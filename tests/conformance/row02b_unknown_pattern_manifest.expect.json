@@ -1,0 +1,24 @@
+{
+  "row": 2,
+  "title": "an unrecognized manifest-level `pattern` value is rejected by name (manifest-level counterpart to row 2)",
+  "level": "manifest",
+  "expect": "reject",
+  "error_substring": "is not a supported plugin family (expected one of",
+  "loaders": [
+    "cpp_load_manifest",
+    "py_load_manifest"
+  ],
+  "overrides": {},
+  "why": [
+    "This checks the same unrecognized-pattern rule as row02, but at the",
+    "manifest level across all manifest-loading doors, instead of at the",
+    "sidecar level. The two fixtures pin the same underlying rule at each of",
+    "the two levels; it is normal for both to be numbered as the same row.",
+    "Both C++ registries and Python's manifest loader already rejected an",
+    "unrecognized manifest pattern; this fixture is the first place that",
+    "cross-language behaviour is checked mechanically rather than just observed.",
+    "The C++ and Python rejection messages differ in wording (C++ appends an",
+    "upgrade hint and lists the supported patterns differently from Python), so",
+    "this fixture only checks the literal text the two messages share."
+  ]
+}

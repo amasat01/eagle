@@ -1,0 +1,78 @@
+/* EAGLE — brand skeleton over sphinx-book-theme (pydata-sphinx-theme).
+ *
+ * The per-brand "skin" (--pst-color-primary and friends) used to live here,
+ * one hard-coded copy per repo. It now lives in the shared raptor-theme.css
+ * (consumed via docs/_static/site-accent.css's one-line --accent), so every
+ * one of these rules below just CONSUMES --pst-color-primary etc. rather
+ * than one of them setting it — this file no longer needs to be mirrored
+ * byte-for-byte against a sibling's skin block; raptor-theme.css already is. */
+
+/* ============================ SKELETON (shared) =========================== */
+
+/* Section rubrics carry the brand accent (was a hard-coded #2a5db0 blue). */
+.rubric {
+    font-size: 1.6em;
+    font-weight: bold;
+    color: var(--pst-color-primary);
+    background-color: var(--pst-color-background);
+    margin-top: 0.0em;
+    margin-bottom: 0.5em;
+}
+
+/* Separator between overloaded definitions. */
+.field-list {
+    border-bottom: 1px solid currentColor;
+    opacity: 0.8;
+    padding-bottom: 0.5em;
+    margin-bottom: 1em;
+}
+
+/* Tables — alternate row colouring defers to the (theme-aware) page bg. */
+table.table>tbody>tr:nth-child(odd),
+table.table>tbody>tr:nth-child(even) {
+    background-color: var(--pst-color-background);
+}
+
+/* Autosummary tables: transparent background. */
+table.autosummary.longtable.table>tbody>tr:nth-child(odd),
+table.autosummary.longtable.table>tbody>tr:nth-child(even) {
+    background-color: transparent !important;
+}
+
+div.pst-scrollable-table-container {
+    background-color: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    padding: 0 !important;
+}
+
+blockquote {
+    background-color: transparent !important;
+    border-left: 3px solid var(--pst-color-primary) !important;
+    margin: 0 !important;
+    padding: 0 0 0 1em !important;
+}
+
+/* Sidebar logo lockup — keep the mascot+wordmark tidy at the top of the nav. */
+.navbar-brand img,
+img.sidebar-logo,
+.sidebar-logo-container img {
+    max-height: 3.4rem;
+    width: auto;
+}
+
+/* Brand-tinted top border on the landing-page grid cards. */
+.bd-content .sd-card {
+    border-top: 3px solid var(--pst-color-primary);
+}
+
+/* The systematic diagrams (pipeline / ecosystem / used-in) render as
+ * transparent-cornered cards; give them a touch of breathing room and let the
+ * dark panels sit as subtle raised cards over the near-black page. */
+.bd-content img.only-light,
+.bd-content img.only-dark {
+    max-width: 100%;
+    height: auto;
+    margin: 1rem auto;
+    display: block;
+}

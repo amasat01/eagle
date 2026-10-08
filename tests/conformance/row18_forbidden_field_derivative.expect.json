@@ -1,0 +1,33 @@
+{
+  "row": 18,
+  "title": "a `neural_block` descriptor carrying a populated, otherwise-valid `derivative` block is rejected — forbidden means populated",
+  "level": "sidecar",
+  "expect": "reject",
+  "error_substring": "must not carry 'derivative'",
+  "loaders": [
+    "shared_validator",
+    "host_add_plugin"
+  ],
+  "overrides": {},
+  "why": [
+    "This fixture is row01's golden descriptor plus a valid-shaped `derivative`",
+    "block (a real primal reference, recompute-only policy, empty residuals —",
+    "exactly the shape a real derivative kernel like row01b carries). The",
+    "block's shape is deliberately correct so that the only rule that can",
+    "reject this fixture is the one under test: a descriptor forbids a",
+    "`derivative` block outright, regardless of whether the block itself would",
+    "separately pass its own shape check.",
+    "Forbidden means populated, consistently across all of the descriptor's",
+    "forbidden fields — an empty-string or empty-container form is treated as",
+    "absent and accepted (see row18b, this fixture's counterpart).",
+    "`derivative` is forbidden on the descriptor because it belongs on the",
+    "kernel the descriptor's `vjp_exec` names (row01b), not on the descriptor",
+    "that merely references it.",
+    "The neural-specific checks run before the general derivative-shape check,",
+    "in both languages: this fixture's well-formed derivative block is what",
+    "proves that ordering, since a malformed block could not distinguish the",
+    "two possible rejecting rules.",
+    "The manifest-bypassing plugin loader is exercised too, since its only",
+    "structural gate is the shared validator."
+  ]
+}

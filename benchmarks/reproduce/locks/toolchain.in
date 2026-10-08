@@ -1,0 +1,18 @@
+# Build toolchain shared by the cards-gpu and cards-cpu profiles (conda-forge, linux-64).
+# GCC 14 for the C++23 sources (and the static libstdc++ the bindings link); the CUDA 12.9
+# compiler builds eagle's driver-only CUDA plugin and installs the CUDA-mode headers. It is
+# also present in the CPU profile: header installs need nvcc at configure, never at run time.
+# Driver floor implied: none to build; the plugin's cubins load on any CUDA 12 driver
+# (>= 525.60.13, CUDA minor-version compatibility). Tested on 560.35.
+python=3.12.14
+gxx_linux-64=14.4.0
+gcc_linux-64=14.4.0
+cmake=4.4.3
+ninja=1.13.2
+make
+cuda-version=12.9
+cuda-nvcc=12.9.86
+cuda-cudart-dev=12.9.79
+cuda-driver-dev=12.9.79
+cuda-nvrtc-dev=12.9.86
+pip=26.2.1

@@ -1,0 +1,23 @@
+{
+  "row": 1,
+  "title": "the VJP kernel a `neural_block` descriptor points to is an ordinary, launchable kernel",
+  "level": "sidecar",
+  "expect": "accept",
+  "error_substring": null,
+  "loaders": [
+    "shared_validator"
+  ],
+  "overrides": {},
+  "why": [
+    "A `neural_block` descriptor only names kernels; it does not contain them.",
+    "This fixture is the actual kernel that row01's descriptor's `vjp_exec.kernel`",
+    "points to, and it is an ordinary launch-certified kernel with a real",
+    "argument spec — accepted at the shared validator, since that is the only",
+    "check meaningful for a real, standalone kernel.",
+    "It carries a recompute-only derivative block (kind `vjp`) naming the",
+    "descriptor's forward kernel as its primal, with an empty `residuals` list.",
+    "That kind of block is forbidden on the descriptor itself (checked in a",
+    "separate fixture) precisely because it belongs here, on the kernel that",
+    "is the derivative."
+  ]
+}

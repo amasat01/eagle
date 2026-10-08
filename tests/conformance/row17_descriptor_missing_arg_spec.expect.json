@@ -1,0 +1,32 @@
+{
+  "row": 17,
+  "title": "a `neural_block` descriptor with no `arg_spec` key at all is rejected in BOTH languages, at DIFFERENT stages",
+  "level": "sidecar",
+  "expect": "reject",
+  "error_substring": "arg_spec",
+  "loaders": ["shared_validator", "host_add_plugin"],
+  "overrides": {},
+  "why": [
+    "Fixture content is row01's golden with the `arg_spec` key removed entirely",
+    "(not emptied — row01's golden already carries an EMPTY `arg_spec: []`,",
+    "which is the REQUIRED shape; this row removes the key).",
+    "C++ `parse_sidecar` structurally REQUIRES the `arg_spec` key for every",
+    "sidecar, unconditionally (pattern-agnostic, like every other field it",
+    "reads) — its absence throws 'sidecar missing arg_spec' at PARSE time,",
+    "before `validate_sidecar` (and so the neural clause) ever runs.",
+    "Python has no separate parse step, so its `_validate_neural_block`",
+    "clause requires the key itself, with the message '... the key is absent'.",
+    "This is a companion fact: presence IS",
+    "enforceable here — unlike the forbidden-field class H1 rules on — because",
+    "C++ structurally requires this particular key at parse for every sidecar,",
+    "so there is no in-memory road (door #3/#5) on which the key could be",
+    "silently absent without already having failed.",
+    "Both drivers' reject-capture already spans parse+validate (the C++ driver",
+    "constructs the `Sidecar` via `parse_sidecar` inside the same try that",
+    "asserts the substring), so this row exercises different code PATHS in the",
+    "two languages while asserting the SAME shared substring ('arg_spec'),",
+    "which stops before either language's more specific wording diverges —",
+    "the same rendering rule applied to a parse-vs-validate divergence rather",
+    "than a set-rendering one."
+  ]
+}

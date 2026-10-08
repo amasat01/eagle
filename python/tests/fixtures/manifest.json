@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "pattern": "mixed",
+  "aether_abi": "aether-abi/1",
+  "plugins": [
+    {
+      "id": "gravity",
+      "order": 0,
+      "enabled": true,
+      "artifact": "gravity.ptx",
+      "sidecar": "gravity.json",
+      "format": "ptx"
+    },
+    {
+      "id": "drag_ps",
+      "order": 1,
+      "enabled": true,
+      "artifact": "drag_ps.ptx",
+      "sidecar": "drag_ps.json",
+      "format": "ptx"
+    },
+    {
+      "id": "bump",
+      "order": 2,
+      "enabled": true,
+      "artifact": "bump.ptx",
+      "sidecar": "bump.json",
+      "format": "ptx"
+    }
+  ]
+}

@@ -1,0 +1,31 @@
+{
+  "row": 7,
+  "title": "an unknown manifest-entry `format` is rejected naming the supported set",
+  "level": "manifest",
+  "expect": "reject",
+  "error_substring": "unknown artifact format 'not_a_manifest_format'",
+  "loaders": ["cpp_load_manifest", "py_load_manifest"],
+  "overrides": {},
+  "why": [
+    "`format` is a schema DISCRIMINANT — it selects HOW a",
+    "registry must read the artifact bytes an entry names (`cuModuleLoadData`",
+    "for PTX text vs. a binary cubin/fatbin), so an unrecognized value is",
+    "refused rather than handed to the loader as though it were a known",
+    "container. Matches the producer of record's vocabulary",
+    "(the manifest producer's format set: ptx | cubin | fatbin).",
+    "Checked over every declared entry BEFORE any sidecar parse / module load",
+    "(this fixture's referenced gravity.ptx/gravity.json need not exist), so",
+    "the reject fires with no GPU and no disk I/O beyond the manifest itself —",
+    "the manifest-level twin of the duplicate-id structural check.",
+    "`cpp_load_manifest` maps to the HOST registry (eagle::cpu::PluginRegistry",
+    "::load) — the only C++ manifest loader this CUDA-free driver TU can reach;",
+    "the DEVICE registry's identical check (plugin_registry/registry.h:150) is",
+    "exercised by the named CUDA-only .cu unit test",
+    "PluginRegistryManifestTest.RejectsUnknownManifestFormat",
+    "(test_PluginRegistryManifest.cu) — added together with this row's device",
+    "counterpart, after an audit found",
+    "the format/schema_version device gates untested and this same claim false",
+    "An outside-coverage claim here must NAME the",
+    "test that provides it, not just gesture at a file."
+  ]
+}

@@ -1,0 +1,73 @@
+/* RAPTOR palette tokens (final palette, October 2026).
+   mark-*  : logo colours, ONE value for light and dark (3:1 on white, #fcfcfb, #1a1a19, GitHub dark). Graphics only.
+   raptor/aether/hawk/eagle : text inks, one per mode (4.5:1 on surface). Tones/soft/wash: fills only.
+   Dark values apply with prefers-color-scheme, or with [data-theme="dark"] as set by pydata-sphinx-theme,
+   sphinx-book-theme and Furo. */
+:root {
+  --mark-raptor: #7d53dc;
+  --mark-aether: #0398e3;
+  --mark-eagle: #cf416b;
+  --mark-hawk: #c18711;
+  --mark-neutral: rgba(127, 126, 120, 0.5);
+  --raptor: #7245ce;
+  --raptor-soft: #c9b8f2;
+  --raptor-wash: #eee8fb;
+  --on-raptor: #ffffff;
+  --aether: #0679b6;
+  --aether-tone: #7cc8f0;
+  --hawk: #9a6a00;
+  --hawk-tone: #e0a82e;
+  --eagle: #c13360;
+  --surface: #fcfcfb;
+  --panel: #ffffff;
+  --ink: #0b0b0b;
+  --ink-secondary: #52514e;
+  --muted: #898781;
+  --border: #e1e0d9;
+  /* other tools in comparison figures: chip dots and regions only */
+  --tool-pytorch: #ee4c2c;
+  --tool-jax: #1a9a8c;
+  --tool-cupy: #518d05;
+  --tool-warp: #306101;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --raptor: #9269f5;
+    --raptor-soft: #5a46a0;
+    --raptor-wash: #2a2240;
+    --on-raptor: #1a1a19;
+    --aether: #1fa4f2;
+    --aether-tone: #5fb6e4;
+    --hawk: #ce9428;
+    --hawk-tone: #c9952a;
+    --eagle: #df5078;
+    --surface: #1a1a19;
+    --panel: #242422;
+    --ink: #ffffff;
+    --ink-secondary: #c3c2b7;
+    --muted: #898781;
+    --border: #2c2c2a;
+    --tool-cupy: #76b900;
+    --tool-warp: #88e97e;
+  }
+}
+[data-theme="dark"] {
+  --raptor: #9269f5;
+  --raptor-soft: #5a46a0;
+  --raptor-wash: #2a2240;
+  --on-raptor: #1a1a19;
+  --aether: #1fa4f2;
+  --aether-tone: #5fb6e4;
+  --hawk: #ce9428;
+  --hawk-tone: #c9952a;
+  --eagle: #df5078;
+  --surface: #1a1a19;
+  --panel: #242422;
+  --ink: #ffffff;
+  --ink-secondary: #c3c2b7;
+  --muted: #898781;
+  --border: #2c2c2a;
+  --tool-cupy: #76b900;
+  --tool-warp: #88e97e;
+}
+/* Avoid near-collisions with neighbouring ecosystems: NVIDIA green #76b900, PyTorch orange #ee4c2c, JAX blue/teal. */

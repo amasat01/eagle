@@ -1,0 +1,25 @@
+# Copyright 2026 Alessandro Masat
+# SPDX-License-Identifier: Apache-2.0
+
+**/build*/*
+**/_build*/*
+**/_doxybuild/*
+**/.vscode/*
+**/.cache/*
+**/__pycache__/*
+**/*.pyc
+**/.pytest_cache/*
+**/.ruff_cache/*
+**/*.egg-info/*
+**/*.so
+**/wheelhouse/*
+**/dist/*
+**/*.whl
+**/__hdr_p1/*
+**/__install_p1/*
+**/cards/*_nsys_work/*
+**/cards/*.json
+# Sphinx autosummary output (regenerated on every build)
+docs/content/api/generated/
+# gen_perf_pages.py's output (regenerated on every build from the cards)
+docs/content/_generated/

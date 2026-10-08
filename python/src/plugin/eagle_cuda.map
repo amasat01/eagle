@@ -1,0 +1,11 @@
+# Version script of libeagle_cuda.so, the eagle-backend/1 CUDA plugin: it exports
+# the C seam (eagle_backend_*) and nothing else. Everything it is built from
+# (eagle::cuda, the static CUDA runtime, libstdc++) stays local, so no C++ symbol
+# can bind across the seam in either direction. The symbol gate
+# (python/tests/test_backend_wall.py) reads the export list back with nm -D.
+EAGLE_BACKEND_1 {
+  global:
+    eagle_backend_*;
+  local:
+    *;
+};

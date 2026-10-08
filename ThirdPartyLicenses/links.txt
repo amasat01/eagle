@@ -1,0 +1,4 @@
+Gnu C library home page:    http://www.gnu.org/software/libc/libc.html
+GCC C++ home page:          https://gcc.gnu.org/libstdc++/
+Nvidia CUDA license:        https://docs.nvidia.com/cuda/eula/index.html
+GoogleTest home page:       https://github.com/google/googletest

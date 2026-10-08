@@ -1,0 +1,50 @@
+{
+  "format": "ptx",
+  "schema_version": 1,
+  "pattern": "vector",
+  "aether_abi": "aether-abi/1",
+  "scalar_type": "float64",
+  "kernel": "raptor_kernel",
+  "vector_inputs": [
+    "velocity"
+  ],
+  "params": [],
+  "per_sample": [
+    "mass",
+    "area",
+    "cd"
+  ],
+  "accumulate": true,
+  "sink": "outVec-scratch",
+  "vec_widths": {
+    "out": 3,
+    "velocity": 3
+  },
+  "arg_spec": [
+    [
+      "out",
+      "out"
+    ],
+    [
+      "vec_in",
+      "velocity"
+    ],
+    [
+      "per_sample",
+      "mass"
+    ],
+    [
+      "per_sample",
+      "area"
+    ],
+    [
+      "per_sample",
+      "cd"
+    ],
+    [
+      "terminated",
+      "terminated"
+    ]
+  ],
+  "buffers": []
+}

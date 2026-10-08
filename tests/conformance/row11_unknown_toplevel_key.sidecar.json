@@ -1,0 +1,22 @@
+{
+  "format": "ptx",
+  "schema_version": 1,
+  "pattern": "vector",
+  "aether_abi": "aether-abi/1",
+  "scalar_type": "float64",
+  "kernel": "raptor_kernel",
+  "vector_inputs": ["position"],
+  "params": ["mu"],
+  "per_sample": [],
+  "accumulate": true,
+  "sink": "outVec-scratch",
+  "vec_widths": {"out": 3, "position": 3},
+  "arg_spec": [
+    ["out", "out"],
+    ["vec_in", "position"],
+    ["terminated", "terminated"],
+    ["uniform", "mu"]
+  ],
+  "buffers": [],
+  "an_optional_hint_from_a_future_minor_revision": {"nested": [1, 2, 3]}
+}

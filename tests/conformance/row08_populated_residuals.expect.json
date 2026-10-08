@@ -1,0 +1,23 @@
+{
+  "row": 8,
+  "title": "a derivative block with a populated `residuals` list is rejected, naming the rule that would require a schema bump",
+  "level": "sidecar",
+  "expect": "reject",
+  "error_substring": "derivative.residuals is populated",
+  "loaders": [
+    "shared_validator",
+    "host_add_plugin"
+  ],
+  "overrides": {},
+  "why": [
+    "Derivative artifacts re-read their own primal inputs, so `residual_policy`",
+    "is always `recompute` and `residuals` is always empty. A populated list",
+    "would need a new schema version to define what it means, so accepting it",
+    "silently would run a derivative kernel under metadata this host cannot",
+    "honor.",
+    "The shared validator has rejected this all along, but the host loader used",
+    "to check only the ABI tag and scalar type, so this exact sidecar could load",
+    "with zero diagnostics through that door. This fixture checks that the host",
+    "loader now rejects it too, before anything is loaded, in both languages."
+  ]
+}

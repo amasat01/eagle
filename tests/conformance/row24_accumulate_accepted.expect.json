@@ -1,0 +1,36 @@
+{
+  "row": 24,
+  "title": "a `neural_block` descriptor declaring the `accumulate` terminal-write contract is accepted by the shared validator, refused at every launching door",
+  "level": "sidecar",
+  "expect": "accept",
+  "error_substring": null,
+  "loaders": [
+    "shared_validator",
+    "host_add_plugin"
+  ],
+  "overrides": {
+    "host_add_plugin": {
+      "expect": "reject",
+      "error_substring": "recognized but not launchable"
+    }
+  },
+  "why": [
+    "`accumulate` is a second terminal-write contract alongside `unique_write`:",
+    "it declares that a target may legitimately be written by more than one",
+    "source per step, with the committed result being an order-unspecified sum.",
+    "The underlying mechanism (atomic add, block-reduce, and so on) stays",
+    "internal and is never part of the wire format; only the contract name is,",
+    "and this fixture is that value's structural-acceptance check — the actual",
+    "executor behaviour is a separate concern from whether the descriptor",
+    "itself validates.",
+    "The fixture is otherwise identical to row01's golden with only",
+    "`scatter_policy` changed from `unique_write` to `accumulate`, so the only",
+    "thing exercised is that this value is actually accepted, not merely absent",
+    "from the disallowed/dead-spelling sets checked elsewhere.",
+    "Accepted at the shared validator, for the same reason as row01: the",
+    "descriptor is structurally valid schema v1. Refused at the",
+    "manifest-bypassing plugin loader, with the same message and reasoning as",
+    "row01: a `neural_block` descriptor is recognized but never",
+    "launch-certified, regardless of which terminal-write contract it declares."
+  ]
+}

@@ -1,0 +1,5 @@
+/* RAPTOR shared theme: this site's accent, consumed by raptor-theme.css.
+   Loaded after raptor-tokens.css (defines --eagle), before raptor-theme.css. */
+:root {
+  --accent: var(--eagle);
+}

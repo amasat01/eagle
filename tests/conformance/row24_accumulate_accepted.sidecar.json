@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "pattern": "neural_block",
+  "scalar_type": "float64",
+  "forward_exec": {"kind": "kernel", "kernel": "mlp_block_fwd"},
+  "vjp_exec": {"kind": "kernel", "kernel": "mlp_block_vjp"},
+  "kernel": "mlp_block",
+  "in_degree": 4,
+  "out_degree": 2,
+  "input_width": 8,
+  "output_width": 3,
+  "state_width": 6,
+  "param_width": 24,
+  "scatter_policy": "accumulate",
+  "arg_spec": []
+}

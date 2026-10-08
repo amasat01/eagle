@@ -1,0 +1,41 @@
+{
+  "format": "ptx",
+  "schema_version": 1,
+  "pattern": "pure",
+  "aether_abi": "aether-abi/1",
+  "scalar_type": "float64",
+  "kernel": "raptor_kernel",
+  "vector_inputs": [],
+  "params": [
+    "rate"
+  ],
+  "per_sample": [],
+  "mutables": [
+    {
+      "name": "counter",
+      "dtype": "float",
+      "width": 1,
+      "default": 0.0
+    }
+  ],
+  "vec_widths": {},
+  "arg_spec": [
+    [
+      "mutable",
+      "counter"
+    ],
+    [
+      "terminated",
+      "terminated"
+    ],
+    [
+      "uniform",
+      "rate"
+    ],
+    [
+      "nsamples",
+      "nsamples"
+    ]
+  ],
+  "buffers": []
+}

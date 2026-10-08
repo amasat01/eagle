@@ -1,0 +1,51 @@
+# CUDA driver globals and init-time allocations.
+# These are reported as "still reachable" (and occasionally "possibly lost")
+# because the CUDA driver holds process-lifetime caches and context blocks.
+# They are not application leaks.
+
+{
+   libcuda_init_reachable
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   ...
+   obj:*/libcuda.so*
+}
+
+{
+   libcuda_init_possible
+   Memcheck:Leak
+   match-leak-kinds: possible
+   ...
+   obj:*/libcuda.so*
+}
+
+{
+   libcudart_init_reachable
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   ...
+   obj:*/libcudart.so*
+}
+
+{
+   libcudart_init_possible
+   Memcheck:Leak
+   match-leak-kinds: possible
+   ...
+   obj:*/libcudart.so*
+}
+
+{
+   nvidia_driver_init_reachable
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   ...
+   obj:*/libnvidia-*.so*
+}
+
+{
+   nvidia_driver_cond_var
+   Memcheck:Addr8
+   ...
+   obj:*/libcuda.so*
+}

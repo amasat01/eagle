@@ -1,0 +1,33 @@
+{
+  "row": 23,
+  "title": "a `neural_block` integer field at exactly 2**32 is rejected — the descriptor's fields are capped at uint32",
+  "level": "sidecar",
+  "expect": "reject",
+  "error_substring": "param_width must be a non-negative integer",
+  "loaders": [
+    "shared_validator",
+    "host_add_plugin"
+  ],
+  "overrides": {},
+  "why": [
+    "The runtime layer has always capped its own derived buffer sizes at",
+    "2**32, but the descriptor's own integer fields (in_degree, out_degree,",
+    "and the width fields) previously had no upper bound, only a lower one.",
+    "This fixture closes that gap: each of the six neural integer fields is",
+    "now capped at strictly less than 2**32, checked alongside the existing",
+    "lower bound.",
+    "The value used is exactly 4294967296 (2**32), not one less, so this pins",
+    "that the cap fires at the boundary itself, not merely somewhere above it.",
+    "`param_width` is the field used here (rather than `in_degree`, which a",
+    "different fixture already exercises for a non-numeric value), so this",
+    "also confirms the cap applies to the one field whose lower bound allows",
+    "zero, not just the fields that must be strictly positive.",
+    "Both languages parse this value as an ordinary large integer without any",
+    "special handling, so the cap is exercised directly rather than through",
+    "an adversarial parsing trick.",
+    "The fixture is otherwise identical to row01's golden with only this field",
+    "changed, so the only thing that can make it reject is the cap under test.",
+    "The manifest-bypassing plugin loader is exercised too, since its only",
+    "structural gate is the shared validator."
+  ]
+}

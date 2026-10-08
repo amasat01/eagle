@@ -1,0 +1,27 @@
+{
+  "row": 10,
+  "title": "the same softdouble descriptor, re-labeled as an ordinary kernel, is accepted — the neural rejection only applies to the neural pattern",
+  "level": "sidecar",
+  "expect": "accept",
+  "error_substring": null,
+  "loaders": [
+    "shared_validator"
+  ],
+  "overrides": {},
+  "why": [
+    "This is row10's fixture with `pattern` changed to an ordinary kernel",
+    "pattern and nothing else touched — same `softdouble` scalar_type, same",
+    "leftover neural-only keys. The existing float64 wire representation",
+    "already serves SoftDouble bit-identically, so an ordinary sidecar's",
+    "`scalar_type: softdouble` is accepted by the shared validator's general",
+    "dtype check; only the neural-specific check (pinned by row10) narrows this,",
+    "and that check never runs when the pattern is not `neural_block`.",
+    "The leftover neural-only keys ride along as unrecognized-but-harmless",
+    "top-level keys on an ordinary sidecar (schema v1 allows additional",
+    "properties) and prove the neural check triggers on the pattern value, not",
+    "merely on the presence of neural-looking keys.",
+    "Accepted at the shared validator only: past that gate, a launching loader",
+    "would proceed to load a stub artifact and fail for an unrelated reason,",
+    "which would prove nothing about validation."
+  ]
+}

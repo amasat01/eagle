@@ -1,0 +1,31 @@
+{
+  "row": 18,
+  "title": "a `neural_block` descriptor carrying an empty `aether_abi` value is accepted — empty counts as absent, not forbidden",
+  "level": "sidecar",
+  "expect": "accept",
+  "error_substring": null,
+  "loaders": [
+    "shared_validator"
+  ],
+  "overrides": {},
+  "why": [
+    "This is row18's counterpart, pinning the other direction of the same",
+    "rule: a forbidden field on a `neural_block` descriptor means populated,",
+    "not merely present. This fixture is row01's golden descriptor plus",
+    "`\"aether_abi\": \"\"` — an empty-string form of a forbidden field — with",
+    "nothing else changed, so an accept here can only mean the empty-is-absent",
+    "rule held.",
+    "Empty is treated as absent because some loading paths hand over an",
+    "in-memory sidecar with no file behind it, where presence versus absence",
+    "cannot be distinguished without adding extra flags that only this one",
+    "check would use; treating both the same keeps every loading path",
+    "consistent. It also matches the same absence convention the schema",
+    "already uses everywhere else (empty scalar_type/pattern/ABI tag are all",
+    "treated as absent on an ordinary kernel sidecar today).",
+    "A future change that starts rejecting a present-but-empty forbidden field",
+    "would fail here, mechanically.",
+    "Accepted at the shared validator only: past that gate, a launching loader",
+    "would proceed to load a stub artifact and fail for an unrelated reason,",
+    "which would prove nothing about validation."
+  ]
+}

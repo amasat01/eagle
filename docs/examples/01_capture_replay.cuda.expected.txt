@@ -1,0 +1,1 @@
+01_capture_replay: 10 replays -> buf[0]=10 (expected 10) : OK

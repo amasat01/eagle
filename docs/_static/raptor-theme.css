@@ -1,0 +1,179 @@
+/* RAPTOR shared accent theme — ONE file, byte-identical across eagle, raptor,
+ * aether and hawk's docs/_static/. The only thing that differs per site is
+ * the one-line docs/_static/site-accent.css loaded just before this file,
+ * which sets --accent to that site's kit colour (raptor-tokens.css):
+ *   eagle -> var(--eagle), raptor -> var(--raptor),
+ *   aether -> var(--aether), hawk -> var(--hawk).
+ * Everything below derives from --accent plus the shared --surface/--ink/
+ * --raptor kit tokens via color-mix(in srgb, ...), and maps onto the real
+ * pydata-sphinx-theme / sphinx-book-theme custom properties (sphinx_book_theme
+ * 1.1.4 over pydata_sphinx_theme 0.15.4, checked against the installed
+ * themes' own stylesheets — selectors/vars below are the real ones, not
+ * guessed). Load order: raptor-tokens.css, site-accent.css, raptor-theme.css,
+ * then raptor-reveal.css (kit files; never edited here).
+ *
+ * Percentages: table header / admonition body / search-&-:target highlight
+ * put plain ink TEXT on an accent wash, which has headroom, so those sit in
+ * the brief's 10-14% (wash) / 20-28% (strong) range. The sidebar current-row
+ * and hover-row backgrounds sit UNDER accent-coloured text (by design, same
+ * as the theme's own unthemed current-page indicator) — self-hue-on-self-hue
+ * loses contrast fast as the mix grows, so those two are tuned down from the
+ * suggested range to the largest value that still clears 4.5:1 for every
+ * site/mode (verified for all 4 sites x 2 modes by contrast_check.py, run
+ * from docs/_static/ or anywhere with its bundled hex table: 1.5% / 16%,
+ * worst case 4.54:1 and 4.64:1 — see the report for the full table). */
+
+html[data-theme="light"],
+html[data-theme="dark"] {
+  /* ---- accent derivatives (color-mix in srgb) ---- */
+  --accent-highlight:     color-mix(in srgb, var(--accent) 85%, var(--ink) 15%);
+  --accent-wash:          color-mix(in srgb, var(--accent) 12%, var(--surface) 88%);
+  --accent-wash-strong:   color-mix(in srgb, var(--accent) 24%, var(--surface) 76%);
+  --accent-wash-active:   color-mix(in srgb, var(--accent) 1.5%, var(--surface) 98.5%);
+  --accent-wash-hover:    color-mix(in srgb, var(--accent) 16%, var(--surface) 84%);
+
+  /* ---- pydata-sphinx-theme / sphinx-book-theme variable surface ----
+   * links, primary buttons, active sidebar entry text, focus ring. */
+  --pst-color-primary:             var(--accent);
+  --pst-color-primary-highlight:   var(--accent-highlight);
+  --pst-color-secondary:           var(--accent);
+  --pst-color-secondary-highlight: var(--accent-highlight);
+  --pst-color-accent:              var(--accent);
+  --pst-color-link:                var(--accent);
+  --pst-color-link-hover:          var(--accent-highlight);
+  --pst-color-inline-code:         var(--accent);
+  --pst-color-inline-code-links:   var(--accent);
+
+  /* search highlight (span.highlighted) + dt:target anchor-jump. */
+  --pst-color-target:              var(--accent-wash);
+  /* table header row background (.table thead tr, incl. notebook dataframes). */
+  --pst-color-table-heading-bg:    var(--accent-wash);
+
+  /* neutral surface/ink/border are the SAME kit tokens on every site, so the
+   * only thing that varies across the four sites is --accent above. */
+  --pst-color-text-base:     var(--ink);
+  --pst-color-text-muted:    var(--ink-secondary);
+  --pst-color-background:    var(--surface);
+  --pst-color-on-background: var(--panel);
+  --pst-color-surface:       var(--panel);
+  --pst-color-border:        var(--border);
+}
+
+/* ---- sidebar / "on this page" active + hover rows ----
+ * The theme only draws an inset accent bar on .current; add the background
+ * wash the brief asks for, at the AA-safe percentages derived above. */
+nav.bd-links li > a:hover,
+.toc-entry a.nav-link:hover {
+  background-color: var(--accent-wash-hover);
+}
+nav.bd-links .current > a,
+.toc-entry a.nav-link.active {
+  background-color: var(--accent-wash-active);
+}
+
+/* ---- admonitions: note/tip/hint/important take the accent; warning/danger
+ * (and caution/error) keep the theme's own semantic colours, untouched. ---- */
+.admonition.note, div.admonition.note,
+.admonition.tip, div.admonition.tip,
+.admonition.hint, div.admonition.hint,
+.admonition.important, div.admonition.important {
+  border-color: var(--accent);
+  background-color: var(--accent-wash);
+}
+.admonition.note > .admonition-title, div.admonition.note > .admonition-title,
+.admonition.tip > .admonition-title, div.admonition.tip > .admonition-title,
+.admonition.hint > .admonition-title, div.admonition.hint > .admonition-title,
+.admonition.important > .admonition-title, div.admonition.important > .admonition-title {
+  background-color: var(--accent-wash-strong);
+}
+.admonition.note > .admonition-title:after, div.admonition.note > .admonition-title:after,
+.admonition.tip > .admonition-title:after, div.admonition.tip > .admonition-title:after,
+.admonition.hint > .admonition-title:after, div.admonition.hint > .admonition-title:after,
+.admonition.important > .admonition-title:after, div.admonition.important > .admonition-title:after {
+  color: var(--accent);
+}
+
+/* ---- code-block left rule + h1/h2 underline: decorative accent tone (no
+ * text sits on these, so the undiluted --accent is fine contrast-wise). ---- */
+div.highlight {
+  border-left: 3px solid var(--accent);
+}
+.bd-content h1 {
+  border-bottom: 2px solid var(--accent);
+  padding-bottom: 0.3rem;
+}
+.bd-content h2 {
+  border-bottom: 1px solid var(--accent);
+  padding-bottom: 0.2rem;
+}
+
+/* ---- the family frame: always --raptor (purple), independent of the
+ * site's own --accent, on every one of the four sites. ---- */
+.bd-header-article {
+  border-bottom: 3px solid var(--raptor);
+}
+.bd-footer {
+  border-top: 3px solid var(--raptor);
+}
+.raptor-family-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35em;
+  font-size: 0.85em;
+}
+.raptor-family-chip a {
+  color: var(--raptor);
+  font-weight: 600;
+  text-decoration: none;
+}
+.raptor-family-chip a:hover {
+  text-decoration: underline;
+}
+
+/* ---- Typography: one more byte-identical block shared across the four
+ * sites -- Recursive (self-hosted OFL,
+ * docs/_static/fonts/recursive-full.woff2 + LICENSE-recursive.txt, same
+ * two files in every site's docs/_static/fonts/), one variable family,
+ * three voices via its CASL/MONO/CRSV axes: Casual headings, Linear body,
+ * Mono code, plus the
+ * modular scale (ratio 1.25 on an 18px body) on the article's own h1/h2.
+ * No other layout change: per-site site-accent.css stays untouched, and
+ * nothing here touches spacing, colour or measure. ---- */
+@font-face {
+  font-family: "Recursive";
+  src: url("fonts/recursive-full.woff2") format("woff2");
+  font-weight: 300 1000;
+  font-display: swap;
+}
+html[data-theme="light"],
+html[data-theme="dark"] {
+  --rpt-f-display: "Recursive", system-ui, sans-serif;
+  --rpt-f-body: "Recursive", system-ui, sans-serif;
+  --rpt-f-code: "Recursive", ui-monospace, monospace;
+  --rpt-v-display: "CASL" 1, "MONO" 0, "CRSV" 0.5;
+  --rpt-w-display: 760;
+  --rpt-v-body: "CASL" 0, "MONO" 0;
+  --rpt-v-code: "CASL" 0, "MONO" 1;
+  --rpt-s1: 22.5px;
+  --rpt-s2: 28px;
+  --rpt-s4: 44px;
+  --rpt-code-size: 15px;
+}
+body, .bd-article {
+  font-family: var(--rpt-f-body);
+  font-variation-settings: var(--rpt-v-body);
+}
+.bd-content h1, .bd-content h2, .bd-content h3,
+.bd-content h4, .bd-content h5, .bd-content h6 {
+  font-family: var(--rpt-f-display);
+  font-variation-settings: var(--rpt-v-display);
+  font-weight: var(--rpt-w-display);
+}
+.bd-article h1 { font-size: var(--rpt-s4); }
+.bd-article h2 { font-size: var(--rpt-s2); }
+.bd-article h3 { font-size: var(--rpt-s1); }
+code, pre, kbd {
+  font-family: var(--rpt-f-code);
+  font-variation-settings: var(--rpt-v-code);
+  font-size: var(--rpt-code-size);
+}

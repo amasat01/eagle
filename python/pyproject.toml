@@ -1,0 +1,152 @@
+# Copyright 2026 Alessandro Masat
+# SPDX-License-Identifier: Apache-2.0
+
+[build-system]
+requires = ["scikit-build-core>=0.10", "nanobind>=2.0"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "raptor-eagle"
+version = "0.4.0"
+description = "EAGLE — the Python face of the launch engine for compiled CUDA kernels"
+# The repo root's README.md, one level above this pyproject.toml (eagle's
+# Python packaging lives in python/, the README does not — see the repo's
+# top-level layout note). scikit-build-core (like every PEP 621 backend)
+# resolves a relative `readme` path against the DIRECTORY HOLDING
+# pyproject.toml, so "../README.md" is correct for both real build paths
+# this package actually goes through:
+#   * the sdist (`python -m build --sdist`, `.github/workflows/publish.yml`):
+#     resolved against the LIVE checkout, where ../README.md exists —
+#     its content lands in the sdist's own PKG-INFO.
+#   * the wheel (cibuildwheel, `CIBW_BUILD_FRONTEND: build` ->
+#     `python -m build --wheel` on the checked-out tree, never from an
+#     intermediate sdist — see publish.yml's build-wheels job): same live
+#     checkout, same resolution.
+# What does NOT work, measured directly: `python -m build` with BOTH
+# `--sdist` and `--wheel` (or neither flag, build's own "do both" default)
+# builds the wheel FROM THE SDIST it just made, and scikit-build-core
+# re-resolves `readme` against that EXTRACTED sdist's own root, which
+# carries nothing above itself — "../README.md" (or any path escaping the
+# project directory, symlink or not: a symlink to it is preserved literally
+# by the sdist step, not dereferenced, so it fails the same way once
+# extracted) is `ConfigurationError: Readme file not found` there. This
+# package is never actually built that way (its two real artifacts come
+# from the two bullets above, run as separate jobs, neither one a
+# wheel-from-sdist step) — proven here with EACH leg run the way publish.yml
+# runs it, not with the combined `python -m build` invocation that this
+# package does not support.
+readme = "../README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+# Python versions match the cibuildwheel matrix publish.yml actually builds
+# and the test-wheel job actually runs (cp310-cp313, manylinux_2_28 x86_64) —
+# never wider than what a real wheel ships.
+classifiers = [
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: POSIX :: Linux",
+    "Environment :: GPU :: NVIDIA CUDA",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Scientific/Engineering :: Mathematics",
+]
+# raptor: the schema constants eagle.roles re-exports (SCHEMA_VERSION and the
+# neural-block vocabulary) are single-sourced there now. raptor is checkout-only today
+# (not on an index) — like eagle itself, it resolves via a local editable install
+# until the family's packaging is unified.
+# DIST names carry the `raptor-` family
+# namespace, IMPORT names stay flat (`import eagle`, `import raptor`). Both bare
+# `eagle` and bare `raptor` are taken on PyPI by unrelated packages.
+# >=0.2.0 is the raptor version that first ships
+# `raptor.schema.blocks.validate_neural_block_descriptor` — the neural_block clause
+# `eagle.sidecar` now IMPORTS rather than defines. An older raptor under this eagle
+# would ImportError at that seam, so the constraint is expressed where a resolver
+# can act on it, never as a runtime surprise.
+dependencies = ["numpy", "raptor-core>=0.2.0,<0.3"]
+
+# The "raptor.pattern_loaders" entry-point declaration for
+# "neural_block" moved to a separate package — eagle.neural was extracted there
+# in full, so eagle itself has no pattern-loader entry point left to declare.
+
+[project.optional-dependencies]
+# cupy is env-provided on the deployment boxes (pinned against the local CUDA
+# toolkit); the extras are a convenience for a fresh environment. ``cuda`` is an
+# alias of ``cuda12`` so existing install lines keep working.
+# CuPy compiles its kernels at run time and needs the CUDA runtime headers and NVRTC:
+# cuda-toolkit[cudart,nvrtc] brings exactly those as pip wheels (no system toolkit),
+# without the math libraries CuPy's own [ctk] extra adds (cuBLAS, cuFFT, ...).
+cuda12 = ["cupy-cuda12x>=14", "cuda-toolkit[cudart,nvrtc]==12.*"]
+cuda13 = ["cupy-cuda13x>=14", "cuda-toolkit[cudart,nvrtc]==13.*"]
+cuda = ["cupy-cuda12x>=14", "cuda-toolkit[cudart,nvrtc]==12.*"]
+# eagle.frameworks.torch: the torch.autograd bridge. torch is imported only by
+# that submodule, so plain `import eagle` never needs it.
+torch = ["torch"]
+
+# The bound eagle._core graph engine is a compiled nanobind extension, so the
+# wheel is per-Python/ABI (not py3-none-any). eagle._core is plain C++; the CUDA
+# backend eagle/libeagle_cuda.so has no Python dependency, so it is built once
+# (EAGLE_PYTHON_CUDA_PLUGIN=BUILD, EAGLE_PYTHON_SKIP_CORE=ON) and handed to every
+# per-Python build as EAGLE_PYTHON_CUDA_PLUGIN=<path>; see python/CMakeLists.txt.
+# The eagle C++ headers + aether come from CMAKE_PREFIX_PATH (set by CI/dev).
+[tool.scikit-build]
+minimum-version = "build-system.requires"
+build-dir = "build/{wheel_tag}"
+wheel.packages = ["eagle"]
+cmake.version = ">=3.20"
+# Keep the built extension out of the pure-python source collection (a dev build
+# may drop one in-tree; the wheel's copy comes from the CMake install).
+sdist.exclude = ["**/*.so"]
+# LICENSE/NOTICE, copied next to this pyproject.toml (the repo root's own
+# copies sit one directory up, same reason `readme` above is "../README.md";
+# scikit-build-core's own license-files glob cannot reach outside this
+# directory). Uses the backend's own setting, not PEP 639's
+# project.license-files, so `license` can keep the classic dict form the
+# Apache classifier above needs.
+wheel.license-files = ["LICENSE", "NOTICE"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# cupy 14 deprecated ExternalStream in favor of Stream.from_external, but the latter
+# wants a __cuda_stream__ protocol object while torch exposes a raw integer stream
+# handle — so ExternalStream stays the right bridge (see interop.py). Silence the
+# cosmetic per-launch DeprecationWarning it emits.
+filterwarnings = ["ignore:ExternalStream is deprecated:DeprecationWarning"]
+markers = [
+    "gpu: requires cupy + a CUDA GPU",
+    "gpu2: requires cupy + TWO CUDA GPUs (skipped, never passed, on one)",
+    "torch: requires torch (CPU or CUDA) + cupy GPU",
+    "torch_gpu: requires a CUDA build of torch (skipped where torch is CPU-only)",
+    "interop_matrix: interop certification matrix row (deselect explicitly via -m 'not interop_matrix'; the only sanctioned way a row may not run)",
+    "mpi: needs the OPTIONAL eagle._mpi extension (eagle::exec::RankPartition; built with -DEAGLE_PYTHON_MPI). Gated exactly as the gpu/torch markers are — the module is optional BY DESIGN, so a build without an MPI legitimately cannot run these. The REFUSAL rows (a missing _mpi must name the build switch) are deliberately NOT marked and run everywhere; the distributed certification is the rank bed, tests/mpi/, which has no skip machinery at all.",
+    "repo_local: venv-gate guardrail — certifies the REPOSITORY (docs/pyproject/source-as-text, or a dev-env package-presence assumption), never the installed DISTRIBUTION, so a wheel legitimately cannot carry what it checks. Deselect only in the isolated-venv leg (-m 'not repo_local'); the repo-rooted suite (CI, dev runs) always runs these — never deselected there. The venv leg enumerates and pins the count by collection, never a hand list.",
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "D"]
+ignore = [
+    "D102",
+    "D105",
+    "D107", # per-method / magic / __init__ docstrings optional
+    "D205",
+    "D209",
+    "D401", # docstring whitespace / imperative-mood pedantry
+    "E741", # single-letter loop vars (l/i) used deliberately
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "pep257"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["D"]        # tests are self-describing; no docstring requirement
+"__init__.py" = ["D104"]
+# These layout gates embed CUDA static_assert strings whose lines are intrinsically
+# > 88 cols and cannot carry a per-line noqa (they live inside string literals).
+"tests/test_gref_layout.py" = ["D", "E501"]
+"tests/test_handle_layout.py" = ["D", "E501"]

@@ -1,0 +1,22 @@
+# cards-gpu: what the two GPU cards (perf_card.py, rk78_card.py) import, plus the build
+# backends the editable installs need (--no-build-isolation). CPython 3.12, Linux x86_64.
+# CUDA runtime: 12.6 (PyTorch cu126 wheels and the nvidia-*-cu12 12.6 libraries they pin,
+# shared by CuPy and JAX); JAX compiles with ptxas 12.9 to SASS. No PTX JIT on the timed paths.
+# Driver floor: >= 525.60.13 (CUDA 12 minor-version compatibility); tested on 560.35.
+# A driver older than ptxas 12.9 only makes XLA warn and compile serially.
+# GPU floor: compute capability 6.0 (cupy, warp, eagle, hawk); the PyTorch and JAX
+# wheels' sm_60 coverage is expected but has not been run on a P100 here.
+--extra-index-url https://download.pytorch.org/whl/cu126
+numpy==2.5.3
+scipy==1.17.1
+torch==2.12.1+cu126
+cupy-cuda12x==14.2.0
+jax[cuda12]==0.11.2
+warp-lang==1.17.0
+cuda-bindings==12.9.9
+cuda-pathfinder==1.8.2
+nvidia-ml-py==13.610.43
+psutil==7.2.2
+pytest==9.1.1
+nanobind==3.1.0
+scikit-build-core==1.1.0

@@ -1,0 +1,32 @@
+{
+  "row": 21,
+  "title": "a `neural_block` descriptor with an empty `kernel` value is rejected — its wire identity must be non-empty",
+  "level": "sidecar",
+  "expect": "reject",
+  "error_substring": "non-empty 'kernel'",
+  "loaders": ["shared_validator", "host_add_plugin"],
+  "overrides": {},
+  "why": [
+    "This check was minted in both",
+    "clauses (C++ `_validate_neural_block`'s first line; Python's mirror) but",
+    "never got a corpus row or a named test — grep-verified across both",
+    "test trees before this fixture existed. It is wire-reachable,",
+    "cross-language, and carries an identical substring, exactly the corpus's",
+    "class of claim.",
+    "Fixture content is row01's golden with the top-level `kernel` VALUE",
+    "emptied (the key stays present, satisfying C++ `parse_sidecar`'s",
+    "structural key requirement, so this row tests the neural clause's own",
+    "non-emptiness check, not the parse-time key-presence one row17 pins).",
+    "KEY ORDER stays LOAD-BEARING here too: `forward_exec` and",
+    "`vjp_exec` still precede the top-level `kernel`, so the masking fix must",
+    "still correctly resolve the (now-empty) top-level `kernel` value rather",
+    "than a nested exec object's own literal 'kernel' text.",
+    "This is the FIRST check inside the `neural_block` clause in both",
+    "languages, run before the scalar_type / arg_spec / requiredness checks —",
+    "the descriptor's wire identity is validated before anything else about",
+    "its shape, which this row's otherwise-golden content proves by reaching",
+    "exactly this check and no other.",
+    "`host_add_plugin` is exercised too: its only structural gate is the",
+    "shared validator."
+  ]
+}

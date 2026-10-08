@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/amasat01/eagle/raw/main/docs/schemas/manifest-v1.schema.json",
+  "title": "EAGLE plugin deployment manifest (schema v1)",
+  "description": "Frozen schema v1 for the EAGLE deployment manifest emitted by the code generator's deploy pipeline (deploy/bundle.py). A manifest describes one deployment set: an ordered list of plugin artifacts (+ their sidecars) that the C++ PluginRegistry (or the Python loaders) consume as a self-contained unit. The list order is the injection order. Validators are backward-lenient (an absent schema_version is treated as v1) and forward-strict (a schema_version newer than the loader is rejected). Unknown/future top-level keys are tolerated so a future minor revision may add keys without a schema_version bump; additionalProperties is therefore true.",
+  "type": "object",
+  "required": ["aether_abi", "plugins"],
+  "additionalProperties": true,
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "description": "Plugin-schema version this manifest conforms to. Single-sourced from eagle.roles.SCHEMA_VERSION / plugin/roles.h::kPluginSchemaVersion. Absent ⇒ treated as v1 (backward-lenient); a value greater than the loader supports ⇒ rejected (forward-strict). Orthogonal to aether_abi."
+    },
+    "version": {
+      "type": "integer",
+      "description": "Legacy manifest-version alias (always 1). Retained for pre-freeze readers; superseded by schema_version, which the loaders read. A loader falls back to this key when schema_version is absent."
+    },
+    "pattern": {
+      "type": "string",
+      "description": "Tag naming the plugin family of the bundle. The code generator's Bundle builder emits one of the canonical values \"vector\" | \"pure\" (a Bundle is pattern-homogeneous). The Python load_manifest / C++ PluginRegistry are STRICT: an unknown OR absent pattern is rejected. It is typed as a string (not enum-constrained) so a future family can be added without a schema bump, but the current loaders accept only \"vector\" | \"pure\"."
+    },
+    "aether_abi": {
+      "const": "aether-abi/1",
+      "description": "Binary-ABI tag of the by-value GRef / HandleT POD mirrors this set was built against. Separate from and orthogonal to schema_version: it is the ABI-stable binary-layout contract. A loader rejects a mismatch before binding any by-value struct."
+    },
+    "plugins": {
+      "type": "array",
+      "description": "The set's plugin artifacts in declared (injection) order.",
+      "items": { "$ref": "#/$defs/pluginEntry" }
+    }
+  },
+  "$defs": {
+    "pluginEntry": {
+      "type": "object",
+      "description": "One artifact in the set: its stable id, injection order, enabled flag, artifact + sidecar filenames (relative to the manifest directory), and the artifact format.",
+      "required": ["id", "order", "enabled", "artifact", "sidecar", "format"],
+      "additionalProperties": true,
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Stable, unique plugin id (from the kernel function name; duplicates get a numeric suffix)."
+        },
+        "order": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Injection order == list index (the deterministic sequence in which a vector set accumulates into outVec)."
+        },
+        "enabled": {
+          "type": "boolean",
+          "description": "Whether the registry loads this plugin."
+        },
+        "artifact": {
+          "type": "string",
+          "description": "Artifact filename (<id>.<ext>), relative to the manifest directory."
+        },
+        "sidecar": {
+          "type": "string",
+          "description": "Sidecar filename (<id>.json), relative to the manifest directory."
+        },
+        "format": {
+          "enum": ["ptx", "cubin", "fatbin"],
+          "description": "Artifact format: arch-portable PTX, single-arch cubin, or multi-arch fatbin."
+        }
+      }
+    }
+  }
+}

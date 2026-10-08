@@ -1,0 +1,17 @@
+/* RAPTOR brand: the hero mark draws itself, left to right.
+   The SVG is never redrawn: a soft-edged mask slides across it.
+   The mark is one transparent file that reads on light and dark pages: no theme switching needed. */
+.raptor-hero{display:flex;justify-content:center;margin:1.5rem 0 2rem}
+.raptor-hero img{width:min(560px,100%);height:auto}
+.raptor-reveal{
+  -webkit-mask-image:linear-gradient(90deg,#000 0 44%,transparent 56% 100%);
+          mask-image:linear-gradient(90deg,#000 0 44%,transparent 56% 100%);
+  -webkit-mask-size:230% 100%; mask-size:230% 100%;
+  -webkit-mask-repeat:no-repeat; mask-repeat:no-repeat;
+  -webkit-mask-position:100% 0; mask-position:100% 0;
+  animation:raptor-draw 2.6s cubic-bezier(.35,0,.25,1) .3s forwards;
+}
+@keyframes raptor-draw{to{-webkit-mask-position:0 0;mask-position:0 0}}
+@media (prefers-reduced-motion: reduce){
+  .raptor-reveal{animation:none;-webkit-mask-position:0 0;mask-position:0 0}
+}

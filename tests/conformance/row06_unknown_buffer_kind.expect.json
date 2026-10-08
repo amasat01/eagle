@@ -1,0 +1,22 @@
+{
+  "row": 6,
+  "title": "an unrecognized declared-buffer `kind` is rejected up front, instead of silently falling out of later dispatch logic",
+  "level": "sidecar",
+  "expect": "reject",
+  "error_substring": "has unknown kind 'texture_future' (supported: lookup); upgrade eagle",
+  "loaders": [
+    "shared_validator",
+    "host_add_plugin"
+  ],
+  "overrides": {},
+  "why": [
+    "All four loaders use buffer `kind` to decide which buffers to consolidate,",
+    "not to validate them — so an unrecognized kind used to fall silently out of",
+    "the binding set instead of failing. This fixture pins that the shared",
+    "validator now rejects an unrecognized kind up front, so the later dispatch",
+    "logic (which is unchanged, and still only used for dispatch) can never be",
+    "reached with one.",
+    "The rejection message is written to be identical, substring for substring,",
+    "in both languages."
+  ]
+}

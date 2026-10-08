@@ -1,0 +1,27 @@
+{
+  "row": 5,
+  "title": "an unrecognized `scatter_policy` value is rejected, and the specific dead spelling used here stays rejected forever",
+  "level": "sidecar",
+  "expect": "reject",
+  "error_substring": "scatter_policy",
+  "loaders": [
+    "shared_validator",
+    "host_add_plugin"
+  ],
+  "overrides": {},
+  "why": [
+    "`scatter_policy` declares the contract for how a block's terminal write",
+    "behaves — what the committed result means — so an unrecognized value must",
+    "be refused rather than let the executor guess.",
+    "The rejected value here is `unique_target`, a spelling that was proposed by",
+    "mistake early on and overturned before any code used it. This fixture",
+    "pins that a loader must never accept that spelling: a loader that",
+    "'helpfully' accepts it as a synonym for the real value fails here, in both",
+    "languages.",
+    "The fixture is otherwise identical to row01's golden with only this one",
+    "field changed, so the only thing that can make it reject is this",
+    "discriminant.",
+    "The manifest-bypassing plugin loader is exercised too, since its only",
+    "structural gate is the shared validator."
+  ]
+}

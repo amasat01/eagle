@@ -1,0 +1,1 @@
+02_host_dispatch: N=1024 sum=1048576 (expected 1048576) : OK

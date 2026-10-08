@@ -1,0 +1,27 @@
+{
+  "row": 16,
+  "title": "a sidecar's legacy `version` key is ignored, not treated as a schema_version fallback",
+  "level": "sidecar",
+  "expect": "accept",
+  "error_substring": null,
+  "loaders": [
+    "shared_validator"
+  ],
+  "overrides": {},
+  "why": [
+    "Python's schema-version check used to treat an old-style `version` key as",
+    "a fallback for `schema_version` on both sidecars and manifests. C++ never",
+    "read that key on a sidecar — only on a manifest, matching how an older",
+    "manifest producer stamps both keys for backward compatibility. So a",
+    "sidecar with `version: 99` used to be rejected in Python (treated as a",
+    "too-high schema version) but accepted in C++ (the key was ignored) — a",
+    "live cross-language mismatch in a gate field.",
+    "The legacy-key fallback is now scoped to manifests only. This fixture",
+    "checks that a sidecar's `version` key is ignored in both languages",
+    "(schema_version defaults to 1, which is backward-lenient), and the fixture",
+    "is accepted. Accepted at the shared validator only — the loader that must",
+    "accept it — for the same reason given for row 11: driving an accept case",
+    "through the manifest-bypassing plugin loader would load a stub artifact",
+    "and fail for an unrelated reason."
+  ]
+}

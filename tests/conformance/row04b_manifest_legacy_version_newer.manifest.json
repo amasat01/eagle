@@ -1,0 +1,9 @@
+{
+  "version": 99,
+  "pattern": "vector",
+  "aether_abi": "aether-abi/1",
+  "plugins": [
+    {"id": "gravity", "order": 0, "enabled": true,
+     "artifact": "gravity.ptx", "sidecar": "gravity.json", "format": "ptx"}
+  ]
+}

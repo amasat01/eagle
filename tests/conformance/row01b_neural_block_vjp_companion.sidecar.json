@@ -1,0 +1,28 @@
+{
+  "format": "ptx",
+  "schema_version": 1,
+  "pattern": "pure",
+  "aether_abi": "aether-abi/1",
+  "scalar_type": "float64",
+  "kernel": "mlp_block_vjp",
+  "vector_inputs": ["x", "y_bar"],
+  "params": [],
+  "per_sample": [],
+  "vec_widths": {"x": 8, "y_bar": 3},
+  "arg_spec": [
+    ["vec_in", "x"],
+    ["per_sample", "y_bar"],
+    ["mutable", "x_bar"],
+    ["terminated", "terminated"],
+    ["nsamples", "n"]
+  ],
+  "mutables": [{"name": "x_bar", "dtype": "vector", "width": 8}],
+  "buffers": [],
+  "derivative": {
+    "kind": "vjp",
+    "primal": "mlp_block_fwd",
+    "wrt": ["x"],
+    "residual_policy": "recompute",
+    "residuals": []
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "row": 20,
+  "title": "a non-numeric `in_degree` is rejected in both languages via TWO DIFFERENT failure paths that share one leading clause",
+  "level": "sidecar",
+  "expect": "reject",
+  "error_substring": "in_degree must be a positive integer",
+  "loaders": ["shared_validator", "host_add_plugin"],
+  "overrides": {},
+  "why": [
+    "Fixture content is row01's golden with `in_degree`'s value replaced by the",
+    "string 'not_a_number' (AMENDED from an earlier draft's literal `in_degree: 0`,",
+    "since a literal zero exercises NEITHER",
+    "promised path — C++'s `strtoll` parses `0` legitimately, and Python's",
+    "`isinstance(value, int)` accepts a real `0` — so it pinned nothing).",
+    "This ONE row exercises BOTH promised failure paths: C++'s",
+    "integer scanner is type-blind by construction — `strtoll` of a",
+    "non-numeric JSON string collapses to 0, and the positive-integer check",
+    "then rejects it with '... got 0'; Python's field is read as a real JSON",
+    "string, so its `isinstance(value, int)` type check rejects it directly",
+    "with '... got 'not_a_number''. The two languages therefore fail via",
+    "DIFFERENT internal mechanisms and DIFFERENT trailing text, which is",
+    "exactly why the asserted substring stops BEFORE the divergent `got` tail",
+    "(the shared substring is the",
+    "language-invariant LEADING clause; what follows is presentation).",
+    "`host_add_plugin` is exercised too: its only structural gate is the",
+    "shared validator, so both failure paths are reachable through it as well."
+  ]
+}

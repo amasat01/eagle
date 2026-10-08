@@ -1,0 +1,140 @@
+# Copyright 2026 Alessandro Masat
+# SPDX-License-Identifier: Apache-2.0
+#
+# Build the Sphinx + Doxygen + breathe (C++) and autodoc/autosummary (Python)
+# documentation site and deploy it to GitHub Pages on push to main.
+#
+# Notebooks under docs/content/userguide/{tutorials,examples}/,
+# docs/content/userguide/quickstart_python.ipynb and docs/content/interop.ipynb
+# are executed LOCALLY on a GPU (`make nbexec`) and committed WITH their
+# outputs — this job never re-executes them (`nb_execution_mode = "off"` in
+# conf.py; `make nbcheck` just refuses to proceed if one was committed
+# unfilled). Building the Python API reference needs `eagle` IMPORTABLE (not
+# functional): the eagle._core nanobind extension is built against a
+# provisioned compile-only CUDA toolchain, mirroring ci.yml's test-python job
+# — no GPU is present or required here.
+
+name: Docs
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      CC: gcc-13
+      CXX: g++-13
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: eagle
+
+      - uses: actions/checkout@v7
+        with:
+          repository: amasat01/aether
+          path: aether
+          token: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
+
+      - uses: actions/checkout@v7
+        with:
+          repository: amasat01/raptor
+          path: raptor
+          token: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - run: sudo apt-get update && sudo apt-get install -y g++-13
+
+      # The runner's own apt doxygen trails Doxygen upstream (locally we only
+      # have 1.9.1); C++20 trailing `requires` clauses need >= 1.10 to parse.
+      # Install the official release tarball instead, pinned and checksum-
+      # verified (sha256, published at doxygen.nl/download.html) rather than
+      # trusting whatever version the runner's default repo happens to carry.
+      - name: Install Doxygen 1.18.0 (official release tarball, checksum-verified)
+        run: |
+          set -euo pipefail
+          DOXYGEN_VERSION=1.18.0
+          DOXYGEN_SHA256=14fa81bdc34171edb5f1f02b1d60e74802f0439b77fa44e592565d517d72df90
+          curl -fsSL -o /tmp/doxygen.tar.gz \
+            "https://www.doxygen.nl/files/doxygen-${DOXYGEN_VERSION}.linux.bin.tar.gz"
+          echo "${DOXYGEN_SHA256}  /tmp/doxygen.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/doxygen.tar.gz -C /tmp
+          echo "/tmp/doxygen-${DOXYGEN_VERSION}/bin" >> "$GITHUB_PATH"
+
+      # NVIDIA's apt repo for Ubuntu 24.04 (noble), x86_64 — compile-only
+      # toolchain, no driver/GPU (mirrors ci.yml's test-python job).
+      - name: Install compile-only CUDA 12.6 toolchain (nvcc; no driver/GPU)
+        run: |
+          curl -fsSL -o /tmp/cuda-keyring.deb \
+            https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+          sudo dpkg -i /tmp/cuda-keyring.deb
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cuda-nvcc-12-6 cuda-cudart-dev-12-6 cuda-driver-dev-12-6
+          echo "/usr/local/cuda-12.6/bin" >> "$GITHUB_PATH"
+          echo "CUDA_HOME=/usr/local/cuda-12.6" >> "$GITHUB_ENV"
+
+      # aether installed in its default CUDA-language mode (eagle._core is
+      # CUDA-language regardless of EAGLE_CPP_MODE).
+      - run: |
+          cmake -DAETHER_CPP_MODE=OFF -DCMAKE_CUDA_COMPILER="$(which nvcc)" \
+            -DCMAKE_INSTALL_PREFIX="${GITHUB_WORKSPACE}/__install" \
+            -B aether/build -S aether
+          cmake --install aether/build
+
+      # eagle's own header-only C++ config, installed next to aether so the
+      # binding's find_package(eagle) resolves.
+      - run: |
+          cd eagle
+          cmake -B __eagle_hdr -DCMAKE_CUDA_COMPILER="$(which nvcc)" \
+            -DCMAKE_CUDA_ARCHITECTURES=70 \
+            -DCMAKE_INSTALL_PREFIX="${GITHUB_WORKSPACE}/__install" .
+          cmake --install __eagle_hdr
+
+      - name: Build the eagle._core binding (compile-only, no GPU needed)
+        run: |
+          cd eagle
+          python -m pip install --quiet --upgrade pip
+          export CMAKE_PREFIX_PATH="${GITHUB_WORKSPACE}/__install:${CMAKE_PREFIX_PATH}"
+          export SKBUILD_CMAKE_ARGS="-DCMAKE_CUDA_COMPILER=$(which nvcc);-DCMAKE_CUDA_ARCHITECTURES=70"
+          pip install ../raptor   # raptor-core is not on PyPI yet
+          pip install -e ./python
+
+      - name: Install docs dependencies
+        run: |
+          python -m pip install --quiet \
+            Sphinx==8.2.3 sphinx-book-theme==1.2.0 sphinx-design==0.7.0 sphinx-copybutton==0.5.2 \
+            sphinx-autodoc-typehints==3.5.2 myst-nb==1.4.0 breathe==4.36.0 nbformat nbclient
+
+      - name: make nbcheck (refuse an unfilled notebook)
+        run: cd eagle/docs && make nbcheck
+
+      - name: make strict (0 Sphinx warnings)
+        run: cd eagle/docs && make strict
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: eagle/docs/_build/html
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

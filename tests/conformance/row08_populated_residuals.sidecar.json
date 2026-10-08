@@ -1,0 +1,27 @@
+{
+  "format": "ptx",
+  "schema_version": 1,
+  "pattern": "pure",
+  "aether_abi": "aether-abi/1",
+  "scalar_type": "float64",
+  "kernel": "poly_vjp",
+  "vector_inputs": ["x"],
+  "params": [],
+  "per_sample": [],
+  "vec_widths": {"x": 3},
+  "arg_spec": [
+    ["vec_in", "x"],
+    ["mutable", "state"],
+    ["terminated", "terminated"],
+    ["nsamples", "n"]
+  ],
+  "mutables": [{"name": "state", "dtype": "float", "width": 1}],
+  "buffers": [],
+  "derivative": {
+    "kind": "vjp",
+    "primal": "poly",
+    "wrt": ["x"],
+    "residual_policy": "recompute",
+    "residuals": [{"name": "r0", "width": 1}]
+  }
+}

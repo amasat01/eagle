@@ -1,0 +1,7 @@
+MpiBed.WorldSizeIsTwo
+RankPartition.CrossSampleReadReplicatedTableBitExact
+RankPartition.CrossSampleWriteRefused
+RankPartition.LegacyV1Refused
+RankPartition.MapreduceWithinBandIdenticalOnAllRanks
+RankPartition.SampleLocalHostBitExactVsWhole
+RankPartition.UnevenSplitCoversEverySample

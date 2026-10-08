@@ -1,0 +1,1 @@
+03_reduction (C++): sum(1..1000)=500500 (expected 500500) : OK

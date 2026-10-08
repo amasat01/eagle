@@ -1,0 +1,17 @@
+# cards-cpu: what the two CPU cards (cpu_card.py, cpu_rk78_card.py) import, plus the build
+# backends the editable installs need (--no-build-isolation). CPython 3.12, Linux x86_64.
+# CUDA runtime/driver floor: none (CPU PyTorch, CPU JAX, Numba; eagle's core is plain C++).
+--extra-index-url https://download.pytorch.org/whl/cpu
+numpy==2.4.2
+scipy==1.17.1
+torch==2.12.1+cpu
+jax==0.11.2
+jaxlib==0.11.2
+numba==0.68.0
+llvmlite==0.50.0
+cuda-bindings==12.9.9
+cuda-pathfinder==1.8.2
+psutil==7.2.2
+pytest==9.1.1
+nanobind==3.1.0
+scikit-build-core==1.1.0

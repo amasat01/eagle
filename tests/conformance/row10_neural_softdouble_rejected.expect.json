@@ -1,0 +1,27 @@
+{
+  "row": 10,
+  "title": "a `neural_block` descriptor with scalar_type=softdouble is rejected — the neural check is stricter than the general dtype check",
+  "level": "sidecar",
+  "expect": "reject",
+  "error_substring": "neural_block requires scalar_type",
+  "loaders": [
+    "shared_validator",
+    "host_add_plugin"
+  ],
+  "overrides": {},
+  "why": [
+    "The neural wire format only supports native float32/float64: SoftDouble is",
+    "a GPU code-generation numeric type, not an array dtype, and is not part of",
+    "neural v1.",
+    "`softdouble` is a perfectly valid `scalar_type` for an ordinary sidecar (the",
+    "existing float64 wire representation already serves it bit-identically), so",
+    "this fixture passes the shared validator's general dtype check and is",
+    "rejected only by the neural-specific check, which allows just",
+    "{float32, float64} rather than merely disallowing SoftDouble. The",
+    "companion row10b fixture proves the reverse: the same scalar_type is",
+    "accepted once the pattern is not `neural_block`, showing the rejection is",
+    "scoped to the neural pattern, not global.",
+    "The manifest-bypassing plugin loader is exercised too, since its only",
+    "structural gate is the shared validator."
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "row": 4,
+  "title": "an ordinary kernel stamped with a schema_version beyond what the loader supports is rejected",
+  "level": "sidecar",
+  "expect": "reject",
+  "error_substring": "upgrade eagle",
+  "loaders": [
+    "shared_validator",
+    "host_add_plugin"
+  ],
+  "overrides": {},
+  "why": [
+    "`schema_version` is a hard gate, not a discriminant: a higher version means",
+    "this build cannot safely interpret the artifact at all, so both languages",
+    "reject it and name the version-upgrade rule regardless of pattern.",
+    "The loader's maximum supported schema_version is 2, so this fixture is",
+    "stamped 3 — one past the maximum — to pin that the rejection fires at",
+    "exactly one past what this build accepts, not at some arbitrary later value."
+  ]
+}

@@ -1,0 +1,38 @@
+{
+  "row": 25,
+  "title": "a neural manifest whose `vjp_exec` reference dangles (no enabled plugin provides it) is rejected in both languages, for different reasons",
+  "level": "manifest",
+  "expect": "reject",
+  "error_substring": "recognized but not launchable",
+  "loaders": [
+    "cpp_load_manifest",
+    "py_load_manifest"
+  ],
+  "overrides": {
+    "py_load_manifest": {
+      "expect": "reject",
+      "error_substring": "vjp_exec.kernel 'mlp_block_vjp' does not resolve"
+    }
+  },
+  "why": [
+    "This manifest carries row01's golden descriptor inline: its block names",
+    "`vjp_exec.kernel` as `mlp_block_vjp`, but the manifest's plugin list only",
+    "enables `mlp_block_fwd`. The reference is dangling by construction — the",
+    "check that catches this is local to the manifest and fires before any",
+    "artifact file is read.",
+    "Both languages reject this fixture, but for different reasons, and that",
+    "difference is itself what this fixture checks. C++ has no consumer for",
+    "neural manifests yet, so both C++ registries refuse the manifest at",
+    "their existing pattern gate — 'recognized but not launchable by this",
+    "loader' — without ever looking at the blocks. Python's manifest loader is",
+    "the first neural-consuming loader, so it dispatches past the pattern",
+    "gate, validates every inline descriptor, builds the neural layer spec,",
+    "and only then hits the dangling-reference check, rejecting on",
+    "`vjp_exec`.",
+    "The Python rejection message is recorded here as the wording the first",
+    "C++ neural consumer must eventually match, once it exists.",
+    "Silently accepting this fixture in either language, or loading it as a",
+    "bare kernel without checking the exec reference against the enabled",
+    "plugin set, is exactly the failure mode this fixture exists to catch."
+  ]
+}

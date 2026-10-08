@@ -1,0 +1,23 @@
+{
+  "row": 11,
+  "title": "an ordinary sidecar carrying an unknown top-level key is accepted",
+  "level": "sidecar",
+  "expect": "accept",
+  "error_substring": null,
+  "loaders": [
+    "shared_validator"
+  ],
+  "overrides": {},
+  "why": [
+    "Schema v1 allows additional properties, so a purely additive optional key",
+    "from a future minor revision must load cleanly and be ignored.",
+    "This fixture's job is to fail if validation is ever tightened into a",
+    "blanket 'unknown key = reject' rule. Every other fixture in this corpus is",
+    "satisfied by making the validator stricter; this one can only be satisfied",
+    "by making it stricter in exactly the right place, and no other.",
+    "Accepted at the shared validator only — the loader that must accept it.",
+    "Driving an accept case through the manifest-bypassing plugin loader would",
+    "prove nothing about validation: past the gate, both languages would proceed",
+    "to load a stub artifact and fail for an unrelated reason."
+  ]
+}

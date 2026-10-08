@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "pattern": "not_a_registered_family",
+  "aether_abi": "aether-abi/1",
+  "plugins": [
+    {"id": "gravity", "order": 0, "enabled": true,
+     "artifact": "gravity.ptx", "sidecar": "gravity.json", "format": "ptx"}
+  ]
+}

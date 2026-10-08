@@ -1,0 +1,25 @@
+{
+  "row": 15,
+  "title": "a sidecar with no `aether_abi` tag is now rejected at the manifest-bypassing host loader",
+  "level": "sidecar",
+  "expect": "reject",
+  "error_substring": "built for",
+  "loaders": [
+    "host_add_plugin"
+  ],
+  "overrides": {},
+  "why": [
+    "The host loader used to check the ABI tag only when it was present,",
+    "accepting a sidecar with no ABI tag at all — the softest ABI check among",
+    "all the loaders. Its C++ counterpart requires the tag to be present (even",
+    "an empty ABI tag is rejected): a memory-layout mismatch must never be",
+    "inferred leniently. Python's separate device-loading path also already",
+    "required the tag; this host loader was the one outlier.",
+    "The host loader now calls the same ABI-check function every other loader",
+    "in both languages uses, instead of its own separate check; this fixture",
+    "pins that unification.",
+    "Only the host loader is exercised: the shared validator does not check the",
+    "ABI tag at all, since that check is specific to each loader rather than",
+    "part of the shared structural checks."
+  ]
+}

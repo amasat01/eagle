@@ -1,0 +1,24 @@
+{
+  "row": 14,
+  "title": "LOCKED behaviour: sidecar `pattern` absence is lenient at the SHARED validator (both languages)",
+  "level": "sidecar",
+  "expect": "accept",
+  "error_substring": null,
+  "loaders": ["shared_validator"],
+  "overrides": {},
+  "why": [
+    "`validate_sidecar` (both languages) is",
+    "absence-LENIENT for `pattern` — a pre-freeze sidecar never stamped one, and",
+    "the SHARED structural validator does not dispatch on it (that is",
+    "`_require_pattern`'s job, kind DISPATCH, layered on top in Python's",
+    "Loaded* classes — see the `LoadedVector`/`LoadedPure` GPU-gated pins in",
+    "test_schema_hardening.py, which is where THAT further dispatch is pinned;",
+    "it needs a real device module load and so cannot be a GPU-free corpus row).",
+    "Unlike the manifest-level `pattern` gate (row 13), this is NOT a",
+    "cross-language asymmetry — both languages agree (ACCEPT) — so no override",
+    "is needed; this row locks the shared agreement itself.",
+    "ACCEPT is asserted at shared_validator only (row 11's precedent): driving",
+    "an accept case through host_add_plugin would dlopen a stub path and fail",
+    "for an unrelated reason, proving nothing about validation."
+  ]
+}

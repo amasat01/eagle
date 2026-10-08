@@ -1,0 +1,19 @@
+cff-version: 1.2.0
+message: "If you use eagle, please cite it using the metadata below."
+type: software
+title: "eagle"
+abstract: "GPU execution runtime for compiled kernels: launch, graph capture, plugin registry, host/device dual mode. Header-only C++ core with a Python package."
+authors:
+  - family-names: "Masat"
+    given-names: "Alessandro"
+version: "0.4.0"
+date-released: "2026-10-02"
+license: Apache-2.0
+repository-code: "https://github.com/amasat01/eagle"
+# doi: "10.5281/zenodo.XXXXXXX"   # filled in after the first Zenodo archive of the tagged release
+keywords:
+  - CUDA
+  - GPU
+  - CUDA graphs
+  - plugins
+  - runtime

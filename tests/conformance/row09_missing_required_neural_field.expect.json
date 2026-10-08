@@ -1,0 +1,27 @@
+{
+  "row": 9,
+  "title": "a `neural_block` descriptor missing a required field is rejected, naming the missing field",
+  "level": "sidecar",
+  "expect": "reject",
+  "error_substring": "missing required neural_block field 'in_degree'",
+  "loaders": ["shared_validator", "host_add_plugin"],
+  "overrides": {},
+  "why": [
+    "Fixture content is row01's golden with the `in_degree` key removed — the ONLY",
+    "thing that can make it reject is the requiredness check under test.",
+    "Presence is ITERATED over the single-sourced `kNeuralRequiredFields` /",
+    "`NEURAL_REQUIRED_FIELDS` list in both languages (single-sourced),",
+    "rather than a hand-written `if` per field,",
+    "so this row also exercises that iteration path, not a bespoke check.",
+    "Both languages iterate the requiredness list in SORTED order ('forward_exec',",
+    "'in_degree', 'input_width', 'out_degree', 'output_width', 'param_width',",
+    "'scatter_policy', 'state_width' — ARM-A's rename moved 'in_degree' off the",
+    "front slot 'fanin' held pre-rename, but the loop still names whichever field",
+    "is actually absent, not merely the alphabetically-first one) — deterministic,",
+    "so both drivers name the SAME missing field even though only one is",
+    "actually absent here.",
+    "The requiredness loop runs BEFORE the positive-integer and",
+    "output_width/state_width checks, so a descriptor missing a field is told",
+    "WHAT is missing rather than nitpicked on the shape of fields it does carry."
+  ]
+}

@@ -1,0 +1,21 @@
+# Copyright 2026 Alessandro Masat
+# SPDX-License-Identifier: Apache-2.0
+#
+# Lightweight CI environment for documentation builds.
+# Used in the deploy:pages CI job — no CUDA toolchain or build tools required.
+#
+# Create with:  micromamba create -p .envs/eagle_docs -f environment-light.yml -y
+
+name: eagle_docs
+channels:
+  - conda-forge
+dependencies:
+  # ── Python version pin ───────────────────────────────────────────────────
+  - python=3.12
+
+  # ── Docs ─────────────────────────────────────────────────────────────────
+  - sphinx
+  - sphinx-book-theme
+  - sphinx-design
+  - breathe>=4.35.0
+  - myst-parser

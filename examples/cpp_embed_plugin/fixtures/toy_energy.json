@@ -1,0 +1,22 @@
+{
+  "format": "ptx",
+  "schema_version": 1,
+  "pattern": "pure",
+  "aether_abi": "aether-abi/1",
+  "scalar_type": "float64",
+  "kernel": "raptor_kernel",
+  "vector_inputs": ["x"],
+  "params": ["p"],
+  "per_sample": [],
+  "mutables": [
+    { "name": "e", "dtype": "float", "width": 1, "default": 0.0 }
+  ],
+  "vec_widths": { "x": 3 },
+  "arg_spec": [
+    ["vec_in", "x"],
+    ["mutable", "e"],
+    ["uniform", "p"],
+    ["nsamples", "nsamples"]
+  ],
+  "buffers": []
+}

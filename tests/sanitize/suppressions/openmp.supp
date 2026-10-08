@@ -1,0 +1,57 @@
+# Suppressions for OpenMP / glibc TLS machinery.
+# These are reported as "possibly lost" or "still reachable" by valgrind
+# because libgomp and the dynamic loader hold allocations for the lifetime of
+# the process. They are not leaks in the application sense.
+
+{
+   gomp_team_start_possibly_lost_calloc
+   Memcheck:Leak
+   match-leak-kinds: possible
+   fun:calloc
+   ...
+   fun:gomp_team_start
+}
+
+{
+   gomp_team_start_possibly_lost_malloc
+   Memcheck:Leak
+   match-leak-kinds: possible
+   fun:malloc
+   ...
+   fun:gomp_team_start
+}
+
+{
+   gomp_thread_local_reachable
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   fun:malloc
+   ...
+   obj:*/libgomp.so*
+}
+
+{
+   pthread_create_allocate_stack
+   Memcheck:Leak
+   match-leak-kinds: possible
+   fun:calloc
+   ...
+   fun:allocate_stack
+   fun:pthread_create*
+}
+
+{
+   libc_dl_allocate_tls_reachable
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   fun:malloc
+   fun:_dl_allocate_tls*
+}
+
+{
+   libc_dl_allocate_tls_calloc_reachable
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   fun:calloc
+   fun:_dl_allocate_tls*
+}

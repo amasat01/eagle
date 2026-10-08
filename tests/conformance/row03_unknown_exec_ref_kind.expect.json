@@ -1,0 +1,28 @@
+{
+  "row": 3,
+  "title": "a `neural_block` descriptor's `forward_exec.kind` outside the exec-ref vocabulary is rejected",
+  "level": "sidecar",
+  "expect": "reject",
+  "error_substring": "forward_exec.kind",
+  "loaders": ["shared_validator", "host_add_plugin"],
+  "overrides": {},
+  "why": [
+    "An exec reference's `kind` is a schema DISCRIMINANT:",
+    "it names HOW the reference must be read, so an unrecognized value is refused rather",
+    "than dispatched on as though it were an ordinary `{'kind': 'kernel', ...}` object.",
+    "v1 has exactly one legal kind ('kernel'); a future aggregate/plan-bundle kind would",
+    "RESHAPE the object (a digest payload alongside `kind`), which is a meaning change and",
+    "therefore a `schema_version` bump, never a silent new value an old loader might",
+    "half-understand (an additive change).",
+    "The rejected value is a deliberately inert placeholder ('not_a_registered_exec_kind'),",
+    "the same convention row02's unknown `pattern` uses: naming a real future kind here",
+    "would be a scope breach, since admitting one is its own governed schema event.",
+    "Fixture content is row01's golden with one field changed (`forward_exec.kind` only —",
+    "`forward_exec.kernel` and the untouched `vjp_exec` stay valid), so the ONLY thing that",
+    "can make it reject is the discriminant under test. The exec-ref fields are checked in",
+    "SORTED order in both languages, and `forward_exec` sorts before `vjp_exec`, so this",
+    "row also pins which field fires first on a descriptor whose exec refs disagree.",
+    "`host_add_plugin` is exercised too: its only structural gate is the shared validator,",
+    "so the check must live there, not in a per-loader afterthought."
+  ]
+}

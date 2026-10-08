@@ -1,0 +1,29 @@
+{
+  "row": 22,
+  "title": "a `neural_block` exec reference carrying an unrecognized third key is rejected (the object is CLOSED)",
+  "level": "sidecar",
+  "expect": "reject",
+  "error_substring": "forward_exec carries unknown key(s)",
+  "loaders": ["shared_validator", "host_add_plugin"],
+  "overrides": {},
+  "why": [
+    "An exec ref's wire shape is fixed to exactly",
+    "`{'kind': ..., 'kernel': ...}` — before this hardening a third key (a digest",
+    "payload, a stray typo) passed validation silently in BOTH languages, because",
+    "`_validate_exec_ref` only ever READ `kind`/`kernel` off the object and never",
+    "checked its key set. This row closes that gap: the object is now CLOSED, not",
+    "merely SHAPED — an unrecognized key is refused by name.",
+    "Fixture content is row01's golden with one field changed (`forward_exec` grows a",
+    "third key, `digest`) — the ONLY thing that can make it reject is the closure",
+    "check under test; `forward_exec.kind`/`forward_exec.kernel` and the untouched",
+    "`vjp_exec` stay valid, so a validator that still only reads the two known keys",
+    "would accept this fixture and fail the row.",
+    "The C++ half parses the exec-ref object's TOP-LEVEL keys at parse time",
+    "(`_object_keys`, `plugin/sidecar.h`) and carries any unrecognized ones on",
+    "`ExecRef::unknown_keys` for `_validate_exec_ref` to report — parsing stays",
+    "validation-free, like every other field the scanner reads, matching the",
+    "parse/validate split the rest of the header already follows.",
+    "`host_add_plugin` is exercised too: its only structural gate is the shared",
+    "validator, so the check must live there, not in a per-loader afterthought."
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "row": 2,
+  "title": "an unrecognized sidecar `pattern` value is rejected by name",
+  "level": "sidecar",
+  "expect": "reject",
+  "error_substring": "unknown sidecar pattern 'not_a_registered_family'",
+  "loaders": [
+    "shared_validator",
+    "host_add_plugin"
+  ],
+  "overrides": {},
+  "why": [
+    "`pattern` selects which kind of bundle a sidecar is, so a loader that does",
+    "not recognize a value must refuse it rather than silently treat it as an",
+    "ordinary kernel.",
+    "The manifest-bypassing plugin loader is checked here because it is the one",
+    "entry point, in both languages, whose only structural gate is the shared",
+    "sidecar validator.",
+    "The pattern value used is a placeholder that is not a real, currently",
+    "supported family: adding a real one to the recognized set is a deliberate",
+    "change that must ship together with the corresponding launch checks."
+  ]
+}

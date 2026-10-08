@@ -1,0 +1,28 @@
+{
+  "row": 19,
+  "title": "a `neural_block` descriptor whose `output_width` exceeds its `state_width` is rejected",
+  "level": "sidecar",
+  "expect": "reject",
+  "error_substring": "must not exceed state_width",
+  "loaders": ["shared_validator", "host_add_plugin"],
+  "overrides": {},
+  "why": [
+    "Fixture content is row01's golden with `output_width` raised from 3 to 7,",
+    "`state_width` left at its golden value of 6 — the ONLY thing that can make",
+    "it reject is the width lock under test (both values individually pass the",
+    "positive-integer check, so this is not that row).",
+    "This wire-checkable width lock: a block's output",
+    "payload is committed into state rows `[0, output_width)` of its own",
+    "per-block state vector, so `output_width` cannot exceed `state_width` —",
+    "this is checkable from the wire fields alone, with no in-process",
+    "resolution needed, which is why it is a SIDECAR-level check rather than",
+    "deferred to NE1's in-process signature-match relation.",
+    "The check runs AFTER the positive-integer loop (both fields must",
+    "individually be valid positive integers before the relational check",
+    "between them is meaningful) and after the requiredness loop (both fields",
+    "must be present at all) — this fixture's golden-derived content passes",
+    "both of those, so it reaches exactly the check under test.",
+    "`host_add_plugin` is exercised too: its only structural gate is the",
+    "shared validator."
+  ]
+}

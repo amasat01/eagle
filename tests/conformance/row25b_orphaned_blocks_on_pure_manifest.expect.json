@@ -1,0 +1,31 @@
+{
+  "row": 25,
+  "title": "a manifest with an ordinary kernel pattern that also carries a `blocks[]` section must fail loudly, in both languages",
+  "level": "manifest",
+  "expect": "reject",
+  "error_substring": "carrying blocks[] must declare pattern 'neural_block'",
+  "loaders": [
+    "cpp_load_manifest",
+    "py_load_manifest"
+  ],
+  "overrides": {},
+  "why": [
+    "This is row25's fixture with one change: the top-level `pattern` is an",
+    "ordinary, launch-certified kernel pattern instead of `neural_block`, so",
+    "both dispatch gates pass it through and reach the check under test rather",
+    "than rejecting on an unrecognized or wrong-family pattern. It is normal",
+    "for two fixtures with different content to share the same row number,",
+    "since they check the same rule at two related points.",
+    "Before this check existed, a kernel-pattern manifest carrying a `blocks[]`",
+    "section was silently ignored in both languages and its entries loaded as",
+    "bare kernels — exactly the kind of misread this fixture exists to catch.",
+    "Before the fix, this exact fixture could not pass by accident: Python",
+    "used to fail reaching for a nonexistent kernel artifact with a file-not-found",
+    "error rather than a validation error, and C++ failed on the same missing",
+    "artifact with an unrelated message, so this fixture could only pass once",
+    "the check was added and made to fire before any artifact is loaded.",
+    "Both languages now reject with the same shared message text saying that a",
+    "manifest carrying `blocks[]` must declare the `neural_block` pattern; each",
+    "language appends its own additional detail after that shared text."
+  ]
+}

@@ -1,0 +1,240 @@
+# Copyright 2026 Alessandro Masat
+# SPDX-License-Identifier: Apache-2.0
+#
+# CI: the CPP_MODE arm (deps -> build:cpp -> test:cpp) plus a provisioned-toolchain build of the
+# eagle._core python binding (test:python), and the core-only wheel on a
+# runner with no NVIDIA driver and no CUDA toolkit (test-python-nodriver). The
+# CUDA C++ arm (test:cuda) still needs a real GPU to RUN on and is not wired here.
+
+name: CI
+
+on: [push, pull_request]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-cpp:
+    runs-on: ubuntu-latest
+    env:
+      CC: gcc-13
+      CXX: g++-13
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: eagle
+
+      # aether as a sibling checkout (amasat01/aether, main).
+      - uses: actions/checkout@v7
+        with:
+          repository: amasat01/aether
+          path: aether
+          token: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
+
+      - run: sudo apt-get update && sudo apt-get install -y g++-13
+
+      # deps stage: install aether's headers (CPP_MODE) into a local prefix.
+      - run: |
+          cmake -DAETHER_CPP_MODE=ON \
+            -DCMAKE_INSTALL_PREFIX="${GITHUB_WORKSPACE}/__install" \
+            -B aether/build -S aether
+          cmake --install aether/build
+
+      # build:cpp, with the project's standard CPP_MODE configure variables.
+      - run: |
+          cd eagle
+          cmake -B build \
+            -DCMAKE_PREFIX_PATH="${GITHUB_WORKSPACE}/__install" \
+            -DFETCHCONTENT_QUIET=ON \
+            -DEAGLE_BUILD_TESTS=ON \
+            -DEAGLE_TEST_REPORT=ON \
+            -DEAGLE_DEBUG_MODE=ON \
+            -DEAGLE_CPP_MODE=ON .
+          cmake --build build -j"$(nproc)"
+
+      # test:cpp — the manifest-backed integrity gate, not the binary bare.
+      - run: cd eagle && tests/check_gate.sh cpp build/tests/eagle_tests
+
+  # test:python — builds eagle._core (plain C++) AND the libeagle_cuda.so backend
+  # plugin (python/CMakeLists.txt's default EAGLE_PYTHON_CUDA_PLUGIN=BUILD needs nvcc)
+  # against a provisioned compile-only CUDA toolchain — no GPU is present or required
+  # to COMPILE. `gpu` is a registered pytest marker (python/pyproject.toml markers=),
+  # so device-dependent tests are deselected with -m "not gpu"; `torch` and
+  # `interop_matrix` are also registered but NOT deselected here (not asked for), so
+  # some interop/torch rows may still fail without a GPU even after this filter.
+  # This job was authored and YAML-validated offline; the CUDA package set/versions
+  # below are UNVERIFIED — not run on a live runner.
+  test-python:
+    runs-on: ubuntu-latest
+    env:
+      CC: gcc-13
+      CXX: g++-13
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: eagle
+
+      - uses: actions/checkout@v7
+        with:
+          repository: amasat01/aether
+          path: aether
+          token: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
+
+      - uses: actions/checkout@v7
+        with:
+          repository: amasat01/raptor
+          path: raptor
+          token: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - run: sudo apt-get update && sudo apt-get install -y g++-13
+
+      # NVIDIA's apt repo for Ubuntu 24.04 (noble), x86_64.
+      - name: Install compile-only CUDA 12.6 toolchain (nvcc; no driver/GPU)
+        run: |
+          curl -fsSL -o /tmp/cuda-keyring.deb \
+            https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+          sudo dpkg -i /tmp/cuda-keyring.deb
+          sudo apt-get update
+          # cuda-nvcc-12-6 + cuda-cudart-dev-12-6 as suggested; cuda-driver-dev-12-6
+          # added for the libcuda.so DRIVER STUB (stubs/, no actual driver) that
+          # python/CMakeLists.txt's CUDA::cuda_driver link target needs.
+          sudo apt-get install -y --no-install-recommends \
+            cuda-nvcc-12-6 cuda-cudart-dev-12-6 cuda-driver-dev-12-6
+          echo "/usr/local/cuda-12.6/bin" >> "$GITHUB_PATH"
+          echo "CUDA_HOME=/usr/local/cuda-12.6" >> "$GITHUB_ENV"
+
+      # deps: [OFF] — aether installed in its default CUDA-language mode
+      # (needed because eagle._core is CUDA-language regardless of EAGLE_CPP_MODE).
+      - run: |
+          cmake -DAETHER_CPP_MODE=OFF -DCMAKE_CUDA_COMPILER="$(which nvcc)" \
+            -DCMAKE_INSTALL_PREFIX="${GITHUB_WORKSPACE}/__install" \
+            -B aether/build -S aether
+          cmake --install aether/build
+
+      # eagle's own header-only C++ config, installed next to aether so the
+      # binding's find_package(eagle) resolves.
+      - run: |
+          cd eagle
+          cmake -B __eagle_hdr -DCMAKE_CUDA_COMPILER="$(which nvcc)" \
+            -DCMAKE_CUDA_ARCHITECTURES=70 \
+            -DCMAKE_INSTALL_PREFIX="${GITHUB_WORKSPACE}/__install" .
+          cmake --install __eagle_hdr
+
+      # The binding build itself, with a single arch (70,
+      # Volta) instead of the 4-way list since nothing here executes device
+      # code.
+      - run: |
+          cd eagle
+          python -m pip install --quiet --upgrade pip pytest
+          export CMAKE_PREFIX_PATH="${GITHUB_WORKSPACE}/__install:${CMAKE_PREFIX_PATH}"
+          export SKBUILD_CMAKE_ARGS="-DCMAKE_CUDA_COMPILER=$(which nvcc);-DCMAKE_CUDA_ARCHITECTURES=70"
+          # the plugin carries the single arch built above, not the shipped list
+          # (read by test_backend_wall where cuobjdump is present)
+          export EAGLE_PLUGIN_EXPECTED_ARCHS=70/70
+          pip install ../raptor   # raptor-core is not on PyPI yet
+          # editable, as in development: python/conftest.py puts this source tree first
+          # on sys.path, and only the editable hook then resolves the compiled eagle._core
+          pip install -e ./python
+          pytest python/tests -q -m "not gpu and not interop_matrix"
+
+  # test-python-nodriver — the wheel where there is NO NVIDIA driver and NO CUDA
+  # toolkit (a stock GitHub runner has neither). eagle._core is plain C++ and reaches
+  # the GPU only through the separately loaded libeagle_cuda.so; this leg builds the
+  # core-only wheel (EAGLE_PYTHON_CUDA_PLUGIN=OFF: no plugin, no nvcc), installs it
+  # into a fresh venv, proves the installed package imports and refuses device work
+  # with the typed eagle.BackendUnavailable, then runs a COPY of the suite outside
+  # the repository against that installed package. Rows that certify the repository
+  # itself (its C++ headers, sources, corpus) are marked repo_local and deselected
+  # here only; gpu/torch rows need a device; the interop-matrix rows fail by design
+  # unless deselected explicitly. All four are deselected in this leg.
+  test-python-nodriver:
+    runs-on: ubuntu-latest
+    env:
+      CC: gcc-13
+      CXX: g++-13
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: eagle
+
+      - uses: actions/checkout@v7
+        with:
+          repository: amasat01/aether
+          path: aether
+          token: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
+
+      - uses: actions/checkout@v7
+        with:
+          repository: amasat01/raptor
+          path: raptor
+          token: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - run: sudo apt-get update && sudo apt-get install -y g++-13
+
+      # The precondition this leg exists for: no driver library, no nvcc.
+      - name: Assert the runner has no NVIDIA driver and no CUDA toolkit
+        run: |
+          if ldconfig -p | grep -q 'libcuda\.so\.1'; then echo "libcuda.so.1 present"; exit 1; fi
+          if command -v nvcc; then echo "nvcc present"; exit 1; fi
+
+      # Pure C++ aether + eagle headers (the core is compiled EAGLE_CPU_ONLY).
+      - run: |
+          cmake -DAETHER_CPP_MODE=ON \
+            -DCMAKE_INSTALL_PREFIX="${GITHUB_WORKSPACE}/__install" \
+            -B aether/build -S aether
+          cmake --install aether/build
+          cmake -B eagle/__eagle_hdr -S eagle -DEAGLE_CPP_MODE=ON \
+            -DCMAKE_PREFIX_PATH="${GITHUB_WORKSPACE}/__install" \
+            -DCMAKE_INSTALL_PREFIX="${GITHUB_WORKSPACE}/__install"
+          cmake --install eagle/__eagle_hdr
+
+      - name: Build the core-only wheel and install it into a fresh venv
+        run: |
+          python -m venv "${RUNNER_TEMP}/venv"
+          . "${RUNNER_TEMP}/venv/bin/activate"
+          pip install --quiet --upgrade pip pytest numpy build scikit-build-core nanobind
+          pip install ./raptor   # raptor-core is not on PyPI yet
+          export CMAKE_PREFIX_PATH="${GITHUB_WORKSPACE}/__install"
+          python -m build --wheel --no-isolation --outdir dist \
+            -Ccmake.define.EAGLE_PYTHON_CUDA_PLUGIN=OFF \
+            -Ccmake.define.EAGLE_PYTHON_MPI=OFF eagle/python
+          if unzip -l dist/*.whl | grep -q libeagle_cuda; then echo "plugin in a core-only wheel"; exit 1; fi
+          pip install dist/*.whl
+
+      - name: The installed wheel imports and refuses device work, typed
+        run: |
+          . "${RUNNER_TEMP}/venv/bin/activate"
+          cd "${RUNNER_TEMP}"
+          python - <<'EOF'
+          import eagle, eagle._core, eagle.exec
+          assert "site-packages" in eagle._core.__file__, eagle._core.__file__
+          assert eagle.exec.fold("sum", [1.0, 2.0]) == 3.0
+          d = eagle._core.cuda_backend()
+          assert not d["loaded"], d
+          try:
+              eagle._core.Stream()
+              raise SystemExit("Stream() did not refuse")
+          except eagle.BackendUnavailable as e:
+              print("typed refusal:", e)
+          maps = open("/proc/self/maps").read()
+          assert "libcuda" not in maps and "libcudart" not in maps
+          EOF
+
+      - name: Host suite (a copy, outside the repository) against the installed wheel
+        run: |
+          . "${RUNNER_TEMP}/venv/bin/activate"
+          mkdir -p "${RUNNER_TEMP}/suite"
+          cp -r eagle/python/tests eagle/python/conftest.py "${RUNNER_TEMP}/suite/"
+          cd "${RUNNER_TEMP}/suite"
+          RAPTOR_ROOT="${GITHUB_WORKSPACE}/raptor" python -m pytest tests -q -p no:cacheprovider \
+            -m "not gpu and not gpu2 and not torch and not interop_matrix and not repo_local"
+          python -c 'import eagle; assert "site-packages" in eagle.__file__, eagle.__file__'

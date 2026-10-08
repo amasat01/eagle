@@ -1,0 +1,30 @@
+{
+  "row": 13,
+  "title": "LOCKED ASYMMETRY: manifest `pattern` absence is lenient in C++, strict in Python",
+  "level": "manifest",
+  "expect": "reject",
+  "error_substring": "duplicate plugin id",
+  "loaders": ["cpp_load_manifest", "py_load_manifest"],
+  "overrides": {
+    "py_load_manifest": {
+      "expect": "reject",
+      "error_substring": "is not a supported plugin family"
+    }
+  },
+  "why": [
+    "This is a locked absence asymmetry: this",
+    "manifest has NO `pattern` key at all. C++ (neither registry dispatches on",
+    "`pattern` — binding is driven entirely by arg_spec) is LENIENT about its",
+    "absence and proceeds past that gate. Python's `load_manifest` NEEDS a",
+    "pattern to pick a Loaded* class (`loaders = {\"vector\": ..., \"pure\": ...}`,",
+    "`if pattern not in loaders: raise`), so it is STRICT.",
+    "Both outcomes here are REJECT, but for DIFFERENT reasons, proven with zero",
+    "GPU/dlopen: the manifest is deliberately ALSO malformed (a duplicate plugin",
+    "id). C++, having passed the lenient pattern gate, reaches the pre-existing",
+    "duplicate-id structural check and rejects THERE. Python's strict pattern",
+    "gate fires first and never reaches the duplicate-id check.",
+    "The top-level expect/substring is C++'s outcome (the default); the",
+    "`py_load_manifest` override is Python's — the override IS the asymmetry,",
+    "made mechanical instead of a locked-but-latent inspection finding."
+  ]
+}

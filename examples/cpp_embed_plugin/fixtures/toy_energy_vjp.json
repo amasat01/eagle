@@ -1,0 +1,32 @@
+{
+  "format": "ptx",
+  "schema_version": 1,
+  "pattern": "pure",
+  "aether_abi": "aether-abi/1",
+  "scalar_type": "float64",
+  "kernel": "raptor_kernel",
+  "vector_inputs": ["x"],
+  "params": ["p"],
+  "per_sample": ["e_bar"],
+  "mutables": [
+    { "name": "x_bar", "dtype": "vector", "width": 3 },
+    { "name": "p_bar", "dtype": "float", "width": 1, "default": 0.0 }
+  ],
+  "vec_widths": { "x": 3, "x_bar": 3 },
+  "arg_spec": [
+    ["vec_in", "x"],
+    ["per_sample", "e_bar"],
+    ["uniform", "p"],
+    ["mutable", "x_bar"],
+    ["mutable", "p_bar"],
+    ["nsamples", "nsamples"]
+  ],
+  "buffers": [],
+  "derivative": {
+    "kind": "vjp",
+    "primal": "toy_energy",
+    "wrt": ["x", "p"],
+    "residual_policy": "recompute",
+    "residuals": []
+  }
+}

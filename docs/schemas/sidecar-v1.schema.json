@@ -1,0 +1,256 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/amasat01/eagle/raw/main/docs/schemas/sidecar-v1.schema.json",
+  "title": "EAGLE plugin sidecar (schema v1)",
+  "description": "Frozen schema v1 for the per-artifact JSON sidecar emitted by the code generator's deploy pipeline (deploy/compile.py). A sidecar describes one plugin's launch signature: a shared base plus one of two pattern-specific variants (vector | pure). arg_spec is the ordered list of [role, name] pairs a loader binds; every role must be one of the 9 canonical schema-v1 roles enumerated inline (plugin/roles.h::kPluginArgRoles ≡ eagle.roles.ROLES). Validators are backward-lenient (absent schema_version ⇒ v1) and forward-strict (an unknown role, or a schema_version newer than the loader, ⇒ rejected). Unknown/future top-level keys are tolerated (additionalProperties true) so a future minor revision may add keys — including populating the reserved launch surface — without a schema_version bump.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "format",
+    "pattern",
+    "aether_abi",
+    "scalar_type",
+    "kernel",
+    "vector_inputs",
+    "params",
+    "per_sample",
+    "arg_spec"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "description": "Plugin-schema version this sidecar conforms to. Single-sourced from eagle.roles.SCHEMA_VERSION. Absent ⇒ treated as v1 (backward-lenient); newer than the loader ⇒ rejected (forward-strict). Orthogonal to aether_abi."
+    },
+    "format": {
+      "enum": ["ptx", "cubin", "fatbin"],
+      "description": "Artifact format the sidecar accompanies: arch-portable PTX, single-arch cubin, or multi-arch fatbin."
+    },
+    "pattern": {
+      "enum": ["vector", "pure"],
+      "description": "Plugin family — selects the variant-specific required fields (see the conditional blocks). A loader refuses the wrong artifact family; an unknown OR absent pattern is a hard error (strict)."
+    },
+    "aether_abi": {
+      "const": "aether-abi/1",
+      "description": "Binary-ABI tag of the by-value GRef / HandleT POD mirrors the artifact was built against. Separate from and orthogonal to schema_version: the ABI-stable binary-layout contract. A loader rejects a mismatch before binding any by-value struct."
+    },
+    "scalar_type": {
+      "enum": ["float64", "float32", "softdouble"],
+      "description": "Real scalar type the kernel was compiled for."
+    },
+    "kernel": {
+      "type": "string",
+      "description": "The extern-\"C\" entry-point symbol the loader resolves in the artifact: always \"raptor_kernel\", the name raptor's schema fixes for every producer, hand-written kernels included."
+    },
+    "vector_inputs": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Named vector inputs, in binding order (mirrors the vec_in arg_spec roles)."
+    },
+    "params": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Named uniform scalar parameters (bound via the uniform role)."
+    },
+    "per_sample": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Named per-sample scalar inputs (bound via the per_sample role)."
+    },
+    "arg_spec": {
+      "$ref": "#/$defs/argSpec"
+    },
+    "vec_widths": {
+      "$ref": "#/$defs/vecWidths"
+    },
+    "launch": {
+      "$ref": "#/$defs/launch"
+    },
+
+    "accumulate": {
+      "type": "boolean",
+      "description": "Vector only: whether the sink (out) uses the outVec `+=` accumulate idiom."
+    },
+    "sink": {
+      "type": "string",
+      "description": "Vector only: the accumulate sink contract name (e.g. \"outVec-scratch\") — a per-kernel deterministic-reduce scratch slot, not the final total."
+    },
+    "buffers": {
+      "$ref": "#/$defs/buffers"
+    },
+
+    "mutables": {
+      "$ref": "#/$defs/mutables"
+    },
+    "matrix_inputs": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Pure only, and only when the kernel has matrix inputs: the mat_in binding order (mirrors vector_inputs)."
+    },
+    "mat_shapes": {
+      "$ref": "#/$defs/matShapes"
+    },
+    "derivative": {
+      "type": "object",
+      "description": "Optional, additive schema-v1 field (no version bump): present only for a VJP/JVP derivative artifact (autodiff, generated or custom — structurally indistinguishable). Metadata only; the artifact still launches as an ordinary pure kernel. Recompute-only in v1, so residual_policy is 'recompute' and residuals is []; a populated residuals list is a future revision that bumps schema_version and is rejected by a v1 loader.",
+      "properties": {
+        "kind": { "enum": ["vjp", "jvp"] },
+        "primal": { "type": "string", "description": "the primal kernel's logical id" },
+        "wrt": { "type": "array", "items": { "type": "string" }, "description": "the differentiated input names" },
+        "residual_policy": { "const": "recompute" },
+        "residuals": { "type": "array", "maxItems": 0, "description": "always empty (recompute-only)" }
+      },
+      "required": ["kind", "wrt", "residual_policy", "residuals"],
+      "additionalProperties": true
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": ["pattern"],
+        "properties": { "pattern": { "const": "vector" } }
+      },
+      "then": {
+        "required": ["accumulate", "sink", "vec_widths", "buffers"]
+      }
+    },
+    {
+      "if": {
+        "required": ["pattern"],
+        "properties": { "pattern": { "const": "pure" } }
+      },
+      "then": {
+        "required": ["mutables", "vec_widths", "buffers"]
+      }
+    }
+  ],
+  "$defs": {
+    "role": {
+      "description": "The 9 canonical schema-v1 arg-spec roles. Single source of truth: plugin/roles.h::kPluginArgRoles ≡ eagle.roles.ROLES (cross-checked by python/tests/test_roles_vocab.py). A loader rejects any role outside this set at LOAD time (forward-strict). Note: mat_in is a valid role recognized by every loader, but the reference C++ host inject() does not pack matrix arguments (a CUDA-backend capability).",
+      "enum": [
+        "out",
+        "vec_in",
+        "mat_in",
+        "per_sample",
+        "lookup",
+        "mutable",
+        "terminated",
+        "uniform",
+        "nsamples"
+      ]
+    },
+    "argSpec": {
+      "type": "array",
+      "description": "Ordered list of [role, name] pairs (role FIRST) the loader binds in sequence.",
+      "items": {
+        "type": "array",
+        "minItems": 2,
+        "maxItems": 2,
+        "prefixItems": [
+          { "$ref": "#/$defs/role" },
+          { "type": "string", "description": "The argument name (a vector_input / param / per_sample / mutable / buffer name, or a fixed slot name such as \"out\"/\"terminated\"/\"nsamples\")." }
+        ],
+        "items": false
+      }
+    },
+    "vecWidths": {
+      "type": "object",
+      "description": "Per-name vector width (component count) so a host can allocate (W, N) buffers; the GRef struct itself is width-independent. Present on both variants.",
+      "additionalProperties": { "type": "integer" }
+    },
+    "buffers": {
+      "type": "array",
+      "description": "Declared read-only lookup buffers (the consolidation contract). Present on both variants. May be empty.",
+      "items": { "$ref": "#/$defs/buffer" }
+    },
+    "buffer": {
+      "type": "object",
+      "description": "One read-only lookup buffer the registry uploads once at consolidation and binds by value as a flat handle.",
+      "required": ["name", "kind", "dtype", "shape", "count"],
+      "additionalProperties": true,
+      "properties": {
+        "name": { "type": "string" },
+        "kind": { "const": "lookup" },
+        "dtype": { "const": "float" },
+        "shape": {
+          "type": "array",
+          "items": { "type": "integer" },
+          "description": "Buffer dimensions."
+        },
+        "count": {
+          "type": "integer",
+          "description": "Flat element count == prod(shape)."
+        }
+      }
+    },
+    "mutables": {
+      "type": "array",
+      "description": "Pure only: the writable per-sample state that IS the pure output.",
+      "items": { "$ref": "#/$defs/mutable" }
+    },
+    "mutable": {
+      "type": "object",
+      "description": "One writable per-sample slot. dtype/width let a loader rebuild which Mutables ride the (W, N) GRef ABI vs a flat scalar handle; the optional default fills an omitted Mutable. A matrix slot additionally carries its (R, C) shape.",
+      "required": ["name", "dtype", "width"],
+      "additionalProperties": true,
+      "properties": {
+        "name": { "type": "string" },
+        "dtype": {
+          "enum": ["float", "int", "vector", "matrix"],
+          "description": "Element kind of the mutable."
+        },
+        "width": {
+          "type": "integer",
+          "description": "Flat component count (1 for a scalar)."
+        },
+        "default": {
+          "type": ["number", "null"],
+          "description": "Scalar fill value for an omitted mutable (null when none)."
+        },
+        "shape": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": { "type": "integer" },
+          "description": "The (R, C) shape — present ONLY when dtype == \"matrix\" (the flat width alone cannot be un-flattened)."
+        }
+      },
+      "if": {
+        "properties": { "dtype": { "const": "matrix" } },
+        "required": ["dtype"]
+      },
+      "then": {
+        "required": ["shape"]
+      }
+    },
+    "matShapes": {
+      "type": "object",
+      "description": "Pure only, and only when the kernel has matrix inputs: the (R, C) shape per matrix-input name.",
+      "additionalProperties": {
+        "type": "array",
+        "minItems": 2,
+        "maxItems": 2,
+        "items": { "type": "integer" }
+      }
+    },
+    "launch": {
+      "type": "object",
+      "description": "RESERVED in v1 (unpopulated; loaders ignore). Populated in a future minor revision without a schema_version bump. additionalProperties is true so unknown/future launch keys do not fail validation of the reserved surface.",
+      "additionalProperties": true,
+      "properties": {
+        "block": {
+          "type": "integer",
+          "description": "Reserved: thread-block size hint."
+        },
+        "shmem_bytes": {
+          "type": "integer",
+          "description": "Reserved: dynamic shared-memory bytes hint."
+        },
+        "grid": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "Reserved: freeform grid-configuration hint (shape TBD)."
+        }
+      }
+    }
+  }
+}
