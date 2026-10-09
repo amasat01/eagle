@@ -43,6 +43,7 @@ from ._active_set import (
     ActiveSet,
     compaction_body,
 )
+from . import _layout
 from ._compat import zip_strict
 from ._conditional import SkipGuard, Skippable, repeat_while
 from .roles import PER_SAMPLE_ROLES
@@ -463,6 +464,7 @@ class Runner:
                  "_fast_prior", "_fast_ev", "_fast_prep",
                  "_fast_ratio")
 
+    @_layout.door
     def __init__(self, plan, *, max_steps, every=None, reorder=None, **planes):
         # Internal only (never a bound plane name, popped before the
         # plane-binding machinery below ever sees it): forces

@@ -152,11 +152,14 @@ class KernelFunction:
         return (f"KernelFunction({self.name!r}, inputs={list(self.inputs)}, "
                 f"outputs={list(self.outputs)}, wrt={list(self.wrt)})")
 
-    def __call__(self, *args, **kwargs):
+    def __call__(self, *args, layout=None, **kwargs):
         """Run the kernel on ``args``/``kwargs`` and return its outputs as
         tensors, differentiable through torch, in the caller's layout (a
         mix of sample-major and component-major inputs is refused, see
-        :meth:`_call_layout`)."""
+        :meth:`_call_layout`). ``layout`` (``"samples_first"`` /
+        ``"samples_last"``) and ``eagle.samples_first(x)`` /
+        ``eagle.samples_last(x)`` say which axis holds the samples of an input
+        whose shape reads both ways (``(w, w)``), which is otherwise refused."""
         if len(args) > len(self.inputs):
             raise TypeError(
                 f"{self.name}: takes {len(self.inputs)} inputs "
@@ -173,6 +176,13 @@ class KernelFunction:
         missing = [n for n in self.inputs if n not in bound]
         if missing:
             raise TypeError(f"{self.name}: missing input(s) {missing}")
+        from eagle import _layout
+
+        bound, axes = _layout.split_marks(bound, layout)
+        with _layout.scope(layout, axes):
+            return self._call_bound(bound)
+
+    def _call_bound(self, bound):
         layouts = {}
         for name in self.inputs:
             bound[name], layout = self._component_major(name, bound[name])

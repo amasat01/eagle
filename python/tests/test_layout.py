@@ -6,8 +6,9 @@
 The rules live in :mod:`eagle._layout`; every eagle door applies them through
 :func:`eagle._layout.adapt`. What each group of rows proves:
 
-* CLASSIFY: the decision table (native / zero-copy view / copy), including the
-  ambiguous ``N == w`` case, scalar planes and matrices; and that HAWK's
+* CLASSIFY: the decision table (native / zero-copy view / copy / ambiguous),
+  including the ambiguous ``N == w`` case (refused, resolved by ``layout=`` or a
+  marker), scalar planes and matrices; and that HAWK's
   restatement (``hawk.runtime.plane_layout``) agrees on every corpus array.
 * PLAN.RUN: a sample-major input or output gives the native answer, the copy
   warns once per call site naming the argument, a written plane lands back in
@@ -93,12 +94,13 @@ def test_classify_table():
     assert _cls(c) == "native"
     assert _cls(c.T) == "view"
     assert _cls(np.zeros((N, W))) == "copy"
-    assert _cls(np.zeros((W, W))) == "native"        # ambiguous: native
+    assert _cls(np.zeros((W, W))) == "ambiguous"     # both readings: refused
     assert _cls(np.zeros(N), (1,)) == "native"       # scalar plane
     assert _cls(np.zeros((N, W)), ()) == "native"    # nothing declared
     assert _cls(np.zeros((2, N))) == "native"        # wrong width: left to the check
     m = np.zeros((3, 3, N))
     assert _cls(m, (3, 3)) == "native"
+    assert _cls(np.zeros((3, 3, 3)), (3, 3)) == "ambiguous"   # N == R == C
     assert _cls(np.zeros((N, 3, 3)), (3, 3)) == "copy"
     assert _cls(np.moveaxis(m, -1, 0), (3, 3)) == "view"
 
@@ -125,7 +127,7 @@ _SINGLE_CORPUS = [
     ((), 1, (N,), "native"),
     ((3,), 3, (3,), "single"),
     ((3,), 3, (3, 1), "native"),         # a batch of one
-    ((3,), 3, (3, 3), "native"),         # a batch of w
+    ((3,), 3, (3, 3), "ambiguous"),      # a batch of w: both readings, refused
     ((3,), 3, (1, 3), "view"),           # sample-major batch of one
     ((4,), 4, (4,), "single"),           # a quaternion
     ((4,), 4, (4, 1), "native"),
@@ -379,3 +381,215 @@ def test_torch_transposed_view_needs_no_copy(torch_op):
         y = torch_op(x.T, 2.0)
     assert y.shape == (N, W)
     torch.testing.assert_close(y, (2.0 * x).T)
+
+
+# --------------------------------------------------------------------------- #
+# AMBIGUOUS (w, w) planes, per-call layout= and per-array markers
+# --------------------------------------------------------------------------- #
+def _sm(n):
+    """Sample-major (n, 3) data."""
+    return np.arange(W * n, dtype=np.float64).reshape(n, W) * 0.5 + 1.0
+
+
+def test_classify_resolves_an_ambiguous_plane_by_marker_and_by_layout():
+    sq = np.zeros((W, W))
+    st = [s // sq.itemsize for s in sq.strides]
+    assert _layout.classify(sq.shape, st, (W,), axis="last") == "native"
+    assert _layout.classify(sq.shape, st, (W,), axis="first") == "copy"
+    assert _layout.classify(sq.shape, st, (W,), layout="samples_last") == "native"
+    assert _layout.classify(sq.shape, st, (W,), layout="samples_first") == "copy"
+    ft = np.asfortranarray(sq)
+    assert _layout.classify(ft.shape, [s // 8 for s in ft.strides], (W,),
+                            axis="first") == "view"
+    # a marker the shape contradicts; and a marker beats the call's layout
+    c = np.zeros((W, N))
+    cs = [s // 8 for s in c.strides]
+    assert _layout.classify(c.shape, cs, (W,), axis="first") == "conflict"
+    assert _layout.classify(c.T.shape, [s // 8 for s in c.T.strides], (W,),
+                            axis="last") == "conflict"
+    assert _layout.classify(sq.shape, st, (W,), axis="last",
+                            layout="samples_first") == "native"
+
+
+def test_hawk_and_eagle_agree_on_the_ambiguous_cases_and_markers():
+    runtime = pytest.importorskip("hawk.runtime")
+    for a in (np.zeros((W, W)), np.zeros((W, W)).T, np.asfortranarray(np.zeros((W, W)))):
+        st = [s // 8 for s in a.strides]
+        for axis in (None, "first", "last"):
+            for layout in (None, "samples_first", "samples_last"):
+                assert _layout.classify(a.shape, st, (W,), axis, layout) == \
+                    runtime.plane_layout(memoryview(a), W, axis, layout), \
+                    (a.strides, axis, layout)
+    for a in (np.zeros((W, N)), np.zeros((W, N)).T, np.zeros((N, W))):
+        st = [s // 8 for s in a.strides]
+        for axis in (None, "first", "last"):
+            assert _layout.classify(a.shape, st, (W,), axis) == \
+                runtime.plane_layout(memoryview(a), W, axis)
+
+
+def test_the_marker_protocol_is_shared_with_hawk():
+    hawk = pytest.importorskip("hawk")
+    x = np.zeros((W, W))
+    for mine, theirs, axis in ((eagle.samples_first, hawk.samples_first, "first"),
+                               (eagle.samples_last, hawk.samples_last, "last")):
+        a, b = mine(x), theirs(x)
+        assert a.__raptor_samples_axis__ == b.__raptor_samples_axis__ == axis
+        assert a.array is b.array is x
+        assert _layout.split_marks({"x": b})[1] == {"x": axis}     # eagle takes hawk's
+
+
+def test_run_refuses_an_ambiguous_plane_naming_both_fixes(vec3_unit):
+    p = _host_plan(vec3_unit)
+    x = np.ascontiguousarray(_sm(W))
+    with pytest.raises(ValueError) as err:
+        p.run(x=x, a=2.0)
+    msg = str(err.value)
+    for needle in ("'x'", "(3, 3)", "component-major (3, N)", "sample-major (N, 3)",
+                   'layout="samples_first"', 'layout="samples_last"',
+                   "eagle.samples_first(x)", "eagle.samples_last(x)"):
+        assert needle in msg, (needle, msg)
+
+
+def test_run_layout_samples_first_matches_the_unambiguous_n4_run(vec3_unit):
+    p = _host_plan(vec3_unit)
+    sm4 = _sm(4)
+    ref = p.run(x=np.asfortranarray(sm4), a=2.0)            # (N, 3) view: unambiguous
+    ref = np.asarray(ref)
+    with pytest.warns(eagle.LayoutWarning):                 # C-contiguous: a copy
+        got = p.run(x=np.ascontiguousarray(sm4[:3]), a=2.0, layout="samples_first")
+    np.testing.assert_array_equal(got, ref[:, :3])
+
+
+def test_run_layout_samples_last_binds_as_native(vec3_unit):
+    p = _host_plan(vec3_unit)
+    x = _x(3)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        y = p.run(x=x, a=2.0, layout="samples_last")
+    np.testing.assert_array_equal(y, 2.0 * x)
+
+
+def test_run_marker_samples_first_is_zero_copy(vec3_unit):
+    p = _host_plan(vec3_unit)
+    sm4 = _sm(4)
+    ref = np.asarray(p.run(x=np.asfortranarray(sm4), a=2.0))
+    xf = np.asfortranarray(sm4[:3])
+    y = np.zeros((W, 3))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")                      # no LayoutWarning: a view
+        got = p.run(x=eagle.samples_first(xf), y=eagle.samples_first(y.T), a=2.0)
+    np.testing.assert_array_equal(y, ref[:, :3])
+    assert np.shares_memory(got, y)
+
+
+def test_bound_buffer_address_is_the_inputs_for_a_marked_plane(vec3_unit):
+    import ctypes
+
+    p = _host_plan(vec3_unit)
+    xf = np.asfortranarray(_sm(3))
+    y = np.zeros((W, 3))
+    b = p.bind(x=eagle.samples_first(xf), y=eagle.samples_last(y), a=2.0)
+    assert b._planes["x"].ctypes.data == xf.ctypes.data     # the caller's own bytes
+    assert not b._copies
+
+
+@pytest.mark.parametrize("marker,shape", [("samples_first", (W, N)),
+                                          ("samples_last", (N, W))])
+def test_a_marker_contradicting_the_shape_is_refused(vec3_unit, marker, shape):
+    p = _host_plan(vec3_unit)
+    x = getattr(eagle, marker)(np.ones(shape))
+    with pytest.raises(ValueError, match=rf"'x'.*{marker}"):
+        p.run(x=x, a=2.0)
+
+
+def test_marker_beats_the_per_call_layout(vec3_unit):
+    p = _host_plan(vec3_unit)
+    x = _x(3)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        y = p.run(x=eagle.samples_last(x), a=2.0, layout="samples_first")
+    np.testing.assert_array_equal(y, 2.0 * x)
+
+
+def test_a_bad_layout_value_is_refused(vec3_unit):
+    with pytest.raises(ValueError, match="samples_first.*samples_last"):
+        _host_plan(vec3_unit).run(x=_x(3), a=2.0, layout="rows")
+
+
+def test_bind_and_rebind_take_layout_and_markers(vec3_unit):
+    p = _host_plan(vec3_unit)
+    x = _x(3)
+    y = np.zeros((W, 3))
+    with pytest.raises(ValueError, match="samples_first"):
+        p.bind(x=x, y=y, a=2.0)
+    b = p.bind(x=x, y=y, a=2.0, layout="samples_last")
+    b.launch() if hasattr(b, "launch") else b()
+    np.testing.assert_array_equal(y, 2.0 * x)
+    x2 = _x(3) + 1.0
+    with pytest.raises(ValueError, match="samples_first"):
+        b.rebind(x=x2)
+    b.rebind(x=eagle.samples_last(x2))
+
+
+def test_matrix_head_with_n_equal_r_equal_c_is_refused():
+    m = np.zeros((3, 3, 3))
+    with pytest.raises(_layout.LayoutError, match=r"'m'.*\(3, 3, 3\).*layout="):
+        _layout.adapt("m", m, (3, 3), writes=False)
+    assert _layout.adapt("m", m, (3, 3), writes=False, axis="last") is None
+    with pytest.warns(eagle.LayoutWarning):
+        a = _layout.adapt("m", m, (3, 3), writes=False, layout="samples_first")
+    assert a is not None and a.layout == "copy"
+
+
+def test_hawks_markers_are_accepted_by_eagle(vec3_unit):
+    hawk = pytest.importorskip("hawk")
+    p = _host_plan(vec3_unit)
+    x = _x(3)
+    y = p.run(x=hawk.samples_last(x), a=2.0)
+    np.testing.assert_array_equal(y, 2.0 * x)
+
+
+@hawk_trace.kernel
+def lay_step(x: hawk_trace.Vector[3], t_end: hawk_trace.Param,
+             dt: hawk_trace.Param, terminated: hawk_trace.Terminated,
+             y: hawk_trace.Mutable[hawk_trace.Vector[3]],
+             t: hawk_trace.Mutable[hawk_trace.Scalar]):
+    y = y + dt * x
+    t1 = t + dt
+    t = t1
+    terminated = t1 >= t_end
+
+
+def _simulate(x, y, **opts):
+    return eagle.simulate(lay_step, x=x, y=y, t=np.zeros(3), t_end=3.0, dt=1.0,
+                          max_steps=10, **opts)
+
+
+def test_simulate_refuses_resolves_and_marks_with_a_hawk_kernel():
+    sm4 = _sm(4)
+    x4, y4 = np.asfortranarray(sm4), np.zeros((4, W), order="F")
+    eagle.simulate(lay_step, x=x4, y=y4, t=np.zeros(4), t_end=3.0, dt=1.0,
+                   max_steps=10)               # unambiguous (4, 3) views
+    ref = y4[:3].copy()
+    np.testing.assert_array_equal(ref, 3.0 * sm4[:3])
+    x = np.ascontiguousarray(sm4[:3])
+    with pytest.raises(ValueError, match=r"'x'.*samples_first"):
+        _simulate(x, np.zeros((W, 3)))
+    # per call: the (3, 3) C-contiguous state is native (samples_last)
+    y = np.zeros((W, 3))
+    xn = np.ascontiguousarray(sm4[:3].T)
+    r = _simulate(xn, y, layout="samples_last")
+    np.testing.assert_array_equal(y, 3.0 * sm4[:3].T)
+    assert r.y is y
+    # per array, zero-copy views of F-contiguous sample-major data
+    xf = np.asfortranarray(sm4[:3])
+    yn = np.zeros((W, 3))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        _simulate(eagle.samples_first(xf), eagle.samples_first(yn.T))
+    np.testing.assert_array_equal(yn.T, ref)
+    # a hawk marker is accepted, and beats the call's layout
+    hawk = pytest.importorskip("hawk")
+    y = np.zeros((W, 3))
+    _simulate(hawk.samples_last(xn), hawk.samples_last(y), layout="samples_first")
+    np.testing.assert_array_equal(y, 3.0 * sm4[:3].T)

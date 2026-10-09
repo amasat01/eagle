@@ -548,6 +548,7 @@ class BoundPlan:
                         a.copy_back()
         return None
 
+    @_layout.door
     def rebind(self, /, **changed):
         """Re-pack only the named slots — one box per name, in one call: for
         a resident pipeline whose planes move (a double-buffered state

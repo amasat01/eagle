@@ -37,7 +37,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from . import _counters
+from . import _counters, _layout
 from . import exec as eexec
 from .abi import DEVICE_CPU, DEVICE_CUDA
 from .roles import INPUT_ROLES, OUTPUT_ROLES
@@ -119,6 +119,7 @@ class Plan:
             left -= 1
         return tuple(parts)
 
+    @_layout.door
     def run(self, /, **kw):
         """Drive :attr:`plugin` over every partition through :attr:`structure`
         and return the assembled per-sample result: the declared output
@@ -158,6 +159,7 @@ class Plan:
         bound-method parameter."""
         return _run_plan(self, **kw)
 
+    @_layout.door
     def bind(self, /, **planes) -> BoundPlan:
         """Bind the caller's own planes by name and pack the argument block
         once — the capture-legal door (see the module docstring).

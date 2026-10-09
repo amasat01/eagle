@@ -358,10 +358,12 @@ def _head(width: int) -> tuple:
     return () if width <= 1 else (width,)
 
 
-def _sample_count(decl, planes):
+def _sample_count(decl, planes, axes=None, layout=None):
     """``(n, single)``: the batch size implied by the sample-shaped values,
-    and whether the call is ONE sample (every such value head-shaped)."""
-    from ._layout import is_single
+    and whether the call is ONE sample (every such value head-shaped).
+    ``axes``/``layout`` are the per-array markers and the call's ``layout=``
+    that settle which axis of a sample-major plane holds the samples."""
+    from ._layout import is_single, sample_extent
 
     for nm, value in planes.items():
         role, width = decl[nm][0], decl[nm][1]
@@ -369,6 +371,9 @@ def _sample_count(decl, planes):
             continue
         shape = _shape(value)
         if not is_single(shape, (width,)):
+            if width > 1 and len(shape) == 2:
+                return sample_extent(nm, value, (width,), (axes or {}).get(nm),
+                                     layout), False
             return (int(shape[-1]) if shape else 1), False
     return 1, True
 
@@ -470,7 +475,9 @@ class Simulation:
                  "terminated", "every", "_state", "_device", "_xp")
 
     def __init__(self, model, args, kwargs, *, until=None, max_steps,
-                 every=None, reorder=None, scalar_type=None):
+                 every=None, reorder=None, scalar_type=None, layout=None):
+        from ._layout import rewrap, split_marks
+
         items = _model_items(model, until)
         plans, kernels = _deploy(items, scalar_type)
         names = [_name(p, k) for p, k in zip_strict(plans, kernels)]
@@ -486,6 +493,7 @@ class Simulation:
         prior = _prior_reads(kernels)
         sig, required = _signature(decl, order, prior)
         planes = _bind(kname, sig, required, prior, args, kwargs)
+        planes, axes = split_marks(planes, layout)
         finishers = _finishers(plans, names)
         if not finishers:
             last = names[-1]
@@ -495,7 +503,7 @@ class Simulation:
                 f"t >= t_end in {last}, say) or pass the kernel that carries it: "
                 "eagle.simulate(model, until=event, ...)")
         max_steps = _check_count("max_steps", max_steps)
-        n, single = _sample_count(decl, planes)
+        n, single = _sample_count(decl, planes, axes, layout)
         _check_params(decl, planes, n, single)
         selected, device = _select(plans, planes)
         xp = _array_module(device)
@@ -532,7 +540,8 @@ class Simulation:
 
         step = plans[0] if len(plans) == 1 else selected
         self.runner = until_done(step, max_steps=max_steps, every=every,
-                                 reorder=reorder, **final)
+                                 reorder=reorder, layout=layout,
+                                 **rewrap(final, axes))
         self.loop = self.runner.loop
         self.n = self.runner.n
         self.active, self.finished = self.runner.active, self.runner.finished
@@ -587,18 +596,19 @@ def _check_step(selected, names, finishers, compacting, every, reorder) -> None:
 
 def simulation(model, *args, until=None, max_steps: int,
                every: int | None = None, reorder=None, scalar_type=None,
-               **kwargs) -> Simulation:
+               layout=None, **kwargs) -> Simulation:
     """Bind and build ``model`` once; returns the :class:`Simulation`, whose
     :meth:`~Simulation.run` runs it (again, after :meth:`~Simulation.reset`,
     without rebuilding). ``*args``/``**kwargs`` are the kernel's own, bound
     exactly like a call to it; the rest are :func:`simulate`'s own options."""
     return Simulation(model, args, kwargs, until=until, max_steps=max_steps,
-                      every=every, reorder=reorder, scalar_type=scalar_type)
+                      every=every, reorder=reorder, scalar_type=scalar_type,
+                      layout=layout)
 
 
 def simulate(model, *args, until=None, max_steps: int,
              every: int | None = None, reorder=None, scalar_type=None,
-             **kwargs) -> SimResult:
+             layout=None, **kwargs) -> SimResult:
     """Run ``model`` on every sample until each one finishes (or ``max_steps``
     is reached) and return the :class:`SimResult`.
 
@@ -621,8 +631,11 @@ def simulate(model, *args, until=None, max_steps: int,
     :func:`eagle.until_done`'s compaction cadence and reorder threshold,
     ``scalar_type`` the precision the kernels are built in (``"float64"``,
     the default, or ``"float32"``; see :func:`eagle.deploy`),
-    keyword-only like every one of eagle's own options -- after the
-    kernel's own arguments."""
+    ``layout`` (``"samples_first"`` or ``"samples_last"``) which axis holds the
+    samples of a per-sample plane whose shape reads both ways (``(w, w)``), which
+    is otherwise refused; ``eagle.samples_first(x)`` / ``eagle.samples_last(x)``
+    say it for one array and win. All keyword-only like every one of eagle's own
+    options -- after the kernel's own arguments."""
     return simulation(model, *args, until=until, max_steps=max_steps,
                       every=every, reorder=reorder, scalar_type=scalar_type,
-                      **kwargs).run()
+                      layout=layout, **kwargs).run()

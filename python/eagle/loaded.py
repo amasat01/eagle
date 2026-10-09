@@ -19,6 +19,7 @@ import json
 import pathlib
 from collections import namedtuple
 
+from . import _layout
 from .abi import check_aether_abi
 from .launch import (
     LaunchMixin,
@@ -158,6 +159,7 @@ class LoadedVector(LoadedKernel):
             block=block,
         )
 
+    @_layout.door
     def __call__(self, *, out=None, **kw):
         """Allocate, launch, and return the contribution, in the caller's
         tensor framework (numpy in -> numpy out, cupy/torch -> same via
@@ -290,6 +292,7 @@ class LoadedPure(LoadedKernel):
             matrix_inputs=self.matrix_inputs,
         )
 
+    @_layout.door
     def __call__(self, **kw):
         """Launch the pure kernel and return the updated ``Mutable`` buffers
         as a dict, in the caller's framework."""

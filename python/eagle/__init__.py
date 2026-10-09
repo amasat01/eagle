@@ -35,7 +35,7 @@ from ._active_set import ActiveSet, compaction_body
 from ._backend import BackendUnavailable
 from ._conditional import RepeatWhile, SkipGuard, Skippable, repeat_while, skippable
 from ._device_props import DeviceProps, device_props
-from ._layout import LayoutWarning
+from ._layout import LayoutWarning, samples_first, samples_last
 from ._simulate import SimResult, Simulation, simulate, simulation
 from ._until_done import (
     FINISHED_PLANE,
@@ -71,6 +71,8 @@ __all__ = [
     "KERNEL_NAME",
     "KernelRegistry",
     "LayoutWarning",
+    "samples_first",
+    "samples_last",
     "LoadedKernel",
     "LoadedPure",
     "LoadedVector",

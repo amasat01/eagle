@@ -12,6 +12,7 @@ import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from . import _layout
 from . import exec as eexec
 from ._plan_binding import BoundPlan
 from ._plan_planes import residency
@@ -87,10 +88,12 @@ class AutoPlan:
                  if role not in ("uniform", "nsamples") and name in planes}
         return self.device if residency(bound) == "device" else self.host
 
+    @_layout.door
     def run(self, /, **kw):
         """:meth:`Plan.run` on the plan :meth:`select` picks for ``kw``."""
         return self.select(kw).run(**kw)
 
+    @_layout.door
     def bind(self, /, **planes) -> BoundPlan:
         """:meth:`Plan.bind` on the plan :meth:`select` picks for ``planes``."""
         return self.select(planes).bind(**planes)

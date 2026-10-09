@@ -12,9 +12,22 @@ device alike:
 
 * A plane is classified against its declared HEAD (``(w,)``, or ``(R, C)`` for a
   matrix): ``head + (N,)`` is native; ``(N,) + head`` is sample-major. A shape
-  that matches both (``N == w``) is taken as native, never guessed. Scalar
-  planes, buffers whose length is a runtime quantity (lookup, wide, accumulate)
-  and ``Param`` uniforms are never adapted.
+  that matches BOTH (``N == w``; ``N == R == C`` for a square matrix) is
+  AMBIGUOUS and is refused, never guessed: it names the argument, its shape,
+  both readings and the two zero-copy fixes below. Scalar planes, buffers whose
+  length is a runtime quantity (lookup, wide, accumulate) and ``Param``
+  uniforms are never adapted.
+* The caller says which axis holds the samples in two ways. PER CALL:
+  ``layout="samples_first"`` (``(N, w)``) or ``layout="samples_last"``
+  (``(w, N)``, native) on the door resolves every ambiguous plane of that call;
+  planes that are not ambiguous behave as before. PER ARRAY:
+  ``eagle.samples_first(x)`` / ``eagle.samples_last(x)`` wrap one argument and
+  are honoured for ANY shape; a marker that contradicts the shape is refused
+  naming the argument, and a marker beats the per-call ``layout``. Neither
+  copies. The marker protocol is shared with HAWK (which imports no eagle): any
+  object carrying ``__raptor_samples_axis__`` (``"first"`` or ``"last"``) and
+  the wrapped array as ``.array`` is a marker, so each package accepts the
+  other's. A marker on one-sample values is ignored.
 * A sample-major plane whose native permutation (``x.T``, or the leading axis
   moved last) is C-contiguous already holds the native bytes: it is bound as
   that view, zero-copy, with no warning, input or output.
@@ -36,16 +49,28 @@ device alike:
   so their own shape check still names it.
 
 HAWK's host runtime restates the zero-copy half of these rules
-(``hawk.runtime.plane_layout``; hawk imports no eagle) and refuses the copy
-half; ``tests/test_layout.py`` asserts the two classify identically.
+(``hawk.runtime.plane_layout``; hawk imports no eagle), the ambiguity refusal and
+the markers, and refuses the copy half; ``tests/test_layout.py`` asserts the two
+classify identically.
 """
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
+import functools
 import sys
 import warnings
 
-__all__ = ["LayoutWarning", "classify", "is_single", "adapt", "Adapted"]
+__all__ = ["LayoutWarning", "LayoutError", "classify", "is_single", "adapt",
+           "Adapted", "samples_first", "samples_last", "split_marks",
+           "check_layout", "scope", "door", "rewrap", "sample_extent"]
+
+#: The marker protocol (shared with hawk, which imports no eagle): an object
+#: with this attribute set to ``"first"`` or ``"last"`` and the wrapped array
+#: as ``.array`` declares which axis of that array holds the samples.
+MARK_ATTR = "__raptor_samples_axis__"
+LAYOUTS = ("samples_first", "samples_last")
 
 
 class LayoutWarning(UserWarning):
@@ -53,6 +78,139 @@ class LayoutWarning(UserWarning):
 
     Filterable like any warning; make it an error with
     ``warnings.filterwarnings("error", category=eagle.LayoutWarning)``."""
+
+
+class LayoutError(ValueError):
+    """A plane's layout is ambiguous, or a marker contradicts its shape."""
+
+
+class _Marked:
+    """One array with the axis that holds its samples declared. Built by
+    :func:`samples_first` / :func:`samples_last`; nothing else touches it."""
+
+    __slots__ = ("array", "__raptor_samples_axis__")
+
+    def __init__(self, array, axis):
+        self.array = array
+        self.__raptor_samples_axis__ = axis
+
+    def __repr__(self):
+        return f"eagle.samples_{self.__raptor_samples_axis__}({self.array!r})"
+
+
+def samples_first(x):
+    """Mark ``x`` as sample-major: its FIRST axis holds the samples, ``(N, w)``
+    (a matrix plane ``(N, R, C)``). Zero-copy, honoured for any shape; passes
+    through any eagle or hawk door that binds per-sample planes, and beats the
+    door's ``layout=``. A shape that contradicts it is refused."""
+    return _Marked(x, "first")
+
+
+def samples_last(x):
+    """Mark ``x`` as component-major (native): its LAST axis holds the samples,
+    ``(w, N)``. Zero-copy, honoured for any shape; passes through any eagle or
+    hawk door and beats the door's ``layout=``. A shape that contradicts it is
+    refused."""
+    return _Marked(x, "last")
+
+
+def _mark_of(value):
+    """``"first"``/``"last"`` when ``value`` is a marker of either package."""
+    axis = getattr(value, MARK_ATTR, None)
+    if axis in ("first", "last") and hasattr(value, "array"):
+        return axis
+    return None
+
+
+def check_layout(layout) -> None:
+    """Refuse a per-call ``layout`` that is neither ``None`` nor one of
+    ``"samples_first"``, ``"samples_last"``."""
+    if layout is not None and layout not in LAYOUTS:
+        raise LayoutError(
+            f"eagle: layout={layout!r} is not one of 'samples_first' (planes "
+            f"are (N, w)) or 'samples_last' (planes are (w, N)), or None")
+
+
+def split_marks(kw, layout=None):
+    """``(plain, axes)``: ``kw`` with every marker unwrapped to its array, and
+    ``{name: "first"|"last"}`` for the marked names. ``layout`` is validated.
+    ``kw`` itself is returned when nothing is marked."""
+    check_layout(layout)
+    axes = {}
+    for name, value in kw.items():
+        axis = _mark_of(value)
+        if axis is not None:
+            axes[name] = axis
+    if not axes:
+        return kw, axes
+    return {n: (v.array if n in axes else v) for n, v in kw.items()}, axes
+
+
+#: The active ``(layout, {name: axis})`` of the door being served, per thread
+#: and task (a :class:`contextvars.ContextVar`, so concurrent calls never see
+#: each other's choice). :func:`adapt` falls back to it.
+_scope = contextvars.ContextVar("eagle_layout_scope", default=(None, {}))
+
+
+@contextlib.contextmanager
+def scope(layout, axes):
+    """Make ``layout`` (the call's) and ``axes`` (``{name: "first"|"last"}``,
+    the per-array markers) the choice every :func:`adapt` inside the block
+    falls back to. Nests: an inner scope adds to the outer one."""
+    check_layout(layout)
+    outer_layout, outer_axes = _scope.get()
+    token = _scope.set((layout or outer_layout, {**outer_axes, **axes}))
+    try:
+        yield
+    finally:
+        _scope.reset(token)
+
+
+def door(fn):
+    """Give a public door that binds per-sample planes a ``layout=`` keyword and
+    marker support: markers among its keyword arguments are unwrapped, and the
+    call runs inside :func:`scope`."""
+
+    @functools.wraps(fn)
+    def wrapper(*args, layout=None, **kw):
+        plain, axes = split_marks(kw, layout)
+        if layout is None and not axes:
+            return fn(*args, **plain)
+        with scope(layout, axes):
+            return fn(*args, **plain)
+
+    return wrapper
+
+
+def rewrap(planes, axes):
+    """:func:`split_marks`'s inverse: ``planes`` with each name in ``axes``
+    wrapped in its marker again."""
+    if not axes:
+        return planes
+    return {n: (_Marked(v, axes[n]) if n in axes else v)
+            for n, v in planes.items()}
+
+
+def sample_extent(name, value, head, axis=None, layout=None) -> int:
+    """The sample count N of a per-sample plane whose per-sample head is
+    ``head``, once its orientation is settled (marker, call layout, or the
+    unambiguous shape). Raises :class:`LayoutError` for an ambiguous plane or a
+    contradicted marker, naming ``name``."""
+    shape = tuple(int(e) for e in value.shape)
+    try:
+        strides = _element_strides(value)
+    except (AttributeError, TypeError):
+        strides = (1,) * len(shape)
+    layout_scope, axes = _scope.get()
+    kind = classify(shape, strides, head, axis or axes.get(name),
+                    layout or layout_scope)
+    if kind == "ambiguous":
+        raise LayoutError(_ambiguous_message(name, shape, head))
+    if kind == "conflict":
+        raise LayoutError(_conflict_message(name, shape, head, axis or axes.get(name)))
+    if kind in ("view", "copy"):
+        return shape[0]
+    return shape[-1] if shape else 1
 
 
 def _c_contiguous(shape, strides) -> bool:
@@ -92,26 +250,41 @@ def is_single(shape, head) -> bool:
     return False
 
 
-def classify(shape, strides, head) -> str:
-    """``"native"``, ``"view"``, ``"copy"`` or ``"single"`` for a plane of
-    ``shape`` and element ``strides`` whose declared per-sample head is
-    ``head``.
+def classify(shape, strides, head, axis=None, layout=None) -> str:
+    """``"native"``, ``"view"``, ``"copy"``, ``"single"``, ``"ambiguous"`` or
+    ``"conflict"`` for a plane of ``shape`` and element ``strides`` whose
+    declared per-sample head is ``head``.
 
     ``"single"`` is one sample (:func:`is_single`), decided first. ``"native"``
     covers every other shape that is not sample-major, including the ones the
-    door's own shape check refuses, so that check still names them."""
+    door's own shape check refuses, so that check still names them.
+    ``"ambiguous"`` is a shape that is both ``head + (N,)`` and ``(N,) + head``
+    with nothing to say which; ``axis`` (``"first"``/``"last"``, the array's own
+    marker) and ``layout`` (``"samples_first"``/``"samples_last"``, the call's)
+    resolve it, the marker winning. ``"conflict"`` is a marker the shape
+    contradicts. Neither is ever taken as native or guessed."""
     if is_single(shape, head):
         return "single"
-    return _classify_batch(shape, strides, head)
+    return _classify_batch(shape, strides, head, axis, layout)
 
 
-def _classify_batch(shape, strides, head) -> str:
+def _classify_batch(shape, strides, head, axis=None, layout=None) -> str:
     """:func:`classify` for a shape already known not to be one sample."""
     shape, head = tuple(int(s) for s in shape), tuple(int(h) for h in head)
     k = len(head)
     if not head or (k == 1 and head[0] <= 1) or len(shape) != k + 1:
         return "native"
-    if shape[:k] == head or shape[1:] != head:
+    is_native, is_sample_major = shape[:k] == head, shape[1:] == head
+    if axis is None and is_native and is_sample_major:
+        # the per-call layout resolves only what is ambiguous
+        axis = {"samples_first": "first", "samples_last": "last"}.get(layout)
+        if axis is None:
+            return "ambiguous"
+    if axis == "first" and not is_sample_major:
+        return "conflict"
+    if axis == "last" and not is_native:
+        return "conflict"
+    if axis == "last" or (axis is None and (is_native or not is_sample_major)):
         return "native"
     perm_shape = shape[1:] + shape[:1]
     perm_strides = tuple(strides[1:]) + tuple(strides[:1])
@@ -177,6 +350,46 @@ def _warn(name, shape, head, *, writes: bool) -> None:
     # `depth` counts _warn's own frame as 1, exactly as stacklevel does
     warnings.warn(message, LayoutWarning, stacklevel=depth)
     _seen.add(key)       # only once the warning did not raise (strict mode)
+
+
+def _shape_text(shape) -> str:
+    return "(" + ", ".join(str(int(e)) for e in shape) + ("," if len(shape) == 1 else "") + ")"
+
+
+def _ambiguous_message(name, shape, head) -> str:
+    native = "(" + ", ".join(str(h) for h in head) + ", N)"
+    first = "(N, " + ", ".join(str(h) for h in head) + ")"
+    n = int(shape[-1])
+    return (
+        f"eagle: argument {name!r} has shape {_shape_text(shape)}, which reads "
+        f"both as component-major {native} with N = {n} (samples last) and as "
+        f"sample-major {first} with N = {n} (samples first); eagle will not "
+        f"guess. Say which axis holds the samples, zero-copy: pass "
+        f"layout=\"samples_first\" or layout=\"samples_last\" to the call "
+        f"(resolves every ambiguous plane), or mark this array: "
+        f"eagle.samples_first({name}) / eagle.samples_last({name})."
+    )
+
+
+def _conflict_message(name, shape, head, axis) -> str:
+    native = "(" + ", ".join(str(h) for h in head) + ", N)"
+    first = "(N, " + ", ".join(str(h) for h in head) + ")"
+    want, other = (first, native) if axis == "first" else (native, first)
+    return (
+        f"eagle: argument {name!r} is marked samples_{axis} (shape {want}) but "
+        f"its shape is {_shape_text(shape)}, which is not {want}"
+        + (f"; it looks like {other}, so use eagle.samples_"
+           f"{'last' if axis == 'first' else 'first'}({name}) or drop the marker"
+           if _shape_fits(shape, head, "last" if axis == "first" else "first")
+           else "")
+        + "."
+    )
+
+
+def _shape_fits(shape, head, axis) -> bool:
+    k = len(head)
+    shape = tuple(int(e) for e in shape)
+    return (shape[:k] == tuple(head)) if axis == "last" else (shape[1:] == tuple(head))
 
 
 class Adapted:
@@ -272,7 +485,8 @@ def is_number(value) -> bool:
     return isinstance(value, numpy.generic)
 
 
-def adapt(name, value, head, *, writes: bool, single: bool = False, dtype=None):
+def adapt(name, value, head, *, writes: bool, single: bool = False, dtype=None,
+          axis=None, layout=None):
     """Adapt one plane. Returns ``None`` when ``value`` is neither sample-major
     nor (with ``single=True``) one sample — bind it as given — else an
     :class:`Adapted` whose ``native`` is bound.
@@ -282,7 +496,12 @@ def adapt(name, value, head, *, writes: bool, single: bool = False, dtype=None):
     kernel writes the plane. With ``single=True`` one sample is adapted too:
     ``native`` is the zero-copy ``(w, 1)``/``(1,)`` view of the caller's array
     (layout ``"single"``), and a number on a read-only plane becomes a one-cell
-    array of ``dtype`` (the door refuses a number on a written plane first)."""
+    array of ``dtype`` (the door refuses a number on a written plane first).
+
+    ``axis`` is this array's own marker (``"first"``/``"last"``, from
+    :func:`split_marks`), ``layout`` the call's; an ambiguous plane that
+    neither resolves, and a marker its shape contradicts, raise
+    :class:`LayoutError` naming ``name``."""
     shape = getattr(value, "shape", None)
     if (shape is None or shape == ()) and single and not writes \
             and is_number(value):
@@ -303,9 +522,18 @@ def adapt(name, value, head, *, writes: bool, single: bool = False, dtype=None):
         strides = _element_strides(value)
     except (AttributeError, TypeError):
         return None
-    layout = _classify_batch(shape, strides, head)
-    if layout == "native":
+    if axis is None or layout is None:
+        layout_scope, axes = _scope.get()
+        axis = axis or axes.get(name)
+        layout = layout or layout_scope
+    kind = _classify_batch(shape, strides, head, axis, layout)
+    if kind == "ambiguous":
+        raise LayoutError(_ambiguous_message(name, shape, head))
+    if kind == "conflict":
+        raise LayoutError(_conflict_message(name, shape, head, axis))
+    if kind == "native":
         return None
+    layout = kind
     view = _native_view(value, len(shape))
     if layout == "view":
         return Adapted(name, value, view, None, writes, layout)

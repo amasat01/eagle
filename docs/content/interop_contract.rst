@@ -162,8 +162,21 @@ per-sample plane (``Plan.run``, ``Plan.bind``/``BoundPlan.rebind``, the
 ``Loaded*`` kernels, and the torch bridge on host and device) accepts both:
 
 - An array whose shape is the declared component-major one is bound as given.
-  A square ``(3, 3)`` plane at ``N == 3`` is ambiguous and is taken as
-  component-major.
+- A square ``(3, 3)`` plane at ``N == 3`` reads both ways, as component-major
+  ``(3, N)`` and as sample-major ``(N, 3)``, so eagle will not guess: it is
+  refused, naming the argument, its shape, both readings and the two fixes
+  below. A square matrix head with ``N == R == C`` is refused the same way.
+  Both fixes are zero-copy: pass ``layout="samples_first"`` (planes are
+  ``(N, 3)``) or ``layout="samples_last"`` (planes are ``(3, N)``) to the call
+  (``Plan.run``, ``Plan.bind``, ``BoundPlan.rebind``, ``eagle.until_done``,
+  ``eagle.run_until_done``, ``eagle.simulate``/``eagle.simulation``, the
+  ``Loaded*`` kernels and the torch bridge) to resolve every ambiguous plane of
+  that call, or wrap one argument: ``eagle.samples_first(x)`` /
+  ``eagle.samples_last(x)``. The marker is honoured for any shape, a marker that
+  contradicts the shape is refused naming the argument, and it wins over the
+  call's ``layout=``. hawk's ``hawk.samples_first`` / ``hawk.samples_last`` are
+  accepted too: a marker is any object carrying ``__raptor_samples_axis__``
+  (``"first"`` or ``"last"``) and the wrapped array as ``.array``.
 - A sample-major array whose transpose is C-contiguous (for example ``x.T`` of
   a contiguous ``(3, N)`` array) already holds the component-major bytes. It is
   bound as that view: no copy, no warning, input or output.
@@ -226,7 +239,8 @@ and device alike:
 3. A shape that is both a batch and a sample is a batch, never guessed away:
    ``(1,)`` on a scalar plane is a batch of one (a 1-D array on a scalar plane
    is always a batch), ``(w, 1)`` is a batch of one, ``(w, w)`` a batch of
-   ``w``, and a ``Matrix[R, 1]`` given ``(R, 1)`` a batch of one.
+   ``w`` (ambiguous: refused until ``layout=`` or a marker says which axis
+   holds the samples), and a ``Matrix[R, 1]`` given ``(R, 1)`` a batch of one.
 4. Lookup, wide and accumulate buffers keep their own lengths, a ``Reduce``
    output stays ``(L,)``, and a ``Param`` is already one value for every
    sample.

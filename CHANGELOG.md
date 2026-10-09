@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.5.0 (unreleased)
+
+A per-sample plane whose shape reads both as component-major `(w, N)` and as
+sample-major `(N, w)` (a `(w, w)` array, or a square matrix head with
+`N == R == C`) is now refused, naming the argument, its shape, both readings
+and the fix; before, it was silently taken as component-major, which transposed
+a C-contiguous sample-major array. Say which axis holds the samples, zero-copy:
+per call with `layout="samples_first"` or `layout="samples_last"` on
+`Plan.run`, `Plan.bind`, `BoundPlan.rebind`, `eagle.until_done`,
+`eagle.run_until_done`, `eagle.simulate`/`eagle.simulation`, the `Loaded*`
+kernels and the torch bridge, or per array with the new `eagle.samples_first(x)`
+/ `eagle.samples_last(x)` markers, which work for any shape, are refused when
+they contradict the shape, and win over the call's `layout=`. hawk's markers are
+accepted too (they share a small protocol, `__raptor_samples_axis__` plus
+`.array`). Shapes that are not ambiguous behave as before. A plane literally
+named `layout` can no longer be passed by keyword to these doors.
+
 ## 0.4.1
 
 Wheels now cover CPython 3.9 to 3.14, plus the free-threaded builds 3.13t and
