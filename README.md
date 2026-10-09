@@ -89,7 +89,7 @@ pip install "raptor-hawk[cuda12]"       # the examples below also write kernels 
 **Platforms:** built and tested on Linux x86_64 only so far (CPython 3.9–3.14, including free-threaded 3.13t and 3.14t), on NVIDIA GPUs from Pascal (Quadro P2000) and Turing (Tesla T4). There are no wheels for macOS, Windows or ARM yet, and WSL2 is untested. `raptor-core` and `aether-dsc` are pure Python and install anywhere.
 
 `raptor-eagle` needs Python 3.9 or newer (CPython 3.9–3.14) and an NVIDIA driver at run time; no `nvcc` or CUDA
-toolkit. Free-threaded builds (3.13t, 3.14t) are supported as wheels but do not yet declare GIL-free support: CPython re-enables the GIL when eagle is imported and prints a RuntimeWarning, so results are correct but not run in parallel. On 3.13t the `[cuda12]` / `[cuda13]` extras do not resolve (CuPy 14 ships no 3.13t wheel), so eagle runs on the CPU route there; 3.14t has no such limit. The wheel ships GPU code for Pascal, Volta, Ampere and Hopper (sm_61/70/80/90) plus PTX for newer GPUs. It
+toolkit. Free-threaded builds (3.13t, 3.14t) are supported as wheels but do not yet declare GIL-free support: CPython re-enables the GIL when eagle is imported and prints a RuntimeWarning, so results are correct but not run in parallel. On 3.13t the `[cuda12]` / `[cuda13]` extras do not resolve (CuPy 14 ships no 3.13t wheel), so eagle runs on the CPU route there; 3.14t has no such limit. The wheel ships GPU code for every NVIDIA architecture from Pascal (sm_60) through Blackwell, plus PTX for newer GPUs. It
 brings `raptor-core` along. The C++ library (`find_package(eagle CONFIG REQUIRED)`) is a separate, CMake-only
 install; building the Python package from source is covered under [Python package](#python-package) below.
 

@@ -31,13 +31,6 @@
 # is CUDA-language regardless of EAGLE_CPU_ONLY, per the existing ci.yml's
 # test-python job) before each wheel's cmake configure.
 #
-# This whole build-wheels job was authored and YAML-validated offline
-# (no docker in the authoring sandbox) and has not been run on a live
-# runner. Single real arch (61: the family's reference Pascal card) is
-# used below to keep a first real run tractable; widen to the project's
-# default SM 61/70/80/90 list (see the root CLAUDE.md) once this has run
-# green once.
-#
 # Release order: eagle needs raptor-core (declared dependency, used only at
 # IMPORT time, never by the C++/CUDA build). test-wheel installs the
 # raptor-core release matching the built wheel's requirement from PyPI when
@@ -100,28 +93,29 @@ jobs:
             curl -fsSL -o /etc/yum.repos.d/cuda-rhel8.repo
             https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo &&
             dnf install -y --setopt=install_weak_deps=False
-            cuda-nvcc-12-6 cuda-cudart-devel-12-6 cuda-driver-devel-12-6 gcc-toolset-13-gcc-c++ &&
-            cmake -DAETHER_CPP_MODE=OFF -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.6/bin/nvcc
+            cuda-nvcc-12-9 cuda-cudart-devel-12-9 cuda-driver-devel-12-9 gcc-toolset-13-gcc-c++ &&
+            cmake -DAETHER_CPP_MODE=OFF -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.9/bin/nvcc
             -DCMAKE_CUDA_HOST_COMPILER=/opt/rh/gcc-toolset-13/root/usr/bin/g++
             -DCMAKE_INSTALL_PREFIX=/opt/eagle-build-prefix -B /tmp/aether-build -S /sib/aether &&
             cmake --install /tmp/aether-build &&
-            cmake -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.6/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES=61
+            cmake -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.9/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES=61
             -DCMAKE_CUDA_HOST_COMPILER=/opt/rh/gcc-toolset-13/root/usr/bin/g++
             -DCMAKE_INSTALL_PREFIX=/opt/eagle-build-prefix -B /tmp/eagle-hdr -S /sib/eagle &&
             cmake --install /tmp/eagle-hdr
-          # nvcc 12.6 accepts host GCC <= 13; the manylinux_2_28 image's default
-          # compiler is newer, so nvcc's host side uses gcc-toolset-13 (CUDAHOSTCXX).
-          # No CMAKE_CUDA_ARCHITECTURES here: python/CMakeLists.txt's default
-          # (sm_61/70/80/90 SASS + PTX at the oldest) is what ships.
+          # CUDA 12.9 is the newest toolkit that still compiles Pascal and Volta,
+          # and it adds Blackwell; its nvcc takes gcc-toolset-13 as the host
+          # compiler (CUDAHOSTCXX). No CMAKE_CUDA_ARCHITECTURES here:
+          # python/CMakeLists.txt's default (SASS for every architecture this
+          # nvcc compiles from sm_60 up, plus PTX at the newest) is what ships.
           # cibuildwheel parses this with a shell grammar: a value holding
           # `;` (or spaces) must be double-quoted, or the whole option is
           # rejected as malformed.
           CIBW_ENVIRONMENT_LINUX: >-
-            PATH=/usr/local/cuda-12.6/bin:$PATH
+            PATH=/usr/local/cuda-12.9/bin:$PATH
             CMAKE_PREFIX_PATH=/opt/eagle-build-prefix
             CMAKE_BUILD_PARALLEL_LEVEL=4
             CUDAHOSTCXX=/opt/rh/gcc-toolset-13/root/usr/bin/g++
-            SKBUILD_CMAKE_ARGS="-DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.6/bin/nvcc"
+            SKBUILD_CMAKE_ARGS="-DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.9/bin/nvcc"
           CIBW_REPAIR_WHEEL_COMMAND_LINUX: "auditwheel repair -w {dest_dir} --exclude libcuda.so.1 {wheel}"
           # The dedicated test-wheel job below (with the raptor-core sibling
           # wheel + the no-driver smoke) replaces cibuildwheel's built-in

@@ -39,10 +39,11 @@ PLUGIN_ALLOWED_NEEDED = (
     "libgomp.so.",
     "ld-linux-x86-64.so.",
 )
-#: The ship build's device code: SASS per arch, plus PTX at the oldest arch
-#: (JIT-compiled on newer devices).
-SHIP_SASS = ("61", "70", "80", "90")
-SHIP_PTX = ("61",)
+#: The ship build's device code: SASS for every architecture the toolkit
+#: compiles from sm_60 up, which always includes at least these, plus PTX at
+#: the newest SASS architecture (JIT-compiled on GPUs newer than the toolkit).
+SHIP_SASS_FLOOR = ("61", "70", "80", "90")
+SHIP_SASS_MIN = 60
 
 _SEAM = re.compile(r"^eagle_backend_[a-z0-9_]+$")
 _EXPERIMENTAL = re.compile(r"^eagle_backend_x_")
@@ -187,10 +188,16 @@ def check_core(core: str | os.PathLike) -> list[str]:
 
 def check_plugin(
     plugin: str | os.PathLike,
-    sass: tuple[str, ...] = SHIP_SASS,
-    ptx: tuple[str, ...] = SHIP_PTX,
+    sass: tuple[str, ...] | None = None,
+    ptx: tuple[str, ...] | None = None,
 ) -> list[str]:
-    """The plugin is self-contained and carries exactly the expected device code."""
+    """The plugin is self-contained and carries the expected device code.
+
+    With ``sass``/``ptx`` given (a dev build), the archs must match exactly.
+    Without them (the ship build), the SASS must cover :data:`SHIP_SASS_FLOOR`,
+    hold nothing below :data:`SHIP_SASS_MIN`, and the PTX must be exactly one
+    copy, at the newest SASS architecture.
+    """
     problems = []
     for lib in needed(plugin):
         if not lib.startswith(PLUGIN_ALLOWED_NEEDED):
@@ -200,10 +207,21 @@ def check_plugin(
     have_sass = sorted(set(re.findall(r"\.sm_(\d+)\.cubin", elf)))
     ptxs = _run(cuobjdump, "--list-ptx", str(plugin))
     have_ptx = sorted(set(re.findall(r"\.sm_(\d+)\.ptx", ptxs)))
-    if have_sass != sorted(sass):
-        problems.append(f"plugin SASS archs {have_sass}, expected {sorted(sass)}")
-    if have_ptx != sorted(ptx):
-        problems.append(f"plugin PTX archs {have_ptx}, expected {sorted(ptx)}")
+    if sass is not None or ptx is not None:
+        if sass is not None and have_sass != sorted(sass):
+            problems.append(f"plugin SASS archs {have_sass}, expected {sorted(sass)}")
+        if ptx is not None and have_ptx != sorted(ptx):
+            problems.append(f"plugin PTX archs {have_ptx}, expected {sorted(ptx)}")
+        return problems
+    missing = sorted(set(SHIP_SASS_FLOOR) - set(have_sass), key=int)
+    if missing:
+        problems.append(f"plugin SASS archs {have_sass} miss {missing}")
+    low = [a for a in have_sass if int(a) < SHIP_SASS_MIN]
+    if low:
+        problems.append(f"plugin SASS archs {low} are below sm_{SHIP_SASS_MIN}")
+    newest = max(have_sass, key=int) if have_sass else None
+    if have_ptx != ([newest] if newest else []):
+        problems.append(f"plugin PTX archs {have_ptx}, expected [{newest}] (the newest SASS)")
     return problems
 
 
@@ -221,7 +239,7 @@ def main(argv: list[str]) -> int:
     elif what == "core":
         problems = check_core(path)
     elif what == "plugin":
-        sass, ptx = SHIP_SASS, SHIP_PTX
+        sass = ptx = None
         if "--archs" in argv:
             sass = tuple(argv[argv.index("--archs") + 1].split(","))
         if "--ptx" in argv:

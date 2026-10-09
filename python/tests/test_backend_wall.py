@@ -50,7 +50,7 @@ def _tools(*names):
 def _expected_archs():
     raw = os.environ.get("EAGLE_PLUGIN_EXPECTED_ARCHS")
     if not raw:
-        return backend_wall.SHIP_SASS, backend_wall.SHIP_PTX
+        return None, None
     sass, _, ptx = raw.partition("/")
     return tuple(a for a in sass.split(",") if a), tuple(a for a in ptx.split(",") if a)
 

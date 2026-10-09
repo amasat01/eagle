@@ -51,48 +51,48 @@ endif()
 
 # Only the plugin needs the CUDA toolkit; the core is plain C++.
 if(_eagle_plugin_mode STREQUAL "BUILD")
-  # Pascal..Hopper SASS plus PTX at the OLDEST architecture, which every newer
-  # device can JIT -- of the architectures this nvcc still compiles (a newer
-  # toolkit drops the oldest: each is asked with a one-line compile). Override
-  # for a faster local build with a QUOTED list, e.g. -DCMAKE_CUDA_ARCHITECTURES=61.
+  # SASS for every architecture this nvcc compiles from sm_60 up (aether's
+  # compensated sums need FP64 atomicAdd, which sm_5x lacks), plus PTX at the
+  # NEWEST, which GPUs released after the toolkit JIT once and cache. The list
+  # is the toolkit's own (nvcc --list-gpu-arch), so a newer toolkit widens it.
+  # Override for a faster local build with a QUOTED list, e.g.
+  # -DCMAKE_CUDA_ARCHITECTURES=61.
   if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-    set(_eagle_nvcc "${CMAKE_CUDA_COMPILER}")
-    if(NOT _eagle_nvcc)
-      find_program(_eagle_nvcc nvcc)
+    # the compiler CMake will enable below: -DCMAKE_CUDA_COMPILER, then
+    # $CUDACXX, then nvcc on PATH
+    if(CMAKE_CUDA_COMPILER)
+      set(_eagle_nvcc "${CMAKE_CUDA_COMPILER}")
+    elseif(NOT "$ENV{CUDACXX}" STREQUAL "")
+      set(_eagle_nvcc "$ENV{CUDACXX}")
+    else()
+      find_program(_eagle_nvcc_on_path nvcc)
+      set(_eagle_nvcc "${_eagle_nvcc_on_path}")
     endif()
     set(_eagle_archs "")
     if(_eagle_nvcc)
-      set(_eagle_probe "${CMAKE_CURRENT_BINARY_DIR}/eagle_arch_probe.cu")
-      file(WRITE "${_eagle_probe}" "__global__ void k(float* x) { x[0] = 1.f; }\n")
-      foreach(_a 61 70 75 80 90 100)
-        execute_process(COMMAND "${_eagle_nvcc}" -c -arch=sm_${_a} "${_eagle_probe}"
-                        -o "${_eagle_probe}.${_a}.o"
-                        RESULT_VARIABLE _rc OUTPUT_QUIET ERROR_QUIET)
-        if(_rc EQUAL 0)
-          list(APPEND _eagle_archs ${_a})
-        endif()
-      endforeach()
+      execute_process(COMMAND "${_eagle_nvcc}" --list-gpu-arch
+                      OUTPUT_VARIABLE _eagle_listed ERROR_QUIET RESULT_VARIABLE _rc)
+      if(_rc EQUAL 0)
+        string(REGEX MATCHALL "compute_[0-9]+" _eagle_listed "${_eagle_listed}")
+        foreach(_c IN LISTS _eagle_listed)
+          string(REPLACE "compute_" "" _a "${_c}")
+          if(_a GREATER_EQUAL 60)
+            list(APPEND _eagle_archs ${_a})
+          endif()
+        endforeach()
+        list(REMOVE_DUPLICATES _eagle_archs)
+        list(SORT _eagle_archs COMPARE NATURAL)
+      endif()
     endif()
     if(NOT _eagle_archs)  # no nvcc to ask here: CMake finds the compiler later
       set(_eagle_archs 61 70 80 90)
     endif()
-    # the default set: Pascal, Volta, Ampere, Hopper (and the oldest a newer
-    # toolkit keeps, when it no longer compiles Pascal or Volta)
-    set(_eagle_wanted 61 70 80 90)
-    list(GET _eagle_archs 0 _eagle_oldest)
-    if(NOT _eagle_oldest IN_LIST _eagle_wanted)
-      list(INSERT _eagle_wanted 0 ${_eagle_oldest})
-    endif()
     set(CMAKE_CUDA_ARCHITECTURES "")
-    foreach(_a IN LISTS _eagle_wanted)
-      if(_a IN_LIST _eagle_archs)
-        list(APPEND CMAKE_CUDA_ARCHITECTURES "${_a}-real")
-      endif()
+    foreach(_a IN LISTS _eagle_archs)
+      list(APPEND CMAKE_CUDA_ARCHITECTURES "${_a}-real")
     endforeach()
-    if(NOT CMAKE_CUDA_ARCHITECTURES)
-      message(FATAL_ERROR "eagle: this nvcc (${_eagle_nvcc}) compiles none of sm_61..sm_100")
-    endif()
-    list(APPEND CMAKE_CUDA_ARCHITECTURES "${_eagle_oldest}-virtual")
+    list(GET _eagle_archs -1 _eagle_newest)
+    list(APPEND CMAKE_CUDA_ARCHITECTURES "${_eagle_newest}-virtual")
   endif()
   enable_language(CUDA)
   find_package(CUDAToolkit REQUIRED)
