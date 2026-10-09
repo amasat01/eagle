@@ -161,6 +161,12 @@ eagle is the execution layer of the RAPTOR family — it launches what
    C++ tutorials <content/userguide/tutorials>
 
 .. toctree::
+   :caption: Extra tutorials
+   :hidden:
+
+   Fork/join graph <content/userguide/extra/fork_join_graph>
+
+.. toctree::
    :maxdepth: 1
    :caption: How-to guides
    :hidden:
