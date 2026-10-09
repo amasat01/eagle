@@ -20,6 +20,13 @@ jobs:
     env:
       CC: gcc-13
       CXX: g++-13
+      # ccache: CMake reads the *_COMPILER_LAUNCHER variables, also under scikit-build-core
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 500M
+      CCACHE_COMPILERCHECK: content
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+      CMAKE_CXX_COMPILER_LAUNCHER: ccache
+      CMAKE_CUDA_COMPILER_LAUNCHER: ccache
     steps:
       - uses: actions/checkout@v7
         with:
@@ -32,7 +39,16 @@ jobs:
           path: aether
           token: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
 
-      - run: sudo apt-get update && sudo apt-get install -y g++-13
+      - run: sudo apt-get update && sudo apt-get install -y g++-13 ccache
+
+      # compiled objects persist across runs; one cache per job and architecture
+      - uses: actions/cache@v6
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-${{ runner.os }}-${{ runner.arch }}-test-cpp-${{ hashFiles('**/*.h', '**/*.hpp', '**/*.cpp', '**/*.cu', '**/*.cuh', '**/CMakeLists.txt') }}
+          restore-keys: |
+            ccache-${{ runner.os }}-${{ runner.arch }}-test-cpp-
+      - run: ccache -z
 
       # deps stage: install aether's headers (CPP_MODE) into a local prefix.
       - run: |
@@ -55,6 +71,8 @@ jobs:
 
       # test:cpp — the manifest-backed integrity gate, not the binary bare.
       - run: cd eagle && tests/check_gate.sh cpp build/tests/eagle_tests
+      - if: always()
+        run: ccache -s
 
   # test:python — builds eagle._core (plain C++) AND the libeagle_cuda.so backend
   # plugin (python/CMakeLists.txt's default EAGLE_PYTHON_CUDA_PLUGIN=BUILD needs nvcc)
@@ -70,6 +88,13 @@ jobs:
     env:
       CC: gcc-13
       CXX: g++-13
+      # ccache: CMake reads the *_COMPILER_LAUNCHER variables, also under scikit-build-core
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 500M
+      CCACHE_COMPILERCHECK: content
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+      CMAKE_CXX_COMPILER_LAUNCHER: ccache
+      CMAKE_CUDA_COMPILER_LAUNCHER: ccache
     steps:
       - uses: actions/checkout@v7
         with:
@@ -90,8 +115,21 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            eagle/python/pyproject.toml
+            raptor/pyproject.toml
 
-      - run: sudo apt-get update && sudo apt-get install -y g++-13
+      - run: sudo apt-get update && sudo apt-get install -y g++-13 ccache
+
+      # compiled objects persist across runs; one cache per job and architecture
+      - uses: actions/cache@v6
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-${{ runner.os }}-${{ runner.arch }}-test-python-${{ hashFiles('**/*.h', '**/*.hpp', '**/*.cpp', '**/*.cu', '**/*.cuh', '**/CMakeLists.txt') }}
+          restore-keys: |
+            ccache-${{ runner.os }}-${{ runner.arch }}-test-python-
+      - run: ccache -z
 
       # NVIDIA's apt repo for Ubuntu 24.04 (noble), x86_64.
       - name: Install compile-only CUDA 12.6 toolchain (nvcc; no driver/GPU)
@@ -141,6 +179,8 @@ jobs:
           # on sys.path, and only the editable hook then resolves the compiled eagle._core
           pip install -e ./python
           pytest python/tests -q -m "not gpu and not interop_matrix"
+      - if: always()
+        run: ccache -s
 
   # test-python-nodriver — the wheel where there is NO NVIDIA driver and NO CUDA
   # toolkit (a stock GitHub runner has neither). eagle._core is plain C++ and reaches
@@ -157,6 +197,13 @@ jobs:
     env:
       CC: gcc-13
       CXX: g++-13
+      # ccache: CMake reads the *_COMPILER_LAUNCHER variables, also under scikit-build-core
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 500M
+      CCACHE_COMPILERCHECK: content
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+      CMAKE_CXX_COMPILER_LAUNCHER: ccache
+      CMAKE_CUDA_COMPILER_LAUNCHER: ccache
     steps:
       - uses: actions/checkout@v7
         with:
@@ -177,8 +224,21 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            eagle/python/pyproject.toml
+            raptor/pyproject.toml
 
-      - run: sudo apt-get update && sudo apt-get install -y g++-13
+      - run: sudo apt-get update && sudo apt-get install -y g++-13 ccache
+
+      # compiled objects persist across runs; one cache per job and architecture
+      - uses: actions/cache@v6
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-${{ runner.os }}-${{ runner.arch }}-test-python-nodriver-${{ hashFiles('**/*.h', '**/*.hpp', '**/*.cpp', '**/*.cu', '**/*.cuh', '**/CMakeLists.txt') }}
+          restore-keys: |
+            ccache-${{ runner.os }}-${{ runner.arch }}-test-python-nodriver-
+      - run: ccache -z
 
       # The precondition this leg exists for: no driver library, no nvcc.
       - name: Assert the runner has no NVIDIA driver and no CUDA toolkit
@@ -238,6 +298,8 @@ jobs:
           RAPTOR_ROOT="${GITHUB_WORKSPACE}/raptor" python -m pytest tests -q -p no:cacheprovider \
             -m "not gpu and not gpu2 and not torch and not interop_matrix and not repo_local"
           python -c 'import eagle; assert "site-packages" in eagle.__file__, eagle.__file__'
+      - if: always()
+        run: ccache -s
 
   # ft-stress: the free-threading rows (pytest -m ft) and the full suite under
   # -W error::RuntimeWarning on the free-threaded interpreters, built and set up
@@ -252,6 +314,13 @@ jobs:
     env:
       CC: gcc-13
       CXX: g++-13
+      # ccache: CMake reads the *_COMPILER_LAUNCHER variables, also under scikit-build-core
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 500M
+      CCACHE_COMPILERCHECK: content
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+      CMAKE_CXX_COMPILER_LAUNCHER: ccache
+      CMAKE_CUDA_COMPILER_LAUNCHER: ccache
     steps:
       - uses: actions/checkout@v7
         with:
@@ -272,8 +341,21 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            eagle/python/pyproject.toml
+            raptor/pyproject.toml
 
-      - run: sudo apt-get update && sudo apt-get install -y g++-13
+      - run: sudo apt-get update && sudo apt-get install -y g++-13 ccache
+
+      # compiled objects persist across runs; one cache per job and architecture
+      - uses: actions/cache@v6
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-${{ runner.os }}-${{ runner.arch }}-ft-stress-${{ matrix.python-version }}-${{ hashFiles('**/*.h', '**/*.hpp', '**/*.cpp', '**/*.cu', '**/*.cuh', '**/CMakeLists.txt') }}
+          restore-keys: |
+            ccache-${{ runner.os }}-${{ runner.arch }}-ft-stress-${{ matrix.python-version }}-
+      - run: ccache -z
 
       # NVIDIA's apt repo for Ubuntu 24.04 (noble), x86_64.
       - name: Install compile-only CUDA 12.6 toolchain (nvcc; no driver/GPU)
@@ -312,16 +394,17 @@ jobs:
       # code.
       - run: |
           cd eagle
-          python -m pip install --quiet --upgrade pip pytest
+          # newest NumPy/SciPy ship no cp313t wheel: prefer a wheel over an sdist build
+          python -m pip install --quiet --prefer-binary --upgrade pip pytest
           export CMAKE_PREFIX_PATH="${GITHUB_WORKSPACE}/__install:${CMAKE_PREFIX_PATH}"
           export SKBUILD_CMAKE_ARGS="-DCMAKE_CUDA_COMPILER=$(which nvcc);-DCMAKE_CUDA_ARCHITECTURES=70"
           # the plugin carries the single arch built above, not the shipped list
           # (read by test_backend_wall where cuobjdump is present)
           export EAGLE_PLUGIN_EXPECTED_ARCHS=70/70
-          pip install ../raptor   # the sibling checkout, so unreleased raptor changes are tested
+          pip install --prefer-binary ../raptor   # the sibling checkout, so unreleased raptor changes are tested
           # editable, as in development: python/conftest.py puts this source tree first
           # on sys.path, and only the editable hook then resolves the compiled eagle._core
-          pip install -e ./python
+          pip install --prefer-binary -e ./python
 
       # An ft leg is vacuous on a GIL interpreter (every ft row skips) and the
       # harness refuses a forced GIL-off (-X gil=0 / PYTHON_GIL): assert the
@@ -344,3 +427,6 @@ jobs:
           [ "$N" -gt 0 ] || { echo "ft selection collected zero tests"; exit 1; }
           python -m pytest python/tests -m ft -q -rs -p no:cacheprovider -W error::RuntimeWarning
           python -m pytest python/tests -q -p no:cacheprovider -W error::RuntimeWarning -m "not gpu and not interop_matrix"
+      - if: always()
+        run: ccache -s
+
