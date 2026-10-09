@@ -154,19 +154,19 @@ inline void bind(nb::module_& m)
             nb::arg("device_id"), nb::arg("producer"), nb::arg("stream").none(),
             "Build the record from raw array-interface fields; ``owner`` is kept alive.")
         .def_prop_ro("ptr",
-            [](const OrderedBuffer& b) { return reinterpret_cast<std::uintptr_t>(b.buffer.view.data); })
-        .def_prop_ro("shape", &shape_of)
-        .def_prop_ro("strides", &strides_of)
-        .def_prop_ro("dtype", [](const OrderedBuffer& b) { return aether::interop::dtypeName(b.buffer.view.dtype); })
-        .def_prop_ro("device_type", [](const OrderedBuffer& b) { return static_cast<int>(b.buffer.view.device.type()); })
-        .def_prop_ro("device_id", [](const OrderedBuffer& b) { return static_cast<int>(b.buffer.view.device.id()); })
-        .def_prop_ro("access", [](const OrderedBuffer& b) { return std::string(aether::interop::accessName(b.buffer.access)); })
-        .def_prop_ro("writable", [](const OrderedBuffer& b) { return b.buffer.writable(); })
-        .def_prop_ro("assumed_writable", [](const OrderedBuffer& b) { return b.buffer.assumedWritable; })
-        .def_prop_ro("owner", [](const OrderedBuffer& b) { return b.buffer.owner; })
-        .def_prop_ro("producer", [](const OrderedBuffer& b) { return b.buffer.producer; })
-        .def_prop_ro("stream", [](const OrderedBuffer& b) { return b.stream; })
-        .def("assume_writable", [](OrderedBuffer& b) { aether::interop::assumeWritable(b.buffer); })
+            [](const OrderedBuffer& b) { return reinterpret_cast<std::uintptr_t>(b.buffer.view.data); }, nb::lock_self())
+        .def_prop_ro("shape", &shape_of, nb::lock_self())
+        .def_prop_ro("strides", &strides_of, nb::lock_self())
+        .def_prop_ro("dtype", [](const OrderedBuffer& b) { return aether::interop::dtypeName(b.buffer.view.dtype); }, nb::lock_self())
+        .def_prop_ro("device_type", [](const OrderedBuffer& b) { return static_cast<int>(b.buffer.view.device.type()); }, nb::lock_self())
+        .def_prop_ro("device_id", [](const OrderedBuffer& b) { return static_cast<int>(b.buffer.view.device.id()); }, nb::lock_self())
+        .def_prop_ro("access", [](const OrderedBuffer& b) { return std::string(aether::interop::accessName(b.buffer.access)); }, nb::lock_self())
+        .def_prop_ro("writable", [](const OrderedBuffer& b) { return b.buffer.writable(); }, nb::lock_self())
+        .def_prop_ro("assumed_writable", [](const OrderedBuffer& b) { return b.buffer.assumedWritable; }, nb::lock_self())
+        .def_prop_ro("owner", [](const OrderedBuffer& b) { return b.buffer.owner; }, nb::lock_self())
+        .def_prop_ro("producer", [](const OrderedBuffer& b) { return b.buffer.producer; }, nb::lock_self())
+        .def_prop_ro("stream", [](const OrderedBuffer& b) { return b.stream; }, nb::lock_self())
+        .def("assume_writable", [](OrderedBuffer& b) { aether::interop::assumeWritable(b.buffer); }, nb::lock_self())
         .def(
             "refusals",
             [](const OrderedBuffer& b, std::optional<int> dtype_code, std::optional<int> dtype_bits,
@@ -187,7 +187,7 @@ inline void bind(nb::module_& m)
                     r.deviceId = static_cast<std::int32_t>(*device_id);
                 r.writable = writable;
                 return aether::interop::refusals(b.buffer, r);
-            },
+            }, nb::lock_self(),
             nb::arg("dtype_code").none(), nb::arg("dtype_bits").none(), nb::arg("count").none(),
             nb::arg("shape").none(), nb::arg("contiguous"), nb::arg("alignment"), nb::arg("device_type").none(),
             nb::arg("device_id").none(), nb::arg("writable"),
@@ -202,7 +202,7 @@ inline void bind(nb::module_& m)
                     throw nb::python_error();
                 }
                 return nb::steal<nb::object>(cap);
-            },
+            }, nb::lock_self(),
             nb::arg("stream").none(), "A versioned DLPack capsule, fenced onto ``stream``.")
         .def(
             "export_legacy",
@@ -214,10 +214,10 @@ inline void bind(nb::module_& m)
                     throw nb::python_error();
                 }
                 return nb::steal<nb::object>(cap);
-            },
+            }, nb::lock_self(),
             nb::arg("stream").none(), "A legacy DLPack capsule, fenced onto ``stream``.")
         .def(
-            "refence", [](const OrderedBuffer& b, std::optional<std::intptr_t> consumer) { eagle::interop::refence(b, consumer); },
+            "refence", [](const OrderedBuffer& b, std::optional<std::intptr_t> consumer) { eagle::interop::refence(b, consumer); }, nb::lock_self(),
             nb::arg("consumer").none(), "Order the buffer's stream before ``consumer`` again.");
 
     m.def(

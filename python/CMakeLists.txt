@@ -240,7 +240,7 @@ endif()
 find_package(OpenMP REQUIRED COMPONENTS CXX)
 get_target_property(_eagle_core_incs eagle::eagle INTERFACE_INCLUDE_DIRECTORIES)
 get_target_property(_aether_incs aether::aether INTERFACE_INCLUDE_DIRECTORIES)
-nanobind_add_module(_core MODULE src/eagle_core.cpp)
+nanobind_add_module(_core MODULE FREE_THREADED src/eagle_core.cpp)
 target_compile_features(_core PRIVATE cxx_std_23)
 # aether's own include directories first: an installed eagle's prefix may also
 # hold an (older) aether copy, and the aether this configure resolved must win.
@@ -319,7 +319,7 @@ elseif(_eagle_python_mpi STREQUAL "ON" OR _eagle_python_mpi STREQUAL "AUTO")
                    "'${_eagle_mpi_library}'")
 
     # Plain C++ like _core (its device inner forwards to the CUDA backend).
-    nanobind_add_module(_mpi MODULE src/eagle_mpi.cpp)
+    nanobind_add_module(_mpi MODULE FREE_THREADED src/eagle_mpi.cpp)
     target_compile_features(_mpi PRIVATE cxx_std_23)
     target_include_directories(_mpi PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src"
       "${CMAKE_CURRENT_SOURCE_DIR}/.." ${_aether_incs} ${_eagle_core_incs})

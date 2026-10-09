@@ -150,7 +150,7 @@ int run(int argc, char** argv) {
 
     // === capture all 3 pure nodes in one opening, replay twice ==================
     cudaStream_t stream; RT_CHECK(cudaStreamCreate(&stream));
-    RT_CHECK(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal));
+    RT_CHECK(cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal));
     const int injected = registry.inject(reinterpret_cast<CUstream>(stream), int(N), block);
     cudaGraph_t graph; RT_CHECK(cudaStreamEndCapture(stream, &graph));
 

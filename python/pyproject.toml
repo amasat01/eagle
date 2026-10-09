@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [build-system]
-requires = ["scikit-build-core>=0.10", "nanobind>=2.0"]
+requires = ["scikit-build-core>=0.10", "nanobind>=3.1,<4"]
 build-backend = "scikit_build_core.build"
 
 [project]
@@ -132,6 +132,7 @@ testpaths = ["tests"]
 # cosmetic per-launch DeprecationWarning it emits.
 filterwarnings = ["ignore:ExternalStream is deprecated:DeprecationWarning"]
 markers = [
+    "ft: free-threading rows (need a free-threaded interpreter; skip on a GIL build)",
     "gpu: requires cupy + a CUDA GPU",
     "gpu2: requires cupy + TWO CUDA GPUs (skipped, never passed, on one)",
     "torch: requires torch (CPU or CUDA) + cupy GPU",

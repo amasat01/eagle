@@ -54,7 +54,7 @@ namespace cuda {
  *
  * Queries ``cudaStreamGetCaptureInfo_v3`` for the in-construction
  * ``cudaGraph_t`` and lists its current nodes via ``cudaGraphGetNodes`` --
- * both calls are legal WHILE a Global-mode capture is active (proven on
+ * both calls are legal WHILE a ThreadLocal-mode capture is active (proven on
  * this driver by probing the call mid-capture: the observed node count
  * strictly grows, one per launch, as more kernels are captured). Every
  * stream touched by one active capture session -- the origin AND any

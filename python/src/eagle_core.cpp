@@ -106,6 +106,20 @@ using eagle::exec::Partition;
 
 namespace {
 
+// The documented FT-2 instrument: a counter that is DELIBERATELY plain, so a
+// free-threading run can prove its schedule is adversarial enough to lose
+// updates before it certifies anything else. Nothing real reads or writes it.
+// The read-modify-write is split by a short busy gap so the lost-update window
+// is wide enough to expose on every free-threaded build.
+volatile std::uint64_t g_unsynchronised = 0;
+
+inline void unsynchronisedBump()
+{
+    const std::uint64_t seen = g_unsynchronised;
+    for (volatile int spin = 0; spin < 32; spin = spin + 1) {}
+    g_unsynchronised = seen + 1;
+}
+
 /** @brief Turn a Python list of integer pointers into the ``params[]`` array a
  *  plugin entry receives. The caller owns every pointer; this only re-types the
  *  list, exactly as ``eagle.host_launch``'s ctypes marshalling does. */
@@ -308,6 +322,13 @@ NB_MODULE(_core, m)
 {
     m.doc() = "eagle._core — nanobind binding of the eagle::cuda CUDA-graph "
               "core (capture / instantiate / replay).";
+
+    m.def("_unsynchronised_bump", [] { unsynchronisedBump(); },
+          "Free-threading canary: increments a deliberately PLAIN counter. "
+          "Concurrent calls lose updates; a run that cannot observe the loss "
+          "cannot certify the real counters. An instrument, not an API.");
+    m.def("_unsynchronised_count", [] { return std::uint64_t{g_unsynchronised}; },
+          "The canary counter `_unsynchronised_bump` increments.");
 
     // The generic DLPack layer: buffer import/validation/export and the
     // stream contract (plugin/interop.h). See interop_binding.h.
@@ -656,12 +677,12 @@ NB_MODULE(_core, m)
                 std::uint64_t p = 0;
                 ck(EB("stream", eagle_backend_stream_ptr)(need(s.h, "Stream"), &p));
                 return static_cast<std::uintptr_t>(p);
-            },
+            }, nb::lock_self(),
             "Raw cudaStream_t as a Python int (wrap with "
             "cupy.cuda.ExternalStream).")
         .def("synchronize", [](PyStream& s) {
             ck(EB("stream", eagle_backend_stream_synchronize)(need(s.h, "Stream")));
-        });
+        }, nb::lock_self());
 
     // -- CapturedGraph: move-only owner of the captured cudaGraph_t -----------
     nb::class_<PyCaptured>(m, "CapturedGraph")
@@ -671,8 +692,8 @@ NB_MODULE(_core, m)
             std::int32_t valid = 0;
             ck(EB("captured", eagle_backend_captured_is_valid)(c.h, &valid));
             return valid != 0;
-        })
-        .def("debug_dot", &capturedDebugDot, nb::arg("path"),
+        }, nb::lock_self())
+        .def("debug_dot", &capturedDebugDot, nb::lock_self(), nb::arg("path"),
             nb::arg("flags") = 0u,
             "Write this captured graph to Graphviz dot at `path` and return "
             "the text (matches cupy Graph.debug_dot_str).");
@@ -692,7 +713,7 @@ NB_MODULE(_core, m)
             nb::arg("stream"), nb::arg("device") = -1)
         .def("begin", [](PyCapturer& c) {
             ck(EB("capturer", eagle_backend_capturer_begin)(need(c.h, "StreamCapturer")));
-        })
+        }, nb::lock_self())
         .def(
             "end",
             [](PyCapturer& c) {
@@ -701,7 +722,7 @@ NB_MODULE(_core, m)
                 auto* out = new PyCaptured();
                 out->h = g;
                 return out;
-            },
+            }, nb::lock_self(),
             nb::rv_policy::take_ownership,
             "End capture and return a CapturedGraph owning the cudaGraph_t.");
 
@@ -728,11 +749,11 @@ NB_MODULE(_core, m)
             "Create branch streams/events for a later fork. MUST be "
             "constructed BEFORE StreamCapturer.begin(): stream and event "
             "creation is illegal while a capture is in flight.")
-        .def("fork", [](PyFork& f) { ck(EB("fork", eagle_backend_fork_fork)(need(f.h, "CaptureFork"))); },
+        .def("fork", [](PyFork& f) { ck(EB("fork", eagle_backend_fork_fork)(need(f.h, "CaptureFork"))); }, nb::lock_self(),
             "Open the fork: every branch becomes a sibling of every other, and "
             "everything captured so far becomes a predecessor of all branches. "
             "Calling twice is a no-op.")
-        .def("join", [](PyFork& f) { ck(EB("fork", eagle_backend_fork_join)(need(f.h, "CaptureFork"))); },
+        .def("join", [](PyFork& f) { ck(EB("fork", eagle_backend_fork_join)(need(f.h, "CaptureFork"))); }, nb::lock_self(),
             "Close the fork: the origin waits for every branch, so work issued "
             "after the join depends on all of them. Idempotent. An unjoined "
             "branch makes StreamCapturer.end() fail and discard the graph.")
@@ -742,7 +763,7 @@ NB_MODULE(_core, m)
                 std::uint64_t s = 0;
                 ck(EB("fork", eagle_backend_fork_branch)(need(f.h, "CaptureFork"), index, &s));
                 return static_cast<std::uintptr_t>(s);
-            },
+            }, nb::lock_self(),
             nb::arg("index"),
             "Raw cudaStream_t of branch `index` as a Python int (wrap with "
             "cupy.cuda.ExternalStream). Only meaningful between fork() and "
@@ -753,7 +774,7 @@ NB_MODULE(_core, m)
                 std::uint64_t s = 0;
                 ck(EB("fork", eagle_backend_fork_origin)(need(f.h, "CaptureFork"), &s));
                 return static_cast<std::uintptr_t>(s);
-            },
+            }, nb::lock_self(),
             "Raw cudaStream_t of the origin stream this fork branches from.")
         .def(
             "forked",
@@ -761,21 +782,21 @@ NB_MODULE(_core, m)
                 std::int32_t v = 0;
                 ck(EB("fork", eagle_backend_fork_forked)(need(f.h, "CaptureFork"), &v));
                 return v != 0;
-            },
+            }, nb::lock_self(),
             "True once fork() has run and join() has not.")
         .def("__len__",
             [](const PyFork& f) {
                 std::uint64_t n = 0;
                 ck(EB("fork", eagle_backend_fork_size)(need(f.h, "CaptureFork"), &n));
                 return static_cast<std::size_t>(n);
-            })
+            }, nb::lock_self())
         .def(
             "size",
             [](const PyFork& f) {
                 std::uint64_t n = 0;
                 ck(EB("fork", eagle_backend_fork_size)(need(f.h, "CaptureFork"), &n));
                 return static_cast<std::size_t>(n);
-            },
+            }, nb::lock_self(),
             "Number of branches.");
 
     // -- CaptureConditional: weave a device-evaluated IF node into capture ---
@@ -808,7 +829,7 @@ NB_MODULE(_core, m)
             nb::arg("loop_cap") = 0, nb::arg("counter_ptr") = 0, nb::arg("device") = -1,
             "Create the guarded region's body stream. MUST be constructed "
             "BEFORE StreamCapturer.begin() -- stream creation is illegal "
-            "while a Global-mode capture is in flight. `origin` is the "
+            "while a capture is in flight on the calling thread. `origin` is the "
             "stream the region would have been captured on directly (the "
             "pipeline's main stream, a CaptureFork branch, or another "
             "CaptureConditional's body_stream()); `count_ptr` / "
@@ -823,7 +844,7 @@ NB_MODULE(_core, m)
                 std::uint64_t s = 0;
                 ck(EB("conditional", eagle_backend_conditional_begin)(need(c.h, "CaptureConditional"), &s));
                 return static_cast<std::uintptr_t>(s);
-            },
+            }, nb::lock_self(),
             "Weave the setter kernel + conditional node (IF, or WHILE for a "
             "loop) at the origin's current capture tip and open capture of "
             "the body on the pre-created body stream. Returns the body "
@@ -835,7 +856,7 @@ NB_MODULE(_core, m)
                 std::uint64_t s = 0;
                 ck(EB("conditional", eagle_backend_conditional_body_stream)(need(c.h, "CaptureConditional"), &s));
                 return static_cast<std::uintptr_t>(s);
-            },
+            }, nb::lock_self(),
             "The pre-created body stream as a raw int, valid from "
             "construction: the `origin` a NESTED weave (a skippable region "
             "inside a loop body) must be constructed against, before "
@@ -846,13 +867,13 @@ NB_MODULE(_core, m)
                 std::int32_t v = 0;
                 ck(EB("conditional", eagle_backend_conditional_is_loop)(need(c.h, "CaptureConditional"), &v));
                 return v != 0;
-            },
+            }, nb::lock_self(),
             "True for a WHILE (loop) weave, False for an IF weave.")
         .def(
             "end",
             [](PyConditional& c) {
                 ck(EB("conditional", eagle_backend_conditional_end)(need(c.h, "CaptureConditional")));
-            },
+            }, nb::lock_self(),
             "Close the body capture. Idempotent, dtor-safe.");
 
     // -- Capture attribution (member-enable "mode=enabled"): mid- ------
@@ -878,7 +899,7 @@ NB_MODULE(_core, m)
         nb::arg("stream"),
         "Node handles (as ints) of the graph currently being captured "
         "into, as seen from `stream` -- which must be part of an ACTIVE "
-        "Global-mode capture (the pipeline's main stream, or a "
+        "ThreadLocal-mode capture (the pipeline's main stream, or a "
         "CaptureFork branch). Diff two snapshots taken immediately before "
         "and after one member's launches to attribute its contributed "
         "nodes.");
@@ -910,7 +931,7 @@ NB_MODULE(_core, m)
             ck(EBX(eagle_backend_x_capture_guard_depth)(&v));
             return static_cast<int>(v);
         },
-        "Process-wide capture-depth counter (test/diagnostic only).");
+        "Capture-depth counter of the calling thread (test/diagnostic only).");
     m.def(
         "capture_guard_pending_count",
         []() {
@@ -919,7 +940,7 @@ NB_MODULE(_core, m)
             return static_cast<std::size_t>(v);
         },
         "Number of CUDA-touching teardowns currently deferred because a "
-        "capture is active somewhere in the process (test/diagnostic only).");
+        "capture is open on the calling thread (test/diagnostic only).");
 
     // -- Device properties: a plain dict, -
     // every eagle::DeviceProps field, raw and derived. ridge_flops_per_byte is
@@ -969,24 +990,24 @@ NB_MODULE(_core, m)
     nb::class_<PyLauncher>(m, "Launcher")
         .def(
             "launch",
-            [](PyLauncher& l) { ck(EB("launcher", eagle_backend_launcher_launch)(need(l.h, "Launcher"))); },
+            [](PyLauncher& l) { ck(EB("launcher", eagle_backend_launcher_launch)(need(l.h, "Launcher"))); }, nb::lock_self(),
             "Replay the instantiated exec graph once. Raises RuntimeError if "
             "cudaGetLastError() is nonzero after the replay; see "
             "eagle/python/eagle/pipeline.py's "
             "launch() for the companion stream-ordering fix).")
         .def("synchronize",
-            [](PyLauncher& l) { ck(EB("launcher", eagle_backend_launcher_synchronize)(need(l.h, "Launcher"))); })
+            [](PyLauncher& l) { ck(EB("launcher", eagle_backend_launcher_synchronize)(need(l.h, "Launcher"))); }, nb::lock_self())
         .def(
             "stream",
             [](PyLauncher& l, std::uintptr_t s) {
                 ck(EB("launcher", eagle_backend_launcher_stream)(need(l.h, "Launcher"), s));
-            },
+            }, nb::lock_self(),
             nb::arg("stream"))
         .def(
             "set_logical_size",
             [](PyLauncher& l, std::int64_t logical_size) {
                 ck(EB("launcher", eagle_backend_launcher_set_logical_size)(need(l.h, "Launcher"), logical_size));
-            },
+            }, nb::lock_self(),
             nb::arg("logical_size"),
             "Patch every kernel node's grid/block for a new logical size.")
         .def(
@@ -995,7 +1016,7 @@ NB_MODULE(_core, m)
                 std::int64_t n = 0;
                 ck(EB("launcher", eagle_backend_launcher_kernel_node_count)(need(l.h, "Launcher"), &n));
                 return n;
-            },
+            }, nb::lock_self(),
             "Number of harvested kernel-node records (cross-check for "
             "num_nodes()).")
         .def(
@@ -1003,7 +1024,7 @@ NB_MODULE(_core, m)
             [](PyLauncher& l, std::uintptr_t node, bool enabled) {
                 ck(EB("launcher", eagle_backend_launcher_set_node_enabled)(need(l.h, "Launcher"), node,
                     enabled ? 1 : 0));
-            },
+            }, nb::lock_self(),
             nb::arg("node"), nb::arg("enabled"),
             "Enable/disable one node (by raw handle, as returned by "
             "capture_snapshot_nodes()) in this Launcher's instantiated "
@@ -1047,21 +1068,21 @@ NB_MODULE(_core, m)
                 g->h = h;
                 return g;
             },
-            nb::arg("captured"), nb::rv_policy::take_ownership,
+            nb::arg("captured").lock(), nb::rv_policy::take_ownership,
             "Adopt a CapturedGraph as the source graph and instantiate it "
             "directly (no clone, no kernel harvest) — the single-sequence "
             "replay path. Consumes the CapturedGraph.")
         .def(
             "stream",
-            [](PyGraph& g, std::uintptr_t s) { ck(EB("graph", eagle_backend_graph_stream)(need(g.h, "Graph"), s)); },
+            [](PyGraph& g, std::uintptr_t s) { ck(EB("graph", eagle_backend_graph_stream)(need(g.h, "Graph"), s)); }, nb::lock_self(),
             nb::arg("stream"))
         .def(
             "add_node",
             [](PyGraph& g, PyCaptured& c) {
                 ck(EB("graph", eagle_backend_graph_add_node)(need(g.h, "Graph"), need(c.h, "CapturedGraph")));
                 c.h = nullptr; // consumed
-            },
-            nb::arg("captured"),
+            }, nb::lock_self(),
+            nb::arg("captured").lock(),
             "Fold a CapturedGraph in as a child-graph node (consumes it) and "
             "harvest its kernel records.")
         .def(
@@ -1072,7 +1093,7 @@ NB_MODULE(_core, m)
                 auto* l = new PyLauncher();
                 l->h = h;
                 return l;
-            },
+            }, nb::lock_self(),
             nb::rv_policy::take_ownership,
             "Instantiate an exec graph and return a Launcher. Raises "
             "RuntimeError if cudaGetLastError() is nonzero after instantiate.")
@@ -1080,7 +1101,7 @@ NB_MODULE(_core, m)
             std::int64_t i = 0;
             ck(EB("graph", eagle_backend_graph_last_node)(need(g.h, "Graph"), &i));
             return i;
-        });
+        }, nb::lock_self());
 
     // -- GraphComposer: the C++-native parity surface --
     // Experimental at the seam (eagle_backend_x_composer_*): it is bound one
@@ -1120,8 +1141,8 @@ NB_MODULE(_core, m)
                 if (hasPre)
                     c.keep.push_back(pre_launch);
                 return index;
-            },
-            nb::arg("launcher"), nb::arg("name") = nb::none(),
+            }, nb::lock_self(),
+            nb::arg("launcher").lock(), nb::arg("name") = nb::none(),
             nb::arg("pre_launch") = nb::none(),
             "Register a built Launcher as a member (mode=\"sequenced\" "
             "only). Consumes `launcher` (move-only, C++ side) -- the "
@@ -1149,7 +1170,7 @@ NB_MODULE(_core, m)
                 if (hasPre)
                     c.keep.push_back(pre_launch);
                 return index;
-            },
+            }, nb::lock_self(),
             nb::arg("step"), nb::arg("name") = nb::none(),
             nb::arg("pre_launch") = nb::none(),
             "Register a raw, kernel-issuing member: `step(stream: int)` "
@@ -1170,15 +1191,15 @@ NB_MODULE(_core, m)
                 if (hasPre)
                     c.keep.push_back(pre_launch);
                 return index;
-            },
-            nb::arg("nested"), nb::arg("name") = nb::none(),
+            }, nb::lock_self(),
+            nb::arg("nested").lock(), nb::arg("name") = nb::none(),
             nb::arg("pre_launch") = nb::none(),
             "Register an already-built() mode=\"sequenced\" GraphComposer "
             "as a member of THIS mode=\"sequenced\" composer -- the "
             "RECURSION LOCK. Returns the member's registration-order "
             "index.")
         .def(
-            "build", [](PyComposer& c) { ck(EBX(eagle_backend_x_composer_build)(need(c.h, "GraphComposer"))); },
+            "build", [](PyComposer& c) { ck(EBX(eagle_backend_x_composer_build)(need(c.h, "GraphComposer"))); }, nb::lock_self(),
             "Perform whatever one-time setup this composer's mode needs "
             "(capture, for the two flat modes; bookkeeping only for "
             "mode=\"sequenced\"). May be called at most once.")
@@ -1188,13 +1209,13 @@ NB_MODULE(_core, m)
                 std::vector<std::uint8_t> p(pattern.begin(), pattern.end());
                 ck(EBX(eagle_backend_x_composer_set_routing)(need(c.h, "GraphComposer"), p.data(),
                     static_cast<std::int64_t>(p.size())));
-            },
+            }, nb::lock_self(),
             nb::arg("pattern"),
             "Update which members are active. Mechanism + cost depend on "
             "mode -- see eagle/compose/GraphComposer.h's class doc.")
         .def(
             "launch",
-            [](PyComposer& c, int n) { ck(EBX(eagle_backend_x_composer_launch)(need(c.h, "GraphComposer"), n)); },
+            [](PyComposer& c, int n) { ck(EBX(eagle_backend_x_composer_launch)(need(c.h, "GraphComposer"), n)); }, nb::lock_self(),
             nb::arg("n") = 1, "Replay n times.")
         .def(
             "fired_history",
@@ -1209,19 +1230,19 @@ NB_MODULE(_core, m)
                 cuda().meta().free(flat);
                 cuda().meta().free(offsets);
                 return out;
-            },
+            }, nb::lock_self(),
             "Per-launch()-call fired-member index lists, oldest first "
             "(list[list[int]] -- eagle._core's parity surface; compose.py's "
             "own GraphComposer returns frozenset per call instead).")
         .def("reset_fired_history",
-            [](PyComposer& c) { ck(EBX(eagle_backend_x_composer_reset_fired_history)(need(c.h, "GraphComposer"))); })
+            [](PyComposer& c) { ck(EBX(eagle_backend_x_composer_reset_fired_history)(need(c.h, "GraphComposer"))); }, nb::lock_self())
         .def_prop_ro(
             "mode",
             [](const PyComposer& c) {
                 const char* mode = nullptr;
                 ck(EBX(eagle_backend_x_composer_mode)(need(c.h, "GraphComposer"), &mode));
                 return std::string(mode ? mode : "");
-            })
+            }, nb::lock_self())
         .def("member_names",
             [](const PyComposer& c) {
                 std::int64_t n = 0;
@@ -1233,10 +1254,10 @@ NB_MODULE(_core, m)
                     out.emplace_back(name ? name : "");
                 }
                 return out;
-            })
+            }, nb::lock_self())
         .def("num_members", [](const PyComposer& c) {
             std::int64_t n = 0;
             ck(EBX(eagle_backend_x_composer_num_members)(need(c.h, "GraphComposer"), &n));
             return n;
-        });
+        }, nb::lock_self());
 }

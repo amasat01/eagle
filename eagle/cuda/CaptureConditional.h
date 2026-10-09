@@ -26,7 +26,7 @@ namespace cuda {
  * chain; there is no capture-time entry point for a ``cudaGraphAddNode``
  * conditional today. ``CaptureConditional`` supplies exactly that, using the
  * capture-interop mechanism proven under
- * ``cudaStreamCaptureModeGlobal`` (eagle's real capture mode,
+ * ``cudaStreamCaptureModeThreadLocal`` (eagle's real capture mode,
  * ``StreamCapturer::begin``): query the in-flight graph and dependency set via
  * ``cudaStreamGetCaptureInfo_v3``, create a conditional handle bound to it,
  * add the setter kernel node (``setCond`` for an IF -- the same ``CountGuard``
@@ -52,7 +52,7 @@ namespace cuda {
  *
  * @par Lifecycle -- mirrors ``CaptureFork`` exactly
  * Construction is the only phase that acquires resources (the body stream):
- * resource creation is illegal mid-capture under Global mode, so it must
+ * resource creation is illegal mid-capture on the capturing thread, so it must
  * happen BEFORE ``StreamCapturer::begin()``. ``begin()`` performs the
  * mid-capture weave and returns the body stream to launch the guarded
  * region's work on; ``end()`` closes the body capture. ``end()`` is
@@ -79,7 +79,7 @@ public:
     /** @brief Create the body stream for a later IF weave.
      *
      *  Must be called BEFORE ``StreamCapturer::begin()`` -- stream creation
-     *  is not permitted while a Global-mode capture is in flight.
+     *  is not permitted while a capture is in flight.
      *
      *  @param[in] origin  Stream the skippable region would have been
      *                     captured on directly (the pipeline's main stream,
@@ -199,7 +199,7 @@ public:
 
         bodyGraph_ = cp.conditional.phGraph_out[0];
         EAGLE_CHECK_ALWAYS(cudaStreamBeginCaptureToGraph(bodyStream_.cuda(),
-            bodyGraph_, nullptr, nullptr, 0, cudaStreamCaptureModeGlobal));
+            bodyGraph_, nullptr, nullptr, 0, cudaStreamCaptureModeThreadLocal));
         open_ = true;
         // STOP-THE-LINE fix: this opens a NESTED capture scope (the body
         // stream) -- enter the process-wide depth counter only after the

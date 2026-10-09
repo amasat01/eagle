@@ -5,14 +5,14 @@
 
 #include <cstddef>
 #include <functional>
-#include <mutex>
+#include <stdexcept>
 #include <vector>
 
 namespace eagle {
 namespace util {
 
 /**
- * @brief Process-wide capture-depth counter + deferred-destroy queue
+ * @brief Per-thread capture-depth counter + deferred-destroy queue
  *        (STOP-THE-LINE incident fix).
  *
  * @par The defect this closes
@@ -39,17 +39,21 @@ namespace util {
  * instead of calling the driver directly: if the depth is 0 (no capture
  * anywhere in the process), it runs immediately -- byte-identical to today's
  * behavior. If the depth is > 0, the destroy is queued and runs the moment
- * the OUTERMOST capture scope exits (``CaptureScope``'s destructor / explicit
- * ``release()``), plus a process-exit backstop so a queue that never drains
+ * the OUTERMOST capture scope of that thread exits (``CaptureScope``'s destructor / explicit
+ * ``release()``), plus a thread-exit backstop so a queue that never drains
  * naturally (e.g. an aborted capture) does not leak forever.
  *
  * @par Thread-safety
- * This codebase's own GPU-serial law means captures are never concurrent
- * (one capture session in flight at a time, one thread driving it) --
- * documented ASSUMPTION, not separately enforced here. The mutex below is
- * cheap insurance against a destructor firing from a DIFFERENT thread than
- * the one driving capture (e.g. a refcount drop from an unrelated Python
- * thread), which the GPU-serial law does not by itself rule out.
+ * The capture depth and the deferred-destroy queue are PER THREAD
+ * (``thread_local``): captures are opened in ``cudaStreamCaptureModeThreadLocal``,
+ * so a capture on thread A is not invalidated by a free, allocation or
+ * destroy on thread B, and B's teardowns therefore run immediately. Only the
+ * capturing thread defers its own teardowns, and drains them when ITS
+ * outermost capture scope exits. A second top-level capture begun on a thread
+ * that already has one open is refused (:meth:`requireIdleThread`): a capture
+ * session is begun, filled and ended by one thread, one at a time per thread.
+ * Whole-device synchronisation by any thread invalidates every open capture
+ * (a CUDA rule, any mode); stream-level synchronisation is fine.
  *
  * @note Pure host-side bookkeeping -- no CUDA type appears in this header,
  *       so it compiles identically in ``EAGLE_CPU_ONLY`` mode (there is no
@@ -69,10 +73,19 @@ public:
     /** @brief Enter one capture scope. Call ONLY after the underlying
      *  ``cudaStream*Capture*`` call has SUCCEEDED (a failed begin never
      *  opened a capture, so it must not raise the depth). */
-    void enter()
+    void enter() { ++local().depth; }
+
+    /** @brief Refuse a top-level capture on a thread that already has one
+     *  open. Call BEFORE the underlying begin-capture call. A nested weave
+     *  (``CaptureConditional``) is part of the open session and does not
+     *  call this.
+     *  @throws std::logic_error  If this thread's capture depth is > 0. */
+    void requireIdleThread() const
     {
-        std::lock_guard<std::mutex> lock(mutex_);
-        ++depth_;
+        if (local().depth > 0)
+            throw std::logic_error(
+                "eagle: a capture is already open on this thread; a capture "
+                "session is begun, filled and ended by one thread, one at a time");
     }
 
     /** @brief Exit one capture scope. Symmetric with :meth:`enter` --
@@ -82,16 +95,12 @@ public:
     void exit()
     {
         std::vector<std::function<void()>> drained;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (depth_ > 0)
-                --depth_;
-            if (depth_ == 0)
-                drained.swap(pending_);
-        }
-        // Run outside the lock: a queued destroy must never re-enter this
-        // class while mutex_ is held (none currently do; this just keeps
-        // that true even if a future destroy op ever touched capture state).
+        Local& st = local();
+        if (st.depth > 0)
+            --st.depth;
+        if (st.depth == 0)
+            drained.swap(st.pending);
+        // Run after the swap: a queued destroy may re-enter this class.
         for (auto& op : drained)
             op();
     }
@@ -105,50 +114,19 @@ public:
      *  this method does not add or remove error handling. */
     void destroyOrDefer(std::function<void()> op)
     {
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (depth_ > 0) {
-                pending_.push_back(std::move(op));
-                return;
-            }
+        Local& st = local();
+        if (st.depth > 0) {
+            st.pending.push_back(std::move(op));
+            return;
         }
         op();
     }
 
     /** @brief Current capture depth (tests / diagnostics). */
-    int depth() const
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return depth_;
-    }
+    int depth() const { return local().depth; }
 
     /** @brief Number of destroys queued, not yet run (tests / diagnostics). */
-    std::size_t pendingCount() const
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return pending_.size();
-    }
-
-    /** @brief Process-exit backstop: run any still-pending destroys
-     *  regardless of depth, so an aborted/never-closed capture cannot leak
-     *  them forever. Never throws -- teardown-adjacent, same convention as
-     *  ``EAGLE_CHECK_NOTHROW`` call sites (a throwing destructor unwinding
-     *  during process teardown would abort rather than report). */
-    ~CaptureGuardState()
-    {
-        std::vector<std::function<void()>> drained;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            drained.swap(pending_);
-        }
-        for (auto& op : drained) {
-            try {
-                op();
-            } catch (...) {
-                // Swallowed deliberately: see the note above.
-            }
-        }
-    }
+    std::size_t pendingCount() const { return local().pending.size(); }
 
     CaptureGuardState(const CaptureGuardState&)            = delete;
     CaptureGuardState& operator=(const CaptureGuardState&) = delete;
@@ -156,9 +134,29 @@ public:
 private:
     CaptureGuardState() = default;
 
-    mutable std::mutex mutex_;
-    int depth_ = 0;
-    std::vector<std::function<void()>> pending_;
+    /** One thread's capture state. Its destructor is the thread-exit
+     *  backstop: any still-pending destroys of an aborted/never-closed
+     *  capture run then, so they cannot leak. Never throws (teardown). */
+    struct Local {
+        int depth = 0;
+        std::vector<std::function<void()>> pending;
+        ~Local()
+        {
+            for (auto& op : pending) {
+                try {
+                    op();
+                } catch (...) {
+                    // Swallowed deliberately: teardown-adjacent.
+                }
+            }
+        }
+    };
+
+    static Local& local()
+    {
+        static thread_local Local state;
+        return state;
+    }
 };
 
 /**

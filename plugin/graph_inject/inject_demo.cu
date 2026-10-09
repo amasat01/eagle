@@ -205,7 +205,7 @@ int run(int argc, char** argv) {
 
     // === capture the pipeline, injecting the plugin SET in the middle ==========
     cudaStream_t stream; RT_CHECK(cudaStreamCreate(&stream));
-    RT_CHECK(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal));
+    RT_CHECK(cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal));
 
     backend_pre<<<grid, block, 0, stream>>>(d_pos, d_vel, SCALE, d_spos, d_svel, N);
     RT_CHECK(cudaGetLastError());

@@ -108,8 +108,9 @@ public:
      */
     void begin()
     {
+        util::CaptureGuardState::instance().requireIdleThread();
         EAGLE_CHECK_ALWAYS(
-            cudaStreamBeginCapture(stream_, cudaStreamCaptureModeGlobal));
+            cudaStreamBeginCapture(stream_, cudaStreamCaptureModeThreadLocal));
         captureScope_.emplace();
     }
 

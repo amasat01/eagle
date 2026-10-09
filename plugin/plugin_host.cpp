@@ -238,7 +238,7 @@ int main(int argc, char** argv) {
 
     // ---- 2. launch as a node in a captured CUDA graph (replayed twice) -----
     CUstream stream; CU_CHECK(cuStreamCreate(&stream, CU_STREAM_NON_BLOCKING));
-    CU_CHECK(cuStreamBeginCapture(stream, CU_STREAM_CAPTURE_MODE_GLOBAL));
+    CU_CHECK(cuStreamBeginCapture(stream, CU_STREAM_CAPTURE_MODE_THREAD_LOCAL));
     CU_CHECK(cuMemsetD8Async(d_out, 0, vlen * sizeof(double), stream));  // reset accel
     CU_CHECK(cuLaunchKernel(fn, grid, 1, 1, block, 1, 1, 0, stream,
                             params.data(), nullptr));
