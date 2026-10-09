@@ -19,6 +19,8 @@ Real dtype ``dt`` threaded through here (:func:`eagle.dtypes.np_dtype`).
 
 from __future__ import annotations
 
+import threading
+
 import numpy as np
 
 from . import _layout
@@ -406,20 +408,24 @@ _ZERO_MASK_COUNTS = {"hits": 0, "misses": 0, "bypassed": 0}
 #: bytes of device memory for the process's life). Past the cap the cache
 #: bypasses -- a fresh private mask, same as an undeclared plugin gets.
 ZERO_MASK_CACHE_CAP = 64
+#: Serialises the cache, its cap and its tallies.
+_ZERO_MASK_LOCK = threading.Lock()
 
 
 def _zero_mask_stats() -> dict:
     """A copy of the opt-in zero-mask cache's counters (record-only).
     ``bypassed`` counts calls served a private mask past the cap."""
-    return dict(_ZERO_MASK_COUNTS)
+    with _ZERO_MASK_LOCK:
+        return dict(_ZERO_MASK_COUNTS)
 
 
 def _reset_zero_mask_cache() -> None:
     """Drop the cached masks and zero their counters (tests / teardown)."""
-    _zero_mask_cache.clear()
-    _ZERO_MASK_COUNTS["hits"] = 0
-    _ZERO_MASK_COUNTS["misses"] = 0
-    _ZERO_MASK_COUNTS["bypassed"] = 0
+    with _ZERO_MASK_LOCK:
+        _zero_mask_cache.clear()
+        _ZERO_MASK_COUNTS["hits"] = 0
+        _ZERO_MASK_COUNTS["misses"] = 0
+        _ZERO_MASK_COUNTS["bypassed"] = 0
 
 
 def _cached_zero_mask(n, cp):
@@ -427,17 +433,19 @@ def _cached_zero_mask(n, cp):
     keyed on ``(device, n)``. Only reached for a plugin that declared the
     mask read-only."""
     key = (int(cp.cuda.runtime.getDevice()), int(n))
-    mask = _zero_mask_cache.get(key)
-    if mask is not None:
-        _ZERO_MASK_COUNTS["hits"] += 1
-        return mask
-    if len(_zero_mask_cache) >= ZERO_MASK_CACHE_CAP:
-        _ZERO_MASK_COUNTS["bypassed"] += 1
-        return cp.zeros(int(n), dtype=cp.bool_)
-    _ZERO_MASK_COUNTS["misses"] += 1
-    mask = cp.zeros(int(n), dtype=cp.bool_)
-    _zero_mask_cache[key] = mask
-    return mask
+    with _ZERO_MASK_LOCK:
+        mask = _zero_mask_cache.get(key)
+        if mask is not None:
+            _ZERO_MASK_COUNTS["hits"] += 1
+            return mask
+        if len(_zero_mask_cache) >= ZERO_MASK_CACHE_CAP:
+            _ZERO_MASK_COUNTS["bypassed"] += 1
+        else:
+            _ZERO_MASK_COUNTS["misses"] += 1
+            mask = cp.zeros(int(n), dtype=cp.bool_)
+            _zero_mask_cache[key] = mask
+            return mask
+    return cp.zeros(int(n), dtype=cp.bool_)
 
 
 def coerce_terminated(kw, n, *, readonly_mask=False):

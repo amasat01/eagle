@@ -28,6 +28,8 @@ re-exporting through ``__dlpack__`` under the DLPack 1.0 stream contract.
 
 from __future__ import annotations
 
+import threading
+
 # kDLCUDA in the DLPack device taxonomy (matching aether's own device tag).
 _KDLCUDA = 2
 
@@ -72,20 +74,24 @@ def _is_cuda(x) -> bool:
 # stream at the same address.
 _external_stream_cache: dict = {}
 _EXTERNAL_STREAM_COUNTS = {"hits": 0, "misses": 0}
+#: Serialises the cache and its tallies: one wrapper per handle, exact counts.
+_EXTERNAL_STREAM_LOCK = threading.Lock()
 
 
 def _external_stream_stats() -> dict:
     """A copy of the :func:`external_stream` cache's hit/miss counters
     (record-only; the gate reads them)."""
-    return dict(_EXTERNAL_STREAM_COUNTS)
+    with _EXTERNAL_STREAM_LOCK:
+        return dict(_EXTERNAL_STREAM_COUNTS)
 
 
 def _reset_external_stream_cache() -> None:
     """Drop the cached ``ExternalStream`` wrappers and zero their counters
     (tests / teardown)."""
-    _external_stream_cache.clear()
-    _EXTERNAL_STREAM_COUNTS["hits"] = 0
-    _EXTERNAL_STREAM_COUNTS["misses"] = 0
+    with _EXTERNAL_STREAM_LOCK:
+        _external_stream_cache.clear()
+        _EXTERNAL_STREAM_COUNTS["hits"] = 0
+        _EXTERNAL_STREAM_COUNTS["misses"] = 0
 
 
 class _StreamProtocol:
@@ -118,14 +124,15 @@ def external_stream(ptr: int):
     """The cached ``cupy.cuda.ExternalStream`` wrapping raw handle ``ptr``
     (same handle -> same wrapper object, identity not equality)."""
     key = int(ptr)
-    stream = _external_stream_cache.get(key)
-    if stream is None:
-        _EXTERNAL_STREAM_COUNTS["misses"] += 1
-        stream = _wrap_external_stream(key)
-        _external_stream_cache[key] = stream
-    else:
-        _EXTERNAL_STREAM_COUNTS["hits"] += 1
-    return stream
+    with _EXTERNAL_STREAM_LOCK:
+        stream = _external_stream_cache.get(key)
+        if stream is None:
+            _EXTERNAL_STREAM_COUNTS["misses"] += 1
+            stream = _wrap_external_stream(key)
+            _external_stream_cache[key] = stream
+        else:
+            _EXTERNAL_STREAM_COUNTS["hits"] += 1
+        return stream
 
 
 class Adapter:

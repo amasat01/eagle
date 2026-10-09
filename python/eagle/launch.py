@@ -17,6 +17,8 @@ inherits.
 
 from __future__ import annotations
 
+import threading
+
 import numpy as np
 from raptor.schema.manifest import KERNEL_NAME
 
@@ -51,6 +53,9 @@ _device_props_cache = None
 #: per-kernel-object ``.attributes`` cache (captured at first launch, never
 #: re-queried -- replay-critical paths must not re-touch the driver).
 _kernel_attrs_cache: dict = {}
+#: Serialises the check-cap-insert of :data:`_kernel_attrs_cache` (its lookup
+#: fast path stays lock-free: a dict read is atomic and entries never change).
+_KERNEL_ATTRS_LOCK = threading.Lock()
 
 #: The hard cap on :data:`_kernel_attrs_cache`. Never evicts (an eviction
 #: would re-query the driver on a replay-critical path), so growth past the
@@ -67,7 +72,8 @@ class KernelAttrsCacheFull(RuntimeError):
 
 def _reset_kernel_attrs_cache() -> None:
     """Empty the per-kernel ``.attributes`` cache (tests / teardown only)."""
-    _kernel_attrs_cache.clear()
+    with _KERNEL_ATTRS_LOCK:
+        _kernel_attrs_cache.clear()
 
 
 def _device_props():
@@ -92,7 +98,12 @@ def _kernel_attrs(fn):
     :data:`KERNEL_ATTRS_CACHE_CAP`, refusing growth past it
     (:class:`KernelAttrsCacheFull`) rather than evicting."""
     cached = _kernel_attrs_cache.get(fn)
-    if cached is None:
+    if cached is not None:
+        return cached
+    with _KERNEL_ATTRS_LOCK:
+        cached = _kernel_attrs_cache.get(fn)
+        if cached is not None:
+            return cached
         if len(_kernel_attrs_cache) >= KERNEL_ATTRS_CACHE_CAP:
             raise KernelAttrsCacheFull(
                 f"eagle.launch._kernel_attrs_cache is full at "
@@ -174,19 +185,23 @@ def _mat_mutables(mdecl) -> set:
 #: Two kernels with the same signature share a plan by design.
 _launch_plan_cache: dict = {}
 _LAUNCH_PLAN_COUNTS = {"hits": 0, "misses": 0}
+#: Serialises the plan cache and its tallies: one plan per key, exact counts.
+_LAUNCH_PLAN_LOCK = threading.Lock()
 
 
 def _launch_plan_stats() -> dict:
     """A copy of the :class:`LaunchPlan` cache's hit/miss counters
     (record-only; the gate reads them)."""
-    return dict(_LAUNCH_PLAN_COUNTS)
+    with _LAUNCH_PLAN_LOCK:
+        return dict(_LAUNCH_PLAN_COUNTS)
 
 
 def _reset_launch_plan_cache() -> None:
     """Empty the plan cache and zero its counters (tests / teardown)."""
-    _launch_plan_cache.clear()
-    _LAUNCH_PLAN_COUNTS["hits"] = 0
-    _LAUNCH_PLAN_COUNTS["misses"] = 0
+    with _LAUNCH_PLAN_LOCK:
+        _launch_plan_cache.clear()
+        _LAUNCH_PLAN_COUNTS["hits"] = 0
+        _LAUNCH_PLAN_COUNTS["misses"] = 0
 
 
 def _new_box(tag):
@@ -278,14 +293,15 @@ def launch_plan(arg_spec, vec_mutables=(), mat_mutables=()) -> LaunchPlan:
         frozenset(vec_mutables),
         frozenset(mat_mutables),
     )
-    plan = _launch_plan_cache.get(key)
-    if plan is None:
-        _LAUNCH_PLAN_COUNTS["misses"] += 1
-        plan = LaunchPlan(key[0], key[1], key[2])
-        _launch_plan_cache[key] = plan
-    else:
-        _LAUNCH_PLAN_COUNTS["hits"] += 1
-    return plan
+    with _LAUNCH_PLAN_LOCK:
+        plan = _launch_plan_cache.get(key)
+        if plan is None:
+            _LAUNCH_PLAN_COUNTS["misses"] += 1
+            plan = LaunchPlan(key[0], key[1], key[2])
+            _launch_plan_cache[key] = plan
+        else:
+            _LAUNCH_PLAN_COUNTS["hits"] += 1
+        return plan
 
 
 def assemble_args(

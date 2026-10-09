@@ -25,6 +25,7 @@ from __future__ import annotations
 import hashlib
 import json
 import pathlib
+import threading
 from collections.abc import Callable
 
 #: The bounded per-process memo of loaded plugins, keyed by the CONTENT of the
@@ -52,6 +53,10 @@ _LAZY_PROVIDERS: dict = {}
 #: The entry-point group, scanned exactly once (see ``_entry_points_scanned``).
 _ENTRY_POINT_GROUP = "raptor.pattern_loaders"
 _entry_points_scanned = False
+#: Guards the one-time scan. Re-entrant, and the scanning thread is recorded,
+#: because a provider imported by the scan may resolve a pattern itself.
+_ENTRY_POINT_LOCK = threading.RLock()
+_entry_points_scanning_thread = None
 
 
 def _clear_plugin_memo() -> None:
@@ -120,20 +125,28 @@ def _discover_entry_points() -> None:
     """Scan :data:`_ENTRY_POINT_GROUP` once, caching every discovered loader
     into :data:`_PATTERN_LOADERS` (a name already registered is never
     overwritten)."""
-    global _entry_points_scanned
+    global _entry_points_scanned, _entry_points_scanning_thread
     if _entry_points_scanned:
         return
-    _entry_points_scanned = True
+    with _ENTRY_POINT_LOCK:
+        # a racing thread waits here for the winner's scan to FINISH, so the
+        # flag is only ever set once every discovered loader is registered
+        if _entry_points_scanned or _entry_points_scanning_thread == threading.get_ident():
+            return
+        _entry_points_scanning_thread = threading.get_ident()
+        try:
+            import importlib.metadata as metadata
 
-    import importlib.metadata as metadata
-
-    try:
-        eps = metadata.entry_points(group=_ENTRY_POINT_GROUP)
-    except TypeError:  # Python 3.9: entry_points() takes no group= kwarg
-        eps = metadata.entry_points().get(_ENTRY_POINT_GROUP, ())
-    for ep in eps:
-        if ep.name not in _PATTERN_LOADERS:
-            _PATTERN_LOADERS[ep.name] = ep.load()
+            try:
+                eps = metadata.entry_points(group=_ENTRY_POINT_GROUP)
+            except TypeError:  # Python 3.9: entry_points() takes no group= kwarg
+                eps = metadata.entry_points().get(_ENTRY_POINT_GROUP, ())
+            for ep in eps:
+                if ep.name not in _PATTERN_LOADERS:
+                    _PATTERN_LOADERS[ep.name] = ep.load()
+            _entry_points_scanned = True
+        finally:
+            _entry_points_scanning_thread = None
 
 
 def _resolve_pattern_loader(pattern: str) -> Callable:

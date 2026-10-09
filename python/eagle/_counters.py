@@ -35,6 +35,12 @@ calls to mechanisms this module does not otherwise change.
 
 from __future__ import annotations
 
+import threading
+
+#: Serialises :func:`bump`: ``+= 1`` on a dict slot is a read-modify-write, and
+#: on a free-threaded interpreter two threads would lose increments.
+_LOCK = threading.Lock()
+
 _COUNTERS: dict = {
     "captures": 0,
     "instantiations": 0,
@@ -57,7 +63,8 @@ def bump(name: str) -> None:
             f"eagle._counters.bump: {name!r} is not one of "
             f"{sorted(_COUNTERS)}"
         )
-    _COUNTERS[name] += 1
+    with _LOCK:
+        _COUNTERS[name] += 1
 
 
 def snapshot() -> dict:
@@ -66,4 +73,5 @@ def snapshot() -> dict:
     Reading never touches the device — this is pure Python bookkeeping, so a
     caller may snapshot from any thread/process context that can import this
     module at all."""
-    return dict(_COUNTERS)
+    with _LOCK:
+        return dict(_COUNTERS)

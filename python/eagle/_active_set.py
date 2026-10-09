@@ -30,6 +30,7 @@ the same compaction and reorder bit-identically.
 
 from __future__ import annotations
 
+import threading
 import weakref
 
 from .roles import PER_SAMPLE_ROLES
@@ -61,6 +62,18 @@ _MASK_IS_DROP = 1  # EAGLE_BACKEND_COMPACT_MASK_IS_DROP
 
 #: Every live ActiveSet that reorders (the owned-plane registry).
 _REORDERING = weakref.WeakSet()
+#: Guards :data:`_REORDERING` and the claim-then-register sequence that admits a
+#: set into it: every scan takes its snapshot under this lock, and a set's claim
+#: on its planes and its registration are one critical section, so two threads
+#: cannot both be admitted for the same plane. Re-entrant (``_claim`` snapshots).
+_REORDER_LOCK = threading.RLock()
+
+
+def _reordering_snapshot() -> list:
+    """The reordering sets alive right now, copied under :data:`_REORDER_LOCK`."""
+    with _REORDER_LOCK:
+        return list(_REORDERING)
+
 
 __all__ = ["ActiveSet", "compaction_body", "MAP_PLANE", "COUNT_PLANE",
            "DEFAULT_EVERY", "MIN_EVERY", "DEFAULT_THETA", "THETA_RANGE"]
@@ -145,7 +158,7 @@ def refuse_if_permuted(obj, door: str) -> None:
     where = _address(obj)
     if where is None or where[1] == 0:
         return
-    for aset in list(_REORDERING):
+    for aset in _reordering_snapshot():
         if any(_overlaps(where, r) for r in aset._owned_ranges()) and aset.permuted:
             raise ValueError(
                 f"{door}: this array is a plane an eagle.ActiveSet owns, and its "
@@ -160,7 +173,7 @@ def check_bound_planes(index_map, bound) -> None:
     declared indirect, and the set's planes are fixed from here on. A set
     that does not reorder (or a map no set owns) has nothing to check."""
     where = _address(index_map)
-    aset = next((a for a in list(_REORDERING)
+    aset = next((a for a in _reordering_snapshot()
                  if where is not None and _address(a.map)[0] == where[0]), None)
     if aset is None:
         return
@@ -245,16 +258,17 @@ class ActiveSet:
         self.perm = self.inv = self.span = self.fire = self.live32 = None
         self.reorders = self._zero = None
         if self.theta is not None:
-            self._claim(mask)
-            self.perm = xp.empty(n, dtype=xp.int32)
-            self.inv = xp.empty(n, dtype=xp.int32)
-            self.span = xp.zeros(1, dtype=xp.uint32)
-            self.fire = xp.zeros(1, dtype=xp.uint32)
-            self.live32 = xp.zeros(1, dtype=xp.uint32)
-            self.reorders = xp.zeros(1, dtype=xp.uint32)
-            self._zero = xp.zeros(1, dtype=xp.uint32)
-            self._owned.append(mask)
-            _REORDERING.add(self)
+            with _REORDER_LOCK:
+                self._claim(mask)
+                self.perm = xp.empty(n, dtype=xp.int32)
+                self.inv = xp.empty(n, dtype=xp.int32)
+                self.span = xp.zeros(1, dtype=xp.uint32)
+                self.fire = xp.zeros(1, dtype=xp.uint32)
+                self.live32 = xp.zeros(1, dtype=xp.uint32)
+                self.reorders = xp.zeros(1, dtype=xp.uint32)
+                self._zero = xp.zeros(1, dtype=xp.uint32)
+                self._owned.append(mask)
+                _REORDERING.add(self)
         if not _lazy_scratch:  # eagle.until_done defers it to its compacting loops
             self.prepare_compaction()
         self.reset()
@@ -395,7 +409,7 @@ class ActiveSet:
     def _claim(self, arr) -> None:
         """Refuse ``arr`` if it overlaps a plane any reordering set owns."""
         where = _address(arr)
-        for other in list(_REORDERING):
+        for other in _reordering_snapshot():
             for r in other._owned_ranges():
                 if where[1] and r[1] and _overlaps(where, r):
                     who = "this set" if other is self else "another ActiveSet"
@@ -432,8 +446,9 @@ class ActiveSet:
                 "bound (or its reorder step built); own every plane before bind")
         for arr in planes:
             self._check_plane(arr, "own")
-            self._claim(arr)
-            self._owned.append(arr)
+            with _REORDER_LOCK:
+                self._claim(arr)
+                self._owned.append(arr)
         return self
 
     def indirect(self, *planes) -> "ActiveSet":
