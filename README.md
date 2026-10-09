@@ -216,6 +216,7 @@ The five-arm table below is the headline cut (both distributions, N = 1,000,000)
 
 <!-- stale-prose-gate:
 benchmarks/perf_card/card_quadro-p2000.json: d37837fb31567858848e5f1830f19431
+benchmarks/perf_card/cpu_card_intel-xeon-w-2125.json: 5bb591471e7758948a1a2f4994dc575b
 -->
 
 <!-- cards:begin -->
@@ -238,6 +239,18 @@ Measured on:
 - [Tesla T4](https://amasat01.github.io/eagle/content/performance.html#perf-card-gpu-tesla-t4)
 - [Intel Xeon W-2125 CPU @ 4.00GHz](https://amasat01.github.io/eagle/content/performance.html#perf-card-cpu-intel-xeon-w-2125)
 <!-- cards:end -->
+
+<!-- cpu-cards:begin -->
+**On a CPU alone: Intel(R) Xeon(R) W-2125 CPU @ 4.00GHz, 4 cores, card of 2026-10-08**
+
+| Arm (N = 1,000,000) | spread S=1000 wall | uniform S=1000 wall | vs eagle 8 threads (spread) |
+|---|---:|---:|---:|
+| eagle host, termination loop, up to 8 threads | 145 ms | 194 ms | 1× |
+| Numba prange, 8 threads | 501 ms | 2.17 s | 3.46× |
+| JAX sharded over 8 CPU devices | 4.97 s | 4.95 s | 34.3× |
+| PyTorch masked, 8 threads | 33.4 s | 33.8 s | 231× |
+| NumPy masked | 62.9 s | 60.7 s | 434× |
+<!-- cpu-cards:end -->
 
 Figures are written by `tools/sync_readme_cards.py` from the card JSON (the
 same numbers `card_quadro-p2000.md` renders): wall time and rates rounded to 3

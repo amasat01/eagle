@@ -804,3 +804,66 @@ def test_no_nvml_skips_the_gate_and_the_clock(monkeypatch):
     stat = pf._arm_stat(walls, meta)
     assert "cycles" not in stat and "sm_mhz" not in stat
     assert pf._gate_sentence() == ""
+
+
+# --------------------------------------------------------------------------- #
+# The README's CPU block (<!-- cpu-cards:begin --> ... <!-- cpu-cards:end -->):
+# one heading and one compact table per cpu_card_*.json, pinned the way the
+# GPU rows above are.
+# --------------------------------------------------------------------------- #
+#: arm -> N = 1,000,000 rows shown; kept in lockstep with
+#: ``tools/sync_readme_cards.py``'s CPU_ARMS by hand (this test catches drift).
+_README_CPU_ARMS = ("eagle_term8", "numba_prange", "jax_shard8", "torch_masked",
+                    "numpy_masked")
+
+
+def _readme_cpu_block():
+    text = _README.read_text()
+    begin, end = "<!-- cpu-cards:begin -->", "<!-- cpu-cards:end -->"
+    assert begin in text and end in text, "README.md has no cpu-cards block"
+    start = text.index(begin) + len(begin)
+    return text[start:text.index(end, start)]
+
+
+def test_readme_cpu_block_matches_every_cpu_card():
+    """Each CPU card is named by a heading (model, cores, card date) and its
+    rows (spread / uniform S=1000 wall at the largest N, and the ratio to
+    eagle on 8 threads) are re-derived here from the card JSON.
+
+    RED: edit a number in the cpu-cards block, or re-run a CPU card without
+    re-running ``tools/sync_readme_cards.py``, and this names the cell."""
+    block = _readme_cpu_block()
+    cards = _cpu_cards()
+    assert cards, "no committed cpu_card_*.json"
+    module = _card_common()
+    for path in cards:
+        card = json.loads(path.read_text())
+        cpu = card["cpu"]
+        heading = (f"On a CPU alone: {cpu['model']}, {cpu['cores']} cores, "
+                   f"card of {card['generated_utc'][:10]}")
+        assert heading in block, f"README cpu block is missing {heading!r}"
+        n = max(card["ns"])
+        rows = {(r["distribution"], r["max_steps"], r["arm"]): r
+                for r in card["results"] if r["n"] == n}
+        base = module.center(rows[("spread", 1000, "eagle_term8")]["wall_s"])
+        for arm in _README_CPU_ARMS:
+            sp = module.center(rows[("spread", 1000, arm)]["wall_s"])
+            un = module.center(rows[("uniform", 1000, arm)]["wall_s"])
+            row = (f"| {card['arm_labels'][arm]} | {module.fmt_time(sp)} "
+                   f"| {module.fmt_time(un)} | {sp / base:.3g}× |")
+            assert row in block, (
+                f"README cpu block is missing {row!r} (re-derived from {path.name}) "
+                "-- the table has drifted from the card")
+
+
+def test_readme_stale_prose_gate_lists_the_cpu_cards():
+    """The README's stale-prose-gate comment carries every committed CPU card's
+    md5 (its CPU block and the prose around it were checked against them)."""
+    m = _STALE_GATE_RE.search(_README.read_text())
+    assert m, "README.md has no stale-prose-gate comment"
+    entries = dict(_STALE_LINE_RE.findall(m.group(1)))
+    for path in _cpu_cards():
+        rel = f"benchmarks/perf_card/{path.name}"
+        assert rel in entries, f"stale-prose-gate comment does not list {rel}"
+        assert entries[rel] == hashlib.md5(path.read_bytes()).hexdigest(), (
+            f"{rel} changed since the README's gate comment was written")

@@ -4,6 +4,9 @@
 
 """Regenerate README.md's Performance table from the committed perf_card cards.
 
+A second block, between ``<!-- cpu-cards:begin -->`` / ``<!-- cpu-cards:end -->``
+right after it, shows each CPU card (every ``cpu_card_*.json``) the same way.
+
 The headline table (N = 1,000,000, five arms, both distributions) used to be
 hand-copied from ``card_quadro-p2000.md``; it now lives between
 ``<!-- cards:begin -->`` / ``<!-- cards:end -->`` markers in README.md, and
@@ -39,6 +42,7 @@ import gen_perf_pages as gp  # noqa: E402
 
 README = _REPO / "README.md"
 BEGIN, END = "<!-- cards:begin -->", "<!-- cards:end -->"
+CPU_BEGIN, CPU_END = "<!-- cpu-cards:begin -->", "<!-- cpu-cards:end -->"
 REFERENCE_CARD = _REPO / "benchmarks" / "perf_card" / "card_quadro-p2000.json"
 _DOCS_BASE = "https://amasat01.github.io/eagle/content/performance.html"
 
@@ -86,6 +90,47 @@ def render_table(card: dict) -> str:
     return "\n".join(lines)
 
 
+#: The CPU block's arms: the same five tools the landing page charts (every
+#: other arm lives on the full card). Kept in lockstep with
+#: ``python/tests/test_perf_card_table.py``.
+CPU_ARMS = ("eagle_term8", "numba_prange", "jax_shard8", "torch_masked",
+            "numpy_masked")
+CPU_BASE_ARM = "eagle_term8"
+CPU_SPEC_KEY = "perf_card_cpu"
+
+
+def render_cpu_table(card: dict) -> str:
+    n = max(card["ns"])
+    by_key = {(r["distribution"], r["max_steps"], r["n"], r["arm"]): r
+              for r in card["results"]}
+    labels = card["arm_labels"]
+    base = by_key[("spread", MAX_STEPS, n, CPU_BASE_ARM)]["wall_s"]
+    lines = [f"| Arm (N = {n:,}) | spread S={MAX_STEPS} wall | uniform S={MAX_STEPS} wall "
+             "| vs eagle 8 threads (spread) |",
+             "|---|---:|---:|---:|"]
+    for arm in CPU_ARMS:
+        sp = by_key[("spread", MAX_STEPS, n, arm)]["wall_s"]
+        un = by_key[("uniform", MAX_STEPS, n, arm)]["wall_s"]
+        ratio = f"{cc.center(sp) / cc.center(base):.3g}\u00d7"
+        lines.append(f"| {labels[arm]} | {cc.fmt_time(cc.center(sp))} "
+                     f"| {cc.fmt_time(cc.center(un))} | {ratio} |")
+    return "\n".join(lines)
+
+
+def render_cpu_heading(card: dict) -> str:
+    cpu = card["cpu"]
+    return (f"**On a CPU alone: {cpu['model']}, {cpu['cores']} cores, "
+            f"card of {card['generated_utc'][:10]}**")
+
+
+def render_cpu_block(eagle_root: pathlib.Path) -> str:
+    spec = next(f for f in gp.FAMILIES if f["key"] == CPU_SPEC_KEY)
+    parts = []
+    for e in gp.load_family(eagle_root, spec):
+        parts.append(render_cpu_heading(e["card"]) + "\n\n" + render_cpu_table(e["card"]))
+    return "\n\n".join(parts)
+
+
 def render_measured_on(eagle_root: pathlib.Path) -> str:
     lines = ["Measured on:", ""]
     for key in ("perf_card_gpu", "perf_card_cpu"):
@@ -118,15 +163,18 @@ def main(argv=None):
     end = text.index(END, start)
     rendered = render_block(_REPO)
     new_text = f"{text[:start]}\n{rendered}\n{text[end:]}"
+    cstart = new_text.index(CPU_BEGIN) + len(CPU_BEGIN)
+    cend = new_text.index(CPU_END, cstart)
+    new_text = f"{new_text[:cstart]}\n{render_cpu_block(_REPO)}\n{new_text[cend:]}"
 
     if args.check:
         if new_text != text:
-            print("README.md's cards block is stale; run tools/sync_readme_cards.py")
+            print("README.md's cards blocks are stale; run tools/sync_readme_cards.py")
             return 1
-        print("README.md's cards block is up to date")
+        print("README.md's cards blocks are up to date")
         return 0
     README.write_text(new_text)
-    print("wrote README.md's cards block")
+    print("wrote README.md's cards blocks")
     return 0
 
 
