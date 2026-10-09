@@ -12,6 +12,9 @@ resolve there and eagle runs on the CPU route. The package's own code no longer
 uses `zip(strict=True)` directly, which needs Python 3.10.
 Stream wrapping uses `Stream.from_external` on CuPy 14 (no more `ExternalStream`
 DeprecationWarning), falling back to `ExternalStream` on CuPy 13.
+Host buffer import on NumPy older than 2.1 (no DLPack read-only signalling, e.g. the
+last NumPy for Python 3.9) now reads access from `__array_interface__`, so read-only
+arrays import as read-only instead of raising or reporting `unknown`.
 
 ## 0.4.0 (first public release)
 

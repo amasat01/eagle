@@ -22,6 +22,8 @@ import pytest
 
 pytest.importorskip("eagle._core")
 
+_NUMPY_VERSIONED_DLPACK = tuple(int(x) for x in np.__version__.split(".")[:2]) >= (2, 1)
+
 from eagle import _core  # noqa: E402
 from eagle.interop import (  # noqa: E402
     BufferRefused,
@@ -74,9 +76,31 @@ def test_numpy_read_only_reports_read_only_and_exports_read_only():
     v = import_buffer(a)
     assert v.access == "read-only"
     assert not v.writable
-    back = np.from_dlpack(v)
-    assert back.ctypes.data == a.ctypes.data
-    assert not back.flags.writeable
+    if _NUMPY_VERSIONED_DLPACK:
+        back = np.from_dlpack(v)
+        assert back.ctypes.data == a.ctypes.data
+        assert not back.flags.writeable
+    else:
+        # NumPy < 2.1 consumes only legacy capsules, which cannot carry
+        # read-only: the re-export is refused rather than silently writable.
+        with pytest.raises(RuntimeError, match="legacy DLPack"):
+            np.from_dlpack(v)
+
+
+@pytest.mark.skipif(not _NUMPY_VERSIONED_DLPACK,
+                    reason="needs a numpy that speaks versioned DLPack")
+def test_versioned_dlpack_producer_keeps_the_dlpack_path(monkeypatch):
+    # The __array_interface__ fallback is only for producers that cannot signal
+    # access: a versioned-DLPack producer must take the DLPack path unchanged.
+    seen = []
+    real = _core.InteropBuffer.from_capsule
+    monkeypatch.setattr(_core.InteropBuffer, "from_capsule",
+                        staticmethod(lambda *a: (seen.append(1), real(*a))[1]))
+    a = np.arange(4.0)
+    assert import_buffer(a).access == "read-write"
+    a.flags.writeable = False
+    assert import_buffer(a).access == "read-only"
+    assert len(seen) == 2
 
 
 def test_numpy_view_survives_del_producer_and_reexports():

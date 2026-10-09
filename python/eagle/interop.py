@@ -501,6 +501,16 @@ def _producer_name(obj) -> str:
     return f"{t.__module__.partition('.')[0]}.{t.__qualname__}"
 
 
+def _capsule_name(capsule) -> bytes:
+    """The PyCapsule name: ``dltensor`` (legacy) or ``dltensor_versioned``."""
+    import ctypes
+
+    f = ctypes.pythonapi.PyCapsule_GetName
+    f.restype = ctypes.c_char_p
+    f.argtypes = [ctypes.py_object]
+    return f(capsule)
+
+
 def _core_buffer_from(obj, stream):
     """The bound record for ``obj``: DLPack first (versioned, then legacy),
     then ``__cuda_array_interface__``, then ``__array_interface__``."""
@@ -519,11 +529,23 @@ def _core_buffer_from(obj, stream):
             raise _core.InteropError(
                 f"stream: a CPU buffer takes no stream, got {stream}")
         kw = {} if on_cpu else {"stream": stream}
+        # A host producer that cannot signal access through DLPack (NumPy < 2.1:
+        # legacy capsule, and BufferError on read-only arrays) is imported via
+        # __array_interface__, which carries the read-only flag.
+        ai_ok = on_cpu and hasattr(obj, "__array_interface__")
         try:
-            capsule = obj.__dlpack__(max_version=(1, 0), **kw)
-        except TypeError:
-            capsule = obj.__dlpack__(**kw)
-        return _core.InteropBuffer.from_capsule(capsule, producer, stream)
+            try:
+                capsule = obj.__dlpack__(max_version=(1, 0), **kw)
+            except TypeError:
+                capsule = obj.__dlpack__(**kw)
+        except BufferError:
+            if not ai_ok:
+                raise
+            capsule = None
+        if capsule is not None and not (
+                ai_ok and _capsule_name(capsule) != b"dltensor_versioned"):
+            return _core.InteropBuffer.from_capsule(capsule, producer, stream)
+        del capsule
     cai = getattr(obj, "__cuda_array_interface__", None)
     if cai is not None:
         ptr, read_only = cai["data"]
