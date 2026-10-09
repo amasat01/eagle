@@ -37,6 +37,7 @@ from __future__ import annotations
 import inspect
 import time
 
+from ._compat import zip_strict
 from ._until_done import (
     _RESERVED,
     _array_module,
@@ -136,7 +137,7 @@ def _declarations(plans, names) -> dict:
     """``{plane: (role, width, dtype, kernel)}`` over the whole pipeline,
     refusing one name declared two ways (family, width or dtype)."""
     seen = {}
-    for plan, kname in zip(plans, names, strict=True):
+    for plan, kname in zip_strict(plans, names):
         plugin = plan.plugin
         widths = getattr(plugin, "arg_widths", None) or {}
         dtypes = getattr(plugin, "arg_dtypes", None) or {}
@@ -177,7 +178,7 @@ def _guards(plans, kernels, names) -> tuple:
     from ._active_set import COUNT_PLANE, MAP_PLANE
 
     first = None
-    for plan, kernel, kname in zip(plans, kernels, names, strict=True):
+    for plan, kernel, kname in zip_strict(plans, kernels, names):
         spec = tuple(tuple(p) for p in plan.plugin.arg_spec)
         masks = [nm for role, nm in spec if role == "terminated"]
         lookups = {nm for role, nm in spec if role == "lookup"}
@@ -210,7 +211,7 @@ def _guards(plans, kernels, names) -> tuple:
 
 def _finishers(plans, names) -> list:
     """The indices of the kernels that finish their own samples."""
-    return [i for i, (p, nm) in enumerate(zip(plans, names, strict=True))
+    return [i for i, (p, nm) in enumerate(zip_strict(plans, names))
             if _finish_of(p.plugin, nm) is not None]
 
 
@@ -223,7 +224,7 @@ def _declared_order(plans, kernels, decl) -> list:
     wrap), or -- an item with no raw kernel, a prebuilt plan -- its
     plugin's ``arg_spec`` order."""
     order, seen = [], set()
-    for plan, kernel in zip(plans, kernels, strict=True):
+    for plan, kernel in zip_strict(plans, kernels):
         source = (kernel.planes if kernel is not None
                  else dict.fromkeys(nm for _role, nm in plan.plugin.arg_spec))
         for nm in source:
@@ -472,7 +473,7 @@ class Simulation:
                  every=None, reorder=None, scalar_type=None):
         items = _model_items(model, until)
         plans, kernels = _deploy(items, scalar_type)
-        names = [_name(p, k) for p, k in zip(plans, kernels, strict=True)]
+        names = [_name(p, k) for p, k in zip_strict(plans, kernels)]
         decl = _declarations(plans, names)
         mask, compacting = _guards(plans, kernels, names)
         kname = names[0]

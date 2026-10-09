@@ -43,6 +43,7 @@ from ._active_set import (
     ActiveSet,
     compaction_body,
 )
+from ._compat import zip_strict
 from ._conditional import SkipGuard, Skippable, repeat_while
 from .roles import PER_SAMPLE_ROLES
 from .sidecar import FINISH_AUTO, FINISH_COUNTER, read_finish
@@ -417,7 +418,7 @@ def _step_planes(plans, specs, planes) -> tuple:
             f"eagle.until_done: {unknown} name no plane of the step's plans "
             f"(their planes: {sorted(declared)})")
     views = {}
-    for plan, spec in zip(plans, specs, strict=True):
+    for plan, spec in zip_strict(plans, specs):
         sub = {nm: planes[nm] for _role, nm in spec if nm in planes}
         adapted, _ = _adapt_planes(plan.plugin, spec, sub, door="bind",
                                    single_only=True)
@@ -492,7 +493,7 @@ class Runner:
         names = [_kernel_name(p.plugin) for p in plans]
         specs = [tuple(tuple(pair) for pair in p.plugin.arg_spec) for p in plans]
         max_steps = _check_count("max_steps", max_steps)
-        finishes = [_finish_of(p.plugin, nm) for p, nm in zip(plans, names, strict=True)]
+        finishes = [_finish_of(p.plugin, nm) for p, nm in zip_strict(plans, names)]
         finishers = [i for i, f in enumerate(finishes) if f is not None]
         if not finishers:
             raise ValueError(
@@ -584,7 +585,7 @@ class Runner:
                 active.own(*owned)
 
         bound = []
-        for plan_i, spec in zip(plans, specs, strict=True):
+        for plan_i, spec in zip_strict(plans, specs):
             if len(plans) == 1:
                 bind = dict(planes)
             else:

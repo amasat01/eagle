@@ -7,7 +7,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "raptor-eagle"
-version = "0.4.0"
+version = "0.4.1"
 description = "EAGLE — the Python face of the launch engine for compiled CUDA kernels"
 # The repo root's README.md, one level above this pyproject.toml (eagle's
 # Python packaging lives in python/, the README does not — see the repo's
@@ -36,18 +36,20 @@ description = "EAGLE — the Python face of the launch engine for compiled CUDA 
 # runs it, not with the combined `python -m build` invocation that this
 # package does not support.
 readme = "../README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.9"
 license = { text = "Apache-2.0" }
 # Python versions match the cibuildwheel matrix publish.yml actually builds
-# and the test-wheel job actually runs (cp310-cp313, manylinux_2_28 x86_64) —
+# and the test-wheel job actually runs (cp39-cp314 plus the free-threaded cp313t/cp314t, manylinux_2_28 x86_64) —
 # never wider than what a real wheel ships.
 classifiers = [
     "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Operating System :: POSIX :: Linux",
     "Environment :: GPU :: NVIDIA CUDA",
     "Topic :: Scientific/Engineering",
@@ -78,9 +80,24 @@ dependencies = ["numpy", "raptor-core>=0.2.0,<0.3"]
 # CuPy compiles its kernels at run time and needs the CUDA runtime headers and NVRTC:
 # cuda-toolkit[cudart,nvrtc] brings exactly those as pip wheels (no system toolkit),
 # without the math libraries CuPy's own [ctk] extra adds (cuBLAS, cuFFT, ...).
-cuda12 = ["cupy-cuda12x>=14", "cuda-toolkit[cudart,nvrtc]==12.*"]
-cuda13 = ["cupy-cuda13x>=14", "cuda-toolkit[cudart,nvrtc]==13.*"]
-cuda = ["cupy-cuda12x>=14", "cuda-toolkit[cudart,nvrtc]==12.*"]
+# CuPy 14 dropped Python 3.9 (its last 3.9 release is 13.6), so the extras pick by
+# marker. CuPy 14 ships no cp313t wheel: on free-threaded 3.13 the GPU extras do not
+# resolve and eagle runs on the CPU route only.
+cuda12 = [
+    "cupy-cuda12x>=14; python_version>='3.10'",
+    "cupy-cuda12x>=13.6,<14; python_version<'3.10'",
+    "cuda-toolkit[cudart,nvrtc]==12.*",
+]
+cuda13 = [
+    "cupy-cuda13x>=14; python_version>='3.10'",
+    "cupy-cuda13x>=13.6,<14; python_version<'3.10'",
+    "cuda-toolkit[cudart,nvrtc]==13.*",
+]
+cuda = [
+    "cupy-cuda12x>=14; python_version>='3.10'",
+    "cupy-cuda12x>=13.6,<14; python_version<'3.10'",
+    "cuda-toolkit[cudart,nvrtc]==12.*",
+]
 # eagle.frameworks.torch: the torch.autograd bridge. torch is imported only by
 # that submodule, so plain `import eagle` never needs it.
 torch = ["torch"]

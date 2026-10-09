@@ -26,7 +26,7 @@ same build, check and test-wheel steps without publishing.
 
 1. Bump `version` in `python/pyproject.toml`, update `CHANGELOG.md`.
 2. `git tag vX.Y.Z && git push origin vX.Y.Z`.
-3. The workflow builds manylinux wheels for CPython 3.10-3.13 with
+3. The workflow builds manylinux wheels for CPython 3.9-3.14 (including free-threaded 3.13t and 3.14t) with
    `cibuildwheel`: `eagle._core` is plain C++ and needs no CUDA toolkit,
    but the `libeagle_cuda.so` plugin it dlopen's is compiled with `nvcc`
    (headers + compiler only — no driver, nothing executed) inside the

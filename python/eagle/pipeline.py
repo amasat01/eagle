@@ -37,6 +37,7 @@ import tempfile
 from typing import NamedTuple
 
 from . import _counters
+from .interop import _wrap_external_stream
 from ._conditional import RepeatWhile, Skippable
 from ._launch_policy import sibling_context
 from ._member_enable import MemberHandle, NonToggleableMemberError, _MemberRegistry
@@ -100,7 +101,7 @@ class _GuardedRun:
         self.inners = inners
 
     def run(self, cp):
-        with cp.cuda.ExternalStream(self.outer.begin()):
+        with _wrap_external_stream(self.outer.begin()):
             if self.inners is None:
                 self.step.step()  # a Skippable's body
             else:
@@ -108,7 +109,7 @@ class _GuardedRun:
                     if inner is None:
                         part()
                         continue
-                    with cp.cuda.ExternalStream(inner.begin()):
+                    with _wrap_external_stream(inner.begin()):
                         part.step()  # the Skippable part's body, inside the loop body
                     inner.end()
         self.outer.end()
@@ -162,7 +163,7 @@ class GraphPipeline:
         # cupy/torch launch on (matches the pre-uniformization cupy pipeline).
         self._stream = _core.Stream(non_blocking=True)  # owns the cudaStream_t
         self._sptr = self._stream.ptr()  # raw handle shared with cupy + the graph
-        self._ext = cp.cuda.ExternalStream(self._sptr)
+        self._ext = _wrap_external_stream(self._sptr)
         self._steps = []
         self._graph = None
         self._launcher = None
@@ -474,7 +475,7 @@ class GraphPipeline:
         for i, member in enumerate(group.members):
             branch = fork.branch(i)
             before = self._core.capture_snapshot_nodes(branch)
-            with cp.cuda.ExternalStream(branch):
+            with _wrap_external_stream(branch):
                 with sibling_context(siblings):
                     run = member_runs[i]
                     if run is not None:

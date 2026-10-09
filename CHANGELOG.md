@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.1
+
+Wheels now cover CPython 3.9 to 3.14, plus the free-threaded builds 3.13t and
+3.14t (manylinux_2_28 x86_64); the package requires Python 3.9 or newer. The
+free-threaded wheels do not yet declare GIL-free support: CPython re-enables the
+GIL at import with a RuntimeWarning, so results are correct but not parallel.
+The `cuda12` / `cuda13` extras pick CuPy by Python version (CuPy 14 on 3.10 and
+newer, CuPy 13.6 on 3.9); on 3.13t CuPy 14 has no wheel, so those extras do not
+resolve there and eagle runs on the CPU route. The package's own code no longer
+uses `zip(strict=True)` directly, which needs Python 3.10.
+Stream wrapping uses `Stream.from_external` on CuPy 14 (no more `ExternalStream`
+DeprecationWarning), falling back to `ExternalStream` on CuPy 13.
+
 ## 0.4.0 (first public release)
 
 eagle is the RAPTOR family's GPU execution layer: kernel launch, CUDA

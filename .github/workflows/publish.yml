@@ -78,13 +78,16 @@ jobs:
       - name: Build the sdist
         run: cd eagle/python && python -m build --sdist --outdir ../../dist
 
-      - name: Build manylinux wheels (cibuildwheel; CPython 3.10-3.13, x86_64)
-        uses: pypa/cibuildwheel@v4.2.1
+      - name: Build manylinux wheels (cibuildwheel; CPython 3.9-3.14 plus free-threaded 3.13t/3.14t, x86_64)
+        uses: pypa/cibuildwheel@v3.4.1
         with:
           package-dir: eagle/python
           output-dir: dist
         env:
-          CIBW_BUILD: "cp310-manylinux_x86_64 cp311-manylinux_x86_64 cp312-manylinux_x86_64 cp313-manylinux_x86_64"
+          CIBW_BUILD: "cp39-manylinux_x86_64 cp310-manylinux_x86_64 cp311-manylinux_x86_64 cp312-manylinux_x86_64 cp313-manylinux_x86_64 cp314-manylinux_x86_64 cp313t-manylinux_x86_64 cp314t-manylinux_x86_64"
+          # cibuildwheel 3.x, not 4.x: 4.x dropped the free-threaded 3.13 build
+          # (cp313t), and 3.x gates it behind this enable group.
+          CIBW_ENABLE: cpython-freethreading
           CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
           CIBW_BUILD_FRONTEND: build
           CIBW_CONTAINER_ENGINE: "docker; create_args: --volume ${{ github.workspace }}/aether:/sib/aether:ro --volume ${{ github.workspace }}/eagle:/sib/eagle:ro"
@@ -177,7 +180,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14", "3.13t", "3.14t"]
     steps:
       - uses: actions/checkout@v7
         with:

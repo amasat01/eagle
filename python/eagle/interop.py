@@ -88,6 +88,32 @@ def _reset_external_stream_cache() -> None:
     _EXTERNAL_STREAM_COUNTS["misses"] = 0
 
 
+class _StreamProtocol:
+    """Minimal CUDA stream protocol object around a raw ``cudaStream_t``."""
+
+    __slots__ = ("_ptr",)
+
+    def __init__(self, ptr: int):
+        self._ptr = int(ptr)
+
+    def __cuda_stream__(self):
+        return (0, self._ptr)
+
+
+def _wrap_external_stream(ptr: int):
+    """A fresh cupy stream wrapping raw handle ``ptr`` (not cached).
+
+    CuPy >= 14 deprecates ``cupy.cuda.ExternalStream`` in favour of
+    ``Stream.from_external``; older CuPy (13.x, CPython 3.9) lacks the
+    latter and keeps the ExternalStream fallback."""
+    import cupy as cp
+
+    from_external = getattr(getattr(cp.cuda, "Stream", None), "from_external", None)
+    if from_external is not None:
+        return from_external(_StreamProtocol(ptr))
+    return cp.cuda.ExternalStream(int(ptr))
+
+
 def external_stream(ptr: int):
     """The cached ``cupy.cuda.ExternalStream`` wrapping raw handle ``ptr``
     (same handle -> same wrapper object, identity not equality)."""
@@ -95,9 +121,7 @@ def external_stream(ptr: int):
     stream = _external_stream_cache.get(key)
     if stream is None:
         _EXTERNAL_STREAM_COUNTS["misses"] += 1
-        import cupy as cp
-
-        stream = cp.cuda.ExternalStream(key)
+        stream = _wrap_external_stream(key)
         _external_stream_cache[key] = stream
     else:
         _EXTERNAL_STREAM_COUNTS["hits"] += 1

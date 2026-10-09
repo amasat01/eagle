@@ -11,6 +11,7 @@ import importlib
 import numpy as np
 
 from . import _counters, _layout
+from .interop import _wrap_external_stream
 from . import exec as eexec
 from .abi import DEVICE_CPU, DEVICE_CUDA
 from .roles import OUTPUT_ROLES, PER_SAMPLE_ROLES
@@ -532,7 +533,7 @@ class BoundPlan:
         handle = _stream_handle(stream, self._cupy)
         if self._copies:
             # the copies ride the launch's own stream: ordered, no sync
-            with self._cupy.cuda.ExternalStream(handle):
+            with _wrap_external_stream(handle):
                 for a in self._copies.values():
                     a.copy_in()
         for part in self._parts:
@@ -541,7 +542,7 @@ class BoundPlan:
                 block=int(_launch._resolved_block(self._entry, part.count, block)),
             )
         if self._copies:
-            with self._cupy.cuda.ExternalStream(handle):
+            with _wrap_external_stream(handle):
                 for a in self._copies.values():
                     if a.writes:
                         a.copy_back()
