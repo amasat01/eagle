@@ -19,17 +19,8 @@ layer. (The name stands for *Extensible Adaptive Graph Launch Engine*, if
 you're curious.) A header-only C++ core; a Python package over the same
 engine.
 
-.. image:: _static/ecosystem/ecosystem_eagle_light.svg
-   :alt: The RAPTOR family: hawk (write it), eagle (run it), aether (the C++/CUDA numerics underneath) and raptor (the shared contract); you are looking at eagle.
-   :class: only-light
-   :align: center
-
-.. image:: _static/ecosystem/ecosystem_eagle_dark.svg
-   :alt: The RAPTOR family: hawk (write it), eagle (run it), aether (the C++/CUDA numerics underneath) and raptor (the shared contract); you are looking at eagle.
-   :class: only-dark
-   :align: center
-
-`aether <https://amasat01.github.io/aether/>`__ · `hawk <https://amasat01.github.io/hawk/>`__ · `eagle <https://amasat01.github.io/eagle/>`__ · `raptor <https://amasat01.github.io/raptor/>`__ · `the family <https://amasat01.github.io/>`__
+.. raw:: html
+   :file: _static/ecosystem/ecosystem_cards_eagle.html
 
 Thirty seconds: ``eagle.simulate``
 ----------------------------------
