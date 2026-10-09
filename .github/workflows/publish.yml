@@ -272,6 +272,27 @@ jobs:
           RAPTOR_ROOT="${GITHUB_WORKSPACE}/raptor" python -m pytest tests -q -p no:cacheprovider \
             -m "not gpu and not gpu2 and not torch and not interop_matrix and not repo_local"
 
+      # Free-threaded legs only (3.13t / 3.14t): the ft rows against the INSTALLED
+      # wheel, then the whole suite with RuntimeWarning as an error (a re-enabled
+      # GIL is that warning). Zero collected ft rows fails the leg, and the
+      # interpreter must be GIL-off by default with no override set.
+      - name: ft-stress (ft rows + full suite, -W error::RuntimeWarning)
+        if: endsWith(matrix.python-version, 't')
+        run: |
+          set -euo pipefail
+          . venv/bin/activate
+          [ -z "${PYTHON_GIL:-}" ] || { echo "PYTHON_GIL is set"; exit 1; }
+          python -c "import sys; assert sys._is_gil_enabled() is False, 'GIL is enabled'"
+          mkdir -p "$RUNNER_TEMP/suite-ft"
+          cp -r eagle/python/tests eagle/python/conftest.py "$RUNNER_TEMP/suite-ft/"
+          cd "$RUNNER_TEMP/suite-ft"
+          export RAPTOR_ROOT="${GITHUB_WORKSPACE}/raptor"
+          N="$(python -m pytest tests -m ft --collect-only -q -p no:cacheprovider | grep -c '::' || true)"
+          echo "ft rows collected: $N"
+          [ "$N" -gt 0 ] || { echo "ft selection collected zero tests"; exit 1; }
+          python -m pytest tests -m ft -q -rs -p no:cacheprovider -W error::RuntimeWarning
+          python -m pytest tests -q -p no:cacheprovider -W error::RuntimeWarning -m "not gpu and not gpu2 and not torch and not interop_matrix and not repo_local"
+
   publish:
     if: github.event_name == 'push' && github.ref_type == 'tag'
     needs: [check, test-wheel]

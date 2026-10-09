@@ -238,3 +238,109 @@ jobs:
           RAPTOR_ROOT="${GITHUB_WORKSPACE}/raptor" python -m pytest tests -q -p no:cacheprovider \
             -m "not gpu and not gpu2 and not torch and not interop_matrix and not repo_local"
           python -c 'import eagle; assert "site-packages" in eagle.__file__, eagle.__file__'
+
+  # ft-stress: the free-threading rows (pytest -m ft) and the full suite under
+  # -W error::RuntimeWarning on the free-threaded interpreters, built and set up
+  # as test-python is (the same compile-only toolchain, editable install).
+  ft-stress:
+    runs-on: ubuntu-latest
+    strategy:
+      # both free-threaded interpreters report, even when one fails
+      fail-fast: false
+      matrix:
+        python-version: ["3.13t", "3.14t"]
+    env:
+      CC: gcc-13
+      CXX: g++-13
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: eagle
+
+      - uses: actions/checkout@v7
+        with:
+          repository: amasat01/aether
+          path: aether
+          token: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
+
+      - uses: actions/checkout@v7
+        with:
+          repository: amasat01/raptor
+          path: raptor
+          token: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - run: sudo apt-get update && sudo apt-get install -y g++-13
+
+      # NVIDIA's apt repo for Ubuntu 24.04 (noble), x86_64.
+      - name: Install compile-only CUDA 12.6 toolchain (nvcc; no driver/GPU)
+        run: |
+          curl -fsSL -o /tmp/cuda-keyring.deb \
+            https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+          sudo dpkg -i /tmp/cuda-keyring.deb
+          sudo apt-get update
+          # cuda-nvcc-12-6 + cuda-cudart-dev-12-6 as suggested; cuda-driver-dev-12-6
+          # added for the libcuda.so DRIVER STUB (stubs/, no actual driver) that
+          # python/CMakeLists.txt's CUDA::cuda_driver link target needs.
+          sudo apt-get install -y --no-install-recommends \
+            cuda-nvcc-12-6 cuda-cudart-dev-12-6 cuda-driver-dev-12-6
+          echo "/usr/local/cuda-12.6/bin" >> "$GITHUB_PATH"
+          echo "CUDA_HOME=/usr/local/cuda-12.6" >> "$GITHUB_ENV"
+
+      # deps: [OFF] — aether installed in its default CUDA-language mode
+      # (needed because eagle._core is CUDA-language regardless of EAGLE_CPP_MODE).
+      - run: |
+          cmake -DAETHER_CPP_MODE=OFF -DCMAKE_CUDA_COMPILER="$(which nvcc)" \
+            -DCMAKE_INSTALL_PREFIX="${GITHUB_WORKSPACE}/__install" \
+            -B aether/build -S aether
+          cmake --install aether/build
+
+      # eagle's own header-only C++ config, installed next to aether so the
+      # binding's find_package(eagle) resolves.
+      - run: |
+          cd eagle
+          cmake -B __eagle_hdr -DCMAKE_CUDA_COMPILER="$(which nvcc)" \
+            -DCMAKE_CUDA_ARCHITECTURES=70 \
+            -DCMAKE_INSTALL_PREFIX="${GITHUB_WORKSPACE}/__install" .
+          cmake --install __eagle_hdr
+
+      # The binding build itself, with a single arch (70,
+      # Volta) instead of the 4-way list since nothing here executes device
+      # code.
+      - run: |
+          cd eagle
+          python -m pip install --quiet --upgrade pip pytest
+          export CMAKE_PREFIX_PATH="${GITHUB_WORKSPACE}/__install:${CMAKE_PREFIX_PATH}"
+          export SKBUILD_CMAKE_ARGS="-DCMAKE_CUDA_COMPILER=$(which nvcc);-DCMAKE_CUDA_ARCHITECTURES=70"
+          # the plugin carries the single arch built above, not the shipped list
+          # (read by test_backend_wall where cuobjdump is present)
+          export EAGLE_PLUGIN_EXPECTED_ARCHS=70/70
+          pip install ../raptor   # raptor-core is not on PyPI yet
+          # editable, as in development: python/conftest.py puts this source tree first
+          # on sys.path, and only the editable hook then resolves the compiled eagle._core
+          pip install -e ./python
+
+      # An ft leg is vacuous on a GIL interpreter (every ft row skips) and the
+      # harness refuses a forced GIL-off (-X gil=0 / PYTHON_GIL): assert the
+      # interpreter is free-threaded with the GIL off by default, no override.
+      - name: Interpreter is free-threaded, GIL off, no override
+        run: |
+          [ -z "${PYTHON_GIL:-}" ] || { echo "PYTHON_GIL is set"; exit 1; }
+          python -c "import sys; assert sys._is_gil_enabled() is False, 'GIL is enabled'; print(sys.version)"
+
+      # ft rows first: zero collected rows fails the leg (never a green no-op),
+      # then the full suite. -W error::RuntimeWarning turns the interpreter's
+      # "GIL re-enabled by an extension" warning into a failure.
+      - name: ft rows (collected count must be > 0), then the full suite
+        run: |
+          set -euo pipefail
+          cd eagle
+          export EAGLE_PLUGIN_EXPECTED_ARCHS=70/70
+          N="$(python -m pytest python/tests -m ft --collect-only -q -p no:cacheprovider | grep -c '::' || true)"
+          echo "ft rows collected: $N"
+          [ "$N" -gt 0 ] || { echo "ft selection collected zero tests"; exit 1; }
+          python -m pytest python/tests -m ft -q -rs -p no:cacheprovider -W error::RuntimeWarning
+          python -m pytest python/tests -q -p no:cacheprovider -W error::RuntimeWarning -m "not gpu and not interop_matrix"
