@@ -230,7 +230,10 @@ def _bound_lib(so_path):
     lib.bind_matrix("A", interop.host_ptr(a), n, 1, 1)
     lib.bind_handle("s", interop.host_ptr(s))
     lib.bind_uniform("u", 3.0)
-    return lib, n, m
+    # The plugin holds raw pointers only: the caller keeps every bound array
+    # alive. Returning `a` and `s` keeps them alive in the test's frame; without
+    # it they are freed before `run` (garbage on allocators that reuse at once).
+    return lib, n, m, (a, s)
 
 
 def test_host_plugin_run_covers_every_tag(_tag_plugin_so):
@@ -239,7 +242,7 @@ def test_host_plugin_run_covers_every_tag(_tag_plugin_so):
     one tag's branch from HostPluginLibrary.run must RED this test
     specifically, while the device-path test above stays green (the
     differential)."""
-    lib, n, m = _bound_lib(_tag_plugin_so)
+    lib, n, m, _alive = _bound_lib(_tag_plugin_so)
     assert lib.run(n) == n
     # m[i] = A[i] + s[i] + u + (nn - n) = 5 + 2 + 3 + 0 = 10 -- proves every
     # bound value (GREF_VEC mutable, GREF_MAT mat_in, HANDLE per_sample,
@@ -253,7 +256,7 @@ def test_host_plugin_run_raises_on_unrecognized_role(_tag_plugin_so):
     the upstream ``validate_sidecar`` gate at __init__, which would otherwise
     reject the bogus role before ``run`` is ever reached) so this pins
     ``run``'s OWN defense-in-depth fail-loud property in isolation."""
-    lib, n, _m = _bound_lib(_tag_plugin_so)
+    lib, n, _m, _alive = _bound_lib(_tag_plugin_so)
     lib._arg_spec = [("bogus_role", "x")]
     with pytest.raises(ValueError, match="unknown arg role"):
         lib.run(n)
@@ -272,7 +275,7 @@ def test_both_paths_raise_on_the_same_unrecognized_role(_tag_plugin_so):
             out=None, vec={}, per_sample={}, terminated=None, uniforms={}, n=4,
         )
 
-    lib, n, _m = _bound_lib(_tag_plugin_so)
+    lib, n, _m, _alive = _bound_lib(_tag_plugin_so)
     lib._arg_spec = [("bogus_role", "x")]
     with pytest.raises(ValueError, match="unknown arg role"):
         lib.run(n)
