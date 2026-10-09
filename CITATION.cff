@@ -6,7 +6,7 @@ abstract: "GPU execution runtime for compiled kernels: launch, graph capture, pl
 authors:
   - family-names: "Masat"
     given-names: "Alessandro"
-version: "0.4.1"
+version: "0.5.0"
 date-released: "2026-10-09"
 license: Apache-2.0
 repository-code: "https://github.com/amasat01/eagle"

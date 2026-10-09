@@ -7,7 +7,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "raptor-eagle"
-version = "0.4.1"
+version = "0.5.0"
 description = "EAGLE — the Python face of the launch engine for compiled CUDA kernels"
 # The repo root's README.md, one level above this pyproject.toml (eagle's
 # Python packaging lives in python/, the README does not — see the repo's
@@ -56,18 +56,16 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Mathematics",
 ]
 # raptor: the schema constants eagle.roles re-exports (SCHEMA_VERSION and the
-# neural-block vocabulary) are single-sourced there now. raptor is checkout-only today
-# (not on an index) — like eagle itself, it resolves via a local editable install
-# until the family's packaging is unified.
+# neural-block vocabulary) are single-sourced there now. raptor-core is on PyPI.
 # DIST names carry the `raptor-` family
 # namespace, IMPORT names stay flat (`import eagle`, `import raptor`). Both bare
 # `eagle` and bare `raptor` are taken on PyPI by unrelated packages.
-# >=0.2.0 is the raptor version that first ships
-# `raptor.schema.blocks.validate_neural_block_descriptor` — the neural_block clause
-# `eagle.sidecar` now IMPORTS rather than defines. An older raptor under this eagle
-# would ImportError at that seam, so the constraint is expressed where a resolver
-# can act on it, never as a runtime surprise.
-dependencies = ["numpy", "raptor-core>=0.2.0,<0.3"]
+# >=0.3 is the raptor-core version that ships the free-threading conformance harness
+# (`raptor.conformance.freethreading`) eagle's free-threading tests import; it also keeps
+# `raptor.schema.blocks.validate_neural_block_descriptor` (first shipped in 0.2.0), which
+# `eagle.sidecar` imports. The constraint is expressed where a resolver can act on it,
+# never as a runtime surprise.
+dependencies = ["numpy", "raptor-core>=0.3,<0.4"]
 
 # The "raptor.pattern_loaders" entry-point declaration for
 # "neural_block" moved to a separate package — eagle.neural was extracted there

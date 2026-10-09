@@ -136,7 +136,7 @@ jobs:
           # the plugin carries the single arch built above, not the shipped list
           # (read by test_backend_wall where cuobjdump is present)
           export EAGLE_PLUGIN_EXPECTED_ARCHS=70/70
-          pip install ../raptor   # raptor-core is not on PyPI yet
+          pip install ../raptor   # the sibling checkout, so unreleased raptor changes are tested
           # editable, as in development: python/conftest.py puts this source tree first
           # on sys.path, and only the editable hook then resolves the compiled eagle._core
           pip install -e ./python
@@ -202,7 +202,7 @@ jobs:
           python -m venv "${RUNNER_TEMP}/venv"
           . "${RUNNER_TEMP}/venv/bin/activate"
           pip install --quiet --upgrade pip pytest numpy build scikit-build-core nanobind
-          pip install ./raptor   # raptor-core is not on PyPI yet
+          pip install ./raptor   # the sibling checkout, so unreleased raptor changes are tested
           export CMAKE_PREFIX_PATH="${GITHUB_WORKSPACE}/__install"
           python -m build --wheel --no-isolation --outdir dist \
             -Ccmake.define.EAGLE_PYTHON_CUDA_PLUGIN=OFF \
@@ -318,7 +318,7 @@ jobs:
           # the plugin carries the single arch built above, not the shipped list
           # (read by test_backend_wall where cuobjdump is present)
           export EAGLE_PLUGIN_EXPECTED_ARCHS=70/70
-          pip install ../raptor   # raptor-core is not on PyPI yet
+          pip install ../raptor   # the sibling checkout, so unreleased raptor changes are tested
           # editable, as in development: python/conftest.py puts this source tree first
           # on sys.path, and only the editable hook then resolves the compiled eagle._core
           pip install -e ./python

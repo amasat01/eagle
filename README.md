@@ -73,6 +73,10 @@ N = 10,000 on the same batch (7.22 ms each). `eagle.simulate`'s wall time is wit
 version in every cell this card runs but N = 1,000 and 10,000 spread-100; memory at a million spread samples is 50 MiB for `eagle.simulate` against 64 MiB
 for NVIDIA Warp. See [every number, every arm](#performance).</sub>
 
+## Threading
+
+Free-threaded CPython (3.13t/3.14t) is supported: the compiled modules declare GIL-free operation and the GIL stays disabled after import. Any number of threads may call module-level functions, build, compile, plan and cache concurrently. Distinct objects may be used from distinct threads without synchronisation. One stateful object (a stream, capture, launcher, graph, composer, plan, pipeline, active set, host kernel or arg block) shared by several threads is memory-safe — its calls serialise and a consumed object raises — but the ORDER of those calls is the caller's responsibility, exactly as for a NumPy array or a CuPy stream. CUDA adds two rules of its own: a stream capture is begun, filled and ended by one thread, and while any capture is open no thread may synchronise the whole device (stream-level synchronisation is fine). GPU routes are supported on free-threaded 3.14; on 3.13t the CPU route runs. CUDA graph capture is per thread: a nested capture on one thread raises, while two threads may capture concurrently.
+
 ## Install
 
 ```bash
@@ -89,7 +93,7 @@ pip install "raptor-hawk[cuda12]"       # the examples below also write kernels 
 **Platforms:** built and tested on Linux x86_64 only so far (CPython 3.9–3.14, including free-threaded 3.13t and 3.14t), on NVIDIA GPUs from Pascal (Quadro P2000) and Turing (Tesla T4). There are no wheels for macOS, Windows or ARM yet, and WSL2 is untested. `raptor-core` and `aether-dsc` are pure Python and install anywhere.
 
 `raptor-eagle` needs Python 3.9 or newer (CPython 3.9–3.14) and an NVIDIA driver at run time; no `nvcc` or CUDA
-toolkit. Free-threaded builds (3.13t, 3.14t) are supported as wheels but do not yet declare GIL-free support: CPython re-enables the GIL when eagle is imported and prints a RuntimeWarning, so results are correct but not run in parallel. On 3.13t the `[cuda12]` / `[cuda13]` extras do not resolve (CuPy 14 ships no 3.13t wheel), so eagle runs on the CPU route there; 3.14t has no such limit. The wheel ships GPU code for every NVIDIA architecture from Pascal (sm_60) through Blackwell, plus PTX for newer GPUs. It
+toolkit. Free-threaded builds (3.13t, 3.14t) run GIL-free. On 3.13t the `[cuda12]` / `[cuda13]` extras do not resolve (CuPy 14 ships no 3.13t wheel), so eagle runs on the CPU route there; 3.14t has no such limit. The wheel ships GPU code for every NVIDIA architecture from Pascal (sm_60) through Blackwell, plus PTX for newer GPUs. It
 brings `raptor-core` along. The C++ library (`find_package(eagle CONFIG REQUIRED)`) is a separate, CMake-only
 install; building the Python package from source is covered under [Python package](#python-package) below.
 

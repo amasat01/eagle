@@ -110,7 +110,7 @@ jobs:
           python -m pip install --quiet --upgrade pip
           export CMAKE_PREFIX_PATH="${GITHUB_WORKSPACE}/__install:${CMAKE_PREFIX_PATH}"
           export SKBUILD_CMAKE_ARGS="-DCMAKE_CUDA_COMPILER=$(which nvcc);-DCMAKE_CUDA_ARCHITECTURES=70"
-          pip install ../raptor   # raptor-core is not on PyPI yet
+          pip install ../raptor   # the sibling checkout, so unreleased raptor changes are tested
           pip install -e ./python
 
       - name: Install docs dependencies

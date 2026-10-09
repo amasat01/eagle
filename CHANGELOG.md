@@ -1,6 +1,21 @@
 # Changelog
 
-## 0.5.0 (unreleased)
+## 0.5.0 (2026-10-09)
+
+**Free-threaded CPython, GIL-free.** The compiled core now declares free-threading
+support, so on 3.13t and 3.14t eagle runs without the GIL and the GIL stays off after
+import. Python-side state is thread-safe: any number of threads may build, plan and
+cache concurrently, distinct objects need no synchronisation, and one stateful object
+(a stream, capture, launcher, graph, plan and so on) shared between threads is
+memory-safe with its calls serialised; the order of those calls is the caller's, as
+for a NumPy array or a CuPy stream. CUDA graph capture is per thread: a nested capture
+on one thread raises, and two threads may capture concurrently. GPU routes are
+supported on free-threaded 3.14; on 3.13t the CPU route runs. CI gained
+free-threading stress legs, and `raptor-core>=0.3,<0.4` is now required for the
+shared conformance harness.
+
+**Wheel GPU code.** The wheel now ships GPU code for every architecture the CUDA 12.9
+toolkit compiles from sm_60 up (Pascal through Blackwell), plus PTX for newer GPUs.
 
 A per-sample plane whose shape reads both as component-major `(w, N)` and as
 sample-major `(N, w)` (a `(w, w)` array, or a square matrix head with
@@ -21,8 +36,7 @@ named `layout` can no longer be passed by keyword to these doors.
 
 Wheels now cover CPython 3.9 to 3.14, plus the free-threaded builds 3.13t and
 3.14t (manylinux_2_28 x86_64); the package requires Python 3.9 or newer. The
-free-threaded wheels do not yet declare GIL-free support: CPython re-enables the
-GIL at import with a RuntimeWarning, so results are correct but not parallel.
+free-threaded wheels first appeared here; 0.5.0 declares GIL-free support for them.
 The `cuda12` / `cuda13` extras pick CuPy by Python version (CuPy 14 on 3.10 and
 newer, CuPy 13.6 on 3.9); on 3.13t CuPy 14 has no wheel, so those extras do not
 resolve there and eagle runs on the CPU route. The package's own code no longer

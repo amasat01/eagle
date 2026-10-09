@@ -9,7 +9,7 @@ Python (pip)
    pip install "raptor-eagle[cuda12]"      # or [cuda13]; add [torch] for PyTorch interop
 
 The package imports as ``eagle``. It needs Python 3.9 or newer (CPython
-3.9-3.14) and an NVIDIA driver at run time; no ``nvcc`` or CUDA toolkit. Free-threaded builds (3.13t, 3.14t) are supported as wheels but do not yet declare GIL-free support: CPython re-enables the GIL when eagle is imported and prints a RuntimeWarning, so results are correct but not run in parallel. On 3.13t the ``[cuda12]`` / ``[cuda13]`` extras do not resolve (CuPy 14 ships no 3.13t wheel), so eagle runs on the CPU route there; 3.14t has no such limit. The
+3.9-3.14) and an NVIDIA driver at run time; no ``nvcc`` or CUDA toolkit. Free-threaded builds (3.13t, 3.14t) run GIL-free. On 3.13t the ``[cuda12]`` / ``[cuda13]`` extras do not resolve (CuPy 14 ships no 3.13t wheel), so eagle runs on the CPU route there; 3.14t has no such limit. The
 wheel ships GPU code for every NVIDIA architecture from Pascal (sm_60) through
 Blackwell, plus PTX for newer GPUs. To write kernels for it with hawk, install
 ``"raptor-hawk[cuda12]"`` alongside (``[cuda13]`` on both for CUDA 13).
