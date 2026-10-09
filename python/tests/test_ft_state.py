@@ -16,10 +16,10 @@ skip on a GIL build (``require_free_threaded``); the cold-registry and
 step (a slow entry-point scan) or a mutation during iteration.
 
 FT-4 drives the compiled host team (``eagle._core``) and is correct on any
-build; importing ``eagle._core`` re-enables the GIL until the extension itself
-declares free-threading support, so on a free-threaded interpreter this row
-proves GIL-free behaviour only once that declaration lands (it skips with a
-reason while the extension is not importable GIL-free).
+build. ``eagle._core`` declares free-threading support, so on a free-threaded
+interpreter the GIL stays disabled after importing it; this row asserts that
+before it runs, so a lost declaration fails here instead of passing under a
+GIL that quietly came back.
 """
 
 from __future__ import annotations
@@ -370,10 +370,11 @@ class _Handle(ctypes.Structure):
 @register_ft_row("FT-4-EAGLE-HOST-PARITY")
 def test_host_parity_on_private_planes(tmp_path):
     core = pytest.importorskip("eagle._core", reason="the compiled extension is not built")
-    if sysconfig.get_config_var("Py_GIL_DISABLED") and sys._is_gil_enabled():
-        # free-threaded interpreter, GIL back on: importing the extension re-enabled it
-        pytest.skip("eagle._core re-enabled the GIL (not yet free-threading-declared); "
-                    "this row proves GIL-free behaviour only once it is")
+    if sysconfig.get_config_var("Py_GIL_DISABLED"):
+        # free-threaded interpreter: the declared extension must leave the GIL off
+        assert not sys._is_gil_enabled(), (
+            "importing eagle._core re-enabled the GIL: its free-threading "
+            "declaration (FREE_THREADED in python/CMakeLists.txt) is missing")
     gxx = shutil.which("g++") or "/usr/bin/g++"
     src = tmp_path / "ft_axpb.cpp"
     src.write_text(_HOST_SRC)
