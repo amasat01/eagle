@@ -154,8 +154,9 @@ message(STATUS "> eagle headers (verified to contain CaptureFork.h): ${_eagle_ro
 
 # Both artifacts carry eagle/aether inline and template instantiations; a
 # STB_GNU_UNIQUE copy of one would bind across the two images at load time.
+# GCC-only flag: clang never emits STB_GNU_UNIQUE and rejects it.
 set(_eagle_no_gnu_unique
-  $<$<COMPILE_LANGUAGE:CXX>:-fno-gnu-unique>
+  $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CXX_COMPILER_ID:GNU>>:-fno-gnu-unique>
   $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-fno-gnu-unique>)
 
 # ---------------------------------------------------------------------------
