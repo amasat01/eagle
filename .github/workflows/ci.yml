@@ -45,9 +45,9 @@ jobs:
       - uses: actions/cache@v6
         with:
           path: ${{ github.workspace }}/.ccache
-          key: ccache-${{ runner.os }}-${{ runner.arch }}-test-cpp-${{ hashFiles('**/*.h', '**/*.hpp', '**/*.cpp', '**/*.cu', '**/*.cuh', '**/CMakeLists.txt') }}
+          key: ccache-v2-${{ runner.os }}-${{ runner.arch }}-test-cpp-${{ hashFiles('**/*.h', '**/*.hpp', '**/*.cpp', '**/*.cu', '**/*.cuh', '**/CMakeLists.txt') }}
           restore-keys: |
-            ccache-${{ runner.os }}-${{ runner.arch }}-test-cpp-
+            ccache-v2-${{ runner.os }}-${{ runner.arch }}-test-cpp-
       - run: ccache -z
 
       # deps stage: install aether's headers (CPP_MODE) into a local prefix.
@@ -105,9 +105,9 @@ jobs:
       - uses: actions/cache@v6
         with:
           path: ${{ github.workspace }}/.ccache
-          key: ccache-${{ runner.os }}-${{ runner.arch }}-sanitize-cpp-${{ hashFiles('**/*.h', '**/*.hpp', '**/*.cpp', '**/*.cu', '**/*.cuh', '**/CMakeLists.txt') }}
+          key: ccache-v2-${{ runner.os }}-${{ runner.arch }}-sanitize-cpp-${{ hashFiles('**/*.h', '**/*.hpp', '**/*.cpp', '**/*.cu', '**/*.cuh', '**/CMakeLists.txt') }}
           restore-keys: |
-            ccache-${{ runner.os }}-${{ runner.arch }}-sanitize-cpp-
+            ccache-v2-${{ runner.os }}-${{ runner.arch }}-sanitize-cpp-
       - run: ccache -z
 
       # aether headers (CPP_MODE) into a local prefix, unsanitized: header-only.
@@ -168,6 +168,58 @@ jobs:
       - if: always()
         run: ccache -s
 
+  # tsan-ft — eagle._core under ThreadSanitizer on a free-threaded CPython built
+  # with --with-thread-sanitizer (cached per version + compiler), running the ft
+  # rows. Green = the canary race is reported without our suppressions (the
+  # detector reaches _core) AND the ft rows give zero reports with them. See
+  # tests/sanitize/tsan_ft.sh and tests/sanitize/tsan.supp.
+  tsan-ft:
+    runs-on: ubuntu-latest
+    env:
+      CC: clang-18
+      CXX: clang++-18
+      TSAN_PY_VERSION: "3.14.8"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: eagle
+
+      - uses: actions/checkout@v7
+        with:
+          repository: amasat01/aether
+          path: aether
+          token: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
+
+      - uses: actions/checkout@v7
+        with:
+          repository: amasat01/raptor
+          path: raptor
+          token: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
+
+      - uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/tsan-python
+          key: tsan-python-${{ runner.os }}-${{ runner.arch }}-${{ env.TSAN_PY_VERSION }}-clang18-${{ hashFiles('eagle/tests/sanitize/build_tsan_python.sh') }}
+
+      - name: TSan free-threaded CPython (cached)
+        run: eagle/tests/sanitize/build_tsan_python.sh "$TSAN_PY_VERSION" "$RUNNER_TEMP/tsan-python"
+
+      - run: |
+          cmake -DAETHER_CPP_MODE=ON \
+            -DCMAKE_INSTALL_PREFIX="${GITHUB_WORKSPACE}/__install" \
+            -B aether/build -S aether
+          cmake --install aether/build
+          cmake -B eagle/__eagle_hdr -S eagle -DEAGLE_CPP_MODE=ON \
+            -DCMAKE_PREFIX_PATH="${GITHUB_WORKSPACE}/__install" \
+            -DCMAKE_INSTALL_PREFIX="${GITHUB_WORKSPACE}/__install"
+          cmake --install eagle/__eagle_hdr
+
+      - name: ft rows under ThreadSanitizer
+        run: |
+          cd eagle
+          CMAKE_PREFIX_PATH="${GITHUB_WORKSPACE}/__install" RAPTOR_DIR="${GITHUB_WORKSPACE}/raptor" \
+            tests/sanitize/tsan_ft.sh "$RUNNER_TEMP/tsan-python/bin/python${TSAN_PY_VERSION%.*}t"
+
   # test:python — builds eagle._core (plain C++) AND the libeagle_cuda.so backend
   # plugin (python/CMakeLists.txt's default EAGLE_PYTHON_CUDA_PLUGIN=BUILD needs nvcc)
   # against a provisioned compile-only CUDA toolchain — no GPU is present or required
@@ -220,9 +272,9 @@ jobs:
       - uses: actions/cache@v6
         with:
           path: ${{ github.workspace }}/.ccache
-          key: ccache-${{ runner.os }}-${{ runner.arch }}-test-python-${{ hashFiles('**/*.h', '**/*.hpp', '**/*.cpp', '**/*.cu', '**/*.cuh', '**/CMakeLists.txt') }}
+          key: ccache-v2-${{ runner.os }}-${{ runner.arch }}-test-python-${{ hashFiles('**/*.h', '**/*.hpp', '**/*.cpp', '**/*.cu', '**/*.cuh', '**/CMakeLists.txt') }}
           restore-keys: |
-            ccache-${{ runner.os }}-${{ runner.arch }}-test-python-
+            ccache-v2-${{ runner.os }}-${{ runner.arch }}-test-python-
       - run: ccache -z
 
       # NVIDIA's apt repo for Ubuntu 24.04 (noble), x86_64.
@@ -334,9 +386,9 @@ jobs:
       - uses: actions/cache@v6
         with:
           path: ${{ github.workspace }}/.ccache
-          key: ccache-${{ runner.os }}-${{ runner.arch }}-test-python-nodriver-${{ hashFiles('**/*.h', '**/*.hpp', '**/*.cpp', '**/*.cu', '**/*.cuh', '**/CMakeLists.txt') }}
+          key: ccache-v2-${{ runner.os }}-${{ runner.arch }}-test-python-nodriver-${{ hashFiles('**/*.h', '**/*.hpp', '**/*.cpp', '**/*.cu', '**/*.cuh', '**/CMakeLists.txt') }}
           restore-keys: |
-            ccache-${{ runner.os }}-${{ runner.arch }}-test-python-nodriver-
+            ccache-v2-${{ runner.os }}-${{ runner.arch }}-test-python-nodriver-
       - run: ccache -z
 
       # The precondition this leg exists for: no driver library, no nvcc.
@@ -451,9 +503,9 @@ jobs:
       - uses: actions/cache@v6
         with:
           path: ${{ github.workspace }}/.ccache
-          key: ccache-${{ runner.os }}-${{ runner.arch }}-ft-stress-${{ matrix.python-version }}-${{ hashFiles('**/*.h', '**/*.hpp', '**/*.cpp', '**/*.cu', '**/*.cuh', '**/CMakeLists.txt') }}
+          key: ccache-v2-${{ runner.os }}-${{ runner.arch }}-ft-stress-${{ matrix.python-version }}-${{ hashFiles('**/*.h', '**/*.hpp', '**/*.cpp', '**/*.cu', '**/*.cuh', '**/CMakeLists.txt') }}
           restore-keys: |
-            ccache-${{ runner.os }}-${{ runner.arch }}-ft-stress-${{ matrix.python-version }}-
+            ccache-v2-${{ runner.os }}-${{ runner.arch }}-ft-stress-${{ matrix.python-version }}-
       - run: ccache -z
 
       # NVIDIA's apt repo for Ubuntu 24.04 (noble), x86_64.

@@ -73,9 +73,9 @@ jobs:
       - uses: actions/cache@v6
         with:
           path: ${{ github.workspace }}/.ccache
-          key: ccache-${{ runner.os }}-${{ runner.arch }}-docs-${{ hashFiles('**/*.h', '**/*.hpp', '**/*.cpp', '**/*.cu', '**/*.cuh', '**/CMakeLists.txt') }}
+          key: ccache-v2-${{ runner.os }}-${{ runner.arch }}-docs-${{ hashFiles('**/*.h', '**/*.hpp', '**/*.cpp', '**/*.cu', '**/*.cuh', '**/CMakeLists.txt') }}
           restore-keys: |
-            ccache-${{ runner.os }}-${{ runner.arch }}-docs-
+            ccache-v2-${{ runner.os }}-${{ runner.arch }}-docs-
       - run: ccache -z
 
       # The runner's own apt doxygen trails Doxygen upstream (locally we only

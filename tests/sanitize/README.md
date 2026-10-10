@@ -23,6 +23,13 @@ cmake --build build -j
 ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
   LSAN_OPTIONS=suppressions=$PWD/tests/sanitize/lsan.supp \
   tests/check_gate.sh cpp build/tests/eagle_tests
+
+# 4. Free-threading race gate (the CI `tsan-ft` job): eagle._core built with
+#    ThreadSanitizer, the ft rows run under a TSan free-threaded CPython
+tests/sanitize/build_tsan_python.sh 3.14.8 ~/.cache/tsan-python      # once (~20 min at -j2, JOBS=2)
+RAPTOR_DIR=../raptor tests/sanitize/tsan_ft.sh ~/.cache/tsan-python/bin/python3.14t
+#    GREEN = the canary race IS reported without tests/sanitize/tsan.supp (the detector
+#    reaches _core) AND the ft rows give zero reports with it
 ```
 
 ## Finding policy

@@ -1,0 +1,23 @@
+# ThreadSanitizer suppressions for the tsan-ft gate (tests/sanitize/tsan_ft.sh).
+# Read together with CPython's own Tools/tsan/suppressions_free_threading.txt.
+# Every entry names its owner, the reason, and the evidence; nothing of
+# eagle's own beyond the deliberate canary is suppressed.
+
+# owner:eagle · why: the free-threading canary (_unsynchronised_bump) races by
+# design: it is the instrument that proves a lost update is observable. The
+# gate checks separately that this race IS reported with this file absent.
+# evidence: python/src/eagle_core.cpp (unsynchronisedBump) · added:2026-10-10
+race:unsynchronisedBump
+
+# owner:eagle · why: LLVM's OpenMP runtime (libomp) is not built with TSan, so
+# its internal synchronisation is invisible and its worker-pool allocations
+# and locks read as races. evidence: every such report has only __kmp_* frames
+# · added:2026-10-10
+called_from_lib:libomp.so
+race:__kmp_
+
+# owner:eagle · why: NumPy's wheel is not built with TSan; its own locking
+# around the identity hash used by ufunc dispatch is invisible.
+# evidence: reports only in PyArrayIdentityHash_* · added:2026-10-10
+called_from_lib:_multiarray_umath
+race:PyArrayIdentityHash_

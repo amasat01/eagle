@@ -78,9 +78,9 @@ jobs:
       - uses: actions/cache@v6
         with:
           path: ${{ github.workspace }}/.ccache-cibw
-          key: ccache-${{ runner.os }}-${{ runner.arch }}-cibw-${{ hashFiles('**/*.h', '**/*.hpp', '**/*.cpp', '**/*.cu', '**/*.cuh', '**/CMakeLists.txt') }}
+          key: ccache-v2-${{ runner.os }}-${{ runner.arch }}-cibw-${{ hashFiles('**/*.h', '**/*.hpp', '**/*.cpp', '**/*.cu', '**/*.cuh', '**/CMakeLists.txt') }}
           restore-keys: |
-            ccache-${{ runner.os }}-${{ runner.arch }}-cibw-
+            ccache-v2-${{ runner.os }}-${{ runner.arch }}-cibw-
 
       - name: Build manylinux wheels (cibuildwheel; CPython 3.9-3.14 plus free-threaded 3.13t/3.14t, x86_64)
         uses: pypa/cibuildwheel@v3.4.1
