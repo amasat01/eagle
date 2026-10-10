@@ -201,6 +201,9 @@ jobs:
           path: ${{ runner.temp }}/tsan-python
           key: tsan-python-${{ runner.os }}-${{ runner.arch }}-${{ env.TSAN_PY_VERSION }}-clang18-${{ hashFiles('eagle/tests/sanitize/build_tsan_python.sh') }}
 
+      # clang's OpenMP runtime (eagle._core needs OpenMP; gcc's libgomp does not pair with clang)
+      - run: sudo apt-get update && sudo apt-get install -y libomp-18-dev
+
       - name: TSan free-threaded CPython (cached)
         run: eagle/tests/sanitize/build_tsan_python.sh "$TSAN_PY_VERSION" "$RUNNER_TEMP/tsan-python"
 
