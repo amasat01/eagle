@@ -263,6 +263,11 @@ jobs:
       - run: |
           cd eagle
           python -m pip install --quiet --upgrade pip pytest
+          # build deps preinstalled + --no-build-isolation: an isolated build compiles nanobind from a
+          # random /tmp build env, so every compile line differs and ccache never hits;
+          # --only-binary=:all: still builds this local project but never a dependency from
+          # source, so no third-party sdist is ever built without its own isolated env
+          python -m pip install --quiet "scikit-build-core>=0.10" "nanobind>=3.1,<4"
           export CMAKE_PREFIX_PATH="${GITHUB_WORKSPACE}/__install:${CMAKE_PREFIX_PATH}"
           export SKBUILD_CMAKE_ARGS="-DCMAKE_CUDA_COMPILER=$(which nvcc);-DCMAKE_CUDA_ARCHITECTURES=70"
           # the plugin carries the single arch built above, not the shipped list
@@ -271,7 +276,7 @@ jobs:
           pip install ../raptor   # the sibling checkout, so unreleased raptor changes are tested
           # editable, as in development: python/conftest.py puts this source tree first
           # on sys.path, and only the editable hook then resolves the compiled eagle._core
-          pip install -e ./python
+          pip install --no-build-isolation --only-binary=:all: -e ./python
           pytest python/tests -q -m "not gpu and not interop_matrix"
       - if: always()
         run: ccache -s
@@ -490,6 +495,11 @@ jobs:
           cd eagle
           # newest NumPy/SciPy ship no cp313t wheel: prefer a wheel over an sdist build
           python -m pip install --quiet --prefer-binary --upgrade pip pytest
+          # build deps preinstalled + --no-build-isolation: an isolated build compiles nanobind from a
+          # random /tmp build env, so every compile line differs and ccache never hits;
+          # --only-binary=:all: still builds this local project but never a dependency from
+          # source, so no third-party sdist is ever built without its own isolated env
+          python -m pip install --quiet --prefer-binary "scikit-build-core>=0.10" "nanobind>=3.1,<4"
           export CMAKE_PREFIX_PATH="${GITHUB_WORKSPACE}/__install:${CMAKE_PREFIX_PATH}"
           export SKBUILD_CMAKE_ARGS="-DCMAKE_CUDA_COMPILER=$(which nvcc);-DCMAKE_CUDA_ARCHITECTURES=70"
           # the plugin carries the single arch built above, not the shipped list
@@ -498,7 +508,7 @@ jobs:
           pip install --prefer-binary ../raptor   # the sibling checkout, so unreleased raptor changes are tested
           # editable, as in development: python/conftest.py puts this source tree first
           # on sys.path, and only the editable hook then resolves the compiled eagle._core
-          pip install --prefer-binary -e ./python
+          pip install --no-build-isolation --only-binary=:all: -e ./python
 
       # An ft leg is vacuous on a GIL interpreter (every ft row skips) and the
       # harness refuses a forced GIL-off (-X gil=0 / PYTHON_GIL): assert the

@@ -128,10 +128,15 @@ jobs:
         run: |
           cd eagle
           python -m pip install --quiet --upgrade pip
+          # build deps preinstalled + --no-build-isolation: an isolated build compiles nanobind from a
+          # random /tmp build env, so every compile line differs and ccache never hits;
+          # --only-binary=:all: still builds this local project but never a dependency from
+          # source, so no third-party sdist is ever built without its own isolated env
+          python -m pip install --quiet "scikit-build-core>=0.10" "nanobind>=3.1,<4"
           export CMAKE_PREFIX_PATH="${GITHUB_WORKSPACE}/__install:${CMAKE_PREFIX_PATH}"
           export SKBUILD_CMAKE_ARGS="-DCMAKE_CUDA_COMPILER=$(which nvcc);-DCMAKE_CUDA_ARCHITECTURES=70"
           pip install ../raptor   # the sibling checkout, so unreleased raptor changes are tested
-          pip install -e ./python
+          pip install --no-build-isolation --only-binary=:all: -e ./python
 
       - name: Install docs dependencies
         run: |
