@@ -7,6 +7,9 @@ option(EAGLE_BUILD_TESTS "Whether to build tests" OFF)
 option(EAGLE_DEBUG_MODE "Whether to compile with debug features" OFF)
 option(EAGLE_WARN_AS_ERR "Whether to promote compilation warnings to errors" OFF)
 option(EAGLE_CPP_MODE "Whether to install eagle as a pure C++ Package. Default is CUDA/C++" OFF)
+# Sanitizer build of the test targets (tests/sanitize/README.md): a -fsanitize= list such as
+# `address,undefined`. Empty (default) changes nothing.
+set(EAGLE_SANITIZERS "" CACHE STRING "-fsanitize= list applied to the test targets and canaries (empty = off)")
 option(EAGLE_BUILD_SANITIZE "Register the `sanitize` custom target (valgrind/compute-sanitizer wrapper)" OFF)
 # The `eagle::exec::RankPartition`
 # MPI bed. OFF by default and deliberately INERT when ON for every target but the
@@ -110,10 +113,10 @@ endif()
 
 if (EAGLE_CPP_MODE)
   message(STATUS "> Configuring eagle in C++ only mode")
-  project(eagle VERSION 0.5.0 LANGUAGES CXX)
+  project(eagle VERSION 0.5.1 LANGUAGES CXX)
 else()
   message(STATUS "> Configuring eagle in CUDA/C++ mode")
-  project(eagle VERSION 0.5.0 LANGUAGES CUDA CXX)
+  project(eagle VERSION 0.5.1 LANGUAGES CUDA CXX)
 endif()
 
 ###########################

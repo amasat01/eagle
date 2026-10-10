@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.1
+
+**Graph-handle leak fix.** `Graph::addNode` rejects borrowed temporaries at compile time; wrap `end()`/`Scan::graph()` in `CapturedGraph` (`addNode(CapturedGraph{ capturer.end() })`). The borrowed `cudaGraph_t` overload never destroyed its input, so a temporary handle leaked; it now takes `const cudaGraph_t&` and the rvalue form is deleted. Lvalue borrows and `CapturedGraph` calls are unchanged. `StreamCapturer::end()` and `Scan::graph()` are now `[[nodiscard]]`, and the internal call sites that leaked (`Scanner`, `Slice`, `Scan::launch`) are fixed. The owned `CapturedGraph` overload of `addNode` gained a scalar `idealBlockSize` (default 0) applied to every kernel when the graph carries no per-kernel table.
+
+**Sanitizer gate.** A CI job runs the CPU suite under AddressSanitizer and UndefinedBehaviorSanitizer, and `tests/sanitize/sanitize_gate.sh` runs the CUDA suite under compute-sanitizer (memcheck, racecheck, synccheck, initcheck) and valgrind. Planted canaries must trip every tool, so a gate that stops instrumenting goes red (`tests/sanitize/README.md`).
+
 ## 0.5.0 (2026-10-09)
 
 **Free-threaded CPython, GIL-free.** The compiled core now declares free-threading

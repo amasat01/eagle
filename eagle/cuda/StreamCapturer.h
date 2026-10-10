@@ -133,7 +133,7 @@ public:
      *
      *  @throws aether::Error  If the capture did not end cleanly.
      */
-    cudaGraph_t end()
+    [[nodiscard]] cudaGraph_t end()
     {
         cudaGraph_t graph            = nullptr;
         const cudaError_t captureErr = cudaStreamEndCapture(stream_, &graph);

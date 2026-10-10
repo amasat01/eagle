@@ -1,0 +1,34 @@
+# Deliberate-misuse negative tests only. Each entry is anchored on a frame of the test body
+# itself, so the same driver faults in any other test stay reported. No leak entries.
+
+# owner:eagle · why: deliberate use-after-destroy/double-destroy negative test · evidence:<build>/sanitize_gate/valgrind · added:2026-10-09
+{
+   poisoned_handle_addr1
+   Memcheck:Addr1
+   ...
+   fun:*DeviceErrorNothrowTest_LauncherTeardownSurvivesPoisonedHandle_Test*TestBody*
+}
+
+# owner:eagle · why: deliberate use-after-destroy/double-destroy negative test · evidence:<build>/sanitize_gate/valgrind · added:2026-10-09
+{
+   poisoned_handle_addr2
+   Memcheck:Addr2
+   ...
+   fun:*DeviceErrorNothrowTest_LauncherTeardownSurvivesPoisonedHandle_Test*TestBody*
+}
+
+# owner:eagle · why: deliberate use-after-destroy/double-destroy negative test · evidence:<build>/sanitize_gate/valgrind · added:2026-10-09
+{
+   poisoned_handle_addr4
+   Memcheck:Addr4
+   ...
+   fun:*DeviceErrorNothrowTest_LauncherTeardownSurvivesPoisonedHandle_Test*TestBody*
+}
+
+# owner:eagle · why: deliberate use-after-destroy/double-destroy negative test · evidence:<build>/sanitize_gate/valgrind · added:2026-10-09
+{
+   poisoned_handle_free
+   Memcheck:Free
+   ...
+   fun:*DeviceErrorNothrowTest_LauncherTeardownSurvivesPoisonedHandle_Test*TestBody*
+}

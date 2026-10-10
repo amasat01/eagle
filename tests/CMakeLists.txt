@@ -539,3 +539,8 @@ set_target_properties(eagle_probe_launch_traits_cpu_only PROPERTIES
 if (EAGLE_MPI)
   add_subdirectory(mpi)
 endif()
+
+# Sanitizer flags (empty EAGLE_SANITIZERS = no-op) go LAST so their -O1 follows the -O3 above;
+# the host/device canaries are built in the same configure. See sanitize/README.md.
+include(${CMAKE_CURRENT_SOURCE_DIR}/sanitize/sanitizers.cmake)
+eagle_apply_sanitizers(eagle_tests)

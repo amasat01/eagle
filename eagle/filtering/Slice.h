@@ -181,7 +181,7 @@ public:
             cuda::StreamCapturer capturer(stream());
             capturer.begin();
             ParentT::download(stream());
-            g.addNode(capturer.end());
+            g.addNode(cuda::CapturedGraph { capturer.end() });
         }
         cuda::Launcher launcher = g.launcher();
         launcher.launch();

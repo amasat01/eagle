@@ -40,13 +40,21 @@ __global__ void writeKernel(int* buf, int offset, int n)
  * See BorrowedAddNodeDoesNotTakeOwnership / OwnedAddNodeConsumesCapturedGraph
  * below for both contracts pinned as observable behaviour.
  * ================================================================ */
-static cudaGraph_t capturedWriteGraph(
+/* Raw handle: the caller owns it (borrowed-overload tests only). */
+[[nodiscard]] static cudaGraph_t capturedWriteGraphRaw(
     const cudaStream_t& stream, int* buf, int offset, int n)
 {
     StreamCapturer capturer(stream);
     capturer.begin();
     writeKernel<<<1, n, 0, stream>>>(buf, offset, n);
     return capturer.end();
+}
+
+/* Owned handle: pass straight to the owned addNode overload. */
+static CapturedGraph capturedWriteGraph(
+    const cudaStream_t& stream, int* buf, int offset, int n)
+{
+    return CapturedGraph { capturedWriteGraphRaw(stream, buf, offset, n) };
 }
 
 /* ================================================================
@@ -233,8 +241,9 @@ TEST_F(GraphFixture, AddChildGraphAndLaunch)
     g.stream(s.cuda());
 
     /* Capture a child graph and add it */
-    cudaGraph_t child = capturedWriteGraph(s.cuda(), d_buf, 10, N);
+    cudaGraph_t child = capturedWriteGraphRaw(s.cuda(), d_buf, 10, N);
     g.addNode(child); /* borrowed overload -- does NOT take ownership (Graph::addNode(cudaGraph_t)) */
+    EAGLE_CHECK_ALWAYS(cudaGraphDestroy(child));
 
     Launcher launcher = g.launcher();
     launcher.launch();
@@ -316,10 +325,12 @@ TEST_F(GraphFixture, AddNodesInitializerList)
     Graph g;
     g.stream(s.cuda());
 
-    cudaGraph_t c1 = capturedWriteGraph(s.cuda(), d_buf, 1, N);
-    cudaGraph_t c2 = capturedWriteGraph(s.cuda(), d_buf, 2, N);
+    cudaGraph_t c1 = capturedWriteGraphRaw(s.cuda(), d_buf, 1, N);
+    cudaGraph_t c2 = capturedWriteGraphRaw(s.cuda(), d_buf, 2, N);
 
     g.addNodes({ c1, c2 });
+    EAGLE_CHECK_ALWAYS(cudaGraphDestroy(c1));
+    EAGLE_CHECK_ALWAYS(cudaGraphDestroy(c2));
 
     Launcher launcher = g.launcher();
     launcher.launch();
@@ -667,7 +678,7 @@ TEST_F(GraphFixture, SetLogicalSizePatchesPerNodeBlockDim)
         cap.begin();
         writeKernel<<<(M + blockA - 1) / blockA, blockA, 0, s.cuda()>>>(
             d_a, offsetA, M);
-        g.addNode(cap.end());
+        g.addNode(CapturedGraph{ cap.end() });
     }
     /* Kernel B: blockDim 128, captured grid = ceil(M/128) = 2. */
     {
@@ -675,7 +686,7 @@ TEST_F(GraphFixture, SetLogicalSizePatchesPerNodeBlockDim)
         cap.begin();
         writeKernel<<<(M + blockB - 1) / blockB, blockB, 0, s.cuda()>>>(
             d_b, offsetB, M);
-        g.addNode(cap.end());
+        g.addNode(CapturedGraph{ cap.end() });
     }
 
     Launcher launcher = g.launcher();
@@ -750,7 +761,7 @@ TEST_F(GraphFixture, SetLogicalSizeRetunesBlockDimWithCap)
         cap.begin();
         writeKernel<<<1, 256, 0, s.cuda()>>>(d_buf, 0, N);
         /* Pass idealBlockSize = 64 — the re-tune cap. */
-        g.addNode(cap.end(), std::initializer_list<idx_t>{}, /*idealBlockSize=*/ 64);
+        g.addNode(CapturedGraph{ cap.end() }, std::initializer_list<idx_t>{}, /*idealBlockSize=*/ 64);
     }
 
     Launcher launcher = g.launcher();
@@ -856,7 +867,7 @@ TEST_F(GraphFixture, BorrowedAddNodeDoesNotTakeOwnership)
     Graph g;
     g.stream(s.cuda());
 
-    cudaGraph_t child = capturedWriteGraph(s.cuda(), d_buf, 1, N);
+    cudaGraph_t child = capturedWriteGraphRaw(s.cuda(), d_buf, 1, N);
 
     /* Borrowed overload: g does not adopt `child`. */
     g.addNode(child);
@@ -894,6 +905,48 @@ TEST_F(GraphFixture, OwnedAddNodeConsumesCapturedGraph)
         << "addNode(CapturedGraph) should have moved-from the argument -- "
            "the OWNED contract (Graph.h ~259) means the caller has nothing "
            "left to manage after this call";
+}
+
+/* ================================================================
+ * Compile-time contract: the borrowed addNode overload rejects a
+ * temporary cudaGraph_t (it would leak: the overload never destroys
+ * its input) but accepts an lvalue; the owned overload accepts a
+ * CapturedGraph temporary.
+ * ================================================================ */
+namespace {
+template<typename G, typename A>
+concept CanAddNode = requires(G& g, A&& a) { g.addNode(std::forward<A>(a)); };
+} // namespace
+
+TEST(GraphAddNodeCompileTime, BorrowedTemporaryIsRejected)
+{
+    static_assert(!CanAddNode<Graph, cudaGraph_t>,
+        "addNode(cudaGraph_t&&) must be deleted: a borrowed temporary leaks");
+    static_assert(CanAddNode<Graph, cudaGraph_t&>,
+        "addNode(cudaGraph_t&) (borrowed lvalue) must stay well-formed");
+    static_assert(CanAddNode<Graph, const cudaGraph_t&>,
+        "addNode(const cudaGraph_t&) must stay well-formed");
+    static_assert(CanAddNode<Graph, CapturedGraph>,
+        "addNode(CapturedGraph) (owned) must stay well-formed");
+    SUCCEED();
+}
+
+/* ================================================================
+ * Owned overload honours the scalar idealBlockSize when the
+ * CapturedGraph carries no per-kernel table.
+ * ================================================================ */
+TEST_F(GraphFixture, OwnedAddNodeHonoursScalarIdealBlockSize)
+{
+    Stream s;
+    Graph g;
+    g.stream(s.cuda());
+
+    g.addNode(capturedWriteGraph(s.cuda(), d_buf, 0, N),
+        std::initializer_list<idx_t>{}, /*idealBlockSize=*/96);
+
+    Launcher launcher = g.launcher();
+    ASSERT_EQ(launcher.kernelNodeCount(), 1);
+    EXPECT_EQ(launcher.kernelNodes()[0].idealBlockSize, 96);
 }
 
 } // namespace GraphTest

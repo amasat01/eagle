@@ -179,7 +179,7 @@ public:
 
     /** @brief Create a cuda graph that can be used to launch the execution of
      * the scan algorithm */
-    cudaGraph_t graph()
+    [[nodiscard]] cudaGraph_t graph()
     {
         ensureInitDevice_();
         const GRef ref = this->deviceRef();
@@ -192,13 +192,13 @@ public:
     void deviceRun(const bool& includeRetrieval = false)
     {
         cuda::Graph g;
-        g.addNode(graph());
+        g.addNode(cuda::CapturedGraph { graph() });
         /* Add data retrieval to node if required */
         if (includeRetrieval) {
             cuda::StreamCapturer capturer(stream_);
             capturer.begin();
             retrieveResults();
-            g.addNode(capturer.end());
+            g.addNode(cuda::CapturedGraph { capturer.end() });
         }
         cuda::Launcher launcher = g.launcher();
         launcher.launch();

@@ -12,7 +12,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "raptor-eagle"
-version = "0.5.0"
+version = "0.5.1"
 description = "EAGLE — the Python face of the launch engine for compiled CUDA kernels"
 # The repo root's README.md, one level above this pyproject.toml (eagle's
 # Python packaging lives in python/, the README does not — see the repo's

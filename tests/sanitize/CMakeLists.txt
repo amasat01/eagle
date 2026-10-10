@@ -7,6 +7,14 @@
 
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
+# The driver pins the gtest count to the mode manifest (a run that executed a different
+# set than the manifest is RED, exit 2).
+if(EAGLE_CPP_MODE)
+  set(_eagle_san_mode cpp)
+else()
+  set(_eagle_san_mode cuda)
+endif()
+
 add_custom_target(sanitize
     COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/run_sanitize.py
@@ -15,6 +23,7 @@ add_custom_target(sanitize
             --suppressions ${CMAKE_CURRENT_SOURCE_DIR}/suppressions
             --log-dir ${CMAKE_BINARY_DIR}/sanitize
             --project-name EAGLE
+            --manifest ${CMAKE_CURRENT_SOURCE_DIR}/../expected_tests_${_eagle_san_mode}.txt
             $<$<BOOL:${EAGLE_SANITIZE_MINIMAL}>:--minimal>
             $<$<BOOL:${EAGLE_SANITIZE_FAIL_ON_REACHABLE}>:--fail-on-reachable>
     DEPENDS eagle_tests

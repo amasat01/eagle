@@ -237,7 +237,7 @@ public:
      *  ``cudaGraphClone``) and/or when it has multiple kernels with
      *  distinct caps. */
     template<typename IdxT = std::initializer_list<idx_t>>
-    void addNode(cudaGraph_t childGraph, const IdxT& dependencies = {},
+    void addNode(const cudaGraph_t& childGraph, const IdxT& dependencies = {},
         idx_t idealBlockSize = 0)
     {
         DepsT deps = nodes_.findDependencies<IdxT>(dependencies);
@@ -247,6 +247,13 @@ public:
         harvestKernels_(nodeSlot, {}, idealBlockSize);
         /* No retention: childGraph is the producer's responsibility. */
     }
+
+    /** @brief Rejects a temporary ``cudaGraph_t`` at compile time: the
+     *  borrowed overload never destroys its input, so a prvalue handle
+     *  (e.g. ``addNode(capturer.end())``) would leak. Wrap it in an
+     *  owner instead: ``addNode(CapturedGraph{ capturer.end() })``. */
+    template<typename IdxT = std::initializer_list<idx_t>>
+    void addNode(cudaGraph_t&&, const IdxT& = {}, idx_t = 0) = delete;
 
     /** @brief Add a child graph carrying a per-kernel
      *  ``idealBlockSize`` table. **Owned-input contract**:
@@ -258,15 +265,17 @@ public:
      *  of this call.
      *
      *  Caps are read positionally from ``child.idealBlockSizes()``.
-     *  Empty vector = grid-only for every kernel. */
+     *  Empty vector = ``idealBlockSize`` for every kernel (default ``0`` =
+     *  grid-only); a non-empty table wins over ``idealBlockSize``. */
     template<typename IdxT = std::initializer_list<idx_t>>
-    void addNode(CapturedGraph child, const IdxT& dependencies = {})
+    void addNode(CapturedGraph child, const IdxT& dependencies = {},
+        idx_t idealBlockSize = 0)
     {
         DepsT deps = nodes_.findDependencies<IdxT>(dependencies);
         cudaGraphNode_t& nodeSlot = nodes_.createSlot();
         EAGLE_CHECK_ALWAYS(cudaGraphAddChildGraphNode(&nodeSlot, storage_->graph,
             data_(deps), deps.size(), child.graph()));
-        harvestKernels_(nodeSlot, child.idealBlockSizes());
+        harvestKernels_(nodeSlot, child.idealBlockSizes(), idealBlockSize);
         /* ~CapturedGraph runs on `child` at the end of this call,
          * destroying the source handle. The parent already has its
          * clone via cudaGraphAddChildGraphNode. */

@@ -132,6 +132,7 @@ TEST_F(GraphPerKernelIdealsFixture, HarvestUniformChildSingleKernel)
 
     cudaGraph_t child = captureSingleKernel(s.cuda(), d_buf, N, /*blockDim=*/32);
     g.addNode(child, std::initializer_list<idx_t>{}, /*idealBlockSize=*/256);
+    cudaGraphDestroy(child); // borrowed overload: the caller still owns the child
 
     Launcher launcher = g.launcher();
     ASSERT_EQ(launcher.kernelNodeCount(), 1);

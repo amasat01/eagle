@@ -3,15 +3,19 @@
 # SPDX-License-Identifier: Apache-2.0
 """run_sanitize.py — drive valgrind / NVIDIA compute-sanitizer over a gtest binary.
 
-Parse tool output and emit a human-readable report. The same script is reused
-across the sibling header-only libraries; the only per-project knob is the
---project-name flag, which selects the env var consumed by the C++-side
-`Test::isMinimalMode()` helper.
+A reusable, project-agnostic driver. The only per-project knob is --project-name,
+which selects the <NAME>_TEST_MINIMAL env var read by the C++-side minimal-mode
+helper, and the <NAME>_DEBUG_MODE cache entry used to resolve @debug manifest rows.
+
+Parse tool output and emit a human-readable report.
 
 Exit codes:
-  0  clean (no errors, no definite/indirect/possible leaks)
+  0  clean (no errors, no definite/indirect/possible leaks; every run non-vacuous)
   1  real errors or leaks detected (still-reachable is a warning by default)
-  2  driver infrastructure error (missing tool, bad config, ...)
+  2  RED, driver or vacuity error: missing tool output (valgrind XML, compute-sanitizer
+     "ERROR SUMMARY"), the target's own exit status is neither 0 nor the tool's
+     error-exitcode (77), or the gtest summary count differs from the mode manifest
+     (--manifest, tests/expected_tests_<mode>.txt) — a green that checked nothing.
 """
 from __future__ import annotations
 
@@ -72,6 +76,7 @@ class ValgrindReport:
     wall: float = 0.0
     suppressed: int = 0
     xml_missing: bool = False
+    rc: int = 0
 
 
 @dataclass
@@ -81,9 +86,72 @@ class CsanResult:
     wall: float = 0.0
     sample: str = ""
     log_path: str = ""
+    summary_missing: bool = False
+    rc: int = 0
 
 
 CSAN_TOOLS = ("memcheck", "initcheck", "racecheck", "synccheck")
+
+# Both tools are told to exit 77 on a finding, so the target's own failure
+# (gtest rc 1, a crash, a signal) is distinguishable from a tool finding.
+TOOL_ERROR_EXITCODE = 77
+
+
+def manifest_count(path: Path, project_name: str, binary: Path) -> "tuple[int, str]":
+    """Rows expected from the mode manifest. `Suite.Test @debug` rows count only
+    in a debug build, read from <PROJECT>_DEBUG_MODE:BOOL in the CMakeCache.txt
+    at or above the binary (a manifest with no tagged rows needs no config)."""
+    bare = tagged = 0
+    for raw in path.read_text().splitlines():
+        line = raw.split("#", 1)[0].rstrip()
+        if not line.strip():
+            continue
+        if line.endswith(" @debug"):
+            tagged += 1
+        else:
+            bare += 1
+    if tagged == 0:
+        return bare, "release/debug-independent"
+    key = f"{project_name.upper()}_DEBUG_MODE:BOOL="
+    probe = binary.resolve().parent
+    for _ in range(5):
+        cache = probe / "CMakeCache.txt"
+        if cache.is_file():
+            for ln in cache.read_text(errors="ignore").splitlines():
+                if ln.startswith(key):
+                    on = ln[len(key):].strip().upper() in ("ON", "1", "TRUE", "YES", "Y")
+                    return (bare + tagged if on else bare), ("debug" if on else "release")
+        if probe.parent == probe:
+            break
+        probe = probe.parent
+    return -1, "unresolved"
+
+
+def gtest_ran(stdout_log: Path) -> "int | None":
+    if not stdout_log.exists():
+        return None
+    ran = None
+    for m in re.finditer(r"^\[==========\] (\d+) tests? from .* ran",
+                         stdout_log.read_text(errors="ignore"), re.M):
+        ran = int(m.group(1))
+    return ran
+
+
+def check_count(args, stdout_log: Path, label: str) -> "str | None":
+    """RED message when the run's gtest count differs from the manifest, else None."""
+    if args.gtest_filter:
+        return None  # a deliberate slice; the full-run gate is the unfiltered one
+    if not args.manifest:
+        return f"{label}: no --manifest given (an unfiltered run must be pinned)"
+    want, cfg = manifest_count(Path(args.manifest), args.project_name, Path(args.binary))
+    if want < 0:
+        return f"{label}: manifest has @debug rows but the build config is unresolved"
+    ran = gtest_ran(stdout_log)
+    if ran is None:
+        return f"{label}: no gtest summary line in {stdout_log} (target never reported a run)"
+    if ran != want:
+        return f"{label}: gtest ran {ran}, manifest ({cfg}) pins {want}"
+    return None
 
 
 def _parse_frame(frame: ET.Element) -> str:
@@ -146,7 +214,7 @@ def run_valgrind(args, log_dir: Path) -> "ValgrindReport | None":
         "--leak-check=full",
         "--show-leak-kinds=all",
         "--errors-for-leak-kinds=definite,indirect,possible",
-        "--error-exitcode=77",
+        f"--error-exitcode={TOOL_ERROR_EXITCODE}",
         "--track-origins=yes",
         "--num-callers=25",
         "--child-silent-after-fork=yes",
@@ -168,11 +236,12 @@ def run_valgrind(args, log_dir: Path) -> "ValgrindReport | None":
     start = time.monotonic()
     with open(log_dir / "valgrind.stdout.log", "wb") as out, \
          open(log_dir / "valgrind.stderr.log", "wb") as err:
-        subprocess.run(cmd, env=env, stdout=out, stderr=err, check=False)
+        proc = subprocess.run(cmd, env=env, stdout=out, stderr=err, check=False)
     wall = time.monotonic() - start
 
     rep = parse_valgrind_xml(xml_path)
     rep.wall = wall
+    rep.rc = proc.returncode
     return rep
 
 
@@ -194,7 +263,7 @@ def run_compute_sanitizer(args, log_dir: Path) -> list:
             "--leak-check=full",
             "--padding=256",
             "--launch-timeout=60",
-            "--error-exitcode=1",
+            f"--error-exitcode={TOOL_ERROR_EXITCODE}",
             f"--log-file={log_path}",
             args.binary,
         ]
@@ -203,25 +272,29 @@ def run_compute_sanitizer(args, log_dir: Path) -> list:
 
         print(f"{C.CYA}> compute-sanitizer {tool}{C.RESET}  {args.binary}")
         start = time.monotonic()
-        subprocess.run(cmd, env=env, check=False,
-                       stdout=subprocess.DEVNULL,
-                       stderr=subprocess.DEVNULL)
+        with open(log_dir / f"computesan.{tool}.stdout.log", "wb") as out:
+            proc = subprocess.run(cmd, env=env, check=False,
+                                  stdout=out, stderr=subprocess.STDOUT)
         wall = time.monotonic() - start
 
         errors = 0
         sample = ""
+        summary_missing = True
         if log_path.exists():
             text = log_path.read_text(errors="ignore")
-            m = re.search(r"ERROR SUMMARY:\s*(\d+)\s*error", text)
+            m = re.search(r"(?:ERROR SUMMARY:\s*(\d+)\s*error|RACECHECK SUMMARY:\s*\d+\s*hazards? displayed \((\d+) error)", text)
             if m:
-                errors = int(m.group(1))
+                errors = int(m.group(1) or m.group(2))
+                summary_missing = False
             # grab the first ~12 lines of the first error block, if any
             first = re.search(r"=========\s+(?:Program|Invalid|Uninitialized|Race|Memory|Host|Barrier)[^\n]*\n(?:=========[^\n]*\n){1,15}",
                               text)
             if first:
                 sample = first.group(0)
         results.append(CsanResult(tool=tool, errors=errors, wall=wall,
-                                  sample=sample, log_path=str(log_path)))
+                                  sample=sample, log_path=str(log_path),
+                                  summary_missing=summary_missing,
+                                  rc=proc.returncode))
     return results
 
 
@@ -251,9 +324,10 @@ def render_valgrind(rep: ValgrindReport, fail_on_reachable: bool):
         head_color, mark = C.GRN, "v"
 
     lines.append(f"{head_color}{mark}  valgrind memcheck{C.RESET}  "
-                 f"({rep.wall:.1f}s, {rep.suppressed} suppressed)")
+                 f"({rep.wall:.1f}s)")
+    lines.append(f"  suppressed:            {rep.suppressed}")
     if rep.xml_missing:
-        lines.append(f"    {C.YLW}(no XML produced — check stdout/stderr logs){C.RESET}")
+        lines.append(f"    {C.RED}(no XML produced — RED, see stdout/stderr logs){C.RESET}")
 
     def row(label, nbytes, nblocks, color):
         if nbytes > 0:
@@ -311,7 +385,12 @@ def render_csan(results: list):
     lines = []
     any_fail = False
     for r in results:
-        if r.errors > 0:
+        if r.summary_missing:
+            any_fail = True
+            lines.append(f"{C.RED}X  compute-sanitizer {r.tool}{C.RESET}  "
+                         f"({r.wall:.1f}s)  no 'ERROR SUMMARY' in {r.log_path} — "
+                         f"the target never exercised the tool; this is not a clean run")
+        elif r.errors > 0:
             any_fail = True
             lines.append(f"{C.RED}X  compute-sanitizer {r.tool}{C.RESET}  "
                          f"({r.wall:.1f}s)  errors: {r.errors}  log: {r.log_path}")
@@ -337,6 +416,8 @@ def main(argv=None) -> int:
     ap.add_argument("--gtest-repeat", type=int, default=1)
     ap.add_argument("--minimal", action="store_true")
     ap.add_argument("--fail-on-reachable", action="store_true")
+    ap.add_argument("--manifest", default="",
+                    help="tests/expected_tests_<mode>.txt; the gtest count must equal its rows")
     ap.add_argument("--project-name", default="EAGLE")
     args = ap.parse_args(argv)
 
@@ -366,11 +447,26 @@ def main(argv=None) -> int:
           f"{'(minimal)' if args.minimal else ''}{C.RESET}")
     exit_code = 0
 
+    red = []  # exit-2 reasons: the run proves nothing
+    if args.tool == "valgrind" and vg_rep is None:
+        red.append("valgrind requested but not available")
+    if args.tool == "computesan" and not csan_results:
+        red.append("compute-sanitizer requested but not available")
+
     if vg_rep is not None:
         fail, text = render_valgrind(vg_rep, args.fail_on_reachable)
         print(text)
         if fail:
             exit_code = 1
+        if vg_rep.xml_missing:
+            red.append("valgrind produced no XML")
+        elif vg_rep.rc not in (0, TOOL_ERROR_EXITCODE):
+            red.append(f"valgrind: target exit status {vg_rep.rc} (not 0, not the tool's {TOOL_ERROR_EXITCODE})")
+        elif vg_rep.rc == TOOL_ERROR_EXITCODE and exit_code == 0:
+            exit_code = 1
+        msg = check_count(args, log_dir / "valgrind.stdout.log", "valgrind")
+        if msg:
+            red.append(msg)
         print()
 
     if csan_results:
@@ -378,7 +474,23 @@ def main(argv=None) -> int:
         print(text)
         if fail:
             exit_code = 1
+        for r in csan_results:
+            if r.summary_missing:
+                red.append(f"compute-sanitizer {r.tool}: no ERROR SUMMARY in log")
+            elif r.rc not in (0, TOOL_ERROR_EXITCODE):
+                red.append(f"compute-sanitizer {r.tool}: target exit status {r.rc}")
+            elif r.rc == TOOL_ERROR_EXITCODE and exit_code == 0:
+                exit_code = 1
+            msg = check_count(args, log_dir / f"computesan.{r.tool}.stdout.log",
+                              f"compute-sanitizer {r.tool}")
+            if msg:
+                red.append(msg)
         print()
+
+    if red:
+        for m in red:
+            print(f"{C.RED}RED (vacuity): {m}{C.RESET}")
+        exit_code = 2
 
     if exit_code == 0:
         print(f"{C.GRN}{C.BOLD}v sanitize clean{C.RESET}  "

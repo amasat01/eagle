@@ -1,0 +1,3 @@
+# LeakSanitizer suppressions for the sanitize-cpp job (LSAN_OPTIONS=suppressions=<this file>).
+# owner:eagle · why:libgomp worker threads keep their team/TLS blocks until process exit · evidence:CI sanitize-cpp job LeakSanitizer report · added:2026-10-09
+leak:libgomp

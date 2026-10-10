@@ -1,8 +1,6 @@
-# Suppressions for OpenMP / glibc TLS machinery.
-# These are reported as "possibly lost" or "still reachable" by valgrind
-# because libgomp and the dynamic loader hold allocations for the lifetime of
-# the process. They are not leaks in the application sense.
+# OpenMP runtime and glibc TLS machinery. Third-party only; reachable/possible leaks only.
 
+# owner:eagle · why:libgomp worker team held for the process · evidence:<build>/sanitize/valgrind.xml · added:2026-10-09
 {
    gomp_team_start_possibly_lost_calloc
    Memcheck:Leak
@@ -12,6 +10,7 @@
    fun:gomp_team_start
 }
 
+# owner:eagle · why:libgomp worker team held for the process · evidence:<build>/sanitize/valgrind.xml · added:2026-10-09
 {
    gomp_team_start_possibly_lost_malloc
    Memcheck:Leak
@@ -21,6 +20,7 @@
    fun:gomp_team_start
 }
 
+# owner:eagle · why:libgomp thread-local state · evidence:<build>/sanitize/valgrind.xml · added:2026-10-09
 {
    gomp_thread_local_reachable
    Memcheck:Leak
@@ -30,6 +30,7 @@
    obj:*/libgomp.so*
 }
 
+# owner:eagle · why:glibc thread stack cache · evidence:<build>/sanitize/valgrind.xml · added:2026-10-09
 {
    pthread_create_allocate_stack
    Memcheck:Leak
@@ -40,6 +41,7 @@
    fun:pthread_create*
 }
 
+# owner:eagle · why:ld.so TLS block · evidence:<build>/sanitize/valgrind.xml · added:2026-10-09
 {
    libc_dl_allocate_tls_reachable
    Memcheck:Leak
@@ -48,10 +50,21 @@
    fun:_dl_allocate_tls*
 }
 
+# owner:eagle · why:ld.so TLS block · evidence:<build>/sanitize/valgrind.xml · added:2026-10-09
 {
    libc_dl_allocate_tls_calloc_reachable
    Memcheck:Leak
    match-leak-kinds: reachable
    fun:calloc
    fun:_dl_allocate_tls*
+}
+
+# owner:eagle · why:owned: thread DTV allocated by ld.so for a worker thread, held via an interior pointer; the single residual after the entries above · evidence:<build>/sanitize/valgrind.xml · added:2026-10-09
+{
+   glibc_allocate_dtv_possibly_lost
+   Memcheck:Leak
+   match-leak-kinds: possible
+   fun:calloc
+   fun:allocate_dtv
+   ...
 }

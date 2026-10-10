@@ -74,6 +74,100 @@ jobs:
       - if: always()
         run: ccache -s
 
+  # Sanitizer leg (host only): the CPP_MODE suite built with -fsanitize=address,undefined and run
+  # through the manifest gate. Three checks keep it from going vacuously green: the runtime is
+  # linked, the committed canary (tests/sanitize/canary.cpp) trips every mode, and the suite
+  # count equals the manifest. CUDA-side coverage is the local `sanitize-gate`
+  # (tests/sanitize/README.md).
+  sanitize-cpp:
+    runs-on: ubuntu-latest
+    env:
+      CC: gcc-13
+      CXX: g++-13
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 500M
+      CCACHE_COMPILERCHECK: content
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+      CMAKE_CXX_COMPILER_LAUNCHER: ccache
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: eagle
+
+      - uses: actions/checkout@v7
+        with:
+          repository: amasat01/aether
+          path: aether
+          token: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
+
+      - run: sudo apt-get update && sudo apt-get install -y g++-13 ccache
+
+      - uses: actions/cache@v6
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-${{ runner.os }}-${{ runner.arch }}-sanitize-cpp-${{ hashFiles('**/*.h', '**/*.hpp', '**/*.cpp', '**/*.cu', '**/*.cuh', '**/CMakeLists.txt') }}
+          restore-keys: |
+            ccache-${{ runner.os }}-${{ runner.arch }}-sanitize-cpp-
+      - run: ccache -z
+
+      # aether headers (CPP_MODE) into a local prefix, unsanitized: header-only.
+      - run: |
+          cmake -DAETHER_CPP_MODE=ON \
+            -DCMAKE_INSTALL_PREFIX="${GITHUB_WORKSPACE}/__install" \
+            -B aether/build -S aether
+          cmake --install aether/build
+
+      - run: |
+          cd eagle
+          cmake -B build \
+            -DCMAKE_PREFIX_PATH="${GITHUB_WORKSPACE}/__install" \
+            -DFETCHCONTENT_QUIET=ON \
+            -DEAGLE_BUILD_TESTS=ON \
+            -DEAGLE_DEBUG_MODE=ON \
+            -DEAGLE_CPP_MODE=ON \
+            -DEAGLE_SANITIZERS=address,undefined .
+          cmake --build build -j"$(nproc)"
+
+      # Non-vacuity (i): the binary must actually carry the ASan runtime.
+      - name: sanitizer runtime is linked
+        run: |
+          cd eagle
+          { nm -D build/tests/eagle_tests; nm build/tests/eagle_tests; } 2>/dev/null | grep -q __asan_init \
+            || { echo "RED: eagle_tests carries no __asan_init — this job is not sanitizing"; exit 1; }
+
+      # Non-vacuity (ii): each canary mode must exit non-zero AND print its banner.
+      - name: canaries trip
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: |
+          cd eagle
+          fail=0
+          for pair in "heap-oob:AddressSanitizer: heap-buffer-overflow" \
+                      "leak:LeakSanitizer: detected memory leaks" \
+                      "uninit:runtime error: load of value" \
+                      "shift-ub:runtime error: shift exponent"; do
+            mode="${pair%%:*}"; banner="${pair#*:}"
+            set +e; build/tests/eagle_canary "$mode" > canary.out 2>&1; rc=$?; set -e
+            if [ "$rc" -eq 0 ] || ! grep -q "$banner" canary.out; then
+              echo "RED: canary '$mode' rc=$rc, banner '$banner' present: $(grep -c "$banner" canary.out)"; cat canary.out; fail=1
+            else
+              echo "canary '$mode' tripped (rc=$rc)"
+            fi
+          done
+          exit $fail
+
+      # Non-vacuity (iii): the manifest gate, with the sanitizer environment.
+      - name: suite under check_gate
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: |
+          cd eagle
+          LSAN_OPTIONS="suppressions=$PWD/tests/sanitize/lsan.supp" tests/check_gate.sh cpp build/tests/eagle_tests
+      - if: always()
+        run: ccache -s
+
   # test:python — builds eagle._core (plain C++) AND the libeagle_cuda.so backend
   # plugin (python/CMakeLists.txt's default EAGLE_PYTHON_CUDA_PLUGIN=BUILD needs nvcc)
   # against a provisioned compile-only CUDA toolchain — no GPU is present or required

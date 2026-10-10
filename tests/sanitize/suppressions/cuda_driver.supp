@@ -1,8 +1,8 @@
-# CUDA driver globals and init-time allocations.
-# These are reported as "still reachable" (and occasionally "possibly lost")
-# because the CUDA driver holds process-lifetime caches and context blocks.
-# They are not application leaks.
+# CUDA driver and runtime process-lifetime allocations. Third-party only.
+# Policy: a Memcheck:Leak entry here may match reachable/possible ONLY; definite and
+# indirect leaks are never suppressed (an app-owned handle leak shows up as definite).
 
+# owner:eagle · why:driver caches live for the process · evidence:<build>/sanitize/valgrind.xml · added:2026-10-09
 {
    libcuda_init_reachable
    Memcheck:Leak
@@ -11,6 +11,7 @@
    obj:*/libcuda.so*
 }
 
+# owner:eagle · why:driver context blocks held via interior pointers · evidence:<build>/sanitize/valgrind.xml · added:2026-10-09
 {
    libcuda_init_possible
    Memcheck:Leak
@@ -19,6 +20,7 @@
    obj:*/libcuda.so*
 }
 
+# owner:eagle · why:runtime caches live for the process · evidence:<build>/sanitize/valgrind.xml · added:2026-10-09
 {
    libcudart_init_reachable
    Memcheck:Leak
@@ -27,6 +29,7 @@
    obj:*/libcudart.so*
 }
 
+# owner:eagle · why:runtime blocks held via interior pointers · evidence:<build>/sanitize/valgrind.xml · added:2026-10-09
 {
    libcudart_init_possible
    Memcheck:Leak
@@ -35,6 +38,7 @@
    obj:*/libcudart.so*
 }
 
+# owner:eagle · why:vendor driver globals · evidence:<build>/sanitize/valgrind.xml · added:2026-10-09
 {
    nvidia_driver_init_reachable
    Memcheck:Leak
@@ -43,9 +47,10 @@
    obj:*/libnvidia-*.so*
 }
 
+# owner:eagle · why:driver-internal condvar wait reads; frame 0 must be libcuda so an app error above a driver frame is never hidden · evidence:<build>/sanitize/valgrind.xml · added:2026-10-09
 {
    nvidia_driver_cond_var
    Memcheck:Addr8
-   ...
    obj:*/libcuda.so*
+   ...
 }

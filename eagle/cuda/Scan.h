@@ -143,7 +143,7 @@ struct Scan {
     /** @brief Capture the full scan algorithm (``enqueue``) into a graph */
     template<typename T, typename OP, bool Inclusive,
         unsigned int blockSize_ = filtering::detail::ScanCore::blockSize>
-    static inline cudaGraph_t graph(
+    [[nodiscard]] static inline cudaGraph_t graph(
         const CRefArrT<T> arr, GRefArrT<T> results,
         GRefArrT<T> blockSums, const T& init = 0,
         const cudaStream_t& stream = 0)
@@ -163,8 +163,8 @@ struct Scan {
         const cudaStream_t& stream = 0)
     {
         cuda::Graph graph;
-        graph.addNode(Scan::graph<T, OP, blockSize_, Inclusive>(
-            arr, results, blockSums, init, stream));
+        graph.addNode(cuda::CapturedGraph { Scan::graph<T, OP, blockSize_, Inclusive>(
+            arr, results, blockSums, init, stream) });
         cuda::Launcher launcher = graph.launcher();
         launcher.launch();
         launcher.synchronize();

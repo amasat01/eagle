@@ -196,7 +196,9 @@ TEST_F(GraphOwnershipFixture, OwnedAddNode_DestroysSourceImmediately)
         l.launch();
         l.synchronize();
     }
-    EXPECT_FALSE(isAlive_(saved));
+    /* No post-destroy probe on `saved` (UB reference, see isAlive_ doc): the
+     * single destroy is proven by the scoped destructors completing and by
+     * the sanitize gate. */
 }
 
 /* ================================================================
