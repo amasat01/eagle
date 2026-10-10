@@ -81,11 +81,17 @@ echo "canary race reported (detector live)"
 n_ft="$(cd "$root/python" && "$venv_py" -m pytest tests -m ft --collect-only -q -p no:cacheprovider | grep -c '::' || true)"
 [ "$n_ft" -gt 0 ] || { echo "RED: no ft rows collected"; exit 1; }
 set +e
-(cd "$root/python" && TSAN_OPTIONS="suppressions=$work/all.supp exitcode=0 second_deadlock_stack=1 log_path=$work/reports/ft" \
+(cd "$root/python" && TSAN_OPTIONS="suppressions=$work/all.supp second_deadlock_stack=1 log_path=$work/reports/ft" \
     "$venv_py" -m pytest tests -m ft -q -rs -p no:cacheprovider --basetemp="$work/pytest")
 rc=$?
 set -e
 n_reports="$(cat "$work"/reports/ft.* 2>/dev/null | grep -c 'WARNING: ThreadSanitizer' || true)"
+# a TSan-fatal child (compiler trampoline, subprocess) must never read as success:
+# the default exitcode (66) is kept for the ft run, and fatal lines are surfaced
+if cat "$work"/reports/ft.* 2>/dev/null | grep -q -E 'FATAL: ThreadSanitizer|ERROR: ThreadSanitizer'; then
+    echo "RED: ThreadSanitizer fatal error in a process of the ft run:"
+    cat "$work"/reports/ft.* | grep -E -A12 'FATAL: ThreadSanitizer|ERROR: ThreadSanitizer' | head -60; exit 1
+fi
 if [ "$n_reports" -gt 0 ]; then
     echo "RED: $n_reports TSan report(s):"; cat "$work"/reports/ft.*; exit 1
 fi
