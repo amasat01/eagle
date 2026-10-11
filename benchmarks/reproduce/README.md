@@ -9,6 +9,7 @@ software and write the cards for that machine.
 | File | What it does |
 |---|---|
 | `bootstrap.sh` | pinned toolchain + Python environment, the four repositories (aether, raptor, eagle, hawk) at their release tags, eagle's `_core` for the GPUs present (CPU-only build without one), hawk, an import smoke test and a machine fact sheet |
+| `bootstrap.sh --from-pypi` | the no-compiler route: a plain venv with the released `raptor-eagle` / `raptor-hawk` wheels, pins in `locks/pypi-{gpu,cpu}.txt` |
 | `run_cards.sh` | runs the cards (`--which gpu\|cpu\|all`, `--preset smoke\|short\|full`) into `cards/<machine-slug>/` |
 | `passes.py` | runs a GPU card one pass at a time (used by `run_cards.sh --split`) |
 | `kaggle.ipynb` | a thin notebook calling the two scripts |
@@ -22,7 +23,7 @@ its own). No root. On vast.ai any CUDA 12 image works, e.g.
 `nvidia/cuda:12.6.3-devel-ubuntu22.04`.
 
 ```bash
-git clone --depth 1 --branch v0.4.0 https://github.com/amasat01/eagle.git
+git clone --depth 1 --branch v0.5.1 https://github.com/amasat01/eagle.git
 eagle/benchmarks/reproduce/bootstrap.sh                 # gpu profile when a GPU is visible
 eagle/benchmarks/reproduce/bootstrap.sh --profile cpu   # the CPU cards' environment
 eagle/benchmarks/reproduce/run_cards.sh --preset smoke --which all   # minutes: checks the setup
@@ -36,6 +37,21 @@ or `EAGLE_REF=...` picks another ref). With several GPUs, set
 `CUDA_VISIBLE_DEVICES` to the one to measure. Cards land in
 `~/.cache/raptor-repro/cards/<gpu>--<cpu>/` (`--out` to change);
 `--publish` writes them next to the committed cards instead.
+
+## Google Cloud (or any VM with an NVIDIA driver)
+
+Needs Python >= 3.10, `git` and a driver >= 525.60.13; no compiler, conda or CUDA toolkit.
+
+```bash
+git clone --depth 1 --branch v0.5.1 https://github.com/amasat01/eagle.git
+eagle/benchmarks/reproduce/bootstrap.sh --from-pypi          # venv + pinned wheels, ~10 GB of disk
+eagle/benchmarks/reproduce/run_cards.sh --split --preset smoke   # minutes: checks the setup
+eagle/benchmarks/reproduce/run_cards.sh --split                  # the full cards
+```
+
+Cards land in `~/.cache/raptor-repro/cards/<gpu>--<cpu>/` (`--out` to change); copy them
+off the VM, then delete it. The fact sheet (`machine_facts.txt`) records `install: pypi`
+and the exact package versions. `REPRO_PYTHON=/path/to/python` picks the interpreter.
 
 ## Kaggle
 

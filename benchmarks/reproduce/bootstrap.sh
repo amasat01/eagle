@@ -26,6 +26,10 @@
 #     --no-smoke      skip the import smoke test
 #     --dry-run       print every command, change nothing
 #
+#     --from-pypi     no compilers, conda or CUDA toolkit: a plain venv with the released
+#                     raptor-eagle / raptor-hawk wheels (pins in locks/pypi-PROFILE.txt);
+#                     the card scripts come from the eagle checkout this script lives in
+#
 # Afterwards: . WORK/env-PROFILE.sh  (or run_cards.sh --env WORK/env-PROFILE.sh)
 set -euo pipefail
 
@@ -33,7 +37,7 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=SCRIPTDIR/lib.sh
 . "$HERE/lib.sh"
 
-TARGET="" PROFILE=auto WORK="" SRC="" ARCH="" ENV_PREFIX="" EDITABLE=0 SMOKE=1
+TARGET="" PROFILE=auto WORK="" SRC="" ARCH="" ENV_PREFIX="" EDITABLE=0 SMOKE=1 FROM_PYPI=0
 JOBS=$(nproc 2>/dev/null || echo 4)
 declare -A REF=([aether]=${AETHER_REF:-v0.2.0} [raptor]=${RAPTOR_REF:-v0.2.0}
                 [eagle]=${EAGLE_REF:-v0.4.0} [hawk]=${HAWK_REF:-v0.3.0})
@@ -52,9 +56,10 @@ while [[ $# -gt 0 ]]; do
     --env-prefix) ENV_PREFIX=$2; shift 2 ;;
     --editable) EDITABLE=1; shift ;;
     --jobs) JOBS=$2; shift 2 ;;
+    --from-pypi) FROM_PYPI=1; shift ;;
     --no-smoke) SMOKE=0; shift ;;
     --dry-run) REPRO_DRY_RUN=1; shift ;;
-    -h|--help) sed -n '5,30p' "$0"; exit 0 ;;
+    -h|--help) sed -n '5,33p' "$0"; exit 0 ;;
     *) die "unknown option $1 (see --help)" ;;
   esac
 done
@@ -65,12 +70,14 @@ case $TARGET in kaggle|vastai|devbox|local) ;; *) die "unknown target $TARGET" ;
 GPUS=$(detect_gpus)
 if [[ $PROFILE == auto ]]; then PROFILE=$([[ -n $GPUS ]] && echo gpu || echo cpu); fi
 [[ $PROFILE == gpu || $PROFILE == cpu ]] || die "unknown profile $PROFILE"
-if [[ $PROFILE == gpu ]]; then
+if [[ $PROFILE == gpu && $FROM_PYPI == 0 ]]; then
   ARCH=${ARCH:-$(gpu_archs)}
   [[ -n $ARCH ]] || die "profile gpu but no GPU visible; pass --arch (e.g. --arch 75) to build anyway"
 fi
 WORK=${WORK:-$(default_work "$TARGET")}
-if [[ -z $SRC ]]; then
+EAGLE_ROOT=$(cd "$HERE/../.." && pwd)
+if [[ $FROM_PYPI == 1 ]]; then SRC=$(dirname "$EAGLE_ROOT")
+elif [[ -z $SRC ]]; then
   if [[ $TARGET == local ]]; then SRC=$(checkout_root); fi
   SRC=${SRC:-$WORK/src}
 fi
@@ -80,114 +87,155 @@ ENV_FILE=$WORK/env-$PROFILE.sh
 log "target=$TARGET profile=$PROFILE arch=${ARCH:-none} work=$WORK src=$SRC env=$ENV_PREFIX"
 [[ $REPRO_DRY_RUN == 1 ]] && log "dry run: commands are printed, nothing is changed"
 
+MODE=$([[ $FROM_PYPI == 1 ]] && echo pypi || echo source)
 stamp_ok() { [[ $REPRO_DRY_RUN == 0 && -f $1 && $(cat "$1") == "$2" ]]; }
 write_stamp() { [[ $REPRO_DRY_RUN == 1 ]] || echo "$2" >"$1"; }
 md5_of() { md5sum "$@" | md5sum | cut -c1-32; }
 
 run mkdir -p "$WORK/bin" "$WORK/build" "$SRC"
 
-# --- 1. conda frontend (an existing micromamba/mamba/conda, else a pinned download)
-# REPRO_MAMBA=/path/to/frontend picks one; REPRO_MAMBA=download forces the download.
-MAMBA=${REPRO_MAMBA:-}
-[[ $MAMBA == download ]] && MAMBA=$WORK/bin/micromamba
-if [[ -z $MAMBA ]]; then
-  for c in micromamba mamba conda; do command -v $c >/dev/null 2>&1 && { MAMBA=$(command -v $c); break; }; done
-fi
-if [[ -z $MAMBA || $MAMBA == "$WORK/bin/micromamba" ]]; then
-  MAMBA=$WORK/bin/micromamba
-  if [[ ! -x $MAMBA ]]; then
-    MM_VER=${MICROMAMBA_VERSION:-2.9.0-0}
-    run curl -fsSL -o "$MAMBA" \
-      "https://github.com/mamba-org/micromamba-releases/releases/download/$MM_VER/micromamba-linux-64"
-    run chmod +x "$MAMBA"
+install_source() {
+  # --- 1. conda frontend (an existing micromamba/mamba/conda, else a pinned download)
+  # REPRO_MAMBA=/path/to/frontend picks one; REPRO_MAMBA=download forces the download.
+  MAMBA=${REPRO_MAMBA:-}
+  [[ $MAMBA == download ]] && MAMBA=$WORK/bin/micromamba
+  if [[ -z $MAMBA ]]; then
+    for c in micromamba mamba conda; do command -v $c >/dev/null 2>&1 && { MAMBA=$(command -v $c); break; }; done
   fi
-fi
-log "conda frontend: $MAMBA"
-case $(basename "$MAMBA") in
-  micromamba) export MAMBA_ROOT_PREFIX=${MAMBA_ROOT_PREFIX:-$WORK/mamba-root}
-              MKENV=("$MAMBA" create -y -q -p "$ENV_PREFIX" -f "$LOCKS/toolchain-linux-64.lock") ;;
-  *)          MKENV=("$MAMBA" create -y -q -p "$ENV_PREFIX" --file "$LOCKS/toolchain-linux-64.lock") ;;
-esac
+  if [[ -z $MAMBA || $MAMBA == "$WORK/bin/micromamba" ]]; then
+    MAMBA=$WORK/bin/micromamba
+    if [[ ! -x $MAMBA ]]; then
+      MM_VER=${MICROMAMBA_VERSION:-2.9.0-0}
+      run curl -fsSL -o "$MAMBA" \
+        "https://github.com/mamba-org/micromamba-releases/releases/download/$MM_VER/micromamba-linux-64"
+      run chmod +x "$MAMBA"
+    fi
+  fi
+  log "conda frontend: $MAMBA"
+  case $(basename "$MAMBA") in
+    micromamba) export MAMBA_ROOT_PREFIX=${MAMBA_ROOT_PREFIX:-$WORK/mamba-root}
+                MKENV=("$MAMBA" create -y -q -p "$ENV_PREFIX" -f "$LOCKS/toolchain-linux-64.lock") ;;
+    *)          MKENV=("$MAMBA" create -y -q -p "$ENV_PREFIX" --file "$LOCKS/toolchain-linux-64.lock") ;;
+  esac
 
-# --- 2. toolchain environment (explicit lock: exact URLs + md5) -----------------
-TC_STAMP=$ENV_PREFIX/.repro-toolchain
-TC_SUM=$(md5_of "$LOCKS/toolchain-linux-64.lock")
-if stamp_ok "$TC_STAMP" "$TC_SUM"; then
-  log "toolchain env up to date"
-else
-  [[ -d $ENV_PREFIX && $REPRO_DRY_RUN == 0 ]] && run rm -rf "$ENV_PREFIX"
-  run "${MKENV[@]}"
-  write_stamp "$TC_STAMP" "$TC_SUM"
-fi
-PY=$ENV_PREFIX/bin/python
-
-# Build environment: the env's own GCC 14 and nvcc, nothing from the host.
-unset CPATH CUDA_PATH CUDA_HOME NVCC_PREPEND_FLAGS NVCC_APPEND_FLAGS PYTHONPATH LD_PRELOAD
-export PATH=$ENV_PREFIX/bin:$PATH CONDA_PREFIX=$ENV_PREFIX
-export CC=$ENV_PREFIX/bin/x86_64-conda-linux-gnu-gcc CXX=$ENV_PREFIX/bin/x86_64-conda-linux-gnu-g++
-export CUDAHOSTCXX=$CXX CUDACXX=$ENV_PREFIX/bin/nvcc
-export CMAKE_PREFIX_PATH=$ENV_PREFIX CMAKE_BUILD_PARALLEL_LEVEL=$JOBS CMAKE_GENERATOR=Ninja
-export HAWK_AETHER_INCLUDE=$SRC/aether HAWK_EAGLE_INCLUDE=$SRC/eagle
-export PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_NO_INPUT=1
-export TMPDIR=${TMPDIR:-$WORK/tmp}; run mkdir -p "$TMPDIR"
-
-# --- 3. Python packages (hashed lock, no resolver) ------------------------------
-PIP_STAMP=$ENV_PREFIX/.repro-pip-$PROFILE
-PIP_SUM=$(md5_of "$LOCKS/cards-$PROFILE.txt")
-if stamp_ok "$PIP_STAMP" "$PIP_SUM"; then
-  log "python packages up to date"
-else
-  run "$PY" -m pip install -q --no-deps --require-hashes -r "$LOCKS/cards-$PROFILE.txt"
-  write_stamp "$PIP_STAMP" "$PIP_SUM"
-fi
-
-# --- 4. sources -----------------------------------------------------------------
-for r in "${REPOS[@]}"; do
-  if [[ -d $SRC/$r ]]; then
-    log "$r: using existing checkout $SRC/$r (left as it is)"
+  # --- 2. toolchain environment (explicit lock: exact URLs + md5) -----------------
+  TC_STAMP=$ENV_PREFIX/.repro-toolchain
+  TC_SUM=$(md5_of "$LOCKS/toolchain-linux-64.lock")
+  if stamp_ok "$TC_STAMP" "$TC_SUM"; then
+    log "toolchain env up to date"
   else
-    run git clone -q --depth 1 --branch "${REF[$r]}" "$GIT_BASE/$r.git" "$SRC/$r" ||
-      die "clone of $r at ${REF[$r]} failed: pass --ref $r=<tag|branch> (or ${r^^}_REF)"
+    [[ -d $ENV_PREFIX && $REPRO_DRY_RUN == 0 ]] && run rm -rf "$ENV_PREFIX"
+    run "${MKENV[@]}"
+    write_stamp "$TC_STAMP" "$TC_SUM"
   fi
-done
+  PY=$ENV_PREFIX/bin/python
 
-# --- 5. headers: aether + eagle (CUDA-mode packages; nvcc is in the env) --------
-HDR_STAMP=$ENV_PREFIX/.repro-headers
-HDR_SUM=""
-if [[ $REPRO_DRY_RUN == 0 ]]; then
-  HDR_SUM=$(for r in aether eagle; do git -C "$SRC/$r" rev-parse HEAD 2>/dev/null || echo "$r-notgit"
-             git -C "$SRC/$r" status --porcelain -- . 2>/dev/null | md5sum; done | md5sum | cut -c1-32)
-fi
-if stamp_ok "$HDR_STAMP" "$HDR_SUM"; then
-  log "headers up to date"
-else
-  for r in aether eagle; do
-    run rm -rf "$WORK/build/hdr-$r"
-    run cmake -S "$SRC/$r" -B "$WORK/build/hdr-$r" -DCMAKE_PREFIX_PATH="$ENV_PREFIX" \
-      -DCMAKE_CUDA_ARCHITECTURES="${ARCH:-61}" -DCMAKE_CUDA_HOST_COMPILER="$CXX"
-    run cmake --install "$WORK/build/hdr-$r" --prefix "$ENV_PREFIX"
+  # Build environment: the env's own GCC 14 and nvcc, nothing from the host.
+  unset CPATH CUDA_PATH CUDA_HOME NVCC_PREPEND_FLAGS NVCC_APPEND_FLAGS PYTHONPATH LD_PRELOAD
+  export PATH=$ENV_PREFIX/bin:$PATH CONDA_PREFIX=$ENV_PREFIX
+  export CC=$ENV_PREFIX/bin/x86_64-conda-linux-gnu-gcc CXX=$ENV_PREFIX/bin/x86_64-conda-linux-gnu-g++
+  export CUDAHOSTCXX=$CXX CUDACXX=$ENV_PREFIX/bin/nvcc
+  export CMAKE_PREFIX_PATH=$ENV_PREFIX CMAKE_BUILD_PARALLEL_LEVEL=$JOBS CMAKE_GENERATOR=Ninja
+  export HAWK_AETHER_INCLUDE=$SRC/aether HAWK_EAGLE_INCLUDE=$SRC/eagle
+  export PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_NO_INPUT=1
+  export TMPDIR=${TMPDIR:-$WORK/tmp}; run mkdir -p "$TMPDIR"
+
+  # --- 3. Python packages (hashed lock, no resolver) ------------------------------
+  PIP_STAMP=$ENV_PREFIX/.repro-pip-$PROFILE
+  PIP_SUM=$(md5_of "$LOCKS/cards-$PROFILE.txt")
+  if stamp_ok "$PIP_STAMP" "$PIP_SUM"; then
+    log "python packages up to date"
+  else
+    run "$PY" -m pip install -q --no-deps --require-hashes -r "$LOCKS/cards-$PROFILE.txt"
+    write_stamp "$PIP_STAMP" "$PIP_SUM"
+  fi
+
+  # --- 4. sources -----------------------------------------------------------------
+  for r in "${REPOS[@]}"; do
+    if [[ -d $SRC/$r ]]; then
+      log "$r: using existing checkout $SRC/$r (left as it is)"
+    else
+      run git clone -q --depth 1 --branch "${REF[$r]}" "$GIT_BASE/$r.git" "$SRC/$r" ||
+        die "clone of $r at ${REF[$r]} failed: pass --ref $r=<tag|branch> (or ${r^^}_REF)"
+    fi
   done
-  write_stamp "$HDR_STAMP" "$HDR_SUM"
-fi
 
-# --- 6. raptor, aether-dsc, eagle (_core + plugin for ARCH), hawk ----------------
-PIPI=("$PY" -m pip install -q --no-deps --no-build-isolation)
-ED=(); [[ $EDITABLE == 1 ]] && ED=(-e)
-if [[ $PROFILE == gpu ]]; then
-  EAGLE_CFG=(-C "cmake.define.CMAKE_CUDA_ARCHITECTURES=$ARCH" -C "cmake.define.CMAKE_CUDA_HOST_COMPILER=$CXX")
-else
-  EAGLE_CFG=(-C "cmake.define.EAGLE_PYTHON_CUDA_PLUGIN=OFF")
-fi
-run "${PIPI[@]}" "${ED[@]}" "$SRC/raptor"
-run "${PIPI[@]}" "${ED[@]}" "$SRC/aether/dsc"
-run "${PIPI[@]}" -C "build-dir=$WORK/build/eagle-$PROFILE" "${EAGLE_CFG[@]}" "${ED[@]}" "$SRC/eagle/python"
-run "${PIPI[@]}" -C "build-dir=$WORK/build/hawk-$PROFILE" "${ED[@]}" "$SRC/hawk"
+  # --- 5. headers: aether + eagle (CUDA-mode packages; nvcc is in the env) --------
+  HDR_STAMP=$ENV_PREFIX/.repro-headers
+  HDR_SUM=""
+  if [[ $REPRO_DRY_RUN == 0 ]]; then
+    HDR_SUM=$(for r in aether eagle; do git -C "$SRC/$r" rev-parse HEAD 2>/dev/null || echo "$r-notgit"
+               git -C "$SRC/$r" status --porcelain -- . 2>/dev/null | md5sum; done | md5sum | cut -c1-32)
+  fi
+  if stamp_ok "$HDR_STAMP" "$HDR_SUM"; then
+    log "headers up to date"
+  else
+    for r in aether eagle; do
+      run rm -rf "$WORK/build/hdr-$r"
+      run cmake -S "$SRC/$r" -B "$WORK/build/hdr-$r" -DCMAKE_PREFIX_PATH="$ENV_PREFIX" \
+        -DCMAKE_CUDA_ARCHITECTURES="${ARCH:-61}" -DCMAKE_CUDA_HOST_COMPILER="$CXX"
+      run cmake --install "$WORK/build/hdr-$r" --prefix "$ENV_PREFIX"
+    done
+    write_stamp "$HDR_STAMP" "$HDR_SUM"
+  fi
+
+  # --- 6. raptor, aether-dsc, eagle (_core + plugin for ARCH), hawk ----------------
+  PIPI=("$PY" -m pip install -q --no-deps --no-build-isolation)
+  ED=(); [[ $EDITABLE == 1 ]] && ED=(-e)
+  if [[ $PROFILE == gpu ]]; then
+    EAGLE_CFG=(-C "cmake.define.CMAKE_CUDA_ARCHITECTURES=$ARCH" -C "cmake.define.CMAKE_CUDA_HOST_COMPILER=$CXX")
+  else
+    EAGLE_CFG=(-C "cmake.define.EAGLE_PYTHON_CUDA_PLUGIN=OFF")
+  fi
+  run "${PIPI[@]}" "${ED[@]}" "$SRC/raptor"
+  run "${PIPI[@]}" "${ED[@]}" "$SRC/aether/dsc"
+  run "${PIPI[@]}" -C "build-dir=$WORK/build/eagle-$PROFILE" "${EAGLE_CFG[@]}" "${ED[@]}" "$SRC/eagle/python"
+  run "${PIPI[@]}" -C "build-dir=$WORK/build/hawk-$PROFILE" "${ED[@]}" "$SRC/hawk"
+}
+
+# --- the pypi mode: a venv + released wheels, nothing compiled ------------------
+# Python >= 3.10 from the machine (REPRO_PYTHON picks one).
+install_pypi() {
+  local py=${REPRO_PYTHON:-} c
+  if [[ -z $py ]]; then
+    for c in python3.13 python3.12 python3.11 python3.10 python3; do
+      command -v "$c" >/dev/null 2>&1 || continue
+      "$c" -c 'import sys; sys.exit(sys.version_info < (3, 10))' && { py=$(command -v "$c"); break; }
+    done
+  fi
+  [[ -n $py ]] || die "no Python >= 3.10 found: install one or set REPRO_PYTHON=/path/to/python"
+  PY=$ENV_PREFIX/bin/python
+  export PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_NO_INPUT=1 TMPDIR=${TMPDIR:-$WORK/tmp}
+  run mkdir -p "$TMPDIR"
+  local lock=$LOCKS/pypi-$PROFILE.txt stamp=$ENV_PREFIX/.repro-pypi-$PROFILE
+  local sum; sum=$(md5_of "$lock")
+  if stamp_ok "$stamp" "$sum"; then
+    log "python packages up to date"
+  else
+    [[ -d $ENV_PREFIX && $REPRO_DRY_RUN == 0 ]] && run rm -rf "$ENV_PREFIX"
+    run "$py" -m venv "$ENV_PREFIX"
+    run "$PY" -m pip install -q --no-cache-dir -r "$lock"
+    write_stamp "$stamp" "$sum"
+  fi
+}
+
+if [[ $FROM_PYPI == 1 ]]; then install_pypi; else install_source; fi
 
 # --- 7. env script --------------------------------------------------------------
 if [[ $REPRO_DRY_RUN == 1 ]]; then
   log "would write $ENV_FILE"
 else
-  cat >"$ENV_FILE" <<EOF
+  if [[ $FROM_PYPI == 1 ]]; then
+    cat >"$ENV_FILE" <<EOF
+# Generated by eagle/benchmarks/reproduce/bootstrap.sh --from-pypi ($PROFILE profile). Source it.
+unset CPATH CUDA_PATH CUDA_HOME NVCC_PREPEND_FLAGS LD_PRELOAD PYTHONPATH
+export REPRO_PROFILE=$PROFILE REPRO_TARGET=$TARGET REPRO_SRC=$SRC REPRO_WORK=$WORK
+export P=$ENV_PREFIX/bin/python
+export PATH=$ENV_PREFIX/bin:\$PATH
+export CUDA_DEVICE_ORDER=PCI_BUS_ID XLA_PYTHON_CLIENT_PREALLOCATE=false
+EOF
+  else
+    cat >"$ENV_FILE" <<EOF
 # Generated by eagle/benchmarks/reproduce/bootstrap.sh ($PROFILE profile). Source it.
 unset CPATH CUDA_PATH CUDA_HOME NVCC_PREPEND_FLAGS LD_PRELOAD PYTHONPATH
 export REPRO_PROFILE=$PROFILE REPRO_TARGET=$TARGET REPRO_SRC=$SRC REPRO_WORK=$WORK
@@ -199,6 +247,7 @@ export HAWK_AETHER_INCLUDE=$SRC/aether HAWK_EAGLE_INCLUDE=$SRC/eagle HAWK_AETHER
 export EAGLE_AETHER_INCLUDE=$SRC/aether RAPTOR_HAWK_ROOT=$SRC/hawk RAPTOR_EAGLE_ROOT=$SRC/eagle
 export CUDA_DEVICE_ORDER=PCI_BUS_ID XLA_PYTHON_CLIENT_PREALLOCATE=false
 EOF
+  fi
   [[ $PROFILE == cpu ]] && echo 'export CUDA_VISIBLE_DEVICES=""' >>"$ENV_FILE"
   log "wrote $ENV_FILE"
 fi
@@ -226,6 +275,7 @@ fi
 facts() {
   echo "target:       $TARGET"
   echo "profile:      $PROFILE"
+  echo "install:      $MODE"
   echo "machine slug: $(machine_slug)"
   echo "host:         $(uname -srm)"
   echo "cpu:          $(cpu_model) ($(nproc) logical)"
@@ -236,17 +286,23 @@ facts() {
   else
     echo "gpu:          none visible"
   fi
-  echo "eagle archs:  ${ARCH:-none (CPU-only build)}"
-  echo "nvcc:         $("$ENV_PREFIX/bin/nvcc" --version 2>/dev/null | sed -n 's/.*release \([0-9.]*\).*/\1/p')"
-  echo "g++:          $("$CXX" -dumpfullversion 2>/dev/null)"
+  if [[ $FROM_PYPI == 1 ]]; then
+    echo "python:       $("$PY" -c 'import platform; print(platform.python_version())' 2>/dev/null)"
+  else
+    echo "eagle archs:  ${ARCH:-none (CPU-only build)}"
+    echo "nvcc:         $("$ENV_PREFIX/bin/nvcc" --version 2>/dev/null | sed -n 's/.*release \([0-9.]*\).*/\1/p')"
+    echo "g++:          $("$CXX" -dumpfullversion 2>/dev/null)"
+  fi
   echo "nsys:         $(command -v nsys || echo 'not found (kernel-only times will be null)')"
-  for r in "${REPOS[@]}"; do
-    echo "$r:$(printf '%*s' $((12 - ${#r})) '')$(git -C "$SRC/$r" describe --tags --always --dirty 2>/dev/null || echo '?') ($SRC/$r)"
+  for r in $([[ $FROM_PYPI == 1 ]] && echo eagle || echo "${REPOS[@]}"); do
+    src_r=$SRC/$r; [[ $FROM_PYPI == 1 ]] && src_r=$EAGLE_ROOT
+    echo "$r:$(printf '%*s' $((12 - ${#r})) '')$(git -C "$src_r" describe --tags --always --dirty 2>/dev/null || echo '?') ($src_r)"
   done
   "$PY" - <<'EOF'
 import importlib.metadata as md
-for d in ("numpy", "torch", "jax", "jaxlib", "cupy-cuda12x", "warp-lang", "numba",
-          "raptor-eagle", "raptor-hawk", "raptor-core", "aether-dsc"):
+for d in ("numpy", "scipy", "torch", "jax", "jaxlib", "cupy-cuda12x", "warp-lang", "numba",
+          "cuda-bindings", "cuda-toolkit", "nvidia-cuda-nvrtc-cu12", "raptor-eagle", "raptor-hawk",
+          "raptor-core", "aether-dsc"):
     try:
         print(f"{d + ':':13s} {md.version(d)}")
     except md.PackageNotFoundError:
