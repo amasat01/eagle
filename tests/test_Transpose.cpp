@@ -154,10 +154,14 @@ TEST(TransposeTest, OpaqueNodeRefusedByName)
     expectThrowsNaming([&] { transpose(d, { { 0, {}, {} }, { 1, {}, {} } }, {}); }, "'custom' is opaque");
 }
 
-TEST(TransposeTest, ConditionalRefusedByName)
+TEST(TransposeTest, ConditionalNodeReversesLikeItsChild)
 {
-    eg::Description d = graphOf({ "maybe" }, { "skippable" });
-    expectThrowsNaming([&] { transpose(d, { { 0, {}, {} } }, {}); }, "'maybe' is inside a skippable");
+    eg::Description d = graphOf({ "maybe", "g" }, { "skippable", "launch" });
+    const ReversePlan p = transpose(d, { { 0, { "x" }, { "y" } }, { 1, { "y" }, { "z" } } }, { "z" });
+    ASSERT_EQ(p.forward.size(), 2u);
+    EXPECT_EQ(p.forward[0], 1);
+    EXPECT_EQ(p.forward[1], 0);
+    EXPECT_NO_THROW(p.reversed.validate());
 }
 
 TEST(TransposeTest, SecondOrderRefused)

@@ -220,14 +220,26 @@ def _cond_lower(node, ctx):
 
 
 def _cond_record(node):
+    """What the forward saves per launch: a skippable's guard cells, read as
+    the launch saw them. A repeat_while's iteration cell is already a plane
+    its node writes, so it needs no copy."""
     c = node.payload
-    out = [(n, a) for n, a, _r in _guard_arrays(c.wrapper.guard)]
     if isinstance(c.wrapper, RepeatWhile):
-        out.append(("iterations", c.wrapper._cell))
+        return ()
+    g = c.wrapper.guard
+    out = [("guard", g.count_arr[g.count_idx:g.count_idx + 1])]
+    if g.baseline_arr is not None:
+        out.append(("guard_baseline", g.baseline_arr[g.baseline_idx:g.baseline_idx + 1]))
     return tuple(out)
+
+
+def _cond_transpose(node, incoming, ctx):
+    from ._conditional_reverse import transpose
+
+    return transpose(node, incoming, ctx)
 
 
 for _kind in ("skippable", "repeat_while"):
     register_node_kind(_kind, reads=_cond_reads, writes=_cond_writes,
                        lower_gpu=_cond_lower, lower_cpu=_cond_lower,
-                       record_planes=_cond_record)
+                       transpose=_cond_transpose, record_planes=_cond_record)

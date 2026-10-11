@@ -145,7 +145,7 @@ inline std::vector<Snapshot> snapshots(const std::vector<NodeVjp>& vjps)
  *  caller seeds (the gradient of the objective with respect to their final
  *  value); an unseeded plane contributes nothing of its own.
  *  @throws std::invalid_argument for a graph that is already a reverse (second
- *          order), an opaque node, a node inside a conditional, or a node with
+ *          order), an opaque node, or a node with
  *          no entry in @p vjps; the message names the node. */
 inline ReversePlan transpose(const graph::Description& forward, const std::vector<NodeVjp>& vjps,
                              const std::vector<std::string>& seeded)
@@ -159,10 +159,6 @@ inline ReversePlan transpose(const graph::Description& forward, const std::vecto
         if (nd.opaque)
             detail::refuse(nd, "is opaque: eagle does not know its derivative; move it "
                                "out of the recorded graph, or give its node kind a transpose");
-        if (nd.frame != -1 || nd.kind == "skippable" || nd.kind == "repeat_while")
-            detail::refuse(nd, "is inside a skippable or repeat_while; reversing "
-                               "through a conditional is not supported yet, so move "
-                               "the conditional out of the recorded graph");
     }
     const std::vector<const NodeVjp*> of = detail::byNode(n, vjps);
     std::vector<NodeVjp> ordered;

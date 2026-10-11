@@ -19,12 +19,14 @@ from __future__ import annotations
 import threading
 import weakref
 from collections.abc import Mapping
+from contextlib import contextmanager
 from typing import NamedTuple
 
 
 from .. import _core, _counters
 from .._busy import BusyGuard
-from ..graph import _DERIVED_DOOR, Graph, get_node_kind, opaque
+from .._conditional import skippable
+from ..graph import _DERIVED_DOOR, Graph, Node, get_node_kind, opaque
 from ..roles import OUTPUT_ROLES
 from ..sidecar import derived_tag, refuse_prior_read
 from ._record import Record, xp_of
@@ -98,27 +100,60 @@ class ReverseCtx:
     returns the adjoint of each plane it reads, adding the steps that compute
     them with :meth:`add`. ``backend`` is ``"cpu"`` or ``"gpu"``."""
 
-    __slots__ = ("backend", "label", "vjp", "_primal", "_steps", "inexact")
+    __slots__ = ("backend", "label", "vjp", "_primal", "_steps", "inexact", "_gate",
+                 "_recorded", "_written", "reads")
 
-    def __init__(self, backend, label, vjp, primal):
+    def __init__(self, backend, label, vjp, primal, recorded=None, written=None, reads=()):
         self.backend = backend
         self.label = label
         self.vjp = vjp
         self._primal = primal
         self._steps = []
         self.inexact = set()
+        self._gate = None
+        self._recorded = recorded
+        self._written = written
+        self.reads = frozenset(reads)
 
     def primal(self, name):
         """The value the node read for plane ``name`` in the recorded launch."""
         return self._primal(name)
 
+    def recorded(self, name):
+        """The value the forward saved for ``name`` of this node's record
+        planes (a conditional's guard cell), as the launch saw it."""
+        return self._recorded(name)
+
+    def written(self, name):
+        """The final value of plane ``name`` this node wrote in the recorded
+        launch (a ``repeat_while``'s iteration cell)."""
+        return self._written(name)
+
     @staticmethod
     def empty_like(arr):
         return xp_of(arr).empty_like(arr)
 
+    @contextmanager
+    def gated(self, guard):
+        """Steps added inside run only while ``guard`` (an
+        :class:`eagle.SkipGuard` over arrays the reverse owns) holds."""
+        before, self._gate = self._gate, guard
+        try:
+            yield
+        finally:
+            self._gate = before
+
     def add(self, step, *, reads=(), writes=()):
         """Run ``step`` in the reverse: a bound derivative plan, or a zero-arg
         callable touching the declared arrays."""
+        if self._gate is not None:
+            if hasattr(step, "_arg_spec"):
+                node, kind = Node("launch", step), get_node_kind("launch")
+                reads = [a for _n, a, _r in kind.reads(node)]
+                writes = [a for _n, a, _r in kind.writes(node)]
+                step = step.launch
+            self._steps.append(skippable(opaque(step, reads=reads, writes=writes), self._gate))
+            return
         self._steps.append(step if hasattr(step, "_arg_spec")
                            else opaque(step, reads=reads, writes=writes))
 
@@ -311,8 +346,11 @@ class Reverse:
             if kind.transpose is None:
                 raise ValueError(f"{door}: node {labels[i]!r} (kind {a.node.kind!r}) "
                                  "has no transpose; it cannot be reversed")
-            if a.node.kind == "launch":
-                b = a.node.payload
+            node = a.node
+            if node.kind in ("skippable", "repeat_while"):
+                node = node.payload.child
+            if node.kind == "launch":
+                b = node.payload
                 self._vjp[i] = _vjp_plan(labels[i], b, vjps.get(labels[i]))
                 _check_vjp_covers(labels[i], b, self._vjp[i])
         written = sorted({k for w in planes.writes for _, k in w})
@@ -455,7 +493,16 @@ class _Program:
                 idx = read_of.get(key, -1)
                 return tape.copies[idx] if idx >= 0 else tape.arrays[key]
 
-            ctx = ReverseCtx(backend, leaf.label, rev._vjp.get(fwd), primal)
+            snaps, wkey = rev._graph._recorder.recorded, dict(writes)
+
+            def recorded(name, fwd=fwd, snaps=snaps):
+                return tape.copies[snaps[(fwd, name)]]
+
+            def written(name, wkey=wkey):
+                return tape.arrays[wkey[name]]
+
+            ctx = ReverseCtx(backend, leaf.label, rev._vjp.get(fwd), primal, recorded, written,
+                             [n for n, _k in reads])
             result = get_node_kind(leaf.node.kind).transpose(leaf.node, incoming, ctx)
             for step in ctx._steps:
                 if hasattr(step, "_arg_spec"):

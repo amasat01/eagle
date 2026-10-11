@@ -61,8 +61,13 @@ class Planes:
         for i, a in enumerate(accesses):
             key = lambda name, arr: self._key(where, i, name, arr)
             self.reads.append([(n, key(n, arr)) for n, arr, role in a.reads
-                               if role not in STATE_ROLES])
+                               if role not in STATE_ROLES and role != "guard"])
             self.writes.append([(n, key(n, arr)) for n, arr, _r in a.writes])
+            if a.node.kind in ("skippable", "repeat_while"):
+                # skipped, a conditional leaves the plane as the earlier writer made it
+                earlier = {k for w in self.writes[:i] for _n, k in w}
+                have = {k for _n, k in self.reads[i]}
+                self.reads[i] += [(n, k) for n, k in self.writes[i] if k in earlier and k not in have]
         spans = [(k, where_k) for where_k, k in where.items()]
         for x in range(len(spans)):
             for y in range(x + 1, len(spans)):
@@ -183,6 +188,10 @@ def _with_parameter_planes(node, cells):
     if node.kind == "group":
         return Node("group", tuple(tuple(_with_parameter_planes(n, cells) for n in branch)
                                    for branch in node.payload), node.name)
+    if node.kind in ("skippable", "repeat_while"):
+        cond = node.payload     # owned by this graph: its lowering reads the new child
+        cond.child = cond.late.child = _with_parameter_planes(cond.child, cells)
+        return node
     if node.kind != "launch":
         return node
     bound, label = node.payload, node.label
@@ -230,6 +239,7 @@ class Recorder:
 
     def attach(self, accesses):
         from .._graph_view import _stage_of_leaves
+        from ..graph import get_node_kind
 
         graph = self._graph
         self.planes = planes = Planes(accesses)
@@ -242,6 +252,14 @@ class Recorder:
             self.copy_of[(leaf, key)] = len(copies)
             copies.append(buf)
             self._before.setdefault(stage_of[leaf], []).append(_copier(buf, src))
+        self.recorded = {}
+        for leaf, a in enumerate(accesses):
+            saved = get_node_kind(a.node.kind).record_planes
+            for name, src in (saved(a.node) if saved else ()):
+                buf = xp_of(src).empty_like(src)
+                self.recorded[(leaf, name)] = len(copies)
+                copies.append(buf)
+                self._before.setdefault(stage_of[leaf], []).append(_copier(buf, src))
         aset = _pairing_set(planes)
         self._aset = aset
         perm = None if aset is None else xp_of(aset.perm).empty_like(aset.perm)

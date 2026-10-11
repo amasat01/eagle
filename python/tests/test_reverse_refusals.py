@@ -37,16 +37,6 @@ def test_an_opaque_node_is_refused(tmp_path):
         eagle.diff.Reverse(g)
 
 
-def test_a_conditional_is_refused(tmp_path):
-    sq = plans(tmp_path, "cpu")[0]
-    x, y = np.linspace(0, 1, N), np.zeros(N)
-    cell, base = np.zeros(1, dtype=np.int32), np.zeros(1, dtype=np.int32)
-    maybe = skippable(sq.bind(x=x, a=1.0, y=y).launch, SkipGuard(cell, 0, base, 0))
-    g = eagle.Graph().add_node(maybe, name="maybe").build(record=True)
-    with pytest.raises(ValueError, match="node 'maybe' is inside a skippable or repeat_while"):
-        eagle.diff.Reverse(g)
-
-
 def test_a_prior_read_is_refused_with_its_fix(tmp_path):
     (p,) = eagle.plan.auto([rf_accumulate], targets=("host",), cache_dir=str(tmp_path / "c"))
     x, y = np.linspace(0, 1, N), np.ones(N)
