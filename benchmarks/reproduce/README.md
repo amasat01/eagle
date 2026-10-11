@@ -12,6 +12,7 @@ software and write the cards for that machine.
 | `bootstrap.sh --from-pypi` | the no-compiler route: a plain venv with the released `raptor-eagle` / `raptor-hawk` wheels, pins in `locks/pypi-{gpu,cpu}.txt` |
 | `run_cards.sh` | runs the cards (`--which gpu\|cpu\|all`, `--preset smoke\|short\|full`) into `cards/<machine-slug>/` |
 | `passes.py` | runs a GPU card one pass at a time (used by `run_cards.sh --split`) |
+| `calibrate.sh`, `calibrate.py` | the calibration data collector (see below), with its own notebook `kaggle_calibrate.ipynb` and pins `locks/calibrate-{gpu,cpu}.txt` |
 | `kaggle.ipynb` | a thin notebook calling the two scripts |
 | `locks/` | the pinned environments and `make_locks.py`, which regenerates them |
 
@@ -63,6 +64,33 @@ the run is split into resumable steps (`run_cards.sh --split`) and stops before
 the cap. To continue, save the version, attach its output to a new session and
 set `RESUME_FROM`. Kaggle's 4 shared vCPUs make its CPU cards a different
 machine class from the 8-thread arms the CPU cards time, so run the GPU cards there.
+
+## Calibration data
+
+`calibrate.sh` times a few isolated micro-kernels on this machine and writes one CSV of raw
+timings: the cost of each operation class (arithmetic and special functions in both
+precisions, plane loads, gathers), the launch and plane-traffic overhead, the extra cost of a
+split step and of the class sort, a fused cheap/heavy kernel at four heavy fractions (GPU
+only), and held-out fused-vs-split pairs that a later fit must reproduce. Every repetition is
+kept (the first of each case is marked cold); nothing is fitted here and nothing on the
+machine is changed. The data is fitted later, elsewhere, into the weights the dispatch
+chooser uses.
+
+```bash
+eagle/benchmarks/reproduce/calibrate.sh --quick     # about a minute: checks the setup
+eagle/benchmarks/reproduce/calibrate.sh             # a few minutes per target
+```
+
+It installs the pinned pre-release `raptor-eagle` / `raptor-hawk` wheels (`locks/calibrate-*.txt`,
+`pip install --pre`) into a private venv under `--work`, then writes
+`WORK/calibration/<machine-slug>/calibration-<gpu|cpu>-<date>.csv` (`--out` to change) and prints
+its path. The profile follows the visible hardware (`--profile gpu|cpu`); run it once for each
+of the GPU and the host. The run takes under 10 minutes per target including kernel compiles
+(the CSV header records the compile time, the clocks and temperature before and after, the
+thread count and `OMP_PROC_BIND`). It needs a C++ compiler; Debian/Ubuntu:
+`sudo apt-get install build-essential python3-venv python3-dev`. `--local` uses the eagle and
+hawk already installed for `--python` instead of a venv. On Kaggle open `kaggle_calibrate.ipynb`
+(GPU T4, Internet on).
 
 ## Time and cost
 
