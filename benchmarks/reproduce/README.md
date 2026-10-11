@@ -12,6 +12,7 @@ software and write the cards for that machine.
 | `bootstrap.sh --from-pypi` | the no-compiler route: a plain venv with the released `raptor-eagle` / `raptor-hawk` wheels, pins in `locks/pypi-{gpu,cpu}.txt` |
 | `run_cards.sh` | runs the cards (`--which gpu\|cpu\|all`, `--preset smoke\|short\|full`) into `cards/<machine-slug>/` |
 | `passes.py` | runs a GPU card one pass at a time (used by `run_cards.sh --split`) |
+| `profile.sh`, `gpu_profile.py` | the profiling kit: decision probe, Nsight Systems and Nsight Compute captures, one tarball (see below) |
 | `kaggle.ipynb` | a thin notebook calling the two scripts |
 | `locks/` | the pinned environments and `make_locks.py`, which regenerates them |
 
@@ -63,6 +64,35 @@ the run is split into resumable steps (`run_cards.sh --split`) and stops before
 the cap. To continue, save the version, attach its output to a new session and
 set `RESUME_FROM`. Kaggle's 4 shared vCPUs make its CPU cards a different
 machine class from the 8-thread arms the CPU cards time, so run the GPU cards there.
+
+## Profiling (nsys + ncu)
+
+`profile.sh` answers *why* a launch mode or a kernel is fast or slow on this GPU, for the cards' kernel.
+It runs after `bootstrap.sh` and the cards, unattended, in about 15 minutes on an A100 (`--quick`: about 5):
+
+```bash
+eagle/benchmarks/reproduce/profile.sh --env ~/.cache/raptor-repro/env-gpu.sh
+# -> ~/.cache/raptor-repro/profiles/<gpu>--<cpu>/profile-<gpu>--<cpu>.tgz  (the last line it prints)
+```
+
+| Stage | What it captures |
+|---|---|
+| `probe` | what eagle reads from the device (SMs, registers, resident threads, the issue knee), `device_capacity()`, whether the persist entry exists, the launch mode chosen at N = 10³, 10⁵, 10⁶ and the mode a real run took (`probe.txt`) |
+| `nsys-grid` | Nsight Systems timelines of eagle auto, persist, band (steps + compaction) and Warp over N = 10³..10⁶, uniform and spread, S = 100 and 1000; kernel time, launch counts and API time as text (`nsys_grid.txt`) |
+| `nsys-width` | the same four arms at N = 10⁶, S = 1000 with the stop steps log-uniform over [S/10, S] and [S/1000, S] (the grid holds uniform and the card's [S/100, S]) |
+| `ncu-*` | Nsight Compute, one launch per kernel (SpeedOfLight, Occupancy, LaunchStats, WarpStateStats, MemoryWorkloadAnalysis, SchedulerStats) at N = 10⁶ S = 1000 spread (efficiency under thinning), N = 10⁶ S = 1000 uniform (bandwidth baseline) and N = 10⁴ S = 100 spread (latency and launch regime); CSV plus a digest per kernel. Only on compute capability 7.0 and newer |
+
+Needs `nsys` and `ncu` (Nsight Systems and Nsight Compute; found on `PATH` or under `/usr/local/cuda*/bin`; a
+missing one skips its stages) and exactly one visible GPU (set `CUDA_VISIBLE_DEVICES` on a multi-GPU machine). GPU
+performance counters are usually restricted to administrators: when they are, the ncu stages run under `sudo -n`
+(passwordless sudo, as on Google Cloud VMs); without it they are skipped with that reason, and nothing is ever
+prompted or changed system-wide.
+
+Every stage runs under its own time cap and a failing one never stops the next; the tarball (reports, raw
+`.nsys-rep` / `.ncu-rep` under 200 MB, `status.txt` listing each stage as ok, failed or skipped, `facts.txt` with
+versions and the clocks before and after) is written on every exit, Ctrl-C and SIGTERM included. Re-running the
+same command after a preemption skips the finished stages (`--fresh` starts over); `--deadline-min` (default 20)
+stops new stages from starting.
 
 ## Time and cost
 
