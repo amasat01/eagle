@@ -574,6 +574,89 @@ NB_MODULE(_core, m)
         "`scratch == 0` nothing is enqueued and the return value is the scratch size "
         "in bytes; otherwise it returns 0.");
 
+    m.def(
+        "backend_has",
+        [](const std::string& symbol, const std::string& kind) {
+            return eagle_seam::backend(kind).optional(symbol.c_str()) != nullptr;
+        },
+        nb::arg("symbol"), nb::arg("kind") = "cuda",
+        "Whether the loaded backend `kind` resolves the seam symbol `symbol` (a symbol bound "
+        "one by one: its presence is the capability). False when the backend is not loaded.");
+
+    m.def("compact_classes_device",
+        [](std::uintptr_t mask, std::uintptr_t index_map, std::uintptr_t count, std::uintptr_t scratch,
+           std::int64_t n, std::uintptr_t stream, std::uint32_t flags, std::int32_t device,
+           std::uintptr_t live32, std::uintptr_t span, std::uintptr_t fire, float theta,
+           std::uintptr_t class_plane, std::uint32_t classes, float class_theta, std::uintptr_t mixed32,
+           std::uintptr_t stale_count, std::uintptr_t class_fire) {
+            auto d = makeDesc<eagle_backend_compact_classes_desc>(device);
+            d.flags = flags;
+            d.mask = mask;
+            d.index_map = index_map;
+            d.count = count;
+            d.scratch = scratch;
+            d.n = n;
+            d.stream = stream;
+            d.live32 = live32;
+            d.span = span;
+            d.fire = fire;
+            d.theta = theta;
+            d.class_plane = class_plane;
+            d.classes = classes;
+            d.class_theta = class_theta;
+            d.mixed32 = mixed32;
+            d.stale_count = stale_count;
+            d.class_fire = class_fire;
+            ck(EBX(eagle_backend_compact_classes_device)(&d));
+            return static_cast<std::int64_t>(d.scratch_bytes);
+        },
+        nb::arg("mask"), nb::arg("index_map"), nb::arg("count"), nb::arg("scratch"), nb::arg("n"),
+        nb::arg("stream"), nb::arg("flags"), nb::arg("device"), nb::arg("live32"), nb::arg("span"),
+        nb::arg("fire"), nb::arg("theta"), nb::arg("class_plane"), nb::arg("classes"), nb::arg("class_theta"),
+        nb::arg("mixed32"), nb::arg("stale_count") = 0, nb::arg("class_fire") = 0,
+        "K-class compaction (the `filtering` group, bound per symbol): `compact_device` with the "
+        "liveness trigger plus `mixed32` and `class_fire`. With `scratch == 0` nothing is enqueued "
+        "and the return value is the scratch size in bytes; otherwise it returns 0.");
+
+    m.def("reorder_classes_device",
+        [reorderDesc](const std::vector<std::pair<std::uintptr_t, std::uint32_t>>& planes, std::uintptr_t mask,
+            std::uintptr_t perm, std::uintptr_t inv, std::uintptr_t index_map, std::uintptr_t count,
+            std::uintptr_t span, std::uintptr_t fire, std::uintptr_t scratch, std::int64_t n,
+            std::uintptr_t stream, std::uint32_t flags, std::int32_t device, std::uintptr_t class_plane,
+            std::uint32_t classes, std::uintptr_t offsets, std::uintptr_t class_sorts) {
+            std::vector<eagle_backend_reorder_plane> table;
+            auto b = reorderDesc(planes, table, n, scratch, stream, flags, device);
+            auto d = makeDesc<eagle_backend_reorder_classes_desc>(device);
+            d.flags = b.flags;
+            d.n_planes = b.n_planes;
+            d.planes = b.planes;
+            d.mask = mask;
+            d.perm = perm;
+            d.inv = inv;
+            d.index_map = index_map;
+            d.count = count;
+            d.span = span;
+            d.fire = fire;
+            d.scratch = scratch;
+            d.n = n;
+            d.stream = stream;
+            d.class_plane = class_plane;
+            d.classes = classes;
+            d.offsets = offsets;
+            d.class_sorts = class_sorts;
+            ck(EBX(eagle_backend_reorder_classes_device)(&d));
+            return static_cast<std::int64_t>(d.scratch_bytes);
+        },
+        nb::arg("planes"), nb::arg("mask"), nb::arg("perm"), nb::arg("inv"), nb::arg("index_map"),
+        nb::arg("count"), nb::arg("span"), nb::arg("fire"), nb::arg("scratch"), nb::arg("n"),
+        nb::arg("stream"), nb::arg("flags"), nb::arg("device"), nb::arg("class_plane"), nb::arg("classes"),
+        nb::arg("offsets"), nb::arg("class_sorts"),
+        "K-class stable sort (the `filtering` group, bound per symbol): the in-place permutation of "
+        "every plane in `planes` (the mask and the class plane among them) by (live, class) over "
+        "[0, *span), or by class over [0, *count) with flags bit 1 (WITHIN_LIVE); `offsets` is the "
+        "live class prefix, `class_sorts` is incremented. With `scratch == 0` nothing is enqueued "
+        "and the return value is the scratch size in bytes; otherwise it returns 0.");
+
     m.def("restore_device",
         [reorderDesc](const std::vector<std::pair<std::uintptr_t, std::uint32_t>>& planes, std::uintptr_t perm,
             std::uintptr_t inv, std::uintptr_t scratch, std::int64_t n, std::uintptr_t stream,

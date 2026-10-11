@@ -222,6 +222,100 @@ The reorder pays on memory-bound kernels, where gathers through a thin map
 dominate; on a compute-bound kernel the map alone is already close to the
 dense ideal and the reorder adds little.
 
+Grouping samples by branch: K classes
+--------------------------------------
+
+Liveness is a two-way split, live or finished. A kernel whose samples fall
+into several *branches* (say, three force models chosen per sample) has a
+second divergence problem: when the classes are interleaved, every warp runs
+every branch. ``ActiveSet(mask, reorder=theta, classes=K, class_plane=cls)``
+generalises the reorder to ``K`` classes: one stable counting sort of the
+slots by ``(live, class)``, so the live samples sit in ``K`` contiguous runs,
+one per class, followed by the finished ones. ``cls`` is a ``uint8`` plane
+holding each sample's class in ``[0, K)`` (``K`` is at most 255); the set owns
+it, so it moves with every other plane.
+
+.. code-block:: python
+
+   import numpy as np
+   import eagle
+
+   n, K = 8192, 3
+   rng = np.random.default_rng(0)
+   done = (rng.random(n) < 0.3).astype(np.uint8)     # terminated mask
+   cls = rng.integers(0, K, n).astype(np.uint8)       # branch per sample
+   x = np.arange(n, dtype=np.float64)                 # a plane to carry along
+
+   active = eagle.ActiveSet(done, reorder=0.5, classes=K, class_plane=cls)
+   active.own(x)
+
+   active.compact()          # also computes mixed32 and class_fire
+   active.class_sort()       # one stable permutation by (live, class)
+
+   off = active.offsets      # class c occupies slots [off[c], off[c + 1])
+   run1 = x[off[1]:off[2]]   # the live samples of class 1, contiguous
+   assert off[K] == active.live
+   assert (active.in_sample_order(x) == np.arange(n)).all()
+
+   active.restore()          # every plane back in sample order
+
+**One permutation, one pairing.** With ``classes=K`` the liveness reorder *is*
+the class sort: there is never a second permutation on top of the first, which
+would scatter the class runs. ``perm`` and ``inv`` stay the only planes that
+carry sample identity, exactly as for the plain reorder: ``plane[inv[i]]`` is
+sample ``i``, ``restore()`` and ``in_sample_order()`` put the caller's order
+back, and a sample's value in every owned plane stays together through any
+number of sorts. The sort is *stable*: inside a class the samples keep their
+relative order, so a sorted run is a pure function of the class plane and the
+mask, and the host and device agree to the bit.
+
+**Within the live prefix.** ``class_sort(within_live=True)`` permutes only the
+slots ``[0, count)`` among themselves, by class, and leaves ``count`` and
+``span`` alone. A pass that grows its live set one prefix at a time (a reverse
+sweep) uses it to re-group without ever moving a slot out of its prefix.
+
+**When it fires.** Every compaction of a K-class set also counts ``mixed32``,
+the aligned 32-sample groups that hold two or more live classes, and sets
+``class_fire``:
+
+.. code-block:: text
+
+   class_fire =  (mixed32 > 0 and mixed32 >= class_theta * live32 and span >= 4096)
+              or  stale_count > STALE_MAX * count
+              or  fire                       # the liveness trigger
+
+The first term is the divergence proxy: a mixed warp runs both branches, so
+once the live samples are mixed across ``class_theta`` of the warps they
+occupy (default :data:`eagle._active_set.CLASS_THETA`, 0.5) and the span is
+large enough for the moves to pay, a sort pays. The second is for a kernel
+whose class is decided by evolving state: it writes ``stale_count``, and the
+set re-sorts when more than :data:`eagle._active_set.STALE_MAX` (5 %) of the
+live samples changed class. The third keeps a thinning batch from being lost
+when the classes happen to be grouped already. All three are integer counts,
+so the decision is exact and deterministic; there is no hysteresis at the
+trigger, because a sort resets ``mixed32`` and the stale count to zero.
+A batch whose classes never change fires only when liveness moves samples.
+:meth:`eagle.ActiveSet.reorder` and :meth:`eagle.ActiveSet.reorder_if_degraded`
+run the sort exactly when ``class_fire`` is set (the latter under one
+conditional node, so it is capturable); ``class_sort()`` itself is
+unconditional unless ``if_fired=True``. Each sort bumps ``class_sorts``, never
+``reorders``.
+
+``ActiveSet(..., epochs=True)`` additionally keeps the ``perm`` snapshot of every
+sort in :attr:`eagle.ActiveSet.epochs`, so a later pass can map a plane saved
+before a sort through ``inv`` of that epoch.
+
+**Backends.** The device face is two seam symbols, bound one by one like
+``eagle_backend_reorder_device``: ``eagle_backend_compact_classes_device`` and
+``eagle_backend_reorder_classes_device``. Their presence is the capability
+(``eagle._core.backend_has(symbol)`` reports it); a backend without either
+refuses ``classes=K`` naming the backend and the symbol. The C++ faces are
+``compactDevice`` plus ``classTriggerDevice`` and ``reorderClassesDevice`` in
+``eagle/filtering/ReorderClasses.h``, with serial host twins. The device sort
+costs one inclusive scan per class (plus one for the finished samples), so it
+suits a handful of classes; with 255 classes expect it to dominate a short
+step.
+
 Running until every sample is done, in one call
 ------------------------------------------------
 

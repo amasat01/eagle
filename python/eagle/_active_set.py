@@ -26,6 +26,16 @@ caller's order at exit (:meth:`ActiveSet.restore`), a plane the caller
 cannot move is declared :meth:`ActiveSet.indirect` instead, and export
 doors refuse an owned plane while it is permuted. Device and host run
 the same compaction and reorder bit-identically.
+
+``ActiveSet(mask, reorder=theta, classes=K, class_plane=cls)`` generalises the
+two-way live/dead split to ``K`` classes: :meth:`ActiveSet.class_sort` is a
+stable counting sort of the slots by ``(live, class)`` (``perm``/``inv`` stay
+the only permutation planes, so the sample pairing is unchanged), the
+``offsets`` plane (``K + 1`` words) holds the class prefix of the live samples,
+and the trigger generalises ``live32`` to ``mixed32`` (32-sample groups holding
+two or more classes). A sort inside the live prefix only (``within_live=True``,
+the reverse's form) leaves ``count``/``span`` alone. Both are counted as
+``class_sorts``, never as ``reorders``.
 """
 
 from __future__ import annotations
@@ -55,10 +65,25 @@ THETA_RANGE = (0.25, 0.75)
 #: The smallest span a reorder fires for (the trigger's floor): below it the
 #: fixed launch cost of the moves exceeds what the restored coalescing saves.
 MIN_REORDER_SPAN = 4096
+#: The mixed-group threshold of the K-class trigger: it fires when
+#: ``mixed32 >= CLASS_THETA * live32`` (32-slot groups holding two or more live
+#: classes against groups holding a live sample), over at least
+#: :data:`MIN_CLASS_SORT_SPAN` samples. A divergence/coalescing proxy: a mixed
+#: warp serialises both branches. Its own name; accepted within :data:`THETA_RANGE`.
+CLASS_THETA = DEFAULT_THETA
+#: The stale trigger of a state-dependent selector: the K-class sort also fires
+#: when more than this fraction of the live samples changed class since the last
+#: sort (``stale_count > STALE_MAX * count``). Exact integer counts, no hysteresis.
+STALE_MAX = 0.05
+#: The most classes a set distinguishes (the class plane is one byte per sample).
+MAX_CLASSES = 255
+#: The smallest span a class sort is triggered for (as :data:`MIN_REORDER_SPAN`).
+MIN_CLASS_SORT_SPAN = MIN_REORDER_SPAN
 #: Element sizes a plane may carry, in bytes.
 ELEM_BYTES = (1, 2, 4, 8, 16)
 
 _MASK_IS_DROP = 1  # EAGLE_BACKEND_COMPACT_MASK_IS_DROP
+_CLASSES_WITHIN_LIVE = 2  # EAGLE_BACKEND_CLASSES_WITHIN_LIVE
 
 #: Every live ActiveSet that reorders (the owned-plane registry).
 _REORDERING = weakref.WeakSet()
@@ -76,7 +101,8 @@ def _reordering_snapshot() -> list:
 
 
 __all__ = ["ActiveSet", "compaction_body", "MAP_PLANE", "COUNT_PLANE",
-           "DEFAULT_EVERY", "MIN_EVERY", "DEFAULT_THETA", "THETA_RANGE"]
+           "DEFAULT_EVERY", "MIN_EVERY", "DEFAULT_THETA", "THETA_RANGE",
+           "MAX_CLASSES", "MIN_CLASS_SORT_SPAN", "CLASS_THETA", "STALE_MAX"]
 
 
 def _module_of(arr):
@@ -187,6 +213,15 @@ def check_bound_planes(index_map, bound) -> None:
             continue
         inside = lambda spans: any(s[0] <= r[0] and r[0] + r[1] <= s[0] + s[1] for s in spans)
         if not (inside(owned) or inside(indirect)):
+            for other in _reordering_snapshot():
+                if other is not aset and any(
+                        s and s[0] <= r[0] and r[0] + r[1] <= s[0] + s[1]
+                        for s in other._owned_ranges()):
+                    raise ValueError(
+                        f"eagle.plan.bind: {role} {name!r} is owned by a different "
+                        "ActiveSet than the one this run compacts through; a "
+                        "reverse registers its adjoint planes on its OWN set, never "
+                        "on the forward's (or another reverse's)")
             raise ValueError(
                 f"eagle.plan.bind: {role} {name!r} is a per-sample plane of a run "
                 f"whose ActiveSet reorders its samples, but the set neither owns it "
@@ -210,15 +245,54 @@ class ActiveSet:
     pays on large, irregularly thinning batches (from about 1e5 samples;
     below that the map alone is as fast). The set then owns the mask and
     every plane given to :meth:`own`. The set starts as the identity
-    (every sample live, ``count == n``)."""
+    (every sample live, ``count == n``).
+
+    ``classes=K`` (with ``class_plane``) makes it a K-class set, for a kernel
+    whose samples fall into ``K`` branches that diverge a warp when
+    interleaved. ``class_plane`` is a C-contiguous ``uint8`` array of ``n``
+    entries, each sample's class in ``[0, K)``; the set owns it (it moves with
+    every other plane) and ``K`` is at most :data:`MAX_CLASSES` (255). The set
+    must reorder (``reorder=theta``). :meth:`class_sort` groups the live
+    samples into one run per class, in one stable permutation carried by
+    ``perm``/``inv``, so the sample pairing is the one of any reorder. The
+    planes it adds:
+
+    * ``offsets`` -- ``K + 1`` words, the exclusive prefix over the live
+      samples: class ``c`` occupies slots ``[offsets[c], offsets[c + 1])`` and
+      ``offsets[K] == count``. Valid after a sort, until the next reorder or
+      :meth:`restore`.
+    * ``class_sorts`` -- how many class sorts ran (a class sort is never counted
+      as a ``reorders``).
+    * ``mixed32`` -- 32-slot groups holding two or more live classes (written
+      by every compaction).
+    * ``class_fire`` -- 1 when the last compaction found a class sort worth
+      running (see below); :meth:`reorder` and :meth:`reorder_if_degraded` run
+      the sort exactly then.
+    * ``stale_count`` -- an input: the samples whose class changed since the
+      last sort, written by a kernel whose branch is chosen from evolving state
+      (0 when classes never change).
+
+    A compaction sets ``class_fire`` to ``(mixed32 > 0 and mixed32 >=
+    class_theta * live32 and span >= MIN_CLASS_SORT_SPAN) or stale_count >
+    STALE_MAX * count or fire``: the live samples are mixed across at least
+    ``class_theta`` of the warps they occupy, or more than :data:`STALE_MAX` of
+    them changed class, or the liveness reorder already fired. ``class_theta``
+    defaults to :data:`CLASS_THETA` and is accepted in :data:`THETA_RANGE`.
+    With ``epochs=True`` the set keeps a snapshot of ``perm`` after every sort
+    (:attr:`epochs`). On the device the K-class set needs a backend providing the
+    seam symbols ``compact_classes_device`` and ``reorder_classes_device``
+    (:func:`eagle._core.backend_has`); without them construction is refused,
+    naming the backend and the symbol."""
 
     __slots__ = ("mask", "n", "map", "count", "_xp", "_device", "_scratch",
                  "_done_at_last", "theta", "perm", "inv", "span", "fire",
                  "live32", "reorders", "_owned", "_indirect", "_frozen",
                  "_reorder_scratch", "_zero", "_reorders_at_restore", "_map_lazy",
-                 "__weakref__")
+                 "classes", "class_theta", "stale_count", "class_plane", "offsets", "class_sorts", "mixed32",
+                 "class_fire", "_epochs", "_lock", "__weakref__")
 
-    def __init__(self, mask, *, reorder=None, _lazy_scratch=False, _lazy_map=False):
+    def __init__(self, mask, *, reorder=None, classes=None, class_plane=None,
+                 class_theta=None, epochs=False, _lazy_scratch=False, _lazy_map=False):
         xp = _module_of(mask)
         if getattr(mask, "ndim", None) != 1:
             raise ValueError(
@@ -238,6 +312,41 @@ class ActiveSet:
                 f"samples, got {n}"
             )
         self.theta = None if reorder is None or reorder is False else _check_theta(reorder)
+        self.classes = self.class_plane = self.offsets = None
+        self.class_theta = self.stale_count = None
+        self.class_sorts = self.mixed32 = self.class_fire = None
+        self._epochs = None
+        self._lock = threading.RLock()
+        if classes is not None:
+            if isinstance(classes, bool) or not isinstance(classes, int) \
+                    or not 2 <= classes <= MAX_CLASSES:
+                raise ValueError(
+                    f"eagle.ActiveSet: classes is an int in [2, {MAX_CLASSES}], "
+                    f"got {classes!r}")
+            if self.theta is None:
+                raise ValueError(
+                    "eagle.ActiveSet: classes=K sorts the samples physically, so it "
+                    f"needs a reordering set; construct it as ActiveSet(mask, "
+                    f"reorder={DEFAULT_THETA}, classes={classes}, class_plane=...)")
+            if class_plane is None:
+                raise ValueError(
+                    "eagle.ActiveSet: classes=K needs class_plane, the per-sample "
+                    "uint8 plane holding each sample's class in [0, K)")
+            if _module_of(class_plane) is not xp:
+                raise TypeError(
+                    f"eagle.ActiveSet: class_plane lives where the mask lives "
+                    f"({xp.__name__})")
+            if class_plane.dtype != xp.uint8 or tuple(class_plane.shape) != (n,) \
+                    or not class_plane.flags.c_contiguous:
+                raise ValueError(
+                    f"eagle.ActiveSet: class_plane is a C-contiguous uint8 ({n},) "
+                    f"array, got {class_plane.dtype} {tuple(class_plane.shape)}")
+            if xp.__name__ == "cupy":
+                _require_class_symbols()
+            self.classes = classes
+            self.class_theta = CLASS_THETA if class_theta is None else _check_theta(class_theta)
+        elif class_plane is not None:
+            raise ValueError("eagle.ActiveSet: class_plane needs classes=K")
         self.mask = mask
         self.n = n
         self._xp = xp
@@ -268,6 +377,19 @@ class ActiveSet:
                 self.reorders = xp.zeros(1, dtype=xp.uint32)
                 self._zero = xp.zeros(1, dtype=xp.uint32)
                 self._owned.append(mask)
+                if self.classes is not None:
+                    self._claim(class_plane)
+                    self.class_plane = class_plane
+                    self._owned.append(class_plane)
+                    self.offsets = xp.zeros(self.classes + 1, dtype=xp.uint32)
+                    self.class_sorts = xp.zeros(1, dtype=xp.uint32)
+                    self.mixed32 = xp.zeros(1, dtype=xp.uint32)
+                    self.class_fire = xp.zeros(1, dtype=xp.uint32)
+                    #: IN: samples whose class changed since the last sort (written
+                    #: by the units of a forced segmented policy; 0 = none)
+                    self.stale_count = xp.zeros(1, dtype=xp.uint32)
+                    if epochs:
+                        self._epochs = []
                 _REORDERING.add(self)
         if not _lazy_scratch:  # eagle.until_done defers it to its compacting loops
             self.prepare_compaction()
@@ -296,6 +418,13 @@ class ActiveSet:
             self.live32[0] = 0
             self.reorders[0] = 0
             self._reorders_at_restore = 0
+            if self.classes is not None:
+                self.offsets[...] = 0
+                self.class_sorts[0] = 0
+                self.mixed32[0] = 0
+                self.class_fire[0] = 0
+                if self._epochs is not None:
+                    self._epochs.clear()
 
     def materialize_map(self) -> bool:
         """Allocate the deferred map (see ``_lazy_map``) and set it to the
@@ -322,6 +451,23 @@ class ActiveSet:
                 trig = dict(live32=int(self.live32.data.ptr),
                             span=int(self.span.data.ptr),
                             fire=int(self.fire.data.ptr), theta=self.theta)
+            if self.classes is not None:
+                if self._scratch is None:
+                    if cupy.cuda.get_current_stream().is_capturing():
+                        raise RuntimeError(
+                            "eagle: an ActiveSet's first device compaction cannot run "
+                            "under graph capture; call prepare_compaction() before capturing")
+                    self.prepare_compaction()
+                _core.compact_classes_device(
+                    int(self.mask.data.ptr), int(self.map.data.ptr),
+                    int(self.count.data.ptr), int(self._scratch.data.ptr), self.n,
+                    int(cupy.cuda.get_current_stream().ptr), _MASK_IS_DROP,
+                    int(self.mask.device.id), class_plane=int(self.class_plane.data.ptr),
+                    classes=self.classes, class_theta=self.class_theta,
+                    mixed32=int(self.mixed32.data.ptr),
+                    stale_count=int(self.stale_count.data.ptr),
+                    class_fire=int(self.class_fire.data.ptr), **trig)
+                return
             if self._scratch is None:
                 if cupy.cuda.get_current_stream().is_capturing():
                     raise RuntimeError(
@@ -350,6 +496,8 @@ class ActiveSet:
             span = int(self.span[0])
             self.fire[0] = int(live.size < limit and live.size < span
                                and span >= MIN_REORDER_SPAN)
+            if self.classes is not None:
+                self._host_mixed32(live, live32, span)
 
     __call__ = compact
 
@@ -483,9 +631,14 @@ class ActiveSet:
         if self._device:
             from . import _core
 
-            nbytes = _core.reorder_device(self._table(), 0, 0, 0, 0, 0, 0, 0, 0,
-                                          self.n, 0, _MASK_IS_DROP,
-                                          int(self.mask.device.id))
+            if self.classes is not None:
+                nbytes = _core.reorder_classes_device(
+                    self._table(), 0, 0, 0, 0, 0, 0, 0, 0, self.n, 0, _MASK_IS_DROP,
+                    int(self.mask.device.id), 0, self.classes, 0, 0)
+            else:
+                nbytes = _core.reorder_device(self._table(), 0, 0, 0, 0, 0, 0, 0, 0,
+                                              self.n, 0, _MASK_IS_DROP,
+                                              int(self.mask.device.id))
             self._reorder_scratch = self._xp.empty(max(int(nbytes), 1),
                                                    dtype=self._xp.uint8)
             _count_fired()(self._zero, self._xp.zeros(1, dtype=self._xp.uint32))  # compile now, not under capture
@@ -497,6 +650,9 @@ class ActiveSet:
         on the current stream; host: now."""
         self._need_reorder("reorder")
         self._freeze()
+        if self.classes is not None:  # one permutation: the liveness reorder IS the class sort
+            self.class_sort(if_fired=True)
+            return
         xp = self._xp
         if self._device:
             import cupy
@@ -538,7 +694,111 @@ class ActiveSet:
 
         self._need_reorder("reorder_if_degraded")
         self._freeze()
-        return Skippable(self.reorder, SkipGuard(self.fire, 0, self._zero, 0))
+        gate = self.fire if self.classes is None else self.class_fire
+        return Skippable(self.reorder, SkipGuard(gate, 0, self._zero, 0))
+
+    # --- The K-class sort --- #
+    def _need_classes(self, what: str) -> None:
+        if self.classes is None:
+            raise ValueError(
+                f"eagle.ActiveSet.{what}: this set has no classes; construct it as "
+                f"ActiveSet(mask, reorder={DEFAULT_THETA}, classes=K, class_plane=...)")
+
+    def _host_mixed32(self, live, live32: int, span: int) -> None:
+        """The host form of the class trigger: ``mixed32`` = 32-slot groups
+        holding two or more classes among the live samples, and
+        ``class_fire = (mixed32 > 0 and mixed32 >= class_theta * live32 and
+        span >= MIN_CLASS_SORT_SPAN) or stale_count > STALE_MAX * count or
+        fire`` (the last term: the liveness trigger of the same compaction, so a
+        thinning batch is never lost because the classes happen to be grouped).
+        The device rule, to the bit."""
+        import numpy as np
+
+        cls = self.class_plane[live].astype(np.int64)
+        pair = np.unique((live.astype(np.int64) // 32) * self.classes + cls)
+        per_group = np.bincount(pair // self.classes, minlength=1)
+        mixed = int(np.count_nonzero(per_group >= 2))
+        self.mixed32[0] = mixed
+        limit = float(np.float32(self.class_theta)) * float(live32)
+        warp_mix = mixed > 0 and float(mixed) >= limit and span >= MIN_CLASS_SORT_SPAN
+        drift = float(int(self.stale_count[0])) > STALE_MAX * float(live.size)
+        self.class_fire[0] = int(warp_mix or drift or int(self.fire[0]) != 0)
+
+    def _record_epoch(self) -> None:
+        if self._epochs is not None:
+            self._epochs.append(self.perm.copy())
+
+    @property
+    def epochs(self) -> tuple:
+        """The epoch table: the ``perm`` snapshot written after every
+        reorder / class sort of a set built with ``epochs=True`` (empty
+        otherwise), oldest first. A snapshot is a private copy."""
+        return () if self._epochs is None else tuple(self._epochs)
+
+    def class_sort(self, *, within_live: bool = False, if_fired: bool = False) -> bool:
+        """Stable counting sort of the slots by ``(live, class)``. Every owned
+        plane, ``perm`` and ``inv`` move together; ``offsets[c]`` becomes the
+        first live slot of class ``c`` (``offsets[K] == count``), the map the
+        identity over ``[0, count)``, ``class_sorts += 1``. ``within_live=True``
+        permutes the slots ``[0, count)`` among themselves by class only (the
+        reverse's form: liveness is the prefix, ``count``/``span`` unchanged);
+        otherwise ``[0, span)`` is sorted by ``(live, class)`` and
+        ``span = count``. ``if_fired=True`` sorts only when the last compaction
+        raised ``class_fire`` (``mixed32`` >= ``theta * live32`` over at least
+        :data:`MIN_CLASS_SORT_SPAN` samples). Returns whether a sort ran.
+        Host: now. The device face needs the backend's class symbols."""
+        self._need_classes("class_sort")
+        self._freeze()
+        if self._device:
+            import cupy
+
+            from . import _core
+
+            _core.reorder_classes_device(
+                self._table(), int(self.mask.data.ptr), int(self.perm.data.ptr),
+                int(self.inv.data.ptr), int(self.map.data.ptr),
+                int(self.count.data.ptr), int(self.span.data.ptr),
+                int(self.class_fire.data.ptr) if if_fired else 0,
+                int(self._reorder_scratch.data.ptr), self.n,
+                int(cupy.cuda.get_current_stream().ptr),
+                _MASK_IS_DROP | (_CLASSES_WITHIN_LIVE if within_live else 0),
+                int(self.mask.device.id), int(self.class_plane.data.ptr), self.classes,
+                int(self.offsets.data.ptr), int(self.class_sorts.data.ptr))
+            if self._epochs is not None and not _capturing():
+                self._record_epoch()
+            return True  # enqueued (an if_fired sort is a no-op on the device when it did not fire)
+        import numpy as np
+
+        with self._lock:
+            if if_fired and int(self.class_fire[0]) == 0:
+                return False
+            k = self.classes
+            sp = int(self.count[0]) if within_live else int(self.span[0])
+            cls = self.class_plane[:sp].astype(np.int64)
+            if cls.size and int(cls.max()) >= k:
+                raise ValueError(
+                    f"eagle.ActiveSet.class_sort: the class plane holds "
+                    f"{int(cls.max())}, outside [0, {k})")
+            key = cls if within_live else np.where(self.mask[:sp] != 0, k, cls)
+            order = np.argsort(key, kind="stable")  # == the stable counting sort
+            slots = np.arange(sp, dtype=np.int64)
+            for arr in self._owned:
+                arr[..., :sp] = arr[..., order]
+            self.perm[:sp] = self.perm[:sp][order]
+            self.inv[self.perm[:sp]] = slots.astype(np.int32)
+            live = int(np.count_nonzero(key < k))
+            counts = np.bincount(key[key < k], minlength=k)
+            self.offsets[0] = 0
+            self.offsets[1:] = np.cumsum(counts).astype(np.uint32)
+            if not within_live:
+                self.map[:live] = np.arange(live, dtype=np.int32)
+                self.count[0] = live
+                self.span[0] = live
+            self.fire[0] = 0
+            self.class_fire[0] = 0
+            self.class_sorts[0] += 1
+            self._record_epoch()
+        return True
 
     @property
     def permuted(self) -> bool:
@@ -546,7 +806,7 @@ class ActiveSet:
         (a device sync for a device set)."""
         if self.theta is None:
             return False
-        return _read_word(self.reorders) != self._reorders_at_restore
+        return self._moves() != self._reorders_at_restore
 
     def restore(self) -> None:
         """Put every owned plane back in sample order; ``perm``/``inv``
@@ -587,7 +847,15 @@ class ActiveSet:
         self.fire[0] = 0
         self.compact()
         self.fire[0] = 0
-        self._reorders_at_restore = _read_word(self.reorders)
+        if self.classes is not None:
+            self.offsets[...] = 0
+            self.class_fire[0] = 0
+        self._reorders_at_restore = self._moves()
+
+    def _moves(self) -> int:
+        """Reorders plus class sorts so far: the count :attr:`permuted` compares."""
+        n = _read_word(self.reorders)
+        return n + (0 if self.class_sorts is None else _read_word(self.class_sorts))
 
     def in_sample_order(self, plane):
         """A copy of ``plane`` in sample order (``plane[..., inv]``);
@@ -599,6 +867,20 @@ class ActiveSet:
                 "eagle.ActiveSet.in_sample_order: the plane is not one this set "
                 "owns (an indirect plane is already in sample order)")
         return self._xp.take(plane, self.inv, axis=-1)
+
+
+def _require_class_symbols() -> None:
+    """Refuse a device K-class set when the backend lacks a class symbol,
+    naming the backend and the symbol."""
+    from . import _core
+
+    info = _core.cuda_backend()
+    for sym in ("eagle_backend_compact_classes_device", "eagle_backend_reorder_classes_device"):
+        if not _core.backend_has(sym):
+            where = info.get("path") or "not loaded"
+            raise RuntimeError(
+                f"eagle.ActiveSet: classes=K on the device needs the seam symbol {sym}; "
+                f"the {info.get('kind', 'cuda')} backend ({where}) does not provide it")
 
 
 def _host_identity(arr) -> None:

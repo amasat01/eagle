@@ -33,6 +33,34 @@ and is the same function as :func:`eagle.plan.auto`:
 .. autofunction:: eagle.deploy
    :no-index:
 
+K-class active sets
+-------------------
+
+:class:`eagle.ActiveSet` (``classes=``, ``class_plane=``, ``class_theta=``,
+``epochs=``; :meth:`~eagle.ActiveSet.class_sort`, and the ``offsets``,
+``class_sorts``, ``mixed32``, ``class_fire`` and ``stale_count`` planes) is
+documented on its class page. The thresholds and the backend probe:
+
+.. autodata:: eagle._active_set.CLASS_THETA
+   :no-value:
+
+.. autodata:: eagle._active_set.STALE_MAX
+   :no-value:
+
+.. autodata:: eagle._active_set.MAX_CLASSES
+   :no-value:
+
+.. autodata:: eagle._active_set.MIN_CLASS_SORT_SPAN
+   :no-value:
+
+.. function:: eagle._core.backend_has(symbol, kind="cuda")
+   :no-index:
+
+   Whether the loaded backend ``kind`` resolves the seam symbol ``symbol``
+   (False when the backend is not loaded). Symbols bound one by one, such as
+   ``eagle_backend_compact_classes_device``, are a capability exactly when
+   they resolve.
+
 Submodules not re-exported at the top level
 ----------------------------------------------
 

@@ -418,6 +418,90 @@ struct eagle_backend_reorder_desc {
  *  added within major 1, so its presence is the capability. */
 eagle_backend_status eagle_backend_reorder_device(struct eagle_backend_reorder_desc* desc);
 
+/* ---- filtering: K classes (bound per symbol, like reorder_device) ------------- */
+
+/** ``eagle_backend_reorder_classes_desc.flags``: sort the slots ``[0, *count)``
+ *  among themselves by class only (the live prefix of a reverse pass); without
+ *  it the sort is by ``(live, class)`` over ``[0, *span)``. An older backend
+ *  that does not know the bit refuses the call (UNSUPPORTED). */
+#define EAGLE_BACKEND_CLASSES_WITHIN_LIVE (UINT32_C(1) << 1)
+/** The most classes (``classes`` in [2, 255]; the class plane is one byte per sample). */
+#define EAGLE_BACKEND_MAX_CLASSES 255
+
+/** ``compact_device`` plus the K-class trigger. The first block repeats
+ *  ``eagle_backend_compact_desc`` field for field; ``live32``, ``span`` and
+ *  ``fire`` are REQUIRED here. Every buffer is a raw device address. */
+struct eagle_backend_compact_classes_desc {
+    uint32_t struct_size;
+    uint32_t flags;          /**< EAGLE_BACKEND_COMPACT_MASK_IS_DROP */
+    int32_t device;
+    uint32_t reserved;       /**< zero */
+    uint64_t mask;
+    uint64_t index_map;
+    uint64_t count;
+    uint64_t scratch;        /**< 0 = query */
+    int64_t n;
+    uint64_t stream;
+    int64_t scratch_bytes;   /**< OUT when scratch == 0 */
+    uint64_t live32;         /**< uint32_t[1]: OUT */
+    uint64_t span;           /**< uint32_t[1]: IN */
+    uint64_t fire;           /**< uint32_t[1]: OUT, the liveness trigger of compact_device */
+    float theta;             /**< the liveness threshold, in (0, 1) */
+    uint32_t reserved2;      /**< zero */
+    /* the class fields */
+    uint64_t class_plane;    /**< uint8_t[n], each sample's class in [0, classes) */
+    uint32_t classes;        /**< K, in [2, 255] */
+    float class_theta;       /**< the mixed-group threshold, in (0, 1) */
+    uint64_t offsets;        /**< uint32_t[classes + 1]: reserved for the sort; not written here (0 allowed) */
+    uint64_t mixed32;        /**< uint32_t[1]: OUT, 32-slot groups holding two or more live classes */
+    uint64_t stale_count;    /**< uint32_t[1]: IN, samples whose class changed since the last sort; 0 = none */
+    uint64_t class_fire;     /**< uint32_t[1]: OUT, (mixed32 > 0 && mixed32 >= class_theta * live32 && span >= 4096)
+                              *   || stale_count > 0.05 * count || fire */
+    uint64_t reserved3;      /**< zero */
+};
+
+/** ``compact_device`` with the class trigger (see ``eagle_backend_compact_device``
+ *  for the query and capturability contract; both hold here). Bound per symbol:
+ *  its presence is the capability. */
+eagle_backend_status eagle_backend_compact_classes_device(struct eagle_backend_compact_classes_desc* desc);
+
+/** ``reorder_device`` generalised to K classes. The first block repeats
+ *  ``eagle_backend_reorder_desc`` field for field. ``class_plane`` must be one of
+ *  the planes (it moves with them). */
+struct eagle_backend_reorder_classes_desc {
+    uint32_t struct_size;
+    uint32_t flags;          /**< EAGLE_BACKEND_COMPACT_MASK_IS_DROP | EAGLE_BACKEND_CLASSES_WITHIN_LIVE */
+    int32_t device;
+    uint32_t n_planes;
+    uint64_t planes;
+    uint64_t mask;
+    uint64_t perm;
+    uint64_t inv;
+    uint64_t index_map;
+    uint64_t count;
+    uint64_t span;
+    uint64_t fire;           /**< 0 = unconditional; else the kernels exit while *fire == 0, and it is cleared */
+    uint64_t scratch;        /**< 0 = query */
+    int64_t n;
+    uint64_t stream;
+    int64_t scratch_bytes;   /**< OUT when scratch == 0 */
+    /* the class fields */
+    uint64_t class_plane;    /**< uint8_t[n] */
+    uint32_t classes;        /**< K, in [2, 255] */
+    uint32_t reserved3;      /**< zero */
+    uint64_t offsets;        /**< uint32_t[classes + 1]: OUT, exclusive prefix over the LIVE samples */
+    uint64_t class_sorts;    /**< uint32_t[1]: incremented once when the permutation ran */
+};
+
+/** Permute every plane IN PLACE by a stable counting sort on ``(live, class)``
+ *  over ``[0, *span)`` (dead last), then ``*count = *span = live``; with
+ *  WITHIN_LIVE, over ``[0, *count)`` by class only, ``count``/``span`` unchanged.
+ *  ``perm`` moves, ``inv`` is rebuilt, ``index_map`` is the identity over
+ *  ``[0, live)``, ``offsets`` is written. Query and capturability as for
+ *  ``reorder_device`` (the query's ``scratch_bytes`` includes the class
+ *  working set). Bound per symbol. */
+eagle_backend_status eagle_backend_reorder_classes_device(struct eagle_backend_reorder_classes_desc* desc);
+
 /* ---- experimental (eagle_backend_x_*, optional, unlocked) -------------------- */
 
 /** Write the captured graph as Graphviz dot to ``path`` (the caller reads it). */

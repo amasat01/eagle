@@ -45,6 +45,7 @@
 #include "eagle/exec/DeviceKernel.h"
 #include "eagle/filtering/Compact.h"
 #include "eagle/filtering/Reorder.h"
+#include "eagle/filtering/ReorderClasses.h"
 #include "eagle/util/CaptureGuard.h"
 #include "plugin/cuda_driver.h"
 #include "plugin/interop.h"
@@ -937,6 +938,118 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_reorder_device(struct eagle
                 reinterpret_cast<std::int32_t*>(d.inv), reinterpret_cast<std::int32_t*>(d.index_map),
                 reinterpret_cast<std::uint32_t*>(d.count), reinterpret_cast<std::uint32_t*>(d.span),
                 reinterpret_cast<std::uint32_t*>(d.fire), reinterpret_cast<void*>(d.scratch), d.n,
+                seamStream(d.stream));
+            return 0;
+        });
+    });
+}
+
+// ---- filtering: K classes ----------------------------------------------------
+
+namespace {
+
+// the class descs repeat the base descs verbatim and in order (the common prefix parses identically)
+static_assert(offsetof(eagle_backend_reorder_classes_desc, scratch_bytes) == offsetof(eagle_backend_reorder_desc, scratch_bytes)
+        && offsetof(eagle_backend_reorder_classes_desc, class_plane) == sizeof(eagle_backend_reorder_desc),
+    "eagle_backend_reorder_classes_desc must start with eagle_backend_reorder_desc");
+static_assert(offsetof(eagle_backend_compact_classes_desc, reserved2) == offsetof(eagle_backend_compact_desc, reserved2)
+        && offsetof(eagle_backend_compact_classes_desc, class_plane) == sizeof(eagle_backend_compact_desc),
+    "eagle_backend_compact_classes_desc must start with eagle_backend_compact_desc");
+
+/** A class desc must carry every class field (a shorter one is UNSUPPORTED, never zero-defaulted). */
+template <class D>
+void requireClassFields(const D* in, std::size_t end, const char* who)
+{
+    if (in != nullptr && in->struct_size < end)
+        throw Unsupported(std::string(who) + ": struct_size " + std::to_string(in->struct_size)
+            + " ends before the class fields (" + std::to_string(end) + " bytes needed)");
+}
+
+} // namespace
+
+EAGLE_BACKEND_API eagle_backend_status eagle_backend_compact_classes_device(
+    struct eagle_backend_compact_classes_desc* desc)
+{
+    return guarded([&] {
+        constexpr const char* who = "eagle_backend_compact_classes_device";
+        requireClassFields(desc, offsetof(eagle_backend_compact_classes_desc, reserved3) + sizeof(desc->reserved3), who);
+        const auto d = readDesc(desc, EAGLE_BACKEND_COMPACT_MASK_IS_DROP);
+        if (d.n < 0)
+            throw std::invalid_argument(std::string(who) + ": n must be >= 0");
+        if (d.n > eagle::filtering::kCompactMaxSamples)
+            throw Unsupported(std::string(who) + ": the int32 index map addresses at most 2^31-1 samples, got n = "
+                + std::to_string(d.n));
+        if (d.scratch == 0) {
+            desc->scratch_bytes = static_cast<std::int64_t>(eagle::filtering::compactScratchBytes(d.n));
+            return;
+        }
+        if (d.count == 0 || (d.n > 0 && (d.mask == 0 || d.index_map == 0)))
+            throw std::invalid_argument(std::string(who) + ": mask, index_map and count must be device addresses");
+        if (d.live32 == 0 || d.span == 0 || d.fire == 0 || d.mixed32 == 0 || d.class_fire == 0
+            || (d.n > 0 && d.class_plane == 0))
+            throw std::invalid_argument(std::string(who) + ": live32, span, fire, class_plane, mixed32 and class_fire "
+                                                           "are required");
+        if (d.reserved2 != 0 || d.reserved3 != 0)
+            throw std::invalid_argument(std::string(who) + ": reserved fields must be zero");
+        requireDevice();
+        const int device = resolveDevice(d.device, d.stream);
+        DeviceScope scope(device);
+        bracketed(who, "enqueue", [&] {
+            eagle::filtering::ReorderTrigger trig{ reinterpret_cast<std::uint32_t*>(d.live32),
+                reinterpret_cast<const std::uint32_t*>(d.span), reinterpret_cast<std::uint32_t*>(d.fire), d.theta };
+            const auto stream = seamStream(d.stream);
+            eagle::filtering::compactDevice(reinterpret_cast<const std::uint8_t*>(d.mask), d.flags,
+                reinterpret_cast<std::int32_t*>(d.index_map), reinterpret_cast<std::uint32_t*>(d.count),
+                reinterpret_cast<void*>(d.scratch), d.n, stream, &trig);
+            eagle::filtering::ClassTrigger ct{ reinterpret_cast<const std::uint8_t*>(d.class_plane), d.classes,
+                d.class_theta, reinterpret_cast<std::uint32_t*>(d.mixed32),
+                reinterpret_cast<const std::uint32_t*>(d.stale_count), reinterpret_cast<std::uint32_t*>(d.class_fire) };
+            eagle::filtering::classTriggerDevice(reinterpret_cast<const std::uint8_t*>(d.mask), d.flags, trig,
+                reinterpret_cast<const std::uint32_t*>(d.count), ct, d.n, stream);
+            return 0;
+        });
+    });
+}
+
+EAGLE_BACKEND_API eagle_backend_status eagle_backend_reorder_classes_device(
+    struct eagle_backend_reorder_classes_desc* desc)
+{
+    return guarded([&] {
+        constexpr const char* who = "eagle_backend_reorder_classes_device";
+        requireClassFields(desc, offsetof(eagle_backend_reorder_classes_desc, class_sorts) + sizeof(desc->class_sorts),
+            who);
+        const auto d = readDesc(desc,
+            EAGLE_BACKEND_COMPACT_MASK_IS_DROP | EAGLE_BACKEND_CLASSES_WITHIN_LIVE);
+        if (d.classes < 2 || d.classes > EAGLE_BACKEND_MAX_CLASSES)
+            throw std::invalid_argument(std::string(who) + ": classes must lie in [2, 255]");
+        if (d.reserved3 != 0)
+            throw std::invalid_argument(std::string(who) + ": reserved3 must be zero");
+        // the base validation shares the reorder_device descriptor shape
+        eagle_backend_reorder_desc base{};
+        std::memcpy(&base, &d, sizeof base);
+        std::uint32_t maxElem = 0;
+        const auto planes     = reorderPlanes(base, who, maxElem);
+        if (d.scratch == 0) {
+            desc->scratch_bytes = static_cast<std::int64_t>(
+                eagle::filtering::classSortScratchBytes(d.n, maxElem, d.classes));
+            return;
+        }
+        if (d.n > 0
+            && (d.mask == 0 || d.perm == 0 || d.inv == 0 || d.index_map == 0 || d.count == 0 || d.span == 0
+                || d.class_plane == 0 || d.offsets == 0 || d.class_sorts == 0))
+            throw std::invalid_argument(std::string(who) + ": mask, perm, inv, index_map, count, span, class_plane, "
+                                                           "offsets and class_sorts must be device addresses");
+        requireDevice();
+        const int device = resolveDevice(d.device, d.stream);
+        DeviceScope scope(device);
+        bracketed(who, "enqueue", [&] {
+            eagle::filtering::reorderClassesDevice(planes.data(), static_cast<std::uint32_t>(planes.size()),
+                reinterpret_cast<const std::uint8_t*>(d.mask), d.flags, d.classes,
+                reinterpret_cast<const std::uint8_t*>(d.class_plane), reinterpret_cast<std::int32_t*>(d.perm),
+                reinterpret_cast<std::int32_t*>(d.inv), reinterpret_cast<std::int32_t*>(d.index_map),
+                reinterpret_cast<std::uint32_t*>(d.count), reinterpret_cast<std::uint32_t*>(d.span),
+                reinterpret_cast<std::uint32_t*>(d.fire), reinterpret_cast<std::uint32_t*>(d.offsets),
+                reinterpret_cast<std::uint32_t*>(d.class_sorts), reinterpret_cast<void*>(d.scratch), d.n,
                 seamStream(d.stream));
             return 0;
         });
