@@ -110,6 +110,7 @@ inline const std::vector<const char*>& experimentalSymbols()
         "eagle_backend_x_capture_guard_pending_count",
         "eagle_backend_x_restore_device",
         "eagle_backend_x_reduce_canonical",
+        "eagle_backend_x_diff_columns",
         "eagle_backend_x_composer_create",
         "eagle_backend_x_composer_register_launcher",
         "eagle_backend_x_composer_register_callable",

@@ -42,6 +42,7 @@
 #include "eagle/cuda/CaptureFork.h"
 #include "eagle/cuda/DeviceProps.h"
 #include "eagle/cuda/Graph.h"
+#include "eagle/diff/Reverse.h"
 #include "eagle/exec/DeviceKernel.h"
 #include "eagle/filtering/Compact.h"
 #include "eagle/filtering/Reorder.h"
@@ -1138,6 +1139,55 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_x_reduce_canonical(struct e
                 break;
             default:
                 reduceCanonical<std::uint8_t, LogicalAndOp>(d, stream);
+            }
+            return 0;
+        });
+    });
+}
+
+EAGLE_BACKEND_API eagle_backend_status eagle_backend_x_diff_columns(struct eagle_backend_diff_desc* desc)
+{
+    return guarded([&] {
+        constexpr const char* who = "eagle_backend_x_diff_columns";
+        if (desc == nullptr || desc->struct_size < sizeof(eagle_backend_diff_desc))
+            throw std::invalid_argument(std::string(who) + ": null desc or struct_size too small");
+        const auto& d = *desc;
+        if (d.count < 0 || d.rows < 0 || d.op > EAGLE_BACKEND_DIFF_READ)
+            throw std::invalid_argument(std::string(who) + ": unknown op, or a negative count/rows");
+        requireDevice();
+        const int device = resolveDevice(d.device, d.stream);
+        DeviceScope scope(device);
+        bracketed(who, "enqueue", [&] {
+            namespace dd = eagle::diff::device;
+            const auto stream = seamStream(d.stream);
+            void* dst = reinterpret_cast<void*>(d.dst);
+            const void* src = reinterpret_cast<const void*>(d.src);
+            const auto* index = reinterpret_cast<const std::int64_t*>(d.index);
+            const std::uint32_t b = d.elem_bytes;
+            const std::size_t bytes = static_cast<std::size_t>(d.count) * b;
+            const auto check = [&](cudaError_t e, const char* what) {
+                if (e != cudaSuccess)
+                    throw std::runtime_error(std::string(who) + ": " + what + " failed: " + cudaGetErrorString(e));
+            };
+            if (d.op == EAGLE_BACKEND_DIFF_COPY) {
+                if (bytes) check(cudaMemcpyAsync(dst, src, bytes, cudaMemcpyDeviceToDevice, stream), "copy");
+            } else if (d.op == EAGLE_BACKEND_DIFF_READ) {
+                if (bytes) check(cudaMemcpyAsync(dst, src, bytes, cudaMemcpyDeviceToHost, stream), "read");
+                check(cudaStreamSynchronize(stream), "stream wait");
+            } else if (d.op == EAGLE_BACKEND_DIFF_GATHER) {
+                if (b == 1) dd::gatherColumns<std::uint8_t>(dst, d.dst_ld, src, d.src_ld, index, d.count, d.rows, stream);
+                else if (b == 2) dd::gatherColumns<std::uint16_t>(dst, d.dst_ld, src, d.src_ld, index, d.count, d.rows, stream);
+                else if (b == 4) dd::gatherColumns<std::uint32_t>(dst, d.dst_ld, src, d.src_ld, index, d.count, d.rows, stream);
+                else if (b == 8) dd::gatherColumns<std::uint64_t>(dst, d.dst_ld, src, d.src_ld, index, d.count, d.rows, stream);
+                else throw std::invalid_argument(std::string(who) + ": gather elem_bytes must be 1, 2, 4 or 8");
+            } else if (d.op == EAGLE_BACKEND_DIFF_ACCUMULATE) {
+                if (b == 8) dd::accumulatePrefix(static_cast<double*>(dst), static_cast<const double*>(src), d.dst_ld, d.count, d.rows, stream);
+                else if (b == 4) dd::accumulatePrefix(static_cast<float*>(dst), static_cast<const float*>(src), d.dst_ld, d.count, d.rows, stream);
+                else throw std::invalid_argument(std::string(who) + ": accumulate elem_bytes must be 4 or 8");
+            } else {
+                if (b == 8) dd::fillPrefix(static_cast<std::int64_t*>(dst), static_cast<std::int64_t>(d.value), d.count, stream);
+                else if (b == 4) dd::fillPrefix(static_cast<std::int32_t*>(dst), static_cast<std::int32_t>(d.value), d.count, stream);
+                else throw std::invalid_argument(std::string(who) + ": fill elem_bytes must be 4 or 8");
             }
             return 0;
         });

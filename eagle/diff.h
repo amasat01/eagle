@@ -5,9 +5,13 @@
 
 /**
  * @file diff.h
- * @brief Umbrella header for reverse-mode differentiation of a graph: the
- *        transposition of a graph ``Description`` and the fixed-order sum of
- *        adjoints. CUDA-free and header-only.
+ * @brief Umbrella header for reverse-mode differentiation: the transposition
+ *        of a graph ``Description``, the fixed-order sum of adjoints, and the
+ *        windowed reverse of a stepped run (windows, record slot, driver).
+ *        CUDA-free and header-only.
  */
 
+#include "eagle/diff/Record.h"
+#include "eagle/diff/Reverse.h"
 #include "eagle/diff/Transpose.h"
+#include "eagle/diff/Window.h"

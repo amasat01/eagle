@@ -91,7 +91,7 @@ enum Slot : int {
     sStreamCreate, sStreamDestroy, sStreamSynchronize, sStreamWaitEvent,
     sStreamBeginCapture, sStreamEndCapture, sStreamBeginCaptureToGraph, sStreamGetCaptureInfo,
     sStreamUpdateCaptureDependencies,
-    sEventCreate, sEventDestroy, sEventRecord, sMemFree,
+    sEventCreate, sEventDestroy, sEventRecord, sMemFree, sMemcpyAsync,
     sGraphCreate, sGraphDestroy, sGraphExecDestroy, sGraphInstantiateWithFlags, sGraphLaunch, sGraphGetNodes,
     sGraphNodeGetType, sGraphAddKernelNode, sGraphKernelNodeGetParams, sGraphExecKernelNodeSetParams,
     sGraphAddEmptyNode, sGraphAddChildGraphNode, sGraphChildGraphNodeGetGraph, sGraphNodeSetEnabled,
@@ -138,6 +138,7 @@ Entry g_entries[kSlots] = {
     { "cuEventDestroy", 4000, FORK | INTEROP, nullptr },
     { "cuEventRecord", 2000, FORK | INTEROP, nullptr },
     { "cuMemFree", 3020, 0, nullptr },
+    { "cuMemcpyAsync", 4000, 0, nullptr },
     { "cuGraphCreate", 10000, GRAPH | COND, nullptr },
     { "cuGraphDestroy", 10000, CAPTURER | CAPTURED | GRAPH | COND, nullptr },
     { "cuGraphExecDestroy", 10000, LAUNCHER, nullptr },
@@ -852,6 +853,22 @@ cudaError_t cudaFree(void* devPtr)
         return cudaSuccess;
     EAGLE_DRV(memFree, sMemFree, PFN_cuMemFree_v3020);
     return fromDriver(memFree(reinterpret_cast<CUdeviceptr>(devPtr)));
+}
+
+// Unified addressing: one call copies device<->device and device->host alike.
+static cudaError_t memcpyAsync(void* dst, const void* src, size_t count, CUstream s)
+{
+    EAGLE_CTX();
+    EAGLE_DRV(copy, sMemcpyAsync, PFN_cuMemcpyAsync_v4000);
+    return fromDriver(copy(reinterpret_cast<CUdeviceptr>(dst), reinterpret_cast<CUdeviceptr>(src), count, s));
+}
+cudaError_t cudaMemcpyAsync(void* dst, const void* src, size_t count, cudaMemcpyKind, cudaStream_t stream)
+{
+    return memcpyAsync(dst, src, count, legacy(stream));
+}
+cudaError_t cudaMemcpyAsync_ptsz(void* dst, const void* src, size_t count, cudaMemcpyKind, cudaStream_t stream)
+{
+    return memcpyAsync(dst, src, count, perThread(stream));
 }
 
 static cudaError_t entryPoint(const char* symbol, void** funcPtr, unsigned int cudaVersion, unsigned long long flags,

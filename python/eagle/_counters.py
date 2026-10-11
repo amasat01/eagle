@@ -48,6 +48,7 @@ _COUNTERS: dict = {
     "rebinds": 0,
     "graph_builds": 0,
     "reverses": 0,
+    "records": 0,
 }
 
 

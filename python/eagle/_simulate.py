@@ -53,7 +53,7 @@ __all__ = ["SimResult", "Simulation", "simulate", "simulation"]
 
 #: The result's own fields: a state plane must not shadow one.
 _RESULT_FIELDS = ("state", "finished", "done", "steps", "status", "report", "n",
-                  "wall_s", "allocated")
+                  "wall_s", "allocated", "record")
 
 #: The roles that hold one value (or one column) per sample.
 _SAMPLE_ROLES = frozenset({"per_sample", "vec_in", "mat_in", "mutable"})
@@ -66,7 +66,8 @@ _FAMILY = {"uniform": "Param", "per_sample": "per-sample", "mutable": "per-sampl
 
 #: eagle's own call-time options: keyword-only, after the kernel's own
 #: arguments; a kernel parameter sharing one of these names is refused.
-_DOOR_OPTIONS = frozenset({"until", "max_steps", "every", "reorder"})
+_DOOR_OPTIONS = frozenset({"until", "max_steps", "every", "reorder", "record", "window",
+                           "memory_budget"})
 
 
 def _refuse(text: str):
@@ -430,11 +431,12 @@ class SimResult:
     :attr:`steps`/:attr:`report`/:attr:`wall_s` the loop's steps, full
     :class:`eagle.RunReport` and wall time."""
 
-    __slots__ = ("state", "finished", "done", "steps", "status", "report", "n",
+    __slots__ = ("state", "finished", "done", "steps", "status", "report", "n", "record",
                  "wall_s", "allocated")
 
-    def __init__(self, *, state, finished, report, wall_s, allocated):
+    def __init__(self, *, state, finished, report, wall_s, allocated, record=None):
         put = object.__setattr__
+        put(self, "record", record)
         put(self, "state", dict(state))
         put(self, "finished", finished)
         put(self, "report", report)
@@ -478,7 +480,8 @@ class Simulation:
                  "terminated", "every", "_state", "_device", "_xp")
 
     def __init__(self, model, args, kwargs, *, until=None, max_steps,
-                 every=None, reorder=None, scalar_type=None, layout=None):
+                 every=None, reorder=None, scalar_type=None, layout=None,
+                 record=False, window=None, memory_budget=None):
         from ._layout import rewrap, split_marks
 
         items = _model_items(model, until)
@@ -543,12 +546,24 @@ class Simulation:
 
         step = plans[0] if len(plans) == 1 else selected
         self.runner = until_done(step, max_steps=max_steps, every=every,
-                                 reorder=reorder, layout=layout,
-                                 **rewrap(final, axes))
+                                 reorder=reorder, record=record, window=window,
+                                 memory_budget=memory_budget, layout=layout, **rewrap(final, axes))
+        if record:
+            self.runner._recorder.owner = self
+            self.runner._recorder.door = "eagle.simulate"
         self.loop = self.runner.loop
         self.n = self.runner.n
         self.active, self.finished = self.runner.active, self.runner.finished
         self.every = self.runner.every
+
+    @property
+    def record(self):
+        """The :class:`eagle.diff.Record` of the last :meth:`run` of a
+        ``record=True`` simulation (``None`` otherwise): pass it to
+        :func:`eagle.diff.reverse`.
+
+        Example: ``sim.run(); grads = eagle.diff.reverse(sim.record, {"x": dJ_dx})``."""
+        return self.runner.record
 
     @property
     def pipeline(self):
@@ -573,7 +588,8 @@ class Simulation:
             self._xp.cuda.Device().synchronize()
         wall = time.perf_counter() - t0
         return SimResult(state=self._state, finished=self.terminated, report=report,
-                         wall_s=wall, allocated=self.names["allocated"])
+                         wall_s=wall, allocated=self.names["allocated"],
+                         record=self.runner.record)
 
     def reset(self) -> None:
         """Clear the finished mask (and the active set): the next :meth:`run`
@@ -599,19 +615,22 @@ def _check_step(selected, names, finishers, compacting, every, reorder) -> None:
 
 def simulation(model, *args, until=None, max_steps: int,
                every: int | None = None, reorder=None, scalar_type=None,
-               layout=None, **kwargs) -> Simulation:
+               layout=None, record: bool = False, window=None,
+               memory_budget: int | None = None, **kwargs) -> Simulation:
     """Bind and build ``model`` once; returns the :class:`Simulation`, whose
     :meth:`~Simulation.run` runs it (again, after :meth:`~Simulation.reset`,
     without rebuilding). ``*args``/``**kwargs`` are the kernel's own, bound
     exactly like a call to it; the rest are :func:`simulate`'s own options."""
     return Simulation(model, args, kwargs, until=until, max_steps=max_steps,
                       every=every, reorder=reorder, scalar_type=scalar_type,
-                      layout=layout)
+                      layout=layout, record=record, window=window,
+                      memory_budget=memory_budget)
 
 
 def simulate(model, *args, until=None, max_steps: int,
              every: int | None = None, reorder=None, scalar_type=None,
-             layout=None, **kwargs) -> SimResult:
+             layout=None, record: bool = False, window=None,
+             memory_budget: int | None = None, **kwargs) -> SimResult:
     """Run ``model`` on every sample until each one finishes (or ``max_steps``
     is reached) and return the :class:`SimResult`.
 
@@ -638,7 +657,15 @@ def simulate(model, *args, until=None, max_steps: int,
     samples of a per-sample plane whose shape reads both ways (``(w, w)``), which
     is otherwise refused; ``eagle.samples_first(x)`` / ``eagle.samples_last(x)``
     say it for one array and win. All keyword-only like every one of eagle's own
-    options -- after the kernel's own arguments."""
+    options -- after the kernel's own arguments.
+
+    ``record=True`` records the run for a reverse pass: the result's
+    ``.record`` goes to :func:`eagle.diff.reverse` (``window`` and
+    ``memory_budget`` are :func:`eagle.until_done`'s, for advanced tuning). Example::
+
+        res = eagle.simulate(model, x=x0, v=v0, max_steps=1000, record=True)
+        grads = eagle.diff.reverse(res.record, {"x": numpy.ones_like(x0)})"""
     return simulation(model, *args, until=until, max_steps=max_steps,
                       every=every, reorder=reorder, scalar_type=scalar_type,
-                      layout=layout, **kwargs).run()
+                      layout=layout, record=record, window=window,
+                      memory_budget=memory_budget, **kwargs).run()

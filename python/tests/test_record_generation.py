@@ -1,7 +1,7 @@
 # Copyright 2026 Alessandro Masat
 # SPDX-License-Identifier: Apache-2.0
 """A Record names one launch: the graph refuses a new recording launch while
-the Record is live, a stale Record is refused by a reverse, detach() keeps a
+the Record is live, a stale Record is refused by a reverse, keep() keeps a
 private copy, and a launch never overlaps a reverse of its Record."""
 
 import threading
@@ -29,17 +29,17 @@ def test_a_live_record_blocks_the_next_recording_launch_until_reversed(graph):
     assert first.generation == 1 and not first.held
     with pytest.raises(RuntimeError, match=(
             r"eagle.Graph.launch: the Record of the previous launch is still live; "
-            r"reverse it, or Record.detach\(\) to keep a private copy")):
+            r"reverse it, or record.keep\(\) to keep a private copy")):
         graph.launch()
     eagle.diff.reverse(first, SEED)
     graph.launch()
     assert graph.record.generation == 2
 
 
-def test_a_stale_record_is_refused_and_a_detached_one_is_kept(graph):
+def test_a_stale_record_is_refused_and_a_kept_one_is_kept(graph):
     graph.launch()
     live = graph.record
-    kept = live.detach()
+    kept = live.keep()
     before = eagle.diff.reverse(kept, SEED)
     graph._nodes[0].payload._planes["x"][...] += 1.0     # the next launch differs
     graph.launch()

@@ -546,6 +546,36 @@ struct eagle_backend_reduce_desc {
  *  store: capturable). Experimental. */
 eagle_backend_status eagle_backend_x_reduce_canonical(struct eagle_backend_reduce_desc* desc);
 
+/** Column operations of a reverse window driver (``x_diff_columns``). */
+#define EAGLE_BACKEND_DIFF_GATHER     0u   /**< dst[r*dst_ld+c] = src[r*src_ld+index[c]] */
+#define EAGLE_BACKEND_DIFF_ACCUMULATE 1u   /**< dst[r*dst_ld+c] += src[r*dst_ld+c] (4: f32, 8: f64) */
+#define EAGLE_BACKEND_DIFF_FILL       2u   /**< dst[c] = value (4: i32, 8: i64) */
+#define EAGLE_BACKEND_DIFF_COPY       3u   /**< dst[0, count*elem_bytes) = src[...], device to device */
+#define EAGLE_BACKEND_DIFF_READ       4u   /**< HOST dst = device src (count*elem_bytes bytes); waits for the stream */
+
+/** One column operation over ``count`` columns of ``rows`` rows of
+ *  sample-last device planes. Element size ``elem_bytes`` (gather: 1, 2, 4
+ *  or 8). */
+struct eagle_backend_diff_desc {
+    uint32_t struct_size;
+    uint32_t op;             /**< EAGLE_BACKEND_DIFF_GATHER / ACCUMULATE / FILL */
+    int32_t device;
+    uint32_t elem_bytes;
+    uint64_t dst;            /**< device address */
+    uint64_t src;            /**< device address (gather, accumulate) */
+    uint64_t index;          /**< int64 device column index (gather) */
+    int64_t dst_ld;          /**< row stride of dst, in elements */
+    int64_t src_ld;          /**< row stride of src, in elements (gather) */
+    int64_t count;
+    int64_t rows;
+    int64_t value;           /**< fill */
+    uint64_t stream;
+};
+
+/** Enqueue one column operation (capturable, except READ, which waits for
+ *  the stream and returns the bytes in host memory). Experimental. */
+eagle_backend_status eagle_backend_x_diff_columns(struct eagle_backend_diff_desc* desc);
+
 eagle_backend_status eagle_backend_x_composer_create(const struct eagle_backend_composer_desc* desc, eagle_backend_composer* out);
 /** CONSUMES ``launcher`` (on OK). ``name`` / ``pre`` may be NULL. */
 eagle_backend_status eagle_backend_x_composer_register_launcher(eagle_backend_composer h, eagle_backend_launcher launcher,

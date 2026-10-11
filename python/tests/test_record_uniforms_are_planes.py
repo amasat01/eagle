@@ -44,7 +44,7 @@ def test_update_refusals(tmp_path):
     g.launch()
     with pytest.raises(RuntimeError, match="the Record of the last launch is still live"):
         g.update(a=1.0)
-    g.record.detach()
+    g.record.keep()
     g.update(a=1.0)
     plain, _ = chain(ps, np.linspace(-1, 1, N), 0.5)
     with pytest.raises(ValueError, match="only a record=True graph holds its parameters in planes"):

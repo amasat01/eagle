@@ -190,6 +190,13 @@ list(REMOVE_DUPLICATES TEST_FILES)
 set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/test_Transpose.cpp
   PROPERTIES COMPILE_DEFINITIONS "EAGLE_CPU_ONLY=1")
 
+# The windowed reverse of a stepped run (window plan, record slot, driver) is
+# CUDA-free: compiled by CXX in BOTH build modes, the test_Transpose.cpp recipe.
+list(APPEND TEST_FILES ${CMAKE_CURRENT_SOURCE_DIR}/test_DiffWindow.cpp)
+list(REMOVE_DUPLICATES TEST_FILES)
+set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/test_DiffWindow.cpp
+  PROPERTIES COMPILE_DEFINITIONS "EAGLE_CPU_ONLY=1")
+
 # The busy guard is header-only and CUDA-free, so it must compile+run in BOTH
 # build modes (no forced define: it never reaches eagle/typedefs.h).
 list(APPEND TEST_FILES ${CMAKE_CURRENT_SOURCE_DIR}/test_Busy.cpp)

@@ -128,12 +128,23 @@ class Tape:
     copies, and the slot->sample map (``None`` when nothing reorders)."""
 
     __slots__ = ("source", "arrays", "copies", "perm")
+    steps = window = None
 
     def __init__(self, source, arrays, copies, perm):
         self.source = source
         self.arrays = arrays
         self.copies = copies
         self.perm = perm
+
+    @property
+    def nbytes(self) -> int:
+        return sum(int(c.nbytes) for c in self.copies)
+
+    def copy(self):
+        dup = lambda a: xp_of(a).array(a, copy=True)
+        return Tape(None, {k: dup(a) for k, a in self.arrays.items()},
+                    [dup(c) for c in self.copies],
+                    None if self.perm is None else dup(self.perm))
 
 
 def _parameter_variant(bound, label, uniforms):
@@ -257,7 +268,7 @@ class Recorder:
                 raise RuntimeError(
                     "eagle.Graph.update: the Record of the last launch is still live and "
                     "its reverse reads these parameters; reverse it, or "
-                    "Record.detach() first")
+                    "record.keep() first")
             for cell, value in targets:
                 cell[...] = value
 
@@ -266,15 +277,15 @@ class Recorder:
             raise ValueError(
                 f"eagle.Graph.{method}: a record=True graph records one run per "
                 f"launch (n=1), got n={n}; call launch() n times, reversing (or "
-                "detaching) each Record")
+                "keeping) each Record")
         with self._lock:
             if self._readers:
                 raise Busy(f"eagle.Graph.{method}: a reverse is reading this graph's "
-                           "Record; wait for it, or Record.detach() a copy first")
+                           "Record; wait for it, or record.keep() a copy first")
             if self._live is not None and not self._live._released:
                 raise RuntimeError(
                     f"eagle.Graph.{method}: the Record of the previous launch is "
-                    "still live; reverse it, or Record.detach() to keep a private copy")
+                    "still live; reverse it, or record.keep() to keep a private copy")
             self._generation += 1      # older Records are stale from here on
 
     def finish(self):
@@ -292,7 +303,7 @@ class Recorder:
                 raise RuntimeError(
                     f"{door}: the forward ran again (generation {record._generation} "
                     f"-> {self._generation}) since this Record was made; reverse the "
-                    "newest graph.record, or detach() a Record to keep it")
+                    "newest graph.record, or keep() a Record to keep it")
             self._readers += 1
 
     def release(self, record, door):
@@ -306,17 +317,28 @@ class Recorder:
 
 
 class Record:
-    """One launch of a ``record=True`` :class:`eagle.Graph`, as its reverse
-    needs it: get it from ``graph.record`` after ``graph.launch()`` and pass
-    it to :func:`eagle.diff.reverse`.
+    """One recorded forward, as its reverse needs it: get it from ``.record``
+    after the forward ran (``graph.launch()`` of a ``record=True``
+    :class:`eagle.Graph`, or a ``record=True`` :func:`eagle.simulate`,
+    :class:`eagle.Simulation` or :func:`eagle.until_done` run) and pass it to
+    :func:`eagle.diff.reverse`.
 
-    A Record points at the graph's own planes and copies, which the next
-    launch overwrites. So the graph refuses a new recording launch while the
-    Record is live (neither reversed nor detached), and a reverse refuses a
-    Record whose launch is no longer the newest. :meth:`detach` makes a
-    private copy that stays valid however often the graph runs again.
-    Immutable: a reverse never writes it, so any number of reverses may read
-    one Record at once."""
+    A Record points at buffers the next recorded forward overwrites. So the
+    forward refuses to record again while the Record is live (neither
+    reversed nor kept), and a reverse refuses a Record whose forward is no
+    longer the newest. :meth:`keep` makes a private copy that stays valid
+    however often the forward runs again. Immutable: a reverse never writes
+    it, so several reverses may read one Record at once.
+
+    Example::
+
+        sim = eagle.simulation(model, x=x0, v=v0, max_steps=1000, record=True)
+        sim.run()
+        rec = sim.record
+        rec.steps          # how many steps each sample took
+        rec.nbytes         # the memory the record holds
+        grads = eagle.diff.reverse(rec, {"x": dJ_dx})
+    """
 
     __slots__ = ("_graph", "_generation", "_tape", "_recorder", "_released",
                  "_readers", "_lock", "__weakref__")
@@ -331,13 +353,19 @@ class Record:
         self._lock = threading.Lock()
 
     @property
+    def forward(self):
+        """What ran the recorded forward: the :class:`eagle.Graph`,
+        :class:`eagle.Simulation` or :class:`eagle.Runner`."""
+        return self._graph
+
+    @property
     def graph(self):
-        """The :class:`eagle.Graph` this Record came from."""
+        """The same object as :attr:`forward`."""
         return self._graph
 
     @property
     def generation(self) -> int:
-        """Which launch of the graph this is (1 for the first)."""
+        """Which recorded run of the forward this is (1 for the first)."""
         return self._generation
 
     @property
@@ -345,23 +373,41 @@ class Record:
         """Whether a reverse is reading this Record right now."""
         return self._readers > 0
 
-    def detach(self) -> Record:
-        """A private copy of everything a reverse reads (every plane of the
-        graph and the saved copies). It costs that memory and one copy; the
-        graph may launch again right away, and the copy stays valid for good."""
+    @property
+    def steps(self):
+        """The steps each sample took, in sample order (a host int64 array),
+        for a recorded run; ``None`` for a graph."""
+        steps = self._tape.steps
+        return None if steps is None else steps.copy()
+
+    @property
+    def window(self):
+        """The reverse window W of a recorded run (the state is kept every W
+        steps); ``None`` for a graph."""
+        return self._tape.window
+
+    @property
+    def nbytes(self) -> int:
+        """The bytes this Record holds of its own: the saved checkpoints of a
+        run, or the saved copies of a graph."""
+        return self._tape.nbytes
+
+    def keep(self) -> Record:
+        """A private copy of everything a reverse reads, which stays valid
+        however often the forward runs again; it costs that memory and one
+        copy. The forward may record again right away.
+
+        Example: ``kept = sim.record.keep(); sim.run(); eagle.diff.reverse(kept, seeds)``."""
         if self._recorder is not None:
-            self._recorder.hold(self, "eagle.diff.Record.detach")
+            self._recorder.hold(self, "eagle.diff.Record.keep")
         try:
-            t = self._tape
-            dup = lambda a: xp_of(a).array(a, copy=True)
-            tape = Tape(None, {k: dup(a) for k, a in t.arrays.items()},
-                        [dup(c) for c in t.copies],
-                        None if t.perm is None else dup(t.perm))
+            tape = self._tape.copy()
             copy = Record(self._graph, self._generation, tape, None)
-            tape.source = copy
+            if hasattr(tape, "source"):
+                tape.source = copy
         finally:
             if self._recorder is not None:
-                self._recorder.release(self, "eagle.diff.Record.detach")
+                self._recorder.release(self, "eagle.diff.Record.keep")
         return copy
 
     @contextmanager
@@ -380,5 +426,5 @@ class Record:
                 self._recorder.release(self, door)
 
     def __repr__(self) -> str:
-        kind = "live" if self._recorder is not None else "detached"
+        kind = "live" if self._recorder is not None else "kept"
         return f"<eagle.diff.Record generation {self._generation}, {kind}>"

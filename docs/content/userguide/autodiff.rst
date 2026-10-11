@@ -105,19 +105,19 @@ mixing up launches:
 
 - A ``record=True`` graph records one run per launch: ``launch()`` (not
   ``launch(n)``, not ``enqueue``).
-- While a Record is live (neither reversed nor detached), the next recording
+- While a Record is live (neither reversed nor kept), the next recording
   launch is refused: reverse it first, or keep a copy with
-  ``record.detach()``.
+  ``record.keep()``.
 - Reversing a Record whose launch is no longer the newest is refused: the
   message says which :term:`generation` you have and which is current.
-- ``record.detach()`` copies everything the reverse reads (a cost in memory
+- ``record.keep()`` copies everything the reverse reads (a cost in memory
   and one copy) and stays valid however often the graph runs again.
 - A launch while a reverse is reading the Record raises :class:`eagle.Busy`.
 
 You will never get a gradient computed from a mix of two launches: either the
 reverse is refused, or it is the gradient of the launch you recorded. Keep the
 graph's input planes unchanged between the launch and its reverse (or
-``detach()`` first); eagle reverses the values the planes hold.
+``keep()`` first); eagle reverses the values the planes hold.
 
 Built once, run many times
 --------------------------
@@ -148,7 +148,7 @@ A recorded graph keeps each parameter (a kernel ``uniform``) in a one-cell
 plane of its own, which the forward kernels and their vjps both read, so
 ``update`` is a copy into that cell: neither the forward nor the reverse is
 rebuilt or recaptured. Like a recording launch, ``update`` is refused until the
-last Record is reversed or detached, so a reverse always sees the parameters
+last Record is reversed or kept, so a reverse always sees the parameters
 its launch used. (The plans you bound keep their own values: a recorded graph
 runs its own copies of them, bound to the cells.)
 

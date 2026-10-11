@@ -387,7 +387,7 @@ def test_state_plane_named_like_a_result_field():
 
     _refused("the state plane 'steps' would shadow the result's own field of that "
              "name (the result's fields: state, finished, done, steps, status, report, "
-             "n, wall_s, allocated); rename the plane in the kernel",
+             "n, wall_s, allocated, record); rename the plane in the kernel",
              sim_counted, steps=np.zeros(4), dt=0.5, max_steps=10)
 
 

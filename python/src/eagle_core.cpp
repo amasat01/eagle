@@ -83,6 +83,7 @@
 #include <nanobind/stl/vector.h>  // std::vector<uintptr_t> <-> list[int] (capture_snapshot_nodes)
 #include <nanobind/stl/pair.h>  // (address, element bytes) plane pairs (reorder_device)
 #include <nanobind/stl/tuple.h>  // graph-view rows (nodes, edges, plane refs)
+#include <nanobind/stl/function.h>  // the recording forward's checkpoint callback
 
 // The heterogeneous execution contract's C++ half.
 // `eagle.plan` (Python) decides a Plan; these are the structures it drives, plus
@@ -90,7 +91,10 @@
 // self-check sizes). All of it is host code: this module is compiled without a
 // device runtime (EAGLE_CPU_ONLY) and reaches the GPU only through the backend
 // plugin (src/seam/).
+#include "eagle/diff/Record.h"
+#include "eagle/diff/Reverse.h"
 #include "eagle/diff/Transpose.h"
+#include "eagle/diff/Window.h"
 #include "eagle/exec/HostSchedule.h"
 #include "eagle/exec/HostTeam.h"
 #include "eagle/exec/Partition.h"
@@ -103,6 +107,7 @@
 #include "plugin/roles.h"
 
 #include "interop_binding.h"  // the generic DLPack layer (eagle.interop)
+#include "seam/DeviceKernel.h"
 #include "seam/Groups.h"
 #include "seam/Loader.h"
 #include "seam/Status.h"
@@ -1644,6 +1649,266 @@ NB_MODULE(_core, m)
         nb::arg("dst"), nb::arg("src"), nb::arg("n"), nb::arg("dtype"),
         "dst = ((src[0] + src[1]) + ...) elementwise over n host elements, in exactly this order: "
         "the same bits for every OpenMP thread count. dtype: 0 f32, 1 f64 (the reduce codes).");
+
+    // -- The windowed reverse of a stepped run (eagle/diff/{Window,Record,Reverse}.h).
+    m.def("diff_default_window", &eagle::diff::defaultWindow, nb::arg("steps"),
+        "The default reverse window for runs of up to `steps` steps: clamp(ceil(sqrt(steps)), 16, 1024).");
+    nb::class_<eagle::diff::RecordSlot>(m, "RecordSlot")
+        .def(nb::init<>())
+        .def("begin", [](eagle::diff::RecordSlot& r) { return static_cast<int>(r.begin()); },
+             "Start a recording: 0 ok (generation moves on), 1 a reverse holds the last record, "
+             "2 the last record is still live.")
+        .def("abandon", &eagle::diff::RecordSlot::abandon)
+        .def("hold", &eagle::diff::RecordSlot::hold, nb::arg("generation"))
+        .def("release", &eagle::diff::RecordSlot::release, nb::arg("generation"), nb::arg("consumed"))
+        .def_prop_ro("generation", &eagle::diff::RecordSlot::generation)
+        .def_prop_ro("live", &eagle::diff::RecordSlot::live)
+        .def_prop_ro("held", &eagle::diff::RecordSlot::held);
+    m.def("diff_stop_order",
+        [](std::uintptr_t steps, std::int64_t n) {
+            return eagle::diff::stopOrder(reinterpret_cast<const std::int64_t*>(steps), n);
+        },
+        nb::arg("steps"), nb::arg("n"),
+        "The reverse's sample order: samples sorted by stop step, longest first (stable). "
+        "`steps` is the address of n int64 host values.");
+    m.def("diff_live_counts",
+        [](std::uintptr_t steps, std::int64_t n) {
+            return eagle::diff::liveCounts(reinterpret_cast<const std::int64_t*>(steps), n);
+        },
+        nb::arg("steps"), nb::arg("n"),
+        "live[j] = samples whose stop step exceeds j, for j below the longest stop.");
+    m.def("diff_chunk_samples", &eagle::diff::chunkSamples, nb::arg("budget_bytes"),
+        nb::arg("per_sample_bytes"), nb::arg("n"), nb::arg("leaf"),
+        "Samples per reverse pass under a byte budget: n when all fit, else the largest "
+        "leaf * 2^q that fits, 0 when not even one leaf block fits.");
+    m.def("diff_combine_chunks",
+        [](std::vector<double> partials, std::uint32_t dtype) -> double {
+            if (partials.empty()) throw std::invalid_argument("diff_combine_chunks: no partials");
+            if (dtype == EAGLE_BACKEND_REDUCE_F32) {
+                std::vector<float> f(partials.begin(), partials.end());
+                return eagle::reduce::canonical::combine<float, aether::SumOp<float>>(f);
+            }
+            return eagle::reduce::canonical::combine<double, aether::SumOp<double>>(partials);
+        },
+        nb::arg("partials"), nb::arg("dtype"),
+        "The canonical pairwise combine of per-pass sums (in pass order): bitwise the "
+        "unchunked canonical sum when every pass but the last holds leaf * 2^q samples.");
+    m.def("diff_record_host",
+        [](std::uintptr_t entry, const std::vector<std::uintptr_t>& params, std::int64_t n,
+           std::int64_t maxSteps, std::int64_t window, std::int64_t maxK, std::uintptr_t word,
+           std::uintptr_t finished, const std::function<void(std::int64_t)>& checkpoint,
+           const std::optional<std::function<void(std::int64_t)>>& after) {
+            const std::vector<void*> p = asParams(params);
+            const auto fn = reinterpret_cast<eagle::exec::HostEntryV2>(entry);
+            const auto* count = reinterpret_cast<const std::int32_t*>(finished);
+            auto* steps = reinterpret_cast<std::int64_t*>(word);
+            nb::gil_scoped_release unlocked;
+            return eagle::diff::recordForward(
+                maxSteps, window, maxK, [&] { return *count >= n; },
+                [&](std::int64_t k) { nb::gil_scoped_acquire locked; checkpoint(k); },
+                [&](std::int64_t j, std::int64_t k) {
+                    if (steps != nullptr) *steps = k;
+                    HostTeam::run(fn, p.data(), Partition::whole(n));
+                    if (after) { nb::gil_scoped_acquire locked; (*after)(j + k); }
+                });
+        },
+        nb::arg("entry"), nb::arg("params"), nb::arg("n"), nb::arg("max_steps"),
+        nb::arg("window"), nb::arg("max_k"), nb::arg("word"), nb::arg("finished"),
+        nb::arg("checkpoint"), nb::arg("after").none() = nb::none(),
+        "The recording forward on the host: launches of the host entry that never cross a "
+        "window boundary (k <= max_k steps, written to the int64 `word` first unless it is 0) "
+        "until the int32 finished count at `finished` reaches n or max_steps, calling "
+        "checkpoint(k) before the first launch of window k and after(steps done) after every "
+        "launch when given (a compaction). Returns the steps run.");
+    using Gather = std::tuple<std::uintptr_t, std::vector<std::uintptr_t>, std::int64_t, std::int64_t>;
+    using Accum = std::tuple<std::uintptr_t, std::uintptr_t, std::int64_t, std::uint32_t>;
+    m.def("diff_reverse_host",
+        [](std::int64_t n, std::int64_t srcN, std::int64_t window, const std::vector<std::int64_t>& live,
+           const std::vector<std::uintptr_t>& orders, const std::vector<Gather>& gathers,
+           std::uintptr_t recomputeEntry, const std::vector<std::uintptr_t>& recomputeParams,
+           std::uintptr_t recomputeWord, std::uintptr_t vjpEntry, const std::vector<std::vector<std::uintptr_t>>& vjpParams,
+           const std::vector<Accum>& accums, std::uintptr_t stepPlane, std::int64_t stepBytes) {
+            if (static_cast<std::int64_t>(vjpParams.size()) != 2 * window)
+                throw std::invalid_argument("diff_reverse_host: vjp_params holds 2 lists per tape row");
+            const auto recompute = reinterpret_cast<eagle::exec::HostEntryV2>(recomputeEntry);
+            const auto vjp = reinterpret_cast<eagle::exec::HostEntryV2>(vjpEntry);
+            auto* word = reinterpret_cast<std::int64_t*>(recomputeWord);
+            const std::vector<void*> rp = asParams(recomputeParams);
+            std::vector<std::vector<void*>> vp;
+            for (const auto& v : vjpParams) vp.push_back(asParams(v));
+            const auto prefix = [n](std::int64_t count) { return Partition{ 0, count, n }; };
+            const auto at = [&](std::int64_t j) { return live[static_cast<std::size_t>(j)]; };
+            nb::gil_scoped_release unlocked;
+            eagle::diff::reverseWindows(
+                window, live,
+                [&](std::int64_t k, std::int64_t count) {
+                    for (const auto& [dst, sources, rows, bytes] : gathers)
+                        eagle::diff::gatherColumns(reinterpret_cast<void*>(dst), n,
+                            reinterpret_cast<const void*>(sources.at(static_cast<std::size_t>(k))), srcN,
+                            reinterpret_cast<const std::int64_t*>(orders.at(static_cast<std::size_t>(k))),
+                            count, rows, static_cast<std::size_t>(bytes));
+                },
+                [&](std::int64_t c, std::int64_t len) {
+                    if (word != nullptr) {   // one fused launch; each sample stops itself
+                        *word = len;
+                        HostTeam::run(recompute, rp.data(), prefix(at(c)));
+                        return;
+                    }
+                    for (std::int64_t j = c; j < c + len; ++j) HostTeam::run(recompute, rp.data(), prefix(at(j)));
+                },
+                [&](std::int64_t j, std::int64_t count) {
+                    if (stepBytes == 8)
+                        eagle::diff::fillPrefix(reinterpret_cast<std::int64_t*>(stepPlane), j, count);
+                    else if (stepBytes == 4)
+                        eagle::diff::fillPrefix(reinterpret_cast<std::int32_t*>(stepPlane),
+                                                static_cast<std::int32_t>(j), count);
+                    HostTeam::run(vjp, vp[static_cast<std::size_t>(2 * (j % window) + (j & 1))].data(), prefix(count));
+                    for (const auto& [acc, g, rows, dtype] : accums)
+                        for (std::int64_t r = 0; r < rows; ++r) {
+                            if (dtype == EAGLE_BACKEND_REDUCE_F64)
+                                eagle::diff::accumulatePrefix(reinterpret_cast<double*>(acc) + r * n,
+                                                              reinterpret_cast<const double*>(g) + r * n, count);
+                            else
+                                eagle::diff::accumulatePrefix(reinterpret_cast<float*>(acc) + r * n,
+                                                              reinterpret_cast<const float*>(g) + r * n, count);
+                        }
+                });
+        },
+        nb::arg("n"), nb::arg("src_n"), nb::arg("window"), nb::arg("live"), nb::arg("orders"),
+        nb::arg("gathers"), nb::arg("recompute_entry"), nb::arg("recompute_params"),
+        nb::arg("recompute_word"), nb::arg("vjp_entry"), nb::arg("vjp_params"), nb::arg("accums"),
+        nb::arg("step_plane"), nb::arg("step_bytes"),
+        "The windowed reverse of one pass of a recorded host run, all in C++. Planes are n "
+        "samples wide, checkpoints src_n. gathers: (dst, checkpoint address per window, rows, "
+        "element bytes), window k's columns read through orders[k] (int64 checkpoint column "
+        "per reverse slot, the window's sample order composed with its checkpoint's slot order). The recompute entry replays a window as one fused launch (its int64 steps word "
+        "at recompute_word) or step by step (recompute_word 0), over the live prefix; "
+        "vjp_params[2*row + (j & 1)] binds step j's vjp; step_plane (0: none) receives j "
+        "before it; accums: (acc, g, rows, dtype 0 f32 / 1 f64) add each step's share.");
+
+    m.def("diff_record_device",
+        [](std::uintptr_t entry, const std::vector<std::uintptr_t>& params, std::int64_t n,
+           std::int64_t maxSteps, std::int64_t window, std::int64_t maxK, std::uintptr_t word,
+           std::uintptr_t finished, std::uint32_t block,
+           const std::vector<std::pair<std::uintptr_t, std::int64_t>>& state,
+           const std::function<std::vector<std::uintptr_t>(std::int64_t)>& checkpoint,
+           const std::optional<std::function<void(std::int64_t)>>& after, std::uintptr_t stream,
+           std::int32_t device) {
+            const std::vector<void*> p = asParams(params);
+            const auto op = [&](std::uint32_t code, std::uint64_t dst, std::uint64_t src, std::int64_t count,
+                                std::uint32_t bytes, std::int64_t value) {
+                auto d = makeDesc<eagle_backend_diff_desc>(device);
+                d.op = code;
+                d.dst = dst;
+                d.src = src;
+                d.dst_ld = count;
+                d.count = count;
+                d.rows = 1;
+                d.elem_bytes = bytes;
+                d.value = value;
+                d.stream = stream;
+                ck(EBX(eagle_backend_x_diff_columns)(&d));
+            };
+            std::int32_t done = 0;
+            std::int64_t ran = 0;
+            const eagle::exec::Partition whole{ 0, n, n };
+            return eagle::diff::recordForward(
+                maxSteps, window, maxK,
+                [&] {   // read back once per window: a finished sample's launch is a no-op
+                    if (ran % window != 0) return false;
+                    op(EAGLE_BACKEND_DIFF_READ, reinterpret_cast<std::uint64_t>(&done), finished, 1, 4, 0);
+                    return done >= n;
+                },
+                [&](std::int64_t k) {
+                    const std::vector<std::uintptr_t> dst = checkpoint(k);
+                    if (dst.size() != state.size())
+                        throw std::invalid_argument("diff_record_device: checkpoint(k) returns one address per state plane");
+                    for (std::size_t i = 0; i < state.size(); ++i)
+                        op(EAGLE_BACKEND_DIFF_COPY, dst[i], state[i].first, state[i].second, 1, 0);
+                },
+                [&](std::int64_t j, std::int64_t k) {
+                    if (word != 0) op(EAGLE_BACKEND_DIFF_FILL, word, 0, 1, 8, k);
+                    eagle_seam::DeviceKernel::run(entry, p, whole, stream, block);
+                    ran = j + k;
+                    if (after) (*after)(ran);
+                });
+        },
+        nb::arg("entry"), nb::arg("params"), nb::arg("n"), nb::arg("max_steps"), nb::arg("window"),
+        nb::arg("max_k"), nb::arg("word"), nb::arg("finished"), nb::arg("block"), nb::arg("state"),
+        nb::arg("checkpoint"), nb::arg("after").none() = nb::none(), nb::arg("stream") = 0,
+        nb::arg("device") = -1,
+        "diff_record_host on the device: launches through the backend's launcher, the steps word "
+        "written on the stream, checkpoints copied on the stream into the addresses checkpoint(k) "
+        "returns (state: (device address, bytes) per plane), the int32 finished count read back "
+        "through `eagle_backend_x_diff_columns`. Returns the steps run.");
+    m.def("diff_reverse_device",
+        [](std::int64_t n, std::int64_t srcN, std::int64_t window, const std::vector<std::int64_t>& live,
+           const std::vector<std::uintptr_t>& orders, const std::vector<Gather>& gathers,
+           std::uintptr_t recomputeEntry, const std::vector<std::uintptr_t>& recomputeParams,
+           std::uintptr_t recomputeWord, std::uint32_t recomputeBlock, std::uintptr_t vjpEntry,
+           const std::vector<std::vector<std::uintptr_t>>& vjpParams, std::uint32_t vjpBlock,
+           const std::vector<Accum>& accums, std::uintptr_t stepPlane, std::int64_t stepBytes,
+           std::uintptr_t stream, std::int32_t device) {
+            if (static_cast<std::int64_t>(vjpParams.size()) != 2 * window)
+                throw std::invalid_argument("diff_reverse_device: vjp_params holds 2 lists per tape row");
+            const std::vector<void*> rp = asParams(recomputeParams);
+            std::vector<std::vector<void*>> vp;
+            for (const auto& v : vjpParams) vp.push_back(asParams(v));
+            const auto columns = [&](std::uint32_t op, std::uint64_t dst, std::uint64_t src, std::int64_t dstLd,
+                                     std::int64_t srcLd, std::int64_t count, std::int64_t rows,
+                                     std::uint32_t bytes, std::int64_t value, std::uint64_t index) {
+                auto d = makeDesc<eagle_backend_diff_desc>(device);
+                d.op = op;
+                d.dst = dst;
+                d.src = src;
+                d.index = index;
+                d.dst_ld = dstLd;
+                d.src_ld = srcLd;
+                d.count = count;
+                d.rows = rows;
+                d.elem_bytes = bytes;
+                d.value = value;
+                d.stream = stream;
+                ck(EBX(eagle_backend_x_diff_columns)(&d));
+            };
+            const auto prefix = [n](std::int64_t count) { return Partition{ 0, count, n }; };
+            const auto at = [&](std::int64_t j) { return live[static_cast<std::size_t>(j)]; };
+            eagle::diff::reverseWindows(
+                window, live,
+                [&](std::int64_t k, std::int64_t count) {
+                    for (const auto& [dst, sources, rows, bytes] : gathers)
+                        columns(EAGLE_BACKEND_DIFF_GATHER, dst, sources.at(static_cast<std::size_t>(k)), n, srcN,
+                                count, rows, static_cast<std::uint32_t>(bytes), 0,
+                                orders.at(static_cast<std::size_t>(k)));
+                },
+                [&](std::int64_t c, std::int64_t len) {
+                    if (recomputeWord != 0) {   // one fused launch; each sample stops itself
+                        columns(EAGLE_BACKEND_DIFF_FILL, recomputeWord, 0, 1, 0, 1, 1, 8, len, 0);
+                        eagle_seam::DeviceKernel::run(recomputeEntry, rp, prefix(at(c)), stream, recomputeBlock);
+                        return;
+                    }
+                    for (std::int64_t j = c; j < c + len; ++j)
+                        eagle_seam::DeviceKernel::run(recomputeEntry, rp, prefix(at(j)), stream, recomputeBlock);
+                },
+                [&](std::int64_t j, std::int64_t count) {
+                    if (stepPlane != 0)
+                        columns(EAGLE_BACKEND_DIFF_FILL, stepPlane, 0, n, 0, count, 1,
+                                static_cast<std::uint32_t>(stepBytes), j, 0);
+                    eagle_seam::DeviceKernel::run(
+                        vjpEntry, vp[static_cast<std::size_t>(2 * (j % window) + (j & 1))], prefix(count), stream, vjpBlock);
+                    for (const auto& [acc, g, rows, dtype] : accums)
+                        columns(EAGLE_BACKEND_DIFF_ACCUMULATE, acc, g, n, n, count, rows,
+                                dtype == EAGLE_BACKEND_REDUCE_F64 ? 8u : 4u, 0, 0);
+                });
+        },
+        nb::arg("n"), nb::arg("src_n"), nb::arg("window"), nb::arg("live"), nb::arg("orders"),
+        nb::arg("gathers"), nb::arg("recompute_entry"), nb::arg("recompute_params"),
+        nb::arg("recompute_word"), nb::arg("recompute_block"), nb::arg("vjp_entry"),
+        nb::arg("vjp_params"), nb::arg("vjp_block"), nb::arg("accums"), nb::arg("step_plane"),
+        nb::arg("step_bytes"), nb::arg("stream") = 0, nb::arg("device") = -1,
+        "diff_reverse_host on the device: the same window driver, every operation enqueued on "
+        "`stream` (launches through the backend's launcher, column ops through "
+        "`eagle_backend_x_diff_columns`); `orders` are device int64 arrays. Enqueue only.");
 
     nb::class_<eagle::util::BusyGuard>(m, "BusyGuard")
         .def(nb::init<std::string>(), nb::arg("owner"))

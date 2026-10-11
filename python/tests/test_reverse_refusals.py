@@ -71,7 +71,7 @@ def test_the_graph_must_be_recorded(tmp_path):
     with pytest.raises(ValueError, match=r"build it with g.build\(record=True\)"):
         eagle.diff.Reverse(g.launch())
     rec = _chain(tmp_path).record
-    with pytest.raises(TypeError, match=r"the Record goes to the call: rev\(g.record, seeds\)"):
+    with pytest.raises(TypeError, match=r"the Record goes to the call: rev\(sim.record, seeds\)"):
         eagle.diff.Reverse(rec)
 
 

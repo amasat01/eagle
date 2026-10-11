@@ -478,10 +478,11 @@ class Runner:
                  "_fast_util_on", "_fast_exact", "_fast_views",
                  "_fast_counts", "_fast_pick", "_fast_wall", "_fast_runs", "_fast_last", "_fast_probe",
                  "_fast_prior", "_fast_ev", "_fast_prep",
-                 "_fast_ratio")
+                 "_fast_ratio", "_recorder")
 
     @_layout.door
-    def __init__(self, plan, *, max_steps, every=None, reorder=None, **planes):
+    def __init__(self, plan, *, max_steps, every=None, reorder=None, record=False,
+                 window=None, memory_budget=None, **planes):
         # Internal only (never a bound plane name, popped before the
         # plane-binding machinery below ever sees it): forces
         # :func:`_fast_mode_for`'s decision for the card's explicit-arm row
@@ -535,7 +536,7 @@ class Runner:
         xp = _array_module(device)
         for i in finishers:
             _require_counter_slot(specs[i], names[i])
-        for reserved in _reserved_names():
+        for reserved in _reserved_names(record=record):
             if reserved in planes:
                 raise ValueError(
                     f"eagle.until_done: {reserved!r} is allocated and bound by the "
@@ -566,6 +567,11 @@ class Runner:
                         "a several-plan step takes one step per launch")
             k = 1
         auto = k == FINISH_AUTO
+        if record:
+            _refuse_record(len(plans))
+        elif window is not None or memory_budget is not None:
+            raise ValueError("eagle.until_done: window= and memory_budget= set how a "
+                             "record=True run is reversed; pass record=True, or drop them")
         if auto:
             if every is not None:
                 raise ValueError(
@@ -604,6 +610,14 @@ class Runner:
                          and hasattr(planes.get(nm), "shape")]
                 active.own(*owned)
 
+        extras = {}
+        if record:      # the recorded run's own per-sample planes move with a reorder
+            from .diff._run import record_planes
+
+            extras = record_planes(plans[0], max_steps, window, device, xp, n, planes)
+            if active is not None and active.theta is not None:
+                active.own(*(v for nm, v in extras.items() if nm != "tape" and v.shape))
+                active.indirect(extras["tape"][0])
         bound = []
         for plan_i, spec in zip_strict(plans, specs):
             if len(plans) == 1:
@@ -664,6 +678,12 @@ class Runner:
             self._bump = _bump_kernel()
             self._bump(xp.zeros(1, dtype=xp.uint32), size=1)  # compile before capture
 
+        self._recorder = None
+        if record:
+            from .diff._run import RunRecorder
+
+            self._recorder = RunRecorder(self, plans[0], "eagle.until_done", window,
+                                         memory_budget, extras, self)
         launches = tuple(b.launch for b in bound)
 
         def launch():
@@ -1176,6 +1196,8 @@ class Runner:
 
         A fast mode (:meth:`_build_fast`) skips all of the above: one
         launch IS the run, so :meth:`_run_fast` handles it entirely."""
+        if self._recorder is not None:
+            return self._recorder.run()
         if self._fast_mode is not None:
             return self._run_fast()
         xp = self._xp
@@ -1235,6 +1257,15 @@ class Runner:
             reorders=reorders, build_s=self._build_s, launches_by_k=by_k,
             exact_steps=exact, mode="band")
 
+    @property
+    def record(self):
+        """The :class:`eagle.diff.Record` of the last run of a ``record=True``
+        runner (``None`` before the first run, or without ``record=True``):
+        pass it to :func:`eagle.diff.reverse`.
+
+        Example: ``runner.run(); grads = eagle.diff.reverse(runner.record, {"x": dJ_dx})``."""
+        return None if self._recorder is None else self._recorder.live
+
     def _reorders(self) -> bool:
         return self.active is not None and self.active.theta is not None
 
@@ -1253,6 +1284,15 @@ class Runner:
             self.finished.fill(0)
         if self.active is not None:
             self.active.reset()
+
+
+def _refuse_record(nplans: int) -> None:
+    """The run shapes a ``record=True`` run does not take yet, refused by name."""
+    from .diff._run import _not_yet
+
+    door = "eagle.until_done"
+    if nplans > 1:
+        raise _not_yet(door, "for a step of several plans")
 
 
 def _cadence(name: str, every, k: int) -> int:
@@ -1274,6 +1314,7 @@ def _cadence(name: str, every, k: int) -> int:
 
 
 def until_done(plan, *, max_steps: int, every: int | None = None, reorder=None,
+               record: bool = False, window=None, memory_budget: int | None = None,
                **planes) -> Runner:
     """Bind ``plan`` and build the loop that runs it until every sample is
     done; returns the :class:`Runner` (``.run()`` runs it).
@@ -1297,12 +1338,28 @@ def until_done(plan, *, max_steps: int, every: int | None = None, reorder=None,
     An automatic artifact (``steps="auto"``) runs the policy loop instead
     (see the module docstring): the cap is exact, ``every=`` is refused,
     reorder only with ``reorder=theta``, and the runner owns the
-    :data:`FUSED_STEPS_PLANE` word."""
-    return Runner(plan, max_steps=max_steps, every=every, reorder=reorder, **planes)
+    :data:`FUSED_STEPS_PLANE` word.
+
+    ``record=True`` records each run for a reverse pass: :attr:`Runner.record`
+    after :meth:`Runner.run` goes to :func:`eagle.diff.reverse`. The run
+    takes one step per launch and keeps the state every ``window`` steps
+    (``None``: clamp(ceil(sqrt(max_steps)), 16, 1024); ``"full"``: every
+    step, one window). ``memory_budget`` (bytes; ``None``: half the free
+    device memory, or of the available host RAM) bounds what a reverse holds:
+    over it, the reverse runs the batch in passes, with the same bits
+    (``grads.report.chunks`` counts the passes). Example::
+
+        runner = eagle.until_done(plan, max_steps=1000, record=True, x=x, v=v)
+        runner.run()
+        grads = eagle.diff.reverse(runner.record, {"x": dJ_dx})"""
+    return Runner(plan, max_steps=max_steps, every=every, reorder=reorder,
+                  record=record, window=window, memory_budget=memory_budget, **planes)
 
 
 def run_until_done(plan, *, max_steps: int, every: int | None = None, reorder=None,
+                   record: bool = False, window=None, memory_budget: int | None = None,
                    **planes) -> RunReport:
     """:func:`until_done` then :meth:`Runner.run`: the one-call form."""
     return until_done(plan, max_steps=max_steps, every=every, reorder=reorder,
+                      record=record, window=window, memory_budget=memory_budget,
                       **planes).run()

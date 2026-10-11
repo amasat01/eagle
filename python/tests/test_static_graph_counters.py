@@ -46,7 +46,7 @@ hawk_artifact = pytest.importorskip("hawk.artifact")
 DEVICE_ARCH = hawk_artifact.arch()
 
 _ALL_ZERO = {"captures": 0, "instantiations": 0, "binds": 0, "rebinds": 0,
-             "graph_builds": 0, "reverses": 0}
+             "graph_builds": 0, "reverses": 0, "records": 0}
 
 
 @hawk_trace.kernel
@@ -278,3 +278,19 @@ def test_a_second_build_on_a_new_pipe_is_plus_one_plus_one_again():
 )
 def test_the_recapture_without_reinstantiate_row_has_no_seam():
     pass
+
+
+def test_a_recorded_run_moves_records_by_exactly_one():
+    """A record=True run is one recording; its reverse is one reverse."""
+    import eagle.diff
+    from _run_reverse_fixtures import inputs, rr_osc, simulation
+
+    sim = simulation(rr_osc, *inputs(np))
+    before = _counters.snapshot()
+    sim.run()
+    mid = _counters.snapshot()
+    eagle.diff.reverse(sim.record, {"x": np.ones(len(sim.record.steps))})
+    after = _counters.snapshot()
+    assert mid["records"] - before["records"] == 1
+    assert mid["reverses"] == before["reverses"]
+    assert after["reverses"] - mid["reverses"] == 1 and after["records"] == mid["records"]

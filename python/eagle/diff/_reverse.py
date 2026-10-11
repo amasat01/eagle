@@ -56,12 +56,14 @@ def broadcast_adjoint(cotangent, n: int, *, out=None):
 
 class Report(NamedTuple):
     """How a :class:`Gradients` was made: the ``generation`` of the recorded
-    launch, and per returned plane whether it is ``bitwise`` reproducible
+    launch, per returned plane whether it is ``bitwise`` reproducible
     (``False`` only for a plane fed by a cross-sample scatter-add, whose
-    summing order varies run to run)."""
+    summing order varies run to run), and in how many passes (``chunks``)
+    the reverse ran the batch to stay within ``memory_budget``."""
 
     generation: int
     bitwise: dict
+    chunks: int = 1
 
 
 class Gradients(Mapping):
@@ -222,25 +224,53 @@ def _name_tables(names, labels, keys):
 
 
 class Reverse:
-    """The reverse pass of a recorded graph, built once and called per
-    Record: ``rev = eagle.diff.Reverse(g)``, then ``grads = rev(g.record,
-    seeds)`` after each ``g.launch()``. On the GPU it is captured once and
-    replayed.
+    """The reverse pass of a recorded forward, built once and called per
+    Record: ``rev = eagle.diff.Reverse(forward)``, then ``grads =
+    rev(forward.record, seeds)`` after each recorded forward. On the GPU a
+    graph's reverse is captured once and replayed.
 
-    ``graph`` is a built ``record=True`` :class:`eagle.Graph`. ``vjps`` maps a
-    node name to the plan of its vjp (``hawk.diff.vjp`` of its kernel): needed
-    for a plan not made by :func:`eagle.plan.auto` (eagle derives the vjp of
-    an auto plan by itself), and overriding the derived one otherwise.
-    ``strict=True`` refuses a gradient that is not bit-reproducible (one fed
-    by a cross-sample scatter-add) instead of reporting it."""
+    ``forward`` is what ran the forward with ``record=True``: a built
+    :class:`eagle.Graph`, an :class:`eagle.Simulation` or an
+    :class:`eagle.Runner`. ``vjps`` (graphs only) maps a node name to the
+    plan of its vjp (``hawk.diff.vjp`` of its kernel): needed for a plan not
+    made by :func:`eagle.plan.auto` (eagle derives the vjp of an auto plan by
+    itself), and overriding the derived one otherwise. ``strict=True``
+    refuses a gradient that is not bit-reproducible (one fed by a
+    cross-sample scatter-add) instead of reporting it.
 
-    def __init__(self, graph, *, vjps=None, strict=False):
+    Example::
+
+        sim = eagle.simulation(model, x=x0, v=v0, max_steps=1000, record=True)
+        rev = eagle.diff.Reverse(sim)
+        for _ in range(iterations):
+            sim.reset(); sim.run()
+            grads = rev(sim.record, {"x": dJ_dx})
+    """
+
+    def __init__(self, forward, *, vjps=None, strict=False):
         door = "eagle.diff.Reverse"
-        if isinstance(graph, Record):
-            raise TypeError(f"{door}: takes the Graph (Reverse(g)); the Record goes "
-                            "to the call: rev(g.record, seeds)")
-        if not isinstance(graph, Graph):
-            raise TypeError(f"{door}: expected an eagle.Graph, got {type(graph).__name__}")
+        if isinstance(forward, Record):
+            raise TypeError(f"{door}: takes what ran the forward (Reverse(sim) or "
+                            "Reverse(g)); the Record goes to the call: rev(sim.record, seeds)")
+        from ._run import RunReverse, reverse_of
+
+        self._run = None
+        if not isinstance(forward, Graph):
+            recorder = reverse_of(forward)
+            if recorder is None:
+                if hasattr(getattr(forward, "runner", forward), "_max_steps"):
+                    raise ValueError(f"{door}: the run was not built with record=True; "
+                                     "pass record=True to the forward, then run it")
+                raise TypeError(f"{door}: expected an eagle.Graph, Simulation or Runner, "
+                                f"got {type(forward).__name__}")
+            if vjps:
+                raise ValueError(f"{door}: vjps= for a recorded run is not yet supported; "
+                                 "eagle derives the vjp of the step from its kernel")
+            self._graph = recorder.owner
+            self._run = RunReverse(recorder, door)
+            self._strict = bool(strict)
+            return
+        graph = forward
         if graph._is_reverse:
             raise ValueError(f"{door}: this graph is itself a reverse pass; reversing "
                              "a reverse (second order) is not supported")
@@ -329,9 +359,11 @@ class Reverse:
         adj_seed, optimal control the terminal costate). ``wrt`` names the
         input planes to return (default: all)."""
         door = "eagle.diff.reverse"
-        if not isinstance(record, Record) or record.graph is not self._graph:
-            raise ValueError(f"{door}: expected the Record of this Reverse's graph "
-                             "(graph.record after graph.launch())")
+        if not isinstance(record, Record) or record.forward is not self._graph:
+            raise ValueError(f"{door}: expected the Record of this Reverse's forward "
+                             "(its .record after it ran)")
+        if self._run is not None:
+            return self._run(record, seeds, wrt, door)
         keys = (list(self._inputs) if wrt is None else
                 [self._input_key(name) for name in ([wrt] if isinstance(wrt, str) else wrt)])
         with self._busy("__call__"), record._hold(door) as tape:
@@ -511,13 +543,25 @@ def _ordered_sum(dst, arrays):
 
 
 def reverse(record, seeds, *, wrt=None, vjps=None, strict=False) -> Gradients:
-    """The gradients of one recorded launch, in one call:
-    ``grads = eagle.diff.reverse(g.record, seeds={"s": dJ_ds})``.
+    """The gradients of one recorded forward, in one call:
+    ``grads = eagle.diff.reverse(sim.record, seeds={"x": dJ_dx})``.
 
-    Builds a :class:`Reverse` per call (on the GPU, a capture per call); to
-    reverse the same graph many times, build ``eagle.diff.Reverse(g)`` once
-    and call it. Arguments as :class:`Reverse` and its call."""
+    ``record`` is the ``.record`` of a ``record=True`` forward (a Graph
+    launch, a simulate / Simulation / until_done run); ``seeds`` maps output
+    planes to ∂J/∂(output), one value per sample in sample order. The
+    result maps each input plane to ∂J/∂(input): per sample for a per-sample
+    plane, summed over samples for a shared parameter.
+
+    Builds a :class:`Reverse` per call; to reverse the same forward many
+    times, build ``eagle.diff.Reverse(forward)`` once and call it. Arguments
+    as :class:`Reverse` and its call.
+
+    Example::
+
+        res = eagle.simulate(model, x=x0, v=v0, max_steps=1000, record=True)
+        grads = eagle.diff.reverse(res.record, {"x": numpy.ones_like(x0)})
+        grads["x"]     # dJ/dx0 per sample"""
     if not isinstance(record, Record):
-        raise TypeError("eagle.diff.reverse: expected a Record (graph.record after "
-                        f"graph.launch()), got {type(record).__name__}")
-    return Reverse(record.graph, vjps=vjps, strict=strict)(record, seeds, wrt=wrt)
+        raise TypeError("eagle.diff.reverse: expected a Record (the .record of a "
+                        f"record=True forward), got {type(record).__name__}")
+    return Reverse(record.forward, vjps=vjps, strict=strict)(record, seeds, wrt=wrt)

@@ -489,7 +489,7 @@ class Graph:
         0.3})`` one node's. A recorded graph holds its parameters in one-cell
         planes, so this is a copy into them: nothing is rebuilt or recaptured,
         forward or reverse. Refused while the last launch's Record is live
-        (reverse it, or ``detach()`` it, first)."""
+        (reverse it, or ``keep()`` it, first)."""
         with self._busy("update"):
             self._need_built("update")
             if self._recorder is None:
