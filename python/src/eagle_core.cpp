@@ -98,9 +98,13 @@
 #include "eagle/exec/HostSchedule.h"
 #include "eagle/exec/HostTeam.h"
 #include "eagle/exec/Partition.h"
+#include "eagle/exec/TimeLaunch.h"
+#include "eagle/filtering/ReorderClasses.h"
 #include "eagle/graph/Edges.h"
 #include "eagle/graph/Layout.h"
 #include "eagle/graph/Render.h"
+#include "eagle/cpu/DeviceProps.h"
+#include "eagle/policy/Dispatch.h"
 #include "eagle/reduce/canonical.h"
 #include "eagle/util/Busy.h"
 #include "plugin/gref_abi.h"
@@ -771,6 +775,60 @@ NB_MODULE(_core, m)
         "`function` is a CUfunction handle and `params` a list of "
         "pointers, both as integers. Returns 1, or 0 for an empty partition.");
 
+    m.def("time_launch",
+        [](std::uintptr_t entry, const std::vector<std::uintptr_t>& params, const Partition& part,
+           int reps, bool device, std::uintptr_t stream, unsigned block) {
+            if (!device) {
+                const std::vector<void*> p = asParams(params);
+                return eagle::exec::timeHostLaunch(reinterpret_cast<eagle::exec::HostEntryV2>(entry),
+                                                   p.data(), part, reps);
+            }
+            if (reps < 1) throw std::invalid_argument("time_launch: reps must be at least 1");
+            std::vector<std::uint64_t> p(params.begin(), params.end());
+            auto d = makeDesc<eagle_backend_launch_desc>(-1);
+            d.block = block;
+            d.function = entry;
+            d.params = p.data();
+            d.nparams = static_cast<std::int64_t>(p.size());
+            d.base = part.base;
+            d.count = part.count;
+            d.n_samples = part.nSamples;
+            d.stream = stream;
+            std::vector<double> seconds(static_cast<std::size_t>(reps));
+            ck(EBX(eagle_backend_x_time_launch)(&d, reps, seconds.data()));
+            return seconds;
+        },
+        nb::arg("entry"), nb::arg("params"), nb::arg("partition"), nb::arg("reps"),
+        nb::arg("device") = false, nb::arg("stream") = 0, nb::arg("block") = 256,
+        "Seconds of each of `reps` launches of one entry over one partition, every repetition "
+        "kept: the host team run timed with steady_clock, or (device=True; `entry` a CUfunction) "
+        "a CUDA event pair around each launch on `stream` (experimental at the seam: "
+        "`eagle_backend_x_time_launch`; one stream sync after the last). For calibration.");
+
+    m.def("reorder_classes_host",
+        [](const std::vector<std::pair<std::uintptr_t, std::uint32_t>>& planes, std::uintptr_t mask,
+           std::uintptr_t perm, std::uintptr_t inv, std::uintptr_t index_map, std::uintptr_t count,
+           std::uintptr_t span, std::uintptr_t fire, std::int64_t n, std::uint32_t flags,
+           std::uintptr_t class_plane, std::uint32_t classes, std::uintptr_t offsets,
+           std::uintptr_t class_sorts) {
+            std::vector<eagle::filtering::ReorderPlane> table;
+            table.reserve(planes.size());
+            for (const auto& [address, bytes] : planes)
+                table.push_back({ reinterpret_cast<void*>(address), bytes });
+            eagle::filtering::reorderClassesHost(table.data(), static_cast<std::uint32_t>(table.size()),
+                reinterpret_cast<const std::uint8_t*>(mask), flags, classes,
+                reinterpret_cast<const std::uint8_t*>(class_plane), reinterpret_cast<std::int32_t*>(perm),
+                reinterpret_cast<std::int32_t*>(inv), reinterpret_cast<std::int32_t*>(index_map),
+                reinterpret_cast<std::uint32_t*>(count), reinterpret_cast<std::uint32_t*>(span),
+                reinterpret_cast<std::uint32_t*>(fire), reinterpret_cast<std::uint32_t*>(offsets),
+                reinterpret_cast<std::uint32_t*>(class_sorts), n);
+        },
+        nb::arg("planes"), nb::arg("mask"), nb::arg("perm"), nb::arg("inv"), nb::arg("index_map"),
+        nb::arg("count"), nb::arg("span"), nb::arg("fire"), nb::arg("n"), nb::arg("flags"),
+        nb::arg("class_plane"), nb::arg("classes"), nb::arg("offsets"), nb::arg("class_sorts"),
+        "The host face of reorder_classes_device: the same stable counting sort by (live, class), "
+        "in place, now; the planes are (address, element bytes) pairs of host memory.");
+
     m.def("device_grid", &eagle::exec::launch_grid,
         nb::arg("count"), nb::arg("block"),
         "The grid eagle derives from a partition's `count` (never nSamples).");
@@ -822,6 +880,122 @@ NB_MODULE(_core, m)
         "How the host runs a stage: 'branch_tasks' iff it has >= 2 independent "
         "branches, a team of >= 2 threads, n <= BRANCH_TASKS_MAX_SAMPLES and only "
         "native nodes; else 'work_share'. Pure.");
+
+    // -- the splitting rule (eagle/policy/Dispatch.h) ------------------------------
+    {
+        namespace pol = eagle::policy;
+        using BranchRow = std::tuple<double, double, double, double, double, double>;
+
+        // Only the derived fields the rule reads cross the boundary.
+        auto propsOf = [](const nb::dict& d) {
+            eagle::DeviceProps p;
+            p.peak_flops_sp = nb::cast<double>(d["peak_flops_sp"]);
+            p.peak_bytes_per_s = nb::cast<double>(d["peak_bytes_per_s"]);
+            p.fp64_ratio = nb::cast<double>(d["fp64_ratio"]);
+            return p;
+        };
+        auto targetOf = [](const std::string& name) {
+            if (name == "host") return pol::Target::Host;
+            if (name == "device") return pol::Target::Device;
+            throw std::invalid_argument("target must be 'host' or 'device', got '" + name + "'");
+        };
+        auto costOf = [](const std::vector<BranchRow>& rows, bool fusedVectorised) {
+            if (rows.size() < 2 || rows.size() > static_cast<std::size_t>(pol::MAX_BRANCHES))
+                throw std::invalid_argument("a dispatch group has 2 to 16 branches, got " +
+                                            std::to_string(rows.size()));
+            pol::CostVector c;
+            c.fusedVectorised = fusedVectorised;
+            for (const auto& [a32, a64, s32, s64, loads, gathers] : rows)
+                c.branch[c.count++] = { a32, a64, s32, s64, loads, gathers };
+            return c;
+        };
+        auto mixOf = [](const std::vector<std::int64_t>& counts, std::int64_t fusedSteps,
+                        std::int64_t remainingSteps, double mixed32) {
+            pol::Mix mix;
+            for (std::size_t j = 0; j < counts.size() && j < pol::MAX_BRANCHES; ++j)
+                mix.counts[j] = counts[j];
+            mix.fusedSteps = fusedSteps;
+            mix.remainingSteps = remainingSteps;
+            mix.mixed32 = mixed32;
+            return mix;
+        };
+
+        m.attr("DISPATCH_ENTER_GAIN") = pol::ENTER_GAIN;
+        m.attr("DISPATCH_LEAVE_GAIN") = pol::LEAVE_GAIN;
+        m.attr("DISPATCH_EVERY") = pol::DECISION_EVERY;
+
+        m.def("cpu_device_props",
+            [] {
+                const eagle::DeviceProps p = eagle::cpu::deviceProps();
+                nb::dict d;
+                d["peak_flops_sp"] = p.peak_flops_sp;
+                d["peak_bytes_per_s"] = p.peak_bytes_per_s;
+                d["fp64_ratio"] = p.fp64_ratio;
+                return d;
+            },
+            "The host's documented device properties, in the dict form the splitting rule reads.");
+
+        m.def("dispatch_gain",
+            [=](const std::vector<BranchRow>& branches, const std::vector<std::int64_t>& counts,
+                const nb::dict& props, const std::string& target, std::int64_t fused_steps,
+                bool fused_vectorised, std::int64_t remaining_steps, double mixed32) {
+                return pol::predictedGain(costOf(branches, fused_vectorised),
+                                          mixOf(counts, fused_steps, remaining_steps, mixed32),
+                                          propsOf(props), pol::defaultWeights(targetOf(target)));
+            },
+            nb::arg("branches"), nb::arg("counts"), nb::arg("props"), nb::arg("target"),
+            nb::arg("fused_steps") = 1, nb::arg("fused_vectorised") = false,
+            nb::arg("remaining_steps") = pol::DECISION_EVERY, nb::arg("mixed32") = -1.0,
+            "Predicted time of the fused switch kernel over the split one for this branch mix "
+            "(above 1 the split wins). branches: per branch (arith32, arith64, special32, "
+            "special64, loads, gathers); counts: samples that took each branch; target: "
+            "'host' or 'device'; fused_vectorised: the fused host loop runs every branch; "
+            "remaining_steps: steps a class sort is paid over; mixed32: measured share of "
+            "32-lane groups holding two or more branches (negative: unmeasured). Pure.");
+
+        m.def("resolve_dispatch_policy",
+            [=](const std::vector<BranchRow>& branches, const std::vector<std::int64_t>& counts,
+                const nb::dict& props, const std::string& target, const std::string& current,
+                std::int64_t fused_steps, bool fused_vectorised, std::int64_t remaining_steps,
+                double mixed32) {
+                if (current != "switch" && current != "segmented")
+                    throw std::invalid_argument("current must be 'switch' or 'segmented', got '" + current + "'");
+                pol::HysteresisState state;
+                state.current = current == "segmented" ? pol::Policy::Segmented : pol::Policy::Switch;
+                return pol::resolve(costOf(branches, fused_vectorised),
+                                    mixOf(counts, fused_steps, remaining_steps, mixed32), propsOf(props),
+                                    pol::defaultWeights(targetOf(target)), state) == pol::Policy::Segmented
+                           ? "segmented" : "switch";
+            },
+            nb::arg("branches"), nb::arg("counts"), nb::arg("props"), nb::arg("target"),
+            nb::arg("current") = "switch", nb::arg("fused_steps") = 1,
+            nb::arg("fused_vectorised") = false, nb::arg("remaining_steps") = pol::DECISION_EVERY,
+            nb::arg("mixed32") = -1.0,
+            "'segmented' once the predicted gain reaches DISPATCH_ENTER_GAIN, 'switch' once it falls "
+            "under DISPATCH_LEAVE_GAIN, else `current`; an empty mix keeps `current`. Pure.");
+
+        m.def("dispatch_decide",
+            [](double gain, const std::string& current) {
+                if (current != "switch" && current != "segmented")
+                    throw std::invalid_argument("current must be 'switch' or 'segmented', got '" + current + "'");
+                return pol::decide(gain, current == "segmented" ? pol::Policy::Segmented
+                                                                : pol::Policy::Switch) == pol::Policy::Segmented
+                           ? "segmented" : "switch";
+            },
+            nb::arg("gain"), nb::arg("current"),
+            "The band alone: 'segmented' at gain >= DISPATCH_ENTER_GAIN, 'switch' under DISPATCH_LEAVE_GAIN, "
+            "else `current`. Pure.");
+
+        m.def("dispatch_due",
+            [](std::int64_t since, std::int64_t steps) {
+                pol::HysteresisState state;
+                state.sinceDecision = static_cast<int>(since);
+                const bool look = pol::due(state, static_cast<int>(steps));
+                return std::make_pair(look, static_cast<std::int64_t>(state.sinceDecision));
+            },
+            nb::arg("since"), nb::arg("steps") = 1,
+            "(look, since): count `steps` more steps after `since`; look is True every DISPATCH_EVERY steps.");
+    }
 
     m.def("run_host_branches",
         [](const std::vector<std::vector<std::tuple<std::uintptr_t,

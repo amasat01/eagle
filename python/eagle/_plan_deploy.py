@@ -315,8 +315,9 @@ def _after_fork_in_child():
 os.register_at_fork(after_in_child=_after_fork_in_child)
 
 
-def _hawk_plugins(kernels, targets, cache_dir, scalar_type=None) -> tuple:
-    """Build ``kernels`` into one bundle and return their plugins in order."""
+def _build_by_name(kernels, targets, cache_dir, scalar_type=None) -> tuple:
+    """Build ``kernels`` into one bundle; ``({plugin name: plugin}, bundle)``
+    (a segmented kernel appears as its units)."""
     build_bundle, plugins, default_cache_dir, FAST_ENTRIES_MACRO = _hawk_api()
     from .registry import load_manifest
 
@@ -330,7 +331,12 @@ def _hawk_plugins(kernels, targets, cache_dir, scalar_type=None) -> tuple:
     with _BUNDLE_LOCKS.setdefault(str(where.resolve()), threading.Lock()):
         bundle = build_bundle(kernels, where, targets=targets, cache_dir=cache_dir,
                               defines=defines, mode=mode)
-    by_name = plugins(bundle, device_loader=load_manifest)
+    return plugins(bundle, device_loader=load_manifest), bundle
+
+
+def _hawk_plugins(kernels, targets, cache_dir, scalar_type=None) -> tuple:
+    """Build ``kernels`` into one bundle and return their plugins in order."""
+    by_name, bundle = _build_by_name(kernels, targets, cache_dir, scalar_type)
     missing = [k.name for k in kernels if k.name not in by_name]
     if missing:
         raise ValueError(

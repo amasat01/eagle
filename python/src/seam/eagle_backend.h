@@ -546,6 +546,13 @@ struct eagle_backend_reduce_desc {
  *  store: capturable). Experimental. */
 eagle_backend_status eagle_backend_x_reduce_canonical(struct eagle_backend_reduce_desc* desc);
 
+/** Time ``reps`` launches of ``desc`` (as ``run_device``), each between a pair of
+ *  CUDA events on ``desc->stream``, and write the seconds of each to
+ *  ``seconds[0, reps)``. Synchronises the stream once, after the last pair: for
+ *  calibration, never inside a run. Experimental. */
+eagle_backend_status eagle_backend_x_time_launch(const struct eagle_backend_launch_desc* desc, int32_t reps,
+    double* seconds);
+
 /** Column operations of a reverse window driver (``x_diff_columns``). */
 #define EAGLE_BACKEND_DIFF_GATHER     0u   /**< dst[r*dst_ld+c] = src[r*src_ld+index[c]] */
 #define EAGLE_BACKEND_DIFF_ACCUMULATE 1u   /**< dst[r*dst_ld+c] += src[r*dst_ld+c] (4: f32, 8: f64) */

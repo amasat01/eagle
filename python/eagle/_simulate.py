@@ -108,6 +108,25 @@ def _model_items(model, until) -> list:
     return items
 
 
+def _lower_dispatch(items, dispatch):
+    """``(items, spec)``: the hawk kernels among ``items`` with their dispatch
+    groups lowered (:func:`eagle._dispatch_door.resolve_kernels`) and the
+    group a runner takes over, if any. A model without hawk kernels passes
+    through; ``dispatch=`` on one is refused."""
+    from ._dispatch_door import auto_groups, request, resolve_kernels
+    from ._plan_deploy import _is_hawk_kernel
+
+    kernels = [it for it in items if _is_hawk_kernel(it)]
+    if not kernels or (dispatch is None and not any(auto_groups(k) for k in kernels)):
+        if dispatch is not None:
+            request(kernels, dispatch)      # names the problem
+        return items, None
+    lowered, spec = resolve_kernels(kernels, request(kernels, dispatch),
+                                    door="eagle.simulate")
+    swap = iter(lowered)
+    return [next(swap) if _is_hawk_kernel(it) else it for it in items], spec
+
+
 def _deploy(items, scalar_type=None):
     """``(plans, kernels)``: an :class:`eagle.plan.AutoPlan` per item, hawk
     kernels built into one bundle, and each item's own kernel (``None``
@@ -481,10 +500,14 @@ class Simulation:
 
     def __init__(self, model, args, kwargs, *, until=None, max_steps,
                  every=None, reorder=None, scalar_type=None, layout=None,
-                 record=False, window=None, memory_budget=None):
+                 record=False, window=None, memory_budget=None, dispatch=None):
         from ._layout import rewrap, split_marks
 
+        if record and dispatch is not None:
+            raise ValueError("eagle.simulate: record=True runs each step fused, so dispatch= cannot "
+                             "be combined with it yet; drop dispatch= to record this run")
         items = _model_items(model, until)
+        items, spec = _lower_dispatch(items, dispatch)
         plans, kernels = _deploy(items, scalar_type)
         names = [_name(p, k) for p, k in zip_strict(plans, kernels)]
         decl = _declarations(plans, names)
@@ -545,9 +568,19 @@ class Simulation:
         self._device, self._xp = device, xp
 
         step = plans[0] if len(plans) == 1 else selected
-        self.runner = until_done(step, max_steps=max_steps, every=every,
-                                 reorder=reorder, record=record, window=window,
-                                 memory_budget=memory_budget, layout=layout, **rewrap(final, axes))
+        if spec is not None and not single and layout is None and not record:
+            from ._dispatch_door import DispatchRunner
+
+            def plain(steps, step=step, final=final):
+                return until_done(step, max_steps=steps, every=every, reorder=reorder, **final)
+
+            self.runner = DispatchRunner(*spec[:2], final, final[mask], max_steps=max_steps,
+                                         plain=plain, forced=spec[2], theta=reorder or True)
+        else:
+            self.runner = until_done(step, max_steps=max_steps, every=every,
+                                     reorder=reorder, record=record, window=window,
+                                     memory_budget=memory_budget, layout=layout,
+                                     **rewrap(final, axes))
         if record:
             self.runner._recorder.owner = self
             self.runner._recorder.door = "eagle.simulate"
@@ -616,7 +649,7 @@ def _check_step(selected, names, finishers, compacting, every, reorder) -> None:
 def simulation(model, *args, until=None, max_steps: int,
                every: int | None = None, reorder=None, scalar_type=None,
                layout=None, record: bool = False, window=None,
-               memory_budget: int | None = None, **kwargs) -> Simulation:
+               memory_budget: int | None = None, dispatch=None, **kwargs) -> Simulation:
     """Bind and build ``model`` once; returns the :class:`Simulation`, whose
     :meth:`~Simulation.run` runs it (again, after :meth:`~Simulation.reset`,
     without rebuilding). ``*args``/``**kwargs`` are the kernel's own, bound
@@ -624,13 +657,13 @@ def simulation(model, *args, until=None, max_steps: int,
     return Simulation(model, args, kwargs, until=until, max_steps=max_steps,
                       every=every, reorder=reorder, scalar_type=scalar_type,
                       layout=layout, record=record, window=window,
-                      memory_budget=memory_budget)
+                      memory_budget=memory_budget, dispatch=dispatch)
 
 
 def simulate(model, *args, until=None, max_steps: int,
              every: int | None = None, reorder=None, scalar_type=None,
              layout=None, record: bool = False, window=None,
-             memory_budget: int | None = None, **kwargs) -> SimResult:
+             memory_budget: int | None = None, dispatch=None, **kwargs) -> SimResult:
     """Run ``model`` on every sample until each one finishes (or ``max_steps``
     is reached) and return the :class:`SimResult`.
 
@@ -664,8 +697,26 @@ def simulate(model, *args, until=None, max_steps: int,
     ``memory_budget`` are :func:`eagle.until_done`'s, for advanced tuning). Example::
 
         res = eagle.simulate(model, x=x0, v=v0, max_steps=1000, record=True)
-        grads = eagle.diff.reverse(res.record, {"x": numpy.ones_like(x0)})"""
+        grads = eagle.diff.reverse(res.record, {"x": numpy.ones_like(x0)})
+
+    ``dispatch`` chooses how the model's ``policy="auto"`` dispatch groups run.
+    ``None`` (default) keeps every group the author declared and decides the
+    ``"auto"`` ones by measurement: the model starts fused, counts how many
+    samples take each branch, and every 16 steps splits the group into one
+    kernel per branch when that is predicted to be at least 15% faster (and
+    back when under 5%); only a group whose selector no kernel of the step
+    writes is ever split. A policy name (``"switch"``, ``"segmented"``,
+    ``"predicated"``) or ``{group: policy}`` forces ``"auto"`` groups; a group
+    the author gave a policy is refused, never overridden. Forcing
+    ``"segmented"`` on a group whose selector the step writes is correct and
+    answers with one :class:`eagle.PerformanceWarning`. What was decided is in
+    ``result.report.dispatch``. Splitting runs on the host and on the GPU.
+
+    Example::
+
+        result = eagle.simulate(walker, k=k, x=x, t=t, max_steps=100)
+        result.report.dispatch   # {"dispatch0": ("segmented", (990, 6, 4), 1.9)}"""
     return simulation(model, *args, until=until, max_steps=max_steps,
                       every=every, reorder=reorder, scalar_type=scalar_type,
                       layout=layout, record=record, window=window,
-                      memory_budget=memory_budget, **kwargs).run()
+                      memory_budget=memory_budget, dispatch=dispatch, **kwargs).run()

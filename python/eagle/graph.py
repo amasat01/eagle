@@ -221,6 +221,13 @@ class Graph:
         self._recorder = None
         self._record = None
         self._is_reverse = False
+        self._dispatch = {}
+
+    @property
+    def dispatch(self) -> dict:
+        """``{node label: {group: policy}}`` the last :meth:`build` lowered
+        (empty when no node had an ``"auto"`` dispatch group)."""
+        return dict(self._dispatch)
 
     # -- construction -- #
     def _check_open(self, method):
@@ -394,15 +401,41 @@ class Graph:
                              f"planes live on the {inferred}")
         return backend
 
-    def build(self, *, backend=None, record=False) -> Graph:
+    def build(self, *, backend=None, record=False, dispatch=None) -> Graph:
         """Derive the edges, refuse conflicts (always), and lower. ``backend``
         is inferred from where the planes live. ``record=True`` keeps what a
         reverse pass needs (:mod:`eagle.diff`): after each :meth:`launch`,
-        :attr:`record` is that launch's ``Record``."""
+        :attr:`record` is that launch's ``Record``.
+
+        ``dispatch`` lowers the ``policy="auto"`` dispatch groups of the
+        graph's hawk kernels (``None`` or ``"switch"``: the fused kernel;
+        ``"predicated"``; or ``{group: policy}``), rebuilding those plans over
+        the planes they were bound with; a plan without an ``"auto"`` group is
+        not touched. A built graph is one fixed structure, so a split
+        (``"segmented"``) is refused here: it is decided as a run goes, in
+        :func:`eagle.simulate`. :attr:`dispatch` says what was chosen.
+
+        Example::
+
+            graph = eagle.Graph().add(bound_step).build(dispatch="switch")
+            graph.dispatch   # {"walker": {"dispatch0": "switch"}}"""
         with self._busy("build"):
             self._check_open("build")
             if not self._nodes:
                 raise ValueError("eagle.Graph.build: the graph is empty")
+            self._dispatch = {}
+            if not self._is_reverse and (dispatch is not None or any(
+                    n.kind == "launch" and getattr(getattr(n.payload.plan, "plugin", None),
+                                                   "_hawk_source", None) for n in self._nodes)):
+                from ._dispatch_door import relower_graph_nodes
+
+                self._nodes, self._dispatch = relower_graph_nodes(
+                    self._nodes, dispatch, door="eagle.Graph.build")
+                if dispatch is not None and not self._dispatch:
+                    raise ValueError(
+                        "eagle.Graph.build: dispatch= picks the policy of an 'auto' dispatch "
+                        "group, and no plan of this graph has one; declare one with "
+                        "policy='auto' in the kernel, or drop dispatch=")
             if record and _RECORD_FACTORY is None:
                 from . import diff  # noqa: F401  (installs the recorder)
             recorder = _RECORD_FACTORY(self) if record else None

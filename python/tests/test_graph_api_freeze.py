@@ -18,7 +18,7 @@ def test_graph_methods_and_signatures():
     assert _sig(C.add) == "(self, bound, *, name=None) -> 'Graph'"
     assert _sig(C.add_node) == "(self, node, *, name=None) -> 'Graph'"
     assert _sig(C.add_group) == "(self, branches, *, names=None) -> 'Graph'"
-    assert _sig(C.build) == "(self, *, backend=None, record=False) -> 'Graph'"
+    assert _sig(C.build) == "(self, *, backend=None, record=False, dispatch=None) -> 'Graph'"
     assert _sig(C.launch) == "(self, n: 'int' = 1) -> 'Graph'"
     assert _sig(C.enqueue) == "(self, n: 'int' = 1) -> 'Graph'"
     assert _sig(C.synchronize) == "(self) -> 'Graph'"
@@ -30,7 +30,7 @@ def test_graph_methods_and_signatures():
                             "show_schedule: 'bool' = True)")
     assert _sig(C.to_mermaid) == "(self) -> 'str'"
     assert _sig(C.to_dot) == "(self) -> 'str'"
-    for prop in ("schedule", "backend", "record"):
+    for prop in ("schedule", "backend", "record", "dispatch"):
         assert isinstance(inspect.getattr_static(C, prop), property)
     assert not hasattr(C, "run") and not hasattr(C, "replay")
 

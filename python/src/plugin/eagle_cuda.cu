@@ -817,6 +817,43 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_run_device(const struct eag
     });
 }
 
+EAGLE_BACKEND_API eagle_backend_status eagle_backend_x_time_launch(const struct eagle_backend_launch_desc* desc,
+    std::int32_t reps, double* seconds)
+{
+    return guarded([&] {
+        const auto d = readDesc(desc, 0);
+        requireDevice();
+        if (reps < 1 || seconds == nullptr)
+            throw std::invalid_argument("eagle: x_time_launch needs reps >= 1 and a seconds array");
+        if (d.nparams < 0 || (d.nparams > 0 && d.params == nullptr))
+            throw std::invalid_argument("eagle: x_time_launch needs nparams >= 0 and a params array");
+        const int device = resolveDevice(d.device, d.stream);
+        DeviceScope scope(device);
+        std::vector<void*> params;
+        params.reserve(static_cast<std::size_t>(d.nparams));
+        for (std::int64_t i = 0; i < d.nparams; ++i)
+            params.push_back(reinterpret_cast<void*>(d.params[i]));
+        const eagle::exec::Partition part{ d.base, d.count, d.n_samples };
+        // a raw 0 is the legacy default stream here, as for run_device's cuLaunchKernel
+        const cudaStream_t stream = d.stream == 0 ? cudaStreamLegacy : reinterpret_cast<cudaStream_t>(d.stream);
+        std::vector<cudaEvent_t> events(2 * static_cast<std::size_t>(reps));
+        for (auto& e : events) EAGLE_CHECK_ALWAYS(cudaEventCreateWithFlags(&e, cudaEventDefault));
+        for (std::int32_t r = 0; r < reps; ++r) {
+            EAGLE_CHECK_ALWAYS(cudaEventRecord(events[2 * r], stream));
+            eagle::exec::DeviceKernel::run(reinterpret_cast<CUfunction>(d.function), params, part,
+                reinterpret_cast<CUstream>(d.stream), d.block);
+            EAGLE_CHECK_ALWAYS(cudaEventRecord(events[2 * r + 1], stream));
+        }
+        EAGLE_CHECK_ALWAYS(cudaEventSynchronize(events.back()));
+        for (std::int32_t r = 0; r < reps; ++r) {
+            float ms = 0.0f;
+            EAGLE_CHECK_ALWAYS(cudaEventElapsedTime(&ms, events[2 * r], events[2 * r + 1]));
+            seconds[r] = 1e-3 * static_cast<double>(ms);
+        }
+        for (auto& e : events) EAGLE_CHECK_ALWAYS(cudaEventDestroy(e));
+    });
+}
+
 // ---- filtering -----------------------------------------------------------------
 
 EAGLE_BACKEND_API eagle_backend_status eagle_backend_compact_device(struct eagle_backend_compact_desc* desc)

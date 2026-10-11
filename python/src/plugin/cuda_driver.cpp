@@ -91,7 +91,7 @@ enum Slot : int {
     sStreamCreate, sStreamDestroy, sStreamSynchronize, sStreamWaitEvent,
     sStreamBeginCapture, sStreamEndCapture, sStreamBeginCaptureToGraph, sStreamGetCaptureInfo,
     sStreamUpdateCaptureDependencies,
-    sEventCreate, sEventDestroy, sEventRecord, sMemFree, sMemcpyAsync,
+    sEventCreate, sEventDestroy, sEventRecord, sEventSynchronize, sEventElapsedTime, sMemFree, sMemcpyAsync,
     sGraphCreate, sGraphDestroy, sGraphExecDestroy, sGraphInstantiateWithFlags, sGraphLaunch, sGraphGetNodes,
     sGraphNodeGetType, sGraphAddKernelNode, sGraphKernelNodeGetParams, sGraphExecKernelNodeSetParams,
     sGraphAddEmptyNode, sGraphAddChildGraphNode, sGraphChildGraphNodeGetGraph, sGraphNodeSetEnabled,
@@ -137,6 +137,8 @@ Entry g_entries[kSlots] = {
     { "cuEventCreate", 2000, FORK | INTEROP, nullptr },
     { "cuEventDestroy", 4000, FORK | INTEROP, nullptr },
     { "cuEventRecord", 2000, FORK | INTEROP, nullptr },
+    { "cuEventSynchronize", 2000, 0, nullptr },
+    { "cuEventElapsedTime", 2000, 0, nullptr },
     { "cuMemFree", 3020, 0, nullptr },
     { "cuMemcpyAsync", 4000, 0, nullptr },
     { "cuGraphCreate", 10000, GRAPH | COND, nullptr },
@@ -969,6 +971,18 @@ cudaError_t cudaEventRecord(cudaEvent_t event, cudaStream_t stream) { return eve
 cudaError_t cudaEventRecord_ptsz(cudaEvent_t event, cudaStream_t stream)
 {
     return eventRecord(event, perThread(stream));
+}
+
+cudaError_t cudaEventSynchronize(cudaEvent_t event)
+{
+    EAGLE_DRV(sync, sEventSynchronize, PFN_cuEventSynchronize_v2000);
+    return fromDriver(sync(reinterpret_cast<CUevent>(event)));
+}
+
+cudaError_t cudaEventElapsedTime(float* ms, cudaEvent_t start, cudaEvent_t end)
+{
+    EAGLE_DRV(elapsed, sEventElapsedTime, PFN_cuEventElapsedTime_v2000);
+    return fromDriver(elapsed(ms, reinterpret_cast<CUevent>(start), reinterpret_cast<CUevent>(end)));
 }
 
 // ---- stream capture ----------------------------------------------------------

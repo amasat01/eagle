@@ -111,7 +111,12 @@ class RunReport:
     ``"persist"`` for a no-graph fast-path run, ``"band"`` for the
     WHILE-graph/policy path (the only mode before the fast path existed).
     ``probe`` is true for a fast-path run taken to time the entry the batch
-    is not currently using (see :meth:`Runner._pick_entry`)."""
+    is not currently using (see :meth:`Runner._pick_entry`).
+    ``dispatch`` is ``None`` unless the run decided a dispatch group
+    (``dispatch=``): ``{group: (policy, mix, gain)}`` with the policy in force
+    at the end, the samples that took each branch at the last look and the
+    predicted gain of splitting (above 1 the split wins); ``class_sorts``
+    counts the sorts of samples by branch a split run made."""
 
     n: int
     finished: int
@@ -126,6 +131,8 @@ class RunReport:
     lane_utilisation: float | None = None
     mode: str = "band"
     probe: bool = False
+    dispatch: dict | None = None
+    class_sorts: int = 0
 
 
 def _array_module(device: bool):

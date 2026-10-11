@@ -767,36 +767,28 @@ class ActiveSet:
             if self._epochs is not None and not _capturing():
                 self._record_epoch()
             return True  # enqueued (an if_fired sort is a no-op on the device when it did not fire)
-        import numpy as np
-
         with self._lock:
             if if_fired and int(self.class_fire[0]) == 0:
                 return False
             k = self.classes
             sp = int(self.count[0]) if within_live else int(self.span[0])
-            cls = self.class_plane[:sp].astype(np.int64)
-            if cls.size and int(cls.max()) >= k:
+            top = int(self.class_plane[:sp].max()) if sp else 0
+            if top >= k:
                 raise ValueError(
                     f"eagle.ActiveSet.class_sort: the class plane holds "
-                    f"{int(cls.max())}, outside [0, {k})")
-            key = cls if within_live else np.where(self.mask[:sp] != 0, k, cls)
-            order = np.argsort(key, kind="stable")  # == the stable counting sort
-            slots = np.arange(sp, dtype=np.int64)
-            for arr in self._owned:
-                arr[..., :sp] = arr[..., order]
-            self.perm[:sp] = self.perm[:sp][order]
-            self.inv[self.perm[:sp]] = slots.astype(np.int32)
-            live = int(np.count_nonzero(key < k))
-            counts = np.bincount(key[key < k], minlength=k)
-            self.offsets[0] = 0
-            self.offsets[1:] = np.cumsum(counts).astype(np.uint32)
-            if not within_live:
-                self.map[:live] = np.arange(live, dtype=np.int32)
-                self.count[0] = live
-                self.span[0] = live
+                    f"{top}, outside [0, {k})")
+            from . import _core
+
+            def at(arr) -> int:
+                return int(arr.ctypes.data)
+
+            _core.reorder_classes_host(
+                self._table(), at(self.mask), at(self.perm), at(self.inv), at(self.map),
+                at(self.count), at(self.span), 0, self.n,
+                _MASK_IS_DROP | (_CLASSES_WITHIN_LIVE if within_live else 0),
+                at(self.class_plane), k, at(self.offsets), at(self.class_sorts))
             self.fire[0] = 0
             self.class_fire[0] = 0
-            self.class_sorts[0] += 1
             self._record_epoch()
         return True
 

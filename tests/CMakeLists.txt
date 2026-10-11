@@ -183,6 +183,13 @@ list(REMOVE_DUPLICATES TEST_FILES)
 set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/test_HostSchedule.cpp
   PROPERTIES COMPILE_DEFINITIONS "EAGLE_CPU_ONLY=1")
 
+# The splitting rule is plain arithmetic: compiled by CXX in BOTH build modes,
+# the test_HostSchedule.cpp recipe.
+list(APPEND TEST_FILES ${CMAKE_CURRENT_SOURCE_DIR}/test_DispatchPolicy.cpp)
+list(REMOVE_DUPLICATES TEST_FILES)
+set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/test_DispatchPolicy.cpp
+  PROPERTIES COMPILE_DEFINITIONS "EAGLE_CPU_ONLY=1")
+
 # The reverse-graph transposition is CUDA-free: compiled by CXX in BOTH build
 # modes, the test_GraphView.cpp recipe.
 list(APPEND TEST_FILES ${CMAKE_CURRENT_SOURCE_DIR}/test_Transpose.cpp)
