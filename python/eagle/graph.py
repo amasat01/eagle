@@ -64,8 +64,15 @@ class NodeKind:
 
 
 _REGISTRY_LOCK = threading.Lock()
+_DERIVED_DOOR = object()    # the token of Graph._add_derived, used by eagle.diff only
 _REGISTRY: dict = {}
-_RECORD_FACTORY = None      # installed once by eagle.diff, under _REGISTRY_LOCK
+#: ``factory(graph) -> recorder``, installed once by eagle.diff (under
+#: _REGISTRY_LOCK). Made before the edges are derived (it may re-bind the
+#: launches); ``attach(accesses)`` then plans the copies to run before each stage
+#: (``before(stage)``); it checks a launch may record (``begin(n, method)``),
+#: makes the ``Record`` after it (``finish()``) and writes parameters
+#: (``update(values)``).
+_RECORD_FACTORY = None
 
 
 def register_node_kind(kind: str, *, reads, writes, lower_gpu, lower_cpu,
@@ -105,7 +112,7 @@ def get_node_kind(kind: str) -> NodeKind:
 
 
 def _install_record_factory(factory) -> None:
-    """Private: ``eagle.diff`` installs the ``Record`` constructor here."""
+    """Private: ``eagle.diff`` installs the recorder factory here."""
     global _RECORD_FACTORY
     with _REGISTRY_LOCK:
         _RECORD_FACTORY = factory
@@ -211,7 +218,9 @@ class Graph:
         self._pipe = None
         self._cpu_steps: list = []
         self._record_on = False
+        self._recorder = None
         self._record = None
+        self._is_reverse = False
 
     # -- construction -- #
     def _check_open(self, method):
@@ -287,6 +296,19 @@ class Graph:
                             "for a Node")
         self._validate(node)
         self._nodes.append(node)
+        return self
+
+    def _add_derived(self, bound, token, *, name=None) -> Graph:
+        """Private door of :mod:`eagle.diff`: a derivative plan enters only the
+        reverse graph eagle.diff builds, where it is paired with its primal.
+        Every public door refuses one."""
+        if token is not _DERIVED_DOOR:
+            raise ValueError("eagle.Graph._add_derived is eagle.diff's own door")
+        self._check_open("add")
+        node = Node("launch", bound, name)
+        self._validate(node)
+        self._nodes.append(node)
+        self._is_reverse = True
         return self
 
     def add_node(self, node, *, name=None) -> Graph:
@@ -374,24 +396,30 @@ class Graph:
 
     def build(self, *, backend=None, record=False) -> Graph:
         """Derive the edges, refuse conflicts (always), and lower. ``backend``
-        is inferred from where the planes live. ``record=True`` is not available yet."""
+        is inferred from where the planes live. ``record=True`` keeps what a
+        reverse pass needs (:mod:`eagle.diff`): after each :meth:`launch`,
+        :attr:`record` is that launch's ``Record``."""
         with self._busy("build"):
             self._check_open("build")
             if not self._nodes:
                 raise ValueError("eagle.Graph.build: the graph is empty")
             if record and _RECORD_FACTORY is None:
-                raise ValueError("eagle.Graph.build: record=True is not available "
-                                 "in this build yet")
+                from . import diff  # noqa: F401  (installs the recorder)
+            recorder = _RECORD_FACTORY(self) if record else None
             accesses, groups = self._leaves()
             check_conflicts(accesses, groups)
             be = self._resolve_backend(accesses, backend)
             edges = tuple(derive_edges(accesses, groups))
+            if recorder is not None:
+                recorder.attach(accesses)
+            before = recorder.before if recorder else (lambda stage: ())
             ctx = LowerCtx(be)
             if be == "gpu":
                 from .pipeline import GraphPipeline
 
                 stages = []
-                for node in self._nodes:
+                for i, node in enumerate(self._nodes):
+                    stages += [("step", copy) for copy in before(i)]
                     res = ctx.lower(node)
                     if isinstance(res, ForkStage):
                         stages.append(("group", res.members))
@@ -402,17 +430,17 @@ class Graph:
                 self._pipe = pipe
                 self._schedule = ("capture",) * len(self._nodes)
             else:
-                self._cpu_steps = [ctx.lower(n) for n in self._nodes]
-                self._schedule = ("work_share",) * len(self._nodes)
                 from ._host_schedule import lower_cpu_stage
 
                 lowered = [lower_cpu_stage(n, ctx) for n in self._nodes]
-                self._cpu_steps = [step for step, _ in lowered]
+                self._cpu_steps = [s for i, (step, _) in enumerate(lowered)
+                                   for s in (*before(i), step)]
                 self._schedule = tuple(how for _, how in lowered)
             self._backend = be
             self._edges = edges
             self._labels = [a.label for a in accesses]
             self._record_on = bool(record)
+            self._recorder = recorder
             self._built = True
             _counters.bump("graph_builds")
         return self
@@ -422,34 +450,55 @@ class Graph:
         if not self._built:
             raise RuntimeError(f"eagle.Graph.{method}: call build() first")
 
-    def _finish_record(self):
-        if self._record_on and _RECORD_FACTORY is not None:
-            self._record = _RECORD_FACTORY(self)
-
     def launch(self, n: int = 1) -> Graph:
-        """Run the graph ``n`` times and wait."""
+        """Run the graph ``n`` times and wait. A ``record=True`` graph runs
+        once per launch and keeps that run's ``Record`` in :attr:`record`."""
         with self._busy("launch"):
             self._need_built("launch")
+            if self._recorder is not None:
+                self._recorder.begin(n, "launch")
             if self._backend == "gpu":
                 self._pipe.launch(n)
             else:
                 for _ in range(n):
                     for step in self._cpu_steps:
                         step()
-            self._finish_record()
+            if self._recorder is not None:
+                self._record = self._recorder.finish()
         return self
 
     def enqueue(self, n: int = 1) -> Graph:
         """Enqueue ``n`` runs without waiting (CPU: same as :meth:`launch`)."""
         with self._busy("enqueue"):
             self._need_built("enqueue")
+            if self._recorder is not None:
+                raise RuntimeError(
+                    "eagle.Graph.enqueue: a record=True graph runs with launch(), "
+                    "which waits for the run its Record describes")
             if self._backend == "gpu":
                 self._pipe.enqueue(n)
             else:
                 for _ in range(n):
                     for step in self._cpu_steps:
                         step()
-            self._finish_record()
+        return self
+
+    def update(self, values=None, /, **kw) -> Graph:
+        """Change parameters of a ``record=True`` graph between launches:
+        ``g.update(k=0.3)`` sets every node's ``k``, ``g.update({"join.k":
+        0.3})`` one node's. A recorded graph holds its parameters in one-cell
+        planes, so this is a copy into them: nothing is rebuilt or recaptured,
+        forward or reverse. Refused while the last launch's Record is live
+        (reverse it, or ``detach()`` it, first)."""
+        with self._busy("update"):
+            self._need_built("update")
+            if self._recorder is None:
+                raise ValueError(
+                    "eagle.Graph.update: only a record=True graph holds its parameters "
+                    "in planes; for this graph rebind the plan (bound.rebind) and build "
+                    "the graph again")
+            self._recorder.update({**(values or {}), **kw})
+            _counters.bump("rebinds")
         return self
 
     def synchronize(self) -> Graph:
@@ -489,8 +538,8 @@ class Graph:
 
     @property
     def record(self):
-        """The ``Record`` of the last launch (``record=True`` builds), else
-        ``None``."""
+        """The ``Record`` of the last launch of a ``record=True`` graph (what
+        :func:`eagle.diff.reverse` takes), else ``None``."""
         return self._record
 
     # -- seeing the graph (never builds, launches or takes the Busy guard) -- #

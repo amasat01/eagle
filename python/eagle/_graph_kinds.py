@@ -50,11 +50,47 @@ def _launch_native(node, ctx):
     return b._entry, b._addrs, b._parts
 
 
+def _launch_transpose(node, incoming, ctx):
+    """A plan launch's reverse (:mod:`eagle.diff`): its vjp kernel bound to the
+    recorded values of the planes it read, the incoming adjoints of the planes
+    it wrote, and fresh adjoint planes for everything it read."""
+    import numpy
+
+    bound = node.payload
+    role_of = {name: role for role, name in bound._arg_spec}
+    xp = bound._cupy or numpy
+    planes, out = {}, {}
+    for role, name in ctx.vjp.plugin.arg_spec:
+        src = name[4:] if name.startswith("bar_") else None
+        if role == "nsamples":
+            continue
+        if name in role_of:
+            planes[name] = ctx.primal(name)
+        elif src in incoming:
+            planes[name] = incoming[src]
+        elif src in role_of and role_of[src] not in OUTPUT_ROLES:
+            # a parameter cell's gradient comes back per sample; the reverse sums it
+            per_sample = role_of[src] == "lookup" and role == "mutable"
+            buf = (xp.empty(bound.n, dtype=bound._dtype) if per_sample
+                   else xp.empty_like(bound._planes[src]))
+            if role == "accum_out":     # a scatter-add accumulates: start from zero
+                ctx.add(lambda b=buf: b.fill(0), writes=[buf])
+                ctx.not_bitwise(src)
+            planes[name] = out[src] = buf
+        else:
+            raise ValueError(
+                f"eagle.diff.Reverse: the vjp of node {ctx.label!r} takes plane "
+                f"{name!r}, which node {ctx.label!r} does not bind")
+    ctx.add(ctx.vjp.bind(**planes))
+    return out
+
+
 register_node_kind(
     "launch",
     reads=lambda n: _launch_access(n, writing=False),
     writes=lambda n: _launch_access(n, writing=True),
-    lower_gpu=_launch_step, lower_cpu=_launch_step, native_entry=_launch_native)
+    lower_gpu=_launch_step, lower_cpu=_launch_step, native_entry=_launch_native,
+    transpose=_launch_transpose)
 
 
 # --- Built-in kind: opaque (a callable with declared planes) --- #

@@ -341,6 +341,8 @@ def _hawk_plugins(kernels, targets, cache_dir, scalar_type=None) -> tuple:
             f"segmented kernel: {sorted(by_name)}), which are planned one by one: "
             "build it with hawk.artifact.build_bundle and plan each plugin of "
             "hawk.artifact.plugins(bundle)")
+    for k in kernels:  # what eagle.diff needs to build this kernel's vjp beside it
+        by_name[k.name]._hawk_source = (k, bundle.digest, cache_dir)
     return tuple(by_name[k.name] for k in kernels)
 
 

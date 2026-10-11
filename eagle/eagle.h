@@ -32,6 +32,7 @@
 #include "eagle/compose.h"
 
 #include "eagle/graph.h"
+#include "eagle/diff.h"
 
 #include "eagle/stream.h"
 

@@ -119,8 +119,7 @@ def test_refusals():
         eagle.Graph().add_group([opaque(lambda: None)])
     with pytest.raises(TypeError):
         eagle.Graph().add(object())
-    with pytest.raises(ValueError, match="record=True is not available"):
-        eagle.Graph().add_node(opaque(lambda: None)).build(record=True)
+    assert eagle.Graph().add_node(opaque(lambda: None)).build(record=True).record is None
     built = eagle.Graph().add_node(opaque(lambda: None)).build()
     with pytest.raises(RuntimeError, match="is built"):
         built.add_node(opaque(lambda: None))

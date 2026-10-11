@@ -78,6 +78,9 @@ and the GPU/CPU device-dispatch internals.
 .. automodule:: eagle.graph
    :members:
 
+.. automodule:: eagle.diff
+   :members: reverse, Reverse, Record, Gradients, Report, broadcast_adjoint
+
 .. automodule:: eagle.marshal
    :members:
 

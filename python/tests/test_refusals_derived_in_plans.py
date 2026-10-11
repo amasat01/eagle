@@ -122,8 +122,8 @@ def test_conditional_reserved_names_only_under_their_modes():
         assert set(ud._RESERVED) <= set(ud._reserved_names(**kw))
 
 
-def test_no_eagle_diff_stub():
-    assert not hasattr(eagle, "diff")
+def test_eagle_diff_is_the_reverse_not_a_stub():
+    assert callable(eagle.diff.reverse) and callable(eagle.diff.Reverse)
 
 
 def test_plan_auto_refuses_a_real_hawk_derived_kernel():

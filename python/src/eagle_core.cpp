@@ -90,6 +90,7 @@
 // self-check sizes). All of it is host code: this module is compiled without a
 // device runtime (EAGLE_CPU_ONLY) and reaches the GPU only through the backend
 // plugin (src/seam/).
+#include "eagle/diff/Transpose.h"
 #include "eagle/exec/HostSchedule.h"
 #include "eagle/exec/HostTeam.h"
 #include "eagle/exec/Partition.h"
@@ -1581,6 +1582,68 @@ NB_MODULE(_core, m)
             return eg::detail::overlap(planeRefOf(a), planeRefOf(b));
         },
         nb::arg("a"), nb::arg("b"), "Do two plane references share a byte?");
+
+    // -- The reverse of a graph (eagle/diff/Transpose.h): eagle.diff plans its
+    // derivative steps, summing joins and snapshots here.
+    using VjpRow = std::tuple<std::int64_t, std::vector<std::string>, std::vector<std::string>>;
+    auto vjpsOf = [](const std::vector<VjpRow>& rows) {
+        std::vector<eagle::diff::NodeVjp> out;
+        for (const auto& [node, reads, writes] : rows) out.push_back({ node, reads, writes });
+        return out;
+    };
+    auto snapshotRows = [](const std::vector<eagle::diff::Snapshot>& s) {
+        std::vector<std::pair<std::int64_t, std::string>> out;
+        for (const auto& x : s) out.emplace_back(x.node, x.plane);
+        return out;
+    };
+    m.attr("DIFF_SEED") = eagle::diff::kSeed;
+    m.attr("DIFF_ZERO") = eagle::diff::kZero;
+    m.def("diff_snapshots",
+        [=](const std::vector<VjpRow>& vjps) { return snapshotRows(eagle::diff::snapshots(vjpsOf(vjps))); },
+        nb::arg("vjps"),
+        "The planes a reverse needs copied during the forward: (node, plane) = copy `plane` just "
+        "before forward node `node` runs. vjps: (node, reads, writes) per node, in node order.");
+    m.def("diff_transpose",
+        [=](const PyDescription& forward, const std::vector<VjpRow>& vjps, const std::vector<std::string>& seeded) {
+            const eagle::diff::ReversePlan p = eagle::diff::transpose(forward.d, vjpsOf(vjps), seeded);
+            std::vector<NodeRow> nodes;
+            for (const eg::Node& n : p.reversed.nodes) nodes.emplace_back(n.label, n.kind, n.stage, n.frame, n.opaque);
+            std::vector<EdgeRow> edges;
+            for (const eg::Edge& e : p.reversed.edges) edges.emplace_back(e.src, e.dst, e.plane, eg::kindName(e.kind));
+            std::vector<std::tuple<std::int64_t, std::string, std::vector<std::int64_t>>> joins;
+            for (const auto& j : p.joins) joins.emplace_back(j.target, j.plane, j.sources);
+            nb::dict out;
+            out["nodes"] = nodes;
+            out["edges"] = edges;
+            out["forward"] = p.forward;
+            out["joins"] = joins;
+            out["snapshots"] = snapshotRows(p.snapshots);
+            out["seed_of"] = p.seedOf;
+            out["read_of"] = p.readOf;
+            out["gradients"] = p.gradients;
+            return out;
+        },
+        nb::arg("forward"), nb::arg("vjps"), nb::arg("seeded"),
+        "The reverse of `forward` (a GraphDescription) as a dict: nodes/edges of the reverse "
+        "(run in order), forward (its forward node, -1 for a join), joins (target, plane, "
+        "sources in summing order), snapshots, seed_of / read_of per reverse node, and gradients "
+        "(plane, source) per graph input. Sources: a reverse node, DIFF_SEED or DIFF_ZERO. "
+        "Raises ValueError naming a node that cannot be reversed.");
+    m.def("ordered_sum",
+        [](std::uintptr_t dst, const std::vector<std::uintptr_t>& src, std::int64_t n, std::uint32_t dtype) {
+            auto go = [&](auto tag) {
+                using T = decltype(tag);
+                std::vector<const T*> in;
+                for (std::uintptr_t a : src) in.push_back(reinterpret_cast<const T*>(a));
+                eagle::diff::orderedSum<T>(reinterpret_cast<T*>(dst), in, n);
+            };
+            if (dtype == EAGLE_BACKEND_REDUCE_F64) go(double{});
+            else if (dtype == EAGLE_BACKEND_REDUCE_F32) go(float{});
+            else throw std::invalid_argument("ordered_sum: dtype must be 0 (f32) or 1 (f64)");
+        },
+        nb::arg("dst"), nb::arg("src"), nb::arg("n"), nb::arg("dtype"),
+        "dst = ((src[0] + src[1]) + ...) elementwise over n host elements, in exactly this order: "
+        "the same bits for every OpenMP thread count. dtype: 0 f32, 1 f64 (the reduce codes).");
 
     nb::class_<eagle::util::BusyGuard>(m, "BusyGuard")
         .def(nb::init<std::string>(), nb::arg("owner"))

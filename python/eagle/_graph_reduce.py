@@ -132,5 +132,21 @@ def _lower_gpu(node, ctx):
     return step
 
 
+def _transpose(node, incoming, ctx):
+    """The reverse of a sum (:mod:`eagle.diff`): every sample receives the
+    adjoint of the total."""
+    x, _out, op, _dtype = node.payload
+    if op != _OPS["sum"][0]:
+        raise ValueError(
+            f"eagle.diff.Reverse: node {ctx.label!r} is a 'max' or 'all' reduce, "
+            "which has no gradient eagle can pull back (a tie has no single "
+            "answer); only op='sum' reverses")
+    from .diff import broadcast_adjoint
+
+    cot, bar_x, n = incoming["out"], ctx.empty_like(x), int(x.shape[0])
+    ctx.add(lambda: broadcast_adjoint(cot, n, out=bar_x), reads=[cot], writes=[bar_x])
+    return {"x": bar_x}
+
+
 register_node_kind("reduce", reads=_reads, writes=_writes,
-                   lower_gpu=_lower_gpu, lower_cpu=_lower_cpu)
+                   lower_gpu=_lower_gpu, lower_cpu=_lower_cpu, transpose=_transpose)

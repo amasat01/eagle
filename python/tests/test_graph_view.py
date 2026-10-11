@@ -96,10 +96,7 @@ def test_conditionals_are_frames_with_their_labels():
     assert all(ord(c) < 128 for c in ascii_only) and "skip if guard" in ascii_only
 
 
-def test_recorded_tag_is_in_the_header_when_recording(monkeypatch):
-    from eagle import graph as G
-
-    monkeypatch.setattr(G, "_RECORD_FACTORY", lambda graph: object())
+def test_recorded_tag_is_in_the_header_when_recording():
     g = _fork_join().build(record=True)
     assert _graph_view.header(g).endswith("backend: cpu · recorded")
 

@@ -183,7 +183,6 @@ moves by one, so does ``graph_builds``); ``launch(n)`` then replays.
 :class:`~eagle.GraphPipeline`; on the CPU ``enqueue`` is ``launch``.
 ``g.backend`` is ``"gpu"``, ``"cpu"`` or ``None`` before the build, and
 ``g.schedule`` says how each stage runs (``"capture"`` on the GPU,
-``"work_share"`` on the CPU).
 ``"work_share"`` or ``"branch_tasks"`` on the CPU, see below).
 
 CPU schedules

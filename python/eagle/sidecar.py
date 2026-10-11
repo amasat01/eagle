@@ -300,9 +300,9 @@ def derived_tag(obj, _depth: int = 0):
     Read off the object, never by importing hawk: a traced derivative
     kernel (its ``sinks`` carry hawk's ``kind``/``primal`` tag), a loaded
     artifact or built plugin whose ``derivative`` block is set, a plan or
-    auto plan (its ``plugin``), a bound method (its ``__self__``) or a
-    ``functools.partial`` (its function and arguments). A bare closure
-    hides what it launches and answers ``None``."""
+    auto plan (its ``plugin``), a bound plan (its ``plan``), a bound method
+    (its ``__self__``) or a ``functools.partial`` (its function and
+    arguments). A bare closure hides what it launches and answers ``None``."""
     if obj is None or _depth > 3:
         return None
     block = getattr(obj, "derivative", None)
@@ -312,7 +312,8 @@ def derived_tag(obj, _depth: int = 0):
     kind = getattr(sinks, "kind", None)
     if kind in ("vjp", "jvp") and hasattr(sinks, "primal"):
         return kind, sinks.primal
-    nxt = [getattr(obj, "plugin", None), getattr(obj, "__self__", None)]
+    nxt = [getattr(obj, "plugin", None), getattr(obj, "plan", None),
+           getattr(obj, "__self__", None)]
     func = getattr(obj, "func", None)
     if func is not None:
         nxt += [func, *getattr(obj, "args", ())]

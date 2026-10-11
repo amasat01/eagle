@@ -33,6 +33,9 @@ rendered through Breathe and split by module. For the Python package
      - ``eagle::graph``: ``Description``, ``deriveEdges``, ``siblingConflicts``,
        ``layout``, ``ascii`` / ``mermaid`` / ``dot``, ``describe``; and
        ``eagle::util::BusyGuard`` (listed under :doc:`api_util`).
+   * - :doc:`api_diff`
+     - ``eagle::diff``: ``transpose`` (the reverse of a graph ``Description``),
+       ``snapshots``, ``orderedSum``; the guide is :doc:`../userguide/autodiff`.
    * - :doc:`api_filtering`
      - ``Scanner``, ``FilteringSlice``, ``RefScanner``, ``RefSlice``,
        ``cuda::Scan``, ``cpu::Scan``.

@@ -124,6 +124,10 @@ def __getattr__(name):
 
         globals()["reduce"] = reduce
         return reduce
+    if name == "diff":
+        import importlib
+
+        return importlib.import_module(".diff", __name__)
     if name == "Graph":
         from .graph import Graph
 

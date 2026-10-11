@@ -66,7 +66,6 @@ def test_graph_builds_counter_loses_no_increments():
 
     ts = [threading.Thread(target=work) for _ in range(n_threads)]
     [t.start() for t in ts]
-    [t.join() for t in ts]
     [t.join(120) for t in ts]
     assert not any(t.is_alive() for t in ts)
     assert _counters.snapshot()["graph_builds"] - before == n_threads * per
