@@ -91,15 +91,21 @@ struct HostTeam {
         const std::int64_t tile =
             static_cast<std::int64_t>(tile_size(bytesPerSample));
         const std::int64_t ntiles = (part.count + tile - 1) / tile;
-#ifdef _OPENMP
-#pragma omp parallel for schedule(dynamic)
-#endif
-        for (std::int64_t t = 0; t < ntiles; ++t) {
+        const auto runTile = [&](std::int64_t t) {
             const std::int64_t base  = part.base + t * tile;
             const std::int64_t count =
                 (t + 1 == ntiles) ? (part.base + part.count - base) : tile;
             fn(args, base, count, part.nSamples);
+        };
+        // inside a caller's parallel region the tiles run in place: no nested team
+#ifdef _OPENMP
+        if (omp_get_level() == 0) {
+#pragma omp parallel for schedule(dynamic)
+            for (std::int64_t t = 0; t < ntiles; ++t) runTile(t);
+            return static_cast<std::size_t>(ntiles);
         }
+#endif
+        for (std::int64_t t = 0; t < ntiles; ++t) runTile(t);
         return static_cast<std::size_t>(ntiles);
     }
 

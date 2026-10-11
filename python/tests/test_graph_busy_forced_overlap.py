@@ -36,6 +36,7 @@ def test_forced_overlap_raises_busy_naming_the_method_in_flight():
     finally:
         release.set()
         t.join(30)
+    assert not t.is_alive()
     assert errs[0] == ("eagle.Graph.launch: another call is still running on this Graph; "
                        "give each thread its own Graph, or wait for it")
     assert errs[1].startswith("eagle.Graph.enqueue: another call is still running on this Graph")
@@ -66,6 +67,8 @@ def test_graph_builds_counter_loses_no_increments():
     ts = [threading.Thread(target=work) for _ in range(n_threads)]
     [t.start() for t in ts]
     [t.join() for t in ts]
+    [t.join(120) for t in ts]
+    assert not any(t.is_alive() for t in ts)
     assert _counters.snapshot()["graph_builds"] - before == n_threads * per
 
 

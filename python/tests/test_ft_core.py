@@ -409,18 +409,37 @@ def test_other_thread_alloc_free_during_capture():
 # --------------------------------------------------------------------------- #
 # A2 lint: the bindings never detach.
 # --------------------------------------------------------------------------- #
+# A binding that detaches names itself here with the busy state that makes it safe.
+_GIL_RELEASE_ALLOWED = {
+    "eagle_core.cpp:run_host_branches":
+        "its busy state is the eagle.Graph BusyGuard held across launch/enqueue; "
+        "it works on copies of entries, params and partitions taken before the release",
+}
+
+
 @pytest.mark.repo_local
 @register_ft_row("FT-LINT-EAGLE-NO-GIL-RELEASE")
 def test_bindings_never_release_the_gil():
     # nb::lock_self is a critical section that CPython suspends whenever the
     # thread detaches, so a binding that releases the GIL needs a per-object
-    # busy state instead (and an allow-list entry naming it). None does.
+    # busy state instead (and an allow-list entry naming it).
     pattern = re.compile(r"gil_scoped_release|call_guard|Py_BEGIN_ALLOW_THREADS")
-    hits = [
-        f"{p.relative_to(_SRC)}:{n}: {line.strip()}"
-        for p in sorted(_SRC.rglob("*"))
-        if p.suffix in {".cpp", ".h", ".cu"}
-        for n, line in enumerate(p.read_text().splitlines(), 1)
-        if pattern.search(line) and not line.lstrip().startswith("//")
-    ]
+    binding = re.compile(r'm\.def\("(\w+)"')
+    hits, used = [], set()
+    for p in sorted(_SRC.rglob("*")):
+        if p.suffix not in {".cpp", ".h", ".cu"}:
+            continue
+        current = None
+        for n, line in enumerate(p.read_text().splitlines(), 1):
+            found = binding.search(line)
+            current = found.group(1) if found else current
+            if pattern.search(line) and not line.lstrip().startswith("//"):
+                key = f"{p.name}:{current}"
+                if key in _GIL_RELEASE_ALLOWED:
+                    used.add(key)
+                else:
+                    hits.append(f"{p.relative_to(_SRC)}:{n}: {line.strip()}")
     assert hits == [], hits
+    assert used == set(_GIL_RELEASE_ALLOWED), (
+        "allow-listed binding no longer releases the GIL: "
+        f"{sorted(set(_GIL_RELEASE_ALLOWED) - used)}")

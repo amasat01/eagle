@@ -90,6 +90,7 @@
 // self-check sizes). All of it is host code: this module is compiled without a
 // device runtime (EAGLE_CPU_ONLY) and reaches the GPU only through the backend
 // plugin (src/seam/).
+#include "eagle/exec/HostSchedule.h"
 #include "eagle/exec/HostTeam.h"
 #include "eagle/exec/Partition.h"
 #include "eagle/graph/Edges.h"
@@ -792,6 +793,47 @@ NB_MODULE(_core, m)
         nb::arg("entry"), nb::arg("params"), nb::arg("partition"),
         "One call, one triple -- the SERIAL arm, and the correctness oracle the "
         "band rows are judged against (fork F-c).");
+
+    m.def("host_threads",
+        [] {
+#ifdef _OPENMP
+            return omp_get_max_threads();
+#else
+            return 1;
+#endif
+        },
+        "The size of the host team a launch would use right now.");
+
+    m.attr("BRANCH_TASKS_MAX_SAMPLES") = eagle::exec::BRANCH_TASKS_MAX_SAMPLES;
+
+    m.def("resolve_host_schedule",
+        [](std::int64_t n, std::int64_t branches, std::int64_t threads, bool native_only) {
+            return eagle::exec::resolve(n, branches, threads, native_only) ==
+                           eagle::exec::Schedule::BranchTasks
+                       ? "branch_tasks" : "work_share";
+        },
+        nb::arg("n"), nb::arg("branches"), nb::arg("threads"), nb::arg("native_only"),
+        "How the host runs a stage: 'branch_tasks' iff it has >= 2 independent "
+        "branches, a team of >= 2 threads, n <= BRANCH_TASKS_MAX_SAMPLES and only "
+        "native nodes; else 'work_share'. Pure.");
+
+    m.def("run_host_branches",
+        [](const std::vector<std::vector<std::tuple<std::uintptr_t,
+               std::vector<std::uintptr_t>, std::vector<Partition>>>>& stage) {
+            std::vector<eagle::exec::HostBranch> branches;
+            for (const auto& branch : stage) {
+                auto& out = branches.emplace_back();
+                for (const auto& [entry, params, parts] : branch)
+                    out.push_back({ reinterpret_cast<eagle::exec::HostEntryV2>(entry),
+                                    asParams(params), parts });
+            }
+            nb::gil_scoped_release release;
+            eagle::exec::runHostBranches(branches);
+        },
+        nb::arg("stage"),
+        "Run one stage's independent branches at once, one per thread, with the GIL "
+        "released. `stage` is a list of branches; a branch is a list of "
+        "(entry, params, partitions) host nodes run in order on one thread.");
 
     m.def("host_tile_size", &HostTeam::tile_size, nb::arg("bytes_per_sample") = 0,
         "The team's tile size in samples -- `Host::launch`'s own rule "

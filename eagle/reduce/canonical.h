@@ -37,6 +37,8 @@
 #include "eagle/typedefs.h"
 #include "eagle/util/throw.h"
 
+#include <omp.h>
+
 #include <algorithm>
 #include <vector>
 
@@ -83,6 +85,10 @@ inline T leaf(const In& in, idx_t base, idx_t cnt)
     for (idx_t t = paired; t < loaded; ++t)
         s[t] = in(base + t);
     for (idx_t off = half / 2; off > 0; off >>= 1) {
+    T s[leafSize];
+    for (idx_t t = 0; t < cnt; ++t)
+        s[t] = in(base + t);
+    for (idx_t off = leafSize / 2; off > 0; off >>= 1) {
         const idx_t lim = cnt > off ? std::min(off, cnt - off) : 0; // has a partner (idx_t may be unsigned)
         for (idx_t t = 0; t < lim; ++t)
             s[t] = OP{}(s[t], s[t + off]);
@@ -188,6 +194,13 @@ template<typename T, typename OP, typename In>
 AETHER_KERNEL()
 __launch_bounds__(256, 1) void leafKernel(
     In in, T* out, idx_t n)
+/** @brief Device leaf: one 256-thread block reduces one leaf block with the
+ *  fixed in-block tree and writes ``out[blockIdx.x]``. Launch with
+ *  ``<<<leafCount(n), leafSize>>>``. */
+template<typename T, typename OP>
+AETHER_KERNEL()
+__launch_bounds__(256, 1) void leafKernel(
+    CRefArrT<T> in, T* out, idx_t n)
 {
     __shared__ T s[256];
     const idx_t base = idx_t(blockIdx.x) * leafSize;
@@ -234,11 +247,14 @@ inline idx_t deviceWorkElems(idx_t n) { return leafCount(n); }
  */
 template<typename T, typename OP, typename In>
 inline T* enqueue(const In& in, idx_t n, T* workA, T* workB,
+template<typename T, typename OP>
+inline T* enqueue(const CRefArrT<T>& in, idx_t n, T* workA, T* workB,
     cudaStream_t stream)
 {
     EAGLE_ASSERT(n >= 1, "canonical::enqueue: empty range");
     idx_t m = leafCount(n);
     leafKernel<T, OP, In><<<unsigned(m), unsigned(leafSize), 0, stream>>>(
+    leafKernel<T, OP><<<unsigned(m), unsigned(leafSize), 0, stream>>>(
         in, workA, n);
     T* src = workA;
     T* dst = workB;

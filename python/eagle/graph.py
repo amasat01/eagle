@@ -404,6 +404,11 @@ class Graph:
             else:
                 self._cpu_steps = [ctx.lower(n) for n in self._nodes]
                 self._schedule = ("work_share",) * len(self._nodes)
+                from ._host_schedule import lower_cpu_stage
+
+                lowered = [lower_cpu_stage(n, ctx) for n in self._nodes]
+                self._cpu_steps = [step for step, _ in lowered]
+                self._schedule = tuple(how for _, how in lowered)
             self._backend = be
             self._edges = edges
             self._labels = [a.label for a in accesses]

@@ -184,6 +184,40 @@ moves by one, so does ``graph_builds``); ``launch(n)`` then replays.
 ``g.backend`` is ``"gpu"``, ``"cpu"`` or ``None`` before the build, and
 ``g.schedule`` says how each stage runs (``"capture"`` on the GPU,
 ``"work_share"`` on the CPU).
+``"work_share"`` or ``"branch_tasks"`` on the CPU, see below).
+
+CPU schedules
+-------------
+
+On the CPU a stage runs one of two ways, and ``build`` picks per stage:
+
+- ``"work_share"``: the stage's nodes run one after another, each spread over
+  the whole thread team. This is the right shape when a node has enough
+  samples to keep every core busy, and it is the schedule of every plain
+  (non-fork) stage.
+- ``"branch_tasks"``: the independent branches of a fork/join stage run at the
+  same time, each branch's nodes in order on one thread, in a single native
+  call that releases the GIL. This is the right shape for small batches (the
+  control and MPC regime), where a team barrier per node costs more than the
+  node: on a typical 8-core machine eight 16-node branches over 1024 samples
+  run several times faster this way.
+
+The choice is a fixed rule, not a heuristic: ``branch_tasks`` when the stage
+is a fork/join with at least two branches, the host team has at least two
+threads, there are at most 4096 samples
+(``eagle._core.BRANCH_TASKS_MAX_SAMPLES``), and every node is a plan launch;
+otherwise ``work_share``. A branch holding a conditional or an
+:func:`~eagle.graph.opaque` Python callable always work-shares, because Python
+code cannot run inside the native branch runner. The rule is evaluated at ``build`` with
+the team size of that moment, and ``g.schedule`` reports the result.
+
+Both schedules give bit-identical results to a serial run, and so does any
+thread count: a node is a per-sample kernel, so how its samples are cut across
+threads changes nothing, and a branch's nodes always run in order. The
+executor opens one team region per run and never nests one: called from inside
+your own ``omp parallel`` region it runs in place on the calling thread. In
+C++ the same rule is ``eagle::exec::resolve`` and the branch runner is
+``eagle::exec::runHostBranches`` (see :doc:`../api/api_host`).
 
 Using one graph from several threads
 ------------------------------------
