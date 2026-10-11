@@ -240,6 +240,10 @@ def repeat_while(step, guard: SkipGuard, max_iters: int) -> RepeatWhile:
     """Repeat ``step`` (a zero-arg callable, a :class:`Skippable`, or a
     tuple of such parts) while ``guard`` holds, at most ``max_iters``
     times: one device-side WHILE node under :meth:`GraphPipeline.build`,
-    a host loop everywhere else.
+    a host loop everywhere else. A refined run phase is refused: a phase
+    count must be static.
     """
+    from .diff.events import refuse_repeated_phase
+
+    refuse_repeated_phase(step)
     return RepeatWhile(step, guard, max_iters)

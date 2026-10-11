@@ -43,6 +43,7 @@
 #include "eagle/cuda/DeviceProps.h"
 #include "eagle/cuda/Graph.h"
 #include "eagle/diff/Reverse.h"
+#include "eagle/events/Sensitivity.h"
 #include "eagle/exec/DeviceKernel.h"
 #include "eagle/filtering/Compact.h"
 #include "eagle/filtering/Reorder.h"
@@ -1226,6 +1227,70 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_x_diff_columns(struct eagle
                 else if (b == 4) dd::fillPrefix(static_cast<std::int32_t*>(dst), static_cast<std::int32_t>(d.value), d.count, stream);
                 else throw std::invalid_argument(std::string(who) + ": fill elem_bytes must be 4 or 8");
             }
+            return 0;
+        });
+    });
+}
+
+namespace {
+
+template <class T>
+eagle::events::EventPlanes<T> eventPlanes(const eagle_backend_event_desc& d)
+{
+    eagle::events::EventPlanes<T> p;
+    p.n = d.n;
+    p.guards = d.guards;
+    p.components = d.components;
+    for (int j = 0; j < d.guards; ++j) {
+        p.g[j] = reinterpret_cast<const T*>(d.g[j]);
+        p.dg[j] = reinterpret_cast<const T*>(d.dg[j]);
+        p.gbar[j] = reinterpret_cast<T*>(d.gbar[j]);
+    }
+    for (int r = 0; r < d.components; ++r) {
+        p.a[r] = reinterpret_cast<T*>(d.a[r]);
+        p.b[r] = reinterpret_cast<const T*>(d.b[r]);
+        p.c[r] = reinterpret_cast<const T*>(d.c[r]);
+    }
+    p.terminated = reinterpret_cast<const std::uint8_t*>(d.terminated);
+    p.applied = reinterpret_cast<const std::int64_t*>(d.applied);
+    p.t0 = reinterpret_cast<const T*>(d.t0);
+    p.h = reinterpret_cast<const T*>(d.h);
+    p.status = reinterpret_cast<std::int8_t*>(d.status);
+    p.which = reinterpret_cast<std::int8_t*>(d.which);
+    p.tau = reinterpret_cast<T*>(d.tau);
+    p.lo = reinterpret_cast<T*>(d.lo);
+    p.hi = reinterpret_cast<T*>(d.hi);
+    p.tStop = reinterpret_cast<T*>(d.t_stop);
+    return p;
+}
+
+}  // namespace
+
+EAGLE_BACKEND_API eagle_backend_status eagle_backend_x_event_columns(struct eagle_backend_event_desc* desc)
+{
+    return guarded([&] {
+        constexpr const char* who = "eagle_backend_x_event_columns";
+        if (desc == nullptr || desc->struct_size < sizeof(eagle_backend_event_desc))
+            throw std::invalid_argument(std::string(who) + ": null desc or struct_size too small");
+        const auto& d = *desc;
+        if (d.n < 0 || d.op > eagle::events::kOpSelect || d.guards < 0
+            || d.guards > EAGLE_BACKEND_EVENT_GUARDS || d.components < 0
+            || d.components > EAGLE_BACKEND_EVENT_COMPONENTS)
+            throw std::invalid_argument(std::string(who) + ": unknown op, or n/guards/components out of range");
+        requireDevice();
+        const int device = resolveDevice(d.device, d.stream);
+        DeviceScope scope(device);
+        bracketed(who, "enqueue", [&] {
+            const auto stream = seamStream(d.stream);
+            if (d.elem_bytes == 8)
+                eagle::events::device::apply(eventPlanes<double>(d), d.op, stream);
+            else if (d.elem_bytes == 4)
+                eagle::events::device::apply(eventPlanes<float>(d), d.op, stream);
+            else
+                throw std::invalid_argument(std::string(who) + ": elem_bytes must be 4 or 8");
+            const cudaError_t e = cudaGetLastError();
+            if (e != cudaSuccess)
+                throw std::runtime_error(std::string(who) + ": launch failed: " + cudaGetErrorString(e));
             return 0;
         });
     });

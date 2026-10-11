@@ -67,7 +67,7 @@ _FAMILY = {"uniform": "Param", "per_sample": "per-sample", "mutable": "per-sampl
 #: eagle's own call-time options: keyword-only, after the kernel's own
 #: arguments; a kernel parameter sharing one of these names is refused.
 _DOOR_OPTIONS = frozenset({"until", "max_steps", "every", "reorder", "record", "window",
-                           "memory_budget"})
+                           "memory_budget", "events", "on_no_event"})
 
 
 def _refuse(text: str):
@@ -448,14 +448,19 @@ class SimResult:
     :attr:`finished` is the per-sample mask, :attr:`done` whether every
     sample did, :attr:`status` ``"finished"``/``"max_steps"``,
     :attr:`steps`/:attr:`report`/:attr:`wall_s` the loop's steps, full
-    :class:`eagle.RunReport` and wall time."""
+    :class:`eagle.RunReport` and wall time. An ``events="refine"`` run also
+    fills :attr:`t_stop` (each sample's event time) and :attr:`event_status`
+    (see :attr:`eagle.Runner.event_status`); both are ``None`` otherwise."""
 
     __slots__ = ("state", "finished", "done", "steps", "status", "report", "n", "record",
-                 "wall_s", "allocated")
+                 "wall_s", "allocated", "t_stop", "event_status")
 
-    def __init__(self, *, state, finished, report, wall_s, allocated, record=None):
+    def __init__(self, *, state, finished, report, wall_s, allocated, record=None,
+                 t_stop=None, event_status=None):
         put = object.__setattr__
         put(self, "record", record)
+        put(self, "t_stop", t_stop)
+        put(self, "event_status", event_status)
         put(self, "state", dict(state))
         put(self, "finished", finished)
         put(self, "report", report)
@@ -500,7 +505,8 @@ class Simulation:
 
     def __init__(self, model, args, kwargs, *, until=None, max_steps,
                  every=None, reorder=None, scalar_type=None, layout=None,
-                 record=False, window=None, memory_budget=None, dispatch=None):
+                 record=False, window=None, memory_budget=None, dispatch=None,
+                 events="step", on_no_event="raise"):
         from ._layout import rewrap, split_marks
 
         if record and dispatch is not None:
@@ -568,7 +574,8 @@ class Simulation:
         self._device, self._xp = device, xp
 
         step = plans[0] if len(plans) == 1 else selected
-        if spec is not None and not single and layout is None and not record:
+        if (spec is not None and not single and layout is None and not record
+                and events == "step"):
             from ._dispatch_door import DispatchRunner
 
             def plain(steps, step=step, final=final):
@@ -580,8 +587,9 @@ class Simulation:
             self.runner = until_done(step, max_steps=max_steps, every=every,
                                      reorder=reorder, record=record, window=window,
                                      memory_budget=memory_budget, layout=layout,
+                                     events=events, on_no_event=on_no_event,
                                      **rewrap(final, axes))
-        if record:
+        if record or events == "refine":
             self.runner._recorder.owner = self
             self.runner._recorder.door = "eagle.simulate"
         self.loop = self.runner.loop
@@ -622,7 +630,8 @@ class Simulation:
         wall = time.perf_counter() - t0
         return SimResult(state=self._state, finished=self.terminated, report=report,
                          wall_s=wall, allocated=self.names["allocated"],
-                         record=self.runner.record)
+                         record=self.runner.record, t_stop=getattr(self.runner, "t_stop", None),
+                         event_status=getattr(self.runner, "event_status", None))
 
     def reset(self) -> None:
         """Clear the finished mask (and the active set): the next :meth:`run`
@@ -649,7 +658,8 @@ def _check_step(selected, names, finishers, compacting, every, reorder) -> None:
 def simulation(model, *args, until=None, max_steps: int,
                every: int | None = None, reorder=None, scalar_type=None,
                layout=None, record: bool = False, window=None,
-               memory_budget: int | None = None, dispatch=None, **kwargs) -> Simulation:
+               memory_budget: int | None = None, dispatch=None, events: str = "step",
+               on_no_event: str = "raise", **kwargs) -> Simulation:
     """Bind and build ``model`` once; returns the :class:`Simulation`, whose
     :meth:`~Simulation.run` runs it (again, after :meth:`~Simulation.reset`,
     without rebuilding). ``*args``/``**kwargs`` are the kernel's own, bound
@@ -657,13 +667,15 @@ def simulation(model, *args, until=None, max_steps: int,
     return Simulation(model, args, kwargs, until=until, max_steps=max_steps,
                       every=every, reorder=reorder, scalar_type=scalar_type,
                       layout=layout, record=record, window=window,
-                      memory_budget=memory_budget, dispatch=dispatch)
+                      memory_budget=memory_budget, dispatch=dispatch, events=events,
+                      on_no_event=on_no_event)
 
 
 def simulate(model, *args, until=None, max_steps: int,
              every: int | None = None, reorder=None, scalar_type=None,
              layout=None, record: bool = False, window=None,
-             memory_budget: int | None = None, dispatch=None, **kwargs) -> SimResult:
+             memory_budget: int | None = None, dispatch=None, events: str = "step",
+             on_no_event: str = "raise", **kwargs) -> SimResult:
     """Run ``model`` on every sample until each one finishes (or ``max_steps``
     is reached) and return the :class:`SimResult`.
 
@@ -699,6 +711,16 @@ def simulate(model, *args, until=None, max_steps: int,
         res = eagle.simulate(model, x=x0, v=v0, max_steps=1000, record=True)
         grads = eagle.diff.reverse(res.record, {"x": numpy.ones_like(x0)})
 
+    ``events="refine"`` stops each sample AT its stop rule's crossing, inside
+    the stop step, instead of at the step's end (``on_no_event`` is
+    :func:`eagle.until_done`'s); the result's :attr:`SimResult.t_stop` is the
+    event time, and a recorded run's reverse includes its sensitivity::
+
+        res = eagle.simulate(fall, y=y0, v=v0, t=t0, dt=0.01, max_steps=1000,
+                             events="refine", record=True)
+        res.t_stop                    # when each sample hit the ground
+        grads = eagle.diff.reverse(res.record, {"t": numpy.ones_like(y0)})
+
     ``dispatch`` chooses how the model's ``policy="auto"`` dispatch groups run.
     ``None`` (default) keeps every group the author declared and decides the
     ``"auto"`` ones by measurement: the model starts fused, counts how many
@@ -719,4 +741,5 @@ def simulate(model, *args, until=None, max_steps: int,
     return simulation(model, *args, until=until, max_steps=max_steps,
                       every=every, reorder=reorder, scalar_type=scalar_type,
                       layout=layout, record=record, window=window,
-                      memory_budget=memory_budget, dispatch=dispatch, **kwargs).run()
+                      memory_budget=memory_budget, dispatch=dispatch, events=events,
+                      on_no_event=on_no_event, **kwargs).run()

@@ -583,6 +583,38 @@ struct eagle_backend_diff_desc {
  *  the stream and returns the bytes in host memory). Experimental. */
 eagle_backend_status eagle_backend_x_diff_columns(struct eagle_backend_diff_desc* desc);
 
+/** One per-sample event operation (``x_event_columns``): ``op`` is an
+ *  ``eagle::events::Op`` (classify, newton, settle, graze, commit, seed,
+ *  select; ``eagle/events/Refine.h``, ``Sensitivity.h``). Every address is a
+ *  device plane of ``n`` samples (row pointers for ``a``/``b``/``c``), 0 when
+ *  the operation does not use it. */
+#define EAGLE_BACKEND_EVENT_GUARDS     8
+#define EAGLE_BACKEND_EVENT_COMPONENTS 32
+struct eagle_backend_event_desc {
+    uint32_t struct_size;
+    uint32_t op;
+    int32_t device;
+    uint32_t elem_bytes;     /**< 4: f32, 8: f64 */
+    int64_t n;
+    int32_t guards;
+    int32_t components;
+    uint64_t g[EAGLE_BACKEND_EVENT_GUARDS];
+    uint64_t dg[EAGLE_BACKEND_EVENT_GUARDS];
+    uint64_t gbar[EAGLE_BACKEND_EVENT_GUARDS];
+    uint64_t a[EAGLE_BACKEND_EVENT_COMPONENTS];
+    uint64_t b[EAGLE_BACKEND_EVENT_COMPONENTS];
+    uint64_t c[EAGLE_BACKEND_EVENT_COMPONENTS];
+    uint64_t terminated;     /**< uint8 */
+    uint64_t applied;        /**< int64 */
+    uint64_t t0, h;
+    uint64_t status, which;  /**< int8 */
+    uint64_t tau, lo, hi, t_stop;
+    uint64_t stream;
+};
+
+/** Enqueue one per-sample event operation (capturable). Experimental. */
+eagle_backend_status eagle_backend_x_event_columns(struct eagle_backend_event_desc* desc);
+
 eagle_backend_status eagle_backend_x_composer_create(const struct eagle_backend_composer_desc* desc, eagle_backend_composer* out);
 /** CONSUMES ``launcher`` (on OK). ``name`` / ``pre`` may be NULL. */
 eagle_backend_status eagle_backend_x_composer_register_launcher(eagle_backend_composer h, eagle_backend_launcher launcher,

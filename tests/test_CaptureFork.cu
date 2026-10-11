@@ -390,7 +390,7 @@ TEST_F(CaptureForkFixture, UnjoinedCaptureThrowsFromEnd)
     scaleKernel<<<1, BLOCK, 0, fork.branch(1)>>>(d_x, d_y2, 3.0, N);
     /* DELIBERATELY OMITTED: fork.join(); */
 
-    EXPECT_THROW(capturer.end(), aether::Error)
+    EXPECT_THROW(static_cast<void>(capturer.end()), aether::Error)
         << "an unjoined capture must throw, not return a null graph";
 
     /* Drain whatever the invalidated capture left behind so the rest of

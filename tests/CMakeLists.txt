@@ -204,6 +204,14 @@ list(REMOVE_DUPLICATES TEST_FILES)
 set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/test_DiffWindow.cpp
   PROPERTIES COMPILE_DEFINITIONS "EAGLE_CPU_ONLY=1")
 
+# Event refinement (bracket, status, the refine loop) and its sensitivity seed
+# are CUDA-free on the host path: compiled by CXX in BOTH build modes, the
+# test_DiffWindow.cpp recipe.
+list(APPEND TEST_FILES ${CMAKE_CURRENT_SOURCE_DIR}/test_EventRefine.cpp)
+list(REMOVE_DUPLICATES TEST_FILES)
+set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/test_EventRefine.cpp
+  PROPERTIES COMPILE_DEFINITIONS "EAGLE_CPU_ONLY=1")
+
 # The busy guard is header-only and CUDA-free, so it must compile+run in BOTH
 # build modes (no forced define: it never reaches eagle/typedefs.h).
 list(APPEND TEST_FILES ${CMAKE_CURRENT_SOURCE_DIR}/test_Busy.cpp)

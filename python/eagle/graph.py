@@ -51,7 +51,10 @@ class NodeKind:
     (node) -> ((name, array), ...)`` (what a recorder snapshots per launch)
     and ``native_entry(node, ctx) -> (entry, params, partition) | None``
     (what a native host runner executes; ``None`` = a Python host arm) are
-    optional."""
+    optional. ``gpu_eager=True`` marks a kind whose GPU lowering is a host
+    call that cannot be captured (it reads results back): the GPU graph is
+    then captured in segments around it, each launch running the segments
+    and the eager calls in order; a graph without one is one capture."""
 
     kind: str
     reads: Callable
@@ -61,6 +64,7 @@ class NodeKind:
     transpose: Callable | None = None
     record_planes: Callable | None = None
     native_entry: Callable | None = None
+    gpu_eager: bool = False
 
 
 _REGISTRY_LOCK = threading.Lock()
@@ -77,14 +81,14 @@ _RECORD_FACTORY = None
 
 def register_node_kind(kind: str, *, reads, writes, lower_gpu, lower_cpu,
                        transpose=None, record_planes=None,
-                       native_entry=None) -> NodeKind:
+                       native_entry=None, gpu_eager=False) -> NodeKind:
     """Register a node kind; idempotent for an identical registration.
     Registering a DIFFERENT kind under an existing name is refused (a silent
     swap would re-type every Graph built so far). Import-time only."""
     if not isinstance(kind, str) or not kind:
         raise TypeError("eagle.graph.register_node_kind: kind must be a non-empty str")
     new = NodeKind(kind, reads, writes, lower_gpu, lower_cpu, transpose,
-                   record_planes, native_entry)
+                   record_planes, native_entry, bool(gpu_eager))
     with _REGISTRY_LOCK:
         old = _REGISTRY.get(kind)
         if old is None:
@@ -180,6 +184,20 @@ class LowerCtx:
         return (k.lower_gpu if self.backend == "gpu" else k.lower_cpu)(node, self)
 
 
+def _eager(copies, call):
+    """An eager GPU node's host call: the recorder's copies first, the call,
+    then a wait on the current stream so the next segment sees its writes."""
+
+    def run():
+        import cupy
+
+        for copy in copies:
+            copy()
+        call()
+        cupy.cuda.get_current_stream().synchronize()
+    return run
+
+
 # --- The Graph --- #
 class _Access:
     """One executable node for the edge derivation."""
@@ -216,6 +234,7 @@ class Graph:
         self._labels: list = []
         self._schedule: tuple = ()
         self._pipe = None
+        self._segments = None   # a GPU graph with an eager node: [pipeline | callable]
         self._cpu_steps: list = []
         self._record_on = False
         self._recorder = None
@@ -450,17 +469,36 @@ class Graph:
             if be == "gpu":
                 from .pipeline import GraphPipeline
 
-                stages = []
+                top = {id(n) for n in self._nodes}
+                for a in accesses:
+                    if get_node_kind(a.node.kind).gpu_eager and id(a.node) not in top:
+                        raise ValueError(
+                            f"eagle.Graph.build: node {a.label!r} runs on the host between "
+                            "captured stages on the GPU, so it cannot run concurrently "
+                            "inside add_group; place it at the top level")
+                segments, stages = [], []
                 for i, node in enumerate(self._nodes):
+                    if get_node_kind(node.kind).gpu_eager:
+                        if stages:
+                            segments.append(stages)
+                            stages = []
+                        segments.append(_eager(list(before(i)), ctx.lower(node)))
+                        continue
                     stages += [("step", copy) for copy in before(i)]
                     res = ctx.lower(node)
                     if isinstance(res, ForkStage):
                         stages.append(("group", res.members))
                     else:
                         stages.append(("step", res))
-                pipe = GraphPipeline()
-                pipe._capture_stages(stages)      # bumps `captures` once
-                self._pipe = pipe
+                if not segments:
+                    pipe = GraphPipeline()
+                    pipe._capture_stages(stages)      # bumps `captures` once
+                    self._pipe = pipe
+                else:
+                    if stages:
+                        segments.append(stages)
+                    self._segments = [GraphPipeline()._capture_stages(seg)
+                                      if isinstance(seg, list) else seg for seg in segments]
                 self._schedule = ("capture",) * len(self._nodes)
             else:
                 from ._host_schedule import lower_cpu_stage
@@ -490,7 +528,9 @@ class Graph:
             self._need_built("launch")
             if self._recorder is not None:
                 self._recorder.begin(n, "launch")
-            if self._backend == "gpu":
+            if self._segments is not None:
+                self._run_segments(n)
+            elif self._backend == "gpu":
                 self._pipe.launch(n)
             else:
                 for _ in range(n):
@@ -508,7 +548,9 @@ class Graph:
                 raise RuntimeError(
                     "eagle.Graph.enqueue: a record=True graph runs with launch(), "
                     "which waits for the run its Record describes")
-            if self._backend == "gpu":
+            if self._segments is not None:      # an eager node waits for its inputs
+                self._run_segments(n)
+            elif self._backend == "gpu":
                 self._pipe.enqueue(n)
             else:
                 for _ in range(n):
@@ -537,9 +579,19 @@ class Graph:
     def synchronize(self) -> Graph:
         """Block until enqueued runs complete (CPU: a no-op)."""
         self._need_built("synchronize")
-        if self._backend == "gpu":
+        if self._backend == "gpu" and self._segments is None:
             self._pipe.synchronize()
         return self
+
+    def _run_segments(self, n):
+        """A segmented GPU graph: each captured segment launched (and waited
+        for) in order, each eager node called between them."""
+        for _ in range(n):
+            for seg in self._segments:
+                if callable(seg):
+                    seg()
+                else:
+                    seg.launch(1)
 
     # -- introspection -- #
     def node_labels(self) -> list:

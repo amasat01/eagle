@@ -144,7 +144,8 @@ class ReverseCtx:
             self._gate = before
 
     def add(self, step, *, reads=(), writes=()):
-        """Run ``step`` in the reverse: a bound derivative plan, or a zero-arg
+        """Run ``step`` in the reverse: a bound derivative plan, a graph
+        :class:`~eagle.graph.Node` of a registered kind, or a zero-arg
         callable touching the declared arrays."""
         if self._gate is not None:
             if hasattr(step, "_arg_spec"):
@@ -152,10 +153,12 @@ class ReverseCtx:
                 reads = [a for _n, a, _r in kind.reads(node)]
                 writes = [a for _n, a, _r in kind.writes(node)]
                 step = step.launch
-            self._steps.append(skippable(opaque(step, reads=reads, writes=writes), self._gate))
+            if not isinstance(step, Node):
+                step = opaque(step, reads=reads, writes=writes)
+            self._steps.append(skippable(step, self._gate))
             return
-        self._steps.append(step if hasattr(step, "_arg_spec")
-                           else opaque(step, reads=reads, writes=writes))
+        keep = hasattr(step, "_arg_spec") or isinstance(step, Node)
+        self._steps.append(step if keep else opaque(step, reads=reads, writes=writes))
 
     def not_bitwise(self, name):
         """Mark the adjoint of ``name`` as a scatter-add (not bit-reproducible)."""

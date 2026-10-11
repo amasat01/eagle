@@ -94,11 +94,11 @@ class _Kernels:
     __slots__ = ("single", "fused", "vjp", "taped", "time")
 
 
-def _step_kernels(plugin, window, door, device):
+def _step_kernels(plugin, window, door, device, events="step"):
     cache = getattr(plugin, "_tapes", None)
     if cache is None:
         cache = plugin._tapes = {}
-    key = (window, device)
+    key = (window, device, events)
     if key in cache:
         return cache[key]
     source = getattr(plugin, "_hawk_source", None)
@@ -118,7 +118,7 @@ def _step_kernels(plugin, window, door, device):
     finish = getattr(step.walk, "finish", None)
     if finish is not None and finish[1] != 1:
         raise _not_yet(door, f"for a kernel taking {finish[1]} steps per launch")
-    twin = tape(kernel, window)
+    twin = tape(kernel, window, events=events)
     single = getattr(twin, "one_step", None) or twin
     fused = twin if single is not twin else None
     derived = Kernel(f"{step.name}_step_vjp", step_vjp(kernel))
@@ -138,13 +138,17 @@ def _step_kernels(plugin, window, door, device):
     return out
 
 
-def record_planes(plan, max_steps, window, device, xp, n, planes):
+def record_planes(plan, max_steps, window, device, xp, n, planes, events="step"):
     """The per-sample planes a recorded run adds, made before the runner
     binds so a reordering ActiveSet can own them: ``applied_steps``, the
     time plane's start ``<t>_0``, a time step the twin reads per sample, and
-    the forward's tape (never touched: declared indirect, never moved)."""
-    k = _step_kernels(plan.plugin, resolve_window(window, max_steps, "eagle.until_done"),
-                      "eagle.until_done", device)
+    the forward's tape (never touched: declared indirect, never moved). An
+    ``events="refine"`` run's tape is one real row per sample: the state it
+    held before its last step."""
+    refine = events == "refine"
+    k = _step_kernels(plan.plugin, 1 if refine else resolve_window(window, max_steps,
+                                                                    "eagle.until_done"),
+                      "eagle.until_done", device, events)
     twin = k.fused or k.single
     scalar = planes[k.taped[0][0]].dtype
     out = {APPLIED_STEPS: xp.zeros(n, dtype=twin.arg_dtypes[APPLIED_STEPS])}
@@ -154,6 +158,10 @@ def record_planes(plan, max_steps, window, device, xp, n, planes):
         if role == "per_sample" and nm in planes and not hasattr(planes[nm], "shape"):
             out[nm] = xp.full(n, planes[nm], dtype=scalar)
     width = sum(rows for _nm, rows in k.taped)
+    if refine:
+        row = xp.zeros((width, n), dtype=scalar)
+        out[TAPE] = (row, row)
+        return out
     rows = resolve_window(window, max_steps, "eagle.until_done") * width
     out[TAPE] = _dummy_tape(xp, rows, width, n, scalar)
     return out
@@ -187,14 +195,15 @@ class RunTape:
     int64 host array), the window, the budget, and the non-state planes the
     step read."""
 
-    __slots__ = ("checkpoints", "steps", "window", "reads", "budget")
+    __slots__ = ("checkpoints", "steps", "window", "reads", "budget", "events")
 
-    def __init__(self, checkpoints, steps, window, reads, budget):
+    def __init__(self, checkpoints, steps, window, reads, budget, events=None):
         self.checkpoints = checkpoints
         self.steps = steps
         self.window = window
         self.reads = reads
         self.budget = budget
+        self.events = events     # an events="refine" run's refinement (diff/events.py)
 
     @property
     def nbytes(self) -> int:
@@ -202,31 +211,46 @@ class RunTape:
 
     def copy(self):
         dup = lambda a: xp_of(a).array(a, copy=True)
+        from .events import copy_events
+
         return RunTape([{k: dup(a) for k, a in c.items()} for c in self.checkpoints],
                        self.steps.copy(), self.window,
-                       {k: dup(a) for k, a in self.reads.items()}, self.budget)
+                       {k: dup(a) for k, a in self.reads.items()}, self.budget,
+                       copy_events(self.events))
 
 
 class RunRecorder:
     """The record slot of one runner: the twin bound over the runner's own
     planes (tape off) and the checkpoint pool."""
 
-    def __init__(self, runner, plan, door, window, budget, extras, owner):
+    def __init__(self, runner, plan, door, window, budget, extras, owner, *, record=True,
+                 events="step", on_no_event="raise"):
         from ..plan import plan as make_plan
 
         self.runner = runner
         self.owner = owner            # what Record.forward names: the Runner or Simulation
         self.door = door
-        self.window = resolve_window(window, runner._max_steps, door)
-        self.budget = resolve_budget(budget, runner._device, door)
+        self.recording = record
+        refine = events == "refine"
+        # without record=, a refined run keeps no checkpoints but the first
+        self.window = (resolve_window(window, runner._max_steps, door) if record
+                       else max(int(runner._max_steps), 1))
+        self.budget = resolve_budget(budget, runner._device, door) if record else 0
         xp, n = runner._xp, runner.n
         self.xp, self.n, self.device = xp, n, runner._device
-        self.kernels = k = _step_kernels(plan.plugin, self.window, door, runner._device)
+        # the forward of a refined run tapes one row (the state before the
+        # stop step); the reverse recomputes with the window's own twin
+        self.fwd_kernels = (_step_kernels(plan.plugin, 1, door, runner._device, events)
+                            if refine else None)
+        self.kernels = k = (_step_kernels(plan.plugin, self.window, door, runner._device, events)
+                            if record else self.fwd_kernels)
+        self.fwd_kernels = self.fwd_kernels or k
         # an automatic or steps=K kernel replays its fused twin: at most its
         # own steps per launch, never across a window boundary
         self.fused = k.fused is not None
         self.max_k = int(runner._k_max or 1) if self.fused else 1
-        twin = k.fused if self.fused else k.single
+        fk = self.fwd_kernels
+        twin = fk.fused if self.fused else fk.single
         self.roles = roles = {nm: role for role, nm in twin.arg_spec}
         planes = {nm: v for nm, v in runner.step._planes.items() if nm in roles}
         if runner.active is not None:   # the real map, not a deferred placeholder
@@ -241,7 +265,7 @@ class RunRecorder:
         self.every = 1 if runner.auto else runner.every
         self.reorders = runner._reorders()
         width = sum(rows for _nm, rows in k.taped)
-        planes[TAPE_ON] = 0
+        planes[TAPE_ON] = 1 if refine else 0
         self.word = None
         if self.fused:
             self.word = planes[FUSED_STEPS] = xp.ones(1, dtype=xp.int64)
@@ -258,6 +282,12 @@ class RunRecorder:
         self.slot = _core.RecordSlot()
         self.live = None
         self._taken = 0
+        self.plan = plan
+        self.refine = None
+        if refine:
+            from .events import RefinePass
+
+            self.refine = RefinePass(self, on_no_event)
 
     def per_sample_bytes(self):
         """What one sample costs a reverse: its checkpoints over the longest
@@ -330,10 +360,19 @@ class RunRecorder:
                 launches = self._launch_count(ran)
             if self.reorders:
                 self.active.restore()
+            if self.refine is not None:
+                self.refine.run()
+            if not self.recording:
+                self.slot.abandon()
+                finished = int(runner.terminated.sum())
+                return RunReport(n=n, finished=finished, done=finished == n,
+                                 launches=launches, steps=ran, compactions=0, reorders=0,
+                                 build_s=0.0, exact_steps=True, mode="refine")
             steps = self.planes[APPLIED_STEPS]
             steps = (steps.get() if self.device else steps).astype("int64").reshape(-1)
             reads = {nm: self.planes[nm] for nm in self.read_names}
-            tape = RunTape(self.pool[:self._taken], steps, window, reads, self.budget)
+            tape = RunTape(self.pool[:self._taken], steps, window, reads, self.budget,
+                           None if self.refine is None else self.refine.held())
             record = Record(self.owner, self.slot.generation, tape, self)
         except BaseException:
             self.slot.abandon()
@@ -492,6 +531,12 @@ class RunReverse:
         self.summed = {nm for nm in self.acc if nm in rec.uniforms or nm in rec.promoted}
         self.folded = {rec.t0: k.time} if rec.t0 in self.acc else {}
         self.inputs = tuple(self.taped) + tuple(nm for nm in self.acc if nm not in self.folded)
+        if rec.refine is not None:      # inputs only the stop rule reads (a guard's parameter)
+            ek = rec.refine.k
+            more = [nm[4:] for _r, nm in ek.vjp.arg_spec if nm.startswith("bar_")
+                    and not nm.endswith("_refined") and not nm.startswith("bar_event_g")]
+            self.inputs += tuple(nm for nm in more if nm not in self.inputs
+                                 and nm not in (ek.tau, rec.t0) and nm in rec.planes)
         self._busy = BusyGuard("eagle.diff.Reverse")
         self._tape = None
 
@@ -519,7 +564,16 @@ class RunReverse:
                     f"{self.n} samples of {nm!r} (shape {tuple(rec.state[nm].shape)}); pass "
                     "one value per sample in sample order")
         with self._busy("__call__"), record._hold(door) as tape:
+            extra = None
+            if tape.events is not None:     # an events="refine" run: the moved stop time
+                from .events import RefineReverse
+
+                seeds, steps, extra = RefineReverse(rec).seeds(tape, seeds, door)
+                tape = RunTape(tape.checkpoints, steps, tape.window, tape.reads, tape.budget,
+                               tape.events)
             values = self._run(tape, seeds, names)
+            if extra:
+                self._add_refine(values, extra, names)
         _counters.bump("reverses")
         return Gradients(values, Report(record.generation, {nm: True for nm in values},
                                         self.passes))
@@ -566,7 +620,7 @@ class RunReverse:
             elif nm in partials:
                 code = 1 if self.acc[nm].dtype == numpy.float64 else 0
                 values[nm] = xp.asarray(_combine(partials[nm], code), dtype=self.acc[nm].dtype)
-            else:
+            elif nm in per:
                 values[nm] = per[nm]
         for t0, t in self.folded.items():
             if t in values:
@@ -574,6 +628,19 @@ class RunReverse:
         if rec.device:
             xp.cuda.get_current_stream().synchronize()
         return values
+
+    def _add_refine(self, values, extra, names):
+        """The refine entry's share of each input gradient, added to the
+        step-by-step reverse's: summed in sample order for a parameter, per
+        sample otherwise, a start time's share to its time plane."""
+        rec = self.rec
+        for nm, g in extra.items():
+            target = self.folded.get(nm, rec.kernels.time if nm == rec.t0 else nm)
+            if target not in names:
+                continue
+            summed = target in self.summed or target in rec.uniforms
+            share = self.xp.asarray(self._sum(g), dtype=g.dtype) if summed else g
+            values[target] = values[target] + share if target in values else share
 
     def _orders(self, tape, cols):
         """Per window, the checkpoint column of each reverse slot: the

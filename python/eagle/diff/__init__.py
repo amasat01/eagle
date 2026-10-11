@@ -19,7 +19,9 @@ from __future__ import annotations
 from .. import graph as _graph
 from ._record import Record, Recorder
 from ._reverse import Gradients, Report, Reverse, broadcast_adjoint, reverse
+from .events import phase
 
-__all__ = ["Gradients", "Record", "Report", "Reverse", "broadcast_adjoint", "reverse"]
+__all__ = ["Gradients", "Record", "Report", "Reverse", "broadcast_adjoint", "phase",
+           "reverse"]
 
 _graph._install_record_factory(Recorder)

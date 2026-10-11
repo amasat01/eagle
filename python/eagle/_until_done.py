@@ -489,7 +489,8 @@ class Runner:
 
     @_layout.door
     def __init__(self, plan, *, max_steps, every=None, reorder=None, record=False,
-                 window=None, memory_budget=None, **planes):
+                 window=None, memory_budget=None, events="step", on_no_event="raise",
+                 **planes):
         # Internal only (never a bound plane name, popped before the
         # plane-binding machinery below ever sees it): forces
         # :func:`_fast_mode_for`'s decision for the card's explicit-arm row
@@ -543,7 +544,11 @@ class Runner:
         xp = _array_module(device)
         for i in finishers:
             _require_counter_slot(specs[i], names[i])
-        for reserved in _reserved_names(record=record):
+        from .diff.events import check_events
+
+        check_events(events, on_no_event, "eagle.until_done")
+        refine = events == "refine"
+        for reserved in _reserved_names(record=record, events=events):
             if reserved in planes:
                 raise ValueError(
                     f"eagle.until_done: {reserved!r} is allocated and bound by the "
@@ -574,8 +579,10 @@ class Runner:
                         "a several-plan step takes one step per launch")
             k = 1
         auto = k == FINISH_AUTO
-        if record:
+        if record or refine:
             _refuse_record(len(plans))
+        if record:
+            pass
         elif window is not None or memory_budget is not None:
             raise ValueError("eagle.until_done: window= and memory_budget= set how a "
                              "record=True run is reversed; pass record=True, or drop them")
@@ -618,13 +625,17 @@ class Runner:
                 active.own(*owned)
 
         extras = {}
-        if record:      # the recorded run's own per-sample planes move with a reorder
+        if record or refine:    # the run's own per-sample planes move with a reorder
             from .diff._run import record_planes
 
-            extras = record_planes(plans[0], max_steps, window, device, xp, n, planes)
+            extras = record_planes(plans[0], max_steps, window, device, xp, n, planes,
+                                   events=events)
             if active is not None and active.theta is not None:
                 active.own(*(v for nm, v in extras.items() if nm != "tape" and v.shape))
-                active.indirect(extras["tape"][0])
+                if refine:      # a real row per sample: it moves with its sample
+                    active.own(extras["tape"][0])
+                else:
+                    active.indirect(extras["tape"][0])
         bound = []
         for plan_i, spec in zip_strict(plans, specs):
             if len(plans) == 1:
@@ -686,11 +697,12 @@ class Runner:
             self._bump(xp.zeros(1, dtype=xp.uint32), size=1)  # compile before capture
 
         self._recorder = None
-        if record:
+        if record or refine:
             from .diff._run import RunRecorder
 
             self._recorder = RunRecorder(self, plans[0], "eagle.until_done", window,
-                                         memory_budget, extras, self)
+                                         memory_budget, extras, self, record=record,
+                                         events=events, on_no_event=on_no_event)
         launches = tuple(b.launch for b in bound)
 
         def launch():
@@ -1273,6 +1285,22 @@ class Runner:
         Example: ``runner.run(); grads = eagle.diff.reverse(runner.record, {"x": dJ_dx})``."""
         return None if self._recorder is None else self._recorder.live
 
+    @property
+    def t_stop(self):
+        """The event time of each sample of an ``events="refine"`` run (the
+        step's end time for a sample with no located event); ``None``
+        otherwise. A per-sample plane, written by every run."""
+        refine = getattr(self._recorder, "refine", None)
+        return None if refine is None else refine.t_stop
+
+    @property
+    def event_status(self):
+        """Per sample, how an ``events="refine"`` run located its event
+        (int8): 1 inside the stop step, 2 at the step's end, 3 no event (with
+        ``on_no_event="zero"``); ``None`` without ``events="refine"``."""
+        refine = getattr(self._recorder, "refine", None)
+        return None if refine is None else refine.status
+
     def _reorders(self) -> bool:
         return self.active is not None and self.active.theta is not None
 
@@ -1322,7 +1350,7 @@ def _cadence(name: str, every, k: int) -> int:
 
 def until_done(plan, *, max_steps: int, every: int | None = None, reorder=None,
                record: bool = False, window=None, memory_budget: int | None = None,
-               **planes) -> Runner:
+               events: str = "step", on_no_event: str = "raise", **planes) -> Runner:
     """Bind ``plan`` and build the loop that runs it until every sample is
     done; returns the :class:`Runner` (``.run()`` runs it).
 
@@ -1358,15 +1386,36 @@ def until_done(plan, *, max_steps: int, every: int | None = None, reorder=None,
 
         runner = eagle.until_done(plan, max_steps=1000, record=True, x=x, v=v)
         runner.run()
-        grads = eagle.diff.reverse(runner.record, {"x": dJ_dx})"""
+        grads = eagle.diff.reverse(runner.record, {"x": dJ_dx})
+
+    ``events="refine"`` locates each sample's stop INSIDE its stop step (the
+    default ``"step"`` stops at the step the rule fires, with a zero
+    derivative through the stop time). The kernel declares its time plane
+    and step, ``@hawk.kernel(time="t", time_step="dt")``, and its stop rule
+    is a smooth crossing (``terminated = x < a * t``). Each run then leaves
+    the state AT the crossing in the planes, :attr:`Runner.t_stop` holds the
+    event time and :attr:`Runner.event_status` how it was located; under
+    ``record=True`` the reverse includes the stop time's sensitivity. A
+    sample with no crossing in its stop step (it hit ``max_steps``) is
+    refused unless ``on_no_event="zero"`` (its stop stays the stepped one,
+    with zero event sensitivity); a grazing crossing and two stop rules
+    crossing in one step are always refused. Example::
+
+        runner = eagle.until_done(plan, max_steps=1000, events="refine",
+                                  record=True, x=x, v=v, t=t)
+        runner.run()
+        runner.t_stop                       # the event time of each sample
+        grads = eagle.diff.reverse(runner.record, {"t": numpy.ones(n)})"""
     return Runner(plan, max_steps=max_steps, every=every, reorder=reorder,
-                  record=record, window=window, memory_budget=memory_budget, **planes)
+                  record=record, window=window, memory_budget=memory_budget,
+                  events=events, on_no_event=on_no_event, **planes)
 
 
 def run_until_done(plan, *, max_steps: int, every: int | None = None, reorder=None,
                    record: bool = False, window=None, memory_budget: int | None = None,
+                   events: str = "step", on_no_event: str = "raise",
                    **planes) -> RunReport:
     """:func:`until_done` then :meth:`Runner.run`: the one-call form."""
     return until_done(plan, max_steps=max_steps, every=every, reorder=reorder,
                       record=record, window=window, memory_budget=memory_budget,
-                      **planes).run()
+                      events=events, on_no_event=on_no_event, **planes).run()

@@ -62,6 +62,7 @@
  *                     the named post-boundary follow-on, not this binding.
  */
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -95,6 +96,7 @@
 #include "eagle/diff/Reverse.h"
 #include "eagle/diff/Transpose.h"
 #include "eagle/diff/Window.h"
+#include "eagle/events/Sensitivity.h"
 #include "eagle/exec/HostSchedule.h"
 #include "eagle/exec/HostTeam.h"
 #include "eagle/exec/Partition.h"
@@ -1867,6 +1869,144 @@ NB_MODULE(_core, m)
         nb::arg("partials"), nb::arg("dtype"),
         "The canonical pairwise combine of per-pass sums (in pass order): bitwise the "
         "unchunked canonical sum when every pass but the last holds leaf * 2^q samples.");
+    // -- per-sample event refinement (eagle/events) --
+    // args = (n, g, dg, gbar, a, b, c, scalars): address lists, scalars =
+    // (terminated, applied, t0, h, status, which, tau, lo, hi, t_stop), 0 = unused.
+    using EventArgs = std::tuple<std::int64_t, std::vector<std::uintptr_t>, std::vector<std::uintptr_t>,
+                                 std::vector<std::uintptr_t>, std::vector<std::uintptr_t>,
+                                 std::vector<std::uintptr_t>, std::vector<std::uintptr_t>,
+                                 std::vector<std::uintptr_t>>;
+    const auto eventCheck = [](const EventArgs& args) {
+        const auto& [n, g, dg, gbar, a, b, c, sc] = args;
+        if (n < 0 || g.size() > eagle::events::kMaxGuards || dg.size() != g.size()
+            || (!gbar.empty() && gbar.size() != g.size()) || a.size() > eagle::events::kMaxComponents
+            || b.size() > eagle::events::kMaxComponents || c.size() > eagle::events::kMaxComponents
+            || sc.size() != 10)
+            throw std::invalid_argument(
+                "events: n >= 0, at most 8 guards (g, dg, gbar alike), at most 32 component rows, "
+                "10 scalar planes");
+    };
+    const auto eventPlanes = [eventCheck](const EventArgs& args, auto zero) {
+        using T = decltype(zero);
+        eventCheck(args);
+        const auto& [n, g, dg, gbar, a, b, c, sc] = args;
+        eagle::events::EventPlanes<T> p;
+        p.n = n;
+        p.guards = static_cast<int>(g.size());
+        p.components = static_cast<int>(std::max({ a.size(), b.size(), c.size() }));
+        for (std::size_t j = 0; j < g.size(); ++j) {
+            p.g[j] = reinterpret_cast<const T*>(g[j]);
+            p.dg[j] = reinterpret_cast<const T*>(dg[j]);
+            p.gbar[j] = gbar.empty() ? nullptr : reinterpret_cast<T*>(gbar[j]);
+        }
+        for (std::size_t r = 0; r < a.size(); ++r) p.a[r] = reinterpret_cast<T*>(a[r]);
+        for (std::size_t r = 0; r < b.size(); ++r) p.b[r] = reinterpret_cast<const T*>(b[r]);
+        for (std::size_t r = 0; r < c.size(); ++r) p.c[r] = reinterpret_cast<const T*>(c[r]);
+        p.terminated = reinterpret_cast<const std::uint8_t*>(sc[0]);
+        p.applied = reinterpret_cast<const std::int64_t*>(sc[1]);
+        p.t0 = reinterpret_cast<const T*>(sc[2]);
+        p.h = reinterpret_cast<const T*>(sc[3]);
+        p.status = reinterpret_cast<std::int8_t*>(sc[4]);
+        p.which = reinterpret_cast<std::int8_t*>(sc[5]);
+        p.tau = reinterpret_cast<T*>(sc[6]);
+        p.lo = reinterpret_cast<T*>(sc[7]);
+        p.hi = reinterpret_cast<T*>(sc[8]);
+        p.tStop = reinterpret_cast<T*>(sc[9]);
+        return p;
+    };
+    const auto eventHost = [eventPlanes](std::uint32_t op, std::uint32_t bytes, const EventArgs& args) {
+        if (op > eagle::events::kOpSelect) throw std::invalid_argument("events: unknown op");
+        if (bytes == 8)
+            eagle::events::applyHost(eventPlanes(args, double{}), op);
+        else if (bytes == 4)
+            eagle::events::applyHost(eventPlanes(args, float{}), op);
+        else
+            throw std::invalid_argument("events: elem_bytes must be 4 or 8");
+    };
+    const auto eventDevice = [eventCheck](std::uint32_t op, std::uint32_t bytes, const EventArgs& args,
+                                          std::uintptr_t stream, std::int32_t device) {
+        eventCheck(args);
+        const auto& [n, g, dg, gbar, a, b, c, sc] = args;
+        auto d = makeDesc<eagle_backend_event_desc>(device);
+        d.op = op;
+        d.elem_bytes = bytes;
+        d.n = n;
+        d.guards = static_cast<std::int32_t>(g.size());
+        d.components = static_cast<std::int32_t>(std::max({ a.size(), b.size(), c.size() }));
+        for (std::size_t j = 0; j < g.size(); ++j) {
+            d.g[j] = g[j];
+            d.dg[j] = dg[j];
+            d.gbar[j] = gbar.empty() ? 0 : gbar[j];
+        }
+        for (std::size_t r = 0; r < a.size(); ++r) d.a[r] = a[r];
+        for (std::size_t r = 0; r < b.size(); ++r) d.b[r] = b[r];
+        for (std::size_t r = 0; r < c.size(); ++r) d.c[r] = c[r];
+        d.terminated = sc[0];
+        d.applied = sc[1];
+        d.t0 = sc[2];
+        d.h = sc[3];
+        d.status = sc[4];
+        d.which = sc[5];
+        d.tau = sc[6];
+        d.lo = sc[7];
+        d.hi = sc[8];
+        d.t_stop = sc[9];
+        d.stream = stream;
+        ck(EBX(eagle_backend_x_event_columns)(&d));
+    };
+    m.def("events_apply_host", eventHost, nb::arg("op"), nb::arg("elem_bytes"), nb::arg("args"),
+        "One per-sample event operation (eagle::events::Op) over host planes.");
+    m.def("events_apply_device", eventDevice, nb::arg("op"), nb::arg("elem_bytes"), nb::arg("args"),
+        nb::arg("stream") = 0, nb::arg("device") = -1,
+        "events_apply_host on the device, enqueued on `stream` through "
+        "`eagle_backend_x_event_columns`.");
+    m.def("events_refine_host",
+        [eventPlanes](std::uintptr_t entry, const std::vector<std::uintptr_t>& params,
+                      std::uint32_t bytes, const EventArgs& args) {
+            const std::vector<void*> prm = asParams(params);
+            const auto fn = reinterpret_cast<eagle::exec::HostEntryV2>(entry);
+            const std::int64_t n = std::get<0>(args);
+            const auto run = [&](auto zero) {
+                const auto p = eventPlanes(args, zero);
+                const auto evaluate = [&] { HostTeam::run(fn, prm.data(), Partition::whole(n)); };
+                evaluate();
+                eagle::events::applyHost(p, eagle::events::kOpClassify);
+                return eagle::events::refineLoop(
+                    evaluate, [&](std::uint32_t op) { eagle::events::applyHost(p, op); },
+                    [&] { return eagle::events::anyPending(p); });
+            };
+            if (bytes == 8) return run(double{});
+            if (bytes == 4) return run(float{});
+            throw std::invalid_argument("events_refine_host: elem_bytes must be 4 or 8");
+        },
+        nb::arg("entry"), nb::arg("params"), nb::arg("elem_bytes"), nb::arg("args"),
+        "Locate each sample's event in its stop step on the host: evaluate the refine entry at "
+        "tau = h, classify, then up to 8 rounds of evaluate + Newton/bisection and a last "
+        "evaluation at the final tau. Returns the rounds run.");
+    m.def("events_refine_device",
+        [eventDevice](std::uintptr_t entry, const std::vector<std::uintptr_t>& params, std::uint32_t block,
+                      std::uint32_t bytes, const EventArgs& args, std::uintptr_t stream, std::int32_t device) {
+            const std::vector<void*> prm = asParams(params);
+            const std::int64_t n = std::get<0>(args);
+            const eagle::exec::Partition whole{ 0, n, n };
+            const auto evaluate = [&] { eagle_seam::DeviceKernel::run(entry, prm, whole, stream, block); };
+            const auto update = [&](std::uint32_t op) { eventDevice(op, bytes, args, stream, device); };
+            evaluate();
+            update(eagle::events::kOpClassify);
+            return eagle::events::refineLoop(evaluate, update, [] { return true; });
+        },
+        nb::arg("entry"), nb::arg("params"), nb::arg("block"), nb::arg("elem_bytes"), nb::arg("args"),
+        nb::arg("stream") = 0, nb::arg("device") = -1,
+        "events_refine_host on the device: every round enqueued on `stream` (no read-back, so "
+        "all 8 rounds run; a located sample's update is a no-op). Returns the rounds run.");
+    m.def("events_reverse_steps",
+        [](std::uintptr_t steps, std::uintptr_t status, std::int64_t n) {
+            eagle::events::reverseSteps(reinterpret_cast<std::int64_t*>(steps),
+                                        reinterpret_cast<const std::int8_t*>(status), n);
+        },
+        nb::arg("steps"), nb::arg("status"), nb::arg("n"),
+        "One fewer step-by-step reverse step for every located sample (host int64 steps, int8 "
+        "status, sample order).");
     m.def("diff_record_host",
         [](std::uintptr_t entry, const std::vector<std::uintptr_t>& params, std::int64_t n,
            std::int64_t maxSteps, std::int64_t window, std::int64_t maxK, std::uintptr_t word,
