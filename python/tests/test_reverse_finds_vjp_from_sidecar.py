@@ -115,12 +115,12 @@ def test_a_raw_plugin_with_by_value_parameters_is_refused_with_the_fix(tmp_path)
         g.build(record=True)
 
 
-def test_a_prebuilt_vjp_plugin_is_refused_as_a_forward_step(hand_built):
+def test_a_prebuilt_vjp_plugin_runs_alone_but_is_refused_in_a_graph(hand_built):
     vp = hand_built["rv_square_params_vjp"]
-    with pytest.raises(ValueError, match="is a vjp derivative kernel of 'rv_square_params'"):
-        eagle.plan.auto(vp)
+    eagle.plan.auto(vp)   # a plan of its own
     x = np.zeros(N)
     bound = eagle.plan.plan(vp, structure=HostTeam).bind(
         x=x, a=np.ones(1), bar_y=x.copy(), bar_x=x.copy(), bar_a=x.copy())
-    with pytest.raises(ValueError, match="enters a graph only through eagle.diff"):
+    with pytest.raises(ValueError, match="is a vjp derivative kernel of 'rv_square_params'"
+                                         ".*enters those only through eagle.diff"):
         eagle.Graph().add(bound)

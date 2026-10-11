@@ -326,17 +326,18 @@ def derived_tag(obj, _depth: int = 0):
 
 def refuse_derived(obj, *, door: str, what: str = "this kernel") -> None:
     """Raise ``ValueError`` naming ``door`` when ``obj`` is a derivative
-    kernel: a derivative enters a plan, pipeline or Dag only through
-    ``eagle.diff``, which pairs it with its primal."""
+    kernel. A derivative runs on its own as a plan, but it enters a pipeline,
+    Graph, until_done or simulate only through ``eagle.diff``, which pairs it
+    with its primal."""
     found = derived_tag(obj)
     if found is not None:
         kind, primal = found
         raise ValueError(
             f"{door}: {what} is a {kind} derivative kernel"
             + (f" of {primal!r}" if primal else "")
-            + "; a derivative is not run directly as a step of a plan, "
-            "pipeline, until_done or simulate -- it enters a graph only "
-            "through eagle.diff, which pairs it with its primal")
+            + "; a derivative runs on its own as a plan, but it is not a "
+            "step of a pipeline, Graph, until_done or simulate -- it enters "
+            "those only through eagle.diff, which pairs it with its primal")
 
 
 def refuse_prior_read(names, *, door: str) -> None:

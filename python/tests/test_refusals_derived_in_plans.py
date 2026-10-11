@@ -1,8 +1,8 @@
 # Copyright 2026 Alessandro Masat
 # SPDX-License-Identifier: Apache-2.0
 
-"""A derivative (VJP/JVP) kernel is refused at every public plan door, with
-the message pinned; a ``prior_read`` plane is refused at the reverse door's
+"""A derivative (VJP/JVP) kernel runs on its own as a plan, and is refused,
+with the message pinned, at every door that composes steps; a ``prior_read`` plane is refused at the reverse door's
 shared helper; the conditional reserved names bind only while a recording,
 event-refining or reverse run is on. CPU-only: the refusals fire before any
 build or launch."""
@@ -22,9 +22,9 @@ from eagle.sidecar import derived_tag, refuse_derived, refuse_prior_read
 _BLOCK = {"kind": "vjp", "primal": "poly", "wrt": ["x"], "residuals": []}
 
 #: The pinned text every door shares, after its own ``<door>: <what> is a``.
-_TAIL = ("derivative kernel of 'poly'; a derivative is not run directly as a "
-         "step of a plan, pipeline, until_done or simulate -- it enters a graph "
-         "only through eagle.diff, which pairs it with its primal")
+_TAIL = ("derivative kernel of 'poly'; a derivative runs on its own as a plan, "
+         "but it is not a step of a pipeline, Graph, until_done or simulate -- it "
+         "enters those only through eagle.diff, which pairs it with its primal")
 
 
 def _artifact():
@@ -62,14 +62,6 @@ def test_refuse_derived_message_is_pinned():
     with pytest.raises(ValueError) as exc:
         refuse_derived(_artifact(), door="eagle.X", what="the step")
     assert str(exc.value) == f"eagle.X: the step is a vjp {_TAIL}"
-
-
-def test_plan_auto_refuses_a_derived_kernel():
-    with pytest.raises(ValueError) as exc:
-        plan_mod.auto(_traced())
-    assert str(exc.value) == f"eagle.plan.auto: item 0 is a jvp {_TAIL}"
-    with pytest.raises(ValueError, match=r"item 1 is a vjp"):
-        plan_mod.auto([object(), _artifact()])
 
 
 def test_until_done_refuses_a_derived_step():
@@ -126,21 +118,11 @@ def test_eagle_diff_is_the_reverse_not_a_stub():
     assert callable(eagle.diff.reverse) and callable(eagle.diff.Reverse)
 
 
-def test_plan_auto_refuses_a_real_hawk_derived_kernel():
+def test_plan_auto_runs_a_derivative_kernel_on_its_own(tmp_path):
+    """Deployed next to its primal, a jvp kernel is a plan of its own and gives
+    the directional derivative."""
     hawk = pytest.importorskip("hawk")
-    from hawk.diff import vjp
-    from hawk.trace.kernel import Kernel
-
-    @hawk.kernel
-    def poly(x: hawk.Scalar, y: hawk.Mutable[hawk.Scalar]):
-        y = x * x
-
-    with pytest.raises(ValueError, match=r"eagle.plan.auto: item 0 is a vjp derivative"):
-        plan_mod.auto(Kernel("poly_vjp", vjp(poly)))
-
-
-def test_plan_auto_refuses_a_jvp_kernel_listed_with_its_primal():
-    hawk = pytest.importorskip("hawk")
+    import numpy as np
     from hawk.diff import jvp
     from hawk.trace.kernel import Kernel
 
@@ -148,5 +130,8 @@ def test_plan_auto_refuses_a_jvp_kernel_listed_with_its_primal():
     def poly2(x: hawk.Scalar, v: hawk.Scalar, y: hawk.Mutable[hawk.Scalar]):
         y = x * x + v
 
-    with pytest.raises(ValueError, match=r"eagle.plan.auto: item 1 is a jvp derivative"):
-        plan_mod.auto([poly2, Kernel("poly2_jvp", jvp(poly2, wrt=("v",)))])
+    _, fwd = plan_mod.auto([poly2, Kernel("poly2_jvp", jvp(poly2, wrt=("x",)))],
+                           cache_dir=str(tmp_path), targets=("host",))
+    x = np.linspace(0.5, 2.0, 8)
+    got = fwd.run(x=x, v=np.zeros(8), dot_x=np.ones(8))
+    np.testing.assert_allclose(np.asarray(got), 2 * x)

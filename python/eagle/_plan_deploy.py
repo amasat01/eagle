@@ -16,7 +16,6 @@ from . import _layout
 from . import exec as eexec
 from ._plan_binding import BoundPlan
 from ._plan_planes import residency
-from .sidecar import refuse_derived
 
 if TYPE_CHECKING:
     from .plan import Plan
@@ -145,8 +144,6 @@ def auto(plugin, *, targets=None, cache_dir=None, scalar_type=None,
         raise ValueError(
             f"eagle.plan.auto: scalar_type must be one of {_BUILT_SCALAR_TYPES}, "
             f"got {scalar_type!r}")
-    for i, item in enumerate(plugin if isinstance(plugin, (list, tuple)) else [plugin]):
-        refuse_derived(item, door="eagle.plan.auto", what=f"item {i}")
     if isinstance(plugin, (list, tuple)):
         kernels = list(plugin)
         if not kernels:
