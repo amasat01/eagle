@@ -9,20 +9,21 @@ Read this page once, before the quickstart. It walks through every term the
 rest of the documentation assumes you already know, in the order you
 actually need them — each one introduced with a concrete example first, a
 plain definition second.
+The :doc:`../glossary` lists the same words, one sentence each.
 
 .. note::
 
    New to parallel or GPU programming? :doc:`parallel_execution` covers the
    one idea everything below builds on — one body of code, run across many
-   items at once, on a GPU or a CPU — before diving into EAGLE's specific
+   items at once, on a GPU or a CPU — before diving into eagle's specific
    names for it.
 
-What EAGLE does, in one sentence
+What eagle does, in one sentence
 ---------------------------------
 
 You have a kernel launch — or a sequence of them — that you want to run
 thousands of times in an inner loop, without paying the CPU-side overhead of
-re-issuing the same launch every time. EAGLE records the launch once into a
+re-issuing the same launch every time. eagle records the launch once into a
 **graph**, then replays that graph as many times as you like. Everything
 below is either part of that record-once/replay-many idea, or its
 CPU-side (non-CUDA) counterpart.
@@ -30,7 +31,7 @@ CPU-side (non-CUDA) counterpart.
 The four objects you'll meet in every example
 ------------------------------------------------
 
-Here is the smallest possible EAGLE program — capture one kernel launch and
+Here is the smallest possible eagle program — capture one kernel launch and
 replay it:
 
 .. code-block:: cpp
@@ -83,7 +84,7 @@ re-capturing.
 Dual-mode: the same shape without CUDA
 ------------------------------------------
 
-Every project built on EAGLE compiles two ways: with a CUDA toolchain
+Every project built on eagle compiles two ways: with a CUDA toolchain
 (everything above), or as pure C++23 with OpenMP, no GPU required. The
 **dual-mode** promise is that your calling code barely changes between the
 two — you write against a Host launch API on the C++ side that mirrors the
@@ -100,7 +101,7 @@ CUDA ``Launcher``'s "just call it" shape:
 ``cpu::Host`` is the C++/OpenMP counterpart of the CUDA graph launchers —
 where a CUDA kernel runs one GPU thread per sample, ``Host::launch`` runs
 this lambda once per sample across your CPU cores. ``eagle::SampleIndex`` is
-just the per-sample index type — EAGLE builds on **aether**, its sibling
+just the per-sample index type — eagle builds on **aether**, its sibling
 array library, for this and every other per-sample data type you'll see
 below.
 
@@ -144,7 +145,7 @@ that into a packed 4-element array holding just samples 0, 2, 3, 6 — nothing
 else touches memory it doesn't need to. Getting there is two steps: scan the
 flags to compute each active sample's new, packed position, then scatter
 each one there. That two-step operation is called **stream compaction**.
-EAGLE's ``Scanner`` / ``RefScanner`` (in the filtering module) implement it
+eagle's ``Scanner`` / ``RefScanner`` (in the filtering module) implement it
 as a prefix scan over the flags followed by a scatter of the active
 elements' offsets. See :doc:`../modules/module_filtering`.
 

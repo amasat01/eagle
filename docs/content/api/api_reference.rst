@@ -46,3 +46,19 @@ rendered through Breathe and split by module. For the Python package
    * - :doc:`api_util`
      - Global typedefs, logging, error handling, ``Observable`` /
        ``Observer``, ``Slice``, and thread management.
+
+The eight pages, one per module:
+
+.. toctree::
+   :maxdepth: 1
+   :hidden:
+
+   api_graph
+   api_graph_view
+   api_diff
+   api_filtering
+   api_reduce
+   api_host
+   api_util
+
+(The Python reference, :doc:`api_python`, is listed beside this page.)

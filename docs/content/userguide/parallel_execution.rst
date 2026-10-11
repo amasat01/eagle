@@ -9,9 +9,9 @@ Read this before :doc:`foundations` if terms like "kernel," "thread," or
 "device memory" aren't already familiar. It explains the one idea
 everything else in these docs assumes: *you write what happens to a single
 item, and the hardware runs that same logic across every item at once.*
-Nothing here is EAGLE-specific — it's the same idea whether the "hardware"
+Nothing here is eagle-specific — it's the same idea whether the "hardware"
 running your logic is a GPU or a multi-core CPU, which is exactly why
-EAGLE's API has one shape for both.
+eagle's API has one shape for both.
 
 One body, run many times at once
 ----------------------------------
@@ -43,18 +43,18 @@ What actually runs it, in parallel
   one of them on each item (or a small group of items) so they all execute
   the same instructions in lockstep.
 - **On a CPU**, you have far fewer cores, but each core's vector hardware
-  (SIMD) can run the *same* instruction over several values at once. EAGLE
+  (SIMD) can run the *same* instruction over several values at once. eagle
   calls one such group of items processed together a **packet** (of a fixed
   size ``W``, the CPU's SIMD width), and each item's slot within that packet
   a **lane** — a packet is the CPU's version of a GPU thread group. See
-  :doc:`foundations` for the full walkthrough of this vocabulary in EAGLE's
+  :doc:`foundations` for the full walkthrough of this vocabulary in eagle's
   ``cpu::Host`` dispatcher.
 
 Both are the same underlying trick — do the same operation to many items at
 once instead of one at a time — implemented on different hardware. That's
-why EAGLE presents one calling shape (write the per-item body, call
+why eagle presents one calling shape (write the per-item body, call
 ``launch``) for both: the *parallel-execution idea* is identical; only the
-hardware executing it differs, and EAGLE's dual-mode API is what lets your
+hardware executing it differs, and eagle's dual-mode API is what lets your
 code not care which one it's running on.
 
 Host and device memory are separate
@@ -64,10 +64,10 @@ A CPU (the **host**) and a GPU (the **device**) each have their own,
 physically separate memory. Data your CPU code has doesn't automatically
 exist where the GPU can read it — it has to be explicitly copied over
 (**uploaded**) before a GPU kernel can use it, and copied back
-(**downloaded**) to read the result on the CPU side. This is why EAGLE's
+(**downloaded**) to read the result on the CPU side. This is why eagle's
 APIs have explicit ``upload()`` / ``download()`` steps (see
 :doc:`../modules/module_filtering` for a concrete example) — it's not
-EAGLE-specific bookkeeping, it's a direct consequence of the GPU having its
+eagle-specific bookkeeping, it's a direct consequence of the GPU having its
 own memory.
 
 What you won't find explained here
@@ -77,8 +77,8 @@ Raw CUDA's own kernel-launch syntax — the ``<<<grid, block, shmem,
 stream>>>`` triple-angle-bracket notation you'll see in
 :doc:`quickstart`'s ``addOne<<<1, N, 0, stream.cuda()>>>(...)`` — along with
 what a "block" and "grid" precisely are, and the full CUDA memory model, are
-raw CUDA C++ concepts that EAGLE builds on top of but doesn't reinvent.
-EAGLE's own API (``cpu::Host::launch``, ``GraphPipeline``, the ``Reduction``
+raw CUDA C++ concepts that eagle builds on top of but doesn't reinvent.
+eagle's own API (``cpu::Host::launch``, ``GraphPipeline``, the ``Reduction``
 / ``Scanner`` helpers) is designed so you rarely need to write that syntax
 yourself. If you do want the full picture — writing a raw CUDA kernel from
 scratch, tuning block/grid sizes, the GPU memory hierarchy in depth —

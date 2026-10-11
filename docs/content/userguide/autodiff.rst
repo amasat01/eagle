@@ -32,63 +32,8 @@ Several communities differentiate programs, and each has its own words for the
 same few things. These are the ones eagle uses; the synonyms are there so you
 can recognise what you already know.
 
-.. glossary::
-
-   reverse mode
-      Computing derivatives by running the program's steps backwards, each
-      step turning "how the objective moves with my outputs" into "how it
-      moves with my inputs". One backward sweep gives the gradient with
-      respect to *every* input at once, which is why it is the method of
-      choice when you have one objective and many inputs. Also called the
-      adjoint method (optimal control, PDE-constrained optimisation) or
-      backpropagation (machine learning).
-
-   seed
-      What you hand the reverse pass: the gradient of your objective ``J``
-      with respect to an output plane, ``∂J/∂output``, one value per sample.
-      If ``J`` is the sum of the outputs, every seed is ``1``; if ``J`` is a
-      weighted sum, the seed is the weights; if ``J`` is a terminal cost
-      ``φ(x(T))``, the seed is ``∂φ/∂x(T)``. It is per sample because each
-      sample has its own output, so each has its own ``∂J/∂output``. Also
-      called a cotangent (JAX), ``grad_outputs`` (PyTorch), ``adj_seed``
-      (CasADi), or the terminal costate ``λ(T)`` (optimal control).
-
-   adjoint
-      The quantity flowing backwards through the graph: for a plane ``p``,
-      ``∂J/∂p``. A seed is the adjoint of an output; a gradient is the adjoint
-      of an input. Where two nodes read one plane, the plane's adjoint is the
-      sum of what flows back from each.
-
-   vjp
-      Vector-Jacobian product: the kernel that pulls a seed back through one
-      step, from the adjoints of the step's outputs to the adjoints of its
-      inputs. ``hawk.diff.vjp(kernel)`` makes one from a kernel. Each launch
-      node of a graph is reversed by its kernel's vjp.
-
-   wrt
-      "With respect to": which inputs you want gradients for. ``wrt=None``
-      (the default) returns them all.
-
-   gradient
-      What comes back: ``∂J/∂input``. For a per-sample input, one value per
-      sample (in sample order); for a parameter shared by every sample, one
-      value, summed over the samples.
-
-   Record
-      What one launch of a ``record=True`` graph keeps for its reverse:
-      ``g.record`` after ``g.launch()``. Most of it is the graph's own planes,
-      so it is only valid until the graph runs again (see
-      :ref:`autodiff-record`).
-
-   generation
-      Which launch a Record belongs to: 1 for the first launch, 2 for the
-      second, and so on. It is how a reverse knows its Record is still the
-      newest one.
-
-   bitwise
-      Bit-for-bit reproducible: the same inputs give the same bits on every
-      run and every thread count. Every gradient eagle sums is bitwise; the
-      one exception is named in :ref:`autodiff-bits`.
+A short glossary of these words (reverse mode, seed, adjoint, vjp and the rest)
+lives in the :doc:`../glossary`; each term below links there.
 
 Seeds, and what comes back
 --------------------------

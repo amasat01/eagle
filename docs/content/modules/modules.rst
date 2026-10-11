@@ -63,6 +63,24 @@ Modules
 
       :bdg-secondary:`→ API reference` :doc:`../api/api_util`
 
+The five module pages, one job each:
+
+.. toctree::
+   :maxdepth: 1
+   :hidden:
+
+   module_graph
+   module_filtering
+   module_reduce
+   module_host
+   module_util
+
+- :doc:`module_graph` -- CUDA-graph capture and launch.
+- :doc:`module_filtering` -- prefix scan, compaction, reorder, and running until done.
+- :doc:`module_reduce` -- GPU and CPU parallel reductions.
+- :doc:`module_host` -- the OpenMP + SIMD host dispatcher.
+- :doc:`module_util` -- typedefs, logging, errors, observers and threads.
+
 Directory layout
 ----------------
 

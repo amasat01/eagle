@@ -13,7 +13,7 @@ work. The usual symptom is a total that changes when you change the number of
 OpenMP threads, or move from one machine to another, even though nothing about
 your data changed.
 
-EAGLE's answer is to fix the grouping. Its sum is defined as one specific
+eagle's answer is to fix the grouping. Its sum is defined as one specific
 tree of additions — the **canonical tree** — and every implementation computes
 exactly that tree. This page explains the tree, what it promises, and what it
 deliberately does not.
@@ -86,7 +86,7 @@ chunk size that breaks the rule.
 
 Two things look equivalent and are not: folding the chunk results from left to
 right, and choosing a chunk of, say, three leaves. Both change the grouping and
-therefore the bits. EAGLE's own tests plant exactly these wrong orders and
+therefore the bits. eagle's own tests plant exactly these wrong orders and
 require that they *do* differ from the canonical result, so the checks cannot
 pass by accident.
 

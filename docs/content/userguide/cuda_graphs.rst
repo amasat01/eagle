@@ -12,7 +12,7 @@ CUDA graphs
    is the same record-once/replay-many idea, worked end to end with
    :func:`eagle.until_done` and :class:`~eagle.GraphPipeline`.
 
-EAGLE is built around **CUDA graphs**: record a stream of kernel launches once,
+eagle is built around **CUDA graphs**: record a stream of kernel launches once,
 assemble them into a dependency graph, and replay the instantiated graph to
 amortise per-launch overhead across the inner loop of a batched algorithm.
 

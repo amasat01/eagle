@@ -1,7 +1,7 @@
 Module: cuda
 ============
 
-The ``cuda`` module is the heart of EAGLE: it records a stream of kernel
+The ``cuda`` module is the heart of eagle: it records a stream of kernel
 launches once, assembles them into a CUDA dependency graph, and replays the
 instantiated graph with microsecond-class per-launch re-tuning.  It also
 provides RAII wrappers for the underlying CUDA stream / event primitives.
@@ -74,7 +74,7 @@ active-sample count changes between iterations.
 
 .. note::
 
-   EAGLE defines ``CUDA_API_PER_THREAD_DEFAULT_STREAM=1`` at compile time, so
+   eagle defines ``CUDA_API_PER_THREAD_DEFAULT_STREAM=1`` at compile time, so
    stream ``0`` maps to each thread's private default stream rather than the
    legacy NULL stream.
 

@@ -46,3 +46,22 @@ make linkcheck  # crawl every link
 
 See the [Documentation guide](devguide/docs_guide) for the full toolchain,
 dependencies, and docstring style.
+
+## Developer pages
+
+```{toctree}
+:maxdepth: 1
+:hidden:
+
+devguide/dev_guide
+devguide/docs_guide
+devguide/host-plugin-parity
+devguide/test-map
+devguide/roadmap
+```
+
+- [Developer guide](devguide/dev_guide): coding conventions, the contribution workflow, adding an error code.
+- [Documentation guide](devguide/docs_guide): the docs toolchain, dependencies and docstring style.
+- [Host/plugin parity](devguide/host-plugin-parity): which features the CPU host path and the CUDA device path each have.
+- [Test map](devguide/test-map): which test covers which behaviour.
+- [Roadmap](devguide/roadmap): the capabilities deliberately not built yet.

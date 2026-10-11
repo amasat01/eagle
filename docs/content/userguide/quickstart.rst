@@ -5,13 +5,13 @@ Quick start
    :local:
    :depth: 2
 
-This page walks through a minimal EAGLE program: capture a kernel launch into
+This page walks through a minimal eagle program: capture a kernel launch into
 a CUDA graph, instantiate a launcher, and replay it.  It mirrors the shipped
 ``eagle_demo.cu`` smoke test.
 
 .. note::
 
-   New to EAGLE's vocabulary? :doc:`foundations` introduces ``Stream``,
+   New to eagle's vocabulary? :doc:`foundations` introduces ``Stream``,
    ``Graph``, ``StreamCapturer``, and ``Launcher`` one at a time before this
    page puts them together. This page's code block is a working confirmation
    of that walkthrough, not a first introduction.

@@ -138,66 +138,36 @@ eagle is the execution layer of the RAPTOR family — it launches what
 
    content/userguide/installation
    content/userguide/quickstart_python
+   C++ quickstart <content/userguide/quickstart>
 
 .. toctree::
    :maxdepth: 1
    :caption: Tutorials
    :hidden:
 
-   content/userguide/tutorials/02_cuda_graphs_python
-   content/userguide/tutorials/05_steps_per_launch
-   content/userguide/tutorials/06_compaction_and_reorder
-   content/userguide/tutorials/04_multi_kernel_workflow
-   content/userguide/tutorials/07_host_or_device
-   content/userguide/tutorials/03_torch_training
-   content/userguide/tutorials/08_profile_your_run
-   content/userguide/tutorials/11_graph_model
-   content/userguide/tutorials/12_gradients_through_a_graph
-   C++ quickstart <content/userguide/quickstart>
+   Python tutorials <content/userguide/tutorials_python>
    C++ tutorials <content/userguide/tutorials>
-
-.. toctree::
-   :caption: Extra tutorials
-   :hidden:
-
-   Fork/join graph <content/userguide/extra/fork_join_graph>
 
 .. toctree::
    :maxdepth: 1
    :caption: How-to guides
    :hidden:
 
-   content/userguide/tutorials/01_launch_and_registry
-   content/userguide/examples
-   content/userguide/examples/01_device_properties
-
-.. toctree::
-   :maxdepth: 1
-   :caption: Interoperability
-   :hidden:
-
-   content/interop
-   content/interop_contract
+   content/userguide/howto
 
 .. toctree::
    :maxdepth: 1
    :caption: Explanation
    :hidden:
 
-   content/userguide/foundations
-   content/userguide/parallel_execution
-   content/userguide/cuda_graphs
-   content/userguide/graph_model
-   content/userguide/graph_view
-   content/userguide/autodiff
-   content/userguide/determinism
-   content/userguide/build_options
+   content/userguide/concepts
    content/modules/modules
-   content/modules/module_graph
-   content/modules/module_filtering
-   content/modules/module_reduce
-   content/modules/module_host
-   content/modules/module_util
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Performance
+   :hidden:
+
    content/performance
 
 .. toctree::
@@ -206,14 +176,11 @@ eagle is the execution layer of the RAPTOR family — it launches what
    :hidden:
 
    content/api/api_reference
-   content/api/api_graph
-   content/api/api_graph_view
-   content/api/api_diff
-   content/api/api_filtering
-   content/api/api_reduce
-   content/api/api_host
-   content/api/api_util
    content/api/api_python
+   content/interop_contract
+   content/userguide/build_options
+   content/devguide/plugin_schema
+   content/glossary
 
 .. toctree::
    :maxdepth: 1
@@ -221,12 +188,6 @@ eagle is the execution layer of the RAPTOR family — it launches what
    :hidden:
 
    content/contributing
-   content/devguide/dev_guide
-   content/devguide/plugin_schema
-   content/devguide/host-plugin-parity
-   content/devguide/test-map
-   content/devguide/roadmap
-   content/devguide/docs_guide
 
 The RAPTOR family
 ------------------
