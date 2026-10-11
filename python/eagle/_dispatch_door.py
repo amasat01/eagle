@@ -33,6 +33,7 @@ from . import exec as eexec
 from ._active_set import STALE_MAX, ActiveSet
 from ._compat import zip_strict
 from ._active_set import COUNT_PLANE, MAP_PLANE
+from ._busy import BusyGuard
 from ._until_done import FINISHED_PLANE, FUSED_STEPS_PLANE, RunReport
 from .roles import PER_SAMPLE_ROLES
 
@@ -323,6 +324,7 @@ class DispatchRunner:
 
     def __init__(self, kernel, group, planes, mask, *, max_steps, plain, forced=None,
                  theta=True):
+        self._busy = BusyGuard("eagle.Runner")
         self._step = _step(kernel)
         self._group, self._forced = group, forced
         self._planes, self._mask, self._max_steps = planes, mask, max_steps
@@ -522,6 +524,10 @@ class DispatchRunner:
         return self._plain(steps).run()
 
     def run(self) -> RunReport:
+        with self._busy("run"):
+            return self._run()
+
+    def _run(self) -> RunReport:
         steps, split_steps, plain = 0, 0, None
         if self._static:
             self._classes()

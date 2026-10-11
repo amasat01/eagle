@@ -219,3 +219,35 @@ def test_n_threads_n_simulations_agree_with_serial_and_count_records_exactly(bac
     after = _counters.snapshot()
     assert after["records"] - before["records"] == threads_n * rounds
     assert after["reverses"] - before["reverses"] == threads_n * rounds
+
+
+@pytest.mark.parametrize("backend", ["cpu", pytest.param("gpu", marks=pytest.mark.gpu)])
+def test_one_simulation_run_by_two_threads_at_once_is_busy(monkeypatch, backend):
+    from eagle._until_done import Runner
+    from _run_reverse_fixtures import xp_for
+
+    xp = xp_for(backend)
+    entered, release = threading.Event(), threading.Event()
+    real = Runner._run
+
+    def gated(self):
+        entered.set()
+        assert release.wait(30)
+        return real(self)
+
+    monkeypatch.setattr(Runner, "_run", gated)
+    sim = simulation(rr_osc, *inputs(xp), record=False)
+    t = threading.Thread(target=sim.run)
+    t.start()
+    try:
+        assert entered.wait(30)
+        with pytest.raises(eagle.Busy, match=r"eagle\.Simulation\.run: another call is still running"):
+            sim.run()
+        with pytest.raises(eagle.Busy, match=r"eagle\.Runner\.run: another call is still running"):
+            sim.runner.run()
+    finally:
+        release.set()
+        t.join(60)
+    assert not t.is_alive()
+    monkeypatch.undo()
+    sim.run()                                  # free again afterwards

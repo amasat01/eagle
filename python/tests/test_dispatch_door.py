@@ -484,3 +484,31 @@ def test_device_calibration_timer_runs_on_distinct_bound_plans_in_many_threads()
     assert not errors
     for x in xs:
         np.testing.assert_array_equal(cp.asnumpy(x), np.full(64, float(reps)))
+
+
+@pytest.mark.parametrize("backend", ["cpu", pytest.param("gpu", marks=pytest.mark.gpu)])
+def test_one_dispatch_simulation_run_by_two_threads_at_once_is_busy(monkeypatch, backend):
+    xp = pytest.importorskip("cupy") if backend == "gpu" else np
+    entered, release = threading.Event(), threading.Event()
+    real = door.DispatchRunner._run
+
+    def gated(self):
+        entered.set()
+        assert release.wait(30)
+        return real(self)
+
+    monkeypatch.setattr(door.DispatchRunner, "_run", gated)
+    sim = eagle.simulation(walker, k=xp.asarray(rare_classes()), x=xp.zeros(N), t=xp.zeros(N),
+                           max_steps=200, dispatch="segmented")
+    t = threading.Thread(target=sim.run)
+    t.start()
+    try:
+        assert entered.wait(30)
+        with pytest.raises(eagle.Busy, match=r"eagle\.Simulation\.run: another call is still running"):
+            sim.run()
+        with pytest.raises(eagle.Busy, match=r"eagle\.Runner\.run: another call is still running"):
+            sim.runner.run()
+    finally:
+        release.set()
+        t.join(60)
+    assert not t.is_alive()
