@@ -643,7 +643,7 @@ class Runner:
             else:
                 bind = {nm: planes[nm] for _role, nm in spec if nm in planes}
             if ("lookup", FINISHED_PLANE) in spec:
-                bind[FINISHED_PLANE] = finished.view(xp.int32)
+                bind[FINISHED_PLANE] = finished
             if ("lookup", FUSED_STEPS_PLANE) in spec:
                 bind[FUSED_STEPS_PLANE] = (word if auto
                                            else xp.ones(1, dtype=xp.int64))

@@ -264,7 +264,7 @@ class Rig:
             elif role == "terminated":
                 out[name] = xp.zeros(n, dtype=xp.bool_)
             elif name == "finished_count":
-                out[name] = xp.zeros(1, dtype=xp.int32)
+                out[name] = xp.zeros(1, dtype=xp.uint32)
             elif name == "fused_steps":
                 out[name] = xp.ones(1, dtype=xp.int64)
             elif name.endswith("_offsets"):

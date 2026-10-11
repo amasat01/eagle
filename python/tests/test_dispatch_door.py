@@ -263,7 +263,7 @@ def test_the_calibration_timer_keeps_every_repetition():
     plan = auto(plain).select({"x": np.zeros(64)})
     x, t, done = np.zeros(64), np.zeros(64), np.zeros(64, dtype=bool)
     spec = plan.plugin.arg_spec
-    extra = {nm: np.zeros(1, dtype=np.int64 if nm == "fused_steps" else np.int32)
+    extra = {nm: np.zeros(1, dtype=np.int64 if nm == "fused_steps" else np.uint32)
              for role, nm in spec if role == "lookup"}
     bound = plan.bind(x=x, t=t, terminated=done, **extra)
     seconds = door.time_launch(bound, 4)
@@ -318,8 +318,8 @@ def _graph_with(kernel):
     from eagle._plan_deploy import auto
 
     planes = dict(k=rare_classes(), x=np.zeros(N), t=np.zeros(N),
-                  terminated=np.zeros(N, dtype=bool), dispatch0_mix=np.zeros(3, dtype=np.int64),
-                  finished_count=np.zeros(1, dtype=np.int32))
+                  terminated=np.zeros(N, dtype=bool), dispatch0_mix=np.zeros(3, dtype=np.uint32),
+                  finished_count=np.zeros(1, dtype=np.uint32))
     step = kernel.step if kernel.step is not None else kernel
     bound = auto(step).host.bind(**planes)
     return eagle.Graph().add(bound), planes
@@ -347,7 +347,7 @@ def test_graph_build_refuses_what_simulate_refuses():
     graph = eagle.Graph()
     from eagle._plan_deploy import auto
     graph.add(auto(plain).host.bind(x=np.zeros(4), t=np.zeros(4), terminated=np.zeros(4, dtype=bool),
-                                    finished_count=np.zeros(1, dtype=np.int32)))
+                                    finished_count=np.zeros(1, dtype=np.uint32)))
     with pytest.raises(ValueError, match="no plan of this graph has one"):
         graph.build(dispatch="switch")
 
@@ -356,7 +356,7 @@ def test_graph_build_without_dispatch_leaves_a_plain_graph_alone():
     graph = eagle.Graph()
     from eagle._plan_deploy import auto
     graph.add(auto(plain).host.bind(x=np.zeros(4), t=np.zeros(4), terminated=np.zeros(4, dtype=bool),
-                                    finished_count=np.zeros(1, dtype=np.int32)))
+                                    finished_count=np.zeros(1, dtype=np.uint32)))
     graph.build()
     assert graph.dispatch == {}
 

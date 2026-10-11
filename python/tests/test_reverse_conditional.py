@@ -14,7 +14,7 @@ from eagle import SkipGuard, repeat_while, skippable
 from _reverse_fixtures import central_difference, xp_for
 
 hawk = pytest.importorskip("hawk")
-from hawk import Mutable, Param, Scalar  # noqa: E402
+from hawk import Mutable, Param, Scalar, UInt32  # noqa: E402
 from hawk import math as m  # noqa: E402
 
 N = 12
@@ -31,9 +31,9 @@ def cv_sin(x: Scalar, y: Mutable[Scalar]):
 
 
 @hawk.kernel
-def cv_step(x: Scalar, a: Param, c: Scalar, y: Mutable[Scalar], d: Mutable[Scalar]):
+def cv_step(x: Scalar, a: Param, c: UInt32, y: Mutable[Scalar], d: Mutable[UInt32]):
     y = x + 0.3 * a * m.sin(x)
-    d = c - 1.0
+    d = c - 1
 
 
 def _plans(tmp_path, backend):
@@ -146,12 +146,12 @@ def test_a_forward_without_record_saves_nothing(tmp_path):
     assert len(gr._recorder.recorded) == 1        # one guard cell, copied only when recording
 
 
-# the guard reads the high word of the float counter: zero exactly when the counter is 0.0
+# the guard reads the uint32 counter plane the step decrements
 def _loop_graph(ps, x, a, c, *, cap, record=False, guard=None):
     step = ps[2]
     body = step.bind(x=x, a=a, c=c, y=x, d=c)
     g = eagle.Graph().add_node(
-        repeat_while(body.launch, guard or SkipGuard(c.view("uint32"), 1), cap), name="loop").build(record=record)
+        repeat_while(body.launch, guard or SkipGuard(c, 0), cap), name="loop").build(record=record)
     return g, x
 
 
@@ -170,8 +170,9 @@ def test_repeat_while_matches_central_differences_and_the_unrolled_chain(tmp_pat
     cap, a = 40, 0.8      # 40 > the 16-iteration window: n = 20 crosses a boundary
 
     def make(p, x_, a_):
-        return _loop_graph(p, x_, a_, np.full(N, float(n)), cap=cap)       # on the host
-    g, _x = _loop_graph(ps, xp.asarray(x0.copy()), a, xp.full(N, float(n)), cap=cap, record=True)
+        return _loop_graph(p, x_, a_, np.full(N, n, dtype="uint32"), cap=cap)       # on the host
+    g, _x = _loop_graph(ps, xp.asarray(x0.copy()), a, xp.full(N, n, dtype="uint32"), cap=cap,
+                        record=True)
     g.launch()
     loop = g.record
     grads = eagle.diff.reverse(loop, {"y": xp.asarray(seed)})
@@ -181,7 +182,7 @@ def test_repeat_while_matches_central_differences_and_the_unrolled_chain(tmp_pat
     np.testing.assert_allclose(host["x"], dx, rtol=1e-6, atol=1e-9)
     np.testing.assert_allclose(float(host["a"]), da, rtol=1e-6, atol=1e-12)
     if n:
-        u, _ = _unrolled(ps, xp.asarray(x0.copy()), a, xp.full(N, float(n)), n=n, record=True)
+        u, _ = _unrolled(ps, xp.asarray(x0.copy()), a, xp.full(N, n, dtype="uint32"), n=n, record=True)
         u.launch()
         ref = eagle.diff.reverse(u.record, {"y": xp.asarray(seed)})
         pull = lambda v: np.asarray(v.get() if hasattr(v, "get") else v)

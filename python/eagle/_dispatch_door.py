@@ -366,11 +366,11 @@ class DispatchRunner:
         bind.update({nm: v for nm, v in (extra or {}).items() if ("lookup", nm) in spec
                      or any(n == nm for _r, n in spec)})
         if ("lookup", FINISHED_PLANE) in spec:
-            bind[FINISHED_PLANE] = self._cells[2:3].view(xp.int32)
+            bind[FINISHED_PLANE] = self._cells[2:3]
         if ("lookup", FUSED_STEPS_PLANE) in spec:
             bind[FUSED_STEPS_PLANE] = xp.ones(1, dtype=xp.int64)
         if ("lookup", MAP_PLANE) in spec:
-            bind[MAP_PLANE], bind[COUNT_PLANE] = self._smap, self._scount.view(xp.int32)
+            bind[MAP_PLANE], bind[COUNT_PLANE] = self._smap, self._scount
         return plan.bind(**bind)
 
     def _classify_setup(self) -> None:

@@ -274,11 +274,9 @@ class KernelFunction:
         values = {}
         for role, name in self._spec[key]:
             if role == "lookup" and name == FINISHED_PLANE:
-                # the host runtime's own bind check wants int64 for an
-                # i32/i64-wired lookup plane; the device plan path wants
-                # the device-native int32 it atomically adds into.
-                dtype = torch.int32 if device.type == "cuda" else torch.int64
-                values[name] = torch.zeros(1, dtype=dtype, device=device)
+                # one 4-byte counter cell (declared uint32; torch's int32
+                # carries the same bytes on every device)
+                values[name] = torch.zeros(1, dtype=torch.int32, device=device)
                 continue
             value = planes[name]
             if role == "uniform":
@@ -452,12 +450,11 @@ def _current_stream(index):
 
 def _requirements(cls, tensor, device, index=None, name=None):
     """What a bound plane must be: for the synthesised ``finished_count``
-    lookup cell, int64 on the host runtime's own bind check or int32 on
-    the device plan path (see ``_run``); the tensor's own dtype when it
+    lookup cell, a 4-byte integer (see ``_run``); the tensor's own dtype when it
     is a ``Terminated`` mask (``bool``), float64 otherwise; contiguous;
     on ``device``."""
     if name == FINISHED_PLANE:
-        dtype = "int32" if device == "cuda" else "int64"
+        dtype = "int32"
     else:
         dtype = "bool" if tensor.dtype == torch.bool else "float64"
     return cls(dtype=dtype, contiguous=True, device=device, device_id=index)

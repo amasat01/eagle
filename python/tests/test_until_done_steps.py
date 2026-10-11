@@ -102,7 +102,7 @@ def _fused_explicit(fused, k, target, inp, steps):
     term = xp.zeros(n, dtype=xp.bool_)
     counter = xp.zeros(1, dtype=xp.uint32)
     bound = fused[("plain", k, target)].bind(
-        dt=_DT, terminated=term, finished_count=counter.view(xp.int32), **g)
+        dt=_DT, terminated=term, finished_count=counter, **g)
     for _ in range(-(-steps // k)):
         if int(counter[0]) == n:
             break

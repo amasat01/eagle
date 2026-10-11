@@ -333,6 +333,14 @@ def plan(
     )
 
 
+def _output_dtype(plugin, name, real):
+    """The dtype an output plane ``run`` allocates: the sidecar's declared wire
+    dtype (an ``Int32`` plane is ``int32``, an ``Index`` one ``int64``), else
+    the artifact's Real."""
+    declared = (getattr(plugin, "arg_dtypes", None) or {}).get(name)
+    return np.dtype(declared) if declared else real
+
+
 def _run_device_plan(plugin, arg_spec, kw, n: int, parts, *, launch=None, gather=None,
                      keep_device=False):
     """Run a device plan. Outputs come back as host numpy arrays, except
@@ -352,7 +360,8 @@ def _run_device_plan(plugin, arg_spec, kw, n: int, parts, *, launch=None, gather
             device_arrays[name] = (
                 cp.ascontiguousarray(cp.asarray(kw[name]))
                 if name in kw
-                else cp.zeros(_plane_shape(widths.get(name, 1), n), dtype=dtype)
+                else cp.zeros(_plane_shape(widths.get(name, 1), n),
+                               dtype=_output_dtype(plugin, name, dtype))
             )
         elif role in INPUT_ROLES:
             device_arrays[name] = _device_plane(_bound(kw, name, role), dtype,
@@ -397,7 +406,8 @@ def _run_host_plan(plugin, arg_spec, kw, n: int, parts, *, launch=None, gather=N
             host_arrays[name] = (
                 np.ascontiguousarray(kw[name])
                 if name in kw
-                else np.zeros(_plane_shape(widths.get(name, 1), n), dtype=dtype)
+                else np.zeros(_plane_shape(widths.get(name, 1), n),
+                               dtype=_output_dtype(plugin, name, dtype))
             )
         elif role in INPUT_ROLES:
             host_arrays[name] = _host_plane(_bound(kw, name, role), dtype,

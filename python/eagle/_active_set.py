@@ -521,7 +521,7 @@ class ActiveSet:
 
     def planes(self) -> dict:
         """The two reserved planes as :meth:`eagle.plan.Plan.bind` keywords."""
-        return {MAP_PLANE: self.map, COUNT_PLANE: self.count.view(self._xp.int32)}
+        return {MAP_PLANE: self.map, COUNT_PLANE: self.count}
 
     def when_finished(self, finished):
         """A :class:`eagle.Skippable` compaction that runs only when

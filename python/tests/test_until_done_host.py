@@ -281,7 +281,7 @@ def _serial(plan, max_steps, **planes):
     n = planes["x"].shape[0] if "x" in planes else planes["s"].shape[-1]
     finished = np.zeros(1, dtype=np.uint32)
     bound = plan.bind(terminated=np.zeros(n, dtype=bool),
-                      finished_count=finished.view(np.int32), **planes)
+                      finished_count=finished, **planes)
     whole = eexec.Partition(0, n, n)
     for _ in range(max_steps):
         if int(finished[0]) == n:

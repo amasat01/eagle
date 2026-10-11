@@ -135,7 +135,9 @@ def _repeat_while(node, incoming, ctx):
     cur = {r: like(r) for r in pairs}
     ckpt = [{r: like(r) for r in pairs} for _ in range(groups)]
     win = [{r: like(r) for r in pairs} for _ in range(window)]
-    abar = {r: xp.empty_like(incoming[w]) for r, w in pairs.items()}
+    # an integer state plane (a counter) is re-run state, never differentiated
+    adjoint = {r: w for r, w in pairs.items() if names[r].dtype.kind == "f"}
+    abar = {r: xp.empty_like(incoming[w]) for r, w in adjoint.items()}
     pbar = {w: xp.empty_like(incoming[w]) for w in outs}
 
     # the body on private copies of the state it updates
@@ -169,7 +171,8 @@ def _repeat_while(node, incoming, ctx):
 
     for r in pairs:
         _copy(ctx, xp, cur[r], ctx.primal(r))
-        _copy(ctx, xp, abar[r], incoming[pairs[r]])
+    for r in adjoint:
+        _copy(ctx, xp, abar[r], incoming[adjoint[r]])
     for w in outs:
         _copy(ctx, xp, pbar[w], incoming[w])
     last = (groups - 1) * window
@@ -192,7 +195,7 @@ def _repeat_while(node, incoming, ctx):
             states = win[j - first]
             sub = type(ctx)(ctx.backend, ctx.label, ctx.vjp,
                             lambda n, states=states: states[n] if n in states else ctx.primal(n))
-            inc = {w: abar[r] for r, w in pairs.items()} | pbar
+            inc = {w: abar[r] for r, w in adjoint.items()} | pbar
             with sub.gated(on[j]):
                 out = get_node_kind("launch").transpose(child, inc, sub)
             ctx._steps.extend(sub._steps)
@@ -202,11 +205,11 @@ def _repeat_while(node, incoming, ctx):
                     terms[r].append((j, out[r]))
                     zeroed.append(out[r])
             with ctx.gated(on[j]):
-                for r in pairs:
+                for r in adjoint:
                     _copy(ctx, xp, abar[r], out[r])
                 for w in outs:
                     ctx.add(lambda b=pbar[w]: b.fill(0), writes=[pbar[w]])
-    for r in pairs:
+    for r in adjoint:
         result[r] = abar[r]
     for w in outs:
         if w in ctx.reads:      # no iteration ran: the adjoint goes on to the plane's earlier writer

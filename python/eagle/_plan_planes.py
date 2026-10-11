@@ -145,15 +145,9 @@ def _bound(kw, name: str, role: str):
 
 
 def _declared_dtype(plugin, name):
-    """The wire dtype the sidecar declares for plane ``name``, or ``None``.
-    The active-set map/count planes and the finish counter are eagle's own
-    4-byte planes and fix their dtype themselves, so they are never checked
-    against the sidecar."""
-    from ._active_set import COUNT_PLANE, MAP_PLANE
-    from .sidecar import FINISH_COUNTER
-
-    if name in (MAP_PLANE, COUNT_PLANE, FINISH_COUNTER):
-        return None
+    """The wire dtype the sidecar declares for plane ``name``, or ``None``
+    (the reserved 4-byte planes included: ``active_map`` is ``int32``, the
+    ``finished_count``/``active_count``/``<group>_mix`` counters ``uint32``)."""
     declared = (getattr(plugin, "arg_dtypes", None) or {}).get(name)
     return np.dtype(declared) if declared else None
 
@@ -161,8 +155,13 @@ def _declared_dtype(plugin, name):
 def _refuse_dtype_mismatch(door, role, name, declared, given) -> None:
     """Refuse a plane whose dtype is not the one the sidecar declares: the
     body reads ``declared.itemsize``-byte elements, so a narrower or wider
-    plane is walked off its end (or reinterpreted) at launch. Never cast."""
-    if declared is None or np.dtype(given) == declared:
+    plane is walked off its end (or reinterpreted) at launch. Never cast.
+    An integer plane's signedness is not policed (an ``int32`` view of a
+    ``uint32`` counter reads the same bytes), only its kind and width."""
+    given = np.dtype(given)
+    if declared is None or given == declared:
+        return
+    if given.kind in "iu" and declared.kind in "iu" and given.itemsize == declared.itemsize:
         return
     raise ValueError(
         f"eagle.plan.{door}: {role} {name!r} has dtype {np.dtype(given)}, but "

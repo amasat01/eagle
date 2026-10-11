@@ -209,7 +209,7 @@ def _capacity_probe(auto, label, target):
     counter = xp.zeros(1, dtype=xp.uint32)
     word = xp.zeros(1, dtype=xp.int64)
     kw = dict(dt=_DT, terminated=term, fused_steps=word,
-             finished_count=counter.view(xp.int32), **g)
+             finished_count=counter, **g)
     plugin = auto[(label, target)].plugin
     declared = {name for _role, name in plugin.arg_spec}
     if "active_map" in declared and "active_count" in declared:
@@ -273,7 +273,7 @@ def _by_hand(auto, target, inp, max_steps, *, pinned_k_max=None):
     counter = xp.zeros(1, dtype=xp.uint32)
     word = xp.zeros(1, dtype=xp.int64)
     bound = auto[("plain", target)].bind(dt=_DT, terminated=term, fused_steps=word,
-                                         finished_count=counter.view(xp.int32), **g)
+                                         finished_count=counter, **g)
 
     def finished_after(k):
         if k is not None:
@@ -1164,7 +1164,7 @@ def _launches(plan, target, inp, door, launches, word=None):
     n = inp["x"].shape[0]
     term = xp.zeros(n, dtype=xp.bool_)
     counter = xp.zeros(1, dtype=xp.uint32)
-    kw = dict(dt=_DT, terminated=term, finished_count=counter.view(xp.int32), **g)
+    kw = dict(dt=_DT, terminated=term, finished_count=counter, **g)
     if word is not None:
         kw[FUSED_STEPS] = xp.full(1, word, dtype=xp.int64)
     if door == "bind":
@@ -1232,7 +1232,7 @@ def test_device_plan_run_puts_the_one_step_word_on_the_device(auto, monkeypatch)
     n = g["x"].shape[0]
     auto[("default", "device")].run(
         dt=_DT, terminated=np.zeros(n, dtype=bool),
-        finished_count=np.zeros(1, dtype=np.int32), **g)
+        finished_count=np.zeros(1, dtype=np.uint32), **g)
     assert seen == ["cupy"]
     assert isinstance(g["k"], np.ndarray)
     np.testing.assert_array_equal(g["k"], 1.0)
