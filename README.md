@@ -214,7 +214,7 @@ and a CPU OpenMP arm (no device or transfers needed, and the correctness referen
 The five-arm table below is the headline cut (both distributions, N = 1,000,000); the
 [full performance page](https://amasat01.github.io/eagle/content/performance.html) has every arm, every N.
 
-<p align="center"><a href="https://amasat01.github.io/eagle/content/performance.html"><img src="https://raw.githubusercontent.com/amasat01/eagle/main/docs/_static/perf/readme_gpu.svg" alt="Wall time per tool for a million RK4 oscillators on the default GPU: eagle.simulate, NVIDIA Warp, JAX, CuPy and PyTorch; the numbers are on the performance page." width="700"></a></p>
+<p align="center"><a href="https://amasat01.github.io/eagle/content/performance.html"><img src="https://raw.githubusercontent.com/amasat01/eagle/main/docs/_static/perf/readme_gpu.svg" alt="Wall time per tool for a million RK4 oscillators on the default GPU: eagle.simulate, NVIDIA Warp, JAX, CuPy and PyTorch; the numbers are on the performance page." width="732"></a></p>
 
 The chart shows one GPU; [the performance page](https://amasat01.github.io/eagle/content/performance.html) has a tab for every device and CPU measured.
 

@@ -61,6 +61,8 @@ def test_dropping_a_card_adds_a_tab_with_no_code_change(tmp_path):
     src = root / "benchmarks" / "perf_card" / "card_tesla-t4.json"
     (root / "benchmarks" / "perf_card" / "card_extra-gpu.json").write_text(
         src.read_text().replace("Tesla T4", "Extra GPU").replace("tesla-t4", "extra-gpu"))
+    (root / "benchmarks" / "perf_card" / "card_extra-gpu.md").write_text(
+        (root / "benchmarks" / "perf_card" / "card_tesla-t4.md").read_text())
     gen.generate(root, out)
     text = (out / "perf_card_gpu.md").read_text()
     assert text.count(":::{tab-item}") == before + 1

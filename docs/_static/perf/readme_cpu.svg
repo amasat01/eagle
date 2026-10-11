@@ -1,15 +1,17 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="700" height="200" viewBox="0 0 700 200" role="img" aria-labelledby="t d" font-family="system-ui, -apple-system, Segoe UI, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" width="732" height="232" viewBox="0 0 732 232" role="img" aria-labelledby="t d" font-family="system-ui, -apple-system, Segoe UI, sans-serif">
 <title id="t">RK4 oscillators, 1,000,000 samples, spread (up to 1000 steps)</title>
 <desc id="d">Wall time on Intel Xeon W-2125 CPU @ 4.00GHz: eagle, 8 threads 145 ms, Numba 501 ms, JAX 4.97 s, PyTorch 33.4 s, NumPy 62.9 s.</desc>
-<style>.ink{fill:#0b0b0b}.sub{fill:#52514e}.bar{fill:rgba(127,126,120,.5)}.us{fill:#7d53dc}
+<style>.bg{fill:#fcfcfb;stroke:#e1e0d9}.ink{fill:#0b0b0b}.sub{fill:#52514e}.bar{fill:rgba(127,126,120,.5)}.us{fill:#7d53dc}
 .c0{fill:#cf416b}
 .c1{fill:#00a3e0}
 .c2{fill:#1a9a8c}
 .c3{fill:#ee4c2c}
 .c4{fill:#4d77cf}
-@media (prefers-color-scheme: dark){.ink{fill:#f2f2ee}.sub{fill:#c3c2b7}
+@media (prefers-color-scheme: dark){.bg{fill:#1a1a19;stroke:#2c2c2a}.ink{fill:#f2f2ee}.sub{fill:#c3c2b7}
 .c4{fill:#7ea3f2}
 }</style>
+<rect class="bg" x="0.5" y="0.5" width="731" height="231" rx="8"/>
+<g transform="translate(16,16)">
 <text class="ink" x="0" y="22" font-size="16" font-weight="600">RK4 oscillators, 1,000,000 samples, spread (up to 1000 steps)</text>
 <text class="sub" x="0" y="42" font-size="12.5">Intel Xeon W-2125 CPU @ 4.00GHz. Log scale, 90.5 ms to 101 s.</text>
 <circle class="c0" cx="5" cy="66" r="4.5"/><text class="ink" x="18" y="71" font-size="14">eagle, 8 threads</text><rect class="us" x="150" y="59" width="32.2" height="14" rx="3"/><text class="ink" x="190.2" y="71" font-size="13">145 ms</text>
@@ -17,4 +19,5 @@
 <circle class="c2" cx="5" cy="126" r="4.5"/><text class="ink" x="18" y="131" font-size="14">JAX</text><rect class="bar" x="150" y="119" width="274.2" height="14" rx="3"/><text class="ink" x="432.2" y="131" font-size="13">4.97 s</text>
 <circle class="c3" cx="5" cy="156" r="4.5"/><text class="ink" x="18" y="161" font-size="14">PyTorch</text><rect class="bar" x="150" y="149" width="404.6" height="14" rx="3"/><text class="ink" x="562.6" y="161" font-size="13">33.4 s</text>
 <circle class="c4" cx="5" cy="186" r="4.5"/><text class="ink" x="18" y="191" font-size="14">NumPy</text><rect class="bar" x="150" y="179" width="447.8" height="14" rx="3"/><text class="ink" x="605.8" y="191" font-size="13">62.9 s</text>
+</g>
 </svg>

@@ -39,8 +39,10 @@ writes under ``benchmarks/``.
 
 from __future__ import annotations
 
+import html
 import pathlib
 import re
+import shutil
 import sys
 
 DOCS_DIR = pathlib.Path(__file__).resolve().parent.parent
@@ -60,16 +62,16 @@ import perf_charts as charts  # noqa: E402
 #: pair this script reports a ratio between on every non-reference device;
 #: CPU cards run neither arm, so they stay unset.
 FAMILIES = [
-    {"key": "perf_card_gpu", "dir": "benchmarks/perf_card", "prefix": "card_",
+    {"key": "perf_card_gpu", "page": "rk4", "dir": "benchmarks/perf_card", "prefix": "card_",
      "reference_slug": "quadro-p2000", "heading": "GPU", "has_config": True,
      "simulate": "eagle_simulate", "twin": "eagle_graph_auto"},
-    {"key": "perf_card_cpu", "dir": "benchmarks/perf_card", "prefix": "cpu_card_",
+    {"key": "perf_card_cpu", "page": "rk4", "dir": "benchmarks/perf_card", "prefix": "cpu_card_",
      "reference_slug": "intel-xeon-w-2125", "heading": "CPU", "has_config": True,
      "simulate": None, "twin": None},
-    {"key": "rk78_card_gpu", "dir": "benchmarks/rk78_card", "prefix": "card_",
+    {"key": "rk78_card_gpu", "page": "rk78", "dir": "benchmarks/rk78_card", "prefix": "card_",
      "reference_slug": "quadro-p2000", "heading": "GPU", "has_config": False,
      "simulate": "eagle_simulate", "twin": "eagle_graph"},
-    {"key": "rk78_card_cpu", "dir": "benchmarks/rk78_card", "prefix": "cpu_card_",
+    {"key": "rk78_card_cpu", "page": "rk78", "dir": "benchmarks/rk78_card", "prefix": "cpu_card_",
      "reference_slug": "intel-r-xeon-r-w-2125-cpu-4-00ghz", "heading": "CPU",
      "has_config": False, "simulate": None, "twin": None},
 ]
@@ -207,74 +209,119 @@ def _simulate_vs_twin_lines(card: dict, simulate_arm: str | None, twin_arm: str 
 # --------------------------------------------------------------------------- #
 # Rendering
 # --------------------------------------------------------------------------- #
-def _measured_on_table(spec: dict, entries: list[dict]) -> list[str]:
-    lines = ["### Measured on", "",
-             "| device | compute capability / CPU model | date | section |",
-             "|---|---|---|---|"]
+def _measured_on_table(entries: list[dict]) -> list[str]:
+    lines = ["| device | compute capability / CPU model | date |", "|---|---|---|"]
     for e in entries:
-        card = e["card"]
-        name, cls = _device_name_and_class(card)
-        date = (card.get("generated_utc") or "–").split("T")[0]
-        anchor = f"{spec['key']}-{e['slug']}"
-        lines.append(f"| {name} | {cls} | {date} | [{name}](#{anchor}) |")
+        name, cls = _device_name_and_class(e["card"])
+        date = (e["card"].get("generated_utc") or "–").split("T")[0]
+        lines.append(f"| {name} | {cls} | {date} |")
     lines.append("")
     return lines
 
 
-def _chart_tabs(spec: dict, entries: list[dict]) -> list[str]:
-    """A tab-set with one tab per device (the first is shown): one wall-time
-    bar chart per workload configuration, at the card's largest N."""
+def _chart_for(spec: dict, e: dict, cfg: dict | None, name_config: bool = True) -> str | None:
+    """One chart's HTML (the card's tools at its largest N), or None."""
     tools = charts.GPU_TOOLS if spec["heading"] == "GPU" else charts.CPU_TOOLS
-    group = spec["heading"].lower()
-    tabs = []
+    chart_bars, n = charts.bars(e["card"], tools, cfg)
+    if not chart_bars:
+        return None
+    title = f"{_config_label(cfg)}, N = {n:,}" if cfg and name_config else f"N = {n:,}"
+    return (f'<p class="chart-title">{title}</p>\n'
+            + charts.chart_html(chart_bars, e["name"], ""))
+
+
+def _configs(spec: dict, e: dict) -> list[dict | None]:
+    return (e["card"].get("configs") if spec["has_config"] else None) or [None]
+
+
+def headline_config(spec: dict, e: dict) -> dict | None:
+    """The workload the overview shows: the README's, else the card's first."""
+    configs = _configs(spec, e)
+    return README_CONFIG if README_CONFIG in configs else configs[0]
+
+
+def _slug_key(cfg: dict | None) -> str:
+    return "all" if not cfg else f"{cfg.get('distribution')}-{cfg.get('max_steps')}"
+
+
+def _raw_html(html_text: str) -> list[str]:
+    return ["```{raw} html", *html_text.split("\n"), "```", ""]
+
+
+def card_overview(spec: dict, e: dict, page: str) -> str:
+    """Fragment: the device's headline chart, a one-line description, a link to
+    the results page. Carries the anchor external links point at."""
+    name, cls = _device_name_and_class(e["card"])
+    date = (e["card"].get("generated_utc") or "").split("T")[0]
+    chart = _chart_for(spec, e, headline_config(spec, e))
+    detail = ([f"compute capability {cls}"] if spec["heading"] == "GPU" else []) + (
+        [f"card of {date}"] if date else [])
+    lines = [f"({spec['key']}-{e['slug']})=",
+             f"**{name}**{' (' + ', '.join(detail) + ')' if detail else ''}.", ""]
+    if chart:
+        lines += _raw_html(chart)
+    lines += [f"[Every workload, every arm and every N for {name}](/content/performance/{page}.md)", ""]
+    return "\n".join(lines)
+
+
+def _table_fragment(spec: dict, e: dict) -> str:
+    """The card's own table with its headings turned into bold lines (a heading
+    cannot sit inside a collapsed block), then the machine-derived lines."""
+    out, fenced = [], False
+    for line in e["path"].with_suffix(".md").read_text().splitlines():
+        if line.lstrip().startswith("```"):
+            fenced = not fenced
+        m = None if fenced else re.match(r"#{1,6}\s+(.*)", line)
+        out.append(f"**{m.group(1)}**" if m else line)
+    out.append("")
+    if not e["is_reference"]:
+        out += _fastest_arm_lines(e["card"], spec["has_config"])
+        out += _simulate_vs_twin_lines(e["card"], spec["simulate"], spec["twin"])
+    return "\n".join(out).rstrip("\n") + "\n"
+
+
+def card_results(spec: dict, e: dict, table_rel: str) -> str:
+    """Fragment: one tab per workload configuration with its chart, then the
+    detailed table collapsed underneath."""
+    configs = [(c, _chart_for(spec, e, c, name_config=False)) for c in _configs(spec, e)]
+    configs = [(c, h) for c, h in configs if h]
+    lines: list[str] = []
+    if len(configs) == 1:
+        lines += _raw_html(configs[0][1])
+    elif configs:
+        lines += ["::::{tab-set}", ":sync-group: workload", ""]
+        for cfg, html_text in configs:
+            lines += [f":::{{tab-item}} {_config_label(cfg)}", f":sync: {_slug_key(cfg)}", ""]
+            lines += _raw_html(html_text)
+            lines += [":::"]
+        lines += ["::::", ""]
+    lines += [":::{dropdown} Table of every arm and every N", "",
+              f"```{{include}} {table_rel}", "```", ":::", ""]
+    return "\n".join(lines)
+
+
+def _tab_set(spec: dict, entries: list[dict], fragment_rel) -> list[str]:
+    """Device tabs (first = default), synced across pages by slug."""
+    lines = ["::::{tab-set}", f":sync-group: {spec['heading'].lower()}", ""]
     for e in entries:
-        card = e["card"]
-        configs = (card.get("configs") if spec["has_config"] else None) or [None]
-        blocks = []
-        for cfg in configs:
-            chart_bars, n = charts.bars(card, tools, cfg)
-            if not chart_bars:
-                continue
-            title = f"{_config_label(cfg)}, N = {n:,}" if cfg else f"N = {n:,}"
-            note = f'<a href="#{spec["key"]}-{e["slug"]}">Every arm and every N, below</a>.'
-            blocks.append(f'<p class="chart-title">{title}</p>\n'
-                          + charts.chart_html(chart_bars, e["name"], note))
-        if blocks:
-            tabs.append((e, blocks))
-    if not tabs:
-        return []
-    lines = ["::::{tab-set}", f":sync-group: {group}", ""]
-    for e, blocks in tabs:
-        lines += [f":::{{tab-item}} {e['name']}", f":sync: {e['slug']}", "", "```{raw} html",
-                  *("\n".join(blocks).split("\n")), "```", "", ":::"]
+        lines += [f":::{{tab-item}} {e['name']}", f":sync: {e['slug']}", "",
+                  f"```{{include}} {fragment_rel(e)}", "```", ":::", ""]
     lines += ["::::", ""]
     return lines
 
 
-def render_family(eagle_root: pathlib.Path, spec: dict, entries: list[dict],
-                   out_dir: pathlib.Path) -> str:
+def render_family(spec: dict, entries: list[dict], out_dir: pathlib.Path, view: str) -> str:
+    """The family's assembled fragment for ``view`` ("results" or "overview")."""
     lines = [f"<!-- Generated by docs/_tools/gen_perf_pages.py from "
              f"{spec['dir']}/{spec['prefix']}*.json; do not edit. -->", ""]
     if not entries:
         lines.append(f"No committed `{spec['prefix']}*.json` under `{spec['dir']}/` yet.")
         return "\n".join(lines) + "\n"
-    lines += _chart_tabs(spec, entries)
-    lines += _measured_on_table(spec, entries)
-    for e in entries:
-        anchor = f"{spec['key']}-{e['slug']}"
-        # Docs-root-relative ("/..."): a nested {include} would otherwise
-        # resolve against the INCLUDING page, not this generated file.
-        rel = pathlib.Path("/" + _relpath(e["path"].with_suffix(".md"),
-                                          out_dir.parent.parent))
-        lines.append(f"({anchor})=")
-        lines.append(f"#### {spec['heading']} ({e['name']})")
-        lines.append("")
-        lines.append(f"```{{include}} {rel.as_posix()}")
-        lines.append("```")
-        lines.append("")
-        if not e["is_reference"]:
-            lines += _fastest_arm_lines(e["card"], spec["has_config"])
-            lines += _simulate_vs_twin_lines(e["card"], spec["simulate"], spec["twin"])
+    root = out_dir.parent.parent
+    lines += _tab_set(spec, entries, lambda e: "/" + _relpath(
+        out_dir / spec["key"] / f"{e['slug']}_{view}.md", root))
+    if view == "results":
+        lines += _measured_on_table(entries)
     return "\n".join(lines).rstrip("\n") + "\n"
 
 
@@ -315,6 +362,29 @@ def write_readme_svgs(eagle_root: pathlib.Path, entries_by_family: dict[str, lis
     return written
 
 
+def write_glimpse(out_dir: pathlib.Path, entries_by_family: dict[str, list[dict]]) -> None:
+    """``perf_glimpse.html``: the home page's performance glimpse, the same
+    chart the README embeds (the default GPU card), with the numbers in its alt."""
+    entries = entries_by_family.get("perf_card_gpu") or []
+    target = out_dir / "perf_glimpse.html"
+    target.unlink(missing_ok=True)
+    if not entries:
+        return
+    e = entries[0]
+    cfg = headline_config(FAMILIES[0], e)
+    chart_bars, n = charts.bars(e["card"], charts.GPU_TOOLS, cfg)
+    if not chart_bars:
+        return
+    alt = html.escape(charts.alt_text(chart_bars, e["name"]), quote=True)
+    target.write_text(
+        '<figure class="perf-glimpse">\n'
+        '<a href="content/performance.html"><img src="_static/perf/readme_gpu.svg" '
+        f'alt="{alt}" style="max-width:100%;height:auto"></a>\n'
+        f'<figcaption>{n:,} samples, each stopping at its own step, on {html.escape(e["name"])}: '
+        'wall time per tool, log scale. <a href="content/performance.html">Every device, workload '
+        'and arm</a>.</figcaption>\n</figure>\n')
+
+
 def generate(eagle_root: pathlib.Path, out_dir: pathlib.Path) -> dict[str, int]:
     """Writes ``<out-dir>/<family>.md`` for every family; returns {family:
     device count} for a caller that wants to log or assert on the result."""
@@ -323,12 +393,25 @@ def generate(eagle_root: pathlib.Path, out_dir: pathlib.Path) -> dict[str, int]:
     out_dir.mkdir(parents=True, exist_ok=True)
     counts = {}
     loaded = {}
+    root = out_dir.parent.parent
     for spec in FAMILIES:
         entries = loaded[spec["key"]] = load_family(eagle_root, spec)
-        text = render_family(eagle_root, spec, entries, out_dir)
-        (out_dir / f"{spec['key']}.md").write_text(text)
+        card_dir = out_dir / spec["key"]
+        shutil.rmtree(card_dir, ignore_errors=True)   # a removed card leaves no fragment
+        card_dir.mkdir(parents=True, exist_ok=True)
+        for e in entries:
+            table = card_dir / f"{e['slug']}_table.md"
+            table.write_text(_table_fragment(spec, e))
+            (card_dir / f"{e['slug']}_results.md").write_text(
+                card_results(spec, e, "/" + _relpath(table, root)))
+            (card_dir / f"{e['slug']}_overview.md").write_text(
+                card_overview(spec, e, spec["page"]))
+        for view in ("results", "overview"):
+            name = spec["key"] if view == "results" else f"{spec['key']}_overview"
+            (out_dir / f"{name}.md").write_text(render_family(spec, entries, out_dir, view))
         counts[spec["key"]] = len(entries)
     write_readme_svgs(eagle_root, loaded)
+    write_glimpse(out_dir, loaded)
     return counts
 
 

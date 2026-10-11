@@ -49,7 +49,8 @@ _CARD_SCRIPTS = (_CARD_DIR / "perf_card.py", _CARD_DIR / "cpu_card.py",
                  _REPO / "benchmarks" / "rk78_card" / "rk78_card.py",
                  _REPO / "benchmarks" / "rk78_card" / "cpu_rk78_card.py",
                  _REPO / "benchmarks" / "_card_common.py")
-_PAGE = _REPO / "docs" / "content" / "performance.md"
+_PAGE_DIR = _REPO / "docs" / "content" / "performance"
+_PAGE = _PAGE_DIR / "reading.md"   # carries the stale-prose gates
 _README = _REPO / "README.md"
 
 #: The README's headline table: N = 1,000,000, the five arms shown
@@ -373,43 +374,46 @@ def _gen_module():
     return module
 
 
-def test_docs_page_includes_every_generated_family():
-    """performance.md includes each family's generated fragment
+def test_docs_pages_include_every_generated_family():
+    """The results pages include each family's generated fragment
     (``_generated/<family>.md``, written by ``docs/_tools/gen_perf_pages.py``
-    from the cards on disk), not a raw per-device card path: the generated
-    fragment is what {include}s the device's own ``card_<slug>.md``, so a new
-    device needs no edit to this page.
+    from the cards on disk), and the overview its ``_overview`` twin: a new
+    device needs no edit to any page.
 
-    RED: drop one of the four {include} lines from performance.md and this
-    fails naming the family."""
-    page = _PAGE.read_text()
+    RED: drop one {include} line from a page and this fails naming the family."""
     module = _gen_module()
     for spec in module.FAMILIES:
-        rel = f"_generated/{spec['key']}.md"
-        assert rel in page, f"{_PAGE.name} does not include {rel}"
+        results = (_PAGE_DIR / f"{spec['page']}.md").read_text()
+        assert f"_generated/{spec['key']}.md" in results, (
+            f"{spec['page']}.md does not include _generated/{spec['key']}.md")
+        overview = (_PAGE_DIR.parent / "performance.md").read_text()
+        assert f"_generated/{spec['key']}_overview.md" in overview, (
+            f"performance.md does not include _generated/{spec['key']}_overview.md")
 
 
 def test_generated_families_cover_every_committed_card():
     """Every committed ``card_*.json``/``cpu_card_*.json`` under
-    ``benchmarks/{perf_card,rk78_card}/`` is reachable from performance.md
-    through its family's generated fragment (run on the real cards, into a
-    scratch directory -- the generated files themselves are never committed).
+    ``benchmarks/{perf_card,rk78_card}/`` gets a results, an overview and a
+    table fragment, each reachable from its family's assembled fragment (run on
+    the real cards, into a scratch directory -- the generated files themselves
+    are never committed).
 
     RED: a card whose device the generator does not pick up (e.g. a slug the
-    glob misses) fails here naming the family and the missing table."""
+    glob misses) fails here naming the family and the missing fragment."""
     module = _gen_module()
     with tempfile.TemporaryDirectory() as tmp:
         out_dir = pathlib.Path(tmp)
         module.generate(_REPO, out_dir)
         for spec in module.FAMILIES:
             card_dir = _REPO / spec["dir"]
-            wanted = sorted(p.with_suffix(".md").name
-                            for p in card_dir.glob(f"{spec['prefix']}*.json"))
-            assert wanted, f"{spec['key']}: no committed cards under {card_dir}"
-            text = (out_dir / f"{spec['key']}.md").read_text()
-            for name in wanted:
-                assert name in text, (
-                    f"{spec['key']}.md does not include {name}")
+            cards = sorted(card_dir.glob(f"{spec['prefix']}*.json"))
+            assert cards, f"{spec['key']}: no committed cards under {card_dir}"
+            for view in ("results", "overview"):
+                text = (out_dir / f"{spec['key']}{'' if view == 'results' else '_overview'}.md").read_text()
+                for e in module.load_family(_REPO, spec):
+                    assert f"{spec['key']}/{e['slug']}_{view}.md" in text, (
+                        f"{spec['key']} ({view}) does not include {e['slug']}")
+                    assert (out_dir / spec["key"] / f"{e['slug']}_table.md").is_file()
 
 
 # --------------------------------------------------------------------------- #

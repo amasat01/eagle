@@ -118,23 +118,27 @@ def chart_html(chart_bars, where: str, note: str) -> str:
                     f'<span class="val" style="left:{p:.1f}%">{_time(wall)}</span></div></div>')
     return (f'<div class="chart" role="img" aria-label="{html.escape(alt_text(chart_bars, where))}">\n'
             + "\n".join(rows) + "\n</div>\n"
-            f'<p class="axis-note">Log scale, from {_time(lo)} to {_time(hi)}. {note}</p>')
+            f'<p class="axis-note">Log scale, from {_time(lo)} to {_time(hi)}.{' ' + note if note else ''}</p>')
 
 
 def chart_svg(chart_bars, title: str, where: str) -> str:
     """A standalone SVG of the same chart for the READMEs: no script, light and
     dark by ``prefers-color-scheme``, the numbers in ``<desc>``."""
     lo, hi, pct = _positions(chart_bars)
+    pad = 16
     w, label_w, track_w, row_h, top = 700, 150, 480, 30, 56
     h = top + row_h * (len(chart_bars) - 1) + 24
+    full_w, full_h = w + 2 * pad, h + 2 * pad
     light = "\n".join(f".c{i}{{fill:{_LIGHT[b[1]]}}}" for i, b in enumerate(chart_bars))
     dark = "\n".join(f".c{i}{{fill:{_DARK[b[1]]}}}" for i, b in enumerate(chart_bars) if b[1] in _DARK)
-    parts = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}" '
+    parts = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{full_w}" height="{full_h}" viewBox="0 0 {full_w} {full_h}" '
              f'role="img" aria-labelledby="t d" font-family="system-ui, -apple-system, Segoe UI, sans-serif">',
              f'<title id="t">{html.escape(title)}</title>',
              f'<desc id="d">{html.escape(alt_text(chart_bars, where))}</desc>',
-             "<style>.ink{fill:#0b0b0b}.sub{fill:#52514e}.bar{fill:rgba(127,126,120,.5)}.us{fill:#7d53dc}",
-             light, "@media (prefers-color-scheme: dark){.ink{fill:#f2f2ee}.sub{fill:#c3c2b7}", dark, "}</style>",
+             "<style>.bg{fill:#fcfcfb;stroke:#e1e0d9}.ink{fill:#0b0b0b}.sub{fill:#52514e}.bar{fill:rgba(127,126,120,.5)}.us{fill:#7d53dc}",
+             light, "@media (prefers-color-scheme: dark){.bg{fill:#1a1a19;stroke:#2c2c2a}.ink{fill:#f2f2ee}.sub{fill:#c3c2b7}", dark, "}</style>",
+             f'<rect class="bg" x="0.5" y="0.5" width="{full_w - 1}" height="{full_h - 1}" rx="8"/>',
+             f'<g transform="translate({pad},{pad})">',
              f'<text class="ink" x="0" y="22" font-size="16" font-weight="600">{html.escape(title)}</text>',
              f'<text class="sub" x="0" y="42" font-size="12.5">{html.escape(where)}. Log scale, '
              f'{_time(lo)} to {_time(hi)}.</text>']
@@ -146,5 +150,5 @@ def chart_svg(chart_bars, title: str, where: str) -> str:
                      f'<rect class="{"us" if us else "bar"}" x="{label_w}" y="{y + 3}" width="{bw:.1f}" '
                      f'height="14" rx="3"/>'
                      f'<text class="ink" x="{label_w + bw + 8:.1f}" y="{y + 15}" font-size="13">{_time(wall)}</text>')
-    parts.append("</svg>\n")
+    parts.append("</g>\n</svg>\n")
     return "\n".join(parts)

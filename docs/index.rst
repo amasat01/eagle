@@ -22,6 +22,9 @@ engine.
 .. raw:: html
    :file: _static/ecosystem/ecosystem_cards_eagle.html
 
+.. raw:: html
+   :file: content/_generated/perf_glimpse.html
+
 Thirty seconds: ``eagle.simulate``
 ----------------------------------
 
