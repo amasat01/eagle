@@ -241,6 +241,8 @@ print("ok")
 
 
 def test_several_threads_running_stages_at_once_neither_hang_nor_abort(tmp_path):
+    # the child builds its stages with hawk; without it there is nothing to stress
+    pytest.importorskip("hawk")
     import os
     import subprocess
     import sys
