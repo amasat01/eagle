@@ -104,7 +104,7 @@ class RunReport:
     nothing, hit the cap early, or ended on a one-step launch).
     ``compactions``/``reorders`` count what ran, ``build_s`` the one-time
     capture wall (0 on host), ``launches_by_k`` each ``k``'s launch count.
-    ``lane_utilisation`` (active lanes / warp-iterations, in ``(0, 1]``) is
+    ``lane_utilisation`` (lane steps / lane chunk slots, in ``(0, 1]``) is
     set only for a persist-entry run that counted it; ``None`` otherwise
     (every other mode, or a persist run that skipped the counter).
     ``mode`` is the launch shape this run actually took: ``"fused_one"``/
@@ -875,7 +875,7 @@ class Runner:
         :meth:`run`, not here -- the one-time allocation only); the
         lane-utilisation counter is allocated, and later filled, ONLY when
         ``lane_utilisation_override`` asks for it (off by default -- it
-        costs 2 same-address 64-bit atomics per warp per step, see
+        costs 2 same-address 64-bit atomics per lane per launch, see
         :meth:`_run_fast`'s docstring). ``probe`` builds the persist
         block/grid whatever ``mode`` is, so :meth:`_pick_entry` can switch
         between the two entries; it also (re)starts the measured walls."""
@@ -1126,11 +1126,11 @@ class Runner:
             self._note_run(mode, xp.cuda.get_elapsed_time(t0, t1) if timed else None,
                            steps_read, finished, f)
         if self._fast_util_on and mode == "persist":
-            active_lanes, warp_iters = (
+            lane_steps, lane_slots = (
                 self._fast_util.get() if self._device else self._fast_util
             )
-            if warp_iters > 0:
-                lane_utilisation = float(active_lanes) / float(warp_iters)
+            if lane_slots > 0:
+                lane_utilisation = float(lane_steps) / float(lane_slots)
         done = finished == self.n
         steps, exact = ((steps_read, True) if steps_cell is not None
                         else (self._max_steps, not done))

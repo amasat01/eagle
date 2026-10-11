@@ -611,7 +611,7 @@ def test_fast_mode_rejects_an_unknown_value(auto, bad):
 @pytest.mark.gpu
 def test_fast_path_lane_utilisation_is_off_unless_asked(auto):
     """The persist entry's lane-utilisation counter (2 same-address
-    64-bit atomics per warp per step) stays off -- ``RunReport.lane_utilisation
+    64-bit atomics per lane per launch) stays off -- ``RunReport.lane_utilisation
     is None`` -- unless the internal ``_lane_utilisation`` switch asks for it
     (the same convention ``_fast_mode`` already uses)."""
     _need(auto, ("plain", "device"))

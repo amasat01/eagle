@@ -302,8 +302,10 @@ class BoundPlan:
         one-element uint32 cupy array the caller has already memset to 0
         (not done here, so a caller replaying this inside a captured graph
         can fold the reset into a graph node instead). ``util`` is an
-        optional 2-element uint64 cupy array (active lanes,
-        warp-iterations*32); omitted, the entry gets a null pointer and
+        optional 2-element uint64 cupy array (the lanes' steps, and their
+        chunk slots: each lane's steps rounded up to a chunk, counted per
+        lane so a split warp counts each slot once); omitted, the entry gets
+        a null pointer and
         skips counting. ``steps`` is an optional one-element uint32 cupy
         array the caller has zeroed: the entry maxes each sample's steps
         taken in this launch into it (the run's exact step count); omitted,
