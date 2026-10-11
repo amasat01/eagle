@@ -50,6 +50,7 @@ from ._plan_planes import (
     _check_run_writable,
     _declared_widths,
     _device_inputs,
+    _declared_dtype,
     _device_plane,
     _host_plane,
     _is_single_call,
@@ -354,7 +355,9 @@ def _run_device_plan(plugin, arg_spec, kw, n: int, parts, *, launch=None, gather
                 else cp.zeros(_plane_shape(widths.get(name, 1), n), dtype=dtype)
             )
         elif role in INPUT_ROLES:
-            device_arrays[name] = _device_plane(_bound(kw, name, role), dtype)
+            device_arrays[name] = _device_plane(_bound(kw, name, role), dtype,
+                                                   declared=_declared_dtype(plugin, name),
+                                                   name=name, role=role)
 
     if gather is not None:
         for name in out_names:
@@ -397,7 +400,9 @@ def _run_host_plan(plugin, arg_spec, kw, n: int, parts, *, launch=None, gather=N
                 else np.zeros(_plane_shape(widths.get(name, 1), n), dtype=dtype)
             )
         elif role in INPUT_ROLES:
-            host_arrays[name] = _host_plane(_bound(kw, name, role), dtype)
+            host_arrays[name] = _host_plane(_bound(kw, name, role), dtype,
+                                               declared=_declared_dtype(plugin, name),
+                                               name=name, role=role)
 
     if gather is not None:
         for name in out_names:

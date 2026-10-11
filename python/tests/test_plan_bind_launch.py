@@ -164,6 +164,11 @@ def gather_unit(tmp_path_factory):
 
 
 @pytest.fixture(scope="module")
+def gather_host_unit(tmp_path_factory):
+    return _bundle(e4_gather, tmp_path_factory, "gather_host", ("host",))
+
+
+@pytest.fixture(scope="module")
 def energy_unit(tmp_path_factory):
     return _bundle(e4_energy, tmp_path_factory, "energy")
 
@@ -826,6 +831,57 @@ def test_bind_refuses_a_plane_of_the_wrong_dtype(vec3_unit):
     with pytest.raises(ValueError, match=r"'x' has dtype float32"):
         p.bind(x=cp.asarray(_x_plane(dtype=np.float32)),
                y=cp.zeros((W, N)), a=2.0)
+
+
+_INDEX_MSG = r"'where' has dtype int32.*declares int64.*pass where as int64: where\.astype"
+
+
+def test_bind_refuses_an_int32_plane_for_an_int64_index_on_the_host(gather_host_unit):
+    """The sidecar declares ``where`` int64; the body reads 8-byte indices, so
+    an int32 plane was accepted and the launch SEGFAULTED. Refused at bind (and
+    at run), never cast; the int64 twin binds and runs."""
+    import eagle.exec as eexec
+    from eagle import plan as eplan
+
+    plugin = _host_subject(gather_host_unit, "e4_gather")
+    p = eplan.plan(plugin, structure=eexec.HostTeam)
+    table = np.arange(2 * N, dtype=np.float64) * 3.0
+    where = ((np.arange(N) * 5 + 2) % (2 * N)).astype(np.int64)
+    y = np.zeros(N)
+    with pytest.raises(ValueError, match=_INDEX_MSG):
+        p.bind(table=table, where=where.astype(np.int32), y=y)
+    with pytest.raises(ValueError, match=_INDEX_MSG):
+        p.run(table=table, where=where.astype(np.int32))
+    p.bind(table=table, where=where, y=y).launch()
+    np.testing.assert_array_equal(y, table[where])
+    np.testing.assert_array_equal(p.run(table=table, where=where), table[where])
+
+
+def test_bind_still_refuses_a_float_plane_of_the_wrong_dtype_on_the_host(vec3_unit):
+    import eagle.exec as eexec
+    from eagle import plan as eplan
+
+    plugin = _host_subject(vec3_unit, "e4_vec3_scale")
+    p = eplan.plan(plugin, structure=eexec.HostTeam)
+    with pytest.raises(ValueError, match=r"'x' has dtype float32"):
+        p.bind(x=_x_plane(dtype=np.float32), y=np.zeros((W, N)), a=2.0)
+
+
+@pytest.mark.gpu
+def test_bind_refuses_an_int32_plane_for_an_int64_index_on_the_device(gather_unit):
+    import cupy as cp
+
+    import eagle.exec as eexec
+    from eagle import plan as eplan
+
+    plugin = _device_subject(gather_unit, "e4_gather")
+    p = eplan.plan(plugin, structure=eexec.DeviceKernel)
+    table = cp.arange(2 * N, dtype=cp.float64)
+    where = (cp.arange(N) % (2 * N)).astype(cp.int32)
+    with pytest.raises(ValueError, match=_INDEX_MSG):
+        p.bind(table=table, where=where, y=cp.zeros(N))
+    with pytest.raises(ValueError, match=_INDEX_MSG):
+        p.run(table=table, where=where)
 
 
 @pytest.mark.gpu

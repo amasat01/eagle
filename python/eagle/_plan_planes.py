@@ -144,11 +144,42 @@ def _bound(kw, name: str, role: str):
         ) from None
 
 
-def _host_plane(value, dtype):
+def _declared_dtype(plugin, name):
+    """The wire dtype the sidecar declares for plane ``name``, or ``None``.
+    The active-set map/count planes and the finish counter are eagle's own
+    4-byte planes and fix their dtype themselves, so they are never checked
+    against the sidecar."""
+    from ._active_set import COUNT_PLANE, MAP_PLANE
+    from .sidecar import FINISH_COUNTER
+
+    if name in (MAP_PLANE, COUNT_PLANE, FINISH_COUNTER):
+        return None
+    declared = (getattr(plugin, "arg_dtypes", None) or {}).get(name)
+    return np.dtype(declared) if declared else None
+
+
+def _refuse_dtype_mismatch(door, role, name, declared, given) -> None:
+    """Refuse a plane whose dtype is not the one the sidecar declares: the
+    body reads ``declared.itemsize``-byte elements, so a narrower or wider
+    plane is walked off its end (or reinterpreted) at launch. Never cast."""
+    if declared is None or np.dtype(given) == declared:
+        return
+    raise ValueError(
+        f"eagle.plan.{door}: {role} {name!r} has dtype {np.dtype(given)}, but "
+        f"this artifact declares {declared} for it and its body reads "
+        f"{declared.itemsize}-byte elements; pass {name} as {declared}: "
+        f"{name}.astype(np.{declared})"
+    )
+
+
+def _host_plane(value, dtype, *, declared=None, name=None, role="input"):
     """A caller-supplied input plane as a contiguous host array of the
     artifact's Real dtype; an integer/bool array (an index table, a
-    ``terminated`` mask) passes through at its own dtype instead."""
+    ``terminated`` mask) passes through at its own dtype instead, after
+    being checked against the integer/bool dtype the sidecar declares."""
     arr = np.asarray(value)
+    if declared is not None and declared.kind in "iub":
+        _refuse_dtype_mismatch("run", role, name, declared, arr.dtype)
     if arr.dtype.kind not in "iub":
         arr = arr.astype(dtype, copy=False)
     return np.ascontiguousarray(arr)
@@ -192,15 +223,18 @@ def _device_inputs(arg_spec, kw) -> bool:
     )
 
 
-def _device_plane(value, dtype):
+def _device_plane(value, dtype, *, declared=None, name=None, role="input"):
     """:func:`_host_plane`'s device twin: a device-resident plane is
     wrapped where it lies and cast only on the device when needed; anything
     else goes through :func:`_host_plane` and is uploaded once."""
     import cupy as cp
 
     if not device_resident(value):
-        return cp.asarray(_host_plane(value, dtype))
+        return cp.asarray(_host_plane(value, dtype, declared=declared,
+                                      name=name, role=role))
     arr = cp.asarray(value)
+    if declared is not None and declared.kind in "iub":
+        _refuse_dtype_mismatch("run", role, name, declared, arr.dtype)
     if arr.dtype.kind not in "iub":
         arr = arr.astype(dtype, copy=False)
     return cp.ascontiguousarray(arr)
@@ -438,7 +472,8 @@ def _check_uniform(name, value) -> None:
         )
 
 
-def _check_plane(role, name, value, *, n, dtype, width, framework) -> None:
+def _check_plane(role, name, value, *, n, dtype, width, framework,
+                 declared=None) -> None:
     """Refuse a bound plane this door cannot address, naming the field:
     :meth:`BoundPlan.launch` uploads, allocates or casts nothing, so a
     plane wrong at bind time is wrong in every replay it is recorded into."""
@@ -477,6 +512,7 @@ def _check_plane(role, name, value, *, n, dtype, width, framework) -> None:
             "addresses; bind a contiguous plane"
         )
     bound_dtype = np.dtype(value.dtype)
+    _refuse_dtype_mismatch("bind", role, name, declared, bound_dtype)
     if bound_dtype.kind not in "iub" and bound_dtype != dtype:
         raise ValueError(
             f"eagle.plan.bind: {role} {name!r} has dtype {bound_dtype}, but this "

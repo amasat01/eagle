@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+**Plane dtype check.** `Plan.bind` (and `rebind`, and `Plan.run` for integer and bool planes) now compares every plane's dtype with the one the artifact's sidecar declares in `arg_dtypes`. Before, an int32 array bound to an `Index` plane declared int64 was accepted and the launch read past the plane and crashed. It is now refused at bind time, naming the plane, both dtypes and the fix (`pass where as int64: where.astype(np.int64)`); nothing is cast silently, and the launch path pays nothing.
+
 ## 0.5.1
 
 **Graph-handle leak fix.** `Graph::addNode` rejects borrowed temporaries at compile time; wrap `end()`/`Scan::graph()` in `CapturedGraph` (`addNode(CapturedGraph{ capturer.end() })`). The borrowed `cudaGraph_t` overload never destroyed its input, so a temporary handle leaked; it now takes `const cudaGraph_t&` and the rvalue form is deleted. Lvalue borrows and `CapturedGraph` calls are unchanged. `StreamCapturer::end()` and `Scan::graph()` are now `[[nodiscard]]`, and the internal call sites that leaked (`Scanner`, `Slice`, `Scan::launch`) are fixed. The owned `CapturedGraph` overload of `addNode` gained a scalar `idealBlockSize` (default 0) applied to every kernel when the graph carries no per-kernel table.

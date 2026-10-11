@@ -28,6 +28,7 @@ from ._plan_planes import (
     _adapt_planes,
     _check_bound_names,
     _check_plane,
+    _declared_dtype,
     _check_uniform,
     _declared_widths,
     _plane_dtype,
@@ -92,7 +93,8 @@ def _bind_plan(p: Plan, planes: dict) -> BoundPlan:
             _check_uniform(name, planes[name])
         else:
             _check_plane(role, name, planes[name], n=n, dtype=dtype,
-                         width=widths.get(name), framework=framework)
+                         width=widths.get(name), framework=framework,
+                         declared=_declared_dtype(plugin, name))
 
     boxes, addrs = _pack_args(
         arg_spec, planes, planes, n, device_type,
@@ -586,7 +588,8 @@ class BoundPlan:
                         value = a.native
                 _check_plane(role, name, value, n=self._n, dtype=self._dtype,
                              width=self._widths.get(name),
-                             framework=self._framework)
+                             framework=self._framework,
+                             declared=_declared_dtype(self.plan.plugin, name))
                 self._copies.pop(name, None)
                 if a is not None and a.scratch is not None:
                     self._copies[name] = a
