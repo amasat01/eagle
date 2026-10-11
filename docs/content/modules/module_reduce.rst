@@ -16,6 +16,9 @@ Headers
    * - ``eagle/cuda/Reduction.h`` / ``eagle/cpu/Reduction.h``
      - ``cuda::Reduction`` (multi-level GPU) and ``cpu::Reduction<T,OP>``
        (cache-padded OpenMP).
+   * - ``eagle/reduce/canonical.h``
+     - The canonical fixed-order reduction tree (host and device faces); see
+       :doc:`../userguide/determinism`.
    * - ``eagle/reduce/detail.h``
      - Internal warp-shuffle and block-reduction kernels (not public API).
 
@@ -101,6 +104,14 @@ slowdown called **false sharing** — more on this in the note below).
    // Or allocate buffer on the fly
    double total2 = eagle::cpu::Reduction<double, aether::SumOp<double>>::reduce(
        hostRef, 0.0);
+
+.. note::
+
+   Floating-point sums (and user-supplied operators) go through the canonical
+   tree, so the result is bitwise identical for every OpenMP thread count; the
+   per-thread buffer is then not used. Integer sums, ``MaxOp`` and
+   ``LogicalAndOp`` use native OpenMP reductions. See
+   :doc:`../userguide/determinism`.
 
 .. note::
 

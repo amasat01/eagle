@@ -100,6 +100,7 @@ __all__ = [
     "np_dtype",
     "origin_adapter",
     "pure_prepare",
+    "reduce",
     "repeat_while",
     "run_until_done",
     "simulate",
@@ -118,6 +119,11 @@ def __getattr__(name):
 
         globals()["deploy"] = auto
         return auto
+    if name == "reduce":
+        from ._graph_reduce import reduce
+
+        globals()["reduce"] = reduce
+        return reduce
     if name == "Graph":
         from .graph import Graph
 

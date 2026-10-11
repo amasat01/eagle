@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "eagle/reduce/canonical.h"
 #include "eagle/typedefs.h"
 #include "eagle/util/DeviceError.h"
 #include "eagle/util/log.h"
@@ -37,7 +38,13 @@ struct Reduction {
         T value;
     };
 
-    /** @brief Run the OpenMP based reduction */
+    /** @brief Run the OpenMP based reduction.
+     *
+     * Integer sums, ``MaxOp`` and ``LogicalAndOp`` use native OpenMP reduction
+     * clauses (exactly associative, so any schedule gives the same value).
+     * A floating-point sum and any other operator use the canonical tree
+     * (``eagle/reduce/canonical.h``): the result is bitwise identical for
+     * every OpenMP thread count. */
     static T reduce(const CRefArrT<T>& in,
         std::vector<PaddedT>& buffer, const T& init = 0)
     {
@@ -48,7 +55,8 @@ struct Reduction {
 
         T final = init;
 
-        if constexpr (std::is_same_v<OP, aether::SumOp<T>>) {
+        if constexpr (std::is_same_v<OP, aether::SumOp<T>>
+            && !std::is_floating_point_v<T>) {
 #pragma omp parallel for reduction(+ : final)
             for (idx_t i = 0; i < sz; i++) {
                 final += in(i);
@@ -76,29 +84,18 @@ struct Reduction {
             return final;
         }
 
-#pragma omp parallel
-        {
-            /* Create a copy per thread */
-            idx_t tid = omp_get_thread_num();
-            T local   = init;
-
-            /* Run the reduction on thread copies */
-#pragma omp for simd
-            for (idx_t i = 0; i < sz; i++) {
-                local = OP{}(local, in(i));
-            }
-
-            buffer[tid].value = local;
+        /* Floating-point sum and every other operator: the canonical tree
+         * (eagle/reduce/canonical.h) — a function of the values in sample
+         * order only, bitwise independent of the OpenMP thread count. */
+        (void)numThreads;
+        if constexpr (!std::is_same_v<T, bool>) {
+            if (sz == 0)
+                return init;
+            return OP{}(init,
+                eagle::reduce::canonical::reduce<T, OP>(in, sz));
+        } else {
+            return final; // bool: only LogicalAndOp, handled above
         }
-
-        /* Final reduction */
-#pragma omp simd
-        for (idx_t i = 0; i < numThreads; ++i) {
-            final = OP{}(final, buffer[i].value);
-        }
-
-        /* Copy the results back where it should be */
-        return final;
     }
 
     /** @brief Allocate buffer on the fly and run the OpenMP based reduction */

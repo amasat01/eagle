@@ -95,6 +95,7 @@
 #include "eagle/graph/Edges.h"
 #include "eagle/graph/Layout.h"
 #include "eagle/graph/Render.h"
+#include "eagle/reduce/canonical.h"
 #include "eagle/util/Busy.h"
 #include "plugin/gref_abi.h"
 #include "plugin/roles.h"
@@ -674,6 +675,70 @@ NB_MODULE(_core, m)
         "Undo every reorder since the last restore (experimental at the seam: "
         "`eagle_backend_x_restore_device`): each plane back in sample order, `perm` "
         "and `inv` the identity. Enqueue only; the scratch query as for reorder_device.");
+
+    // -- canonical reduction (eagle/reduce/canonical.h): host tree + device seam symbol --
+    m.def("reduce_canonical_host",
+        [](std::uintptr_t in, std::int64_t n, std::uint32_t dtype, std::uint32_t op, std::uintptr_t out) {
+            if (n < 1)
+                throw std::invalid_argument("reduce_canonical_host: n must be >= 1");
+            if (op > EAGLE_BACKEND_REDUCE_OP_ALL || dtype > EAGLE_BACKEND_REDUCE_U8
+                || (op == EAGLE_BACKEND_REDUCE_OP_ALL) != (dtype == EAGLE_BACKEND_REDUCE_U8))
+                throw std::invalid_argument("reduce_canonical_host: unknown dtype/op, or U8 not paired with OP_ALL");
+            namespace canon = eagle::reduce::canonical;
+            const bool sum = op == EAGLE_BACKEND_REDUCE_OP_SUM;
+            auto go = [&](auto tag, auto sumOp, auto maxOp) {
+                using T = decltype(tag);
+                struct Ptr {
+                    const T* p;
+                    T operator()(eagle::idx_t i) const { return p[i]; }
+                } src{ reinterpret_cast<const T*>(in) };
+                *reinterpret_cast<T*>(out) = sum ? canon::reduce<T, decltype(sumOp)>(src, n)
+                                                 : canon::reduce<T, decltype(maxOp)>(src, n);
+            };
+            switch (dtype) {
+            case EAGLE_BACKEND_REDUCE_F32: go(float{}, aether::SumOp<float>{}, aether::MaxOp<float>{}); break;
+            case EAGLE_BACKEND_REDUCE_F64: go(double{}, aether::SumOp<double>{}, aether::MaxOp<double>{}); break;
+            case EAGLE_BACKEND_REDUCE_I32:
+                go(std::int32_t{}, aether::SumOp<std::int32_t>{}, aether::MaxOp<std::int32_t>{});
+                break;
+            case EAGLE_BACKEND_REDUCE_I64:
+                go(std::int64_t{}, aether::SumOp<std::int64_t>{}, aether::MaxOp<std::int64_t>{});
+                break;
+            default: {
+                struct Ptr8 {
+                    const std::uint8_t* p;
+                    std::uint8_t operator()(eagle::idx_t i) const { return p[i]; }
+                } src{ reinterpret_cast<const std::uint8_t*>(in) };
+                *reinterpret_cast<std::uint8_t*>(out) = canon::reduce<std::uint8_t, aether::LogicalAndOp>(src, n);
+            }
+            }
+        },
+        nb::arg("in"), nb::arg("n"), nb::arg("dtype"), nb::arg("op"), nb::arg("out"),
+        "The canonical fixed-order reduction (leaf blocks of 256, then pairwise levels) of `n` host "
+        "elements at address `in` into the one element at `out`. dtype: 0 f32, 1 f64, 2 i32, 3 i64, "
+        "4 u8 (OP_ALL only); op: 0 sum, 1 max, 2 all. Bitwise independent of the OpenMP thread count.");
+
+    m.def("reduce_canonical_device",
+        [](std::uintptr_t in, std::int64_t n, std::uint32_t dtype, std::uint32_t op, std::uintptr_t out,
+            std::uintptr_t work_a, std::uintptr_t work_b, std::uintptr_t stream, std::int32_t device) {
+            auto d = makeDesc<eagle_backend_reduce_desc>(device);
+            d.dtype = dtype;
+            d.op = op;
+            d.in = in;
+            d.out = out;
+            d.work_a = work_a;
+            d.work_b = work_b;
+            d.n = n;
+            d.stream = stream;
+            ck(EBX(eagle_backend_x_reduce_canonical)(&d));
+            return static_cast<std::int64_t>(d.work_elems);
+        },
+        nb::arg("in"), nb::arg("n"), nb::arg("dtype"), nb::arg("op"), nb::arg("out"), nb::arg("work_a"),
+        nb::arg("work_b"), nb::arg("stream") = 0, nb::arg("device") = -1,
+        "The same canonical reduction on the device (experimental at the seam: "
+        "`eagle_backend_x_reduce_canonical`), enqueued on `stream` and capturable. With `work_a == 0` "
+        "nothing is enqueued and the return value is the element count EACH of the two work buffers "
+        "must hold; otherwise it returns 0. The result equals `reduce_canonical_host` bit for bit.");
 
     m.def("run_device",
         [](std::uintptr_t function, const std::vector<std::uintptr_t>& params,

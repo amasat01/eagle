@@ -185,6 +185,7 @@ eagle is the execution layer of the RAPTOR family — it launches what
    content/userguide/cuda_graphs
    content/userguide/graph_model
    content/userguide/graph_view
+   content/userguide/determinism
    content/userguide/build_options
    content/modules/modules
    content/modules/module_graph

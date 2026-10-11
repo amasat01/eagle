@@ -96,6 +96,22 @@ only the guard's own array takes part in the ordering; prefer one of the
 first two. A conditional holds one step: nesting one inside another, or a
 tuple of parts as the loop body, is refused for now.
 
+Reductions
+^^^^^^^^^^
+
+``eagle.reduce(x, out, op="sum")`` is a node that adds up (or takes the
+``"max"`` of, or the ``"all"`` of) a 1-D plane into a one-element plane. It
+reads ``x`` and writes ``out``, so a node that produced ``x`` is ordered
+before it and a node that reads ``out`` after it, with nothing for you to
+declare. A floating-point ``"sum"`` always adds in the same fixed order, so
+the answer does not change with the number of CPU threads and the CPU and the
+GPU agree bit for bit; :doc:`determinism` has the details.
+
+.. code-block:: python
+
+   total = np.zeros(1)
+   g.add_node(eagle.reduce(energy, total), name="total")
+
 Opaque nodes
 ^^^^^^^^^^^^
 

@@ -19,6 +19,13 @@ device namespaces as ``eagle::cuda::Reduction`` and ``eagle::cpu::Reduction``;
    :project: EAGLE
    :members:
 
+Canonical tree — ``eagle::reduce::canonical``
+---------------------------------------------
+
+The fixed-order tree (leaf blocks of 256, then pairwise levels) with a host and a
+device face; see :doc:`../userguide/determinism`. Its members are listed under the
+``eagle::reduce`` namespace below.
+
 Namespace ``eagle::reduce``
 ---------------------------
 

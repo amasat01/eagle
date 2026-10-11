@@ -46,6 +46,7 @@
 #include "eagle/filtering/Compact.h"
 #include "eagle/filtering/Reorder.h"
 #include "eagle/filtering/ReorderClasses.h"
+#include "eagle/reduce/canonical.h"
 #include "eagle/util/CaptureGuard.h"
 #include "plugin/cuda_driver.h"
 #include "plugin/interop.h"
@@ -1073,6 +1074,71 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_x_restore_device(struct eag
             eagle::filtering::restoreDevice(planes.data(), static_cast<std::uint32_t>(planes.size()),
                 reinterpret_cast<std::int32_t*>(d.perm), reinterpret_cast<std::int32_t*>(d.inv),
                 reinterpret_cast<void*>(d.scratch), d.n, seamStream(d.stream));
+            return 0;
+        });
+    });
+}
+
+namespace {
+
+/** One canonical reduction of element type @p T under @p OP, result copied to
+ *  @p out (one store kernel, capturable). */
+template <class T, class OP>
+void reduceCanonical(const eagle_backend_reduce_desc& d, cudaStream_t stream)
+{
+    namespace canon = eagle::reduce::canonical;
+    const eagle::idx_t n = static_cast<eagle::idx_t>(d.n);
+    canon::enqueueTo<T, OP>(canon::DevicePtr<T>{ reinterpret_cast<const T*>(d.in) }, n,
+        reinterpret_cast<T*>(d.work_a), reinterpret_cast<T*>(d.work_b), reinterpret_cast<T*>(d.out), stream);
+}
+
+} // namespace
+
+EAGLE_BACKEND_API eagle_backend_status eagle_backend_x_reduce_canonical(struct eagle_backend_reduce_desc* desc)
+{
+    return guarded([&] {
+        constexpr const char* who = "eagle_backend_x_reduce_canonical";
+        if (desc == nullptr || desc->struct_size < sizeof(eagle_backend_reduce_desc))
+            throw std::invalid_argument(std::string(who) + ": null desc or struct_size too small");
+        const auto& d = *desc;
+        if (d.n < 1)
+            throw std::invalid_argument(std::string(who) + ": n must be >= 1");
+        const bool all = d.op == EAGLE_BACKEND_REDUCE_OP_ALL;
+        if (d.op > EAGLE_BACKEND_REDUCE_OP_ALL || d.dtype > EAGLE_BACKEND_REDUCE_U8)
+            throw std::invalid_argument(std::string(who) + ": unknown dtype or op");
+        if (all != (d.dtype == EAGLE_BACKEND_REDUCE_U8))
+            throw std::invalid_argument(std::string(who) + ": the U8 element type goes with OP_ALL, and only with it");
+        if (d.work_a == 0) {
+            desc->work_elems = static_cast<std::int64_t>(eagle::reduce::canonical::deviceWorkElems(d.n));
+            return;
+        }
+        if (d.in == 0 || d.out == 0 || d.work_b == 0)
+            throw std::invalid_argument(std::string(who) + ": in, out, work_a and work_b must be device addresses");
+        requireDevice();
+        const int device = resolveDevice(d.device, d.stream);
+        DeviceScope scope(device);
+        bracketed(who, "enqueue", [&] {
+            const auto stream = seamStream(d.stream);
+            using namespace aether;
+            const bool sum = d.op == EAGLE_BACKEND_REDUCE_OP_SUM;
+            switch (d.dtype) {
+            case EAGLE_BACKEND_REDUCE_F32:
+                sum ? reduceCanonical<float, SumOp<float>>(d, stream) : reduceCanonical<float, MaxOp<float>>(d, stream);
+                break;
+            case EAGLE_BACKEND_REDUCE_F64:
+                sum ? reduceCanonical<double, SumOp<double>>(d, stream) : reduceCanonical<double, MaxOp<double>>(d, stream);
+                break;
+            case EAGLE_BACKEND_REDUCE_I32:
+                sum ? reduceCanonical<std::int32_t, SumOp<std::int32_t>>(d, stream)
+                    : reduceCanonical<std::int32_t, MaxOp<std::int32_t>>(d, stream);
+                break;
+            case EAGLE_BACKEND_REDUCE_I64:
+                sum ? reduceCanonical<std::int64_t, SumOp<std::int64_t>>(d, stream)
+                    : reduceCanonical<std::int64_t, MaxOp<std::int64_t>>(d, stream);
+                break;
+            default:
+                reduceCanonical<std::uint8_t, LogicalAndOp>(d, stream);
+            }
             return 0;
         });
     });

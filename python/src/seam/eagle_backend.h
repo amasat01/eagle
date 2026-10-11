@@ -513,6 +513,39 @@ eagle_backend_status eagle_backend_x_capture_guard_pending_count(int64_t* count)
  *  ``span`` and ``fire`` are not read). Enqueue only; eager use. */
 eagle_backend_status eagle_backend_x_restore_device(struct eagle_backend_reorder_desc* desc);
 
+/** Element types and operators of ``x_reduce_canonical``. */
+#define EAGLE_BACKEND_REDUCE_F32 0u
+#define EAGLE_BACKEND_REDUCE_F64 1u
+#define EAGLE_BACKEND_REDUCE_I32 2u
+#define EAGLE_BACKEND_REDUCE_I64 3u
+#define EAGLE_BACKEND_REDUCE_U8  4u   /**< one byte per element; only with OP_ALL */
+#define EAGLE_BACKEND_REDUCE_OP_SUM 0u
+#define EAGLE_BACKEND_REDUCE_OP_MAX 1u
+#define EAGLE_BACKEND_REDUCE_OP_ALL 2u
+
+/** The canonical fixed-order reduction of ``n`` device elements into one. */
+struct eagle_backend_reduce_desc {
+    uint32_t struct_size;
+    uint32_t dtype;          /**< EAGLE_BACKEND_REDUCE_F32 .. U8 */
+    uint32_t op;             /**< EAGLE_BACKEND_REDUCE_OP_SUM / MAX / ALL */
+    int32_t device;
+    uint64_t in;             /**< n elements, device address */
+    uint64_t out;            /**< one element, device address (may not alias work or in) */
+    uint64_t work_a;         /**< work_elems elements, device address; 0 = query */
+    uint64_t work_b;         /**< work_elems elements, device address */
+    int64_t n;               /**< sample count, n >= 1 */
+    uint64_t stream;         /**< the backend's queue to enqueue on */
+    int64_t work_elems;      /**< OUT when work_a == 0: the elements EACH work buffer must hold */
+};
+
+/** Reduce ``in[0, n)`` with the canonical tree (leaf blocks of 256 by a fixed
+ *  in-block tree, then level-by-level pairwise over the leaf results; see
+ *  ``eagle/reduce/canonical.h``) and write the result to ``*out``. The value
+ *  is a function of the values in sample order only and equals the host
+ *  canonical reduction bit for bit. Enqueue only (kernel launches ending in a one-element
+ *  store: capturable). Experimental. */
+eagle_backend_status eagle_backend_x_reduce_canonical(struct eagle_backend_reduce_desc* desc);
+
 eagle_backend_status eagle_backend_x_composer_create(const struct eagle_backend_composer_desc* desc, eagle_backend_composer* out);
 /** CONSUMES ``launcher`` (on OK). ``name`` / ``pre`` may be NULL. */
 eagle_backend_status eagle_backend_x_composer_register_launcher(eagle_backend_composer h, eagle_backend_launcher launcher,

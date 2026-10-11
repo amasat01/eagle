@@ -5,3 +5,4 @@
 
 #include "eagle/cuda/Reduction.h"
 #include "eagle/cpu/Reduction.h"
+#include "eagle/reduce/canonical.h"
