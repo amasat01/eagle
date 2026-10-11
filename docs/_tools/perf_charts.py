@@ -18,7 +18,9 @@ import re
 #: Substrings of the lower-cased device name, best first. A device that matches
 #: none follows the ones that do, alphabetically. The first card present is the
 #: tab shown by default.
-GPU_PREFERENCE = ("h100", "a100", "l4", "t4", "p2000")
+#: The A100 card was measured with an automatic launch path that never took its
+#: one-launch fast path; the L4 leads until the A100 is measured again.
+GPU_PREFERENCE = ("h100", "l4", "a100", "t4", "p2000")
 #: Newest server CPUs first (by name or by model-number family), then
 #: workstation parts.
 CPU_PREFERENCE = ("sapphire rapids", "platinum 84", "genoa", "epyc 9", "ice lake",

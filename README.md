@@ -239,8 +239,8 @@ benchmarks/perf_card/cpu_card_intel-xeon-w-2125.json: 5bb591471e7758948a1a2f4994
 
 Measured on:
 
-- [NVIDIA A100-SXM4-40GB](https://amasat01.github.io/eagle/content/performance.html#perf-card-gpu-nvidia-a100-sxm4-40gb)
 - [NVIDIA L4](https://amasat01.github.io/eagle/content/performance.html#perf-card-gpu-nvidia-l4)
+- [NVIDIA A100-SXM4-40GB](https://amasat01.github.io/eagle/content/performance.html#perf-card-gpu-nvidia-a100-sxm4-40gb)
 - [Tesla T4](https://amasat01.github.io/eagle/content/performance.html#perf-card-gpu-tesla-t4)
 - [Quadro P2000](https://amasat01.github.io/eagle/content/performance.html#perf-card-gpu-quadro-p2000)
 - [Intel Xeon W-2125 CPU @ 4.00GHz](https://amasat01.github.io/eagle/content/performance.html#perf-card-cpu-intel-xeon-w-2125)
