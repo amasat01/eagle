@@ -763,6 +763,38 @@ def test_active_set_auto_default_deploy_picks_the_fast_path(active_auto, n, whic
 
 
 @pytest.mark.gpu
+def test_active_set_auto_carries_the_fast_entries_under_nvrtc(monkeypatch, tmp_path):
+    """The same default deploy on a box whose device compiler is NVRTC (the
+    pip-installed wheels with no ``nvcc``), into a fresh cache: the build's
+    fast-entries define reaches the device compile, so the active-set
+    automatic kernel carries ``<name>_persist`` and ``<name>_range`` and
+    the ordinary decision picks the fast path, not the band path."""
+    if not _have_gpu():
+        pytest.skip("no CUDA device")
+    hawk = pytest.importorskip("hawk")
+    cp = pytest.importorskip("cupy")
+    from hawk.ext import Guard, Kind
+
+    try:
+        from hawk.compile import nvrtc
+
+        nvrtc.nvrtc_version()
+    except Exception:
+        pytest.skip("no NVRTC on this box")
+    monkeypatch.setenv("HAWK_DEVICE_COMPILER", "nvrtc")
+    monkeypatch.setenv("HAWK_CACHE_DIR", str(tmp_path / "cache"))
+    kind = Kind("uda_map_nvrtc_entries", guard=Guard(active_set=True))
+    plan = eagle.deploy(hawk.steps(_oscillator(kind, True), "auto"))
+    inp = _batch(2048, "spread")
+    runner = eagle.until_done(plan, max_steps=10 * _S, dt=_DT, **_planes(inp, cp))
+    assert runner.step.persist_entry() is not None
+    assert runner.step.range_entry() is not None
+    assert runner._fast_mode in ("fused_one", "persist")
+    rep = runner.run()
+    assert (rep.n, rep.finished, rep.done) == (2048, 2048, True)
+
+
+@pytest.mark.gpu
 def test_active_set_fast_and_band_agree_on_the_budget_hit():
     """``max_steps`` below every sample's own stop: nobody finishes, the
     budget IS the bottleneck for both paths -- here ``steps``/``exact_steps``
