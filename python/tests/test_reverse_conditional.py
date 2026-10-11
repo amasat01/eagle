@@ -136,6 +136,66 @@ def test_two_threads_reverse_two_records_of_one_graph(tmp_path):
             _check(grads, ps, x0, 0.8, _flag("cpu", on), seed)
 
 
+@pytest.mark.parametrize("backend", ["cpu", pytest.param("gpu", marks=pytest.mark.gpu)])
+def test_n_reverses_of_one_conditional_record_agree_bitwise(tmp_path, backend):
+    ps, xp = _plans(tmp_path, backend), xp_for(backend)
+    x0, seed = np.linspace(-1.1, 0.9, N), np.linspace(1.0, 2.0, N)
+    flag = _flag(backend, 1)
+    g, _z = _skip_graph(ps, xp.asarray(x0), 0.8, flag=flag, record=True)
+    kept = {}
+    for on in (1, 0):
+        flag[0] = on
+        g.launch()
+        kept[on] = g.record.keep()
+    seeds = {"sin.y": xp.asarray(seed)}
+
+    def bytes_of(grads):
+        return {k: np.asarray(v.get() if hasattr(v, "get") else v).tobytes()
+                for k, v in grads.items()}
+
+    want = {on: bytes_of(eagle.diff.Reverse(g)(kept[on], seeds)) for on in (1, 0)}
+    threads_n = 8
+    out, errors = [None] * threads_n, []
+    start = threading.Barrier(threads_n)
+
+    def work(i):
+        try:
+            rev = eagle.diff.Reverse(g)
+            start.wait()
+            for _ in range(5):
+                out[i] = bytes_of(rev(kept[i % 2], seeds))
+        except BaseException as exc:      # surfaced below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=work, args=(i,)) for i in range(threads_n)]
+    [t.start() for t in threads]
+    [t.join(120) for t in threads]
+    assert not errors, errors
+    assert out == [want[i % 2] for i in range(threads_n)]
+
+
+def test_one_reverse_of_a_conditional_record_shared_by_two_threads_is_busy(tmp_path):
+    from _reverse_block import Gate, block
+
+    sq = _plans(tmp_path, "cpu")[0]
+    x, y, w = np.linspace(0, 1, N), np.zeros(N), np.zeros(N)
+    flag, gate = _flag("cpu", 1), Gate()
+    maybe = skippable(sq.bind(x=x, a=0.8, y=y).launch, SkipGuard(flag, 0))
+    g = eagle.Graph().add_node(maybe, name="maybe").add_node(block(y, w, gate)).build(record=True)
+    g.launch()
+    rev = eagle.diff.Reverse(g)
+    t = threading.Thread(target=lambda: rev(g.record, {"block.y": np.ones(N)}))
+    t.start()
+    try:
+        assert gate.entered.wait(30)
+        with pytest.raises(eagle.Busy, match="eagle.diff.Reverse.__call__"):
+            rev(g.record, {"block.y": np.ones(N)})
+    finally:
+        gate.go.set()
+        t.join(30)
+    assert not t.is_alive()
+
+
 def test_a_forward_without_record_saves_nothing(tmp_path):
     ps = _plans(tmp_path, "cpu")
     flag = _flag("cpu", 1)
