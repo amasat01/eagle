@@ -68,7 +68,7 @@ machine class from the 8-thread arms the CPU cards time, so run the GPU cards th
 ## Profiling (nsys + ncu)
 
 `profile.sh` answers *why* a launch mode or a kernel is fast or slow on this GPU, for the cards' kernel.
-It runs after `bootstrap.sh` and the cards, unattended, in about 15 minutes on an A100 (`--quick`: about 5):
+It runs after `bootstrap.sh` and the cards, unattended, in about 30 minutes on an A100 (`--quick`: under 8):
 
 ```bash
 eagle/benchmarks/reproduce/profile.sh --env ~/.cache/raptor-repro/env-gpu.sh
@@ -77,10 +77,15 @@ eagle/benchmarks/reproduce/profile.sh --env ~/.cache/raptor-repro/env-gpu.sh
 
 | Stage | What it captures |
 |---|---|
-| `probe` | what eagle reads from the device (SMs, registers, resident threads, the issue knee), `device_capacity()`, whether the persist entry exists, the launch mode chosen at N = 10³, 10⁵, 10⁶ and the mode a real run took (`probe.txt`) |
+| `probe` | what eagle reads from the device (SMs, registers, resident threads, the issue knee), each device entry's registers, local bytes, register bound and resident threads per SM (`entry_reports`; "unavailable in this eagle" on releases without it), `device_capacity()`, whether the persist entry exists, the launch mode chosen at N = 10³, 10⁵, 10⁶ and the mode a real run took (`probe.txt`) |
 | `nsys-grid` | Nsight Systems timelines of eagle auto, persist, band (steps + compaction) and Warp over N = 10³..10⁶, uniform and spread, S = 100 and 1000; kernel time, launch counts and API time as text (`nsys_grid.txt`) |
 | `nsys-width` | the same four arms at N = 10⁶, S = 1000 with the stop steps log-uniform over [S/10, S] and [S/1000, S] (the grid holds uniform and the card's [S/100, S]) |
 | `ncu-*` | Nsight Compute, one launch per kernel (SpeedOfLight, Occupancy, LaunchStats, WarpStateStats, MemoryWorkloadAnalysis, SchedulerStats) at N = 10⁶ S = 1000 spread (efficiency under thinning), N = 10⁶ S = 1000 uniform (bandwidth baseline) and N = 10⁴ S = 100 spread (latency and launch regime); CSV plus a digest per kernel. Only on compute capability 7.0 and newer |
+| `persist-sweep` | wall time (CUDA events) and per-lane utilisation of the persistent launch over persist threads per SM (oscillator 320 / 640 / 960 / 1280, RK78 256 / 384, plus eagle's own pick) at N = 10⁶, S = 100 and 1000, uniform and spread; the RK78 card has one workload, so one row per size. `tps_launched` is what really launched (`persist_sweep.txt`). eagle has no knob for the size, so the kit replaces the sizing function for the length of one cell and says so |
+| `fused-sweep` | the same points through the fused one-launch entry (`_fast_mode="fused_one"`), for the crossover with the persistent launch |
+| `cadence-sweep` | the band path (single-step kernel plus compaction) over the compaction cadence `every` = 4, 8, 16, 32 at N = 10⁶, S = 1000, uniform and spread: the graph run gives the wall and the compaction count, an eager run of the same kernels gives the per-kernel sums nsys cannot see inside the graph's conditional loop |
+| `ncu-ratio` | Nsight Compute on the persist kernels: threads per issued instruction (about 32 converged, under 16 fragmented), FP64 pipe use, achieved warps and the stall classes, for the oscillator (uniform / spread × S = 100 / 1000) and the RK78 card kernel at N = 10⁶ |
+| `ncu-band` | the band path's step kernel and its three compaction kernels (predicate, scan, scatter) under Nsight Compute, run as an eager loop because a graph's conditional loop node cannot be profiled |
 
 Needs `nsys` and `ncu` (Nsight Systems and Nsight Compute; found on `PATH` or under `/usr/local/cuda*/bin`; a
 missing one skips its stages) and exactly one visible GPU (set `CUDA_VISIBLE_DEVICES` on a multi-GPU machine). GPU
@@ -91,7 +96,7 @@ prompted or changed system-wide.
 Every stage runs under its own time cap and a failing one never stops the next; the tarball (reports, raw
 `.nsys-rep` / `.ncu-rep` under 200 MB, `status.txt` listing each stage as ok, failed or skipped, `facts.txt` with
 versions and the clocks before and after) is written on every exit, Ctrl-C and SIGTERM included. Re-running the
-same command after a preemption skips the finished stages (`--fresh` starts over); `--deadline-min` (default 20)
+same command after a preemption skips the finished stages (`--fresh` starts over); `--deadline-min` (default 35)
 stops new stages from starting.
 
 ## Time and cost

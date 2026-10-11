@@ -3,15 +3,15 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Profile eagle's launch decisions and kernels on this machine's GPU (Nsight Systems and
-# Nsight Compute), unattended, in about 15 minutes, ending with one tarball to copy off.
+# Nsight Compute), unattended, in about 30 minutes, ending with one tarball to copy off.
 #
 #   profile.sh [options]
 #     --env FILE        the GPU environment script bootstrap.sh wrote (default WORK/env-gpu.sh)
 #     --out DIR         where results go (default WORK/profiles/<machine-slug>/)
 #     --work DIR        bootstrap's work directory (default per target)
-#     --quick           the probe, one nsys capture and one ncu kernel: about 5 minutes
+#     --quick           the probe and one point of every stage: under 8 minutes
 #     --fresh           ignore the markers of an earlier run and start over
-#     --deadline-min M  stop starting stages after M minutes (default 20)
+#     --deadline-min M  stop starting stages after M minutes (default 35)
 #     --dry-run         print the plan, run nothing
 #
 # Stages run independently, each under its own time cap; a failing stage never stops the
@@ -31,7 +31,7 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=SCRIPTDIR/lib.sh
 . "$HERE/lib.sh"
 
-ENV_FILE="" OUT="" WORK=${REPRO_WORK:-} QUICK=0 FRESH=0 DEADLINE_MIN=20
+ENV_FILE="" OUT="" WORK=${REPRO_WORK:-} QUICK=0 FRESH=0 DEADLINE_MIN=35
 while [[ $# -gt 0 ]]; do
   case $1 in
     --env) ENV_FILE=${2:-}; shift 2 ;;
@@ -58,9 +58,11 @@ TARBALL=$OUT/profile-$SLUG.tgz
 
 # stage NAME:CAP_SECONDS, in run order
 if [[ $QUICK == 1 ]]; then
-  PLAN=(probe:180 nsys-quick:120 ncu-quick:180)
+  PLAN=(probe:180 nsys-quick:120 ncu-quick:180 persist-sweep-quick:90 fused-sweep-quick:90 cadence-sweep-quick:90
+        ncu-ratio-quick:150 ncu-band-quick:180)
 else
-  PLAN=(probe:180 nsys-grid:540 nsys-width:150 ncu-spread-1e6:240 ncu-uniform-1e6:240 ncu-spread-1e4:240)
+  PLAN=(probe:180 nsys-grid:540 nsys-width:150 ncu-spread-1e6:240 ncu-uniform-1e6:240 ncu-spread-1e4:240
+        persist-sweep:420 fused-sweep:300 cadence-sweep:300 ncu-ratio:420 ncu-band:300)
 fi
 if [[ $REPRO_DRY_RUN == 1 ]]; then
   log "env=$ENV_FILE out=$OUT deadline=${DEADLINE_MIN} min"
@@ -219,7 +221,7 @@ run_stage() {  # NAME CAP_SECONDS
   CURRENT=$name
   if [[ $FRESH == 0 && -f $MARK/$name.ok ]]; then STATUS[$name]="ok (finished in an earlier run)"; return; fi
   case $name in
-    nsys*) [[ -n $NSYS ]] || { STATUS[$name]="skipped: nsys not found (install Nsight Systems)"; return; } ;;
+    nsys*|cadence-sweep*) [[ -n $NSYS ]] || { STATUS[$name]="skipped: nsys not found (install Nsight Systems)"; return; } ;;
     ncu*)  if [[ $NCU_MODE == skip:* ]]; then STATUS[$name]="skipped: ${NCU_MODE#skip:}"; return; fi ;;
   esac
   remaining=$((DEADLINE_S - (SECONDS - T0)))
