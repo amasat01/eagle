@@ -36,7 +36,7 @@ mask
 packet
 : A fixed-size group of samples that the host launcher processes together with one SIMD instruction stream.
 plan
-: A kernel or group of kernels built into something that runs where its data lives, ready to launch.
+: In eagle, a plan is what `eagle.deploy` returns: a kernel built to run where its data lives, ready to launch. The general meaning, shared by the family, is in the [family glossary](https://amasat01.github.io/raptor/content/glossary.html#term-plan).
 Record
 : What one launch of a ``record=True`` graph keeps for its reverse: ``g.record`` after ``g.launch()``. Most of it is the graph's own planes, so it is only valid until the graph runs again (see {ref}`autodiff-record`).
 registry
