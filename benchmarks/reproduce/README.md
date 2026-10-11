@@ -40,10 +40,12 @@ or `EAGLE_REF=...` picks another ref). With several GPUs, set
 
 ## Google Cloud (or any VM with an NVIDIA driver)
 
-Needs Python >= 3.10, `git` and a driver >= 525.60.13; no compiler, conda or CUDA toolkit.
+Needs Python >= 3.10 with `venv` and its headers, `git`, a C++ compiler (hawk compiles each kernel the
+first time it runs) and a driver >= 525.60.13; no conda or CUDA toolkit. On Debian or
+Ubuntu: `sudo apt-get install python3-venv python3-dev git build-essential`.
 
 ```bash
-git clone --depth 1 --branch v0.5.1 https://github.com/amasat01/eagle.git
+git clone --depth 1 https://github.com/amasat01/eagle.git
 eagle/benchmarks/reproduce/bootstrap.sh --from-pypi          # venv + pinned wheels, ~10 GB of disk
 eagle/benchmarks/reproduce/run_cards.sh --split --preset smoke   # minutes: checks the setup
 eagle/benchmarks/reproduce/run_cards.sh --split                  # the full cards

@@ -204,6 +204,12 @@ install_pypi() {
     done
   fi
   [[ -n $py ]] || die "no Python >= 3.10 found: install one or set REPRO_PYTHON=/path/to/python"
+  # hawk compiles each kernel the first time it runs, so the wheels need a host C++ compiler
+  command -v "${CXX:-g++}" >/dev/null 2>&1 || command -v c++ >/dev/null 2>&1 \
+    || die "no C++ compiler found: hawk compiles each kernel when it first runs (Debian/Ubuntu: sudo apt-get install build-essential)"
+  # torch.compile's Triton backend builds a small C module against Python's headers
+  "$py" -c 'import os, sysconfig, sys; sys.exit(not os.path.isfile(os.path.join(sysconfig.get_paths()["include"], "Python.h")))' \
+    || die "no Python headers for $py: torch.compile needs them (Debian/Ubuntu: sudo apt-get install python3-dev)"
   PY=$ENV_PREFIX/bin/python
   export PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_NO_INPUT=1 TMPDIR=${TMPDIR:-$WORK/tmp}
   run mkdir -p "$TMPDIR"

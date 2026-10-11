@@ -131,7 +131,7 @@ step() {
 run_gpu_cards() {
   local eroot; eroot=$(eagle_root "$GPU_ENV")
   local out=$OUT/$SLUG; [[ $PUBLISH == 1 ]] && out=$eroot/benchmarks
-  local parts=$OUT/$SLUG/parts
+  local parts=$OUT/$SLUG/parts-$PRESET
   STEPS=$OUT/$SLUG/.steps-$PRESET; run mkdir -p "$STEPS" "$out/perf_card" "$out/rk78_card"
   if [[ $SPLIT == 0 ]]; then
     step gpu-perf "$GPU_ENV" GPU "$eroot" python benchmarks/perf_card/perf_card.py \
@@ -166,7 +166,7 @@ run_gpu_cards() {
 run_cpu_cards() {
   local eroot; eroot=$(eagle_root "$CPU_ENV")
   local out=$OUT/$SLUG; [[ $PUBLISH == 1 ]] && out=$eroot/benchmarks
-  local parts=$OUT/$SLUG/parts/cpu
+  local parts=$OUT/$SLUG/parts-$PRESET/cpu
   STEPS=$OUT/$SLUG/.steps-$PRESET; run mkdir -p "$STEPS" "$out/perf_card" "$out/rk78_card" "$parts"
   if [[ $SPLIT == 0 || $PRESET == smoke ]]; then
     step cpu-rk4 "$CPU_ENV" CPU "$eroot" python benchmarks/perf_card/cpu_card.py \
