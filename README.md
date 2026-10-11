@@ -214,6 +214,10 @@ and a CPU OpenMP arm (no device or transfers needed, and the correctness referen
 The five-arm table below is the headline cut (both distributions, N = 1,000,000); the
 [full performance page](https://amasat01.github.io/eagle/content/performance.html) has every arm, every N.
 
+<p align="center"><a href="https://amasat01.github.io/eagle/content/performance.html"><img src="https://raw.githubusercontent.com/amasat01/eagle/main/docs/_static/perf/readme_gpu.svg" alt="Wall time per tool for a million RK4 oscillators on the default GPU: eagle.simulate, NVIDIA Warp, JAX, CuPy and PyTorch; the numbers are on the performance page." width="700"></a></p>
+
+The chart shows one GPU; [the performance page](https://amasat01.github.io/eagle/content/performance.html) has a tab for every device and CPU measured.
+
 <!-- stale-prose-gate:
 benchmarks/perf_card/card_quadro-p2000.json: d37837fb31567858848e5f1830f19431
 benchmarks/perf_card/cpu_card_intel-xeon-w-2125.json: 5bb591471e7758948a1a2f4994dc575b
@@ -235,8 +239,8 @@ benchmarks/perf_card/cpu_card_intel-xeon-w-2125.json: 5bb591471e7758948a1a2f4994
 
 Measured on:
 
-- [Quadro P2000](https://amasat01.github.io/eagle/content/performance.html#perf-card-gpu-quadro-p2000)
 - [Tesla T4](https://amasat01.github.io/eagle/content/performance.html#perf-card-gpu-tesla-t4)
+- [Quadro P2000](https://amasat01.github.io/eagle/content/performance.html#perf-card-gpu-quadro-p2000)
 - [Intel Xeon W-2125 CPU @ 4.00GHz](https://amasat01.github.io/eagle/content/performance.html#perf-card-cpu-intel-xeon-w-2125)
 <!-- cards:end -->
 

@@ -189,14 +189,14 @@ correctness reference, at 8 threads only; the CPU card is the fuller
 CPU-side comparison, with 1- and 8-thread hawk + eagle rows plus Numba, JAX,
 multiprocessing and plain Python).
 
-### GPU (Quadro P2000, Tesla T4)
+### GPU
 
 The GPU card is measured on two devices: the Quadro P2000, the reference card for every ratio quoted on this page, and a Tesla T4 (Kaggle, power-capped at 70 W, CUDA 12.6). On the T4 we observed significant SM clock fluctuations between and within arm blocks, so its cells move more from run to run than the P2000's; the card records the SM clock of every timed run.
 
 ```{include} _generated/perf_card_gpu.md
 ```
 
-### CPU (Intel Xeon W-2125)
+### CPU
 
 ```{include} _generated/perf_card_cpu.md
 ```
@@ -325,7 +325,7 @@ graph` arm uses, under its automatic launch policy.
 ```{include} _generated/rk78_card_gpu.md
 ```
 
-### CPU (Intel Xeon W-2125)
+### CPU
 
 ```{include} _generated/rk78_card_cpu.md
 ```

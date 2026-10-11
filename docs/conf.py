@@ -140,7 +140,7 @@ html_static_path = ['_static']
 # raptor-reveal.css (kit) -> brand.css (skeleton rules that CONSUME the vars
 # raptor-theme.css sets; no longer sets them itself, see its own header).
 html_css_files = ['raptor-tokens.css', 'site-accent.css', 'raptor-theme.css',
-                   'raptor-reveal.css', 'brand.css']
+                   'raptor-reveal.css', 'brand.css', 'perf-chart.css']
 
 html_theme_options = {
     "repository_url": "https://github.com/amasat01/eagle",

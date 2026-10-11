@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="700" height="200" viewBox="0 0 700 200" role="img" aria-labelledby="t d" font-family="system-ui, -apple-system, Segoe UI, sans-serif">
+<title id="t">RK4 oscillators, 1,000,000 samples, spread (up to 1000 steps)</title>
+<desc id="d">Wall time on Tesla T4: eagle.simulate 50.1 ms, NVIDIA Warp 194 ms, JAX 594 ms, CuPy 3.68 s, PyTorch 3.85 s.</desc>
+<style>.ink{fill:#0b0b0b}.sub{fill:#52514e}.bar{fill:rgba(127,126,120,.5)}.us{fill:#7d53dc}
+.c0{fill:#cf416b}
+.c1{fill:#306101}
+.c2{fill:#1a9a8c}
+.c3{fill:#518d05}
+.c4{fill:#ee4c2c}
+@media (prefers-color-scheme: dark){.ink{fill:#f2f2ee}.sub{fill:#c3c2b7}
+.c1{fill:#88e97e}
+.c3{fill:#76b900}
+}</style>
+<text class="ink" x="0" y="22" font-size="16" font-weight="600">RK4 oscillators, 1,000,000 samples, spread (up to 1000 steps)</text>
+<text class="sub" x="0" y="42" font-size="12.5">Tesla T4. Log scale, 31.3 ms to 6.16 s.</text>
+<circle class="c0" cx="5" cy="66" r="4.5"/><text class="ink" x="18" y="71" font-size="14">eagle.simulate</text><rect class="us" x="150" y="59" width="42.7" height="14" rx="3"/><text class="ink" x="200.7" y="71" font-size="13">50.1 ms</text>
+<circle class="c1" cx="5" cy="96" r="4.5"/><text class="ink" x="18" y="101" font-size="14">NVIDIA Warp</text><rect class="bar" x="150" y="89" width="165.7" height="14" rx="3"/><text class="ink" x="323.7" y="101" font-size="13">194 ms</text>
+<circle class="c2" cx="5" cy="126" r="4.5"/><text class="ink" x="18" y="131" font-size="14">JAX</text><rect class="bar" x="150" y="119" width="267.4" height="14" rx="3"/><text class="ink" x="425.4" y="131" font-size="13">594 ms</text>
+<circle class="c3" cx="5" cy="156" r="4.5"/><text class="ink" x="18" y="161" font-size="14">CuPy</text><rect class="bar" x="150" y="149" width="433.2" height="14" rx="3"/><text class="ink" x="591.2" y="161" font-size="13">3.68 s</text>
+<circle class="c4" cx="5" cy="186" r="4.5"/><text class="ink" x="18" y="191" font-size="14">PyTorch</text><rect class="bar" x="150" y="179" width="437.3" height="14" rx="3"/><text class="ink" x="595.3" y="191" font-size="13">3.85 s</text>
+</svg>
