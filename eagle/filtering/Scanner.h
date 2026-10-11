@@ -157,7 +157,7 @@ public:
     /** @brief Deep copy — see `eagle::cloneArray`. */
     Scanner clone() const
     {
-        Scanner out(idx_t(ParentT::samples()));
+        Scanner out(static_cast<idx_t>(ParentT::samples()));
         static_cast<ParentT&>(out) = cloneArray(static_cast<const ParentT&>(*this));
         out.stream_ = stream_;
         return out;

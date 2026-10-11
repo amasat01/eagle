@@ -39,7 +39,7 @@ jobs:
           path: aether
           token: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
 
-      - run: sudo apt-get update && sudo apt-get install -y g++-13 ccache
+      - run: sudo apt-get update && sudo apt-get install -y g++-13 ccache clang-18 libomp-18-dev
 
       # compiled objects persist across runs; one cache per job and architecture
       - uses: actions/cache@v6
@@ -71,6 +71,11 @@ jobs:
 
       # test:cpp — the manifest-backed integrity gate, not the binary bare.
       - run: cd eagle && tests/check_gate.sh cpp build/tests/eagle_tests
+
+      # every header parses on its own with both compilers (clang rejects some code GCC accepts)
+      - run: |
+          eagle/tests/check_headers.sh g++-13 "${GITHUB_WORKSPACE}/__install/include"
+          eagle/tests/check_headers.sh clang++-18 "${GITHUB_WORKSPACE}/__install/include"
       - if: always()
         run: ccache -s
 
