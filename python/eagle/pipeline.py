@@ -38,6 +38,7 @@ from typing import NamedTuple
 
 from . import _counters
 from .interop import _wrap_external_stream
+from .sidecar import refuse_derived
 from ._conditional import RepeatWhile, Skippable
 from ._launch_policy import sibling_context
 from ._member_enable import MemberHandle, NonToggleableMemberError, _MemberRegistry
@@ -195,6 +196,7 @@ class GraphPipeline:
         disables its launches on replay with no recapture. Every step
         is a member, named or not.
         """
+        refuse_derived(step, door="eagle.GraphPipeline.add", what="the step")
         self._registry.register(name)
         self._steps.append(step)
         return self
@@ -228,10 +230,30 @@ class GraphPipeline:
             raise ValueError(
                 f"names has {len(names)} entries but members has {len(members)}"
             )
+        for i, member in enumerate(members):
+            refuse_derived(member, door="eagle.GraphPipeline.add_concurrent",
+                           what=f"member {i}")
         for i in range(len(members)):
             self._registry.register(names[i] if names is not None else None)
         self._steps.append(_ConcurrentGroup(members))
         return self
+
+    def _capture_stages(self, stages):
+        """Register ``stages`` and capture them: the capture loop as
+        :class:`eagle.graph.Graph` drives it. A stage is ``("step",
+        callable)`` or ``("group", [callable, ...])`` (a fork/join of at
+        least two members); a callable may be a
+        :class:`~eagle._conditional.Skippable`/``RepeatWhile``. Equivalent
+        to the matching :meth:`add`/:meth:`add_concurrent` calls then
+        :meth:`build`; returns ``self``."""
+        for kind, payload in stages:
+            if kind == "step":
+                self.add(payload)
+            elif kind == "group":
+                self.add_concurrent(payload)
+            else:
+                raise ValueError(f"unknown stage kind {kind!r}")
+        return self.build()
 
     def build(self):
         """Stream-capture the registered launches into an instantiated

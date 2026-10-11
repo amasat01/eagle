@@ -46,6 +46,7 @@ _COUNTERS: dict = {
     "instantiations": 0,
     "binds": 0,
     "rebinds": 0,
+    "graph_builds": 0,
 }
 
 
@@ -68,7 +69,7 @@ def bump(name: str) -> None:
 
 
 def snapshot() -> dict:
-    """A fresh ``dict`` copy of the four counters' current values.
+    """A fresh ``dict`` copy of the counters' current values.
 
     Reading never touches the device — this is pure Python bookkeeping, so a
     caller may snapshot from any thread/process context that can import this

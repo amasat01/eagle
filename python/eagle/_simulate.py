@@ -39,6 +39,7 @@ import time
 
 from ._compat import zip_strict
 from ._until_done import (
+    refuse_derived,
     _RESERVED,
     _array_module,
     _check_count,
@@ -99,6 +100,8 @@ def _model_items(model, until) -> list:
     items = list(model) if isinstance(model, (list, tuple)) else [model]
     if until is not None:
         items.append(until)
+    for i, it in enumerate(items):
+        refuse_derived(it, door="eagle.simulate", what=f"item {i} of the model")
     if not items:
         _refuse("the model is empty; pass a hawk kernel or a list of them")
     return items

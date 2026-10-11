@@ -148,6 +148,7 @@ eagle is the execution layer of the RAPTOR family — it launches what
    content/userguide/tutorials/07_host_or_device
    content/userguide/tutorials/03_torch_training
    content/userguide/tutorials/08_profile_your_run
+   content/userguide/tutorials/11_graph_model
    C++ quickstart <content/userguide/quickstart>
    C++ tutorials <content/userguide/tutorials>
 
@@ -182,6 +183,8 @@ eagle is the execution layer of the RAPTOR family — it launches what
    content/userguide/foundations
    content/userguide/parallel_execution
    content/userguide/cuda_graphs
+   content/userguide/graph_model
+   content/userguide/graph_view
    content/userguide/build_options
    content/modules/modules
    content/modules/module_graph
@@ -198,6 +201,7 @@ eagle is the execution layer of the RAPTOR family — it launches what
 
    content/api/api_reference
    content/api/api_graph
+   content/api/api_graph_view
    content/api/api_filtering
    content/api/api_reduce
    content/api/api_host

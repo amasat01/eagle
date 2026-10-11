@@ -290,3 +290,63 @@ def validate_sidecar(meta: dict, *, name: str) -> dict:
             )
 
     return meta
+
+
+# --- Derivative kernels and recurrences: the doors' shared refusals --- #
+def derived_tag(obj, _depth: int = 0):
+    """``(kind, primal)`` when ``obj`` is, or wraps, a VJP/JVP derivative
+    kernel; ``None`` otherwise.
+
+    Read off the object, never by importing hawk: a traced derivative
+    kernel (its ``sinks`` carry hawk's ``kind``/``primal`` tag), a loaded
+    artifact or built plugin whose ``derivative`` block is set, a plan or
+    auto plan (its ``plugin``), a bound method (its ``__self__``) or a
+    ``functools.partial`` (its function and arguments). A bare closure
+    hides what it launches and answers ``None``."""
+    if obj is None or _depth > 3:
+        return None
+    block = getattr(obj, "derivative", None)
+    if isinstance(block, dict) and block.get("kind") in ("vjp", "jvp"):
+        return block["kind"], block.get("primal")
+    sinks = getattr(obj, "sinks", None)
+    kind = getattr(sinks, "kind", None)
+    if kind in ("vjp", "jvp") and hasattr(sinks, "primal"):
+        return kind, sinks.primal
+    nxt = [getattr(obj, "plugin", None), getattr(obj, "__self__", None)]
+    func = getattr(obj, "func", None)
+    if func is not None:
+        nxt += [func, *getattr(obj, "args", ())]
+    for item in nxt:
+        found = derived_tag(item, _depth + 1)
+        if found is not None:
+            return found
+    return None
+
+
+def refuse_derived(obj, *, door: str, what: str = "this kernel") -> None:
+    """Raise ``ValueError`` naming ``door`` when ``obj`` is a derivative
+    kernel: a derivative enters a plan, pipeline or Dag only through
+    ``eagle.diff``, which pairs it with its primal."""
+    found = derived_tag(obj)
+    if found is not None:
+        kind, primal = found
+        raise ValueError(
+            f"{door}: {what} is a {kind} derivative kernel"
+            + (f" of {primal!r}" if primal else "")
+            + "; a derivative is not run directly as a step of a plan, "
+            "pipeline, until_done or simulate -- it enters a graph only "
+            "through eagle.diff, which pairs it with its primal")
+
+
+def refuse_prior_read(names, *, door: str) -> None:
+    """Raise ``ValueError`` when the plane(s) ``names`` are read before they
+    are assigned (a ``prior_read`` Mutable): a reverse pass would need the
+    value the launch overwrites and eagle keeps no such tape."""
+    names = sorted(names)
+    if names:
+        raise ValueError(
+            f"{door}: {names[0]!r} is read before it is assigned: a plane's "
+            "launch-start value is a recurrence across launches; its "
+            "derivative needs the value the primal launch overwrites, "
+            "and eagle keeps no tape for it -- differentiate the per-launch "
+            "term instead")

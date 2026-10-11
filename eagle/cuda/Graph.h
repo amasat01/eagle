@@ -414,6 +414,13 @@ public:
         return nativeIdx;
     }
 
+    /** @brief Per native node, the native indices it depends on (as given to
+     *  ``addNative``). */
+    const std::vector<std::vector<idx_t>>& nativeDeps() const
+    {
+        return nativeDeps_;
+    }
+
     /** @brief Phase 2 of the native-node build: commit the scratch arena, then
      *  capture every native node's subgraph (in add order) with resolved
      *  pointers, mapping each node's native dependencies to the graph-node

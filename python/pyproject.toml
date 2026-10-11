@@ -104,6 +104,9 @@ cuda = [
 # eagle.frameworks.torch: the torch.autograd bridge. torch is imported only by
 # that submodule, so plain `import eagle` never needs it.
 torch = ["torch"]
+# eagle.Graph.plot: the graph drawn with matplotlib (imported only by that
+# method; show()/to_mermaid()/to_dot() need nothing).
+plot = ["matplotlib>=3.7"]
 
 # The bound eagle._core graph engine is a compiled nanobind extension, so the
 # wheel is per-Python/ABI (not py3-none-any). eagle._core is plain C++; the CUDA

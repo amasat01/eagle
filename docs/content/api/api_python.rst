@@ -47,6 +47,9 @@ and the GPU/CPU device-dispatch internals.
 .. automodule:: eagle.exec
    :members:
 
+.. automodule:: eagle.graph
+   :members:
+
 .. automodule:: eagle.marshal
    :members:
 

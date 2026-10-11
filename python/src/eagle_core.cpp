@@ -82,6 +82,7 @@
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>  // std::vector<uintptr_t> <-> list[int] (capture_snapshot_nodes)
 #include <nanobind/stl/pair.h>  // (address, element bytes) plane pairs (reorder_device)
+#include <nanobind/stl/tuple.h>  // graph-view rows (nodes, edges, plane refs)
 
 // The heterogeneous execution contract's C++ half.
 // `eagle.plan` (Python) decides a Plan; these are the structures it drives, plus
@@ -91,6 +92,10 @@
 // plugin (src/seam/).
 #include "eagle/exec/HostTeam.h"
 #include "eagle/exec/Partition.h"
+#include "eagle/graph/Edges.h"
+#include "eagle/graph/Layout.h"
+#include "eagle/graph/Render.h"
+#include "eagle/util/Busy.h"
 #include "plugin/gref_abi.h"
 #include "plugin/roles.h"
 
@@ -315,6 +320,46 @@ void noBackendFence(std::int32_t type, std::int32_t, std::optional<std::intptr_t
     throw eagle_seam::Unavailable(
         "eagle: no eagle backend serves DLPack device type " + std::to_string(type) + " (only kind 'cuda' exists)");
 }
+
+
+// -- The graph view (eagle/graph/*.h): rows in, text and numbers out --
+namespace eg = eagle::graph;
+
+using NodeRow  = std::tuple<std::string, std::string, std::string, std::int64_t, bool>;
+using EdgeRow  = std::tuple<std::int64_t, std::int64_t, std::string, std::string>;
+using FrameRow = std::tuple<std::string, std::string, std::int64_t>;
+using RefRow   = std::tuple<std::string, std::int64_t, std::uint64_t,
+    std::vector<std::int64_t>, std::vector<std::int64_t>, std::int64_t, int>;
+
+eg::PlaneRef planeRefOf(const RefRow& r)
+{
+    const auto& [name, node, base, shape, strides, itemsize, access] = r;
+    if (shape.size() != strides.size())
+        throw std::invalid_argument("plane '" + name + "': shape and strides differ in length");
+    if (access < 0 || access > 2)
+        throw std::invalid_argument("plane '" + name + "': access must be 0 (read), 1 (write) or 2 (in place)");
+    return { name, node, base, shape, strides, itemsize, access };
+}
+
+std::vector<eg::PlaneRef> planeRefsOf(const std::vector<RefRow>& rows)
+{
+    std::vector<eg::PlaneRef> out;
+    out.reserve(rows.size());
+    for (const RefRow& r : rows) out.push_back(planeRefOf(r));
+    return out;
+}
+
+std::vector<eg::SiblingGroup> groupsOf(const std::vector<std::vector<std::vector<std::int64_t>>>& g)
+{
+    std::vector<eg::SiblingGroup> out;
+    for (const auto& branches : g) out.push_back({ branches });
+    return out;
+}
+
+/** @brief An immutable Description (built once from rows, validated). */
+struct PyDescription {
+    eg::Description d;
+};
 
 } // namespace
 
@@ -1260,4 +1305,98 @@ NB_MODULE(_core, m)
             ck(EBX(eagle_backend_x_composer_num_members)(need(c.h, "GraphComposer"), &n));
             return n;
         }, nb::lock_self());
+
+    // -- The graph view: Description, edge derivation, layout, renderers, and
+    // the busy guard behind eagle.Busy. All of it is the header-only C++ of
+    // eagle/graph/ and eagle/util/Busy.h; this is the thin layer over it.
+    nb::register_exception_translator([](const std::exception_ptr& p, void*) {
+        try {
+            std::rethrow_exception(p);
+        } catch (const eagle::util::Busy& e) {
+            nb::object type = nb::module_::import_("eagle._busy").attr("Busy");
+            PyErr_SetString(type.ptr(), e.what());
+        }
+    });
+    m.attr("OVERLAP_MAX_WORK") = eg::kOverlapMaxWork;
+    m.def("kind_meaning", [](const std::string& kind) { return std::string(eg::kindMeaning(eg::parseEdgeKind(kind))); },
+        nb::arg("kind"), "Plain-words meaning of a hazard kind ('RAW', 'WAR', 'WAW').");
+
+    nb::class_<PyDescription>(m, "GraphDescription")
+        .def("__init__",
+            [](PyDescription* self, const std::vector<NodeRow>& nodes,
+                const std::vector<EdgeRow>& edges, const std::vector<FrameRow>& frames) {
+                new (self) PyDescription();
+                eg::Description& d = self->d;
+                for (const auto& [label, kind, stage, frame, opaque] : nodes)
+                    d.nodes.push_back({ eg::gidx(d.nodes.size()), label, kind, stage, frame, opaque });
+                for (const auto& [src, dst, plane, kind] : edges)
+                    d.edges.push_back({ src, dst, plane, eg::parseEdgeKind(kind) });
+                for (const auto& [kind, label, parent] : frames)
+                    d.frames.push_back({ eg::gidx(d.frames.size()), kind, label, parent });
+                d.validate();
+            },
+            nb::arg("nodes"), nb::arg("edges") = std::vector<EdgeRow>{},
+            nb::arg("frames") = std::vector<FrameRow>{},
+            "nodes: (label, kind, stage, frame, opaque); edges: (src, dst, plane, kind "
+            "'RAW'|'WAR'|'WAW'); frames: (kind, label, parent). Ids are positions; "
+            "frame/parent -1 means none. Raises ValueError on a malformed graph.")
+        .def("validate", [](const PyDescription& s) { s.d.validate(); })
+        .def("num_nodes", [](const PyDescription& s) { return s.d.nodes.size(); })
+        .def("num_edges", [](const PyDescription& s) { return s.d.edges.size(); })
+        .def("layout",
+            [](const PyDescription& s, int sweeps) {
+                const eg::Layout l = eg::layout(s.d, sweeps);
+                std::vector<std::pair<double, double>> xy;
+                for (const auto& p : l.xy) xy.emplace_back(p[0], p[1]);
+                return std::make_tuple(l.layer, l.order, xy);
+            },
+            nb::arg("sweeps") = 4,
+            "(layer, order, xy) per node: layer = stage, order = position in it, "
+            "xy = unit-grid coordinates (x centred per layer, y = layer, downwards).")
+        .def("ascii",
+            [](const PyDescription& s, bool unicode, std::size_t max_label) {
+                return eg::ascii(s.d, eg::layout(s.d), unicode, max_label);
+            },
+            nb::arg("unicode") = true, nb::arg("max_label") = 24,
+            "The box block diagram (unicode=False: + - | only).")
+        .def("mermaid", [](const PyDescription& s) { return eg::mermaid(s.d); })
+        .def("dot", [](const PyDescription& s) { return eg::dot(s.d); });
+
+    m.def("derive_edges",
+        [](const std::vector<RefRow>& refs,
+            const std::vector<std::vector<std::vector<std::int64_t>>>& groups) {
+            std::vector<EdgeRow> out;
+            for (const eg::Edge& e : eg::deriveEdges(planeRefsOf(refs), groupsOf(groups)))
+                out.emplace_back(e.src, e.dst, e.plane, eg::kindName(e.kind));
+            return out;
+        },
+        nb::arg("plane_refs"), nb::arg("groups") = std::vector<std::vector<std::vector<std::int64_t>>>{},
+        "Hazard edges between nodes from the planes they touch, stride-aware. "
+        "plane_refs: (name, node, base, shape, strides_bytes, itemsize, access "
+        "0 read | 1 write | 2 in place). groups: per fork/join group, its "
+        "branches, each a list of node ids; siblings get no edge.");
+    m.def("sibling_conflicts",
+        [](const std::vector<RefRow>& refs,
+            const std::vector<std::vector<std::vector<std::int64_t>>>& groups) {
+            std::vector<std::tuple<std::int64_t, std::int64_t, std::string, std::string, std::string>> out;
+            for (const eg::Conflict& c : eg::siblingConflicts(planeRefsOf(refs), groupsOf(groups)))
+                out.emplace_back(c.a, c.b, c.planeA, c.planeB, eg::kindName(c.kind));
+            return out;
+        },
+        nb::arg("plane_refs"), nb::arg("groups"),
+        "Overlaps between siblings of one fork/join group with a writer: "
+        "(a, b, plane_a, plane_b, kind).");
+    m.def("planes_overlap",
+        [](const RefRow& a, const RefRow& b) {
+            return eg::detail::overlap(planeRefOf(a), planeRefOf(b));
+        },
+        nb::arg("a"), nb::arg("b"), "Do two plane references share a byte?");
+
+    nb::class_<eagle::util::BusyGuard>(m, "BusyGuard")
+        .def(nb::init<std::string>(), nb::arg("owner"))
+        .def("enter", [](eagle::util::BusyGuard& g, const std::string& method) { g.enter(method); },
+            nb::arg("method"), "Take the guard or raise eagle.Busy naming the method in flight.")
+        .def("leave", [](eagle::util::BusyGuard& g) { g.leave(); })
+        .def("current", &eagle::util::BusyGuard::current)
+        .def("owner", &eagle::util::BusyGuard::owner);
 }

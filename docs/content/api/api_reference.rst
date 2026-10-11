@@ -29,6 +29,10 @@ rendered through Breathe and split by module. For the Python package
        between native and emulated double-precision kernels), and
        ``computeBlocks`` (derives a block-size/block-count pair for an
        N-sample launch from those two numbers).
+   * - :doc:`api_graph_view`
+     - ``eagle::graph``: ``Description``, ``deriveEdges``, ``siblingConflicts``,
+       ``layout``, ``ascii`` / ``mermaid`` / ``dot``, ``describe``; and
+       ``eagle::util::BusyGuard`` (listed under :doc:`api_util`).
    * - :doc:`api_filtering`
      - ``Scanner``, ``FilteringSlice``, ``RefScanner``, ``RefSlice``,
        ``cuda::Scan``, ``cpu::Scan``.

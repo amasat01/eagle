@@ -31,6 +31,8 @@
 
 #include "eagle/compose.h"
 
+#include "eagle/graph.h"
+
 #include "eagle/stream.h"
 
 #include "eagle/cuda.h"

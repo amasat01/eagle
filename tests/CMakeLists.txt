@@ -166,6 +166,20 @@ list(REMOVE_DUPLICATES TEST_FILES)
 set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/test_DLPackInterop.cpp
   PROPERTIES COMPILE_DEFINITIONS "EAGLE_CPU_ONLY=1")
 
+# The graph view (Description, edge derivation, layout, renderers and the
+# native-graph adapters) is CUDA-free: compiled by CXX in BOTH build modes with
+# EAGLE_CPU_ONLY forced on this one source, the test_ConditionalGroupCpu.cpp
+# recipe. The CUDA graph's adapter is test_GraphViewCuda.cu (CUDA-mode glob).
+list(APPEND TEST_FILES ${CMAKE_CURRENT_SOURCE_DIR}/test_GraphView.cpp)
+list(REMOVE_DUPLICATES TEST_FILES)
+set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/test_GraphView.cpp
+  PROPERTIES COMPILE_DEFINITIONS "EAGLE_CPU_ONLY=1")
+
+# The busy guard is header-only and CUDA-free, so it must compile+run in BOTH
+# build modes (no forced define: it never reaches eagle/typedefs.h).
+list(APPEND TEST_FILES ${CMAKE_CURRENT_SOURCE_DIR}/test_Busy.cpp)
+list(REMOVE_DUPLICATES TEST_FILES)
+
 list(SORT TEST_FILES COMPARE NATURAL)
 
 foreach(file ${TEST_FILES})

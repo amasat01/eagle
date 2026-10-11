@@ -18,8 +18,10 @@ What each group of rows proves:
   memo answers (``unit_stats``); in a NEW process (same ``cache_dir``) the
   unit's stamp answers, the compile cache has no miss and no published file's
   mtime moves. Asserted on counters and mtimes, never on timing.
-* DERIVED KERNELS: a ``jvp`` kernel and a ``hawk.steps(kernel, K)`` kernel are
-  inputs like any other, and ``run_until_done`` takes the plan of the latter.
+* DERIVED KERNELS: a ``hawk.steps(kernel, K)`` kernel is an input like any
+  other, and ``run_until_done`` takes its plan. A ``jvp``/``vjp`` kernel is
+  REFUSED here (a derivative enters a graph only through ``eagle.diff``; pinned
+  in ``test_refusals_derived_in_plans.py``).
 * SEVERANCE: ``import eagle`` and ``auto(plugin)`` work with hawk masked
   (a subprocess with ``sys.modules["hawk"] = None``); a hawk kernel there is
   refused naming hawk.
@@ -147,10 +149,7 @@ def cache(tmp_path_factory):
 # Equality with the hand-assembled plan
 # --------------------------------------------------------------------------- #
 #: ``(id, kernels, index)``: plan ``kernels[index]`` out of ``auto(kernels)``.
-#: A ``jvp`` kernel names its primal, which must share its bundle: it is
-#: built in a list with it (alone, hawk refuses it naming ``primal_unit``).
-_EQUALITY = [("affine", [ak_affine], 0), ("energy", [ak_energy], 0),
-             ("energy_jvp", [ak_energy, ak_energy_jvp], 1)]
+_EQUALITY = [("affine", [ak_affine], 0), ("energy", [ak_energy], 0)]
 
 
 @pytest.mark.parametrize("kernels,index", [c[1:] for c in _EQUALITY],

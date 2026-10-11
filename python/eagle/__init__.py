@@ -56,17 +56,20 @@ from .dtypes import SCALAR_TYPES, np_dtype
 from .interop import detect, origin_adapter, to_cupy
 from .launch import KERNEL_NAME, assemble_args, launch, pure_prepare
 from .loaded import LoadedKernel, LoadedPure, LoadedVector
+from ._busy import Busy
 from .pipeline import GraphPipeline
 from .registry import KernelRegistry, load_manifest
 
 __all__ = [
     "ABI_VERSION",
+    "Busy",
     "ActiveSet",
     "BackendUnavailable",
     "DeviceProps",
     "FINISHED_PLANE",
     "FUSED_STEPS_PLANE",
     "GraphComposer",
+    "Graph",
     "GraphPipeline",
     "KERNEL_NAME",
     "KernelRegistry",
@@ -115,6 +118,11 @@ def __getattr__(name):
 
         globals()["deploy"] = auto
         return auto
+    if name == "Graph":
+        from .graph import Graph
+
+        globals()["Graph"] = Graph
+        return Graph
     raise AttributeError(f"module 'eagle' has no attribute {name!r}")
 
 

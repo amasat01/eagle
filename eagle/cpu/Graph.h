@@ -161,6 +161,13 @@ public:
     /** @brief Number of native nodes added. */
     idx_t nodeCount() const { return idx_t(runClosures_.size()); }
 
+    /** @brief Per native node, the native indices it depends on (as given to
+     *  ``addNative``). */
+    const std::vector<std::vector<idx_t>>& nativeDeps() const
+    {
+        return nativeDeps_;
+    }
+
 private:
     /** @brief Per-graph scratch arena (peak-not-sum reuse), shared design with
      *  the CUDA path; host ``malloc`` backing in ``EAGLE_CPU_ONLY`` mode. */

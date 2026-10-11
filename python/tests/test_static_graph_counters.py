@@ -45,7 +45,8 @@ hawk_artifact = pytest.importorskip("hawk.artifact")
 #: builds against.
 DEVICE_ARCH = hawk_artifact.arch()
 
-_ALL_ZERO = {"captures": 0, "instantiations": 0, "binds": 0, "rebinds": 0}
+_ALL_ZERO = {"captures": 0, "instantiations": 0, "binds": 0, "rebinds": 0,
+             "graph_builds": 0}
 
 
 @hawk_trace.kernel

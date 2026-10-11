@@ -47,7 +47,7 @@ from . import _layout
 from ._compat import zip_strict
 from ._conditional import SkipGuard, Skippable, repeat_while
 from .roles import PER_SAMPLE_ROLES
-from .sidecar import FINISH_AUTO, FINISH_COUNTER, read_finish
+from .sidecar import FINISH_AUTO, FINISH_COUNTER, read_finish, refuse_derived
 
 #: The reserved ``lookup`` plane a finishing kernel counts newly finished
 #: samples into: one ``uint32`` cell, viewed as ``int32`` at bind.
@@ -65,6 +65,22 @@ AUTO_K0 = 16
 
 #: The names the runner allocates and binds itself.
 _RESERVED = (FINISHED_PLANE, MAP_PLANE, COUNT_PLANE, FUSED_STEPS_PLANE)
+
+#: The planes a recording / event-refining / reverse run allocates and binds
+#: itself. Reserved ONLY while that mode is on (see :func:`_reserved_names`);
+#: :data:`_RESERVED` never grows, so a model that names a plane ``tape`` and
+#: runs without them keeps working.
+_CONDITIONAL_RESERVED = ("applied_steps", "t_stop", "tape", "event_status")
+
+
+def _reserved_names(*, record: bool = False, events=None,
+                    reverse: bool = False) -> tuple:
+    """The plane names the runner owns for this run: :data:`_RESERVED`, plus
+    :data:`_CONDITIONAL_RESERVED` when ``record=``, ``events="refine"`` or a
+    reverse is on."""
+    if record or reverse or events == "refine":
+        return _RESERVED + _CONDITIONAL_RESERVED
+    return _RESERVED
 
 # The policy cells (int64): the band's current k, the counter at the last
 # launch, the steps run so far, the step cap.
@@ -492,6 +508,8 @@ class Runner:
                 plans[0] = select(planes)
         else:
             plans = _select_step(plans, planes)
+        for i, p in enumerate(plans):
+            refuse_derived(p, door="eagle.until_done", what=f"step {i}")
         names = [_kernel_name(p.plugin) for p in plans]
         specs = [tuple(tuple(pair) for pair in p.plugin.arg_spec) for p in plans]
         max_steps = _check_count("max_steps", max_steps)
@@ -517,7 +535,7 @@ class Runner:
         xp = _array_module(device)
         for i in finishers:
             _require_counter_slot(specs[i], names[i])
-        for reserved in _RESERVED:
+        for reserved in _reserved_names():
             if reserved in planes:
                 raise ValueError(
                     f"eagle.until_done: {reserved!r} is allocated and bound by the "
