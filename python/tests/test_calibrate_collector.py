@@ -24,7 +24,7 @@ HEADER_KEYS = ("schema", "collector_md5", "date_utc", "target", "eagle_version",
 GPU_HEADER_KEYS = ("gpu_name", "driver", "cuda_runtime", "smi_before", "smi_after")
 COLUMNS = ("case_id", "group", "kind", "target", "kernel_src_md5", "codegen_md5", "n", "K",
            "fused_steps", "steps", "m", "counts", "cost_b0", "cost_b1", "cost_b2", "cost_b3",
-           "held_out", "rep", "warm", "timer", "wall_s", "status")
+           "fused_vectorised", "held_out", "rep", "warm", "timer", "wall_s", "status")
 QUICK_REPS = 3          # --quick: the first (cold) repetition plus two
 
 

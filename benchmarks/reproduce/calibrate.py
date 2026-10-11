@@ -43,7 +43,7 @@ CLASSES = ("a32", "a64", "s32", "s64", "ld", "ga")
 MAX_BRANCHES = 4
 COLUMNS = ["case_id", "group", "kind", "target", "kernel_src_md5", "codegen_md5", "n", "K",
            "fused_steps", "steps", "m", "counts",
-           *[f"cost_b{j}" for j in range(MAX_BRANCHES)],
+           *[f"cost_b{j}" for j in range(MAX_BRANCHES)], "fused_vectorised",
            "held_out", "rep", "warm", "timer", "wall_s", "status"]
 
 KERNELS_SRC = '''\
@@ -228,12 +228,20 @@ def fmt_cost(c) -> str:
     return ";".join(f"{v:g}" for v in c)
 
 
-def branch_costs(kernel, group="dispatch0") -> list:
+class BranchCosts(list):
+    """The per-branch cost rows, plus hawk's fact whether the fused host loop vectorises."""
+
+    vectorised = False
+
+
+def branch_costs(kernel, group="dispatch0") -> BranchCosts:
     from eagle._dispatch_door import _step
     from hawk.ir import dispatch_costs
 
     cost = dispatch_costs(_step(kernel).walk)[group]
-    return [b.as_tuple() for b in cost.branches]
+    out = BranchCosts(b.as_tuple() for b in cost.branches)
+    out.vectorised = bool(cost.fused_vectorised)
+    return out
 
 
 # --- planes and timing --- #
@@ -332,7 +340,8 @@ class Writer:
         cols = [fmt_cost(c) for c in costs] + [""] * (MAX_BRANCHES - len(costs))
         for rep, s in enumerate(seconds):
             self.w.writerow([cid, group, kind, self.target, src, codegen, n, K, fused_steps, steps, m,
-                             ";".join(str(c) for c in counts), *cols, held_out, rep,
+                             ";".join(str(c) for c in counts), *cols, int(getattr(costs, "vectorised", False)),
+                             held_out, rep,
                              int(rep > 0), timer or self.timer, f"{s:.9e}", status])
             self.rows += 1
 

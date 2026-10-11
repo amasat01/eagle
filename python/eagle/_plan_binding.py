@@ -10,7 +10,7 @@ import importlib
 
 import numpy as np
 
-from . import _counters, _layout
+from . import _bounded, _counters, _layout
 from .interop import _wrap_external_stream
 from . import exec as eexec
 from .abi import DEVICE_CPU, DEVICE_CUDA
@@ -235,6 +235,28 @@ class BoundPlan:
             _launch._device_props(), _launch._kernel_attrs(self._entry)
         )
 
+    def entry_reports(self) -> tuple:
+        """The launch policy's view of this plan's device entries: one
+        :class:`eagle._bounded.EntryReport` per entry present (the plain
+        kernel, ``<kernel>_range``, ``<kernel>_persist``) with its registers,
+        local memory, whether a spill-free register bound is in force, and the
+        threads per SM it leaves resident. Empty for a host-team plan."""
+        if self._device_type != DEVICE_CUDA:
+            return ()
+        plugin = self.plan.plugin
+        keep = getattr(plugin, "_keepalive", ())
+        loaded = keep[-1] if keep else None
+        module = getattr(loaded, "module", None)
+        name = getattr(plugin, "name", None)
+        if module is None or not name:
+            return ()
+        reports = [_bounded.entry_report(loaded, name, loaded.fn)]
+        for suffix, resolve in (("range", self.range_entry), ("persist", self.persist_entry)):
+            if resolve() is not None:
+                reports.append(_bounded.entry_report(
+                    loaded, f"{name}_{suffix}", module.get_function(f"{name}_{suffix}")))
+        return tuple(reports)
+
     def persist_entry(self):
         """This bound plan's ``<kernel>_persist`` cupy ``Function`` --
         same compiled unit as the fused entry (hawk's
@@ -254,7 +276,8 @@ class BoundPlan:
             name = getattr(plugin, "name", None)
             if module is not None and name:
                 try:
-                    fn = module.get_function(f"{name}_persist")
+                    fn = _bounded.entry(loaded, f"{name}_persist",
+                                        module.get_function(f"{name}_persist"))
                 except Exception:
                     fn = None
         self._persist_fn = fn
@@ -374,7 +397,8 @@ class BoundPlan:
             name = getattr(plugin, "name", None)
             if module is not None and name:
                 try:
-                    fn = module.get_function(f"{name}_range")
+                    fn = _bounded.entry(loaded, f"{name}_range",
+                                        module.get_function(f"{name}_range"))
                 except Exception:
                     fn = None
         self._range_fn = fn

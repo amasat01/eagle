@@ -121,10 +121,10 @@ def _kernel_attrs(fn):
     return cached
 
 
-#: ``CUfunction_attribute`` enumerators (cuda.h): the three the block-size
+#: ``CUfunction_attribute`` enumerators (cuda.h): the four the launch
 #: policy reads, under the names cupy's ``RawKernel.attributes`` gives them.
 _FUNC_ATTRIBUTES = (("max_threads_per_block", 0), ("shared_size_bytes", 1),
-                    ("num_regs", 4))
+                    ("local_size_bytes", 3), ("num_regs", 4))
 
 
 def _query_kernel_attrs(fn) -> dict:

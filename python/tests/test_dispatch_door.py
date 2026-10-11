@@ -96,7 +96,7 @@ def test_the_reported_mix_is_the_bincount_of_the_classes(reference):
 def test_a_split_run_counts_its_class_sorts():
     report = run(walker, rare_classes(), dispatch="segmented").report
     assert report.class_sorts >= 1
-    assert run(walker, rare_classes()).report.class_sorts == 0
+    assert run(walker, rare_classes(), dispatch="switch").report.class_sorts == 0
 
 
 # --- the static-selector rule --- #

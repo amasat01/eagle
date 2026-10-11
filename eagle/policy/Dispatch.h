@@ -18,6 +18,7 @@
 #pragma once
 
 #include "eagle/DeviceProps.h"
+#include "eagle/policy/Residency.h"
 
 #include <algorithm>
 #include <array>
@@ -39,14 +40,22 @@ inline constexpr int DECISION_EVERY = 16;
 /** @brief Lanes that run in lockstep on a device. */
 inline constexpr int WARP_LANES = 32;
 
-// Measured defaults (see defaultWeights), per sample.
-inline constexpr double HOST_LANE_RATE = 28e9;         ///< lane ops per second, all cores, vectorised
-inline constexpr double HOST_PLANE_SECONDS = 0.7e-9;    ///< one launch's state read + write
-inline constexpr double HOST_SPLIT_SECONDS = 0.2e-9;    ///< one split step's bookkeeping
-inline constexpr double HOST_SORT_SECONDS = 25e-9;      ///< one class sort
-inline constexpr double DEVICE_PLANE_SECONDS = 0.3e-9;
+// Host defaults, fitted by benchmarks/reproduce/fit_profile.py to the calibration
+// of a 4-core Xeon W-2125 (relative RMS 0.19 over the isolated groups). The device
+// defaults are conservative priors until a device calibration fits within 0.20.
+inline constexpr double HOST_LANE_RATE = 24.5e9;        ///< plain 64-bit ops per second, all cores
+inline constexpr double HOST_MEMORY_RATE = 52.1e9;      ///< bytes per second a streaming loop reaches
+inline constexpr double HOST_CACHE_BYTES = 12.7e6;      ///< last-level plus per-core caches
+inline constexpr double HOST_CACHE_RATIO = 5.09;         ///< a cached gather's speed over memory
+inline constexpr double HOST_ARITH32 = 1.495;            ///< a 32-bit op, in 64-bit ops
+inline constexpr double HOST_SPECIAL32 = 25.2;
+inline constexpr double HOST_SPECIAL64 = 122.0;
+inline constexpr double HOST_SPLIT_SECONDS = 0.35e-9;   ///< one split step's bookkeeping, per sample
+inline constexpr double HOST_SORT_SECONDS = 13.2e-9;    ///< one class sort, per sample
 inline constexpr double DEVICE_SPLIT_SECONDS = 0.05e-9;
 inline constexpr double DEVICE_SORT_SECONDS = 10e-9;
+/// Warps per SM above which the issue pipe stays busy: a kernel resident in fewer runs the lanes slower.
+inline constexpr int ISSUE_KNEE_WARPS = 8;
 
 enum class Policy { Switch, Segmented };
 enum class Target { Host, Device };
@@ -65,8 +74,10 @@ struct BranchCost {
 struct CostVector {
     int count = 0;
     /// The fused host loop is vectorised: it evaluates every branch and selects,
-    /// so it costs the sum of the branches whatever the mix.
+    /// so it costs the sum of the branches whatever the mix. Otherwise it is a
+    /// scalar switch that runs each sample's own branch.
     bool fusedVectorised = false;
+    int regsPerThread = 0;  ///< registers the compiled kernel needs per thread; 0 when unknown (full rate)
     std::array<BranchCost, MAX_BRANCHES> branch{};
 };
 
@@ -89,16 +100,18 @@ struct Mix {
 /** @brief Per-target constants; see defaultWeights for where the numbers come from. */
 struct Weights {
     Target target = Target::Host;
-    double special = 20;       ///< one transcendental, in plain arithmetic ops
-    double load = 1;           ///< one plane element read, in arithmetic ops
-    double gather = 4;         ///< extra cost of an indexed read over a plain one
-    double simdLoss = 3;       ///< host, unvectorised fused loop: slowdown of its vectorisable work
+    double arith32 = 1;       ///< one 32-bit operation, in 64-bit operations
+    double special32 = 20;    ///< one 32-bit transcendental, in 64-bit operations
+    double special64 = 20;    ///< one 64-bit transcendental, in 64-bit operations
+    double elemBytes = 8;     ///< bytes of one plane element
     double launchSeconds = 5e-6;          ///< device: one kernel launch / host: one team barrier
-    double planeSeconds = 0;              ///< per sample, per launch: reading and writing the state
     double splitSeconds = 0;              ///< per sample, per split step: run bounds, guard, skipped lanes
     double sortSeconds = 0;               ///< per sample: one class sort
-    double laneRate = 0;                  ///< lane operations per second; 0 takes half the device's
-                                          ///< peak flop rate (an FMA is two flops)
+    double laneRate = 0;                  ///< 64-bit operations per second; 0 takes half the device's
+                                          ///< peak single-precision flop rate (an FMA is two flops)
+    double memoryRate = 0;                ///< bytes per second; 0 takes the device's peak
+    double cacheBytes = 0;                ///< cache that holds a gathered plane; 0 treats every gather as memory
+    double cacheRatio = 4;                ///< a gather served from that cache runs this much faster
 };
 
 /** @brief What the rule remembers between two looks. */
@@ -115,13 +128,17 @@ inline Weights defaultWeights(Target target) {
     Weights w;
     w.target = target;
     if (target == Target::Host) {
-        w.launchSeconds = 2e-6;
+        w.launchSeconds = 1.4e-6;
         w.laneRate = HOST_LANE_RATE;
-        w.planeSeconds = HOST_PLANE_SECONDS;
+        w.memoryRate = HOST_MEMORY_RATE;
+        w.cacheBytes = HOST_CACHE_BYTES;
+        w.cacheRatio = HOST_CACHE_RATIO;
+        w.arith32 = HOST_ARITH32;
+        w.special32 = HOST_SPECIAL32;
+        w.special64 = HOST_SPECIAL64;
         w.splitSeconds = HOST_SPLIT_SECONDS;
         w.sortSeconds = HOST_SORT_SECONDS;
     } else {
-        w.planeSeconds = DEVICE_PLANE_SECONDS;
         w.splitSeconds = DEVICE_SPLIT_SECONDS;
         w.sortSeconds = DEVICE_SORT_SECONDS;
     }
@@ -130,17 +147,43 @@ inline Weights defaultWeights(Target target) {
 
 namespace detail {
 
-/** @brief Cost of the vectorisable part (arithmetic, plain loads) and the scalar part of one branch. */
-struct Split { double vector; double scalar; };
+/** @brief What one branch costs one sample, per step: lane operations, state bytes, gathered bytes. */
+struct Work { double ops; double stateBytes; double gatherBytes; };
 
-inline Split branchWork(const BranchCost& b, const Weights& w, const DeviceProps& props) {
+inline Work branchWork(const BranchCost& b, const Weights& w, const DeviceProps& props) {
     // A 64-bit op costs fp64_ratio plain ones on a device; a host core has no such penalty.
     const double wide = (w.target == Target::Device && props.fp64_ratio > 1.0) ? props.fp64_ratio : 1.0;
-    // A load costs what the device's ridge point says one operand costs in flops.
-    const double ridge = props.ridgeFlopsPerByte("float32");
-    const double load = (w.target == Target::Device && ridge > 0.0) ? std::max(w.load, 2.0 * ridge) : w.load;
-    return { b.arith32 + b.arith64 * wide + b.loads * load,
-             (b.special32 + b.special64 * wide) * w.special + b.gathers * load * w.gather };
+    return { b.arith32 * w.arith32 + b.arith64 * wide + b.special32 * w.special32 + b.special64 * w.special64 * wide,
+             2.0 * b.loads * w.elemBytes,  // carried planes are read and written
+             b.gathers * w.elemBytes };
+}
+
+/** @brief Lane operations per second: the configured rate, slowed when too few warps are resident. */
+inline double laneRate(const CostVector& cost, const DeviceProps& props, const Weights& w) {
+    double rate = w.laneRate > 0.0 ? w.laneRate : 0.5 * props.peak_flops_sp;
+    if (w.target == Target::Device && cost.regsPerThread > 0) {
+        const ResidencyDevice dev{ props.cc_major, props.cc_minor, props.regs_per_sm, 0 };
+        const int warps = residentWarps(dev, cost.regsPerThread);
+        if (warps > 0 && warps < ISSUE_KNEE_WARPS) rate *= static_cast<double>(warps) / ISSUE_KNEE_WARPS;
+    }
+    return rate;
+}
+
+/** @brief Seconds per byte of state traffic and of gathered traffic over @p n samples. */
+struct ByteRates { double state; double gather; };
+
+inline ByteRates byteRates(double n, const DeviceProps& props, const Weights& w) {
+    const double memory = w.memoryRate > 0.0 ? w.memoryRate : props.peak_bytes_per_s;
+    if (memory <= 0.0) return { 0.0, 0.0 };
+    const bool cached = w.cacheBytes > 0.0 && n * w.elemBytes <= w.cacheBytes;
+    return { 1.0 / memory, 1.0 / (cached ? memory * w.cacheRatio : memory) };
+}
+
+/** @brief One launch over @p n samples: the slower of its arithmetic and its memory traffic, plus the launch. */
+inline double launchSeconds(double n, double ops, double stateBytes, double gatherBytes, double rate,
+                            const ByteRates& bytes, double launch) {
+    const double compute = rate > 0.0 ? n * ops / rate : 0.0;
+    return std::max(compute, n * (stateBytes * bytes.state + gatherBytes * bytes.gather)) + launch;
 }
 
 }  // namespace detail
@@ -159,55 +202,73 @@ inline double warpShare(double p, double mixed32) {
     return std::min(1.0, p * (1.0 - mixed32) + mixed32);
 }
 
+/** @brief Seconds per step of the two paths for one mix. */
+struct PathSeconds { double fused; double split; };
+
+/**
+ * @brief Predicted seconds per step of the fused `switch` kernel and of the
+ *        split one for this mix.
+ *
+ * A launch takes the slower of its arithmetic and its memory traffic, plus the
+ * launch itself. Per sample and step, in lane operations and bytes:
+ * - fused: one kernel of `fusedSteps` steps. Its carried planes are read and
+ *   written once per launch, so their traffic is divided by `fusedSteps`;
+ *   gathered reads cost every step, at memory speed or, when the gathered plane
+ *   fits the cache, at the cache's. On a device a 32-lane group pays for every
+ *   branch any of its lanes takes (warpShare); a vectorised host loop
+ *   evaluates every branch and selects, so it costs the sum whatever the mix; a
+ *   scalar one runs each sample's own branch.
+ * - split: one launch per branch over its own samples, every step, state
+ *   traffic included, plus `splitSeconds` per sample and one class sort paid
+ *   over the remaining steps.
+ * The lane rate is the device's, slowed when the kernel's registers leave fewer
+ * than ISSUE_KNEE_WARPS warps resident.
+ *
+ * @return both zero when the mix is empty
+ */
+inline PathSeconds predictedSeconds(const CostVector& cost, const Mix& mix, const DeviceProps& props,
+                                    const Weights& w) {
+    if (cost.count < 2 || cost.count > MAX_BRANCHES)
+        throw std::invalid_argument("predictedSeconds: a dispatch group has 2 to 16 branches");
+    const std::int64_t total = mix.total(cost.count);
+    if (total <= 0) return { 0.0, 0.0 };
+
+    const double n = static_cast<double>(total);
+    const double fusedSteps = static_cast<double>(std::max<std::int64_t>(mix.fusedSteps, 1));
+    const double remaining = static_cast<double>(std::max<std::int64_t>(mix.remainingSteps, 1));
+    const double rate = detail::laneRate(cost, props, w);
+    const detail::ByteRates bytes = detail::byteRates(n, props, w);
+
+    detail::Work fused{ 0, 0, 0 };
+    double split = n * (w.splitSeconds + w.sortSeconds / remaining);
+    for (int j = 0; j < cost.count; ++j) {
+        const double p = static_cast<double>(mix.counts[j]) / static_cast<double>(total);
+        const detail::Work work = detail::branchWork(cost.branch[j], w, props);
+        const double share = w.target == Target::Device ? warpShare(p, mix.mixed32)
+                           : cost.fusedVectorised ? 1.0 : p;
+        fused.ops += share * work.ops;
+        fused.stateBytes += share * work.stateBytes;
+        fused.gatherBytes += share * work.gatherBytes;
+        const detail::ByteRates own = detail::byteRates(p * n, props, w);
+        split += detail::launchSeconds(p * n, work.ops, work.stateBytes, work.gatherBytes, rate, own,
+                                       w.launchSeconds);
+    }
+    const double fusedTime = detail::launchSeconds(n, fused.ops, fused.stateBytes / fusedSteps,
+                                                   fused.gatherBytes, rate, bytes, 0.0)
+                           + w.launchSeconds / fusedSteps;
+    return { fusedTime, split };
+}
+
 /**
  * @brief Predicted time of the fused `switch` kernel over the split one for
- *        this mix; above 1 the split wins.
- *
- * Work per sample and step, in lane operations, turned into seconds at the
- * device's lane rate:
- * - fused: on the host a vectorised loop runs every branch (sum of the
- *   branches); an unvectorised one runs its own branch but loses `simdLoss`
- *   on the vectorisable work. On a device a 32-lane group pays for every
- *   branch any of its lanes takes (warpShare).
- * - split: each sample runs its own branch only.
- *
- * Fixed terms: the fused kernel reads and writes the state once per launch of
- * `fusedSteps` steps; the split path once per step, plus `splitSeconds` per
- * sample per step, K launches per step, and one class sort paid over the
- * remaining steps.
+ *        this mix (see predictedSeconds); above 1 the split wins.
  *
  * @return 1 when the mix is empty (nothing to compare)
  */
 inline double predictedGain(const CostVector& cost, const Mix& mix, const DeviceProps& props,
                             const Weights& w) {
-    if (cost.count < 2 || cost.count > MAX_BRANCHES)
-        throw std::invalid_argument("predictedGain: a dispatch group has 2 to 16 branches");
-    const std::int64_t total = mix.total(cost.count);
-    if (total <= 0) return 1.0;
-
-    double fused = 0, split = 0;
-    for (int j = 0; j < cost.count; ++j) {
-        const double p = static_cast<double>(mix.counts[j]) / static_cast<double>(total);
-        const detail::Split work = detail::branchWork(cost.branch[j], w, props);
-        const double c = work.vector + work.scalar;
-        if (w.target == Target::Device)
-            fused += warpShare(p, mix.mixed32) * c;
-        else if (cost.fusedVectorised)
-            fused += c;
-        else
-            fused += p * (work.vector * w.simdLoss + work.scalar);
-        split += p * c;
-    }
-
-    const double rate = w.laneRate > 0.0 ? w.laneRate : 0.5 * props.peak_flops_sp;
-    if (rate <= 0.0) return split > 0.0 ? fused / split : 1.0;
-    const double n = static_cast<double>(total);
-    const double fusedSteps = static_cast<double>(std::max<std::int64_t>(mix.fusedSteps, 1));
-    const double remaining = static_cast<double>(std::max<std::int64_t>(mix.remainingSteps, 1));
-    const double fusedTime = fused * n / rate + (n * w.planeSeconds + w.launchSeconds) / fusedSteps;
-    const double splitTime = split * n / rate + n * (w.planeSeconds + w.splitSeconds)
-                           + cost.count * w.launchSeconds + n * w.sortSeconds / remaining;
-    return fusedTime / splitTime;
+    const PathSeconds t = predictedSeconds(cost, mix, props, w);
+    return t.split > 0.0 ? t.fused / t.split : 1.0;
 }
 
 /** @brief The band: enter at ENTER_GAIN, leave under LEAVE_GAIN, otherwise keep @p current. */

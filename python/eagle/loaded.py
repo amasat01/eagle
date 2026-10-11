@@ -77,6 +77,8 @@ class LoadedKernel(LaunchMixin):
 
         import cupy as cp
 
+        self.image_path = str(ptx_path)
+        self.device_id = cp.cuda.Device().id
         self.module = cp.RawModule(path=str(ptx_path))  # driver load (JITs PTX)
         self.fn = self.module.get_function(self.kernel_name)
 

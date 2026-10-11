@@ -101,9 +101,29 @@ def _vectorised(cost) -> bool:
     return bool(getattr(cost, "fused_vectorised", False))
 
 
+def _weights(target: str, weights: Mapping[str, float] | None):
+    """The cost-model weights to hand the rule: ``weights`` (a fitted profile)
+    as given, with the device's L2 size added for a device target when the
+    profile does not name a cache -- a gathered plane that fits it is read at
+    the cache's speed. ``None`` keeps the defaults."""
+    if target != "device" or (weights is not None and "cache_bytes" in weights):
+        return None if weights is None else dict(weights)
+    out = {} if weights is None else dict(weights)
+    try:
+        import importlib
+
+        l2 = int(importlib.import_module("eagle.launch")._device_props().get("l2CacheSize", 0))
+    except Exception:
+        l2 = 0
+    if l2 > 0:
+        out["cache_bytes"] = float(l2)
+    return out or None
+
+
 def predicted_gain(cost, counts: Sequence[int], *, target: str = "host", props=None,
                    fused_steps: int = 1, remaining_steps: int = DISPATCH_EVERY,
-                   mixed32: float | None = None) -> float:
+                   mixed32: float | None = None, regs_per_thread: int = 0,
+                   weights: Mapping[str, float] | None = None) -> float:
     """Predicted time of the fused kernel over the split one for this branch mix.
 
     Parameters
@@ -125,6 +145,14 @@ def predicted_gain(cost, counts: Sequence[int], *, target: str = "host", props=N
     mixed32
         Measured share of 32-lane groups holding two or more branches (the
         device's divergence); ``None`` uses the independent-lanes estimate.
+    regs_per_thread
+        Registers the compiled kernel needs per thread (``0``: unknown); a
+        kernel too big for ``8`` resident warps per SM runs its lanes slower.
+    weights
+        A fitted profile: any of ``arith32``, ``special32``, ``special64``,
+        ``elem_bytes``, ``launch_seconds``, ``split_seconds``, ``sort_seconds``,
+        ``lane_rate``, ``memory_rate``, ``cache_bytes``, ``cache_ratio``
+        replacing the defaults.
 
     Returns
     -------
@@ -138,8 +166,8 @@ def predicted_gain(cost, counts: Sequence[int], *, target: str = "host", props=N
         or a group that does not have 2 to 16 branches.
     """
     return _core.dispatch_gain(_rows(cost), list(counts), _props(props, target), target,
-                               fused_steps, _vectorised(cost), remaining_steps,
-                               -1.0 if mixed32 is None else mixed32)
+                               fused_steps, regs_per_thread, _vectorised(cost),
+                               remaining_steps, -1.0 if mixed32 is None else mixed32, _weights(target, weights))
 
 
 class DispatchState:
@@ -192,7 +220,8 @@ class DispatchState:
 
 def resolve(cost, counts: Sequence[int], *, target: str = "host", props=None,
             current: str = "switch", static: bool = True, fused_steps: int = 1,
-            remaining_steps: int = DISPATCH_EVERY, mixed32: float | None = None) -> str:
+            remaining_steps: int = DISPATCH_EVERY, mixed32: float | None = None,
+            regs_per_thread: int = 0, weights: Mapping[str, float] | None = None) -> str:
     """The policy for a group under this branch mix: ``"segmented"`` once the
     predicted gain reaches :data:`DISPATCH_ENTER_GAIN`, ``"switch"`` once it
     falls under :data:`DISPATCH_LEAVE_GAIN`, ``current`` in between (and for
@@ -200,7 +229,7 @@ def resolve(cost, counts: Sequence[int], *, target: str = "host", props=None,
 
     Parameters
     ----------
-    cost, counts, target, props, fused_steps, remaining_steps, mixed32
+    cost, counts, target, props, fused_steps, remaining_steps, mixed32, regs_per_thread, weights
         As in :func:`predicted_gain`.
     current
         The policy in force now (the band keeps it).
@@ -225,5 +254,7 @@ def resolve(cost, counts: Sequence[int], *, target: str = "host", props=None,
     if not static:
         return "switch"
     return _core.resolve_dispatch_policy(_rows(cost), list(counts), _props(props, target),
-                                         target, current, fused_steps, _vectorised(cost),
-                                         remaining_steps, -1.0 if mixed32 is None else mixed32)
+                                         target, current, fused_steps, regs_per_thread,
+                                         _vectorised(cost),
+                                         remaining_steps, -1.0 if mixed32 is None else mixed32,
+                                         _weights(target, weights))

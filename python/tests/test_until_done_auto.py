@@ -1905,3 +1905,36 @@ def test_fast_entries_count_the_mask_so_the_run_launches_no_mask_count(auto, mon
     # no device-to-device copy gathers the count for the readback
     assert rt_calls == ["memsetAsync"]
     assert report.done and report.finished == n
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize("mode", ["persist", "fused_one"])
+def test_register_bound_is_spill_free_and_changes_no_bits(auto, monkeypatch, mode):
+    """An entry within 8 registers of a residency edge is bounded to it exactly
+    when the compiler keeps its local size and fits the edge; the run's planes
+    equal the unbounded run's bit for bit."""
+    from eagle import _bounded
+
+    _need(auto, ("plain", "device"))
+    inp = _batch(4096, "spread")
+    runner, rep, bounded_run = _run(auto, "plain", "device", inp, 10 * _S, _fast_mode=mode)
+    assert rep.done
+    loaded = runner.step.plan.plugin._keepalive[-1]
+    name = runner.step.plan.plugin.name
+    reports = {r.name: r for r in runner.step.entry_reports()}
+    for suffix in ("range", "persist"):
+        r = reports.get(f"{name}_{suffix}")
+        if r is None or not r.edge:
+            continue
+        plain = loaded.module.get_function(f"{name}_{suffix}").attributes
+        trial = _bounded._load_bounded(loaded, f"{name}_{suffix}", r.edge)
+        fits = (trial is not None and trial.attributes["num_regs"] <= r.edge
+                and trial.attributes["local_size_bytes"] == plain["local_size_bytes"])
+        assert r.bounded == fits, (suffix, r)
+        if r.bounded:
+            assert r.regs <= r.edge and r.local_bytes == plain["local_size_bytes"]
+    monkeypatch.setattr(_bounded, "entry", lambda loaded, name, plain: plain)
+    _, rep2, plain_run = _run(auto, "plain", "device", inp, 10 * _S, _fast_mode=mode)
+    assert rep2.done
+    for key in ("x", "v", "k"):
+        np.testing.assert_array_equal(bounded_run[key], plain_run[key], err_msg=key)

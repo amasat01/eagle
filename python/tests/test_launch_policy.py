@@ -86,13 +86,13 @@ def test_siblings_one_large_n_converges_to_the_old_256_identity():
 def test_siblings_one_small_n_is_independent_of_kern_regs_below_the_reg_limit():
     """The small-N formula's `ideal` does not read `num_regs` (only the
     final register-feasibility narrowing does) -- these garbage-kern rows at
-    n=512 give the SAME 32 as the plain-KERN row above, since 1*32*regs stays
-    under regsPerSM for both."""
+    n=512 give the SAME 32 as the plain-KERN row above, since a 32-thread block
+    fits at both register counts."""
     pinned = [
         (
             512,
             DEV,
-            {"num_regs": 600, "shared_size_bytes": 0, "max_threads_per_block": 1024},
+            {"num_regs": 255, "shared_size_bytes": 0, "max_threads_per_block": 1024},
         ),
         (
             512,
@@ -372,14 +372,16 @@ def test_capacity_is_zero_when_properties_are_unavailable():
     assert capacity(None, None) == 0
 
 
-def test_capacity_floors_to_a_warp_multiple():
-    """num_regs chosen so regsPerSM // num_regs is NOT already a warp
-    multiple (65536 // 100 = 655, not a multiple of 32): resident threads
-    floors to 640 (20*32), not the raw 655."""
+def test_capacity_steps_down_at_register_edges():
+    """100 registers cost 13 grant units (800 regs would be 12.5): 4 warps per
+    sub-partition, 512 threads. A pooled register file (65536 // 100) would
+    say 640, a residency the hardware does not have."""
     from eagle._launch_policy import resident_threads_per_sm
 
     kern = dict(KERN, num_regs=100)
-    assert resident_threads_per_sm(DEV, kern) == 640
+    assert resident_threads_per_sm(DEV, kern) == 512
+    assert resident_threads_per_sm(DEV, dict(KERN, num_regs=46)) == 1280
+    assert resident_threads_per_sm(DEV, dict(KERN, num_regs=40)) == 1536
 
 
 # --------------------------------------------------------------------------- #
@@ -399,13 +401,13 @@ def test_latency_regime_capacity_is_the_p2000_row():
 
 def test_latency_regime_capacity_falls_back_to_residency_when_smaller():
     """A device/kernel pair whose residency ceiling is SMALLER than the
-    issue-pipe knee bound (a tight regsPerSM: 2048 // 64 regs = 32
-    threads/SM, capacity = 8*32 = 256 < the knee bound 2048): residency
-    wins instead."""
+    issue-pipe knee bound (a tight regsPerSM: 8192 registers at 64 per
+    thread hold 4 warps = 128 threads/SM, capacity = 8*128 = 1024 < the knee
+    bound 2048): residency wins instead."""
     from eagle._launch_policy import latency_regime_capacity
 
-    dev = dict(DEV, regsPerMultiprocessor=2048)
-    assert latency_regime_capacity(dev, KERN, w_knee=8) == 8 * 32
+    dev = dict(DEV, regsPerMultiprocessor=8192)
+    assert latency_regime_capacity(dev, KERN, w_knee=8) == 8 * 128
 
 
 def test_latency_regime_capacity_default_w_knee_matches_the_constant():
@@ -482,3 +484,59 @@ def test_persistent_launch_falls_back_without_device_properties():
     from eagle._launch_policy import persistent_geometry, persistent_launch
 
     assert persistent_launch({}, {}, 10 ** 6, 1000) == persistent_geometry({}, {})
+
+
+# --------------------------------------------------------------------------- #
+# Residency is the device's, not a pooled register file's: the table below is
+# cuda_occupancy.h's answer (CUDA 12.6) at the four architecture classes.
+# --------------------------------------------------------------------------- #
+_CC = {"p2000": (6, 1, 2048), "a100": (8, 0, 2048), "l4": (8, 9, 1536), "h100": (9, 0, 2048)}
+
+
+def _dev(name, sms=8):
+    major, minor, max_threads = _CC[name]
+    return {"multiProcessorCount": sms, "major": major, "minor": minor,
+            "regsPerMultiprocessor": 65536, "maxThreadsPerMultiProcessor": max_threads,
+            "sharedMemPerMultiprocessor": 98304}
+
+
+def _kern(regs):
+    return {"num_regs": regs, "shared_size_bytes": 0, "max_threads_per_block": 1024}
+
+
+def test_resident_threads_table_at_block_256():
+    from eagle._launch_policy import resident_threads_per_sm
+
+    expected = {32: 2048, 40: 1536, 44: 1280, 46: 1280, 128: 512, 160: 384, 168: 384,
+                172: 256, 174: 256, 186: 256, 188: 256, 210: 256}
+    for regs, threads in expected.items():
+        assert resident_threads_per_sm(_dev("a100"), _kern(regs)) == threads, regs
+        assert resident_threads_per_sm(_dev("p2000"), _kern(regs)) == threads, regs
+    assert resident_threads_per_sm(_dev("l4"), _kern(32)) == 1536
+    assert resident_threads_per_sm(_dev("l4"), _kern(46)) == 1280
+
+
+def test_persistent_launch_never_exceeds_the_blocks_that_fit():
+    """At 186-188 registers an SM holds 8 warps, so a 320- or 352-thread block
+    fits nowhere: the persistent launch narrows to 256 on every device."""
+    from eagle._launch_policy import persistent_launch, persistent_geometry
+    from eagle import _core
+
+    for name in _CC:
+        dev = _dev(name, sms=108)
+        for regs in (186, 188, 210):
+            block, grid = persistent_launch(dev, _kern(regs), 10 ** 6, 1000)
+            assert block == 256, (name, regs, block)
+            assert grid >= 108
+            major, minor, max_threads = _CC[name]
+            assert _core.resident_blocks(major, minor, 65536, max_threads, regs, block) >= 1
+        # a block asked for above what fits is narrowed, not launched refused
+        assert persistent_geometry(dev, _kern(188), ideal_block=352)[0] == 256
+        assert persistent_geometry(dev, _kern(188), ideal_block=320)[0] == 256
+
+
+def test_resident_threads_per_sm_is_zero_without_a_register_file():
+    from eagle._launch_policy import resident_threads_per_sm
+
+    assert resident_threads_per_sm(dict(_dev("a100"), regsPerMultiprocessor=0), _kern(46)) == 0
+    assert resident_threads_per_sm(_dev("a100"), _kern(0)) == 0

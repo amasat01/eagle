@@ -192,3 +192,22 @@ def test_a_real_hawk_cost_goes_through_the_rule():
 
 def test_the_bound_constants_are_the_ruled_ones():
     assert (_core.DISPATCH_ENTER_GAIN, _core.DISPATCH_LEAVE_GAIN, _core.DISPATCH_EVERY) == (1.15, 1.05, 16)
+
+
+def test_a_fitted_profile_replaces_named_weights_and_refuses_unknown_ones():
+    base = dp.predicted_gain(PROBE, _heavy(5), fused_steps=64, remaining_steps=400)
+    slow_sort = dp.predicted_gain(PROBE, _heavy(5), fused_steps=64, remaining_steps=400,
+                                  weights={"sort_seconds": 1e-6})
+    assert slow_sort < base
+    with pytest.raises(ValueError, match="unknown cost-model weight"):
+        dp.predicted_gain(PROBE, _heavy(5), weights={"simd_loss": 3})
+
+
+def test_cost_model_is_thread_safe_to_call_concurrently():
+    from concurrent.futures import ThreadPoolExecutor
+
+    want = dp.predicted_gain(PROBE, _heavy(5), fused_steps=64, remaining_steps=400)
+    with ThreadPoolExecutor(8) as pool:
+        got = list(pool.map(lambda _: dp.predicted_gain(PROBE, _heavy(5), fused_steps=64,
+                                                        remaining_steps=400), range(64)))
+    assert got == [want] * 64

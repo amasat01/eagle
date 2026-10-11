@@ -33,6 +33,8 @@ import contextlib
 import math
 import contextvars
 
+from . import _core
+
 #: Block size used whenever the ``siblings <= 1`` small-N formula cannot
 #: resolve one (n/dev/kern missing or malformed) AND whenever the
 #: ``siblings >= 2`` branch cannot resolve a feasible co-resident block size
@@ -88,13 +90,23 @@ def _warp_floor(x: int) -> int:
     return (x // _WARP) * _WARP
 
 
-def _register_feasible(bs, siblings, num_regs, regs_per_sm):
-    """The largest warp multiple <= ``bs`` that keeps ``siblings`` co-resident
-    blocks within the SM's register file, or ``None`` if no warp multiple
-    >= 32 fits (the caller's cue to return the saturation fallback)."""
+def _residency(dev) -> tuple:
+    """The device facts residency reads, in the order ``eagle._core``'s
+    residency functions take them (``0`` for any that is not reported)."""
+    return (_attr(dev, "major"), _attr(dev, "minor"), _attr(dev, "regsPerMultiprocessor"),
+            _attr(dev, "maxThreadsPerMultiProcessor"))
+
+
+def _register_feasible(bs, siblings, num_regs, dev):
+    """The largest warp multiple <= ``bs`` for which ``siblings`` blocks of that
+    size are co-resident at ``num_regs`` registers per thread, or ``None`` if
+    no warp multiple >= 32 is (the caller's cue to return the saturation
+    fallback). Residency is the device's real one: registers are granted per
+    warp in units of 256 per sub-partition, not as one pooled register file."""
+    residency = _residency(dev)
     candidate = bs
     while candidate >= _WARP:
-        if siblings * candidate * num_regs <= regs_per_sm:
+        if _core.resident_blocks(*residency, num_regs, candidate) >= siblings:
             return candidate
         candidate -= _WARP
     return None
@@ -169,7 +181,7 @@ def resolve_block(n, siblings, dev, kern) -> int:
         denom = 2 * n_sms * _WARP
         ideal = _WARP * -(-n // denom)  # 32 * ceil(n / denom)
         bs = min(max(ideal, _WARP), upper)
-        found = _register_feasible(bs, 1, num_regs, regs_per_sm)
+        found = _register_feasible(bs, 1, num_regs, dev)
         return found if found is not None else _FALLBACK_BLOCK
 
     # siblings = S >= 2: the co-residency occupancy-target shape (unchanged).
@@ -182,7 +194,7 @@ def resolve_block(n, siblings, dev, kern) -> int:
     ideal = _warp_round_up(-(-n // share))  # ceil(n / share), then to a warp multiple
     bs = min(max(ideal, _WARP), upper)
 
-    found = _register_feasible(bs, siblings, num_regs, regs_per_sm)
+    found = _register_feasible(bs, siblings, num_regs, dev)
     return found if found is not None else _FALLBACK_BLOCK
 
 
@@ -230,7 +242,7 @@ def persistent_geometry(dev, kern, *, blocks_per_sm: int = PERSISTENT_BLOCKS_PER
     upper = min(ideal_block, _warp_floor(max_threads))
     if upper < _WARP:
         return ideal_block, grid
-    found = _register_feasible(upper, blocks_per_sm, num_regs, regs_per_sm)
+    found = _register_feasible(upper, blocks_per_sm, num_regs, dev)
     return (found if found is not None else ideal_block), grid
 
 
@@ -306,20 +318,17 @@ def persistent_launch(dev, kern, n: int, max_steps: int, scalar_type: str = "flo
 
 def resident_threads_per_sm(dev, kern) -> int:
     """The resident-thread ceiling one SM can hold at ``kern``'s register
-    count: ``regsPerMultiprocessor // num_regs``, clamped to
-    ``maxThreadsPerMultiProcessor`` when the device reports one, floored to
-    a warp multiple. ``0`` when ``dev``/``kern`` properties are unavailable
+    count: registers are granted per warp in units of 256 and shared by the
+    SM's sub-partitions, so the ceiling steps down at register edges (46
+    registers hold 1280 threads on an A100, not the 1424 a pooled register
+    file would). Clamped to ``maxThreadsPerMultiProcessor`` when the device
+    reports one. ``0`` when ``dev``/``kern`` properties are unavailable
     (read defensively via :func:`_attr`, same degradation as
-    :func:`resolve_block`) — the caller treats ``0`` as "unknown"."""
-    regs_per_sm = _attr(dev, "regsPerMultiprocessor")
+    :func:`resolve_block`) -- the caller treats ``0`` as "unknown"."""
     num_regs = _attr(kern, "num_regs")
-    if regs_per_sm <= 0 or num_regs <= 0:
+    if _attr(dev, "regsPerMultiprocessor") <= 0 or num_regs <= 0:
         return 0
-    threads = regs_per_sm // num_regs
-    max_resident = _attr(dev, "maxThreadsPerMultiProcessor")
-    if max_resident > 0:
-        threads = min(threads, max_resident)
-    return _warp_floor(threads)
+    return _core.resident_warps(*_residency(dev), num_regs) * _WARP
 
 
 def capacity(dev, kern) -> int:

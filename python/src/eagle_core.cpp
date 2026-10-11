@@ -107,6 +107,7 @@
 #include "eagle/graph/Render.h"
 #include "eagle/cpu/DeviceProps.h"
 #include "eagle/policy/Dispatch.h"
+#include "eagle/policy/Residency.h"
 #include "eagle/reduce/canonical.h"
 #include "eagle/util/Busy.h"
 #include "plugin/gref_abi.h"
@@ -901,11 +902,12 @@ NB_MODULE(_core, m)
             if (name == "device") return pol::Target::Device;
             throw std::invalid_argument("target must be 'host' or 'device', got '" + name + "'");
         };
-        auto costOf = [](const std::vector<BranchRow>& rows, bool fusedVectorised) {
+        auto costOf = [](const std::vector<BranchRow>& rows, int regsPerThread, bool fusedVectorised) {
             if (rows.size() < 2 || rows.size() > static_cast<std::size_t>(pol::MAX_BRANCHES))
                 throw std::invalid_argument("a dispatch group has 2 to 16 branches, got " +
                                             std::to_string(rows.size()));
             pol::CostVector c;
+            c.regsPerThread = regsPerThread;
             c.fusedVectorised = fusedVectorised;
             for (const auto& [a32, a64, s32, s64, loads, gathers] : rows)
                 c.branch[c.count++] = { a32, a64, s32, s64, loads, gathers };
@@ -920,6 +922,29 @@ NB_MODULE(_core, m)
             mix.remainingSteps = remainingSteps;
             mix.mixed32 = mixed32;
             return mix;
+        };
+
+        // Default weights for the target, with any named field replaced (a fitted profile).
+        auto weightsOf = [targetOf](const std::string& target, const nb::object& overrides) {
+            pol::Weights w = pol::defaultWeights(targetOf(target));
+            if (overrides.is_none()) return w;
+            const nb::dict d = nb::cast<nb::dict>(overrides);
+            const std::pair<const char*, double pol::Weights::*> fields[] = {
+                { "arith32", &pol::Weights::arith32 },       { "special32", &pol::Weights::special32 },
+                { "special64", &pol::Weights::special64 },   { "elem_bytes", &pol::Weights::elemBytes },
+                { "launch_seconds", &pol::Weights::launchSeconds },
+                { "split_seconds", &pol::Weights::splitSeconds },
+                { "sort_seconds", &pol::Weights::sortSeconds }, { "lane_rate", &pol::Weights::laneRate },
+                { "memory_rate", &pol::Weights::memoryRate },   { "cache_bytes", &pol::Weights::cacheBytes },
+                { "cache_ratio", &pol::Weights::cacheRatio } };
+            for (auto item : d) {
+                const std::string key = nb::cast<std::string>(item.first);
+                bool known = false;
+                for (const auto& [name, field] : fields)
+                    if (key == name) { w.*field = nb::cast<double>(item.second); known = true; }
+                if (!known) throw std::invalid_argument("unknown cost-model weight '" + key + "'");
+            }
+            return w;
         };
 
         m.attr("DISPATCH_ENTER_GAIN") = pol::ENTER_GAIN;
@@ -937,42 +962,75 @@ NB_MODULE(_core, m)
             },
             "The host's documented device properties, in the dict form the splitting rule reads.");
 
+        m.def("default_dispatch_weights",
+            [=](const std::string& target) {
+                const pol::Weights w = pol::defaultWeights(targetOf(target));
+                nb::dict d;
+                d["arith32"] = w.arith32; d["special32"] = w.special32; d["special64"] = w.special64;
+                d["elem_bytes"] = w.elemBytes; d["launch_seconds"] = w.launchSeconds;
+                d["split_seconds"] = w.splitSeconds; d["sort_seconds"] = w.sortSeconds;
+                d["lane_rate"] = w.laneRate; d["memory_rate"] = w.memoryRate;
+                d["cache_bytes"] = w.cacheBytes; d["cache_ratio"] = w.cacheRatio;
+                return d;
+            },
+            nb::arg("target"), "The default cost-model weights of 'host' or 'device', by name. Pure.");
+
+        m.def("dispatch_seconds",
+            [=](const std::vector<BranchRow>& branches, const std::vector<std::int64_t>& counts,
+                const nb::dict& props, const std::string& target, std::int64_t fused_steps,
+                int regs_per_thread, bool fused_vectorised, std::int64_t remaining_steps,
+                double mixed32, const nb::object& weights) {
+                const pol::PathSeconds t = pol::predictedSeconds(
+                    costOf(branches, regs_per_thread, fused_vectorised),
+                    mixOf(counts, fused_steps, remaining_steps, mixed32), propsOf(props),
+                    weightsOf(target, weights));
+                return std::make_pair(t.fused, t.split);
+            },
+            nb::arg("branches"), nb::arg("counts"), nb::arg("props"), nb::arg("target"),
+            nb::arg("fused_steps") = 1, nb::arg("regs_per_thread") = 0, nb::arg("fused_vectorised") = false,
+            nb::arg("remaining_steps") = pol::DECISION_EVERY, nb::arg("mixed32") = -1.0,
+            nb::arg("weights") = nb::none(),
+            "(fused, split) predicted seconds per step for this branch mix. branches: per branch "
+            "(arith32, arith64, special32, special64, loads, gathers); counts: samples that took each "
+            "branch; target: 'host' or 'device'; regs_per_thread: the kernel's registers (0: unknown); "
+            "remaining_steps: steps a class sort is paid over; mixed32: measured share of 32-lane "
+            "groups holding two or more branches (negative: unmeasured); weights: a dict replacing "
+            "named default weights (a fitted profile). Pure.");
+
         m.def("dispatch_gain",
             [=](const std::vector<BranchRow>& branches, const std::vector<std::int64_t>& counts,
                 const nb::dict& props, const std::string& target, std::int64_t fused_steps,
-                bool fused_vectorised, std::int64_t remaining_steps, double mixed32) {
-                return pol::predictedGain(costOf(branches, fused_vectorised),
+                int regs_per_thread, bool fused_vectorised, std::int64_t remaining_steps,
+                double mixed32, const nb::object& weights) {
+                return pol::predictedGain(costOf(branches, regs_per_thread, fused_vectorised),
                                           mixOf(counts, fused_steps, remaining_steps, mixed32),
-                                          propsOf(props), pol::defaultWeights(targetOf(target)));
+                                          propsOf(props), weightsOf(target, weights));
             },
             nb::arg("branches"), nb::arg("counts"), nb::arg("props"), nb::arg("target"),
-            nb::arg("fused_steps") = 1, nb::arg("fused_vectorised") = false,
+            nb::arg("fused_steps") = 1, nb::arg("regs_per_thread") = 0, nb::arg("fused_vectorised") = false,
             nb::arg("remaining_steps") = pol::DECISION_EVERY, nb::arg("mixed32") = -1.0,
+            nb::arg("weights") = nb::none(),
             "Predicted time of the fused switch kernel over the split one for this branch mix "
-            "(above 1 the split wins). branches: per branch (arith32, arith64, special32, "
-            "special64, loads, gathers); counts: samples that took each branch; target: "
-            "'host' or 'device'; fused_vectorised: the fused host loop runs every branch; "
-            "remaining_steps: steps a class sort is paid over; mixed32: measured share of "
-            "32-lane groups holding two or more branches (negative: unmeasured). Pure.");
+            "(above 1 the split wins); arguments as dispatch_seconds. Pure.");
 
         m.def("resolve_dispatch_policy",
             [=](const std::vector<BranchRow>& branches, const std::vector<std::int64_t>& counts,
                 const nb::dict& props, const std::string& target, const std::string& current,
-                std::int64_t fused_steps, bool fused_vectorised, std::int64_t remaining_steps,
-                double mixed32) {
+                std::int64_t fused_steps, int regs_per_thread, bool fused_vectorised,
+                std::int64_t remaining_steps, double mixed32, const nb::object& weights) {
                 if (current != "switch" && current != "segmented")
                     throw std::invalid_argument("current must be 'switch' or 'segmented', got '" + current + "'");
                 pol::HysteresisState state;
                 state.current = current == "segmented" ? pol::Policy::Segmented : pol::Policy::Switch;
-                return pol::resolve(costOf(branches, fused_vectorised),
+                return pol::resolve(costOf(branches, regs_per_thread, fused_vectorised),
                                     mixOf(counts, fused_steps, remaining_steps, mixed32), propsOf(props),
-                                    pol::defaultWeights(targetOf(target)), state) == pol::Policy::Segmented
+                                    weightsOf(target, weights), state) == pol::Policy::Segmented
                            ? "segmented" : "switch";
             },
             nb::arg("branches"), nb::arg("counts"), nb::arg("props"), nb::arg("target"),
-            nb::arg("current") = "switch", nb::arg("fused_steps") = 1,
-            nb::arg("fused_vectorised") = false, nb::arg("remaining_steps") = pol::DECISION_EVERY,
-            nb::arg("mixed32") = -1.0,
+            nb::arg("current") = "switch", nb::arg("fused_steps") = 1, nb::arg("regs_per_thread") = 0, nb::arg("fused_vectorised") = false,
+            nb::arg("remaining_steps") = pol::DECISION_EVERY, nb::arg("mixed32") = -1.0,
+            nb::arg("weights") = nb::none(),
             "'segmented' once the predicted gain reaches DISPATCH_ENTER_GAIN, 'switch' once it falls "
             "under DISPATCH_LEAVE_GAIN, else `current`; an empty mix keeps `current`. Pure.");
 
@@ -997,6 +1055,49 @@ NB_MODULE(_core, m)
             },
             nb::arg("since"), nb::arg("steps") = 1,
             "(look, since): count `steps` more steps after `since`; look is True every DISPATCH_EVERY steps.");
+    }
+
+    // -- residency and the bounded recompile (eagle/policy/Residency.h) ------------
+    {
+        namespace pol = eagle::policy;
+        m.attr("REGISTER_UNIT") = pol::REGISTER_UNIT;
+
+        m.def("resident_warps",
+            [](int major, int minor, int regs_per_sm, int max_threads_per_sm, int regs) {
+                return pol::residentWarps({ major, minor, regs_per_sm, max_threads_per_sm }, regs);
+            },
+            nb::arg("major"), nb::arg("minor"), nb::arg("regs_per_sm"),
+            nb::arg("max_threads_per_sm"), nb::arg("regs"),
+            "Warps one SM holds at `regs` registers per thread: registers are granted per warp in "
+            "units of 256, shared equally by the SM's sub-partitions (4; 2 on cc 6.0). A zero "
+            "max_threads_per_sm leaves the register file as the only limit. 0 when unknown. Pure.");
+
+        m.def("resident_blocks",
+            [](int major, int minor, int regs_per_sm, int max_threads_per_sm, int regs, int block) {
+                return pol::residentBlocks({ major, minor, regs_per_sm, max_threads_per_sm }, regs, block);
+            },
+            nb::arg("major"), nb::arg("minor"), nb::arg("regs_per_sm"),
+            nb::arg("max_threads_per_sm"), nb::arg("regs"), nb::arg("block"),
+            "Blocks of `block` threads one SM holds at `regs` registers per thread (0: none fits, so "
+            "a launch of that block size is refused). Pure.");
+
+        m.def("register_edge",
+            [](int major, int minor, int regs_per_sm, int max_threads_per_sm, int regs) {
+                return pol::registerEdge({ major, minor, regs_per_sm, max_threads_per_sm }, regs);
+            },
+            nb::arg("major"), nb::arg("minor"), nb::arg("regs_per_sm"),
+            nb::arg("max_threads_per_sm"), nb::arg("regs"),
+            "The register count `regs` could drop to for a larger residency when it is at most "
+            "REGISTER_UNIT registers away (41..48 -> 40, 169..176 -> 168), else 0. Pure.");
+
+        m.def("keep_bounded",
+            [](int free_regs, int free_local, int bounded_regs, int bounded_local, int edge) {
+                return pol::keepBounded({ free_regs, free_local }, { bounded_regs, bounded_local }, edge);
+            },
+            nb::arg("free_regs"), nb::arg("free_local_bytes"), nb::arg("bounded_regs"),
+            nb::arg("bounded_local_bytes"), nb::arg("edge"),
+            "True when a kernel recompiled under a register bound of `edge` spills no more than the "
+            "unbounded one (local size unchanged) and fits the bound. Pure.");
     }
 
     m.def("run_host_branches",

@@ -138,12 +138,76 @@ TEST(DispatchPolicy, DecisionTable)
 TEST(DispatchPolicy, VectorisedFusedHostCostIsMixIndependent)
 {
     const Weights w = defaultWeights(Target::Host);
-    const double rare = predictedGain(probe(), probeMix(1, Target::Host), host(), w);
-    const double all = predictedGain(probe(), probeMix(100, Target::Host), host(), w);
-    EXPECT_GT(rare, 2.0 * all) << "the vectorised fused loop pays the heavy branch at any mix";
+    const double rare = predictedSeconds(probe(), probeMix(1, Target::Host), host(), w).fused;
+    const double all = predictedSeconds(probe(), probeMix(100, Target::Host), host(), w).fused;
+    EXPECT_DOUBLE_EQ(rare, all) << "the vectorised fused loop evaluates both branches at any mix";
     CostVector scalar = probe();
     scalar.fusedVectorised = false;
-    EXPECT_LT(predictedGain(scalar, probeMix(1, Target::Host), host(), w), rare);
+    const double scalarRare = predictedSeconds(scalar, probeMix(1, Target::Host), host(), w).fused;
+    const double scalarAll = predictedSeconds(scalar, probeMix(100, Target::Host), host(), w).fused;
+    EXPECT_LT(scalarRare, 0.5 * rare) << "a scalar switch loop runs each sample's own branch";
+    EXPECT_GT(scalarAll, scalarRare);
+}
+
+TEST(DispatchPolicy, StateIsMovedOncePerLaunchGathersEveryStep)
+{
+    const Weights w = defaultWeights(Target::Host);
+    BranchCost state;   // memory-bound, carried planes only
+    state.loads = 8;
+    BranchCost gather;  // memory-bound, indexed reads only
+    gather.gathers = 8;
+    const Mix one = mix({BATCH, 0}, 1, 400), many = mix({BATCH, 0}, 16, 400);
+    const double stateOne = predictedSeconds(costs({state, state}), one, host(), w).fused;
+    const double stateMany = predictedSeconds(costs({state, state}), many, host(), w).fused;
+    EXPECT_NEAR(stateOne / stateMany, 16.0, 0.5) << "state traffic divides by the steps a launch fuses";
+    const double gatherOne = predictedSeconds(costs({gather, gather}), one, host(), w).fused;
+    const double gatherMany = predictedSeconds(costs({gather, gather}), many, host(), w).fused;
+    EXPECT_NEAR(gatherOne / gatherMany, 1.0, 0.05) << "a gather is paid every step";
+}
+
+TEST(DispatchPolicy, GatherIsFasterWhenThePlaneFitsTheCache)
+{
+    Weights w = defaultWeights(Target::Host);
+    w.launchSeconds = 0;
+    BranchCost gather;
+    gather.gathers = 8;
+    const CostVector c = costs({gather, gather});
+    const double small = predictedSeconds(c, mix({1 << 14, 0}, 1), host(), w).fused / (1 << 14);
+    const double large = predictedSeconds(c, mix({1 << 24, 0}, 1), host(), w).fused / (1 << 24);
+    EXPECT_NEAR(large / small, w.cacheRatio, 0.2);
+}
+
+TEST(DispatchPolicy, ArithmeticAndTrafficOverlapNotAdd)
+{
+    Weights w = defaultWeights(Target::Host);
+    w.launchSeconds = 0;
+    BranchCost both;
+    both.arith64 = 40;
+    both.loads = 8;
+    BranchCost compute = both, traffic = both;
+    compute.loads = 0;
+    traffic.arith64 = 0;
+    const Mix m = mix({BATCH, 0}, 1);
+    const double t = predictedSeconds(costs({both, both}), m, host(), w).fused;
+    const double c = predictedSeconds(costs({compute, compute}), m, host(), w).fused;
+    const double b = predictedSeconds(costs({traffic, traffic}), m, host(), w).fused;
+    EXPECT_DOUBLE_EQ(t, std::max(c, b));
+}
+
+TEST(DispatchPolicy, FewResidentWarpsSlowTheDeviceLanes)
+{
+    const Weights w = defaultWeights(Target::Device);
+    CostVector lean = costs({probeCheap(), probeHeavy()});
+    CostVector fat = lean;
+    lean.regsPerThread = 40;
+    fat.regsPerThread = 255;  // half the register file: 4 warps per SM, under the issue knee
+    eagle::DeviceProps small = datacenter();
+    small.regs_per_sm = 32768;
+    const Mix m = probeMix(50, Target::Device);
+    EXPECT_GT(predictedSeconds(fat, m, small, w).fused, predictedSeconds(lean, m, small, w).fused);
+    // an unreported register count leaves the rate alone
+    EXPECT_DOUBLE_EQ(predictedSeconds(costs({probeCheap(), probeHeavy()}), m, small, w).fused,
+                     predictedSeconds(lean, m, small, w).fused);
 }
 
 TEST(DispatchPolicy, SplitOverheadScalesWithTheBatch)
