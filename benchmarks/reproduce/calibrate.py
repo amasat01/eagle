@@ -10,11 +10,15 @@ each case marked ``warm=0``). Nothing on the machine is changed. The data is fit
 later, elsewhere.
 
   A  class slopes     one kernel per operation class (arith/special in two precisions,
-                      plane loads, gathers), a loop of m operations, three m
+                      plane loads, gathers), a loop of m operations, three m; and the
+                      same arithmetic as 4 independent chains (separates dependent-chain
+                      latency from throughput)
   B  launch + planes  an almost empty kernel, three batch sizes, 1 or 16 fused steps
   C  split overhead   the per-branch units of a split step, and the class sort
   D  divergence       (GPU) one fused cheap/heavy kernel at four heavy fractions
-  E  held out         paired fused vs split steps at three heavy fractions
+  E  held out         paired fused vs split steps at three heavy fractions, for a
+                      library-call heavy branch and for a cheap vectorisable branch
+                      against a heavy one that carries a long loop (scalar)
 
 Usage: calibrate.py --target gpu|cpu [--quick] [--out PATH] [--reps N] [--seed S]
 """
@@ -38,12 +42,12 @@ from pathlib import Path
 
 import numpy as np
 
-SCHEMA = 1
+SCHEMA = 2
 CLASSES = ("a32", "a64", "s32", "s64", "ld", "ga")
 MAX_BRANCHES = 4
 COLUMNS = ["case_id", "group", "kind", "target", "kernel_src_md5", "codegen_md5", "n", "K",
            "fused_steps", "steps", "m", "counts",
-           *[f"cost_b{j}" for j in range(MAX_BRANCHES)], "fused_vectorised",
+           *[f"cost_b{j}" for j in range(MAX_BRANCHES)], "fused_vectorised", "chains",
            "held_out", "rep", "warm", "timer", "wall_s", "status"]
 
 KERNELS_SRC = '''\
@@ -71,12 +75,24 @@ def class_kernel(cls: str, m: int) -> tuple:
     name = f"cal_{cls}_{m}"
     if cls == "arith":
         return name, _plain(name, "", f"a = x\nfor _i in range({m}):\n    a = a * 0.9999 + 0.01\nx = a")
-    if cls == "special":
-        return name, _plain(name, "", f"a = x\nfor _i in range({m}):\n    a = M.sin(a)\nx = a")
+    if cls == "arith4":     # the same m multiply-adds as 4 independent chains of m / 4
+        return name, _plain(name, "", "a = x\nb = x * 1.1\nc = x * 1.2\nd = x * 1.3\n"
+                            f"for _i in range({max(m // 4, 1)}):\n    a = a * 0.9999 + 0.01\n"
+                            "    b = b * 0.9999 + 0.01\n    c = c * 0.9999 + 0.01\n"
+                            "    d = d * 0.9999 + 0.01\nx = a + b + c + d")
+    if cls == "special":    # the argument stays in a steady range (as the heavy branch of group E does)
+        return name, _plain(name, "", f"a = x\nfor _i in range({m}):\n    a = M.sin(a) * 1.01\nx = a")
     if cls == "ld":
         return name, _plain(name, f"v: Vector[{m}]", "x = x + M.vsum(v)")
     return name, _plain(name, "tab: Table[Scalar], gi: Index",
                         f"a = x\nfor _i in range({m}):\n    a = a + tab.at(gi + _i)\nx = a")
+
+
+def contrast_kernel(name: str, trips: int) -> tuple:
+    """A two-way dispatch whose cheap branch vectorises and whose heavy branch carries a
+    ``trips``-trip loop of plain arithmetic (rolled, so scalar, above the unroll limit)."""
+    pre = f"a = x\nfor _i in range({trips}):\n    a = a * 0.9999 + 0.01\n"
+    return name, _plain(name, "k: Index", pre + 'x = M.dispatch(k, [x * 1.25 + 0.5, a], policy="auto")')
 
 
 def dispatch_kernel(name: str, k_branches: int, heavy: int) -> tuple:
@@ -183,13 +199,15 @@ def openmp_runtime() -> str:
 
 
 def header(args, device_index: int, hawk_mod, eagle_mod, opt: str) -> dict:
+    from hawk.compile import toolchain
+
     h = {"schema": SCHEMA, "collector_md5": md5(Path(__file__).read_text()),
          "date_utc": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
          "target": args.target, "mode": "quick" if args.quick else "full",
          "eagle_version": version_of("raptor-eagle"), "eagle_sha": git_sha(eagle_mod),
          "hawk_version": version_of("raptor-hawk"), "hawk_sha": git_sha(hawk_mod),
          "compiler": sh([os.environ.get("CXX", "c++"), "--version"]).splitlines()[0:1] or "unknown",
-         "opt_level": opt, "profile": os.environ.get("HAWK_PROFILE", "exact"),
+         "opt_level": opt, "host_profile": toolchain.host_profile(),
          "python": platform.python_version(), "cpu_model": cpu_model(), "isa": isa_level(),
          "threads": os.cpu_count(), "omp_proc_bind": os.environ.get("OMP_PROC_BIND", "unset"),
          "omp_num_threads": os.environ.get("OMP_NUM_THREADS", "unset"), "seed": args.seed}
@@ -213,33 +231,43 @@ def header(args, device_index: int, hawk_mod, eagle_mod, opt: str) -> dict:
 
 
 # --- counts of an op mix, from the cost model itself --- #
-def plain_costs(kernel, relabel32: bool) -> tuple:
-    from eagle._dispatch_door import _step
-    from hawk.ir.cost import _work
+class Costs(list):
+    """The per-branch cost rows (6 counts, 4 chain lengths, vectorised), plus hawk's fact
+    whether the fused host loop vectorises."""
 
-    c = list(_work(_step(kernel).walk.order))
-    # order of hawk's fields: arith32 arith64 special32 special64 loads gathers
-    if relabel32:           # a float32 build runs the model's 64-bit classes at 32-bit cost
-        c = [c[0] + c[1], 0.0, c[2] + c[3], 0.0, c[4], c[5]]
-    return tuple(c)
+    vectorised = False
+
+
+def _row(b) -> tuple:
+    return (*b.chain_tuple(), int(b.vectorised))
+
+
+def plain_costs(kernel, relabel32: bool) -> Costs:
+    """The cost of one sample of a kernel without a dispatch, as hawk counts it for the
+    host profile in effect; the unit rows record hawk's own ``vectorised``."""
+    from eagle._dispatch_door import _step
+    from hawk.ir.cost import kernel_cost
+
+    b = kernel_cost(_step(kernel).walk)
+    row = list(_row(b))
+    if relabel32:           # a float32 build runs the model's 64-bit classes at 32-bit cost, scalar
+        a32, a64, s32, s64, ld, ga, c32, c64, cs32, cs64, _ = row
+        row = [a32 + a64, 0.0, s32 + s64, 0.0, ld, ga, c32 + c64, 0.0, cs32 + cs64, 0.0, 0]
+    out = Costs([tuple(row)])
+    out.vectorised = bool(row[-1])
+    return out
 
 
 def fmt_cost(c) -> str:
     return ";".join(f"{v:g}" for v in c)
 
 
-class BranchCosts(list):
-    """The per-branch cost rows, plus hawk's fact whether the fused host loop vectorises."""
-
-    vectorised = False
-
-
-def branch_costs(kernel, group="dispatch0") -> BranchCosts:
+def branch_costs(kernel, group="dispatch0") -> Costs:
     from eagle._dispatch_door import _step
     from hawk.ir import dispatch_costs
 
     cost = dispatch_costs(_step(kernel).walk)[group]
-    out = BranchCosts(b.as_tuple() for b in cost.branches)
+    out = Costs(_row(b) for b in cost.branches)
     out.vectorised = bool(cost.fused_vectorised)
     return out
 
@@ -333,7 +361,7 @@ class Writer:
         self.timer = "event" if target == "gpu" else "steady_clock"
 
     def case_rows(self, group, kind, *, src, codegen, n, K, fused_steps, steps, m, counts, costs,
-                  seconds, held_out=0, timer=None, status="ok"):
+                  seconds, held_out=0, timer=None, status="ok", chains=0):
         self.case += 1
         cid = f"{group}{self.case:03d}"
         codegen = codegen if codegen in ("n/a", "unknown") else md5(codegen)   # of the bundle digest
@@ -341,7 +369,7 @@ class Writer:
         for rep, s in enumerate(seconds):
             self.w.writerow([cid, group, kind, self.target, src, codegen, n, K, fused_steps, steps, m,
                              ";".join(str(c) for c in counts), *cols, int(getattr(costs, "vectorised", False)),
-                             held_out, rep,
+                             chains, held_out, rep,
                              int(rep > 0), timer or self.timer, f"{s:.9e}", status])
             self.rows += 1
 
@@ -391,8 +419,8 @@ def group_a(ctx):
     ker = Kernels(ctx["dir"])
     wanted = []        # (cls, m, scalar)
     for m in ms:
-        for cls, scalars in (("arith", ("float64", "float32")), ("special", ("float64", "float32")),
-                             ("ld", ("float64",)), ("ga", ("float64",))):
+        for cls, scalars in (("arith", ("float64", "float32")), ("arith4", ("float64",)),
+                             ("special", ("float64", "float32")), ("ld", ("float64",)), ("ga", ("float64",))):
             mm = max(m // 4, 1) if cls == "ld" else m
             ker.add(class_kernel(cls, mm))
             wanted += [(cls, mm, m, s) for s in scalars]
@@ -422,7 +450,8 @@ def group_a(ctx):
         rig.real = np.float64
         costs = plain_costs(getattr(mod, name), scalar == "float32")
         w.case_rows("A", "unit", src=ker.src_md5(name), codegen=digest_of(plugin), n=n, K=1,
-                    fused_steps=1, steps=1, m=mm, counts=[n], costs=[costs], seconds=secs)
+                    fused_steps=1, steps=1, m=mm, counts=[n], costs=costs, seconds=secs,
+                    chains={"arith": 1, "arith4": 4}.get(cls, 0) if scalar == "float64" else 0)
         label = cls + ("32" if scalar == "float32" else "")
         ctx["slopes"].setdefault(label, {})[mm] = float(np.median(secs[1:]))
 
@@ -439,7 +468,7 @@ def group_b(ctx):
         for fs in (1, 16):
             secs = rig.time(bound, n, ctx["reps"] + 1, fs)
             w.case_rows("B", "launch", src=ker.src_md5("cal_empty"), codegen=digest_of(plugin), n=n,
-                        K=1, fused_steps=fs, steps=fs, m=0, counts=[n], costs=[costs], seconds=secs)
+                        K=1, fused_steps=fs, steps=fs, m=0, counts=[n], costs=costs, seconds=secs)
 
 
 def _classes_for(rig, n, k_branches, shares):
@@ -494,9 +523,8 @@ def group_c(ctx):
                     counts=[n], costs=[], seconds=secs, timer="steady_clock")
 
 
-def _pair(ctx, ker, mod, group, ps, held_out, heavy, kinds):
+def _pair(ctx, ker, mod, group, ps, held_out, heavy, kinds, name="cal_pair"):
     rig, w, n = ctx["rig"], ctx["writer"], ctx["n_e"]
-    name = "cal_pair"
     units, _cls, digest_s = split_units(mod, name, ctx["targets"], ctx["clock"])
     fused, digest_f = fused_plugin(mod, name, ctx["targets"], ctx["clock"])
     costs = branch_costs(getattr(mod, name))
@@ -520,11 +548,14 @@ def group_d_e(ctx, groups):
     heavy = ctx["heavy"]
     ker = Kernels(ctx["dir"])
     ker.add(dispatch_kernel("cal_pair", 2, heavy))
+    if "E" in groups:
+        ker.add(contrast_kernel("cal_contrast", heavy))
     mod = ker.load()
     if "D" in groups:
         _pair(ctx, ker, mod, "D", (0.0, 1 / 32, 1 / 4, 1.0), 0, heavy, ("fused",))
     if "E" in groups:
         _pair(ctx, ker, mod, "E", (0.01, 0.1, 0.5), 1, heavy, ("fused", "split"))
+        _pair(ctx, ker, mod, "E", (0.1, 0.5), 1, heavy, ("fused", "split"), "cal_contrast")
 
 
 def main(argv=None) -> int:

@@ -51,8 +51,8 @@ BranchCost heavy() { BranchCost b; b.special32 = 30; return b; }
 BranchCost heavy64() { BranchCost b; b.special64 = 30; return b; }
 // The measured pair, as hawk counts it: x * -0.5 + 1 against
 // exp(sin x cos x) + log(|x| + 2) + tanh x, both fp64, one plane read each.
-BranchCost probeCheap() { BranchCost b; b.arith64 = 2; b.loads = 1; return b; }
-BranchCost probeHeavy() { BranchCost b; b.arith64 = 5; b.special64 = 5; b.loads = 1; return b; }
+BranchCost probeCheap() { BranchCost b; b.arith64 = 2; b.loads = 1; b.vectorised = true; return b; }
+BranchCost probeHeavy() { BranchCost b; b.arith64 = 5; b.special64 = 5; b.loads = 1; b.vectorised = true; return b; }
 
 CostVector costs(std::initializer_list<BranchCost> list, bool fusedVectorised = false)
 {
@@ -147,6 +147,57 @@ TEST(DispatchPolicy, VectorisedFusedHostCostIsMixIndependent)
     const double scalarAll = predictedSeconds(scalar, probeMix(100, Target::Host), host(), w).fused;
     EXPECT_LT(scalarRare, 0.5 * rare) << "a scalar switch loop runs each sample's own branch";
     EXPECT_GT(scalarAll, scalarRare);
+}
+
+TEST(DispatchPolicy, ADependentChainBoundsHostComputeButNotTheDevice)
+{
+    BranchCost one, four;   // the same 512 operations, as one chain and as four independent ones
+    one.arith64 = four.arith64 = 512;
+    one.chain64 = 512;
+    four.chain64 = 128;
+    const Mix m = mix({BATCH, 0}, 1);
+    const Weights hw = defaultWeights(Target::Host);
+    const double hostOne = predictedSeconds(costs({one, one}), m, host(), hw).fused;
+    const double hostFour = predictedSeconds(costs({four, four}), m, host(), hw).fused;
+    EXPECT_GT(hostOne, 3.0 * hostFour) << "latency-bound: the chain is the limit";
+    const Weights dw = defaultWeights(Target::Device);
+    EXPECT_DOUBLE_EQ(predictedSeconds(costs({one, one}), m, consumer(), dw).fused,
+                     predictedSeconds(costs({four, four}), m, consumer(), dw).fused)
+        << "a device interleaves the chains of its resident warps";
+}
+
+TEST(DispatchPolicy, ShortChainsLeaveHostComputeAtTheThroughputLimit)
+{
+    BranchCost b;
+    b.arith64 = 512;
+    b.chain64 = 4;
+    BranchCost c = b;
+    c.chain64 = 0;
+    const Mix m = mix({BATCH, 0}, 1);
+    const Weights w = defaultWeights(Target::Host);
+    EXPECT_DOUBLE_EQ(predictedSeconds(costs({b, b}), m, host(), w).fused,
+                     predictedSeconds(costs({c, c}), m, host(), w).fused);
+}
+
+TEST(DispatchPolicy, AVectorisedHostBranchRunsWidthTimesFaster)
+{
+    BranchCost scalar;
+    scalar.arith64 = 400;
+    scalar.chain64 = 400;
+    BranchCost vec = scalar;
+    vec.vectorised = true;
+    Weights w = defaultWeights(Target::Host);
+    w.launchSeconds = 0;
+    w.splitSeconds = 0;
+    w.sortSeconds = 0;
+    const Mix m = mix({BATCH, 0}, 1);
+    const double split = predictedSeconds(costs({scalar, scalar}), m, host(), w).split;
+    const double splitVec = predictedSeconds(costs({vec, vec}), m, host(), w).split;
+    EXPECT_NEAR(split / splitVec, w.vectorWidth, 1e-9);
+    Weights d = defaultWeights(Target::Device);
+    EXPECT_DOUBLE_EQ(predictedSeconds(costs({scalar, scalar}), m, consumer(), d).split,
+                     predictedSeconds(costs({vec, vec}), m, consumer(), d).split)
+        << "the width is a host fact";
 }
 
 TEST(DispatchPolicy, StateIsMovedOncePerLaunchGathersEveryStep)
