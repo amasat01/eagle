@@ -21,6 +21,8 @@ nobody needs a GUI:
   one-launch entry, the persist launch over threads per SM, the band path over the compaction cadence, and Warp's kernel;
   CUDA-event walls, a correctness guard per arm, a table, a CSV and a summary of where auto trails Warp or the fastest
   eagle path (it covers the persist and fused sweeps of earlier kits, which it replaces);
+  the oscillator also runs in float32 (``osc32``, ``precision=fp32``; arm specs carry ``fp=32``) at N = 1e5, 1e6,
+  S = 100, 1000, spread and uniform, with no Warp arm; every table and CSV row is labelled with its precision;
 * **crossover**: the fused one-launch entry against the persist launch at N = 3e4, 1e5, 3e5, S = 100, card spread,
   with eagle's probe on, and the entry auto settled on (its mode after each run);
 * **band**: the band path over the compaction cadence (16, 32, 64, 128) beside eagle's own pick, at N = 1e5 and 1e6,
@@ -117,8 +119,19 @@ RATIO_METRICS = (
     "smsp__average_warps_issue_stalled_no_instruction_per_issue_active.ratio",
 )
 RK78_POINT = (1_000_000, 0, "orbits")
+#: FP32 variant of the oscillator (spec option ``fp=32``; same model, float32 scalar type): persist sizes of its compare
+#: cells, its sample counts, and the ratio metrics plus the FP32 FMA pipe it is read against
+OSC32_PERSIST_TPS = (640, 1024, 1536, 2048)
+OSC32_NS = (100_000, 1_000_000)
+OSC32_STEPS = (1000, 100)
+OSC32_DISTS = ("spread", "uniform")
+RATIO_METRICS_FP32 = RATIO_METRICS + (
+    "sm__inst_executed_pipe_fma.sum",
+    "sm__inst_executed_pipe_fma.avg.pct_of_peak_sustained_active",
+)
 #: threads-per-SM sweep under ncu: achieved warps at each persist size, N = 1e6, spread
 TSWEEP_STEPS = (100, 1000)
+TSWEEP_FP32_STEPS = 1000  # the FP32 rows: N = 1e6, spread, this S
 #: stage -> captures (label, arm spec, kernel-name regex, point, extra metrics)
 NCU_BAND_EAGER = "osc_compact@every=16,eager=1"
 NCU_BAND_KERNELS = (("band_step", r"regex:oscillator_step"),
@@ -163,6 +176,13 @@ def _host_planes(n, steps):
                 v=inp["v0"].copy(), k=np.zeros(n)), inp
 
 
+def precision_of(kernel_or_spec):
+    """``fp32`` for the float32 oscillator (kernel ``osc32``, or an arm spec with ``fp=32``), else ``fp64``."""
+    if kernel_or_spec == "osc32":
+        return "fp32"
+    return "fp32" if "@" in kernel_or_spec and parse_spec(kernel_or_spec)[1].get("fp") == "32" else "fp64"
+
+
 def _probe_runner(card, kind, n, device):
     """An ``until_done`` runner for the card's automatic ('auto', active-set) or
     persistent ('persist', plain) kernel, with the arrays of its spread workload."""
@@ -184,6 +204,15 @@ def _probe_runner(card, kind, n, device):
     runner = eagle.until_done(eagle.deploy(kernel), max_steps=PROBE_STEPS, dt=card.DT,
                               **(extra if device else {}), **planes)
     return runner, arm, inp
+
+
+def _persist_pick(card, n, fp32):
+    """Threads per SM eagle's launch rule picks for the forced persist entry (spread, S = PROBE_STEPS) in float32
+    or float64, read from the geometry of a real run."""
+    arm, inp = build_arm("osc_persist@fp=32" if fp32 else "osc_persist", n, PROBE_STEPS, "spread")
+    arm["state"].upload(inp)
+    arm["run"]()
+    return launched_threads_per_sm(arm["state"].runner)
 
 
 def _ask(fn):
@@ -291,6 +320,14 @@ def probe(target, out):
             del runner, arm
             if device:
                 cp.get_default_memory_pool().free_all_blocks()
+
+    head("persist entry, FP32 oscillator (precision=fp32) beside FP64 (precision=fp64)")
+    if device:
+        for n in PROBE_NS[1:]:
+            for prec in ("fp32", "fp64"):
+                put(f"persist.threads_per_sm[precision={prec}](n={n})", lambda: _persist_pick(card, n, prec == "fp32"))
+    else:
+        put("persist.threads_per_sm[precision=fp32]", "none (host plans launch no persist kernel)")
 
     text = "\n".join(lines) + "\n"
     (out / "probe.txt").write_text(text)
@@ -421,18 +458,30 @@ def build_arm(spec, n, steps, dist):
         return _runner_arm(state, runner), rk._inputs(n)
     card = load_card()
     inp = make_inputs(card, n, steps, dist)
+    fp32 = opts.get("fp") == "32"  # the same model in float32: planes, inputs and the kernel's scalar type
+    dtype = "float32" if fp32 else "float64"
+    if fp32:
+        inp = {k: v.astype(dtype) for k, v in inp.items()}
+
+    def deploy(kernel):
+        return eagle.deploy(kernel, scalar_type="float32") if fp32 else eagle.deploy(kernel)
+
+    if fp32 and base == "eagle_graph_auto":
+        state = card._GpuArm(n, dtype)
+        runner = eagle.until_done(deploy(card._define_auto_kernel()), max_steps=steps, dt=card.DT, **state.planes())
+        return _runner_arm(state, runner), inp
     if base in ("osc_persist", "osc_fused"):
         mode = "persist" if base == "osc_persist" else "fused_one"
-        state = card._GpuArm(n)
-        runner = eagle.until_done(eagle.deploy(card._define_persist_kernel()), max_steps=steps, dt=card.DT,
+        state = card._GpuArm(n, dtype)
+        runner = eagle.until_done(deploy(card._define_persist_kernel()), max_steps=steps, dt=card.DT,
                                   _fast_mode=mode, _lane_utilisation=(mode == "persist"), **state.planes())
         return _runner_arm(state, runner), inp
     if base == "osc_band":
         import hawk
 
-        state = card._GpuArm(n)
+        state = card._GpuArm(n, dtype)
         steps_kernel = hawk.steps(card._define_active_kernel(), BAND_STEPS_PER_LAUNCH)
-        runner = eagle.until_done(eagle.deploy(steps_kernel), max_steps=steps, dt=card.DT, _fast_mode=False,
+        runner = eagle.until_done(deploy(steps_kernel), max_steps=steps, dt=card.DT, _fast_mode=False,
                                   **({"every": int(opts["every"])} if "every" in opts else {}), **state.planes())
         return _runner_arm(state, runner), inp
     if base == "osc_compact":
@@ -536,6 +585,11 @@ _WALL_SPECS = CONTEXT_ARMS
 
 def compare_arms(kernel):
     """(label, arm spec) of every arm of one kernel, the reference (eagle auto) first and Warp last."""
+    if kernel == "osc32":  # no Warp arm: the float32 variant is eagle-only (auto against its own entries)
+        fp = "fp=32"
+        arms = [("auto", f"eagle_graph_auto@{fp}"), ("fused_one", f"osc_fused@{fp}"), ("persist@auto", f"osc_persist@{fp}")]
+        arms += [(f"persist@{t}", f"osc_persist@{fp},tps={t}") for t in OSC32_PERSIST_TPS]
+        return arms + [("band@auto", f"osc_band@{fp}")]
     osc = kernel == "osc"
     pre = "osc" if osc else "rk78"
     tps = OSC_PERSIST_TPS if osc else RK78_PERSIST_TPS
@@ -545,8 +599,9 @@ def compare_arms(kernel):
     return arms + [("warp", "warp_kernel" if osc else "rk78_warp")]
 
 
-def compare_cells(stage, kernels=("osc", "rk78"), ns=COMPARE_NS):
-    """(kernel, N, S, dist) in run order, large N first; S = 0 and dist 'orbits' for the RK78 card."""
+def compare_cells(stage, kernels=("osc", "rk78", "osc32"), ns=COMPARE_NS):
+    """(kernel, N, S, dist) in run order, large N first; S = 0 and dist 'orbits' for the RK78 card; kernel
+    ``osc32`` is the oscillator in float32 (precision=fp32)."""
     base = stage.removesuffix("-quick")
     quick = stage.endswith("-quick")
     if base == "crossover":
@@ -556,7 +611,8 @@ def compare_cells(stage, kernels=("osc", "rk78"), ns=COMPARE_NS):
         cells = [("osc", n, BAND_STEPS, d) for n in sorted(BAND_NS, reverse=True) for d in BAND_DISTS]
         return [("osc", BAND_NS[0], BAND_STEPS, "uniform")] if quick else cells
     if quick:
-        quick_cells = {"osc": ("osc", 100_000, 100, "spread"), "rk78": ("rk78", 10_000, 0, "orbits")}
+        quick_cells = {"osc": ("osc", 100_000, 100, "spread"), "rk78": ("rk78", 10_000, 0, "orbits"),
+                       "osc32": ("osc32", 100_000, 100, "spread")}
         return [quick_cells[k] for k in kernels]
     cells = []
     for n in sorted(ns, reverse=True):
@@ -564,6 +620,8 @@ def compare_cells(stage, kernels=("osc", "rk78"), ns=COMPARE_NS):
             cells.append(("rk78", n, 0, "orbits"))
         if "osc" in kernels:
             cells += [("osc", n, s, d) for s in COMPARE_OSC_STEPS for d in COMPARE_OSC_DISTS]
+        if "osc32" in kernels and n in OSC32_NS:
+            cells += [("osc32", n, s, d) for s in OSC32_STEPS for d in OSC32_DISTS]
     return cells
 
 
@@ -583,7 +641,7 @@ def _planes(out):
     return dict(zip(("x", "v", "k"), out)) if isinstance(out, (tuple, list)) else dict(out)
 
 
-def judge(kernel, out, ref, inp, same_entry, truth=None):
+def judge(kernel, out, ref, inp, same_entry, truth=None, atol=None):
     """Guard one arm's final state against the reference's: (ok, bitwise, max_diff, why).
     Within the card's tolerance always (oscillator: stop steps exact, x and v within the card's ATOL of the
     reference; RK78: every sample at the final time and inside the stated truth bound); bit for bit as well
@@ -600,7 +658,7 @@ def judge(kernel, out, ref, inp, same_entry, truth=None):
     if kernel == "osc":
         if not np.array_equal(out["k"], inp["nstop"]):
             return False, bitwise, diff, "step counts differ from the stop steps"
-        card_atol = sys.modules["perf_card"].ATOL
+        card_atol = sys.modules["perf_card"].ATOL if atol is None else atol
         if diff > card_atol:
             return False, bitwise, diff, f"state differs from the reference by {diff:.2e} > {card_atol:.0e}"
     else:
@@ -799,7 +857,11 @@ def _entry_family(spec):
 
 def run_cell(kernel, n, steps, dist, extra_arms=(), arms=None):
     """Every arm of one cell. The reference is eagle auto (else the first arm that ran). Returns the cell dict."""
-    inp = make_inputs(load_card(), n, steps, dist) if kernel == "osc" else load_rk78()._inputs(n)
+    fp32 = kernel == "osc32"
+    inp = make_inputs(load_card(), n, steps, dist) if kernel in ("osc", "osc32") else load_rk78()._inputs(n)
+    if fp32:
+        inp = {k: v.astype("float32") for k, v in inp.items()}
+    atol = load_card().FP32_ATOL if fp32 else None
     truth = load_rk78().kepler_truth(inp, load_rk78().T_FINAL) if kernel == "rk78" else None
     ref = {}
 
@@ -809,7 +871,7 @@ def run_cell(kernel, n, steps, dist, extra_arms=(), arms=None):
                 ref.update(out=out, key=(_entry_family(spec), key[1]), spec=spec)
                 return True, True, 0.0, ""
             same = (_entry_family(spec), key[1]) == ref["key"]
-            return judge(kernel, out, ref["out"], inp, same, truth)
+            return judge("osc" if fp32 else kernel, out, ref["out"], inp, same, truth, atol)
         return judge_out
 
     recs = []
@@ -856,23 +918,25 @@ def render_compare(cells, unreached=()):
     text = ["Wall = CUDA events around one run (median of 3 after 2 warm runs), ms. WRONG = the guard flagged the arm "
             "(not timed); skip = persist size above the residency limit; n/a = this eagle cannot build or run the arm.",
             "band = hawk.steps(kernel, %d) compacted every `every` steps (auto = eagle's default) for the oscillator, the "
-            "single-attempt kernel for RK78; persist@T = T threads per SM." % BAND_STEPS_PER_LAUNCH, ""]
+            "single-attempt kernel for RK78; persist@T = T threads per SM." % BAND_STEPS_PER_LAUNCH,
+            "Every row carries precision=fp64 or precision=fp32 (osc32: the oscillator in float32, same model; eagle "
+            "arms only, no Warp arm; guard = float32 tolerance against its own auto).", ""]
     csv = ["kernel,n,steps,dist,arm,status,median_ms,best_ms,mode,threads_per_sm_launched,lane_utilisation,"
-           "bitwise_vs_auto,max_diff_vs_auto,sm_mhz,modes_per_run,launch_fields,note"]
+           "bitwise_vs_auto,max_diff_vs_auto,sm_mhz,modes_per_run,launch_fields,precision,note"]
     notes, slower, not_fastest = [], [], []
-    for kernel in ("osc", "rk78"):
+    for kernel in ("osc", "rk78", "osc32"):
         mine = [c for c in cells if c["kernel"] == kernel]
         if not mine:
             continue
         labels = [r["label"] for r in mine[0]["arms"]]
         extra = sorted({r["label"] for c in mine for r in c["arms"]} - set(labels))
         labels += extra
-        text.append(f"{'cell':32s} " + " ".join(f"{lab:>12s}" for lab in labels) + f" {'auto mode':>10s} {'fastest eagle':>14s} "
+        text.append(f"{'cell':32s} {'precision':>14s} " + " ".join(f"{lab:>12s}" for lab in labels) + f" {'auto mode':>10s} {'fastest eagle':>14s} "
                     f"{'auto/warp':>9s} {'best/warp':>9s}")
         for c in mine:
             by = {r["label"]: r for r in c["arms"]}
             auto, warp, best, a_w, b_w = cell_ratios(c)
-            text.append(f"{cell_id(c):32s} " + " ".join(f"{fmt(by.get(lab)):>12s}" for lab in labels)
+            text.append(f"{cell_id(c):32s} {'precision=' + precision_of(kernel):>14s} " + " ".join(f"{fmt(by.get(lab)):>12s}" for lab in labels)
                         + f" {by.get('auto', {}).get('mode', '-'):>10s} {best['label'] if best else '-':>14s} "
                         f"{'-' if a_w is None else format(a_w, '.2f'):>9s} {'-' if b_w is None else format(b_w, '.2f'):>9s}")
             for r in c["arms"]:
@@ -882,7 +946,7 @@ def render_compare(cells, unreached=()):
                     r["mode"], r["launched"], "" if r["util"] is None else f"{r['util']:.3f}",
                     "" if r["bitwise"] is None else int(r["bitwise"]), "" if r["diff"] is None else f"{r['diff']:.3e}",
                     r.get("sm_mhz") or "", r.get("modes", ""),
-                    ";".join(f"{k}={v}" for k, v in r.get("fields", {}).items()),
+                    ";".join(f"{k}={v}" for k, v in r.get("fields", {}).items()), precision_of(kernel),
                     '"' + r["note"].replace('"', "'") + '"')))
                 if r["note"]:
                     notes.append(f"  {cell_id(c)} {r['label']}: {r['status']}: {r['note']}")
@@ -958,7 +1022,7 @@ def crossover_lines(cells):
     return lines or ["  no crossover cell ran"]
 
 
-def compare_stage(out, stage, kernels=("osc", "rk78"), ns=COMPARE_NS, budget_s=None):
+def compare_stage(out, stage, kernels=("osc", "rk78", "osc32"), ns=COMPARE_NS, budget_s=None):
     """Run every cell; the table and CSV are rewritten after each, so a stage cut short keeps what it finished,
     and no cell starts once the budget is spent. A stage in which no arm of any cell ran fails."""
     t0, cells = time.monotonic(), []
@@ -1120,6 +1184,9 @@ def ncu_captures(stage):
                  (SWEEP_N, steps, "spread"), RATIO_METRICS) for steps in TSWEEP_STEPS for t in OSC_PERSIST_TPS]
         caps += [(f"rk78_persist_t{t}", f"rk78_persist@tps={t}", r"regex:rkf78_attempt_persist", RK78_POINT,
                   RATIO_METRICS) for t in RK78_PERSIST_TPS]
+        caps += [(f"osc32_persist_t{t}_spread_s{TSWEEP_FP32_STEPS}", f"osc_persist@fp=32,tps={t}",
+                  r"regex:oscillator_step_xauto_persist", (SWEEP_N, TSWEEP_FP32_STEPS, "spread"), RATIO_METRICS_FP32)
+                 for t in OSC_PERSIST_TPS]
         return caps[:1] if stage.endswith("-quick") else caps
     if stage == "ncu-ratio-quick":
         return [c for c in RATIO_CAPTURES if c[0] == f"osc_persist_spread_s{SWEEP_STEPS[0]}"]
@@ -1167,8 +1234,10 @@ def ncu_stage(out, stage, ncu, sudo):
                                      capture_output=True, text=True)
                 (out / f"{stage}_{label}.raw.csv").write_text(raw.stdout)
                 digest += "\n" + _ncu_metric_lines(raw.stdout, metrics)
-                digest += "\n" + lane_efficiency_lines(raw.stdout, worker_line)
-            summary.append(f"== {label} ({arm}, {regex}, N={point[0]} S={point[1]} {point[2]}, "
+                digest += "\n" + (f"  lane_efficiency: not computed for FP32 (the count above is the FP64 pipe's; read "
+                                   f"{RATIO_METRICS_FP32[-2]})" if precision_of(arm) == "fp32"
+                                   else lane_efficiency_lines(raw.stdout, worker_line))
+            summary.append(f"== {label} ({arm}, precision={precision_of(arm)}, {regex}, N={point[0]} S={point[1]} {point[2]}, "
                            f"{time.perf_counter() - t0:.0f} s)\n  {worker_line[worker_line.find('sample_steps'):]}\n{digest}\n")
             say(f"ncu {stage} {label}: done ({time.perf_counter() - t0:.0f} s)")
         (out / f"{stage}.txt").write_text("\n".join(summary))
@@ -1263,7 +1332,7 @@ def validate_ncu(ncu, nsys_names):
         lines.append(f"section {section}: {'found' if found else 'MISSING'}")
     known = subprocess.run([ncu, "--query-metrics", "--chip", "ga100"], capture_output=True, text=True).stdout
     names = {ln.split()[0] for ln in known.splitlines() if ln.strip()}
-    for metric in RATIO_METRICS:
+    for metric in RATIO_METRICS_FP32:
         found = metric.split(".", 1)[0] in names
         ok &= found
         lines.append(f"metric {metric}: {'found' if found else 'MISSING'}")
@@ -1303,7 +1372,8 @@ def main(argv=None):
     ap.add_argument("--nsys", help="path of nsys")
     ap.add_argument("--ncu", help="path of ncu")
     ap.add_argument("--ncu-sudo", action="store_true", help="run ncu under `sudo -n` (counters are admin-only)")
-    ap.add_argument("--kernels", default="osc,rk78", help="compare: kernels to run (osc, rk78)")
+    ap.add_argument("--kernels", default="osc,rk78,osc32",
+                    help="compare: kernels to run (osc, rk78, osc32 = the oscillator in float32)")
     ap.add_argument("--ns", default=",".join(str(n) for n in COMPARE_NS), help="compare: sample counts")
     ap.add_argument("--budget-s", type=float, help="compare: start no cell after this many seconds")
     ap.add_argument("--worker", nargs=4, metavar=("ARM", "N", "S", "DIST"), help=argparse.SUPPRESS)

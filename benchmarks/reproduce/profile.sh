@@ -64,7 +64,7 @@ if [[ $QUICK == 1 ]]; then
         ncu-ratio-quick:150 ncu-tsweep-quick:150 ncu-band-quick:180)
 else
   PLAN=(probe:180 nsys-grid:540 nsys-width:150 ncu-spread-1e6:240 ncu-uniform-1e6:240 ncu-spread-1e4:240
-        compare:1500 crossover:300 band:420 cadence-sweep:300 ncu-ratio:420 ncu-tsweep:600 ncu-band:300)
+        compare:1500 crossover:300 band:420 cadence-sweep:300 ncu-ratio:420 ncu-tsweep:750 ncu-band:300)
 fi
 if [[ -n $ONLY ]]; then
   CHOSEN=()

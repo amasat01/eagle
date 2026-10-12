@@ -236,12 +236,14 @@ def test_compare_covers_every_case_of_the_matrix():
     kit = _kit_module()
     cells = kit.compare_cells("compare")
     osc = [c for c in cells if c[0] == "osc"]
-    assert len(cells) == 4 * (1 + 2 * 4) and len([c for c in cells if c[0] == "rk78"]) == 4
+    assert len(cells) == 4 * (1 + 2 * 4) + 2 * 4 and len([c for c in cells if c[0] == "rk78"]) == 4
     assert {c[1] for c in cells} == {10**3, 10**4, 10**5, 10**6} and cells[0][1] == 10**6  # large N first
     assert {(c[2], c[3]) for c in osc} == {(s, d) for s in (100, 1000)
                                            for d in ("uniform", "spread", "spread:10", "spread:1000")}
     assert [c[:2] for c in kit.compare_cells("compare", kernels=("rk78",), ns=(1000,))] == [("rk78", 1000)]
-    assert len(kit.compare_cells("compare-quick")) == 2
+    assert len(kit.compare_cells("compare-quick")) == 3
+    assert [c for c in kit.compare_cells("compare-quick", kernels=("osc", "rk78"))] == [
+        ("osc", 100_000, 100, "spread"), ("rk78", 10_000, 0, "orbits")]
     labels = [lab for lab, _ in kit.compare_arms("osc")]
     assert labels == ["auto", "fused_one", "persist@auto", *(f"persist@{t}" for t in (384, 640, 896, 1152, 1536, 2048)),
                       "band@auto", "band@8", "band@16", "warp"]
@@ -250,6 +252,28 @@ def test_compare_covers_every_case_of_the_matrix():
     specs = dict(kit.compare_arms("osc"))
     assert specs["persist@640"] == "osc_persist@tps=640" and specs["band@8"] == "osc_band@every=8"
     assert specs["warp"] == "warp_kernel" and dict(kit.compare_arms("rk78"))["warp"] == "rk78_warp"
+
+
+def test_the_fp32_cells_and_arms_cover_the_asked_matrix_and_are_labelled():
+    kit = _kit_module()
+    cells = [c for c in kit.compare_cells("compare") if c[0] == "osc32"]
+    assert {(c[1], c[2], c[3]) for c in cells} == {(n, s, d) for n in (10**5, 10**6) for s in (100, 1000)
+                                                   for d in ("spread", "uniform")} and len(cells) == 8
+    assert [c for c in kit.compare_cells("compare-quick", kernels=("osc32",))] == [("osc32", 100_000, 100, "spread")]
+    arms = kit.compare_arms("osc32")
+    assert [lab for lab, _ in arms] == ["auto", "fused_one", "persist@auto", "persist@640", "persist@1024",
+                                        "persist@1536", "persist@2048", "band@auto"]  # no Warp arm
+    assert all(kit.precision_of(spec) == "fp32" for _, spec in arms)
+    assert all(kit.precision_of(spec) == "fp64" for _, spec in kit.compare_arms("osc"))
+    assert kit.precision_of("osc32") == "fp32" and kit.precision_of("osc") == "fp64"
+    tsweep = [c for c in kit.ncu_captures("ncu-tsweep") if kit.precision_of(c[1]) == "fp32"]
+    assert [kit.parse_spec(c[1])[1]["tps"] for c in tsweep] == ["384", "640", "896", "1152", "1536", "2048"]
+    assert all(c[3] == (10**6, 1000, "spread") and "sm__inst_executed_pipe_fma.sum" in c[4] for c in tsweep)
+    text, csv = kit.render_compare([dict(kernel="osc32", n=10**5, steps=100, dist="spread", reference="x", arms=[
+        dict(label="auto", spec="eagle_graph_auto@fp=32", status="ok", note="", median=1.0, best=1.0, mode="persist",
+             launched="-", util=None, bitwise=True, diff=0.0, sm_mhz=None, modes="", fields={})])])
+    assert "precision=fp32" in text and csv.splitlines()[0].endswith("launch_fields,precision,note")
+    assert csv.splitlines()[1].split(",")[-2] == "fp32"
 
 
 def test_crossover_band_and_tsweep_cover_the_asked_cases():
@@ -263,8 +287,8 @@ def test_crossover_band_and_tsweep_cover_the_asked_cases():
     assert len(kit.compare_cells("crossover-quick")) == 1 and len(kit.compare_cells("band-quick")) == 1
     tsweep = kit.ncu_captures("ncu-tsweep")
     osc = {kit.parse_spec(c[1])[1]["tps"] for c in tsweep if c[1].startswith("osc")}
-    assert osc == {"384", "640", "896", "1152", "1536", "2048"} and len(tsweep) == 2 * 6 + 2
-    assert all(c[3][0] == 10**6 and c[4] == kit.RATIO_METRICS for c in tsweep)
+    assert osc == {"384", "640", "896", "1152", "1536", "2048"} and len(tsweep) == 2 * 6 + 2 + 6
+    assert all(c[3][0] == 10**6 and c[4] in (kit.RATIO_METRICS, kit.RATIO_METRICS_FP32) for c in tsweep)
     assert len(kit.ncu_captures("ncu-tsweep-quick")) == 1
 
 
@@ -461,7 +485,7 @@ def test_the_kit_scripts_are_shellcheck_clean():
 
 @pytest.mark.gpu
 def test_compare_times_every_arm_and_the_override_really_changes_the_launch(tmp_path):
-    done = run_py("--stage", "compare-quick", "--out", str(tmp_path), env=_one_gpu_env())
+    done = run_py("--stage", "compare-quick", "--kernels", "osc,rk78", "--out", str(tmp_path), env=_one_gpu_env())
     assert done.returncode == 0, done.stdout[-1500:] + done.stderr[-1500:]
     rows = [ln.split(",") for ln in (tmp_path / "compare_quick.csv").read_text().splitlines()[1:]]
     by = {(r[0], r[4]): r for r in rows}
@@ -476,6 +500,20 @@ def test_compare_times_every_arm_and_the_override_really_changes_the_launch(tmp_
 
 
 @pytest.mark.gpu
+def test_compare_runs_the_fp32_cells_and_labels_every_row(tmp_path):
+    done = run_py("--stage", "compare-quick", "--kernels", "osc32", "--out", str(tmp_path), env=_one_gpu_env())
+    assert done.returncode == 0, done.stdout[-1500:] + done.stderr[-1500:]
+    lines = (tmp_path / "compare_quick.csv").read_text().splitlines()
+    rows = [ln.split(",") for ln in lines[1:]]
+    assert len(rows) == 8 and {r[0] for r in rows} == {"osc32"} and {r[-2] for r in rows} == {"fp32"}
+    by = {r[4]: r for r in rows}
+    assert "warp" not in by and not any(r[5] == "wrong" for r in rows)
+    for label in ("auto", "fused_one", "persist@auto", "persist@1024", "band@auto"):
+        assert by[label][5] == "ok" and float(by[label][6]) > 0, label
+    assert "precision=fp32" in (tmp_path / "compare_quick.txt").read_text()
+
+
+@pytest.mark.gpu
 def test_crossover_and_band_stages_run_and_record_the_clock(tmp_path):
     env = _one_gpu_env()
     for stage in ("crossover-quick", "band-quick"):
@@ -486,7 +524,7 @@ def test_crossover_and_band_stages_run_and_record_the_clock(tmp_path):
     band = (tmp_path / "band_quick.txt").read_text()
     assert "-- band cost model" in band and "eagle's own band pick every=" in band
     header = (tmp_path / "band_quick.csv").read_text().splitlines()[0]
-    assert "sm_mhz,modes_per_run,launch_fields,note" in header
+    assert "sm_mhz,modes_per_run,launch_fields,precision,note" in header
 
 
 @pytest.mark.gpu
