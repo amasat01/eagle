@@ -383,6 +383,30 @@ def _gen_module():
     return module
 
 
+def test_docs_tables_withhold_device_readings_below_the_minimum():
+    """The docs pages never quote a device reading below the workload's
+    minimum state (less one driver page): JAX's 0 MiB at N = 1,000,000 on the
+    A100 card -- its pool was reserved before the baseline -- becomes "not
+    measured", while a small-N 0 MiB (below one driver page) stays.
+    RED: drop the `withhold_impossible_readings` call from `_table_fragment`."""
+    gen = _gen_module()
+    mib = 2**20
+    minimum = {1_000: 40_000, 1_000_000: 40 * mib}
+    row = "| 1,000,000 | JAX | 9.61 ms | 0 MiB (0×) | 100 MiB | – |"
+    assert gen.withhold_impossible_readings(row, minimum) == (
+        "| 1,000,000 | JAX | 9.61 ms | not measured | 100 MiB | – |")
+    small = "| 1,000 | JAX | 3.19 ms | 0 MiB (0×) | 0.0273 MiB | – |"
+    assert gen.withhold_impossible_readings(small, minimum) == small
+    fine = "| 1,000,000 | Warp | 5.96 ms | 64 MiB (1.68× min.) | 3 MiB |"
+    assert gen.withhold_impossible_readings(fine, minimum) == fine
+    a100 = _REPO / "benchmarks" / "perf_card" / "card_nvidia-a100-sxm4-40gb.json"
+    entry = {"path": a100, "card": json.loads(a100.read_text()), "is_reference": True}
+    fragment = gen._table_fragment({}, entry)
+    assert gen.WITHHELD_CELL in fragment and gen.WITHHELD_NOTE in fragment
+    assert "| 1,000,000 | JAX jit + vmap(while_loop) |" in fragment
+    assert not re.search(r"\| 1,000,000 \| JAX[^\n]*\| 0 MiB \(0×\)", fragment)
+
+
 def test_docs_pages_include_every_generated_family():
     """The results pages include each family's generated fragment
     (``_generated/<family>.md``, written by ``docs/_tools/gen_perf_pages.py``

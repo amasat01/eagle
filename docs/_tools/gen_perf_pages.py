@@ -264,16 +264,55 @@ def card_overview(spec: dict, e: dict, page: str) -> str:
     return "\n".join(lines)
 
 
+#: The driver accounts device memory in pages of about 2 MiB.
+DRIVER_PAGE_BYTES = 2 * 2**20
+#: A table row's leading N and its device-memory cell ("50 MiB (1.31×)" or
+#: "50 MiB (1.31× min.)" -- the host cell carries no factor).
+_ROW_N = re.compile(r"\|\s*([\d,]+)\s*\|")
+_DEVICE_CELL = re.compile(r"\| ([\d.e+]+) MiB \([\d.e+]+×(?: min\.)?\) \|")
+WITHHELD_CELL = "not measured"
+WITHHELD_NOTE = (
+    "A device reading below the state the workload needs (less one driver page) shows as "
+    f"\"{WITHHELD_CELL}\": the run cannot fit in less, so the reading missed memory the "
+    "library reserved before the measurement's baseline (JAX reserves its pool during the "
+    "warm-up). Those figures return once the memory pass takes its baseline before any "
+    "library allocates.")
+
+
+def withhold_impossible_readings(line: str, minimum_by_n: dict) -> str:
+    """`line` with its device-memory cell replaced by `WITHHELD_CELL` when the
+    reading is below the minimum state for the row's N, less one driver page:
+    no run fits in less, so such a reading missed memory held before the
+    baseline. Any other line comes back unchanged."""
+    n_match = _ROW_N.match(line)
+    cell = _DEVICE_CELL.search(line)
+    if not n_match or not cell:
+        return line
+    minimum = minimum_by_n.get(int(n_match.group(1).replace(",", "")))
+    if not minimum or float(cell.group(1)) * 2**20 + DRIVER_PAGE_BYTES >= minimum:
+        return line
+    return line[:cell.start()] + f"| {WITHHELD_CELL} |" + line[cell.end():]
+
+
 def _table_fragment(spec: dict, e: dict) -> str:
     """The card's own table with its headings turned into bold lines (a heading
-    cannot sit inside a collapsed block), then the machine-derived lines."""
-    out, fenced = [], False
+    cannot sit inside a collapsed block) and its impossible device-memory
+    readings withheld (`withhold_impossible_readings`), then the
+    machine-derived lines."""
+    minimum_by_n = {r["n"]: r.get("minimum_bytes")
+                    for r in (e["card"].get("memory") or {}).get("rows", [])}
+    out, fenced, withheld = [], False, False
     for line in e["path"].with_suffix(".md").read_text().splitlines():
         if line.lstrip().startswith("```"):
             fenced = not fenced
         m = None if fenced else re.match(r"#{1,6}\s+(.*)", line)
+        if not fenced and not m:
+            kept, line = line, withhold_impossible_readings(line, minimum_by_n)
+            withheld = withheld or line != kept
         out.append(f"**{m.group(1)}**" if m else line)
     out.append("")
+    if withheld:
+        out += [WITHHELD_NOTE, ""]
     if not e["is_reference"]:
         out += _fastest_arm_lines(e["card"], spec["has_config"])
         out += _simulate_vs_twin_lines(e["card"], spec["simulate"], spec["twin"])
