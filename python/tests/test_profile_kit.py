@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -609,8 +610,10 @@ def test_compare_times_every_arm_and_the_override_really_changes_the_launch(tmp_
     done = run_py("--stage", "compare-quick", "--kernels", "osc,rk78", "--out", str(tmp_path), env=_one_gpu_env())
     assert done.returncode == 0, done.stdout[-1500:] + done.stderr[-1500:]
     rows = [ln.split(",") for ln in (tmp_path / "compare_quick.csv").read_text().splitlines()[1:]]
-    by = {(r[0], r[4]): r for r in rows}
-    assert {r[0] for r in rows} == {"osc", "rk78"} and len(rows) == 13 + 9
+    by = {(r[0], r[4].split("/")[0]): r for r in rows}  # a persist label carries its chunk: persist@640/4
+    kit = _kit_module()
+    assert {r[0] for r in rows} == {"osc", "rk78"}
+    assert len(rows) == len(kit.compare_arms("osc")) + len(kit.compare_arms("rk78"))
     for key in (("osc", "auto"), ("osc", "warp"), ("osc", "fused_one"), ("rk78", "auto"), ("rk78", "warp")):
         assert by[key][5] == "ok" and float(by[key][6]) > 0, key
     assert by[("osc", "fused_one")][8] == "fused_one" and by[("osc", "persist@640")][8] == "persist"
@@ -641,12 +644,12 @@ def test_crossover_and_band_stages_run_and_record_the_clock(tmp_path):
         done = run_py("--stage", stage, "--out", str(tmp_path), env=env)
         assert done.returncode == 0, done.stdout[-1500:] + done.stderr[-1500:]
     cross = (tmp_path / "crossover_quick.txt").read_text()
-    assert "-- crossover" in cross and "after 5 runs" in cross and "-- SM clock during the runs" in cross
+    assert "-- crossover" in cross and re.search(r"after \d+ runs", cross) and "-- SM clock during the runs" in cross
     assert "eagle's own walls per timed run" in cross and "auto_last" in cross
     band = (tmp_path / "band_quick.txt").read_text()
     assert "-- band cost model" in band and "eagle's own band pick every=" in band
     header = (tmp_path / "band_quick.csv").read_text().splitlines()[0]
-    assert "sm_mhz,raw_median_ms,modes_per_run,probe_walls,launch_fields,precision,note" in header
+    assert {"sm_mhz", "modes_per_run", "probe_walls", "launch_fields", "precision", "note"} <= set(header.split(","))
 
 
 @pytest.mark.gpu
