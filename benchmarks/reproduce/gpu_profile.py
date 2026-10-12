@@ -29,6 +29,11 @@ nobody needs a GUI:
   and R = one compaction group's cost over one full-live step launch, fitted from the uniform cell;
 * **ncu-tsweep**: achieved warps (and the ratio metrics) of the persist kernels at each persist size, N = 1e6;
 * **cadence-sweep**: the band path (step plus compaction) over the compaction cadence, as nsys sums;
+* **chunk-sweep**: the forced persist launch over the work-stealing chunk {1, 2, 4, 8, 16, 32} x {fp64, fp32} x S {100, 1000} x
+  threads per SM {eagle's rule, twice it}, N = 1e6 spread (wall, slot fill measured in its own arms, the rule's own chunk
+  beside); RK78 at chunk {8, 32}; **ncu-chunk**: the same cells under Nsight Compute (rule threads per SM), with
+  lane efficiency and FP64 inflation; **ncu-rk78-small**: RK78 at N = 1e4 (auto, fused, persist) with instruction counts
+  per attempt and the SASS length of each entry;
 * **ncu-band**: the band path's step and compaction kernels under Nsight Compute, run as an eager
   loop because the graph's conditional loop node cannot be profiled.
 
@@ -66,7 +71,7 @@ PROBE_STEPS = 100
 #: nsys grid: arms x distributions x sample counts x step budgets (large N first, so a
 #: stage cut short by its time cap loses the cheapest-to-spare rows). "spread:D" draws the
 #: stop steps log-uniformly in [S/D, S] (the card's spread is D = 100); "uniform" is D = 1.
-NSYS_ARMS = ("eagle_graph_auto", "eagle_graph_persist", "eagle_graph_steps_compact", "warp_kernel")
+NSYS_ARMS = ("eagle_graph_auto", "osc_fused", "osc_persist@chunk=rule", "eagle_graph_steps_compact", "warp_kernel")
 NSYS_NS = (1_000_000, 100_000, 10_000, 1_000)
 NSYS_DISTS = ("spread", "uniform")
 NSYS_STEPS = (100, 1000)
@@ -81,7 +86,7 @@ NSYS_QUICK = (("eagle_graph_auto", 100_000, 100, "spread"),)
 NCU_KERNELS = (
     ("band_step", "eagle_graph_steps_compact", r"regex:oscillator_step_x16"),
     ("band_compaction", "eagle_graph_steps_compact", r"regex:(compact|rebuildActive)"),
-    ("persist", "eagle_graph_persist", r"regex:oscillator_step_xauto_persist"),
+    ("persist", "osc_persist@chunk=rule", r"regex:oscillator_step_xauto_persist"),
     ("warp", "warp_kernel", r"regex:oscillators"),
 )
 #: ncu points: stage -> (N, S, distribution): thinning efficiency, bandwidth baseline, launch regime
@@ -101,6 +106,14 @@ NCU_MIN_CC = 7.0
 #: cadence in steps, ``eager`` = run the band loop from the host so every kernel is profilable) and
 #: ``rk78_persist``, ``rk78_fused`` (the RK78 card's kernel).
 OSC_PERSIST_TPS = (384, 640, 896, 1152, 1536, 2048)
+#: every forced persist arm passes its work-stealing chunk to eagle (``chunk=N``, or ``chunk=rule``: the chunk eagle's
+#: own rule picks for the arm, evaluated up front); a forced runner is never refitted, so without a pin it keeps the
+#: bind-time chunk for life and its numbers would be that chunk's, not the rule's
+CHUNKS = (1, 2, 4, 8, 16, 32)
+RK78_CHUNKS = (8, 32)
+CHUNK_STEPS = (100, 1000)
+#: mean attempts per RK78 sample the chunk rule is evaluated at for the card's orbits
+RK78_MEAN_ATTEMPTS = 500
 RK78_PERSIST_TPS = (256, 384)
 SWEEP_STEPS = (1000, 100)
 SWEEP_DISTS = ("uniform", "spread")
@@ -110,6 +123,7 @@ CADENCE_EVERY = (4, 8, 16, 32)
 #: under 16 fragmented), FP64 pipe use, achieved warps, and the stall classes that split latency from issue
 RATIO_METRICS = (
     "smsp__thread_inst_executed_per_inst_executed.ratio",
+    "smsp__inst_executed.sum",
     "sm__inst_executed_pipe_fp64.sum",
     "sm__inst_executed_pipe_fp64.avg.pct_of_peak_sustained_active",
     "sm__warps_active.avg.per_cycle_active",
@@ -119,6 +133,8 @@ RATIO_METRICS = (
     "smsp__average_warps_issue_stalled_no_instruction_per_issue_active.ratio",
 )
 RK78_POINT = (1_000_000, 0, "orbits")
+#: the small-N RK78 row: critical-path regime, one sample per lane
+RK78_SMALL_POINT = (10_000, 0, "orbits")
 #: FP32 variant of the oscillator (spec option ``fp=32``; same model, float32 scalar type): persist sizes of its compare
 #: cells, its sample counts, and the ratio metrics plus the FP32 FMA pipe it is read against
 OSC32_PERSIST_TPS = (640, 1024, 1536, 2048)
@@ -139,9 +155,9 @@ NCU_BAND_KERNELS = (("band_step", r"regex:oscillator_step"),
                     ("band_compact_scan", r"regex:inclusiveScanBlock"),
                     ("band_compact_scatter", r"regex:compactScatter"))
 RATIO_CAPTURES = tuple(
-    (f"osc_persist_{d}_s{steps}", "osc_persist", r"regex:oscillator_step_xauto_persist",
+    (f"osc_persist_{d}_s{steps}", "osc_persist@chunk=rule", r"regex:oscillator_step_xauto_persist",
      (SWEEP_N, steps, d), RATIO_METRICS) for d in SWEEP_DISTS for steps in SWEEP_STEPS
-) + (("rk78_persist", "rk78_persist", r"regex:rkf78_attempt_persist", RK78_POINT, RATIO_METRICS),)
+) + (("rk78_persist", "rk78_persist@chunk=rule", r"regex:rkf78_attempt_persist", RK78_POINT, RATIO_METRICS),)
 
 
 def load_card():
@@ -315,8 +331,8 @@ def probe(target, out):
             put(f"{kind}.run_launches(n={n})", lambda: report.launches)
             put(f"{kind}.launch_fields(n={n})",
                 lambda: read_fields(runner, report) or "unavailable in this eagle (no T, c, f, R, k or text_bytes exposed)")
-            if getattr(report, "lane_utilisation", None) is not None:
-                put(f"{kind}.lane_utilisation(n={n})", f"{report.lane_utilisation:.3f}")
+            if slot_fill_of(report) is not None:
+                put(f"{kind}.lane_utilisation(n={n})", f"{slot_fill_of(report):.3f}")
             del runner, arm
             if device:
                 cp.get_default_memory_pool().free_all_blocks()
@@ -374,12 +390,14 @@ def parse_spec(spec):
 
 
 _OVERRIDE_LOCK = threading.Lock()
+#: the last threads-per-SM size a persist_threads block asked for (the launch may hold fewer: residency limits)
+REQUESTED: dict = {}
 
 
 @contextlib.contextmanager
 def persist_threads(tps):
     """Inside the block, a persist launch uses ``tps`` threads per SM instead of eagle's rule (``None``:
-    the rule). eagle has no hook for this, so the sizing function its launch calls is replaced for the
+    the rule; ``"2x"``: twice what the rule picks). eagle has no hook for this, so the sizing function its launch calls is replaced for the
     block -- a measurement tool, undone on exit; :func:`launched_threads_per_sm` reads what really launched.
     The replacement is process-wide, so a second block entered meanwhile (another thread, or nested)
     raises instead of racing."""
@@ -390,7 +408,11 @@ def persist_threads(tps):
     original = policy.persistent_threads_per_sm  # an eagle without the hook raises here, holding nothing
     if not _OVERRIDE_LOCK.acquire(blocking=False):
         raise RuntimeError("persist_threads is already active in this process: run one cell at a time")
-    policy.persistent_threads_per_sm = lambda *args, **kwargs: tps
+    def request(*args, **kwargs):
+        REQUESTED["tps"] = 2 * original(*args, **kwargs) if tps == "2x" else tps
+        return REQUESTED["tps"]
+
+    policy.persistent_threads_per_sm = request
     try:
         yield
     finally:
@@ -399,13 +421,44 @@ def persist_threads(tps):
 
 
 def launched_threads_per_sm(runner):
-    """Threads per SM of the runner's persist launch (block x grid / SMs), or a note when this eagle
-    keeps its launch geometry elsewhere."""
+    """Threads per SM of the runner's persist launch (block x grid / SMs) as the runner launched it (its
+    ``launch_policy``; older eagles: the private geometry), or a note when this eagle exposes neither."""
     try:
         sms = _attr(importlib.import_module("eagle.launch")._device_props(), "multiProcessorCount")
-        return int(runner._fast_block * runner._fast_grid) // sms
-    except Exception as exc:  # noqa: BLE001 -- the geometry attributes are private and differ across eagles
+        try:
+            policy = runner.launch_policy
+            block, grid = policy["block"], policy["grid"]
+        except AttributeError:
+            block, grid = runner._fast_block, runner._fast_grid
+        return int(block * grid) // sms
+    except Exception as exc:  # noqa: BLE001 -- the geometry differs across eagles
         return f"unavailable in this eagle ({type(exc).__name__})"
+
+
+def tps_option(opts):
+    """The ``tps`` option of an arm spec: an int, ``"2x"`` (twice eagle's rule) or None (the rule)."""
+    tps = opts.get("tps")
+    return None if tps is None else tps if tps == "2x" else int(tps)
+
+
+def rule_chunk(step, mean_steps, fp32):
+    """The chunk eagle's own rule picks for a kernel of ``mean_steps`` mean steps, or 32 (what an eagle without the
+    rule runs) with the reason when this eagle has none; (chunk, note)."""
+    try:
+        policy = importlib.import_module("eagle._launch_policy")
+        plugin = getattr(step, "plugin", None) or step.plan.plugin  # a deployed kernel, or a bound step
+        ops = float(getattr(plugin, "fp64_ops_ir", None) or getattr(plugin, "ops_per_step", None) or 0)
+        dev = importlib.import_module("eagle.launch")._device_props()
+        return int(policy.persistent_chunk(dev, ops, mean_steps, "float32" if fp32 else "float64")), ""
+    except Exception as exc:  # noqa: BLE001 -- an eagle without the rule or without the sidecar count
+        return 32, f"no chunk rule in this eagle ({type(exc).__name__}): chunk 32"
+
+
+def _chunk_pin(opts, step, mean_steps, fp32):
+    """(``_chunk`` keyword for until_done, rule chunk or None, note) of an arm's ``chunk=`` option (default: the rule)."""
+    want = opts.get("chunk", "rule")
+    chunk, note = rule_chunk(step, mean_steps, fp32) if want == "rule" else (int(want), "")
+    return {"_chunk": chunk}, chunk, note
 
 
 def _runner_arm(state, runner):
@@ -448,14 +501,21 @@ def build_arm(spec, n, steps, dist):
         if which == "warp":
             return rk._make_warp_arm(n), rk._inputs(n)
         # auto keeps until_done's own pick; the others force one entry (band: the single-attempt kernel, compacted)
-        extra = {"auto": {}, "persist": {"_fast_mode": "persist", "_lane_utilisation": True},
+        extra = {"auto": {}, "persist": {"_fast_mode": "persist", "_lane_utilisation": opts.get("util") == "1"},
                  "fused": {"_fast_mode": "fused_one"},
                  "band": {"_fast_mode": False, **({"every": int(opts["every"])} if "every" in opts else {})}}[which]
         state = rk._GpuArm(n)
         kernel = rk._define_active_kernel() if which == "band" else rk._define_kernel()
-        runner = eagle.until_done(eagle.deploy(kernel), max_steps=rk.MAX_ATTEMPTS, t_final=rk.T_FINAL,
+        step = eagle.deploy(kernel)
+        pinned = None
+        if which == "persist":  # a forced persist runner is never refitted: it takes its chunk from here
+            pin, pinned, note = _chunk_pin(opts, step, RK78_MEAN_ATTEMPTS, False)
+            extra.update(pin)
+        runner = eagle.until_done(step, max_steps=rk.MAX_ATTEMPTS, t_final=rk.T_FINAL,
                                   terminated=state.terminated, **state.planes, **extra)
-        return _runner_arm(state, runner), rk._inputs(n)
+        arm = _runner_arm(state, runner)
+        arm["chunk"], arm["note"] = pinned, note if pinned is not None else ""
+        return arm, rk._inputs(n)
     card = load_card()
     inp = make_inputs(card, n, steps, dist)
     fp32 = opts.get("fp") == "32"  # the same model in float32: planes, inputs and the kernel's scalar type
@@ -473,9 +533,16 @@ def build_arm(spec, n, steps, dist):
     if base in ("osc_persist", "osc_fused"):
         mode = "persist" if base == "osc_persist" else "fused_one"
         state = card._GpuArm(n, dtype)
-        runner = eagle.until_done(deploy(card._define_persist_kernel()), max_steps=steps, dt=card.DT,
-                                  _fast_mode=mode, _lane_utilisation=(mode == "persist"), **state.planes())
-        return _runner_arm(state, runner), inp
+        step = deploy(card._define_persist_kernel())
+        pin, pinned, note = {}, None, ""
+        if mode == "persist":  # a forced persist runner is never refitted: it takes its chunk from here
+            pin, pinned, note = _chunk_pin(opts, step, float(inp["nstop"].mean()), fp32)
+        runner = eagle.until_done(step, max_steps=steps, dt=card.DT, _fast_mode=mode,
+                                  _lane_utilisation=(mode == "persist" and opts.get("util") == "1"), **pin,
+                                  **state.planes())
+        arm = _runner_arm(state, runner)
+        arm["chunk"], arm["note"] = pinned, note
+        return arm, inp
     if base == "osc_band":
         import hawk
 
@@ -495,8 +562,8 @@ def build_arm(spec, n, steps, dist):
 
 
 def _step_accounting(spec, arm, inp, steps):
-    """``sample_steps`` (sample-steps the run executed), ``ops_per_step`` (FP64 instructions per sample-step) and
-    where that came from, for the lane efficiency ncu reports are divided by. The count comes from the
+    """``sample_steps`` (sample-steps the run executed), ``fp64_ops_ir`` (the IR's FP64 operation count per sample-step,
+    which the chunk rule reads; not an instruction count) and where that came from. The count comes from the
     kernel's sidecar when this eagle exposes it, else from the card's own FP64 count of the kernel."""
     base = parse_spec(spec)[0]
     try:
@@ -506,15 +573,18 @@ def _step_accounting(spec, arm, inp, steps):
         elif base.startswith("osc_") or base == "eagle_graph_auto":
             total, card_ops = float(inp["nstop"].sum()), load_card().FLOPS_PER_SAMPLE_STEP
         else:
-            return "sample_steps=- ops_per_step=- ops_source=-"
+            return "sample_steps=- fp64_ops_ir=- ops_source=-"
         runner = getattr(arm["state"], "runner", None)
-        sidecar = next((getattr(o, "ops_per_step") for o in (getattr(runner, "step", None), runner)
-                        if isinstance(getattr(o, "ops_per_step", None), (int, float))), None)
+        plugin = getattr(getattr(getattr(runner, "step", None), "plan", None), "plugin", None)
+        sidecar = next((getattr(o, name) for o in (plugin, getattr(runner, "step", None), runner)
+                        for name in ("fp64_ops_ir", "ops_per_step")
+                        if isinstance(getattr(o, name, None), (int, float))), None)
         ops, src = (sidecar, "sidecar") if sidecar is not None else (card_ops, "card-count")
         launched = launched_threads_per_sm(runner) if base.endswith("persist") else "-"
-        return f"sample_steps={total:.0f} ops_per_step={ops} ops_source={src} launched_tps={launched}"
+        return (f"sample_steps={total:.0f} fp64_ops_ir={ops} ops_source={src} launched_tps={launched} "
+                f"chunk={arm.get('chunk')}")
     except Exception as exc:  # noqa: BLE001 -- the accounting is optional
-        return f"sample_steps=- ops_per_step=- ops_source=unavailable({type(exc).__name__}) launched_tps=-"
+        return f"sample_steps=- fp64_ops_ir=- ops_source=unavailable({type(exc).__name__}) launched_tps=- chunk=-"
 
 
 def worker(spec, n, steps, dist):
@@ -523,8 +593,7 @@ def worker(spec, n, steps, dist):
     sees that run alone."""
     import cupy as cp
 
-    tps = parse_spec(spec)[1].get("tps")
-    with persist_threads(int(tps) if tps else None):
+    with persist_threads(tps_option(parse_spec(spec)[1])):
         arm, inp = build_arm(spec, n, steps, dist)
         for _ in range(2):
             arm["state"].upload(inp)  # compile, graph capture, caches
@@ -575,6 +644,7 @@ FIELD_NAMES = ("T", "c", "f", "R", "k", "text_bytes", "every", "steps_per_launch
 #: context arms (other frameworks), run once at the card's own N = 1e6, S = 1000 spread point and only while
 #: the stage has used less than this share of its budget
 CONTEXT_ARMS = ("torch_compiled", "jax_vmap")
+REFERENCE_ARMS = ("warp",) + CONTEXT_ARMS
 CONTEXT_POINT = (1_000_000, 1000, "spread")
 CONTEXT_BUDGET_SHARE = 0.6
 #: auto counts as having picked the fastest eagle path when within this share of it (timer noise)
@@ -587,16 +657,19 @@ def compare_arms(kernel):
     """(label, arm spec) of every arm of one kernel, the reference (eagle auto) first and Warp last."""
     if kernel == "osc32":  # no Warp arm: the float32 variant is eagle-only (auto against its own entries)
         fp = "fp=32"
-        arms = [("auto", f"eagle_graph_auto@{fp}"), ("fused_one", f"osc_fused@{fp}"), ("persist@auto", f"osc_persist@{fp}")]
-        arms += [(f"persist@{t}", f"osc_persist@{fp},tps={t}") for t in OSC32_PERSIST_TPS]
-        return arms + [("band@auto", f"osc_band@{fp}")]
+        arms = [("auto", f"eagle_graph_auto@{fp}"), ("fused_one", f"osc_fused@{fp}"),
+                ("persist@auto", f"osc_persist@{fp},chunk=rule")]
+        arms += [(f"persist@{t}", f"osc_persist@{fp},chunk=rule,tps={t}") for t in OSC32_PERSIST_TPS]
+        return arms + [("band@auto", f"osc_band@{fp}"), ("auto_last", f"eagle_graph_auto@{fp}")]
     osc = kernel == "osc"
     pre = "osc" if osc else "rk78"
     tps = OSC_PERSIST_TPS if osc else RK78_PERSIST_TPS
     arms = [("auto", "eagle_graph_auto" if osc else "rk78_auto"), ("fused_one", f"{pre}_fused")]
-    arms += [("persist@auto", f"{pre}_persist")] + [(f"persist@{t}", f"{pre}_persist@tps={t}") for t in tps]
+    arms += [("persist@auto", f"{pre}_persist@chunk=rule")]
+    arms += [(f"persist@{t}", f"{pre}_persist@chunk=rule,tps={t}") for t in tps]
     arms += [(f"band@{e or 'auto'}", f"{pre}_band" + (f"@every={e}" if e else "")) for e in BAND_EVERY]
-    return arms + [("warp", "warp_kernel" if osc else "rk78_warp")]
+    # eagle auto is timed first and last: the first arm of a cell follows the previous cell's Warp runs on a hot, throttled clock
+    return arms + [("warp", "warp_kernel" if osc else "rk78_warp"), ("auto_last", arms[0][1])]
 
 
 def compare_cells(stage, kernels=("osc", "rk78", "osc32"), ns=COMPARE_NS):
@@ -629,10 +702,11 @@ def stage_arms(stage, kernel):
     """(label, spec) of the arms a stage runs in each cell."""
     base = stage.removesuffix("-quick")
     if base == "crossover":
-        return [("auto", "eagle_graph_auto"), ("fused_one", "osc_fused"), ("persist@auto", "osc_persist")]
+        return [("auto", "eagle_graph_auto"), ("fused_one", "osc_fused"), ("persist@auto", "osc_persist@chunk=rule"),
+                ("auto_last", "eagle_graph_auto")]
     if base == "band":
         return [("auto", "eagle_graph_auto"), ("band@auto", "osc_band")] + [
-            (f"band@{e}", f"osc_band@every={e}") for e in BAND_SWEEP_EVERY]
+            (f"band@{e}", f"osc_band@every={e}") for e in BAND_SWEEP_EVERY] + [("auto_last", "eagle_graph_auto")]
     return compare_arms(kernel)
 
 
@@ -789,60 +863,115 @@ def _corrupt(label, out):
     return out
 
 
+def clock_mode():
+    """``locked:<MHz>`` when profile.sh locked the SM clock for this run, else ``unlocked`` (walls are then
+    normalised to the device maximum clock)."""
+    return os.environ.get("PROFILE_CLOCK_MODE", "unlocked")
+
+
+def normalised(ms, sm_mhz, max_mhz):
+    """``ms`` scaled to the device maximum clock when the clock was not locked and both clocks are known: a wall
+    sampled at 1095 MHz of a 1410 MHz part reads as the 1410 MHz wall would."""
+    if ms is None or clock_mode().startswith("locked") or not sm_mhz or not max_mhz:
+        return ms
+    return ms * sm_mhz / max_mhz
+
+
+def clock_line():
+    """One line for the head of every table: how the SM clock was held, and what NVML reads now."""
+    sampler = ClockSampler()
+    with sampler:
+        pass
+    now, peak = sampler.median(), sampler.max_mhz()
+    how = (f"SM clock {clock_mode()[7:]} MHz locked for the run" if clock_mode().startswith("locked") else
+           "SM clock NOT locked: walls are as measured; the CSV adds a clock-normalised column (each arm's wall x its own "
+           "NVML median MHz / device maximum MHz)")
+    return f"{how}; NVML now {now or 'n/a'} MHz, device maximum {peak or 'n/a'} MHz"
+
+
+def residency_skip(asked, launched):
+    """The note of an arm whose requested threads per SM the launch could not hold (the launch is read, not the
+    request), or "" when it did."""
+    if isinstance(asked, int) and isinstance(launched, int) and launched < asked:
+        return f"{asked} threads per SM is above the residency limit (launched {launched})"
+    return ""
+
+
 def measure_arm(label, spec, kernel, n, steps, dist, judge_out):
     """Build, warm, guard and (if the guard passes) time one arm. Returns its record: status ok / wrong /
-    skipped / unavailable (the reason in ``note``), median and best ms, the report's mode, the persist threads
-    per SM launched and its lane utilisation. ``judge_out(out, same_key)`` returns the guard's verdict."""
+    skipped / unavailable (the reason in ``note``), median and best ms (clock-normalised when the clock was not
+    locked; ``raw`` is the median as measured), the mode of the TIMED runs, the persist threads per SM and chunk
+    launched, the slot fill (only for arms asked for it with ``util=1``: it adds a memset and a sync per run),
+    and eagle's own per-run probe walls. ``judge_out(out, same_key)`` returns the guard's verdict."""
     import cupy as cp
 
     base, opts = parse_spec(spec)
-    tps = int(opts["tps"]) if "tps" in opts else None
-    rec = dict(label=label, spec=spec, status="ok", note="", median=None, best=None, mode="-", launched="-",
-               util=None, bitwise=None, diff=None, sm_mhz=None, modes="", fields={})
+    tps = tps_option(opts)
+    rec = dict(label=label, spec=spec, status="ok", note="", median=None, best=None, raw=None, mode="-", launched="-",
+               util=None, bitwise=None, diff=None, sm_mhz=None, sm_max_mhz=None, modes="", fields={}, chunk=None,
+               probe_walls="")
     arm = None
     clock = ClockSampler()
     try:
+        REQUESTED.clear()
         with persist_threads(tps), clock:
             arm, inp = build_arm(spec, n, steps, dist)
+            rec["chunk"] = arm.get("chunk")
+            rec["note"] = arm.get("note", "")
             runs = []
             for _ in range(SWEEP_WARM):
                 arm["state"].upload(inp)
                 arm["run"]()
                 runs.append(str(getattr(arm.get("report"), "mode", "-")))
             report = arm.get("report")
-            rec["mode"] = "-" if report is None else str(getattr(report, "mode", "?"))
-            rec["util"] = getattr(report, "lane_utilisation", None)
+            warm_mode = "-" if report is None else str(getattr(report, "mode", "?"))
+            rec["mode"] = warm_mode
             if base.endswith("persist"):
                 rec["launched"] = launched_threads_per_sm(arm["state"].runner)
-            if tps is not None and isinstance(rec["launched"], int) and rec["launched"] < tps:
-                rec.update(status="skipped", note=f"{tps} threads per SM is above the residency limit "
-                                                  f"(launched {rec['launched']})")
+            why_skip = residency_skip(REQUESTED.get("tps") if tps is not None else None, rec["launched"])
+            if why_skip:
+                rec.update(status="skipped", note=why_skip)
                 return rec
             out = _corrupt(label, arm["download"]())
-            ok, bitwise, diff, why = judge_out(out, (base, rec["mode"]))
+            ok, bitwise, diff, why = judge_out(out, (base, warm_mode))
             rec.update(bitwise=bitwise, diff=diff)
             if not ok:
                 rec.update(status="wrong", note=why)
                 return rec
-            kind, walls = _timer_kind(spec), []
+            kind, walls, probe_walls = _timer_kind(spec), [], []
+            runner = getattr(arm["state"], "runner", None)
             for _ in range(SWEEP_REPS):
                 arm["state"].upload(inp)
                 walls.append(timed_ms(kind, arm["run"]))
                 runs.append(str(getattr(arm.get("report"), "mode", "-")))
+                probe_walls.append(_probe_wall(runner))
             report = arm.get("report")
-            rec["fields"] = read_fields(getattr(arm["state"], "runner", None), report)
-            rec["util"] = getattr(report, "lane_utilisation", rec["util"])
+            rec["mode"] = runs[-1]  # the mode the measured runs took, not the warm run's
+            rec["fields"] = read_fields(runner, report)
+            rec["util"] = slot_fill_of(report)
+            rec["probe_walls"] = ">".join(probe_walls)
             walls.sort()
             rec.update(median=walls[len(walls) // 2], best=walls[0])
-        rec["modes"] = ">".join(runs)  # the mode of each run: the third is what eagle's probe settled on
+        rec["modes"] = ">".join(runs)  # the mode of each run; the last is what the table shows
         rec["sm_mhz"] = clock.median()
         rec["sm_max_mhz"] = clock.max_mhz()
+        if rec["median"] is not None:
+            rec["norm"] = normalised(rec["median"], rec["sm_mhz"], rec["sm_max_mhz"])
     except Exception as exc:  # noqa: BLE001 -- one refused arm must not end the matrix
         rec.update(status="unavailable", note=f"{type(exc).__name__}: {str(exc)[:140]}")
     finally:
         del arm
         cp.get_default_memory_pool().free_all_blocks()
     return rec
+
+
+def _probe_wall(runner):
+    """eagle's own wall per launch mode after a run (``mode=ms,...``): what its probe measured and settles on.
+    Empty on an eagle that keeps none."""
+    walls = getattr(runner, "_fast_wall", None)
+    if not isinstance(walls, dict):
+        return ""
+    return ";".join(f"{k}={v:.3f}" for k, v in walls.items() if isinstance(v, (int, float)))
 
 
 _FAMILY = {"eagle_graph_auto": "osc-auto", "osc_fused": "osc-plain", "osc_persist": "osc-plain", "osc_band": "osc-band",
@@ -853,6 +982,20 @@ def _entry_family(spec):
     """The kernel an arm launches: arms of one family and one launch mode must agree bit for bit."""
     base = parse_spec(spec)[0]
     return _FAMILY.get(base, base)
+
+
+def tag(rec):
+    """An arm's label with its work-stealing chunk when it has one: ``persist@640/8``."""
+    return rec["label"] if rec.get("chunk") is None or "/c" in rec["label"] else f"{rec['label']}/{rec['chunk']}"
+
+
+def slot_fill_of(report):
+    """The share of lane-steps that ran a sample step, under either name this eagle's report may carry it."""
+    for name in ("slot_fill", "lane_utilisation"):
+        value = getattr(report, name, None)
+        if value is not None:
+            return value
+    return None
 
 
 def run_cell(kernel, n, steps, dist, extra_arms=(), arms=None):
@@ -878,13 +1021,13 @@ def run_cell(kernel, n, steps, dist, extra_arms=(), arms=None):
     for label, spec in [*(arms or compare_arms(kernel)), *extra_arms]:
         rec = measure_arm(label, spec, kernel, n, steps, dist, make_judge(spec))
         recs.append(rec)
-        say(f"compare {kernel} N={n} S={steps} {dist} {label}: {rec['status']} "
+        say(f"compare {kernel} N={n} S={steps} {dist} {tag(rec)}: {rec['status']} "
             f"{'' if rec['median'] is None else format(rec['median'], '.3f') + ' ms '}{rec['mode']} {rec['note']}")
     return dict(kernel=kernel, n=n, steps=steps, dist=dist, arms=recs, reference=ref.get("spec"))
 
 
 def _eagle_ok(cell):
-    return [r for r in cell["arms"] if r["status"] == "ok" and r["label"] != "warp" and r["median"] is not None
+    return [r for r in cell["arms"] if r["status"] == "ok" and r["label"] not in ("warp", "auto_last") and r["median"] is not None
             and r["spec"] not in CONTEXT_ARMS]
 
 
@@ -912,17 +1055,22 @@ def render_compare(cells, unreached=()):
     def fmt(rec):
         if rec is None:
             return "-"
-        return {"ok": f"{rec['median']:.3f}" if rec["median"] is not None else "?", "wrong": "WRONG",
-                "skipped": "skip"}.get(rec["status"], "n/a")
+        wall = f"{rec['median']:.3f}" if rec["median"] is not None else "?"
+        if rec.get("chunk") is not None and rec["median"] is not None:
+            wall += f"/{rec['chunk']}"
+        return {"ok": wall, "wrong": "WRONG", "skipped": "skip"}.get(rec["status"], "n/a")
 
-    text = ["Wall = CUDA events around one run (median of 3 after 2 warm runs), ms. WRONG = the guard flagged the arm "
+    text = [clock_line(),
+            "Wall = CUDA events around one run (median of 3 after 2 warm runs), ms; a persist wall carries its chunk (wall/c). "
+            "auto mode = the mode of the last timed run. WRONG = the guard flagged the arm "
             "(not timed); skip = persist size above the residency limit; n/a = this eagle cannot build or run the arm.",
             "band = hawk.steps(kernel, %d) compacted every `every` steps (auto = eagle's default) for the oscillator, the "
-            "single-attempt kernel for RK78; persist@T = T threads per SM." % BAND_STEPS_PER_LAUNCH,
+            "single-attempt kernel for RK78; persist@T = T threads per SM at the chunk eagle's rule picks, passed explicitly "
+            "(a forced runner is never refitted); auto_last = eagle auto timed again after every other arm.",
             "Every row carries precision=fp64 or precision=fp32 (osc32: the oscillator in float32, same model; eagle "
             "arms only, no Warp arm; guard = float32 tolerance against its own auto).", ""]
-    csv = ["kernel,n,steps,dist,arm,status,median_ms,best_ms,mode,threads_per_sm_launched,lane_utilisation,"
-           "bitwise_vs_auto,max_diff_vs_auto,sm_mhz,modes_per_run,launch_fields,precision,note"]
+    csv = ["kernel,n,steps,dist,arm,status,median_ms,best_ms,mode,threads_per_sm_launched,slot_fill,"
+           "bitwise_vs_auto,max_diff_vs_auto,sm_mhz,clock_normalised_ms,modes_per_run,probe_walls,launch_fields,precision,note"]
     notes, slower, not_fastest = [], [], []
     for kernel in ("osc", "rk78", "osc32"):
         mine = [c for c in cells if c["kernel"] == kernel]
@@ -941,11 +1089,12 @@ def render_compare(cells, unreached=()):
                         f"{'-' if a_w is None else format(a_w, '.2f'):>9s} {'-' if b_w is None else format(b_w, '.2f'):>9s}")
             for r in c["arms"]:
                 csv.append(",".join(str(v) for v in (
-                    c["kernel"], c["n"], c["steps"], c["dist"], r["label"], r["status"],
+                    c["kernel"], c["n"], c["steps"], c["dist"], tag(r), r["status"],
                     "" if r["median"] is None else f"{r['median']:.4f}", "" if r["best"] is None else f"{r['best']:.4f}",
                     r["mode"], r["launched"], "" if r["util"] is None else f"{r['util']:.3f}",
                     "" if r["bitwise"] is None else int(r["bitwise"]), "" if r["diff"] is None else f"{r['diff']:.3e}",
-                    r.get("sm_mhz") or "", r.get("modes", ""),
+                    r.get("sm_mhz") or "", "" if r.get("norm") is None else f"{r['norm']:.4f}", r.get("modes", ""),
+                    r.get("probe_walls", ""),
                     ";".join(f"{k}={v}" for k, v in r.get("fields", {}).items()), precision_of(kernel),
                     '"' + r["note"].replace('"', "'") + '"')))
                 if r["note"]:
@@ -971,6 +1120,15 @@ def render_compare(cells, unreached=()):
     text += ["", "-- SM clock during the runs (NVML median per arm; quote bounds at it, not at the boost clock): "
              + (f"median {clocks[len(clocks) // 2]} MHz, lowest {clocks[0]}, highest {clocks[-1]}"
                 + (f", device maximum {peak}" if peak else "") if clocks else "unavailable (no NVML)")]
+    drift = []
+    for c in cells:
+        by = {r["label"]: r for r in c["arms"]}
+        first, last = by.get("auto", {}).get("median"), by.get("auto_last", {}).get("median")
+        if first and last and abs(last / first - 1) > AUTO_TOLERANCE / 2:
+            drift.append(f"  {cell_id(c)}: auto first {first:.3f} ms, last {last:.3f} ms ({last / first - 1:+.1%}; "
+                         f"SM clock {by['auto'].get('sm_mhz') or 'n/a'} then {by['auto_last'].get('sm_mhz') or 'n/a'} MHz)")
+    text += ["", f"-- cells where auto timed last differs from auto timed first by more than {AUTO_TOLERANCE / 2:.1%} ({len(drift)})",
+             *(drift or ["  none"])]
     text += ["", "-- notes", *(notes or ["  none"]), "",
              f"-- cells where eagle auto is slower than Warp ({len(slower)})", *(slower or ["  none"]), "",
              f"-- cells where auto did not pick the fastest eagle path (more than {AUTO_TOLERANCE:.0%} slower; {len(not_fastest)})",
@@ -1008,23 +1166,27 @@ def band_fit(cells):
 
 
 def crossover_lines(cells):
-    """fused_one against persist per cell, and the entry auto settled on (its mode after each run)."""
+    """fused_one against persist per cell, the entry auto settled on (its mode after the last run), eagle's own probe
+    walls per run (what its pick was made from), and the forced walls the pick is held against."""
     lines = []
     for c in cells:
         by = {r["label"]: r for r in c["arms"]}
         f, p, a = (by.get(k, {}) for k in ("fused_one", "persist@auto", "auto"))
         if f.get("median") and p.get("median"):
             verdict = "persist" if p["median"] < f["median"] else "fused_one"
-            lines.append(f"  N={_cell_name('osc', c['n'], 0, '').split()[1][2:]}: fused_one {f['median']:.3f} ms, persist {p['median']:.3f} ms "
-                         f"(faster: {verdict}, {max(f['median'], p['median']) / min(f['median'], p['median']):.2f}x); "
-                         f"auto settled on {(a.get('modes', '').split('>') + ['?', '?', '?'])[2]} after 3 runs "
-                         f"(modes per run {a.get('modes', '?')})")
+            modes = a.get("modes", "").split(">") if a.get("modes") else ["?"]
+            settled = modes[-1]
+            lines.append(f"  N={_cell_name('osc', c['n'], 0, '').split()[1][2:]}: fused_one {f['median']:.3f} ms, persist {p['median']:.3f}"
+                         f"/c{p.get('chunk', '?')} ms (faster: {verdict}, {max(f['median'], p['median']) / min(f['median'], p['median']):.2f}x); "
+                         f"auto settled on {settled} after {len(modes)} runs (modes per run {a.get('modes', '?')}; "
+                         f"{'agrees' if settled == verdict else 'DISAGREES'} with the forced walls)")
+            lines.append(f"    eagle's own walls per timed run (ms, mode=wall;): {a.get('probe_walls') or 'unavailable in this eagle'}")
     return lines or ["  no crossover cell ran"]
 
 
 def compare_stage(out, stage, kernels=("osc", "rk78", "osc32"), ns=COMPARE_NS, budget_s=None):
     """Run every cell; the table and CSV are rewritten after each, so a stage cut short keeps what it finished,
-    and no cell starts once the budget is spent. A stage in which no arm of any cell ran fails."""
+    and no cell starts once the budget is spent. A stage in which no arm of any cell ran, or no eagle arm, fails."""
     t0, cells = time.monotonic(), []
     todo = compare_cells(stage, kernels, ns)
     txt, csv = out / f"{stage.replace('-', '_')}.txt", out / f"{stage.replace('-', '_')}.csv"
@@ -1052,6 +1214,119 @@ def compare_stage(out, stage, kernels=("osc", "rk78", "osc32"), ns=COMPARE_NS, b
     say("\n" + text.split("-- notes")[-1])
     if not any(r["status"] == "ok" for c in cells for r in c["arms"]):
         raise RuntimeError(f"no arm of any cell of {stage} ran; see {txt.name}")
+    # the reference arms (Warp, torch, jax) running alone measure nothing about eagle
+    if not any(r["status"] == "ok" and r["label"] not in REFERENCE_ARMS for c in cells for r in c["arms"]):
+        raise RuntimeError(f"no eagle arm of any cell of {stage} ran; see {txt.name}")
+
+
+# --------------------------------------------------------------------------- #
+# chunk sweep: the forced persist launch over the work-stealing chunk
+# --------------------------------------------------------------------------- #
+def chunk_cells(stage):
+    """(kernel, N, S, dist) of the chunk sweep: the oscillator in float64 and float32 over S, then RK78 (the quick
+    stage: one small cell)."""
+    if stage.endswith("-quick"):
+        return [("osc", 100_000, 100, "spread")]
+    cells = [(k, SWEEP_N, s, "spread") for k in ("osc", "osc32") for s in CHUNK_STEPS]
+    return cells + [("rk78", SWEEP_N, 0, "orbits")]
+
+
+def chunk_arms(kernel, stage="chunk-sweep", with_t2=True):
+    """(label, spec) of one cell: the forced persist arm at each chunk and threads per SM (``T1`` = eagle's rule,
+    ``T2`` = twice it; the second only while the budget allows), and one arm per chunk that also counts the slot fill
+    (``util=1``: it adds a memset and a sync per run, so it never shares an arm with a wall)."""
+    pre = "rk78_persist" if kernel == "rk78" else "osc_persist"
+    fp = ",fp=32" if kernel == "osc32" else ""
+    chunks = RK78_CHUNKS if kernel == "rk78" else ((2, 8, 32) if stage.endswith("-quick") else CHUNKS)
+
+    def spec(c, extra=""):
+        opts = ",".join(o for o in (fp[1:], f"chunk={c}", extra) if o)
+        return f"{pre}@{opts}"
+
+    arms = [(f"T1/c{c}", spec(c)) for c in chunks]
+    if with_t2 and not stage.endswith("-quick"):
+        arms += [(f"T2/c{c}", spec(c, "tps=2x")) for c in chunks]
+    return arms + [(f"fill/c{c}", spec(c, "util=1")) for c in chunks]
+
+
+def render_chunk_sweep(cells):
+    """(text, csv): per cell, the wall of each (threads per SM, chunk), the slot fill of each chunk, the fastest chunk
+    and where the rule's chunk stands against it."""
+    text = [clock_line(),
+            "Wall = CUDA events around one forced persist run (median of 3 after 2 warm runs), ms. T1 = eagle's threads per SM, "
+            "T2 = twice that; each arm passes its chunk explicitly. Slot fill (share of lane-steps that ran a sample step, "
+            "counted in its own arm) is read from the util arms. rule = the chunk eagle's rule picks for the cell.", ""]
+    csv = ["kernel,n,steps,dist,precision,threads,chunk,status,median_ms,clock_normalised_ms,threads_per_sm_launched,slot_fill,rule_chunk,sm_mhz,note"]
+    for c in cells:
+        rule = next((r["chunk_rule"] for r in c["arms"] if r.get("chunk_rule") is not None), None)
+        walls = {}
+        fill = {}
+        launched = {}
+        for r in c["arms"]:
+            thr, _, ch = r["label"].partition("/c")
+            if r["median"] is not None and thr in ("T1", "T2"):
+                walls[(thr, int(ch))] = r["median"]
+                launched[thr] = r["launched"]
+            if thr == "fill":
+                fill[int(ch)] = r["util"]
+            csv.append(",".join(str(v) for v in (
+                c["kernel"], c["n"], c["steps"], c["dist"], precision_of(c["kernel"]), thr, ch, r["status"],
+                "" if r["median"] is None else f"{r['median']:.4f}", "" if r.get("norm") is None else f"{r['norm']:.4f}",
+                r["launched"], "" if r["util"] is None else f"{r['util']:.3f}", "" if rule is None else rule,
+                r.get("sm_mhz") or "", '"' + r["note"].replace('"', "'") + '"')))
+        chunks = sorted({k[1] for k in walls} | set(fill))
+        text.append(f"{_cell_name(c['kernel'], c['n'], c['steps'], c['dist'])}  precision={precision_of(c['kernel'])}  "
+                    f"rule chunk {rule if rule is not None else 'n/a'}")
+        text.append(f"  {'chunk':>12s} " + " ".join(f"{k:>8d}" for k in chunks))
+        for thr in ("T1", "T2"):
+            if any(k[0] == thr for k in walls):
+                text.append(f"  {thr + ' ' + str(launched.get(thr, '?')) + '/SM':>12s} "
+                            + " ".join(f"{walls.get((thr, k), float('nan')):8.3f}" for k in chunks))
+        if fill:
+            text.append(f"  {'slot fill':>12s} " + " ".join(f"{fill[k]:8.3f}" if fill.get(k) is not None else f"{'-':>8s}"
+                                                             for k in chunks))
+        t1 = {k[1]: v for k, v in walls.items() if k[0] == "T1"}
+        if t1:
+            best = min(t1, key=t1.get)
+            line = f"  fastest at T1: chunk {best} ({t1[best]:.3f} ms)"
+            if rule in t1:
+                line += f"; rule chunk {rule} = {t1[rule]:.3f} ms ({t1[rule] / t1[best] - 1:+.1%} against the fastest)"
+            text.append(line)
+        text.append("")
+    return "\n".join(text) + "\n", "\n".join(csv) + "\n"
+
+
+def chunk_sweep_stage(out, stage, budget_s=None):
+    """Run every cell of the chunk sweep, rewriting the table and CSV after each; no cell starts once the budget is
+    spent. ``PROFILE_CHUNK_T2=0`` drops the twice-the-threads arms (profile.sh sets it when the estimate is over budget)."""
+    t0, cells = time.monotonic(), []
+    with_t2 = os.environ.get("PROFILE_CHUNK_T2", "1") != "0"
+    txt, csv = out / f"{stage.replace('-', '_')}.txt", out / f"{stage.replace('-', '_')}.csv"
+    for kernel, n, steps, dist in chunk_cells(stage):
+        if budget_s is not None and time.monotonic() - t0 > budget_s:
+            break
+        cell = run_cell(kernel, n, steps, dist, arms=chunk_arms(kernel, stage, with_t2))
+        rule = cell_rule_chunk(kernel, n, steps, dist)  # the chunk eagle's rule picks for this cell
+        for r in cell["arms"]:
+            r["chunk_rule"] = rule
+        cells.append(cell)
+        text, table = render_chunk_sweep(cells)
+        txt.write_text(text)
+        csv.write_text(table)
+    if not any(r["status"] == "ok" for c in cells for r in c["arms"]):
+        raise RuntimeError(f"no arm of any cell of {stage} ran; see {txt.name}")
+
+
+def cell_rule_chunk(kernel, n, steps, dist):
+    """The chunk eagle's rule picks for a cell (None when this eagle has no rule)."""
+    spec = {"osc": "osc_persist@chunk=rule", "osc32": "osc_persist@fp=32,chunk=rule",
+            "rk78": "rk78_persist@chunk=rule"}[kernel]
+    try:
+        arm, _ = build_arm(spec, n, steps, dist)
+        chunk, note = arm.get("chunk"), arm.get("note", "")
+        return None if note else chunk
+    except Exception:  # noqa: BLE001 -- the rule line is a convenience, never the stage
+        return None
 
 
 # --------------------------------------------------------------------------- #
@@ -1071,7 +1346,8 @@ def nsys_stage(out, name, cells, nsys):
     summary = out / f"{name}.txt"
     table_head = ("arm                        dist        N        S     mode       launches  "
                   "traced_kernels  kernel_ms  api_calls  api_ms  compactions  wall_ms")
-    notes = ("Measured run only (profiler start/stop around one run after two warm runs).\n"
+    notes = (clock_line() + "\n"
+             "Measured run only (profiler start/stop around one run after two warm runs); kernel_ms (nsys) sits beside wall_ms (events).\n"
              "launches = what eagle reports for the run; traced_kernels / kernel_ms = what nsys recorded. A band run\n"
              "whose loop sits in a conditional graph can show fewer traced kernels than launches: the\n"
              "device-side loop's kernels are then missing from the trace, not absent from the run.\n")
@@ -1188,6 +1464,17 @@ def ncu_captures(stage):
                   r"regex:oscillator_step_xauto_persist", (SWEEP_N, TSWEEP_FP32_STEPS, "spread"), RATIO_METRICS_FP32)
                  for t in OSC_PERSIST_TPS]
         return caps[:1] if stage.endswith("-quick") else caps
+    if stage.startswith("ncu-chunk"):
+        caps = [(f"{kernel}_c{c}_s{steps}", f"osc_persist@{'fp=32,' if kernel == 'osc32' else ''}chunk={c}",
+                 r"regex:oscillator_step_xauto_persist", (SWEEP_N, steps, "spread"), RATIO_METRICS_FP32)
+                for kernel in ("osc", "osc32") for steps in CHUNK_STEPS for c in CHUNKS]
+        caps += [(f"rk78_c{c}", f"rk78_persist@chunk={c}", r"regex:rkf78_attempt_persist", RK78_POINT, RATIO_METRICS_FP32)
+                 for c in RK78_CHUNKS]
+        return caps[3:4] if stage.endswith("-quick") else caps
+    if stage.startswith("ncu-rk78-small"):
+        caps = [(f"rk78_{which}_n1e4", spec, r"regex:rkf78_attempt", RK78_SMALL_POINT, RATIO_METRICS)
+                for which, spec in (("auto", "rk78_auto"), ("fused", "rk78_fused"), ("persist", "rk78_persist@chunk=rule"))]
+        return caps[2:] if stage.endswith("-quick") else caps
     if stage == "ncu-ratio-quick":
         return [c for c in RATIO_CAPTURES if c[0] == f"osc_persist_spread_s{SWEEP_STEPS[0]}"]
     if stage in ("ncu-band", "ncu-band-quick"):
@@ -1198,6 +1485,47 @@ def ncu_captures(stage):
             if stage != "ncu-quick" or label in NCU_QUICK_KERNELS]
 
 
+def _capture(out, stage, label, arm, regex, point, metrics, ncu, sudo):
+    """One ncu capture and what it left: (code, tail, worker line, report path, raw-page CSV text)."""
+    rep = out / f"{stage}_{label}"
+    worker_line = raw = ""
+    try:
+        done = subprocess.run(ncu_command(ncu, rep, regex, arm, point, sudo, metrics), capture_output=True,
+                              text=True, timeout=NCU_KERNEL_CAP_S)
+        code, tail = done.returncode, (done.stdout + done.stderr)[-1500:]
+        worker_line = next((ln for ln in done.stdout.splitlines() if "worker arm=" in ln), "")
+    except subprocess.TimeoutExpired:
+        code, tail = 124, f"ncu exceeded {NCU_KERNEL_CAP_S} s"
+    report = pathlib.Path(str(rep) + ".ncu-rep")
+    if sudo and report.exists():
+        subprocess.run(["sudo", "-n", "chown", f"{os.getuid()}:{os.getgid()}", str(report)])
+    if code == 0 and report.exists() and metrics:
+        raw = subprocess.run([ncu, "--import", str(report), "--csv", "--page", "raw"],
+                             capture_output=True, text=True).stdout
+        (out / f"{stage}_{label}.raw.csv").write_text(raw)
+    return code, tail, worker_line, report, raw
+
+
+def _calibration(arm):
+    """(key, spec, point) of the cell an arm's ``i_step`` is calibrated on: the uniform oscillator cell of the same
+    precision, or the RK78 card's own cell (it has no uniform variant)."""
+    if parse_spec(arm)[0].startswith("rk78_"):
+        return "rk78", "rk78_persist@chunk=rule", RK78_POINT
+    fp32 = precision_of(arm) == "fp32"
+    return f"osc-{precision_of(arm)}", "osc_persist@" + ("fp=32," if fp32 else "") + "chunk=rule", (SWEEP_N, 1000, "uniform")
+
+
+def sass_instructions(ncu, report):
+    """Rows of ncu's SASS view of the captured kernel (its static instruction count), or a note."""
+    try:
+        text = subprocess.run([ncu, "--import", str(report), "--page", "source", "--print-source", "sass", "--csv"],
+                              capture_output=True, text=True, timeout=120).stdout
+        rows = [ln for ln in text.splitlines()[1:] if ln.strip().strip('"')]
+        return f"{len(rows)}" if rows else "unavailable (ncu printed no SASS rows)"
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"unavailable ({type(exc).__name__})"
+
+
 def ncu_stage(out, stage, ncu, sudo):
     cc_ = compute_capability()
     if cc_ is None:
@@ -1205,21 +1533,10 @@ def ncu_stage(out, stage, ncu, sudo):
     if cc_ < NCU_MIN_CC:
         raise Skip(f"compute capability {cc_} < {NCU_MIN_CC} (Nsight Compute needs Volta or newer)")
     chosen = ncu_captures(stage)
-    summary, failed = [], 0
+    summary, failed, i_steps = [clock_line() + "\n"], 0, {}
     for label, arm, regex, point, metrics in chosen:
-        rep = out / f"{stage}_{label}"
         t0 = time.perf_counter()
-        worker_line = ""
-        try:
-            done = subprocess.run(ncu_command(ncu, rep, regex, arm, point, sudo, metrics), capture_output=True,
-                                  text=True, timeout=NCU_KERNEL_CAP_S)
-            code, tail = done.returncode, (done.stdout + done.stderr)[-1500:]
-            worker_line = next((ln for ln in done.stdout.splitlines() if "worker arm=" in ln), "")
-        except subprocess.TimeoutExpired:
-            code, tail = 124, f"ncu exceeded {NCU_KERNEL_CAP_S} s"
-        report = pathlib.Path(str(rep) + ".ncu-rep")
-        if sudo and report.exists():
-            subprocess.run(["sudo", "-n", "chown", f"{os.getuid()}:{os.getgid()}", str(report)])
+        code, tail, worker_line, report, raw = _capture(out, stage, label, arm, regex, point, metrics, ncu, sudo)
         if code != 0 or not report.exists():
             failed += 1
             summary.append(f"== {label}: ncu failed (exit {code})\n{tail}\n")
@@ -1230,19 +1547,34 @@ def ncu_stage(out, stage, ncu, sudo):
             (out / f"{stage}_{label}.csv").write_text(text.stdout)
             digest = _ncu_digest(text.stdout)
             if metrics:
-                raw = subprocess.run([ncu, "--import", str(report), "--csv", "--page", "raw"],
-                                     capture_output=True, text=True)
-                (out / f"{stage}_{label}.raw.csv").write_text(raw.stdout)
-                digest += "\n" + _ncu_metric_lines(raw.stdout, metrics)
-                digest += "\n" + (f"  lane_efficiency: not computed for FP32 (the count above is the FP64 pipe's; read "
-                                   f"{RATIO_METRICS_FP32[-2]})" if precision_of(arm) == "fp32"
-                                   else lane_efficiency_lines(raw.stdout, worker_line))
+                digest += "\n" + _ncu_metric_lines(raw, metrics)
+                digest += "\n" + _lane_block(out, stage, arm, point, raw, worker_line, i_steps, ncu, sudo)
+            if stage.startswith("ncu-rk78-small"):
+                digest += f"\n  sass_instructions (static, this entry) = {sass_instructions(ncu, report)}"
             summary.append(f"== {label} ({arm}, precision={precision_of(arm)}, {regex}, N={point[0]} S={point[1]} {point[2]}, "
                            f"{time.perf_counter() - t0:.0f} s)\n  {worker_line[worker_line.find('sample_steps'):]}\n{digest}\n")
             say(f"ncu {stage} {label}: done ({time.perf_counter() - t0:.0f} s)")
         (out / f"{stage}.txt").write_text("\n".join(summary))
     if failed == len(chosen):
         raise RuntimeError(f"every ncu capture of {stage} failed; see {stage}.txt")
+
+
+def _lane_block(out, stage, arm, point, raw, worker_line, i_steps, ncu, sudo):
+    """The two lane metrics of a capture; ``i_step`` comes from the calibration cell of its kernel and precision,
+    captured first when this stage has not yet read it."""
+    precision = precision_of(arm)
+    key, cal_spec, cal_point = _calibration(arm)
+    if key not in i_steps:
+        if (arm, point) == (cal_spec, cal_point):
+            i_steps[key] = (lane_metrics(raw, worker_line, precision).get("i_step"), f"this cell ({arm})")
+        else:
+            label = f"calibration_{key}"
+            _, _, line, rep, cal_raw = _capture(out, stage, label, cal_spec, r"regex:oscillator_step_xauto_persist"
+                                                if key.startswith("osc") else r"regex:rkf78_attempt_persist",
+                                                cal_point, RATIO_METRICS_FP32, ncu, sudo)
+            got = lane_metrics(cal_raw, line, precision) if cal_raw else {}
+            i_steps[key] = (got.get("i_step"), f"{cal_spec} at N={cal_point[0]} {cal_point[2]}")
+    return lane_lines(raw, worker_line, precision, *i_steps[key])
 
 
 _DIGEST = ("Duration", "Registers Per Thread", "Theoretical Occupancy", "Achieved Occupancy",
@@ -1283,20 +1615,51 @@ def _ncu_values(raw_csv, names):
     return found
 
 
-def lane_efficiency_lines(raw_csv, worker_line):
-    """Lane efficiency from ncu, never from the slot counter: sample-steps x FP64 instructions per step, over
-    32 x the FP64 warp-instructions ncu counted; and those warp-instructions per 32 sample-steps (ideal: ops per step)."""
+#: the pipe whose warp-instruction count the inflation is read from, by precision
+ISSUE_PIPE = {"fp64": "sm__inst_executed_pipe_fp64.sum", "fp32": "sm__inst_executed_pipe_fma.sum"}
+THREADS_PER_INST = "smsp__thread_inst_executed_per_inst_executed.ratio"
+
+
+def lane_metrics(raw_csv, worker_line, precision, i_step=None):
+    """The two lane metrics of one ncu report, from ncu only: ``lane_efficiency`` (threads per issued instruction
+    over 32), ``i_step`` (warp-instructions of the arithmetic pipe per 32 sample-steps, as observed) and, given a
+    calibrated ``i_step``, ``inflation`` (instructions issued over those the sample-steps need at that cost). Absent
+    keys name what the report or the worker did not provide."""
     got = dict(tok.split("=", 1) for tok in worker_line.split() if "=" in tok)
-    fp64 = _ncu_values(raw_csv, ("sm__inst_executed_pipe_fp64.sum",)).get("sm__inst_executed_pipe_fp64.sum")
+    vals = _ncu_values(raw_csv, (THREADS_PER_INST, ISSUE_PIPE[precision]))
+    out = {}
+    if vals.get(THREADS_PER_INST):
+        out["lane_efficiency"] = vals[THREADS_PER_INST] / 32
     try:
-        steps, ops = float(got["sample_steps"]), float(got["ops_per_step"])
+        steps = float(got["sample_steps"])
     except (KeyError, ValueError):
-        return "  lane_efficiency: unavailable (no sample-step accounting from the worker)"
-    if not fp64:
-        return "  lane_efficiency: unavailable (sm__inst_executed_pipe_fp64.sum missing from the report)"
-    return (f"  lane_efficiency = sample_steps x ops_per_step / (32 x fp64_warp_inst) = {steps * ops / (32 * fp64):.3f} "
-            f"(ops_per_step {ops:g} from {got.get('ops_source', '?')})\n"
-            f"  fp64_warp_inst_per_32_sample_steps = {fp64 * 32 / steps:.1f} (ideal {ops:g})")
+        return out
+    issued = vals.get(ISSUE_PIPE[precision])
+    if steps and issued:
+        out["i_step"] = 32 * issued / steps
+        if i_step:
+            out["inflation"] = issued / (steps * i_step / 32)
+    return out
+
+
+def lane_lines(raw_csv, worker_line, precision, i_step=None, source="-"):
+    """:func:`lane_metrics` as text: the efficiency, the inflation against the calibrated instruction cost and the
+    cost as observed. The IR operation count the chunk rule reads (``fp64_ops_ir``) is not an instruction count and
+    is never divided into these."""
+    got = lane_metrics(raw_csv, worker_line, precision, i_step)
+    pipe = ISSUE_PIPE[precision]
+    lines = [f"  lane_efficiency = {THREADS_PER_INST} / 32 = {got['lane_efficiency']:.3f}" if "lane_efficiency" in got else
+             f"  lane_efficiency: unavailable ({THREADS_PER_INST} missing from the report)"]
+    if "i_step" not in got:
+        return "\n".join(lines + ["  inflation: unavailable (no sample-step accounting from the worker, or "
+                                  f"{pipe} missing from the report)"])
+    lines.append(f"  i_step_observed = 32 x {pipe} / sample_steps = {got['i_step']:.1f}")
+    if "inflation" in got:
+        lines.append(f"  {precision}_inflation = {pipe} / (sample_steps x i_step / 32) = {got['inflation']:.3f} "
+                     f"(i_step {i_step:.1f}, calibrated on {source})")
+    else:
+        lines.append(f"  {precision}_inflation: unavailable (no calibrated i_step: {source})")
+    return "\n".join(lines)
 
 
 def _ncu_metric_lines(raw_csv, metrics):
@@ -1358,9 +1721,10 @@ def validation_kernels():
 
 # --------------------------------------------------------------------------- #
 STAGES = ("probe", "nsys-grid", "nsys-width", "nsys-quick", *NCU_POINTS, "ncu-ratio", "ncu-band",
-          "ncu-tsweep", "compare", "crossover", "band", "cadence-sweep", "validate-ncu",
-          *(f"{s}-quick" for s in ("ncu-ratio", "ncu-band", "ncu-tsweep", "compare", "crossover", "band",
-                                   "cadence-sweep")))
+          "ncu-tsweep", "ncu-chunk", "ncu-rk78-small", "compare", "crossover", "band", "chunk-sweep", "cadence-sweep",
+          "validate-ncu",
+          *(f"{s}-quick" for s in ("ncu-ratio", "ncu-band", "ncu-tsweep", "ncu-chunk", "ncu-rk78-small", "compare",
+                                   "crossover", "band", "chunk-sweep", "cadence-sweep")))
 
 
 def main(argv=None):
@@ -1396,6 +1760,10 @@ def main(argv=None):
                 raise Skip("this stage times the device")
             compare_stage(args.out, stage, tuple(args.kernels.split(",")),
                           tuple(int(float(x)) for x in args.ns.split(",")), args.budget_s)
+        elif stage.removesuffix("-quick") == "chunk-sweep":
+            if args.target == "cpu":
+                raise Skip("this stage times the device")
+            chunk_sweep_stage(args.out, stage, args.budget_s)
         elif stage.startswith("nsys") or stage in ("validate-ncu", "cadence-sweep", "cadence-sweep-quick"):
             if not args.nsys:
                 raise Skip("nsys not found")

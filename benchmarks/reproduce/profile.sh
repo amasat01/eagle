@@ -13,6 +13,9 @@
 #     --fresh           ignore the markers of an earlier run and start over
 #     --deadline-min M  stop starting stages after M minutes (default 50)
 #     --only A[,B...]   run just these stages (a name, or a prefix such as ncu), keeping the order
+#     --lock-clock M    SM clock for the whole run: a MHz value, "auto" (the device maximum; default) or "off".
+#                       Needs passwordless sudo for nvidia-smi; without it the walls are normalised to the
+#                       device maximum clock instead, and every table says which. Reset on every exit.
 #     --dry-run         print the plan, run nothing
 #
 # Stages run independently, each under its own time cap; a failing stage never stops the
@@ -32,7 +35,7 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=SCRIPTDIR/lib.sh
 . "$HERE/lib.sh"
 
-ENV_FILE="" OUT="" WORK=${REPRO_WORK:-} QUICK=0 FRESH=0 DEADLINE_MIN=50 ONLY=
+ENV_FILE="" OUT="" WORK=${REPRO_WORK:-} QUICK=0 FRESH=0 DEADLINE_MIN=50 ONLY='' LOCK_CLOCK=auto
 while [[ $# -gt 0 ]]; do
   case $1 in
     --env) ENV_FILE=${2:-}; shift 2 ;;
@@ -42,12 +45,14 @@ while [[ $# -gt 0 ]]; do
     --fresh) FRESH=1; shift ;;
     --deadline-min) DEADLINE_MIN=${2:-}; shift 2 ;;
     --only) ONLY=${2:-}; shift 2 ;;
+    --lock-clock) LOCK_CLOCK=${2:-}; shift 2 ;;
     --dry-run) REPRO_DRY_RUN=1; shift ;;
-    -h|--help) sed -n '5,28p' "$0"; exit 0 ;;
+    -h|--help) sed -n '5,31p' "$0"; exit 0 ;;
     *) die "unknown option $1 (see --help)" ;;
   esac
 done
 [[ $DEADLINE_MIN =~ ^[0-9]+$ ]] || die "--deadline-min takes whole minutes"
+[[ $LOCK_CLOCK == auto || $LOCK_CLOCK == off || $LOCK_CLOCK =~ ^[0-9]+$ ]] || die "--lock-clock takes MHz, auto or off"
 
 TARGET=$(detect_target)
 WORK=${WORK:-$(default_work "$TARGET")}
@@ -60,11 +65,13 @@ TARBALL=$OUT/profile-$SLUG.tgz
 
 # stage NAME:CAP_SECONDS, in run order
 if [[ $QUICK == 1 ]]; then
-  PLAN=(probe:180 nsys-quick:120 ncu-quick:180 compare-quick:300 crossover-quick:120 band-quick:150 cadence-sweep-quick:90
-        ncu-ratio-quick:150 ncu-tsweep-quick:150 ncu-band-quick:180)
+  PLAN=(probe:180 nsys-quick:120 ncu-quick:180 compare-quick:300 crossover-quick:120 band-quick:150 chunk-sweep-quick:150
+        cadence-sweep-quick:90 ncu-ratio-quick:150 ncu-tsweep-quick:150 ncu-chunk-quick:150 ncu-rk78-small-quick:150
+        ncu-band-quick:180)
 else
-  PLAN=(probe:180 nsys-grid:540 nsys-width:150 ncu-spread-1e6:240 ncu-uniform-1e6:240 ncu-spread-1e4:240
-        compare:1500 crossover:300 band:420 cadence-sweep:300 ncu-ratio:420 ncu-tsweep:750 ncu-band:300)
+  PLAN=(probe:180 nsys-grid:720 nsys-width:150 ncu-spread-1e6:240 ncu-uniform-1e6:240 ncu-spread-1e4:240
+        compare:1500 crossover:300 band:420 chunk-sweep:480 cadence-sweep:300 ncu-ratio:420 ncu-tsweep:750
+        ncu-chunk:900 ncu-rk78-small:300 ncu-band:300)
 fi
 if [[ -n $ONLY ]]; then
   CHOSEN=()
@@ -85,9 +92,24 @@ if [[ -n $ONLY ]]; then
   done
   PLAN=("${CHOSEN[@]}")
 fi
+
+# Expected seconds per stage on an A100 or H100 (the caps above are ceilings, not expectations). The twice-the-threads
+# arms of the chunk sweep are the first thing dropped when the plan is over the budget.
+BUDGET_MIN=35
+declare -A EST=([probe]=30 [nsys-grid]=375 [nsys-width]=60 [ncu-spread-1e6]=60 [ncu-uniform-1e6]=60 [ncu-spread-1e4]=60
+                [compare]=460 [crossover]=45 [band]=120 [chunk-sweep]=150 [cadence-sweep]=90 [ncu-ratio]=100
+                [ncu-tsweep]=200 [ncu-chunk]=210 [ncu-rk78-small]=60 [ncu-band]=60)
+EST_S=0 CHUNK_T2=1
+for s in "${PLAN[@]}"; do
+  n=${s%%:*}
+  if [[ $n == *-quick ]]; then EST_S=$((EST_S + 60)); else EST_S=$((EST_S + ${EST[$n]:-60})); fi
+done
+if [[ $QUICK == 0 && $EST_S -gt $((BUDGET_MIN * 60)) ]]; then CHUNK_T2=0; EST_S=$((EST_S - 75)); fi
+export PROFILE_CHUNK_T2=$CHUNK_T2
 if [[ $REPRO_DRY_RUN == 1 ]]; then
   log "env=$ENV_FILE out=$OUT deadline=${DEADLINE_MIN} min"
   for s in "${PLAN[@]}"; do log "stage ${s%%:*} (cap ${s##*:} s)"; done
+  log "estimate on an A100/H100: $((EST_S / 60)) min of the ${BUDGET_MIN} min budget; chunk sweep at twice the threads: $([[ $CHUNK_T2 == 1 ]] && echo on || echo "dropped (over budget)"); SM clock: ${LOCK_CLOCK}"
   exit 0
 fi
 
@@ -97,6 +119,7 @@ mkdir -p "$DATA" "$LOGS" "$MARK" || { echo "[repro] ERROR: cannot create $OUT" >
 # --- status and the exit trap ------------------------------------------------------------
 declare -A STATUS=()
 PREFLIGHT_ERROR="" CURRENT="" CHILD="" NCU="" NSYS="" NCU_MODE="" T0=$SECONDS
+CLOCK_LOCKED=0 CLOCK_MODE=unlocked SMI_SUDO=() SMI_IDX=0
 EXCLUDED=""
 
 write_status() {
@@ -157,6 +180,11 @@ finalize() {
     kill -TERM -- "-$CHILD" 2>/dev/null; sleep 2; kill -KILL -- "-$CHILD" 2>/dev/null
     [[ -n $CURRENT && -z ${STATUS[$CURRENT]:-} ]] && STATUS[$CURRENT]="failed: interrupted ($1)"
   fi
+  if [[ $CLOCK_LOCKED == 1 ]]; then
+    "${SMI_SUDO[@]}" nvidia-smi -i "$SMI_IDX" -rgc >/dev/null 2>&1 \
+      && echo "clock: SM clock lock released" >>"$OUT/facts.txt" \
+      || echo "clock: COULD NOT RELEASE the SM clock lock: run 'sudo nvidia-smi -i $SMI_IDX -rgc'" >>"$OUT/facts.txt"
+  fi
   write_facts after
   EXCLUDED=$(find "$DATA" -type f -size +200M -printf '  %p (%s bytes)\n' 2>/dev/null)
   write_status
@@ -194,6 +222,7 @@ if [[ $NGPU -gt 1 ]]; then
   # nothing of ours may run on the other GPUs: it would share the machine with the captures
   BUS_INDEX=$(nvidia-smi --query-gpu=index,pci.bus_id --format=csv,noheader | tr -d ' ')
   while IFS=, read -r bus pid; do
+    pid=${pid// /}
     [[ -n $pid ]] || continue
     idx=$(awk -F, -v b="${bus// /}" '$2==b {print $1}' <<<"$BUS_INDEX")
     [[ $idx == "$SEL" ]] && continue
@@ -232,6 +261,22 @@ else
 fi
 write_facts before
 
+# --- the SM clock: held for the whole run when permitted, else the kit normalises walls to the maximum clock
+[[ ${CUDA_VISIBLE_DEVICES:-} =~ ^[0-9]+$ ]] && SMI_IDX=$CUDA_VISIBLE_DEVICES
+[[ $EUID -eq 0 ]] || SMI_SUDO=(sudo -n)
+if [[ $LOCK_CLOCK != off ]]; then
+  LOCK_MHZ=$LOCK_CLOCK
+  [[ $LOCK_MHZ == auto ]] && LOCK_MHZ=$(nvidia-smi -i "$SMI_IDX" --query-gpu=clocks.max.sm --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ' ')
+  if [[ $LOCK_MHZ =~ ^[0-9]+$ ]] && "${SMI_SUDO[@]}" nvidia-smi -i "$SMI_IDX" -lgc "$LOCK_MHZ,$LOCK_MHZ" >/dev/null 2>&1; then
+    CLOCK_LOCKED=1 CLOCK_MODE="locked:$LOCK_MHZ"
+    log "SM clock locked at $LOCK_MHZ MHz for the run (released on exit)"
+  else
+    log "SM clock not locked (no passwordless sudo for nvidia-smi, or no clock value): walls are normalised to the device maximum clock"
+  fi
+fi
+export PROFILE_CLOCK_MODE=$CLOCK_MODE
+echo "clock:     $CLOCK_MODE" >>"$OUT/facts.txt"
+
 # --- stages -------------------------------------------------------------------------------
 DEADLINE_S=$((DEADLINE_MIN * 60))
 : >"$OUT/walls.txt"
@@ -257,7 +302,7 @@ run_stage() {  # NAME CAP_SECONDS
   else
     local args=(--stage "$name" --out "$DATA")
     # the comparison starts no cell it cannot finish inside its cap
-    [[ $name == compare* || $name == crossover* || $name == band* ]] && args+=(--budget-s $((cap > 120 ? cap - 90 : cap / 2)))
+    [[ $name == compare* || $name == crossover* || $name == band* || $name == chunk-sweep* ]] && args+=(--budget-s $((cap > 120 ? cap - 90 : cap / 2)))
     [[ -n $NSYS ]] && args+=(--nsys "$NSYS")
     [[ -n $NCU ]] && args+=(--ncu "$NCU")
     [[ $NCU_SUDO == 1 ]] && args+=(--ncu-sudo)
