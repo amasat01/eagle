@@ -835,3 +835,21 @@ def test_every_arm_is_timed_by_the_same_event_pair_whatever_its_launch_mode():
     kit = _kit_module()
     kinds = {kit._timer_kind(spec) for spec in ("eagle_graph_auto", "osc_fused", "osc_persist", "osc_persist@chunk=rule")}
     assert len(kinds) == 1 and kinds == {"event"}
+
+
+def test_an_unrelated_mamba_on_path_is_not_taken_for_the_conda_frontend(tmp_path):
+    """A tool that only shares the name (Kaggle ships a test runner called mamba) is skipped:
+    the bootstrap falls back to its own pinned micromamba; a real conda-family frontend is used."""
+    shim = tmp_path / "bin"
+    shim.mkdir()
+    (shim / "mamba").write_text("#!/bin/sh\necho 'usage: mamba [-h] [specs ...]' >&2\nexit 2\n")
+    (shim / "mamba").chmod(0o755)
+    env = {"PATH": f"{shim}:/usr/bin:/bin", "REPRO_MAMBA": ""}
+    rc, out = _bootstrap(env=env)
+    assert rc == 0, out[-800:]
+    assert "conda frontend: /nonexistent/work/bin/micromamba" in out
+    (shim / "micromamba").write_text("#!/bin/sh\n[ \"$1\" = info ] && { echo '{}'; exit 0; }\nexit 0\n")
+    (shim / "micromamba").chmod(0o755)
+    rc, out = _bootstrap(env=env)
+    assert rc == 0, out[-800:]
+    assert f"conda frontend: {shim / 'micromamba'}" in out

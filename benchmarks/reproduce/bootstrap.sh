@@ -109,7 +109,12 @@ install_source() {
   MAMBA=${REPRO_MAMBA:-}
   [[ $MAMBA == download ]] && MAMBA=$WORK/bin/micromamba
   if [[ -z $MAMBA ]]; then
-    for c in micromamba mamba conda; do command -v $c >/dev/null 2>&1 && { MAMBA=$(command -v $c); break; }; done
+    # a name on PATH is not proof: some images ship an unrelated tool called "mamba", so a candidate
+    # counts only if it answers "info --json" as every conda-family frontend does, offline
+    for c in micromamba mamba conda; do
+      command -v $c >/dev/null 2>&1 && "$(command -v $c)" info --json >/dev/null 2>&1 \
+        && { MAMBA=$(command -v $c); break; }
+    done
   fi
   if [[ -z $MAMBA || $MAMBA == "$WORK/bin/micromamba" ]]; then
     MAMBA=$WORK/bin/micromamba
