@@ -623,6 +623,7 @@ def _self_cmd(arm, n, steps, dist):
 # compare: every arm of eagle against Warp on one matrix, in one process
 # --------------------------------------------------------------------------- #
 SWEEP_WARM, SWEEP_REPS = 2, 3
+WARM_CAP = 8  # warm runs at most, waiting for eagle's pick to settle
 COMPARE_NS = (1_000, 10_000, 100_000, 1_000_000)
 COMPARE_OSC_STEPS = (1000, 100)
 #: stop-step distributions: uniform, the card's spread (D = 100), a narrow and a wide log-uniform width
@@ -900,6 +901,25 @@ def residency_skip(asked, launched):
     return ""
 
 
+def warm_until_settled(arm, inp, runs, floor=SWEEP_WARM, cap=WARM_CAP):
+    """Warm ``arm`` until a run reports neither ``probe`` nor ``timed`` (eagle has stopped measuring), at least
+    ``floor`` and at most ``cap`` runs. An arm whose report carries no such flags (a forced mode, another framework,
+    an older eagle) warms ``floor`` runs. Appends each run's mode to ``runs``; returns True if settled, False if
+    the cap ended the warm-up first (the arm is then reported "unsettled")."""
+    for i in range(cap):
+        arm["state"].upload(inp)
+        arm["run"]()
+        report = arm.get("report")
+        runs.append(str(getattr(report, "mode", "-")))
+        if i + 1 < floor:
+            continue
+        if not hasattr(report, "timed"):
+            return True
+        if not (report.probe or report.timed):
+            return True
+    return False
+
+
 def measure_arm(label, spec, kernel, n, steps, dist, judge_out):
     """Build, warm, guard and (if the guard passes) time one arm. Returns its record: status ok / wrong /
     skipped / unavailable (the reason in ``note``), median and best ms (clock-normalised when the clock was not
@@ -912,7 +932,7 @@ def measure_arm(label, spec, kernel, n, steps, dist, judge_out):
     tps = tps_option(opts)
     rec = dict(label=label, spec=spec, status="ok", note="", median=None, best=None, raw=None, mode="-", launched="-",
                util=None, bitwise=None, diff=None, sm_mhz=None, sm_max_mhz=None, modes="", fields={}, chunk=None,
-               probe_walls="")
+               probe_walls="", eagle_ms=None)
     arm = None
     clock = ClockSampler()
     try:
@@ -922,10 +942,8 @@ def measure_arm(label, spec, kernel, n, steps, dist, judge_out):
             rec["chunk"] = arm.get("chunk")
             rec["note"] = arm.get("note", "")
             runs = []
-            for _ in range(SWEEP_WARM):
-                arm["state"].upload(inp)
-                arm["run"]()
-                runs.append(str(getattr(arm.get("report"), "mode", "-")))
+            if not warm_until_settled(arm, inp, runs):
+                rec["note"] = (rec["note"] + "; " if rec["note"] else "") + f"unsettled after {WARM_CAP} warm runs"
             report = arm.get("report")
             warm_mode = "-" if report is None else str(getattr(report, "mode", "?"))
             rec["mode"] = warm_mode
@@ -953,6 +971,9 @@ def measure_arm(label, spec, kernel, n, steps, dist, judge_out):
             rec["fields"] = read_fields(runner, report)
             rec["util"] = slot_fill_of(report)
             rec["probe_walls"] = ">".join(probe_walls)
+            walls_now = getattr(runner, "_fast_wall", None)
+            if isinstance(walls_now, dict) and isinstance(walls_now.get(runs[-1]), (int, float)):
+                rec["eagle_ms"] = float(walls_now[runs[-1]])  # eagle's own wall of the mode the timed runs took
             walls.sort()
             rec.update(median=walls[len(walls) // 2], best=walls[0])
         rec["modes"] = ">".join(runs)  # the mode of each run; the last is what the table shows
@@ -1184,6 +1205,9 @@ def crossover_lines(cells):
                          f"auto settled on {settled} after {len(modes)} runs (modes per run {a.get('modes', '?')}; "
                          f"{'agrees' if settled == verdict else 'DISAGREES'} with the forced walls)")
             lines.append(f"    eagle's own walls per timed run (ms, mode=wall;): {a.get('probe_walls') or 'unavailable in this eagle'}")
+            if a.get("median") and a.get("eagle_ms"):
+                lines.append(f"    auto kit wall {a['median']:.3f} ms beside eagle's own {a['eagle_ms']:.3f} ms "
+                             f"(kit - eagle {1e3 * (a['median'] - a['eagle_ms']):+.1f} us)")
     return lines or ["  no crossover cell ran"]
 
 

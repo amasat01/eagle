@@ -796,3 +796,39 @@ def test_torch_and_jax_arms_are_not_in_the_profile_and_are_skipped_not_failed(tm
     finally:
         kit.run_cell = orig
     assert seen and all(extra == () for extra in seen)
+
+
+def test_warm_runs_until_eagle_stops_measuring_and_reports_an_unsettled_arm():
+    from types import SimpleNamespace
+
+    kit = _kit_module()
+
+    def arm_of(flags):
+        seq = iter(flags)
+        arm = {"state": SimpleNamespace(upload=lambda inp: None), "report": None}
+
+        def run():
+            probe, timed = next(seq)
+            arm["report"] = SimpleNamespace(mode="persist", probe=probe, timed=timed)
+
+        arm["run"] = run
+        return arm
+
+    runs = []
+    assert kit.warm_until_settled(arm_of([(True, True), (True, True), (False, False)]), None, runs)
+    assert len(runs) == 3  # past the two-run floor, one more until a run is neither probe nor timed
+    runs = []
+    assert kit.warm_until_settled(arm_of([(False, False)] * 5), None, runs) and len(runs) == 2
+    runs = []
+    assert not kit.warm_until_settled(arm_of([(False, True)] * 20), None, runs)
+    assert len(runs) == kit.WARM_CAP
+    runs = []  # a report without the flags (forced mode, older eagle): the fixed floor
+    bare = {"state": SimpleNamespace(upload=lambda inp: None), "report": SimpleNamespace(mode="x")}
+    bare["run"] = lambda: None
+    assert kit.warm_until_settled(bare, None, runs) and len(runs) == kit.SWEEP_WARM
+
+
+def test_every_arm_is_timed_by_the_same_event_pair_whatever_its_launch_mode():
+    kit = _kit_module()
+    kinds = {kit._timer_kind(spec) for spec in ("eagle_graph_auto", "osc_fused", "osc_persist", "osc_persist@chunk=rule")}
+    assert len(kinds) == 1 and kinds == {"event"}
