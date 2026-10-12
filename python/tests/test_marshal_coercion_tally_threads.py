@@ -6,8 +6,7 @@ read-modify-write, on a GIL build as well as on a free-threaded one)."""
 
 import sys
 import threading
-
-import pytest
+import types
 
 from eagle import marshal
 
@@ -15,7 +14,9 @@ THREADS, PER = 8, 50000
 
 
 def test_the_fast_coercion_tally_is_exact_under_threads(monkeypatch):
-    pytest.importorskip("cupy")
+    # The tally is host-side; a stand-in cupy lets the row run on every runner,
+    # free-threaded ones included, where no cupy wheel is installed.
+    monkeypatch.setitem(sys.modules, "cupy", types.ModuleType("cupy"))
     monkeypatch.setattr(marshal, "_fast_path_ok", lambda value, dt, cp: True)
     marshal._reset_coercion_stats()
     start = threading.Barrier(THREADS)
