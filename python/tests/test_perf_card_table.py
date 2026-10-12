@@ -64,11 +64,9 @@ _README_ROWS = [(dist, 1000, arm)
                             "cupy_masked", "cpu_openmp")]
 
 
-#: Cards whose small-N automatic runs took a launch sequence the card's replay
-#: does not model (eagle 0.5.1 never took its one-launch fast path on these
-#: GPUs), so their auto issued-bytes rows are approximate. Empty again once
-#: these GPUs are measured with the fixed launch path.
-_AUTO_SCHEDULE_GAPS = frozenset({"card_nvidia-l4.json", "card_nvidia-a100-sxm4-40gb.json"})
+#: Cards whose automatic-schedule replay is known not to match their run (none:
+#: every committed card replays its launches exactly).
+_AUTO_SCHEDULE_GAPS = frozenset()
 
 
 def _script():
@@ -363,7 +361,7 @@ def test_the_auto_issued_bytes_follow_eagle_s_policy():
 def test_k_steps_issued_bytes_count_per_launch():
     """The K-steps arm's analytic bytes are the step kernel's count over the
     launches' first steps: a uniform batch of n samples over S steps issues
-    (33 + 40) B per sample per launch plus 1 B per finishing sample.
+    (33 + 28) B per sample per launch plus 1 B per finishing sample.
 
     RED: count the K-steps arm per step instead of per launch and this fails."""
     import numpy as np
@@ -909,3 +907,83 @@ def test_readme_stale_prose_gate_lists_the_cpu_cards():
         assert rel in entries, f"stale-prose-gate comment does not list {rel}"
         assert entries[rel] == hashlib.md5(path.read_bytes()).hexdigest(), (
             f"{rel} changed since the README's gate comment was written")
+
+
+def _rk78_script():
+    spec = importlib.util.spec_from_file_location(
+        "eagle_rk78_card", _REPO / "benchmarks" / "rk78_card" / "rk78_card.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _fake_memory_probe_run(module, monkeypatch, probe, patches):
+    """Run ``module._memory_probe`` with every device and process reading faked;
+    returns the ordered list of the calls that matter to the baseline."""
+    calls = []
+
+    def note(name, ret=None):
+        def fake(*a, **k):
+            calls.append(name)
+            return ret
+        return fake
+
+    cc = module.cc
+    monkeypatch.setattr(cc, "probe_reply_fd", note("reply_fd", 1))
+    monkeypatch.setattr(cc, "probe_reply", note("reply"))
+    monkeypatch.setattr(cc, "process_device_bytes", note("baseline", (123, "fake")))
+    monkeypatch.setattr(cc, "trim_pools", note("trim"))
+    monkeypatch.setattr(cc, "probe_sync", note("sync"))
+    monkeypatch.setattr(cc, "status_kib", note("rss", 1))
+    monkeypatch.setattr(cc, "reset_host_peak", note("reset", True))
+    monkeypatch.setattr(module, "_touch_device", note("touch"))
+    for name, ret in patches.items():
+        monkeypatch.setattr(module, name, note(name, ret))
+    probe()
+    return calls
+
+
+def _assert_baseline_before_warmup(calls, warm_call):
+    assert calls.count("baseline") == 2, calls  # the baseline, then the reading after the run
+    first = calls.index("baseline")
+    assert "touch" in calls[:first], (
+        f"the CUDA context must exist (one tiny device op) before the baseline: {calls}")
+    assert first < calls.index(warm_call), (
+        f"the device baseline must be read before the warm-up call {warm_call}: {calls}")
+    assert first < calls.index("trim"), (
+        f"the device baseline must be read before any allocator is trimmed: {calls}")
+    assert calls.index("trim") < calls.index("baseline", first + 1), calls
+
+
+def test_perf_card_memory_baseline_is_read_before_the_warm_up(monkeypatch):
+    """The device baseline is taken once the CUDA context exists but before the
+    arm's warm-up run, so every library's pool reserved during the warm-up counts.
+
+    RED: read the baseline after the warm-up (the old order) and this fails."""
+    import numpy as np
+
+    module = _script()
+    module.WARM_N = 4
+    patches = {"_probe_arm": {}, "_probe_once": (np.zeros(1), np.zeros(1), np.zeros(1)),
+               "_inputs": {"nstop": np.zeros(1)}, "_np_array_equal": True,
+               "_library_counters": {}}
+    calls = _fake_memory_probe_run(
+        module, monkeypatch,
+        lambda: module._memory_probe("eagle_graph", "spread", 5, 8, "0000:00:00.0"),
+        patches)
+    _assert_baseline_before_warmup(calls, "_probe_once")
+
+
+def test_rk78_card_memory_baseline_is_read_before_the_warm_up(monkeypatch):
+    """Same order check for the second card's memory probe.
+
+    RED: read the baseline after the warm-up and this fails."""
+    import numpy as np
+
+    module = _rk78_script()
+    out = (0.0, 0.0, {"t": np.full(2, module.T_FINAL)})
+    patches = {"_probe_arm": {}, "_timed": out, "_inputs": {}, "_sync": None}
+    calls = _fake_memory_probe_run(
+        module, monkeypatch,
+        lambda: module._memory_probe("eagle_graph", 8, "0000:00:00.0"), patches)
+    _assert_baseline_before_warmup(calls, "_timed")

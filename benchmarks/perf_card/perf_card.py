@@ -325,13 +325,14 @@ COMPACTION_SWEEP_NS = (1_000_000, 100_000)
 #: source. Recorded in the card with the rule.
 FLOPS_PER_SAMPLE_STEP = 44
 #: Bytes the compiled step moves per sample per launch, from its loads and
-#: stores (float64 = 8 B, the bool mask = 1 B). Every sample loads x, v,
-#: omega, zeta and its mask (33 B); a running sample also loads k and its stop
-#: step and stores x, v, k (40 B). A finished sample's stores are skipped by
+#: stores (float64 = 8 B, the 32-bit step and stop counters = 4 B, the bool
+#: mask = 1 B). Every sample loads x, v, omega, zeta and its mask (33 B); a
+#: running sample also loads k and its stop step (4 B each) and stores x, v
+#: (8 B each) and k (4 B): 28 B. A finished sample's stores are skipped by
 #: the guard; a sample finishing this step stores its mask (1 B; the one-word
 #: atomic on the finished counter is not counted).
 STEP_BYTES_ALL = 33
-STEP_BYTES_ACTIVE = 40
+STEP_BYTES_ACTIVE = 28
 STEP_BYTES_FINISH = 1
 #: eagle_graph_compact: each launched position also loads its map entry (4 B);
 #: one compaction moves about 30 B per sample (mask 1 B; keep flag, inclusive
@@ -340,11 +341,11 @@ STEP_BYTES_FINISH = 1
 MAP_BYTES = 4
 COMPACT_BYTES_PER_SAMPLE = 30
 #: eagle_graph_reorder: one reorder stages and places every moved plane over
-#: the span (each element read twice and written twice): omega, zeta, nstop,
-#: x, v, k (8 B each), the mask (1 B) and perm (4 B) -- 53 B, so 212 B per
-#: span sample -- plus inv (4 B read, 4 B written) and a scan of the mask
+#: the span (each element read twice and written twice): omega, zeta, x, v
+#: (8 B each), nstop and k (4 B each), the mask (1 B) and perm (4 B) -- 45 B,
+#: so 180 B per span sample -- plus inv (4 B read, 4 B written) and a scan of the mask
 #: (30 B per sample, as a compaction).
-REORDER_BYTES_PER_SPAN_SAMPLE = 4 * 53 + 8
+REORDER_BYTES_PER_SPAN_SAMPLE = 4 * 45 + 8
 #: The useful data a step needs, per running sample: load x, v, k, omega,
 #: zeta; store x, v, k (64 B). The arm-independent yardstick.
 USEFUL_BYTES_PER_SAMPLE_STEP = 64
@@ -362,8 +363,8 @@ _COUNTING_RULE = {
     ),
     "issued_bytes": (
         "Issued bytes = the arm's own analytic loads and stores. Step kernel: "
-        "33 B per sample per launch (x, v, omega, zeta, mask) plus 40 B per "
-        "running sample (k and stop-step loads, x/v/k stores), plus 1 B per "
+        "33 B per sample per launch (x, v, omega, zeta, mask) plus 28 B per "
+        "running sample (k and stop-step loads, x/v/k stores; the counters are 4 B each), plus 1 B per "
         "sample finishing (its mask; the kernel finishes its own samples, so "
         "there is no stop-rule kernel); eagle_graph (the plain decorator's "
         "automatic kernel) and eager_loop count it per launch over the whole "
@@ -371,13 +372,13 @@ _COUNTING_RULE = {
         "(replayed from the stop-step profile), eager_loop once per step. "
         "eagle_graph_compact: the step kernel's "
         "33 B + 4 B (the map entry) per MAPPED position per launch instead of "
-        "per sample and the same 40 B per running sample, plus 30 B per "
+        "per sample and the same 28 B per running sample, plus 30 B per "
         "sample per compaction. eagle_graph_reorder: as eagle_graph_compact, "
-        "plus 220 B per span sample and 30 B per sample per reorder; "
+        "plus 188 B per span sample and 30 B per sample per reorder; "
         "the reorders are modelled from the trigger rule assuming the live "
         "samples sit at random inside the span. eagle_graph_steps: the step "
         "kernel's count per LAUNCH of 16 steps instead of per step (33 B per "
-        "sample per launch, 40 B per sample running at the launch's start, "
+        "sample per launch, 28 B per sample running at the launch's start, "
         "1 B per sample finishing; the state stays in registers across the "
         "launch's steps). eagle_graph_steps_compact: eagle_graph_compact's "
         "count per launch, compacting every 4 launches. eagle_graph_auto: "
@@ -557,7 +558,7 @@ def render_markdown(card: dict) -> str:
                   "| device memory (× minimum) | host memory |")
         rule = "|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|"
         if v2:
-            header += " % issue peak | lane util | launches (kernel/memcpy/API) |"
+            header += " % issue peak | slot fill | launches (kernel/memcpy/API) |"
             rule += "---:|---:|---:|"
         clocks = any(r["wall_s"].get("sm_mhz") for r in rows)
         if clocks:
@@ -588,7 +589,7 @@ def render_markdown(card: dict) -> str:
                            f"{nc.get('kernel_launches', '–')}/"
                            f"{nc.get('memcpy', '–')}/{nc.get('api_calls', '–')}")
                 cells += (f" {_fmt_pct(row.get('fraction_of_issue_peak_at_observed_clock'))} "
-                         f"| {row.get('lane_utilisation') or '–'} | {launches} |")
+                         f"| {row.get('slot_fill') or '–'} | {launches} |")
             if clocks:
                 cells += f" {_clock_range(w) or '–'} |"
             lines.append(cells)
@@ -841,13 +842,13 @@ def _fit_notes(card):
 # --------------------------------------------------------------------------- #
 def _define_kernel():
     import hawk
-    from hawk import Mutable, Param, Scalar, Terminated
+    from hawk import Mutable, Param, Scalar, Terminated, UInt32
 
     # >>> code:hawk_step
     @hawk.kernel
-    def oscillator_step(omega: Scalar, zeta: Scalar, nstop: Scalar, dt: Param,
+    def oscillator_step(omega: Scalar, zeta: Scalar, nstop: UInt32, dt: Param,
                         terminated: Terminated, x: Mutable[Scalar],
-                        v: Mutable[Scalar], k: Mutable[Scalar]):
+                        v: Mutable[Scalar], k: Mutable[UInt32]):
         # One classical RK4 step of x'' + 2 zeta omega x' + omega^2 x = 0.
         x0 = x
         v0 = v
@@ -867,7 +868,7 @@ def _define_kernel():
         a4 = -w2 * x4 - c * v4
         x = x0 + h6 * (v0 + 2.0 * v2 + 2.0 * v3 + v4)
         v = v0 + h6 * (a1 + 2.0 * a2 + 2.0 * a3 + a4)
-        k1 = k + 1.0
+        k1 = k + 1
         k = k1
         terminated = k1 >= nstop  # the sample stops after its own nstop steps
     # <<< code:hawk_step
@@ -879,13 +880,13 @@ def _define_steps_kernel():
     """The step of :func:`_define_kernel`, declared to take STEPS_PER_LAUNCH
     steps per launch (the decorator form of ``hawk.steps``)."""
     import hawk
-    from hawk import Mutable, Param, Scalar, Terminated
+    from hawk import Mutable, Param, Scalar, Terminated, UInt32
 
     # >>> code:hawk_steps
     @hawk.kernel(steps=STEPS_PER_LAUNCH)
-    def oscillator_step(omega: Scalar, zeta: Scalar, nstop: Scalar, dt: Param,
+    def oscillator_step(omega: Scalar, zeta: Scalar, nstop: UInt32, dt: Param,
                         terminated: Terminated, x: Mutable[Scalar],
-                        v: Mutable[Scalar], k: Mutable[Scalar]):
+                        v: Mutable[Scalar], k: Mutable[UInt32]):
         # The RK4 step above, unchanged; one launch runs up to 16 of them.
         x0 = x
         v0 = v
@@ -905,7 +906,7 @@ def _define_steps_kernel():
         a4 = -w2 * x4 - c * v4
         x = x0 + h6 * (v0 + 2.0 * v2 + 2.0 * v3 + v4)
         v = v0 + h6 * (a1 + 2.0 * a2 + 2.0 * a3 + a4)
-        k1 = k + 1.0
+        k1 = k + 1
         k = k1
         terminated = k1 >= nstop
     # <<< code:hawk_steps
@@ -935,15 +936,15 @@ def _define_active_kernel():
     the kernel the compaction arms launch, one step per launch at their own
     ``every`` cadence (``hawk.steps`` of it is the K-steps compaction kernel)."""
     import hawk
-    from hawk import Mutable, Param, Scalar, Terminated
+    from hawk import Mutable, Param, Scalar, Terminated, UInt32
 
     ACTIVE_SET = _active_set_kind()
 
     # >>> code:hawk_active
     @hawk.kernel(steps=1, kind=ACTIVE_SET)
-    def oscillator_step(omega: Scalar, zeta: Scalar, nstop: Scalar, dt: Param,
+    def oscillator_step(omega: Scalar, zeta: Scalar, nstop: UInt32, dt: Param,
                         terminated: Terminated, x: Mutable[Scalar],
-                        v: Mutable[Scalar], k: Mutable[Scalar]):
+                        v: Mutable[Scalar], k: Mutable[UInt32]):
         # The RK4 step above, unchanged; its launch covers the active set.
         x0 = x
         v0 = v
@@ -963,7 +964,7 @@ def _define_active_kernel():
         a4 = -w2 * x4 - c * v4
         x = x0 + h6 * (v0 + 2.0 * v2 + 2.0 * v3 + v4)
         v = v0 + h6 * (a1 + 2.0 * a2 + 2.0 * a3 + a4)
-        k1 = k + 1.0
+        k1 = k + 1
         k = k1
         terminated = k1 >= nstop
     # <<< code:hawk_active
@@ -975,15 +976,15 @@ def _define_auto_kernel():
     """The step of :func:`_define_kernel` under the active-set kind, declared
     to pick its steps per launch at run time (``@hawk.kernel(steps="auto")``)."""
     import hawk
-    from hawk import Mutable, Param, Scalar, Terminated
+    from hawk import Mutable, Param, Scalar, Terminated, UInt32
 
     ACTIVE_SET = _active_set_kind()
 
     # >>> code:hawk_auto
     @hawk.kernel(steps="auto", kind=ACTIVE_SET)
-    def oscillator_step(omega: Scalar, zeta: Scalar, nstop: Scalar, dt: Param,
+    def oscillator_step(omega: Scalar, zeta: Scalar, nstop: UInt32, dt: Param,
                         terminated: Terminated, x: Mutable[Scalar],
-                        v: Mutable[Scalar], k: Mutable[Scalar]):
+                        v: Mutable[Scalar], k: Mutable[UInt32]):
         # The RK4 step above, unchanged; eagle picks the steps per launch.
         x0 = x
         v0 = v
@@ -1003,7 +1004,7 @@ def _define_auto_kernel():
         a4 = -w2 * x4 - c * v4
         x = x0 + h6 * (v0 + 2.0 * v2 + 2.0 * v3 + v4)
         v = v0 + h6 * (a1 + 2.0 * a2 + 2.0 * a3 + a4)
-        k1 = k + 1.0
+        k1 = k + 1
         k = k1
         terminated = k1 >= nstop
     # <<< code:hawk_auto
@@ -1020,13 +1021,13 @@ def _define_persist_kernel():
     active-set one; :data:`PERSIST_ARM` forces eagle's persist launch over
     this kernel."""
     import hawk
-    from hawk import Mutable, Param, Scalar, Terminated
+    from hawk import Mutable, Param, Scalar, Terminated, UInt32
 
     # >>> code:hawk_persist
     @hawk.kernel(steps="auto")
-    def oscillator_step(omega: Scalar, zeta: Scalar, nstop: Scalar, dt: Param,
+    def oscillator_step(omega: Scalar, zeta: Scalar, nstop: UInt32, dt: Param,
                         terminated: Terminated, x: Mutable[Scalar],
-                        v: Mutable[Scalar], k: Mutable[Scalar]):
+                        v: Mutable[Scalar], k: Mutable[UInt32]):
         # The RK4 step above, unchanged; eagle picks the steps per launch,
         # and (forced) runs them through the persist entry, no active set.
         x0 = x
@@ -1047,7 +1048,7 @@ def _define_persist_kernel():
         a4 = -w2 * x4 - c * v4
         x = x0 + h6 * (v0 + 2.0 * v2 + 2.0 * v3 + v4)
         v = v0 + h6 * (a1 + 2.0 * a2 + 2.0 * a3 + a4)
-        k1 = k + 1.0
+        k1 = k + 1
         k = k1
         terminated = k1 >= nstop
     # <<< code:hawk_persist
@@ -1157,16 +1158,17 @@ class _GpuArm:
     """Device buffers for one GPU arm (inputs uploaded in place, so captured
     pointers stay valid across repetitions)."""
 
-    def __init__(self, n, dtype="float64"):
+    def __init__(self, n, dtype="float64", counters=None):
         import cupy as cp
 
         self.n = n
+        cdtype = counters or dtype  # the step and stop counters' own dtype
         self.omega = cp.empty(n, dtype=dtype)
         self.zeta = cp.empty(n, dtype=dtype)
-        self.nstop = cp.empty(n, dtype=dtype)
+        self.nstop = cp.empty(n, dtype=cdtype)
         self.x = cp.empty(n, dtype=dtype)
         self.v = cp.empty(n, dtype=dtype)
-        self.k = cp.zeros(n, dtype=dtype)
+        self.k = cp.zeros(n, dtype=cdtype)
         self.terminated = cp.zeros(n, dtype=cp.bool_)
         self.runner = None  # the eagle.until_done runner (or eagle.simulation)
 
@@ -1178,10 +1180,10 @@ class _GpuArm:
     def upload(self, inp):
         self.omega.set(inp["omega"])
         self.zeta.set(inp["zeta"])
-        self.nstop.set(inp["nstop"])
+        self.nstop.set(inp["nstop"].astype(self.nstop.dtype))
         self.x.set(inp["x0"])
         self.v.set(inp["v0"])
-        self.k.fill(0.0)
+        self.k.fill(0)
         self.terminated.fill(False)
         if self.runner is not None:
             self.runner.reset()
@@ -1251,7 +1253,7 @@ def _make_steps_arms(n, max_steps, names):
         # never be fast-routed, but the row's device-loop labels/byte model
         # assume the band -- forced explicitly so a future kernel change
         # cannot silently drift this arm onto the fast path unnoticed)
-        s = _GpuArm(n)
+        s = _GpuArm(n, counters="uint32")
         s.runner = eagle.until_done(eagle.deploy(oscillator_step), max_steps=max_steps,
                                     dt=DT, _fast_mode=False, **s.planes())
         # <<< code:eagle_graph_steps
@@ -1263,7 +1265,7 @@ def _make_steps_arms(n, max_steps, names):
         # eagle_graph_steps_compact: K steps per launch of the active-set step,
         # compacted every 64 steps (4 launches); forced off the fast path for
         # the same reason eagle_graph_steps is (see there)
-        c = _GpuArm(n)
+        c = _GpuArm(n, counters="uint32")
         steps = hawk.steps(oscillator_step, STEPS_PER_LAUNCH)
         c.runner = eagle.until_done(eagle.deploy(steps), max_steps=max_steps, dt=DT,
                                     every=STEPS_COMPACT_EVERY, _fast_mode=False,
@@ -1276,7 +1278,7 @@ def _make_steps_arms(n, max_steps, names):
         # >>> code:eagle_graph_auto
         # eagle_graph_auto: the same one call; the kernel picks its steps per
         # launch and compacts as it goes
-        a = _GpuArm(n)
+        a = _GpuArm(n, counters="uint32")
         a.runner = eagle.until_done(eagle.deploy(oscillator_step), max_steps=max_steps,
                                     dt=DT, **a.planes())
         # <<< code:eagle_graph_auto
@@ -1288,10 +1290,10 @@ def _make_steps_arms(n, max_steps, names):
         # eagle_graph_persist: the persist entry forced explicitly (device
         # rule (ii)) -- one launch, no graph, no map, no policy kernel;
         # lanes steal samples off a counter until every one is done
-        p = _GpuArm(n)
+        p = _GpuArm(n, counters="uint32")
         p.runner = eagle.until_done(eagle.deploy(oscillator_step), max_steps=max_steps,
                                     dt=DT, _fast_mode="persist",
-                                    _lane_utilisation=True, **p.planes())
+                                    _slot_fill=True, **p.planes())
         # <<< code:eagle_graph_persist
         arms[PERSIST_ARM] = _runner_arm(p)
 
@@ -1300,7 +1302,7 @@ def _make_steps_arms(n, max_steps, names):
         # >>> code:eagle_simulate
         # eagle_simulate: the model, its state and its parameters by name; it
         # runs until every sample has finished
-        m = _GpuArm(n)
+        m = _GpuArm(n, counters="uint32")
         m.runner = eagle.simulation(oscillator_step, omega=m.omega, zeta=m.zeta,
                                     nstop=m.nstop, dt=DT, x=m.x, v=m.v, k=m.k,
                                     max_steps=max_steps)
@@ -1323,7 +1325,7 @@ def _make_cupy_arms(n, max_steps, names):
         # issued-bytes model and expected-kernel count all assume the
         # device-loop/band path (eagle_graph_auto's row is the one that
         # follows auto's actual pick, see there).
-        g = _GpuArm(n)
+        g = _GpuArm(n, counters="uint32")
         g.runner = eagle.until_done(eagle.deploy(oscillator_step), max_steps=max_steps,
                                     dt=DT, _fast_mode=False, **g.planes())
         # <<< code:eagle_graph
@@ -1334,7 +1336,7 @@ def _make_cupy_arms(n, max_steps, names):
         # >>> code:eagle_graph_compact
         # eagle_graph_compact: the same call on the active-set step; forced
         # off the fast path for the same reason eagle_graph is (see there)
-        a = _GpuArm(n)
+        a = _GpuArm(n, counters="uint32")
         a.runner = eagle.until_done(eagle.deploy(oscillator_step), max_steps=max_steps,
                                     dt=DT, every=COMPACT_EVERY, _fast_mode=False,
                                     **a.planes())
@@ -1348,7 +1350,7 @@ def _make_cupy_arms(n, max_steps, names):
         # every per-sample plane (restored to sample order at the end);
         # reorder= already keeps this off the fast path, forced here too for
         # the same reason eagle_graph is (see there)
-        r = _GpuArm(n)
+        r = _GpuArm(n, counters="uint32")
         r.runner = eagle.until_done(eagle.deploy(oscillator_step), max_steps=max_steps,
                                     dt=DT, every=COMPACT_EVERY, reorder=REORDER_THETA,
                                     _fast_mode=False,
@@ -1361,7 +1363,7 @@ def _make_cupy_arms(n, max_steps, names):
         # >>> code:eager_loop
         # eager_loop: the single step (no loop in the kernel), launched from
         # Python, a host check of the finished count per step
-        e = _GpuArm(n)
+        e = _GpuArm(n, counters="uint32")
         done = cp.zeros(1, dtype=cp.uint32)
         e_step = eagle.deploy(oscillator_step.step).bind(
             dt=DT, finished_count=done.view(cp.int32), **e.planes())
@@ -2043,10 +2045,10 @@ class _CpuArm:
         self.max_steps = max_steps
         self.omega = np.empty(n)
         self.zeta = np.empty(n)
-        self.nstop = np.empty(n)
+        self.nstop = np.empty(n, dtype=np.uint32)
         self.x = np.empty(n)
         self.v = np.empty(n)
-        self.k = np.zeros(n)
+        self.k = np.zeros(n, dtype=np.uint32)
         self.terminated = np.zeros(n, dtype=bool)
         self.kernel_s = None  # the steps and the checks run inside one call
 
@@ -2055,10 +2057,10 @@ class _CpuArm:
 
         np.copyto(self.omega, inp["omega"])
         np.copyto(self.zeta, inp["zeta"])
-        np.copyto(self.nstop, inp["nstop"])
+        np.copyto(self.nstop, inp["nstop"], casting="unsafe")  # integral
         np.copyto(self.x, inp["x0"])
         np.copyto(self.v, inp["v0"])
-        self.k.fill(0.0)
+        self.k.fill(0)
         self.terminated.fill(False)
 
     # >>> code:cpu_openmp
@@ -2474,8 +2476,8 @@ def _run_config(n, distribution, max_steps, reps, bus_id, kernel_pass=False):
             "issued_bytes": issued[name],
             "issued_bytes_per_s": issued[name] / med,
             "max_abs_diff_vs_cpu": worst[name],
-            "lane_utilisation": (
-                getattr(arms[name].get("report"), "lane_utilisation", None)
+            "slot_fill": (
+                getattr(arms[name].get("report"), "slot_fill", None)
                 if name in arms else None),
             # the launch shape the runner actually took this row ("band",
             # "fused_one" or "persist"; None for an arm with no report --
@@ -2544,7 +2546,7 @@ def _make_fp32_arms(n, max_steps):
     import eagle
 
     oscillator_step = _define_auto_kernel()
-    m = _GpuArm(n, "float32")
+    m = _GpuArm(n, "float32", counters="uint32")
     m.runner = eagle.simulation(oscillator_step, omega=m.omega, zeta=m.zeta,
                                 nstop=m.nstop, dt=DT, x=m.x, v=m.v, k=m.k,
                                 max_steps=max_steps, scalar_type="float32")
@@ -2666,7 +2668,7 @@ def _make_compaction_sweep_arms(n, max_steps, ks):
 
         # matched_cadence: eagle_graph's own step kernel (no map), looped k
         # times between guard checks -- the same cadence as `compact` below.
-        m = _GpuArm(n)
+        m = _GpuArm(n, counters="uint32")
         done = cp.zeros(1, dtype=cp.uint32)
         total = cp.asarray([n], dtype=cp.uint32)
         m_step = step_plan.bind(dt=DT, finished_count=done.view(cp.int32),
@@ -2686,7 +2688,7 @@ def _make_compaction_sweep_arms(n, max_steps, ks):
             m_pipe.launch()
 
         # compact: eagle_graph_compact's active-set step kernel at cadence k.
-        a = _GpuArm(n)
+        a = _GpuArm(n, counters="uint32")
         a.runner = eagle.until_done(compact_plan, max_steps=max_steps, dt=DT,
                                     every=k, **a.planes())
 
@@ -2758,10 +2760,13 @@ def _run_compaction_sweep(n, distribution, max_steps, reps, ks):
 # --------------------------------------------------------------------------- #
 #: Warm-up batch of the memory and compile-time probes.
 WARM_N = 64
-#: The state a sample needs: x, v (state width 2) plus the per-sample scalars
-#: omega, zeta and the stop step, all float64 (the CPU card's minimum).
+#: The state a sample needs: x, v (state width 2) plus omega and zeta, all
+#: float64, plus the stop step as a 32-bit integer (the step counter is an
+#: output, not part of the minimum).
 STATE_WIDTH = 2
-PER_SAMPLE_SCALARS = 3
+FLOAT_SCALARS = 2
+COUNTER_BYTES = 4
+MIN_BYTES_PER_SAMPLE = (STATE_WIDTH + FLOAT_SCALARS) * 8 + COUNTER_BYTES
 COMPILE_REPS = 3
 #: Arms with no compile step of their own (PyTorch's eager kernels ship
 #: prebuilt).
@@ -2769,7 +2774,7 @@ NO_COMPILE_ARMS = ("torch_masked", "torch_graphed")
 
 
 def _min_bytes(n):
-    return n * (STATE_WIDTH + PER_SAMPLE_SCALARS) * 8
+    return n * MIN_BYTES_PER_SAMPLE
 
 
 def _host_peak_kib():
@@ -2818,11 +2823,20 @@ def _probe_once(a, inp):
     return a["download"]()
 
 
+def _touch_device():
+    """Create the CUDA context with one tiny device operation, so a baseline
+    read right after it sees the context and nothing else."""
+    import cupy as cp
+
+    cp.zeros(1, dtype=cp.uint8).sum()
+    cp.cuda.Device().synchronize()
+
+
 def _memory_probe(arm, distribution, max_steps, n, bus_id):
-    """One fresh process: imports, the arm's kernels built and a warm-up run
-    on a WARM_N batch (every JIT compiles here; JAX also compiles for shape N
-    from abstract shapes), the caching allocators trimmed, the baseline read;
-    then the batch's inputs generated, the arm built for N (eagle's graph,
+    """One fresh process: imports, the CUDA context created and the baseline
+    read; then the arm's kernels built and a warm-up run on a WARM_N batch
+    (every JIT compiles here; JAX also compiles for shape N from abstract
+    shapes), the CuPy and PyTorch caches trimmed; then the batch's inputs generated, the arm built for N (eagle's graph,
     PyTorch's recorded CUDA graph) and one full run with upload and download;
     then the reading again, with every allocator still holding its
     high-water reservation."""
@@ -2830,6 +2844,12 @@ def _memory_probe(arm, distribution, max_steps, n, bus_id):
 
     reply_fd = cc.probe_reply_fd()
     gpu = arm != "cpu_openmp"
+    # the device baseline: the CUDA context exists (one tiny device op), nothing
+    # of the arm is built or allocated yet, so whatever any library's pool
+    # reserves during the warm-up counts in the reading
+    if gpu:
+        _touch_device()
+    dev_base, dev_source = cc.process_device_bytes(bus_id) if gpu else (None, None)
     _probe_once(_probe_arm(arm, WARM_N, max_steps), _inputs(WARM_N, distribution, max_steps))
     jax_compiled = _jax_compile(n, "float64", max_steps) if arm == "jax_vmap" else None
     gc.collect()
@@ -2838,7 +2858,6 @@ def _memory_probe(arm, distribution, max_steps, n, bus_id):
     torch = sys.modules.get("torch")
     if torch is not None and torch.cuda.is_initialized():
         torch.cuda.reset_peak_memory_stats()
-    dev_base, dev_source = cc.process_device_bytes(bus_id) if gpu else (None, None)
     lib_base = _library_counters() if gpu else {}
     rss_base = cc.status_kib("VmRSS")
     reset_ok = cc.reset_host_peak()
@@ -3025,17 +3044,20 @@ _COMPILE_METHOD = (
 
 _MEMORY_METHOD = (
     "A separate pass after the timing pass. Each (arm, N, configuration) runs "
-    "in a fresh process: imports, the arm's kernels built and a warm-up run on a "
+    "in a fresh process: imports, the CUDA context created by one tiny device "
+    "operation, then the baseline read, before the arm builds or allocates "
+    "anything; then the arm's kernels built and a warm-up run on a "
     f"{WARM_N}-sample batch (every compile happens here; JAX also compiles for "
-    "shape N from abstract shapes), every caching allocator trimmed (CuPy's "
-    "pools freed, torch.cuda.empty_cache(), Warp's pool release threshold set "
-    "to 0), then the baseline; then the batch's "
+    "shape N from abstract shapes), so every library's pool reserved during the "
+    "warm-up counts in the reading; CuPy's pools freed and "
+    "torch.cuda.empty_cache() called after the warm-up (Warp's pool release "
+    "threshold set to 0); then the batch's "
     "inputs generated, the arm set up for N (eagle builds its graph, PyTorch "
     "captures its CUDA graph, whose private memory pool counts) and one full run with upload and download. "
     "Device memory = the memory the CUDA driver accounts to the process (NVML "
     "per-process used memory) after the run minus at the baseline. The caching "
     "allocators of CuPy, PyTorch and JAX are left at their defaults and are not "
-    "trimmed after the baseline; each keeps the memory it reserved until "
+    "trimmed after the run; each keeps the memory it reserved until "
     "trimmed, so the reading after the run is the allocator's high-water "
     "reservation, the same measure for every arm. A disabled pool returns "
     "memory between operations, so its peak could only be caught by sampling, "
@@ -3047,10 +3069,11 @@ _MEMORY_METHOD = (
     "0 or one page. The per-library counters (CuPy pool, "
     "torch.cuda.max_memory_reserved/allocated, JAX memory_stats) are recorded "
     "in the JSON as a cross-check. Host memory = peak resident set size above "
-    "the baseline (/proc/self/clear_refs reset at the baseline, then "
-    "VmHWM). Minimum = the state the workload needs, N × "
-    f"({STATE_WIDTH} state + {PER_SAMPLE_SCALARS} per-sample scalars: omega, "
-    "zeta, stop step) × 8 bytes; the factor is device memory / minimum.")
+    "the host baseline (taken after the warm-up; /proc/self/clear_refs reset "
+    "there, then VmHWM). Minimum = the state the workload needs, N × "
+    f"(({STATE_WIDTH} state + {FLOAT_SCALARS} float64 scalars: omega, zeta) × 8 "
+    f"+ {COUNTER_BYTES} bytes for the stop step as a 32-bit integer) = "
+    f"{MIN_BYTES_PER_SAMPLE} bytes per sample; the factor is device memory / minimum.")
 
 
 # --------------------------------------------------------------------------- #
@@ -3334,10 +3357,10 @@ def main(argv=None):
         # pass above; "--" (None) with --no-nsys or no complete traced run.
         row["nsys_counts"] = (nsys_counts.get(key) if row["arm"] != "cpu_openmp"
                               and nsys_counts is not None else None)
-        # Item 4: lane utilisation -- set already, per-row, from the
+        # Item 4: slot fill -- set already, per-row, from the
         # persist arm's own report (the persistent launch); every other
         # arm's row has none, so this only fills the gap.
-        row.setdefault("lane_utilisation", None)
+        row.setdefault("slot_fill", None)
     for row in results:
         row["fraction_of_peak_fp64"] = (
             None if row["arm"] == "cpu_openmp" or peak["fp64_flops"] is None
@@ -3350,7 +3373,7 @@ def main(argv=None):
             None if not ko or row["fraction_of_peak_fp64"] is None
             else FLOPS_PER_SAMPLE_STEP * row["sample_steps"] / ko / peak["fp64_flops"])
     for row in fixed_overhead_rows:
-        row["lane_utilisation"] = None
+        row["slot_fill"] = None
         row["fraction_of_peak_fp64"] = (
             None if row["arm"] == "cpu_openmp" or peak["fp64_flops"] is None
             else row["useful_flops_per_s"] / peak["fp64_flops"])
@@ -3456,7 +3479,8 @@ def main(argv=None):
                             "from the same traced pass as kernel_only; \"--\" (None) "
                             "with --no-nsys or when no complete traced run exists"
                             if not args.no_nsys else "skipped (--no-nsys)"),
-            "lane_utilisation": ("active lanes / warp-iterations, in (0, 1]; "
+            "slot_fill": ("steps run / the persist entry's chunk slots (32 lanes "
+                                 "x chunk per warp per head), in (0, 1]; "
                                  "filled for the persist arm (the persistent "
                                  "launch), \"--\" for every other "
                                  "arm (none counts it)"),
@@ -3479,7 +3503,7 @@ def main(argv=None):
         "per_config": extras,
         "torch_graph_block": GRAPH_BLOCK,
         "memory": {"method": _MEMORY_METHOD,
-                   "minimum_bytes_per_sample": (STATE_WIDTH + PER_SAMPLE_SCALARS) * 8,
+                   "minimum_bytes_per_sample": MIN_BYTES_PER_SAMPLE,
                    "rows": memory_rows},
         "compile_time": {"method": _COMPILE_METHOD, "rows": compile_rows,
                          "none": list(NO_COMPILE_ARMS)},
