@@ -207,7 +207,7 @@ def _probe_runner(card, kind, n, device):
     if kind == "auto":
         kernel, extra = card._define_auto_kernel(), {}
     else:
-        kernel, extra = card._define_persist_kernel(), {"_fast_mode": "persist", "_lane_utilisation": True}
+        kernel, extra = card._define_persist_kernel(), {"_fast_mode": "persist", "_slot_fill": True}
     if device:
         arm = card._GpuArm(n)
         inp = card._inputs(n, "spread", PROBE_STEPS)
@@ -501,7 +501,7 @@ def build_arm(spec, n, steps, dist):
         if which == "warp":
             return rk._make_warp_arm(n), rk._inputs(n)
         # auto keeps until_done's own pick; the others force one entry (band: the single-attempt kernel, compacted)
-        extra = {"auto": {}, "persist": {"_fast_mode": "persist", "_lane_utilisation": opts.get("util") == "1"},
+        extra = {"auto": {}, "persist": {"_fast_mode": "persist", "_slot_fill": opts.get("util") == "1"},
                  "fused": {"_fast_mode": "fused_one"},
                  "band": {"_fast_mode": False, **({"every": int(opts["every"])} if "every" in opts else {})}}[which]
         state = rk._GpuArm(n)
@@ -538,7 +538,7 @@ def build_arm(spec, n, steps, dist):
         if mode == "persist":  # a forced persist runner is never refitted: it takes its chunk from here
             pin, pinned, note = _chunk_pin(opts, step, float(inp["nstop"].mean()), fp32)
         runner = eagle.until_done(step, max_steps=steps, dt=card.DT, _fast_mode=mode,
-                                  _lane_utilisation=(mode == "persist" and opts.get("util") == "1"), **pin,
+                                  _slot_fill=(mode == "persist" and opts.get("util") == "1"), **pin,
                                   **state.planes())
         arm = _runner_arm(state, runner)
         arm["chunk"], arm["note"] = pinned, note
