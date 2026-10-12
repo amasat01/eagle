@@ -1139,7 +1139,7 @@ NB_MODULE(_core, m)
             nb::arg("fill"), nb::arg("chunk") = 0, nb::arg("ops") = 0.0,
             "Threads per SM of a persistent launch of `n` samples at `regs` registers and step fill "
             "`fill`: the saturation count (plus one warp per partition for a chunk head's fetch "
-            "latency when `chunk` and `ops` are known) held between two warps per partition and "
+            "latency, up to three, when `chunk` and `ops` are known) held between two warps per partition and "
             "min(residency ceiling, n * fill / (2 * SMs)). 0 when the SM count is unknown. Pure.");
 
         m.def("persist_chunk",

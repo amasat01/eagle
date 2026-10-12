@@ -24,15 +24,15 @@ const LaunchDevice H100 = { { 9, 0, 65536, 2048 }, 132, 2, 1755000 };
 
 TEST(Launch, SaturationFollowsTheFp64Class)
 {
-    EXPECT_EQ(persistSaturation(A100, true), 640);
+    EXPECT_EQ(persistSaturation(A100, true), 384);
     EXPECT_EQ(persistSaturation(P2000, true), 256);
     EXPECT_EQ(persistSaturation(L4, true), 256);
 }
 
 TEST(Launch, A100OscillatorRows)
 {
-    EXPECT_EQ(persistThreads(A100, true, 36, 1000000, 0.23), 640);
-    EXPECT_EQ(persistThreads(A100, true, 36, 1000000, 1.0), 640);
+    EXPECT_EQ(persistThreads(A100, true, 36, 1000000, 0.23), 384);
+    EXPECT_EQ(persistThreads(A100, true, 36, 1000000, 1.0), 384);
     EXPECT_EQ(persistThreads(A100, true, 36, 100000, 0.23), 256);
     EXPECT_EQ(persistThreads(A100, true, 36, 270000, 0.23), 320);
 }
@@ -59,7 +59,7 @@ TEST(Launch, TheDrainLimitShrinksASmallBatch)
 
 TEST(Launch, DemandIsTheSaturationPlusTheFetchWarp)
 {
-    EXPECT_EQ(persistDemand(A100, true), 768);
+    EXPECT_EQ(persistDemand(A100, true), 512);
     EXPECT_EQ(persistDemand(P2000, true), 384);
 }
 
@@ -81,7 +81,7 @@ TEST(Launch, ThreadsNeverExceedTheResidencyCeiling)
 
 TEST(Launch, ChunkRuleRows)
 {
-    // (device, precision, ops, mean steps) -> chunk
+    // (device, precision, ops, mean steps) -> chunk; the head is a fixed 256 cycles, whatever the clock
     EXPECT_EQ(persistChunk(P2000, true, 44, 22), 4);
     EXPECT_EQ(persistChunk(P2000, true, 44, 215), 8);
     EXPECT_EQ(persistChunk(P2000, false, 44, 22), 16);
@@ -91,6 +91,9 @@ TEST(Launch, ChunkRuleRows)
     EXPECT_EQ(persistChunk(A100, true, 1106, 498), 8);
     const int h100 = persistChunk(H100, true, 44, 22);
     EXPECT_TRUE(h100 == 8 || h100 == 16) << h100;
+    LaunchDevice slow = P2000;
+    slow.clockKhz = 0;
+    EXPECT_EQ(persistChunk(slow, false, 44, 22), persistChunk(P2000, false, 44, 22));
 }
 
 TEST(Launch, ChunkIsAPowerOfTwoInItsBounds)
@@ -121,9 +124,11 @@ TEST(Launch, ChunkNeverShrinksAsStepsGrow)
 TEST(Launch, TheFetchTermAddsOneWarpOnceTheChunkIsKnown)
 {
     EXPECT_EQ(persistThreads(P2000, true, 43, 1000000, 0.23, 4, 44), 384);
-    EXPECT_EQ(persistThreads(A100, true, 36, 1000000, 0.23, 8, 44), 768);
-    EXPECT_EQ(persistThreads(A100, true, 36, 1000000, 0.23, 8, 0), 640);   // ops unknown: none
-    EXPECT_EQ(persistThreads(A100, true, 36, 1000000, 0.23, 0, 44), 640);  // chunk unknown: none
+    EXPECT_EQ(persistThreads(A100, true, 36, 1000000, 0.23, 8, 44), 640);   // two fetch warps
+    EXPECT_EQ(persistThreads(A100, true, 36, 1000000, 0.23, 32, 44), 512);  // one
+    EXPECT_EQ(persistThreads(A100, true, 36, 1000000, 0.23, 1, 44), 768);   // at most three
+    EXPECT_EQ(persistThreads(A100, true, 36, 1000000, 0.23, 8, 0), 384);    // ops unknown: none
+    EXPECT_EQ(persistThreads(A100, true, 36, 1000000, 0.23, 0, 44), 384);   // chunk unknown: none
     EXPECT_EQ(persistThreads(A100, true, 166, 1000000, 0.23, 8, 44), 384); // a ceiling is still the ceiling
 }
 

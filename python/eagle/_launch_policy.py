@@ -281,7 +281,7 @@ def persistent_threads_per_sm(dev, kern, n: int, fill: float = _core.PERSIST_FIR
     saturation count held between two warps per partition and the smaller of
     the register-limited residency and the drain limit ``n * fill / (2 * SMs)``
     (:func:`eagle._core.persist_threads_per_sm`). A known ``chunk`` and
-    ``ops`` (the step's floating-point operations) add one warp per partition
+    ``ops`` (the step's floating-point operations) add one to three warps per partition
     for a chunk head's fetch latency. ``0`` when the SM count is unknown."""
     major, minor, sms, ratio, fp64 = _fp64_args(dev, scalar_type)
     regs_per_sm, max_threads = _attr(dev, "regsPerMultiprocessor"), _attr(dev, "maxThreadsPerMultiProcessor")

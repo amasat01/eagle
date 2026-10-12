@@ -89,12 +89,46 @@ def test_the_chunk_follows_the_mean_steps_and_the_step_cost(args, fp64, ops, m, 
     assert _core.persist_chunk(*args, fp64, ops, m) == want
 
 
-def test_the_fetch_term_adds_one_warp_per_partition_once_the_chunk_is_known():
-    a100 = (8, 0, 65536, 2048, 108, 2, True, 36, 1_000_000, 0.23)
-    assert _core.persist_threads_per_sm(*a100) == 640
-    assert _core.persist_threads_per_sm(*a100, 8, 44.0) == 768
-    p2000 = (6, 1, 65536, 2048, 8, 32, True, 43, 1_000_000, 0.23)
-    assert _core.persist_threads_per_sm(*p2000, 4, 44.0) == 384
+_FETCH_FIT = {  # name -> (major, minor, ratio, sms)
+    "H100": (9, 0, 2, 132), "A100": (8, 0, 2, 108), "P2000": (6, 1, 32, 8)}
+
+
+def _threads(card, fp64, c, ops=44.0, regs=36, n=10_000_000, fill=1.0):
+    major, minor, ratio, sms = _FETCH_FIT[card]
+    return _core.persist_threads_per_sm(major, minor, 65536, 2048, sms, ratio, fp64, regs, n, fill, c, ops)
+
+
+@pytest.mark.parametrize("card, fp64, c, want", [
+    ("H100", True, 16, 896), ("H100", True, 32, 768),
+    ("H100", False, 16, 1536), ("H100", False, 32, 1408),
+    ("A100", True, 8, 640), ("A100", True, 32, 512),
+    ("A100", False, 16, 896), ("A100", False, 32, 768),
+    ("P2000", True, 4, 384), ("P2000", True, 8, 384),
+    ("P2000", False, 16, 1536), ("P2000", False, 32, 1408)])
+def test_the_persist_threads_follow_the_saturation_and_the_fetch_warps(card, fp64, c, want):
+    assert _threads(card, fp64, c) == want
+
+
+@pytest.mark.parametrize("card, fp64, c, want", [("H100", True, 8, 384), ("A100", True, 8, 384)])
+def test_a_long_step_is_capped_by_the_register_ceiling(card, fp64, c, want):
+    assert _threads(card, fp64, c, ops=1125.0, regs=166) == want
+
+
+@pytest.mark.parametrize("card, fp64, c, want", [("H100", True, 8, 768), ("A100", True, 8, 512)])
+def test_a_long_step_wants_one_fetch_warp(card, fp64, c, want):
+    assert _threads(card, fp64, c, ops=1125.0) == want
+
+
+@pytest.mark.parametrize("card, fp64, c", [("H100", True, 16), ("H100", False, 16)])
+def test_the_drain_limit_still_binds(card, fp64, c):
+    assert _threads(card, fp64, c, n=1_000_000, fill=0.2196) == 832
+
+
+def test_the_chunk_ignores_the_device_clock():
+    # the head is a fixed 256 cycles: the clock never enters the chunk
+    for card, fp64, want in (("H100", False, 16), ("A100", True, 8), ("P2000", True, 4), ("P2000", False, 16)):
+        major, minor, ratio, _ = _FETCH_FIT[card]
+        assert _core.persist_chunk(major, minor, ratio, fp64, 44.0, 22.0) == want
 
 
 # --------------------------------------------------------------------------- #

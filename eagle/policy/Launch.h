@@ -17,13 +17,14 @@
 
 #include <algorithm>
 #include <climits>
+#include <cmath>
 #include <cstdint>
 
 namespace eagle {
 namespace policy {
 
 /** @brief Cycles of dependent arithmetic a step's chain exposes to one warp. */
-inline constexpr int PERSIST_CHAIN_CYCLES = 16;
+inline constexpr int PERSIST_CHAIN_CYCLES = 8;
 /** @brief Fewest warps per scheduler partition a persistent launch ever uses. */
 inline constexpr int PERSIST_MIN_WARPS = 2;
 /** @brief Threads per SM are granted in multiples of this. */
@@ -35,6 +36,10 @@ inline constexpr int PERSIST_CHUNK_MIN = 2;
 inline constexpr int PERSIST_CHUNK_MAX = 32;
 /** @brief Cycles a chunk head costs a warp: the work fetch and its same-address atomic. */
 inline constexpr double PERSIST_HEAD_CYCLES = 256.0;
+/** @brief Cycles of fetch latency the warps of a persistent launch must cover. */
+inline constexpr double PERSIST_FETCH_CYCLES = 2000.0;
+/** @brief Most warps per partition added to cover a chunk head's fetch. */
+inline constexpr int PERSIST_FETCH_WARPS_MAX = 3;
 
 /** @brief Compaction's fixed cost: nine small kernels, in seconds. */
 inline constexpr double COMPACTION_FLOOR_S = 27e-6;
@@ -97,8 +102,8 @@ inline int persistDemand(const LaunchDevice& dev, bool fp64) {
  * end). When the ceiling is under the saturation count the launch takes the
  * whole ceiling.
  *
- * Once the chunk is known, one more warp per partition is added to cover the
- * latency of a chunk head's fetch. @p chunk and @p ops (the step's
+ * Once the chunk is known, one to PERSIST_FETCH_WARPS_MAX more warps per
+ * partition are added to cover the latency of a chunk head's fetch. @p chunk and @p ops (the step's
  * floating-point operations) are 0 when unknown, which adds nothing.
  */
 inline int persistThreads(const LaunchDevice& dev, bool fp64, int regs, long long n, double f,
@@ -109,8 +114,13 @@ inline int persistThreads(const LaunchDevice& dev, bool fp64, int regs, long lon
     const double drain = static_cast<double>(n) * f / (2.0 * dev.sms);
     const int lowest = std::min(PERSIST_MIN_WARPS * warpLayer(dev), ceiling);
     const double hi = std::min<double>(ceiling, drain);
-    // a head's fetch latency (~2000 cycles) is never covered by a chunk's arithmetic: always one warp more
-    const int fetchWarps = (chunk > 0 && ops > 0.0) ? 1 : 0;
+    // a head's fetch latency is covered by as many warps as its chunk's arithmetic falls short of it
+    int fetchWarps = 0;
+    if (chunk > 0 && ops > 0.0) {
+        const double cover = chunk * ops * issueCycles(dev, fp64);
+        fetchWarps = static_cast<int>(std::clamp(std::ceil(PERSIST_FETCH_CYCLES / cover), 1.0,
+                                                 static_cast<double>(PERSIST_FETCH_WARPS_MAX)));
+    }
     const double saturation = persistSaturation(dev, fp64) + fetchWarps * warpLayer(dev);
     const double want = std::max<double>(lowest, std::min<double>(saturation, hi));
     const long long step = PERSIST_THREAD_STEP;
