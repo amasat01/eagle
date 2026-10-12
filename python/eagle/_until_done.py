@@ -120,7 +120,10 @@ class RunReport:
     ``"persist"`` for a no-graph fast-path run, ``"band"`` for the
     WHILE-graph/policy path (the only mode before the fast path existed).
     ``probe`` is true for a fast-path run taken to time the entry the batch
-    is not currently using (see :meth:`Runner._pick_entry`).
+    is not currently using (see :meth:`Runner._pick_entry`); ``timed`` is
+    true for a fast-path run that carried the timing event pair (a probe, the
+    first run, or a run after the walls were invalidated), so a caller can
+    warm until a run is neither ``probe`` nor ``timed``.
     ``dispatch`` is ``None`` unless the run decided a dispatch group
     (``dispatch=``): ``{group: (policy, mix, gain)}`` with the policy in force
     at the end, the samples that took each branch at the last look and the
@@ -140,6 +143,7 @@ class RunReport:
     slot_fill: float | None = None
     mode: str = "band"
     probe: bool = False
+    timed: bool = False
     dispatch: dict | None = None
     class_sorts: int = 0
 
@@ -157,6 +161,8 @@ def _array_module(device: bool):
 #: A settled runner sums its steps (the step fill f) on one run in this many;
 #: the runs between pass no sum cell and pay no device atomics.
 STEP_FILL_EVERY = 8
+#: the other entry replaces the pick only when its wall is below this fraction of the pick's
+PICK_HYSTERESIS = 0.98
 
 
 def _packed_read(xp, device: bool, cells) -> tuple:
@@ -1033,8 +1039,9 @@ class Runner:
     def _pick_entry(self) -> tuple:
         """The entry this run takes and whether it is a probe, as
         ``(mode, probe)``. A pinned or below-capacity runner always takes its
-        bind-time mode. Otherwise the first run takes the size pick, the
-        second the other entry, and from then on the one with the smaller
+        bind-time mode. Otherwise the first run takes the size pick (real
+        work, often the only run: never a probe), the second the other entry,
+        and from then on the one with the smaller
         measured launch wall; the loser is timed again when a run's readback
         (``steps``/``finished``) differs from the last probe's, and every
         64 runs. However low the step fill f, the fused entry is timed: a spread
@@ -1057,6 +1064,11 @@ class Runner:
             return other, True
         return pick, False
 
+    def _carries_timing(self, probing: bool) -> bool:
+        """Whether the run just picked carries the timing event pair: a
+        probe, the first run, and a run while either wall is missing."""
+        return probing or self._fast_prior is None or len(self._fast_wall) < 2
+
     def _note_run(self, mode: str, wall_ms, steps: int, finished: int, f) -> None:
         """Fold one probing-eligible run into the pick: its step fill ``f``
         (from either entry; ``None`` on a settled run that did not sum its
@@ -1078,7 +1090,13 @@ class Runner:
         elif wall_ms is not None:
             wall[mode] = wall_ms
             if len(wall) == 2:
-                self._fast_pick = min(wall, key=wall.get)
+                # a tie keeps the pick: the other entry must win by 2 %
+                pick = self._fast_pick
+                other = "persist" if pick == "fused_one" else "fused_one"
+                if pick in wall and wall[other] < PICK_HYSTERESIS * wall[pick]:
+                    self._fast_pick = other
+                elif pick not in wall:
+                    self._fast_pick = min(wall, key=wall.get)
         if self._fast_runs % 64 == 0 and len(wall) == 2:
             wall.pop("persist" if self._fast_pick == "fused_one" else "fused_one")
         self._fast_prior = f
@@ -1162,8 +1180,7 @@ class Runner:
         # only a run that decides is timed: the first, a probe, and the
         # run(s) after an invalidation cleared the walls; a settled run is
         # not (an event pair costs more than the launch policy is worth)
-        prior = self._fast_prior
-        timed = probed and (probing or prior is None or len(self._fast_wall) < 2)
+        timed = probed and self._carries_timing(probing)
         if timed:
             t0, t1 = self._fast_ev
             t0.record()
@@ -1232,7 +1249,7 @@ class Runner:
             n=self.n, finished=finished, done=done, launches=1,
             steps=steps, compactions=0, reorders=0, build_s=0.0,
             launches_by_k={self._max_steps: 1}, exact_steps=exact,
-            slot_fill=slot_fill, mode=mode, probe=probing)
+            slot_fill=slot_fill, mode=mode, probe=probing, timed=timed)
 
     @property
     def policy(self) -> dict | None:

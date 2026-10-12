@@ -1463,8 +1463,9 @@ def test_device_run_never_invokes_cupy_s_count_nonzero(auto, monkeypatch):
 
 # --------------------------------------------------------------------------- #
 # The measured entry pick: above capacity, with both fast entries present, the
-# first run takes the size pick, the second the other entry, and later runs
-# the one whose launch wall was smaller.
+# first run takes the size pick (never a probe), the second the other entry,
+# and later runs the one whose launch wall was smaller (the other must win by
+# 2 %).
 # --------------------------------------------------------------------------- #
 def _probe_runner(auto, n, **kw):
     """A device runner over ``n`` > capacity samples (a uniform batch: a full
@@ -1517,6 +1518,8 @@ def test_fast_entry_probe_picks_the_faster_entry(auto, monkeypatch, slow):
     # run 1 refits the persist geometry from what it read back, which drops its
     # wall: persist is timed again on the refit geometry before the pick settles
     assert [r.mode for r in reports] == [first, other, first, fast, fast, fast]
+    assert [(r.probe, r.timed) for r in reports] == [
+        (False, True), (True, True), (False, True)] + [(False, False)] * 3
     assert all(r.done for r in reports)
 
 
