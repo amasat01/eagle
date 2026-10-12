@@ -1512,10 +1512,11 @@ def test_fast_entry_probe_picks_the_faster_entry(auto, monkeypatch, slow):
     other = "persist" if first == "fused_one" else "fused_one"
     assert first == "persist"  # above capacity the size rule picks persist
     _slow_entry(monkeypatch, runner, slow)
-    reports = [rerun()[0] for _ in range(5)]
+    reports = [rerun()[0] for _ in range(6)]
     fast = "persist" if slow == "fused_one" else "fused_one"
-    assert [r.mode for r in reports] == [first, other, fast, fast, fast]
-    assert [r.probe for r in reports] == [False, True, False, False, False]
+    # run 1 refits the persist geometry from what it read back, which drops its
+    # wall: persist is timed again on the refit geometry before the pick settles
+    assert [r.mode for r in reports] == [first, other, first, fast, fast, fast]
     assert all(r.done for r in reports)
 
 
@@ -1553,8 +1554,8 @@ def test_fast_entry_probe_reprobes_on_regime_change(auto, monkeypatch):
     n = _above(auto)
     runner, rerun = _probe_runner(auto, n)
     _slow_entry(monkeypatch, runner, "persist")
-    modes = [rerun()[0].mode for _ in range(4)]
-    assert modes[2:] == ["fused_one"] * 2
+    modes = [rerun()[0].mode for _ in range(5)]
+    assert modes[3:] == ["fused_one"] * 2  # run 3 re-times persist on the refit geometry
     # a run that ends differently (no sample can finish within 3 steps) is a
     # new regime: the loser is timed again within two runs
     runner._max_steps = 3
@@ -1826,7 +1827,7 @@ def test_entry_prior_is_known_after_a_fused_one_run(auto):
     assert reports[1].mode == "fused_one" and runner._fast_prior == 1.0
     runner._fast_prior = None  # forget it: the fused run alone must restore it
     runner._fast_pick = "fused_one"
-    runner._fast_wall.pop("persist")
+    runner._fast_wall.pop("persist", None)
     assert rerun().mode == "fused_one" and runner._fast_prior == 1.0
 
 

@@ -493,7 +493,7 @@ class Runner:
                  "_fast_util_on", "_fast_exact", "_fast_views",
                  "_fast_counts", "_fast_pick", "_fast_wall", "_fast_runs", "_fast_last", "_fast_probe",
                  "_fast_prior", "_fast_ev", "_fast_prep",
-                 "_fast_fill", "_fast_chunk", "_fast_chunk_ok", "_rate", "_recorder")
+                 "_fast_fill", "_fast_chunk", "_fast_chunk_ok", "_fast_chunk_pin", "_fast_fit", "_rate", "_recorder")
 
     @_layout.door
     def __init__(self, plan, *, max_steps, every=None, reorder=None, record=False,
@@ -516,6 +516,14 @@ class Runner:
         legacy = planes.pop("_lane_utilisation", None)
         if slot_fill_override is None:
             slot_fill_override = legacy
+        # Internal only, same convention: pins the persist entry's chunk length
+        # (steps per work fetch) for the life of the runner and turns off the
+        # refit of the chunk from the readback; the launch geometry still
+        # follows the step fill. For a card arm that sweeps the chunk. Omitted
+        # (``None``), the chunk follows the launch rule.
+        chunk_pin = planes.pop("_chunk", None)
+        if chunk_pin is not None and int(chunk_pin) < 1:
+            raise ValueError(f"eagle.until_done: _chunk must be a positive number of steps, got {chunk_pin!r}")
         # Internal only: ``False`` keeps the size pick for every run instead of
         # timing the other entry (see :meth:`_pick_entry`).
         self._fast_probe = planes.pop("_fast_probe", True)
@@ -700,6 +708,8 @@ class Runner:
         self._fast_fill = _core.PERSIST_FIRST_FILL
         self._fast_chunk = None
         self._fast_chunk_ok = False
+        self._fast_chunk_pin = None if chunk_pin is None else int(chunk_pin)
+        self._fast_fit = None
         self._fast_wall = {}
         self._fast_runs = 0
         self._fast_counter = self._fast_grid = self._fast_block = self._fast_util = None
@@ -926,7 +936,8 @@ class Runner:
         # that predates it ignores the trailing argument)
         self._fast_chunk_ok = True
         self._fast_fill = _core.PERSIST_FIRST_FILL
-        self._fast_chunk = _core.persist_chunk(1e9) if self._fast_chunk_ok else None
+        self._fast_fit = None
+        self._fast_chunk = self._chunk_for(1e9)
         # the timing events, allocated once: only a probing runner times runs
         self._fast_ev = (self._xp.cuda.Event(), self._xp.cuda.Event()) if probe else None
         self.loop = None  # no WHILE-graph body exists in this mode
@@ -960,8 +971,30 @@ class Runner:
                            if self._fast_util_on else None)
         self._size_persist()
 
-    def _persist_geometry(self, fill: float) -> tuple:
-        """``(block, grid)`` of the persist launch at step fill ``fill``."""
+    def _device_and_ops(self) -> tuple:
+        """The device properties and the step's floating-point operation count
+        (the plugin's ``fp64_ops_ir`` or ``ops_per_step``; ``AUTO_STEP_OPS``
+        when it carries neither) the launch rules read."""
+        import importlib
+
+        plugin = self.step.plan.plugin
+        ops = (getattr(plugin, "fp64_ops_ir", None) or getattr(plugin, "ops_per_step", None)
+               or AUTO_STEP_OPS)
+        return importlib.import_module("eagle.launch")._device_props(), float(ops)
+
+    def _chunk_for(self, mean_steps: float) -> int:
+        """The chunk length for samples of ``mean_steps`` mean steps: the pinned
+        one, else the launch rule (:func:`eagle._launch_policy.persistent_chunk`)."""
+        if self._fast_chunk_pin is not None:
+            return self._fast_chunk_pin
+        from ._launch_policy import persistent_chunk
+
+        dev, ops = self._device_and_ops()
+        return persistent_chunk(dev, ops, mean_steps, self._scalar_type())
+
+    def _persist_geometry(self, fill: float, chunk: int) -> tuple:
+        """``(block, grid)`` of the persist launch at step fill ``fill`` and
+        chunk length ``chunk``."""
         import importlib
 
         from ._launch_policy import persistent_launch
@@ -972,7 +1005,7 @@ class Runner:
         _launch = importlib.import_module("eagle.launch")
         return persistent_launch(_launch._device_props(),
                                  _launch._kernel_attrs(self.step.persist_entry()),
-                                 self.n, fill, self._scalar_type())
+                                 self.n, fill, self._scalar_type(), chunk, self._device_and_ops()[1])
 
     def _size_persist(self) -> None:
         """Size the persist launch and pack its argument blocks: threads per SM
@@ -981,7 +1014,7 @@ class Runner:
         (:func:`eagle._launch_policy.persistent_launch`), the chunk length from
         the mean steps seen. Called at bind and again when a run's readback moves
         the fill or the chunk."""
-        self._fast_block, self._fast_grid = self._persist_geometry(self._fast_fill)
+        self._fast_block, self._fast_grid = self._persist_geometry(self._fast_fill, self._fast_chunk)
         counter, steps, stepsum = self._fast_views
         steps_cell = steps if self._fast_exact else None
         stepsum = stepsum if self._fast_exact else None
@@ -1054,16 +1087,24 @@ class Runner:
 
     def _refit_persist(self, fill: float, steps: int) -> None:
         """Resize the persist launch when the readback moved the step fill or
-        the chunk: the threads per SM follow the fill (a drain limit) and the
-        chunk follows the mean steps ``fill * steps``."""
+        the steps: the threads per SM follow the fill (a drain limit) and the
+        chunk follows the mean steps ``fill * steps``. A readback whose
+        ``(round(fill, 2), steps)`` is the one already fitted costs nothing.
+        A refit that changes the launch drops the persist entry's stored wall,
+        which was timed on the old geometry; it is timed again."""
         if "persist" not in self._fast_prep:
             return
-        chunk = _core.persist_chunk(fill * steps) if self._fast_chunk_ok else None
-        geometry = self._persist_geometry(fill)
+        key = (round(fill, 2), steps)
+        if key == self._fast_fit:
+            return
+        self._fast_fit = key
+        chunk = self._chunk_for(fill * steps)
+        geometry = self._persist_geometry(fill, chunk)
         if geometry == (self._fast_block, self._fast_grid) and chunk == self._fast_chunk:
             self._fast_fill = fill
             return
         self._fast_fill, self._fast_chunk = fill, chunk
+        self._fast_wall.pop("persist", None)
         self._size_persist()
 
     def _run_fast(self) -> RunReport:

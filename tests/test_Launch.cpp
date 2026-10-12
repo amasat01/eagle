@@ -18,6 +18,7 @@ namespace {
 const LaunchDevice A100 = { { 8, 0, 65536, 2048 }, 108, 2, 1410000 };
 const LaunchDevice P2000 = { { 6, 1, 65536, 2048 }, 8, 32, 1480000 };
 const LaunchDevice L4 = { { 8, 9, 65536, 1536 }, 58, 64, 2040000 };
+const LaunchDevice H100 = { { 9, 0, 65536, 2048 }, 132, 2, 1755000 };
 
 }  // namespace
 
@@ -56,6 +57,12 @@ TEST(Launch, TheDrainLimitShrinksASmallBatch)
     EXPECT_EQ(persistThreads(A100, true, 36, 1, 1.0), 256);
 }
 
+TEST(Launch, DemandIsTheSaturationPlusTheFetchWarp)
+{
+    EXPECT_EQ(persistDemand(A100, true), 768);
+    EXPECT_EQ(persistDemand(P2000, true), 384);
+}
+
 TEST(Launch, UnknownDevicesSizeNothing)
 {
     EXPECT_EQ(persistThreads({}, true, 36, 1000000, 0.5), 0);
@@ -72,13 +79,52 @@ TEST(Launch, ThreadsNeverExceedTheResidencyCeiling)
             }
 }
 
-TEST(Launch, ChunkIsAPowerOfTwoFromTheMeanSteps)
+TEST(Launch, ChunkRuleRows)
 {
-    EXPECT_EQ(persistChunk(23.0), 8);
-    EXPECT_EQ(persistChunk(500.0), 32);
-    EXPECT_EQ(persistChunk(1.0), 4);
-    EXPECT_EQ(persistChunk(16.0), 4);
-    EXPECT_EQ(persistChunk(17.0), 8);
+    // (device, precision, ops, mean steps) -> chunk
+    EXPECT_EQ(persistChunk(P2000, true, 44, 22), 4);
+    EXPECT_EQ(persistChunk(P2000, true, 44, 215), 8);
+    EXPECT_EQ(persistChunk(P2000, false, 44, 22), 16);
+    EXPECT_EQ(persistChunk(P2000, false, 44, 215), 32);
+    EXPECT_EQ(persistChunk(A100, true, 44, 22), 8);
+    EXPECT_EQ(persistChunk(A100, true, 44, 215), 32);
+    EXPECT_EQ(persistChunk(A100, true, 1106, 498), 8);
+    const int h100 = persistChunk(H100, true, 44, 22);
+    EXPECT_TRUE(h100 == 8 || h100 == 16) << h100;
+}
+
+TEST(Launch, ChunkIsAPowerOfTwoInItsBounds)
+{
+    EXPECT_EQ(persistChunk(P2000, true, 44, 1.0), PERSIST_CHUNK_MIN);
+    EXPECT_EQ(persistChunk(P2000, true, 44, 1e9), PERSIST_CHUNK_MAX);
+    EXPECT_EQ(persistChunk(P2000, true, 0, 22), PERSIST_CHUNK_MAX);
+    for (const LaunchDevice* dev : { &A100, &P2000, &L4 })
+        for (double m : { 1.0, 7.0, 23.0, 100.0, 5000.0 })
+            for (double ops : { 10.0, 44.0, 1106.0 }) {
+                const int c = persistChunk(*dev, true, ops, m);
+                EXPECT_EQ(c & (c - 1), 0);
+                EXPECT_GE(c, PERSIST_CHUNK_MIN);
+                EXPECT_LE(c, PERSIST_CHUNK_MAX);
+            }
+}
+
+TEST(Launch, ChunkNeverShrinksAsStepsGrow)
+{
+    int last = 0;
+    for (double m = 1; m < 1e5; m *= 1.3) {
+        const int c = persistChunk(A100, true, 44, m);
+        EXPECT_GE(c, last);
+        last = c;
+    }
+}
+
+TEST(Launch, TheFetchTermAddsOneWarpOnceTheChunkIsKnown)
+{
+    EXPECT_EQ(persistThreads(P2000, true, 43, 1000000, 0.23, 4, 44), 384);
+    EXPECT_EQ(persistThreads(A100, true, 36, 1000000, 0.23, 8, 44), 768);
+    EXPECT_EQ(persistThreads(A100, true, 36, 1000000, 0.23, 8, 0), 640);   // ops unknown: none
+    EXPECT_EQ(persistThreads(A100, true, 36, 1000000, 0.23, 0, 44), 640);  // chunk unknown: none
+    EXPECT_EQ(persistThreads(A100, true, 166, 1000000, 0.23, 8, 44), 384); // a ceiling is still the ceiling
 }
 
 TEST(Launch, BandCadenceRows)

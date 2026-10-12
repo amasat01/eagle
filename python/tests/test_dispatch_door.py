@@ -99,6 +99,22 @@ def test_a_split_run_counts_its_class_sorts():
     assert run(walker, rare_classes(), dispatch="switch").report.class_sorts == 0
 
 
+def test_the_default_keeps_a_library_math_group_fused_under_an_exact_host_profile(monkeypatch):
+    # exp and sin stay scalar under libm bit-identity, so the fused loop is no
+    # lockstep over the branches and splitting the rare ones is no gain
+    monkeypatch.setenv("HAWK_HOST_PROFILE", "native")
+    assert run(walker, rare_classes()).report.class_sorts == 0
+
+
+def test_the_default_splits_a_library_math_group_under_the_vector_math_profile(monkeypatch):
+    from hawk.compile import toolchain
+
+    if toolchain.default_host_profile() != "native-vector-math":
+        pytest.skip("no vector-math host profile on this machine")
+    monkeypatch.setenv("HAWK_HOST_PROFILE", "native-vector-math")
+    assert run(walker, rare_classes()).report.class_sorts >= 1
+
+
 # --- the static-selector rule --- #
 def test_a_selector_the_step_writes_is_never_split_by_the_door():
     k0 = (np.arange(N) % 3).astype(np.int64)

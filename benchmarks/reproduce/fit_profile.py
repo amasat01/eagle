@@ -178,12 +178,13 @@ def main(argv=None) -> int:
     for path in args.csv:
         header, cases = read(path)
         weights, rms = fit(cases, header, cache_bytes=args.cache_bytes)
-        held = rel_rmse(cases, "host" if header["target"] == "cpu" else "device",
-                        props_of(header), weights, "D")
+        target = "host" if header["target"] == "cpu" else "device"
+        held = rel_rmse(cases, target, props_of(header), weights, "D")
+        paired = rel_rmse(cases, target, props_of(header), weights, "E")
         agree, total = winners(cases, header, weights)
         verdict = "refused (defaults stay)" if rms > args.max_residual else "accepted"
         print(f"{Path(path).name}: relative RMS {rms:.3f} on A-C ({verdict}); "
-              f"divergence group D {held:.3f}; held-out winners {agree}/{total}")
+              f"divergence group D {held:.3f}; paired group E {paired:.3f}; held-out winners {agree}/{total}")
         for key, value in weights.items():
             print(f"  {key} = {value:.4g}")
         out[header["target"]] = weights

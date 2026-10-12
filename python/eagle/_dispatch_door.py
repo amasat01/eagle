@@ -254,23 +254,27 @@ _PARTS_MAX = 32
 
 def _split_parts(kernel, group: str, device: bool) -> tuple:
     """``(cost, unit plugins, classify plugin or None, sweep plan or None)``
-    of ``kernel``'s ``group``, built once per kernel, group and target (the
-    IR walks and the bundle key are the expensive half of a short run)."""
+    of ``kernel``'s ``group``, built once per kernel, group and target (and,
+    on the host, host profile: it decides whether library math vectorises, so
+    the cost depends on it; the IR walks and the bundle key are the expensive
+    half of a short run)."""
     import dataclasses
 
     import hawk
+    from hawk.compile.toolchain import host_profile
     from hawk.ir import dispatch_costs
     from hawk.trace.kernel import Kernel
 
     from ._plan_deploy import _build_by_name, auto
 
-    key = (id(kernel), group, device)
+    profile = None if device else host_profile()
+    key = (id(kernel), group, device, profile)
     with _PARTS_LOCK:
         hit = _PARTS.get(key)
     if hit is not None and hit[0] is kernel:
         return hit[1]
     step = _step(kernel)
-    cost = dispatch_costs(step.walk)[group]
+    cost = dispatch_costs(step.walk, profile)[group]
     seg = hawk.resolve_dispatch(kernel, {group: "segmented"})
     by_name, _ = _build_by_name([seg], None if device else ("host",), None)
     units = [by_name[f"{seg.name}__k{j}"] for j in range(len(cost.branches))]

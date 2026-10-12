@@ -6,8 +6,9 @@
 // compactions of a banded run.
 //
 // Every rule reads only the device class (compute capability, FP64 rate), the
-// kernel's registers, the batch size n, the step fill f and the mean steps m;
-// none of them reads which kernel it is sizing. Plain arithmetic, identical on
+// precision, the kernel's registers and per-step operation count, the batch
+// size n, the step fill f and the mean steps m; none of them reads which kernel
+// it is sizing. Plain arithmetic, identical on
 // host and device builds, so the host loop and the device policy kernel share
 // one answer.
 #pragma once
@@ -30,8 +31,10 @@ inline constexpr int PERSIST_THREAD_STEP = 64;
 /** @brief The step fill assumed until a run has measured one. */
 inline constexpr double PERSIST_FIRST_FILL = 0.5;
 /** @brief Fewest and most steps one work-stealing chunk runs. */
-inline constexpr int PERSIST_CHUNK_MIN = 4;
+inline constexpr int PERSIST_CHUNK_MIN = 2;
 inline constexpr int PERSIST_CHUNK_MAX = 32;
+/** @brief Cycles a chunk head costs a warp: the work fetch and its same-address atomic. */
+inline constexpr double PERSIST_HEAD_CYCLES = 256.0;
 
 /** @brief Compaction's fixed cost: nine small kernels, in seconds. */
 inline constexpr double COMPACTION_FLOOR_S = 27e-6;
@@ -79,6 +82,11 @@ inline int persistSaturation(const LaunchDevice& dev, bool fp64) {
     return warpLayer(dev) * warps;
 }
 
+/** @brief Threads per SM a persistent launch asks for before n and the registers cut it: the saturation count plus the fetch warp. */
+inline int persistDemand(const LaunchDevice& dev, bool fp64) {
+    return persistSaturation(dev, fp64) + warpLayer(dev);
+}
+
 /**
  * @brief Threads per SM of a persistent launch of @p n samples at @p regs
  *        registers and step fill @p f; 0 when the SM count is unknown.
@@ -88,25 +96,43 @@ inline int persistSaturation(const LaunchDevice& dev, bool fp64) {
  * n * f / (2 * SMs) (past it, lanes outnumber the work and sit idle at the
  * end). When the ceiling is under the saturation count the launch takes the
  * whole ceiling.
+ *
+ * Once the chunk is known, one more warp per partition is added to cover the
+ * latency of a chunk head's fetch. @p chunk and @p ops (the step's
+ * floating-point operations) are 0 when unknown, which adds nothing.
  */
-inline int persistThreads(const LaunchDevice& dev, bool fp64, int regs, long long n, double f) {
+inline int persistThreads(const LaunchDevice& dev, bool fp64, int regs, long long n, double f,
+                          int chunk = 0, double ops = 0.0) {
     if (dev.sms <= 0) return 0;
     const int resident = residentThreads(dev.residency, regs);
     const int ceiling = resident > 0 ? resident : INT_MAX;
     const double drain = static_cast<double>(n) * f / (2.0 * dev.sms);
     const int lowest = std::min(PERSIST_MIN_WARPS * warpLayer(dev), ceiling);
     const double hi = std::min<double>(ceiling, drain);
-    const double want = std::max<double>(lowest, std::min<double>(persistSaturation(dev, fp64), hi));
+    // a head's fetch latency (~2000 cycles) is never covered by a chunk's arithmetic: always one warp more
+    const int fetchWarps = (chunk > 0 && ops > 0.0) ? 1 : 0;
+    const double saturation = persistSaturation(dev, fp64) + fetchWarps * warpLayer(dev);
+    const double want = std::max<double>(lowest, std::min<double>(saturation, hi));
     const long long step = PERSIST_THREAD_STEP;
     const long long rounded = (static_cast<long long>(want + step - 1) / step) * step;
     return static_cast<int>(std::min<long long>(rounded, ceiling));
 }
 
-/** @brief Steps one work-stealing chunk runs for samples that take @p meanSteps on average. */
-inline int persistChunk(double meanSteps) {
-    const double target = std::clamp(meanSteps / 4.0, double(PERSIST_CHUNK_MIN), double(PERSIST_CHUNK_MAX));
+/**
+ * @brief Steps one work-stealing chunk runs for samples that take @p meanSteps
+ *        on average, each step @p ops floating-point operations of the given precision.
+ *
+ * The power of two nearest sqrt(2 * m * H / (ops * issue)), held to
+ * [PERSIST_CHUNK_MIN, PERSIST_CHUNK_MAX]: the minimiser of the lanes a chunk
+ * leaves idle at its end (c / 2m) against the head's cost per step
+ * (H / (c * ops * issue)), H being PERSIST_HEAD_CYCLES. Written on the square
+ * so no root is taken. An unknown @p ops (0) takes the longest chunk.
+ */
+inline int persistChunk(const LaunchDevice& dev, bool fp64, double ops, double meanSteps) {
+    if (!(ops > 0.0)) return PERSIST_CHUNK_MAX;
+    const double x2 = 2.0 * meanSteps * PERSIST_HEAD_CYCLES / (ops * issueCycles(dev, fp64));
     int chunk = PERSIST_CHUNK_MIN;
-    while (chunk < target) chunk *= 2;
+    while (chunk < PERSIST_CHUNK_MAX && x2 >= 2.0 * chunk * chunk) chunk *= 2;
     return chunk;
 }
 

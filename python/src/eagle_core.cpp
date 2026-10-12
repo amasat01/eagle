@@ -1117,30 +1117,40 @@ NB_MODULE(_core, m)
         m.attr("PERSIST_FIRST_FILL") = pol::PERSIST_FIRST_FILL;
 
         // -- launch sizing and cadence (eagle/policy/Launch.h) ---------------------
-        m.def("persist_saturation",
+        m.def("persist_demand",
             [](int major, int minor, int fp64_ratio, bool fp64) {
-                return pol::persistSaturation({ { major, minor, 0, 0 }, 0, fp64_ratio, 0 }, fp64);
+                return pol::persistDemand({ { major, minor, 0, 0 }, 0, fp64_ratio, 0 }, fp64);
             },
             nb::arg("major"), nb::arg("minor"), nb::arg("fp64_ratio"), nb::arg("fp64") = true,
-            "Threads per SM at which a step's dependent chain keeps the issue pipe busy (5 warps per "
-            "partition on a full-rate FP64 part, 2 on a 1:32 or 1:64 one). Pure.");
+            "Threads per SM a persistent launch asks for before the batch size and the registers cut it: "
+            "the count at which a step's dependent chain keeps the issue pipe busy (5 warps per "
+            "partition on a full-rate FP64 part, 2 on a 1:32 or 1:64 one) plus one warp per partition "
+            "for a chunk head's fetch. Pure.");
 
         m.def("persist_threads_per_sm",
             [](int major, int minor, int regs_per_sm, int max_threads_per_sm, int sms, int fp64_ratio,
-               bool fp64, int regs, long long n, double fill) {
+               bool fp64, int regs, long long n, double fill, int chunk, double ops) {
                 return pol::persistThreads(
-                    { { major, minor, regs_per_sm, max_threads_per_sm }, sms, fp64_ratio, 0 }, fp64, regs, n, fill);
+                    { { major, minor, regs_per_sm, max_threads_per_sm }, sms, fp64_ratio, 0 }, fp64, regs, n, fill,
+                    chunk, ops);
             },
             nb::arg("major"), nb::arg("minor"), nb::arg("regs_per_sm"), nb::arg("max_threads_per_sm"),
             nb::arg("sms"), nb::arg("fp64_ratio"), nb::arg("fp64"), nb::arg("regs"), nb::arg("n"),
-            nb::arg("fill"),
+            nb::arg("fill"), nb::arg("chunk") = 0, nb::arg("ops") = 0.0,
             "Threads per SM of a persistent launch of `n` samples at `regs` registers and step fill "
-            "`fill`: the saturation count held between two warps per partition and min(residency "
-            "ceiling, n * fill / (2 * SMs)). 0 when the SM count is unknown. Pure.");
+            "`fill`: the saturation count (plus one warp per partition for a chunk head's fetch "
+            "latency when `chunk` and `ops` are known) held between two warps per partition and "
+            "min(residency ceiling, n * fill / (2 * SMs)). 0 when the SM count is unknown. Pure.");
 
-        m.def("persist_chunk", &pol::persistChunk, nb::arg("mean_steps"),
-            "Steps one work-stealing chunk runs for samples taking `mean_steps` on average: the power "
-            "of two at or above mean_steps / 4, held to [4, 32]. Pure.");
+        m.def("persist_chunk",
+            [](int major, int minor, int fp64_ratio, bool fp64, double ops, double mean_steps) {
+                return pol::persistChunk({ { major, minor, 0, 0 }, 0, fp64_ratio, 0 }, fp64, ops, mean_steps);
+            },
+            nb::arg("major"), nb::arg("minor"), nb::arg("fp64_ratio"), nb::arg("fp64"), nb::arg("ops"),
+            nb::arg("mean_steps"),
+            "Steps one work-stealing chunk runs for samples taking `mean_steps` on average with `ops` "
+            "floating-point operations a step: the power of two nearest sqrt(2 * mean_steps * 256 / "
+            "(ops * issue cycles)), held to [2, 32]; 32 when `ops` is unknown (0). Pure.");
 
         m.def("band_k",
             [](double rate, long long newly, long long live, long long k, long long k_max, long long k_min) {

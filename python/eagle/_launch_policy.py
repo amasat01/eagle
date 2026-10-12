@@ -255,34 +255,49 @@ def _fp64_args(dev, scalar_type: str) -> tuple:
 def persistent_demand(dev, scalar_type: str = "float64") -> int:
     """Threads per SM a persistent launch asks for before the batch size and the
     registers cut it down: the count at which the step's dependent chain keeps
-    the issue pipe busy (see :func:`eagle._core.persist_saturation`). A register
+    the issue pipe busy (see :func:`eagle._core.persist_demand`). A register
     bound is worth trying only when the entry holds fewer."""
     major, minor, _, ratio, fp64 = _fp64_args(dev, scalar_type)
-    return _core.persist_saturation(major, minor, ratio, fp64)
+    return _core.persist_demand(major, minor, ratio, fp64)
+
+
+def persistent_chunk(dev, ops: float, mean_steps: float, scalar_type: str = "float64") -> int:
+    """Steps one work-stealing chunk runs: the power of two nearest
+    ``sqrt(2 * mean_steps * 256 / (ops * issue))`` held to ``[2, 32]``, where
+    ``ops`` is the step's floating-point operation count and ``issue`` the
+    cycles one warp instruction of ``scalar_type`` takes on the SM
+    (:func:`eagle._core.persist_chunk`). ``32`` when ``ops`` is unknown (0).
+
+    Example: a 44-operation FP64 step averaging 22 steps runs chunks of 4 on a
+    1:32 part and 8 on an A100."""
+    major, minor, _, ratio, fp64 = _fp64_args(dev, scalar_type)
+    return _core.persist_chunk(major, minor, ratio, fp64, float(ops), float(mean_steps))
 
 
 def persistent_threads_per_sm(dev, kern, n: int, fill: float = _core.PERSIST_FIRST_FILL,
-                              scalar_type: str = "float64") -> int:
+                              scalar_type: str = "float64", chunk: int = 0, ops: float = 0.0) -> int:
     """Threads per SM for a persistent launch of ``n`` samples whose steps fill
     a fraction ``fill`` of the longest sample's (first run: 0.5): the
     saturation count held between two warps per partition and the smaller of
     the register-limited residency and the drain limit ``n * fill / (2 * SMs)``
-    (:func:`eagle._core.persist_threads_per_sm`). ``0`` when the SM count is
-    unknown."""
+    (:func:`eagle._core.persist_threads_per_sm`). A known ``chunk`` and
+    ``ops`` (the step's floating-point operations) add one warp per partition
+    for a chunk head's fetch latency. ``0`` when the SM count is unknown."""
     major, minor, sms, ratio, fp64 = _fp64_args(dev, scalar_type)
     regs_per_sm, max_threads = _attr(dev, "regsPerMultiprocessor"), _attr(dev, "maxThreadsPerMultiProcessor")
     return _core.persist_threads_per_sm(major, minor, regs_per_sm, max_threads, sms, ratio, fp64,
-                                        _attr(kern, "num_regs"), int(n), float(fill))
+                                        _attr(kern, "num_regs"), int(n), float(fill),
+                                        int(chunk), float(ops))
 
 
 def persistent_launch(dev, kern, n: int, fill: float = _core.PERSIST_FIRST_FILL,
-                      scalar_type: str = "float64"):
+                      scalar_type: str = "float64", chunk: int = 0, ops: float = 0.0):
     """``(block, grid)`` of a persistent launch: :func:`persistent_threads_per_sm`
     split into the fewest blocks per SM of at most 512 threads (the shape
     does not matter, only the threads per SM), through
     :func:`persistent_geometry`'s register narrowing. Unknown device
     properties fall back to :func:`persistent_geometry`'s defaults."""
-    threads = persistent_threads_per_sm(dev, kern, n, fill, scalar_type)
+    threads = persistent_threads_per_sm(dev, kern, n, fill, scalar_type, chunk, ops)
     if threads <= 0:
         return persistent_geometry(dev, kern)
     blocks = 1

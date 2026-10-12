@@ -63,8 +63,8 @@ FUSED_REGS = {
 ARITH_COUNTS = {
     "oscillator_step_xauto": (32, 16, 8, 0),
     "oscillator_step_xauto_range": (80, 28, 17, 0),
-    # four unrolled trips and one peeled: the step's maths is the fused one
-    "oscillator_step_xauto_persist": (80, 24, 17, 0),
+    # four unrolled trips, no peeled one: the step's maths is the fused one
+    "oscillator_step_xauto_persist": (64, 20, 14, 0),
     "rkf78_attempt": (1247, 400, 84, 69),
     "rkf78_attempt_range": (1247, 400, 84, 69),
     "rkf78_attempt_persist": (659, 210, 58, 37),

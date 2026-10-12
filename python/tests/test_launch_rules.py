@@ -75,8 +75,26 @@ def test_the_cost_model_prices_a_compaction_in_steps():
     assert _core.band_rate(8, 0, 108, 2, 0, True, 1_000_000, 33.0) == 0.0
 
 
-def test_the_chunk_follows_the_mean_steps():
-    assert [_core.persist_chunk(m) for m in (1, 23, 100, 130, 500)] == [4, 8, 32, 32, 32]
+P2000_ARGS = (6, 1, 32)
+A100_ARGS = (8, 0, 2)
+
+
+@pytest.mark.parametrize("args, fp64, ops, m, want", [
+    (P2000_ARGS, True, 44, 22, 4), (P2000_ARGS, True, 44, 215, 8),
+    (P2000_ARGS, False, 44, 22, 16), (P2000_ARGS, False, 44, 215, 32),
+    (A100_ARGS, True, 44, 22, 8), (A100_ARGS, True, 44, 215, 32),
+    (A100_ARGS, True, 1106, 498, 8),
+    (P2000_ARGS, True, 44, 1, 2), (P2000_ARGS, True, 44, 1e9, 32), (P2000_ARGS, True, 0, 22, 32)])
+def test_the_chunk_follows_the_mean_steps_and_the_step_cost(args, fp64, ops, m, want):
+    assert _core.persist_chunk(*args, fp64, ops, m) == want
+
+
+def test_the_fetch_term_adds_one_warp_per_partition_once_the_chunk_is_known():
+    a100 = (8, 0, 65536, 2048, 108, 2, True, 36, 1_000_000, 0.23)
+    assert _core.persist_threads_per_sm(*a100) == 640
+    assert _core.persist_threads_per_sm(*a100, 8, 44.0) == 768
+    p2000 = (6, 1, 65536, 2048, 8, 32, True, 43, 1_000_000, 0.23)
+    assert _core.persist_threads_per_sm(*p2000, 4, 44.0) == 384
 
 
 # --------------------------------------------------------------------------- #
@@ -154,7 +172,7 @@ def test_the_rules_are_safe_to_call_from_many_threads():
     def worker():
         try:
             for _ in range(200):
-                got.append((ud._next_k(_K, _NEWLY, _LIVE, 1000, 8, 8.4), _core.persist_chunk(23.0)))
+                got.append((ud._next_k(_K, _NEWLY, _LIVE, 1000, 8, 8.4), _core.persist_chunk(8, 0, 2, True, 44.0, 23.0)))
         except Exception as exc:  # pragma: no cover
             errors.append(exc)
 
@@ -165,3 +183,74 @@ def test_the_rules_are_safe_to_call_from_many_threads():
         t.join()
     assert not errors and len(set(got)) == 1
 
+
+
+# --------------------------------------------------------------------------- #
+# The refit: cached on (fill, steps), drops the stale persist wall, honours a pinned chunk
+# --------------------------------------------------------------------------- #
+class _FitRunner(ud.Runner):
+    """A runner whose device-facing steps are stand-ins set on the instance."""
+
+    def _persist_geometry(self, fill, chunk):
+        return self.geometry(fill, chunk)
+
+    def _chunk_for(self, mean_steps):
+        return self.chunk_rule(mean_steps)
+
+    def _size_persist(self):
+        self.size()
+
+
+def _fitting_runner(chunk_pin=None):
+    runner = _FitRunner.__new__(_FitRunner)
+    runner._fast_pick, runner._fast_mode = "persist", "persist"
+    runner._fast_wall, runner._fast_runs = {}, 0
+    runner._fast_last = runner._fast_prior = None
+    runner._fast_prep = {"persist": object()}
+    runner._fast_block, runner._fast_grid, runner._fast_fill = 256, 8, 0.5
+    runner._fast_chunk, runner._fast_chunk_pin, runner._fast_fit = 32, chunk_pin, None
+    calls = {"geometry": 0, "size": 0}
+
+    def geometry(fill, chunk):
+        calls["geometry"] += 1
+        return (128 * (3 if chunk < 16 else 2), 8)
+
+    runner.geometry = geometry
+    runner.chunk_rule = lambda m: chunk_pin if chunk_pin is not None else (8 if m < 100 else 32)
+    runner.size = lambda: calls.__setitem__("size", calls["size"] + 1)
+    return runner, calls
+
+
+def test_an_unchanged_readback_does_no_host_work_after_the_first_fit():
+    runner, calls = _fitting_runner()
+    runner._refit_persist(0.23, 100)
+    assert calls == {"geometry": 1, "size": 1}
+    for _ in range(50):
+        runner._refit_persist(0.2301, 100)
+    assert calls == {"geometry": 1, "size": 1}
+    runner._refit_persist(0.5, 100)
+    assert calls["geometry"] == 2
+
+
+def test_a_refit_that_moves_the_launch_drops_the_persist_wall():
+    runner, calls = _fitting_runner()
+    runner._fast_wall = {"persist": 1.0, "fused_one": 2.0}
+    runner._refit_persist(0.23, 100)
+    assert runner._fast_wall == {"fused_one": 2.0} and runner._fast_chunk == 8 and calls["size"] == 1
+
+
+def test_a_refit_that_moves_nothing_keeps_the_wall():
+    runner, calls = _fitting_runner(chunk_pin=32)
+    runner._fast_block = 256
+    runner.geometry = lambda fill, chunk: (256, 8)
+    runner._fast_wall = {"persist": 1.0}
+    runner._refit_persist(0.23, 100)
+    assert runner._fast_wall == {"persist": 1.0} and calls["size"] == 0
+
+
+def test_a_pinned_chunk_is_never_refit():
+    runner, _ = _fitting_runner(chunk_pin=16)
+    runner._fast_chunk = 16
+    runner._refit_persist(0.23, 10)
+    runner._refit_persist(0.9, 100_000)
+    assert runner._fast_chunk == 16
