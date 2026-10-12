@@ -383,6 +383,35 @@ def _gen_module():
     return module
 
 
+def test_docs_tables_withhold_device_readings_below_the_minimum():
+    """The docs pages never quote a device reading below the workload's
+    minimum state (less one driver page). JAX's 0 MiB at N = 1,000,000 on the
+    A100 card -- its pool was reserved before the baseline -- shows the
+    P2000/T4 reading instead, marked and attributed; with no other card it
+    shows "not measured"; a small-N 0 MiB (below one driver page) stays.
+    RED: drop the `withhold_impossible_readings` call from `_table_fragment`."""
+    gen = _gen_module()
+    mib = 2**20
+    minimum = {1_000: 40_000, 1_000_000: 40 * mib}
+    row = "| 1,000,000 | JAX | 9.61 ms | 0 MiB (0×) | 100 MiB | – |"
+    assert gen.withhold_impossible_readings(row, minimum) == (
+        "| 1,000,000 | JAX | 9.61 ms | not measured | 100 MiB | – |")
+    borrowed = {("jax_vmap", 1_000_000): (128 * mib, 40 * mib, ["Quadro P2000"])}
+    assert gen.withhold_impossible_readings(row, minimum, {"JAX": "jax_vmap"}, borrowed) == (
+        "| 1,000,000 | JAX | 9.61 ms | 128 MiB (3.2×)† | 100 MiB | – |")
+    small = "| 1,000 | JAX | 3.19 ms | 0 MiB (0×) | 0.0273 MiB | – |"
+    assert gen.withhold_impossible_readings(small, minimum) == small
+    fine = "| 1,000,000 | Warp | 5.96 ms | 64 MiB (1.68× min.) | 3 MiB |"
+    assert gen.withhold_impossible_readings(fine, minimum) == fine
+    spec = next(f for f in gen.FAMILIES if f["key"] == "perf_card_gpu")
+    entries = gen.load_family(_REPO, spec)
+    a100 = next(e for e in entries if "a100" in e["slug"])
+    fragment = gen._table_fragment(spec, a100, entries)
+    assert "128 MiB (3.36×)†" in fragment
+    assert "Measured on Quadro P2000 and Tesla T4" in fragment
+    assert not re.search(r"\| 1,000,000 \| JAX[^\n]*\| 0 MiB \(0×\)", fragment)
+
+
 def test_docs_pages_include_every_generated_family():
     """The results pages include each family's generated fragment
     (``_generated/<family>.md``, written by ``docs/_tools/gen_perf_pages.py``
