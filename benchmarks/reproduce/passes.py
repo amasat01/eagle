@@ -26,7 +26,12 @@ import pathlib
 import sys
 import tempfile
 
-BENCH = pathlib.Path(__file__).resolve().parent.parent
+#: The card scripts of the eagle source the cards measure: run_cards.sh runs this from that
+#: checkout's root, so a kit checked out elsewhere never times its own copies of the scripts
+#: (their md5 is the card's provenance). Run from anywhere else, the kit's own copies are used.
+_HERE_BENCH = pathlib.Path(__file__).resolve().parent.parent
+BENCH = (pathlib.Path.cwd() / "benchmarks"
+         if (pathlib.Path.cwd() / "benchmarks" / "perf_card" / "perf_card.py").is_file() else _HERE_BENCH)
 CHUNK = {"perf": {"compile": 4}, "rk78": {"memory": 5, "compile": 3}}
 
 
