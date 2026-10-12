@@ -271,48 +271,113 @@ DRIVER_PAGE_BYTES = 2 * 2**20
 _ROW_N = re.compile(r"\|\s*([\d,]+)\s*\|")
 _DEVICE_CELL = re.compile(r"\| ([\d.e+]+) MiB \([\d.e+]+×(?: min\.)?\) \|")
 WITHHELD_CELL = "not measured"
-WITHHELD_NOTE = (
-    "A device reading below the state the workload needs (less one driver page) shows as "
-    f"\"{WITHHELD_CELL}\": the run cannot fit in less, so the reading missed memory the "
-    "library reserved before the measurement's baseline (JAX reserves its pool during the "
-    "warm-up). Those figures return once the memory pass takes its baseline before any "
-    "library allocates.")
+#: Marks a device-memory cell borrowed from another card of the family.
+BORROWED_MARK = "†"
 
 
-def withhold_impossible_readings(line: str, minimum_by_n: dict) -> str:
-    """`line` with its device-memory cell replaced by `WITHHELD_CELL` when the
-    reading is below the minimum state for the row's N, less one driver page:
-    no run fits in less, so such a reading missed memory held before the
-    baseline. Any other line comes back unchanged."""
+def _valid_reading(row: dict) -> bool:
+    """False when a memory row's device reading is below the workload's
+    minimum state, less one driver page: no run fits in less."""
+    peak, minimum = row.get("device_peak_bytes"), row.get("minimum_bytes")
+    return peak is None or not minimum or peak + DRIVER_PAGE_BYTES >= minimum
+
+
+def borrowed_readings(e: dict, entries) -> dict:
+    """{(arm, n): (peak_bytes, minimum_bytes, [device names])} for every
+    reading of `e`'s card that `_valid_reading` rejects and that the family's
+    other cards measured validly with ONE value at that (arm, n) across every
+    configuration -- an allocator's pool that does not depend on the card.
+    A (arm, n) whose other cards disagree is left out (it stays withheld)."""
+    bad = {(r["arm"], r["n"]) for r in (e["card"].get("memory") or {}).get("rows", [])
+           if not _valid_reading(r)}
+    found: dict = {}
+    for other in entries:
+        if other is e:
+            continue
+        for r in (other["card"].get("memory") or {}).get("rows", []):
+            key = (r["arm"], r["n"])
+            if key in bad and r.get("device_peak_bytes") is not None and _valid_reading(r):
+                found.setdefault(key, {}).setdefault(
+                    (r["device_peak_bytes"], r["minimum_bytes"]), set()).add(other["name"])
+    return {key: (*next(iter(vals)), sorted(next(iter(vals.values()))))
+            for key, vals in found.items() if len(vals) == 1}
+
+
+def withhold_impossible_readings(line: str, minimum_by_n: dict, labels: dict | None = None,
+                                 borrowed: dict | None = None) -> str:
+    """`line` with an impossible device-memory cell replaced: a reading below
+    the minimum state for the row's N, less one driver page, missed memory held
+    before the baseline. The replacement is the family's other cards' reading
+    for the same arm and N, marked `BORROWED_MARK` (`borrowed`, keyed by the
+    arm whose label is `labels`[row label]), else `WITHHELD_CELL`. Any other
+    line comes back unchanged."""
     n_match = _ROW_N.match(line)
     cell = _DEVICE_CELL.search(line)
     if not n_match or not cell:
         return line
-    minimum = minimum_by_n.get(int(n_match.group(1).replace(",", "")))
+    n = int(n_match.group(1).replace(",", ""))
+    minimum = minimum_by_n.get(n)
     if not minimum or float(cell.group(1)) * 2**20 + DRIVER_PAGE_BYTES >= minimum:
         return line
-    return line[:cell.start()] + f"| {WITHHELD_CELL} |" + line[cell.end():]
+    label = line.split("|")[2].strip()
+    hit = (borrowed or {}).get(((labels or {}).get(label), n))
+    if hit:
+        peak, need, _names = hit
+        suffix = " min." if cell.group(0).endswith(" min.) |") else ""
+        text = f"{peak / 2**20:.3g} MiB ({peak / need:.3g}×{suffix}){BORROWED_MARK}"
+    else:
+        text = WITHHELD_CELL
+    return line[:cell.start()] + f"| {text} |" + line[cell.end():]
 
 
-def _table_fragment(spec: dict, e: dict) -> str:
+def _withheld_note(borrowed_used: dict, any_withheld: bool) -> list[str]:
+    lines = []
+    if borrowed_used:
+        names = sorted({name for _p, _m, ns in borrowed_used.values() for name in ns})
+        lines.append(
+            f"{BORROWED_MARK} Measured on {' and '.join(names)}: on this card the reading fell below "
+            "the state the workload needs, because the library reserved its memory pool during "
+            "the warm-up, before the measurement's baseline (JAX does). The pool's size does not "
+            "depend on the card, so the other cards' reading stands in until this card is "
+            "measured again with the baseline taken before any library allocates.")
+        lines.append("")
+    if any_withheld:
+        lines.append(
+            f"\"{WITHHELD_CELL}\": the reading fell below the state the workload needs (less one "
+            "driver page), so it missed memory the library reserved before the measurement's "
+            "baseline, and no other card measured that arm at that N.")
+        lines.append("")
+    return lines
+
+
+def _table_fragment(spec: dict, e: dict, entries=()) -> str:
     """The card's own table with its headings turned into bold lines (a heading
     cannot sit inside a collapsed block) and its impossible device-memory
-    readings withheld (`withhold_impossible_readings`), then the
-    machine-derived lines."""
+    readings replaced (`withhold_impossible_readings`, borrowing from the
+    family's other `entries`), then the machine-derived lines."""
     minimum_by_n = {r["n"]: r.get("minimum_bytes")
                     for r in (e["card"].get("memory") or {}).get("rows", [])}
-    out, fenced, withheld = [], False, False
+    arms = e["card"].get("arms")
+    labels = {label: arm for arm, label in arms.items()} if isinstance(arms, dict) else {}
+    borrowed = borrowed_readings(e, entries)
+    used, withheld = {}, False
+    out, fenced = [], False
     for line in e["path"].with_suffix(".md").read_text().splitlines():
         if line.lstrip().startswith("```"):
             fenced = not fenced
         m = None if fenced else re.match(r"#{1,6}\s+(.*)", line)
         if not fenced and not m:
-            kept, line = line, withhold_impossible_readings(line, minimum_by_n)
-            withheld = withheld or line != kept
+            kept, line = line, withhold_impossible_readings(line, minimum_by_n, labels, borrowed)
+            if line != kept:
+                n = int(_ROW_N.match(line).group(1).replace(",", ""))
+                key = (labels.get(line.split("|")[2].strip()), n)
+                if key in borrowed:
+                    used[key] = borrowed[key]
+                else:
+                    withheld = True
         out.append(f"**{m.group(1)}**" if m else line)
     out.append("")
-    if withheld:
-        out += [WITHHELD_NOTE, ""]
+    out += _withheld_note(used, withheld)
     if not e["is_reference"]:
         out += _fastest_arm_lines(e["card"], spec["has_config"])
         out += _simulate_vs_twin_lines(e["card"], spec["simulate"], spec["twin"])
@@ -440,7 +505,7 @@ def generate(eagle_root: pathlib.Path, out_dir: pathlib.Path) -> dict[str, int]:
         card_dir.mkdir(parents=True, exist_ok=True)
         for e in entries:
             table = card_dir / f"{e['slug']}_table.md"
-            table.write_text(_table_fragment(spec, e))
+            table.write_text(_table_fragment(spec, e, entries))
             (card_dir / f"{e['slug']}_results.md").write_text(
                 card_results(spec, e, "/" + _relpath(table, root)))
             (card_dir / f"{e['slug']}_overview.md").write_text(
