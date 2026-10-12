@@ -643,7 +643,10 @@ BAND_STEPS = 1000
 FIELD_NAMES = ("T", "c", "f", "R", "k", "text_bytes", "every", "steps_per_launch")
 #: context arms (other frameworks), run once at the card's own N = 1e6, S = 1000 spread point and only while
 #: the stage has used less than this share of its budget
-CONTEXT_ARMS = ("torch_compiled", "jax_vmap")
+#: The profiling kit compares eagle against Warp only: the torch_compiled and jax_vmap context arms of the
+#: published cards are not run here (the cards keep them), so the profile needs neither PyTorch nor JAX.
+DROPPED_CONTEXT_ARMS = ("torch_compiled", "jax_vmap")
+CONTEXT_ARMS = ()
 REFERENCE_ARMS = ("warp",) + CONTEXT_ARMS
 CONTEXT_POINT = (1_000_000, 1000, "spread")
 CONTEXT_BUDGET_SHARE = 0.6
@@ -1214,7 +1217,7 @@ def compare_stage(out, stage, kernels=("osc", "rk78", "osc32"), ns=COMPARE_NS, b
     say("\n" + text.split("-- notes")[-1])
     if not any(r["status"] == "ok" for c in cells for r in c["arms"]):
         raise RuntimeError(f"no arm of any cell of {stage} ran; see {txt.name}")
-    # the reference arms (Warp, torch, jax) running alone measure nothing about eagle
+    # the reference arms (Warp) running alone measure nothing about eagle
     if not any(r["status"] == "ok" and r["label"] not in REFERENCE_ARMS for c in cells for r in c["arms"]):
         raise RuntimeError(f"no eagle arm of any cell of {stage} ran; see {txt.name}")
 

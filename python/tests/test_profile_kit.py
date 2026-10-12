@@ -700,3 +700,99 @@ def test_the_new_ncu_stages_skip_on_an_old_gpu_and_run_on_a_new_one(tmp_path, st
         assert done.returncode == 0, done.stdout[-1500:]
         text = (tmp_path / f"{stage.replace('-quick', '')}.txt").read_text()
         assert ("smsp__thread_inst_executed_per_inst_executed" in text) == (not stage.startswith("ncu-band"))
+
+
+# --------------------------------------------------------------------------- #
+# the CUDA profile switch (--cuda 12|13) and the Warp-only comparison arms
+# --------------------------------------------------------------------------- #
+BOOTSTRAP_SH = REPRO / "bootstrap.sh"
+BOOT_ENV = {**os.environ, "REPRO_TARGET": "devbox", "REPRO_GPUS": "NVIDIA RTX PRO 6000,12.0,580.65",
+            "REPRO_MAMBA": "/bin/true"}
+
+
+def _bootstrap(*flags, env=None):
+    done = subprocess.run(["bash", str(BOOTSTRAP_SH), "--dry-run", "--work", "/nonexistent/work", "--src", "/nonexistent/src",
+                           *flags], capture_output=True, text=True, env={**BOOT_ENV, **(env or {})})
+    return done.returncode, done.stdout + done.stderr
+
+
+@pytest.mark.parametrize("extra", [(), ("--from-pypi",)])
+def test_cuda_13_selects_the_cuda13_locks_and_cuda_12_is_the_default(extra):
+    rc13, out13 = _bootstrap("--cuda", "13", *extra)
+    assert rc13 == 0, out13[-800:]
+    lock = "pypi-gpu-cuda13.txt" if extra else "cards-gpu-cuda13.txt"
+    assert lock in out13 and "cards-gpu-cuda13" in out13 and "env-gpu-cuda13.sh" in out13
+    if not extra:
+        assert "toolchain-linux-64-cuda13.lock" in out13
+    rc, default = _bootstrap(*extra)
+    rc12, out12 = _bootstrap("--cuda", "12", *extra)
+    rce, via_env = _bootstrap(*extra, env={"REPRO_CUDA": "13"})
+    assert rc == rc12 == rce == 0
+    assert default == out12 and "cuda13" not in default and "torch" in default
+    assert via_env == out13
+    # the smoke test of the CUDA 13 profile imports no PyTorch, JAX or CuPy comparison arm
+    smoke = [ln for ln in out13.splitlines() if "-W ignore -c" in ln][0]
+    assert "torch" not in smoke.split("not in this profile")[0] and "jax.devices" not in smoke and "import cupy" not in smoke
+
+
+def test_cuda_13_leaves_the_cpu_profile_alone():
+    rc, cpu13 = _bootstrap("--profile", "cpu", "--cuda", "13")
+    rc2, cpu12 = _bootstrap("--profile", "cpu")
+    assert rc == rc2 == 0 and cpu13 == cpu12 and "cuda13" not in cpu13
+
+
+@pytest.mark.parametrize("script_args", [("bootstrap",), ("profile",)])
+def test_an_unknown_cuda_version_is_refused_with_the_choices(script_args):
+    script = BOOTSTRAP_SH if script_args[0] == "bootstrap" else PROFILE_SH
+    for flags, env in ((("--cuda", "11"), {}), ((), {"REPRO_CUDA": "latest"})):
+        done = subprocess.run(["bash", str(script), "--dry-run", *flags], capture_output=True, text=True,
+                              env={**BOOT_ENV, **env})
+        assert done.returncode != 0 and "takes 12 or 13" in done.stderr, done.stderr[-400:]
+        assert "unknown CUDA version" in done.stderr
+
+
+def test_profile_sh_takes_the_cuda_switch_through_to_its_environment_script():
+    rc, err = _plan("--cuda", "13", "--work", "/nonexistent/work")
+    assert rc == 0 and "env=/nonexistent/work/env-gpu-cuda13.sh" in err
+    rc, err = _plan("--work", "/nonexistent/work")
+    assert rc == 0 and "env=/nonexistent/work/env-gpu.sh" in err
+    rc, err = _plan("--cuda", "12", "--work", "/nonexistent/work", "--env", "/x/custom.sh")
+    assert rc == 0 and "env=/x/custom.sh" in err
+
+
+def test_the_cuda13_locks_pin_every_package_and_carry_no_torch_jax_or_cupy12():
+    pip = (REPRO / "locks" / "cards-gpu-cuda13.txt").read_text()
+    names = [ln.split("==")[0].lower() for ln in pip.splitlines() if "==" in ln and not ln.startswith(" ")]
+    assert len(names) >= 10 and pip.count("--hash=sha256:") == len(names)
+    for needed in ("cupy-cuda13x", "warp-lang", "cuda-bindings", "nvidia-ml-py", "numpy"):
+        assert needed in names, needed
+    assert not {"torch", "jax", "jaxlib", "cupy-cuda12x"} & set(names)
+    assert "sm_75" in pip and ">= 580" in pip
+    tool = [ln for ln in (REPRO / "locks" / "toolchain-linux-64-cuda13.lock").read_text().splitlines()
+            if ln.startswith("https://")]
+    assert len(tool) > 50 and all(len(ln.rsplit("#", 1)[1]) == 32 for ln in tool)
+    assert any("/cuda-nvcc-13." in ln for ln in tool) and not any("/cuda-nvcc-12." in ln for ln in tool)
+    wheels = (REPRO / "locks" / "pypi-gpu-cuda13.txt").read_text()
+    assert "raptor-eagle[cuda13]" in wheels and "raptor-hawk[cuda13]" in wheels
+    assert not [ln for ln in wheels.splitlines() if not ln.startswith("#") and ("torch" in ln or "jax" in ln)]
+
+
+def test_torch_and_jax_arms_are_not_in_the_profile_and_are_skipped_not_failed(tmp_path):
+    kit = _kit_module()
+    assert kit.CONTEXT_ARMS == () and set(kit.DROPPED_CONTEXT_ARMS) == {"torch_compiled", "jax_vmap"}
+    assert kit.REFERENCE_ARMS == ("warp",)
+    for stage in ("compare", "compare-quick", "crossover", "band", "chunk-sweep"):
+        for kernel in ("osc", "rk78", "osc32"):
+            specs = [spec for _label, spec in kit.stage_arms(stage, kernel)]
+            assert not [s for s in specs if "torch" in s or "jax" in s], (stage, kernel)
+    # the compare stage adds no context arm at the context point: eagle and Warp arms only
+    seen = []
+    orig = kit.run_cell
+    kit.run_cell = lambda kernel, n, steps, dist, extra, arms: (seen.append(extra), {"arms": [], "kernel": kernel})[1]
+    kit.render_compare = lambda cells, todo=(): ("", "")
+    try:
+        with pytest.raises(RuntimeError):  # no arm ran: the stage's own refusal, not a missing import
+            kit.compare_stage(tmp_path, "compare", kernels=("osc",), ns=(1_000_000,))
+    finally:
+        kit.run_cell = orig
+    assert seen and all(extra == () for extra in seen)

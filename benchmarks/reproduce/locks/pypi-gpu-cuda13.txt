@@ -1,0 +1,13 @@
+# --from-pypi, gpu profile, CUDA 13: released wheels only (no compiler, conda or CUDA toolkit).
+# The one place the versions live. Python >= 3.10, Linux x86_64.
+# Driver floor: >= 580 (CUDA 13). GPU floor: compute capability 7.5 (CUDA 13 drops offline compilation below sm_75).
+# eagle/hawk bring cupy-cuda13x, cuda-toolkit and NVRTC through their cuda13 extras; Warp's PyPI wheel is built with
+# CUDA 13.4. No PyTorch, no JAX (versions as in cards-gpu-cuda13.in).
+raptor-eagle[cuda13]==0.5.1
+raptor-hawk[cuda13]==0.4.0
+numpy==2.5.3
+cupy-cuda13x==14.2.0
+warp-lang==1.18.0
+cuda-bindings==13.4.3
+cuda-pathfinder==1.8.3
+nvidia-ml-py==13.615.71

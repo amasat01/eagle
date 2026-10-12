@@ -7,6 +7,8 @@
 #
 #   profile.sh [options]
 #     --env FILE        the GPU environment script bootstrap.sh wrote (default WORK/env-gpu.sh)
+#     --cuda V          12 | 13 (default 12, or $REPRO_CUDA): the CUDA profile bootstrap.sh --cuda V made; 13 reads
+#                       WORK/env-gpu-cuda13.sh by default and reports the CUDA 13 package names
 #     --out DIR         where results go (default WORK/profiles/<machine-slug>/)
 #     --work DIR        bootstrap's work directory (default per target)
 #     --quick           the probe and one point of every stage: under 8 minutes
@@ -35,10 +37,12 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=SCRIPTDIR/lib.sh
 . "$HERE/lib.sh"
 
+CUDA=${REPRO_CUDA:-12}
 ENV_FILE="" OUT="" WORK=${REPRO_WORK:-} QUICK=0 FRESH=0 DEADLINE_MIN=50 ONLY='' LOCK_CLOCK=auto
 while [[ $# -gt 0 ]]; do
   case $1 in
     --env) ENV_FILE=${2:-}; shift 2 ;;
+    --cuda) CUDA=${2:-}; shift 2 ;;
     --out) OUT=${2:-}; shift 2 ;;
     --work) WORK=${2:-}; shift 2 ;;
     --quick) QUICK=1; shift ;;
@@ -47,16 +51,17 @@ while [[ $# -gt 0 ]]; do
     --only) ONLY=${2:-}; shift 2 ;;
     --lock-clock) LOCK_CLOCK=${2:-}; shift 2 ;;
     --dry-run) REPRO_DRY_RUN=1; shift ;;
-    -h|--help) sed -n '5,31p' "$0"; exit 0 ;;
+    -h|--help) sed -n '5,33p' "$0"; exit 0 ;;
     *) die "unknown option $1 (see --help)" ;;
   esac
 done
+[[ $CUDA == 12 || $CUDA == 13 ]] || die "unknown CUDA version '$CUDA': --cuda (or REPRO_CUDA) takes 12 or 13"
 [[ $DEADLINE_MIN =~ ^[0-9]+$ ]] || die "--deadline-min takes whole minutes"
 [[ $LOCK_CLOCK == auto || $LOCK_CLOCK == off || $LOCK_CLOCK =~ ^[0-9]+$ ]] || die "--lock-clock takes MHz, auto or off"
 
 TARGET=$(detect_target)
 WORK=${WORK:-$(default_work "$TARGET")}
-ENV_FILE=${ENV_FILE:-$WORK/env-gpu.sh}
+ENV_FILE=${ENV_FILE:-$WORK/env-gpu$([[ $CUDA == 13 ]] && echo -cuda13).sh}
 SLUG=$(machine_slug)
 OUT=${OUT:-$WORK/profiles/$SLUG}
 DATA=$OUT/data LOGS=$OUT/logs MARK=$OUT/.stages
@@ -144,6 +149,9 @@ smi_clocks() {
     --format=csv 2>&1 || true
 }
 
+PKGS="raptor-eagle raptor-hawk raptor-core cupy-cuda12x warp-lang numpy"
+[[ $CUDA == 13 ]] && PKGS="raptor-eagle raptor-hawk raptor-core cupy-cuda13x warp-lang cuda-bindings nvidia-ml-py numpy"
+
 write_facts() {  # PHASE: before | after
   local f=$OUT/facts.txt
   if [[ $1 == before ]]; then
@@ -158,10 +166,12 @@ write_facts() {  # PHASE: before | after
       echo "-- nvidia-smi before"
       smi_clocks
       echo "-- packages"
+      echo "comparison arms: warp (the torch, jax and cupy arms are not in this profile)"
       ( cd "$EROOT" && . "$ENV_FILE" 2>/dev/null
-        python - <<'PY'
+        PROFILE_PKGS="$PKGS" python - <<'PY'
 import importlib.metadata as md
-for d in ("raptor-eagle", "raptor-hawk", "raptor-core", "cupy-cuda12x", "warp-lang", "numpy"):
+import os
+for d in os.environ["PROFILE_PKGS"].split():
     try:
         print(f"{d}: {md.version(d)}")
     except md.PackageNotFoundError:
