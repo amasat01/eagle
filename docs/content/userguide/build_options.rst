@@ -86,6 +86,10 @@ correctness check against Warp); the published performance cards are measured
 with CUDA 12.6. Later CUDA 12 releases share the same APIs and are expected to
 work; releases before 12.6 are not supported.
 
+eagle asks the driver for its entry points at the CUDA 12.0 interface level, so
+a build made with a CUDA 13 toolkit also runs on any CUDA 13 driver, and a
+CUDA 12 build on any CUDA 12 or 13 driver.
+
 CPU-only build
 --------------
 
