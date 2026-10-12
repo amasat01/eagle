@@ -178,3 +178,76 @@ def test_one_simulation_reversed_from_two_threads_is_refused_or_correct():
     for grads in results:
         for k in want:
             np.testing.assert_array_equal(grads[k], want[k])
+
+
+@pytest.mark.parametrize("backend", ["cpu", pytest.param("gpu", marks=pytest.mark.gpu)])
+@pytest.mark.parametrize("window", [None, 16, "full"])
+def test_n_threads_n_simulations_agree_with_serial_and_count_records_exactly(backend, window):
+    from eagle import _counters
+    from _run_reverse_fixtures import host, xp_for
+
+    xp = xp_for(backend)
+    threads_n, rounds = 6, 3
+    seeds = {"x": xp.ones(N)}
+    models = [rr_osc, rr_pend] * (threads_n // 2)
+
+    def grads(model):
+        sim = simulation(model, *inputs(xp), window=window)
+        sim.run()
+        return {k: host(v).tobytes() for k, v in eagle.diff.reverse(sim.record, seeds).items()}
+
+    want = {m.name: grads(m) for m in (rr_osc, rr_pend)}
+    out, errors = [None] * threads_n, []
+    start = threading.Barrier(threads_n)
+    before = _counters.snapshot()
+
+    def work(i):
+        try:
+            start.wait()
+            for _ in range(rounds):
+                out[i] = grads(models[i])
+        except BaseException as exc:      # surfaced below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=work, args=(i,)) for i in range(threads_n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(120)
+    assert errors == []
+    assert out == [want[m.name] for m in models]
+    after = _counters.snapshot()
+    assert after["records"] - before["records"] == threads_n * rounds
+    assert after["reverses"] - before["reverses"] == threads_n * rounds
+
+
+@pytest.mark.parametrize("backend", ["cpu", pytest.param("gpu", marks=pytest.mark.gpu)])
+def test_one_simulation_run_by_two_threads_at_once_is_busy(monkeypatch, backend):
+    from eagle._until_done import Runner
+    from _run_reverse_fixtures import xp_for
+
+    xp = xp_for(backend)
+    entered, release = threading.Event(), threading.Event()
+    real = Runner._run
+
+    def gated(self):
+        entered.set()
+        assert release.wait(30)
+        return real(self)
+
+    monkeypatch.setattr(Runner, "_run", gated)
+    sim = simulation(rr_osc, *inputs(xp), record=False)
+    t = threading.Thread(target=sim.run)
+    t.start()
+    try:
+        assert entered.wait(30)
+        with pytest.raises(eagle.Busy, match=r"eagle\.Simulation\.run: another call is still running"):
+            sim.run()
+        with pytest.raises(eagle.Busy, match=r"eagle\.Runner\.run: another call is still running"):
+            sim.runner.run()
+    finally:
+        release.set()
+        t.join(60)
+    assert not t.is_alive()
+    monkeypatch.undo()
+    sim.run()                                  # free again afterwards

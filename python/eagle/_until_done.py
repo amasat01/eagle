@@ -44,6 +44,7 @@ from ._active_set import (
     compaction_body,
 )
 from . import _core, _layout
+from ._busy import BusyGuard
 from ._compat import zip_strict
 from ._conditional import SkipGuard, Skippable, repeat_while
 from .roles import PER_SAMPLE_ROLES
@@ -489,7 +490,7 @@ class Runner:
     by reference: a run writes the caller's arrays in place; a new binding
     is a new runner."""
 
-    __slots__ = ("step", "loop", "pipeline", "active", "finished", "terminated",
+    __slots__ = ("_busy", "step", "loop", "pipeline", "active", "finished", "terminated",
                  "n", "steps_per_launch", "every", "launches_per_compaction",
                  "fused_steps", "auto", "host_policy", "host_threads",
                  "_device", "_xp", "_total", "_max_steps", "_k_max", "_k_min", "_k0",
@@ -505,6 +506,7 @@ class Runner:
     def __init__(self, plan, *, max_steps, every=None, reorder=None, record=False,
                  window=None, memory_budget=None, events="step", on_no_event="raise",
                  **planes):
+        self._busy = BusyGuard("eagle.Runner")
         # Internal only (never a bound plane name, popped before the
         # plane-binding machinery below ever sees it): forces
         # :func:`_fast_mode_for`'s decision for the card's explicit-arm row
@@ -1343,6 +1345,10 @@ class Runner:
 
         A fast mode (:meth:`_build_fast`) skips all of the above: one
         launch IS the run, so :meth:`_run_fast` handles it entirely."""
+        with self._busy("run"):
+            return self._run()
+
+    def _run(self) -> RunReport:
         if self._recorder is not None:
             return self._recorder.run()
         if self._fast_mode is not None:
