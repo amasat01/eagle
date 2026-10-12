@@ -68,7 +68,7 @@ machine class from the 8-thread arms the CPU cards time, so run the GPU cards th
 ## Profiling (nsys + ncu)
 
 `profile.sh` answers *why* a launch mode or a kernel is fast or slow on this GPU, for the cards' kernel.
-It runs after `bootstrap.sh` and the cards, unattended, in about 30 minutes on an A100 (`--quick`: under 8):
+It runs after `bootstrap.sh` and the cards, unattended, in about 15 minutes on an A100 or H100 (limit 45; `--quick`: under 8):
 
 ```bash
 eagle/benchmarks/reproduce/profile.sh --env ~/.cache/raptor-repro/env-gpu.sh
@@ -81,10 +81,12 @@ eagle/benchmarks/reproduce/profile.sh --env ~/.cache/raptor-repro/env-gpu.sh
 | `nsys-grid` | Nsight Systems timelines of eagle auto, persist, band (steps + compaction) and Warp over N = 10³..10⁶, uniform and spread, S = 100 and 1000; kernel time, launch counts and API time as text (`nsys_grid.txt`) |
 | `nsys-width` | the same four arms at N = 10⁶, S = 1000 with the stop steps log-uniform over [S/10, S] and [S/1000, S] (the grid holds uniform and the card's [S/100, S]) |
 | `ncu-*` | Nsight Compute, one launch per kernel (SpeedOfLight, Occupancy, LaunchStats, WarpStateStats, MemoryWorkloadAnalysis, SchedulerStats) at N = 10⁶ S = 1000 spread (efficiency under thinning), N = 10⁶ S = 1000 uniform (bandwidth baseline) and N = 10⁴ S = 100 spread (latency and launch regime); CSV plus a digest per kernel. Only on compute capability 7.0 and newer |
-| `persist-sweep` | wall time (CUDA events) and per-lane utilisation of the persistent launch over persist threads per SM (oscillator 320 / 640 / 960 / 1280, RK78 256 / 384, plus eagle's own pick) at N = 10⁶, S = 100 and 1000, uniform and spread; the RK78 card has one workload, so one row per size. `tps_launched` is what really launched (`persist_sweep.txt`). eagle has no knob for the size, so the kit replaces the sizing function for the length of one cell and says so |
-| `fused-sweep` | the same points through the fused one-launch entry (`_fast_mode="fused_one"`), for the crossover with the persistent launch |
+| `compare` | every comparison case on one matrix, eagle against Warp, in one process (`compare.txt`, `compare.csv`): the oscillator and the RK78 card kernel at N = 10³..10⁶; the oscillator also over S = 100 and 1000 and four stop-step distributions (uniform, the card's spread, narrow `spread:10`, wide `spread:1000`). Every cell runs eagle auto (and records the mode it took), the forced fused one-launch entry, the persistent launch at eagle's own threads per SM and at 320 / 640 / 960 / 1280 (RK78: 256 / 384; a size above the residency limit is skipped and says so), the band path (K-step kernel plus compaction, `every` = eagle's default, 8, 16) and Warp's kernel, each as the median of 3 CUDA-event walls after 2 warm runs (Warp: its own events). Every arm's final state is checked against eagle auto's first (bit for bit when it ran the same kernel through the same launch mode, within the card's tolerance otherwise); a wrong arm is flagged `WRONG` and not timed. The summary lists every cell where auto is slower than Warp and every cell where auto is more than 5 % slower than the fastest eagle path. The card's torch_compiled and jax_vmap arms run once for context at N = 10⁶, S = 1000 spread. It replaces the earlier persist and fused sweeps. Every arm records the SM clock (NVML median during its runs; quote bounds at it, not at the boost clock) and, where the eagle exposes them, T, c, f, R, k and text_bytes. The literal-table ON/OFF comparison runs only if hawk exposes the option; the probe says whether it does |
+| `crossover` | the fused one-launch entry against the persist launch at N = 3·10⁴, 10⁵, 3·10⁵, S = 100, card spread, with eagle's probe on; records the entry auto settled on after 3 runs (`crossover.txt`) |
+| `band` | the band path over the compaction cadence `every` = 16, 32, 64, 128 beside eagle's own pick at N = 10⁵ and 10⁶, S = 1000; R, one compaction group's cost over one full-live step launch, is fitted from the uniform cell's walls over S / every (`band.txt`) |
+| `ncu-tsweep` | Nsight Compute achieved warps (with the ratio metrics) of the persist kernel at each persist size (oscillator 384 / 640 / 896 / 1152 / 1536 / 2048, RK78 256 / 384) at N = 10⁶, spread, S = 100 and 1000 |
 | `cadence-sweep` | the band path (single-step kernel plus compaction) over the compaction cadence `every` = 4, 8, 16, 32 at N = 10⁶, S = 1000, uniform and spread: the graph run gives the wall and the compaction count, an eager run of the same kernels gives the per-kernel sums nsys cannot see inside the graph's conditional loop |
-| `ncu-ratio` | Nsight Compute on the persist kernels: threads per issued instruction (about 32 converged, under 16 fragmented), FP64 pipe use, achieved warps and the stall classes, for the oscillator (uniform / spread × S = 100 / 1000) and the RK78 card kernel at N = 10⁶ |
+| `ncu-ratio` | Nsight Compute on the persist kernels: threads per issued instruction (about 32 converged, under 16 fragmented), FP64 pipe use, achieved warps and the stall classes, the lane efficiency (sample-steps × FP64 instructions per step over 32 × the FP64 warp-instructions ncu counted; the per-step count comes from the kernel's sidecar when the eagle exposes it, else from the card's own count, and the report says which) and the FP64 warp-instructions per 32 sample-steps, for the oscillator (uniform / spread × S = 100 / 1000) and the RK78 card kernel at N = 10⁶ |
 | `ncu-band` | the band path's step kernel and its three compaction kernels (predicate, scan, scatter) under Nsight Compute, run as an eager loop because a graph's conditional loop node cannot be profiled |
 
 Needs `nsys` and `ncu` (Nsight Systems and Nsight Compute; found on `PATH` or under `/usr/local/cuda*/bin`; a
@@ -96,8 +98,8 @@ prompted or changed system-wide.
 Every stage runs under its own time cap and a failing one never stops the next; the tarball (reports, raw
 `.nsys-rep` / `.ncu-rep` under 200 MB, `status.txt` listing each stage as ok, failed or skipped, `facts.txt` with
 versions and the clocks before and after) is written on every exit, Ctrl-C and SIGTERM included. Re-running the
-same command after a preemption skips the finished stages (`--fresh` starts over); `--deadline-min` (default 35)
-stops new stages from starting.
+same command after a preemption skips the finished stages (`--fresh` starts over); `--deadline-min` (default 50)
+stops new stages from starting; `--only compare,cadence-sweep` runs just those stages (a name or a prefix such as `ncu`).
 
 ## Time and cost
 

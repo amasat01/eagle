@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Profile eagle's launch decisions and kernels on this machine's GPU (Nsight Systems and
-# Nsight Compute), unattended, in about 30 minutes, ending with one tarball to copy off.
+# Nsight Compute), unattended, in under 45 minutes, ending with one tarball to copy off.
 #
 #   profile.sh [options]
 #     --env FILE        the GPU environment script bootstrap.sh wrote (default WORK/env-gpu.sh)
@@ -11,7 +11,8 @@
 #     --work DIR        bootstrap's work directory (default per target)
 #     --quick           the probe and one point of every stage: under 8 minutes
 #     --fresh           ignore the markers of an earlier run and start over
-#     --deadline-min M  stop starting stages after M minutes (default 35)
+#     --deadline-min M  stop starting stages after M minutes (default 50)
+#     --only A[,B...]   run just these stages (a name, or a prefix such as ncu), keeping the order
 #     --dry-run         print the plan, run nothing
 #
 # Stages run independently, each under its own time cap; a failing stage never stops the
@@ -31,7 +32,7 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=SCRIPTDIR/lib.sh
 . "$HERE/lib.sh"
 
-ENV_FILE="" OUT="" WORK=${REPRO_WORK:-} QUICK=0 FRESH=0 DEADLINE_MIN=35
+ENV_FILE="" OUT="" WORK=${REPRO_WORK:-} QUICK=0 FRESH=0 DEADLINE_MIN=50 ONLY=
 while [[ $# -gt 0 ]]; do
   case $1 in
     --env) ENV_FILE=${2:-}; shift 2 ;;
@@ -40,8 +41,9 @@ while [[ $# -gt 0 ]]; do
     --quick) QUICK=1; shift ;;
     --fresh) FRESH=1; shift ;;
     --deadline-min) DEADLINE_MIN=${2:-}; shift 2 ;;
+    --only) ONLY=${2:-}; shift 2 ;;
     --dry-run) REPRO_DRY_RUN=1; shift ;;
-    -h|--help) sed -n '5,27p' "$0"; exit 0 ;;
+    -h|--help) sed -n '5,28p' "$0"; exit 0 ;;
     *) die "unknown option $1 (see --help)" ;;
   esac
 done
@@ -58,11 +60,30 @@ TARBALL=$OUT/profile-$SLUG.tgz
 
 # stage NAME:CAP_SECONDS, in run order
 if [[ $QUICK == 1 ]]; then
-  PLAN=(probe:180 nsys-quick:120 ncu-quick:180 persist-sweep-quick:90 fused-sweep-quick:90 cadence-sweep-quick:90
-        ncu-ratio-quick:150 ncu-band-quick:180)
+  PLAN=(probe:180 nsys-quick:120 ncu-quick:180 compare-quick:300 crossover-quick:120 band-quick:150 cadence-sweep-quick:90
+        ncu-ratio-quick:150 ncu-tsweep-quick:150 ncu-band-quick:180)
 else
   PLAN=(probe:180 nsys-grid:540 nsys-width:150 ncu-spread-1e6:240 ncu-uniform-1e6:240 ncu-spread-1e4:240
-        persist-sweep:420 fused-sweep:300 cadence-sweep:300 ncu-ratio:420 ncu-band:300)
+        compare:1500 crossover:300 band:420 cadence-sweep:300 ncu-ratio:420 ncu-tsweep:600 ncu-band:300)
+fi
+if [[ -n $ONLY ]]; then
+  CHOSEN=()
+  IFS=, read -ra WANT <<<"$ONLY"
+  for w in "${WANT[@]}"; do
+    hit=0
+    for s in "${PLAN[@]}"; do
+      n=${s%%:*}
+      if [[ $n == "$w" || $n == "$w-quick" || $n == "$w"-* ]]; then hit=1; fi
+    done
+    [[ $hit == 1 ]] || die "--only $w matches no stage; the stages are: $(printf '%s ' "${PLAN[@]%%:*}")"
+  done
+  for s in "${PLAN[@]}"; do
+    n=${s%%:*}
+    for w in "${WANT[@]}"; do
+      if [[ $n == "$w" || $n == "$w-quick" || $n == "$w"-* ]]; then CHOSEN+=("$s"); break; fi
+    done
+  done
+  PLAN=("${CHOSEN[@]}")
 fi
 if [[ $REPRO_DRY_RUN == 1 ]]; then
   log "env=$ENV_FILE out=$OUT deadline=${DEADLINE_MIN} min"
@@ -235,6 +256,8 @@ run_stage() {  # NAME CAP_SECONDS
     echo "forced failure (PROFILE_TEST_FAIL)" >"$log_file"; rc=1
   else
     local args=(--stage "$name" --out "$DATA")
+    # the comparison starts no cell it cannot finish inside its cap
+    [[ $name == compare* || $name == crossover* || $name == band* ]] && args+=(--budget-s $((cap > 120 ? cap - 90 : cap / 2)))
     [[ -n $NSYS ]] && args+=(--nsys "$NSYS")
     [[ -n $NCU ]] && args+=(--ncu "$NCU")
     [[ $NCU_SUDO == 1 ]] && args+=(--ncu-sudo)

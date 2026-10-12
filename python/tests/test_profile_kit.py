@@ -182,7 +182,7 @@ def test_a_missing_ncu_is_a_skipped_stage(kit, tmp_path):
 
 
 # --- the stages that answer the launch-sizing questions: plans, parsing, the override -----
-NEW_STAGES = ("persist-sweep", "fused-sweep", "cadence-sweep", "ncu-ratio", "ncu-band")
+NEW_STAGES = ("compare", "crossover", "band", "cadence-sweep", "ncu-ratio", "ncu-tsweep", "ncu-band")
 
 
 def test_the_new_stages_are_in_the_full_and_the_quick_plan():
@@ -192,7 +192,8 @@ def test_the_new_stages_are_in_the_full_and_the_quick_plan():
         assert done.returncode == 0, done.stderr[-1500:]
         for stage in NEW_STAGES:
             assert f"stage {stage}{suffix} (cap" in done.stderr, (stage, done.stderr[-800:])
-        assert "deadline=35 min" in done.stderr
+        assert "deadline=50 min" in done.stderr
+        assert "persist-sweep" not in done.stderr and "fused-sweep" not in done.stderr
 
 
 def test_every_stage_profile_sh_plans_is_one_gpu_profile_py_accepts():
@@ -202,23 +203,182 @@ def test_every_stage_profile_sh_plans_is_one_gpu_profile_py_accepts():
     quick = subprocess.run(["bash", str(PROFILE_SH), "--dry-run", "--quick"], capture_output=True, text=True,
                            env={**os.environ, "REPRO_TARGET": "devbox"}).stderr
     names = {ln.split()[2] for ln in (planned + quick).splitlines() if " stage " in f" {ln} " and "(cap" in ln}
-    assert len(names) >= 10 and names <= set(kit.STAGES), names - set(kit.STAGES)
+    assert len(names) >= 10 and "compare" in names and "compare-quick" in names and names <= set(kit.STAGES), names - set(kit.STAGES)
 
 
-def test_sweep_cells_cover_the_asked_grid():
+def _plan(*flags):
+    done = subprocess.run(["bash", str(PROFILE_SH), "--dry-run", *flags], capture_output=True, text=True,
+                          env={**os.environ, "REPRO_TARGET": "devbox"})
+    return done.returncode, done.stderr
+
+
+def test_only_selects_stages_by_name_or_prefix_and_refuses_an_unknown_one():
+    rc, err = _plan("--only", "compare,probe")
+    assert rc == 0 and [ln.split()[2] for ln in err.splitlines() if "(cap" in ln] == ["probe", "compare"]
+    rc, err = _plan("--quick", "--only", "compare")
+    assert rc == 0 and "stage compare-quick (cap" in err and "probe" not in err
+    rc, err = _plan("--only", "ncu")
+    assert rc == 0 and sorted(ln.split()[2] for ln in err.splitlines() if "(cap" in ln) == [
+        "ncu-band", "ncu-ratio", "ncu-spread-1e4", "ncu-spread-1e6", "ncu-tsweep", "ncu-uniform-1e6"]
+    rc, err = _plan("--only", "compar")
+    assert rc != 0 and "matches no stage" in err
+
+
+def test_the_cadence_sweep_cells_cover_the_asked_grid():
     kit = _kit_module()
-    persist = kit.sweep_cells("persist-sweep")
-    osc = [c for c in persist if c[0] == "osc"]
-    assert {c[4] for c in osc} == {None, *kit.OSC_PERSIST_TPS}
-    assert {(c[2], c[3]) for c in osc} == {(s, d) for s in (100, 1000) for d in ("uniform", "spread")}
-    assert {c[4] for c in persist if c[0] == "rk78"} == {None, *kit.RK78_PERSIST_TPS}
-    assert len(persist) == 4 * 5 + 3
-    assert len(kit.sweep_cells("fused-sweep")) == 4 + 1
-    assert len(kit.sweep_cells("persist-sweep-quick")) == 2 and len(kit.sweep_cells("fused-sweep-quick")) == 1
     cadence = kit.nsys_cells("cadence-sweep")
     assert {kit.parse_spec(c[0])[1]["every"] for c in cadence} == {"4", "8", "16", "32"}
     assert {c[3] for c in cadence} == {"uniform", "spread"} and {c[1:3] for c in cadence} == {(10**6, 1000)}
     assert sum(kit.parse_spec(c[0])[1].get("eager") == "1" for c in cadence) == len(cadence) // 2
+
+
+def test_compare_covers_every_case_of_the_matrix():
+    kit = _kit_module()
+    cells = kit.compare_cells("compare")
+    osc = [c for c in cells if c[0] == "osc"]
+    assert len(cells) == 4 * (1 + 2 * 4) and len([c for c in cells if c[0] == "rk78"]) == 4
+    assert {c[1] for c in cells} == {10**3, 10**4, 10**5, 10**6} and cells[0][1] == 10**6  # large N first
+    assert {(c[2], c[3]) for c in osc} == {(s, d) for s in (100, 1000)
+                                           for d in ("uniform", "spread", "spread:10", "spread:1000")}
+    assert [c[:2] for c in kit.compare_cells("compare", kernels=("rk78",), ns=(1000,))] == [("rk78", 1000)]
+    assert len(kit.compare_cells("compare-quick")) == 2
+    labels = [lab for lab, _ in kit.compare_arms("osc")]
+    assert labels == ["auto", "fused_one", "persist@auto", *(f"persist@{t}" for t in (384, 640, 896, 1152, 1536, 2048)),
+                      "band@auto", "band@8", "band@16", "warp"]
+    assert [lab for lab, _ in kit.compare_arms("rk78")] == [
+        "auto", "fused_one", "persist@auto", "persist@256", "persist@384", "band@auto", "band@8", "band@16", "warp"]
+    specs = dict(kit.compare_arms("osc"))
+    assert specs["persist@640"] == "osc_persist@tps=640" and specs["band@8"] == "osc_band@every=8"
+    assert specs["warp"] == "warp_kernel" and dict(kit.compare_arms("rk78"))["warp"] == "rk78_warp"
+
+
+def test_crossover_band_and_tsweep_cover_the_asked_cases():
+    kit = _kit_module()
+    cross = kit.compare_cells("crossover")
+    assert sorted(c[1] for c in cross) == [30_000, 100_000, 300_000] and {c[2:] for c in cross} == {(100, "spread")}
+    assert [l for l, _ in kit.stage_arms("crossover", "osc")] == ["auto", "fused_one", "persist@auto"]
+    band = kit.compare_cells("band")
+    assert {(c[1], c[3]) for c in band} == {(n, d) for n in (10**5, 10**6) for d in ("uniform", "spread")}
+    assert [l for l, _ in kit.stage_arms("band", "osc")] == ["auto", "band@auto", "band@16", "band@32", "band@64", "band@128"]
+    assert len(kit.compare_cells("crossover-quick")) == 1 and len(kit.compare_cells("band-quick")) == 1
+    tsweep = kit.ncu_captures("ncu-tsweep")
+    osc = {kit.parse_spec(c[1])[1]["tps"] for c in tsweep if c[1].startswith("osc")}
+    assert osc == {"384", "640", "896", "1152", "1536", "2048"} and len(tsweep) == 2 * 6 + 2
+    assert all(c[3][0] == 10**6 and c[4] == kit.RATIO_METRICS for c in tsweep)
+    assert len(kit.ncu_captures("ncu-tsweep-quick")) == 1
+
+
+def test_lane_efficiency_comes_from_the_ncu_fp64_count_and_the_workers_step_accounting():
+    kit = _kit_module()
+    raw = '"ID","Kernel Name","sm__inst_executed_pipe_fp64.sum"\n"","","inst"\n"0","k","44000"\n'
+    line = "worker arm=osc_persist n=1 steps=1 dist=spread sample_steps=32000 ops_per_step=44 ops_source=card-count"
+    text = kit.lane_efficiency_lines(raw, line)
+    assert "= 1.000" in text and "card-count" in text and "(ideal 44)" in text and "= 44.0" in text
+    assert "unavailable" in kit.lane_efficiency_lines(raw, "worker arm=x")
+    assert "unavailable" in kit.lane_efficiency_lines('"ID","Kernel Name"\n"0","k"\n', line)
+    assert kit._ncu_values("", ("a",)) == {}
+
+
+def test_launch_fields_are_read_by_exact_name_where_an_eagle_exposes_them():
+    kit = _kit_module()
+
+    class Report:
+        T, text_bytes, hidden = 640, 1234, 7
+
+    class Runner:
+        every = 16
+        k = "not-a-number-kept-as-text"
+
+        @property
+        def c(self):
+            raise RuntimeError("older eagle")
+
+    got = kit.read_fields(Runner(), Report())
+    assert got == {"T": 640, "text_bytes": 1234, "every": 16, "k": "not-a-number-kept-as-text"}
+    assert kit.read_fields(object()) == {}
+
+
+def test_the_band_fit_recovers_the_compaction_cost_and_the_crossover_names_the_settled_entry():
+    kit = _kit_module()
+    steps, launch, group = 1000, 0.5, 0.05  # ms per K-step launch, per compaction group
+    arms = [_rec("band@auto", 1.0, "band")]
+    arms[0]["fields"] = {"every": 16}
+    for e in (16, 32, 64, 128):
+        arms.append(_rec(f"band@{e}", steps / kit.BAND_STEPS_PER_LAUNCH * launch + steps / e * group, "band"))
+    cell = dict(kernel="osc", n=10**6, steps=steps, dist="uniform", reference="x", arms=arms)
+    text = "\n".join(kit.band_fit([cell]))
+    assert "R = C / launch = 0.10" in text and "every=16" in text
+    assert "R is not measurable" in "\n".join(kit.band_fit([dict(cell, arms=[_rec(f"band@{e}", 5.0, "band")
+                                                                              for e in (16, 32, 64, 128)])]))
+    auto = _rec("auto", 1.0, "persist")
+    auto["modes"] = "fused_one>fused_one>persist>persist>persist"
+    cross = dict(kernel="osc", n=10**5, steps=100, dist="spread", reference="x", arms=[
+        auto, _rec("fused_one", 2.0, "fused_one"), _rec("persist@auto", 1.0)])
+    line = kit.crossover_lines([cross])[0]
+    assert "N=1e5" in line and "faster: persist, 2.00x" in line and "settled on persist after 3 runs" in line
+
+
+def _inputs_and_outputs(n=64):
+    import numpy as np
+
+    rng = np.random.default_rng(1)
+    inp = {"nstop": np.full(n, 10.0)}
+    ref = {"x": rng.uniform(-1, 1, n), "v": rng.uniform(-1, 1, n), "k": np.full(n, 10.0)}
+    return inp, ref
+
+
+def test_the_guard_flags_a_wrong_arm_and_demands_bits_only_of_the_same_entry():
+    kit = _kit_module()
+    kit.load_card()
+    inp, ref = _inputs_and_outputs()
+    same = {k: v.copy() for k, v in ref.items()}
+    assert kit.judge("osc", same, ref, inp, True)[:2] == (True, True)
+    near = {**same, "x": ref["x"] + 1e-13}  # inside the card's tolerance
+    ok, bitwise, diff, _ = kit.judge("osc", near, ref, inp, False)
+    assert ok and not bitwise and diff > 0
+    ok, _, _, why = kit.judge("osc", near, ref, inp, True)  # the same entry must agree bit for bit
+    assert not ok and "bit for bit" in why
+    far = {**same, "x": ref["x"] + 1e-6}
+    ok, _, _, why = kit.judge("osc", far, ref, inp, False)
+    assert not ok and "differs from the reference" in why
+    ok, _, _, why = kit.judge("osc", {**same, "k": ref["k"] - 1}, ref, inp, False)
+    assert not ok and "step counts" in why
+    ok, _, _, why = kit.judge("osc", {**same, "v": ref["v"] * float("nan")}, ref, inp, False)
+    assert not ok and "non-finite" in why
+    # a tuple download (the oscillator card's) is read like the dict
+    assert kit.judge("osc", (same["x"], same["v"], same["k"]), ref, inp, True)[0]
+
+
+def _rec(label, median, mode="persist", status="ok", note=""):
+    return dict(label=label, spec=label, status=status, note=note, median=median, best=median, mode=mode,
+                launched="-", util=None, bitwise=True, diff=0.0)
+
+
+def test_the_summary_lists_where_auto_trails_warp_or_misses_the_fastest_path():
+    kit = _kit_module()
+    fast = dict(kernel="osc", n=10**6, steps=1000, dist="spread", reference="x", arms=[
+        _rec("auto", 5.0), _rec("persist@640", 4.0), _rec("band@8", 9.0, "band"), _rec("warp", 4.5, "-")])
+    ok = dict(kernel="osc", n=10**3, steps=100, dist="uniform", reference="x", arms=[
+        _rec("auto", 1.0, "fused_one"), _rec("fused_one", 1.0, "fused_one"), _rec("warp", 2.0, "-")])
+    wrong = dict(kernel="rk78", n=10**4, steps=0, dist="orbits", reference="x", arms=[
+        _rec("auto", 100.0), _rec("persist@256", None, status="wrong", note="3 samples exceed the truth bound"),
+        _rec("persist@384", None, status="skipped", note="384 threads per SM is above the residency limit"),
+        _rec("band@8", None, status="unavailable", note="TypeError: x"), _rec("warp", 150.0, "-")])
+    text, csv = kit.render_compare([fast, ok, wrong], unreached=[("osc", 10**3, 1000, "uniform")])
+    slower = text.split("auto is slower than Warp")[1].split("--")[0]
+    assert "osc N=1e6 S=1000 spread" in slower and "1.11x" in slower and "N=1e3" not in slower
+    missed = text.split("did not pick the fastest")[1].split("--")[0]
+    assert "persist@640" in missed and "1.25x" in missed and "rk78" not in missed
+    assert "WRONG" in text and "skip" in text and "n/a" in text
+    assert "3 samples exceed the truth bound" in text and "cells not reached (1" in text
+    rows = csv.splitlines()
+    assert rows[0].startswith("kernel,n,steps,dist,arm,status,median_ms") and len(rows) == 1 + 4 + 3 + 5
+    assert any(r.startswith("rk78,10000,0,orbits,persist@256,wrong,") for r in rows)
+
+
+def test_compare_refuses_the_cpu_target(tmp_path):
+    done = run_py("--stage", "compare-quick", "--target", "cpu", "--out", str(tmp_path))
+    assert done.returncode == 3 and "SKIP" in done.stdout
 
 
 def test_ncu_captures_ask_for_the_ratio_metrics_and_the_band_kernels():
@@ -279,9 +439,18 @@ def test_the_override_refuses_a_second_block_instead_of_racing():
     finally:
         release.set()
         thread.join()
-    assert "entered" not in outcome and "one sweep cell at a time" in outcome["error"]
+    assert "entered" not in outcome and "one cell at a time" in outcome["error"]
     with kit.persist_threads(960):  # free again once the first block ended
         pass
+
+
+def test_an_eagle_without_the_override_hook_leaves_the_lock_free(monkeypatch):
+    kit = _kit_module()
+    policy = pytest.importorskip("eagle._launch_policy")
+    monkeypatch.delattr(policy, "persistent_threads_per_sm", raising=False)
+    for _ in range(2):  # the second refusal would be "already active" had the first kept the lock
+        with pytest.raises(AttributeError), kit.persist_threads(320):
+            pass
 
 
 @pytest.mark.skipif(shutil.which("shellcheck") is None, reason="shellcheck not installed")
@@ -291,17 +460,45 @@ def test_the_kit_scripts_are_shellcheck_clean():
 
 
 @pytest.mark.gpu
-def test_the_sweeps_run_and_the_override_really_changes_the_launch(tmp_path):
+def test_compare_times_every_arm_and_the_override_really_changes_the_launch(tmp_path):
+    done = run_py("--stage", "compare-quick", "--out", str(tmp_path), env=_one_gpu_env())
+    assert done.returncode == 0, done.stdout[-1500:] + done.stderr[-1500:]
+    rows = [ln.split(",") for ln in (tmp_path / "compare_quick.csv").read_text().splitlines()[1:]]
+    by = {(r[0], r[4]): r for r in rows}
+    assert {r[0] for r in rows} == {"osc", "rk78"} and len(rows) == 13 + 9
+    for key in (("osc", "auto"), ("osc", "warp"), ("osc", "fused_one"), ("rk78", "auto"), ("rk78", "warp")):
+        assert by[key][5] == "ok" and float(by[key][6]) > 0, key
+    assert by[("osc", "fused_one")][8] == "fused_one" and by[("osc", "persist@640")][8] == "persist"
+    assert by[("osc", "persist@640")][9] == "640"  # launched = requested
+    assert not any(r[5] == "wrong" for r in rows)
+    text = (tmp_path / "compare_quick.txt").read_text()
+    assert "cells where eagle auto is slower than Warp" in text and "did not pick the fastest eagle path" in text
+
+
+@pytest.mark.gpu
+def test_crossover_and_band_stages_run_and_record_the_clock(tmp_path):
     env = _one_gpu_env()
-    for stage in ("persist-sweep-quick", "fused-sweep-quick"):
+    for stage in ("crossover-quick", "band-quick"):
         done = run_py("--stage", stage, "--out", str(tmp_path), env=env)
         assert done.returncode == 0, done.stdout[-1500:] + done.stderr[-1500:]
-    rows = (tmp_path / "persist_sweep_quick.txt").read_text().splitlines()[-2:]
-    auto, forced = (r.split() for r in rows)
-    assert auto[3] == "auto" and forced[3] == "640" and forced[4] == "640"  # launched = requested
-    assert forced[5] == "persist" and 0.0 < float(forced[8]) <= 1.0
-    fused = (tmp_path / "fused_sweep_quick.txt").read_text().splitlines()[-1].split()
-    assert fused[5] == "fused_one" and float(fused[6]) > 0
+    cross = (tmp_path / "crossover_quick.txt").read_text()
+    assert "-- crossover" in cross and "after 3 runs" in cross and "-- SM clock during the runs" in cross
+    band = (tmp_path / "band_quick.txt").read_text()
+    assert "-- band cost model" in band and "eagle's own band pick every=" in band
+    header = (tmp_path / "band_quick.csv").read_text().splitlines()[0]
+    assert "sm_mhz,modes_per_run,launch_fields,note" in header
+
+
+@pytest.mark.gpu
+def test_compare_flags_a_planted_wrong_arm_and_does_not_time_it(tmp_path):
+    done = run_py("--stage", "compare-quick", "--out", str(tmp_path),
+                  env={**_one_gpu_env(), "PROFILE_TEST_CORRUPT": "persist@640"})
+    assert done.returncode == 0, done.stdout[-1500:] + done.stderr[-1500:]
+    rows = {(r.split(",")[0], r.split(",")[4]): r.split(",") for r in
+            (tmp_path / "compare_quick.csv").read_text().splitlines()[1:]}
+    planted = rows[("osc", "persist@640")]
+    assert planted[5] == "wrong" and planted[6] == "" and rows[("osc", "persist@384")][5] == "ok"
+    assert "WRONG" in (tmp_path / "compare_quick.txt").read_text()
 
 
 @pytest.mark.gpu
@@ -327,7 +524,7 @@ def test_the_ncu_stages_are_validated_without_a_supported_gpu(tmp_path):
 
 
 @pytest.mark.gpu
-@pytest.mark.parametrize("stage", ["ncu-ratio-quick", "ncu-band-quick"])
+@pytest.mark.parametrize("stage", ["ncu-ratio-quick", "ncu-band-quick", "ncu-tsweep-quick"])
 def test_the_new_ncu_stages_skip_on_an_old_gpu_and_run_on_a_new_one(tmp_path, stage):
     ncu = shutil.which("ncu")
     if ncu is None:
@@ -342,4 +539,4 @@ def test_the_new_ncu_stages_skip_on_an_old_gpu_and_run_on_a_new_one(tmp_path, st
     else:
         assert done.returncode == 0, done.stdout[-1500:]
         text = (tmp_path / f"{stage.replace('-quick', '')}.txt").read_text()
-        assert ("smsp__thread_inst_executed_per_inst_executed" in text) == stage.startswith("ncu-ratio")
+        assert ("smsp__thread_inst_executed_per_inst_executed" in text) == (not stage.startswith("ncu-band"))
