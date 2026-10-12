@@ -107,6 +107,7 @@
 #include "eagle/graph/Render.h"
 #include "eagle/cpu/DeviceProps.h"
 #include "eagle/policy/Dispatch.h"
+#include "eagle/policy/Launch.h"
 #include "eagle/policy/Residency.h"
 #include "eagle/reduce/canonical.h"
 #include "eagle/util/Busy.h"
@@ -1091,13 +1092,75 @@ NB_MODULE(_core, m)
             "REGISTER_UNIT registers away (41..48 -> 40, 169..176 -> 168), else 0. Pure.");
 
         m.def("keep_bounded",
-            [](int free_regs, int free_local, int bounded_regs, int bounded_local, int edge) {
-                return pol::keepBounded({ free_regs, free_local }, { bounded_regs, bounded_local }, edge);
+            [](int free_regs, int free_local, long long free_text, int bounded_regs, int bounded_local,
+               long long bounded_text, int edge, double free_ms, double bounded_ms) {
+                return pol::keepBounded({ free_regs, free_local, free_text },
+                                        { bounded_regs, bounded_local, bounded_text }, edge, free_ms, bounded_ms);
             },
-            nb::arg("free_regs"), nb::arg("free_local_bytes"), nb::arg("bounded_regs"),
-            nb::arg("bounded_local_bytes"), nb::arg("edge"),
+            nb::arg("free_regs"), nb::arg("free_local_bytes"), nb::arg("free_text_bytes"),
+            nb::arg("bounded_regs"), nb::arg("bounded_local_bytes"), nb::arg("bounded_text_bytes"),
+            nb::arg("edge"), nb::arg("free_ms") = 0.0, nb::arg("bounded_ms") = 0.0,
             "True when a kernel recompiled under a register bound of `edge` spills no more than the "
-            "unbounded one (local size unchanged) and fits the bound. Pure.");
+            "unbounded one (local size unchanged), fits the bound, grew its code by at most "
+            "BOUND_TEXT_GROWTH_PERCENT (a text size of 0 is not judged) and, when both launches were "
+            "timed (ms above 0), is not slower. Pure.");
+
+        m.def("bound_demanded",
+            [](int demand_threads, int resident_unbounded) {
+                return pol::boundDemanded(demand_threads, resident_unbounded);
+            },
+            nb::arg("demand_threads"), nb::arg("resident_unbounded"),
+            "True when a launch asking for `demand_threads` per SM would not fit at the unbounded "
+            "residency, so a register bound is worth trying. Pure.");
+
+        m.attr("BOUND_TEXT_GROWTH_PERCENT") = pol::BOUND_TEXT_GROWTH_PERCENT;
+        m.attr("PERSIST_FIRST_FILL") = pol::PERSIST_FIRST_FILL;
+
+        // -- launch sizing and cadence (eagle/policy/Launch.h) ---------------------
+        m.def("persist_saturation",
+            [](int major, int minor, int fp64_ratio, bool fp64) {
+                return pol::persistSaturation({ { major, minor, 0, 0 }, 0, fp64_ratio, 0 }, fp64);
+            },
+            nb::arg("major"), nb::arg("minor"), nb::arg("fp64_ratio"), nb::arg("fp64") = true,
+            "Threads per SM at which a step's dependent chain keeps the issue pipe busy (5 warps per "
+            "partition on a full-rate FP64 part, 2 on a 1:32 or 1:64 one). Pure.");
+
+        m.def("persist_threads_per_sm",
+            [](int major, int minor, int regs_per_sm, int max_threads_per_sm, int sms, int fp64_ratio,
+               bool fp64, int regs, long long n, double fill) {
+                return pol::persistThreads(
+                    { { major, minor, regs_per_sm, max_threads_per_sm }, sms, fp64_ratio, 0 }, fp64, regs, n, fill);
+            },
+            nb::arg("major"), nb::arg("minor"), nb::arg("regs_per_sm"), nb::arg("max_threads_per_sm"),
+            nb::arg("sms"), nb::arg("fp64_ratio"), nb::arg("fp64"), nb::arg("regs"), nb::arg("n"),
+            nb::arg("fill"),
+            "Threads per SM of a persistent launch of `n` samples at `regs` registers and step fill "
+            "`fill`: the saturation count held between two warps per partition and min(residency "
+            "ceiling, n * fill / (2 * SMs)). 0 when the SM count is unknown. Pure.");
+
+        m.def("persist_chunk", &pol::persistChunk, nb::arg("mean_steps"),
+            "Steps one work-stealing chunk runs for samples taking `mean_steps` on average: the power "
+            "of two at or above mean_steps / 4, held to [4, 32]. Pure.");
+
+        m.def("band_k",
+            [](double rate, long long newly, long long live, long long k, long long k_max, long long k_min) {
+                return pol::bandK(rate, newly, live, k, k_max, k_min);
+            },
+            nb::arg("rate"), nb::arg("newly"), nb::arg("live"), nb::arg("k"), nb::arg("k_max"),
+            nb::arg("k_min"),
+            "Steps to the next compaction: the power of two nearest sqrt(2R / h) held to [k_min, k_max], "
+            "with R = `rate` (a compaction's cost in full-live steps) and h = newly / (live * k). The "
+            "host twin of the device policy kernel. Pure.");
+
+        m.def("band_rate",
+            [](int major, int minor, int sms, int fp64_ratio, int clock_khz, bool fp64, long long live,
+               double step_ops) {
+                return pol::bandRate({ { major, minor, 0, 0 }, sms, fp64_ratio, clock_khz }, fp64, live, step_ops);
+            },
+            nb::arg("major"), nb::arg("minor"), nb::arg("sms"), nb::arg("fp64_ratio"), nb::arg("clock_khz"),
+            nb::arg("fp64"), nb::arg("live"), nb::arg("step_ops"),
+            "R from the cost model: one compaction of `live` samples over one step of a full-live "
+            "launch of `step_ops` issue slots per sample. 0 when the clock or SM count is unknown. Pure.");
     }
 
     m.def("run_host_branches",

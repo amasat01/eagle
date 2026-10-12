@@ -29,10 +29,14 @@ class _Fn:
         self.attributes = {"num_regs": regs, "local_size_bytes": local}
 
 
-def _decide(monkeypatch, plain, bounded, loaded=None):
+def _decide(monkeypatch, plain, bounded, loaded=None, demand=None, text=None):
     """``_bounded._decide`` over an A100 with the given plain entry and the
-    compiler's answer ``bounded`` ((regs, local), or ``None`` for no recompile)."""
+    compiler's answer ``bounded`` ((regs, local), or ``None`` for no recompile).
+    ``text`` is ``(unbounded, bounded)`` code sizes; ``demand`` the threads per
+    SM the launch asks for."""
     monkeypatch.setattr(launch, "_device_props", lambda: A100)
+    sizes = text or (0, 0)
+    monkeypatch.setattr(_bounded, "_text_bytes", lambda loaded_, name, cap: sizes[1] if cap else sizes[0])
     asked = []
 
     def load(loaded_, name, cap):
@@ -40,7 +44,7 @@ def _decide(monkeypatch, plain, bounded, loaded=None):
         return None if bounded is None else _Fn(*bounded)
 
     monkeypatch.setattr(_bounded, "_load_bounded", load)
-    fn, report = _bounded._decide(loaded or SimpleNamespace(), "k_range", _Fn(*plain))
+    fn, report = _bounded._decide(loaded or SimpleNamespace(), "k_range", _Fn(*plain), demand)
     return fn, report, asked
 
 
@@ -115,3 +119,38 @@ def test_decided_once_per_entry_under_concurrent_use(monkeypatch):
     for t in threads:
         t.join()
     assert calls == ["k_persist"] and len({id(f) for f in got}) == 1
+
+
+def test_a_bound_is_tried_only_when_the_launch_asks_for_more_than_is_resident(monkeypatch):
+    """The oscillator persist entry (36 registers) holds 1536 threads per SM on
+    an A100 and could drop to 32 registers for 2048; a launch asking for 640
+    never recompiles it."""
+    fn, report, asked = _decide(monkeypatch, (36, 0), (32, 0), demand=640)
+    assert asked == [] and not report.bounded and report.edge == 32
+    assert report.demand == 640 and "no bound" in report.note
+    assert fn.attributes["num_regs"] == 36
+    # a launch asking for more than the entry holds does try it
+    _, report, asked = _decide(monkeypatch, (36, 0), (32, 0), demand=2048)
+    assert asked == [32] and report.bounded
+
+
+def test_a_hardware_scheduled_entry_demands_the_residency_the_edge_gives(monkeypatch):
+    _, report, asked = _decide(monkeypatch, (46, 0), (40, 0))
+    assert asked == [40] and report.bounded and report.demand == 1536
+
+
+@pytest.mark.parametrize("sizes, kept", [((10000, 10000), True), ((10000, 10400), True),
+                                         ((10000, 10401), False), ((10000, 12000), False),
+                                         ((0, 99999), True)])
+def test_a_bound_is_refused_when_its_code_grows_over_four_percent(monkeypatch, sizes, kept):
+    fn, report, _ = _decide(monkeypatch, (46, 0), (40, 0), text=sizes)
+    assert report.bounded is kept
+    assert report.text_bytes == (sizes[1] if kept else sizes[0])
+    if not kept:
+        assert "B of code" in report.note and fn.attributes["num_regs"] == 46
+
+
+def test_the_report_carries_registers_local_code_bound_and_demand(monkeypatch):
+    _, report, _ = _decide(monkeypatch, (46, 8), (40, 8), demand=1536, text=(880, 900))
+    assert (report.regs, report.local_bytes, report.text_bytes, report.bounded, report.demand) == (
+        40, 8, 900, True, 1536)

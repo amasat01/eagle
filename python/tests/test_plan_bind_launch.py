@@ -1271,3 +1271,39 @@ def test_prepared_launch_arguments_equal_a_fresh_marshal(monkeypatch):
     del issued[:]
     prepared()
     assert issued[0][1][0] == 99
+
+
+def test_launch_persist_packs_its_chunk_and_refuses_a_bad_one(monkeypatch):
+    """The persist entry's last argument is the chunk length, a ``uint32``:
+    32 unless the caller passes one. A chunk that is not a power of two from
+    1 to 2**20, or a block that is not whole warps, is refused before anything
+    reaches the device, with the fix in the message."""
+    import ctypes
+
+    part = SimpleNamespace(base=0, count=1000, n_samples=1000)
+    bound, issued, tail = _stub_bound(monkeypatch, (part,))
+    cell = lambda v: SimpleNamespace(data=SimpleNamespace(ptr=v))  # noqa: E731
+    chunks = []
+
+    def chunk_word(params_addr):
+        arr = ctypes.cast(params_addr, ctypes.POINTER(ctypes.c_void_p))
+        return ctypes.c_uint.from_address(arr[len(bound._addrs) + 7]).value
+
+    launch = bound._cupy.cuda.driver.launchKernel
+
+    def spy(ptr, gx, gy, gz, bx, by, bz, shm, stream, params, extra):
+        chunks.append(chunk_word(params))
+        launch(ptr, gx, gy, gz, bx, by, bz, shm, stream, params, extra)
+
+    bound._cupy.cuda.driver.launchKernel = spy
+    bound.launch_persist(grid=2, counter=cell(0x100), block=64)
+    bound.launch_persist(grid=2, counter=cell(0x100), block=64, chunk=8)
+    bound.prepare_persist(grid=2, counter=cell(0x100), block=64, chunk=1)()
+    assert chunks == [32, 8, 1] and len(issued) == 3
+    for chunk in (0, 6, 2**21, -32):
+        with pytest.raises(ValueError, match="power of two from 1 to 2\\*\\*20"):
+            bound.launch_persist(grid=2, counter=cell(0x100), block=64, chunk=chunk)
+    for block in (0, 48, 100):
+        with pytest.raises(ValueError, match="multiple of 32"):
+            bound.launch_persist(grid=2, counter=cell(0x100), block=block)
+    assert len(issued) == 3

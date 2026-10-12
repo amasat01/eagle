@@ -1,15 +1,20 @@
 # Copyright 2026 Alessandro Masat
 # SPDX-License-Identifier: Apache-2.0
 
-"""A register bound, attached only when the compiler proves it free.
+"""A register bound, attached only when the launch needs it and the compiler proves it free.
 
 An entry that sits a few registers above a residency edge (46 registers hold
 1280 threads on an A100, 40 hold 1536) can often be recompiled under a cap at
-the edge. Whether it can is a compiler fact, so it is asked, never assumed: the
-module's PTX is JIT-compiled again with ``CU_JIT_MAX_REGISTERS`` set to the
-edge, and the bounded entry replaces the plain one only when it keeps the same
-local-memory size (no new spill) and really fits the edge
-(:func:`eagle._core.keep_bounded`). Otherwise the plain entry stands, and
+the edge. A bound is tried only when the launch asks for more threads per SM
+than the unbounded entry holds (:func:`eagle._core.bound_demanded`): an entry
+whose demand already fits runs as compiled. Whether a bound is free is a
+compiler fact, so it is asked, never assumed: the module's PTX is JIT-compiled
+again with ``CU_JIT_MAX_REGISTERS`` set to the edge, and the bounded entry
+replaces the plain one only when it keeps the same local-memory size (no new
+spill), really fits the edge and its code grew by at most
+``BOUND_TEXT_GROWTH_PERCENT`` (:func:`eagle._core.keep_bounded`) -- a bound
+that rematerialises values instead of spilling them keeps the local size and
+issues more instructions. Otherwise the plain entry stands, and
 :func:`entry_report` says why. A cubin image has nothing left to compile and is
 never bounded.
 
@@ -22,6 +27,7 @@ from __future__ import annotations
 
 import ctypes
 import importlib
+import struct
 import threading
 from types import SimpleNamespace
 from typing import NamedTuple
@@ -29,9 +35,10 @@ from typing import NamedTuple
 from . import _core
 from ._launch_policy import _attr, _residency
 
-__all__ = ["EntryReport", "entry", "entry_report"]
+__all__ = ["EntryReport", "elf_section_size", "entry", "entry_report"]
 
 _CU_JIT_MAX_REGISTERS = 0
+_CU_JIT_INPUT_PTX = 1
 _CU_FUNC_ATTR_REGS = 4
 _CU_FUNC_ATTR_LOCAL = 3
 _ELF = b"\x7fELF"
@@ -49,6 +56,8 @@ class EntryReport(NamedTuple):
     bounded: bool        #: True when a register bound is in force
     edge: int            #: the residency edge in reach (0: none within 8 registers)
     resident_threads: int  #: threads per SM at ``regs``, 0 when unknown
+    text_bytes: int      #: the entry's ELF ``.text`` size, 0 when not measured
+    demand: int          #: threads per SM the launch asks for, 0 when the entry reports none
     note: str            #: why a bound was not attached, empty when bounded or not tried
 
 
@@ -84,6 +93,15 @@ def _cuda():
         _driver.cuModuleGetFunction.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p,
                                                 ctypes.c_char_p]
         _driver.cuModuleUnload.argtypes = [ctypes.c_void_p]
+        _driver.cuLinkCreate_v2.argtypes = [ctypes.c_uint, ctypes.POINTER(ctypes.c_int),
+                                            ctypes.POINTER(ctypes.c_void_p),
+                                            ctypes.POINTER(ctypes.c_void_p)]
+        _driver.cuLinkAddData_v2.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_char_p,
+                                             ctypes.c_size_t, ctypes.c_char_p, ctypes.c_uint,
+                                             ctypes.c_void_p, ctypes.c_void_p]
+        _driver.cuLinkComplete.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p),
+                                           ctypes.POINTER(ctypes.c_size_t)]
+        _driver.cuLinkDestroy.argtypes = [ctypes.c_void_p]
     return _driver
 
 
@@ -125,43 +143,105 @@ def _load_bounded(loaded, name: str, cap: int):
     return _Bounded(module, func.value)
 
 
-def _decide(loaded, name: str, plain):
-    """``(function that launches, EntryReport)`` for entry ``name``."""
+def elf_section_size(image: bytes, section: str) -> int:
+    """Size in bytes of ELF64 section ``section`` in ``image``, ``0`` when the
+    image is not a little-endian ELF64 or has no such section."""
+    if image[:4] != _ELF or len(image) < 64 or image[4] != 2 or image[5] != 1:
+        return 0
+    shoff, = struct.unpack_from("<Q", image, 0x28)
+    shentsize, shnum, shstrndx = struct.unpack_from("<HHH", image, 0x3A)
+
+    def header(i):
+        return struct.unpack_from("<IIQQQQ", image, shoff + i * shentsize)  # name type flags addr offset size
+
+    try:
+        names_offset = header(shstrndx)[4]
+        for i in range(shnum):
+            name, _, _, _, _, size = header(i)
+            start = names_offset + name
+            if image[start:image.index(b"\0", start)] == section.encode():
+                return size
+    except (struct.error, ValueError):
+        return 0
+    return 0
+
+
+def _text_bytes(loaded, name: str, cap: int) -> int:
+    """The ``.text`` size of entry ``name`` compiled from ``loaded``'s PTX under
+    ``cap`` registers (0: unbounded), or ``0`` when it cannot be measured."""
+    try:
+        image = open(loaded.image_path, "rb").read()
+    except (OSError, AttributeError):
+        return 0
+    if image.startswith(_ELF):
+        return elf_section_size(image, f".text.{name}")
+    import cupy
+
+    cuda = _cuda()
+    state, cubin, size = ctypes.c_void_p(), ctypes.c_void_p(), ctypes.c_size_t()
+    options = (ctypes.c_int * 1)(_CU_JIT_MAX_REGISTERS)
+    values = (ctypes.c_void_p * 1)(cap)
+    with cupy.cuda.Device(loaded.device_id):
+        if cuda.cuLinkCreate_v2(1 if cap else 0, options, values, ctypes.byref(state)) != 0:
+            return 0
+        try:
+            data = image + b"\0"
+            if (cuda.cuLinkAddData_v2(state, _CU_JIT_INPUT_PTX, data, len(data), b"entry", 0, None, None) != 0
+                    or cuda.cuLinkComplete(state, ctypes.byref(cubin), ctypes.byref(size)) != 0):
+                return 0
+            return elf_section_size(ctypes.string_at(cubin.value, size.value), f".text.{name}")
+        finally:
+            cuda.cuLinkDestroy(state)
+
+
+def _decide(loaded, name: str, plain, demand=None):
+    """``(function that launches, EntryReport)`` for entry ``name``. ``demand``
+    is the threads per SM the launch asks for; ``None`` asks for the whole
+    residency the edge would give (a hardware-scheduled entry)."""
     dev = importlib.import_module("eagle.launch")._device_props()
     regs, local = _plain_resources(plain)
     residency = _residency(dev)
     threads = _core.resident_warps(*residency, regs) * 32 if _attr(dev, "regsPerMultiprocessor") else 0
     edge = _core.register_edge(*residency, regs)
     if edge == 0:
-        return plain, EntryReport(name, regs, local, False, 0, threads, "")
+        return plain, EntryReport(name, regs, local, False, 0, threads, 0, demand or 0, "")
+    if demand is None:
+        demand = _core.resident_warps(*residency, edge) * 32
+    if not _core.bound_demanded(demand, threads):
+        return plain, EntryReport(name, regs, local, False, edge, threads, 0, demand,
+                                  f"no bound: the launch asks for {demand} threads per SM and "
+                                  f"{threads} are resident")
     bounded = _load_bounded(loaded, name, edge)
     if bounded is None:
-        return plain, EntryReport(name, regs, local, False, edge, threads,
+        return plain, EntryReport(name, regs, local, False, edge, threads, 0, demand,
                                   "the image cannot be recompiled under a bound (a cubin)")
     b_regs, b_local = _plain_resources(bounded)
-    if not _core.keep_bounded(regs, local, b_regs, b_local, edge):
-        why = (f"bound {edge} gives {b_regs} registers and {b_local} B local "
-               f"against {regs} and {local} B unbounded")
-        return plain, EntryReport(name, regs, local, False, edge, threads, why)
+    text, b_text = _text_bytes(loaded, name, 0), _text_bytes(loaded, name, edge)
+    if not _core.keep_bounded(regs, local, text, b_regs, b_local, b_text, edge):
+        why = (f"bound {edge} gives {b_regs} registers, {b_local} B local and {b_text} B of code "
+               f"against {regs}, {local} B and {text} B unbounded")
+        return plain, EntryReport(name, regs, local, False, edge, threads, text, demand, why)
     return bounded, EntryReport(name, b_regs, b_local, True, edge,
-                                _core.resident_warps(*residency, b_regs) * 32, "")
+                                _core.resident_warps(*residency, b_regs) * 32, b_text, demand, "")
 
 
-def entry(loaded, name: str, plain):
+def entry(loaded, name: str, plain, demand=None):
     """The function to launch for entry ``name`` of ``loaded``'s module: its
-    register-bounded recompile when one was proven spill-free, else ``plain``.
-    Decided once per entry and kept with ``loaded``."""
-    return _resolved(loaded, name, plain)[0]
+    register-bounded recompile when the launch's ``demand`` (threads per SM;
+    ``None``: the whole residency a bound would give) exceeds what ``plain``
+    holds and a bound was proven free, else ``plain``. Decided once per entry
+    and kept with ``loaded``."""
+    return _resolved(loaded, name, plain, demand)[0]
 
 
-def entry_report(loaded, name: str, plain) -> EntryReport:
+def entry_report(loaded, name: str, plain, demand=None) -> EntryReport:
     """The :class:`EntryReport` of entry ``name`` (see :func:`entry`)."""
-    return _resolved(loaded, name, plain)[1]
+    return _resolved(loaded, name, plain, demand)[1]
 
 
-def _resolved(loaded, name: str, plain):
+def _resolved(loaded, name: str, plain, demand=None):
     with _LOCK:
         cache = loaded.__dict__.setdefault("_bounded_entries", {})
         if name not in cache:
-            cache[name] = _decide(loaded, name, plain)
+            cache[name] = _decide(loaded, name, plain, demand)
         return cache[name]

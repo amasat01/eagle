@@ -43,7 +43,7 @@ from ._active_set import (
     ActiveSet,
     compaction_body,
 )
-from . import _layout
+from . import _core, _layout
 from ._compat import zip_strict
 from ._conditional import SkipGuard, Skippable, repeat_while
 from .roles import PER_SAMPLE_ROLES
@@ -83,8 +83,15 @@ def _reserved_names(*, record: bool = False, events=None,
     return _RESERVED
 
 # The policy cells (int64): the band's current k, the counter at the last
-# launch, the steps run so far, the step cap.
-_K, _FIN_AT, _DONE, _CAP = range(4)
+# launch, the steps run so far, the step cap, and R in thousandths (a
+# compaction's cost in steps of a full-live launch).
+_K, _FIN_AT, _DONE, _CAP, _R = range(5)
+RATE_SCALE = 1000
+
+#: R until the cost model can price the device: the middle of the measured range.
+AUTO_RATE0 = 8.0
+#: Issue slots per step the cost model assumes when the kernel does not say.
+AUTO_STEP_OPS = 33
 
 _STRUCTURES = {"device_kernel": True, "host_team": False}
 
@@ -104,8 +111,10 @@ class RunReport:
     nothing, hit the cap early, or ended on a one-step launch).
     ``compactions``/``reorders`` count what ran, ``build_s`` the one-time
     capture wall (0 on host), ``launches_by_k`` each ``k``'s launch count.
-    ``lane_utilisation`` (lane steps / lane chunk slots, in ``(0, 1]``) is
-    set only for a persist-entry run that counted it; ``None`` otherwise
+    ``slot_fill`` (the steps run over the persist entry's chunk slots, 32
+    lanes times the chunk length per warp per chunk head, in ``(0, 1]``; a
+    lane waiting masked for the next head is an empty slot) is set only
+    for a persist-entry run that counted it; ``None`` otherwise
     (every other mode, or a persist run that skipped the counter).
     ``mode`` is the launch shape this run actually took: ``"fused_one"``/
     ``"persist"`` for a no-graph fast-path run, ``"band"`` for the
@@ -128,7 +137,7 @@ class RunReport:
     build_s: float
     launches_by_k: dict = field(default_factory=dict)
     exact_steps: bool = False
-    lane_utilisation: float | None = None
+    slot_fill: float | None = None
     mode: str = "band"
     probe: bool = False
     dispatch: dict | None = None
@@ -171,14 +180,6 @@ def _packed_read(xp, device: bool, cells) -> tuple:
         staging[i : i + 1] = arr[idx : idx + 1]
     host = staging.get()
     return tuple(int(v) for v in host)
-
-
-# The step fill f = (sum of the lanes' steps) / (n * longest lane's steps) below
-# which the fused entry is not timed against persist. Structural bound: the
-# persist loop is the fused loop plus at most ~9 bookkeeping instructions per
-# step on a body of at least ~25 instructions, so the fused entry cannot win
-# below this fill on any device; above it the measured wall arbitrates.
-FUSED_MIN_STEP_RATIO = 0.6
 
 
 def _fast_mode_for(step, n: int, *, compacting: bool = False) -> str | None:
@@ -328,10 +329,17 @@ def _warm_device_kernels() -> None:
 
 
 #: The policy band, device face: ``k_next`` from ``k`` (current steps per
-#: launch), ``newly`` (finished in the launch) and ``live`` (not finished).
+#: launch), ``newly`` (finished in the launch), ``live`` (not finished) and
+#: ``rate`` (R). The same expression, in the same order, as
+#: ``eagle::policy::bandK``.
 _BAND_SRC = (
-    "if (newly * 16 < live) k_next = (2 * k < KMAX) ? 2 * k : KMAX;\n"
-    "else if (newly * 4 > live) k_next = (k / 2 > KMIN) ? k / 2 : KMIN;\n")
+    "if (newly <= 0) k_next = KMAX;\n"
+    "else {\n"
+    "    const double e2 = 2.0 * rate * (double)live * (double)k / (double)newly;\n"
+    "    long long p = 1;\n"
+    "    while (p < (1LL << 30) && e2 >= 2.0 * (double)p * (double)p) p *= 2;\n"
+    "    k_next = p < KMIN ? KMIN : (p > KMAX ? KMAX : p);\n"
+    "}\n")
 
 _POLICY_SRC = r"""
 extern "C" __global__ void eagle_until_done_policy(
@@ -345,6 +353,7 @@ extern "C" __global__ void eagle_until_done_policy(
     cells[%(fin_at)d] = fin;
     cells[%(done)d] = done;
     const long long k = cells[%(k)d];
+    const double rate = (double)cells[%(r)d] / %(scale)d.0;
     long long k_next = k;
     %(band)s
     cells[%(k)d] = k_next;
@@ -360,17 +369,15 @@ extern "C" __global__ void eagle_until_done_policy(
 """
 
 
-def _next_k(k: int, newly: int, live: int, k_max: int, k_min: int = AUTO_K_MIN) -> int:
-    """The band of the policy, host face (the twin of :data:`_BAND_SRC`).
-    ``k_min`` defaults to :data:`AUTO_K_MIN`; a caller that pins
-    ``k_min == k_max`` (a batch skipping compaction
-    because it fits inside one resident wave) makes both arms of the band a
-    no-op, so ``k`` never leaves ``k_max`` once seeded there."""
-    if newly * 16 < live:
-        return min(2 * k, k_max)
-    if newly * 4 > live:
-        return max(k // 2, k_min)
-    return k
+def _next_k(k: int, newly: int, live: int, k_max: int, k_min: int = AUTO_K_MIN,
+            rate: float = AUTO_RATE0) -> int:
+    """Steps to the next compaction, host face (the twin of :data:`_BAND_SRC`):
+    the power of two nearest ``sqrt(2R / h)`` held to ``[k_min, k_max]``, with
+    ``R = rate`` and ``h = newly / (live * k)`` the rate samples finish at
+    (:func:`eagle._core.band_k`). A caller that pins ``k_min == k_max`` (a
+    batch skipping compaction because it fits inside one resident wave) makes
+    the band a no-op, so ``k`` never leaves ``k_max`` once seeded there."""
+    return _core.band_k(rate, newly, live, k, k_max, k_min)
 
 
 def _host_policy(cells, finished, total, word, go, hist, k_max: int,
@@ -381,7 +388,8 @@ def _host_policy(cells, finished, total, word, go, hist, k_max: int,
     done = int(cells[_DONE]) + int(word[0])
     cells[_FIN_AT] = fin
     cells[_DONE] = done
-    k_next = _next_k(int(cells[_K]), newly, live, k_max, k_min)
+    k_next = _next_k(int(cells[_K]), newly, live, k_max, k_min,
+                     int(cells[_R]) / RATE_SCALE)
     cells[_K] = k_next
     left = int(cells[_CAP]) - done
     g = fin != all_ and left > 0
@@ -398,7 +406,7 @@ def _policy_kernel(k_max: int, k_min: int = AUTO_K_MIN):
 
     src = _POLICY_SRC % {"kmin": k_min, "kmax": k_max, "k": _K,
                          "fin_at": _FIN_AT, "done": _DONE, "cap": _CAP,
-                         "band": _BAND_SRC}
+                         "r": _R, "scale": RATE_SCALE, "band": _BAND_SRC}
     return cupy.RawKernel(src, "eagle_until_done_policy")
 
 
@@ -485,7 +493,7 @@ class Runner:
                  "_fast_util_on", "_fast_exact", "_fast_views",
                  "_fast_counts", "_fast_pick", "_fast_wall", "_fast_runs", "_fast_last", "_fast_probe",
                  "_fast_prior", "_fast_ev", "_fast_prep",
-                 "_fast_ratio", "_recorder")
+                 "_fast_fill", "_fast_chunk", "_fast_chunk_ok", "_rate", "_recorder")
 
     @_layout.door
     def __init__(self, plan, *, max_steps, every=None, reorder=None, record=False,
@@ -500,10 +508,14 @@ class Runner:
         # own, as for every other caller; no public signature changes.
         fast_mode_override = planes.pop("_fast_mode", None)
         # Internal only, same convention as ``_fast_mode`` above: turns on the
-        # persist entry's lane-utilisation counter (off by default -- see
+        # persist entry's slot-fill counter (off by default -- see
         # :meth:`_build_fast`/:meth:`_run_fast`), for a card arm that still
-        # wants :attr:`RunReport.lane_utilisation` filled.
-        lane_utilisation_override = planes.pop("_lane_utilisation", None)
+        # wants :attr:`RunReport.slot_fill` filled.
+        slot_fill_override = planes.pop("_slot_fill", None)
+        # the card scripts' earlier name for it, kept until the cards re-run
+        legacy = planes.pop("_lane_utilisation", None)
+        if slot_fill_override is None:
+            slot_fill_override = legacy
         # Internal only: ``False`` keeps the size pick for every run instead of
         # timing the other entry (see :meth:`_pick_entry`).
         self._fast_probe = planes.pop("_fast_probe", True)
@@ -673,6 +685,7 @@ class Runner:
         self._k_max = finish.get("steps_max", k if not auto else None)
         self._k_min = AUTO_K_MIN
         self._k0 = AUTO_K0
+        self._rate = AUTO_RATE0
         self._cells = self._go = self._hist = None
         self._device = device
         self._xp = xp
@@ -684,7 +697,9 @@ class Runner:
         self._fast_pick = self._fast_last = self._fast_prior = None
         self._fast_ev = None
         self._fast_prep = {}
-        self._fast_ratio = FUSED_MIN_STEP_RATIO
+        self._fast_fill = _core.PERSIST_FIRST_FILL
+        self._fast_chunk = None
+        self._fast_chunk_ok = False
         self._fast_wall = {}
         self._fast_runs = 0
         self._fast_counter = self._fast_grid = self._fast_block = self._fast_util = None
@@ -711,7 +726,7 @@ class Runner:
 
         if auto:
             self._build_auto(launch, max_steps, fast_mode_override,
-                             lane_utilisation_override)
+                             slot_fill_override)
             return
         guard = SkipGuard(finished, 0, self._total, 0)
         if active is not None:
@@ -727,7 +742,7 @@ class Runner:
             self.loop = repeat_while(tuple(parts), guard, -(-max_steps // every))
 
     def _build_auto(self, launch, max_steps: int, fast_mode_override=None,
-                    lane_utilisation_override=None) -> None:
+                    slot_fill_override=None) -> None:
         """The automatic loop: ``(launch, compact?, reorder?, policy)`` under
         the ``go`` guard, capped at ``ceil(max_steps / AUTO_K_MIN) + 1``
         iterations (the policy's ``go`` is the real stop).
@@ -807,13 +822,14 @@ class Runner:
         else:
             mode = None
         if mode is not None:
-            self._build_fast(mode, lane_utilisation_override, probe)
+            self._build_fast(mode, slot_fill_override, probe)
             return
         if self.active is not None:
             self._materialize_map()
             self.active.prepare_compaction()
         xp = self._xp
-        self._cells = xp.zeros(4, dtype=xp.int64)
+        self._rate = self._band_rate()
+        self._cells = xp.zeros(5, dtype=xp.int64)
         self._go = xp.zeros(1, dtype=xp.uint32)
         self._hist = xp.zeros(self._k_max + 1, dtype=xp.int64)
         cells, go, hist, word = self._cells, self._go, self._hist, self.fused_steps
@@ -835,7 +851,7 @@ class Runner:
             args = (finished, total, cells, word, go, hist)
             # compile (and check) before any capture, on scratch cells
             kernel((1,), (1,), (xp.zeros(1, dtype=xp.uint32), total,
-                                xp.zeros(4, dtype=xp.int64),
+                                xp.zeros(5, dtype=xp.int64),
                                 xp.zeros(1, dtype=xp.int64),
                                 xp.zeros(1, dtype=xp.uint32),
                                 xp.zeros(k_max + 1, dtype=xp.int64)))
@@ -856,6 +872,26 @@ class Runner:
         cap = -(-max_steps // AUTO_K_MIN) + 1
         self.loop = repeat_while(tuple(parts), SkipGuard(go, 0), cap)
 
+    def _band_rate(self) -> float:
+        """R, a compaction's cost in steps of a full-live launch, from the cost
+        model (:func:`eagle._core.band_rate`) on a device run; the middle of the
+        measured range where the device or the model is unknown."""
+        if not self._device:
+            return AUTO_RATE0
+        import importlib
+
+        from ._launch_policy import _attr, _fp64_args
+
+        dev = importlib.import_module("eagle.launch")._device_props()
+        major, minor, sms, ratio, fp64 = _fp64_args(dev, self._scalar_type())
+        step_ops = getattr(self.step.plan.plugin, "step_ops", None) or AUTO_STEP_OPS
+        rate = _core.band_rate(major, minor, sms, ratio, _attr(dev, "clockRate"), fp64,
+                               self.n, float(step_ops))
+        return rate if rate > 0 else AUTO_RATE0
+
+    def _scalar_type(self) -> str:
+        return getattr(self.step.plan.plugin, "scalar_type", None) or "float64"
+
     def _materialize_map(self) -> None:
         """The band path reads the active-set map: allocate the deferred one
         and re-point the bound plans at it."""
@@ -864,7 +900,7 @@ class Runner:
                 if MAP_PLANE in bound.names:
                     bound.rebind(**{MAP_PLANE: self.active.map})
 
-    def _build_fast(self, mode: str, lane_utilisation_override=None,
+    def _build_fast(self, mode: str, slot_fill_override=None,
                     probe: bool = False) -> None:
         """Set up the no-graph shape :func:`_fast_mode_for` picked: no
         ``self.loop``/``self.pipeline`` at all, since one call of
@@ -873,9 +909,9 @@ class Runner:
         the life of the runner), so :meth:`_run_fast` never writes it.
         ``"persist"`` allocates the lane-stealing counter (memset at each
         :meth:`run`, not here -- the one-time allocation only); the
-        lane-utilisation counter is allocated, and later filled, ONLY when
-        ``lane_utilisation_override`` asks for it (off by default -- it
-        costs 2 same-address 64-bit atomics per lane per launch, see
+        slot-fill counter is allocated, and later filled, ONLY when
+        ``slot_fill_override`` asks for it (off by default -- it
+        costs a same-address 64-bit atomic per warp per chunk, see
         :meth:`_run_fast`'s docstring). ``probe`` builds the persist
         block/grid whatever ``mode`` is, so :meth:`_pick_entry` can switch
         between the two entries; it also (re)starts the measured walls."""
@@ -884,19 +920,18 @@ class Runner:
         self._fast_wall = {}
         self._fast_runs = 0
         self._fast_last = self._fast_prior = None
-        # the step-fill bound below which the fused entry is never timed: the
-        # persist loop's extra bookkeeping (~12 instructions per step) over a
-        # step of step_ops instructions, so a heavy step has little to lose
-        step_ops = getattr(self.step.plan.plugin, "step_ops", None)
         # an artifact whose fast entries count the samples finished on entry
         self._fast_counts = bool(getattr(self.step.plan.plugin, "entry_counts_finished", False))
-        self._fast_ratio = (max(FUSED_MIN_STEP_RATIO, 1.0 - 12.0 / step_ops)
-                            if step_ops else FUSED_MIN_STEP_RATIO)
+        # every persist entry takes the chunk length as a launch argument (one
+        # that predates it ignores the trailing argument)
+        self._fast_chunk_ok = True
+        self._fast_fill = _core.PERSIST_FIRST_FILL
+        self._fast_chunk = _core.persist_chunk(1e9) if self._fast_chunk_ok else None
         # the timing events, allocated once: only a probing runner times runs
         self._fast_ev = (self._xp.cuda.Event(), self._xp.cuda.Event()) if probe else None
         self.loop = None  # no WHILE-graph body exists in this mode
         self.fused_steps[0] = self._max_steps
-        self._fast_util_on = bool(lane_utilisation_override) and (mode == "persist" or probe)
+        self._fast_util_on = bool(slot_fill_override) and (mode == "persist" or probe)
         xp = self._xp
         # [0] the persist entry's lane-stealing counter, [1] the run's exact
         # step count (both entries max each sample's steps into it): ONE
@@ -923,11 +958,10 @@ class Runner:
             return
         self._fast_util = (xp.zeros(2, dtype=xp.uint64)
                            if self._fast_util_on else None)
-        # block/grid: the persistent launch's threads-per-SM rule
-        # (eagle._launch_policy.persistent_launch), not a literal here --
-        # from the device's issue rate for the step's precision, the batch
-        # size, the step budget and the persist entry's own register-limited
-        # occupancy.
+        self._size_persist()
+
+    def _persist_geometry(self, fill: float) -> tuple:
+        """``(block, grid)`` of the persist launch at step fill ``fill``."""
         import importlib
 
         from ._launch_policy import persistent_launch
@@ -936,20 +970,32 @@ class Runner:
         # that shadows the submodule (same reason _plan_binding.py's own
         # .launch() resolves it this way).
         _launch = importlib.import_module("eagle.launch")
-        fn = self.step.persist_entry()
-        scalar_type = getattr(self.step.plan.plugin, "scalar_type", None) or "float64"
-        self._fast_block, self._fast_grid = persistent_launch(
-            _launch._device_props(), _launch._kernel_attrs(fn), self.n, self._max_steps,
-            scalar_type)
+        return persistent_launch(_launch._device_props(),
+                                 _launch._kernel_attrs(self.step.persist_entry()),
+                                 self.n, fill, self._scalar_type())
+
+    def _size_persist(self) -> None:
+        """Size the persist launch and pack its argument blocks: threads per SM
+        from the device, the batch size, the step fill read back so far (first
+        run: 0.5) and the entry's own register-limited residency
+        (:func:`eagle._launch_policy.persistent_launch`), the chunk length from
+        the mean steps seen. Called at bind and again when a run's readback moves
+        the fill or the chunk."""
+        self._fast_block, self._fast_grid = self._persist_geometry(self._fast_fill)
+        counter, steps, stepsum = self._fast_views
+        steps_cell = steps if self._fast_exact else None
+        stepsum = stepsum if self._fast_exact else None
+        chunk = self._fast_chunk if self._fast_chunk_ok else None
+        prep = self._fast_prep
         for key, util in (("persist", None), ("persist_util", self._fast_util)):
             if key == "persist" or util is not None:
                 prep[key] = self.step.prepare_persist(
-                    grid=self._fast_grid, counter=self._fast_views[0], util=util,
-                    block=self._fast_block, steps=steps_cell, stepsum=stepsum)
+                    grid=self._fast_grid, counter=counter, util=util, block=self._fast_block,
+                    steps=steps_cell, stepsum=stepsum, chunk=chunk)
                 if stepsum is not None:
                     prep[key + "_bare"] = self.step.prepare_persist(
-                        grid=self._fast_grid, counter=self._fast_views[0], util=util,
-                        block=self._fast_block, steps=steps_cell)
+                        grid=self._fast_grid, counter=counter, util=util, block=self._fast_block,
+                        steps=steps_cell, chunk=chunk)
 
     def _pick_entry(self) -> tuple:
         """The entry this run takes and whether it is a probe, as
@@ -958,16 +1004,14 @@ class Runner:
         second the other entry, and from then on the one with the smaller
         measured launch wall; the loser is timed again when a run's readback
         (``steps``/``finished``) differs from the last probe's, and every
-        64 runs. The step fill f is read back after every run, either entry; an f
-        under the bound (:data:`FUSED_MIN_STEP_RATIO`, raised by a heavy step's
-        ``step_ops``) keeps the run on persist with no probe."""
+        64 runs. However low the step fill f, the fused entry is timed: a spread
+        batch is exactly where a persistent launch's refills can cost more than
+        the fused entry's idle lanes, and only the wall says which."""
         pick = self._fast_pick
         if pick is None:
             return self._fast_mode, False
         if self._fast_prior is None:
             return pick, False
-        if self._fast_prior < self._fast_ratio:
-            return "persist", False
         wall = self._fast_wall
         other = "persist" if pick == "fused_one" else "fused_one"
         if not wall:
@@ -988,14 +1032,11 @@ class Runner:
         re-probe cadence)."""
         wall = self._fast_wall
         last, now = self._fast_last, (steps, finished)
-        prior = self._fast_prior
         self._fast_runs += 1
         if f is None:
-            f = prior
-        # a new readback regime, or f crossing the bound either way: the old
-        # walls no longer compare
-        if last != now or (prior is not None
-                           and (f < self._fast_ratio) != (prior < self._fast_ratio)):
+            f = self._fast_prior
+        # a new readback regime: the old walls no longer compare
+        if last != now:
             wall.clear()
             self._fast_pick = mode
             self._fast_last = now
@@ -1005,12 +1046,25 @@ class Runner:
             wall[mode] = wall_ms
             if len(wall) == 2:
                 self._fast_pick = min(wall, key=wall.get)
-        self._fast_prior = f
-        if f < self._fast_ratio:
-            self._fast_pick = "persist"
-            wall.pop("fused_one", None)
-        elif self._fast_runs % 64 == 0 and len(wall) == 2:
+        if self._fast_runs % 64 == 0 and len(wall) == 2:
             wall.pop("persist" if self._fast_pick == "fused_one" else "fused_one")
+        self._fast_prior = f
+        if f is not None:
+            self._refit_persist(f, steps)
+
+    def _refit_persist(self, fill: float, steps: int) -> None:
+        """Resize the persist launch when the readback moved the step fill or
+        the chunk: the threads per SM follow the fill (a drain limit) and the
+        chunk follows the mean steps ``fill * steps``."""
+        if "persist" not in self._fast_prep:
+            return
+        chunk = _core.persist_chunk(fill * steps) if self._fast_chunk_ok else None
+        geometry = self._persist_geometry(fill)
+        if geometry == (self._fast_block, self._fast_grid) and chunk == self._fast_chunk:
+            self._fast_fill = fill
+            return
+        self._fast_fill, self._fast_chunk = fill, chunk
+        self._size_persist()
 
     def _run_fast(self) -> RunReport:
         """:meth:`run`'s body for a no-graph mode: one launch (fused with
@@ -1045,12 +1099,12 @@ class Runner:
         back to the budget OFFERED: exact when the budget was the
         bottleneck, an upper bound otherwise.
 
-        The lane-utilisation counter (:attr:`_fast_util_on`) is read back
+        The slot-fill counter (:attr:`_fast_util_on`) is read back
         with its own ``.get()`` only when it was asked for at bind
         (:meth:`_build_fast`) -- an extra sync, opted into, never the
         default."""
         xp = self._xp
-        lane_utilisation = None
+        slot_fill = None
         # ONE device word block per run: [0] the persist entry's
         # lane-stealing counter, [1] the run's exact step count, [2] the
         # finished count -- zeroed by one async memset, read back by ONE
@@ -1068,9 +1122,7 @@ class Runner:
         # run(s) after an invalidation cleared the walls; a settled run is
         # not (an event pair costs more than the launch policy is worth)
         prior = self._fast_prior
-        timed = probed and (probing or prior is None
-                            or (prior >= self._fast_ratio and len(self._fast_wall) < 2)
-                            or (prior < self._fast_ratio and "persist" not in self._fast_wall))
+        timed = probed and (probing or prior is None or len(self._fast_wall) < 2)
         if timed:
             t0, t1 = self._fast_ev
             t0.record()
@@ -1111,7 +1163,8 @@ class Runner:
             self.step.launch_persist(grid=self._fast_grid,
                                      counter=next_cell, util=util,
                                      block=self._fast_block, steps=steps_cell,
-                                     stepsum=stepsum, prepared=self._fast_prep[key + bare])
+                                     stepsum=stepsum, chunk=self._fast_chunk,
+                                     prepared=self._fast_prep[key + bare])
         if timed:
             t1.record()
         cells = [(counter, i) for i in (range(1, 6) if summed else (1, 2))]
@@ -1126,11 +1179,11 @@ class Runner:
             self._note_run(mode, xp.cuda.get_elapsed_time(t0, t1) if timed else None,
                            steps_read, finished, f)
         if self._fast_util_on and mode == "persist":
-            lane_steps, lane_slots = (
+            steps_run, slots = (
                 self._fast_util.get() if self._device else self._fast_util
             )
-            if lane_slots > 0:
-                lane_utilisation = float(lane_steps) / float(lane_slots)
+            if slots > 0:
+                slot_fill = float(steps_run) / float(slots)
         done = finished == self.n
         steps, exact = ((steps_read, True) if steps_cell is not None
                         else (self._max_steps, not done))
@@ -1138,7 +1191,7 @@ class Runner:
             n=self.n, finished=finished, done=done, launches=1,
             steps=steps, compactions=0, reorders=0, build_s=0.0,
             launches_by_k={self._max_steps: 1}, exact_steps=exact,
-            lane_utilisation=lane_utilisation, mode=mode, probe=probing)
+            slot_fill=slot_fill, mode=mode, probe=probing)
 
     @property
     def policy(self) -> dict | None:
@@ -1152,6 +1205,23 @@ class Runner:
                 "steps_done": int(cells[_DONE]), "max_steps": int(cells[_CAP]),
                 "go": self._word(self._go)}
 
+    @property
+    def launch_policy(self) -> dict:
+        """What the launch rules chose for this runner, for a probe report:
+        ``block`` and ``grid`` of the persist launch (``None`` when the runner has
+        none), ``chunk`` (steps per fetch; ``None`` when the entry takes none),
+        ``fill`` (the step fill the sizing last read, first run 0.5), ``rate`` (R)
+        and ``k`` (the band's current steps per launch; ``None`` off the band).
+        Pair it with :meth:`eagle.plan.BoundPlan.entry_reports` (registers, local
+        memory, code size, bound, demanded threads)."""
+        persist = self._fast_block is not None
+        k = None
+        if self.auto and self._cells is not None:
+            k = int((self._cells.get() if self._device else self._cells)[_K])
+        return {"block": self._fast_block if persist else None,
+                "grid": self._fast_grid if persist else None,
+                "chunk": self._fast_chunk, "fill": self._fast_fill, "rate": self._rate, "k": k}
+
     def _seed(self) -> None:
         """Seed the automatic loop's cells from the host before a run (the
         counter is already re-synchronised to the mask)."""
@@ -1159,8 +1229,8 @@ class Runner:
         fin = self._word(self.finished)
         first = min(self._k0, self._max_steps)
         go = fin != self.n and self._max_steps > 0
-        self._cells[...] = xp.asarray([self._k0, fin, 0, self._max_steps],
-                                      dtype=xp.int64)
+        self._cells[...] = xp.asarray(
+            [self._k0, fin, 0, self._max_steps, round(self._rate * RATE_SCALE)], dtype=xp.int64)
         self.fused_steps[0] = first
         self._go[0] = 1 if go else 0
         self._hist.fill(0)

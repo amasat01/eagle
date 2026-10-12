@@ -235,6 +235,15 @@ class BoundPlan:
             _launch._device_props(), _launch._kernel_attrs(self._entry)
         )
 
+    def _persist_demand(self) -> int:
+        """Threads per SM the persistent launch asks for on this device (the
+        register-bound test in :mod:`eagle._bounded` reads it)."""
+        from ._launch_policy import persistent_demand
+
+        _launch = importlib.import_module("eagle.launch")
+        scalar_type = getattr(self.plan.plugin, "scalar_type", None) or "float64"
+        return persistent_demand(_launch._device_props(), scalar_type)
+
     def entry_reports(self) -> tuple:
         """The launch policy's view of this plan's device entries: one
         :class:`eagle._bounded.EntryReport` per entry present (the plain
@@ -254,7 +263,8 @@ class BoundPlan:
         for suffix, resolve in (("range", self.range_entry), ("persist", self.persist_entry)):
             if resolve() is not None:
                 reports.append(_bounded.entry_report(
-                    loaded, f"{name}_{suffix}", module.get_function(f"{name}_{suffix}")))
+                    loaded, f"{name}_{suffix}", module.get_function(f"{name}_{suffix}"),
+                    self._persist_demand() if suffix == "persist" else None))
         return tuple(reports)
 
     def persist_entry(self):
@@ -277,7 +287,8 @@ class BoundPlan:
             if module is not None and name:
                 try:
                     fn = _bounded.entry(loaded, f"{name}_persist",
-                                        module.get_function(f"{name}_persist"))
+                                        module.get_function(f"{name}_persist"),
+                                        self._persist_demand())
                 except Exception:
                     fn = None
         self._persist_fn = fn
@@ -285,35 +296,40 @@ class BoundPlan:
 
     def launch_persist(self, stream=None, *, grid, counter, util=None,
                       block: int = 256, steps=None, stepsum=None,
-                       prepared=None) -> None:
+                       chunk: int = 32, prepared=None) -> None:
         """Launch ``<kernel>_persist`` once -- the persistent launch's whole
-        shape: lanes fetch ``base + atomicAdd(counter, 1)`` until the
-        partition's own ``count``, an already-Terminated sample skipped,
-        each running up to the bound ``fused_steps`` word's budget before
-        writing back and fetching the next; no WHILE graph, no active-set
-        map, no policy kernel -- this one call is the whole run.
+        shape: at each chunk head the lanes of a warp without a sample
+        claim the next ones together off ``counter`` until the partition's
+        own ``count``, an already-Terminated sample skipped, each running up
+        to the bound ``fused_steps`` word's budget before writing back; a
+        lane whose sample commits mid-chunk waits, masked, for the next head.
+        No WHILE graph, no active-set map, no policy kernel -- this one call
+        is the whole run.
 
         ``grid`` is the block count and ``block`` the block size -- the
         caller's own choice, both geometry knobs this method does not
         resolve itself (:func:`eagle._launch_policy.persistent_geometry` is
         the documented rule a caller derives them from, from the entry's own
         register-limited occupancy and the SM count; ``block=256`` here is
-        only a bare fallback for a caller that does not). ``counter`` is a
+        only a bare fallback for a caller that does not); ``block`` is a
+        multiple of 32, as the entry runs whole warps. ``counter`` is a
         one-element uint32 cupy array the caller has already memset to 0
         (not done here, so a caller replaying this inside a captured graph
         can fold the reset into a graph node instead). ``util`` is an
-        optional 2-element uint64 cupy array (the lanes' steps, and their
-        chunk slots: each lane's steps rounded up to a chunk, counted per
-        lane so a split warp counts each slot once); omitted, the entry gets
-        a null pointer and
-        skips counting. ``steps`` is an optional one-element uint32 cupy
+        optional 2-element uint64 cupy array the caller has zeroed (the
+        steps run, and the slots: 32 lanes times ``chunk`` per warp per chunk
+        head, so ``util[0] / util[1]`` is the run's slot fill); omitted, the
+        entry gets a null pointer and skips counting. ``steps`` is an optional one-element uint32 cupy
         array the caller has zeroed: the entry maxes each sample's steps
         taken in this launch into it (the run's exact step count); omitted,
         a null pointer and no report. The entry's trailing ABI is
-        ``base, count, nSamples, hawk_next, hawk_util, hawk_steps, hawk_stepsum``;
-        ``stepsum`` is an optional one-element uint64 cupy array the caller
-        has zeroed, into which the entry adds every step it executes (the
-        run's total; omitted, a null pointer and no report).
+        ``base, count, nSamples, hawk_next, hawk_util, hawk_steps, hawk_stepsum,
+        hawk_chunk``; ``stepsum`` is an optional one-element uint64 cupy
+        array the caller has zeroed, into which the entry adds every step it
+        executes (the run's total; omitted, a null pointer and no report).
+        ``chunk`` is the steps between chunk heads, a power of two from 1 to
+        2**20: shorter chunks idle a finished lane less and run more heads.
+        Any chunk leaves the same results.
 
         Refused for anything but a single, contiguous partition -- the
         only shape the persist entry's ``base``/``count`` pair means.
@@ -323,14 +339,16 @@ class BoundPlan:
             return prepared(stream)
         return self.prepare_persist(
             grid=grid, counter=counter, util=util, block=block, steps=steps,
-            stepsum=stepsum)(stream)
+            stepsum=stepsum, chunk=chunk)(stream)
 
     def prepare_persist(self, *, grid, counter, util=None, block: int = 256,
-                        steps=None, stepsum=None):
+                        steps=None, stepsum=None, chunk: int = 32):
         """:meth:`launch_persist`'s checks and argument packing done ONCE:
         returns ``call(stream=None)`` that only issues the driver launch (a
         resident runner's per-run cost). The packed block is re-made if
-        :meth:`rebind` ran since."""
+        :meth:`rebind` ran since. ``chunk`` is the steps a lane runs between two
+        fetches, passed as the entry's trailing ``hawk_chunk`` uint32 (a power of
+        two; an artifact whose persist entry predates it ignores the argument)."""
         fn = self.persist_entry()
         if fn is None:
             raise ValueError(
@@ -344,6 +362,17 @@ class BoundPlan:
                 f"contiguous partition, got {len(self._parts)}"
             )
         part = self._parts[0]
+        if int(block) <= 0 or int(block) % 32:
+            raise ValueError(
+                "eagle.plan: BoundPlan.launch_persist runs whole warps; pass a "
+                f"block size that is a multiple of 32 (got {block})"
+            )
+        chunk = int(chunk)
+        if not 1 <= chunk <= 2**20 or chunk & (chunk - 1):
+            raise ValueError(
+                "eagle.plan: BoundPlan.launch_persist takes a chunk that is a "
+                f"power of two from 1 to 2**20 (got {chunk}); 32 is the default"
+            )
         # hawk_next is a uint32 the lanes keep fetching from until they pass
         # count: count plus one overshooting fetch per lane must not wrap it
         if part.count + int(grid) * int(block) > 2**32:
@@ -360,6 +389,7 @@ class BoundPlan:
             ctypes.c_longlong(part.n_samples),
             ctypes.c_void_p(int(counter.data.ptr)), ctypes.c_void_p(util_ptr),
             ctypes.c_void_p(steps_ptr), ctypes.c_void_p(stepsum_ptr),
+            ctypes.c_uint(chunk),
         )
         grid, block = int(grid), int(block)
         cupy, ptr = self._cupy, fn.kernel.ptr

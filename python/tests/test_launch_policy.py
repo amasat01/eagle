@@ -434,56 +434,91 @@ STEP64 = dict(KERN, num_regs=43)
 STEP32 = dict(KERN, num_regs=30)
 
 
-@pytest.mark.parametrize("scalar_type, kern, n, want", [
-    # float64 on a 1:32 part: 8 warps/SM cover the chain; a large batch takes
-    # one more warp per partition once each lane has >= 30 samples
-    ("float64", STEP64, 10_000, 256), ("float64", STEP64, 60_000, 256),
-    ("float64", STEP64, 100_000, 384), ("float64", STEP64, 1_000_000, 384),
-    # float32 issues 32x faster: the chain needs 640, the fetch stalls 1408
-    ("float32", STEP32, 10_000, 640), ("float32", STEP32, 30_000, 928),
-    ("float32", STEP32, 1_000_000, 1408)])
-def test_persistent_threads_per_sm_on_the_p2000(scalar_type, kern, n, want):
-    """The rows measured on a Quadro P2000 (the rule's constants come from
-    that card's float64 and float32 sweeps)."""
+A100_FP64 = dict(P2000, multiProcessorCount=108, major=8, minor=0, singleToDoublePrecisionPerfRatio=2)
+L4_FP64 = dict(P2000, multiProcessorCount=58, major=8, minor=9, singleToDoublePrecisionPerfRatio=64,
+               maxThreadsPerMultiProcessor=1536)
+
+
+@pytest.mark.parametrize("dev, regs, n, fill, want", [
+    # A100 oscillator (36 registers): 5 warps per partition, cut by the drain limit
+    (A100_FP64, 36, 1_000_000, 0.23, 640), (A100_FP64, 36, 1_000_000, 1.0, 640),
+    (A100_FP64, 36, 100_000, 0.23, 256), (A100_FP64, 36, 270_000, 0.23, 320),
+    # a ceiling under the saturation count is taken whole, as one block
+    (A100_FP64, 166, 1_000_000, 0.23, 384), (A100_FP64, 166, 1_000_000, 1.0, 384),
+    # 1:32 and 1:64 parts saturate at two warps per partition
+    (P2000, 43, 1_000_000, 0.23, 256), (P2000, 43, 1_000_000, 1.0, 256),
+    (L4_FP64, 36, 1_000_000, 0.23, 256), (L4_FP64, 174, 1_000_000, 0.23, 256)])
+def test_persistent_threads_per_sm_rows(dev, regs, n, fill, want):
+    """The sizing rule over (device class, registers, n, step fill)."""
     from eagle._launch_policy import persistent_threads_per_sm
 
-    assert persistent_threads_per_sm(P2000, kern, n, 1000, scalar_type) == want
+    assert persistent_threads_per_sm(dev, dict(KERN, num_regs=regs), n, fill) == want
 
 
-def test_persistent_threads_follow_the_device_and_the_step_budget():
-    """A wider FP64 part needs more warps for the same step; a short step
-    budget fetches samples more often, so it needs more warps to hide it."""
+def test_persistent_launch_puts_the_a100_rk78_in_one_block():
+    from eagle._launch_policy import persistent_launch
+
+    assert persistent_launch(A100_FP64, dict(KERN, num_regs=166), 1_000_000, 0.23) == (384, 108)
+    assert persistent_launch(A100_FP64, dict(KERN, num_regs=36), 1_000_000, 0.23) == (320, 216)
+
+
+def test_the_first_run_assumes_half_the_steps_are_taken():
     from eagle._launch_policy import persistent_threads_per_sm
 
-    a100 = dict(P2000, multiProcessorCount=108, major=8, minor=0,
-                singleToDoublePrecisionPerfRatio=2)
-    big = 10 ** 9
-    assert persistent_threads_per_sm(a100, STEP64, big, 1000, "float64") == 768
-    assert persistent_threads_per_sm(a100, STEP32, big, 1000, "float32") == 896
-    assert (persistent_threads_per_sm(P2000, STEP64, big, 100, "float64")
-            > persistent_threads_per_sm(P2000, STEP64, big, 1000, "float64"))
+    for n in (50_000, 270_000, 1_000_000):
+        assert (persistent_threads_per_sm(A100_FP64, STEP64, n)
+                == persistent_threads_per_sm(A100_FP64, STEP64, n, 0.5))
+
+
+def test_the_demand_is_the_saturation_count_of_the_fp64_class():
+    from eagle._launch_policy import persistent_demand
+
+    assert persistent_demand(A100_FP64) == 640
+    assert persistent_demand(P2000) == 256
+    assert persistent_demand(L4_FP64) == 256
+
+
+def test_persistent_rules_are_safe_to_call_from_many_threads():
+    import threading
+
+    from eagle._launch_policy import persistent_launch
+
+    want = persistent_launch(A100_FP64, STEP64, 1_000_000, 0.23)
+    got, errors = [], []
+
+    def worker():
+        try:
+            got.extend(persistent_launch(A100_FP64, STEP64, 1_000_000, 0.23) for _ in range(200))
+        except Exception as exc:  # pragma: no cover
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errors and set(got) == {want}
 
 
 def test_persistent_threads_stay_within_the_registers():
     from eagle._launch_policy import persistent_threads_per_sm, resident_threads_per_sm
 
     heavy = dict(STEP32, num_regs=128)
-    got = persistent_threads_per_sm(P2000, heavy, 10 ** 9, 1000, "float32")
+    got = persistent_threads_per_sm(P2000, heavy, 10 ** 9, 1.0, "float32")
     assert got == resident_threads_per_sm(P2000, heavy) == 512
 
 
 def test_persistent_launch_splits_into_blocks_of_at_most_512():
     from eagle._launch_policy import persistent_launch
 
-    assert persistent_launch(P2000, STEP64, 1_000_000, 1000) == (384, 8)
-    assert persistent_launch(P2000, STEP32, 1_000_000, 1000, "float32") == (352, 32)
-    assert persistent_launch(P2000, STEP32, 10_000, 1000, "float32") == (320, 16)
+    assert persistent_launch(P2000, STEP64, 1_000_000, 1.0) == (256, 8)
+    assert persistent_launch(P2000, STEP32, 1_000_000, 1.0, "float32") == (512, 32)
 
 
 def test_persistent_launch_falls_back_without_device_properties():
     from eagle._launch_policy import persistent_geometry, persistent_launch
 
-    assert persistent_launch({}, {}, 10 ** 6, 1000) == persistent_geometry({}, {})
+    assert persistent_launch({}, {}, 10 ** 6) == persistent_geometry({}, {})
 
 
 # --------------------------------------------------------------------------- #
@@ -525,7 +560,7 @@ def test_persistent_launch_never_exceeds_the_blocks_that_fit():
     for name in _CC:
         dev = _dev(name, sms=108)
         for regs in (186, 188, 210):
-            block, grid = persistent_launch(dev, _kern(regs), 10 ** 6, 1000)
+            block, grid = persistent_launch(dev, _kern(regs), 10 ** 6, 1.0)
             assert block == 256, (name, regs, block)
             assert grid >= 108
             major, minor, max_threads = _CC[name]
@@ -540,3 +575,23 @@ def test_resident_threads_per_sm_is_zero_without_a_register_file():
 
     assert resident_threads_per_sm(dict(_dev("a100"), regsPerMultiprocessor=0), _kern(46)) == 0
     assert resident_threads_per_sm(_dev("a100"), _kern(0)) == 0
+
+
+def test_persistent_launch_never_emits_a_block_that_residency_refuses():
+    """Over devices, registers, batch sizes and step fills, the block fits at
+    least once per SM and the SM holds the blocks the launch asks for."""
+    from eagle import _core
+    from eagle._launch_policy import persistent_launch
+
+    devices = {"a100": A100_FP64, "p2000": P2000, "l4": L4_FP64}
+    for name, dev in devices.items():
+        major, minor = dev["major"], dev["minor"]
+        for regs in range(16, 256, 7):
+            for n in (1_000, 100_000, 270_000, 10 ** 7):
+                for fill in (0.05, 0.23, 0.5, 1.0):
+                    block, grid = persistent_launch(dev, _kern(regs), n, fill)
+                    per_sm = grid // dev["multiProcessorCount"]
+                    held = _core.resident_blocks(major, minor, 65536,
+                                                 dev["maxThreadsPerMultiProcessor"], regs, block)
+                    assert held >= 1, (name, regs, n, fill, block)
+                    assert held >= per_sm or block == 256, (name, regs, n, fill, block, grid)

@@ -78,21 +78,32 @@ inline int registerEdge(const ResidencyDevice& dev, int regs) {
     return edge > 0 && residentWarps(dev, edge) > residentWarps(dev, regs) ? edge : 0;
 }
 
-/** @brief What a compiled kernel needs per thread. */
+/** @brief What a compiled kernel needs per thread, and the code it takes. */
 struct KernelResources {
     int regs = 0;
     int localBytes = 0;
+    long long textBytes = 0;  ///< the entry's ELF .text size; 0 when not known
 };
+
+/** @brief Most a bounded recompile's code may grow over the unbounded one, in percent. */
+inline constexpr int BOUND_TEXT_GROWTH_PERCENT = 4;
 
 /**
  * @brief Keep a kernel recompiled under a register bound of @p edge only when
- *        it spills nothing it did not spill before and fits the bound.
+ *        it spills nothing it did not spill before, fits the bound, its code
+ *        grew by at most BOUND_TEXT_GROWTH_PERCENT, and (where both launches
+ *        were timed, @p freeMs and @p boundedMs above 0) it is not slower.
  *
- * "Local size unchanged" is the test, never "small spill": a bound that adds
- * even one spilled double is refused.
+ * "Local size unchanged" alone is not the test: a bound that rematerialises
+ * values instead of spilling them passes it and still issues more
+ * instructions, which the code size and the timing catch.
  */
-inline bool keepBounded(const KernelResources& free, const KernelResources& bounded, int edge) {
-    return edge > 0 && bounded.localBytes == free.localBytes && bounded.regs <= edge;
+inline bool keepBounded(const KernelResources& free, const KernelResources& bounded, int edge,
+                        double freeMs = 0.0, double boundedMs = 0.0) {
+    if (edge <= 0 || bounded.localBytes != free.localBytes || bounded.regs > edge) return false;
+    if (free.textBytes > 0 && bounded.textBytes * 100 > free.textBytes * (100 + BOUND_TEXT_GROWTH_PERCENT))
+        return false;
+    return !(freeMs > 0.0 && boundedMs > 0.0 && boundedMs > freeMs);
 }
 
 }  // namespace policy

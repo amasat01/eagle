@@ -11,8 +11,12 @@ cap and without spilling. Compile-only (no GPU): each card kernel's CUDA unit
 is built as ``eagle.deploy`` builds it, for every arch below the toolkit
 supports, and ``ptxas -v`` plus the SASS are read back:
 
-* ``rkf78_attempt_persist`` uses at most 168 registers, the oscillator's
-  ``oscillator_step_xauto_persist`` at most 40;
+* ``rkf78_attempt_persist`` and the oscillator's
+  ``oscillator_step_xauto_persist`` use at most their pinned per-arch counts
+  (CUDA 12.6), each on or below its residency step;
+* the persist entry is warp-converged: its source holds ONE
+  ``atomicAdd(hawk_next`` (the chunk head's warp-wide claim) and its
+  unrolled step loop no atomic and no warp collective;
 * no entry spills, keeps a stack frame, or touches local memory;
 * every entry's floating-point arithmetic (DFMA/DMUL/DADD/MUFU) is the
   pinned count: the bookkeeping changes, the maths never does;
@@ -42,8 +46,12 @@ _BENCH = pathlib.Path(__file__).resolve().parents[2] / "benchmarks"
 ARCHS = ("sm_61", "sm_80", "sm_89", "sm_90")
 ARITH = ("DFMA", "DMUL", "DADD", "MUFU")
 
-#: The most registers a persist entry may use: its next residency step.
-PERSIST_REGS = {"rkf78_attempt_persist": 168, "oscillator_step_xauto_persist": 40}
+#: The most registers a persist entry may use, per arch (CUDA 12.6): the
+#: warp-converged loop holds no more than the per-lane loop it replaced.
+PERSIST_REGS = {
+    "rkf78_attempt_persist": {"sm_61": 166, "sm_80": 168, "sm_89": 168, "sm_90": 168},
+    "oscillator_step_xauto_persist": {"sm_61": 40, "sm_80": 36, "sm_89": 36, "sm_90": 40},
+}
 
 #: Pinned register counts of the fused RKF7(8) entries (CUDA 12.6), +-2 allowed.
 FUSED_REGS = {
@@ -55,7 +63,8 @@ FUSED_REGS = {
 ARITH_COUNTS = {
     "oscillator_step_xauto": (32, 16, 8, 0),
     "oscillator_step_xauto_range": (80, 28, 17, 0),
-    "oscillator_step_xauto_persist": (64, 28, 22, 0),
+    # four unrolled trips and one peeled: the step's maths is the fused one
+    "oscillator_step_xauto_persist": (80, 24, 17, 0),
     "rkf78_attempt": (1247, 400, 84, 69),
     "rkf78_attempt_range": (1247, 400, 84, 69),
     "rkf78_attempt_persist": (659, 210, 58, 37),
@@ -152,7 +161,19 @@ def test_every_card_entry_was_compiled(compiled):
 @pytest.mark.parametrize("entry", sorted(PERSIST_REGS))
 def test_the_persist_entries_sit_on_their_residency_step(compiled, entry):
     for arch, row in compiled[entry].items():
-        assert row["regs"] <= PERSIST_REGS[entry], (entry, arch, row["regs"])
+        assert row["regs"] <= PERSIST_REGS[entry][arch], (entry, arch, row["regs"])
+
+
+@pytest.mark.parametrize("label", ["osc", "rk78"])
+def test_the_persist_entry_claims_once_per_chunk_head(label):
+    pytest.importorskip("hawk")
+    source = _units()[label]
+    entry = source.split("_persist(", 1)[1].split("\n}\n", 1)[0]
+    head, rest = entry.split("        do {", 1)
+    step = rest.split("        } while (", 1)[0]
+    assert entry.count("atomicAdd(hawk_next") == head.count("atomicAdd(hawk_next") == 1
+    for token in ("atomic", "__syncwarp", "__ballot", "__shfl", "__any_sync", "__all_sync"):
+        assert token not in step, (label, token)
 
 
 def test_no_entry_spills_or_touches_local_memory(compiled):

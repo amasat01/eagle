@@ -30,7 +30,6 @@ lazily on every other capturable path.
 from __future__ import annotations
 
 import contextlib
-import math
 import contextvars
 
 from . import _core
@@ -246,67 +245,44 @@ def persistent_geometry(dev, kern, *, blocks_per_sm: int = PERSISTENT_BLOCKS_PER
     return (found if found is not None else ideal_block), grid
 
 
-#: The persistent launch's threads-per-SM rule (:func:`persistent_launch`).
-#: Each SM needs enough warps per scheduler partition to cover three costs:
-#: the step's dependent arithmetic chain, the stall a lane takes each time it
-#: fetches its next sample, and -- for a small batch -- the drain at the end,
-#: when every warp runs its slowest remaining sample with few lanes live. The
-#: chain and the fetch set the saturation point from the device's issue rate
-#: (the FP32:FP64 ratio for a float64 step), the drain caps the threads a small
-#: batch can use. The constants were measured on a Quadro P2000 (cc 6.1) in
-#: float64 and float32 and checked on cells the fit never saw; re-derive them
-#: on a new GPU class from a uniform and a spread sweep of threads per SM.
-PERSIST_CHAIN_CYCLES = 4          # latency of the step's dependent op chain
-PERSIST_FETCH_CYCLES = 2000       # one sample fetch: the counter atomic + dependent loads
-PERSIST_FETCH_SPACING = 147       # steps between a warp's fetch stalls = max_steps / this
-#: Dominant-pipe issue slots per step. The kernel's own count is not known
-#: here yet, so one value per precision (an RK4 oscillator step).
-PERSIST_STEP_OPS = {"float64": 33, "float32": 66}
-#: Samples per lane below which more threads cost more in the drain than they
-#: gain in the fill.
-PERSIST_SAMPLES_PER_LANE = {"float64": 30, "float32": 4}
-#: (scheduler partitions, FP32 lanes) per SM by compute capability, where it
-#: differs from four partitions of 32 lanes.
-_SM_LAYOUT = {(6, 0): (2, 64), (7, 0): (4, 64), (7, 2): (4, 64), (7, 5): (4, 64),
-              (8, 0): (4, 64)}
+def _fp64_args(dev, scalar_type: str) -> tuple:
+    """``(major, minor, SMs, FP32:FP64 ratio, is float64)`` as the launch rules in
+    :mod:`eagle._core` take them."""
+    return (_attr(dev, "major"), _attr(dev, "minor"), _attr(dev, "multiProcessorCount"),
+            max(1, _attr(dev, "singleToDoublePrecisionPerfRatio")), scalar_type != "float32")
 
 
-def persistent_threads_per_sm(dev, kern, n: int, max_steps: int,
+def persistent_demand(dev, scalar_type: str = "float64") -> int:
+    """Threads per SM a persistent launch asks for before the batch size and the
+    registers cut it down: the count at which the step's dependent chain keeps
+    the issue pipe busy (see :func:`eagle._core.persist_saturation`). A register
+    bound is worth trying only when the entry holds fewer."""
+    major, minor, _, ratio, fp64 = _fp64_args(dev, scalar_type)
+    return _core.persist_saturation(major, minor, ratio, fp64)
+
+
+def persistent_threads_per_sm(dev, kern, n: int, fill: float = _core.PERSIST_FIRST_FILL,
                               scalar_type: str = "float64") -> int:
-    """Threads per SM for a persistent launch of ``n`` samples with a step
-    budget of ``max_steps``: ``n / (SMs * q)`` clamped between the threads
-    that cover the step's chain latency and those that also hide the
-    sample-fetch stalls (plus one spare warp per partition), never above the
-    register-limited resident threads. ``0`` when the SM count is unknown."""
-    n_sms = _attr(dev, "multiProcessorCount")
-    if n_sms <= 0:
-        return 0
-    parts, lanes = _SM_LAYOUT.get((_attr(dev, "major"), _attr(dev, "minor")), (4, 128))
-    issue = max(1, _WARP * parts // lanes)            # cycles per FP32 warp instruction
-    fp64 = scalar_type != "float32"
-    if fp64:
-        issue *= max(1, _attr(dev, "singleToDoublePrecisionPerfRatio"))
-    ops = PERSIST_STEP_OPS["float64" if fp64 else "float32"]
-    w_lat = 1 + PERSIST_CHAIN_CYCLES / issue
-    w_fetch = PERSIST_FETCH_CYCLES / (ops * issue * max(max_steps / PERSIST_FETCH_SPACING, 1.0))
-    per_warp = _WARP * parts
-    t_lat = per_warp * math.ceil(w_lat)
-    t_sat = per_warp * math.ceil(w_lat + w_fetch + 1)
-    cap = resident_threads_per_sm(dev, kern)
-    if cap > 0:
-        t_lat, t_sat = min(t_lat, cap), min(t_sat, cap)
-    q = PERSIST_SAMPLES_PER_LANE["float64" if fp64 else "float32"]
-    t = max(t_lat, min(t_sat, n / (n_sms * q)))
-    return max(_WARP, _WARP * round(t / _WARP))
+    """Threads per SM for a persistent launch of ``n`` samples whose steps fill
+    a fraction ``fill`` of the longest sample's (first run: 0.5): the
+    saturation count held between two warps per partition and the smaller of
+    the register-limited residency and the drain limit ``n * fill / (2 * SMs)``
+    (:func:`eagle._core.persist_threads_per_sm`). ``0`` when the SM count is
+    unknown."""
+    major, minor, sms, ratio, fp64 = _fp64_args(dev, scalar_type)
+    regs_per_sm, max_threads = _attr(dev, "regsPerMultiprocessor"), _attr(dev, "maxThreadsPerMultiProcessor")
+    return _core.persist_threads_per_sm(major, minor, regs_per_sm, max_threads, sms, ratio, fp64,
+                                        _attr(kern, "num_regs"), int(n), float(fill))
 
 
-def persistent_launch(dev, kern, n: int, max_steps: int, scalar_type: str = "float64"):
+def persistent_launch(dev, kern, n: int, fill: float = _core.PERSIST_FIRST_FILL,
+                      scalar_type: str = "float64"):
     """``(block, grid)`` of a persistent launch: :func:`persistent_threads_per_sm`
     split into the fewest blocks per SM of at most 512 threads (the shape
     does not matter, only the threads per SM), through
     :func:`persistent_geometry`'s register narrowing. Unknown device
     properties fall back to :func:`persistent_geometry`'s defaults."""
-    threads = persistent_threads_per_sm(dev, kern, n, max_steps, scalar_type)
+    threads = persistent_threads_per_sm(dev, kern, n, fill, scalar_type)
     if threads <= 0:
         return persistent_geometry(dev, kern)
     blocks = 1

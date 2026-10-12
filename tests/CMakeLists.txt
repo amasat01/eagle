@@ -197,6 +197,13 @@ list(REMOVE_DUPLICATES TEST_FILES)
 set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/test_Residency.cpp
   PROPERTIES COMPILE_DEFINITIONS "EAGLE_CPU_ONLY=1")
 
+# The launch rules are plain arithmetic: compiled by CXX in BOTH build modes, the
+# test_Residency.cpp recipe.
+list(APPEND TEST_FILES ${CMAKE_CURRENT_SOURCE_DIR}/test_Launch.cpp)
+list(REMOVE_DUPLICATES TEST_FILES)
+set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/test_Launch.cpp
+  PROPERTIES COMPILE_DEFINITIONS "EAGLE_CPU_ONLY=1")
+
 # The reverse-graph transposition is CUDA-free: compiled by CXX in BOTH build
 # modes, the test_GraphView.cpp recipe.
 list(APPEND TEST_FILES ${CMAKE_CURRENT_SOURCE_DIR}/test_Transpose.cpp)

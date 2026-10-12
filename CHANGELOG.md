@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+**Launch sizing and cadence.** The persistent launch puts `ceil(1 + 16 / issue)` warps per scheduler partition on each SM (5 on a full-rate FP64 part, 2 on a 1:32 or 1:64 one), held between two warps and the smaller of the register-limited residency and the drain limit `n * f / (2 * SMs)`, where `f` is the step fill read back from the previous run (0.5 on the first); a residency under the saturation count is taken whole as one block. The fused and persistent entries are now timed against each other whatever the step fill: a spread batch is where a persistent launch's refills can cost more than the fused entry's idle lanes, and only the wall says which. A banded run compacts every `2^round(log2 sqrt(2R / h))` steps, `R` being a compaction's cost in steps of a full-live launch (priced by the cost model on a device) and `h` the rate samples finish at; a launch in which nothing finished runs the longest allowed. A register bound is attached to an entry only when its launch asks for more threads per SM than it holds, and kept only when it spills nothing new, fits the edge and grows the code by at most 4 %: the oscillator persist entry on an A100 (36 registers, 640 asked, 1536 held) is no longer recompiled. `BoundPlan.entry_reports()` gained `text_bytes` and `demand`, and `Runner.launch_policy` reports the persist block and grid, chunk, fill, `R` and `k`. A persist entry is launched with a chunk length of `2^ceil(log2(m / 4))` steps held to 4..32, `m` being the previous run's mean steps. The new rules are plain C++ (`eagle/policy/Launch.h`) and bound as `eagle._core.persist_threads_per_sm`, `persist_chunk`, `band_k`, `band_rate` and `bound_demanded`.
+`BoundPlan.launch_persist`/`prepare_persist` take `chunk` (default 32), the steps
+between the warp-converged persist entry's chunk heads, a power of two from 1 to
+2**20, and refuse a block that is not a multiple of 32. `RunReport.lane_utilisation`
+is now `RunReport.slot_fill`: the steps run over the entry's chunk slots (a lane
+waiting masked for the next head is an empty slot).
+
 **Plane dtype check.** `Plan.bind` (and `rebind`, and `Plan.run` for integer and bool planes) now compares every plane's dtype with the one the artifact's sidecar declares in `arg_dtypes`. Before, an int32 array bound to an `Index` plane declared int64 was accepted and the launch read past the plane and crashed. It is now refused at bind time, naming the plane, both dtypes and the fix (`pass where as int64: where.astype(np.int64)`); nothing is cast silently, and the launch path pays nothing.
 
 ## 0.5.1

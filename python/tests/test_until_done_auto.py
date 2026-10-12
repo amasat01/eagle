@@ -156,7 +156,20 @@ def _run(auto, label, target, inp, max_steps, policy="band", **kw):
     return runner, report, {key: _get(g[key]) for key in ("x", "v", "k")}
 
 
-def _policy_sequence(finished_after, n, max_steps):
+def _band_k(rate, newly, live, k, k_max=64, k_min=ud.AUTO_K_MIN):
+    """The documented cadence, re-stated: the power of two nearest
+    ``sqrt(2R / h)`` for ``h = newly / (live * k)``, held to ``[k_min, k_max]``;
+    no samples finishing means the longest launch."""
+    if newly <= 0:
+        return k_max
+    e = (2.0 * rate * live * k / newly) ** 0.5
+    p = 1
+    while p * 2 ** 0.5 <= e:
+        p *= 2
+    return min(max(p, k_min), k_max)
+
+
+def _policy_sequence(finished_after, n, max_steps, rate=ud.AUTO_RATE0):
     """The k sequence, re-stated from the documented rule (independent of eagle's
     code): ``finished_after(k)`` launches ``k`` steps and returns the counter."""
     seq, k, fin_at, done = [], ud.AUTO_K0, finished_after(None), 0
@@ -167,10 +180,7 @@ def _policy_sequence(finished_after, n, max_steps):
         live, newly = n - fin, fin - fin_at
         done += word
         fin_at = fin
-        if newly * 16 < live:
-            k = min(2 * k, 64)
-        elif newly * 4 > live:
-            k = max(k // 2, ud.AUTO_K_MIN)
+        k = _band_k(rate, newly, live, k)
         word = min(k, max_steps - done)
     return seq
 
@@ -258,7 +268,7 @@ def _map_skip(auto, target, label, n):
     return _AUTO["steps_max"] if cap and n <= cap else None
 
 
-def _by_hand(auto, target, inp, max_steps, *, pinned_k_max=None):
+def _by_hand(auto, target, inp, max_steps, *, pinned_k_max=None, rate=ud.AUTO_RATE0):
     """The plain-kind auto artifact driven launch by launch with the policy's
     k sequence: the planes and the sequence. ``pinned_k_max`` (device rule
     (iii)) switches the SEQUENCE oracle to :func:`_pinned_sequence` -- the
@@ -284,7 +294,7 @@ def _by_hand(auto, target, inp, max_steps, *, pinned_k_max=None):
     if pinned_k_max is not None:
         seq = _pinned_sequence(finished_after, n, max_steps, pinned_k_max)
     else:
-        seq = _policy_sequence(finished_after, n, max_steps)
+        seq = _policy_sequence(finished_after, n, max_steps, rate)
     return {key: _get(g[key]) for key in ("x", "v", "k")}, seq
 
 
@@ -359,7 +369,7 @@ def test_the_default_auto_run_does_not_reorder(auto):
 def test_auto_runs_are_bit_identical(auto, label, which, target, n):
     _need(auto, (label, target))
     inp = _batch(n, which)
-    _, report, got = _run(auto, label, target, inp, 10 * _S)
+    runner, report, got = _run(auto, label, target, inp, 10 * _S)
     assert report.done and report.finished == n
     _steps_bound(report, got)
     if target == "host":
@@ -369,7 +379,8 @@ def test_auto_runs_are_bit_identical(auto, label, which, target, n):
     else:
         fast = _runner_fast_mode(auto, target, label, n)
         want, seq = _by_hand(auto, target, inp, 10 * _S,
-                             pinned_k_max=_map_skip(auto, target, label, n))
+                             pinned_k_max=_map_skip(auto, target, label, n),
+                             rate=round(runner._rate * ud.RATE_SCALE) / ud.RATE_SCALE)
         if fast is not None:
             # One launch of the whole budget -- no band, no policy kernel,
             # so _by_hand's ramped/pinned k-SEQUENCE oracle does not apply
@@ -387,7 +398,7 @@ def test_auto_runs_are_bit_identical(auto, label, which, target, n):
 # ``_fast_mode_for`` would pick): one launch, no graph, no policy kernel --
 # eagle.until_done's forced persist/fused_one arm (perf_card.py, rk78_card.py).
 # Bit identity against the one-step oracle, the already-finished and
-# continuing-run shortcuts, the lane-utilisation opt-in switch, and the
+# continuing-run shortcuts, the slot-fill opt-in switch, and the
 # per-run sync budget.
 # --------------------------------------------------------------------------- #
 @pytest.mark.gpu
@@ -609,22 +620,22 @@ def test_fast_mode_rejects_an_unknown_value(auto, bad):
 
 
 @pytest.mark.gpu
-def test_fast_path_lane_utilisation_is_off_unless_asked(auto):
-    """The persist entry's lane-utilisation counter (2 same-address
-    64-bit atomics per lane per launch) stays off -- ``RunReport.lane_utilisation
-    is None`` -- unless the internal ``_lane_utilisation`` switch asks for it
+def test_fast_path_slot_fill_is_off_unless_asked(auto):
+    """The persist entry's slot-fill counter (a same-address 64-bit
+    atomic per warp per chunk) stays off -- ``RunReport.slot_fill
+    is None`` -- unless the internal ``_slot_fill`` switch asks for it
     (the same convention ``_fast_mode`` already uses)."""
     _need(auto, ("plain", "device"))
     inp = _batch(2000, "uniform")
     _, off, _ = _run(auto, "plain", "device", inp, 10 * _S, _fast_mode="persist")
-    assert off.lane_utilisation is None
+    assert off.slot_fill is None
     _, on, _ = _run(auto, "plain", "device", inp, 10 * _S, _fast_mode="persist",
-                    _lane_utilisation=True)
-    assert on.lane_utilisation is not None and 0 < on.lane_utilisation <= 1
+                    _slot_fill=True)
+    assert on.slot_fill is not None and 0 < on.slot_fill <= 1
     # fused_one has no persist entry to count lanes on: the switch is a no-op
     _, fused, _ = _run(auto, "plain", "device", inp, 10 * _S, _fast_mode="fused_one",
-                       _lane_utilisation=True)
-    assert fused.lane_utilisation is None
+                       _slot_fill=True)
+    assert fused.slot_fill is None
 
 
 @pytest.mark.gpu
@@ -929,7 +940,7 @@ def _steps_bound(report, got):
 @pytest.mark.parametrize("target", _TARGETS)
 def test_steps_is_the_loop_s_and_exact_only_when_it_says_so(auto, target):
     """A uniform batch under the band climbs past S inside its last launch
-    (16 + 32 + 64 * 4 = 304 > 300): ``steps`` overshoots the longest sample
+    (16 + 64 * 5 = 336 > 300): ``steps`` overshoots the longest sample
     and is NOT exact. The measured host run of the same batch sweeps one step
     per launch: ``steps == 300``, exact."""
     _need(auto, ("plain", target))
@@ -942,7 +953,9 @@ def test_steps_is_the_loop_s_and_exact_only_when_it_says_so(auto, target):
         assert band.done and band.steps == _S and band.exact_steps
         assert band.launches_by_k == {10 * _S: 1}
     else:
-        assert band.done and band.steps == 304 and not band.exact_steps
+        # no sample finishes in the first launch, so the cadence goes straight to
+        # the longest launch: 16 + 5 * 64
+        assert band.done and band.steps == 336 and not band.exact_steps
     assert int(np.max(got["k"])) == _S
     _steps_bound(band, got)
     if target == "host":
@@ -1123,7 +1136,9 @@ def _band_rows(auto, target):
         assert half.compactions == 0
         assert 64 in half.launches_by_k and not ({8, 16, 32} & set(half.launches_by_k))
     else:
-        assert half.launches_by_k.get(8) == 1
+        # half the batch finishes in the first launch (16 steps is then the
+        # cadence R=8 asks for); once nothing finishes it runs the longest launch
+        assert half.launches_by_k.get(16, 0) >= 2 and 8 not in half.launches_by_k
         assert max(half.launches_by_k) == 64
     assert sum(k * c for k, c in half.launches_by_k.items()) == half.steps
     assert runner.policy["steps_done"] == half.steps and runner.policy["go"] == 0
@@ -1146,7 +1161,7 @@ def test_a_constant_k_policy_turns_the_band_red(auto, target, monkeypatch):
     _need(auto, ("map", target))
     monkeypatch.setattr(
         ud, "_next_k",
-        lambda k, newly, live, k_max, k_min=ud.AUTO_K_MIN: ud.AUTO_K0)
+        lambda k, newly, live, k_max, k_min=ud.AUTO_K_MIN, rate=0: ud.AUTO_K0)
     monkeypatch.setattr(ud, "_BAND_SRC", f"k_next = {ud.AUTO_K0};")
     with pytest.raises(AssertionError):
         _band_rows(auto, target)
@@ -1157,8 +1172,11 @@ def test_a_constant_k_policy_turns_the_band_red(auto, target, monkeypatch):
 # --------------------------------------------------------------------------- #
 @pytest.mark.gpu
 @pytest.mark.parametrize("which", ["spread", "half", "grouped"])
-def test_host_and_device_take_the_same_path(auto, which):
+def test_host_and_device_take_the_same_path(auto, which, monkeypatch):
     _need(auto, ("map", "device"))
+    # the device prices R from its cost model, the host uses the default; the
+    # twin kernels agree when both are given the same R
+    monkeypatch.setattr(ud.Runner, "_band_rate", lambda self: ud.AUTO_RATE0)
     # Comfortably ABOVE the no-active-set-rebuild rule's capacity: below it the device
     # intentionally diverges from the host (skips compaction, pins K), which
     # is this item's whole point, not a bug this parity check should catch.
@@ -1570,8 +1588,8 @@ def test_fast_entry_probe_pins_persist_without_a_range_entry(auto, monkeypatch):
 
 # --------------------------------------------------------------------------- #
 # The step-fill prior: the first persist run counts every lane's executed steps
-# (utilisation counter on for that run only), f = sum(steps) / (n * longest);
-# below FUSED_MIN_STEP_RATIO the fused entry is never timed.
+# (slot-fill counter on for that run only), f = sum(steps) / (n * longest);
+# the fused entry is timed against persist whatever f is.
 # --------------------------------------------------------------------------- #
 def _prior_runner(auto, which, n=None, **kw):
     """A device runner over ``n`` > capacity samples of batch ``which`` plus a
@@ -1621,15 +1639,18 @@ def test_entry_prior_is_the_step_sum(auto):
 
 
 @pytest.mark.gpu
-def test_entry_prior_pins_persist_on_a_spread_batch(auto, monkeypatch):
+def test_entry_prior_still_probes_a_spread_batch(auto, monkeypatch):
+    """A low step fill (a spread batch) no longer keeps the run on persist
+    unmeasured: the fused entry is timed, and the faster entry settles."""
     runner, _, rerun = _prior_runner(auto, "spread")
     seen = _spy_util(monkeypatch, runner)
     reports = [rerun() for _ in range(4)]
-    assert [r.mode for r in reports] == ["persist"] * 4
-    assert not any(r.probe for r in reports)
-    assert set(runner._fast_wall) == {"persist"}
-    assert runner._fast_prior < ud.FUSED_MIN_STEP_RATIO
-    assert seen == [False] * 4  # util is never on unless asked
+    assert [r.mode for r in reports][:2] == ["persist", "fused_one"]
+    assert [r.probe for r in reports][:2] == [False, True]
+    assert set(runner._fast_wall) == {"persist", "fused_one"}
+    assert runner._fast_prior < 0.6
+    assert reports[3].mode == runner._fast_pick and not reports[3].probe
+    assert not any(seen)  # util is never on unless asked
 
 
 @pytest.mark.gpu
@@ -1648,13 +1669,12 @@ def test_entry_prior_reevaluates_on_a_new_readback(auto):
     modes = [rerun().mode for _ in range(2)]
     assert modes == ["persist", "fused_one"] and runner._fast_prior == 1.0
     # a spread batch with a shorter longest sample: a new readback, so the
-    # prior is re-measured and now pins persist
+    # prior is re-measured and both entries are timed again
     spread = np.minimum(_batch(runner.n, "spread")["nstop"], _S // 2)
     reports = [rerun(spread) for _ in range(4)]
-    assert runner._fast_prior < ud.FUSED_MIN_STEP_RATIO
-    assert [r.mode for r in reports[-2:]] == ["persist"] * 2
-    assert not any(r.probe for r in reports[-2:])
-    assert set(runner._fast_wall) == {"persist"}
+    assert runner._fast_prior < 0.6
+    assert any(r.probe for r in reports[:3])
+    assert set(runner._fast_wall) == {"persist", "fused_one"}
     # and back: the uniform readback flips f to 1.0 and the probe returns
     back = [rerun(inp["nstop"]) for _ in range(4)]
     assert runner._fast_prior == 1.0
@@ -1662,27 +1682,27 @@ def test_entry_prior_reevaluates_on_a_new_readback(auto):
 
 
 @pytest.mark.gpu
-def test_entry_prior_keeps_a_heavy_adaptive_kernel_on_persist(auto):
+def test_entry_prior_probes_a_half_stopping_batch(auto):
     # half the samples stop at step 1, the rest run _S: f ~ 0.5
     runner, _, rerun = _prior_runner(auto, "half")
-    reports = [rerun() for _ in range(4)]
-    assert 0.4 < runner._fast_prior < ud.FUSED_MIN_STEP_RATIO
-    assert [r.mode for r in reports] == ["persist"] * 4
-    assert not any(r.probe for r in reports)
+    reports = [rerun() for _ in range(3)]
+    assert 0.4 < runner._fast_prior < 0.6
+    assert [r.mode for r in reports][:2] == ["persist", "fused_one"]
+    assert [r.probe for r in reports][:2] == [False, True]
 
 
 @pytest.mark.gpu
-def test_entry_prior_keeps_the_utilisation_report_opt_in(auto, monkeypatch):
+def test_entry_prior_keeps_the_slot_fill_report_opt_in(auto, monkeypatch):
     runner, _, rerun = _prior_runner(auto, "spread")
     seen = _spy_util(monkeypatch, runner)
     reports = [rerun() for _ in range(3)]
-    assert all(r.lane_utilisation is None for r in reports)
-    assert not runner._fast_util_on and seen == [False] * 3
-    # asked for, the report is filled on every run and the counter stays on
-    asked, _, again = _prior_runner(auto, "spread", _lane_utilisation=True)
-    reports = [again() for _ in range(3)]
-    assert all(r.lane_utilisation is not None and 0 < r.lane_utilisation <= 1
-               for r in reports)
+    assert all(r.slot_fill is None for r in reports)
+    assert not runner._fast_util_on and not any(seen)
+    # asked for, the report is filled on every persist run and the counter stays on
+    asked, _, again = _prior_runner(auto, "spread", _slot_fill=True)
+    reports = [r for r in (again() for _ in range(3)) if r.mode == "persist"]
+    assert reports and all(r.slot_fill is not None and 0 < r.slot_fill <= 1
+                           for r in reports)
     assert asked._fast_util_on
 
 
@@ -1755,45 +1775,29 @@ def test_device_reset_launches_no_fill_kernel(auto, monkeypatch):
     assert not bool(runner.terminated.any()) and int(runner.finished[0]) == 0
 
 
-def _ops_runner(auto, monkeypatch, step_ops):
-    """A uniform ``_prior_runner`` whose plugin reports ``step_ops`` (``None``:
-    absent), as ``(runner, rerun, n)``."""
-    _need(auto, ("plain", "device"))
-    plugin = auto[("plain", "device")].plugin
-    if step_ops is None:
-        monkeypatch.delattr(plugin, "step_ops", raising=False)
-    else:
-        monkeypatch.setattr(plugin, "step_ops", step_ops, raising=False)
-    runner, inp, rerun = _prior_runner(auto, "uniform")
-    return runner, rerun, len(inp["nstop"])
-
-
 @pytest.mark.gpu
-@pytest.mark.parametrize("step_ops, bound", [(None, 0.6), (40, 0.7), (1203, 1 - 12 / 1203)])
-def test_entry_prior_bound_follows_step_ops(auto, monkeypatch, step_ops, bound):
-    runner, _, _ = _ops_runner(auto, monkeypatch, step_ops)
-    assert runner._fast_ratio == pytest.approx(bound)
+def test_the_probe_report_carries_the_launch_policy(auto):
+    """Registers, local memory, code size, bound and demanded threads per
+    entry; block, grid, chunk, fill, R and k for the runner."""
+    runner, _, rerun = _prior_runner(auto, "spread")
+    for _ in range(3):
+        rerun()
+    persist = next(r for r in runner.step.entry_reports() if r.name.endswith("_persist"))
+    assert persist.regs > 0 and persist.demand > 0 and persist.text_bytes >= 0
+    assert persist.bounded is False or persist.edge > 0
+    # an entry that fits what the launch asks for is never bounded
+    if persist.resident_threads >= persist.demand:
+        assert not persist.bounded
+    # the driver's JIT reports a code size for the entry, plain and under a cap
+    from eagle import _bounded
 
-
-@pytest.mark.gpu
-def test_entry_prior_heavy_step_skips_the_probe_at_f_09(auto, monkeypatch):
-    # 20% of the samples stop at half the budget: f = 0.9
-    runner, rerun, n = _ops_runner(auto, monkeypatch, 1203)
-    nstop = np.where(np.arange(n) % 5 == 0, _S // 2, _S).astype(float)
-    reports = [rerun(nstop) for _ in range(4)]
-    assert 0.85 < runner._fast_prior < 0.95
-    assert [r.mode for r in reports] == ["persist"] * 4
-    assert not any(r.probe for r in reports)
-    assert set(runner._fast_wall) == {"persist"}
-
-
-@pytest.mark.gpu
-def test_entry_prior_light_step_still_probes_at_f_09(auto, monkeypatch):
-    runner, rerun, n = _ops_runner(auto, monkeypatch, 40)
-    nstop = np.where(np.arange(n) % 5 == 0, _S // 2, _S).astype(float)
-    reports = [rerun(nstop) for _ in range(3)]
-    assert [r.mode for r in reports][:2] == ["persist", "fused_one"]
-    assert reports[1].probe
+    loaded = runner.step.plan.plugin._keepalive[-1]
+    name = f"{runner.step.plan.plugin.name}_persist"
+    assert _bounded._text_bytes(loaded, name, 0) > 0
+    assert _bounded._text_bytes(loaded, name, 32) > 0
+    report = runner.launch_policy
+    assert report["block"] > 0 and report["grid"] > 0 and 0 < report["fill"] <= 1.0
+    assert report["rate"] > 0
 
 
 @pytest.mark.gpu
@@ -1827,23 +1831,25 @@ def test_entry_prior_is_known_after_a_fused_one_run(auto):
 
 
 @pytest.mark.gpu
-def test_entry_prior_stale_after_a_same_readback_change_moves_to_persist(auto):
+def test_a_same_readback_fill_change_resizes_without_timing_again(auto):
+    """Half the samples stop at step 1: the same longest lane and finished
+    count, so only f changes. It is seen on the next run that sums its steps
+    (within STEP_FILL_EVERY runs) and re-sizes the persist launch; the settled
+    pick and its walls stand, with no probe."""
     runner, inp, rerun = _prior_runner(auto, "uniform")
     for _ in range(4):
         rerun()
-    assert set(runner._fast_wall) == {"persist", "fused_one"}
-    # half the samples stop at step 1: the same longest lane and finished
-    # count, so only f changes
-    # count, so only f changes -- seen on the next run that sums its steps,
-    # within STEP_FILL_EVERY runs, and persist with no probe from then on
+    pick, wall = runner._fast_pick, dict(runner._fast_wall)
+    assert set(wall) == {"persist", "fused_one"}
     half = np.where(np.arange(runner.n) % 2 == 0, 1.0, float(_S))
     reports, priors = [], []
     for _ in range(2 * ud.STEP_FILL_EVERY):
         reports.append(rerun(half))
         priors.append(runner._fast_prior)
-    seen = next(i for i, f in enumerate(priors) if f < ud.FUSED_MIN_STEP_RATIO)
+    seen = next(i for i, f in enumerate(priors) if f < 0.6)
     assert seen < ud.STEP_FILL_EVERY
-    assert all(r.mode == "persist" and not r.probe for r in reports[seen + 1:])
+    assert runner._fast_fill == priors[-1] and runner._fast_pick == pick
+    assert not any(r.probe for r in reports)
 
 
 @pytest.mark.gpu
@@ -1930,10 +1936,10 @@ def test_register_bound_is_spill_free_and_changes_no_bits(auto, monkeypatch, mod
         trial = _bounded._load_bounded(loaded, f"{name}_{suffix}", r.edge)
         fits = (trial is not None and trial.attributes["num_regs"] <= r.edge
                 and trial.attributes["local_size_bytes"] == plain["local_size_bytes"])
-        assert r.bounded == fits, (suffix, r)
+        assert fits or not r.bounded, (suffix, r)
         if r.bounded:
             assert r.regs <= r.edge and r.local_bytes == plain["local_size_bytes"]
-    monkeypatch.setattr(_bounded, "entry", lambda loaded, name, plain: plain)
+    monkeypatch.setattr(_bounded, "entry", lambda loaded, name, plain, demand=None: plain)
     _, rep2, plain_run = _run(auto, "plain", "device", inp, 10 * _S, _fast_mode=mode)
     assert rep2.done
     for key in ("x", "v", "k"):
