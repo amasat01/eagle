@@ -17,6 +17,8 @@ compaction
 : Shrinking a per-sample array to just the samples that are still active, so later kernels launch over a smaller count; also called stream compaction.
 dual-mode
 : A source file that compiles both against CUDA and as plain C++ with OpenMP, with no change to the calling code.
+event refinement
+: Locating a stop *inside* the step where its rule fires (``events="refine"``), so the stop time is a real number with a derivative instead of a multiple of the step; see {ref}`autodiff-events`.
 generation
 : Which launch a Record belongs to: 1 for the first launch, 2 for the second, and so on. It is how a reverse knows its Record is still the newest one.
 gradient
@@ -25,6 +27,8 @@ graph
 : A recorded, dependency-ordered set of launches (a CUDA graph on the GPU, a host executor on the CPU) that is built once and replayed many times.
 graph capture
 : Recording the kernel launches issued on a stream, instead of running them, into a graph that can be replayed.
+guard
+: The cell a conditional node reads: an {func}`eagle.skippable` runs its step only while the cell is non-zero. A recorded graph saves the value each launch saw, and the reverse replays it; see {ref}`autodiff-conditionals`.
 lane
 : One sample's slot inside a packet on the CPU side.
 launch
@@ -33,8 +37,12 @@ Launcher (C++)
 : ``eagle::cuda::Launcher``, the instantiated, replayable form of a graph; calling its ``launch()`` repeats the recorded work with no per-launch setup. Not the same as the family's *launcher* protocol (see the family glossary).
 mask
 : A per-packet record of which lanes are still active, so inactive lanes (or whole packets) can be skipped.
+memory budget
+: The bytes a recorded run's reverse may hold (``memory_budget=``). Over it, the reverse runs the batch in passes with the same bits; see {ref}`autodiff-budget`.
 packet
 : A fixed-size group of samples that the host launcher processes together with one SIMD instruction stream.
+phase
+: One continuous piece of a hybrid trajectory: a refined run made a node of a Graph by {func}`eagle.diff.phase`, with a reset kernel between pieces; see {ref}`autodiff-events`.
 plan
 : In eagle, a plan is what `eagle.deploy` returns: a kernel built to run where its data lives, ready to launch. The general meaning, shared by the family, is in the [family glossary](https://amasat01.github.io/raptor/content/glossary.html#term-plan).
 Record
