@@ -32,10 +32,24 @@ jobs:
         with:
           path: eagle
 
-      # aether as a sibling checkout (amasat01/aether, main).
+      # aether as a sibling checkout (amasat01/aether, at this branch name if it has one, else main).
+      # companion aether: same-named branch if it exists there, else main
+      - id: ref_aether
+        env:
+          COMPANION_REPO: aether
+          BRANCH_NAME: ${{ github.head_ref || github.ref_name }}
+          GH_TOKEN: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
+        run: |
+          auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "${GH_TOKEN:-none}" | base64 -w0)"
+          [ -n "${GH_TOKEN:-}" ] || auth="X-Unauthenticated: 1"
+          found="$(git -c http.extraHeader="$auth" ls-remote --heads "https://github.com/amasat01/${COMPANION_REPO}" "refs/heads/${BRANCH_NAME}" | awk '{print $2}')"
+          if [ "$found" = "refs/heads/${BRANCH_NAME}" ]; then ref="$BRANCH_NAME"; else ref=main; fi
+          echo "companion ${COMPANION_REPO} @ ${ref}"
+          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v7
         with:
           repository: amasat01/aether
+          ref: ${{ steps.ref_aether.outputs.ref }}
           path: aether
           token: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
 
@@ -99,9 +113,23 @@ jobs:
         with:
           path: eagle
 
+      # companion aether: same-named branch if it exists there, else main
+      - id: ref_aether
+        env:
+          COMPANION_REPO: aether
+          BRANCH_NAME: ${{ github.head_ref || github.ref_name }}
+          GH_TOKEN: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
+        run: |
+          auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "${GH_TOKEN:-none}" | base64 -w0)"
+          [ -n "${GH_TOKEN:-}" ] || auth="X-Unauthenticated: 1"
+          found="$(git -c http.extraHeader="$auth" ls-remote --heads "https://github.com/amasat01/${COMPANION_REPO}" "refs/heads/${BRANCH_NAME}" | awk '{print $2}')"
+          if [ "$found" = "refs/heads/${BRANCH_NAME}" ]; then ref="$BRANCH_NAME"; else ref=main; fi
+          echo "companion ${COMPANION_REPO} @ ${ref}"
+          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v7
         with:
           repository: amasat01/aether
+          ref: ${{ steps.ref_aether.outputs.ref }}
           path: aether
           token: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
 
@@ -189,15 +217,43 @@ jobs:
         with:
           path: eagle
 
+      # companion aether: same-named branch if it exists there, else main
+      - id: ref_aether
+        env:
+          COMPANION_REPO: aether
+          BRANCH_NAME: ${{ github.head_ref || github.ref_name }}
+          GH_TOKEN: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
+        run: |
+          auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "${GH_TOKEN:-none}" | base64 -w0)"
+          [ -n "${GH_TOKEN:-}" ] || auth="X-Unauthenticated: 1"
+          found="$(git -c http.extraHeader="$auth" ls-remote --heads "https://github.com/amasat01/${COMPANION_REPO}" "refs/heads/${BRANCH_NAME}" | awk '{print $2}')"
+          if [ "$found" = "refs/heads/${BRANCH_NAME}" ]; then ref="$BRANCH_NAME"; else ref=main; fi
+          echo "companion ${COMPANION_REPO} @ ${ref}"
+          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v7
         with:
           repository: amasat01/aether
+          ref: ${{ steps.ref_aether.outputs.ref }}
           path: aether
           token: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
 
+      # companion raptor: same-named branch if it exists there, else main
+      - id: ref_raptor
+        env:
+          COMPANION_REPO: raptor
+          BRANCH_NAME: ${{ github.head_ref || github.ref_name }}
+          GH_TOKEN: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
+        run: |
+          auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "${GH_TOKEN:-none}" | base64 -w0)"
+          [ -n "${GH_TOKEN:-}" ] || auth="X-Unauthenticated: 1"
+          found="$(git -c http.extraHeader="$auth" ls-remote --heads "https://github.com/amasat01/${COMPANION_REPO}" "refs/heads/${BRANCH_NAME}" | awk '{print $2}')"
+          if [ "$found" = "refs/heads/${BRANCH_NAME}" ]; then ref="$BRANCH_NAME"; else ref=main; fi
+          echo "companion ${COMPANION_REPO} @ ${ref}"
+          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v7
         with:
           repository: amasat01/raptor
+          ref: ${{ steps.ref_raptor.outputs.ref }}
           path: raptor
           token: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
 
@@ -254,15 +310,43 @@ jobs:
         with:
           path: eagle
 
+      # companion aether: same-named branch if it exists there, else main
+      - id: ref_aether
+        env:
+          COMPANION_REPO: aether
+          BRANCH_NAME: ${{ github.head_ref || github.ref_name }}
+          GH_TOKEN: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
+        run: |
+          auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "${GH_TOKEN:-none}" | base64 -w0)"
+          [ -n "${GH_TOKEN:-}" ] || auth="X-Unauthenticated: 1"
+          found="$(git -c http.extraHeader="$auth" ls-remote --heads "https://github.com/amasat01/${COMPANION_REPO}" "refs/heads/${BRANCH_NAME}" | awk '{print $2}')"
+          if [ "$found" = "refs/heads/${BRANCH_NAME}" ]; then ref="$BRANCH_NAME"; else ref=main; fi
+          echo "companion ${COMPANION_REPO} @ ${ref}"
+          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v7
         with:
           repository: amasat01/aether
+          ref: ${{ steps.ref_aether.outputs.ref }}
           path: aether
           token: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
 
+      # companion raptor: same-named branch if it exists there, else main
+      - id: ref_raptor
+        env:
+          COMPANION_REPO: raptor
+          BRANCH_NAME: ${{ github.head_ref || github.ref_name }}
+          GH_TOKEN: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
+        run: |
+          auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "${GH_TOKEN:-none}" | base64 -w0)"
+          [ -n "${GH_TOKEN:-}" ] || auth="X-Unauthenticated: 1"
+          found="$(git -c http.extraHeader="$auth" ls-remote --heads "https://github.com/amasat01/${COMPANION_REPO}" "refs/heads/${BRANCH_NAME}" | awk '{print $2}')"
+          if [ "$found" = "refs/heads/${BRANCH_NAME}" ]; then ref="$BRANCH_NAME"; else ref=main; fi
+          echo "companion ${COMPANION_REPO} @ ${ref}"
+          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v7
         with:
           repository: amasat01/raptor
+          ref: ${{ steps.ref_raptor.outputs.ref }}
           path: raptor
           token: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
 
@@ -368,15 +452,43 @@ jobs:
         with:
           path: eagle
 
+      # companion aether: same-named branch if it exists there, else main
+      - id: ref_aether
+        env:
+          COMPANION_REPO: aether
+          BRANCH_NAME: ${{ github.head_ref || github.ref_name }}
+          GH_TOKEN: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
+        run: |
+          auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "${GH_TOKEN:-none}" | base64 -w0)"
+          [ -n "${GH_TOKEN:-}" ] || auth="X-Unauthenticated: 1"
+          found="$(git -c http.extraHeader="$auth" ls-remote --heads "https://github.com/amasat01/${COMPANION_REPO}" "refs/heads/${BRANCH_NAME}" | awk '{print $2}')"
+          if [ "$found" = "refs/heads/${BRANCH_NAME}" ]; then ref="$BRANCH_NAME"; else ref=main; fi
+          echo "companion ${COMPANION_REPO} @ ${ref}"
+          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v7
         with:
           repository: amasat01/aether
+          ref: ${{ steps.ref_aether.outputs.ref }}
           path: aether
           token: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
 
+      # companion raptor: same-named branch if it exists there, else main
+      - id: ref_raptor
+        env:
+          COMPANION_REPO: raptor
+          BRANCH_NAME: ${{ github.head_ref || github.ref_name }}
+          GH_TOKEN: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
+        run: |
+          auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "${GH_TOKEN:-none}" | base64 -w0)"
+          [ -n "${GH_TOKEN:-}" ] || auth="X-Unauthenticated: 1"
+          found="$(git -c http.extraHeader="$auth" ls-remote --heads "https://github.com/amasat01/${COMPANION_REPO}" "refs/heads/${BRANCH_NAME}" | awk '{print $2}')"
+          if [ "$found" = "refs/heads/${BRANCH_NAME}" ]; then ref="$BRANCH_NAME"; else ref=main; fi
+          echo "companion ${COMPANION_REPO} @ ${ref}"
+          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v7
         with:
           repository: amasat01/raptor
+          ref: ${{ steps.ref_raptor.outputs.ref }}
           path: raptor
           token: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
 
@@ -485,15 +597,43 @@ jobs:
         with:
           path: eagle
 
+      # companion aether: same-named branch if it exists there, else main
+      - id: ref_aether
+        env:
+          COMPANION_REPO: aether
+          BRANCH_NAME: ${{ github.head_ref || github.ref_name }}
+          GH_TOKEN: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
+        run: |
+          auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "${GH_TOKEN:-none}" | base64 -w0)"
+          [ -n "${GH_TOKEN:-}" ] || auth="X-Unauthenticated: 1"
+          found="$(git -c http.extraHeader="$auth" ls-remote --heads "https://github.com/amasat01/${COMPANION_REPO}" "refs/heads/${BRANCH_NAME}" | awk '{print $2}')"
+          if [ "$found" = "refs/heads/${BRANCH_NAME}" ]; then ref="$BRANCH_NAME"; else ref=main; fi
+          echo "companion ${COMPANION_REPO} @ ${ref}"
+          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v7
         with:
           repository: amasat01/aether
+          ref: ${{ steps.ref_aether.outputs.ref }}
           path: aether
           token: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
 
+      # companion raptor: same-named branch if it exists there, else main
+      - id: ref_raptor
+        env:
+          COMPANION_REPO: raptor
+          BRANCH_NAME: ${{ github.head_ref || github.ref_name }}
+          GH_TOKEN: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
+        run: |
+          auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "${GH_TOKEN:-none}" | base64 -w0)"
+          [ -n "${GH_TOKEN:-}" ] || auth="X-Unauthenticated: 1"
+          found="$(git -c http.extraHeader="$auth" ls-remote --heads "https://github.com/amasat01/${COMPANION_REPO}" "refs/heads/${BRANCH_NAME}" | awk '{print $2}')"
+          if [ "$found" = "refs/heads/${BRANCH_NAME}" ]; then ref="$BRANCH_NAME"; else ref=main; fi
+          echo "companion ${COMPANION_REPO} @ ${ref}"
+          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v7
         with:
           repository: amasat01/raptor
+          ref: ${{ steps.ref_raptor.outputs.ref }}
           path: raptor
           token: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
 
