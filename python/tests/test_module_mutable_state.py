@@ -9,9 +9,12 @@ call. ``__all__`` is exempt. The scan reads source only (no import)."""
 from __future__ import annotations
 
 import ast
+import importlib.util
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent / "eagle"
+# The package the suite runs against (the source tree, or an installed wheel when
+# the tests are copied elsewhere), located without importing it.
+ROOT = Path(importlib.util.find_spec("eagle").origin).resolve().parent
 
 MUTABLE_CALLS = {"dict", "list", "set", "bytearray", "defaultdict", "OrderedDict", "deque",
                  "Counter", "ChainMap", "WeakSet", "WeakKeyDictionary", "WeakValueDictionary",
@@ -82,7 +85,9 @@ def _module_level(body):
 
 def found_mutables() -> set:
     found = set()
-    for path in sorted(ROOT.rglob("*.py")):
+    paths = sorted(ROOT.rglob("*.py"))
+    assert len(paths) > 20, f"the scan found {len(paths)} modules under {ROOT}"
+    for path in paths:
         rel = path.relative_to(ROOT).as_posix()
         for node in _module_level(ast.parse(path.read_text()).body):
             if isinstance(node, ast.Assign):
