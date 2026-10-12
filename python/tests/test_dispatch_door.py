@@ -254,6 +254,62 @@ def test_two_threads_with_two_simulations_each_get_the_right_answer(reference):
         np.testing.assert_array_equal(got.x, reference.x)
 
 
+@pytest.mark.parametrize("dispatch", [None, "segmented"])
+def test_n_threads_n_simulations_equal_the_serial_run_bit_for_bit(dispatch, reference):
+    threads_n = 6
+    out, errors = [None] * threads_n, []
+    start = threading.Barrier(threads_n)
+
+    def work(i):
+        try:
+            start.wait()
+            out[i] = run(walker, rare_classes(), dispatch=dispatch)
+        except Exception as exc:        # noqa: BLE001 - reported below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=work, args=(i,)) for i in range(threads_n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(120)
+    assert not errors
+    for got in out:
+        np.testing.assert_array_equal(got.x, reference.x)
+        np.testing.assert_array_equal(got.t, reference.t)
+
+
+def test_the_calibration_timer_runs_on_distinct_bound_plans_in_many_threads():
+    from eagle.plan import auto
+
+    plan = auto(plain).select({"x": np.zeros(64)})
+    spec = plan.plugin.arg_spec
+    threads_n, reps = 6, 5
+    bound, xs, errors = [], [], []
+    for _ in range(threads_n):
+        x, t, done = np.zeros(64), np.zeros(64), np.zeros(64, dtype=bool)
+        extra = {nm: np.zeros(1, dtype=np.int64 if nm == "fused_steps" else np.int32)
+                 for role, nm in spec if role == "lookup"}
+        bound.append(plan.bind(x=x, t=t, terminated=done, **extra))
+        xs.append(x)
+    start = threading.Barrier(threads_n)
+
+    def work(b):
+        try:
+            start.wait()
+            assert len(door.time_launch(b, reps)) == reps
+        except Exception as exc:        # noqa: BLE001 - reported below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=work, args=(b,)) for b in bound]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(120)
+    assert not errors
+    for x in xs:
+        np.testing.assert_array_equal(x, np.full(64, float(reps)))
+
+
 # --- the split step --- #
 def test_a_static_split_step_launches_each_branch_over_its_own_run_only(monkeypatch, reference):
     counts = []
@@ -411,3 +467,64 @@ def test_device_two_threads_with_two_simulations_each_get_the_right_answer():
     assert not errors
     for got in out.values():
         np.testing.assert_array_equal(cp.asnumpy(got.x), cp.asnumpy(ref.x))
+
+
+@pytest.mark.gpu
+def test_device_calibration_timer_runs_on_distinct_bound_plans_in_many_threads():
+    cp = pytest.importorskip("cupy")
+    from eagle.plan import auto
+
+    plan = auto(plain).select({"x": cp.zeros(64)})
+    threads_n, reps = 4, 5
+    bound, xs, errors = [], [], []
+    for _ in range(threads_n):
+        x, t, done = cp.zeros(64), cp.zeros(64), cp.zeros(64, dtype=cp.bool_)
+        extra = {nm: cp.zeros(1, dtype=cp.int64 if nm == "fused_steps" else cp.int32)
+                 for role, nm in plan.plugin.arg_spec if role == "lookup"}
+        bound.append(plan.bind(x=x, t=t, terminated=done, **extra))
+        xs.append(x)
+    start = threading.Barrier(threads_n)
+
+    def work(b):
+        try:
+            start.wait()
+            assert len(door.time_launch(b, reps)) == reps
+        except Exception as exc:        # noqa: BLE001 - reported below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=work, args=(b,)) for b in bound]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(120)
+    assert not errors
+    for x in xs:
+        np.testing.assert_array_equal(cp.asnumpy(x), np.full(64, float(reps)))
+
+
+@pytest.mark.parametrize("backend", ["cpu", pytest.param("gpu", marks=pytest.mark.gpu)])
+def test_one_dispatch_simulation_run_by_two_threads_at_once_is_busy(monkeypatch, backend):
+    xp = pytest.importorskip("cupy") if backend == "gpu" else np
+    entered, release = threading.Event(), threading.Event()
+    real = door.DispatchRunner._run
+
+    def gated(self):
+        entered.set()
+        assert release.wait(30)
+        return real(self)
+
+    monkeypatch.setattr(door.DispatchRunner, "_run", gated)
+    sim = eagle.simulation(walker, k=xp.asarray(rare_classes()), x=xp.zeros(N), t=xp.zeros(N),
+                           max_steps=200, dispatch="segmented")
+    t = threading.Thread(target=sim.run)
+    t.start()
+    try:
+        assert entered.wait(30)
+        with pytest.raises(eagle.Busy, match=r"eagle\.Simulation\.run: another call is still running"):
+            sim.run()
+        with pytest.raises(eagle.Busy, match=r"eagle\.Runner\.run: another call is still running"):
+            sim.runner.run()
+    finally:
+        release.set()
+        t.join(60)
+    assert not t.is_alive()

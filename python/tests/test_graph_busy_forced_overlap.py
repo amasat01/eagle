@@ -78,3 +78,24 @@ def test_busy_guard_is_exported_and_a_runtime_error():
         with pytest.raises(Busy, match="x.Y.b: another call is still running on this Y"):
             with g("b"):
                 pass
+
+
+@pytest.mark.parametrize("name", sorted(_counters.snapshot()))
+def test_every_counter_loses_no_increments_under_threads(name):
+    n_threads, per = 8, 2000
+    start = threading.Barrier(n_threads)
+    before = _counters.snapshot()
+
+    def work():
+        start.wait()
+        for _ in range(per):
+            _counters.bump(name)
+
+    ts = [threading.Thread(target=work) for _ in range(n_threads)]
+    [t.start() for t in ts]
+    [t.join(120) for t in ts]
+    assert not any(t.is_alive() for t in ts)
+    after = _counters.snapshot()
+    assert after[name] - before[name] == n_threads * per
+    assert {k: v for k, v in after.items() if k != name} == {
+        k: v for k, v in before.items() if k != name}

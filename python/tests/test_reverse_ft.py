@@ -57,3 +57,49 @@ def test_one_reverse_shared_by_two_threads_is_busy():
         rev(g.record, {"y": np.ones(8)})
     gate.go.set()
     t.join(30)
+
+
+@pytest.mark.parametrize("backend", ["cpu", pytest.param("gpu", marks=pytest.mark.gpu)])
+def test_distinct_recording_graphs_agree_with_the_serial_run_and_count_exactly(tmp_path, backend):
+    xp = pytest.importorskip("cupy") if backend == "gpu" else np
+    ps = plans(tmp_path, backend)
+    seed = {"sin.y": xp.asarray(np.linspace(1, 2, N))}
+    inputs = [np.linspace(-1, 1, N) + 0.1 * i for i in range(THREADS)]
+    rounds = 5
+
+    def one(g, rev):
+        g.launch()
+        got = rev(g.record, seed)
+        return {k: np.asarray(v.get() if hasattr(v, "get") else v).tobytes()
+                for k, v in got.items()}
+
+    def build(x):
+        g, _z = chain(ps, xp.asarray(x), 0.5, record=True)
+        return g, eagle.diff.Reverse(g)
+
+    want = []
+    for x in inputs:
+        g, rev = build(x)
+        want.append(one(g, rev))
+    pairs = [build(x) for x in inputs]
+    out, errors = [None] * THREADS, []
+    start = threading.Barrier(THREADS)
+    before = _counters.snapshot()
+
+    def work(i):
+        try:
+            start.wait()
+            for _ in range(rounds):
+                out[i] = one(*pairs[i])
+        except BaseException as exc:      # surfaced below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=work, args=(i,)) for i in range(THREADS)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(120)
+    assert not errors, errors
+    assert out == want
+    after = _counters.snapshot()
+    assert after["reverses"] - before["reverses"] == THREADS * rounds

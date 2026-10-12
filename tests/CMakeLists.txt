@@ -231,6 +231,14 @@ set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/test_EventRefine.cpp
 list(APPEND TEST_FILES ${CMAKE_CURRENT_SOURCE_DIR}/test_Busy.cpp)
 list(REMOVE_DUPLICATES TEST_FILES)
 
+# Distinct objects under many threads (branch runner, window driver, record
+# slot, refine loop) are CUDA-free: compiled by CXX in BOTH build modes with
+# EAGLE_CPU_ONLY forced on this one source, the test_HostSchedule.cpp recipe.
+list(APPEND TEST_FILES ${CMAKE_CURRENT_SOURCE_DIR}/test_ConcurrencyHost.cpp)
+list(REMOVE_DUPLICATES TEST_FILES)
+set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/test_ConcurrencyHost.cpp
+  PROPERTIES COMPILE_DEFINITIONS "EAGLE_CPU_ONLY=1")
+
 list(SORT TEST_FILES COMPARE NATURAL)
 
 foreach(file ${TEST_FILES})
