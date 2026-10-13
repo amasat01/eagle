@@ -64,11 +64,6 @@ _README_ROWS = [(dist, 1000, arm)
                             "cupy_masked", "cpu_openmp")]
 
 
-#: Cards whose automatic-schedule replay is known not to match their run (none:
-#: every committed card replays its launches exactly).
-_AUTO_SCHEDULE_GAPS = frozenset()
-
-
 def _script():
     spec = importlib.util.spec_from_file_location(
         "eagle_perf_card", _CARD_DIR / "perf_card.py")
@@ -151,13 +146,12 @@ def test_cards_cover_every_arm_memory_and_compile_step():
             f"{card_path.name}: compile-time rows differ from the script's keys")
         assert set(card["fit"]["arms"]) == run
         for extra in card["per_config"]:
-            for key in ("auto_schedule_matches_run", "graph_schedule_matches_run"):
-                if key == "auto_schedule_matches_run" and card_path.name in _AUTO_SCHEDULE_GAPS:
-                    continue
+            for key in ("auto_schedule_consistent", "graph_schedule_consistent",
+                        "simulate_schedule_consistent"):
                 assert extra.get(key, True), (
                     f"{card_path.name}: {key} is false at {extra['distribution']} "
-                    f"S={extra['max_steps']} N={extra['n']}: the replayed launches "
-                    "differ from the run's, so the issued bytes would be wrong")
+                    f"S={extra['max_steps']} N={extra['n']}: the run's launches "
+                    "are not self-consistent, so the issued bytes would be wrong")
         _check_code_record(card, card_path, {"perf_card.py": module._code_blocks(
             _CARD_DIR / "perf_card.py")}, prefixed=False)
 
@@ -337,25 +331,64 @@ def test_card_scripts_import_no_private_eagle_or_hawk_name():
             assert not bad, f"{path.name}:{node.lineno} imports a private name: {bad}"
 
 
-def test_the_auto_issued_bytes_follow_eagle_s_policy():
-    """The automatic arm's analytic bytes replay eagle's own policy: a uniform
-    batch of n samples over S = 1000 steps launches 16, 32, then 64s (the last
-    one the remainder), compacts once at the end, and issues the mapped count
-    per launch.
+def test_issued_bytes_follow_the_reported_schedule():
+    """The band arm's analytic bytes come from the run's own report: launches
+    {16: 3, 32: 2} (5 launches) with 2 compactions and no reorder issue
+    (all + map) * n per launch, the active traffic of the steps run, the
+    finish write and 2 compaction passes. No policy is replayed.
 
-    RED: count the automatic arm per step, or replay a constant k, and this
-    fails."""
+    RED: replay a policy twin, or ignore the report's launch histogram or
+    compactions, and this fails."""
+    import types
+
     import numpy as np
 
     module = _script()
-    n, s = 1000, 1000
+    n, s = 1000, 112
     running = np.full(s, n)
-    sched = module._auto_schedule(running, n, s)
-    ks = [k for _, k in sched]
-    assert ks[:3] == [16, 32, 64] and sum(ks) == s and max(ks) == 64
-    per = module.STEP_BYTES_ALL + module.MAP_BYTES + module.STEP_BYTES_ACTIVE
-    want = per * n * len(ks) + n + module.COMPACT_BYTES_PER_SAMPLE * n
-    assert module._auto_issued_bytes(running, n, n, s) == want
+    report = types.SimpleNamespace(launches=5, launches_by_k={16: 3, 32: 2},
+                                   compactions=2, reorders=0, mode="band")
+    want = ((module.STEP_BYTES_ALL + module.MAP_BYTES) * n * 5
+            + module.STEP_BYTES_ACTIVE * n * s + module.STEP_BYTES_FINISH * n
+            + module.COMPACT_BYTES_PER_SAMPLE * n * 2)
+    assert module._auto_issued_bytes(report, running, n, n) == want
+    assert module._run_issued_bytes(report, running, n, n) == want
+    report.reorders = 1
+    assert module._auto_issued_bytes(report, running, n, n) == want + (
+        module.REORDER_BYTES_PER_SPAN_SAMPLE + module.COMPACT_BYTES_PER_SAMPLE) * n
+    report.mode = "persist"
+    assert module._run_issued_bytes(report, running, n, n) == \
+        module._persist_issued_bytes(running, n, n)
+    assert module.auto_schedule_consistent(report, s)
+    assert not module.auto_schedule_consistent(report, s + 1)  # words cover 112 steps only
+    report.launches = 4
+    assert not module.auto_schedule_consistent(report, s)  # launches != sum(count)
+    assert not hasattr(module, "_auto_schedule") and not hasattr(module, "_next_k")
+
+
+def test_missing_optional_libraries_become_arms_not_run(monkeypatch):
+    """With torch and jax blocked (``sys.modules[lib] = None``) arm selection
+    returns without raising, the torch and jax arms are listed under
+    ``arms_not_run`` with "<lib> not installed in this profile", and they are
+    absent from the arms the run uses.
+
+    RED: import a library at selection time and this raises."""
+    import sys
+
+    module = _script()
+    monkeypatch.setitem(sys.modules, "torch", None)
+    monkeypatch.setitem(sys.modules, "jax", None)
+    monkeypatch.setattr(module, "_RUN_ARMS", [])
+    extra, not_run = module._optional_arms()
+    assert extra == ()
+    for arm in ("torch_masked", "torch_graphed", "torch_compiled"):
+        assert not_run[arm] == "torch not installed in this profile"
+    assert not_run["jax_vmap"] == "jax not installed in this profile"
+    run = module._run_arms()
+    assert not set(not_run) & set(run) and "eagle_graph" in run
+    assert module._fp32_arms() == ()
+    assert module._compile_keys([1000], run) and not any(
+        k.startswith(("jax:", "torch:")) for k, _, _ in module._compile_keys([1000], run))
 
 
 def test_k_steps_issued_bytes_count_per_launch():

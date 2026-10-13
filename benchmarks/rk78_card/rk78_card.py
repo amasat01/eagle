@@ -89,6 +89,7 @@ Reproduce (from the eagle repository root)::
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import math
 import os
@@ -140,6 +141,29 @@ ARMS = ("eagle_graph", "eagle_graph_compact", "eagle_graph_reorder",
         "cupy_masked", "torch_masked", "torch_graphed", "jax_vmap", "warp_kernel",
         "eagle_cpu")
 GPU_ARMS = ARMS[:-1]
+#: The optional library each arm needs: an arm whose library is not installed
+#: in this profile is listed under ``arms_not_run`` and the run continues.
+ARM_LIBRARY = {"torch_masked": "torch", "torch_graphed": "torch",
+               "jax_vmap": "jax", "warp_kernel": "warp"}
+
+
+def _lib_installed(lib):
+    """Whether ``lib`` can be imported here, decided WITHOUT importing it
+    (``find_spec``); a library blocked through ``sys.modules[lib] = None``
+    counts as not installed."""
+    try:
+        return importlib.util.find_spec(lib) is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def _select_arms(requested):
+    """(the requested arms this machine runs, in table order, {arm: reason}
+    for each requested arm whose library is not installed)."""
+    not_run = {a: f"{ARM_LIBRARY[a]} not installed in this profile"
+               for a in ARMS if a in requested and a in ARM_LIBRARY
+               and not _lib_installed(ARM_LIBRARY[a])}
+    return tuple(a for a in ARMS if a in requested and a not in not_run), not_run
 EAGLE_GPU_ARMS = ARMS[:5]
 ARM_LABELS = {
     "eagle_graph": "eagle graph",
@@ -1330,13 +1354,15 @@ _COMPILE_METHOD = (
     "of 3 cold and 3 warm processes.")
 
 
-def _compile_keys(ns):
+def _compile_keys(ns, arms=ARMS):
     keys = [("hawk_cuda", list(EAGLE_GPU_ARMS),
              "eagle.deploy of the attempt kernel and its active-set variant"),
             ("hawk_host", ["eagle_cpu"], "eagle.deploy of the attempt kernel, host run"),
             ("cupy", ["cupy_masked"], "CuPy elementwise kernels")]
-    keys += [(f"jax:{n}", ["jax_vmap"], f"XLA executable, N = {n:,}") for n in ns]
-    keys.append(("warp", ["warp_kernel"], "Warp kernel module"))
+    if "jax_vmap" in arms:
+        keys += [(f"jax:{n}", ["jax_vmap"], f"XLA executable, N = {n:,}") for n in ns]
+    if "warp_kernel" in arms:
+        keys.append(("warp", ["warp_kernel"], "Warp kernel module"))
     return keys
 
 
@@ -1381,9 +1407,9 @@ def _compile_probe(key):
     cc.probe_reply(reply_fd, {"seconds": seconds})
 
 
-def _run_compile_pass(ns):
+def _run_compile_pass(ns, run_arms=ARMS):
     rows = []
-    for key, arms, what in _compile_keys(ns):
+    for key, arms, what in _compile_keys(ns, run_arms):
         cold, warm = cc.cold_warm(__file__, ["--compile-probe", key], _CACHE_ENV,
                                   reps=COMPILE_REPS, prefix="rk78_cache_", timeout=900,
                                   what=f"compile probe {key}")
@@ -1596,6 +1622,8 @@ def render_markdown(card: dict) -> str:
     for arm in card["arms"]:
         lines.append(f"| {ARM_LABELS[arm]} | {ARM_LOOP[arm]} "
                      f"| {card['code_lines']['arms'][arm]} |")
+    for arm, why in (card.get("arms_not_run") or {}).items():
+        lines += ["", f"{ARM_LABELS[arm]}: {why}."]
     lines += ["", f"Lines of code: {card['code_lines']['rule']} "
               f"({card['code_lines']['shared_scheme_lines']} lines).", ""]
     mem = {(r["n"], r["arm"]): r for r in (card.get("memory") or {}).get("rows", [])}
@@ -1697,7 +1725,9 @@ def main(argv=None):
         ap.error("--reps must be >= 5")
     if args.quick:
         args.ns = [n for n in args.ns if n <= 10_000]
-    names = tuple(a for a in ARMS if a in args.arms)
+    names, arms_not_run = _select_arms(args.arms)
+    for arm, why in arms_not_run.items():
+        print(f"arm {arm} not run: {why}", flush=True)
 
     work = pathlib.Path(tempfile.mkdtemp(prefix="rk78_card_"))
     device, peak, slug, bus_id = _device_facts()
@@ -1770,9 +1800,9 @@ def main(argv=None):
                 None if row["fraction_of_peak_fp64"] is None
                 else row["useful_flops_per_s"] / peak["fp64_flops_at_observed_sm_clock"])
     memory_rows = [] if args.no_memory else _run_memory_pass(args.ns, bus_id, names)
-    compile_rows = [] if args.no_compile else _run_compile_pass(args.ns)
+    compile_rows = [] if args.no_compile else _run_compile_pass(args.ns, names)
     card = {
-        "schema": "eagle-rk78-card/2",
+        "schema": "eagle-rk78-card/3",
         "toolchain": cc.toolchain(),
         "device_slug": slug,
         "script": SCRIPT_REL,
@@ -1801,6 +1831,7 @@ def main(argv=None):
         },
         "ns": list(args.ns),
         "arms": {a: ARM_LABELS[a] for a in names},
+        "arms_not_run": arms_not_run,
         "code_lines": code_line_counts(),
         "method": {
             "repetitions": args.reps,
