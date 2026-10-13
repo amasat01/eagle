@@ -192,18 +192,18 @@ PICK_FUSED_DIVISOR = 4
 PICK_PERSIST_MULTIPLE = 8
 
 
-def _entry_regime(capacity: int, n: int) -> str:
-    """Which entry a batch of ``n`` samples is sure to want on a device that keeps
-    ``capacity`` threads of the persist entry resident
-    (:meth:`Runner._persist_capacity`):
-    ``"fused"``, ``"persist"``, or ``"band"`` when the readback has to say
-    (also when the capacity is unknown, ``<= 0``)."""
-    if capacity <= 0:
-        return "band"
-    if n * PICK_FUSED_DIVISOR <= capacity:
-        return "fused"
-    if n >= PICK_PERSIST_MULTIPLE * capacity:
+def _entry_regime(persist_capacity: int, wave_capacity: int, n: int) -> str:
+    """Which entry a batch of ``n`` samples is sure to want: ``"persist"`` from
+    ``PICK_PERSIST_MULTIPLE`` times the threads the persist entry keeps resident
+    across the device (``persist_capacity``, :meth:`Runner._persist_capacity`),
+    ``"fused"`` up to ``1 / PICK_FUSED_DIVISOR`` of what one fused wave holds
+    (``wave_capacity``, :meth:`~eagle._plan_binding.BoundPlan.device_capacity`),
+    else ``"band"``: the readback cannot say and both entries are timed. An
+    unknown capacity (``<= 0``) never makes a batch sure."""
+    if persist_capacity > 0 and n >= PICK_PERSIST_MULTIPLE * persist_capacity:
         return "persist"
+    if wave_capacity > 0 and n * PICK_FUSED_DIVISOR <= wave_capacity:
+        return "fused"
     return "band"
 
 
@@ -214,8 +214,10 @@ class _Pick(NamedTuple):
     run path takes no lock. ``wall`` maps an entry to its timed wall in ms and is
     never modified once published; ``last`` is the readback regime the walls were
     timed in (:func:`_readback_regime`); ``prior`` the last step fill; ``runs``
-    the runs folded in; ``settled`` says the pick is final for this regime (it
-    came from a model, the process cache, or both entries' walls), so neither
+    the runs folded in; ``ratio`` the model's predicted persist-over-fused wall
+    for the last readback (a record only: it never picks); ``settled`` says the
+    pick is final for this regime (it came from the process cache or from both
+    entries' walls), so neither
     entry is timed again until the regime moves."""
 
     pick: str | None
@@ -224,6 +226,7 @@ class _Pick(NamedTuple):
     prior: float | None
     runs: int
     settled: bool
+    ratio: float | None = None
 
 
 _NO_PICK = _Pick(None, {}, None, None, 0, False)
@@ -301,12 +304,11 @@ def _fast_mode_for(step, n: int, *, compacting: bool = False) -> str | None:
     a compacting kernel: this falls through to the band path, same as an
     unknown capacity.
 
-    This size rule is the first-run rule. Between a quarter of the persist
-    entry's resident capacity and eight times it (:func:`_entry_regime`),
-    when both the persist and the range entries exist, later runs follow the
-    model or the measured wall of each entry on this device
-    (:meth:`Runner._pick_entry`); outside that range the regime's entry stands
-    for every run."""
+    This size rule is the first-run rule. Inside the band between the sure
+    fused and sure persist batches (:func:`_entry_regime`), when both the
+    persist and the range entries exist, later runs follow the measured wall of
+    each entry on this device (:meth:`Runner._pick_entry`); outside the band
+    the regime's entry stands for every run."""
     cap = step.device_capacity()
     if cap <= 0:
         return None
@@ -920,7 +922,7 @@ class Runner:
                 mode = fast_mode_override
         elif eligible:
             mode = _fast_mode_for(self.step, self.n, compacting=self.active is not None)
-            regime = _entry_regime(self._persist_capacity(), self.n)
+            regime = _entry_regime(self._persist_capacity(), self.step.device_capacity(), self.n)
             if regime == "fused" and (self.active is None or self.step.range_entry() is not None):
                 mode = "fused_one"
             elif regime == "persist" and self.step.persist_entry() is not None:
@@ -1191,11 +1193,10 @@ class Runner:
         work, often the only run: never a probe), the second the other entry,
         and from then on the one with the smaller
         measured launch wall. The loser is timed again only when a run's readback
-        moves to another regime (:func:`_readback_regime`), and then only if
-        neither the model (:func:`eagle._core.entry_ratio`) nor a pick the process
-        already settled for the regime says which entry wins. However low the step
-        fill f, a batch the model cannot call is timed: a spread batch is exactly
-        where a persistent launch's refills can cost more than the fused entry's
+        moves to another regime (:func:`_readback_regime`), and then not if
+        a pick the process already settled for the regime says which entry wins.
+        However low the step fill f, a batch inside the band is timed: a spread
+        batch is exactly where a persistent launch's refills can cost more than the fused entry's
         idle lanes, and only the wall says which."""
         state = self._fast_state
         pick = state.pick
@@ -1228,8 +1229,8 @@ class Runner:
         settled run, which only checks whether the readback regime moved).
 
         On a new regime the old walls no longer compare. The pick is then taken,
-        without timing, from the process's settled picks or from the model; failing
-        both, the entry just run is the pick and the other is timed next. The new
+        without timing, from the process's settled picks; failing that, the entry
+        just run is the pick and the other is timed next. The new
         state is built whole and swapped in by one assignment."""
         state = self._fast_state
         prior = state.prior if f is None else f
@@ -1237,7 +1238,7 @@ class Runner:
         pick, wall, settled = state.pick, state.wall, state.settled
         if regime != state.last:
             pick, wall, settled = mode, {}, False
-            decided = self._decide(regime, steps, prior)
+            decided = self._decide(regime)
             if decided is not None:
                 pick, wall, settled = decided
             elif wall_ms is not None:
@@ -1253,34 +1254,32 @@ class Runner:
                     pick = min(wall, key=wall.get)
                 settled = True
                 self._remember(regime, pick, wall)
-        self._fast_state = _Pick(pick, wall, regime, prior, state.runs + 1, settled)
+        self._fast_state = _Pick(pick, wall, regime, prior, state.runs + 1, settled,
+                                 self._model_ratio(steps, prior))
         if prior is not None:
             self._refit_persist(prior, steps)
 
-    def _decide(self, regime: tuple, steps: int, fill):
-        """``(pick, walls, True)`` when a new readback regime is already decided
-        without timing the other entry, else ``None``: a pick the process settled
-        for this device, kernel and regime, or the model's call when its predicted
-        persist-over-fused wall is clear of the contested range."""
+    def _decide(self, regime: tuple):
+        """``(pick, walls, True)`` when a pick the process already settled for this
+        device, kernel and regime exists, else ``None``."""
         key = getattr(self, "_fast_key", None)
         if key is None:
             return None
         import importlib
 
         cached = importlib.import_module("eagle.launch")._pick_cache_get(key + (regime,))
-        if cached is not None:
-            return cached[0], dict(cached[1]), True
+        return None if cached is None else (cached[0], dict(cached[1]), True)
+
+    def _model_ratio(self, steps: int, fill):
+        """The model's predicted persist-over-fused wall for this readback
+        (:func:`eagle._core.entry_ratio`), or ``None`` when the device, the step
+        cost or the fill is unknown. A record of what the model expects; the
+        timed walls pick."""
         model = getattr(self, "_fast_model", None)
         if model is None or fill is None or fill <= 0.0:
             return None
         ratio = _core.entry_ratio(*model[:7], self.n, int(steps), float(fill), model[7])
-        if ratio <= 0.0:
-            return None
-        if ratio < _core.ENTRY_PERSIST_BELOW:
-            return "persist", {}, True
-        if ratio > _core.ENTRY_FUSED_ABOVE:
-            return "fused_one", {}, True
-        return None
+        return ratio if ratio > 0.0 else None
 
     def _remember(self, regime: tuple, pick: str, wall: dict) -> None:
         """Keep a pick settled on measured walls for the process's later runners."""

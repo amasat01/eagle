@@ -256,20 +256,20 @@ def test_a_second_runner_takes_the_cached_pick_untimed():
 _A100_MODEL = (8, 0, 108, 2, 1410000, True, 108 * 1536, 41.0)
 
 
-@pytest.mark.parametrize("n, fill, want", [(100_000, 0.1446, "persist"), (10_000, 1.0, "fused_one")])
-def test_the_model_decides_a_clear_regime_without_timing(n, fill, want):
-    runner = _keyed_runner(None, n, _A100_MODEL)
-    runner._fast_key = ("model only",)
-    runner._note_run("fused_one" if want == "persist" else "persist", 1.0, 1000, n, fill)
-    assert runner._fast_pick == want and runner._fast_state.settled
-    assert runner._pick_entry() == (want, False) and not runner._carries_timing(False)
+def test_the_model_is_recorded_but_never_picks():
+    # 100 000 samples of a 0.1446 step fill on an A100: the model expects persist
+    # to win by a wide margin, and the other entry is timed all the same
+    runner = _keyed_runner(("model only",), 100_000, _A100_MODEL)
+    runner._note_run("fused_one", 1.0, 1000, 100_000, 0.1446)
+    state = runner._fast_state
+    assert state.ratio is not None and state.ratio < 0.8
+    assert not state.settled and runner._pick_entry() == ("persist", True)
 
 
-def test_a_contested_model_still_times_the_other_entry():
-    # 100 000 samples of a 0.59 step fill on an A100: the model cannot call it
-    runner = _keyed_runner(("contested",), 100_000, _A100_MODEL)
-    runner._note_run("persist", 1.0, 1000, 100_000, 0.59)
-    assert not runner._fast_state.settled and runner._pick_entry() == ("fused_one", True)
+def test_without_a_model_no_ratio_is_recorded():
+    runner = _keyed_runner(("no model",), 100_000, None)
+    runner._note_run("persist", 1.0, 1000, 100_000, 0.5)
+    assert runner._fast_state.ratio is None
 
 
 def test_a_settled_pick_never_times_an_entry_again_on_an_unchanged_regime():

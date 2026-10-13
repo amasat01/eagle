@@ -42,32 +42,42 @@ def _fill(dist: str) -> float:
     return (1.0 - 1.0 / k) / math.log(k)
 
 
-def _capacity(row) -> tuple:
-    """``(persist entry's resident threads, fused entry's resident threads)`` of
-    the kernel the row timed: its own threads per SM times the SMs. The first
-    sizes the regime rule, the second the fused entry's waves in the model."""
-    return int(row["capacity"]), int(row["sms"]) * int(row["resident_per_sm"])
+def _capacities(row) -> tuple:
+    """``(persist entry's resident threads, one fused wave, fused entry's resident
+    threads)`` of the kernel the row timed: its own threads per SM times the SMs.
+    The first two size the regime rule, the last the fused entry's waves in the
+    model."""
+    return (int(row["capacity"]), int(row["wave_capacity"]),
+            int(row["sms"]) * int(row["resident_per_sm"]))
 
 
-def _judge(row):
-    """``(kind, factor)`` of a row: how far the pick the rule or the model makes
-    is from the faster entry (``"slower"``: the pick's wall over the faster
-    wall), or how far the model's ratio is from the measured one (``"model"``:
-    the larger of the two over the smaller)."""
-    cap, resident = _capacity(row)
-    n = int(row["n"])
+def _regime(row) -> str:
+    persist_cap, wave_cap, _ = _capacities(row)
+    return ud._entry_regime(persist_cap, wave_cap, int(row["n"]))
+
+
+def _slower(row) -> float:
+    """For a row in a sure regime, the wall of the entry the rule names over the
+    faster wall."""
     fused, persist = float(row["fused_ms"]), float(row["persist_ms"])
-    regime = ud._entry_regime(cap, n)
-    if regime == "persist":
-        return "slower", persist / min(fused, persist)
-    if regime == "fused":
-        return "slower", fused / min(fused, persist)
-    ratio = _core.entry_ratio(
-        int(row["major"]), int(row["minor"]), int(row["sms"]), int(row["fp64_ratio"]),
-        int(row["clock_khz"]), row["precision"] == "fp64", resident, n, int(row["S"]),
-        _fill(row["dist"]), float(row["step_ops"]))
-    measured = persist / fused
-    return "model", max(ratio / measured, measured / ratio), ratio, measured
+    named = persist if _regime(row) == "persist" else fused
+    return named / min(fused, persist)
+
+
+def _probed_pick(row) -> str:
+    """The entry the probe settles on when the two entries take the row's walls:
+    the first run takes the size pick, the second the other entry."""
+    walls = {"fused_one": float(row["fused_ms"]), "persist": float(row["persist_ms"])}
+    runner = ud.Runner.__new__(ud.Runner)
+    first = "persist" if int(row["n"]) > int(row["wave_capacity"]) else "fused_one"
+    runner._fast_state = ud._NO_PICK._replace(pick=first)
+    runner._fast_mode, runner._fast_prep, runner._fast_fit = first, {}, None
+    runner.n = int(row["n"])
+    for _ in range(3):
+        mode, probing = runner._pick_entry()
+        timed = runner._carries_timing(probing)
+        runner._note_run(mode, walls[mode] if timed else None, int(row["S"]), 1, 0.5)
+    return runner._fast_pick
 
 
 def _comparable(rows):
@@ -81,14 +91,20 @@ def test_every_row_is_judged_or_says_why_not():
 
 
 def test_model_pick_agrees_with_the_profiles():
+    """A sure batch names an entry within 5 % of the faster one; a batch in the band
+    is timed, and the pick is the faster entry (to the 2 % hysteresis)."""
     misses = []
     for row in _comparable(_rows()):
         if row["known_miss"]:
             continue
-        verdict = _judge(row)
-        limit = 1.0 + _AGREE_WITHIN if verdict[0] == "slower" else _MODEL_WITHIN
-        if verdict[1] > limit:
-            misses.append((row["device"], row["cell"], verdict[:2]))
+        if _regime(row) == "band":
+            fused, persist = float(row["fused_ms"]), float(row["persist_ms"])
+            pick = _probed_pick(row)
+            picked = persist if pick == "persist" else fused
+            if picked > min(fused, persist) / ud.PICK_HYSTERESIS:
+                misses.append((row["device"], row["cell"], pick))
+        elif _slower(row) > 1.0 + _AGREE_WITHIN:
+            misses.append((row["device"], row["cell"], _slower(row)))
     assert not misses, misses
 
 
@@ -99,21 +115,33 @@ def test_a_known_miss_still_fails_its_limit_and_stays_within_one_and_a_half():
     for row in _comparable(_rows()):
         if not row["known_miss"]:
             continue
-        verdict = _judge(row)
-        limit = 1.0 + _AGREE_WITHIN if verdict[0] == "slower" else _MODEL_WITHIN
-        if verdict[1] <= limit:
+        assert _regime(row) != "band", row["cell"]
+        slower = _slower(row)
+        if slower <= 1.0 + _AGREE_WITHIN:
             stale.append((row["device"], row["cell"]))
-        if verdict[0] == "slower":
-            worst = verdict[1]
-        else:
-            # a band row the model calls wrongly takes the slower entry once
-            ratio, measured = verdict[2], verdict[3]
-            pick = "persist" if ratio < 0.8 else "fused" if ratio > 1.25 else None
-            worst = 1.0 if pick is None else (measured if pick == "persist" else 1 / measured)
-        if worst > 1.5:
-            worse.append((row["device"], row["cell"], worst))
+        if slower > 1.5:
+            worse.append((row["device"], row["cell"], slower))
     assert not stale, stale
     assert not worse, worse
+
+
+def test_report_the_model_against_the_measured_ratio_in_the_band(capsys):
+    """Not a gate: print the model's persist-over-fused ratio beside the measured
+    one for every band row, so a better model can be judged against them."""
+    lines = []
+    for row in _comparable(_rows()):
+        if _regime(row) != "band":
+            continue
+        ratio = _core.entry_ratio(
+            int(row["major"]), int(row["minor"]), int(row["sms"]), int(row["fp64_ratio"]),
+            int(row["clock_khz"]), row["precision"] == "fp64", _capacities(row)[2],
+            int(row["n"]), int(row["S"]), _fill(row["dist"]), float(row["step_ops"]))
+        measured = float(row["persist_ms"]) / float(row["fused_ms"])
+        lines.append(f"{row['device']:6} {row['cell']:34} model {ratio:5.2f} measured {measured:5.2f}"
+                     f" x{max(ratio / measured, measured / ratio):4.2f}")
+    with capsys.disabled():
+        print("\nentry model against the profiles (band rows):\n" + "\n".join(lines))
+    assert lines
 
 
 def test_the_model_is_unknown_without_a_clock_or_a_step_cost():
@@ -123,8 +151,9 @@ def test_the_model_is_unknown_without_a_clock_or_a_step_cost():
     assert _core.entry_ratio(*args[:10], 0.0) == 0.0
 
 
-@pytest.mark.parametrize("capacity, n, want", [
-    (1000, 250, "fused"), (1000, 251, "band"), (1000, 7999, "band"), (1000, 8000, "persist"),
-    (0, 10, "band"), (-1, 10_000_000, "band")])
-def test_the_regime_names_the_sure_batches(capacity, n, want):
-    assert ud._entry_regime(capacity, n) == want
+@pytest.mark.parametrize("persist_capacity, wave_capacity, n, want", [
+    (4000, 1000, 250, "fused"), (4000, 1000, 251, "band"), (4000, 1000, 31999, "band"),
+    (4000, 1000, 32000, "persist"), (0, 0, 10, "band"), (-1, -1, 10_000_000, "band"),
+    (0, 1000, 10, "fused"), (4000, 0, 32000, "persist")])
+def test_the_regime_names_the_sure_batches(persist_capacity, wave_capacity, n, want):
+    assert ud._entry_regime(persist_capacity, wave_capacity, n) == want
