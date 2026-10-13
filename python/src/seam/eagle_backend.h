@@ -101,7 +101,7 @@ extern "C" {
 /** Seam major version: the core accepts exactly this major. */
 #define EAGLE_BACKEND_VERSION_MAJOR 1u
 /** Seam minor version this header describes (informational). */
-#define EAGLE_BACKEND_VERSION_MINOR 0u
+#define EAGLE_BACKEND_VERSION_MINOR 1u
 /** The packed version a backend built from this header reports. */
 #define EAGLE_BACKEND_VERSION ((EAGLE_BACKEND_VERSION_MAJOR << 16) | EAGLE_BACKEND_VERSION_MINOR)
 
@@ -501,6 +501,30 @@ struct eagle_backend_reorder_classes_desc {
  *  ``reorder_device`` (the query's ``scratch_bytes`` includes the class
  *  working set). Bound per symbol. */
 eagle_backend_status eagle_backend_reorder_classes_device(struct eagle_backend_reorder_classes_desc* desc);
+
+/** Reset to the identity: ``perm``, ``inv`` and (when non-zero) ``index_map`` become
+ *  ``0..n-1`` and ``*count = *span = n``, in ONE kernel. Only ``device``, ``perm``,
+ *  ``inv``, ``index_map``, ``count``, ``span``, ``n`` and ``stream`` of
+ *  ``eagle_backend_reorder_desc`` are read (no planes, scratch or ``fire``). Enqueue
+ *  only and capture-legal. Added in minor 1; bound per symbol, so its presence is
+ *  the capability. */
+eagle_backend_status eagle_backend_reset_device(struct eagle_backend_reorder_desc* desc);
+
+/** Residency classes reported by ``eagle_backend_pointer_residency``. */
+#define EAGLE_BACKEND_RESIDENCY_HOST 0
+#define EAGLE_BACKEND_RESIDENCY_DEVICE 1
+#define EAGLE_BACKEND_RESIDENCY_MANAGED 2
+#define EAGLE_BACKEND_RESIDENCY_MAPPED_HOST 3
+#define EAGLE_BACKEND_RESIDENCY_PAGEABLE 4
+#define EAGLE_BACKEND_RESIDENCY_OTHER_DEVICE 5
+
+/** Classify the raw address ``ptr`` as seen from ``device`` (-1 = the current one):
+ *  one of ``EAGLE_BACKEND_RESIDENCY_*`` is written to ``*cls``. MAPPED_HOST is pinned
+ *  host memory the device can address (a planes-in-host-memory buffer for
+ *  ``reorder_device``); PAGEABLE is host memory it cannot. A setup-time query, not a
+ *  per-call check. Added in minor 1; bound per symbol, so its presence is the
+ *  capability. */
+eagle_backend_status eagle_backend_pointer_residency(int32_t device, uint64_t ptr, int32_t* cls);
 
 /* ---- experimental (eagle_backend_x_*, optional, unlocked) -------------------- */
 

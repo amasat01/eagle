@@ -264,7 +264,7 @@ inline void reorderClassesDevice(const ReorderPlane* planes, std::uint32_t nPlan
     std::int32_t* indexMap, std::uint32_t* count, std::uint32_t* span, std::uint32_t* fire, std::uint32_t* offsets,
     std::uint32_t* classSorts, void* scratch, std::int64_t n, cudaStream_t stream)
 {
-    detail::checkReorder(planes, nPlanes, mask, n, true);
+    detail::checkReorder(planes, nPlanes, mask, n, true, true);
     detail::checkClasses(classes, classPlane, n);
     if (offsets == nullptr || classSorts == nullptr)
         EAGLE_THROW(std::invalid_argument, "classes: offsets and class_sorts must be device addresses");
