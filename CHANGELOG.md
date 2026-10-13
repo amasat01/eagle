@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-**Register gate by toolkit.** The card register gate holds its register and arithmetic pins per CUDA major (12.9 and 13.4 measured), compares each build with the pins of the `nvcc` that compiled it, and skips with a reason when no pin exists for that major.
+**Register gate by toolkit.** The card register gate holds its register and arithmetic pins per CUDA release (12.6, 12.9 and 13.4 measured), compares each build with the pins of the `nvcc` that compiled it, and skips with a reason when that release has no pins.
 
 **Grouped reorder kernels.** `reorderDevice` moves planes in groups: one stage kernel and one place kernel per group of up to 64 planes that fit the staging area (the widest plane's size per sample by default, so existing scratch stays valid), plus a final words kernel, instead of two kernels per plane. Each kernel's grid is `min(ceil(n / 256), 4 * multiprocessors)` blocks striding over `[0, span)`, and `ReorderPlane` order and results are unchanged byte for byte. Passing `stageBytesPerSample` to `reorderDevice` / `reorderHost` and sizing the scratch with the new `reorderScratchBytes(n, planes, nPlanes, stageBytesPerSample)` overload makes the groups larger; the host face processes the same groups.
 

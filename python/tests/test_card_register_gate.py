@@ -13,7 +13,7 @@ supports, and ``ptxas -v`` plus the SASS are read back:
 
 * ``rkf78_attempt_persist`` and the oscillator's
   ``oscillator_step_xauto_persist`` use at most their pinned per-arch counts
-  (per CUDA major), each on or below its residency step;
+  (per CUDA release), each on or below its residency step;
 * the persist entry is warp-converged: its source holds ONE
   ``atomicAdd(hawk_next`` (the chunk head's warp-wide claim) and its
   unrolled step loop no atomic and no warp collective;
@@ -46,35 +46,43 @@ _BENCH = pathlib.Path(__file__).resolve().parents[2] / "benchmarks"
 ARCHS = ("sm_61", "sm_80", "sm_89", "sm_90")
 ARITH = ("DFMA", "DMUL", "DADD", "MUFU")
 
-#: Register pins by CUDA major, then entry, then arch: register counts differ
+#: Register pins by CUDA release, then entry, then arch: register counts differ
 #: between toolkits, so each is held to the pins of the toolkit that compiled it
-#: (CUDA 12.9 pins cover the 12.x series). An arch missing under a major has no
+#: (12.6, 12.9 and 13.4 are measured). An arch missing under a release has no
 #: pin there and is not checked. Persist entries: the most registers allowed
 #: (the warp-converged loop is held to the register count pinned here, per arch).
 PERSIST_REGS = {
-    12: {
+    "12.6": {
+        "rkf78_attempt_persist": {"sm_61": 162, "sm_80": 164, "sm_89": 164, "sm_90": 164},
+        "oscillator_step_xauto_persist": {"sm_61": 32, "sm_80": 30, "sm_89": 35, "sm_90": 32},
+    },
+    "12.9": {
         "rkf78_attempt_persist": {"sm_61": 166, "sm_80": 164, "sm_89": 164, "sm_90": 164},
         "oscillator_step_xauto_persist": {"sm_61": 32, "sm_80": 30, "sm_89": 35, "sm_90": 32},
     },
-    13: {
+    "13.4": {
         "rkf78_attempt_persist": {"sm_80": 164, "sm_89": 164, "sm_90": 164},
         "oscillator_step_xauto_persist": {"sm_80": 30, "sm_89": 35, "sm_90": 32},
     },
 }
 
-#: Pinned register counts of the fused RKF7(8) entries, +-2 allowed, by major.
+#: Pinned register counts of the fused RKF7(8) entries, +-2 allowed, by release.
 FUSED_REGS = {
-    12: {
+    "12.6": {
+        "rkf78_attempt": {"sm_61": 184, "sm_80": 184, "sm_89": 184, "sm_90": 186},
+        "rkf78_attempt_range": {"sm_61": 186, "sm_80": 186, "sm_89": 186, "sm_90": 186},
+    },
+    "12.9": {
         "rkf78_attempt": {"sm_61": 188, "sm_80": 182, "sm_89": 182, "sm_90": 184},
         "rkf78_attempt_range": {"sm_61": 186, "sm_80": 184, "sm_89": 184, "sm_90": 186},
     },
-    13: {
+    "13.4": {
         "rkf78_attempt": {"sm_80": 182, "sm_89": 182, "sm_90": 184},
         "rkf78_attempt_range": {"sm_80": 184, "sm_89": 184, "sm_90": 186},
     },
 }
 
-#: Pinned arithmetic per entry by CUDA major, the same on every arch. The
+#: Pinned arithmetic per entry by CUDA release, the same on every arch. The
 #: toolkits differ in how many DADDs the RKF7(8) entries carry.
 # The step and stop counters are uint32 planes, so their increments are integer
 # adds (no DADD); the range entry's loop unrolls six copies of the fused step.
@@ -85,13 +93,19 @@ _OSC_ARITH = {
     "oscillator_step_xauto_persist": (64, 20, 10, 0),
 }
 ARITH_COUNTS = {
-    12: {
+    "12.6": {
+        **_OSC_ARITH,
+        "rkf78_attempt": (1247, 400, 80, 69),
+        "rkf78_attempt_range": (1247, 400, 80, 69),
+        "rkf78_attempt_persist": (659, 210, 56, 37),
+    },
+    "12.9": {
         **_OSC_ARITH,
         "rkf78_attempt": (1247, 400, 79, 69),
         "rkf78_attempt_range": (1247, 400, 79, 69),
         "rkf78_attempt_persist": (659, 210, 56, 37),
     },
-    13: {
+    "13.4": {
         **_OSC_ARITH,
         "rkf78_attempt": (1247, 400, 81, 69),
         "rkf78_attempt_range": (1247, 400, 81, 69),
@@ -164,11 +178,11 @@ def _compile(source, arch, tmp):
     return entries
 
 
-def _nvcc_major():
-    """The CUDA major version of the ``nvcc`` on PATH (``None`` if unreadable)."""
+def _nvcc_release():
+    """The ``"X.Y"`` release of the ``nvcc`` on PATH (``None`` if unreadable)."""
     out = subprocess.run(["nvcc", "--version"], capture_output=True, text=True).stdout
-    m = re.search(r"release (\d+)\.", out)
-    return int(m.group(1)) if m else None
+    m = re.search(r"release (\d+\.\d+)", out)
+    return m.group(1) if m else None
 
 
 @pytest.fixture(scope="module")
@@ -179,8 +193,8 @@ def compiled(tmp_path_factory):
     from hawk.compile import toolchain as tc
 
     toolkit = tc.toolkit_archs("nvcc")
-    if _nvcc_major() not in PERSIST_REGS:
-        pytest.skip(f"no register pins for CUDA {_nvcc_major()}")
+    if _nvcc_release() not in PERSIST_REGS:
+        pytest.skip(f"no register pins for CUDA {_nvcc_release()}")
     archs = [a for a in ARCHS if toolkit is None or int(a[3:]) in toolkit[1]]
     units = _units()
     out = {}
@@ -193,12 +207,12 @@ def compiled(tmp_path_factory):
 
 
 def test_every_card_entry_was_compiled(compiled):
-    assert set(compiled) == set(ARITH_COUNTS[_nvcc_major()])
+    assert set(compiled) == set(ARITH_COUNTS[_nvcc_release()])
 
 
 @pytest.mark.parametrize("entry", ["rkf78_attempt_persist", "oscillator_step_xauto_persist"])
 def test_the_persist_entries_sit_on_their_residency_step(compiled, entry):
-    pins = PERSIST_REGS[_nvcc_major()][entry]
+    pins = PERSIST_REGS[_nvcc_release()][entry]
     for arch, row in compiled[entry].items():
         if arch in pins:
             assert row["regs"] <= pins[arch], (entry, arch, row["regs"])
@@ -227,12 +241,12 @@ def test_the_arithmetic_of_every_entry_is_unchanged(compiled):
     for entry, rows in compiled.items():
         for arch, row in rows.items():
             got = tuple(row["ops"][op] for op in ARITH)
-            want = ARITH_COUNTS[_nvcc_major()][entry]
+            want = ARITH_COUNTS[_nvcc_release()][entry]
             assert got == want, (entry, arch, dict(zip(ARITH, got)))
 
 
 def test_the_fused_rkf78_entries_keep_their_registers(compiled):
-    for entry, pinned in FUSED_REGS[_nvcc_major()].items():
+    for entry, pinned in FUSED_REGS[_nvcc_release()].items():
         for arch, row in compiled[entry].items():
             if arch in pinned:
                 assert abs(row["regs"] - pinned[arch]) <= 2, (entry, arch, row["regs"])
