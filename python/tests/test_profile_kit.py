@@ -749,11 +749,14 @@ def test_an_aarch64_machine_gets_the_aarch64_micromamba_and_toolchain_lock():
     rc, out = _bootstrap("--profile", "cpu", env=arm)
     assert rc == 0, out[-800:]
     assert "micromamba-linux-aarch64" in out and "toolchain-linux-aarch64.lock" in out
+    assert "cards-cpu-linux-aarch64.txt" in out
     assert "micromamba-linux-64" not in out and "toolchain-linux-64" not in out
     rc, x86 = _bootstrap("--profile", "cpu", env={**arm, "REPRO_MACHINE": "x86_64"})
     assert rc == 0 and "micromamba-linux-64" in x86 and "toolchain-linux-64.lock" in x86
     rc, other = _bootstrap("--profile", "cpu", env={**arm, "REPRO_MACHINE": "riscv64"})
     assert rc != 0 and "unsupported CPU architecture 'riscv64'" in other
+    rc, gpu = _bootstrap(env={**arm, "REPRO_MAMBA": "/bin/true"})
+    assert rc != 0 and "no pip lock for profile gpu on linux-aarch64" in gpu
 
 
 @pytest.mark.parametrize("script_args", [("bootstrap",), ("profile",)])

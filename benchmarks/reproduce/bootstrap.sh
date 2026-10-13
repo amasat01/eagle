@@ -100,9 +100,11 @@ ENV_PREFIX=${ENV_PREFIX:-$WORK/envs/cards-$PROFILE$GSFX}
 LOCKS=$HERE/locks
 PLATFORM=$(conda_platform) || exit 1
 TC_LOCK=$LOCKS/toolchain-$PLATFORM$TSFX.lock
+# the hashed pip lock: linux-64 keeps the unsuffixed name, other platforms carry theirs
+PIP_LOCK=$LOCKS/cards-$PROFILE$GSFX$([[ $PLATFORM == linux-64 ]] || echo "-$PLATFORM").txt
 ENV_FILE=$WORK/env-$PROFILE$GSFX.sh
 log "target=$TARGET profile=$PROFILE arch=${ARCH:-none} work=$WORK src=$SRC env=$ENV_PREFIX"
-[[ -n $GSFX ]] && log "cuda=$CUDA locks: $TC_LOCK $LOCKS/cards-$PROFILE$GSFX.txt $LOCKS/pypi-$PROFILE$GSFX.txt"
+[[ -n $GSFX ]] && log "cuda=$CUDA locks: $TC_LOCK $PIP_LOCK $LOCKS/pypi-$PROFILE$GSFX.txt"
 [[ $REPRO_DRY_RUN == 1 ]] && log "dry run: commands are printed, nothing is changed"
 
 MODE=$([[ $FROM_PYPI == 1 ]] && echo pypi || echo source)
@@ -113,6 +115,7 @@ md5_of() { md5sum "$@" | md5sum | cut -c1-32; }
 run mkdir -p "$WORK/bin" "$WORK/build" "$SRC"
 
 install_source() {
+  [[ -f $PIP_LOCK ]] || die "no pip lock for profile $PROFILE on $PLATFORM: $PIP_LOCK (locks/make_locks.py pip $PROFILE --platform $PLATFORM writes it)"
   [[ -f $TC_LOCK ]] || die "no toolchain lock for $PLATFORM${TSFX:+ (cuda $CUDA)}: $TC_LOCK (locks/make_locks.py toolchain --platform $PLATFORM writes it)"
   # --- 1. conda frontend (an existing micromamba/mamba/conda, else a pinned download)
   # REPRO_MAMBA=/path/to/frontend picks one; REPRO_MAMBA=download forces the download.
@@ -167,11 +170,11 @@ install_source() {
 
   # --- 3. Python packages (hashed lock, no resolver) ------------------------------
   PIP_STAMP=$ENV_PREFIX/.repro-pip-$PROFILE
-  PIP_SUM=$(md5_of "$LOCKS/cards-$PROFILE$GSFX.txt")
+  PIP_SUM=$(md5_of "$PIP_LOCK")
   if stamp_ok "$PIP_STAMP" "$PIP_SUM"; then
     log "python packages up to date"
   else
-    run "$PY" -m pip install -q --no-deps --require-hashes -r "$LOCKS/cards-$PROFILE$GSFX.txt"
+    run "$PY" -m pip install -q --no-deps --require-hashes -r "$PIP_LOCK"
     write_stamp "$PIP_STAMP" "$PIP_SUM"
   fi
 

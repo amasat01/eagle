@@ -139,7 +139,8 @@ cards within a class; the card records its device's peak FP64 rate and bandwidth
 | Lock | Pins | CUDA floor |
 |---|---|---|
 | `toolchain-linux-64.lock` | Python 3.12, GCC 14, CMake, Ninja, nvcc 12.9 (conda-forge, explicit URLs + md5) | builds only; shared by CUDA 12 and 12.6; the plugin's cubins load on driver ≥ 525.60 |
-| `toolchain-linux-aarch64.lock` | the same toolchain for 64-bit ARM (`make_locks.py toolchain --platform linux-aarch64`); `bootstrap.sh` picks it, and the matching micromamba, from `uname -m` | as above; the pip locks below are still x86_64 only |
+| `toolchain-linux-aarch64.lock` | the same toolchain for 64-bit ARM (`make_locks.py toolchain --platform linux-aarch64`); `bootstrap.sh` picks it, and the matching micromamba, from `uname -m` | as above |
+| `cards-cpu-linux-aarch64.txt` | the `cards-cpu.txt` packages for 64-bit ARM (`make_locks.py pip cpu --platform linux-aarch64`); `bootstrap.sh` picks it from `uname -m`. There are no aarch64 GPU locks yet, and `--from-pypi` on aarch64 builds raptor-eagle / raptor-hawk from their sdists | none |
 | `cards-gpu.txt`, `pypi-gpu.txt` | NumPy, CuPy, PyTorch (cu129), JAX (cuda12), Warp, … (pip, one sha256 each) | CUDA 12.9 runtime libraries (NVRTC included); driver ≥ 575.51; compute capability ≥ 7.5 (the cu129 PyTorch wheel carries sm_75–sm_120) |
 | `cards-gpu-cuda126.txt`, `pypi-gpu-cuda126.txt` | the same packages with PyTorch cu126 and the 12.6 libraries (the previous `cards-gpu.txt`) | CUDA 12.6 runtime libraries; driver ≥ 525.60.13; compute capability ≥ 6.0: pre-Turing (sm_60–sm_70), use `--cuda 12.6` |
 | `cards-cpu.txt` | NumPy, Numba, PyTorch (CPU), JAX (CPU), … | none |
