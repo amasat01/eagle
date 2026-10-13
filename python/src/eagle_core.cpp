@@ -693,6 +693,19 @@ NB_MODULE(_core, m)
         "0..n-1 and sets `*count = *span = n`. Enqueue only, capture-legal; no scratch and "
         "no `fire` word.");
 
+    m.def("pointer_residency",
+        [](std::uintptr_t ptr, std::int32_t device) {
+            (void)EB("filtering", eagle_backend_compact_device);
+            std::int32_t cls = 0;
+            ck(EBX(eagle_backend_pointer_residency)(device, ptr, &cls));
+            return cls;
+        },
+        nb::arg("ptr"), nb::arg("device") = -1,
+        "Classify a raw address as seen from `device` (-1 = current), symbol "
+        "`eagle_backend_pointer_residency`: 0 host, 1 device, 2 managed, 3 mapped pinned host "
+        "(device-addressable), 4 pageable (not device-addressable), 5 another device's memory. "
+        "A setup-time query.");
+
     m.def("restore_device",
         [reorderDesc](const std::vector<std::pair<std::uintptr_t, std::uint32_t>>& planes, std::uintptr_t perm,
             std::uintptr_t inv, std::uintptr_t scratch, std::int64_t n, std::uintptr_t stream,

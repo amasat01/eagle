@@ -53,6 +53,24 @@ It is capture-legal and reads no ``fire`` word. The seam symbol is
 ``eagle_backend_reset_device`` (seam minor 1) and ``eagle._core.reset_device``
 its binding; ``ActiveSet.reset`` uses it on a reordering device set.
 
+**Planes in pinned host memory.** A plane may live in mapped pinned host memory
+(``cudaHostAlloc`` with the mapped flag, or ``cudaHostRegister`` of a buffer with it):
+the kernels read and write it over the bus through its device address, and the
+result is byte-identical to the device-memory path. The contract: planes are
+structure-of-arrays and at most 16 bytes per element (a 4-double quaternion is
+four planes); the host must not touch a plane between the enqueue and the
+stream's synchronisation; under graph capture the buffer must be allocated or
+registered before the capture and outlive the graph. Pageable memory is not
+addressable by the device: ``eagle::filtering::checkPlanesResident(planes, nPlanes,
+device)`` throws naming the plane index and its class, ``classifyPointer`` gives the
+class (host, device, managed, mapped pinned host, pageable, another device), and both
+are setup-time checks, run on every reorder call only under ``EAGLE_DEBUG_MODE``.
+The seam symbol is ``eagle_backend_pointer_residency`` (seam minor 1) with the
+binding ``eagle._core.pointer_residency``. From Python, ``ActiveSet.own`` on a
+device set accepts a numpy plane when it is mapped pinned host memory (for example
+``cupyx.empty_pinned``); a pageable numpy plane raises ``TypeError``. The check runs
+once, in ``own``.
+
 **When it pays.** The reorder is an explicit opt-in. On the performance
 card's oscillator (a memory-bound RK4 step, stop steps spread over two
 decades, Quadro P2000) it pays from about 1e5 samples: at N = 1e5 it cuts the

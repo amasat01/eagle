@@ -1009,6 +1009,42 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_reset_device(struct eagle_b
     });
 }
 
+EAGLE_BACKEND_API eagle_backend_status eagle_backend_pointer_residency(
+    std::int32_t device, std::uint64_t ptr, std::int32_t* cls)
+{
+    return guarded([&] {
+        if (cls == nullptr)
+            throw std::invalid_argument("eagle_backend_pointer_residency: null cls");
+        requireDevice();
+        const int dev = resolveDevice(device, std::nullopt);
+        DeviceScope scope(dev);
+        // The plugin links the driver only (no cudart): the classes of
+        // eagle::filtering::classifyPointer, read through cuPointerGetAttribute.
+        // A pageable pointer is an INVALID_VALUE here, which is the class, not a fault.
+        using eagle::filtering::Residency;
+        static const auto attr = driverEntry12<CUresult (*)(void*, CUpointer_attribute, CUdeviceptr)>(
+            "cuPointerGetAttribute");
+        const auto p = static_cast<CUdeviceptr>(ptr);
+        Residency r = Residency::Pageable;
+        unsigned memType = 0;
+        int managed = 0;
+        if (attr(&memType, CU_POINTER_ATTRIBUTE_MEMORY_TYPE, p) != CUDA_SUCCESS) {
+            r = Residency::Pageable;
+        } else if (attr(&managed, CU_POINTER_ATTRIBUTE_IS_MANAGED, p) == CUDA_SUCCESS && managed != 0) {
+            r = Residency::Managed;
+        } else if (memType == CU_MEMORYTYPE_DEVICE) {
+            int ordinal = -1;
+            r = attr(&ordinal, CU_POINTER_ATTRIBUTE_DEVICE_ORDINAL, p) == CUDA_SUCCESS && ordinal != dev
+                ? Residency::OtherDevice : Residency::Device;
+        } else if (memType == CU_MEMORYTYPE_HOST) {
+            CUdeviceptr mapped = 0;
+            r = attr(&mapped, CU_POINTER_ATTRIBUTE_DEVICE_POINTER, p) == CUDA_SUCCESS && mapped != 0
+                ? Residency::MappedHost : Residency::Pageable;
+        }
+        *cls = static_cast<std::int32_t>(r);
+    });
+}
+
 // ---- filtering: K classes ----------------------------------------------------
 
 namespace {

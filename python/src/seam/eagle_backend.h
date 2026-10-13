@@ -510,6 +510,22 @@ eagle_backend_status eagle_backend_reorder_classes_device(struct eagle_backend_r
  *  the capability. */
 eagle_backend_status eagle_backend_reset_device(struct eagle_backend_reorder_desc* desc);
 
+/** Residency classes reported by ``eagle_backend_pointer_residency``. */
+#define EAGLE_BACKEND_RESIDENCY_HOST 0
+#define EAGLE_BACKEND_RESIDENCY_DEVICE 1
+#define EAGLE_BACKEND_RESIDENCY_MANAGED 2
+#define EAGLE_BACKEND_RESIDENCY_MAPPED_HOST 3
+#define EAGLE_BACKEND_RESIDENCY_PAGEABLE 4
+#define EAGLE_BACKEND_RESIDENCY_OTHER_DEVICE 5
+
+/** Classify the raw address ``ptr`` as seen from ``device`` (-1 = the current one):
+ *  one of ``EAGLE_BACKEND_RESIDENCY_*`` is written to ``*cls``. MAPPED_HOST is pinned
+ *  host memory the device can address (a planes-in-host-memory buffer for
+ *  ``reorder_device``); PAGEABLE is host memory it cannot. A setup-time query, not a
+ *  per-call check. Added in minor 1; bound per symbol, so its presence is the
+ *  capability. */
+eagle_backend_status eagle_backend_pointer_residency(int32_t device, uint64_t ptr, int32_t* cls);
+
 /* ---- experimental (eagle_backend_x_*, optional, unlocked) -------------------- */
 
 /** Write the captured graph as Graphviz dot to ``path`` (the caller reads it). */

@@ -577,9 +577,26 @@ class ActiveSet:
                         "eagle.ActiveSet.own: the plane overlaps a plane "
                         f"{who} already owns; a plane is moved by one set, once")
 
-    def _check_plane(self, arr, what: str) -> None:
+    def _check_mapped_host(self, arr, what: str) -> None:
+        """A numpy plane on a device set must be mapped pinned host memory
+        (checked once, here: a pageable buffer would fault the kernel)."""
+        from . import _core
+
+        where = _address(arr)
+        cls = _core.pointer_residency(where[0], int(self.mask.device.id))
+        if cls != 3:
+            raise TypeError(
+                f"eagle.ActiveSet.{what}: a numpy plane on a device set must live in "
+                "pinned (mapped) host memory, but this one is pageable or not "
+                "device-addressable; allocate it with pinned memory (for example "
+                "cupyx.empty_pinned) or register the buffer (cudaHostRegister with "
+                "the mapped flag) before owning it")
+
+    def _check_plane(self, arr, what: str, mapped_host: bool = False) -> None:
         xp = self._xp
-        if _module_of(arr) is not xp:
+        if mapped_host and self._device and _module_of(arr).__name__ == "numpy":
+            self._check_mapped_host(arr, what)
+        elif _module_of(arr) is not xp:
             raise TypeError(
                 f"eagle.ActiveSet.{what}: a plane lives where the mask lives "
                 f"({xp.__name__}), got {type(arr).__module__}.{type(arr).__name__}")
@@ -605,7 +622,7 @@ class ActiveSet:
                 "eagle.ActiveSet.own: the owned planes are fixed once the set is "
                 "bound (or its reorder step built); own every plane before bind")
         for arr in planes:
-            self._check_plane(arr, "own")
+            self._check_plane(arr, "own", mapped_host=True)
             with _REORDER_LOCK:
                 self._claim(arr)
                 self._owned.append(arr)

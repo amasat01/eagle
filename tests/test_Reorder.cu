@@ -19,6 +19,11 @@
 
 #include <cuda_runtime_api.h>
 
+#include <algorithm>
+#include <cstdlib>
+#include <stdexcept>
+#include <string>
+
 #include "ReorderHostCases.h"
 
 namespace eagle_tests {
@@ -44,11 +49,16 @@ template<typename T>
 void download(std::vector<T>& v, const T* d)
 {
     if (!v.empty())
-        EXPECT_EQ(cudaMemcpy(v.data(), d, v.size() * sizeof(T), cudaMemcpyDeviceToHost), cudaSuccess);
+        EXPECT_EQ(cudaMemcpy(v.data(), d, v.size() * sizeof(T), cudaMemcpyDefault), cudaSuccess);
 }
+
+/** @brief Where the 4-, 8- and 16-byte planes of a DeviceBatch live. */
+enum class Mem { Device, HostAlloc, HostRegister };
 
 /** @brief A HostBatch mirrored on the device. */
 struct DeviceBatch {
+    Mem mem;
+    std::vector<std::pair<void*, Mem>> pinned; // host buffers to release
     std::int64_t n;
     std::uint8_t* mask;
     std::uint16_t* p2;
@@ -59,13 +69,36 @@ struct DeviceBatch {
     std::uint32_t* words; // count, span, fire, live32
     void* scratch = nullptr;
 
-    explicit DeviceBatch(const HostBatch& h)
-        : n(h.n)
+    /** The plane copy of @p v: device memory, a mapped cudaHostAlloc buffer, or a
+     *  registered (mapped) malloc buffer; always returned as the device address. */
+    template<typename T>
+    T* place(const std::vector<T>& v)
+    {
+        if (mem == Mem::Device)
+            return upload(v);
+        const std::size_t bytes = std::max<std::size_t>(v.size(), 1) * sizeof(T);
+        void* host              = nullptr;
+        if (mem == Mem::HostAlloc) {
+            EXPECT_EQ(cudaHostAlloc(&host, bytes, cudaHostAllocMapped), cudaSuccess);
+        } else {
+            host = std::malloc(bytes);
+            EXPECT_EQ(cudaHostRegister(host, bytes, cudaHostRegisterMapped), cudaSuccess);
+        }
+        pinned.emplace_back(host, mem);
+        std::memcpy(host, v.data(), v.size() * sizeof(T));
+        void* dev = nullptr;
+        EXPECT_EQ(cudaHostGetDevicePointer(&dev, host, 0), cudaSuccess);
+        return static_cast<T*>(dev);
+    }
+
+    explicit DeviceBatch(const HostBatch& h, Mem where = Mem::Device)
+        : mem(where)
+        , n(h.n)
         , mask(upload(h.mask))
         , p2(upload(h.p2))
-        , p4(upload(h.p4))
-        , p8(upload(h.p8))
-        , p16(upload(h.p16))
+        , p4(place(h.p4))
+        , p8(place(h.p8))
+        , p16(place(h.p16))
         , perm(upload(h.perm))
         , inv(upload(h.inv))
         , map(upload(h.map))
@@ -75,9 +108,19 @@ struct DeviceBatch {
     }
     ~DeviceBatch()
     {
-        for (void* p : { (void*)mask, (void*)p2, (void*)p4, (void*)p8, (void*)p16, (void*)perm,
-                 (void*)inv, (void*)map, (void*)words, scratch })
+        for (void* p : { (void*)mask, (void*)p2, (void*)perm, (void*)inv, (void*)map, (void*)words, scratch })
             cudaFree(p);
+        if (mem == Mem::Device)
+            for (void* p : { (void*)p4, (void*)p8, (void*)p16 })
+                cudaFree(p);
+        for (auto& [host, kind] : pinned) {
+            if (kind == Mem::HostAlloc) {
+                cudaFreeHost(host);
+            } else {
+                cudaHostUnregister(host);
+                std::free(host);
+            }
+        }
     }
     std::array<ReorderPlane, 5> planes()
     {
@@ -141,11 +184,10 @@ void expectSame(const HostBatch& a, const HostBatch& b)
 
 class ReorderDeviceSizes : public Test, public ::testing::WithParamInterface<std::int64_t> { };
 
-TEST_P(ReorderDeviceSizes, DeviceMatchesHostByteForByte)
+void expectDeviceMatchesHost(std::int64_t n, Mem mem)
 {
-    const std::int64_t n = GetParam();
     HostBatch h(n);
-    DeviceBatch d(h);
+    DeviceBatch d(h, mem);
     const auto drop1 = randomDrop(n, 0.5, 21u + unsigned(n));
     h.finish(drop1);
     d.setMask(h.mask);
@@ -171,6 +213,11 @@ TEST_P(ReorderDeviceSizes, DeviceMatchesHostByteForByte)
     restoreDevice(pl.data(), std::uint32_t(pl.size()), d.perm, d.inv, d.scratch, n, 0);
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
     expectSame(d.read(), h);
+}
+
+TEST_P(ReorderDeviceSizes, DeviceMatchesHostByteForByte)
+{
+    expectDeviceMatchesHost(GetParam(), Mem::Device);
 }
 
 INSTANTIATE_TEST_SUITE_P(Edges, ReorderDeviceSizes,
@@ -209,11 +256,11 @@ TEST_F(ReorderDevice, TriggerMatchesTheHostFace)
     }
 }
 
-TEST_F(ReorderDevice, CapturedReorderObeysItsFireWord)
+void expectCapturedReorderObeysItsFireWord(Mem mem)
 {
     const std::int64_t n = 5000;
     HostBatch h(n);
-    DeviceBatch d(h);
+    DeviceBatch d(h, mem);
     const auto drop = randomDrop(n, 0.7, 31u);
     h.finish(drop);
     d.setMask(h.mask);
@@ -241,6 +288,73 @@ TEST_F(ReorderDevice, CapturedReorderObeysItsFireWord)
     cudaGraphExecDestroy(exec);
     cudaGraphDestroy(g);
     cudaStreamDestroy(s);
+}
+
+TEST_F(ReorderDevice, CapturedReorderObeysItsFireWord)
+{
+    expectCapturedReorderObeysItsFireWord(Mem::Device);
+}
+
+// Planes in mapped pinned host memory: the kernels reach them over the bus and
+// the result is byte-identical to the device-memory path.
+TEST_F(ReorderDevice, MappedHostAllocPlanesMatchTheHostFace)
+{
+    for (const std::int64_t n : { std::int64_t { 257 }, std::int64_t { 100003 } })
+        expectDeviceMatchesHost(n, Mem::HostAlloc);
+}
+
+TEST_F(ReorderDevice, RegisteredHostPlanesMatchTheHostFace)
+{
+    for (const std::int64_t n : { std::int64_t { 257 }, std::int64_t { 100003 } })
+        expectDeviceMatchesHost(n, Mem::HostRegister);
+}
+
+TEST_F(ReorderDevice, CapturedReorderOnPinnedPlanesObeysItsFireWord)
+{
+    expectCapturedReorderObeysItsFireWord(Mem::HostAlloc);
+    expectCapturedReorderObeysItsFireWord(Mem::HostRegister);
+}
+
+TEST_F(ReorderDevice, ResidencyClassifiesEveryKindOfPointer)
+{
+    using eagle::filtering::classifyPointer;
+    using eagle::filtering::Residency;
+    void *dev = nullptr, *managed = nullptr, *mapped = nullptr;
+    ASSERT_EQ(cudaMalloc(&dev, 64), cudaSuccess);
+    ASSERT_EQ(cudaMallocManaged(&managed, 64), cudaSuccess);
+    ASSERT_EQ(cudaHostAlloc(&mapped, 64, cudaHostAllocMapped), cudaSuccess);
+    std::vector<char> pageable(64);
+    EXPECT_EQ(classifyPointer(dev), Residency::Device);
+    EXPECT_EQ(classifyPointer(managed), Residency::Managed);
+    EXPECT_EQ(classifyPointer(mapped), Residency::MappedHost);
+    EXPECT_EQ(classifyPointer(pageable.data()), Residency::Pageable);
+    int cur = 0;
+    ASSERT_EQ(cudaGetDevice(&cur), cudaSuccess);
+    EXPECT_EQ(classifyPointer(dev, cur), Residency::Device);
+    EXPECT_EQ(classifyPointer(dev, cur + 1), Residency::OtherDevice);
+    cudaFree(dev);
+    cudaFree(managed);
+    cudaFreeHost(mapped);
+}
+
+TEST_F(ReorderDevice, PageablePlaneIsRefusedByIndex)
+{
+    using eagle::filtering::checkPlanesResident;
+    const std::int64_t n = 64;
+    HostBatch h(n);
+    DeviceBatch d(h, Mem::HostAlloc);
+    auto pl = d.planes();
+    EXPECT_NO_THROW(checkPlanesResident(pl.data(), std::uint32_t(pl.size())));
+    std::vector<double> unpinnedBuf(static_cast<std::size_t>(n), 0.0);
+    pl[3] = ReorderPlane { unpinnedBuf.data(), 8 };
+    try {
+        checkPlanesResident(pl.data(), std::uint32_t(pl.size()));
+        FAIL() << "a pageable plane must be refused";
+    } catch (const std::invalid_argument& e) {
+        const std::string what = e.what();
+        EXPECT_NE(what.find("plane 3"), std::string::npos) << what;
+        EXPECT_NE(what.find("pageable"), std::string::npos) << what;
+    }
 }
 
 TEST_F(ReorderDevice, ResetGivesTheIdentityAndTheFullSpan)

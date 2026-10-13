@@ -83,11 +83,101 @@ inline bool supportedElem(std::uint32_t b)
     return b == 1u || b == 2u || b == 4u || b == 8u || b == 16u;
 }
 
-/** @brief Validate a reorder request; throws ``std::invalid_argument``. */
+}  // namespace detail
+
+/** @brief Where a pointer lives, as seen from one device. */
+enum class Residency : std::int32_t {
+    Host = 0,         ///< ordinary host memory (CPU mode: everything)
+    Device = 1,       ///< device memory of the queried device
+    Managed = 2,      ///< managed (unified) memory
+    MappedHost = 3,   ///< pinned host memory the device can address (allocated or registered mapped)
+    Pageable = 4,     ///< host memory the device cannot address (pageable, or pinned but not mapped)
+    OtherDevice = 5,  ///< device memory of a different device
+};
+
+/** @brief Name of a residency class, for messages. */
+inline const char* residencyName(Residency r)
+{
+    switch (r) {
+    case Residency::Host: return "host";
+    case Residency::Device: return "device";
+    case Residency::Managed: return "managed";
+    case Residency::MappedHost: return "mapped pinned host";
+    case Residency::Pageable: return "pageable host (not device-accessible)";
+    case Residency::OtherDevice: return "another device's memory";
+    }
+    return "unknown";
+}
+
+/** @brief Classify @p ptr for @p device (a negative device = the current one).
+ *
+ * Reads the pointer's attributes; the error code is not the signal (a pageable
+ * pointer reports success as "unregistered"). In CPU mode every pointer is
+ * ``Host``. A setup-time query: call it once per buffer, not per reorder.
+ */
+inline Residency classifyPointer(const void* ptr, int device = -1)
+{
+#ifdef EAGLE_CPU_ONLY
+    (void)ptr;
+    (void)device;
+    return Residency::Host;
+#else
+    if (device < 0 && cudaGetDevice(&device) != cudaSuccess) {
+        (void)cudaGetLastError();
+        return Residency::Pageable;
+    }
+    cudaPointerAttributes a{};
+    if (cudaPointerGetAttributes(&a, ptr) != cudaSuccess) {
+        (void)cudaGetLastError();  // sticky-free: an unknown pointer is simply not device-accessible
+        return Residency::Pageable;
+    }
+    switch (a.type) {
+    case cudaMemoryTypeDevice:
+        return a.device == device ? Residency::Device : Residency::OtherDevice;
+    case cudaMemoryTypeManaged:
+        return Residency::Managed;
+    case cudaMemoryTypeHost:
+        return a.devicePointer != nullptr ? Residency::MappedHost : Residency::Pageable;
+    default:
+        return Residency::Pageable;
+    }
+#endif
+}
+
+/** @brief Setup-time check that every plane is addressable by @p device.
+ *
+ * Throws ``std::invalid_argument`` naming the plane index and its class when a
+ * plane is pageable or lives on another device. Device, managed and mapped
+ * pinned host planes pass. Not for the per-reorder hot path.
+ */
+inline void checkPlanesResident(const ReorderPlane* planes, std::uint32_t nPlanes, int device = -1)
+{
+    for (std::uint32_t p = 0; p < nPlanes; ++p) {
+        if (planes[p].data == nullptr)
+            continue;
+        const Residency r = classifyPointer(planes[p].data, device);
+        if (r == Residency::Pageable || r == Residency::OtherDevice)
+            EAGLE_THROW(std::invalid_argument,
+                "reorder: plane " + std::to_string(p) + " is " + residencyName(r)
+                    + "; a device reorder needs device, managed or mapped pinned host memory");
+    }
+}
+
+namespace detail {
+
+/** @brief Validate a reorder request; throws ``std::invalid_argument``.
+ *  @p onDevice: the planes are read by device kernels (residency is then checked
+ *  under ``EAGLE_DEBUG_MODE`` only). */
 inline void checkReorder(const ReorderPlane* planes, std::uint32_t nPlanes,
-    const std::uint8_t* mask, std::int64_t n, bool needMask)
+    const std::uint8_t* mask, std::int64_t n, bool needMask, bool onDevice = false)
 {
     checkCompact(n);
+#if defined(EAGLE_DEBUG_MODE) && !defined(EAGLE_CPU_ONLY)
+    if (onDevice && n > 0 && nPlanes > 0 && planes != nullptr)
+        checkPlanesResident(planes, nPlanes);
+#else
+    (void)onDevice;
+#endif
     if (nPlanes > 0 && planes == nullptr)
         EAGLE_THROW(std::invalid_argument, "reorder: a null plane table");
     bool maskSeen = false;
@@ -334,7 +424,7 @@ inline void reorderDevice(const ReorderPlane* planes, std::uint32_t nPlanes,
     std::uint32_t* span, std::uint32_t* fire, void* scratch, std::int64_t n,
     cudaStream_t stream)
 {
-    detail::checkReorder(planes, nPlanes, mask, n, true);
+    detail::checkReorder(planes, nPlanes, mask, n, true, true);
     err::detail::clearStaleLastError();  // check only our own launches below
     if (n == 0) {
         detail::reorderEmpty<std::uint32_t><<<1, 1, 0, stream>>>(count, span, fire);
@@ -383,7 +473,7 @@ inline void restoreDevice(const ReorderPlane* planes, std::uint32_t nPlanes,
     std::int32_t* perm, std::int32_t* inv, void* scratch, std::int64_t n,
     cudaStream_t stream)
 {
-    detail::checkReorder(planes, nPlanes, nullptr, n, false);
+    detail::checkReorder(planes, nPlanes, nullptr, n, false, true);
     err::detail::clearStaleLastError();  // check only our own launches below
     if (n == 0)
         return;
