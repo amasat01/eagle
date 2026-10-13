@@ -43,8 +43,9 @@ def _fill(dist: str) -> float:
 
 
 def _capacity(row) -> tuple:
-    """``(latency-regime capacity, resident threads of the device)`` of the
-    kernel the row timed: its own threads per SM times the SMs."""
+    """``(persist entry's resident threads, fused entry's resident threads)`` of
+    the kernel the row timed: its own threads per SM times the SMs. The first
+    sizes the regime rule, the second the fused entry's waves in the model."""
     return int(row["capacity"]), int(row["sms"]) * int(row["resident_per_sm"])
 
 

@@ -193,8 +193,9 @@ PICK_PERSIST_MULTIPLE = 8
 
 
 def _entry_regime(capacity: int, n: int) -> str:
-    """Which entry a batch of ``n`` samples is sure to want on a device whose
-    :meth:`~eagle._plan_binding.BoundPlan.device_capacity` is ``capacity``:
+    """Which entry a batch of ``n`` samples is sure to want on a device that keeps
+    ``capacity`` threads of the persist entry resident
+    (:meth:`Runner._persist_capacity`):
     ``"fused"``, ``"persist"``, or ``"band"`` when the readback has to say
     (also when the capacity is unknown, ``<= 0``)."""
     if capacity <= 0:
@@ -300,11 +301,12 @@ def _fast_mode_for(step, n: int, *, compacting: bool = False) -> str | None:
     a compacting kernel: this falls through to the band path, same as an
     unknown capacity.
 
-    This size rule is the first-run rule. Between a quarter of the capacity
-    and eight times it (:func:`_entry_regime`), when both the persist and the
-    range entries exist, later runs follow the model or the measured wall of
-    each entry on this device (:meth:`Runner._pick_entry`); outside that
-    range the size pick stands for every run."""
+    This size rule is the first-run rule. Between a quarter of the persist
+    entry's resident capacity and eight times it (:func:`_entry_regime`),
+    when both the persist and the range entries exist, later runs follow the
+    model or the measured wall of each entry on this device
+    (:meth:`Runner._pick_entry`); outside that range the regime's entry stands
+    for every run."""
     cap = step.device_capacity()
     if cap <= 0:
         return None
@@ -918,10 +920,15 @@ class Runner:
                 mode = fast_mode_override
         elif eligible:
             mode = _fast_mode_for(self.step, self.n, compacting=self.active is not None)
+            regime = _entry_regime(self._persist_capacity(), self.n)
+            if regime == "fused" and (self.active is None or self.step.range_entry() is not None):
+                mode = "fused_one"
+            elif regime == "persist" and self.step.persist_entry() is not None:
+                mode = "persist"
             # inside the band between the two sure regimes, with both entries
             # present, the other entry can be timed against the size pick
             probe = (self._fast_probe is not False and mode is not None
-                     and _entry_regime(self.step.device_capacity(), self.n) == "band"
+                     and regime == "band"
                      and self.step.persist_entry() is not None
                      and self.step.range_entry() is not None)
         else:
@@ -1135,6 +1142,22 @@ class Runner:
     _fast_last = property(lambda self: self._view("last"), lambda self, v: self._put("last", v))
     _fast_prior = property(lambda self: self._view("prior"), lambda self, v: self._put("prior", v))
     _fast_runs = property(lambda self: self._view("runs"), lambda self, v: self._put("runs", v))
+
+    def _persist_capacity(self) -> int:
+        """SMs times the threads per SM the persist entry keeps resident at its own
+        registers (``0`` when unknown); the size the regime rule weighs a batch
+        against. Not ``device_capacity()``: a lighter kernel, such as the same
+        step in single precision, keeps more threads resident per SM, so one
+        wave holds more samples."""
+        import importlib
+
+        from ._launch_policy import capacity
+
+        persist = self.step.persist_entry()
+        if persist is None:
+            return 0
+        launch = importlib.import_module("eagle.launch")
+        return capacity(launch._device_props(), launch._kernel_attrs(persist))
 
     def _entry_model(self) -> tuple:
         """``(model, key)`` of a runner that can time both entries. ``model`` holds

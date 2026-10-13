@@ -1516,6 +1516,18 @@ def _slow_entry(monkeypatch, runner, slow, seconds=0.03):
     monkeypatch.setattr(cls, name, delayed)
 
 
+def _persist_capacity(auto):
+    """Threads the persist entry keeps resident across the device (what the regime
+    rule weighs a batch against)."""
+    import importlib
+
+    from eagle._launch_policy import capacity
+
+    launch = importlib.import_module("eagle.launch")
+    bound = _capacity_probe(auto, "plain", "device")
+    return capacity(launch._device_props(), launch._kernel_attrs(bound.persist_entry()))
+
+
 @pytest.fixture(autouse=True)
 def _contested_model_and_empty_pick_cache(monkeypatch):
     """The probe rows below time both entries: keep the model from calling the
@@ -1532,7 +1544,13 @@ def _contested_model_and_empty_pick_cache(monkeypatch):
 
 @pytest.mark.gpu
 def test_the_regime_rule_skips_the_probe_outside_the_band(auto):
-    cap = _device_capacity(auto, "plain", "device")
+    import importlib
+
+    from eagle._launch_policy import capacity
+
+    launch = importlib.import_module("eagle.launch")
+    bound = _capacity_probe(auto, "plain", "device")
+    cap = capacity(launch._device_props(), launch._kernel_attrs(bound.persist_entry()))
     assert cap
     for n, mode in ((16 * cap, "persist"), (max(cap // 8, 1), "fused_one")):
         runner, rerun = _probe_runner(auto, n)
@@ -1619,7 +1637,7 @@ def test_fast_entry_probe_reprobes_on_regime_change(auto, monkeypatch):
 
 @pytest.mark.gpu
 def test_fast_entry_probe_below_capacity_is_off(auto):
-    runner, rerun = _probe_runner(auto, max(_device_capacity(auto, "plain", "device") // 8, 1))
+    runner, rerun = _probe_runner(auto, max(_persist_capacity(auto) // 8, 1))
     reports = [rerun()[0] for _ in range(4)]
     assert [r.mode for r in reports] == ["fused_one"] * 4
     assert not any(r.probe for r in reports)
