@@ -94,6 +94,18 @@ AUTO_RATE0 = 8.0
 #: Issue slots per step the cost model assumes when the kernel does not say.
 AUTO_STEP_OPS = 33
 
+
+def ops_per_step(plugin) -> float:
+    """The step's operation count the launch rules read, from the artifact's
+    sidecar (``fp64_ops_ir``, else ``ops_per_step``, else ``step_ops``);
+    ``AUTO_STEP_OPS`` when it carries none. The compaction cadence and the
+    persistent chunk both price a step with it."""
+    for key in ("fp64_ops_ir", "ops_per_step", "step_ops"):
+        value = getattr(plugin, key, None)
+        if value:
+            return float(value)
+    return float(AUTO_STEP_OPS)
+
 _STRUCTURES = {"device_kernel": True, "host_team": False}
 
 __all__ = ["FINISHED_PLANE", "FUSED_STEPS_PLANE", "RunReport", "Runner",
@@ -902,9 +914,10 @@ class Runner:
 
         dev = importlib.import_module("eagle.launch")._device_props()
         major, minor, sms, ratio, fp64 = _fp64_args(dev, self._scalar_type())
-        step_ops = getattr(self.step.plan.plugin, "step_ops", None) or AUTO_STEP_OPS
         rate = _core.band_rate(major, minor, sms, ratio, _attr(dev, "clockRate"), fp64,
-                               self.n, float(step_ops))
+                               self.n, ops_per_step(self.step.plan.plugin),
+                               _attr(dev, "memoryClockRate"), _attr(dev, "memoryBusWidth"),
+                               float(self.active.bytes_per_sample() if self.active is not None else 0))
         return rate if rate > 0 else AUTO_RATE0
 
     def _scalar_type(self) -> str:
@@ -980,15 +993,12 @@ class Runner:
         self._size_persist()
 
     def _device_and_ops(self) -> tuple:
-        """The device properties and the step's floating-point operation count
-        (the plugin's ``fp64_ops_ir`` or ``ops_per_step``; ``AUTO_STEP_OPS``
-        when it carries neither) the launch rules read."""
+        """The device properties and the step's operation count
+        (:func:`ops_per_step`) the launch rules read."""
         import importlib
 
-        plugin = self.step.plan.plugin
-        ops = (getattr(plugin, "fp64_ops_ir", None) or getattr(plugin, "ops_per_step", None)
-               or AUTO_STEP_OPS)
-        return importlib.import_module("eagle.launch")._device_props(), float(ops)
+        return (importlib.import_module("eagle.launch")._device_props(),
+                ops_per_step(self.step.plan.plugin))
 
     def _chunk_for(self, mean_steps: float) -> int:
         """The chunk length for samples of ``mean_steps`` mean steps: the pinned

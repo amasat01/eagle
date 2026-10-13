@@ -1165,13 +1165,19 @@ NB_MODULE(_core, m)
 
         m.def("band_rate",
             [](int major, int minor, int sms, int fp64_ratio, int clock_khz, bool fp64, long long live,
-               double step_ops) {
-                return pol::bandRate({ { major, minor, 0, 0 }, sms, fp64_ratio, clock_khz }, fp64, live, step_ops);
+               double step_ops, int mem_clock_khz, int bus_width_bits, double bytes_per_sample) {
+                return pol::bandRate({ { major, minor, 0, 0 }, sms, fp64_ratio, clock_khz, mem_clock_khz,
+                                       bus_width_bits },
+                                     fp64, live, step_ops, bytes_per_sample);
             },
             nb::arg("major"), nb::arg("minor"), nb::arg("sms"), nb::arg("fp64_ratio"), nb::arg("clock_khz"),
-            nb::arg("fp64"), nb::arg("live"), nb::arg("step_ops"),
-            "R from the cost model: one compaction of `live` samples over one step of a full-live "
-            "launch of `step_ops` issue slots per sample. 0 when the clock or SM count is unknown. Pure.");
+            nb::arg("fp64"), nb::arg("live"), nb::arg("step_ops"), nb::arg("mem_clock_khz") = 0,
+            nb::arg("bus_width_bits") = 0, nb::arg("bytes_per_sample") = 0.0,
+            "R from the cost model: one compaction of `live` samples (its fixed cost, its per-sample "
+            "cost and the graph gap) over the arithmetic of one step of a full-live launch of "
+            "`step_ops` issue slots per sample. When the memory clock, bus width and `bytes_per_sample` "
+            "are given and the step is bound by memory, only the share of the arithmetic dead lanes "
+            "expose is counted. 0 when the clock or SM count is unknown. Pure.");
     }
 
     m.def("run_host_branches",

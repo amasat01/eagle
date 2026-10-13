@@ -313,6 +313,8 @@ Launch.APascalClaimCostsTwelveCycles
 Launch.ATimedBoundThatIsSlowerIsRefused
 Launch.BandCadenceRows
 Launch.BandCadenceStaysInsideItsBounds
+Launch.BandKMatchesTheSweptOptimumWithinOneDoubling
+Launch.BandRateCarriesTheMemoryTerm
 Launch.BandRateFromTheCostModel
 Launch.ChunkGrowsWithTheSmCount
 Launch.ChunkIgnoresTheClock

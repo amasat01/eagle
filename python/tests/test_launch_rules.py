@@ -75,6 +75,36 @@ def test_the_cost_model_prices_a_compaction_in_steps():
     assert _core.band_rate(8, 0, 108, 2, 0, True, 1_000_000, 33.0) == 0.0
 
 
+# (major, minor, SMs, FP32:FP64 ratio, clock kHz, memory clock kHz, bus bits)
+_BAND_DEVICES = {
+    "h100": (9, 0, 132, 2, 1_755_000, 2_619_000, 5120),
+    "a100": (8, 0, 108, 2, 1_410_000, 1_215_000, 5120),
+    "rtx": (12, 0, 188, 64, 2_617_000, 14_001_000, 512),
+    "p2000": (6, 1, 8, 32, 1_480_000, 3_504_000, 160),
+}
+
+
+def _band_pick(name, live=1_000_000, bytes_per_sample=40.0):
+    major, minor, sms, ratio, clock, mem_clock, bus = _BAND_DEVICES[name]
+    rate = _core.band_rate(major, minor, sms, ratio, clock, True, live, 33.0, mem_clock, bus,
+                           bytes_per_sample)
+    return ud._next_k(_K, int(0.0022 * live * _K), live, 1024, ud.AUTO_K_MIN, rate)
+
+
+def test_a_memory_bound_step_compacts_less_often():
+    h100 = _BAND_DEVICES["h100"]
+    compute_only = _core.band_rate(*h100[:5], True, 1_000_000, 33.0)
+    with_memory = _core.band_rate(*h100[:5], True, 1_000_000, 33.0, *h100[5:], 200.0)
+    assert with_memory > 3.0 * compute_only
+
+
+@pytest.mark.parametrize("name, want", [("h100", {64, 128, 256, 512, 1024}),
+                                        ("a100", {64, 128, 256, 512, 1024}),
+                                        ("rtx", {16, 32, 64}), ("p2000", {16, 32, 64})])
+def test_the_band_pick_stays_within_a_doubling_of_the_swept_optimum(name, want):
+    assert _band_pick(name) in want
+
+
 # (major, minor, SMs, FP32:FP64 ratio)
 P2000_ARGS = (6, 1, 8, 32)
 A100_ARGS = (8, 0, 108, 2)
@@ -306,3 +336,12 @@ def test_a_pinned_chunk_is_never_refit():
     runner._refit_persist(0.23, 10)
     runner._refit_persist(0.9, 100_000)
     assert runner._fast_chunk == 16
+
+
+def test_band_and_persist_read_one_ops_accessor():
+    class Sidecar:
+        step_ops = 90
+    assert ud.ops_per_step(Sidecar()) == 90.0
+    Sidecar.fp64_ops_ir = 41
+    assert ud.ops_per_step(Sidecar()) == 41.0
+    assert ud.ops_per_step(object()) == float(ud.AUTO_STEP_OPS)

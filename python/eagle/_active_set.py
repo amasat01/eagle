@@ -622,6 +622,12 @@ class ActiveSet:
             out.extend((ptr + r * self.n * size, size) for r in range(rows))
         return out
 
+    def bytes_per_sample(self) -> int:
+        """Bytes one sample's owned planes occupy: what a step moves per live
+        sample, read by the compaction cadence's memory term."""
+        return sum(arr.dtype.itemsize * (1 if arr.ndim == 1 else int(arr.shape[0]))
+                   for arr in self._owned)
+
     def _freeze(self) -> None:
         """Fix the owned planes and allocate the reorder scratch, before
         any capture."""

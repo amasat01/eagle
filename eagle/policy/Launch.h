@@ -43,6 +43,13 @@ inline constexpr int PERSIST_FETCH_WARPS_MAX = 3;
 inline constexpr double COMPACTION_FLOOR_S = 27e-6;
 /** @brief Compaction's cost per live sample, in seconds. */
 inline constexpr double COMPACTION_PER_SAMPLE_S = 32e-12;
+/** @brief The gap a compaction adds between its kernels in a captured graph, in seconds. */
+inline constexpr double GRAPH_NODE_S = 62e-6;
+/**
+ * @brief Share of a step's arithmetic still exposed to dead lanes when the step
+ *        is bound by memory: the rest hides under the loads.
+ */
+inline constexpr double BAND_HIDDEN_WASTE = 0.25;
 
 /** @brief The device facts the launch rules read. A zero field is "not reported". */
 struct LaunchDevice {
@@ -50,6 +57,8 @@ struct LaunchDevice {
     int sms = 0;
     int fp64Ratio = 0;      ///< FP32:FP64 throughput ratio (1 when not reported)
     int clockKhz = 0;
+    int memClockKhz = 0;    ///< memory clock; with busWidthBits gives the bandwidth, 0 = not reported
+    int busWidthBits = 0;
 };
 
 /** @brief Scheduler partitions and FP32 lanes per SM, where they differ from 4 x 32. */
@@ -173,17 +182,59 @@ inline long long bandK(double rate, long long newly, long long live, long long k
 }
 
 /**
- * @brief R from the cost model: one compaction of @p live samples over one
- *        step of a full-live launch (@p stepOps issue slots per sample); 0 when
- *        the clock or the SM count is unknown.
+ * @brief Seconds of one step of @p live samples in a full-live launch on the
+ *        arithmetic alone: @p stepOps issue slots per sample over the SMs'
+ *        issue pipes; 0 when the clock or the SM count is unknown.
  */
-inline double bandRate(const LaunchDevice& dev, bool fp64, long long live, double stepOps) {
+inline double bandComputeStepS(const LaunchDevice& dev, bool fp64, long long live, double stepOps) {
     if (dev.clockKhz <= 0 || dev.sms <= 0 || stepOps <= 0) return 0.0;
     const SmLayout layout = smLayout(dev.residency.ccMajor, dev.residency.ccMinor);
     const double warps = static_cast<double>(live) / RESIDENCY_WARP_LANES;
-    const double stepS = warps * stepOps * issueCycles(dev, fp64) /
-                         (static_cast<double>(layout.partitions) * dev.sms * dev.clockKhz * 1e3);
-    return (COMPACTION_FLOOR_S + COMPACTION_PER_SAMPLE_S * static_cast<double>(live)) / stepS;
+    return warps * stepOps * issueCycles(dev, fp64) /
+           (static_cast<double>(layout.partitions) * dev.sms * dev.clockKhz * 1e3);
+}
+
+/**
+ * @brief Seconds one step of @p live samples takes to move @p bytesPerSample
+ *        bytes each through device memory (memClockKhz * busWidthBits * 2 / 8
+ *        bytes per second); 0 when the memory clock, the bus width or the
+ *        bytes are unknown.
+ */
+inline double bandMemoryStepS(const LaunchDevice& dev, long long live, double bytesPerSample) {
+    if (dev.memClockKhz <= 0 || dev.busWidthBits <= 0 || bytesPerSample <= 0) return 0.0;
+    const double bandwidth = static_cast<double>(dev.memClockKhz) * 1e3 * dev.busWidthBits * 2.0 / 8.0;
+    return static_cast<double>(live) * bytesPerSample / bandwidth;
+}
+
+/**
+ * @brief Seconds of one full-live step: the longer of its arithmetic and its
+ *        memory traffic; 0 when the clock or the SM count is unknown.
+ */
+inline double bandStepS(const LaunchDevice& dev, bool fp64, long long live, double stepOps,
+                        double bytesPerSample = 0.0) {
+    const double compute = bandComputeStepS(dev, fp64, live, stepOps);
+    return compute > 0.0 ? std::max(compute, bandMemoryStepS(dev, live, bytesPerSample)) : 0.0;
+}
+
+/**
+ * @brief R from the cost model: one compaction of @p live samples over the
+ *        step it is weighed against; 0 when the clock or the SM count is
+ *        unknown.
+ *
+ * The compaction costs its fixed part, its per-sample part and the graph gap.
+ * What it saves is the arithmetic dead lanes would have run, so it is priced
+ * against the compute time of a step: a step bound by compute is the whole
+ * step, a step bound by memory hides most of it (only BAND_HIDDEN_WASTE of
+ * the compute time is exposed). The memory term is read from
+ * @p bytesPerSample (0: not reported, the step is taken as compute-bound).
+ */
+inline double bandRate(const LaunchDevice& dev, bool fp64, long long live, double stepOps,
+                       double bytesPerSample = 0.0) {
+    const double compute = bandComputeStepS(dev, fp64, live, stepOps);
+    if (compute <= 0.0) return 0.0;
+    const double memory = bandMemoryStepS(dev, live, bytesPerSample);
+    const double exposed = memory > compute ? BAND_HIDDEN_WASTE * compute : compute;
+    return (COMPACTION_FLOOR_S + COMPACTION_PER_SAMPLE_S * static_cast<double>(live) + GRAPH_NODE_S) / exposed;
 }
 
 /** @brief True when a launch asking for @p demandThreads would not fit at the unbounded residency. */
