@@ -1115,6 +1115,8 @@ NB_MODULE(_core, m)
 
         m.attr("BOUND_TEXT_GROWTH_PERCENT") = pol::BOUND_TEXT_GROWTH_PERCENT;
         m.attr("PERSIST_FIRST_FILL") = pol::PERSIST_FIRST_FILL;
+        m.attr("ENTRY_PERSIST_BELOW") = pol::ENTRY_PERSIST_BELOW;
+        m.attr("ENTRY_FUSED_ABOVE") = pol::ENTRY_FUSED_ABOVE;
 
         // -- launch sizing and cadence (eagle/policy/Launch.h) ---------------------
         m.def("persist_demand",
@@ -1178,6 +1180,21 @@ NB_MODULE(_core, m)
             "`step_ops` issue slots per sample. When the memory clock, bus width and `bytes_per_sample` "
             "are given and the step is bound by memory, only the share of the arithmetic dead lanes "
             "expose is counted. 0 when the clock or SM count is unknown. Pure.");
+        m.def("entry_ratio",
+            [](int major, int minor, int sms, int fp64_ratio, int clock_khz, bool fp64, long long resident_threads,
+               long long n, long long steps, double fill, double ops) {
+                return pol::persistOverFused({ { major, minor, 0, 0 }, sms, fp64_ratio, clock_khz }, fp64,
+                                             resident_threads, n, steps, fill, ops);
+            },
+            nb::arg("major"), nb::arg("minor"), nb::arg("sms"), nb::arg("fp64_ratio"), nb::arg("clock_khz"),
+            nb::arg("fp64"), nb::arg("resident_threads"), nb::arg("n"), nb::arg("steps"), nb::arg("fill"),
+            nb::arg("ops"),
+            "Predicted wall of the persistent entry over the fused entry for `n` samples whose longest ran "
+            "`steps` steps and whose steps fill a fraction `fill` of that, each step `ops` operations, on a "
+            "device that holds `resident_threads` threads at the fused entry's registers. Below "
+            "ENTRY_PERSIST_BELOW the persistent entry wins, above ENTRY_FUSED_ABOVE the fused one. "
+            "0 when the clock, SM count or any argument is unknown. Pure.");
+
     }
 
     m.def("run_host_branches",

@@ -237,6 +237,61 @@ inline double bandRate(const LaunchDevice& dev, bool fp64, long long live, doubl
     return (COMPACTION_FLOOR_S + COMPACTION_PER_SAMPLE_S * static_cast<double>(live) + GRAPH_NODE_S) / exposed;
 }
 
+/** @brief Share of a persistent launch's issue slots that do useful work once its lanes keep fetching. */
+inline constexpr double ENTRY_PERSIST_EFFICIENCY = 0.85;
+/** @brief Share of the step budget a fused launch runs on average (its lanes stop at their own last step). */
+inline constexpr double ENTRY_FUSED_SHARE = 0.9;
+/** @brief Persist over fused time below which the persistent entry is taken without timing the other. */
+inline constexpr double ENTRY_PERSIST_BELOW = 0.8;
+/** @brief Persist over fused time above which the fused entry is taken without timing the other. */
+inline constexpr double ENTRY_FUSED_ABOVE = 1.25;
+
+/**
+ * @brief Seconds one thread's step of @p ops operations costs when every SM's
+ *        issue pipes are full; 0 when the clock, SM count or @p ops is unknown.
+ */
+inline double threadStepS(const LaunchDevice& dev, bool fp64, double ops) {
+    if (dev.clockKhz <= 0 || dev.sms <= 0 || !(ops > 0.0)) return 0.0;
+    const SmLayout layout = smLayout(dev.residency.ccMajor, dev.residency.ccMinor);
+    return ops * issueCycles(dev, fp64) /
+           (static_cast<double>(RESIDENCY_WARP_LANES) * layout.partitions * dev.sms * dev.clockKhz * 1e3);
+}
+
+/**
+ * @brief Seconds one warp takes to run a step of @p ops operations alone: its
+ *        dependent chain, PERSIST_CHAIN_CYCLES cycles an operation; 0 when
+ *        the clock or @p ops is unknown.
+ */
+inline double chainStepS(const LaunchDevice& dev, double ops) {
+    if (dev.clockKhz <= 0 || !(ops > 0.0)) return 0.0;
+    return ops * PERSIST_CHAIN_CYCLES / (static_cast<double>(dev.clockKhz) * 1e3);
+}
+
+/**
+ * @brief Predicted wall of the persistent entry over the fused entry for a
+ *        batch of @p n samples whose longest sample ran @p steps steps and
+ *        whose steps fill a fraction @p fill of that; 0 when unknown.
+ *
+ * The fused entry runs the batch in waves of @p residentThreads (all the
+ * threads the device holds at the entry's registers); a wave takes the longer
+ * of its dependent chain and its issue slots, both over the share of the budget
+ * the lanes run. The persistent entry issues only the steps the samples take
+ * (n * fill * steps) at ENTRY_PERSIST_EFFICIENCY, plus one chain for the tail.
+ * Compare the result with ENTRY_PERSIST_BELOW and ENTRY_FUSED_ABOVE.
+ */
+inline double persistOverFused(const LaunchDevice& dev, bool fp64, long long residentThreads, long long n,
+                               long long steps, double fill, double ops) {
+    const double tThr = threadStepS(dev, fp64, ops);
+    const double tLat = chainStepS(dev, ops);
+    if (tThr <= 0.0 || tLat <= 0.0 || n <= 0 || steps <= 0 || !(fill > 0.0) || residentThreads <= 0) return 0.0;
+    const double waves = std::ceil(static_cast<double>(n) / static_cast<double>(residentThreads));
+    const double perWave = static_cast<double>(n) / waves;
+    const double fused = waves * std::max(ENTRY_FUSED_SHARE * steps * tLat,
+                                          perWave * ENTRY_FUSED_SHARE * steps * tThr);
+    const double persist = static_cast<double>(n) * fill * steps * tThr / ENTRY_PERSIST_EFFICIENCY + steps * tLat;
+    return persist / fused;
+}
+
 /** @brief True when a launch asking for @p demandThreads would not fit at the unbounded residency. */
 inline bool boundDemanded(int demandThreads, int residentUnbounded) {
     return residentUnbounded > 0 && demandThreads > residentUnbounded;

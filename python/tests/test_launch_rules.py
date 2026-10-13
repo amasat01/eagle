@@ -38,7 +38,7 @@ def test_next_k_holds_its_bounds_and_runs_long_when_nothing_finishes():
 @pytest.mark.parametrize("rate, want", [(1.3, {32}), (8.4, {64, 128}), (44.0, {256})])
 def test_host_policy_cells_take_the_same_rows(rate, want):
     """One host policy step over numpy cells: ``k`` follows R in the rate cell."""
-    cells = np.zeros(5, dtype=np.int64)
+    cells = np.zeros(6, dtype=np.int64)
     cells[ud._K], cells[ud._CAP] = _K, 10 ** 6
     cells[ud._R] = round(rate * ud.RATE_SCALE)
     finished, total = np.array([_NEWLY], dtype=np.uint32), np.array([_LIVE + _NEWLY], dtype=np.uint32)
@@ -56,7 +56,7 @@ def test_device_policy_kernel_matches_the_host_face(rate, newly):
     """The device kernel and ``_next_k`` round the same way."""
     cp = pytest.importorskip("cupy")
     kernel = ud._policy_kernel(1000, ud.AUTO_K_MIN)
-    cells = cp.zeros(5, dtype=cp.int64)
+    cells = cp.zeros(6, dtype=cp.int64)
     cells[ud._K], cells[ud._CAP] = _K, 10 ** 6
     cells[ud._R] = round(rate * ud.RATE_SCALE)
     finished = cp.asarray([newly], dtype=cp.uint32)
@@ -223,6 +223,70 @@ def test_a_new_readback_times_both_entries_again():
     runner._note_run("fused_one", None, 400, 100_000, 0.23)   # a settled run, new steps
     assert runner._fast_wall == {}
     assert runner._pick_entry() == ("persist", True)           # the other entry is timed first
+
+
+def _keyed_runner(key, n=100_000, model=None):
+    """A stand-in runner that settles picks under ``key`` in the process cache."""
+    runner = _runner()
+    runner._fast_key, runner._fast_model, runner.n = key, model, n
+    return runner
+
+
+def test_a_second_runner_takes_the_cached_pick_untimed():
+    import importlib
+
+    launch = importlib.import_module("eagle.launch")
+    launch._reset_pick_cache()
+    first = _keyed_runner(("device", "kernel"))
+    _simulate(first, {"persist": 2.0, "fused_one": 1.0}, 0.23)
+    assert first._fast_state.settled and first._fast_pick == "fused_one"
+    second = _keyed_runner(("device", "kernel"))
+    mode, probe = second._pick_entry()
+    second._note_run(mode, 2.0, 1000, 100_000, 0.23)        # its first run, the size pick
+    assert second._fast_pick == "fused_one" and second._fast_state.settled
+    assert second._pick_entry() == ("fused_one", False)
+    assert not second._carries_timing(False)
+    other = _keyed_runner(("another device", "kernel"))
+    other._note_run(other._pick_entry()[0], 2.0, 1000, 100_000, 0.23)
+    assert not other._fast_state.settled and other._pick_entry()[1]
+    launch._reset_pick_cache()
+
+
+# the model's cells on an A100 (108 SMs, 1410 MHz, 1536 resident threads per SM, 41 operations)
+_A100_MODEL = (8, 0, 108, 2, 1410000, True, 108 * 1536, 41.0)
+
+
+@pytest.mark.parametrize("n, fill, want", [(100_000, 0.1446, "persist"), (10_000, 1.0, "fused_one")])
+def test_the_model_decides_a_clear_regime_without_timing(n, fill, want):
+    runner = _keyed_runner(None, n, _A100_MODEL)
+    runner._fast_key = ("model only",)
+    runner._note_run("fused_one" if want == "persist" else "persist", 1.0, 1000, n, fill)
+    assert runner._fast_pick == want and runner._fast_state.settled
+    assert runner._pick_entry() == (want, False) and not runner._carries_timing(False)
+
+
+def test_a_contested_model_still_times_the_other_entry():
+    # 100 000 samples of a 0.59 step fill on an A100: the model cannot call it
+    runner = _keyed_runner(("contested",), 100_000, _A100_MODEL)
+    runner._note_run("persist", 1.0, 1000, 100_000, 0.59)
+    assert not runner._fast_state.settled and runner._pick_entry() == ("fused_one", True)
+
+
+def test_a_settled_pick_never_times_an_entry_again_on_an_unchanged_regime():
+    runner = _runner()
+    walls = {"persist": 2.0, "fused_one": 1.0}
+    seen = _simulate(runner, walls, 0.23, runs=300)
+    assert seen[2:] == [("fused_one", False)] * 298
+    assert runner._fast_state.runs == 300 and set(runner._fast_wall) == {"persist", "fused_one"}
+
+
+def test_the_pick_state_is_swapped_whole():
+    runner = _runner()
+    before = runner._fast_state
+    runner._note_run("persist", 2.0, 1000, 100_000, 0.23)
+    after = runner._fast_state
+    assert after is not before and before.runs == 0 and before.wall == {}
+    assert after.runs == 1 and after.wall == {"persist": 2.0}
 
 
 # --------------------------------------------------------------------------- #
