@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+**Grouped reorder kernels.** `reorderDevice` moves planes in groups: one stage kernel and one place kernel per group of up to 64 planes that fit the staging area (the widest plane's size per sample by default, so existing scratch stays valid), plus a final words kernel, instead of two kernels per plane. Each kernel's grid is `min(ceil(n / 256), 4 * multiprocessors)` blocks striding over `[0, span)`, and `ReorderPlane` order and results are unchanged byte for byte. Passing `stageBytesPerSample` to `reorderDevice` / `reorderHost` and sizing the scratch with the new `reorderScratchBytes(n, planes, nPlanes, stageBytesPerSample)` overload makes the groups larger; the host face processes the same groups.
+
 **Mapped pinned host planes.** A reorder or restore plane may live in mapped pinned host memory (SoA, at most 16 bytes per element, results identical to device memory); `eagle::filtering::classifyPointer` and `checkPlanesResident` classify a pointer for a device and refuse pageable or other-device planes by plane index (per call only under `EAGLE_DEBUG_MODE`), exposed as the plugin symbol `eagle_backend_pointer_residency` (seam minor 1, additive) and `eagle._core.pointer_residency`, and `ActiveSet.own` on a device set accepts a numpy plane that is mapped pinned memory and names the fix for a pageable one.
 
 **resetDevice.** `eagle::filtering::resetDevice(perm, inv, indexMap, count, span, n, stream)` gives `perm`, `inv` and (when non-null) `indexMap` the identity and sets `*count = *span = n` in one capture-legal kernel, with the host twin `resetHost`; it is bound as `eagle._core.reset_device` and the plugin symbol `eagle_backend_reset_device` (seam minor 0 to 1, additive), and `ActiveSet.reset` on a reordering device set uses it.

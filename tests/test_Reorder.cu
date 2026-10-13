@@ -256,6 +256,126 @@ TEST_F(ReorderDevice, TriggerMatchesTheHostFace)
     }
 }
 
+/** @brief The kernel nodes of the work ``reorderDevice`` does before its first
+ *  plane group: the keep predicate and the inclusive scan. */
+std::size_t fixedReorderNodes(std::int64_t n)
+{
+    using eagle::idx_t;
+    using eagle::spanView;
+    using eagle::deviceDevice;
+    std::uint8_t* mask = nullptr;
+    idx_t* scr         = nullptr;
+    cudaMalloc(&mask, std::size_t(n));
+    cudaMalloc(&scr, 3 * std::size_t(n) * sizeof(idx_t));
+    cudaStream_t s = nullptr;
+    cudaStreamCreateWithFlags(&s, cudaStreamNonBlocking);
+    cudaStreamBeginCapture(s, cudaStreamCaptureModeThreadLocal);
+    auto keep      = spanView<idx_t>(scr, idx_t(n), deviceDevice());
+    auto inclusive = spanView<idx_t>(scr + n, idx_t(n), deviceDevice());
+    auto sums      = spanView<idx_t>(scr + 2 * n, idx_t(n), deviceDevice());
+    eagle::filtering::detail::compactPredicate<true><<<unsigned((n + 255) / 256), 256, 0, s>>>(mask, keep);
+    eagle::cuda::Scan::enqueue<idx_t, aether::SumOp<idx_t>, true>(
+        keep.as_const(), inclusive, sums, idx_t(0), s);
+    cudaGraph_t g = nullptr;
+    cudaStreamEndCapture(s, &g);
+    std::size_t nodes = 0;
+    cudaGraphGetNodes(g, nullptr, &nodes);
+    cudaGraphDestroy(g);
+    cudaStreamDestroy(s);
+    cudaFree(mask);
+    cudaFree(scr);
+    return nodes;
+}
+
+/** @brief A captured reorder of @p nPlanes 8-byte planes staging @p stage bytes
+ *  per sample: the graph it produced. */
+struct ManyPlanes {
+    std::int64_t n;
+    std::vector<void*> bufs;
+    std::vector<eagle::filtering::ReorderPlane> planes;
+    std::uint8_t* mask;
+    std::int32_t *perm, *inv, *map;
+    std::uint32_t* words;
+    void* scratch = nullptr;
+    cudaGraph_t graph = nullptr;
+
+    ManyPlanes(std::int64_t n_, int nPlanes, std::uint32_t stage)
+        : n(n_)
+    {
+        for (int p = 0; p < nPlanes; ++p) {
+            void* d = nullptr;
+            cudaMalloc(&d, std::size_t(n) * 8);
+            bufs.push_back(d);
+            planes.push_back({ d, 8 });
+        }
+        mask  = upload(std::vector<std::uint8_t>(std::size_t(n), 0));
+        perm  = upload(std::vector<std::int32_t>(std::size_t(n)));
+        inv   = upload(std::vector<std::int32_t>(std::size_t(n)));
+        map   = upload(std::vector<std::int32_t>(std::size_t(n)));
+        words = upload(std::vector<std::uint32_t> { 0u, std::uint32_t(n), 1u, 0u });
+        planes.push_back({ mask, 1 });
+        cudaMalloc(&scratch, eagle::filtering::reorderScratchBytes(n, planes.data(), std::uint32_t(planes.size()), stage));
+        cudaStream_t s = nullptr;
+        cudaStreamCreateWithFlags(&s, cudaStreamNonBlocking);
+        cudaStreamBeginCapture(s, cudaStreamCaptureModeThreadLocal);
+        reorderDevice(planes.data(), std::uint32_t(planes.size()), mask, kCompactMaskIsDrop, perm, inv, map,
+            words, words + 1, words + 2, scratch, n, s, stage);
+        cudaStreamEndCapture(s, &graph);
+        cudaStreamDestroy(s);
+    }
+    ~ManyPlanes()
+    {
+        cudaGraphDestroy(graph);
+        for (void* p : bufs)
+            cudaFree(p);
+        for (void* p : { (void*)mask, (void*)perm, (void*)inv, (void*)map, (void*)words, scratch })
+            cudaFree(p);
+    }
+    std::size_t nodes() const
+    {
+        std::size_t k = 0;
+        cudaGraphGetNodes(graph, nullptr, &k);
+        return k;
+    }
+};
+
+// 40 planes of 8 bytes, the 1-byte mask and the 4-byte perm: 325 bytes per sample
+// staged 128 at a time is three groups, so six group kernels and the words kernel.
+TEST_F(ReorderDevice, GroupsLaunchTwoKernelsPerGroup)
+{
+    const std::int64_t n = 4096;
+    ManyPlanes grouped(n, 40, 128);
+    EXPECT_EQ(grouped.nodes() - fixedReorderNodes(n), std::size_t(2 * 3 + 1));
+    ManyPlanes whole(n, 40, 512); // 332 bytes per sample fit one group
+    EXPECT_EQ(whole.nodes() - fixedReorderNodes(n), std::size_t(2 * 1 + 1));
+}
+
+TEST_F(ReorderDevice, GridIsBoundedBySms)
+{
+    int dev = 0, sms = 0;
+    ASSERT_EQ(cudaGetDevice(&dev), cudaSuccess);
+    ASSERT_EQ(cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev), cudaSuccess);
+    const std::int64_t n = std::int64_t(sms) * 4 * 256 * 8; // eight times the cap in blocks
+    ManyPlanes m(n, 3, 64);
+    std::size_t count = 0;
+    ASSERT_EQ(cudaGraphGetNodes(m.graph, nullptr, &count), cudaSuccess);
+    std::vector<cudaGraphNode_t> nodes(count);
+    ASSERT_EQ(cudaGraphGetNodes(m.graph, nodes.data(), &count), cudaSuccess);
+    unsigned atCap = 0;
+    for (auto node : nodes) {
+        cudaGraphNodeType t;
+        ASSERT_EQ(cudaGraphNodeGetType(node, &t), cudaSuccess);
+        if (t != cudaGraphNodeTypeKernel)
+            continue;
+        cudaKernelNodeParams kp {};
+        ASSERT_EQ(cudaGraphKernelNodeGetParams(node, &kp), cudaSuccess);
+        if (kp.gridDim.x == 4u * unsigned(sms))
+            ++atCap;
+    }
+    // the predicate and scan size to n; the group kernels stop at four blocks per SM
+    EXPECT_EQ(atCap, 2u); // the stage and place kernels of the single group
+}
+
 void expectCapturedReorderObeysItsFireWord(Mem mem)
 {
     const std::int64_t n = 5000;

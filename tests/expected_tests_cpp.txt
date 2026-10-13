@@ -220,6 +220,7 @@ ReductionTest.OMP_MaxWithFloats
 ReductionTest.OMP_SumWithDoubles
 ReductionTest.OMP_WithIntegers_BigArray
 ReorderHost.ClearFireIsANoOp
+ReorderHost.LargerStagingGroupsMorePlanesWithTheSameResult
 ReorderHost.Refusals
 ReorderHost.ResetGivesTheIdentityAndTheFullSpan
 ReorderHost.TriggerFiresOnRandomOrderAndNotOnGroupedOrder

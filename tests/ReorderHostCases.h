@@ -192,6 +192,40 @@ INSTANTIATE_TEST_SUITE_P(Edges, ReorderHostSizes,
 
 class ReorderHost : public Test { };
 
+// Staging more bytes per sample puts more planes in each group; the moves are
+// the same, so every plane, perm, inv, the map and the words come out equal.
+TEST_F(ReorderHost, LargerStagingGroupsMorePlanesWithTheSameResult)
+{
+    const std::int64_t n = 4099;
+    HostBatch a(n), b(n);
+    const auto drop = randomDrop(n, 0.6, 77u);
+    a.finish(drop);
+    b.finish(drop);
+    a.reorder();
+    auto pl = b.planes();
+    for (const std::uint32_t stage : { 4u, 16u, 24u, 64u }) {
+        HostBatch c(n);
+        c.finish(drop);
+        auto cpl = c.planes();
+        std::vector<std::uint8_t> big(reorderScratchBytes(n, cpl.data(), std::uint32_t(cpl.size()), stage) + 16);
+        const auto addr = reinterpret_cast<std::uintptr_t>(big.data());
+        void* sc        = big.data() + ((16 - addr % 16) % 16);
+        reorderHost(cpl.data(), std::uint32_t(cpl.size()), c.mask.data(), kCompactMaskIsDrop,
+            c.perm.data(), c.inv.data(), c.map.data(), &c.count, &c.span, &c.fire, sc, n, stage);
+        EXPECT_EQ(c.count, a.count) << stage;
+        EXPECT_EQ(c.perm, a.perm) << stage;
+        EXPECT_EQ(c.inv, a.inv) << stage;
+        EXPECT_EQ(c.p2, a.p2) << stage;
+        EXPECT_EQ(c.p4, a.p4) << stage;
+        EXPECT_EQ(c.p8, a.p8) << stage;
+        EXPECT_EQ(c.mask, a.mask) << stage;
+        EXPECT_TRUE(c.p16 == a.p16) << stage;
+        for (std::uint32_t t = 0; t < a.count; ++t)
+            ASSERT_EQ(c.map[t], a.map[t]);
+    }
+    (void)pl;
+}
+
 TEST_F(ReorderHost, ClearFireIsANoOp)
 {
     HostBatch b(1000);
