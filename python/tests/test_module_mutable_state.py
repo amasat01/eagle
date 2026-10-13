@@ -51,6 +51,7 @@ ALLOWED = {
     ("interop.py", "_DTYPE_CODES"): TABLE,
     ("interop.py", "_DEVICE_TYPES"): TABLE,
     ("launch.py", "_kernel_attrs_cache"): "guarded by _KERNEL_ATTRS_LOCK (lock-free reads of immutable entries)",
+    ("launch.py", "_pick_cache"): "guarded by _PICK_CACHE_LOCK (reads and inserts both take it; capped, never evicts)",
     ("launch.py", "_launch_plan_cache"): "guarded by _LAUNCH_PLAN_LOCK",
     ("launch.py", "_LAUNCH_PLAN_COUNTS"): "guarded by _LAUNCH_PLAN_LOCK",
     ("marshal.py", "_coerce_stats"): "guarded by _COERCE_LOCK",

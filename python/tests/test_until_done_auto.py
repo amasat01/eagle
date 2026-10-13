@@ -1552,7 +1552,8 @@ def test_the_regime_rule_skips_the_probe_outside_the_band(auto):
     bound = _capacity_probe(auto, "plain", "device")
     cap = capacity(launch._device_props(), launch._kernel_attrs(bound.persist_entry()))
     assert cap
-    for n, mode in ((16 * cap, "persist"), (max(cap // 8, 1), "fused_one")):
+    wave = _device_capacity(auto, "plain", "device")  # what one fused wave holds
+    for n, mode in ((16 * cap, "persist"), (max(wave // 8, 1), "fused_one")):
         runner, rerun = _probe_runner(auto, n)
         reports = [rerun()[0] for _ in range(3)]
         assert reports[1].probe is False and not any(r.probe for r in reports)
@@ -1637,7 +1638,7 @@ def test_fast_entry_probe_reprobes_on_regime_change(auto, monkeypatch):
 
 @pytest.mark.gpu
 def test_fast_entry_probe_below_capacity_is_off(auto):
-    runner, rerun = _probe_runner(auto, max(_persist_capacity(auto) // 8, 1))
+    runner, rerun = _probe_runner(auto, max(_device_capacity(auto, "plain", "device") // 8, 1))
     reports = [rerun()[0] for _ in range(4)]
     assert [r.mode for r in reports] == ["fused_one"] * 4
     assert not any(r.probe for r in reports)
@@ -1902,16 +1903,16 @@ def test_entry_prior_is_known_after_a_fused_one_run(auto):
 
 
 @pytest.mark.gpu
-def test_a_same_readback_fill_change_resizes_without_timing_again(auto):
-    """Half the samples stop at step 1: the same longest lane and finished
-    count, so only f changes. It is seen on the next run that sums its steps
-    (within STEP_FILL_EVERY runs) and re-sizes the persist launch; the settled
-    pick and its walls stand, with no probe."""
+def test_a_fill_change_resizes_and_times_the_new_regime_once(auto):
+    """Half the samples stop at step 1: the same longest lane, so only f changes,
+    from 1.0 to about 0.5, which is another readback regime. It is seen on the
+    next run that sums its steps (within STEP_FILL_EVERY runs): the persist launch
+    is re-sized and the other entry is timed once, after which the pick settles
+    again with both walls."""
     runner, inp, rerun = _prior_runner(auto, "uniform")
     for _ in range(4):
         rerun()
-    pick, wall = runner._fast_pick, dict(runner._fast_wall)
-    assert set(wall) == {"persist", "fused_one"}
+    assert set(runner._fast_wall) == {"persist", "fused_one"}
     half = np.where(np.arange(runner.n) % 2 == 0, 1.0, float(_S))
     reports, priors = [], []
     for _ in range(2 * ud.STEP_FILL_EVERY):
@@ -1919,8 +1920,9 @@ def test_a_same_readback_fill_change_resizes_without_timing_again(auto):
         priors.append(runner._fast_prior)
     seen = next(i for i, f in enumerate(priors) if f < 0.6)
     assert seen < ud.STEP_FILL_EVERY
-    assert runner._fast_fill == priors[-1] and runner._fast_pick == pick
-    assert not any(r.probe for r in reports)
+    assert runner._fast_fill == priors[-1]
+    assert sum(r.probe for r in reports) == 1
+    assert runner._fast_state.settled and set(runner._fast_wall) == {"persist", "fused_one"}
 
 
 @pytest.mark.gpu
