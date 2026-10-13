@@ -184,7 +184,7 @@ def test_a_real_hawk_cost_goes_through_the_rule():
 
     cost = dispatch_costs(canonical(rare.sinks))["dispatch0"]
     assert dp.static_selector(cost.selector_reads, {"y"})
-    assert cost.fused_vectorised      # sample-local: the fused host loop runs every branch
+    assert not cost.fused_vectorised  # the fused host loop renders the dispatch as a switch, which stays scalar
     big = 1 << 26  # the host's launch terms are noise at this size
     assert dp.resolve(cost, [big * 98 // 100, big // 100, big // 100], **RUN) == "segmented"
     assert dp.resolve(cost, [0, big, 0], **RUN) == "switch"
