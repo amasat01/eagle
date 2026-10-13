@@ -985,7 +985,9 @@ NB_MODULE(_core, m)
                     costOf(branches, regs_per_thread, fused_vectorised),
                     mixOf(counts, fused_steps, remaining_steps, mixed32), propsOf(props),
                     weightsOf(target, weights));
-                return std::make_pair(t.fused, t.split);
+                // A Python tuple, not std::pair<double, double>: returning that pair by value
+                // makes GCC on aarch64 note that its passing convention changed in GCC 10.1.
+                return nb::make_tuple(t.fused, t.split);
             },
             nb::arg("branches"), nb::arg("counts"), nb::arg("props"), nb::arg("target"),
             nb::arg("fused_steps") = 1, nb::arg("regs_per_thread") = 0, nb::arg("fused_vectorised") = false,
