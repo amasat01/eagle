@@ -98,9 +98,11 @@ elif [[ -z $SRC ]]; then
 fi
 ENV_PREFIX=${ENV_PREFIX:-$WORK/envs/cards-$PROFILE$GSFX}
 LOCKS=$HERE/locks
+PLATFORM=$(conda_platform) || exit 1
+TC_LOCK=$LOCKS/toolchain-$PLATFORM$TSFX.lock
 ENV_FILE=$WORK/env-$PROFILE$GSFX.sh
 log "target=$TARGET profile=$PROFILE arch=${ARCH:-none} work=$WORK src=$SRC env=$ENV_PREFIX"
-[[ -n $GSFX ]] && log "cuda=$CUDA locks: $LOCKS/toolchain-linux-64$TSFX.lock $LOCKS/cards-$PROFILE$GSFX.txt $LOCKS/pypi-$PROFILE$GSFX.txt"
+[[ -n $GSFX ]] && log "cuda=$CUDA locks: $TC_LOCK $LOCKS/cards-$PROFILE$GSFX.txt $LOCKS/pypi-$PROFILE$GSFX.txt"
 [[ $REPRO_DRY_RUN == 1 ]] && log "dry run: commands are printed, nothing is changed"
 
 MODE=$([[ $FROM_PYPI == 1 ]] && echo pypi || echo source)
@@ -111,6 +113,7 @@ md5_of() { md5sum "$@" | md5sum | cut -c1-32; }
 run mkdir -p "$WORK/bin" "$WORK/build" "$SRC"
 
 install_source() {
+  [[ -f $TC_LOCK ]] || die "no toolchain lock for $PLATFORM${TSFX:+ (cuda $CUDA)}: $TC_LOCK (locks/make_locks.py toolchain --platform $PLATFORM writes it)"
   # --- 1. conda frontend (an existing micromamba/mamba/conda, else a pinned download)
   # REPRO_MAMBA=/path/to/frontend picks one; REPRO_MAMBA=download forces the download.
   MAMBA=${REPRO_MAMBA:-}
@@ -128,20 +131,20 @@ install_source() {
     if [[ ! -x $MAMBA ]]; then
       MM_VER=${MICROMAMBA_VERSION:-2.9.0-0}
       run curl -fsSL -o "$MAMBA" \
-        "https://github.com/mamba-org/micromamba-releases/releases/download/$MM_VER/micromamba-linux-64"
+        "https://github.com/mamba-org/micromamba-releases/releases/download/$MM_VER/micromamba-$PLATFORM"
       run chmod +x "$MAMBA"
     fi
   fi
   log "conda frontend: $MAMBA"
   case $(basename "$MAMBA") in
     micromamba) export MAMBA_ROOT_PREFIX=${MAMBA_ROOT_PREFIX:-$WORK/mamba-root}
-                MKENV=("$MAMBA" create -y -q -p "$ENV_PREFIX" -f "$LOCKS/toolchain-linux-64$TSFX.lock") ;;
-    *)          MKENV=("$MAMBA" create -y -q -p "$ENV_PREFIX" --file "$LOCKS/toolchain-linux-64$TSFX.lock") ;;
+                MKENV=("$MAMBA" create -y -q -p "$ENV_PREFIX" -f "$TC_LOCK") ;;
+    *)          MKENV=("$MAMBA" create -y -q -p "$ENV_PREFIX" --file "$TC_LOCK") ;;
   esac
 
   # --- 2. toolchain environment (explicit lock: exact URLs + md5) -----------------
   TC_STAMP=$ENV_PREFIX/.repro-toolchain
-  TC_SUM=$(md5_of "$LOCKS/toolchain-linux-64$TSFX.lock")
+  TC_SUM=$(md5_of "$TC_LOCK")
   if stamp_ok "$TC_STAMP" "$TC_SUM"; then
     log "toolchain env up to date"
   else
@@ -154,7 +157,8 @@ install_source() {
   # Build environment: the env's own GCC 14 and nvcc, nothing from the host.
   unset CPATH CUDA_PATH CUDA_HOME NVCC_PREPEND_FLAGS NVCC_APPEND_FLAGS PYTHONPATH LD_PRELOAD
   export PATH=$ENV_PREFIX/bin:$PATH CONDA_PREFIX=$ENV_PREFIX
-  export CC=$ENV_PREFIX/bin/x86_64-conda-linux-gnu-gcc CXX=$ENV_PREFIX/bin/x86_64-conda-linux-gnu-g++
+  local triple; triple=$([[ $PLATFORM == linux-aarch64 ]] && echo aarch64 || echo x86_64)-conda-linux-gnu
+  export CC=$ENV_PREFIX/bin/$triple-gcc CXX=$ENV_PREFIX/bin/$triple-g++
   export CUDAHOSTCXX=$CXX CUDACXX=$ENV_PREFIX/bin/nvcc
   export CMAKE_PREFIX_PATH=$ENV_PREFIX CMAKE_BUILD_PARALLEL_LEVEL=$JOBS CMAKE_GENERATOR=Ninja
   export HAWK_AETHER_INCLUDE=$SRC/aether HAWK_EAGLE_INCLUDE=$SRC/eagle

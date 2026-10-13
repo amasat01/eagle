@@ -744,6 +744,18 @@ def test_cuda_13_leaves_the_cpu_profile_alone():
     assert rc == rc2 == 0 and cpu13 == cpu12 and "cuda13" not in cpu13
 
 
+def test_an_aarch64_machine_gets_the_aarch64_micromamba_and_toolchain_lock():
+    arm = {"REPRO_MACHINE": "aarch64", "REPRO_MAMBA": "download"}
+    rc, out = _bootstrap("--profile", "cpu", env=arm)
+    assert rc == 0, out[-800:]
+    assert "micromamba-linux-aarch64" in out and "toolchain-linux-aarch64.lock" in out
+    assert "micromamba-linux-64" not in out and "toolchain-linux-64" not in out
+    rc, x86 = _bootstrap("--profile", "cpu", env={**arm, "REPRO_MACHINE": "x86_64"})
+    assert rc == 0 and "micromamba-linux-64" in x86 and "toolchain-linux-64.lock" in x86
+    rc, other = _bootstrap("--profile", "cpu", env={**arm, "REPRO_MACHINE": "riscv64"})
+    assert rc != 0 and "unsupported CPU architecture 'riscv64'" in other
+
+
 @pytest.mark.parametrize("script_args", [("bootstrap",), ("profile",)])
 def test_an_unknown_cuda_version_is_refused_with_the_choices(script_args):
     script = BOOTSTRAP_SH if script_args[0] == "bootstrap" else PROFILE_SH

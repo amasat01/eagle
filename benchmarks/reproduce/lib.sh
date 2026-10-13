@@ -6,6 +6,7 @@
 # Detection can be mocked for dry runs and tests:
 #   REPRO_TARGET=kaggle|vastai|devbox|local   skip target detection
 #   REPRO_GPUS="none" | "name,compute_cap,driver;name,..."   skip nvidia-smi
+#   REPRO_MACHINE=x86_64|aarch64   the CPU architecture instead of `uname -m`
 
 REPRO_DRY_RUN=${REPRO_DRY_RUN:-0}
 
@@ -71,6 +72,16 @@ detect_gpus() {
   fi
   nvidia-smi "${sel[@]}" --query-gpu=name,compute_cap,driver_version \
     --format=csv,noheader 2>/dev/null | sed 's/, /,/g' || true
+}
+
+# conda_platform: the conda platform of this machine (linux-64 or linux-aarch64); the
+# micromamba binary and the toolchain lock follow it. Any other architecture is refused.
+conda_platform() {
+  case ${REPRO_MACHINE:-$(uname -m)} in
+    x86_64) echo linux-64 ;;
+    aarch64|arm64) echo linux-aarch64 ;;
+    *) die "unsupported CPU architecture '${REPRO_MACHINE:-$(uname -m)}': the kit runs on x86_64 and aarch64" ;;
+  esac
 }
 
 # gpu_archs: "60;75"-style CMake arch list of the visible GPUs (unique, sorted).
