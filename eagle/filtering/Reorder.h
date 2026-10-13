@@ -220,6 +220,26 @@ AETHER_KERNEL() void reorderEmpty(WordT* count, WordT* span, WordT* fire)
         *fire = WordT(0);
 }
 
+/** @brief ``perm[i] = inv[i] = i`` (and ``indexMap[i] = i`` when given) over
+ *  ``[0, n)``; thread 0 also sets ``*count = *span = n``. */
+template<typename IndexT, typename WordT>
+AETHER_KERNEL()
+__launch_bounds__(256, 4) void resetIdentity(IndexT* perm, IndexT* inv,
+    IndexT* indexMap, WordT* count, WordT* span, std::int64_t n)
+{
+    const std::int64_t i = reorderThread();
+    if (i < n) {
+        perm[i] = IndexT(i);
+        inv[i]  = IndexT(i);
+        if (indexMap != nullptr)
+            indexMap[i] = IndexT(i);
+    }
+    if (i == 0) {
+        *count = WordT(n);
+        *span  = WordT(n);
+    }
+}
+
 /** @brief ``plane[perm[s]] = stage[s]`` over ``[0, n)``: back to sample order. */
 template<typename T, typename IndexT>
 AETHER_KERNEL()
@@ -378,6 +398,25 @@ inline void restoreDevice(const ReorderPlane* planes, std::uint32_t nPlanes,
     EAGLE_CHECK_ALWAYS(cudaGetLastError());
 }
 
+/**
+ * @brief Enqueue the reset of @p n samples on @p stream (device memory): one
+ *        kernel gives ``perm``, ``inv`` and (when non-null) ``indexMap`` the
+ *        identity ``0..n-1`` and sets ``*count = *span = n``.
+ *
+ * Kernels only, legal while ``stream`` is being captured; no ``fire`` word is
+ * read or written. Argument order as for ``reorderDevice``.
+ */
+inline void resetDevice(std::int32_t* perm, std::int32_t* inv, std::int32_t* indexMap,
+    std::uint32_t* count, std::uint32_t* span, std::int64_t n, cudaStream_t stream)
+{
+    if (n < 0 || n > kCompactMaxSamples)
+        EAGLE_THROW(std::invalid_argument, "reset: n must be in [0, 2^31 - 1]");
+    err::detail::clearStaleLastError();  // check only our own launch below
+    const unsigned nb = n == 0 ? 1u : unsigned((n + 255) / 256);
+    detail::resetIdentity<std::int32_t, std::uint32_t><<<nb, 256, 0, stream>>>(perm, inv, indexMap, count, span, n);
+    EAGLE_CHECK_ALWAYS(cudaGetLastError());
+}
+
 #endif // EAGLE_CPU_ONLY
 
 namespace detail {
@@ -484,6 +523,23 @@ inline void restoreHost(const ReorderPlane* planes, std::uint32_t nPlanes,
         perm[i] = std::int32_t(i);
         inv[i]  = std::int32_t(i);
     }
+}
+
+/** @brief The host face of ``resetDevice`` over host memory (OpenMP). */
+inline void resetHost(std::int32_t* perm, std::int32_t* inv, std::int32_t* indexMap,
+    std::uint32_t* count, std::uint32_t* span, std::int64_t n)
+{
+    if (n < 0 || n > kCompactMaxSamples)
+        EAGLE_THROW(std::invalid_argument, "reset: n must be in [0, 2^31 - 1]");
+#pragma omp parallel for schedule(static)
+    for (std::int64_t i = 0; i < n; ++i) {
+        perm[i] = std::int32_t(i);
+        inv[i]  = std::int32_t(i);
+        if (indexMap != nullptr)
+            indexMap[i] = std::int32_t(i);
+    }
+    *count = std::uint32_t(n);
+    *span  = std::uint32_t(n);
 }
 
 } // namespace filtering

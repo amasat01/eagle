@@ -984,6 +984,31 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_reorder_device(struct eagle
     });
 }
 
+EAGLE_BACKEND_API eagle_backend_status eagle_backend_reset_device(struct eagle_backend_reorder_desc* desc)
+{
+    return guarded([&] {
+        constexpr const char* who = "eagle_backend_reset_device";
+        const auto d = readDesc(desc, EAGLE_BACKEND_COMPACT_MASK_IS_DROP);
+        if (d.n < 0)
+            throw std::invalid_argument(std::string(who) + ": n must be >= 0");
+        if (d.n > eagle::filtering::kCompactMaxSamples)
+            throw Unsupported(std::string(who) + ": the int32 indices address at most 2^31-1 samples, got n = "
+                + std::to_string(d.n));
+        if (d.count == 0 || d.span == 0 || (d.n > 0 && (d.perm == 0 || d.inv == 0)))
+            throw std::invalid_argument(std::string(who) + ": perm, inv, count and span must be device addresses");
+        requireDevice();
+        const int device = resolveDevice(d.device, d.stream);
+        DeviceScope scope(device);
+        bracketed(who, "enqueue", [&] {
+            eagle::filtering::resetDevice(reinterpret_cast<std::int32_t*>(d.perm),
+                reinterpret_cast<std::int32_t*>(d.inv), reinterpret_cast<std::int32_t*>(d.index_map),
+                reinterpret_cast<std::uint32_t*>(d.count), reinterpret_cast<std::uint32_t*>(d.span), d.n,
+                seamStream(d.stream));
+            return 0;
+        });
+    });
+}
+
 // ---- filtering: K classes ----------------------------------------------------
 
 namespace {

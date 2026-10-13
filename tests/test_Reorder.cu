@@ -26,6 +26,7 @@ namespace ReorderTest {
 
 using eagle::filtering::compactDevice;
 using eagle::filtering::reorderDevice;
+using eagle::filtering::resetDevice;
 using eagle::filtering::restoreDevice;
 
 template<typename T>
@@ -237,6 +238,73 @@ TEST_F(ReorderDevice, CapturedReorderObeysItsFireWord)
     h.reorder();
     expectSame(d.read(), h);
     expectReordered(d.read(), drop);
+    cudaGraphExecDestroy(exec);
+    cudaGraphDestroy(g);
+    cudaStreamDestroy(s);
+}
+
+TEST_F(ReorderDevice, ResetGivesTheIdentityAndTheFullSpan)
+{
+    const std::int64_t n = 100003;
+    for (const bool withMap : { true, false }) {
+        HostBatch h(n);
+        DeviceBatch d(h);
+        h.finish(randomDrop(n, 0.37, 51u));
+        d.setMask(h.mask);
+        h.reorder();
+        d.reorder(0, false);
+        ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+        const HostBatch dropped = d.read();
+        ASSERT_LT(dropped.count, std::uint32_t(n)) << "the reorder must have dropped samples";
+        resetDevice(d.perm, d.inv, withMap ? d.map : nullptr, d.words, d.words + 1, n, 0);
+        ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+        const HostBatch got = d.read();
+        EXPECT_EQ(got.count, std::uint32_t(n));
+        EXPECT_EQ(got.span, std::uint32_t(n));
+        EXPECT_EQ(got.fire, dropped.fire) << "no fire word is touched";
+        for (std::int64_t i = 0; i < n; ++i) {
+            const auto s = std::size_t(i);
+            ASSERT_EQ(got.perm[s], std::int32_t(i));
+            ASSERT_EQ(got.inv[s], std::int32_t(i));
+            if (withMap)
+                ASSERT_EQ(got.map[s], std::int32_t(i));
+            else
+                ASSERT_EQ(got.map[s], dropped.map[s]) << "a null map is left alone";
+        }
+    }
+}
+
+TEST_F(ReorderDevice, CapturedResetReplaysTheIdentity)
+{
+    const std::int64_t n = 5000;
+    HostBatch h(n);
+    DeviceBatch d(h);
+    h.finish(randomDrop(n, 0.5, 61u));
+    d.setMask(h.mask);
+    cudaStream_t s = nullptr;
+    ASSERT_EQ(cudaStreamCreateWithFlags(&s, cudaStreamNonBlocking), cudaSuccess);
+    ASSERT_EQ(cudaStreamBeginCapture(s, cudaStreamCaptureModeThreadLocal), cudaSuccess);
+    resetDevice(d.perm, d.inv, d.map, d.words, d.words + 1, n, s);
+    cudaGraph_t g = nullptr;
+    ASSERT_EQ(cudaStreamEndCapture(s, &g), cudaSuccess);
+    cudaGraphExec_t exec = nullptr;
+    ASSERT_EQ(cudaGraphInstantiate(&exec, g, 0), cudaSuccess);
+    for (int rep = 0; rep < 2; ++rep) {
+        d.reorder(0, false); // scramble perm/inv/map/words, then replay the reset
+        ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+        ASSERT_LT(d.read().count, std::uint32_t(n));
+        ASSERT_EQ(cudaGraphLaunch(exec, s), cudaSuccess);
+        ASSERT_EQ(cudaStreamSynchronize(s), cudaSuccess);
+        const HostBatch got = d.read();
+        EXPECT_EQ(got.count, std::uint32_t(n));
+        EXPECT_EQ(got.span, std::uint32_t(n));
+        for (std::int64_t i = 0; i < n; ++i) {
+            const auto k = std::size_t(i);
+            ASSERT_EQ(got.perm[k], std::int32_t(i));
+            ASSERT_EQ(got.inv[k], std::int32_t(i));
+            ASSERT_EQ(got.map[k], std::int32_t(i));
+        }
+    }
     cudaGraphExecDestroy(exec);
     cudaGraphDestroy(g);
     cudaStreamDestroy(s);

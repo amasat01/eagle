@@ -403,17 +403,29 @@ class ActiveSet:
     def reset(self) -> None:
         """Back to the identity: every sample live, ``count == n`` (and, for
         a reordering set, ``perm``/``inv`` identity, ``span == n``, reorder
-        counter zero). Not capture-legal: a plain array write, run before a
-        launch, never recorded."""
+        counter zero). Run before a launch, never recorded; a reordering device
+        set resets with one kernel on the current stream."""
         identity = _identity if self._device else _host_identity
-        if not self._map_lazy:
-            identity(self.map)
-        self.count[0] = self.n
         self._done_at_last[0] = 0
+        if self.theta is not None and self._device:
+            import cupy
+
+            from . import _core
+
+            _core.reset_device(
+                int(self.perm.data.ptr), int(self.inv.data.ptr),
+                0 if self._map_lazy else int(self.map.data.ptr),
+                int(self.count.data.ptr), int(self.span.data.ptr), self.n,
+                int(cupy.cuda.get_current_stream().ptr), int(self.mask.device.id))
+        else:
+            if not self._map_lazy:
+                identity(self.map)
+            self.count[0] = self.n
+            if self.theta is not None:
+                identity(self.perm)
+                identity(self.inv)
+                self.span[0] = self.n
         if self.theta is not None:
-            identity(self.perm)
-            identity(self.inv)
-            self.span[0] = self.n
             self.fire[0] = 0
             self.live32[0] = 0
             self.reorders[0] = 0

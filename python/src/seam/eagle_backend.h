@@ -101,7 +101,7 @@ extern "C" {
 /** Seam major version: the core accepts exactly this major. */
 #define EAGLE_BACKEND_VERSION_MAJOR 1u
 /** Seam minor version this header describes (informational). */
-#define EAGLE_BACKEND_VERSION_MINOR 0u
+#define EAGLE_BACKEND_VERSION_MINOR 1u
 /** The packed version a backend built from this header reports. */
 #define EAGLE_BACKEND_VERSION ((EAGLE_BACKEND_VERSION_MAJOR << 16) | EAGLE_BACKEND_VERSION_MINOR)
 
@@ -501,6 +501,14 @@ struct eagle_backend_reorder_classes_desc {
  *  ``reorder_device`` (the query's ``scratch_bytes`` includes the class
  *  working set). Bound per symbol. */
 eagle_backend_status eagle_backend_reorder_classes_device(struct eagle_backend_reorder_classes_desc* desc);
+
+/** Reset to the identity: ``perm``, ``inv`` and (when non-zero) ``index_map`` become
+ *  ``0..n-1`` and ``*count = *span = n``, in ONE kernel. Only ``device``, ``perm``,
+ *  ``inv``, ``index_map``, ``count``, ``span``, ``n`` and ``stream`` of
+ *  ``eagle_backend_reorder_desc`` are read (no planes, scratch or ``fire``). Enqueue
+ *  only and capture-legal. Added in minor 1; bound per symbol, so its presence is
+ *  the capability. */
+eagle_backend_status eagle_backend_reset_device(struct eagle_backend_reorder_desc* desc);
 
 /* ---- experimental (eagle_backend_x_*, optional, unlocked) -------------------- */
 

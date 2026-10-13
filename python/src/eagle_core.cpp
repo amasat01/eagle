@@ -673,6 +673,26 @@ NB_MODULE(_core, m)
         "live class prefix, `class_sorts` is incremented. With `scratch == 0` nothing is enqueued "
         "and the return value is the scratch size in bytes; otherwise it returns 0.");
 
+    m.def("reset_device",
+        [reorderDesc](std::uintptr_t perm, std::uintptr_t inv, std::uintptr_t index_map, std::uintptr_t count,
+            std::uintptr_t span, std::int64_t n, std::uintptr_t stream, std::int32_t device) {
+            (void)EB("filtering", eagle_backend_compact_device);
+            std::vector<eagle_backend_reorder_plane> table;
+            auto d = reorderDesc({}, table, n, 0, stream, 0u, device);
+            d.perm = perm;
+            d.inv = inv;
+            d.index_map = index_map;
+            d.count = count;
+            d.span = span;
+            ck(EBX(eagle_backend_reset_device)(&d));
+        },
+        nb::arg("perm"), nb::arg("inv"), nb::arg("index_map"), nb::arg("count"), nb::arg("span"),
+        nb::arg("n"), nb::arg("stream") = 0, nb::arg("device") = -1,
+        "Reset to the identity (the `filtering` group, symbol `eagle_backend_reset_device`): "
+        "one kernel gives `perm`, `inv` and, when `index_map` is not 0, the map the identity "
+        "0..n-1 and sets `*count = *span = n`. Enqueue only, capture-legal; no scratch and "
+        "no `fire` word.");
+
     m.def("restore_device",
         [reorderDesc](const std::vector<std::pair<std::uintptr_t, std::uint32_t>>& planes, std::uintptr_t perm,
             std::uintptr_t inv, std::uintptr_t scratch, std::int64_t n, std::uintptr_t stream,

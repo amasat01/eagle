@@ -271,6 +271,8 @@ def test_reset_gives_the_identity(device):
     for arr in (a.perm, a.inv, a.map):
         assert np.array_equal(_host(arr), np.arange(n))
     assert int(_host(a.span)[0]) == n and a.live == n and not a.permuted
+    assert int(_host(a.count)[0]) == n and int(_host(a.fire)[0]) == 0
+    assert int(_host(a.reorders)[0]) == 0
 
 
 # --------------------------------------------------------------------------- #

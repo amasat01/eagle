@@ -40,6 +40,7 @@ using eagle::filtering::ReorderPlane;
 using eagle::filtering::ReorderTrigger;
 using eagle::filtering::reorderHost;
 using eagle::filtering::reorderScratchBytes;
+using eagle::filtering::resetHost;
 using eagle::filtering::restoreHost;
 
 /** @brief A 16-byte element with a value per sample. */
@@ -274,6 +275,27 @@ TEST_F(ReorderHost, Refusals)
     const ReorderTrigger badTheta { &live32, &span, &fire, 1.5f };
     EXPECT_THROW(compactHost(b.mask.data(), 1u, map.data(), &b.count, scratch.data(), 64, &badTheta),
         std::invalid_argument);
+}
+
+TEST_F(ReorderHost, ResetGivesTheIdentityAndTheFullSpan)
+{
+    const std::int64_t n = 100003;
+    for (const bool withMap : { true, false }) {
+        HostBatch b(n);
+        b.finish(randomDrop(n, 0.37, 51u));
+        b.reorder();
+        ASSERT_LT(b.count, std::uint32_t(n)) << "the reorder must have dropped samples";
+        const auto mapWas = b.map;
+        resetHost(b.perm.data(), b.inv.data(), withMap ? b.map.data() : nullptr, &b.count, &b.span, n);
+        EXPECT_EQ(b.count, std::uint32_t(n));
+        EXPECT_EQ(b.span, std::uint32_t(n));
+        for (std::int64_t i = 0; i < n; ++i) {
+            const auto s = std::size_t(i);
+            ASSERT_EQ(b.perm[s], std::int32_t(i));
+            ASSERT_EQ(b.inv[s], std::int32_t(i));
+            ASSERT_EQ(b.map[s], withMap ? std::int32_t(i) : mapWas[s]);
+        }
+    }
 }
 
 } // namespace ReorderTest

@@ -46,6 +46,13 @@ the reorder clears it.
                                    eagle::filtering::kCompactMaskIsDrop, perm, inv,
                                    map, count, span, fire, scratch2, n, stream);
 
+``eagle::filtering::resetDevice(perm, inv, indexMap, count, span, n, stream)``
+(host twin ``resetHost``) puts a set back to the identity in one kernel: ``perm``,
+``inv`` and, when non-null, ``indexMap`` become ``0..n-1`` and ``*count = *span = n``.
+It is capture-legal and reads no ``fire`` word. The seam symbol is
+``eagle_backend_reset_device`` (seam minor 1) and ``eagle._core.reset_device``
+its binding; ``ActiveSet.reset`` uses it on a reordering device set.
+
 **When it pays.** The reorder is an explicit opt-in. On the performance
 card's oscillator (a memory-bound RK4 step, stop steps spread over two
 decades, Quadro P2000) it pays from about 1e5 samples: at N = 1e5 it cuts the
