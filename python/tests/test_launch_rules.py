@@ -75,18 +75,36 @@ def test_the_cost_model_prices_a_compaction_in_steps():
     assert _core.band_rate(8, 0, 108, 2, 0, True, 1_000_000, 33.0) == 0.0
 
 
-P2000_ARGS = (6, 1, 32)
-A100_ARGS = (8, 0, 2)
+# (major, minor, SMs, FP32:FP64 ratio)
+P2000_ARGS = (6, 1, 8, 32)
+A100_ARGS = (8, 0, 108, 2)
+H100_ARGS = (9, 0, 132, 2)
+T4_ARGS = (7, 5, 40, 32)
+RTX_ARGS = (12, 0, 188, 64)
 
 
 @pytest.mark.parametrize("args, fp64, ops, m, want", [
     (P2000_ARGS, True, 44, 22, 4), (P2000_ARGS, True, 44, 215, 8),
     (P2000_ARGS, False, 44, 22, 16), (P2000_ARGS, False, 44, 215, 32),
     (A100_ARGS, True, 44, 22, 8), (A100_ARGS, True, 44, 215, 32),
-    (A100_ARGS, True, 1106, 498, 8),
-    (P2000_ARGS, True, 44, 1, 2), (P2000_ARGS, True, 44, 1e9, 32), (P2000_ARGS, True, 0, 22, 32)])
+    (A100_ARGS, True, 1106, 498, 8), (H100_ARGS, False, 41, 22, 32), (T4_ARGS, True, 41, 22, 2),
+    (P2000_ARGS, True, 44, 1, 2), (P2000_ARGS, True, 44, 1e9, 32), (P2000_ARGS, True, 0, 22, 32),
+    ((9, 0, 0, 2), True, 44, 22, 32)])
 def test_the_chunk_follows_the_mean_steps_and_the_step_cost(args, fp64, ops, m, want):
     assert _core.persist_chunk(*args, fp64, ops, m) == want
+
+
+# the swept cells at 41 operations: mean steps 22 at S=100 and 215 at S=1000
+@pytest.mark.parametrize("args, fp64, m, want", [
+    (H100_ARGS, False, 22, 32), (RTX_ARGS, False, 22, 32), (H100_ARGS, True, 22, 16),
+    (H100_ARGS, True, 215, 32), (H100_ARGS, False, 215, 32), (A100_ARGS, False, 22, 16),
+    (A100_ARGS, True, 22, 8),  # the A100 sweep's fastest at fp64 S=100 is chunk 8 (16 is +2.3 %)
+    (A100_ARGS, False, 215, 32), (A100_ARGS, True, 215, 32),
+    (RTX_ARGS, True, 22, 4), (RTX_ARGS, True, 215, 8), (RTX_ARGS, False, 215, 32),
+    (T4_ARGS, True, 22, 2), (P2000_ARGS, True, 22, 4), (P2000_ARGS, True, 215, 8),
+    (P2000_ARGS, False, 22, 16), (P2000_ARGS, False, 215, 32)])
+def test_the_chunk_matches_the_swept_cells(args, fp64, m, want):
+    assert _core.persist_chunk(*args, fp64, 41.0, m) == want
 
 
 _FETCH_FIT = {  # name -> (major, minor, ratio, sms)
@@ -125,10 +143,10 @@ def test_the_drain_limit_still_binds(card, fp64, c):
 
 
 def test_the_chunk_ignores_the_device_clock():
-    # the head is a fixed 256 cycles: the clock never enters the chunk
-    for card, fp64, want in (("H100", False, 16), ("A100", True, 8), ("P2000", True, 4), ("P2000", False, 16)):
-        major, minor, ratio, _ = _FETCH_FIT[card]
-        assert _core.persist_chunk(major, minor, ratio, fp64, 44.0, 22.0) == want
+    # a claim costs cycles fixed by the device class: the clock never enters the chunk
+    for card, fp64, want in (("H100", False, 32), ("A100", True, 8), ("P2000", True, 4), ("P2000", False, 16)):
+        major, minor, ratio, sms = _FETCH_FIT[card]
+        assert _core.persist_chunk(major, minor, sms, ratio, fp64, 44.0, 22.0) == want
 
 
 # --------------------------------------------------------------------------- #
@@ -206,7 +224,7 @@ def test_the_rules_are_safe_to_call_from_many_threads():
     def worker():
         try:
             for _ in range(200):
-                got.append((ud._next_k(_K, _NEWLY, _LIVE, 1000, 8, 8.4), _core.persist_chunk(8, 0, 2, True, 44.0, 23.0)))
+                got.append((ud._next_k(_K, _NEWLY, _LIVE, 1000, 8, 8.4), _core.persist_chunk(8, 0, 108, 2, True, 44.0, 23.0)))
         except Exception as exc:  # pragma: no cover
             errors.append(exc)
 

@@ -34,8 +34,6 @@ inline constexpr double PERSIST_FIRST_FILL = 0.5;
 /** @brief Fewest and most steps one work-stealing chunk runs. */
 inline constexpr int PERSIST_CHUNK_MIN = 2;
 inline constexpr int PERSIST_CHUNK_MAX = 32;
-/** @brief Cycles a chunk head costs a warp: the work fetch and its same-address atomic. */
-inline constexpr double PERSIST_HEAD_CYCLES = 256.0;
 /** @brief Cycles of fetch latency the warps of a persistent launch must cover. */
 inline constexpr double PERSIST_FETCH_CYCLES = 2000.0;
 /** @brief Most warps per partition added to cover a chunk head's fetch. */
@@ -63,6 +61,13 @@ inline constexpr SmLayout smLayout(int ccMajor, int ccMinor) {
         return { 4, 64 };
     return { 4, 128 };
 }
+
+/**
+ * @brief SM cycles one warp's claim of work holds the chip: the same-address
+ *        atomic every claim contends on. Pascal's L2 serialises them about an
+ *        order of magnitude slower than Volta and later.
+ */
+inline constexpr int claimCycles(int ccMajor) { return ccMajor < 7 ? 12 : 1; }
 
 /** @brief Cycles one warp instruction of the step's precision takes to issue on the SM. */
 inline int issueCycles(const LaunchDevice& dev, bool fp64) {
@@ -132,15 +137,17 @@ inline int persistThreads(const LaunchDevice& dev, bool fp64, int regs, long lon
  * @brief Steps one work-stealing chunk runs for samples that take @p meanSteps
  *        on average, each step @p ops floating-point operations of the given precision.
  *
- * The power of two nearest sqrt(2 * m * H / (ops * issue)), held to
- * [PERSIST_CHUNK_MIN, PERSIST_CHUNK_MAX]: the minimiser of the lanes a chunk
- * leaves idle at its end (c / 2m) against the head's cost per step
- * (H / (c * ops * issue)), H being PERSIST_HEAD_CYCLES. Written on the square
- * so no root is taken. An unknown @p ops (0) takes the longest chunk.
+ * The power of two nearest sqrt(8 * m * SMs * claimCycles / (ops * issue)),
+ * held to [PERSIST_CHUNK_MIN, PERSIST_CHUNK_MAX]: the minimiser of the lane
+ * steps a chunk wastes masked at its end (c / 2 per lane) against the claims
+ * (m * t_claim / (32 c)), every claim holding the chip claimCycles cycles
+ * and the SMs sharing the one counter. Written on the square so no root is
+ * taken. An unknown @p ops (0) or SM count takes the longest chunk.
  */
 inline int persistChunk(const LaunchDevice& dev, bool fp64, double ops, double meanSteps) {
-    if (!(ops > 0.0)) return PERSIST_CHUNK_MAX;
-    const double x2 = 2.0 * meanSteps * PERSIST_HEAD_CYCLES / (ops * issueCycles(dev, fp64));
+    if (!(ops > 0.0) || dev.sms <= 0) return PERSIST_CHUNK_MAX;
+    const double x2 = 8.0 * meanSteps * dev.sms * claimCycles(dev.residency.ccMajor) /
+                      (ops * issueCycles(dev, fp64));
     int chunk = PERSIST_CHUNK_MIN;
     while (chunk < PERSIST_CHUNK_MAX && x2 >= 2.0 * chunk * chunk) chunk *= 2;
     return chunk;

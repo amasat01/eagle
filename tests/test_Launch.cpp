@@ -19,6 +19,7 @@ const LaunchDevice A100 = { { 8, 0, 65536, 2048 }, 108, 2, 1410000 };
 const LaunchDevice P2000 = { { 6, 1, 65536, 2048 }, 8, 32, 1480000 };
 const LaunchDevice L4 = { { 8, 9, 65536, 1536 }, 58, 64, 2040000 };
 const LaunchDevice H100 = { { 9, 0, 65536, 2048 }, 132, 2, 1755000 };
+const LaunchDevice T4 = { { 7, 5, 65536, 1024 }, 40, 32, 1590000 };
 
 }  // namespace
 
@@ -81,19 +82,52 @@ TEST(Launch, ThreadsNeverExceedTheResidencyCeiling)
 
 TEST(Launch, ChunkRuleRows)
 {
-    // (device, precision, ops, mean steps) -> chunk; the head is a fixed 256 cycles, whatever the clock
+    // (device: cc, SMs; precision, ops, mean steps) -> chunk; a claim's cost is a device-class fact, never the clock
+    EXPECT_EQ(persistChunk(P2000, true, 41, 22), 4);
     EXPECT_EQ(persistChunk(P2000, true, 44, 22), 4);
     EXPECT_EQ(persistChunk(P2000, true, 44, 215), 8);
     EXPECT_EQ(persistChunk(P2000, false, 44, 22), 16);
     EXPECT_EQ(persistChunk(P2000, false, 44, 215), 32);
+    EXPECT_EQ(persistChunk(A100, false, 41, 22), 16);
     EXPECT_EQ(persistChunk(A100, true, 44, 22), 8);
     EXPECT_EQ(persistChunk(A100, true, 44, 215), 32);
     EXPECT_EQ(persistChunk(A100, true, 1106, 498), 8);
-    const int h100 = persistChunk(H100, true, 44, 22);
-    EXPECT_TRUE(h100 == 8 || h100 == 16) << h100;
+    EXPECT_EQ(persistChunk(H100, false, 41, 22), 32);
+    EXPECT_EQ(persistChunk(H100, true, 41, 22), 16);
+    EXPECT_EQ(persistChunk(T4, true, 41, 22), 2);
     LaunchDevice slow = P2000;
     slow.clockKhz = 0;
     EXPECT_EQ(persistChunk(slow, false, 44, 22), persistChunk(P2000, false, 44, 22));
+}
+
+TEST(Launch, ChunkIgnoresTheClock)
+{
+    for (const LaunchDevice* dev : { &A100, &P2000, &H100, &T4 })
+        for (bool fp64 : { true, false }) {
+            LaunchDevice other = *dev;
+            other.clockKhz = dev->clockKhz / 2;
+            EXPECT_EQ(persistChunk(other, fp64, 41, 22), persistChunk(*dev, fp64, 41, 22));
+        }
+}
+
+TEST(Launch, ChunkGrowsWithTheSmCount)
+{
+    LaunchDevice few = H100, many = H100;
+    few.sms = 8;
+    EXPECT_EQ(persistChunk(few, false, 44, 21.5), 4);
+    EXPECT_EQ(persistChunk(many, false, 44, 21.5), 32);
+}
+
+TEST(Launch, APascalClaimCostsTwelveCycles)
+{
+    EXPECT_EQ(claimCycles(6), 12);
+    EXPECT_EQ(claimCycles(7), 1);
+    EXPECT_EQ(claimCycles(9), 1);
+    LaunchDevice volta = P2000;
+    volta.residency.ccMajor = 7;
+    volta.residency.ccMinor = 5;
+    EXPECT_EQ(persistChunk(P2000, true, 41, 22), 4);
+    EXPECT_EQ(persistChunk(volta, true, 41, 22), 2);
 }
 
 TEST(Launch, ChunkIsAPowerOfTwoInItsBounds)

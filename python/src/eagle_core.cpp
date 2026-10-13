@@ -1143,14 +1143,15 @@ NB_MODULE(_core, m)
             "min(residency ceiling, n * fill / (2 * SMs)). 0 when the SM count is unknown. Pure.");
 
         m.def("persist_chunk",
-            [](int major, int minor, int fp64_ratio, bool fp64, double ops, double mean_steps) {
-                return pol::persistChunk({ { major, minor, 0, 0 }, 0, fp64_ratio, 0 }, fp64, ops, mean_steps);
+            [](int major, int minor, int sms, int fp64_ratio, bool fp64, double ops, double mean_steps) {
+                return pol::persistChunk({ { major, minor, 0, 0 }, sms, fp64_ratio, 0 }, fp64, ops, mean_steps);
             },
-            nb::arg("major"), nb::arg("minor"), nb::arg("fp64_ratio"), nb::arg("fp64"), nb::arg("ops"),
-            nb::arg("mean_steps"),
+            nb::arg("major"), nb::arg("minor"), nb::arg("sms"), nb::arg("fp64_ratio"), nb::arg("fp64"),
+            nb::arg("ops"), nb::arg("mean_steps"),
             "Steps one work-stealing chunk runs for samples taking `mean_steps` on average with `ops` "
-            "floating-point operations a step: the power of two nearest sqrt(2 * mean_steps * 256 / "
-            "(ops * issue cycles)), held to [2, 32]; 32 when `ops` is unknown (0). Pure.");
+            "floating-point operations a step: the power of two nearest sqrt(8 * mean_steps * sms * "
+            "claim cycles / (ops * issue cycles)), held to [2, 32], where a claim holds the chip 12 cycles "
+            "on a Pascal part and 1 on a later one; 32 when `ops` or `sms` is unknown (0). Pure.");
 
         m.def("band_k",
             [](double rate, long long newly, long long live, long long k, long long k_max, long long k_min) {
