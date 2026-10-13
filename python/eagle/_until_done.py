@@ -1127,8 +1127,8 @@ class Runner:
                         grid=self._fast_grid, counter=counter, util=util, block=self._fast_block,
                         steps=steps_cell, chunk=chunk)
 
-    # The pick as it was kept in separate fields: read-only views of the one
-    # state value, and assignments that swap in a copy with that field changed.
+    # Read-only views of single fields of the one pick-state value; an assignment
+    # swaps in a copy of the state with that field replaced.
     def _view(self, name):
         return getattr(getattr(self, "_fast_state", _NO_PICK), name)
 
@@ -1224,7 +1224,8 @@ class Runner:
         steps), its readback and, when it was timed, its wall (``None`` for a
         settled run, which only checks whether the readback regime moved).
 
-        On a new regime the old walls no longer compare. The pick is then taken,
+        When the readback regime changes, walls timed under the previous regime
+        are not comparable. The pick is then taken,
         without timing, from the process's settled picks; failing that, the entry
         just run is the pick and the other is timed next. The new
         state is built whole and swapped in by one assignment."""

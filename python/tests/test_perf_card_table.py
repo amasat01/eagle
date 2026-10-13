@@ -337,8 +337,8 @@ def test_issued_bytes_follow_the_reported_schedule():
     (all + map) * n per launch, the active traffic of the steps run, the
     finish write and 2 compaction passes. No policy is replayed.
 
-    RED: replay a policy twin, or ignore the report's launch histogram or
-    compactions, and this fails."""
+    This fails if the card replays a policy copy, or ignores the report's
+    launch histogram or compactions."""
     import types
 
     import numpy as np
@@ -372,7 +372,7 @@ def test_missing_optional_libraries_become_arms_not_run(monkeypatch):
     ``arms_not_run`` with "<lib> not installed in this profile", and they are
     absent from the arms the run uses.
 
-    RED: import a library at selection time and this raises."""
+    This raises if a library is imported at selection time."""
     import sys
 
     module = _script()
@@ -992,7 +992,7 @@ def test_perf_card_memory_baseline_is_read_before_the_warm_up(monkeypatch):
     """The device baseline is taken once the CUDA context exists but before the
     arm's warm-up run, so every library's pool reserved during the warm-up counts.
 
-    RED: read the baseline after the warm-up (the old order) and this fails."""
+    This fails if the baseline is read after the warm-up."""
     import numpy as np
 
     module = _script()

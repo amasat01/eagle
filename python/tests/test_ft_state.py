@@ -415,7 +415,7 @@ def test_host_parity_on_private_planes(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# FT-3: the entry pick. One thread runs a runner (the only writer); another
+# Concurrency of the entry pick. One thread runs a runner (the only writer); another
 # reads its pick state the whole time. Two runners on the same key race to
 # settle it in the process cache.
 # --------------------------------------------------------------------------- #

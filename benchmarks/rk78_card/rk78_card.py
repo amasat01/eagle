@@ -1773,15 +1773,14 @@ def main(argv=None):
         row["fraction_of_peak_fp64"] = (
             None if row["arm"] == "eagle_cpu" or not peak["fp64_flops"]
             else row["useful_flops_per_s"] / peak["fp64_flops"])
-        # Item 5: memcpy/runtime-API-call counts from the same nsys pass.
+        # nsys_counts: memcpy/runtime-API-call counts from the same nsys pass.
         row["nsys_counts"] = (kcounts.get((row["n"], row["arm"]))
                               if row["arm"] != "eagle_cpu" and kcounts is not None
                               else None)
-        # Item 4: slot fill -- set already, per-row, from the persist
-        # arm's own report (the persistent launch); every
-        # other arm's row has none, so this only fills the gap.
+        # slot_fill: filled per row from the persist arm's own report (the
+        # persistent launch); every other arm's row has none, so default it to None.
         row.setdefault("slot_fill", None)
-    # Item 1: the SM clock the repetitions ran at (ClockPoller: NVML where
+    # The SM clock the repetitions ran at (ClockPoller: NVML where
     # available, else nvidia-smi) and the FP64 peak at that clock.
     clocks = [e["gpu_state_during"].get("sm_clock_mhz_median") for e in per_n]
     clock_sources = {e["gpu_state_during"].get("source") for e in per_n

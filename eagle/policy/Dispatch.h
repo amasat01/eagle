@@ -56,15 +56,16 @@ inline constexpr double HOST_MEMORY_RATE = 52.1e9;      ///< bytes per second a 
 inline constexpr double HOST_CACHE_BYTES = 12.7e6;      ///< last-level plus per-core caches
 inline constexpr double HOST_CACHE_RATIO = 5.09;         ///< a cached gather's speed over memory
 inline constexpr double HOST_ARITH32 = 1.495;            ///< a 32-bit op, in 64-bit ops
-inline constexpr double HOST_SPECIAL32 = 25.2;
-inline constexpr double HOST_SPECIAL64 = 122.0;
+inline constexpr double HOST_SPECIAL32 = 25.2;        ///< a 32-bit transcendental or library call, in 64-bit ops
+inline constexpr double HOST_SPECIAL64 = 122.0;        ///< a 64-bit transcendental or library call, in 64-bit ops
 inline constexpr double HOST_CHAIN_SECONDS = 0.23e-9;  ///< one dependent op, across all cores: 4 cycles / 4.3 GHz / 4 cores, a default the host calibration refits per machine
-inline constexpr double HOST_VECTOR_WIDTH = 8;          ///< fp64 lanes of a vectorised loop (avx512f), as an effective width
+inline constexpr double HOST_VECTOR_WIDTH = 8;          ///< speed-up of a vectorised loop over a scalar one: the 8 fp64 lanes of AVX-512, as an effective width
 inline constexpr double HOST_SPLIT_SECONDS = 0.35e-9;   ///< one split step's bookkeeping, per sample
 inline constexpr double HOST_SORT_SECONDS = 13.2e-9;    ///< one class sort, per sample
-inline constexpr double DEVICE_SPLIT_SECONDS = 0.05e-9;
-inline constexpr double DEVICE_SORT_SECONDS = 10e-9;
+inline constexpr double DEVICE_SPLIT_SECONDS = 0.05e-9;  ///< one split step's bookkeeping, per sample; a prior
+inline constexpr double DEVICE_SORT_SECONDS = 10e-9;     ///< one class sort, per sample; a prior
 /// Warps per SM above which the issue pipe stays busy: a kernel resident in fewer runs the lanes slower.
+/// 8 is the knee measured on a P2000 (1:32 FP64 rate).
 inline constexpr int ISSUE_KNEE_WARPS = 8;
 
 enum class Policy { Switch, Segmented };

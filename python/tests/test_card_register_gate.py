@@ -50,7 +50,7 @@ ARITH = ("DFMA", "DMUL", "DADD", "MUFU")
 #: between toolkits, so each is held to the pins of the toolkit that compiled it
 #: (CUDA 12.9 pins cover the 12.x series). An arch missing under a major has no
 #: pin there and is not checked. Persist entries: the most registers allowed
-#: (the warp-converged loop holds no more than the per-lane loop it replaced).
+#: (the warp-converged loop is held to the register count pinned here, per arch).
 PERSIST_REGS = {
     12: {
         "rkf78_attempt_persist": {"sm_61": 166, "sm_80": 164, "sm_89": 164, "sm_90": 164},
@@ -76,9 +76,8 @@ FUSED_REGS = {
 
 #: Pinned arithmetic per entry by CUDA major, the same on every arch. The
 #: toolkits differ in how many DADDs the RKF7(8) entries carry.
-# The step and stop counters are uint32 planes: their increments are integer
-# adds, so each entry carries fewer DADDs than the float64 counters did, and
-# the range entry's loop unrolls one more trip (six copies of the fused step).
+# The step and stop counters are uint32 planes, so their increments are integer
+# adds (no DADD); the range entry's loop unrolls six copies of the fused step.
 _OSC_ARITH = {
     "oscillator_step_xauto": (32, 16, 6, 0),
     "oscillator_step_xauto_range": (96, 32, 14, 0),

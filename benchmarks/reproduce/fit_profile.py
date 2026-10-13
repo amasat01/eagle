@@ -38,8 +38,13 @@ from eagle import _core
 FITTED = ("lane_rate", "arith32", "special32", "special64", "memory_rate", "cache_ratio",
           "launch_seconds", "split_seconds", "chain_seconds", "vector_width")
 #: Hard bounds on a fitted weight, in the weight's own unit; the others stay within 4x of the default.
+#: chain_seconds: 0.1-0.6 ns per dependent op across all cores; arith32: a 32-bit op costs 0.8-1.25 of a 64-bit one.
 BOUNDS = {"chain_seconds": (0.10e-9, 0.60e-9), "arith32": (0.8, 1.25)}
-#: Acceptance bars.
+#: Acceptance bars: the worst relative error of any single isolated case; the worst
+#: error of the predicted 1-chain / 4-chain ratio; the largest absolute error of a
+#: predicted segmented-over-switch gain (judged only on pairs whose measured gain
+#: differs from 1 by at least this much); the gain at which dispatch switches
+#: to segmented (the same value as policy::ENTER_GAIN).
 MAX_A_CASE, MAX_ILP, MAX_GAIN_ERROR, ENTER_GAIN = 0.35, 0.20, 0.15, 1.15
 SCHEMA = 2
 
@@ -72,7 +77,7 @@ def branches_of(row):
     written; per-branch vectorised flags)``."""
     keys = [k for k in ("cost_b0", "cost_b1", "cost_b2", "cost_b3") if row[k]]
     cells = [[float(x) for x in row[k].split(";")] for k in keys]
-    # a schema-1 cell has the six counts only: no chains, every branch takes the fused flag
+    # an older calibration cell (schema 1) holds the six counts only: no chains, and every branch takes the fused-loop flag
     fused = row.get("fused_vectorised", "0") == "1"
     return ([tuple(c[:10]) + tuple(c[11:12]) if len(c) > 6 else tuple(c) + (0.0,) * 4 for c in cells],
             [bool(c[10]) if len(c) > 10 else fused for c in cells])

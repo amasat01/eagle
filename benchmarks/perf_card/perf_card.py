@@ -3381,13 +3381,12 @@ def main(argv=None):
                 "and Warp arms launch; node-level graph tracing adds a per-node "
                 "cost, so for a graph of many short kernels (PyTorch's captured "
                 "block) the traced sum can exceed the untraced wall")
-        # Item 5: kernel-launch/memcpy/graph-node counts, from the same nsys
+        # nsys_counts: kernel-launch/memcpy/graph-node counts from the same nsys
         # pass above; "--" (None) with --no-nsys or no complete traced run.
         row["nsys_counts"] = (nsys_counts.get(key) if row["arm"] != "cpu_openmp"
                               and nsys_counts is not None else None)
-        # Item 4: slot fill -- set already, per-row, from the
-        # persist arm's own report (the persistent launch); every other
-        # arm's row has none, so this only fills the gap.
+        # slot_fill: filled per row from the persist arm's own report (the
+        # persistent launch); every other arm's row has none, so default it to None.
         row.setdefault("slot_fill", None)
     for row in results:
         row["fraction_of_peak_fp64"] = (
@@ -3406,7 +3405,7 @@ def main(argv=None):
             None if row["arm"] == "cpu_openmp" or peak["fp64_flops"] is None
             else row["useful_flops_per_s"] / peak["fp64_flops"])
 
-    # Item 1: the SM clock the repetitions actually ran at (NVML where
+    # The SM clock the repetitions actually ran at (NVML where
     # available, nvidia-smi otherwise -- see ClockPoller) and the FP64 peak
     # at that clock.
     clocks = [e["gpu_state_during"].get("sm_clock_mhz_median") for e in extras]

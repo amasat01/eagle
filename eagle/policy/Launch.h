@@ -23,37 +23,39 @@
 namespace eagle {
 namespace policy {
 
-/** @brief Cycles of dependent arithmetic a step's chain exposes to one warp. */
+/** @brief Cycles of dependent arithmetic a step's chain exposes to one warp; 8 ran 3-5% faster than 16 on about eight benchmark cells. */
 inline constexpr int PERSIST_CHAIN_CYCLES = 8;
 /** @brief Fewest warps per scheduler partition a persistent launch ever uses. */
 inline constexpr int PERSIST_MIN_WARPS = 2;
-/** @brief Threads per SM are granted in multiples of this. */
+/** @brief Threads per SM are granted in multiples of this (two warps of 32 lanes). */
 inline constexpr int PERSIST_THREAD_STEP = 64;
-/** @brief The step fill assumed until a run has measured one. */
+/** @brief The step fill assumed until a run has measured one: the midpoint of the 0..1 range. */
 inline constexpr double PERSIST_FIRST_FILL = 0.5;
-/** @brief Fewest and most steps one work-stealing chunk runs. */
+/** @brief Fewest and most steps one work-stealing chunk runs: a chunk of 2 ties 4 on low-end FP64 parts and 1 never won. */
 inline constexpr int PERSIST_CHUNK_MIN = 2;
 inline constexpr int PERSIST_CHUNK_MAX = 32;
-/** @brief Cycles of fetch latency the warps of a persistent launch must cover. */
+/** @brief Cycles of latency (about 2000) a chunk head's fetch exposes; persistThreads divides it by the chunk's arithmetic cycles to count the warps that cover it. */
 inline constexpr double PERSIST_FETCH_CYCLES = 2000.0;
 /** @brief Most warps per partition added to cover a chunk head's fetch. */
 inline constexpr int PERSIST_FETCH_WARPS_MAX = 3;
 
-/** @brief Compaction's fixed cost: nine small kernels, in seconds. */
+/** @brief Compaction's fixed cost: nine small kernels, 27 us in all, in seconds. */
 inline constexpr double COMPACTION_FLOOR_S = 27e-6;
-/** @brief Compaction's cost per live sample, in seconds. */
+/** @brief Compaction's cost per live sample, in seconds (32 ps). */
 inline constexpr double COMPACTION_PER_SAMPLE_S = 32e-12;
 /**
  * @brief The gap a compaction adds between its kernels in a captured graph, in
- *        seconds: on an H100 a compaction cost 74 us of wall against 12 us of
- *        kernel time.
+ *        seconds, per compaction: on an H100 a compaction cost 74 us of wall
+ *        against 12 us of kernel time, and 74 - 12 = 62 us is the gap.
  */
 inline constexpr double GRAPH_NODE_S = 62e-6;
 /**
  * @brief Share of a step's arithmetic still exposed to dead lanes when the step
  *        is bound by memory: the rest hides under the loads. Set on an H100; the
  *        cadence it gives on an A100, an RTX and a P2000 stays within the swept
- *        best.
+ *        best. 0.25 means a quarter of the compute time is exposed: the band
+ *        step on an H100 is DRAM-bound (71% of peak bandwidth), so most dead-lane
+ *        arithmetic hides under the loads.
  */
 inline constexpr double BAND_HIDDEN_WASTE = 0.25;
 
@@ -224,8 +226,8 @@ inline double bandStepS(const LaunchDevice& dev, bool fp64, long long live, doub
 }
 
 /**
- * @brief R from the cost model: one compaction of @p live samples over the
- *        step it is weighed against; 0 when the clock or the SM count is
+ * @brief R, the cost ratio of one compaction of @p live samples to the step
+ *        it is weighed against, in steps of a full-live launch; 0 when the clock or the SM count is
  *        unknown.
  *
  * The compaction costs its fixed part, its per-sample part and the graph gap.
@@ -244,13 +246,13 @@ inline double bandRate(const LaunchDevice& dev, bool fp64, long long live, doubl
     return (COMPACTION_FLOOR_S + COMPACTION_PER_SAMPLE_S * static_cast<double>(live) + GRAPH_NODE_S) / exposed;
 }
 
-/** @brief Share of a persistent launch's issue slots that do useful work once its lanes keep fetching. */
+/** @brief Share of a persistent launch's issue slots that do useful work once its lanes keep fetching (0.85); a parameter of the entry-pick model. */
 inline constexpr double ENTRY_PERSIST_EFFICIENCY = 0.85;
-/** @brief Share of the step budget a fused launch runs on average (its lanes stop at their own last step). */
+/** @brief Share of the step budget a fused launch runs on average (its lanes stop at their own last step); a parameter of the entry-pick model. */
 inline constexpr double ENTRY_FUSED_SHARE = 0.9;
-/** @brief Persist over fused time below which the persistent entry is taken without timing the other. */
+/** @brief Persist over fused time below which the persistent entry is taken without timing the other; the reciprocal of ENTRY_FUSED_ABOVE, so the margin is symmetric. */
 inline constexpr double ENTRY_PERSIST_BELOW = 0.8;
-/** @brief Persist over fused time above which the fused entry is taken without timing the other. */
+/** @brief Persist over fused time above which the fused entry is taken without timing the other (1.25 = 1 / 0.8). */
 inline constexpr double ENTRY_FUSED_ABOVE = 1.25;
 
 /**
