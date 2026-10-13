@@ -116,19 +116,26 @@ def _median_wall_s(kernel, k, n, **options):
     return sorted(walls[1:])[1]
 
 
-@pytest.mark.parametrize("n", [
-    N,
-    pytest.param(200_000, marks=pytest.mark.xfail(strict=True, reason=(
-        "the host cost model prices a class split below its measured cost at large batches; "
-        "the split-overhead weight is refitted by the host calibration"))),
+_MISCALIBRATED = pytest.mark.xfail(strict=True, reason=(
+    "the host dispatch cost model is mis-calibrated on this class of machine (it predicts gains of 9-26x where the measured ratio is 0.7-1.3x); the host calibration refits its weights"))
+
+
+@pytest.mark.parametrize("n, share", [
+    (N, "rare"),
+    pytest.param(200_000, "rare", marks=_MISCALIBRATED),
+    pytest.param(N, "all", marks=_MISCALIBRATED),
+    (200_000, "all"),
 ])
-def test_the_default_follows_the_measured_faster_path_under_the_vector_math_profile(monkeypatch, n):
+def test_the_default_follows_the_measured_faster_path_under_the_vector_math_profile(monkeypatch, n, share):
     from hawk.compile import toolchain
 
     if toolchain.default_host_profile() != "native-vector-math":
         pytest.skip("no vector-math host profile on this machine")
     monkeypatch.setenv("HAWK_HOST_PROFILE", "native-vector-math")
-    k = (np.arange(n) * 7919 % 100 > 97).astype(np.int64) * 2      # class 2 for 2 % of the samples
+    if share == "rare":
+        k = (np.arange(n) * 7919 % 100 > 97).astype(np.int64) * 2  # class 2 for 2 % of the samples
+    else:
+        k = np.full(n, 2, dtype=np.int64)                            # every sample in class 2
     switch = _median_wall_s(walker, k, n, dispatch="switch")
     split = _median_wall_s(walker, k, n, dispatch="segmented")
     if max(switch, split) < 1.5 * min(switch, split):
