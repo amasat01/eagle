@@ -40,6 +40,14 @@ inline constexpr int DECISION_EVERY = 16;
 /** @brief Lanes that run in lockstep on a device. */
 inline constexpr int WARP_LANES = 32;
 
+// Host compute is the slower of two limits: the throughput of the operations
+// (`ops / rate`) and the dependent chain through them (`chain * chainSeconds`):
+// a core cannot start an operation before the one it reads has finished, so work
+// that is one long chain runs at the latency of its operations however many
+// there are. A loop over samples the compiler vectorises runs its operations
+// `vectorWidth` times faster and hides the chain across its lanes, so it pays none;
+// one it leaves scalar pays the chain in full.
+//
 // Host defaults, fitted by benchmarks/reproduce/fit_profile.py to the calibration
 // of a 4-core Xeon W-2125 (relative RMS 0.19 over the isolated groups). The device
 // defaults are conservative priors until a device calibration fits within 0.20.
@@ -50,6 +58,8 @@ inline constexpr double HOST_CACHE_RATIO = 5.09;         ///< a cached gather's 
 inline constexpr double HOST_ARITH32 = 1.495;            ///< a 32-bit op, in 64-bit ops
 inline constexpr double HOST_SPECIAL32 = 25.2;
 inline constexpr double HOST_SPECIAL64 = 122.0;
+inline constexpr double HOST_CHAIN_SECONDS = 0.23e-9;  ///< one dependent op, across all cores: 4 cycles / 4.3 GHz / 4 cores, a default the host calibration refits per machine
+inline constexpr double HOST_VECTOR_WIDTH = 8;          ///< fp64 lanes of a vectorised loop (avx512f), as an effective width
 inline constexpr double HOST_SPLIT_SECONDS = 0.35e-9;   ///< one split step's bookkeeping, per sample
 inline constexpr double HOST_SORT_SECONDS = 13.2e-9;    ///< one class sort, per sample
 inline constexpr double DEVICE_SPLIT_SECONDS = 0.05e-9;
@@ -68,14 +78,22 @@ struct BranchCost {
     double special64 = 0;  ///< the same on 64-bit floats
     double loads = 0;      ///< plane elements read
     double gathers = 0;    ///< indexed (scattered) plane reads
+    double chain32 = 0;         ///< longest dependent path of arith32 ops
+    double chain64 = 0;         ///< the same for arith64
+    double chainSpecial32 = 0;  ///< dependent special32 ops on that path
+    double chainSpecial64 = 0;  ///< the same for special64
+    bool vectorised = false;    ///< a host loop over samples running only this branch is vectorised
+    /// plane elements written; negative: not counted, and every plane read is taken to be written too
+    double stores = -1;
 };
 
 /** @brief The branches of one dispatch group, as counted from its IR. */
 struct CostVector {
     int count = 0;
     /// The fused host loop is vectorised: it evaluates every branch and selects,
-    /// so it costs the sum of the branches whatever the mix. Otherwise it is a
-    /// scalar switch that runs each sample's own branch.
+    /// so it costs the sum of the branches whatever the mix (and its chain is the
+    /// longest branch's: the branches are independent). Otherwise it is a scalar
+    /// switch that runs each sample's own branch.
     bool fusedVectorised = false;
     int regsPerThread = 0;  ///< registers the compiled kernel needs per thread; 0 when unknown (full rate)
     std::array<BranchCost, MAX_BRANCHES> branch{};
@@ -112,6 +130,8 @@ struct Weights {
     double memoryRate = 0;                ///< bytes per second; 0 takes the device's peak
     double cacheBytes = 0;                ///< cache that holds a gathered plane; 0 treats every gather as memory
     double cacheRatio = 4;                ///< a gather served from that cache runs this much faster
+    double chainSeconds = 0;              ///< host: one dependent operation, across all cores; 0 ignores chains
+    double vectorWidth = 1;               ///< host: speed-up of a vectorised loop over a scalar one
 };
 
 /** @brief What the rule remembers between two looks. */
@@ -133,6 +153,8 @@ inline Weights defaultWeights(Target target) {
         w.memoryRate = HOST_MEMORY_RATE;
         w.cacheBytes = HOST_CACHE_BYTES;
         w.cacheRatio = HOST_CACHE_RATIO;
+        w.chainSeconds = HOST_CHAIN_SECONDS;
+        w.vectorWidth = HOST_VECTOR_WIDTH;
         w.arith32 = HOST_ARITH32;
         w.special32 = HOST_SPECIAL32;
         w.special64 = HOST_SPECIAL64;
@@ -147,14 +169,25 @@ inline Weights defaultWeights(Target target) {
 
 namespace detail {
 
-/** @brief What one branch costs one sample, per step: lane operations, state bytes, gathered bytes. */
-struct Work { double ops; double stateBytes; double gatherBytes; };
+/** @brief What one branch costs one sample, per step: lane operations, dependent-chain seconds, state bytes, gathered bytes. */
+struct Work { double ops; double chain; double stateBytes; double gatherBytes; };
 
-inline Work branchWork(const BranchCost& b, const Weights& w, const DeviceProps& props) {
+/** @brief Speed-up of a host loop that is @p vectorised; a device (and a scalar loop) has none. */
+inline double hostWidth(bool vectorised, const Weights& w) {
+    return (w.target == Target::Host && vectorised) ? std::max(w.vectorWidth, 1.0) : 1.0;
+}
+
+inline Work branchWork(const BranchCost& b, const Weights& w, const DeviceProps& props, bool vectorised) {
     // A 64-bit op costs fp64_ratio plain ones on a device; a host core has no such penalty.
     const double wide = (w.target == Target::Device && props.fp64_ratio > 1.0) ? props.fp64_ratio : 1.0;
-    return { b.arith32 * w.arith32 + b.arith64 * wide + b.special32 * w.special32 + b.special64 * w.special64 * wide,
-             2.0 * b.loads * w.elemBytes,  // carried planes are read and written
+    const double width = hostWidth(vectorised, w);
+    const double path = b.chain32 + b.chain64 + b.chainSpecial32 * w.special32 + b.chainSpecial64 * w.special64;
+    return { (b.arith32 * w.arith32 + b.arith64 * wide + b.special32 * w.special32 + b.special64 * w.special64 * wide) / width,
+             // A vectorised loop overlaps the chain across its lanes; a scalar one pays it in full.
+             (w.target == Target::Host && !vectorised) ? path * w.chainSeconds : 0.0,
+             // Planes read are read once; planes written are written once (an uncounted write count
+             // assumes every plane read is also written).
+             (b.stores < 0.0 ? 2.0 * b.loads : b.loads + b.stores) * w.elemBytes,
              b.gathers * w.elemBytes };
 }
 
@@ -179,11 +212,11 @@ inline ByteRates byteRates(double n, const DeviceProps& props, const Weights& w)
     return { 1.0 / memory, 1.0 / (cached ? memory * w.cacheRatio : memory) };
 }
 
-/** @brief One launch over @p n samples: the slower of its arithmetic and its memory traffic, plus the launch. */
-inline double launchSeconds(double n, double ops, double stateBytes, double gatherBytes, double rate,
-                            const ByteRates& bytes, double launch) {
-    const double compute = rate > 0.0 ? n * ops / rate : 0.0;
-    return std::max(compute, n * (stateBytes * bytes.state + gatherBytes * bytes.gather)) + launch;
+/** @brief One launch over @p n samples: the slowest of its arithmetic, its dependent chain and its memory traffic, plus the launch. */
+inline double launchSeconds(double n, const Work& work, double rate, const ByteRates& bytes, double launch) {
+    const double compute = rate > 0.0 ? n * work.ops / rate : 0.0;
+    const double traffic = n * (work.stateBytes * bytes.state + work.gatherBytes * bytes.gather);
+    return std::max({ compute, n * work.chain, traffic }) + launch;
 }
 
 }  // namespace detail
@@ -209,8 +242,8 @@ struct PathSeconds { double fused; double split; };
  * @brief Predicted seconds per step of the fused `switch` kernel and of the
  *        split one for this mix.
  *
- * A launch takes the slower of its arithmetic and its memory traffic, plus the
- * launch itself. Per sample and step, in lane operations and bytes:
+ * A launch takes the slowest of its arithmetic, its dependent chain (host only) and
+ * its memory traffic, plus the launch itself. Per sample and step, in lane operations and bytes:
  * - fused: one kernel of `fusedSteps` steps. Its carried planes are read and
  *   written once per launch, so their traffic is divided by `fusedSteps`;
  *   gathered reads cost every step, at memory speed or, when the gathered plane
@@ -239,22 +272,24 @@ inline PathSeconds predictedSeconds(const CostVector& cost, const Mix& mix, cons
     const double rate = detail::laneRate(cost, props, w);
     const detail::ByteRates bytes = detail::byteRates(n, props, w);
 
-    detail::Work fused{ 0, 0, 0 };
+    detail::Work fused{ 0, 0, 0, 0 };
     double split = n * (w.splitSeconds + w.sortSeconds / remaining);
     for (int j = 0; j < cost.count; ++j) {
         const double p = static_cast<double>(mix.counts[j]) / static_cast<double>(total);
-        const detail::Work work = detail::branchWork(cost.branch[j], w, props);
+        const detail::Work work = detail::branchWork(cost.branch[j], w, props, cost.branch[j].vectorised);
+        // The fused loop has one width for every branch: its own flag, not the branch's.
+        const detail::Work inFused = detail::branchWork(cost.branch[j], w, props, cost.fusedVectorised);
         const double share = w.target == Target::Device ? warpShare(p, mix.mixed32)
                            : cost.fusedVectorised ? 1.0 : p;
-        fused.ops += share * work.ops;
-        fused.stateBytes += share * work.stateBytes;
-        fused.gatherBytes += share * work.gatherBytes;
+        fused.ops += share * inFused.ops;
+        fused.chain = cost.fusedVectorised ? std::max(fused.chain, inFused.chain) : fused.chain + share * inFused.chain;
+        fused.stateBytes += share * inFused.stateBytes;
+        fused.gatherBytes += share * inFused.gatherBytes;
         const detail::ByteRates own = detail::byteRates(p * n, props, w);
-        split += detail::launchSeconds(p * n, work.ops, work.stateBytes, work.gatherBytes, rate, own,
-                                       w.launchSeconds);
+        split += detail::launchSeconds(p * n, work, rate, own, w.launchSeconds);
     }
-    const double fusedTime = detail::launchSeconds(n, fused.ops, fused.stateBytes / fusedSteps,
-                                                   fused.gatherBytes, rate, bytes, 0.0)
+    fused.stateBytes /= fusedSteps;
+    const double fusedTime = detail::launchSeconds(n, fused, rate, bytes, 0.0)
                            + w.launchSeconds / fusedSteps;
     return { fusedTime, split };
 }

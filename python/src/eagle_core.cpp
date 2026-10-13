@@ -63,6 +63,7 @@
  */
 
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -137,7 +138,7 @@ volatile std::uint64_t g_unsynchronised = 0;
 inline void unsynchronisedBump()
 {
     const std::uint64_t seen = g_unsynchronised;
-    for (volatile int spin = 0; spin < 2048; spin = spin + 1) {}
+    for (int spin = 0; spin < 16384; ++spin) std::atomic_signal_fence(std::memory_order_seq_cst);  // a compiler barrier keeps the gap
     g_unsynchronised = seen + 1;
 }
 
@@ -921,7 +922,7 @@ NB_MODULE(_core, m)
     // -- the splitting rule (eagle/policy/Dispatch.h) ------------------------------
     {
         namespace pol = eagle::policy;
-        using BranchRow = std::tuple<double, double, double, double, double, double>;
+        using BranchRow = std::vector<double>;   // 6 counts, then optionally the 4 chain lengths
 
         // Only the derived fields the rule reads cross the boundary.
         auto propsOf = [](const nb::dict& d) {
@@ -936,15 +937,31 @@ NB_MODULE(_core, m)
             if (name == "device") return pol::Target::Device;
             throw std::invalid_argument("target must be 'host' or 'device', got '" + name + "'");
         };
-        auto costOf = [](const std::vector<BranchRow>& rows, int regsPerThread, bool fusedVectorised) {
+        // `vectorised`: one flag per branch, or none (every branch takes the fused loop's).
+        auto costOf = [](const std::vector<BranchRow>& rows, int regsPerThread, bool fusedVectorised,
+                         const std::vector<bool>& vectorised) {
             if (rows.size() < 2 || rows.size() > static_cast<std::size_t>(pol::MAX_BRANCHES))
                 throw std::invalid_argument("a dispatch group has 2 to 16 branches, got " +
                                             std::to_string(rows.size()));
             pol::CostVector c;
             c.regsPerThread = regsPerThread;
             c.fusedVectorised = fusedVectorised;
-            for (const auto& [a32, a64, s32, s64, loads, gathers] : rows)
-                c.branch[c.count++] = { a32, a64, s32, s64, loads, gathers };
+            if (!vectorised.empty() && vectorised.size() != rows.size())
+                throw std::invalid_argument("branch_vectorised needs one flag per branch (" +
+                                            std::to_string(rows.size()) + "), got " +
+                                            std::to_string(vectorised.size()));
+            for (const auto& row : rows) {
+                if (row.size() != 6 && row.size() != 10 && row.size() != 11)
+                    throw std::invalid_argument("a branch row has 6 counts, optionally followed by 4 chain lengths and a store count, got " +
+                                                std::to_string(row.size()) + " values");
+                pol::BranchCost b{ row[0], row[1], row[2], row[3], row[4], row[5] };
+                if (row.size() >= 10) {
+                    b.chain32 = row[6]; b.chain64 = row[7]; b.chainSpecial32 = row[8]; b.chainSpecial64 = row[9];
+                }
+                if (row.size() == 11) b.stores = row[10];
+                b.vectorised = vectorised.empty() ? fusedVectorised : static_cast<bool>(vectorised[c.count]);
+                c.branch[c.count++] = b;
+            }
             return c;
         };
         auto mixOf = [](const std::vector<std::int64_t>& counts, std::int64_t fusedSteps,
@@ -970,7 +987,8 @@ NB_MODULE(_core, m)
                 { "split_seconds", &pol::Weights::splitSeconds },
                 { "sort_seconds", &pol::Weights::sortSeconds }, { "lane_rate", &pol::Weights::laneRate },
                 { "memory_rate", &pol::Weights::memoryRate },   { "cache_bytes", &pol::Weights::cacheBytes },
-                { "cache_ratio", &pol::Weights::cacheRatio } };
+                { "cache_ratio", &pol::Weights::cacheRatio },
+                { "chain_seconds", &pol::Weights::chainSeconds }, { "vector_width", &pol::Weights::vectorWidth } };
             for (auto item : d) {
                 const std::string key = nb::cast<std::string>(item.first);
                 bool known = false;
@@ -1005,6 +1023,7 @@ NB_MODULE(_core, m)
                 d["split_seconds"] = w.splitSeconds; d["sort_seconds"] = w.sortSeconds;
                 d["lane_rate"] = w.laneRate; d["memory_rate"] = w.memoryRate;
                 d["cache_bytes"] = w.cacheBytes; d["cache_ratio"] = w.cacheRatio;
+                d["chain_seconds"] = w.chainSeconds; d["vector_width"] = w.vectorWidth;
                 return d;
             },
             nb::arg("target"), "The default cost-model weights of 'host' or 'device', by name. Pure.");
@@ -1013,9 +1032,10 @@ NB_MODULE(_core, m)
             [=](const std::vector<BranchRow>& branches, const std::vector<std::int64_t>& counts,
                 const nb::dict& props, const std::string& target, std::int64_t fused_steps,
                 int regs_per_thread, bool fused_vectorised, std::int64_t remaining_steps,
-                double mixed32, const nb::object& weights) {
+                double mixed32, const nb::object& weights,
+                const std::vector<bool>& branch_vectorised) {
                 const pol::PathSeconds t = pol::predictedSeconds(
-                    costOf(branches, regs_per_thread, fused_vectorised),
+                    costOf(branches, regs_per_thread, fused_vectorised, branch_vectorised),
                     mixOf(counts, fused_steps, remaining_steps, mixed32), propsOf(props),
                     weightsOf(target, weights));
                 return std::make_pair(t.fused, t.split);
@@ -1023,9 +1043,11 @@ NB_MODULE(_core, m)
             nb::arg("branches"), nb::arg("counts"), nb::arg("props"), nb::arg("target"),
             nb::arg("fused_steps") = 1, nb::arg("regs_per_thread") = 0, nb::arg("fused_vectorised") = false,
             nb::arg("remaining_steps") = pol::DECISION_EVERY, nb::arg("mixed32") = -1.0,
-            nb::arg("weights") = nb::none(),
+            nb::arg("weights") = nb::none(), nb::arg("branch_vectorised") = std::vector<bool>{},
             "(fused, split) predicted seconds per step for this branch mix. branches: per branch "
-            "(arith32, arith64, special32, special64, loads, gathers); counts: samples that took each "
+            "(arith32, arith64, special32, special64, loads, gathers), optionally followed by the four chain "
+            "lengths (chain32, chain64, chainSpecial32, chainSpecial64) and then the plane elements written (stores; omitted: every plane read is also written); branch_vectorised: one flag per "
+            "branch (default: every branch takes fused_vectorised); counts: samples that took each "
             "branch; target: 'host' or 'device'; regs_per_thread: the kernel's registers (0: unknown); "
             "remaining_steps: steps a class sort is paid over; mixed32: measured share of 32-lane "
             "groups holding two or more branches (negative: unmeasured); weights: a dict replacing "
@@ -1035,15 +1057,16 @@ NB_MODULE(_core, m)
             [=](const std::vector<BranchRow>& branches, const std::vector<std::int64_t>& counts,
                 const nb::dict& props, const std::string& target, std::int64_t fused_steps,
                 int regs_per_thread, bool fused_vectorised, std::int64_t remaining_steps,
-                double mixed32, const nb::object& weights) {
-                return pol::predictedGain(costOf(branches, regs_per_thread, fused_vectorised),
+                double mixed32, const nb::object& weights,
+                const std::vector<bool>& branch_vectorised) {
+                return pol::predictedGain(costOf(branches, regs_per_thread, fused_vectorised, branch_vectorised),
                                           mixOf(counts, fused_steps, remaining_steps, mixed32),
                                           propsOf(props), weightsOf(target, weights));
             },
             nb::arg("branches"), nb::arg("counts"), nb::arg("props"), nb::arg("target"),
             nb::arg("fused_steps") = 1, nb::arg("regs_per_thread") = 0, nb::arg("fused_vectorised") = false,
             nb::arg("remaining_steps") = pol::DECISION_EVERY, nb::arg("mixed32") = -1.0,
-            nb::arg("weights") = nb::none(),
+            nb::arg("weights") = nb::none(), nb::arg("branch_vectorised") = std::vector<bool>{},
             "Predicted time of the fused switch kernel over the split one for this branch mix "
             "(above 1 the split wins); arguments as dispatch_seconds. Pure.");
 
@@ -1051,12 +1074,13 @@ NB_MODULE(_core, m)
             [=](const std::vector<BranchRow>& branches, const std::vector<std::int64_t>& counts,
                 const nb::dict& props, const std::string& target, const std::string& current,
                 std::int64_t fused_steps, int regs_per_thread, bool fused_vectorised,
-                std::int64_t remaining_steps, double mixed32, const nb::object& weights) {
+                std::int64_t remaining_steps, double mixed32, const nb::object& weights,
+                const std::vector<bool>& branch_vectorised) {
                 if (current != "switch" && current != "segmented")
                     throw std::invalid_argument("current must be 'switch' or 'segmented', got '" + current + "'");
                 pol::HysteresisState state;
                 state.current = current == "segmented" ? pol::Policy::Segmented : pol::Policy::Switch;
-                return pol::resolve(costOf(branches, regs_per_thread, fused_vectorised),
+                return pol::resolve(costOf(branches, regs_per_thread, fused_vectorised, branch_vectorised),
                                     mixOf(counts, fused_steps, remaining_steps, mixed32), propsOf(props),
                                     weightsOf(target, weights), state) == pol::Policy::Segmented
                            ? "segmented" : "switch";
@@ -1064,7 +1088,7 @@ NB_MODULE(_core, m)
             nb::arg("branches"), nb::arg("counts"), nb::arg("props"), nb::arg("target"),
             nb::arg("current") = "switch", nb::arg("fused_steps") = 1, nb::arg("regs_per_thread") = 0, nb::arg("fused_vectorised") = false,
             nb::arg("remaining_steps") = pol::DECISION_EVERY, nb::arg("mixed32") = -1.0,
-            nb::arg("weights") = nb::none(),
+            nb::arg("weights") = nb::none(), nb::arg("branch_vectorised") = std::vector<bool>{},
             "'segmented' once the predicted gain reaches DISPATCH_ENTER_GAIN, 'switch' once it falls "
             "under DISPATCH_LEAVE_GAIN, else `current`; an empty mix keeps `current`. Pure.");
 
