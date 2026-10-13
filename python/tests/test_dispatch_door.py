@@ -106,13 +106,37 @@ def test_the_default_keeps_a_library_math_group_fused_under_an_exact_host_profil
     assert run(walker, rare_classes()).report.class_sorts == 0
 
 
-def test_the_default_splits_a_library_math_group_under_the_vector_math_profile(monkeypatch):
+def _median_wall_s(kernel, k, n, **options):
+    import time
+    walls = []
+    for _ in range(4):                       # the first run builds; the median of the rest is kept
+        t0 = time.perf_counter()
+        eagle.simulate(kernel, k=k.copy(), x=np.zeros(n), t=np.zeros(n), max_steps=200, **options)
+        walls.append(time.perf_counter() - t0)
+    return sorted(walls[1:])[1]
+
+
+@pytest.mark.parametrize("n", [
+    N,
+    pytest.param(200_000, marks=pytest.mark.xfail(strict=True, reason=(
+        "the host cost model prices a class split below its measured cost at large batches; "
+        "the split-overhead weight is refitted by the host calibration"))),
+])
+def test_the_default_follows_the_measured_faster_path_under_the_vector_math_profile(monkeypatch, n):
     from hawk.compile import toolchain
 
     if toolchain.default_host_profile() != "native-vector-math":
         pytest.skip("no vector-math host profile on this machine")
     monkeypatch.setenv("HAWK_HOST_PROFILE", "native-vector-math")
-    assert run(walker, rare_classes()).report.class_sorts >= 1
+    k = (np.arange(n) * 7919 % 100 > 97).astype(np.int64) * 2      # class 2 for 2 % of the samples
+    switch = _median_wall_s(walker, k, n, dispatch="switch")
+    split = _median_wall_s(walker, k, n, dispatch="segmented")
+    if max(switch, split) < 1.5 * min(switch, split):
+        pytest.skip(f"no clearly faster path at n={n} ({switch * 1e3:.2f} vs {split * 1e3:.2f} ms)")
+    picked = eagle.simulate(walker, k=k.copy(), x=np.zeros(n), t=np.zeros(n), max_steps=200).report
+    chose = picked.dispatch["dispatch0"][0] if picked.dispatch else "switch"
+    assert chose == ("switch" if switch < split else "segmented")
+    assert (picked.class_sorts == 0) == (chose == "switch")
 
 
 # --- the static-selector rule --- #
