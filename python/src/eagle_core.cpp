@@ -63,6 +63,7 @@
  */
 
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -137,7 +138,7 @@ volatile std::uint64_t g_unsynchronised = 0;
 inline void unsynchronisedBump()
 {
     const std::uint64_t seen = g_unsynchronised;
-    for (volatile int spin = 0; spin < 2048; spin = spin + 1) {}
+    for (int spin = 0; spin < 16384; ++spin) std::atomic_signal_fence(std::memory_order_seq_cst);  // a compiler barrier keeps the gap
     g_unsynchronised = seen + 1;
 }
 
