@@ -299,8 +299,19 @@ private:
             if (!found)
                 found = attempt(file);
             if (!found) {
-                fail_("no " + file + " was found (set $" + env + " to its path, or install it next to eagle._core)."
-                    + trail);
+#ifdef EAGLE_CORE_BUILT_WITHOUT_CUDA_PLUGIN
+                // Installed from source on a machine with no CUDA toolkit: say so, and
+                // how to get the plugin, ahead of the search trail.
+                const std::string cause = file == "libeagle_cuda.so"
+                    ? "this eagle was installed without its GPU plugin because no CUDA toolkit "
+                      "was found when it was built; install the CUDA toolkit and reinstall eagle "
+                      "for GPU support. "
+                    : "";
+#else
+                const std::string cause;
+#endif
+                fail_(cause + "no " + file + " was found (set $" + env
+                    + " to its path, or install it next to eagle._core)." + trail);
                 return;
             }
         }
