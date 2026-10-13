@@ -10,8 +10,11 @@ Python (pip)
 
 The package imports as ``eagle``. It needs Python 3.9 or newer (CPython
 3.9-3.14) and an NVIDIA driver at run time; no ``nvcc`` or CUDA toolkit. Free-threaded builds (3.13t, 3.14t) run GIL-free. On 3.13t the ``[cuda12]`` / ``[cuda13]`` extras do not resolve (CuPy 14 ships no 3.13t wheel), so eagle runs on the CPU route there; 3.14t has no such limit. The
-wheel ships GPU code for every NVIDIA architecture from Pascal (sm_60) through
-Blackwell, plus PTX for newer GPUs. To write kernels for it with hawk, install
+wheel ships GPU code (SASS) for every NVIDIA architecture from Pascal (sm_60)
+through Blackwell (sm_100 and sm_103 on B200 and B300, sm_120 and sm_121 on the
+RTX PRO 6000 and GB10), plus PTX for newer GPUs, so those GPUs run without a
+first-use JIT. One wheel serves ``[cuda12]`` and ``[cuda13]`` alike: the plugin
+needs only the driver. To write kernels for it with hawk, install
 ``"raptor-hawk[cuda12]"`` alongside (``[cuda13]`` on both for CUDA 13).
 
 .. important::

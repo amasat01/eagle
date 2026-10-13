@@ -66,6 +66,13 @@ is not given:
    cmake -DEAGLE_CUDA_ARCHS=all -B build .
    cmake -DEAGLE_CUDA_ARCHS="80;90" -B build .
 
+The published wheel is built with CUDA 12.9 and no override, so it carries SASS
+for every architecture that ``nvcc`` lists from ``sm_60`` up: ``60 61 62 70 72
+75 80 86 87 89 90 100 101 103 120 121``, plus PTX at ``121``. A CUDA 13 ``nvcc``
+with the same default lists ``75`` up and ``110``, drops ``101``, and ends in
+the same PTX. The list a plugin was built for is reported by its ``archs``
+field, and CI checks that the wheel names ``100`` and ``120``.
+
 ``CMAKE_CUDA_ARCHITECTURES``, when given, still wins. aether takes the same
 switch as ``AETHER_CUDA_ARCHS``.
 
