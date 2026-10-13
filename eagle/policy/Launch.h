@@ -43,11 +43,17 @@ inline constexpr int PERSIST_FETCH_WARPS_MAX = 3;
 inline constexpr double COMPACTION_FLOOR_S = 27e-6;
 /** @brief Compaction's cost per live sample, in seconds. */
 inline constexpr double COMPACTION_PER_SAMPLE_S = 32e-12;
-/** @brief The gap a compaction adds between its kernels in a captured graph, in seconds. */
+/**
+ * @brief The gap a compaction adds between its kernels in a captured graph, in
+ *        seconds: on an H100 a compaction cost 74 us of wall against 12 us of
+ *        kernel time.
+ */
 inline constexpr double GRAPH_NODE_S = 62e-6;
 /**
  * @brief Share of a step's arithmetic still exposed to dead lanes when the step
- *        is bound by memory: the rest hides under the loads.
+ *        is bound by memory: the rest hides under the loads. Set on an H100; the
+ *        cadence it gives on an A100, an RTX and a P2000 stays within the swept
+ *        best.
  */
 inline constexpr double BAND_HIDDEN_WASTE = 0.25;
 
@@ -74,7 +80,8 @@ inline constexpr SmLayout smLayout(int ccMajor, int ccMinor) {
 /**
  * @brief SM cycles one warp's claim of work holds the chip: the same-address
  *        atomic every claim contends on. Pascal's L2 serialises them about an
- *        order of magnitude slower than Volta and later.
+ *        order of magnitude slower than Volta and later: about 10 ns (12 cycles)
+ *        on a P2000, under one cycle on an H100.
  */
 inline constexpr int claimCycles(int ccMajor) { return ccMajor < 7 ? 12 : 1; }
 
