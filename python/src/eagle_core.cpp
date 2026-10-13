@@ -917,13 +917,14 @@ NB_MODULE(_core, m)
                                             std::to_string(rows.size()) + "), got " +
                                             std::to_string(vectorised.size()));
             for (const auto& row : rows) {
-                if (row.size() != 6 && row.size() != 10)
-                    throw std::invalid_argument("a branch row has 6 counts, or 6 counts and 4 chain lengths, got " +
+                if (row.size() != 6 && row.size() != 10 && row.size() != 11)
+                    throw std::invalid_argument("a branch row has 6 counts, optionally followed by 4 chain lengths and a store count, got " +
                                                 std::to_string(row.size()) + " values");
                 pol::BranchCost b{ row[0], row[1], row[2], row[3], row[4], row[5] };
-                if (row.size() == 10) {
+                if (row.size() >= 10) {
                     b.chain32 = row[6]; b.chain64 = row[7]; b.chainSpecial32 = row[8]; b.chainSpecial64 = row[9];
                 }
+                if (row.size() == 11) b.stores = row[10];
                 b.vectorised = vectorised.empty() ? fusedVectorised : static_cast<bool>(vectorised[c.count]);
                 c.branch[c.count++] = b;
             }
@@ -1011,7 +1012,7 @@ NB_MODULE(_core, m)
             nb::arg("weights") = nb::none(), nb::arg("branch_vectorised") = std::vector<bool>{},
             "(fused, split) predicted seconds per step for this branch mix. branches: per branch "
             "(arith32, arith64, special32, special64, loads, gathers), optionally followed by the four chain "
-            "lengths (chain32, chain64, chainSpecial32, chainSpecial64); branch_vectorised: one flag per "
+            "lengths (chain32, chain64, chainSpecial32, chainSpecial64) and then the plane elements written (stores; omitted: every plane read is also written); branch_vectorised: one flag per "
             "branch (default: every branch takes fused_vectorised); counts: samples that took each "
             "branch; target: 'host' or 'device'; regs_per_thread: the kernel's registers (0: unknown); "
             "remaining_steps: steps a class sort is paid over; mixed32: measured share of 32-lane "

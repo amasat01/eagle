@@ -84,3 +84,11 @@ def test_the_checks_name_the_ilp_pair_and_the_paired_gain(fit_profile):
     rows = fit_profile.checks(cases, header, None, 0.1, 0.2)
     assert {name for name, _, _ in rows} >= {"A-C relative RMS", "every A case",
                                              "E decide agreement", "E gain error"}
+
+
+def test_a_cost_cell_carries_its_store_count_only_when_it_has_one(fit_profile):
+    old = {"cost_b0": "0;1;0;0;2;0;0;1;0;0;1", "cost_b1": "", "cost_b2": "", "cost_b3": "",
+           "fused_vectorised": "0"}
+    new = dict(old, cost_b0="0;1;0;0;2;0;0;1;0;0;1;3")
+    assert fit_profile.branches_of(old) == ([(0, 1, 0, 0, 2, 0, 0, 1, 0, 0)], [True])
+    assert fit_profile.branches_of(new) == ([(0, 1, 0, 0, 2, 0, 0, 1, 0, 0, 3)], [True])

@@ -66,12 +66,12 @@ def check_contract(head: dict, rows: list, target: str) -> None:
 
 
 def check_cost_cells(rows: list) -> None:
-    """Every cost cell is 6 counts, 4 chain lengths and hawk's vectorised flag."""
+    """Every cost cell is 6 counts, 4 chain lengths, hawk's vectorised flag and, when hawk counts it, the plane elements written."""
     for row in rows:
         for key in ("cost_b0", "cost_b1", "cost_b2", "cost_b3"):
             if row[key]:
                 cell = [float(x) for x in row[key].split(";")]
-                assert len(cell) == 11 and cell[-1] in (0.0, 1.0), (row["case_id"], row[key])
+                assert len(cell) in (11, 12) and cell[10] in (0.0, 1.0), (row["case_id"], row[key])
 
 
 def check_chains(head: dict, rows: list) -> None:
@@ -87,7 +87,7 @@ def check_chains(head: dict, rows: list) -> None:
         one, four = unit[("1", m)], unit[("4", m)]
         assert abs(one[1] - four[1]) <= 8 and one[7] > 3 * (four[7] - 2), (m, one, four)  # same ops, shorter path
     long_one = [unit[("1", m)] for m in ms if int(m) > 16]
-    assert long_one and all(c[10] == 0.0 for c in long_one), "a rolled loop is not vectorised"
+    assert long_one and all(c[10] == 1.0 for c in long_one), "a rolled loop over samples is run interchanged and vectorised"
     contrast = [r for r in rows if r["group"] == "E" and r["kind"] == "split"]
     cheap, heavy = ([float(x) for x in contrast[-1][k].split(";")] for k in ("cost_b0", "cost_b1"))
     assert cheap[10] == 1.0 and heavy[10] == 0.0, "the contrast pair: cheap vectorises, heavy loop does not"

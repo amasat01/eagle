@@ -232,14 +232,15 @@ def header(args, device_index: int, hawk_mod, eagle_mod, opt: str) -> dict:
 
 # --- counts of an op mix, from the cost model itself --- #
 class Costs(list):
-    """The per-branch cost rows (6 counts, 4 chain lengths, vectorised), plus hawk's fact
-    whether the fused host loop vectorises."""
+    """The per-branch cost rows (6 counts, 4 chain lengths, vectorised, and the plane
+    elements written when counted), plus hawk's fact whether the fused host loop vectorises."""
 
     vectorised = False
 
 
 def _row(b) -> tuple:
-    return (*b.chain_tuple(), int(b.vectorised))
+    stores = getattr(b, "stores", None)
+    return (*b.chain_tuple(), int(b.vectorised), *(() if stores is None else (stores,)))
 
 
 def plain_costs(kernel, relabel32: bool) -> Costs:
@@ -250,11 +251,11 @@ def plain_costs(kernel, relabel32: bool) -> Costs:
 
     b = kernel_cost(_step(kernel).walk)
     row = list(_row(b))
-    if relabel32:           # a float32 build runs the model's 64-bit classes at 32-bit cost, scalar
-        a32, a64, s32, s64, ld, ga, c32, c64, cs32, cs64, _ = row
-        row = [a32 + a64, 0.0, s32 + s64, 0.0, ld, ga, c32 + c64, 0.0, cs32 + cs64, 0.0, 0]
+    if relabel32:           # a float32 build runs the model's 64-bit classes at 32-bit cost; the step keeps its own vectorised flag
+        a32, a64, s32, s64, ld, ga, c32, c64, cs32, cs64, vec, *stores = row
+        row = [a32 + a64, 0.0, s32 + s64, 0.0, ld, ga, c32 + c64, 0.0, cs32 + cs64, 0.0, vec, *stores]
     out = Costs([tuple(row)])
-    out.vectorised = bool(row[-1])
+    out.vectorised = bool(row[10])
     return out
 
 

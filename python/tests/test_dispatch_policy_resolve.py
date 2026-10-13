@@ -257,3 +257,17 @@ def test_the_chain_weights_are_named_and_replaceable():
     fast = dp.predicted_gain(cost, [BATCH, 0], weights={"chain_seconds": 1e-12})
     slow = dp.predicted_gain(cost, [BATCH, 0], weights={"chain_seconds": 1e-9})
     assert fast != slow
+
+
+def test_a_row_with_a_store_count_prices_reads_and_writes_separately():
+    props = _core.cpu_device_props()
+    counts = [N, 0]
+
+    def seconds(*row):
+        return _core.dispatch_seconds([row, row], counts, props, "host")[1]
+
+    base = (0, 0, 0, 0, 8, 0, 0, 0, 0, 0)
+    assert seconds(*base, 8) == pytest.approx(seconds(*base))      # 8 read + 8 written = 2 x loads
+    assert seconds(*base, 0) < seconds(*base)                      # read-only planes are read once
+    with pytest.raises(ValueError):
+        seconds(*base, 8, 1)

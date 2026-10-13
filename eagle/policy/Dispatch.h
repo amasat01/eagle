@@ -44,8 +44,9 @@ inline constexpr int WARP_LANES = 32;
 // (`ops / rate`) and the dependent chain through them (`chain * chainSeconds`):
 // a core cannot start an operation before the one it reads has finished, so work
 // that is one long chain runs at the latency of its operations however many
-// there are. A loop over samples the compiler vectorises does both `vectorWidth`
-// times faster; one it leaves scalar does not.
+// there are. A loop over samples the compiler vectorises runs its operations
+// `vectorWidth` times faster and hides the chain across its lanes, so it pays none;
+// one it leaves scalar pays the chain in full.
 //
 // Host defaults, fitted by benchmarks/reproduce/fit_profile.py to the calibration
 // of a 4-core Xeon W-2125 (relative RMS 0.19 over the isolated groups). The device
@@ -82,6 +83,8 @@ struct BranchCost {
     double chainSpecial32 = 0;  ///< dependent special32 ops on that path
     double chainSpecial64 = 0;  ///< the same for special64
     bool vectorised = false;    ///< a host loop over samples running only this branch is vectorised
+    /// plane elements written; negative: not counted, and every plane read is taken to be written too
+    double stores = -1;
 };
 
 /** @brief The branches of one dispatch group, as counted from its IR. */
@@ -180,8 +183,11 @@ inline Work branchWork(const BranchCost& b, const Weights& w, const DeviceProps&
     const double width = hostWidth(vectorised, w);
     const double path = b.chain32 + b.chain64 + b.chainSpecial32 * w.special32 + b.chainSpecial64 * w.special64;
     return { (b.arith32 * w.arith32 + b.arith64 * wide + b.special32 * w.special32 + b.special64 * w.special64 * wide) / width,
-             w.target == Target::Host ? path * w.chainSeconds / width : 0.0,
-             2.0 * b.loads * w.elemBytes,  // carried planes are read and written
+             // A vectorised loop overlaps the chain across its lanes; a scalar one pays it in full.
+             (w.target == Target::Host && !vectorised) ? path * w.chainSeconds : 0.0,
+             // Planes read are read once; planes written are written once (an uncounted write count
+             // assumes every plane read is also written).
+             (b.stores < 0.0 ? 2.0 * b.loads : b.loads + b.stores) * w.elemBytes,
              b.gathers * w.elemBytes };
 }
 

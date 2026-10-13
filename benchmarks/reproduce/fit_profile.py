@@ -68,12 +68,13 @@ def props_of(header):
 
 
 def branches_of(row):
-    """``(rows of 6 counts and 4 chain lengths, per-branch vectorised flags)``."""
+    """``(rows of 6 counts, 4 chain lengths and, when the cell has one, the plane elements
+    written; per-branch vectorised flags)``."""
     keys = [k for k in ("cost_b0", "cost_b1", "cost_b2", "cost_b3") if row[k]]
     cells = [[float(x) for x in row[k].split(";")] for k in keys]
     # a schema-1 cell has the six counts only: no chains, every branch takes the fused flag
     fused = row.get("fused_vectorised", "0") == "1"
-    return ([tuple(c[:10]) if len(c) > 6 else tuple(c) + (0.0,) * 4 for c in cells],
+    return ([tuple(c[:10]) + tuple(c[11:12]) if len(c) > 6 else tuple(c) + (0.0,) * 4 for c in cells],
             [bool(c[10]) if len(c) > 10 else fused for c in cells])
 
 

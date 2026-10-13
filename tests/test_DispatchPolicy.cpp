@@ -179,11 +179,71 @@ TEST(DispatchPolicy, ShortChainsLeaveHostComputeAtTheThroughputLimit)
                      predictedSeconds(costs({c, c}), m, host(), w).fused);
 }
 
+TEST(DispatchPolicy, AVectorisedBranchPaysNoChain)
+{
+    BranchCost chained, free;
+    chained.arith64 = 4;
+    chained.chain64 = 4000;   // a long chain, few operations: latency-bound if scalar
+    chained.vectorised = true;
+    free = chained;
+    free.chain64 = 0;
+    const Mix m = mix({BATCH, 0}, 1);
+    const Weights w = defaultWeights(Target::Host);
+    EXPECT_DOUBLE_EQ(predictedSeconds(costs({chained, chained}), m, host(), w).split,
+                     predictedSeconds(costs({free, free}), m, host(), w).split);
+}
+
+TEST(DispatchPolicy, AScalarBranchPaysTheFullChain)
+{
+    BranchCost b;
+    b.arith64 = 4;
+    b.chain64 = 4000;
+    Weights w = defaultWeights(Target::Host);
+    w.launchSeconds = 0;
+    w.splitSeconds = 0;
+    w.sortSeconds = 0;
+    const Mix m = mix({BATCH, 0}, 1);
+    const double seconds = predictedSeconds(costs({b, b}), m, host(), w).split;
+    EXPECT_NEAR(seconds, static_cast<double>(BATCH) * 4000 * w.chainSeconds, 1e-9 * seconds)
+        << "not divided by the vector width";
+}
+
+TEST(DispatchPolicy, ReadOnlyPlanesAreReadOnce)
+{
+    BranchCost readOnly;
+    readOnly.loads = 8;
+    readOnly.stores = 0;
+    BranchCost carried = readOnly;
+    carried.stores = 8;
+    Weights w = defaultWeights(Target::Host);
+    w.launchSeconds = 0;
+    w.splitSeconds = 0;
+    w.sortSeconds = 0;
+    const Mix m = mix({BATCH, 0}, 1);
+    const double once = predictedSeconds(costs({readOnly, readOnly}), m, host(), w).split;
+    const double twice = predictedSeconds(costs({carried, carried}), m, host(), w).split;
+    EXPECT_NEAR(twice / once, 2.0, 1e-9);
+}
+
+TEST(DispatchPolicy, ACostRowWithoutStoresKeepsTwoLoads)
+{
+    BranchCost uncounted, counted;
+    uncounted.loads = 8;
+    counted.loads = 8;
+    counted.stores = 8;
+    Weights w = defaultWeights(Target::Host);
+    w.launchSeconds = 0;
+    w.splitSeconds = 0;
+    w.sortSeconds = 0;
+    const Mix m = mix({BATCH, 0}, 1);
+    EXPECT_DOUBLE_EQ(predictedSeconds(costs({uncounted, uncounted}), m, host(), w).split,
+                     predictedSeconds(costs({counted, counted}), m, host(), w).split);
+}
+
 TEST(DispatchPolicy, AVectorisedHostBranchRunsWidthTimesFaster)
 {
     BranchCost scalar;
     scalar.arith64 = 400;
-    scalar.chain64 = 400;
     BranchCost vec = scalar;
     vec.vectorised = true;
     Weights w = defaultWeights(Target::Host);

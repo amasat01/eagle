@@ -94,7 +94,10 @@ def _props(props, target: str) -> Mapping[str, float]:
 
 
 def _rows(cost) -> list[tuple[float, ...]]:
-    """Each branch's counts and chain lengths (an older hawk has no chains: 6 values)."""
+    """Each branch's counts, chain lengths and, when counted, plane elements written
+    (an older hawk has no chains: 6 values; one without stores: 10)."""
+    if hasattr(cost.branches[0], "row_tuple"):
+        return [b.row_tuple() for b in cost.branches]
     return [b.chain_tuple() if hasattr(b, "chain_tuple") else b.as_tuple() for b in cost.branches]
 
 
