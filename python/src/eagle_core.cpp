@@ -1148,6 +1148,8 @@ NB_MODULE(_core, m)
 
         m.attr("BOUND_TEXT_GROWTH_PERCENT") = pol::BOUND_TEXT_GROWTH_PERCENT;
         m.attr("PERSIST_FIRST_FILL") = pol::PERSIST_FIRST_FILL;
+        m.attr("ENTRY_PERSIST_BELOW") = pol::ENTRY_PERSIST_BELOW;
+        m.attr("ENTRY_FUSED_ABOVE") = pol::ENTRY_FUSED_ABOVE;
 
         // -- launch sizing and cadence (eagle/policy/Launch.h) ---------------------
         m.def("persist_demand",
@@ -1176,14 +1178,15 @@ NB_MODULE(_core, m)
             "min(residency ceiling, n * fill / (2 * SMs)). 0 when the SM count is unknown. Pure.");
 
         m.def("persist_chunk",
-            [](int major, int minor, int fp64_ratio, bool fp64, double ops, double mean_steps) {
-                return pol::persistChunk({ { major, minor, 0, 0 }, 0, fp64_ratio, 0 }, fp64, ops, mean_steps);
+            [](int major, int minor, int sms, int fp64_ratio, bool fp64, double ops, double mean_steps) {
+                return pol::persistChunk({ { major, minor, 0, 0 }, sms, fp64_ratio, 0 }, fp64, ops, mean_steps);
             },
-            nb::arg("major"), nb::arg("minor"), nb::arg("fp64_ratio"), nb::arg("fp64"), nb::arg("ops"),
-            nb::arg("mean_steps"),
+            nb::arg("major"), nb::arg("minor"), nb::arg("sms"), nb::arg("fp64_ratio"), nb::arg("fp64"),
+            nb::arg("ops"), nb::arg("mean_steps"),
             "Steps one work-stealing chunk runs for samples taking `mean_steps` on average with `ops` "
-            "floating-point operations a step: the power of two nearest sqrt(2 * mean_steps * 256 / "
-            "(ops * issue cycles)), held to [2, 32]; 32 when `ops` is unknown (0). Pure.");
+            "floating-point operations a step: the power of two nearest sqrt(8 * mean_steps * sms * "
+            "claim cycles / (ops * issue cycles)), held to [2, 32], where a claim holds the chip 12 cycles "
+            "on a Pascal part and 1 on a later one; 32 when `ops` or `sms` is unknown (0). Pure.");
 
         m.def("band_k",
             [](double rate, long long newly, long long live, long long k, long long k_max, long long k_min) {
@@ -1197,13 +1200,34 @@ NB_MODULE(_core, m)
 
         m.def("band_rate",
             [](int major, int minor, int sms, int fp64_ratio, int clock_khz, bool fp64, long long live,
-               double step_ops) {
-                return pol::bandRate({ { major, minor, 0, 0 }, sms, fp64_ratio, clock_khz }, fp64, live, step_ops);
+               double step_ops, int mem_clock_khz, int bus_width_bits, double bytes_per_sample) {
+                return pol::bandRate({ { major, minor, 0, 0 }, sms, fp64_ratio, clock_khz, mem_clock_khz,
+                                       bus_width_bits },
+                                     fp64, live, step_ops, bytes_per_sample);
             },
             nb::arg("major"), nb::arg("minor"), nb::arg("sms"), nb::arg("fp64_ratio"), nb::arg("clock_khz"),
-            nb::arg("fp64"), nb::arg("live"), nb::arg("step_ops"),
-            "R from the cost model: one compaction of `live` samples over one step of a full-live "
-            "launch of `step_ops` issue slots per sample. 0 when the clock or SM count is unknown. Pure.");
+            nb::arg("fp64"), nb::arg("live"), nb::arg("step_ops"), nb::arg("mem_clock_khz") = 0,
+            nb::arg("bus_width_bits") = 0, nb::arg("bytes_per_sample") = 0.0,
+            "R from the cost model: one compaction of `live` samples (its fixed cost, its per-sample "
+            "cost and the graph gap) over the arithmetic of one step of a full-live launch of "
+            "`step_ops` issue slots per sample. When the memory clock, bus width and `bytes_per_sample` "
+            "are given and the step is bound by memory, only the share of the arithmetic dead lanes "
+            "expose is counted. 0 when the clock or SM count is unknown. Pure.");
+        m.def("entry_ratio",
+            [](int major, int minor, int sms, int fp64_ratio, int clock_khz, bool fp64, long long resident_threads,
+               long long n, long long steps, double fill, double ops) {
+                return pol::persistOverFused({ { major, minor, 0, 0 }, sms, fp64_ratio, clock_khz }, fp64,
+                                             resident_threads, n, steps, fill, ops);
+            },
+            nb::arg("major"), nb::arg("minor"), nb::arg("sms"), nb::arg("fp64_ratio"), nb::arg("clock_khz"),
+            nb::arg("fp64"), nb::arg("resident_threads"), nb::arg("n"), nb::arg("steps"), nb::arg("fill"),
+            nb::arg("ops"),
+            "Predicted wall of the persistent entry over the fused entry for `n` samples whose longest ran "
+            "`steps` steps and whose steps fill a fraction `fill` of that, each step `ops` operations, on a "
+            "device that holds `resident_threads` threads at the fused entry's registers. Below "
+            "ENTRY_PERSIST_BELOW the persistent entry wins, above ENTRY_FUSED_ABOVE the fused one. "
+            "0 when the clock, SM count or any argument is unknown. Pure.");
+
     }
 
     m.def("run_host_branches",

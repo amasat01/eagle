@@ -570,6 +570,7 @@ class DispatchRunner:
             steps=steps, compactions=0, reorders=0,
             build_s=plain.build_s if plain else 0.0, launches_by_k=by_k,
             exact_steps=plain.exact_steps if plain else True,
+            mapped=(plain.mapped if plain else 0) + split_steps * self.n,
             mode=plain.mode if plain else "band",
             dispatch={self._group: (self._state.policy, self._mix, self._gain)},
             class_sorts=sorts)

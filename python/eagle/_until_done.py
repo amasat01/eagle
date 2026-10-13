@@ -32,9 +32,11 @@ beats it.
 
 from __future__ import annotations
 
+import hashlib
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from typing import NamedTuple
 
 from ._active_set import (
     COUNT_PLANE,
@@ -86,13 +88,25 @@ def _reserved_names(*, record: bool = False, events=None,
 # The policy cells (int64): the band's current k, the counter at the last
 # launch, the steps run so far, the step cap, and R in thousandths (a
 # compaction's cost in steps of a full-live launch).
-_K, _FIN_AT, _DONE, _CAP, _R = range(5)
+_K, _FIN_AT, _DONE, _CAP, _R, _MAPPED = range(6)
 RATE_SCALE = 1000
 
 #: R until the cost model can price the device: the middle of the measured range.
 AUTO_RATE0 = 8.0
 #: Issue slots per step the cost model assumes when the kernel does not say.
 AUTO_STEP_OPS = 33
+
+
+def ops_per_step(plugin) -> float:
+    """The step's operation count the launch rules read, from the artifact's
+    sidecar (``fp64_ops_ir``, else ``ops_per_step``, else ``step_ops``);
+    ``AUTO_STEP_OPS`` when it carries none. The compaction cadence and the
+    persistent chunk both price a step with it."""
+    for key in ("fp64_ops_ir", "ops_per_step", "step_ops"):
+        value = getattr(plugin, key, None)
+        if value:
+            return float(value)
+    return float(AUTO_STEP_OPS)
 
 _STRUCTURES = {"device_kernel": True, "host_team": False}
 
@@ -129,7 +143,11 @@ class RunReport:
     (``dispatch=``): ``{group: (policy, mix, gain)}`` with the policy in force
     at the end, the samples that took each branch at the last look and the
     predicted gain of splitting (above 1 the split wins); ``class_sorts``
-    counts the sorts of samples by branch a split run made."""
+    counts the sorts of samples by branch a split run made. ``mapped`` is the
+    samples the launches ran over, summed over the launches: ``n`` for a
+    fast-path run (one launch over the whole batch), the live samples of each
+    launch for a compacting run, ``launches * n`` for one that does not
+    compact; ``0`` for a report that does not count them."""
 
     n: int
     finished: int
@@ -147,6 +165,7 @@ class RunReport:
     timed: bool = False
     dispatch: dict | None = None
     class_sorts: int = 0
+    mapped: int = 0
 
 
 def _array_module(device: bool):
@@ -164,6 +183,75 @@ def _array_module(device: bool):
 STEP_FILL_EVERY = 8
 #: the other entry replaces the pick only when its wall is below this fraction of the pick's
 PICK_HYSTERESIS = 0.98
+#: A batch of at most ``capacity / PICK_FUSED_DIVISOR`` samples is a fused-entry
+#: batch and one of at least ``PICK_PERSIST_MULTIPLE * capacity`` a persist-entry
+#: batch, whatever the readback says: the entry that wins there wins by a wide
+#: margin on every device measured, so the other is never timed. Between the
+#: two the entries trade places with the step fill and the number of steps.
+PICK_FUSED_DIVISOR = 4
+PICK_PERSIST_MULTIPLE = 8
+
+
+def _entry_regime(persist_capacity: int, wave_capacity: int, n: int) -> str:
+    """Which entry a batch of ``n`` samples is sure to want: ``"persist"`` from
+    ``PICK_PERSIST_MULTIPLE`` times the threads the persist entry keeps resident
+    across the device (``persist_capacity``, :meth:`Runner._persist_capacity`),
+    ``"fused"`` up to ``1 / PICK_FUSED_DIVISOR`` of what one fused wave holds
+    (``wave_capacity``, :meth:`~eagle._plan_binding.BoundPlan.device_capacity`),
+    else ``"band"``: the readback cannot say and both entries are timed. An
+    unknown capacity (``<= 0``) never makes a batch sure."""
+    if persist_capacity > 0 and n >= PICK_PERSIST_MULTIPLE * persist_capacity:
+        return "persist"
+    if wave_capacity > 0 and n * PICK_FUSED_DIVISOR <= wave_capacity:
+        return "fused"
+    return "band"
+
+
+class _Pick(NamedTuple):
+    """What a probing runner knows about its entry pick, as ONE immutable value.
+    A runner replaces it as a whole (an atomic reference swap), so a reader on
+    another thread sees the old pick or the new one, never a mixture, and the
+    run path takes no lock. ``wall`` maps an entry to its timed wall in ms and is
+    never modified once published; ``last`` is the readback regime the walls were
+    timed in (:func:`_readback_regime`); ``prior`` the last step fill; ``runs``
+    the runs folded in; ``ratio`` the model's predicted persist-over-fused wall
+    for the last readback (a record only: it never picks); ``settled`` says the
+    pick is final for this regime (it came from the process cache or from both
+    entries' walls), so neither
+    entry is timed again until the regime moves."""
+
+    pick: str | None
+    wall: dict
+    last: tuple | None
+    prior: float | None
+    runs: int
+    settled: bool
+    ratio: float | None = None
+
+
+_NO_PICK = _Pick(None, {}, None, None, 0, False)
+
+
+def _readback_regime(steps: int, fill) -> tuple:
+    """The readback bucket two runs share when their timings compare: the
+    longest sample's steps to the nearest power of two below, and the step fill
+    to one decimal."""
+    return (max(int(steps), 1).bit_length(), None if fill is None else round(fill, 1))
+
+
+def _artifact_digest(step) -> str:
+    """A digest naming the kernel a bound plan launches: its entry's name and
+    source, or the registers it was built with when no source is kept."""
+    import importlib
+
+    entry = getattr(step, "_entry", None)
+    digest = hashlib.md5(usedforsecurity=False)
+    digest.update(str(getattr(entry, "name", "")).encode())
+    code = getattr(entry, "code", None)
+    if isinstance(code, str):
+        code = code.encode()
+    digest.update(bytes(code) if code else repr(importlib.import_module("eagle.launch")._kernel_attrs(entry)).encode())
+    return digest.hexdigest()
 
 
 def _packed_read(xp, device: bool, cells) -> tuple:
@@ -216,10 +304,11 @@ def _fast_mode_for(step, n: int, *, compacting: bool = False) -> str | None:
     a compacting kernel: this falls through to the band path, same as an
     unknown capacity.
 
-    This size rule is the first-run rule. Above capacity, when both the
-    persist and the range entries exist, later runs follow the measured wall
-    of each entry on this device (:meth:`Runner._pick_entry`); at or below
-    capacity the size pick stands for every run."""
+    This size rule is the first-run rule. Inside the band between the sure
+    fused and sure persist batches (:func:`_entry_regime`), when both the
+    persist and the range entries exist, later runs follow the measured wall of
+    each entry on this device (:meth:`Runner._pick_entry`); outside the band
+    the regime's entry stands for every run."""
     cap = step.device_capacity()
     if cap <= 0:
         return None
@@ -357,6 +446,7 @@ extern "C" __global__ void eagle_until_done_policy(
     const long long fin = finished[0], all = total[0];
     const long long live = all - fin, newly = fin - cells[%(fin_at)d];
     const long long done = cells[%(done)d] + word[0];
+    cells[%(mapped)d] += all - cells[%(fin_at)d];
     cells[%(fin_at)d] = fin;
     cells[%(done)d] = done;
     const long long k = cells[%(k)d];
@@ -393,6 +483,7 @@ def _host_policy(cells, finished, total, word, go, hist, k_max: int,
     fin, all_ = int(finished[0]), int(total[0])
     live, newly = all_ - fin, fin - int(cells[_FIN_AT])
     done = int(cells[_DONE]) + int(word[0])
+    cells[_MAPPED] += all_ - int(cells[_FIN_AT])
     cells[_FIN_AT] = fin
     cells[_DONE] = done
     k_next = _next_k(int(cells[_K]), newly, live, k_max, k_min,
@@ -413,7 +504,7 @@ def _policy_kernel(k_max: int, k_min: int = AUTO_K_MIN):
 
     src = _POLICY_SRC % {"kmin": k_min, "kmax": k_max, "k": _K,
                          "fin_at": _FIN_AT, "done": _DONE, "cap": _CAP,
-                         "r": _R, "scale": RATE_SCALE, "band": _BAND_SRC}
+                         "r": _R, "mapped": _MAPPED, "scale": RATE_SCALE, "band": _BAND_SRC}
     return cupy.RawKernel(src, "eagle_until_done_policy")
 
 
@@ -498,8 +589,8 @@ class Runner:
                  "_compactions", "_bump", "_build_s",
                  "_fast_mode", "_fast_counter", "_fast_grid", "_fast_block", "_fast_util",
                  "_fast_util_on", "_fast_exact", "_fast_views",
-                 "_fast_counts", "_fast_pick", "_fast_wall", "_fast_runs", "_fast_last", "_fast_probe",
-                 "_fast_prior", "_fast_ev", "_fast_prep",
+                 "_fast_counts", "_fast_state", "_fast_probe", "_fast_model", "_fast_key",
+                 "_mapped_live", "_fast_ev", "_fast_prep",
                  "_fast_fill", "_fast_chunk", "_fast_chunk_ok", "_fast_chunk_pin", "_fast_fit", "_rate", "_recorder")
 
     @_layout.door
@@ -710,7 +801,9 @@ class Runner:
         self._build_s = 0.0
         self._bump = None
         self._fast_mode = None
-        self._fast_pick = self._fast_last = self._fast_prior = None
+        self._fast_state = _NO_PICK
+        self._fast_model = self._fast_key = None
+        self._mapped_live = False
         self._fast_ev = None
         self._fast_prep = {}
         self._fast_fill = _core.PERSIST_FIRST_FILL
@@ -718,8 +811,6 @@ class Runner:
         self._fast_chunk_ok = False
         self._fast_chunk_pin = None if chunk_pin is None else int(chunk_pin)
         self._fast_fit = None
-        self._fast_wall = {}
-        self._fast_runs = 0
         self._fast_counter = self._fast_grid = self._fast_block = self._fast_util = None
         self._fast_exact = False
         self._fast_counts = False
@@ -831,10 +922,15 @@ class Runner:
                 mode = fast_mode_override
         elif eligible:
             mode = _fast_mode_for(self.step, self.n, compacting=self.active is not None)
-            # above capacity with both entries present, the other entry can be
-            # timed against the size pick
+            regime = _entry_regime(self._persist_capacity(), self.step.device_capacity(), self.n)
+            if regime == "fused" and (self.active is None or self.step.range_entry() is not None):
+                mode = "fused_one"
+            elif regime == "persist" and self.step.persist_entry() is not None:
+                mode = "persist"
+            # inside the band between the two sure regimes, with both entries
+            # present, the other entry can be timed against the size pick
             probe = (self._fast_probe is not False and mode is not None
-                     and self.n > self.step.device_capacity()
+                     and regime == "band"
                      and self.step.persist_entry() is not None
                      and self.step.range_entry() is not None)
         else:
@@ -847,7 +943,7 @@ class Runner:
             self.active.prepare_compaction()
         xp = self._xp
         self._rate = self._band_rate()
-        self._cells = xp.zeros(5, dtype=xp.int64)
+        self._cells = xp.zeros(6, dtype=xp.int64)
         self._go = xp.zeros(1, dtype=xp.uint32)
         self._hist = xp.zeros(self._k_max + 1, dtype=xp.int64)
         cells, go, hist, word = self._cells, self._go, self._hist, self.fused_steps
@@ -859,6 +955,7 @@ class Runner:
             cap = self.step.device_capacity()
             if cap > 0 and self.n <= cap:
                 skip_compaction = True
+        self._mapped_live = self.active is not None and not skip_compaction
         if skip_compaction:
             self._k_min = k_max
             self._k0 = k_max
@@ -869,7 +966,7 @@ class Runner:
             args = (finished, total, cells, word, go, hist)
             # compile (and check) before any capture, on scratch cells
             kernel((1,), (1,), (xp.zeros(1, dtype=xp.uint32), total,
-                                xp.zeros(5, dtype=xp.int64),
+                                xp.zeros(6, dtype=xp.int64),
                                 xp.zeros(1, dtype=xp.int64),
                                 xp.zeros(1, dtype=xp.uint32),
                                 xp.zeros(k_max + 1, dtype=xp.int64)))
@@ -902,9 +999,10 @@ class Runner:
 
         dev = importlib.import_module("eagle.launch")._device_props()
         major, minor, sms, ratio, fp64 = _fp64_args(dev, self._scalar_type())
-        step_ops = getattr(self.step.plan.plugin, "step_ops", None) or AUTO_STEP_OPS
         rate = _core.band_rate(major, minor, sms, ratio, _attr(dev, "clockRate"), fp64,
-                               self.n, float(step_ops))
+                               self.n, ops_per_step(self.step.plan.plugin),
+                               _attr(dev, "memoryClockRate"), _attr(dev, "memoryBusWidth"),
+                               float(self.active.bytes_per_sample() if self.active is not None else 0))
         return rate if rate > 0 else AUTO_RATE0
 
     def _scalar_type(self) -> str:
@@ -934,10 +1032,8 @@ class Runner:
         block/grid whatever ``mode`` is, so :meth:`_pick_entry` can switch
         between the two entries; it also (re)starts the measured walls."""
         self._fast_mode = mode
-        self._fast_pick = mode if probe else None
-        self._fast_wall = {}
-        self._fast_runs = 0
-        self._fast_last = self._fast_prior = None
+        self._fast_state = _NO_PICK._replace(pick=mode if probe else None)
+        self._fast_model, self._fast_key = self._entry_model() if probe else (None, None)
         # an artifact whose fast entries count the samples finished on entry
         self._fast_counts = bool(getattr(self.step.plan.plugin, "entry_counts_finished", False))
         # every persist entry takes the chunk length as a launch argument (one
@@ -980,15 +1076,12 @@ class Runner:
         self._size_persist()
 
     def _device_and_ops(self) -> tuple:
-        """The device properties and the step's floating-point operation count
-        (the plugin's ``fp64_ops_ir`` or ``ops_per_step``; ``AUTO_STEP_OPS``
-        when it carries neither) the launch rules read."""
+        """The device properties and the step's operation count
+        (:func:`ops_per_step`) the launch rules read."""
         import importlib
 
-        plugin = self.step.plan.plugin
-        ops = (getattr(plugin, "fp64_ops_ir", None) or getattr(plugin, "ops_per_step", None)
-               or AUTO_STEP_OPS)
-        return importlib.import_module("eagle.launch")._device_props(), float(ops)
+        return (importlib.import_module("eagle.launch")._device_props(),
+                ops_per_step(self.step.plan.plugin))
 
     def _chunk_for(self, mean_steps: float) -> int:
         """The chunk length for samples of ``mean_steps`` mean steps: the pinned
@@ -1038,23 +1131,80 @@ class Runner:
                         grid=self._fast_grid, counter=counter, util=util, block=self._fast_block,
                         steps=steps_cell, chunk=chunk)
 
+    # The pick as it was kept in separate fields: read-only views of the one
+    # state value, and assignments that swap in a copy with that field changed.
+    def _view(self, name):
+        return getattr(getattr(self, "_fast_state", _NO_PICK), name)
+
+    def _put(self, name, value) -> None:
+        self._fast_state = getattr(self, "_fast_state", _NO_PICK)._replace(**{name: value})
+
+    _fast_pick = property(lambda self: self._view("pick"), lambda self, v: self._put("pick", v))
+    _fast_wall = property(lambda self: self._view("wall"), lambda self, v: self._put("wall", v))
+    _fast_last = property(lambda self: self._view("last"), lambda self, v: self._put("last", v))
+    _fast_prior = property(lambda self: self._view("prior"), lambda self, v: self._put("prior", v))
+    _fast_runs = property(lambda self: self._view("runs"), lambda self, v: self._put("runs", v))
+
+    def _persist_capacity(self) -> int:
+        """SMs times the threads per SM the persist entry keeps resident at its own
+        registers (``0`` when unknown); the size the regime rule weighs a batch
+        against. Not ``device_capacity()``: a lighter kernel, such as the same
+        step in single precision, keeps more threads resident per SM, so one
+        wave holds more samples."""
+        import importlib
+
+        from ._launch_policy import capacity
+
+        persist = self.step.persist_entry()
+        if persist is None:
+            return 0
+        launch = importlib.import_module("eagle.launch")
+        return capacity(launch._device_props(), launch._kernel_attrs(persist))
+
+    def _entry_model(self) -> tuple:
+        """``(model, key)`` of a runner that can time both entries. ``model`` holds
+        what :func:`eagle._core.entry_ratio` needs besides the readback (``None``
+        when the device or the step cost is unknown); ``key`` names this device,
+        kernel, precision and batch size for the process's settled picks
+        (:func:`eagle.launch._pick_cache_get`)."""
+        import importlib
+
+        from ._launch_policy import _attr, _fp64_args, capacity
+
+        launch = importlib.import_module("eagle.launch")
+        dev = launch._device_props()
+        scalar = self._scalar_type()
+        major, minor, sms, ratio, fp64 = _fp64_args(dev, scalar)
+        resident = capacity(dev, launch._kernel_attrs(self.step._entry))
+        ops = ops_per_step(self.step.plan.plugin)
+        clock = _attr(dev, "clockRate")
+        model = None
+        if sms > 0 and clock > 0 and resident > 0:
+            model = (major, minor, sms, ratio, clock, fp64, resident, ops)
+        name = dev.get("name", b"") if isinstance(dev, dict) else getattr(dev, "name", b"")
+        key = (launch._current_device_ordinal(), str(name), major, minor, sms, clock // 50000,
+               _artifact_digest(self.step), scalar, self.n.bit_length())
+        return model, key
+
     def _pick_entry(self) -> tuple:
         """The entry this run takes and whether it is a probe, as
         ``(mode, probe)``. A pinned or below-capacity runner always takes its
         bind-time mode. Otherwise the first run takes the size pick (real
         work, often the only run: never a probe), the second the other entry,
         and from then on the one with the smaller
-        measured launch wall; the loser is timed again when a run's readback
-        (``steps``/``finished``) differs from the last probe's, and every
-        64 runs. However low the step fill f, the fused entry is timed: a spread
-        batch is exactly where a persistent launch's refills can cost more than
-        the fused entry's idle lanes, and only the wall says which."""
-        pick = self._fast_pick
+        measured launch wall. The loser is timed again only when a run's readback
+        moves to another regime (:func:`_readback_regime`), and then not if
+        a pick the process already settled for the regime says which entry wins.
+        However low the step fill f, a batch inside the band is timed: a spread
+        batch is exactly where a persistent launch's refills can cost more than the fused entry's
+        idle lanes, and only the wall says which."""
+        state = self._fast_state
+        pick = state.pick
         if pick is None:
             return self._fast_mode, False
-        if self._fast_prior is None:
+        if state.prior is None or state.settled:
             return pick, False
-        wall = self._fast_wall
+        wall = state.wall
         other = "persist" if pick == "fused_one" else "fused_one"
         if not wall:
             # an untimed run invalidated the walls: the pick has no wall,
@@ -1069,41 +1219,75 @@ class Runner:
     def _carries_timing(self, probing: bool) -> bool:
         """Whether the run just picked carries the timing event pair: a
         probe, the first run, and a run while either wall is missing."""
-        return probing or self._fast_prior is None or len(self._fast_wall) < 2
+        state = self._fast_state
+        return not state.settled and (probing or state.prior is None or len(state.wall) < 2)
 
     def _note_run(self, mode: str, wall_ms, steps: int, finished: int, f) -> None:
         """Fold one probing-eligible run into the pick: its step fill ``f``
         (from either entry; ``None`` on a settled run that did not sum its
         steps), its readback and, when it was timed, its wall (``None`` for a
-        settled run, which only checks for invalidation and keeps the 64-run
-        re-probe cadence)."""
-        wall = self._fast_wall
-        last, now = self._fast_last, (steps, finished)
-        self._fast_runs += 1
-        if f is None:
-            f = self._fast_prior
-        # a new readback regime: the old walls no longer compare
-        if last != now:
-            wall.clear()
-            self._fast_pick = mode
-            self._fast_last = now
-            if wall_ms is not None:
-                wall[mode] = wall_ms
+        settled run, which only checks whether the readback regime moved).
+
+        On a new regime the old walls no longer compare. The pick is then taken,
+        without timing, from the process's settled picks; failing that, the entry
+        just run is the pick and the other is timed next. The new
+        state is built whole and swapped in by one assignment."""
+        state = self._fast_state
+        prior = state.prior if f is None else f
+        regime = _readback_regime(steps, prior)
+        pick, wall, settled = state.pick, state.wall, state.settled
+        if regime != state.last:
+            pick, wall, settled = mode, {}, False
+            decided = self._decide(regime)
+            if decided is not None:
+                pick, wall, settled = decided
+            elif wall_ms is not None:
+                wall = {mode: wall_ms}
         elif wall_ms is not None:
-            wall[mode] = wall_ms
+            wall = {**wall, mode: wall_ms}
             if len(wall) == 2:
                 # a tie keeps the pick: the other entry must win by 2 %
-                pick = self._fast_pick
                 other = "persist" if pick == "fused_one" else "fused_one"
                 if pick in wall and wall[other] < PICK_HYSTERESIS * wall[pick]:
-                    self._fast_pick = other
+                    pick = other
                 elif pick not in wall:
-                    self._fast_pick = min(wall, key=wall.get)
-        if self._fast_runs % 64 == 0 and len(wall) == 2:
-            wall.pop("persist" if self._fast_pick == "fused_one" else "fused_one")
-        self._fast_prior = f
-        if f is not None:
-            self._refit_persist(f, steps)
+                    pick = min(wall, key=wall.get)
+                settled = True
+                self._remember(regime, pick, wall)
+        self._fast_state = _Pick(pick, wall, regime, prior, state.runs + 1, settled,
+                                 self._model_ratio(steps, prior))
+        if prior is not None:
+            self._refit_persist(prior, steps)
+
+    def _decide(self, regime: tuple):
+        """``(pick, walls, True)`` when a pick the process already settled for this
+        device, kernel and regime exists, else ``None``."""
+        key = getattr(self, "_fast_key", None)
+        if key is None:
+            return None
+        import importlib
+
+        cached = importlib.import_module("eagle.launch")._pick_cache_get(key + (regime,))
+        return None if cached is None else (cached[0], dict(cached[1]), True)
+
+    def _model_ratio(self, steps: int, fill):
+        """The model's predicted persist-over-fused wall for this readback
+        (:func:`eagle._core.entry_ratio`), or ``None`` when the device, the step
+        cost or the fill is unknown. A record of what the model expects; the
+        timed walls pick."""
+        model = getattr(self, "_fast_model", None)
+        if model is None or fill is None or fill <= 0.0:
+            return None
+        ratio = _core.entry_ratio(*model[:7], self.n, int(steps), float(fill), model[7])
+        return ratio if ratio > 0.0 else None
+
+    def _remember(self, regime: tuple, pick: str, wall: dict) -> None:
+        """Keep a pick settled on measured walls for the process's later runners."""
+        key = getattr(self, "_fast_key", None)
+        if key is not None:
+            import importlib
+
+            importlib.import_module("eagle.launch")._pick_cache_put(key + (regime,), pick, wall)
 
     def _refit_persist(self, fill: float, steps: int) -> None:
         """Resize the persist launch when the readback moved the step fill or
@@ -1111,7 +1295,9 @@ class Runner:
         chunk follows the mean steps ``fill * steps``. A readback whose
         ``(round(fill, 2), steps)`` is the one already fitted costs nothing.
         A refit that changes the launch drops the persist entry's stored wall,
-        which was timed on the old geometry; it is timed again."""
+        which was timed on the old geometry; it is timed again. A settled pick
+        keeps its walls: its regime has not moved, and a settled key never times
+        an entry again."""
         if "persist" not in self._fast_prep:
             return
         key = (round(fill, 2), steps)
@@ -1124,7 +1310,9 @@ class Runner:
             self._fast_fill = fill
             return
         self._fast_fill, self._fast_chunk = fill, chunk
-        self._fast_wall.pop("persist", None)
+        state = self._fast_state
+        if not state.settled and "persist" in state.wall:
+            self._fast_state = state._replace(wall={k: v for k, v in state.wall.items() if k != "persist"})
         self._size_persist()
 
     def _run_fast(self) -> RunReport:
@@ -1178,7 +1366,8 @@ class Runner:
         # itself, as the step counts those finishing in the run: the memset
         # zeroes the count too; else the mask is counted after it
         counts = self._fast_counts and (mode == "persist" or self._fast_exact)
-        probed = self._fast_pick is not None
+        state = self._fast_state
+        probed = state.pick is not None
         # only a run that decides is timed: the first, a probe, and the
         # run(s) after an invalidation cleared the walls; a settled run is
         # not (an event pair costs more than the launch policy is worth)
@@ -1190,7 +1379,7 @@ class Runner:
         # STEP_FILL_EVERY-th settled one (a batch whose spread changed under
         # the same readback is seen within that many runs); the other runs
         # pass no sum cell, so the device adds nothing
-        summed = probed and (timed or self._fast_runs % STEP_FILL_EVERY == 0)
+        summed = probed and (timed or state.runs % STEP_FILL_EVERY == 0)
         bare = "" if summed or not probed else "_bare"
         if self._fast_exact:
             rt.memsetAsync(counter.data.ptr, 0, 24 if summed else 12, stream)
@@ -1251,7 +1440,7 @@ class Runner:
             n=self.n, finished=finished, done=done, launches=1,
             steps=steps, compactions=0, reorders=0, build_s=0.0,
             launches_by_k={self._max_steps: 1}, exact_steps=exact,
-            slot_fill=slot_fill, mode=mode, probe=probing, timed=timed)
+            slot_fill=slot_fill, mode=mode, probe=probing, timed=timed, mapped=self.n)
 
     @property
     def policy(self) -> dict | None:
@@ -1290,7 +1479,7 @@ class Runner:
         first = min(self._k0, self._max_steps)
         go = fin != self.n and self._max_steps > 0
         self._cells[...] = xp.asarray(
-            [self._k0, fin, 0, self._max_steps, round(self._rate * RATE_SCALE)], dtype=xp.int64)
+            [self._k0, fin, 0, self._max_steps, round(self._rate * RATE_SCALE), 0], dtype=xp.int64)
         self.fused_steps[0] = first
         self._go[0] = 1 if go else 0
         self._hist.fill(0)
@@ -1321,6 +1510,11 @@ class Runner:
                 f"steps_per_launch={self.steps_per_launch}, every={self.every}, "
                 f"launches_per_compaction={self.launches_per_compaction}, "
                 f"active={self.active is not None})")
+
+    def _word_at(self, arr, index: int) -> int:
+        value = arr[index]
+        get = getattr(value, "get", None)
+        return int(get()) if get is not None else int(value)
 
     def _word(self, arr) -> int:
         value = arr[0]
@@ -1389,7 +1583,10 @@ class Runner:
             if self._reorders():
                 reorders = rest[1] - reorders0
                 self.active.restore()
+        mapped = launches * self.n
         if self.auto:
+            if self._mapped_live and launches:
+                mapped = self._word_at(self._cells, _MAPPED) or mapped
             hist = self._hist.get() if self._device else self._hist
             nz = hist.nonzero()[0]
             by_k = dict(zip(nz.tolist(), hist[nz].tolist()))
@@ -1408,7 +1605,7 @@ class Runner:
             steps=steps,
             compactions=compactions_post - compactions0,
             reorders=reorders, build_s=self._build_s, launches_by_k=by_k,
-            exact_steps=exact, mode="band")
+            exact_steps=exact, mode="band", mapped=mapped)
 
     @property
     def record(self):
