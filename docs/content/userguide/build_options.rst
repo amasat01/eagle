@@ -68,10 +68,24 @@ is not given:
 
 The published wheel is built with CUDA 12.9 and no override, so it carries SASS
 for every architecture that ``nvcc`` lists from ``sm_60`` up: ``60 61 62 70 72
-75 80 86 87 89 90 100 101 103 120 121``, plus PTX at ``121``. A CUDA 13 ``nvcc``
+75 80 86 87 89 90 100 101 103 120 121``, plus PTX at ``100`` and ``121``. A CUDA 13 ``nvcc``
 with the same default lists ``75`` up and ``110``, drops ``101``, and ends in
-the same PTX. The list a plugin was built for is reported by its ``archs``
-field, and CI checks that the wheel names ``100`` and ``120``.
+the same two PTX targets. The list a plugin was built for is reported by its ``archs``
+field, and CI checks that the wheel names ``100-real``, ``120-real`` and ``100-virtual``. The ``100-virtual`` PTX is what lets a CUDA 13 driver
+run on Jetson Thor (sm_110), which has no SASS here.
+
+.. list-table:: Driver requirements (Linux; the driver, not the installed toolkit, decides, because the plugin uses the driver API only)
+   :header-rows: 1
+
+   * - Code used
+     - GPUs
+     - Minimum driver
+   * - Precompiled SASS (every listed architecture)
+     - Any GPU the wheel lists
+     - Any driver that supports the GPU: ``>= 525.60.13`` for CUDA 12.x GPUs; Blackwell needs ``>= 570.26`` for the GPU itself
+   * - PTX fallback (``compute_100``, ``compute_121``)
+     - GPUs with no SASS in the wheel: Jetson Thor under a CUDA 13 driver (sm_110), future GPUs
+     - ``>= 575.51.03`` (the CUDA 12.9 PTX ISA); the driver compiles the PTX at first load and caches it in ``~/.nv/ComputeCache``, near-SASS speed after a one-off JIT delay
 
 ``CMAKE_CUDA_ARCHITECTURES``, when given, still wins. aether takes the same
 switch as ``AETHER_CUDA_ARCHS``.

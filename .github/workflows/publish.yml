@@ -175,16 +175,16 @@ jobs:
             fi
           done
           echo "OK: no wheel vendors libcuda"
-      - name: Plugin carries Blackwell SASS (sm_100, sm_120)
+      - name: Plugin carries Blackwell SASS (sm_100, sm_120) and compute_100 PTX
         run: |
           shopt -s nullglob
           for whl in dist/*.whl; do
             archs="$(unzip -p "$whl" eagle/libeagle_cuda.so | strings -n 8 | grep -E '^[0-9]+-real(,[0-9]+-real)*,[0-9]+-virtual$' | head -1)"
-            for want in 100-real 120-real; do
+            for want in 100-real 120-real 100-virtual; do
               case ",$archs," in *",$want,"*) ;; *) echo "$whl: plugin archs '$archs' lack $want"; exit 1;; esac
             done
           done
-          echo "OK: every wheel's plugin lists 100-real and 120-real"
+          echo "OK: every wheel's plugin lists 100-real, 120-real and 100-virtual"
       - name: tag == version guard (every wheel + the sdist must agree)
         if: github.ref_type == 'tag'
         run: |
