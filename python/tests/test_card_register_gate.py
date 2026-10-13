@@ -60,14 +60,17 @@ FUSED_REGS = {
 }
 
 #: Pinned arithmetic per entry, the same on every arch (CUDA 12.6).
+# The step and stop counters are uint32 planes: their increments are integer
+# adds, so each entry carries fewer DADDs than the float64 counters did, and
+# the range entry's loop unrolls one more trip (six copies of the fused step).
 ARITH_COUNTS = {
-    "oscillator_step_xauto": (32, 16, 8, 0),
-    "oscillator_step_xauto_range": (80, 28, 17, 0),
+    "oscillator_step_xauto": (32, 16, 6, 0),
+    "oscillator_step_xauto_range": (96, 32, 14, 0),
     # four unrolled trips, no peeled one: the step's maths is the fused one
-    "oscillator_step_xauto_persist": (64, 20, 14, 0),
-    "rkf78_attempt": (1247, 400, 84, 69),
-    "rkf78_attempt_range": (1247, 400, 84, 69),
-    "rkf78_attempt_persist": (659, 210, 58, 37),
+    "oscillator_step_xauto_persist": (64, 20, 10, 0),
+    "rkf78_attempt": (1247, 400, 80, 69),
+    "rkf78_attempt_range": (1247, 400, 80, 69),
+    "rkf78_attempt_persist": (659, 210, 56, 37),
 }
 
 OSC_PERSIST_MAX_INSTRUCTIONS = 1000

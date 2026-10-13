@@ -157,7 +157,8 @@ def test_rk78_whole_run_is_bit_identical(rk78, n, cap, monkeypatch):
 
     def go():
         g = {"s": np.stack([inp[k] for k in card.STATE_NAMES]), "t": np.zeros(n),
-             "h": np.full(n, card.H0), "n_acc": np.zeros(n), "n_rej": np.zeros(n)}
+             "h": np.full(n, card.H0), "n_acc": np.zeros(n, dtype=np.uint32),
+             "n_rej": np.zeros(n, dtype=np.uint32)}
         term = np.zeros(n, dtype=bool)
         report = eagle.run_until_done(plan, max_steps=cap, t_final=card.T_FINAL,
                                       terminated=term, **g)

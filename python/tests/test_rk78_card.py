@@ -140,3 +140,18 @@ def test_card_line_counts_match_the_script():
         assert card["code_lines"]["arms"] == now["arms"], (
             f"{card_path.name}: recorded lines of code differ from the script's "
             "markers")
+
+
+def test_missing_optional_libraries_become_arms_not_run(monkeypatch):
+    """Arm selection with torch and jax blocked returns without raising and
+    names the arms it drops, with the reason, for the card's ``arms_not_run``."""
+    import sys
+
+    module = _script()
+    monkeypatch.setitem(sys.modules, "torch", None)
+    monkeypatch.setitem(sys.modules, "jax", None)
+    names, not_run = module._select_arms(module.ARMS)
+    assert set(not_run) == {"torch_masked", "torch_graphed", "jax_vmap"}
+    assert all(why.endswith("not installed in this profile") for why in not_run.values())
+    assert not set(names) & set(not_run) and "eagle_graph" in names
+    assert not any(k.startswith("jax:") for k, _, _ in module._compile_keys([1000], names))

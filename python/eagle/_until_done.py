@@ -611,10 +611,6 @@ class Runner:
         # :meth:`_build_fast`/:meth:`_run_fast`), for a card arm that still
         # wants :attr:`RunReport.slot_fill` filled.
         slot_fill_override = planes.pop("_slot_fill", None)
-        # the card scripts' earlier name for it, kept until the cards re-run
-        legacy = planes.pop("_lane_utilisation", None)
-        if slot_fill_override is None:
-            slot_fill_override = legacy
         # Internal only, same convention: pins the persist entry's chunk length
         # (steps per work fetch) for the life of the runner and turns off the
         # refit of the chunk from the readback; the launch geometry still

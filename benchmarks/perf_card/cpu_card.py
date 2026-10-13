@@ -211,9 +211,11 @@ def _cpu_mhz_now():
 #: Memory pass warm-up size (the warm-up compiles every JIT on a tiny batch).
 WARM_N = 64
 #: The state a sample needs: x, v (state width 2) plus the per-sample scalars
-#: omega, zeta and the stop step, all float64.
+#: omega and zeta (float64) and the stop step (a 32-bit integer).
 STATE_WIDTH = 2
-PER_SAMPLE_SCALARS = 3
+FLOAT_SCALARS = 2
+COUNTER_BYTES = 4
+MIN_BYTES_PER_SAMPLE = (STATE_WIDTH + FLOAT_SCALARS) * 8 + COUNTER_BYTES
 
 
 def _included(arm, n, distribution, max_steps):
@@ -712,8 +714,9 @@ class _EagleHostArm(_Arm):
         np = self.np
         super().setup(inp, max_steps)
         n = len(inp["x0"])
-        st = SimpleNamespace(**{k: np.empty(n) for k in ("omega", "zeta", "nstop", "x", "v")})
-        st.k = np.zeros(n)
+        st = SimpleNamespace(**{k: np.empty(n) for k in ("omega", "zeta", "x", "v")})
+        st.nstop = np.empty(n, dtype=np.uint32)  # the stop step: a 4-byte integer plane
+        st.k = np.zeros(n, dtype=np.uint32)  # the step counter: a 4-byte integer plane
         st.terminated = np.zeros(n, dtype=bool)
         self.st = st
         planes = vars(st)
@@ -742,8 +745,8 @@ class _EagleHostArm(_Arm):
         st = self.st
         for dst, key in ((st.omega, "omega"), (st.zeta, "zeta"), (st.nstop, "nstop"),
                          (st.x, "x0"), (st.v, "v0")):
-            self.np.copyto(dst, self.inp[key])
-        st.k.fill(0.0)
+            self.np.copyto(dst, self.inp[key], casting="unsafe")  # the stop step is integral
+        st.k.fill(0)
         self.runner.reset()
 
     def run(self):
@@ -1452,7 +1455,7 @@ def _run_memory(arm, distribution, max_steps, n):
 
 
 def _min_bytes(n):
-    return n * (STATE_WIDTH + PER_SAMPLE_SCALARS) * 8
+    return n * MIN_BYTES_PER_SAMPLE
 
 
 def _cpufreq_facts():
@@ -1684,7 +1687,7 @@ def _merge(parts_dir, configs, ns, reps, slug, cpu, peak, out_dir, allow_partial
                             "(os.getloadavg()); eagle_term8/eagle_term1 and "
                             "eagle_compact8/eagle_compact1/eagle_reorder8/"
                             "eagle_reorder1 are the 1-thread vs N-thread rows"),
-            "lane_utilisation": "n/a on the host (device-only hook; see perf_card.py)",
+            "slot_fill": "n/a on the host (device-only hook; see perf_card.py)",
             "nsys_counts": "n/a on the host (no nsys trace here)",
             "fixed_overhead": ("not re-measured as a dedicated cell on this card; "
                                "per_cell's inner_runs/wall already show per-call "
@@ -1711,13 +1714,14 @@ def _merge(parts_dir, configs, ns, reps, slug, cpu, peak, out_dir, allow_partial
                 "memory = ru_maxrss at the end minus the baseline; for "
                 "multiprocessing, plus each pool process's own peak above its "
                 "baseline (shared pages counted once per process). Minimum = the "
-                f"state the workload needs, N × ({STATE_WIDTH} state + "
-                f"{PER_SAMPLE_SCALARS} per-sample scalars: omega, zeta, stop step) "
-                "× 8 bytes; the factor is peak / minimum. Compile overhead = "
+                f"state the workload needs, N × (({STATE_WIDTH} state + "
+                f"{FLOAT_SCALARS} float64 scalars: omega, zeta) × 8 + "
+                f"{COUNTER_BYTES} bytes for the stop step as a 32-bit integer) = "
+                f"{MIN_BYTES_PER_SAMPLE} bytes per sample; the factor is peak / minimum. Compile overhead = "
                 "baseline minus the resident size before the arm's imports-and-"
                 "warm-up. Below about 1 MiB the allocator reuses memory already resident at "
                 "the baseline, so small-N peaks can read below the minimum."),
-            "minimum_bytes_per_sample": (STATE_WIDTH + PER_SAMPLE_SCALARS) * 8,
+            "minimum_bytes_per_sample": MIN_BYTES_PER_SAMPLE,
             "rows": mem_rows,
             "compile_overhead_bytes": comp,
         },
