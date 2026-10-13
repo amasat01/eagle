@@ -865,3 +865,37 @@ def test_cuda_12_is_the_cu129_runtime_and_12_6_keeps_the_pre_turing_lock():
     rc, out = _bootstrap("--cuda", "12.6")
     assert rc == 0 and "cards-gpu-cuda126.txt" in out and "env-gpu-cuda126.sh" in out
     assert "toolchain-linux-64.lock" in out and "toolchain-linux-64-cuda126" not in out
+
+
+def test_ns_and_every_options_parse_and_N_is_in_the_cells_labels_and_file_names():
+    kit = _kit_module()
+    # chunk-sweep / ncu-chunk / band: the default is today's N; an explicit list repeats the cells per N
+    assert {c[1] for c in kit.chunk_cells("chunk-sweep")} == {10**6}
+    two = kit.chunk_cells("chunk-sweep", (10**6, 10**7))
+    assert {c[1] for c in two} == {10**6, 10**7} and len(two) == 2 * len(kit.chunk_cells("chunk-sweep"))
+    assert {c[1] for c in kit.compare_cells("band", band_ns=(10**7,))} == {10**7}
+    assert {c[1] for c in kit.compare_cells("band")} == set(kit.BAND_NS)
+    default = kit.ncu_captures("ncu-chunk")
+    caps = kit.ncu_captures("ncu-chunk", (10**6, 10**7))
+    assert len(caps) == 2 * len(default) and len({c[0] for c in caps}) == len(caps)  # labels do not collide
+    assert all(c[0].endswith(("_n1e6", "_n1e7")) and f"n{kit.n_tag(c[3][0])}" in c[0] for c in caps)
+    assert {c[3][0] for c in caps} == {10**6, 10**7} and not any("_n1e" in c[0] for c in default)
+    assert kit.ns_suffix(None) == "" and kit.ns_suffix((10**6, 10**7)) == "_n1e6_1e7" and kit.n_tag(1_234_567) == "1234567"
+    # band cadences
+    assert [lab for lab, _ in kit.stage_arms("band", "osc")][2:-1] == [f"band@{e}" for e in kit.BAND_SWEEP_EVERY]
+    arms = kit.stage_arms("band", "osc", (16, 32, 64, 128, 256, 512))
+    assert [lab for lab, _ in arms][2:-1] == [f"band@{e}" for e in (16, 32, 64, 128, 256, 512)]
+    assert dict(arms)["band@512"] == "osc_band@every=512"
+
+
+def test_gpu_profile_cli_takes_ns_and_every_lists(monkeypatch, tmp_path):
+    kit = _kit_module()
+    seen = {}
+    monkeypatch.setattr(kit, "compare_stage", lambda *a, **k: seen.update(a=a, k=k))
+    monkeypatch.setattr(kit, "chunk_sweep_stage", lambda *a, **k: seen.update(chunk=a))
+    assert kit.main(["--out", str(tmp_path), "--stage", "band", "--ns", "1e6", "1e7", "--every", "16", "32", "512"]) == 0
+    assert seen["k"] == {"band_ns": (10**6, 10**7), "every": (16, 32, 512)}
+    assert kit.main(["--out", str(tmp_path), "--stage", "chunk-sweep", "--ns", "10000000"]) == 0
+    assert seen["chunk"][-1] == (10**7,)
+    assert kit.main(["--out", str(tmp_path), "--stage", "band"]) == 0
+    assert seen["k"] == {"band_ns": None, "every": None} and seen["a"][3] == kit.COMPARE_NS

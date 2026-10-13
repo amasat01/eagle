@@ -28,6 +28,8 @@ nobody needs a GUI:
 * **band**: the band path over the compaction cadence (16, 32, 64, 128) beside eagle's own pick, at N = 1e5 and 1e6,
   and R = one compaction group's cost over one full-live step launch, fitted from the uniform cell;
 * **ncu-tsweep**: achieved warps (and the ratio metrics) of the persist kernels at each persist size, N = 1e6;
+* ``--ns N [N ...]`` (compare, band, chunk-sweep, ncu-chunk) overrides a stage's sample counts and ``--every K [K ...]``
+  band's cadence list; with ``--ns`` the stage's output names carry N (``band_n1e7.txt``), so two Ns do not collide;
 * **cadence-sweep**: the band path (step plus compaction) over the compaction cadence, as nsys sums;
 * **chunk-sweep**: the forced persist launch over the work-stealing chunk {1, 2, 4, 8, 16, 32} x {fp64, fp32} x S {100, 1000} x
   threads per SM {eagle's rule, twice it}, N = 1e6 spread (wall, slot fill measured in its own arms, the rule's own chunk
@@ -657,6 +659,17 @@ _WARP_SPECS = ("warp_kernel", "rk78_warp")
 _WALL_SPECS = CONTEXT_ARMS
 
 
+def n_tag(n):
+    """N as a short exact tag for labels and file names: ``1e7`` for a power of ten, else the digits."""
+    s = f"{n:.0e}".replace("e+0", "e").replace("e+", "e")
+    return s if int(float(s)) == n else str(n)
+
+
+def ns_suffix(ns):
+    """File-name suffix of a stage run with an explicit ``--ns`` (``_n1e6_1e7``), empty for the default Ns."""
+    return "" if not ns else "_n" + "_".join(n_tag(n) for n in ns)
+
+
 def compare_arms(kernel):
     """(label, arm spec) of every arm of one kernel, the reference (eagle auto) first and Warp last."""
     if kernel == "osc32":  # no Warp arm: the float32 variant is eagle-only (auto against its own entries)
@@ -676,7 +689,7 @@ def compare_arms(kernel):
     return arms + [("warp", "warp_kernel" if osc else "rk78_warp"), ("auto_last", arms[0][1])]
 
 
-def compare_cells(stage, kernels=("osc", "rk78", "osc32"), ns=COMPARE_NS):
+def compare_cells(stage, kernels=("osc", "rk78", "osc32"), ns=COMPARE_NS, band_ns=None):
     """(kernel, N, S, dist) in run order, large N first; S = 0 and dist 'orbits' for the RK78 card; kernel
     ``osc32`` is the oscillator in float32 (precision=fp32)."""
     base = stage.removesuffix("-quick")
@@ -685,7 +698,7 @@ def compare_cells(stage, kernels=("osc", "rk78", "osc32"), ns=COMPARE_NS):
         return [("osc", n, 100, "spread") for n in sorted(CROSSOVER_NS, reverse=True)][-1:] if quick else \
             [("osc", n, 100, "spread") for n in sorted(CROSSOVER_NS, reverse=True)]
     if base == "band":
-        cells = [("osc", n, BAND_STEPS, d) for n in sorted(BAND_NS, reverse=True) for d in BAND_DISTS]
+        cells = [("osc", n, BAND_STEPS, d) for n in sorted(band_ns or BAND_NS, reverse=True) for d in BAND_DISTS]
         return [("osc", BAND_NS[0], BAND_STEPS, "uniform")] if quick else cells
     if quick:
         quick_cells = {"osc": ("osc", 100_000, 100, "spread"), "rk78": ("rk78", 10_000, 0, "orbits"),
@@ -702,7 +715,7 @@ def compare_cells(stage, kernels=("osc", "rk78", "osc32"), ns=COMPARE_NS):
     return cells
 
 
-def stage_arms(stage, kernel):
+def stage_arms(stage, kernel, every=None):
     """(label, spec) of the arms a stage runs in each cell."""
     base = stage.removesuffix("-quick")
     if base == "crossover":
@@ -710,7 +723,7 @@ def stage_arms(stage, kernel):
                 ("auto_last", "eagle_graph_auto")]
     if base == "band":
         return [("auto", "eagle_graph_auto"), ("band@auto", "osc_band")] + [
-            (f"band@{e}", f"osc_band@every={e}") for e in BAND_SWEEP_EVERY] + [("auto_last", "eagle_graph_auto")]
+            (f"band@{e}", f"osc_band@every={e}") for e in (every or BAND_SWEEP_EVERY)] + [("auto_last", "eagle_graph_auto")]
     return compare_arms(kernel)
 
 
@@ -1211,12 +1224,13 @@ def crossover_lines(cells):
     return lines or ["  no crossover cell ran"]
 
 
-def compare_stage(out, stage, kernels=("osc", "rk78", "osc32"), ns=COMPARE_NS, budget_s=None):
+def compare_stage(out, stage, kernels=("osc", "rk78", "osc32"), ns=COMPARE_NS, budget_s=None, band_ns=None, every=None):
     """Run every cell; the table and CSV are rewritten after each, so a stage cut short keeps what it finished,
     and no cell starts once the budget is spent. A stage in which no arm of any cell ran, or no eagle arm, fails."""
     t0, cells = time.monotonic(), []
-    todo = compare_cells(stage, kernels, ns)
-    txt, csv = out / f"{stage.replace('-', '_')}.txt", out / f"{stage.replace('-', '_')}.csv"
+    todo = compare_cells(stage, kernels, ns, band_ns)
+    sfx = ns_suffix(band_ns) if stage.removesuffix("-quick") == "band" else ""
+    txt, csv = out / f"{stage.replace('-', '_')}{sfx}.txt", out / f"{stage.replace('-', '_')}{sfx}.csv"
     for i, (kernel, n, steps, dist) in enumerate(todo):
         if budget_s is not None and time.monotonic() - t0 > budget_s:
             todo = todo[i:]
@@ -1225,7 +1239,7 @@ def compare_stage(out, stage, kernels=("osc", "rk78", "osc32"), ns=COMPARE_NS, b
         if (kernel, n, steps, dist) == ("osc", *CONTEXT_POINT) and (
                 budget_s is None or time.monotonic() - t0 < CONTEXT_BUDGET_SHARE * budget_s):
             extra = tuple((a, a) for a in CONTEXT_ARMS)
-        cells.append(run_cell(kernel, n, steps, dist, extra, stage_arms(stage, kernel)))
+        cells.append(run_cell(kernel, n, steps, dist, extra, stage_arms(stage, kernel, every)))
         text, table = render_compare(cells)
         txt.write_text(text)
         csv.write_text(table)
@@ -1249,13 +1263,15 @@ def compare_stage(out, stage, kernels=("osc", "rk78", "osc32"), ns=COMPARE_NS, b
 # --------------------------------------------------------------------------- #
 # chunk sweep: the forced persist launch over the work-stealing chunk
 # --------------------------------------------------------------------------- #
-def chunk_cells(stage):
+def chunk_cells(stage, ns=None):
     """(kernel, N, S, dist) of the chunk sweep: the oscillator in float64 and float32 over S, then RK78 (the quick
     stage: one small cell)."""
     if stage.endswith("-quick"):
         return [("osc", 100_000, 100, "spread")]
-    cells = [(k, SWEEP_N, s, "spread") for k in ("osc", "osc32") for s in CHUNK_STEPS]
-    return cells + [("rk78", SWEEP_N, 0, "orbits")]
+    cells = []
+    for n in ns or (SWEEP_N,):
+        cells += [(k, n, s, "spread") for k in ("osc", "osc32") for s in CHUNK_STEPS] + [("rk78", n, 0, "orbits")]
+    return cells
 
 
 def chunk_arms(kernel, stage="chunk-sweep", with_t2=True):
@@ -1323,13 +1339,14 @@ def render_chunk_sweep(cells):
     return "\n".join(text) + "\n", "\n".join(csv) + "\n"
 
 
-def chunk_sweep_stage(out, stage, budget_s=None):
+def chunk_sweep_stage(out, stage, budget_s=None, ns=None):
     """Run every cell of the chunk sweep, rewriting the table and CSV after each; no cell starts once the budget is
     spent. ``PROFILE_CHUNK_T2=0`` drops the twice-the-threads arms (profile.sh sets it when the estimate is over budget)."""
     t0, cells = time.monotonic(), []
     with_t2 = os.environ.get("PROFILE_CHUNK_T2", "1") != "0"
-    txt, csv = out / f"{stage.replace('-', '_')}.txt", out / f"{stage.replace('-', '_')}.csv"
-    for kernel, n, steps, dist in chunk_cells(stage):
+    sfx = ns_suffix(ns)
+    txt, csv = out / f"{stage.replace('-', '_')}{sfx}.txt", out / f"{stage.replace('-', '_')}{sfx}.csv"
+    for kernel, n, steps, dist in chunk_cells(stage, ns):
         if budget_s is not None and time.monotonic() - t0 > budget_s:
             break
         cell = run_cell(kernel, n, steps, dist, arms=chunk_arms(kernel, stage, with_t2))
@@ -1478,7 +1495,7 @@ class Skip(Exception):
     """A stage that has nothing to do here (reason in the message)."""
 
 
-def ncu_captures(stage):
+def ncu_captures(stage, ns=None):
     """The stage's captures: (label, arm spec, kernel-name regex, (N, S, dist), extra metrics)."""
     if stage == "ncu-ratio":
         return list(RATIO_CAPTURES)
@@ -1492,11 +1509,14 @@ def ncu_captures(stage):
                  for t in OSC_PERSIST_TPS]
         return caps[:1] if stage.endswith("-quick") else caps
     if stage.startswith("ncu-chunk"):
-        caps = [(f"{kernel}_c{c}_s{steps}", f"osc_persist@{'fp=32,' if kernel == 'osc32' else ''}chunk={c}",
-                 r"regex:oscillator_step_xauto_persist", (SWEEP_N, steps, "spread"), RATIO_METRICS_FP32)
-                for kernel in ("osc", "osc32") for steps in CHUNK_STEPS for c in CHUNKS]
-        caps += [(f"rk78_c{c}", f"rk78_persist@chunk={c}", r"regex:rkf78_attempt_persist", RK78_POINT, RATIO_METRICS_FP32)
-                 for c in RK78_CHUNKS]
+        caps = []
+        for n in ns or (SWEEP_N,):
+            nt = f"_n{n_tag(n)}" if ns else ""  # an explicit --ns puts N in every label (and so every report name)
+            caps += [(f"{kernel}_c{c}_s{steps}{nt}", f"osc_persist@{'fp=32,' if kernel == 'osc32' else ''}chunk={c}",
+                      r"regex:oscillator_step_xauto_persist", (n, steps, "spread"), RATIO_METRICS_FP32)
+                     for kernel in ("osc", "osc32") for steps in CHUNK_STEPS for c in CHUNKS]
+            caps += [(f"rk78_c{c}{nt}", f"rk78_persist@chunk={c}", r"regex:rkf78_attempt_persist",
+                      (n, *RK78_POINT[1:]), RATIO_METRICS_FP32) for c in RK78_CHUNKS]
         return caps[3:4] if stage.endswith("-quick") else caps
     if stage.startswith("ncu-rk78-small"):
         caps = [(f"rk78_{which}_n1e4", spec, r"regex:rkf78_attempt", RK78_SMALL_POINT, RATIO_METRICS)
@@ -1553,13 +1573,14 @@ def sass_instructions(ncu, report):
         return f"unavailable ({type(exc).__name__})"
 
 
-def ncu_stage(out, stage, ncu, sudo):
+def ncu_stage(out, stage, ncu, sudo, ns=None):
     cc_ = compute_capability()
     if cc_ is None:
         raise Skip("compute capability not readable (nvidia-smi)")
     if cc_ < NCU_MIN_CC:
         raise Skip(f"compute capability {cc_} < {NCU_MIN_CC} (Nsight Compute needs Volta or newer)")
-    chosen = ncu_captures(stage)
+    chosen = ncu_captures(stage, ns)
+    sfx = ns_suffix(ns) if stage.startswith("ncu-chunk") else ""
     summary, failed, i_steps = [clock_line() + "\n"], 0, {}
     for label, arm, regex, point, metrics in chosen:
         t0 = time.perf_counter()
@@ -1581,9 +1602,9 @@ def ncu_stage(out, stage, ncu, sudo):
             summary.append(f"== {label} ({arm}, precision={precision_of(arm)}, {regex}, N={point[0]} S={point[1]} {point[2]}, "
                            f"{time.perf_counter() - t0:.0f} s)\n  {worker_line[worker_line.find('sample_steps'):]}\n{digest}\n")
             say(f"ncu {stage} {label}: done ({time.perf_counter() - t0:.0f} s)")
-        (out / f"{stage}.txt").write_text("\n".join(summary))
+        (out / f"{stage}{sfx}.txt").write_text("\n".join(summary))
     if failed == len(chosen):
-        raise RuntimeError(f"every ncu capture of {stage} failed; see {stage}.txt")
+        raise RuntimeError(f"every ncu capture of {stage} failed; see {stage}{sfx}.txt")
 
 
 def _lane_block(out, stage, arm, point, raw, worker_line, i_steps, ncu, sudo):
@@ -1754,6 +1775,11 @@ STAGES = ("probe", "nsys-grid", "nsys-width", "nsys-quick", *NCU_POINTS, "ncu-ra
                                    "crossover", "band", "chunk-sweep", "cadence-sweep")))
 
 
+def _ns_arg(text):
+    """One ``--ns`` token: ``1e7``, ``10000000`` or a comma list of them (a list of Ns); returns a tuple."""
+    return tuple(int(float(x)) for x in text.split(",") if x)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--out", type=pathlib.Path, default=pathlib.Path("profile-out"))
@@ -1765,10 +1791,18 @@ def main(argv=None):
     ap.add_argument("--ncu-sudo", action="store_true", help="run ncu under `sudo -n` (counters are admin-only)")
     ap.add_argument("--kernels", default="osc,rk78,osc32",
                     help="compare: kernels to run (osc, rk78, osc32 = the oscillator in float32)")
-    ap.add_argument("--ns", default=",".join(str(n) for n in COMPARE_NS), help="compare: sample counts")
+    ap.add_argument("--ns", nargs="+", metavar="N", type=_ns_arg,
+                    help="sample counts (1e7 or 10000000; commas also split): compare (default %s), band (default %s), "
+                         "chunk-sweep and ncu-chunk (default %s); an explicit list adds _nN to the stage's output names"
+                         % (" ".join(map(n_tag, COMPARE_NS)), " ".join(map(n_tag, BAND_NS)), n_tag(SWEEP_N)))
+    ap.add_argument("--every", nargs="+", type=int, metavar="K",
+                    help="band: compaction cadences to sweep (default %s)" % " ".join(map(str, BAND_SWEEP_EVERY)))
     ap.add_argument("--budget-s", type=float, help="compare: start no cell after this many seconds")
     ap.add_argument("--worker", nargs=4, metavar=("ARM", "N", "S", "DIST"), help=argparse.SUPPRESS)
     args = ap.parse_args(argv)
+    args.ns = tuple(n for group in args.ns for n in group) if args.ns else None
+    if args.ns and any(n <= 0 for n in args.ns) or args.every and any(k <= 0 for k in args.every):
+        ap.error("--ns and --every take positive integers")
 
     if args.worker:
         worker(args.worker[0], int(args.worker[1]), int(args.worker[2]), args.worker[3])
@@ -1786,11 +1820,12 @@ def main(argv=None):
             if args.target == "cpu":
                 raise Skip("this stage times the device")
             compare_stage(args.out, stage, tuple(args.kernels.split(",")),
-                          tuple(int(float(x)) for x in args.ns.split(",")), args.budget_s)
+                          args.ns if args.ns and stage.startswith("compare") else COMPARE_NS, args.budget_s,
+                          band_ns=args.ns, every=tuple(args.every) if args.every else None)
         elif stage.removesuffix("-quick") == "chunk-sweep":
             if args.target == "cpu":
                 raise Skip("this stage times the device")
-            chunk_sweep_stage(args.out, stage, args.budget_s)
+            chunk_sweep_stage(args.out, stage, args.budget_s, args.ns)
         elif stage.startswith("nsys") or stage in ("validate-ncu", "cadence-sweep", "cadence-sweep-quick"):
             if not args.nsys:
                 raise Skip("nsys not found")
@@ -1805,7 +1840,7 @@ def main(argv=None):
         else:
             if not args.ncu:
                 raise Skip("ncu not found")
-            ncu_stage(args.out, stage, args.ncu, args.ncu_sudo)
+            ncu_stage(args.out, stage, args.ncu, args.ncu_sudo, args.ns if stage.startswith("ncu-chunk") else None)
     except Skip as why:
         print(f"SKIP: {why}")
         return 3
