@@ -12,9 +12,13 @@
 #   bootstrap.sh [options]
 #     --target T      kaggle | vastai | devbox | local   (default: detected)
 #     --profile P     gpu | cpu | auto   (default auto: gpu when a GPU is visible)
-#     --cuda V        12 | 13   (default 12, or $REPRO_CUDA): the CUDA major of the gpu profile. 13 uses the
-#                     *-cuda13 locks (driver >= 580, GPU >= sm_75; eagle, hawk, Warp, no PyTorch or JAX) and an
-#                     environment of its own (cards-gpu-cuda13, env-gpu-cuda13.sh); the cpu profile ignores it
+#     --cuda V        12 | 12.6 | 13   (default 12, or $REPRO_CUDA): the CUDA runtime of the gpu profile. 12 is the
+#                     12.9 runtime (PyTorch cu129, nvidia-*-cu12 12.9; driver >= 575.51, GPU >= sm_75 through
+#                     Blackwell sm_120). 12.6 is the pre-Turing runtime for sm_60-sm_70 GPUs (P100, V100; PyTorch
+#                     cu126; driver >= 525.60.13) with an environment of its own (cards-gpu-cuda126,
+#                     env-gpu-cuda126.sh). 13 uses the *-cuda13 locks (driver >= 580, GPU >= sm_75; eagle, hawk,
+#                     Warp, no PyTorch or JAX) and an environment of its own (cards-gpu-cuda13, env-gpu-cuda13.sh);
+#                     the cpu profile ignores it
 #     --work DIR      envs, clones, build trees, env script, fact sheet
 #                     (default per target; see README.md)
 #     --src DIR       directory with (or to receive) aether/ raptor/ eagle/ hawk/
@@ -64,7 +68,7 @@ while [[ $# -gt 0 ]]; do
     --from-pypi) FROM_PYPI=1; shift ;;
     --no-smoke) SMOKE=0; shift ;;
     --dry-run) REPRO_DRY_RUN=1; shift ;;
-    -h|--help) sed -n '5,36p' "$0"; exit 0 ;;
+    -h|--help) sed -n '5,40p' "$0"; exit 0 ;;
     *) die "unknown option $1 (see --help)" ;;
   esac
 done
@@ -75,9 +79,12 @@ case $TARGET in kaggle|vastai|devbox|local) ;; *) die "unknown target $TARGET" ;
 GPUS=$(detect_gpus)
 if [[ $PROFILE == auto ]]; then PROFILE=$([[ -n $GPUS ]] && echo gpu || echo cpu); fi
 [[ $PROFILE == gpu || $PROFILE == cpu ]] || die "unknown profile $PROFILE"
-[[ $CUDA == 12 || $CUDA == 13 ]] || die "unknown CUDA version '$CUDA': --cuda (or REPRO_CUDA) takes 12 or 13"
-# GSFX: the suffix of the CUDA 13 gpu profile's locks, environment and env script (empty for CUDA 12 and for cpu)
+[[ $CUDA == 12 || $CUDA == 12.6 || $CUDA == 13 ]] || die "unknown CUDA version '$CUDA': --cuda (or REPRO_CUDA) takes 12, 12.6 or 13"
+# GSFX: the suffix of the CUDA 13 / 12.6 gpu profiles' locks, environment and env script (empty for CUDA 12 and for cpu)
 GSFX=""; [[ $CUDA == 13 && $PROFILE == gpu ]] && GSFX=-cuda13
+[[ $CUDA == 12.6 && $PROFILE == gpu ]] && GSFX=-cuda126
+# TSFX: the toolchain lock's suffix (CUDA 12.6 shares the CUDA 12 toolchain: nvcc 12.9)
+TSFX=$GSFX; [[ $GSFX == -cuda126 ]] && TSFX=""
 if [[ $PROFILE == gpu && $FROM_PYPI == 0 ]]; then
   ARCH=${ARCH:-$(gpu_archs)}
   [[ -n $ARCH ]] || die "profile gpu but no GPU visible; pass --arch (e.g. --arch 75) to build anyway"
@@ -93,7 +100,7 @@ ENV_PREFIX=${ENV_PREFIX:-$WORK/envs/cards-$PROFILE$GSFX}
 LOCKS=$HERE/locks
 ENV_FILE=$WORK/env-$PROFILE$GSFX.sh
 log "target=$TARGET profile=$PROFILE arch=${ARCH:-none} work=$WORK src=$SRC env=$ENV_PREFIX"
-[[ -n $GSFX ]] && log "cuda=13 locks: $LOCKS/toolchain-linux-64$GSFX.lock $LOCKS/cards-$PROFILE$GSFX.txt $LOCKS/pypi-$PROFILE$GSFX.txt"
+[[ -n $GSFX ]] && log "cuda=$CUDA locks: $LOCKS/toolchain-linux-64$TSFX.lock $LOCKS/cards-$PROFILE$GSFX.txt $LOCKS/pypi-$PROFILE$GSFX.txt"
 [[ $REPRO_DRY_RUN == 1 ]] && log "dry run: commands are printed, nothing is changed"
 
 MODE=$([[ $FROM_PYPI == 1 ]] && echo pypi || echo source)
@@ -128,13 +135,13 @@ install_source() {
   log "conda frontend: $MAMBA"
   case $(basename "$MAMBA") in
     micromamba) export MAMBA_ROOT_PREFIX=${MAMBA_ROOT_PREFIX:-$WORK/mamba-root}
-                MKENV=("$MAMBA" create -y -q -p "$ENV_PREFIX" -f "$LOCKS/toolchain-linux-64$GSFX.lock") ;;
-    *)          MKENV=("$MAMBA" create -y -q -p "$ENV_PREFIX" --file "$LOCKS/toolchain-linux-64$GSFX.lock") ;;
+                MKENV=("$MAMBA" create -y -q -p "$ENV_PREFIX" -f "$LOCKS/toolchain-linux-64$TSFX.lock") ;;
+    *)          MKENV=("$MAMBA" create -y -q -p "$ENV_PREFIX" --file "$LOCKS/toolchain-linux-64$TSFX.lock") ;;
   esac
 
   # --- 2. toolchain environment (explicit lock: exact URLs + md5) -----------------
   TC_STAMP=$ENV_PREFIX/.repro-toolchain
-  TC_SUM=$(md5_of "$LOCKS/toolchain-linux-64$GSFX.lock")
+  TC_SUM=$(md5_of "$LOCKS/toolchain-linux-64$TSFX.lock")
   if stamp_ok "$TC_STAMP" "$TC_SUM"; then
     log "toolchain env up to date"
   else
@@ -269,7 +276,7 @@ export CUDA_DEVICE_ORDER=PCI_BUS_ID XLA_PYTHON_CLIENT_PREALLOCATE=false
 EOF
   fi
   [[ $PROFILE == cpu ]] && echo 'export CUDA_VISIBLE_DEVICES=""' >>"$ENV_FILE"
-  [[ -n $GSFX ]] && echo "export REPRO_CUDA=13" >>"$ENV_FILE"
+  [[ -n $GSFX ]] && echo "export REPRO_CUDA=$CUDA" >>"$ENV_FILE"
   log "wrote $ENV_FILE"
 fi
 
@@ -289,7 +296,7 @@ print("cupy devices", cupy.cuda.runtime.getDeviceCount(), "torch cuda", torch.cu
 import numba
 print("numba", numba.__version__)'
   fi
-  if [[ -n $GSFX ]]; then  # the CUDA 13 profile has no PyTorch, JAX or CuPy comparison arm: nothing of them is imported
+  if [[ $GSFX == -cuda13 ]]; then  # the CUDA 13 profile has no PyTorch, JAX or CuPy comparison arm: nothing of them is imported
     SMOKE_PY='import eagle, eagle._core, hawk, raptor, aether_dsc, numpy, warp, eagle.cuda as ec
 print("import ok: eagle", eagle.__file__)
 ec.Stream()

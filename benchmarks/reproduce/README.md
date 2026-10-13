@@ -19,9 +19,10 @@ software and write the cards for that machine.
 ## Your machine, or a rented one (vast.ai)
 
 Needs: Linux x86_64 with glibc ≥ 2.28, `git`, `curl`, ~25 GB of disk, and for
-the GPU cards an NVIDIA driver ≥ 525.60 (no CUDA toolkit: the environment brings
-its own). No root. On vast.ai any CUDA 12 image works, e.g.
-`nvidia/cuda:12.6.3-devel-ubuntu22.04`.
+the GPU cards an NVIDIA driver ≥ 575.51 (CUDA 12.9 runtime; no CUDA toolkit: the environment brings
+its own) and a GPU of compute capability ≥ 7.5. For a pre-Turing GPU (P100, V100; sm_60–sm_70) use
+`--cuda 12.6` (driver ≥ 525.60.13). No root. On vast.ai any CUDA 12 image works, e.g.
+`nvidia/cuda:12.9.1-devel-ubuntu22.04`.
 
 ```bash
 git clone --depth 1 --branch v0.5.1 https://github.com/amasat01/eagle.git
@@ -42,7 +43,7 @@ or `EAGLE_REF=...` picks another ref). With several GPUs, set
 ## Google Cloud (or any VM with an NVIDIA driver)
 
 Needs Python >= 3.10 with `venv` and its headers, `git`, a C++ compiler (hawk compiles each kernel the
-first time it runs) and a driver >= 525.60.13; no conda or CUDA toolkit. On Debian or
+first time it runs) and a driver >= 575.51 (>= 525.60.13 with `--cuda 12.6`); no conda or CUDA toolkit. On Debian or
 Ubuntu: `sudo apt-get install python3-venv python3-dev git build-essential`.
 
 ```bash
@@ -137,11 +138,21 @@ cards within a class; the card records its device's peak FP64 rate and bandwidth
 
 | Lock | Pins | CUDA floor |
 |---|---|---|
-| `toolchain-linux-64.lock` | Python 3.12, GCC 14, CMake, Ninja, nvcc 12.9 (conda-forge, explicit URLs + md5) | builds only; the plugin's cubins load on driver ≥ 525.60 |
-| `cards-gpu.txt` | NumPy, CuPy, PyTorch (cu126), JAX (cuda12), Warp, … (pip, one sha256 each) | CUDA 12.6 runtime libraries; driver ≥ 525.60.13; compute capability ≥ 6.0 |
+| `toolchain-linux-64.lock` | Python 3.12, GCC 14, CMake, Ninja, nvcc 12.9 (conda-forge, explicit URLs + md5) | builds only; shared by CUDA 12 and 12.6; the plugin's cubins load on driver ≥ 525.60 |
+| `cards-gpu.txt`, `pypi-gpu.txt` | NumPy, CuPy, PyTorch (cu129), JAX (cuda12), Warp, … (pip, one sha256 each) | CUDA 12.9 runtime libraries (NVRTC included); driver ≥ 575.51; compute capability ≥ 7.5 (the cu129 PyTorch wheel carries sm_75–sm_120) |
+| `cards-gpu-cuda126.txt`, `pypi-gpu-cuda126.txt` | the same packages with PyTorch cu126 and the 12.6 libraries (the previous `cards-gpu.txt`) | CUDA 12.6 runtime libraries; driver ≥ 525.60.13; compute capability ≥ 6.0: pre-Turing (sm_60–sm_70), use `--cuda 12.6` |
 | `cards-cpu.txt` | NumPy, Numba, PyTorch (CPU), JAX (CPU), … | none |
 | `toolchain-linux-64-cuda13.lock` | Python 3.12, GCC 14, CMake, Ninja, nvcc 13.4 (conda-forge, explicit URLs + md5) | builds only; driver ≥ 580, compute capability ≥ 7.5 (CUDA 13 drops offline compilation below sm_75) |
 | `cards-gpu-cuda13.txt`, `pypi-gpu-cuda13.txt` | NumPy, CuPy (cuda13x, as eagle's dependency), Warp (CUDA 13.4 wheel), cuda-bindings 13, nvidia-ml-py; no PyTorch, no JAX (pip, one sha256 each) | CUDA 13.4 runtime libraries; driver ≥ 580; compute capability ≥ 7.5 |
+
+### CUDA 12.9 and 12.6
+
+The default `--cuda 12` profile runs one CUDA 12.9 runtime on every GPU from Turing (sm_75) to Blackwell
+(sm_120, RTX PRO 6000): PyTorch cu129 and the `nvidia-*-cu12` 12.9 libraries, NVRTC included. Driver ≥ 575.51
+(an older CUDA 12 driver may work through minor-version compatibility; only 575 and later is tested). The cu129
+PyTorch wheel has no sm_60/61/70 code, so for a pre-Turing GPU (sm_60–sm_70) use `bootstrap.sh --cuda 12.6`: the
+previous cu126 locks (`*-cuda126`), an environment of its own (`envs/cards-gpu-cuda126`, `env-gpu-cuda126.sh`),
+driver ≥ 525.60.13. Its lock comes from `locks/make_locks.py pip gpu --cuda 12.6`.
 
 ### CUDA 13
 
@@ -157,9 +168,9 @@ cards' PyTorch and JAX arms need the CUDA 12 profile.
 `profile.sh` compares eagle with Warp alone, on CUDA 12 and 13: the cards' `torch_compiled` and `jax_vmap` context
 arms are not run (they are not in this profile; nothing is reported as failed). `run_cards.sh` and the cards keep every arm.
 
-They pin the package versions the committed cards ran with and have been run
-end to end on driver 560.35, compute capability 6.1; some builds differ (the committed GPU cards used
-conda-forge's CUDA 12.9 PyTorch, the lock uses the cu126 wheel). `nsys` (Nsight Systems) is
+They pin the package versions the committed cards ran with. The CUDA 12.6 locks have been run
+end to end on driver 560.35, compute capability 6.1; the CUDA 12.9 locks are new and have not yet been run on a GPU
+here. Some builds differ (the committed GPU cards used conda-forge's CUDA 12.9 PyTorch, the lock uses the pip wheel). `nsys` (Nsight Systems) is
 optional: without it the cards' kernel-only times are `null`. To bump a version,
 edit the `.in` file and run `locks/make_locks.py toolchain` or
 `locks/make_locks.py pip gpu|cpu`.

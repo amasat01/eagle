@@ -8,7 +8,7 @@ Two kinds of lock live next to this script:
 ``toolchain-linux-64.lock``
     An explicit conda lock (``@EXPLICIT``, one URL + md5 per package) for the
     build toolchain shared by both profiles: Python, GCC 14, CMake, Ninja and
-    the CUDA 12.9 compiler. Solved by ``micromamba create --dry-run --json``
+    the CUDA 12.9 compiler (the same toolchain serves every CUDA 12 runtime line). Solved by ``micromamba create --dry-run --json``
     from ``toolchain.in``; nothing is installed.
 
 ``cards-gpu.txt`` / ``cards-cpu.txt``
@@ -20,9 +20,20 @@ Two kinds of lock live next to this script:
 Usage::
 
     python make_locks.py toolchain [--cuda 12|13] [--micromamba PATH]
-    python make_locks.py pip gpu|cpu [--cuda 12|13] [--python PATH]
+    python make_locks.py pip gpu|cpu [--cuda 12|12.6|13] [--python PATH]
 
-``--cuda 13`` (default 12) selects the CUDA 13 specs and writes the files with a
+``--cuda 12`` (the default) is the CUDA 12.9 runtime line: PyTorch cu129 wheels and the
+nvidia-*-cu12 12.9 libraries (NVRTC included) they pin, shared by CuPy and JAX, so every GPU
+from Turing (sm_75) to Blackwell (sm_120) runs the same stack. Driver floor: >= 575.51
+(CUDA 12.9; older 12.x drivers >= 525.60.13 may work through minor-version compatibility,
+but NVRTC 12.9 and the cu129 wheels are only tested from 575). GPU floor: compute capability
+7.5 (the cu129 PyTorch wheel carries sm_75..sm_120 and no sm_60/61/70 code).
+
+``--cuda 12.6`` is the pre-Turing (sm_60-sm_70) line: PyTorch cu126 and the 12.6 libraries,
+driver >= 525.60.13. It writes ``cards-gpu-cuda126.txt`` from ``cards-gpu-cuda126.in`` (gpu
+profile only; the toolchain lock is shared with ``--cuda 12``).
+
+``--cuda 13`` selects the CUDA 13 specs and writes the files with a
 ``-cuda13`` suffix: ``toolchain-cuda13.in`` -> ``toolchain-linux-64-cuda13.lock``,
 ``cards-gpu-cuda13.in`` -> ``cards-gpu-cuda13.txt``. There is no CPU profile for CUDA 13
 (the CPU profile has no CUDA runtime).
@@ -68,7 +79,7 @@ def _header(path: pathlib.Path) -> list[str]:
 
 
 def _suffix(cuda: str) -> str:
-    return "-cuda13" if cuda == "13" else ""
+    return {"13": "-cuda13", "12.6": "-cuda126"}.get(cuda, "")
 
 
 def toolchain(micromamba: str, cuda: str = "12") -> None:
@@ -105,7 +116,7 @@ def _pypi_sha256(name: str, version: str, filename: str) -> str:
 def pip_lock(profile: str, python: str, cuda: str = "12") -> None:
     sfx = _suffix(cuda)
     if sfx and profile != "gpu":
-        raise SystemExit("--cuda 13 has a gpu profile only (the cpu profile has no CUDA runtime)")
+        raise SystemExit(f"--cuda {cuda} has a gpu profile only (the cpu profile has no CUDA runtime)")
     spec = HERE / f"cards-{profile}{sfx}.in"
     with tempfile.TemporaryDirectory() as tmp:
         report = pathlib.Path(tmp) / "report.json"
@@ -142,7 +153,7 @@ def main(argv=None) -> int:
     t.add_argument("--micromamba", default=shutil.which("micromamba") or "micromamba")
     p = sub.add_parser("pip")
     p.add_argument("profile", choices=["gpu", "cpu"])
-    p.add_argument("--cuda", choices=["12", "13"], default="12")
+    p.add_argument("--cuda", choices=["12", "12.6", "13"], default="12")
     p.add_argument("--python", default=sys.executable)
     args = ap.parse_args(argv)
     if args.what == "toolchain":

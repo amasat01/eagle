@@ -750,7 +750,7 @@ def test_an_unknown_cuda_version_is_refused_with_the_choices(script_args):
     for flags, env in ((("--cuda", "11"), {}), ((), {"REPRO_CUDA": "latest"})):
         done = subprocess.run(["bash", str(script), "--dry-run", *flags], capture_output=True, text=True,
                               env={**BOOT_ENV, **env})
-        assert done.returncode != 0 and "takes 12 or 13" in done.stderr, done.stderr[-400:]
+        assert done.returncode != 0 and "takes 12" in done.stderr, done.stderr[-400:]
         assert "unknown CUDA version" in done.stderr
 
 
@@ -853,3 +853,15 @@ def test_an_unrelated_mamba_on_path_is_not_taken_for_the_conda_frontend(tmp_path
     rc, out = _bootstrap(env=env)
     assert rc == 0, out[-800:]
     assert f"conda frontend: {shim / 'micromamba'}" in out
+
+
+def test_cuda_12_is_the_cu129_runtime_and_12_6_keeps_the_pre_turing_lock():
+    new = (REPRO / "locks" / "cards-gpu.txt").read_text()
+    old = (REPRO / "locks" / "cards-gpu-cuda126.txt").read_text()
+    assert "torch==2.12.1+cu129" in new and "whl/cu129" in new and "12.6." not in new
+    assert "torch==2.12.1+cu126" in old and "whl/cu126" in old
+    assert "whl/cu129" in (REPRO / "locks" / "pypi-gpu.txt").read_text()
+    assert "whl/cu126" in (REPRO / "locks" / "pypi-gpu-cuda126.txt").read_text()
+    rc, out = _bootstrap("--cuda", "12.6")
+    assert rc == 0 and "cards-gpu-cuda126.txt" in out and "env-gpu-cuda126.sh" in out
+    assert "toolchain-linux-64.lock" in out and "toolchain-linux-64-cuda126" not in out
