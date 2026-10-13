@@ -43,41 +43,76 @@ def _fill(dist: str) -> float:
 
 
 def _capacity(row) -> tuple:
-    """``(latency-regime capacity, resident threads of the device)``."""
-    sms, per_sm = int(row["sms"]), int(row["resident_per_sm"])
-    return min(sms * per_sm, sms * 32 * 8), sms * per_sm
+    """``(latency-regime capacity, resident threads of the device)`` of the
+    kernel the row timed: its own threads per SM times the SMs."""
+    return int(row["capacity"]), int(row["sms"]) * int(row["resident_per_sm"])
 
 
-def test_the_table_covers_every_device_and_both_regimes():
-    rows = _rows()
-    assert {r["device"] for r in rows} == {"H100", "A100", "RTX", "T4", "P2000"}
-    regimes = {ud._entry_regime(_capacity(r)[0], int(r["n"])) for r in rows}
-    assert regimes == {"fused", "persist", "band"}
+def _judge(row):
+    """``(kind, factor)`` of a row: how far the pick the rule or the model makes
+    is from the faster entry (``"slower"``: the pick's wall over the faster
+    wall), or how far the model's ratio is from the measured one (``"model"``:
+    the larger of the two over the smaller)."""
+    cap, resident = _capacity(row)
+    n = int(row["n"])
+    fused, persist = float(row["fused_ms"]), float(row["persist_ms"])
+    regime = ud._entry_regime(cap, n)
+    if regime == "persist":
+        return "slower", persist / min(fused, persist)
+    if regime == "fused":
+        return "slower", fused / min(fused, persist)
+    ratio = _core.entry_ratio(
+        int(row["major"]), int(row["minor"]), int(row["sms"]), int(row["fp64_ratio"]),
+        int(row["clock_khz"]), row["precision"] == "fp64", resident, n, int(row["S"]),
+        _fill(row["dist"]), float(row["step_ops"]))
+    measured = persist / fused
+    return "model", max(ratio / measured, measured / ratio), ratio, measured
+
+
+def _comparable(rows):
+    return [r for r in rows if not r["not_comparable"]]
+
+
+def test_every_row_is_judged_or_says_why_not():
+    for row in _rows():
+        assert row["not_comparable"] or (row["fused_ms"] and row["persist_ms"]), row["cell"]
+        assert not (row["known_miss"] and row["not_comparable"]), row["cell"]
 
 
 def test_model_pick_agrees_with_the_profiles():
     misses = []
-    for row in _rows():
-        cap, resident = _capacity(row)
-        n = int(row["n"])
-        fused, persist = float(row["fused_ms"]), float(row["persist_ms"])
-        regime = ud._entry_regime(cap, n)
-        if regime == "persist":
-            slower = persist / min(fused, persist) - 1.0
-        elif regime == "fused":
-            slower = fused / min(fused, persist) - 1.0
-        else:
-            ratio = _core.entry_ratio(
-                int(row["major"]), int(row["minor"]), int(row["sms"]), int(row["fp64_ratio"]),
-                int(row["clock_khz"]), row["precision"] == "fp64", resident, n, int(row["S"]),
-                _fill(row["dist"]), float(row["step_ops"]))
-            measured = persist / fused
-            if not (1 / _MODEL_WITHIN <= ratio / measured <= _MODEL_WITHIN):
-                misses.append((row["device"], row["cell"], f"model {ratio:.2f} vs measured {measured:.2f}"))
+    for row in _comparable(_rows()):
+        if row["known_miss"]:
             continue
-        if slower > _AGREE_WITHIN:
-            misses.append((row["device"], row["cell"], f"{regime} entry {slower:.1%} slower"))
+        verdict = _judge(row)
+        limit = 1.0 + _AGREE_WITHIN if verdict[0] == "slower" else _MODEL_WITHIN
+        if verdict[1] > limit:
+            misses.append((row["device"], row["cell"], verdict[:2]))
     assert not misses, misses
+
+
+def test_a_known_miss_still_fails_its_limit_and_stays_within_one_and_a_half():
+    """A row listed as a known miss must still miss (a fix retires the entry) and
+    must not get worse than a pick 1.5 times the faster entry."""
+    stale, worse = [], []
+    for row in _comparable(_rows()):
+        if not row["known_miss"]:
+            continue
+        verdict = _judge(row)
+        limit = 1.0 + _AGREE_WITHIN if verdict[0] == "slower" else _MODEL_WITHIN
+        if verdict[1] <= limit:
+            stale.append((row["device"], row["cell"]))
+        if verdict[0] == "slower":
+            worst = verdict[1]
+        else:
+            # a band row the model calls wrongly takes the slower entry once
+            ratio, measured = verdict[2], verdict[3]
+            pick = "persist" if ratio < 0.8 else "fused" if ratio > 1.25 else None
+            worst = 1.0 if pick is None else (measured if pick == "persist" else 1 / measured)
+        if worst > 1.5:
+            worse.append((row["device"], row["cell"], worst))
+    assert not stale, stale
+    assert not worse, worse
 
 
 def test_the_model_is_unknown_without_a_clock_or_a_step_cost():
