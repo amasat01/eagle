@@ -53,7 +53,7 @@ endif()
 if(_eagle_plugin_mode STREQUAL "BUILD")
   # SASS for every architecture this nvcc compiles from sm_60 up (aether's
   # compensated sums need FP64 atomicAdd, which sm_5x lacks), plus PTX at the
-  # NEWEST, which GPUs released after the toolkit JIT once and cache. The list
+  # NEWEST (and at compute_100 when the toolkit has it), which GPUs released after the toolkit JIT once and cache. The list
   # is the toolkit's own (nvcc --list-gpu-arch), so a newer toolkit widens it.
   # Override for a faster local build with a QUOTED list, e.g.
   # -DCMAKE_CUDA_ARCHITECTURES=61.
@@ -92,6 +92,13 @@ if(_eagle_plugin_mode STREQUAL "BUILD")
       list(APPEND CMAKE_CUDA_ARCHITECTURES "${_a}-real")
     endforeach()
     list(GET _eagle_archs -1 _eagle_newest)
+    # Also PTX at compute_100 where nvcc has Blackwell: CUDA 13 renamed Jetson
+    # Thor sm_101 to sm_110, so a CUDA 13 driver finds no SASS for it and cannot
+    # JIT compute_121 PTX down to 11.0, but does JIT compute_100 PTX up to 11.0
+    # (and to any later architecture).
+    if(100 IN_LIST _eagle_archs AND NOT _eagle_newest EQUAL 100)
+      list(APPEND CMAKE_CUDA_ARCHITECTURES "100-virtual")
+    endif()
     list(APPEND CMAKE_CUDA_ARCHITECTURES "${_eagle_newest}-virtual")
   endif()
   enable_language(CUDA)
