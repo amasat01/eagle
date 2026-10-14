@@ -36,6 +36,8 @@ every page in this section.
   every N, per device.
 - [Adaptive RK7(8): results](performance/rk78.md): the same for an adaptive solver.
 - [Reading the numbers](performance/reading.md): where each approach wins, and why.
+- [Where the performance comes from](performance/mechanism.md): the mechanisms behind the
+  numbers, each with its card evidence.
 - [The workload and the ways of running it](performance/workload.md): what is
   measured and what each arm does.
 - [Method](performance/method.md): how a number is produced.
@@ -49,6 +51,7 @@ every page in this section.
 performance/rk4
 performance/rk78
 performance/reading
+performance/mechanism
 performance/workload
 performance/method
 performance/reproduce
