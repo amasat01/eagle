@@ -98,6 +98,7 @@ DEVICES = {
     "a100": "nvidia-a100*",
     "t4": "tesla-t4",
     "h100": "nvidia-h100*",
+    "rtx6000": "nvidia-rtx-pro-6000*",
 }
 
 #: Card family -> (directory, filename prefix).
@@ -246,6 +247,7 @@ FP64_FMA_PER_CLK_PER_SM = {
     "8.6": 2,
     "8.9": 2,
     "9.0": 64,
+    "12.0": 2,
 }
 
 #: A tool name -> a predicate on the arm name (the tool's arms on a GPU or CPU card).

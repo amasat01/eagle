@@ -59,18 +59,29 @@
       "evidence": "8 threads 3.8276e11 FMA/s (16 threads 3.7847e11: SMT adds nothing); implied 2990 MHz at 16 FMA/clk/core"
     },
     "amd-epyc-7b13": {
-      "fma_per_s": null,
-      "source": "pending",
+      "fma_per_s": 223070000000.0,
+      "source": "measured",
       "clock_mhz": null,
-      "method": "register-only packed FMA chain probe, threads = physical cores",
-      "evidence": "not yet measured; efficiency is not published for this device until it is"
+      "method": "register-only packed FMA chain probe (AVX2), 8 threads = physical cores, best sustained rate",
+      "evidence": "8 threads 2.2307e11 FMA/s (16 threads 2.2878e11: SMT adds under 3%)"
     },
     "aarch64": {
-      "fma_per_s": null,
-      "source": "pending",
-      "clock_mhz": null,
-      "method": "register-only packed FMA chain probe, threads = physical cores",
-      "evidence": "not yet measured; efficiency is not published for this device until it is"
+      "fma_per_s": 192000000000.0,
+      "source": "spec",
+      "clock_mhz": 3000,
+      "method": "published Neoverse-V2 rate: 4 x 128-bit FMA pipes = 8 FP64 FMA/clk/core x 8 cores (the card runs at most 8 threads, as on the x86 machines) x 3.0 GHz (clock from the firmware CPU name)",
+      "evidence": "the register-chain probe read 1.03e11 (2.1 FMA/clk/core): 12 chains cannot fill 4 pipes x 4-cycle latency, so it under-measures; the spec rate is the conservative reference"
+    },
+    "nvidia-rtx-pro-6000-blackwell-server-edition": {
+      "fma_per_s": 910672000000.0,
+      "source": "spec",
+      "clock_mhz": 2422.0,
+      "method": "specification: SM count x FP64 FMA per clock per SM for the compute capability (CUDA C++ Programming Guide, arithmetic instruction throughput) x the highest SM clock recorded across the card's rows",
+      "evidence": "188 SMs x 2 FMA/clk x 2.422 GHz (the card's rows ran at 2317-2422 MHz)",
+      "cross_check": {
+        "measured_fma_per_s": 912220000000.0,
+        "method": "register-only FP64 FMA chain probe in the card session (dp_sol_probe), best sustained rate at an implied 2426 MHz; 0.2% above the specification at the row clock, so the specification is the reference"
+      }
     }
   }
 }
