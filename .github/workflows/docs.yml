@@ -144,7 +144,21 @@ jobs:
             Sphinx==8.2.3 sphinx-book-theme==1.2.0 sphinx-design==0.7.0 sphinx-copybutton==0.5.2 \
             sphinx-autodoc-typehints==3.5.2 myst-nb==1.4.0 breathe==4.36.0 nbformat nbclient
 
-      - name: make nbcheck (refuse an unfilled notebook)
+      # nbcheck also executes every notebook on the CPU: it needs hawk (sibling checkout), a kernel and torch
+      - uses: actions/checkout@v7
+        with:
+          repository: amasat01/hawk
+          path: hawk
+          token: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
+
+      - name: Install what the notebooks run on
+        run: |
+          export HAWK_AETHER_INCLUDE="${GITHUB_WORKSPACE}/aether" HAWK_EAGLE_INCLUDE="${GITHUB_WORKSPACE}/eagle"
+          python -m pip install --quiet ipykernel matplotlib scipy
+          python -m pip install --quiet torch --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install --quiet ./hawk
+
+      - name: make nbcheck (refuse an unfilled notebook; run every notebook on the CPU)
         run: cd eagle/docs && make nbcheck
 
       - name: make strict (0 Sphinx warnings)
