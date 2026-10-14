@@ -90,13 +90,15 @@ inline const GroupSpec& group(const std::string& name)
     throw std::logic_error("eagle_seam: no group named " + name);
 }
 
-/** @brief The group-12 (filtering) symbols bound one by one (presence = capability, MINOR 0). */
+/** @brief The group-12 (filtering) symbols bound one by one (presence = capability; MINOR 0, reset_device and pointer_residency MINOR 1). */
 inline const std::vector<const char*>& filteringPerSymbol()
 {
     static const std::vector<const char*> all = {
         "eagle_backend_reorder_device",
         "eagle_backend_compact_classes_device",
         "eagle_backend_reorder_classes_device",
+        "eagle_backend_reset_device",
+        "eagle_backend_pointer_residency",
     };
     return all;
 }

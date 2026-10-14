@@ -1,24 +1,26 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="732" height="232" viewBox="0 0 732 232" role="img" aria-labelledby="t d" font-family="system-ui, -apple-system, Segoe UI, sans-serif">
 <title id="t">RK4 oscillators, 1,000,000 samples, spread (up to 1000 steps)</title>
-<desc id="d">Wall time on NVIDIA L4: eagle.simulate 30.5 ms, NVIDIA Warp 105 ms, JAX 242 ms, CuPy 1.62 s, PyTorch 1.70 s.</desc>
+<desc id="d">Wall time on NVIDIA H100 80GB HBM3: eagle.simulate 613 µs, NVIDIA Warp 1.54 ms, JAX 47.0 ms, PyTorch with torch.compile 84.5 ms, CuPy 368 ms.</desc>
 <style>.bg{fill:#fcfcfb;stroke:#e1e0d9}.ink{fill:#0b0b0b}.sub{fill:#52514e}.bar{fill:rgba(127,126,120,.5)}.us{fill:#7d53dc}
 .c0{fill:#cf416b}
-.c1{fill:#306101}
-.c2{fill:#1a9a8c}
-.c3{fill:#518d05}
-.c4{fill:#ee4c2c}
+.c1{fill:#6d9f09}
+.c2{fill:#0e9d9b}
+.c3{fill:#df5345}
+.c4{fill:#157b21}
 @media (prefers-color-scheme: dark){.bg{fill:#1a1a19;stroke:#2c2c2a}.ink{fill:#f2f2ee}.sub{fill:#c3c2b7}
-.c1{fill:#88e97e}
-.c3{fill:#76b900}
+.c1{fill:#b6fd13}
+.c2{fill:#36fcd8}
+.c3{fill:#eb7e61}
+.c4{fill:#22d434}
 }</style>
 <rect class="bg" x="0.5" y="0.5" width="731" height="231" rx="8"/>
 <g transform="translate(16,16)">
 <text class="ink" x="0" y="22" font-size="16" font-weight="600">RK4 oscillators, 1,000,000 samples, spread (up to 1000 steps)</text>
-<text class="sub" x="0" y="42" font-size="12.5">NVIDIA L4. Log scale, 19.0 ms to 2.72 s.</text>
-<circle class="c0" cx="5" cy="66" r="4.5"/><text class="ink" x="18" y="71" font-size="14">eagle.simulate</text><rect class="us" x="150" y="59" width="45.5" height="14" rx="3"/><text class="ink" x="203.5" y="71" font-size="13">30.5 ms</text>
-<circle class="c1" cx="5" cy="96" r="4.5"/><text class="ink" x="18" y="101" font-size="14">NVIDIA Warp</text><rect class="bar" x="150" y="89" width="165.0" height="14" rx="3"/><text class="ink" x="323.0" y="101" font-size="13">105 ms</text>
-<circle class="c2" cx="5" cy="126" r="4.5"/><text class="ink" x="18" y="131" font-size="14">JAX</text><rect class="bar" x="150" y="119" width="246.1" height="14" rx="3"/><text class="ink" x="404.1" y="131" font-size="13">242 ms</text>
-<circle class="c3" cx="5" cy="156" r="4.5"/><text class="ink" x="18" y="161" font-size="14">CuPy</text><rect class="bar" x="150" y="149" width="429.7" height="14" rx="3"/><text class="ink" x="587.7" y="161" font-size="13">1.62 s</text>
-<circle class="c4" cx="5" cy="186" r="4.5"/><text class="ink" x="18" y="191" font-size="14">PyTorch</text><rect class="bar" x="150" y="179" width="434.5" height="14" rx="3"/><text class="ink" x="592.5" y="191" font-size="13">1.70 s</text>
+<text class="sub" x="0" y="42" font-size="12.5">NVIDIA H100 80GB HBM3. Log scale, 383 µs to 589 ms.</text>
+<circle class="c0" cx="5" cy="66" r="4.5"/><text class="ink" x="18" y="71" font-size="14">eagle.simulate</text><rect class="us" x="150" y="59" width="30.7" height="14" rx="3"/><text class="ink" x="188.7" y="71" font-size="13">613 µs</text>
+<circle class="c1" cx="5" cy="96" r="4.5"/><text class="ink" x="18" y="101" font-size="14">NVIDIA Warp</text><rect class="bar" x="150" y="89" width="91.1" height="14" rx="3"/><text class="ink" x="249.1" y="101" font-size="13">1.54 ms</text>
+<circle class="c2" cx="5" cy="126" r="4.5"/><text class="ink" x="18" y="131" font-size="14">JAX</text><rect class="bar" x="150" y="119" width="314.6" height="14" rx="3"/><text class="ink" x="472.6" y="131" font-size="13">47.0 ms</text>
+<circle class="c3" cx="5" cy="156" r="4.5"/><text class="ink" x="18" y="161" font-size="14">PyTorch with torch.compile</text><rect class="bar" x="150" y="149" width="353.0" height="14" rx="3"/><text class="ink" x="511.0" y="161" font-size="13">84.5 ms</text>
+<circle class="c4" cx="5" cy="186" r="4.5"/><text class="ink" x="18" y="191" font-size="14">CuPy</text><rect class="bar" x="150" y="179" width="449.3" height="14" rx="3"/><text class="ink" x="607.3" y="191" font-size="13">368 ms</text>
 </g>
 </svg>

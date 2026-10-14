@@ -25,10 +25,13 @@
   --muted: #898781;
   --border: #e1e0d9;
   /* other tools in comparison figures: chip dots and regions only */
-  --tool-pytorch: #ee4c2c;
-  --tool-jax: #1a9a8c;
-  --tool-cupy: #518d05;
-  --tool-warp: #306101;
+  --tool-raptor: #7d53dc;
+  --tool-warp: #6d9f09;
+  --tool-jax: #0e9d9b;
+  --tool-pytorch: #df5345;
+  --tool-cupy: #157b21;
+  --tool-numba: #0f7da7;
+  --tool-numpy: #1e47b5;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
@@ -47,8 +50,13 @@
     --ink-secondary: #c3c2b7;
     --muted: #898781;
     --border: #2c2c2a;
-    --tool-cupy: #76b900;
-    --tool-warp: #88e97e;
+    --tool-raptor: #9269f5;
+    --tool-warp: #b6fd13;
+    --tool-jax: #36fcd8;
+    --tool-pytorch: #eb7e61;
+    --tool-cupy: #22d434;
+    --tool-numba: #7fcdf0;
+    --tool-numpy: #8aa3f2;
   }
 }
 [data-theme="dark"] {
@@ -67,7 +75,12 @@
   --ink-secondary: #c3c2b7;
   --muted: #898781;
   --border: #2c2c2a;
-  --tool-cupy: #76b900;
-  --tool-warp: #88e97e;
+  --tool-raptor: #9269f5;
+  --tool-warp: #b6fd13;
+  --tool-jax: #36fcd8;
+  --tool-pytorch: #eb7e61;
+  --tool-cupy: #22d434;
+  --tool-numba: #7fcdf0;
+  --tool-numpy: #8aa3f2;
 }
-/* Avoid near-collisions with neighbouring ecosystems: NVIDIA green #76b900, PyTorch orange #ee4c2c, JAX blue/teal. */
+/* Tool colours are checked against each project's logo and kept clear of the neighbouring ecosystems' marks. */

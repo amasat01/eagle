@@ -25,6 +25,11 @@ engine.
 .. raw:: html
    :file: content/_generated/perf_glimpse.html
 
+.. raw:: html
+   :file: _static/family_visuals/fragments/map.html
+
+*Where each tool covers the work, drawn from the committed performance cards; the table behind the chart lists every value.*
+
 Thirty seconds: ``eagle.simulate``
 ----------------------------------
 

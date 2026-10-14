@@ -27,7 +27,7 @@ from __future__ import annotations
 import threading
 from contextlib import contextmanager
 
-from .. import _core
+from .. import _core, _counters
 from .._active_set import _address, _overlaps, _reordering_snapshot
 from .._busy import Busy
 from ..roles import STATE_ROLES
@@ -313,7 +313,8 @@ class Recorder:
         with self._lock:
             tape = Tape(self, arrays, copies, perm)
             self._live = Record(self._graph, self._generation, tape, self)
-            return self._live
+        _counters.bump("records")
+        return self._live
 
     def hold(self, record, door):
         with self._lock:

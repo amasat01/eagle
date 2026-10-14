@@ -37,6 +37,7 @@ from __future__ import annotations
 import inspect
 import time
 
+from ._busy import BusyGuard
 from ._compat import zip_strict
 from ._until_done import (
     refuse_derived,
@@ -500,7 +501,7 @@ class Simulation:
     plans per kernel, :attr:`n` the batch size, :attr:`names` the
     ``state``/``params``/``allocated`` plane names."""
 
-    __slots__ = ("runner", "loop", "plans", "n", "names", "active", "finished",
+    __slots__ = ("_busy", "runner", "loop", "plans", "n", "names", "active", "finished",
                  "terminated", "every", "_state", "_device", "_xp")
 
     def __init__(self, model, args, kwargs, *, until=None, max_steps,
@@ -509,6 +510,7 @@ class Simulation:
                  events="step", on_no_event="raise"):
         from ._layout import rewrap, split_marks
 
+        self._busy = BusyGuard("eagle.Simulation")
         if record and dispatch is not None:
             raise ValueError("eagle.simulate: record=True runs each step fused, so dispatch= cannot "
                              "be combined with it yet; drop dispatch= to record this run")
@@ -621,6 +623,10 @@ class Simulation:
         """Run until every sample finishes or the step cap is reached; the
         state is written in place and returned in the :class:`SimResult`.
         A second call continues from the current state."""
+        with self._busy("run"):
+            return self._run()
+
+    def _run(self) -> SimResult:
         t0 = time.perf_counter()
         report = self.runner.run()
         if self._device and self.runner._fast_mode is None:

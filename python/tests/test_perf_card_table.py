@@ -64,13 +64,6 @@ _README_ROWS = [(dist, 1000, arm)
                             "cupy_masked", "cpu_openmp")]
 
 
-#: Cards whose small-N automatic runs took a launch sequence the card's replay
-#: does not model (eagle 0.5.1 never took its one-launch fast path on these
-#: GPUs), so their auto issued-bytes rows are approximate. Empty again once
-#: these GPUs are measured with the fixed launch path.
-_AUTO_SCHEDULE_GAPS = frozenset({"card_nvidia-l4.json", "card_nvidia-a100-sxm4-40gb.json"})
-
-
 def _script():
     spec = importlib.util.spec_from_file_location(
         "eagle_perf_card", _CARD_DIR / "perf_card.py")
@@ -153,13 +146,12 @@ def test_cards_cover_every_arm_memory_and_compile_step():
             f"{card_path.name}: compile-time rows differ from the script's keys")
         assert set(card["fit"]["arms"]) == run
         for extra in card["per_config"]:
-            for key in ("auto_schedule_matches_run", "graph_schedule_matches_run"):
-                if key == "auto_schedule_matches_run" and card_path.name in _AUTO_SCHEDULE_GAPS:
-                    continue
+            for key in ("auto_schedule_consistent", "graph_schedule_consistent",
+                        "simulate_schedule_consistent"):
                 assert extra.get(key, True), (
                     f"{card_path.name}: {key} is false at {extra['distribution']} "
-                    f"S={extra['max_steps']} N={extra['n']}: the replayed launches "
-                    "differ from the run's, so the issued bytes would be wrong")
+                    f"S={extra['max_steps']} N={extra['n']}: the run's launches "
+                    "are not self-consistent, so the issued bytes would be wrong")
         _check_code_record(card, card_path, {"perf_card.py": module._code_blocks(
             _CARD_DIR / "perf_card.py")}, prefixed=False)
 
@@ -339,31 +331,70 @@ def test_card_scripts_import_no_private_eagle_or_hawk_name():
             assert not bad, f"{path.name}:{node.lineno} imports a private name: {bad}"
 
 
-def test_the_auto_issued_bytes_follow_eagle_s_policy():
-    """The automatic arm's analytic bytes replay eagle's own policy: a uniform
-    batch of n samples over S = 1000 steps launches 16, 32, then 64s (the last
-    one the remainder), compacts once at the end, and issues the mapped count
-    per launch.
+def test_issued_bytes_follow_the_reported_schedule():
+    """The band arm's analytic bytes come from the run's own report: launches
+    {16: 3, 32: 2} (5 launches) with 2 compactions and no reorder issue
+    (all + map) * n per launch, the active traffic of the steps run, the
+    finish write and 2 compaction passes. No policy is replayed.
 
-    RED: count the automatic arm per step, or replay a constant k, and this
-    fails."""
+    This fails if the card replays a policy copy, or ignores the report's
+    launch histogram or compactions."""
+    import types
+
     import numpy as np
 
     module = _script()
-    n, s = 1000, 1000
+    n, s = 1000, 112
     running = np.full(s, n)
-    sched = module._auto_schedule(running, n, s)
-    ks = [k for _, k in sched]
-    assert ks[:3] == [16, 32, 64] and sum(ks) == s and max(ks) == 64
-    per = module.STEP_BYTES_ALL + module.MAP_BYTES + module.STEP_BYTES_ACTIVE
-    want = per * n * len(ks) + n + module.COMPACT_BYTES_PER_SAMPLE * n
-    assert module._auto_issued_bytes(running, n, n, s) == want
+    report = types.SimpleNamespace(launches=5, launches_by_k={16: 3, 32: 2},
+                                   compactions=2, reorders=0, mode="band")
+    want = ((module.STEP_BYTES_ALL + module.MAP_BYTES) * n * 5
+            + module.STEP_BYTES_ACTIVE * n * s + module.STEP_BYTES_FINISH * n
+            + module.COMPACT_BYTES_PER_SAMPLE * n * 2)
+    assert module._auto_issued_bytes(report, running, n, n) == want
+    assert module._run_issued_bytes(report, running, n, n) == want
+    report.reorders = 1
+    assert module._auto_issued_bytes(report, running, n, n) == want + (
+        module.REORDER_BYTES_PER_SPAN_SAMPLE + module.COMPACT_BYTES_PER_SAMPLE) * n
+    report.mode = "persist"
+    assert module._run_issued_bytes(report, running, n, n) == \
+        module._persist_issued_bytes(running, n, n)
+    assert module.auto_schedule_consistent(report, s)
+    assert not module.auto_schedule_consistent(report, s + 1)  # words cover 112 steps only
+    report.launches = 4
+    assert not module.auto_schedule_consistent(report, s)  # launches != sum(count)
+    assert not hasattr(module, "_auto_schedule") and not hasattr(module, "_next_k")
+
+
+def test_missing_optional_libraries_become_arms_not_run(monkeypatch):
+    """With torch and jax blocked (``sys.modules[lib] = None``) arm selection
+    returns without raising, the torch and jax arms are listed under
+    ``arms_not_run`` with "<lib> not installed in this profile", and they are
+    absent from the arms the run uses.
+
+    This raises if a library is imported at selection time."""
+    import sys
+
+    module = _script()
+    monkeypatch.setitem(sys.modules, "torch", None)
+    monkeypatch.setitem(sys.modules, "jax", None)
+    monkeypatch.setattr(module, "_RUN_ARMS", [])
+    extra, not_run = module._optional_arms()
+    assert extra == ()
+    for arm in ("torch_masked", "torch_graphed", "torch_compiled"):
+        assert not_run[arm] == "torch not installed in this profile"
+    assert not_run["jax_vmap"] == "jax not installed in this profile"
+    run = module._run_arms()
+    assert not set(not_run) & set(run) and "eagle_graph" in run
+    assert module._fp32_arms() == ()
+    assert module._compile_keys([1000], run) and not any(
+        k.startswith(("jax:", "torch:")) for k, _, _ in module._compile_keys([1000], run))
 
 
 def test_k_steps_issued_bytes_count_per_launch():
     """The K-steps arm's analytic bytes are the step kernel's count over the
     launches' first steps: a uniform batch of n samples over S steps issues
-    (33 + 40) B per sample per launch plus 1 B per finishing sample.
+    (33 + 28) B per sample per launch plus 1 B per finishing sample.
 
     RED: count the K-steps arm per step instead of per launch and this fails."""
     import numpy as np
@@ -383,11 +414,11 @@ def _gen_module():
     return module
 
 
-def test_docs_tables_withhold_device_readings_below_the_minimum():
+def test_docs_tables_withhold_device_readings_below_the_minimum(tmp_path):
     """The docs pages never quote a device reading below the workload's
-    minimum state (less one driver page). JAX's 0 MiB at N = 1,000,000 on the
-    A100 card -- its pool was reserved before the baseline -- shows the
-    P2000/T4 reading instead, marked and attributed; with no other card it
+    minimum state (less one driver page). A JAX reading of 0 MiB at N = 1,000,000 on a
+    synthetic card -- its pool was reserved before the baseline -- shows the
+    other cards' reading instead, marked and attributed; with no other card it
     shows "not measured"; a small-N 0 MiB (below one driver page) stays.
     RED: drop the `withhold_impossible_readings` call from `_table_fragment`."""
     gen = _gen_module()
@@ -404,12 +435,25 @@ def test_docs_tables_withhold_device_readings_below_the_minimum():
     fine = "| 1,000,000 | Warp | 5.96 ms | 64 MiB (1.68× min.) | 3 MiB |"
     assert gen.withhold_impossible_readings(fine, minimum) == fine
     spec = next(f for f in gen.FAMILIES if f["key"] == "perf_card_gpu")
-    entries = gen.load_family(_REPO, spec)
-    a100 = next(e for e in entries if "a100" in e["slug"])
-    fragment = gen._table_fragment(spec, a100, entries)
-    assert "128 MiB (3.36×)†" in fragment
-    assert "Measured on Quadro P2000 and Tesla T4" in fragment
-    assert not re.search(r"\| 1,000,000 \| JAX[^\n]*\| 0 MiB \(0×\)", fragment)
+
+    def entry(name, peak_mib, reference):
+        # a synthetic card whose JAX reading at N = 1,000,000 is `peak_mib`
+        path = tmp_path / f"card_{name}.json"
+        path.with_suffix(".md").write_text(
+            f"| 1,000,000 | JAX | 9.61 ms | {peak_mib} MiB (3.2×) | 100 MiB | – |\n")
+        memory = {"rows": [{"arm": "jax_vmap", "n": 1_000_000,
+                            "device_peak_bytes": peak_mib * mib, "minimum_bytes": 40 * mib}]}
+        card = {"device": {"name": name}, "arms": {"jax_vmap": "JAX"}, "memory": memory}
+        return {"slug": name, "path": path, "card": card, "name": name,
+                "is_reference": reference}
+
+    low, other = entry("Synthetic Low", 0, True), entry("Synthetic Other", 128, False)
+    fragment = gen._table_fragment(spec, low, [low, other])
+    assert "128 MiB (3.2×)†" in fragment
+    assert "Measured on Synthetic Other" in fragment
+    assert not re.search(r"\| 1,000,000 \| JAX[^\n]*\| 0 MiB", fragment)
+    alone = gen._table_fragment(spec, low, [low])
+    assert "not measured" in alone
 
 
 def test_docs_pages_include_every_generated_family():
@@ -510,11 +554,11 @@ def test_stale_prose_gate_reference_cards_match():
 
 
 def test_readme_performance_numbers_match_card():
-    """The README's Performance table is copied from the quadro-p2000 card.
+    """The README's Performance table is copied from the nvidia-h100-80gb-hbm3 card.
 
     Re-renders each headline cell with the script's own ``_fmt_time``/
     ``_fmt_rate``/``_fmt_pct`` (the same helpers ``render_markdown`` uses for
-    ``card_quadro-p2000.md``) and requires that exact text to appear in
+    ``card_nvidia-h100-80gb-hbm3.md``) and requires that exact text to appear in
     ``README.md``, so a stale number left behind by a re-run of the benchmark
     is caught here rather than drifting silently.
 
@@ -522,7 +566,7 @@ def test_readme_performance_numbers_match_card():
     benchmark without updating the README, and this fails naming the cell.
     """
     module = _script()
-    card_path = _CARD_DIR / "card_quadro-p2000.json"
+    card_path = _CARD_DIR / "card_nvidia-h100-80gb-hbm3.json"
     assert card_path.is_file(), f"no committed {card_path.name} for the README table"
     card = json.loads(card_path.read_text())
     rows = {(r["distribution"], r["max_steps"], r["arm"]): r
@@ -533,7 +577,7 @@ def test_readme_performance_numbers_match_card():
     section = readme.split("## Performance", 1)[1].split("## The RAPTOR family", 1)[0]
 
     for key in _README_ROWS:
-        assert key in rows, f"card_quadro-p2000.json has no N=1,000,000 row for {key}"
+        assert key in rows, f"card_nvidia-h100-80gb-hbm3.json has no N=1,000,000 row for {key}"
         r = rows[key]
         fmt_time = module._fmt_time
         w = r["wall_s"]
@@ -548,7 +592,7 @@ def test_readme_performance_numbers_match_card():
         for cell in (wall_cell, rate_cell, flops_cell):
             assert cell in section, (
                 f"README.md's Performance section is missing {cell!r} for "
-                f"{key} (re-derived from card_quadro-p2000.json) -- "
+                f"{key} (re-derived from card_nvidia-h100-80gb-hbm3.json) -- "
                 "the table has drifted from the card")
 
 
@@ -859,12 +903,38 @@ _README_CPU_ARMS = ("eagle_term8", "numba_prange", "jax_shard8", "torch_masked",
                     "numpy_masked")
 
 
+def _prose_claims():
+    spec = importlib.util.spec_from_file_location(
+        "eagle_prose_claims_under_test", _REPO / "tools" / "prose_claims.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def _readme_cpu_block():
     text = _README.read_text()
     begin, end = "<!-- cpu-cards:begin -->", "<!-- cpu-cards:end -->"
     assert begin in text and end in text, "README.md has no cpu-cards block"
     start = text.index(begin) + len(begin)
     return text[start:text.index(end, start)]
+
+
+def test_device_names_table_is_used_and_keys_match_cards():
+    """Every key of ``benchmarks/device_names.json`` is an existing card file
+    stem, and the README's CPU block shows the table's ``name`` for it.
+
+    RED: rename a card without its table key, or print the raw model string."""
+    table = json.loads((_REPO / "benchmarks" / "device_names.json").read_text())
+    names = {k: v for k, v in table.items() if not k.startswith("_")}
+    stems = {p.stem for p in (_REPO / "benchmarks").glob("*/*.json")}
+    assert names and set(names) <= stems, sorted(set(names) - stems)
+    block = _readme_cpu_block()
+    for path in _cpu_cards():
+        if path.stem in names:
+            assert f"On a CPU alone: {names[path.stem]['name']}," in block
+            assert _card_common().cpu_display_name(path, "x") == names[path.stem]["name"]
+        else:
+            assert _card_common().cpu_display_name(path, "raw model") == "raw model"
 
 
 def test_readme_cpu_block_matches_every_cpu_card():
@@ -878,10 +948,12 @@ def test_readme_cpu_block_matches_every_cpu_card():
     cards = _cpu_cards()
     assert cards, "no committed cpu_card_*.json"
     module = _card_common()
+    pcl = _prose_claims()  # the one rounding rule the README generator uses
     for path in cards:
         card = json.loads(path.read_text())
         cpu = card["cpu"]
-        heading = (f"On a CPU alone: {cpu['model']}, {cpu['cores']} cores, "
+        shown = module.cpu_display_name(path, cpu["model"])
+        heading = (f"On a CPU alone: {shown}, {cpu['cores']} cores, "
                    f"card of {card['generated_utc'][:10]}")
         assert heading in block, f"README cpu block is missing {heading!r}"
         n = max(card["ns"])
@@ -892,7 +964,7 @@ def test_readme_cpu_block_matches_every_cpu_card():
             sp = module.center(rows[("spread", 1000, arm)]["wall_s"])
             un = module.center(rows[("uniform", 1000, arm)]["wall_s"])
             row = (f"| {card['arm_labels'][arm]} | {module.fmt_time(sp)} "
-                   f"| {module.fmt_time(un)} | {sp / base:.3g}× |")
+                   f"| {module.fmt_time(un)} | {pcl.fmt_ratio(sp / base)} |")
             assert row in block, (
                 f"README cpu block is missing {row!r} (re-derived from {path.name}) "
                 "-- the table has drifted from the card")
@@ -909,3 +981,83 @@ def test_readme_stale_prose_gate_lists_the_cpu_cards():
         assert rel in entries, f"stale-prose-gate comment does not list {rel}"
         assert entries[rel] == hashlib.md5(path.read_bytes()).hexdigest(), (
             f"{rel} changed since the README's gate comment was written")
+
+
+def _rk78_script():
+    spec = importlib.util.spec_from_file_location(
+        "eagle_rk78_card", _REPO / "benchmarks" / "rk78_card" / "rk78_card.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _fake_memory_probe_run(module, monkeypatch, probe, patches):
+    """Run ``module._memory_probe`` with every device and process reading faked;
+    returns the ordered list of the calls that matter to the baseline."""
+    calls = []
+
+    def note(name, ret=None):
+        def fake(*a, **k):
+            calls.append(name)
+            return ret
+        return fake
+
+    cc = module.cc
+    monkeypatch.setattr(cc, "probe_reply_fd", note("reply_fd", 1))
+    monkeypatch.setattr(cc, "probe_reply", note("reply"))
+    monkeypatch.setattr(cc, "process_device_bytes", note("baseline", (123, "fake")))
+    monkeypatch.setattr(cc, "trim_pools", note("trim"))
+    monkeypatch.setattr(cc, "probe_sync", note("sync"))
+    monkeypatch.setattr(cc, "status_kib", note("rss", 1))
+    monkeypatch.setattr(cc, "reset_host_peak", note("reset", True))
+    monkeypatch.setattr(module, "_touch_device", note("touch"))
+    for name, ret in patches.items():
+        monkeypatch.setattr(module, name, note(name, ret))
+    probe()
+    return calls
+
+
+def _assert_baseline_before_warmup(calls, warm_call):
+    assert calls.count("baseline") == 2, calls  # the baseline, then the reading after the run
+    first = calls.index("baseline")
+    assert "touch" in calls[:first], (
+        f"the CUDA context must exist (one tiny device op) before the baseline: {calls}")
+    assert first < calls.index(warm_call), (
+        f"the device baseline must be read before the warm-up call {warm_call}: {calls}")
+    assert first < calls.index("trim"), (
+        f"the device baseline must be read before any allocator is trimmed: {calls}")
+    assert calls.index("trim") < calls.index("baseline", first + 1), calls
+
+
+def test_perf_card_memory_baseline_is_read_before_the_warm_up(monkeypatch):
+    """The device baseline is taken once the CUDA context exists but before the
+    arm's warm-up run, so every library's pool reserved during the warm-up counts.
+
+    This fails if the baseline is read after the warm-up."""
+    import numpy as np
+
+    module = _script()
+    module.WARM_N = 4
+    patches = {"_probe_arm": {}, "_probe_once": (np.zeros(1), np.zeros(1), np.zeros(1)),
+               "_inputs": {"nstop": np.zeros(1)}, "_np_array_equal": True,
+               "_library_counters": {}}
+    calls = _fake_memory_probe_run(
+        module, monkeypatch,
+        lambda: module._memory_probe("eagle_graph", "spread", 5, 8, "0000:00:00.0"),
+        patches)
+    _assert_baseline_before_warmup(calls, "_probe_once")
+
+
+def test_rk78_card_memory_baseline_is_read_before_the_warm_up(monkeypatch):
+    """Same order check for the second card's memory probe.
+
+    RED: read the baseline after the warm-up and this fails."""
+    import numpy as np
+
+    module = _rk78_script()
+    out = (0.0, 0.0, {"t": np.full(2, module.T_FINAL)})
+    patches = {"_probe_arm": {}, "_timed": out, "_inputs": {}, "_sync": None}
+    calls = _fake_memory_probe_run(
+        module, monkeypatch,
+        lambda: module._memory_probe("eagle_graph", 8, "0000:00:00.0"), patches)
+    _assert_baseline_before_warmup(calls, "_timed")

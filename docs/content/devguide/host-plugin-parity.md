@@ -69,7 +69,7 @@ same `scalar_type != "float64"` gate, raising before `dlopen` with a
 matching "float64 only" message
 (`test_host_plugin_rejects_nonfloat64_scalar_type`). Both host paths — C++
 and Python — refuse a device-only float32 / SoftDouble sidecar identically:
-native float64 is the only host target in v1. Widening the mirror to a
+native float64 is the only host target in v1 (a float32 artifact still runs on the device). Widening the mirror to a
 genuine f32 host wire ABI stays a possible future evolution if a consumer
 ever materializes.
 

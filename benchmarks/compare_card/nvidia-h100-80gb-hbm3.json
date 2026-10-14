@@ -1,0 +1,14 @@
+{
+  "schema": "eagle-compare-evidence/1",
+  "slug": "nvidia-h100-80gb-hbm3",
+  "device": "NVIDIA H100 80GB HBM3",
+  "session": "final-h100",
+  "eagle_commit": "06b72ca2d0aae86d0e3d6d10e47678d542914f93",
+  "hawk_commit": "efaed2c",
+  "commits_source": "session log final-h100.log",
+  "csv_md5": "d1d6336e9e559995b0fb87ed7c3a15be",
+  "kit_branch": "profile-kit",
+  "kit_commit": "f6cdc0f8449259ba42e35f5891683aac24b90e3a",
+  "gpu_profile_md5": "c8c45b7753117acb9218715874b5e726",
+  "generated_utc": "2026-10-13T16:12:02Z"
+}

@@ -8,8 +8,11 @@ A map keeps the live samples' warps full, but as the batch thins out its
 gathers touch memory further and further apart. The reorder restores
 contiguity without changing any address: ``reorderDevice`` /
 ``reorderHost`` (``eagle/filtering/Reorder.h``) permute every plane the caller
-registers **in place** over ``[0, span)``, through one scratch staging plane,
-so the kept samples fill ``[0, count)`` in ascending sample order and the
+registers **in place** over ``[0, span)``, through a scratch staging area that
+holds a group of planes at a time (one stage kernel and one place kernel per
+group of up to 64 planes that fit the staging area, plus a final words kernel;
+``reorderScratchBytes`` takes an optional ``stageBytesPerSample`` to make the
+groups larger), so the kept samples fill ``[0, count)`` in ascending sample order and the
 dropped ones follow them. Pointers baked into a captured graph stay valid.
 
 - ``perm`` (slot → sample id) is permuted with the planes and ``inv``
@@ -46,16 +49,54 @@ the reorder clears it.
                                    eagle::filtering::kCompactMaskIsDrop, perm, inv,
                                    map, count, span, fire, scratch2, n, stream);
 
+``eagle::filtering::resetDevice(perm, inv, indexMap, count, span, n, stream)``
+(host twin ``resetHost``) puts a set back to the identity in one kernel: ``perm``,
+``inv`` and, when non-null, ``indexMap`` become ``0..n-1`` and ``*count = *span = n``.
+It is capture-legal and reads no ``fire`` word. The seam symbol is
+``eagle_backend_reset_device`` (seam minor 1) and ``eagle._core.reset_device``
+its binding; ``ActiveSet.reset`` uses it on a reordering device set.
+
+**Planes in pinned host memory.** A plane may live in mapped pinned host memory
+(``cudaHostAlloc`` with the mapped flag, or ``cudaHostRegister`` of a buffer with it):
+the kernels read and write it over the bus through its device address, and the
+result is byte-identical to the device-memory path. The contract: planes are
+structure-of-arrays and at most 16 bytes per element (a 4-double quaternion is
+four planes); the host must not touch a plane between the enqueue and the
+stream's synchronisation; under graph capture the buffer must be allocated or
+registered before the capture and outlive the graph. Pageable memory is not
+addressable by the device: ``eagle::filtering::checkPlanesResident(planes, nPlanes,
+device)`` throws naming the plane index and its class, ``classifyPointer`` gives the
+class (host, device, managed, mapped pinned host, pageable, another device), and both
+are setup-time checks, run on every reorder call only under ``EAGLE_DEBUG_MODE``.
+The seam symbol is ``eagle_backend_pointer_residency`` (seam minor 1) with the
+binding ``eagle._core.pointer_residency``. From Python, ``ActiveSet.own`` on a
+device set accepts a numpy plane when it is mapped pinned host memory (for example
+``cupyx.empty_pinned``); a pageable numpy plane raises ``TypeError``. The check runs
+once, in ``own``.
+
 **When it pays.** The reorder is an explicit opt-in. On the performance
 card's oscillator (a memory-bound RK4 step, stop steps spread over two
-decades, Quadro P2000) it pays from about 1e5 samples: at N = 1e5 it cuts the
-spread-1000 wall from 45.6 ms (compaction alone) to 34.5 ms, at N = 1e6 from 416 ms
-to 280 ms, while a uniform batch (nothing to reorder) costs at most 4 % more.
-Below that it does not pay: at N = 1e3 and 1e4 the reorder arm is about 6 %
+decades, Quadro P2000) it pays on the spread-1000 distribution from about 1e5 samples: at N = 1e5 it cuts the
+spread-1000 wall from |rg_c100k| (compaction alone) to |rg_r100k|, at N = 1e6 from |rg_c1m|
+to |rg_r1m|, while a uniform batch (nothing to reorder) costs a little more, and a spread-100 batch (few samples left to recover) can lose at N = 1e5.
+Below that it does not pay: at N = 1e3 and 1e4 the reorder arm is about |rg_g1k| and |rg_g10k|
 slower than compaction alone (the extra conditional node per loop iteration
 and the map-routed stop rule cost more than the coalescing recovers). Use
 compaction alone for small batches, and for compute-bound steps, where the
 map is already close to the dense ideal.
+
+.. c: wall arm=eagle_graph_compact n=100000
+.. |rg_c100k| replace:: 41.4 ms
+.. c: wall arm=eagle_graph_reorder n=100000
+.. |rg_r100k| replace:: 32.2 ms
+.. c: wall arm=eagle_graph_compact n=1000000
+.. |rg_c1m| replace:: 374 ms
+.. c: wall arm=eagle_graph_reorder n=1000000
+.. |rg_r1m| replace:: 253 ms
+.. c: pctgap arm=eagle_graph_reorder den_arm=eagle_graph_compact n=1000
+.. |rg_g1k| replace:: 4.4%
+.. c: pctgap arm=eagle_graph_reorder den_arm=eagle_graph_compact n=10000
+.. |rg_g10k| replace:: 7%
 
 From Python, ``eagle.ActiveSet(mask, reorder=0.5)`` (or ``reorder=True`` for
 the 0.5 default) turns it on; ``ActiveSet(mask)`` never reorders (``theta`` is

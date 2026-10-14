@@ -63,6 +63,7 @@
  */
 
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -137,7 +138,7 @@ volatile std::uint64_t g_unsynchronised = 0;
 inline void unsynchronisedBump()
 {
     const std::uint64_t seen = g_unsynchronised;
-    for (volatile int spin = 0; spin < 2048; spin = spin + 1) {}
+    for (int spin = 0; spin < 16384; ++spin) std::atomic_signal_fence(std::memory_order_seq_cst);  // a compiler barrier keeps the gap
     g_unsynchronised = seen + 1;
 }
 
@@ -673,6 +674,39 @@ NB_MODULE(_core, m)
         "live class prefix, `class_sorts` is incremented. With `scratch == 0` nothing is enqueued "
         "and the return value is the scratch size in bytes; otherwise it returns 0.");
 
+    m.def("reset_device",
+        [reorderDesc](std::uintptr_t perm, std::uintptr_t inv, std::uintptr_t index_map, std::uintptr_t count,
+            std::uintptr_t span, std::int64_t n, std::uintptr_t stream, std::int32_t device) {
+            (void)EB("filtering", eagle_backend_compact_device);
+            std::vector<eagle_backend_reorder_plane> table;
+            auto d = reorderDesc({}, table, n, 0, stream, 0u, device);
+            d.perm = perm;
+            d.inv = inv;
+            d.index_map = index_map;
+            d.count = count;
+            d.span = span;
+            ck(EBX(eagle_backend_reset_device)(&d));
+        },
+        nb::arg("perm"), nb::arg("inv"), nb::arg("index_map"), nb::arg("count"), nb::arg("span"),
+        nb::arg("n"), nb::arg("stream") = 0, nb::arg("device") = -1,
+        "Reset to the identity (the `filtering` group, symbol `eagle_backend_reset_device`): "
+        "one kernel gives `perm`, `inv` and, when `index_map` is not 0, the map the identity "
+        "0..n-1 and sets `*count = *span = n`. Enqueue only, capture-legal; no scratch and "
+        "no `fire` word.");
+
+    m.def("pointer_residency",
+        [](std::uintptr_t ptr, std::int32_t device) {
+            (void)EB("filtering", eagle_backend_compact_device);
+            std::int32_t cls = 0;
+            ck(EBX(eagle_backend_pointer_residency)(device, ptr, &cls));
+            return cls;
+        },
+        nb::arg("ptr"), nb::arg("device") = -1,
+        "Classify a raw address as seen from `device` (-1 = current), symbol "
+        "`eagle_backend_pointer_residency`: 0 host, 1 device, 2 managed, 3 mapped pinned host "
+        "(device-addressable), 4 pageable (not device-addressable), 5 another device's memory. "
+        "A setup-time query.");
+
     m.def("restore_device",
         [reorderDesc](const std::vector<std::pair<std::uintptr_t, std::uint32_t>>& planes, std::uintptr_t perm,
             std::uintptr_t inv, std::uintptr_t scratch, std::int64_t n, std::uintptr_t stream,
@@ -888,7 +922,7 @@ NB_MODULE(_core, m)
     // -- the splitting rule (eagle/policy/Dispatch.h) ------------------------------
     {
         namespace pol = eagle::policy;
-        using BranchRow = std::tuple<double, double, double, double, double, double>;
+        using BranchRow = std::vector<double>;   // 6 counts, then optionally the 4 chain lengths
 
         // Only the derived fields the rule reads cross the boundary.
         auto propsOf = [](const nb::dict& d) {
@@ -903,15 +937,31 @@ NB_MODULE(_core, m)
             if (name == "device") return pol::Target::Device;
             throw std::invalid_argument("target must be 'host' or 'device', got '" + name + "'");
         };
-        auto costOf = [](const std::vector<BranchRow>& rows, int regsPerThread, bool fusedVectorised) {
+        // `vectorised`: one flag per branch, or none (every branch takes the fused loop's).
+        auto costOf = [](const std::vector<BranchRow>& rows, int regsPerThread, bool fusedVectorised,
+                         const std::vector<bool>& vectorised) {
             if (rows.size() < 2 || rows.size() > static_cast<std::size_t>(pol::MAX_BRANCHES))
                 throw std::invalid_argument("a dispatch group has 2 to 16 branches, got " +
                                             std::to_string(rows.size()));
             pol::CostVector c;
             c.regsPerThread = regsPerThread;
             c.fusedVectorised = fusedVectorised;
-            for (const auto& [a32, a64, s32, s64, loads, gathers] : rows)
-                c.branch[c.count++] = { a32, a64, s32, s64, loads, gathers };
+            if (!vectorised.empty() && vectorised.size() != rows.size())
+                throw std::invalid_argument("branch_vectorised needs one flag per branch (" +
+                                            std::to_string(rows.size()) + "), got " +
+                                            std::to_string(vectorised.size()));
+            for (const auto& row : rows) {
+                if (row.size() != 6 && row.size() != 10 && row.size() != 11)
+                    throw std::invalid_argument("a branch row has 6 counts, optionally followed by 4 chain lengths and a store count, got " +
+                                                std::to_string(row.size()) + " values");
+                pol::BranchCost b{ row[0], row[1], row[2], row[3], row[4], row[5] };
+                if (row.size() >= 10) {
+                    b.chain32 = row[6]; b.chain64 = row[7]; b.chainSpecial32 = row[8]; b.chainSpecial64 = row[9];
+                }
+                if (row.size() == 11) b.stores = row[10];
+                b.vectorised = vectorised.empty() ? fusedVectorised : static_cast<bool>(vectorised[c.count]);
+                c.branch[c.count++] = b;
+            }
             return c;
         };
         auto mixOf = [](const std::vector<std::int64_t>& counts, std::int64_t fusedSteps,
@@ -937,7 +987,8 @@ NB_MODULE(_core, m)
                 { "split_seconds", &pol::Weights::splitSeconds },
                 { "sort_seconds", &pol::Weights::sortSeconds }, { "lane_rate", &pol::Weights::laneRate },
                 { "memory_rate", &pol::Weights::memoryRate },   { "cache_bytes", &pol::Weights::cacheBytes },
-                { "cache_ratio", &pol::Weights::cacheRatio } };
+                { "cache_ratio", &pol::Weights::cacheRatio },
+                { "chain_seconds", &pol::Weights::chainSeconds }, { "vector_width", &pol::Weights::vectorWidth } };
             for (auto item : d) {
                 const std::string key = nb::cast<std::string>(item.first);
                 bool known = false;
@@ -972,6 +1023,7 @@ NB_MODULE(_core, m)
                 d["split_seconds"] = w.splitSeconds; d["sort_seconds"] = w.sortSeconds;
                 d["lane_rate"] = w.laneRate; d["memory_rate"] = w.memoryRate;
                 d["cache_bytes"] = w.cacheBytes; d["cache_ratio"] = w.cacheRatio;
+                d["chain_seconds"] = w.chainSeconds; d["vector_width"] = w.vectorWidth;
                 return d;
             },
             nb::arg("target"), "The default cost-model weights of 'host' or 'device', by name. Pure.");
@@ -980,19 +1032,24 @@ NB_MODULE(_core, m)
             [=](const std::vector<BranchRow>& branches, const std::vector<std::int64_t>& counts,
                 const nb::dict& props, const std::string& target, std::int64_t fused_steps,
                 int regs_per_thread, bool fused_vectorised, std::int64_t remaining_steps,
-                double mixed32, const nb::object& weights) {
+                double mixed32, const nb::object& weights,
+                const std::vector<bool>& branch_vectorised) {
                 const pol::PathSeconds t = pol::predictedSeconds(
-                    costOf(branches, regs_per_thread, fused_vectorised),
+                    costOf(branches, regs_per_thread, fused_vectorised, branch_vectorised),
                     mixOf(counts, fused_steps, remaining_steps, mixed32), propsOf(props),
                     weightsOf(target, weights));
-                return std::make_pair(t.fused, t.split);
+                // A Python tuple, not std::pair<double, double>: returning that pair by value
+                // makes GCC on aarch64 note that its passing convention changed in GCC 10.1.
+                return nb::make_tuple(t.fused, t.split);
             },
             nb::arg("branches"), nb::arg("counts"), nb::arg("props"), nb::arg("target"),
             nb::arg("fused_steps") = 1, nb::arg("regs_per_thread") = 0, nb::arg("fused_vectorised") = false,
             nb::arg("remaining_steps") = pol::DECISION_EVERY, nb::arg("mixed32") = -1.0,
-            nb::arg("weights") = nb::none(),
+            nb::arg("weights") = nb::none(), nb::arg("branch_vectorised") = std::vector<bool>{},
             "(fused, split) predicted seconds per step for this branch mix. branches: per branch "
-            "(arith32, arith64, special32, special64, loads, gathers); counts: samples that took each "
+            "(arith32, arith64, special32, special64, loads, gathers), optionally followed by the four chain "
+            "lengths (chain32, chain64, chainSpecial32, chainSpecial64) and then the plane elements written (stores; omitted: every plane read is also written); branch_vectorised: one flag per "
+            "branch (default: every branch takes fused_vectorised); counts: samples that took each "
             "branch; target: 'host' or 'device'; regs_per_thread: the kernel's registers (0: unknown); "
             "remaining_steps: steps a class sort is paid over; mixed32: measured share of 32-lane "
             "groups holding two or more branches (negative: unmeasured); weights: a dict replacing "
@@ -1002,15 +1059,16 @@ NB_MODULE(_core, m)
             [=](const std::vector<BranchRow>& branches, const std::vector<std::int64_t>& counts,
                 const nb::dict& props, const std::string& target, std::int64_t fused_steps,
                 int regs_per_thread, bool fused_vectorised, std::int64_t remaining_steps,
-                double mixed32, const nb::object& weights) {
-                return pol::predictedGain(costOf(branches, regs_per_thread, fused_vectorised),
+                double mixed32, const nb::object& weights,
+                const std::vector<bool>& branch_vectorised) {
+                return pol::predictedGain(costOf(branches, regs_per_thread, fused_vectorised, branch_vectorised),
                                           mixOf(counts, fused_steps, remaining_steps, mixed32),
                                           propsOf(props), weightsOf(target, weights));
             },
             nb::arg("branches"), nb::arg("counts"), nb::arg("props"), nb::arg("target"),
             nb::arg("fused_steps") = 1, nb::arg("regs_per_thread") = 0, nb::arg("fused_vectorised") = false,
             nb::arg("remaining_steps") = pol::DECISION_EVERY, nb::arg("mixed32") = -1.0,
-            nb::arg("weights") = nb::none(),
+            nb::arg("weights") = nb::none(), nb::arg("branch_vectorised") = std::vector<bool>{},
             "Predicted time of the fused switch kernel over the split one for this branch mix "
             "(above 1 the split wins); arguments as dispatch_seconds. Pure.");
 
@@ -1018,12 +1076,13 @@ NB_MODULE(_core, m)
             [=](const std::vector<BranchRow>& branches, const std::vector<std::int64_t>& counts,
                 const nb::dict& props, const std::string& target, const std::string& current,
                 std::int64_t fused_steps, int regs_per_thread, bool fused_vectorised,
-                std::int64_t remaining_steps, double mixed32, const nb::object& weights) {
+                std::int64_t remaining_steps, double mixed32, const nb::object& weights,
+                const std::vector<bool>& branch_vectorised) {
                 if (current != "switch" && current != "segmented")
                     throw std::invalid_argument("current must be 'switch' or 'segmented', got '" + current + "'");
                 pol::HysteresisState state;
                 state.current = current == "segmented" ? pol::Policy::Segmented : pol::Policy::Switch;
-                return pol::resolve(costOf(branches, regs_per_thread, fused_vectorised),
+                return pol::resolve(costOf(branches, regs_per_thread, fused_vectorised, branch_vectorised),
                                     mixOf(counts, fused_steps, remaining_steps, mixed32), propsOf(props),
                                     weightsOf(target, weights), state) == pol::Policy::Segmented
                            ? "segmented" : "switch";
@@ -1031,7 +1090,7 @@ NB_MODULE(_core, m)
             nb::arg("branches"), nb::arg("counts"), nb::arg("props"), nb::arg("target"),
             nb::arg("current") = "switch", nb::arg("fused_steps") = 1, nb::arg("regs_per_thread") = 0, nb::arg("fused_vectorised") = false,
             nb::arg("remaining_steps") = pol::DECISION_EVERY, nb::arg("mixed32") = -1.0,
-            nb::arg("weights") = nb::none(),
+            nb::arg("weights") = nb::none(), nb::arg("branch_vectorised") = std::vector<bool>{},
             "'segmented' once the predicted gain reaches DISPATCH_ENTER_GAIN, 'switch' once it falls "
             "under DISPATCH_LEAVE_GAIN, else `current`; an empty mix keeps `current`. Pure.");
 
@@ -1115,32 +1174,45 @@ NB_MODULE(_core, m)
 
         m.attr("BOUND_TEXT_GROWTH_PERCENT") = pol::BOUND_TEXT_GROWTH_PERCENT;
         m.attr("PERSIST_FIRST_FILL") = pol::PERSIST_FIRST_FILL;
+        m.attr("ENTRY_PERSIST_BELOW") = pol::ENTRY_PERSIST_BELOW;
+        m.attr("ENTRY_FUSED_ABOVE") = pol::ENTRY_FUSED_ABOVE;
 
         // -- launch sizing and cadence (eagle/policy/Launch.h) ---------------------
-        m.def("persist_saturation",
+        m.def("persist_demand",
             [](int major, int minor, int fp64_ratio, bool fp64) {
-                return pol::persistSaturation({ { major, minor, 0, 0 }, 0, fp64_ratio, 0 }, fp64);
+                return pol::persistDemand({ { major, minor, 0, 0 }, 0, fp64_ratio, 0 }, fp64);
             },
             nb::arg("major"), nb::arg("minor"), nb::arg("fp64_ratio"), nb::arg("fp64") = true,
-            "Threads per SM at which a step's dependent chain keeps the issue pipe busy (5 warps per "
-            "partition on a full-rate FP64 part, 2 on a 1:32 or 1:64 one). Pure.");
+            "Threads per SM a persistent launch asks for before the batch size and the registers cut it: "
+            "the count at which a step's dependent chain keeps the issue pipe busy (5 warps per "
+            "partition on a full-rate FP64 part, 2 on a 1:32 or 1:64 one) plus one warp per partition "
+            "for a chunk head's fetch. Pure.");
 
         m.def("persist_threads_per_sm",
             [](int major, int minor, int regs_per_sm, int max_threads_per_sm, int sms, int fp64_ratio,
-               bool fp64, int regs, long long n, double fill) {
+               bool fp64, int regs, long long n, double fill, int chunk, double ops) {
                 return pol::persistThreads(
-                    { { major, minor, regs_per_sm, max_threads_per_sm }, sms, fp64_ratio, 0 }, fp64, regs, n, fill);
+                    { { major, minor, regs_per_sm, max_threads_per_sm }, sms, fp64_ratio, 0 }, fp64, regs, n, fill,
+                    chunk, ops);
             },
             nb::arg("major"), nb::arg("minor"), nb::arg("regs_per_sm"), nb::arg("max_threads_per_sm"),
             nb::arg("sms"), nb::arg("fp64_ratio"), nb::arg("fp64"), nb::arg("regs"), nb::arg("n"),
-            nb::arg("fill"),
+            nb::arg("fill"), nb::arg("chunk") = 0, nb::arg("ops") = 0.0,
             "Threads per SM of a persistent launch of `n` samples at `regs` registers and step fill "
-            "`fill`: the saturation count held between two warps per partition and min(residency "
-            "ceiling, n * fill / (2 * SMs)). 0 when the SM count is unknown. Pure.");
+            "`fill`: the saturation count (plus one warp per partition for a chunk head's fetch "
+            "latency, up to three, when `chunk` and `ops` are known) held between two warps per partition and "
+            "min(residency ceiling, n * fill / (2 * SMs)). 0 when the SM count is unknown. Pure.");
 
-        m.def("persist_chunk", &pol::persistChunk, nb::arg("mean_steps"),
-            "Steps one work-stealing chunk runs for samples taking `mean_steps` on average: the power "
-            "of two at or above mean_steps / 4, held to [4, 32]. Pure.");
+        m.def("persist_chunk",
+            [](int major, int minor, int sms, int fp64_ratio, bool fp64, double ops, double mean_steps) {
+                return pol::persistChunk({ { major, minor, 0, 0 }, sms, fp64_ratio, 0 }, fp64, ops, mean_steps);
+            },
+            nb::arg("major"), nb::arg("minor"), nb::arg("sms"), nb::arg("fp64_ratio"), nb::arg("fp64"),
+            nb::arg("ops"), nb::arg("mean_steps"),
+            "Steps one work-stealing chunk runs for samples taking `mean_steps` on average with `ops` "
+            "floating-point operations a step: the power of two nearest sqrt(8 * mean_steps * sms * "
+            "claim cycles / (ops * issue cycles)), held to [2, 32], where a claim holds the chip 12 cycles "
+            "on a Pascal part and 1 on a later one; 32 when `ops` or `sms` is unknown (0). Pure.");
 
         m.def("band_k",
             [](double rate, long long newly, long long live, long long k, long long k_max, long long k_min) {
@@ -1154,13 +1226,34 @@ NB_MODULE(_core, m)
 
         m.def("band_rate",
             [](int major, int minor, int sms, int fp64_ratio, int clock_khz, bool fp64, long long live,
-               double step_ops) {
-                return pol::bandRate({ { major, minor, 0, 0 }, sms, fp64_ratio, clock_khz }, fp64, live, step_ops);
+               double step_ops, int mem_clock_khz, int bus_width_bits, double bytes_per_sample) {
+                return pol::bandRate({ { major, minor, 0, 0 }, sms, fp64_ratio, clock_khz, mem_clock_khz,
+                                       bus_width_bits },
+                                     fp64, live, step_ops, bytes_per_sample);
             },
             nb::arg("major"), nb::arg("minor"), nb::arg("sms"), nb::arg("fp64_ratio"), nb::arg("clock_khz"),
-            nb::arg("fp64"), nb::arg("live"), nb::arg("step_ops"),
-            "R from the cost model: one compaction of `live` samples over one step of a full-live "
-            "launch of `step_ops` issue slots per sample. 0 when the clock or SM count is unknown. Pure.");
+            nb::arg("fp64"), nb::arg("live"), nb::arg("step_ops"), nb::arg("mem_clock_khz") = 0,
+            nb::arg("bus_width_bits") = 0, nb::arg("bytes_per_sample") = 0.0,
+            "R from the cost model: one compaction of `live` samples (its fixed cost, its per-sample "
+            "cost and the graph gap) over the arithmetic of one step of a full-live launch of "
+            "`step_ops` issue slots per sample. When the memory clock, bus width and `bytes_per_sample` "
+            "are given and the step is bound by memory, only the share of the arithmetic dead lanes "
+            "expose is counted. 0 when the clock or SM count is unknown. Pure.");
+        m.def("entry_ratio",
+            [](int major, int minor, int sms, int fp64_ratio, int clock_khz, bool fp64, long long resident_threads,
+               long long n, long long steps, double fill, double ops) {
+                return pol::persistOverFused({ { major, minor, 0, 0 }, sms, fp64_ratio, clock_khz }, fp64,
+                                             resident_threads, n, steps, fill, ops);
+            },
+            nb::arg("major"), nb::arg("minor"), nb::arg("sms"), nb::arg("fp64_ratio"), nb::arg("clock_khz"),
+            nb::arg("fp64"), nb::arg("resident_threads"), nb::arg("n"), nb::arg("steps"), nb::arg("fill"),
+            nb::arg("ops"),
+            "Predicted wall of the persistent entry over the fused entry for `n` samples whose longest ran "
+            "`steps` steps and whose steps fill a fraction `fill` of that, each step `ops` operations, on a "
+            "device that holds `resident_threads` threads at the fused entry's registers. Below "
+            "ENTRY_PERSIST_BELOW the persistent entry wins, above ENTRY_FUSED_ABOVE the fused one. "
+            "0 when the clock, SM count or any argument is unknown. Pure.");
+
     }
 
     m.def("run_host_branches",

@@ -79,7 +79,7 @@ and the GPU/CPU device-dispatch internals.
    :members:
 
 .. automodule:: eagle.diff
-   :members: reverse, Reverse, Record, Gradients, Report, broadcast_adjoint
+   :members: reverse, Reverse, Record, Gradients, Report, broadcast_adjoint, phase
 
 .. automodule:: eagle.marshal
    :members:

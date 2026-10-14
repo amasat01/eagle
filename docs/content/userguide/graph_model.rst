@@ -18,7 +18,7 @@ one idea to carry through the page.
 
 .. note::
 
-   New to the pieces? :doc:`tutorials/11_graph_model` builds everything below
+   New to the pieces? :doc:`tutorials/09_graph_model` builds everything below
    step by step. :class:`~eagle.GraphPipeline` is unchanged: it is still
    the right tool when you want to record opaque callables yourself.
 
@@ -230,6 +230,23 @@ never queued behind the first and never handed a half-built state. The flag is
 a C++ atomic (``eagle/util/Busy.h``), so this holds on free-threaded Python
 too. Looking at a graph (below) takes no guard and never gets in the way.
 
+Choosing fused or split kernels: ``dispatch=``
+----------------------------------------------
+
+A hawk kernel can declare a dispatch group with ``policy="auto"``: a
+``switch`` over a per-sample selector. ``dispatch=`` on :meth:`eagle.Graph.build`
+and :func:`eagle.simulate` says how those groups run. ``None`` (the default)
+keeps every group the author declared and decides the ``"auto"`` ones by
+measurement: the model starts fused, counts how many samples take each branch
+and, every 16 steps, splits the group into one kernel per branch when that is
+predicted to be at least 15 % faster (and fuses it again when the gain falls
+under 5 %). A policy name (``"switch"``, ``"segmented"``, ``"predicated"``) or
+a ``{group: policy}`` dict forces the ``"auto"`` groups; a group the author
+gave a policy is never overridden. A built graph is one fixed structure, so
+``Graph.build`` takes ``"switch"`` and ``"predicated"`` only; the split is
+decided as a run goes, in :func:`eagle.simulate`. What was chosen is in
+``graph.dispatch`` and ``result.report.dispatch``.
+
 Seeing your graph
 -----------------
 
@@ -316,6 +333,6 @@ registering a *different* kind under an existing name is refused.
 Where next
 ----------
 
-- :doc:`tutorials/11_graph_model`: build, inspect and break a graph, hands on.
+- :doc:`tutorials/09_graph_model`: build, inspect and break a graph, hands on.
 - :doc:`graph_view`: print and lay out a C++ graph with the same engine.
 - :doc:`cuda_graphs`: the C++ capture/replay machinery a GPU build lowers to.

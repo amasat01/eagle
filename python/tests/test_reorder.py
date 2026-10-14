@@ -271,6 +271,8 @@ def test_reset_gives_the_identity(device):
     for arr in (a.perm, a.inv, a.map):
         assert np.array_equal(_host(arr), np.arange(n))
     assert int(_host(a.span)[0]) == n and a.live == n and not a.permuted
+    assert int(_host(a.count)[0]) == n and int(_host(a.fire)[0]) == 0
+    assert int(_host(a.reorders)[0]) == 0
 
 
 # --------------------------------------------------------------------------- #
@@ -352,3 +354,52 @@ def test_captured_compaction_and_conditional_reorder_follow_the_mask():
             assert _host(dplanes[key]).tobytes() == hplanes[key].tobytes(), (frac, key)
         assert np.array_equal(_host(d.perm), h.perm)
     assert fires[0] == 0 and fires[-1] >= 1, fires
+
+
+# --------------------------------------------------------------------------- #
+# Planes in mapped pinned host memory
+# --------------------------------------------------------------------------- #
+def _pinned_copy(cupyx, arr):
+    out = cupyx.empty_pinned(arr.shape, dtype=arr.dtype)
+    out[...] = arr
+    return out
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize("n", [257, 100_003])
+def test_device_set_owns_pinned_numpy_planes_like_the_host_twin(n):
+    cp = pytest.importorskip("cupy")
+    cupyx = pytest.importorskip("cupyx")
+    hplanes, ref = _batch(np, n)
+    pinned = {key: _pinned_copy(cupyx, v) for key, v in hplanes.items()}
+    dmask = cp.zeros(n, dtype=bool)
+    hmask = np.zeros(n, dtype=bool)
+    dset = ActiveSet(dmask, reorder=0.5).own(*pinned.values())
+    hset = ActiveSet(hmask, reorder=0.5).own(*hplanes.values())
+    drop = np.random.default_rng(n).random(n) < 0.6
+    dmask[...] = cp.asarray(drop)
+    hmask[...] = drop
+    for aset in (dset, hset):
+        aset.fire[0] = 1
+        aset.reorder()
+    cp.cuda.get_current_stream().synchronize()
+    _check_reordered(dset, pinned, ref, drop)
+    for key in pinned:
+        assert np.array_equal(pinned[key], hplanes[key]), key
+    dset.restore()
+    hset.restore()
+    cp.cuda.get_current_stream().synchronize()
+    for key in pinned:
+        assert np.array_equal(pinned[key], ref[key]), key
+        assert np.array_equal(pinned[key], hplanes[key]), key
+
+
+@pytest.mark.gpu
+def test_pageable_numpy_plane_on_a_device_set_names_the_fix():
+    cp = pytest.importorskip("cupy")
+    n = 64
+    a = ActiveSet(cp.zeros(n, dtype=bool), reorder=0.5)
+    with pytest.raises(TypeError, match="pinned"):
+        a.own(np.zeros(n))
+    with pytest.raises(TypeError, match="lives where the mask lives"):
+        a.indirect(np.zeros(n))  # only own() takes a pinned host plane

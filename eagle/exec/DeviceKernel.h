@@ -36,7 +36,15 @@ namespace detail {
  * NVIDIA driver loads fine and can run the host structures. Only asking for device
  * execution needs the driver, and that is where a missing driver or GPU is
  * reported, in words a user can act on.
+ *
+ * The symbol is asked for at its CUDA 12.0 ABI, never at the toolkit's own
+ * CUDA_VERSION: a CUDA 13 driver refuses a version above its own (a 13.0 driver
+ * answers "invalid argument" for 13040), so a build with a newer toolkit than the
+ * installed driver -- CUDA minor-version compatibility -- would lose every launch.
+ * The three entry points used here have not changed their ABI since 12.0.
  */
+inline constexpr unsigned int DRIVER_ENTRY_ABI = 12000;
+
 template <class Fn>
 Fn driver_entry(const char* symbol) {
 #ifdef CUDA_API_PER_THREAD_DEFAULT_STREAM
@@ -48,7 +56,7 @@ Fn driver_entry(const char* symbol) {
 #if CUDART_VERSION >= 12050
     cudaDriverEntryPointQueryResult found{};
     const cudaError_t err =
-        cudaGetDriverEntryPointByVersion(symbol, &fn, CUDA_VERSION, flags, &found);
+        cudaGetDriverEntryPointByVersion(symbol, &fn, DRIVER_ENTRY_ABI, flags, &found);
     const bool ok = err == cudaSuccess && found == cudaDriverEntryPointSuccess;
 #elif CUDART_VERSION >= 12000
     cudaDriverEntryPointQueryResult found{};
@@ -62,10 +70,15 @@ Fn driver_entry(const char* symbol) {
         const std::string why = err != cudaSuccess
             ? std::string(cudaGetErrorString(err))
             : std::string("the driver does not provide ") + symbol;
-        throw std::runtime_error(
-            "eagle: device execution needs an NVIDIA driver and a CUDA-capable GPU, "
-            "and none is usable here (" + why + "). Host execution "
-            "(eagle::exec::HostTeam) does not need one.");
+        const bool noDriver = err == cudaErrorInsufficientDriver || err == cudaErrorNoDevice ||
+                              err == cudaErrorInitializationError;
+        if (noDriver)
+            throw std::runtime_error(
+                "eagle: device execution needs an NVIDIA driver and a CUDA-capable GPU, "
+                "and none is usable here (" + why + "). Host execution "
+                "(eagle::exec::HostTeam) does not need one.");
+        throw std::runtime_error(std::string("eagle: the NVIDIA driver could not provide ") + symbol +
+                                 " (" + why + ").");
     }
     return reinterpret_cast<Fn>(fn);
 }

@@ -50,7 +50,33 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  docs-fresh:
+    # Freshness check, never a commit: the generator re-renders the pages and fails on any difference.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: documented numbers match the committed cards
+        run: |
+          if ! python tools/sync_readme_cards.py --check; then
+            echo "::error::The documented performance numbers are out of date with the committed cards. Regenerate them locally with: python tools/sync_readme_cards.py -- then commit the result."
+            exit 1
+          fi
+      - uses: actions/checkout@v7
+        with:
+          repository: amasat01/amasat01.github.io
+          ref: main
+          path: site
+      - name: family visuals match the landing site and the cards
+        run: |
+          if ! python site/tools/sync_family_visuals.py --check --site-root site --eagle-root . --target eagle=.; then
+            echo "::error::The family visuals bundle is out of date with the landing site or the cards. Regenerate it locally with: python tools/sync_family_visuals.py --site-root <path to the site checkout> --eagle-root <path to an eagle checkout> --target eagle=<this repo> -- then commit docs/_static/family_visuals."
+            exit 1
+          fi
   build:
+    needs: docs-fresh
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -97,7 +123,7 @@ jobs:
           # /tmp path that lands in every compile line, so ccache could never hit across runs
           CIBW_BUILD_FRONTEND: "build; args: --no-isolation"
           CIBW_BEFORE_BUILD: >-
-            python -m pip install 'scikit-build-core>=0.10'
+            python -m pip install 'scikit-build-core>=0.10' 'ninja>=1.5'
             'nanobind>=3.1,<4; python_version >= "3.10"'
             'nanobind>=2.2,<3; python_version < "3.10"'
           CIBW_CONTAINER_ENGINE: "docker; create_args: --volume ${{ github.workspace }}/aether:/sib/aether:ro --volume ${{ github.workspace }}/eagle:/sib/eagle:ro --volume ${{ github.workspace }}/.ccache-cibw:/ccache"
@@ -175,6 +201,16 @@ jobs:
             fi
           done
           echo "OK: no wheel vendors libcuda"
+      - name: Plugin carries Blackwell SASS (sm_100, sm_120) and compute_100 PTX
+        run: |
+          shopt -s nullglob
+          for whl in dist/*.whl; do
+            archs="$(unzip -p "$whl" eagle/libeagle_cuda.so | strings -n 8 | grep -E '^[0-9]+-real(,[0-9]+-real)*(,[0-9]+-virtual)+$' | head -1)"
+            for want in 100-real 120-real 100-virtual; do
+              case ",$archs," in *",$want,"*) ;; *) echo "$whl: plugin archs '$archs' lack $want"; exit 1;; esac
+            done
+          done
+          echo "OK: every wheel's plugin lists 100-real, 120-real and 100-virtual"
       - name: tag == version guard (every wheel + the sdist must agree)
         if: github.ref_type == 'tag'
         run: |
@@ -318,10 +354,10 @@ jobs:
           cp -r eagle/python/tests eagle/python/conftest.py "$RUNNER_TEMP/suite-ft/"
           cd "$RUNNER_TEMP/suite-ft"
           export RAPTOR_ROOT="${GITHUB_WORKSPACE}/raptor"
-          N="$(python -m pytest tests -m ft --collect-only -q -p no:cacheprovider | grep -c '::' || true)"
+          N="$(python -m pytest tests -m "ft and not repo_local" --collect-only -q -p no:cacheprovider | grep -c '::' || true)"
           echo "ft rows collected: $N"
           [ "$N" -gt 0 ] || { echo "ft selection collected zero tests"; exit 1; }
-          python -m pytest tests -m ft -q -rs -p no:cacheprovider -W error::RuntimeWarning
+          python -m pytest tests -m "ft and not repo_local" -q -rs -p no:cacheprovider -W error::RuntimeWarning
           python -m pytest tests -q -p no:cacheprovider -W error::RuntimeWarning -m "not gpu and not gpu2 and not torch and not interop_matrix and not repo_local"
 
   publish:

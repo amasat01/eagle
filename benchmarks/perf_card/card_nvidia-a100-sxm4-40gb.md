@@ -4,7 +4,7 @@
 
 Each arm's block starts once the GPU is within 3 °C of its idle 33 °C and reads idle, or after 20 s; the SM clock is read right after each timed run and its range is in the last column.
 
-The FP64 peak above is at the device's reported maximum clock (1410 MHz). During the timed repetitions the SM clock read 1178 MHz; at that clock the FP64 peak is 8.14e12 FLOP/s, and every FP64 percentage below is 1.2× larger against it.
+The FP64 peak above is at the device's reported maximum clock (1410 MHz). During the timed repetitions the SM clock read 1252 MHz; at that clock the FP64 peak is 8.66e12 FLOP/s, and every FP64 percentage below is 1.13× larger against it.
 
 "% of issue peak" (the eagle arms only) counts DP instructions (DFMA/DMUL/DADD/DSETP/MUFU), not useful FLOPs: the step's SASS has ? of them, against the device's DP issue-slot throughput at the observed clock -- a kernel that is already at the issue pipe's limit can still read well under 100% of FP64 peak, because useful FLOPs/step is smaller than issued DP instructions/step.
 
@@ -39,231 +39,231 @@ Cap fixture (checked before any timing counts): N = 4,096, 8 samples with stop s
 
 ### Spread stop steps (log-uniform in [1, 100]), up to 100 steps
 
-| N | arm | wall (range) | kernel-only | end-to-end | sample·steps/s | useful FLOP/s (% peak) | issued B/s (% peak) | device memory (× minimum) | host memory | % issue peak | lane util | launches (kernel/memcpy/API) | SM clock (MHz) |
+| N | arm | wall (range) | kernel-only | end-to-end | sample·steps/s | useful FLOP/s (% peak) | issued B/s (% peak) | device memory (× minimum) | host memory | % issue peak | slot fill | launches (kernel/memcpy/API) | SM clock (MHz) |
 |---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 1,000 | eagle graph (device loop) | 724 µs (712 µs–736 µs) | – | 909 µs | 3.05e7 | 1.34e9 (0.014 %) | 6.94e8 (0.045 %) | 2 MiB (52.4×) | 3.2 MiB | – | – | – | 1095–1095 |
-| 1,000 | eagle graph + compaction | 771 µs (770 µs–773 µs) | – | 1.04 ms | 2.86e7 | 1.26e9 (0.013 %) | 2.90e9 (0.19 %) | 2 MiB (52.4×) | 3.19 MiB | – | – | – | 1410–1410 |
-| 1,000 | eagle graph + compaction + reorder | 930 µs (923 µs–938 µs) | – | 1.29 ms | 2.37e7 | 1.04e9 (0.011 %) | 2.91e9 (0.19 %) | 2 MiB (52.4×) | 3.21 MiB | – | – | – | 1410–1410 |
-| 1,000 | eagle graph, K fused steps per launch | 276 µs (273 µs–281 µs) | – | 457 µs | 7.98e7 | 3.51e9 (0.036 %) | 1.12e9 (0.072 %) | 2 MiB (52.4×) | 3.15 MiB | – | – | – | 1410–1410 |
-| 1,000 | eagle graph, K fused steps per launch + compaction | 391 µs (385 µs–400 µs) | – | 652 µs | 5.65e7 | 2.48e9 (0.025 %) | 7.66e8 (0.049 %) | 2 MiB (52.4×) | 3.17 MiB | – | – | – | 1095–1095 |
-| 1,000 | eagle auto (eagle picks the launch mode) | 662 µs (651 µs–668 µs) | – | 908 µs | 3.33e7 | 1.47e9 (0.015 %) | 8.53e8 (0.055 %) | 2 MiB (52.4×) | 3.16 MiB | – | – | – | 1095–1095 |
-| 1,000 | hawk + eagle persistent | 161 µs (156 µs–168 µs) | – | 326 µs | 1.37e8 | 6.02e9 (0.062 %) | 5.68e9 (0.37 %) | 2 MiB (52.4×) | 3.19 MiB | – | 0.022115465389784945 | – | 1095–1095 |
-| 1,000 | eagle.simulate (eagle picks the launch mode) | 670 µs (667 µs–672 µs) | – | 928 µs | 3.29e7 | 1.45e9 (0.015 %) | 8.42e8 (0.054 %) | 2 MiB (52.4×) | 3.19 MiB | – | – | – | 1095–1095 |
-| 1,000 | eager launch loop | 3.64 ms (3.64 ms–3.64 ms) | – | 3.8 ms | 6.07e6 | 2.67e8 (0.0027 %) | 1.15e9 (0.074 %) | 2 MiB (52.4×) | 1.17 MiB | – | – | – | 1095–1095 |
-| 1,000 | CuPy masked | 70.9 ms (70.9 ms–71 ms) | – | 71.1 ms | 3.11e5 | 1.37e7 (0.00014 %) | 1.27e9 (0.082 %) | 2 MiB (52.4×) | 3.84 MiB | – | – | – | 1095–1095 |
-| 1,000 | PyTorch masked | 42.9 ms (42.8 ms–43 ms) | – | 43.2 ms | 5.14e5 | 2.26e7 (0.00023 %) | 2.10e9 (0.14 %) | 2 MiB (52.4×) | 0.0703 MiB | – | – | – | 1170–1170 |
-| 1,000 | PyTorch, CUDA graph of 16 steps | 8.93 ms (8.92 ms–8.93 ms) | – | 9.17 ms | 2.47e6 | 1.09e8 (0.0011 %) | 1.14e10 (0.73 %) | 4 MiB (105×) | 0.414 MiB | – | – | – | 1410–1410 |
-| 1,000 | PyTorch torch.compile (reduce-overhead) | 13.5 ms (13.5 ms–13.6 ms) | – | 13.8 ms | 1.63e6 | 7.17e7 (0.00074 %) | 6.50e8 (0.042 %) | 0 MiB (0×) | 32.8 MiB | – | – | – | 1410–1410 |
-| 1,000 | JAX jit + vmap(while_loop) | 3.19 ms (3.18 ms–3.19 ms) | – | 4.99 ms | 6.92e6 | 3.05e8 (0.0031 %) | 2.77e9 (0.18 %) | 0 MiB (0×) | 0.0273 MiB | – | – | – | 1095–1095 |
-| 1,000 | Warp per-thread kernel | 114 µs (107 µs–127 µs) | – | 469 µs | 1.94e8 | 8.54e9 (0.088 %) | 5.63e8 (0.036 %) | 32 MiB (839×) | 0.00391 MiB | – | – | – | 1095–1095 |
-| 1,000 | CPU OpenMP | 388 µs (385 µs–391 µs) | – | 405 µs | 5.69e7 | 2.50e9 (–) | 1.08e10 (–) | – | 0.691 MiB | – | – | – | – |
-| 10,000 | eagle graph (device loop) | 754 µs (733 µs–766 µs) | – | 1.1 ms | 3.03e8 | 1.33e10 (0.14 %) | 6.72e9 (0.43 %) | 2 MiB (5.24×) | 3.68 MiB | – | – | – | 1095–1095 |
-| 10,000 | eagle graph + compaction | 820 µs (813 µs–827 µs) | – | 1.25 ms | 2.79e8 | 1.23e10 (0.13 %) | 2.81e10 (1.8 %) | 2 MiB (5.24×) | 3.75 MiB | – | – | – | 1410–1410 |
-| 10,000 | eagle graph + compaction + reorder | 1.25 ms (1.24 ms–1.27 ms) | – | 1.79 ms | 1.82e8 | 8.02e9 (0.082 %) | 2.22e10 (1.4 %) | 2 MiB (5.24×) | 4.12 MiB | – | – | – | 1410–1410 |
-| 10,000 | eagle graph, K fused steps per launch | 296 µs (291 µs–300 µs) | – | 628 µs | 7.72e8 | 3.40e10 (0.35 %) | 1.05e10 (0.68 %) | 2 MiB (5.24×) | 3.64 MiB | – | – | – | 1410–1410 |
-| 10,000 | eagle graph, K fused steps per launch + compaction | 411 µs (405 µs–417 µs) | – | 835 µs | 5.56e8 | 2.45e10 (0.25 %) | 7.37e9 (0.47 %) | 2 MiB (5.24×) | 3.74 MiB | – | – | – | 1095–1095 |
-| 10,000 | eagle auto (eagle picks the launch mode) | 675 µs (672 µs–678 µs) | – | 1.09 ms | 3.39e8 | 1.49e10 (0.15 %) | 8.46e9 (0.54 %) | 2 MiB (5.24×) | 3.75 MiB | – | – | – | 1095–1095 |
-| 10,000 | hawk + eagle persistent | 163 µs (158 µs–173 µs) | – | 487 µs | 1.40e9 | 6.16e10 (0.63 %) | 5.81e10 (3.7 %) | 2 MiB (5.24×) | 3.66 MiB | – | 0.13683831630608975 | – | 1095–1095 |
-| 10,000 | eagle.simulate (eagle picks the launch mode) | 675 µs (668 µs–680 µs) | – | 1.11 ms | 3.39e8 | 1.49e10 (0.15 %) | 8.47e9 (0.54 %) | 2 MiB (5.24×) | 3.75 MiB | – | – | – | 1095–1095 |
-| 10,000 | eager launch loop | 3.67 ms (3.65 ms–3.68 ms) | – | 3.98 ms | 6.23e7 | 2.74e9 (0.028 %) | 1.15e10 (0.74 %) | 2 MiB (5.24×) | 1.68 MiB | – | – | – | 1095–1095 |
-| 10,000 | CuPy masked | 69.8 ms (69.6 ms–69.9 ms) | – | 70.2 ms | 3.28e6 | 1.44e8 (0.0015 %) | 1.29e10 (0.83 %) | 2 MiB (5.24×) | 4.12 MiB | – | – | – | 1095–1095 |
-| 10,000 | PyTorch masked | 43 ms (42.9 ms–43.2 ms) | – | 43.5 ms | 5.32e6 | 2.34e8 (0.0024 %) | 2.10e10 (1.3 %) | 2 MiB (5.24×) | 0.676 MiB | – | – | – | 1125–1125 |
-| 10,000 | PyTorch, CUDA graph of 16 steps | 8.93 ms (8.93 ms–8.94 ms) | – | 9.35 ms | 2.56e7 | 1.13e9 (0.012 %) | 1.13e11 (7.3 %) | 4 MiB (10.5×) | 0.805 MiB | – | – | – | 1410–1410 |
-| 10,000 | PyTorch torch.compile (reduce-overhead) | 13.7 ms (13.7 ms–13.7 ms) | – | 14.2 ms | 1.67e7 | 7.34e8 (0.0075 %) | 6.43e9 (0.41 %) | 40 MiB (105×) | 84.2 MiB | – | – | – | 1410–1410 |
-| 10,000 | JAX jit + vmap(while_loop) | 3.52 ms (3.51 ms–3.53 ms) | – | 5.11 ms | 6.49e7 | 2.85e9 (0.029 %) | 2.51e10 (1.6 %) | 0 MiB (0×) | 0.445 MiB | – | – | – | 1095–1095 |
-| 10,000 | Warp per-thread kernel | 115 µs (114 µs–117 µs) | – | 661 µs | 1.98e9 | 8.72e10 (0.89 %) | 5.55e9 (0.36 %) | 32 MiB (83.9×) | 0.684 MiB | – | – | – | 1095–1095 |
-| 10,000 | CPU OpenMP | 708 µs (704 µs–710 µs) | – | 792 µs | 3.23e8 | 1.42e10 (–) | 5.96e10 (–) | – | 1.57 MiB | – | – | – | – |
-| 100,000 | eagle graph (device loop) | 805 µs (795 µs–818 µs) | – | 2.54 ms | 2.84e9 | 1.25e11 (1.3 %) | 6.29e10 (4 %) | 6 MiB (1.57×) | 9.93 MiB | – | – | – | 1095–1095 |
-| 100,000 | eagle graph + compaction | 1.05 ms (1.02 ms–1.08 ms) | – | 2.87 ms | 2.19e9 | 9.61e10 (0.99 %) | 2.20e11 (14 %) | 8 MiB (2.1×) | 9.96 MiB | – | – | – | 1320–1320 |
-| 100,000 | eagle graph + compaction + reorder | 1.52 ms (1.52 ms–1.53 ms) | – | 3.48 ms | 1.50e9 | 6.62e10 (0.68 %) | 1.83e11 (12 %) | 10 MiB (2.62×) | 10 MiB | – | – | – | 1410–1410 |
-| 100,000 | eagle graph, K fused steps per launch | 352 µs (340 µs–359 µs) | – | 2.12 ms | 6.51e9 | 2.86e11 (2.9 %) | 8.85e10 (5.7 %) | 6 MiB (1.57×) | 9.24 MiB | – | – | – | 1410–1410 |
-| 100,000 | eagle graph, K fused steps per launch + compaction | 465 µs (464 µs–466 µs) | – | 2.31 ms | 4.93e9 | 2.17e11 (2.2 %) | 6.52e10 (4.2 %) | 8 MiB (2.1×) | 9.94 MiB | – | – | – | 1170–1170 |
-| 100,000 | eagle auto (eagle picks the launch mode) | 1.29 ms (1.27 ms–1.31 ms) | – | 3.14 ms | 1.78e9 | 7.82e10 (0.8 %) | 4.44e10 (2.9 %) | 8 MiB (2.1×) | 9.95 MiB | – | – | – | 1110–1110 |
-| 100,000 | hawk + eagle persistent | 285 µs (282 µs–290 µs) | – | 2.05 ms | 8.03e9 | 3.53e11 (3.6 %) | 3.33e11 (21 %) | 6 MiB (1.57×) | 9.27 MiB | – | 0.24812885046586555 | – | 1125–1125 |
-| 100,000 | eagle.simulate (eagle picks the launch mode) | 1.28 ms (1.28 ms–1.29 ms) | – | 3.14 ms | 1.79e9 | 7.85e10 (0.81 %) | 4.46e10 (2.9 %) | 8 MiB (2.1×) | 9.93 MiB | – | – | – | 1140–1140 |
-| 100,000 | eager launch loop | 3.72 ms (3.71 ms–3.74 ms) | – | 5.47 ms | 6.15e8 | 2.71e10 (0.28 %) | 1.13e11 (7.3 %) | 6 MiB (1.57×) | 7.27 MiB | – | – | – | 1140–1140 |
-| 100,000 | CuPy masked | 69.5 ms (69.4 ms–69.7 ms) | – | 71.5 ms | 3.29e7 | 1.45e9 (0.015 %) | 1.30e11 (8.3 %) | 24 MiB (6.29×) | 7.68 MiB | – | – | – | 1095–1140 |
-| 100,000 | PyTorch masked | 46 ms (45.9 ms–46 ms) | – | 48.3 ms | 4.98e7 | 2.19e9 (0.022 %) | 1.96e11 (13 %) | 26 MiB (6.82×) | 6.86 MiB | – | – | – | 1245–1260 |
-| 100,000 | PyTorch, CUDA graph of 16 steps | 10.3 ms (10.3 ms–10.3 ms) | – | 12.4 ms | 2.22e8 | 9.77e9 (0.1 %) | 9.84e11 (63 %) | 26 MiB (6.82×) | 6.88 MiB | – | – | – | 1410–1410 |
-| 100,000 | PyTorch torch.compile (reduce-overhead) | 13.3 ms (13.3 ms–13.3 ms) | – | 15.6 ms | 1.72e8 | 7.55e9 (0.077 %) | 6.60e10 (4.2 %) | 50 MiB (13.1×) | 88 MiB | – | – | – | 1410–1410 |
-| 100,000 | JAX jit + vmap(while_loop) | 3.46 ms (3.45 ms–3.47 ms) | – | 5.96 ms | 6.61e8 | 2.91e10 (0.3 %) | 2.55e11 (16 %) | 0 MiB (0×) | 10.6 MiB | – | – | – | 1200–1200 |
-| 100,000 | Warp per-thread kernel | 176 µs (175 µs–177 µs) | – | 2.35 ms | 1.30e10 | 5.72e11 (5.9 %) | 3.64e10 (2.3 %) | 32 MiB (8.39×) | 6.86 MiB | – | – | – | 1095–1095 |
-| 100,000 | CPU OpenMP | 3.29 ms (3.29 ms–3.29 ms) | – | 4.18 ms | 6.96e8 | 3.06e10 (–) | 1.28e11 (–) | – | 11.4 MiB | – | – | – | – |
-| 1,000,000 | eagle graph (device loop) | 1.37 ms (1.37 ms–1.38 ms) | – | 15.6 ms | 1.67e10 | 7.36e11 (7.6 %) | 3.69e11 (24 %) | 50 MiB (1.31×) | 71.7 MiB | – | – | – | 1410–1410 |
-| 1,000,000 | eagle graph + compaction | 4.42 ms (4.42 ms–4.43 ms) | – | 19.1 ms | 5.20e9 | 2.29e11 (2.3 %) | 5.22e11 (34 %) | 66 MiB (1.73×) | 71.8 MiB | – | – | – | 1410–1410 |
-| 1,000,000 | eagle graph + compaction + reorder | 3.5 ms (3.5 ms–3.51 ms) | – | 17.9 ms | 6.57e9 | 2.89e11 (3 %) | 7.96e11 (51 %) | 94 MiB (2.46×) | 71.8 MiB | – | – | – | 1410–1410 |
-| 1,000,000 | eagle graph, K fused steps per launch | 942 µs (937 µs–951 µs) | – | 15.5 ms | 2.44e10 | 1.07e12 (11 %) | 3.31e11 (21 %) | 50 MiB (1.31×) | 65 MiB | – | – | – | 1410–1410 |
-| 1,000,000 | eagle graph, K fused steps per launch + compaction | 914 µs (909 µs–919 µs) | – | 15.2 ms | 2.52e10 | 1.11e12 (11 %) | 3.32e11 (21 %) | 66 MiB (1.73×) | 71.7 MiB | – | – | – | 1350–1350 |
-| 1,000,000 | eagle auto (eagle picks the launch mode) | 2.04 ms (2.04 ms–2.04 ms) | – | 16.3 ms | 1.13e10 | 4.96e11 (5.1 %) | 2.80e11 (18 %) | 66 MiB (1.73×) | 71.8 MiB | – | – | – | 1140–1140 |
-| 1,000,000 | hawk + eagle persistent | 1.27 ms (1.26 ms–1.28 ms) | – | 15.6 ms | 1.81e10 | 7.95e11 (8.2 %) | 7.50e11 (48 %) | 50 MiB (1.31×) | 65.1 MiB | – | 0.18926079732504625 | – | 1215–1215 |
-| 1,000,000 | eagle.simulate (eagle picks the launch mode) | 2.02 ms (2 ms–2.03 ms) | – | 16.3 ms | 1.14e10 | 5.02e11 (5.2 %) | 2.84e11 (18 %) | 66 MiB (1.73×) | 71.8 MiB | – | – | – | 1260–1260 |
-| 1,000,000 | eager launch loop | 6.71 ms (6.7 ms–6.72 ms) | – | 21 ms | 3.43e9 | 1.51e11 (1.5 %) | 6.29e11 (40 %) | 50 MiB (1.31×) | 63.1 MiB | – | – | – | 1410–1410 |
-| 1,000,000 | CuPy masked | 69.9 ms (69.8 ms–70 ms) | – | 84.4 ms | 3.29e8 | 1.45e10 (0.15 %) | 1.29e12 (83 %) | 194 MiB (5.09×) | 68.7 MiB | – | – | – | 1410–1410 |
-| 1,000,000 | PyTorch masked | 60.6 ms (60.6 ms–60.6 ms) | – | 84 ms | 3.79e8 | 1.67e10 (0.17 %) | 1.49e12 (96 %) | 262 MiB (6.87×) | 68.7 MiB | – | – | – | 1410–1410 |
-| 1,000,000 | PyTorch, CUDA graph of 16 steps | 59.4 ms (59.4 ms–59.4 ms) | – | 82.7 ms | 3.87e8 | 1.70e10 (0.17 %) | 1.71e12 (1.1e+02 %) | 264 MiB (6.92×) | 68.7 MiB | – | – | – | 1410–1410 |
-| 1,000,000 | PyTorch torch.compile (reduce-overhead) | 17.1 ms (17 ms–17.1 ms) | – | 40.5 ms | 1.35e9 | 5.93e10 (0.61 %) | 5.16e11 (33 %) | 180 MiB (4.72×) | 139 MiB | – | – | – | 1410–1410 |
-| 1,000,000 | JAX jit + vmap(while_loop) | 9.61 ms (9.59 ms–9.63 ms) | – | 24 ms | 2.39e9 | 1.05e11 (1.1 %) | 9.19e11 (59 %) | 0 MiB (0×) | 100 MiB | – | – | – | 1410–1410 |
-| 1,000,000 | Warp per-thread kernel | 620 µs (617 µs–625 µs) | – | 32.1 ms | 3.71e10 | 1.63e12 (17 %) | 1.03e11 (6.6 %) | 64 MiB (1.68×) | 68.7 MiB | – | – | – | 1410–1410 |
-| 1,000,000 | CPU OpenMP | 28.7 ms (28.6 ms–28.7 ms) | – | 45.9 ms | 8.02e8 | 3.53e10 (–) | 1.47e11 (–) | – | 109 MiB | – | – | – | – |
+| 1,000 | eagle graph (device loop) | 620 µs (595 µs–641 µs) | – | 797 µs | 3.56e7 | 1.57e9 (0.016 %) | 1.18e9 (0.076 %) | 0 MiB (0×) | 2.04 MiB | – | – | – | 1095–1095 |
+| 1,000 | eagle graph + compaction | 757 µs (754 µs–759 µs) | – | 1 ms | 2.91e7 | 1.28e9 (0.013 %) | 2.61e9 (0.17 %) | 0 MiB (0×) | 2.04 MiB | – | – | – | 1410–1410 |
+| 1,000 | eagle graph + compaction + reorder | 915 µs (910 µs–919 µs) | – | 1.19 ms | 2.41e7 | 1.06e9 (0.011 %) | 2.62e9 (0.17 %) | 0 MiB (0×) | 2.1 MiB | – | – | – | 1410–1410 |
+| 1,000 | eagle graph, K fused steps per launch | 276 µs (274 µs–279 µs) | – | 447 µs | 7.99e7 | 3.52e9 (0.036 %) | 1.04e9 (0.067 %) | 0 MiB (0×) | 2.03 MiB | – | – | – | 1410–1410 |
+| 1,000 | eagle graph, K fused steps per launch + compaction | 396 µs (385 µs–416 µs) | – | 656 µs | 5.57e7 | 2.45e9 (0.025 %) | 6.97e8 (0.045 %) | 0 MiB (0×) | 2.04 MiB | – | – | – | 1095–1095 |
+| 1,000 | eagle auto (eagle picks the launch mode) | 90.8 µs (88.3 µs–92.5 µs) | – | 303 µs | 2.43e8 | 1.07e10 (0.11 %) | 7.18e9 (0.46 %) | 0 MiB (0×) | 2.04 MiB | – | – | – | 1095–1095 |
+| 1,000 | hawk + eagle persistent | 155 µs (151 µs–159 µs) | – | 306 µs | 1.43e8 | 6.27e9 (0.064 %) | 4.21e9 (0.27 %) | 0 MiB (0×) | 2.03 MiB | – | 0.2098712531887755 | – | 1095–1095 |
+| 1,000 | eagle.simulate (eagle picks the launch mode) | 102 µs (100 µs–103 µs) | – | 320 µs | 2.17e8 | 9.53e9 (0.098 %) | 6.40e9 (0.41 %) | 0 MiB (0×) | 2.04 MiB | – | – | – | 1095–1095 |
+| 1,000 | eager launch loop | 3.61 ms (3.59 ms–3.62 ms) | – | 3.76 ms | 6.12e6 | 2.69e8 (0.0028 %) | 1.09e9 (0.07 %) | 0 MiB (0×) | 0.0312 MiB | – | – | – | 1095–1095 |
+| 1,000 | CuPy masked | 67.7 ms (67.7 ms–67.7 ms) | – | 67.9 ms | 3.26e5 | 1.43e7 (0.00015 %) | 1.33e9 (0.086 %) | 0 MiB (0×) | 5.01 MiB | – | – | – | 1095–1095 |
+| 1,000 | PyTorch masked | 42.4 ms (42.3 ms–42.5 ms) | – | 42.7 ms | 5.20e5 | 2.29e7 (0.00023 %) | 2.12e9 (0.14 %) | 74 MiB (2.16e+03×) | 0.0703 MiB | – | – | – | 1185–1185 |
+| 1,000 | PyTorch, CUDA graph of 16 steps | 8.93 ms (8.92 ms–8.93 ms) | – | 9.16 ms | 2.47e6 | 1.09e8 (0.0011 %) | 1.14e10 (0.73 %) | 102 MiB (2.97e+03×) | 0.164 MiB | – | – | – | 1410–1410 |
+| 1,000 | PyTorch torch.compile (reduce-overhead) | 13.2 ms (13.2 ms–13.3 ms) | – | 13.5 ms | 1.67e6 | 7.34e7 (0.00075 %) | 6.65e8 (0.043 %) | 96 MiB (2.8e+03×) | 32.8 MiB | – | – | – | 1410–1410 |
+| 1,000 | JAX jit + vmap(while_loop) | 3.07 ms (3.05 ms–3.08 ms) | – | 4.45 ms | 7.18e6 | 3.16e8 (0.0032 %) | 2.88e9 (0.18 %) | 134 MiB (3.9e+03×) | 0.0195 MiB | – | – | – | 1410–1410 |
+| 1,000 | Warp per-thread kernel | 105 µs (104 µs–105 µs) | – | 448 µs | 2.11e8 | 9.27e9 (0.095 %) | 6.11e8 (0.039 %) | 30 MiB (874×) | 0.0156 MiB | – | – | – | 1095–1095 |
+| 1,000 | CPU OpenMP | 410 µs (406 µs–416 µs) | – | 428 µs | 5.38e7 | 2.37e9 (–) | 9.56e9 (–) | – | 0.25 MiB | – | – | – | – |
+| 10,000 | eagle graph (device loop) | 645 µs (643 µs–647 µs) | – | 966 µs | 3.54e8 | 1.56e10 (0.16 %) | 1.17e10 (0.75 %) | 0 MiB (0×) | 2.43 MiB | – | – | – | 1095–1095 |
+| 10,000 | eagle graph + compaction | 798 µs (796 µs–800 µs) | – | 1.2 ms | 2.86e8 | 1.26e10 (0.13 %) | 2.54e10 (1.6 %) | 0 MiB (0×) | 2.45 MiB | – | – | – | 1410–1410 |
+| 10,000 | eagle graph + compaction + reorder | 1.26 ms (1.25 ms–1.28 ms) | – | 1.71 ms | 1.81e8 | 7.97e9 (0.082 %) | 1.94e10 (1.3 %) | 0 MiB (0×) | 2.92 MiB | – | – | – | 1410–1410 |
+| 10,000 | eagle graph, K fused steps per launch | 311 µs (302 µs–331 µs) | – | 655 µs | 7.34e8 | 3.23e10 (0.33 %) | 9.23e9 (0.59 %) | 0 MiB (0×) | 2.43 MiB | – | – | – | 1410–1410 |
+| 10,000 | eagle graph, K fused steps per launch + compaction | 384 µs (374 µs–402 µs) | – | 797 µs | 5.96e8 | 2.62e10 (0.27 %) | 7.27e9 (0.47 %) | 0 MiB (0×) | 2.45 MiB | – | – | – | 1410–1410 |
+| 10,000 | eagle auto (eagle picks the launch mode) | 117 µs (116 µs–117 µs) | – | 495 µs | 1.96e9 | 8.63e10 (0.89 %) | 5.78e10 (3.7 %) | 0 MiB (0×) | 2.37 MiB | – | – | – | 1095–1095 |
+| 10,000 | hawk + eagle persistent | 157 µs (154 µs–159 µs) | – | 483 µs | 1.45e9 | 6.40e10 (0.66 %) | 4.29e10 (2.8 %) | 0 MiB (0×) | 2.31 MiB | – | 0.21156370013627354 | – | 1095–1095 |
+| 10,000 | eagle.simulate (eagle picks the launch mode) | 129 µs (128 µs–131 µs) | – | 521 µs | 1.77e9 | 7.80e10 (0.8 %) | 5.22e10 (3.4 %) | 0 MiB (0×) | 2.37 MiB | – | – | – | 1095–1095 |
+| 10,000 | eager launch loop | 3.64 ms (3.62 ms–3.65 ms) | – | 3.97 ms | 6.27e7 | 2.76e9 (0.028 %) | 1.08e10 (0.7 %) | 0 MiB (0×) | 0.121 MiB | – | – | – | 1095–1095 |
+| 10,000 | CuPy masked | 67.5 ms (67.4 ms–67.6 ms) | – | 68 ms | 3.39e6 | 1.49e8 (0.0015 %) | 1.33e10 (0.86 %) | 0 MiB (0×) | 5.62 MiB | – | – | – | 1095–1095 |
+| 10,000 | PyTorch masked | 43.9 ms (43 ms–45.7 ms) | – | 44.5 ms | 5.20e6 | 2.29e8 (0.0023 %) | 2.05e10 (1.3 %) | 74 MiB (216×) | 0.68 MiB | – | – | – | 1125–1125 |
+| 10,000 | PyTorch, CUDA graph of 16 steps | 8.94 ms (8.94 ms–8.94 ms) | – | 9.37 ms | 2.56e7 | 1.13e9 (0.012 %) | 1.13e11 (7.3 %) | 102 MiB (297×) | 0.719 MiB | – | – | – | 1410–1410 |
+| 10,000 | PyTorch torch.compile (reduce-overhead) | 13.6 ms (13.5 ms–13.7 ms) | – | 14.1 ms | 1.68e7 | 7.39e8 (0.0076 %) | 6.47e9 (0.42 %) | 96 MiB (280×) | 33.3 MiB | – | – | – | 1410–1410 |
+| 10,000 | JAX jit + vmap(while_loop) | 3.44 ms (3.43 ms–3.44 ms) | – | 5.34 ms | 6.65e7 | 2.93e9 (0.03 %) | 2.57e10 (1.7 %) | 134 MiB (390×) | 0.555 MiB | – | – | – | 1095–1095 |
+| 10,000 | Warp per-thread kernel | 113 µs (113 µs–113 µs) | – | 642 µs | 2.03e9 | 8.91e10 (0.91 %) | 5.67e9 (0.36 %) | 30 MiB (87.4×) | 0.688 MiB | – | – | – | 1095–1095 |
+| 10,000 | CPU OpenMP | 798 µs (790 µs–811 µs) | – | 875 µs | 2.86e8 | 1.26e10 (–) | 4.94e10 (–) | – | 1.14 MiB | – | – | – | – |
+| 100,000 | eagle graph (device loop) | 710 µs (704 µs–720 µs) | – | 2.3 ms | 3.22e9 | 1.42e11 (1.5 %) | 1.06e11 (6.8 %) | 4 MiB (1.17×) | 7.86 MiB | – | – | – | 1095–1095 |
+| 100,000 | eagle graph + compaction | 997 µs (995 µs–1 ms) | – | 2.72 ms | 2.29e9 | 1.01e11 (1 %) | 2.03e11 (13 %) | 4 MiB (1.17×) | 7.88 MiB | – | – | – | 1410–1410 |
+| 100,000 | eagle graph + compaction + reorder | 1.52 ms (1.51 ms–1.52 ms) | – | 3.25 ms | 1.51e9 | 6.62e10 (0.68 %) | 1.61e11 (10 %) | 8 MiB (2.33×) | 8.5 MiB | – | – | – | 1410–1410 |
+| 100,000 | eagle graph, K fused steps per launch | 343 µs (343 µs–344 µs) | – | 1.97 ms | 6.67e9 | 2.93e11 (3 %) | 8.38e10 (5.4 %) | 4 MiB (1.17×) | 7.86 MiB | – | – | – | 1410–1410 |
+| 100,000 | eagle graph, K fused steps per launch + compaction | 482 µs (476 µs–486 µs) | – | 2.18 ms | 4.74e9 | 2.09e11 (2.1 %) | 5.79e10 (3.7 %) | 4 MiB (1.17×) | 7.88 MiB | – | – | – | 1110–1110 |
+| 100,000 | eagle auto (eagle picks the launch mode) | 145 µs (145 µs–146 µs) | – | 1.8 ms | 1.57e10 | 6.93e11 (7.1 %) | 4.64e11 (30 %) | 4 MiB (1.17×) | 7.59 MiB | – | – | – | 1095–1095 |
+| 100,000 | hawk + eagle persistent | 204 µs (199 µs–207 µs) | – | 1.82 ms | 1.12e10 | 4.94e11 (5.1 %) | 3.31e11 (21 %) | 4 MiB (1.17×) | 7.58 MiB | – | 0.3725825992089435 | – | 1095–1095 |
+| 100,000 | eagle.simulate (eagle picks the launch mode) | 161 µs (158 µs–165 µs) | – | 1.8 ms | 1.42e10 | 6.27e11 (6.4 %) | 4.20e11 (27 %) | 4 MiB (1.17×) | 7.61 MiB | – | – | – | 1095–1095 |
+| 100,000 | eager launch loop | 3.68 ms (3.67 ms–3.69 ms) | – | 5.29 ms | 6.22e8 | 2.74e10 (0.28 %) | 1.07e11 (6.9 %) | 4 MiB (1.17×) | 5.39 MiB | – | – | – | 1095–1095 |
+| 100,000 | CuPy masked | 68 ms (67.8 ms–68.1 ms) | – | 70.1 ms | 3.37e7 | 1.48e9 (0.015 %) | 1.33e11 (8.5 %) | 22 MiB (6.41×) | 9.39 MiB | – | – | – | 1095–1095 |
+| 100,000 | PyTorch masked | 45.5 ms (45.4 ms–45.5 ms) | – | 47.8 ms | 5.03e7 | 2.21e9 (0.023 %) | 1.98e11 (13 %) | 98 MiB (28.5×) | 6.86 MiB | – | – | – | 1275–1275 |
+| 100,000 | PyTorch, CUDA graph of 16 steps | 10.3 ms (10.3 ms–10.3 ms) | – | 12.4 ms | 2.23e8 | 9.80e9 (0.1 %) | 9.86e11 (63 %) | 124 MiB (36.1×) | 6.87 MiB | – | – | – | 1410–1410 |
+| 100,000 | PyTorch torch.compile (reduce-overhead) | 13.8 ms (13.7 ms–13.8 ms) | – | 15.9 ms | 1.66e8 | 7.32e9 (0.075 %) | 6.39e10 (4.1 %) | 102 MiB (29.7×) | 36.9 MiB | – | – | – | 1410–1410 |
+| 100,000 | JAX jit + vmap(while_loop) | 3.54 ms (3.5 ms–3.57 ms) | – | 6.21 ms | 6.47e8 | 2.85e10 (0.29 %) | 2.50e11 (16 %) | 134 MiB (39×) | 10.9 MiB | – | – | – | 1410–1410 |
+| 100,000 | Warp per-thread kernel | 170 µs (170 µs–171 µs) | – | 2.28 ms | 1.35e10 | 5.92e11 (6.1 %) | 3.76e10 (2.4 %) | 30 MiB (8.74×) | 6.87 MiB | – | – | – | 1095–1095 |
+| 100,000 | CPU OpenMP | 3.42 ms (3.41 ms–3.43 ms) | – | 4.18 ms | 6.68e8 | 2.94e10 (–) | 1.15e11 (–) | – | 9.93 MiB | – | – | – | – |
+| 1,000,000 | eagle graph (device loop) | 1.38 ms (1.36 ms–1.4 ms) | – | 14.9 ms | 1.67e10 | 7.35e11 (7.5 %) | 6.03e11 (39 %) | 40 MiB (1.17×) | 62.8 MiB | – | – | – | 1095–1095 |
+| 1,000,000 | eagle graph + compaction | 3.77 ms (3.76 ms–3.79 ms) | – | 17.4 ms | 6.09e9 | 2.68e11 (2.8 %) | 5.39e11 (35 %) | 56 MiB (1.63×) | 62.8 MiB | – | – | – | 1320–1410 |
+| 1,000,000 | eagle graph + compaction + reorder | 3.23 ms (3.22 ms–3.24 ms) | – | 16.9 ms | 7.12e9 | 3.13e11 (3.2 %) | 7.61e11 (49 %) | 84 MiB (2.45×) | 63.1 MiB | – | – | – | 1410–1410 |
+| 1,000,000 | eagle graph, K fused steps per launch | 880 µs (874 µs–890 µs) | – | 14.3 ms | 2.61e10 | 1.15e12 (12 %) | 3.27e11 (21 %) | 40 MiB (1.17×) | 62.8 MiB | – | – | – | 1410–1410 |
+| 1,000,000 | eagle graph, K fused steps per launch + compaction | 959 µs (939 µs–984 µs) | – | 14.6 ms | 2.40e10 | 1.05e12 (11 %) | 2.91e11 (19 %) | 56 MiB (1.63×) | 62.8 MiB | – | – | – | 1275–1290 |
+| 1,000,000 | eagle auto (eagle picks the launch mode) | 390 µs (389 µs–391 µs) | – | 14.1 ms | 5.89e10 | 2.59e12 (27 %) | 1.74e12 (1.1e+02 %) | 40 MiB (1.17×) | 60 MiB | – | – | – | 1095–1095 |
+| 1,000,000 | hawk + eagle persistent | 536 µs (534 µs–539 µs) | – | 14 ms | 4.29e10 | 1.89e12 (19 %) | 1.26e12 (81 %) | 40 MiB (1.17×) | 59.9 MiB | – | 0.47417527299096307 | – | 1095–1095 |
+| 1,000,000 | eagle.simulate (eagle picks the launch mode) | 410 µs (403 µs–414 µs) | – | 13.9 ms | 5.61e10 | 2.47e12 (25 %) | 1.65e12 (1.1e+02 %) | 40 MiB (1.17×) | 60 MiB | – | – | – | 1095–1095 |
+| 1,000,000 | eager launch loop | 6.43 ms (6.42 ms–6.45 ms) | – | 20 ms | 3.58e9 | 1.57e11 (1.6 %) | 6.13e11 (39 %) | 40 MiB (1.17×) | 57.8 MiB | – | – | – | 1125–1155 |
+| 1,000,000 | CuPy masked | 68.7 ms (68.5 ms–69.2 ms) | – | 84.5 ms | 3.35e8 | 1.47e10 (0.15 %) | 1.31e12 (84 %) | 192 MiB (5.59×) | 68.7 MiB | – | – | – | 1410–1410 |
+| 1,000,000 | PyTorch masked | 60.7 ms (60.7 ms–60.7 ms) | – | 83.7 ms | 3.79e8 | 1.67e10 (0.17 %) | 1.48e12 (95 %) | 334 MiB (9.73×) | 68.7 MiB | – | – | – | 1410–1410 |
+| 1,000,000 | PyTorch, CUDA graph of 16 steps | 59.2 ms (59.2 ms–59.3 ms) | – | 82.3 ms | 3.88e8 | 1.71e10 (0.18 %) | 1.71e12 (1.1e+02 %) | 362 MiB (10.5×) | 68.7 MiB | – | – | – | 1410–1410 |
+| 1,000,000 | PyTorch torch.compile (reduce-overhead) | 17.2 ms (17.2 ms–17.2 ms) | – | 40.3 ms | 1.34e9 | 5.89e10 (0.6 %) | 5.12e11 (33 %) | 176 MiB (5.13×) | 77.5 MiB | – | – | – | 1410–1410 |
+| 1,000,000 | JAX jit + vmap(while_loop) | 9.5 ms (9.47 ms–9.54 ms) | – | 24.3 ms | 2.42e9 | 1.07e11 (1.1 %) | 9.30e11 (60 %) | 134 MiB (3.9×) | 101 MiB | – | – | – | 1410–1410 |
+| 1,000,000 | Warp per-thread kernel | 604 µs (603 µs–606 µs) | – | 30.2 ms | 3.81e10 | 1.67e12 (17 %) | 1.06e11 (6.8 %) | 62 MiB (1.81×) | 68.7 MiB | – | – | – | 1410–1410 |
+| 1,000,000 | CPU OpenMP | 29.8 ms (29.8 ms–29.8 ms) | – | 45 ms | 7.73e8 | 3.40e10 (–) | 1.33e11 (–) | – | 97.5 MiB | – | – | – | – |
 
 Fastest arm by mean wall time (middle 10 of 12 runs):
 
-- N = 1,000: Warp per-thread kernel (114 µs), then hawk + eagle persistent (161 µs, 1.42× the time)
-- N = 10,000: Warp per-thread kernel (115 µs), then hawk + eagle persistent (163 µs, 1.42× the time)
-- N = 100,000: Warp per-thread kernel (176 µs), then hawk + eagle persistent (285 µs, 1.62× the time)
-- N = 1,000,000: Warp per-thread kernel (620 µs), then eagle graph, K fused steps per launch + compaction (914 µs, 1.47× the time)
+- N = 1,000: eagle auto (eagle picks the launch mode) (90.8 µs), then eagle.simulate (eagle picks the launch mode) (102 µs, 1.12× the time)
+- N = 10,000: Warp per-thread kernel (113 µs), then eagle auto (eagle picks the launch mode) (117 µs, 1.03× the time)
+- N = 100,000: eagle auto (eagle picks the launch mode) (145 µs), then eagle.simulate (eagle picks the launch mode) (161 µs, 1.11× the time)
+- N = 1,000,000: eagle auto (eagle picks the launch mode) (390 µs), then eagle.simulate (eagle picks the launch mode) (410 µs, 1.05× the time)
 
 ### Spread stop steps (log-uniform in [10, 1000]), up to 1000 steps
 
-| N | arm | wall (range) | kernel-only | end-to-end | sample·steps/s | useful FLOP/s (% peak) | issued B/s (% peak) | device memory (× minimum) | host memory | % issue peak | lane util | launches (kernel/memcpy/API) | SM clock (MHz) |
+| N | arm | wall (range) | kernel-only | end-to-end | sample·steps/s | useful FLOP/s (% peak) | issued B/s (% peak) | device memory (× minimum) | host memory | % issue peak | slot fill | launches (kernel/memcpy/API) | SM clock (MHz) |
 |---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 1,000 | eagle graph (device loop) | 1.1 ms (1.09 ms–1.1 ms) | – | 1.29 ms | 1.92e8 | 8.44e9 (0.087 %) | 1.70e9 (0.11 %) | 2 MiB (52.4×) | 3.2 MiB | – | – | – | 1410–1410 |
-| 1,000 | eagle graph + compaction | 4.82 ms (4.81 ms–4.82 ms) | – | 5.09 ms | 4.36e7 | 1.92e9 (0.02 %) | 3.80e9 (0.24 %) | 2 MiB (52.4×) | 3.19 MiB | – | – | – | 1410–1410 |
-| 1,000 | eagle graph + compaction + reorder | 5.07 ms (5.04 ms–5.11 ms) | – | 5.44 ms | 4.15e7 | 1.83e9 (0.019 %) | 3.77e9 (0.24 %) | 2 MiB (52.4×) | 3.21 MiB | – | – | – | 1410–1410 |
-| 1,000 | eagle graph, K fused steps per launch | 810 µs (809 µs–811 µs) | – | 1 ms | 2.60e8 | 1.14e10 (0.12 %) | 3.24e9 (0.21 %) | 2 MiB (52.4×) | 3.15 MiB | – | – | – | 1410–1410 |
-| 1,000 | eagle graph, K fused steps per launch + compaction | 935 µs (930 µs–943 µs) | – | 1.2 ms | 2.25e8 | 9.89e9 (0.1 %) | 1.70e9 (0.11 %) | 2 MiB (52.4×) | 3.16 MiB | – | – | – | 1410–1410 |
-| 1,000 | eagle auto (eagle picks the launch mode) | 852 µs (849 µs–854 µs) | – | 1.11 ms | 2.47e8 | 1.09e10 (0.11 %) | 2.40e9 (0.15 %) | 2 MiB (52.4×) | 3.19 MiB | – | – | – | 1410–1410 |
-| 1,000 | hawk + eagle persistent | 283 µs (277 µs–288 µs) | – | 464 µs | 7.42e8 | 3.26e10 (0.33 %) | 2.98e10 (1.9 %) | 2 MiB (52.4×) | 3.19 MiB | – | 0.11870653417344568 | – | 1410–1410 |
-| 1,000 | eagle.simulate (eagle picks the launch mode) | 889 µs (878 µs–898 µs) | – | 1.15 ms | 2.36e8 | 1.04e10 (0.11 %) | 2.30e9 (0.15 %) | 2 MiB (52.4×) | 3.2 MiB | – | – | – | 1410–1410 |
-| 1,000 | eager launch loop | 36.1 ms (36 ms–36.2 ms) | – | 36.4 ms | 5.82e6 | 2.56e8 (0.0026 %) | 1.15e9 (0.074 %) | 2 MiB (52.4×) | 1.2 MiB | – | – | – | 1095–1410 |
-| 1,000 | CuPy masked | 698 ms (698 ms–698 ms) | – | 698 ms | 3.01e5 | 1.33e7 (0.00014 %) | 1.29e9 (0.083 %) | 2 MiB (52.4×) | 3.89 MiB | – | – | – | 1095–1095 |
-| 1,000 | PyTorch masked | 431 ms (430 ms–431 ms) | – | 431 ms | 4.88e5 | 2.15e7 (0.00022 %) | 2.09e9 (0.13 %) | 2 MiB (52.4×) | 0.0703 MiB | – | – | – | 1170–1170 |
-| 1,000 | PyTorch, CUDA graph of 16 steps | 79.5 ms (79.5 ms–79.5 ms) | – | 79.9 ms | 2.64e6 | 1.16e8 (0.0012 %) | 1.15e10 (0.74 %) | 4 MiB (105×) | 0.414 MiB | – | – | – | 1410–1410 |
-| 1,000 | PyTorch torch.compile (reduce-overhead) | 132 ms (132 ms–132 ms) | – | 132 ms | 1.59e6 | 7.02e7 (0.00072 %) | 6.68e8 (0.043 %) | 0 MiB (0×) | 32.5 MiB | – | – | – | 1410–1410 |
-| 1,000 | JAX jit + vmap(while_loop) | 29.3 ms (29.2 ms–29.3 ms) | – | 31.6 ms | 7.18e6 | 3.16e8 (0.0032 %) | 3.01e9 (0.19 %) | 0 MiB (0×) | 0.0117 MiB | – | – | – | 1095–1095 |
-| 1,000 | Warp per-thread kernel | 271 µs (267 µs–276 µs) | – | 653 µs | 7.77e8 | 3.42e10 (0.35 %) | 2.37e8 (0.015 %) | 32 MiB (839×) | 0.0352 MiB | – | – | – | 1095–1095 |
-| 1,000 | CPU OpenMP | 711 µs (705 µs–716 µs) | – | 731 µs | 2.96e8 | 1.30e10 (–) | 5.82e10 (–) | – | 0.672 MiB | – | – | – | – |
-| 10,000 | eagle graph (device loop) | 1.12 ms (1.12 ms–1.12 ms) | – | 1.48 ms | 1.95e9 | 8.57e10 (0.88 %) | 1.62e10 (1 %) | 2 MiB (5.24×) | 3.68 MiB | – | – | – | 1410–1410 |
-| 10,000 | eagle graph + compaction | 4.99 ms (4.97 ms–5.01 ms) | – | 5.49 ms | 4.38e8 | 1.93e10 (0.2 %) | 3.80e10 (2.4 %) | 2 MiB (5.24×) | 3.77 MiB | – | – | – | 1410–1410 |
-| 10,000 | eagle graph + compaction + reorder | 5.8 ms (5.79 ms–5.81 ms) | – | 6.37 ms | 3.76e8 | 1.66e10 (0.17 %) | 3.38e10 (2.2 %) | 2 MiB (5.24×) | 4.1 MiB | – | – | – | 1410–1410 |
-| 10,000 | eagle graph, K fused steps per launch | 900 µs (895 µs–905 µs) | – | 1.26 ms | 2.42e9 | 1.07e11 (1.1 %) | 2.94e10 (1.9 %) | 2 MiB (5.24×) | 3.65 MiB | – | – | – | 1410–1410 |
-| 10,000 | eagle graph, K fused steps per launch + compaction | 1.02 ms (1.01 ms–1.02 ms) | – | 1.45 ms | 2.15e9 | 9.44e10 (0.97 %) | 1.60e10 (1 %) | 2 MiB (5.24×) | 3.75 MiB | – | – | – | 1410–1410 |
-| 10,000 | eagle auto (eagle picks the launch mode) | 949 µs (946 µs–956 µs) | – | 1.37 ms | 2.30e9 | 1.01e11 (1 %) | 2.17e10 (1.4 %) | 2 MiB (5.24×) | 3.75 MiB | – | – | – | 1410–1410 |
-| 10,000 | hawk + eagle persistent | 299 µs (295 µs–305 µs) | – | 632 µs | 7.30e9 | 3.21e11 (3.3 %) | 2.93e11 (19 %) | 2 MiB (5.24×) | 3.75 MiB | – | 0.22456472269263336 | – | 1410–1410 |
-| 10,000 | eagle.simulate (eagle picks the launch mode) | 981 µs (976 µs–984 µs) | – | 1.41 ms | 2.22e9 | 9.79e10 (1 %) | 2.10e10 (1.4 %) | 2 MiB (5.24×) | 3.73 MiB | – | – | – | 1410–1410 |
-| 10,000 | eager launch loop | 36.6 ms (36.5 ms–36.7 ms) | – | 37 ms | 5.96e7 | 2.62e9 (0.027 %) | 1.14e10 (0.73 %) | 2 MiB (5.24×) | 1.7 MiB | – | – | – | 1095–1095 |
-| 10,000 | CuPy masked | 700 ms (698 ms–701 ms) | – | 700 ms | 3.12e6 | 1.37e8 (0.0014 %) | 1.29e10 (0.83 %) | 2 MiB (5.24×) | 4.12 MiB | – | – | – | 1095–1095 |
-| 10,000 | PyTorch masked | 433 ms (431 ms–434 ms) | – | 433 ms | 5.04e6 | 2.22e8 (0.0023 %) | 2.08e10 (1.3 %) | 2 MiB (5.24×) | 0.68 MiB | – | – | – | 1125–1125 |
-| 10,000 | PyTorch, CUDA graph of 16 steps | 79.4 ms (79.3 ms–79.4 ms) | – | 80 ms | 2.75e7 | 1.21e9 (0.012 %) | 1.15e11 (7.4 %) | 4 MiB (10.5×) | 0.801 MiB | – | – | – | 1410–1410 |
-| 10,000 | PyTorch torch.compile (reduce-overhead) | 134 ms (134 ms–135 ms) | – | 135 ms | 1.62e7 | 7.14e8 (0.0073 %) | 6.55e9 (0.42 %) | 0 MiB (0×) | 33.4 MiB | – | – | – | 1410–1410 |
-| 10,000 | JAX jit + vmap(while_loop) | 32.4 ms (32.3 ms–32.4 ms) | – | 34.7 ms | 6.75e7 | 2.97e9 (0.03 %) | 2.72e10 (1.7 %) | 0 MiB (0×) | 0.422 MiB | – | – | – | 1110–1110 |
-| 10,000 | Warp per-thread kernel | 277 µs (277 µs–277 µs) | – | 844 µs | 7.88e9 | 3.47e11 (3.6 %) | 2.31e9 (0.15 %) | 32 MiB (83.9×) | 0.684 MiB | – | – | – | 1110–1110 |
-| 10,000 | CPU OpenMP | 3.24 ms (3.22 ms–3.25 ms) | – | 3.33 ms | 6.74e8 | 2.97e10 (–) | 1.29e11 (–) | – | 1.61 MiB | – | – | – | – |
-| 100,000 | eagle graph (device loop) | 1.65 ms (1.65 ms–1.65 ms) | – | 3.42 ms | 1.31e10 | 5.77e11 (5.9 %) | 1.11e11 (7.1 %) | 6 MiB (1.57×) | 9.92 MiB | – | – | – | 1410–1410 |
-| 100,000 | eagle graph + compaction | 7.54 ms (7.52 ms–7.56 ms) | – | 9.63 ms | 2.87e9 | 1.26e11 (1.3 %) | 2.50e11 (16 %) | 8 MiB (2.1×) | 9.94 MiB | – | – | – | 1410–1410 |
-| 100,000 | eagle graph + compaction + reorder | 7.2 ms (7.17 ms–7.26 ms) | – | 9.42 ms | 3.01e9 | 1.32e11 (1.4 %) | 2.70e11 (17 %) | 10 MiB (2.62×) | 10 MiB | – | – | – | 1410–1410 |
-| 100,000 | eagle graph, K fused steps per launch | 1.27 ms (1.27 ms–1.27 ms) | – | 3.02 ms | 1.70e10 | 7.50e11 (7.7 %) | 2.08e11 (13 %) | 6 MiB (1.57×) | 9.25 MiB | – | – | – | 1410–1410 |
-| 100,000 | eagle graph, K fused steps per launch + compaction | 1.37 ms (1.36 ms–1.39 ms) | – | 3.32 ms | 1.58e10 | 6.94e11 (7.1 %) | 1.18e11 (7.6 %) | 8 MiB (2.1×) | 9.94 MiB | – | – | – | 1410–1410 |
-| 100,000 | eagle auto (eagle picks the launch mode) | 2.53 ms (2.53 ms–2.53 ms) | – | 4.37 ms | 8.56e9 | 3.77e11 (3.9 %) | 8.19e10 (5.3 %) | 8 MiB (2.1×) | 9.95 MiB | – | – | – | 1410–1410 |
-| 100,000 | hawk + eagle persistent | 557 µs (554 µs–563 µs) | – | 2.35 ms | 3.89e10 | 1.71e12 (18 %) | 1.56e12 (1e+02 %) | 6 MiB (1.57×) | 9.26 MiB | – | 0.5165850040947906 | – | 1410–1410 |
-| 100,000 | eagle.simulate (eagle picks the launch mode) | 2.75 ms (2.73 ms–2.76 ms) | – | 4.73 ms | 7.88e9 | 3.47e11 (3.6 %) | 7.54e10 (4.8 %) | 8 MiB (2.1×) | 9.95 MiB | – | – | – | 1410–1410 |
-| 100,000 | eager launch loop | 36.2 ms (36.1 ms–36.3 ms) | – | 38.2 ms | 5.99e8 | 2.63e10 (0.27 %) | 1.15e11 (7.4 %) | 6 MiB (1.57×) | 7.27 MiB | – | – | – | 1410–1410 |
-| 100,000 | CuPy masked | 701 ms (700 ms–704 ms) | – | 703 ms | 3.09e7 | 1.36e9 (0.014 %) | 1.28e11 (8.3 %) | 24 MiB (6.29×) | 7.68 MiB | – | – | – | 1095–1095 |
-| 100,000 | PyTorch masked | 455 ms (454 ms–456 ms) | – | 457 ms | 4.76e7 | 2.09e9 (0.021 %) | 1.98e11 (13 %) | 26 MiB (6.82×) | 6.86 MiB | – | – | – | 1305–1305 |
-| 100,000 | PyTorch, CUDA graph of 16 steps | 91.6 ms (91.6 ms–91.8 ms) | – | 94.1 ms | 2.36e8 | 1.04e10 (0.11 %) | 9.95e11 (64 %) | 26 MiB (6.82×) | 6.88 MiB | – | – | – | 1410–1410 |
-| 100,000 | PyTorch torch.compile (reduce-overhead) | 133 ms (133 ms–133 ms) | – | 135 ms | 1.63e8 | 7.17e9 (0.074 %) | 6.62e10 (4.3 %) | 6 MiB (1.57×) | 36.9 MiB | – | – | – | 1410–1410 |
-| 100,000 | JAX jit + vmap(while_loop) | 31.4 ms (31.3 ms–31.6 ms) | – | 35.1 ms | 6.89e8 | 3.03e10 (0.31 %) | 2.80e11 (18 %) | 0 MiB (0×) | 10.6 MiB | – | – | – | 1380–1380 |
-| 100,000 | Warp per-thread kernel | 682 µs (676 µs–690 µs) | – | 3.19 ms | 3.17e10 | 1.40e12 (14 %) | 9.38e9 (0.6 %) | 32 MiB (8.39×) | 6.86 MiB | – | – | – | 1380–1380 |
-| 100,000 | CPU OpenMP | 27.8 ms (27.7 ms–27.8 ms) | – | 29.1 ms | 7.80e8 | 3.43e10 (–) | 1.50e11 (–) | – | 11.4 MiB | – | – | – | – |
-| 1,000,000 | eagle graph (device loop) | 6.18 ms (6.14 ms–6.2 ms) | – | 20.7 ms | 3.50e10 | 1.54e12 (16 %) | 2.95e11 (19 %) | 50 MiB (1.31×) | 71.7 MiB | – | – | – | 1410–1410 |
-| 1,000,000 | eagle graph + compaction | 39 ms (39 ms–39 ms) | – | 53.8 ms | 5.55e9 | 2.44e11 (2.5 %) | 4.83e11 (31 %) | 66 MiB (1.73×) | 71.8 MiB | – | – | – | 1410–1410 |
-| 1,000,000 | eagle graph + compaction + reorder | 19.3 ms (19.2 ms–19.4 ms) | – | 34.5 ms | 1.12e10 | 4.92e11 (5.1 %) | 1.01e12 (65 %) | 94 MiB (2.46×) | 71.8 MiB | – | – | – | 1410–1410 |
-| 1,000,000 | eagle graph, K fused steps per launch | 5.79 ms (5.78 ms–5.79 ms) | – | 20.6 ms | 3.74e10 | 1.64e12 (17 %) | 4.56e11 (29 %) | 50 MiB (1.31×) | 71.7 MiB | – | – | – | 1410–1410 |
-| 1,000,000 | eagle graph, K fused steps per launch + compaction | 3.91 ms (3.89 ms–3.92 ms) | – | 18.5 ms | 5.53e10 | 2.43e12 (25 %) | 4.14e11 (27 %) | 66 MiB (1.73×) | 71.8 MiB | – | – | – | 1410–1410 |
-| 1,000,000 | eagle auto (eagle picks the launch mode) | 5.08 ms (5.07 ms–5.09 ms) | – | 20 ms | 4.26e10 | 1.87e12 (19 %) | 4.08e11 (26 %) | 66 MiB (1.73×) | 71.7 MiB | – | – | – | 1410–1410 |
-| 1,000,000 | hawk + eagle persistent | 3.56 ms (3.56 ms–3.57 ms) | – | 18.5 ms | 6.07e10 | 2.67e12 (27 %) | 2.44e12 (1.6e+02 %) | 50 MiB (1.31×) | 65.1 MiB | – | 0.7230168876330473 | – | 1410–1410 |
-| 1,000,000 | eagle.simulate (eagle picks the launch mode) | 5.12 ms (5.09 ms–5.16 ms) | – | 20 ms | 4.22e10 | 1.86e12 (19 %) | 4.04e11 (26 %) | 66 MiB (1.73×) | 71.8 MiB | – | – | – | 1410–1410 |
-| 1,000,000 | eager launch loop | 65.8 ms (65.7 ms–65.9 ms) | – | 80.7 ms | 3.29e9 | 1.45e11 (1.5 %) | 6.33e11 (41 %) | 50 MiB (1.31×) | 63.1 MiB | – | – | – | 1410–1410 |
-| 1,000,000 | CuPy masked | 705 ms (702 ms–706 ms) | – | 720 ms | 3.07e8 | 1.35e10 (0.14 %) | 1.28e12 (82 %) | 194 MiB (5.09×) | 68.7 MiB | – | – | – | 1410–1410 |
-| 1,000,000 | PyTorch masked | 606 ms (606 ms–606 ms) | – | 630 ms | 3.57e8 | 1.57e10 (0.16 %) | 1.49e12 (96 %) | 262 MiB (6.87×) | 68.7 MiB | – | – | – | 1410–1410 |
-| 1,000,000 | PyTorch, CUDA graph of 16 steps | 532 ms (532 ms–532 ms) | – | 556 ms | 4.07e8 | 1.79e10 (0.18 %) | 1.71e12 (1.1e+02 %) | 264 MiB (6.92×) | 68.7 MiB | – | – | – | 1410–1410 |
-| 1,000,000 | PyTorch torch.compile (reduce-overhead) | 172 ms (171 ms–172 ms) | – | 195 ms | 1.26e9 | 5.55e10 (0.57 %) | 5.13e11 (33 %) | 80 MiB (2.1×) | 77.5 MiB | – | – | – | 1095–1095 |
-| 1,000,000 | JAX jit + vmap(while_loop) | 91.2 ms (91 ms–91.5 ms) | – | 107 ms | 2.37e9 | 1.04e11 (1.1 %) | 9.65e11 (62 %) | 0 MiB (0×) | 100 MiB | – | – | – | 1410–1410 |
-| 1,000,000 | Warp per-thread kernel | 5.96 ms (5.95 ms–5.97 ms) | – | 37.4 ms | 3.63e10 | 1.60e12 (16 %) | 1.07e10 (0.69 %) | 64 MiB (1.68×) | 68.7 MiB | – | – | – | 1095–1095 |
-| 1,000,000 | CPU OpenMP | 268 ms (268 ms–268 ms) | – | 285 ms | 8.08e8 | 3.55e10 (–) | 1.56e11 (–) | – | 109 MiB | – | – | – | – |
+| 1,000 | eagle graph (device loop) | 834 µs (825 µs–849 µs) | – | 1 ms | 2.52e8 | 1.11e10 (0.11 %) | 7.81e9 (0.5 %) | 0 MiB (0×) | 2.04 MiB | – | – | – | 1410–1410 |
+| 1,000 | eagle graph + compaction | 4.59 ms (4.58 ms–4.6 ms) | – | 4.84 ms | 4.58e7 | 2.02e9 (0.021 %) | 3.45e9 (0.22 %) | 0 MiB (0×) | 2.05 MiB | – | – | – | 1410–1410 |
+| 1,000 | eagle graph + compaction + reorder | 4.79 ms (4.78 ms–4.8 ms) | – | 5.07 ms | 4.39e7 | 1.93e9 (0.02 %) | 3.44e9 (0.22 %) | 0 MiB (0×) | 2.1 MiB | – | – | – | 1410–1410 |
+| 1,000 | eagle graph, K fused steps per launch | 791 µs (790 µs–792 µs) | – | 964 µs | 2.66e8 | 1.17e10 (0.12 %) | 3.11e9 (0.2 %) | 0 MiB (0×) | 2.03 MiB | – | – | – | 1410–1410 |
+| 1,000 | eagle graph, K fused steps per launch + compaction | 973 µs (967 µs–983 µs) | – | 1.23 ms | 2.16e8 | 9.50e9 (0.097 %) | 1.46e9 (0.094 %) | 0 MiB (0×) | 2.04 MiB | – | – | – | 1410–1410 |
+| 1,000 | eagle auto (eagle picks the launch mode) | 145 µs (144 µs–147 µs) | – | 358 µs | 1.45e9 | 6.36e10 (0.65 %) | 4.07e10 (2.6 %) | 0 MiB (0×) | 2.04 MiB | – | – | – | 1410–1410 |
+| 1,000 | hawk + eagle persistent | 281 µs (272 µs–298 µs) | – | 435 µs | 7.48e8 | 3.29e10 (0.34 %) | 2.11e10 (1.4 %) | 0 MiB (0×) | 2.03 MiB | – | 0.22980196323115862 | – | 1410–1410 |
+| 1,000 | eagle.simulate (eagle picks the launch mode) | 156 µs (154 µs–159 µs) | – | 373 µs | 1.35e9 | 5.92e10 (0.61 %) | 3.79e10 (2.4 %) | 0 MiB (0×) | 2.04 MiB | – | – | – | 1410–1410 |
+| 1,000 | eager launch loop | 35.5 ms (35.4 ms–35.7 ms) | – | 35.7 ms | 5.92e6 | 2.61e8 (0.0027 %) | 1.10e9 (0.07 %) | 0 MiB (0×) | 0.0312 MiB | – | – | – | 1095–1095 |
+| 1,000 | CuPy masked | 673 ms (673 ms–674 ms) | – | 674 ms | 3.12e5 | 1.37e7 (0.00014 %) | 1.34e9 (0.086 %) | 0 MiB (0×) | 4.89 MiB | – | – | – | 1095–1095 |
+| 1,000 | PyTorch masked | 424 ms (424 ms–424 ms) | – | 424 ms | 4.96e5 | 2.18e7 (0.00022 %) | 2.12e9 (0.14 %) | 74 MiB (2.16e+03×) | 0.0703 MiB | – | – | – | 1185–1185 |
+| 1,000 | PyTorch, CUDA graph of 16 steps | 79.1 ms (79.1 ms–79.1 ms) | – | 79.4 ms | 2.66e6 | 1.17e8 (0.0012 %) | 1.15e10 (0.74 %) | 102 MiB (2.97e+03×) | 0.156 MiB | – | – | – | 1410–1410 |
+| 1,000 | PyTorch torch.compile (reduce-overhead) | 132 ms (132 ms–132 ms) | – | 132 ms | 1.59e6 | 7.00e7 (0.00072 %) | 6.66e8 (0.043 %) | 96 MiB (2.8e+03×) | 32.5 MiB | – | – | – | 1410–1410 |
+| 1,000 | JAX jit + vmap(while_loop) | 28.3 ms (28.3 ms–28.4 ms) | – | 30.3 ms | 7.42e6 | 3.26e8 (0.0033 %) | 3.11e9 (0.2 %) | 134 MiB (3.9e+03×) | 0.00781 MiB | – | – | – | 1095–1095 |
+| 1,000 | Warp per-thread kernel | 272 µs (262 µs–279 µs) | – | 632 µs | 7.74e8 | 3.40e10 (0.35 %) | 2.36e8 (0.015 %) | 30 MiB (874×) | 0.0117 MiB | – | – | – | 1095–1095 |
+| 1,000 | CPU OpenMP | 795 µs (787 µs–800 µs) | – | 815 µs | 2.64e8 | 1.16e10 (–) | 4.89e10 (–) | – | 0.25 MiB | – | – | – | – |
+| 10,000 | eagle graph (device loop) | 894 µs (893 µs–896 µs) | – | 1.22 ms | 2.44e9 | 1.07e11 (1.1 %) | 7.54e10 (4.8 %) | 0 MiB (0×) | 2.43 MiB | – | – | – | 1410–1410 |
+| 10,000 | eagle graph + compaction | 5.06 ms (5.06 ms–5.07 ms) | – | 5.48 ms | 4.31e8 | 1.90e10 (0.19 %) | 3.23e10 (2.1 %) | 0 MiB (0×) | 2.45 MiB | – | – | – | 1410–1410 |
+| 10,000 | eagle graph + compaction + reorder | 5.91 ms (5.91 ms–5.91 ms) | – | 6.37 ms | 3.69e8 | 1.62e10 (0.17 %) | 2.86e10 (1.8 %) | 0 MiB (0×) | 2.91 MiB | – | – | – | 1410–1410 |
+| 10,000 | eagle graph, K fused steps per launch | 838 µs (835 µs–842 µs) | – | 1.18 ms | 2.60e9 | 1.15e11 (1.2 %) | 2.95e10 (1.9 %) | 0 MiB (0×) | 2.43 MiB | – | – | – | 1410–1410 |
+| 10,000 | eagle graph, K fused steps per launch + compaction | 1.03 ms (1.03 ms–1.03 ms) | – | 1.44 ms | 2.13e9 | 9.36e10 (0.96 %) | 1.42e10 (0.91 %) | 0 MiB (0×) | 2.44 MiB | – | – | – | 1410–1410 |
+| 10,000 | eagle auto (eagle picks the launch mode) | 231 µs (229 µs–233 µs) | – | 615 µs | 9.44e9 | 4.15e11 (4.3 %) | 2.66e11 (17 %) | 0 MiB (0×) | 2.38 MiB | – | – | – | 1410–1410 |
+| 10,000 | hawk + eagle persistent | 292 µs (291 µs–294 µs) | – | 606 µs | 7.47e9 | 3.29e11 (3.4 %) | 2.10e11 (14 %) | 0 MiB (0×) | 2.31 MiB | – | 0.2384722378329774 | – | 1350–1350 |
+| 10,000 | eagle.simulate (eagle picks the launch mode) | 244 µs (242 µs–246 µs) | – | 641 µs | 8.96e9 | 3.94e11 (4 %) | 2.52e11 (16 %) | 0 MiB (0×) | 2.37 MiB | – | – | – | 1350–1350 |
+| 10,000 | eager launch loop | 35.9 ms (35.9 ms–36 ms) | – | 36.3 ms | 6.07e7 | 2.67e9 (0.027 %) | 1.09e10 (0.7 %) | 0 MiB (0×) | 0.148 MiB | – | – | – | 1095–1095 |
+| 10,000 | CuPy masked | 675 ms (672 ms–678 ms) | – | 676 ms | 3.23e6 | 1.42e8 (0.0015 %) | 1.33e10 (0.86 %) | 0 MiB (0×) | 5.62 MiB | – | – | – | 1095–1095 |
+| 10,000 | PyTorch masked | 426 ms (424 ms–427 ms) | – | 426 ms | 5.13e6 | 2.26e8 (0.0023 %) | 2.12e10 (1.4 %) | 74 MiB (216×) | 0.688 MiB | – | – | – | 1155–1155 |
+| 10,000 | PyTorch, CUDA graph of 16 steps | 79.6 ms (79.5 ms–79.6 ms) | – | 80.1 ms | 2.74e7 | 1.21e9 (0.012 %) | 1.15e11 (7.4 %) | 102 MiB (297×) | 0.719 MiB | – | – | – | 1410–1410 |
+| 10,000 | PyTorch torch.compile (reduce-overhead) | 131 ms (131 ms–131 ms) | – | 132 ms | 1.67e7 | 7.33e8 (0.0075 %) | 6.71e9 (0.43 %) | 96 MiB (280×) | 33.3 MiB | – | – | – | 1410–1410 |
+| 10,000 | JAX jit + vmap(while_loop) | 31.4 ms (31.4 ms–31.5 ms) | – | 33.5 ms | 6.94e7 | 3.05e9 (0.031 %) | 2.80e10 (1.8 %) | 134 MiB (390×) | 0.469 MiB | – | – | – | 1125–1125 |
+| 10,000 | Warp per-thread kernel | 269 µs (268 µs–271 µs) | – | 816 µs | 8.11e9 | 3.57e11 (3.7 %) | 2.38e9 (0.15 %) | 30 MiB (87.4×) | 0.691 MiB | – | – | – | 1125–1125 |
+| 10,000 | CPU OpenMP | 3.68 ms (3.67 ms–3.69 ms) | – | 3.77 ms | 5.93e8 | 2.61e10 (–) | 1.06e11 (–) | – | 1.17 MiB | – | – | – | – |
+| 100,000 | eagle graph (device loop) | 1.31 ms (1.28 ms–1.33 ms) | – | 2.91 ms | 1.65e10 | 7.26e11 (7.4 %) | 5.10e11 (33 %) | 4 MiB (1.17×) | 7.86 MiB | – | – | – | 1410–1410 |
+| 100,000 | eagle graph + compaction | 7.12 ms (7.11 ms–7.13 ms) | – | 8.84 ms | 3.04e9 | 1.34e11 (1.4 %) | 2.28e11 (15 %) | 4 MiB (1.17×) | 7.88 MiB | – | – | – | 1410–1410 |
+| 100,000 | eagle graph + compaction + reorder | 6.92 ms (6.91 ms–6.92 ms) | – | 8.67 ms | 3.13e9 | 1.38e11 (1.4 %) | 2.43e11 (16 %) | 8 MiB (2.33×) | 8.5 MiB | – | – | – | 1410–1410 |
+| 100,000 | eagle graph, K fused steps per launch | 1.33 ms (1.32 ms–1.33 ms) | – | 2.91 ms | 1.63e10 | 7.18e11 (7.4 %) | 1.86e11 (12 %) | 4 MiB (1.17×) | 7.86 MiB | – | – | – | 1410–1410 |
+| 100,000 | eagle graph, K fused steps per launch + compaction | 1.34 ms (1.33 ms–1.34 ms) | – | 3.01 ms | 1.62e10 | 7.12e11 (7.3 %) | 1.08e11 (7 %) | 4 MiB (1.17×) | 7.88 MiB | – | – | – | 1410–1410 |
+| 100,000 | eagle auto (eagle picks the launch mode) | 350 µs (345 µs–354 µs) | – | 2.02 ms | 6.18e10 | 2.72e12 (28 %) | 1.74e12 (1.1e+02 %) | 4 MiB (1.17×) | 7.62 MiB | – | – | – | 1410–1410 |
+| 100,000 | hawk + eagle persistent | 391 µs (391 µs–391 µs) | – | 1.97 ms | 5.54e10 | 2.44e12 (25 %) | 1.56e12 (1e+02 %) | 4 MiB (1.17×) | 7.56 MiB | – | 0.5649979515277368 | – | 1410–1410 |
+| 100,000 | eagle.simulate (eagle picks the launch mode) | 434 µs (431 µs–439 µs) | – | 2.1 ms | 4.99e10 | 2.20e12 (23 %) | 1.41e12 (90 %) | 4 MiB (1.17×) | 7.64 MiB | – | – | – | 1095–1095 |
+| 100,000 | eager launch loop | 36.3 ms (36.2 ms–36.5 ms) | – | 38.1 ms | 5.96e8 | 2.62e10 (0.27 %) | 1.08e11 (6.9 %) | 4 MiB (1.17×) | 5.38 MiB | – | – | – | 1095–1095 |
+| 100,000 | CuPy masked | 679 ms (674 ms–683 ms) | – | 681 ms | 3.19e7 | 1.40e9 (0.014 %) | 1.33e11 (8.5 %) | 22 MiB (6.41×) | 9.39 MiB | – | – | – | 1095–1095 |
+| 100,000 | PyTorch masked | 448 ms (446 ms–449 ms) | – | 450 ms | 4.84e7 | 2.13e9 (0.022 %) | 2.01e11 (13 %) | 98 MiB (28.5×) | 6.86 MiB | – | – | – | 1320–1320 |
+| 100,000 | PyTorch, CUDA graph of 16 steps | 91.6 ms (91.6 ms–91.7 ms) | – | 94 ms | 2.36e8 | 1.04e10 (0.11 %) | 9.96e11 (64 %) | 124 MiB (36.1×) | 6.87 MiB | – | – | – | 1410–1410 |
+| 100,000 | PyTorch torch.compile (reduce-overhead) | 131 ms (130 ms–131 ms) | – | 133 ms | 1.66e8 | 7.30e9 (0.075 %) | 6.74e10 (4.3 %) | 102 MiB (29.7×) | 36.9 MiB | – | – | – | 1410–1410 |
+| 100,000 | JAX jit + vmap(while_loop) | 30.4 ms (30.2 ms–30.5 ms) | – | 33.6 ms | 7.11e8 | 3.13e10 (0.32 %) | 2.89e11 (19 %) | 134 MiB (39×) | 10.8 MiB | – | – | – | 1335–1365 |
+| 100,000 | Warp per-thread kernel | 659 µs (648 µs–671 µs) | – | 2.82 ms | 3.28e10 | 1.45e12 (15 %) | 9.71e9 (0.62 %) | 30 MiB (8.74×) | 6.87 MiB | – | – | – | 1365–1365 |
+| 100,000 | CPU OpenMP | 29 ms (28.9 ms–29 ms) | – | 30 ms | 7.48e8 | 3.29e10 (–) | 1.35e11 (–) | – | 9.93 MiB | – | – | – | – |
+| 1,000,000 | eagle graph (device loop) | 5.33 ms (5.32 ms–5.33 ms) | – | 18.7 ms | 4.06e10 | 1.79e12 (18 %) | 1.26e12 (81 %) | 40 MiB (1.17×) | 62.8 MiB | – | – | – | 1410–1410 |
+| 1,000,000 | eagle graph + compaction | 32.6 ms (32.6 ms–32.7 ms) | – | 46.3 ms | 6.63e9 | 2.92e11 (3 %) | 4.97e11 (32 %) | 56 MiB (1.63×) | 62.8 MiB | – | – | – | 1410–1410 |
+| 1,000,000 | eagle graph + compaction + reorder | 17.2 ms (17.2 ms–17.2 ms) | – | 30.7 ms | 1.26e10 | 5.52e11 (5.7 %) | 9.74e11 (63 %) | 84 MiB (2.45×) | 63.1 MiB | – | – | – | 1410–1410 |
+| 1,000,000 | eagle graph, K fused steps per launch | 5.55 ms (5.55 ms–5.55 ms) | – | 19 ms | 3.90e10 | 1.71e12 (18 %) | 4.45e11 (29 %) | 40 MiB (1.17×) | 62.8 MiB | – | – | – | 1410–1410 |
+| 1,000,000 | eagle graph, K fused steps per launch + compaction | 3.54 ms (3.54 ms–3.55 ms) | – | 17 ms | 6.10e10 | 2.69e12 (28 %) | 4.09e11 (26 %) | 56 MiB (1.63×) | 62.8 MiB | – | – | – | 1410–1410 |
+| 1,000,000 | eagle auto (eagle picks the launch mode) | 1.48 ms (1.48 ms–1.48 ms) | – | 14.9 ms | 1.46e11 | 6.44e12 (66 %) | 4.12e12 (2.7e+02 %) | 40 MiB (1.17×) | 60 MiB | – | – | – | 1410–1410 |
+| 1,000,000 | hawk + eagle persistent | 1.53 ms (1.53 ms–1.53 ms) | – | 14.9 ms | 1.41e11 | 6.22e12 (64 %) | 3.98e12 (2.6e+02 %) | 40 MiB (1.17×) | 59.9 MiB | – | 0.8243109163213885 | – | 1410–1410 |
+| 1,000,000 | eagle.simulate (eagle picks the launch mode) | 1.5 ms (1.49 ms–1.5 ms) | – | 14.9 ms | 1.45e11 | 6.36e12 (65 %) | 4.07e12 (2.6e+02 %) | 40 MiB (1.17×) | 60 MiB | – | – | – | 1410–1410 |
+| 1,000,000 | eager launch loop | 59.4 ms (59.3 ms–59.5 ms) | – | 73 ms | 3.64e9 | 1.60e11 (1.6 %) | 6.58e11 (42 %) | 40 MiB (1.17×) | 57.8 MiB | – | – | – | 1410–1410 |
+| 1,000,000 | CuPy masked | 673 ms (672 ms–673 ms) | – | 688 ms | 3.22e8 | 1.41e10 (0.15 %) | 1.34e12 (86 %) | 192 MiB (5.59×) | 68.7 MiB | – | – | – | 1410–1410 |
+| 1,000,000 | PyTorch masked | 608 ms (606 ms–611 ms) | – | 631 ms | 3.56e8 | 1.57e10 (0.16 %) | 1.48e12 (95 %) | 334 MiB (9.73×) | 68.7 MiB | – | – | – | 1410–1410 |
+| 1,000,000 | PyTorch, CUDA graph of 16 steps | 532 ms (532 ms–532 ms) | – | 556 ms | 4.06e8 | 1.79e10 (0.18 %) | 1.71e12 (1.1e+02 %) | 362 MiB (10.5×) | 68.7 MiB | – | – | – | 1410–1410 |
+| 1,000,000 | PyTorch torch.compile (reduce-overhead) | 167 ms (167 ms–167 ms) | – | 190 ms | 1.29e9 | 5.69e10 (0.58 %) | 5.26e11 (34 %) | 176 MiB (5.13×) | 77.4 MiB | – | – | – | 1095–1095 |
+| 1,000,000 | JAX jit + vmap(while_loop) | 90.7 ms (90.3 ms–91 ms) | – | 106 ms | 2.39e9 | 1.05e11 (1.1 %) | 9.71e11 (62 %) | 134 MiB (3.9×) | 101 MiB | – | – | – | 1410–1410 |
+| 1,000,000 | Warp per-thread kernel | 5.94 ms (5.94 ms–5.95 ms) | – | 36.3 ms | 3.64e10 | 1.60e12 (16 %) | 1.08e10 (0.69 %) | 62 MiB (1.81×) | 68.7 MiB | – | – | – | 1095–1095 |
+| 1,000,000 | CPU OpenMP | 281 ms (281 ms–281 ms) | – | 293 ms | 7.70e8 | 3.39e10 (–) | 1.39e11 (–) | – | 97.5 MiB | – | – | – | – |
 
 Fastest arm by mean wall time (middle 10 of 12 runs):
 
-- N = 1,000: Warp per-thread kernel (271 µs), then hawk + eagle persistent (283 µs, 1.05× the time)
-- N = 10,000: Warp per-thread kernel (277 µs), then hawk + eagle persistent (299 µs, 1.08× the time)
-- N = 100,000: hawk + eagle persistent (557 µs), then Warp per-thread kernel (682 µs, 1.22× the time)
-- N = 1,000,000: hawk + eagle persistent (3.56 ms), then eagle graph, K fused steps per launch + compaction (3.91 ms, 1.1× the time)
+- N = 1,000: eagle auto (eagle picks the launch mode) (145 µs), then eagle.simulate (eagle picks the launch mode) (156 µs, 1.07× the time)
+- N = 10,000: eagle auto (eagle picks the launch mode) (231 µs), then eagle.simulate (eagle picks the launch mode) (244 µs, 1.05× the time)
+- N = 100,000: eagle auto (eagle picks the launch mode) (350 µs), then hawk + eagle persistent (391 µs, 1.12× the time)
+- N = 1,000,000: eagle auto (eagle picks the launch mode) (1.48 ms), then eagle.simulate (eagle picks the launch mode) (1.5 ms, 1.01× the time)
 
 ### Uniform stop step: every sample runs 1000 steps
 
-| N | arm | wall (range) | kernel-only | end-to-end | sample·steps/s | useful FLOP/s (% peak) | issued B/s (% peak) | device memory (× minimum) | host memory | % issue peak | lane util | launches (kernel/memcpy/API) | SM clock (MHz) |
+| N | arm | wall (range) | kernel-only | end-to-end | sample·steps/s | useful FLOP/s (% peak) | issued B/s (% peak) | device memory (× minimum) | host memory | % issue peak | slot fill | launches (kernel/memcpy/API) | SM clock (MHz) |
 |---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 1,000 | eagle graph (device loop) | 846 µs (835 µs–852 µs) | – | 1.05 ms | 1.18e9 | 5.20e10 (0.53 %) | 1.47e9 (0.094 %) | 2 MiB (52.4×) | 3.2 MiB | – | – | – | 1410–1410 |
-| 1,000 | eagle graph + compaction | 3.68 ms (3.63 ms–3.75 ms) | – | 4.01 ms | 2.72e8 | 1.20e10 (0.12 %) | 2.10e10 (1.4 %) | 2 MiB (52.4×) | 3.2 MiB | – | – | – | 1410–1410 |
-| 1,000 | eagle graph + compaction + reorder | 3.82 ms (3.81 ms–3.83 ms) | – | 4.25 ms | 2.62e8 | 1.15e10 (0.12 %) | 2.02e10 (1.3 %) | 2 MiB (52.4×) | 3.2 MiB | – | – | – | 1410–1410 |
-| 1,000 | eagle graph, K fused steps per launch | 753 µs (752 µs–755 µs) | – | 970 µs | 1.33e9 | 5.84e10 (0.6 %) | 6.11e9 (0.39 %) | 2 MiB (52.4×) | 3.14 MiB | – | – | – | 1410–1410 |
-| 1,000 | eagle graph, K fused steps per launch + compaction | 712 µs (707 µs–719 µs) | – | 1.01 ms | 1.40e9 | 6.18e10 (0.63 %) | 6.90e9 (0.44 %) | 2 MiB (52.4×) | 3.16 MiB | – | – | – | 1410–1410 |
-| 1,000 | eagle auto (eagle picks the launch mode) | 877 µs (863 µs–885 µs) | – | 1.16 ms | 1.14e9 | 5.02e10 (0.51 %) | 1.53e9 (0.098 %) | 2 MiB (52.4×) | 3.18 MiB | – | – | – | 1410–1410 |
-| 1,000 | hawk + eagle persistent | 297 µs (288 µs–311 µs) | – | 477 µs | 3.37e9 | 1.48e11 (1.5 %) | 1.35e11 (8.7 %) | 2 MiB (52.4×) | 3.2 MiB | – | 0.5261651400862069 | – | 1410–1410 |
-| 1,000 | eagle.simulate (eagle picks the launch mode) | 914 µs (903 µs–924 µs) | – | 1.21 ms | 1.09e9 | 4.81e10 (0.49 %) | 1.47e9 (0.094 %) | 2 MiB (52.4×) | 3.19 MiB | – | – | – | 1410–1410 |
-| 1,000 | eager launch loop | 36.1 ms (36.1 ms–36.2 ms) | – | 36.4 ms | 2.77e7 | 1.22e9 (0.012 %) | 2.02e9 (0.13 %) | 2 MiB (52.4×) | 1.18 MiB | – | – | – | 1095–1410 |
-| 1,000 | CuPy masked | 694 ms (691 ms–697 ms) | – | 694 ms | 1.44e6 | 6.34e7 (0.00065 %) | 1.30e9 (0.083 %) | 2 MiB (52.4×) | 3.81 MiB | – | – | – | 1095–1095 |
-| 1,000 | PyTorch masked | 428 ms (427 ms–429 ms) | – | 428 ms | 2.34e6 | 1.03e8 (0.0011 %) | 2.11e9 (0.14 %) | 2 MiB (52.4×) | 0.0742 MiB | – | – | – | 1185–1185 |
-| 1,000 | PyTorch, CUDA graph of 16 steps | 79.6 ms (79.6 ms–79.6 ms) | – | 80 ms | 1.26e7 | 5.53e8 (0.0057 %) | 1.15e10 (0.74 %) | 4 MiB (105×) | 0.414 MiB | – | – | – | 1410–1410 |
-| 1,000 | PyTorch torch.compile (reduce-overhead) | 132 ms (132 ms–133 ms) | – | 132 ms | 7.57e6 | 3.33e8 (0.0034 %) | 6.66e8 (0.043 %) | 0 MiB (0×) | 32.4 MiB | – | – | – | 1410–1410 |
-| 1,000 | JAX jit + vmap(while_loop) | 28.9 ms (28.8 ms–29 ms) | – | 31 ms | 3.46e7 | 1.52e9 (0.016 %) | 3.04e9 (0.2 %) | 0 MiB (0×) | 0.0117 MiB | – | – | – | 1095–1095 |
-| 1,000 | Warp per-thread kernel | 288 µs (286 µs–288 µs) | – | 716 µs | 3.47e9 | 1.53e11 (1.6 %) | 2.22e8 (0.014 %) | 32 MiB (839×) | 0.0352 MiB | – | – | – | 1095–1095 |
-| 1,000 | CPU OpenMP | 732 µs (726 µs–743 µs) | – | 751 µs | 1.37e9 | 6.01e10 (–) | 9.97e10 (–) | – | 0.672 MiB | – | – | – | – |
-| 10,000 | eagle graph (device loop) | 912 µs (905 µs–916 µs) | – | 1.28 ms | 1.10e10 | 4.82e11 (5 %) | 1.36e10 (0.88 %) | 2 MiB (5.24×) | 3.66 MiB | – | – | – | 1410–1410 |
-| 10,000 | eagle graph + compaction | 3.91 ms (3.9 ms–3.92 ms) | – | 4.38 ms | 2.56e9 | 1.13e11 (1.2 %) | 1.98e11 (13 %) | 2 MiB (5.24×) | 3.75 MiB | – | – | – | 1410–1410 |
-| 10,000 | eagle graph + compaction + reorder | 4.49 ms (4.49 ms–4.49 ms) | – | 5.05 ms | 2.23e9 | 9.80e10 (1 %) | 1.72e11 (11 %) | 2 MiB (5.24×) | 3.98 MiB | – | – | – | 1410–1410 |
-| 10,000 | eagle graph, K fused steps per launch | 919 µs (914 µs–923 µs) | – | 1.29 ms | 1.09e10 | 4.79e11 (4.9 %) | 5.00e10 (3.2 %) | 2 MiB (5.24×) | 3.66 MiB | – | – | – | 1410–1410 |
-| 10,000 | eagle graph, K fused steps per launch + compaction | 833 µs (827 µs–837 µs) | – | 1.27 ms | 1.20e10 | 5.28e11 (5.4 %) | 5.90e10 (3.8 %) | 2 MiB (5.24×) | 3.7 MiB | – | – | – | 1410–1410 |
-| 10,000 | eagle auto (eagle picks the launch mode) | 940 µs (930 µs–946 µs) | – | 1.37 ms | 1.06e10 | 4.68e11 (4.8 %) | 1.43e10 (0.92 %) | 2 MiB (5.24×) | 3.7 MiB | – | – | – | 1410–1410 |
-| 10,000 | hawk + eagle persistent | 303 µs (298 µs–308 µs) | – | 661 µs | 3.30e10 | 1.45e12 (15 %) | 1.32e12 (85 %) | 2 MiB (5.24×) | 3.67 MiB | – | 0.9241624869877921 | – | 1365–1365 |
-| 10,000 | eagle.simulate (eagle picks the launch mode) | 1.08 ms (1.07 ms–1.08 ms) | – | 1.53 ms | 9.29e9 | 4.09e11 (4.2 %) | 1.25e10 (0.8 %) | 2 MiB (5.24×) | 3.7 MiB | – | – | – | 1095–1095 |
-| 10,000 | eager launch loop | 36.2 ms (36.2 ms–36.3 ms) | – | 36.6 ms | 2.76e8 | 1.21e10 (0.12 %) | 2.01e10 (1.3 %) | 2 MiB (5.24×) | 1.7 MiB | – | – | – | 1095–1095 |
-| 10,000 | CuPy masked | 697 ms (697 ms–698 ms) | – | 698 ms | 1.43e7 | 6.31e8 (0.0065 %) | 1.29e10 (0.83 %) | 2 MiB (5.24×) | 4.18 MiB | – | – | – | 1095–1095 |
-| 10,000 | PyTorch masked | 429 ms (427 ms–430 ms) | – | 429 ms | 2.33e7 | 1.03e9 (0.011 %) | 2.10e10 (1.4 %) | 2 MiB (5.24×) | 0.625 MiB | – | – | – | 1155–1155 |
-| 10,000 | PyTorch, CUDA graph of 16 steps | 79.6 ms (79.6 ms–79.6 ms) | – | 80.2 ms | 1.26e8 | 5.53e9 (0.057 %) | 1.15e11 (7.4 %) | 4 MiB (10.5×) | 0.797 MiB | – | – | – | 1410–1410 |
-| 10,000 | PyTorch torch.compile (reduce-overhead) | 131 ms (131 ms–131 ms) | – | 132 ms | 7.62e7 | 3.35e9 (0.034 %) | 6.71e9 (0.43 %) | 0 MiB (0×) | 33.4 MiB | – | – | – | 1410–1410 |
-| 10,000 | JAX jit + vmap(while_loop) | 31.7 ms (31.1 ms–31.9 ms) | – | 33.7 ms | 3.16e8 | 1.39e10 (0.14 %) | 2.78e10 (1.8 %) | 0 MiB (0×) | 0.277 MiB | – | – | – | 1125–1140 |
-| 10,000 | Warp per-thread kernel | 287 µs (286 µs–288 µs) | – | 880 µs | 3.48e10 | 1.53e12 (16 %) | 2.23e9 (0.14 %) | 32 MiB (83.9×) | 0.688 MiB | – | – | – | 1140–1140 |
-| 10,000 | CPU OpenMP | 3.46 ms (3.46 ms–3.47 ms) | – | 3.54 ms | 2.89e9 | 1.27e11 (–) | 2.11e11 (–) | – | 1.61 MiB | – | – | – | – |
-| 100,000 | eagle graph (device loop) | 1.35 ms (1.34 ms–1.36 ms) | – | 3.13 ms | 7.40e10 | 3.26e12 (33 %) | 9.19e10 (5.9 %) | 6 MiB (1.57×) | 9.25 MiB | – | – | – | 1410–1410 |
-| 100,000 | eagle graph + compaction | 5.17 ms (5.17 ms–5.18 ms) | – | 7.02 ms | 1.93e10 | 8.51e11 (8.7 %) | 1.49e12 (96 %) | 8 MiB (2.1×) | 9.36 MiB | – | – | – | 1410–1410 |
-| 100,000 | eagle graph + compaction + reorder | 5.75 ms (5.74 ms–5.76 ms) | – | 7.82 ms | 1.74e10 | 7.65e11 (7.9 %) | 1.34e12 (86 %) | 10 MiB (2.62×) | 9.6 MiB | – | – | – | 1410–1410 |
-| 100,000 | eagle graph, K fused steps per launch | 1.4 ms (1.4 ms–1.4 ms) | – | 3.17 ms | 7.14e10 | 3.14e12 (32 %) | 3.29e11 (21 %) | 6 MiB (1.57×) | 9.25 MiB | – | – | – | 1410–1410 |
-| 100,000 | eagle graph, K fused steps per launch + compaction | 1.32 ms (1.31 ms–1.32 ms) | – | 3.16 ms | 7.60e10 | 3.34e12 (34 %) | 3.74e11 (24 %) | 8 MiB (2.1×) | 9.29 MiB | – | – | – | 1410–1410 |
-| 100,000 | eagle auto (eagle picks the launch mode) | 1.54 ms (1.54 ms–1.55 ms) | – | 3.4 ms | 6.48e10 | 2.85e12 (29 %) | 8.68e10 (5.6 %) | 8 MiB (2.1×) | 9.36 MiB | – | – | – | 1410–1410 |
-| 100,000 | hawk + eagle persistent | 753 µs (751 µs–754 µs) | – | 2.51 ms | 1.33e11 | 5.84e12 (60 %) | 5.32e12 (3.4e+02 %) | 6 MiB (1.57×) | 9.27 MiB | – | 0.9991533574110641 | – | 1410–1410 |
-| 100,000 | eagle.simulate (eagle picks the launch mode) | 1.58 ms (1.58 ms–1.59 ms) | – | 3.4 ms | 6.32e10 | 2.78e12 (29 %) | 8.47e10 (5.4 %) | 8 MiB (2.1×) | 9.41 MiB | – | – | – | 1410–1410 |
-| 100,000 | eager launch loop | 35.9 ms (35.8 ms–35.9 ms) | – | 37.8 ms | 2.79e9 | 1.23e11 (1.3 %) | 2.03e11 (13 %) | 6 MiB (1.57×) | 7.29 MiB | – | – | – | 1410–1410 |
-| 100,000 | CuPy masked | 695 ms (690 ms–698 ms) | – | 697 ms | 1.44e8 | 6.33e9 (0.065 %) | 1.30e11 (8.3 %) | 24 MiB (6.29×) | 7.63 MiB | – | – | – | 1095–1095 |
-| 100,000 | PyTorch masked | 450 ms (449 ms–451 ms) | – | 452 ms | 2.22e8 | 9.78e9 (0.1 %) | 2.00e11 (13 %) | 26 MiB (6.82×) | 6.24 MiB | – | – | – | 1305–1320 |
-| 100,000 | PyTorch, CUDA graph of 16 steps | 91.6 ms (91.6 ms–91.6 ms) | – | 93.9 ms | 1.09e9 | 4.81e10 (0.49 %) | 9.96e11 (64 %) | 26 MiB (6.82×) | 6.52 MiB | – | – | – | 1410–1410 |
-| 100,000 | PyTorch torch.compile (reduce-overhead) | 132 ms (132 ms–132 ms) | – | 134 ms | 7.58e8 | 3.34e10 (0.34 %) | 6.67e10 (4.3 %) | 6 MiB (1.57×) | 37 MiB | – | – | – | 1410–1410 |
-| 100,000 | JAX jit + vmap(while_loop) | 31 ms (30.9 ms–31 ms) | – | 34.3 ms | 3.23e9 | 1.42e11 (1.5 %) | 2.84e11 (18 %) | 0 MiB (0×) | 9.95 MiB | – | – | – | 1350–1410 |
-| 100,000 | Warp per-thread kernel | 688 µs (683 µs–692 µs) | – | 2.99 ms | 1.45e11 | 6.39e12 (66 %) | 9.30e9 (0.6 %) | 32 MiB (8.39×) | 6.86 MiB | – | – | – | 1410–1410 |
-| 100,000 | CPU OpenMP | 30.6 ms (30.6 ms–30.7 ms) | – | 31.7 ms | 3.26e9 | 1.44e11 (–) | 2.38e11 (–) | – | 11.4 MiB | – | – | – | – |
-| 1,000,000 | eagle graph (device loop) | 6.18 ms (6.17 ms–6.18 ms) | – | 20.6 ms | 1.62e11 | 7.12e12 (73 %) | 2.01e11 (13 %) | 50 MiB (1.31×) | 65.1 MiB | – | – | – | 1410–1410 |
-| 1,000,000 | eagle graph + compaction | 62.3 ms (62.3 ms–62.3 ms) | – | 77 ms | 1.61e10 | 7.07e11 (7.2 %) | 1.24e12 (80 %) | 66 MiB (1.73×) | 65.2 MiB | – | – | – | 1410–1410 |
-| 1,000,000 | eagle graph + compaction + reorder | 62.7 ms (62.6 ms–62.8 ms) | – | 77.4 ms | 1.59e10 | 7.02e11 (7.2 %) | 1.23e12 (79 %) | 94 MiB (2.46×) | 65.4 MiB | – | – | – | 1410–1410 |
-| 1,000,000 | eagle graph, K fused steps per launch | 6.38 ms (6.38 ms–6.38 ms) | – | 20.5 ms | 1.57e11 | 6.89e12 (71 %) | 7.21e11 (46 %) | 50 MiB (1.31×) | 65.1 MiB | – | – | – | 1410–1410 |
-| 1,000,000 | eagle graph, K fused steps per launch + compaction | 6.33 ms (6.32 ms–6.33 ms) | – | 20.8 ms | 1.58e11 | 6.95e12 (71 %) | 7.77e11 (50 %) | 66 MiB (1.73×) | 65.1 MiB | – | – | – | 1410–1410 |
-| 1,000,000 | eagle auto (eagle picks the launch mode) | 6.39 ms (6.39 ms–6.4 ms) | – | 20.9 ms | 1.56e11 | 6.88e12 (71 %) | 2.10e11 (13 %) | 66 MiB (1.73×) | 65.2 MiB | – | – | – | 1410–1410 |
-| 1,000,000 | hawk + eagle persistent | 5.46 ms (5.46 ms–5.47 ms) | – | 19.8 ms | 1.83e11 | 8.05e12 (83 %) | 7.33e12 (4.7e+02 %) | 50 MiB (1.31×) | 65.1 MiB | – | 0.9995951719521208 | – | 1410–1410 |
-| 1,000,000 | eagle.simulate (eagle picks the launch mode) | 6.43 ms (6.43 ms–6.44 ms) | – | 20.9 ms | 1.55e11 | 6.84e12 (70 %) | 2.08e11 (13 %) | 66 MiB (1.73×) | 65.2 MiB | – | – | – | 1410–1410 |
-| 1,000,000 | eager launch loop | 87.4 ms (87.3 ms–87.5 ms) | – | 102 ms | 1.14e10 | 5.03e11 (5.2 %) | 8.35e11 (54 %) | 50 MiB (1.31×) | 63.1 MiB | – | – | – | 1410–1410 |
-| 1,000,000 | CuPy masked | 696 ms (695 ms–699 ms) | – | 711 ms | 1.44e9 | 6.32e10 (0.65 %) | 1.29e12 (83 %) | 194 MiB (5.09×) | 64.9 MiB | – | – | – | 1410–1410 |
-| 1,000,000 | PyTorch masked | 605 ms (605 ms–606 ms) | – | 629 ms | 1.65e9 | 7.27e10 (0.75 %) | 1.49e12 (96 %) | 262 MiB (6.87×) | 62.1 MiB | – | – | – | 1410–1410 |
-| 1,000,000 | PyTorch, CUDA graph of 16 steps | 532 ms (532 ms–532 ms) | – | 556 ms | 1.88e9 | 8.27e10 (0.85 %) | 1.71e12 (1.1e+02 %) | 264 MiB (6.92×) | 62.4 MiB | – | – | – | 1410–1410 |
-| 1,000,000 | PyTorch torch.compile (reduce-overhead) | 170 ms (169 ms–170 ms) | – | 193 ms | 5.89e9 | 2.59e11 (2.7 %) | 5.18e11 (33 %) | 80 MiB (2.1×) | 71 MiB | – | – | – | 1095–1095 |
-| 1,000,000 | JAX jit + vmap(while_loop) | 91.2 ms (91.1 ms–91.5 ms) | – | 106 ms | 1.10e10 | 4.82e11 (4.9 %) | 9.65e11 (62 %) | 0 MiB (0×) | 94.8 MiB | – | – | – | 1410–1410 |
-| 1,000,000 | Warp per-thread kernel | 6.69 ms (6.68 ms–6.7 ms) | – | 38.4 ms | 1.49e11 | 6.58e12 (67 %) | 9.57e9 (0.62 %) | 64 MiB (1.68×) | 68.7 MiB | – | – | – | 1095–1095 |
-| 1,000,000 | CPU OpenMP | 300 ms (299 ms–300 ms) | – | 314 ms | 3.34e9 | 1.47e11 (–) | 2.44e11 (–) | – | 109 MiB | – | – | – | – |
+| 1,000 | eagle graph (device loop) | 855 µs (853 µs–858 µs) | – | 1.03 ms | 1.17e9 | 5.15e10 (0.53 %) | 3.35e10 (2.2 %) | 0 MiB (0×) | 2.03 MiB | – | – | – | 1410–1410 |
+| 1,000 | eagle graph + compaction | 3.72 ms (3.72 ms–3.73 ms) | – | 3.99 ms | 2.69e8 | 1.18e10 (0.12 %) | 1.75e10 (1.1 %) | 0 MiB (0×) | 2.04 MiB | – | – | – | 1410–1410 |
+| 1,000 | eagle graph + compaction + reorder | 3.7 ms (3.7 ms–3.7 ms) | – | 3.99 ms | 2.70e8 | 1.19e10 (0.12 %) | 1.76e10 (1.1 %) | 0 MiB (0×) | 2.11 MiB | – | – | – | 1410–1410 |
+| 1,000 | eagle graph, K fused steps per launch | 775 µs (766 µs–779 µs) | – | 958 µs | 1.29e9 | 5.68e10 (0.58 %) | 4.96e9 (0.32 %) | 0 MiB (0×) | 2.03 MiB | – | – | – | 1410–1410 |
+| 1,000 | eagle graph, K fused steps per launch + compaction | 691 µs (690 µs–691 µs) | – | 944 µs | 1.45e9 | 6.37e10 (0.65 %) | 6.03e9 (0.39 %) | 0 MiB (0×) | 2.04 MiB | – | – | – | 1410–1410 |
+| 1,000 | eagle auto (eagle picks the launch mode) | 156 µs (154 µs–158 µs) | – | 392 µs | 6.42e9 | 2.82e11 (2.9 %) | 1.80e11 (12 %) | 0 MiB (0×) | 2.04 MiB | – | – | – | 1410–1410 |
+| 1,000 | hawk + eagle persistent | 286 µs (282 µs–294 µs) | – | 451 µs | 3.49e9 | 1.54e11 (1.6 %) | 9.80e10 (6.3 %) | 0 MiB (0×) | 2.03 MiB | – | 0.95367431640625 | – | 1410–1410 |
+| 1,000 | eagle.simulate (eagle picks the launch mode) | 174 µs (163 µs–184 µs) | – | 401 µs | 5.76e9 | 2.53e11 (2.6 %) | 1.61e11 (10 %) | 0 MiB (0×) | 2.04 MiB | – | – | – | 1410–1410 |
+| 1,000 | eager launch loop | 35.1 ms (35.1 ms–35.2 ms) | – | 35.4 ms | 2.85e7 | 1.25e9 (0.013 %) | 1.74e9 (0.11 %) | 0 MiB (0×) | 0.0312 MiB | – | – | – | 1410–1410 |
+| 1,000 | CuPy masked | 678 ms (676 ms–681 ms) | – | 678 ms | 1.48e6 | 6.49e7 (0.00067 %) | 1.33e9 (0.086 %) | 0 MiB (0×) | 5.1 MiB | – | – | – | 1095–1095 |
+| 1,000 | PyTorch masked | 425 ms (424 ms–425 ms) | – | 425 ms | 2.36e6 | 1.04e8 (0.0011 %) | 2.12e9 (0.14 %) | 74 MiB (2.16e+03×) | 0.0703 MiB | – | – | – | 1185–1185 |
+| 1,000 | PyTorch, CUDA graph of 16 steps | 79.7 ms (79.6 ms–79.7 ms) | – | 80 ms | 1.26e7 | 5.52e8 (0.0057 %) | 1.15e10 (0.74 %) | 102 MiB (2.97e+03×) | 0.16 MiB | – | – | – | 1410–1410 |
+| 1,000 | PyTorch torch.compile (reduce-overhead) | 129 ms (129 ms–130 ms) | – | 130 ms | 7.72e6 | 3.40e8 (0.0035 %) | 6.80e8 (0.044 %) | 96 MiB (2.8e+03×) | 32.6 MiB | – | – | – | 1410–1410 |
+| 1,000 | JAX jit + vmap(while_loop) | 28.3 ms (28.3 ms–28.3 ms) | – | 30.2 ms | 3.53e7 | 1.55e9 (0.016 %) | 3.11e9 (0.2 %) | 134 MiB (3.9e+03×) | 0.0195 MiB | – | – | – | 1095–1095 |
+| 1,000 | Warp per-thread kernel | 274 µs (272 µs–275 µs) | – | 658 µs | 3.65e9 | 1.61e11 (1.6 %) | 2.34e8 (0.015 %) | 30 MiB (874×) | 0.0156 MiB | – | – | – | 1095–1095 |
+| 1,000 | CPU OpenMP | 718 µs (707 µs–723 µs) | – | 739 µs | 1.39e9 | 6.13e10 (–) | 8.50e10 (–) | – | 0.242 MiB | – | – | – | – |
+| 10,000 | eagle graph (device loop) | 902 µs (897 µs–905 µs) | – | 1.23 ms | 1.11e10 | 4.88e11 (5 %) | 3.17e11 (20 %) | 0 MiB (0×) | 2.42 MiB | – | – | – | 1410–1410 |
+| 10,000 | eagle graph + compaction | 3.78 ms (3.78 ms–3.78 ms) | – | 4.2 ms | 2.64e9 | 1.16e11 (1.2 %) | 1.73e11 (11 %) | 0 MiB (0×) | 2.44 MiB | – | – | – | 1410–1410 |
+| 10,000 | eagle graph + compaction + reorder | 4.4 ms (4.39 ms–4.41 ms) | – | 4.86 ms | 2.27e9 | 1.00e11 (1 %) | 1.48e11 (9.5 %) | 0 MiB (0×) | 2.91 MiB | – | – | – | 1410–1410 |
+| 10,000 | eagle graph, K fused steps per launch | 896 µs (891 µs–901 µs) | – | 1.24 ms | 1.12e10 | 4.91e11 (5 %) | 4.29e10 (2.8 %) | 0 MiB (0×) | 2.42 MiB | – | – | – | 1410–1410 |
+| 10,000 | eagle graph, K fused steps per launch + compaction | 810 µs (809 µs–812 µs) | – | 1.22 ms | 1.23e10 | 5.43e11 (5.6 %) | 5.14e10 (3.3 %) | 0 MiB (0×) | 2.43 MiB | – | – | – | 1410–1410 |
+| 10,000 | eagle auto (eagle picks the launch mode) | 239 µs (237 µs–242 µs) | – | 647 µs | 4.19e10 | 1.84e12 (19 %) | 1.17e12 (76 %) | 0 MiB (0×) | 2.36 MiB | – | – | – | 1410–1410 |
+| 10,000 | hawk + eagle persistent | 298 µs (296 µs–300 µs) | – | 633 µs | 3.36e10 | 1.48e12 (15 %) | 9.42e11 (61 %) | 0 MiB (0×) | 2.31 MiB | – | 0.9750024960063898 | – | 1410–1410 |
+| 10,000 | eagle.simulate (eagle picks the launch mode) | 248 µs (248 µs–249 µs) | – | 636 µs | 4.03e10 | 1.77e12 (18 %) | 1.13e12 (73 %) | 0 MiB (0×) | 2.38 MiB | – | – | – | 1410–1410 |
+| 10,000 | eager launch loop | 36.1 ms (36 ms–36.3 ms) | – | 36.5 ms | 2.77e8 | 1.22e10 (0.13 %) | 1.69e10 (1.1 %) | 0 MiB (0×) | 0.137 MiB | – | – | – | 1095–1095 |
+| 10,000 | CuPy masked | 672 ms (671 ms–673 ms) | – | 672 ms | 1.49e7 | 6.55e8 (0.0067 %) | 1.34e10 (0.86 %) | 0 MiB (0×) | 5.62 MiB | – | – | – | 1095–1095 |
+| 10,000 | PyTorch masked | 426 ms (425 ms–428 ms) | – | 427 ms | 2.35e7 | 1.03e9 (0.011 %) | 2.11e10 (1.4 %) | 74 MiB (216×) | 0.625 MiB | – | – | – | 1155–1155 |
+| 10,000 | PyTorch, CUDA graph of 16 steps | 79.6 ms (79.6 ms–79.7 ms) | – | 80.2 ms | 1.26e8 | 5.53e9 (0.057 %) | 1.15e11 (7.4 %) | 102 MiB (297×) | 0.719 MiB | – | – | – | 1410–1410 |
+| 10,000 | PyTorch torch.compile (reduce-overhead) | 130 ms (130 ms–131 ms) | – | 131 ms | 7.69e7 | 3.38e9 (0.035 %) | 6.77e9 (0.44 %) | 96 MiB (280×) | 33.3 MiB | – | – | – | 1410–1410 |
+| 10,000 | JAX jit + vmap(while_loop) | 31.4 ms (31.2 ms–31.6 ms) | – | 33.8 ms | 3.18e8 | 1.40e10 (0.14 %) | 2.80e10 (1.8 %) | 134 MiB (390×) | 0.328 MiB | – | – | – | 1125–1125 |
+| 10,000 | Warp per-thread kernel | 274 µs (271 µs–280 µs) | – | 817 µs | 3.65e10 | 1.61e12 (16 %) | 2.33e9 (0.15 %) | 30 MiB (87.4×) | 0.691 MiB | – | – | – | 1125–1125 |
+| 10,000 | CPU OpenMP | 3.3 ms (3.29 ms–3.32 ms) | – | 3.39 ms | 3.03e9 | 1.33e11 (–) | 1.85e11 (–) | – | 1.16 MiB | – | – | – | – |
+| 100,000 | eagle graph (device loop) | 1.35 ms (1.33 ms–1.35 ms) | – | 2.95 ms | 7.43e10 | 3.27e12 (34 %) | 2.13e12 (1.4e+02 %) | 4 MiB (1.17×) | 7.66 MiB | – | – | – | 1410–1410 |
+| 100,000 | eagle graph + compaction | 5.05 ms (5.05 ms–5.05 ms) | – | 6.78 ms | 1.98e10 | 8.71e11 (8.9 %) | 1.29e12 (83 %) | 4 MiB (1.17×) | 7.69 MiB | – | – | – | 1410–1410 |
+| 100,000 | eagle graph + compaction + reorder | 5.48 ms (5.47 ms–5.49 ms) | – | 7.24 ms | 1.82e10 | 8.03e11 (8.2 %) | 1.19e12 (77 %) | 8 MiB (2.33×) | 8.32 MiB | – | – | – | 1410–1410 |
+| 100,000 | eagle graph, K fused steps per launch | 1.29 ms (1.28 ms–1.29 ms) | – | 2.91 ms | 7.76e10 | 3.42e12 (35 %) | 2.98e11 (19 %) | 4 MiB (1.17×) | 7.65 MiB | – | – | – | 1410–1410 |
+| 100,000 | eagle graph, K fused steps per launch + compaction | 1.25 ms (1.24 ms–1.25 ms) | – | 2.96 ms | 8.03e10 | 3.53e12 (36 %) | 3.34e11 (21 %) | 4 MiB (1.17×) | 7.68 MiB | – | – | – | 1410–1410 |
+| 100,000 | eagle auto (eagle picks the launch mode) | 650 µs (649 µs–652 µs) | – | 2.32 ms | 1.54e11 | 6.77e12 (69 %) | 4.31e12 (2.8e+02 %) | 4 MiB (1.17×) | 7.61 MiB | – | – | – | 1410–1410 |
+| 100,000 | hawk + eagle persistent | 778 µs (776 µs–781 µs) | – | 2.41 ms | 1.28e11 | 5.65e12 (58 %) | 3.60e12 (2.3e+02 %) | 4 MiB (1.17×) | 7.56 MiB | – | 0.9765625 | – | 1410–1410 |
+| 100,000 | eagle.simulate (eagle picks the launch mode) | 660 µs (660 µs–661 µs) | – | 2.33 ms | 1.51e11 | 6.66e12 (68 %) | 4.25e12 (2.7e+02 %) | 4 MiB (1.17×) | 7.62 MiB | – | – | – | 1410–1410 |
+| 100,000 | eager launch loop | 35.7 ms (35.6 ms–35.7 ms) | – | 37.5 ms | 2.80e9 | 1.23e11 (1.3 %) | 1.71e11 (11 %) | 4 MiB (1.17×) | 5.39 MiB | – | – | – | 1410–1410 |
+| 100,000 | CuPy masked | 674 ms (673 ms–676 ms) | – | 676 ms | 1.48e8 | 6.53e9 (0.067 %) | 1.34e11 (8.6 %) | 22 MiB (6.41×) | 9.39 MiB | – | – | – | 1095–1095 |
+| 100,000 | PyTorch masked | 448 ms (447 ms–449 ms) | – | 450 ms | 2.23e8 | 9.83e9 (0.1 %) | 2.01e11 (13 %) | 98 MiB (28.5×) | 6.24 MiB | – | – | – | 1305–1320 |
+| 100,000 | PyTorch, CUDA graph of 16 steps | 91.3 ms (91.3 ms–91.4 ms) | – | 93.7 ms | 1.09e9 | 4.82e10 (0.49 %) | 9.99e11 (64 %) | 124 MiB (36.1×) | 6.33 MiB | – | – | – | 1410–1410 |
+| 100,000 | PyTorch torch.compile (reduce-overhead) | 130 ms (130 ms–130 ms) | – | 132 ms | 7.69e8 | 3.38e10 (0.35 %) | 6.77e10 (4.4 %) | 102 MiB (29.7×) | 37 MiB | – | – | – | 1410–1410 |
+| 100,000 | JAX jit + vmap(while_loop) | 30.4 ms (30.3 ms–30.5 ms) | – | 33.7 ms | 3.29e9 | 1.45e11 (1.5 %) | 2.89e11 (19 %) | 134 MiB (39×) | 10.4 MiB | – | – | – | 1365–1380 |
+| 100,000 | Warp per-thread kernel | 679 µs (678 µs–679 µs) | – | 2.86 ms | 1.47e11 | 6.48e12 (66 %) | 9.43e9 (0.61 %) | 30 MiB (8.74×) | 6.87 MiB | – | – | – | 1380–1380 |
+| 100,000 | CPU OpenMP | 26.9 ms (26.8 ms–26.9 ms) | – | 27.9 ms | 3.72e9 | 1.64e11 (–) | 2.27e11 (–) | – | 9.92 MiB | – | – | – | – |
+| 1,000,000 | eagle graph (device loop) | 5.87 ms (5.84 ms–5.9 ms) | – | 19.3 ms | 1.70e11 | 7.49e12 (77 %) | 4.88e12 (3.1e+02 %) | 40 MiB (1.17×) | 60.1 MiB | – | – | – | 1410–1410 |
+| 1,000,000 | eagle graph + compaction | 53.7 ms (53.6 ms–53.7 ms) | – | 67.5 ms | 1.86e10 | 8.20e11 (8.4 %) | 1.22e12 (78 %) | 56 MiB (1.63×) | 60.1 MiB | – | – | – | 1410–1410 |
+| 1,000,000 | eagle graph + compaction + reorder | 54.4 ms (54.3 ms–54.4 ms) | – | 68.3 ms | 1.84e10 | 8.09e11 (8.3 %) | 1.20e12 (77 %) | 84 MiB (2.45×) | 60.6 MiB | – | – | – | 1410–1410 |
+| 1,000,000 | eagle graph, K fused steps per launch | 6.19 ms (6.18 ms–6.2 ms) | – | 19.6 ms | 1.62e11 | 7.11e12 (73 %) | 6.21e11 (40 %) | 40 MiB (1.17×) | 60 MiB | – | – | – | 1410–1410 |
+| 1,000,000 | eagle graph, K fused steps per launch + compaction | 6.07 ms (6.07 ms–6.08 ms) | – | 19.6 ms | 1.65e11 | 7.24e12 (74 %) | 6.85e11 (44 %) | 56 MiB (1.63×) | 60.1 MiB | – | – | – | 1410–1410 |
+| 1,000,000 | eagle auto (eagle picks the launch mode) | 4.83 ms (4.82 ms–4.83 ms) | – | 18.3 ms | 2.07e11 | 9.12e12 (94 %) | 5.81e12 (3.7e+02 %) | 40 MiB (1.17×) | 60 MiB | – | – | – | 1410–1410 |
+| 1,000,000 | hawk + eagle persistent | 5.07 ms (5.05 ms–5.09 ms) | – | 18.4 ms | 1.97e11 | 8.68e12 (89 %) | 5.53e12 (3.6e+02 %) | 40 MiB (1.17×) | 60 MiB | – | 0.9765625 | – | 1410–1410 |
+| 1,000,000 | eagle.simulate (eagle picks the launch mode) | 4.85 ms (4.85 ms–4.86 ms) | – | 18.3 ms | 2.06e11 | 9.07e12 (93 %) | 5.78e12 (3.7e+02 %) | 40 MiB (1.17×) | 60 MiB | – | – | – | 1410–1410 |
+| 1,000,000 | eager launch loop | 76.9 ms (76.5 ms–77.1 ms) | – | 90.7 ms | 1.30e10 | 5.72e11 (5.9 %) | 7.94e11 (51 %) | 40 MiB (1.17×) | 57.8 MiB | – | – | – | 1410–1410 |
+| 1,000,000 | CuPy masked | 679 ms (676 ms–682 ms) | – | 695 ms | 1.47e9 | 6.48e10 (0.66 %) | 1.33e12 (85 %) | 192 MiB (5.59×) | 65.3 MiB | – | – | – | 1410–1410 |
+| 1,000,000 | PyTorch masked | 608 ms (606 ms–611 ms) | – | 631 ms | 1.65e9 | 7.24e10 (0.74 %) | 1.48e12 (95 %) | 334 MiB (9.73×) | 62.1 MiB | – | – | – | 1410–1410 |
+| 1,000,000 | PyTorch, CUDA graph of 16 steps | 532 ms (532 ms–532 ms) | – | 556 ms | 1.88e9 | 8.27e10 (0.85 %) | 1.71e12 (1.1e+02 %) | 362 MiB (10.5×) | 62.2 MiB | – | – | – | 1410–1410 |
+| 1,000,000 | PyTorch torch.compile (reduce-overhead) | 166 ms (165 ms–166 ms) | – | 189 ms | 6.03e9 | 2.65e11 (2.7 %) | 5.31e11 (34 %) | 176 MiB (5.13×) | 71.3 MiB | – | – | – | 1095–1095 |
+| 1,000,000 | JAX jit + vmap(while_loop) | 90.5 ms (90.4 ms–90.5 ms) | – | 106 ms | 1.11e10 | 4.86e11 (5 %) | 9.73e11 (63 %) | 134 MiB (3.9×) | 95.1 MiB | – | – | – | 1410–1410 |
+| 1,000,000 | Warp per-thread kernel | 6.67 ms (6.67 ms–6.68 ms) | – | 38 ms | 1.50e11 | 6.60e12 (68 %) | 9.59e9 (0.62 %) | 62 MiB (1.81×) | 68.7 MiB | – | – | – | 1095–1095 |
+| 1,000,000 | CPU OpenMP | 261 ms (261 ms–261 ms) | – | 276 ms | 3.83e9 | 1.69e11 (–) | 2.34e11 (–) | – | 97.5 MiB | – | – | – | – |
 
 Fastest arm by mean wall time (middle 10 of 12 runs):
 
-- N = 1,000: Warp per-thread kernel (288 µs), then hawk + eagle persistent (297 µs, 1.03× the time)
-- N = 10,000: Warp per-thread kernel (287 µs), then hawk + eagle persistent (303 µs, 1.06× the time)
-- N = 100,000: Warp per-thread kernel (688 µs), then hawk + eagle persistent (753 µs, 1.09× the time)
-- N = 1,000,000: hawk + eagle persistent (5.46 ms), then eagle graph (device loop) (6.18 ms, 1.13× the time)
+- N = 1,000: eagle auto (eagle picks the launch mode) (156 µs), then eagle.simulate (eagle picks the launch mode) (174 µs, 1.11× the time)
+- N = 10,000: eagle auto (eagle picks the launch mode) (239 µs), then eagle.simulate (eagle picks the launch mode) (248 µs, 1.04× the time)
+- N = 100,000: eagle auto (eagle picks the launch mode) (650 µs), then eagle.simulate (eagle picks the launch mode) (660 µs, 1.02× the time)
+- N = 1,000,000: eagle auto (eagle picks the launch mode) (4.83 ms), then eagle.simulate (eagle picks the launch mode) (4.85 ms, 1.01× the time)
 
 ### Compaction cadence sweep (isolates the active-set map)
 
@@ -273,12 +273,12 @@ Config: Spread stop steps (log-uniform in [10, 1000]), up to 1000 steps.
 
 | N | K (steps between guard checks) | matched cadence, no map (range) | eagle graph + compaction (range) | ratio (matched/compact, `>1` = compaction faster) |
 |---:|---:|---:|---:|---:|
-| 100,000 | 8 | 4.19 ms (4.19 ms–4.19 ms) | 9.11 ms (9.1 ms–9.12 ms) | 0.46× |
-| 100,000 | 16 | 3.84 ms (3.84 ms–3.84 ms) | 7.18 ms (7.18 ms–7.19 ms) | 0.535× |
-| 100,000 | 32 | 3.64 ms (3.64 ms–3.65 ms) | 6.22 ms (6.21 ms–6.23 ms) | 0.586× |
-| 1,000,000 | 8 | 36.9 ms (36.8 ms–36.9 ms) | 42.1 ms (42.1 ms–42.1 ms) | 0.876× |
-| 1,000,000 | 16 | 36.5 ms (36.5 ms–36.6 ms) | 38.8 ms (38.7 ms–38.8 ms) | 0.943× |
-| 1,000,000 | 32 | 36.3 ms (36.2 ms–36.3 ms) | 37.2 ms (37.2 ms–37.2 ms) | 0.975× |
+| 100,000 | 8 | 4.04 ms (4.03 ms–4.04 ms) | 8.79 ms (8.78 ms–8.81 ms) | 0.459× |
+| 100,000 | 16 | 3.68 ms (3.68 ms–3.68 ms) | 6.98 ms (6.97 ms–6.99 ms) | 0.527× |
+| 100,000 | 32 | 3.56 ms (3.55 ms–3.56 ms) | 5.98 ms (5.97 ms–5.99 ms) | 0.595× |
+| 1,000,000 | 8 | 31.2 ms (31.2 ms–31.2 ms) | 36.4 ms (36.4 ms–36.4 ms) | 0.855× |
+| 1,000,000 | 16 | 31 ms (31 ms–31 ms) | 32.5 ms (32.5 ms–32.6 ms) | 0.952× |
+| 1,000,000 | 32 | 30.7 ms (30.7 ms–30.7 ms) | 30.6 ms (30.6 ms–30.6 ms) | 1× |
 
 ### FP32: eagle vs Warp (float32, S = 1000)
 
@@ -292,12 +292,12 @@ Cap fixture (checked before any timing counts): N = 4,096, 8 samples with stop s
 
 | distribution | N | eagle.simulate (range) | Warp (range) | JAX (range) | eagle / Warp | eagle / Warp (cycles) | eagle entry |
 |---|---:|---:|---:|---:|---:|---:|---|
-| uniform | 10,000 | 984 µs (975 µs–989 µs), 1095–1095 MHz | 205 µs (205 µs–206 µs), 1095–1095 MHz | 31.9 ms (31.9 ms–31.9 ms), 1110–1125 MHz | 4.8× | 4.8× | band |
-| uniform | 100,000 | 1.34 ms (1.33 ms–1.36 ms), 1245–1245 MHz | 413 µs (411 µs–415 µs), 1305–1305 MHz | 27.5 ms (27.4 ms–27.6 ms), 1335–1380 MHz | 3.25× | 3.1× | band |
-| uniform | 1,000,000 | 3.65 ms (3.64 ms–3.65 ms), 1410–1410 MHz | 2.6 ms (2.6 ms–2.6 ms), 1410–1410 MHz | 37.6 ms (37.6 ms–37.7 ms), 1410–1410 MHz | 1.4× | 1.4× | band |
-| spread | 10,000 | 947 µs (943 µs–952 µs), 1410–1410 MHz | 211 µs (205 µs–224 µs), 1095–1095 MHz | 31.9 ms (31.9 ms–32 ms), 1140–1140 MHz | 4.48× | 5.77× | band |
-| spread | 100,000 | 2.55 ms (2.55 ms–2.55 ms), 1410–1410 MHz | 392 µs (386 µs–404 µs), 1410–1410 MHz | 26 ms (25.9 ms–26.3 ms), 1410–1410 MHz | 6.49× | 6.49× | band |
-| spread | 1,000,000 | 4.32 ms (4.28 ms–4.39 ms), 1410–1410 MHz | 2.33 ms (2.33 ms–2.34 ms), 1410–1410 MHz | 37.7 ms (37.6 ms–37.7 ms), 1410–1410 MHz | 1.85× | 1.85× | band |
+| uniform | 10,000 | 212 µs (210 µs–213 µs), 1095–1095 MHz | 198 µs (195 µs–201 µs), 1095–1095 MHz | 31.5 ms (31.5 ms–31.5 ms), 1095–1095 MHz | 1.07× | 1.07× | fused_one |
+| uniform | 100,000 | 449 µs (442 µs–453 µs), 1140–1140 MHz | 447 µs (442 µs–453 µs), 1140–1140 MHz | 30.7 ms (30.6 ms–30.7 ms), 1260–1260 MHz | 1× | 1× | fused_one |
+| uniform | 1,000,000 | 2.51 ms (2.51 ms–2.51 ms), 1410–1410 MHz | 2.59 ms (2.59 ms–2.59 ms), 1410–1410 MHz | 37.4 ms (36.2 ms–38.2 ms), 1410–1410 MHz | 0.97× | 0.97× | fused_one |
+| spread | 10,000 | 194 µs (190 µs–201 µs), 1410–1410 MHz | 192 µs (191 µs–193 µs), 1095–1095 MHz | 31.6 ms (31.5 ms–31.6 ms), 1095–1095 MHz | 1.01× | 1.3× | fused_one |
+| spread | 100,000 | 321 µs (314 µs–332 µs), 1095–1095 MHz | 444 µs (439 µs–450 µs), 1095–1095 MHz | 30.8 ms (30.7 ms–30.9 ms), 1215–1245 MHz | 0.725× | 0.725× | persist |
+| spread | 1,000,000 | 994 µs (987 µs–999 µs), 1260–1260 MHz | 2.34 ms (2.33 ms–2.35 ms), 1350–1350 MHz | 36.8 ms (36.1 ms–38.1 ms), 1410–1410 MHz | 0.425× | 0.397× | persist |
 
 ### Fixed overhead per run (N = 64, S = 100)
 
@@ -305,43 +305,43 @@ item 3: wall at a cell small enough that per-run overhead dominates (N=64, S=100
 
 | arm | wall (range) | kernel-only |
 |---|---:|---:|
-| eagle graph (device loop) | 643 µs (634 µs–652 µs) | – |
-| eagle graph + compaction | 684 µs (684 µs–685 µs) | – |
-| eagle graph + compaction + reorder | 840 µs (838 µs–844 µs) | – |
-| eagle graph, K fused steps per launch | 332 µs (328 µs–339 µs) | – |
-| eagle graph, K fused steps per launch + compaction | 388 µs (382 µs–394 µs) | – |
-| eagle auto (eagle picks the launch mode) | 680 µs (680 µs–681 µs) | – |
-| hawk + eagle persistent | 174 µs (168 µs–177 µs) | – |
-| eagle.simulate (eagle picks the launch mode) | 714 µs (712 µs–716 µs) | – |
-| eager launch loop | 3.72 ms (3.71 ms–3.73 ms) | – |
-| CuPy masked | 67 ms (66.9 ms–67.2 ms) | – |
-| PyTorch masked | 42.9 ms (42.9 ms–43 ms) | – |
-| PyTorch, CUDA graph of 16 steps | 6.95 ms (6.95 ms–6.95 ms) | – |
-| PyTorch torch.compile (reduce-overhead) | 13.6 ms (13.6 ms–13.7 ms) | – |
-| JAX jit + vmap(while_loop) | 3.07 ms (2.98 ms–3.12 ms) | – |
-| Warp per-thread kernel | 150 µs (148 µs–154 µs) | – |
-| CPU OpenMP | 381 µs (368 µs–392 µs) | – |
+| eagle graph (device loop) | 647 µs (639 µs–652 µs) | – |
+| eagle graph + compaction | 674 µs (673 µs–674 µs) | – |
+| eagle graph + compaction + reorder | 819 µs (811 µs–834 µs) | – |
+| eagle graph, K fused steps per launch | 318 µs (317 µs–320 µs) | – |
+| eagle graph, K fused steps per launch + compaction | 397 µs (391 µs–408 µs) | – |
+| eagle auto (eagle picks the launch mode) | 119 µs (118 µs–121 µs) | – |
+| hawk + eagle persistent | 175 µs (168 µs–185 µs) | – |
+| eagle.simulate (eagle picks the launch mode) | 130 µs (127 µs–134 µs) | – |
+| eager launch loop | 3.71 ms (3.7 ms–3.71 ms) | – |
+| CuPy masked | 66 ms (65.9 ms–66 ms) | – |
+| PyTorch masked | 42.6 ms (42.5 ms–42.6 ms) | – |
+| PyTorch, CUDA graph of 16 steps | 6.47 ms (6.47 ms–6.48 ms) | – |
+| PyTorch torch.compile (reduce-overhead) | 13.6 ms (13.5 ms–13.8 ms) | – |
+| JAX jit + vmap(while_loop) | 2.25 ms (2.22 ms–2.31 ms) | – |
+| Warp per-thread kernel | 136 µs (132 µs–143 µs) | – |
+| CPU OpenMP | 384 µs (382 µs–386 µs) | – |
 
 ### Where each tool fits
 
 Each tool below is written the way its users write it, and each brings something of its own. Times are walls (mean of the middle 3 of 5 runs) at the largest N; ratios are against the eagle graph arm (below 1 = less time). The fastest arm per N is listed under each table above.
 
-- **eagle graph (device loop).** The step written once as a hawk kernel; the whole loop runs on the device as one CUDA graph with a device-side stop guard, so a run is one launch with no host round trip per step. On this card: N = 1,000,000, spread S=100: 1.37 ms; spread S=1000: 6.18 ms; uniform S=1000: 6.18 ms. Fastest in 0 of 12 cells.
-- **eagle graph + compaction.** Adds an active-set map: the launch covers only the samples still running, rebuilt every 16 steps; it is made for batches that thin out (the spread configurations). On this card: N = 1,000,000, spread S=100: 4.42 ms (3.22× the eagle graph time); spread S=1000: 39 ms (6.31× the eagle graph time); uniform S=1000: 62.3 ms (10.1× the eagle graph time). Fastest in 0 of 12 cells.
-- **eagle graph + compaction + reorder.** Adds a physical reorder when the live samples spread thin over their warps, so the mapped reads stay contiguous; the final restore to sample order is inside its wall. On this card: N = 1,000,000, spread S=100: 3.5 ms (2.55× the eagle graph time); spread S=1000: 19.3 ms (3.13× the eagle graph time); uniform S=1000: 62.7 ms (10.1× the eagle graph time). Fastest in 0 of 12 cells.
-- **eagle graph, K fused steps per launch.** The same step with one decorator argument, @hawk.kernel(steps=16): each launch runs that many steps per sample with the state kept in registers, as Warp's per-thread loop does, and the launches, guard checks and plane reads shrink by the same factor; its results are bit-identical to the eagle graph arm's in every cell. K is chosen by hand here; the eagle_graph_auto arm picks it at run time. On this card: N = 1,000,000, spread S=100: 942 µs (0.686× the eagle graph time); spread S=1000: 5.79 ms (0.937× the eagle graph time); uniform S=1000: 6.38 ms (1.03× the eagle graph time). Fastest in 0 of 12 cells.
-- **eagle graph, K fused steps per launch + compaction.** The K-steps kernel over the active-set map: the register-resident steps of the arm above, and the launches cover only the samples still running, so it fits batches that thin out. On this card: N = 1,000,000, spread S=100: 914 µs (0.665× the eagle graph time); spread S=1000: 3.91 ms (0.633× the eagle graph time); uniform S=1000: 6.33 ms (1.02× the eagle graph time). Fastest in 0 of 12 cells.
-- **eagle auto (eagle picks the launch mode).** The same step with @hawk.kernel(steps="auto") on the active-set kind, and nothing to tune: it picks the steps per launch itself after every launch, on the device, so a batch whose samples all run to the end gets Warp-like fusion of up to 64 steps per launch, and a batch that thins out gets shorter launches with the active set compacted after each one; no sample takes more steps than the cap. On this card: N = 1,000,000, spread S=100: 2.04 ms (1.49× the eagle graph time); spread S=1000: 5.08 ms (0.823× the eagle graph time); uniform S=1000: 6.39 ms (1.03× the eagle graph time). Fastest in 0 of 12 cells.
-- **hawk + eagle persistent.** The plain (not active-set) automatic kernel, forced through hawk's persist entry: one launch, no graph, no map, no policy kernel, no cap at 64 -- a grid of SMs blocks of 256 lanes each steal the next unfinished sample off a counter when their own finishes, so idle warps refill without ever rebuilding an index map; made for batches too large for one resident wave. On this card: N = 1,000,000, spread S=100: 1.27 ms (0.926× the eagle graph time); spread S=1000: 3.56 ms (0.577× the eagle graph time); uniform S=1000: 5.46 ms (0.884× the eagle graph time). Fastest in 3 of 12 cells.
-- **eagle.simulate (eagle picks the launch mode).** The same automatic kernel through eagle.simulate: the model, its state and its parameters by name, with no plan or plane binding to write; eagle deploys the kernel and builds the same device loop. On this card: N = 1,000,000, spread S=100: 2.02 ms (1.47× the eagle graph time); spread S=1000: 5.12 ms (0.829× the eagle graph time); uniform S=1000: 6.43 ms (1.04× the eagle graph time). Fastest in 0 of 12 cells.
-- **eager launch loop.** The same kernels launched from Python one step at a time; the host sees the state after every step. On this card: N = 1,000,000, spread S=100: 6.71 ms (4.88× the eagle graph time); spread S=1000: 65.8 ms (10.6× the eagle graph time); uniform S=1000: 87.4 ms (14.1× the eagle graph time). Fastest in 0 of 12 cells.
-- **CuPy masked.** NumPy-like array code on GPUs with no kernel to write; every sample is computed every step, so it fits dense batches where all samples run to the end (the uniform configuration). On this card: N = 1,000,000, spread S=100: 69.9 ms (50.8× the eagle graph time); spread S=1000: 705 ms (114× the eagle graph time); uniform S=1000: 696 ms (113× the eagle graph time). Fastest in 0 of 12 cells.
-- **PyTorch masked.** The same array code in PyTorch tensors; it fits where the computation sits next to a PyTorch model or needs autograd. On this card: N = 1,000,000, spread S=100: 60.6 ms (44.1× the eagle graph time); spread S=1000: 606 ms (98.1× the eagle graph time); uniform S=1000: 605 ms (98× the eagle graph time). Fastest in 0 of 12 cells.
-- **PyTorch, CUDA graph of 16 steps.** The same PyTorch code with its launch overhead removed by hand: 16 steps captured as one CUDA graph and replayed, one host check per replay, the masking unchanged. On this card: N = 1,000,000, spread S=100: 59.4 ms (43.2× the eagle graph time); spread S=1000: 532 ms (86.1× the eagle graph time); uniform S=1000: 532 ms (86.2× the eagle graph time). Fastest in 0 of 12 cells.
-- **PyTorch torch.compile (reduce-overhead).** The PyTorch step under torch.compile(mode="reduce-overhead"): Inductor-fused kernels replayed as a CUDA graph. On this card: N = 1,000,000, spread S=100: 17.1 ms (12.4× the eagle graph time); spread S=1000: 172 ms (27.8× the eagle graph time); uniform S=1000: 170 ms (27.5× the eagle graph time). Fastest in 0 of 12 cells.
-- **JAX jit + vmap(while_loop).** The whole loop compiled once, a per-sample while loop batched with vmap; the same code runs on CPUs and GPUs and differentiates with jax.grad. On this card: N = 1,000,000, spread S=100: 9.61 ms (6.99× the eagle graph time); spread S=1000: 91.2 ms (14.8× the eagle graph time); uniform S=1000: 91.2 ms (14.8× the eagle graph time). Fastest in 0 of 12 cells.
-- **Warp per-thread kernel.** Explicit per-thread kernels written in Python, maintained by NVIDIA and differentiable through wp.Tape; each thread runs its own sample and stops at its own step, so finished samples cost nothing. On this card: N = 1,000,000, spread S=100: 620 µs (0.451× the eagle graph time); spread S=1000: 5.96 ms (0.965× the eagle graph time); uniform S=1000: 6.69 ms (1.08× the eagle graph time). Fastest in 9 of 12 cells.
-- **CPU OpenMP.** The same hawk kernel on the host through eagle's OpenMP team, for machines without a GPU. On this card: N = 1,000,000, spread S=100: 28.7 ms (20.9× the eagle graph time); spread S=1000: 268 ms (43.4× the eagle graph time); uniform S=1000: 300 ms (48.5× the eagle graph time). Fastest in 0 of 12 cells.
+- **eagle graph (device loop).** The step written once as a hawk kernel; the whole loop runs on the device as one CUDA graph with a device-side stop guard, so a run is one launch with no host round trip per step. On this card: N = 1,000,000, spread S=100: 1.38 ms; spread S=1000: 5.33 ms; uniform S=1000: 5.87 ms. Fastest in 0 of 12 cells.
+- **eagle graph + compaction.** Adds an active-set map: the launch covers only the samples still running, rebuilt every 16 steps; it is made for batches that thin out (the spread configurations). On this card: N = 1,000,000, spread S=100: 3.77 ms (2.74× the eagle graph time); spread S=1000: 32.6 ms (6.13× the eagle graph time); uniform S=1000: 53.7 ms (9.14× the eagle graph time). Fastest in 0 of 12 cells.
+- **eagle graph + compaction + reorder.** Adds a physical reorder when the live samples spread thin over their warps, so the mapped reads stay contiguous; the final restore to sample order is inside its wall. On this card: N = 1,000,000, spread S=100: 3.23 ms (2.35× the eagle graph time); spread S=1000: 17.2 ms (3.24× the eagle graph time); uniform S=1000: 54.4 ms (9.26× the eagle graph time). Fastest in 0 of 12 cells.
+- **eagle graph, K fused steps per launch.** The same step with one decorator argument, @hawk.kernel(steps=16): each launch runs that many steps per sample with the state kept in registers, as Warp's per-thread loop does, and the launches, guard checks and plane reads shrink by the same factor; its results are bit-identical to the eagle graph arm's in every cell. K is chosen by hand here; the eagle_graph_auto arm picks it at run time. On this card: N = 1,000,000, spread S=100: 880 µs (0.639× the eagle graph time); spread S=1000: 5.55 ms (1.04× the eagle graph time); uniform S=1000: 6.19 ms (1.05× the eagle graph time). Fastest in 0 of 12 cells.
+- **eagle graph, K fused steps per launch + compaction.** The K-steps kernel over the active-set map: the register-resident steps of the arm above, and the launches cover only the samples still running, so it fits batches that thin out. On this card: N = 1,000,000, spread S=100: 959 µs (0.697× the eagle graph time); spread S=1000: 3.54 ms (0.665× the eagle graph time); uniform S=1000: 6.07 ms (1.03× the eagle graph time). Fastest in 0 of 12 cells.
+- **eagle auto (eagle picks the launch mode).** The same step with @hawk.kernel(steps="auto") on the active-set kind, and nothing to tune: it picks the steps per launch itself after every launch, on the device, so a batch whose samples all run to the end gets Warp-like fusion of up to 64 steps per launch, and a batch that thins out gets shorter launches with the active set compacted after each one; no sample takes more steps than the cap. On this card: N = 1,000,000, spread S=100: 390 µs (0.284× the eagle graph time); spread S=1000: 1.48 ms (0.277× the eagle graph time); uniform S=1000: 4.83 ms (0.822× the eagle graph time). Fastest in 11 of 12 cells.
+- **hawk + eagle persistent.** The plain (not active-set) automatic kernel, forced through hawk's persist entry: one launch, no graph, no map, no policy kernel, no cap at 64 -- a grid of SMs blocks of 256 lanes each steal the next unfinished sample off a counter when their own finishes, so idle warps refill without ever rebuilding an index map; made for batches too large for one resident wave. On this card: N = 1,000,000, spread S=100: 536 µs (0.389× the eagle graph time); spread S=1000: 1.53 ms (0.287× the eagle graph time); uniform S=1000: 5.07 ms (0.863× the eagle graph time). Fastest in 0 of 12 cells.
+- **eagle.simulate (eagle picks the launch mode).** The same automatic kernel through eagle.simulate: the model, its state and its parameters by name, with no plan or plane binding to write; eagle deploys the kernel and builds the same device loop. On this card: N = 1,000,000, spread S=100: 410 µs (0.298× the eagle graph time); spread S=1000: 1.5 ms (0.281× the eagle graph time); uniform S=1000: 4.85 ms (0.826× the eagle graph time). Fastest in 0 of 12 cells.
+- **eager launch loop.** The same kernels launched from Python one step at a time; the host sees the state after every step. On this card: N = 1,000,000, spread S=100: 6.43 ms (4.67× the eagle graph time); spread S=1000: 59.4 ms (11.2× the eagle graph time); uniform S=1000: 76.9 ms (13.1× the eagle graph time). Fastest in 0 of 12 cells.
+- **CuPy masked.** NumPy-like array code on GPUs with no kernel to write; every sample is computed every step, so it fits dense batches where all samples run to the end (the uniform configuration). On this card: N = 1,000,000, spread S=100: 68.7 ms (49.9× the eagle graph time); spread S=1000: 673 ms (126× the eagle graph time); uniform S=1000: 679 ms (116× the eagle graph time). Fastest in 0 of 12 cells.
+- **PyTorch masked.** The same array code in PyTorch tensors; it fits where the computation sits next to a PyTorch model or needs autograd. On this card: N = 1,000,000, spread S=100: 60.7 ms (44.1× the eagle graph time); spread S=1000: 608 ms (114× the eagle graph time); uniform S=1000: 608 ms (104× the eagle graph time). Fastest in 0 of 12 cells.
+- **PyTorch, CUDA graph of 16 steps.** The same PyTorch code with its launch overhead removed by hand: 16 steps captured as one CUDA graph and replayed, one host check per replay, the masking unchanged. On this card: N = 1,000,000, spread S=100: 59.2 ms (43× the eagle graph time); spread S=1000: 532 ms (100× the eagle graph time); uniform S=1000: 532 ms (90.7× the eagle graph time). Fastest in 0 of 12 cells.
+- **PyTorch torch.compile (reduce-overhead).** The PyTorch step under torch.compile(mode="reduce-overhead"): Inductor-fused kernels replayed as a CUDA graph. On this card: N = 1,000,000, spread S=100: 17.2 ms (12.5× the eagle graph time); spread S=1000: 167 ms (31.4× the eagle graph time); uniform S=1000: 166 ms (28.2× the eagle graph time). Fastest in 0 of 12 cells.
+- **JAX jit + vmap(while_loop).** The whole loop compiled once, a per-sample while loop batched with vmap; the same code runs on CPUs and GPUs and differentiates with jax.grad. On this card: N = 1,000,000, spread S=100: 9.5 ms (6.9× the eagle graph time); spread S=1000: 90.7 ms (17× the eagle graph time); uniform S=1000: 90.5 ms (15.4× the eagle graph time). Fastest in 0 of 12 cells.
+- **Warp per-thread kernel.** Explicit per-thread kernels written in Python, maintained by NVIDIA and differentiable through wp.Tape; each thread runs its own sample and stops at its own step, so finished samples cost nothing. On this card: N = 1,000,000, spread S=100: 604 µs (0.439× the eagle graph time); spread S=1000: 5.94 ms (1.12× the eagle graph time); uniform S=1000: 6.67 ms (1.14× the eagle graph time). Fastest in 1 of 12 cells.
+- **CPU OpenMP.** The same hawk kernel on the host through eagle's OpenMP team, for machines without a GPU. On this card: N = 1,000,000, spread S=100: 29.8 ms (21.6× the eagle graph time); spread S=1000: 281 ms (52.8× the eagle graph time); uniform S=1000: 261 ms (44.4× the eagle graph time). Fastest in 0 of 12 cells.
 
 ### Compile time
 
@@ -349,31 +349,31 @@ Its own pass, never part of any wall. Each measurement is a fresh process: the i
 
 | arm | compiled | cold (median of 3) | warm (median of 3) |
 |---|---|---:|---:|
-| eagle graph (device loop) | eagle.deploy of the hawk step kernel (the device build; the host side builds in the background), the device-loop graph | 2.09 s | 149 ms |
-| eagle graph + compaction | eagle.deploy of the hawk active-set step kernel (the device build; the host side builds in the background), the compaction-loop graph | 2 s | 136 ms |
-| eagle graph + compaction + reorder | eagle.deploy of the hawk active-set step kernel (the device build; the host side builds in the background), the compaction + reorder loop graph | 2.09 s | 137 ms |
-| eagle graph, K fused steps per launch | eagle.deploy of the hawk K-steps kernel (the device build; the host side builds in the background), the device-loop graph | 2.01 s | 139 ms |
-| eagle graph, K fused steps per launch + compaction | eagle.deploy of the hawk active-set K-steps kernel (the device build; the host side builds in the background), the compaction-loop graph | 2.01 s | 138 ms |
-| eagle auto (eagle picks the launch mode) | eagle.deploy of the hawk active-set automatic kernel (the device build; the host side builds in the background), the policy kernel, the policy-loop graph | 2.07 s | 144 ms |
-| hawk + eagle persistent | eagle.deploy of the hawk automatic kernel (the device build; the host side builds in the background), the persistent launch | 1.95 s | 141 ms |
-| eagle.simulate (eagle picks the launch mode) | eagle.simulate's deploy of the hawk active-set automatic kernel (the device build; the host side builds in the background), the policy kernel, the policy-loop graph | 2.1 s | 145 ms |
-| eager launch loop | eagle.deploy of the hawk single step kernel (the device build; the host side builds in the background) | 1.89 s | 132 ms |
-| CuPy masked | CuPy's elementwise and reduction kernels of one masked step | 1.05 s | 40.9 ms |
-| PyTorch torch.compile (reduce-overhead) | torch.compile (Inductor + Triton) and CUDA-graph record, N = 1,000 | 6.46 s | 4.25 s |
-| PyTorch torch.compile (reduce-overhead) | torch.compile (Inductor + Triton) and CUDA-graph record, N = 10,000 | 6.6 s | 4.19 s |
-| PyTorch torch.compile (reduce-overhead) | torch.compile (Inductor + Triton) and CUDA-graph record, N = 100,000 | 6.72 s | 4.26 s |
-| PyTorch torch.compile (reduce-overhead) | torch.compile (Inductor + Triton) and CUDA-graph record, N = 1,000,000 | 6.81 s | 4.24 s |
-| Warp per-thread kernel | Warp kernel module (code generation, NVRTC compile, load) | 925 ms | 239 ms |
-| JAX jit + vmap(while_loop) | XLA executable for N = 1,000 | 258 ms | 57 ms |
-| JAX jit + vmap(while_loop) | XLA executable for N = 10,000 | 235 ms | 57.3 ms |
-| JAX jit + vmap(while_loop) | XLA executable for N = 100,000 | 267 ms | 59.4 ms |
-| JAX jit + vmap(while_loop) | XLA executable for N = 1,000,000 | 272 ms | 57.8 ms |
-| CPU OpenMP | eagle.deploy of the hawk step kernel and its first host run, which waits for the host build | 1.95 s | 155 ms |
+| eagle graph (device loop) | eagle.deploy of the hawk step kernel (the device build; the host side builds in the background), the device-loop graph | 1.22 s | 110 ms |
+| eagle graph + compaction | eagle.deploy of the hawk active-set step kernel (the device build; the host side builds in the background), the compaction-loop graph | 978 ms | 92.9 ms |
+| eagle graph + compaction + reorder | eagle.deploy of the hawk active-set step kernel (the device build; the host side builds in the background), the compaction + reorder loop graph | 1.09 s | 96.1 ms |
+| eagle graph, K fused steps per launch | eagle.deploy of the hawk K-steps kernel (the device build; the host side builds in the background), the device-loop graph | 995 ms | 102 ms |
+| eagle graph, K fused steps per launch + compaction | eagle.deploy of the hawk active-set K-steps kernel (the device build; the host side builds in the background), the compaction-loop graph | 998 ms | 104 ms |
+| eagle auto (eagle picks the launch mode) | eagle.deploy of the hawk active-set automatic kernel (the device build; the host side builds in the background), the policy kernel, the policy-loop graph | 1.32 s | 110 ms |
+| hawk + eagle persistent | eagle.deploy of the hawk automatic kernel (the device build; the host side builds in the background), the persistent launch | 1.06 s | 107 ms |
+| eagle.simulate (eagle picks the launch mode) | eagle.simulate's deploy of the hawk active-set automatic kernel (the device build; the host side builds in the background), the policy kernel, the policy-loop graph | 1.32 s | 113 ms |
+| eager launch loop | eagle.deploy of the hawk single step kernel (the device build; the host side builds in the background) | 865 ms | 82.3 ms |
+| CuPy masked | CuPy's elementwise and reduction kernels of one masked step | 1.05 s | 33.5 ms |
+| PyTorch torch.compile (reduce-overhead) | torch.compile (Inductor + Triton) and CUDA-graph record, N = 1,000 | 6.19 s | 4.08 s |
+| PyTorch torch.compile (reduce-overhead) | torch.compile (Inductor + Triton) and CUDA-graph record, N = 10,000 | 6.53 s | 4.05 s |
+| PyTorch torch.compile (reduce-overhead) | torch.compile (Inductor + Triton) and CUDA-graph record, N = 100,000 | 6.62 s | 4.05 s |
+| PyTorch torch.compile (reduce-overhead) | torch.compile (Inductor + Triton) and CUDA-graph record, N = 1,000,000 | 6.63 s | 4.06 s |
+| Warp per-thread kernel | Warp kernel module (code generation, NVRTC compile, load) | 936 ms | 250 ms |
+| JAX jit + vmap(while_loop) | XLA executable for N = 1,000 | 250 ms | 56.9 ms |
+| JAX jit + vmap(while_loop) | XLA executable for N = 10,000 | 235 ms | 56.4 ms |
+| JAX jit + vmap(while_loop) | XLA executable for N = 100,000 | 258 ms | 56 ms |
+| JAX jit + vmap(while_loop) | XLA executable for N = 1,000,000 | 274 ms | 57.2 ms |
+| CPU OpenMP | eagle.deploy of the hawk step kernel and its first host run, which waits for the host build | 1.78 s | 102 ms |
 
 No compile step: PyTorch masked, PyTorch, CUDA graph of 16 steps (PyTorch's eager kernels ship prebuilt; the CUDA-graph capture is per N and recorded per configuration as torch_graph_capture_s).
 
 ### Memory method
 
-A separate pass after the timing pass. Each (arm, N, configuration) runs in a fresh process: imports, the arm's kernels built and a warm-up run on a 64-sample batch (every compile happens here; JAX also compiles for shape N from abstract shapes), every caching allocator trimmed (CuPy's pools freed, torch.cuda.empty_cache(), Warp's pool release threshold set to 0), then the baseline; then the batch's inputs generated, the arm set up for N (eagle builds its graph, PyTorch captures its CUDA graph, whose private memory pool counts) and one full run with upload and download. Device memory = the memory the CUDA driver accounts to the process (NVML per-process used memory) after the run minus at the baseline. The caching allocators of CuPy, PyTorch and JAX are left at their defaults and are not trimmed after the baseline; each keeps the memory it reserved until trimmed, so the reading after the run is the allocator's high-water reservation, the same measure for every arm. A disabled pool returns memory between operations, so its peak could only be caught by sampling, which misses short peaks; the held reservation needs no sampling. Caveats: the reading is what the process holds, so each allocator's rounding and growth policy count (JAX's allocator grows in regions that can exceed the request; PyTorch's rounds blocks up; a captured CUDA graph keeps a private pool; Warp's stream-ordered pool reserves in chunks of tens of MiB); the driver accounts in pages of about 2 MiB, so small-N rows read 0 or one page. The per-library counters (CuPy pool, torch.cuda.max_memory_reserved/allocated, JAX memory_stats) are recorded in the JSON as a cross-check. Host memory = peak resident set size above the baseline (/proc/self/clear_refs reset at the baseline, then VmHWM). Minimum = the state the workload needs, N × (2 state + 3 per-sample scalars: omega, zeta, stop step) × 8 bytes; the factor is device memory / minimum.
+A separate pass after the timing pass. Each (arm, N, configuration) runs in a fresh process: imports, the CUDA context created by one tiny device operation, then the baseline read, before the arm builds or allocates anything; then the arm's kernels built and a warm-up run on a 64-sample batch (every compile happens here; JAX also compiles for shape N from abstract shapes), so every library's pool reserved during the warm-up counts in the reading; CuPy's pools freed and torch.cuda.empty_cache() called after the warm-up (Warp's pool release threshold set to 0); then the batch's inputs generated, the arm set up for N (eagle builds its graph, PyTorch captures its CUDA graph, whose private memory pool counts) and one full run with upload and download. Device memory = the memory the CUDA driver accounts to the process (NVML per-process used memory) after the run minus at the baseline. The caching allocators of CuPy, PyTorch and JAX are left at their defaults and are not trimmed after the run; each keeps the memory it reserved until trimmed, so the reading after the run is the allocator's high-water reservation, the same measure for every arm. A disabled pool returns memory between operations, so its peak could only be caught by sampling, which misses short peaks; the held reservation needs no sampling. Caveats: the reading is what the process holds, so each allocator's rounding and growth policy count (JAX's allocator grows in regions that can exceed the request; PyTorch's rounds blocks up; a captured CUDA graph keeps a private pool; Warp's stream-ordered pool reserves in chunks of tens of MiB); the driver accounts in pages of about 2 MiB, so small-N rows read 0 or one page. The per-library counters (CuPy pool, torch.cuda.max_memory_reserved/allocated, JAX memory_stats) are recorded in the JSON as a cross-check. Host memory = peak resident set size above the host baseline (taken after the warm-up; /proc/self/clear_refs reset there, then VmHWM). Minimum = the state the workload needs, N × ((2 state + 2 float64 scalars: omega, zeta) × 8 + 4 bytes for the stop step as a 32-bit integer) = 36 bytes per sample; the factor is device memory / minimum.
 
-Device memory the process already held at the baseline (CUDA context, loaded kernels and libraries, the warm-up's leftovers; at N = 1,000,000, first configuration): eagle graph (device loop) 418 MiB; eagle graph + compaction 418 MiB; eagle graph + compaction + reorder 418 MiB; eagle graph, K fused steps per launch 418 MiB; eagle graph, K fused steps per launch + compaction 418 MiB; eagle auto (eagle picks the launch mode) 418 MiB; hawk + eagle persistent 418 MiB; eagle.simulate (eagle picks the launch mode) 418 MiB; eager launch loop 418 MiB; CuPy masked 418 MiB; PyTorch masked 492 MiB; PyTorch, CUDA graph of 16 steps 518 MiB; PyTorch torch.compile (reduce-overhead) 516 MiB; JAX jit + vmap(while_loop) 554 MiB; Warp per-thread kernel 418 MiB.
+Device memory the process already held at the baseline (CUDA context, loaded kernels and libraries, the warm-up's leftovers; at N = 1,000,000, first configuration): eagle graph (device loop) 420 MiB; eagle graph + compaction 420 MiB; eagle graph + compaction + reorder 420 MiB; eagle graph, K fused steps per launch 420 MiB; eagle graph, K fused steps per launch + compaction 420 MiB; eagle auto (eagle picks the launch mode) 420 MiB; hawk + eagle persistent 420 MiB; eagle.simulate (eagle picks the launch mode) 420 MiB; eager launch loop 420 MiB; CuPy masked 420 MiB; PyTorch masked 420 MiB; PyTorch, CUDA graph of 16 steps 420 MiB; PyTorch torch.compile (reduce-overhead) 420 MiB; JAX jit + vmap(while_loop) 420 MiB; Warp per-thread kernel 420 MiB.

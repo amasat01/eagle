@@ -113,10 +113,10 @@ endif()
 
 if (EAGLE_CPP_MODE)
   message(STATUS "> Configuring eagle in C++ only mode")
-  project(eagle VERSION 0.5.1 LANGUAGES CXX)
+  project(eagle VERSION 0.6.0 LANGUAGES CXX)
 else()
   message(STATUS "> Configuring eagle in CUDA/C++ mode")
-  project(eagle VERSION 0.5.1 LANGUAGES CUDA CXX)
+  project(eagle VERSION 0.6.0 LANGUAGES CUDA CXX)
 endif()
 
 ###########################

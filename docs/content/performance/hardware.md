@@ -1,12 +1,25 @@
 # Hardware caveat
 
-The GPU cards come from a Quadro P2000, a development, consumer-class
-card whose FP64 throughput (1:32 of its FP32 rate) and memory bandwidth are
-recorded in each card, and from a Kaggle Tesla T4; the CPU cards come from an Intel Xeon W-2125
-workstation chip (4 cores, 8 logical CPUs). The method transfers to other
-hardware unchanged; the absolute numbers, and possibly the crossover points
-between arms, will differ on data-centre GPUs or larger CPUs, whose FP64
-throughput, bandwidth and core counts differ from these cards'. A card from
-such a device would be added beside these, produced by the same scripts.
+Every card records the device it was measured on: its name, compute capability or CPU model, and, for a GPU,
+the FP64 throughput and memory bandwidth the card's ratios are taken against. The devices with a committed
+card are listed below; the lists are generated from the cards, so a device added next to them appears here
+without an edit.
 
-The GPU card is measured on two devices: the Quadro P2000, the reference card for every ratio quoted in Reading the numbers, and a Tesla T4 (Kaggle, power-capped at 70 W, CUDA 12.6). On the T4 we observed significant SM clock fluctuations between and within arm blocks, so its cells move more from run to run than the P2000's; the card records the SM clock of every timed run.
+## GPUs
+
+```{include} /content/_generated/perf_card_gpu_devices.md
+```
+
+## CPUs
+
+```{include} /content/_generated/perf_card_cpu_devices.md
+```
+
+The method transfers to other hardware unchanged; the absolute numbers, and the crossover points between arms,
+differ from device to device, because FP64 throughput, memory bandwidth, launch overhead and core counts differ.
+[Reading the numbers](reading.md) describes the NVIDIA H100 card and the AMD EPYC 9B45 card and names the
+device wherever it quotes another; each other device has its own tab on the results pages. A card from a new
+device is added beside these, produced by the same scripts.
+
+One device is worth a note. The Tesla T4 (Kaggle, power-capped at 70 W) showed
+significant SM clock fluctuations between and within arm blocks, so its cells can move more from run to run; each card records the SM clock of every timed run.

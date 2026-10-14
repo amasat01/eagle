@@ -31,6 +31,8 @@ builds a hawk kernel into a plan that runs where its data lives.
 on every sample until each one finishes, called exactly like the kernel itself.
 """
 
+from importlib import metadata as _metadata
+
 from ._active_set import ActiveSet, compaction_body
 from ._backend import BackendUnavailable
 from ._conditional import RepeatWhile, SkipGuard, Skippable, repeat_while, skippable
@@ -60,6 +62,11 @@ from .loaded import LoadedKernel, LoadedPure, LoadedVector
 from ._busy import Busy
 from .pipeline import GraphPipeline
 from .registry import KernelRegistry, load_manifest
+
+try:
+    __version__ = _metadata.version("raptor-eagle")
+except _metadata.PackageNotFoundError:  # a source tree on sys.path with no install metadata
+    __version__ = "unknown"
 
 __all__ = [
     "ABI_VERSION",

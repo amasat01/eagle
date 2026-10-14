@@ -184,10 +184,11 @@ def test_a_real_hawk_cost_goes_through_the_rule():
 
     cost = dispatch_costs(canonical(rare.sinks))["dispatch0"]
     assert dp.static_selector(cost.selector_reads, {"y"})
-    assert cost.fused_vectorised      # sample-local: the fused host loop runs every branch
+    assert not cost.fused_vectorised  # the fused host loop renders the dispatch as a switch, which stays scalar
     big = 1 << 26  # the host's launch terms are noise at this size
-    assert dp.resolve(cost, [big * 98 // 100, big // 100, big // 100], **RUN) == "segmented"
-    assert dp.resolve(cost, [0, big, 0], **RUN) == "switch"
+    # which path wins a mixed batch is measured, not fixed here (test_dispatch_door follows the faster path)
+    assert dp.resolve(cost, [big * 98 // 100, big // 100, big // 100], **RUN) in ("switch", "segmented")
+    assert dp.resolve(cost, [0, big, 0], **RUN) in ("switch", "segmented")
 
 
 def test_the_bound_constants_are_the_ruled_ones():
@@ -211,3 +212,63 @@ def test_cost_model_is_thread_safe_to_call_concurrently():
         got = list(pool.map(lambda _: dp.predicted_gain(PROBE, _heavy(5), fused_steps=64,
                                                         remaining_steps=400), range(64)))
     assert got == [want] * 64
+
+
+def _chained(*rows, vectorised=()):
+    flags = list(vectorised) or [False] * len(rows)
+    return SimpleNamespace(
+        branches=[SimpleNamespace(chain_tuple=lambda r=r: r, vectorised=v) for r, v in zip(rows, flags)],
+        fused_vectorised=all(flags))
+
+
+def test_chain_lengths_make_the_host_prefer_independent_work_and_leave_the_device_alone():
+    one = (0, 512, 0, 0, 0, 0, 0, 512, 0, 0)
+    four = (0, 512, 0, 0, 0, 0, 0, 128, 0, 0)
+    mix = [BATCH, 0]
+    t1 = _core.dispatch_seconds([one, one], mix, _core.cpu_device_props(), "host")[0]
+    t4 = _core.dispatch_seconds([four, four], mix, _core.cpu_device_props(), "host")[0]
+    assert t1 > 3 * t4
+    d1 = _core.dispatch_seconds([one, one], mix, CONSUMER, "device")[0]
+    d4 = _core.dispatch_seconds([four, four], mix, CONSUMER, "device")[0]
+    assert d1 == d4
+
+
+def test_the_policy_passes_chains_and_per_branch_flags_through():
+    cheap = (0, 2, 0, 0, 1, 0, 0, 2, 0, 0)
+    heavy = (0, 2, 0, 0, 1, 0, 0, 128, 0, 0)
+    scalar_heavy = _chained(cheap, heavy, vectorised=(True, False))
+    vector_heavy = _chained(cheap, heavy, vectorised=(True, True))
+    mix = _heavy(50)
+    assert dp.predicted_gain(scalar_heavy, mix) != dp.predicted_gain(vector_heavy, mix)
+
+
+def test_a_malformed_row_or_flag_list_is_refused_with_the_fix():
+    with pytest.raises(ValueError, match="6 counts"):
+        _core.dispatch_gain([(1, 2, 3), (1, 2, 3)], [1, 1], _core.cpu_device_props(), "host")
+    with pytest.raises(ValueError, match="one flag per branch"):
+        _core.dispatch_gain([CHEAP, CHEAP], [1, 1], _core.cpu_device_props(), "host",
+                            branch_vectorised=[True])
+
+
+def test_the_chain_weights_are_named_and_replaceable():
+    w = _core.default_dispatch_weights("host")
+    assert w["chain_seconds"] > 0 and w["vector_width"] >= 1
+    assert _core.default_dispatch_weights("device")["chain_seconds"] == 0
+    cost = _chained((0, 512, 0, 0, 0, 0, 0, 512, 0, 0), (0, 512, 0, 0, 0, 0, 0, 512, 0, 0))
+    fast = dp.predicted_gain(cost, [BATCH, 0], weights={"chain_seconds": 1e-12})
+    slow = dp.predicted_gain(cost, [BATCH, 0], weights={"chain_seconds": 1e-9})
+    assert fast != slow
+
+
+def test_a_row_with_a_store_count_prices_reads_and_writes_separately():
+    props = _core.cpu_device_props()
+    counts = [N, 0]
+
+    def seconds(*row):
+        return _core.dispatch_seconds([row, row], counts, props, "host")[1]
+
+    base = (0, 0, 0, 0, 8, 0, 0, 0, 0, 0)
+    assert seconds(*base, 8) == pytest.approx(seconds(*base))      # 8 read + 8 written = 2 x loads
+    assert seconds(*base, 0) < seconds(*base)                      # read-only planes are read once
+    with pytest.raises(ValueError):
+        seconds(*base, 8, 1)

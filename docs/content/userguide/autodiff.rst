@@ -22,7 +22,7 @@ word in them, and what eagle promises about the numbers that come back.
 
 .. note::
 
-   New to it? :doc:`tutorials/12_gradients_through_a_graph` builds this up
+   New to it? :doc:`tutorials/10_gradients_through_a_graph` builds this up
    step by step and checks every gradient against finite differences.
 
 Words used on this page
@@ -183,20 +183,172 @@ whatever order they arrive. That gradient is still correct, but not
 :term:`bitwise`; ``grads.report.bitwise["table"]`` says ``False``, and
 ``eagle.diff.reverse(..., strict=True)`` refuses such a reverse instead.
 
+.. _autodiff-conditionals:
+
+Gradients through conditionals
+------------------------------
+
+A step inside :func:`eagle.skippable` runs only while its guard cell is
+non-zero; one inside :func:`eagle.repeat_while` repeats while its guard holds,
+up to a cap. Both reverse. The rule is the same for both: **the reverse
+differentiates the launch that happened, and never evaluates a guard.**
+
+- **Recorded.** ``build(record=True)`` saves the guard cell a ``skippable``
+  read (a one-value ``uint32`` copy), and a ``repeat_while`` already writes
+  its iteration count into a plane. These are all the reverse needs.
+- **Replayed.** The reverse turns those saved values into flags it owns and
+  runs the member's derivative only when the member ran: once for a taken
+  ``skippable``, once per iteration, newest first, for a ``repeat_while``.
+  The state each iteration started with is rebuilt from checkpoints kept every
+  few iterations, on private copies, so your planes are never written.
+  Flipping the guard between launches therefore needs no rebuild, and a
+  guard that counts its own reads is read zero times by the reverse.
+- **Passed through.** A skipped member leaves its planes as they were, so the
+  adjoint of a plane it would have updated in place goes to the plane's
+  earlier writer, and every other adjoint of the member is zero.
+
+The sum over a ``repeat_while``'s iterations runs oldest first, the order of
+the same chain written out as separate nodes, so the two give the same bits.
+
+.. code-block:: python
+
+   flag = np.array([1], dtype="uint32")             # 1: run `maybe`
+   maybe = eagle.skippable(wave_plan.bind(x=x, y=y).launch,
+                           eagle.SkipGuard.nonzero(flag))
+   g = (eagle.Graph()
+        .add(square_plan.bind(x=x, a=0.8, y=y), name="first")
+        .add_node(maybe, name="maybe")
+        .add(wave_plan.bind(x=y, y=z), name="last")
+        .build(record=True))
+   rev = eagle.diff.Reverse(g)
+   for on in (1, 0):
+       flag[0] = on                                  # no rebuild, no recapture
+       g.launch()
+       grads = rev(g.record, {"last.y": np.ones(n)})  # on=1: grads["a"] is 0
+
+The member of a ``repeat_while`` must be a plan launch; its cap is the most
+iterations a reverse unrolls. The full, checked version of this example is in
+:doc:`tutorials/11_conditionals_budgets_events`.
+
+.. _autodiff-budget:
+
+Memory budget
+-------------
+
+Reversing a recorded :func:`eagle.until_done` or :func:`eagle.simulation`
+(``record=True``) keeps the state at the start of every ``window`` steps and,
+working one window at a time from the last, recomputes the window's steps and
+steps the adjoint back through them. One sample therefore holds about
+``ceil(max_steps / window) + window`` states: the default window,
+``clamp(ceil(sqrt(max_steps)), 16, 1024)``, balances the two terms, and
+``window="full"`` trades memory for no recompute.
+
+``memory_budget`` (bytes; ``None``, the default, is half the free device
+memory, or half the available host RAM) caps what the reverse holds. When the
+whole batch does not fit, the reverse runs it in **passes** of ``256 * 2^q``
+samples, the largest that fits, and combines the passes' parameter sums with
+the canonical tree. Those sums are exactly the subtrees of the one-pass tree,
+so **the gradients are the same bits at any budget** (see
+:ref:`autodiff-bits`). What a smaller budget costs is time: each pass launches
+its own reverse over fewer samples.
+
+.. code-block:: python
+
+   sim = eagle.simulation(pendulum, ..., max_steps=400, record=True,
+                          window=20, memory_budget=1_000_000)
+   sim.run()
+   grads = eagle.diff.reverse(sim.record, {"x": np.ones(n)})
+   grads.report.chunks                  # how many passes it took
+
+A budget that cannot hold one sample, or fewer than the 256 a pass needs to keep
+parameter gradients bitwise, is refused with the bytes and the fix: raise
+``memory_budget``, lower ``max_steps``, or set ``window``. ``window=`` and
+``memory_budget=`` without ``record=True`` are refused too.
+
+.. _autodiff-events:
+
+Event refinement
+----------------
+
+A run-until-done stops a sample at the first *step* whose rule fires. Its stop
+time is then a multiple of the step, and nudging an input moves it by nothing,
+so the gradient of the stop time is zero. That is the right answer for the
+stepped model, and the wrong one if the model is a continuous trajectory that
+you sampled. ``events="refine"`` finds the crossing *inside* the stop step.
+
+The kernel declares its time plane and step, ``@hawk.kernel(time="t",
+time_step="dt")``, and its stop rule is read as a smooth guard ``g`` that
+changes sign (``terminated = y < 0``; a count or a flag has no crossing and is
+refused). The run then:
+
+1. steps as usual, remembering the state before each sample's last step;
+2. solves ``g = 0`` for the partial step ``tau`` in ``[0, dt]`` by Newton's
+   method with a bisection fallback (at most 8 rounds);
+3. writes the state *at* the crossing over the stepped one, and the event time
+   and how it was found into ``runner.t_stop`` and ``runner.event_status``.
+
+The reverse (:func:`eagle.diff.reverse` of a ``record=True`` run, no extra
+flag) adds the **event sensitivity**: how the stop time moves with the
+initial state and the parameters, from the implicit function theorem on
+``g = 0``, together with its effect on the end state. Nothing else changes.
+
+.. code-block:: python
+
+   sim = eagle.simulation(fall, dt=0.1, g=9.81, y=y0, v=v0, t=t0,
+                          max_steps=200, events="refine", record=True)
+   sim.run()
+   sim.runner.t_stop                                    # the event time
+   grads = eagle.diff.reverse(sim.record, {"t": np.ones(n)})
+   grads["y"]                                           # dt*/dy0, here 1/(g t*)
+
+A sample that never crosses inside its stop step (it hit ``max_steps``) is
+refused, unless you pass ``on_no_event="zero"``: its stop stays the stepped
+one, with zero event sensitivity. A grazing crossing, and two stop rules
+crossing in one step, are always refused, because the sensitivity is not
+defined there.
+
+**Phases.** A hybrid trajectory (a ball that bounces, a pendulum that hits a
+wall) is a *phase* graph: each continuous piece is a refined run, and
+:func:`eagle.diff.phase` makes it a node of an ordinary :class:`eagle.Graph`,
+with a reset kernel between pieces.
+
+.. code-block:: python
+
+   graph = (eagle.Graph()
+            .add_node(eagle.diff.phase(down), name="fall")
+            .add(bounce_plan.bind(e=e, v_in=v_down, v=v_up), name="bounce")
+            .add_node(eagle.diff.phase(up), name="rise")
+            .build(record=True))
+   graph.launch()                       # restarts each phase, runs it to its event
+   grads = eagle.diff.reverse(graph.record, {"y": np.ones(n)})
+
+Each launch of the graph restarts every phase and runs it to its event. The
+reverse chains the phases through the reset kernels' vjps, which is the chain
+rule across each jump (the saltation of the jump, in the hybrid-systems
+literature). The number of phases is the graph's, so a phase inside
+:func:`eagle.repeat_while` is refused. On the GPU a phase is an eager node (it
+reads its own progress back between launches), and the graph is captured in
+segments around it. The checked version of both examples is in
+:doc:`tutorials/11_conditionals_budgets_events`.
+
 What a reverse refuses
 ----------------------
 
 Each refusal names the node and what to do instead:
 
 - an opaque node (``eagle.graph.opaque``): eagle cannot know its derivative;
-- a node inside ``eagle.skippable`` / ``eagle.repeat_while``: not reversible
-  yet;
 - a kernel that reads a plane before assigning it (a value carried from one
   launch to the next): its derivative needs the overwritten value;
 - a ``"max"`` or ``"all"`` :func:`eagle.reduce`: a tie has no single
   derivative (``"sum"`` reverses);
 - a reverse of a reverse (second order);
-- a launch node with no vjp and none passed.
+- a launch node with no vjp and none passed;
+- a ``repeat_while`` whose body is not a plan launch;
+- a ``record=True`` run of a step made of several plans, or of a kernel taking
+  several steps per launch (record one kernel per step);
+- ``vjps=`` for a recorded run;
+- the ``events="refine"`` cases above: no smooth crossing, no crossing in the
+  stop step, a grazing crossing, two rules crossing at once.
 
 Threads
 -------

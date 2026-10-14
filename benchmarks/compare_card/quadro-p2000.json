@@ -1,0 +1,14 @@
+{
+  "schema": "eagle-compare-evidence/1",
+  "slug": "quadro-p2000",
+  "device": "Quadro P2000",
+  "session": "p2000",
+  "eagle_commit": "06b72ca2d0aae86d0e3d6d10e47678d542914f93",
+  "hawk_commit": "efaed2cd9e04c71c2647007aa54f907db69c7aa7",
+  "commits_source": "card card_quadro-p2000.json",
+  "csv_md5": "c5af65b67b41b8a5808e2c7721bd74c9",
+  "kit_branch": "profile-kit",
+  "kit_commit": "f6cdc0f8449259ba42e35f5891683aac24b90e3a",
+  "gpu_profile_md5": "c8c45b7753117acb9218715874b5e726",
+  "generated_utc": "2026-10-13T17:30:28Z"
+}
