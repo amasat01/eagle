@@ -147,8 +147,16 @@ void requireDevice()
     }();
     if (status == cudaSuccess)
         return;
-    const std::string text = std::string("eagle: the CUDA backend cannot run here: ") + cudaGetErrorName(status)
+    std::string text = std::string("eagle: the CUDA backend cannot run here: ") + cudaGetErrorName(status)
         + " (" + cudaGetErrorString(status) + ")";
+    if (status == cudaErrorNoDevice)
+        text = "eagle: no CUDA GPU visible (cudaErrorNoDevice). Check nvidia-smi and CUDA_VISIBLE_DEVICES. "
+               "To run on the CPU instead, pass NumPy arrays (not CuPy arrays): the same eagle call then runs on CPU threads.";
+    else if (status == cudaErrorInsufficientDriver || status == cudaErrorSystemDriverMismatch)
+        text = std::string("eagle: the NVIDIA driver cannot run this CUDA build (") + cudaGetErrorName(status)
+            + "). Install the extra that matches your driver: pip install \"raptor-eagle[cuda12]\" for a CUDA 12 "
+              "driver (R525 or newer), \"raptor-eagle[cuda13]\" for a CUDA 13 driver (R580 or newer); "
+              "run nvidia-smi to see which CUDA version your driver supports.";
     if (isUnavailableCode(status))
         throw DeviceUnavailable(text);
     throw std::runtime_error(text);

@@ -59,7 +59,10 @@ print(result.status, result.steps, result.x[:3])
 # (steps counts whole check intervals, so it varies with the launch strategy eagle picks; x does not)
 ```
 
-NumPy arrays in, and the same call runs on CPU threads.
+NumPy arrays in, and the same call runs on CPU threads. No GPU? Change the first line to `import numpy as cp` and the
+example above runs unchanged on the CPU (`steps` then prints 1024, not 1000: it counts whole check intervals, which differ by route). Errors:
+`no CUDA GPU visible` means there is no GPU (or `CUDA_VISIBLE_DEVICES` hides it); `cudaErrorInsufficientDriver` means the
+installed extra does not match the driver, so install `raptor-eagle[cuda12]` for a CUDA 12 driver or `[cuda13]` for CUDA 13.
 **[Quickstart](https://amasat01.github.io/eagle/content/userguide/quickstart_python.html)** ·
 [Install](#install) · [Performance](#performance) · [C++ API](#c-api)
 
