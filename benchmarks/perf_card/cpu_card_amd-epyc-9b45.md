@@ -32,56 +32,56 @@ What each arm needed to get there: JAX, a cap in the while_loop condition; eagle
 
 | N | arm | threads | wall (IQR) | sample·steps/s | useful FLOP/s (% peak) | CPU busy | peak memory (× minimum) |
 |---:|---|---:|---:|---:|---:|---:|---:|
-| 1,000 | eagle host, termination loop, up to 8 threads | 8 | 27.2 µs (59.7 ns) | 8.10e8 | 3.56e10 (–) | 8.2 | 162 MiB (4.71e+03×) |
-| 1,000 | eagle host, termination loop, 1 thread | 1 | 117 µs (46.3 ns) | 1.89e8 | 8.32e9 (–) | 1 | 162 MiB (4.72e+03×) |
-| 1,000 | eagle host, termination + compaction, up to 8 threads | 8 | 233 µs (4.43 µs) | 9.46e7 | 4.16e9 (–) | 8 | 162 MiB (4.71e+03×) |
-| 1,000 | eagle host, termination + compaction, 1 thread | 1 | 205 µs (1.68 µs) | 1.08e8 | 4.73e9 (–) | 1 | 162 MiB (4.72e+03×) |
-| 1,000 | eagle host, termination + compaction + reorder, up to 8 threads | 8 | 249 µs (2 µs) | 8.85e7 | 3.89e9 (–) | 8 | 161 MiB (4.69e+03×) |
-| 1,000 | eagle host, termination + compaction + reorder, 1 thread | 1 | 228 µs (499 ns) | 9.68e7 | 4.26e9 (–) | 1 | 161 MiB (4.69e+03×) |
-| 1,000 | Numba prange, 8 threads | 8 | 39 µs (59.4 ns) | 5.65e8 | 2.49e10 (–) | 8.1 | 0.871 MiB (25.4×) |
-| 1,000 | JAX sharded over 8 CPU devices | 8 | 85.2 µs (45 ns) | 2.59e8 | 1.14e10 (–) | 5.8 | 0.387 MiB (11.3×) |
+| 1,000 | eagle host, termination loop, up to 8 threads | 8 | 27.2 µs (59.7 ns) | 8.10e8 | 3.56e10 (–) | 8.2 | 0 MiB (0×) |
+| 1,000 | eagle host, termination loop, 1 thread | 1 | 117 µs (46.3 ns) | 1.89e8 | 8.32e9 (–) | 1 | 0 MiB (0×) |
+| 1,000 | eagle host, termination + compaction, up to 8 threads | 8 | 233 µs (4.43 µs) | 9.46e7 | 4.16e9 (–) | 8 | 0 MiB (0×) |
+| 1,000 | eagle host, termination + compaction, 1 thread | 1 | 205 µs (1.68 µs) | 1.08e8 | 4.73e9 (–) | 1 | 0 MiB (0×) |
+| 1,000 | eagle host, termination + compaction + reorder, up to 8 threads | 8 | 249 µs (2 µs) | 8.85e7 | 3.89e9 (–) | 8 | 0 MiB (0×) |
+| 1,000 | eagle host, termination + compaction + reorder, 1 thread | 1 | 228 µs (499 ns) | 9.68e7 | 4.26e9 (–) | 1 | 0 MiB (0×) |
+| 1,000 | Numba prange, 8 threads | 8 | 39 µs (59.4 ns) | 5.65e8 | 2.49e10 (–) | 8.1 | 0 MiB (0×) |
+| 1,000 | JAX sharded over 8 CPU devices | 8 | 85.2 µs (45 ns) | 2.59e8 | 1.14e10 (–) | 5.8 | 0 MiB (0×) |
 | 1,000 | JAX jit + vmap(while_loop), 1 device | 8 | 185 µs (756 ns) | 1.19e8 | 5.23e9 (–) | 1.1 | 0 MiB (0×) |
 | 1,000 | PyTorch masked, 8 threads | 8 | 4.5 ms (9.06 µs) | 4.90e6 | 2.16e8 (–) | 1 | 0 MiB (0×) |
-| 1,000 | NumPy masked | 1 | 2.3 ms (13.9 µs) | 9.59e6 | 4.22e8 (–) | 1 | 170 MiB (4.94e+03×) |
-| 1,000 | multiprocessing, 8 x NumPy | 8 | 1.84 ms (8.38 µs) | 1.20e7 | 5.28e8 (–) | 6.9 | 169 MiB (4.93e+03×) |
-| 1,000 | plain Python loops | 1 | 3.67 ms (5.04 µs) | 6.00e6 | 2.64e8 (–) | 1 | 172 MiB (5.01e+03×) |
-| 10,000 | eagle host, termination loop, up to 8 threads | 8 | 159 µs (156 ns) | 1.44e9 | 6.31e10 (–) | 8.2 | 162 MiB (472×) |
-| 10,000 | eagle host, termination loop, 1 thread | 1 | 1.11 ms (2.7 µs) | 2.06e8 | 9.07e9 (–) | 1 | 162 MiB (472×) |
-| 10,000 | eagle host, termination + compaction, up to 8 threads | 8 | 484 µs (2.07 µs) | 4.72e8 | 2.08e10 (–) | 8.1 | 162 MiB (471×) |
-| 10,000 | eagle host, termination + compaction, 1 thread | 1 | 1.48 ms (2.4 µs) | 1.54e8 | 6.79e9 (–) | 1 | 162 MiB (472×) |
-| 10,000 | eagle host, termination + compaction + reorder, up to 8 threads | 8 | 811 µs (5.76 µs) | 2.82e8 | 1.24e10 (–) | 8 | 161 MiB (468×) |
-| 10,000 | eagle host, termination + compaction + reorder, 1 thread | 1 | 1.84 ms (3.72 µs) | 1.25e8 | 5.48e9 (–) | 1 | 161 MiB (469×) |
-| 10,000 | Numba prange, 8 threads | 8 | 338 µs (671 ns) | 6.76e8 | 2.98e10 (–) | 8 | 0.855 MiB (2.49×) |
-| 10,000 | JAX sharded over 8 CPU devices | 8 | 450 µs (4.22 µs) | 5.08e8 | 2.23e10 (–) | 6.1 | 3.89 MiB (11.3×) |
+| 1,000 | NumPy masked | 1 | 2.3 ms (13.9 µs) | 9.59e6 | 4.22e8 (–) | 1 | 0 MiB (0×) |
+| 1,000 | multiprocessing, 8 x NumPy | 8 | 1.84 ms (8.38 µs) | 1.20e7 | 5.28e8 (–) | 6.9 | 0 MiB (0×) |
+| 1,000 | plain Python loops | 1 | 3.67 ms (5.04 µs) | 6.00e6 | 2.64e8 (–) | 1 | 3.55 MiB (103×) |
+| 10,000 | eagle host, termination loop, up to 8 threads | 8 | 159 µs (156 ns) | 1.44e9 | 6.31e10 (–) | 8.2 | 0.629 MiB (1.83×) |
+| 10,000 | eagle host, termination loop, 1 thread | 1 | 1.11 ms (2.7 µs) | 2.06e8 | 9.07e9 (–) | 1 | 0.648 MiB (1.89×) |
+| 10,000 | eagle host, termination + compaction, up to 8 threads | 8 | 484 µs (2.07 µs) | 4.72e8 | 2.08e10 (–) | 8.1 | 0.551 MiB (1.6×) |
+| 10,000 | eagle host, termination + compaction, 1 thread | 1 | 1.48 ms (2.4 µs) | 1.54e8 | 6.79e9 (–) | 1 | 0.719 MiB (2.09×) |
+| 10,000 | eagle host, termination + compaction + reorder, up to 8 threads | 8 | 811 µs (5.76 µs) | 2.82e8 | 1.24e10 (–) | 8 | 1.96 MiB (5.7×) |
+| 10,000 | eagle host, termination + compaction + reorder, 1 thread | 1 | 1.84 ms (3.72 µs) | 1.25e8 | 5.48e9 (–) | 1 | 2.07 MiB (6.03×) |
+| 10,000 | Numba prange, 8 threads | 8 | 338 µs (671 ns) | 6.76e8 | 2.98e10 (–) | 8 | 0 MiB (0×) |
+| 10,000 | JAX sharded over 8 CPU devices | 8 | 450 µs (4.22 µs) | 5.08e8 | 2.23e10 (–) | 6.1 | 2.37 MiB (6.89×) |
 | 10,000 | JAX jit + vmap(while_loop), 1 device | 8 | 1.59 ms (5.1 µs) | 1.44e8 | 6.33e9 (–) | 2 | 0 MiB (0×) |
-| 10,000 | PyTorch masked, 8 threads | 8 | 12.5 ms (57.3 µs) | 1.83e7 | 8.07e8 (–) | 1 | 2.12 MiB (6.18×) |
-| 10,000 | NumPy masked | 1 | 9.2 ms (54.9 µs) | 2.49e7 | 1.09e9 (–) | 1 | 170 MiB (494×) |
-| 10,000 | multiprocessing, 8 x NumPy | 8 | 3.07 ms (10.1 µs) | 7.45e7 | 3.28e9 (–) | 7 | 169 MiB (493×) |
-| 10,000 | plain Python loops | 1 | 38.7 ms (1.57 ms) | 5.91e6 | 2.60e8 (–) | 1 | 172 MiB (500×) |
-| 100,000 | eagle host, termination loop, up to 8 threads | 8 | 1.44 ms (12.5 µs) | 1.59e9 | 7.00e10 (–) | 8 | 162 MiB (47.2×) |
-| 100,000 | eagle host, termination loop, 1 thread | 1 | 11.3 ms (16.2 µs) | 2.03e8 | 8.92e9 (–) | 1 | 162 MiB (47.2×) |
-| 100,000 | eagle host, termination + compaction, up to 8 threads | 8 | 2.96 ms (4.14 µs) | 7.74e8 | 3.40e10 (–) | 8 | 162 MiB (47.2×) |
-| 100,000 | eagle host, termination + compaction, 1 thread | 1 | 15.3 ms (38.5 µs) | 1.49e8 | 6.57e9 (–) | 1 | 162 MiB (47.2×) |
-| 100,000 | eagle host, termination + compaction + reorder, up to 8 threads | 8 | 7.04 ms (27 µs) | 3.25e8 | 1.43e10 (–) | 8 | 161 MiB (46.8×) |
-| 100,000 | eagle host, termination + compaction + reorder, 1 thread | 1 | 19.1 ms (66.5 µs) | 1.20e8 | 5.26e9 (–) | 1 | 161 MiB (46.9×) |
-| 100,000 | Numba prange, 8 threads | 8 | 3.27 ms (4.29 µs) | 7.01e8 | 3.08e10 (–) | 8 | 6.24 MiB (1.82×) |
-| 100,000 | JAX sharded over 8 CPU devices | 8 | 4.1 ms (35.6 µs) | 5.58e8 | 2.46e10 (–) | 11 | 19.4 MiB (5.66×) |
-| 100,000 | JAX jit + vmap(while_loop), 1 device | 8 | 13.2 ms (12.9 µs) | 1.73e8 | 7.63e9 (–) | 2.1 | 16.6 MiB (4.83×) |
-| 100,000 | PyTorch masked, 8 threads | 8 | 41.2 ms (3.85 ms) | 5.56e7 | 2.45e9 (–) | 8 | 27.2 MiB (7.93×) |
-| 100,000 | NumPy masked | 1 | 123 ms (1.59 ms) | 1.86e7 | 8.18e8 (–) | 1 | 170 MiB (49.4×) |
-| 100,000 | multiprocessing, 8 x NumPy | 8 | 17.8 ms (7.32 ms) | 1.29e8 | 5.66e9 (–) | 6 | 180 MiB (52.5×) |
-| 1,000,000 | eagle host, termination loop, up to 8 threads | 8 | 14.4 ms (24 µs) | 1.60e9 | 7.05e10 (–) | 8 | 162 MiB (4.72×) |
-| 1,000,000 | eagle host, termination loop, 1 thread | 1 | 114 ms (138 µs) | 2.02e8 | 8.90e9 (–) | 1 | 162 MiB (4.72×) |
-| 1,000,000 | eagle host, termination + compaction, up to 8 threads | 8 | 38.4 ms (225 µs) | 5.98e8 | 2.63e10 (–) | 8 | 162 MiB (4.71×) |
-| 1,000,000 | eagle host, termination + compaction, 1 thread | 1 | 164 ms (2.22 ms) | 1.40e8 | 6.17e9 (–) | 1 | 162 MiB (4.72×) |
-| 1,000,000 | eagle host, termination + compaction + reorder, up to 8 threads | 8 | 74.6 ms (710 µs) | 3.08e8 | 1.36e10 (–) | 5.2 | 161 MiB (4.68×) |
-| 1,000,000 | eagle host, termination + compaction + reorder, 1 thread | 1 | 196 ms (2.47 ms) | 1.17e8 | 5.17e9 (–) | 1 | 161 MiB (4.69×) |
-| 1,000,000 | Numba prange, 8 threads | 8 | 32.4 ms (21.2 µs) | 7.09e8 | 3.12e10 (–) | 8 | 68.1 MiB (1.98×) |
-| 1,000,000 | JAX sharded over 8 CPU devices | 8 | 194 ms (8.01 ms) | 1.19e8 | 5.23e9 (–) | 14 | 196 MiB (5.7×) |
-| 1,000,000 | JAX jit + vmap(while_loop), 1 device | 8 | 296 ms (10.8 ms) | 7.77e7 | 3.42e9 (–) | 3.7 | 182 MiB (5.31×) |
+| 10,000 | PyTorch masked, 8 threads | 8 | 12.5 ms (57.3 µs) | 1.83e7 | 8.07e8 (–) | 1 | 2.2 MiB (6.41×) |
+| 10,000 | NumPy masked | 1 | 9.2 ms (54.9 µs) | 2.49e7 | 1.09e9 (–) | 1 | 1.59 MiB (4.63×) |
+| 10,000 | multiprocessing, 8 x NumPy | 8 | 3.07 ms (10.1 µs) | 7.45e7 | 3.28e9 (–) | 7 | 1.34 MiB (3.9×) |
+| 10,000 | plain Python loops | 1 | 38.7 ms (1.57 ms) | 5.91e6 | 2.60e8 (–) | 1 | 3.63 MiB (10.6×) |
+| 100,000 | eagle host, termination loop, up to 8 threads | 8 | 1.44 ms (12.5 µs) | 1.59e9 | 7.00e10 (–) | 8 | 9.32 MiB (2.71×) |
+| 100,000 | eagle host, termination loop, 1 thread | 1 | 11.3 ms (16.2 µs) | 2.03e8 | 8.92e9 (–) | 1 | 9.31 MiB (2.71×) |
+| 100,000 | eagle host, termination + compaction, up to 8 threads | 8 | 2.96 ms (4.14 µs) | 7.74e8 | 3.40e10 (–) | 8 | 9.61 MiB (2.8×) |
+| 100,000 | eagle host, termination + compaction, 1 thread | 1 | 15.3 ms (38.5 µs) | 1.49e8 | 6.57e9 (–) | 1 | 9.79 MiB (2.85×) |
+| 100,000 | eagle host, termination + compaction + reorder, up to 8 threads | 8 | 7.04 ms (27 µs) | 3.25e8 | 1.43e10 (–) | 8 | 13.9 MiB (4.04×) |
+| 100,000 | eagle host, termination + compaction + reorder, 1 thread | 1 | 19.1 ms (66.5 µs) | 1.20e8 | 5.26e9 (–) | 1 | 14 MiB (4.09×) |
+| 100,000 | Numba prange, 8 threads | 8 | 3.27 ms (4.29 µs) | 7.01e8 | 3.08e10 (–) | 8 | 6.34 MiB (1.85×) |
+| 100,000 | JAX sharded over 8 CPU devices | 8 | 4.1 ms (35.6 µs) | 5.58e8 | 2.46e10 (–) | 11 | 19.7 MiB (5.74×) |
+| 100,000 | JAX jit + vmap(while_loop), 1 device | 8 | 13.2 ms (12.9 µs) | 1.73e8 | 7.63e9 (–) | 2.1 | 14.1 MiB (4.12×) |
+| 100,000 | PyTorch masked, 8 threads | 8 | 41.2 ms (3.85 ms) | 5.56e7 | 2.45e9 (–) | 8 | 27.1 MiB (7.9×) |
+| 100,000 | NumPy masked | 1 | 123 ms (1.59 ms) | 1.86e7 | 8.18e8 (–) | 1 | 17.1 MiB (4.98×) |
+| 100,000 | multiprocessing, 8 x NumPy | 8 | 17.8 ms (7.32 ms) | 1.29e8 | 5.66e9 (–) | 6 | 21.4 MiB (6.24×) |
+| 1,000,000 | eagle host, termination loop, up to 8 threads | 8 | 14.4 ms (24 µs) | 1.60e9 | 7.05e10 (–) | 8 | 96 MiB (2.8×) |
+| 1,000,000 | eagle host, termination loop, 1 thread | 1 | 114 ms (138 µs) | 2.02e8 | 8.90e9 (–) | 1 | 96 MiB (2.8×) |
+| 1,000,000 | eagle host, termination + compaction, up to 8 threads | 8 | 38.4 ms (225 µs) | 5.98e8 | 2.63e10 (–) | 8 | 99.8 MiB (2.91×) |
+| 1,000,000 | eagle host, termination + compaction, 1 thread | 1 | 164 ms (2.22 ms) | 1.40e8 | 6.17e9 (–) | 1 | 99.8 MiB (2.91×) |
+| 1,000,000 | eagle host, termination + compaction + reorder, up to 8 threads | 8 | 74.6 ms (710 µs) | 3.08e8 | 1.36e10 (–) | 5.2 | 129 MiB (3.76×) |
+| 1,000,000 | eagle host, termination + compaction + reorder, 1 thread | 1 | 196 ms (2.47 ms) | 1.17e8 | 5.17e9 (–) | 1 | 129 MiB (3.76×) |
+| 1,000,000 | Numba prange, 8 threads | 8 | 32.4 ms (21.2 µs) | 7.09e8 | 3.12e10 (–) | 8 | 68.3 MiB (1.99×) |
+| 1,000,000 | JAX sharded over 8 CPU devices | 8 | 194 ms (8.01 ms) | 1.19e8 | 5.23e9 (–) | 14 | 198 MiB (5.76×) |
+| 1,000,000 | JAX jit + vmap(while_loop), 1 device | 8 | 296 ms (10.8 ms) | 7.77e7 | 3.42e9 (–) | 3.7 | 152 MiB (4.41×) |
 | 1,000,000 | PyTorch masked, 8 threads | 8 | 1.06 s (30.4 ms) | 2.17e7 | 9.56e8 (–) | 8 | 267 MiB (7.79×) |
-| 1,000,000 | NumPy masked | 1 | 1.64 s (10.9 ms) | 1.41e7 | 6.19e8 (–) | 1 | 169 MiB (4.94×) |
-| 1,000,000 | multiprocessing, 8 x NumPy | 8 | 782 ms (15.5 ms) | 2.94e7 | 1.29e9 (–) | 7.7 | 304 MiB (8.86×) |
+| 1,000,000 | NumPy masked | 1 | 1.64 s (10.9 ms) | 1.41e7 | 6.19e8 (–) | 1 | 169 MiB (4.92×) |
+| 1,000,000 | multiprocessing, 8 x NumPy | 8 | 782 ms (15.5 ms) | 2.94e7 | 1.29e9 (–) | 7.7 | 234 MiB (6.82×) |
 
 Fastest arm by median wall time:
 
@@ -94,56 +94,56 @@ Fastest arm by median wall time:
 
 | N | arm | threads | wall (IQR) | sample·steps/s | useful FLOP/s (% peak) | CPU busy | peak memory (× minimum) |
 |---:|---|---:|---:|---:|---:|---:|---:|
-| 1,000 | eagle host, termination loop, up to 8 threads | 8 | 167 µs (685 ns) | 1.26e9 | 5.52e10 (–) | 8.1 | 162 MiB (4.72e+03×) |
-| 1,000 | eagle host, termination loop, 1 thread | 1 | 1.07 ms (1.96 µs) | 1.96e8 | 8.64e9 (–) | 1 | 162 MiB (4.72e+03×) |
-| 1,000 | eagle host, termination + compaction, up to 8 threads | 8 | 2.28 ms (29 µs) | 9.21e7 | 4.05e9 (–) | 8 | 162 MiB (4.71e+03×) |
-| 1,000 | eagle host, termination + compaction, 1 thread | 1 | 1.93 ms (3.02 µs) | 1.09e8 | 4.79e9 (–) | 1 | 162 MiB (4.72e+03×) |
-| 1,000 | eagle host, termination + compaction + reorder, up to 8 threads | 8 | 2.45 ms (46.5 µs) | 8.58e7 | 3.77e9 (–) | 8 | 161 MiB (4.68e+03×) |
-| 1,000 | eagle host, termination + compaction + reorder, 1 thread | 1 | 2.11 ms (8.59 µs) | 9.94e7 | 4.37e9 (–) | 1 | 161 MiB (4.69e+03×) |
-| 1,000 | Numba prange, 8 threads | 8 | 368 µs (122 ns) | 5.71e8 | 2.51e10 (–) | 8 | 0.82 MiB (23.9×) |
-| 1,000 | JAX sharded over 8 CPU devices | 8 | 491 µs (3.59 µs) | 4.28e8 | 1.88e10 (–) | 6.1 | 0 MiB (0×) |
+| 1,000 | eagle host, termination loop, up to 8 threads | 8 | 167 µs (685 ns) | 1.26e9 | 5.52e10 (–) | 8.1 | 39.9 MiB (1.16e+03×) |
+| 1,000 | eagle host, termination loop, 1 thread | 1 | 1.07 ms (1.96 µs) | 1.96e8 | 8.64e9 (–) | 1 | 39.8 MiB (1.16e+03×) |
+| 1,000 | eagle host, termination + compaction, up to 8 threads | 8 | 2.28 ms (29 µs) | 9.21e7 | 4.05e9 (–) | 8 | 39.6 MiB (1.15e+03×) |
+| 1,000 | eagle host, termination + compaction, 1 thread | 1 | 1.93 ms (3.02 µs) | 1.09e8 | 4.79e9 (–) | 1 | 39.9 MiB (1.16e+03×) |
+| 1,000 | eagle host, termination + compaction + reorder, up to 8 threads | 8 | 2.45 ms (46.5 µs) | 8.58e7 | 3.77e9 (–) | 8 | 38.5 MiB (1.12e+03×) |
+| 1,000 | eagle host, termination + compaction + reorder, 1 thread | 1 | 2.11 ms (8.59 µs) | 9.94e7 | 4.37e9 (–) | 1 | 38.7 MiB (1.13e+03×) |
+| 1,000 | Numba prange, 8 threads | 8 | 368 µs (122 ns) | 5.71e8 | 2.51e10 (–) | 8 | 0 MiB (0×) |
+| 1,000 | JAX sharded over 8 CPU devices | 8 | 491 µs (3.59 µs) | 4.28e8 | 1.88e10 (–) | 6.1 | 1.75 MiB (51×) |
 | 1,000 | JAX jit + vmap(while_loop), 1 device | 8 | 1.75 ms (8.57 µs) | 1.20e8 | 5.28e9 (–) | 1 | 0 MiB (0×) |
 | 1,000 | PyTorch masked, 8 threads | 8 | 44.7 ms (33.4 µs) | 4.70e6 | 2.07e8 (–) | 1 | 0 MiB (0×) |
-| 1,000 | NumPy masked | 1 | 23.2 ms (264 µs) | 9.04e6 | 3.98e8 (–) | 1 | 170 MiB (4.94e+03×) |
-| 1,000 | multiprocessing, 8 x NumPy | 8 | 15.6 ms (5.18 ms) | 1.35e7 | 5.94e8 (–) | 7.6 | 170 MiB (4.94e+03×) |
-| 1,000 | plain Python loops | 1 | 34.9 ms (43.5 µs) | 6.02e6 | 2.65e8 (–) | 1 | 172 MiB (5e+03×) |
-| 10,000 | eagle host, termination loop, up to 8 threads | 8 | 1.5 ms (5.27 µs) | 1.45e9 | 6.38e10 (–) | 8 | 162 MiB (472×) |
-| 10,000 | eagle host, termination loop, 1 thread | 1 | 11.5 ms (26.4 µs) | 1.89e8 | 8.34e9 (–) | 1 | 162 MiB (472×) |
-| 10,000 | eagle host, termination + compaction, up to 8 threads | 8 | 3.88 ms (28.6 µs) | 5.62e8 | 2.47e10 (–) | 8 | 162 MiB (471×) |
-| 10,000 | eagle host, termination + compaction, 1 thread | 1 | 9.27 ms (36 µs) | 2.35e8 | 1.04e10 (–) | 1 | 162 MiB (472×) |
-| 10,000 | eagle host, termination + compaction + reorder, up to 8 threads | 8 | 4.47 ms (29.8 µs) | 4.88e8 | 2.15e10 (–) | 8 | 161 MiB (468×) |
-| 10,000 | eagle host, termination + compaction + reorder, 1 thread | 1 | 9.92 ms (17.7 µs) | 2.20e8 | 9.68e9 (–) | 1 | 161 MiB (469×) |
-| 10,000 | Numba prange, 8 threads | 8 | 3.46 ms (6.29 µs) | 6.31e8 | 2.78e10 (–) | 8 | 1.04 MiB (3.03×) |
-| 10,000 | JAX sharded over 8 CPU devices | 8 | 4.08 ms (168 µs) | 5.35e8 | 2.36e10 (–) | 6.3 | 2.96 MiB (8.62×) |
+| 1,000 | NumPy masked | 1 | 23.2 ms (264 µs) | 9.04e6 | 3.98e8 (–) | 1 | 47.3 MiB (1.38e+03×) |
+| 1,000 | multiprocessing, 8 x NumPy | 8 | 15.6 ms (5.18 ms) | 1.35e7 | 5.94e8 (–) | 7.6 | 47.3 MiB (1.38e+03×) |
+| 1,000 | plain Python loops | 1 | 34.9 ms (43.5 µs) | 6.02e6 | 2.65e8 (–) | 1 | 49.5 MiB (1.44e+03×) |
+| 10,000 | eagle host, termination loop, up to 8 threads | 8 | 1.5 ms (5.27 µs) | 1.45e9 | 6.38e10 (–) | 8 | 39.8 MiB (116×) |
+| 10,000 | eagle host, termination loop, 1 thread | 1 | 11.5 ms (26.4 µs) | 1.89e8 | 8.34e9 (–) | 1 | 39.9 MiB (116×) |
+| 10,000 | eagle host, termination + compaction, up to 8 threads | 8 | 3.88 ms (28.6 µs) | 5.62e8 | 2.47e10 (–) | 8 | 39.6 MiB (115×) |
+| 10,000 | eagle host, termination + compaction, 1 thread | 1 | 9.27 ms (36 µs) | 2.35e8 | 1.04e10 (–) | 1 | 39.7 MiB (116×) |
+| 10,000 | eagle host, termination + compaction + reorder, up to 8 threads | 8 | 4.47 ms (29.8 µs) | 4.88e8 | 2.15e10 (–) | 8 | 38.6 MiB (113×) |
+| 10,000 | eagle host, termination + compaction + reorder, 1 thread | 1 | 9.92 ms (17.7 µs) | 2.20e8 | 9.68e9 (–) | 1 | 38.8 MiB (113×) |
+| 10,000 | Numba prange, 8 threads | 8 | 3.46 ms (6.29 µs) | 6.31e8 | 2.78e10 (–) | 8 | 0 MiB (0×) |
+| 10,000 | JAX sharded over 8 CPU devices | 8 | 4.08 ms (168 µs) | 5.35e8 | 2.36e10 (–) | 6.3 | 3.37 MiB (9.81×) |
 | 10,000 | JAX jit + vmap(while_loop), 1 device | 8 | 16.7 ms (291 µs) | 1.31e8 | 5.75e9 (–) | 2 | 0 MiB (0×) |
-| 10,000 | PyTorch masked, 8 threads | 8 | 117 ms (1.13 ms) | 1.87e7 | 8.21e8 (–) | 1 | 2.04 MiB (5.93×) |
-| 10,000 | NumPy masked | 1 | 83.8 ms (484 µs) | 2.61e7 | 1.15e9 (–) | 1 | 170 MiB (494×) |
-| 10,000 | multiprocessing, 8 x NumPy | 8 | 38.9 ms (1.58 ms) | 5.62e7 | 2.47e9 (–) | 5.8 | 169 MiB (493×) |
-| 10,000 | plain Python loops | 1 | 362 ms (470 µs) | 6.03e6 | 2.65e8 (–) | 1 | 172 MiB (500×) |
-| 100,000 | eagle host, termination loop, up to 8 threads | 8 | 14.3 ms (26.8 µs) | 1.51e9 | 6.65e10 (–) | 8 | 162 MiB (47.2×) |
-| 100,000 | eagle host, termination loop, 1 thread | 1 | 113 ms (162 µs) | 1.92e8 | 8.44e9 (–) | 1 | 162 MiB (47.2×) |
-| 100,000 | eagle host, termination + compaction, up to 8 threads | 8 | 19.1 ms (49.7 µs) | 1.13e9 | 4.98e10 (–) | 8 | 162 MiB (47.1×) |
-| 100,000 | eagle host, termination + compaction, 1 thread | 1 | 91.8 ms (209 µs) | 2.36e8 | 1.04e10 (–) | 1 | 162 MiB (47.2×) |
-| 100,000 | eagle host, termination + compaction + reorder, up to 8 threads | 8 | 22.9 ms (58.5 µs) | 9.46e8 | 4.16e10 (–) | 8 | 161 MiB (46.8×) |
-| 100,000 | eagle host, termination + compaction + reorder, 1 thread | 1 | 87.3 ms (85 µs) | 2.48e8 | 1.09e10 (–) | 1 | 161 MiB (46.9×) |
-| 100,000 | Numba prange, 8 threads | 8 | 33.2 ms (9.04 µs) | 6.52e8 | 2.87e10 (–) | 8 | 6.22 MiB (1.81×) |
-| 100,000 | JAX sharded over 8 CPU devices | 8 | 40.5 ms (44 µs) | 5.35e8 | 2.35e10 (–) | 11 | 21.1 MiB (6.13×) |
-| 100,000 | JAX jit + vmap(while_loop), 1 device | 8 | 132 ms (1.58 ms) | 1.64e8 | 7.21e9 (–) | 2.1 | 17.2 MiB (5.01×) |
-| 100,000 | PyTorch masked, 8 threads | 8 | 314 ms (1.98 ms) | 6.90e7 | 3.04e9 (–) | 8 | 28 MiB (8.15×) |
-| 100,000 | NumPy masked | 1 | 1 s (1.01 ms) | 2.16e7 | 9.49e8 (–) | 1 | 170 MiB (49.4×) |
-| 100,000 | multiprocessing, 8 x NumPy | 8 | 134 ms (16 ms) | 1.62e8 | 7.13e9 (–) | 6.8 | 181 MiB (52.8×) |
-| 1,000,000 | eagle host, termination loop, up to 8 threads | 8 | 142 ms (360 µs) | 1.52e9 | 6.71e10 (–) | 8 | 162 MiB (4.71×) |
-| 1,000,000 | eagle host, termination loop, 1 thread | 1 | 1.13 s (742 µs) | 1.92e8 | 8.44e9 (–) | 1 | 162 MiB (4.72×) |
-| 1,000,000 | eagle host, termination + compaction, up to 8 threads | 8 | 292 ms (2.78 ms) | 7.41e8 | 3.26e10 (–) | 8 | 162 MiB (4.71×) |
-| 1,000,000 | eagle host, termination + compaction, 1 thread | 1 | 1.03 s (4.1 ms) | 2.09e8 | 9.21e9 (–) | 1 | 162 MiB (4.72×) |
-| 1,000,000 | eagle host, termination + compaction + reorder, up to 8 threads | 8 | 242 ms (3.67 ms) | 8.94e8 | 3.93e10 (–) | 7 | 161 MiB (4.68×) |
-| 1,000,000 | eagle host, termination + compaction + reorder, 1 thread | 1 | 877 ms (193 µs) | 2.47e8 | 1.09e10 (–) | 1 | 161 MiB (4.69×) |
-| 1,000,000 | Numba prange, 8 threads | 8 | 328 ms (162 µs) | 6.59e8 | 2.90e10 (–) | 8 | 68.3 MiB (1.99×) |
-| 1,000,000 | JAX sharded over 8 CPU devices | 8 | 1.86 s (39.8 ms) | 1.16e8 | 5.10e9 (–) | 14 | 199 MiB (5.8×) |
+| 10,000 | PyTorch masked, 8 threads | 8 | 117 ms (1.13 ms) | 1.87e7 | 8.21e8 (–) | 1 | 2.27 MiB (6.61×) |
+| 10,000 | NumPy masked | 1 | 83.8 ms (484 µs) | 2.61e7 | 1.15e9 (–) | 1 | 47.3 MiB (138×) |
+| 10,000 | multiprocessing, 8 x NumPy | 8 | 38.9 ms (1.58 ms) | 5.62e7 | 2.47e9 (–) | 5.8 | 47.3 MiB (138×) |
+| 10,000 | plain Python loops | 1 | 362 ms (470 µs) | 6.03e6 | 2.65e8 (–) | 1 | 49.4 MiB (144×) |
+| 100,000 | eagle host, termination loop, up to 8 threads | 8 | 14.3 ms (26.8 µs) | 1.51e9 | 6.65e10 (–) | 8 | 39.7 MiB (11.6×) |
+| 100,000 | eagle host, termination loop, 1 thread | 1 | 113 ms (162 µs) | 1.92e8 | 8.44e9 (–) | 1 | 39.8 MiB (11.6×) |
+| 100,000 | eagle host, termination + compaction, up to 8 threads | 8 | 19.1 ms (49.7 µs) | 1.13e9 | 4.98e10 (–) | 8 | 39.6 MiB (11.5×) |
+| 100,000 | eagle host, termination + compaction, 1 thread | 1 | 91.8 ms (209 µs) | 2.36e8 | 1.04e10 (–) | 1 | 39.7 MiB (11.6×) |
+| 100,000 | eagle host, termination + compaction + reorder, up to 8 threads | 8 | 22.9 ms (58.5 µs) | 9.46e8 | 4.16e10 (–) | 8 | 38.5 MiB (11.2×) |
+| 100,000 | eagle host, termination + compaction + reorder, 1 thread | 1 | 87.3 ms (85 µs) | 2.48e8 | 1.09e10 (–) | 1 | 38.7 MiB (11.3×) |
+| 100,000 | Numba prange, 8 threads | 8 | 33.2 ms (9.04 µs) | 6.52e8 | 2.87e10 (–) | 8 | 6.12 MiB (1.78×) |
+| 100,000 | JAX sharded over 8 CPU devices | 8 | 40.5 ms (44 µs) | 5.35e8 | 2.35e10 (–) | 11 | 19.6 MiB (5.7×) |
+| 100,000 | JAX jit + vmap(while_loop), 1 device | 8 | 132 ms (1.58 ms) | 1.64e8 | 7.21e9 (–) | 2.1 | 17.4 MiB (5.06×) |
+| 100,000 | PyTorch masked, 8 threads | 8 | 314 ms (1.98 ms) | 6.90e7 | 3.04e9 (–) | 8 | 27.9 MiB (8.13×) |
+| 100,000 | NumPy masked | 1 | 1 s (1.01 ms) | 2.16e7 | 9.49e8 (–) | 1 | 47.4 MiB (13.8×) |
+| 100,000 | multiprocessing, 8 x NumPy | 8 | 134 ms (16 ms) | 1.62e8 | 7.13e9 (–) | 6.8 | 59 MiB (17.2×) |
+| 1,000,000 | eagle host, termination loop, up to 8 threads | 8 | 142 ms (360 µs) | 1.52e9 | 6.71e10 (–) | 8 | 95.8 MiB (2.79×) |
+| 1,000,000 | eagle host, termination loop, 1 thread | 1 | 1.13 s (742 µs) | 1.92e8 | 8.44e9 (–) | 1 | 96.1 MiB (2.8×) |
+| 1,000,000 | eagle host, termination + compaction, up to 8 threads | 8 | 292 ms (2.78 ms) | 7.41e8 | 3.26e10 (–) | 8 | 99.8 MiB (2.91×) |
+| 1,000,000 | eagle host, termination + compaction, 1 thread | 1 | 1.03 s (4.1 ms) | 2.09e8 | 9.21e9 (–) | 1 | 99.9 MiB (2.91×) |
+| 1,000,000 | eagle host, termination + compaction + reorder, up to 8 threads | 8 | 242 ms (3.67 ms) | 8.94e8 | 3.93e10 (–) | 7 | 129 MiB (3.75×) |
+| 1,000,000 | eagle host, termination + compaction + reorder, 1 thread | 1 | 877 ms (193 µs) | 2.47e8 | 1.09e10 (–) | 1 | 129 MiB (3.76×) |
+| 1,000,000 | Numba prange, 8 threads | 8 | 328 ms (162 µs) | 6.59e8 | 2.90e10 (–) | 8 | 68.4 MiB (1.99×) |
+| 1,000,000 | JAX sharded over 8 CPU devices | 8 | 1.86 s (39.8 ms) | 1.16e8 | 5.10e9 (–) | 14 | 198 MiB (5.78×) |
 | 1,000,000 | JAX jit + vmap(while_loop), 1 device | 8 | 2.74 s (16.9 ms) | 7.90e7 | 3.48e9 (–) | 3.7 | 174 MiB (5.08×) |
 | 1,000,000 | PyTorch masked, 8 threads | 8 | 10.2 s (84.7 ms) | 2.11e7 | 9.29e8 (–) | 8 | 275 MiB (8.01×) |
-| 1,000,000 | NumPy masked | 1 | 15.3 s (73.6 ms) | 1.42e7 | 6.24e8 (–) | 1 | 170 MiB (4.94×) |
-| 1,000,000 | multiprocessing, 8 x NumPy | 8 | 7.72 s (33.5 ms) | 2.80e7 | 1.23e9 (–) | 7.9 | 303 MiB (8.83×) |
+| 1,000,000 | NumPy masked | 1 | 15.3 s (73.6 ms) | 1.42e7 | 6.24e8 (–) | 1 | 169 MiB (4.92×) |
+| 1,000,000 | multiprocessing, 8 x NumPy | 8 | 7.72 s (33.5 ms) | 2.80e7 | 1.23e9 (–) | 7.9 | 234 MiB (6.82×) |
 
 Fastest arm by median wall time:
 
@@ -156,55 +156,55 @@ Fastest arm by median wall time:
 
 | N | arm | threads | wall (IQR) | sample·steps/s | useful FLOP/s (% peak) | CPU busy | peak memory (× minimum) |
 |---:|---|---:|---:|---:|---:|---:|---:|
-| 1,000 | eagle host, termination loop, up to 8 threads | 8 | 209 µs (68.1 ns) | 4.77e9 | 2.10e11 (–) | 8.1 | 162 MiB (4.71e+03×) |
-| 1,000 | eagle host, termination loop, 1 thread | 1 | 1.52 ms (320 ns) | 6.60e8 | 2.90e10 (–) | 1 | 162 MiB (4.72e+03×) |
-| 1,000 | eagle host, termination + compaction, up to 8 threads | 8 | 2.52 ms (62.7 µs) | 3.96e8 | 1.74e10 (–) | 8 | 162 MiB (4.71e+03×) |
-| 1,000 | eagle host, termination + compaction, 1 thread | 1 | 4.51 ms (21.9 µs) | 2.22e8 | 9.75e9 (–) | 1 | 162 MiB (4.72e+03×) |
-| 1,000 | eagle host, termination + compaction + reorder, up to 8 threads | 8 | 2.53 ms (40.7 µs) | 3.95e8 | 1.74e10 (–) | 8 | 162 MiB (4.71e+03×) |
-| 1,000 | eagle host, termination + compaction + reorder, 1 thread | 1 | 4.51 ms (24.6 µs) | 2.22e8 | 9.76e9 (–) | 1 | 162 MiB (4.72e+03×) |
-| 1,000 | Numba prange, 8 threads | 8 | 1.53 ms (1.16 µs) | 6.54e8 | 2.88e10 (–) | 8 | 0.895 MiB (26.1×) |
-| 1,000 | JAX sharded over 8 CPU devices | 8 | 492 µs (2.28 µs) | 2.03e9 | 8.95e10 (–) | 6.2 | 0 MiB (0×) |
+| 1,000 | eagle host, termination loop, up to 8 threads | 8 | 209 µs (68.1 ns) | 4.77e9 | 2.10e11 (–) | 8.1 | 39.8 MiB (1.16e+03×) |
+| 1,000 | eagle host, termination loop, 1 thread | 1 | 1.52 ms (320 ns) | 6.60e8 | 2.90e10 (–) | 1 | 39.8 MiB (1.16e+03×) |
+| 1,000 | eagle host, termination + compaction, up to 8 threads | 8 | 2.52 ms (62.7 µs) | 3.96e8 | 1.74e10 (–) | 8 | 39.7 MiB (1.16e+03×) |
+| 1,000 | eagle host, termination + compaction, 1 thread | 1 | 4.51 ms (21.9 µs) | 2.22e8 | 9.75e9 (–) | 1 | 39.8 MiB (1.16e+03×) |
+| 1,000 | eagle host, termination + compaction + reorder, up to 8 threads | 8 | 2.53 ms (40.7 µs) | 3.95e8 | 1.74e10 (–) | 8 | 39.6 MiB (1.15e+03×) |
+| 1,000 | eagle host, termination + compaction + reorder, 1 thread | 1 | 4.51 ms (24.6 µs) | 2.22e8 | 9.76e9 (–) | 1 | 40 MiB (1.16e+03×) |
+| 1,000 | Numba prange, 8 threads | 8 | 1.53 ms (1.16 µs) | 6.54e8 | 2.88e10 (–) | 8 | 0 MiB (0×) |
+| 1,000 | JAX sharded over 8 CPU devices | 8 | 492 µs (2.28 µs) | 2.03e9 | 8.95e10 (–) | 6.2 | 1.48 MiB (43.2×) |
 | 1,000 | JAX jit + vmap(while_loop), 1 device | 8 | 1.74 ms (7.7 µs) | 5.73e8 | 2.52e10 (–) | 1 | 0 MiB (0×) |
 | 1,000 | PyTorch masked, 8 threads | 8 | 44.4 ms (89.5 µs) | 2.25e7 | 9.92e8 (–) | 1 | 0 MiB (0×) |
-| 1,000 | NumPy masked | 1 | 22.9 ms (217 µs) | 4.37e7 | 1.92e9 (–) | 1 | 169 MiB (4.94e+03×) |
-| 1,000 | multiprocessing, 8 x NumPy | 8 | 15.4 ms (54.4 µs) | 6.48e7 | 2.85e9 (–) | 7.8 | 169 MiB (4.93e+03×) |
-| 1,000 | plain Python loops | 1 | 166 ms (110 µs) | 6.03e6 | 2.65e8 (–) | 1 | 172 MiB (5e+03×) |
-| 10,000 | eagle host, termination loop, up to 8 threads | 8 | 1.94 ms (2.55 µs) | 5.16e9 | 2.27e11 (–) | 8 | 162 MiB (472×) |
-| 10,000 | eagle host, termination loop, 1 thread | 1 | 14.9 ms (9.47 µs) | 6.69e8 | 2.95e10 (–) | 1 | 162 MiB (472×) |
-| 10,000 | eagle host, termination + compaction, up to 8 threads | 8 | 6.91 ms (19.6 µs) | 1.45e9 | 6.37e10 (–) | 8 | 162 MiB (472×) |
-| 10,000 | eagle host, termination + compaction, 1 thread | 1 | 35.8 ms (30 µs) | 2.80e8 | 1.23e10 (–) | 1 | 162 MiB (472×) |
-| 10,000 | eagle host, termination + compaction + reorder, up to 8 threads | 8 | 6.93 ms (81.4 µs) | 1.44e9 | 6.35e10 (–) | 8 | 162 MiB (471×) |
-| 10,000 | eagle host, termination + compaction + reorder, 1 thread | 1 | 35.8 ms (102 µs) | 2.79e8 | 1.23e10 (–) | 1 | 162 MiB (472×) |
-| 10,000 | Numba prange, 8 threads | 8 | 15.3 ms (8.19 µs) | 6.55e8 | 2.88e10 (–) | 8 | 0.902 MiB (2.63×) |
-| 10,000 | JAX sharded over 8 CPU devices | 8 | 4.03 ms (63.1 µs) | 2.48e9 | 1.09e11 (–) | 6.5 | 3.22 MiB (9.38×) |
-| 10,000 | JAX jit + vmap(while_loop), 1 device | 8 | 15.2 ms (152 µs) | 6.60e8 | 2.90e10 (–) | 2 | 0 MiB (0×) |
-| 10,000 | PyTorch masked, 8 threads | 8 | 114 ms (488 µs) | 8.81e7 | 3.88e9 (–) | 1 | 2.07 MiB (6.04×) |
-| 10,000 | NumPy masked | 1 | 81.8 ms (147 µs) | 1.22e8 | 5.38e9 (–) | 1 | 170 MiB (494×) |
-| 10,000 | multiprocessing, 8 x NumPy | 8 | 25.9 ms (10.9 µs) | 3.86e8 | 1.70e10 (–) | 7.7 | 170 MiB (494×) |
-| 100,000 | eagle host, termination loop, up to 8 threads | 8 | 18.8 ms (146 µs) | 5.31e9 | 2.34e11 (–) | 8 | 162 MiB (47.2×) |
-| 100,000 | eagle host, termination loop, 1 thread | 1 | 149 ms (359 µs) | 6.70e8 | 2.95e10 (–) | 1 | 162 MiB (47.2×) |
-| 100,000 | eagle host, termination + compaction, up to 8 threads | 8 | 52.8 ms (73.9 µs) | 1.89e9 | 8.34e10 (–) | 8 | 162 MiB (47.1×) |
-| 100,000 | eagle host, termination + compaction, 1 thread | 1 | 354 ms (410 µs) | 2.82e8 | 1.24e10 (–) | 1 | 162 MiB (47.2×) |
-| 100,000 | eagle host, termination + compaction + reorder, up to 8 threads | 8 | 53 ms (178 µs) | 1.89e9 | 8.30e10 (–) | 8 | 162 MiB (47.2×) |
-| 100,000 | eagle host, termination + compaction + reorder, 1 thread | 1 | 356 ms (2.87 ms) | 2.81e8 | 1.24e10 (–) | 1 | 162 MiB (47.2×) |
-| 100,000 | Numba prange, 8 threads | 8 | 153 ms (68.1 µs) | 6.55e8 | 2.88e10 (–) | 8 | 5.49 MiB (1.6×) |
-| 100,000 | JAX sharded over 8 CPU devices | 8 | 39.9 ms (411 µs) | 2.50e9 | 1.10e11 (–) | 11 | 17.9 MiB (5.22×) |
-| 100,000 | JAX jit + vmap(while_loop), 1 device | 8 | 133 ms (1.57 ms) | 7.51e8 | 3.30e10 (–) | 2.1 | 13.1 MiB (3.82×) |
-| 100,000 | PyTorch masked, 8 threads | 8 | 300 ms (4.26 ms) | 3.33e8 | 1.47e10 (–) | 8 | 28.1 MiB (8.18×) |
-| 100,000 | NumPy masked | 1 | 792 ms (1.47 ms) | 1.26e8 | 5.56e9 (–) | 1 | 170 MiB (49.4×) |
-| 100,000 | multiprocessing, 8 x NumPy | 8 | 145 ms (15.2 ms) | 6.92e8 | 3.04e10 (–) | 6.4 | 180 MiB (52.5×) |
-| 1,000,000 | eagle host, termination loop, up to 8 threads | 8 | 187 ms (618 µs) | 5.34e9 | 2.35e11 (–) | 8 | 162 MiB (4.72×) |
-| 1,000,000 | eagle host, termination loop, 1 thread | 1 | 1.49 s (10 ms) | 6.71e8 | 2.95e10 (–) | 1 | 162 MiB (4.72×) |
-| 1,000,000 | eagle host, termination + compaction, up to 8 threads | 8 | 744 ms (4.38 ms) | 1.34e9 | 5.92e10 (–) | 8 | 162 MiB (4.71×) |
-| 1,000,000 | eagle host, termination + compaction, 1 thread | 1 | 3.56 s (2.33 ms) | 2.81e8 | 1.24e10 (–) | 1 | 162 MiB (4.72×) |
-| 1,000,000 | eagle host, termination + compaction + reorder, up to 8 threads | 8 | 761 ms (4.3 ms) | 1.31e9 | 5.78e10 (–) | 8 | 162 MiB (4.71×) |
-| 1,000,000 | eagle host, termination + compaction + reorder, 1 thread | 1 | 3.58 s (14.9 ms) | 2.79e8 | 1.23e10 (–) | 1 | 162 MiB (4.72×) |
-| 1,000,000 | Numba prange, 8 threads | 8 | 1.53 s (878 µs) | 6.55e8 | 2.88e10 (–) | 8 | 60.5 MiB (1.76×) |
-| 1,000,000 | JAX sharded over 8 CPU devices | 8 | 1.94 s (41.5 ms) | 5.14e8 | 2.26e10 (–) | 14 | 191 MiB (5.57×) |
+| 1,000 | NumPy masked | 1 | 22.9 ms (217 µs) | 4.37e7 | 1.92e9 (–) | 1 | 47.4 MiB (1.38e+03×) |
+| 1,000 | multiprocessing, 8 x NumPy | 8 | 15.4 ms (54.4 µs) | 6.48e7 | 2.85e9 (–) | 7.8 | 47.3 MiB (1.38e+03×) |
+| 1,000 | plain Python loops | 1 | 166 ms (110 µs) | 6.03e6 | 2.65e8 (–) | 1 | 49.6 MiB (1.44e+03×) |
+| 10,000 | eagle host, termination loop, up to 8 threads | 8 | 1.94 ms (2.55 µs) | 5.16e9 | 2.27e11 (–) | 8 | 39.8 MiB (116×) |
+| 10,000 | eagle host, termination loop, 1 thread | 1 | 14.9 ms (9.47 µs) | 6.69e8 | 2.95e10 (–) | 1 | 39.7 MiB (116×) |
+| 10,000 | eagle host, termination + compaction, up to 8 threads | 8 | 6.91 ms (19.6 µs) | 1.45e9 | 6.37e10 (–) | 8 | 39.8 MiB (116×) |
+| 10,000 | eagle host, termination + compaction, 1 thread | 1 | 35.8 ms (30 µs) | 2.80e8 | 1.23e10 (–) | 1 | 39.9 MiB (116×) |
+| 10,000 | eagle host, termination + compaction + reorder, up to 8 threads | 8 | 6.93 ms (81.4 µs) | 1.44e9 | 6.35e10 (–) | 8 | 39.5 MiB (115×) |
+| 10,000 | eagle host, termination + compaction + reorder, 1 thread | 1 | 35.8 ms (102 µs) | 2.79e8 | 1.23e10 (–) | 1 | 39.7 MiB (116×) |
+| 10,000 | Numba prange, 8 threads | 8 | 15.3 ms (8.19 µs) | 6.55e8 | 2.88e10 (–) | 8 | 0 MiB (0×) |
+| 10,000 | JAX sharded over 8 CPU devices | 8 | 4.03 ms (63.1 µs) | 2.48e9 | 1.09e11 (–) | 6.5 | 0.957 MiB (2.79×) |
+| 10,000 | JAX jit + vmap(while_loop), 1 device | 8 | 15.2 ms (152 µs) | 6.60e8 | 2.90e10 (–) | 2 | 0.0234 MiB (0.0683×) |
+| 10,000 | PyTorch masked, 8 threads | 8 | 114 ms (488 µs) | 8.81e7 | 3.88e9 (–) | 1 | 2.15 MiB (6.26×) |
+| 10,000 | NumPy masked | 1 | 81.8 ms (147 µs) | 1.22e8 | 5.38e9 (–) | 1 | 47.3 MiB (138×) |
+| 10,000 | multiprocessing, 8 x NumPy | 8 | 25.9 ms (10.9 µs) | 3.86e8 | 1.70e10 (–) | 7.7 | 47.2 MiB (138×) |
+| 100,000 | eagle host, termination loop, up to 8 threads | 8 | 18.8 ms (146 µs) | 5.31e9 | 2.34e11 (–) | 8 | 39.7 MiB (11.6×) |
+| 100,000 | eagle host, termination loop, 1 thread | 1 | 149 ms (359 µs) | 6.70e8 | 2.95e10 (–) | 1 | 39.8 MiB (11.6×) |
+| 100,000 | eagle host, termination + compaction, up to 8 threads | 8 | 52.8 ms (73.9 µs) | 1.89e9 | 8.34e10 (–) | 8 | 39.6 MiB (11.5×) |
+| 100,000 | eagle host, termination + compaction, 1 thread | 1 | 354 ms (410 µs) | 2.82e8 | 1.24e10 (–) | 1 | 39.8 MiB (11.6×) |
+| 100,000 | eagle host, termination + compaction + reorder, up to 8 threads | 8 | 53 ms (178 µs) | 1.89e9 | 8.30e10 (–) | 8 | 39.7 MiB (11.6×) |
+| 100,000 | eagle host, termination + compaction + reorder, 1 thread | 1 | 356 ms (2.87 ms) | 2.81e8 | 1.24e10 (–) | 1 | 39.9 MiB (11.6×) |
+| 100,000 | Numba prange, 8 threads | 8 | 153 ms (68.1 µs) | 6.55e8 | 2.88e10 (–) | 8 | 5.47 MiB (1.59×) |
+| 100,000 | JAX sharded over 8 CPU devices | 8 | 39.9 ms (411 µs) | 2.50e9 | 1.10e11 (–) | 11 | 20.8 MiB (6.07×) |
+| 100,000 | JAX jit + vmap(while_loop), 1 device | 8 | 133 ms (1.57 ms) | 7.51e8 | 3.30e10 (–) | 2.1 | 15.7 MiB (4.57×) |
+| 100,000 | PyTorch masked, 8 threads | 8 | 300 ms (4.26 ms) | 3.33e8 | 1.47e10 (–) | 8 | 28.1 MiB (8.19×) |
+| 100,000 | NumPy masked | 1 | 792 ms (1.47 ms) | 1.26e8 | 5.56e9 (–) | 1 | 47.4 MiB (13.8×) |
+| 100,000 | multiprocessing, 8 x NumPy | 8 | 145 ms (15.2 ms) | 6.92e8 | 3.04e10 (–) | 6.4 | 58.6 MiB (17.1×) |
+| 1,000,000 | eagle host, termination loop, up to 8 threads | 8 | 187 ms (618 µs) | 5.34e9 | 2.35e11 (–) | 8 | 96.3 MiB (2.8×) |
+| 1,000,000 | eagle host, termination loop, 1 thread | 1 | 1.49 s (10 ms) | 6.71e8 | 2.95e10 (–) | 1 | 96.2 MiB (2.8×) |
+| 1,000,000 | eagle host, termination + compaction, up to 8 threads | 8 | 744 ms (4.38 ms) | 1.34e9 | 5.92e10 (–) | 8 | 99.7 MiB (2.91×) |
+| 1,000,000 | eagle host, termination + compaction, 1 thread | 1 | 3.56 s (2.33 ms) | 2.81e8 | 1.24e10 (–) | 1 | 99.8 MiB (2.91×) |
+| 1,000,000 | eagle host, termination + compaction + reorder, up to 8 threads | 8 | 761 ms (4.3 ms) | 1.31e9 | 5.78e10 (–) | 8 | 107 MiB (3.13×) |
+| 1,000,000 | eagle host, termination + compaction + reorder, 1 thread | 1 | 3.58 s (14.9 ms) | 2.79e8 | 1.23e10 (–) | 1 | 107 MiB (3.13×) |
+| 1,000,000 | Numba prange, 8 threads | 8 | 1.53 s (878 µs) | 6.55e8 | 2.88e10 (–) | 8 | 60.8 MiB (1.77×) |
+| 1,000,000 | JAX sharded over 8 CPU devices | 8 | 1.94 s (41.5 ms) | 5.14e8 | 2.26e10 (–) | 14 | 188 MiB (5.46×) |
 | 1,000,000 | JAX jit + vmap(while_loop), 1 device | 8 | 2.88 s (26.7 ms) | 3.47e8 | 1.53e10 (–) | 3.7 | 167 MiB (4.86×) |
 | 1,000,000 | PyTorch masked, 8 threads | 8 | 10.2 s (103 ms) | 9.80e7 | 4.31e9 (–) | 8 | 260 MiB (7.57×) |
-| 1,000,000 | NumPy masked | 1 | 13.4 s (207 ms) | 7.48e7 | 3.29e9 (–) | 1 | 170 MiB (4.94×) |
-| 1,000,000 | multiprocessing, 8 x NumPy | 8 | 7.65 s (14.1 ms) | 1.31e8 | 5.75e9 (–) | 7.9 | 304 MiB (8.85×) |
+| 1,000,000 | NumPy masked | 1 | 13.4 s (207 ms) | 7.48e7 | 3.29e9 (–) | 1 | 162 MiB (4.73×) |
+| 1,000,000 | multiprocessing, 8 x NumPy | 8 | 7.65 s (14.1 ms) | 1.31e8 | 5.75e9 (–) | 7.9 | 223 MiB (6.51×) |
 
 Fastest arm by median wall time:
 
@@ -261,4 +261,4 @@ Same build as another row: eagle host, termination loop, 1 thread (as eagle host
 
 A separate pass after the timing pass. Each (arm, N, configuration) runs in a fresh process: imports, then a warm-up run on a 64-sample batch (every JIT compiles here; JAX also compiles for shape N from abstract shapes), then the baseline (resident set size, VmRSS) and a reset of the process's peak mark (/proc/self/clear_refs, so ru_maxrss restarts from the baseline); then the batch's inputs are generated and one full run done. Peak memory = ru_maxrss at the end minus the baseline; for multiprocessing, plus each pool process's own peak above its baseline (shared pages counted once per process). Minimum = the state the workload needs, N × ((2 state + 2 float64 scalars: omega, zeta) × 8 + 4 bytes for the stop step as a 32-bit integer) = 36 bytes per sample; the factor is peak / minimum. Compile overhead = baseline minus the resident size before the arm's imports-and-warm-up. Below about 1 MiB the allocator reuses memory already resident at the baseline, so small-N peaks can read below the minimum.
 
-Compile/import overhead (resident memory added by the warm-up compile, measured once per arm at the largest N): eagle host, termination loop, up to 8 threads 30.7 MiB; eagle host, termination loop, 1 thread 30.6 MiB; eagle host, termination + compaction, up to 8 threads 30.8 MiB; eagle host, termination + compaction, 1 thread 30.6 MiB; eagle host, termination + compaction + reorder, up to 8 threads 30.7 MiB; eagle host, termination + compaction + reorder, 1 thread 30.7 MiB; Numba prange, 8 threads 192 MiB; JAX sharded over 8 CPU devices 283 MiB; JAX jit + vmap(while_loop), 1 device 278 MiB; PyTorch masked, 8 threads 289 MiB; NumPy masked 23 MiB; multiprocessing, 8 x NumPy 23.2 MiB; plain Python loops 21 MiB.
+Compile/import overhead (resident memory added by the warm-up compile, measured once per arm at the largest N): eagle host, termination loop, up to 8 threads 30.7 MiB; eagle host, termination loop, 1 thread 30.6 MiB; eagle host, termination + compaction, up to 8 threads 30.7 MiB; eagle host, termination + compaction, 1 thread 30.6 MiB; eagle host, termination + compaction + reorder, up to 8 threads 30.8 MiB; eagle host, termination + compaction + reorder, 1 thread 30.6 MiB; Numba prange, 8 threads 192 MiB; JAX sharded over 8 CPU devices 283 MiB; JAX jit + vmap(while_loop), 1 device 280 MiB; PyTorch masked, 8 threads 289 MiB; NumPy masked 23 MiB; multiprocessing, 8 x NumPy 23.2 MiB; plain Python loops 20.9 MiB.
