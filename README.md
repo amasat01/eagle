@@ -109,18 +109,7 @@ pip install raptor-eagle raptor-hawk                      # CPU threads: no NVID
 pip install "raptor-eagle[cuda12]" "raptor-hawk[cuda12]"  # NVIDIA GPU; [cuda13] for CUDA 13; add [torch] for PyTorch interop
 ```
 
-> **NVIDIA packages come only through the extras.** `raptor-eagle[cuda12]` / `[cuda13]` pull CuPy (`cupy-cuda12x` /
-> `cupy-cuda13x`, with the CUDA headers CuPy compiles against); `raptor-hawk[cuda12]` pulls `cuda-bindings` 12, `nvidia-cuda-nvrtc-cu12` and
-> `nvidia-cuda-cccl-cu12`, and `raptor-hawk[cuda13]` pulls `cuda-bindings` 13, `nvidia-cuda-nvrtc` 13 and
-> `nvidia-cuda-cccl` 13 (CUDA 13's wheels have no `-cu13` suffix). Without an extra pip installs no NVIDIA package: you get the CPU route, or the GPU route through a CUDA setup you already have. Pick
-> the extra matching the CUDA version your driver reports (`nvidia-smi`, top right).
-
-**Platforms:** the wheels are Linux x86_64 (CPython 3.9–3.14, including free-threaded 3.13t and 3.14t). The performance page lists the NVIDIA GPUs and the x86-64 and ARM (aarch64) CPUs the code has been run and measured on. There are no wheels for macOS, Windows or ARM yet, and WSL2 is untested. `raptor-core` and `aether-dsc` are pure Python and install anywhere.
-
-`raptor-eagle` needs Python 3.9 or newer (CPython 3.9–3.14) and an NVIDIA driver at run time; no `nvcc` or CUDA
-toolkit. Free-threaded builds (3.13t, 3.14t) run GIL-free. On 3.13t the `[cuda12]` / `[cuda13]` extras do not resolve (CuPy 14 ships no 3.13t wheel), so eagle runs on the CPU route there; 3.14t has no such limit. The wheel ships GPU code for every NVIDIA architecture from Pascal (sm_60) through Blackwell, plus PTX for newer GPUs. It
-brings `raptor-core` along. The C++ library (`find_package(eagle CONFIG REQUIRED)`) is a separate, CMake-only
-install; building the Python package from source is covered under [Python package](#python-package) below.
+Extras, platforms, driver and Python versions: [installation](https://amasat01.github.io/eagle/content/userguide/installation.html). Building from source: [build from source](https://amasat01.github.io/build_from_source.html). The C++ library is a separate CMake install; the Python package from source is under [Python package](#python-package) below.
 
 <details>
 <summary>C++ library: build, test, install</summary>

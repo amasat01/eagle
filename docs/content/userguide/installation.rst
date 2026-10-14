@@ -44,6 +44,8 @@ needs only the driver. To write kernels for it with hawk, install
 
 **Platforms:** the wheels are Linux x86_64 (CPython 3.9–3.14, including free-threaded 3.13t and 3.14t). The performance page lists the NVIDIA GPUs and the x86-64 and ARM (aarch64) CPUs the code has been run and measured on. There are no wheels for macOS, Windows or ARM yet, and WSL2 is untested. ``raptor-core`` and ``aether-dsc`` are pure Python and install anywhere.
 
+To build from source, and for the supported-version table, see `build from source <https://amasat01.github.io/build_from_source.html>`__.
+
 C++ library
 -----------
 
