@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.0 (2026-10-14)
 
 **Register gate by toolkit.** The card register gate holds its register and arithmetic pins per CUDA release (12.6, 12.9 and 13.4 measured), compares each build with the pins of the `nvcc` that compiled it, and skips with a reason when that release has no pins.
 
