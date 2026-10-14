@@ -10,6 +10,14 @@ Wall time to integrate a million samples, each stopping at its own step: one
 bar per tool, log scale. Pick a device with the tabs; the pick carries over to
 every page in this section.
 
+## Where each tool covers the work
+
+```{raw} html
+:file: ../_static/family_visuals/fragments/performance.html
+```
+
+*Map, rosette and radar of the same committed cards: each tool where it covers a workload, with the table behind every chart.*
+
 ## RK4 oscillators: GPU
 
 ```{include} /content/_generated/perf_card_gpu_overview.md

@@ -29,6 +29,31 @@ jobs:
             echo "::error::The documented performance numbers are out of date with the committed cards. Regenerate them locally with: python tools/sync_readme_cards.py -- then commit the result."
             exit 1
           fi
+      # companion site (amasat01.github.io): same-named branch if it exists there, else main
+      - id: ref_site
+        env:
+          COMPANION_REPO: amasat01.github.io
+          BRANCH_NAME: ${{ github.head_ref || github.ref_name }}
+          GH_TOKEN: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
+        run: |
+          auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "${GH_TOKEN:-none}" | base64 -w0)"
+          [ -n "${GH_TOKEN:-}" ] || auth="X-Unauthenticated: 1"
+          found="$(git -c http.extraHeader="$auth" ls-remote --heads "https://github.com/amasat01/${COMPANION_REPO}" "refs/heads/${BRANCH_NAME}" | awk '{print $2}')"
+          if [ "$found" = "refs/heads/${BRANCH_NAME}" ]; then ref="$BRANCH_NAME"; else ref=main; fi
+          echo "companion ${COMPANION_REPO} @ ${ref}"
+          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v7
+        with:
+          repository: amasat01/amasat01.github.io
+          ref: ${{ steps.ref_site.outputs.ref }}
+          path: site
+          token: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
+      - name: family visuals match the landing site and the cards
+        run: |
+          if ! python site/tools/sync_family_visuals.py --check --site-root site --eagle-root . --target eagle=.; then
+            echo "::error::The family visuals bundle is out of date with the landing site or the cards. Regenerate it locally with: python tools/sync_family_visuals.py --site-root <path to the site checkout> --eagle-root <path to an eagle checkout> --target eagle=<this repo> -- then commit docs/_static/family_visuals."
+            exit 1
+          fi
   test-cpp:
     needs: docs-fresh
     runs-on: ubuntu-latest
