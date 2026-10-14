@@ -354,10 +354,10 @@ jobs:
           cp -r eagle/python/tests eagle/python/conftest.py "$RUNNER_TEMP/suite-ft/"
           cd "$RUNNER_TEMP/suite-ft"
           export RAPTOR_ROOT="${GITHUB_WORKSPACE}/raptor"
-          N="$(python -m pytest tests -m ft --collect-only -q -p no:cacheprovider | grep -c '::' || true)"
+          N="$(python -m pytest tests -m "ft and not repo_local" --collect-only -q -p no:cacheprovider | grep -c '::' || true)"
           echo "ft rows collected: $N"
           [ "$N" -gt 0 ] || { echo "ft selection collected zero tests"; exit 1; }
-          python -m pytest tests -m ft -q -rs -p no:cacheprovider -W error::RuntimeWarning
+          python -m pytest tests -m "ft and not repo_local" -q -rs -p no:cacheprovider -W error::RuntimeWarning
           python -m pytest tests -q -p no:cacheprovider -W error::RuntimeWarning -m "not gpu and not gpu2 and not torch and not interop_matrix and not repo_local"
 
   publish:
