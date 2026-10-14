@@ -51,15 +51,22 @@ linkcheck: doxygen
 # what gets committed; the Sphinx build never re-executes them
 # (`nb_execution_mode = "off"` in conf.py).
 NB_PATHS = content/userguide/quickstart_python.ipynb content/userguide/tutorials \
-           content/userguide/examples content/interop.ipynb
+           content/userguide/examples content/userguide/extra content/interop.ipynb
 
 nbexec:
 	python _tools/nb_execute.py $(NB_PATHS)
 
 # Refuse to proceed unless every code cell in every notebook above has
 # actually run (an execution_count, not merely static source).
+#
+# nbcheck ALSO executes every notebook, in memory: on the CPU always, and again
+# on the GPU when one is present (_tools/nb_run_gate.py; a notebook declares
+# "gate" metadata for what it needs, and a GPU-only one skips cleanly on the CPU
+# leg). A committed notebook can no longer outlive the code that produced it.
 nbcheck:
+	python _tools/nb_colab_setup.py --check
 	python _tools/nb_check_filled.py $(NB_PATHS)
+	python _tools/nb_run_gate.py $(NB_PATHS)
 
 clean:
 	rm -rf $(BUILDDIR) $(DOXYBUILDDIR)

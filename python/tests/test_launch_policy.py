@@ -440,8 +440,8 @@ L4_FP64 = dict(P2000, multiProcessorCount=58, major=8, minor=9, singleToDoublePr
 
 
 @pytest.mark.parametrize("dev, regs, n, fill, want", [
-    # A100 oscillator (36 registers): 5 warps per partition, cut by the drain limit
-    (A100_FP64, 36, 1_000_000, 0.23, 640), (A100_FP64, 36, 1_000_000, 1.0, 640),
+    # A100 oscillator (36 registers): 3 warps per partition, cut by the drain limit
+    (A100_FP64, 36, 1_000_000, 0.23, 384), (A100_FP64, 36, 1_000_000, 1.0, 384),
     (A100_FP64, 36, 100_000, 0.23, 256), (A100_FP64, 36, 270_000, 0.23, 320),
     # a ceiling under the saturation count is taken whole, as one block
     (A100_FP64, 166, 1_000_000, 0.23, 384), (A100_FP64, 166, 1_000_000, 1.0, 384),
@@ -455,11 +455,27 @@ def test_persistent_threads_per_sm_rows(dev, regs, n, fill, want):
     assert persistent_threads_per_sm(dev, dict(KERN, num_regs=regs), n, fill) == want
 
 
+def test_the_chunk_rule_reads_the_device_and_the_precision():
+    from eagle._launch_policy import persistent_chunk
+
+    assert persistent_chunk(P2000, 44, 22) == 4
+    assert persistent_chunk(P2000, 44, 22, "float32") == 16
+    assert persistent_chunk(A100_FP64, 44, 22) == 8
+    assert persistent_chunk(A100_FP64, 1106, 498) == 8
+
+
+def test_a_known_chunk_adds_the_fetch_warp_to_the_threads():
+    from eagle._launch_policy import persistent_threads_per_sm
+
+    assert persistent_threads_per_sm(P2000, dict(KERN, num_regs=43), 1_000_000, 0.23, "float64", 4, 44.0) == 384
+    assert persistent_threads_per_sm(A100_FP64, dict(KERN, num_regs=36), 1_000_000, 0.23, "float64", 8, 44.0) == 640
+
+
 def test_persistent_launch_puts_the_a100_rk78_in_one_block():
     from eagle._launch_policy import persistent_launch
 
     assert persistent_launch(A100_FP64, dict(KERN, num_regs=166), 1_000_000, 0.23) == (384, 108)
-    assert persistent_launch(A100_FP64, dict(KERN, num_regs=36), 1_000_000, 0.23) == (320, 216)
+    assert persistent_launch(A100_FP64, dict(KERN, num_regs=36), 1_000_000, 0.23) == (384, 108)
 
 
 def test_the_first_run_assumes_half_the_steps_are_taken():
@@ -470,12 +486,12 @@ def test_the_first_run_assumes_half_the_steps_are_taken():
                 == persistent_threads_per_sm(A100_FP64, STEP64, n, 0.5))
 
 
-def test_the_demand_is_the_saturation_count_of_the_fp64_class():
+def test_the_demand_is_the_saturation_count_plus_the_fetch_warp():
     from eagle._launch_policy import persistent_demand
 
-    assert persistent_demand(A100_FP64) == 640
-    assert persistent_demand(P2000) == 256
-    assert persistent_demand(L4_FP64) == 256
+    assert persistent_demand(A100_FP64) == 512
+    assert persistent_demand(P2000) == 384
+    assert persistent_demand(L4_FP64) == 384
 
 
 def test_persistent_rules_are_safe_to_call_from_many_threads():
@@ -512,7 +528,7 @@ def test_persistent_launch_splits_into_blocks_of_at_most_512():
     from eagle._launch_policy import persistent_launch
 
     assert persistent_launch(P2000, STEP64, 1_000_000, 1.0) == (256, 8)
-    assert persistent_launch(P2000, STEP32, 1_000_000, 1.0, "float32") == (512, 32)
+    assert persistent_launch(P2000, STEP32, 1_000_000, 1.0, "float32") == (288, 32)
 
 
 def test_persistent_launch_falls_back_without_device_properties():

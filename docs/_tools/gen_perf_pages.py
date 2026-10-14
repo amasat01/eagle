@@ -16,7 +16,8 @@ For each family this writes ``<out-dir>/<family>.md``, a MyST fragment with:
 
 - a "Measured on" table, one row per device (name, compute capability or CPU
   model, FP64 class if the card records one, date from ``generated_utc``, a
-  link to the device's own section);
+  link to the device's own section), also written alone as ``<family>_devices.md``
+  for pages that only list the devices;
 - one section per device, reference device first then the rest by name, each
   under a stable anchor (``{family}-{slug}``) and including that device's own
   committed ``card_<slug>.md`` table;
@@ -63,16 +64,16 @@ import perf_charts as charts  # noqa: E402
 #: CPU cards run neither arm, so they stay unset.
 FAMILIES = [
     {"key": "perf_card_gpu", "page": "rk4", "dir": "benchmarks/perf_card", "prefix": "card_",
-     "reference_slug": "quadro-p2000", "heading": "GPU", "has_config": True,
+     "reference_slug": "nvidia-h100-80gb-hbm3", "heading": "GPU", "has_config": True,
      "simulate": "eagle_simulate", "twin": "eagle_graph_auto"},
     {"key": "perf_card_cpu", "page": "rk4", "dir": "benchmarks/perf_card", "prefix": "cpu_card_",
-     "reference_slug": "intel-xeon-w-2125", "heading": "CPU", "has_config": True,
+     "reference_slug": "amd-epyc-9b45", "heading": "CPU", "has_config": True,
      "simulate": None, "twin": None},
     {"key": "rk78_card_gpu", "page": "rk78", "dir": "benchmarks/rk78_card", "prefix": "card_",
-     "reference_slug": "quadro-p2000", "heading": "GPU", "has_config": False,
+     "reference_slug": "nvidia-h100-80gb-hbm3", "heading": "GPU", "has_config": False,
      "simulate": "eagle_simulate", "twin": "eagle_graph"},
     {"key": "rk78_card_cpu", "page": "rk78", "dir": "benchmarks/rk78_card", "prefix": "cpu_card_",
-     "reference_slug": "intel-r-xeon-r-w-2125-cpu-4-00ghz", "heading": "CPU",
+     "reference_slug": "amd-epyc-9b45", "heading": "CPU",
      "has_config": False, "simulate": None, "twin": None},
 ]
 
@@ -106,15 +107,17 @@ def _clean_cpu_name(model: str) -> str:
     return re.sub(r"\s+", " ", model.replace("(R)", "").replace("(TM)", "")).strip()
 
 
-def _device_name_and_class(card: dict) -> tuple[str, str]:
-    """(display name, compute capability or CPU model) of the card's device."""
+def _device_name_and_class(card: dict, path: pathlib.Path | None = None) -> tuple[str, str]:
+    """(display name, compute capability or CPU model) of the card's device. A CPU
+    card whose file stem is in ``benchmarks/device_names.json`` shows that name."""
     if card.get("device"):
         d = card["device"]
         return d["name"], d.get("compute_capability", "–")
     cpu = card.get("cpu")
     model = cpu.get("model", "unknown CPU") if isinstance(cpu, dict) else cpu
     if isinstance(model, str) and model:
-        return _clean_cpu_name(model), model
+        name = _clean_cpu_name(model)
+        return (cc.cpu_display_name(path, name) if path else name), model
     return "unknown device", "–"
 
 
@@ -129,7 +132,7 @@ def load_family(eagle_root: pathlib.Path, spec: dict) -> list[dict]:
     for path in sorted(card_dir.glob(f"{spec['prefix']}*.json")):
         card = _load_json(path)
         slug = _slug(card, path, spec["prefix"])
-        name, _ = _device_name_and_class(card)
+        name, _ = _device_name_and_class(card, path)
         entries.append({"slug": slug, "path": path, "card": card,
                         "name": name, "is_reference": slug == spec["reference_slug"]})
     pref = charts.GPU_PREFERENCE if spec["heading"] == "GPU" else charts.CPU_PREFERENCE
@@ -212,9 +215,28 @@ def _simulate_vs_twin_lines(card: dict, simulate_arm: str | None, twin_arm: str 
 def _measured_on_table(entries: list[dict]) -> list[str]:
     lines = ["| device | compute capability / CPU model | date |", "|---|---|---|"]
     for e in entries:
-        name, cls = _device_name_and_class(e["card"])
+        name, cls = _device_name_and_class(e["card"], e["path"])
         date = (e["card"].get("generated_utc") or "–").split("T")[0]
         lines.append(f"| {name} | {cls} | {date} |")
+    lines.append("")
+    return lines
+
+
+def _software_table(entries: list[dict]) -> list[str]:
+    """What each card ran on and against, straight from its JSON (a field a card lacks shows a dash)."""
+    lines = ["", "| device | driver | CUDA runtime | host CPU | Warp | JAX | PyTorch | CuPy |",
+             "|---|---|---|---|---|---|---|---|"]
+    for e in entries:
+        c = e["card"]
+        dev, sw = c.get("device") or {}, c.get("software") or {}
+        name, _cls = _device_name_and_class(c, e["path"])
+        rt = dev.get("cuda_runtime")
+        cpu_field = c.get("cpu")
+        cpu = sw.get("cpu") or (cpu_field.get("model") if isinstance(cpu_field, dict) else cpu_field)
+        cells = [dev.get("driver_version"), f"{rt // 1000}.{rt % 1000 // 10}" if rt else None,
+                 _clean_cpu_name(cpu) if cpu else None,
+                 *(sw.get(k) for k in ("warp", "jax", "torch", "cupy"))]
+        lines.append(f"| {name} | " + " | ".join(str(v) if v else "–" for v in cells) + " |")
     lines.append("")
     return lines
 
@@ -248,16 +270,47 @@ def _raw_html(html_text: str) -> list[str]:
     return ["```{raw} html", *html_text.split("\n"), "```", ""]
 
 
+_TOOL_VERSIONS = (("warp", "Warp"), ("jax", "JAX"), ("torch", "PyTorch"), ("cupy", "CuPy"), ("numpy", "NumPy"))
+
+
+def versions_line(card: dict) -> str:
+    """One caption line of what the card ran on, from its JSON only: driver, CUDA, host CPU,
+    compiler and the versions of the tools it compared. A field the card lacks is left out."""
+    parts = []
+    dev, sw, tc = card.get("device") or {}, card.get("software") or {}, card.get("toolchain") or {}
+    if dev.get("driver_version"):
+        parts.append(f"driver {dev['driver_version']}")
+    rt = dev.get("cuda_runtime")
+    if rt:
+        parts.append(f"CUDA runtime {rt // 1000}.{rt % 1000 // 10}")
+    cpu_field = card.get("cpu")
+    cpu = sw.get("cpu") or (cpu_field.get("model") if isinstance(cpu_field, dict) else cpu_field)
+    if cpu:
+        parts.append(f"host CPU {_clean_cpu_name(cpu)}")
+    host = (tc.get("host_compiler") or "").split("||")
+    if len(host) > 1 and host[1]:
+        parts.append(f"compiler {host[1]}")
+    if tc.get("python"):
+        parts.append(f"Python {tc['python']}")
+    tools = [f"{label} {sw[key]}" for key, label in _TOOL_VERSIONS if sw.get(key)]
+    if tools:
+        parts.append(", ".join(tools))
+    return f"*Run on: {'; '.join(parts)}.*" if parts else ""
+
+
 def card_overview(spec: dict, e: dict, page: str) -> str:
     """Fragment: the device's headline chart, a one-line description, a link to
     the results page. Carries the anchor external links point at."""
-    name, cls = _device_name_and_class(e["card"])
+    name, cls = _device_name_and_class(e["card"], e["path"])
     date = (e["card"].get("generated_utc") or "").split("T")[0]
     chart = _chart_for(spec, e, headline_config(spec, e))
     detail = ([f"compute capability {cls}"] if spec["heading"] == "GPU" else []) + (
         [f"card of {date}"] if date else [])
     lines = [f"({spec['key']}-{e['slug']})=",
              f"**{name}**{' (' + ', '.join(detail) + ')' if detail else ''}.", ""]
+    versions = versions_line(e["card"])
+    if versions:
+        lines += [versions, ""]
     if chart:
         lines += _raw_html(chart)
     lines += [f"[Every workload, every arm and every N for {name}](/content/performance/{page}.md)", ""]
@@ -350,6 +403,46 @@ def _withheld_note(borrowed_used: dict, any_withheld: bool) -> list[str]:
     return lines
 
 
+#: A CPU table row's memory cell, the last one: "100 MiB (2.8×)".
+_CPU_MEM_CELL = re.compile(r"\| (?:[\d.e+]+ MiB \([\d.e+]+×\)|–) \|\s*$")
+
+
+CPU_MEMORY_NOTE = ("CPU peak memory is shown for N = 1,000,000 only, net of the benchmark harness's own "
+                   "copies (36 bytes per sample on eagle's arms). At smaller N this harness cannot resolve it: "
+                   "each measuring process inherits the launching process's peak, so smaller readings show "
+                   "that floor rather than the workload. The cards keep the raw readings; the next card run "
+                   "measures every size directly.")
+UNRESOLVED_CELL = "–*"
+
+
+def net_cpu_memory_line(line: str, rows: dict, labels: dict, card_kind: str, all_rows: list) -> str:
+    """`line` (a CPU table row) with its memory cell showing the published
+    value (`cc.published_peak_bytes`: net of the harness's copies, at N = 10^6
+    only) or `UNRESOLVED_CELL`, and the factor against the row's minimum.
+    `rows` is the card's memory rows of the section's configuration by
+    (arm, n). A line that is not a table row comes back unchanged."""
+    n_match, cell = _ROW_N.match(line), _CPU_MEM_CELL.search(line)
+    arm = labels.get(line.split("|")[2].strip()) if n_match else None
+    row = rows.get((arm, int(n_match.group(1).replace(",", "")))) if n_match else None
+    if not cell or not row:
+        return line
+    value = cc.published_peak_bytes(row, all_rows, card_kind)
+    text = (UNRESOLVED_CELL if value is None
+            else f"{cc.fmt_mib(value)} ({cc.fmt_x(value / row['minimum_bytes'])})")
+    return line[:cell.start()] + f"| {text} |"
+
+
+def _config_rows(card: dict) -> list[dict]:
+    """The card's memory rows grouped by configuration, in the order the
+    card's table prints its configuration sections."""
+    out = []
+    for cfg in card["configs"]:
+        out.append({(r["arm"], r["n"]): r for r in card["memory"]["rows"]
+                    if r["distribution"] == cfg["distribution"]
+                    and r["max_steps"] == cfg["max_steps"]})
+    return out
+
+
 def _table_fragment(spec: dict, e: dict, entries=()) -> str:
     """The card's own table with its headings turned into bold lines (a heading
     cannot sit inside a collapsed block) and its impossible device-memory
@@ -357,15 +450,23 @@ def _table_fragment(spec: dict, e: dict, entries=()) -> str:
     family's other `entries`), then the machine-derived lines."""
     minimum_by_n = {r["n"]: r.get("minimum_bytes")
                     for r in (e["card"].get("memory") or {}).get("rows", [])}
-    arms = e["card"].get("arms")
-    labels = {label: arm for arm, label in arms.items()} if isinstance(arms, dict) else {}
+    labels = {label: arm for arm, label in _arm_labels(e["card"]).items()}
     borrowed = borrowed_readings(e, entries)
     used, withheld = {}, False
     out, fenced = [], False
+    net_kind = "rk4_cpu" if spec["key"] == "perf_card_cpu" else None
+    by_config = _config_rows(e["card"]) if net_kind else []
+    all_rows = e["card"]["memory"]["rows"] if net_kind else None
+    section = -1  # the configuration section a row belongs to: the card's "###" headings in order
     for line in e["path"].with_suffix(".md").read_text().splitlines():
         if line.lstrip().startswith("```"):
             fenced = not fenced
         m = None if fenced else re.match(r"#{1,6}\s+(.*)", line)
+        if m and net_kind and section + 1 < len(by_config) and m.group(1).startswith(
+                ("Spread", "Uniform")):
+            section += 1
+        elif net_kind and not m and 0 <= section < len(by_config):
+            line = net_cpu_memory_line(line, by_config[section], labels, net_kind, all_rows)
         if not fenced and not m:
             kept, line = line, withhold_impossible_readings(line, minimum_by_n, labels, borrowed)
             if line != kept:
@@ -377,6 +478,9 @@ def _table_fragment(spec: dict, e: dict, entries=()) -> str:
                     withheld = True
         out.append(f"**{m.group(1)}**" if m else line)
     out.append("")
+    if net_kind:
+        assert section + 1 == len(by_config), f"{e['path'].name}: configuration sections not found"
+        out += [CPU_MEMORY_NOTE, ""]
     out += _withheld_note(used, withheld)
     if not e["is_reference"]:
         out += _fastest_arm_lines(e["card"], spec["has_config"])
@@ -390,6 +494,9 @@ def card_results(spec: dict, e: dict, table_rel: str) -> str:
     configs = [(c, _chart_for(spec, e, c, name_config=False)) for c in _configs(spec, e)]
     configs = [(c, h) for c, h in configs if h]
     lines: list[str] = []
+    versions = versions_line(e["card"])
+    if versions:
+        lines += [versions, ""]
     if len(configs) == 1:
         lines += _raw_html(configs[0][1])
     elif configs:
@@ -513,6 +620,8 @@ def generate(eagle_root: pathlib.Path, out_dir: pathlib.Path) -> dict[str, int]:
         for view in ("results", "overview"):
             name = spec["key"] if view == "results" else f"{spec['key']}_overview"
             (out_dir / f"{name}.md").write_text(render_family(spec, entries, out_dir, view))
+        (out_dir / f"{spec['key']}_devices.md").write_text(
+            "\n".join(_measured_on_table(entries) + _software_table(entries)))
         counts[spec["key"]] = len(entries)
     write_readme_svgs(eagle_root, loaded)
     write_glimpse(out_dir, loaded)

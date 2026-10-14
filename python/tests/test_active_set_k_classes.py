@@ -268,6 +268,35 @@ def test_distinct_sets_sort_concurrently():
     assert all(int(a.class_sorts[0]) == 3 for a in sets)
 
 
+def test_distinct_sets_sorted_concurrently_equal_the_serial_permutation():
+    seeds = range(8)
+    want = []
+    for s in seeds:
+        a = _make(4200, 4, seed=s)[0]
+        a.compact()
+        a.class_sort()
+        want.append((a.perm.copy(), a.inv.copy(), a.offsets.copy()))
+    sets = [_make(4200, 4, seed=s)[0] for s in seeds]
+    start = threading.Barrier(len(sets))
+    errs = []
+
+    def work(a):
+        try:
+            start.wait()
+            a.compact()
+            a.class_sort()
+        except BaseException as e:  # noqa: BLE001
+            errs.append(e)
+
+    th = [threading.Thread(target=work, args=(a,)) for a in sets]
+    [t.start() for t in th]
+    [t.join() for t in th]
+    assert not errs
+    for a, (perm, inv, offsets) in zip(sets, want):
+        assert np.array_equal(a.perm, perm) and np.array_equal(a.inv, inv)
+        assert np.array_equal(a.offsets, offsets)
+
+
 def test_one_set_shared_across_threads_is_serialised():
     a, *_ = _make(4200, 4, seed=1)
     errs = []
@@ -402,3 +431,33 @@ def test_device_restore_and_pairing():
     assert np.array_equal(_get(dp), (d.perm.get() * 7 + 3))
     d.restore()
     assert np.array_equal(_get(dp), np.arange(5000) * 7 + 3)
+
+
+@gpu
+def test_device_distinct_sets_sorted_concurrently_equal_the_host_permutation():
+    cupy = pytest.importorskip("cupy")
+    pairs = [_pair(6000, 4, seed=s) for s in range(4)]
+    want = []
+    for h, _hp, _d, _dp in pairs:
+        h.compact()
+        h.class_sort()
+        want.append((h.perm.copy(), h.offsets.copy()))
+    start = threading.Barrier(len(pairs))
+    errs = []
+
+    def work(d):
+        try:
+            with cupy.cuda.Device(cupy.cuda.runtime.getDevice()):
+                start.wait()
+                d.compact()
+                d.class_sort()
+                cupy.cuda.get_current_stream().synchronize()
+        except BaseException as e:  # noqa: BLE001
+            errs.append(e)
+
+    th = [threading.Thread(target=work, args=(p[2],)) for p in pairs]
+    [t.start() for t in th]
+    [t.join() for t in th]
+    assert not errs
+    for (_h, _hp, d, _dp), (perm, offsets) in zip(pairs, want):
+        assert np.array_equal(_get(d.perm), perm) and np.array_equal(_get(d.offsets), offsets)

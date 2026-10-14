@@ -15,6 +15,7 @@ graph_model
 graph_view
 autodiff
 determinism
+threading
 ../interop
 ```
 

@@ -143,8 +143,8 @@ Certification
 NVIDIA Warp is certified today, through this same layer, not a dedicated
 adapter: any ``__dlpack__`` + ``__dlpack_device__`` producer already reaches
 :func:`eagle.interop.import_buffer`. A ``wp.array`` imports zero-copy
-(``WP-IN-CUDA-ALIAS``) — Warp speaks legacy (pre-1.0) DLPack, so its access
-flag always reports ``"unknown"`` — and exports back zero-copy via
+(``WP-IN-CUDA-ALIAS``) — Warp speaks legacy (pre-1.0) DLPack in the version the
+tests pin, so its access flag reports ``"unknown"`` — and exports back zero-copy via
 ``wp.from_dlpack`` (``WP-OUT-CUDA-ALIAS``); the stream contract above is
 honoured end to end, producer side (``STREAM-WARP-PRODUCER-ORDER``). See
 `raptor's interoperability protocols

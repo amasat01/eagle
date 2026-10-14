@@ -26,4 +26,5 @@ endif()
 
 if(NOT EAGLE_CPP_MODE)
   add_executable(eagle_canary_cu ${CMAKE_CURRENT_LIST_DIR}/canary.cu)
+  target_compile_options(eagle_canary_cu PRIVATE -Wno-deprecated-gpu-targets)
 endif()

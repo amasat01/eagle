@@ -52,6 +52,8 @@ declare_ft_row("FT-3-EAGLE-CAPS-HOLD", "eagle",
                "the zero-mask and kernel-attribute caches never exceed their caps under threads")
 declare_ft_row("FT-3-EAGLE-REORDERING-SNAPSHOT", "eagle",
                "registering reordering sets while others scan the registry never raises")
+declare_ft_row("FT-3-EAGLE-PICK-CONVERGES", "eagle",
+               "two threads on one pick: a reader never sees a torn pick and two runners settle one key")
 declare_ft_row("FT-4-EAGLE-HOST-PARITY", "eagle",
                "private host-team runs on disjoint planes are bit-identical to the serial oracle")
 
@@ -64,6 +66,7 @@ EXPECTED_TESTS = frozenset(
         "test_external_stream_identity_under_threads",
         "test_caches_never_exceed_their_caps",
         "test_reordering_registry_is_snapshotted_under_lock",
+        "test_the_entry_pick_converges_without_a_torn_read",
         "test_host_parity_on_private_planes",
     }
 )
@@ -409,3 +412,57 @@ def test_host_parity_on_private_planes(tmp_path):
     results, errors = _run_threads(THREADS, one)
     assert errors == [None] * THREADS, [repr(e) for e in errors if e]
     assert results == [0] * THREADS, results
+
+
+# --------------------------------------------------------------------------- #
+# Concurrency of the entry pick. One thread runs a runner (the only writer); another
+# reads its pick state the whole time. Two runners on the same key race to
+# settle it in the process cache.
+# --------------------------------------------------------------------------- #
+@register_ft_row("FT-3-EAGLE-PICK-CONVERGES")
+def test_the_entry_pick_converges_without_a_torn_read():
+    import importlib
+
+    from eagle import _until_done as ud
+
+    launch = importlib.import_module("eagle.launch")
+    launch._reset_pick_cache()
+
+    def runner():
+        r = ud.Runner.__new__(ud.Runner)
+        r._fast_state = ud._NO_PICK._replace(pick="persist")
+        r._fast_mode, r._fast_prep, r._fast_fit = "persist", {}, None
+        r._fast_key, r._fast_model, r.n = ("ft", "key"), None, 100_000
+        return r
+
+    walls = {"persist": 2.0, "fused_one": 1.0}
+    shared = runner()
+    done = threading.Event()
+    torn = []
+
+    def reader():
+        last_runs = 0
+        while not done.is_set():
+            st = shared._fast_state
+            ok = (st.runs >= last_runs and st.pick in (None, "persist", "fused_one")
+                  and set(st.wall) <= set(walls) and (not st.settled or st.pick is not None))
+            if not ok:
+                torn.append(st)
+            last_runs = st.runs
+
+    def writer(r):
+        for _ in range(500):
+            mode, _probe = r._pick_entry()
+            timed = r._carries_timing(_probe)
+            r._note_run(mode, walls[mode] if timed else None, 1000, 100_000, 0.23)
+
+    watcher = threading.Thread(target=reader)
+    watcher.start()
+    _, errors = _run_threads(2, lambda i: writer(shared if i == 0 else runner()))
+    done.set()
+    watcher.join()
+    assert errors == [None, None], errors
+    assert not torn, torn[:1]
+    assert shared._fast_pick == "fused_one" and shared._fast_state.settled
+    assert launch._pick_cache_get(("ft", "key") + (shared._fast_state.last,))[0] == "fused_one"
+    launch._reset_pick_cache()

@@ -294,3 +294,17 @@ def test_a_recorded_run_moves_records_by_exactly_one():
     assert mid["records"] - before["records"] == 1
     assert mid["reverses"] == before["reverses"]
     assert after["reverses"] - mid["reverses"] == 1 and after["records"] == mid["records"]
+
+
+def test_a_recording_graph_launch_moves_records_by_exactly_one(tmp_path):
+    import eagle.diff
+    from _reverse_fixtures import chain, plans
+
+    g, _z = chain(plans(tmp_path, "cpu"), np.linspace(-1, 1, 8), 0.5, record=True)
+    before = _counters.snapshot()
+    g.launch()
+    mid = _counters.snapshot()
+    assert mid["records"] - before["records"] == 1 and mid["reverses"] == before["reverses"]
+    eagle.diff.reverse(g.record, {"sin.y": np.ones(8)})
+    after = _counters.snapshot()
+    assert after["records"] == mid["records"] and after["reverses"] - mid["reverses"] == 1

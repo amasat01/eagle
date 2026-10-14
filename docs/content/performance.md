@@ -10,6 +10,14 @@ Wall time to integrate a million samples, each stopping at its own step: one
 bar per tool, log scale. Pick a device with the tabs; the pick carries over to
 every page in this section.
 
+## Where each tool covers the work
+
+```{raw} html
+:file: ../_static/family_visuals/fragments/performance.html
+```
+
+*Map, rosette and radar of the same committed cards: each tool where it covers a workload, with the table behind every chart.*
+
 ## RK4 oscillators: GPU
 
 ```{include} /content/_generated/perf_card_gpu_overview.md
@@ -35,7 +43,11 @@ every page in this section.
 - [RK4 oscillators: results](performance/rk4.md): every workload, every arm and
   every N, per device.
 - [Adaptive RK7(8): results](performance/rk78.md): the same for an adaptive solver.
+- [Which commits ran](https://github.com/amasat01/eagle/blob/main/benchmarks/card_provenance.json): the eagle and hawk
+  commit behind every card file.
 - [Reading the numbers](performance/reading.md): where each approach wins, and why.
+- [Where the performance comes from](performance/mechanism.md): the mechanisms behind the
+  numbers, each with its card evidence.
 - [The workload and the ways of running it](performance/workload.md): what is
   measured and what each arm does.
 - [Method](performance/method.md): how a number is produced.
@@ -49,6 +61,7 @@ every page in this section.
 performance/rk4
 performance/rk78
 performance/reading
+performance/mechanism
 performance/workload
 performance/method
 performance/reproduce

@@ -1,11 +1,11 @@
-Quick start
-===========
+C++ quick start
+===============
 
 .. contents:: On this page
    :local:
    :depth: 2
 
-This page walks through a minimal eagle program: capture a kernel launch into
+For Python see :doc:`quickstart_python`. This page walks through a minimal eagle program: capture a kernel launch into
 a CUDA graph, instantiate a launcher, and replay it.  It mirrors the shipped
 ``eagle_demo.cu`` smoke test.
 

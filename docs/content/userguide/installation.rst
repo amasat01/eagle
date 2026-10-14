@@ -6,13 +6,30 @@ Python (pip)
 
 .. code-block:: bash
 
-   pip install "raptor-eagle[cuda12]"      # or [cuda13]; add [torch] for PyTorch interop
+   pip install raptor-eagle                # CPU threads: no NVIDIA packages
+   pip install "raptor-eagle[cuda12]"      # NVIDIA GPU; or [cuda13]; add [torch] for PyTorch interop
 
 The package imports as ``eagle``. It needs Python 3.9 or newer (CPython
 3.9-3.14) and an NVIDIA driver at run time; no ``nvcc`` or CUDA toolkit. Free-threaded builds (3.13t, 3.14t) run GIL-free. On 3.13t the ``[cuda12]`` / ``[cuda13]`` extras do not resolve (CuPy 14 ships no 3.13t wheel), so eagle runs on the CPU route there; 3.14t has no such limit. The
-wheel ships GPU code for every NVIDIA architecture from Pascal (sm_60) through
-Blackwell, plus PTX for newer GPUs. To write kernels for it with hawk, install
+wheel ships GPU code (SASS) for every NVIDIA architecture from Pascal (sm_60)
+through Blackwell (sm_100 and sm_103 on B200 and B300, sm_120 and sm_121 on the
+RTX PRO 6000 and GB10), plus PTX (compute_100 and compute_121) for newer GPUs such as Jetson Thor. The wheel
+carries that native code, so those GPUs need no first-use JIT; sm_120 is measured (RTX PRO 6000 Blackwell Server Edition); sm_100, sm_103 and sm_121 are not yet run on hardware. One wheel serves ``[cuda12]`` and ``[cuda13]`` alike: the plugin
+needs only the driver. To write kernels for it with hawk, install
 ``"raptor-hawk[cuda12]"`` alongside (``[cuda13]`` on both for CUDA 13).
+
+.. list-table:: Driver requirements (Linux; the driver, not the installed toolkit, decides, because the plugin uses the driver API only)
+   :header-rows: 1
+
+   * - Code used
+     - GPUs
+     - Minimum driver
+   * - Precompiled SASS (every listed architecture)
+     - Any GPU the wheel lists
+     - Any driver that supports the GPU: ``>= 525.60.13`` for CUDA 12.x GPUs; Blackwell needs ``>= 570.26`` for the GPU itself
+   * - PTX fallback (``compute_100``, ``compute_121``)
+     - GPUs with no SASS in the wheel: Jetson Thor under a CUDA 13 driver (sm_110), future GPUs
+     - ``>= 575.51.03`` (the CUDA 12.9 PTX ISA); the driver compiles the PTX at first load and caches it in ``~/.nv/ComputeCache``, near-SASS speed after a one-off JIT delay
 
 .. important::
 
@@ -25,7 +42,9 @@ Blackwell, plus PTX for newer GPUs. To write kernels for it with hawk, install
    Without an extra pip installs no NVIDIA package: you get the CPU route, or the GPU route through a CUDA setup you already have. Pick the extra matching the CUDA
    version your driver reports (``nvidia-smi``, top right).
 
-**Platforms:** built and tested on Linux x86_64 only so far (CPython 3.9–3.14, including free-threaded 3.13t and 3.14t), on NVIDIA GPUs from Pascal (Quadro P2000) and Turing (Tesla T4). There are no wheels for macOS, Windows or ARM yet, and WSL2 is untested. ``raptor-core`` and ``aether-dsc`` are pure Python and install anywhere.
+**Platforms:** the wheels are Linux x86_64 (CPython 3.9–3.14, including free-threaded 3.13t and 3.14t). The performance page lists the NVIDIA GPUs and the x86-64 and ARM (aarch64) CPUs the code has been run and measured on. There are no wheels for macOS, Windows or ARM yet, and WSL2 is untested. ``raptor-core`` and ``aether-dsc`` are pure Python and install anywhere.
+
+To build from source, and for the supported-version table, see `build from source <https://amasat01.github.io/build_from_source.html>`__.
 
 C++ library
 -----------
@@ -48,7 +67,7 @@ Prerequisites
      - ≥ 0.2
      - Required; must be installed first (see below).
    * - CUDA Toolkit
-     - 12.6 or newer (tested with 12.6 and 13.0)
+     - 12.6 or newer (each performance card records its toolkit)
      - Required for GPU mode; not needed for ``EAGLE_CPP_MODE``.
    * - OpenMP
      - any

@@ -1,0 +1,164 @@
+{
+ "schema": "eagle-card-provenance-1",
+ "release": "eagle 0.6.0, hawk 0.5.0",
+ "about": "For each committed card file, the eagle and hawk commit its session ran. Recorded from the session logs; a null would carry its reason.",
+ "cards": {
+  "benchmarks/perf_card/card_nvidia-a100-sxm4-40gb.json": {
+   "eagle_version": "0.6.0",
+   "eagle": "06b72ca2d0aae86d0e3d6d10e47678d542914f93",
+   "hawk": "efaed2cd9e04c71c2647007aa54f907db69c7aa7",
+   "source": "gtc_work/final_round/a100/final-a100.log: 'eagle:' / 'hawk:' fact-sheet lines"
+  },
+  "benchmarks/perf_card/card_nvidia-h100-80gb-hbm3.json": {
+   "eagle_version": "0.6.0",
+   "eagle": "06b72ca2d0aae86d0e3d6d10e47678d542914f93",
+   "hawk": "efaed2cd9e04c71c2647007aa54f907db69c7aa7",
+   "source": "gtc_work/final_round/h100/final-h100.log: 'eagle:' / 'hawk:' fact-sheet lines"
+  },
+  "benchmarks/perf_card/card_nvidia-l4.json": {
+   "eagle_version": "0.6.0",
+   "eagle": "06b72ca2d0aae86d0e3d6d10e47678d542914f93",
+   "hawk": "efaed2cd9e04c71c2647007aa54f907db69c7aa7",
+   "source": "gtc_work/final_round/l4/final-l4.log: 'eagle:' / 'hawk:' fact-sheet lines"
+  },
+  "benchmarks/perf_card/card_nvidia-rtx-pro-6000-blackwell-server-edition.json": {
+   "eagle_version": "0.6.0",
+   "eagle": "ff6f22c7a96ddd3399ed56c4e90c983ba04ec2e1",
+   "hawk": "98c227b0a01bec928fad4d743ce62cd2d0bbac9b",
+   "source": "gtc_work/final_round/rtx12/final-rtx12.log (the 10-14 session, second checkout block): 'eagle:' / 'hawk:' fact-sheet lines"
+  },
+  "benchmarks/perf_card/card_quadro-p2000.json": {
+   "eagle_version": "0.6.0",
+   "eagle": "06b72ca2d0aae86d0e3d6d10e47678d542914f93",
+   "hawk": "efaed2cd9e04c71c2647007aa54f907db69c7aa7",
+   "source": "the commits recorded inside the card by its own run"
+  },
+  "benchmarks/perf_card/card_tesla-t4.json": {
+   "eagle_version": "0.6.0",
+   "eagle": "06b72ca2d0aae86d0e3d6d10e47678d542914f93",
+   "hawk": "efaed2cd9e04c71c2647007aa54f907db69c7aa7",
+   "source": "gtc_work/final_round/t4-v3/final-t4/final-t4-v2.log: 'eagle:' / 'hawk:' fact-sheet lines"
+  },
+  "benchmarks/rk78_card/card_nvidia-a100-sxm4-40gb.json": {
+   "eagle_version": "0.6.0",
+   "eagle": "06b72ca2d0aae86d0e3d6d10e47678d542914f93",
+   "hawk": "efaed2cd9e04c71c2647007aa54f907db69c7aa7",
+   "source": "gtc_work/final_round/a100/final-a100.log: 'eagle:' / 'hawk:' fact-sheet lines"
+  },
+  "benchmarks/rk78_card/card_nvidia-h100-80gb-hbm3.json": {
+   "eagle_version": "0.6.0",
+   "eagle": "06b72ca2d0aae86d0e3d6d10e47678d542914f93",
+   "hawk": "efaed2cd9e04c71c2647007aa54f907db69c7aa7",
+   "source": "gtc_work/final_round/h100/final-h100.log: 'eagle:' / 'hawk:' fact-sheet lines"
+  },
+  "benchmarks/rk78_card/card_nvidia-l4.json": {
+   "eagle_version": "0.6.0",
+   "eagle": "06b72ca2d0aae86d0e3d6d10e47678d542914f93",
+   "hawk": "efaed2cd9e04c71c2647007aa54f907db69c7aa7",
+   "source": "gtc_work/final_round/l4/final-l4.log: 'eagle:' / 'hawk:' fact-sheet lines"
+  },
+  "benchmarks/rk78_card/card_nvidia-rtx-pro-6000-blackwell-server-edition.json": {
+   "eagle_version": "0.6.0",
+   "eagle": "ff6f22c7a96ddd3399ed56c4e90c983ba04ec2e1",
+   "hawk": "98c227b0a01bec928fad4d743ce62cd2d0bbac9b",
+   "source": "gtc_work/final_round/rtx12/final-rtx12.log (the 10-14 session, second checkout block): 'eagle:' / 'hawk:' fact-sheet lines"
+  },
+  "benchmarks/rk78_card/card_quadro-p2000.json": {
+   "eagle_version": "0.6.0",
+   "eagle": "7f1e0918a971510f85446598fb5581aedc502d78",
+   "hawk": "efaed2cd9e04c71c2647007aa54f907db69c7aa7",
+   "source": "the commits recorded inside the card by its own run",
+   "note": "the card's own eagle_commit differs from the perf card's (06b72ca): it was run from a pre-release checkout that is not in the release history"
+  },
+  "benchmarks/rk78_card/card_tesla-t4.json": {
+   "eagle_version": "0.6.0",
+   "eagle": "06b72ca2d0aae86d0e3d6d10e47678d542914f93",
+   "hawk": "efaed2cd9e04c71c2647007aa54f907db69c7aa7",
+   "source": "gtc_work/final_round/t4-v3/final-t4/final-t4-v2.log: 'eagle:' / 'hawk:' fact-sheet lines"
+  },
+  "benchmarks/perf_card/cpu_card_aarch64.json": {
+   "eagle_version": "0.6.0",
+   "eagle": "06b72ca2d0aae86d0e3d6d10e47678d542914f93",
+   "hawk": "efaed2cd9e04c71c2647007aa54f907db69c7aa7",
+   "source": "gtc_work/final_round/cpu-arm/final-cpu-arm.log: 'eagle:' / 'hawk:' fact-sheet lines",
+   "memory_rerun_10_14": {
+    "eagle": "ff6f22c7a96ddd3399ed56c4e90c983ba04ec2e1",
+    "hawk": "98c227b0a01bec928fad4d743ce62cd2d0bbac9b",
+    "source": "gtc_work/memattr/cm_arm/memattr-out/commits.txt",
+    "note": "the 10-14 memory re-run on this machine class; its memory columns come from this checkout"
+   }
+  },
+  "benchmarks/perf_card/cpu_card_amd-epyc-7b13.json": {
+   "eagle_version": "0.6.0",
+   "eagle": "06b72ca2d0aae86d0e3d6d10e47678d542914f93",
+   "hawk": "efaed2cd9e04c71c2647007aa54f907db69c7aa7",
+   "source": "gtc_work/final_round/cpu-avx2/final-cpu-avx2.log: 'eagle:' / 'hawk:' fact-sheet lines",
+   "memory_rerun_10_14": {
+    "eagle": "ff6f22c7a96ddd3399ed56c4e90c983ba04ec2e1",
+    "hawk": "98c227b0a01bec928fad4d743ce62cd2d0bbac9b",
+    "source": "gtc_work/memattr/cm_milan/memattr-out/commits.txt",
+    "note": "the 10-14 memory re-run on this machine class; its memory columns come from this checkout"
+   }
+  },
+  "benchmarks/perf_card/cpu_card_amd-epyc-9b45.json": {
+   "eagle_version": "0.6.0",
+   "eagle": "06b72ca2d0aae86d0e3d6d10e47678d542914f93",
+   "hawk": "efaed2cd9e04c71c2647007aa54f907db69c7aa7",
+   "source": "gtc_work/final_round/cpu-zen5-v4/final-cpu-zen5.log: 'eagle:' / 'hawk:' fact-sheet lines",
+   "memory_rerun_10_14": {
+    "eagle": "ff6f22c7a96ddd3399ed56c4e90c983ba04ec2e1",
+    "hawk": "98c227b0a01bec928fad4d743ce62cd2d0bbac9b",
+    "source": "gtc_work/memattr/cm_zen5/memattr-out/commits.txt",
+    "note": "the 10-14 memory re-run on this machine class; its memory columns come from this checkout"
+   }
+  },
+  "benchmarks/perf_card/cpu_card_intel-xeon-platinum-8581c.json": {
+   "eagle_version": "0.6.0",
+   "eagle": "06b72ca2d0aae86d0e3d6d10e47678d542914f93",
+   "hawk": "efaed2cd9e04c71c2647007aa54f907db69c7aa7",
+   "source": "gtc_work/final_round/final-cpu-intel.log: 'eagle:' / 'hawk:' fact-sheet lines"
+  },
+  "benchmarks/rk78_card/cpu_card_aarch64.json": {
+   "eagle_version": "0.6.0",
+   "eagle": "06b72ca2d0aae86d0e3d6d10e47678d542914f93",
+   "hawk": "efaed2cd9e04c71c2647007aa54f907db69c7aa7",
+   "source": "gtc_work/final_round/cpu-arm/final-cpu-arm.log: 'eagle:' / 'hawk:' fact-sheet lines",
+   "memory_rerun_10_14": {
+    "eagle": "ff6f22c7a96ddd3399ed56c4e90c983ba04ec2e1",
+    "hawk": "98c227b0a01bec928fad4d743ce62cd2d0bbac9b",
+    "source": "gtc_work/memattr/cm_arm/memattr-out/commits.txt",
+    "note": "the 10-14 memory re-run on this machine class; its memory columns come from this checkout"
+   }
+  },
+  "benchmarks/rk78_card/cpu_card_amd-epyc-7b13.json": {
+   "eagle_version": "0.6.0",
+   "eagle": "06b72ca2d0aae86d0e3d6d10e47678d542914f93",
+   "hawk": "efaed2cd9e04c71c2647007aa54f907db69c7aa7",
+   "source": "gtc_work/final_round/cpu-avx2/final-cpu-avx2.log: 'eagle:' / 'hawk:' fact-sheet lines",
+   "memory_rerun_10_14": {
+    "eagle": "ff6f22c7a96ddd3399ed56c4e90c983ba04ec2e1",
+    "hawk": "98c227b0a01bec928fad4d743ce62cd2d0bbac9b",
+    "source": "gtc_work/memattr/cm_milan/memattr-out/commits.txt",
+    "note": "the 10-14 memory re-run on this machine class; its memory columns come from this checkout"
+   }
+  },
+  "benchmarks/rk78_card/cpu_card_amd-epyc-9b45.json": {
+   "eagle_version": "0.6.0",
+   "eagle": "06b72ca2d0aae86d0e3d6d10e47678d542914f93",
+   "hawk": "efaed2cd9e04c71c2647007aa54f907db69c7aa7",
+   "source": "gtc_work/final_round/cpu-zen5-v4/final-cpu-zen5.log: 'eagle:' / 'hawk:' fact-sheet lines",
+   "memory_rerun_10_14": {
+    "eagle": "ff6f22c7a96ddd3399ed56c4e90c983ba04ec2e1",
+    "hawk": "98c227b0a01bec928fad4d743ce62cd2d0bbac9b",
+    "source": "gtc_work/memattr/cm_zen5/memattr-out/commits.txt",
+    "note": "the 10-14 memory re-run on this machine class; its memory columns come from this checkout"
+   }
+  },
+  "benchmarks/rk78_card/cpu_card_intel-r-xeon-r-platinum-8581c-cpu-2-30ghz.json": {
+   "eagle_version": "0.6.0",
+   "eagle": "06b72ca2d0aae86d0e3d6d10e47678d542914f93",
+   "hawk": "efaed2cd9e04c71c2647007aa54f907db69c7aa7",
+   "source": "gtc_work/final_round/final-cpu-intel.log: 'eagle:' / 'hawk:' fact-sheet lines"
+  }
+ }
+}

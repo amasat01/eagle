@@ -76,6 +76,51 @@ def _reset_kernel_attrs_cache() -> None:
         _kernel_attrs_cache.clear()
 
 
+#: Settled entry picks of this process, keyed by the device, the kernel, the
+#: precision, the batch size bucket and the readback bucket a runner measured
+#: (see :func:`_pick_cache_get`). A runner that finds its key here takes the
+#: pick without timing the other entry.
+_pick_cache: dict = {}
+#: Serialises the inserts into (and the resets of) :data:`_pick_cache`; a
+#: runner settles once per readback regime, never on its run path.
+_PICK_CACHE_LOCK = threading.Lock()
+#: The most picks held. Past it a settled pick is simply not remembered: the
+#: runner that measured it keeps it, and a later runner times it again.
+PICK_CACHE_CAP = 4096
+
+
+def _pick_cache_get(key):
+    """The ``(mode, walls)`` a runner settled on for ``key`` (a hashable tuple),
+    or ``None``. ``walls`` maps each timed entry to its wall in ms and must not
+    be modified."""
+    with _PICK_CACHE_LOCK:
+        return _pick_cache.get(key)
+
+
+def _pick_cache_put(key, mode: str, walls: dict) -> None:
+    """Remember that ``mode`` won for ``key``, with the walls it won on. The
+    first runner to settle a key keeps it; a full cache remembers nothing new."""
+    with _PICK_CACHE_LOCK:
+        if key not in _pick_cache and len(_pick_cache) < PICK_CACHE_CAP:
+            _pick_cache[key] = (mode, dict(walls))
+
+
+def _reset_pick_cache() -> None:
+    """Empty the settled-pick cache (tests / teardown only)."""
+    with _PICK_CACHE_LOCK:
+        _pick_cache.clear()
+
+
+def _current_device_ordinal() -> int:
+    """The ordinal of the current device (``0`` when it cannot be read)."""
+    try:
+        import cupy as cp
+
+        return int(cp.cuda.runtime.getDevice())
+    except Exception:
+        return 0
+
+
 def _device_props():
     """The current device's properties, queried once per process and
     cached thereafter."""

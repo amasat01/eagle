@@ -52,3 +52,43 @@ def test_a_kernel_whose_fused_host_loop_runs_scalar_follows_the_mix_weighted_sum
     for row, _ in cases.values():
         row["fused_vectorised"] = "0"
     assert fit_profile.rel_rmse(cases, "host", props, None, "E") < 0.20
+
+
+def _with_header(tmp_path, name, **fields):
+    lines = []
+    for line in SAMPLE.read_text().splitlines():
+        key = line[1:].split("=")[0].strip() if line.startswith("#") else None
+        if key in fields:
+            line = f"# {key}={fields.pop(key)}"
+        lines.append(line)
+    lines[:0] = [f"# {k}={v}" for k, v in fields.items()]
+    path = tmp_path / name
+    path.write_text("\n".join(lines) + "\n")
+    return str(path)
+
+
+def test_a_schema_one_csv_has_no_host_profile_and_is_refused(fit_profile, tmp_path):
+    with pytest.raises(SystemExit, match="host_profile"):
+        fit_profile.main([str(SAMPLE)])
+
+
+def test_csvs_of_different_host_profiles_are_never_merged(fit_profile, tmp_path):
+    a = _with_header(tmp_path, "a.csv", schema=2, host_profile="native")
+    b = _with_header(tmp_path, "b.csv", schema=2, host_profile="native-vector-math")
+    with pytest.raises(SystemExit, match="refusing to merge"):
+        fit_profile.main([a, b])
+
+
+def test_the_checks_name_the_ilp_pair_and_the_paired_gain(fit_profile):
+    header, cases = fit_profile.read(SAMPLE)
+    rows = fit_profile.checks(cases, header, None, 0.1, 0.2)
+    assert {name for name, _, _ in rows} >= {"A-C relative RMS", "every A case",
+                                             "E decide agreement", "E gain error"}
+
+
+def test_a_cost_cell_carries_its_store_count_only_when_it_has_one(fit_profile):
+    old = {"cost_b0": "0;1;0;0;2;0;0;1;0;0;1", "cost_b1": "", "cost_b2": "", "cost_b3": "",
+           "fused_vectorised": "0"}
+    new = dict(old, cost_b0="0;1;0;0;2;0;0;1;0;0;1;3")
+    assert fit_profile.branches_of(old) == ([(0, 1, 0, 0, 2, 0, 0, 1, 0, 0)], [True])
+    assert fit_profile.branches_of(new) == ([(0, 1, 0, 0, 2, 0, 0, 1, 0, 0, 3)], [True])

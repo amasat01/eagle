@@ -24,7 +24,7 @@ its own). No root. On vast.ai any CUDA 12 image works, e.g.
 `nvidia/cuda:12.6.3-devel-ubuntu22.04`.
 
 ```bash
-git clone --depth 1 --branch v0.5.1 https://github.com/amasat01/eagle.git
+git clone --depth 1 --branch v0.6.0 https://github.com/amasat01/eagle.git
 eagle/benchmarks/reproduce/bootstrap.sh                 # gpu profile when a GPU is visible
 eagle/benchmarks/reproduce/bootstrap.sh --profile cpu   # the CPU cards' environment
 eagle/benchmarks/reproduce/run_cards.sh --preset smoke --which all   # minutes: checks the setup

@@ -1,0 +1,14 @@
+{
+  "schema": "eagle-compare-evidence/1",
+  "slug": "nvidia-l4",
+  "device": "NVIDIA L4",
+  "session": "final-l4",
+  "eagle_commit": "06b72ca2d0aae86d0e3d6d10e47678d542914f93",
+  "hawk_commit": "efaed2c",
+  "commits_source": "session log final-l4.log",
+  "csv_md5": "49417084e73051200afbc856b6de05bb",
+  "kit_branch": "profile-kit",
+  "kit_commit": "f6cdc0f8449259ba42e35f5891683aac24b90e3a",
+  "gpu_profile_md5": "c8c45b7753117acb9218715874b5e726",
+  "generated_utc": "2026-10-14T09:42:46Z"
+}

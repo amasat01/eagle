@@ -54,6 +54,8 @@ def require_n(n, *, hint="state-vector input"):
 
 #: fast/slow counters over :func:`_as_dtype` (record-only; the gate reads them).
 _coerce_stats = {"fast": 0, "slow": 0}
+#: Serialises the tallies: ``+= 1`` on a dict slot is a read-modify-write.
+_COERCE_LOCK = threading.Lock()
 
 #: Forces :func:`_fast_path_ok` to always answer ``False`` (the
 #: launch-parity corpus's forced-slow arm); never set in production.
@@ -62,13 +64,15 @@ _force_slow = False
 
 def _coercion_stats() -> dict:
     """A copy of the fast/slow coercion counters (record-only)."""
-    return dict(_coerce_stats)
+    with _COERCE_LOCK:
+        return dict(_coerce_stats)
 
 
 def _reset_coercion_stats() -> None:
     """Zero the fast/slow coercion counters."""
-    _coerce_stats["fast"] = 0
-    _coerce_stats["slow"] = 0
+    with _COERCE_LOCK:
+        _coerce_stats["fast"] = 0
+        _coerce_stats["slow"] = 0
 
 
 def _force_slow_coercion(enabled: bool = True) -> None:
@@ -106,10 +110,12 @@ def _as_dtype(value, dt=np.float64):
     import cupy as cp
 
     if _fast_path_ok(value, dt, cp):
-        _coerce_stats["fast"] += 1
+        with _COERCE_LOCK:
+            _coerce_stats["fast"] += 1
         return value
 
-    _coerce_stats["slow"] += 1
+    with _COERCE_LOCK:
+        _coerce_stats["slow"] += 1
 
     from . import interop
 

@@ -147,8 +147,16 @@ void requireDevice()
     }();
     if (status == cudaSuccess)
         return;
-    const std::string text = std::string("eagle: the CUDA backend cannot run here: ") + cudaGetErrorName(status)
+    std::string text = std::string("eagle: the CUDA backend cannot run here: ") + cudaGetErrorName(status)
         + " (" + cudaGetErrorString(status) + ")";
+    if (status == cudaErrorNoDevice)
+        text = "eagle: no CUDA GPU visible (cudaErrorNoDevice). Check nvidia-smi and CUDA_VISIBLE_DEVICES. "
+               "To run on the CPU instead, pass NumPy arrays (not CuPy arrays): the same eagle call then runs on CPU threads.";
+    else if (status == cudaErrorInsufficientDriver || status == cudaErrorSystemDriverMismatch)
+        text = std::string("eagle: the NVIDIA driver cannot run this CUDA build (") + cudaGetErrorName(status)
+            + "). Install the extra that matches your driver: pip install \"raptor-eagle[cuda12]\" for a CUDA 12 "
+              "driver (R525 or newer), \"raptor-eagle[cuda13]\" for a CUDA 13 driver (R580 or newer); "
+              "run nvidia-smi to see which CUDA version your driver supports.";
     if (isUnavailableCode(status))
         throw DeviceUnavailable(text);
     throw std::runtime_error(text);
@@ -981,6 +989,67 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_reorder_device(struct eagle
                 seamStream(d.stream));
             return 0;
         });
+    });
+}
+
+EAGLE_BACKEND_API eagle_backend_status eagle_backend_reset_device(struct eagle_backend_reorder_desc* desc)
+{
+    return guarded([&] {
+        constexpr const char* who = "eagle_backend_reset_device";
+        const auto d = readDesc(desc, EAGLE_BACKEND_COMPACT_MASK_IS_DROP);
+        if (d.n < 0)
+            throw std::invalid_argument(std::string(who) + ": n must be >= 0");
+        if (d.n > eagle::filtering::kCompactMaxSamples)
+            throw Unsupported(std::string(who) + ": the int32 indices address at most 2^31-1 samples, got n = "
+                + std::to_string(d.n));
+        if (d.count == 0 || d.span == 0 || (d.n > 0 && (d.perm == 0 || d.inv == 0)))
+            throw std::invalid_argument(std::string(who) + ": perm, inv, count and span must be device addresses");
+        requireDevice();
+        const int device = resolveDevice(d.device, d.stream);
+        DeviceScope scope(device);
+        bracketed(who, "enqueue", [&] {
+            eagle::filtering::resetDevice(reinterpret_cast<std::int32_t*>(d.perm),
+                reinterpret_cast<std::int32_t*>(d.inv), reinterpret_cast<std::int32_t*>(d.index_map),
+                reinterpret_cast<std::uint32_t*>(d.count), reinterpret_cast<std::uint32_t*>(d.span), d.n,
+                seamStream(d.stream));
+            return 0;
+        });
+    });
+}
+
+EAGLE_BACKEND_API eagle_backend_status eagle_backend_pointer_residency(
+    std::int32_t device, std::uint64_t ptr, std::int32_t* cls)
+{
+    return guarded([&] {
+        if (cls == nullptr)
+            throw std::invalid_argument("eagle_backend_pointer_residency: null cls");
+        requireDevice();
+        const int dev = resolveDevice(device, std::nullopt);
+        DeviceScope scope(dev);
+        // The plugin links the driver only (no cudart): the classes of
+        // eagle::filtering::classifyPointer, read through cuPointerGetAttribute.
+        // A pageable pointer is an INVALID_VALUE here, which is the class, not a fault.
+        using eagle::filtering::Residency;
+        static const auto attr = driverEntry12<CUresult (*)(void*, CUpointer_attribute, CUdeviceptr)>(
+            "cuPointerGetAttribute");
+        const auto p = static_cast<CUdeviceptr>(ptr);
+        Residency r = Residency::Pageable;
+        unsigned memType = 0;
+        int managed = 0;
+        if (attr(&memType, CU_POINTER_ATTRIBUTE_MEMORY_TYPE, p) != CUDA_SUCCESS) {
+            r = Residency::Pageable;
+        } else if (attr(&managed, CU_POINTER_ATTRIBUTE_IS_MANAGED, p) == CUDA_SUCCESS && managed != 0) {
+            r = Residency::Managed;
+        } else if (memType == CU_MEMORYTYPE_DEVICE) {
+            int ordinal = -1;
+            r = attr(&ordinal, CU_POINTER_ATTRIBUTE_DEVICE_ORDINAL, p) == CUDA_SUCCESS && ordinal != dev
+                ? Residency::OtherDevice : Residency::Device;
+        } else if (memType == CU_MEMORYTYPE_HOST) {
+            CUdeviceptr mapped = 0;
+            r = attr(&mapped, CU_POINTER_ATTRIBUTE_DEVICE_POINTER, p) == CUDA_SUCCESS && mapped != 0
+                ? Residency::MappedHost : Residency::Pageable;
+        }
+        *cls = static_cast<std::int32_t>(r);
     });
 }
 

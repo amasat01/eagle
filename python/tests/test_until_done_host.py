@@ -394,8 +394,8 @@ def test_rk78_attempt_kernel_matches_the_explicit_path_and_the_serial_oracle(
         g = {"s": np.stack([inp[k] for k in card.STATE_NAMES])}
         g["t"] = np.zeros(n)
         g["h"] = np.full(n, card.H0)
-        g["n_acc"] = np.zeros(n)
-        g["n_rej"] = np.zeros(n)
+        g["n_acc"] = np.zeros(n, dtype=np.uint32)
+        g["n_rej"] = np.zeros(n, dtype=np.uint32)
         return g
 
     def expand(g):

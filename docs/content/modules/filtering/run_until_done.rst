@@ -48,13 +48,17 @@ runner owns. The same call runs it; nothing else changes for the caller:
    assert report.steps <= 10_000 # the steps the loop ran, never above max_steps
 
 After each launch one single-thread policy kernel picks the next launch's
-steps: it doubles them when fewer than 1/16 of the live samples finished
-during the launch, halves them when more than 1/4 did, and keeps them between
-8 and 64 (starting at 16). On a batch whose samples all run about as long it
-climbs to 64 steps per launch, the same fusion a hand-written multi-step
-kernel gets; on a batch whose stop steps are spread out it stays shorter, and
-an artifact built with ``Guard(active_set=True)`` compacts after every launch
-in which a sample finished, so the live samples keep sharing warps. The last
+steps: the power of two nearest ``sqrt(2R / h)`` (:func:`eagle._core.band_k`),
+held between ``AUTO_K_MIN`` (8) and the artifact's ``steps_max``, where ``R``
+is a compaction's cost in steps of a full-live launch and ``h`` the rate at
+which samples finish; a launch in which nothing finished is followed by the
+longest launch allowed. The first launch takes ``AUTO_K0`` (16) steps. On a
+batch whose samples all run about as long it climbs to ``steps_max`` steps per
+launch, the same fusion a hand-written multi-step kernel gets; on a batch
+whose stop steps are spread out it stays shorter, and an artifact built with
+``Guard(active_set=True)`` compacts between the launches of the band, so the
+live samples keep sharing warps (a batch that fits inside one resident wave
+skips the compaction and runs every launch at ``steps_max``). The last
 launch takes exactly the steps left, so no sample takes more than
 ``max_steps`` steps. :attr:`eagle.RunReport.steps` is the steps the loop ran:
 a sample still running at the end took exactly that many, and the
@@ -68,14 +72,14 @@ The cadence is the policy's, so ``every=`` is refused for such a kernel;
 ``reorder=theta`` still opts into the physical reorder (it is off by default,
 because a fused launch reads each plane once per launch and gains less from
 it). On the host a one-step launch runs the single step vectorised across
-samples while a fused launch runs each sample's scalar loop, so the host
-measures instead of following the band (``runner.host_policy ==
-"measured"``, the default): it runs one step per launch and, each time the
-live samples have halved, times one fused launch of 8 steps; once that beats
-the one-step launch per step it continues under the band. A batch whose
-samples all run to the end never probes and runs exactly the one-step loop.
-``runner.host_policy = "band"`` runs the device's band on the host (the same
-launches as the device). The results are those of one step per launch:
+samples while a fused launch runs each sample's scalar loop, so the host does not simply follow the band. ``runner.host_policy`` defaults
+to ``"auto"``: ``"tiled"`` (``steps_max`` steps per launch) when the entry's
+fused side is tiled, else ``"measured"``, which runs one step per launch and,
+each time the live samples have halved, times one fused launch of 8 steps;
+once that beats the one-step launch per step it continues under the band. A
+batch whose samples all run to the end never probes and runs exactly the
+one-step loop. ``runner.host_policy = "band"`` runs the device's band on the
+host (the same launches as the device). The results are those of one step per launch:
 bit-equal on the host; on the device the fused loop may round a contracted
 multiply-add differently from the single step, never from its own body run one
 step at a time.
@@ -84,3 +88,44 @@ Termination is discrete: a ``vjp``/``jvp`` derived from a finishing kernel
 does not finish samples (it zeroes terminated samples, as before). Launch the
 derived kernels before the primal in a step, so they read the mask as it was
 when the step began.
+
+Fused or persistent, picked for you
+-----------------------------------
+
+On the device a kernel can have two entries: the fused one (a launch per
+loop turn) and a persistent one (one launch whose lanes claim samples until
+none are left). The runner chooses between them, and the choice needs no
+flag:
+
+- a batch of at least ``PICK_PERSIST_MULTIPLE`` (8) times the threads the
+  persistent entry keeps resident across the device takes the persistent
+  entry, and one of at most ``1 / PICK_FUSED_DIVISOR`` (a quarter) of what one
+  fused wave holds takes the fused entry, from the first run and without
+  timing the other;
+- in between, run 1 takes the size pick and run 2 runs the other entry, so
+  both have a measured wall;
+- later runs are settled: they carry no timing events.
+
+The pick changes only when the other entry wins by more than 2 %
+(``eagle._until_done.PICK_HYSTERESIS`` is 0.98), so two near-equal entries
+do not trade places. A settled runner times the other entry again only when a
+run reads back something different from before: the longest sample's steps
+(to the nearest power of two below) or the step fill (to one decimal) moved
+to another bucket. A runner that has timed both entries leaves its pick in a
+process-wide cache keyed on the device, the kernel, the precision, the batch
+size and that readback bucket, and a later runner with the same key takes it
+untimed; nothing is written to disk.
+:attr:`eagle.RunReport.timed` says whether a run was timed, and
+``report.probe`` whether it ran the entry the batch was not using, so a
+caller that wants a clean measurement warms until a run is neither.
+
+Persistent launches take ``chunk=``, the steps a lane runs between two looks
+for new samples (default 32, or whatever the launch policy chose for the
+batch's mean steps). :attr:`eagle.Runner.launch_policy` reports what was
+chosen: ``block``, ``grid``, ``chunk``, ``fill``, ``rate`` and ``k``.
+:attr:`eagle.RunReport.slot_fill` is the steps run over the persistent
+entry's chunk slots, in ``(0, 1]``; it is set only for a persistent run that
+counted it, ``None`` otherwise. Pair the policy with
+:meth:`eagle.plan.BoundPlan.entry_reports`, whose entries carry registers,
+local memory, ``text_bytes`` (code size) and ``demand`` (threads per SM the
+launch asks for).

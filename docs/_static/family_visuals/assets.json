@@ -1,0 +1,11 @@
+{
+  "css": [
+    "visuals.css"
+  ],
+  "js": [
+    "perf-state.js",
+    "radar.js",
+    "visuals.js",
+    "family_visuals.js"
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "schema": "eagle-compare-evidence/1",
+  "slug": "nvidia-a100-sxm4-40gb",
+  "device": "NVIDIA A100-SXM4-40GB",
+  "session": "final-a100",
+  "eagle_commit": "06b72ca2d0aae86d0e3d6d10e47678d542914f93",
+  "hawk_commit": "efaed2c",
+  "commits_source": "session log final-a100.log",
+  "csv_md5": "4d66e404b5db3bc1e5db17eac79d9b3c",
+  "kit_branch": "profile-kit",
+  "kit_commit": "f6cdc0f8449259ba42e35f5891683aac24b90e3a",
+  "gpu_profile_md5": "c8c45b7753117acb9218715874b5e726",
+  "generated_utc": "2026-10-13T14:41:20Z"
+}

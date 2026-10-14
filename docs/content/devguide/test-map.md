@@ -18,8 +18,8 @@ exit code — it diffs the actual `--gtest_list_tests` output and the shuffled
 run's summary line against a committed name manifest
 (`tests/expected_tests_cuda.txt` / `tests/expected_tests_cpp.txt`), so a
 silently-skipped or silently-renamed test fails the gate even if every test
-that *did* run passed. The two manifests currently commit **274** CUDA-mode
-tests and **163** CPP_MODE (OpenMP host) tests — CPP_MODE is smaller because
+that *did* run passed. The two manifests commit the CUDA-mode
+tests and the CPP_MODE (OpenMP host) tests — CPP_MODE is smaller because
 several GPU-only suites (graph capture internals, device error handling)
 have no CPU equivalent to run. `tests/check_gate.sh`'s own header explains the reasoning behind this
 design; the short version is: a test *runner* that reports
@@ -71,7 +71,7 @@ GPU's parallel capacity a kernel actually keeps busy.
 | Test file | Suite(s) | Capability |
 |---|---|---|
 | `tests/test_DeviceProps.cpp` | `DevicePropsTest` | The CUDA-free half: `eagle::deriveFields()`'s formulas and the `fmaLanesPerSM`/`fp64Ratio` compute-capability tables (including the fallback for an unlisted compute capability), plain arithmetic over synthetic inputs. |
-| `tests/test_DeviceProps.cu` | `DevicePropsCudaTest` | The hardware half: `eagle::cuda::deviceProps()` against the real device — raw-field sanity, derived-field consistency, and a known-answer check for the dev box's GPU. |
+| `tests/test_DeviceProps.cu` | `DevicePropsCudaTest` | The hardware half: `eagle::cuda::deviceProps()` against the real device — raw-field sanity, derived-field consistency, and a known-answer check for the GPU the test runs on. |
 
 ## Conditional / branch execution (dual-mode)
 

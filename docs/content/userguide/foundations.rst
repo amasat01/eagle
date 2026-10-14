@@ -127,8 +127,7 @@ code that wants to do its own SIMD work via ``packetLoad`` / ``packetStore``).
 See :doc:`../modules/module_host` for the full API.
 
 These packet helpers work over any per-sample element type, not only
-``double`` — most code uses ``double`` since that runs fastest on today's
-hardware, but a debug/oracle build can swap in ``aether::SoftDouble``, a
+``double`` — most code uses ``double``, the precision the performance cards are measured in, but a debug/oracle build can swap in ``aether::SoftDouble``, a
 double built entirely out of ordinary integer/float arithmetic, to
 cross-check a result on hardware whose double-precision throughput is
 limited. That swap always runs one sample per packet: the software type has
