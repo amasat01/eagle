@@ -92,6 +92,38 @@ def fmt_x(value):
 
 
 # --------------------------------------------------------------------------- #
+# CPU memory net of the benchmark harness's own copies
+# --------------------------------------------------------------------------- #
+#: The RK4 CPU card's eagle arms copy omega and zeta into separate float64
+#: planes (16 bytes per sample) and their ``download()`` returns copies of x, v
+#: (float64) and k (uint32), another 20 bytes per sample. eagle needs neither:
+#: it runs on the caller's planes and the caller reads x, v and k in place.
+HARNESS_COPY_BYTES_PER_SAMPLE = 16 + 20
+#: The RK4 CPU card's eagle arms (the others have no harness-only copies).
+_HARNESS_COPY_ARMS = ("eagle_term", "eagle_compact", "eagle_reorder")
+
+
+def harness_copy_bytes(arm, n, card_kind):
+    """Bytes the benchmark harness holds for `arm` at `n` samples that eagle
+    itself does not need. Only the RK4 CPU card's eagle arms have any
+    (``card_kind`` "rk4_cpu"); the RK7(8) CPU card's arms all copy their
+    outputs alike, so it stays raw, and so does every GPU card."""
+    if card_kind == "rk4_cpu" and arm.startswith(_HARNESS_COPY_ARMS):
+        return HARNESS_COPY_BYTES_PER_SAMPLE * n
+    return 0
+
+
+def net_peak_bytes(row, card_kind):
+    """The CPU peak memory a table shows for a card's memory `row`: the
+    measured ``peak_bytes`` less `harness_copy_bytes`. A result that would be
+    negative shows the measured value (below 1 MiB the allocator reuses
+    memory already resident at the baseline). The card keeps the raw reading."""
+    peak = row["peak_bytes"]
+    net = peak - harness_copy_bytes(row["arm"], row["n"], card_kind)
+    return net if net >= 0 else peak
+
+
+# --------------------------------------------------------------------------- #
 # Statistics and small facts
 # --------------------------------------------------------------------------- #
 def median_iqr(values):
@@ -179,6 +211,19 @@ def cpu_model():
     except OSError:
         pass
     return platform.processor() or None
+
+
+def cpu_display_name(card_path, model):
+    """The name a generator prints for a CPU card: the ``name`` that
+    ``benchmarks/device_names.json`` gives the card's file stem, else the card's
+    own ``model`` string. ``card_path`` is a card under ``benchmarks/<family>/``."""
+    card_path = pathlib.Path(card_path)
+    table = card_path.parent.parent / "device_names.json"
+    try:
+        entry = json.loads(table.read_text()).get(card_path.stem)
+    except OSError:
+        entry = None
+    return entry["name"] if isinstance(entry, dict) and entry.get("name") else model
 
 
 def git_commit(module, short=False):
@@ -872,3 +917,41 @@ def nsys_ranges(nsys, rep, script, args, prefix, timeout=None):
 
 def nsys_version(nsys):
     return subprocess.run([nsys, "--version"], capture_output=True, text=True).stdout.strip()
+
+
+# --------------------------------------------------------------------------- #
+# Which CPU memory readings the harness resolves
+# --------------------------------------------------------------------------- #
+#: A CPU memory probe's ``ru_maxrss`` carries the launching process's resident
+#: size, and clearing the peak mark does not reset it, so a reading is
+#: max(true peak, launcher's size - baseline). Rows at small N sit on that floor.
+RESOLVED_N = 10**6
+FLOOR_MARGIN_BYTES = 8 * 2**20
+_FLOOR_MAX_N = 10**4
+
+
+def floor_estimate(rows, arm=None):
+    """The resident size a card's probes inherited from the launching process:
+    the largest ``peak_bytes + rss_baseline_bytes`` over the rows with N <= 1e4
+    (whose true peak is under 1 MiB, so their reading is the floor or noise).
+    With `arm`, over that arm's rows only. The per-arm floor is the one the
+    tables use: a card-wide maximum is dominated by the arm with the largest
+    own baseline (PyTorch's, ~320 MiB) and would hide every arm below it."""
+    small = [r["peak_bytes"] + r["rss_baseline_bytes"] for r in rows
+             if r["n"] <= _FLOOR_MAX_N and (arm is None or r["arm"] == arm)]
+    return max(small) if small else None
+
+
+def is_resolved(row, floor):
+    """True when the row is at N = 1e6 and clears the floor by 8 MiB."""
+    return (floor is not None and row["n"] == RESOLVED_N
+            and row["peak_bytes"] + row["rss_baseline_bytes"] > floor + FLOOR_MARGIN_BYTES)
+
+
+def published_peak_bytes(row, rows, card_kind):
+    """The CPU peak memory a table, bar or radar axis shows: `net_peak_bytes`
+    for a resolved row (against the floor of the row's own arm in `rows`, the
+    card's memory rows), None (a dash with a footnote) otherwise."""
+    if not is_resolved(row, floor_estimate(rows, row["arm"])):
+        return None
+    return net_peak_bytes(row, card_kind)

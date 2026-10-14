@@ -48,13 +48,17 @@ runner owns. The same call runs it; nothing else changes for the caller:
    assert report.steps <= 10_000 # the steps the loop ran, never above max_steps
 
 After each launch one single-thread policy kernel picks the next launch's
-steps: it doubles them when fewer than 1/16 of the live samples finished
-during the launch, halves them when more than 1/4 did, and keeps them between
-8 and 64 (starting at 16). On a batch whose samples all run about as long it
-climbs to 64 steps per launch, the same fusion a hand-written multi-step
-kernel gets; on a batch whose stop steps are spread out it stays shorter, and
-an artifact built with ``Guard(active_set=True)`` compacts after every launch
-in which a sample finished, so the live samples keep sharing warps. The last
+steps: the power of two nearest ``sqrt(2R / h)`` (:func:`eagle._core.band_k`),
+held between ``AUTO_K_MIN`` (8) and the artifact's ``steps_max``, where ``R``
+is a compaction's cost in steps of a full-live launch and ``h`` the rate at
+which samples finish; a launch in which nothing finished is followed by the
+longest launch allowed. The first launch takes ``AUTO_K0`` (16) steps. On a
+batch whose samples all run about as long it climbs to ``steps_max`` steps per
+launch, the same fusion a hand-written multi-step kernel gets; on a batch
+whose stop steps are spread out it stays shorter, and an artifact built with
+``Guard(active_set=True)`` compacts between the launches of the band, so the
+live samples keep sharing warps (a batch that fits inside one resident wave
+skips the compaction and runs every launch at ``steps_max``). The last
 launch takes exactly the steps left, so no sample takes more than
 ``max_steps`` steps. :attr:`eagle.RunReport.steps` is the steps the loop ran:
 a sample still running at the end took exactly that many, and the
@@ -93,16 +97,24 @@ loop turn) and a persistent one (one launch whose lanes claim samples until
 none are left). The runner chooses between them, and the choice needs no
 flag:
 
-- run 1 takes the model's pick of the two, sized without any probing;
-- run 2 runs the other entry, so both have a measured wall;
-- run 3 times the pick again after the sizing was refitted to what the first
-  runs read back;
+- a batch of at least ``PICK_PERSIST_MULTIPLE`` (8) times the threads the
+  persistent entry keeps resident across the device takes the persistent
+  entry, and one of at most ``1 / PICK_FUSED_DIVISOR`` (a quarter) of what one
+  fused wave holds takes the fused entry, from the first run and without
+  timing the other;
+- in between, run 1 takes the size pick and run 2 runs the other entry, so
+  both have a measured wall;
 - later runs are settled: they carry no timing events.
 
 The pick changes only when the other entry wins by more than 2 %
 (``eagle._until_done.PICK_HYSTERESIS`` is 0.98), so two near-equal entries
-do not trade places. A settled runner looks again when a run reads back
-something different from before, and every 64 runs.
+do not trade places. A settled runner times the other entry again only when a
+run reads back something different from before: the longest sample's steps
+(to the nearest power of two below) or the step fill (to one decimal) moved
+to another bucket. A runner that has timed both entries leaves its pick in a
+process-wide cache keyed on the device, the kernel, the precision, the batch
+size and that readback bucket, and a later runner with the same key takes it
+untimed; nothing is written to disk.
 :attr:`eagle.RunReport.timed` says whether a run was timed, and
 ``report.probe`` whether it ran the entry the batch was not using, so a
 caller that wants a clean measurement warms until a run is neither.

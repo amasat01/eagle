@@ -94,7 +94,18 @@ def _props(props, target: str) -> Mapping[str, float]:
 
 
 def _rows(cost) -> list[tuple[float, ...]]:
-    return [b.as_tuple() for b in cost.branches]
+    """Each branch's counts, chain lengths and, when counted, plane elements written
+    (an older hawk has no chains: 6 values; one without stores: 10)."""
+    if hasattr(cost.branches[0], "row_tuple"):
+        return [b.row_tuple() for b in cost.branches]
+    return [b.chain_tuple() if hasattr(b, "chain_tuple") else b.as_tuple() for b in cost.branches]
+
+
+def _branch_vectorised(cost) -> list[bool]:
+    """Per branch: does the host compiler vectorise a loop running it? An older
+    hawk does not say, so every branch takes the fused loop's flag."""
+    flags = [getattr(b, "vectorised", None) for b in cost.branches]
+    return [] if any(f is None for f in flags) else [bool(f) for f in flags]
 
 
 def _vectorised(cost) -> bool:
@@ -151,7 +162,9 @@ def predicted_gain(cost, counts: Sequence[int], *, target: str = "host", props=N
     weights
         A fitted profile: any of ``arith32``, ``special32``, ``special64``,
         ``elem_bytes``, ``launch_seconds``, ``split_seconds``, ``sort_seconds``,
-        ``lane_rate``, ``memory_rate``, ``cache_bytes``, ``cache_ratio``
+        ``lane_rate``, ``memory_rate``, ``cache_bytes``, ``cache_ratio``,
+        ``chain_seconds`` (one dependent operation on the host, across all
+        cores), ``vector_width`` (speed-up of a vectorised host loop)
         replacing the defaults.
 
     Returns
@@ -167,7 +180,8 @@ def predicted_gain(cost, counts: Sequence[int], *, target: str = "host", props=N
     """
     return _core.dispatch_gain(_rows(cost), list(counts), _props(props, target), target,
                                fused_steps, regs_per_thread, _vectorised(cost),
-                               remaining_steps, -1.0 if mixed32 is None else mixed32, _weights(target, weights))
+                               remaining_steps, -1.0 if mixed32 is None else mixed32, _weights(target, weights),
+                               _branch_vectorised(cost))
 
 
 class DispatchState:
@@ -257,4 +271,4 @@ def resolve(cost, counts: Sequence[int], *, target: str = "host", props=None,
                                          target, current, fused_steps, regs_per_thread,
                                          _vectorised(cost),
                                          remaining_steps, -1.0 if mixed32 is None else mixed32,
-                                         _weights(target, weights))
+                                         _weights(target, weights), _branch_vectorised(cost))

@@ -60,7 +60,10 @@ Or install manually:
 Doxygen must also be on ``PATH``. Building the Python API reference needs the
 ``eagle`` package importable (``pip install -e ./python``, see
 :doc:`../userguide/installation`); executing the notebooks additionally needs
-a CUDA GPU and ``cupy``.
+a CUDA GPU and ``cupy`` for the GPU notebooks. ``make nbcheck`` also *runs* every notebook
+(on the CPU, and on the GPU when one is present), so it needs ``hawk``, ``ipykernel``,
+``matplotlib`` and ``torch``; the NVIDIA Warp cell of ``interop.ipynb`` needs ``warp-lang`` and
+prints a note and carries on without it.
 
 Writing docstrings
 ------------------

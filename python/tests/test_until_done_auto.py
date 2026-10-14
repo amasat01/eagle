@@ -156,6 +156,17 @@ def _run(auto, label, target, inp, max_steps, policy="band", **kw):
     return runner, report, {key: _get(g[key]) for key in ("x", "v", "k")}
 
 
+@pytest.mark.parametrize("label", ["plain", "map"])
+def test_runreport_counts_mapped_samples_per_launch(auto, label):
+    n = 1000
+    _, report, _ = _run(auto, label, "host", _batch(n, "uniform"), 10 * _S)
+    assert report.launches >= 1
+    # a launch maps no more than the whole batch, and a run maps at least one launch's worth
+    assert n <= report.mapped <= report.launches * n
+    if label == "plain":
+        assert report.mapped == report.launches * n
+
+
 def _band_k(rate, newly, live, k, k_max=64, k_min=ud.AUTO_K_MIN):
     """The documented cadence, re-stated: the power of two nearest
     ``sqrt(2R / h)`` for ``h = newly / (live * k)``, held to ``[k_min, k_max]``;
@@ -1505,6 +1516,63 @@ def _slow_entry(monkeypatch, runner, slow, seconds=0.03):
     monkeypatch.setattr(cls, name, delayed)
 
 
+def _persist_capacity(auto):
+    """Threads the persist entry keeps resident across the device (what the regime
+    rule weighs a batch against)."""
+    import importlib
+
+    from eagle._launch_policy import capacity
+
+    launch = importlib.import_module("eagle.launch")
+    bound = _capacity_probe(auto, "plain", "device")
+    return capacity(launch._device_props(), launch._kernel_attrs(bound.persist_entry()))
+
+
+@pytest.fixture(autouse=True)
+def _contested_model_and_empty_pick_cache(monkeypatch):
+    """The probe rows below time both entries: keep the model from calling the
+    pick (it reads 1, the middle of the contested range) and start each row
+    with no pick settled by an earlier runner."""
+    import importlib
+
+    monkeypatch.setattr(ud._core, "entry_ratio", lambda *args: 1.0)
+    launch = importlib.import_module("eagle.launch")
+    launch._reset_pick_cache()
+    yield
+    launch._reset_pick_cache()
+
+
+@pytest.mark.gpu
+def test_the_regime_rule_skips_the_probe_outside_the_band(auto):
+    import importlib
+
+    from eagle._launch_policy import capacity
+
+    launch = importlib.import_module("eagle.launch")
+    bound = _capacity_probe(auto, "plain", "device")
+    cap = capacity(launch._device_props(), launch._kernel_attrs(bound.persist_entry()))
+    assert cap
+    wave = _device_capacity(auto, "plain", "device")  # what one fused wave holds
+    for n, mode in ((16 * cap, "persist"), (max(wave // 8, 1), "fused_one")):
+        runner, rerun = _probe_runner(auto, n)
+        reports = [rerun()[0] for _ in range(3)]
+        assert reports[1].probe is False and not any(r.probe for r in reports)
+        assert [r.mode for r in reports] == [mode] * 3
+        assert runner._fast_pick is None
+
+
+@pytest.mark.gpu
+def test_a_second_runner_takes_the_cached_pick_untimed_on_the_device(auto, monkeypatch):
+    n = _above(auto)
+    runner, rerun = _probe_runner(auto, n)
+    _slow_entry(monkeypatch, runner, "persist")
+    first = [rerun()[0] for _ in range(5)]
+    assert first[-1].mode == "fused_one" and not first[-1].timed
+    second, rerun2 = _probe_runner(auto, n)
+    reports = [rerun2()[0] for _ in range(3)]
+    assert not any(r.probe for r in reports[1:]) and not any(r.timed for r in reports[1:])
+
+
 @pytest.mark.gpu
 @pytest.mark.parametrize("slow", ["fused_one", "persist"])
 def test_fast_entry_probe_picks_the_faster_entry(auto, monkeypatch, slow):
@@ -1570,7 +1638,7 @@ def test_fast_entry_probe_reprobes_on_regime_change(auto, monkeypatch):
 
 @pytest.mark.gpu
 def test_fast_entry_probe_below_capacity_is_off(auto):
-    runner, rerun = _probe_runner(auto, 1000)
+    runner, rerun = _probe_runner(auto, max(_device_capacity(auto, "plain", "device") // 8, 1))
     reports = [rerun()[0] for _ in range(4)]
     assert [r.mode for r in reports] == ["fused_one"] * 4
     assert not any(r.probe for r in reports)
@@ -1835,16 +1903,16 @@ def test_entry_prior_is_known_after_a_fused_one_run(auto):
 
 
 @pytest.mark.gpu
-def test_a_same_readback_fill_change_resizes_without_timing_again(auto):
-    """Half the samples stop at step 1: the same longest lane and finished
-    count, so only f changes. It is seen on the next run that sums its steps
-    (within STEP_FILL_EVERY runs) and re-sizes the persist launch; the settled
-    pick and its walls stand, with no probe."""
+def test_a_fill_change_resizes_and_times_the_new_regime_once(auto):
+    """Half the samples stop at step 1: the same longest lane, so only f changes,
+    from 1.0 to about 0.5, which is another readback regime. It is seen on the
+    next run that sums its steps (within STEP_FILL_EVERY runs): the persist launch
+    is re-sized and the other entry is timed once, after which the pick settles
+    again with both walls."""
     runner, inp, rerun = _prior_runner(auto, "uniform")
     for _ in range(4):
         rerun()
-    pick, wall = runner._fast_pick, dict(runner._fast_wall)
-    assert set(wall) == {"persist", "fused_one"}
+    assert set(runner._fast_wall) == {"persist", "fused_one"}
     half = np.where(np.arange(runner.n) % 2 == 0, 1.0, float(_S))
     reports, priors = [], []
     for _ in range(2 * ud.STEP_FILL_EVERY):
@@ -1852,8 +1920,9 @@ def test_a_same_readback_fill_change_resizes_without_timing_again(auto):
         priors.append(runner._fast_prior)
     seen = next(i for i, f in enumerate(priors) if f < 0.6)
     assert seen < ud.STEP_FILL_EVERY
-    assert runner._fast_fill == priors[-1] and runner._fast_pick == pick
-    assert not any(r.probe for r in reports)
+    assert runner._fast_fill == priors[-1]
+    assert sum(r.probe for r in reports) == 1
+    assert runner._fast_state.settled and set(runner._fast_wall) == {"persist", "fused_one"}
 
 
 @pytest.mark.gpu

@@ -22,7 +22,7 @@ word in them, and what eagle promises about the numbers that come back.
 
 .. note::
 
-   New to it? :doc:`tutorials/12_gradients_through_a_graph` builds this up
+   New to it? :doc:`tutorials/10_gradients_through_a_graph` builds this up
    step by step and checks every gradient against finite differences.
 
 Words used on this page
@@ -228,7 +228,7 @@ the same chain written out as separate nodes, so the two give the same bits.
 
 The member of a ``repeat_while`` must be a plan launch; its cap is the most
 iterations a reverse unrolls. The full, checked version of this example is in
-:doc:`tutorials/13_conditionals_budgets_events`.
+:doc:`tutorials/11_conditionals_budgets_events`.
 
 .. _autodiff-budget:
 
@@ -329,7 +329,7 @@ literature). The number of phases is the graph's, so a phase inside
 :func:`eagle.repeat_while` is refused. On the GPU a phase is an eager node (it
 reads its own progress back between launches), and the graph is captured in
 segments around it. The checked version of both examples is in
-:doc:`tutorials/13_conditionals_budgets_events`.
+:doc:`tutorials/11_conditionals_budgets_events`.
 
 What a reverse refuses
 ----------------------

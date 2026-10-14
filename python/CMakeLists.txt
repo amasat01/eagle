@@ -9,28 +9,72 @@
 #                          per-Python wheel
 #
 # EAGLE_PYTHON_CUDA_PLUGIN selects where the plugin comes from:
-#   BUILD   (default) build it here with nvcc
+#   BUILD   (default in a repository checkout) build it here with nvcc
+#   AUTO    (default from a source distribution) BUILD when a CUDA compiler is
+#           found, else OFF with a message saying so
 #   OFF     no plugin (the GPU-less leg); every CUDA entry point raises
 #           eagle.BackendUnavailable
 #   <path>  install that prebuilt libeagle_cuda.so (the per-Python phase)
 # EAGLE_PYTHON_SKIP_CORE=ON builds the plugin alone (phase 1, no Python needed).
+# EAGLE_PYTHON_WARN_AS_ERR=ON turns compiler warnings in this package's own
+# sources into errors.
+#
+# Built from a source distribution (pip install of the sdist), there is no
+# repository above this directory: the eagle, plugin and aether headers come
+# from the copy the sdist carries in _sdist_include/ (see _build_backend.py),
+# and the plugin default is AUTO.
 cmake_minimum_required(VERSION 3.20)
 project(eagle_python LANGUAGES CXX)
 
-set(EAGLE_PYTHON_CUDA_PLUGIN "BUILD" CACHE STRING
-    "Where libeagle_cuda.so comes from: BUILD | OFF | <path to a prebuilt plugin>")
+get_filename_component(_eagle_src "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
+set(_eagle_sdist_include "${CMAKE_CURRENT_SOURCE_DIR}/_sdist_include")
+set(_eagle_from_sdist OFF)
+if(NOT EXISTS "${_eagle_src}/eagle/cuda/CaptureFork.h"
+   AND EXISTS "${_eagle_sdist_include}/eagle/cuda/CaptureFork.h"
+   AND NOT DEFINED eagle_DIR)
+  set(_eagle_from_sdist ON)
+endif()
+if(_eagle_from_sdist)
+  set(_eagle_plugin_default "AUTO")
+else()
+  set(_eagle_plugin_default "BUILD")
+endif()
+
+option(EAGLE_PYTHON_WARN_AS_ERR "Compiler warnings in this package's sources are errors" OFF)
+set(EAGLE_PYTHON_CUDA_PLUGIN "${_eagle_plugin_default}" CACHE STRING
+    "Where libeagle_cuda.so comes from: BUILD | AUTO | OFF | <path to a prebuilt plugin>")
 option(EAGLE_PYTHON_SKIP_CORE "Build only the CUDA plugin, not eagle._core" OFF)
 option(EAGLE_BACKEND_INJECT_MISSING
     "Export one seam symbol under a wrong name (symbol-gate injection build only)" OFF)
 
 string(TOUPPER "${EAGLE_PYTHON_CUDA_PLUGIN}" _eagle_plugin_mode)
+set(_eagle_plugin_skipped OFF)
+if(_eagle_plugin_mode STREQUAL "AUTO")
+  include(CheckLanguage)
+  check_language(CUDA)
+  if(CMAKE_CUDA_COMPILER)
+    set(_eagle_plugin_mode "BUILD")
+  else()
+    set(_eagle_plugin_mode "OFF")
+    set(_eagle_plugin_skipped ON)
+    message(STATUS "> CUDA toolkit not found: building eagle without the GPU plugin; "
+                   "install the CUDA toolkit and reinstall for GPU support")
+  endif()
+endif()
 if(NOT _eagle_plugin_mode STREQUAL "BUILD" AND NOT _eagle_plugin_mode STREQUAL "OFF")
   set(_eagle_plugin_mode "PATH")
   if(NOT EXISTS "${EAGLE_PYTHON_CUDA_PLUGIN}")
     message(FATAL_ERROR
-      "EAGLE_PYTHON_CUDA_PLUGIN must be BUILD, OFF or the path of a prebuilt "
+      "EAGLE_PYTHON_CUDA_PLUGIN must be BUILD, AUTO, OFF or the path of a prebuilt "
       "libeagle_cuda.so; '${EAGLE_PYTHON_CUDA_PLUGIN}' does not exist")
   endif()
+endif()
+if(EAGLE_PYTHON_WARN_AS_ERR)
+  set(_eagle_warn_as_err
+    $<$<COMPILE_LANGUAGE:CXX>:-Werror>
+    $<$<COMPILE_LANGUAGE:CUDA>:-Werror=all-warnings>)
+else()
+  set(_eagle_warn_as_err "")
 endif()
 if(EAGLE_PYTHON_SKIP_CORE AND NOT _eagle_plugin_mode STREQUAL "BUILD")
   message(FATAL_ERROR "EAGLE_PYTHON_SKIP_CORE=ON builds nothing unless EAGLE_PYTHON_CUDA_PLUGIN=BUILD")
@@ -53,7 +97,7 @@ endif()
 if(_eagle_plugin_mode STREQUAL "BUILD")
   # SASS for every architecture this nvcc compiles from sm_60 up (aether's
   # compensated sums need FP64 atomicAdd, which sm_5x lacks), plus PTX at the
-  # NEWEST, which GPUs released after the toolkit JIT once and cache. The list
+  # NEWEST (and at compute_100 when the toolkit has it), which GPUs released after the toolkit JIT once and cache. The list
   # is the toolkit's own (nvcc --list-gpu-arch), so a newer toolkit widens it.
   # Override for a faster local build with a QUOTED list, e.g.
   # -DCMAKE_CUDA_ARCHITECTURES=61.
@@ -92,6 +136,13 @@ if(_eagle_plugin_mode STREQUAL "BUILD")
       list(APPEND CMAKE_CUDA_ARCHITECTURES "${_a}-real")
     endforeach()
     list(GET _eagle_archs -1 _eagle_newest)
+    # Also PTX at compute_100 where nvcc has Blackwell: CUDA 13 renamed Jetson
+    # Thor sm_101 to sm_110, so a CUDA 13 driver finds no SASS for it and cannot
+    # JIT compute_121 PTX down to 11.0, but does JIT compute_100 PTX up to 11.0
+    # (and to any later architecture).
+    if(100 IN_LIST _eagle_archs AND NOT _eagle_newest EQUAL 100)
+      list(APPEND CMAKE_CUDA_ARCHITECTURES "100-virtual")
+    endif()
     list(APPEND CMAKE_CUDA_ARCHITECTURES "${_eagle_newest}-virtual")
   endif()
   enable_language(CUDA)
@@ -99,6 +150,30 @@ if(_eagle_plugin_mode STREQUAL "BUILD")
 endif()
 
 # eagle C++ headers (INTERFACE) + its aether/OpenMP deps.
+#
+# From a source distribution: the header copy it carries, and nothing from the
+# ambient environment (the copy is the exact tree this version was cut from).
+# The compile definitions are the ones the installed CUDA-mode eagle and aether
+# packages export; only the plugin uses them (the core takes include paths only).
+if(_eagle_from_sdist)
+  add_library(aether::aether INTERFACE IMPORTED)
+  set_target_properties(aether::aether PROPERTIES
+    INTERFACE_INCLUDE_DIRECTORIES "${_eagle_sdist_include}"
+    INTERFACE_COMPILE_DEFINITIONS "AETHER_WARP_SIZE=32;AETHER_HAS_CUDA=1")
+  add_library(eagle::eagle INTERFACE IMPORTED)
+  set_target_properties(eagle::eagle PROPERTIES
+    INTERFACE_INCLUDE_DIRECTORIES "${_eagle_sdist_include}"
+    INTERFACE_COMPILE_DEFINITIONS
+      "EAGLE_BLOCKSIZE=256;CUDA_API_PER_THREAD_DEFAULT_STREAM=1;NDEBUG"
+    INTERFACE_LINK_LIBRARIES "aether::aether")
+  if(_eagle_plugin_mode STREQUAL "BUILD")
+    set_property(TARGET aether::aether APPEND PROPERTY
+      INTERFACE_LINK_LIBRARIES CUDA::toolkit)
+  endif()
+  # the version the plugin reports: this package's, which the C++ project shares
+  set(eagle_VERSION "${SKBUILD_PROJECT_VERSION}")
+  message(STATUS "> eagle headers (source distribution copy): ${_eagle_sdist_include}")
+else()
 #
 # This binding lives INSIDE the eagle repo, so it must compile the eagle headers
 # that sit next to it. A bare find_package would resolve against whatever eagle
@@ -144,13 +219,13 @@ endif()
 # exists to prevent, just relocated. Prepending the repo root makes
 # eagle/{cuda,util,cpu,...} resolve live; eagle/plugin/ has no in-tree
 # counterpart under that prefix, so it still falls through to the install.
-get_filename_component(_eagle_src "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
 if(EXISTS "${_eagle_src}/eagle/cuda/CaptureFork.h")
   set_property(TARGET eagle::eagle PROPERTY
     INTERFACE_INCLUDE_DIRECTORIES "${_eagle_src}" ${_eagle_incs})
   set(_eagle_root "${_eagle_src} (live tree, ahead of ${_eagle_root})")
 endif()
 message(STATUS "> eagle headers (verified to contain CaptureFork.h): ${_eagle_root}")
+endif()
 
 # Both artifacts carry eagle/aether inline and template instantiations; a
 # STB_GNU_UNIQUE copy of one would bind across the two images at load time.
@@ -187,7 +262,7 @@ if(_eagle_plugin_mode STREQUAL "BUILD")
     EAGLE_PYTHON_VERSION="${eagle_VERSION}"
     EAGLE_CUDA_PLUGIN_ARCHS="${_eagle_plugin_archs}"
     $<$<BOOL:${EAGLE_BACKEND_INJECT_MISSING}>:EAGLE_BACKEND_INJECT_MISSING=1>)
-  target_compile_options(eagle_cuda PRIVATE ${_eagle_no_gnu_unique})
+  target_compile_options(eagle_cuda PRIVATE ${_eagle_no_gnu_unique} ${_eagle_warn_as_err})
   set(_eagle_map "${CMAKE_CURRENT_SOURCE_DIR}/src/plugin/eagle_cuda.map")
   target_link_options(eagle_cuda PRIVATE
     "LINKER:--version-script=${_eagle_map}" "LINKER:--no-undefined" ${_eagle_static_runtime})
@@ -246,9 +321,10 @@ target_compile_features(_core PRIVATE cxx_std_23)
 # aether's own include directories first: an installed eagle's prefix may also
 # hold an (older) aether copy, and the aether this configure resolved must win.
 target_include_directories(_core PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src" ${_aether_incs} ${_eagle_core_incs})
-target_compile_definitions(_core PRIVATE EAGLE_CPU_ONLY=1 AETHER_CPP_MODE=1 EAGLE_BLOCKSIZE=256 NDEBUG)
+target_compile_definitions(_core PRIVATE EAGLE_CPU_ONLY=1 AETHER_CPP_MODE=1 EAGLE_BLOCKSIZE=256 NDEBUG
+  $<$<BOOL:${_eagle_plugin_skipped}>:EAGLE_CORE_BUILT_WITHOUT_CUDA_PLUGIN=1>)
 target_link_libraries(_core PRIVATE OpenMP::OpenMP_CXX ${CMAKE_DL_LIBS})
-target_compile_options(_core PRIVATE ${_eagle_no_gnu_unique})
+target_compile_options(_core PRIVATE ${_eagle_no_gnu_unique} ${_eagle_warn_as_err})
 # libstdc++/libgcc bundled where the toolchain allows (see _eagle_static_runtime).
 target_link_options(_core PRIVATE ${_eagle_static_runtime})
 set_target_properties(_core PROPERTIES
@@ -331,7 +407,7 @@ elseif(_eagle_python_mpi STREQUAL "ON" OR _eagle_python_mpi STREQUAL "AUTO")
       EAGLE_CPU_ONLY=1 AETHER_CPP_MODE=1 EAGLE_BLOCKSIZE=256 NDEBUG
       EAGLE_MPI=1 EAGLE_MPI_LIBRARY="${_eagle_mpi_library}")
     target_link_libraries(_mpi PRIVATE OpenMP::OpenMP_CXX MPI::MPI_CXX ${CMAKE_DL_LIBS})
-    target_compile_options(_mpi PRIVATE ${_eagle_no_gnu_unique})
+    target_compile_options(_mpi PRIVATE ${_eagle_no_gnu_unique} ${_eagle_warn_as_err})
     # The same wheel-portability link flags `_core` carries, for the same reason.
     target_link_options(_mpi PRIVATE ${_eagle_static_runtime})
     set_target_properties(_mpi PROPERTIES

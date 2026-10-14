@@ -3,7 +3,7 @@ Module: cuda
 
 The ``cuda`` module is the heart of eagle: it records a stream of kernel
 launches once, assembles them into a CUDA dependency graph, and replays the
-instantiated graph with microsecond-class per-launch re-tuning.  It also
+instantiated graph, re-tuning a launch's geometry without rebuilding it.  It also
 provides RAII wrappers for the underlying CUDA stream / event primitives.
 
 Headers
@@ -69,7 +69,7 @@ Re-tuning without re-capture
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 ``setLogicalSize`` re-tunes the launch geometry of an instantiated graph
-without rebuilding it, for the microsecond-class replay of a batch whose
+without rebuilding it, for replaying a batch whose
 active-sample count changes between iterations.
 
 .. note::

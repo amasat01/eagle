@@ -263,15 +263,17 @@ def persistent_demand(dev, scalar_type: str = "float64") -> int:
 
 def persistent_chunk(dev, ops: float, mean_steps: float, scalar_type: str = "float64") -> int:
     """Steps one work-stealing chunk runs: the power of two nearest
-    ``sqrt(2 * mean_steps * 256 / (ops * issue))`` held to ``[2, 32]``, where
-    ``ops`` is the step's floating-point operation count and ``issue`` the
-    cycles one warp instruction of ``scalar_type`` takes on the SM
-    (:func:`eagle._core.persist_chunk`). ``32`` when ``ops`` is unknown (0).
+    ``sqrt(8 * mean_steps * SMs * claim / (ops * issue))`` held to ``[2, 32]``,
+    where ``ops`` is the step's floating-point operation count, ``issue`` the
+    cycles one warp instruction of ``scalar_type`` takes on the SM and
+    ``claim`` the cycles one warp's claim of work holds the chip (12 on a
+    Pascal part, 1 on a later one; :func:`eagle._core.persist_chunk`). ``32``
+    when ``ops`` or the SM count is unknown (0).
 
-    Example: a 44-operation FP64 step averaging 22 steps runs chunks of 4 on a
-    1:32 part and 8 on an A100."""
-    major, minor, _, ratio, fp64 = _fp64_args(dev, scalar_type)
-    return _core.persist_chunk(major, minor, ratio, fp64, float(ops), float(mean_steps))
+    Example: a 44-operation FP32 step averaging 22 steps runs chunks of 16 on
+    an 8-SM Pascal part and 32 on a 132-SM H100."""
+    major, minor, sms, ratio, fp64 = _fp64_args(dev, scalar_type)
+    return _core.persist_chunk(major, minor, sms, ratio, fp64, float(ops), float(mean_steps))
 
 
 def persistent_threads_per_sm(dev, kern, n: int, fill: float = _core.PERSIST_FIRST_FILL,

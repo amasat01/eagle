@@ -18,7 +18,7 @@ one idea to carry through the page.
 
 .. note::
 
-   New to the pieces? :doc:`tutorials/11_graph_model` builds everything below
+   New to the pieces? :doc:`tutorials/09_graph_model` builds everything below
    step by step. :class:`~eagle.GraphPipeline` is unchanged: it is still
    the right tool when you want to record opaque callables yourself.
 
@@ -333,6 +333,6 @@ registering a *different* kind under an existing name is refused.
 Where next
 ----------
 
-- :doc:`tutorials/11_graph_model`: build, inspect and break a graph, hands on.
+- :doc:`tutorials/09_graph_model`: build, inspect and break a graph, hands on.
 - :doc:`graph_view`: print and lay out a C++ graph with the same engine.
 - :doc:`cuda_graphs`: the C++ capture/replay machinery a GPU build lowers to.

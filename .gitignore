@@ -23,3 +23,6 @@
 docs/content/api/generated/
 # gen_perf_pages.py's output (regenerated on every build from the cards)
 docs/content/_generated/
+# copies python/_build_backend.py makes for the sdist
+python/README.md
+python/_sdist_include/

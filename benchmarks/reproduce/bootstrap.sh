@@ -39,8 +39,8 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 TARGET="" PROFILE=auto WORK="" SRC="" ARCH="" ENV_PREFIX="" EDITABLE=0 SMOKE=1 FROM_PYPI=0
 JOBS=$(nproc 2>/dev/null || echo 4)
-declare -A REF=([aether]=${AETHER_REF:-v0.2.0} [raptor]=${RAPTOR_REF:-v0.2.0}
-                [eagle]=${EAGLE_REF:-v0.4.0} [hawk]=${HAWK_REF:-v0.3.0})
+declare -A REF=([aether]=${AETHER_REF:-v0.2.3} [raptor]=${RAPTOR_REF:-main}
+                [eagle]=${EAGLE_REF:-v0.6.0} [hawk]=${HAWK_REF:-v0.5.0})
 GIT_BASE=${REPRO_GIT_BASE:-https://github.com/amasat01}
 REPOS=(aether raptor eagle hawk)
 
@@ -214,6 +214,14 @@ install_pypi() {
   export PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_NO_INPUT=1 TMPDIR=${TMPDIR:-$WORK/tmp}
   run mkdir -p "$TMPDIR"
   local lock=$LOCKS/pypi-$PROFILE.txt stamp=$ENV_PREFIX/.repro-pypi-$PROFILE
+  # The lock pins the released wheels; the card scripts come from THIS checkout. A lock older than the
+  # checkout would run new scripts against old wheels and write cards that claim the wrong version.
+  local want have
+  want=$(sed -n 's/^version = "\(.*\)"/\1/p' "$EAGLE_ROOT/python/pyproject.toml" | head -1)
+  have=$(sed -n 's/^raptor-eagle\(\[[a-z0-9,]*\]\)\{0,1\}==\([0-9][^ ;]*\).*/\2/p' "$lock" | head -1)
+  if [[ -n $want && $have != "$want" && ${REPRO_ALLOW_LOCK_MISMATCH:-0} != 1 ]]; then
+    die "$lock pins raptor-eagle ${have:-<none>} but this checkout is eagle $want: re-lock (locks/make_locks.py pip $PROFILE) after the release is on PyPI, or check out the tag that matches the lock (REPRO_ALLOW_LOCK_MISMATCH=1 overrides)"
+  fi
   local sum; sum=$(md5_of "$lock")
   if stamp_ok "$stamp" "$sum"; then
     log "python packages up to date"

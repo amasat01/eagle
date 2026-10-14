@@ -89,6 +89,7 @@ Reproduce (from the eagle repository root)::
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import math
 import os
@@ -140,6 +141,29 @@ ARMS = ("eagle_graph", "eagle_graph_compact", "eagle_graph_reorder",
         "cupy_masked", "torch_masked", "torch_graphed", "jax_vmap", "warp_kernel",
         "eagle_cpu")
 GPU_ARMS = ARMS[:-1]
+#: The optional library each arm needs: an arm whose library is not installed
+#: in this profile is listed under ``arms_not_run`` and the run continues.
+ARM_LIBRARY = {"torch_masked": "torch", "torch_graphed": "torch",
+               "jax_vmap": "jax", "warp_kernel": "warp"}
+
+
+def _lib_installed(lib):
+    """Whether ``lib`` can be imported here, decided WITHOUT importing it
+    (``find_spec``); a library blocked through ``sys.modules[lib] = None``
+    counts as not installed."""
+    try:
+        return importlib.util.find_spec(lib) is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def _select_arms(requested):
+    """(the requested arms this machine runs, in table order, {arm: reason}
+    for each requested arm whose library is not installed)."""
+    not_run = {a: f"{ARM_LIBRARY[a]} not installed in this profile"
+               for a in ARMS if a in requested and a in ARM_LIBRARY
+               and not _lib_installed(ARM_LIBRARY[a])}
+    return tuple(a for a in ARMS if a in requested and a not in not_run), not_run
 EAGLE_GPU_ARMS = ARMS[:5]
 ARM_LABELS = {
     "eagle_graph": "eagle graph",
@@ -272,14 +296,14 @@ def sum_terms(terms):
 # --------------------------------------------------------------------------- #
 def _define_kernel():
     import hawk
-    from hawk import Mutable, Param, Scalar, Terminated, Vector
+    from hawk import Mutable, Param, Scalar, Terminated, UInt32, Vector
     from hawk import math as m
 
     # >>> code:hawk_kernel
     @hawk.kernel
     def rkf78_attempt(t_final: Param, terminated: Terminated, s: Mutable[Vector[6]],
                       t: Mutable[Scalar], h: Mutable[Scalar],
-                      n_acc: Mutable[Scalar], n_rej: Mutable[Scalar]):
+                      n_acc: Mutable[UInt32], n_rej: Mutable[UInt32]):
         # One adaptive RKF7(8) attempt of this sample, with its step-size controller.
         s0 = s
         t0 = t
@@ -293,8 +317,8 @@ def _define_kernel():
         s = m.where(accept, m.vec(s8), s0)
         t1 = m.where(accept, m.where(last, t_final, t0 + step), t0)
         t = t1
-        n_acc = n_acc + m.where(accept, 1.0, 0.0)
-        n_rej = n_rej + m.where(accept, 0.0, 1.0)
+        n_acc = n_acc + m.uint32(m.where(accept, 1.0, 0.0))
+        n_rej = n_rej + m.uint32(m.where(accept, 0.0, 1.0))
         terminated = t1 >= t_final  # the sample finishes itself
     # <<< code:hawk_kernel
 
@@ -306,7 +330,7 @@ def _define_active_kernel():
     active-set kind: the kernel the compaction arms launch, one attempt per
     launch at their own ``every`` cadence."""
     import hawk
-    from hawk import Mutable, Param, Scalar, Terminated, Vector
+    from hawk import Mutable, Param, Scalar, Terminated, UInt32, Vector
     from hawk import math as m
     from hawk.ext import Guard, Kind
 
@@ -316,7 +340,7 @@ def _define_active_kernel():
     @hawk.kernel(steps=1, kind=ACTIVE_SET)
     def rkf78_attempt(t_final: Param, terminated: Terminated, s: Mutable[Vector[6]],
                       t: Mutable[Scalar], h: Mutable[Scalar],
-                      n_acc: Mutable[Scalar], n_rej: Mutable[Scalar]):
+                      n_acc: Mutable[UInt32], n_rej: Mutable[UInt32]):
         # The attempt above, unchanged; its launch covers the active set.
         s0 = s
         t0 = t
@@ -330,8 +354,8 @@ def _define_active_kernel():
         s = m.where(accept, m.vec(s8), s0)
         t1 = m.where(accept, m.where(last, t_final, t0 + step), t0)
         t = t1
-        n_acc = n_acc + m.where(accept, 1.0, 0.0)
-        n_rej = n_rej + m.where(accept, 0.0, 1.0)
+        n_acc = n_acc + m.uint32(m.where(accept, 1.0, 0.0))
+        n_rej = n_rej + m.uint32(m.where(accept, 0.0, 1.0))
         terminated = t1 >= t_final
     # <<< code:hawk_kernel_active
 
@@ -352,6 +376,12 @@ ARM_KERNEL = {"eagle_graph": _define_kernel, "eagle_graph_compact": _define_acti
 
 STATE_NAMES = ("x", "y", "z", "vx", "vy", "vz")
 PLANE_NAMES = STATE_NAMES + ("t", "h", "n_acc", "n_rej")
+#: The eagle arms' counting planes are 4-byte unsigned integers (every other
+#: plane is float64); the other arms keep their counters in float64.
+COUNTER_DTYPES = {"n_acc": "uint32", "n_rej": "uint32"}
+#: Bytes per sample of the workload's minimum footprint: the float64 planes
+#: (state, t, h) at 8 B and the two counters at 4 B each.
+MIN_BYTES_PER_SAMPLE = (len(PLANE_NAMES) - len(COUNTER_DTYPES)) * 8 + len(COUNTER_DTYPES) * 4
 
 
 def _build(work_dir, targets=("host", "cuda")):
@@ -479,7 +509,8 @@ class _GpuArm:
 
         self.n = n
         self.planes = {"s": cp.empty((6, n))}
-        self.planes.update({name: cp.empty(n) for name in PLANE_NAMES[6:]})
+        self.planes.update({name: cp.empty(n, dtype=COUNTER_DTYPES.get(name, "float64"))
+                            for name in PLANE_NAMES[6:]})
         self.terminated = cp.zeros(n, dtype=cp.bool_)
         self.runner = None
 
@@ -489,15 +520,18 @@ class _GpuArm:
         self.planes["s"].set(np.stack([inp[name] for name in STATE_NAMES]))
         self.planes["t"].fill(0.0)
         self.planes["h"].fill(H0)
-        self.planes["n_acc"].fill(0.0)
-        self.planes["n_rej"].fill(0.0)
+        self.planes["n_acc"].fill(0)
+        self.planes["n_rej"].fill(0)
         if self.runner is not None:
             self.runner.reset()
 
     def download(self):
+        import numpy as np
+
         s = self.planes["s"].get()
         out = {name: s[d].copy() for d, name in enumerate(STATE_NAMES)}
-        out.update({name: self.planes[name].get() for name in PLANE_NAMES[6:]})
+        out.update({name: self.planes[name].get().astype(np.float64)
+                    for name in PLANE_NAMES[6:]})  # the counters compared as float64
         return out
 
 
@@ -518,7 +552,7 @@ def _make_eagle_arms(n, names):
                 "eagle_graph_reorder": {"every": COMPACT_EVERY, "reorder": REORDER_THETA,
                                         "_fast_mode": False},
                 "eagle_graph_persist": {"_fast_mode": "persist",
-                                         "_lane_utilisation": True}}
+                                         "_slot_fill": True}}
     arms = {}
     for name in (a for a in EAGLE_GPU_ARMS if a in names):
         rkf78_attempt = ARM_KERNEL[name]()
@@ -949,7 +983,8 @@ class _CpuArm:
         self.plan = plan
         self.n = n
         self.planes = {"s": np.empty((6, n))}
-        self.planes.update({k: np.empty(n) for k in PLANE_NAMES[6:]})
+        self.planes.update({k: np.empty(n, dtype=COUNTER_DTYPES.get(k, "float64"))
+                            for k in PLANE_NAMES[6:]})
         self.terminated = np.zeros(n, dtype=bool)
         self.runner = None
         self.kernel_s = None  # the loop launches and checks in one call
@@ -960,8 +995,8 @@ class _CpuArm:
         np.copyto(self.planes["s"], np.stack([inp[k] for k in STATE_NAMES]))
         self.planes["t"].fill(0.0)
         self.planes["h"].fill(H0)
-        self.planes["n_acc"].fill(0.0)
-        self.planes["n_rej"].fill(0.0)
+        self.planes["n_acc"].fill(0)
+        self.planes["n_rej"].fill(0)
         self.terminated.fill(False)
 
     def run(self):
@@ -973,8 +1008,10 @@ class _CpuArm:
         # <<< code:eagle_cpu
 
     def download(self):
+        import numpy as np
+
         out = {k: self.planes["s"][d].copy() for d, k in enumerate(STATE_NAMES)}
-        out.update({k: self.planes[k].copy() for k in PLANE_NAMES[6:]})
+        out.update({k: self.planes[k].astype(np.float64) for k in PLANE_NAMES[6:]})
         return out
 
 
@@ -1186,8 +1223,8 @@ def _run_n(n, reps, bus_id, names, kernel_pass=False):
             "kernel_only_s": (statistics.median(kern[name]) if kern[name] else None),
             "build_s": arms[name].get("build_s"),
             "compile_s": arms[name].get("compile_s"),
-            "lane_utilisation": getattr(arms[name].get("report"),
-                                       "lane_utilisation", None),
+            "slot_fill": getattr(arms[name].get("report"),
+                                       "slot_fill", None),
             # the launch shape the runner actually took ("band", "fused_one"
             # or "persist"; None for a non-eagle arm) -- eagle_simulate
             # auto-routes past the band at/above capacity, so this is read off the run, never assumed.
@@ -1206,10 +1243,13 @@ def _run_n(n, reps, bus_id, names, kernel_pass=False):
 # --------------------------------------------------------------------------- #
 _MEMORY_METHOD = (
     "A separate pass after the timing pass. Each (arm, N) runs in a fresh "
-    "process: imports, the arm's kernels built and a warm-up run on a "
+    "process: imports, the CUDA context created by one tiny device operation, "
+    "then the baseline read, before the arm builds or allocates anything; "
+    "then the arm's kernels built and a warm-up run on a "
     f"{WARM_N}-sample batch (every compile happens here; JAX also compiles for "
-    "shape N), every caching allocator trimmed (CuPy's pools, PyTorch's "
-    "cache), then the baseline read; then the arm built for N (eagle's graph, "
+    "shape N), so every library's pool reserved during the warm-up counts in "
+    "the reading; CuPy's pools and PyTorch's cache trimmed after the warm-up; "
+    "then the arm built for N (eagle's graph, "
     "PyTorch's captured graph) and one full run with upload and download; then "
     "the reading again, the allocators still holding their high-water "
     "reservation (the same measure for every arm, no sampling needed). Device: "
@@ -1218,11 +1258,12 @@ _MEMORY_METHOD = (
     "allocator grows in regions that can exceed the request; PyTorch rounds "
     "blocks up and a captured CUDA graph keeps a private pool; Warp's "
     "stream-ordered pool reserves in chunks of tens of MiB, its release "
-    "threshold set to 0 before the baseline); the driver accounts in pages of "
+    "threshold set to 0 after the warm-up); the driver accounts in pages of "
     "about 2 MiB, so small-N rows read 0 or one page. Host: the peak resident "
-    "set (VmHWM, reset to the current RSS at the baseline) minus the baseline "
-    "RSS. Minimum: the planes the workload needs, N x 10 (state, time, step, "
-    "two counters) x 8 bytes.")
+    "set (VmHWM, reset to the current RSS at the host baseline, taken after the "
+    "warm-up) minus the baseline RSS. Minimum: the planes the workload needs, "
+    "N x (8 float64 planes (state, time, step) x 8 bytes + 2 counters x 4 "
+    "bytes) = N x 72 bytes.")
 
 
 def _probe_arm(arm, n, compiled=None):
@@ -1232,11 +1273,26 @@ def _probe_arm(arm, n, compiled=None):
     return _make_arms(n, (arm,))[arm]
 
 
+def _touch_device():
+    """Create the CUDA context with one tiny device operation, so a baseline
+    read right after it sees the context and nothing else."""
+    import cupy as cp
+
+    cp.zeros(1, dtype=cp.uint8).sum()
+    cp.cuda.Device().synchronize()
+
+
 def _memory_probe(arm, n, bus_id):
     import gc
 
     reply_fd = cc.probe_reply_fd()
     gpu = arm != "eagle_cpu"
+    # the device baseline: the CUDA context exists (one tiny device op), nothing
+    # of the arm is built or allocated yet, so whatever any library's pool
+    # reserves during the warm-up counts in the reading
+    if gpu:
+        _touch_device()
+    dev_base, src = cc.process_device_bytes(bus_id) if gpu else (None, None)
     a = _probe_arm(arm, WARM_N)
     _timed(arm, a, _inputs(WARM_N))
     compiled = _jax_compile(n) if arm == "jax_vmap" else None
@@ -1245,7 +1301,6 @@ def _memory_probe(arm, n, bus_id):
     cc.trim_pools()
     if gpu:
         _sync()
-    dev_base, src = cc.process_device_bytes(bus_id) if gpu else (None, None)
     rss_base = cc.status_kib("VmRSS")
     cc.reset_host_peak()
     inp = _inputs(n)
@@ -1266,7 +1321,7 @@ def _run_memory_pass(ns, bus_id, names):
         for arm in names:
             r = cc.run_probe(__file__, ["--memory-probe", arm, str(n), bus_id],
                              timeout=1800, what=f"memory probe {arm} {n}")
-            r.update(n=n, arm=arm, minimum_bytes=n * len(PLANE_NAMES) * 8)
+            r.update(n=n, arm=arm, minimum_bytes=n * MIN_BYTES_PER_SAMPLE)
             rows.append(r)
             print(f"memory {arm:20s} N={n:>8,} device "
                   f"{(r['device_peak_bytes'] or 0) / 2**20:.3g} MiB", flush=True)
@@ -1299,13 +1354,15 @@ _COMPILE_METHOD = (
     "of 3 cold and 3 warm processes.")
 
 
-def _compile_keys(ns):
+def _compile_keys(ns, arms=ARMS):
     keys = [("hawk_cuda", list(EAGLE_GPU_ARMS),
              "eagle.deploy of the attempt kernel and its active-set variant"),
             ("hawk_host", ["eagle_cpu"], "eagle.deploy of the attempt kernel, host run"),
             ("cupy", ["cupy_masked"], "CuPy elementwise kernels")]
-    keys += [(f"jax:{n}", ["jax_vmap"], f"XLA executable, N = {n:,}") for n in ns]
-    keys.append(("warp", ["warp_kernel"], "Warp kernel module"))
+    if "jax_vmap" in arms:
+        keys += [(f"jax:{n}", ["jax_vmap"], f"XLA executable, N = {n:,}") for n in ns]
+    if "warp_kernel" in arms:
+        keys.append(("warp", ["warp_kernel"], "Warp kernel module"))
     return keys
 
 
@@ -1350,9 +1407,9 @@ def _compile_probe(key):
     cc.probe_reply(reply_fd, {"seconds": seconds})
 
 
-def _run_compile_pass(ns):
+def _run_compile_pass(ns, run_arms=ARMS):
     rows = []
-    for key, arms, what in _compile_keys(ns):
+    for key, arms, what in _compile_keys(ns, run_arms):
         cold, warm = cc.cold_warm(__file__, ["--compile-probe", key], _CACHE_ENV,
                                   reps=COMPILE_REPS, prefix="rk78_cache_", timeout=900,
                                   what=f"compile probe {key}")
@@ -1565,6 +1622,8 @@ def render_markdown(card: dict) -> str:
     for arm in card["arms"]:
         lines.append(f"| {ARM_LABELS[arm]} | {ARM_LOOP[arm]} "
                      f"| {card['code_lines']['arms'][arm]} |")
+    for arm, why in (card.get("arms_not_run") or {}).items():
+        lines += ["", f"{ARM_LABELS[arm]}: {why}."]
     lines += ["", f"Lines of code: {card['code_lines']['rule']} "
               f"({card['code_lines']['shared_scheme_lines']} lines).", ""]
     mem = {(r["n"], r["arm"]): r for r in (card.get("memory") or {}).get("rows", [])}
@@ -1666,7 +1725,9 @@ def main(argv=None):
         ap.error("--reps must be >= 5")
     if args.quick:
         args.ns = [n for n in args.ns if n <= 10_000]
-    names = tuple(a for a in ARMS if a in args.arms)
+    names, arms_not_run = _select_arms(args.arms)
+    for arm, why in arms_not_run.items():
+        print(f"arm {arm} not run: {why}", flush=True)
 
     work = pathlib.Path(tempfile.mkdtemp(prefix="rk78_card_"))
     device, peak, slug, bus_id = _device_facts()
@@ -1712,15 +1773,14 @@ def main(argv=None):
         row["fraction_of_peak_fp64"] = (
             None if row["arm"] == "eagle_cpu" or not peak["fp64_flops"]
             else row["useful_flops_per_s"] / peak["fp64_flops"])
-        # Item 5: memcpy/runtime-API-call counts from the same nsys pass.
+        # nsys_counts: memcpy/runtime-API-call counts from the same nsys pass.
         row["nsys_counts"] = (kcounts.get((row["n"], row["arm"]))
                               if row["arm"] != "eagle_cpu" and kcounts is not None
                               else None)
-        # Item 4: lane utilisation -- set already, per-row, from the persist
-        # arm's own report (the persistent launch); every
-        # other arm's row has none, so this only fills the gap.
-        row.setdefault("lane_utilisation", None)
-    # Item 1: the SM clock the repetitions ran at (ClockPoller: NVML where
+        # slot_fill: filled per row from the persist arm's own report (the
+        # persistent launch); every other arm's row has none, so default it to None.
+        row.setdefault("slot_fill", None)
+    # The SM clock the repetitions ran at (ClockPoller: NVML where
     # available, else nvidia-smi) and the FP64 peak at that clock.
     clocks = [e["gpu_state_during"].get("sm_clock_mhz_median") for e in per_n]
     clock_sources = {e["gpu_state_during"].get("source") for e in per_n
@@ -1739,9 +1799,9 @@ def main(argv=None):
                 None if row["fraction_of_peak_fp64"] is None
                 else row["useful_flops_per_s"] / peak["fp64_flops_at_observed_sm_clock"])
     memory_rows = [] if args.no_memory else _run_memory_pass(args.ns, bus_id, names)
-    compile_rows = [] if args.no_compile else _run_compile_pass(args.ns)
+    compile_rows = [] if args.no_compile else _run_compile_pass(args.ns, names)
     card = {
-        "schema": "eagle-rk78-card/2",
+        "schema": "eagle-rk78-card/3",
         "toolchain": cc.toolchain(),
         "device_slug": slug,
         "script": SCRIPT_REL,
@@ -1770,6 +1830,7 @@ def main(argv=None):
         },
         "ns": list(args.ns),
         "arms": {a: ARM_LABELS[a] for a in names},
+        "arms_not_run": arms_not_run,
         "code_lines": code_line_counts(),
         "method": {
             "repetitions": args.reps,

@@ -23,28 +23,41 @@
 namespace eagle {
 namespace policy {
 
-/** @brief Cycles of dependent arithmetic a step's chain exposes to one warp. */
+/** @brief Cycles of dependent arithmetic a step's chain exposes to one warp; 8 ran 3-5% faster than 16 on about eight benchmark cells. */
 inline constexpr int PERSIST_CHAIN_CYCLES = 8;
 /** @brief Fewest warps per scheduler partition a persistent launch ever uses. */
 inline constexpr int PERSIST_MIN_WARPS = 2;
-/** @brief Threads per SM are granted in multiples of this. */
+/** @brief Threads per SM are granted in multiples of this (two warps of 32 lanes). */
 inline constexpr int PERSIST_THREAD_STEP = 64;
-/** @brief The step fill assumed until a run has measured one. */
+/** @brief The step fill assumed until a run has measured one: the midpoint of the 0..1 range. */
 inline constexpr double PERSIST_FIRST_FILL = 0.5;
-/** @brief Fewest and most steps one work-stealing chunk runs. */
+/** @brief Fewest and most steps one work-stealing chunk runs: a chunk of 2 ties 4 on low-end FP64 parts and 1 never won. */
 inline constexpr int PERSIST_CHUNK_MIN = 2;
 inline constexpr int PERSIST_CHUNK_MAX = 32;
-/** @brief Cycles a chunk head costs a warp: the work fetch and its same-address atomic. */
-inline constexpr double PERSIST_HEAD_CYCLES = 256.0;
-/** @brief Cycles of fetch latency the warps of a persistent launch must cover. */
+/** @brief Cycles of latency (about 2000) a chunk head's fetch exposes; persistThreads divides it by the chunk's arithmetic cycles to count the warps that cover it. */
 inline constexpr double PERSIST_FETCH_CYCLES = 2000.0;
 /** @brief Most warps per partition added to cover a chunk head's fetch. */
 inline constexpr int PERSIST_FETCH_WARPS_MAX = 3;
 
-/** @brief Compaction's fixed cost: nine small kernels, in seconds. */
+/** @brief Compaction's fixed cost: nine small kernels, 27 us in all, in seconds. */
 inline constexpr double COMPACTION_FLOOR_S = 27e-6;
-/** @brief Compaction's cost per live sample, in seconds. */
+/** @brief Compaction's cost per live sample, in seconds (32 ps). */
 inline constexpr double COMPACTION_PER_SAMPLE_S = 32e-12;
+/**
+ * @brief The gap a compaction adds between its kernels in a captured graph, in
+ *        seconds, per compaction: on an H100 a compaction cost 74 us of wall
+ *        against 12 us of kernel time, and 74 - 12 = 62 us is the gap.
+ */
+inline constexpr double GRAPH_NODE_S = 62e-6;
+/**
+ * @brief Share of a step's arithmetic still exposed to dead lanes when the step
+ *        is bound by memory: the rest hides under the loads. Set on an H100; the
+ *        cadence it gives on an A100, an RTX and a P2000 stays within the swept
+ *        best. 0.25 means a quarter of the compute time is exposed: the band
+ *        step on an H100 is DRAM-bound (71% of peak bandwidth), so most dead-lane
+ *        arithmetic hides under the loads.
+ */
+inline constexpr double BAND_HIDDEN_WASTE = 0.25;
 
 /** @brief The device facts the launch rules read. A zero field is "not reported". */
 struct LaunchDevice {
@@ -52,6 +65,8 @@ struct LaunchDevice {
     int sms = 0;
     int fp64Ratio = 0;      ///< FP32:FP64 throughput ratio (1 when not reported)
     int clockKhz = 0;
+    int memClockKhz = 0;    ///< memory clock; with busWidthBits gives the bandwidth, 0 = not reported
+    int busWidthBits = 0;
 };
 
 /** @brief Scheduler partitions and FP32 lanes per SM, where they differ from 4 x 32. */
@@ -63,6 +78,14 @@ inline constexpr SmLayout smLayout(int ccMajor, int ccMinor) {
         return { 4, 64 };
     return { 4, 128 };
 }
+
+/**
+ * @brief SM cycles one warp's claim of work holds the chip: the same-address
+ *        atomic every claim contends on. Pascal's L2 serialises them about an
+ *        order of magnitude slower than Volta and later: about 10 ns (12 cycles)
+ *        on a P2000, under one cycle on an H100.
+ */
+inline constexpr int claimCycles(int ccMajor) { return ccMajor < 7 ? 12 : 1; }
 
 /** @brief Cycles one warp instruction of the step's precision takes to issue on the SM. */
 inline int issueCycles(const LaunchDevice& dev, bool fp64) {
@@ -132,15 +155,17 @@ inline int persistThreads(const LaunchDevice& dev, bool fp64, int regs, long lon
  * @brief Steps one work-stealing chunk runs for samples that take @p meanSteps
  *        on average, each step @p ops floating-point operations of the given precision.
  *
- * The power of two nearest sqrt(2 * m * H / (ops * issue)), held to
- * [PERSIST_CHUNK_MIN, PERSIST_CHUNK_MAX]: the minimiser of the lanes a chunk
- * leaves idle at its end (c / 2m) against the head's cost per step
- * (H / (c * ops * issue)), H being PERSIST_HEAD_CYCLES. Written on the square
- * so no root is taken. An unknown @p ops (0) takes the longest chunk.
+ * The power of two nearest sqrt(8 * m * SMs * claimCycles / (ops * issue)),
+ * held to [PERSIST_CHUNK_MIN, PERSIST_CHUNK_MAX]: the minimiser of the lane
+ * steps a chunk wastes masked at its end (c / 2 per lane) against the claims
+ * (m * t_claim / (32 c)), every claim holding the chip claimCycles cycles
+ * and the SMs sharing the one counter. Written on the square so no root is
+ * taken. An unknown @p ops (0) or SM count takes the longest chunk.
  */
 inline int persistChunk(const LaunchDevice& dev, bool fp64, double ops, double meanSteps) {
-    if (!(ops > 0.0)) return PERSIST_CHUNK_MAX;
-    const double x2 = 2.0 * meanSteps * PERSIST_HEAD_CYCLES / (ops * issueCycles(dev, fp64));
+    if (!(ops > 0.0) || dev.sms <= 0) return PERSIST_CHUNK_MAX;
+    const double x2 = 8.0 * meanSteps * dev.sms * claimCycles(dev.residency.ccMajor) /
+                      (ops * issueCycles(dev, fp64));
     int chunk = PERSIST_CHUNK_MIN;
     while (chunk < PERSIST_CHUNK_MAX && x2 >= 2.0 * chunk * chunk) chunk *= 2;
     return chunk;
@@ -166,17 +191,114 @@ inline long long bandK(double rate, long long newly, long long live, long long k
 }
 
 /**
- * @brief R from the cost model: one compaction of @p live samples over one
- *        step of a full-live launch (@p stepOps issue slots per sample); 0 when
- *        the clock or the SM count is unknown.
+ * @brief Seconds of one step of @p live samples in a full-live launch on the
+ *        arithmetic alone: @p stepOps issue slots per sample over the SMs'
+ *        issue pipes; 0 when the clock or the SM count is unknown.
  */
-inline double bandRate(const LaunchDevice& dev, bool fp64, long long live, double stepOps) {
+inline double bandComputeStepS(const LaunchDevice& dev, bool fp64, long long live, double stepOps) {
     if (dev.clockKhz <= 0 || dev.sms <= 0 || stepOps <= 0) return 0.0;
     const SmLayout layout = smLayout(dev.residency.ccMajor, dev.residency.ccMinor);
     const double warps = static_cast<double>(live) / RESIDENCY_WARP_LANES;
-    const double stepS = warps * stepOps * issueCycles(dev, fp64) /
-                         (static_cast<double>(layout.partitions) * dev.sms * dev.clockKhz * 1e3);
-    return (COMPACTION_FLOOR_S + COMPACTION_PER_SAMPLE_S * static_cast<double>(live)) / stepS;
+    return warps * stepOps * issueCycles(dev, fp64) /
+           (static_cast<double>(layout.partitions) * dev.sms * dev.clockKhz * 1e3);
+}
+
+/**
+ * @brief Seconds one step of @p live samples takes to move @p bytesPerSample
+ *        bytes each through device memory (memClockKhz * busWidthBits * 2 / 8
+ *        bytes per second); 0 when the memory clock, the bus width or the
+ *        bytes are unknown.
+ */
+inline double bandMemoryStepS(const LaunchDevice& dev, long long live, double bytesPerSample) {
+    if (dev.memClockKhz <= 0 || dev.busWidthBits <= 0 || bytesPerSample <= 0) return 0.0;
+    const double bandwidth = static_cast<double>(dev.memClockKhz) * 1e3 * dev.busWidthBits * 2.0 / 8.0;
+    return static_cast<double>(live) * bytesPerSample / bandwidth;
+}
+
+/**
+ * @brief Seconds of one full-live step: the longer of its arithmetic and its
+ *        memory traffic; 0 when the clock or the SM count is unknown.
+ */
+inline double bandStepS(const LaunchDevice& dev, bool fp64, long long live, double stepOps,
+                        double bytesPerSample = 0.0) {
+    const double compute = bandComputeStepS(dev, fp64, live, stepOps);
+    return compute > 0.0 ? std::max(compute, bandMemoryStepS(dev, live, bytesPerSample)) : 0.0;
+}
+
+/**
+ * @brief R, the cost ratio of one compaction of @p live samples to the step
+ *        it is weighed against, in steps of a full-live launch; 0 when the clock or the SM count is
+ *        unknown.
+ *
+ * The compaction costs its fixed part, its per-sample part and the graph gap.
+ * What it saves is the arithmetic dead lanes would have run, so it is priced
+ * against the compute time of a step: a step bound by compute is the whole
+ * step, a step bound by memory hides most of it (only BAND_HIDDEN_WASTE of
+ * the compute time is exposed). The memory term is read from
+ * @p bytesPerSample (0: not reported, the step is taken as compute-bound).
+ */
+inline double bandRate(const LaunchDevice& dev, bool fp64, long long live, double stepOps,
+                       double bytesPerSample = 0.0) {
+    const double compute = bandComputeStepS(dev, fp64, live, stepOps);
+    if (compute <= 0.0) return 0.0;
+    const double memory = bandMemoryStepS(dev, live, bytesPerSample);
+    const double exposed = memory > compute ? BAND_HIDDEN_WASTE * compute : compute;
+    return (COMPACTION_FLOOR_S + COMPACTION_PER_SAMPLE_S * static_cast<double>(live) + GRAPH_NODE_S) / exposed;
+}
+
+/** @brief Share of a persistent launch's issue slots that do useful work once its lanes keep fetching (0.85); a parameter of the entry-pick model. */
+inline constexpr double ENTRY_PERSIST_EFFICIENCY = 0.85;
+/** @brief Share of the step budget a fused launch runs on average (its lanes stop at their own last step); a parameter of the entry-pick model. */
+inline constexpr double ENTRY_FUSED_SHARE = 0.9;
+/** @brief Persist over fused time below which the persistent entry is taken without timing the other; the reciprocal of ENTRY_FUSED_ABOVE, so the margin is symmetric. */
+inline constexpr double ENTRY_PERSIST_BELOW = 0.8;
+/** @brief Persist over fused time above which the fused entry is taken without timing the other (1.25 = 1 / 0.8). */
+inline constexpr double ENTRY_FUSED_ABOVE = 1.25;
+
+/**
+ * @brief Seconds one thread's step of @p ops operations costs when every SM's
+ *        issue pipes are full; 0 when the clock, SM count or @p ops is unknown.
+ */
+inline double threadStepS(const LaunchDevice& dev, bool fp64, double ops) {
+    if (dev.clockKhz <= 0 || dev.sms <= 0 || !(ops > 0.0)) return 0.0;
+    const SmLayout layout = smLayout(dev.residency.ccMajor, dev.residency.ccMinor);
+    return ops * issueCycles(dev, fp64) /
+           (static_cast<double>(RESIDENCY_WARP_LANES) * layout.partitions * dev.sms * dev.clockKhz * 1e3);
+}
+
+/**
+ * @brief Seconds one warp takes to run a step of @p ops operations alone: its
+ *        dependent chain, PERSIST_CHAIN_CYCLES cycles an operation; 0 when
+ *        the clock or @p ops is unknown.
+ */
+inline double chainStepS(const LaunchDevice& dev, double ops) {
+    if (dev.clockKhz <= 0 || !(ops > 0.0)) return 0.0;
+    return ops * PERSIST_CHAIN_CYCLES / (static_cast<double>(dev.clockKhz) * 1e3);
+}
+
+/**
+ * @brief Predicted wall of the persistent entry over the fused entry for a
+ *        batch of @p n samples whose longest sample ran @p steps steps and
+ *        whose steps fill a fraction @p fill of that; 0 when unknown.
+ *
+ * The fused entry runs the batch in waves of @p residentThreads (all the
+ * threads the device holds at the entry's registers); a wave takes the longer
+ * of its dependent chain and its issue slots, both over the share of the budget
+ * the lanes run. The persistent entry issues only the steps the samples take
+ * (n * fill * steps) at ENTRY_PERSIST_EFFICIENCY, plus one chain for the tail.
+ * Compare the result with ENTRY_PERSIST_BELOW and ENTRY_FUSED_ABOVE.
+ */
+inline double persistOverFused(const LaunchDevice& dev, bool fp64, long long residentThreads, long long n,
+                               long long steps, double fill, double ops) {
+    const double tThr = threadStepS(dev, fp64, ops);
+    const double tLat = chainStepS(dev, ops);
+    if (tThr <= 0.0 || tLat <= 0.0 || n <= 0 || steps <= 0 || !(fill > 0.0) || residentThreads <= 0) return 0.0;
+    const double waves = std::ceil(static_cast<double>(n) / static_cast<double>(residentThreads));
+    const double perWave = static_cast<double>(n) / waves;
+    const double fused = waves * std::max(ENTRY_FUSED_SHARE * steps * tLat,
+                                          perWave * ENTRY_FUSED_SHARE * steps * tThr);
+    const double persist = static_cast<double>(n) * fill * steps * tThr / ENTRY_PERSIST_EFFICIENCY + steps * tLat;
+    return persist / fused;
 }
 
 /** @brief True when a launch asking for @p demandThreads would not fit at the unbounded residency. */

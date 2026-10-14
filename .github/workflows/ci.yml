@@ -15,7 +15,47 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  docs-fresh:
+    # Freshness check, never a commit: the generator re-renders the pages and fails on any difference.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: documented numbers match the committed cards
+        run: |
+          if ! python tools/sync_readme_cards.py --check; then
+            echo "::error::The documented performance numbers are out of date with the committed cards. Regenerate them locally with: python tools/sync_readme_cards.py -- then commit the result."
+            exit 1
+          fi
+      # companion site (amasat01.github.io): same-named branch if it exists there, else main
+      - id: ref_site
+        env:
+          COMPANION_REPO: amasat01.github.io
+          BRANCH_NAME: ${{ github.head_ref || github.ref_name }}
+          GH_TOKEN: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
+        run: |
+          auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "${GH_TOKEN:-none}" | base64 -w0)"
+          [ -n "${GH_TOKEN:-}" ] || auth="X-Unauthenticated: 1"
+          found="$(git -c http.extraHeader="$auth" ls-remote --heads "https://github.com/amasat01/${COMPANION_REPO}" "refs/heads/${BRANCH_NAME}" | awk '{print $2}')"
+          if [ "$found" = "refs/heads/${BRANCH_NAME}" ]; then ref="$BRANCH_NAME"; else ref=main; fi
+          echo "companion ${COMPANION_REPO} @ ${ref}"
+          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v7
+        with:
+          repository: amasat01/amasat01.github.io
+          ref: ${{ steps.ref_site.outputs.ref }}
+          path: site
+          token: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
+      - name: family visuals match the landing site and the cards
+        run: |
+          if ! python site/tools/sync_family_visuals.py --check --site-root site --eagle-root . --target eagle=.; then
+            echo "::error::The family visuals bundle is out of date with the landing site or the cards. Regenerate it locally with: python tools/sync_family_visuals.py --site-root <path to the site checkout> --eagle-root <path to an eagle checkout> --target eagle=<this repo> -- then commit docs/_static/family_visuals."
+            exit 1
+          fi
   test-cpp:
+    needs: docs-fresh
     runs-on: ubuntu-latest
     env:
       CC: gcc-13
@@ -99,6 +139,7 @@ jobs:
   # count equals the manifest. CUDA-side coverage is the local `sanitize-gate`
   # (tests/sanitize/README.md).
   sanitize-cpp:
+    needs: docs-fresh
     runs-on: ubuntu-latest
     env:
       CC: gcc-13
@@ -207,6 +248,7 @@ jobs:
   # detector reaches _core) AND the ft rows give zero reports with them. See
   # tests/sanitize/tsan_ft.sh and tests/sanitize/tsan.supp.
   tsan-ft:
+    needs: docs-fresh
     runs-on: ubuntu-latest
     env:
       CC: clang-18
@@ -294,6 +336,7 @@ jobs:
   # This job was authored and YAML-validated offline; the CUDA package set/versions
   # below are UNVERIFIED — not run on a live runner.
   test-python:
+    needs: docs-fresh
     runs-on: ubuntu-latest
     env:
       CC: gcc-13
@@ -436,6 +479,7 @@ jobs:
   # here only; gpu/torch rows need a device; the interop-matrix rows fail by design
   # unless deselected explicitly. All four are deselected in this leg.
   test-python-nodriver:
+    needs: docs-fresh
     runs-on: ubuntu-latest
     env:
       CC: gcc-13
@@ -576,6 +620,7 @@ jobs:
   # -W error::RuntimeWarning on the free-threaded interpreters, built and set up
   # as test-python is (the same compile-only toolchain, editable install).
   ft-stress:
+    needs: docs-fresh
     runs-on: ubuntu-latest
     strategy:
       # both free-threaded interpreters report, even when one fails
@@ -734,3 +779,80 @@ jobs:
       - if: always()
         run: ccache -s
 
+
+  # The source distribution as a user without a matching wheel gets it: build the
+  # sdist exactly as publish.yml does, then pip install it into a clean venv with
+  # nothing else provided (no CMAKE_PREFIX_PATH, no eagle_DIR, no installed
+  # headers) and use it. On x86_64 and on aarch64; compiler warnings in eagle's
+  # own sources are errors here.
+  sdist-install:
+    needs: docs-fresh
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    env:
+      CC: gcc-13
+      CXX: g++-13
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: eagle
+
+      # companion aether: same-named branch if it exists there, else main
+      - id: ref_aether
+        env:
+          COMPANION_REPO: aether
+          BRANCH_NAME: ${{ github.head_ref || github.ref_name }}
+          GH_TOKEN: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
+        run: |
+          auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "${GH_TOKEN:-none}" | base64 -w0)"
+          [ -n "${GH_TOKEN:-}" ] || auth="X-Unauthenticated: 1"
+          found="$(git -c http.extraHeader="$auth" ls-remote --heads "https://github.com/amasat01/${COMPANION_REPO}" "refs/heads/${BRANCH_NAME}" | awk '{print $2}')"
+          if [ "$found" = "refs/heads/${BRANCH_NAME}" ]; then ref="$BRANCH_NAME"; else ref=main; fi
+          echo "companion ${COMPANION_REPO} @ ${ref}"
+          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v7
+        with:
+          repository: amasat01/aether
+          ref: ${{ steps.ref_aether.outputs.ref }}
+          path: aether
+          token: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - run: sudo apt-get update && sudo apt-get install -y g++-13
+
+      - name: Build the sdist (as publish.yml does)
+        run: |
+          python -m pip install --quiet build
+          cd eagle/python && python -m build --sdist --outdir ../../dist
+
+      - name: Clean venv, pip install the sdist (warnings are errors)
+        run: |
+          set -euo pipefail
+          python -m venv "$RUNNER_TEMP/venv"
+          . "$RUNNER_TEMP/venv/bin/activate"
+          pip install --quiet --upgrade pip
+          pip install -v -Ccmake.define.EAGLE_PYTHON_WARN_AS_ERR=ON dist/raptor_eagle-*.tar.gz
+          pip check
+
+      - name: The installed package imports and computes
+        run: |
+          . "$RUNNER_TEMP/venv/bin/activate"
+          cd "$RUNNER_TEMP"
+          python - <<'PY'
+          import platform
+          from importlib.metadata import version
+
+          import eagle
+          import eagle._core
+          import eagle.exec
+
+          assert "site-packages" in eagle._core.__file__, eagle._core.__file__
+          assert eagle.exec.fold("sum", [1.0, 2.0]) == 3.0
+          print(f"OK: raptor-eagle {version('raptor-eagle')} from its sdist on {platform.machine()}")
+          PY

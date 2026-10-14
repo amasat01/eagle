@@ -1,0 +1,14 @@
+{
+  "schema": "eagle-compare-evidence/1",
+  "slug": "tesla-t4",
+  "device": "Tesla T4",
+  "session": "final-t4",
+  "eagle_commit": "06b72ca2d0aae86d0e3d6d10e47678d542914f93",
+  "hawk_commit": "efaed2c",
+  "commits_source": "session log final-t4-v2.log",
+  "csv_md5": "67f7f6ec8a1fa0226bac98f72824078c",
+  "kit_branch": "profile-kit",
+  "kit_commit": "f6cdc0f8449259ba42e35f5891683aac24b90e3a",
+  "gpu_profile_md5": "c8c45b7753117acb9218715874b5e726",
+  "generated_utc": "2026-10-13T19:20:41Z"
+}

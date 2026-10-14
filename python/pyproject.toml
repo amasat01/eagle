@@ -8,39 +8,15 @@ requires = [
     "nanobind>=3.1,<4; python_version>='3.10'",
     "nanobind>=2.2,<3; python_version<'3.10'",
 ]
-build-backend = "scikit_build_core.build"
+build-backend = "_build_backend"
+backend-path = ["."]
 
 [project]
 name = "raptor-eagle"
-version = "0.5.1"
+version = "0.6.0"
 description = "EAGLE — the Python face of the launch engine for compiled CUDA kernels"
-# The repo root's README.md, one level above this pyproject.toml (eagle's
-# Python packaging lives in python/, the README does not — see the repo's
-# top-level layout note). scikit-build-core (like every PEP 621 backend)
-# resolves a relative `readme` path against the DIRECTORY HOLDING
-# pyproject.toml, so "../README.md" is correct for both real build paths
-# this package actually goes through:
-#   * the sdist (`python -m build --sdist`, `.github/workflows/publish.yml`):
-#     resolved against the LIVE checkout, where ../README.md exists —
-#     its content lands in the sdist's own PKG-INFO.
-#   * the wheel (cibuildwheel, `CIBW_BUILD_FRONTEND: build` ->
-#     `python -m build --wheel` on the checked-out tree, never from an
-#     intermediate sdist — see publish.yml's build-wheels job): same live
-#     checkout, same resolution.
-# What does NOT work, measured directly: `python -m build` with BOTH
-# `--sdist` and `--wheel` (or neither flag, build's own "do both" default)
-# builds the wheel FROM THE SDIST it just made, and scikit-build-core
-# re-resolves `readme` against that EXTRACTED sdist's own root, which
-# carries nothing above itself — "../README.md" (or any path escaping the
-# project directory, symlink or not: a symlink to it is preserved literally
-# by the sdist step, not dereferenced, so it fails the same way once
-# extracted) is `ConfigurationError: Readme file not found` there. This
-# package is never actually built that way (its two real artifacts come
-# from the two bullets above, run as separate jobs, neither one a
-# wheel-from-sdist step) — proven here with EACH leg run the way publish.yml
-# runs it, not with the combined `python -m build` invocation that this
-# package does not support.
-readme = "../README.md"
+# A copy of the repository README, made by _build_backend.py (git-ignored).
+readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "Apache-2.0" }
 # Python versions match the cibuildwheel matrix publish.yml actually builds
@@ -122,8 +98,10 @@ cmake.version = ">=3.20"
 # Keep the built extension out of the pure-python source collection (a dev build
 # may drop one in-tree; the wheel's copy comes from the CMake install).
 sdist.exclude = ["**/*.so"]
+# The README and header copies _build_backend.py makes; git-ignored, so listed.
+sdist.include = ["README.md", "_sdist_include/**"]
 # LICENSE/NOTICE, copied next to this pyproject.toml (the repo root's own
-# copies sit one directory up, same reason `readme` above is "../README.md";
+# copies sit one directory up, outside this package directory;
 # scikit-build-core's own license-files glob cannot reach outside this
 # directory). Uses the backend's own setting, not PEP 639's
 # project.license-files, so `license` can keep the classic dict form the

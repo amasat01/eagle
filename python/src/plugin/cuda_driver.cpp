@@ -188,7 +188,7 @@ const Driver& driver()
 {
     static const Driver d = [] {
         Driver out;
-        void* lib = dlopen("libcuda.so.1", RTLD_NOW | RTLD_LOCAL);
+        void* lib = hidden("libcuda.so.1") ? nullptr : dlopen("libcuda.so.1", RTLD_NOW | RTLD_LOCAL);
         if (lib == nullptr)
             return out;
         auto get2 = reinterpret_cast<GetProc2>(dlsym(lib, "cuGetProcAddress_v2"));
@@ -714,6 +714,8 @@ const char* cudaGetErrorString(cudaError_t error)
         return "no usable CUDA driver: libcuda.so.1 could not be loaded";
     case cudaErrorCallRequiresNewerDriver:
         return "the installed CUDA driver does not provide this entry point";
+    case cudaErrorNoDevice:
+        return "no CUDA-capable device is detected";
     case cudaErrorInvalidDeviceFunction:
         return "invalid device function";
     case cudaErrorMissingConfiguration:

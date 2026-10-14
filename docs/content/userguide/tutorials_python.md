@@ -37,15 +37,15 @@ Putting a kernel inside a training loop, and differentiating a whole graph.
 :hidden:
 
 tutorials/03_torch_training
-tutorials/11_graph_model
-tutorials/12_gradients_through_a_graph
-tutorials/13_conditionals_budgets_events
+tutorials/09_graph_model
+tutorials/10_gradients_through_a_graph
+tutorials/11_conditionals_budgets_events
 ```
 
-- [Train through a physics kernel](tutorials/03_torch_training): a hawk kernel inside `loss.backward()`.
-- [Build a step as a graph](tutorials/11_graph_model): `eagle.Graph`, built, inspected and run.
-- [Gradients through a graph](tutorials/12_gradients_through_a_graph): `eagle.diff`, checked against finite differences.
-- [Conditionals, budgets and events](tutorials/13_conditionals_budgets_events): reverse through a skipped step, a capped memory budget, and a stop between two steps.
+- [Gradients through a physics kernel](tutorials/03_torch_training): a hawk kernel inside `loss.backward()`.
+- [Build a step as a graph](tutorials/09_graph_model): `eagle.Graph`, built, inspected and run.
+- [Gradients through a graph](tutorials/10_gradients_through_a_graph): `eagle.diff`, checked against finite differences.
+- [Conditionals, budgets and events](tutorials/11_conditionals_budgets_events): reverse through a skipped step, a capped memory budget, and a stop between two steps.
 
 ## Seeing what ran
 

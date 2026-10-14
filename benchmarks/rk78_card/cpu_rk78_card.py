@@ -357,7 +357,7 @@ def _run_n(n, reps, names, work):
                      "host_peak_bytes": setup[a]["host_peak_bytes"],
                      "compile_s_cold": (None if a in NO_COMPILE_ARMS
                                         else setup[a]["compile_s"]),
-                     "lane_utilisation": None})
+                     "slot_fill": None})
     return rows, {"n": n, "reference_arm": ref, "agreement": agreement, "steps": steps,
                   "load_avg_before": load_before, "load_avg_after": load_after}
 
@@ -448,7 +448,7 @@ def main(argv=None):
                                        "are the 1-thread vs N-thread rows"),
                        "simd": "not measured on this card (see cpu_card.py's simd.summary "
                                "for the same hawk host build's scalar/packed op counts)",
-                       "lane_utilisation": "n/a on the host (device-only hook)",
+                       "slot_fill": "n/a on the host (device-only hook)",
                        "fixed_overhead": "not re-measured as a dedicated cell on this card"},
             "results": results, "per_n": per_n}
     args.out_dir.mkdir(parents=True, exist_ok=True)

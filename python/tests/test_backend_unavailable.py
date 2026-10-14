@@ -174,10 +174,40 @@ def test_no_visible_device_is_typed(tmp_path):
         extra_env={"CUDA_VISIBLE_DEVICES": ""},
     )
     assert out["loaded"] is True
-    if out["raised"] and "no usable CUDA driver" in out["raised"]:
+    if out["raised"] and "NVIDIA driver cannot run" in out["raised"]:
         pytest.skip("no CUDA driver on this machine: the driver-absent case is "
                     "the no-driver leg's, not this row's")
     assert out["raised"] is not None and "cudaErrorNoDevice" in out["raised"], out
+    # F4: plain language, how to run on the CPU, never the raw driver-library wording
+    assert "no CUDA GPU visible" in out["raised"], out
+    assert "NumPy" in out["raised"] and "CPU" in out["raised"], out
+    assert "unrecognized error code" not in out["raised"], out
+
+
+def test_driver_mismatch_names_the_matching_extra(tmp_path):
+    """F3: an unusable driver (hidden libcuda here) tells the user which extra to install."""
+    import eagle._core
+
+    plugin = pathlib.Path(eagle._core.__file__).parent / "libeagle_cuda.so"
+    if not plugin.exists():
+        pytest.skip("no CUDA plugin installed (a core-only build)")
+    out = _run_child(
+        """
+        try:
+            eagle._core.Stream()
+            raised = None
+        except eagle.BackendUnavailable as e:
+            raised = str(e)
+        print(json.dumps({"raised": raised}))
+        """,
+        plugin,
+        extra_env={"EAGLE_CUDA_DRIVER_HIDE": "libcuda.so.1"},
+    )
+    msg = out["raised"]
+    assert msg is not None, out
+    assert "cudaErrorInsufficientDriver" in msg, msg
+    assert 'raptor-eagle[cuda12]' in msg and 'raptor-eagle[cuda13]' in msg, msg
+    assert "nvidia-smi" in msg, msg
 
 
 def test_major_version_mismatch_is_refused_naming_both(tmp_path):
