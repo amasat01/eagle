@@ -1496,26 +1496,36 @@ def _cpu_facts():
     logical = os.cpu_count()
     tpc = int(info.get("Thread(s) per core", "1"))
     m = re.search(r"@\s*([\d.]+)\s*GHz", model)
-    base_hz = float(m.group(1)) * 1e9 if m else float(info.get("CPU max MHz", "0")) * 1e6
+    freq = _cpufreq_facts()
+    if m:
+        base_hz, clock_from = float(m.group(1)) * 1e9, "the model name"
+    elif info.get("CPU max MHz"):
+        base_hz, clock_from = float(info["CPU max MHz"]) * 1e6, "lscpu's CPU max MHz"
+    elif freq.get("cpuinfo_max_mhz"):
+        base_hz, clock_from = freq["cpuinfo_max_mhz"] * 1e6, "cpufreq's cpuinfo_max_freq"
+    else:
+        # a cloud VM often names no clock anywhere: the peak is then unknown, never 0
+        base_hz, clock_from = None, None
     simd = 8 if "avx512f" in flags else (4 if "avx" in flags else 2)
     fma = "fma" in flags
     flop_per_lane = 2 if fma else 1
-    peak = cores * FMA_UNITS_PER_CORE * simd * flop_per_lane * base_hz
-    peak_scalar = cores * FMA_UNITS_PER_CORE * flop_per_lane * base_hz
+    peak = None if base_hz is None else cores * FMA_UNITS_PER_CORE * simd * flop_per_lane * base_hz
+    peak_scalar = None if base_hz is None else cores * FMA_UNITS_PER_CORE * flop_per_lane * base_hz
     clean = re.sub(r"\((R|TM)\)|\bCPU\b|@.*$", "", model)
     slug = re.sub(r"[^a-z0-9]+", "-", clean.lower()).strip("-")
     cpu = {"model": model, "cores": cores, "logical_cpus": logical,
            "threads_per_core": tpc, "base_clock_hz": base_hz,
            "max_clock_mhz": info.get("CPU max MHz"), "simd_doubles": simd,
            "fma": fma, "isa_flags": sorted(f for f in flags if f.startswith(("avx", "fma", "sse"))),
-           **_cpufreq_facts()}
+           **freq}
     peak_d = {
         "fp64_flops": peak, "fp64_flops_scalar": peak_scalar,
         "assumption": (f"{cores} cores × {FMA_UNITS_PER_CORE} FMA units × {simd} "
                        f"float64 lanes × {flop_per_lane} FLOP per FMA × "
-                       f"{base_hz / 1e9:.3g} GHz base clock"),
-        "source": ("cores and ISA from lscpu and /proc/cpuinfo; base clock from the "
-                   "model name; FMA units per core assumed (Intel lists 2 AVX-512 "
+                       + (f"{base_hz / 1e9:.3g} GHz base clock" if base_hz is not None else
+                          "an unknown clock (the model name, lscpu and cpufreq name none), so no peak")),
+        "source": ("cores and ISA from lscpu and /proc/cpuinfo; base clock from "
+                   f"{clock_from or 'nowhere (unknown)'}; FMA units per core assumed (Intel lists 2 AVX-512 "
                    "FMA units for the Xeon W-2125); turbo can exceed the base clock "
                    "and wide-vector load can run below it"),
     }
@@ -1615,7 +1625,8 @@ def _merge(parts_dir, configs, ns, reps, slug, cpu, peak, out_dir, allow_partial
         print("card not written; missing parts: " + ", ".join(missing))
         return None
     for r in results:
-        r["fraction_of_peak_fp64"] = r["useful_flops_per_s"] / peak["fp64_flops"]
+        r["fraction_of_peak_fp64"] = (None if peak["fp64_flops"] is None
+                                      else r["useful_flops_per_s"] / peak["fp64_flops"])
     ns_present = sorted({r["n"] for r in results})
     cfg_present = [{"distribution": d, "max_steps": s} for d, s in configs
                    if any((r["distribution"], r["max_steps"]) == (d, s) for r in results)]
