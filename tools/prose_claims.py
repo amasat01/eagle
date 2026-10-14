@@ -649,6 +649,7 @@ def headline_facts(cards):
         facts["ns"].append(
             {
                 "n": n,
+                "mem_names": [HEAD_ARM_NAMES.get(chosen[t], t) for t in HEAD_MEM_TOOLS],
                 "wall": fmt_time(base),
                 "speed": speed,
                 "mem": mem,
@@ -711,8 +712,10 @@ def render_hero(facts):
         f"| **{mspan(a)} less GPU memory** at N = {a['n']:,}, {mspan(b)} at N = {b['n']:,} |",
         "|:---:|:---:|:---:|",
         f"| RK4 oscillators, each stopping at its own step, up to {steps} steps "
-        f"| than {_caption(a['speed'])} at N = {a['n']:,} "
-        f"| than CuPy and PyTorch: {a['mib']} for N = {a['n']:,}, {a['xmin']} the bare minimum state |",
+        f"| than {_caption(a['speed'])} at N = {a['n']:,}"
+        + ("; Warp is level or ahead when every sample runs all its steps" if "dense" in facts else "")
+        + " "
+        f"| than {' and '.join(a['mem_names'])}: {a['mib']} for N = {a['n']:,}, {a['xmin']} the bare minimum state |",
         "",
         f"<sub>{facts['device']} (card of {facts['date']}). NVIDIA Warp's per-thread kernel is the "
         f"fastest GPU arm in {facts['warp_first']} of {facts['cells']} RK4 cells",
@@ -727,12 +730,17 @@ def render_hero(facts):
     return "\n".join(lines)
 
 
+def _a(name):
+    """``a`` or ``an`` before a device name (NVIDIA, AMD and Intel read with a vowel sound)."""
+    return "an" if name.split()[0] in ("NVIDIA", "AMD", "Intel") or name[:1] in "AEIO" else "a"
+
+
 def render_hero_sentence(facts, subject="`eagle.simulate`"):
     """The same headline as one sentence, for a README that only quotes it."""
     a, b = facts["ns"]
     return (
         f"{subject} integrates {a['n']:,} RK4 oscillators, each stopping at its own step, "
-        f"in {a['wall']} on a {facts['device']} ({b['wall']} for {b['n']:,}), "
+        f"in {a['wall']} on {_a(facts['device'])} {facts['device']} ({b['wall']} for {b['n']:,}), "
         f"{_span(a['speed'])} faster than {_caption(a['speed'])} at N = {a['n']:,}"
         f" ({_span(b['speed'])} at N = {b['n']:,}), in {a['mib']} of GPU memory"
     )

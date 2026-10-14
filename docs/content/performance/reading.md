@@ -1,6 +1,6 @@
 # Reading the numbers
 
-What the results show, with the cards' own figures. Each statement can be checked against the tables on the results pages ([RK4](rk4.md), [RK7(8)](rk78.md)). For the mechanisms behind these numbers, see [Where the performance comes from](mechanism.md).
+What the results show, with the benchmark cards' own figures. Each statement can be checked against the tables on the results pages ([RK4](rk4.md), [RK7(8)](rk78.md)). For the mechanisms behind these numbers, see [Where the performance comes from](mechanism.md).
 
 ## RK4 oscillators
 
@@ -77,8 +77,8 @@ below say where.
   from <!--c x src=sweep variant=compact den_variant=matched_cadence k=8 n=100000-->2.2×<!--/c--> to <!--c x src=sweep variant=compact den_variant=matched_cadence k=32 n=100000-->1.6×<!--/c--> at N = 10⁵. On this card the
   active-set map accounts for the smaller part of the gap to the plain graph;
   most of it is already there once the guard is checked every K steps.
-- **Memory traffic.** PyTorch's CUDA-graph arm reaches the card's full
-  issued bandwidth at N = 10⁶ uniform (<!--c rate field=issued_bytes_per_s arm=torch_graphed dist=uniform-->3.36e12<!--/c--> B/s, <!--c pct field=fraction_of_peak_dram arm=torch_graphed dist=uniform-->100%<!--/c--> of the DRAM peak);
+- **Memory traffic.** PyTorch's CUDA-graph arm reaches the device's full
+  issued bandwidth at N = 10⁶ uniform (<!--c rate field=issued_bytes_per_s arm=torch_graphed dist=uniform-->3.36e12<!--/c--> B/s, <!--c pct field=fraction_of_peak_dram arm=torch_graphed dist=uniform-->100%<!--/c--> of the DRAM peak, analytic not measured);
   CuPy masked reaches <!--c pct field=fraction_of_peak_dram arm=cupy_masked dist=uniform-->74%<!--/c--> of peak in the same cell. Both arms' wall time
   comes from the number of passes they make over the whole batch every
   step, finished samples included, rather than from slow passes.

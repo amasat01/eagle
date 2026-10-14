@@ -222,6 +222,25 @@ def _measured_on_table(entries: list[dict]) -> list[str]:
     return lines
 
 
+def _software_table(entries: list[dict]) -> list[str]:
+    """What each card ran on and against, straight from its JSON (a field a card lacks shows a dash)."""
+    lines = ["", "| device | driver | CUDA runtime | host CPU | Warp | JAX | PyTorch | CuPy |",
+             "|---|---|---|---|---|---|---|---|"]
+    for e in entries:
+        c = e["card"]
+        dev, sw = c.get("device") or {}, c.get("software") or {}
+        name, _cls = _device_name_and_class(c, e["path"])
+        rt = dev.get("cuda_runtime")
+        cpu_field = c.get("cpu")
+        cpu = sw.get("cpu") or (cpu_field.get("model") if isinstance(cpu_field, dict) else cpu_field)
+        cells = [dev.get("driver_version"), f"{rt // 1000}.{rt % 1000 // 10}" if rt else None,
+                 _clean_cpu_name(cpu) if cpu else None,
+                 *(sw.get(k) for k in ("warp", "jax", "torch", "cupy"))]
+        lines.append(f"| {name} | " + " | ".join(str(v) if v else "–" for v in cells) + " |")
+    lines.append("")
+    return lines
+
+
 def _chart_for(spec: dict, e: dict, cfg: dict | None, name_config: bool = True) -> str | None:
     """One chart's HTML (the card's tools at its largest N), or None."""
     tools = charts.GPU_TOOLS if spec["heading"] == "GPU" else charts.CPU_TOOLS
@@ -251,6 +270,34 @@ def _raw_html(html_text: str) -> list[str]:
     return ["```{raw} html", *html_text.split("\n"), "```", ""]
 
 
+_TOOL_VERSIONS = (("warp", "Warp"), ("jax", "JAX"), ("torch", "PyTorch"), ("cupy", "CuPy"), ("numpy", "NumPy"))
+
+
+def versions_line(card: dict) -> str:
+    """One caption line of what the card ran on, from its JSON only: driver, CUDA, host CPU,
+    compiler and the versions of the tools it compared. A field the card lacks is left out."""
+    parts = []
+    dev, sw, tc = card.get("device") or {}, card.get("software") or {}, card.get("toolchain") or {}
+    if dev.get("driver_version"):
+        parts.append(f"driver {dev['driver_version']}")
+    rt = dev.get("cuda_runtime")
+    if rt:
+        parts.append(f"CUDA runtime {rt // 1000}.{rt % 1000 // 10}")
+    cpu_field = card.get("cpu")
+    cpu = sw.get("cpu") or (cpu_field.get("model") if isinstance(cpu_field, dict) else cpu_field)
+    if cpu:
+        parts.append(f"host CPU {_clean_cpu_name(cpu)}")
+    host = (tc.get("host_compiler") or "").split("||")
+    if len(host) > 1 and host[1]:
+        parts.append(f"compiler {host[1]}")
+    if tc.get("python"):
+        parts.append(f"Python {tc['python']}")
+    tools = [f"{label} {sw[key]}" for key, label in _TOOL_VERSIONS if sw.get(key)]
+    if tools:
+        parts.append(", ".join(tools))
+    return f"*Run on: {'; '.join(parts)}.*" if parts else ""
+
+
 def card_overview(spec: dict, e: dict, page: str) -> str:
     """Fragment: the device's headline chart, a one-line description, a link to
     the results page. Carries the anchor external links point at."""
@@ -261,6 +308,9 @@ def card_overview(spec: dict, e: dict, page: str) -> str:
         [f"card of {date}"] if date else [])
     lines = [f"({spec['key']}-{e['slug']})=",
              f"**{name}**{' (' + ', '.join(detail) + ')' if detail else ''}.", ""]
+    versions = versions_line(e["card"])
+    if versions:
+        lines += [versions, ""]
     if chart:
         lines += _raw_html(chart)
     lines += [f"[Every workload, every arm and every N for {name}](/content/performance/{page}.md)", ""]
@@ -444,6 +494,9 @@ def card_results(spec: dict, e: dict, table_rel: str) -> str:
     configs = [(c, _chart_for(spec, e, c, name_config=False)) for c in _configs(spec, e)]
     configs = [(c, h) for c, h in configs if h]
     lines: list[str] = []
+    versions = versions_line(e["card"])
+    if versions:
+        lines += [versions, ""]
     if len(configs) == 1:
         lines += _raw_html(configs[0][1])
     elif configs:
@@ -568,7 +621,7 @@ def generate(eagle_root: pathlib.Path, out_dir: pathlib.Path) -> dict[str, int]:
             name = spec["key"] if view == "results" else f"{spec['key']}_overview"
             (out_dir / f"{name}.md").write_text(render_family(spec, entries, out_dir, view))
         (out_dir / f"{spec['key']}_devices.md").write_text(
-            "\n".join(_measured_on_table(entries)))
+            "\n".join(_measured_on_table(entries) + _software_table(entries)))
         counts[spec["key"]] = len(entries)
     write_readme_svgs(eagle_root, loaded)
     write_glimpse(out_dir, loaded)

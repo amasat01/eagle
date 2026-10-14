@@ -33,7 +33,11 @@ GPU_TOOLS = (("eagle_simulate", "eagle.simulate", "--mark-eagle"),
              ("warp_kernel", "NVIDIA Warp", "--tool-warp"),
              ("jax_vmap", "JAX", "--tool-jax"),
              ("cupy_masked", "CuPy", "--tool-cupy"),
-             ("torch_masked", "PyTorch", "--tool-pytorch"))
+             (("torch_compiled", "torch_graphed", "torch_masked"), "PyTorch", "--tool-pytorch"))
+#: A tool with several arms is drawn by its fastest arm on the cell, and the label names which
+#: arm when it is not the plain one (the same rule as the README hero in tools/prose_claims.py).
+ARM_LABELS = {"torch_compiled": "PyTorch with torch.compile",
+              "torch_graphed": "PyTorch with CUDA graphs"}
 CPU_TOOLS = (("eagle_term8", "eagle, 8 threads", "--mark-eagle"),
              ("eagle_cpu8", "eagle, 8 threads", "--mark-eagle"),
              ("numba_prange", "Numba", "--tool-numba"),
@@ -100,10 +104,13 @@ def bars(card: dict, tools, config: dict | None = None):
                 and r.get("max_steps") == cfg.get("max_steps")):
             rows[r["arm"]] = r
     out, seen = [], set()
-    for arm, label, var in tools:
-        if arm in rows and label not in seen:
+    for arms, label, var in tools:
+        present = [a for a in ((arms,) if isinstance(arms, str) else arms) if a in rows]
+        if present and label not in seen:
             seen.add(label)
-            out.append((label, var, _center(rows[arm]["wall_s"]), arm.startswith("eagle")))
+            arm = min(present, key=lambda a: _center(rows[a]["wall_s"]))
+            out.append((ARM_LABELS.get(arm, label), var, _center(rows[arm]["wall_s"]),
+                        arm.startswith("eagle")))
     out.sort(key=lambda b: b[2])
     return out, n
 

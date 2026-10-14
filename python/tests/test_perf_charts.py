@@ -73,3 +73,28 @@ def test_readme_svg_names_the_tools_and_the_machine():
     svg = (_REPO / "docs" / "_static" / "perf" / "readme_gpu.svg").read_text()
     assert "<desc" in svg and "eagle.simulate" in svg and "NVIDIA Warp" in svg
     assert "prefers-color-scheme: dark" in svg
+
+
+def _walls(**arms):
+    return [{"arm": a, "n": 10, "distribution": "spread", "max_steps": 5, "wall_s": {"mean": w}}
+            for a, w in arms.items()]
+
+
+def test_a_tool_with_several_arms_is_drawn_by_its_fastest_arm_and_named():
+    charts = _charts()
+    card = {"ns": [10], "results": _walls(eagle_simulate=1e-3, torch_masked=0.3,
+                                          torch_compiled=0.08, torch_graphed=0.1)}
+    got, _n = charts.bars(card, charts.GPU_TOOLS, {"distribution": "spread", "max_steps": 5})
+    assert [(b[0], b[2]) for b in got] == [("eagle.simulate", 1e-3), ("PyTorch with torch.compile", 0.08)]
+
+
+def test_versions_line_comes_from_the_card_json_only():
+    gen = _generator()
+    card = {"device": {"driver_version": "580.1", "cuda_runtime": 12090},
+            "software": {"cpu": "Intel(R) Xeon(R) CPU", "torch": "2.12.1", "warp": "1.17.0"},
+            "toolchain": {"python": "3.12.14", "host_compiler": "g++||g++ (GCC) 11.5||x"}}
+    line = gen.versions_line(card)
+    for part in ("driver 580.1", "CUDA runtime 12.9", "host CPU Intel Xeon CPU", "Warp 1.17.0", "PyTorch 2.12.1",
+                 "compiler g++ (GCC) 11.5"):
+        assert part in line
+    assert gen.versions_line({}) == ""

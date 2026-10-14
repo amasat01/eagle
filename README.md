@@ -29,6 +29,13 @@ eagle is the execution layer of the [RAPTOR family](https://amasat01.github.io/)
 as CUDA graphs to keep work efficient on the GPU, and connects them to the code you already have. See
 [where RAPTOR fits](https://amasat01.github.io/where_raptor_fits.html) for the full four-part story.
 
+Linux x86_64 wheels (Python 3.9-3.14). On macOS or Windows, open the notebook on Colab or Kaggle (the Kaggle badge above).
+
+```bash
+pip install raptor-eagle raptor-hawk                           # CPU threads, no NVIDIA packages
+pip install "raptor-eagle[cuda12]" "raptor-hawk[cuda12]"       # NVIDIA GPU ([cuda13] for a CUDA 13 driver)
+```
+
 ```python
 import cupy as cp
 
@@ -59,17 +66,34 @@ print(result.status, result.steps, result.x[:3])
 # (steps counts whole check intervals, so it varies with the launch strategy eagle picks; x does not)
 ```
 
-NumPy arrays in, and the same call runs on CPU threads. No GPU? Change the first line to `import numpy as cp` and the
-example above runs unchanged on the CPU (`steps` then prints 1024, not 1000: it counts whole check intervals, which differ by route). Errors:
-`no CUDA GPU visible` means there is no GPU (or `CUDA_VISIBLE_DEVICES` hides it); `cudaErrorInsufficientDriver` means the
+The same call runs on CPU threads with NumPy arrays. No GPU? Change the first line of the example to:
+
+```python
+import numpy as cp   # CPU route: the rest runs unchanged (steps then prints 1024, not 1000: it counts whole check intervals, which differ by route)
+```
+
+Errors: `no CUDA GPU visible` means there is no GPU (or `CUDA_VISIBLE_DEVICES` hides it); `cudaErrorInsufficientDriver` means the
 installed extra does not match the driver, so install `raptor-eagle[cuda12]` for a CUDA 12 driver or `[cuda13]` for CUDA 13.
+
+With the `[torch]` extra, a hawk kernel works inside PyTorch autograd:
+
+```python
+import torch
+from eagle.frameworks import torch as eagle_torch
+
+step = eagle_torch.function(decay, wrt=("k", "x"))   # decay: a hawk kernel
+k = torch.full((1000,), 0.5, dtype=torch.float64, requires_grad=True)
+x_next = step(k, torch.ones(1000, dtype=torch.float64), torch.zeros(1000, dtype=torch.bool))
+x_next.sum().backward()      # fills k.grad
+```
+
 **[Quickstart](https://amasat01.github.io/eagle/content/userguide/quickstart_python.html)** ·
 [Install](#install) · [Performance](#performance) · [C++ API](#c-api)
 
 <!-- hero:begin -->
 | **613 µs** at N = 1,000,000, 199 µs at N = 100,000 | **2.5×–600× faster** at N = 1,000,000, 1.1×–1700× at N = 100,000 | **4.8×–6.0× less GPU memory** at N = 1,000,000, 5.5×–42× at N = 100,000 |
 |:---:|:---:|:---:|
-| RK4 oscillators, each stopping at its own step, up to 1000 steps | than NVIDIA Warp (2.5×), JAX (76×), CuPy (600×), PyTorch with torch.compile (130×) at N = 1,000,000 | than CuPy and PyTorch: 40 MiB for N = 1,000,000, 1.1× the bare minimum state |
+| RK4 oscillators, each stopping at its own step, up to 1000 steps | than NVIDIA Warp (2.5×), JAX (76×), CuPy (600×), PyTorch with torch.compile (130×) at N = 1,000,000; Warp is level or ahead when every sample runs all its steps | than CuPy and PyTorch with torch.compile: 40 MiB for N = 1,000,000, 1.1× the bare minimum state |
 
 <sub>NVIDIA H100 80GB HBM3 (card of 2026-10-13). NVIDIA Warp's per-thread kernel is the fastest GPU arm in 2 of 12 RK4 cells; on the dense batch (every sample running all 1000 steps) at N = 1,000,000 it takes 1.71 ms and `eagle.simulate` 1.75 ms. See [every number, every arm](#performance).</sub>
 <!-- hero:end -->
@@ -81,8 +105,8 @@ Free-threaded CPython (3.13t/3.14t) is supported: the compiled modules declare G
 ## Install
 
 ```bash
-pip install "raptor-eagle[cuda12]"      # or [cuda13]; add [torch] for PyTorch interop
-pip install "raptor-hawk[cuda12]"       # the examples below also write kernels with hawk; [cuda13] for CUDA 13
+pip install raptor-eagle raptor-hawk                      # CPU threads: no NVIDIA packages, nothing else to install
+pip install "raptor-eagle[cuda12]" "raptor-hawk[cuda12]"  # NVIDIA GPU; [cuda13] for CUDA 13; add [torch] for PyTorch interop
 ```
 
 > **NVIDIA packages come only through the extras.** `raptor-eagle[cuda12]` / `[cuda13]` pull CuPy (`cupy-cuda12x` /

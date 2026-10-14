@@ -33,7 +33,7 @@ findable in one place instead of only where the gap happens to surface.
   whenever the `nvcc` in use compiles it (CUDA 13, late CUDA 12), and the
   `native` default builds for whatever GPU the machine has. CUDA 13 is
   supported and tested alongside CUDA 12. The wheel carries Blackwell native
-  code, shipped but not yet run or measured on Blackwell hardware; the
+  code: sm_120 is measured (RTX PRO 6000 Blackwell Server Edition); sm_100, sm_103 and sm_121 are not yet run on hardware; the
   performance cards record the toolkit each was built with.
 
 ## Host plugin parity — closed out, nothing carried forward

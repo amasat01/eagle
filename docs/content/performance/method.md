@@ -52,3 +52,9 @@
   step kernel as `eagle_graph`, looped K steps between guard checks with no
   map, against `eagle_graph_compact` at that K. The only structural
   difference within a pair is the active-set map.
+
+## Terms
+
+- **Useful FLOP/s**: floating-point operations of steps a sample really took, per second of wall time.
+- **Issued bytes per second**: analytic count of bytes the loads and stores move, per second; not read from hardware counters.
+- **Benchmark card**: one device's report; the **device** is the GPU or CPU it ran on.

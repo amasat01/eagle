@@ -18,6 +18,7 @@ that produced it; a test re-renders the table from the JSON so the two
 cannot drift. `--quick` runs a reduced matrix as a smoke test.
 
 To reproduce the cards on another machine (Kaggle, a rented GPU or your own box) with the same pinned software, see [`benchmarks/reproduce/`](https://github.com/amasat01/eagle/tree/main/benchmarks/reproduce).
+The P2000 card ran locally, the T4 on Kaggle, and the other cards on cloud VMs through `benchmarks/reproduce/run_cards.sh`.
 On Kaggle, choose the GPU T4 x2 accelerator, turn Internet on and run the notebook:
 [![Open in Kaggle](https://kaggle.com/static/images/open-in-kaggle.svg)](https://www.kaggle.com/kernels/welcome?src=https://github.com/amasat01/eagle/blob/main/benchmarks/reproduce/kaggle.ipynb)
 
