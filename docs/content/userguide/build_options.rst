@@ -93,19 +93,18 @@ switch as ``AETHER_CUDA_ARCHS``.
 Platform support
 ----------------
 
-Pure C++ (host) execution is built and measured today on x86-64 Linux; the
-reference machine is a Xeon W-2125 with AVX-512.  The aether headers eagle
-builds on are compiled with ``-march=x86-64-v3`` (AVX2 and FMA) by default, so
-the host path needs an x86-64 CPU of that level or newer; the ``AETHER_MARCH``
-CMake variable overrides it.  Extending the host path to ARM (aarch64) and to
-x86 CPUs with other vector widths (for example AVX2-only parts) is planned;
-until then those targets are not built or measured.
+Pure C++ (host) execution is built and measured on x86-64 Linux (AVX-512
+and AVX2-only CPUs) and on aarch64 Linux; the performance page lists the CPUs.
+On aarch64 the step is not vectorised and there is no vector-math profile.
+The aether headers eagle builds on are compiled with ``-march=x86-64-v3``
+(AVX2 and FMA) by default on x86-64, so the host path needs an x86-64 CPU of
+that level or newer; the ``AETHER_MARCH`` CMake variable overrides it. There
+are no ARM wheels yet.
 
-On the device side, eagle is tested with CUDA 12.6 (a Quadro P2000, and a Tesla
-T4 on Kaggle) and CUDA 13.0 (a Tesla T4 on Kaggle: build, test suites and a
-correctness check against Warp); the published performance cards are measured
-with CUDA 12.6. Later CUDA 12 releases share the same APIs and are expected to
-work; releases before 12.6 are not supported.
+On the device side, eagle is built with CUDA 12.6 or newer; the register gate
+pins the toolkits it exercises, and each performance card records the toolkit
+it was measured with. Later CUDA 12 releases share the same APIs and are
+expected to work; releases before 12.6 are not supported.
 
 eagle asks the driver for its entry points at the CUDA 12.0 interface level, so
 a build made with a CUDA 13 toolkit also runs on any CUDA 13 driver, and a

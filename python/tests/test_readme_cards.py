@@ -74,8 +74,8 @@ def test_measured_on_anchors_match_the_built_pages_hyphenated_ids():
     sides can drift to the SAME wrong spelling together."""
     module = _script()
     rendered = module.render_block(_REPO)
-    assert "#perf-card-gpu-quadro-p2000" in rendered
-    assert "#perf-card-cpu-intel-xeon-w-2125" in rendered
+    assert "#perf-card-gpu-nvidia-h100-80gb-hbm3" in rendered
+    assert "#perf-card-cpu-amd-epyc-9b45" in rendered
     assert "#perf_card_gpu-" not in rendered
     assert "#perf_card_cpu-" not in rendered
 

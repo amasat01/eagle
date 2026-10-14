@@ -414,11 +414,11 @@ def _gen_module():
     return module
 
 
-def test_docs_tables_withhold_device_readings_below_the_minimum():
+def test_docs_tables_withhold_device_readings_below_the_minimum(tmp_path):
     """The docs pages never quote a device reading below the workload's
-    minimum state (less one driver page). JAX's 0 MiB at N = 1,000,000 on the
-    A100 card -- its pool was reserved before the baseline -- shows the
-    P2000/T4 reading instead, marked and attributed; with no other card it
+    minimum state (less one driver page). A JAX reading of 0 MiB at N = 1,000,000 on a
+    synthetic card -- its pool was reserved before the baseline -- shows the
+    other cards' reading instead, marked and attributed; with no other card it
     shows "not measured"; a small-N 0 MiB (below one driver page) stays.
     RED: drop the `withhold_impossible_readings` call from `_table_fragment`."""
     gen = _gen_module()
@@ -435,12 +435,25 @@ def test_docs_tables_withhold_device_readings_below_the_minimum():
     fine = "| 1,000,000 | Warp | 5.96 ms | 64 MiB (1.68× min.) | 3 MiB |"
     assert gen.withhold_impossible_readings(fine, minimum) == fine
     spec = next(f for f in gen.FAMILIES if f["key"] == "perf_card_gpu")
-    entries = gen.load_family(_REPO, spec)
-    a100 = next(e for e in entries if "a100" in e["slug"])
-    fragment = gen._table_fragment(spec, a100, entries)
-    assert "128 MiB (3.36×)†" in fragment
-    assert "Measured on Quadro P2000 and Tesla T4" in fragment
-    assert not re.search(r"\| 1,000,000 \| JAX[^\n]*\| 0 MiB \(0×\)", fragment)
+
+    def entry(name, peak_mib, reference):
+        # a synthetic card whose JAX reading at N = 1,000,000 is `peak_mib`
+        path = tmp_path / f"card_{name}.json"
+        path.with_suffix(".md").write_text(
+            f"| 1,000,000 | JAX | 9.61 ms | {peak_mib} MiB (3.2×) | 100 MiB | – |\n")
+        memory = {"rows": [{"arm": "jax_vmap", "n": 1_000_000,
+                            "device_peak_bytes": peak_mib * mib, "minimum_bytes": 40 * mib}]}
+        card = {"device": {"name": name}, "arms": {"jax_vmap": "JAX"}, "memory": memory}
+        return {"slug": name, "path": path, "card": card, "name": name,
+                "is_reference": reference}
+
+    low, other = entry("Synthetic Low", 0, True), entry("Synthetic Other", 128, False)
+    fragment = gen._table_fragment(spec, low, [low, other])
+    assert "128 MiB (3.2×)†" in fragment
+    assert "Measured on Synthetic Other" in fragment
+    assert not re.search(r"\| 1,000,000 \| JAX[^\n]*\| 0 MiB", fragment)
+    alone = gen._table_fragment(spec, low, [low])
+    assert "not measured" in alone
 
 
 def test_docs_pages_include_every_generated_family():
@@ -541,11 +554,11 @@ def test_stale_prose_gate_reference_cards_match():
 
 
 def test_readme_performance_numbers_match_card():
-    """The README's Performance table is copied from the quadro-p2000 card.
+    """The README's Performance table is copied from the nvidia-h100-80gb-hbm3 card.
 
     Re-renders each headline cell with the script's own ``_fmt_time``/
     ``_fmt_rate``/``_fmt_pct`` (the same helpers ``render_markdown`` uses for
-    ``card_quadro-p2000.md``) and requires that exact text to appear in
+    ``card_nvidia-h100-80gb-hbm3.md``) and requires that exact text to appear in
     ``README.md``, so a stale number left behind by a re-run of the benchmark
     is caught here rather than drifting silently.
 
@@ -553,7 +566,7 @@ def test_readme_performance_numbers_match_card():
     benchmark without updating the README, and this fails naming the cell.
     """
     module = _script()
-    card_path = _CARD_DIR / "card_quadro-p2000.json"
+    card_path = _CARD_DIR / "card_nvidia-h100-80gb-hbm3.json"
     assert card_path.is_file(), f"no committed {card_path.name} for the README table"
     card = json.loads(card_path.read_text())
     rows = {(r["distribution"], r["max_steps"], r["arm"]): r
@@ -564,7 +577,7 @@ def test_readme_performance_numbers_match_card():
     section = readme.split("## Performance", 1)[1].split("## The RAPTOR family", 1)[0]
 
     for key in _README_ROWS:
-        assert key in rows, f"card_quadro-p2000.json has no N=1,000,000 row for {key}"
+        assert key in rows, f"card_nvidia-h100-80gb-hbm3.json has no N=1,000,000 row for {key}"
         r = rows[key]
         fmt_time = module._fmt_time
         w = r["wall_s"]
@@ -579,7 +592,7 @@ def test_readme_performance_numbers_match_card():
         for cell in (wall_cell, rate_cell, flops_cell):
             assert cell in section, (
                 f"README.md's Performance section is missing {cell!r} for "
-                f"{key} (re-derived from card_quadro-p2000.json) -- "
+                f"{key} (re-derived from card_nvidia-h100-80gb-hbm3.json) -- "
                 "the table has drifted from the card")
 
 
@@ -890,6 +903,14 @@ _README_CPU_ARMS = ("eagle_term8", "numba_prange", "jax_shard8", "torch_masked",
                     "numpy_masked")
 
 
+def _prose_claims():
+    spec = importlib.util.spec_from_file_location(
+        "eagle_prose_claims_under_test", _REPO / "tools" / "prose_claims.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def _readme_cpu_block():
     text = _README.read_text()
     begin, end = "<!-- cpu-cards:begin -->", "<!-- cpu-cards:end -->"
@@ -909,6 +930,7 @@ def test_readme_cpu_block_matches_every_cpu_card():
     cards = _cpu_cards()
     assert cards, "no committed cpu_card_*.json"
     module = _card_common()
+    pcl = _prose_claims()  # the one rounding rule the README generator uses
     for path in cards:
         card = json.loads(path.read_text())
         cpu = card["cpu"]
@@ -923,7 +945,7 @@ def test_readme_cpu_block_matches_every_cpu_card():
             sp = module.center(rows[("spread", 1000, arm)]["wall_s"])
             un = module.center(rows[("uniform", 1000, arm)]["wall_s"])
             row = (f"| {card['arm_labels'][arm]} | {module.fmt_time(sp)} "
-                   f"| {module.fmt_time(un)} | {sp / base:.3g}× |")
+                   f"| {module.fmt_time(un)} | {pcl.fmt_ratio(sp / base)} |")
             assert row in block, (
                 f"README cpu block is missing {row!r} (re-derived from {path.name}) "
                 "-- the table has drifted from the card")

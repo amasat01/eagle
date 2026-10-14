@@ -1,13 +1,16 @@
 # Method
 
-- **One block per arm.** For each configuration and N, every arm is timed in
+- **One block per arm (RK4 GPU cards).** For each configuration and N, every arm is timed in
   its own block, one arm after the other, with no interleaving. A block is two
   warm-up runs (excluded; the first also verifies the result), then untimed
   back-to-back runs of that arm until 0.5 s has elapsed (at least one run), so
   the clocks are settled, then 5 timed runs. Every reported time is the mean
   of the middle 3 of the 5 runs (the single highest and the single lowest
   dropped), shown with the range of those 3; the median, the interquartile
-  range and every run are kept in the card's JSON.
+  range and every run are kept in the card's JSON. The RK7(8) cards and the CPU
+  cards report the median and interquartile range of their repetitions and rotate
+  the arm order every repetition instead; each card's JSON records its own
+  `method`, which is the authority for that card.
 - **Cool-down gate and clock record.** Before each arm's block the card waits
   until the GPU temperature is within 3 °C of the idle temperature it read at
   start and the GPU reads idle, or for at most 20 s (the wait, the temperature
@@ -24,7 +27,7 @@
   per row.
 - **Times.** *Wall* is the integration alone, from inputs resident on the
   device to the device synchronised. *End-to-end* adds uploading the inputs
-  from host memory and downloading the results. *Kernel-only* is the sum of
+  from host memory and downloading the results. *Kernel-only* (on cards run with Nsight Systems; the others record it as skipped) is the sum of
   the durations of the GPU kernels one run executes, measured with Nsight
   Systems in a separate traced pass (for the graph arm it includes hawk + eagle's
   loop-control kernels); tracing makes kernels run slightly longer, so at the

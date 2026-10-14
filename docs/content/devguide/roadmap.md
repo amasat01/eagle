@@ -32,8 +32,9 @@ findable in one place instead of only where the gap happens to surface.
 - **SM 100/120 (Blackwell).** `EAGLE_CUDA_ARCHS=all` includes Blackwell
   whenever the `nvcc` in use compiles it (CUDA 13, late CUDA 12), and the
   `native` default builds for whatever GPU the machine has. CUDA 13 is
-  supported and tested alongside CUDA 12. The published performance cards
-  are still measured with CUDA 12.6; Blackwell measurements are planned.
+  supported and tested alongside CUDA 12. The wheel carries Blackwell native
+  code, shipped but not yet run or measured on Blackwell hardware; the
+  performance cards record the toolkit each was built with.
 
 ## Host plugin parity — closed out, nothing carried forward
 

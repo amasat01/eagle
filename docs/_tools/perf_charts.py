@@ -14,6 +14,7 @@ from __future__ import annotations
 import html
 import math
 import re
+from pathlib import Path
 
 #: Substrings of the lower-cased device name, best first. A device that matches
 #: none follows the ones that do, alphabetically. The first card present is the
@@ -41,11 +42,21 @@ CPU_TOOLS = (("eagle_term8", "eagle, 8 threads", "--mark-eagle"),
              ("torch_masked", "PyTorch", "--tool-pytorch"),
              ("numpy_masked", "NumPy", "--tool-numpy"))
 
-# Light and dark values of the colour variables, for the standalone SVG.
-_LIGHT = {"--mark-eagle": "#cf416b", "--tool-warp": "#306101", "--tool-jax": "#1a9a8c",
-          "--tool-cupy": "#518d05", "--tool-pytorch": "#ee4c2c", "--tool-numba": "#00a3e0",
-          "--tool-numpy": "#4d77cf"}
-_DARK = {"--tool-warp": "#88e97e", "--tool-cupy": "#76b900", "--tool-numpy": "#7ea3f2"}
+_TOKENS = Path(__file__).resolve().parent.parent / "_static" / "raptor-tokens.css"
+
+
+def _tool_colours(css: str, opener: str) -> dict:
+    """The ``--tool-*`` values of the first block of ``css`` that starts at ``opener``."""
+    start = css.index(opener)
+    block = css[start:css.index("}", start)]
+    return {f"--tool-{n}": v for n, v in re.findall(r"--tool-([a-z]+):\s*(#[0-9a-fA-F]{6})", block)}
+
+
+# Light and dark values of the colour variables, for the standalone SVG: the
+# site's token file is the one source.
+_CSS = _TOKENS.read_text(encoding="utf-8")
+_LIGHT = {"--mark-eagle": "#cf416b", **_tool_colours(_CSS, ":root {")}
+_DARK = _tool_colours(_CSS, '[data-theme="dark"] {')
 
 
 def _rank(name: str, preference) -> int:

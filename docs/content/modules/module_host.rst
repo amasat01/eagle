@@ -79,7 +79,7 @@ you:
 
 ``packetLoad`` / ``packetStore`` / ``loadMask`` above are generic over the
 per-sample element type (a ``DataT`` template parameter), not hard-wired to
-``Real``. Production code always passes ``Real`` (double) at its native SIMD
+``Real``. Production code passes ``Real`` (double, the default scalar type) at its native SIMD
 width. ``aether::SoftDouble`` — a double built entirely from ordinary
 integer/float instructions — can stand in as a dev/debug/oracle type
 instead, always at one sample per packet (``W = 1``), since it has no

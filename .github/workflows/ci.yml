@@ -15,7 +15,22 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  docs-fresh:
+    # Freshness check, never a commit: the generator re-renders the pages and fails on any difference.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: documented numbers match the committed cards
+        run: |
+          if ! python tools/sync_readme_cards.py --check; then
+            echo "::error::The documented performance numbers are out of date with the committed cards. Regenerate them locally with: python tools/sync_readme_cards.py -- then commit the result."
+            exit 1
+          fi
   test-cpp:
+    needs: docs-fresh
     runs-on: ubuntu-latest
     env:
       CC: gcc-13
@@ -99,6 +114,7 @@ jobs:
   # count equals the manifest. CUDA-side coverage is the local `sanitize-gate`
   # (tests/sanitize/README.md).
   sanitize-cpp:
+    needs: docs-fresh
     runs-on: ubuntu-latest
     env:
       CC: gcc-13
@@ -207,6 +223,7 @@ jobs:
   # detector reaches _core) AND the ft rows give zero reports with them. See
   # tests/sanitize/tsan_ft.sh and tests/sanitize/tsan.supp.
   tsan-ft:
+    needs: docs-fresh
     runs-on: ubuntu-latest
     env:
       CC: clang-18
@@ -294,6 +311,7 @@ jobs:
   # This job was authored and YAML-validated offline; the CUDA package set/versions
   # below are UNVERIFIED — not run on a live runner.
   test-python:
+    needs: docs-fresh
     runs-on: ubuntu-latest
     env:
       CC: gcc-13
@@ -436,6 +454,7 @@ jobs:
   # here only; gpu/torch rows need a device; the interop-matrix rows fail by design
   # unless deselected explicitly. All four are deselected in this leg.
   test-python-nodriver:
+    needs: docs-fresh
     runs-on: ubuntu-latest
     env:
       CC: gcc-13
@@ -576,6 +595,7 @@ jobs:
   # -W error::RuntimeWarning on the free-threaded interpreters, built and set up
   # as test-python is (the same compile-only toolchain, editable install).
   ft-stress:
+    needs: docs-fresh
     runs-on: ubuntu-latest
     strategy:
       # both free-threaded interpreters report, even when one fails
@@ -741,6 +761,7 @@ jobs:
   # headers) and use it. On x86_64 and on aarch64; compiler warnings in eagle's
   # own sources are errors here.
   sdist-install:
+    needs: docs-fresh
     strategy:
       fail-fast: false
       matrix:

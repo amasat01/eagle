@@ -59,9 +59,11 @@ anything until it is done.
 
 The plain `@hawk.kernel` decorator builds the automatic kernel. By default
 {func}`eagle.until_done` auto-routes it past this device-loop/"band" shape
-entirely: at or below the device's own latency-regime capacity it takes one
-fused launch of the whole run, above it the persistent (work-stealing)
-launch -- both no-graph, no-map, one host-device sync total. The band shown
+for most batch sizes: a batch of at most a quarter of what one fused wave holds
+takes one fused launch of the whole run, and one of at least eight times the
+threads the persistent (work-stealing) launch keeps resident takes the
+persistent launch -- both no-graph, no-map, one host-device sync total; in
+between, the runner times both entries and keeps the faster. The band shown
 above (each launch running as many steps per sample as the policy picks, 8
 to 64, with the state in registers) is still reachable, and is what this
 row forces explicitly so its loop-structure description, byte model and
@@ -83,8 +85,8 @@ other hawk + eagle arms vary one thing at a time:
 - **eagle auto (eagle picks the launch mode)**:
   `@hawk.kernel(steps="auto")` on the active-set kind -- this row is the one
   left on `eagle.until_done`'s own default pick, so it takes the fast,
-  no-graph launch described above whenever capacity allows and the band
-  (compacting after every launch in which a sample finished) only above it;
+  no-graph launch described above (fused or persistent, by the size rule) and the band
+  (compacting between launches) only when those entries are unavailable or a reorder is requested;
   the card records which one each run actually took;
 - **hawk + eagle persistent**: the plain automatic kernel forced through
   hawk's persist entry -- one launch, no graph, no map, no policy kernel, a

@@ -12,8 +12,8 @@ The package imports as ``eagle``. It needs Python 3.9 or newer (CPython
 3.9-3.14) and an NVIDIA driver at run time; no ``nvcc`` or CUDA toolkit. Free-threaded builds (3.13t, 3.14t) run GIL-free. On 3.13t the ``[cuda12]`` / ``[cuda13]`` extras do not resolve (CuPy 14 ships no 3.13t wheel), so eagle runs on the CPU route there; 3.14t has no such limit. The
 wheel ships GPU code (SASS) for every NVIDIA architecture from Pascal (sm_60)
 through Blackwell (sm_100 and sm_103 on B200 and B300, sm_120 and sm_121 on the
-RTX PRO 6000 and GB10), plus PTX (compute_100 and compute_121) for newer GPUs such as Jetson Thor, so the listed GPUs run without a
-first-use JIT. One wheel serves ``[cuda12]`` and ``[cuda13]`` alike: the plugin
+RTX PRO 6000 and GB10), plus PTX (compute_100 and compute_121) for newer GPUs such as Jetson Thor. The wheel
+carries that native code, so those GPUs need no first-use JIT; eagle has not yet been run or measured on Blackwell hardware. One wheel serves ``[cuda12]`` and ``[cuda13]`` alike: the plugin
 needs only the driver. To write kernels for it with hawk, install
 ``"raptor-hawk[cuda12]"`` alongside (``[cuda13]`` on both for CUDA 13).
 
@@ -41,7 +41,7 @@ needs only the driver. To write kernels for it with hawk, install
    Without an extra pip installs no NVIDIA package: you get the CPU route, or the GPU route through a CUDA setup you already have. Pick the extra matching the CUDA
    version your driver reports (``nvidia-smi``, top right).
 
-**Platforms:** built and tested on Linux x86_64 only so far (CPython 3.9–3.14, including free-threaded 3.13t and 3.14t), on NVIDIA GPUs from Pascal (Quadro P2000) and Turing (Tesla T4). There are no wheels for macOS, Windows or ARM yet, and WSL2 is untested. ``raptor-core`` and ``aether-dsc`` are pure Python and install anywhere.
+**Platforms:** the wheels are Linux x86_64 (CPython 3.9–3.14, including free-threaded 3.13t and 3.14t). The performance page lists the NVIDIA GPUs and the x86-64 and ARM (aarch64) CPUs the code has been run and measured on. There are no wheels for macOS, Windows or ARM yet, and WSL2 is untested. ``raptor-core`` and ``aether-dsc`` are pure Python and install anywhere.
 
 C++ library
 -----------
@@ -64,7 +64,7 @@ Prerequisites
      - ≥ 0.2
      - Required; must be installed first (see below).
    * - CUDA Toolkit
-     - 12.6 or newer (tested with 12.6 and 13.0)
+     - 12.6 or newer (each performance card records its toolkit)
      - Required for GPU mode; not needed for ``EAGLE_CPP_MODE``.
    * - OpenMP
      - any

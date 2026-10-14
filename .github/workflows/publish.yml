@@ -50,7 +50,22 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  docs-fresh:
+    # Freshness check, never a commit: the generator re-renders the pages and fails on any difference.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: documented numbers match the committed cards
+        run: |
+          if ! python tools/sync_readme_cards.py --check; then
+            echo "::error::The documented performance numbers are out of date with the committed cards. Regenerate them locally with: python tools/sync_readme_cards.py -- then commit the result."
+            exit 1
+          fi
   build:
+    needs: docs-fresh
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

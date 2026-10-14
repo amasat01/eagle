@@ -8,8 +8,11 @@ A map keeps the live samples' warps full, but as the batch thins out its
 gathers touch memory further and further apart. The reorder restores
 contiguity without changing any address: ``reorderDevice`` /
 ``reorderHost`` (``eagle/filtering/Reorder.h``) permute every plane the caller
-registers **in place** over ``[0, span)``, through one scratch staging plane,
-so the kept samples fill ``[0, count)`` in ascending sample order and the
+registers **in place** over ``[0, span)``, through a scratch staging area that
+holds a group of planes at a time (one stage kernel and one place kernel per
+group of up to 64 planes that fit the staging area, plus a final words kernel;
+``reorderScratchBytes`` takes an optional ``stageBytesPerSample`` to make the
+groups larger), so the kept samples fill ``[0, count)`` in ascending sample order and the
 dropped ones follow them. Pointers baked into a captured graph stay valid.
 
 - ``perm`` (slot → sample id) is permuted with the planes and ``inv``
@@ -73,14 +76,27 @@ once, in ``own``.
 
 **When it pays.** The reorder is an explicit opt-in. On the performance
 card's oscillator (a memory-bound RK4 step, stop steps spread over two
-decades, Quadro P2000) it pays from about 1e5 samples: at N = 1e5 it cuts the
-spread-1000 wall from 45.6 ms (compaction alone) to 34.5 ms, at N = 1e6 from 416 ms
-to 280 ms, while a uniform batch (nothing to reorder) costs at most 4 % more.
-Below that it does not pay: at N = 1e3 and 1e4 the reorder arm is about 6 %
+decades, Quadro P2000) it pays on the spread-1000 distribution from about 1e5 samples: at N = 1e5 it cuts the
+spread-1000 wall from |rg_c100k| (compaction alone) to |rg_r100k|, at N = 1e6 from |rg_c1m|
+to |rg_r1m|, while a uniform batch (nothing to reorder) costs a little more, and a spread-100 batch (few samples left to recover) can lose at N = 1e5.
+Below that it does not pay: at N = 1e3 and 1e4 the reorder arm is about |rg_g1k| and |rg_g10k|
 slower than compaction alone (the extra conditional node per loop iteration
 and the map-routed stop rule cost more than the coalescing recovers). Use
 compaction alone for small batches, and for compute-bound steps, where the
 map is already close to the dense ideal.
+
+.. c: wall arm=eagle_graph_compact n=100000
+.. |rg_c100k| replace:: 41.4 ms
+.. c: wall arm=eagle_graph_reorder n=100000
+.. |rg_r100k| replace:: 32.2 ms
+.. c: wall arm=eagle_graph_compact n=1000000
+.. |rg_c1m| replace:: 374 ms
+.. c: wall arm=eagle_graph_reorder n=1000000
+.. |rg_r1m| replace:: 253 ms
+.. c: pctgap arm=eagle_graph_reorder den_arm=eagle_graph_compact n=1000
+.. |rg_g1k| replace:: 4.4%
+.. c: pctgap arm=eagle_graph_reorder den_arm=eagle_graph_compact n=10000
+.. |rg_g10k| replace:: 7%
 
 From Python, ``eagle.ActiveSet(mask, reorder=0.5)`` (or ``reorder=True`` for
 the 0.5 default) turns it on; ``ActiveSet(mask)`` never reorders (``theta`` is

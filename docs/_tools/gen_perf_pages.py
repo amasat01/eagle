@@ -16,7 +16,8 @@ For each family this writes ``<out-dir>/<family>.md``, a MyST fragment with:
 
 - a "Measured on" table, one row per device (name, compute capability or CPU
   model, FP64 class if the card records one, date from ``generated_utc``, a
-  link to the device's own section);
+  link to the device's own section), also written alone as ``<family>_devices.md``
+  for pages that only list the devices;
 - one section per device, reference device first then the rest by name, each
   under a stable anchor (``{family}-{slug}``) and including that device's own
   committed ``card_<slug>.md`` table;
@@ -63,16 +64,16 @@ import perf_charts as charts  # noqa: E402
 #: CPU cards run neither arm, so they stay unset.
 FAMILIES = [
     {"key": "perf_card_gpu", "page": "rk4", "dir": "benchmarks/perf_card", "prefix": "card_",
-     "reference_slug": "quadro-p2000", "heading": "GPU", "has_config": True,
+     "reference_slug": "nvidia-h100-80gb-hbm3", "heading": "GPU", "has_config": True,
      "simulate": "eagle_simulate", "twin": "eagle_graph_auto"},
     {"key": "perf_card_cpu", "page": "rk4", "dir": "benchmarks/perf_card", "prefix": "cpu_card_",
-     "reference_slug": "intel-xeon-w-2125", "heading": "CPU", "has_config": True,
+     "reference_slug": "amd-epyc-9b45", "heading": "CPU", "has_config": True,
      "simulate": None, "twin": None},
     {"key": "rk78_card_gpu", "page": "rk78", "dir": "benchmarks/rk78_card", "prefix": "card_",
-     "reference_slug": "quadro-p2000", "heading": "GPU", "has_config": False,
+     "reference_slug": "nvidia-h100-80gb-hbm3", "heading": "GPU", "has_config": False,
      "simulate": "eagle_simulate", "twin": "eagle_graph"},
     {"key": "rk78_card_cpu", "page": "rk78", "dir": "benchmarks/rk78_card", "prefix": "cpu_card_",
-     "reference_slug": "intel-r-xeon-r-w-2125-cpu-4-00ghz", "heading": "CPU",
+     "reference_slug": "amd-epyc-9b45", "heading": "CPU",
      "has_config": False, "simulate": None, "twin": None},
 ]
 
@@ -513,6 +514,8 @@ def generate(eagle_root: pathlib.Path, out_dir: pathlib.Path) -> dict[str, int]:
         for view in ("results", "overview"):
             name = spec["key"] if view == "results" else f"{spec['key']}_overview"
             (out_dir / f"{name}.md").write_text(render_family(spec, entries, out_dir, view))
+        (out_dir / f"{spec['key']}_devices.md").write_text(
+            "\n".join(_measured_on_table(entries)))
         counts[spec["key"]] = len(entries)
     write_readme_svgs(eagle_root, loaded)
     write_glimpse(out_dir, loaded)
