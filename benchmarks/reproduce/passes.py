@@ -104,7 +104,7 @@ def run_chunk(mod, card, what, idx, ns, parts):
         else:
             keys = mod._compile_keys(ns)
             lo = idx * CHUNK[card]["compile"]
-            mod._compile_keys = lambda ns: keys[lo:lo + CHUNK[card]["compile"]]
+            mod._compile_keys = lambda ns, arms=None: keys[lo:lo + CHUNK[card]["compile"]]
             obj = mod._run_compile_pass(ns)
     _save(parts, name, obj)
     print(f"{card} {name}: saved", flush=True)
@@ -133,10 +133,10 @@ def final(mod, card, ns, parts, rest):
         flags.append("--no-memory")
     comp = [r for part in _load(parts, "compile") for r in part]
     if comp:
-        mod._run_compile_pass = lambda ns: comp
+        mod._run_compile_pass = lambda ns, *a: comp
     else:
         flags.append("--no-compile")
-    return mod.main(["--ns", *map(str, ns), *flags, *rest])
+    return mod.main(["--ns", *map(str, sorted(ns, key=lambda n: (n != max(ns), n))), *flags, *rest])
 
 
 def main(argv=None):
