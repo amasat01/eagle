@@ -181,6 +181,19 @@ def cpu_model():
     return platform.processor() or None
 
 
+def cpu_display_name(card_path, model):
+    """The name a generator prints for a CPU card: the ``name`` that
+    ``benchmarks/device_names.json`` gives the card's file stem, else the card's
+    own ``model`` string. ``card_path`` is a card under ``benchmarks/<family>/``."""
+    card_path = pathlib.Path(card_path)
+    table = card_path.parent.parent / "device_names.json"
+    try:
+        entry = json.loads(table.read_text()).get(card_path.stem)
+    except OSError:
+        entry = None
+    return entry["name"] if isinstance(entry, dict) and entry.get("name") else model
+
+
 def git_commit(module, short=False):
     """``<commit>[-dirty]`` of the repository holding ``module``, or None."""
     root = pathlib.Path(module.__file__).resolve().parent

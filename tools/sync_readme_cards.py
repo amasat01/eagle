@@ -147,9 +147,9 @@ def render_cpu_table(card: dict) -> str:
     return "\n".join(lines)
 
 
-def render_cpu_heading(card: dict) -> str:
+def render_cpu_heading(card: dict, path: pathlib.Path) -> str:
     cpu = card["cpu"]
-    return (f"**On a CPU alone: {cpu['model']}, {cpu['cores']} cores, "
+    return (f"**On a CPU alone: {cc.cpu_display_name(path, cpu['model'])}, {cpu['cores']} cores, "
             f"card of {card['generated_utc'][:10]}**")
 
 
@@ -157,7 +157,7 @@ def render_cpu_block(eagle_root: pathlib.Path) -> str:
     spec = next(f for f in gp.FAMILIES if f["key"] == CPU_SPEC_KEY)
     parts = []
     for e in gp.load_family(eagle_root, spec):
-        parts.append(render_cpu_heading(e["card"]) + "\n\n" + render_cpu_table(e["card"]))
+        parts.append(render_cpu_heading(e["card"], e["path"]) + "\n\n" + render_cpu_table(e["card"]))
     return "\n\n".join(parts)
 
 

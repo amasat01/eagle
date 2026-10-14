@@ -919,6 +919,24 @@ def _readme_cpu_block():
     return text[start:text.index(end, start)]
 
 
+def test_device_names_table_is_used_and_keys_match_cards():
+    """Every key of ``benchmarks/device_names.json`` is an existing card file
+    stem, and the README's CPU block shows the table's ``name`` for it.
+
+    RED: rename a card without its table key, or print the raw model string."""
+    table = json.loads((_REPO / "benchmarks" / "device_names.json").read_text())
+    names = {k: v for k, v in table.items() if not k.startswith("_")}
+    stems = {p.stem for p in (_REPO / "benchmarks").glob("*/*.json")}
+    assert names and set(names) <= stems, sorted(set(names) - stems)
+    block = _readme_cpu_block()
+    for path in _cpu_cards():
+        if path.stem in names:
+            assert f"On a CPU alone: {names[path.stem]['name']}," in block
+            assert _card_common().cpu_display_name(path, "x") == names[path.stem]["name"]
+        else:
+            assert _card_common().cpu_display_name(path, "raw model") == "raw model"
+
+
 def test_readme_cpu_block_matches_every_cpu_card():
     """Each CPU card is named by a heading (model, cores, card date) and its
     rows (spread / uniform S=1000 wall at the largest N, and the ratio to
@@ -934,7 +952,8 @@ def test_readme_cpu_block_matches_every_cpu_card():
     for path in cards:
         card = json.loads(path.read_text())
         cpu = card["cpu"]
-        heading = (f"On a CPU alone: {cpu['model']}, {cpu['cores']} cores, "
+        shown = module.cpu_display_name(path, cpu["model"])
+        heading = (f"On a CPU alone: {shown}, {cpu['cores']} cores, "
                    f"card of {card['generated_utc'][:10]}")
         assert heading in block, f"README cpu block is missing {heading!r}"
         n = max(card["ns"])

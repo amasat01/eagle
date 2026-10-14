@@ -255,9 +255,9 @@ Measured on:
 - [Tesla T4](https://amasat01.github.io/eagle/content/performance.html#perf-card-gpu-tesla-t4)
 - [Quadro P2000](https://amasat01.github.io/eagle/content/performance.html#perf-card-gpu-quadro-p2000)
 - [AMD EPYC 9B45](https://amasat01.github.io/eagle/content/performance.html#perf-card-cpu-amd-epyc-9b45)
-- [aarch64](https://amasat01.github.io/eagle/content/performance.html#perf-card-cpu-aarch64)
 - [AMD EPYC 7B13](https://amasat01.github.io/eagle/content/performance.html#perf-card-cpu-amd-epyc-7b13)
-- [INTEL XEON PLATINUM 8581C CPU @ 2.30GHz](https://amasat01.github.io/eagle/content/performance.html#perf-card-cpu-intel-xeon-platinum-8581c)
+- [Google Axion (Arm Neoverse-V2)](https://amasat01.github.io/eagle/content/performance.html#perf-card-cpu-aarch64)
+- [Intel Xeon Platinum 8581C](https://amasat01.github.io/eagle/content/performance.html#perf-card-cpu-intel-xeon-platinum-8581c)
 <!-- cards:end -->
 
 <!-- cpu-cards:begin -->
@@ -271,16 +271,6 @@ Measured on:
 | PyTorch masked, 8 threads | 10.2 s | 10.2 s | 72× |
 | NumPy masked | 15.3 s | 13.4 s | 100× |
 
-**On a CPU alone: aarch64, 16 cores, card of 2026-10-13**
-
-| Arm (N = 1,000,000) | spread S=1000 wall | uniform S=1000 wall | vs eagle 8 threads (spread) |
-|---|---:|---:|---:|
-| eagle host, termination loop, up to 8 threads | 330 ms | 648 ms | 1.0× |
-| Numba prange, 8 threads | 388 ms | 1.8 s | 1.1× |
-| JAX sharded over 8 CPU devices | 410 ms | 411 ms | 1.2× |
-| PyTorch masked, 8 threads | 3.02 s | 2.76 s | 9.1× |
-| NumPy masked | 16.4 s | 15.6 s | 49× |
-
 **On a CPU alone: AMD EPYC 7B13, 8 cores, card of 2026-10-13**
 
 | Arm (N = 1,000,000) | spread S=1000 wall | uniform S=1000 wall | vs eagle 8 threads (spread) |
@@ -291,7 +281,17 @@ Measured on:
 | PyTorch masked, 8 threads | 8.19 s | 8.37 s | 20× |
 | NumPy masked | 21.6 s | 19.6 s | 54× |
 
-**On a CPU alone: INTEL(R) XEON(R) PLATINUM 8581C CPU @ 2.30GHz, 8 cores, card of 2026-10-13**
+**On a CPU alone: Google Axion (Arm Neoverse-V2), 16 cores, card of 2026-10-13**
+
+| Arm (N = 1,000,000) | spread S=1000 wall | uniform S=1000 wall | vs eagle 8 threads (spread) |
+|---|---:|---:|---:|
+| eagle host, termination loop, up to 8 threads | 330 ms | 648 ms | 1.0× |
+| Numba prange, 8 threads | 388 ms | 1.8 s | 1.1× |
+| JAX sharded over 8 CPU devices | 410 ms | 411 ms | 1.2× |
+| PyTorch masked, 8 threads | 3.02 s | 2.76 s | 9.1× |
+| NumPy masked | 16.4 s | 15.6 s | 49× |
+
+**On a CPU alone: Intel Xeon Platinum 8581C, 8 cores, card of 2026-10-13**
 
 | Arm (N = 1,000,000) | spread S=1000 wall | uniform S=1000 wall | vs eagle 8 threads (spread) |
 |---|---:|---:|---:|

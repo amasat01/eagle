@@ -315,6 +315,8 @@ def render(cards, kind, sel):
         value = cards.load(sel["card"], sel["dev"])
         for part in sel["field"].split("."):
             value = value[part]
+        if sel["field"] == "cpu.model":
+            value = cc.cpu_display_name(cards.path(sel["card"], sel["dev"]), value)
         return cc.fmt_rate(value) if isinstance(value, float) else str(value)
     if kind == "pctgap":
         num, den = _split(sel)

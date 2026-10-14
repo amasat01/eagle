@@ -107,15 +107,17 @@ def _clean_cpu_name(model: str) -> str:
     return re.sub(r"\s+", " ", model.replace("(R)", "").replace("(TM)", "")).strip()
 
 
-def _device_name_and_class(card: dict) -> tuple[str, str]:
-    """(display name, compute capability or CPU model) of the card's device."""
+def _device_name_and_class(card: dict, path: pathlib.Path | None = None) -> tuple[str, str]:
+    """(display name, compute capability or CPU model) of the card's device. A CPU
+    card whose file stem is in ``benchmarks/device_names.json`` shows that name."""
     if card.get("device"):
         d = card["device"]
         return d["name"], d.get("compute_capability", "–")
     cpu = card.get("cpu")
     model = cpu.get("model", "unknown CPU") if isinstance(cpu, dict) else cpu
     if isinstance(model, str) and model:
-        return _clean_cpu_name(model), model
+        name = _clean_cpu_name(model)
+        return (cc.cpu_display_name(path, name) if path else name), model
     return "unknown device", "–"
 
 
@@ -130,7 +132,7 @@ def load_family(eagle_root: pathlib.Path, spec: dict) -> list[dict]:
     for path in sorted(card_dir.glob(f"{spec['prefix']}*.json")):
         card = _load_json(path)
         slug = _slug(card, path, spec["prefix"])
-        name, _ = _device_name_and_class(card)
+        name, _ = _device_name_and_class(card, path)
         entries.append({"slug": slug, "path": path, "card": card,
                         "name": name, "is_reference": slug == spec["reference_slug"]})
     pref = charts.GPU_PREFERENCE if spec["heading"] == "GPU" else charts.CPU_PREFERENCE
@@ -213,7 +215,7 @@ def _simulate_vs_twin_lines(card: dict, simulate_arm: str | None, twin_arm: str 
 def _measured_on_table(entries: list[dict]) -> list[str]:
     lines = ["| device | compute capability / CPU model | date |", "|---|---|---|"]
     for e in entries:
-        name, cls = _device_name_and_class(e["card"])
+        name, cls = _device_name_and_class(e["card"], e["path"])
         date = (e["card"].get("generated_utc") or "–").split("T")[0]
         lines.append(f"| {name} | {cls} | {date} |")
     lines.append("")
@@ -252,7 +254,7 @@ def _raw_html(html_text: str) -> list[str]:
 def card_overview(spec: dict, e: dict, page: str) -> str:
     """Fragment: the device's headline chart, a one-line description, a link to
     the results page. Carries the anchor external links point at."""
-    name, cls = _device_name_and_class(e["card"])
+    name, cls = _device_name_and_class(e["card"], e["path"])
     date = (e["card"].get("generated_utc") or "").split("T")[0]
     chart = _chart_for(spec, e, headline_config(spec, e))
     detail = ([f"compute capability {cls}"] if spec["heading"] == "GPU" else []) + (
