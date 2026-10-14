@@ -30,6 +30,8 @@ import pytest
 pytestmark = pytest.mark.repo_local
 
 _REPO = pathlib.Path(__file__).resolve().parents[2]
+if not (_REPO / "tools" / "prose_claims.py").is_file():  # the suite copied outside the repository
+    pytest.skip("repository files are not present", allow_module_level=True)
 
 
 def _load(name):

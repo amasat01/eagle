@@ -26,6 +26,8 @@ import pytest
 pytestmark = pytest.mark.repo_local
 
 _REPO = pathlib.Path(__file__).resolve().parents[2]
+if not (_REPO / "tools" / "prose_claims.py").is_file():  # the suite copied outside the repository
+    pytest.skip("repository files are not present", allow_module_level=True)
 _spec = importlib.util.spec_from_file_location("eagle_pcl_eff", _REPO / "tools" / "prose_claims.py")
 pcl = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(pcl)
