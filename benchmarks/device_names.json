@@ -1,0 +1,18 @@
+{
+  "_comment": "Display names for devices whose card records an unhelpful model string. Keyed by the card file stem (perf_card and rk78_card). The cards stay as measured; generators show `name` and keep `card_model` traceable. Source: each session's lscpu.txt.",
+  "cpu_card_aarch64": {
+    "name": "Google Axion (Arm Neoverse-V2)",
+    "card_model": "aarch64",
+    "source": "lscpu Model name: Neoverse-V2, Vendor ID: ARM; machine type c4a-standard-16"
+  },
+  "cpu_card_intel-xeon-platinum-8581c": {
+    "name": "Intel Xeon Platinum 8581C",
+    "card_model": "INTEL(R) XEON(R) PLATINUM 8581C CPU @ 2.30GHz",
+    "source": "lscpu Model name"
+  },
+  "cpu_card_intel-r-xeon-r-platinum-8581c-cpu-2-30ghz": {
+    "name": "Intel Xeon Platinum 8581C",
+    "card_model": "INTEL(R) XEON(R) PLATINUM 8581C CPU @ 2.30GHz",
+    "source": "lscpu Model name"
+  }
+}
