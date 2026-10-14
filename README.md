@@ -64,9 +64,9 @@ NumPy arrays in, and the same call runs on CPU threads.
 [Install](#install) · [Performance](#performance) · [C++ API](#c-api)
 
 <!-- hero:begin -->
-| **613 µs** at N = 1,000,000, 199 µs at N = 100,000 | **2.5×–600× faster** at N = 1,000,000, 1.1×–1700× at N = 100,000 | **4.8×–8.7× less GPU memory** at N = 1,000,000, 5.5×–28× at N = 100,000 |
+| **613 µs** at N = 1,000,000, 199 µs at N = 100,000 | **2.5×–600× faster** at N = 1,000,000, 1.1×–1700× at N = 100,000 | **4.8×–6.0× less GPU memory** at N = 1,000,000, 5.5×–42× at N = 100,000 |
 |:---:|:---:|:---:|
-| RK4 oscillators, each stopping at its own step, up to 1000 steps | than NVIDIA Warp (2.5×), JAX (76×), CuPy (600×), PyTorch (540×) at N = 1,000,000 | than CuPy and PyTorch: 40 MiB for N = 1,000,000, 1.1× the bare minimum state |
+| RK4 oscillators, each stopping at its own step, up to 1000 steps | than NVIDIA Warp (2.5×), JAX (76×), CuPy (600×), PyTorch with torch.compile (130×) at N = 1,000,000 | than CuPy and PyTorch: 40 MiB for N = 1,000,000, 1.1× the bare minimum state |
 
 <sub>NVIDIA H100 80GB HBM3 (card of 2026-10-13). NVIDIA Warp's per-thread kernel is the fastest GPU arm in 2 of 12 RK4 cells; on the dense batch (every sample running all 1000 steps) at N = 1,000,000 it takes 1.71 ms and `eagle.simulate` 1.75 ms. See [every number, every arm](#performance).</sub>
 <!-- hero:end -->

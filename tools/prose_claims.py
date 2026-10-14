@@ -573,14 +573,18 @@ def count_claims(text):
 # --------------------------------------------------------------------------- #
 # The headline: HEADLINE's device, its larger N with the smaller N beside it
 # --------------------------------------------------------------------------- #
-#: Tools the headline names, in this order (never resorted by ratio).
+#: Tools the headline names, in this order (never resorted by ratio). Each tool is quoted by its
+#: fastest arm on the headline cell, the arm the radar and the efficiency view use; the name says
+#: which arm when a tool has several.
 HEAD_TOOLS = (
-    ("warp_kernel", "NVIDIA Warp"),
-    ("jax_vmap", "JAX"),
-    ("cupy_masked", "CuPy"),
-    ("torch_masked", "PyTorch"),
+    (("warp_kernel",), "NVIDIA Warp"),
+    (("jax_vmap",), "JAX"),
+    (("cupy_masked",), "CuPy"),
+    (("torch_compiled", "torch_graphed", "torch_masked"), "PyTorch"),
 )
-HEAD_MEM_TOOLS = ("cupy_masked", "torch_masked")
+HEAD_ARM_NAMES = {"torch_compiled": "PyTorch with torch.compile",
+                  "torch_graphed": "PyTorch with CUDA graphs"}
+HEAD_MEM_TOOLS = ("CuPy", "PyTorch")
 BASE_ARM = "eagle_simulate"
 
 
@@ -626,17 +630,21 @@ def headline_facts(cards):
                 f"headline card lacks {BASE_ARM} at N={n:,} ({dist}, {steps} steps)"
             )
         base = cc.center(cell[BASE_ARM]["wall_s"])
-        speed = []
-        for arm, name in HEAD_TOOLS:
-            if arm in cell:
-                speed.append((name, floor_sig(cc.center(cell[arm]["wall_s"]) / base)))
+        speed, chosen = [], {}
+        for arms, name in HEAD_TOOLS:
+            present = [a for a in arms if a in cell]
+            if present:
+                arm = min(present, key=lambda a: cc.center(cell[a]["wall_s"]))
+                chosen[name] = arm
+                speed.append((HEAD_ARM_NAMES.get(arm, name),
+                              floor_sig(cc.center(cell[arm]["wall_s"]) / base)))
         base_mem = _head_mem(card, BASE_ARM, n, dist, steps)
         mem = [
             floor_sig(
-                _head_mem(card, a, n, dist, steps)["device_peak_bytes"]
+                _head_mem(card, chosen[t], n, dist, steps)["device_peak_bytes"]
                 / base_mem["device_peak_bytes"]
             )
-            for a in HEAD_MEM_TOOLS
+            for t in HEAD_MEM_TOOLS
         ]
         facts["ns"].append(
             {
