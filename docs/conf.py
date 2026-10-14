@@ -135,6 +135,7 @@ exclude_patterns = ['_templates', '_build', '_doxybuild', '_tools', 'README.md',
 
 html_theme = 'sphinx_book_theme'
 html_static_path = ['_static']
+html_extra_path = ['_redirects']   # stubs for tutorial URLs that were renumbered
 # raptor-tokens.css (kit) -> site-accent.css (this site's --accent) ->
 # raptor-theme.css (shared skin, derives everything from --accent) ->
 # raptor-reveal.css (kit) -> brand.css (skeleton rules that CONSUME the vars
