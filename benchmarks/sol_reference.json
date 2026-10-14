@@ -1,0 +1,76 @@
+{
+  "_comment": "FP64 speed-of-light reference per device, keyed by card slug (card_<slug>.json, cpu_card_<slug>.json). R_SOL = fma_per_s / 22 sample-steps per second (22 = 16 DFMA + 4 DMUL + 2 DADD per step). source: measured (probe), spec (published rate x recorded clock), or pending (an efficiency is refused). aliases map other card stems onto a slug.",
+  "ops_per_step": 22,
+  "aliases": {
+    "intel-r-xeon-r-platinum-8581c-cpu-2-30ghz": "intel-xeon-platinum-8581c"
+  },
+  "devices": {
+    "nvidia-a100-sxm4-40gb": {
+      "fma_per_s": 4872960000000.0,
+      "source": "spec",
+      "clock_mhz": 1410.0,
+      "method": "specification: SM count x FP64 FMA per clock per SM for the compute capability (CUDA C++ Programming Guide, arithmetic instruction throughput) x the highest SM clock recorded across the card's rows",
+      "evidence": "every row of the card ran at or below 1410 MHz, the device's reported maximum SM clock"
+    },
+    "nvidia-h100-80gb-hbm3": {
+      "fma_per_s": 16727040000000.0,
+      "source": "spec",
+      "clock_mhz": 1980.0,
+      "method": "specification: SM count x FP64 FMA per clock per SM for the compute capability (CUDA C++ Programming Guide, arithmetic instruction throughput) x the highest SM clock recorded across the card's rows",
+      "evidence": "every row of the card ran at or below 1980 MHz, the device's reported maximum SM clock"
+    },
+    "nvidia-l4": {
+      "fma_per_s": 236640000000.0,
+      "source": "spec",
+      "clock_mhz": 2040.0,
+      "method": "specification: SM count x FP64 FMA per clock per SM for the compute capability (CUDA C++ Programming Guide, arithmetic instruction throughput) x the highest SM clock recorded across the card's rows",
+      "evidence": "every row of the card ran at or below 2040 MHz, the device's reported maximum SM clock"
+    },
+    "tesla-t4": {
+      "fma_per_s": 127200000000.0,
+      "source": "spec",
+      "clock_mhz": 1590.0,
+      "method": "specification: SM count x FP64 FMA per clock per SM for the compute capability (CUDA C++ Programming Guide, arithmetic instruction throughput) x the highest SM clock recorded across the card's rows",
+      "evidence": "every row of the card ran at or below 1590 MHz, the device's reported maximum SM clock"
+    },
+    "quadro-p2000": {
+      "fma_per_s": 34400000000.0,
+      "source": "spec",
+      "clock_mhz": 1075.0,
+      "method": "specification: SM count x FP64 FMA per clock per SM for the compute capability (CUDA C++ Programming Guide, arithmetic instruction throughput) x the highest SM clock recorded across the card's rows",
+      "evidence": "8 SMs x 4 FMA/clk x 1.075 GHz; the card's rows all ran at the 1075 MHz application clock with no throttle reasons",
+      "cross_check": {
+        "measured_fma_per_s": 34340000000.0,
+        "method": "register-only FP64 FMA chain probe, best sustained rate; 0.2% below the specification, within its timing resolution, so the specification is the reference (a row of the card reaches 1.0006 x the probe value)"
+      }
+    },
+    "amd-epyc-9b45": {
+      "fma_per_s": 529720000000.0,
+      "source": "measured",
+      "clock_mhz": null,
+      "method": "register-only packed FMA chain probe (AVX-512, 12 packed FMA instructions in the binary), 8 threads = physical cores, best sustained rate",
+      "evidence": "8 threads 5.2972e11 FMA/s (16 threads 5.3119e11: SMT adds nothing); implied 4138 MHz at 16 FMA/clk/core"
+    },
+    "intel-xeon-platinum-8581c": {
+      "fma_per_s": 382760000000.0,
+      "source": "measured",
+      "clock_mhz": null,
+      "method": "register-only packed FMA chain probe (AVX-512, 12 packed FMA instructions in the binary), 8 threads = physical cores, best sustained rate",
+      "evidence": "8 threads 3.8276e11 FMA/s (16 threads 3.7847e11: SMT adds nothing); implied 2990 MHz at 16 FMA/clk/core"
+    },
+    "amd-epyc-7b13": {
+      "fma_per_s": null,
+      "source": "pending",
+      "clock_mhz": null,
+      "method": "register-only packed FMA chain probe, threads = physical cores",
+      "evidence": "not yet measured; efficiency is not published for this device until it is"
+    },
+    "aarch64": {
+      "fma_per_s": null,
+      "source": "pending",
+      "clock_mhz": null,
+      "method": "register-only packed FMA chain probe, threads = physical cores",
+      "evidence": "not yet measured; efficiency is not published for this device until it is"
+    }
+  }
+}

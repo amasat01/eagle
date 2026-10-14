@@ -31,6 +31,7 @@ Claim kinds (``kind`` is the first word of a span)
   pctgap how much longer one wall is than another, as a percentage
   mib    device memory        xmem  a ratio of two device-memory peaks
   xmin   factor over the minimum state   pct   a percentage of a card field
+  eff    efficiency on an uneven batch (see EFFICIENCY below)
   rate   a rate card field    comp  a cold/warm compile time (``which=``)
   cmp   large-N compare evidence (``benchmarks/compare_card/<slug>.csv``): a
         ratio of two arms' walls when ``den_arm`` is given, else one arm's wall;
@@ -38,6 +39,22 @@ Claim kinds (``kind`` is the first word of a span)
         ``kernel`` (default ``osc``)::
 
           <!--c cmp dev=h100 n=1e7 dist=spread steps=1000 arm=warp den_arm=auto-->3.2×<!--/c-->
+EFFICIENCY (``eff``)
+  ``eff = R_spread / R_SOL``. ``R_spread`` is the fastest ``sample_steps_per_s``
+  among the named arm(s) on the card's largest N for the span's ``dist`` and
+  ``steps`` (``arm=<arm>`` for one arm, ``tool=eagle|warp|jax|torch|cupy`` for
+  the fastest arm of a tool). ``R_SOL = F_dev / 22``: the sample-steps per
+  second the device would deliver if every FP64 pipe issued the step's 22
+  instructions (16 DFMA + 4 DMUL + 2 DADD) back to back, with no divergence and
+  no memory stall. ``F_dev`` is read from ``benchmarks/sol_reference.json``
+  (measured by a register-only FMA probe, or from the published FP64 rate at the
+  clock recorded during the run). The span prints whole percent, floored, never
+  rounded up. It is refused (``ClaimError``) when the reference is pending or
+  when ANY row of the card exceeds 1.00 x R_SOL: a row above the speed of light
+  means the reference is wrong, so nothing is clamped and nothing is published::
+
+    <!--c eff tool=eagle dist=spread-->92%<!--/c-->
+
 Selectors: ``card`` (rk4 | rk4cpu | rk78 | rk78cpu), ``dev`` (a device alias
 below, or ``headline``), ``arm``, ``n``, ``dist``, ``steps``; ``src``
 (results | fixed | sweep) with ``variant``/``k`` for the cadence sweep. A ratio
@@ -137,6 +154,14 @@ def fmt_mib(nbytes):
     return cc.DASH if nbytes is None else f"{round(nbytes / 2**20)} MiB"
 
 
+def fmt_eff(fraction):
+    """An efficiency as a whole percent, floored (``92%``); under 1 % as ``<1%``."""
+    if fraction is None:
+        return cc.DASH
+    whole = math.floor(100.0 * fraction + 1e-9)
+    return "<1%" if whole < 1 else f"{whole}%"
+
+
 def fmt_pct(fraction):
     """A percentage, 2 significant figures (``87%``, ``1.1%``, ``100%``)."""
     if fraction is None:
@@ -202,6 +227,134 @@ class Cards:
         if p not in self._cache:
             self._cache[p] = json.loads(p.read_text())
         return self._cache[p]
+
+
+# --------------------------------------------------------------------------- #
+# Speed-of-light reference (efficiency on uneven batches)
+# --------------------------------------------------------------------------- #
+#: FP64 pipe instructions per sample-step of the benchmark step: 16 DFMA + 4 DMUL + 2 DADD.
+SOL_OPS_PER_STEP = 22
+
+#: FP64 FMA per clock per SM by compute capability (CUDA C++ Programming Guide,
+#: arithmetic instruction throughput). A capability absent here has no spec value.
+FP64_FMA_PER_CLK_PER_SM = {
+    "6.0": 32,
+    "6.1": 4,
+    "7.0": 32,
+    "7.5": 2,
+    "8.0": 32,
+    "8.6": 2,
+    "8.9": 2,
+    "9.0": 64,
+}
+
+#: A tool name -> a predicate on the arm name (the tool's arms on a GPU or CPU card).
+TOOL_ARMS = {
+    "eagle": lambda a: a.startswith("eagle_") and a != "eager_loop",
+    "warp": lambda a: a.startswith("warp"),
+    "jax": lambda a: a.startswith("jax"),
+    "torch": lambda a: a.startswith("torch"),
+    "cupy": lambda a: a.startswith("cupy"),
+}
+
+EFF_CARDS = ("rk4", "rk4cpu")
+
+
+def card_slug(path):
+    """The device slug of a card file: its name without the family prefix."""
+    name = pathlib.Path(path).name[:-5]
+    for prefix in ("cpu_card_", "card_"):
+        if name.startswith(prefix):
+            return name[len(prefix) :]
+    raise ClaimError(f"{path}: not a card file name")
+
+
+def load_sol_reference(root):
+    """``benchmarks/sol_reference.json`` as a dict (``devices`` and ``aliases``)."""
+    path = pathlib.Path(root) / "benchmarks" / "sol_reference.json"
+    if not path.is_file():
+        raise ClaimError(f"missing speed-of-light reference: {path}")
+    return json.loads(path.read_text())
+
+
+def sol_spec_fma_per_s(card):
+    """The specification F_dev of a GPU card: SMs x FMA/clk/SM x the run's top SM clock.
+
+    The clock is the highest ``wall_s.sm_mhz`` over the card's rows and must not
+    exceed the device's reported maximum SM clock. Returns (F_dev, clock_mhz)."""
+    dev = card["device"]
+    cap = dev["compute_capability"]
+    if cap not in FP64_FMA_PER_CLK_PER_SM:
+        raise ClaimError(f"no FP64 FMA/clk/SM entry for compute capability {cap}")
+    clocks = [m for r in card["results"] for m in r["wall_s"].get("sm_mhz", [])]
+    if not clocks:
+        raise ClaimError("card records no SM clock; the specification rate needs one")
+    f_run = max(clocks)
+    smi_max = float(str(dev["nvidia_smi"]["clocks_max_sm"]).split()[0])
+    if f_run > smi_max:
+        raise ClaimError(f"run clock {f_run} MHz exceeds the device maximum {smi_max} MHz")
+    return dev["sm_count"] * FP64_FMA_PER_CLK_PER_SM[cap] * f_run * 1e6, f_run
+
+
+def sol_fma_per_s(root, path):
+    """F_dev (FMA/s) for the card at `path` from the committed reference.
+
+    Raises ``ClaimError`` when the device has no entry or its entry is pending."""
+    ref = load_sol_reference(root)
+    slug = card_slug(path)
+    slug = ref.get("aliases", {}).get(slug, slug)
+    entry = ref["devices"].get(slug)
+    if entry is None:
+        raise ClaimError(f"no speed-of-light reference for device {slug!r}")
+    if entry.get("source") not in ("measured", "spec"):
+        raise ClaimError(
+            f"speed-of-light reference for {slug!r} is {entry.get('source')!r}; "
+            "an efficiency is not published until it is measured"
+        )
+    value = entry.get("fma_per_s")
+    if not isinstance(value, (int, float)) or value <= 0:
+        raise ClaimError(f"speed-of-light reference for {slug!r} has no fma_per_s")
+    return float(value)
+
+
+def check_rows_under_sol(card, fma_per_s):
+    """Raise ``ClaimError`` if any row of the card exceeds 1.00 x R_SOL (never clamps)."""
+    r_sol = fma_per_s / SOL_OPS_PER_STEP
+    for r in card["results"]:
+        rate = r.get("sample_steps_per_s")
+        if rate and rate > r_sol:
+            raise ClaimError(
+                f"row {r['arm']} n={r['n']} {r['distribution']} steps={r['max_steps']} runs at "
+                f"{rate / r_sol:.3f} x the speed of light; the reference is wrong and must be re-measured"
+            )
+
+
+def efficiency(cards, sel):
+    """``R_spread / R_SOL`` of one tool/arm on the card's largest N (a fraction)."""
+    if sel["card"] not in EFF_CARDS:
+        raise ClaimError(f"eff is defined for the RK4 cards only, not {sel['card']!r}")
+    card = cards.load(sel["card"], sel["dev"])
+    fma = sol_fma_per_s(cards.root, cards.path(sel["card"], sel["dev"]))
+    check_rows_under_sol(card, fma)
+    if "arm" in sel:
+        match = lambda a: a == sel["arm"]  # noqa: E731
+    elif sel.get("tool") in TOOL_ARMS:
+        match = TOOL_ARMS[sel["tool"]]
+    else:
+        raise ClaimError("eff needs arm=<arm> or tool=<eagle|warp|jax|torch|cupy>")
+    dist, steps = sel["dist"], _num(sel["steps"])
+    cell = [
+        r
+        for r in card["results"]
+        if r["distribution"] == dist and r["max_steps"] == steps and r.get("sample_steps_per_s")
+    ]
+    if not cell:
+        raise ClaimError(f"card has no {dist} rows at {steps} steps")
+    n_max = max(r["n"] for r in cell)
+    rates = [r["sample_steps_per_s"] for r in cell if r["n"] == n_max and match(r["arm"])]
+    if not rates:
+        raise ClaimError(f"no arm matches {sel.get('arm') or sel.get('tool')!r} at N={n_max:,}")
+    return max(rates) / (fma / SOL_OPS_PER_STEP)
 
 
 def _num(text):
@@ -308,6 +461,8 @@ def render(cards, kind, sel):
         if kind == "mib":
             return fmt_mib(row["device_peak_bytes"])
         return fmt_ratio(row["device_factor"])
+    if kind == "eff":
+        return fmt_eff(efficiency(cards, sel))
     if kind == "pct":
         _c, row = _resolve(cards, sel)
         return fmt_pct(row[sel["field"]])
