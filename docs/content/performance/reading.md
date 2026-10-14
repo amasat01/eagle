@@ -6,7 +6,7 @@ What the results show, with the cards' own figures. Each statement can be checke
 
 <!-- stale-prose-gate:
 benchmarks/perf_card/card_nvidia-h100-80gb-hbm3.json: e896d6d2050fc792c90b59697547201b
-benchmarks/perf_card/cpu_card_amd-epyc-9b45.json: aec8051d141bb840e62b26abc336778a
+benchmarks/perf_card/cpu_card_amd-epyc-9b45.json: ff15fa43e17e2c9a88f2ba336e8aa476
 -->
 
 <!--ctx card=rk4 dev=h100 n=1e6 dist=spread steps=1000-->
@@ -106,7 +106,10 @@ below say where.
   (<!--c wall arm=numba_prange n=1000 steps=100-->39 µs<!--/c-->). CPU compaction does not pay back its bookkeeping on this card either: at N = 10⁶ it costs
   <!--c x arm=eagle_compact8 den_arm=eagle_term8-->2.0×<!--/c--> the plain termination loop on spread-1000 (<!--c wall arm=eagle_compact8-->292 ms<!--/c--> vs <!--c wall arm=eagle_term8-->142 ms<!--/c-->) and
   <!--c x arm=eagle_compact8 dist=uniform den_arm=eagle_term8-->3.9×<!--/c--> on the dense uniform workload (<!--c wall arm=eagle_compact8 dist=uniform-->744 ms<!--/c--> vs <!--c wall arm=eagle_term8 dist=uniform-->187 ms<!--/c-->), the same
-  direction as on the H100.<!--ctx card=rk4 dev=h100-->
+  direction as on the H100. CPU peak memory is shown for N = 1,000,000 only, net of the benchmark harness's own copies (36 bytes
+  per sample on eagle's arms). At smaller N this harness cannot resolve it: each measuring process inherits the launching
+  process's peak, so smaller readings show that floor rather than the workload. The cards keep the raw readings; the next
+  card run measures every size directly.<!--ctx card=rk4 dev=h100-->
 
 ## Adaptive RK7(8)
 

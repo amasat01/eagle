@@ -225,9 +225,9 @@ benchmarks/perf_card/card_nvidia-h100-80gb-hbm3.json: e896d6d2050fc792c90b596975
 benchmarks/perf_card/card_quadro-p2000.json: 911e5824c44f7ff69a3633d35de40e43
 benchmarks/rk78_card/card_nvidia-h100-80gb-hbm3.json: 763658c485f8b65b8ff42c1dc3bba84c
 benchmarks/rk78_card/cpu_card_amd-epyc-9b45.json: 07b9ec84b69364c1e746befa19e5c544
-benchmarks/perf_card/cpu_card_aarch64.json: 670f08ef47206d3316473afbcc8a33f9
-benchmarks/perf_card/cpu_card_amd-epyc-7b13.json: 135d96d648d0ca39e528eb98a9cb1e61
-benchmarks/perf_card/cpu_card_amd-epyc-9b45.json: aec8051d141bb840e62b26abc336778a
+benchmarks/perf_card/cpu_card_aarch64.json: d1d065f68ed14dda1d052a0c9e464bb6
+benchmarks/perf_card/cpu_card_amd-epyc-7b13.json: ea705ae1dc4b2b4a43e22f1a1fa66d01
+benchmarks/perf_card/cpu_card_amd-epyc-9b45.json: ff15fa43e17e2c9a88f2ba336e8aa476
 benchmarks/perf_card/cpu_card_intel-xeon-platinum-8581c.json: 8c9062ee2917655ec13646870c37a993
 -->
 
@@ -254,6 +254,7 @@ Measured on:
 - [NVIDIA A100-SXM4-40GB](https://amasat01.github.io/eagle/content/performance.html#perf-card-gpu-nvidia-a100-sxm4-40gb)
 - [Tesla T4](https://amasat01.github.io/eagle/content/performance.html#perf-card-gpu-tesla-t4)
 - [Quadro P2000](https://amasat01.github.io/eagle/content/performance.html#perf-card-gpu-quadro-p2000)
+- [NVIDIA RTX PRO 6000 Blackwell Server Edition](https://amasat01.github.io/eagle/content/performance.html#perf-card-gpu-nvidia-rtx-pro-6000-blackwell-server-edition)
 - [AMD EPYC 9B45](https://amasat01.github.io/eagle/content/performance.html#perf-card-cpu-amd-epyc-9b45)
 - [AMD EPYC 7B13](https://amasat01.github.io/eagle/content/performance.html#perf-card-cpu-amd-epyc-7b13)
 - [Google Axion (Arm Neoverse-V2)](https://amasat01.github.io/eagle/content/performance.html#perf-card-cpu-aarch64)

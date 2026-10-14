@@ -353,6 +353,46 @@ def _withheld_note(borrowed_used: dict, any_withheld: bool) -> list[str]:
     return lines
 
 
+#: A CPU table row's memory cell, the last one: "100 MiB (2.8×)".
+_CPU_MEM_CELL = re.compile(r"\| (?:[\d.e+]+ MiB \([\d.e+]+×\)|–) \|\s*$")
+
+
+CPU_MEMORY_NOTE = ("CPU peak memory is shown for N = 1,000,000 only, net of the benchmark harness's own "
+                   "copies (36 bytes per sample on eagle's arms). At smaller N this harness cannot resolve it: "
+                   "each measuring process inherits the launching process's peak, so smaller readings show "
+                   "that floor rather than the workload. The cards keep the raw readings; the next card run "
+                   "measures every size directly.")
+UNRESOLVED_CELL = "–*"
+
+
+def net_cpu_memory_line(line: str, rows: dict, labels: dict, card_kind: str, all_rows: list) -> str:
+    """`line` (a CPU table row) with its memory cell showing the published
+    value (`cc.published_peak_bytes`: net of the harness's copies, at N = 10^6
+    only) or `UNRESOLVED_CELL`, and the factor against the row's minimum.
+    `rows` is the card's memory rows of the section's configuration by
+    (arm, n). A line that is not a table row comes back unchanged."""
+    n_match, cell = _ROW_N.match(line), _CPU_MEM_CELL.search(line)
+    arm = labels.get(line.split("|")[2].strip()) if n_match else None
+    row = rows.get((arm, int(n_match.group(1).replace(",", "")))) if n_match else None
+    if not cell or not row:
+        return line
+    value = cc.published_peak_bytes(row, all_rows, card_kind)
+    text = (UNRESOLVED_CELL if value is None
+            else f"{cc.fmt_mib(value)} ({cc.fmt_x(value / row['minimum_bytes'])})")
+    return line[:cell.start()] + f"| {text} |"
+
+
+def _config_rows(card: dict) -> list[dict]:
+    """The card's memory rows grouped by configuration, in the order the
+    card's table prints its configuration sections."""
+    out = []
+    for cfg in card["configs"]:
+        out.append({(r["arm"], r["n"]): r for r in card["memory"]["rows"]
+                    if r["distribution"] == cfg["distribution"]
+                    and r["max_steps"] == cfg["max_steps"]})
+    return out
+
+
 def _table_fragment(spec: dict, e: dict, entries=()) -> str:
     """The card's own table with its headings turned into bold lines (a heading
     cannot sit inside a collapsed block) and its impossible device-memory
@@ -360,15 +400,23 @@ def _table_fragment(spec: dict, e: dict, entries=()) -> str:
     family's other `entries`), then the machine-derived lines."""
     minimum_by_n = {r["n"]: r.get("minimum_bytes")
                     for r in (e["card"].get("memory") or {}).get("rows", [])}
-    arms = e["card"].get("arms")
-    labels = {label: arm for arm, label in arms.items()} if isinstance(arms, dict) else {}
+    labels = {label: arm for arm, label in _arm_labels(e["card"]).items()}
     borrowed = borrowed_readings(e, entries)
     used, withheld = {}, False
     out, fenced = [], False
+    net_kind = "rk4_cpu" if spec["key"] == "perf_card_cpu" else None
+    by_config = _config_rows(e["card"]) if net_kind else []
+    all_rows = e["card"]["memory"]["rows"] if net_kind else None
+    section = -1  # the configuration section a row belongs to: the card's "###" headings in order
     for line in e["path"].with_suffix(".md").read_text().splitlines():
         if line.lstrip().startswith("```"):
             fenced = not fenced
         m = None if fenced else re.match(r"#{1,6}\s+(.*)", line)
+        if m and net_kind and section + 1 < len(by_config) and m.group(1).startswith(
+                ("Spread", "Uniform")):
+            section += 1
+        elif net_kind and not m and 0 <= section < len(by_config):
+            line = net_cpu_memory_line(line, by_config[section], labels, net_kind, all_rows)
         if not fenced and not m:
             kept, line = line, withhold_impossible_readings(line, minimum_by_n, labels, borrowed)
             if line != kept:
@@ -380,6 +428,9 @@ def _table_fragment(spec: dict, e: dict, entries=()) -> str:
                     withheld = True
         out.append(f"**{m.group(1)}**" if m else line)
     out.append("")
+    if net_kind:
+        assert section + 1 == len(by_config), f"{e['path'].name}: configuration sections not found"
+        out += [CPU_MEMORY_NOTE, ""]
     out += _withheld_note(used, withheld)
     if not e["is_reference"]:
         out += _fastest_arm_lines(e["card"], spec["has_config"])

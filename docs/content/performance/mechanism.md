@@ -46,9 +46,10 @@ A tool's efficiency on an uneven batch is its sample-steps per second on the spr
 |:---|---:|---:|
 | P2000 | <!--c eff dev=p2000 tool=eagle-->92%<!--/c--> | <!--c eff dev=p2000 tool=warp-->22%<!--/c--> |
 | T4 | <!--c eff dev=t4 tool=eagle-->81%<!--/c--> | <!--c eff dev=t4 tool=warp-->19%<!--/c--> |
-| L4 | <!--c eff dev=l4 tool=eagle-->66%<!--/c--> | <!--c eff dev=l4 tool=warp-->19%<!--/c--> |
+| L4 | <!--c eff dev=l4 tool=eagle-->79%<!--/c--> | <!--c eff dev=l4 tool=warp-->19%<!--/c--> |
 | A100 | <!--c eff dev=a100 tool=eagle-->66%<!--/c--> | <!--c eff dev=a100 tool=warp-->16%<!--/c--> |
 | H100 | <!--c eff dev=h100 tool=eagle-->47%<!--/c--> | <!--c eff dev=h100 tool=warp-->18%<!--/c--> |
+| RTX PRO 6000 | <!--c eff dev=rtx6000 tool=eagle-->70%<!--/c--> | <!--c eff dev=rtx6000 tool=warp-->18%<!--/c--> |
 
 100 % is the device's FP64 speed of light: every FP64 pipe issuing the step's 22 instructions back to back at the clock the device ran at, measured with a register-only FMA probe where one is available and otherwise taken from the published FP64 rate at the clock recorded during the run. Nothing can exceed it, and a tool that keeps paying for finished samples can keep at most the live share of the batch (21.6 % of the sample-steps here). The reference is the same for every tool and does not depend on any of them. Read the figures as where each tool sits between the live work and the device's limit on this one batch shape; the per-thread kernel's lower figure on spread batches is the dead-lane cost described above, not a statement about its dense-batch speed, where it sits at the same limit as `eagle`.
 
