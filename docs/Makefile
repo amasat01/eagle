@@ -64,6 +64,7 @@ nbexec:
 # "gate" metadata for what it needs, and a GPU-only one skips cleanly on the CPU
 # leg). A committed notebook can no longer outlive the code that produced it.
 nbcheck:
+	python _tools/nb_colab_setup.py --check
 	python _tools/nb_check_filled.py $(NB_PATHS)
 	python _tools/nb_run_gate.py $(NB_PATHS)
 

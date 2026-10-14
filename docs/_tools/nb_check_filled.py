@@ -71,6 +71,7 @@ def main(argv: list[str]) -> int:
         unexecuted = [
             i for i, c in enumerate(nb.cells)
             if c.cell_type == "code" and c.source.strip() and c.get("execution_count") is None
+            and "colab-setup" not in c.get("metadata", {}).get("tags", [])  # generated, no output
         ]
         if unexecuted:
             bad.append((p, unexecuted))
