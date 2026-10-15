@@ -119,6 +119,14 @@ BASE_CTX = {
 }
 
 
+# Exit codes shared by the docs-fresh generators.
+EXIT_FRESH = 0
+EXIT_STALE = 1
+EXIT_USAGE = 2      # argparse only
+EXIT_MISSING_CARD = 3
+EXIT_MISSING_TOOL = 4
+
+
 class ClaimError(Exception):
     """A claim cannot be rendered (missing card, cell or malformed span)."""
 

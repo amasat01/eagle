@@ -58,23 +58,13 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - name: documented numbers match the committed cards
-        run: |
-          if ! python tools/sync_readme_cards.py --check; then
-            echo "::error::The documented performance numbers are out of date with the committed cards. Regenerate them locally with: python tools/sync_readme_cards.py -- then commit the result."
-            exit 1
-          fi
       - uses: actions/checkout@v7
         with:
           repository: amasat01/amasat01.github.io
           ref: main
           path: site
-      - name: family visuals match the landing site and the cards
-        run: |
-          if ! python site/tools/sync_family_visuals.py --check --site-root site --eagle-root . --target eagle=.; then
-            echo "::error::The family visuals bundle is out of date with the landing site or the cards. Regenerate it locally with: python tools/sync_family_visuals.py --site-root <path to the site checkout> --eagle-root <path to an eagle checkout> --target eagle=<this repo> -- then commit docs/_static/family_visuals."
-            exit 1
-          fi
+      - name: documented numbers and family visuals match the committed cards
+        run: bash tools/docs_fresh.sh site
   build:
     needs: docs-fresh
     runs-on: ubuntu-latest
