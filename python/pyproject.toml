@@ -46,7 +46,7 @@ classifiers = [
 # `raptor.schema.blocks.validate_neural_block_descriptor` (first shipped in 0.2.0), which
 # `eagle.sidecar` imports. The constraint is expressed where a resolver can act on it,
 # never as a runtime surprise.
-dependencies = ["numpy", "raptor-core>=0.3,<0.4"]
+dependencies = ["numpy>=1.26", "raptor-core>=0.3,<0.4"]
 
 # The "raptor.pattern_loaders" entry-point declaration for
 # "neural_block" moved to a separate package — eagle.neural was extracted there
@@ -79,7 +79,7 @@ cuda = [
 ]
 # eagle.frameworks.torch: the torch.autograd bridge. torch is imported only by
 # that submodule, so plain `import eagle` never needs it.
-torch = ["torch"]
+torch = ["torch>=2.2"]
 # eagle's JAX bridge (see docs: interop contract). JAX publishes wheels for
 # Python 3.12 and newer, so this extra resolves there and nowhere else; for
 # GPU arrays install JAX's own CUDA extra (jax[cuda12] or jax[cuda13]).
