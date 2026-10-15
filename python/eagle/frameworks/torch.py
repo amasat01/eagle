@@ -306,9 +306,11 @@ class KernelFunction:
         arrays = {}
         for name, value in values.items():
             if isinstance(value, torch.Tensor):
-                view = import_buffer(value, require=_requirements(
-                    Requirements, value, "cpu", name=name))
-                value = np.from_dlpack(view)
+                # the buffer check validates dtype, layout and device; the array itself is torch's own NumPy
+                # view (same memory, always writable), since NumPy < 2.2 imports every torch tensor read-only
+                # over DLPack and the kernel writes its mutable planes
+                import_buffer(value, require=_requirements(Requirements, value, "cpu", name=name))
+                value = value.detach().numpy()
             arrays[name] = value
         run(self._host[key], **arrays)
 

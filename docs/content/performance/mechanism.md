@@ -53,12 +53,6 @@ A tool's efficiency on an uneven batch is its sample-steps per second on the spr
 
 100 % is the device's FP64 speed of light: every FP64 pipe issuing the step's 22 instructions back to back at the clock the device ran at, measured with a register-only FMA probe where one is available and otherwise taken from the published FP64 rate at the clock recorded during the run. Nothing can exceed it, and a tool that keeps paying for finished samples can keep at most the live share of the batch (21.6 % of the sample-steps here). The reference is the same for every tool and does not depend on any of them. Read the figures as where each tool sits between the live work and the device's limit on this one batch shape; the per-thread kernel's lower figure on spread batches is the dead-lane cost described above, not a statement about its dense-batch speed, where it sits at the same limit as `eagle`.
 
-```{raw} html
-:file: ../../_static/family_visuals/fragments/early_bars.html
-```
-
-*The saving from finishing early, per tool, with the table behind the bars.*
-
 ## Where eagle does not win
 
 On the dense uniform batch, where every sample runs every step, there is nothing to reclaim and the two tools tie. On the H100 at N = 10⁶ `warp_kernel` takes <!--c wall arm=warp_kernel dist=uniform-->1.71 ms<!--/c--> and `eagle.simulate` <!--c wall arm=eagle_simulate dist=uniform-->1.75 ms<!--/c-->; at N = 10⁷ the compare evidence has <!--c cmp dev=h100 n=1e7 dist=uniform steps=1000 arm=warp-->15.9 ms<!--/c--> for Warp and <!--c cmp dev=h100 n=1e7 dist=uniform steps=1000 arm=auto-->16.8 ms<!--/c--> for the automatic arm. Warp is the better fit for that shape.

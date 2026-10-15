@@ -13,7 +13,7 @@ backend-path = ["."]
 
 [project]
 name = "raptor-eagle"
-version = "0.6.0"
+version = "0.6.1rc1"
 description = "EAGLE — the Python face of the launch engine for compiled CUDA kernels"
 # A copy of the repository README, made by _build_backend.py (git-ignored).
 readme = "README.md"

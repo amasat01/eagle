@@ -100,6 +100,29 @@ def test_every_helper_the_notebook_imports_is_downloaded_and_exists(path):
         assert any(f"/{gen.FIXTURE_DIRNAME}/" in rel for rel in downloaded), f"{path.name}: uses fixtures, none downloaded"
 
 
+@pytest.mark.parametrize("path", _NOTEBOOKS, ids=_ids)
+def test_the_cell_matches_the_cuda_major_and_says_plainly_when_it_runs_on_the_cpu(path):
+    cell = _setup_cell(_load(path)) or ""
+    assert "Running on the CPU (no GPU in this runtime). For a GPU: " in cell, f"{path.name}: no plain CPU line"
+    assert "Runtime \u2192 Change runtime type \u2192 T4 GPU." in cell and "Settings \u2192 Accelerator \u2192 GPU T4 x2." in cell
+    assert 'extra = "[cuda12]"' not in cell, f"{path.name}: the extra is fixed to CUDA 12"
+    if "{extra}" in cell:  # a notebook that installs eagle or hawk picks the extra by the runtime
+        for needle in ('"cupy-cuda{m}x"', "torch.version.cuda", "CUDA Version: (", 'extra = f"[cuda{major}]"'):
+            assert needle.replace("{m}", "{m}") in cell, f"{path.name}: the CUDA-major selection lacks {needle}"
+
+
+@pytest.mark.parametrize("path", _NOTEBOOKS, ids=_ids)
+def test_the_cell_has_the_release_candidate_and_branch_switches(path):
+    cell = _setup_cell(_load(path)) or ""
+    assert 'os.environ.get("RAPTOR_PRE")' in cell and '*pre' in cell, f"{path.name}: no RAPTOR_PRE switch"
+    assert 'os.environ.get("RAPTOR_REF", "main")' in cell, f"{path.name}: no RAPTOR_REF switch"
+    assert "Pre-release test: installing with --pre, helper files from {ref}." in cell
+    if "urlretrieve" in cell:
+        assert "/{ref}/" in cell and "/main/" not in cell, f"{path.name}: helper files are not fetched from the ref"
+        assert 'os.environ.get("RAPTOR_RAW_BASE", "https://raw.githubusercontent.com")' in cell, f"{path.name}: no RAPTOR_RAW_BASE switch"
+        assert 'os.environ.get("RAPTOR_WORKDIR")' in cell and '"/content"' in cell, f"{path.name}: no RAPTOR_WORKDIR switch"
+
+
 def test_the_generated_cell_is_valid_python():
     for path in _NOTEBOOKS:
         ast.parse(_setup_cell(_load(path)) or "")

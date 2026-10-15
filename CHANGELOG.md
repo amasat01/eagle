@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.1 (unreleased)
+
+**Torch tensors on the CPU under older NumPy.** With NumPy older than 2.2 (Colab ships 2.1), NumPy imports every torch tensor read-only, so `eagle.simulate` refused CPU torch outputs as not writable. The torch bridge now checks the tensor as before and then works on torch's own NumPy view of the same memory, which is always writable. A test makes NumPy's import read-only and checks the outputs are written.
+
+**Colab and Kaggle setup cell.** The first cell of every docs notebook installs the CUDA 12 or CUDA 13 extras to match the runtime (Colab's GPU runtime is CUDA 13) and says plainly when it runs on the CPU and how to get a GPU.
+
+**Notebooks checked the way a Colab user runs them.** `make nbcheck-hosted` (and `nbcheck-floor`, `nbcheck-hosted-gpu`) runs every docs notebook against the built wheels in a pinned copy of Colab's environment, setup cell included.
+
 ## 0.6.0 (2026-10-14)
 
 **Register gate by toolkit.** The card register gate holds its register and arithmetic pins per CUDA release (12.6, 12.9 and 13.4 measured), compares each build with the pins of the `nvcc` that compiled it, and skips with a reason when that release has no pins.

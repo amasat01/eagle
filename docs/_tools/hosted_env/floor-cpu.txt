@@ -1,0 +1,11 @@
+# The "floor" lock: the oldest numpy and torch a user can still run these packages with, on the same Python 3.13.
+# The packages declare no lower bound: raptor-eagle needs "numpy" and optional "torch" (python/pyproject.toml), raptor-hawk
+# needs "numpy". The floor is therefore the oldest release that has a CPython 3.13 wheel (numpy 2.1.0, torch 2.5.0, matplotlib 3.9.2,
+# the first of each to ship cp313). Declare real bounds and move this file to match them. Refresh with the hosted lock.
+--index-url https://pypi.org/simple
+--extra-index-url https://download.pytorch.org/whl/cpu
+numpy==2.1.0
+torch==2.5.0+cpu
+matplotlib==3.9.2
+IPython==8.18.1
+ipykernel==6.29.0
