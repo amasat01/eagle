@@ -1,10 +1,10 @@
 # Changelog
 
-## 0.6.1 (unreleased)
+## 0.6.1 (2026-10-15)
 
 **Torch tensors on the CPU under older NumPy.** With NumPy older than 2.2 (Colab ships 2.1), NumPy imports every torch tensor read-only, so `eagle.simulate` refused CPU torch outputs as not writable. The torch bridge now checks the tensor as before and then works on torch's own NumPy view of the same memory, which is always writable. A test makes NumPy's import read-only and checks the outputs are written.
 
-**Colab and Kaggle setup cell.** The first cell of every docs notebook installs the CUDA 12 or CUDA 13 extras to match the runtime (Colab's GPU runtime is CUDA 13) and says plainly when it runs on the CPU and how to get a GPU.
+**Colab and Kaggle setup cell.** The first cell of every docs notebook installs the CUDA 12 or CUDA 13 extras to match the runtime (Colab's GPU runtime is CUDA 13) and says plainly when it runs on the CPU and how to get a GPU. It installs the family's own packages with `--upgrade`, so a runtime that kept an older release gets the current one.
 
 **Notebooks checked the way a Colab user runs them.** `make nbcheck-hosted` (and `nbcheck-floor`, `nbcheck-hosted-gpu`) runs every docs notebook against the built wheels in a pinned copy of Colab's environment, setup cell included.
 
