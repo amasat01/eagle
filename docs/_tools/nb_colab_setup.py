@@ -149,9 +149,11 @@ def plan(nb, nb_path: pathlib.Path) -> dict:
 
 
 def render(p: dict) -> str:
-    pkg_items = ", ".join(
-        f'f"{x}{{extra}}"' if x in GPU_EXTRA else f'"{x}"' for x in p["pkgs"]
-    )
+    def items(names):
+        return ", ".join(f'f"{x}{{extra}}"' if x in GPU_EXTRA else f'"{x}"' for x in names)
+
+    ours = [x for x in p["pkgs"] if x.startswith(("raptor-", "aether-"))]
+    others = [x for x in p["pkgs"] if x not in ours]
     files = "".join(f'        "{f}",\n' for f in p["files"])
     hard = ", ".join(p["hard"])
     plain = " ".join(p["pkgs"])
@@ -197,8 +199,11 @@ def render(p: dict) -> str:
         '    ref = os.environ.get("RAPTOR_REF", "main")  # optional: fetch the helper files from this git ref',
         '    if pre or "RAPTOR_REF" in os.environ:',
         '        print(f"Pre-release test: installing with --pre, helper files from {ref}.")',
-        f'    subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", *pre, {pkg_items}])',
+        "    # our packages with --upgrade, so a runtime that kept an older release gets the current one",
+        f'    subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "--upgrade", *pre, {items(ours)}])',
     ]
+    if others:
+        lines.append(f'    subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", {items(others)}])')
     if p["files"]:
         lines += [
             '    base = os.environ.get("RAPTOR_RAW_BASE", "https://raw.githubusercontent.com")  # optional: a local mirror',
