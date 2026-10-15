@@ -12,7 +12,7 @@
     "visuals.js": "b91816374f88b33aa47784c180430d85"
   },
   "inputs": {
-    "_generated/perf_switch.md": "4b93056488ccef8b52e495c662cf1c49",
+    "_generated/perf_switch.md": "19b110801971c09758e662fe2850653f",
     "_generated/radar_detailed.md": "81e44a3e54a5d7fef49bae853c25d9e3",
     "_static/custom.css": "80c94e883a321f4857e1cc8e996a0be4",
     "_static/js/perf-state.js": "470940933ae3d6e32d48d63e1299882b",
@@ -49,7 +49,7 @@
     "sync_family_visuals.py": "d6c48e95a3088601b39267938e4399e4",
     "tools/palette.py": "9313f90302393558925ffa0d0a146f03",
     "tools/radar_icons.py": "934e3660df5b76564611b89ed798e747",
-    "tools/sync_cards.py": "44ac41ee87aaa234d51ca1e299d8d0e4",
+    "tools/sync_cards.py": "31690962b6531495111b7b059845c028",
     "tools/visuals.py": "554680cc329829ab4d2b0fb9e658cfb6",
     "tools/visuals_markup.py": "4f8ca447291582b6a33e1087ef2288db"
   }
