@@ -87,6 +87,24 @@ MPI_AVAILABLE = _mpi_available()
 _BED_ENV = "EAGLE_RANK_BED"
 
 
+_MARKERS = (
+    "ft: free-threading rows",
+    "gpu: requires cupy + a CUDA GPU",
+    "gpu2: requires cupy + two CUDA GPUs",
+    "torch: requires torch + cupy GPU",
+    "torch_gpu: requires a CUDA build of torch",
+    "interop_matrix: interop certification matrix row",
+    "mpi: needs the optional eagle._mpi extension",
+    "repo_local: certifies the repository, not the installed wheel",
+)
+
+
+def pytest_configure(config):
+    """Register the markers: a suite copy outside the repo has no pyproject."""
+    for line in _MARKERS:
+        config.addinivalue_line("markers", line)
+
+
 def pytest_ignore_collect(collection_path, config):
     """Keep the rank bed out of every recursive collection but its own gate's."""
     if collection_path == ROOT / "tests" / "mpi" and not os.environ.get(_BED_ENV):

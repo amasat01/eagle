@@ -610,7 +610,7 @@ jobs:
           mkdir -p "${RUNNER_TEMP}/suite"
           cp -r eagle/python/tests eagle/python/conftest.py "${RUNNER_TEMP}/suite/"
           cd "${RUNNER_TEMP}/suite"
-          RAPTOR_ROOT="${GITHUB_WORKSPACE}/raptor" python -m pytest tests -q -p no:cacheprovider \
+          RAPTOR_ROOT="${GITHUB_WORKSPACE}/raptor" python -m pytest tests -q -p no:cacheprovider -W error::pytest.PytestUnknownMarkWarning \
             -m "not gpu and not gpu2 and not torch and not interop_matrix and not repo_local"
           python -c 'import eagle; assert "site-packages" in eagle.__file__, eagle.__file__'
       - if: always()

@@ -99,6 +99,8 @@ public:
     /** @brief Create the body stream for a later WHILE weave (device-side
      *  loop). Same pre-capture rule as the IF constructor.
      *
+     *  @param[in] origin       As for the IF constructor.
+     *  @param[in] guard        As for the IF constructor.
      *  @param[in] loopCap      Maximum iterations per replay, >= 1; baked
      *                          into the head setter as a kernel argument
      *                          (a new cap is a new build). 0 is refused:

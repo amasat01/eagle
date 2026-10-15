@@ -257,7 +257,38 @@ if(_eagle_plugin_mode STREQUAL "BUILD")
   # toolkit is linked.
   target_include_directories(eagle_cuda SYSTEM PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
   target_link_libraries(eagle_cuda PRIVATE eagle::eagle ${CMAKE_DL_LIBS})
-  string(REPLACE ";" "," _eagle_plugin_archs "${CMAKE_CUDA_ARCHITECTURES}")
+  # The installed aether/eagle packages name libgomp by path, from whichever
+  # toolset built them; a second toolset's directories on the link line can hide
+  # it. Drop those paths and let the compiler link OpenMP (-fopenmp) instead.
+  find_package(OpenMP REQUIRED COMPONENTS CXX)
+  foreach(_t aether::aether eagle::eagle)
+    get_target_property(_libs ${_t} INTERFACE_LINK_LIBRARIES)
+    if(_libs)
+      list(FILTER _libs EXCLUDE REGEX "libgomp|libpthread|\\$<LINK_LANGUAGE")
+      set_property(TARGET ${_t} PROPERTY INTERFACE_LINK_LIBRARIES "${_libs}")
+    endif()
+  endforeach()
+  target_compile_options(eagle_cuda PRIVATE $<$<COMPILE_LANGUAGE:CXX>:${OpenMP_CXX_FLAGS}>)
+  target_link_options(eagle_cuda PRIVATE ${OpenMP_CXX_FLAGS})
+  # Compact listing, e.g. "61,70,90/90": a long arch list must fit the
+  # build_info archs field (checked at compile time in eagle_cuda.cu).
+  set(_eagle_sass "")
+  set(_eagle_ptx "")
+  foreach(_a IN LISTS CMAKE_CUDA_ARCHITECTURES)
+    if(_a MATCHES "^([0-9]+)-virtual$")
+      list(APPEND _eagle_ptx "${CMAKE_MATCH_1}")
+    elseif(_a MATCHES "^([0-9]+)(-real)?$")
+      list(APPEND _eagle_sass "${CMAKE_MATCH_1}")
+      if(NOT CMAKE_MATCH_2)
+        list(APPEND _eagle_ptx "${CMAKE_MATCH_1}")
+      endif()
+    else()
+      list(APPEND _eagle_sass "${_a}")
+    endif()
+  endforeach()
+  list(JOIN _eagle_sass "," _eagle_sass)
+  list(JOIN _eagle_ptx "," _eagle_ptx)
+  set(_eagle_plugin_archs "${_eagle_sass}/${_eagle_ptx}")
   target_compile_definitions(eagle_cuda PRIVATE
     EAGLE_PYTHON_VERSION="${eagle_VERSION}"
     EAGLE_CUDA_PLUGIN_ARCHS="${_eagle_plugin_archs}"

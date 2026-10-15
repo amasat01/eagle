@@ -80,14 +80,14 @@ struct ReversePlan {
     std::vector<Join> joins;
     std::vector<Snapshot> snapshots;
     /** @brief Per reverse node, per @c NodeVjp::writes entry: the reverse node
-     *  whose adjoint it consumes, @ref kSeed or @ref kZero. Empty for a join. */
+     *  whose adjoint it consumes, @c kSeed or @c kZero. Empty for a join. */
     std::vector<std::vector<gidx>> seedOf;
     /** @brief Per reverse node, per @c NodeVjp::reads entry: the index of the
-     *  snapshot holding the value the node read, or @ref kLive. */
+     *  snapshot holding the value the node read, or @c kLive. */
     std::vector<std::vector<gidx>> readOf;
     /** @brief Per graph input (a plane read before anything writes it), in
      *  first-use order: where its gradient comes from (a reverse node, or
-     *  @ref kZero). */
+     *  @c kZero). */
     std::vector<std::pair<std::string, gidx>> gradients;
 };
 

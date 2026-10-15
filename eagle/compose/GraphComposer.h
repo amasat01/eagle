@@ -391,7 +391,7 @@ private:
  *
  * @par Fired-member recording
  * Every @ref launch call appends the active-member index set to a history
- * (@ref firedHistory / @ref resetFiredHistory).
+ * (@ref firedHistory / @c resetFiredHistory).
  *
  * @par The overlap seam (``mode="sequenced"``, CUDA)
  * A member whose engine owns its own, non-default stream
@@ -698,7 +698,7 @@ public:
 
     /** @brief Replay ``n`` times. Identical on both faces: delegates to
      *  @ref FlatCaptureEngine when one was installed; ordered per-member
-     *  dispatch (@ref launchOrdered_) otherwise -- which is EVERY case on
+     *  dispatch (@c launchOrdered_) otherwise -- which is EVERY case on
      *  the CPU face, and the ``mode="sequenced"`` case on the CUDA face.
      *  @throws std::runtime_error if called before @ref build. */
     Self& launch(idx_t n = 1)
@@ -736,7 +736,7 @@ public:
     }
 
     /** @brief Per-``launch()``-call fired-member index sets, oldest first,
-     *  since construction or the last @ref resetFiredHistory. */
+     *  since construction or the last @c resetFiredHistory. */
     const std::vector<std::vector<idx_t>>& firedHistory() const
     {
         return firedHistory_;
