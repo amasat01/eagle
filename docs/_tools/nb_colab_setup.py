@@ -9,11 +9,16 @@ not installed and the helper files it imports (``_shared/``, sibling example
 modules, fixtures) are not next to it. This script gives each notebook one
 generated cell, derived from the notebook's own imports, that on Colab only
 
-* ``pip install``s the PyPI packages the notebook imports (the ``[cuda12]`` extra
-  only when ``nvidia-smi`` shows a GPU), and
+* ``pip install``s the PyPI packages the notebook imports (the ``[cuda12]`` or ``[cuda13]`` extra
+  only when ``nvidia-smi`` shows a GPU, matching the runtime's CUDA major), and
 * downloads the repo files it needs from raw.githubusercontent.com into
   ``/content/<repo> (Kaggle: /kaggle/working/<repo>)/<same repo path>`` and changes into the notebook's directory,
   so every relative path in the notebook resolves exactly as in a checkout.
+
+Two optional environment variables test a release before it ships: ``RAPTOR_PRE=1`` adds ``--pre`` to the pip
+install, and ``RAPTOR_REF=<git ref>`` downloads the helper files from that ref instead of ``main``. Two more
+point the cell at a local mirror (``make nbcheck-hosted`` uses them): ``RAPTOR_RAW_BASE`` replaces
+``https://raw.githubusercontent.com`` and ``RAPTOR_WORKDIR`` replaces ``/content`` (Kaggle: ``/kaggle/working``).
 
 Elsewhere the cell installs nothing: it only checks the hard imports and raises an
 ImportError that names the pip line. The cell is generated; do not edit it by hand.
@@ -47,7 +52,7 @@ PYPI = {
     "torch": "torch",
     "matplotlib": "matplotlib",
     "warp": "warp-lang",
-    "cupy": "raptor-eagle",  # the [cuda12] extra brings cupy
+    "cupy": "raptor-eagle",  # the [cuda12] / [cuda13] extra brings cupy
 }
 #: distributions that take the GPU extra when a GPU is visible
 GPU_EXTRA = ("raptor-eagle", "raptor-hawk")
@@ -163,26 +168,53 @@ def render(p: dict) -> str:
         '    HOSTED = "KAGGLE_KERNEL_RUN_TYPE" in os.environ  # a Kaggle kernel',
         "",
         "if HOSTED:",
-        "    import pathlib, shutil, subprocess, sys, urllib.request",
+        "    import importlib.metadata, pathlib, re, shutil, subprocess, sys, urllib.request",
         "",
         '    gpu = bool(shutil.which("nvidia-smi")) and subprocess.run(["nvidia-smi", "-L"], capture_output=True).returncode == 0',
-        '    extra = "[cuda12]" if gpu else ""',
-        f'    subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", {pkg_items}])',
+        '    extra = ""',
+        "    if gpu:",
+        "        # the CUDA major the runtime already has: a CuPy that is installed, else torch's, else the driver's",
+        "        major = None",
+        '        for m in ("13", "12"):',
+        "            try:",
+        '                importlib.metadata.version(f"cupy-cuda{m}x")',
+        "                major = m",
+        "                break",
+        "            except importlib.metadata.PackageNotFoundError:",
+        "                pass",
+        "        if major is None:",
+        "            try:",
+        "                import torch",
+        '                major = "13" if str(torch.version.cuda).startswith("13") else None',
+        "            except ImportError:",
+        "                pass",
+        "        if major is None:",
+        '            smi = re.search(r"CUDA Version: (\\d+)", subprocess.run(["nvidia-smi"], capture_output=True, text=True).stdout)',
+        '            major = "13" if smi and int(smi.group(1)) >= 13 else "12"',
+        '        extra = f"[cuda{major}]"',
+        '        print(f"GPU found: installing the {extra} extras to match this runtime.")',
+        '    pre = ["--pre"] if os.environ.get("RAPTOR_PRE") else []  # optional: test a release candidate',
+        '    ref = os.environ.get("RAPTOR_REF", "main")  # optional: fetch the helper files from this git ref',
+        '    if pre or "RAPTOR_REF" in os.environ:',
+        '        print(f"Pre-release test: installing with --pre, helper files from {ref}.")',
+        f'    subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", *pre, {pkg_items}])',
     ]
     if p["files"]:
         lines += [
-            f'    root = pathlib.Path("/kaggle/working" if "KAGGLE_KERNEL_RUN_TYPE" in os.environ else "/content") / "{REPO}"',
+            '    base = os.environ.get("RAPTOR_RAW_BASE", "https://raw.githubusercontent.com")  # optional: a local mirror',
+            '    top = os.environ.get("RAPTOR_WORKDIR") or ("/kaggle/working" if "KAGGLE_KERNEL_RUN_TYPE" in os.environ else "/content")',
+            f'    root = pathlib.Path(top) / "{REPO}"',
             "    for rel in (",
             files.rstrip("\n"),
             "    ):",
             "        (root / rel).parent.mkdir(parents=True, exist_ok=True)",
-            f'        urllib.request.urlretrieve(f"https://raw.githubusercontent.com/{GITHUB}/{REPO}/main/{{rel}}", root / rel)',
+            f'        urllib.request.urlretrieve(f"{{base}}/{GITHUB}/{REPO}/{{ref}}/{{rel}}", root / rel)',
             f'    (root / "{p["nb_dir"]}").mkdir(parents=True, exist_ok=True)',
             f'    os.chdir(root / "{p["nb_dir"]}")',
         ]
     lines += [
         "    if not gpu:",
-        '        print("No GPU found; continuing on the CPU (pick a GPU runtime or accelerator to use one).")',
+        '        print("Running on the CPU (no GPU in this runtime). For a GPU: " + ("Settings \u2192 Accelerator \u2192 GPU T4 x2." if "KAGGLE_KERNEL_RUN_TYPE" in os.environ else "Runtime \u2192 Change runtime type \u2192 T4 GPU."))',
     ]
     if p["hard"]:
         lines += [

@@ -18,7 +18,7 @@ DOXYBUILDDIR  = _doxybuild
 help:
 	@$(SPHINXBUILD) -M help "$(SOURCEDIR)" "$(BUILDDIR)" $(SPHINXOPTS) $(O)
 
-.PHONY: help Makefile doxygen clean livehtml exampletest strict linkcheck nbexec nbcheck
+.PHONY: help Makefile doxygen clean livehtml exampletest strict linkcheck nbexec nbcheck nbcheck-hosted nbcheck-floor nbcheck-hosted-gpu
 
 doxygen:
 	@EAGLE_VERSION=$$(python3 -c "import re, sys; m = re.search(r'project\s*\(\s*eagle\s+VERSION\s+(\d+\.\d+\.\d+)', open('../CMakeLists.txt').read(), re.IGNORECASE); print(m.group(1)) if m else sys.exit('doxygen: could not read eagle version from ../CMakeLists.txt')") && \
@@ -81,3 +81,22 @@ livehtml: Makefile
 # Catch-all target: route unknown targets to Sphinx.
 %: Makefile
 	@$(SPHINXBUILD) -M $@ "$(SOURCEDIR)" "$(BUILDDIR)" $(SPHINXOPTS) $(O)
+
+# Run every docs notebook as a hosted (Colab) user does: wheels built from the checkouts, a pinned environment,
+# the setup cell included (_tools/nb_hosted.py). Needs uv, a Python 3.13 and a C++23 compiler (CXX).
+NBH_PYTHON ?= python3.13
+NBH_ARGS   ?=
+nbcheck-hosted:
+	python _tools/nb_hosted.py --python $(NBH_PYTHON) --lock colab --repos eagle --eagle $(abspath ..) $(NBH_ARGS)
+
+# The same against the oldest numpy and torch that have Python 3.13 wheels (_tools/hosted_env/floor-cpu.txt).
+nbcheck-floor:
+	python _tools/nb_hosted.py --python $(NBH_PYTHON) --lock floor --repos eagle --eagle $(abspath ..) $(NBH_ARGS)
+
+# The GPU runtime's lock (CUDA 12 builds: see the header of _tools/hosted_env/colab-gpu.txt): eagle's CUDA plugin is built for
+# NBH_GPU_ARCH, the GPU-only notebooks run too, on GPU NBH_GPU_INDEX, under the flock file NBH_GPU_LOCK if set. Needs ~5 GB free.
+NBH_GPU_ARCH  ?= 61
+NBH_GPU_INDEX ?= 1
+NBH_GPU_LOCK  ?=
+nbcheck-hosted-gpu:
+	python _tools/nb_hosted.py --python $(NBH_PYTHON) --lock colab-gpu --gpu --cuda-arch $(NBH_GPU_ARCH) --gpu-index $(NBH_GPU_INDEX) $(if $(NBH_GPU_LOCK),--gpu-lock $(NBH_GPU_LOCK)) --repos eagle --eagle $(abspath ..) $(NBH_ARGS)

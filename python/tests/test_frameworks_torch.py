@@ -183,6 +183,23 @@ def test_gradcheck_float64(op, dev):
         check_batched_grad=False)
 
 
+def test_host_path_does_not_depend_on_numpy_dlpack_writability(op, monkeypatch):
+    """NumPy before 2.2 imports every torch tensor read-only over DLPack (Colab ships 2.1); the host path must still
+    write the kernel's outputs, so it must not take its arrays from ``np.from_dlpack``."""
+    import numpy as np
+
+    real = np.from_dlpack
+
+    def read_only(x, *args, **kwargs):
+        out = real(x, *args, **kwargs)
+        out.flags.writeable = False
+        return out
+
+    monkeypatch.setattr(np, "from_dlpack", read_only)
+    v, cd, terminated = _inputs(_device("cpu"))
+    torch.testing.assert_close(op(v, cd, terminated), _reference(v, cd, terminated), rtol=1e-14, atol=0)
+
+
 @pytest.mark.parametrize("dev", DEVICES)
 def test_terminated_sample_contributes_zero_gradient(op, dev):
     v, cd, terminated = _inputs(_device(dev))

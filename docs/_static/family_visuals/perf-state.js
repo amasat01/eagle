@@ -106,12 +106,12 @@
     var saved = null;
     try { saved = window.localStorage.getItem(VIEW_KEY); } catch (e) { /* private window, blocked storage */ }
     root.classList.add("bars-js");
-    show(saved === "eff" || saved === "early" ? saved : "wall");
+    show(saved === "eff" ? saved : "wall");
     root.addEventListener("click", function (ev) {
       var b = ev.target.closest ? ev.target.closest(".bars-opt") : null;
       if (!b) { return; }
       var view = b.getAttribute("data-view");
-      view = view === "eff" || view === "early" ? view : "wall";
+      view = view === "eff" ? view : "wall";
       show(view);
       try { window.localStorage.setItem(VIEW_KEY, view); } catch (e) { /* the choice just is not remembered */ }
     });
