@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+**JAX is certified.** Five rows (`JX-IN-CUDA-ALIAS`, `JX-IN-WRITE-REFUSED`, `JX-OUT-CUDA-ALIAS`, `JX-IN-CPU-COPY`, `STREAM-JAX-PRODUCER-ORDER`) cover JAX arrays: zero-copy in for read-only roles, zero-copy out (the JAX array is eagle's own result buffer, never written again), and a device-side wait for a JAX operation still running. JAX arrays are immutable, so a JAX array passed as `out=`, as `terminated` (unless the plugin declares it read-only), as a `Mutable` plane, or as a written host buffer (`host_ptr(..., writable=True)`) is refused by name instead of copied. A CPU result for a CPU JAX input is now placed on the CPU device. JAX publishes wheels for Python 3.12 and newer, and no 3.13 free-threaded build; install it with the new `jax` extra on those, plus JAX's own `jax[cuda12]` or `jax[cuda13]` for GPU arrays.
+
 ## 0.6.1 (2026-10-15)
 
 **Torch tensors on the CPU under older NumPy.** With NumPy older than 2.2 (Colab ships 2.1), NumPy imports every torch tensor read-only, so `eagle.simulate` refused CPU torch outputs as not writable. The torch bridge now checks the tensor as before and then works on torch's own NumPy view of the same memory, which is always writable. A test makes NumPy's import read-only and checks the outputs are written.

@@ -181,8 +181,9 @@ same body, and the placement/layout self-checks that refuse a mismatch at plan t
 | `python/tests/test_interop.py` | Framework-free DLPack detection and origin-selection logic. |
 | `python/tests/test_interop_buffer.py` | The generic buffer layer: zero-copy import of numpy, torch, cupy and Warp producers, access/owner/producer reporting, re-export, named refusals and the stream contract (fence, RED twin, re-fence). |
 | `python/tests/test_interop_matrix.py` | eagle's own 8 declared rows of the cross-repo interop certification matrix. |
-| `python/tests/test_interop_matrix_conformance.py` | Completeness gate and no-skip self-test over the matrix above. |
+| `python/tests/test_interop_matrix_conformance.py` | Completeness gate and no-skip self-test over the matrix above, and the absent-torch and absent-jax checks (a missing certified framework fails, never skips). |
 | `python/tests/test_interop_warp.py` | The NVIDIA Warp interop certification rows (`WP-IN-CUDA-ALIAS`, `WP-OUT-CUDA-ALIAS`, `STREAM-WARP-PRODUCER-ORDER`) — kept separate from `test_interop_matrix.py` rather than appended to it. |
+| `python/tests/test_interop_jax.py` | The JAX interop certification rows (`JX-IN-CUDA-ALIAS`, `JX-IN-WRITE-REFUSED`, `JX-OUT-CUDA-ALIAS`, `JX-IN-CPU-COPY`, `STREAM-JAX-PRODUCER-ORDER`); the stream row builds a small `jax.ffi` spin kernel (`fixtures/jax_spin.cu`) with nvcc. |
 | `python/tests/test_arg_classify.py` | The shared role-to-ABI-shape classifier. |
 
 ## Python backend seam (`eagle._core` / CUDA plugin boundary)

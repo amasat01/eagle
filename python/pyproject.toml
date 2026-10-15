@@ -80,6 +80,10 @@ cuda = [
 # eagle.frameworks.torch: the torch.autograd bridge. torch is imported only by
 # that submodule, so plain `import eagle` never needs it.
 torch = ["torch"]
+# eagle's JAX bridge (see docs: interop contract). JAX publishes wheels for
+# Python 3.12 and newer, so this extra resolves there and nowhere else; for
+# GPU arrays install JAX's own CUDA extra (jax[cuda12] or jax[cuda13]).
+jax = ["jax>=0.11"]
 # eagle.Graph.plot: the graph drawn with matplotlib (imported only by that
 # method; show()/to_mermaid()/to_dot() need nothing).
 plot = ["matplotlib>=3.7"]

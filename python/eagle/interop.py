@@ -272,6 +272,22 @@ class _TorchAdapter(Adapter):
 
 
 class _JaxAdapter(Adapter):
+    """A JAX array in, a JAX array out.
+
+    In: a jax array in a read-only role (state vectors, per-sample planes,
+    tables, uniforms) is aliased on CUDA and uploaded on the CPU. jax arrays
+    are immutable, so one passed where the kernel writes (``out=``,
+    ``terminated`` unless the plugin declares it read-only, a ``Mutable``
+    plane, a written host buffer) is refused by name, never copied: a copy
+    would drop the kernel's update.
+
+    Out: on CUDA the jax array IS eagle's result buffer; eagle never writes
+    it again. On the CPU the result is copied into a new jax array.
+
+    jax speaks only legacy DLPack, so :func:`import_buffer` reports its
+    access as ``"unknown"``.
+    """
+
     name = "jax"
 
     def __init__(self, cuda: bool):
@@ -295,9 +311,8 @@ class _JaxAdapter(Adapter):
 
         if self.cuda:
             return jax.dlpack.from_dlpack(a)  # zero-copy device view
-        import jax.numpy as jnp
 
-        return jnp.asarray(a.get())  # host result -> jax (default device; best-effort)
+        return jax.device_put(a.get(), jax.devices("cpu")[0])  # host result -> CPU jax
 
 
 class _TfAdapter(Adapter):
@@ -381,11 +396,27 @@ def to_cupy(x):
     return ad.to_cupy(x)
 
 
-def host_ptr(x) -> int:
+def refuse_jax_written(x, role: str) -> None:
+    """Raise :class:`BufferRefused` if ``x`` is a jax array passed where the
+    kernel writes (``role`` names the place). jax arrays are immutable, so a
+    write could not reach them, and a copy would silently drop it."""
+    if _root_module(x) in ("jax", "jaxlib"):
+        raise BufferRefused(
+            f"eagle.interop: a jax array cannot be passed as {role}: jax arrays "
+            "are immutable, so the kernel's write could not reach it; pass a "
+            "cupy or torch buffer"
+        )
+
+
+def host_ptr(x, *, writable: bool = False) -> int:
     """Raw host data pointer of a contiguous CPU tensor, for a zero-copy
     host-plugin launch (:class:`eagle.host_launch.HostPluginLibrary`) --
     no import, no copy, no cupy. Accepts a torch CPU tensor or a numpy
-    array; a device tensor or non-contiguous buffer raises."""
+    array; a device tensor or non-contiguous buffer raises. ``writable=True``
+    is for a buffer the kernel writes: a jax array or any read-only view is
+    refused."""
+    if writable:
+        refuse_jax_written(x, "a written host buffer")
     root = _root_module(x)
     if root == "torch":
         if _is_cuda(x):
@@ -398,6 +429,8 @@ def host_ptr(x) -> int:
     a = np.asarray(x)
     if not a.flags.c_contiguous:
         raise ValueError("host_ptr: array must be C-contiguous")
+    if writable and not a.flags.writeable:
+        raise BufferRefused("host_ptr: the buffer is read-only, so a kernel cannot write it")
     return int(a.ctypes.data)
 
 
@@ -409,6 +442,7 @@ def as_out_buffer(out, shape, dtype=None):
     C-contiguous ``shape`` buffer of ``dtype`` (default float64)."""
     import cupy as cp
 
+    refuse_jax_written(out, "out=")
     if dtype is None:
         dtype = cp.float64
     ad = detect(out)
