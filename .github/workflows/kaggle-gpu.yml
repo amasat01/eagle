@@ -1,0 +1,94 @@
+# Copyright 2026 Alessandro Masat
+# SPDX-License-Identifier: Apache-2.0
+#
+# Runs eagle's GPU interop certification rows (including JAX) and two short notebooks on a free
+# Kaggle T4, for CUDA 12 and CUDA 13. GitHub's hosted runners have no GPU, so this is where the
+# `interop_matrix` rows run on real hardware. The job pushes a private Kaggle kernel
+# (.github/kaggle/kernel.py), waits for it, and fails if any test or notebook failed. A CUDA 13 run
+# on a machine whose driver is older than 580 is reported as a warning and a green job.
+#
+# Started by hand (workflow_dispatch) or after a version tag's Publish run succeeds; never by push or
+# pull request.
+# Both jobs use the `kaggle` environment (required reviewer) and the secret KAGGLE_API_TOKEN.
+
+name: Kaggle GPU
+
+on:
+  workflow_dispatch:
+    inputs:
+      eagle_ref:
+        description: eagle ref (tests, and the build when source is git)
+        default: main
+      hawk_ref:
+        description: hawk ref (used when source is git)
+        default: main
+      raptor_ref:
+        description: raptor ref (RAPTOR_ROOT, and the build when source is git)
+        default: main
+      aether_ref:
+        description: aether ref (used when source is git)
+        default: main
+      source:
+        description: Where the packages come from
+        type: choice
+        options: [pypi, git]
+        default: pypi
+      pre:
+        description: Allow pre-release packages (pip --pre)
+        type: boolean
+        default: false
+      version:
+        description: Exact raptor-eagle version (pypi only, optional; hawk takes its newest)
+        default: ""
+  # after a tag's Publish run succeeds, so the new wheels are already on PyPI
+  workflow_run:
+    workflows: [Publish]
+    types: [completed]
+
+permissions:
+  contents: read
+
+jobs:
+  kaggle-gpu:
+    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && startsWith(github.event.workflow_run.head_branch, 'v'))
+    runs-on: ubuntu-latest
+    environment: kaggle
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        cuda: [12, 13]
+    env:
+      KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --quiet kaggle
+      - name: Run the kernel on Kaggle
+        env:
+          INPUT_EAGLE_REF: ${{ inputs.eagle_ref || github.event.workflow_run.head_branch || 'main' }}
+          INPUT_HAWK_REF: ${{ inputs.hawk_ref || 'main' }}
+          INPUT_RAPTOR_REF: ${{ inputs.raptor_ref || 'main' }}
+          INPUT_AETHER_REF: ${{ inputs.aether_ref || 'main' }}
+          INPUT_SOURCE: ${{ inputs.source || 'pypi' }}
+          INPUT_PRE: ${{ (inputs.pre || contains(github.event.workflow_run.head_branch, 'rc')) && 'true' || 'false' }}
+          TAG: ${{ github.event.workflow_run.head_branch }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          args=(--cuda "${{ matrix.cuda }}" --run-id "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+                --eagle-ref "$INPUT_EAGLE_REF" --hawk-ref "$INPUT_HAWK_REF"
+                --raptor-ref "$INPUT_RAPTOR_REF" --aether-ref "$INPUT_AETHER_REF"
+                --source "$INPUT_SOURCE" --out kaggle-out)
+          if [ "$INPUT_PRE" = true ]; then args+=(--pre); fi
+          if [ -z "$INPUT_VERSION" ] && [ -n "$TAG" ]; then INPUT_VERSION="${TAG#v}"; fi
+          if [ -n "$INPUT_VERSION" ]; then args+=(--version "$INPUT_VERSION"); fi
+          python .github/kaggle/drive.py "${args[@]}"
+      - name: Keep the kernel log and result
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: kaggle-gpu-cuda${{ matrix.cuda }}
+          path: kaggle-out
+          if-no-files-found: warn
