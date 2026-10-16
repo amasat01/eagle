@@ -1,0 +1,17 @@
+# Build toolchain of the CUDA 13 profile (conda-forge, linux-64; no CPU twin: the CPU profile has no CUDA runtime).
+# GCC 14 for the C++23 sources (and the static libstdc++ the bindings link); the CUDA 13.4
+# compiler builds eagle's driver-only CUDA plugin and installs the CUDA-mode headers.
+# Driver floor: >= 580 (CUDA 13). GPU floor: compute capability 7.5 (CUDA 13 drops offline
+# compilation below sm_75). Target: Blackwell sm_120 (RTX PRO 6000) among others.
+python=3.12.14
+gxx_linux-64=14.4.0
+gcc_linux-64=14.4.0
+cmake=4.4.3
+ninja=1.13.2
+make
+cuda-version=13.4
+cuda-nvcc
+cuda-cudart-dev
+cuda-driver-dev
+cuda-nvrtc-dev
+pip=26.2.1
