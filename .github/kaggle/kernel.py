@@ -77,7 +77,7 @@ def make_env_python(cfg, work):
     sh(sys.executable, "-m", "pip", "install", "-q", "uv")
     want = sys.executable if sys.version_info >= (3, 12) else "3.12"
     venv = work / "venv"
-    if sh(sys.executable, "-m", "uv", "venv", "--python", want, venv) != 0:
+    if sh(sys.executable, "-m", "uv", "venv", "--seed", "--python", want, venv) != 0:  # --seed: pip, which the notebooks' setup cell calls
         raise SystemExit("could not create a clean Python environment with uv")
     return str(venv / "bin" / "python"), True
 
