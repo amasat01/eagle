@@ -48,7 +48,7 @@ CUDA=${REPRO_CUDA:-12}
 TARGET="" PROFILE=auto WORK="" SRC="" ARCH="" ENV_PREFIX="" EDITABLE=0 SMOKE=1 FROM_PYPI=0
 JOBS=$(nproc 2>/dev/null || echo 4)
 declare -A REF=([aether]=${AETHER_REF:-v0.2.3} [raptor]=${RAPTOR_REF:-main}
-                [eagle]=${EAGLE_REF:-v0.6.0} [hawk]=${HAWK_REF:-v0.5.0})
+                [eagle]=${EAGLE_REF:-v0.6.2} [hawk]=${HAWK_REF:-v0.5.1})
 GIT_BASE=${REPRO_GIT_BASE:-https://github.com/amasat01}
 REPOS=(aether raptor eagle hawk)
 

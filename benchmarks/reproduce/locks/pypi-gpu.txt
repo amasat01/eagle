@@ -4,8 +4,8 @@
 # eagle/hawk bring cupy, cuda-toolkit and NVRTC through their cuda12 extras; the rest is
 # what the card scripts import (versions as in cards-gpu.in).
 --extra-index-url https://download.pytorch.org/whl/cu129
-raptor-eagle[cuda12]==0.6.0
-raptor-hawk[cuda12]==0.5.0
+raptor-eagle[cuda12]==0.6.2
+raptor-hawk[cuda12]==0.5.1
 numpy==2.5.3
 scipy==1.17.1
 torch==2.12.1+cu129

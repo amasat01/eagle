@@ -3,8 +3,8 @@
 # Driver floor: >= 580 (CUDA 13). GPU floor: compute capability 7.5 (CUDA 13 drops offline compilation below sm_75).
 # eagle/hawk bring cupy-cuda13x, cuda-toolkit and NVRTC through their cuda13 extras; Warp's PyPI wheel is built with
 # CUDA 13.4. No PyTorch, no JAX (versions as in cards-gpu-cuda13.in).
-raptor-eagle[cuda13]==0.6.0
-raptor-hawk[cuda13]==0.5.0
+raptor-eagle[cuda13]==0.6.2
+raptor-hawk[cuda13]==0.5.1
 numpy==2.5.3
 cupy-cuda13x==14.2.0
 warp-lang==1.18.0

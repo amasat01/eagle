@@ -26,7 +26,7 @@ its own) and a GPU of compute capability ≥ 7.5. For a pre-Turing GPU (P100, V1
 `nvidia/cuda:12.9.1-devel-ubuntu22.04`.
 
 ```bash
-git clone --depth 1 --branch v0.6.0 https://github.com/amasat01/eagle.git
+git clone --depth 1 --branch v0.6.2 https://github.com/amasat01/eagle.git
 eagle/benchmarks/reproduce/bootstrap.sh                 # gpu profile when a GPU is visible
 eagle/benchmarks/reproduce/bootstrap.sh --profile cpu   # the CPU cards' environment
 eagle/benchmarks/reproduce/run_cards.sh --preset smoke --which all   # minutes: checks the setup

@@ -1,8 +1,22 @@
 # Changelog
 
-## Unreleased
+## 0.6.2 (unreleased)
 
 **JAX is certified.** Five rows (`JX-IN-CUDA-ALIAS`, `JX-IN-WRITE-REFUSED`, `JX-OUT-CUDA-ALIAS`, `JX-IN-CPU-COPY`, `STREAM-JAX-PRODUCER-ORDER`) cover JAX arrays: zero-copy in for read-only roles, zero-copy out (the JAX array is eagle's own result buffer, never written again), and a device-side wait for a JAX operation still running. JAX arrays are immutable, so a JAX array passed as `out=`, as `terminated` (unless the plugin declares it read-only), as a `Mutable` plane, or as a written host buffer (`host_ptr(..., writable=True)`) is refused by name instead of copied. A CPU result for a CPU JAX input is now placed on the CPU device. JAX publishes wheels for Python 3.12 and newer, and no 3.13 free-threaded build; install it with the new `jax` extra on those, plus JAX's own `jax[cuda12]` or `jax[cuda13]` for GPU arrays.
+
+**Build warnings fixed.** The build-info architectures string now lists SASS and PTX in a short form (`61,70,90/90`) so the full list fits its buffer, with a compile check (before, it was cut at 127 characters); the build links libgomp; test markers are registered; Doxygen builds under strict warnings; the Pages actions use the Node 24 releases.
+
+**Kaggle GPU workflow.** A Kaggle T4 workflow runs the GPU interop rows and the notebooks, from a copy of the suite outside the checkout, and reports results even when the kernel ends in error.
+
+**Efficiency table.** The table quotes `eagle.simulate`, the same arm as the landing site.
+
+**NumPy and torch floors.** `numpy>=1.26` and `torch>=2.2` are declared, with a floor lock and a test that keeps the two in step. `raptor-core>=0.3.1` carries the JAX rows.
+
+**docs-fresh tells its failures apart.** `tools/docs_fresh.sh` exits with a different code for stale docs, a missing card and a missing tool.
+
+**Profiling kit.** The card kit gains a short `nsys` and `ncu` profiling run: launch and chunk sweeps, comparison of every eagle path with Warp, slot fill and crossover reports, clocks locked and chunk lengths pinned, FP64 and FP32 kernels. It supports aarch64 (toolchain and cards-cpu locks picked by `uname -m`) and CUDA 13 (`--cuda 13`); the CUDA 12 profile runs on 12.9 and `--cuda 12.6` keeps the lock for pre-Turing parts. Band captures are profiled as an eager loop, counters are `uint32`, a test guards the locks, and split card runs load the card scripts of the eagle source they measure. The bootstrap uses a conda frontend from `PATH` only when it answers like one.
+
+**Reproduction locks.** The `pypi-*` locks pin eagle 0.6.2 and hawk 0.5.1.
 
 ## 0.6.1 (2026-10-15)
 
