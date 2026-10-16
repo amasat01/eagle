@@ -135,7 +135,7 @@ def main():
         return 1
     kaggle("kernels", "output", kid, "-p", str(outdir), check=False)
     result = outdir / "result.json"
-    if st != "COMPLETE" or not result.exists():
+    if not result.exists():
         summary([f"### Kaggle GPU, CUDA {args.cuda}", "",
                  f"Kernel ended as {st} and left no result.json; see the log artifact."])
         return 1
@@ -145,7 +145,7 @@ def main():
         print(f"::warning::Kaggle GPU CUDA {args.cuda} skipped: {res.get('reason')}")
         lines += ["", f"SKIPPED: {res.get('reason')}"]
     summary(lines)
-    return 1 if res.get("status") == "fail" else 0
+    return 1 if res.get("status") == "fail" or st != "COMPLETE" and res.get("status") != "skip" else 0
 
 
 if __name__ == "__main__":

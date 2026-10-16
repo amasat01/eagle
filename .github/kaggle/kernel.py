@@ -186,8 +186,15 @@ def junit_summary(path):
 
 
 def run_tests(py, eagle_src, work):
-    pydir = eagle_src / "python"
-    runs = (("interop_matrix", ["tests", "-m", "interop_matrix"]), ("jax", ["tests/test_interop_jax.py"]))
+    # a copy of the suite outside the checkout, as CI runs it: from inside, the source tree's eagle/ (no compiled
+    # extension) would shadow the installed package
+    pydir = work / "suite"
+    shutil.rmtree(pydir, ignore_errors=True)
+    pydir.mkdir()
+    shutil.copytree(eagle_src / "python" / "tests", pydir / "tests")
+    shutil.copy2(eagle_src / "python" / "conftest.py", pydir)
+    runs = (("interop_matrix", ["tests", "-m", "interop_matrix and not repo_local"]),
+            ("jax", ["tests/test_interop_jax.py", "-m", "not repo_local"]))
     total = {"tests": 0, "failures": 0, "errors": 0, "skipped": 0, "failed": []}
     rcs = {}
     for name, sel in runs:
