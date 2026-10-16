@@ -97,6 +97,8 @@ private:
  *        cross a window boundary, a checkpoint before every launch that starts
  *        a window, until @p done() or @p maxSteps. Returns the steps run.
  *
+ * @param maxSteps    step cap for the whole run.
+ * @param window      steps between checkpoints.
  * @param maxK        steps one launch may take (1 for a single-step entry).
  * @param done        true once every sample has finished (checked before each launch).
  * @param checkpoint  checkpoint(k): save the state at the start of window k.

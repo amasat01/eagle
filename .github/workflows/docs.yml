@@ -164,7 +164,7 @@ jobs:
       - name: make strict (0 Sphinx warnings)
         run: cd eagle/docs && make strict
 
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: eagle/docs/_build/html
           retention-days: 7
@@ -179,4 +179,4 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5

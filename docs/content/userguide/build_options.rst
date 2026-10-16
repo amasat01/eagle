@@ -71,7 +71,8 @@ for every architecture that ``nvcc`` lists from ``sm_60`` up: ``60 61 62 70 72
 75 80 86 87 89 90 100 101 103 120 121``, plus PTX at ``100`` and ``121``. A CUDA 13 ``nvcc``
 with the same default lists ``75`` up and ``110``, drops ``101``, and ends in
 the same two PTX targets. The list a plugin was built for is reported by its ``archs``
-field, and CI checks that the wheel names ``100-real``, ``120-real`` and ``100-virtual``. The ``100-virtual`` PTX is what lets a CUDA 13 driver
+field, SASS first and PTX after a slash (e.g. ``61,70,90/90``), and CI checks that the wheel
+lists SASS ``100`` and ``120`` and PTX ``100``. The PTX at ``100`` is what lets a CUDA 13 driver
 run on Jetson Thor (sm_110), which has no SASS here.
 
 .. list-table:: Driver requirements (Linux; the driver, not the installed toolkit, decides, because the plugin uses the driver API only)

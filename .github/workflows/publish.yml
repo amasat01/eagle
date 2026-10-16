@@ -58,23 +58,13 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - name: documented numbers match the committed cards
-        run: |
-          if ! python tools/sync_readme_cards.py --check; then
-            echo "::error::The documented performance numbers are out of date with the committed cards. Regenerate them locally with: python tools/sync_readme_cards.py -- then commit the result."
-            exit 1
-          fi
       - uses: actions/checkout@v7
         with:
           repository: amasat01/amasat01.github.io
           ref: main
           path: site
-      - name: family visuals match the landing site and the cards
-        run: |
-          if ! python site/tools/sync_family_visuals.py --check --site-root site --eagle-root . --target eagle=.; then
-            echo "::error::The family visuals bundle is out of date with the landing site or the cards. Regenerate it locally with: python tools/sync_family_visuals.py --site-root <path to the site checkout> --eagle-root <path to an eagle checkout> --target eagle=<this repo> -- then commit docs/_static/family_visuals."
-            exit 1
-          fi
+      - name: documented numbers and family visuals match the committed cards
+        run: bash tools/docs_fresh.sh site
   build:
     needs: docs-fresh
     runs-on: ubuntu-latest
@@ -205,12 +195,15 @@ jobs:
         run: |
           shopt -s nullglob
           for whl in dist/*.whl; do
-            archs="$(unzip -p "$whl" eagle/libeagle_cuda.so | strings -n 8 | grep -E '^[0-9]+-real(,[0-9]+-real)*(,[0-9]+-virtual)+$' | head -1)"
-            for want in 100-real 120-real 100-virtual; do
-              case ",$archs," in *",$want,"*) ;; *) echo "$whl: plugin archs '$archs' lack $want"; exit 1;; esac
+            archs="$(unzip -p "$whl" eagle/libeagle_cuda.so | strings -n 8 | grep -E '^[0-9]+(,[0-9]+)*/[0-9]+(,[0-9]+)*$' | head -1)"
+            sass=",${archs%%/*},"
+            ptx=",${archs##*/},"
+            for want in sass:100 sass:120 ptx:100; do
+              case "${want%%:*}" in sass) have="$sass";; *) have="$ptx";; esac
+              case "$have" in *",${want##*:},"*) ;; *) echo "$whl: plugin archs '$archs' lack $want"; exit 1;; esac
             done
           done
-          echo "OK: every wheel's plugin lists 100-real, 120-real and 100-virtual"
+          echo "OK: every wheel's plugin lists SASS 100 and 120 and PTX 100"
       - name: tag == version guard (every wheel + the sdist must agree)
         if: github.ref_type == 'tag'
         run: |
@@ -336,7 +329,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/suite"
           cp -r eagle/python/tests eagle/python/conftest.py "$RUNNER_TEMP/suite/"
           cd "$RUNNER_TEMP/suite"
-          RAPTOR_ROOT="${GITHUB_WORKSPACE}/raptor" python -m pytest tests -q -p no:cacheprovider \
+          RAPTOR_ROOT="${GITHUB_WORKSPACE}/raptor" python -m pytest tests -q -p no:cacheprovider -W error::pytest.PytestUnknownMarkWarning \
             -m "not gpu and not gpu2 and not torch and not interop_matrix and not repo_local"
 
       # Free-threaded legs only (3.13t / 3.14t): the ft rows against the INSTALLED
@@ -357,8 +350,8 @@ jobs:
           N="$(python -m pytest tests -m "ft and not repo_local" --collect-only -q -p no:cacheprovider | grep -c '::' || true)"
           echo "ft rows collected: $N"
           [ "$N" -gt 0 ] || { echo "ft selection collected zero tests"; exit 1; }
-          python -m pytest tests -m "ft and not repo_local" -q -rs -p no:cacheprovider -W error::RuntimeWarning
-          python -m pytest tests -q -p no:cacheprovider -W error::RuntimeWarning -m "not gpu and not gpu2 and not torch and not interop_matrix and not repo_local"
+          python -m pytest tests -m "ft and not repo_local" -q -rs -p no:cacheprovider -W error::RuntimeWarning -W error::pytest.PytestUnknownMarkWarning
+          python -m pytest tests -q -p no:cacheprovider -W error::RuntimeWarning -W error::pytest.PytestUnknownMarkWarning -m "not gpu and not gpu2 and not torch and not interop_matrix and not repo_local"
 
   publish:
     if: github.event_name == 'push' && github.ref_type == 'tag'

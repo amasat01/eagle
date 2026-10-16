@@ -26,7 +26,12 @@ import pathlib
 import sys
 import tempfile
 
-BENCH = pathlib.Path(__file__).resolve().parent.parent
+#: The card scripts of the eagle source the cards measure: run_cards.sh runs this from that
+#: checkout's root, so a kit checked out elsewhere never times its own copies of the scripts
+#: (their md5 is the card's provenance). Run from anywhere else, the kit's own copies are used.
+_HERE_BENCH = pathlib.Path(__file__).resolve().parent.parent
+BENCH = (pathlib.Path.cwd() / "benchmarks"
+         if (pathlib.Path.cwd() / "benchmarks" / "perf_card" / "perf_card.py").is_file() else _HERE_BENCH)
 CHUNK = {"perf": {"compile": 4}, "rk78": {"memory": 5, "compile": 3}}
 
 
@@ -99,7 +104,7 @@ def run_chunk(mod, card, what, idx, ns, parts):
         else:
             keys = mod._compile_keys(ns)
             lo = idx * CHUNK[card]["compile"]
-            mod._compile_keys = lambda ns: keys[lo:lo + CHUNK[card]["compile"]]
+            mod._compile_keys = lambda ns, arms=None: keys[lo:lo + CHUNK[card]["compile"]]
             obj = mod._run_compile_pass(ns)
     _save(parts, name, obj)
     print(f"{card} {name}: saved", flush=True)
@@ -128,10 +133,10 @@ def final(mod, card, ns, parts, rest):
         flags.append("--no-memory")
     comp = [r for part in _load(parts, "compile") for r in part]
     if comp:
-        mod._run_compile_pass = lambda ns: comp
+        mod._run_compile_pass = lambda ns, *a: comp
     else:
         flags.append("--no-compile")
-    return mod.main(["--ns", *map(str, ns), *flags, *rest])
+    return mod.main(["--ns", *map(str, sorted(ns, key=lambda n: (n != max(ns), n))), *flags, *rest])
 
 
 def main(argv=None):

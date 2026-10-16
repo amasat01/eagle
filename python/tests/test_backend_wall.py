@@ -19,6 +19,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import pathlib
+import re
 
 import backend_wall
 import pytest
@@ -91,3 +92,19 @@ def test_plugin_carries_the_expected_device_code():
     sass, ptx = _expected_archs()
     problems = backend_wall.check_plugin(_plugin_path(), sass, ptx)
     assert not problems, "\n".join(problems)
+
+
+def test_plugin_archs_string_lists_the_whole_device_code():
+    # the embedded archs string must carry every arch, not a cut-off prefix
+    _tools("cuobjdump")
+    plugin = _plugin_path()
+    listing = rb"(?<![^\x00])[0-9]+(?:,[0-9]+)*/[0-9]+(?:,[0-9]+)*(?=\x00)"
+    found = re.findall(listing, plugin.read_bytes())
+    assert len(found) == 1, found
+    sass, ptx = re.fullmatch(r"([0-9,]+)/([0-9,]+)", found[0].decode()).groups()
+    elf = backend_wall._run(backend_wall._tool("cuobjdump"), "--list-elf", str(plugin))
+    ptxs = backend_wall._run(backend_wall._tool("cuobjdump"), "--list-ptx", str(plugin))
+    assert sass.split(",") == sorted(
+        set(re.findall(r"\.sm_(\d+)\.cubin", elf)), key=int
+    )
+    assert ptx.split(",") == sorted(set(re.findall(r"\.sm_(\d+)\.ptx", ptxs)), key=int)

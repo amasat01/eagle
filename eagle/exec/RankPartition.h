@@ -138,7 +138,8 @@ struct RankPartition {
         return Partition{ base, count, whole.nSamples };
     }
 
-    /** @overload Resolves the rank and size from @p comm. */
+    /** @overload
+     *  Resolves the rank and size from @p comm. */
     static Partition local(const Partition& whole, MPI_Comm comm)
     {
         return local(whole, comm_rank(comm), comm_size(comm));

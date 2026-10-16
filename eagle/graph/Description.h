@@ -37,7 +37,7 @@ inline const char* kindMeaning(EdgeKind k)
     return k == EdgeKind::RAW ? "data flows" : k == EdgeKind::WAR ? "must wait to overwrite" : "same output";
 }
 
-/** @brief The inverse of @ref kindName.
+/** @brief The inverse of @c kindName.
  *  @throws std::invalid_argument for any other text. */
 inline EdgeKind parseEdgeKind(const std::string& s)
 {

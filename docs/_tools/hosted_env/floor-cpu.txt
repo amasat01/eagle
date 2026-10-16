@@ -1,11 +1,11 @@
-# The "floor" lock: the oldest numpy and torch a user can still run these packages with, on the same Python 3.13.
-# The packages declare no lower bound: raptor-eagle needs "numpy" and optional "torch" (python/pyproject.toml), raptor-hawk
-# needs "numpy". The floor is therefore the oldest release that has a CPython 3.13 wheel (numpy 2.1.0, torch 2.5.0, matplotlib 3.9.2,
-# the first of each to ship cp313). Declare real bounds and move this file to match them. Refresh with the hosted lock.
+# The "floor" lock: the oldest numpy and torch these packages declare (raptor-eagle: numpy>=1.26, torch>=2.2 in the
+# torch extra, python/pyproject.toml; raptor-hawk: numpy>=1.26). Run it with Python 3.12, the newest Python both
+# releases ship wheels for. tests/test_dependency_floor.py keeps these pins and the declared bounds equal.
+# GPU installs need numpy 2 anyway (CuPy 14 requires it); this lock covers the CPU path.
 --index-url https://pypi.org/simple
 --extra-index-url https://download.pytorch.org/whl/cpu
-numpy==2.1.0
-torch==2.5.0+cpu
+numpy==1.26.4
+torch==2.2.2+cpu
 matplotlib==3.9.2
 IPython==8.18.1
 ipykernel==6.29.0

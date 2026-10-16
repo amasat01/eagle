@@ -10,8 +10,8 @@ Interoperability contract
    (``Mutable``, ``Scalar``, ``Vector``) is what the shapes below are shapes
    *of*.
 
-Any array that speaks DLPack — NumPy, CuPy, PyTorch, NVIDIA Warp, and by the
-same protocol JAX, TensorFlow and others — becomes a first-class buffer for
+Any array that speaks DLPack — NumPy, CuPy, PyTorch, NVIDIA Warp, JAX, and by the
+same protocol TensorFlow and others — becomes a first-class buffer for
 the family: zero-copy, with correct stream ordering and lifetime. The layer
 is implemented once, in C++ headers (``aether/interop/Buffer.h`` for the
 buffer record, ``plugin/interop.h`` for the CUDA-aware half), and bound in
@@ -151,6 +151,27 @@ honoured end to end, producer side (``STREAM-WARP-PRODUCER-ORDER``). See
 <https://amasat01.github.io/raptor/content/interop_protocols.html>`_ for the
 full, row-cited statement.
 
+JAX is certified the same way. JAX publishes wheels for Python 3.12 and
+newer, and no 3.13 free-threaded build; its CUDA 12 build supports Pascal
+and newer, and its CUDA 13 build supports newer GPUs only. JAX arrays are
+immutable, so the rules differ from the writable frameworks:
+
+* A JAX array in a read-only role (state vectors, per-sample planes, tables,
+  uniforms) is imported without a copy on CUDA (``JX-IN-CUDA-ALIAS``) and
+  uploaded on the CPU (``JX-IN-CPU-COPY``). JAX speaks legacy DLPack, so its
+  access flag reports ``"unknown"``.
+* A JAX array in a role the kernel writes (``out=``, ``terminated``, a
+  ``Mutable`` plane, a written host buffer) is refused by name and left
+  unchanged (``JX-IN-WRITE-REFUSED``), because a copy would drop the kernel's
+  update. A plugin that declares ``terminated`` read-only accepts one.
+* The JAX result on CUDA is eagle's own result buffer; eagle never writes it
+  again (``JX-OUT-CUDA-ALIAS``). Zero-copy in, zero-copy out, never written in
+  place.
+* eagle imports a JAX array with its current stream passed to ``__dlpack__``,
+  so a JAX operation still running on the GPU is waited for on the device
+  (``STREAM-JAX-PRODUCER-ORDER``). The result is synchronized before it is
+  handed back to JAX.
+
 Layouts
 -------
 
@@ -281,7 +302,7 @@ cache and assembles the plugin with ``hawk.artifact.plugins``. hawk's host runti
 Roadmap
 -------
 
-DLPack is spoken by many more frameworks than are certified here. JAX,
+DLPack is spoken by many more frameworks than are certified here.
 TensorFlow and Keras reach this layer by the same protocol, but only the
 rows of raptor's interoperability certification matrix are claimed as
 supported; this page makes no claim beyond them.
