@@ -68,28 +68,39 @@ def driver_info():
 
 
 def make_env_python(cfg, work):
-    """The interpreter the run uses: this one, or a fresh 3.12 venv when this one is older."""
-    if cfg.local or sys.version_info >= (3, 12):
+    """The interpreter the run uses. CUDA 12 runs in the image's own Python, as a Kaggle user does (the image is
+    CUDA 12). CUDA 13 gets a clean venv: on top of the image's CUDA 12 packages it would mix two CUDA releases.
+    Python older than 3.12 also gets a venv (JAX needs 3.12)."""
+    clean = not cfg.local and cfg.cuda == "13"
+    if cfg.local or (sys.version_info >= (3, 12) and not clean):
         return sys.executable, False
     sh(sys.executable, "-m", "pip", "install", "-q", "uv")
-    venv = work / "venv312"
-    if sh(sys.executable, "-m", "uv", "venv", "--python", "3.12", venv) != 0:
-        raise SystemExit("could not create a Python 3.12 environment with uv")
+    want = sys.executable if sys.version_info >= (3, 12) else "3.12"
+    venv = work / "venv"
+    if sh(sys.executable, "-m", "uv", "venv", "--python", want, venv) != 0:
+        raise SystemExit("could not create a clean Python environment with uv")
     return str(venv / "bin" / "python"), True
 
 
 def pip(py, use_uv, *args):
-    cmd = [sys.executable, "-m", "uv", "pip", "install", "--python", py] if use_uv else [py, "-m", "pip", "install"]
+    # uv takes a package from the first index that has it; best-match keeps PyPI's versions beside the torch index
+    cmd = ([sys.executable, "-m", "uv", "pip", "install", "--python", py, "--index-strategy", "unsafe-best-match"]
+           if use_uv else [py, "-m", "pip", "install"])
     return sh(*cmd, *args)
+
+
+def torch_index(cfg):
+    """PyPI's torch wheels bundle CUDA 12; the CUDA 13 run takes torch built for CUDA 13."""
+    return ["--extra-index-url", "https://download.pytorch.org/whl/cu130"] if cfg.cuda == "13" else []
 
 
 def install(cfg, py, use_uv, work):
     cu = f"cuda{cfg.cuda}"
     pre = ["--pre"] if cfg.pre else []
     pin = f"=={cfg.version}" if cfg.version else ""
-    others = ["jax[" + cu + "]", "torch", "pytest", "nbclient", "ipykernel", "nbformat", "matplotlib"]
+    others = ["jax[" + cu + "]", "torch", "warp-lang", "pytest", "nbclient", "ipykernel", "nbformat", "matplotlib"]
     if cfg.source == "pypi":
-        rc = pip(py, use_uv, *pre, f"raptor-eagle[{cu}]{pin}", f"raptor-hawk[{cu}]", *others)
+        rc = pip(py, use_uv, *pre, *torch_index(cfg), f"raptor-eagle[{cu}]{pin}", f"raptor-hawk[{cu}]", *others)
     else:
         src = work / "src"
         src.mkdir(exist_ok=True)
@@ -110,7 +121,7 @@ def install(cfg, py, use_uv, work):
         rc = pip(py, use_uv, src / "raptor")
         rc = rc or pip(py, use_uv, "--no-build-isolation", src / "eagle" / "python")
         rc = rc or pip(py, use_uv, "--no-build-isolation", src / "hawk")
-        rc = rc or pip(py, use_uv, *pre, f"jax[{cu}]", "torch", f"cupy-cuda{cfg.cuda}x",
+        rc = rc or pip(py, use_uv, *pre, *torch_index(cfg), f"jax[{cu}]", "torch", "warp-lang", f"cupy-cuda{cfg.cuda}x",
                        "pytest", "nbclient", "ipykernel", "nbformat", "matplotlib")
     if rc != 0:
         raise SystemExit("install failed (see the pip output above)")
@@ -201,7 +212,7 @@ def run_tests(py, eagle_src, work):
         header(f"pytest: {name}")
         xml = work / f"junit_{name}.xml"
         base = pathlib.Path(tempfile.mkdtemp(prefix=f"pytest_{name}_", dir=work))
-        rcs[name] = sh(py, "-m", "pytest", *sel, "-q", "-p", "no:cacheprovider", "--basetemp", base / "t",
+        rcs[name] = sh(py, "-m", "pytest", *sel, "-q", "-rs", "-p", "no:cacheprovider", "--basetemp", base / "t",
                        "-W", "error::pytest.PytestUnknownMarkWarning", f"--junitxml={xml}", cwd=pydir)
         s = junit_summary(xml)
         if s is None:
