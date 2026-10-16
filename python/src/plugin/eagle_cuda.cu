@@ -318,6 +318,11 @@ void release(H* h) noexcept
     }
 }
 
+// kept in the binary as one literal (the release check reads it with strings)
+[[gnu::used]] const char kPluginArchs[] = EAGLE_CUDA_PLUGIN_ARCHS;
+static_assert(sizeof kPluginArchs <= sizeof eagle_backend_build_info::archs,
+              "the arch list does not fit eagle_backend_build_info::archs");
+
 void copyText(char* dst, std::size_t n, const char* src)
 {
     std::snprintf(dst, n, "%s", src);
@@ -389,7 +394,7 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_build_info(struct eagle_bac
         full.abi_version = EAGLE_BACKEND_VERSION;
         full.cudart_version = CUDART_VERSION;
         copyText(full.eagle_version, sizeof full.eagle_version, EAGLE_PYTHON_VERSION);
-        copyText(full.archs, sizeof full.archs, EAGLE_CUDA_PLUGIN_ARCHS);
+        copyText(full.archs, sizeof full.archs, kPluginArchs);
         copyText(full.backend_kind, sizeof full.backend_kind, "cuda");
         const std::uint32_t want = info->struct_size;
         if (want < sizeof(std::uint32_t))

@@ -91,14 +91,14 @@ public:
             + "; give each thread its own " + type + ", or wait for it");
     }
 
-    /** @brief Scoped form of @ref enter. */
+    /** @brief Scoped form of @c enter. */
     Scope scope(const std::string& method)
     {
         enter(method);
         return Scope(this);
     }
 
-    /** @brief Release a guard taken with @ref enter / @ref tryEnter. */
+    /** @brief Release a guard taken with @c enter / @c tryEnter. */
     void leave()
     {
         {

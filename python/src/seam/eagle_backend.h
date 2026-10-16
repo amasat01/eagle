@@ -163,7 +163,7 @@ struct eagle_backend_build_info {
     int32_t cudart_version;   /**< device-runtime version built against (0 if none) */
     int32_t reserved0;
     char eagle_version[32];   /**< the eagle release the backend was built from */
-    char archs[128];          /**< device code carried, e.g. "61-real,90-virtual" */
+    char archs[128];          /**< device code carried, e.g. "61,90/90" (SASS / PTX) */
     char backend_kind[16];    /**< the kind: "cuda", ... */
 };
 

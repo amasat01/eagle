@@ -16,6 +16,7 @@ fence orders the two, and the RED twin (no fence) must read the stale value.
 from __future__ import annotations
 
 import gc
+import inspect
 
 import numpy as np
 import pytest
@@ -132,7 +133,10 @@ def test_torch_cpu_is_zero_copy_and_reexports_to_numpy():
     t = torch.arange(4, dtype=torch.float64)
     v = import_buffer(t)
     assert v.ptr == t.data_ptr()
-    assert (v.access, v.owner, v.producer) == ("read-write", "external", "torch.Tensor")
+    # a torch without versioned DLPack export (before ``max_version``) carries no access flag
+    versioned = "max_version" in inspect.signature(t.__dlpack__).parameters
+    access = "read-write" if versioned else "unknown"
+    assert (v.access, v.owner, v.producer) == (access, "external", "torch.Tensor")
     del t
     gc.collect()
     assert np.from_dlpack(v).ctypes.data == v.ptr

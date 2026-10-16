@@ -35,7 +35,7 @@ headline block.
 Usage::
 
     python tools/sync_readme_cards.py           # write the pages in place
-    python tools/sync_readme_cards.py --check   # exit 1 on a diff, write nothing
+    python tools/sync_readme_cards.py --check   # write nothing; exit 1 on a diff, 3 on a missing card
     python tools/sync_readme_cards.py --without-headline   # leave the hero block alone
 """
 from __future__ import annotations
@@ -206,6 +206,15 @@ def process_file(rel: str, eagle_root: pathlib.Path, cards) -> str:
 
 
 def main(argv=None):
+    """Exit 0 fresh, 1 stale, 3 a card or cell a claim cites is missing, 2 usage."""
+    try:
+        return _main(argv)
+    except pcl.ClaimError as exc:
+        print(f"missing card or cell: {exc}", file=sys.stderr)
+        return pcl.EXIT_MISSING_CARD
+
+
+def _main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--check", action="store_true",
                      help="exit 1 on a diff instead of writing")
@@ -228,7 +237,7 @@ def main(argv=None):
             hero = render_hero_block(root)
         except pcl.ClaimError as exc:
             print(f"headline card missing, nothing written: {exc}", file=sys.stderr)
-            return 2
+            return pcl.EXIT_MISSING_CARD
         hstart = new_readme.index(HERO_BEGIN) + len(HERO_BEGIN)
         hend = new_readme.index(HERO_END, hstart)
         new_readme = f"{new_readme[:hstart]}\n{hero}\n{new_readme[hend:]}"
@@ -244,7 +253,7 @@ def main(argv=None):
     if args.check:
         if stale:
             print("stale (run tools/sync_readme_cards.py): " + ", ".join(stale))
-            return 1
+            return pcl.EXIT_STALE
         print("README.md's cards blocks and every prose claim are up to date")
         return 0
     for rel in stale:

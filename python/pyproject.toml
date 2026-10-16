@@ -13,7 +13,7 @@ backend-path = ["."]
 
 [project]
 name = "raptor-eagle"
-version = "0.6.1"
+version = "0.6.2rc1"
 description = "EAGLE — the Python face of the launch engine for compiled CUDA kernels"
 # A copy of the repository README, made by _build_backend.py (git-ignored).
 readme = "README.md"
@@ -41,12 +41,12 @@ classifiers = [
 # DIST names carry the `raptor-` family
 # namespace, IMPORT names stay flat (`import eagle`, `import raptor`). Both bare
 # `eagle` and bare `raptor` are taken on PyPI by unrelated packages.
-# >=0.3 is the raptor-core version that ships the free-threading conformance harness
+# >=0.3.1 carries the JAX interop rows eagle declares. 0.3 shipped the free-threading conformance harness
 # (`raptor.conformance.freethreading`) eagle's free-threading tests import; it also keeps
 # `raptor.schema.blocks.validate_neural_block_descriptor` (first shipped in 0.2.0), which
 # `eagle.sidecar` imports. The constraint is expressed where a resolver can act on it,
 # never as a runtime surprise.
-dependencies = ["numpy", "raptor-core>=0.3,<0.4"]
+dependencies = ["numpy>=1.26", "raptor-core>=0.3.1,<0.4"]
 
 # The "raptor.pattern_loaders" entry-point declaration for
 # "neural_block" moved to a separate package — eagle.neural was extracted there
@@ -79,7 +79,11 @@ cuda = [
 ]
 # eagle.frameworks.torch: the torch.autograd bridge. torch is imported only by
 # that submodule, so plain `import eagle` never needs it.
-torch = ["torch"]
+torch = ["torch>=2.2"]
+# eagle's JAX bridge (see docs: interop contract). JAX publishes wheels for
+# Python 3.12 and newer, so this extra resolves there and nowhere else; for
+# GPU arrays install JAX's own CUDA extra (jax[cuda12] or jax[cuda13]).
+jax = ["jax>=0.11"]
 # eagle.Graph.plot: the graph drawn with matplotlib (imported only by that
 # method; show()/to_mermaid()/to_dot() need nothing).
 plot = ["matplotlib>=3.7"]

@@ -12,6 +12,13 @@
 #   bootstrap.sh [options]
 #     --target T      kaggle | vastai | devbox | local   (default: detected)
 #     --profile P     gpu | cpu | auto   (default auto: gpu when a GPU is visible)
+#     --cuda V        12 | 12.6 | 13   (default 12, or $REPRO_CUDA): the CUDA runtime of the gpu profile. 12 is the
+#                     12.9 runtime (PyTorch cu129, nvidia-*-cu12 12.9; driver >= 575.51, GPU >= sm_75 through
+#                     Blackwell sm_120). 12.6 is the pre-Turing runtime for sm_60-sm_70 GPUs (P100, V100; PyTorch
+#                     cu126; driver >= 525.60.13) with an environment of its own (cards-gpu-cuda126,
+#                     env-gpu-cuda126.sh). 13 uses the *-cuda13 locks (driver >= 580, GPU >= sm_75; eagle, hawk,
+#                     Warp, no PyTorch or JAX) and an environment of its own (cards-gpu-cuda13, env-gpu-cuda13.sh);
+#                     the cpu profile ignores it
 #     --work DIR      envs, clones, build trees, env script, fact sheet
 #                     (default per target; see README.md)
 #     --src DIR       directory with (or to receive) aether/ raptor/ eagle/ hawk/
@@ -37,10 +44,11 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=SCRIPTDIR/lib.sh
 . "$HERE/lib.sh"
 
+CUDA=${REPRO_CUDA:-12}
 TARGET="" PROFILE=auto WORK="" SRC="" ARCH="" ENV_PREFIX="" EDITABLE=0 SMOKE=1 FROM_PYPI=0
 JOBS=$(nproc 2>/dev/null || echo 4)
 declare -A REF=([aether]=${AETHER_REF:-v0.2.3} [raptor]=${RAPTOR_REF:-main}
-                [eagle]=${EAGLE_REF:-v0.6.0} [hawk]=${HAWK_REF:-v0.5.0})
+                [eagle]=${EAGLE_REF:-v0.6.2} [hawk]=${HAWK_REF:-v0.5.1})
 GIT_BASE=${REPRO_GIT_BASE:-https://github.com/amasat01}
 REPOS=(aether raptor eagle hawk)
 
@@ -48,6 +56,7 @@ while [[ $# -gt 0 ]]; do
   case $1 in
     --target) TARGET=$2; shift 2 ;;
     --profile) PROFILE=$2; shift 2 ;;
+    --cuda) CUDA=${2:-}; shift 2 ;;
     --work) WORK=$2; shift 2 ;;
     --src) SRC=$2; shift 2 ;;
     --ref) [[ $2 == *=* && -n ${REF[${2%%=*}]+x} ]] || die "--ref wants REPO=REF with REPO in ${REPOS[*]}"
@@ -59,7 +68,7 @@ while [[ $# -gt 0 ]]; do
     --from-pypi) FROM_PYPI=1; shift ;;
     --no-smoke) SMOKE=0; shift ;;
     --dry-run) REPRO_DRY_RUN=1; shift ;;
-    -h|--help) sed -n '5,33p' "$0"; exit 0 ;;
+    -h|--help) sed -n '5,40p' "$0"; exit 0 ;;
     *) die "unknown option $1 (see --help)" ;;
   esac
 done
@@ -70,6 +79,12 @@ case $TARGET in kaggle|vastai|devbox|local) ;; *) die "unknown target $TARGET" ;
 GPUS=$(detect_gpus)
 if [[ $PROFILE == auto ]]; then PROFILE=$([[ -n $GPUS ]] && echo gpu || echo cpu); fi
 [[ $PROFILE == gpu || $PROFILE == cpu ]] || die "unknown profile $PROFILE"
+[[ $CUDA == 12 || $CUDA == 12.6 || $CUDA == 13 ]] || die "unknown CUDA version '$CUDA': --cuda (or REPRO_CUDA) takes 12, 12.6 or 13"
+# GSFX: the suffix of the CUDA 13 / 12.6 gpu profiles' locks, environment and env script (empty for CUDA 12 and for cpu)
+GSFX=""; [[ $CUDA == 13 && $PROFILE == gpu ]] && GSFX=-cuda13
+[[ $CUDA == 12.6 && $PROFILE == gpu ]] && GSFX=-cuda126
+# TSFX: the toolchain lock's suffix (CUDA 12.6 shares the CUDA 12 toolchain: nvcc 12.9)
+TSFX=$GSFX; [[ $GSFX == -cuda126 ]] && TSFX=""
 if [[ $PROFILE == gpu && $FROM_PYPI == 0 ]]; then
   ARCH=${ARCH:-$(gpu_archs)}
   [[ -n $ARCH ]] || die "profile gpu but no GPU visible; pass --arch (e.g. --arch 75) to build anyway"
@@ -81,10 +96,15 @@ elif [[ -z $SRC ]]; then
   if [[ $TARGET == local ]]; then SRC=$(checkout_root); fi
   SRC=${SRC:-$WORK/src}
 fi
-ENV_PREFIX=${ENV_PREFIX:-$WORK/envs/cards-$PROFILE}
-LOCKS=$HERE/locks
-ENV_FILE=$WORK/env-$PROFILE.sh
+ENV_PREFIX=${ENV_PREFIX:-$WORK/envs/cards-$PROFILE$GSFX}
+LOCKS=${REPRO_LOCKS:-$HERE/locks}   # REPRO_LOCKS: another lock folder (tests)
+PLATFORM=$(conda_platform) || exit 1
+TC_LOCK=$LOCKS/toolchain-$PLATFORM$TSFX.lock
+# the hashed pip lock: linux-64 keeps the unsuffixed name, other platforms carry theirs
+PIP_LOCK=$LOCKS/cards-$PROFILE$GSFX$([[ $PLATFORM == linux-64 ]] || echo "-$PLATFORM").txt
+ENV_FILE=$WORK/env-$PROFILE$GSFX.sh
 log "target=$TARGET profile=$PROFILE arch=${ARCH:-none} work=$WORK src=$SRC env=$ENV_PREFIX"
+[[ -n $GSFX ]] && log "cuda=$CUDA locks: $TC_LOCK $PIP_LOCK $LOCKS/pypi-$PROFILE$GSFX.txt"
 [[ $REPRO_DRY_RUN == 1 ]] && log "dry run: commands are printed, nothing is changed"
 
 MODE=$([[ $FROM_PYPI == 1 ]] && echo pypi || echo source)
@@ -95,32 +115,39 @@ md5_of() { md5sum "$@" | md5sum | cut -c1-32; }
 run mkdir -p "$WORK/bin" "$WORK/build" "$SRC"
 
 install_source() {
+  [[ -f $PIP_LOCK ]] || die "no pip lock for profile $PROFILE on $PLATFORM: $PIP_LOCK (locks/make_locks.py pip $PROFILE --platform $PLATFORM writes it)"
+  [[ -f $TC_LOCK ]] || die "no toolchain lock for $PLATFORM${TSFX:+ (cuda $CUDA)}: $TC_LOCK (locks/make_locks.py toolchain --platform $PLATFORM writes it)"
   # --- 1. conda frontend (an existing micromamba/mamba/conda, else a pinned download)
   # REPRO_MAMBA=/path/to/frontend picks one; REPRO_MAMBA=download forces the download.
   MAMBA=${REPRO_MAMBA:-}
   [[ $MAMBA == download ]] && MAMBA=$WORK/bin/micromamba
   if [[ -z $MAMBA ]]; then
-    for c in micromamba mamba conda; do command -v $c >/dev/null 2>&1 && { MAMBA=$(command -v $c); break; }; done
+    # a name on PATH is not proof: some images ship an unrelated tool called "mamba", so a candidate
+    # counts only if it answers "info --json" as every conda-family frontend does, offline
+    for c in micromamba mamba conda; do
+      command -v $c >/dev/null 2>&1 && "$(command -v $c)" info --json >/dev/null 2>&1 \
+        && { MAMBA=$(command -v $c); break; }
+    done
   fi
   if [[ -z $MAMBA || $MAMBA == "$WORK/bin/micromamba" ]]; then
     MAMBA=$WORK/bin/micromamba
     if [[ ! -x $MAMBA ]]; then
       MM_VER=${MICROMAMBA_VERSION:-2.9.0-0}
       run curl -fsSL -o "$MAMBA" \
-        "https://github.com/mamba-org/micromamba-releases/releases/download/$MM_VER/micromamba-linux-64"
+        "https://github.com/mamba-org/micromamba-releases/releases/download/$MM_VER/micromamba-$PLATFORM"
       run chmod +x "$MAMBA"
     fi
   fi
   log "conda frontend: $MAMBA"
   case $(basename "$MAMBA") in
     micromamba) export MAMBA_ROOT_PREFIX=${MAMBA_ROOT_PREFIX:-$WORK/mamba-root}
-                MKENV=("$MAMBA" create -y -q -p "$ENV_PREFIX" -f "$LOCKS/toolchain-linux-64.lock") ;;
-    *)          MKENV=("$MAMBA" create -y -q -p "$ENV_PREFIX" --file "$LOCKS/toolchain-linux-64.lock") ;;
+                MKENV=("$MAMBA" create -y -q -p "$ENV_PREFIX" -f "$TC_LOCK") ;;
+    *)          MKENV=("$MAMBA" create -y -q -p "$ENV_PREFIX" --file "$TC_LOCK") ;;
   esac
 
   # --- 2. toolchain environment (explicit lock: exact URLs + md5) -----------------
   TC_STAMP=$ENV_PREFIX/.repro-toolchain
-  TC_SUM=$(md5_of "$LOCKS/toolchain-linux-64.lock")
+  TC_SUM=$(md5_of "$TC_LOCK")
   if stamp_ok "$TC_STAMP" "$TC_SUM"; then
     log "toolchain env up to date"
   else
@@ -133,7 +160,8 @@ install_source() {
   # Build environment: the env's own GCC 14 and nvcc, nothing from the host.
   unset CPATH CUDA_PATH CUDA_HOME NVCC_PREPEND_FLAGS NVCC_APPEND_FLAGS PYTHONPATH LD_PRELOAD
   export PATH=$ENV_PREFIX/bin:$PATH CONDA_PREFIX=$ENV_PREFIX
-  export CC=$ENV_PREFIX/bin/x86_64-conda-linux-gnu-gcc CXX=$ENV_PREFIX/bin/x86_64-conda-linux-gnu-g++
+  local triple; triple=$([[ $PLATFORM == linux-aarch64 ]] && echo aarch64 || echo x86_64)-conda-linux-gnu
+  export CC=$ENV_PREFIX/bin/$triple-gcc CXX=$ENV_PREFIX/bin/$triple-g++
   export CUDAHOSTCXX=$CXX CUDACXX=$ENV_PREFIX/bin/nvcc
   export CMAKE_PREFIX_PATH=$ENV_PREFIX CMAKE_BUILD_PARALLEL_LEVEL=$JOBS CMAKE_GENERATOR=Ninja
   export HAWK_AETHER_INCLUDE=$SRC/aether HAWK_EAGLE_INCLUDE=$SRC/eagle
@@ -142,11 +170,11 @@ install_source() {
 
   # --- 3. Python packages (hashed lock, no resolver) ------------------------------
   PIP_STAMP=$ENV_PREFIX/.repro-pip-$PROFILE
-  PIP_SUM=$(md5_of "$LOCKS/cards-$PROFILE.txt")
+  PIP_SUM=$(md5_of "$PIP_LOCK")
   if stamp_ok "$PIP_STAMP" "$PIP_SUM"; then
     log "python packages up to date"
   else
-    run "$PY" -m pip install -q --no-deps --require-hashes -r "$LOCKS/cards-$PROFILE.txt"
+    run "$PY" -m pip install -q --no-deps --require-hashes -r "$PIP_LOCK"
     write_stamp "$PIP_STAMP" "$PIP_SUM"
   fi
 
@@ -213,7 +241,7 @@ install_pypi() {
   PY=$ENV_PREFIX/bin/python
   export PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_NO_INPUT=1 TMPDIR=${TMPDIR:-$WORK/tmp}
   run mkdir -p "$TMPDIR"
-  local lock=$LOCKS/pypi-$PROFILE.txt stamp=$ENV_PREFIX/.repro-pypi-$PROFILE
+  local lock=$LOCKS/pypi-$PROFILE$GSFX.txt stamp=$ENV_PREFIX/.repro-pypi-$PROFILE
   # The lock pins the released wheels; the card scripts come from THIS checkout. A lock older than the
   # checkout would run new scripts against old wheels and write cards that claim the wrong version.
   local want have
@@ -255,7 +283,7 @@ unset CPATH CUDA_PATH CUDA_HOME NVCC_PREPEND_FLAGS LD_PRELOAD PYTHONPATH
 export REPRO_PROFILE=$PROFILE REPRO_TARGET=$TARGET REPRO_SRC=$SRC REPRO_WORK=$WORK
 export CONDA_PREFIX=$ENV_PREFIX P=$ENV_PREFIX/bin/python
 export PATH=$ENV_PREFIX/bin:\$PATH
-export CC=$CC CXX=$CXX CUDAHOSTCXX=$CXX
+export CC=$CC CXX=$CXX CUDAHOSTCXX=$CXX HAWK_CXX=$CXX
 export NVCC_PREPEND_FLAGS="-ccbin $CXX"
 export HAWK_AETHER_INCLUDE=$SRC/aether HAWK_EAGLE_INCLUDE=$SRC/eagle HAWK_AETHER_SOURCE=$SRC/aether
 export EAGLE_AETHER_INCLUDE=$SRC/aether RAPTOR_HAWK_ROOT=$SRC/hawk RAPTOR_EAGLE_ROOT=$SRC/eagle
@@ -263,6 +291,7 @@ export CUDA_DEVICE_ORDER=PCI_BUS_ID XLA_PYTHON_CLIENT_PREALLOCATE=false
 EOF
   fi
   [[ $PROFILE == cpu ]] && echo 'export CUDA_VISIBLE_DEVICES=""' >>"$ENV_FILE"
+  [[ -n $GSFX ]] && echo "export REPRO_CUDA=$CUDA" >>"$ENV_FILE"
   log "wrote $ENV_FILE"
 fi
 
@@ -281,6 +310,13 @@ print("cupy devices", cupy.cuda.runtime.getDeviceCount(), "torch cuda", torch.cu
     SMOKE_PY+='
 import numba
 print("numba", numba.__version__)'
+  fi
+  if [[ $GSFX == -cuda13 ]]; then  # the CUDA 13 profile has no PyTorch, JAX or CuPy comparison arm: nothing of them is imported
+    SMOKE_PY='import eagle, eagle._core, hawk, raptor, aether_dsc, numpy, warp, eagle.cuda as ec
+print("import ok: eagle", eagle.__file__)
+ec.Stream()
+print("eagle cuda backend", eagle._core.cuda_backend())
+print("not in this profile: torch, jax, cupy arms")'
   fi
   run "$PY" -W ignore -c "$SMOKE_PY"
 fi
@@ -315,7 +351,7 @@ facts() {
   "$PY" - <<'EOF'
 import importlib.metadata as md
 for d in ("numpy", "scipy", "torch", "jax", "jaxlib", "cupy-cuda12x", "warp-lang", "numba",
-          "cuda-bindings", "cuda-toolkit", "nvidia-cuda-nvrtc-cu12", "raptor-eagle", "raptor-hawk",
+          "cuda-bindings", "cuda-toolkit", "nvidia-cuda-nvrtc-cu12", "cupy-cuda13x", "nvidia-cuda-nvrtc", "raptor-eagle", "raptor-hawk",
           "raptor-core", "aether-dsc"):
     try:
         print(f"{d + ':':13s} {md.version(d)}")

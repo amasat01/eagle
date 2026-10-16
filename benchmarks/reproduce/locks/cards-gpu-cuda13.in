@@ -1,0 +1,15 @@
+# cards-gpu-cuda13: the CUDA 13 profile. eagle and hawk (their cuda13 extras bring cupy-cuda13x and the
+# CUDA 13 toolkit libraries), NVIDIA Warp (the one comparison arm; its PyPI wheel is built with CUDA 13.4),
+# and the kit's own needs. No PyTorch, no JAX. CPython 3.12, Linux x86_64.
+# Driver floor: >= 580 (CUDA 13). GPU floor: compute capability 7.5 (CUDA 13 drops offline compilation
+# below sm_75). Tested target: RTX PRO 6000 Blackwell (sm_120).
+numpy==2.5.3
+cupy-cuda13x
+cuda-toolkit[cudart,nvrtc]==13.*
+warp-lang
+cuda-bindings==13.*
+cuda-pathfinder
+nvidia-ml-py
+pytest==9.1.1
+nanobind==3.1.0
+scikit-build-core==1.1.0

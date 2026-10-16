@@ -143,6 +143,7 @@ struct Reduction {
      * @tparam OP Reduction operator to use. Must be callable as
      * `OP{}(a, b)` (aether's functor shape). Example:
      * `aether::SumOp<T>`
+     * @param graph Graph the reduction nodes are added to.
      * @param result Pointer to the reduction result
      * @param arr Input scalar array. The reduction will be performed over the
      * device copy, but it will not be modified. Must be already allocated on
@@ -151,6 +152,7 @@ struct Reduction {
      * on host and device. Its values on both host and device will be
      * overwritten. It is recommended to generate it via `makeBuffer`
      * to ensure it has the appropriate size. Must be distinct from `arr`.
+     * @param N Number of elements to reduce.
      * @param init Initial value for the accumulation.
      * @param stream CUDA stream to use.
      */
@@ -250,7 +252,15 @@ struct Reduction {
     }
 
     /**
-     * @copydoc Reduction::reduceBlocking(cuda::Graph&, T*, const eagle::CRefArrT<T>&, aether::Array<T>&, const idx_t, const T&, const cudaStream_t&)
+     * @brief As the sized overload, reducing over every sample of @p arr.
+     * @tparam T Data type of the elements
+     * @tparam OP Reduction operator to use.
+     * @param graph Graph the reduction nodes are added to.
+     * @param result Pointer to the reduction result
+     * @param arr Input scalar array, already allocated on the device.
+     * @param oarr Work buffer; see the sized overload.
+     * @param init Initial value for the accumulation.
+     * @param stream CUDA stream to use.
      */
     template<typename T, typename OP, bool DirectCopy = false>
     static void reduceBlocking(cuda::Graph& graph, T* result,
@@ -262,7 +272,15 @@ struct Reduction {
     }
 
     /**
-     * @copydoc Reduction::reduceBlocking(cuda::Graph&, T*, const eagle::CRefArrT<T>&, aether::Array<T>&, const idx_t, const T&, const cudaStream_t&)
+     * @brief As the sized overload, building and returning a new graph.
+     * @tparam T Data type of the elements
+     * @tparam OP Reduction operator to use.
+     * @param result Pointer to the reduction result
+     * @param arr Input scalar array, already allocated on the device.
+     * @param oarr Work buffer; see the sized overload.
+     * @param init Initial value for the accumulation.
+     * @param stream CUDA stream to use.
+     * @return The graph holding the reduction.
      */
     template<typename T, typename OP>
     static cuda::Graph reduceBlocking(T* result,
@@ -275,7 +293,7 @@ struct Reduction {
     }
 
     /**
-     * @copydoc Reduction::reduceBlocking(const eagle::CRefArrT<T>&, const T&, const cudaStream_t&)
+     * @copydoc Reduction::reduceBlocking(aether::Array<T>&, const T&, const cudaStream_t&)
      */
     template<typename T, typename OP>
     static inline T reduceBlocking(

@@ -261,7 +261,7 @@ inline bool siblings(const std::vector<std::vector<gidx>>& table, gidx a, gidx b
 
 /** @brief Every hazard edge between nodes, in add order (ascending source,
  *  then destination), siblings of one group excluded (their overlap is a
- *  conflict, see @ref siblingConflicts). A hazard on the same plane name
+ *  conflict, see @c siblingConflicts). A hazard on the same plane name
  *  between the same two nodes collapses to one edge per kind. */
 inline std::vector<Edge> deriveEdges(const std::vector<PlaneRef>& refs,
     const std::vector<SiblingGroup>& groups = {})

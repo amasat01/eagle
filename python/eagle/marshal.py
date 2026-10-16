@@ -345,6 +345,9 @@ def coerce_mutable(name, value, decl, dt=np.float64, adapted=None):
     stored there by name, so the caller can write the result back."""
     import cupy as cp
 
+    from . import interop
+
+    interop.refuse_jax_written(value, f"the Mutable '{name}'")
     if decl.dtype == "vector":
         value = _adapt_mutable(name, value, ((decl.width,),), adapted)
         arr = _as_dtype(value, dt)
@@ -467,6 +470,10 @@ def coerce_terminated(kw, n, *, readonly_mask=False):
         if readonly_mask:
             return _cached_zero_mask(n, cp)
         return cp.zeros(n, dtype=cp.bool_)
+    if not readonly_mask:
+        from . import interop
+
+        interop.refuse_jax_written(term, "the terminated mask")
     term = _as_dtype(term, cp.bool_)
     if term.shape != (n,):
         raise ValueError(f"'terminated' must have shape ({n},); got {term.shape}")

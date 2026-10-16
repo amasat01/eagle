@@ -17,8 +17,8 @@ on:
   workflow_dispatch:
     inputs:
       eagle_ref:
-        description: eagle ref (tests, and the build when source is git)
-        default: main
+        description: eagle ref (tests, and the build when source is git); empty = the branch you run from
+        default: ""
       hawk_ref:
         description: hawk ref (used when source is git)
         default: main
@@ -68,7 +68,7 @@ jobs:
       - run: python -m pip install --quiet kaggle
       - name: Run the kernel on Kaggle
         env:
-          INPUT_EAGLE_REF: ${{ inputs.eagle_ref || github.event.workflow_run.head_branch || 'main' }}
+          INPUT_EAGLE_REF: ${{ inputs.eagle_ref || github.event.workflow_run.head_branch || github.ref_name }}
           INPUT_HAWK_REF: ${{ inputs.hawk_ref || 'main' }}
           INPUT_RAPTOR_REF: ${{ inputs.raptor_ref || 'main' }}
           INPUT_AETHER_REF: ${{ inputs.aether_ref || 'main' }}

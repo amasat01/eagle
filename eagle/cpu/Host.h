@@ -164,6 +164,8 @@ struct Host {
      *  ``docs/examples/02_host_dispatch.cpp`` (a standalone, region-free
      *  correctness demo) as a threading example.
      *
+     *  @param size            Number of samples.
+     *  @param kernel          Callable run on each sample batch.
      *  @param bytesPerSample  Caller's per-sample working-set estimate.
      *                         ``0`` (default) falls back to aether's
      *                         compile-time ``DEFAULT_TILE_SIZE``.  A

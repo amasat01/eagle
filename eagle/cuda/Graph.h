@@ -413,6 +413,7 @@ public:
             });
         return nativeIdx;
     }
+    /// \endcond
 
     /** @brief Per native node, the native indices it depends on (as given to
      *  ``addNative``). */

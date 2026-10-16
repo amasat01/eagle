@@ -1,0 +1,17 @@
+# --from-pypi, gpu profile, CUDA 12.6 (pre-Turing, sm_60-sm_70; `bootstrap.sh --cuda 12.6`): released wheels only (no compiler, conda or CUDA toolkit).
+# The one place the versions live. Python >= 3.10, Linux x86_64, driver >= 525.60.13.
+# eagle/hawk bring cupy, cuda-toolkit and NVRTC through their cuda12 extras; the rest is
+# what the card scripts import (versions as in cards-gpu.in).
+--extra-index-url https://download.pytorch.org/whl/cu126
+raptor-eagle[cuda12]==0.6.2
+raptor-hawk[cuda12]==0.5.1
+numpy==2.5.3
+scipy==1.17.1
+torch==2.12.1+cu126
+cupy-cuda12x==14.2.0
+jax[cuda12]==0.11.2
+warp-lang==1.17.0
+cuda-bindings==12.9.9
+cuda-pathfinder==1.8.2
+nvidia-ml-py==13.610.43
+psutil==7.2.2
