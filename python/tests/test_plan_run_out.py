@@ -186,7 +186,7 @@ def test_device_plan_writes_native_scalar_y_back(scale_device_module):
 # so the pre-fix code wrote the answer into a throwaway buffer).
 # --------------------------------------------------------------------------- #
 @pytest.mark.repo_local
-def test_host_plan_writes_a_noncontiguous_native_y_back(scale_host_lib):
+def test_host_plan_refuses_a_noncontiguous_native_y(scale_host_lib):
     import eagle.exec as eexec
     from eagle import plan as eplan
 
@@ -198,12 +198,12 @@ def test_host_plan_writes_a_noncontiguous_native_y_back(scale_host_lib):
     plugin = _host_plugin(scale_host_lib, "scale_host", _SCALE_SPEC,
                           arg_widths={"y": 1})
 
-    result = eplan.plan(plugin, structure=eexec.HostTeam).run(x=x, a=a, b=b, y=y)
+    from eagle.interop import BufferRefused
 
-    expected = _expected_scale(x, a, b)
-    np.testing.assert_array_equal(y, expected)
-    np.testing.assert_array_equal(y_buf[1::2], 0.0)      # the untouched lanes untouched
-    np.testing.assert_array_equal(result, y)
+    # a strided out is refused before the launch, not silently copied
+    with pytest.raises(BufferRefused, match="'y'.*contiguous"):
+        eplan.plan(plugin, structure=eexec.HostTeam).run(x=x, a=a, b=b, y=y)
+    np.testing.assert_array_equal(y_buf, 0.0)
 
 
 # --------------------------------------------------------------------------- #

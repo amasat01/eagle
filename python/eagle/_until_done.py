@@ -49,6 +49,7 @@ from . import _core, _layout
 from ._busy import BusyGuard
 from ._compat import zip_strict
 from ._conditional import SkipGuard, Skippable, repeat_while
+from .graph import LowerCtx, Node, get_node_kind
 from .roles import PER_SAMPLE_ROLES
 from .sidecar import FINISH_AUTO, FINISH_COUNTER, read_finish, refuse_derived
 
@@ -591,7 +592,8 @@ class Runner:
                  "_fast_util_on", "_fast_exact", "_fast_views",
                  "_fast_counts", "_fast_state", "_fast_probe", "_fast_model", "_fast_key",
                  "_mapped_live", "_fast_ev", "_fast_prep",
-                 "_fast_fill", "_fast_chunk", "_fast_chunk_ok", "_fast_chunk_pin", "_fast_fit", "_rate", "_recorder")
+                 "_fast_fill", "_fast_chunk", "_fast_chunk_ok", "_fast_chunk_pin", "_fast_fit", "_rate", "_recorder",
+                 "_hooks")
 
     @_layout.door
     def __init__(self, plan, *, max_steps, every=None, reorder=None, record=False,
@@ -622,7 +624,9 @@ class Runner:
         # Internal only: ``False`` keeps the size pick for every run instead of
         # timing the other entry (see :meth:`_pick_entry`).
         self._fast_probe = planes.pop("_fast_probe", True)
-        plans = list(plan) if isinstance(plan, (list, tuple)) else [plan]
+        steps = list(plan) if isinstance(plan, (list, tuple)) else [plan]
+        hooks = _hook_nodes(steps, record)
+        plans = [p for p in steps if not isinstance(p, Node)]
         if not plans:
             raise ValueError("eagle.until_done: the step is empty; pass a plan or a "
                              "list of plans")
@@ -685,6 +689,15 @@ class Runner:
                 "set), so every=/reorder= do not apply; build it with "
                 "Guard(active_set=True) to compact")
         k = finish["steps"]
+        if hooks and any(finishes[i]["steps"] != 1 for i in finishers):
+            raise ValueError(
+                f"eagle.until_done: a per-step hook needs one step per launch; build the "
+                f"plan with steps=1 and without steps='auto' ({name} takes {k!r})")
+        if hooks and refine:
+            raise ValueError(
+                "eagle.until_done: events='refine' with a per-step node is not supported "
+                "yet: the refine entry re-steps the last step without your node; use "
+                "events='step'")
         if len(plans) > 1:
             for i in finishers:
                 if finishes[i]["steps"] not in (FINISH_AUTO, 1):
@@ -717,9 +730,12 @@ class Runner:
             every = _cadence(name, every, k) if compacting else None
 
         planes, n = _step_planes(plans, specs, planes)
+        if reorder is not None:
+            _refuse_moving_node_planes(hooks, specs, planes)
         if mask_name not in planes:
             planes[mask_name] = xp.zeros(n, dtype=xp.bool_)
         mask = planes[mask_name]
+        nodes = _record_nodes(steps, specs[0], planes) if hooks and record else ()
         # the finished count is word [2] of the fast entries' counter block
         # (see _build_fast): one memset zeroes it with the other counters and
         # one read returns it with them
@@ -822,8 +838,11 @@ class Runner:
 
             self._recorder = RunRecorder(self, plans[0], "eagle.until_done", window,
                                          memory_budget, extras, self, record=record,
-                                         events=events, on_no_event=on_no_event)
-        launches = tuple(b.launch for b in bound)
+                                         events=events, on_no_event=on_no_event, nodes=nodes)
+        self._hooks = tuple(hooks)
+        ctx = LowerCtx("gpu" if device else "cpu", body=True)
+        by_plan = iter(b.launch for b in bound)
+        launches = tuple(ctx.lower(p) if isinstance(p, Node) else next(by_plan) for p in steps)
 
         def launch():
             for one in launches:
@@ -1540,6 +1559,10 @@ class Runner:
             return self._run()
 
     def _run(self) -> RunReport:
+        for node in self._hooks:
+            check = get_node_kind(node.kind).check
+            if check is not None:
+                check(node)
         if self._recorder is not None:
             return self._recorder.run()
         if self._fast_mode is not None:
@@ -1647,6 +1670,88 @@ class Runner:
             self.finished.fill(0)
         if self.active is not None:
             self.active.reset()
+
+
+def _hook_nodes(steps, record) -> list:
+    """The nodes of a step list (per-step hooks). Unrecorded, each must be
+    captured work (a stream or host node cannot run inside one device graph);
+    a recorded run calls every node from the host each step, so any tier runs."""
+    from ._graph_kinds import OWN_CODE_KINDS
+
+    hooks = [p for p in steps if isinstance(p, Node)]
+    for node in hooks:
+        if node.kind not in OWN_CODE_KINDS:
+            raise ValueError(f"eagle.until_done: a step list takes plans and opaque or child "
+                             f"nodes, not a {node.kind!r} node")
+        if not record and get_node_kind(node.kind).tier != "capture":
+            raise ValueError(
+                f"eagle.until_done: node {node.label!r} runs on the host each launch, but a "
+                "stepping loop is one device graph: run host work between runs "
+                "(runner.run() with max_steps=k, then your code), or make the node "
+                "captured (drop stream= / eager=), or pass record=True (a recorded run "
+                "calls nodes from the host each step)")
+    return hooks
+
+
+def _refuse_moving_node_planes(hooks, specs, planes) -> None:
+    """``reorder=`` moves the plans' per-sample planes; a plane only a node
+    declares would stay put and belong to other samples after a reorder."""
+    declared = {nm for spec in specs for _role, nm in spec}
+    bound = [v for v in planes.values()]
+    for node in hooks:
+        kind = get_node_kind(node.kind)
+        for nm, arr, _role in (*kind.reads(node), *kind.writes(node)):
+            if nm in declared or any(arr is v for v in bound) or not getattr(arr, "ndim", 0):
+                continue
+            raise ValueError(
+                f"eagle.until_done: reorder= cannot move plane {nm!r}, which only node "
+                f"{node.label!r} declares; drop reorder=, or bind the plane to a plan")
+
+
+def _record_nodes(steps, spec, planes) -> list:
+    """``[(node, reads, writes)]`` of a recorded step ``[node, ..., plan]``,
+    ``reads``/``writes`` as ``[(declared name, plan plane, array)]``; the shapes a
+    reverse cannot re-run are refused by name."""
+    roles = {nm: role for role, nm in spec}
+    plane_of = lambda nm, a: next((p for p, v in planes.items() if v is a),  # noqa: E731
+                                  nm if nm in planes else None)
+    first = next(j for j, p in enumerate(steps) if not isinstance(p, Node))
+    out = []
+    for i, node in enumerate(steps):
+        if not isinstance(node, Node):
+            continue
+        if i > first:
+            raise ValueError(
+                f"eagle.until_done: node {node.label!r} comes after the plan in a recorded "
+                "step: its output would be a carried state with an initial value; put the "
+                "node before the plan: it prepares the step from the current state")
+        kind = get_node_kind(node.kind)
+        out.append((node, *([(nm, plane_of(nm, a), a) for nm, a, _r in got]
+                            for got in (kind.reads(node), kind.writes(node)))))
+    labels = [node.label for node, _r, _w in out]
+    for label in labels:
+        if labels.count(label) > 1:
+            raise ValueError(f"eagle.until_done: two nodes of the recorded step are labelled "
+                             f"{label!r}; give each node a name= (vjps= keys on it)")
+    writer = {pn: node.label for node, _r, writes in out for _nm, pn, _a in writes}
+    for node, reads, writes in out:
+        for (nm, pn, _a), w in [(x, False) for x in reads] + [(x, True) for x in writes]:
+            role = roles.get(pn)
+            if role == "uniform":
+                raise ValueError(f"eagle.until_done: node {node.label!r} reads parameter "
+                                 f"{pn!r}: bind it as a per-sample plane or a Table")
+            if role is None or (w and role in ("mutable", "terminated", "lookup", "out")):
+                raise ValueError(
+                    f"eagle.until_done: node {node.label!r} declares {nm!r}, which the plan "
+                    + ("reads as state, not as a per-sample input" if role else "does not bind")
+                    + "; in a recorded step a node reads the plan's planes and writes planes "
+                    "the plan reads")
+            if not w and pn in writer:
+                raise ValueError(
+                    f"eagle.until_done: node-to-node planes inside a recorded step are not "
+                    f"supported yet: node {node.label!r} reads {pn!r}, which node "
+                    f"{writer[pn]!r} writes")
+    return out
 
 
 def _refuse_record(nplans: int) -> None:

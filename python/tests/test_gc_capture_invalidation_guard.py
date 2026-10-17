@@ -59,8 +59,7 @@ showed ``capturer.end()`` raise
 operation not permitted when stream is capturing`` line the incident report
 named. This file itself requires the rebuilt ``eagle._core`` (it calls the
 new ``capture_guard_depth``/``capture_guard_pending_count`` bindings, which
-do not exist in the pre-fix binary) -- authored to run GREEN once eagle._core
-is rebuilt with the fix in ``eagle/util/CaptureGuard.h`` and the deferred
+do not exist in the pre-fix binary) -- it passes on an ``eagle._core`` built with the fix in ``eagle/util/CaptureGuard.h`` and the deferred
 call sites it guards (``Stream.h`` / ``Event.h`` / ``CapturedGraph.h`` /
 ``Launcher.h`` / ``Graph.h`` / ``ScratchArena.h``).
 """

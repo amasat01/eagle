@@ -46,7 +46,7 @@ hawk_artifact = pytest.importorskip("hawk.artifact")
 DEVICE_ARCH = hawk_artifact.arch()
 
 _ALL_ZERO = {"captures": 0, "instantiations": 0, "binds": 0, "rebinds": 0,
-             "graph_builds": 0, "reverses": 0, "records": 0}
+             "graph_builds": 0, "reverses": 0, "records": 0, "host_syncs": 0}
 
 
 @hawk_trace.kernel
@@ -244,40 +244,6 @@ def test_a_second_build_on_a_new_pipe_is_plus_one_plus_one_again():
         "monotonic, never reset: two builds this process must leave both "
         "counters at 2 or more"
     )
-
-
-# --------------------------------------------------------------------------- #
-# The discriminating row, and why it is not here.
-# --------------------------------------------------------------------------- #
-@pytest.mark.skip(
-    reason=(
-        "the recapture-without-reinstantiate path ('captures +1, "
-        "instantiations +0, this is the DISCRIMINATING row') "
-        "names no code path that exists in this tree. GraphPipeline.build() "
-        "(eagle/pipeline.py:236-374) is the ONLY capture/instantiate call "
-        "site and it always pairs capturer.begin()/capturer.end() (capture) "
-        "with Graph.from_captured(...)/g.launcher() (instantiate) inside ONE "
-        "method call -- there is no code path that captures without also "
-        "instantiating, so this delta cannot occur against real behaviour. "
-        "set_member_enabled's own docstring (pipeline.py ~438-440) reads "
-        "'Toggling never recaptures, never re-instantiates' -- the OPPOSITE "
-        "of a capture-only path; that is the 0/0 case covered by "
-        "test_set_member_enabled_moves_nothing above, not this one. The only "
-        "other 'recapture' language in eagle is "
-        "eagle.compose.GraphComposer._rebuild_pipe (mode='rebuild'), which "
-        "also pairs capture+instantiate in one _build_flat_pipe(...).build() "
-        "call (so it is +1/+1, not the claimed +1/0), and compose.py's "
-        "call site is not one of the three hooked here regardless. The C++ "
-        "core (eagle/python/src/eagle_core.cu) has no cudaGraphExecUpdate or "
-        "similar partial-recapture primitive either (grepped for "
-        "ExecUpdate/exec_update/recapture: none). Reported as absent "
-        "rather than inventing a new "
-        "code path under a hook that is supposed to make NO behaviour "
-        "change."
-    )
-)
-def test_the_recapture_without_reinstantiate_row_has_no_seam():
-    pass
 
 
 def test_a_recorded_run_moves_records_by_exactly_one():

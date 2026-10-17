@@ -26,6 +26,7 @@ from typing import NamedTuple
 from .. import _core, _counters
 from .._busy import BusyGuard
 from .._conditional import skippable
+from .._graph_kinds import OWN_CODE_KINDS
 from ..graph import _DERIVED_DOOR, Graph, Node, get_node_kind, opaque
 from ..roles import OUTPUT_ROLES
 from ..sidecar import derived_tag, refuse_prior_read
@@ -34,6 +35,7 @@ from ._record import Record, xp_of
 __all__ = ["Gradients", "Report", "Reverse", "broadcast_adjoint", "reverse"]
 
 _FLOATS = ("float32", "float64")
+_CONDITIONALS = ("skippable", "repeat_while")
 
 
 def _is_float(arr) -> bool:
@@ -269,10 +271,21 @@ class Reverse:
 
     ``forward`` is what ran the forward with ``record=True``: a built
     :class:`eagle.Graph`, an :class:`eagle.Simulation` or an
-    :class:`eagle.Runner`. ``vjps`` (graphs only) maps a node name to the
+    :class:`eagle.Runner`. ``vjps`` maps a node name to the
     plan of its vjp (``hawk.diff.vjp`` of its kernel): needed for a plan not
     made by :func:`eagle.plan.auto` (eagle derives the vjp of an auto plan by
-    itself), and overriding the derived one otherwise. ``strict=True``
+    itself), and overriding the derived one otherwise. For a node of your own
+    code (:func:`eagle.graph.opaque`, :func:`eagle.graph.child`) it is
+    required: a callable ``vjp(primals, cotangents) -> {read name:
+    gradient}`` (``primals`` the values the node read in the recorded launch,
+    ``cotangents`` the adjoints of what it wrote, both by declared name),
+    run host-synchronized in the reverse on the GPU and eagerly on the CPU,
+    or a Node run at its own tier (graphs only). For a recorded run whose step
+    list is ``[node, plan]`` the callable runs once per step; it must be pure
+    (same inputs, same outputs; row-wise; writes only its declared planes; the
+    weights untouched until the reverse returns), and the node's planes are
+    eagle's scratch until the reverse returns them restored. Your model's own parameter gradients are
+    yours to accumulate (``p.grad += ...``) across reverses. ``strict=True``
     refuses a gradient that is not bit-reproducible (one fed by a
     cross-sample scatter-add) instead of reporting it.
 
@@ -301,11 +314,14 @@ class Reverse:
                                      "pass record=True to the forward, then run it")
                 raise TypeError(f"{door}: expected an eagle.Graph, Simulation or Runner, "
                                 f"got {type(forward).__name__}")
-            if vjps:
-                raise ValueError(f"{door}: vjps= for a recorded run is not yet supported; "
-                                 "eagle derives the vjp of the step from its kernel")
+            for label, fn in (vjps or {}).items():
+                if isinstance(fn, Node):
+                    raise ValueError(
+                        f"{door}: vjps[{label!r}] is a Node; a recorded run takes a callable "
+                        "vjp(primals, cotangents) for now (a captured backward as a run's "
+                        "node vjp is not supported yet)")
             self._graph = recorder.owner
-            self._run = RunReverse(recorder, door)
+            self._run = RunReverse(recorder, door, dict(vjps or {}))
             self._strict = bool(strict)
             return
         graph = forward
@@ -322,12 +338,19 @@ class Reverse:
         self._planes = planes = graph._recorder.planes
         self._accesses = accesses = graph._leaves()[0]
         self._labels = labels = [a.label for a in accesses]
-        self._desc = description(graph)
+        self._desc = description(graph, drawing=False)
         vjps = dict(vjps or {})
         unknown = sorted(set(vjps) - set(labels))
         if unknown:
             raise ValueError(f"{door}: vjps names {unknown[0]!r}, which is not a node "
                              f"of the graph (nodes: {labels})")
+        for a in accesses:
+            node = a.node.payload.child if a.node.kind in _CONDITIONALS else a.node
+            if node.kind in OWN_CODE_KINDS and a.label not in vjps:
+                raise ValueError(
+                    f"{door}: node {a.label!r} is opaque: pass vjps={{{a.label!r}: fn}}, a "
+                    "vjp(primals, cotangents) -> {read name: gradient} callable (or a Node "
+                    "computing it)")
         rows = planes.rows()
         self._reads = planes.reads
         for i in range(len(accesses)):
@@ -350,12 +373,19 @@ class Reverse:
                 raise ValueError(f"{door}: node {labels[i]!r} (kind {a.node.kind!r}) "
                                  "has no transpose; it cannot be reversed")
             node = a.node
-            if node.kind in ("skippable", "repeat_while"):
+            if node.kind in _CONDITIONALS:
                 node = node.payload.child
             if node.kind == "launch":
                 b = node.payload
                 self._vjp[i] = _vjp_plan(labels[i], b, vjps.get(labels[i]))
                 _check_vjp_covers(labels[i], b, self._vjp[i])
+            elif labels[i] in vjps:
+                given = vjps[labels[i]]
+                if not callable(given) and not isinstance(given, Node):
+                    raise TypeError(f"{door}: vjps[{labels[i]!r}] is the vjp of a node of your "
+                                    "own code: a callable vjp(primals, cotangents) or a Node, "
+                                    f"got {type(given).__name__}")
+                self._vjp[i] = given
         written = sorted({k for w in planes.writes for _, k in w})
         inputs = [k for k, _src in gradients if _is_float(planes.array[k])]
         # an output goes by the names its writers give it, an input by its readers'

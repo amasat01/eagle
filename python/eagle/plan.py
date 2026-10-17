@@ -37,6 +37,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from .interop import BufferRefused
+
 from . import _counters, _layout
 from . import exec as eexec
 from .abi import DEVICE_CPU, DEVICE_CUDA
@@ -341,6 +343,61 @@ def _output_dtype(plugin, name, real):
     return np.dtype(declared) if declared else real
 
 
+def _host_view(name, role, value):
+    """``value`` as a host numpy view, zero-copy; a device-resident output
+    is refused by name (a host plan cannot write device memory)."""
+    from ._plan_planes import device_resident
+
+    if device_resident(value):
+        raise BufferRefused(
+            f"eagle.plan.run: {role} {name!r} is device-resident but this plan "
+            "runs on the host; pass a host array or omit it to get one back"
+        )
+    return np.asarray(value)
+
+
+def _checked_out(name, role, arr, want, *, device):
+    """Refuse, before any launch, a caller-supplied output ``arr`` that is
+    not the plane the kernel writes: the dtype, contiguity or device must
+    match. Returns ``arr``."""
+    if arr.dtype != np.dtype(want):
+        raise BufferRefused(
+            f"eagle.plan.run: {role} {name!r} must be {np.dtype(want).name} "
+            f"(the plane's dtype); got {arr.dtype.name}"
+        )
+    if not arr.flags.c_contiguous:
+        raise BufferRefused(
+            f"eagle.plan.run: {role} {name!r} must be C-contiguous (the "
+            f"kernel writes the plane in place); got strides {arr.strides}"
+        )
+    if device:
+        import cupy as cp
+
+        if arr.device.id != cp.cuda.Device().id:
+            raise BufferRefused(
+                f"eagle.plan.run: {role} {name!r} lives on device "
+                f"{arr.device.id}, the run is on device {cp.cuda.Device().id}"
+            )
+    return arr
+
+
+def _torch_stream_context(kw):
+    """The context the device run executes within: torch's current stream
+    when a CUDA torch tensor was passed (so every copy and the launch ride
+    it), else cupy's current stream as it stands."""
+    import contextlib
+
+    for value in kw.values():
+        if type(value).__module__.partition(".")[0] == "torch" and \
+                getattr(value, "is_cuda", False):
+            from .interop import external_stream
+
+            import torch
+
+            return external_stream(torch.cuda.current_stream(value.device).cuda_stream)
+    return contextlib.nullcontext()
+
+
 def _run_device_plan(plugin, arg_spec, kw, n: int, parts, *, launch=None, gather=None,
                      keep_device=False):
     """Run a device plan. Outputs come back as host numpy arrays, except
@@ -358,7 +415,8 @@ def _run_device_plan(plugin, arg_spec, kw, n: int, parts, *, launch=None, gather
     for role, name in arg_spec:
         if role in OUTPUT_ROLES:
             device_arrays[name] = (
-                cp.ascontiguousarray(cp.asarray(kw[name]))
+                _checked_out(name, role, cp.asarray(kw[name]),
+                             _output_dtype(plugin, name, dtype), device=True)
                 if name in kw
                 else cp.zeros(_plane_shape(widths.get(name, 1), n),
                                dtype=_output_dtype(plugin, name, dtype))
@@ -402,9 +460,12 @@ def _run_host_plan(plugin, arg_spec, kw, n: int, parts, *, launch=None, gather=N
     for role, name in arg_spec:
         if role in OUTPUT_ROLES:
             # a caller-supplied output plane is written IN PLACE and returned
-            # as given (its own dtype and width), never re-cast.
+            # as given; one that is not the plane's own dtype/layout/device
+            # is refused before the launch (the kernel would write through
+            # the wrong element size).
             host_arrays[name] = (
-                np.ascontiguousarray(kw[name])
+                _checked_out(name, role, _host_view(name, role, kw[name]),
+                             _output_dtype(plugin, name, dtype), device=False)
                 if name in kw
                 else np.zeros(_plane_shape(widths.get(name, 1), n),
                                dtype=_output_dtype(plugin, name, dtype))
@@ -443,7 +504,12 @@ def _launch_host(entry, addrs, part):
 
 def _launch_device(fn, addrs, part):
     """The single-process device launch — the twin of :func:`_launch_host`."""
-    return eexec.DeviceKernel.run(fn, addrs, part, stream=0)
+    import cupy as cp
+
+    # the caller's current stream (cupy's, which a torch call has made its
+    # own for the run): the legacy stream does not wait for a non-blocking one
+    return eexec.DeviceKernel.run(fn, addrs, part,
+                                  stream=int(cp.cuda.get_current_stream().ptr))
 
 
 def _check_gatherable(plane) -> None:
@@ -540,8 +606,9 @@ def _run_plan(p: Plan, /, **kw):
 def _run_structure(p: Plan, plugin, arg_spec, kw, n: int, parts):
     """Run the adapted ``kw`` under the plan's structure; the raw result."""
     if p.structure is eexec.DeviceKernel:
-        return _run_device_plan(plugin, arg_spec, kw, n, parts,
-                                keep_device=_device_inputs(arg_spec, kw))
+        with _torch_stream_context(kw):
+            return _run_device_plan(plugin, arg_spec, kw, n, parts,
+                                    keep_device=_device_inputs(arg_spec, kw))
     if p.structure is eexec.HostTeam:
         return _run_host_plan(plugin, arg_spec, kw, n, parts)
     if p.structure is eexec.RankPartition:

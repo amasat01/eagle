@@ -5,8 +5,8 @@ What the results show, with the benchmark cards' own figures. Each statement can
 ## RK4 oscillators
 
 <!-- stale-prose-gate:
-benchmarks/perf_card/card_nvidia-h100-80gb-hbm3.json: e896d6d2050fc792c90b59697547201b
-benchmarks/perf_card/cpu_card_amd-epyc-9b45.json: ff15fa43e17e2c9a88f2ba336e8aa476
+benchmarks/perf_card/card_nvidia-h100-80gb-hbm3.json: 86570d9dd9f301b54ae3e50a40ecdfc4
+benchmarks/perf_card/cpu_card_amd-epyc-9b45.json: 440352ba86c3de47db28e0e9d25fbd6b
 -->
 
 <!--ctx card=rk4 dev=h100 n=1e6 dist=spread steps=1000-->
@@ -114,8 +114,8 @@ below say where.
 ## Adaptive RK7(8)
 
 <!-- stale-prose-gate:
-benchmarks/rk78_card/card_nvidia-h100-80gb-hbm3.json: 763658c485f8b65b8ff42c1dc3bba84c
-benchmarks/rk78_card/cpu_card_amd-epyc-9b45.json: 07b9ec84b69364c1e746befa19e5c544
+benchmarks/rk78_card/card_nvidia-h100-80gb-hbm3.json: 4a6847fb1f7815d64d95de8c8b48a527
+benchmarks/rk78_card/cpu_card_amd-epyc-9b45.json: 1ef4eda3e4f12f87d3a84585424f1c57
 -->
 
 <!--ctx card=rk78 dev=h100-->

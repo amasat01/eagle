@@ -1,2 +1,6 @@
 eagle
 Copyright 2026 Alessandro Masat
+
+This product includes the XLA FFI C API header (xla/ffi/api/c_api.h,
+vendored in python/src/xla/vendor), Copyright 2023 The OpenXLA Authors,
+licensed under the Apache License, Version 2.0 (text: ThirdPartyLicenses/XLA_FFI_LICENSE.Apache-2.0).

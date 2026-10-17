@@ -159,6 +159,7 @@ eagle is the execution layer of the RAPTOR family — it launches what
    :hidden:
 
    content/userguide/howto
+   Interoperability guides <content/interop>
 
 .. toctree::
    :maxdepth: 1

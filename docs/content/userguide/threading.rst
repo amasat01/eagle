@@ -23,6 +23,12 @@ free-threaded Python too.
    # one runner shared by two threads: the second caller gets eagle.Busy
    # unless it waits for the first to return
 
+A graph's runs stay ordered across threads: the first stage of each run waits
+on the device for the run before it, whichever thread launched it. One
+exception couples threads: a host-synchronized node (``opaque(fn,
+eager=True)``) syncs the whole device, so it also waits for every other
+thread's GPU work.
+
 Inside the package, module-level state is limited to read-only tables, locked
 tallies and idempotent memos (computing the same value twice is harmless); a
 test enforces it, so importing eagle from many threads is safe.

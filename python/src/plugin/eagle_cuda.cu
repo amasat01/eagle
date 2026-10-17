@@ -667,6 +667,19 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_is_node_toggleable(std::uin
     });
 }
 
+EAGLE_BACKEND_API eagle_backend_status eagle_backend_capture_add_child(std::uint64_t stream, std::uint64_t child,
+    std::int32_t conditionalBody)
+{
+    return guarded([&] {
+        if (child == 0)
+            throw std::invalid_argument("eagle_backend_capture_add_child: null graph");
+        requireDevice();
+        DeviceScope scope(resolveDevice(-1, stream));
+        eagle::cuda::captureAddChild(reinterpret_cast<cudaStream_t>(stream),
+            reinterpret_cast<cudaGraph_t>(child), conditionalBody != 0);
+    });
+}
+
 // ---- graph -------------------------------------------------------------------
 
 EAGLE_BACKEND_API eagle_backend_status eagle_backend_graph_create(const struct eagle_backend_graph_desc* desc,
@@ -1428,6 +1441,38 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_fence(std::int32_t dlDevice
 EAGLE_BACKEND_API eagle_backend_status eagle_backend_event_pool_created(std::int64_t* count)
 {
     return guarded([&] { out(count, static_cast<std::int64_t>(eagle::interop::EventPool::instance().created())); });
+}
+
+EAGLE_BACKEND_API eagle_backend_status eagle_backend_memset_device(std::uint64_t ptr, std::uint64_t bytes,
+    std::uint64_t stream)
+{
+    return guarded([&] {
+        if (bytes == 0)
+            return;
+        if (ptr == 0)
+            throw std::invalid_argument("eagle_backend_memset_device: null address");
+        requireDevice();
+        const int device = resolveDevice(-1, stream);
+        DeviceScope scope(device);
+        EAGLE_CHECK_ALWAYS(cudaMemsetAsync(reinterpret_cast<void*>(ptr), 0, static_cast<std::size_t>(bytes),
+            seamStream(stream)));
+    });
+}
+
+EAGLE_BACKEND_API eagle_backend_status eagle_backend_memcpy_device(std::uint64_t dst, std::uint64_t src,
+    std::uint64_t bytes, std::uint64_t stream)
+{
+    return guarded([&] {
+        if (bytes == 0)
+            return;
+        if (dst == 0 || src == 0)
+            throw std::invalid_argument("eagle_backend_memcpy_device: null address");
+        requireDevice();
+        const int device = resolveDevice(-1, stream);
+        DeviceScope scope(device);
+        EAGLE_CHECK_ALWAYS(cudaMemcpyAsync(reinterpret_cast<void*>(dst), reinterpret_cast<const void*>(src),
+            static_cast<std::size_t>(bytes), cudaMemcpyDeviceToDevice, seamStream(stream)));
+    });
 }
 
 // ---- experimental --------------------------------------------------------------

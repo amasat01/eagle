@@ -26,7 +26,13 @@ produced it). Uses nbclient, a myst_nb dependency: no extra tool.
 
     python _tools/nb_run_gate.py content            # CPU, plus GPU if present
     python _tools/nb_run_gate.py --cpu-only content
+    python _tools/nb_run_gate.py --list content     # discovery dry-run: every notebook with its gate class
+
+The discovery rule (``discover``) and the gate reading (``skip_reason``, ``truncate_at_gpu_cell``) are shared with
+``nb_hosted.py`` / ``nb_hosted_run.py`` and Kaggle's ``kernel.py``: one rule, no hand lists.
 """
+from __future__ import annotations
+
 import importlib.util
 import json
 import os
@@ -36,10 +42,51 @@ import sys
 import tempfile
 import traceback
 
-import nbformat
-from nbclient import NotebookClient
-
 TIMEOUT_S = 1800
+SKIP_PARTS = frozenset({"_build", ".ipynb_checkpoints", "jupyter_execute", ".git"})
+
+
+def discover(roots: dict[str, pathlib.Path]) -> dict[str, list[pathlib.Path]]:
+    """Every notebook of each checkout, by glob: the site's ``notebooks/*.ipynb`` (repo name ``site``), any other repo's
+    ``docs/content/**/*.ipynb``. Build output and checkpoint folders are skipped. A new tutorial is covered the day it
+    is committed."""
+    found = {}
+    for repo, root in roots.items():
+        base = root / "notebooks" if repo == "site" else root / "docs" / "content"
+        pattern = "*.ipynb" if repo == "site" else "**/*.ipynb"
+        found[repo] = sorted(p for p in base.glob(pattern) if not SKIP_PARTS & set(p.relative_to(base).parts))
+    return found
+
+
+def gate_class(path: pathlib.Path) -> str:
+    """The gate a notebook declares, as one word: ``gpu_only``, ``needs:<mods>``, ``cell-stop`` (a GPU-only section
+    at the end), joined with ``+``; ``plain`` when it declares none. Reads the JSON only (no nbformat needed)."""
+    nb = json.loads(path.read_text())
+    gate = nb.get("metadata", {}).get("gate", {})
+    parts = (["gpu_only"] if gate.get("gpu_only") else []) + ([f"needs:{','.join(gate['needs'])}"] if gate.get("needs") else [])
+    if any(c.get("metadata", {}).get("gate", {}).get("gpu_only") for c in nb.get("cells", [])):
+        parts.append("cell-stop")
+    return "+".join(parts) or "plain"
+
+
+def list_notebooks(found: dict[str, list[pathlib.Path]]) -> int:
+    """Print every notebook with its gate class and return how many there are."""
+    total = 0
+    for repo, nbs in found.items():
+        for p in nbs:
+            print(f"{repo:<8} {gate_class(p):<18} {p}")
+        total += len(nbs)
+    print(f"[nb_run_gate] {total} notebooks: " + ", ".join(f"{r} {len(n)}" for r, n in found.items()))
+    return total
+
+
+def truncate_at_gpu_cell(nb) -> bool:
+    """CPU leg: cut the notebook before its first GPU-only cell (a CPU tutorial may end with a GPU-only section)."""
+    for i, cell in enumerate(nb.cells):
+        if cell.get("metadata", {}).get("gate", {}).get("gpu_only"):
+            nb.cells = nb.cells[:i]
+            return True
+    return False
 
 
 def gpu_present() -> bool:
@@ -66,7 +113,7 @@ def register_kernel(root: pathlib.Path) -> str:
 
 
 def skip_reason(nb, leg: str) -> str | None:
-    gate = nb.metadata.get("gate", {})
+    gate = nb["metadata"].get("gate", {})
     if leg == "cpu" and gate.get("gpu_only"):
         return f"needs a CUDA GPU ({gate['gpu_only']})"
     for mod in gate.get("needs", []):
@@ -77,15 +124,15 @@ def skip_reason(nb, leg: str) -> str | None:
 
 def run_leg(path: pathlib.Path, leg: str, kernel: str) -> str:
     """Return 'OK', 'SKIP: <reason>' or 'FAIL'."""
+    import nbformat
+    from nbclient import NotebookClient
+
     nb = nbformat.read(path, as_version=4)
     reason = skip_reason(nb, leg)
     if reason:
         return f"SKIP: {reason}"
     if leg == "cpu":
-        for i, cell in enumerate(nb.cells):
-            if cell.get("metadata", {}).get("gate", {}).get("gpu_only"):
-                nb.cells = nb.cells[:i]
-                break
+        truncate_at_gpu_cell(nb)
     saved = os.environ.get("CUDA_VISIBLE_DEVICES")
     if leg == "cpu":
         os.environ["CUDA_VISIBLE_DEVICES"] = ""
@@ -115,11 +162,14 @@ def main(argv: list[str]) -> int:
     notebooks = sorted(
         p for r in roots
         for p in ([r] if r.suffix == ".ipynb" else r.rglob("*.ipynb"))
-        if ".ipynb_checkpoints" not in p.parts
+        if not SKIP_PARTS & set(p.parts)
     )
     if not notebooks:
         print("nb_run_gate: no notebooks found under", [str(r) for r in roots])
         return 2
+    if "--list" in args:
+        list_notebooks({"paths": notebooks})
+        return 0
     legs = ["cpu"] + ([] if cpu_only or not gpu_present() else ["gpu"])
     if "gpu" not in legs:
         print("[nb_run_gate] no CUDA GPU visible (or --cpu-only): the GPU leg is not run")

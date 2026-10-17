@@ -4,13 +4,39 @@
 
 **JAX is certified.** Five rows (`JX-IN-CUDA-ALIAS`, `JX-IN-WRITE-REFUSED`, `JX-OUT-CUDA-ALIAS`, `JX-IN-CPU-COPY`, `STREAM-JAX-PRODUCER-ORDER`) cover JAX arrays: zero-copy in for read-only roles, zero-copy out (the JAX array is eagle's own result buffer, never written again), and a device-side wait for a JAX operation still running. JAX arrays are immutable, so a JAX array passed as `out=`, as `terminated` (unless the plugin declares it read-only), as a `Mutable` plane, or as a written host buffer (`host_ptr(..., writable=True)`) is refused by name instead of copied. A CPU result for a CPU JAX input is now placed on the CPU device. JAX publishes wheels for Python 3.12 and newer, and no 3.13 free-threaded build; install it with the new `jax` extra on those, plus JAX's own `jax[cuda12]` or `jax[cuda13]` for GPU arrays.
 
+**JAX FFI rows.** Four rows certify `eagle.frameworks.jax`: `JX-FFI-CPU-ALIAS`, `JX-OUT-XLA-OWNED`, `JX-JIT-INVARIANCE` and `STREAM-JAX-FFI-ORDER`, each on the CPU and CUDA legs it declares. The completeness gate now counts a row only if its test ran and passed on every leg (a deselected or skipped row is red), which needs `raptor-core>=0.3.2`.
+
+**hawk kernels are JAX functions.** `eagle.frameworks.jax` runs a hawk kernel under `jit`, `vmap`, `grad`, `jacfwd` and `jacrev` to any order, on the CPU and the GPU, with outputs XLA owns, `donate_argnums` honoured, and the kernel on XLA's own stream (no host wait). Carried-state planes alias input to output, `wrt=()` runs forward-only, a kernel that finishes its own samples needs no `steps=1`, and refusals name your kernel. It needs `jax>=0.11.2` (the `jax` extra also asks for `raptor-hawk>=0.5.1`) and, as for the certified rows, Python 3.12 or newer. Refusals say the way out: mixed float32 and float64 planes (cast to one), forward mode of a kernel that carries state (use reverse mode), and `function()` on an `active_set` kernel (run it with eagle). A new small library, `libeagle_xla.so`, carries the call.
+
+**A carried-state kernel under `vmap` no longer reads zeros.** XLA can hand a batched call a result buffer other than its operand; the handler now copies the operand into the result itself, so the kernel starts from the right state and finishes. The copy is the new seam entry `eagle_backend_memcpy_device` (minor 4).
+
+**`eagle.frameworks.jax.node(fn, reads=, writes=, name=)`.** Runs a JAX step between eagle launches, ordered on the stream, and keeps its results until their copy has run; carried state differentiates through the step's vjp. On the CPU it no longer needs cupy: cupy is imported only for device arrays. On a GPU a JAX node runs between launches, not inside `until_done`'s graph (XLA owns its memory): drive the loop yourself, or put the batch inside `jit`.
+
+**The backend seam is at minor 4.** Minor 2 added `eagle_backend_memset_device` (zero an XLA output without a sync, capture-legal), minor 3 `eagle_backend_capture_add_child` (insert a framework's CUDA graph as one child node) and minor 4 `eagle_backend_memcpy_device`. Each is bound by symbol, so the presence of a symbol is the capability.
+
+**The torch bridge covers more.** One generic launch op gives derivatives to any order, `torch.func`, float32, and `Param` values read from a device plane, loop bodies included; a carried-state kernel steps in place and differentiates through the step vjp; and the op works inside `torch.compile` (first-order reverse mode there; run forward mode and double backward outside it). `torch.compile` needs torch 2.4 or newer (the floor stays 2.2: on an older torch run the step eagerly). A kernel that finishes its own samples returns a fresh `Terminated` mask and leaves yours untouched: keep the returned mask as the next step's.
+
+**Warp programs call hawk kernels.** A hawk kernel runs inside a Warp program: stream-ordered, capturable in `wp.capture_begin` (call `fn.prepare(mode, device)` first, since a build cannot happen inside a capture), writing into Warp arrays given as `out=`. State kernels run in a loop and differentiate through `wp.Tape` (reverse mode only; use the JAX bridge for forward mode). A Warp program that moves its tape fails by name.
+
+**CuPy and NumPy.** `Plan.run` follows the current CuPy or torch stream. An `out=` that is non-contiguous, of the wrong dtype or on the wrong device is now refused by name instead of written back through a copy: pass a contiguous array of the right dtype and device. NumPy calls still block, since host arrays have no stream.
+
+**Your own code in a graph, by name.** `opaque()` and `child()`, and `Graph.add` and `add_node`, take `name=`; a recorded step refuses two nodes with one label. A node declares its tier (captured, stream-ordered or host), and a child graph carrying a node type a loop body forbids is refused by name. `until_done` accepts captured per-step nodes in its step list, and refuses cadence, reorder, tier and record shapes it cannot honour by name. A stream or host node cannot run inside a stepping loop's device graph: capture it, or call `runner.run()` with `max_steps=k` and run your code between.
+
+**Gradients through a recorded run that runs your model.** `reverse(record, seeds, vjps=)` differentiates a recorded stepping loop whose step runs your model before the kernel, through your vjp; the result matches pure torch autograd. A recorded run also accepts stream-ordered and host nodes. In a recorded loop write the step as `[node, plan]`, give a node per-sample planes (not a `Param`) and no plane another node writes, and use `events="step"`; these lift in 0.6.3.
+
+**The shipped CUDA plugin covers every architecture.** `libeagle_cuda` is built for all 15 architectures from sm_60, plus `compute_100` PTX for newer GPUs, for about 130 KB more; the build-info string and the ship-build check agree on that list.
+
+**Performance cards.** Cards kept in git hold the summaries, fits and metadata; the raw rows are release assets. CI downloads the full rows and fails on a missing or altered one. Slim cards keep the top SM clock.
+
+**Interop guides, tutorials and demos.** Guides for JAX, torch, CuPy/NumPy and Warp, tutorials 12 to 18 (torch net in a stepping loop, a Warp kernel inside a graph, a JAX model between launches, the eagle batch inside `jit`), and the early-termination and zero-copy interop demos with notebooks and cards, which moved here from raptor-core. The matching certification rows are in raptor-core 0.3.2.
+
 **Build warnings fixed.** The build-info architectures string now lists SASS and PTX in a short form (`61,70,90/90`) so the full list fits its buffer, with a compile check (before, it was cut at 127 characters); the build links libgomp; test markers are registered; Doxygen builds under strict warnings; the Pages actions use the Node 24 releases.
 
 **Kaggle GPU workflow.** A Kaggle T4 workflow runs the GPU interop rows and the notebooks, from a copy of the suite outside the checkout, and reports results even when the kernel ends in error.
 
 **Efficiency table.** The table quotes `eagle.simulate`, the same arm as the landing site.
 
-**NumPy and torch floors.** `numpy>=1.26` and `torch>=2.2` are declared, with a floor lock and a test that keeps the two in step. `raptor-core>=0.3.1` carries the JAX rows.
+**NumPy and torch floors.** `numpy>=1.26` and `torch>=2.2` are declared, with a floor lock and a test that keeps the two in step. `raptor-core>=0.3.2` carries the JAX rows.
 
 **docs-fresh tells its failures apart.** `tools/docs_fresh.sh` exits with a different code for stale docs, a missing card and a missing tool.
 

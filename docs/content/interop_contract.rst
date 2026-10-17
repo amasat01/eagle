@@ -140,8 +140,7 @@ Refused stream codes raise ``ValueError`` naming the stream
 Certification
 -------------
 
-NVIDIA Warp is certified today, through this same layer, not a dedicated
-adapter: any ``__dlpack__`` + ``__dlpack_device__`` producer already reaches
+NVIDIA Warp is certified through this same layer: any ``__dlpack__`` + ``__dlpack_device__`` producer already reaches
 :func:`eagle.interop.import_buffer`. A ``wp.array`` imports zero-copy
 (``WP-IN-CUDA-ALIAS``) — Warp speaks legacy (pre-1.0) DLPack in the version the
 tests pin, so its access flag reports ``"unknown"`` — and exports back zero-copy via
@@ -150,6 +149,9 @@ honoured end to end, producer side (``STREAM-WARP-PRODUCER-ORDER``). See
 `raptor's interoperability protocols
 <https://amasat01.github.io/raptor/content/interop_protocols.html>`_ for the
 full, row-cited statement.
+
+``eagle.frameworks.warp`` runs a hawk kernel on Warp arrays directly, with ``wp.Tape`` gradients and
+CUDA graph capture; the Warp page walks through it.
 
 JAX is certified the same way. JAX publishes wheels for Python 3.12 and
 newer, and no 3.13 free-threaded build; its CUDA 12 build supports Pascal
@@ -171,6 +173,33 @@ immutable, so the rules differ from the writable frameworks:
   so a JAX operation still running on the GPU is waited for on the device
   (``STREAM-JAX-PRODUCER-ORDER``). The result is synchronized before it is
   handed back to JAX.
+
+The bridge ``eagle.frameworks.jax.function``, which runs a hawk kernel as an
+XLA custom call on XLA's own buffers and stream, is certified by four more rows:
+
+* On the CPU platform the kernel reads XLA's host buffers in place and the
+  result is a fresh XLA-owned buffer (``JX-FFI-CPU-ALIAS``).
+* Outputs are XLA-allocated and zero where the kernel writes nothing, on CPU and
+  CUDA, even when the allocator held old data; a donated mask comes back at the
+  same address and one that was not donated is left intact
+  (``JX-OUT-XLA-OWNED``).
+* Eager, ``jit``, a ``vmap``-folded batch and a ``lax.scan`` of steps agree: bit
+  for bit on CUDA and on the exact host profiles, within a few ULP on
+  ``native-vector-math`` (``JX-JIT-INVARIANCE``).
+* In one ``jit``, a kernel after a long-running XLA operation runs on XLA's
+  stream: the call returns without a host wait and reads the finished values
+  (``STREAM-JAX-FFI-ORDER``).
+
+Three more rows cover JAX code inside an eagle graph:
+
+* A JAX step between eagle stages runs in order on the device, its result stays
+  alive until eagle's copy of it is done, and the host does not wait
+  (``STREAM-JAX-INJECT-ORDER``).
+* A JAX call in a host-synchronized node is seen by the next stage
+  (``JX-INJECT-HOST``).
+* A carried-state kernel in ``jit(while_loop)`` gives the run-until-done answer,
+  and ``grad`` of a ``scan`` over it matches a plain JAX reference
+  (``JX-LOOP-INVARIANCE``).
 
 Layouts
 -------

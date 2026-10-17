@@ -1,0 +1,99 @@
+{
+  "code": {
+    "kernel_source": "def step_kernel():\n    \"\"\"Trace the gated RK4 step.\n\n    ``alive``/``alive_next`` are explicit 0/1 planes (``T.Terminated`` is\n    read-only, so a terminated sample's own flag has to be carried this way).\n    ``age``/``age_next`` ping-pong an increment-while-alive counter\n    (``age_next = age + alive``): once a sample's ``alive`` reaches 0, its age\n    stops advancing, so the age plane read back at the end IS that sample's\n    termination step -- there is no per-replay step-number parameter to read\n    it from, because a captured graph replay cannot see a scalar that varies\n    per replay (a ``Param`` freezes at capture time).\n\n    ``n_active`` is a one-cell accumulator, seeded to the batch size by the\n    caller and never re-zeroed: every launch subtracts exactly the number of\n    samples that terminate on THIS step (``still - alive``, zero for a sample\n    that stays alive or was already dead), so it decays monotonically to zero\n    as the batch finishes. An ``Accum`` plane must be a float type (there is\n    no integer atomic accumulate), so the caller views this float32 cell as\n    uint32 to build the graph's skip guard -- exact for batches under 2**24\n    samples, comfortably above anything this demo runs.\n\n    A dead sample's own step is a mathematical no-op (``x_next = x``,\n    ``alive_next = 0``, ``age_next = age``, the accumulator's contribution\n    ``still - alive = 0 - 0 = 0``) -- this is WHY the unguarded graph arm\n    (which never skips, so it re-runs this no-op every remaining step) still\n    lands bit-for-bit on the same final state as the guarded one.\n    \"\"\"\n    import hawk\n    import hawk.math as hm\n\n    def rhs(s):\n        r2 = s[0] * s[0] + s[1] * s[1]\n        inv_r3 = hm.rsqrt(r2 * r2 * r2)\n        return hm.vec(s[2], s[3], -MU * s[0] * inv_r3, -MU * s[1] * inv_r3)\n\n    @hawk.kernel\n    def et_step(\n        x: hawk.Vector[4],\n        alive: hawk.Scalar,\n        age: hawk.Scalar,\n        dt: hawk.Param,\n        r_esc2: hawk.Param,\n        r_col2: hawk.Param,\n        x_next: hawk.Mutable[hawk.Vector[4]],\n        alive_next: hawk.Mutable[hawk.Scalar],\n        age_next: hawk.Mutable[hawk.Scalar],\n        n_active: hawk.Accum[hawk.Scalar],\n    ):\n        k1 = rhs(x)\n        k2 = rhs(x + (0.5 * dt) * k1)\n        k3 = rhs(x + (0.5 * dt) * k2)\n        k4 = rhs(x + dt * k3)\n        xn = x + (dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)\n\n        r2 = xn[0] * xn[0] + xn[1] * xn[1]\n        zero = alive * 0\n        one = zero + 1\n        live = alive != 0\n        still = hm.select(\n            live, hm.select(r2 < r_esc2, hm.select(r2 > r_col2, one, zero), zero), zero\n        )\n\n        x_next = hm.select(live, xn, x)\n        alive_next = still\n        age_next = age + alive\n        n_active.add(still - alive, at=0)\n\n    return et_step\n"
+  },
+  "dry": false,
+  "facts": {
+    "device": {
+      "clock_rate_hz": 1480500000.0,
+      "compute_capability": "6.1",
+      "cuda_driver_api": 12060,
+      "cuda_runtime": 12090,
+      "driver_version": "560.35.03",
+      "memory_bus_width_bits": 160,
+      "memory_clock_hz": 3504000000.0,
+      "name": "Quadro P2000",
+      "nvidia_smi": {
+        "clocks_max_mem": "3504 MHz",
+        "clocks_max_sm": "1721 MHz",
+        "driver_version": "560.35.03",
+        "memory_total": "5120 MiB",
+        "name": "Quadro P2000",
+        "power_limit": "75.00 W"
+      },
+      "pci_bus_id": "00000000:21:00.0",
+      "sm_count": 8,
+      "total_memory_bytes": 5283250176
+    },
+    "example_script": "examples/python/early_termination.py",
+    "example_script_md5": "729fb616a0517c03fe7caf02ec3cf39f",
+    "generated_utc": "2026-10-17T07:48:44Z",
+    "peak": {
+      "datasheet_cross_check": "Quadro P2000 data sheet: 3.0 TFLOPS peak FP32 (FP64 is 1/32 of FP32 on compute capability 6.1), 140 GB/s memory bandwidth",
+      "dram_bytes_per_s": 140160000000.0,
+      "dram_source": "2 x memory clock (cudaDeviceProp::memoryClockRate) x bus width (cudaDeviceProp::memoryBusWidth) / 8",
+      "fp64_flops": 94752000000.0,
+      "fp64_source": "SM count x FP64 FMA per clock per SM (CUDA C++ Programming Guide, Arithmetic Instructions throughput table, compute capability 6.1: 4) x 2 FLOP per FMA x the device's reported maximum clock (cudaDeviceProp::clockRate)"
+    },
+    "script_md5": "c2ff1e53ab1b87199ab86c98356f2ef6",
+    "software": {
+      "cpu": "Intel(R) Xeon(R) W-2125 CPU @ 4.00GHz",
+      "cupy": "14.2.0",
+      "eagle_commit": "3f9a26785f55bcd5caac37c950d9263451469a27",
+      "hawk": "0.5.1",
+      "hawk_commit": "127857f8a327e96c9becf32d1cb7e85df9f5e198",
+      "jax": "0.10.2",
+      "jaxlib": "0.10.2",
+      "numpy": "2.5.3",
+      "omp_num_threads": null,
+      "platform": "Linux-6.12.0-100.28.2.el9uek.x86_64-x86_64-with-glibc2.34",
+      "python": "3.12.14",
+      "torch": "2.12.1",
+      "warp": "1.17.0"
+    }
+  },
+  "name": "early_termination",
+  "results": {
+    "batch": 1000000,
+    "last_termination": 285,
+    "ratio_eager_over_guarded": 1.0177214041156901,
+    "ratio_unguarded_over_guarded": 13.760553759039608,
+    "steps": 4000,
+    "wall_s_per_step": {
+      "eager": {
+        "iqr": 5.914221983402889e-07,
+        "median": 0.00021437406726181507,
+        "q1": 0.0002138554737903178,
+        "q3": 0.00021444689598865808,
+        "samples": [
+          0.00021333688031882048,
+          0.00021437406726181507,
+          0.00021451972471550108
+        ]
+      },
+      "guarded": {
+        "iqr": 1.514662289990305e-08,
+        "median": 0.00021064120926894247,
+        "q1": 0.00021063810586929323,
+        "q3": 0.00021065325249219313,
+        "samples": [
+          0.0002106652957154438,
+          0.00021063500246964396,
+          0.00021064120926894247
+        ]
+      },
+      "unguarded": {
+        "iqr": 4.5168801443649237e-07,
+        "median": 0.002898539684014395,
+        "q1": 0.0028982803910039363,
+        "q3": 0.002898732079018373,
+        "samples": [
+          0.002898924474022351,
+          0.002898539684014395,
+          0.002898021097993478
+        ]
+      }
+    }
+  },
+  "schema": "raptor-perf-card/1"
+}

@@ -514,8 +514,13 @@ class Simulation:
         if record and dispatch is not None:
             raise ValueError("eagle.simulate: record=True runs each step fused, so dispatch= cannot "
                              "be combined with it yet; drop dispatch= to record this run")
+        from .graph import Node
+
         items = _model_items(model, until)
-        items, spec = _lower_dispatch(items, dispatch)
+        nodes = {i: it for i, it in enumerate(items) if isinstance(it, Node)}
+        items, spec = _lower_dispatch([it for it in items if not isinstance(it, Node)], dispatch)
+        if nodes and spec is not None:
+            _refuse("dispatch= runs the kernels its own way; a step with a node takes none")
         plans, kernels = _deploy(items, scalar_type)
         names = [_name(p, k) for p, k in zip_strict(plans, kernels)]
         decl = _declarations(plans, names)
@@ -576,6 +581,9 @@ class Simulation:
         self._device, self._xp = device, xp
 
         step = plans[0] if len(plans) == 1 else selected
+        if nodes:       # the step list as given: nodes where they stood
+            rest = iter([step] if len(plans) == 1 else step)
+            step = [nodes[i] if i in nodes else next(rest) for i in range(len(nodes) + len(plans))]
         if (spec is not None and not single and layout is None and not record
                 and events == "step"):
             from ._dispatch_door import DispatchRunner

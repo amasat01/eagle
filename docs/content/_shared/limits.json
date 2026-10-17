@@ -1,0 +1,268 @@
+[
+ {
+  "id": "one-gpu",
+  "text": "One GPU per process until 0.7 (our scope): run one process per GPU, or choose it with `CUDA_VISIBLE_DEVICES`.",
+  "way_out": "one process per GPU",
+  "cause": "ours",
+  "lifted_in": "0.7"
+ },
+ {
+  "id": "float64-copy",
+  "text": "Inputs of another float type are converted to float64, which is a copy (our scope here): pass float64 arrays to avoid it.",
+  "way_out": "pass float64",
+  "cause": "ours",
+  "lifted_in": "none"
+ },
+ {
+  "id": "jax-dtype-build",
+  "text": "A call runs the float32 or the float64 build, chosen by its first float plane, and mixing them is refused (the kernel is built once per dtype). JAX itself is float32 unless `jax_enable_x64` is on: cast every plane to one dtype, or turn x64 on as this page does.",
+  "way_out": "cast planes to one dtype, or enable x64",
+  "cause": "ours",
+  "lifted_in": "none"
+ },
+ {
+  "id": "jax-param-vmap",
+  "text": "`vmap` over a batch of `Param` values runs one launch per entry, because a `Param` is one number per launch (our scope). Put the varying value in a plane for one launch; over planes it is free for `in_axes=-1` and one transpose for a leading axis.",
+  "way_out": "put the varying value in a plane",
+  "cause": "ours",
+  "lifted_in": "none"
+ },
+ {
+  "id": "jax-export",
+  "text": "`jax.export` modules carry the kernel's digest, not its code (so they stay small and cache-friendly): in a fresh process call `eagle.frameworks.jax.preload(cache_dir)` before running one.",
+  "way_out": "preload(cache_dir)",
+  "cause": "ours",
+  "lifted_in": "none"
+ },
+ {
+  "id": "jax-terminated",
+  "text": "`Terminated` is a stop decision, not a number, so it carries no derivative and a finished sample's derivatives are zero. Keep any soft version of the decision in `jnp`, and differentiate the planes.",
+  "way_out": "keep a soft version in jnp",
+  "cause": "ours",
+  "lifted_in": "none"
+ },
+ {
+  "id": "jax-active-set",
+  "text": "`function()` refuses a kernel built with `Guard(active_set=True)`, because its index map belongs to eagle's launcher (our scope): run that kernel with eagle, or build it without `active_set`.",
+  "way_out": "run it with eagle, or drop active_set",
+  "cause": "ours",
+  "lifted_in": "none"
+ },
+ {
+  "id": "jax-min-version",
+  "text": "Needs `jax>=0.11.2`, the release whose XLA FFI version the bridge is built against (our scope); a newer jax works.",
+  "way_out": "upgrade jax",
+  "cause": "ours",
+  "lifted_in": "none"
+ },
+ {
+  "id": "torch-compile-min",
+  "text": "`torch.compile` needs torch 2.4 or newer, the release that added the custom-op API the bridge uses; on an older torch run the step eagerly.",
+  "way_out": "run eagerly on older torch",
+  "cause": "framework",
+  "lifted_in": "none"
+ },
+ {
+  "id": "torch-compile-ad",
+  "text": "Inside a `torch.compile` region only first-order reverse mode runs, because compile traces the backward once, ahead of time (torch's design); run forward AD and double backward outside it, or through `torch.func`.",
+  "way_out": "run them outside the compiled region, or through torch.func",
+  "cause": "framework",
+  "lifted_in": "none"
+ },
+ {
+  "id": "torch-fresh-mask",
+  "text": "A kernel that finishes its own samples returns a fresh `Terminated` mask and leaves yours untouched (our design, so inputs are never written); keep the returned mask as the next step's.",
+  "way_out": "use the returned mask",
+  "cause": "ours",
+  "lifted_in": "none"
+ },
+ {
+  "id": "torch-param-vmap",
+  "text": "`torch.func.vmap` over a batch of `Param` values runs one launch per entry, because a `Param` is one number per launch (our scope); put the varying value in a plane for one launch.",
+  "way_out": "put the varying value in a plane",
+  "cause": "ours",
+  "lifted_in": "none"
+ },
+ {
+  "id": "numpy-cupy-no-autodiff",
+  "text": "No gradients through NumPy or CuPy, because neither has autodiff (the frameworks' design): write the vjp yourself and pass it as `vjps=`, or use the [torch](torch.ipynb) or [JAX](jax.ipynb) bridge.",
+  "way_out": "write the vjp, or use the torch or JAX bridge",
+  "cause": "framework",
+  "lifted_in": "none"
+ },
+ {
+  "id": "numpy-blocks",
+  "text": "NumPy calls block until the result is ready, because host arrays have no stream (NumPy's design); CuPy arrays run asynchronously.",
+  "way_out": "use CuPy arrays for asynchronous work",
+  "cause": "framework",
+  "lifted_in": "none"
+ },
+ {
+  "id": "cupy-plan-run-stream",
+  "text": "`plan.run` does not follow a CuPy stream you opened (our scope): bind the arrays and call `bind(...).launch()` as above to stay ordered on it.",
+  "way_out": "bind(...).launch()",
+  "cause": "ours",
+  "lifted_in": "none"
+ },
+ {
+  "id": "warp-device-code",
+  "text": "Warp kernels cannot call an eagle kernel, because a Warp kernel is device code and an eagle launch is a call from Python (their design): launch eagle between your Warp launches.",
+  "way_out": "launch eagle between Warp launches",
+  "cause": "framework",
+  "lifted_in": "none"
+ },
+ {
+  "id": "warp-vec-types",
+  "text": "Planes are component-major, `(3, n)` for a vector, so arrays of Warp vector types (`wp.vec3d`) are refused (our scope): pass a `(3, n)` array.",
+  "way_out": "pass a (3, n) array",
+  "cause": "ours",
+  "lifted_in": "none"
+ },
+ {
+  "id": "warp-reverse-only",
+  "text": "Gradients are reverse mode only: `Tape.record_func`, which records eagle's backward, has no forward mode and no second derivative (Warp's design): differentiate once with `tape.backward`, or use the [JAX](jax.ipynb) bridge for forward mode and higher orders.",
+  "way_out": "differentiate once, or the JAX bridge",
+  "cause": "framework",
+  "lifted_in": "none"
+ },
+ {
+  "id": "warp-float-mode",
+  "text": "A call runs the float32 or the float64 build, chosen by its first float array, and mixing them is refused (the kernel is built once per dtype, our scope): create every array in one float dtype.",
+  "way_out": "one float dtype",
+  "cause": "ours",
+  "lifted_in": "none"
+ },
+ {
+  "id": "warp-build-before-capture",
+  "text": "A kernel is built on its first call, and a graph capture records device work only, so a build cannot happen inside one (CUDA's design): call `fn.prepare(mode, device)` (or the function once) before `wp.capture_begin`.",
+  "way_out": "fn.prepare before the capture",
+  "cause": "framework",
+  "lifted_in": "none"
+ },
+ {
+  "id": "warp-threads",
+  "text": "Warp keeps one global tape, creates its CUDA context on first use and holds the current stream per device, not per thread (Warp's design), so threads pass `tape=` to each call, the device is touched once (`wp.zeros(1, device=device)`) before they start, and CUDA `.numpy()`, `ScopedStream` and `set_stream` are not called from several threads at once: read back on one thread, or copy with an explicit stream.",
+  "way_out": "tape= per call, touch the device first, read back on one thread",
+  "cause": "framework",
+  "lifted_in": "none"
+ },
+ {
+  "id": "run-vjps-node-after-plan",
+  "text": "In a recorded loop a node runs before the plan, preparing the step from the current state (our scope until 0.6.3): write the step as `[node, plan]`.",
+  "way_out": "the [node, plan] form",
+  "cause": "ours",
+  "lifted_in": "0.6.3"
+ },
+ {
+  "id": "run-vjps-node-chain",
+  "text": "In a recorded loop a node cannot read a plane another node writes (our scope until 0.6.3): fold the two into one node.",
+  "way_out": "one node",
+  "cause": "ours",
+  "lifted_in": "0.6.3"
+ },
+ {
+  "id": "run-vjps-param-read",
+  "text": "In a recorded loop a node reads per-sample planes, not a `Param` (our scope until 0.6.3): bind the value as a per-sample plane or a `Table`.",
+  "way_out": "a per-sample plane",
+  "cause": "ours",
+  "lifted_in": "0.6.3"
+ },
+ {
+  "id": "run-vjps-refine",
+  "text": "A recorded loop with a node stops with `events=\"step\"` (our scope until 0.6.3): `events=\"refine\"` re-steps the last step without your node.",
+  "way_out": "events=\"step\"",
+  "cause": "ours",
+  "lifted_in": "0.6.3"
+ },
+ {
+  "id": "run-vjps-node-vjp",
+  "text": "In a recorded loop the node's vjp is a callable run host-synchronized once per step (our scope until 0.6.3): a captured backward as a `Node` vjp is refused by name.",
+  "way_out": "the callable vjp",
+  "cause": "ours",
+  "lifted_in": "0.6.3"
+ },
+ {
+  "id": "torch-capture-alloc",
+  "text": "A torch module that allocates cannot be captured as a plain `opaque`, because torch hands its graph memory to the next replay (torch's design): capture it with `torch.cuda.CUDAGraph(keep_graph=True)` and insert it with `child`, or write it with `out=`.",
+  "way_out": "child, or out=",
+  "cause": "framework",
+  "lifted_in": "none"
+ },
+ {
+  "id": "node-loop-tier",
+  "text": "A stream or host node cannot run inside a stepping loop's device graph (our scope): capture it (`opaque(fn)`, or `child`), or call `runner.run()` with `max_steps=k`, then your code, in your own loop.",
+  "way_out": "capture it, or your own run(max_steps=k) loop",
+  "cause": "ours",
+  "lifted_in": "none"
+ },
+ {
+  "id": "nested-capture",
+  "text": "An eagle graph cannot be captured inside `torch.cuda.graph` or `wp.capture_begin` (our scope): build the eagle graph first and replay it next to your framework's.",
+  "way_out": "build the eagle graph first",
+  "cause": "ours",
+  "lifted_in": "none"
+ },
+ {
+  "id": "numpy-gpu-host",
+  "text": "A NumPy function in a GPU graph is host-synchronized, because host arrays have no stream (NumPy's design): write it as `opaque(fn, eager=True)`, or use CuPy for work that stays on the device.",
+  "way_out": "eager=True, or CuPy",
+  "cause": "framework",
+  "lifted_in": "none"
+ },
+ {
+  "id": "jax-captured",
+  "text": "JAX cannot run inside a captured eagle graph or stepping loop, because XLA owns its allocations (XLA's design): use `eagle.frameworks.jax.node` between launches, or put the batch inside `jit`.",
+  "way_out": "frameworks.jax.node, or jit",
+  "cause": "framework",
+  "lifted_in": "none"
+ },
+ {
+  "id": "jax-grad-while",
+  "text": "`jax.grad` does not differentiate through `lax.while_loop` (JAX's rule): use `lax.scan` with a next-state kernel.",
+  "way_out": "lax.scan",
+  "cause": "framework",
+  "lifted_in": "none"
+ },
+ {
+  "id": "jax-node-loop",
+  "text": "On a GPU a JAX node runs between launches, not inside `until_done`'s one device graph, because XLA owns its own memory and cannot be captured (XLA's design): drive the graph with your own loop, as this page does, or put the batch inside `jit` (tutorial 18).",
+  "way_out": "own launch loop, or the batch inside jit",
+  "cause": "framework",
+  "lifted_in": "none"
+ },
+ {
+  "id": "jax-while-grad",
+  "text": "`jax.grad` does not go through `lax.while_loop`, because the trip count is only known at run time (JAX's rule): use `lax.scan` with a fixed length for gradients, as this page does.",
+  "way_out": "lax.scan with a fixed length",
+  "cause": "framework",
+  "lifted_in": "none"
+ },
+ {
+  "id": "jax-state-forward",
+  "text": "Forward mode (`jvp`, `jacfwd`) of a kernel that carries state is not available yet (our scope): use reverse mode (`grad`, `jacrev`), or a kernel that writes a separate output plane.",
+  "way_out": "reverse mode, or a separate output plane",
+  "cause": "ours",
+  "lifted_in": "none"
+ },
+ {
+  "id": "jax-inside-jit",
+  "text": "Compaction, conditionals and event refinement belong to `until_done`; inside `jit` the loop is XLA's (`while_loop`, `scan`), so they do not apply there (XLA's design): use `until_done` when you need them.",
+  "way_out": "until_done outside jit",
+  "cause": "framework",
+  "lifted_in": "none"
+ },
+ {
+  "id": "jax-ft-wheel",
+  "text": "JAX runs under free-threading on Python 3.14t only, because jaxlib publishes no 3.13t wheel (JAX's release choice): use 3.14t for free-threaded JAX, or a regular 3.13 build.",
+  "way_out": "3.14t, or a regular 3.13",
+  "cause": "framework",
+  "lifted_in": "none"
+ },
+ {
+  "id": "torch-ft-wheel",
+  "text": "torch's CPU wheels cover free-threaded Python 3.14t only, none for 3.13t (torch's release choice): use 3.14t for free-threaded torch, or a regular 3.13 build.",
+  "way_out": "3.14t, or a regular 3.13",
+  "cause": "framework",
+  "lifted_in": "none"
+ }
+]

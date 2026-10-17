@@ -42,7 +42,7 @@ findable in one place instead of only where the gap happens to surface.
 the CUDA and CPU host plugin paths. Its tally line reads **22 CLOSED / 0
 OPEN**, over the full 56-cell matrix — every row that page tracks is closed.
 It stays in the devguide as the record of how that closure was reached, and
-as the template this page and {doc}`test-map` both follow for "how do I keep
+as the template this page follows for "how do I keep
 a tracking page honest as work lands."
 
 ## What is *not* on this list, on purpose

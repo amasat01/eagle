@@ -29,12 +29,9 @@ Two tiers, split by whether they can run yet:
       docstring -- so exercising it here through ``RecordedSchedule``'s
       host-reachable door tests the real production code, not a proxy).
 
-  (b) CUDA-ARM -- ``pytest.mark.gpu``, AUTHORED but NOT YET RUN: the
-      installed ``eagle._core`` predates these C++ additions
-      (``capture_snapshot_nodes`` /
-      ``is_node_toggleable`` / ``Launcher.set_node_enabled`` do not exist
-      in it yet), so running these now would fail on an unrelated
-      ``AttributeError`` rather than exercise anything. cupy and
+  (b) CUDA-ARM -- ``pytest.mark.gpu``; it needs an ``eagle._core`` that has
+      ``capture_snapshot_nodes``, ``is_node_toggleable`` and
+      ``Launcher.set_node_enabled``. cupy and
       ``eagle.pipeline``/``eagle._conditional`` symbols that need a real
       capture are imported LOCALLY inside each such test (not at module
       top), so this file's (a) tests stay collectible and runnable even in
@@ -228,9 +225,7 @@ def test_non_toggleable_member_error_is_a_type_error():
 
 
 # ============================================================================
-# (b) CUDA-ARM -- pytest.mark.gpu. AUTHORED, NOT YET RUN (see
-# module docstring): eagle._core predates capture_snapshot_nodes /
-# is_node_toggleable / Launcher.set_node_enabled. cupy and the
+# (b) CUDA-ARM -- pytest.mark.gpu (see module docstring). cupy and the
 # capture-needing eagle symbols are imported LOCALLY, inside each test, so
 # collecting this file never requires cupy.
 # ============================================================================

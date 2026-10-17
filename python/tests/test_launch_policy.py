@@ -7,8 +7,7 @@ This is Gate A: pure, no GPU, no cupy — it must
 collect and pass with cupy entirely ABSENT from the environment, because
 :mod:`eagle._launch_policy` itself never imports cupy. Gate B (a GPU end-to-end value
 twin against a real captured graph's ``<<<grid,block,smem>>>`` label) and Gate C (the
-nonvacuity ritual) are authored separately and are NOT run here — they need a CUDA
-device.
+nonvacuity ritual) live in their own files and need a CUDA device.
 
 Every expected value below is HAND-DERIVED in the comment beside it (plain
 arithmetic, independent of :func:`resolve_block`'s own expression) — per this

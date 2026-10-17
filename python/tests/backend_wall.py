@@ -195,8 +195,9 @@ def check_plugin(
 
     With ``sass``/``ptx`` given (a dev build), the archs must match exactly.
     Without them (the ship build), the SASS must cover :data:`SHIP_SASS_FLOOR`,
-    hold nothing below :data:`SHIP_SASS_MIN`, and the PTX must be exactly one
-    copy, at the newest SASS architecture.
+    hold nothing below :data:`SHIP_SASS_MIN`, and the PTX must be the newest SASS
+    architecture, plus compute_100 when sm_100 is there and not the newest (the
+    CMake rule: a CUDA 13 driver JITs compute_100 PTX for Jetson Thor).
     """
     problems = []
     for lib in needed(plugin):
@@ -220,8 +221,9 @@ def check_plugin(
     if low:
         problems.append(f"plugin SASS archs {low} are below sm_{SHIP_SASS_MIN}")
     newest = max(have_sass, key=int) if have_sass else None
-    if have_ptx != ([newest] if newest else []):
-        problems.append(f"plugin PTX archs {have_ptx}, expected [{newest}] (the newest SASS)")
+    want_ptx = sorted({newest, "100"} & {newest, *have_sass}, key=int) if newest else []
+    if have_ptx != want_ptx:
+        problems.append(f"plugin PTX archs {have_ptx}, expected {want_ptx}")
     return problems
 
 

@@ -3,9 +3,8 @@
 
 """Gate C — the nonvacuity ritual.
 
-AUTHORED, NOT RUN here (same HARD CONSTRAINT as Gate B — one
-half of this file needs a CUDA device). Both reds below must be recorded
-when this file is run.
+One half of this file needs a CUDA device. Both reds below must show when
+the file is run.
 
 Two independent deliberate-breaks, proving each acceptance gate can actually
 go RED (not just that it happened to pass):
@@ -45,10 +44,8 @@ import tempfile
 import pytest
 
 # Only test 1 below needs a CUDA device; test 2 is pure. The file is marked
-# `gpu` as a whole (matching Gate B's file-level marker) because it exists to
-# be authored-and-run as ONE unit, following the
-# "AUTHOR (do not run) Gate B, Gate C" pairing -- not because every test in
-# it individually needs a GPU.
+# `gpu` as a whole (matching Gate B's file-level marker) because the two gates
+# run as one unit, not because every test in it needs a GPU.
 pytestmark = pytest.mark.gpu
 
 

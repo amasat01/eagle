@@ -5,7 +5,9 @@
 // cycles, then returns x + 1. It writes -1 into the result first, so an
 // early reader sees -1 and a reader that waited sees x + 1. It is the
 // "operation still running" that python/tests/test_interop_jax.py needs
-// (built there with nvcc at test time).
+// (built there with nvcc at test time). SpinSyncHandler is the same operation
+// with a host wait after the launch: the known-bad answer for the dispatch
+// timing in python/tests/test_interop_jax_ffi.py.
 
 #include <cstdint>
 #include <cuda_runtime.h>
@@ -23,16 +25,34 @@ __global__ void spinAddOne(const double* x, double* y, int64_t n, long long cycl
   for (int64_t i = threadIdx.x; i < n; i += blockDim.x) y[i] = x[i] + 1.0;
 }
 
-static ffi::Error spinImpl(cudaStream_t stream, int64_t cycles,
-                           ffi::Buffer<ffi::F64> x, ffi::ResultBuffer<ffi::F64> y) {
+static ffi::Error spin(cudaStream_t stream, int64_t cycles, bool hostWait,
+                       ffi::Buffer<ffi::F64> x, ffi::ResultBuffer<ffi::F64> y) {
   spinAddOne<<<1, 128, 0, stream>>>(x.typed_data(), y->typed_data(),
                                     static_cast<int64_t>(x.element_count()), cycles);
-  const cudaError_t err = cudaGetLastError();
+  cudaError_t err = cudaGetLastError();
+  if (err == cudaSuccess && hostWait) err = cudaStreamSynchronize(stream);
   if (err != cudaSuccess) return ffi::Error::Internal(cudaGetErrorString(err));
   return ffi::Error::Success();
 }
 
+static ffi::Error spinImpl(cudaStream_t stream, int64_t cycles,
+                           ffi::Buffer<ffi::F64> x, ffi::ResultBuffer<ffi::F64> y) {
+  return spin(stream, cycles, false, x, y);
+}
+
+static ffi::Error spinSyncImpl(cudaStream_t stream, int64_t cycles,
+                               ffi::Buffer<ffi::F64> x, ffi::ResultBuffer<ffi::F64> y) {
+  return spin(stream, cycles, true, x, y);
+}
+
 XLA_FFI_DEFINE_HANDLER_SYMBOL(SpinHandler, spinImpl,
+                              ffi::Ffi::Bind()
+                                  .Ctx<ffi::PlatformStream<cudaStream_t>>()
+                                  .Attr<int64_t>("cycles")
+                                  .Arg<ffi::Buffer<ffi::F64>>()
+                                  .Ret<ffi::Buffer<ffi::F64>>());
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(SpinSyncHandler, spinSyncImpl,
                               ffi::Ffi::Bind()
                                   .Ctx<ffi::PlatformStream<cudaStream_t>>()
                                   .Attr<int64_t>("cycles")

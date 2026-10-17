@@ -120,6 +120,23 @@ def _wrap_external_stream(ptr: int):
     return cp.cuda.ExternalStream(int(ptr))
 
 
+def _stream_handle(stream) -> int:
+    """The raw ``cudaStream_t`` of ``stream`` as an int, from any spelling the
+    family uses: an int, the ``__cuda_stream__()`` protocol, ``.cuda_stream``
+    (torch, Warp) or ``.ptr`` (CuPy). Pure: no import, no lookup."""
+    if hasattr(stream, "__index__") and not isinstance(stream, bool):
+        return int(stream)
+    proto = getattr(stream, "__cuda_stream__", None)
+    if proto is not None:
+        return int(proto()[1])
+    for attr in ("cuda_stream", "ptr"):
+        value = getattr(stream, attr, None)
+        if value is not None:
+            return int(value)
+    raise TypeError("stream= takes an int, a __cuda_stream__ object, a torch/Warp stream "
+                    f"(.cuda_stream) or a CuPy stream (.ptr); got {type(stream).__name__}")
+
+
 def external_stream(ptr: int):
     """The cached ``cupy.cuda.ExternalStream`` wrapping raw handle ``ptr``
     (same handle -> same wrapper object, identity not equality)."""
@@ -188,6 +205,20 @@ class _NumpyAdapter(Adapter):
         return cp.asnumpy(a)  # device -> host (the historical numpy-out path)
 
 
+class _DlpackImport(Adapter):
+    """An adapter whose tensors enter through DLPack: a device tensor as a
+    zero-copy cupy view, a host tensor uploaded."""
+
+    def to_cupy(self, x):
+        import cupy as cp
+
+        if self.cuda:
+            return cp.from_dlpack(x)
+        import numpy as np
+
+        return cp.asarray(np.from_dlpack(x))
+
+
 class _CaiAdapter(Adapter):
     """A ``__cuda_array_interface__`` producer with no framework to
     round-trip to; imported zero-copy, exported as cupy."""
@@ -204,7 +235,7 @@ class _CaiAdapter(Adapter):
         return a
 
 
-class _DlpackAdapter(Adapter):
+class _DlpackAdapter(_DlpackImport):
     """A generic ``__dlpack__`` producer with no framework we specifically
     know; exported as cupy (device) or numpy (host), since no owning
     framework exists to make."""
@@ -215,15 +246,6 @@ class _DlpackAdapter(Adapter):
         self.cuda = cuda
         self.blocking = not cuda  # CUDA -> async on cupy's current stream; CPU -> sync
 
-    def to_cupy(self, x):
-        import cupy as cp
-
-        if self.cuda:
-            return cp.from_dlpack(x)  # zero-copy device view
-        import numpy as np
-
-        return cp.asarray(np.from_dlpack(x))  # cupy rejects CPU DLPack -> host upload
-
     def from_cupy(self, a):
         _refuse_permuted_export(a, self.name)
         if self.cuda:
@@ -233,7 +255,7 @@ class _DlpackAdapter(Adapter):
         return cp.asnumpy(a)
 
 
-class _TorchAdapter(Adapter):
+class _TorchAdapter(_DlpackImport):
     name = "torch"
 
     def __init__(self, cuda: bool):
@@ -251,15 +273,6 @@ class _TorchAdapter(Adapter):
         # launch inherits torch's ordering, no host sync.
         return external_stream(torch.cuda.current_stream().cuda_stream)
 
-    def to_cupy(self, x):
-        import cupy as cp
-
-        if self.cuda:
-            return cp.from_dlpack(x)  # zero-copy device view (shares x's storage)
-        import numpy as np
-
-        return cp.asarray(np.from_dlpack(x))  # CPU tensor -> host upload
-
     def from_cupy(self, a):
         _refuse_permuted_export(a, self.name)
         import torch
@@ -271,7 +284,7 @@ class _TorchAdapter(Adapter):
         return torch.from_numpy(cp.asnumpy(a))  # device result -> host torch tensor
 
 
-class _JaxAdapter(Adapter):
+class _JaxAdapter(_DlpackImport):
     """A JAX array in, a JAX array out.
 
     In: a jax array in a read-only role (state vectors, per-sample planes,
@@ -296,15 +309,6 @@ class _JaxAdapter(Adapter):
         # the DLPack round-trip still works, just synchronously.
         self.blocking = True
 
-    def to_cupy(self, x):
-        import cupy as cp
-
-        if self.cuda:
-            return cp.from_dlpack(x)
-        import numpy as np
-
-        return cp.asarray(np.from_dlpack(x))
-
     def from_cupy(self, a):
         _refuse_permuted_export(a, self.name)
         import jax
@@ -315,21 +319,12 @@ class _JaxAdapter(Adapter):
         return jax.device_put(a.get(), jax.devices("cpu")[0])  # host result -> CPU jax
 
 
-class _TfAdapter(Adapter):
+class _TfAdapter(_DlpackImport):
     name = "tensorflow"
 
     def __init__(self, cuda: bool):
         self.cuda = cuda
         self.blocking = True  # v1: sync (TF stream not injected yet); see _JaxAdapter
-
-    def to_cupy(self, x):
-        import cupy as cp
-
-        if self.cuda:
-            return cp.from_dlpack(x)
-        import numpy as np
-
-        return cp.asarray(np.from_dlpack(x))
 
     def from_cupy(self, a):
         _refuse_permuted_export(a, self.name)
@@ -561,6 +556,8 @@ def _core_buffer_from(obj, stream):
 
     refuse_if_permuted(obj, "eagle.interop.import_buffer")
     producer = _producer_name(obj)
+    if getattr(obj, "requires_grad", False) and hasattr(obj, "detach"):
+        obj = obj.detach()      # torch exports a grad-tracked tensor's data, never its graph
     if hasattr(obj, "__dlpack__"):
         on_cpu = False
         dd = getattr(obj, "__dlpack_device__", None)
@@ -739,7 +736,10 @@ def import_buffer(obj, *, stream=None, require=None,
     :class:`Requirements`, raising :class:`BufferRefused` naming every
     failed check. ``assume_writable`` asserts writability for a buffer
     whose producer declared no access, never overriding a declared
-    read-only."""
+    read-only. A torch tensor that requires grad (a parameter) is imported by
+    its data, and the view keeps the tensor itself: a plan plane bound from
+    the view is refused at launch once the tensor's data pointer moves
+    (``param.data = ...``)."""
     buf = _core_buffer_from(obj, stream)
     if assume_writable:
         buf.assume_writable()

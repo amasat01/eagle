@@ -290,16 +290,16 @@ def load_sol_reference(root):
 def sol_spec_fma_per_s(card):
     """The specification F_dev of a GPU card: SMs x FMA/clk/SM x the run's top SM clock.
 
-    The clock is the highest ``wall_s.sm_mhz`` over the card's rows and must not
-    exceed the device's reported maximum SM clock. Returns (F_dev, clock_mhz)."""
+    The clock is the card's ``max_sm_mhz`` (the highest ``wall_s.sm_mhz`` over its rows;
+    a full card is read from the rows) and must not exceed the device's reported maximum SM clock. Returns (F_dev, clock_mhz)."""
     dev = card["device"]
     cap = dev["compute_capability"]
     if cap not in FP64_FMA_PER_CLK_PER_SM:
         raise ClaimError(f"no FP64 FMA/clk/SM entry for compute capability {cap}")
-    clocks = [m for r in card["results"] for m in r["wall_s"].get("sm_mhz", [])]
-    if not clocks:
+    f_run = card.get("max_sm_mhz") or max(
+        (m for r in card["results"] for m in r["wall_s"].get("sm_mhz", [])), default=None)
+    if not f_run:
         raise ClaimError("card records no SM clock; the specification rate needs one")
-    f_run = max(clocks)
     smi_max = float(str(dev["nvidia_smi"]["clocks_max_sm"]).split()[0])
     if f_run > smi_max:
         raise ClaimError(f"run clock {f_run} MHz exceeds the device maximum {smi_max} MHz")

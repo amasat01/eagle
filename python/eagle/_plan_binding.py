@@ -11,6 +11,7 @@ import importlib
 import numpy as np
 
 from . import _bounded, _counters, _layout
+from .interop import _stream_handle as _handle_of
 from .interop import _wrap_external_stream
 from . import exec as eexec
 from .abi import DEVICE_CPU, DEVICE_CUDA
@@ -78,6 +79,7 @@ def _bind_plan(p: Plan, planes: dict) -> BoundPlan:
         )
 
     planes = one_step_word(arg_spec, planes, framework)
+    planes, origins = _from_views(planes, device_type)
     _check_bound_names(arg_spec, planes)
     planes, adapted = _adapt_planes(plugin, arg_spec, planes, door="bind")
     n = _n_from_kw(arg_spec, planes)
@@ -106,8 +108,33 @@ def _bind_plan(p: Plan, planes: dict) -> BoundPlan:
         device_type=device_type, framework=framework, dtype=dtype, widths=widths,
         vec_mutables=vec_mut, mat_mutables=mat_mut,
         int_uniforms=_integer_uniforms(plugin), active_count=active,
-        copies=[a for a in adapted.values() if a.scratch is not None],
+        copies=[a for a in adapted.values() if a.scratch is not None], origins=origins,
     )
+
+
+def _from_views(planes: dict, device_type) -> tuple:
+    """``(planes, origins)``: each :class:`eagle.interop.BufferView` plane as
+    a zero-copy array, and ``(name, producer, address)`` for each, so a
+    launch can refuse a producer whose data moved since the bind."""
+    from .interop import BufferView, to_cupy
+
+    views = {nm: v for nm, v in planes.items() if isinstance(v, BufferView)}
+    if not views:
+        return planes, ()
+    planes = dict(planes)
+    for nm, view in views.items():
+        planes[nm] = to_cupy(view) if device_type == DEVICE_CUDA else np.from_dlpack(view)
+    return planes, tuple((nm, v._obj, v.ptr) for nm, v in views.items())
+
+
+def _data_ptr(obj) -> int:
+    """The current data address of a producer (torch, or any array protocol)."""
+    ptr = getattr(obj, "data_ptr", None)
+    if callable(ptr):
+        return int(ptr())
+    face = (getattr(obj, "__cuda_array_interface__", None)
+            or getattr(obj, "__array_interface__", None))
+    return int(face["data"][0])
 
 
 def _active_count_plane(arg_spec, planes, parts):
@@ -154,7 +181,7 @@ class BoundPlan:
         "_entry", "_device_type", "_framework", "_dtype", "_widths",
         "_vec_mutables", "_mat_mutables", "_int_uniforms", "_slot_of", "_cupy",
         "_active_count", "_copies", "_persist_fn", "_range_fn",
-        "_gen",
+        "_gen", "_origins",
     )
 
     #: Sentinel for "not yet looked up" (the persist/range entry's own cupy
@@ -165,7 +192,7 @@ class BoundPlan:
     def __init__(self, plan, arg_spec, planes, n, parts, boxes, addrs, entry, *,
                  device_type, framework, dtype, widths, vec_mutables,
                  mat_mutables, int_uniforms=frozenset(), active_count=None,
-                 copies=()):
+                 copies=(), origins=()):
         self.plan = plan
         self._arg_spec = tuple(arg_spec)
         self._planes = planes
@@ -202,6 +229,20 @@ class BoundPlan:
         self._range_fn = BoundPlan._PERSIST_UNRESOLVED
         # bumped by rebind: a prepared launch block packed before it is stale
         self._gen = 0
+        # (name, producer, address) of each plane bound from a BufferView
+        self._origins = tuple(origins)
+
+    def _check_origins(self) -> None:
+        """Refuse a launch once the producer of a plane bound from a
+        :class:`eagle.interop.BufferView` moved its data (``param.data =
+        ...``, ``load_state_dict(assign=True)``): the plane would read the old
+        storage. One address read per such plane."""
+        for name, obj, ptr in self._origins:
+            if _data_ptr(obj) != ptr:
+                raise ValueError(
+                    f"eagle.plan: plane {name!r} was rebound (its data pointer moved); "
+                    "bind the new tensor (with FSDP or AMP master weights, bind the "
+                    "tensor the optimizer updates)")
 
     def _warm(self, a) -> None:
         """Run both copies once at bind, so a launch recorded into a graph
@@ -563,6 +604,8 @@ class BoundPlan:
                 f"from each partition's own count; got grid={grid!r}"
             )
         addrs = self._addrs
+        if self._origins:
+            self._check_origins()
         if self._device_type == DEVICE_CPU:
             if stream is not None:
                 raise ValueError(
@@ -651,6 +694,7 @@ class BoundPlan:
                     self._copies[name] = a
                     self._warm(a)
             self._planes[name] = value
+            self._origins = tuple(o for o in self._origins if o[0] != name)
             if self._active_count is not None:
                 from ._active_set import COUNT_PLANE
 
@@ -677,5 +721,4 @@ def _stream_handle(stream, cupy) -> int:
     stream — and the default stream may not even be capturable."""
     if stream is None:
         return int(cupy.cuda.get_current_stream().ptr)
-    ptr = getattr(stream, "ptr", None)
-    return int(stream if ptr is None else ptr)
+    return _handle_of(stream)

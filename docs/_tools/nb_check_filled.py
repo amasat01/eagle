@@ -13,6 +13,10 @@ Also refuses a notebook whose OUTPUT (stream text, `text/plain`,
 path. eagle's docs publish to a public site; a committed output with
 `/local/...`, `/home/<user>/...` etc. leaks the machine that built
 them. Only rendered OUTPUT is scanned, not cell source.
+
+Finally, refuses a stored image larger than IMAGE_BUDGET: the docs show the
+stored plots (nothing re-executes at build), so a runaway figure would bloat
+the repository.
 """
 import pathlib
 import re
@@ -22,6 +26,10 @@ import nbformat
 
 # Deliberately narrow: absolute local-filesystem roots a committed output
 # should never contain, not a general "looks like a path" heuristic.
+# Bytes of base64 per stored image output. Measured on the 11 shipped notebooks:
+# mean ~33 KB, largest 68 KB.
+IMAGE_BUDGET = 80_000
+
 _LEAK_PATTERNS = [re.compile(p) for p in (r"/local/", r"/home/", r"/tmp/", r"/root/", r"/Users/", r"C:\\Users")]
 
 
@@ -54,6 +62,12 @@ def _output_leaks(cell) -> list[str]:
     return leaks
 
 
+def _oversized_images(cell) -> list[int]:
+    return [len(_text_of(out["data"][mime])) for out in cell.get("outputs", [])
+            for mime in ("image/png", "image/jpeg")
+            if mime in out.get("data", {}) and len(_text_of(out["data"][mime])) > IMAGE_BUDGET]
+
+
 def main(argv: list[str]) -> int:
     roots = [pathlib.Path(a) for a in argv[1:]] or [pathlib.Path(".")]
     notebooks = sorted(
@@ -66,6 +80,7 @@ def main(argv: list[str]) -> int:
         return 2
     bad = []
     leaked = []
+    heavy = []
     for p in notebooks:
         nb = nbformat.read(p, as_version=4)
         unexecuted = [
@@ -80,14 +95,18 @@ def main(argv: list[str]) -> int:
                 continue
             for pattern in _output_leaks(c):
                 leaked.append((p, i, pattern))
+            heavy.extend((p, i, size) for size in _oversized_images(c))
     for p, cells in bad:
         print(f"[nb_check_filled] UNEXECUTED {p}: code cells {cells[:6]}"
               f"{'...' if len(cells) > 6 else ''}")
     for p, i, pattern in leaked:
         print(f"[nb_check_filled] LEAKED PATH {p}: code cell {i} output matched {pattern!r}")
+    for p, i, size in heavy:
+        print(f"[nb_check_filled] IMAGE OVER BUDGET {p}: code cell {i} image is {size} bytes "
+              f"(budget {IMAGE_BUDGET})")
     print(f"[nb_check_filled] {len(notebooks) - len(bad)}/{len(notebooks)} notebooks "
           "fully executed")
-    return 1 if (bad or leaked) else 0
+    return 1 if (bad or leaked or heavy) else 0
 
 
 if __name__ == "__main__":

@@ -87,14 +87,3 @@ class RecognizedContraction:
     staged_fanin: tuple[tuple[str, int | None], ...]
     fanin_source: str
     adjoint_accumulates: tuple[tuple[str, bool], ...]
-
-    @property
-    def operand_count(self) -> int:
-        """How many distinct buffers the addend reads (1 or 2 — see
-        ``operand_class``)."""
-        return len(self.operands)
-
-    @property
-    def operand_names(self) -> tuple[str, ...]:
-        """The read operands' declared names, in first-read order."""
-        return tuple(op.name for op in self.operands)

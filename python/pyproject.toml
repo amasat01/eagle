@@ -13,7 +13,7 @@ backend-path = ["."]
 
 [project]
 name = "raptor-eagle"
-version = "0.6.2rc1"
+version = "0.6.2rc2"
 description = "EAGLE — the Python face of the launch engine for compiled CUDA kernels"
 # A copy of the repository README, made by _build_backend.py (git-ignored).
 readme = "README.md"
@@ -46,7 +46,7 @@ classifiers = [
 # `raptor.schema.blocks.validate_neural_block_descriptor` (first shipped in 0.2.0), which
 # `eagle.sidecar` imports. The constraint is expressed where a resolver can act on it,
 # never as a runtime surprise.
-dependencies = ["numpy>=1.26", "raptor-core>=0.3.1,<0.4"]
+dependencies = ["numpy>=1.26", "raptor-core>=0.3.2,<0.4"]
 
 # The "raptor.pattern_loaders" entry-point declaration for
 # "neural_block" moved to a separate package — eagle.neural was extracted there
@@ -78,12 +78,15 @@ cuda = [
     "cuda-toolkit[cudart,nvrtc]==12.*",
 ]
 # eagle.frameworks.torch: the torch.autograd bridge. torch is imported only by
-# that submodule, so plain `import eagle` never needs it.
-torch = ["torch>=2.2"]
-# eagle's JAX bridge (see docs: interop contract). JAX publishes wheels for
-# Python 3.12 and newer, so this extra resolves there and nowhere else; for
-# GPU arrays install JAX's own CUDA extra (jax[cuda12] or jax[cuda13]).
-jax = ["jax>=0.11"]
+# that submodule, so plain `import eagle` never needs it. The bridges compile
+# kernels with hawk; 0.5.1 is the first to derive nested derivatives.
+torch = ["torch>=2.2", "raptor-hawk>=0.5.1"]
+# eagle's JAX interop and eagle.frameworks.jax (see docs: interop contract).
+# JAX publishes wheels for Python 3.12 and newer, so this extra resolves there
+# and nowhere else; for GPU arrays install JAX's own CUDA extra (jax[cuda12] or
+# jax[cuda13]). The floor is the jaxlib whose XLA FFI headers libeagle_xla.so
+# vendors (an older runtime with newer headers is the unsupported direction).
+jax = ["jax>=0.11.2", "raptor-hawk>=0.5.1"]
 # eagle.Graph.plot: the graph drawn with matplotlib (imported only by that
 # method; show()/to_mermaid()/to_dot() need nothing).
 plot = ["matplotlib>=3.7"]
@@ -128,6 +131,7 @@ markers = [
     "interop_matrix: interop certification matrix row (deselect explicitly via -m 'not interop_matrix'; the only sanctioned way a row may not run)",
     "mpi: needs the OPTIONAL eagle._mpi extension (eagle::exec::RankPartition; built with -DEAGLE_PYTHON_MPI). Gated exactly as the gpu/torch markers are — the module is optional BY DESIGN, so a build without an MPI legitimately cannot run these. The REFUSAL rows (a missing _mpi must name the build switch) are deliberately NOT marked and run everywhere; the distributed certification is the rank bed, tests/mpi/, which has no skip machinery at all.",
     "repo_local: venv-gate guardrail — certifies the REPOSITORY (docs/pyproject/source-as-text, or a dev-env package-presence assumption), never the installed DISTRIBUTION, so a wheel legitimately cannot carry what it checks. Deselect only in the isolated-venv leg (-m 'not repo_local'); the repo-rooted suite (CI, dev runs) always runs these — never deselected there. The venv leg enumerates and pins the count by collection, never a hand list.",
+    "wall_clock: compares measured run times, which flip with machine load; skipped unless EAGLE_WALL_CLOCK_ROWS=1 is set (run on a quiet machine)",
 ]
 
 [tool.ruff]

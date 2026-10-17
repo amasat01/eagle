@@ -1,5 +1,6 @@
 eagle_backend_build_info
 eagle_backend_capabilities
+eagle_backend_capture_add_child
 eagle_backend_capture_snapshot_nodes
 eagle_backend_captured_is_valid
 eagle_backend_captured_release
@@ -44,6 +45,8 @@ eagle_backend_launcher_set_logical_size
 eagle_backend_launcher_set_node_enabled
 eagle_backend_launcher_stream
 eagle_backend_launcher_synchronize
+eagle_backend_memcpy_device
+eagle_backend_memset_device
 eagle_backend_pointer_residency
 eagle_backend_probe
 eagle_backend_reorder_classes_device

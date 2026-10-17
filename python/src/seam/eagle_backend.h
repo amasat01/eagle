@@ -38,13 +38,13 @@
  * | 2   | captured    | captured_is_valid, captured_release                    |
  * | 3   | fork        | fork_create, fork_fork, fork_join, fork_branch, fork_origin, fork_forked, fork_size, fork_release |
  * | 4   | conditional | conditional_create, conditional_begin, conditional_body_stream, conditional_is_loop, conditional_end, conditional_release |
- * | 5   | attribution | capture_snapshot_nodes, is_node_toggleable             |
+ * | 5   | attribution | capture_snapshot_nodes, is_node_toggleable (+ capture_add_child, bound per symbol) |
  * | 6   | graph       | graph_create, graph_from_captured, graph_stream, graph_add_node, graph_launcher, graph_last_node, graph_release |
  * | 7   | launcher    | launcher_launch, launcher_synchronize, launcher_stream, launcher_set_logical_size, launcher_kernel_node_count, launcher_set_node_enabled, launcher_release |
  * | 8   | (reserved)  | the composer group, when it is promoted from ``x_``     |
  * | 9   | exec        | run_device                                            |
  * | 10  | device      | device_props                                          |
- * | 11  | interop     | fence, event_pool_created                             |
+ * | 11  | interop     | fence, event_pool_created (+ memset_device, memcpy_device, bound per symbol) |
  * | 12  | filtering   | compact_device (+ reorder_device, bound per symbol)   |
  * | 13..62 | reserved | new families only (additions to a family are per-symbol) |
  * | 63  | never assigned                                                       |
@@ -101,7 +101,7 @@ extern "C" {
 /** Seam major version: the core accepts exactly this major. */
 #define EAGLE_BACKEND_VERSION_MAJOR 1u
 /** Seam minor version this header describes (informational). */
-#define EAGLE_BACKEND_VERSION_MINOR 1u
+#define EAGLE_BACKEND_VERSION_MINOR 4u
 /** The packed version a backend built from this header reports. */
 #define EAGLE_BACKEND_VERSION ((EAGLE_BACKEND_VERSION_MAJOR << 16) | EAGLE_BACKEND_VERSION_MINOR)
 
@@ -301,6 +301,11 @@ void eagle_backend_conditional_release(eagle_backend_conditional h);
  *  backend-allocated (``eagle_backend_free``). */
 eagle_backend_status eagle_backend_capture_snapshot_nodes(uint64_t stream, uint64_t** nodes, int64_t* count);
 eagle_backend_status eagle_backend_is_node_toggleable(uint64_t node, int32_t* toggleable);
+/** Insert the graph ``child`` (a ``cudaGraph_t`` another library owns) at the
+ *  capture tip of ``stream`` as one child-graph node; ``conditional_body`` != 0
+ *  refuses, by name, a node type CUDA forbids inside a conditional body. Added in
+ *  minor 3; bound per symbol, so its presence is the capability. */
+eagle_backend_status eagle_backend_capture_add_child(uint64_t stream, uint64_t child, int32_t conditional_body);
 
 /* ---- graph (bit 6) ----------------------------------------------------------- */
 
@@ -339,6 +344,15 @@ eagle_backend_status eagle_backend_device_props(int32_t device, struct eagle_bac
  *  ``device_id``) without blocking the host; codes per the file doc. */
 eagle_backend_status eagle_backend_fence(int32_t dl_device_type, int32_t device_id, int64_t producer, int64_t consumer);
 eagle_backend_status eagle_backend_event_pool_created(int64_t* count);
+/** Zero ``bytes`` bytes at the device address ``ptr``, enqueued on ``stream``
+ *  (a raw 0 is the legacy default stream) on the stream's device: no
+ *  synchronisation, no allocation, capture-legal. Added in minor 2; bound per
+ *  symbol, so its presence is the capability. */
+eagle_backend_status eagle_backend_memset_device(uint64_t ptr, uint64_t bytes, uint64_t stream);
+/** Copy ``bytes`` bytes from the device address ``src`` to the device address
+ *  ``dst`` (distinct, non-overlapping), enqueued on ``stream`` like
+ *  ``memset_device``. Added in minor 4; bound per symbol. */
+eagle_backend_status eagle_backend_memcpy_device(uint64_t dst, uint64_t src, uint64_t bytes, uint64_t stream);
 
 /* ---- filtering (bit 12) ------------------------------------------------------ */
 
