@@ -20,7 +20,6 @@ import json
 import pathlib
 import re
 import sys
-import tomllib
 
 import pytest
 
@@ -50,8 +49,8 @@ def _stated():
 
 
 def _version():
-    text = (ROOT / "python/pyproject.toml").read_bytes()
-    return tomllib.loads(text.decode())["project"]["version"]
+    text = (ROOT / "python/pyproject.toml").read_text()
+    return re.search(r'^version\s*=\s*"([^"]+)"', text, re.M)[1]  # tomllib is 3.11+
 
 
 def _tuple(version):
