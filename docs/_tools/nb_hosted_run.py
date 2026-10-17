@@ -5,11 +5,11 @@
 """Runs inside the hosted venv (started by nb_hosted.py): execute each notebook from a COPY in an empty directory.
 
 Prints one line per notebook: ``RESULT<TAB>PASS|FAIL|SKIP<TAB><path><TAB><first error line or skip reason>``.
-Honours the same ``metadata.gate`` keys as nb_run_gate.py (``gpu_only``, ``needs``; this runtime has no GPU).
+Honours the same ``metadata.gate`` keys as nb_run_gate.py (``gpu_only``, ``needs``, per-cell stop) through its code;
+``NB_HOSTED_GPU=1`` marks a GPU runtime. On a FAIL the whole error goes to stderr after a ``--- <path>`` line.
 """
 import contextlib
 import fcntl
-import importlib.util
 import json
 import os
 import pathlib
@@ -21,7 +21,9 @@ import tempfile
 import nbformat
 from nbclient import NotebookClient
 
-TIMEOUT_S = 1800
+import nb_run_gate  # the gate reading is shared with the in-place gate: one rule
+
+TIMEOUT_S = int(os.environ.get("NB_HOSTED_CELL_TIMEOUT") or 1800)  # seconds per cell
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 
@@ -51,17 +53,12 @@ def locked():
 
 def run(path: pathlib.Path, kernel: str) -> tuple[str, str]:
     nb = nbformat.read(path, as_version=4)
-    gate = nb.metadata.get("gate", {})
     gpu = bool(os.environ.get("NB_HOSTED_GPU"))  # a GPU runtime: GPU-only notebooks run in full
-    if gate.get("gpu_only") and not gpu:
-        return "SKIP", f"needs a CUDA GPU ({gate['gpu_only']})"
-    for mod in gate.get("needs", []):
-        if importlib.util.find_spec(mod) is None:
-            return "SKIP", f"needs the '{mod}' package, which is not installed"
-    for i, cell in enumerate(nb.cells if not gpu else ()):
-        if cell.get("metadata", {}).get("gate", {}).get("gpu_only"):
-            nb.cells = nb.cells[:i]
-            break
+    reason = nb_run_gate.skip_reason(nb, "gpu" if gpu else "cpu")
+    if reason:
+        return "SKIP", reason
+    if not gpu:
+        nb_run_gate.truncate_at_gpu_cell(nb)
     with tempfile.TemporaryDirectory(prefix="nb_hosted_") as tmp:
         tmp = pathlib.Path(tmp)
         work = tmp / "nb"

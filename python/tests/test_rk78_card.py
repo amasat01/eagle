@@ -31,6 +31,7 @@ import json
 import pathlib
 
 import pytest
+from _raw_cards import raw_card
 
 pytestmark = pytest.mark.repo_local
 
@@ -90,7 +91,7 @@ def test_flop_count_comes_from_the_scheme():
 def test_committed_tables_match_their_cards():
     render = _script().render_markdown
     for card_path in _cards():
-        card = json.loads(card_path.read_text())
+        card = raw_card(card_path)
         table_path = card_path.with_suffix(".md")
         assert table_path.is_file(), f"{card_path.name}: no rendered {table_path.name}"
         assert table_path.read_text() == render(card), (
@@ -102,7 +103,7 @@ def test_cards_name_their_script_and_are_complete():
     module = _script()
     md5 = hashlib.md5(_SCRIPT.read_bytes()).hexdigest()
     for card_path in _cards():
-        card = json.loads(card_path.read_text())
+        card = raw_card(card_path)
         assert card["script"] == module.SCRIPT_REL
         assert card["script_md5"] == md5, (
             f"{card_path.name} was produced by a different rk78_card.py: re-run it")

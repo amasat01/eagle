@@ -331,6 +331,43 @@ reads its own progress back between launches), and the graph is captured in
 segments around it. The checked version of both examples is in
 :doc:`tutorials/11_conditionals_budgets_events`.
 
+.. _autodiff-run-vjps:
+
+Your model inside a recorded loop
+---------------------------------
+
+A step list ``[node, plan]`` runs your model before the kernel on every step,
+and a recorded run of it reverses with your vjp:
+
+.. code-block:: python
+
+   node = eagle.graph.opaque(model_step, reads={"x": x, "v": v}, writes={"corr": corr},
+                             name="model")
+   runner = eagle.until_done([node, plan], max_steps=1000, record=True, x=x, v=v, corr=corr)
+   runner.run()
+   grads = eagle.diff.reverse(runner.record, {"x": dJ_dx}, vjps={"model": vjp})
+
+The node reads the plan's state and per-sample planes and writes planes the
+plan reads (``eagle.simulate([node, kernel], ...)`` takes the same list). The
+reverse re-runs it once per step while it recomputes a window, then calls
+``vjp(primals, cotangents)`` once per step, host-synchronized, on the samples
+still running at that step; your model's parameter gradients accumulate as
+you write them. **Cost**: a hooked reverse costs what your model costs per
+step; eagle's share is the un-hooked reverse (0.12 ms/step at 4k rows on a
+P2000). **Memory**: one more window of each plane the node writes per sample.
+
+The node must be pure, because the reverse re-runs it: the same inputs give
+the same outputs (``model.eval()``, no random draw, no counter), row ``s``
+of a write depends only on row ``s`` of the reads, it writes only its declared
+planes, and the weights stay as they were until the reverse returns
+(``run()``, ``reverse()``, then ``optimizer.step()``). eagle cannot see an
+impure node; the test that catches it is yours: reverse twice, compare. The
+vjp gets views of eagle's buffers, valid during the call: copy what you keep.
+
+**HAZARD 3**: during the reverse the node's planes are eagle's scratch, and
+they come back bitwise at the end. Do not read them while a reverse of that run
+is in flight; a second reverse of it raises :class:`eagle.Busy`.
+
 What a reverse refuses
 ----------------------
 
@@ -346,7 +383,8 @@ Each refusal names the node and what to do instead:
 - a ``repeat_while`` whose body is not a plan launch;
 - a ``record=True`` run of a step made of several plans, or of a kernel taking
   several steps per launch (record one kernel per step);
-- ``vjps=`` for a recorded run;
+- a recorded step with a node after the plan, a node reading another node's
+  plane or a ``Param``, ``events="refine"``, or a ``Node`` as the vjp;
 - the ``events="refine"`` cases above: no smooth crossing, no crossing in the
   stop step, a grazing crossing, two rules crossing at once.
 

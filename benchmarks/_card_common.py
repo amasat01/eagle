@@ -203,6 +203,25 @@ def find_absolute_paths(value, _key=""):
     return hits
 
 
+#: Schema tag of the small demo cards under ``demo_cards/``.
+DEMO_SCHEMA = "raptor-perf-card/1"
+
+
+def utc_now_iso():
+    import datetime
+
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def write_card(card, json_path, md_text, md_path):
+    """Write a demo card and its markdown; refuse, writing neither, a card that carries an absolute path."""
+    hits = find_absolute_paths(card)
+    if hits:
+        raise ValueError(f"card carries an absolute path: {hits}")
+    json_path.write_text(json.dumps(card, indent=2, sort_keys=True) + "\n")
+    md_path.write_text(md_text)
+
+
 def cpu_model():
     try:
         for line in pathlib.Path("/proc/cpuinfo").read_text().splitlines():

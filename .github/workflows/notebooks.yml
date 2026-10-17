@@ -1,0 +1,150 @@
+# Copyright 2026 Alessandro Masat
+# SPDX-License-Identifier: Apache-2.0
+#
+# Every docs notebook, on the CPU, the way a hosted (Colab) user runs it: docs/_tools/nb_hosted.py
+# builds CPU wheels of aether, raptor, eagle and hawk from the checked-out trees (or, after a
+# release, installs the published ones), creates a fresh venv from the pinned Colab lock, and runs
+# each notebook from a copy in an empty directory with its generated setup cell executing for real.
+# Notebooks are found by glob in each tree (the site's notebooks/*.ipynb, docs/content/**/*.ipynb of
+# eagle, hawk, raptor, aether): a new tutorial is covered the day it is committed. A GPU-only
+# notebook SKIPs here; Kaggle GPU (kaggle-gpu.yml) runs it on a T4.
+#
+# Modes:
+#   built (push to main, pull request, workflow_dispatch default): wheels built from the checkouts.
+#   pypi  (after Publish succeeds on a version tag, or workflow_dispatch with source=pypi): the
+#         published wheels, pinned to --version.
+# Sibling repositories (hawk, raptor, aether, the site) are checked out at the branch of the same
+# name when it exists there, else main (as ci.yml's docs-fresh does); a dispatch input overrides.
+
+name: Notebooks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      source:
+        description: Where the packages come from
+        type: choice
+        options: [built, pypi]
+        default: built
+      version:
+        description: Exact raptor-eagle version, e.g. 0.6.2rc1 (pypi only; hawk takes its newest)
+        default: ""
+      pre:
+        description: Allow pre-releases (pypi only)
+        type: boolean
+        default: false
+      eagle_ref:
+        description: eagle ref (empty = the branch you run from)
+        default: ""
+      hawk_ref:
+        description: hawk ref (empty = same-named branch, else main)
+        default: ""
+      raptor_ref:
+        description: raptor ref (empty = same-named branch, else main)
+        default: ""
+      aether_ref:
+        description: aether ref (empty = same-named branch, else main)
+        default: ""
+      site_ref:
+        description: site ref (empty = same-named branch, else main)
+        default: ""
+  # after a tag's Publish run succeeds, so the new wheels are already on PyPI
+  workflow_run:
+    workflows: [Publish]
+    types: [completed]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.workflow_run.head_branch || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  notebooks-cpu:
+    if: github.event_name != 'workflow_run' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && startsWith(github.event.workflow_run.head_branch, 'v'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      GH_TOKEN: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
+    steps:
+      - name: Settings and input check
+        id: cfg
+        env:
+          EVENT: ${{ github.event_name }}
+          IN_SOURCE: ${{ inputs.source }}
+          IN_VERSION: ${{ inputs.version }}
+          IN_PRE: ${{ inputs.pre }}
+          TAG: ${{ github.event.workflow_run.head_branch }}
+          BRANCH_NAME: ${{ github.event.workflow_run.head_branch || github.head_ref || github.ref_name }}
+          IN_EAGLE: ${{ inputs.eagle_ref }}
+          IN_HAWK: ${{ inputs.hawk_ref }}
+          IN_RAPTOR: ${{ inputs.raptor_ref }}
+          IN_AETHER: ${{ inputs.aether_ref }}
+          IN_SITE: ${{ inputs.site_ref }}
+        run: |
+          set -euo pipefail
+          source=built; version=""; pre=false
+          if [ "$EVENT" = workflow_run ]; then source=pypi; version="${TAG#v}"; fi
+          if [ "$EVENT" = workflow_dispatch ]; then source="${IN_SOURCE:-built}"; version="$IN_VERSION"; pre="${IN_PRE:-false}"; fi
+          if [ -n "$version" ] && ! printf '%s' "$version" | grep -Eq '^([0-9]+!)?[0-9]+(\.[0-9]+)*((a|b|rc)[0-9]+)?(\.post[0-9]+)?(\.dev[0-9]+)?$'; then
+            echo "::error::version must look like 0.6.2rc1, not '$version'"; exit 1
+          fi
+          case "$version" in *a[0-9]*|*b[0-9]*|*rc[0-9]*|*.dev*) pre=true;; esac
+          echo "source=$source" >> "$GITHUB_OUTPUT"; echo "version=$version" >> "$GITHUB_OUTPUT"; echo "pre=$pre" >> "$GITHUB_OUTPUT"
+          # sibling refs: an explicit input, else the same-named branch when it exists there, else main
+          auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "${GH_TOKEN:-none}" | base64 -w0)"
+          for pair in "hawk:hawk:$IN_HAWK" "raptor:raptor:$IN_RAPTOR" "aether:aether:$IN_AETHER" "site:amasat01.github.io:$IN_SITE"; do
+            key="${pair%%:*}"; rest="${pair#*:}"; repo="${rest%%:*}"; given="${rest#*:}"
+            if [ -n "$given" ]; then ref="$given"; else
+              found="$(git -c http.extraHeader="$auth" ls-remote --heads "https://github.com/amasat01/${repo}" "refs/heads/${BRANCH_NAME}" | awk '{print $2}')"
+              if [ "$found" = "refs/heads/${BRANCH_NAME}" ]; then ref="$BRANCH_NAME"; else ref=main; fi
+            fi
+            echo "companion ${repo} @ ${ref}"; echo "${key}_ref=${ref}" >> "$GITHUB_OUTPUT"
+          done
+      - uses: actions/checkout@v7
+        with:
+          path: eagle
+          ref: ${{ inputs.eagle_ref || github.event.workflow_run.head_sha || '' }}
+      - uses: actions/checkout@v7
+        with: {repository: amasat01/aether, ref: "${{ steps.cfg.outputs.aether_ref }}", path: aether, token: "${{ secrets.SIBLING_READ_TOKEN || github.token }}"}
+      - uses: actions/checkout@v7
+        with: {repository: amasat01/raptor, ref: "${{ steps.cfg.outputs.raptor_ref }}", path: raptor, token: "${{ secrets.SIBLING_READ_TOKEN || github.token }}"}
+      - uses: actions/checkout@v7
+        with: {repository: amasat01/hawk, ref: "${{ steps.cfg.outputs.hawk_ref }}", path: hawk, token: "${{ secrets.SIBLING_READ_TOKEN || github.token }}"}
+      - uses: actions/checkout@v7
+        with: {repository: amasat01/amasat01.github.io, ref: "${{ steps.cfg.outputs.site_ref }}", path: site, token: "${{ secrets.SIBLING_READ_TOKEN || github.token }}"}
+      # the Colab lock is Python 3.13
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Toolchain (built mode compiles the wheels)
+        if: steps.cfg.outputs.source == 'built'
+        run: sudo apt-get update && sudo apt-get install -y g++-13
+      - run: python -m pip install --quiet uv
+      - name: Discovery (every notebook, with its gate class)
+        run: python eagle/docs/_tools/nb_hosted.py --list --repos all --eagle eagle --hawk hawk --raptor raptor --aether aether --site site
+      - name: Run every notebook on the CPU
+        env:
+          CC: gcc-13
+          CXX: g++-13
+          SOURCE: ${{ steps.cfg.outputs.source }}
+          VERSION: ${{ steps.cfg.outputs.version }}
+          PRE: ${{ steps.cfg.outputs.pre }}
+        run: |
+          args=(--python "$(which python)" --lock colab --repos all --timeout 900
+                --eagle eagle --hawk hawk --raptor raptor --aether aether --site site
+                --work "$RUNNER_TEMP/nbh" --cleanup --json notebooks-cpu.json --source "$SOURCE")
+          if [ -n "$VERSION" ]; then args+=(--version "$VERSION"); fi
+          if [ "$PRE" = true ]; then args+=(--pre); fi
+          python eagle/docs/_tools/nb_hosted.py "${args[@]}"
+      - name: Keep the per-notebook results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: notebooks-cpu
+          path: notebooks-cpu.json
+          if-no-files-found: ignore

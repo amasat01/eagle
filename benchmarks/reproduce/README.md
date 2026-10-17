@@ -41,6 +41,17 @@ or `EAGLE_REF=...` picks another ref). With several GPUs, set
 `~/.cache/raptor-repro/cards/<gpu>--<cpu>/` (`--out` to change);
 `--publish` writes them next to the committed cards instead.
 
+Committed cards are slim: the raw rows are release assets. After `--publish`, run
+`python benchmarks/slim_card.py --raw-out <dir> <card>.json` to slim a card and keep the full one in `<dir>`;
+the tests that read raw rows take `EAGLE_CARD_RAW_DIR=<dir>`, are skipped without it, and fail by file name when it is set
+and a file is missing or its md5 is not the card's `slim_of_md5`. CI downloads the release asset `cards.tar.gz` (the
+`<dir>` tree: `perf_card/` and `rk78_card/`) from the `perf-cards-raw` release:
+`tar -C <dir> -czf cards.tar.gz perf_card rk78_card && gh release create perf-cards-raw cards.tar.gz --latest=false --notes "Full performance cards"`
+(a later card run: `gh release upload perf-cards-raw cards.tar.gz --clobber`). After a re-slim, the card md5s that moved are
+pinned in the READMEs and notebooks (`python tools/sync_readme_cards.py --check` names them), the site's
+`_generated/SOURCES.json` (`tools/sync_cards.py <eagle>`), each repo's family visuals `LOCK.json`
+(`tools/sync_family_visuals.py --target <repo>=<path>`) and hawk's `docs/perf_claims.json` (`tools/sync_perf_claims.py --eagle-root <eagle>`).
+
 ## Google Cloud (or any VM with an NVIDIA driver)
 
 Needs Python >= 3.10 with `venv` and its headers, `git`, a C++ compiler (hawk compiles each kernel the

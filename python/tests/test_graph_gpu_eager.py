@@ -1,6 +1,6 @@
 # Copyright 2026 Alessandro Masat
 # SPDX-License-Identifier: Apache-2.0
-"""A node kind registered ``gpu_eager=True`` runs as a host call on the GPU:
+"""A node kind registered ``tier="host"`` runs as a host call on the GPU:
 the graph is captured in segments around it and each launch runs segments
 and eager calls in order. Rows: a graph without one is still exactly one
 capture (counters pinned, same launch path, same bits); a segmented graph
@@ -39,7 +39,7 @@ def _double_after_a_read(node, ctx):
 register_node_kind("test_gpu_eager", reads=lambda n: (("y", n.payload[0], "per_sample"),),
                    writes=lambda n: (("y2", n.payload[1], "mutable"),),
                    lower_gpu=_double_after_a_read, lower_cpu=_double_after_a_read,
-                   gpu_eager=True)
+                   tier="host")
 
 
 def _graph(ps, xp, x, gate=None, *, eager=True):
@@ -93,7 +93,7 @@ def test_a_segmented_graph_equals_its_cpu_twin_and_describes_one_graph(tmp_path)
     np.testing.assert_allclose(z.get(), zc, rtol=1e-12, atol=1e-15)
     assert g.node_labels() == h.node_labels() == ["square", "double", "sin"]
     assert g.edges() == h.edges()
-    assert g.schedule == ("capture",) * 3
+    assert g.schedule == ("capture", "eager_host", "capture")
     assert "double" in str(g)
 
 

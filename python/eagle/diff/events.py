@@ -481,11 +481,11 @@ def _register():
 
     register_node_kind("phase", reads=lambda n: _phase_planes(n, False),
                        writes=lambda n: _phase_planes(n, True), lower_gpu=_phase_run,
-                       lower_cpu=_phase_run, transpose=_phase_transpose, gpu_eager=True)
+                       lower_cpu=_phase_run, transpose=_phase_transpose, tier="host")
     # a phase's reverse: a host call in the reverse graph, eager on the GPU too
     register_node_kind("phase_reverse", reads=lambda n: n.payload[1],
                        writes=lambda n: n.payload[2], lower_gpu=lambda n, ctx: n.payload[0],
-                       lower_cpu=lambda n, ctx: n.payload[0], gpu_eager=True)
+                       lower_cpu=lambda n, ctx: n.payload[0], tier="host")
 
 
 _register()

@@ -79,8 +79,13 @@ def _write_into(dst, src) -> None:
         import cupy as cp
 
         cp.copyto(dst, cp.asarray(src))
+    elif device_resident(dst):  # any other CUDA-array producer (a warp array)
+        import cupy as cp
+
+        cp.copyto(cp.asarray(dst), cp.asarray(src))
     else:
-        np.copyto(dst, src.get() if src_on_device else src)
+        host = src.get() if src_on_device else src
+        np.copyto(dst if isinstance(dst, np.ndarray) else np.asarray(dst), host)
 
 
 def _write_back_outputs(out_names, supplied, adapted, result):
@@ -206,6 +211,10 @@ def device_resident(value) -> bool:
     """Whether ``value`` is already in device memory (a cupy array, or
     anything exporting ``__cuda_array_interface__``); a CPU or
     grad-tracked tensor raises there, so both answer ``False``."""
+    from .interop import BufferView
+
+    if isinstance(value, BufferView):
+        return value.device[0] == 2
     try:
         return getattr(value, "__cuda_array_interface__", None) is not None
     except Exception:  # noqa: BLE001 -- torch raises RuntimeError for a grad-tracked tensor

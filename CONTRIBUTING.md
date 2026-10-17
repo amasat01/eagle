@@ -1,71 +1,58 @@
 # Contributing
 
-Contributions — issues and pull requests — are welcome on GitHub, under the
-terms below.
+Read [How we build](https://amasat01.github.io/raptor/content/principles.html) first: the twelve rules every pull request in the
+family is read against, plus the style, release and license terms.
 
-## Terms
+**This repo:** the execution layer. Kernel launch, graph capture, the plugin registry and the batch runner, with a header-only C++
+core and a Python package. The same code runs on the host and the GPU.
 
-Contributions are accepted under the Apache License 2.0, the license this
-project ships under (inbound = outbound). Every contribution must carry a
-Developer Certificate of Origin sign-off (`git commit -s`); see
-https://developercertificate.org/ for what that certifies. There is no
-Contributor License Agreement and no relicensing right.
+## Build and run the gate
 
-## Using the code
+C++ (CPU build shown, as in `.github/workflows/ci.yml`; drop `-DEAGLE_CPP_MODE=ON` for CUDA). aether is a sibling checkout:
 
-The code is available under the Apache License 2.0 (see `LICENSE`).
-Contributions are accepted under the same terms (inbound = outbound).
+```bash
+cmake -DAETHER_CPP_MODE=ON -DCMAKE_INSTALL_PREFIX=$PWD/__install -B ../aether/build -S ../aether
+cmake --install ../aether/build
+cmake -B build -DCMAKE_PREFIX_PATH=$PWD/__install -DEAGLE_BUILD_TESTS=ON -DEAGLE_DEBUG_MODE=ON -DEAGLE_WARN_AS_ERR=ON -DEAGLE_CPP_MODE=ON .
+cmake --build build -j"$(nproc)"
+tests/check_gate.sh cpp build/tests/eagle_tests     # or: cuda
+```
 
-## Checking the notebooks as a hosted user runs them
+Never run the test binary or `ctest` bare. eagle has no `ctest` wiring, and an empty run exits 0. `tests/check_gate.sh` checks the run
+and the listing against `tests/expected_tests_<mode>.txt`; commit the manifest diff with your tests.
 
-`make nbcheck` runs the docs notebooks in your own environment against source checkouts. `make nbcheck-hosted` (in `docs/`) runs
-them the way a Colab user does: it builds CPU-only wheels of `aether-dsc`, `raptor-core`, `raptor-eagle` and `raptor-hawk` from the
-four checkouts (side by side, or given as `AETHER_ROOT`, `EAGLE_ROOT`, `HAWK_ROOT`, `RAPTOR_ROOT`), installs them into a fresh venv
-pinned to Colab's CPU runtime (`docs/_tools/hosted_env/colab-cpu.txt`, generated from Google's published package list by
-`refresh_colab_lock.py`; refresh it each release), and executes every notebook of this repository from a copy in an empty directory
-with a stand-in `google.colab` module, so the generated setup cell takes its hosted branch (pip from the local wheels, helper files
-from a local mirror). `make nbcheck-floor` does the same with the oldest numpy and torch that have Python 3.13 wheels
-(`floor-cpu.txt`). Needs `uv`, a Python 3.13 (`NBH_PYTHON=...`), a C++23 compiler (`CXX=...`) and network access to the package indexes; one
-PASS, FAIL or SKIP line per notebook, exit 1 on a FAIL. `NBH_ARGS="--work DIR --keep"` keeps the wheelhouse between runs.
-`make nbcheck-hosted-gpu` runs the same on a GPU: Colab's GPU-runtime lock with CUDA 12 builds (`colab-gpu.txt`), eagle's CUDA plugin built for
-`NBH_GPU_ARCH`, and the GPU-only notebooks run too, on GPU `NBH_GPU_INDEX` (under the `flock` file `NBH_GPU_LOCK`, if set). It needs about 5 GB of disk.
+Python: `pip install -e ./python`, then
 
-## Releasing
+```bash
+pytest python/tests -q -m "not gpu and not interop_matrix"     # drop the -m filter on a GPU machine
+pytest python/tests -m ft -W error::RuntimeWarning              # free-threading rows, on a free-threaded Python
+```
 
-`raptor-eagle` (the Python package; the C++ library itself is not
-published to PyPI) publishes through `.github/workflows/publish.yml`,
-triggered by pushing a tag `v<version>` that matches
-`python/pyproject.toml`'s `project.version`. `workflow_dispatch` runs the
-same build, check and test-wheel steps without publishing.
+Docs: `cd docs && make strict` (zero warnings), then `make nbexec` (needs a GPU) and `make nbcheck` for notebooks, `make linkcheck`
+for links. `make nbcheck-hosted` runs the notebooks the way a Colab user does; the comments above the target in `docs/Makefile`
+say what it needs. Toolchain and docstring style: [Documentation guide](https://amasat01.github.io/eagle/content/devguide/docs_guide.html).
 
-1. Bump `version` in `python/pyproject.toml`, update `CHANGELOG.md`.
-2. `git tag vX.Y.Z && git push origin vX.Y.Z`.
-3. The workflow builds manylinux wheels for CPython 3.9-3.14 (including free-threaded 3.13t and 3.14t) with
-   `cibuildwheel`: `eagle._core` is plain C++ and needs no CUDA toolkit,
-   but the `libeagle_cuda.so` plugin it dlopen's is compiled with `nvcc`
-   (headers + compiler only — no driver, nothing executed) inside the
-   manylinux container. The published wheel needs only the NVIDIA driver
-   at run time (`libcuda.so.1`, resolved by `dlopen`), never a CUDA
-   runtime — `auditwheel repair` additionally excludes `libcuda.so.1` as a
-   defensive guard. The workflow runs `twine check --strict`, tests each
-   wheel (together with a freshly built `raptor-core` sibling) on a
-   driver-less runner on every supported CPython — importing, running a
-   host kernel, and getting the typed `eagle.BackendUnavailable` refusal
-   for device work — then publishes via a PyPI Trusted Publisher
-   (environment `pypi`; no token in this repository).
+## What a PR here must show
 
-**Publish order across the family:** `raptor-eagle` depends on
-`raptor-core` (in the `raptor` repo), which has no family dependencies and
-publishes first. Release `raptor-core` before `raptor-eagle`.
+- **C++ first, then bind.** The behaviour exists and is tested in C++; the Python binding only exposes it.
+- **The seam stays additive.** `python/src/seam/eagle_backend.h` is versioned: a new backend symbol bumps
+  `EAGLE_BACKEND_VERSION_MINOR`, is bound by symbol, and gets a line in `CHANGELOG.md`. Nothing is removed or reordered within major 1.
+- **Host and device agree.** Guard CUDA-only code with `#ifndef EAGLE_CPU_ONLY` and give it an OpenMP counterpart; update
+  [Host/plugin parity](https://amasat01.github.io/eagle/content/devguide/host-plugin-parity.html).
+- **Free-threading.** A new Python feature has an `ft` test.
+- **Limits.** A limit a page states is an entry in `docs/content/_shared/limits.json`; `python/tests/test_doc_limits.py` checks it.
+- The family checklist from [How we build](https://amasat01.github.io/raptor/content/principles.html), nothing more.
 
-## How work flows
+## Style specifics
 
-- Changes go to the long-lived `dev` branch, either directly or through a
-  short-lived feature branch that is merged into `dev`.
-- Work that spans repositories uses the SAME branch name in each repository.
-  CI checks out the companion repositories at that branch if it exists there,
-  and at `main` otherwise; the log line "companion <repo> @ <branch>" shows
-  which one was used.
-- CI runs on every push, so a red result is seen before anything reaches `main`.
-- `main` is updated only by merging `dev` at a clean state (a release or
-  milestone point) with green CI. Nothing is pushed to `main` directly.
+- Classes `PascalCase`, functions `camelCase`, private data `member_`, template parameters `DataT`, `KernelFunc`.
+- Run the repo's `.clang-format`: `find eagle -name '*.h' -print0 | xargs -0 clang-format -i`.
+- `DEVICEHOST()` marks host-and-device functions, `KERNEL()` marks `__global__` kernels. Internal helpers go in a `detail`
+  namespace wrapped in `/// @cond INTERNAL` ... `/// @endcond`.
+- A new error code: add an enumerator (a power of two) to `eagle::err::EagleErrorTypes` and its message to
+  `eagle::err::errorMessages` in `eagle/util/DeviceError.h`; raise it with `EAGLE_GPU_THROW` or `EAGLE_GPU_ASSERT`.
+
+## Release
+
+Bump `version` in `python/pyproject.toml`, update `CHANGELOG.md`, tag `vX.Y.Z`. `.github/workflows/publish.yml` builds the
+wheels; `workflow_dispatch` dry-runs it. `raptor-core` publishes first (see the family guide).

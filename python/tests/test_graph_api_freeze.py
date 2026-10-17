@@ -38,15 +38,17 @@ def test_graph_methods_and_signatures():
 def test_module_functions_and_registry():
     assert _sig(G.register_node_kind) == (
         "(kind: 'str', *, reads, writes, lower_gpu, lower_cpu, transpose=None, "
-        "record_planes=None, native_entry=None, gpu_eager=False) -> 'NodeKind'")
-    assert _sig(G.opaque) == "(fn, *, reads=(), writes=()) -> 'Node'"
+        "record_planes=None, native_entry=None, tier='capture', check=None) -> 'NodeKind'")
+    assert _sig(G.opaque) == ("(fn, *, reads=(), writes=(), eager=False, stream=None, "
+                              "name=None) -> 'Node'")
+    assert _sig(G.child) == "(owner, *, reads=(), writes=(), name=None) -> 'Node'"
     # one home for conditionals: the existing eagle.skippable / eagle.repeat_while
     assert not hasattr(G, "skippable") and not hasattr(G, "repeat_while")
     assert not hasattr(eagle.Graph, "skippable")
     assert not hasattr(eagle.Graph, "repeat_while")
     assert [f.name for f in G.NodeKind.__dataclass_fields__.values()] == [
         "kind", "reads", "writes", "lower_gpu", "lower_cpu", "transpose",
-        "record_planes", "native_entry", "gpu_eager"]
+        "record_planes", "native_entry", "tier", "check"]
     assert Edge._fields == ("src", "dst", "plane", "kind")
 
 

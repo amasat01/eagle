@@ -1,0 +1,36 @@
+# Copyright 2026 Alessandro Masat
+# SPDX-License-Identifier: Apache-2.0
+name: Companion checkout
+description: Check out amasat01/<repo> at this branch name if it has one there, else main.
+inputs:
+  repo:
+    description: Repository name under amasat01.
+    required: true
+  path:
+    description: Directory to check it out into.
+    required: true
+  token:
+    description: Read token for the companion repository.
+    required: true
+runs:
+  using: composite
+  steps:
+    - id: ref
+      shell: bash
+      env:
+        COMPANION_REPO: ${{ inputs.repo }}
+        BRANCH_NAME: ${{ github.head_ref || github.ref_name }}
+        GH_TOKEN: ${{ inputs.token }}
+      run: |
+        auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "${GH_TOKEN:-none}" | base64 -w0)"
+        [ -n "${GH_TOKEN:-}" ] || auth="X-Unauthenticated: 1"
+        found="$(git -c http.extraHeader="$auth" ls-remote --heads "https://github.com/amasat01/${COMPANION_REPO}" "refs/heads/${BRANCH_NAME}" | awk '{print $2}')"
+        if [ "$found" = "refs/heads/${BRANCH_NAME}" ]; then ref="$BRANCH_NAME"; else ref=main; fi
+        echo "companion ${COMPANION_REPO} @ ${ref}"
+        echo "ref=${ref}" >> "$GITHUB_OUTPUT"
+    - uses: actions/checkout@v7
+      with:
+        repository: amasat01/${{ inputs.repo }}
+        ref: ${{ steps.ref.outputs.ref }}
+        path: ${{ inputs.path }}
+        token: ${{ inputs.token }}

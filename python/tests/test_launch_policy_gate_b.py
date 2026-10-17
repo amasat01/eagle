@@ -3,9 +3,7 @@
 
 """Gate B — GPU end-to-end value twin against a real captured graph.
 
-AUTHORED, NOT RUN in a session under a HARD CONSTRAINT of no GPU work (a
-concurrent performance-measurement session owns the GPUs). A GPU-enabled
-session runs this.
+Needs a CUDA device.
 
 The observable is the captured graph's OWN ``name<<<grid,block,smem>>>``
 label (``cudaGraphDebugDotPrint`` at ``flags=1``), not a shape

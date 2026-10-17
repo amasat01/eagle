@@ -237,14 +237,14 @@ table is the headline cut (both distributions, N = 1,000,000), and the
 The chart shows the H100; [the performance page](https://amasat01.github.io/eagle/content/performance.html) has a tab for every device and CPU measured.
 
 <!-- stale-prose-gate:
-benchmarks/perf_card/card_nvidia-h100-80gb-hbm3.json: e896d6d2050fc792c90b59697547201b
-benchmarks/perf_card/card_quadro-p2000.json: 911e5824c44f7ff69a3633d35de40e43
-benchmarks/rk78_card/card_nvidia-h100-80gb-hbm3.json: 763658c485f8b65b8ff42c1dc3bba84c
-benchmarks/rk78_card/cpu_card_amd-epyc-9b45.json: 07b9ec84b69364c1e746befa19e5c544
-benchmarks/perf_card/cpu_card_aarch64.json: d1d065f68ed14dda1d052a0c9e464bb6
-benchmarks/perf_card/cpu_card_amd-epyc-7b13.json: ea705ae1dc4b2b4a43e22f1a1fa66d01
-benchmarks/perf_card/cpu_card_amd-epyc-9b45.json: ff15fa43e17e2c9a88f2ba336e8aa476
-benchmarks/perf_card/cpu_card_intel-xeon-platinum-8581c.json: 8c9062ee2917655ec13646870c37a993
+benchmarks/perf_card/card_nvidia-h100-80gb-hbm3.json: 86570d9dd9f301b54ae3e50a40ecdfc4
+benchmarks/perf_card/card_quadro-p2000.json: e1d57a6c7d57c7cd7efd7bd8e97fcdcf
+benchmarks/rk78_card/card_nvidia-h100-80gb-hbm3.json: 4a6847fb1f7815d64d95de8c8b48a527
+benchmarks/rk78_card/cpu_card_amd-epyc-9b45.json: 1ef4eda3e4f12f87d3a84585424f1c57
+benchmarks/perf_card/cpu_card_aarch64.json: 778ce3a02f2c8c80dd7d23d942630da0
+benchmarks/perf_card/cpu_card_amd-epyc-7b13.json: 9b3195ca87f82cf3966a32f30051a03f
+benchmarks/perf_card/cpu_card_amd-epyc-9b45.json: 440352ba86c3de47db28e0e9d25fbd6b
+benchmarks/perf_card/cpu_card_intel-xeon-platinum-8581c.json: f9c4d4d83d853181142e47e22a9cc994
 -->
 
 <!-- cards:begin -->

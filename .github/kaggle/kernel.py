@@ -1,20 +1,21 @@
 # Copyright 2026 Alessandro Masat
 # SPDX-License-Identifier: Apache-2.0
 #
-# The script Kaggle runs on a T4: it installs the family, checks that JAX sees the GPU, runs the
-# interop certification rows plus the JAX rows, executes two notebooks, and writes result.json.
-# drive.py pushes it with the settings below filled in; `--local` runs the same steps in the
-# current environment (no install, no Kaggle paths).
+# The script Kaggle runs on a T4: it installs the family, checks that JAX sees the GPU, then either
+#   --mode tests      runs the interop certification rows plus the JAX rows, or
+#   --mode notebooks  runs EVERY docs notebook (site, eagle, hawk; found by glob, see nb_run_gate.discover),
+#                     each from a copy in an empty directory with its setup cell executing for real (the
+#                     Kaggle branch), and records PASS / FAIL / SKIP + seconds per notebook,
+# and writes result.json. drive.py pushes it with the settings below filled in, one kernel per mode and
+# CUDA leg; `--local` runs the same steps in the current environment (no install, no Kaggle paths).
 import argparse
 import json
 import os
 import pathlib
-import re
 import shutil
 import subprocess
 import sys
 import tempfile
-import time
 import xml.etree.ElementTree as ET
 
 # drive.py replaces the next line with the run settings.
@@ -22,8 +23,6 @@ EMBEDDED_CONFIG = None
 
 ORG = "https://github.com/amasat01"
 SITE_REPO = "amasat01.github.io"
-START_HERE = "notebooks/raptor_start_here.ipynb"
-QUICKSTART = "docs/content/userguide/quickstart_python.ipynb"
 FAMILY = ("raptor-eagle", "raptor-hawk", "jax", "jaxlib", "cupy-cuda12x", "cupy-cuda13x", "torch")
 
 
@@ -40,6 +39,11 @@ def sh(*cmd, cwd=None, env=None, capture=False):
 
 def settings():
     ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--mode", default="tests", choices=("tests", "notebooks"), help="the interop test rows, or every docs notebook")
+    ap.add_argument("--nb-timeout", type=int, default=900, help="notebooks mode: seconds one notebook may run before it FAILs")
+    ap.add_argument("--only", default="", help="notebooks mode: run only notebooks whose path contains this text")
+    ap.add_argument("--hawk-src", help="local hawk checkout (notebooks mode)")
+    ap.add_argument("--aether-src", help="local aether checkout (notebooks mode; its helper files)")
     ap.add_argument("--local", action="store_true", help="use the current environment; no install, no Kaggle paths")
     ap.add_argument("--cuda", default="12", help="CUDA major of the extras: 12 or 13")
     ap.add_argument("--source", default="pypi", choices=("pypi", "git"))
@@ -49,7 +53,7 @@ def settings():
         ap.add_argument(f"--{name}-ref", default="main")
     ap.add_argument("--eagle-src", help="local eagle checkout (default: the one holding this script)")
     ap.add_argument("--raptor-src", help="local raptor checkout, sets RAPTOR_ROOT")
-    ap.add_argument("--site-src", help="local checkout of the site repository (for the start-here notebook)")
+    ap.add_argument("--site-src", help="local checkout of the site repository (its notebooks run in notebooks mode)")
     ap.add_argument("--out", help="directory for result.json (default: /kaggle/working, or ./out with --local)")
     args = ap.parse_args()
     cfg = dict(vars(args))
@@ -226,31 +230,67 @@ def run_tests(py, eagle_src, work):
     return total
 
 
-def register_kernel(py, work):
-    """A Jupyter kernel that runs this environment's interpreter, so a notebook sees the installed packages."""
-    prefix = work / "jupyter"
-    if sh(py, "-m", "ipykernel", "install", "--prefix", prefix, "--name", "eagle_gpu") != 0:
-        raise SystemExit("could not register a Jupyter kernel for the notebooks")
-    os.environ["JUPYTER_PATH"] = f"{prefix}/share/jupyter" + os.pathsep + os.environ.get("JUPYTER_PATH", "")
+def pin_family(py, work):
+    """A notebook's setup cell runs `pip install --upgrade raptor-eagle ...`: constrain the family to what is
+    installed, so a git build or a pinned release is not replaced by PyPI's newest."""
+    code = ("import importlib.metadata as m\nfor n in ('raptor-eagle', 'raptor-hawk', 'raptor-core', 'aether-dsc'):\n"
+            "    try: print(f'{n}=={m.version(n)}')\n    except m.PackageNotFoundError: pass")
+    path = work / "family_constraints.txt"
+    path.write_text(sh(py, "-c", code, capture=True).stdout)
+    os.environ["PIP_CONSTRAINT"] = str(path)
 
 
-def run_notebook(py, path, work, name):
-    header(f"notebook: {name}")
-    if path is None or not pathlib.Path(path).exists():
-        print("notebook not found:", path)
-        return {"name": name, "status": "missing", "seconds": 0}
-    code = ("import sys, nbformat\nfrom nbclient import NotebookClient\n"
-            "nb = nbformat.read(sys.argv[1], as_version=4)\n"
-            "NotebookClient(nb, timeout=900, kernel_name='eagle_gpu', resources={'metadata': {'path': sys.argv[2]}}).execute()\n")
-    cwd = pathlib.Path(path).parent  # the notebook's own folder, where its helper files are found
-    t0 = time.time()
-    rc = sh(py, "-c", code, path, cwd)
-    return {"name": name, "status": "pass" if rc == 0 else "fail", "seconds": round(time.time() - t0)}
+def table_of(rows):
+    return {"PASS": sum(r["status"] == "PASS" for r in rows), "FAIL": sum(r["status"] == "FAIL" for r in rows),
+            "SKIP": sum(r["status"] == "SKIP" for r in rows)}
 
 
-def write_result(out, result):
+def run_notebooks(cfg, py, work, roots, result, out):
+    """Every notebook of the checkouts in ``roots`` (repo name -> path; 'site' = the site repository), one by one.
+    result.json is rewritten after each one, so a kernel that dies still shows what ran."""
+    tools = roots["eagle"] / "docs" / "_tools"
+    sys.path.insert(0, str(tools))
+    import nb_hosted
+    import nb_run_gate
+    found = nb_run_gate.discover({r: roots[r] for r in ("site", "eagle", "hawk") if r in roots})
+    todo = [(repo, p, p.relative_to(roots[repo] / ("notebooks" if repo == "site" else "docs/content")))
+            for repo, nbs in found.items() for p in nbs if cfg.only in p.as_posix()]
+    header(f"{len(todo)} notebooks: " + ", ".join(f"{r} {len(n)}" for r, n in found.items()))
+    nb_run_gate.list_notebooks({r: [p for p in n if cfg.only in p.as_posix()] for r, n in found.items()})
+    pin_family(py, work)
+    mirror_roots = {r: roots[r] for r in ("eagle", "hawk", "raptor", "aether") if r in roots}
+    server = nb_hosted.start_mirror(mirror_roots, work)  # the setup cells' helper files come from these checkouts
+    os.environ.update(RAPTOR_RAW_BASE=f"http://127.0.0.1:{server.server_address[1]}", RAPTOR_REF="local",
+                      NB_HOSTED_GPU="1", NB_HOSTED_CELL_TIMEOUT=str(cfg.nb_timeout))
+    if cfg.pre:
+        os.environ["RAPTOR_PRE"] = "1"
+    if cfg.local:  # a local run is not on Kaggle: select the setup cells' Kaggle branch, as the real kernel does
+        os.environ.setdefault("KAGGLE_KERNEL_RUN_TYPE", "Interactive")
+    rows = []
+    result.update(status="incomplete", reason="notebooks still running", discovered=len(todo), notebooks=rows)
+    for repo, path, rel in todo:
+        header(f"notebook: {repo}/{rel}")
+        status, msg, tail, secs = nb_hosted.run_notebook(py, work / "kernels", path, dict(os.environ), cfg.nb_timeout)
+        print(f"{status} {repo}/{rel} [{secs} s] {msg}", flush=True)
+        if tail:
+            print("\n".join(tail), flush=True)
+        rows.append({"name": f"{repo}/{rel}", "status": status, "seconds": secs, "reason": msg, "error": tail})
+        write_result(out, result, quiet=True)
+    server.shutdown()
+    counts = table_of(rows)
+    ok = counts["FAIL"] == 0 and counts["PASS"] > 0 and len(rows) == len(todo)
+    result.update(status="pass" if ok else "fail", counts=counts)
+    result.pop("reason", None)
+    if not ok and not counts["FAIL"]:
+        result["reason"] = "no notebook passed" if todo else "no notebooks found"
+    return ok
+
+
+def write_result(out, result, quiet=False):
     out.mkdir(parents=True, exist_ok=True)
     (out / "result.json").write_text(json.dumps(result, indent=2) + "\n")
+    if quiet:
+        return
     print("\nresult:", json.dumps({k: result[k] for k in ("status", "reason") if k in result}))
 
 
@@ -290,33 +330,36 @@ def main():
         write_result(out, result)
         return 1
     header("test sources")
+    roots = {}
     if cfg.local:
-        eagle_src = pathlib.Path(cfg.eagle_src or pathlib.Path(__file__).resolve().parents[2])
-        raptor_src = pathlib.Path(cfg.raptor_src) if cfg.raptor_src else None
-        site_src = pathlib.Path(cfg.site_src) if cfg.site_src else None
+        roots["eagle"] = pathlib.Path(cfg.eagle_src or pathlib.Path(__file__).resolve().parents[2])
+        for name in ("raptor", "site", "hawk", "aether"):
+            if getattr(cfg, f"{name}_src"):
+                roots[name] = pathlib.Path(getattr(cfg, f"{name}_src"))
     else:
         src = work / "src"
         src.mkdir(exist_ok=True)
         clone("eagle", cfg.eagle_ref, src / "eagle")
         clone("raptor", cfg.raptor_ref, src / "raptor")
-        clone(SITE_REPO, "main", src / SITE_REPO)
-        eagle_src, raptor_src, site_src = src / "eagle", src / "raptor", src / SITE_REPO
-    if raptor_src:
-        os.environ["RAPTOR_ROOT"] = str(raptor_src)
+        roots.update(eagle=src / "eagle", raptor=src / "raptor")
+        if cfg.mode == "notebooks":
+            clone(SITE_REPO, "main", src / SITE_REPO)
+            clone("hawk", cfg.hawk_ref, src / "hawk")
+            clone("aether", cfg.aether_ref, src / "aether")
+            roots.update(site=src / SITE_REPO, hawk=src / "hawk", aether=src / "aether")
+    if "raptor" in roots:
+        os.environ["RAPTOR_ROOT"] = str(roots["raptor"])
     if cfg.pre:
         os.environ["RAPTOR_PRE"] = "1"
     os.environ["RAPTOR_REF"] = cfg.raptor_ref
-    tests = run_tests(py, eagle_src, work)
-    register_kernel(py, work)
-    notebooks = [run_notebook(py, site_src / START_HERE if site_src else None, work, "raptor_start_here"),
-                 run_notebook(py, eagle_src / QUICKSTART, work, "quickstart_python")]
-    ok = tests["tests"] > 0 and not tests["failures"] and not tests["errors"] \
-        and all(n["status"] == "pass" for n in notebooks)
-    # In --local mode a missing site checkout is not a failure.
-    if cfg.local:
-        ok = tests["tests"] > 0 and not tests["failures"] and not tests["errors"] \
-            and all(n["status"] in ("pass", "missing") for n in notebooks)
-    result.update(status="pass" if ok else "fail", junit=tests, failed_tests=tests["failed"], notebooks=notebooks)
+    result["mode"] = cfg.mode
+    if cfg.mode == "notebooks":
+        ok = run_notebooks(cfg, py, work, roots, result, out)
+        write_result(out, result)
+        return 0 if ok else 1
+    tests = run_tests(py, roots["eagle"], work)
+    ok = tests["tests"] > 0 and not tests["failures"] and not tests["errors"]
+    result.update(status="pass" if ok else "fail", junit=tests, failed_tests=tests["failed"])
     write_result(out, result)
     return 0 if ok else 1
 

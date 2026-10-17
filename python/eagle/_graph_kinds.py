@@ -10,7 +10,8 @@ touches ``graph.py``."""
 from __future__ import annotations
 
 from ._conditional import RepeatWhile, Skippable
-from .graph import ForkStage, Node, get_node_kind, register_node_kind
+from .graph import ForkStage, LowerCtx, Node, get_node_kind, register_node_kind
+from .interop import _stream_handle
 from .roles import OUTPUT_ROLES, STATE_ROLES
 
 # --- Built-in kind: launch (a BoundPlan) --- #
@@ -93,30 +94,184 @@ register_node_kind(
     transpose=_launch_transpose)
 
 
-# --- Built-in kind: opaque (a callable with declared planes) --- #
+# --- Built-in kinds: opaque (a callable with declared planes), child --- #
+#: The kinds that run the reader's own code; a reverse through one needs its vjp.
+OWN_CODE_KINDS = ("opaque", "opaque_stream", "opaque_host", "child")
+
+
+class _OnStream:
+    """A stream node's GPU lowering: the call, and the stream its work is on."""
+
+    __slots__ = ("call", "stream")
+
+    def __init__(self, call, stream):
+        self.call, self.stream = call, stream
+
+    def __call__(self):
+        self.call()
+
+
 def _named_arrays(arrays, prefix):
     if isinstance(arrays, dict):
         return tuple((str(k), v, "declared") for k, v in arrays.items())
     return tuple((f"{prefix}{i}", a, "declared") for i, a in enumerate(arrays))
 
 
-def opaque(fn, *, reads=(), writes=()) -> Node:
-    """A zero-arg callable (a cupy custom kernel, a torch op, a host closure)
-    with the arrays it touches DECLARED -- a sequence of arrays, or a
-    ``{name: array}`` mapping. Edges are still derived from those arrays (the
-    declaration says WHICH planes, never which edges) and the conflict check
-    covers them. An undeclared write is not detected. GPU lowering is a
-    capture step, CPU an eager call; a reverse that meets one refuses by
-    name."""
+def opaque(fn, *, reads=(), writes=(), eager=False, stream=None, name=None) -> Node:
+    """Your own code as a graph node: a zero-arg callable (a cupy custom
+    kernel, a torch op, a host closure) with the arrays it touches DECLARED
+    -- a sequence of arrays, or a ``{name: array}`` mapping. Edges are derived
+    from those arrays (the declaration says WHICH planes, never which edges)
+    and the conflict check covers them; name every plane the node touches,
+    since an array it touches but you did not declare is invisible to the
+    conflict check and the reverse.
+
+    How it runs on the GPU (the CPU always calls it eagerly, in order):
+
+    * default -- **captured**: ``fn`` issues its device work on the current
+      stream at build and is replayed with the graph (also inside groups,
+      conditionals and ``until_done`` steps). It must not allocate.
+    * ``stream=S`` -- **stream-ordered**: ``fn`` runs on the host each
+      launch with ``S`` (an int, a torch/Warp/CuPy stream or a
+      ``__cuda_stream__`` object) as cupy's current stream; issue its device
+      work on ``S`` (``torch.cuda.stream(S)`` for torch). ``S`` waits for the
+      stage before and the stage after waits for ``S``; the host never waits.
+      Keep what that work reads alive until it ran (torch:
+      ``tensor.record_stream(S)``).
+    * ``eager=True`` -- **host-synchronized**: ``fn`` runs on the host each
+      launch between two device syncs, on any stream, host readbacks
+      allowed. The sync waits for every stream of the device, other
+      threads' work included.
+
+    ``g.schedule`` names the tier per stage (``capture`` / ``eager_stream`` /
+    ``eager_host``) and ``str(g)`` tags the node. A reverse pass through it
+    needs ``vjps={label: fn}`` (:func:`eagle.diff.reverse`): the label is
+    ``name`` when given (``Graph.add(name=)`` wins over it), the kind otherwise."""
     if not callable(fn):
         raise TypeError("eagle.graph.opaque: fn must be a zero-arg callable")
-    return Node("opaque", (fn, _named_arrays(reads, "in"), _named_arrays(writes, "out")))
+    planes = (fn, _named_arrays(reads, "in"), _named_arrays(writes, "out"))
+    if stream is not None:
+        return Node("opaque_stream", (*planes, stream, _stream_handle(stream)), name)
+    return Node("opaque_host" if eager else "opaque", planes, name)
 
 
-register_node_kind(
-    "opaque",
-    reads=lambda n: n.payload[1], writes=lambda n: n.payload[2],
-    lower_gpu=lambda n, ctx: n.payload[0], lower_cpu=lambda n, ctx: n.payload[0])
+def _opaque_transpose(node, incoming, ctx):
+    """The reverse of a node eagle cannot see into: the reader's vjp. A
+    callable ``vjp(primals, cotangents) -> {read name: gradient}`` runs
+    host-synchronized; a Node runs at its own tier, its declared reads named
+    like this node's writes taking the cotangents and its declared writes
+    named like this node's reads giving the gradients."""
+    vjp = ctx.vjp                   # eagle.diff.Reverse refused a node without one
+    _fn, reads, writes = node.payload[:3]
+    floats = lambda planes: [(nm, a) for nm, a, _r in planes  # noqa: E731
+                             if str(getattr(a, "dtype", "")) in ("float32", "float64")]
+    cots = {nm: incoming[nm] for nm, _a in floats(writes) if nm in incoming}
+    if isinstance(vjp, Node):
+        kind = get_node_kind(vjp.kind)
+        takes = {nm: a for nm, a, _r in kind.reads(vjp)}
+        gives = {nm: a for nm, a, _r in kind.writes(vjp)}
+        for nm, cot in cots.items():
+            if nm in takes:
+                ctx.add(lambda d=takes[nm], c=cot: d.__setitem__(Ellipsis, c),
+                        reads=[cot], writes=[takes[nm]])
+        ctx.add(vjp)
+        return {nm: gives[nm] for nm, _a in floats(reads) if nm in gives}
+    primals = {nm: ctx.primal(nm) for nm, _a in floats(reads)}
+    out = {nm: ctx.empty_like(a) for nm, a in primals.items()}
+
+    def step():
+        got = vjp(dict(primals), dict(cots))
+        for nm, buf in out.items():
+            if nm not in got:
+                raise ValueError(f"eagle.diff.reverse: vjps[{ctx.label!r}] returned no "
+                                 f"gradient for {nm!r} (it returned {sorted(got)})")
+            buf[...] = got[nm]
+    ctx.add(Node("opaque_host", (step, _named_arrays([*primals.values(), *cots.values()], "in"),
+                                 _named_arrays(list(out.values()), "out"))))
+    return out
+
+
+def _declared(i):
+    return lambda n: n.payload[i]
+
+
+register_node_kind("opaque", reads=_declared(1), writes=_declared(2),
+                   lower_gpu=lambda n, ctx: n.payload[0], lower_cpu=lambda n, ctx: n.payload[0],
+                   transpose=_opaque_transpose)
+register_node_kind("opaque_stream", reads=_declared(1), writes=_declared(2), tier="stream",
+                   lower_gpu=lambda n, ctx: _OnStream(n.payload[0], n.payload[4]),
+                   lower_cpu=lambda n, ctx: n.payload[0], transpose=_opaque_transpose)
+register_node_kind("opaque_host", reads=_declared(1), writes=_declared(2), tier="host",
+                   lower_gpu=lambda n, ctx: n.payload[0], lower_cpu=lambda n, ctx: n.payload[0],
+                   transpose=_opaque_transpose)
+
+
+class _Child:
+    """The framework object owning a captured graph, held for the eagle
+    Graph's life, and the graph handle it had at :func:`child`."""
+
+    __slots__ = ("owner", "handle", "_read")
+
+    def __init__(self, owner):
+        if isinstance(owner, int):
+            raise TypeError("eagle.graph.child: pass the graph object; eagle must keep it "
+                            "alive (a bare handle dies with the object that owns it)")
+        raw = getattr(owner, "raw_cuda_graph", None)            # torch.cuda.CUDAGraph
+        if callable(raw):
+            read = raw
+        elif hasattr(owner, "graph"):                           # warp.Graph
+            read = lambda: getattr(owner.graph, "value", owner.graph)  # noqa: E731
+        else:
+            raise TypeError("eagle.graph.child: takes a torch.cuda.CUDAGraph (captured with "
+                            f"keep_graph=True) or a warp.Graph, got {type(owner).__name__}")
+        self.owner, self._read = owner, read
+        try:
+            self.handle = int(read())
+        except Exception as exc:
+            raise TypeError("eagle.graph.child: the framework graph holds no captured graph; "
+                            "capture it first (torch: CUDAGraph(keep_graph=True))") from exc
+
+    def check(self):
+        try:
+            now = int(self._read())
+        except Exception:
+            now = None
+        if now != self.handle:
+            raise RuntimeError("eagle.Graph.launch: the framework graph was reset or "
+                               "re-captured; rebuild the eagle Graph")
+
+    def insert(self, body):
+        import cupy
+
+        from . import _core
+
+        _core.capture_add_child(cupy.cuda.get_current_stream().ptr, self.handle, body)
+
+
+def child(owner, *, reads=(), writes=(), name=None) -> Node:
+    """A graph your framework captured itself, inserted as ONE child node of
+    eagle's graph: ``owner`` is the object that owns it, a
+    ``torch.cuda.CUDAGraph`` captured with ``keep_graph=True`` or a
+    ``warp.Graph`` (a bare handle is refused: eagle keeps the owner alive,
+    since the graph's kernels point into memory the owner holds).
+    ``reads``/``writes`` and ``name`` are :func:`opaque`'s. The
+    graph is captured (GPU only; on the host call the model in an
+    :func:`opaque`), also inside conditionals and ``until_done`` steps. Each
+    launch re-reads the owner's handle and refuses a reset or re-captured
+    graph by name. Do not replay the framework graph yourself while an eagle
+    launch of it is in flight: both share the framework's memory pool."""
+    return Node("child", (_Child(owner), _named_arrays(reads, "in"),
+                          _named_arrays(writes, "out")), name)
+
+
+def _child_cpu(node, ctx):
+    raise ValueError(f"eagle.Graph.build: child {node.label!r} is device work; on the host "
+                     "call the model in an opaque")
+
+
+register_node_kind("child", reads=_declared(1), writes=_declared(2), transpose=_opaque_transpose,
+                   lower_gpu=lambda n, ctx: (lambda: n.payload[0].insert(ctx.body)),
+                   lower_cpu=_child_cpu, check=lambda n: n.payload[0].check())
 
 
 # --- Built-in kind: group (fork/join) --- #
@@ -215,7 +370,7 @@ def _cond_writes(node):
 
 def _cond_lower(node, ctx):
     c = node.payload
-    c.late.fn = ctx.lower(c.child)
+    c.late.fn = LowerCtx(ctx.backend, body=True).lower(c.child)
     return c.wrapper
 
 

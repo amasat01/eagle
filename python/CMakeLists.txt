@@ -7,6 +7,8 @@
 #   eagle/libeagle_cuda.so the CUDA backend plugin (eagle-backend/1 C seam),
 #                          no Python dependency: built ONCE and copied into every
 #                          per-Python wheel
+#   eagle/libeagle_xla.so  the XLA FFI handler behind eagle.frameworks.jax, plain
+#                          C++, built on every leg (with or without CUDA)
 #
 # EAGLE_PYTHON_CUDA_PLUGIN selects where the plugin comes from:
 #   BUILD   (default in a repository checkout) build it here with nvcc
@@ -372,6 +374,41 @@ endforeach()
 
 # scikit-build-core maps this DESTINATION into the wheel's eagle package.
 install(TARGETS _core LIBRARY DESTINATION eagle)
+
+# ---------------------------------------------------------------------------
+# libeagle_xla.so — the generic XLA FFI handler behind eagle.frameworks.jax.
+#
+# Plain C++ on every leg (GPU-less included): no CUDA toolchain, no Python, no
+# JAX at build time. The handler speaks XLA's stable C API; its one header is vendored
+# (src/xla/vendor/xla/ffi/api/c_api.h, from jaxlib 0.11.2, FFI API 0.4; the JAX floor is that version) and the CUDA
+# entry points it calls are addresses Python resolves from the loaded
+# libeagle_cuda.so, so nothing CUDA is linked. A version script exports the
+# three eagle_xla_* symbols and nothing else.
+# ---------------------------------------------------------------------------
+add_library(eagle_xla SHARED src/xla/eagle_xla.cpp)
+target_compile_features(eagle_xla PRIVATE cxx_std_17)
+target_include_directories(eagle_xla PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src" ${_eagle_core_incs})
+target_include_directories(eagle_xla SYSTEM PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/xla/vendor")
+# one section per function/datum so the linker can drop the static runtime code the handler never calls
+target_compile_options(eagle_xla PRIVATE ${_eagle_no_gnu_unique} ${_eagle_warn_as_err} -ffunction-sections -fdata-sections)
+set(_eagle_xla_map "${CMAKE_CURRENT_SOURCE_DIR}/src/xla/eagle_xla.map")
+# A sanitized build leaves the sanitizer runtime's symbols to the (sanitized)
+# interpreter that loads the library, so --no-undefined would reject them.
+if("${CMAKE_CXX_FLAGS} ${CMAKE_SHARED_LINKER_FLAGS}" MATCHES "-fsanitize")
+  set(_eagle_xla_no_undefined "")
+else()
+  set(_eagle_xla_no_undefined "LINKER:--no-undefined")
+endif()
+target_link_options(eagle_xla PRIVATE
+  "LINKER:--version-script=${_eagle_xla_map}" ${_eagle_xla_no_undefined} "LINKER:--gc-sections" ${_eagle_static_runtime})
+set_target_properties(eagle_xla PROPERTIES
+  OUTPUT_NAME eagle_xla
+  LINK_DEPENDS "${_eagle_xla_map}"
+  CXX_VISIBILITY_PRESET "hidden"
+  POSITION_INDEPENDENT_CODE ON
+  LINKER_LANGUAGE CXX)
+install(TARGETS eagle_xla LIBRARY DESTINATION eagle)
+message(STATUS "> libeagle_xla.so: built here (XLA FFI C API header vendored from jaxlib 0.11.2)")
 
 # ---------------------------------------------------------------------------
 # eagle._mpi — the OPTIONAL second extension: eagle::exec::RankPartition.

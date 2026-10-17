@@ -12,6 +12,7 @@ pulls in a compiler.
 import os
 import pathlib
 import sys
+import sysconfig
 
 import pytest  # does not need the path setup below; grouped with the stdlib imports
 
@@ -30,6 +31,9 @@ RAPTOR_ROOT = os.environ.get("RAPTOR_ROOT", str(ROOT.parent.parent / f"raptor{SF
 sys.path.insert(0, RAPTOR_ROOT)
 
 os.environ.setdefault("CUDA_PATH", "/usr/local/cuda")
+
+# Records which certification rows RAN and passed, for assert_rows_complete("eagle", ran=True).
+pytest_plugins = ["raptor.conformance.pytest_rows"]
 
 
 def _cupy_available() -> bool:
@@ -86,6 +90,10 @@ MPI_AVAILABLE = _mpi_available()
 #: rather than hanging, because nothing here blocks at a world size of one.
 _BED_ENV = "EAGLE_RANK_BED"
 
+#: Rows marked ``wall_clock`` compare measured run times, which flip with machine load.
+#: They run only when this variable is set (a quiet machine), never in the main gate.
+_WALL_CLOCK_ENV = "EAGLE_WALL_CLOCK_ROWS"
+
 
 _MARKERS = (
     "ft: free-threading rows",
@@ -96,6 +104,7 @@ _MARKERS = (
     "interop_matrix: interop certification matrix row",
     "mpi: needs the optional eagle._mpi extension",
     "repo_local: certifies the repository, not the installed wheel",
+    "wall_clock: compares measured run times; runs only with EAGLE_WALL_CLOCK_ROWS=1",
 )
 
 
@@ -127,6 +136,28 @@ def pytest_collection_modifyitems(config, items):
         ),
     }
     for item in items:
+        if "wall_clock" in item.keywords and not os.environ.get(_WALL_CLOCK_ENV):
+            item.add_marker(
+                pytest.mark.skip(reason=f"measured-time row; set {_WALL_CLOCK_ENV}=1")
+            )
         for marker, (available, reason) in gates.items():
             if marker in item.keywords and not available:
                 item.add_marker(pytest.mark.skip(reason=reason))
+
+
+#: framework thread rows: test module -> the framework whose import may switch the GIL back on
+_FT_FRAMEWORK_ROWS = {"test_frameworks_torch_tower": "torch", "test_frameworks_jax": "jax",
+                      "test_frameworks_warp": "warp"}
+
+
+@pytest.fixture(autouse=True)
+def _ft_row_needs_the_gil_off(request):
+    """On a free-threaded interpreter, a framework that switched the GIL on at import has no ft rows to run."""
+    framework = _FT_FRAMEWORK_ROWS.get(request.module.__name__)
+    if not (framework and request.node.get_closest_marker("ft") and sysconfig.get_config_var("Py_GIL_DISABLED")):
+        yield
+        return
+    if sys._is_gil_enabled():
+        pytest.skip(f"{framework} switched the GIL back on when imported, so its free-threading rows are skipped")
+    yield
+    assert not sys._is_gil_enabled(), f"the GIL came back on during a {framework} free-threading row"

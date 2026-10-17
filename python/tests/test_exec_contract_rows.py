@@ -6,10 +6,8 @@
 ``execution_partition_identity``, ``execution_host_device_twin``,
 ``execution_illegal_placement_refused``, ``execution_layout_selfcheck_refused``.
 
-raptor declared these four rows in ``raptor.conformance.interop.ROWS``
-ahead of their implementation, banked here as ``xfail(strict=True)`` against
-``eagle.exec``/``eagle.plan``, which did not exist yet. This file lands both
-modules (``eagle/exec.py``, ``eagle/plan.py``) and un-xfails all four.
+raptor declares these four rows in ``raptor.conformance.interop.ROWS``; this
+file certifies them against ``eagle.exec`` and ``eagle.plan``.
 
 FIXTURES: rows 1/2 (partition identity, host/device twin) need a REAL
 aether-abi/2 body run through ``eagle.plan``/``eagle.exec`` on both targets.

@@ -120,6 +120,7 @@ _MISCALIBRATED = pytest.mark.xfail(strict=True, reason=(
     "the host dispatch cost model is mis-calibrated on this class of machine (it predicts gains of 9-26x where the measured ratio is 0.7-1.3x); the host calibration refits its weights"))
 
 
+@pytest.mark.wall_clock
 @pytest.mark.parametrize("n, share", [
     (N, "rare"),
     pytest.param(200_000, "rare", marks=_MISCALIBRATED),
@@ -127,6 +128,10 @@ _MISCALIBRATED = pytest.mark.xfail(strict=True, reason=(
     (200_000, "all"),
 ])
 def test_the_default_follows_the_measured_faster_path_under_the_vector_math_profile(monkeypatch, n, share):
+    """Measured-time rows: they flip with machine load, so the main gate skips them.
+
+    Run them on a quiet machine with ``EAGLE_WALL_CLOCK_ROWS=1``.
+    """
     from hawk.compile import toolchain
 
     if toolchain.default_host_profile() != "native-vector-math":

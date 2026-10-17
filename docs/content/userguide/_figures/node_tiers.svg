@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="404" viewBox="0 0 760 404" role="img" aria-labelledby="t d" font-family="system-ui, -apple-system, Segoe UI, sans-serif">
+<title id="t">Three tiers for your own code in an eagle graph</title>
+<desc id="d">Three timelines, each with a host lane and a device lane. Captured: the node is part of the one graph replay and nothing waits. Stream-ordered: your function runs on the host without waiting, its device work waits for the stage before and the next stage waits for it. Host-synchronized: the device drains, your function runs on the host, then the next stage starts.</desc>
+<style>.bg{fill:#fcfcfb;stroke:#e1e0d9}.ink{fill:#0b0b0b}.sub{fill:#52514e}.lane{fill:#7f7e78;fill-opacity:.15}
+.st{fill:#7f7e78;fill-opacity:.55}.me{fill:#7d53dc}.hs{fill:#cf416b}.ln{stroke:#52514e;stroke-width:1.5;fill:none}.gap{fill:none;stroke:#cf416b;stroke-width:1.5;stroke-dasharray:4 3}
+.wt{stroke:#7d53dc;stroke-width:1.5;fill:none}
+@media (prefers-color-scheme: dark){.bg{fill:#1a1a19;stroke:#2c2c2a}.ink{fill:#f2f2ee}.sub{fill:#c3c2b7}.me{fill:#b69cf5}.hs{fill:#eb7e61}.ln{stroke:#c3c2b7}.gap{stroke:#eb7e61}.wt{stroke:#b69cf5}}</style>
+<rect class="bg" x="0.5" y="0.5" width="759" height="403" rx="8"/>
+<g font-size="12.5">
+<text class="sub" x="470" y="22">grey: eagle stages · colour: your code · dashed: idle</text>
+
+<!-- tier 1 -->
+<text class="ink" x="16" y="42" font-size="14" font-weight="600">1  captured</text><text class="sub" x="116" y="42">opaque(fn)</text>
+<text class="sub" x="16" y="62">host</text><rect class="lane" x="60" y="52" width="684" height="16" rx="3"/>
+<text class="sub" x="16" y="86">device</text><rect class="lane" x="60" y="74" width="684" height="16" rx="3"/>
+<rect class="st" x="70" y="76" width="190" height="12" rx="2"/><rect class="me" x="262" y="76" width="130" height="12" rx="2"/><rect class="st" x="394" y="76" width="190" height="12" rx="2"/>
+<text class="sub" x="596" y="86">one replay</text><text class="ink" x="296" y="106">fn, in the graph</text>
+<text class="sub" x="60" y="124">Nothing waits. fn must not allocate.</text>
+
+<!-- tier 2 -->
+<text class="ink" x="16" y="154" font-size="14" font-weight="600">2  stream-ordered</text><text class="sub" x="160" y="154">opaque(fn, stream=S)</text>
+<text class="sub" x="16" y="174">host</text><rect class="lane" x="60" y="164" width="684" height="16" rx="3"/>
+<text class="sub" x="16" y="198">device</text><rect class="lane" x="60" y="186" width="684" height="16" rx="3"/>
+<rect class="st" x="70" y="188" width="190" height="12" rx="2"/><rect class="me" x="262" y="188" width="130" height="12" rx="2"/><rect class="st" x="394" y="188" width="190" height="12" rx="2"/>
+<rect class="me" x="236" y="166" width="22" height="12" rx="2"/><text class="ink" x="296" y="218">fn on the host; its device work on S</text>
+<path class="wt" d="M260 190 L262 190 M392 190 L394 190"/>
+<text class="sub" x="60" y="236">S waits the stage before, the next stage waits S. The host never waits.</text>
+
+<!-- tier 3 -->
+<text class="ink" x="16" y="266" font-size="14" font-weight="600">3  host-synchronized</text><text class="sub" x="190" y="266">opaque(fn, eager=True)</text>
+<text class="sub" x="16" y="286">host</text><rect class="lane" x="60" y="276" width="684" height="16" rx="3"/>
+<text class="sub" x="16" y="310">device</text><rect class="lane" x="60" y="298" width="684" height="16" rx="3"/>
+<rect class="st" x="70" y="300" width="190" height="12" rx="2"/><rect class="gap" x="262" y="300" width="130" height="12" rx="2"/><rect class="st" x="394" y="300" width="190" height="12" rx="2"/>
+<rect class="hs" x="262" y="278" width="130" height="12" rx="2"/><path class="ln" d="M261 272 V318 M393 272 V318"/>
+<text class="ink" x="290" y="330">fn on the host, any stream, readbacks allowed</text>
+<text class="sub" x="60" y="348">A device sync before and after: the GPU idles while fn runs, and every stream</text>
+<text class="sub" x="60" y="364">in the process waits once.</text>
+
+<text class="ink" x="16" y="392" font-size="12.5">Pick the highest tier your code allows. On the CPU all three are plain calls, in order.</text>
+</g>
+</svg>

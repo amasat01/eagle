@@ -30,15 +30,16 @@ import ast
 import json
 import pathlib
 import sys
+import tomllib
 
 # ---- per-repo configuration (the only lines that differ between the three repos) ----
 REPO = "eagle"
 GITHUB = "amasat01"
 CONTENT = "docs/content"
 #: repo-relative directories whose modules a notebook may import as helpers
-HELPER_DIRS = ("docs/content/_shared",)
+HELPER_DIRS = ("docs/content/_shared", "examples/python")
 #: third-party packages a helper needs beyond its module-level imports (it imports them inside functions)
-HELPER_NEEDS = {"docs/content/_shared/nb_helpers.py": ("matplotlib",)}
+HELPER_NEEDS = {"docs/content/_shared/nb_helpers.py": ("matplotlib",), "examples/python/zero_copy_interop.py": ("torch",)}
 #: a notebook that mentions this directory name gets the whole directory downloaded
 FIXTURE_DIRNAME = "_fixtures"
 # ------------------------------------------------------------------------------------
@@ -54,10 +55,18 @@ PYPI = {
     "warp": "warp-lang",
     "cupy": "raptor-eagle",  # the [cuda12] / [cuda13] extra brings cupy
 }
+
+
+def _jax_floor() -> str:
+    """The JAX release eagle needs, read from the ``jax`` extra in ``python/pyproject.toml``."""
+    extra = tomllib.loads((ROOT / "python" / "pyproject.toml").read_text(encoding="utf-8"))["project"]["optional-dependencies"]["jax"]
+    return next(r.split(">=")[1] for r in extra if r.startswith("jax>="))
+
+
 #: distributions that take the GPU extra when a GPU is visible
 GPU_EXTRA = ("raptor-eagle", "raptor-hawk")
 #: preinstalled on Colab and not listed
-PREINSTALLED = frozenset({"numpy", "IPython"})
+PREINSTALLED = frozenset({"numpy", "IPython", "jax"})
 #: imports the cell checks off Colab when a notebook imports them at the top level of a cell
 HARD = ("eagle", "hawk", "raptor", "torch", "matplotlib")
 _FALLBACK_STDLIB = frozenset(
@@ -141,6 +150,7 @@ def plan(nb, nb_path: pathlib.Path) -> dict:
         raise SystemExit(f"{nb_path}: imports {unknown} with no PyPI name in {pathlib.Path(__file__).name} PYPI")
     pkgs = sorted({PYPI[m] for m in third_party})
     return {
+        "jax": _jax_floor() if "jax" in anywhere else None,
         "pkgs": pkgs,
         "files": files,
         "hard": [m for m in HARD if m in top],
@@ -202,6 +212,18 @@ def render(p: dict) -> str:
         "    # our packages with --upgrade, so a runtime that kept an older release gets the current one",
         f'    subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "--upgrade", *pre, {items(ours)}])',
     ]
+    if p["jax"]:
+        # Colab keeps its own jax: raise it when it is below the floor eagle's JAX bridge needs
+        lines += [
+            "    from packaging.version import Version",
+            "",
+            "    try:",
+            f'        old = Version(importlib.metadata.version("jax")) < Version("{p["jax"]}")',
+            "    except importlib.metadata.PackageNotFoundError:",
+            "        old = True",
+            "    if old:",
+            f'        subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", f"jax{{extra}}>={p["jax"]}"])',
+        ]
     if others:
         lines.append(f'    subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", {items(others)}])')
     if p["files"]:

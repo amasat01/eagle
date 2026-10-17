@@ -20,29 +20,48 @@ def _stage_of_leaves(g) -> list:
     return out
 
 
-def rows(g):
-    """``(nodes, edges, frames)`` as ``_core.GraphDescription`` takes them."""
+def _tier(node) -> str:
+    """How a node of your own code runs: ``child``, ``stream`` or ``host``
+    (``""`` for a captured node)."""
+    if node.kind == "child":
+        return "child"
+    from .graph import get_node_kind  # graph imports this module first
+
+    tier = get_node_kind(node.kind).tier
+    return "" if tier == "capture" else tier
+
+
+def rows(g, drawing=True):
+    """``(nodes, edges, frames)`` as ``_core.GraphDescription`` takes them.
+    ``drawing=False`` is the reverse pass's copy: labels without tier tags and
+    no node opaque (eagle.diff has checked each has a vjp)."""
+    from ._graph_kinds import OWN_CODE_KINDS
+
     leaves, _groups = g._leaves()
     stage_of = _stage_of_leaves(g)
     schedule = g._schedule if g._built else ()
     nodes, frames = [], []
     for i, leaf in enumerate(leaves):
         n = leaf.node
-        label, opaque_node, frame = n.label, n.kind == "opaque", -1
+        shown, frame = n, -1
+        label = n.label
         if n.kind in _COND_FRAMES:
             kind, text = _COND_FRAMES[n.kind]
             frames.append((kind, text(n.payload), -1))
             frame = len(frames) - 1
-            label = n.name or n.payload.child.label
-            opaque_node = n.payload.child.kind == "opaque"
-        nodes.append((label, n.kind, schedule[stage_of[i]] if schedule else "", frame, opaque_node))
+            shown = n.payload.child
+            label = n.name or shown.label
+        tier = _tier(shown) if drawing else ""
+        label += f" [{tier}]" if tier else ""
+        nodes.append((label, n.kind, schedule[stage_of[i]] if schedule else "", frame,
+                      drawing and shown.kind in OWN_CODE_KINDS))
     return nodes, [(e.src, e.dst, e.plane, e.kind) for e in g.edges()], frames
 
 
-def description(g):
+def description(g, drawing=True):
     from ._core import GraphDescription
 
-    return GraphDescription(*rows(g))
+    return GraphDescription(*rows(g, drawing))
 
 
 def _count(n: int, word: str) -> str:
@@ -59,6 +78,9 @@ def header(g) -> str:
 
 def text(g) -> str:
     body = description(g).ascii() if g._nodes else "  (empty)\n"
+    if g._backend == "cpu":         # stream= is kept and shown, never silently dropped
+        body += "".join(f"  {a.label} [stream: cpu runs eagerly]\n" for a in g._leaves()[0]
+                        if _tier(a.node) == "stream")
     return header(g) + "\n\n" + body
 
 

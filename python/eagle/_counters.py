@@ -49,6 +49,7 @@ _COUNTERS: dict = {
     "graph_builds": 0,
     "reverses": 0,
     "records": 0,
+    "host_syncs": 0,
 }
 
 

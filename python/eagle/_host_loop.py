@@ -328,7 +328,7 @@ def run_host(runner) -> None:
 def _run_host_loop(runner, threads: int) -> None:
     loop = runner.loop
     step = runner.step
-    if not _direct(step):
+    if not _direct(step) or runner._hooks:     # a per-step hook runs in the loop's host arm
         loop()
         return
     entry, addrs, n = step._entry, step._addrs, step.n

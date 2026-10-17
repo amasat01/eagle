@@ -112,8 +112,10 @@ GPU agree bit for bit; :doc:`determinism` has the details.
    total = np.zeros(1)
    g.add_node(eagle.reduce(energy, total), name="total")
 
-Opaque nodes
-^^^^^^^^^^^^
+.. _graph-model-tiers:
+
+Your own code in the graph: three tiers
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 ``eagle.graph.opaque(fn, reads=..., writes=...)`` wraps any zero-argument
 callable: a cupy elementwise kernel, a torch op, a host closure. *You declare
@@ -121,9 +123,74 @@ which arrays it touches*; eagle still works out the edges, and the
 conflict check covers what you declared. The declaration says *which
 planes*, never *which edges*. Name the planes with a dict
 (``reads={"x": x}``) and they show up by name in every message and picture.
+Name every plane the node touches: an array it touches but you did not
+declare is invisible to the conflict check and to the reverse pass.
 
-One honest limit: an array the callable touches but you did not declare is
-invisible. If it aliases a sibling's plane, nothing is refused.
+Give a node ``name="model"`` and it is that label in ``g.schedule``, in
+messages and pictures, and in ``vjps={"model": ...}`` (below).
+
+How it runs on the GPU is one keyword, and the ladder below says what waits
+where. Take the highest tier your code allows:
+
+.. figure:: _figures/node_tiers.svg
+   :alt: Three timelines, each with a host lane and a device lane. Captured: the node is part of one graph replay and nothing waits. Stream-ordered: fn runs on the host without waiting and its device work is fenced on both sides. Host-synchronized: the device drains, fn runs on the host, then the next stage starts.
+   :width: 100%
+   :align: center
+
+.. list-table::
+   :header-rows: 1
+   :widths: 22 46 32
+
+   * - Spelling
+     - What runs
+     - Ordering
+   * - ``opaque(fn)``
+     - captured: replayed with the graph, also inside groups, conditionals
+       and ``until_done`` steps. ``fn`` must not allocate.
+     - the graph's edges
+   * - ``opaque(fn, stream=S)``
+     - ``fn`` on the host every launch, its device work on ``S`` (a torch,
+       CuPy or Warp stream, or a handle)
+     - ``S`` waits the stage before, the next stage waits ``S``; the host never
+       waits
+   * - ``opaque(fn, eager=True)``
+     - ``fn`` on the host every launch, any stream, host readbacks allowed
+     - a device sync before and after
+
+``g.schedule`` names each stage ``capture``, ``eager_stream`` or
+``eager_host``, and ``print(g)`` tags the node ``[stream]``, ``[host]`` or
+``[child]``. On the CPU every tier is a plain call, in order (a ``stream=``
+node is listed as ``[stream: cpu runs eagerly]``).
+
+What ``S``'s work reads must stay alive until it ran: with torch, call
+``tensor.record_stream(S)`` on a tensor you made inside ``fn``.
+``eagle.frameworks.jax.node(fn, reads=..., writes=...)`` builds a ``stream=``
+node for a JAX step and keeps JAX's results alive for you.
+
+**A graph your framework captured.** ``eagle.graph.child(owner, reads=...,
+writes=...)`` inserts a ``torch.cuda.CUDAGraph`` (captured with
+``keep_graph=True``) or a ``warp.Graph`` as one node. eagle keeps ``owner``
+alive and refuses a launch after ``owner.reset()`` or a re-capture; rebuild
+the eagle graph then. Do not replay the framework graph yourself while an
+eagle launch of it is in flight. On the CPU, call the model in an ``opaque``.
+
+**Once per step of a stepping loop.** ``eagle.until_done([model, plan], ...)``
+runs a captured ``opaque`` or a ``child`` in list order once per step, over
+the whole batch. The plan takes one step per launch (``steps=1``); the node
+must never write a finished sample (pass ``terminated=`` and read it). A
+stream or host node cannot run inside the loop's one device graph: call
+``runner.run()`` with ``max_steps=k``, then your code, in your own loop.
+
+**Gradients through your code.** ``eagle.diff.reverse(g.record, seeds,
+vjps={"model": vjp})`` runs ``vjp(primals, cotangents) -> {read name:
+gradient}`` in place of the node, host-synchronized; your model's own
+parameter gradients are yours to accumulate.
+
+**Weights.** Bind a ``Table`` plane to ``eagle.interop.import_buffer(param)``:
+one zero-copy buffer, so the optimizer's in-place step is the refresh. Update
+weights after ``launch()`` returns (or ``synchronize()`` first), never between
+``enqueue`` and ``synchronize``. A launch after ``param.data = ...`` is
+refused by name: bind the tensor the optimizer updates.
 
 How the edges are found
 -----------------------

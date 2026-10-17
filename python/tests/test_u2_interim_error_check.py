@@ -7,10 +7,9 @@
 Release-build ``Launcher::instantiate_``/``Launcher::launch`` use the
 debug-only ``EAGLE_CHECK`` (not ``EAGLE_CHECK_ALWAYS``), so a rejected CUDA
 call is swallowed and the caller gets a silently INERT ``Launcher`` instead of
-an error (the swallowed-failure class this names, and the exact mechanism a prior
-probe's ``ConditionalGroupTest.MultiLauncherFanOut``
-(``eagle/tests/test_ConditionalGroup.cu``)
-demonstrated in C++: a second ``launcher()`` on a conditional-bearing graph
+an error (the swallowed-failure class this names, and the mechanism
+``ConditionalGroupTest.MultiLauncherFanOut`` (``eagle/tests/test_ConditionalGroup.cu``)
+shows in C++: a second ``launcher()`` on a conditional-bearing graph
 does not throw, but ``cudaGetLastError()`` reads back 801
 (``cudaErrorNotSupported``) and the resulting exec is dead).
 

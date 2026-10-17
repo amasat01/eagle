@@ -111,9 +111,9 @@ def test_two_kernels_in_one_step_are_not_yet_supported():
                          t=np.zeros(N), max_steps=100, record=True)
 
 
-def test_vjps_for_a_run_is_not_yet_supported():
+def test_vjps_for_a_run_without_nodes_is_refused():
     sim = _sim()
-    with pytest.raises(ValueError, match="vjps= for a recorded run is not yet supported"):
+    with pytest.raises(ValueError, match="this run's step has none; eagle derives the vjp"):
         eagle.diff.Reverse(sim, vjps={"rr_osc": None})
 
 

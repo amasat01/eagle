@@ -70,8 +70,8 @@ Writing docstrings
 
 The project uses ``/** … */`` for documented public symbols. The one sanctioned
 exception is ``/// @cond INTERNAL`` / ``/// @endcond``, used to exclude
-internal-only code from Breathe's extraction — see :doc:`dev_guide` for where
-that pattern applies.
+internal-only code from Breathe's extraction — see the style specifics in
+:doc:`../contributing` for where that pattern applies.
 
 **Short (single-line) form:**
 

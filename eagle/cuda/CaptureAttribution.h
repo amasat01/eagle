@@ -11,6 +11,7 @@
 #ifndef EAGLE_CPU_ONLY
 
 #include <cstddef>
+#include <string>
 #include <vector>
 
 #include <cuda_runtime.h>
@@ -172,6 +173,85 @@ inline bool isNodeToggleable(cudaGraphNode_t node)
     EAGLE_CHECK_ALWAYS(cudaGraphNodeGetType(node, &type));
     return type == cudaGraphNodeTypeKernel || type == cudaGraphNodeTypeMemcpy
         || type == cudaGraphNodeTypeMemset;
+}
+
+namespace detail {
+
+/** @brief The first node type in @p graph (nested child graphs included) that
+ *  CUDA refuses inside a conditional body, or nullptr when every node is legal
+ *  there (kernel, memcpy, memset, empty, child graph, conditional). */
+inline const char* bodyRefusedNodeType(cudaGraph_t graph)
+{
+    std::size_t n = 0;
+    EAGLE_CHECK_ALWAYS(cudaGraphGetNodes(graph, nullptr, &n));
+    std::vector<cudaGraphNode_t> nodes(n);
+    if (n > 0)
+        EAGLE_CHECK_ALWAYS(cudaGraphGetNodes(graph, nodes.data(), &n));
+    for (cudaGraphNode_t node : nodes) {
+        cudaGraphNodeType type;
+        EAGLE_CHECK_ALWAYS(cudaGraphNodeGetType(node, &type));
+        switch (type) {
+        case cudaGraphNodeTypeKernel:
+        case cudaGraphNodeTypeMemcpy:
+        case cudaGraphNodeTypeMemset:
+        case cudaGraphNodeTypeEmpty:
+        case cudaGraphNodeTypeConditional:
+            break;
+        case cudaGraphNodeTypeGraph: {
+            cudaGraph_t inner = nullptr;
+            EAGLE_CHECK_ALWAYS(cudaGraphChildGraphNodeGetGraph(node, &inner));
+            if (const char* found = bodyRefusedNodeType(inner))
+                return found;
+            break;
+        }
+        case cudaGraphNodeTypeHost: return "host";
+        case cudaGraphNodeTypeEventRecord: return "event record";
+        case cudaGraphNodeTypeWaitEvent: return "event wait";
+        case cudaGraphNodeTypeMemAlloc: return "memory allocation";
+        case cudaGraphNodeTypeMemFree: return "memory free";
+        default: return "external semaphore or batch memop";
+        }
+    }
+    return nullptr;
+}
+
+} // namespace detail
+
+/**
+ * @brief Insert @p child, a graph another library captured, as ONE child-graph
+ *        node at @p stream's capture tip; the capture continues after it.
+ *
+ * CUDA clones @p child's topology into the capture, but its kernels keep
+ * pointing at the memory the other library owns, so the caller keeps the
+ * object owning @p child alive for the captured graph's lifetime. With
+ * @p conditionalBody (the capture is a conditional's body) a node type CUDA
+ * forbids there is refused by name before anything is inserted.
+ *
+ * @throws aether::Error  If @p stream is not capturing, @p child holds a node
+ *         type a conditional body forbids, or the driver refuses the insertion.
+ */
+inline void captureAddChild(cudaStream_t stream, cudaGraph_t child, bool conditionalBody)
+{
+    if (conditionalBody) {
+        if (const char* type = detail::bodyRefusedNodeType(child))
+            EAGLE_THROW(std::runtime_error,
+                std::string("captureAddChild: the graph holds a node of type '") + type
+                    + "', which CUDA does not allow inside a conditional or loop body");
+    }
+    cudaStreamCaptureStatus status;
+    unsigned long long capId          = 0;
+    cudaGraph_t capturedGraph         = nullptr;
+    const cudaGraphNode_t* deps       = nullptr;
+    const cudaGraphEdgeData* edgeData = nullptr;
+    std::size_t numDeps               = 0;
+    EAGLE_CHECK_ALWAYS(detail::streamGetCaptureInfo(stream, &status, &capId,
+        &capturedGraph, &deps, &edgeData, &numDeps));
+    EAGLE_ASSERT(status == cudaStreamCaptureStatusActive,
+        "captureAddChild: stream is not actively capturing");
+    cudaGraphNode_t node = nullptr;
+    EAGLE_CHECK_ALWAYS(cudaGraphAddChildGraphNode(&node, capturedGraph, deps, numDeps, child));
+    EAGLE_CHECK_ALWAYS(detail::streamUpdateCaptureDependencies(stream, &node, 1,
+        cudaStreamSetCaptureDependencies));
 }
 
 /**

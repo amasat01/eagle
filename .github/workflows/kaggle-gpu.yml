@@ -1,10 +1,13 @@
 # Copyright 2026 Alessandro Masat
 # SPDX-License-Identifier: Apache-2.0
 #
-# Runs eagle's GPU interop certification rows (including JAX) and two short notebooks on a free
-# Kaggle T4, for CUDA 12 and CUDA 13. GitHub's hosted runners have no GPU, so this is where the
-# `interop_matrix` rows run on real hardware. The job pushes a private Kaggle kernel
-# (.github/kaggle/kernel.py), waits for it, and fails if any test or notebook failed. A CUDA 13 run
+# Runs eagle's GPU interop certification rows (including JAX) and EVERY docs notebook (site, eagle, hawk;
+# found by glob, nothing listed by hand) on a free Kaggle T4, for CUDA 12 and CUDA 13. GitHub's hosted
+# runners have no GPU, so this is where the `interop_matrix` rows and the GPU-only notebooks run on real
+# hardware. Each CUDA leg pushes two private Kaggle kernels (.github/kaggle/kernel.py): `tests` and
+# `notebooks`, separate so neither shares the other's time limit; at most two run at once. Each waits for
+# its kernel and fails if any test or notebook failed; the job summary lists PASS / FAIL / SKIP and the
+# seconds of every notebook. A CUDA 13 run
 # on a machine whose driver is older than 580 is reported as a warning and a green job.
 #
 # Started by hand (workflow_dispatch) or after a version tag's Publish run succeeds; never by push or
@@ -53,11 +56,16 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && startsWith(github.event.workflow_run.head_branch, 'v'))
     runs-on: ubuntu-latest
     environment: kaggle
-    timeout-minutes: 90
+    timeout-minutes: 210  # the notebooks kernel may run 180 minutes (drive.py LIMITS)
     strategy:
       fail-fast: false
+      max-parallel: 2  # at most two Kaggle kernels at once
       matrix:
-        cuda: [12, 13]
+        include:
+          - {cuda: 12, mode: tests}
+          - {cuda: 13, mode: tests}
+          - {cuda: 12, mode: notebooks}
+          - {cuda: 13, mode: notebooks}
     env:
       KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
     steps:
@@ -77,7 +85,7 @@ jobs:
           TAG: ${{ github.event.workflow_run.head_branch }}
           INPUT_VERSION: ${{ inputs.version }}
         run: |
-          args=(--cuda "${{ matrix.cuda }}" --run-id "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          args=(--cuda "${{ matrix.cuda }}" --mode "${{ matrix.mode }}" --run-id "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
                 --eagle-ref "$INPUT_EAGLE_REF" --hawk-ref "$INPUT_HAWK_REF"
                 --raptor-ref "$INPUT_RAPTOR_REF" --aether-ref "$INPUT_AETHER_REF"
                 --source "$INPUT_SOURCE" --out kaggle-out)
@@ -89,6 +97,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: kaggle-gpu-cuda${{ matrix.cuda }}
+          name: kaggle-gpu-cuda${{ matrix.cuda }}-${{ matrix.mode }}
           path: kaggle-out
           if-no-files-found: warn

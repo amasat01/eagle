@@ -37,11 +37,15 @@ from raptor.conformance.interop import assert_no_skip_machinery, assert_rows_com
 
 _MATRIX_MODULE = pathlib.Path(__file__).resolve().parent / "test_interop_matrix.py"
 _JAX_MODULE = pathlib.Path(__file__).resolve().parent / "test_interop_jax.py"
+_JAX_FFI_MODULE = pathlib.Path(__file__).resolve().parent / "test_interop_jax_ffi.py"
 
 
 @pytest.mark.interop_matrix
+@pytest.mark.rows_gate
 def test_all_eagle_rows_are_collected():
-    assert_rows_complete("eagle")
+    """Every eagle row has a test that RAN and passed on each declared leg
+    (the gate runs after every other test; a deselected or skipped row is red)."""
+    assert_rows_complete("eagle", ran=True)
 
 
 def test_matrix_module_has_no_skip_tokens():
@@ -96,7 +100,20 @@ def test_absent_torch_is_red():
     _run_with_blocked(_MATRIX_MODULE, "torch")
 
 
-def test_absent_jax_is_red():
-    """The same proof for jax: with jax blocked, all five jax rows hit
-    ``certified_framework("jax")`` and FAIL loudly, with nothing skipped."""
-    _run_with_blocked(_JAX_MODULE, "jax")
+@pytest.mark.parametrize("module", [_JAX_MODULE, _JAX_FFI_MODULE], ids=lambda m: m.stem)
+def test_absent_jax_is_red(module):
+    """The same proof for jax: with jax blocked, every jax row (the five
+    crossing rows and the four FFI rows) hits ``certified_framework("jax")`` and
+    FAILS loudly, with nothing skipped."""
+    _run_with_blocked(module, "jax")
+
+
+@pytest.mark.repo_local
+def test_contract_doc_cites_exactly_the_declared_jax_rows():
+    """``docs/content/interop_contract.rst`` names every jax row and no other
+    (both directions, through raptor's own checker)."""
+    from raptor.conformance.interop import ROWS, assert_doc_rows_match
+
+    doc = pathlib.Path(__file__).resolve().parents[2] / "docs" / "content" / "interop_contract.rst"
+    jax_rows = {rid: decl for rid, decl in ROWS.items() if decl.framework == "jax"}
+    assert_doc_rows_match(doc, jax_rows, row_id_pattern=r"``((?:JX|STREAM-JAX)-[A-Z0-9-]+)``")

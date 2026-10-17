@@ -1,0 +1,8 @@
+# Version script of libeagle_xla.so: the two XLA FFI handlers and the recipe
+# registration, nothing else (libstdc++ stays local). The wall test reads the export list back with nm -D.
+EAGLE_XLA_1 {
+  global:
+    eagle_xla_*;
+  local:
+    *;
+};

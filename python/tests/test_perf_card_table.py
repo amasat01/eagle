@@ -38,6 +38,7 @@ import re
 import tempfile
 
 import pytest
+from _raw_cards import raw_card
 
 pytestmark = pytest.mark.repo_local
 
@@ -81,7 +82,7 @@ def _cards():
 def test_committed_tables_match_their_cards():
     render = _script().render_markdown
     for card_path in _cards():
-        card = json.loads(card_path.read_text())
+        card = raw_card(card_path)
         table_path = card_path.with_suffix(".md")
         assert table_path.is_file(), f"{card_path.name}: no rendered {table_path.name}"
         assert table_path.read_text() == render(card), (
@@ -91,7 +92,7 @@ def test_committed_tables_match_their_cards():
 
 def test_cards_name_their_script_and_are_complete():
     for card_path in _cards():
-        card = json.loads(card_path.read_text())
+        card = raw_card(card_path)
         assert card["script"] == "benchmarks/perf_card/perf_card.py"
         script_md5 = hashlib.md5((_CARD_DIR / "perf_card.py").read_bytes()).hexdigest()
         assert card["script_md5"] == script_md5, (
@@ -116,7 +117,7 @@ def test_cards_cover_every_arm_memory_and_compile_step():
     committed card and this fails naming the card."""
     module = _script()
     for card_path in _cards():
-        card = json.loads(card_path.read_text())
+        card = raw_card(card_path)
         run = set(card["arms"])
         not_run = set(card["arms_not_run"])
         assert set(module.ARMS) <= run, f"{card_path.name}: arms missing"
@@ -617,7 +618,7 @@ def test_committed_cpu_tables_match_their_cards():
     """RED: edit one number in a committed ``cpu_card_*.md`` and this fails."""
     render = _cpu_script().render_markdown
     for card_path in _cpu_cards():
-        card = json.loads(card_path.read_text())
+        card = raw_card(card_path)
         table_path = card_path.with_suffix(".md")
         assert table_path.is_file(), f"{card_path.name}: no rendered {table_path.name}"
         assert table_path.read_text() == render(card), (
@@ -633,7 +634,7 @@ def test_cpu_cards_time_full_blocks():
     busy cores during each settle pause and the clock at each timer start are
     recorded per row as diagnostics."""
     for card_path in _cpu_cards():
-        card = json.loads(card_path.read_text())
+        card = raw_card(card_path)
         for r in card["results"]:
             inner = r["inner_runs"]
             if inner > 1:
@@ -645,25 +646,13 @@ def test_cpu_cards_time_full_blocks():
             assert "busy_cores_during_settle" in r and "cpu_mhz_at_timer_start" in r
 
 
-@pytest.mark.skip(reason="the committed CPU card was measured on a shared 4-core host whose 8-thread "
-                         "arms use every hardware thread; re-enabled with the dedicated-hardware card")
-def test_cpu_cards_agree_with_their_reruns():
-    """The reference arm's re-runs across arm groups agree within 1.10x."""
-    for card_path in _cpu_cards():
-        card = json.loads(card_path.read_text())
-        for rr in card.get("reference_reruns") or []:
-            assert rr["max_over_min"] <= 1.10, (
-                f"{card_path.name}: the reference arm's re-runs differ {rr['max_over_min']:.3g}x "
-                f"at {rr['distribution']}/{rr['max_steps']}/{rr['n']}")
-
-
 def test_cpu_cards_name_their_scripts_and_are_complete():
     """Each CPU card was produced by the committed cpu_card.py on the committed
     perf_card.py workload, and every (configuration, N, arm) cell is either a
     result row with a memory row or a dropped cell with its stated reason."""
     module = _cpu_script()
     for card_path in _cpu_cards():
-        card = json.loads(card_path.read_text())
+        card = raw_card(card_path)
         assert card["script"] == "benchmarks/perf_card/cpu_card.py"
         for key, name in (("script_md5", "cpu_card.py"),
                           ("workload_script_md5", "perf_card.py")):
@@ -706,7 +695,7 @@ def test_cpu_cards_name_their_scripts_and_are_complete():
 def test_cpu_cards_record_their_code_snippets():
     module = _cpu_script()
     for card_path in _cpu_cards():
-        card = json.loads(card_path.read_text())
+        card = raw_card(card_path)
         _check_code_record(card, card_path, {
             name: module.pc._code_blocks(_CARD_DIR / name)
             for name in ("perf_card.py", "cpu_card.py")}, prefixed=True)
@@ -718,7 +707,7 @@ def test_cpu_cards_record_hawk_flags_from_hawk():
 
     RED: hardcode a flag list in ``cpu_card.py``'s facts and this fails."""
     for card_path in _cpu_cards():
-        card = json.loads(card_path.read_text())
+        card = raw_card(card_path)
         for arm in ("eagle_term8", "eagle_compact8"):
             facts = card["arm_info"][arm]["facts"]
             prof = facts["host_profile"]
@@ -845,7 +834,7 @@ def test_clock_and_throttle_are_read_after_the_timer_stops(monkeypatch):
 
 
 def _synthetic_card(pf, with_clock):
-    card = json.loads(next(iter(_cards())).read_text())
+    card = raw_card(next(iter(_cards())))
     for row in card["results"]:
         row["wall_s"].pop("sm_mhz", None)
     fp = {a: {"mean": 1e-3, "lo": 9e-4, "hi": 1.1e-3, "median": 1e-3, "iqr": 1e-4,

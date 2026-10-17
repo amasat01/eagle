@@ -10,6 +10,9 @@ above itself, so before the sdist is written they are copied in:
 
 * ``README.md``: copied from ``../README.md`` before every hook, because the
   project metadata of every build (wheel, editable, sdist) names it.
+* test fixtures that are symlinks to files outside this directory are swapped
+  for copies of their targets while the sdist is written (pip refuses an sdist
+  whose links leave it), then restored.
 * ``_sdist_include/``: the header trees, copied for the sdist only and removed
   again afterwards. ``CMakeLists.txt`` compiles them only when the live
   repository tree above this directory is absent, so a checkout always builds
@@ -74,6 +77,14 @@ def _stage_headers() -> None:
         shutil.copytree(root / name, _INCLUDE / name, ignore=headers_only)
 
 
+def _outside_links() -> list[tuple[Path, str]]:
+    found = []
+    for path in sorted((_HERE / "tests").rglob("*")):
+        if path.is_symlink() and not path.resolve().is_relative_to(_HERE):
+            found.append((path, os.readlink(path)))
+    return found
+
+
 def _with_readme(hook):
     @functools.wraps(hook)
     def run(*args, **kwargs):
@@ -91,10 +102,18 @@ def build_sdist(sdist_directory, config_settings=None):
     """Write the sdist with the README and the header trees copied in."""
     _stage_readme()
     _stage_headers()
+    links = _outside_links()
     try:
+        for path, _ in links:
+            data = path.read_bytes()
+            path.unlink()
+            path.write_bytes(data)
         return _backend.build_sdist(sdist_directory, config_settings)
     finally:
         shutil.rmtree(_INCLUDE, ignore_errors=True)
+        for path, target in links:
+            path.unlink(missing_ok=True)
+            path.symlink_to(target)
 
 
 __all__ = list(_backend.__all__)

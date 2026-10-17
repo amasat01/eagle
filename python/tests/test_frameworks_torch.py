@@ -51,11 +51,18 @@ DEVICES = [
     "cpu",
     pytest.param("cuda", marks=[pytest.mark.gpu, pytest.mark.torch_gpu]),
 ]
+# torch itself calls its deprecated torch.jit.script / script_method (func, gradcheck,
+# inductor) and instantiates autograd.Function while tracing under dynamo.
+torch_internal_jit = pytest.mark.filterwarnings(
+    "ignore:`torch.jit.script(_method)?` is deprecated:DeprecationWarning:torch",
+    "ignore:.*autograd.function.Function.* should not be instantiated"
+    ":DeprecationWarning:torch",
+)
 
 
 @hawk.kernel
 def drag(v: Vector[3], cd: Param, terminated: Terminated, a: Mutable[Vector[3]]):
-    a = -cd * sqrt(dot(v, v)) * v
+    a = -cd * sqrt(dot(v, v)) * v  # noqa: F841 (DSL output)
 
 
 def _reference(v, cd, terminated):
@@ -66,18 +73,29 @@ def _reference(v, cd, terminated):
 
 @hawk.kernel
 def vec_sum(v: Vector[3], w: Vector[3], a: Mutable[Vector[3]]):
-    a = v + w
+    a = v + w  # noqa: F841 (DSL output)
 
 
 @hawk.kernel(steps=1)
-def step_and_finish(k: Scalar, nstop: Param, terminated: Terminated,
-                    k_next: Mutable[Scalar]):
+def step_and_finish(
+    k: Scalar, nstop: Param, terminated: Terminated, k_next: Mutable[Scalar]
+):
     """A counter step that finishes its own samples once it reaches
     ``nstop`` -- the shape the torch bridge hands the updated mask back
     for, instead of the caller recomputing the same decision."""
     k1 = k + 1.0
-    k_next = k1
-    terminated = k1 >= nstop
+    k_next = k1  # noqa: F841 (DSL output)
+    terminated = k1 >= nstop  # noqa: F841 (DSL output)
+
+
+@hawk.kernel
+def finish_plain(
+    k: Scalar, nstop: Param, terminated: Terminated, k_next: Mutable[Scalar]
+):
+    """The same finishing step declared without ``steps=1``."""
+    k1 = k + 1.0
+    k_next = k1  # noqa: F841 (DSL output)
+    terminated = k1 >= nstop  # noqa: F841 (DSL output)
 
 
 @pytest.fixture(scope="module")
@@ -88,13 +106,15 @@ def op(tmp_path_factory):
 @pytest.fixture(scope="module")
 def op_two_vectors(tmp_path_factory):
     return eagle_torch.function(
-        vec_sum, cache_dir=tmp_path_factory.mktemp("torch_fn_two_vectors"))
+        vec_sum, cache_dir=tmp_path_factory.mktemp("torch_fn_two_vectors")
+    )
 
 
 @pytest.fixture(scope="module")
 def op_finishing(tmp_path_factory):
     return eagle_torch.function(
-        step_and_finish, cache_dir=tmp_path_factory.mktemp("torch_fn_finishing"))
+        step_and_finish, cache_dir=tmp_path_factory.mktemp("torch_fn_finishing")
+    )
 
 
 def _device(name):
@@ -121,9 +141,11 @@ def _sample_major(v):
 
 
 def test_import_eagle_stays_torch_free():
-    code = ("import sys, eagle, eagle.frameworks; "
-            "bad = sorted(m for m in ('torch', 'hawk') if m in sys.modules); "
-            "assert not bad, bad")
+    code = (
+        "import sys, eagle, eagle.frameworks; "
+        "bad = sorted(m for m in ('torch', 'hawk') if m in sys.modules); "
+        "assert not bad, bad"
+    )
     subprocess.run([sys.executable, "-c", code], check=True)
 
 
@@ -160,7 +182,8 @@ def test_a_kernel_that_finishes_its_mask_returns_the_updated_mask(op_finishing, 
 
     k, terminated = op_finishing(k, nstop, terminated)
     torch.testing.assert_close(
-        k, torch.full((n,), 2.0, dtype=torch.float64, device=device))
+        k, torch.full((n,), 2.0, dtype=torch.float64, device=device)
+    )
     assert torch.all(terminated)
 
 
@@ -173,19 +196,24 @@ def test_forward_matches_reference(op, dev):
     torch.testing.assert_close(op(v=v, cd=0.3, terminated=terminated), a)
 
 
+@torch_internal_jit
 @pytest.mark.parametrize("dev", DEVICES)
 def test_gradcheck_float64(op, dev):
     v, cd, terminated = _inputs(_device(dev))
     v.requires_grad_()
     cd.requires_grad_()
     assert torch.autograd.gradcheck(
-        lambda v, cd: op(v, cd, terminated), (v, cd), check_forward_ad=True,
-        check_batched_grad=False)
+        lambda v, cd: op(v, cd, terminated),
+        (v, cd),
+        check_forward_ad=True,
+        check_batched_grad=False,
+    )
 
 
 def test_host_path_does_not_depend_on_numpy_dlpack_writability(op, monkeypatch):
-    """NumPy before 2.2 imports every torch tensor read-only over DLPack (Colab ships 2.1); the host path must still
-    write the kernel's outputs, so it must not take its arrays from ``np.from_dlpack``."""
+    """NumPy before 2.2 imports every torch tensor read-only over DLPack (Colab
+    ships 2.1); the host path must still write the kernel's outputs, so it must not
+    take its arrays from ``np.from_dlpack``."""
     import numpy as np
 
     real = np.from_dlpack
@@ -197,7 +225,9 @@ def test_host_path_does_not_depend_on_numpy_dlpack_writability(op, monkeypatch):
 
     monkeypatch.setattr(np, "from_dlpack", read_only)
     v, cd, terminated = _inputs(_device("cpu"))
-    torch.testing.assert_close(op(v, cd, terminated), _reference(v, cd, terminated), rtol=1e-14, atol=0)
+    torch.testing.assert_close(
+        op(v, cd, terminated), _reference(v, cd, terminated), rtol=1e-14, atol=0
+    )
 
 
 @pytest.mark.parametrize("dev", DEVICES)
@@ -216,6 +246,7 @@ def test_terminated_sample_contributes_zero_gradient(op, dev):
     torch.testing.assert_close(cd.grad, cd_ref.grad, rtol=1e-13, atol=0)
 
 
+@torch_internal_jit
 @pytest.mark.parametrize("dev", DEVICES)
 def test_forward_mode_tangent_runs_the_derived_kernel(op, dev):
     import torch.autograd.forward_ad as fwAD
@@ -267,6 +298,7 @@ def test_sample_major_copy_warns_once_per_call(op, dev):
     torch.testing.assert_close(a_sample, op(v, cd, terminated).T)
 
 
+@torch_internal_jit
 @pytest.mark.parametrize("dev", DEVICES)
 def test_gradcheck_and_forward_ad_sample_major(op, dev):
     """gradcheck (reverse-mode) and ``check_forward_ad`` both still pass when
@@ -276,14 +308,17 @@ def test_gradcheck_and_forward_ad_sample_major(op, dev):
     v_sample = _sample_major(v).requires_grad_()
     cd.requires_grad_()
     assert torch.autograd.gradcheck(
-        lambda v_sample, cd: op(v_sample, cd, terminated), (v_sample, cd),
-        check_forward_ad=True, check_batched_grad=False)
+        lambda v_sample, cd: op(v_sample, cd, terminated),
+        (v_sample, cd),
+        check_forward_ad=True,
+        check_batched_grad=False,
+    )
 
 
 def test_mixed_layout_across_inputs_is_refused(op_two_vectors):
     """No documented rule says which layout wins when per-sample inputs
     disagree, so the call is refused, naming each input and its layout."""
-    v = torch.randn(3, 6, dtype=torch.float64)              # component-major
+    v = torch.randn(3, 6, dtype=torch.float64)  # component-major
     w = _sample_major(torch.randn(3, 6, dtype=torch.float64))  # sample-major
     with pytest.raises(ValueError) as excinfo:
         op_two_vectors(v, w)
@@ -306,8 +341,9 @@ def test_planes_cross_zero_copy(op, dev, monkeypatch):
         real = hawk.runtime.run
 
         def spy(kernel, **arrays):
-            bound.update({k: a.ctypes.data for k, a in arrays.items()
-                          if hasattr(a, "ctypes")})
+            bound.update(
+                {k: a.ctypes.data for k, a in arrays.items() if hasattr(a, "ctypes")}
+            )
             return real(kernel, **arrays)
 
         monkeypatch.setattr(hawk.runtime, "run", spy)
@@ -317,8 +353,9 @@ def test_planes_cross_zero_copy(op, dev, monkeypatch):
         real = Plan.bind
 
         def spy(self, /, **planes):
-            bound.update({k: a.data.ptr for k, a in planes.items()
-                          if hasattr(a, "data")})
+            bound.update(
+                {k: a.data.ptr for k, a in planes.items() if hasattr(a, "data")}
+            )
             return real(self, **planes)
 
         monkeypatch.setattr(Plan, "bind", spy)
@@ -328,18 +365,23 @@ def test_planes_cross_zero_copy(op, dev, monkeypatch):
     finally:
         if dev == "cuda":
             torch.cuda.set_sync_debug_mode("default")
-    assert bound == {"v": v.data_ptr(), "terminated": terminated.data_ptr(),
-                     "a": a.data_ptr()}
+    # `cd` is a Param read from a one-cell plane the bridge builds from the number
+    assert bound.pop("cd") is not None
+    assert bound == {
+        "v": v.data_ptr(),
+        "terminated": terminated.data_ptr(),
+        "a": a.data_ptr(),
+    }
 
 
 def test_wrong_dtype_is_refused_not_cast(op):
     v, cd, terminated = _inputs("cpu")
     with pytest.raises(BufferRefused, match="dtype"):
-        op(v.float(), cd, terminated)
+        op(v.long(), cd, terminated)
 
 
 def test_unsupported_role_is_refused():
-    from hawk import Accum, Index, Scalar
+    from hawk import Accum, Index
 
     @hawk.kernel
     def scatter(x: Scalar, lane: Index, acc: Accum[Scalar]):
@@ -404,8 +446,61 @@ def test_bridge_on_a_wrong_stream_reads_stale_data(op, monkeypatch):
     _device("cuda")
     cycles = _sleep_cycles(0.06)
     wrong = torch.cuda.Stream()
-    monkeypatch.setattr(eagle_torch, "_current_stream",
-                        lambda index: wrong.cuda_stream)
+    monkeypatch.setattr(
+        eagle.interop, "_stream_handle", lambda stream: wrong.cuda_stream
+    )
     seen, expect = _adversarial_schedule(op, cycles, busy=wrong)
     assert not torch.equal(seen, expect)
     assert torch.all(seen == 0), "the consumer read the output before the launch"
+
+
+@pytest.mark.parametrize("dev", DEVICES)
+def test_a_finishing_kernel_without_steps_one_runs_and_differentiates(tmp_path, dev):
+    device = _device(dev)
+    fn = eagle_torch.function(finish_plain, cache_dir=tmp_path)
+    k = (torch.arange(4, dtype=torch.float64, device=device) + 0.5).requires_grad_()
+    k_next, done = fn(k, 3.0, torch.zeros(4, dtype=torch.bool, device=device))
+    assert k_next.tolist() == [1.5, 2.5, 3.5, 4.5]
+    assert done.tolist() == [False, False, True, True]
+    k_next.sum().backward()
+    assert k.grad.tolist() == [1.0] * 4
+
+
+@hawk.kernel(steps=1)
+def grow_state(nstop: Param, terminated: Terminated, k: Mutable[Scalar]):
+    k = k + 0.1 * k * k
+    terminated = k >= nstop  # noqa: F841 (DSL output)
+
+
+@torch_internal_jit
+@pytest.mark.parametrize("dev", DEVICES)
+def test_a_carried_state_kernel_steps_and_differentiates_with_no_where(tmp_path, dev):
+    device = _device(dev)
+    fn = eagle_torch.function(grow_state, cache_dir=tmp_path)
+    k0 = torch.linspace(0.5, 2.0, 64, dtype=torch.float64, device=device)
+
+    def run(step, k):
+        m = torch.zeros(64, dtype=torch.bool, device=device)
+        for _ in range(12):
+            k, m = step(k, m)
+        return k, m
+
+    def ref(k, m):
+        kn = torch.where(m, k, k + 0.1 * k * k)
+        return kn, m | (kn >= 50.0)
+
+    a = k0.clone().requires_grad_()
+    b = k0.clone().requires_grad_()
+    ka, ma = run(lambda k, m: fn(50.0, m, k), a)
+    kb, mb = run(ref, b)
+    assert torch.equal(ma, mb) and bool(ma.any()) and not bool(ma.all())
+    torch.testing.assert_close(ka, kb, rtol=1e-13, atol=0)
+    ka.sum().backward()
+    kb.sum().backward()
+    torch.testing.assert_close(a.grad, b.grad, rtol=1e-12, atol=0)
+    with pytest.raises(NotImplementedError, match="grow_state.*carries state"):
+        torch.func.jvp(
+            lambda k: fn(50.0, torch.zeros_like(k, dtype=torch.bool), k)[0],
+            (k0,),
+            (torch.ones_like(k0),),
+        )

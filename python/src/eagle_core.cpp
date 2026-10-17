@@ -1591,6 +1591,17 @@ NB_MODULE(_core, m)
         "set for cudaGraphNodeSetEnabled). False for e.g. a "
         "CaptureConditional IF node.");
 
+    m.def(
+        "capture_add_child",
+        [](std::uintptr_t stream, std::uintptr_t child, bool conditional_body) {
+            ck(EBX(eagle_backend_capture_add_child)(stream, child, conditional_body ? 1 : 0));
+        },
+        nb::arg("stream"), nb::arg("child"), nb::arg("conditional_body") = false,
+        "Insert `child` (a cudaGraph_t another library owns, as an int) at the "
+        "capture tip of `stream` as one child-graph node. The caller keeps the "
+        "owning object alive while the captured graph lives. `conditional_body` "
+        "refuses, by name, a node type CUDA forbids inside a conditional body.");
+
     // -- Capture-guard introspection (STOP-THE-LINE incident fix, test/ ------
     // diagnostic only): eagle::util::CaptureGuardState's process-wide
     // capture-depth counter and deferred-destroy queue length, which live in
@@ -2298,7 +2309,9 @@ NB_MODULE(_core, m)
            const std::vector<std::uintptr_t>& orders, const std::vector<Gather>& gathers,
            std::uintptr_t recomputeEntry, const std::vector<std::uintptr_t>& recomputeParams,
            std::uintptr_t recomputeWord, std::uintptr_t vjpEntry, const std::vector<std::vector<std::uintptr_t>>& vjpParams,
-           const std::vector<Accum>& accums, std::uintptr_t stepPlane, std::int64_t stepBytes) {
+           const std::vector<Accum>& accums, std::uintptr_t stepPlane, std::int64_t stepBytes,
+           const std::optional<std::function<void(std::int64_t)>>& hook,
+           const std::optional<std::function<void(std::int64_t, std::int64_t)>>& nodeVjp) {
             if (static_cast<std::int64_t>(vjpParams.size()) != 2 * window)
                 throw std::invalid_argument("diff_reverse_host: vjp_params holds 2 lists per tape row");
             const auto recompute = reinterpret_cast<eagle::exec::HostEntryV2>(recomputeEntry);
@@ -2320,12 +2333,15 @@ NB_MODULE(_core, m)
                             count, rows, static_cast<std::size_t>(bytes));
                 },
                 [&](std::int64_t c, std::int64_t len) {
-                    if (word != nullptr) {   // one fused launch; each sample stops itself
+                    if (word != nullptr && !hook) {   // one fused launch; each sample stops itself
                         *word = len;
                         HostTeam::run(recompute, rp.data(), prefix(at(c)));
                         return;
                     }
-                    for (std::int64_t j = c; j < c + len; ++j) HostTeam::run(recompute, rp.data(), prefix(at(j)));
+                    for (std::int64_t j = c; j < c + len; ++j) {
+                        if (hook) { nb::gil_scoped_acquire locked; (*hook)(j); }
+                        HostTeam::run(recompute, rp.data(), prefix(at(j)));
+                    }
                 },
                 [&](std::int64_t j, std::int64_t count) {
                     if (stepBytes == 8)
@@ -2334,6 +2350,7 @@ NB_MODULE(_core, m)
                         eagle::diff::fillPrefix(reinterpret_cast<std::int32_t*>(stepPlane),
                                                 static_cast<std::int32_t>(j), count);
                     HostTeam::run(vjp, vp[static_cast<std::size_t>(2 * (j % window) + (j & 1))].data(), prefix(count));
+                    if (nodeVjp) { nb::gil_scoped_acquire locked; (*nodeVjp)(j, count); }
                     for (const auto& [acc, g, rows, dtype] : accums)
                         for (std::int64_t r = 0; r < rows; ++r) {
                             if (dtype == EAGLE_BACKEND_REDUCE_F64)
@@ -2348,14 +2365,17 @@ NB_MODULE(_core, m)
         nb::arg("n"), nb::arg("src_n"), nb::arg("window"), nb::arg("live"), nb::arg("orders"),
         nb::arg("gathers"), nb::arg("recompute_entry"), nb::arg("recompute_params"),
         nb::arg("recompute_word"), nb::arg("vjp_entry"), nb::arg("vjp_params"), nb::arg("accums"),
-        nb::arg("step_plane"), nb::arg("step_bytes"),
+        nb::arg("step_plane"), nb::arg("step_bytes"), nb::arg("hook").none() = nb::none(),
+        nb::arg("node_vjp").none() = nb::none(),
         "The windowed reverse of one pass of a recorded host run, all in C++. Planes are n "
         "samples wide, checkpoints src_n. gathers: (dst, checkpoint address per window, rows, "
         "element bytes), window k's columns read through orders[k] (int64 checkpoint column "
         "per reverse slot, the window's sample order composed with its checkpoint's slot order). The recompute entry replays a window as one fused launch (its int64 steps word "
         "at recompute_word) or step by step (recompute_word 0), over the live prefix; "
         "vjp_params[2*row + (j & 1)] binds step j's vjp; step_plane (0: none) receives j "
-        "before it; accums: (acc, g, rows, dtype 0 f32 / 1 f64) add each step's share.");
+        "before it; accums: (acc, g, rows, dtype 0 f32 / 1 f64) add each step's share. hook(j), when "
+        "given, runs before each recompute launch (step by step); node_vjp(j, count) after step j's "
+        "vjp launch, before the accumulates.");
 
     m.def("diff_record_device",
         [](std::uintptr_t entry, const std::vector<std::uintptr_t>& params, std::int64_t n,
@@ -2419,7 +2439,9 @@ NB_MODULE(_core, m)
            std::uintptr_t recomputeWord, std::uint32_t recomputeBlock, std::uintptr_t vjpEntry,
            const std::vector<std::vector<std::uintptr_t>>& vjpParams, std::uint32_t vjpBlock,
            const std::vector<Accum>& accums, std::uintptr_t stepPlane, std::int64_t stepBytes,
-           std::uintptr_t stream, std::int32_t device) {
+           std::uintptr_t stream, std::int32_t device,
+           const std::optional<std::function<void(std::int64_t)>>& hook,
+           const std::optional<std::function<void(std::int64_t, std::int64_t)>>& nodeVjp) {
             if (static_cast<std::int64_t>(vjpParams.size()) != 2 * window)
                 throw std::invalid_argument("diff_reverse_device: vjp_params holds 2 lists per tape row");
             const std::vector<void*> rp = asParams(recomputeParams);
@@ -2453,13 +2475,15 @@ NB_MODULE(_core, m)
                                 orders.at(static_cast<std::size_t>(k)));
                 },
                 [&](std::int64_t c, std::int64_t len) {
-                    if (recomputeWord != 0) {   // one fused launch; each sample stops itself
+                    if (recomputeWord != 0 && !hook) {   // one fused launch; each sample stops itself
                         columns(EAGLE_BACKEND_DIFF_FILL, recomputeWord, 0, 1, 0, 1, 1, 8, len, 0);
                         eagle_seam::DeviceKernel::run(recomputeEntry, rp, prefix(at(c)), stream, recomputeBlock);
                         return;
                     }
-                    for (std::int64_t j = c; j < c + len; ++j)
+                    for (std::int64_t j = c; j < c + len; ++j) {
+                        if (hook) (*hook)(j);
                         eagle_seam::DeviceKernel::run(recomputeEntry, rp, prefix(at(j)), stream, recomputeBlock);
+                    }
                 },
                 [&](std::int64_t j, std::int64_t count) {
                     if (stepPlane != 0)
@@ -2467,6 +2491,7 @@ NB_MODULE(_core, m)
                                 static_cast<std::uint32_t>(stepBytes), j, 0);
                     eagle_seam::DeviceKernel::run(
                         vjpEntry, vp[static_cast<std::size_t>(2 * (j % window) + (j & 1))], prefix(count), stream, vjpBlock);
+                    if (nodeVjp) (*nodeVjp)(j, count);
                     for (const auto& [acc, g, rows, dtype] : accums)
                         columns(EAGLE_BACKEND_DIFF_ACCUMULATE, acc, g, n, n, count, rows,
                                 dtype == EAGLE_BACKEND_REDUCE_F64 ? 8u : 4u, 0, 0);
@@ -2477,6 +2502,7 @@ NB_MODULE(_core, m)
         nb::arg("recompute_word"), nb::arg("recompute_block"), nb::arg("vjp_entry"),
         nb::arg("vjp_params"), nb::arg("vjp_block"), nb::arg("accums"), nb::arg("step_plane"),
         nb::arg("step_bytes"), nb::arg("stream") = 0, nb::arg("device") = -1,
+        nb::arg("hook").none() = nb::none(), nb::arg("node_vjp").none() = nb::none(),
         "diff_reverse_host on the device: the same window driver, every operation enqueued on "
         "`stream` (launches through the backend's launcher, column ops through "
         "`eagle_backend_x_diff_columns`); `orders` are device int64 arrays. Enqueue only.");
