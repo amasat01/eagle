@@ -1,6 +1,8 @@
 # Changelog
 
-## 0.6.2 (unreleased)
+## 0.6.2 (2026-10-18)
+
+**Graphs run on the GPU their planes live on.** On a machine with several GPUs, a graph now builds and launches on its planes' device from any thread, and a JAX call between eagle launches no longer moves it (before, a launch from another thread could fail with `cudaErrorInvalidResourceHandle`, and a JAX node could hit a capture error).
 
 **JAX is certified.** Five rows (`JX-IN-CUDA-ALIAS`, `JX-IN-WRITE-REFUSED`, `JX-OUT-CUDA-ALIAS`, `JX-IN-CPU-COPY`, `STREAM-JAX-PRODUCER-ORDER`) cover JAX arrays: zero-copy in for read-only roles, zero-copy out (the JAX array is eagle's own result buffer, never written again), and a device-side wait for a JAX operation still running. JAX arrays are immutable, so a JAX array passed as `out=`, as `terminated` (unless the plugin declares it read-only), as a `Mutable` plane, or as a written host buffer (`host_ptr(..., writable=True)`) is refused by name instead of copied. A CPU result for a CPU JAX input is now placed on the CPU device. JAX publishes wheels for Python 3.12 and newer, and no 3.13 free-threaded build; install it with the new `jax` extra on those, plus JAX's own `jax[cuda12]` or `jax[cuda13]` for GPU arrays.
 

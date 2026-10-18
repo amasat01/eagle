@@ -20,6 +20,7 @@ distinct Graphs run concurrently.
 
 from __future__ import annotations
 
+import contextlib
 import threading
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -277,6 +278,29 @@ class _Access:
         self.writes = tuple(k.writes(node))
 
 
+@contextlib.contextmanager
+def _on_device(device):
+    """Make ``device`` (a CUDA ordinal, ``None`` for a host graph) the calling
+    thread's current device and context, whatever a framework left current
+    there (thread-local, restored on exit)."""
+    if device is None:
+        yield
+        return
+    import cupy
+
+    with cupy.cuda.Device(device):
+        cupy.cuda.runtime.setDevice(device)   # Device() skips this when the id already matches
+        yield
+
+
+def _plane_device(accesses):
+    """The CUDA ordinal the graph's planes live on (the first one's)."""
+    for a in accesses:
+        for _n, arr, _r in (*a.reads, *a.writes):
+            return arr.device.id
+    return None
+
+
 def _array_backend(arr):
     return "gpu" if type(arr).__module__.split(".")[0] == "cupy" else "cpu"
 
@@ -298,6 +322,7 @@ class Graph:
         self._edges: tuple = ()
         self._labels: list = []
         self._schedule: tuple = ()
+        self._device = None     # the CUDA ordinal of the planes (GPU graph)
         self._pipe = None
         self._segments = None   # a GPU graph with an eager node: [(pipeline, event) | _Eager]
         self._seeds = None
@@ -506,7 +531,7 @@ class Graph:
 
             graph = eagle.Graph().add(bound_step).build(dispatch="switch")
             graph.dispatch   # {"walker": {"dispatch0": "switch"}}"""
-        with self._busy("build"):
+        with self._busy("build"), contextlib.ExitStack() as pin:
             self._check_open("build")
             if not self._nodes:
                 raise ValueError("eagle.Graph.build: the graph is empty")
@@ -536,6 +561,9 @@ class Graph:
             ctx = LowerCtx(be)
             if be == "gpu":
                 import cupy
+
+                self._device = _plane_device(accesses)
+                pin.enter_context(_on_device(self._device))
 
                 from .pipeline import GraphPipeline
 
@@ -607,7 +635,7 @@ class Graph:
         """Run the graph ``n`` times and wait (``enqueue(n)`` then
         :meth:`synchronize`). A ``record=True`` graph runs once per launch and
         keeps that run's ``Record`` in :attr:`record`."""
-        with self._busy("launch"):
+        with self._busy("launch"), _on_device(self._device):
             self._need_built("launch")
             self._check_live()
             if self._recorder is not None:
@@ -631,7 +659,7 @@ class Graph:
         the device); one with a host node waits as :meth:`launch` does. As for
         :class:`eagle.GraphPipeline`, write no plane of the graph between
         ``enqueue`` and :meth:`synchronize`."""
-        with self._busy("enqueue"):
+        with self._busy("enqueue"), _on_device(self._device):
             self._need_built("enqueue")
             self._check_live()
             if self._recorder is not None:
@@ -670,10 +698,11 @@ class Graph:
         """Block until enqueued runs complete (CPU: a no-op)."""
         self._need_built("synchronize")
         if self._backend == "gpu":
-            if self._segments is None:
-                self._pipe.synchronize()
-            else:
-                self._sync_tail()
+            with _on_device(self._device):
+                if self._segments is None:
+                    self._pipe.synchronize()
+                else:
+                    self._sync_tail()
         return self
 
     def _sync_tail(self):

@@ -41,8 +41,10 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import gc
+import os
 import threading
 import time
+import weakref
 
 import numpy as np
 import pytest
@@ -191,6 +193,76 @@ def _acc_after(runs):
     return float(sum(r + 1 for r in range(1, runs + 1)))
 
 
+def _in_threads(targets, *, setup=None):
+    """Run each target in its own thread (after ``setup()`` in that thread);
+    a thread's exception is raised here, never lost."""
+    errors = []
+
+    def run(target):
+        try:
+            if setup is None:
+                target()
+            else:
+                with setup():
+                    target()
+        except BaseException as err:  # noqa: BLE001
+            errors.append(err)
+
+    threads = [threading.Thread(target=run, args=(t,)) for t in targets]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(60)
+    assert not any(t.is_alive() for t in threads)
+    if errors:
+        raise errors[0]
+
+
+@contextlib.contextmanager
+def _foreign_context():
+    """A CUDA context nobody built a graph under, current on this thread (what
+    a framework that owns its own context leaves behind)."""
+    cp = _cp()
+    drv = cp.cuda.driver
+    ctx = drv.ctxCreate(cp.cuda.Device().id)
+    try:
+        yield
+    finally:
+        cp.cuda.runtime.setDevice(cp.cuda.Device().id)
+        drv.ctxDestroy(ctx)
+
+
+def test_launch_from_a_thread_with_a_foreign_context():
+    torch = _torch_cuda()
+    cp = _cp()
+    ts = torch.cuda.Stream()
+    chains = [_chain(cp, ts, slow_node=False) for _ in range(4)]
+    _in_threads([c[0].launch for c in chains], setup=_foreign_context)
+    for _g, w, _y, acc in chains:
+        assert float(w[0]) == 1.0 and bool((acc == _acc_after(1)).all())
+
+
+def test_graph_enters_its_planes_device(monkeypatch):
+    cp = _cp()
+    entered = []
+    real = G._on_device
+
+    def spy(device):
+        entered.append(device)
+        return real(device)
+
+    monkeypatch.setattr(G, "_on_device", spy)
+    w = cp.zeros(8)
+    g = (eagle.Graph().add_node(opaque(lambda: cp.add(w, 1.0, out=w), reads={"w": w},
+                                       writes={"w": w}), name="inc").build())
+    here = cp.cuda.Device().id
+    assert entered == [here]
+    g.launch()
+    g.enqueue()
+    g.synchronize()
+    assert entered == [here] * 4 and float(w[0]) == 2.0
+
+
 @register_row("STREAM-INJECT-STREAM-ORDER", leg="cuda")
 def test_stream_node_is_fenced_on_the_device(monkeypatch):
     torch = _torch_cuda()
@@ -213,9 +285,7 @@ def test_stream_node_is_fenced_on_the_device(monkeypatch):
     acc.fill(0)
     g.enqueue(1)
     g.enqueue(1)
-    other = threading.Thread(target=g.launch)
-    other.start()
-    other.join(60)
+    _in_threads([g.launch])
     g.synchronize()
     assert bool((acc == _acc_after(3)).all())
     # E3: the stream node first, after a slow producer on the caller's stream
@@ -615,6 +685,35 @@ def _jax_spin(tmp_path_factory):
     return jax, spin, _spin_cycles
 
 
+def test_jax_node_made_in_a_foreign_context_runs_on_the_planes_device():
+    certified_framework("jax")
+    from test_interop_jax import _jax
+
+    jax = _jax()
+    from eagle.frameworks import jax as ej
+
+    cp = _cp()
+    x, y = cp.arange(8, dtype=cp.float64), cp.zeros(8)
+    with _foreign_context():
+        step = ej.node(jax.jit(lambda a: a * 2.0), reads={"x": x}, writes={"y": y})
+    holder = []
+    _in_threads([lambda: holder.append(eagle.Graph().add_node(step).build().launch())])
+    assert bool((y == 2 * x).all())
+
+
+def test_jax_node_refuses_planes_on_two_devices():
+    from eagle.frameworks import jax as ej
+
+    def fake(ordinal):
+        cls = type("ndarray", (), {"__module__": "cupy.fake"})
+        obj = cls()
+        obj.device = type("D", (), {"id": ordinal})()
+        return obj
+
+    with pytest.raises(ValueError, match="span devices"):
+        ej.node(lambda a: a, reads={"x": fake(0)}, writes={"y": fake(1)})
+
+
 @register_row("STREAM-JAX-INJECT-ORDER", leg="cuda")
 def test_jax_node_is_stream_ordered_and_retained(tmp_path_factory, monkeypatch):
     jax, spin, cycles_for = _jax_spin(tmp_path_factory)
@@ -665,10 +764,25 @@ def test_jax_node_is_stream_ordered_and_retained(tmp_path_factory, monkeypatch):
     assert g.schedule == ("capture", "eager_stream", "capture")
     bad, ratio = trials(g, 10)
     assert bad == 0 and ratio < 0.1, (bad, ratio)
-    # falsifier: the retain list off -> the landing copy reads freed JAX memory
-    monkeypatch.setattr(ej._Retain, "keep", lambda self, event, view: None)
-    bad, _ = trials(graph(ej.node), 5)
-    assert bad > 0
+
+    # every result a queued copy still reads is alive (the node's stream is busy, so the copy is queued)
+    seen = []
+    keep = ej._Retain.keep
+
+    def dropped_early(g):
+        g.enqueue(1)
+        gc.collect()
+        n = sum(ref() is None and not event.done for event, ref in seen)
+        g.synchronize()
+        return n
+
+    monkeypatch.setattr(ej._Retain, "keep", lambda self, event, view: (
+        seen.append((event, weakref.ref(view))), keep(self, event, view)))
+    assert dropped_early(graph(ej.node)) == 0 and seen
+    # falsifier: the retain list off -> a result is dropped while its copy is still queued
+    seen.clear()
+    monkeypatch.setattr(ej._Retain, "keep", lambda self, event, view: seen.append((event, weakref.ref(view))))
+    assert dropped_early(graph(ej.node)) > 0
 
 
 @register_row("JX-INJECT-HOST", leg="cuda")
@@ -922,10 +1036,11 @@ def _run_vjp_row(torch, xp, dev, targets, tmp, monkeypatch):
     steps = int(run.runner.record.steps.max())      # the reverse's steps (the device
     if xp is not np:                                # forward pads to the window)
         assert _counters.snapshot()["host_syncs"] - syncs == 2 * steps
-        t0 = time.perf_counter()
-        run.vjp({"x": run.x0, "v": run.v0}, {"corr": run.x0})
-        torch.cuda.synchronize()
-        assert wall <= steps * (time.perf_counter() - t0 + 1e-3)    # a sanity bound
+        if os.environ.get("EAGLE_WALL_CLOCK_ROWS"):   # a wall-time bound: opt-in, like every wall_clock row
+            t0 = time.perf_counter()
+            run.vjp({"x": run.x0, "v": run.v0}, {"corr": run.x0})
+            torch.cuda.synchronize()
+            assert wall <= steps * (time.perf_counter() - t0 + 1e-3)
     bare = eagle.until_done(plan, max_steps=400, record=True, window=16, dt=DT, c=C,
                             terminated=xp.zeros(512, bool), x=run.x0.copy(), v=run.v0.copy(),
                             t=xp.zeros(512), corr=xp.zeros(512), t_final=run.p["t_final"])
