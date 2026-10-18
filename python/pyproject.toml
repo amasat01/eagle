@@ -19,7 +19,7 @@ description = "EAGLE — the Python face of the launch engine for compiled CUDA 
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "Apache-2.0" }
-# Python versions match the cibuildwheel matrix publish.yml actually builds
+# Python versions match the cibuildwheel matrix release.yml actually builds
 # and the test-wheel job actually runs (cp39-cp314 plus the free-threaded cp313t/cp314t, manylinux_2_28 x86_64) —
 # never wider than what a real wheel ships.
 classifiers = [
@@ -130,7 +130,7 @@ markers = [
     "torch_gpu: requires a CUDA build of torch (skipped where torch is CPU-only)",
     "interop_matrix: interop certification matrix row (deselect explicitly via -m 'not interop_matrix'; the only sanctioned way a row may not run)",
     "mpi: needs the OPTIONAL eagle._mpi extension (eagle::exec::RankPartition; built with -DEAGLE_PYTHON_MPI). Gated exactly as the gpu/torch markers are — the module is optional BY DESIGN, so a build without an MPI legitimately cannot run these. The REFUSAL rows (a missing _mpi must name the build switch) are deliberately NOT marked and run everywhere; the distributed certification is the rank bed, tests/mpi/, which has no skip machinery at all.",
-    "repo_local: venv-gate guardrail — certifies the REPOSITORY (docs/pyproject/source-as-text, or a dev-env package-presence assumption), never the installed DISTRIBUTION, so a wheel legitimately cannot carry what it checks. Deselect only in the isolated-venv leg (-m 'not repo_local'); the repo-rooted suite (CI, dev runs) always runs these — never deselected there. The venv leg enumerates and pins the count by collection, never a hand list.",
+    "repo_local: venv-gate guardrail — certifies the REPOSITORY (docs/pyproject/source-as-text, or a dev-env package-presence assumption), never the installed DISTRIBUTION, so a wheel legitimately cannot carry what it checks. Deselect only in the isolated-venv leg (release.yml test-wheel, -m 'not repo_local'); the repo-rooted suite (CI, dev runs) always runs these — never deselected there. The venv leg enumerates and pins the count by collection, never a hand list.",
     "wall_clock: compares measured run times, which flip with machine load; skipped unless EAGLE_WALL_CLOCK_ROWS=1 is set (run on a quiet machine)",
 ]
 

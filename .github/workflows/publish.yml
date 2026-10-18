@@ -3,40 +3,14 @@
 #
 # Publish raptor-eagle to PyPI through a Trusted Publisher (PyPI pending
 # publisher: owner amasat01, GitHub environment "pypi"). No tokens, no
-# secrets.
+# secrets: the `publish` job authenticates with the environment's OIDC
+# token (`permissions: id-token: write`).
 #
-# Trigger: pushing a tag `v*` builds, checks, tests AND publishes.
-# `workflow_dispatch` builds, checks and tests but never publishes.
-#
-# eagle's Python package has two compiled parts (python/CMakeLists.txt):
-# `eagle._core` is plain C++ (EAGLE_CPU_ONLY) and needs no CUDA toolkit at
-# all; `eagle/libeagle_cuda.so`, the CUDA backend plugin `_core` dlopen's on
-# first use, is compiled by nvcc but links NEITHER cudart NOR libcuda (built
-# `-cudart none`; `src/plugin/cuda_driver.cpp` resolves the driver's
-# `cuGetProcAddress` entry points at RUN time via `dlopen("libcuda.so.1")`).
-# So the manylinux container needs nvcc + CUDA HEADERS to BUILD the plugin,
-# but the published wheel needs only the NVIDIA DRIVER (no CUDA runtime, no
-# NVRTC — NVRTC is a hawk run-time concern, not eagle's; the eagle._core
-# `eagle.frameworks`/`eagle.plan.auto` code paths that touch
-# `hawk.compile.nvrtc` only run when hawk happens to be installed too, and
-# are not a run-time requirement of this wheel). `auditwheel repair` is told
-# to exclude `libcuda.so.1` defensively, even though nothing here links it.
-#
-# The manylinux_2_28 image is AlmaLinux 8 (glibc 2.28): CUDA packages come
-# from NVIDIA's rhel8 CUDA repo (yum/dnf), not the apt names eagle's ci.yml
-# uses for its Ubuntu compile-only CUDA leg — same package set, el8 naming.
-# The sibling aether/eagle header trees are bind-mounted into the container
-# (cibuildwheel's `container-engine: ... create_args: --volume ...`) and
-# aether is installed INSIDE the container (CUDA/default mode — eagle._core
-# is CUDA-language regardless of EAGLE_CPU_ONLY, per the existing ci.yml's
-# test-python job) before each wheel's cmake configure.
-#
-# Release order: eagle needs raptor-core (declared dependency, used only at
-# IMPORT time, never by the C++/CUDA build). test-wheel installs the
-# raptor-core release matching the built wheel's requirement from PyPI when
-# one exists, and only otherwise builds it from the sibling checkout, so the
-# workflow works before and after the family's first release. The sibling
-# repositories are public: the default GITHUB_TOKEN checks them out.
+# Nothing is built here. release.yml built, checked and tested the wheels on
+# the pull request and stored them under the git tree hash; this workflow
+# fetches that artifact for the tagged tree, verifies its checksums and
+# uploads it. Pushing a tag `v*` publishes. `workflow_dispatch` runs the
+# same fetch and verification but never uploads (a dry run).
 
 name: Publish
 
@@ -50,312 +24,43 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  docs-fresh:
-    # Freshness check, never a commit: the generator re-renders the pages and fails on any difference.
+  fetch:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.12"
-      - uses: actions/checkout@v7
-        with:
-          repository: amasat01/amasat01.github.io
-          ref: main
-          path: site
-      - name: documented numbers and family visuals match the committed cards
-        run: bash tools/docs_fresh.sh site
-  build:
-    needs: docs-fresh
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          path: eagle
-
-      - uses: actions/checkout@v7
-        with:
-          repository: amasat01/aether
-          path: aether
-
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: eagle/python/pyproject.toml
-
-      - run: python -m pip install --quiet build
-
-      - name: Build the sdist
-        run: cd eagle/python && python -m build --sdist --outdir ../../dist
-
-      # ccache inside the manylinux container: the runner directory is bind-mounted at /ccache
-      - run: mkdir -p .ccache-cibw
-      - uses: actions/cache@v6
-        with:
-          path: ${{ github.workspace }}/.ccache-cibw
-          key: ccache-v2-${{ runner.os }}-${{ runner.arch }}-cibw-${{ hashFiles('**/*.h', '**/*.hpp', '**/*.cpp', '**/*.cu', '**/*.cuh', '**/CMakeLists.txt') }}
-          restore-keys: |
-            ccache-v2-${{ runner.os }}-${{ runner.arch }}-cibw-
-
-      - name: Build manylinux wheels (cibuildwheel; CPython 3.9-3.14 plus free-threaded 3.13t/3.14t, x86_64)
-        uses: pypa/cibuildwheel@v3.4.1
-        with:
-          package-dir: eagle/python
-          output-dir: dist
+      - name: Fetch the artifact built for this tree
         env:
-          CIBW_BUILD: "cp39-manylinux_x86_64 cp310-manylinux_x86_64 cp311-manylinux_x86_64 cp312-manylinux_x86_64 cp313-manylinux_x86_64 cp314-manylinux_x86_64 cp313t-manylinux_x86_64 cp314t-manylinux_x86_64"
-          # cibuildwheel 3.x, not 4.x: 4.x dropped the free-threaded 3.13 build
-          # (cp313t), and 3.x gates it behind this enable group.
-          CIBW_ENABLE: cpython-freethreading
-          CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
-          # no isolation, deps installed per Python first: an isolated build env sits at a random
-          # /tmp path that lands in every compile line, so ccache could never hit across runs
-          CIBW_BUILD_FRONTEND: "build; args: --no-isolation"
-          CIBW_BEFORE_BUILD: >-
-            python -m pip install 'scikit-build-core>=0.10' 'ninja>=1.5'
-            'nanobind>=3.1,<4; python_version >= "3.10"'
-            'nanobind>=2.2,<3; python_version < "3.10"'
-          CIBW_CONTAINER_ENGINE: "docker; create_args: --volume ${{ github.workspace }}/aether:/sib/aether:ro --volume ${{ github.workspace }}/eagle:/sib/eagle:ro --volume ${{ github.workspace }}/.ccache-cibw:/ccache"
-          # nvcc + CUDA headers only (no driver, nothing executed); rhel8
-          # repo matches manylinux_2_28's AlmaLinux 8 base. Installed once
-          # per container, ahead of every per-Python wheel build. The .repo
-          # file is fetched with curl (dnf cannot `install` a .repo file, and
-          # `dnf config-manager` needs dnf-plugins-core).
-          CIBW_BEFORE_ALL_LINUX: >-
-            dnf install -y epel-release && dnf install -y ccache &&
-            CCACHE_DIR=/ccache ccache -z &&
-            curl -fsSL -o /etc/yum.repos.d/cuda-rhel8.repo
-            https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo &&
-            dnf install -y --setopt=install_weak_deps=False
-            cuda-nvcc-12-9 cuda-cudart-devel-12-9 cuda-driver-devel-12-9 gcc-toolset-13-gcc-c++ &&
-            cmake -DAETHER_CPP_MODE=OFF -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.9/bin/nvcc
-            -DCMAKE_CUDA_HOST_COMPILER=/opt/rh/gcc-toolset-13/root/usr/bin/g++
-            -DCMAKE_INSTALL_PREFIX=/opt/eagle-build-prefix -B /tmp/aether-build -S /sib/aether &&
-            cmake --install /tmp/aether-build &&
-            cmake -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.9/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES=61
-            -DCMAKE_CUDA_HOST_COMPILER=/opt/rh/gcc-toolset-13/root/usr/bin/g++
-            -DCMAKE_INSTALL_PREFIX=/opt/eagle-build-prefix -B /tmp/eagle-hdr -S /sib/eagle &&
-            cmake --install /tmp/eagle-hdr
-          # CUDA 12.9 is the newest toolkit that still compiles Pascal and Volta,
-          # and it adds Blackwell; its nvcc takes gcc-toolset-13 as the host
-          # compiler (CUDAHOSTCXX). No CMAKE_CUDA_ARCHITECTURES here:
-          # python/CMakeLists.txt's default (SASS for every architecture this
-          # nvcc compiles from sm_60 up, plus PTX at the newest) is what ships.
-          # cibuildwheel parses this with a shell grammar: a value holding
-          # `;` (or spaces) must be double-quoted, or the whole option is
-          # rejected as malformed.
-          CIBW_ENVIRONMENT_LINUX: >-
-            PATH=/usr/local/cuda-12.9/bin:$PATH
-            CMAKE_PREFIX_PATH=/opt/eagle-build-prefix
-            CMAKE_BUILD_PARALLEL_LEVEL=4
-            CUDAHOSTCXX=/opt/rh/gcc-toolset-13/root/usr/bin/g++
-            SKBUILD_CMAKE_ARGS="-DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.9/bin/nvcc"
-            CCACHE_DIR=/ccache
-            CCACHE_MAXSIZE=1G
-            CCACHE_COMPILERCHECK=content
-            CMAKE_C_COMPILER_LAUNCHER=ccache
-            CMAKE_CXX_COMPILER_LAUNCHER=ccache
-            CMAKE_CUDA_COMPILER_LAUNCHER=ccache
-          CIBW_REPAIR_WHEEL_COMMAND_LINUX: "ccache -s; auditwheel repair -w {dest_dir} --exclude libcuda.so.1 {wheel}"
-          # The dedicated test-wheel job below (with the raptor-core sibling
-          # wheel + the no-driver smoke) replaces cibuildwheel's built-in
-          # --test-command.
-          CIBW_TEST_SKIP: "*"
-
+          GH_TOKEN: ${{ github.token }}
+        run: bash tools/ci_fetch_artifact.sh dist "$(git rev-parse 'HEAD^{tree}')" dist
+      - name: Verify checksums
+        run: cd dist && sha256sum -c SHA256SUMS
+      - name: tag == version guard (every wheel and the sdist must agree)
+        if: github.ref_type == 'tag'
+        run: |
+          want="${GITHUB_REF_NAME#v}"
+          [ "${GITHUB_REF_NAME}" != "${want}" ] || { echo "::error::tag ${GITHUB_REF_NAME} does not start with 'v'"; exit 1; }
+          for f in dist/*.whl; do
+            version=$(basename "$f" | cut -d- -f2)
+            [ "$version" = "$want" ] || { echo "::error::tag ${GITHUB_REF_NAME} != $(basename "$f") version ${version}"; exit 1; }
+          done
+          for f in dist/*.tar.gz; do
+            version=$(basename "$f" .tar.gz | sed 's/^.*-//')
+            [ "$version" = "$want" ] || { echo "::error::tag ${GITHUB_REF_NAME} != $(basename "$f") version ${version}"; exit 1; }
+          done
+          echo "OK: tag ${GITHUB_REF_NAME} == package version ${want}"
+      - run: rm dist/SHA256SUMS
       - uses: actions/upload-artifact@v7
         with:
           name: raptor-eagle-dist
           retention-days: 7
           path: dist/
 
-  check:
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/download-artifact@v8
-        with:
-          name: raptor-eagle-dist
-          path: dist
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.12"
-      - run: python -m pip install --quiet "twine>=6" packaging
-      - run: python -m twine check --strict dist/*
-      - name: No wheel vendors libcuda
-        run: |
-          shopt -s nullglob
-          for whl in dist/*.whl; do
-            if unzip -l "$whl" | grep -qi 'libcuda\.so'; then
-              echo "$whl vendors libcuda — auditwheel's --exclude was not honoured"; exit 1
-            fi
-          done
-          echo "OK: no wheel vendors libcuda"
-      - name: Plugin carries Blackwell SASS (sm_100, sm_120) and compute_100 PTX
-        run: |
-          shopt -s nullglob
-          for whl in dist/*.whl; do
-            archs="$(unzip -p "$whl" eagle/libeagle_cuda.so | strings -n 8 | grep -E '^[0-9]+(,[0-9]+)*/[0-9]+(,[0-9]+)*$' | head -1)"
-            sass=",${archs%%/*},"
-            ptx=",${archs##*/},"
-            for want in sass:100 sass:120 ptx:100; do
-              case "${want%%:*}" in sass) have="$sass";; *) have="$ptx";; esac
-              case "$have" in *",${want##*:},"*) ;; *) echo "$whl: plugin archs '$archs' lack $want"; exit 1;; esac
-            done
-          done
-          echo "OK: every wheel's plugin lists SASS 100 and 120 and PTX 100"
-      - name: tag == version guard (every wheel + the sdist must agree)
-        if: github.ref_type == 'tag'
-        run: |
-          python - <<'EOF'
-          import glob, os
-          from packaging.utils import parse_wheel_filename, parse_sdist_filename
-          tag = os.environ["GITHUB_REF_NAME"]
-          assert tag.startswith("v"), f"tag {tag!r} does not start with 'v'"
-          want = tag[1:]
-          seen = set()
-          for whl in glob.glob("dist/*.whl"):
-              _, version, _, _ = parse_wheel_filename(os.path.basename(whl))
-              seen.add(str(version))
-          for sdist in glob.glob("dist/*.tar.gz"):
-              _, version = parse_sdist_filename(os.path.basename(sdist))
-              seen.add(str(version))
-          assert seen == {want}, f"tag v{want} vs dist versions {seen}"
-          print(f"OK: tag v{want} == {len(seen)} agreeing dist version(s)")
-          EOF
-
-  test-wheel:
-    needs: check
-    runs-on: ubuntu-latest
-    strategy:
-      # every Python version reports, even when one fails
-      fail-fast: false
-      matrix:
-        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14", "3.13t", "3.14t"]
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          path: eagle
-      - uses: actions/checkout@v7
-        with:
-          repository: amasat01/raptor
-          path: raptor
-      - uses: actions/download-artifact@v8
-        with:
-          name: raptor-eagle-dist
-          path: dist
-      - uses: actions/setup-python@v7
-        with:
-          python-version: ${{ matrix.python-version }}
-          cache: pip
-          cache-dependency-path: |
-            eagle/python/pyproject.toml
-            raptor/pyproject.toml
-
-      # raptor-core, eagle's one runtime dependency, resolved against the
-      # requirement the BUILT wheel declares: from PyPI when a matching
-      # release exists (what a user gets), otherwise built from the sibling
-      # raptor checkout (before the family's first release).
-      - name: raptor-core wheel (PyPI if released, else the sibling checkout)
-        run: |
-          set -euo pipefail
-          # newest NumPy/SciPy ship no cp313t wheel: prefer a wheel over an sdist build
-          python -m pip install --quiet --prefer-binary build
-          REQ="$(python - <<'PY'
-          import glob, zipfile
-          whl = sorted(glob.glob("dist/*.whl"))[0]
-          with zipfile.ZipFile(whl) as z:
-              meta = next(n for n in z.namelist() if n.endswith(".dist-info/METADATA"))
-              for line in z.read(meta).decode().splitlines():
-                  if line.startswith("Requires-Dist:") and "raptor-core" in line and "extra ==" not in line:
-                      print(line.split(":", 1)[1].strip()); break
-              else:
-                  raise SystemExit(f"{whl} declares no raptor-core requirement")
-          PY
-          )"
-          echo "eagle requires: $REQ"
-          mkdir -p dist-raptor
-          if python -m pip download --quiet --no-deps --only-binary=:all: -d dist-raptor "$REQ"; then
-            echo "raptor-core: from PyPI"
-          else
-            echo "raptor-core: not on PyPI yet, building it from the sibling checkout"
-            (cd raptor && python -m build --wheel --outdir ../dist-raptor)
-          fi
-          ls dist-raptor
-
-      - name: Assert this runner has no NVIDIA driver (the precondition this leg is for)
-        run: |
-          if ldconfig -p | grep -q 'libcuda\.so\.1'; then echo "libcuda.so.1 present"; exit 1; fi
-
-      # Third-party packages (numpy: a runtime dependency; pytest) from PyPI
-      # first; then raptor-core from dist-raptor and raptor-eagle from THIS
-      # run's dist, both index-free (never an index copy of the same version).
-      - name: Fresh venv, install the released wheel + raptor-core, pip check
-        run: |
-          set -euo pipefail
-          python -m venv venv
-          . venv/bin/activate
-          pip install --quiet --upgrade pip
-          pip install --quiet --prefer-binary numpy pytest
-          pip install --quiet --no-index --find-links dist-raptor raptor-core
-          pip install --quiet --no-index --find-links dist --find-links dist-raptor raptor-eagle
-          pip check
-
-      - name: The installed wheel imports and refuses device work, typed
-        run: |
-          . venv/bin/activate
-          cd "$RUNNER_TEMP"
-          python - <<'EOF'
-          import eagle, eagle._core, eagle.exec
-          assert "site-packages" in eagle._core.__file__, eagle._core.__file__
-          assert eagle.exec.fold("sum", [1.0, 2.0]) == 3.0
-          # The CUDA plugin links no driver library, so it loads on a machine
-          # without one; what must hold is that USING the GPU refuses, typed.
-          d = eagle._core.cuda_backend()
-          print("cuda plugin:", {k: d[k] for k in ("loaded", "error")})
-          try:
-              eagle._core.Stream()
-              raise SystemExit("Stream() did not refuse")
-          except eagle.BackendUnavailable as e:
-              print("typed refusal:", e)
-          maps = open("/proc/self/maps").read()
-          assert "libcuda" not in maps and "libcudart" not in maps
-          print("OK: host-only CPU smoke, CUDA correctly unavailable")
-          EOF
-
-      - name: Host suite (a copy, outside the repository) against the installed wheel
-        run: |
-          . venv/bin/activate
-          mkdir -p "$RUNNER_TEMP/suite"
-          cp -rL eagle/python/tests eagle/python/conftest.py "$RUNNER_TEMP/suite/"
-          cd "$RUNNER_TEMP/suite"
-          RAPTOR_ROOT="${GITHUB_WORKSPACE}/raptor" python -m pytest tests -q -p no:cacheprovider -W error::pytest.PytestUnknownMarkWarning \
-            -m "not gpu and not gpu2 and not torch and not interop_matrix and not repo_local"
-
-      # Free-threaded legs only (3.13t / 3.14t): the ft rows against the INSTALLED
-      # wheel, then the whole suite with RuntimeWarning as an error (a re-enabled
-      # GIL is that warning). Zero collected ft rows fails the leg, and the
-      # interpreter must be GIL-off by default with no override set.
-      - name: ft-stress (ft rows + full suite, -W error::RuntimeWarning)
-        if: endsWith(matrix.python-version, 't')
-        run: |
-          set -euo pipefail
-          . venv/bin/activate
-          [ -z "${PYTHON_GIL:-}" ] || { echo "PYTHON_GIL is set"; exit 1; }
-          python -c "import sys; assert sys._is_gil_enabled() is False, 'GIL is enabled'"
-          mkdir -p "$RUNNER_TEMP/suite-ft"
-          cp -rL eagle/python/tests eagle/python/conftest.py "$RUNNER_TEMP/suite-ft/"
-          cd "$RUNNER_TEMP/suite-ft"
-          export RAPTOR_ROOT="${GITHUB_WORKSPACE}/raptor"
-          N="$(python -m pytest tests -m "ft and not repo_local" --collect-only -q -p no:cacheprovider | grep -c '::' || true)"
-          echo "ft rows collected: $N"
-          [ "$N" -gt 0 ] || { echo "ft selection collected zero tests"; exit 1; }
-          python -m pytest tests -m "ft and not repo_local" -q -rs -p no:cacheprovider -W error::RuntimeWarning -W error::pytest.PytestUnknownMarkWarning
-          python -m pytest tests -q -p no:cacheprovider -W error::RuntimeWarning -W error::pytest.PytestUnknownMarkWarning -m "not gpu and not gpu2 and not torch and not interop_matrix and not repo_local"
-
   publish:
     if: github.event_name == 'push' && github.ref_type == 'tag'
-    needs: [check, test-wheel]
+    needs: fetch
     runs-on: ubuntu-latest
     environment:
       name: pypi

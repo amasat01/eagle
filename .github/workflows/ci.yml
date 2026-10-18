@@ -8,7 +8,10 @@
 
 name: CI
 
-on: [push, pull_request]
+# Pull requests only: main receives the tested tree, nothing re-runs there.
+on:
+  pull_request:
+  workflow_dispatch: {}
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -652,7 +655,7 @@ jobs:
 
 
   # The source distribution as a user without a matching wheel gets it: build the
-  # sdist exactly as publish.yml does, then pip install it into a clean venv with
+  # sdist exactly as release.yml does, then pip install it into a clean venv with
   # nothing else provided (no CMAKE_PREFIX_PATH, no eagle_DIR, no installed
   # headers) and use it. On x86_64 and on aarch64; compiler warnings in eagle's
   # own sources are errors here.
@@ -684,7 +687,7 @@ jobs:
 
       - run: sudo apt-get update && sudo apt-get install -y g++-13
 
-      - name: Build the sdist (as publish.yml does)
+      - name: Build the sdist (as release.yml does)
         run: |
           python -m pip install --quiet build
           cd eagle/python && python -m build --sdist --outdir ../../dist

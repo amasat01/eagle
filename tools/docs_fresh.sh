@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Freshness checks for the documented numbers and the family visuals; never writes.
-# Used by ci.yml and publish.yml. Each check has its own exit code:
+# Used by ci.yml. Each check has its own exit code:
 #   0 fresh, 1 stale, 3 a card the docs cite is missing, 4 tool or companion checkout missing.
 # Usage: tools/docs_fresh.sh [site-checkout]      (default: site)
 set -u

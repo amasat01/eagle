@@ -9,6 +9,7 @@
 # and writes result.json. drive.py pushes it with the settings below filled in, one kernel per mode and
 # CUDA leg; `--local` runs the same steps in the current environment (no install, no Kaggle paths).
 import argparse
+import hashlib
 import json
 import os
 import pathlib
@@ -46,7 +47,10 @@ def settings():
     ap.add_argument("--aether-src", help="local aether checkout (notebooks mode; its helper files)")
     ap.add_argument("--local", action="store_true", help="use the current environment; no install, no Kaggle paths")
     ap.add_argument("--cuda", default="12", help="CUDA major of the extras: 12 or 13")
-    ap.add_argument("--source", default="pypi", choices=("pypi", "git"))
+    ap.add_argument("--source", default="pypi", choices=("pypi", "git", "wheel"),
+                    help="wheel: the raptor-eagle wheel shipped in a Kaggle dataset (the pull request's own build)")
+    ap.add_argument("--wheel-sha256", default="", help="--source wheel: the sha256 of the shipped SHA256SUMS file")
+    ap.add_argument("--wheel-dir", default="/kaggle/input", help="--source wheel: where the dataset is mounted")
     ap.add_argument("--pre", action="store_true")
     ap.add_argument("--version", default="")
     for name in ("eagle", "hawk", "raptor", "aether"):
@@ -98,13 +102,34 @@ def torch_index(cfg):
     return ["--extra-index-url", "https://download.pytorch.org/whl/cu130"] if cfg.cuda == "13" else []
 
 
+def shipped_wheel(cfg, py):
+    """The mounted dataset's raptor-eagle wheel for ``py``'s CPython tag, after checking the shipped SHA256SUMS file
+    against the sha256 in the config and the wheel against its line there (a dataset overwritten by another run fails
+    here, not silently)."""
+    tag = subprocess.run([str(py), "-c", "import sys; print(f'cp{sys.version_info[0]}{sys.version_info[1]}')"],
+                         capture_output=True, text=True, check=True).stdout.strip()
+    found = sorted(pathlib.Path(cfg.wheel_dir).rglob(f"raptor_eagle-*-{tag}-{tag}-*.whl"))
+    if len(found) != 1:
+        raise SystemExit(f"expected one {tag} raptor_eagle wheel under {cfg.wheel_dir}, found {len(found)}")
+    wheel = found[0]
+    sums = (wheel.parent / "SHA256SUMS").read_bytes()
+    if hashlib.sha256(sums).hexdigest() != cfg.wheel_sha256:
+        raise SystemExit(f"shipped SHA256SUMS does not match the expected {cfg.wheel_sha256}")
+    got = hashlib.sha256(wheel.read_bytes()).hexdigest()
+    if f"{got}  {wheel.name}" not in sums.decode().splitlines():
+        raise SystemExit(f"{wheel.name}: sha256 {got} is not the one in the shipped SHA256SUMS")
+    print("wheel", wheel.name, "sha256 ok")
+    return wheel
+
+
 def install(cfg, py, use_uv, work):
     cu = f"cuda{cfg.cuda}"
     pre = ["--pre"] if cfg.pre else []
     pin = f"=={cfg.version}" if cfg.version else ""
     others = ["jax[" + cu + "]", "torch", "warp-lang", "pytest", "nbclient", "ipykernel", "nbformat", "matplotlib"]
-    if cfg.source == "pypi":
-        rc = pip(py, use_uv, *pre, *torch_index(cfg), f"raptor-eagle[{cu}]{pin}", f"raptor-hawk[{cu}]", *others)
+    if cfg.source in ("pypi", "wheel"):
+        eagle = f"raptor-eagle[{cu}]{pin}" if cfg.source == "pypi" else f"{shipped_wheel(cfg, py)}[{cu}]"
+        rc = pip(py, use_uv, *pre, *torch_index(cfg), eagle, f"raptor-hawk[{cu}]", *others)
     else:
         src = work / "src"
         src.mkdir(exist_ok=True)
