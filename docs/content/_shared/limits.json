@@ -217,6 +217,20 @@
   "lifted_in": "none"
  },
  {
+  "id": "jax-current-device",
+  "text": "Starting JAX makes its last GPU the thread's current device, and each JAX call then makes its own GPU current (JAX's behavior); eagle graphs and `jax.node` still run on their planes' GPU: make other cupy arrays inside `with cupy.cuda.Device(n):`, or show one GPU with `CUDA_VISIBLE_DEVICES`.",
+  "way_out": "cupy.cuda.Device(n), or one visible GPU",
+  "cause": "framework",
+  "lifted_in": "none"
+ },
+ {
+  "id": "jax-cu13-nvrtc",
+  "text": "On CUDA 13, CuPy cannot compile a kernel after JAX has started, because JAX loads NVIDIA's NVRTC library first and that build of it cannot find its own builtins (NVIDIA's and JAX's packaging): call `cupy.cuda.nvrtc.getVersion()` before your first JAX call, as the notebooks here do.",
+  "way_out": "cupy.cuda.nvrtc.getVersion() before JAX starts",
+  "cause": "framework",
+  "lifted_in": "none"
+ },
+ {
   "id": "jax-grad-while",
   "text": "`jax.grad` does not differentiate through `lax.while_loop` (JAX's rule): use `lax.scan` with a next-state kernel.",
   "way_out": "lax.scan",

@@ -295,16 +295,21 @@ def node(fn, *, reads, writes, name=None):
     node's own stream; the host never waits. On the CPU it is an eager call.
     For a JAX call that reads values back on the host use
     ``opaque(fn, eager=True)``."""
-    from ..graph import opaque
+    from ..graph import _on_device, opaque
     from ..interop import import_buffer, to_cupy
 
     reads, writes = dict(reads), dict(writes)
-    device = any(type(a).__module__.split(".")[0] == "cupy" for a in (*reads.values(),
-                                                                       *writes.values()))
+    ordinals = {a.device.id for a in (*reads.values(), *writes.values())
+                if type(a).__module__.split(".")[0] == "cupy"}
+    if len(ordinals) > 1:
+        raise ValueError(f"{_WHO}.node: the planes span devices {sorted(ordinals)}; "
+                         "a node runs on one device")
+    ordinal = next(iter(ordinals), None)
     stream = None
-    if device:
+    if ordinal is not None:
         import cupy
-        stream = cupy.cuda.Stream(non_blocking=True)
+        with _on_device(ordinal):               # the stream belongs to the planes' device
+            stream = cupy.cuda.Stream(non_blocking=True)
     retain = _Retain()
 
     def run():
@@ -317,15 +322,16 @@ def node(fn, *, reads, writes, name=None):
         if len(out) != len(writes):
             raise ValueError(f"{_WHO}.node: fn returned {len(out)} array(s) for "
                              f"{len(writes)} write(s) {list(writes)}")
-        for dst, result in zip(writes.values(), out):
-            view = import_buffer(result, stream=code)
-            if stream is None:
-                dst[...] = np.from_dlpack(view)
-                continue
-            cupy.copyto(dst, to_cupy(view))
-            event = cupy.cuda.Event(disable_timing=True)
-            event.record(stream)
-            retain.keep(event, view)
+        with _on_device(ordinal):               # JAX leaves its own context current
+            for dst, result in zip(writes.values(), out):
+                view = import_buffer(result, stream=code)
+                if stream is None:
+                    dst[...] = np.from_dlpack(view)
+                    continue
+                cupy.copyto(dst, to_cupy(view))
+                event = cupy.cuda.Event(disable_timing=True)
+                event.record(stream)
+                retain.keep(event, view)
 
     return opaque(run, reads=reads, writes=writes, name=name,
                   **({"stream": stream} if stream is not None else {}))
