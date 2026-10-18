@@ -735,7 +735,9 @@ _KEEP = []          # modules preload loaded: never unloaded (a module may name 
 
 @functools.cache
 def _xla_library():
-    path = Path(__file__).resolve().parent.parent / "libeagle_xla.so"
+    from .. import _core
+
+    path = Path(_core.__file__).resolve().parent / "libeagle_xla.so"   # beside _core, also in an editable install
     if not path.is_file():
         raise ImportError(f"{_WHO}: {path} is missing; reinstall eagle")
     lib = ctypes.CDLL(str(path))
