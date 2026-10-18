@@ -557,7 +557,9 @@ def test_handler_pods_match_eagles_packer(ops, probe, platform):
 # -- the library -------------------------------------------------------------------------
 
 def _xla_path():
-    return pathlib.Path(eagle_jax.__file__).resolve().parent.parent / "libeagle_xla.so"
+    from eagle import _core
+
+    return pathlib.Path(_core.__file__).resolve().parent / "libeagle_xla.so"
 
 
 def test_library_exports_three_symbols_and_needs_no_cuda():

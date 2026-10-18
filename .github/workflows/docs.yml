@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Build the Sphinx + Doxygen + breathe (C++) and autodoc/autosummary (Python)
-# documentation site and deploy it to GitHub Pages on push to main.
+# documentation site and deploy it to GitHub Pages on push to main; a pull
+# request builds and checks it the same way, without deploying.
 #
 # Notebooks under docs/content/userguide/{tutorials,examples}/,
 # docs/content/userguide/quickstart_python.ipynb and docs/content/interop.ipynb
@@ -19,9 +20,11 @@ name: Docs
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
 
 concurrency:
-  group: pages
+  group: ${{ github.event_name == 'push' && 'pages' || format('docs-{0}', github.ref) }}
   cancel-in-progress: false
 
 permissions:
@@ -144,7 +147,7 @@ jobs:
             Sphinx==8.2.3 sphinx-book-theme==1.2.0 sphinx-design==0.7.0 sphinx-copybutton==0.5.2 \
             sphinx-autodoc-typehints==3.5.2 myst-nb==1.4.0 breathe==4.36.0 nbformat nbclient
 
-      # nbcheck also executes every notebook on the CPU: it needs hawk (sibling checkout), a kernel and torch
+      # nbcheck also executes every notebook on the CPU: it needs hawk (sibling checkout), a kernel, torch and JAX
       - uses: actions/checkout@v7
         with:
           repository: amasat01/hawk
@@ -156,6 +159,7 @@ jobs:
           export HAWK_AETHER_INCLUDE="${GITHUB_WORKSPACE}/aether" HAWK_EAGLE_INCLUDE="${GITHUB_WORKSPACE}/eagle"
           python -m pip install --quiet ipykernel matplotlib scipy
           python -m pip install --quiet torch --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install --quiet --only-binary=:all: "jax[cpu]==0.11.2"   # the JAX notebooks (the floor, as ci.yml pins it)
           python -m pip install --quiet ./hawk
 
       - name: make nbcheck (refuse an unfilled notebook; run every notebook on the CPU)
@@ -164,7 +168,8 @@ jobs:
       - name: make strict (0 Sphinx warnings)
         run: cd eagle/docs && make strict
 
-      - uses: actions/upload-pages-artifact@v5
+      - if: github.event_name == 'push'
+        uses: actions/upload-pages-artifact@v5
         with:
           path: eagle/docs/_build/html
           retention-days: 7
@@ -172,6 +177,7 @@ jobs:
         run: ccache -s
 
   deploy:
+    if: github.event_name == 'push'
     needs: build
     runs-on: ubuntu-latest
     environment:
