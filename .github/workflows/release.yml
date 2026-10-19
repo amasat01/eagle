@@ -565,24 +565,33 @@ jobs:
           echo "run=$run" >> "$GITHUB_OUTPUT"
           echo "kaggle GPU jobs: $run"
 
-  # One job behind the `kaggle` environment, so one approval runs everything: it puts the pull request's wheels in a
-  # private Kaggle dataset, then runs the four T4 kernels two at a time (Kaggle allows two GPU sessions per account):
-  # the CUDA 12 and 13 tests, then the CUDA 12 and 13 notebooks. Skipped (no GPU paths, no `release` label) = pass.
-  # If Kaggle itself fails (the dataset upload, a kernel never started, the API), the job stays green, says
-  # INCONCLUSIVE and labels the pull request `gpu-inconclusive`: merging without the GPU run is the maintainer's call.
-  # A failing test or notebook is always red. GPU_BACKEND (repository variable, default kaggle) picks the runner.
-  # Each leg that passes is remembered (actions cache) under a digest of every file except .github/workflows, so a
-  # re-run or a CI-only push runs only the legs that have not passed on that code. Labels `gpu-only:<leg>` (e.g.
-  # gpu-only:cuda13-tests) run exactly those legs, passed or not.
-  kaggle:
+  # Each of the four T4 legs (CUDA 12 and 13, tests and notebooks) is its own job behind the `kaggle` environment, so
+  # each is approved, timed out and re-run on its own ("Re-run failed jobs" re-runs just the red or inconclusive one), and
+  # a kernel Kaggle never starts holds only its own leg. Two run at a time (Kaggle allows two GPU sessions per account).
+  # Each leg puts the pull request's wheels in its own private Kaggle dataset and deletes it at the end. Skipped (no GPU
+  # paths, no `release` label) = pass. If Kaggle itself fails (the dataset upload, a kernel never started, the API), the
+  # leg stays green and says INCONCLUSIVE, and the kaggle job labels the pull request `gpu-inconclusive`: merging
+  # without the GPU run is the maintainer's call. A failing test or notebook is always red. A leg that passed is
+  # remembered (actions cache) under a digest of every file except .github/workflows, so a CI-only push skips it.
+  # GPU_BACKEND (repository variable, default kaggle) picks the runner.
+  kaggle-leg:
     needs: [build, kaggle-plan]
     if: needs.kaggle-plan.outputs.run == 'true'
     runs-on: ubuntu-latest
     environment: kaggle
-    timeout-minutes: 350  # tests take minutes, notebooks up to 180, plus up to 60 waiting for a GPU slot per wave
+    timeout-minutes: ${{ matrix.timeout }}  # up to 30 waiting for Kaggle to start the kernel, then the run itself
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - {leg: cuda12-tests, cuda: 12, mode: tests, timeout: 75, stagger: 0}
+          - {leg: cuda13-tests, cuda: 13, mode: tests, timeout: 75, stagger: 90}
+          - {leg: cuda12-notebooks, cuda: 12, mode: notebooks, timeout: 240, stagger: 0}
+          - {leg: cuda13-notebooks, cuda: 13, mode: notebooks, timeout: 240, stagger: 90}
+    name: kaggle (${{ matrix.leg }})
     permissions:
       contents: read
-      pull-requests: write  # the gpu-inconclusive label
     env:
       KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
       GPU_BACKEND: ${{ vars.GPU_BACKEND || 'kaggle' }}
@@ -591,103 +600,104 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - run: python -m pip install --quiet kaggle
       - id: memo
         run: echo "digest=$(git ls-tree -r HEAD | grep -v $'\t.github/workflows/' | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache/restore@v6
+      - id: pass
+        uses: actions/cache/restore@v6
         with:
           path: kaggle-pass
-          key: kaggle-pass-${{ steps.memo.outputs.digest }}-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: kaggle-pass-${{ steps.memo.outputs.digest }}-
+          key: kaggle-pass-${{ matrix.leg }}-${{ steps.memo.outputs.digest }}
+          lookup-only: true
       - id: plan
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR: ${{ github.event.pull_request.number }}
         run: |
-          mkdir -p kaggle-pass
-          # labels are read live, so a label added before "Re-run jobs" counts
-          only=$(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json labels --jq '.labels[].name' | sed -n 's/^gpu-only://p' | tr '\n' ' ')
-          legs=""
-          for name in cuda12-tests cuda13-tests cuda12-notebooks cuda13-notebooks; do
-            if [ -n "$only" ]; then
-              case " $only " in *" $name "*) legs="$legs $name" ;; esac
-            elif [ -e "kaggle-pass/$name" ]; then
-              echo "$name: passed earlier on digest ${{ steps.memo.outputs.digest }}" | tee -a "$GITHUB_STEP_SUMMARY"
-            else
-              legs="$legs $name"
-            fi
-          done
-          echo "legs to run:${legs:- none}" | tee -a "$GITHUB_STEP_SUMMARY"
-          echo "legs=$legs" >> "$GITHUB_OUTPUT"
+          mkdir -p kaggle-state
+          if [ "${{ steps.pass.outputs.cache-hit }}" = true ]; then
+            echo "${{ matrix.leg }}: passed earlier on digest ${{ steps.memo.outputs.digest }}" | tee -a "$GITHUB_STEP_SUMMARY"
+            echo pass > "kaggle-state/${{ matrix.leg }}"
+          else
+            echo run=true >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.plan.outputs.run == 'true'
+        run: python -m pip install --quiet kaggle
       - uses: actions/download-artifact@v8
-        if: steps.plan.outputs.legs != ''
+        if: steps.plan.outputs.run == 'true'
         with:
           name: dist-${{ needs.build.outputs.tree }}
           path: dist
       - id: wheel
-        if: steps.plan.outputs.legs != ''
+        if: steps.plan.outputs.run == 'true'
         continue-on-error: true  # an upload failure is Kaggle's, not the pull request's: reported as inconclusive
-        run: python .github/kaggle/wheel.py dist "${{ needs.build.outputs.tree }}"
-      - name: Run the kernels on Kaggle
-        if: env.GPU_BACKEND == 'kaggle' && steps.plan.outputs.legs != ''
+        run: python .github/kaggle/wheel.py dist "${{ needs.build.outputs.tree }}" --leg "${{ matrix.leg }}"
+      - name: Run the kernel on Kaggle
+        if: env.GPU_BACKEND == 'kaggle' && steps.plan.outputs.run == 'true'
         env:
-          LEGS: ${{ steps.plan.outputs.legs }}
           WHEEL_OUTCOME: ${{ steps.wheel.outcome }}
-          GH_TOKEN: ${{ github.token }}
-          PR: ${{ github.event.pull_request.number }}
           DATASET: ${{ steps.wheel.outputs.dataset }}
           WHEEL_SHA256: ${{ steps.wheel.outputs.sha256 }}
           EAGLE_REF: ${{ github.head_ref }}
+          LEG: ${{ matrix.leg }}
         run: |
-          leg() {  # cuda mode
-            python .github/kaggle/drive.py --cuda "$1" --mode "$2" \
+          if [ "$WHEEL_OUTCOME" != success ]; then
+            rc=3
+          else
+            sleep ${{ matrix.stagger }}  # let the first leg's push land before the second asks for a GPU slot
+            rc=0
+            python .github/kaggle/drive.py --cuda ${{ matrix.cuda }} --mode ${{ matrix.mode }} \
               --run-id "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" --eagle-ref "$EAGLE_REF" \
               --source wheel --dataset "$DATASET" --wheel-sha256 "$WHEEL_SHA256" \
-              --out "kaggle-out/cuda$1-$2" > "kaggle-cuda$1-$2.log" 2>&1
-          }
-          failed=""
-          unrun=""
-          note() {  # leg name, exit code: 3 = Kaggle never ran it
-            case "$2" in 0) touch "kaggle-pass/$1" ;; 3) unrun="$unrun $1" ;; *) failed="$failed $1" ;; esac
-          }
-          if [ "$WHEEL_OUTCOME" != success ]; then
-            unrun=" wheel-dataset"
-          else
-            for mode in tests notebooks; do  # the selected legs of one mode run side by side (two GPU sessions)
-              pids=""
-              for cuda in 12 13; do
-                case " $LEGS " in *" cuda$cuda-$mode "*) ;; *) continue ;; esac
-                [ -z "$pids" ] || sleep 90  # let the first push land before the second asks for a GPU slot
-                leg "$cuda" "$mode" & pids="$pids $cuda:$!"
-              done
-              for entry in $pids; do
-                rc=0; wait "${entry#*:}" || rc=$?; note "cuda${entry%%:*}-$mode" "$rc"
-              done
-            done
-            for f in kaggle-cuda*.log; do echo "::group::$f"; cat "$f"; echo "::endgroup::"; done
+              --out "kaggle-out/$LEG" || rc=$?
           fi
-          [ -z "$failed" ] || { echo "::error::failed:$failed"; exit 1; }
-          if [ -n "$unrun" ]; then
-            echo "::warning::INCONCLUSIVE: Kaggle did not run:$unrun"
-            echo "### GPU run INCONCLUSIVE: Kaggle did not run:$unrun (merging without it is the maintainer's call)" >> "$GITHUB_STEP_SUMMARY"
-            gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --add-label gpu-inconclusive || true
-          else
-            gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --remove-label gpu-inconclusive || true  # a later full run clears it
-          fi
+          case "$rc" in
+            0) echo pass > "kaggle-state/$LEG"; mkdir -p kaggle-pass; touch "kaggle-pass/$LEG" ;;
+            3) echo unrun > "kaggle-state/$LEG"
+               echo "::warning::INCONCLUSIVE: Kaggle did not run $LEG"
+               echo "### GPU run INCONCLUSIVE: Kaggle did not run $LEG (merging without it is the maintainer's call)" >> "$GITHUB_STEP_SUMMARY" ;;
+            *) echo fail > "kaggle-state/$LEG"; echo "::error::$LEG failed"; exit 1 ;;
+          esac
       - uses: actions/cache/save@v6
-        if: always() && steps.plan.outputs.legs != ''
+        if: always() && hashFiles('kaggle-pass/*') != ''
         with:
           path: kaggle-pass
-          key: kaggle-pass-${{ steps.memo.outputs.digest }}-${{ github.run_id }}-${{ github.run_attempt }}
-      - name: Delete the pull request's wheel dataset
+          key: kaggle-pass-${{ matrix.leg }}-${{ steps.memo.outputs.digest }}
+      - name: Delete the leg's wheel dataset
         if: always() && steps.wheel.outputs.dataset != ''
         run: kaggle datasets delete -y "${{ steps.wheel.outputs.dataset }}"
-      - name: Keep the kernel logs and results
+      - name: Keep the leg's state, kernel log and results
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: kaggle-gpu
+          name: kaggle-${{ matrix.leg }}
           path: |
+            kaggle-state
             kaggle-out
-            kaggle-cuda*.log
           if-no-files-found: warn
+
+  # The one required GPU check: red when a leg failed. Labels the pull request `gpu-inconclusive` when any leg did not
+  # run on Kaggle (inconclusive, cancelled, timed out); a run where every leg passed removes it.
+  kaggle:
+    needs: [kaggle-leg]
+    if: always() && needs.kaggle-leg.result != 'skipped'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: kaggle-*
+          merge-multiple: true
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          unrun=""
+          for leg in cuda12-tests cuda13-tests cuda12-notebooks cuda13-notebooks; do
+            state=$(cat "kaggle-state/$leg" 2>/dev/null || echo unrun)
+            echo "$leg: $state" | tee -a "$GITHUB_STEP_SUMMARY"
+            [ "$state" != unrun ] || unrun="$unrun $leg"
+          done
+          if [ -n "$unrun" ]; then
+            gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --add-label gpu-inconclusive
+          else
+            gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --remove-label gpu-inconclusive || true
+          fi
+          [ "${{ needs.kaggle-leg.result }}" != failure ] || { echo "::error::a GPU leg failed"; exit 1; }

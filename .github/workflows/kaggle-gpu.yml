@@ -11,8 +11,8 @@
 # on a machine whose driver is older than 580 is reported as a warning and a green job.
 #
 # Started by hand (workflow_dispatch) only, to test the published wheels (source pypi) or a git ref (source
-# git). Pull requests run the same kernels with their own wheel from release.yml (jobs kaggle-wheel, kaggle-gpu).
-# Both jobs use the `kaggle` environment (required reviewer) and the secret KAGGLE_API_TOKEN.
+# git). Pull requests run the same kernels with their own wheel from release.yml (job kaggle-leg, one per leg).
+# Both use the `kaggle` environment (required reviewer) and the secret KAGGLE_API_TOKEN.
 
 name: Kaggle GPU
 
