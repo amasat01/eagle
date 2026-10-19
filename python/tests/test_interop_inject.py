@@ -723,10 +723,12 @@ def test_jax_node_is_stream_ordered_and_retained(tmp_path_factory, monkeypatch, 
 
     cp = _cp()
     # JAX makes device 0 current on every call, so put the planes, the graph and
-    # the thread's current device on device 0 up front
-    previous = cp.cuda.runtime.getDevice()
-    request.addfinalizer(lambda: cp.cuda.runtime.setDevice(previous))
-    cp.cuda.Device(0).use()
+    # the thread's current device on device 0 for this test; CuPy's own device
+    # scope restores the previous device afterwards (a raw runtime.setDevice
+    # leaves CuPy's view of the current device behind, and later tests abort)
+    device = cp.cuda.Device(0)
+    device.__enter__()
+    request.addfinalizer(lambda: device.__exit__(None, None, None))
     n = 1 << 20
     x = cp.arange(n, dtype=cp.float64)
     w, y, z = cp.zeros(n), cp.zeros(n), cp.zeros(n)
