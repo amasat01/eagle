@@ -572,7 +572,8 @@ jobs:
   # paths, no `release` label) = pass. If Kaggle itself fails (the dataset upload, a kernel never started, the API), the
   # leg stays green and says INCONCLUSIVE, and the kaggle job labels the pull request `gpu-inconclusive`: merging
   # without the GPU run is the maintainer's call. A failing test or notebook is always red. A leg that passed is
-  # remembered (actions cache) under a digest of every file except .github/workflows, so a CI-only push skips it.
+  # remembered (actions cache) under a digest of the files a leg can read (not workflows, tools, top-level text or docs
+  # prose), so a push that changes only those skips it.
   # GPU_BACKEND (repository variable, default kaggle) picks the runner.
   kaggle-leg:
     needs: [build, kaggle-plan]
@@ -600,8 +601,10 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - id: memo
-        run: echo "digest=$(git ls-tree -r HEAD | grep -v $'\t.github/workflows/' | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+      - id: memo  # leaves out what no leg reads: workflows, tools, top-level text, and docs prose, styles and images
+        run: |
+          digest=$(git ls-tree -r HEAD | grep -vE $'\t(\\.github/workflows/|tools/|ThirdPartyLicenses/|[^/]+\\.(md|cff)$|LICENSE$|NOTICE$|docs/.*\\.(rst|md|css|js|html|svg|png|jpg)$)' | sha256sum | cut -c1-16)
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
       - id: pass
         uses: actions/cache/restore@v6
         with:
