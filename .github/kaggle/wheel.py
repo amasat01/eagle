@@ -3,10 +3,11 @@
 #
 # Puts the pull request's own raptor-eagle wheels (CPython 3.12 and newer, GIL builds, manylinux x86_64, from the build
 # job's dist folder; the kernel installs the one matching Kaggle's Python) into the private Kaggle dataset
-# USER/eagle-pr-wheel-<first 12 characters of the git tree hash>, with their SHA256SUMS lines beside them,
+# USER/eagle-pr-wheel-<first 12 characters of the git tree hash>[-<leg>], with their SHA256SUMS lines beside them,
 # creating the dataset the first time and a new version after that, and waits until the version is ready.
 # Prints `dataset=USER/SLUG` and `sha256=...` (of the shipped SHA256SUMS file) (also appended to $GITHUB_OUTPUT), which drive.py --source wheel takes.
 # Needs the `kaggle` package and KAGGLE_API_TOKEN. `--dry-run` stages the folder and touches nothing else.
+# The release workflow gives each Kaggle leg its own dataset (--leg) and deletes it when the leg ends.
 import argparse
 import hashlib
 import json
@@ -46,12 +47,13 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("dist", help="folder holding the wheels and SHA256SUMS")
     ap.add_argument("tree", help="git tree hash the wheel was built from")
+    ap.add_argument("--leg", default="", help="suffix for one leg's own dataset, e.g. cuda12-tests")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
     folder = pathlib.Path(tempfile.mkdtemp(prefix="kaggle_wheel_"))
     names, sha = stage(args.dist, folder)
     user = "USER" if args.dry_run else username()
-    slug = f"{SLUG}-{args.tree[:12]}"
+    slug = f"{SLUG}-{args.tree[:12]}" + (f"-{args.leg}" if args.leg else "")
     dataset = f"{user}/{slug}"
     (folder / "dataset-metadata.json").write_text(json.dumps(
         {"title": slug, "id": dataset, "licenses": [{"name": "other"}]}, indent=2) + "\n")
