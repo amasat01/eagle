@@ -7,6 +7,7 @@
 # creating the dataset the first time and a new version after that, and waits until the version is ready.
 # Prints `dataset=USER/SLUG` and `sha256=...` (of the shipped SHA256SUMS file) (also appended to $GITHUB_OUTPUT), which drive.py --source wheel takes.
 # Needs the `kaggle` package and KAGGLE_API_TOKEN. `--dry-run` stages the folder and touches nothing else.
+# The release workflow deletes the dataset when its Kaggle job ends.
 import argparse
 import hashlib
 import json

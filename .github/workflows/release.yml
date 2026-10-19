@@ -610,6 +610,9 @@ jobs:
           done
           for f in kaggle-cuda*.log; do echo "::group::$f"; cat "$f"; echo "::endgroup::"; done
           [ -z "$failed" ] || { echo "::error::failed:$failed"; exit 1; }
+      - name: Delete the pull request's wheel dataset
+        if: always() && steps.wheel.outputs.dataset != ''
+        run: kaggle datasets delete -y "${{ steps.wheel.outputs.dataset }}"
       - name: Keep the kernel logs and results
         if: always()
         uses: actions/upload-artifact@v7
