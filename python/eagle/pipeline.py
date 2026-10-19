@@ -493,18 +493,27 @@ class GraphPipeline:
         """
         fork = group._fork
         fork.fork()
-        siblings = len(group.members)
-        for i, member in enumerate(group.members):
-            branch = fork.branch(i)
-            before = self._core.capture_snapshot_nodes(branch)
-            with _wrap_external_stream(branch):
-                with sibling_context(siblings):
-                    run = member_runs[i]
-                    if run is not None:
-                        run.run(cp)
-                    else:
-                        member()
-            self._record_member_(before, branch, skippable=(run is not None))
+        try:
+            siblings = len(group.members)
+            for i, member in enumerate(group.members):
+                branch = fork.branch(i)
+                before = self._core.capture_snapshot_nodes(branch)
+                with _wrap_external_stream(branch):
+                    with sibling_context(siblings):
+                        run = member_runs[i]
+                        if run is not None:
+                            run.run(cp)
+                        else:
+                            member()
+                self._record_member_(before, branch, skippable=(run is not None))
+        except Exception:
+            # rejoin the branches so capture can end cleanly and the fork's
+            # streams are not freed while still part of an open capture
+            try:
+                fork.join()
+            except Exception:
+                pass
+            raise
         fork.join()
 
     def _prebuild_guarded(self, origin, step):

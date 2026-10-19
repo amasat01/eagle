@@ -223,3 +223,39 @@ def test_concurrent_write_conflict_check_allows_overlap_within_one_member():
     # a repeated twice inside member 0 (legal: a member's own launches
     # serialize with each other) alongside a disjoint member 1.
     _concurrent_write_conflict_check([[a, a], [b]])
+
+
+# --------------------------------------------------------------------------- #
+# 3. A member that raises during build must not leave the fork unsafe to free.
+# --------------------------------------------------------------------------- #
+_FAILED_BUILD_SCRIPT = """
+import gc
+import cupy as cp
+from eagle.pipeline import GraphPipeline
+
+a = cp.arange(64, dtype=cp.float64)
+o1 = cp.empty_like(a)
+
+
+def bad():
+    raise RuntimeError("boom")
+
+
+pipe = GraphPipeline()
+pipe.add_concurrent([lambda: cp.multiply(a, 2.0, out=o1), bad])
+try:
+    pipe.build()
+except RuntimeError as e:
+    err = e
+del pipe, err
+gc.collect()
+"""
+
+
+def test_failed_build_in_concurrent_group_tears_down_cleanly():
+    import subprocess
+    import sys
+
+    run = subprocess.run([sys.executable, "-c", _FAILED_BUILD_SCRIPT],
+                         capture_output=True, text=True, timeout=120)
+    assert run.returncode == 0, (run.returncode, run.stderr[-500:])

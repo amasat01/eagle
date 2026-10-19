@@ -691,7 +691,7 @@ class Graph:
                     "in planes; for this graph rebind the plan (bound.rebind) and build "
                     "the graph again")
             self._recorder.update({**(values or {}), **kw})
-            _counters.bump("rebinds")
+            _counters.bump("updates")
         return self
 
     def synchronize(self) -> Graph:
