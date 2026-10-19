@@ -17,6 +17,9 @@ import time
 
 HERE = pathlib.Path(__file__).resolve().parent
 POLL_SECONDS = 30
+START_SECONDS = 10 * 60  # a kernel still QUEUED after this is deleted and pushed again
+START_ATTEMPTS = 3
+UNRUN = 3  # exit code when Kaggle never ran the kernel (inconclusive, not a failure)
 LIMITS = {"tests": 75 * 60, "notebooks": 180 * 60}  # per kernel, by mode
 # PEP 440 (the public version grammar of packaging's VERSION_PATTERN, lower case): 0.6.2, 0.6.2rc1, 1!2.0.post1.dev3
 PEP440 = re.compile(r"^(?:\d+!)?\d+(?:\.\d+)*(?:(?:a|b|rc)\d+)?(?:\.post\d+)?(?:\.dev\d+)?$")
@@ -129,8 +132,36 @@ def push(cmd, wait=3600):
         if "successfully pushed" in out:
             return
         if "GPU session count" not in out or time.time() - t0 > wait:
-            raise SystemExit("kernel push failed: " + (out.strip().splitlines() or ["no output"])[-1])
+            print("kernel push failed: " + (out.strip().splitlines() or ["no output"])[-1], flush=True)
+            raise SystemExit(UNRUN)
         time.sleep(60)
+
+
+def slots_busy(kid):
+    """True while two other kernels of this account are RUNNING (Kaggle's GPU session limit)."""
+    out = kaggle("kernels", "list", "--mine", "--sort-by", "dateRun", "--page-size", "10", "--csv", check=False).stdout
+    refs = [line.split(",")[0] for line in out.splitlines()[1:] if line and not line.startswith(kid + ",")]
+    running = sum(state(kaggle("kernels", "status", ref, check=False).stdout) == "RUNNING" for ref in refs)
+    return running >= 2
+
+
+def start(kid, cmd):
+    """Push the kernel and wait until Kaggle starts it. Kaggle sometimes leaves a kernel QUEUED for hours; one still
+    queued after START_SECONDS while a GPU slot is free is deleted and pushed again, at most START_ATTEMPTS times."""
+    for attempt in range(1, START_ATTEMPTS + 1):
+        push(cmd)
+        t0 = time.time()
+        while time.time() - t0 < START_SECONDS:
+            time.sleep(POLL_SECONDS)
+            st = state(kaggle("kernels", "status", kid, check=False).stdout)
+            if st not in ("QUEUED", "NEW_SCRIPT", "UNKNOWN"):
+                return
+            if slots_busy(kid):  # queued behind the account's two GPU sessions: waiting, not stuck
+                t0 = time.time()
+        print(f"still queued after {START_SECONDS // 60} minutes (attempt {attempt}); deleting and pushing again", flush=True)
+        kaggle("kernels", "delete", "-y", kid, check=False)
+    print(f"Kaggle did not start the kernel in {START_ATTEMPTS} attempts", flush=True)
+    raise SystemExit(UNRUN)
 
 
 def fetch_result(outdir):
@@ -173,7 +204,7 @@ def main():
         return 0
     outdir.mkdir(parents=True, exist_ok=True)
     kid = meta["id"]
-    push(commands(folder, outdir, limit)[0])
+    start(kid, commands(folder, outdir, limit)[0])
     t0 = time.time()
     st = "UNKNOWN"
     while time.time() - t0 < limit:
