@@ -568,14 +568,21 @@ jobs:
   # One job behind the `kaggle` environment, so one approval runs everything: it puts the pull request's wheels in a
   # private Kaggle dataset, then runs the four T4 kernels two at a time (Kaggle allows two GPU sessions per account):
   # the CUDA 12 and 13 tests, then the CUDA 12 and 13 notebooks. Skipped (no GPU paths, no `release` label) = pass.
+  # If Kaggle itself fails (the dataset upload, a kernel never started, the API), the job stays green, says
+  # INCONCLUSIVE and labels the pull request `gpu-inconclusive`: merging without the GPU run is the maintainer's call.
+  # A failing test or notebook is always red. GPU_BACKEND (repository variable, default kaggle) picks the runner.
   kaggle:
     needs: [build, kaggle-plan]
     if: needs.kaggle-plan.outputs.run == 'true'
     runs-on: ubuntu-latest
     environment: kaggle
     timeout-minutes: 350  # tests take minutes, notebooks up to 180, plus up to 60 waiting for a GPU slot per wave
+    permissions:
+      contents: read
+      pull-requests: write  # the gpu-inconclusive label
     env:
       KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
+      GPU_BACKEND: ${{ vars.GPU_BACKEND || 'kaggle' }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -587,9 +594,14 @@ jobs:
           name: dist-${{ needs.build.outputs.tree }}
           path: dist
       - id: wheel
+        continue-on-error: true  # an upload failure is Kaggle's, not the pull request's: reported as inconclusive
         run: python .github/kaggle/wheel.py dist "${{ needs.build.outputs.tree }}"
       - name: Run the kernels on Kaggle
+        if: env.GPU_BACKEND == 'kaggle'
         env:
+          WHEEL_OUTCOME: ${{ steps.wheel.outcome }}
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
           DATASET: ${{ steps.wheel.outputs.dataset }}
           WHEEL_SHA256: ${{ steps.wheel.outputs.sha256 }}
           EAGLE_REF: ${{ github.head_ref }}
@@ -601,15 +613,30 @@ jobs:
               --out "kaggle-out/cuda$1-$2" > "kaggle-cuda$1-$2.log" 2>&1
           }
           failed=""
-          for mode in tests notebooks; do
-            leg 12 "$mode" & a=$!
-            sleep 90  # let the first push land before the second asks for a GPU slot
-            leg 13 "$mode" & b=$!
-            wait "$a" || failed="$failed cuda12-$mode"
-            wait "$b" || failed="$failed cuda13-$mode"
-          done
-          for f in kaggle-cuda*.log; do echo "::group::$f"; cat "$f"; echo "::endgroup::"; done
+          unrun=""
+          note() {  # leg name, exit code: 3 = Kaggle never ran it
+            case "$2" in 0) ;; 3) unrun="$unrun $1" ;; *) failed="$failed $1" ;; esac
+          }
+          if [ "$WHEEL_OUTCOME" != success ]; then
+            unrun=" wheel-dataset"
+          else
+            for mode in tests notebooks; do
+              leg 12 "$mode" & a=$!
+              sleep 90  # let the first push land before the second asks for a GPU slot
+              leg 13 "$mode" & b=$!
+              rc=0; wait "$a" || rc=$?; note "cuda12-$mode" "$rc"
+              rc=0; wait "$b" || rc=$?; note "cuda13-$mode" "$rc"
+            done
+            for f in kaggle-cuda*.log; do echo "::group::$f"; cat "$f"; echo "::endgroup::"; done
+          fi
           [ -z "$failed" ] || { echo "::error::failed:$failed"; exit 1; }
+          if [ -n "$unrun" ]; then
+            echo "::warning::INCONCLUSIVE: Kaggle did not run:$unrun"
+            echo "### GPU run INCONCLUSIVE: Kaggle did not run:$unrun (merging without it is the maintainer's call)" >> "$GITHUB_STEP_SUMMARY"
+            gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --add-label gpu-inconclusive || true
+          else
+            gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --remove-label gpu-inconclusive || true  # a later full run clears it
+          fi
       - name: Delete the pull request's wheel dataset
         if: always() && steps.wheel.outputs.dataset != ''
         run: kaggle datasets delete -y "${{ steps.wheel.outputs.dataset }}"
