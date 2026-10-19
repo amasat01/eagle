@@ -40,6 +40,9 @@ check() {
 check "documented performance numbers" "python tools/sync_readme_cards.py, then commit the result" \
   python tools/sync_readme_cards.py --check
 
+check "manifesto copy" "copy the Manifesto lines of raptor docs/content/principles.md between the manifesto markers" \
+  bash tools/manifesto_check.sh CONTRIBUTING.md
+
 if [ -f "$site/tools/sync_family_visuals.py" ]; then
   check "family visuals" "python tools/sync_family_visuals.py --site-root <site checkout> --eagle-root <eagle checkout> --target eagle=<this repo>, then commit docs/_static/family_visuals" \
     python "$site/tools/sync_family_visuals.py" --check --site-root "$site" --eagle-root . --target eagle=.

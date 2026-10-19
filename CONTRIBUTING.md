@@ -1,5 +1,17 @@
 # Contributing
 
+The manifesto behind [How we build](https://amasat01.github.io/raptor/content/principles.html):
+
+<!-- manifesto:begin -->
+Bloat is future technical debt.<br>
+Excessive abstraction hides reality.<br>
+Focus and clear boundaries promote flexibility and seamless integration.<br>
+Efficiency safeguards portability and scale.<br>
+Performance unlocks capabilities.<br>
+Rigor earns trust.<br>
+Simplicity enables discovery.
+<!-- manifesto:end -->
+
 Read [How we build](https://amasat01.github.io/raptor/content/principles.html) first: the twelve rules every pull request in the
 family is read against, plus the style, release and license terms.
 
