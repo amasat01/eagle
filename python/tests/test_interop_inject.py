@@ -715,13 +715,18 @@ def test_jax_node_refuses_planes_on_two_devices():
 
 
 @register_row("STREAM-JAX-INJECT-ORDER", leg="cuda")
-def test_jax_node_is_stream_ordered_and_retained(tmp_path_factory, monkeypatch):
+def test_jax_node_is_stream_ordered_and_retained(tmp_path_factory, monkeypatch, request):
     jax, spin, cycles_for = _jax_spin(tmp_path_factory)
     import jax.numpy as jnp
 
     from eagle.frameworks import jax as ej
 
     cp = _cp()
+    # JAX makes device 0 current on every call, so put the planes, the graph and
+    # the thread's current device on device 0 up front
+    previous = cp.cuda.runtime.getDevice()
+    request.addfinalizer(lambda: cp.cuda.runtime.setDevice(previous))
+    cp.cuda.Device(0).use()
     n = 1 << 20
     x = cp.arange(n, dtype=cp.float64)
     w, y, z = cp.zeros(n), cp.zeros(n), cp.zeros(n)
