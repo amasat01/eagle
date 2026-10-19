@@ -137,9 +137,17 @@ def push(cmd, wait=3600):
         time.sleep(60)
 
 
+def slots_busy(kid):
+    """True while two other kernels of this account are RUNNING (Kaggle's GPU session limit)."""
+    out = kaggle("kernels", "list", "--mine", "--sort-by", "dateRun", "--page-size", "10", "--csv", check=False).stdout
+    refs = [line.split(",")[0] for line in out.splitlines()[1:] if line and not line.startswith(kid + ",")]
+    running = sum(state(kaggle("kernels", "status", ref, check=False).stdout) == "RUNNING" for ref in refs)
+    return running >= 2
+
+
 def start(kid, cmd):
     """Push the kernel and wait until Kaggle starts it. Kaggle sometimes leaves a kernel QUEUED for hours; one still
-    queued after START_SECONDS is deleted and pushed again, at most START_ATTEMPTS times."""
+    queued after START_SECONDS while a GPU slot is free is deleted and pushed again, at most START_ATTEMPTS times."""
     for attempt in range(1, START_ATTEMPTS + 1):
         push(cmd)
         t0 = time.time()
@@ -148,6 +156,8 @@ def start(kid, cmd):
             st = state(kaggle("kernels", "status", kid, check=False).stdout)
             if st not in ("QUEUED", "NEW_SCRIPT", "UNKNOWN"):
                 return
+            if slots_busy(kid):  # queued behind the account's two GPU sessions: waiting, not stuck
+                t0 = time.time()
         print(f"still queued after {START_SECONDS // 60} minutes (attempt {attempt}); deleting and pushing again", flush=True)
         kaggle("kernels", "delete", "-y", kid, check=False)
     print(f"Kaggle did not start the kernel in {START_ATTEMPTS} attempts", flush=True)
