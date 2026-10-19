@@ -103,7 +103,7 @@ class ReverseCtx:
     them with :meth:`add`. ``backend`` is ``"cpu"`` or ``"gpu"``."""
 
     __slots__ = ("backend", "label", "vjp", "_primal", "_steps", "inexact", "_gate",
-                 "_recorded", "_written", "reads")
+                 "_recorded", "_written", "reads", "comp")
 
     def __init__(self, backend, label, vjp, primal, recorded=None, written=None, reads=()):
         self.backend = backend
@@ -116,6 +116,9 @@ class ReverseCtx:
         self._recorded = recorded
         self._written = written
         self.reads = frozenset(reads)
+        #: ``{id(rows): companion rows}`` of the adjoints that arrive as rows
+        #: of per-32-sample partial sums (finished by the reverse)
+        self.comp = {}
 
     def primal(self, name):
         """The value the node read for plane ``name`` in the recorded launch."""
@@ -285,9 +288,12 @@ class Reverse:
     (same inputs, same outputs; row-wise; writes only its declared planes; the
     weights untouched until the reverse returns), and the node's planes are
     eagle's scratch until the reverse returns them restored. Your model's own parameter gradients are
-    yours to accumulate (``p.grad += ...``) across reverses. ``strict=True``
-    refuses a gradient that is not bit-reproducible (one fed by a
-    cross-sample scatter-add) instead of reporting it.
+    yours to accumulate (``p.grad += ...``) across reverses. ``policy`` is the
+    :func:`eagle.reduce` policy of the sums over samples eagle inserts
+    (``"compensated"`` by default; ``report.bitwise`` is True for such a
+    gradient only under ``"ordered"``). ``strict=True`` sums with
+    ``"ordered"`` and refuses a gradient that is not bit-reproducible (one fed
+    by a cross-sample scatter-add) instead of reporting it.
 
     Example::
 
@@ -298,8 +304,13 @@ class Reverse:
             grads = rev(sim.record, {"x": dJ_dx})
     """
 
-    def __init__(self, forward, *, vjps=None, strict=False):
+    def __init__(self, forward, *, vjps=None, strict=False, policy="compensated"):
         door = "eagle.diff.Reverse"
+        from .._graph_reduce import POLICIES
+
+        if policy not in POLICIES:
+            raise ValueError(f"{door}: policy {policy!r} is not one of {sorted(POLICIES)}")
+        self._policy = "ordered" if strict else policy
         if isinstance(forward, Record):
             raise TypeError(f"{door}: takes what ran the forward (Reverse(sim) or "
                             "Reverse(g)); the Record goes to the call: rev(sim.record, seeds)")
@@ -321,7 +332,7 @@ class Reverse:
                         "vjp(primals, cotangents) for now (a captured backward as a run's "
                         "node vjp is not supported yet)")
             self._graph = recorder.owner
-            self._run = RunReverse(recorder, door, dict(vjps or {}))
+            self._run = RunReverse(recorder, door, dict(vjps or {}), POLICIES[self._policy])
             self._strict = bool(strict)
             return
         graph = forward
@@ -489,6 +500,7 @@ class _Program:
             return zeros[k]
 
         out, taint = {}, {}
+        self.comp = {}
 
         def source(s, key):
             if s == _core.DIFF_SEED:
@@ -509,6 +521,11 @@ class _Program:
                 dst = xp.empty_like(arrays[0])
                 g.add_node(opaque(_ordered_sum(dst, arrays), reads=arrays, writes=[dst]),
                            name=f"sum({plane})")
+                if any(id(a) in self.comp for a in arrays):     # rows: their companions add too
+                    los = [self.comp.get(id(a), zero(plane)) for a in arrays]
+                    self.comp[id(dst)] = lo = xp.empty_like(dst)
+                    g.add_node(opaque(_ordered_sum(lo, los), reads=los, writes=[lo]),
+                               name=f"sum({plane}, comp)")
                 out[(r, plane)] = dst
                 taint[(r, plane)] = next((t for _, t in parts if t), None)
                 continue
@@ -537,6 +554,7 @@ class _Program:
             ctx = ReverseCtx(backend, leaf.label, rev._vjp.get(fwd), primal, recorded, written,
                              [n for n, _k in reads])
             result = get_node_kind(leaf.node.kind).transpose(leaf.node, incoming, ctx)
+            self.comp.update(ctx.comp)
             for step in ctx._steps:
                 if hasattr(step, "_arg_spec"):
                     g._add_derived(step, _DERIVED_DOOR, name=f"vjp({leaf.label})")
@@ -559,12 +577,17 @@ class _Program:
                     "to run; drop strict=True to accept it (grads.report.bitwise "
                     "marks it)")
             self.bitwise[key] = origin is None
-            if arr.shape != tape.arrays[key].shape:   # per-sample terms of one parameter
-                arr = self._sample_order_step(g, arr)
+            lo = self.comp.get(id(arr))
+            if lo is not None or arr.shape != tape.arrays[key].shape:
+                # one parameter's partial sums (rows of 32 samples) or per-sample terms
+                self.bitwise[key] = origin is None and rev._policy == "ordered"
+                if lo is None:
+                    arr = self._sample_order_step(g, arr)
                 total = xp.empty(1, dtype=arr.dtype)
                 from .._graph_reduce import reduce
 
-                g.add_node(reduce(arr, total), name=f"sum({rev._inputs.get(key, key)})")
+                g.add_node(reduce(arr, total, comp=lo, policy=rev._policy),
+                           name=f"sum({rev._inputs.get(key, key)})")
                 self.reduced[key] = total
             else:
                 self.grads[key] = arr
@@ -622,7 +645,7 @@ def _ordered_sum(dst, arrays):
     return step
 
 
-def reverse(record, seeds, *, wrt=None, vjps=None, strict=False) -> Gradients:
+def reverse(record, seeds, *, wrt=None, vjps=None, strict=False, policy="compensated") -> Gradients:
     """The gradients of one recorded forward, in one call:
     ``grads = eagle.diff.reverse(sim.record, seeds={"x": dJ_dx})``.
 
@@ -644,4 +667,4 @@ def reverse(record, seeds, *, wrt=None, vjps=None, strict=False) -> Gradients:
     if not isinstance(record, Record):
         raise TypeError("eagle.diff.reverse: expected a Record (the .record of a "
                         f"record=True forward), got {type(record).__name__}")
-    return Reverse(record.forward, vjps=vjps, strict=strict)(record, seeds, wrt=wrt)
+    return Reverse(record.forward, vjps=vjps, strict=strict, policy=policy)(record, seeds, wrt=wrt)

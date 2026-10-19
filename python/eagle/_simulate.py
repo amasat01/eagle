@@ -37,7 +37,9 @@ from __future__ import annotations
 import inspect
 import time
 
+from . import _cell_rows
 from ._busy import BusyGuard
+from ._plan_planes import _plane_dtype
 from ._compat import zip_strict
 from ._until_done import (
     refuse_derived,
@@ -502,7 +504,7 @@ class Simulation:
     ``state``/``params``/``allocated`` plane names."""
 
     __slots__ = ("_busy", "runner", "loop", "plans", "n", "names", "active", "finished",
-                 "terminated", "every", "_state", "_device", "_xp")
+                 "terminated", "every", "_state", "_device", "_xp", "_cells")
 
     def __init__(self, model, args, kwargs, *, until=None, max_steps,
                  every=None, reorder=None, scalar_type=None, layout=None,
@@ -527,6 +529,8 @@ class Simulation:
         mask, compacting = _guards(plans, kernels, names)
         kname = names[0]
         order = _declared_order(plans, kernels, decl)
+        rowset = frozenset().union(*(_cell_rows.row_planes(p.plugin) for p in plans))
+        order = [nm for nm in order if nm not in rowset]
         _check_positional_needs_a_raw_kernel(kernels, order, args)
         _check_old_keywords(kname, order, kwargs)
         _check_option_collision(decl)
@@ -571,9 +575,15 @@ class Simulation:
             final[nm] = xp.zeros(shape, dtype=_dtype(xp, selected[0], nm, decl))
             allocated.append(nm)
         final[mask] = xp.zeros(() if single else (n,), dtype=xp.bool_)
+        # a reduction over samples: the rows are eagle's scratch, the cell is returned
+        self._cells = [c for c in (_cell_rows.scratch(p.plugin, n, xp, _plane_dtype(p.plugin))
+                                   for p in plans) if c is not None]
+        for c in self._cells:
+            final.update(c.rows)
         self._state = {nm: v for nm, v in final.items() if decl[nm][0] in STATE_ROLES}
         self.terminated = final[mask]
-        self.names = {"state": tuple(nm for nm in self._state if nm not in allocated),
+        self.names = {"state": tuple(nm for nm in self._state
+                                     if nm not in allocated and nm not in rowset),
                       "params": tuple(nm for nm in final
                                       if decl[nm][0] not in STATE_ROLES),
                       "allocated": tuple(allocated)}
@@ -642,7 +652,13 @@ class Simulation:
             # still queue work after its read (a reordering set's restore)
             self._xp.cuda.Device().synchronize()
         wall = time.perf_counter() - t0
-        return SimResult(state=self._state, finished=self.terminated, report=report,
+        state = self._state
+        if self._cells:
+            state = {nm: a for nm, a in state.items()
+                     if not any(nm in c.rows and nm not in c.cell for c in self._cells)}
+            for c in self._cells:
+                state.update(c.finish())
+        return SimResult(state=state, finished=self.terminated, report=report,
                          wall_s=wall, allocated=self.names["allocated"],
                          record=self.runner.record, t_stop=getattr(self.runner, "t_stop", None),
                          event_status=getattr(self.runner, "event_status", None))

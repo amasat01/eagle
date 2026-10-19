@@ -168,6 +168,13 @@ inline void ck(eagle_backend_status status)
 #define EB(group, sym) EAGLE_SEAM_FN(group, sym)
 #define EBX(sym) EAGLE_SEAM_XFN(sym)
 
+/** @brief A raw host pointer as an ``in(i)`` accessor of the canonical tree. */
+template <class T>
+struct HostPtr {
+    const T* p;
+    T operator()(eagle::idx_t i) const { return p[i]; }
+};
+
 /** @brief A zero-filled, size-prefixed desc naming device @p device. */
 template <class D>
 D makeDesc(std::int32_t device)
@@ -727,49 +734,70 @@ NB_MODULE(_core, m)
 
     // -- canonical reduction (eagle/reduce/canonical.h): host tree + device seam symbol --
     m.def("reduce_canonical_host",
-        [](std::uintptr_t in, std::int64_t n, std::uint32_t dtype, std::uint32_t op, std::uintptr_t out) {
-            if (n < 1)
-                throw std::invalid_argument("reduce_canonical_host: n must be >= 1");
+        [](std::uintptr_t in, std::int64_t n, std::uint32_t dtype, std::uint32_t op, std::uintptr_t out,
+            std::int64_t columns, std::uintptr_t comp, bool pair) {
+            if (n < 1 || columns < 1)
+                throw std::invalid_argument("reduce_canonical_host: n and columns must be >= 1");
             if (op > EAGLE_BACKEND_REDUCE_OP_ALL || dtype > EAGLE_BACKEND_REDUCE_U8
                 || (op == EAGLE_BACKEND_REDUCE_OP_ALL) != (dtype == EAGLE_BACKEND_REDUCE_U8))
                 throw std::invalid_argument("reduce_canonical_host: unknown dtype/op, or U8 not paired with OP_ALL");
+            const bool fsum = op == EAGLE_BACKEND_REDUCE_OP_SUM
+                && (dtype == EAGLE_BACKEND_REDUCE_F32 || dtype == EAGLE_BACKEND_REDUCE_F64);
+            if ((comp != 0 || pair) && !fsum)
+                throw std::invalid_argument("reduce_canonical_host: comp and pair take a float32/float64 sum");
             namespace canon = eagle::reduce::canonical;
+            auto columnsOf = [&](auto tag, auto opTag) {
+                using T  = decltype(tag);
+                using OP = decltype(opTag);
+                const auto cols = eagle::idx_t(columns), rows = eagle::idx_t(n);
+                auto* o = reinterpret_cast<T*>(out);
+                for (eagle::idx_t j = 0; j < cols; ++j) {
+                    const canon::Column<HostPtr<T>> x{ { reinterpret_cast<const T*>(in) }, cols, j };
+                    canon::Partial<T, OP> p;
+                    if constexpr (canon::compensated_v<T, OP>) {
+                        if (comp != 0) {
+                            const canon::Column<HostPtr<T>> c{ { reinterpret_cast<const T*>(comp) }, cols, j };
+                            p = canon::partialRange<T, OP>(x, 0, rows, c);
+                        } else {
+                            p = canon::partialRange<T, OP>(x, 0, rows);
+                        }
+                        if (pair) {
+                            o[j]        = p.h;
+                            o[cols + j] = p.c;
+                            continue;
+                        }
+                    } else {
+                        p = canon::partialRange<T, OP>(x, 0, rows);
+                    }
+                    o[j] = p.value();
+                }
+            };
             const bool sum = op == EAGLE_BACKEND_REDUCE_OP_SUM;
-            auto go = [&](auto tag, auto sumOp, auto maxOp) {
+            auto go = [&](auto tag) {
                 using T = decltype(tag);
-                struct Ptr {
-                    const T* p;
-                    T operator()(eagle::idx_t i) const { return p[i]; }
-                } src{ reinterpret_cast<const T*>(in) };
-                *reinterpret_cast<T*>(out) = sum ? canon::reduce<T, decltype(sumOp)>(src, n)
-                                                 : canon::reduce<T, decltype(maxOp)>(src, n);
+                sum ? columnsOf(tag, aether::SumOp<T>{}) : columnsOf(tag, aether::MaxOp<T>{});
             };
             switch (dtype) {
-            case EAGLE_BACKEND_REDUCE_F32: go(float{}, aether::SumOp<float>{}, aether::MaxOp<float>{}); break;
-            case EAGLE_BACKEND_REDUCE_F64: go(double{}, aether::SumOp<double>{}, aether::MaxOp<double>{}); break;
-            case EAGLE_BACKEND_REDUCE_I32:
-                go(std::int32_t{}, aether::SumOp<std::int32_t>{}, aether::MaxOp<std::int32_t>{});
-                break;
-            case EAGLE_BACKEND_REDUCE_I64:
-                go(std::int64_t{}, aether::SumOp<std::int64_t>{}, aether::MaxOp<std::int64_t>{});
-                break;
-            default: {
-                struct Ptr8 {
-                    const std::uint8_t* p;
-                    std::uint8_t operator()(eagle::idx_t i) const { return p[i]; }
-                } src{ reinterpret_cast<const std::uint8_t*>(in) };
-                *reinterpret_cast<std::uint8_t*>(out) = canon::reduce<std::uint8_t, aether::LogicalAndOp>(src, n);
-            }
+            case EAGLE_BACKEND_REDUCE_F32: go(float{}); break;
+            case EAGLE_BACKEND_REDUCE_F64: go(double{}); break;
+            case EAGLE_BACKEND_REDUCE_I32: go(std::int32_t{}); break;
+            case EAGLE_BACKEND_REDUCE_I64: go(std::int64_t{}); break;
+            default: columnsOf(std::uint8_t{}, aether::LogicalAndOp{});
             }
         },
-        nb::arg("in"), nb::arg("n"), nb::arg("dtype"), nb::arg("op"), nb::arg("out"),
-        "The canonical fixed-order reduction (leaf blocks of 256, then pairwise levels) of `n` host "
-        "elements at address `in` into the one element at `out`. dtype: 0 f32, 1 f64, 2 i32, 3 i64, "
-        "4 u8 (OP_ALL only); op: 0 sum, 1 max, 2 all. Bitwise independent of the OpenMP thread count.");
+        nb::arg("in"), nb::arg("n"), nb::arg("dtype"), nb::arg("op"), nb::arg("out"), nb::arg("columns") = 1,
+        nb::arg("comp") = 0, nb::arg("pair") = false,
+        "The canonical fixed-order reduction (leaves of 256 slots by 16 strided samples, an in-leaf "
+        "tree, then pairwise levels) of each column of the row-major (n, columns) host plane at "
+        "`in` into out[column]. dtype: 0 f32, 1 f64, 2 i32, 3 i64, 4 u8 (OP_ALL only); op: 0 sum, "
+        "1 max, 2 all. Float sums: `comp` is the companion plane (each term is in + comp) and "
+        "`pair` writes hi[columns] then comp[columns] unrounded. The host runs the ordered policy "
+        "for every policy; bitwise independent of the OpenMP thread count.");
 
     m.def("reduce_canonical_device",
         [](std::uintptr_t in, std::int64_t n, std::uint32_t dtype, std::uint32_t op, std::uintptr_t out,
-            std::uintptr_t work_a, std::uintptr_t work_b, std::uintptr_t stream, std::int32_t device) {
+            std::uintptr_t work_a, std::uintptr_t work_b, std::uintptr_t stream, std::int32_t device,
+            std::uint32_t policy, std::int64_t columns, std::uintptr_t comp, bool pair) {
             auto d = makeDesc<eagle_backend_reduce_desc>(device);
             d.dtype = dtype;
             d.op = op;
@@ -779,15 +807,22 @@ NB_MODULE(_core, m)
             d.work_b = work_b;
             d.n = n;
             d.stream = stream;
+            d.policy = policy;
+            d.flags = pair ? EAGLE_BACKEND_REDUCE_PAIR_OUT : 0u;
+            d.columns = columns;
+            d.comp_in = comp;
             ck(EBX(eagle_backend_x_reduce_canonical)(&d));
             return static_cast<std::int64_t>(d.work_elems);
         },
         nb::arg("in"), nb::arg("n"), nb::arg("dtype"), nb::arg("op"), nb::arg("out"), nb::arg("work_a"),
         nb::arg("work_b"), nb::arg("stream") = 0, nb::arg("device") = -1,
-        "The same canonical reduction on the device (experimental at the seam: "
+        nb::arg("policy") = EAGLE_BACKEND_REDUCE_ORDERED, nb::arg("columns") = 1, nb::arg("comp") = 0,
+        nb::arg("pair") = false,
+        "The same reduction on the device (experimental at the seam: "
         "`eagle_backend_x_reduce_canonical`), enqueued on `stream` and capturable. With `work_a == 0` "
         "nothing is enqueued and the return value is the element count EACH of the two work buffers "
-        "must hold; otherwise it returns 0. The result equals `reduce_canonical_host` bit for bit.");
+        "must hold; otherwise it returns 0. policy: 0 compensated, 1 ordered, 2 auto (float sums; "
+        "the rest are exact). Under ordered the result equals `reduce_canonical_host` bit for bit.");
 
     m.def("run_device",
         [](std::uintptr_t function, const std::vector<std::uintptr_t>& params,
@@ -2126,17 +2161,21 @@ NB_MODULE(_core, m)
         "Samples per reverse pass under a byte budget: n when all fit, else the largest "
         "leaf * 2^q that fits, 0 when not even one leaf block fits.");
     m.def("diff_combine_chunks",
-        [](std::vector<double> partials, std::uint32_t dtype) -> double {
+        [](const std::vector<std::pair<double, double>>& partials, std::uint32_t dtype) -> double {
             if (partials.empty()) throw std::invalid_argument("diff_combine_chunks: no partials");
-            if (dtype == EAGLE_BACKEND_REDUCE_F32) {
-                std::vector<float> f(partials.begin(), partials.end());
-                return eagle::reduce::canonical::combine<float, aether::SumOp<float>>(f);
-            }
-            return eagle::reduce::canonical::combine<double, aether::SumOp<double>>(partials);
+            namespace canon = eagle::reduce::canonical;
+            auto go = [&](auto tag) -> double {
+                using T = decltype(tag);
+                std::vector<canon::Partial<T, aether::SumOp<T>>> p;
+                for (const auto& [h, c] : partials)
+                    p.push_back({ T(h), T(c) });
+                return double(canon::combine(std::move(p)).value());
+            };
+            return dtype == EAGLE_BACKEND_REDUCE_F32 ? go(float{}) : go(double{});
         },
         nb::arg("partials"), nb::arg("dtype"),
-        "The canonical pairwise combine of per-pass sums (in pass order): bitwise the "
-        "unchunked canonical sum when every pass but the last holds leaf * 2^q samples.");
+        "The canonical pairwise combine of per-pass (hi, comp) partials (in pass order): "
+        "bitwise the unchunked canonical sum when every pass but the last holds leaf * 2^q samples.");
     // -- per-sample event refinement (eagle/events) --
     // args = (n, g, dg, gbar, a, b, c, scalars): address lists, scalars =
     // (terminated, applied, t0, h, status, which, tau, lo, hi, t_stop), 0 = unused.

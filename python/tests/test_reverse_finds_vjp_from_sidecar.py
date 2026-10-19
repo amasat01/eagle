@@ -120,7 +120,8 @@ def test_a_prebuilt_vjp_plugin_runs_alone_but_is_refused_in_a_graph(hand_built):
     eagle.plan.auto(vp)   # a plan of its own
     x = np.zeros(N)
     bound = eagle.plan.plan(vp, structure=HostTeam).bind(
-        x=x, a=np.ones(1), bar_y=x.copy(), bar_x=x.copy(), bar_a=x.copy())
+        x=x, a=np.ones(1), bar_y=x.copy(), bar_x=x.copy(), bar_a=x.copy(),
+        **{n: x.copy() for _r, n in vp.arg_spec if n == "bar_a_comp"})
     with pytest.raises(ValueError, match="is a vjp derivative kernel of 'rv_square_params'"
                                          ".*enters those only through eagle.diff"):
         eagle.Graph().add(bound)

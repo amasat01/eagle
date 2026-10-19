@@ -36,7 +36,8 @@ def test_reverse_matches_central_differences(tmp_path, backend, make, out):
     dx, da = central_difference(make, ps, x, a, seed)
     np.testing.assert_allclose(_host(grads["x"]), _host(dx), rtol=1e-6, atol=1e-8)
     np.testing.assert_allclose(float(grads["a"]), da, rtol=1e-6)
-    assert grads.report.bitwise == {"x": True, "a": True}
+    # a parameter's sum over samples is bitwise only under the ordered policy
+    assert grads.report.bitwise == {"x": True, "a": False}
 
 
 def test_fork_join_sums_both_branches_into_x(tmp_path):

@@ -47,7 +47,7 @@ FUSED_STEPS = "fused_steps"
 _STATE = ("mutable", "terminated")
 _EPOCH = "slot_samples"   # a checkpoint's slot -> sample map, when compaction reorders
 _NEXT = "_next"      # hawk.diff.step_vjp's naming contract (bar_<plane>_next)
-_LEAF = 256          # the canonical reduction's leaf block (eagle/reduce/canonical.h)
+_LEAF = 4096         # the canonical reduction's leaf (eagle/reduce/canonical.h)
 
 # Module-level so a row can plant a wrong chunking or combine and see it fail.
 _chunk_samples = _core.diff_chunk_samples
@@ -497,9 +497,10 @@ class RunReverse:
     pass of ``m`` samples, the recompute twin bound over them, the vjp bound
     once per (tape row, adjoint buffer parity), the gradient buffers."""
 
-    def __init__(self, recorder, door, vjps=None):
+    def __init__(self, recorder, door, vjps=None, policy=1):
         from ..plan import plan as make_plan
 
+        self.policy = policy    # core code of the parameter sums (eagle.reduce policies)
         self.rec = rec = recorder
         labels = [node.label for node, _r, _w in rec.nodes]
         vjps = vjps or {}
@@ -520,7 +521,8 @@ class RunReverse:
         xp, n, W = rec.xp, rec.n, rec.window
         k = rec.kernels
         per = rec.per_sample_bytes()
-        m = int(_chunk_samples(rec.budget, per, n, _LEAF))
+        leaf = _LEAF if self.policy == 1 else 1     # only ordered keeps gradients bitwise per leaf
+        m = int(_chunk_samples(rec.budget, per, n, leaf))
         if m == 0:
             windows = -(-rec.runner._max_steps // W)
             if per > rec.budget:
@@ -706,7 +708,7 @@ class RunReverse:
                 if nm in self.summed:
                     sample = xp.empty(cnt, dtype=acc.dtype)
                     sample[xp.asarray(order)] = acc[:cnt]
-                    partials[nm].append(self._sum(sample))
+                    partials[nm].append(self._sum(sample, pair=True))
                 else:
                     flat(per[nm], n)[:, cols] = flat(acc, m)[:, :cnt]
         values = {}
@@ -820,20 +822,24 @@ class RunReverse:
             out.append(inv[cols])
         return out
 
-    def _sum(self, x):
-        """The canonical sum of ``x`` (one pass, sample order) as a float."""
+    def _sum(self, x, pair=False):
+        """The canonical sum of ``x`` (one pass, sample order) as a float, or
+        its unrounded (hi, comp) partial with ``pair``."""
         code = 1 if x.dtype == numpy.float64 else 0
+        n2 = 2 if pair else 1
         if self.rec.device:
-            work = int(_core.reduce_canonical_device(0, x.size, code, 0, 0, 0, 0, 0, -1))
+            work = int(_core.reduce_canonical_device(0, x.size, code, 0, 0, 0, 0, 0, -1, self.policy))
             wa, wb = (self.xp.empty(max(work, 1), dtype=x.dtype) for _ in range(2))
-            res = self.xp.empty(1, dtype=x.dtype)
+            res = self.xp.empty(n2, dtype=x.dtype)
             stream = int(self.xp.cuda.get_current_stream().ptr)
             _core.reduce_canonical_device(int(x.data.ptr), x.size, code, 0, int(res.data.ptr),
-                                          int(wa.data.ptr), int(wb.data.ptr), stream, -1)
-            return float(res.get()[0])
-        res = numpy.empty(1, dtype=x.dtype)
-        _core.reduce_canonical_host(x.ctypes.data, x.size, code, 0, res.ctypes.data)
-        return float(res[0])
+                                          int(wa.data.ptr), int(wb.data.ptr), stream, -1,
+                                          self.policy, 1, 0, pair)
+            res = res.get()
+        else:
+            res = numpy.empty(n2, dtype=x.dtype)
+            _core.reduce_canonical_host(x.ctypes.data, x.size, code, 0, res.ctypes.data, 1, 0, pair)
+        return (float(res[0]), float(res[1])) if pair else float(res[0])
 
     def _plans(self, addr):
         rows = lambda a: max(int(a.size) // self.m, 1)

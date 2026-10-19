@@ -29,7 +29,7 @@ from __future__ import annotations
 import threading
 from pathlib import Path
 
-from ._kernel_planes import Signature
+from ._kernel_planes import Signature, promote
 
 __all__ = ["LOCK", "Level", "finished_identity", "plane_names"]
 
@@ -106,7 +106,8 @@ class Level:
 
                 fn = jvp if which == "jvp" else vjp
                 derivative = fn(self.kernel, wrt=wrt)
-                level = Level(Kernel(f"{self.name}_{which}", derivative), kind=which,
+                # a cell's seed is a scalar in the derivative: a one-cell plane here
+                level = Level(promote(Kernel(f"{self.name}_{which}", derivative)), kind=which,
                               base=self, who=self.who, label=f"{self.label}_{which}")
                 self._derived[which] = level
             return level

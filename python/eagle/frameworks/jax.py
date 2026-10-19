@@ -71,7 +71,7 @@ import numpy as np
 from jax import extend as jex
 from jax.interpreters import ad, batching, mlir
 
-from .. import FINISHED_PLANE
+from .. import FINISHED_PLANE, _cell_rows
 from ._kernel_planes import FUSED_STEPS, SAMPLE_ROLES, call_mode, promote
 from ._tower import LOCK, Level, finished_identity
 
@@ -251,11 +251,11 @@ def _stepped(owner):
                 res.append(None)
                 continue
             g = out[back.sig.outputs.index(g_name)]
-            if mask is not None:
+            if mask is not None and g_name not in back.sig.cells:
                 g = (finished_identity(jnp.where, mask, after[name], g) if name in sig.state
                      else jnp.where(mask, jnp.zeros_like(g), g))
-            if tuple(g.shape) != tuple(a.shape):
-                g = jnp.sum(g).reshape(a.shape)      # a cell's gradient: the batch sum
+            if tuple(g.shape) != tuple(a.shape):    # a cell arrives finished (hawk main: per-sample terms)
+                g = (g if g_name in back.sig.cells else jnp.sum(g)).reshape(a.shape)
             res.append(g.astype(a.dtype))
         return tuple(res)
 
@@ -400,7 +400,11 @@ class _Prim:
         mode, n = self._mode_n(ctx.avals_in)
         digest = _register(self.level, self.owner, platform, mode)
         conv = _convention(self.sig)
-        shapes = [jax.ShapeDtypeStruct(self.sig.shape(r, n), self.sig.dtype(r, mode))
+        nrows = -(-n // _cell_rows.ROW)
+        # the rows sit in the first ``nrows`` of an n-sample plane (the handler sizes every
+        # per-sample slot at n)
+        shapes = [jax.ShapeDtypeStruct((n,) if r in self.sig.rows else self.sig.shape(r, n),
+                                       self.sig.dtype(r, mode))
                   for r in conv["results"]]
         call = jax.ffi.ffi_call(TARGET, shapes, input_output_aliases=conv["aliases"] or None)
 
@@ -410,7 +414,11 @@ class _Prim:
                 # little-endian int32 halves, since without x64 JAX has no int64
                 operands = (*operands, jnp.asarray([1, 0], np.int32))
             out = call(*operands, digest=digest)
-            return [out[i] for i in conv["visible"]]
+            return [_finish(self.sig.cells[o], out[conv["rows"][o][0]][:nrows],
+                            None if conv["rows"][o][1] is None
+                            else out[conv["rows"][o][1]][:nrows])
+                    if o in conv["rows"] else out[i]
+                    for o, i in zip(self.sig.outputs, conv["visible"])]
 
         return mlir.lower_fun(run, multiple_results=True)(ctx, *args)
 
@@ -497,8 +505,8 @@ class _Prim:
                 res.append(ad.Zero(aval))
                 continue
             g = grads[reverse.sig.outputs.index(g_name)]
-            if tuple(g.shape) != tuple(aval.shape):
-                g = jnp.sum(g).reshape(aval.shape)       # a cell's gradient: the batch sum
+            if tuple(g.shape) != tuple(aval.shape):   # a cell arrives finished (hawk main: per-sample terms)
+                g = (g if g_name in reverse.sig.cells else jnp.sum(g)).reshape(aval.shape)
             res.append(g.astype(aval.dtype))
         return res
 
@@ -506,8 +514,9 @@ class _Prim:
     def _batch(self, args, dims):
         sig = self.sig
         size = next(a.shape[d] for a, d in zip(args, dims) if d is not None)
-        if any(d is not None and sig.is_cell(n)
-               for n, d in zip(sig.inputs, dims)):
+        # a batched cell input, or a cell output (a sum over the folded samples), cannot fold
+        if sig.cells or any(d is not None and sig.is_cell(n)
+                            for n, d in zip(sig.inputs, dims)):
             moved = [jnp.moveaxis(a, d, 0) if d is not None else None
                      for a, d in zip(args, dims)]
 
@@ -545,6 +554,13 @@ def _carried(sig):
     return sig.state
 
 
+def _finish(op, rows, comp):
+    """The (1,) cell of a reduction over samples from its rows (and companions)."""
+    if op in ("sum", "mean"):
+        return (jnp.sum(rows) + jnp.sum(comp)).reshape(1)
+    return (jnp.max(rows) if op == "max" else jnp.min(rows)).reshape(1)
+
+
 def _convention(sig):
     """Operands, FFI results, the visible results and the mask alias of ``sig``:
     operands = its inputs; results = its output planes, then the
@@ -553,14 +569,18 @@ def _convention(sig):
     zeroed: a sample the kernel does not write (a terminated one) keeps its input
     value. A pure output is zero where the kernel does not write."""
     planes = [o for o in sig.outputs if o != sig.terminated or not sig.finishes]
+    planes += sorted(sig.rows - set(sig.cells))      # the cells' companion rows
     results = planes + ([FINISHED_PLANE] if sig.counter else []) + (
         [sig.terminated] if sig.finishes else [])
     visible = [results.index(o) for o in sig.outputs]
+    #: a cell's result is its rows; the call finishes them into the cell
+    rows = {o: (results.index(o), results.index(_cell_rows.comp_name(o)) if
+                _cell_rows.comp_name(o) in results else None) for o in sig.cells}
     aliases = {sig.inputs.index(s): results.index(s) for s in _carried(sig)}
     if sig.finishes:
         aliases[sig.inputs.index(sig.terminated)] = len(results) - 1
     return {"operands": list(sig.inputs) + ([FUSED_STEPS] if sig.fused else []),
-            "results": results, "visible": visible,
+            "results": results, "visible": visible, "rows": rows,
             "aliases": aliases}
 
 
