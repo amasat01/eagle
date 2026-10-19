@@ -10,7 +10,8 @@ capture completed by :meth:`~eagle.pipeline.GraphPipeline.build`),
 ``instantiations`` (a captured graph turned into a replayable exec graph, the
 same method, the instantiate half), ``binds`` (a completed
 :meth:`~eagle.plan.Plan.bind` call), ``rebinds`` (a completed
-:meth:`~eagle.plan.BoundPlan.rebind` call).
+:meth:`~eagle.plan.BoundPlan.rebind` call), ``updates`` (a completed
+:meth:`~eagle.graph.Graph.update` call; a parameter copy, never a rebind).
 
 The counters registry names ``captures``/``instantiations``/``rebinds`` plus hawk's own
 ``builds`` (``hawk.artifact.bundle.COUNTERS`` — hawk must not import eagle, so it keeps
@@ -46,6 +47,7 @@ _COUNTERS: dict = {
     "instantiations": 0,
     "binds": 0,
     "rebinds": 0,
+    "updates": 0,
     "graph_builds": 0,
     "reverses": 0,
     "records": 0,

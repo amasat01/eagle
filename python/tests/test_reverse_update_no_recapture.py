@@ -37,7 +37,8 @@ def test_update_in_a_loop_rebuilds_nothing(tmp_path, backend):
         grads = rev(g.record, seed)
         got.append((_host(grads["x"]), float(grads["a"])))
     after = _counters.snapshot()
-    assert after["rebinds"] - before["rebinds"] == ITERS
+    assert after["updates"] - before["updates"] == ITERS
+    assert after["rebinds"] - before["rebinds"] == 0
     assert after["graph_builds"] - before["graph_builds"] == 2      # forward + reverse
     if backend == "gpu":
         assert after["captures"] - before["captures"] == 2
