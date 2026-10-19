@@ -54,5 +54,6 @@ say what it needs. Toolchain and docstring style: [Documentation guide](https://
 
 ## Release
 
-Bump `version` in `python/pyproject.toml`, update `CHANGELOG.md`, tag `vX.Y.Z`. `.github/workflows/publish.yml` builds the
-wheels; `workflow_dispatch` dry-runs it. `raptor-core` publishes first (see the family guide).
+Bump `version` in `python/pyproject.toml` and update `CHANGELOG.md` in a pull request. Its green run builds and tests the
+wheels and the sdist; merge it up to date, then tag `vX.Y.Z` on that commit. `.github/workflows/publish.yml` uploads the files
+the pull request built (`workflow_dispatch` dry-runs it). `raptor-core` publishes first (see the family guide).

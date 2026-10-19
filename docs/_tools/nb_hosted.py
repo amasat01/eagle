@@ -85,8 +85,18 @@ def clean_env(**extra):
     return env
 
 
-def build_wheels(py, uv, roots, work, rebuild, gpu=None):
-    """``gpu``: None for CPU-only wheels, else (nvcc, host compiler, CUDA arch) to build eagle's plugin as well."""
+def prebuilt_eagle_wheel(py, directory):
+    """The raptor-eagle wheel in ``directory`` that matches the interpreter ``py``'s CPython tag."""
+    tag = subprocess.check_output([str(py), "-c", "import sys; print(f'cp{sys.version_info[0]}{sys.version_info[1]}')"], text=True).strip()
+    found = sorted(pathlib.Path(directory).glob(f"raptor_eagle-*-{tag}-{tag}-*.whl"))
+    if len(found) != 1:
+        raise SystemExit(f"nb_hosted: --eagle-wheels {directory} holds {len(found)} raptor-eagle wheels for {tag}, need exactly one")
+    return found[0]
+
+
+def build_wheels(py, uv, roots, work, rebuild, gpu=None, eagle_wheels=None):
+    """``gpu``: None for CPU-only wheels, else (nvcc, host compiler, CUDA arch) to build eagle's plugin as well.
+    ``eagle_wheels``: a directory holding an already built raptor-eagle wheel, used instead of building one."""
     wh = work / ("wheelhouse_gpu" if gpu else "wheelhouse")
     stamp = wh / ".built"
     if stamp.is_file() and not rebuild:
@@ -115,19 +125,23 @@ def build_wheels(py, uv, roots, work, rebuild, gpu=None):
     sh(wheel + [ws / "raptor"], env=env)
     sdists = work / "sdists"
     shutil.rmtree(sdists, ignore_errors=True)
-    print("[nb_hosted] building raptor-eagle from its sdist", flush=True)
-    sh([bpy, "-m", "build", "--sdist", "--no-isolation", "-o", sdists, ws / "eagle" / "python"],
-       env={**env, "EAGLE_SDIST_AETHER_INCLUDE": str(ws / "aether")})
-    if gpu:
-        nvcc, host_cxx, arch = gpu
-        eagle_env = {**env, "PATH": f"{pathlib.Path(nvcc).parent}:{env['PATH']}", "CUDACXX": nvcc, "CUDAHOSTCXX": host_cxx,
-                     "SKBUILD_CMAKE_ARGS": f"-DEAGLE_PYTHON_CUDA_PLUGIN=BUILD;-DCMAKE_CUDA_ARCHITECTURES={arch}"}
-        print(f"[nb_hosted] eagle: CUDA plugin for sm_{arch} (nvcc {nvcc})", flush=True)
+    if eagle_wheels:
+        shutil.copy2(prebuilt_eagle_wheel(py, eagle_wheels), wh)
+        print("[nb_hosted] raptor-eagle: the wheel built by the pull request", flush=True)
     else:
-        eagle_env = {**env, "SKBUILD_CMAKE_ARGS": "-DEAGLE_PYTHON_CUDA_PLUGIN=OFF"}
-    t_eagle = time.time()
-    sh(wheel + [next(sdists.glob("raptor_eagle-*.tar.gz"))], env=eagle_env, log=work / "build_eagle.log")
-    print(f"[nb_hosted] raptor-eagle wheel built in {time.time() - t_eagle:.0f} s", flush=True)
+        print("[nb_hosted] building raptor-eagle from its sdist", flush=True)
+        sh([bpy, "-m", "build", "--sdist", "--no-isolation", "-o", sdists, ws / "eagle" / "python"],
+           env={**env, "EAGLE_SDIST_AETHER_INCLUDE": str(ws / "aether")})
+        if gpu:
+            nvcc, host_cxx, arch = gpu
+            eagle_env = {**env, "PATH": f"{pathlib.Path(nvcc).parent}:{env['PATH']}", "CUDACXX": nvcc, "CUDAHOSTCXX": host_cxx,
+                         "SKBUILD_CMAKE_ARGS": f"-DEAGLE_PYTHON_CUDA_PLUGIN=BUILD;-DCMAKE_CUDA_ARCHITECTURES={arch}"}
+            print(f"[nb_hosted] eagle: CUDA plugin for sm_{arch} (nvcc {nvcc})", flush=True)
+        else:
+            eagle_env = {**env, "SKBUILD_CMAKE_ARGS": "-DEAGLE_PYTHON_CUDA_PLUGIN=OFF"}
+        t_eagle = time.time()
+        sh(wheel + [next(sdists.glob("raptor_eagle-*.tar.gz"))], env=eagle_env, log=work / "build_eagle.log")
+        print(f"[nb_hosted] raptor-eagle wheel built in {time.time() - t_eagle:.0f} s", flush=True)
     print("[nb_hosted] building raptor-hawk (from its sdist)", flush=True)
     sh([bpy, "-m", "build", "--sdist", "--no-isolation", "-o", sdists, ws / "hawk"],
        env={**env, "HAWK_AETHER_INCLUDE": str(ws / "aether"), "HAWK_EAGLE_INCLUDE": str(ws / "eagle")})
@@ -214,7 +228,8 @@ def execute(args, roots, work):
     lock_name = lock.stem if args.lock not in LOCKS else args.lock
     pypi = args.source == "pypi"
     wh = None if pypi else build_wheels(args.python, args.uv, roots, work, args.rebuild,
-                                        (args.nvcc, args.cuda_host_cxx, args.cuda_arch) if args.gpu else None)
+                                        (args.nvcc, args.cuda_host_cxx, args.cuda_arch) if args.gpu else None,
+                                        args.eagle_wheels)
 
     venv = work / f"venv_{lock_name}"
     shutil.rmtree(venv, ignore_errors=True)
@@ -304,6 +319,8 @@ def main(argv):
                     help="built: wheels built from the checkouts (default); pypi: install the published wheels")
     ap.add_argument("--version", default="", help="--source pypi: the exact raptor-eagle version (hawk takes its newest)")
     ap.add_argument("--pre", action="store_true", help="--source pypi: allow pre-releases (also RAPTOR_PRE=1 for the setup cells)")
+    ap.add_argument("--eagle-wheels", default=None, help="--source built: a directory holding the raptor-eagle wheels to install "
+                    "(the one for the interpreter's CPython tag) instead of building eagle")
     ap.add_argument("--timeout", type=int, default=900, help="seconds one notebook may run before it FAILs (default 900)")
     ap.add_argument("--list", action="store_true", help="print every notebook with its gate class and exit (no build, no run)")
     ap.add_argument("--json", default=None, help="also write the per-notebook results to this file")
@@ -341,6 +358,8 @@ def main(argv):
         raise SystemExit("nb_hosted: --python is required (unless --list)")
     if not args.uv:
         raise SystemExit("nb_hosted: uv not found; `python -m venv v && v/bin/pip install uv`, then --uv v/bin/uv")
+    if args.eagle_wheels and args.source != "built":
+        raise SystemExit("nb_hosted: --eagle-wheels needs --source built")
     if args.version and args.source != "pypi":
         raise SystemExit("nb_hosted: --version needs --source pypi")
     work = pathlib.Path(args.work).resolve() if args.work else pathlib.Path(os.environ.get("TMPDIR", "/tmp")) / f"nb_hosted_{os.getpid()}"

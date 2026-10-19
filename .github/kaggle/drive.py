@@ -41,7 +41,7 @@ def username():
 
 def build(args, user, folder):
     slug = f"eagle-{'nb' if args.mode == 'notebooks' else 'gpu'}-cuda{args.cuda}-{args.run_id}".lower()
-    config = {k: getattr(args, k) for k in ("mode", "cuda", "source", "pre", "version", "nb_timeout",
+    config = {k: getattr(args, k) for k in ("mode", "cuda", "source", "pre", "version", "nb_timeout", "wheel_sha256",
                                             "eagle_ref", "hawk_ref", "raptor_ref", "aether_ref")}
     text = (HERE / "kernel.py").read_text()
     if "EMBEDDED_CONFIG = None" not in text:
@@ -50,7 +50,7 @@ def build(args, user, folder):
     (folder / "kernel.py").write_text(text.replace("EMBEDDED_CONFIG = None", f"EMBEDDED_CONFIG = {config!r}", 1))
     meta = {"id": f"{user}/{slug}", "title": slug, "code_file": "kernel.py", "language": "python",
             "kernel_type": "script", "is_private": "true", "enable_gpu": "true", "enable_tpu": "false",
-            "enable_internet": "true", "machine_shape": GPU, "dataset_sources": [],
+            "enable_internet": "true", "machine_shape": GPU, "dataset_sources": [args.dataset] if args.source == "wheel" else [],
             "competition_sources": [], "kernel_sources": [], "model_sources": []}
     (folder / "kernel-metadata.json").write_text(json.dumps(meta, indent=2) + "\n")
     return meta
@@ -119,6 +119,20 @@ def commands(folder, outdir, limit):
             ("kernels", "status", "USER/SLUG"), ("kernels", "output", "USER/SLUG", "-p", str(outdir))]
 
 
+def push(cmd, wait=3600):
+    """Push the kernel. Kaggle runs at most two GPU sessions per account and answers a third with an error but exit
+    0, so wait for a free slot while that is the error and stop on any other one."""
+    t0 = time.time()
+    while True:
+        r = kaggle(*cmd, check=False)
+        out = r.stdout + r.stderr
+        if "successfully pushed" in out:
+            return
+        if "GPU session count" not in out or time.time() - t0 > wait:
+            raise SystemExit("kernel push failed: " + (out.strip().splitlines() or ["no output"])[-1])
+        time.sleep(60)
+
+
 def fetch_result(outdir):
     """result.json of the kernel (the notebooks kernel rewrites it after every notebook, so a kernel that ended as
     ERROR still shows what ran), or None."""
@@ -132,7 +146,10 @@ def main():
     ap.add_argument("--mode", default="tests", choices=("tests", "notebooks"), help="the interop test rows, or every docs notebook")
     ap.add_argument("--nb-timeout", type=int, default=900, help="notebooks mode: seconds one notebook may run (default 900)")
     ap.add_argument("--run-id", default=os.environ.get("GITHUB_RUN_ID", "local"))
-    ap.add_argument("--source", default="pypi", choices=("pypi", "git"))
+    ap.add_argument("--source", default="pypi", choices=("pypi", "git", "wheel"),
+                    help="wheel: the pull request's own raptor-eagle wheel, from the private dataset made by wheel.py")
+    ap.add_argument("--dataset", default="", help="--source wheel: USER/SLUG of that dataset")
+    ap.add_argument("--wheel-sha256", default="", help="--source wheel: the sha256 of the dataset's SHA256SUMS file")
     ap.add_argument("--pre", action="store_true")
     ap.add_argument("--version", default="")
     for n in ("eagle", "hawk", "raptor", "aether"):
@@ -142,6 +159,8 @@ def main():
     args = ap.parse_args()
     if args.version and not PEP440.match(args.version):  # before any network call
         raise SystemExit(f"version must look like 0.6.2rc1 (a PEP 440 version), not {args.version!r}")
+    if args.source == "wheel" and not (re.fullmatch(r"[\w.-]+/[\w.-]+", args.dataset) and re.fullmatch(r"[0-9a-f]{64}", args.wheel_sha256)):
+        raise SystemExit("--source wheel needs --dataset USER/SLUG and --wheel-sha256 (64 hex digits)")
     limit = LIMITS[args.mode]
     outdir = pathlib.Path(args.out)
     folder = pathlib.Path(tempfile.mkdtemp(prefix="kaggle_kernel_"))
@@ -154,7 +173,7 @@ def main():
         return 0
     outdir.mkdir(parents=True, exist_ok=True)
     kid = meta["id"]
-    kaggle(*commands(folder, outdir, limit)[0])
+    push(commands(folder, outdir, limit)[0])
     t0 = time.time()
     st = "UNKNOWN"
     while time.time() - t0 < limit:

@@ -1,0 +1,621 @@
+# Copyright 2026 Alessandro Masat
+# SPDX-License-Identifier: Apache-2.0
+#
+# Build, check and test everything that ships, on the pull request. The
+# artifacts are named by git tree hash, so publish.yml and docs.yml can find
+# and upload exactly what was tested here instead of rebuilding it.
+#
+# Besides the wheels, the docs site and the CPU notebooks, a pull request that
+# touches GPU or interop code (or carries the label `release`) runs the interop
+# rows and the notebooks on a Kaggle T4 for CUDA 12 and 13 with THIS pull
+# request's wheel, put into a private Kaggle dataset named by the tree hash that
+# the kernels install from. One job (`kaggle`) does all of it under the `kaggle`
+# environment, whose reviewer approves it once per run; it is skipped otherwise.
+#
+# eagle's Python package has two compiled parts (python/CMakeLists.txt):
+# `eagle._core` is plain C++ (EAGLE_CPU_ONLY) and needs no CUDA toolkit at
+# all; `eagle/libeagle_cuda.so`, the CUDA backend plugin `_core` dlopen's on
+# first use, is compiled by nvcc but links NEITHER cudart NOR libcuda (built
+# `-cudart none`; `src/plugin/cuda_driver.cpp` resolves the driver's
+# `cuGetProcAddress` entry points at RUN time via `dlopen("libcuda.so.1")`).
+# So the manylinux container needs nvcc + CUDA HEADERS to BUILD the plugin,
+# but the published wheel needs only the NVIDIA DRIVER (no CUDA runtime, no
+# NVRTC — NVRTC is a hawk run-time concern, not eagle's; the eagle._core
+# `eagle.frameworks`/`eagle.plan.auto` code paths that touch
+# `hawk.compile.nvrtc` only run when hawk happens to be installed too, and
+# are not a run-time requirement of this wheel). `auditwheel repair` is told
+# to exclude `libcuda.so.1` defensively, even though nothing here links it.
+#
+# The manylinux_2_28 image is AlmaLinux 8 (glibc 2.28): CUDA packages come
+# from NVIDIA's rhel8 CUDA repo (yum/dnf), not the apt names eagle's ci.yml
+# uses for its Ubuntu compile-only CUDA leg — same package set, el8 naming.
+# The sibling aether/eagle header trees are bind-mounted into the container
+# (cibuildwheel's `container-engine: ... create_args: --volume ...`) and
+# aether is installed INSIDE the container (CUDA/default mode — eagle._core
+# is CUDA-language regardless of EAGLE_CPU_ONLY, per the existing ci.yml's
+# test-python job) before each wheel's cmake configure.
+#
+# Release order: eagle needs raptor-core (declared dependency, used only at
+# IMPORT time, never by the C++/CUDA build). test-wheel installs the
+# raptor-core release matching the built wheel's requirement from PyPI when
+# one exists, and only otherwise builds it from the sibling checkout, so the
+# workflow works before and after the family's first release. The sibling
+# repositories are public: the default GITHUB_TOKEN checks them out.
+
+name: Release
+
+# Pull requests only: main receives the tested tree, nothing re-runs there.
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, labeled]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    outputs:
+      tree: ${{ steps.tree.outputs.tree }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: eagle
+
+      - uses: actions/checkout@v7
+        with:
+          repository: amasat01/aether
+          path: aether
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: eagle/python/pyproject.toml
+
+      - run: python -m pip install --quiet build "twine>=6" pyyaml
+
+      - name: publish and deploy workflows only download, verify and upload
+        run: python eagle/tools/ci_publish_subset.py
+
+      - name: Build the sdist
+        run: cd eagle/python && python -m build --sdist --outdir ../../dist
+
+      # ccache inside the manylinux container: the runner directory is bind-mounted at /ccache
+      - run: mkdir -p .ccache-cibw
+      - uses: actions/cache@v6
+        with:
+          path: ${{ github.workspace }}/.ccache-cibw
+          key: ccache-v2-${{ runner.os }}-${{ runner.arch }}-cibw-${{ hashFiles('**/*.h', '**/*.hpp', '**/*.cpp', '**/*.cu', '**/*.cuh', '**/CMakeLists.txt') }}
+          restore-keys: |
+            ccache-v2-${{ runner.os }}-${{ runner.arch }}-cibw-
+
+      - name: Build manylinux wheels (cibuildwheel; CPython 3.9-3.14 plus free-threaded 3.13t/3.14t, x86_64)
+        uses: pypa/cibuildwheel@v3.4.1
+        with:
+          package-dir: eagle/python
+          output-dir: dist
+        env:
+          CIBW_BUILD: "cp39-manylinux_x86_64 cp310-manylinux_x86_64 cp311-manylinux_x86_64 cp312-manylinux_x86_64 cp313-manylinux_x86_64 cp314-manylinux_x86_64 cp313t-manylinux_x86_64 cp314t-manylinux_x86_64"
+          # cibuildwheel 3.x, not 4.x: 4.x dropped the free-threaded 3.13 build
+          # (cp313t), and 3.x gates it behind this enable group.
+          CIBW_ENABLE: cpython-freethreading
+          CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
+          # no isolation, deps installed per Python first: an isolated build env sits at a random
+          # /tmp path that lands in every compile line, so ccache could never hit across runs
+          CIBW_BUILD_FRONTEND: "build; args: --no-isolation"
+          CIBW_BEFORE_BUILD: >-
+            python -m pip install 'scikit-build-core>=0.10' 'ninja>=1.5'
+            'nanobind>=3.1,<4; python_version >= "3.10"'
+            'nanobind>=2.2,<3; python_version < "3.10"'
+          CIBW_CONTAINER_ENGINE: "docker; create_args: --volume ${{ github.workspace }}/aether:/sib/aether:ro --volume ${{ github.workspace }}/eagle:/sib/eagle:ro --volume ${{ github.workspace }}/.ccache-cibw:/ccache"
+          # nvcc + CUDA headers only (no driver, nothing executed); rhel8
+          # repo matches manylinux_2_28's AlmaLinux 8 base. Installed once
+          # per container, ahead of every per-Python wheel build. The .repo
+          # file is fetched with curl (dnf cannot `install` a .repo file, and
+          # `dnf config-manager` needs dnf-plugins-core).
+          CIBW_BEFORE_ALL_LINUX: >-
+            dnf install -y epel-release && dnf install -y ccache &&
+            CCACHE_DIR=/ccache ccache -z &&
+            curl -fsSL -o /etc/yum.repos.d/cuda-rhel8.repo
+            https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo &&
+            dnf install -y --setopt=install_weak_deps=False
+            cuda-nvcc-12-9 cuda-cudart-devel-12-9 cuda-driver-devel-12-9 gcc-toolset-13-gcc-c++ &&
+            cmake -DAETHER_CPP_MODE=OFF -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.9/bin/nvcc
+            -DCMAKE_CUDA_HOST_COMPILER=/opt/rh/gcc-toolset-13/root/usr/bin/g++
+            -DCMAKE_INSTALL_PREFIX=/opt/eagle-build-prefix -B /tmp/aether-build -S /sib/aether &&
+            cmake --install /tmp/aether-build &&
+            cmake -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.9/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES=61
+            -DCMAKE_CUDA_HOST_COMPILER=/opt/rh/gcc-toolset-13/root/usr/bin/g++
+            -DCMAKE_INSTALL_PREFIX=/opt/eagle-build-prefix -B /tmp/eagle-hdr -S /sib/eagle &&
+            cmake --install /tmp/eagle-hdr
+          # CUDA 12.9 is the newest toolkit that still compiles Pascal and Volta,
+          # and it adds Blackwell; its nvcc takes gcc-toolset-13 as the host
+          # compiler (CUDAHOSTCXX). No CMAKE_CUDA_ARCHITECTURES here:
+          # python/CMakeLists.txt's default (SASS for every architecture this
+          # nvcc compiles from sm_60 up, plus PTX at the newest) is what ships.
+          # cibuildwheel parses this with a shell grammar: a value holding
+          # `;` (or spaces) must be double-quoted, or the whole option is
+          # rejected as malformed.
+          CIBW_ENVIRONMENT_LINUX: >-
+            PATH=/usr/local/cuda-12.9/bin:$PATH
+            CMAKE_PREFIX_PATH=/opt/eagle-build-prefix
+            CMAKE_BUILD_PARALLEL_LEVEL=4
+            CUDAHOSTCXX=/opt/rh/gcc-toolset-13/root/usr/bin/g++
+            SKBUILD_CMAKE_ARGS="-DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.9/bin/nvcc"
+            CCACHE_DIR=/ccache
+            CCACHE_MAXSIZE=1G
+            CCACHE_COMPILERCHECK=content
+            CMAKE_C_COMPILER_LAUNCHER=ccache
+            CMAKE_CXX_COMPILER_LAUNCHER=ccache
+            CMAKE_CUDA_COMPILER_LAUNCHER=ccache
+          CIBW_REPAIR_WHEEL_COMMAND_LINUX: "ccache -s; auditwheel repair -w {dest_dir} --exclude libcuda.so.1 {wheel}"
+          # The dedicated test-wheel job below (with the raptor-core sibling
+          # wheel + the no-driver smoke) replaces cibuildwheel's built-in
+          # --test-command.
+          CIBW_TEST_SKIP: "*"
+
+      - run: python -m twine check --strict dist/*
+      - name: No wheel vendors libcuda
+        run: |
+          shopt -s nullglob
+          for whl in dist/*.whl; do
+            if unzip -l "$whl" | grep -qi 'libcuda\.so'; then
+              echo "$whl vendors libcuda — auditwheel's --exclude was not honoured"; exit 1
+            fi
+          done
+          echo "OK: no wheel vendors libcuda"
+      - name: Plugin carries Blackwell SASS (sm_100, sm_120) and compute_100 PTX
+        run: |
+          shopt -s nullglob
+          for whl in dist/*.whl; do
+            archs="$(unzip -p "$whl" eagle/libeagle_cuda.so | strings -n 8 | grep -E '^[0-9]+(,[0-9]+)*/[0-9]+(,[0-9]+)*$' | head -1)"
+            sass=",${archs%%/*},"
+            ptx=",${archs##*/},"
+            for want in sass:100 sass:120 ptx:100; do
+              case "${want%%:*}" in sass) have="$sass";; *) have="$ptx";; esac
+              case "$have" in *",${want##*:},"*) ;; *) echo "$whl: plugin archs '$archs' lack $want"; exit 1;; esac
+            done
+          done
+          echo "OK: every wheel's plugin lists SASS 100 and 120 and PTX 100"
+
+      - name: Checksums
+        run: cd dist && sha256sum * > SHA256SUMS
+
+      - id: tree
+        run: echo "tree=$(git -C eagle rev-parse 'HEAD^{tree}')" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist-${{ steps.tree.outputs.tree }}
+          retention-days: 90
+          path: dist/
+
+  test-wheel:
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      # every Python version reports, even when one fails
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14", "3.13t", "3.14t"]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: eagle
+      - uses: actions/checkout@v7
+        with:
+          repository: amasat01/raptor
+          path: raptor
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist-${{ needs.build.outputs.tree }}
+          path: dist
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            eagle/python/pyproject.toml
+            raptor/pyproject.toml
+
+      # raptor-core, eagle's one runtime dependency, resolved against the
+      # requirement the BUILT wheel declares: from PyPI when a matching
+      # release exists (what a user gets), otherwise built from the sibling
+      # raptor checkout (before the family's first release).
+      - name: raptor-core wheel (PyPI if released, else the sibling checkout)
+        run: |
+          set -euo pipefail
+          # newest NumPy/SciPy ship no cp313t wheel: prefer a wheel over an sdist build
+          python -m pip install --quiet --prefer-binary build
+          REQ="$(python - <<'PY'
+          import glob, zipfile
+          whl = sorted(glob.glob("dist/*.whl"))[0]
+          with zipfile.ZipFile(whl) as z:
+              meta = next(n for n in z.namelist() if n.endswith(".dist-info/METADATA"))
+              for line in z.read(meta).decode().splitlines():
+                  if line.startswith("Requires-Dist:") and "raptor-core" in line and "extra ==" not in line:
+                      print(line.split(":", 1)[1].strip()); break
+              else:
+                  raise SystemExit(f"{whl} declares no raptor-core requirement")
+          PY
+          )"
+          echo "eagle requires: $REQ"
+          mkdir -p dist-raptor
+          if python -m pip download --quiet --no-deps --only-binary=:all: -d dist-raptor "$REQ"; then
+            echo "raptor-core: from PyPI"
+          else
+            echo "raptor-core: not on PyPI yet, building it from the sibling checkout"
+            (cd raptor && python -m build --wheel --outdir ../dist-raptor)
+          fi
+          ls dist-raptor
+
+      - name: Assert this runner has no NVIDIA driver (the precondition this leg is for)
+        run: |
+          if ldconfig -p | grep -q 'libcuda\.so\.1'; then echo "libcuda.so.1 present"; exit 1; fi
+
+      # Third-party packages (numpy: a runtime dependency; pytest) from PyPI
+      # first; then raptor-core from dist-raptor and raptor-eagle from THIS
+      # run's dist, both index-free (never an index copy of the same version).
+      - name: Fresh venv, install the released wheel + raptor-core, pip check
+        run: |
+          set -euo pipefail
+          python -m venv venv
+          . venv/bin/activate
+          pip install --quiet --upgrade pip
+          pip install --quiet --prefer-binary numpy pytest
+          pip install --quiet --no-index --find-links dist-raptor raptor-core
+          pip install --quiet --no-index --find-links dist --find-links dist-raptor raptor-eagle
+          pip check
+
+      - name: The installed wheel imports and refuses device work, typed
+        run: |
+          . venv/bin/activate
+          cd "$RUNNER_TEMP"
+          python - <<'EOF'
+          import eagle, eagle._core, eagle.exec
+          assert "site-packages" in eagle._core.__file__, eagle._core.__file__
+          assert eagle.exec.fold("sum", [1.0, 2.0]) == 3.0
+          # The CUDA plugin links no driver library, so it loads on a machine
+          # without one; what must hold is that USING the GPU refuses, typed.
+          d = eagle._core.cuda_backend()
+          print("cuda plugin:", {k: d[k] for k in ("loaded", "error")})
+          try:
+              eagle._core.Stream()
+              raise SystemExit("Stream() did not refuse")
+          except eagle.BackendUnavailable as e:
+              print("typed refusal:", e)
+          maps = open("/proc/self/maps").read()
+          assert "libcuda" not in maps and "libcudart" not in maps
+          print("OK: host-only CPU smoke, CUDA correctly unavailable")
+          EOF
+
+      - name: Host suite (a copy, outside the repository) against the installed wheel
+        run: |
+          . venv/bin/activate
+          mkdir -p "$RUNNER_TEMP/suite"
+          cp -rL eagle/python/tests eagle/python/conftest.py "$RUNNER_TEMP/suite/"
+          cd "$RUNNER_TEMP/suite"
+          RAPTOR_ROOT="${GITHUB_WORKSPACE}/raptor" python -m pytest tests -q -p no:cacheprovider -W error::pytest.PytestUnknownMarkWarning \
+            -m "not gpu and not gpu2 and not torch and not interop_matrix and not repo_local"
+
+      # Free-threaded legs only (3.13t / 3.14t): the ft rows against the INSTALLED
+      # wheel, then the whole suite with RuntimeWarning as an error (a re-enabled
+      # GIL is that warning). Zero collected ft rows fails the leg, and the
+      # interpreter must be GIL-off by default with no override set.
+      - name: ft-stress (ft rows + full suite, -W error::RuntimeWarning)
+        if: endsWith(matrix.python-version, 't')
+        run: |
+          set -euo pipefail
+          . venv/bin/activate
+          [ -z "${PYTHON_GIL:-}" ] || { echo "PYTHON_GIL is set"; exit 1; }
+          python -c "import sys; assert sys._is_gil_enabled() is False, 'GIL is enabled'"
+          mkdir -p "$RUNNER_TEMP/suite-ft"
+          cp -rL eagle/python/tests eagle/python/conftest.py "$RUNNER_TEMP/suite-ft/"
+          cd "$RUNNER_TEMP/suite-ft"
+          export RAPTOR_ROOT="${GITHUB_WORKSPACE}/raptor"
+          N="$(python -m pytest tests -m "ft and not repo_local" --collect-only -q -p no:cacheprovider | grep -c '::' || true)"
+          echo "ft rows collected: $N"
+          [ "$N" -gt 0 ] || { echo "ft selection collected zero tests"; exit 1; }
+          python -m pytest tests -m "ft and not repo_local" -q -rs -p no:cacheprovider -W error::RuntimeWarning -W error::pytest.PytestUnknownMarkWarning
+          python -m pytest tests -q -p no:cacheprovider -W error::RuntimeWarning -W error::pytest.PytestUnknownMarkWarning -m "not gpu and not gpu2 and not torch and not interop_matrix and not repo_local"
+
+  docs:
+    runs-on: ubuntu-latest
+    env:
+      CC: gcc-13
+      CXX: g++-13
+      # ccache: CMake reads the *_COMPILER_LAUNCHER variables, also under scikit-build-core
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 500M
+      CCACHE_COMPILERCHECK: content
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+      CMAKE_CXX_COMPILER_LAUNCHER: ccache
+      CMAKE_CUDA_COMPILER_LAUNCHER: ccache
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: eagle
+
+      - uses: actions/checkout@v7
+        with:
+          repository: amasat01/aether
+          path: aether
+          token: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
+
+      - uses: actions/checkout@v7
+        with:
+          repository: amasat01/raptor
+          path: raptor
+          token: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            eagle/python/pyproject.toml
+            raptor/pyproject.toml
+
+      - run: sudo apt-get update && sudo apt-get install -y g++-13 ccache
+
+      # compiled objects persist across runs; one cache per job and architecture
+      - uses: actions/cache@v6
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-v2-${{ runner.os }}-${{ runner.arch }}-docs-${{ hashFiles('**/*.h', '**/*.hpp', '**/*.cpp', '**/*.cu', '**/*.cuh', '**/CMakeLists.txt') }}
+          restore-keys: |
+            ccache-v2-${{ runner.os }}-${{ runner.arch }}-docs-
+      - run: ccache -z
+
+      # The runner's own apt doxygen trails Doxygen upstream (locally we only
+      # have 1.9.1); C++20 trailing `requires` clauses need >= 1.10 to parse.
+      # Install the official release tarball instead, pinned and checksum-
+      # verified (sha256, published at doxygen.nl/download.html) rather than
+      # trusting whatever version the runner's default repo happens to carry.
+      - name: Install Doxygen 1.18.0 (official release tarball, checksum-verified)
+        run: |
+          set -euo pipefail
+          DOXYGEN_VERSION=1.18.0
+          DOXYGEN_SHA256=14fa81bdc34171edb5f1f02b1d60e74802f0439b77fa44e592565d517d72df90
+          curl -fsSL -o /tmp/doxygen.tar.gz \
+            "https://www.doxygen.nl/files/doxygen-${DOXYGEN_VERSION}.linux.bin.tar.gz"
+          echo "${DOXYGEN_SHA256}  /tmp/doxygen.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/doxygen.tar.gz -C /tmp
+          echo "/tmp/doxygen-${DOXYGEN_VERSION}/bin" >> "$GITHUB_PATH"
+
+      # NVIDIA's apt repo for Ubuntu 24.04 (noble), x86_64 — compile-only
+      # toolchain, no driver/GPU (mirrors ci.yml's test-python job).
+      - name: Install compile-only CUDA 12.6 toolchain (nvcc; no driver/GPU)
+        run: |
+          curl -fsSL -o /tmp/cuda-keyring.deb \
+            https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+          sudo dpkg -i /tmp/cuda-keyring.deb
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cuda-nvcc-12-6 cuda-cudart-dev-12-6 cuda-driver-dev-12-6
+          echo "/usr/local/cuda-12.6/bin" >> "$GITHUB_PATH"
+          echo "CUDA_HOME=/usr/local/cuda-12.6" >> "$GITHUB_ENV"
+
+      # aether installed in its default CUDA-language mode (eagle._core is
+      # CUDA-language regardless of EAGLE_CPP_MODE).
+      - run: |
+          cmake -DAETHER_CPP_MODE=OFF -DCMAKE_CUDA_COMPILER="$(which nvcc)" \
+            -DCMAKE_INSTALL_PREFIX="${GITHUB_WORKSPACE}/__install" \
+            -B aether/build -S aether
+          cmake --install aether/build
+
+      # eagle's own header-only C++ config, installed next to aether so the
+      # binding's find_package(eagle) resolves.
+      - run: |
+          cd eagle
+          cmake -B __eagle_hdr -DCMAKE_CUDA_COMPILER="$(which nvcc)" \
+            -DCMAKE_CUDA_ARCHITECTURES=70 \
+            -DCMAKE_INSTALL_PREFIX="${GITHUB_WORKSPACE}/__install" .
+          cmake --install __eagle_hdr
+
+      - name: Build the eagle._core binding (compile-only, no GPU needed)
+        run: |
+          cd eagle
+          python -m pip install --quiet --upgrade pip
+          # build deps preinstalled + --no-build-isolation: an isolated build compiles nanobind from a
+          # random /tmp build env, so every compile line differs and ccache never hits;
+          # --only-binary=:all: still builds this local project but never a dependency from
+          # source, so no third-party sdist is ever built without its own isolated env
+          python -m pip install --quiet "scikit-build-core>=0.10" "nanobind>=3.1,<4"
+          export CMAKE_PREFIX_PATH="${GITHUB_WORKSPACE}/__install:${CMAKE_PREFIX_PATH}"
+          export SKBUILD_CMAKE_ARGS="-DCMAKE_CUDA_COMPILER=$(which nvcc);-DCMAKE_CUDA_ARCHITECTURES=70"
+          pip install ../raptor   # the sibling checkout, so unreleased raptor changes are tested
+          pip install --no-build-isolation --only-binary=:all: -e ./python
+
+      - name: Install docs dependencies
+        run: |
+          python -m pip install --quiet \
+            Sphinx==8.2.3 sphinx-book-theme==1.2.0 sphinx-design==0.7.0 sphinx-copybutton==0.5.2 \
+            sphinx-autodoc-typehints==3.5.2 myst-nb==1.4.0 breathe==4.36.0 nbformat nbclient
+
+      # nbcheck also executes every notebook on the CPU: it needs hawk (sibling checkout), a kernel, torch and JAX
+      - uses: actions/checkout@v7
+        with:
+          repository: amasat01/hawk
+          path: hawk
+          token: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
+
+      - name: Install what the notebooks run on
+        run: |
+          export HAWK_AETHER_INCLUDE="${GITHUB_WORKSPACE}/aether" HAWK_EAGLE_INCLUDE="${GITHUB_WORKSPACE}/eagle"
+          python -m pip install --quiet ipykernel matplotlib scipy
+          python -m pip install --quiet torch --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install --quiet --only-binary=:all: "jax[cpu]==0.11.2"   # the JAX notebooks (the floor, as ci.yml pins it)
+          python -m pip install --quiet ./hawk
+
+      - name: make nbcheck (refuse an unfilled notebook; run every notebook on the CPU)
+        run: cd eagle/docs && make nbcheck
+
+      - name: make strict (0 Sphinx warnings)
+        run: cd eagle/docs && make strict
+
+      - id: tree
+        run: echo "tree=$(git -C eagle rev-parse 'HEAD^{tree}')" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: site-${{ steps.tree.outputs.tree }}
+          retention-days: 90
+          path: eagle/docs/_build/html
+      - if: always()
+        run: ccache -s
+
+  # Informational: a non-release PR carries an already published version.
+  pypi-version:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist-${{ needs.build.outputs.tree }}
+          path: dist
+      - run: |
+          whl=$(ls dist/*.whl | head -n 1 | xargs basename)
+          version=$(echo "$whl" | cut -d- -f2)
+          if curl -fsS "https://pypi.org/pypi/raptor-eagle/${version}/json" > /dev/null; then
+            echo "::notice::raptor-eagle ${version} is already on PyPI; a release needs a version bump"
+          else
+            echo "::notice::raptor-eagle ${version} is not on PyPI yet"
+          fi
+
+  # Every docs notebook on the CPU, the way a hosted (Colab) user runs it (docs/_tools/nb_hosted.py), with this
+  # pull request's own eagle wheel (the one for the lock's Python); aether, raptor and hawk are built from the
+  # companion checkouts. A GPU-only notebook is skipped here; the kaggle job runs it on a T4.
+  notebooks:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: eagle
+      # companions: same-named branch if it exists there, else main
+      - uses: ./eagle/.github/actions/companion
+        with: {repo: aether, path: aether, token: "${{ secrets.SIBLING_READ_TOKEN || github.token }}"}
+      - uses: ./eagle/.github/actions/companion
+        with: {repo: raptor, path: raptor, token: "${{ secrets.SIBLING_READ_TOKEN || github.token }}"}
+      - uses: ./eagle/.github/actions/companion
+        with: {repo: hawk, path: hawk, token: "${{ secrets.SIBLING_READ_TOKEN || github.token }}"}
+      - uses: ./eagle/.github/actions/companion
+        with: {repo: amasat01.github.io, path: site, token: "${{ secrets.SIBLING_READ_TOKEN || github.token }}"}
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist-${{ needs.build.outputs.tree }}
+          path: dist
+      # the Colab lock is Python 3.13
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - run: sudo apt-get update && sudo apt-get install -y g++-13
+      - run: python -m pip install --quiet uv
+      - name: Discovery (every notebook, with its gate class)
+        run: python eagle/docs/_tools/nb_hosted.py --list --repos all --eagle eagle --hawk hawk --raptor raptor --aether aether --site site
+      - name: Run every notebook on the CPU
+        env:
+          CC: gcc-13
+          CXX: g++-13
+        run: |
+          python eagle/docs/_tools/nb_hosted.py --python "$(which python)" --lock colab --repos all --timeout 900 \
+            --eagle eagle --hawk hawk --raptor raptor --aether aether --site site \
+            --work "$RUNNER_TEMP/nbh" --cleanup --json notebooks-cpu.json --source built --eagle-wheels dist
+      - name: Keep the per-notebook results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: notebooks-cpu
+          path: notebooks-cpu.json
+          if-no-files-found: ignore
+
+  # Whether the Kaggle GPU jobs run: the pull request carries the label `release`, or it changes GPU or interop code.
+  kaggle-plan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      run: ${{ steps.plan.outputs.run }}
+    steps:
+      - id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LABELLED: ${{ contains(github.event.pull_request.labels.*.name, 'release') }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          run=false
+          if [ "$LABELLED" = true ]; then
+            run=true; echo "label release"
+          else
+            files="$(gh pr diff "$PR" --repo "$GITHUB_REPOSITORY" --name-only)"
+            if grep -Eq '^(eagle/cuda|plugin/|python/src/|python/eagle/(frameworks/|interop\.py|cuda\.py)|python/tests/test_interop|docs/_tools/nb_|\.github/kaggle/|\.github/workflows/release\.yml)' <<< "$files"; then
+              run=true; echo "GPU or interop paths changed"
+            fi
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          echo "kaggle GPU jobs: $run"
+
+  # One job behind the `kaggle` environment, so one approval runs everything: it puts the pull request's wheels in a
+  # private Kaggle dataset, then runs the four T4 kernels two at a time (Kaggle allows two GPU sessions per account):
+  # the CUDA 12 and 13 tests, then the CUDA 12 and 13 notebooks. Skipped (no GPU paths, no `release` label) = pass.
+  kaggle:
+    needs: [build, kaggle-plan]
+    if: needs.kaggle-plan.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    environment: kaggle
+    timeout-minutes: 350  # tests take minutes, notebooks up to 180, plus up to 60 waiting for a GPU slot per wave
+    env:
+      KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --quiet kaggle
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist-${{ needs.build.outputs.tree }}
+          path: dist
+      - id: wheel
+        run: python .github/kaggle/wheel.py dist "${{ needs.build.outputs.tree }}"
+      - name: Run the kernels on Kaggle
+        env:
+          DATASET: ${{ steps.wheel.outputs.dataset }}
+          WHEEL_SHA256: ${{ steps.wheel.outputs.sha256 }}
+          EAGLE_REF: ${{ github.head_ref }}
+        run: |
+          leg() {  # cuda mode
+            python .github/kaggle/drive.py --cuda "$1" --mode "$2" \
+              --run-id "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" --eagle-ref "$EAGLE_REF" \
+              --source wheel --dataset "$DATASET" --wheel-sha256 "$WHEEL_SHA256" \
+              --out "kaggle-out/cuda$1-$2" > "kaggle-cuda$1-$2.log" 2>&1
+          }
+          failed=""
+          for mode in tests notebooks; do
+            leg 12 "$mode" & a=$!
+            sleep 90  # let the first push land before the second asks for a GPU slot
+            leg 13 "$mode" & b=$!
+            wait "$a" || failed="$failed cuda12-$mode"
+            wait "$b" || failed="$failed cuda13-$mode"
+          done
+          for f in kaggle-cuda*.log; do echo "::group::$f"; cat "$f"; echo "::endgroup::"; done
+          [ -z "$failed" ] || { echo "::error::failed:$failed"; exit 1; }
+      - name: Keep the kernel logs and results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: kaggle-gpu
+          path: |
+            kaggle-out
+            kaggle-cuda*.log
+          if-no-files-found: warn
