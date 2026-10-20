@@ -19,9 +19,11 @@
 
 #pragma once
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <random>
 #include <vector>
 
@@ -310,6 +312,34 @@ TEST_F(CanonicalReduceTest, Compensated_WithinContract_f32)
 TEST_F(CanonicalReduceTest, Compensated_WithinContract_f64)
 {
     withinContract<double>(std::ldexp(1.0, -53), std::ldexp(1.0, 48));
+}
+
+/** The exact min fold: the minimum of the finite terms, -Inf when one is present, and (a NaN
+ *  term included) the bits the device tree gives. */
+template<typename T>
+inline void minRow()
+{
+    for (idx_t n : { idx_t(1), idx_t(257), idx_t(9001) }) {
+        auto x = corpus<T>(n, 31 + n);
+        VecIn<T> in { x.data() };
+        T want = x[0];
+        for (T v : x)
+            want = v < want ? v : want;
+        EXPECT_EQ((canon::reduce<T, canon::MinOp<T>>(in, n)), want) << "n=" << n;
+        EXPECT_EQ((canon::reduce<T, aether::MaxOp<T>>(in, n)), *std::max_element(x.begin(), x.end())) << "n=" << n;
+    }
+    auto x = corpus<T>(9001, 5);
+    VecIn<T> in { x.data() };
+    x[1000] = T(INFINITY);
+    x[7000] = -T(INFINITY);
+    EXPECT_EQ((canon::reduce<T, canon::MinOp<T>>(in, 9001)), -T(INFINITY));
+    EXPECT_EQ((canon::reduce<T, aether::MaxOp<T>>(in, 9001)), T(INFINITY));
+}
+
+TEST_F(CanonicalReduceTest, Min_ExactAndInfinite)
+{
+    minRow<float>();
+    minRow<double>();
 }
 
 TEST_F(CanonicalReduceTest, Columns_EqualsPerColumnFlat)

@@ -560,6 +560,7 @@ eagle_backend_status eagle_backend_x_restore_device(struct eagle_backend_reorder
 #define EAGLE_BACKEND_REDUCE_OP_SUM 0u
 #define EAGLE_BACKEND_REDUCE_OP_MAX 1u
 #define EAGLE_BACKEND_REDUCE_OP_ALL 2u
+#define EAGLE_BACKEND_REDUCE_OP_MIN 3u
 #define EAGLE_BACKEND_REDUCE_COMPENSATED 0u
 #define EAGLE_BACKEND_REDUCE_ORDERED     1u
 #define EAGLE_BACKEND_REDUCE_AUTO        2u

@@ -353,7 +353,8 @@ nanobind_add_module(_core MODULE FREE_THREADED src/eagle_core.cpp)
 target_compile_features(_core PRIVATE cxx_std_23)
 # aether's own include directories first: an installed eagle's prefix may also
 # hold an (older) aether copy, and the aether this configure resolved must win.
-target_include_directories(_core PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src" ${_aether_incs} ${_eagle_core_incs})
+# the live eagle root ahead of aether's prefix, which may hold an installed (older) eagle copy
+target_include_directories(_core PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src" "${_eagle_src}" ${_aether_incs} ${_eagle_core_incs})
 target_compile_definitions(_core PRIVATE EAGLE_CPU_ONLY=1 AETHER_CPP_MODE=1 EAGLE_BLOCKSIZE=256 NDEBUG
   $<$<BOOL:${_eagle_plugin_skipped}>:EAGLE_CORE_BUILT_WITHOUT_CUDA_PLUGIN=1>)
 target_link_libraries(_core PRIVATE OpenMP::OpenMP_CXX ${CMAKE_DL_LIBS})
@@ -386,8 +387,10 @@ install(TARGETS _core LIBRARY DESTINATION eagle)
 # three eagle_xla_* symbols and nothing else.
 # ---------------------------------------------------------------------------
 add_library(eagle_xla SHARED src/xla/eagle_xla.cpp)
-target_compile_features(eagle_xla PRIVATE cxx_std_17)
-target_include_directories(eagle_xla PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src" ${_eagle_core_incs})
+target_compile_features(eagle_xla PRIVATE cxx_std_23)
+# the host finish is eagle's canonical reduction (eagle/reduce/canonical.h), header only
+target_include_directories(eagle_xla PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src" "${_eagle_src}" ${_aether_incs} ${_eagle_core_incs})
+target_compile_definitions(eagle_xla PRIVATE EAGLE_CPU_ONLY=1 AETHER_CPP_MODE=1 EAGLE_BLOCKSIZE=256 NDEBUG)
 target_include_directories(eagle_xla SYSTEM PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/xla/vendor")
 # one section per function/datum so the linker can drop the static runtime code the handler never calls
 target_compile_options(eagle_xla PRIVATE ${_eagle_no_gnu_unique} ${_eagle_warn_as_err} -ffunction-sections -fdata-sections)

@@ -98,5 +98,5 @@ def test_a_max_reduce_is_refused():
     x, out = np.linspace(0, 1, N), np.zeros(1)
     g = eagle.Graph().add_node(eagle.reduce(x, out, op="max"), name="peak").build(record=True)
     g.launch()
-    with pytest.raises(ValueError, match="node 'peak' is a 'max' or 'all' reduce"):
+    with pytest.raises(ValueError, match="node 'peak' is a 'max', 'min' or 'all' reduce"):
         eagle.diff.reverse(g.record, {"out": np.ones(1)})

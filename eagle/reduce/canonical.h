@@ -97,6 +97,12 @@ template<typename T, typename OP>
 inline constexpr bool compensated_v
     = std::is_floating_point_v<T> && std::is_same_v<OP, aether::SumOp<T>>;
 
+/** @brief ``min(a, b)``, the exact fold beside ``aether::MaxOp`` (``a < b ? a : b``). */
+template<typename T>
+struct MinOp {
+    AETHER_DEVICEHOST() constexpr T operator()(T a, T b) const { return a < b ? a : b; }
+};
+
 /** @brief A partial of an exact operator: one plain value. */
 template<typename T, typename OP, bool C = compensated_v<T, OP>>
 struct Partial {

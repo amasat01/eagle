@@ -40,7 +40,7 @@ def cells_of(plugin) -> dict:
     if source is not None:
         cells = kernel_cells(source[0])
     elif "cells" in meta:
-        cells = {k: v["op"] for k, v in meta["cells"].items()}
+        cells = _planes(meta["cells"])
     elif "sample_sums" in meta:
         cells = {k: "sum" for k in meta["sample_sums"]}
     else:       # a raw plugin: a row plane and its companion
@@ -84,10 +84,8 @@ class CellRows:
             if op in ("sum", "mean"):
                 lo = self.rows[comp_name(name)] = xp.zeros(rows, dtype=dt)
                 self._steps.append(lower(reduce(hi, out, comp=lo, policy=policy), None))
-            elif op == "max":
-                self._steps.append(lower(reduce(hi, out, op="max"), None))
             else:
-                self._steps.append(lambda h=hi, o=out: xp.min(h, out=o))
+                self._steps.append(lower(reduce(hi, out, op=op), None))
         #: held from the launch to the read of the cell (the rows are shared)
         self.lock = threading.RLock()
 
@@ -107,7 +105,18 @@ class CellRows:
 
 def kernel_cells(kernel) -> dict:
     """``{cell plane: op}`` of a traced hawk kernel."""
-    return {k: v["op"] for k, v in getattr(kernel.walk, "cells", {}).items()}
+    return _planes(getattr(kernel.walk, "cells", {}))
+
+
+def _planes(cells) -> dict:
+    """``{plane: op}`` from hawk's ``{name: {op, columns}}``: a cell ``columns``
+    wide is the planes ``name_0 .. name_{columns-1}``."""
+    out = {}
+    for name, cell in cells.items():
+        width = cell.get("columns", 1)
+        out.update({name: cell["op"]} if width == 1
+                   else {f"{name}_{i}": cell["op"] for i in range(width)})
+    return out
 
 
 def _key(n, policy, xp, dtype):

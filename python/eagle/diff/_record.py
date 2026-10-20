@@ -232,6 +232,10 @@ class Recorder:
         self._graph = graph
         self.cells = {}
         graph._nodes = [_with_parameter_planes(n, self.cells) for n in graph._nodes]
+        self._by_key = {}  # "name" and "node.name" -> cells, so update() is one lookup per key
+        for (label, name), cell in self.cells.items():
+            self._by_key.setdefault(name, []).append(cell)
+            self._by_key.setdefault(f"{label}.{name}", []).append(cell)
         self._lock = threading.Lock()
         self._generation = 0
         self._live = None
@@ -274,10 +278,9 @@ class Recorder:
         parameter cells; refused while the last Record still needs them."""
         targets = []
         for key, value in values.items():
-            hit = [c for (label, name), c in self.cells.items()
-                   if key in (name, f"{label}.{name}")]
+            hit = self._by_key.get(key)
             if not hit:
-                known = sorted({n for _l, n in self.cells} | {f"{l}.{n}" for l, n in self.cells})
+                known = sorted(self._by_key)
                 raise ValueError(f"eagle.Graph.update: {key!r} is not a parameter of this "
                                  f"graph (parameters: {known})")
             targets += [(c, value) for c in hit]

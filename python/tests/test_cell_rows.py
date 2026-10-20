@@ -27,6 +27,11 @@ def cell_max(x: Scalar, t: Mutable[Scalar]):
 
 
 @hawk.kernel
+def cell_min(x: Scalar, t: Mutable[Scalar]):
+    t = hawk.all_samples(x).min()
+
+
+@hawk.kernel
 def sim_cell(x: Mutable[Scalar], s: Mutable[Scalar], terminated: Terminated):
     x = x + 1.0
     s = hawk.all_samples(x * x).sum()
@@ -51,6 +56,42 @@ def test_plan_run_returns_the_finished_sum_and_max(tmp_path, n):
     assert got.shape == (1,) and got[0] == (x * x).sum()
     got = pm.run(x=x)
     assert got.shape == (1,) and got[0] == (x * 1.5).max()
+
+
+@pytest.mark.parametrize("n", [1, 33, 1000])
+def test_plan_run_returns_a_vector_cell_one_plane_per_component(tmp_path, n):
+    def vcell(v: hawk.Vector[3], t: Mutable[hawk.Vector[3]]):
+        t = hawk.all_samples(v).sum(axis="samples")  # noqa: F841
+    try:
+        k = hawk.kernel(vcell)
+        k.walk.cells
+    except Exception:
+        pytest.skip("this hawk has no vector cells")
+    (p,) = eagle.plan.auto([k], targets=("host",), cache_dir=str(tmp_path))
+    v = np.random.default_rng(n).uniform(-2, 2, (3, n))
+    got = p.run(v=v)
+    np.testing.assert_allclose([got[f"t_{i}"][0] for i in range(3)], v.sum(axis=1), rtol=1e-12)
+
+
+@pytest.mark.parametrize("n", [1, 31, 33, 1000])
+def test_plan_run_returns_the_finished_min(tmp_path, n):
+    x = _x(n)
+    (p,) = eagle.plan.auto([cell_min], targets=("host",), cache_dir=str(tmp_path))
+    got = p.run(x=x)
+    assert got.shape == (1,) and got[0] == x.min()
+    x[n // 2] = -np.inf
+    assert p.run(x=x)[0] == -np.inf
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize("n", [1, 33, 1000])
+def test_plan_run_returns_the_finished_min_on_cuda(tmp_path, n):
+    cp = pytest.importorskip("cupy")
+    x = _x(n)
+    x[n // 2] = -np.inf if n > 1 else x[0]
+    (p,) = eagle.plan.auto([cell_min], targets=("cuda",), cache_dir=str(tmp_path))
+    got = p.run(x=cp.asarray(x))
+    assert got.shape == (1,) and float(got[0]) == x.min()
 
 
 def test_row_scratch_is_made_once_per_kernel_and_n(tmp_path):

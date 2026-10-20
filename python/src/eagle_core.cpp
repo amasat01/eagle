@@ -738,7 +738,7 @@ NB_MODULE(_core, m)
             std::int64_t columns, std::uintptr_t comp, bool pair) {
             if (n < 1 || columns < 1)
                 throw std::invalid_argument("reduce_canonical_host: n and columns must be >= 1");
-            if (op > EAGLE_BACKEND_REDUCE_OP_ALL || dtype > EAGLE_BACKEND_REDUCE_U8
+            if (op > EAGLE_BACKEND_REDUCE_OP_MIN || dtype > EAGLE_BACKEND_REDUCE_U8
                 || (op == EAGLE_BACKEND_REDUCE_OP_ALL) != (dtype == EAGLE_BACKEND_REDUCE_U8))
                 throw std::invalid_argument("reduce_canonical_host: unknown dtype/op, or U8 not paired with OP_ALL");
             const bool fsum = op == EAGLE_BACKEND_REDUCE_OP_SUM
@@ -772,10 +772,14 @@ NB_MODULE(_core, m)
                     o[j] = p.value();
                 }
             };
-            const bool sum = op == EAGLE_BACKEND_REDUCE_OP_SUM;
             auto go = [&](auto tag) {
                 using T = decltype(tag);
-                sum ? columnsOf(tag, aether::SumOp<T>{}) : columnsOf(tag, aether::MaxOp<T>{});
+                if (op == EAGLE_BACKEND_REDUCE_OP_SUM)
+                    columnsOf(tag, aether::SumOp<T>{});
+                else if (op == EAGLE_BACKEND_REDUCE_OP_MAX)
+                    columnsOf(tag, aether::MaxOp<T>{});
+                else
+                    columnsOf(tag, canon::MinOp<T>{});
             };
             switch (dtype) {
             case EAGLE_BACKEND_REDUCE_F32: go(float{}); break;
@@ -790,7 +794,7 @@ NB_MODULE(_core, m)
         "The canonical fixed-order reduction (leaves of 256 slots by 16 strided samples, an in-leaf "
         "tree, then pairwise levels) of each column of the row-major (n, columns) host plane at "
         "`in` into out[column]. dtype: 0 f32, 1 f64, 2 i32, 3 i64, 4 u8 (OP_ALL only); op: 0 sum, "
-        "1 max, 2 all. Float sums: `comp` is the companion plane (each term is in + comp) and "
+        "1 max, 2 all, 3 min. Float sums: `comp` is the companion plane (each term is in + comp) and "
         "`pair` writes hi[columns] then comp[columns] unrounded. The host runs the ordered policy "
         "for every policy; bitwise independent of the OpenMP thread count.");
 

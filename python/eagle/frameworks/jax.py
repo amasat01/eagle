@@ -72,6 +72,7 @@ from jax import extend as jex
 from jax.interpreters import ad, batching, mlir
 
 from .. import FINISHED_PLANE, _cell_rows
+from .._graph_reduce import POLICIES
 from ._kernel_planes import FUSED_STEPS, SAMPLE_ROLES, call_mode, promote
 from ._tower import LOCK, Level, finished_identity
 
@@ -116,7 +117,14 @@ class _Recipe(ctypes.Structure):
                 ("slot_cell", ctypes.POINTER(ctypes.c_uint8)),
                 ("index_bytes", ctypes.c_int32), ("nalias", ctypes.c_int32),
                 ("alias_operand", ctypes.POINTER(ctypes.c_int32)),
-                ("alias_result", ctypes.POINTER(ctypes.c_int32))]
+                ("alias_result", ctypes.POINTER(ctypes.c_int32)),
+                ("reduce", ctypes.c_uint64), ("ncells", ctypes.c_int32),
+                ("cell_row", ctypes.c_int32), ("policy", ctypes.c_int32),
+                ("cell_rows", ctypes.POINTER(ctypes.c_int32)),
+                ("cell_comp", ctypes.POINTER(ctypes.c_int32)),
+                ("cell_out", ctypes.POINTER(ctypes.c_int32)),
+                ("cell_op", ctypes.POINTER(ctypes.c_int32)),
+                ("work_a", ctypes.c_int32), ("work_b", ctypes.c_int32)]
 
 
 def function(kernel, *, wrt=None, cache_dir=None, device_arch=None):
@@ -398,13 +406,13 @@ class _Prim:
     # -- lowering -------------------------------------------------------------
     def _lower(self, platform, ctx, *args):
         mode, n = self._mode_n(ctx.avals_in)
+        device = platform == "cuda"
+        work = _work_elems(self.sig, n, mode) if device else 0
         digest = _register(self.level, self.owner, platform, mode)
-        conv = _convention(self.sig)
-        nrows = -(-n // _cell_rows.ROW)
-        # the rows sit in the first ``nrows`` of an n-sample plane (the handler sizes every
-        # per-sample slot at n)
-        shapes = [jax.ShapeDtypeStruct((n,) if r in self.sig.rows else self.sig.shape(r, n),
-                                       self.sig.dtype(r, mode))
+        conv = _convention(self.sig, device)
+        # a cell's rows sit in the first ceil(n / ROW) of an n-sample plane (the handler sizes every
+        # per-sample slot at n); the handler finishes them into the (1,) cell result
+        shapes = [jax.ShapeDtypeStruct(_result_shape(self.sig, r, n, work), _result_dtype(self.sig, r, mode))
                   for r in conv["results"]]
         call = jax.ffi.ffi_call(TARGET, shapes, input_output_aliases=conv["aliases"] or None)
 
@@ -414,11 +422,7 @@ class _Prim:
                 # little-endian int32 halves, since without x64 JAX has no int64
                 operands = (*operands, jnp.asarray([1, 0], np.int32))
             out = call(*operands, digest=digest)
-            return [_finish(self.sig.cells[o], out[conv["rows"][o][0]][:nrows],
-                            None if conv["rows"][o][1] is None
-                            else out[conv["rows"][o][1]][:nrows])
-                    if o in conv["rows"] else out[i]
-                    for o, i in zip(self.sig.outputs, conv["visible"])]
+            return [out[i] for i in conv["visible"]]
 
         return mlir.lower_fun(run, multiple_results=True)(ctx, *args)
 
@@ -554,42 +558,65 @@ def _carried(sig):
     return sig.state
 
 
-def _finish(op, rows, comp):
-    """The (1,) cell of a reduction over samples from its rows (and companions)."""
-    if op in ("sum", "mean"):
-        return (jnp.sum(rows) + jnp.sum(comp)).reshape(1)
-    return (jnp.max(rows) if op == "max" else jnp.min(rows)).reshape(1)
+def _result_dtype(sig, name, mode):
+    """The element type of a result of the call: the cells and the work results are float."""
+    if isinstance(name, tuple):
+        return sig.dtype(next(iter(sig.cells)), mode)
+    return sig.dtype(name, mode)
 
 
-def _convention(sig):
+def _result_shape(sig, name, n, work):
+    """The shape of a result: a cell's (1,), a work buffer's own, the rows' n samples."""
+    if isinstance(name, tuple):
+        return (1,) if name[0] == "cell" else (work,)
+    return (n,) if name in sig.rows else sig.shape(name, n)
+
+
+def _work_elems(sig, n, mode):
+    """Elements each CUDA reduction work result holds (0 with no cells)."""
+    if not sig.cells:
+        return 0
+    from .. import _core
+
+    dtype = 0 if sig.dtype(next(iter(sig.cells)), mode) == np.float32 else 1
+    return int(_core.reduce_canonical_device(0, -(-n // _cell_rows.ROW), dtype, 0, 0, 0, 0, 0, -1,
+                                             _POLICY, 1))
+
+
+def _convention(sig, device=False):
     """Operands, FFI results, the visible results and the mask alias of ``sig``:
     operands = its inputs; results = its output planes, then the
-    ``finished_count`` cell (zeroed, discarded), then the finished mask. The
+    ``finished_count`` cell (zeroed, discarded), then the finished mask. A cell's
+    rows stay results; each cell adds a (1,) result the handler finishes them into,
+    and a CUDA call (``device``) two reduction work results. The
     finished mask and every carried-state plane alias their operand and are never
     zeroed: a sample the kernel does not write (a terminated one) keeps its input
     value. A pure output is zero where the kernel does not write."""
     planes = [o for o in sig.outputs if o != sig.terminated or not sig.finishes]
     planes += sorted(sig.rows - set(sig.cells))      # the cells' companion rows
+    planes += [("cell", o) for o in sig.cells] + ([("work", 0), ("work", 1)] if device and sig.cells else [])
     results = planes + ([FINISHED_PLANE] if sig.counter else []) + (
         [sig.terminated] if sig.finishes else [])
-    visible = [results.index(o) for o in sig.outputs]
-    #: a cell's result is its rows; the call finishes them into the cell
-    rows = {o: (results.index(o), results.index(_cell_rows.comp_name(o)) if
-                _cell_rows.comp_name(o) in results else None) for o in sig.cells}
+    visible = [results.index(("cell", o) if o in sig.cells else o) for o in sig.outputs]
+    #: a cell: (rows, companion rows or None, the cell result, op)
+    cells = [(results.index(o), results.index(_cell_rows.comp_name(o)) if
+              _cell_rows.comp_name(o) in results else None, results.index(("cell", o)),
+              sig.cells[o]) for o in sig.cells]
     aliases = {sig.inputs.index(s): results.index(s) for s in _carried(sig)}
     if sig.finishes:
         aliases[sig.inputs.index(sig.terminated)] = len(results) - 1
     return {"operands": list(sig.inputs) + ([FUSED_STEPS] if sig.fused else []),
-            "results": results, "visible": visible, "rows": rows,
+            "results": results, "visible": visible, "cells": cells,
+            "work": [results.index(("work", k)) for k in range(2 if device and sig.cells else 0)],
             "aliases": aliases}
 
 
-def _recipe_fields(level, artifact, mode):
+def _recipe_fields(level, artifact, mode, device=False):
     """The platform-free half of ``level``'s recipe, from its built sidecar."""
     from hawk.runtime import descriptor_for_sidecar
 
     sig = level.sig
-    conv = _convention(sig)
+    conv = _convention(sig, device)
     sidecar = artifact.sidecar
     spec = [tuple(p) for p in sidecar["arg_spec"]]
     if spec != list(sig.arg_spec):
@@ -600,12 +627,13 @@ def _recipe_fields(level, artifact, mode):
     declared = sidecar.get("arg_dtypes", {})
     dtype = []
     for name in ops + rets:
-        dt = sig.dtype(name, mode)
-        if name in declared and name != FINISHED_PLANE and np.dtype(declared[name]) != dt:
+        dt = _result_dtype(sig, name, mode)
+        if not isinstance(name, tuple) and name in declared and name != FINISHED_PLANE and np.dtype(declared[name]) != dt:
             raise RuntimeError(f"{_WHO}: {level.label}: slot {name!r} is built as "
                                f"{declared[name]}, the bridge expects {dt.name}")
         dtype.append(_XLA_DTYPE[np.dtype(np.int32) if name == FUSED_STEPS else dt])
-    zero = [0 if (sig.finishes and r == sig.terminated) or r in _carried(sig) else 1 for r in rets]
+    zero = [0 if (sig.finishes and r == sig.terminated) or r in _carried(sig) or isinstance(r, tuple) else 1
+            for r in rets]
     slot_kind, slot_buffer, slot_cell = [], [], []
     for (role, name), kind in zip(spec, kinds):
         if kind not in _SLOT:
@@ -632,6 +660,10 @@ def _recipe_fields(level, artifact, mode):
     return {"nargs": len(ops), "nrets": len(rets), "dtype": dtype, "zero": zero,
             "slot_kind": slot_kind, "slot_buffer": slot_buffer, "slot_cell": slot_cell,
             "sample_buffer": sample,
+            #: buffer indices (operands, then results)
+            "cells": [(len(ops) + r, -1 if c is None else len(ops) + c, len(ops) + o, _CELL_OP[op])
+                      for r, c, o, op in conv["cells"]],
+            "work": [len(ops) + w for w in conv["work"]],
             "aliases": sorted(conv["aliases"].items()),
             "index_bytes": int(hawk_core.build_info()["index_type_bytes"])}
 
@@ -657,6 +689,14 @@ def _install(digest, fields, *, platform, entry, ordinal=0, block=256, function=
     r.slot_kind, r.slot_buffer, r.slot_cell = (arr["slot_kind"], arr["slot_buffer"],
                                               u8["slot_cell"])
     r.index_bytes = fields["index_bytes"]
+    cells = fields["cells"]
+    cols = {k: (ctypes.c_int32 * max(1, len(cells)))(*[c[i] for c in cells])
+            for i, k in enumerate(("cell_rows", "cell_comp", "cell_out", "cell_op"))}
+    r.ncells, r.cell_row, r.policy = len(cells), _cell_rows.ROW, _POLICY
+    r.cell_rows, r.cell_comp, r.cell_out, r.cell_op = (cols[k] for k in ("cell_rows", "cell_comp", "cell_out", "cell_op"))
+    r.work_a, r.work_b = fields["work"] or (-1, -1)
+    if seam is not None:
+        r.reduce = seam["reduce"]
     pairs = fields["aliases"]
     a_op, a_res = [(ctypes.c_int32 * max(1, len(pairs)))(*column) for column in zip(*pairs)] or [None, None]
     r.nalias, r.alias_operand, r.alias_result = len(pairs), a_op, a_res
@@ -690,7 +730,7 @@ def _register(level, owner, platform, mode):
             unit = level.unit(owner._dir, "cuda", mode, arch)
             plugin = _load_device(unit, level.name, ordinal)
             digest = f"{unit.digest}/{level.name}/{mode}/cuda-{arch}"
-            fields = _recipe_fields(level, level.artifact(unit), mode)
+            fields = _recipe_fields(level, level.artifact(unit), mode, device=True)
             _install(digest, fields, platform="cuda", entry=seam["run"], ordinal=ordinal,
                      function=plugin.device_function, seam=seam)
             level.slots[("keep", platform, mode)] = plugin
@@ -768,6 +808,11 @@ def _xla_library():
 
 _TARGETS = set()
 
+#: the cells' ops as the handler's EAGLE_XLA_CELL_* (mean rows already carry 1/n)
+_CELL_OP = MappingProxyType({"sum": 0, "mean": 0, "max": 1, "min": 2})
+#: no ``policy=`` door on the bridge yet: eagle.reduce's default
+_POLICY = POLICIES["compensated"]
+
 
 def _xla(platform="cpu"):
     """``libeagle_xla.so``, its FFI target registered for ``platform`` once."""
@@ -800,7 +845,8 @@ def _seam():
                    for key, sym in (("run", "eagle_backend_run_device"),
                                     ("last_error", "eagle_backend_last_error"),
                                     ("memset", "eagle_backend_memset_device"),
-                                    ("memcpy", "eagle_backend_memcpy_device"))}
+                                    ("memcpy", "eagle_backend_memcpy_device"),
+                                    ("reduce", "eagle_backend_x_reduce_canonical"))}
         except AttributeError as err:
             raise BackendUnavailable(
                 f"{_WHO}: the CUDA backend {info['path']} predates the JAX bridge "

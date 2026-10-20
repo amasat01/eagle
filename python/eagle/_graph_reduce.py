@@ -30,6 +30,7 @@ _OPS = {
     "sum": (0, ("float32", "float64", "int32", "int64")),
     "max": (1, ("float32", "float64", "int32", "int64")),
     "all": (2, ("bool",)),
+    "min": (3, ("float32", "float64", "int32", "int64")),
 }
 #: numpy dtype name -> core dtype code (bool is one byte, reduced as u8)
 _DTYPES = {"float32": 0, "float64": 1, "int32": 2, "int64": 3, "bool": 4}
@@ -59,12 +60,12 @@ def reduce(x, out, *, op: str = "sum", comp=None, policy: str = "compensated") -
     Args:
         x: the plane to reduce, a contiguous numpy or cupy array with at least
             one sample: 1-D ``(n,)``, or 2-D ``(rows, N)`` reduced column by
-            column. Floating-point and integer planes take ``"sum"`` and
-            ``"max"``; a ``bool`` plane takes ``"all"``.
+            column. Floating-point and integer planes take ``"sum"``,
+            ``"max"`` and ``"min"``; a ``bool`` plane takes ``"all"``.
         out: a contiguous array of the same dtype on the same backend, shape
             ``(1,)`` for a 1-D ``x`` and ``(N,)`` for a 2-D one; it receives
             the result.
-        op: ``"sum"``, ``"max"`` or ``"all"`` (numpy's names).
+        op: ``"sum"``, ``"max"``, ``"min"`` or ``"all"`` (numpy's names).
         comp: the companion plane of a floating-point sum, same shape and
             dtype as ``x``: each term is the pair ``x + comp`` (rows of
             (hi, comp) partials), finished together.
@@ -181,7 +182,7 @@ def _transpose(node, incoming, ctx):
             "eagle does not pull back yet; only a 1-D op='sum' reduce reverses")
     if op != _OPS["sum"][0]:
         raise ValueError(
-            f"eagle.diff.Reverse: node {ctx.label!r} is a 'max' or 'all' reduce, "
+            f"eagle.diff.Reverse: node {ctx.label!r} is a 'max', 'min' or 'all' reduce, "
             "which has no gradient eagle can pull back (a tie has no single "
             "answer); only op='sum' reverses")
     from .diff import broadcast_adjoint

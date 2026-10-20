@@ -86,6 +86,7 @@ def test_gpu_columns_equal_cpu_and_flat(dtype, rows, cols):
 
 
 @pytest.mark.parametrize("op,dtype", [("max", np.float64), ("max", np.int32),
+                                      ("min", np.float64), ("min", np.int32),
                                       ("sum", np.int64), ("all", np.bool_)])
 def test_gpu_exact_ops_equal_cpu(op, dtype):
     rng = np.random.default_rng(4)

@@ -71,6 +71,12 @@ def drag(v: Vector[3], cd: Param, terminated: Terminated, a: Mutable[Vector[3]])
     a = -cd * sqrt(dot(v, v)) * v
 
 
+if hasattr(hawk, "all_samples"):
+    @hawk.kernel
+    def cell_min(x: Scalar, t: Mutable[Scalar]):
+        t = hawk.all_samples(x).min()  # noqa: F841
+
+
 @hawk.kernel
 def vec_sum(v: Vector[3], w: Vector[3], a: Mutable[Vector[3]]):
     a = v + w
@@ -434,6 +440,22 @@ def test_wrt_empty_wraps_a_state_kernel_forward_only(tmp_path, platform):
         assert batched.shape == (2, 4)
         with pytest.raises(NotImplementedError, match="count_up.*forward-only"):
             jax.grad(lambda k: K(2.5, m, k)[0].sum())(k)
+
+
+@pytest.mark.parametrize("platform", PLATFORMS)
+@pytest.mark.parametrize("jit", [False, True])
+def test_min_cell_is_the_exact_minimum(tmp_path, platform, jit):
+    if not hasattr(hawk, "all_samples"):
+        pytest.skip("this hawk has no reductions over samples")
+    for n in (1, 33, 1000):
+        x = np.random.default_rng(n).uniform(-5, 5, n)
+        with jax.default_device(_device(platform)):
+            K = eagle_jax.function(cell_min, wrt=(), cache_dir=tmp_path)
+            f = jax.jit(K) if jit else K
+            got = np.asarray(f(jnp.asarray(x)))
+            assert got.shape == (1,) and got[0] == x.min()
+            x[n // 2] = -np.inf
+            assert np.asarray(f(jnp.asarray(x)))[0] == -np.inf
 
 
 @pytest.mark.parametrize("platform", PLATFORMS)

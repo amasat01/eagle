@@ -185,12 +185,13 @@ def test_sum_differs_from_a_left_fold():
 
 
 @pytest.mark.parametrize("op,dtype", [("max", np.float64), ("max", np.int32),
+                                      ("min", np.float64), ("min", np.int32),
                                       ("sum", np.int64), ("all", np.bool_)])
 def test_exact_ops_match_numpy(op, dtype):
     rng = np.random.default_rng(3)
     x = (rng.integers(-1000, 1000, 5003) if dtype is not np.bool_
          else rng.random(5003) > 0.001).astype(dtype)
-    want = {"max": x.max, "sum": x.sum, "all": x.all}[op]()
+    want = {"max": x.max, "min": x.min, "sum": x.sum, "all": x.all}[op]()
     assert _run(x, op) == want
     assert _run(x.reshape(-1, 1), op)[0] == want
 
@@ -243,7 +244,7 @@ def test_two_reduces_of_one_plane_share_no_edge():
 
 
 @pytest.mark.parametrize("make,exc,match", [
-    (lambda: eagle.reduce(np.zeros(4), np.zeros(1), op="prod"), ValueError, r"'prod'.*\['all', 'max', 'sum'\]"),
+    (lambda: eagle.reduce(np.zeros(4), np.zeros(1), op="prod"), ValueError, r"'prod'.*\['all', 'max', 'min', 'sum'\]"),
     (lambda: eagle.reduce(np.zeros(4), np.zeros(1), op="all"), TypeError, "bool"),
     (lambda: eagle.reduce(np.zeros(4, np.bool_), np.zeros(1, np.bool_)), TypeError, "float32"),
     (lambda: eagle.reduce(np.zeros((2, 2, 2)), np.zeros(1)), ValueError, "1-D sample plane or a 2-D"),

@@ -56,6 +56,20 @@ TEST_F(CanonicalReduceTest, CUDA_SumEqualsHost_Bitwise)
     }
 }
 
+TEST_F(CanonicalReduceTest, CUDA_MinEqualsHost_Bitwise)
+{
+    for (idx_t n : sizes()) {
+        auto x = corpus<double>(n, 99 + n);
+        x[n / 2] = -std::numeric_limits<double>::infinity();
+        if (n > 3)
+            x[n / 3] = std::numeric_limits<double>::quiet_NaN();
+        VecIn<double> in { x.data() };
+        EXPECT_TRUE(sameBits((deviceCanonical<double, canon::MinOp<double>>(x)),
+            (canon::reduce<double, canon::MinOp<double>>(in, n))))
+            << "n=" << n;
+    }
+}
+
 TEST_F(CanonicalReduceTest, CUDA_SumEqualsHost_Float_Bitwise)
 {
     for (idx_t n : { idx_t(257), idx_t(70001), idx_t(300000) }) {

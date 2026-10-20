@@ -1248,7 +1248,7 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_x_reduce_canonical(struct e
         if (d.n < 1)
             throw std::invalid_argument(std::string(who) + ": n must be >= 1");
         const bool all = d.op == EAGLE_BACKEND_REDUCE_OP_ALL;
-        if (d.op > EAGLE_BACKEND_REDUCE_OP_ALL || d.dtype > EAGLE_BACKEND_REDUCE_U8)
+        if (d.op > EAGLE_BACKEND_REDUCE_OP_MIN || d.dtype > EAGLE_BACKEND_REDUCE_U8)
             throw std::invalid_argument(std::string(who) + ": unknown dtype or op");
         if (all != (d.dtype == EAGLE_BACKEND_REDUCE_U8))
             throw std::invalid_argument(std::string(who) + ": the U8 element type goes with OP_ALL, and only with it");
@@ -1274,22 +1274,19 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_x_reduce_canonical(struct e
         bracketed(who, "enqueue", [&] {
             const auto stream = seamStream(d.stream);
             using namespace aether;
-            const bool sum = d.op == EAGLE_BACKEND_REDUCE_OP_SUM;
+            const auto go = [&](auto tag) {
+                using T = decltype(tag);
+                switch (d.op) {
+                case EAGLE_BACKEND_REDUCE_OP_SUM: reduceCanonical<T, SumOp<T>>(d, e, stream); break;
+                case EAGLE_BACKEND_REDUCE_OP_MAX: reduceCanonical<T, MaxOp<T>>(d, e, stream); break;
+                default: reduceCanonical<T, eagle::reduce::canonical::MinOp<T>>(d, e, stream);
+                }
+            };
             switch (d.dtype) {
-            case EAGLE_BACKEND_REDUCE_F32:
-                sum ? reduceCanonical<float, SumOp<float>>(d, e, stream) : reduceCanonical<float, MaxOp<float>>(d, e, stream);
-                break;
-            case EAGLE_BACKEND_REDUCE_F64:
-                sum ? reduceCanonical<double, SumOp<double>>(d, e, stream) : reduceCanonical<double, MaxOp<double>>(d, e, stream);
-                break;
-            case EAGLE_BACKEND_REDUCE_I32:
-                sum ? reduceCanonical<std::int32_t, SumOp<std::int32_t>>(d, e, stream)
-                    : reduceCanonical<std::int32_t, MaxOp<std::int32_t>>(d, e, stream);
-                break;
-            case EAGLE_BACKEND_REDUCE_I64:
-                sum ? reduceCanonical<std::int64_t, SumOp<std::int64_t>>(d, e, stream)
-                    : reduceCanonical<std::int64_t, MaxOp<std::int64_t>>(d, e, stream);
-                break;
+            case EAGLE_BACKEND_REDUCE_F32: go(float{}); break;
+            case EAGLE_BACKEND_REDUCE_F64: go(double{}); break;
+            case EAGLE_BACKEND_REDUCE_I32: go(std::int32_t{}); break;
+            case EAGLE_BACKEND_REDUCE_I64: go(std::int64_t{}); break;
             default:
                 reduceCanonical<std::uint8_t, LogicalAndOp>(d, e, stream);
             }
