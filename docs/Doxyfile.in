@@ -221,6 +221,7 @@ PREDEFINED             = __device__= \
                          AETHER_HOST(...)= \
                          AETHER_DEVICEANDHOST(...)= \
                          AETHER_DEVICEHOST(...)= \
+                         AETHER_FORCEINLINE(...)=inline \
                          AETHER_NOINLINE(...)= \
                          AETHER_KERNEL(...)= \
                          AETHER_GRID_CONSTANT(...)=const \
