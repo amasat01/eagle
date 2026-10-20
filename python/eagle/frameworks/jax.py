@@ -71,8 +71,9 @@ import numpy as np
 from jax import extend as jex
 from jax.interpreters import ad, batching, mlir
 
-from .. import FINISHED_PLANE, _cell_rows
+from .. import FINISHED_PLANE, _cell_rows, _split
 from .._graph_reduce import POLICIES
+from .._graph_reduce import fixed_f64 as _fixed_f64
 from ._kernel_planes import FUSED_STEPS, SAMPLE_ROLES, call_mode, promote
 from ._tower import LOCK, Level, finished_identity
 
@@ -324,8 +325,10 @@ def node(fn, *, reads, writes, name=None):
         if stream is not None:
             retain.prune()
         code = None if stream is None else stream.ptr
-        out = fn(*(jax.dlpack.from_dlpack(import_buffer(a, stream=code))
-                   for a in reads.values()))
+        with _on_device(ordinal):               # a previous call left JAX's device current
+            args = [jax.dlpack.from_dlpack(import_buffer(a, stream=code))
+                    for a in reads.values()]
+        out = fn(*args)
         out = out if isinstance(out, (tuple, list)) else (out,)
         if len(out) != len(writes):
             raise ValueError(f"{_WHO}.node: fn returned {len(out)} array(s) for "
@@ -362,10 +365,16 @@ class _Prim:
         self.level, self.owner = level, owner
         sig = level.sig
         self.sig = sig
+        #: a kernel hawk splits in stages lowers to one ordinary call per stage,
+        #: each stage's cells passed to the next as one-cell planes
+        self.stages = tuple(Level(k, wrt=(), who=_WHO, label=f"{level.label} ({k.name})")
+                            for k in _split.kernels_of(level.kernel))
         p = jex.core.Primitive(f"eagle_{level.name}")
         p.multiple_results = True
-        eager = jax.jit(lambda *a: p.bind(*a))
-        p.def_impl(lambda *a: eager(*a))
+        # ``n``: the sample count, given when no input plane is per sample (the
+        # vjp of a kernel whose only output is a cell reads the cell's cotangent)
+        eager = jax.jit(lambda *a, n=None: p.bind(*a, n=n), static_argnames=("n",))
+        p.def_impl(lambda *a, n=None: eager(*a, n=n))
         p.def_abstract_eval(self._abstract)
         ad.primitive_jvps[p] = self._jvp
         if level.kind == "jvp":
@@ -375,16 +384,17 @@ class _Prim:
         mlir.register_lowering(p, functools.partial(self._lower, "cuda"), platform="cuda")
         self.prim = p
 
-    def __call__(self, *operands):
-        return self.prim.bind(*operands)
+    def __call__(self, *operands, n=None):
+        return self.prim.bind(*operands, n=n)
 
     # -- shapes ---------------------------------------------------------------
-    def _mode_n(self, avals):
+    def _mode_n(self, avals, n=None):
         sig = self.sig
+        given = n
         mode = call_mode(f"{_WHO} {self.level.label}",
                          [(n, a.dtype) for n, a in zip(sig.inputs, avals) if sig.is_float(n)])
         n = next((a.shape[-1] for nm, a in zip(sig.inputs, avals)
-                  if (sig.role[nm] in SAMPLE_ROLES or nm in sig.state) and a.ndim), None)
+                  if (sig.role[nm] in SAMPLE_ROLES or nm in sig.state) and a.ndim), given)
         if n is None:
             raise ValueError(f"{_WHO}: {self.level.label!r} needs a per-sample input plane")
         for name, a in zip(sig.inputs, avals):
@@ -398,38 +408,54 @@ class _Prim:
                                 f"{dt.name} in a {mode} call, got {np.dtype(a.dtype).name}")
         return mode, n
 
-    def _abstract(self, *avals):
-        mode, n = self._mode_n(avals)
+    def _abstract(self, *avals, n=None):
+        mode, n = self._mode_n(avals, n)
         return [jax.core.ShapedArray(self.sig.shape(o, n), self.sig.dtype(o, mode))
                 for o in self.sig.outputs]
 
     # -- lowering -------------------------------------------------------------
-    def _lower(self, platform, ctx, *args):
-        mode, n = self._mode_n(ctx.avals_in)
+    def _lower(self, platform, ctx, *args, n=None):
+        mode, n = self._mode_n(ctx.avals_in, n)
+        if not self.stages:
+            run = self._ffi(self.level, platform, mode, n)
+        else:
+            calls = [(st, self._ffi(st, platform, mode, n)) for st in self.stages]
+
+            def run(*operands):
+                values = dict(zip(self.sig.inputs, operands))
+                for st, call in calls:
+                    values.update(zip(st.sig.outputs, call(*(values[x] for x in st.sig.inputs))))
+                return [values[o] for o in self.sig.outputs]
+
+        return mlir.lower_fun(run, multiple_results=True)(ctx, *args)
+
+    def _ffi(self, level, platform, mode, n):
+        """One kernel's FFI call: its input planes in, its outputs out."""
+        sig = level.sig
         device = platform == "cuda"
-        work = _work_elems(self.sig, n, mode) if device else 0
-        digest = _register(self.level, self.owner, platform, mode)
-        conv = _convention(self.sig, device)
+        work = _work_elems(sig, n, mode) if device else 0
+        digest = _register(level, self.owner, platform, mode)
+        conv = _convention(sig, device)
         # a cell's rows sit in the first ceil(n / ROW) of an n-sample plane (the handler sizes every
         # per-sample slot at n); the handler finishes them into the (1,) cell result
-        shapes = [jax.ShapeDtypeStruct(_result_shape(self.sig, r, n, work), _result_dtype(self.sig, r, mode))
+        shapes = [jax.ShapeDtypeStruct(_result_shape(sig, r, n, work), _result_dtype(sig, r, mode))
                   for r in conv["results"]]
         call = jax.ffi.ffi_call(TARGET, shapes, input_output_aliases=conv["aliases"] or None)
 
         def run(*operands):
-            if self.sig.fused:
+            if sig.fused:
                 # the step-count word, always 1: an int64 cell. Passed as its two
                 # little-endian int32 halves, since without x64 JAX has no int64
                 operands = (*operands, jnp.asarray([1, 0], np.int32))
             out = call(*operands, digest=digest)
             return [out[i] for i in conv["visible"]]
 
-        return mlir.lower_fun(run, multiple_results=True)(ctx, *args)
+        return run
 
     # -- forward mode ----------------------------------------------------------
-    def _jvp(self, primals, tangents):
+    def _jvp(self, primals, tangents, *, n=None):
         level, sig = self.level, self.sig
-        outs = self.prim.bind(*primals)
+        outs = self.prim.bind(*primals, n=n)
         by = dict(zip(sig.inputs, primals))
         live = [(n, t) for n, t in zip(sig.inputs, tangents)
                 if n in level.wrt and type(t) is not ad.Zero]
@@ -448,7 +474,7 @@ class _Prim:
         for w in level.wrt:
             p = by[w]
             by[names[w]] = given.get(w, jnp.zeros(p.shape, p.dtype))
-        touts = _primitive(derived, self.owner)(*(by[n] for n in derived.sig.inputs))
+        touts = _primitive(derived, self.owner)(*(by[k] for k in derived.sig.inputs), n=n)
         res = []
         for o, z in zip(sig.outputs, zero_out):
             t = names.get(o) if o != sig.terminated else None
@@ -456,8 +482,12 @@ class _Prim:
         return outs, res
 
     # -- reverse mode: the transpose of a jvp level is the vjp of its base ------
-    def _transpose(self, cts, *args):
+    def _transpose(self, cts, *args, n=None):
         level = self.level
+        # the vjp may read no per-sample plane (a cell's cotangent only): it is
+        # told the sample count this call ran over
+        _, n = self._mode_n([a.aval if ad.is_undefined_primal(a) else jax.typeof(a)
+                             for a in args], n)
         base = level.base
         tangent_of = {d: w for w, d in base.names("jvp").items() if w in base.wrt}
         known = {}
@@ -496,7 +526,7 @@ class _Prim:
             raise NotImplementedError(
                 f"{_WHO}: transposing {level.label!r} needs {missing}, which are "
                 "not known primal values here")
-        grads = _primitive(reverse, self.owner)(*(by[n] for n in reverse.sig.inputs))
+        grads = _primitive(reverse, self.owner)(*(by[k] for k in reverse.sig.inputs), n=n)
         res = []
         for name, a in zip(level.sig.inputs, args):
             if not ad.is_undefined_primal(a):
@@ -515,7 +545,7 @@ class _Prim:
         return res
 
     # -- vmap -----------------------------------------------------------------
-    def _batch(self, args, dims):
+    def _batch(self, args, dims, *, n=None):
         sig = self.sig
         size = next(a.shape[d] for a, d in zip(args, dims) if d is not None)
         # a batched cell input, or a cell output (a sum over the folded samples), cannot fold
@@ -526,7 +556,7 @@ class _Prim:
 
             def one(xs):
                 return self.prim.bind(*(x if x is not None else a
-                                        for x, a in zip(xs, args)))
+                                        for x, a in zip(xs, args)), n=n)
 
             outs = jax.lax.map(one, moved)
             return outs, [0] * len(outs)
@@ -540,7 +570,7 @@ class _Prim:
             else:
                 a = jnp.moveaxis(a, d, -1)
             folded.append(a.reshape(a.shape[:-2] + (a.shape[-2] * size,)))
-        outs = self.prim.bind(*folded)
+        outs = self.prim.bind(*folded, n=None if n is None else n * size)
         res = [o.reshape(o.shape[:-1] + (o.shape[-1] // size, size)) for o in outs]
         return res, [o.ndim - 1 for o in res]
 
@@ -692,7 +722,9 @@ def _install(digest, fields, *, platform, entry, ordinal=0, block=256, function=
     cells = fields["cells"]
     cols = {k: (ctypes.c_int32 * max(1, len(cells)))(*[c[i] for c in cells])
             for i, k in enumerate(("cell_rows", "cell_comp", "cell_out", "cell_op"))}
-    r.ncells, r.cell_row, r.policy = len(cells), _cell_rows.ROW, _POLICY
+    # the host finishes float64 sums with the machine GPU's arithmetic (bitwise host == device)
+    fixed = platform == "cpu" and fields["cells"] and _fixed_f64()
+    r.ncells, r.cell_row, r.policy = len(cells), _cell_rows.ROW, _POLICY | (_FIXED_F64 if fixed else 0)
     r.cell_rows, r.cell_comp, r.cell_out, r.cell_op = (cols[k] for k in ("cell_rows", "cell_comp", "cell_out", "cell_op"))
     r.work_a, r.work_b = fields["work"] or (-1, -1)
     if seam is not None:
@@ -812,6 +844,8 @@ _TARGETS = set()
 _CELL_OP = MappingProxyType({"sum": 0, "mean": 0, "max": 1, "min": 2})
 #: no ``policy=`` door on the bridge yet: eagle.reduce's default
 _POLICY = POLICIES["compensated"]
+#: EAGLE_XLA_POLICY_FIXED_F64 (eagle_xla.h)
+_FIXED_F64 = 0x100
 
 
 def _xla(platform="cpu"):

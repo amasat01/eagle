@@ -114,6 +114,12 @@ def e4_gather(table: hawk_trace.Table[hawk_trace.Scalar], where: hawk_trace.Inde
 
 
 @hawk_trace.kernel
+def e4_energy(v: hawk_trace.Vector[W], total: hawk_trace.Mutable[hawk_trace.Scalar]):
+    """A sum over samples, finished into one cell."""
+    total = all_samples(hawk_math.dot(v, v)).sum()
+
+
+@hawk_trace.kernel
 def e4_scatter(x: hawk_trace.Scalar, lane: hawk_trace.Index,
                acc: hawk_trace.Mutable[hawk_trace.Scalar]):
     """``cross_sample_write``: a by-key plane that is read-modify-written, so
@@ -161,6 +167,11 @@ def gather_unit(tmp_path_factory):
 @pytest.fixture(scope="module")
 def gather_host_unit(tmp_path_factory):
     return _bundle(e4_gather, tmp_path_factory, "gather_host", ("host",))
+
+
+@pytest.fixture(scope="module")
+def energy_host_unit(tmp_path_factory):
+    return _bundle(e4_energy, tmp_path_factory, "energy_host", ("host",))
 
 
 @pytest.fixture(scope="module")
@@ -235,7 +246,7 @@ def _host_subject(unit, name):
     view = hawk_artifact.plan_view(_sidecar(unit, name))
     entry = getattr(lib, view.pop("host_entry"))
     return SimpleNamespace(host_entry=ctypes.cast(entry, ctypes.c_void_p).value,
-                           _keepalive=lib, **view)
+                           _keepalive=lib, _meta=_sidecar(unit, name), **view)
 
 
 # --------------------------------------------------------------------------- #
@@ -372,6 +383,27 @@ def test_a_lookup_handle_carries_the_planes_own_length_not_the_sample_count():
     assert table_h.samples == 21, "the table's own length, not the sample count"
     assert where_h.samples == N, "a per-sample plane still spans the run"
     assert table_h.deviceType == DEVICE_CPU and table_h.stride == 1
+
+
+def test_a_cells_kernel_runs_by_name_and_refuses_a_rank_partition(energy_host_unit):
+    """The cell is the plane the caller reads, by name; the rows are eagle's own
+    scratch. Partitions that each cover whole rows land in the same rows, so the
+    cell is the single run's bit for bit. Folding cells across ranks is not in
+    this release, so a rank partition is refused by name."""
+    import eagle.exec as eexec
+    from eagle import plan as eplan
+
+    plugin = _host_subject(energy_host_unit, "e4_energy")
+    n = 160
+    v = np.random.default_rng(5).uniform(-1.0, 1.0, (W, n))
+    whole = eplan.plan(plugin, structure=eexec.HostTeam).run(v=v)
+    assert whole.shape == (1,)
+    split = eplan.plan(plugin, structure=eexec.HostTeam,
+                       partitions=[(0, 64, n), (64, 96, n)]).run(v=v)
+    np.testing.assert_array_equal(split, whole)
+    np.testing.assert_allclose(whole, (v * v).sum(), rtol=1e-14)
+    with pytest.raises(ValueError, match="e4_energy' reduces over samples"):
+        eplan.plan(plugin, structure=eexec.RankPartition)
 
 
 def test_a_bound_host_team_launch_equals_plan_run_bit_for_bit(vec3_unit):

@@ -29,6 +29,7 @@ import warnings
 import numpy as np
 
 from . import _dispatch_policy as _policy
+from . import _split
 from . import exec as eexec
 from ._active_set import STALE_MAX, ActiveSet
 from ._compat import zip_strict
@@ -234,6 +235,7 @@ def time_launch(bound, reps: int, fused_steps: int = 1) -> list:
     from . import _core
     from ._plan_binding import DEVICE_CUDA
 
+    _split.single(bound, "eagle dispatch timing")
     word = bound._planes.get(FUSED_STEPS_PLANE) if isinstance(bound._planes, dict) else None
     if word is not None:
         word[...] = fused_steps
@@ -409,7 +411,8 @@ class DispatchRunner:
                  if hasattr(a, "shape") and a.shape[-1:] == (n,) and a is not self._mask
                  and a is not self._cls}
         self._aset.own(*owned.values())
-        self._units = [self._bind(AutoPlan(p, {}), extra) for p in self._unit_plugins]
+        self._units = [_split.single(self._bind(AutoPlan(p, {}), extra), "eagle dispatch")
+                       for p in self._unit_plugins]
         self._sweep = None if self._static else self._bind(self._sweep_plan)
         self._run_len = np.zeros(k, dtype=np.int64)
         self._blocks = [256] * k

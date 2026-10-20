@@ -18,6 +18,7 @@
 #include <mutex>
 #include <shared_mutex>
 #include <string>
+#include <type_traits>
 #include <string_view>
 #include <unordered_map>
 #include <vector>
@@ -85,6 +86,7 @@ struct Recipe {
     std::vector<std::uint8_t> slotCell;
     std::vector<std::int32_t> aliasOperand, aliasResult;
     std::int32_t cellRow = 1, policy = 0, workA = -1, workB = -1;
+    bool fixedF64 = false; // host float64 sum cells take the fixed-point leaf
     std::vector<std::int32_t> cellRows, cellComp, cellOut, cellOp;
 };
 
@@ -266,6 +268,15 @@ void finishCellHost(const Recipe& r, const std::vector<View>& views, std::size_t
     const auto n = static_cast<eagle::idx_t>(nrows);
     if (r.cellOp[c] == EAGLE_XLA_CELL_SUM) {
         const canon::Column<Ptr> x{ { rows }, 1, 0 };
+        if constexpr (std::is_same_v<T, double>) {
+            if (r.fixedF64) {
+                using P = canon::FixedPartial;
+                const canon::Column<Ptr> k{ { comp < 0 ? nullptr : static_cast<const T*>(views[static_cast<std::size_t>(comp)].data) }, 1, 0 };
+                *out = (comp < 0 ? canon::partialRange<T, aether::SumOp<T>, P>(x, 0, n)
+                                 : canon::partialRange<T, aether::SumOp<T>, P>(x, 0, n, k)).value();
+                return;
+            }
+        }
         if (comp < 0) {
             *out = canon::partialRange<T, aether::SumOp<T>>(x, 0, n).value();
         } else {
@@ -468,7 +479,8 @@ EAGLE_XLA_API std::int32_t eagle_xla_register(const char* digest, const struct e
         r->cellOp.push_back(c.cell_op[k]);
     }
     r->cellRow = std::max<std::int32_t>(1, c.cell_row);
-    r->policy = c.policy;
+    r->policy = c.policy & ~EAGLE_XLA_POLICY_FIXED_F64;
+    r->fixedF64 = (c.policy & EAGLE_XLA_POLICY_FIXED_F64) != 0;
     r->workA = c.work_a;
     r->workB = c.work_b;
     std::unique_lock<std::shared_mutex> lock(g_mutex);

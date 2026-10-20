@@ -591,7 +591,10 @@ struct eagle_backend_reduce_desc {
  *  pairwise; see ``eagle/reduce/canonical.h``) and write it to ``out``. Under
  *  ORDERED the value is a function of the values in sample order only and
  *  equals the host canonical reduction bit for bit; under COMPENSATED (float
- *  sums) the leaf partials are committed by two-sum atomics instead. Enqueue only (kernel launches ending in a one-element
+ *  sums) the leaf partials are committed by two-sum atomics instead. A float64
+ *  sum without PAIR_OUT on a device with slow FP64 (``fixedLeaf`` in
+ *  canonical.h) runs the fixed-point leaf and the pairwise levels under every
+ *  policy, equal to the host fixed-point reduction bit for bit. Enqueue only (kernel launches ending in a one-element
  *  store: capturable). Experimental. */
 eagle_backend_status eagle_backend_x_reduce_canonical(struct eagle_backend_reduce_desc* desc);
 

@@ -37,7 +37,7 @@ from __future__ import annotations
 import inspect
 import time
 
-from . import _cell_rows
+from . import _cell_rows, _split
 from ._busy import BusyGuard
 from ._plan_planes import _plane_dtype
 from ._compat import zip_strict
@@ -151,6 +151,8 @@ def _deploy(items, scalar_type=None):
         built = auto(kernels[0] if len(kernels) == 1 else kernels, scalar_type=scalar_type)
         built = iter((built,) if len(kernels) == 1 else built)
     plans = [next(built) if _is_hawk_kernel(it) else it for it in items]
+    for pl in plans:
+        _split.refuse(pl.plugin, "eagle.simulate")
     return plans, [it if _is_hawk_kernel(it) else None for it in items]
 
 

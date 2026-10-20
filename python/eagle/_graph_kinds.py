@@ -44,7 +44,7 @@ def _launch_step(node, ctx):
 
 def _launch_native(node, ctx):
     b = node.payload
-    if b._cupy is not None:
+    if b._cupy is not None or getattr(b, "_stages", None):
         return None
     if b._copies or b._active_count is not None:
         return None
@@ -57,18 +57,26 @@ def _launch_transpose(node, incoming, ctx):
     it wrote, and fresh adjoint planes for everything it read."""
     import numpy
 
-    from . import _cell_rows
+    from . import _cell_rows, _split
 
     bound = node.payload
     role_of = {name: role for role, name in bound._arg_spec}
     xp = bound._cupy or numpy
-    cells, rowset = _cell_rows.cells_of(ctx.vjp.plugin), _cell_rows.row_planes(ctx.vjp.plugin)
+    vjp = ctx.vjp.plugin
+    cells, rowset = _cell_rows.cells_of(vjp), _cell_rows.row_planes(vjp)
+    if _split.stages_of(vjp):
+        # a split vjp owns its rows and finishes each gradient cell itself
+        cells, rowset, finished = {}, frozenset(), frozenset(_split.cells(vjp))
+    else:
+        finished = frozenset()
     planes, out = {}, {}
-    for role, name in ctx.vjp.plugin.arg_spec:
+    for role, name in _split.arg_spec(vjp):
         src = name[4:] if name.startswith("bar_") else None
         if role == "nsamples":
             continue
-        if name in role_of:
+        if name in finished:
+            planes[name] = out[src] = xp.zeros(1, dtype=bound._dtype)
+        elif name in role_of:
             planes[name] = ctx.primal(name)
         elif src in incoming:
             planes[name] = incoming[src]

@@ -79,7 +79,7 @@ STATE_ROLES = frozenset({"mutable", "accum_out", "wide_out"})
 SCHEMA_VERSION = manifest.SCHEMA_VERSION
 
 #: The highest ``schema_version`` :func:`check_schema_version` accepts
-#: (v1 and v2 both load today, v3+ does not) — a separate constant from
+#: (v1, v2 and v3 load today, v4+ does not) — a separate constant from
 #: :data:`SCHEMA_VERSION`, not a bump of it. Attribute-derived, so a
 #: "future schema version" anywhere in tests is ``MAX_SCHEMA_VERSION + 1``,
 #: never a hardcoded literal.

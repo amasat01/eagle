@@ -39,7 +39,7 @@ import numpy as np
 
 from .interop import BufferRefused
 
-from . import _cell_rows, _counters, _layout
+from . import _cell_rows, _counters, _layout, _split
 from . import exec as eexec
 from .abi import DEVICE_CPU, DEVICE_CUDA
 from .roles import INPUT_ROLES, OUTPUT_ROLES
@@ -172,7 +172,10 @@ class Plan:
         :data:`eagle.exec.DeviceKernel` plan, numpy for
         :data:`~eagle.exec.HostTeam`, a plain scalar for a ``uniform``
         (frozen into its by-value box here). ``nsamples`` is derived, never
-        bound. The reserved ``fused_steps`` word of an automatic kernel may
+        bound. A kernel split in stages binds the planes of
+        :func:`eagle._split.arg_spec` and returns a
+        :class:`eagle._split.SplitBound`, which owns the rows and cells between
+        its stages and stands wherever a :class:`BoundPlan` does. The reserved ``fused_steps`` word of an automatic kernel may
         be left out: a one-step word is then bound for you
         (:func:`one_step_word`); :func:`eagle.until_done` binds its own.
 
@@ -320,6 +323,11 @@ def plan(
                 f"arm; a {structure.name!r} run has no gather to suppress"
             )
 
+    if structure is eexec.RankPartition and _cell_rows.cells_of(plugin):
+        raise ValueError(
+            f"eagle.plan: '{getattr(plugin, 'kernel', 'this kernel')}' reduces over "
+            "samples; folding its cells across ranks is not in this release (it "
+            "returns in the next); run it on one rank")
     eexec.check_placement(access, structure, npart)  # placement legality, at PLAN time
 
     return Plan(
@@ -610,6 +618,14 @@ def _run_plan(p: Plan, /, **kw):
     """``Plan.run``'s body. ``p`` is positional-only: a plugin declaring a
     plane literally named ``p`` would otherwise collide with this
     function's own first parameter."""
+    if _split.stages_of(p.plugin):
+        return _split.run(p, kw, _run_one)
+    return _run_one(p, **kw)
+
+
+def _run_one(p: Plan, /, **kw):
+    """One kernel's run: the body of :func:`_run_plan` (a split kernel's stages
+    each run through here)."""
     plugin = p.plugin
     arg_spec = getattr(plugin, "arg_spec", None)
     if arg_spec is None:

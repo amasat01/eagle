@@ -1218,7 +1218,7 @@ struct ReduceExt {
 /** One canonical reduction of element type @p T under @p OP into @p out
  *  (capturable). */
 template <class T, class OP>
-void reduceCanonical(const eagle_backend_reduce_desc& d, const ReduceExt& e, cudaStream_t stream)
+void reduceCanonical(const eagle_backend_reduce_desc& d, const ReduceExt& e, cudaStream_t stream, bool fixed)
 {
     namespace canon = eagle::reduce::canonical;
     const canon::DevicePtr<T> in{ reinterpret_cast<const T*>(d.in) };
@@ -1230,9 +1230,9 @@ void reduceCanonical(const eagle_backend_reduce_desc& d, const ReduceExt& e, cud
     auto* out = reinterpret_cast<T*>(d.out);
     if (e.comp_in != 0)
         canon::enqueueTo<T, OP>(in, canon::DevicePtr<T>{ reinterpret_cast<const T*>(e.comp_in) }, rows,
-            cols, policy, wa, wb, out, pair, stream);
+            cols, policy, wa, wb, out, pair, stream, fixed);
     else
-        canon::enqueueTo<T, OP>(in, canon::NoComp{}, rows, cols, policy, wa, wb, out, pair, stream);
+        canon::enqueueTo<T, OP>(in, canon::NoComp{}, rows, cols, policy, wa, wb, out, pair, stream, fixed);
 }
 
 } // namespace
@@ -1273,13 +1273,16 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_x_reduce_canonical(struct e
         DeviceScope scope(device);
         bracketed(who, "enqueue", [&] {
             const auto stream = seamStream(d.stream);
+            // double sums on a slow-FP64 device take the fixed-point leaf
+            const bool fixed = d.dtype == EAGLE_BACKEND_REDUCE_F64 && d.op == EAGLE_BACKEND_REDUCE_OP_SUM
+                && eagle::reduce::canonical::fixedLeafDevice(device);
             using namespace aether;
             const auto go = [&](auto tag) {
                 using T = decltype(tag);
                 switch (d.op) {
-                case EAGLE_BACKEND_REDUCE_OP_SUM: reduceCanonical<T, SumOp<T>>(d, e, stream); break;
-                case EAGLE_BACKEND_REDUCE_OP_MAX: reduceCanonical<T, MaxOp<T>>(d, e, stream); break;
-                default: reduceCanonical<T, eagle::reduce::canonical::MinOp<T>>(d, e, stream);
+                case EAGLE_BACKEND_REDUCE_OP_SUM: reduceCanonical<T, SumOp<T>>(d, e, stream, fixed); break;
+                case EAGLE_BACKEND_REDUCE_OP_MAX: reduceCanonical<T, MaxOp<T>>(d, e, stream, false); break;
+                default: reduceCanonical<T, eagle::reduce::canonical::MinOp<T>>(d, e, stream, false);
                 }
             };
             switch (d.dtype) {
@@ -1288,7 +1291,7 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_x_reduce_canonical(struct e
             case EAGLE_BACKEND_REDUCE_I32: go(std::int32_t{}); break;
             case EAGLE_BACKEND_REDUCE_I64: go(std::int64_t{}); break;
             default:
-                reduceCanonical<std::uint8_t, LogicalAndOp>(d, e, stream);
+                reduceCanonical<std::uint8_t, LogicalAndOp>(d, e, stream, false);
             }
             return 0;
         });

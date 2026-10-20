@@ -12,13 +12,17 @@ leaves pairwise level by level: bitwise identical for every thread count and
 between the CPU and the GPU. ``compensated`` commits the leaves with two-sum
 atomics on the GPU (not bitwise run to run); the CPU runs ``ordered``. For n
 terms with condition number k both are within (1 + n*k*u) ULP of the exact sum.
-Integer sums, max and all are exact and ignore the policy.
+Integer sums, max and all are exact and ignore the policy. On a machine whose
+GPU has slow FP64, a float64 sum runs a fixed-point leaf (exact integer
+accumulation, the same tree) on both the CPU and the GPU, under every policy,
+and the two agree bit for bit.
 
 The kind registers itself here; ``graph.py`` never changes.
 """
 
 from __future__ import annotations
 
+from functools import lru_cache
 from types import MappingProxyType
 
 from .graph import Node, register_node_kind
@@ -36,6 +40,23 @@ _OPS = {
 _DTYPES = {"float32": 0, "float64": 1, "int32": 2, "int64": 3, "bool": 4}
 #: policy name -> core code (``auto`` is ``compensated`` in this release)
 POLICIES = MappingProxyType({"compensated": 0, "ordered": 1, "auto": 2})
+
+
+@lru_cache(maxsize=None)
+def fixed_f64(device: int = -1) -> bool:
+    """True when float64 sums use the fixed-point leaf on this machine: the
+    GPU ``device`` (-1: the current one) has slow FP64. False without a GPU."""
+    try:
+        import cupy
+
+        dev = cupy.cuda.runtime.getDevice() if device < 0 else device
+        ratio = cupy.cuda.runtime.deviceGetAttribute(
+            cupy.cuda.runtime.cudaDevAttrSingleToDoublePrecisionPerfRatio, dev)
+    except Exception:  # no cupy or no GPU: the CPU keeps (hi, comp)
+        return False
+    from . import _core
+
+    return bool(_core.reduce_fixed_leaf(int(ratio)))
 
 
 def _door(msg: str) -> str:
@@ -144,8 +165,10 @@ def _lower_cpu(node, ctx):
     rows, cols = _shape(x)
     xp, op_ptr, cp = x.ctypes.data, out.ctypes.data, (0 if comp is None else comp.ctypes.data)
 
+    fixed = dtype == _DTYPES["float64"] and op == _OPS["sum"][0] and fixed_f64()
+
     def step():
-        _core.reduce_canonical_host(xp, rows, dtype, op, op_ptr, cols, cp)
+        _core.reduce_canonical_host(xp, rows, dtype, op, op_ptr, cols, cp, False, fixed)
     return step
 
 

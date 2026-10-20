@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+**Cells are the only record of a reduction over samples.** The doors read a sidecar's `cells` and no longer its `sample_sums`.
+
 ## 0.6.2 (2026-10-18)
 
 **Graphs run on the GPU their planes live on.** On a machine with several GPUs, a graph now builds and launches on its planes' device from any thread, and a JAX call between eagle launches no longer moves it (before, a launch from another thread could fail with `cudaErrorInvalidResourceHandle`, and a JAX node could hit a capture error).

@@ -35,14 +35,14 @@ from eagle.registry import load_manifest
 from eagle.roles import MAX_SCHEMA_VERSION
 
 
-def test_max_schema_version_is_two():
+def test_max_schema_version_is_three():
     """Sanity anchor: every v2 fixture below hardcodes ``schema_version: 2`` —
     correctly, since v2 is a SPECIFIC, named schema (the execution
     axis, aether-abi/2), not "whatever the ceiling currently is". If a later
-    wave bumps :data:`MAX_SCHEMA_VERSION` again (introducing v3), this test
+    wave bumps :data:`MAX_SCHEMA_VERSION` again (introducing v4), this test
     goes red FIRST, pointing here rather than leaving the v2 fixtures below
     silently misrepresenting v2."""
-    assert MAX_SCHEMA_VERSION == 2
+    assert MAX_SCHEMA_VERSION == 3
 
 
 def _write_manifest(tmp_path, extra):

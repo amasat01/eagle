@@ -315,7 +315,7 @@ def _load_unit(manifest_path) -> Unit:
     version = check_schema_version(manifest, name=name, allow_legacy_version_key=True)
     check_execution_axis(manifest, version, name=name)
     check_aether_abi(manifest, kind="plugin manifest", name=name)
-    if version != 2:
+    if version < 2:
         raise ValueError(
             f"{name}: the rank bed drives aether-abi/2 artifacts; this manifest "
             f"declares schema_version {version}"

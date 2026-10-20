@@ -701,6 +701,28 @@ def test_jax_node_made_in_a_foreign_context_runs_on_the_planes_device():
     assert bool((y == 2 * x).all())
 
 
+def test_jax_node_on_the_second_device_survives_jax_leaving_device_0_current():
+    certified_framework("jax")
+    from test_interop_jax import _jax
+
+    jax = _jax()
+    from eagle.frameworks import jax as ej
+
+    cp = _cp()
+    if cp.cuda.runtime.getDeviceCount() < 2:
+        pytest.skip("needs two GPUs")
+    with cp.cuda.Device(1):
+        x, y = cp.arange(8, dtype=cp.float64), cp.zeros(8)
+    step = ej.node(jax.jit(lambda a: a * 2.0), reads={"x": x}, writes={"y": y})
+    graph = eagle.Graph().add_node(step).build()
+    for _ in range(2):                      # the second launch starts where JAX left device 0
+        cp.cuda.Device(0).use()
+        graph.launch()
+    with cp.cuda.Device(1):
+        cp.cuda.Device(1).synchronize()
+        assert bool((y == 2 * x).all())
+
+
 def test_jax_node_refuses_planes_on_two_devices():
     from eagle.frameworks import jax as ej
 

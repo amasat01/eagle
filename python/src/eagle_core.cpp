@@ -735,7 +735,7 @@ NB_MODULE(_core, m)
     // -- canonical reduction (eagle/reduce/canonical.h): host tree + device seam symbol --
     m.def("reduce_canonical_host",
         [](std::uintptr_t in, std::int64_t n, std::uint32_t dtype, std::uint32_t op, std::uintptr_t out,
-            std::int64_t columns, std::uintptr_t comp, bool pair) {
+            std::int64_t columns, std::uintptr_t comp, bool pair, bool fixed) {
             if (n < 1 || columns < 1)
                 throw std::invalid_argument("reduce_canonical_host: n and columns must be >= 1");
             if (op > EAGLE_BACKEND_REDUCE_OP_MIN || dtype > EAGLE_BACKEND_REDUCE_U8
@@ -753,6 +753,15 @@ NB_MODULE(_core, m)
                 auto* o = reinterpret_cast<T*>(out);
                 for (eagle::idx_t j = 0; j < cols; ++j) {
                     const canon::Column<HostPtr<T>> x{ { reinterpret_cast<const T*>(in) }, cols, j };
+                    if constexpr (std::is_same_v<T, double> && canon::compensated_v<T, OP>) {
+                        if (fixed && !pair) {
+                            const canon::Column<HostPtr<T>> c{ { reinterpret_cast<const T*>(comp) }, cols, j };
+                            o[j] = (comp != 0 ? canon::partialRange<T, OP, canon::FixedPartial>(x, 0, rows, c)
+                                              : canon::partialRange<T, OP, canon::FixedPartial>(x, 0, rows))
+                                       .value();
+                            continue;
+                        }
+                    }
                     canon::Partial<T, OP> p;
                     if constexpr (canon::compensated_v<T, OP>) {
                         if (comp != 0) {
@@ -790,13 +799,18 @@ NB_MODULE(_core, m)
             }
         },
         nb::arg("in"), nb::arg("n"), nb::arg("dtype"), nb::arg("op"), nb::arg("out"), nb::arg("columns") = 1,
-        nb::arg("comp") = 0, nb::arg("pair") = false,
+        nb::arg("comp") = 0, nb::arg("pair") = false, nb::arg("fixed") = false,
         "The canonical fixed-order reduction (leaves of 256 slots by 16 strided samples, an in-leaf "
         "tree, then pairwise levels) of each column of the row-major (n, columns) host plane at "
         "`in` into out[column]. dtype: 0 f32, 1 f64, 2 i32, 3 i64, 4 u8 (OP_ALL only); op: 0 sum, "
         "1 max, 2 all, 3 min. Float sums: `comp` is the companion plane (each term is in + comp) and "
-        "`pair` writes hi[columns] then comp[columns] unrounded. The host runs the ordered policy "
-        "for every policy; bitwise independent of the OpenMP thread count.");
+        "`pair` writes hi[columns] then comp[columns] unrounded. `fixed`: a float64 sum without "
+        "`pair` uses the fixed-point leaf (the device's arithmetic where `reduce_fixed_leaf` holds). "
+        "The host runs the ordered policy for every policy; bitwise independent of the OpenMP "
+        "thread count.");
+    m.def("reduce_fixed_leaf", &eagle::reduce::canonical::fixedLeaf, nb::arg("fp32_per_fp64"),
+        "True when a device with this FP32:FP64 throughput ratio reduces float64 sums with the "
+        "fixed-point leaf.");
 
     m.def("reduce_canonical_device",
         [](std::uintptr_t in, std::int64_t n, std::uint32_t dtype, std::uint32_t op, std::uintptr_t out,

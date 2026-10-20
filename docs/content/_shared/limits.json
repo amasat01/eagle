@@ -278,5 +278,12 @@
   "way_out": "3.14t, or a regular 3.13",
   "cause": "framework",
   "lifted_in": "none"
+ },
+ {
+  "id": "jax-cell-policy",
+  "text": "A cell inside `jit` is finished with the default `\"compensated\"` policy (a float64 cell on a GPU with slow FP64 is finished exactly, in integers, under any policy); there is no `policy=` argument on the bridge yet (our scope): finish the rows yourself with `eagle.reduce(policy=\"ordered\")` where the bits must be fixed, or use `max`/`min`, which are exact.",
+  "way_out": "finish the rows with eagle.reduce(policy=\"ordered\")",
+  "cause": "ours",
+  "lifted_in": "0.6.4"
  }
 ]

@@ -1,6 +1,6 @@
 {
   "format": "ptx",
-  "schema_version": 3,
+  "schema_version": 4,
   "pattern": "vector",
   "aether_abi": "aether-abi/1",
   "scalar_type": "float64",

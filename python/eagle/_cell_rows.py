@@ -31,8 +31,8 @@ def comp_name(name: str) -> str:
 
 def cells_of(plugin) -> dict:
     """``{cell plane: op}`` the kernel reduces over samples (empty for a kernel
-    without any). Reads the sidecar's ``cells``, else its ``sample_sums`` (sums)."""
-    found = getattr(plugin, "_cells", None)
+    without any). Reads the sidecar's ``cells``."""
+    found = getattr(plugin, "_stage_cells", None) or getattr(plugin, "_cells", None)
     if found is not None:
         return found
     source = getattr(plugin, "_hawk_source", None)
@@ -41,8 +41,6 @@ def cells_of(plugin) -> dict:
         cells = kernel_cells(source[0])
     elif "cells" in meta:
         cells = _planes(meta["cells"])
-    elif "sample_sums" in meta:
-        cells = {k: "sum" for k in meta["sample_sums"]}
     else:       # a raw plugin: a row plane and its companion
         names = {n for r, n in plugin.arg_spec if r == "accum_out"}
         cells = {n: "sum" for n in names if comp_name(n) in names}
@@ -69,9 +67,11 @@ def hidden(plugin) -> frozenset:
 
 
 class CellRows:
-    """The row scratch of one kernel at one sample count, and its finish."""
+    """The row scratch of one kernel at one sample count, and its finish.
+    ``outs`` (``{plane: (1,) array}``) names cells finished into the caller's
+    own arrays instead of new ones."""
 
-    def __init__(self, cells, n, xp, dtype, policy):
+    def __init__(self, cells, n, xp, dtype, policy, outs=None):
         rows = -(-int(n) // ROW)
         self.rows = {}
         self.cell = {}
@@ -80,7 +80,9 @@ class CellRows:
         for name, op in cells.items():
             dt = np.dtype(dtype)
             hi = self.rows[name] = xp.zeros(rows, dtype=dt)
-            out = self.cell[name] = xp.zeros(1, dtype=dt)
+            out = self.cell[name] = (outs or {}).get(name)
+            if out is None:
+                out = self.cell[name] = xp.zeros(1, dtype=dt)
             if op in ("sum", "mean"):
                 lo = self.rows[comp_name(name)] = xp.zeros(rows, dtype=dt)
                 self._steps.append(lower(reduce(hi, out, comp=lo, policy=policy), None))

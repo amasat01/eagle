@@ -71,6 +71,9 @@ extern "C" {
 /** ``eagle_xla_recipe.cell_op``: how a cell folds its rows (sum and mean rows
  *  already carry the 1/n); ``policy``: the float-sum policy, the seam's
  *  EAGLE_BACKEND_REDUCE_COMPENSATED / ORDERED / AUTO values. */
+/** OR'd into ``policy`` of a CPU recipe: float64 sum cells take the
+ *  fixed-point leaf, as the machine's GPU does (``canonical::fixedLeaf``). */
+#define EAGLE_XLA_POLICY_FIXED_F64 0x100
 #define EAGLE_XLA_CELL_SUM 0
 #define EAGLE_XLA_CELL_MAX 1
 #define EAGLE_XLA_CELL_MIN 2

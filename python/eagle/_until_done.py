@@ -45,7 +45,7 @@ from ._active_set import (
     ActiveSet,
     compaction_body,
 )
-from . import _core, _layout
+from . import _core, _layout, _split
 from ._busy import BusyGuard
 from ._compat import zip_strict
 from ._conditional import SkipGuard, Skippable, repeat_while
@@ -638,6 +638,7 @@ class Runner:
             plans = _select_step(plans, planes)
         for i, p in enumerate(plans):
             refuse_derived(p, door="eagle.until_done", what=f"step {i}")
+            _split.refuse(p.plugin, "eagle.until_done")
         names = [_kernel_name(p.plugin) for p in plans]
         specs = [tuple(tuple(pair) for pair in p.plugin.arg_spec) for p in plans]
         max_steps = _check_count("max_steps", max_steps)

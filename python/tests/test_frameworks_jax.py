@@ -76,6 +76,10 @@ if hasattr(hawk, "all_samples"):
     def cell_min(x: Scalar, t: Mutable[Scalar]):
         t = hawk.all_samples(x).min()  # noqa: F841
 
+    @hawk.kernel
+    def cell_sum(x: Scalar, t: Mutable[Scalar]):
+        t = hawk.all_samples(x).sum()  # noqa: F841
+
 
 @hawk.kernel
 def vec_sum(v: Vector[3], w: Vector[3], a: Mutable[Vector[3]]):
@@ -456,6 +460,35 @@ def test_min_cell_is_the_exact_minimum(tmp_path, platform, jit):
             assert got.shape == (1,) and got[0] == x.min()
             x[n // 2] = -np.inf
             assert np.asarray(f(jnp.asarray(x)))[0] == -np.inf
+
+
+def test_float64_sum_cell_on_the_cpu_matches_eagle_reduce(tmp_path):
+    """The host finish of a float64 sum cell takes the arithmetic eagle.reduce
+    takes on this machine (the fixed-point leaf where the GPU has slow FP64),
+    so it equals the GPU's finish bit for bit."""
+    if not hasattr(hawk, "all_samples"):
+        pytest.skip("this hawk has no reductions over samples")
+    import eagle
+    from eagle import _cell_rows
+    from eagle._graph_reduce import fixed_f64
+
+    rng = np.random.default_rng(0)
+    big = rng.uniform(1, 2, 500) * 2.0 ** rng.integers(-80, 80, 500)
+    v = np.concatenate([big, -big[::-1]])
+    v[::3] *= 1 + 2.0 ** -30          # wide spread: the two arithmetics differ here
+    x = np.zeros(v.size * _cell_rows.ROW)
+    x[::_cell_rows.ROW] = v           # one term per row: the rows are v exactly
+    want = np.zeros(1)
+    eagle.Graph().add_node(eagle.reduce(v, want)).build().launch()
+    with jax.default_device(_device("cpu")):
+        got = np.asarray(eagle_jax.function(cell_sum, wrt=(), cache_dir=tmp_path)(jnp.asarray(x)))
+    assert got.tobytes() == want.tobytes()
+    if fixed_f64():                   # non-vacuity: the (hi, comp) finish gives other bits
+        from eagle import _core
+
+        comp = np.zeros(1)
+        _core.reduce_canonical_host(v.ctypes.data, v.size, 1, 0, comp.ctypes.data)
+        assert comp.tobytes() != want.tobytes()
 
 
 @pytest.mark.parametrize("platform", PLATFORMS)

@@ -53,7 +53,7 @@ from types import MappingProxyType
 
 import torch
 
-from .. import FINISHED_PLANE, _cell_rows
+from .. import FINISHED_PLANE, _cell_rows, _split
 from ._kernel_planes import INPUT_ROLES, OUTPUT_ROLES, _prior_reads, call_mode, promote
 from ._tower import LOCK, finished_identity, plane_names
 
@@ -667,6 +667,7 @@ class _Level:
             device_arch=arch,
         )
         built = plugins(unit, device_loader=load_manifest)
+        _split.link(built, unit)
         return eplan.plan(built[self.kernel.name], structure=eexec.DeviceKernel)
 
     @property

@@ -33,7 +33,7 @@ import threading
 
 import numpy
 
-from .. import _core, _counters
+from .. import _core, _counters, _split
 from .._busy import Busy, BusyGuard
 from ..graph import get_node_kind
 from ._record import xp_of
@@ -313,7 +313,8 @@ class RunRecorder:
         self.structure = plan.structure
         self.planes = planes
         self.width, self.scalar = width, numpy.dtype(scalar)
-        self.forward = make_plan(twin, structure=plan.structure).bind(**planes)
+        self.forward = _split.single(make_plan(twin, structure=plan.structure).bind(**planes),
+                                     "eagle.diff (record=True)")
         self.state = {nm: planes[nm] for nm, role in roles.items() if role in _STATE}
         self.uniforms = {nm: planes[nm] for nm, role in roles.items()
                          if role == "uniform" and nm != TAPE_ON}
@@ -556,7 +557,8 @@ class RunReverse:
             elif role == "lookup":
                 twin_planes[nm] = xp.zeros_like(rec.planes[nm])
         self.word = twin_planes.get(FUSED_STEPS) if rec.fused else None
-        self.recompute = make_plan(twin, structure=rec.structure).bind(**twin_planes)
+        self.recompute = _split.single(make_plan(twin, structure=rec.structure).bind(**twin_planes),
+                                       "eagle.diff.reverse")
 
         vspec = k.vjp.arg_spec
         taped = dict(k.taped)
@@ -605,7 +607,8 @@ class RunReverse:
                     else:
                         raise ValueError(f"{door}: the step's vjp reads {nm!r}, which "
                                          "the recorded run does not hold")
-                self.vjps.append(make_plan(k.vjp, structure=rec.structure).bind(**bind))
+                self.vjps.append(_split.single(make_plan(k.vjp, structure=rec.structure)
+                                              .bind(**bind), "eagle.diff.reverse"))
         # parameters sum over samples; a time-indexed run's t_0 share belongs to t
         self.summed = {nm for nm in self.acc if nm in rec.uniforms or nm in rec.promoted}
         self.folded = {rec.t0: k.time} if rec.t0 in self.acc else {}
@@ -838,7 +841,10 @@ class RunReverse:
             res = res.get()
         else:
             res = numpy.empty(n2, dtype=x.dtype)
-            _core.reduce_canonical_host(x.ctypes.data, x.size, code, 0, res.ctypes.data, 1, 0, pair)
+            from .._graph_reduce import fixed_f64
+
+            _core.reduce_canonical_host(x.ctypes.data, x.size, code, 0, res.ctypes.data, 1, 0, pair,
+                                        code == 1 and not pair and fixed_f64())
         return (float(res[0]), float(res[1])) if pair else float(res[0])
 
     def _plans(self, addr):

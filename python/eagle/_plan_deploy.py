@@ -12,7 +12,7 @@ import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from . import _layout
+from . import _layout, _split
 from . import exec as eexec
 from ._plan_binding import BoundPlan
 from ._plan_planes import residency
@@ -331,7 +331,9 @@ def _build_by_name(kernels, targets, cache_dir, scalar_type=None) -> tuple:
     with _BUNDLE_LOCKS.setdefault(str(where.resolve()), threading.Lock()):
         bundle = build_bundle(kernels, where, targets=targets, cache_dir=cache_dir,
                               defines=defines, mode=mode)
-    return plugins(bundle, device_loader=load_manifest), bundle
+    by_name = plugins(bundle, device_loader=load_manifest)
+    _split.link(by_name, bundle)
+    return by_name, bundle
 
 
 def _hawk_plugins(kernels, targets, cache_dir, scalar_type=None) -> tuple:
