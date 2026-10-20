@@ -64,16 +64,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 310
     steps:
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.12"
       - uses: actions/download-artifact@v8
         with:
           name: raptor-eagle-dist
           path: dist
       - name: Wait for the family packages this release requires
         run: |
-          python - <<'PY' > reqs.txt
+          python3 - <<'PY' > reqs.txt
           import glob, re, zipfile
           fam = re.compile(r"^(raptor-core|aether-dsc|raptor-hawk|raptor-eagle)\b", re.I)
           for whl in glob.glob("dist/*.whl"):
@@ -86,7 +83,7 @@ jobs:
           sort -u reqs.txt -o reqs.txt
           [ -s reqs.txt ] || { echo "no family requirements"; exit 0; }
           while read -r req; do
-            until python -m pip download --no-deps --quiet -d "$RUNNER_TEMP/up" "$req"; do
+            until python3 -m pip download --no-deps --quiet -d "$RUNNER_TEMP/up" "$req"; do
               echo "waiting for $req"; sleep 120
             done
             echo "$req: on PyPI"
@@ -119,9 +116,6 @@ jobs:
       attestations: write
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.12"
       - uses: actions/download-artifact@v8
         with:
           name: raptor-eagle-dist
@@ -133,6 +127,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          V=$(python tools/version.py get)
+          V=$(python3 tools/version.py get)
           gh release create "$GITHUB_REF_NAME" dist/* --title "eagle $V" \
-            --notes "$(python tools/version.py notes)" --verify-tag
+            --notes "$(python3 tools/version.py notes)" --verify-tag
