@@ -1,8 +1,22 @@
 # Changelog
 
-## Unreleased
+## 0.6.3 (2026-10-20)
 
-**Cells are the only record of a reduction over samples.** The doors read a sidecar's `cells` and no longer its `sample_sums`.
+**Cells are the only record of a reduction over samples.** A hawk kernel that stores `hawk.all_samples(x).sum()` (or `.mean()`, `.max()`, `.min()`) to a `Mutable` output writes rows, one partial per 32 samples, and every door finishes them into the cell with `eagle.reduce`: `eagle.deploy(...).run` and `eagle.simulate` return the cell as a one-element array (one element per column for a vector cell), and the JAX bridge finishes it inside the same XLA call under `jit`. The row scratch is made once per kernel and sample count, so it is safe inside a captured graph. The doors read a sidecar's `cells` and no longer its `sample_sums`.
+
+**Kernels split in stages run in every door.** A hawk kernel that reads a value reduced over samples arrives as stages, `<name>`, `<name>_2`, ...; eagle runs them in sequence with the cells finished between them, in `deploy`, `simulate`, the graph loops, the vjp doors and the torch, Warp and JAX bridges. A cell only a later stage reads stays internal. Supplying a cell the kernel computes itself is refused by name.
+
+**`eagle.reduce` takes `policy=`.** `"compensated"` (the default) is an accurate sum; on the GPU its bits can differ from run to run. `"ordered"` combines the leaves pairwise, level by level: the same bits on every run, thread count, CPU and GPU. `"auto"` is `"compensated"` in this release. `op=` adds `"min"`, and a 2-D plane reduces per column. Integer sums, `"max"`, `"min"` and `"all"` are exact and ignore the policy.
+
+**Exact float64 sums on GPUs with slow FP64.** There a float64 sum adds each term exactly into a wide integer with integer instructions only and combines the leaves in the fixed pairwise order under both policies: the same bits on every run, host and device agree, and it is about 2.5 times faster on those GPUs.
+
+**Gradients through cells and stages.** The vjp doors and the JAX bridge differentiate kernels with cells and kernels split in stages.
+
+**Sidecar schema v3.** `cells` replaces `sample_sums`, and a split kernel adds `stages`. eagle loads v1 to v3 and needs `raptor-core>=0.3.3`; the `torch` and `jax` extras ask for `raptor-hawk>=0.6.3`. An eagle that predates v3 refuses a v3 artifact.
+
+**A JAX node on a multi-GPU host reads on its own device** even when an earlier JAX call left another device current.
+
+**Limits.** Inside `jit` a cell is finished with the default policy; the bridge has no `policy=` yet (0.6.4). Finish the rows yourself with `eagle.reduce(policy="ordered")` where the bits must be fixed. A rank fold of cells is refused by name (0.6.4). Five recorded-loop limits (`run-vjps-*`: a node after the plan, a node reading another node's plane, a node reading a `Param`, `events="refine"` with a node, a captured node vjp) move from 0.6.3 to 0.6.4.
 
 ## 0.6.2 (2026-10-18)
 
