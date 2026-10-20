@@ -42,7 +42,9 @@ There are three cooperating pieces:
   as the new size needs, no more. A typical reason to shrink it: a batched
   loop where some samples finish (**terminate**) before others and no
   longer need processing, so later replays only need to cover the samples
-  still active.
+  still active. A kernel a plugin launches through the driver API
+  (a ``CUfunction``) is patched the same way, so a captured plugin launch goes
+  through ``addNode`` like any other.
 
 Direct graph usage
 ------------------
@@ -59,7 +61,7 @@ Direct graph usage
    eagle::cuda::StreamCapturer cap(stream.cuda());
    cap.begin();
    myKernel<<<grid, block, 0, stream.cuda()>>>(args);
-   graph.addNode(cap.end());
+   graph.addNode(eagle::cuda::CapturedGraph{ cap.end() });
 
    // Add a host callback (runs on the CPU as a graph node)
    graph.addHostNode([&result]() { /* post-process on CPU */ });

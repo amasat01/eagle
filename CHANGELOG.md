@@ -14,6 +14,8 @@
 
 **Sidecar schema v3.** `cells` replaces `sample_sums`, and a split kernel adds `stages`. eagle loads v1 to v3 and needs `raptor-core>=0.3.3`; the `torch` and `jax` extras ask for `raptor-hawk>=0.6.3`. An eagle that predates v3 refuses a v3 artifact.
 
+**A captured plugin launch goes through `Graph::addNode`.** A kernel launched through the driver API (a plugin's `CUfunction`) used to fail `addNode` with `cudaErrorInvalidDeviceFunction`; it is now read and patched through the driver, so `Launcher::setLogicalSize` resizes it like any other kernel. The C++ examples now wrap a capture as `addNode(eagle::cuda::CapturedGraph{ capturer.end() })`; the bare `addNode(capturer.end())` they showed does not compile.
+
 **A JAX node on a multi-GPU host reads on its own device** even when an earlier JAX call left another device current.
 
 **Limits.** Inside `jit` a cell is finished with the default policy; the bridge has no `policy=` yet (0.6.4). Finish the rows yourself with `eagle.reduce(policy="ordered")` where the bits must be fixed. A rank fold of cells is refused by name (0.6.4). Five recorded-loop limits (`run-vjps-*`: a node after the plan, a node reading another node's plane, a node reading a `Param`, `events="refine"` with a node, a captured node vjp) move from 0.6.3 to 0.6.4.

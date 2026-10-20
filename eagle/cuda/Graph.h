@@ -5,6 +5,7 @@
 
 #include "eagle/cuda/CapturedGraph.h"
 #include "eagle/cuda/ComputeBlocks.h"
+#include "eagle/cuda/detail/DriverEntry.h"
 #include "eagle/cuda/detail/RuntimeCompat.h"
 #include "eagle/cuda/NativeNode.h"
 #include "eagle/ScratchArena.h"
@@ -20,6 +21,7 @@
 #include <map>
 #include <memory>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -65,6 +67,13 @@ struct KernelNodeRecord {
      *  fixed-size buffers and would over-write their internal
      *  state if grid grew on a logicalSize patch). */
     idx_t idealBlockSize;
+    /** @brief The kernel was launched through the driver API (a plugin's
+     *  ``cuLaunchKernel``): the runtime cannot read or patch it, so its
+     *  parameters live in ``driverParams`` and ``capturedParams`` is unused. */
+    bool driverLaunched = false;
+#ifndef EAGLE_CPU_ONLY
+    CUDA_KERNEL_NODE_PARAMS driverParams {};
+#endif
 };
 
 /** @brief Sentinel for ``KernelNodeRecord::idealBlockSize`` meaning
@@ -328,10 +337,7 @@ public:
         /* Snapshot from graph-internal storage so ``setLogicalSize``
          * never has to call ``cudaGraphKernelNodeGetParams`` at runtime
          * (broken for templated kernels). */
-        cudaKernelNodeParams snapshot {};
-        EAGLE_CHECK_ALWAYS(cudaGraphKernelNodeGetParams(nodeSlot, &snapshot));
-        kernelNodes_.push_back(
-            KernelNodeRecord{ nodeSlot, snapshot, idealBlockSize });
+        kernelNodes_.push_back(recordKernel_(nodeSlot, idealBlockSize));
     }
 
     /** @brief Add a host node to the graph.
@@ -521,15 +527,41 @@ protected:
             EAGLE_CHECK_ALWAYS(cudaGraphNodeGetType(inner, &type));
             if (type != cudaGraphNodeTypeKernel)
                 continue;
-            cudaKernelNodeParams params {};
-            EAGLE_CHECK_ALWAYS(cudaGraphKernelNodeGetParams(inner, &params));
-            const idx_t cap = useCaps ? caps[k] : uniformDefault;
-            kernelNodes_.push_back(KernelNodeRecord{ inner, params, cap });
+            kernelNodes_.push_back(recordKernel_(inner, useCaps ? caps[k] : uniformDefault));
             ++k;
         }
         EAGLE_ASSERT(!useCaps || k == caps.size(),
             "CapturedGraph::idealBlockSizes size must match the number of "
             "kernel nodes in the cloned child graph");
+    }
+
+    /** @brief Snapshot one kernel node's launch parameters. A kernel launched
+     *  through the driver API (a plugin's ``CUfunction``) answers the runtime
+     *  query with ``cudaErrorInvalidDeviceFunction``; it is read through the
+     *  driver instead and patched the same way by ``Launcher::setLogicalSize``. */
+    static KernelNodeRecord recordKernel_(cudaGraphNode_t node, idx_t idealBlockSize)
+    {
+        KernelNodeRecord rec { node, {}, idealBlockSize };
+        const cudaError_t err = cudaGraphKernelNodeGetParams(node, &rec.capturedParams);
+        if (err != cudaErrorInvalidDeviceFunction) {
+            EAGLE_CHECK_ALWAYS(err);
+            return rec;
+        }
+#ifdef EAGLE_CPU_ONLY
+        EAGLE_CHECK_ALWAYS(err);
+        return rec;
+#else
+        (void)cudaGetLastError(); // the runtime query's error is not sticky
+        static const auto get = detail::driver_entry<decltype(&::cuGraphKernelNodeGetParams)>(
+            "cuGraphKernelNodeGetParams");
+        if (const CUresult r = get(reinterpret_cast<CUgraphNode>(node), &rec.driverParams);
+            r != CUDA_SUCCESS)
+            throw std::runtime_error(std::string("eagle: reading a driver-launched kernel node failed (")
+                + detail::driver_error_text(r) + ").");
+        rec.capturedParams = {};
+        rec.driverLaunched = true;
+        return rec;
+#endif
     }
 
     /** @brief Create the underlying ``cudaGraph_t`` inside ``storage_``. */

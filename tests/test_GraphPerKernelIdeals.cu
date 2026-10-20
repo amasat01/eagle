@@ -248,6 +248,80 @@ TEST_F(GraphPerKernelIdealsFixture, HarvestNeverOverridesExisting)
     EAGLE_CHECK_ALWAYS(cudaFree(d_buf2));
 }
 
+/* A plugin kernel arrives as a CUfunction from a module and is launched through
+ * the driver: buf[i] = 1 for i < n. */
+static const char* kFillPtx = R"(
+.version 7.0
+.target sm_52
+.address_size 64
+.visible .entry fill(.param .u64 buf, .param .u32 n)
+{
+    .reg .pred %p;
+    .reg .b32 %r<6>;
+    .reg .b64 %rd<4>;
+    ld.param.u64 %rd1, [buf];
+    ld.param.u32 %r1, [n];
+    mov.u32 %r2, %ctaid.x;
+    mov.u32 %r3, %ntid.x;
+    mov.u32 %r4, %tid.x;
+    mad.lo.s32 %r5, %r2, %r3, %r4;
+    setp.ge.u32 %p, %r5, %r1;
+    @%p bra DONE;
+    cvta.to.global.u64 %rd2, %rd1;
+    mul.wide.u32 %rd3, %r5, 4;
+    add.s64 %rd2, %rd2, %rd3;
+    st.global.u32 [%rd2], 1;
+DONE:
+    ret;
+}
+)";
+
+/* Test 6: a driver-launched kernel goes through addNode, and setLogicalSize
+ * patches its grid (the runtime can neither read nor patch its CUfunction). */
+TEST_F(GraphPerKernelIdealsFixture, DriverLaunchedKernelIsPatchedBySetLogicalSize)
+{
+    using cuda::detail::driver_entry;
+    static const auto load = driver_entry<decltype(&::cuModuleLoadData)>("cuModuleLoadData");
+    static const auto get = driver_entry<decltype(&::cuModuleGetFunction)>("cuModuleGetFunction");
+    static const auto launchK = driver_entry<decltype(&::cuLaunchKernel)>("cuLaunchKernel");
+    static const auto unload = driver_entry<decltype(&::cuModuleUnload)>("cuModuleUnload");
+    CUmodule mod = nullptr;
+    CUfunction fn = nullptr;
+    ASSERT_EQ(load(&mod, kFillPtx), CUDA_SUCCESS);
+    ASSERT_EQ(get(&fn, mod, "fill"), CUDA_SUCCESS);
+
+    Stream s;
+    Graph g;
+    g.stream(s.cuda());
+    {
+        /* Captured over the first 32 entries only. */
+        int* buf = d_buf;
+        unsigned int n = N;
+        void* args[] = { &buf, &n };
+        StreamCapturer capturer(s.cuda());
+        capturer.begin();
+        ASSERT_EQ(launchK(fn, 1, 1, 1, 32, 1, 1, 0, s.cuda(), args, nullptr), CUDA_SUCCESS);
+        g.addNode(CapturedGraph { capturer.end() });
+    }
+
+    Launcher launcher = g.launcher();
+    ASSERT_EQ(launcher.kernelNodeCount(), 1);
+    EXPECT_TRUE(launcher.kernelNodes()[0].driverLaunched);
+    EXPECT_EQ(launcher.kernelNodes()[0].driverParams.blockDimX, 32u);
+
+    launcher.setLogicalSize(N);
+    launcher.launch();
+    launcher.synchronize();
+
+    int host[N] = {};
+    EAGLE_CHECK_ALWAYS(cudaMemcpy(host, d_buf, sizeof(host), cudaMemcpyDeviceToHost));
+    int written = 0;
+    for (int v : host)
+        written += v;
+    EXPECT_EQ(written, N) << "the patched grid must cover all N entries, not the captured 32";
+    EXPECT_EQ(unload(mod), CUDA_SUCCESS);
+}
+
 } // namespace GraphPerKernelIdealsTest
 } // namespace eagle_tests
 
