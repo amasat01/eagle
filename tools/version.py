@@ -3,13 +3,12 @@
 
 The version strings live in the files listed in tools/version_sites.toml (file + regex with one
 capture group around the version); the first entry is the primary. `bump` rewrites all of them,
-CITATION.cff and the top `## Unreleased` CHANGELOG heading. Stdlib only; needs Python >= 3.11 (tomllib).
+CITATION.cff and the top `## Unreleased` CHANGELOG heading. Stdlib only; runs on every Python the packages support (3.9+).
 Run from anywhere; paths are relative to the repo root.
 """
 import datetime
 import re
 import sys
-import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -20,8 +19,9 @@ HEAD = re.compile(r"^## ", re.M)
 
 def sites():
     """(file, regex) per site, then CITATION.cff's version."""
-    tab = tomllib.loads((ROOT / "tools/version_sites.toml").read_text())
-    return [(s["file"], s["pattern"]) for s in tab["site"]] + [("CITATION.cff", CITE_V)]
+    text = (ROOT / "tools/version_sites.toml").read_text()  # [[site]] tables of `file = "..."` and `pattern = '...'`
+    found = re.findall(r'^file = "([^"]+)"\npattern = \'([^\']+)\'$', text, re.M)
+    return found + [("CITATION.cff", CITE_V)]
 
 
 def matches(file, pat):
