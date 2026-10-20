@@ -96,6 +96,9 @@ def _skippable(node, incoming, ctx):
                 ctx.add(lambda d=buf, s=src: xp.copyto(d, s), reads=[src], writes=[buf])
             else:
                 ctx.add(lambda d=buf: d.fill(0), writes=[buf])
+            lo = ctx.comp.get(id(buf))      # a row sum's companion rows
+            if lo is not None:
+                ctx.add(lambda d=lo: d.fill(0), writes=[lo])
     _insert_front(ctx, start + 1, skipped)
     for w in outs:
         if w in ctx.reads:      # skipped, the adjoint goes on to the plane's earlier writer
@@ -200,10 +203,13 @@ def _repeat_while(node, incoming, ctx):
                 out = get_node_kind("launch").transpose(child, inc, sub)
             ctx._steps.extend(sub._steps)
             ctx.inexact |= sub.inexact
+            ctx.comp.update(sub.comp)
             for r in consts:
                 if r in out:
                     terms[r].append((j, out[r]))
                     zeroed.append(out[r])
+                    if id(out[r]) in ctx.comp:
+                        zeroed.append(ctx.comp[id(out[r])])
             with ctx.gated(on[j]):
                 for r in adjoint:
                     _copy(ctx, xp, abar[r], out[r])
@@ -227,6 +233,11 @@ def _repeat_while(node, incoming, ctx):
 
         total = xp.empty_like(arrays[0])
         ctx.add(_ordered_sum(total, arrays), reads=arrays, writes=[total])
+        if any(id(a) in ctx.comp for a in arrays):
+            los = [ctx.comp.get(id(a)) for a in arrays]
+            los = [lo if lo is not None else xp.zeros_like(arrays[0]) for lo in los]
+            ctx.comp[id(total)] = lo_total = xp.empty_like(total)
+            ctx.add(_ordered_sum(lo_total, los), reads=los, writes=[lo_total])
         result[r] = total
     return result
 

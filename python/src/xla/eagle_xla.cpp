@@ -9,6 +9,7 @@
 
 #include "xla/eagle_xla.h"
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -17,10 +18,12 @@
 #include <mutex>
 #include <shared_mutex>
 #include <string>
+#include <type_traits>
 #include <string_view>
 #include <unordered_map>
 #include <vector>
 
+#include "eagle/reduce/canonical.h"
 #include "plugin/gref_layout.h"
 #include "seam/eagle_backend.h"
 #include "xla/ffi/api/c_api.h"
@@ -68,19 +71,23 @@ using RunDevice = eagle_backend_status (*)(const struct eagle_backend_launch_des
 using LastError = const char* (*)(void);
 using MemsetDevice = eagle_backend_status (*)(std::uint64_t, std::uint64_t, std::uint64_t);
 using MemcpyDevice = eagle_backend_status (*)(std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t);
+using ReduceDevice = eagle_backend_status (*)(struct eagle_backend_reduce_desc*);
 
 /** A registered kernel: the C recipe with its arrays copied in. */
 struct Recipe {
     std::uint32_t platform = EAGLE_XLA_PLATFORM_CPU;
     std::int32_t ordinal = 0;
     std::uint32_t block = 256;
-    std::uint64_t entry = 0, lastError = 0, memset = 0, memcpy = 0, function = 0;
+    std::uint64_t entry = 0, lastError = 0, memset = 0, memcpy = 0, function = 0, reduce = 0;
     std::int32_t nargs = 0, nrets = 0, sampleBuffer = 0, indexBytes = 4;
     std::vector<std::int32_t> dtype;
     std::vector<std::uint8_t> zero;
     std::vector<std::int32_t> slotKind, slotBuffer;
     std::vector<std::uint8_t> slotCell;
     std::vector<std::int32_t> aliasOperand, aliasResult;
+    std::int32_t cellRow = 1, policy = 0, workA = -1, workB = -1;
+    bool fixedF64 = false; // host float64 sum cells take the fixed-point leaf
+    std::vector<std::int32_t> cellRows, cellComp, cellOut, cellOp;
 };
 
 std::shared_mutex g_mutex;
@@ -246,6 +253,43 @@ std::shared_ptr<const Recipe> lookup(std::string_view digest, std::uint32_t plat
     return r;
 }
 
+/** One cell on the host: the canonical reduction of its rows (+ companions). */
+template <class T>
+void finishCellHost(const Recipe& r, const std::vector<View>& views, std::size_t c, std::int64_t nrows)
+{
+    namespace canon = eagle::reduce::canonical;
+    struct Ptr {
+        const T* p;
+        T operator()(eagle::idx_t i) const { return p[i]; }
+    };
+    const auto rows = static_cast<const T*>(views[static_cast<std::size_t>(r.cellRows[c])].data);
+    const std::int32_t comp = r.cellComp[c];
+    T* out = static_cast<T*>(views[static_cast<std::size_t>(r.cellOut[c])].data);
+    const auto n = static_cast<eagle::idx_t>(nrows);
+    if (r.cellOp[c] == EAGLE_XLA_CELL_SUM) {
+        const canon::Column<Ptr> x{ { rows }, 1, 0 };
+        if constexpr (std::is_same_v<T, double>) {
+            if (r.fixedF64) {
+                using P = canon::FixedPartial;
+                const canon::Column<Ptr> k{ { comp < 0 ? nullptr : static_cast<const T*>(views[static_cast<std::size_t>(comp)].data) }, 1, 0 };
+                *out = (comp < 0 ? canon::partialRange<T, aether::SumOp<T>, P>(x, 0, n)
+                                 : canon::partialRange<T, aether::SumOp<T>, P>(x, 0, n, k)).value();
+                return;
+            }
+        }
+        if (comp < 0) {
+            *out = canon::partialRange<T, aether::SumOp<T>>(x, 0, n).value();
+        } else {
+            const canon::Column<Ptr> k{ { static_cast<const T*>(views[static_cast<std::size_t>(comp)].data) }, 1, 0 };
+            *out = canon::partialRange<T, aether::SumOp<T>>(x, 0, n, k).value();
+        }
+    } else {
+        const canon::Column<Ptr> x{ { rows }, 1, 0 };
+        *out = r.cellOp[c] == EAGLE_XLA_CELL_MAX ? canon::partialRange<T, aether::MaxOp<T>>(x, 0, n).value()
+                                                 : canon::partialRange<T, canon::MinOp<T>>(x, 0, n).value();
+    }
+}
+
 Error launchCpu(std::string_view digest, const XLA_FFI_CallFrame& frame)
 {
     Error err = Error::Success();
@@ -271,6 +315,14 @@ Error launchCpu(std::string_view digest, const XLA_FFI_CallFrame& frame)
         return e;
     if (n > 0)
         reinterpret_cast<HostEntry>(r->entry)(params.data(), 0, n, n);
+    const std::int64_t nrows = (n + r->cellRow - 1) / r->cellRow;
+    for (std::size_t k = 0; k < r->cellOut.size(); ++k) {
+        const std::int32_t dt = views[static_cast<std::size_t>(r->cellOut[k])].dtype;
+        if (dt == XLA_FFI_DataType_F32)
+            finishCellHost<float>(*r, views, k, nrows);
+        else
+            finishCellHost<double>(*r, views, k, nrows);
+    }
     return Error::Success();
 }
 
@@ -330,6 +382,29 @@ Error launchCuda(void* stream, std::int32_t ordinal, std::string_view digest, co
     std::int32_t launched = 0;
     if (reinterpret_cast<RunDevice>(r->entry)(&d, &launched) != EAGLE_BACKEND_OK)
         return Error::Internal(quoted(digest) + ": launch failed: " + lastError());
+    // the cells, on the same stream: the seam's canonical reduce over the XLA-owned work results
+    const std::int64_t nrows = (n + r->cellRow - 1) / r->cellRow;
+    for (std::size_t k = 0; n > 0 && k < r->cellOut.size(); ++k) {
+        const View& out = views[static_cast<std::size_t>(r->cellOut[k])];
+        struct eagle_backend_reduce_desc rd {};
+        rd.struct_size = sizeof rd;
+        rd.dtype = out.dtype == XLA_FFI_DataType_F32 ? EAGLE_BACKEND_REDUCE_F32 : EAGLE_BACKEND_REDUCE_F64;
+        rd.op = r->cellOp[k] == EAGLE_XLA_CELL_SUM   ? EAGLE_BACKEND_REDUCE_OP_SUM
+              : r->cellOp[k] == EAGLE_XLA_CELL_MAX ? EAGLE_BACKEND_REDUCE_OP_MAX
+                                                   : EAGLE_BACKEND_REDUCE_OP_MIN;
+        rd.device = -1;
+        rd.in = reinterpret_cast<std::uint64_t>(views[static_cast<std::size_t>(r->cellRows[k])].data);
+        rd.out = reinterpret_cast<std::uint64_t>(out.data);
+        rd.work_a = reinterpret_cast<std::uint64_t>(views[static_cast<std::size_t>(r->workA)].data);
+        rd.work_b = reinterpret_cast<std::uint64_t>(views[static_cast<std::size_t>(r->workB)].data);
+        rd.n = nrows;
+        rd.stream = reinterpret_cast<std::uint64_t>(stream);
+        rd.policy = static_cast<std::uint32_t>(r->policy);
+        rd.columns = 1;
+        rd.comp_in = r->cellComp[k] < 0 ? 0 : reinterpret_cast<std::uint64_t>(views[static_cast<std::size_t>(r->cellComp[k])].data);
+        if (reinterpret_cast<ReduceDevice>(r->reduce)(&rd) != EAGLE_BACKEND_OK)
+            return Error::Internal(quoted(digest) + ": finishing a cell failed: " + lastError());
+    }
     return Error::Success();
 }
 
@@ -359,6 +434,7 @@ EAGLE_XLA_API std::int32_t eagle_xla_register(const char* digest, const struct e
     r->memset = c.memset;
     r->memcpy = c.memcpy;
     r->function = c.function;
+    r->reduce = c.reduce;
     r->nargs = c.nargs;
     r->nrets = c.nrets;
     r->sampleBuffer = c.sample_buffer;
@@ -384,6 +460,29 @@ EAGLE_XLA_API std::int32_t eagle_xla_register(const char* digest, const struct e
         r->slotBuffer.push_back(buffer);
         r->slotCell.push_back(c.slot_cell[s] ? 1 : 0);
     }
+    if (c.ncells < 0 || (c.ncells > 0 && (c.cell_rows == nullptr || c.cell_comp == nullptr || c.cell_out == nullptr
+            || c.cell_op == nullptr || c.cell_row < 1))
+        || (c.ncells > 0 && c.platform == EAGLE_XLA_PLATFORM_CUDA
+            && (c.reduce == 0 || c.work_a < 0 || c.work_b < 0 || c.work_a >= c.nargs + c.nrets
+                || c.work_b >= c.nargs + c.nrets)))
+        return EAGLE_XLA_BAD_SLOT;
+    const std::int32_t nbuf = c.nargs + c.nrets;
+    for (std::int32_t k = 0; k < c.ncells; ++k) {
+        const std::int32_t d = c.dtype[c.cell_out[k]];
+        if (c.cell_rows[k] < 0 || c.cell_rows[k] >= nbuf || c.cell_comp[k] < -1 || c.cell_comp[k] >= nbuf
+            || c.cell_out[k] < c.nargs || c.cell_out[k] >= nbuf || c.cell_op[k] < EAGLE_XLA_CELL_SUM
+            || c.cell_op[k] > EAGLE_XLA_CELL_MIN || (d != XLA_FFI_DataType_F32 && d != XLA_FFI_DataType_F64))
+            return EAGLE_XLA_BAD_SLOT;
+        r->cellRows.push_back(c.cell_rows[k]);
+        r->cellComp.push_back(c.cell_comp[k]);
+        r->cellOut.push_back(c.cell_out[k]);
+        r->cellOp.push_back(c.cell_op[k]);
+    }
+    r->cellRow = std::max<std::int32_t>(1, c.cell_row);
+    r->policy = c.policy & ~EAGLE_XLA_POLICY_FIXED_F64;
+    r->fixedF64 = (c.policy & EAGLE_XLA_POLICY_FIXED_F64) != 0;
+    r->workA = c.work_a;
+    r->workB = c.work_b;
     std::unique_lock<std::shared_mutex> lock(g_mutex);
     g_table[digest] = std::move(r);
     return EAGLE_XLA_OK;

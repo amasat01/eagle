@@ -44,7 +44,7 @@ def _launch_step(node, ctx):
 
 def _launch_native(node, ctx):
     b = node.payload
-    if b._cupy is not None:
+    if b._cupy is not None or getattr(b, "_stages", None):
         return None
     if b._copies or b._active_count is not None:
         return None
@@ -57,18 +57,37 @@ def _launch_transpose(node, incoming, ctx):
     it wrote, and fresh adjoint planes for everything it read."""
     import numpy
 
+    from . import _cell_rows, _split
+
     bound = node.payload
     role_of = {name: role for role, name in bound._arg_spec}
     xp = bound._cupy or numpy
+    vjp = ctx.vjp.plugin
+    cells, rowset = _cell_rows.cells_of(vjp), _cell_rows.row_planes(vjp)
+    if _split.stages_of(vjp):
+        # a split vjp owns its rows and finishes each gradient cell itself
+        cells, rowset, finished = {}, frozenset(), frozenset(_split.cells(vjp))
+    else:
+        finished = frozenset()
     planes, out = {}, {}
-    for role, name in ctx.vjp.plugin.arg_spec:
+    for role, name in _split.arg_spec(vjp):
         src = name[4:] if name.startswith("bar_") else None
         if role == "nsamples":
             continue
-        if name in role_of:
+        if name in finished:
+            planes[name] = out[src] = xp.zeros(1, dtype=bound._dtype)
+        elif name in role_of:
             planes[name] = ctx.primal(name)
         elif src in incoming:
             planes[name] = incoming[src]
+        elif name in rowset:
+            # a parameter's gradient arrives as rows of 32-sample partial sums
+            # (and their companions); the reverse finishes them into the cell
+            planes[name] = buf = xp.zeros(-(-bound.n // _cell_rows.ROW), dtype=bound._dtype)
+            if name in cells:
+                out[src] = buf
+            else:
+                ctx.comp[id(planes[name[:-len("_comp")]])] = buf
         elif src in role_of and role_of[src] not in OUTPUT_ROLES:
             # a parameter cell's gradient comes back per sample; the reverse sums it
             per_sample = role_of[src] == "lookup" and role == "mutable"

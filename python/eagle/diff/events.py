@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import numpy
 
-from .. import _core
+from .. import _core, _split
 from ._record import xp_of
 
 __all__ = ["phase"]
@@ -190,7 +190,8 @@ class RefinePass:
                 bind[nm] = self.prestop[nm]
             else:
                 bind[nm] = rec.planes[nm]
-        self.newton = make_plan(k.newton, structure=rec.structure).bind(**bind)
+        self.newton = _split.single(make_plan(k.newton, structure=rec.structure).bind(**bind),
+                                    "eagle.diff events")
         self.g = [self.out[f"{_GUARD}{j}"] for j in range(k.guards)]
         self.dg = [self.out[f"{_DOT}{_GUARD}{j}"] for j in range(k.guards)]
         self.refined = {nm: self.out[nm + _REFINED] for nm in k.state}

@@ -28,6 +28,12 @@
  * ``(n,)`` or one-cell buffer a ``ScalarHandle``), and launches ONE serial
  * call over ``[0, n)``:
  *
+ * After the launch, each cell the recipe lists is finished into its one-element
+ * result from its rows (and companion rows) with the canonical reduction
+ * (``eagle/reduce/canonical.h``): inline on the CPU, the seam's
+ * ``eagle_backend_x_reduce_canonical`` on the same stream on CUDA, in the work
+ * results XLA allocated (the handler allocates nothing).
+ *
  * - CPU: the kernel's host entry ``void entry(void* const*, int64 base, int64
  *   count, int64 n)``, inline on XLA's thread; alias copy and zero-fill are ``memcpy`` and
  *   ``memset``.
@@ -62,6 +68,16 @@ extern "C" {
 #define EAGLE_XLA_SLOT_NSAMPLES 4
 #define EAGLE_XLA_SLOT_INOUT 5
 
+/** ``eagle_xla_recipe.cell_op``: how a cell folds its rows (sum and mean rows
+ *  already carry the 1/n); ``policy``: the float-sum policy, the seam's
+ *  EAGLE_BACKEND_REDUCE_COMPENSATED / ORDERED / AUTO values. */
+/** OR'd into ``policy`` of a CPU recipe: float64 sum cells take the
+ *  fixed-point leaf, as the machine's GPU does (``canonical::fixedLeaf``). */
+#define EAGLE_XLA_POLICY_FIXED_F64 0x100
+#define EAGLE_XLA_CELL_SUM 0
+#define EAGLE_XLA_CELL_MAX 1
+#define EAGLE_XLA_CELL_MIN 2
+
 /** ``eagle_xla_register`` status codes. */
 #define EAGLE_XLA_OK 0
 #define EAGLE_XLA_BAD_RECIPE 1   /**< null pointer, wrong struct_size or platform */
@@ -92,6 +108,16 @@ struct eagle_xla_recipe {
     int32_t nalias;              /**< operand/result pairs XLA aliases */
     const int32_t* alias_operand; /**< nalias operand indices */
     const int32_t* alias_result;  /**< nalias result indices (into the results, not the buffers) */
+    uint64_t reduce;             /**< CUDA: eagle_backend_x_reduce_canonical (the host finishes inline) */
+    int32_t ncells;              /**< sample cells the call finishes after the launch */
+    int32_t cell_row;            /**< samples each row of a cell stands for (rows = ceil(n / cell_row)) */
+    int32_t policy;              /**< EAGLE_XLA_POLICY_* of the float sums */
+    const int32_t* cell_rows;    /**< ncells buffer indices of the row planes */
+    const int32_t* cell_comp;    /**< ncells buffer indices of the companion rows (-1: none) */
+    const int32_t* cell_out;     /**< ncells buffer indices of the (1,) cell results */
+    const int32_t* cell_op;      /**< ncells EAGLE_XLA_CELL_* */
+    int32_t work_a;              /**< CUDA: buffer index of the first reduction work result (-1: no cells) */
+    int32_t work_b;              /**< CUDA: the second */
 };
 
 int32_t eagle_xla_register(const char* digest, const struct eagle_xla_recipe* recipe);

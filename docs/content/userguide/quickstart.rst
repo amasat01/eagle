@@ -59,7 +59,7 @@ short, here's what each does in the program that follows:
        eagle::cuda::StreamCapturer capturer(stream.cuda());
        capturer.begin();
        addOne<<<1, N, 0, stream.cuda()>>>(dBuf, N);
-       graph.addNode(capturer.end());
+       graph.addNode(eagle::cuda::CapturedGraph{ capturer.end() });
 
        // Instantiate and replay
        eagle::cuda::Launcher launcher = graph.launcher();

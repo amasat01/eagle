@@ -44,7 +44,7 @@ import tempfile
 import numpy as np
 import warp as wp
 
-from .. import FINISHED_PLANE
+from .. import FINISHED_PLANE, _cell_rows, _split
 from ._kernel_planes import call_mode, promote
 from ._tower import LOCK, Level
 
@@ -109,7 +109,14 @@ def _make_kernels(dtype):
             total = total + part[c]
         dst[0] = dst[0] + total
 
-    return accumulate, chunk_sums, add_total
+    @wp.kernel(module="unique")
+    def unfinished(dst: wp.array2d(dtype=dtype), src: wp.array2d(dtype=dtype),
+                   mask: wp.array(dtype=wp.bool)):
+        # a finished sample did not step: it seeds no gradient
+        i, j = wp.tid()
+        dst[i, j] = dtype(0.0) if mask[j] else src[i, j]
+
+    return accumulate, unfinished, chunk_sums, add_total
 
 
 _NO_MASK = {}
@@ -217,14 +224,35 @@ class WarpFunction:
             self._record(tape, values, outs, device, n, mode)
         return outs[0] if len(outs) == 1 else tuple(outs)
 
-    def prepare(self, mode, device, *, backward=False):
+    def prepare(self, mode, device, *, backward=False, samples=None):
         """Build and load the kernel (and its reverse-mode kernel when
         ``backward``) for ``mode`` (``"float32"``/``"float64"``) on ``device``,
-        so a later call can sit inside ``wp.capture_begin``."""
+        so a later call can sit inside ``wp.capture_begin``. A kernel that
+        reduces over samples also needs ``samples``, the batch size the capture
+        will run (the row scratch cannot be allocated inside a capture)."""
         device = wp.get_device(device)
-        self._built(self._root, mode, device)
-        if backward:
-            self._built(self._adjoint()[0], mode, device)
+        levels = [self._root] + ([self._adjoint()[0]] if backward else [])
+        for level in levels:
+            self._built(level, mode, device)
+            if samples is not None:
+                self._rows(level, int(samples), mode, device)
+
+    @staticmethod
+    def _rows(level, n, mode, device):
+        """The row scratch of ``level`` at ``n`` samples (``None`` without a reduction)."""
+        if not level.sig.cells:
+            return None
+        if device.is_cuda:
+            import cupy as xp
+        else:
+            xp = np
+        if device.is_cuda and device.is_capturing and not _cell_rows.has(level, n, xp, mode):
+            raise RuntimeError(
+                f"eagle.frameworks.warp: {level.label!r} reduces over samples and a graph "
+                "capture is open (its row scratch cannot be allocated inside one); call "
+                f"fn.prepare(mode, device, backward=..., samples={n}) or run the call once "
+                "before wp.capture_begin")
+        return _cell_rows.scratch(level, n, xp, np.dtype(mode), cells=level.sig.cells)
 
     def _bind(self, args, kwargs):
         names = self.inputs
@@ -330,6 +358,10 @@ class WarpFunction:
                     seed = outputs[seeds[name]]
                     # an output the caller did not ask a gradient for carries a zero adjoint
                     planes[name] = seed.grad if seed.grad is not None else wp.zeros_like(seed)
+                    if vjp.sig.cells and sig.terminated:
+                        # the rows sum every sample: a finished one must seed nothing
+                        planes[name] = self._unfinished(planes[name], values[sig.terminated],
+                                                        device, mode)
             for name in vjp.sig.outputs:
                 planes[name] = wp.zeros(vjp.sig.shape(name, n),
                                         dtype=wp.dtype_from_numpy(vjp.sig.dtype(name, mode)),
@@ -340,17 +372,20 @@ class WarpFunction:
                 # a finished sample did not step: its incoming gradient passes through
                 carried = outputs[name].grad if name in sig.state else None
                 self._add(values[name].grad, planes[adjoint[name]], mask, device, mode,
-                          cell=sig.is_cell(name), through=carried)
+                          cell=sig.is_cell(name), through=carried,
+                          finished=adjoint[name] in vjp.sig.cells)
 
         tape.record_func(backward, tracked)
 
     @staticmethod
-    def _add(dst, src, mask, device, mode, *, cell, through=None):
-        accumulate, chunk_sums, add_total = _kernels(
+    def _add(dst, src, mask, device, mode, *, cell, finished=False, through=None):
+        accumulate, _unfinished, chunk_sums, add_total = _kernels(
             wp.float32 if mode == "float32" else wp.float64)
+        if cell and finished:     # a cell arrives finished (eagle.reduce of the rows): add it as is
+            mask = None
         flag = 0 if mask is None else (1 if through is None else 2)
         mask = _no_mask(device) if mask is None else mask
-        if cell:
+        if cell and not finished:     # per-sample terms (no reduction over samples in the kernel)
             n = src.shape[0]
             count = min(_CHUNKS, n)
             part = wp.empty(count, dtype=src.dtype, device=device)
@@ -363,17 +398,48 @@ class WarpFunction:
         wp.launch(accumulate, dim=d.shape, inputs=[d, s, nxt, mask, flag], device=device,
                   record_tape=False)
 
+    @staticmethod
+    def _unfinished(seed, mask, device, mode):
+        _acc, unfinished, _cs, _at = _kernels(wp.float32 if mode == "float32" else wp.float64)
+        out = wp.zeros_like(seed)
+        wp.launch(unfinished, dim=_planes_2d(out).shape, inputs=[_planes_2d(out), _planes_2d(seed), mask],
+                  device=device, record_tape=False)
+        return out
+
     # -- the launch itself ------------------------------------------------------
     def _launch(self, level, mode, planes, device):
         """Run ``level`` over ``planes`` (name -> wp.array): on Warp's current
         stream for a CUDA device, on the host runtime for a CPU one."""
         spec = level.sig.arg_spec
-        if device.is_cuda:
-            self._launch_device(level, mode, spec, planes, device)
-        else:
-            self._launch_host(level, mode, spec, planes, device)
+        cells = level.sig.cells
+        if not cells:
+            if device.is_cuda:
+                self._launch_device(level, mode, spec, planes, device)
+            else:
+                self._launch_host(level, mode, spec, planes, device)
+            return
+        # a reduction over samples: the kernel writes rows into eagle's scratch,
+        # which are finished into the cell plane
+        sig = level.sig
+        n = next(int(planes[nm].shape[-1]) for r, nm in spec
+                 if nm in planes and nm not in sig.rows and r in ("per_sample", "vec_in", "mat_in"))
+        rows = self._rows(level, n, mode, device)
+        with rows:
+            if device.is_cuda:
+                self._launch_device(level, mode, spec, planes, device, rows=rows.rows)
+                stream = device.stream.cuda_stream or 0
+                import cupy
+                from eagle.interop import external_stream
 
-    def _launch_host(self, level, mode, spec, planes, device):
+                with cupy.cuda.Device(device.ordinal), external_stream(stream):
+                    for nm, cell in rows.finish().items():
+                        _cupy_view(planes[nm], device)[...] = cell
+            else:
+                self._launch_host(level, mode, spec, planes, device, rows=rows.rows)
+                for nm, cell in rows.finish().items():
+                    planes[nm].numpy()[...] = cell
+
+    def _launch_host(self, level, mode, spec, planes, device, rows=None):
         from hawk.runtime import run
 
         host = self._built(level, mode, device)
@@ -381,11 +447,13 @@ class WarpFunction:
         for role, name in spec:
             if role == "lookup" and name == FINISHED_PLANE:
                 arrays[name] = np.zeros(1, dtype=np.int32)
+            elif rows is not None and name in rows:
+                arrays[name] = rows[name]
             elif name in planes:
                 arrays[name] = planes[name].numpy()
         run(host, **arrays)
 
-    def _launch_device(self, level, mode, spec, planes, device):
+    def _launch_device(self, level, mode, spec, planes, device, rows=None):
         import cupy
 
         from eagle.interop import external_stream
@@ -398,6 +466,8 @@ class WarpFunction:
             for role, name in spec:
                 if role == "lookup" and name == FINISHED_PLANE:
                     arrays[name] = _cupy_view(wp.zeros(1, dtype=wp.int32, device=device), device)
+                elif rows is not None and name in rows:
+                    arrays[name] = rows[name]
                 elif name in planes:
                     arrays[name] = _cupy_view(planes[name], device)
             plan.bind(**arrays).launch(stream=stream)
@@ -437,4 +507,5 @@ class WarpFunction:
         arch = self._arch or f"sm_{device.arch}"
         unit = level.unit(self._dir, "cuda", mode, arch)
         built = plugins(unit, device_loader=load_manifest)
+        _split.link(built, unit)
         return eplan.plan(built[level.name], structure=eexec.DeviceKernel)

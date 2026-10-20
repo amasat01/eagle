@@ -53,7 +53,7 @@ from types import MappingProxyType
 
 import torch
 
-from .. import FINISHED_PLANE
+from .. import FINISHED_PLANE, _cell_rows, _split
 from ._kernel_planes import INPUT_ROLES, OUTPUT_ROLES, _prior_reads, call_mode, promote
 from ._tower import LOCK, finished_identity, plane_names
 
@@ -92,6 +92,13 @@ def function(kernel, *, wrt=None, cache_dir=None, device_arch=None):
 
 
 # -- the generic op ----------------------------------------------------------
+def _as_tensor(array, device):
+    """A tensor over the same memory as the numpy/cupy ``array``."""
+    if device.type == "cuda":
+        return torch.as_tensor(array, device=device)
+    return torch.from_numpy(array)
+
+
 def _launch(digest, planes):
     """What ``eagle::launch`` does: run the level ``digest`` names over ``planes``."""
     level, mode = _REGISTRY[digest]
@@ -158,11 +165,14 @@ def _gradients(got, saved, needs, grad_plan, mask_pos, grad_outs=(), carried=())
             continue
         grad = got[pos]
         out = carried[i] if carried else -1
+        if is_param == 2:       # a cell: it arrives finished (eagle.reduce of the rows)
+            grads.append(grad.reshape(saved[i].shape).to(saved[i].device))
+            continue
         if mask_pos >= 0 and out >= 0:
             grad = finished_identity(torch.where, saved[mask_pos], grad_outs[out], grad)
         elif mask_pos >= 0:
             grad = grad.masked_fill(saved[mask_pos], 0.0)
-        if is_param:
+        if is_param:     # per-sample terms (no reduction over samples in the kernel)
             grad = grad.sum().reshape(saved[i].shape).to(saved[i].device)
         grads.append(grad)
     return tuple(grads)
@@ -240,7 +250,11 @@ class _Level:
             and self.finish is not None
             and self.finish[0] == self.terminated
         )
-        outputs = [n for n in order if self.role.get(n) in OUTPUT_ROLES]
+        #: a reduction over samples: its rows are eagle's scratch, the cell is the output
+        self.cells = _cell_rows.kernel_cells(kernel)
+        companions = _cell_rows.row_names(self.cells) - frozenset(self.cells)
+        outputs = [n for n in order if (self.role.get(n) in OUTPUT_ROLES or n in self.cells)
+                   and n not in companions]
         if self.finishes_terminated:
             outputs.append(self.terminated)
         self.outputs = tuple(outputs)
@@ -337,7 +351,9 @@ class _Level:
         )
         child_at = {n: j for j, n in enumerate(child.outputs)}
         grads = tuple(
-            (child_at.get(child.grad.get(n), -1), n in self.params) for n in self.inputs
+            (child_at.get(child.grad.get(n), -1),
+             (2 if child.grad.get(n) in child.cells else 1) if n in self.params else 0)
+            for n in self.inputs
         )
         mask = in_at.get(self.terminated, -1) if self.terminated is not None else -1
         carried = tuple(out_at[n] if n in self.state else -1 for n in self.inputs)
@@ -371,6 +387,8 @@ class _Level:
 
     # -- shapes -------------------------------------------------------------
     def plane_shape(self, name, n):
+        if name in self.cells:
+            return (1,)
         return (n,) if self.width.get(name, 1) == 1 else (self.width[name], n)
 
     def _samples(self, values):
@@ -434,8 +452,38 @@ class _Level:
             )
         for name in self.state:  # carried state: stepped in place on a copy
             outs[name] = values[name].detach().contiguous().clone()
-        self._run(mode, {**values, **outs}, device)
+        rows = self._cell_rows(n, mode, device)
+        if rows is None:
+            self._run(mode, {**values, **outs}, device)
+        else:
+            with rows:
+                views = {nm: _as_tensor(a, device) for nm, a in rows.rows.items()}
+                self._run(mode, {**values, **outs, **views}, device)
+                for nm, cell in self._finish(rows, device).items():
+                    outs[nm] = _as_tensor(cell, device).clone()
         return [outs[name] for name in self.outputs]
+
+    @staticmethod
+    def _finish(rows, device):
+        """``rows.finish()`` on the stream the launch ran on (a capture sees it)."""
+        if device.type != "cuda":
+            return rows.finish()
+        import cupy
+
+        from eagle.interop import _stream_handle, external_stream
+
+        index = device.index if device.index is not None else torch.cuda.current_device()
+        with cupy.cuda.Device(index), external_stream(_stream_handle(torch.cuda.current_stream(index))):
+            return rows.finish()
+
+    def _cell_rows(self, n, mode, device):
+        """The row scratch of this kernel at ``n`` samples (``None`` without a reduction)."""
+        import numpy
+
+        xp = numpy
+        if device.type == "cuda":
+            import cupy as xp
+        return _cell_rows.scratch(self, n, xp, numpy.dtype(mode), cells=self.cells)
 
     def _mask(self, plane, values):
         if self.terminated is None:
@@ -458,7 +506,7 @@ class _Level:
                 )
         got = dict(zip(child.outputs, child.fn_for_call.apply(*args)))
         return tuple(
-            self._mask(got[child.tan_out[o]], values)
+            (got[child.tan_out[o]] if o in self.cells else self._mask(got[child.tan_out[o]], values))
             if o != self.terminated and child.tan_out.get(o) in got
             else None
             for o in self.outputs
@@ -469,7 +517,9 @@ class _Level:
         ``n * batch`` samples (the batch folds into the sample axis); a
         batched ``Param`` cannot, so that case is a loop of calls."""
         size = info.batch_size
-        if any(d is not None for n, d in zip(self.inputs, in_dims) if n in self.params):
+        # a batched Param, or a cell (a sum over the folded samples), cannot fold
+        if self.cells or any(d is not None for n, d in zip(self.inputs, in_dims)
+                             if n in self.params):
             rows = []
             for i in range(size):
                 picked = [
@@ -617,6 +667,7 @@ class _Level:
             device_arch=arch,
         )
         built = plugins(unit, device_loader=load_manifest)
+        _split.link(built, unit)
         return eplan.plan(built[self.kernel.name], structure=eexec.DeviceKernel)
 
     @property

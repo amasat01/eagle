@@ -55,6 +55,7 @@ import os
 import threading
 import time
 
+from . import _split
 from . import exec as eexec
 from .plan import BoundPlan
 
@@ -327,7 +328,7 @@ def run_host(runner) -> None:
 
 def _run_host_loop(runner, threads: int) -> None:
     loop = runner.loop
-    step = runner.step
+    step = _split.single(runner.step, "eagle.until_done host loop")
     if not _direct(step) or runner._hooks:     # a per-step hook runs in the loop's host arm
         loop()
         return

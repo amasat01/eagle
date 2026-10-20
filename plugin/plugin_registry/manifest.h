@@ -218,9 +218,9 @@ inline void validate_execution_axis(const Manifest& m, const std::string& what) 
     const int version = (m.schema_version == 0) ? 1 : m.schema_version;
     if (!m.aether_abi.empty()) {
         const int tag_version = abi_version_of(m.aether_abi);
-        if (tag_version != version)
+        if (tag_version != (version >= 2 ? 2 : 1))
             throw std::runtime_error(what + ": schema v" + std::to_string(version) +
-                " requires aether_abi '" + (version == 2 ? EAGLE_AETHER_ABI_V2
+                " requires aether_abi '" + (version >= 2 ? EAGLE_AETHER_ABI_V2
                                                          : EAGLE_AETHER_ABI) +
                 "'; got '" + m.aether_abi + "'");
     }

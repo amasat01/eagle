@@ -187,7 +187,7 @@ graph.stream(stream.cuda());
 eagle::cuda::StreamCapturer capturer(stream.cuda());
 capturer.begin();
 addOne<<<1, 64, 0, stream.cuda()>>>(buf, 64);
-graph.addNode(capturer.end());
+graph.addNode(eagle::cuda::CapturedGraph{ capturer.end() });
 
 eagle::cuda::Launcher launcher = graph.launcher();
 launcher.launch();          // cudaGraphLaunch — no per-call kernel-config overhead

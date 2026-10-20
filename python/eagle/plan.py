@@ -39,7 +39,7 @@ import numpy as np
 
 from .interop import BufferRefused
 
-from . import _counters, _layout
+from . import _cell_rows, _counters, _layout, _split
 from . import exec as eexec
 from .abi import DEVICE_CPU, DEVICE_CUDA
 from .roles import INPUT_ROLES, OUTPUT_ROLES
@@ -172,7 +172,10 @@ class Plan:
         :data:`eagle.exec.DeviceKernel` plan, numpy for
         :data:`~eagle.exec.HostTeam`, a plain scalar for a ``uniform``
         (frozen into its by-value box here). ``nsamples`` is derived, never
-        bound. The reserved ``fused_steps`` word of an automatic kernel may
+        bound. A kernel split in stages binds the planes of
+        :func:`eagle._split.arg_spec` and returns a
+        :class:`eagle._split.SplitBound`, which owns the rows and cells between
+        its stages and stands wherever a :class:`BoundPlan` does. The reserved ``fused_steps`` word of an automatic kernel may
         be left out: a one-step word is then bound for you
         (:func:`one_step_word`); :func:`eagle.until_done` binds its own.
 
@@ -320,6 +323,11 @@ def plan(
                 f"arm; a {structure.name!r} run has no gather to suppress"
             )
 
+    if structure is eexec.RankPartition and _cell_rows.cells_of(plugin):
+        raise ValueError(
+            f"eagle.plan: '{getattr(plugin, 'kernel', 'this kernel')}' reduces over "
+            "samples; folding its cells across ranks is not in this release (it "
+            "returns in the next); run it on one rank")
     eexec.check_placement(access, structure, npart)  # placement legality, at PLAN time
 
     return Plan(
@@ -411,9 +419,13 @@ def _run_device_plan(plugin, arg_spec, kw, n: int, parts, *, launch=None, gather
     dtype = _plane_dtype(plugin)
     widths = _declared_widths(plugin)
     vec_mut, mat_mut = _mutable_shapes(plugin)
+    cells = _cell_rows.scratch(plugin, n, cp, dtype)
     device_arrays = {}
     for role, name in arg_spec:
-        if role in OUTPUT_ROLES:
+        if cells is not None and name in cells.rows:
+            _refuse_supplied_cell(name, kw)
+            device_arrays[name] = cells.rows[name]
+        elif role in OUTPUT_ROLES:
             device_arrays[name] = (
                 _checked_out(name, role, cp.asarray(kw[name]),
                              _output_dtype(plugin, name, dtype), device=True)
@@ -428,7 +440,8 @@ def _run_device_plan(plugin, arg_spec, kw, n: int, parts, *, launch=None, gather
 
     if gather is not None:
         for name in out_names:
-            _check_gatherable(device_arrays[name])
+            if cells is None or name not in cells.rows:
+                _check_gatherable(device_arrays[name])
 
     fn = plugin.device_function
     for part in parts:
@@ -441,13 +454,18 @@ def _run_device_plan(plugin, arg_spec, kw, n: int, parts, *, launch=None, gather
         del boxes  # kept alive until run() returns, below this loop's scope
     cp.cuda.runtime.deviceSynchronize()
     if keep_device and gather is None:
-        return _returned(device_arrays, out_names)
+        return _returned(*_finished(plugin, cells, device_arrays, out_names))
     # planes come home before anything else looks at them: this makes the
     # rank gather a HOST gather (CUDA-aware MPI was ruled out)
-    planes = {name: cp.asnumpy(device_arrays[name]) for name in out_names}
+    planes = {name: cp.asnumpy(device_arrays[name]) for name in out_names
+              if cells is None or name not in cells.rows}
     if gather is not None:
-        for name in out_names:
+        for name in planes:
             gather(planes[name], n, parts)
+    if cells is not None:
+        cells.finish()
+        planes.update({name: cp.asnumpy(c) for name, c in cells.cell.items()})
+        out_names = tuple(nm for nm in out_names if nm not in _cell_rows.hidden(plugin))
     return _returned(planes, out_names)
 
 
@@ -456,9 +474,13 @@ def _run_host_plan(plugin, arg_spec, kw, n: int, parts, *, launch=None, gather=N
     dtype = _plane_dtype(plugin)
     widths = _declared_widths(plugin)
     vec_mut, mat_mut = _mutable_shapes(plugin)
+    cells = _cell_rows.scratch(plugin, n, np, dtype)
     host_arrays = {}
     for role, name in arg_spec:
-        if role in OUTPUT_ROLES:
+        if cells is not None and name in cells.rows:
+            _refuse_supplied_cell(name, kw)
+            host_arrays[name] = cells.rows[name]
+        elif role in OUTPUT_ROLES:
             # a caller-supplied output plane is written IN PLACE and returned
             # as given; one that is not the plane's own dtype/layout/device
             # is refused before the launch (the kernel would write through
@@ -491,8 +513,27 @@ def _run_host_plan(plugin, arg_spec, kw, n: int, parts, *, launch=None, gather=N
         del boxes
     if gather is not None:
         for name in out_names:
-            gather(host_arrays[name], n, parts)
-    return _returned(host_arrays, out_names)
+            if cells is None or name not in cells.rows:
+                gather(host_arrays[name], n, parts)
+    return _returned(*_finished(plugin, cells, host_arrays, out_names))
+
+
+def _refuse_supplied_cell(name, kw) -> None:
+    if name in kw:
+        raise BufferRefused(
+            f"eagle.plan.run: output {name!r} is a reduction over samples; run() "
+            "finishes its rows into the one-element cell and returns it, so do "
+            "not pass a plane for it")
+
+
+def _finished(plugin, cells, arrays, out_names):
+    """``(arrays, names)`` of a run's result: the finished cell in place of its
+    rows (the ``_comp`` companions are not handed back)."""
+    if cells is None:
+        return arrays, out_names
+    cells.finish()
+    arrays = {**arrays, **cells.cell}
+    return arrays, tuple(nm for nm in out_names if nm not in _cell_rows.hidden(plugin))
 
 
 def _launch_host(entry, addrs, part):
@@ -577,6 +618,14 @@ def _run_plan(p: Plan, /, **kw):
     """``Plan.run``'s body. ``p`` is positional-only: a plugin declaring a
     plane literally named ``p`` would otherwise collide with this
     function's own first parameter."""
+    if _split.stages_of(p.plugin):
+        return _split.run(p, kw, _run_one)
+    return _run_one(p, **kw)
+
+
+def _run_one(p: Plan, /, **kw):
+    """One kernel's run: the body of :func:`_run_plan` (a split kernel's stages
+    each run through here)."""
     plugin = p.plugin
     arg_spec = getattr(plugin, "arg_spec", None)
     if arg_spec is None:

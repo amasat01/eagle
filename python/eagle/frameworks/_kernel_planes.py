@@ -26,7 +26,7 @@ from types import MappingProxyType
 
 import numpy as np
 
-from .. import FINISHED_PLANE
+from .. import FINISHED_PLANE, _cell_rows
 
 __all__ = ["FLOAT_MODES", "INPUT_ROLES", "OUTPUT_ROLES", "ModeError", "Signature", "call_mode", "promote"]
 
@@ -89,13 +89,19 @@ class Signature:
         types = kernel.walk.slot_types
         self.role = {name: role for role, name in self.arg_spec}
         self._ir = {name: types[(role, name)] for role, name in self.arg_spec}
+        #: reductions over samples ``{cell: op}``: the kernel writes rows (and a
+        #: ``<cell>_comp`` companion) that the bridge finishes into the cell
+        self.cells = _cell_rows.kernel_cells(kernel)
+        self.rows = _cell_rows.row_names(self.cells)
         bad = sorted(f"{n} ({r})" for r, n in self.arg_spec
-                     if r in _BY_VALUE or r not in INPUT_ROLES | OUTPUT_ROLES)
+                     if r in _BY_VALUE or (r not in INPUT_ROLES | OUTPUT_ROLES
+                                           and n not in self.rows))
         if bad:
             raise ValueError(
                 f"{who}: kernel {self.name!r} declares {', '.join(bad)}; a framework "
                 "bridge serves per-sample kernels (Scalar/Vector/Matrix planes, Param, "
-                "Terminated, Mutable outputs)")
+                "Terminated, Mutable outputs; a scattered accum_out and a reduction over "
+                "samples the bridge cannot finish are refused)")
         self.counter = ("lookup", FINISHED_PLANE) in self.arg_spec
         #: a kernel declared without ``steps=1`` reads the one-cell step-count word
         #: every launch but ``until_done``'s binds to 1: never a user input
@@ -112,7 +118,8 @@ class Signature:
         finish = getattr(kernel.walk, "finish", None)
         self.finishes = (self.terminated is not None and finish is not None
                          and finish[0] == self.terminated)
-        outs = [n for r, n in self.arg_spec if r in OUTPUT_ROLES]
+        outs = [n for r, n in self.arg_spec
+                if (r in OUTPUT_ROLES or n in self.cells) and n not in self.rows - set(self.cells)]
         if not outs:
             raise ValueError(f"{who}: kernel {self.name!r} writes no output")
         self.outputs = tuple(outs + ([self.terminated] if self.finishes else []))
@@ -130,7 +137,7 @@ class Signature:
 
     def shape(self, name, n) -> tuple:
         """The array shape of slot ``name`` for ``n`` samples."""
-        if self.is_cell(name):
+        if self.is_cell(name) or name in self.cells:
             return (1,)
         w = self.width(name)
         return (n,) if w == 1 else (w, n)

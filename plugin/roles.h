@@ -81,8 +81,9 @@ inline constexpr int kPluginSchemaVersion = 1;
 // does not own, while the loader ceiling is a per-build property that must move
 // with the loader. A schema-v2 document additionally carries the FLAT execution
 // keys (``exec_targets`` / ``exec_access`` / ``exec_op``) and is refused
-// without them; a v1 document must carry NONE of them.
-inline constexpr int kPluginMaxSchemaVersion = 2;
+// without them; a v1 document must carry NONE of them. Schema v3 is v2 with
+// ``cells`` replacing ``sample_sums``; it carries the same axis and tag.
+inline constexpr int kPluginMaxSchemaVersion = 3;
 
 // The plugin FAMILIES a manifest/sidecar ``pattern`` may name (schema v1): the
 // variants a generated ``Bundle`` can emit. Unlike an ordinary optional key, ``pattern``

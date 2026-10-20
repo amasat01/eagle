@@ -1207,15 +1207,32 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_x_restore_device(struct eag
 
 namespace {
 
-/** One canonical reduction of element type @p T under @p OP, result copied to
- *  @p out (one store kernel, capturable). */
+/** The fields a newer caller appends to the reduce desc; defaults for an older one. */
+struct ReduceExt {
+    std::uint32_t policy = EAGLE_BACKEND_REDUCE_ORDERED;
+    std::uint32_t flags = 0;
+    std::int64_t columns = 1;
+    std::uint64_t comp_in = 0;
+};
+
+/** One canonical reduction of element type @p T under @p OP into @p out
+ *  (capturable). */
 template <class T, class OP>
-void reduceCanonical(const eagle_backend_reduce_desc& d, cudaStream_t stream)
+void reduceCanonical(const eagle_backend_reduce_desc& d, const ReduceExt& e, cudaStream_t stream, bool fixed)
 {
     namespace canon = eagle::reduce::canonical;
-    const eagle::idx_t n = static_cast<eagle::idx_t>(d.n);
-    canon::enqueueTo<T, OP>(canon::DevicePtr<T>{ reinterpret_cast<const T*>(d.in) }, n,
-        reinterpret_cast<T*>(d.work_a), reinterpret_cast<T*>(d.work_b), reinterpret_cast<T*>(d.out), stream);
+    const canon::DevicePtr<T> in{ reinterpret_cast<const T*>(d.in) };
+    const auto policy = static_cast<eagle::reduce::Policy>(e.policy);
+    const auto rows = static_cast<eagle::idx_t>(d.n), cols = static_cast<eagle::idx_t>(e.columns);
+    const bool pair = (e.flags & EAGLE_BACKEND_REDUCE_PAIR_OUT) != 0;
+    auto* wa = reinterpret_cast<T*>(d.work_a);
+    auto* wb = reinterpret_cast<T*>(d.work_b);
+    auto* out = reinterpret_cast<T*>(d.out);
+    if (e.comp_in != 0)
+        canon::enqueueTo<T, OP>(in, canon::DevicePtr<T>{ reinterpret_cast<const T*>(e.comp_in) }, rows,
+            cols, policy, wa, wb, out, pair, stream, fixed);
+    else
+        canon::enqueueTo<T, OP>(in, canon::NoComp{}, rows, cols, policy, wa, wb, out, pair, stream, fixed);
 }
 
 } // namespace
@@ -1224,18 +1241,29 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_x_reduce_canonical(struct e
 {
     return guarded([&] {
         constexpr const char* who = "eagle_backend_x_reduce_canonical";
-        if (desc == nullptr || desc->struct_size < sizeof(eagle_backend_reduce_desc))
+        constexpr std::size_t base = offsetof(eagle_backend_reduce_desc, work_elems) + sizeof(desc->work_elems);
+        if (desc == nullptr || desc->struct_size < base)
             throw std::invalid_argument(std::string(who) + ": null desc or struct_size too small");
         const auto& d = *desc;
         if (d.n < 1)
             throw std::invalid_argument(std::string(who) + ": n must be >= 1");
         const bool all = d.op == EAGLE_BACKEND_REDUCE_OP_ALL;
-        if (d.op > EAGLE_BACKEND_REDUCE_OP_ALL || d.dtype > EAGLE_BACKEND_REDUCE_U8)
+        if (d.op > EAGLE_BACKEND_REDUCE_OP_MIN || d.dtype > EAGLE_BACKEND_REDUCE_U8)
             throw std::invalid_argument(std::string(who) + ": unknown dtype or op");
         if (all != (d.dtype == EAGLE_BACKEND_REDUCE_U8))
             throw std::invalid_argument(std::string(who) + ": the U8 element type goes with OP_ALL, and only with it");
+        ReduceExt e;
+        if (d.struct_size >= offsetof(eagle_backend_reduce_desc, comp_in) + sizeof(d.comp_in))
+            e = { d.policy, d.flags, d.columns, d.comp_in };
+        if (e.columns < 1 || e.policy > EAGLE_BACKEND_REDUCE_AUTO || e.flags > EAGLE_BACKEND_REDUCE_PAIR_OUT)
+            throw std::invalid_argument(std::string(who) + ": columns must be >= 1; unknown policy or flags");
+        const bool fsum = d.op == EAGLE_BACKEND_REDUCE_OP_SUM
+            && (d.dtype == EAGLE_BACKEND_REDUCE_F32 || d.dtype == EAGLE_BACKEND_REDUCE_F64);
+        if ((e.comp_in != 0 || e.flags != 0) && !fsum)
+            throw std::invalid_argument(std::string(who) + ": comp_in and PAIR_OUT take a float32/float64 sum");
         if (d.work_a == 0) {
-            desc->work_elems = static_cast<std::int64_t>(eagle::reduce::canonical::deviceWorkElems(d.n));
+            desc->work_elems = static_cast<std::int64_t>(eagle::reduce::canonical::deviceWorkElems(
+                static_cast<eagle::idx_t>(d.n), static_cast<eagle::idx_t>(e.columns)));
             return;
         }
         if (d.in == 0 || d.out == 0 || d.work_b == 0)
@@ -1245,25 +1273,25 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_x_reduce_canonical(struct e
         DeviceScope scope(device);
         bracketed(who, "enqueue", [&] {
             const auto stream = seamStream(d.stream);
+            // double sums on a slow-FP64 device take the fixed-point leaf
+            const bool fixed = d.dtype == EAGLE_BACKEND_REDUCE_F64 && d.op == EAGLE_BACKEND_REDUCE_OP_SUM
+                && eagle::reduce::canonical::fixedLeafDevice(device);
             using namespace aether;
-            const bool sum = d.op == EAGLE_BACKEND_REDUCE_OP_SUM;
+            const auto go = [&](auto tag) {
+                using T = decltype(tag);
+                switch (d.op) {
+                case EAGLE_BACKEND_REDUCE_OP_SUM: reduceCanonical<T, SumOp<T>>(d, e, stream, fixed); break;
+                case EAGLE_BACKEND_REDUCE_OP_MAX: reduceCanonical<T, MaxOp<T>>(d, e, stream, false); break;
+                default: reduceCanonical<T, eagle::reduce::canonical::MinOp<T>>(d, e, stream, false);
+                }
+            };
             switch (d.dtype) {
-            case EAGLE_BACKEND_REDUCE_F32:
-                sum ? reduceCanonical<float, SumOp<float>>(d, stream) : reduceCanonical<float, MaxOp<float>>(d, stream);
-                break;
-            case EAGLE_BACKEND_REDUCE_F64:
-                sum ? reduceCanonical<double, SumOp<double>>(d, stream) : reduceCanonical<double, MaxOp<double>>(d, stream);
-                break;
-            case EAGLE_BACKEND_REDUCE_I32:
-                sum ? reduceCanonical<std::int32_t, SumOp<std::int32_t>>(d, stream)
-                    : reduceCanonical<std::int32_t, MaxOp<std::int32_t>>(d, stream);
-                break;
-            case EAGLE_BACKEND_REDUCE_I64:
-                sum ? reduceCanonical<std::int64_t, SumOp<std::int64_t>>(d, stream)
-                    : reduceCanonical<std::int64_t, MaxOp<std::int64_t>>(d, stream);
-                break;
+            case EAGLE_BACKEND_REDUCE_F32: go(float{}); break;
+            case EAGLE_BACKEND_REDUCE_F64: go(double{}); break;
+            case EAGLE_BACKEND_REDUCE_I32: go(std::int32_t{}); break;
+            case EAGLE_BACKEND_REDUCE_I64: go(std::int64_t{}); break;
             default:
-                reduceCanonical<std::uint8_t, LogicalAndOp>(d, stream);
+                reduceCanonical<std::uint8_t, LogicalAndOp>(d, e, stream, false);
             }
             return 0;
         });

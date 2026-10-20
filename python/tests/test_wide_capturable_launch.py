@@ -316,7 +316,7 @@ def test_launch_pure_rejects_a_mismatched_unexempt_wide_output_plane():
 
 @pytest.mark.gpu
 def test_launch_pure_exempts_a_row_indexed_wide_out_from_n_reconciliation():
-    """The atomic ``Accum`` arm: a ``(rows, 1)`` destination
+    """The atomic by-key arm: a ``(rows, 1)`` destination
     beside a genuine N=4 batch launches, and its width never becomes N."""
     import cupy as cp
 

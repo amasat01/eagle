@@ -26,12 +26,13 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      # companion site (amasat01.github.io): same-named branch if it exists there, else main
+      # companion site (amasat01.github.io): the ref pinned in .github/companions, else a same-named branch, else main
       - uses: ./.github/actions/companion
         with:
           repo: amasat01.github.io
           path: site
           token: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
+          pins: .github/companions
       - name: documented numbers and family visuals match the committed cards
         run: bash tools/docs_fresh.sh site
   test-cpp:
@@ -53,12 +54,13 @@ jobs:
           path: eagle
 
       # aether as a sibling checkout (amasat01/aether, at this branch name if it has one, else main).
-      # companion aether: same-named branch if it exists there, else main
+      # companion aether: the ref pinned in .github/companions, else a same-named branch, else main
       - uses: ./eagle/.github/actions/companion
         with:
           repo: aether
           path: aether
           token: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
+          pins: eagle/.github/companions
 
       - run: sudo apt-get update && sudo apt-get install -y g++-13 ccache clang-18 libomp-18-dev
 
@@ -121,12 +123,13 @@ jobs:
         with:
           path: eagle
 
-      # companion aether: same-named branch if it exists there, else main
+      # companion aether: the ref pinned in .github/companions, else a same-named branch, else main
       - uses: ./eagle/.github/actions/companion
         with:
           repo: aether
           path: aether
           token: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
+          pins: eagle/.github/companions
 
       - run: sudo apt-get update && sudo apt-get install -y g++-13 ccache
 
@@ -213,19 +216,21 @@ jobs:
         with:
           path: eagle
 
-      # companion aether: same-named branch if it exists there, else main
+      # companion aether: the ref pinned in .github/companions, else a same-named branch, else main
       - uses: ./eagle/.github/actions/companion
         with:
           repo: aether
           path: aether
           token: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
+          pins: eagle/.github/companions
 
-      # companion raptor: same-named branch if it exists there, else main
+      # companion raptor: the ref pinned in .github/companions, else a same-named branch, else main
       - uses: ./eagle/.github/actions/companion
         with:
           repo: raptor
           path: raptor
           token: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
+          pins: eagle/.github/companions
 
       - uses: actions/cache@v6
         with:
@@ -283,19 +288,21 @@ jobs:
         with:
           path: eagle
 
-      # companion aether: same-named branch if it exists there, else main
+      # companion aether: the ref pinned in .github/companions, else a same-named branch, else main
       - uses: ./eagle/.github/actions/companion
         with:
           repo: aether
           path: aether
           token: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
+          pins: eagle/.github/companions
 
-      # companion raptor: same-named branch if it exists there, else main
+      # companion raptor: the ref pinned in .github/companions, else a same-named branch, else main
       - uses: ./eagle/.github/actions/companion
         with:
           repo: raptor
           path: raptor
           token: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
+          pins: eagle/.github/companions
 
       - uses: actions/setup-python@v7
         with:
@@ -409,19 +416,21 @@ jobs:
         with:
           path: eagle
 
-      # companion aether: same-named branch if it exists there, else main
+      # companion aether: the ref pinned in .github/companions, else a same-named branch, else main
       - uses: ./eagle/.github/actions/companion
         with:
           repo: aether
           path: aether
           token: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
+          pins: eagle/.github/companions
 
-      # companion raptor: same-named branch if it exists there, else main
+      # companion raptor: the ref pinned in .github/companions, else a same-named branch, else main
       - uses: ./eagle/.github/actions/companion
         with:
           repo: raptor
           path: raptor
           token: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
+          pins: eagle/.github/companions
 
       - uses: actions/setup-python@v7
         with:
@@ -529,19 +538,21 @@ jobs:
         with:
           path: eagle
 
-      # companion aether: same-named branch if it exists there, else main
+      # companion aether: the ref pinned in .github/companions, else a same-named branch, else main
       - uses: ./eagle/.github/actions/companion
         with:
           repo: aether
           path: aether
           token: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
+          pins: eagle/.github/companions
 
-      # companion raptor: same-named branch if it exists there, else main
+      # companion raptor: the ref pinned in .github/companions, else a same-named branch, else main
       - uses: ./eagle/.github/actions/companion
         with:
           repo: raptor
           path: raptor
           token: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
+          pins: eagle/.github/companions
 
       - uses: actions/setup-python@v7
         with:
@@ -674,12 +685,21 @@ jobs:
         with:
           path: eagle
 
-      # companion aether: same-named branch if it exists there, else main
+      # companion aether: the ref pinned in .github/companions, else a same-named branch, else main
       - uses: ./eagle/.github/actions/companion
         with:
           repo: aether
           path: aether
           token: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
+          pins: eagle/.github/companions
+
+      # companion raptor: used only while its version is not on PyPI yet (a release in flight)
+      - uses: ./eagle/.github/actions/companion
+        with:
+          repo: raptor
+          path: raptor
+          token: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
+          pins: eagle/.github/companions
 
       - uses: actions/setup-python@v7
         with:
@@ -698,6 +718,12 @@ jobs:
           python -m venv "$RUNNER_TEMP/venv"
           . "$RUNNER_TEMP/venv/bin/activate"
           pip install --quiet --upgrade pip
+          # raptor-core from PyPI like any user, unless the sibling's version is not released yet
+          CORE_V=$(sed -n 's/^version = "\(.*\)"/\1/p' raptor/pyproject.toml)
+          if ! pip download --quiet --no-deps --only-binary=:all: -d "$RUNNER_TEMP/rc" "raptor-core==$CORE_V"; then
+            echo "raptor-core $CORE_V: not on PyPI yet, installing the sibling checkout"
+            pip install --quiet ./raptor
+          fi
           pip install -v -Ccmake.define.EAGLE_PYTHON_WARN_AS_ERR=ON dist/raptor_eagle-*.tar.gz
           pip check
 

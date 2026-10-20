@@ -221,13 +221,7 @@ def test_param_gradient_is_a_fixed_order_sum(op, dev, mode):
     v = c["v_np"]
     partial = (-(np.linalg.norm(v.astype(np.float64), axis=0) * (v * c["w_np"]).sum(axis=0))
                ).astype(ndt)
-    chunk = -(-n // eagle_warp._CHUNKS)
-    total = ndt(0)
-    for lo in range(0, n, chunk):
-        s = ndt(0)
-        for x in partial[lo:lo + chunk]:
-            s = ndt(s + x)
-        total = ndt(total + s)
+    total = partial.astype(np.float64).sum()   # eagle.reduce of the rows: exact to within a few ULP
     np.testing.assert_allclose(runs[0][0], total, rtol=2e-4 if mode == "float32" else 1e-12)
 
 
@@ -281,7 +275,7 @@ def test_graph_capture_replays_forward_and_backward(tmp_path, mode):
     fn = eagle_warp.function(drag, cache_dir=tmp_path)
     c = _case(dev, mode)
     wdt = MODES[mode][0]
-    fn.prepare(mode, dev, backward=True)
+    fn.prepare(mode, dev, backward=True, samples=c["v"].shape[-1])
     loss = wp.zeros(1, dtype=wdt, device=dev, requires_grad=True)
     out = wp.zeros((3, 7), dtype=wdt, device=dev, requires_grad=True)
     with wp.ScopedCapture(device=dev) as capture:
@@ -312,7 +306,7 @@ def test_graph_capture_replays_a_state_loop_and_its_backward(tmp_path, mode):
     fn = eagle_warp.function(grow, cache_dir=tmp_path)
     wdt = MODES[mode][0]
     w = np.random.default_rng(2).normal(size=_N)
-    fn.prepare(mode, dev, backward=True)
+    fn.prepare(mode, dev, backward=True, samples=_N)
     c = _grow_arrays(dev, mode)
     mk = lambda dt, grad=False: wp.zeros(_N, dtype=dt, device=dev, requires_grad=grad)
     outs = [(mk(wdt, True), mk(wdt), mk(wp.bool)) for _ in range(_STEPS)]

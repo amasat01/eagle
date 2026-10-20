@@ -138,7 +138,7 @@ def test_coerce_wide_outputs_rejects_1d():
 
 # ============================================================================
 # The row-indexed-destination ``exempt`` name -- an atomic
-# Accum output's degenerate (rows, 1) buffer, which carries no batch-sized
+# by-key output's degenerate (rows, 1) buffer, which carries no batch-sized
 # axis and so must not join N-reconciliation. ``_core`` md5 stays unchanged
 # by this deliverable (python-only; the C++ vocabulary is untouched).
 # ============================================================================

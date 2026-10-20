@@ -67,10 +67,8 @@ jobs:
         with:
           path: eagle
 
-      - uses: actions/checkout@v7
-        with:
-          repository: amasat01/aether
-          path: aether
+      - uses: ./eagle/.github/actions/companion
+        with: {repo: aether, path: aether, pins: eagle/.github/companions, token: "${{ secrets.SIBLING_READ_TOKEN || github.token }}"}
 
       - uses: actions/setup-python@v7
         with:
@@ -208,10 +206,8 @@ jobs:
       - uses: actions/checkout@v7
         with:
           path: eagle
-      - uses: actions/checkout@v7
-        with:
-          repository: amasat01/raptor
-          path: raptor
+      - uses: ./eagle/.github/actions/companion
+        with: {repo: raptor, path: raptor, pins: eagle/.github/companions, token: "${{ secrets.SIBLING_READ_TOKEN || github.token }}"}
       - uses: actions/download-artifact@v8
         with:
           name: dist-${{ needs.build.outputs.tree }}
@@ -342,17 +338,11 @@ jobs:
         with:
           path: eagle
 
-      - uses: actions/checkout@v7
-        with:
-          repository: amasat01/aether
-          path: aether
-          token: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
+      - uses: ./eagle/.github/actions/companion
+        with: {repo: aether, path: aether, pins: eagle/.github/companions, token: "${{ secrets.SIBLING_READ_TOKEN || github.token }}"}
 
-      - uses: actions/checkout@v7
-        with:
-          repository: amasat01/raptor
-          path: raptor
-          token: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
+      - uses: ./eagle/.github/actions/companion
+        with: {repo: raptor, path: raptor, pins: eagle/.github/companions, token: "${{ secrets.SIBLING_READ_TOKEN || github.token }}"}
 
       - uses: actions/setup-python@v7
         with:
@@ -440,11 +430,8 @@ jobs:
             sphinx-autodoc-typehints==3.5.2 myst-nb==1.4.0 breathe==4.36.0 nbformat nbclient
 
       # nbcheck also executes every notebook on the CPU: it needs hawk (sibling checkout), a kernel, torch and JAX
-      - uses: actions/checkout@v7
-        with:
-          repository: amasat01/hawk
-          path: hawk
-          token: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
+      - uses: ./eagle/.github/actions/companion
+        with: {repo: hawk, path: hawk, pins: eagle/.github/companions, token: "${{ secrets.SIBLING_READ_TOKEN || github.token }}"}
 
       - name: Install what the notebooks run on
         run: |
@@ -500,15 +487,15 @@ jobs:
       - uses: actions/checkout@v7
         with:
           path: eagle
-      # companions: same-named branch if it exists there, else main
+      # companions: the ref pinned in .github/companions, else a same-named branch, else main
       - uses: ./eagle/.github/actions/companion
-        with: {repo: aether, path: aether, token: "${{ secrets.SIBLING_READ_TOKEN || github.token }}"}
+        with: {repo: aether, path: aether, pins: eagle/.github/companions, token: "${{ secrets.SIBLING_READ_TOKEN || github.token }}"}
       - uses: ./eagle/.github/actions/companion
-        with: {repo: raptor, path: raptor, token: "${{ secrets.SIBLING_READ_TOKEN || github.token }}"}
+        with: {repo: raptor, path: raptor, pins: eagle/.github/companions, token: "${{ secrets.SIBLING_READ_TOKEN || github.token }}"}
       - uses: ./eagle/.github/actions/companion
-        with: {repo: hawk, path: hawk, token: "${{ secrets.SIBLING_READ_TOKEN || github.token }}"}
+        with: {repo: hawk, path: hawk, pins: eagle/.github/companions, token: "${{ secrets.SIBLING_READ_TOKEN || github.token }}"}
       - uses: ./eagle/.github/actions/companion
-        with: {repo: amasat01.github.io, path: site, token: "${{ secrets.SIBLING_READ_TOKEN || github.token }}"}
+        with: {repo: amasat01.github.io, path: site, pins: eagle/.github/companions, token: "${{ secrets.SIBLING_READ_TOKEN || github.token }}"}
       - uses: actions/download-artifact@v8
         with:
           name: dist-${{ needs.build.outputs.tree }}

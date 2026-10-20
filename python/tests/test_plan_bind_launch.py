@@ -39,8 +39,8 @@ execution axis is a MANIFEST-level declaration and these four disagree
 about it: ``e4_vec3_scale`` (``sample_local``, a ``Vector[3]`` input and a
 ``Mutable[Vector[3]]`` output — the 40-byte mirror on both sides, plus a
 uniform), ``e4_gather`` (``cross_sample_read``, the ``Table`` read whose lookup
-plane the v1 door could not even NAME), ``e4_energy`` (``mapreduce``), and
-``e4_scatter`` (``cross_sample_write``, whose ``Accum`` plane is
+plane the v1 door could not even NAME), and
+``e4_scatter`` (``cross_sample_write``, whose by-key plane is
 read-modify-written — the one shape that can show a replay accumulating).
 
 RED HISTORY (measured with this file's own source in place and eagle's two
@@ -79,6 +79,7 @@ from _device_file import device_artifact
 import eagle._plan_pack as plan_pack  # noqa: E402
 
 hawk_trace = pytest.importorskip("hawk.trace")
+all_samples = hawk_trace.all_samples
 hawk_artifact = pytest.importorskip("hawk.artifact")
 hawk_math = pytest.importorskip("hawk.math")
 
@@ -113,17 +114,17 @@ def e4_gather(table: hawk_trace.Table[hawk_trace.Scalar], where: hawk_trace.Inde
 
 
 @hawk_trace.kernel
-def e4_energy(v: hawk_trace.Vector[W], total: hawk_trace.Reduce("sum")):
-    """``mapreduce``: the per-sample partial plane an ``accum_out`` role names."""
-    total.contribute(hawk_math.dot(v, v))
+def e4_energy(v: hawk_trace.Vector[W], total: hawk_trace.Mutable[hawk_trace.Scalar]):
+    """A sum over samples, finished into one cell."""
+    total = all_samples(hawk_math.dot(v, v)).sum()
 
 
 @hawk_trace.kernel
 def e4_scatter(x: hawk_trace.Scalar, lane: hawk_trace.Index,
-               acc: hawk_trace.Accum[hawk_trace.Scalar]):
-    """``cross_sample_write``: an ``Accum`` plane that is read-modify-written, so
+               acc: hawk_trace.Mutable[hawk_trace.Scalar]):
+    """``cross_sample_write``: a by-key plane that is read-modify-written, so
     launching it twice is visibly twice, which is what a replay row needs."""
-    acc.add(x, at=lane)
+    all_samples(acc)[lane] += x
 
 
 def _x_plane(n=N, w=W, dtype=np.float64) -> np.ndarray:
@@ -169,8 +170,8 @@ def gather_host_unit(tmp_path_factory):
 
 
 @pytest.fixture(scope="module")
-def energy_unit(tmp_path_factory):
-    return _bundle(e4_energy, tmp_path_factory, "energy")
+def energy_host_unit(tmp_path_factory):
+    return _bundle(e4_energy, tmp_path_factory, "energy_host", ("host",))
 
 
 @pytest.fixture(scope="module")
@@ -245,7 +246,7 @@ def _host_subject(unit, name):
     view = hawk_artifact.plan_view(_sidecar(unit, name))
     entry = getattr(lib, view.pop("host_entry"))
     return SimpleNamespace(host_entry=ctypes.cast(entry, ctypes.c_void_p).value,
-                           _keepalive=lib, **view)
+                           _keepalive=lib, _meta=_sidecar(unit, name), **view)
 
 
 # --------------------------------------------------------------------------- #
@@ -384,31 +385,25 @@ def test_a_lookup_handle_carries_the_planes_own_length_not_the_sample_count():
     assert table_h.deviceType == DEVICE_CPU and table_h.stride == 1
 
 
-@pytest.mark.gpu
-def test_a_bound_mapreduce_partial_plane_binds_by_name(energy_unit):
-    """The ``mapreduce`` shape: the ``accum_out`` partial plane, bound by name.
-
-    Its declaration carries no width (``arg_widths`` covers what the artifact
-    actually declares, and this plane's extent is a runtime quantity), so the
-    plane the caller brings is the only statement of how long it is."""
-    import cupy as cp
-
+def test_a_cells_kernel_runs_by_name_and_refuses_a_rank_partition(energy_host_unit):
+    """The cell is the plane the caller reads, by name; the rows are eagle's own
+    scratch. Partitions that each cover whole rows land in the same rows, so the
+    cell is the single run's bit for bit. Folding cells across ranks is not in
+    this release, so a rank partition is refused by name."""
     import eagle.exec as eexec
     from eagle import plan as eplan
 
-    plugin = _device_subject(energy_unit, "e4_energy")
-    assert plugin.exec_access == "mapreduce" and plugin.exec_op == "sum"
-    v = _x_plane()
-    p = eplan.plan(plugin, structure=eexec.DeviceKernel)
-
-    through_run = p.run(v=v)
-
-    total = cp.zeros(N, dtype=cp.float64)
-    p.bind(v=cp.asarray(v), total=total).launch()
-    cp.cuda.runtime.deviceSynchronize()
-
-    np.testing.assert_array_equal(cp.asnumpy(total), through_run)
-    np.testing.assert_array_equal(cp.asnumpy(total), (v * v).sum(axis=0))
+    plugin = _host_subject(energy_host_unit, "e4_energy")
+    n = 160
+    v = np.random.default_rng(5).uniform(-1.0, 1.0, (W, n))
+    whole = eplan.plan(plugin, structure=eexec.HostTeam).run(v=v)
+    assert whole.shape == (1,)
+    split = eplan.plan(plugin, structure=eexec.HostTeam,
+                       partitions=[(0, 64, n), (64, 96, n)]).run(v=v)
+    np.testing.assert_array_equal(split, whole)
+    np.testing.assert_allclose(whole, (v * v).sum(), rtol=1e-14)
+    with pytest.raises(ValueError, match="e4_energy' reduces over samples"):
+        eplan.plan(plugin, structure=eexec.RankPartition)
 
 
 def test_a_bound_host_team_launch_equals_plan_run_bit_for_bit(vec3_unit):
@@ -617,7 +612,7 @@ def test_a_captured_accum_plane_accumulates_across_replays_as_uncaptured(
 
     ``e4_vec3_scale`` ASSIGNS, so three of its launches look exactly like one
     and a graph that quietly recorded a single node would pass the row above.
-    An ``Accum`` plane cannot hide that: three recorded launches must land
+    A by-key plane cannot hide that: three recorded launches must land
     three times, and a second replay must land three more — into the SAME
     device memory the caller still holds, which is the "no copy-home" half of
     the contract stated arithmetically."""

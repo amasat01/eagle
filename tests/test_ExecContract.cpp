@@ -178,12 +178,12 @@ TEST(ExecContractTest, AbiVersionOfResolvesTheGeneration)
     EXPECT_EQ(abi_version_of(""), 0);
 }
 
-TEST(ExecContractTest, SchemaPinStaysOneWhileTheCeilingIsTwo)
+TEST(ExecContractTest, SchemaPinStaysOneWhileTheCeilingIsThree)
 {
     // The cross-repo constant does NOT move (raptor / eagle-Python / this
     // header / the code generator's sanctioned copy); the LOADER ceiling does.
     EXPECT_EQ(kPluginSchemaVersion, 1);
-    EXPECT_EQ(kPluginMaxSchemaVersion, 2);
+    EXPECT_EQ(kPluginMaxSchemaVersion, 3);
 }
 
 TEST(ExecContractTest, ManifestSchemaBeyondMaxIsRefused)

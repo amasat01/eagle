@@ -329,8 +329,8 @@ def test_schema_version_current_ok():
 
 
 def test_schema_version_max_accepted_ok():
-    """Schema v2 (:data:`MAX_SCHEMA_VERSION`) is accepted, not future — the
-    transition bridge: v1 AND v2 both load today."""
+    """Schema v3 (:data:`MAX_SCHEMA_VERSION`) is accepted, not future — the
+    transition bridge: v1, v2 AND v3 load today."""
     assert (
         check_schema_version({"schema_version": MAX_SCHEMA_VERSION}, name="kern")
         == MAX_SCHEMA_VERSION

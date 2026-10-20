@@ -10,7 +10,7 @@ import importlib
 
 import numpy as np
 
-from . import _bounded, _counters, _layout
+from . import _bounded, _counters, _layout, _split
 from .interop import _stream_handle as _handle_of
 from .interop import _wrap_external_stream
 from . import exec as eexec
@@ -55,7 +55,15 @@ def one_step_word(arg_spec, planes: dict, framework: str = "numpy") -> dict:
 
 
 def _bind_plan(p: Plan, planes: dict) -> BoundPlan:
-    """:meth:`Plan.bind`'s body — see that method for the contract."""
+    """:meth:`Plan.bind`'s body — see that method for the contract. A split
+    kernel binds each of its stages (:class:`eagle._split.SplitBound`)."""
+    if _split.stages_of(p.plugin):
+        return _split.SplitBound(p, planes, _bind_one)
+    return _bind_one(p, planes)
+
+
+def _bind_one(p: Plan, planes: dict) -> BoundPlan:
+    """One kernel's bind."""
     plugin = p.plugin
     arg_spec = getattr(plugin, "arg_spec", None)
     if arg_spec is None:

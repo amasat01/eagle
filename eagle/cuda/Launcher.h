@@ -152,16 +152,26 @@ public:
             if (rec.idealBlockSize == kFixedSize)
                 continue;
 
-            cudaKernelNodeParams params = rec.capturedParams;
             idx_t newBlock;
             idx_t newGrid;
             if (rec.idealBlockSize == 0) {
                 newBlock = rec.capturedParams.blockDim.x;
+#ifndef EAGLE_CPU_ONLY
+                if (rec.driverLaunched)
+                    newBlock = rec.driverParams.blockDimX;
+#endif
                 newGrid  = (logicalSize + newBlock - 1) / newBlock;
             } else {
                 computeBlocks(
                     logicalSize, newGrid, newBlock, rec.idealBlockSize);
             }
+#ifndef EAGLE_CPU_ONLY
+            if (rec.driverLaunched) {
+                patchDriverNode_(rec, newGrid, newBlock);
+                continue;
+            }
+#endif
+            cudaKernelNodeParams params = rec.capturedParams;
             params.blockDim = dim3(newBlock, 1, 1);
             params.gridDim  = dim3(newGrid, 1, 1);
             EAGLE_CHECK_ALWAYS(
@@ -204,6 +214,28 @@ public:
      *  precedent. A bare accessor -- no CUDA API call here, so this adds
      *  no new version floor to this shared header. */
     cudaGraphExec_t execHandle() const { return instance_; }
+
+private:
+#ifndef EAGLE_CPU_ONLY
+    /** @brief Patch a driver-launched kernel node's grid and block through the
+     *  driver API (the runtime refuses its ``CUfunction``). */
+    void patchDriverNode_(const KernelNodeRecord& rec, idx_t grid, idx_t block)
+    {
+        static const auto set = detail::driver_entry<decltype(&::cuGraphExecKernelNodeSetParams)>(
+            "cuGraphExecKernelNodeSetParams");
+        CUDA_KERNEL_NODE_PARAMS params = rec.driverParams;
+        params.gridDimX  = static_cast<unsigned int>(grid);
+        params.gridDimY  = 1;
+        params.gridDimZ  = 1;
+        params.blockDimX = static_cast<unsigned int>(block);
+        params.blockDimY = 1;
+        params.blockDimZ = 1;
+        if (const CUresult r = set(reinterpret_cast<CUgraphExec>(instance_),
+                reinterpret_cast<CUgraphNode>(rec.node), &params); r != CUDA_SUCCESS)
+            throw std::runtime_error(std::string("eagle: patching a driver-launched kernel node failed (")
+                + detail::driver_error_text(r) + ").");
+    }
+#endif
 
 protected:
     /** @brief Construct from shared Storage and a kernelNodes_

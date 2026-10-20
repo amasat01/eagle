@@ -100,12 +100,13 @@ Reductions
 ^^^^^^^^^^
 
 ``eagle.reduce(x, out, op="sum")`` is a node that adds up (or takes the
-``"max"`` of, or the ``"all"`` of) a 1-D plane into a one-element plane. It
+``"max"`` or ``"min"`` of, or the ``"all"`` of) a 1-D plane into a one-element plane. It
 reads ``x`` and writes ``out``, so a node that produced ``x`` is ordered
 before it and a node that reads ``out`` after it, with nothing for you to
 declare. A floating-point ``"sum"`` always adds in the same fixed order, so
 the answer does not change with the number of CPU threads and the CPU and the
-GPU agree bit for bit; :doc:`determinism` has the details.
+GPU agree bit for bit; ``policy=`` chooses ``"compensated"`` (the default),
+``"ordered"`` or ``"auto"``, and :doc:`determinism` has the details.
 
 .. code-block:: python
 

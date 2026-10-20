@@ -13,6 +13,7 @@ so the pages build never re-executes them. Uses nbclient (a myst_nb
 dependency): no extra tool.
 """
 import pathlib
+import re
 import sys
 import traceback
 
@@ -20,6 +21,19 @@ import nbformat
 from nbclient import NotebookClient
 
 TIMEOUT_S = 3600
+
+
+#: stderr text that is the machine's, not the page's: a local path or a library environment warning
+_NOISE = re.compile(r"(?<![\w:/.])/(?:[\w.+-]+/)+[\w.+-]+|[A-Za-z]:\\|\w+Warning\b|warnings\.warn|Falling back to cpu")
+
+
+def drop_machine_noise(nb) -> None:
+    """Remove stderr stream outputs that name a local path or carry a library warning."""
+    for cell in nb.cells:
+        if cell.cell_type == "code":
+            cell.outputs = [o for o in cell.outputs
+                            if not (o.output_type == "stream" and o.name == "stderr"
+                                    and _NOISE.search(o.text))]
 
 
 def execute(path: pathlib.Path) -> bool:
@@ -37,6 +51,7 @@ def execute(path: pathlib.Path) -> bool:
         traceback.print_exc(limit=1)
         return False
     finally:
+        drop_machine_noise(nb)
         nbformat.write(nb, path)  # keep whatever ran, even for a failed notebook
     return True
 

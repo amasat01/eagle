@@ -95,8 +95,8 @@ In a graph: ``eagle.reduce``
 
 From Python the canonical tree is a node of :class:`eagle.Graph`.
 ``eagle.reduce(x, out, op="sum")`` reads the 1-D plane ``x`` and writes the
-one-element plane ``out``; ``op`` is ``"sum"``, ``"max"`` or ``"all"`` (numpy's
-names). Because the node declares what it reads and writes, eagle derives its
+one-element plane ``out``; ``op`` is ``"sum"``, ``"max"``, ``"min"`` or ``"all"``
+(numpy's names). Because the node declares what it reads and writes, eagle derives its
 place in the graph for you: after the nodes that produce ``x``, before the
 nodes that read ``out``, including after a fork/join.
 
@@ -119,6 +119,73 @@ same bits for the same values, and a numpy ``x`` and its cupy copy give the
 same bits too. A floating-point ``"sum"`` is where the order matters. For
 integers, ``"max"`` and ``"all"`` every order gives the same value, and the
 node simply uses the same tree.
+
+Policies
+~~~~~~~~
+
+A floating-point sum takes ``policy=``. Every policy runs the same leaf blocks; they
+differ in how the leaf results are combined.
+
+* ``"compensated"`` (the default) is an accurate sum. On the GPU it commits the leaves with
+  two-sum atomics, so the bits can differ from run to run; the CPU runs ``"ordered"``.
+* ``"ordered"`` combines the leaves pairwise, level by level: the same bits on every run,
+  every thread count, CPU and GPU.
+* ``"auto"`` is ``"compensated"`` in this release.
+
+Integer sums, ``"max"``, ``"min"`` and ``"all"`` are exact and ignore the policy.
+
+A float64 sum on a GPU with slow FP64 takes a different path. Each term is added exactly
+into a wide integer, using integer instructions only, and the leaves are combined in the
+fixed pairwise levels under both policies. The result is the same bits on every run, and
+the host runs the same integer arithmetic, so host and device agree too; it is also about
+2.5 times faster on those GPUs. float32 sums, and float64 on GPUs with fast FP64, use the
+compensated sums above.
+
+.. code-block:: python
+
+   total = np.zeros(1)
+   node = eagle.reduce(energy, total, policy="ordered")
+
+.. _determinism-cells:
+
+Cells from a kernel
+-------------------
+
+A hawk kernel that stores ``hawk.all_samples(x).sum()`` (or ``.mean()``, ``.max()``,
+``.min()``) to a ``Mutable`` output makes a **cell**: one value for the whole batch. The
+kernel does not write that value itself. It writes **rows**, one partial per 32 samples,
+and a ``<name>_comp`` row of rounding corrections for a sum. A vector or matrix cell is one
+such pair per entry (``total_0``, ``total_1``, ...).
+
+eagle turns rows into the cell with ``eagle.reduce``, taking the rows as ``x``, the
+corrections as ``comp=`` and, for ``"max"``/``"min"``, the operation as ``op=``. Every
+door that launches such a kernel does this for you: ``eagle.deploy(...).run`` and
+``eagle.simulate`` return the cell finished, as a one-element array (a vector cell is one
+element per column). The scratch for the rows is made once per kernel and sample count, never
+per launch, so it is safe inside a captured graph. Calling the compiled kernel with
+``hawk.run`` gives the same cell, added on the host, bitwise equal to ``policy="ordered"``.
+
+Inside ``jax.jit`` the JAX bridge finishes the cells in the same XLA call; see
+:doc:`../interop/jax`. It uses the default policy, since the bridge has no ``policy=``
+argument yet. Where the bits must be fixed, finish the values yourself with
+``eagle.reduce(..., policy="ordered")`` or take the cell from ``hawk.run``.
+
+Reading a total later in the same kernel
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A kernel that reads a reduced value after computing it, such as
+``z = x / hawk.all_samples(x).sum()``, is built as stages: one launch, the finish of its
+cells, then the next launch, with the sidecar listing them under ``stages``.
+``Plan.run`` and ``Plan.bind`` run the stages in sequence, and so does every door built on
+them: a ``Graph``, the reverse, and the torch, JAX and Warp bridges. ``eagle.until_done``
+and ``eagle.simulate`` launch one kernel per step and cannot run the finish between stages,
+so they refuse a split kernel by name (``'<kernel>' runs in N stages; <door> runs single-stage kernels in this release``); use ``eagle.plan.auto(kernel).run`` or ``.bind``.
+
+Limits
+~~~~~~
+
+* Folding a kernel's cells across MPI ranks (an ``eagle.exec.RankPartition`` run) is refused in this
+  release (our scope; it returns in the next): run such a kernel on one rank.
 
 What is promised, and what is not
 ---------------------------------

@@ -1,7 +1,7 @@
 # Copyright 2026 Alessandro Masat
 # SPDX-License-Identifier: Apache-2.0
 name: Companion checkout
-description: Check out amasat01/<repo> at this branch name if it has one there, else main.
+description: Check out amasat01/<repo> at the ref pinned for it in the caller's pin file, else at this branch name if it has one there, else main.
 inputs:
   repo:
     description: Repository name under amasat01.
@@ -12,6 +12,10 @@ inputs:
   token:
     description: Read token for the companion repository.
     required: true
+  pins:
+    description: The caller's pin file (lines `<repo> <ref>`); a pinned ref wins over the branch-name match.
+    required: false
+    default: ""
 runs:
   using: composite
   steps:
@@ -21,7 +25,15 @@ runs:
         COMPANION_REPO: ${{ inputs.repo }}
         BRANCH_NAME: ${{ github.head_ref || github.ref_name }}
         GH_TOKEN: ${{ inputs.token }}
+        PINS: ${{ inputs.pins }}
       run: |
+        pinned=""
+        [ -n "$PINS" ] && [ -f "$PINS" ] && pinned="$(awk -v r="$COMPANION_REPO" '$1 == r {print $2}' "$PINS")"
+        if [ -n "$pinned" ]; then
+          echo "companion ${COMPANION_REPO} @ ${pinned} (pinned)"
+          echo "ref=${pinned}" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
         auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "${GH_TOKEN:-none}" | base64 -w0)"
         [ -n "${GH_TOKEN:-}" ] || auth="X-Unauthenticated: 1"
         found="$(git -c http.extraHeader="$auth" ls-remote --heads "https://github.com/amasat01/${COMPANION_REPO}" "refs/heads/${BRANCH_NAME}" | awk '{print $2}')"

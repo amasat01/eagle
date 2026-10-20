@@ -55,7 +55,7 @@ instantiates a ``Launcher``, and replays it:
    eagle::cuda::StreamCapturer capturer(stream.cuda());
    capturer.begin();
    myKernel<<<grid, block, 0, stream.cuda()>>>(args);
-   graph.addNode(capturer.end());
+   graph.addNode(eagle::cuda::CapturedGraph{ capturer.end() });
 
    // Add a host callback that runs on the CPU
    graph.addHostNode([&]() { /* post-process on CPU */ });

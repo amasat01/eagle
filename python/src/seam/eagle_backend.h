@@ -560,6 +560,11 @@ eagle_backend_status eagle_backend_x_restore_device(struct eagle_backend_reorder
 #define EAGLE_BACKEND_REDUCE_OP_SUM 0u
 #define EAGLE_BACKEND_REDUCE_OP_MAX 1u
 #define EAGLE_BACKEND_REDUCE_OP_ALL 2u
+#define EAGLE_BACKEND_REDUCE_OP_MIN 3u
+#define EAGLE_BACKEND_REDUCE_COMPENSATED 0u
+#define EAGLE_BACKEND_REDUCE_ORDERED     1u
+#define EAGLE_BACKEND_REDUCE_AUTO        2u
+#define EAGLE_BACKEND_REDUCE_PAIR_OUT    1u
 
 /** The canonical fixed-order reduction of ``n`` device elements into one. */
 struct eagle_backend_reduce_desc {
@@ -574,13 +579,22 @@ struct eagle_backend_reduce_desc {
     int64_t n;               /**< sample count, n >= 1 */
     uint64_t stream;         /**< the backend's queue to enqueue on */
     int64_t work_elems;      /**< OUT when work_a == 0: the elements EACH work buffer must hold */
+    /* read only when struct_size covers them (older callers: ordered, 1 column, no comp) */
+    uint32_t policy;         /**< EAGLE_BACKEND_REDUCE_COMPENSATED / ORDERED / AUTO (float sums only) */
+    uint32_t flags;          /**< EAGLE_BACKEND_REDUCE_PAIR_OUT: out receives hi[columns] then comp[columns] */
+    int64_t columns;         /**< in is row-major (n, columns); each column reduces to out[column] */
+    uint64_t comp_in;        /**< 0, or the companion (n, columns) plane: each term is in + comp_in (float sums) */
 };
 
-/** Reduce ``in[0, n)`` with the canonical tree (leaf blocks of 256 by a fixed
- *  in-block tree, then level-by-level pairwise over the leaf results; see
- *  ``eagle/reduce/canonical.h``) and write the result to ``*out``. The value
- *  is a function of the values in sample order only and equals the host
- *  canonical reduction bit for bit. Enqueue only (kernel launches ending in a one-element
+/** Reduce each column of ``in`` (``n`` rows) with the canonical tree (leaves of
+ *  256 slots by 16 strided samples, a fixed in-leaf tree, then level-by-level
+ *  pairwise; see ``eagle/reduce/canonical.h``) and write it to ``out``. Under
+ *  ORDERED the value is a function of the values in sample order only and
+ *  equals the host canonical reduction bit for bit; under COMPENSATED (float
+ *  sums) the leaf partials are committed by two-sum atomics instead. A float64
+ *  sum without PAIR_OUT on a device with slow FP64 (``fixedLeaf`` in
+ *  canonical.h) runs the fixed-point leaf and the pairwise levels under every
+ *  policy, equal to the host fixed-point reduction bit for bit. Enqueue only (kernel launches ending in a one-element
  *  store: capturable). Experimental. */
 eagle_backend_status eagle_backend_x_reduce_canonical(struct eagle_backend_reduce_desc* desc);
 

@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "pattern": "neural_block",
   "scalar_type": "float64",
   "forward_exec": {"kind": "kernel", "kernel": "mlp_block_fwd"},

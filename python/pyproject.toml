@@ -13,7 +13,7 @@ backend-path = ["."]
 
 [project]
 name = "raptor-eagle"
-version = "0.6.2"
+version = "0.6.3"
 description = "EAGLE — the Python face of the launch engine for compiled CUDA kernels"
 # A copy of the repository README, made by _build_backend.py (git-ignored).
 readme = "README.md"
@@ -46,7 +46,7 @@ classifiers = [
 # `raptor.schema.blocks.validate_neural_block_descriptor` (first shipped in 0.2.0), which
 # `eagle.sidecar` imports. The constraint is expressed where a resolver can act on it,
 # never as a runtime surprise.
-dependencies = ["numpy>=1.26", "raptor-core>=0.3.2,<0.4"]
+dependencies = ["numpy>=1.26", "raptor-core>=0.3.3,<0.4"]
 
 # The "raptor.pattern_loaders" entry-point declaration for
 # "neural_block" moved to a separate package — eagle.neural was extracted there
@@ -80,13 +80,13 @@ cuda = [
 # eagle.frameworks.torch: the torch.autograd bridge. torch is imported only by
 # that submodule, so plain `import eagle` never needs it. The bridges compile
 # kernels with hawk; 0.5.1 is the first to derive nested derivatives.
-torch = ["torch>=2.2", "raptor-hawk>=0.5.1"]
+torch = ["torch>=2.2", "raptor-hawk>=0.6.3"]
 # eagle's JAX interop and eagle.frameworks.jax (see docs: interop contract).
 # JAX publishes wheels for Python 3.12 and newer, so this extra resolves there
 # and nowhere else; for GPU arrays install JAX's own CUDA extra (jax[cuda12] or
 # jax[cuda13]). The floor is the jaxlib whose XLA FFI headers libeagle_xla.so
 # vendors (an older runtime with newer headers is the unsupported direction).
-jax = ["jax>=0.11.2", "raptor-hawk>=0.5.1"]
+jax = ["jax>=0.11.2", "raptor-hawk>=0.6.3"]
 # eagle.Graph.plot: the graph drawn with matplotlib (imported only by that
 # method; show()/to_mermaid()/to_dot() need nothing).
 plot = ["matplotlib>=3.7"]

@@ -47,7 +47,7 @@ int main()
     eagle::cuda::StreamCapturer capturer(stream.cuda());
     capturer.begin();
     addOne<<<1, N, 0, stream.cuda()>>>(dBuf, N);
-    graph.addNode(capturer.end());
+    graph.addNode(eagle::cuda::CapturedGraph{ capturer.end() });
     // [cell:capture:end]
 
     // [cell:replay]

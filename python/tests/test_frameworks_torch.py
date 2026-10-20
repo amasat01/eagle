@@ -381,11 +381,11 @@ def test_wrong_dtype_is_refused_not_cast(op):
 
 
 def test_unsupported_role_is_refused():
-    from hawk import Accum, Index
+    from hawk import Index
 
     @hawk.kernel
-    def scatter(x: Scalar, lane: Index, acc: Accum[Scalar]):
-        acc.add(x, at=lane)
+    def scatter(x: Scalar, lane: Index, acc: Mutable[Scalar]):
+        hawk.all_samples(acc)[lane] += x
 
     with pytest.raises(ValueError, match="acc"):
         eagle_torch.function(scatter)

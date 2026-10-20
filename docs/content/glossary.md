@@ -13,6 +13,8 @@ bitwise
 : Bit-for-bit reproducible: the same inputs give the same bits on every run and every thread count. Every gradient eagle sums is bitwise; the one exception is named in {ref}`autodiff-bits`.
 canonical tree
 : The one fixed grouping of additions eagle uses for sums, so a total has the same bits for any thread count.
+cell
+: One value for the whole batch, made by a hawk kernel that stores a reduction over samples (`hawk.all_samples(x).sum()`) to a `Mutable` output. The kernel writes rows; eagle finishes them into the cell with {func}`eagle.reduce`; see {ref}`determinism-cells`.
 compaction
 : Shrinking a per-sample array to just the samples that are still active, so later kernels launch over a smaller count; also called stream compaction.
 dual-mode
@@ -47,10 +49,16 @@ plan
 : In eagle, a plan is what `eagle.deploy` returns: a kernel built to run where its data lives, ready to launch. The general meaning, shared by the family, is in the [family glossary](https://amasat01.github.io/raptor/content/glossary.html#term-plan).
 Record
 : What one launch of a ``record=True`` graph keeps for its reverse: ``g.record`` after ``g.launch()``. Most of it is the graph's own planes, so it is only valid until the graph runs again (see {ref}`autodiff-record`).
+reduction policy
+: How {func}`eagle.reduce` adds the leaf results of a floating-point sum: `"compensated"` (default, accurate, not bitwise on the GPU), `"ordered"` (the same bits every run) or `"auto"` (`"compensated"` for now).
 registry
 : The table that resolves a compiled kernel by name so it can be called, streamed or put in a graph ({class}`eagle.KernelRegistry`).
+rows
+: What a kernel that reduces over samples writes: one partial per 32 samples, plus a `_comp` row of rounding corrections for a sum. Finishing them gives the {term}`cell`.
 reverse mode
 : Computing derivatives by running the program's steps backwards, each step turning "how the objective moves with my outputs" into "how it moves with my inputs". One backward sweep gives the gradient with respect to *every* input at once, which is why it is the method of choice when you have one objective and many inputs. Also called the adjoint method (optimal control, PDE-constrained optimisation) or backpropagation (machine learning).
+stage
+: One launch of a kernel that reads a value reduced over samples: the read is a launch boundary, so eagle runs the stages in sequence with the finish of the cells between them; see {ref}`determinism-cells`.
 sample
 : One independent item the same kernel runs over: a particle, a trajectory, a network input. eagle runs every sample through the same step.
 seed
