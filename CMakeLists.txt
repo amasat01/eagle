@@ -132,8 +132,9 @@ endif()
 find_package(OpenMP REQUIRED)
 message(STATUS "> Found OpenMP")
 
-# Dependency versions (also referenced by CI pipeline)
-set(EAGLE_AETHER_VERSION "0.2")
+# Dependency versions (also referenced by CI pipeline). aether 0.2.5 brings the
+# compensated-sum helpers eagle/reduce/canonical.h uses.
+set(EAGLE_AETHER_VERSION "0.2.5")
 
 # The VERSION argument is fixed
 # on the MAJOR-matching CMake ConfigVersion rule: aether is 0.x, so an
