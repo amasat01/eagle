@@ -18,6 +18,27 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  release-gate:
+    # Every merge to main is a release unless docs-only (tools/release_gate.sh). Skipped on other PRs.
+    if: github.event_name == 'pull_request' && github.base_ref == 'main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: bash tools/release_gate.sh "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}"
+  version:
+    # Every version string and the CHANGELOG heading agree (tools/version_sites.toml)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: python tools/version.py check
   docs-fresh:
     # Freshness check, never a commit: the generator re-renders the pages and fails on any difference.
     runs-on: ubuntu-latest
@@ -712,18 +733,22 @@ jobs:
           python -m pip install --quiet build
           cd eagle/python && python -m build --sdist --outdir ../../dist
 
+      # raptor-core: PyPI when the checkout's version is released, else built from it
+      - id: sib
+        uses: ./eagle/.github/actions/install-siblings
+        with:
+          siblings: raptor-core=raptor
+
       - name: Clean venv, pip install the sdist (warnings are errors)
+        env:
+          SIB_DIR: ${{ steps.sib.outputs.dir }}
+          SIB_PINS: ${{ steps.sib.outputs.pins }}
         run: |
           set -euo pipefail
           python -m venv "$RUNNER_TEMP/venv"
           . "$RUNNER_TEMP/venv/bin/activate"
           pip install --quiet --upgrade pip
-          # raptor-core from PyPI like any user, unless the sibling's version is not released yet
-          CORE_V=$(sed -n 's/^version = "\(.*\)"/\1/p' raptor/pyproject.toml)
-          if ! pip download --quiet --no-deps --only-binary=:all: -d "$RUNNER_TEMP/rc" "raptor-core==$CORE_V"; then
-            echo "raptor-core $CORE_V: not on PyPI yet, installing the sibling checkout"
-            pip install --quiet ./raptor
-          fi
+          pip install --quiet --find-links "$SIB_DIR" $SIB_PINS
           pip install -v -Ccmake.define.EAGLE_PYTHON_WARN_AS_ERR=ON dist/raptor_eagle-*.tar.gz
           pip check
 

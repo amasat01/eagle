@@ -1,5 +1,7 @@
 # Changelog
 
+## Unreleased
+
 ## 0.6.3 (2026-10-20)
 
 **Cells are the only record of a reduction over samples.** A hawk kernel that stores `hawk.all_samples(x).sum()` (or `.mean()`, `.max()`, `.min()`) to a `Mutable` output writes rows, one partial per 32 samples, and every door finishes them into the cell with `eagle.reduce`: `eagle.deploy(...).run` and `eagle.simulate` return the cell as a one-element array (one element per column for a vector cell), and the JAX bridge finishes it inside the same XLA call under `jit`. The row scratch is made once per kernel and sample count, so it is safe inside a captured graph. The doors read a sidecar's `cells` and no longer its `sample_sums`.

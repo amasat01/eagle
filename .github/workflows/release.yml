@@ -220,53 +220,30 @@ jobs:
             eagle/python/pyproject.toml
             raptor/pyproject.toml
 
-      # raptor-core, eagle's one runtime dependency, resolved against the
-      # requirement the BUILT wheel declares: from PyPI when a matching
-      # release exists (what a user gets), otherwise built from the sibling
-      # raptor checkout (before the family's first release).
-      - name: raptor-core wheel (PyPI if released, else the sibling checkout)
-        run: |
-          set -euo pipefail
-          # newest NumPy/SciPy ship no cp313t wheel: prefer a wheel over an sdist build
-          python -m pip install --quiet --prefer-binary build
-          REQ="$(python - <<'PY'
-          import glob, zipfile
-          whl = sorted(glob.glob("dist/*.whl"))[0]
-          with zipfile.ZipFile(whl) as z:
-              meta = next(n for n in z.namelist() if n.endswith(".dist-info/METADATA"))
-              for line in z.read(meta).decode().splitlines():
-                  if line.startswith("Requires-Dist:") and "raptor-core" in line and "extra ==" not in line:
-                      print(line.split(":", 1)[1].strip()); break
-              else:
-                  raise SystemExit(f"{whl} declares no raptor-core requirement")
-          PY
-          )"
-          echo "eagle requires: $REQ"
-          mkdir -p dist-raptor
-          if python -m pip download --quiet --no-deps --only-binary=:all: -d dist-raptor "$REQ"; then
-            echo "raptor-core: from PyPI"
-          else
-            echo "raptor-core: not on PyPI yet, building it from the sibling checkout"
-            (cd raptor && python -m build --wheel --outdir ../dist-raptor)
-          fi
-          ls dist-raptor
+      # raptor-core, eagle's one runtime dependency: PyPI when the checkout's version is released
+      # (what a user gets), else built from the sibling raptor checkout.
+      - id: sib
+        uses: ./eagle/.github/actions/install-siblings
+        with:
+          siblings: raptor-core=raptor
 
       - name: Assert this runner has no NVIDIA driver (the precondition this leg is for)
         run: |
           if ldconfig -p | grep -q 'libcuda\.so\.1'; then echo "libcuda.so.1 present"; exit 1; fi
 
-      # Third-party packages (numpy: a runtime dependency; pytest) from PyPI
-      # first; then raptor-core from dist-raptor and raptor-eagle from THIS
-      # run's dist, both index-free (never an index copy of the same version).
+      # Third-party packages (numpy: a runtime dependency; pytest) and raptor-core first; then
+      # raptor-eagle from THIS run's dist only (never an index copy of the same version).
       - name: Fresh venv, install the released wheel + raptor-core, pip check
+        env:
+          SIB_DIR: ${{ steps.sib.outputs.dir }}
+          SIB_PINS: ${{ steps.sib.outputs.pins }}
         run: |
           set -euo pipefail
           python -m venv venv
           . venv/bin/activate
           pip install --quiet --upgrade pip
-          pip install --quiet --prefer-binary numpy pytest
-          pip install --quiet --no-index --find-links dist-raptor raptor-core
-          pip install --quiet --no-index --find-links dist --find-links dist-raptor raptor-eagle
+          pip install --quiet --prefer-binary --find-links "$SIB_DIR" $SIB_PINS numpy pytest
+          pip install --quiet --no-index --find-links dist raptor-eagle
           pip check
 
       - name: The installed wheel imports and refuses device work, typed
@@ -588,9 +565,29 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - id: memo  # leaves out what no leg reads: workflows, tools, top-level text, and docs prose, styles and images
+      # the siblings the wheel leg ships beside eagle's wheel: pin file, else a same-named branch, else main
+      - uses: ./.github/actions/companion
+        with: {repo: raptor, path: raptor, pins: .github/companions, token: "${{ secrets.SIBLING_READ_TOKEN || github.token }}"}
+      - uses: ./.github/actions/companion
+        with: {repo: aether, path: aether, pins: .github/companions, token: "${{ secrets.SIBLING_READ_TOKEN || github.token }}"}
+      - uses: ./.github/actions/companion
+        with: {repo: hawk, path: hawk, pins: .github/companions, token: "${{ secrets.SIBLING_READ_TOKEN || github.token }}"}
+      - id: sibpins  # resolves the sibling pins (and which are unreleased) before the cache lookup; builds nothing
+        uses: ./.github/actions/install-siblings
+        with:
+          siblings: raptor-core=raptor aether-dsc=aether/dsc raptor-hawk=hawk
+          dry: dry
+      - id: memo  # leaves out what no leg reads: workflows, tools, top-level text, and docs prose, styles and images; plus the sibling pins and, for a sibling built from its checkout, that checkout's tree
+        env:
+          SIB_PINS: ${{ steps.sibpins.outputs.pins }}
+          SIB_BUILT: ${{ steps.sibpins.outputs.built }}
         run: |
-          digest=$(git ls-tree -r HEAD | grep -vE $'\t(\\.github/workflows/|tools/|ThirdPartyLicenses/|[^/]+\\.(md|cff)$|LICENSE$|NOTICE$|docs/.*\\.(rst|md|css|js|html|svg|png|jpg)$)' | sha256sum | cut -c1-16)
+          trees=""
+          for p in $SIB_BUILT; do
+            case $p in raptor-core) d=raptor ;; aether-dsc) d=aether ;; raptor-hawk) d=hawk ;; esac
+            trees="$trees $(git -C $d rev-parse 'HEAD^{tree}')"
+          done
+          digest=$( { echo "$SIB_PINS$trees"; git ls-tree -r HEAD | grep -vE $'\t(\\.github/workflows/|tools/|ThirdPartyLicenses/|[^/]+\\.(md|cff)$|LICENSE$|NOTICE$|docs/.*\\.(rst|md|css|js|html|svg|png|jpg)$)'; } | sha256sum | cut -c1-16)
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
       - id: pass
         uses: actions/cache/restore@v6
@@ -614,16 +611,26 @@ jobs:
         with:
           name: dist-${{ needs.build.outputs.tree }}
           path: dist
+      # PyPI when a sibling's version is released, else built from its checkout (hawk as an sdist, built on Kaggle)
+      - id: sib
+        if: steps.plan.outputs.run == 'true'
+        uses: ./.github/actions/install-siblings
+        env:
+          HAWK_AETHER_INCLUDE: ${{ github.workspace }}/aether
+          HAWK_EAGLE_INCLUDE: ${{ github.workspace }}
+        with:
+          siblings: raptor-core=raptor aether-dsc=aether/dsc raptor-hawk=hawk
       - id: wheel
         if: steps.plan.outputs.run == 'true'
         continue-on-error: true  # an upload failure is Kaggle's, not the pull request's: reported as inconclusive
-        run: python .github/kaggle/wheel.py dist "${{ needs.build.outputs.tree }}" --leg "${{ matrix.leg }}"
+        run: python .github/kaggle/wheel.py dist "${{ needs.build.outputs.tree }}" --leg "${{ matrix.leg }}" --siblings "${{ steps.sib.outputs.dir }}"
       - name: Run the kernel on Kaggle
         if: env.GPU_BACKEND == 'kaggle' && steps.plan.outputs.run == 'true'
         env:
           WHEEL_OUTCOME: ${{ steps.wheel.outcome }}
           DATASET: ${{ steps.wheel.outputs.dataset }}
           WHEEL_SHA256: ${{ steps.wheel.outputs.sha256 }}
+          SIBLING_PINS: ${{ steps.sib.outputs.pins }}
           EAGLE_REF: ${{ github.head_ref }}
           LEG: ${{ matrix.leg }}
         run: |
@@ -634,7 +641,7 @@ jobs:
             rc=0
             python .github/kaggle/drive.py --cuda ${{ matrix.cuda }} --mode ${{ matrix.mode }} \
               --run-id "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" --eagle-ref "$EAGLE_REF" \
-              --source wheel --dataset "$DATASET" --wheel-sha256 "$WHEEL_SHA256" \
+              --source wheel --dataset "$DATASET" --wheel-sha256 "$WHEEL_SHA256" --sibling-pins "$SIBLING_PINS" \
               --out "kaggle-out/$LEG" || rc=$?
           fi
           case "$rc" in

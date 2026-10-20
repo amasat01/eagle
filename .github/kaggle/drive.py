@@ -44,7 +44,7 @@ def username():
 
 def build(args, user, folder):
     slug = f"eagle-{'nb' if args.mode == 'notebooks' else 'gpu'}-cuda{args.cuda}-{args.run_id}".lower()
-    config = {k: getattr(args, k) for k in ("mode", "cuda", "source", "pre", "version", "nb_timeout", "wheel_sha256",
+    config = {k: getattr(args, k) for k in ("mode", "cuda", "source", "pre", "version", "nb_timeout", "wheel_sha256", "sibling_pins",
                                             "eagle_ref", "hawk_ref", "raptor_ref", "aether_ref")}
     text = (HERE / "kernel.py").read_text()
     if "EMBEDDED_CONFIG = None" not in text:
@@ -181,6 +181,7 @@ def main():
                     help="wheel: the pull request's own raptor-eagle wheel, from the private dataset made by wheel.py")
     ap.add_argument("--dataset", default="", help="--source wheel: USER/SLUG of that dataset")
     ap.add_argument("--wheel-sha256", default="", help="--source wheel: the sha256 of the dataset's SHA256SUMS file")
+    ap.add_argument("--sibling-pins", default="", help="--source wheel: exact pins (`pkg==V ...`) of the siblings the dataset may carry")
     ap.add_argument("--pre", action="store_true")
     ap.add_argument("--version", default="")
     for n in ("eagle", "hawk", "raptor", "aether"):

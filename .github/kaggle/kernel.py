@@ -53,6 +53,7 @@ def settings():
     ap.add_argument("--wheel-dir", default="/kaggle/input", help="--source wheel: where the dataset is mounted")
     ap.add_argument("--pre", action="store_true")
     ap.add_argument("--version", default="")
+    ap.add_argument("--sibling-pins", default="", help="source wheel: exact sibling pins, `pkg==V ...`")
     for name in ("eagle", "hawk", "raptor", "aether"):
         ap.add_argument(f"--{name}-ref", default="main")
     ap.add_argument("--eagle-src", help="local eagle checkout (default: the one holding this script)")
@@ -118,8 +119,26 @@ def shipped_wheel(cfg, py):
     got = hashlib.sha256(wheel.read_bytes()).hexdigest()
     if f"{got}  {wheel.name}" not in sums.decode().splitlines():
         raise SystemExit(f"{wheel.name}: sha256 {got} is not the one in the shipped SHA256SUMS")
+    listed = {ln.split()[-1]: ln.split()[0] for ln in sums.decode().splitlines()}
+    for f in sorted(p for p in wheel.parent.iterdir() if p.is_file() and p.name != "SHA256SUMS"):
+        if listed.get(f.name) != hashlib.sha256(f.read_bytes()).hexdigest():
+            raise SystemExit(f"{f.name}: not in the shipped SHA256SUMS or its sha256 differs")
     print("wheel", wheel.name, "sha256 ok")
     return wheel
+
+
+def install_args(cfg, py, cu, pre, pin, others):
+    """pip arguments for source pypi or wheel. For wheel, the dataset folder is a find-links source and the siblings
+    (raptor-hawk with its extra, raptor-core, aether-dsc) are exact pins: PyPI's when released, else built from the sdist
+    or wheel the pull request's run shipped."""
+    if cfg.source == "pypi":
+        return [*pre, *torch_index(cfg), f"raptor-eagle[{cu}]{pin}", f"raptor-hawk[{cu}]", *others]
+    wheel = shipped_wheel(cfg, py)
+    pins = (getattr(cfg, "sibling_pins", "") or "").split()
+    hawk = next((p.split("==")[1] for p in pins if p.startswith("raptor-hawk==")), None)
+    rest = [p for p in pins if not p.startswith("raptor-hawk==")]
+    return [*pre, *torch_index(cfg), "--find-links", str(wheel.parent), f"{wheel}[{cu}]",
+            f"raptor-hawk[{cu}]" + (f"=={hawk}" if hawk else ""), *rest, *others]
 
 
 def install(cfg, py, use_uv, work):
@@ -128,8 +147,7 @@ def install(cfg, py, use_uv, work):
     pin = f"=={cfg.version}" if cfg.version else ""
     others = ["jax[" + cu + "]", "torch", "warp-lang", "pytest", "nbclient", "ipykernel", "nbformat", "matplotlib"]
     if cfg.source in ("pypi", "wheel"):
-        eagle = f"raptor-eagle[{cu}]{pin}" if cfg.source == "pypi" else f"{shipped_wheel(cfg, py)}[{cu}]"
-        rc = pip(py, use_uv, *pre, *torch_index(cfg), eagle, f"raptor-hawk[{cu}]", *others)
+        rc = pip(py, use_uv, *install_args(cfg, py, cu, pre, pin, others))
     else:
         src = work / "src"
         src.mkdir(exist_ok=True)
