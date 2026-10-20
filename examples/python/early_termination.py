@@ -123,7 +123,7 @@ def step_kernel():
     caller and never re-zeroed: every launch subtracts exactly the number of
     samples that terminate on THIS step (``still - alive``, zero for a sample
     that stays alive or was already dead), so it decays monotonically to zero
-    as the batch finishes. An ``Accum`` plane must be a float type (there is
+    as the batch finishes. A by-key plane must be a float type (there is
     no integer atomic accumulate), so the caller views this float32 cell as
     uint32 to build the graph's skip guard -- exact for batches under 2**24
     samples, comfortably above anything this demo runs.
@@ -153,7 +153,7 @@ def step_kernel():
         x_next: hawk.Mutable[hawk.Vector[4]],
         alive_next: hawk.Mutable[hawk.Scalar],
         age_next: hawk.Mutable[hawk.Scalar],
-        n_active: hawk.Accum[hawk.Scalar],
+        n_active: hawk.Mutable[hawk.Scalar],
     ):
         k1 = rhs(x)
         k2 = rhs(x + (0.5 * dt) * k1)
@@ -172,7 +172,7 @@ def step_kernel():
         x_next = hm.select(live, xn, x)
         alive_next = still
         age_next = age + alive
-        n_active.add(still - alive, at=0)
+        hawk.all_samples(n_active)[0] += still - alive
 
     return et_step
 

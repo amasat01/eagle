@@ -168,7 +168,7 @@ def coerce_wide_outputs(kw, names, n=None, dt=np.float64, exempt=()):
     written in place; returns ``(dict, n)``. Never auto-allocated (the row
     count is a runtime quantity, as in :func:`coerce_wide_inputs`) -- the
     caller must pass a buffer. ``exempt`` names a declared row-indexed
-    destination (e.g. an atomic ``Accum`` output's ``(rows, 1)`` buffer)
+    destination (e.g. an atomic by-key store output's ``(rows, 1)`` buffer)
     that carries no batch axis, so it binds as-is and skips
     ``_reconcile_n``."""
     out = {}

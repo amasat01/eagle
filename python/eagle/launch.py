@@ -530,7 +530,7 @@ def _launch_pure(
     allocating one -- but bound as-is here (never coerced, since that is
     illegal mid-capture). ``wide_out_exempt`` names the ``wide_outputs``
     that are row-indexed destinations with no batch axis (e.g. an atomic
-    ``Accum`` output), binding at their own width and skipping
+    by-key store output), binding at their own width and skipping
     reconciliation.
 
     Returns the ``Mutable`` handoff merged with the wide gradient outputs,
@@ -683,7 +683,7 @@ def pure_prepare(
     inputs -> 2-D ``(rows, N)``; wide gradient outputs -> 2-D ``(rows, N)``
     written in place, never auto-allocated. ``wide_out_exempt`` names the
     ``wide_outputs`` that are row-indexed destinations (e.g. an atomic
-    ``Accum`` output), skipping N-reconciliation. A ``Mutable`` omitted
+    by-key store output), skipping N-reconciliation. A ``Mutable`` omitted
     from ``kw`` is a broadcast scalar fill or its declared default. Returns
     the ``Mutable`` buffers merged with any wide gradient outputs (RMW in
     place). Meant to run inside the caller's launch context (see
