@@ -25,6 +25,7 @@ at a barrier).
 
 from __future__ import annotations
 
+import json
 import ctypes
 import os
 import pathlib
@@ -489,6 +490,28 @@ def test_float64_sum_cell_on_the_cpu_matches_eagle_reduce(tmp_path):
         comp = np.zeros(1)
         _core.reduce_canonical_host(v.ctypes.data, v.size, 1, 0, comp.ctypes.data)
         assert comp.tobytes() != want.tobytes()
+
+
+@pytest.mark.parametrize("policy", ["compensated", "ordered"])
+def test_policy_reaches_the_cell_recipe(tmp_path, policy):
+    """The recipe the handler runs carries the policy given, and the sum is right."""
+    if not hasattr(hawk, "all_samples"):
+        pytest.skip("this hawk has no reductions over samples")
+    from eagle import _cell_rows
+    from eagle._graph_reduce import POLICIES
+
+    x = np.random.default_rng(0).uniform(-1, 1, 3 * _cell_rows.ROW + 5)
+    with jax.default_device(_device("cpu")):
+        got = np.asarray(eagle_jax.function(cell_sum, wrt=(), cache_dir=tmp_path,
+                                            policy=policy)(jnp.asarray(x)))
+    np.testing.assert_allclose(got, [x.sum()], rtol=1e-12)
+    recipes = [json.loads(p.read_text()) for p in tmp_path.rglob(eagle_jax.RECIPE_FILE)]
+    assert [r["policy"] for r in recipes] == [POLICIES[policy]]
+
+
+def test_unknown_policy_is_refused_like_eagle_reduce(tmp_path):
+    with pytest.raises(ValueError, match=r"policy 'fast' is not one of \['auto', 'compensated', 'ordered'\]"):
+        eagle_jax.function(drag, cache_dir=tmp_path, policy="fast")
 
 
 @pytest.mark.parametrize("platform", PLATFORMS)

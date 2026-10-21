@@ -51,7 +51,7 @@ linkcheck: doxygen
 # what gets committed; the Sphinx build never re-executes them
 # (`nb_execution_mode = "off"` in conf.py).
 NB_PATHS = content/userguide/quickstart_python.ipynb content/userguide/tutorials \
-           content/userguide/examples content/userguide/extra content/interop.ipynb content/interop
+           content/userguide/examples content/userguide/extra content/interop.ipynb content/interop content/devguide/graph_capture_replay.ipynb
 
 nbexec:
 	python _tools/nb_execute.py $(NB_PATHS)

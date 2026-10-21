@@ -9,6 +9,7 @@ tests use: the ``gpu`` marker (needs cupy + a CUDA device) and the ``torch`` mar
 pulls in a compiler.
 """
 
+import functools
 import os
 import pathlib
 import sys
@@ -36,6 +37,7 @@ os.environ.setdefault("CUDA_PATH", "/usr/local/cuda")
 pytest_plugins = ["raptor.conformance.pytest_rows"]
 
 
+@functools.cache
 def _cupy_available() -> bool:
     try:
         import cupy
@@ -148,6 +150,18 @@ def pytest_collection_modifyitems(config, items):
 #: framework thread rows: test module -> the framework whose import may switch the GIL back on
 _FT_FRAMEWORK_ROWS = {"test_frameworks_torch_tower": "torch", "test_frameworks_jax": "jax",
                       "test_frameworks_warp": "warp"}
+
+
+@pytest.fixture(autouse=True)
+def _start_on_gpu_0():
+    """Every test starts with GPU 0 current: starting JAX leaves its LAST GPU current on the
+    calling thread, so arrays a later test allocates would land on GPU 1 and fail where the
+    two GPUs cannot read each other's memory."""
+    if _cupy_available():
+        import cupy
+
+        cupy.cuda.runtime.setDevice(0)
+    yield
 
 
 @pytest.fixture(autouse=True)

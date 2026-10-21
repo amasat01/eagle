@@ -54,6 +54,7 @@ from types import MappingProxyType
 import torch
 
 from .. import FINISHED_PLANE, _cell_rows, _split
+from .._graph_reduce import check_policy
 from ._kernel_planes import INPUT_ROLES, OUTPUT_ROLES, _prior_reads, call_mode, promote
 from ._tower import LOCK, finished_identity, plane_names
 
@@ -77,7 +78,7 @@ _UIDS = itertools.count()
 _OP = None
 
 
-def function(kernel, *, wrt=None, cache_dir=None, device_arch=None):
+def function(kernel, *, wrt=None, cache_dir=None, device_arch=None, policy="compensated"):
     """Wrap ``kernel`` as a torch-differentiable callable.
 
     :param kernel: a per-sample hawk kernel (``@hawk.kernel``). Its inputs
@@ -86,9 +87,12 @@ def function(kernel, *, wrt=None, cache_dir=None, device_arch=None):
     :param wrt: names to differentiate (default: every differentiable input).
     :param cache_dir: where artifacts publish (default: a private temp dir).
     :param device_arch: CUDA arch to compile for (default: the first call's device).
+    :param policy: how a sum over samples (a cell) is finished: ``"compensated"``
+        (default), ``"ordered"`` or ``"auto"``, as for :func:`eagle.reduce`.
     :returns: a :class:`KernelFunction`.
     """
-    return KernelFunction(kernel, wrt=wrt, cache_dir=cache_dir, device_arch=device_arch)
+    return KernelFunction(kernel, wrt=wrt, cache_dir=cache_dir, device_arch=device_arch,
+                          policy=policy)
 
 
 # -- the generic op ----------------------------------------------------------
@@ -483,7 +487,8 @@ class _Level:
         xp = numpy
         if device.type == "cuda":
             import cupy as xp
-        return _cell_rows.scratch(self, n, xp, numpy.dtype(mode), cells=self.cells)
+        return _cell_rows.scratch(self, n, xp, numpy.dtype(mode), self.owner.policy,
+                                  cells=self.cells)
 
     def _mask(self, plane, values):
         if self.terminated is None:
@@ -689,7 +694,9 @@ class KernelFunction:
         reading it.
     """
 
-    def __init__(self, kernel, *, wrt=None, cache_dir=None, device_arch=None):
+    def __init__(self, kernel, *, wrt=None, cache_dir=None, device_arch=None,
+                 policy="compensated"):
+        self.policy = check_policy(policy, "eagle.frameworks.torch")
         from hawk.diff import step_vjp, vjp
 
         role_of = {name: role for role, name in kernel.arg_spec}

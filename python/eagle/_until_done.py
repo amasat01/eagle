@@ -694,11 +694,6 @@ class Runner:
             raise ValueError(
                 f"eagle.until_done: a per-step hook needs one step per launch; build the "
                 f"plan with steps=1 and without steps='auto' ({name} takes {k!r})")
-        if hooks and refine:
-            raise ValueError(
-                "eagle.until_done: events='refine' with a per-step node is not supported "
-                "yet: the refine entry re-steps the last step without your node; use "
-                "events='step'")
         if len(plans) > 1:
             for i in finishers:
                 if finishes[i]["steps"] not in (FINISH_AUTO, 1):
@@ -1735,23 +1730,25 @@ def _record_nodes(steps, spec, planes) -> list:
             raise ValueError(f"eagle.until_done: two nodes of the recorded step are labelled "
                              f"{label!r}; give each node a name= (vjps= keys on it)")
     writer = {pn: node.label for node, _r, writes in out for _nm, pn, _a in writes}
+    order = {label: i for i, label in enumerate(labels)}
     for node, reads, writes in out:
         for (nm, pn, _a), w in [(x, False) for x in reads] + [(x, True) for x in writes]:
             role = roles.get(pn)
             if role == "uniform":
-                raise ValueError(f"eagle.until_done: node {node.label!r} reads parameter "
-                                 f"{pn!r}: bind it as a per-sample plane or a Table")
+                if w:
+                    raise ValueError(f"eagle.until_done: node {node.label!r} writes parameter "
+                                     f"{pn!r}: a node only reads a parameter")
+                continue
             if role is None or (w and role in ("mutable", "terminated", "lookup", "out")):
                 raise ValueError(
                     f"eagle.until_done: node {node.label!r} declares {nm!r}, which the plan "
                     + ("reads as state, not as a per-sample input" if role else "does not bind")
                     + "; in a recorded step a node reads the plan's planes and writes planes "
                     "the plan reads")
-            if not w and pn in writer:
+            if not w and pn in writer and order[writer[pn]] >= order[node.label]:
                 raise ValueError(
-                    f"eagle.until_done: node-to-node planes inside a recorded step are not "
-                    f"supported yet: node {node.label!r} reads {pn!r}, which node "
-                    f"{writer[pn]!r} writes")
+                    f"eagle.until_done: node {node.label!r} reads {pn!r}, which node "
+                    f"{writer[pn]!r} writes after it; put {writer[pn]!r} first")
     return out
 
 

@@ -329,7 +329,8 @@ literature). The number of phases is the graph's, so a phase inside
 :func:`eagle.repeat_while` is refused. On the GPU a phase is an eager node (it
 reads its own progress back between launches), and the graph is captured in
 segments around it. The checked version of both examples is in
-:doc:`tutorials/11_conditionals_budgets_events`.
+:doc:`tutorials/11_conditionals_budgets_events`. A discontinuity in the model itself, a branch on a learnable
+threshold, is trained through in :doc:`tutorials/19_train_through_a_branch`.
 
 .. _autodiff-run-vjps:
 

@@ -154,27 +154,6 @@
   "lifted_in": "0.6.4"
  },
  {
-  "id": "run-vjps-node-chain",
-  "text": "In a recorded loop a node cannot read a plane another node writes (our scope until 0.6.4): fold the two into one node.",
-  "way_out": "one node",
-  "cause": "ours",
-  "lifted_in": "0.6.4"
- },
- {
-  "id": "run-vjps-param-read",
-  "text": "In a recorded loop a node reads per-sample planes, not a `Param` (our scope until 0.6.4): bind the value as a per-sample plane or a `Table`.",
-  "way_out": "a per-sample plane",
-  "cause": "ours",
-  "lifted_in": "0.6.4"
- },
- {
-  "id": "run-vjps-refine",
-  "text": "A recorded loop with a node stops with `events=\"step\"` (our scope until 0.6.4): `events=\"refine\"` re-steps the last step without your node.",
-  "way_out": "events=\"step\"",
-  "cause": "ours",
-  "lifted_in": "0.6.4"
- },
- {
   "id": "run-vjps-node-vjp",
   "text": "In a recorded loop the node's vjp is a callable run host-synchronized once per step (our scope until 0.6.4): a captured backward as a `Node` vjp is refused by name.",
   "way_out": "the callable vjp",
@@ -278,12 +257,5 @@
   "way_out": "3.14t, or a regular 3.13",
   "cause": "framework",
   "lifted_in": "none"
- },
- {
-  "id": "jax-cell-policy",
-  "text": "A cell inside `jit` is finished with the default `\"compensated\"` policy (a float64 cell on a GPU with slow FP64 is finished exactly, in integers, under any policy); there is no `policy=` argument on the bridge yet (our scope): finish the rows yourself with `eagle.reduce(policy=\"ordered\")` where the bits must be fixed, or use `max`/`min`, which are exact.",
-  "way_out": "finish the rows with eagle.reduce(policy=\"ordered\")",
-  "cause": "ours",
-  "lifted_in": "0.6.4"
  }
 ]

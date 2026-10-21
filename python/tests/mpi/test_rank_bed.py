@@ -467,3 +467,34 @@ def test_structure_from_name_resolves_the_rank_structure():
         eexec.check_placement(access, eexec.RankPartition, size)
     with pytest.raises(ValueError, match="F-e"):
         eexec.check_placement("cross_sample_write", eexec.RankPartition, size)
+
+
+# --------------------------------------------------------------------------- #
+# (f) a kernel that reduces over samples folds its cells across the world
+# --------------------------------------------------------------------------- #
+def test_cells_fold_across_ranks_is_bitwise_the_single_rank_cell(tmp_path_factory):
+    """The ranks are cut at whole 32-sample rows and the row planes are gathered,
+    so every rank folds the SAME rows a single rank writes: the cell is the single
+    rank's bit for bit, at sample counts the row size and the world size do not
+    divide. The pre-gather arm is the non-vacuity control: one rank's own rows
+    alone do NOT make the cell."""
+    from test_plan_bind_launch import _bundle, _host_subject, e4_energy
+
+    # the returned cell is the scratch's own array, so each result is copied
+    unit = _bundle(e4_energy, tmp_path_factory, "energy_ranks", ("host",))
+    plugin = _host_subject(unit, "e4_energy")
+    for policy, n in [(pl, n) for pl in ("compensated", "ordered") for n in (64, 160, 1000, 1001)]:
+        v = np.random.default_rng(n).uniform(-1.0, 1.0, (3, n))
+        # the fold runs first, on a scratch no run has filled at this n
+        folded = eplan.plan(plugin, structure=eexec.RankPartition,
+                            inner=eexec.HostTeam, policy=policy).run(v=v).copy()
+        single = eplan.plan(plugin, structure=eexec.HostTeam, policy=policy).run(v=v).copy()
+        assert folded.tobytes() == single.tobytes(), f"{policy} n={n}"
+        _assert_identical_on_all_ranks(folded, f"the folded cell at {policy} n={n}")
+        # the row scratch is kept between runs, so the control runs new values:
+        # the rows the other ranks wrote are then still the old ones
+        w = 1.5 * v
+        mine = eplan.plan(plugin, structure=eexec.RankPartition,
+                          inner=eexec.HostTeam, _gather=False, policy=policy).run(v=w).copy()
+        whole = eplan.plan(plugin, structure=eexec.HostTeam, policy=policy).run(v=w).copy()
+        assert mine.tobytes() != whole.tobytes(), f"{policy} n={n}: the control folded nothing"

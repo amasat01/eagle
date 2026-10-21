@@ -72,7 +72,7 @@ from jax import extend as jex
 from jax.interpreters import ad, batching, mlir
 
 from .. import FINISHED_PLANE, _cell_rows, _split
-from .._graph_reduce import POLICIES
+from .._graph_reduce import POLICIES, check_policy
 from .._graph_reduce import fixed_f64 as _fixed_f64
 from ._kernel_planes import FUSED_STEPS, SAMPLE_ROLES, call_mode, promote
 from ._tower import LOCK, Level, finished_identity
@@ -128,7 +128,7 @@ class _Recipe(ctypes.Structure):
                 ("work_a", ctypes.c_int32), ("work_b", ctypes.c_int32)]
 
 
-def function(kernel, *, wrt=None, cache_dir=None, device_arch=None):
+def function(kernel, *, wrt=None, cache_dir=None, device_arch=None, policy="compensated"):
     """Wrap ``kernel`` as a JAX-differentiable, jit-able, vmap-able callable.
 
     :param kernel: a per-sample hawk kernel (``@hawk.kernel``). Its inputs may
@@ -139,9 +139,12 @@ def function(kernel, *, wrt=None, cache_dir=None, device_arch=None):
         one directory to every process that should share builds (and to
         :func:`preload` to run exported modules).
     :param device_arch: CUDA arch to compile for (default: the GPU's own).
+    :param policy: how a sum over samples (a cell) is finished: ``"compensated"``
+        (default), ``"ordered"`` or ``"auto"``, as for :func:`eagle.reduce`.
     :returns: a :class:`KernelFunction`.
     """
-    return KernelFunction(kernel, wrt=wrt, cache_dir=cache_dir, device_arch=device_arch)
+    return KernelFunction(kernel, wrt=wrt, cache_dir=cache_dir, device_arch=device_arch,
+                          policy=policy)
 
 
 class KernelFunction:
@@ -156,7 +159,9 @@ class KernelFunction:
     :ivar finishes_terminated: whether the kernel's body finishes its mask.
     """
 
-    def __init__(self, kernel, *, wrt=None, cache_dir=None, device_arch=None):
+    def __init__(self, kernel, *, wrt=None, cache_dir=None, device_arch=None,
+                 policy="compensated"):
+        self._policy = POLICIES[check_policy(policy, _WHO)]
         if getattr(getattr(getattr(kernel, "kind", None), "guard", None), "active_set", False):
             raise ValueError(
                 f"{_WHO}: kernel {kernel.name!r} is built with Guard(active_set=True), whose index "
@@ -433,7 +438,7 @@ class _Prim:
         """One kernel's FFI call: its input planes in, its outputs out."""
         sig = level.sig
         device = platform == "cuda"
-        work = _work_elems(sig, n, mode) if device else 0
+        work = _work_elems(sig, n, mode, self.owner._policy) if device else 0
         digest = _register(level, self.owner, platform, mode)
         conv = _convention(sig, device)
         # a cell's rows sit in the first ceil(n / ROW) of an n-sample plane (the handler sizes every
@@ -602,7 +607,7 @@ def _result_shape(sig, name, n, work):
     return (n,) if name in sig.rows else sig.shape(name, n)
 
 
-def _work_elems(sig, n, mode):
+def _work_elems(sig, n, mode, policy):
     """Elements each CUDA reduction work result holds (0 with no cells)."""
     if not sig.cells:
         return 0
@@ -610,7 +615,7 @@ def _work_elems(sig, n, mode):
 
     dtype = 0 if sig.dtype(next(iter(sig.cells)), mode) == np.float32 else 1
     return int(_core.reduce_canonical_device(0, -(-n // _cell_rows.ROW), dtype, 0, 0, 0, 0, 0, -1,
-                                             _POLICY, 1))
+                                             policy, 1))
 
 
 def _convention(sig, device=False):
@@ -699,7 +704,7 @@ def _recipe_fields(level, artifact, mode, device=False):
 
 
 def _install(digest, fields, *, platform, entry, ordinal=0, block=256, function=0,
-             seam=None):
+             seam=None, policy=POLICIES["compensated"]):
     """Register one recipe in ``libeagle_xla.so``'s table."""
     lib = _xla()
     arr = {k: (ctypes.c_int32 * len(fields[k]))(*fields[k])
@@ -724,7 +729,7 @@ def _install(digest, fields, *, platform, entry, ordinal=0, block=256, function=
             for i, k in enumerate(("cell_rows", "cell_comp", "cell_out", "cell_op"))}
     # the host finishes float64 sums with the machine GPU's arithmetic (bitwise host == device)
     fixed = platform == "cpu" and fields["cells"] and _fixed_f64()
-    r.ncells, r.cell_row, r.policy = len(cells), _cell_rows.ROW, _POLICY | (_FIXED_F64 if fixed else 0)
+    r.ncells, r.cell_row, r.policy = len(cells), _cell_rows.ROW, policy | (_FIXED_F64 if fixed else 0)
     r.cell_rows, r.cell_comp, r.cell_out, r.cell_op = (cols[k] for k in ("cell_rows", "cell_comp", "cell_out", "cell_op"))
     r.work_a, r.work_b = fields["work"] or (-1, -1)
     if seam is not None:
@@ -751,31 +756,31 @@ def _register(level, owner, platform, mode):
             from hawk.artifact import plugins
 
             plugin = plugins(unit)[level.name]
-            digest = f"{unit.digest}/{level.name}/{mode}/cpu"
+            digest = f"{unit.digest}/{level.name}/{mode}/p{owner._policy}/cpu"
             fields = _recipe_fields(level, level.artifact(unit), mode)
-            _install(digest, fields, platform="cpu", entry=plugin.host_entry)
+            _install(digest, fields, policy=owner._policy, platform="cpu", entry=plugin.host_entry)
             level.slots[("keep", platform, mode)] = plugin
-            _write_recipe(unit, level, digest, fields, "cpu", mode, "")
+            _write_recipe(unit, level, digest, fields, owner._policy, "cpu", mode, "")
         else:
             seam = _seam()
             ordinal, arch = _cuda_device(owner._device_arch)
             unit = level.unit(owner._dir, "cuda", mode, arch)
             plugin = _load_device(unit, level.name, ordinal)
-            digest = f"{unit.digest}/{level.name}/{mode}/cuda-{arch}"
+            digest = f"{unit.digest}/{level.name}/{mode}/p{owner._policy}/cuda-{arch}"
             fields = _recipe_fields(level, level.artifact(unit), mode, device=True)
-            _install(digest, fields, platform="cuda", entry=seam["run"], ordinal=ordinal,
-                     function=plugin.device_function, seam=seam)
+            _install(digest, fields, policy=owner._policy, platform="cuda", entry=seam["run"],
+                     ordinal=ordinal, function=plugin.device_function, seam=seam)
             level.slots[("keep", platform, mode)] = plugin
-            _write_recipe(unit, level, digest, fields, "cuda", mode, arch)
+            _write_recipe(unit, level, digest, fields, owner._policy, "cuda", mode, arch)
         level.slots[key] = digest
         return digest
 
 
-def _write_recipe(unit, level, digest, fields, platform, mode, arch):
+def _write_recipe(unit, level, digest, fields, policy, platform, mode, arch):
     art = level.artifact(unit)
     record = {"digest": digest, "kernel": level.name, "platform": platform,
               "mode": mode, "arch": arch, "manifest": str(unit.manifest_path),
-              "fields": fields}
+              "policy": policy, "fields": fields}
     if platform == "cpu":
         record["host"] = {"library": str(art.entries["host"].artifact),
                           "entry": art.sidecar.get("host_entry")}
@@ -802,7 +807,7 @@ def preload(cache_dir, *, platform=None):
                 entry = ctypes.cast(getattr(cdll, record["host"]["entry"]),
                                     ctypes.c_void_p).value
                 _KEEP.append((library, cdll))
-                _install(record["digest"], fields, platform="cpu", entry=entry)
+                _install(record["digest"], fields, policy=record["policy"], platform="cpu", entry=entry)
             else:
                 from eagle.registry import load_manifest
 
@@ -814,8 +819,8 @@ def preload(cache_dir, *, platform=None):
                     registry = load_manifest(record["manifest"])
                 loaded = registry[record["kernel"]]
                 _KEEP.append((registry, loaded))
-                _install(record["digest"], fields, platform="cuda", entry=seam["run"],
-                         ordinal=ordinal, function=loaded.fn.kernel.ptr, seam=seam)
+                _install(record["digest"], fields, policy=record["policy"], platform="cuda",
+                         entry=seam["run"], ordinal=ordinal, function=loaded.fn.kernel.ptr, seam=seam)
             done.append(record["digest"])
     return done
 
@@ -842,8 +847,6 @@ _TARGETS = set()
 
 #: the cells' ops as the handler's EAGLE_XLA_CELL_* (mean rows already carry 1/n)
 _CELL_OP = MappingProxyType({"sum": 0, "mean": 0, "max": 1, "min": 2})
-#: no ``policy=`` door on the bridge yet: eagle.reduce's default
-_POLICY = POLICIES["compensated"]
 #: EAGLE_XLA_POLICY_FIXED_F64 (eagle_xla.h)
 _FIXED_F64 = 0x100
 

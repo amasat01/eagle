@@ -237,6 +237,7 @@ class RefinePass:
     def run(self):
         """Refine the forward that just ran; raise the pinned refusals."""
         xp, rec, b = self.xp, self.rec, self.newton
+        self._nodes_at_prestop()
         xp.subtract(rec.planes["applied_steps"], 1, out=self.steps)
         xp.maximum(self.steps, 0, out=self.steps)
         xp.copyto(self.tau, self.h)          # the first evaluation is the step's end
@@ -261,6 +262,27 @@ class RefinePass:
         self._apply(_GRAZE, g=self.g, dg=self.dg, b=b_rows, c=rows(self.phi_tau))
         self._refuse()
         self._apply(_COMMIT, a=rows(rec.state), b=rows(self.refined))
+
+    def _nodes_at_prestop(self):
+        """The step's nodes run from the state before each sample's stop step, as
+        they did before that step; their writes stay for the refine entry to read."""
+        rec = self.rec
+        if not rec.nodes:
+            return
+        saved = {}
+        for _n, reads, _w in rec.nodes:
+            for _nm, pn, a in reads:
+                if id(a) not in saved and (pn in self.prestop
+                                           or rec.roles.get(pn) == "terminated"):
+                    saved[id(a)] = (a, a.copy())
+                    if pn in self.prestop:
+                        self.xp.copyto(a, self.prestop[pn])
+                    else:
+                        a.fill(False)
+        for call in rec.calls:
+            call()
+        for a, held in saved.values():
+            self.xp.copyto(a, held)
 
     def _refuse(self):
         status = self.status.get() if self.device else self.status

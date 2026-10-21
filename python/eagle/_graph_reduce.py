@@ -42,6 +42,13 @@ _DTYPES = {"float32": 0, "float64": 1, "int32": 2, "int64": 3, "bool": 4}
 POLICIES = MappingProxyType({"compensated": 0, "ordered": 1, "auto": 2})
 
 
+def check_policy(policy, who):
+    """``policy`` if it is one eagle.reduce takes, else a refusal naming ``who``."""
+    if policy not in POLICIES:
+        raise ValueError(f"{who}: policy {policy!r} is not one of {sorted(POLICIES)}")
+    return policy
+
+
 @lru_cache(maxsize=None)
 def fixed_f64(device: int = -1) -> bool:
     """True when float64 sums use the fixed-point leaf on this machine: the
@@ -109,8 +116,7 @@ def reduce(x, out, *, op: str = "sum", comp=None, policy: str = "compensated") -
     """
     if op not in _OPS:
         raise ValueError(_door(f"op {op!r} is not one of {sorted(_OPS)}"))
-    if policy not in POLICIES:
-        raise ValueError(_door(f"policy {policy!r} is not one of {sorted(POLICIES)}"))
+    check_policy(policy, "eagle.reduce")
     arrays = (("x", x), ("out", out)) + ((("comp", comp),) if comp is not None else ())
     for label, arr in arrays:
         if not hasattr(arr, "dtype") or not hasattr(arr, "shape"):

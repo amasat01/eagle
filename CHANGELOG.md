@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+**Cells fold across MPI ranks.** A kernel that reduces over samples runs under `eagle.exec.RankPartition`: the ranks are cut at whole rows of 32 samples and the rows are gathered, so every rank gets the single rank's cell bit for bit. `eagle.plan(..., policy=)` sets how the cells are finished, as in `eagle.reduce`.
+
+**The JAX, torch and Warp bridges take `policy=`** (`"compensated"`, `"ordered"` or `"auto"`, as `eagle.reduce`) for how a sum over samples is finished.
+
+**`grad=False` marks a node as not differentiated.** `Graph.add(..., grad=False)` and `eagle.graph.opaque(..., grad=False)` (a controller that writes a step size, say): a recorded run and `eagle.diff.Reverse` skip it, so it needs no vjp and no gradient goes back through its outputs. A `repeat_while` body may be a tuple of parts, including a `skippable`; a reverse skips a loop of `grad=False` parts and refuses a differentiated part inside a loop by name.
+
+**A node in a recorded loop reads more.** It can read a plane an earlier node writes (the reverse runs the nodes last first and passes the cotangent back) and a `Param` (its gradient sums over the steps). A loop with a node takes `events="refine"`: the node runs from the state before each sample's stop step, and the reverse takes its vjp there.
+
 ## 0.6.3 (2026-10-20)
 
 **Cells are the only record of a reduction over samples.** A hawk kernel that stores `hawk.all_samples(x).sum()` (or `.mean()`, `.max()`, `.min()`) to a `Mutable` output writes rows, one partial per 32 samples, and every door finishes them into the cell with `eagle.reduce`: `eagle.deploy(...).run` and `eagle.simulate` return the cell as a one-element array (one element per column for a vector cell), and the JAX bridge finishes it inside the same XLA call under `jit`. The row scratch is made once per kernel and sample count, so it is safe inside a captured graph. The doors read a sidecar's `cells` and no longer its `sample_sums`.

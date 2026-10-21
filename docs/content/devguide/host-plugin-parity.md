@@ -1,3 +1,7 @@
+---
+orphan: true
+---
+
 # Host plugin parity
 
 This page tracks feature parity between the CPU host plugin path and the
@@ -7,9 +11,8 @@ parity check — what `eagle::cpu::PluginRegistry` (`plugin/host_registry.h`)
 and `eagle.host_launch.HostPluginLibrary` (`python/eagle/host_launch.py`)
 accept, bind, and run once a producer hands them a `.so`. The matching
 **producer** half — what the code generator's `compile_to_host` emits, and
-which roles are still unimplemented in its codegen — lives in the code
-generator's own `host-codegen-parity.md`; read the two together, since most
-rows depend on both sides.
+which roles are still unimplemented in its codegen — lives with the code
+generator; most rows depend on both sides.
 
 ## Where the host path sits
 
@@ -166,7 +169,7 @@ reject.
 
 Flip exactly the cells a producer/consumer change proves — from `**OPEN**`
 to `**CLOSED**`, citing the new test — and update the tally line. Keep this
-page and the code generator's `host-codegen-parity.md` in lockstep: a row
+page and the code generator in lockstep: a row
 closes only when *both* the producer emits the shape and this consumer
 round-trips it, so a one-sided fix should still land the cell as OPEN here
 with an updated note, not CLOSED.

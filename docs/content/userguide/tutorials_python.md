@@ -40,6 +40,7 @@ tutorials/03_torch_training
 tutorials/09_graph_model
 tutorials/10_gradients_through_a_graph
 tutorials/11_conditionals_budgets_events
+tutorials/19_train_through_a_branch
 tutorials/12_jax_training_step
 tutorials/13_jax_vmap_and_jacobians
 tutorials/14_jax_simulation_loop
@@ -53,6 +54,7 @@ tutorials/18_the_eagle_batch_inside_jit
 - [Build a step as a graph](tutorials/09_graph_model): `eagle.Graph`, built, inspected and run.
 - [Gradients through a graph](tutorials/10_gradients_through_a_graph): `eagle.diff`, checked against finite differences.
 - [Conditionals, budgets and events](tutorials/11_conditionals_budgets_events): reverse through a skipped step, a capped memory budget, and a stop between two steps.
+- [Train through a branch](tutorials/19_train_through_a_branch): `jump=` gives a learnable threshold its gradient, and descent finds it.
 - [A hawk kernel inside your jitted JAX step](tutorials/12_jax_training_step): fit a drag coefficient with `jax.jit` and `grad`.
 - [Batches and Jacobians](tutorials/13_jax_vmap_and_jacobians): `vmap`, `jacfwd`, `hessian`, and which cost one launch.
 - [A stepping loop in `lax.scan`](tutorials/14_jax_simulation_loop): balls that land and stop, on the CPU and the GPU.

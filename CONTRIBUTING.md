@@ -41,16 +41,23 @@ pytest python/tests -m ft -W error::RuntimeWarning              # free-threading
 ```
 
 Docs: `cd docs && make strict` (zero warnings), then `make nbexec` (needs a GPU) and `make nbcheck` for notebooks, `make linkcheck`
-for links. `make nbcheck-hosted` runs the notebooks the way a Colab user does; the comments above the target in `docs/Makefile`
-say what it needs. Toolchain and docstring style: [Documentation guide](https://amasat01.github.io/eagle/content/devguide/docs_guide.html).
+for links. `make nbcheck-hosted` runs the notebooks the way a Colab user does (needs and notebook rules: the Documentation guide). Toolchain and docstring style: [Documentation guide](https://amasat01.github.io/eagle/content/devguide/docs_guide.html).
+
+## Where things live
+
+- `eagle/`: the header-only C++ core, one folder per idea (`cuda/` graph and launcher, `cpu/` its host twin, `exec/`, `filtering/`, `util/`).
+- `python/eagle/`: the Python package; `graph.py` is `eagle.Graph`, `registry.py` the plugin registry. `python/src/` is the binding.
+- `plugin/`: the C++ plugin registry. `tests/`: C++ tests and the gate manifests. `python/tests/`: Python tests.
+- Docs: `docs/content/`; examples compiled by the docs gate: `docs/examples/`.
+- Adding an error code, a Python feature or a notebook: [Developer guide](https://amasat01.github.io/eagle/content/devguide/dev_guide.html).
 
 ## What a PR here must show
 
 - **C++ first, then bind.** The behaviour exists and is tested in C++; the Python binding only exposes it.
 - **The seam stays additive.** `python/src/seam/eagle_backend.h` is versioned: a new backend symbol bumps
   `EAGLE_BACKEND_VERSION_MINOR`, is bound by symbol, and gets a line in `CHANGELOG.md`. Nothing is removed or reordered within major 1.
-- **Host and device agree.** Guard CUDA-only code with `#ifndef EAGLE_CPU_ONLY` and give it an OpenMP counterpart; update
-  [Host/plugin parity](https://amasat01.github.io/eagle/content/devguide/host-plugin-parity.html).
+- **Host and device agree.** Guard CUDA-only code with `#ifndef EAGLE_CPU_ONLY` and give it an OpenMP counterpart;
+  `python/tests/test_pipeline_parity.py` keeps the two paths in step.
 - **Free-threading.** A new Python feature has an `ft` test.
 - **Limits.** A limit a page states is an entry in `docs/content/_shared/limits.json`; `python/tests/test_doc_limits.py` checks it.
 - The family checklist from [How we build](https://amasat01.github.io/raptor/content/principles.html), nothing more.

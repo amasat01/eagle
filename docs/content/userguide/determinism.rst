@@ -184,8 +184,10 @@ so they refuse a split kernel by name (``'<kernel>' runs in N stages; <door> run
 Limits
 ~~~~~~
 
-* Folding a kernel's cells across MPI ranks (an ``eagle.exec.RankPartition`` run) is refused in this
-  release (our scope; it returns in the next): run such a kernel on one rank.
+* A kernel's cells fold across MPI ranks (an ``eagle.exec.RankPartition`` run): the ranks are cut
+  at whole rows of 32 samples, the rows are gathered, and every rank finishes the same rows a
+  single rank would, so the cell is the single rank's bit for bit. A partition must start on a
+  multiple of 32. Pass ``policy="ordered"`` to ``eagle.plan`` for the same bits on the GPU too.
 
 What is promised, and what is not
 ---------------------------------

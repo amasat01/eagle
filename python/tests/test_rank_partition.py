@@ -222,3 +222,27 @@ def test_the_singleton_case_runner_can_fail(bed_artifact):
     )
     assert proc.returncode != 0
     assert "OK " not in proc.stdout
+
+
+def test_rank_cuts_of_a_cells_kernel_are_whole_rows_and_cover_every_sample():
+    """No MPI: a kernel that reduces over samples writes one row per 32 samples,
+    so the ranks are cut at rows (the first ``rows % size`` take one more), every
+    sample is covered once, and only the last cut can end off a row."""
+    from eagle import _cell_rows
+
+    for n in (32, 33, 1000, 1024, 1 + 32 * 7):
+        for size in (1, 2, 3, 5, 40):
+            whole = eexec.Partition.whole(n)
+            cuts = [_cell_rows.rank_samples(whole, r, size) for r in range(size)]
+            covered = []
+            for base, count, total in cuts:
+                assert total == n and base % 32 == 0
+                assert count % 32 == 0 or base + count == n
+                covered.extend(range(base, base + count))
+            assert covered == list(range(n)), (n, size)
+    # an offset whole partition keeps its base and its end
+    part = eexec.Partition(64, 200, 1000)
+    cuts = [_cell_rows.rank_samples(part, r, 2) for r in range(2)]
+    assert cuts == [(64, 128, 1000), (192, 72, 1000)]
+    with pytest.raises(ValueError, match="multiple of 32"):
+        _cell_rows.rank_samples(eexec.Partition(40, 100, 1000), 0, 2)

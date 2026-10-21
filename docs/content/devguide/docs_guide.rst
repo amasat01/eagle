@@ -65,6 +65,19 @@ a CUDA GPU and ``cupy`` for the GPU notebooks. ``make nbcheck`` also *runs* ever
 ``matplotlib`` and ``torch``; the NVIDIA Warp cell of ``interop.ipynb`` needs ``warp-lang`` and
 prints a note and carries on without it.
 
+Notebooks
+---------
+
+A notebook declares what it needs in its ``gate`` metadata, and ``nb_run_gate.py`` (run by ``make nbcheck``) reads it:
+
+* ``"needs": ["pkg", ...]`` in the notebook metadata: skip the notebook where a package is not installed.
+* ``"gpu_only": "reason"`` in the notebook metadata: skip the whole notebook on the CPU leg.
+* ``"gpu_only": "reason"`` in one cell's metadata: the CPU leg stops before that cell, so a CPU tutorial may end with
+  a GPU-only section.
+
+``make nbcheck-hosted`` runs the notebooks the way a Colab user does (a fresh environment, only the installed
+packages), so a notebook should import the package API, never a path in a checkout.
+
 Writing docstrings
 ------------------
 

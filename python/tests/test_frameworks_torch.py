@@ -504,3 +504,28 @@ def test_a_carried_state_kernel_steps_and_differentiates_with_no_where(tmp_path,
             (k0,),
             (torch.ones_like(k0),),
         )
+
+
+@pytest.mark.parametrize("policy", ["compensated", "ordered"])
+def test_policy_reaches_the_gradient_cell_finish(tmp_path, monkeypatch, policy):
+    """A Param's gradient is a sum over samples: its cell is finished under the
+    policy given, and the gradient is right."""
+    from eagle import _cell_rows
+
+    seen = []
+    real = _cell_rows.reduce
+    monkeypatch.setattr(_cell_rows, "reduce",
+                        lambda *a, **k: seen.append(k.get("policy")) or real(*a, **k))
+    fn = eagle_torch.function(drag, cache_dir=tmp_path, policy=policy)
+    v, cd, terminated = _inputs(_device("cpu"))
+    cd.requires_grad_(True)
+    fn(v, cd, terminated).sum().backward()
+    assert seen and set(seen) == {policy}
+    want = torch.tensor(0.3, dtype=torch.float64, requires_grad=True)
+    _reference(v, want, terminated).sum().backward()
+    torch.testing.assert_close(cd.grad, want.grad, rtol=1e-12, atol=0)
+
+
+def test_unknown_policy_is_refused_like_eagle_reduce(tmp_path):
+    with pytest.raises(ValueError, match=r"policy 'fast' is not one of \['auto', 'compensated', 'ordered'\]"):
+        eagle_torch.function(drag, cache_dir=tmp_path, policy="fast")

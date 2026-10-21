@@ -618,3 +618,33 @@ def test_a_warp_without_the_private_tape_attribute_fails_by_name(op, monkeypatch
     with pytest.raises(RuntimeError, match=r"runtime\.tape.*tape="):
         op(c["v"], c["cd"], c["t"])
     op(c["v"], c["cd"], c["t"], tape=wp.Tape())             # an explicit tape needs no lookup
+
+
+@hawk.kernel
+def cell_sum(x: Scalar, t: Mutable[Scalar]):
+    t = hawk.all_samples(x).sum()  # noqa: F841
+
+
+@pytest.mark.parametrize("policy", ["compensated", "ordered"])
+def test_policy_reaches_the_cell_finish(tmp_path, monkeypatch, policy):
+    """The cell's finishing is built with the policy given, and the sum is right."""
+    if not hasattr(hawk, "all_samples"):
+        pytest.skip("this hawk has no reductions over samples")
+    import numpy as np
+
+    from eagle import _cell_rows
+
+    seen = []
+    real = _cell_rows.reduce
+    monkeypatch.setattr(_cell_rows, "reduce",
+                        lambda *a, **k: seen.append(k.get("policy")) or real(*a, **k))
+    x = np.random.default_rng(0).uniform(-1, 1, 3 * _cell_rows.ROW + 5)
+    fn = eagle_warp.function(cell_sum, cache_dir=tmp_path, policy=policy)
+    got = fn(wp.array(x, dtype=wp.float64, device="cpu")).numpy()
+    assert seen and set(seen) == {policy}
+    np.testing.assert_allclose(got, [x.sum()], rtol=1e-12)
+
+
+def test_unknown_policy_is_refused_like_eagle_reduce(tmp_path):
+    with pytest.raises(ValueError, match=r"policy 'fast' is not one of \['auto', 'compensated', 'ordered'\]"):
+        eagle_warp.function(drag, cache_dir=tmp_path, policy="fast")

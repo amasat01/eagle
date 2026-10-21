@@ -136,7 +136,8 @@ def _named_arrays(arrays, prefix):
     return tuple((f"{prefix}{i}", a, "declared") for i, a in enumerate(arrays))
 
 
-def opaque(fn, *, reads=(), writes=(), eager=False, stream=None, name=None) -> Node:
+def opaque(fn, *, reads=(), writes=(), eager=False, stream=None, name=None,
+           grad=True) -> Node:
     """Your own code as a graph node: a zero-arg callable (a cupy custom
     kernel, a torch op, a host closure) with the arrays it touches DECLARED
     -- a sequence of arrays, or a ``{name: array}`` mapping. Edges are derived
@@ -165,13 +166,15 @@ def opaque(fn, *, reads=(), writes=(), eager=False, stream=None, name=None) -> N
     ``g.schedule`` names the tier per stage (``capture`` / ``eager_stream`` /
     ``eager_host``) and ``str(g)`` tags the node. A reverse pass through it
     needs ``vjps={label: fn}`` (:func:`eagle.diff.reverse`): the label is
-    ``name`` when given (``Graph.add(name=)`` wins over it), the kind otherwise."""
+    ``name`` when given (``Graph.add(name=)`` wins over it), the kind otherwise.
+    ``grad=False`` marks the node as not differentiated (see
+    :meth:`eagle.Graph.add`): a reverse skips it and needs no vjp for it."""
     if not callable(fn):
         raise TypeError("eagle.graph.opaque: fn must be a zero-arg callable")
     planes = (fn, _named_arrays(reads, "in"), _named_arrays(writes, "out"))
     if stream is not None:
-        return Node("opaque_stream", (*planes, stream, _stream_handle(stream)), name)
-    return Node("opaque_host" if eager else "opaque", planes, name)
+        return Node("opaque_stream", (*planes, stream, _stream_handle(stream)), name, grad)
+    return Node("opaque_host" if eager else "opaque", planes, name, grad)
 
 
 def _opaque_transpose(node, incoming, ctx):
@@ -340,6 +343,19 @@ register_node_kind(
     lower_gpu=lambda n, ctx: ForkStage(_group_members(n, ctx)), lower_cpu=_group_cpu)
 
 
+# --- Built-in kind: sequence (the parts of a repeat_while body, in order) --- #
+def _sequence_union(which):
+    def get(node):
+        return tuple(a for n in node.payload for a in getattr(get_node_kind(n.kind), which)(n))
+    return get
+
+
+register_node_kind(
+    "sequence", reads=_sequence_union("reads"), writes=_sequence_union("writes"),
+    lower_gpu=lambda n, ctx: _Seq([ctx.lower(p) for p in n.payload]),
+    lower_cpu=lambda n, ctx: _Seq([ctx.lower(p) for p in n.payload]))
+
+
 # --- Built-in kinds: skippable / repeat_while (the EXISTING eagle objects) --- #
 class _Late:
     """The step slot of an adopted conditional. Before a build it runs the
@@ -389,6 +405,10 @@ def _cond_writes(node):
 
 def _cond_lower(node, ctx):
     c = node.payload
+    if c.child.kind == "sequence":      # the loop's parts, woven one by one by the pipeline
+        body = LowerCtx(ctx.backend, body=True)
+        c.wrapper.step = tuple(body.lower(p) for p in c.child.payload)
+        return c.wrapper
     c.late.fn = LowerCtx(ctx.backend, body=True).lower(c.child)
     return c.wrapper
 
