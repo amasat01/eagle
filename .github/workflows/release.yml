@@ -78,8 +78,11 @@ jobs:
       # per container, ahead of every per-Python wheel build. The .repo
       # file is fetched with curl (dnf cannot `install` a .repo file, and
       # `dnf config-manager` needs dnf-plugins-core).
+      # EPEL mirrors fail often on aarch64: retry, then run uncached through a pass-through ccache stand-in
       CIBW_BEFORE_ALL_LINUX: >-
-        dnf install -y epel-release && dnf install -y ccache &&
+        for i in 1 2 3; do dnf install -y epel-release && dnf install -y ccache && break; dnf clean all; done;
+        command -v ccache >/dev/null || { printf '%s\n' '#!/bin/sh' 'case $1 in -*) exit 0;; esac' 'exec "$@"' > /usr/local/bin/ccache;
+        chmod +x /usr/local/bin/ccache; };
         CCACHE_DIR=/ccache ccache -z &&
         curl -fsSL -o /etc/yum.repos.d/cuda-rhel8.repo
         https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo &&
@@ -169,7 +172,12 @@ jobs:
         'nanobind>=3.1,<4; python_version >= "3.10"'
         'nanobind>=2.2,<3; python_version < "3.10"'
       CIBW_CONTAINER_ENGINE: "docker; create_args: --volume ${{ github.workspace }}/.ccache-cibw:/ccache"
-      CIBW_BEFORE_ALL_LINUX: "dnf install -y epel-release && dnf install -y ccache && CCACHE_DIR=/ccache ccache -z"
+      # EPEL mirrors fail often on aarch64: retry, then run uncached through a pass-through ccache stand-in
+      CIBW_BEFORE_ALL_LINUX: >-
+        for i in 1 2 3; do dnf install -y epel-release && dnf install -y ccache && break; dnf clean all; done;
+        command -v ccache >/dev/null || { printf '%s\n' '#!/bin/sh' 'case $1 in -*) exit 0;; esac' 'exec "$@"' > /usr/local/bin/ccache;
+        chmod +x /usr/local/bin/ccache; };
+        CCACHE_DIR=/ccache ccache -z
       CIBW_ENVIRONMENT_LINUX: >-
         CMAKE_BUILD_PARALLEL_LEVEL=4
         SKBUILD_CMAKE_ARGS="-DEAGLE_PYTHON_CUDA_PLUGIN=OFF"
