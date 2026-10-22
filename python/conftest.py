@@ -152,16 +152,16 @@ _FT_FRAMEWORK_ROWS = {"test_frameworks_torch_tower": "torch", "test_frameworks_j
                       "test_frameworks_warp": "warp"}
 
 
-@pytest.fixture(autouse=True)
-def _start_on_gpu_0():
-    """Every test starts with GPU 0 current: starting JAX leaves its LAST GPU current on the
-    calling thread, so arrays a later test allocates would land on GPU 1 and fail where the
-    two GPUs cannot read each other's memory."""
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_setup(item):
+    """Every test starts with GPU 0 current, before ANY of its fixtures is set up: starting JAX (even at
+    collection, when a test module imports it) leaves its LAST GPU current on the calling thread, so a
+    module-scoped fixture would load its kernel on GPU 1 and the launch on GPU 0 would fail with "invalid
+    resource handle", and arrays a later test allocates would land on GPU 1."""
     if _cupy_available():
         import cupy
 
         cupy.cuda.runtime.setDevice(0)
-    yield
 
 
 @pytest.fixture(autouse=True)
