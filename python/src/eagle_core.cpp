@@ -139,7 +139,7 @@ volatile std::uint64_t g_unsynchronised = 0;
 inline void unsynchronisedBump()
 {
     const std::uint64_t seen = g_unsynchronised;
-    for (volatile int spin = 0; spin < 16384; ++spin) {}
+    for (volatile int spin = 0; spin < 16384; spin = spin + 1) {}
     g_unsynchronised = seen + 1;
 }
 
