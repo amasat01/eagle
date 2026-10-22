@@ -178,8 +178,13 @@ def test_numpy_host_import_is_a_zero_copy_view_with_write_through():
 
     back = np.from_dlpack(v)
     assert back.ctypes.data == a.ctypes.data
-    back[3] = 7.25
-    assert a[3] == 7.25                                   # write-through
+    if np.from_dlpack(np.arange(3.0)).flags.writeable:     # NumPy >= 2.2 imports writable
+        back[3] = 7.25
+        assert a[3] == 7.25                               # write-through
+    else:                                                 # older NumPy marks every import read-only
+        assert not back.flags.writeable
+        a[3] = 7.25
+        assert back[3] == 7.25                            # the alias, seen from the other side
 
     ro = np.arange(6.0)
     ro.flags.writeable = False

@@ -278,5 +278,12 @@
   "way_out": "Python 3.14 for CuPy and torch",
   "cause": "framework",
   "lifted_in": "none"
+ },
+ {
+  "id": "numpy-dlpack-readonly",
+  "text": "Before NumPy 2.2, every array NumPy imports through DLPack is read-only (NumPy's behavior), so a NumPy view of an eagle buffer cannot be written: write through the original array, or use NumPy 2.2 or later.",
+  "way_out": "NumPy 2.2 or later",
+  "cause": "framework",
+  "lifted_in": "none"
  }
 ]

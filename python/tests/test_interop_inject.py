@@ -64,11 +64,13 @@ from eagle.graph import opaque
 pytestmark = pytest.mark.interop_matrix
 
 N = 1 << 14
-CYCLES = 2 * 10**8          # ~0.1-0.2 s of one GPU thread spinning
+CYCLES = 6 * 10**8          # ~0.4 s of one GPU thread spinning
+RACE_CYCLES = 3 * CYCLES   # a falsifier's slow producer: long enough that a cut ordering reads stale on any GPU
 
-_SPIN = r"""extern "C" __global__ void inj_spin(const double* x, double* y, long long c, int n) {
-  long long t0 = clock64(); while (clock64() - t0 < c) {}
-  int i = blockIdx.x * blockDim.x + threadIdx.x; if (i < n) y[i] = x[i] + 1.0; }"""
+# One thread spinning: a wide spin would hold every SM, and a later kernel on another stream
+# would then wait for it by resource, not by order, which hides a missing ordering.
+_DELAY = r"""extern "C" __global__ void inj_delay(long long c) {
+  long long t0 = clock64(); while (clock64() - t0 < c) {} }"""
 
 
 def _cp():
@@ -78,11 +80,10 @@ def _cp():
 
 
 def _spin(x, y, cycles=CYCLES):
-    """``y = x + 1`` after ``cycles`` of spinning, on cupy's current stream."""
+    """``y = x + 1`` after ``cycles`` of one-thread delay, on cupy's current stream."""
     cp = _cp()
-    k = cp.RawKernel(_SPIN, "inj_spin")
-    n = x.size
-    k(((n + 255) // 256,), (256,), (x, y, np.int64(cycles), np.int32(n)))
+    cp.RawKernel(_DELAY, "inj_delay")((1,), (1,), (np.int64(cycles),))
+    cp.add(x, 1.0, out=y)
 
 
 def _torch_cuda():
@@ -174,11 +175,11 @@ def test_tier_named_cuda(monkeypatch):
 # --------------------------------------------------------------------------- #
 # STREAM-INJECT-STREAM-ORDER
 # --------------------------------------------------------------------------- #
-def _chain(cp, S, *, slow_node=True, slow_first=False):
+def _chain(cp, S, *, slow_node=True, slow_first=False, cycles=CYCLES):
     """seg0 ``w += 1`` -> stream node ``y = w + 1`` on ``S`` -> seg1 ``acc += y``."""
     w, y, acc = cp.zeros(N), cp.zeros(N), cp.zeros(N)
-    seg0 = (lambda: _spin(w, w)) if slow_first else (lambda: cp.add(w, 1.0, out=w))
-    node = (lambda: _spin(w, y)) if slow_node else (lambda: cp.add(w, 1.0, out=y))
+    seg0 = (lambda: _spin(w, w, cycles)) if slow_first else (lambda: cp.add(w, 1.0, out=w))
+    node = (lambda: _spin(w, y, cycles)) if slow_node else (lambda: cp.add(w, 1.0, out=y))
     g = (eagle.Graph()
          .add_node(opaque(seg0, reads={"w": w}, writes={"w": w}), name="seg0")
          .add_node(opaque(node, reads={"w": w}, writes={"y": y}, stream=S), name="model")
@@ -301,13 +302,13 @@ def test_stream_node_is_fenced_on_the_device(monkeypatch):
     first.launch()
     assert bool((z == 2 * (x + 1)).all())
     # falsifier (a): the stream's wait removed reads stale
-    ga, wa, ya, acca = _chain(cp, ts, slow_node=False, slow_first=True)
+    ga, wa, ya, acca = _chain(cp, ts, slow_node=False, slow_first=True, cycles=RACE_CYCLES)
     with monkeypatch.context() as m:
         m.setattr(G, "_wait_stream", lambda stream, events: None)
         ga.launch()
     assert not bool((acca == 2.0).all())
     # falsifier (b): the previous run's tail removed races run to run
-    gb, wb, yb, accb = _chain(cp, ts)
+    gb, wb, yb, accb = _chain(cp, ts, cycles=RACE_CYCLES)
     seeds = G._run_seeds
     with monkeypatch.context() as m:
         m.setattr(G, "_run_seeds", lambda cache, tail: seeds(cache, None))
@@ -327,9 +328,11 @@ def test_host_node_sees_a_non_default_torch_stream(monkeypatch):
     y, z = cp.zeros(N), cp.zeros(N)
     yt = torch.as_tensor(y, device=_dev(torch))
 
+    cycles = [CYCLES]
+
     def model():
         with on_ts:
-            _spin(x, y)                 # y = x + 1, slowly, on the torch stream
+            _spin(x, y, cycles[0])      # y = x + 1, slowly, on the torch stream
         with torch.cuda.stream(ts):
             yt.mul_(1.0)
 
@@ -343,6 +346,7 @@ def test_host_node_sees_a_non_default_torch_stream(monkeypatch):
                                  writes={"z": z}), name="seg1").build())
     graph().launch()
     assert bool((z == 2 * (x + 1)).all())
+    cycles[0] = RACE_CYCLES             # the falsifier's producer outlasts any unfenced consumer
     with monkeypatch.context() as m:
         m.setattr(G, "_device_sync", lambda: cp.cuda.get_current_stream().synchronize())
         graph().launch()
@@ -963,7 +967,7 @@ class _RunVjp:
     from ``(x, v)`` per step; 50..200 steps per sample, W=16."""
 
     def __init__(self, torch, xp, dev, plan, n=512, counter=False, node_kw=None, around=None,
-                 param=0.0, shuffle=False, child=False, **kw):
+                 param=0.0, shuffle=False, child=False, child_sleep=0, **kw):
         torch.manual_seed(0)
         self.torch, self.xp, self.dev, self.calls, self.fwd_calls = torch, xp, dev, 0, None
         self.param = param      # the node also adds param * c, reading the Param c
@@ -998,6 +1002,8 @@ class _RunVjp:
             torch.cuda.synchronize()
             tg = torch.cuda.CUDAGraph(keep_graph=True)
             with torch.cuda.graph(tg, stream=side), torch.no_grad():
+                if child_sleep:     # a slow replay: a launch not ordered after it reads stale
+                    torch.cuda._sleep(child_sleep)
                 tc.copy_(self.model(tx, tv))
             self.node = G.child(tg, reads={"x": self.p["x"], "v": self.p["v"]},
                                 writes={"corr": self.p["corr"]}, name="model")
@@ -1528,7 +1534,7 @@ def test_run_node_tiers_device(tmp_path, monkeypatch):
     assert xp.cuda.ExternalStream(0).ptr == xp.cuda.Stream.null.ptr == 0
     real_stream = torch.cuda.default_stream
     monkeypatch.setattr(torch.cuda, "default_stream", lambda *a: torch.cuda.ExternalStream(0))
-    cut = _tier_arm(torch, xp, dev, plan, child=True)           # replayed off the null stream
+    cut = _tier_arm(torch, xp, dev, plan, child=True, child_sleep=10_000_000)   # replayed off the null stream
     torch.cuda.synchronize()
     assert _rel([cut[0]["x"]], [base[0]["x"]]) > 1e-6
     monkeypatch.setattr(torch.cuda, "default_stream", real_stream)
