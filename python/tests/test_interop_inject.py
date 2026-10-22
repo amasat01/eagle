@@ -86,6 +86,18 @@ def _spin(x, y, cycles=CYCLES):
     cp.add(x, 1.0, out=y)
 
 
+# The full-width spin: every SM stays busy, for the row that needs a stream busy across the device.
+_WIDE_SPIN = r"""extern "C" __global__ void inj_spin(const double* x, double* y, long long c, int n) {
+  long long t0 = clock64(); while (clock64() - t0 < c) {}
+  int i = blockIdx.x * blockDim.x + threadIdx.x; if (i < n) y[i] = x[i] + 1.0; }"""
+
+
+def _wide_spin(x, y, cycles=CYCLES):
+    """``y = x + 1`` after ``cycles`` of spinning on every block, on cupy's current stream."""
+    _cp().RawKernel(_WIDE_SPIN, "inj_spin")(((x.size + 255) // 256,), (256,),
+                                            (x, y, np.int64(cycles), np.int32(x.size)))
+
+
 def _torch_cuda():
     certified_framework("torch")
     import torch
@@ -758,12 +770,12 @@ def test_jax_node_is_stream_ordered_and_retained(tmp_path_factory, monkeypatch):
     busy = cp.zeros(1)
 
     def model(wj):              # the node's stream stays busy after JAX's result is ready
-        _spin(busy, busy, cyc)
+        _wide_spin(busy, busy, cyc)
         return bump(wj)
 
     def graph(node):
         return (eagle.Graph()
-                .add_node(opaque(lambda: _spin(x, w, cyc), reads={"x": x}, writes={"w": w}),
+                .add_node(opaque(lambda: _wide_spin(x, w, cyc), reads={"x": x}, writes={"w": w}),
                           name="seg0")
                 .add_node(node(model, reads={"w": w}, writes={"y": y}),
                           name="model")
@@ -1532,11 +1544,25 @@ def test_run_node_tiers_device(tmp_path, monkeypatch):
     child = _tier_arm(torch, xp, dev, plan, child=True)         # a captured torch graph
     _same_arm(base, child)
     assert xp.cuda.ExternalStream(0).ptr == xp.cuda.Stream.null.ptr == 0
+    # the cut's premise: work on ExternalStream(0) is NOT ordered behind torch's default stream.
+    # Probe it: an event recorded there while a long sleep is queued on the default stream.
+    probe = torch.cuda.Event()
+    torch.cuda._sleep(2 * 10**9)
+    probe.record(torch.cuda.ExternalStream(0))
+    time.sleep(0.05)
+    unordered = probe.query()           # done at once: it did not wait for the sleep
+    torch.cuda.synchronize()
     real_stream = torch.cuda.default_stream
     monkeypatch.setattr(torch.cuda, "default_stream", lambda *a: torch.cuda.ExternalStream(0))
     cut = _tier_arm(torch, xp, dev, plan, child=True, child_sleep=10_000_000)   # replayed off the null stream
     torch.cuda.synchronize()
-    assert _rel([cut[0]["x"]], [base[0]["x"]]) > 1e-6
+    if unordered:
+        print("tiers cut arm: ExternalStream(0) is unordered here; the cut must read stale")
+        assert _rel([cut[0]["x"]], [base[0]["x"]]) > 1e-6
+    else:
+        print("tiers cut arm: ExternalStream(0) is the ordered null stream here; the cut is harmless")
+        for k in ("x", "v", "t"):
+            np.testing.assert_array_equal(cut[0][k], base[0][k], err_msg=k)
     monkeypatch.setattr(torch.cuda, "default_stream", real_stream)
     side = torch.cuda.Stream()
 
