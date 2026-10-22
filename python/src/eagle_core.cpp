@@ -132,14 +132,16 @@ namespace {
 // free-threading run can prove its schedule is adversarial enough to lose
 // updates before it certifies anything else. Nothing real reads or writes it.
 // The read-modify-write is split by a short busy gap so the lost-update window
-// is wide enough to expose on every free-threaded build. The gap loop counts a
-// volatile, because clang deletes an empty loop or one holding only a signal fence.
+// is wide enough to expose on every free-threaded build. The gap stores to an
+// atomic each step: clang deletes an empty loop or one holding only a signal
+// fence, and arithmetic on a volatile is deprecated in C++20.
 volatile std::uint64_t g_unsynchronised = 0;
+std::atomic<int> g_unsynchronised_gap{0};
 
 inline void unsynchronisedBump()
 {
     const std::uint64_t seen = g_unsynchronised;
-    for (volatile int spin = 0; spin < 16384; spin = spin + 1) {}
+    for (int spin = 0; spin < 16384; ++spin) g_unsynchronised_gap.store(spin, std::memory_order_relaxed);
     g_unsynchronised = seen + 1;
 }
 
