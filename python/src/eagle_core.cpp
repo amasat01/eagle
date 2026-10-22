@@ -63,7 +63,7 @@
  */
 
 #include <algorithm>
-#include <atomic>
+#include <thread>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -132,16 +132,15 @@ namespace {
 // free-threading run can prove its schedule is adversarial enough to lose
 // updates before it certifies anything else. Nothing real reads or writes it.
 // The read-modify-write is split by a short busy gap so the lost-update window
-// is wide enough to expose on every free-threaded build. The gap stores to an
-// atomic each step: clang deletes an empty loop or one holding only a signal
-// fence, and arithmetic on a volatile is deprecated in C++20.
+// is wide enough to expose on every free-threaded build. The gap yields to the
+// scheduler: an optimiser may delete a busy loop (clang removes empty ones and
+// relaxed atomic stores alike), never a call into the OS.
 volatile std::uint64_t g_unsynchronised = 0;
-std::atomic<int> g_unsynchronised_gap{0};
 
 inline void unsynchronisedBump()
 {
     const std::uint64_t seen = g_unsynchronised;
-    for (int spin = 0; spin < 16384; ++spin) g_unsynchronised_gap.store(spin, std::memory_order_relaxed);
+    for (int gap = 0; gap < 4; ++gap) std::this_thread::yield();
     g_unsynchronised = seen + 1;
 }
 
