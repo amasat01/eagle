@@ -60,8 +60,9 @@ class Planes:
         where = {}
         for i, a in enumerate(accesses):
             key = lambda name, arr: self._key(where, i, name, arr)
+            # a node marked grad=False is not differentiated: nothing it reads is taped
             self.reads.append([(n, key(n, arr)) for n, arr, role in a.reads
-                               if role not in STATE_ROLES and role != "guard"])
+                               if a.grad and role not in STATE_ROLES and role != "guard"])
             self.writes.append([(n, key(n, arr)) for n, arr, _r in a.writes])
             if a.node.kind in ("skippable", "repeat_while"):
                 # skipped, a conditional leaves the plane as the earlier writer made it
@@ -187,7 +188,7 @@ def _with_parameter_planes(node, cells):
 
     if node.kind == "group":
         return Node("group", tuple(tuple(_with_parameter_planes(n, cells) for n in branch)
-                                   for branch in node.payload), node.name)
+                                   for branch in node.payload), node.name, node.grad)
     if node.kind in ("skippable", "repeat_while"):
         cond = node.payload     # owned by this graph: its lowering reads the new child
         cond.child = cond.late.child = _with_parameter_planes(cond.child, cells)
@@ -206,13 +207,45 @@ def _with_parameter_planes(node, cells):
             1, bound._planes[name], dtype=variant.arg_dtypes[name])
     rebound = plan(variant, structure=bound.plan.structure,
                    npartitions=bound.plan.npartitions).bind(**planes)
-    return Node("launch", rebound, label)
+    return Node("launch", rebound, label, node.grad)
 
 
 def _xp_of_bound(bound):
     import numpy
 
     return bound._cupy or numpy
+
+
+def _param_plane_names(node):
+    """The names of the one-cell parameter planes (``hawk.diff.param_planes``)
+    the launch ``node`` reads, from the kernel's own walk."""
+    if node.kind in ("skippable", "repeat_while"):
+        node = node.payload.child
+    source = getattr(getattr(getattr(node.payload, "plan", None), "plugin", None),
+                     "_hawk_source", None)
+    return frozenset(source[0].walk.param_planes) if node.kind == "launch" and source else frozenset()
+
+
+def _refuse_ungraded_feed(accesses, planes):
+    """A differentiated node reads what a ``grad=False`` node wrote only
+    through a parameter plane: any other plane would need a gradient through
+    a node that has none."""
+    for i, a in enumerate(accesses):
+        if a.grad:
+            continue
+        for _n, key in planes.writes[i]:
+            for j in range(i + 1, len(accesses)):
+                if not accesses[j].grad:
+                    continue
+                params = _param_plane_names(accesses[j].node)
+                for local, k in planes.reads[j]:
+                    if k == key and local not in params:
+                        raise ValueError(
+                            f"eagle.Graph.build: record=True: node {accesses[j].label!r} "
+                            f"reads plane {local!r}, written by node {a.label!r} marked "
+                            "grad=False; a node that is not differentiated may feed a "
+                            "differentiated one only through a parameter plane "
+                            "(hawk.diff.param_planes)")
 
 
 def _copier(dst, src):
@@ -247,6 +280,7 @@ class Recorder:
 
         graph = self._graph
         self.planes = planes = Planes(accesses)
+        _refuse_ungraded_feed(accesses, planes)
         stage_of = _stage_of_leaves(graph)
         self.copy_of = {}
         copies, self._before = [], {}

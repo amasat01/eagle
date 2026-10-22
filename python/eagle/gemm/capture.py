@@ -218,10 +218,16 @@ class CublasCaptureHandle:
     recorded graph node at enqueue time: changing them means recording
     again."""
 
-    def __init__(self, stream_ptr):
+    def __init__(self, stream_ptr, device=None):
+        import cupy as cp
+
+        #: The CUDA device the handle (and its stream) belong to; ``None``
+        #: is the current one. Operands on another device are refused by name.
+        self.device = int(cp.cuda.runtime.getDevice()) if device is None else int(device)
         self._lib = load_cublas()
         self._handle = ctypes.c_void_p()
-        _check(self._lib.cublasCreate_v2(ctypes.byref(self._handle)), "cublasCreate")
+        with cp.cuda.Device(self.device):    # a cuBLAS handle belongs to the device current at creation
+            _check(self._lib.cublasCreate_v2(ctypes.byref(self._handle)), "cublasCreate")
         _check(
             self._lib.cublasSetStream_v2(
                 self._handle, ctypes.c_void_p(int(stream_ptr))
@@ -261,32 +267,44 @@ class CublasCaptureHandle:
                 "and is never reused across builds"
             )
         first, second = params.operands
-        _check(
-            self._lib.cublasSgemm_v2(
-                self._handle,
-                CUBLAS_OP[params.op_a],
-                CUBLAS_OP[params.op_b],
-                params.m,
-                params.n,
-                params.k,
-                ctypes.byref(self._alpha),
-                ctypes.c_void_p(_device_ptr(operands[first])),
-                params.lda,
-                ctypes.c_void_p(_device_ptr(operands[second])),
-                params.ldb,
-                ctypes.byref(self._beta),
-                ctypes.c_void_p(_device_ptr(operands["out"])),
-                params.ldc,
-            ),
-            "cublasSgemm",
-        )
+        for name, operand in operands.items():
+            on = getattr(getattr(operand, "data", None), "device_id", self.device)
+            if on != self.device:
+                raise ValueError(
+                    f"eagle.gemm: operand {name!r} lives on device {on}, the handle on "
+                    f"device {self.device}; a gemm uses one device")
+        import cupy as cp
+
+        with cp.cuda.Device(self.device):    # cuBLAS runs on the device current at the call
+            _check(
+                self._lib.cublasSgemm_v2(
+                    self._handle,
+                    CUBLAS_OP[params.op_a],
+                    CUBLAS_OP[params.op_b],
+                    params.m,
+                    params.n,
+                    params.k,
+                    ctypes.byref(self._alpha),
+                    ctypes.c_void_p(_device_ptr(operands[first])),
+                    params.lda,
+                    ctypes.c_void_p(_device_ptr(operands[second])),
+                    params.ldb,
+                    ctypes.byref(self._beta),
+                    ctypes.c_void_p(_device_ptr(operands["out"])),
+                    params.ldc,
+                ),
+                "cublasSgemm",
+            )
 
     def destroy(self) -> None:
         """Destroy the handle. Call after destroying the graph that
         recorded work against it, and before freeing the memory pool.
         Idempotent."""
         if self._handle is not None:
-            _check(self._lib.cublasDestroy_v2(self._handle), "cublasDestroy")
+            import cupy as cp
+
+            with cp.cuda.Device(self.device):
+                _check(self._lib.cublasDestroy_v2(self._handle), "cublasDestroy")
             self._handle = None
 
 

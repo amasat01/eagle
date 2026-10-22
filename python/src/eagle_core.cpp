@@ -63,7 +63,7 @@
  */
 
 #include <algorithm>
-#include <atomic>
+#include <thread>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -132,13 +132,15 @@ namespace {
 // free-threading run can prove its schedule is adversarial enough to lose
 // updates before it certifies anything else. Nothing real reads or writes it.
 // The read-modify-write is split by a short busy gap so the lost-update window
-// is wide enough to expose on every free-threaded build.
+// is wide enough to expose on every free-threaded build. The gap yields to the
+// scheduler: an optimiser may delete a busy loop (clang removes empty ones and
+// relaxed atomic stores alike), never a call into the OS.
 volatile std::uint64_t g_unsynchronised = 0;
 
 inline void unsynchronisedBump()
 {
     const std::uint64_t seen = g_unsynchronised;
-    for (int spin = 0; spin < 16384; ++spin) std::atomic_signal_fence(std::memory_order_seq_cst);  // a compiler barrier keeps the gap
+    for (int gap = 0; gap < 4; ++gap) std::this_thread::yield();
     g_unsynchronised = seen + 1;
 }
 
@@ -844,9 +846,9 @@ NB_MODULE(_core, m)
 
     m.def("run_device",
         [](std::uintptr_t function, const std::vector<std::uintptr_t>& params,
-           const Partition& part, std::uintptr_t stream, unsigned block) {
+           const Partition& part, std::uintptr_t stream, unsigned block, int device) {
             std::vector<std::uint64_t> p(params.begin(), params.end());
-            auto d = makeDesc<eagle_backend_launch_desc>(-1);
+            auto d = makeDesc<eagle_backend_launch_desc>(device);
             d.block = block;
             d.function = function;
             d.params = p.data();
@@ -860,11 +862,12 @@ NB_MODULE(_core, m)
             return static_cast<int>(launched);
         },
         nb::arg("function"), nb::arg("params"), nb::arg("partition"),
-        nb::arg("stream") = 0, nb::arg("block") = 256,
+        nb::arg("stream") = 0, nb::arg("block") = 256, nb::arg("device") = -1,
         "ONE cuLaunchKernel over one partition, with the int64 triple appended "
         "after the role args and the grid derived from the partition's `count` "
         "`function` is a CUfunction handle and `params` a list of "
-        "pointers, both as integers. Returns 1, or 0 for an empty partition.");
+        "pointers, both as integers. `device` -1 is the stream's device, else the current one; "
+        "a stream of another device is refused by name. Returns 1, or 0 for an empty partition.");
 
     m.def("time_launch",
         [](std::uintptr_t entry, const std::vector<std::uintptr_t>& params, const Partition& part,

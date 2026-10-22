@@ -20,10 +20,66 @@
 # via the independent PluginRegistry) and the Runtime API (stream/graph capture),
 # so it is an nvcc build.
 cmake_minimum_required(VERSION 3.18)
-project(eagle_cpp_embed_plugin CXX CUDA)
+
+# Two arms of the same demo: the CUDA arm (embedding_demo, nvcc) and the CPU arm
+# (embedding_demo_cpu, no CUDA). -DEMBED_CPU_ONLY=ON builds only the CPU arm and
+# needs no CUDA toolchain.
+option(EMBED_CPU_ONLY "Build only the CPU arm (no CUDA toolchain needed)" OFF)
+if(EMBED_CPU_ONLY)
+  project(eagle_cpp_embed_plugin CXX)
+else()
+  project(eagle_cpp_embed_plugin CXX CUDA)
+endif()
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CUDA_STANDARD 17)
+set(_ART_DIR ${CMAKE_CURRENT_BINARY_DIR}/art)
+file(MAKE_DIRECTORY ${_ART_DIR})
+set(_EAGLE_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../..)
+
+# --- CPU arm: the same three plugins as host code (fixtures/host_plugins.cpp, one
+# shared object) loaded through eagle::cpu::PluginRegistry, plus the shared sidecars.
+find_package(OpenMP)
+add_library(host_plugins MODULE fixtures/host_plugins.cpp)
+set_target_properties(host_plugins PROPERTIES POSITION_INDEPENDENT_CODE ON PREFIX ""
+  LIBRARY_OUTPUT_DIRECTORY ${_ART_DIR})
+target_include_directories(host_plugins PRIVATE ${_EAGLE_ROOT})
+if(OpenMP_CXX_FOUND)
+  target_link_libraries(host_plugins PRIVATE OpenMP::OpenMP_CXX)
+endif()
+foreach(_fx mattrace toy_energy toy_energy_vjp)
+  configure_file(${CMAKE_CURRENT_SOURCE_DIR}/fixtures/${_fx}.json
+                 ${_ART_DIR}/${_fx}.json COPYONLY)
+endforeach()
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/fixtures/host_manifest.json
+               ${_ART_DIR}/host_manifest.json COPYONLY)
+
+# The float32 arm: one float32 plugin (loaded through eagle::cpu::PluginRegistry32).
+add_library(host_plugin_f32 MODULE fixtures/host_plugin_f32.cpp)
+set_target_properties(host_plugin_f32 PROPERTIES POSITION_INDEPENDENT_CODE ON PREFIX ""
+  LIBRARY_OUTPUT_DIRECTORY ${_ART_DIR})
+target_include_directories(host_plugin_f32 PRIVATE ${_EAGLE_ROOT})
+if(OpenMP_CXX_FOUND)
+  target_link_libraries(host_plugin_f32 PRIVATE OpenMP::OpenMP_CXX)
+endif()
+foreach(_fx toy_energy32.json host_manifest_f32.json)
+  configure_file(${CMAKE_CURRENT_SOURCE_DIR}/fixtures/${_fx} ${_ART_DIR}/${_fx} COPYONLY)
+endforeach()
+
+add_executable(embedding_demo_cpu embedding_demo_cpu.cpp)
+add_dependencies(embedding_demo_cpu host_plugins host_plugin_f32)
+target_include_directories(embedding_demo_cpu PRIVATE ${_EAGLE_ROOT})
+target_link_libraries(embedding_demo_cpu PRIVATE ${CMAKE_DL_LIBS})
+if(OpenMP_CXX_FOUND)
+  target_link_libraries(embedding_demo_cpu PRIVATE OpenMP::OpenMP_CXX)
+endif()
+target_compile_definitions(embedding_demo_cpu PRIVATE EMBED_DEMO_ART_DIR="${_ART_DIR}")
+
+if(EMBED_CPU_ONLY)
+  return()
+endif()
+
+# --- CUDA arm ---------------------------------------------------------------
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
   set(CMAKE_CUDA_ARCHITECTURES 61)   # local Quadro P2000; override as needed
 endif()
@@ -67,10 +123,6 @@ if(NOT _EMBED_FIXTURE_NVCC)
     "to compile the example's fixture PTX")
 endif()
 
-set(_ART_DIR ${CMAKE_CURRENT_BINARY_DIR}/art)
-file(MAKE_DIRECTORY ${_ART_DIR})
-
-set(_EAGLE_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../..)
 set(_FIXTURES mattrace toy_energy toy_energy_vjp)
 set(_FIXTURE_PTX)
 foreach(_fx ${_FIXTURES})

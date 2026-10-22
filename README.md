@@ -29,7 +29,7 @@ eagle is the execution layer of the [RAPTOR family](https://amasat01.github.io/)
 as CUDA graphs to keep work efficient on the GPU, and connects them to the code you already have. See
 [where RAPTOR fits](https://amasat01.github.io/where_raptor_fits.html) for the full four-part story.
 
-Linux x86_64 wheels (Python 3.9-3.14). On macOS or Windows, open the notebook on Colab or Kaggle (the Kaggle badge above).
+Wheels for Linux x86_64 and aarch64 and macOS arm64 (Python 3.9-3.15); the GPU plugin is in the x86_64 wheels only. On Windows, open the notebook on Colab or Kaggle (the Kaggle badge above).
 
 ```bash
 pip install raptor-eagle raptor-hawk                           # CPU threads, no NVIDIA packages
@@ -97,6 +97,24 @@ x_next.sum().backward()      # fills k.grad
 
 <sub>NVIDIA H100 80GB HBM3 (card of 2026-10-13). NVIDIA Warp's per-thread kernel is the fastest GPU arm in 2 of 12 RK4 cells; on the dense batch (every sample running all 1000 steps) at N = 1,000,000 it takes 1.71 ms and `eagle.simulate` 1.75 ms. See [every number, every arm](#performance).</sub>
 <!-- hero:end -->
+
+## What's new in 0.6.4
+
+- Sums over samples work across MPI ranks: every rank gets the single-rank cell bit for bit (`eagle.exec.RankPartition`).
+- The JAX, torch and Warp bridges take `policy=` for how a sum is finished.
+- `grad=False` marks a node as not differentiated (a step-size controller); a loop body may be several parts, and a node in a recorded loop can read another node's plane and a `Param`.
+- `until_done` takes any DLPack array (JAX, torch, CuPy, NumPy) and returns the answer with `Runner.result`.
+- `vmap` over a batch of `Param` values is one launch; forward mode works through a kernel that carries state.
+- The CPU host runs float32 plugins, and host plugins load from a manifest with `format: host`.
+- The C++ registries own the finished counter.
+- Fixed: torch bridge `Param` gradients were too large when some samples finished early (0.6.3), and a torch `CUDAGraph` node of a recorded run on the GPU could give wrong results. Re-run any training that used either.
+- Wheels for Linux aarch64, macOS arm64, and Python 3.15 and 3.15t.
+
+Full list in the [changelog](CHANGELOG.md).
+
+## Gradients, certified
+
+JAX (`grad`, `jit`, `vmap`, `jacfwd`, `jacrev`), PyTorch (`backward`, `torch.func`) and NVIDIA Warp (`wp.Tape`) differentiate through an eagle kernel, and each is certified against the same law written in that framework alone. NumPy and CuPy have no autodiff: pass your own `vjps=`. The [interoperability page](https://amasat01.github.io/eagle/content/interop.html) lists the certified rows, with tutorials for [JAX](https://amasat01.github.io/eagle/content/userguide/tutorials/13_jax_vmap_and_jacobians.html), [PyTorch](https://amasat01.github.io/eagle/content/userguide/tutorials/03_torch_training.html), [Warp](https://amasat01.github.io/eagle/content/userguide/tutorials/16_a_warp_kernel_in_a_graph.html) and [whole graphs](https://amasat01.github.io/eagle/content/userguide/tutorials/10_gradients_through_a_graph.html). To use your own CUDA graph inside an eagle graph, hand it over as a `child` node (see the Warp tutorial); eagle does not launch inside your capture.
 
 ## Threading
 
@@ -208,9 +226,11 @@ parallel-dispatch substrate for GPU batch workloads. It bundles the reusable lau
   and the prefix-sum + scatter kernels behind stream compaction.
 - **Reduction** — `eagle::cuda::Reduction` (multi-level GPU) and
   `eagle::cpu::Reduction` (cache-padded OpenMP).
-- **PyTorch bridge** — kernels plug into `loss.backward()` and
-  `torch.autograd.forward_ad`, so both reverse-mode and forward-mode
-  derivatives run through the same dual-mode engine.
+- **PyTorch, JAX and Warp bridges** — kernels plug into `loss.backward()`,
+  `torch.autograd.forward_ad`, `jax.grad`/`jacfwd` and `wp.Tape`, so reverse-mode and
+  forward-mode derivatives run through the same dual-mode engine.
+- **CPU deployment** — `eagle::cpu::PluginRegistry` loads host plugins (float64 and
+  float32) from a manifest; see [embed a kernel](https://amasat01.github.io/eagle/content/userguide/cpp/c4_embed_a_kernel.html).
 
 Like its sibling libraries it is **dual-mode**: the same API compiles as CUDA or as pure C++23 (OpenMP), selected
 by `EAGLE_CPP_MODE`. The C++ core depends only on `aether`; the Python package (`raptor-eagle`) also depends on

@@ -406,7 +406,11 @@ def test_host_parity_on_private_planes(tmp_path):
             core.run_host_serial(
                 entry, [ctypes.addressof(hs), ctypes.addressof(hx)] + tail, part)
             mismatches += int(not np.array_equal(y_par, y_ser))
-            mismatches += int(not np.array_equal(y_ser, a.value * x + b.value))
+            # parallel vs serial is the same binary on the same data: bitwise. Against NumPy it is a different
+            # implementation, and a compiler may fuse a*x+b into one FMA (ARM does by default): an error bound
+            ref = a.value * x + b.value
+            bound = 2 * np.finfo(np.float64).eps * (np.abs(a.value * x) + abs(b.value))
+            mismatches += int(not np.all(np.abs(y_ser - ref) <= bound))
         return mismatches
 
     results, errors = _run_threads(THREADS, one)

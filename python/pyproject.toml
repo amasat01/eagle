@@ -13,14 +13,14 @@ backend-path = ["."]
 
 [project]
 name = "raptor-eagle"
-version = "0.6.3"
+version = "0.6.4"
 description = "EAGLE — the Python face of the launch engine for compiled CUDA kernels"
 # A copy of the repository README, made by _build_backend.py (git-ignored).
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "Apache-2.0" }
 # Python versions match the cibuildwheel matrix release.yml actually builds
-# and the test-wheel job actually runs (cp39-cp314 plus the free-threaded cp313t/cp314t, manylinux_2_28 x86_64) —
+# and the test-wheel job actually runs (cp39-cp315 plus the free-threaded cp313t/cp314t/cp315t; manylinux_2_28 x86_64 and aarch64, macOS arm64) —
 # never wider than what a real wheel ships.
 classifiers = [
     "License :: OSI Approved :: Apache Software License",
@@ -31,7 +31,9 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
     "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
     "Environment :: GPU :: NVIDIA CUDA",
     "Topic :: Scientific/Engineering",
     "Topic :: Scientific/Engineering :: Mathematics",
@@ -46,7 +48,7 @@ classifiers = [
 # `raptor.schema.blocks.validate_neural_block_descriptor` (first shipped in 0.2.0), which
 # `eagle.sidecar` imports. The constraint is expressed where a resolver can act on it,
 # never as a runtime surprise.
-dependencies = ["numpy>=1.26", "raptor-core>=0.3.3,<0.4"]
+dependencies = ["numpy>=1.26", "raptor-core>=0.3.4,<0.4"]
 
 # The "raptor.pattern_loaders" entry-point declaration for
 # "neural_block" moved to a separate package — eagle.neural was extracted there

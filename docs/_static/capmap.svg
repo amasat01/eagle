@@ -1,0 +1,297 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 738 478" width="738" height="478" role="img" aria-labelledby="t d"><title id="t">Capability map</title><desc id="d">Which tool has a documented way to do each block of work, on the CPU (left square) and the GPU (right square).</desc><style>.t{font:12px sans-serif;fill:#1b2433}.h{font:600 12px sans-serif;fill:#1b2433}.on{fill:#6d4aff}.off{fill:none;stroke:#aab4c8;stroke-width:1}.g{stroke:#e9edf5}@media (prefers-color-scheme:dark){.t,.h{fill:#e6ebf5}.on{fill:#a99bff}.off{stroke:#5b667c}.g{stroke:#2a3347}}</style>
+<text class="h" text-anchor="start" transform="translate(282 66) rotate(-35)">raptor</text>
+<text class="h" text-anchor="start" transform="translate(346 66) rotate(-35)">NVIDIA Warp</text>
+<text class="h" text-anchor="start" transform="translate(410 66) rotate(-35)">JAX</text>
+<text class="h" text-anchor="start" transform="translate(474 66) rotate(-35)">PyTorch</text>
+<text class="h" text-anchor="start" transform="translate(538 66) rotate(-35)">CuPy</text>
+<text class="h" text-anchor="start" transform="translate(602 66) rotate(-35)">Numba</text>
+<text class="h" text-anchor="start" transform="translate(666 66) rotate(-35)">NumPy</text>
+<line class="g" x1="0" x2="738" y1="74" y2="74"/>
+<text class="t" x="4" y="89">Hand-tuned kernels</text>
+<rect class="off" x="266" y="78" width="14" height="14" rx="3"/>
+<rect class="off" x="284" y="78" width="14" height="14" rx="3"/>
+<rect class="on" x="330" y="78" width="14" height="14" rx="3"/>
+<rect class="on" x="348" y="78" width="14" height="14" rx="3"/>
+<rect class="off" x="394" y="78" width="14" height="14" rx="3"/>
+<rect class="on" x="412" y="78" width="14" height="14" rx="3"/>
+<rect class="off" x="458" y="78" width="14" height="14" rx="3"/>
+<rect class="off" x="476" y="78" width="14" height="14" rx="3"/>
+<rect class="off" x="522" y="78" width="14" height="14" rx="3"/>
+<rect class="on" x="540" y="78" width="14" height="14" rx="3"/>
+<rect class="on" x="586" y="78" width="14" height="14" rx="3"/>
+<rect class="on" x="604" y="78" width="14" height="14" rx="3"/>
+<rect class="off" x="650" y="78" width="14" height="14" rx="3"/>
+<rect class="off" x="668" y="78" width="14" height="14" rx="3"/>
+<line class="g" x1="0" x2="738" y1="96" y2="96"/>
+<text class="t" x="4" y="111">Fixed-step ODEs</text>
+<rect class="on" x="266" y="100" width="14" height="14" rx="3"/>
+<rect class="on" x="284" y="100" width="14" height="14" rx="3"/>
+<rect class="on" x="330" y="100" width="14" height="14" rx="3"/>
+<rect class="on" x="348" y="100" width="14" height="14" rx="3"/>
+<rect class="on" x="394" y="100" width="14" height="14" rx="3"/>
+<rect class="on" x="412" y="100" width="14" height="14" rx="3"/>
+<rect class="on" x="458" y="100" width="14" height="14" rx="3"/>
+<rect class="on" x="476" y="100" width="14" height="14" rx="3"/>
+<rect class="off" x="522" y="100" width="14" height="14" rx="3"/>
+<rect class="on" x="540" y="100" width="14" height="14" rx="3"/>
+<rect class="on" x="586" y="100" width="14" height="14" rx="3"/>
+<rect class="on" x="604" y="100" width="14" height="14" rx="3"/>
+<rect class="on" x="650" y="100" width="14" height="14" rx="3"/>
+<rect class="off" x="668" y="100" width="14" height="14" rx="3"/>
+<line class="g" x1="0" x2="738" y1="118" y2="118"/>
+<text class="t" x="4" y="133">Differentiable sensitivities</text>
+<rect class="on" x="266" y="122" width="14" height="14" rx="3"/>
+<rect class="on" x="284" y="122" width="14" height="14" rx="3"/>
+<rect class="on" x="330" y="122" width="14" height="14" rx="3"/>
+<rect class="on" x="348" y="122" width="14" height="14" rx="3"/>
+<rect class="on" x="394" y="122" width="14" height="14" rx="3"/>
+<rect class="on" x="412" y="122" width="14" height="14" rx="3"/>
+<rect class="on" x="458" y="122" width="14" height="14" rx="3"/>
+<rect class="on" x="476" y="122" width="14" height="14" rx="3"/>
+<rect class="off" x="522" y="122" width="14" height="14" rx="3"/>
+<rect class="off" x="540" y="122" width="14" height="14" rx="3"/>
+<rect class="off" x="586" y="122" width="14" height="14" rx="3"/>
+<rect class="off" x="604" y="122" width="14" height="14" rx="3"/>
+<rect class="off" x="650" y="122" width="14" height="14" rx="3"/>
+<rect class="off" x="668" y="122" width="14" height="14" rx="3"/>
+<line class="g" x1="0" x2="738" y1="140" y2="140"/>
+<text class="t" x="4" y="155">Zero-copy hand-over (DLPack)</text>
+<rect class="on" x="266" y="144" width="14" height="14" rx="3"/>
+<rect class="on" x="284" y="144" width="14" height="14" rx="3"/>
+<rect class="on" x="330" y="144" width="14" height="14" rx="3"/>
+<rect class="on" x="348" y="144" width="14" height="14" rx="3"/>
+<rect class="on" x="394" y="144" width="14" height="14" rx="3"/>
+<rect class="on" x="412" y="144" width="14" height="14" rx="3"/>
+<rect class="on" x="458" y="144" width="14" height="14" rx="3"/>
+<rect class="on" x="476" y="144" width="14" height="14" rx="3"/>
+<rect class="off" x="522" y="144" width="14" height="14" rx="3"/>
+<rect class="on" x="540" y="144" width="14" height="14" rx="3"/>
+<rect class="on" x="586" y="144" width="14" height="14" rx="3"/>
+<rect class="on" x="604" y="144" width="14" height="14" rx="3"/>
+<rect class="on" x="650" y="144" width="14" height="14" rx="3"/>
+<rect class="off" x="668" y="144" width="14" height="14" rx="3"/>
+<line class="g" x1="0" x2="738" y1="162" y2="162"/>
+<text class="t" x="4" y="177">Per-sample models and RHS</text>
+<rect class="on" x="266" y="166" width="14" height="14" rx="3"/>
+<rect class="on" x="284" y="166" width="14" height="14" rx="3"/>
+<rect class="on" x="330" y="166" width="14" height="14" rx="3"/>
+<rect class="on" x="348" y="166" width="14" height="14" rx="3"/>
+<rect class="on" x="394" y="166" width="14" height="14" rx="3"/>
+<rect class="on" x="412" y="166" width="14" height="14" rx="3"/>
+<rect class="on" x="458" y="166" width="14" height="14" rx="3"/>
+<rect class="on" x="476" y="166" width="14" height="14" rx="3"/>
+<rect class="off" x="522" y="166" width="14" height="14" rx="3"/>
+<rect class="off" x="540" y="166" width="14" height="14" rx="3"/>
+<rect class="on" x="586" y="166" width="14" height="14" rx="3"/>
+<rect class="on" x="604" y="166" width="14" height="14" rx="3"/>
+<rect class="off" x="650" y="166" width="14" height="14" rx="3"/>
+<rect class="off" x="668" y="166" width="14" height="14" rx="3"/>
+<line class="g" x1="0" x2="738" y1="184" y2="184"/>
+<text class="t" x="4" y="199">Half precision</text>
+<rect class="off" x="266" y="188" width="14" height="14" rx="3"/>
+<rect class="off" x="284" y="188" width="14" height="14" rx="3"/>
+<rect class="on" x="330" y="188" width="14" height="14" rx="3"/>
+<rect class="on" x="348" y="188" width="14" height="14" rx="3"/>
+<rect class="on" x="394" y="188" width="14" height="14" rx="3"/>
+<rect class="on" x="412" y="188" width="14" height="14" rx="3"/>
+<rect class="on" x="458" y="188" width="14" height="14" rx="3"/>
+<rect class="on" x="476" y="188" width="14" height="14" rx="3"/>
+<rect class="off" x="522" y="188" width="14" height="14" rx="3"/>
+<rect class="on" x="540" y="188" width="14" height="14" rx="3"/>
+<rect class="off" x="586" y="188" width="14" height="14" rx="3"/>
+<rect class="on" x="604" y="188" width="14" height="14" rx="3"/>
+<rect class="on" x="650" y="188" width="14" height="14" rx="3"/>
+<rect class="off" x="668" y="188" width="14" height="14" rx="3"/>
+<line class="g" x1="0" x2="738" y1="206" y2="206"/>
+<text class="t" x="4" y="221">Dense linear algebra, large solvers</text>
+<rect class="off" x="266" y="210" width="14" height="14" rx="3"/>
+<rect class="off" x="284" y="210" width="14" height="14" rx="3"/>
+<rect class="on" x="330" y="210" width="14" height="14" rx="3"/>
+<rect class="on" x="348" y="210" width="14" height="14" rx="3"/>
+<rect class="on" x="394" y="210" width="14" height="14" rx="3"/>
+<rect class="on" x="412" y="210" width="14" height="14" rx="3"/>
+<rect class="on" x="458" y="210" width="14" height="14" rx="3"/>
+<rect class="on" x="476" y="210" width="14" height="14" rx="3"/>
+<rect class="off" x="522" y="210" width="14" height="14" rx="3"/>
+<rect class="on" x="540" y="210" width="14" height="14" rx="3"/>
+<rect class="on" x="586" y="210" width="14" height="14" rx="3"/>
+<rect class="off" x="604" y="210" width="14" height="14" rx="3"/>
+<rect class="on" x="650" y="210" width="14" height="14" rx="3"/>
+<rect class="off" x="668" y="210" width="14" height="14" rx="3"/>
+<line class="g" x1="0" x2="738" y1="228" y2="228"/>
+<text class="t" x="4" y="243">Ensembles and Monte Carlo</text>
+<rect class="on" x="266" y="232" width="14" height="14" rx="3"/>
+<rect class="on" x="284" y="232" width="14" height="14" rx="3"/>
+<rect class="on" x="330" y="232" width="14" height="14" rx="3"/>
+<rect class="on" x="348" y="232" width="14" height="14" rx="3"/>
+<rect class="on" x="394" y="232" width="14" height="14" rx="3"/>
+<rect class="on" x="412" y="232" width="14" height="14" rx="3"/>
+<rect class="on" x="458" y="232" width="14" height="14" rx="3"/>
+<rect class="on" x="476" y="232" width="14" height="14" rx="3"/>
+<rect class="off" x="522" y="232" width="14" height="14" rx="3"/>
+<rect class="on" x="540" y="232" width="14" height="14" rx="3"/>
+<rect class="on" x="586" y="232" width="14" height="14" rx="3"/>
+<rect class="on" x="604" y="232" width="14" height="14" rx="3"/>
+<rect class="on" x="650" y="232" width="14" height="14" rx="3"/>
+<rect class="off" x="668" y="232" width="14" height="14" rx="3"/>
+<line class="g" x1="0" x2="738" y1="250" y2="250"/>
+<text class="t" x="4" y="265">Divergent workloads</text>
+<rect class="on" x="266" y="254" width="14" height="14" rx="3"/>
+<rect class="on" x="284" y="254" width="14" height="14" rx="3"/>
+<rect class="off" x="330" y="254" width="14" height="14" rx="3"/>
+<rect class="off" x="348" y="254" width="14" height="14" rx="3"/>
+<rect class="off" x="394" y="254" width="14" height="14" rx="3"/>
+<rect class="off" x="412" y="254" width="14" height="14" rx="3"/>
+<rect class="off" x="458" y="254" width="14" height="14" rx="3"/>
+<rect class="off" x="476" y="254" width="14" height="14" rx="3"/>
+<rect class="off" x="522" y="254" width="14" height="14" rx="3"/>
+<rect class="off" x="540" y="254" width="14" height="14" rx="3"/>
+<rect class="off" x="586" y="254" width="14" height="14" rx="3"/>
+<rect class="off" x="604" y="254" width="14" height="14" rx="3"/>
+<rect class="off" x="650" y="254" width="14" height="14" rx="3"/>
+<rect class="off" x="668" y="254" width="14" height="14" rx="3"/>
+<line class="g" x1="0" x2="738" y1="272" y2="272"/>
+<text class="t" x="4" y="287">Events and early exit</text>
+<rect class="on" x="266" y="276" width="14" height="14" rx="3"/>
+<rect class="on" x="284" y="276" width="14" height="14" rx="3"/>
+<rect class="on" x="330" y="276" width="14" height="14" rx="3"/>
+<rect class="off" x="348" y="276" width="14" height="14" rx="3"/>
+<rect class="off" x="394" y="276" width="14" height="14" rx="3"/>
+<rect class="off" x="412" y="276" width="14" height="14" rx="3"/>
+<rect class="off" x="458" y="276" width="14" height="14" rx="3"/>
+<rect class="off" x="476" y="276" width="14" height="14" rx="3"/>
+<rect class="off" x="522" y="276" width="14" height="14" rx="3"/>
+<rect class="off" x="540" y="276" width="14" height="14" rx="3"/>
+<rect class="off" x="586" y="276" width="14" height="14" rx="3"/>
+<rect class="off" x="604" y="276" width="14" height="14" rx="3"/>
+<rect class="off" x="650" y="276" width="14" height="14" rx="3"/>
+<rect class="off" x="668" y="276" width="14" height="14" rx="3"/>
+<line class="g" x1="0" x2="738" y1="294" y2="294"/>
+<text class="t" x="4" y="309">Adaptive ODEs, embedded pairs</text>
+<rect class="on" x="266" y="298" width="14" height="14" rx="3"/>
+<rect class="on" x="284" y="298" width="14" height="14" rx="3"/>
+<rect class="off" x="330" y="298" width="14" height="14" rx="3"/>
+<rect class="off" x="348" y="298" width="14" height="14" rx="3"/>
+<rect class="on" x="394" y="298" width="14" height="14" rx="3"/>
+<rect class="on" x="412" y="298" width="14" height="14" rx="3"/>
+<rect class="off" x="458" y="298" width="14" height="14" rx="3"/>
+<rect class="off" x="476" y="298" width="14" height="14" rx="3"/>
+<rect class="off" x="522" y="298" width="14" height="14" rx="3"/>
+<rect class="off" x="540" y="298" width="14" height="14" rx="3"/>
+<rect class="off" x="586" y="298" width="14" height="14" rx="3"/>
+<rect class="off" x="604" y="298" width="14" height="14" rx="3"/>
+<rect class="off" x="650" y="298" width="14" height="14" rx="3"/>
+<rect class="off" x="668" y="298" width="14" height="14" rx="3"/>
+<line class="g" x1="0" x2="738" y1="316" y2="316"/>
+<text class="t" x="4" y="331">Deployment outside Python</text>
+<rect class="on" x="266" y="320" width="14" height="14" rx="3"/>
+<rect class="on" x="284" y="320" width="14" height="14" rx="3"/>
+<rect class="on" x="330" y="320" width="14" height="14" rx="3"/>
+<rect class="on" x="348" y="320" width="14" height="14" rx="3"/>
+<rect class="on" x="394" y="320" width="14" height="14" rx="3"/>
+<rect class="on" x="412" y="320" width="14" height="14" rx="3"/>
+<rect class="on" x="458" y="320" width="14" height="14" rx="3"/>
+<rect class="on" x="476" y="320" width="14" height="14" rx="3"/>
+<rect class="off" x="522" y="320" width="14" height="14" rx="3"/>
+<rect class="off" x="540" y="320" width="14" height="14" rx="3"/>
+<rect class="off" x="586" y="320" width="14" height="14" rx="3"/>
+<rect class="off" x="604" y="320" width="14" height="14" rx="3"/>
+<rect class="off" x="650" y="320" width="14" height="14" rx="3"/>
+<rect class="off" x="668" y="320" width="14" height="14" rx="3"/>
+<line class="g" x1="0" x2="738" y1="338" y2="338"/>
+<text class="t" x="4" y="353">Differentiable simulation into learning</text>
+<rect class="on" x="266" y="342" width="14" height="14" rx="3"/>
+<rect class="on" x="284" y="342" width="14" height="14" rx="3"/>
+<rect class="on" x="330" y="342" width="14" height="14" rx="3"/>
+<rect class="on" x="348" y="342" width="14" height="14" rx="3"/>
+<rect class="on" x="394" y="342" width="14" height="14" rx="3"/>
+<rect class="on" x="412" y="342" width="14" height="14" rx="3"/>
+<rect class="on" x="458" y="342" width="14" height="14" rx="3"/>
+<rect class="on" x="476" y="342" width="14" height="14" rx="3"/>
+<rect class="off" x="522" y="342" width="14" height="14" rx="3"/>
+<rect class="off" x="540" y="342" width="14" height="14" rx="3"/>
+<rect class="off" x="586" y="342" width="14" height="14" rx="3"/>
+<rect class="off" x="604" y="342" width="14" height="14" rx="3"/>
+<rect class="off" x="650" y="342" width="14" height="14" rx="3"/>
+<rect class="off" x="668" y="342" width="14" height="14" rx="3"/>
+<line class="g" x1="0" x2="738" y1="360" y2="360"/>
+<text class="t" x="4" y="375">Ensemble data for training</text>
+<rect class="on" x="266" y="364" width="14" height="14" rx="3"/>
+<rect class="on" x="284" y="364" width="14" height="14" rx="3"/>
+<rect class="on" x="330" y="364" width="14" height="14" rx="3"/>
+<rect class="on" x="348" y="364" width="14" height="14" rx="3"/>
+<rect class="on" x="394" y="364" width="14" height="14" rx="3"/>
+<rect class="on" x="412" y="364" width="14" height="14" rx="3"/>
+<rect class="on" x="458" y="364" width="14" height="14" rx="3"/>
+<rect class="on" x="476" y="364" width="14" height="14" rx="3"/>
+<rect class="off" x="522" y="364" width="14" height="14" rx="3"/>
+<rect class="on" x="540" y="364" width="14" height="14" rx="3"/>
+<rect class="on" x="586" y="364" width="14" height="14" rx="3"/>
+<rect class="on" x="604" y="364" width="14" height="14" rx="3"/>
+<rect class="on" x="650" y="364" width="14" height="14" rx="3"/>
+<rect class="off" x="668" y="364" width="14" height="14" rx="3"/>
+<line class="g" x1="0" x2="738" y1="382" y2="382"/>
+<text class="t" x="4" y="397">Hybrid, physics-informed models</text>
+<rect class="on" x="266" y="386" width="14" height="14" rx="3"/>
+<rect class="on" x="284" y="386" width="14" height="14" rx="3"/>
+<rect class="on" x="330" y="386" width="14" height="14" rx="3"/>
+<rect class="on" x="348" y="386" width="14" height="14" rx="3"/>
+<rect class="on" x="394" y="386" width="14" height="14" rx="3"/>
+<rect class="on" x="412" y="386" width="14" height="14" rx="3"/>
+<rect class="on" x="458" y="386" width="14" height="14" rx="3"/>
+<rect class="on" x="476" y="386" width="14" height="14" rx="3"/>
+<rect class="off" x="522" y="386" width="14" height="14" rx="3"/>
+<rect class="off" x="540" y="386" width="14" height="14" rx="3"/>
+<rect class="off" x="586" y="386" width="14" height="14" rx="3"/>
+<rect class="off" x="604" y="386" width="14" height="14" rx="3"/>
+<rect class="off" x="650" y="386" width="14" height="14" rx="3"/>
+<rect class="off" x="668" y="386" width="14" height="14" rx="3"/>
+<line class="g" x1="0" x2="738" y1="404" y2="404"/>
+<text class="t" x="4" y="419">Dense tensor training</text>
+<rect class="off" x="266" y="408" width="14" height="14" rx="3"/>
+<rect class="off" x="284" y="408" width="14" height="14" rx="3"/>
+<rect class="off" x="330" y="408" width="14" height="14" rx="3"/>
+<rect class="off" x="348" y="408" width="14" height="14" rx="3"/>
+<rect class="on" x="394" y="408" width="14" height="14" rx="3"/>
+<rect class="on" x="412" y="408" width="14" height="14" rx="3"/>
+<rect class="on" x="458" y="408" width="14" height="14" rx="3"/>
+<rect class="on" x="476" y="408" width="14" height="14" rx="3"/>
+<rect class="off" x="522" y="408" width="14" height="14" rx="3"/>
+<rect class="off" x="540" y="408" width="14" height="14" rx="3"/>
+<rect class="off" x="586" y="408" width="14" height="14" rx="3"/>
+<rect class="off" x="604" y="408" width="14" height="14" rx="3"/>
+<rect class="off" x="650" y="408" width="14" height="14" rx="3"/>
+<rect class="off" x="668" y="408" width="14" height="14" rx="3"/>
+<line class="g" x1="0" x2="738" y1="426" y2="426"/>
+<text class="t" x="4" y="441">Low-precision inference</text>
+<rect class="off" x="266" y="430" width="14" height="14" rx="3"/>
+<rect class="off" x="284" y="430" width="14" height="14" rx="3"/>
+<rect class="off" x="330" y="430" width="14" height="14" rx="3"/>
+<rect class="off" x="348" y="430" width="14" height="14" rx="3"/>
+<rect class="on" x="394" y="430" width="14" height="14" rx="3"/>
+<rect class="on" x="412" y="430" width="14" height="14" rx="3"/>
+<rect class="on" x="458" y="430" width="14" height="14" rx="3"/>
+<rect class="on" x="476" y="430" width="14" height="14" rx="3"/>
+<rect class="off" x="522" y="430" width="14" height="14" rx="3"/>
+<rect class="off" x="540" y="430" width="14" height="14" rx="3"/>
+<rect class="off" x="586" y="430" width="14" height="14" rx="3"/>
+<rect class="off" x="604" y="430" width="14" height="14" rx="3"/>
+<rect class="off" x="650" y="430" width="14" height="14" rx="3"/>
+<rect class="off" x="668" y="430" width="14" height="14" rx="3"/>
+<line class="g" x1="0" x2="738" y1="448" y2="448"/>
+<text class="t" x="4" y="463">Array-style programs</text>
+<rect class="off" x="266" y="452" width="14" height="14" rx="3"/>
+<rect class="off" x="284" y="452" width="14" height="14" rx="3"/>
+<rect class="off" x="330" y="452" width="14" height="14" rx="3"/>
+<rect class="off" x="348" y="452" width="14" height="14" rx="3"/>
+<rect class="on" x="394" y="452" width="14" height="14" rx="3"/>
+<rect class="on" x="412" y="452" width="14" height="14" rx="3"/>
+<rect class="on" x="458" y="452" width="14" height="14" rx="3"/>
+<rect class="on" x="476" y="452" width="14" height="14" rx="3"/>
+<rect class="off" x="522" y="452" width="14" height="14" rx="3"/>
+<rect class="on" x="540" y="452" width="14" height="14" rx="3"/>
+<rect class="off" x="586" y="452" width="14" height="14" rx="3"/>
+<rect class="off" x="604" y="452" width="14" height="14" rx="3"/>
+<rect class="on" x="650" y="452" width="14" height="14" rx="3"/>
+<rect class="off" x="668" y="452" width="14" height="14" rx="3"/>
+</svg>

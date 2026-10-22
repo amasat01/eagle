@@ -309,10 +309,9 @@ class Reverse:
 
     def __init__(self, forward, *, vjps=None, strict=False, policy="compensated"):
         door = "eagle.diff.Reverse"
-        from .._graph_reduce import POLICIES
+        from .._graph_reduce import POLICIES, check_policy
 
-        if policy not in POLICIES:
-            raise ValueError(f"{door}: policy {policy!r} is not one of {sorted(POLICIES)}")
+        check_policy(policy, door)
         self._policy = "ordered" if strict else policy
         if isinstance(forward, Record):
             raise TypeError(f"{door}: takes what ran the forward (Reverse(sim) or "
@@ -389,6 +388,8 @@ class Reverse:
             node = a.node
             if node.kind in _CONDITIONALS:
                 node = node.payload.child
+            if not a.grad:
+                continue
             if node.kind == "launch":
                 b = node.payload
                 self._vjp[i] = _vjp_plan(labels[i], b, vjps.get(labels[i]))
@@ -533,6 +534,8 @@ class _Program:
                 taint[(r, plane)] = next((t for _, t in parts if t), None)
                 continue
             leaf = accesses[fwd]
+            if not leaf.grad:       # not differentiated: its outputs pass no gradient back
+                continue
             reads, writes = rev._reads[fwd], planes.writes[fwd]
             incoming, came = {}, None
             for (local, key), s in zip(writes, plan["seed_of"][r]):

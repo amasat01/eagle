@@ -1,0 +1,36 @@
+# Copyright 2026 Alessandro Masat
+# SPDX-License-Identifier: Apache-2.0
+name: Install siblings
+description: For each sibling package, pin its checkout's version if that version is on PyPI, else build it from the checkout. Install with `pip install --find-links "$dir" $pins`.
+inputs:
+  siblings:
+    description: Whitespace-separated `pkg=path` pairs, path being the package directory inside the sibling's companion checkout (e.g. `raptor-core=raptor aether-dsc=aether/dsc`).
+    required: true
+  dir:
+    description: Output directory for what gets built.
+    required: false
+    default: sibling-dist
+  dry:
+    description: Set to `dry` to resolve pins and `built` without building anything.
+    required: false
+    default: ""
+outputs:
+  built:
+    description: Packages built from their checkout (not on PyPI), space-separated.
+    value: ${{ steps.run.outputs.built }}
+  dir:
+    description: Find-links directory (empty when everything is released).
+    value: ${{ steps.run.outputs.dir }}
+  pins:
+    description: Exact pins, `pkg==V ...`.
+    value: ${{ steps.run.outputs.pins }}
+runs:
+  using: composite
+  steps:
+    - id: run
+      shell: bash
+      env:
+        SIBLINGS: ${{ inputs.siblings }}
+        OUT: ${{ inputs.dir }}
+        DRY: ${{ inputs.dry }}
+      run: bash "${{ github.action_path }}/install_siblings.sh" "$SIBLINGS" "$OUT" "$DRY"

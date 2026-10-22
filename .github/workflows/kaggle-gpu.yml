@@ -31,6 +31,9 @@ on:
       aether_ref:
         description: aether ref (used when source is git)
         default: main
+      site_ref:
+        description: landing-site ref (its docs tooling and notebooks, notebooks mode)
+        default: main
       source:
         description: Where the packages come from
         type: choice
@@ -75,13 +78,14 @@ jobs:
           INPUT_HAWK_REF: ${{ inputs.hawk_ref || 'main' }}
           INPUT_RAPTOR_REF: ${{ inputs.raptor_ref || 'main' }}
           INPUT_AETHER_REF: ${{ inputs.aether_ref || 'main' }}
+          INPUT_SITE_REF: ${{ inputs.site_ref || 'main' }}
           INPUT_SOURCE: ${{ inputs.source }}
           INPUT_PRE: ${{ inputs.pre && 'true' || 'false' }}
           INPUT_VERSION: ${{ inputs.version }}
         run: |
           args=(--cuda "${{ matrix.cuda }}" --mode "${{ matrix.mode }}" --run-id "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
                 --eagle-ref "$INPUT_EAGLE_REF" --hawk-ref "$INPUT_HAWK_REF"
-                --raptor-ref "$INPUT_RAPTOR_REF" --aether-ref "$INPUT_AETHER_REF"
+                --raptor-ref "$INPUT_RAPTOR_REF" --aether-ref "$INPUT_AETHER_REF" --site-ref "$INPUT_SITE_REF"
                 --source "$INPUT_SOURCE" --out kaggle-out)
           if [ "$INPUT_PRE" = true ]; then args+=(--pre); fi
           if [ -n "$INPUT_VERSION" ]; then args+=(--version "$INPUT_VERSION"); fi

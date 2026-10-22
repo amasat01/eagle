@@ -141,19 +141,20 @@ class Node:
     :func:`opaque`, or a kind's own
     constructor."""
 
-    __slots__ = ("kind", "payload", "name")
+    __slots__ = ("kind", "payload", "name", "grad")
 
-    def __init__(self, kind: str, payload, name: str | None = None):
+    def __init__(self, kind: str, payload, name: str | None = None, grad: bool = True):
         object.__setattr__(self, "kind", kind)
         object.__setattr__(self, "payload", payload)
         object.__setattr__(self, "name", name)
+        object.__setattr__(self, "grad", grad)
 
     def __setattr__(self, key, value):
         raise AttributeError("eagle.graph.Node is immutable")
 
     def _named(self, name):
         return self if name is None or name == self.name else Node(
-            self.kind, self.payload, name)
+            self.kind, self.payload, name, self.grad)
 
     @property
     def label(self) -> str:
@@ -268,11 +269,12 @@ def _run_seeds(cache, tail):
 class _Access:
     """One executable node for the edge derivation."""
 
-    __slots__ = ("label", "reads", "writes", "node")
+    __slots__ = ("label", "reads", "writes", "node", "grad")
 
     def __init__(self, node):
         k = get_node_kind(node.kind)
         self.node = node
+        self.grad = node.grad
         self.label = node.label
         self.reads = tuple(k.reads(node))
         self.writes = tuple(k.writes(node))
@@ -293,12 +295,18 @@ def _on_device(device):
         yield
 
 
-def _plane_device(accesses):
-    """The CUDA ordinal the graph's planes live on (the first one's)."""
-    for a in accesses:
-        for _n, arr, _r in (*a.reads, *a.writes):
-            return arr.device.id
-    return None
+def _plane_device(accesses, device=None):
+    """The CUDA ordinal the graph's planes live on. Planes on two devices are
+    refused by name, and so is an explicit ``device`` they are not on."""
+    found = sorted({arr.device.id for a in accesses
+                    for _n, arr, _r in (*a.reads, *a.writes)})
+    if len(found) > 1:
+        raise ValueError(f"eagle.graph: the planes span devices {found}; "
+                         "a graph runs on one device")
+    if device is not None and found and found[0] != device:
+        raise ValueError(f"eagle.graph: device={device} was asked, "
+                         f"the arrays live on device {found[0]}")
+    return found[0] if found else device
 
 
 def _array_backend(arr):
@@ -347,16 +355,30 @@ class Graph:
             raise RuntimeError(f"eagle.Graph.{method}: this Graph is built; "
                                "make a new Graph to add nodes")
 
-    def _child_of(self, step, door):
+    def _child_of(self, step, door, loop=False):
         """The Node a conditional's step stands for: a Node itself, a
         ``BoundPlan.launch`` (its planes are then derived), or any other
-        zero-arg callable (opaque: no declared planes)."""
+        zero-arg callable (opaque: no declared planes). A repeat_while
+        (``loop``) also takes a tuple of such parts, run in order, and a
+        ``skippable`` part: a ``"sequence"`` node."""
+        if isinstance(step, RepeatWhile) and loop:
+            raise ValueError(f"{door}: nesting a repeat_while inside a "
+                             "repeat_while is not supported; flatten it")
+        if isinstance(step, Skippable) and loop:
+            step = (step,)
         if isinstance(step, (Skippable, RepeatWhile)):
             raise ValueError(f"{door}: nesting a conditional inside a "
                              "conditional is not supported; flatten it")
         if isinstance(step, tuple):
-            raise ValueError(f"{door}: a repeat_while takes one body step here, "
-                             "not a tuple of parts")
+            if not loop:
+                raise ValueError(f"{door}: only a repeat_while takes a tuple of "
+                                 "body parts")
+            parts = tuple(self._node_of(p, None, door=door) if isinstance(p, Skippable)
+                          else self._child_of(p, door, loop=True) for p in step)
+            if any(p.kind == "repeat_while" for p in parts):
+                raise ValueError(f"{door}: nesting a repeat_while inside a "
+                                 "repeat_while is not supported; flatten it")
+            return Node("sequence", parts, None, all(p.grad for p in parts))
         if isinstance(step, Node):
             if step.kind in ("group",):
                 raise ValueError(f"{door}: a group cannot be a conditional's step")
@@ -376,10 +398,10 @@ class Graph:
                                  "belongs to another Graph")
             child = late.child
         else:
-            child = self._child_of(cond.step, door)
+            child = self._child_of(cond.step, door, loop=isinstance(cond, RepeatWhile))
             late = cond.step = _Late(child, self)
         kind = "skippable" if isinstance(cond, Skippable) else "repeat_while"
-        return Node(kind, _Cond(cond, child, late))
+        return Node(kind, _Cond(cond, child, late), None, child.grad)
 
     def _node_of(self, item, name=None, *, door):
         if isinstance(item, (Skippable, RepeatWhile)):
@@ -406,13 +428,22 @@ class Graph:
                 raise TypeError(f"eagle.Graph: node {node.label!r} declares a "
                                 f"non-array plane {type(arr).__name__}")
 
-    def add(self, bound, *, name=None) -> Graph:
-        """Append one plan launch (a :class:`eagle.plan.BoundPlan`)."""
+    def add(self, bound, *, name=None, grad=True) -> Graph:
+        """Append one plan launch (a :class:`eagle.plan.BoundPlan`).
+
+        ``grad=False`` marks the launch as not differentiated (a controller
+        that writes a step size, say): a recorded run and
+        :class:`eagle.diff.Reverse` skip it, so it needs no vjp and no tape,
+        and its outputs carry no gradient back. A differentiated node may
+        read what it writes only through a one-cell parameter plane;
+        :meth:`build` with ``record=True`` refuses any other plane by name."""
         self._check_open("add")
         node = self._node_of(bound, name, door="eagle.Graph.add")
         if node.kind != "launch":
             raise TypeError("eagle.Graph.add: takes a BoundPlan; use add_node "
                             "for a Node")
+        if not grad:
+            node = Node(node.kind, node.payload, node.name, False)
         self._validate(node)
         self._nodes.append(node)
         return self
@@ -513,11 +544,14 @@ class Graph:
                              f"planes live on the {inferred}")
         return backend
 
-    def build(self, *, backend=None, record=False, dispatch=None) -> Graph:
+    def build(self, *, backend=None, record=False, dispatch=None, device=None) -> Graph:
         """Derive the edges, refuse conflicts (always), and lower. ``backend``
         is inferred from where the planes live. ``record=True`` keeps what a
         reverse pass needs (:mod:`eagle.diff`): after each :meth:`launch`,
         :attr:`record` is that launch's ``Record``.
+
+        The graph runs on the GPU its planes live on (``device=n`` is checked
+        against them); planes on two GPUs are refused.
 
         ``dispatch`` lowers the ``policy="auto"`` dispatch groups of the
         graph's hawk kernels (``None`` or ``"switch"``: the fused kernel;
@@ -562,7 +596,7 @@ class Graph:
             if be == "gpu":
                 import cupy
 
-                self._device = _plane_device(accesses)
+                self._device = _plane_device(accesses, device)
                 pin.enter_context(_on_device(self._device))
 
                 from .pipeline import GraphPipeline
@@ -637,6 +671,8 @@ class Graph:
         keeps that run's ``Record`` in :attr:`record`."""
         with self._busy("launch"), _on_device(self._device):
             self._need_built("launch")
+            if self._device is not None:
+                refuse_in_capture("eagle.Graph.launch")
             self._check_live()
             if self._recorder is not None:
                 self._recorder.begin(n, "launch")
@@ -661,6 +697,8 @@ class Graph:
         ``enqueue`` and :meth:`synchronize`."""
         with self._busy("enqueue"), _on_device(self._device):
             self._need_built("enqueue")
+            if self._device is not None:
+                refuse_in_capture("eagle.Graph.enqueue")
             self._check_live()
             if self._recorder is not None:
                 raise RuntimeError(
@@ -819,3 +857,4 @@ def _live_checks(accesses):
 # the built-in kinds register themselves on import; Graph needs a few of their helpers
 from ._graph_kinds import _Child, _Cond, _Late, _is_bound, child, opaque  # noqa: E402,F401
 from .interop import _wrap_external_stream  # noqa: E402
+from .pipeline import refuse_in_capture  # noqa: E402

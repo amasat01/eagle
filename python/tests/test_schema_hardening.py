@@ -316,6 +316,13 @@ def test_frozen_field_pattern_rejects_unknown_at_manifest_level(tmp_path):
         eagle.load_manifest(manifest)
 
 
+def test_device_loader_refuses_a_host_library_entry(tmp_path):
+    shutil.copy(FIX / "gravity.json", tmp_path / "gravity.json")
+    entry = {**_one_entry("gravity"), "artifact": "gravity.so", "format": "host"}
+    with pytest.raises(ValueError, match="host library"):
+        eagle.load_manifest(_write_manifest(tmp_path, [entry]))
+
+
 @pytest.mark.gpu
 def test_frozen_field_kernel_is_a_required_sidecar_key(tmp_path):
     assert "kernel" in FROZEN_STRICT_FIELDS

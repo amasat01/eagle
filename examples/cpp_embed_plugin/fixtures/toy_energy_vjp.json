@@ -5,6 +5,7 @@
   "aether_abi": "aether-abi/1",
   "scalar_type": "float64",
   "kernel": "raptor_kernel",
+  "host_entry": "toy_energy_vjp_host",
   "vector_inputs": ["x"],
   "params": ["p"],
   "per_sample": ["e_bar"],

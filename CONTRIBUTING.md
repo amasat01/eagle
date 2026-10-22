@@ -40,17 +40,24 @@ pytest python/tests -q -m "not gpu and not interop_matrix"     # drop the -m fil
 pytest python/tests -m ft -W error::RuntimeWarning              # free-threading rows, on a free-threaded Python
 ```
 
-Docs: `cd docs && make strict` (zero warnings), then `make nbexec` (needs a GPU) and `make nbcheck` for notebooks, `make linkcheck`
-for links. `make nbcheck-hosted` runs the notebooks the way a Colab user does; the comments above the target in `docs/Makefile`
-say what it needs. Toolchain and docstring style: [Documentation guide](https://amasat01.github.io/eagle/content/devguide/docs_guide.html).
+Docs: `cd docs && make strict` (zero warnings), then `make nbexec` (uses the GPU when one is visible) and `make nbcheck` for notebooks, `make linkcheck`
+for links. `make nbcheck-hosted` runs the notebooks the way a Colab user does (needs uv, Python 3.13 and a C++23 compiler; see `docs/Makefile`, and the Documentation guide for the notebook rules). Toolchain and docstring style: [Documentation guide](https://amasat01.github.io/eagle/content/devguide/docs_guide.html).
+
+## Where things live
+
+- `eagle/`: the header-only C++ core, one folder per idea (`cuda/` graph and launcher, `cpu/` its host twin, `exec/`, `filtering/`, `util/`).
+- `python/eagle/`: the Python package; `graph.py` is `eagle.Graph`, `registry.py` the plugin registry. `python/src/` is the binding.
+- `plugin/`: the C++ plugin registry. `tests/`: C++ tests and the gate manifests. `python/tests/`: Python tests.
+- Docs: `docs/content/`; examples compiled by the docs gate: `docs/examples/`.
+- Adding an error code, a Python feature or a notebook: [Developer guide](https://amasat01.github.io/eagle/content/devguide/dev_guide.html).
 
 ## What a PR here must show
 
 - **C++ first, then bind.** The behaviour exists and is tested in C++; the Python binding only exposes it.
 - **The seam stays additive.** `python/src/seam/eagle_backend.h` is versioned: a new backend symbol bumps
   `EAGLE_BACKEND_VERSION_MINOR`, is bound by symbol, and gets a line in `CHANGELOG.md`. Nothing is removed or reordered within major 1.
-- **Host and device agree.** Guard CUDA-only code with `#ifndef EAGLE_CPU_ONLY` and give it an OpenMP counterpart; update
-  [Host/plugin parity](https://amasat01.github.io/eagle/content/devguide/host-plugin-parity.html).
+- **Host and device agree.** Guard CUDA-only code with `#ifndef EAGLE_CPU_ONLY` and give it an OpenMP counterpart;
+  `python/tests/test_pipeline_parity.py` keeps the two paths in step.
 - **Free-threading.** A new Python feature has an `ft` test.
 - **Limits.** A limit a page states is an entry in `docs/content/_shared/limits.json`; `python/tests/test_doc_limits.py` checks it.
 - The family checklist from [How we build](https://amasat01.github.io/raptor/content/principles.html), nothing more.
@@ -66,6 +73,4 @@ say what it needs. Toolchain and docstring style: [Documentation guide](https://
 
 ## Release
 
-Bump `version` in `python/pyproject.toml` and update `CHANGELOG.md` in a pull request. Its green run builds and tests the
-wheels and the sdist; merge it up to date, then tag `vX.Y.Z` on that commit. `.github/workflows/publish.yml` uploads the files
-the pull request built (`workflow_dispatch` dry-runs it). `raptor-core` publishes first (see the family guide).
+Record changes under `## Unreleased` in `CHANGELOG.md`; release with `python tools/version.py bump X.Y.Z` (never edit version strings by hand); the whole flow is in [RELEASING.md](https://github.com/amasat01/raptor/blob/main/RELEASING.md).

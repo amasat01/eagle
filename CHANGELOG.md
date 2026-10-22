@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.6.4 (2026-10-22)
+
+**A run follows its arrays' GPU.** `plan.run`, `Plan.bind(...).launch()`, plan graphs and `eagle.reduce` run on the GPU their arrays live on, whatever device is current or the kernel was loaded on (before, a kernel loaded on one GPU failed with `invalid resource handle` while another was current, and a correct run on the second GPU was refused). Arrays on two GPUs are refused by name, as is a pipeline given a plan of another GPU. `device=n` on `plan.run`, `Plan.bind`, `Graph.build` and `eagle.reduce` is checked against the arrays and never moves them. A JAX function is kept per GPU, so one function per GPU coexist. Smaller changes: `_core.run_device` and `DeviceKernel.run` take `device=-1` (a stream of another GPU is refused by name), `LoadedKernel.function(device)` loads the kernel per GPU (`.fn` and `.device_id` stay), `GraphPipeline(device=-1)`, and `refence` and `device_props` default to `device=-1`, the current GPU (it was 0; the same on one GPU).
+
+**`until_done` takes any DLPack array.** JAX, torch, CuPy and NumPy planes are read in place; a host plane runs on the host, a device plane on the device, and a mix is refused by name. An array of another framework is never written: `Runner.result(name)` returns the answer as a new array of the caller's type (a NumPy or CuPy plane is still written in place).
+
+**The CPU host runs float32 plugins.** `eagle::cpu::PluginRegistry32` (and `HostPluginLibrary` for `scalar_type: float32`), for C++ users running plugins on the CPU, runs float32 plugins beside the float64 `PluginRegistry`; a real uniform is narrowed once at bind, and a sidecar whose `scalar_type` is the other one is refused by name.
+
+**The C++ registries own the finished counter.** A kernel that counts finished samples (`finished_count`) needs no table from you: the host and device registries allocate it, zero it at the start of each run and bind it; `consolidate("finished_count", ...)` is refused by name, as `until_done` refuses the plane.
+
+**Host plugin manifests.** A manifest entry may name `"format": "host"` (a host shared library); `eagle::cpu::PluginRegistry::load(manifest, dir)` loads it, and the device registries refuse it by name.
+
+**Cells fold across MPI ranks.** A kernel that reduces over samples runs under `eagle.exec.RankPartition`: the ranks are cut at whole rows of 32 samples and the rows are gathered, so every rank gets the single rank's cell bit for bit. `eagle.plan(..., policy=)` sets how the cells are finished, as in `eagle.reduce`.
+
+**The JAX, torch and Warp bridges take `policy=`** (`"compensated"`, `"ordered"` or `"auto"`, as `eagle.reduce`) for how a sum over samples is finished.
+
+**`grad=False` marks a node as not differentiated.** `Graph.add(..., grad=False)` and `eagle.graph.opaque(..., grad=False)` (a controller that writes a step size, say): a recorded run and `eagle.diff.Reverse` skip it, so it needs no vjp and no gradient goes back through its outputs. A `repeat_while` body may be a tuple of parts, including a `skippable`; a reverse skips a loop of `grad=False` parts and refuses a differentiated part inside a loop by name.
+
+**A node in a recorded loop reads more.** It can read a plane an earlier node writes (the reverse runs the nodes last first and passes the cotangent back) and a `Param` (its gradient sums over the steps). A loop with a node takes `events="refine"`: the node runs from the state before each sample's stop step, and the reverse takes its vjp there.
+
+**Fixed: wrong answers when a torch `CUDAGraph` is a node of a recorded run on the GPU.** It was replayed on a stream not ordered against eagle's launches, so a run that did this on a 0.6 release may have given wrong results; re-run it. A node after the plan stays refused; the `[node, plan]` form covers it.
+
+**Fixed: CuPy could not compile after JAX started on CUDA 13.** With NVIDIA's pip wheels, starting JAX's CUDA plugin before CuPy's first kernel compile made NVRTC fail with "failed to open libnvrtc-builtins.so.13.0". `import eagle` now loads the wheels' NVRTC builtins library first, so the order no longer matters.
+
+**Fixed: wrong torch gradients in 0.6.3.** If you trained through the torch bridge with a kernel that carries state and some samples finish early, the gradient of its `Param` was too large (it also summed the steps a finished sample never took); it now matches finite differences. Re-run any training done on 0.6.3 that used this.
+
+**`vmap` over a batch of `Param` values is one launch** in the JAX and torch bridges: each sample reads its entry of a table, and the gradient of an entry is the sum over the samples that read it. A kernel that reduces over samples itself, or has a `jump=` plan, still runs one launch per entry.
+
+**Forward mode through a kernel that carries state.** `jvp` and `jacfwd` now work in the JAX and torch bridges on a kernel with state.
+
+**`Guard(active_set=True)` in the JAX bridge.** A kernel built with it runs on every sample.
+
+**Wheels.** Linux aarch64 and macOS arm64 wheels, and Python 3.15 and 3.15t wheels for every platform (the other versions are CPython 3.9-3.14 and free-threaded 3.13t and 3.14t). The GPU plugin ships in the x86_64 wheels only.
+
 ## 0.6.3 (2026-10-20)
 
 **Cells are the only record of a reduction over samples.** A hawk kernel that stores `hawk.all_samples(x).sum()` (or `.mean()`, `.max()`, `.min()`) to a `Mutable` output writes rows, one partial per 32 samples, and every door finishes them into the cell with `eagle.reduce`: `eagle.deploy(...).run` and `eagle.simulate` return the cell as a one-element array (one element per column for a vector cell), and the JAX bridge finishes it inside the same XLA call under `jit`. The row scratch is made once per kernel and sample count, so it is safe inside a captured graph. The doors read a sidecar's `cells` and no longer its `sample_sums`.

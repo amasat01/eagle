@@ -50,7 +50,7 @@ from ._busy import BusyGuard
 from ._compat import zip_strict
 from ._conditional import SkipGuard, Skippable, repeat_while
 from .graph import LowerCtx, Node, get_node_kind
-from .roles import PER_SAMPLE_ROLES
+from .roles import OUTPUT_ROLES, PER_SAMPLE_ROLES
 from .sidecar import FINISH_AUTO, FINISH_COUNTER, read_finish, refuse_derived
 
 #: The reserved ``lookup`` plane a finishing kernel counts newly finished
@@ -530,6 +530,51 @@ def _select_step(plans, planes) -> list:
     return [getattr(p, where) if hasattr(p, "select") else p for p in plans]
 
 
+def _is_foreign(value) -> bool:
+    """A DLPack producer that is neither numpy nor cupy (jax, torch, ...)."""
+    from .interop import _root_module
+
+    return hasattr(value, "__dlpack__") and _root_module(value) not in ("numpy", "cupy")
+
+
+def _import_foreign(planes) -> tuple:
+    """``(planes, foreign)``: each foreign plane as a zero-copy
+    :class:`eagle.interop.BufferView` (the plan door's own intake), and
+    ``{name: the caller's array}``."""
+    foreign = {nm: v for nm, v in planes.items() if _is_foreign(v)}
+    if not foreign:
+        return planes, {}
+    from .interop import import_buffer
+
+    return {**planes, **{nm: import_buffer(v) for nm, v in foreign.items()}}, foreign
+
+
+def _native_planes(planes, foreign, specs, device) -> tuple:
+    """``planes`` with each foreign view as the array the loop runs on: read
+    in place, and, where the kernel writes it, a copy (the caller's array is
+    never written; :meth:`Runner.result` hands the answer back). A view on the
+    other side of the plan's device is refused by name. Returns ``(planes,
+    the names the kernel writes)``."""
+    written = {nm for spec in specs for role, nm in spec
+               if role in OUTPUT_ROLES or role == "terminated"}
+    if not foreign:
+        return planes, written
+    import numpy as np
+
+    from .interop import to_cupy
+    out = dict(planes)
+    for nm in foreign:
+        view = planes[nm]
+        if (view.device[0] == 2) != device:
+            raise ValueError(
+                f"eagle.until_done: {nm!r} is a {'device' if view.device[0] == 2 else 'host'} "
+                f"array but this plan runs on the {'device' if device else 'host'}; move it "
+                "(all planes of one run live in one place)")
+        arr = to_cupy(view) if device else np.from_dlpack(view)
+        out[nm] = arr.copy() if nm in written else arr
+    return out, written
+
+
 def _step_planes(plans, specs, planes) -> tuple:
     """``(planes, n)``: one sample's head-shaped arrays as batch-of-one
     views (same memory, written in place), and the batch size. A
@@ -593,7 +638,7 @@ class Runner:
                  "_fast_counts", "_fast_state", "_fast_probe", "_fast_model", "_fast_key",
                  "_mapped_live", "_fast_ev", "_fast_prep",
                  "_fast_fill", "_fast_chunk", "_fast_chunk_ok", "_fast_chunk_pin", "_fast_fit", "_rate", "_recorder",
-                 "_hooks")
+                 "_hooks", "_foreign", "_work", "_written")
 
     @_layout.door
     def __init__(self, plan, *, max_steps, every=None, reorder=None, record=False,
@@ -624,6 +669,7 @@ class Runner:
         # Internal only: ``False`` keeps the size pick for every run instead of
         # timing the other entry (see :meth:`_pick_entry`).
         self._fast_probe = planes.pop("_fast_probe", True)
+        planes, self._foreign = _import_foreign(planes)
         steps = list(plan) if isinstance(plan, (list, tuple)) else [plan]
         hooks = _hook_nodes(steps, record)
         plans = [p for p in steps if not isinstance(p, Node)]
@@ -694,11 +740,6 @@ class Runner:
             raise ValueError(
                 f"eagle.until_done: a per-step hook needs one step per launch; build the "
                 f"plan with steps=1 and without steps='auto' ({name} takes {k!r})")
-        if hooks and refine:
-            raise ValueError(
-                "eagle.until_done: events='refine' with a per-step node is not supported "
-                "yet: the refine entry re-steps the last step without your node; use "
-                "events='step'")
         if len(plans) > 1:
             for i in finishers:
                 if finishes[i]["steps"] not in (FINISH_AUTO, 1):
@@ -730,12 +771,15 @@ class Runner:
         else:
             every = _cadence(name, every, k) if compacting else None
 
+        planes, self._written = _native_planes(planes, self._foreign, specs, device)
+        self._work = dict(planes)
         planes, n = _step_planes(plans, specs, planes)
         if reorder is not None:
             _refuse_moving_node_planes(hooks, specs, planes)
         if mask_name not in planes:
             planes[mask_name] = xp.zeros(n, dtype=xp.bool_)
         mask = planes[mask_name]
+        self._work.setdefault(mask_name, mask)
         nodes = _record_nodes(steps, specs[0], planes) if hooks and record else ()
         # the finished count is word [2] of the fast entries' counter block
         # (see _build_fast): one memset zeroes it with the other counters and
@@ -1013,7 +1057,7 @@ class Runner:
 
         from ._launch_policy import _attr, _fp64_args
 
-        dev = importlib.import_module("eagle.launch")._device_props()
+        dev = importlib.import_module("eagle.launch")._device_props(self._run_device())
         major, minor, sms, ratio, fp64 = _fp64_args(dev, self._scalar_type())
         rate = _core.band_rate(major, minor, sms, ratio, _attr(dev, "clockRate"), fp64,
                                self.n, ops_per_step(self.step.plan.plugin),
@@ -1091,12 +1135,17 @@ class Runner:
                            if self._fast_util_on else None)
         self._size_persist()
 
+    def _run_device(self) -> int:
+        """The CUDA ordinal the step's planes live on (``-1``: the current one)."""
+        on = getattr(self.step, "_device", None)
+        return -1 if on is None else int(on)
+
     def _device_and_ops(self) -> tuple:
         """The device properties and the step's operation count
         (:func:`ops_per_step`) the launch rules read."""
         import importlib
 
-        return (importlib.import_module("eagle.launch")._device_props(),
+        return (importlib.import_module("eagle.launch")._device_props(self._run_device()),
                 ops_per_step(self.step.plan.plugin))
 
     def _chunk_for(self, mean_steps: float) -> int:
@@ -1120,7 +1169,7 @@ class Runner:
         # that shadows the submodule (same reason _plan_binding.py's own
         # .launch() resolves it this way).
         _launch = importlib.import_module("eagle.launch")
-        return persistent_launch(_launch._device_props(),
+        return persistent_launch(_launch._device_props(self._run_device()),
                                  _launch._kernel_attrs(self.step.persist_entry()),
                                  self.n, fill, self._scalar_type(), chunk, self._device_and_ops()[1])
 
@@ -1175,7 +1224,7 @@ class Runner:
         if persist is None:
             return 0
         launch = importlib.import_module("eagle.launch")
-        return capacity(launch._device_props(), launch._kernel_attrs(persist))
+        return capacity(launch._device_props(self._run_device()), launch._kernel_attrs(persist))
 
     def _entry_model(self) -> tuple:
         """``(model, key)`` of a runner that can time both entries. ``model`` holds
@@ -1188,7 +1237,7 @@ class Runner:
         from ._launch_policy import _attr, _fp64_args, capacity
 
         launch = importlib.import_module("eagle.launch")
-        dev = launch._device_props()
+        dev = launch._device_props(self._run_device())
         scalar = self._scalar_type()
         major, minor, sms, ratio, fp64 = _fp64_args(dev, scalar)
         resident = capacity(dev, launch._kernel_attrs(self.step._entry))
@@ -1198,7 +1247,7 @@ class Runner:
         if sms > 0 and clock > 0 and resident > 0:
             model = (major, minor, sms, ratio, clock, fp64, resident, ops)
         name = dev.get("name", b"") if isinstance(dev, dict) else getattr(dev, "name", b"")
-        key = (launch._current_device_ordinal(), str(name), major, minor, sms, clock // 50000,
+        key = (self._run_device() if self._run_device() >= 0 else launch._current_device_ordinal(), str(name), major, minor, sms, clock // 50000,
                _artifact_digest(self.step), scalar, self.n.bit_length())
         return model, key
 
@@ -1656,6 +1705,25 @@ class Runner:
     def _reorders(self) -> bool:
         return self.active is not None and self.active.theta is not None
 
+    def result(self, name: str):
+        """The plane ``name`` after a run, as the caller's own array type. A
+        numpy or cupy plane is the caller's array, written in place. A plane
+        from another framework (jax, torch, ...) is read in place and never
+        written: a plane the kernel writes comes back as a NEW array of that
+        framework holding the answer (a copy per call), an unwritten one as
+        the caller's array itself."""
+        if name not in self._work:
+            raise KeyError(f"eagle.until_done: no plane {name!r} (planes: {sorted(self._work)})")
+        original = self._foreign.get(name)
+        native = self._work[name]
+        if original is None:
+            return native
+        if name not in self._written:
+            return original
+        from .interop import export_like
+
+        return export_like(original, native)
+
     def reset(self) -> None:
         """Clear the mask/counter/active set: the next :meth:`run` starts the batch over."""
         if self._reorders():
@@ -1735,23 +1803,25 @@ def _record_nodes(steps, spec, planes) -> list:
             raise ValueError(f"eagle.until_done: two nodes of the recorded step are labelled "
                              f"{label!r}; give each node a name= (vjps= keys on it)")
     writer = {pn: node.label for node, _r, writes in out for _nm, pn, _a in writes}
+    order = {label: i for i, label in enumerate(labels)}
     for node, reads, writes in out:
         for (nm, pn, _a), w in [(x, False) for x in reads] + [(x, True) for x in writes]:
             role = roles.get(pn)
             if role == "uniform":
-                raise ValueError(f"eagle.until_done: node {node.label!r} reads parameter "
-                                 f"{pn!r}: bind it as a per-sample plane or a Table")
+                if w:
+                    raise ValueError(f"eagle.until_done: node {node.label!r} writes parameter "
+                                     f"{pn!r}: a node only reads a parameter")
+                continue
             if role is None or (w and role in ("mutable", "terminated", "lookup", "out")):
                 raise ValueError(
                     f"eagle.until_done: node {node.label!r} declares {nm!r}, which the plan "
                     + ("reads as state, not as a per-sample input" if role else "does not bind")
                     + "; in a recorded step a node reads the plan's planes and writes planes "
                     "the plan reads")
-            if not w and pn in writer:
+            if not w and pn in writer and order[writer[pn]] >= order[node.label]:
                 raise ValueError(
-                    f"eagle.until_done: node-to-node planes inside a recorded step are not "
-                    f"supported yet: node {node.label!r} reads {pn!r}, which node "
-                    f"{writer[pn]!r} writes")
+                    f"eagle.until_done: node {node.label!r} reads {pn!r}, which node "
+                    f"{writer[pn]!r} writes after it; put {writer[pn]!r} first")
     return out
 
 

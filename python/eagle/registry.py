@@ -317,6 +317,11 @@ def _preload_plugins_pass(manifest, path) -> None:
             )
         seen_ids.add(pid)
         fmt = entry.get("format")
+        if fmt == "host":
+            raise ValueError(
+                f"{path.name}: manifest plugin {pid!r}: format 'host' is a host "
+                "library; load it with the host (CPU) registry"
+            )
         if fmt not in MANIFEST_FORMATS:
             raise ValueError(
                 f"{path.name}: manifest plugin {pid!r}: unknown artifact format "

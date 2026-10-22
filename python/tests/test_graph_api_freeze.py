@@ -15,10 +15,10 @@ def _sig(f):
 
 def test_graph_methods_and_signatures():
     C = eagle.Graph
-    assert _sig(C.add) == "(self, bound, *, name=None) -> 'Graph'"
+    assert _sig(C.add) == "(self, bound, *, name=None, grad=True) -> 'Graph'"
     assert _sig(C.add_node) == "(self, node, *, name=None) -> 'Graph'"
     assert _sig(C.add_group) == "(self, branches, *, names=None) -> 'Graph'"
-    assert _sig(C.build) == "(self, *, backend=None, record=False, dispatch=None) -> 'Graph'"
+    assert _sig(C.build) == "(self, *, backend=None, record=False, dispatch=None, device=None) -> 'Graph'"
     assert _sig(C.launch) == "(self, n: 'int' = 1) -> 'Graph'"
     assert _sig(C.enqueue) == "(self, n: 'int' = 1) -> 'Graph'"
     assert _sig(C.synchronize) == "(self) -> 'Graph'"
@@ -40,7 +40,7 @@ def test_module_functions_and_registry():
         "(kind: 'str', *, reads, writes, lower_gpu, lower_cpu, transpose=None, "
         "record_planes=None, native_entry=None, tier='capture', check=None) -> 'NodeKind'")
     assert _sig(G.opaque) == ("(fn, *, reads=(), writes=(), eager=False, stream=None, "
-                              "name=None) -> 'Node'")
+                              "name=None, grad=True) -> 'Node'")
     assert _sig(G.child) == "(owner, *, reads=(), writes=(), name=None) -> 'Node'"
     # one home for conditionals: the existing eagle.skippable / eagle.repeat_while
     assert not hasattr(G, "skippable") and not hasattr(G, "repeat_while")

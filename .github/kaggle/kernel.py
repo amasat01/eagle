@@ -3,7 +3,7 @@
 #
 # The script Kaggle runs on a T4: it installs the family, checks that JAX sees the GPU, then either
 #   --mode tests      runs the interop certification rows plus the JAX rows, or
-#   --mode notebooks  runs EVERY docs notebook (site, eagle, hawk; found by glob, see nb_run_gate.discover),
+#   --mode notebooks  runs EVERY docs notebook (site, eagle, hawk; found by glob, see raptor_docs.nb.discover),
 #                     each from a copy in an empty directory with its setup cell executing for real (the
 #                     Kaggle branch), and records PASS / FAIL / SKIP + seconds per notebook,
 # and writes result.json. drive.py pushes it with the settings below filled in, one kernel per mode and
@@ -53,7 +53,8 @@ def settings():
     ap.add_argument("--wheel-dir", default="/kaggle/input", help="--source wheel: where the dataset is mounted")
     ap.add_argument("--pre", action="store_true")
     ap.add_argument("--version", default="")
-    for name in ("eagle", "hawk", "raptor", "aether"):
+    ap.add_argument("--sibling-pins", default="", help="source wheel: exact sibling pins, `pkg==V ...`")
+    for name in ("eagle", "hawk", "raptor", "aether", "site"):
         ap.add_argument(f"--{name}-ref", default="main")
     ap.add_argument("--eagle-src", help="local eagle checkout (default: the one holding this script)")
     ap.add_argument("--raptor-src", help="local raptor checkout, sets RAPTOR_ROOT")
@@ -118,8 +119,26 @@ def shipped_wheel(cfg, py):
     got = hashlib.sha256(wheel.read_bytes()).hexdigest()
     if f"{got}  {wheel.name}" not in sums.decode().splitlines():
         raise SystemExit(f"{wheel.name}: sha256 {got} is not the one in the shipped SHA256SUMS")
+    listed = {ln.split()[-1]: ln.split()[0] for ln in sums.decode().splitlines()}
+    for f in sorted(p for p in wheel.parent.iterdir() if p.is_file() and p.name != "SHA256SUMS"):
+        if listed.get(f.name) != hashlib.sha256(f.read_bytes()).hexdigest():
+            raise SystemExit(f"{f.name}: not in the shipped SHA256SUMS or its sha256 differs")
     print("wheel", wheel.name, "sha256 ok")
     return wheel
+
+
+def install_args(cfg, py, cu, pre, pin, others):
+    """pip arguments for source pypi or wheel. For wheel, the dataset folder is a find-links source and the siblings
+    (raptor-hawk with its extra, raptor-core, aether-dsc) are exact pins: PyPI's when released, else built from the sdist
+    or wheel the pull request's run shipped."""
+    if cfg.source == "pypi":
+        return [*pre, *torch_index(cfg), f"raptor-eagle[{cu}]{pin}", f"raptor-hawk[{cu}]", *others]
+    wheel = shipped_wheel(cfg, py)
+    pins = (getattr(cfg, "sibling_pins", "") or "").split()
+    hawk = next((p.split("==")[1] for p in pins if p.startswith("raptor-hawk==")), None)
+    rest = [p for p in pins if not p.startswith("raptor-hawk==")]
+    return [*pre, *torch_index(cfg), "--find-links", str(wheel.parent), f"{wheel}[{cu}]",
+            f"raptor-hawk[{cu}]" + (f"=={hawk}" if hawk else ""), *rest, *others]
 
 
 def install(cfg, py, use_uv, work):
@@ -128,8 +147,7 @@ def install(cfg, py, use_uv, work):
     pin = f"=={cfg.version}" if cfg.version else ""
     others = ["jax[" + cu + "]", "torch", "warp-lang", "pytest", "nbclient", "ipykernel", "nbformat", "matplotlib"]
     if cfg.source in ("pypi", "wheel"):
-        eagle = f"raptor-eagle[{cu}]{pin}" if cfg.source == "pypi" else f"{shipped_wheel(cfg, py)}[{cu}]"
-        rc = pip(py, use_uv, *pre, *torch_index(cfg), eagle, f"raptor-hawk[{cu}]", *others)
+        rc = pip(py, use_uv, *install_args(cfg, py, cu, pre, pin, others))
     else:
         src = work / "src"
         src.mkdir(exist_ok=True)
@@ -273,11 +291,9 @@ def table_of(rows):
 def run_notebooks(cfg, py, work, roots, result, out):
     """Every notebook of the checkouts in ``roots`` (repo name -> path; 'site' = the site repository), one by one.
     result.json is rewritten after each one, so a kernel that dies still shows what ran."""
-    tools = roots["eagle"] / "docs" / "_tools"
-    sys.path.insert(0, str(tools))
-    import nb_hosted
-    import nb_run_gate
-    found = nb_run_gate.discover({r: roots[r] for r in ("site", "eagle", "hawk") if r in roots})
+    sys.path.insert(0, str(roots["site"]))  # raptor_docs, the family's docs tooling, lives in the site checkout
+    from raptor_docs.nb import discover, hosted as nb_hosted, run_gate as nb_run_gate
+    found = discover({r: roots[r] for r in ("site", "eagle", "hawk") if r in roots})
     todo = [(repo, p, p.relative_to(roots[repo] / ("notebooks" if repo == "site" else "docs/content")))
             for repo, nbs in found.items() for p in nbs if cfg.only in p.as_posix()]
     header(f"{len(todo)} notebooks: " + ", ".join(f"{r} {len(n)}" for r, n in found.items()))
@@ -368,7 +384,7 @@ def main():
         clone("raptor", cfg.raptor_ref, src / "raptor")
         roots.update(eagle=src / "eagle", raptor=src / "raptor")
         if cfg.mode == "notebooks":
-            clone(SITE_REPO, "main", src / SITE_REPO)
+            clone(SITE_REPO, cfg.site_ref, src / SITE_REPO)
             clone("hawk", cfg.hawk_ref, src / "hawk")
             clone("aether", cfg.aether_ref, src / "aether")
             roots.update(site=src / SITE_REPO, hawk=src / "hawk", aether=src / "aether")

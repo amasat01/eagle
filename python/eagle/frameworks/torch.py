@@ -7,7 +7,8 @@ kernel launch, and a derivative of a derivative is one more launch of the
 kernel hawk derives from the derived kernel, so ``create_graph=True``,
 ``torch.autograd.functional.hessian`` and ``gradgradcheck`` work to any
 depth. ``torch.func.grad``/``jvp``/``vmap`` run through the same functions
-(``vmap`` folds the batch into the sample axis; a batched ``Param`` loops).
+(``vmap`` folds the batch into the sample axis, a batched ``Param`` as a table read per sample;
+a kernel that reduces over samples loops over a batched ``Param``).
 
 Every launch is ONE generic ``torch.library.custom_op``, ``eagle::launch``
 (registered once per process; the kernel is named by a digest string, so there
@@ -54,6 +55,7 @@ from types import MappingProxyType
 import torch
 
 from .. import FINISHED_PLANE, _cell_rows, _split
+from .._graph_reduce import check_policy
 from ._kernel_planes import INPUT_ROLES, OUTPUT_ROLES, _prior_reads, call_mode, promote
 from ._tower import LOCK, finished_identity, plane_names
 
@@ -66,6 +68,8 @@ _WHO = "eagle.frameworks.torch"
 _INPUT_ROLES = INPUT_ROLES | {"uniform"}
 #: A Param, read by value (``uniform``) or from a one-cell device plane (``lookup``).
 _PARAM_ROLES = frozenset({"uniform", "lookup"})
+#: the per-sample plane naming each sample's parameter cell (``hawk.diff.params.CELL_PLANE``)
+_CELL_PLANE = "param_cell"
 
 #: torch floating dtype of each hawk build mode.
 _DTYPE_OF = MappingProxyType({"float64": torch.float64, "float32": torch.float32})
@@ -77,7 +81,7 @@ _UIDS = itertools.count()
 _OP = None
 
 
-def function(kernel, *, wrt=None, cache_dir=None, device_arch=None):
+def function(kernel, *, wrt=None, cache_dir=None, device_arch=None, policy="compensated"):
     """Wrap ``kernel`` as a torch-differentiable callable.
 
     :param kernel: a per-sample hawk kernel (``@hawk.kernel``). Its inputs
@@ -86,9 +90,12 @@ def function(kernel, *, wrt=None, cache_dir=None, device_arch=None):
     :param wrt: names to differentiate (default: every differentiable input).
     :param cache_dir: where artifacts publish (default: a private temp dir).
     :param device_arch: CUDA arch to compile for (default: the first call's device).
+    :param policy: how a sum over samples (a cell) is finished: ``"compensated"``
+        (default), ``"ordered"`` or ``"auto"``, as for :func:`eagle.reduce`.
     :returns: a :class:`KernelFunction`.
     """
-    return KernelFunction(kernel, wrt=wrt, cache_dir=cache_dir, device_arch=device_arch)
+    return KernelFunction(kernel, wrt=wrt, cache_dir=cache_dir, device_arch=device_arch,
+                          policy=policy)
 
 
 # -- the generic op ----------------------------------------------------------
@@ -185,8 +192,11 @@ def _backward(saved, grad_outs, needs, plan, traced):
     again; traced (``torch.compile``), it is the generic op itself, not a nested
     Function, so it traces with no graph break (a second derivative through a
     compiled region is not supported)."""
-    target, args_plan, grad_plan, mask_pos, carried = plan
+    target, args_plan, grad_plan, mask_pos, carried, unseeded = plan
     args = [saved[i] if kind == 0 else grad_outs[i] for kind, i in args_plan]
+    for k in unseeded:      # a cell sums every sample: a finished one must seed nothing
+        if args[k].shape[-1] == saved[mask_pos].shape[-1]:      # a per-sample seed, not a cell's
+            args[k] = args[k].masked_fill(saved[mask_pos], 0.0)
     got = _apply_op(target, args) if traced else target.apply(*args)
     return _gradients(got, saved, needs, grad_plan, mask_pos, grad_outs, carried)
 
@@ -225,10 +235,16 @@ class _Level:
         )
         self.spec = tuple(kernel.arg_spec)
         self.role = {name: role for role, name in self.spec}
+        #: reads one parameter cell per sample (``hawk.diff.param_planes(per_cell=True)``): its
+        #: lookups are tables of one entry per cell, the cell plane is built by the launch
+        self.per_cell = self.role.get(_CELL_PLANE) == "per_sample"
+        self.base = self.kind = None
         #: Mutable planes read before written (carried state): inputs as well as outputs
         self.state = tuple(state)
         self.finish = kernel.walk.finish
         internal = {FINISHED_PLANE} if self.finish is not None else frozenset()
+        if self.per_cell:
+            internal = internal | {_CELL_PLANE}
         order = list(order) if order is not None else [n for _, n in self.spec]
         self.inputs = tuple(
             n
@@ -253,7 +269,8 @@ class _Level:
         #: a reduction over samples: its rows are eagle's scratch, the cell is the output
         self.cells = _cell_rows.kernel_cells(kernel)
         companions = _cell_rows.row_names(self.cells) - frozenset(self.cells)
-        outputs = [n for n in order if (self.role.get(n) in OUTPUT_ROLES or n in self.cells)
+        written = OUTPUT_ROLES | {"accum_out"} if self.per_cell else OUTPUT_ROLES
+        outputs = [n for n in order if (self.role.get(n) in written or n in self.cells)
                    and n not in companions]
         if self.finishes_terminated:
             outputs.append(self.terminated)
@@ -311,7 +328,10 @@ class _Level:
         derived = ((step_vjp if self.state else vjp) if reverse else jvp)(
             self.kernel, wrt=self.wrt
         )
-        kernel = Kernel(f"{self.owner.name}_{self.path}{kind[0]}", derived)
+        # the scattered gradient of a per-cell kernel builds alone (one execution axis per bundle)
+        alone = self.per_cell and reverse
+        kernel = Kernel(f"{self.owner.name}_{self.path}{kind[0]}",
+                        tuple(derived) if alone else derived)
         floats = [o for o in self.outputs if o != self.terminated]
         nexts = {o: f"bar_{o}_next" for o in floats if self.state}
         named = plane_names(
@@ -324,8 +344,10 @@ class _Level:
             {n for _, n in kernel.arg_spec},
         )
         child = _Level(
-            self.owner, kernel, chain=(*self.chain, kernel), path=self.path + kind[0]
+            self.owner, kernel, chain=(kernel,) if alone else (*self.chain, kernel),
+            path=self.path + kind[0]
         )
+        child.base, child.kind = self, kind
         child.fn  # built now, so a traced pass never builds under the lock
         child.wrt = tuple(child._wrt_names())
         if reverse:
@@ -352,12 +374,17 @@ class _Level:
         child_at = {n: j for j, n in enumerate(child.outputs)}
         grads = tuple(
             (child_at.get(child.grad.get(n), -1),
-             (2 if child.grad.get(n) in child.cells else 1) if n in self.params else 0)
+             (2 if child.grad.get(n) in child.cells or self.per_cell else 1)
+             if n in self.params else 0)
             for n in self.inputs
         )
         mask = in_at.get(self.terminated, -1) if self.terminated is not None else -1
         carried = tuple(out_at[n] if n in self.state else -1 for n in self.inputs)
-        return (child.digests if traced else child.fn), args, grads, mask, carried
+        # the per-sample seeds (not a Param's, which is one number) of a level whose vjp has cells
+        masked = tuple(k for k, (kind, _) in enumerate(args)
+                       if kind == 1 and child.cells and mask >= 0
+                       and child.role.get(child.inputs[k]) not in ("uniform", "lookup"))
+        return (child.digests if traced else child.fn), args, grads, mask, carried, masked
 
     def link(self):
         """This level's eager backward wiring (its vjp level, derived on demand)."""
@@ -386,7 +413,9 @@ class _Level:
         return self._fn_traced if _is_compiling() else fn
 
     # -- shapes -------------------------------------------------------------
-    def plane_shape(self, name, n):
+    def plane_shape(self, name, n, cells=1):
+        if self.per_cell and self.role.get(name) in ("lookup", "accum_out"):
+            return (cells,)
         if name in self.cells:
             return (1,)
         return (n,) if self.width.get(name, 1) == 1 else (self.width[name], n)
@@ -425,9 +454,10 @@ class _Level:
         values = dict(zip(self.inputs, planes))
         n, device = self._samples(values)
         dtype = _DTYPE_OF[mode]
+        cells = self._table_cells(values)
         return [
             torch.empty(
-                self.plane_shape(name, n),
+                self.plane_shape(name, n, cells),
                 dtype=torch.bool if name == self.terminated else dtype,
                 device=device,
             )
@@ -441,11 +471,14 @@ class _Level:
         values = dict(zip(self.inputs, planes))
         n, device = self._samples(values)
         dtype = _DTYPE_OF[mode]
+        cells = self._table_cells(values)
         outs = {
-            name: torch.zeros(self.plane_shape(name, n), dtype=dtype, device=device)
+            name: torch.zeros(self.plane_shape(name, n, cells), dtype=dtype, device=device)
             for name in self.outputs
             if name != self.terminated
         }
+        if self.per_cell:       # sample ``i`` reads cell ``i % cells``
+            values[_CELL_PLANE] = torch.arange(cells, device=device).repeat(n // cells)
         if self.finishes_terminated:
             outs[self.terminated] = (
                 values[self.terminated].detach().contiguous().clone()
@@ -483,12 +516,46 @@ class _Level:
         xp = numpy
         if device.type == "cuda":
             import cupy as xp
-        return _cell_rows.scratch(self, n, xp, numpy.dtype(mode), cells=self.cells)
+        return _cell_rows.scratch(self, n, xp, numpy.dtype(mode), self.owner.policy,
+                                  cells=self.cells)
+
+    def _table_cells(self, values):
+        """The entries of a per-cell kernel's parameter tables (1 for any other kernel)."""
+        return next((values[n].numel() for n in self.params if self.per_cell), 1)
+
+    def cell_twin(self):
+        """This level with each ``Param`` read from a table of one entry per parameter cell
+        (so one launch runs a batch of values), or ``None`` when hawk refuses the kernel
+        (it reduces over samples itself, or has a ``jump=`` plan)."""
+        with LOCK:
+            if "twin" not in self._children:
+                from hawk.diff import param_planes
+                from hawk.ir.nodes import HawkError
+
+                twin = None
+                try:
+                    if self.base is not None:
+                        below = self.base.cell_twin()
+                        twin = None if below is None else below.child(self.kind)
+                    elif self.owner._root is self:
+                        kernel = param_planes(self.owner.declared, per_cell=True)
+                        twin = _Level(self.owner, kernel, chain=(kernel,), path="c",
+                                      state=self.state)
+                        twin.fn
+                        twin.wrt = tuple(n for n in self.wrt if n in twin.inputs)
+                except HawkError:
+                    twin = None
+                self._children["twin"] = twin
+            return self._children["twin"]
 
     def _mask(self, plane, values):
         if self.terminated is None:
             return plane
         return plane.masked_fill(values[self.terminated], 0.0)
+
+    def _is_table(self, name):
+        """Whether ``name`` has one entry per parameter cell (a per-cell kernel's scattered gradient)."""
+        return self.per_cell and self.role.get(name) in ("lookup", "accum_out")
 
     def jvp_pass(self, saved, tangents):
         child = self.child("jvp")
@@ -506,20 +573,27 @@ class _Level:
                 )
         got = dict(zip(child.outputs, child.fn_for_call.apply(*args)))
         return tuple(
-            (got[child.tan_out[o]] if o in self.cells else self._mask(got[child.tan_out[o]], values))
+            (got[child.tan_out[o]] if o in self.cells or self._is_table(o)
+             else self._mask(got[child.tan_out[o]], values))
             if o != self.terminated and child.tan_out.get(o) in got
             else None
             for o in self.outputs
         )
 
     def vmap_pass(self, info, in_dims, args):
-        """``torch.func.vmap``: a batch of calls is ONE call over
-        ``n * batch`` samples (the batch folds into the sample axis); a
-        batched ``Param`` cannot, so that case is a loop of calls."""
+        """``torch.func.vmap``: a batch of calls is ONE call over ``n * batch`` samples
+        (the batch folds into the sample axis). A batched ``Param`` folds too, as a table
+        of one entry per batch entry that sample ``i * batch + b`` reads at cell ``b``;
+        a kernel that reduces over samples (or hawk refuses) loops over the entries."""
         size = info.batch_size
+        batched = any(d is not None for n, d in zip(self.inputs, in_dims) if n in self.params)
+        # a Param's gradient is a sum over the folded samples: one entry per batch entry
+        twin = self.cell_twin() if (batched or self.cells) and not self.per_cell else None
+        if twin is not None and set(self.inputs) <= set(twin.inputs) \
+                and set(self.outputs) <= set(twin.outputs):
+            return self._vmap_cells(twin, size, in_dims, args)
         # a batched Param, or a cell (a sum over the folded samples), cannot fold
-        if self.cells or any(d is not None for n, d in zip(self.inputs, in_dims)
-                             if n in self.params):
+        if self.cells or batched or self.per_cell:
             rows = []
             for i in range(size):
                 picked = [
@@ -530,21 +604,35 @@ class _Level:
                 torch.stack([r[j] for r in rows]) for j in range(len(self.outputs))
             )
             return outs, (0,) * len(outs)
-        folded = []
-        for name, a, d in zip(self.inputs, args, in_dims):
-            if name in self.params:
-                folded.append(a)
-                continue
-            a = (
-                a.movedim(d, -1)
-                if d is not None
-                else a.unsqueeze(-1).expand(*a.shape, size)
-            )
-            folded.append(a.reshape(*a.shape[:-2], -1))
+        folded = [a if name in self.params else _fold(a, d, size)
+                  for name, a, d in zip(self.inputs, args, in_dims)]
         outs = tuple(
             o.reshape(*o.shape[:-1], -1, size) for o in self.fn_for_call.apply(*folded)
         )
         return outs, tuple(o.ndim - 1 for o in outs)
+
+    def _vmap_cells(self, twin, size, in_dims, args):
+        by = {n: (a, d) for n, a, d in zip(self.inputs, args, in_dims)}
+        folded = []
+        for name in twin.inputs:
+            a, d = by[name]
+            if name in self.params:
+                a = (a.reshape(1).expand(size) if d is None
+                     else a.movedim(d, 0).reshape(size)).contiguous()
+            else:
+                a = _fold(a, d, size)
+            folded.append(a)
+        got = dict(zip(twin.outputs, twin.fn_for_call.apply(*folded)))
+        outs, dims = [], []
+        for name in self.outputs:
+            o = got[name]
+            if name in self.cells:          # a sum over the samples: one entry per cell
+                outs.append(o.reshape(size, 1))
+                dims.append(0)
+            else:
+                outs.append(o.reshape(*o.shape[:-1], -1, size))
+                dims.append(o.ndim)
+        return tuple(outs), tuple(dims)
 
     # -- the launch itself ------------------------------------------------------
     def _run(self, mode, planes, device):
@@ -565,7 +653,7 @@ class _Level:
             if role == "uniform":
                 values[name] = float(value)
             elif role == "lookup":
-                values[name] = value.reshape(1).contiguous()
+                values[name] = value.reshape(-1).contiguous()
             else:
                 values[name] = value if role in OUTPUT_ROLES else value.contiguous()
         if device.type == "cuda":
@@ -689,7 +777,9 @@ class KernelFunction:
         reading it.
     """
 
-    def __init__(self, kernel, *, wrt=None, cache_dir=None, device_arch=None):
+    def __init__(self, kernel, *, wrt=None, cache_dir=None, device_arch=None,
+                 policy="compensated"):
+        self.policy = check_policy(policy, "eagle.frameworks.torch")
         from hawk.diff import step_vjp, vjp
 
         role_of = {name: role for role, name in kernel.arg_spec}
@@ -724,6 +814,7 @@ class KernelFunction:
             n for n in order if role_of[n] == "mutable" and n in _prior_reads(kernel)
         )
         self.name = kernel.name
+        self.declared = kernel
         self.uid = next(_UIDS)
         _generic_op()
         base = promote(kernel)
@@ -900,6 +991,12 @@ def _sample_major_view(value):
     return value.T if value.ndim == 2 else value
 
 
+def _fold(a, d, size):
+    """A plane batched along axis ``d`` (or not at all) as one sample axis, sample-major."""
+    a = a.movedim(d, -1) if d is not None else a.unsqueeze(-1).expand(*a.shape, size)
+    return a.reshape(*a.shape[:-2], -1)
+
+
 def _requirements(cls, tensor, device, index=None, name=None, mode="float64"):
     """What a bound plane must be: for the synthesised ``finished_count``
     lookup cell, a 4-byte integer (see ``_Level._run``); the tensor's own dtype
@@ -907,6 +1004,8 @@ def _requirements(cls, tensor, device, index=None, name=None, mode="float64"):
     otherwise; contiguous; on ``device``."""
     if name == FINISHED_PLANE:
         dtype = "int32"
+    elif name == _CELL_PLANE:
+        dtype = "int64"
     else:
         dtype = "bool" if tensor.dtype == torch.bool else mode
     return cls(dtype=dtype, contiguous=True, device=device, device_id=index)

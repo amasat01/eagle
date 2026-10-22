@@ -45,6 +45,7 @@ import numpy as np
 import warp as wp
 
 from .. import FINISHED_PLANE, _cell_rows, _split
+from .._graph_reduce import check_policy
 from ._kernel_planes import call_mode, promote
 from ._tower import LOCK, Level
 
@@ -54,14 +55,16 @@ __all__ = ["WarpFunction", "function"]
 _CHUNKS = 256
 
 
-def function(kernel, *, cache_dir=None, device_arch=None):
+def function(kernel, *, cache_dir=None, device_arch=None, policy="compensated"):
     """Wrap ``kernel`` (a hawk per-sample kernel) as a callable over Warp arrays.
 
     :param cache_dir: where artifacts publish (default: a private temp dir).
     :param device_arch: CUDA arch to compile for (default: the arrays' device).
+    :param policy: how a sum over samples (a cell) is finished: ``"compensated"``
+        (default), ``"ordered"`` or ``"auto"``, as for :func:`eagle.reduce`.
     :returns: a :class:`WarpFunction`.
     """
-    return WarpFunction(kernel, cache_dir=cache_dir, device_arch=device_arch)
+    return WarpFunction(kernel, cache_dir=cache_dir, device_arch=device_arch, policy=policy)
 
 
 # -- the accumulate / reduce kernels (per float dtype, built once) --------------
@@ -183,7 +186,8 @@ class WarpFunction:
         ``Terminated`` mask when the kernel finishes it.
     """
 
-    def __init__(self, kernel, *, cache_dir=None, device_arch=None):
+    def __init__(self, kernel, *, cache_dir=None, device_arch=None, policy="compensated"):
+        self._policy = check_policy(policy, "eagle.frameworks.warp")
         self.name = kernel.name
         self._private = None
         if cache_dir is None:
@@ -237,8 +241,7 @@ class WarpFunction:
             if samples is not None:
                 self._rows(level, int(samples), mode, device)
 
-    @staticmethod
-    def _rows(level, n, mode, device):
+    def _rows(self, level, n, mode, device):
         """The row scratch of ``level`` at ``n`` samples (``None`` without a reduction)."""
         if not level.sig.cells:
             return None
@@ -246,13 +249,15 @@ class WarpFunction:
             import cupy as xp
         else:
             xp = np
-        if device.is_cuda and device.is_capturing and not _cell_rows.has(level, n, xp, mode):
+        if (device.is_cuda and device.is_capturing
+                and not _cell_rows.has(level, n, xp, mode, self._policy)):
             raise RuntimeError(
                 f"eagle.frameworks.warp: {level.label!r} reduces over samples and a graph "
                 "capture is open (its row scratch cannot be allocated inside one); call "
                 f"fn.prepare(mode, device, backward=..., samples={n}) or run the call once "
                 "before wp.capture_begin")
-        return _cell_rows.scratch(level, n, xp, np.dtype(mode), cells=level.sig.cells)
+        return _cell_rows.scratch(level, n, xp, np.dtype(mode), self._policy,
+                                  cells=level.sig.cells)
 
     def _bind(self, args, kwargs):
         names = self.inputs

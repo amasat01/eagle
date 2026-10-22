@@ -14,13 +14,14 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <limits>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
 #include <string>
 #include <type_traits>
 #include <string_view>
-#include <unordered_map>
 #include <vector>
 
 #include "eagle/reduce/canonical.h"
@@ -91,13 +92,24 @@ struct Recipe {
 };
 
 std::shared_mutex g_mutex;
-std::unordered_map<std::string, std::shared_ptr<const Recipe>> g_table;
+// One recipe per (digest, ordinal): a function built for each GPU coexists.
+std::map<std::pair<std::string, std::int32_t>, std::shared_ptr<const Recipe>> g_table;
 
-std::shared_ptr<const Recipe> find(std::string_view digest)
+/** The recipe of @p digest for @p ordinal (-1: any); @p other, when none matches, gets the ordinal
+ *  another registration holds (-1 if the digest is unknown). */
+std::shared_ptr<const Recipe> find(std::string_view digest, std::int32_t ordinal, std::int32_t& other)
 {
     std::shared_lock<std::shared_mutex> lock(g_mutex);
-    const auto it = g_table.find(std::string(digest));
-    return it == g_table.end() ? nullptr : it->second;
+    const std::string key(digest);
+    const auto it = g_table.lower_bound({ key, ordinal < 0 ? std::numeric_limits<std::int32_t>::min() : ordinal });
+    other = -1;
+    if (it == g_table.end() || it->first.first != key)
+        return nullptr;
+    if (ordinal >= 0 && it->first.second != ordinal) {
+        other = it->first.second;
+        return nullptr;
+    }
+    return it->second;
 }
 
 std::string quoted(std::string_view digest) { return "eagle: kernel '" + std::string(digest) + "'"; }
@@ -237,9 +249,17 @@ Error prepare(const Recipe& r, std::string_view digest, std::vector<View>& views
     return Error::Success();
 }
 
-std::shared_ptr<const Recipe> lookup(std::string_view digest, std::uint32_t platform, Error& err)
+std::shared_ptr<const Recipe> lookup(std::string_view digest, std::uint32_t platform, std::int32_t ordinal, Error& err)
 {
-    auto r = find(digest);
+    std::int32_t other = -1;
+    auto r = find(digest, ordinal, other);
+    if (!r && other >= 0) {
+        err = Error::InvalidArgument(quoted(digest) + " was loaded for CUDA device " + std::to_string(other)
+            + ", this call runs on device " + std::to_string(ordinal)
+            + ": build the function under with jax.default_device(jax.devices()[" + std::to_string(ordinal)
+            + "]) (one function per GPU)");
+        return nullptr;
+    }
     if (!r) {
         err = Error::InvalidArgument(quoted(digest)
             + " is not loaded in this process (an exported or cached module needs "
@@ -293,7 +313,7 @@ void finishCellHost(const Recipe& r, const std::vector<View>& views, std::size_t
 Error launchCpu(std::string_view digest, const XLA_FFI_CallFrame& frame)
 {
     Error err = Error::Success();
-    const auto r = lookup(digest, EAGLE_XLA_PLATFORM_CPU, err);
+    const auto r = lookup(digest, EAGLE_XLA_PLATFORM_CPU, -1, err);
     if (!r)
         return err;
     std::vector<View> views;
@@ -329,12 +349,9 @@ Error launchCpu(std::string_view digest, const XLA_FFI_CallFrame& frame)
 Error launchCuda(void* stream, std::int32_t ordinal, std::string_view digest, const XLA_FFI_CallFrame& frame)
 {
     Error err = Error::Success();
-    const auto r = lookup(digest, EAGLE_XLA_PLATFORM_CUDA, err);
+    const auto r = lookup(digest, EAGLE_XLA_PLATFORM_CUDA, ordinal, err);
     if (!r)
         return err;
-    if (r->ordinal != ordinal)
-        return Error::InvalidArgument(quoted(digest) + " was loaded for CUDA device " + std::to_string(r->ordinal)
-            + ", this call runs on device " + std::to_string(ordinal) + " (one GPU per process until 0.7)");
     std::vector<View> views;
     if (Error e = gather(*r, digest, frame, views); e.failure())
         return e;
@@ -484,7 +501,8 @@ EAGLE_XLA_API std::int32_t eagle_xla_register(const char* digest, const struct e
     r->workA = c.work_a;
     r->workB = c.work_b;
     std::unique_lock<std::shared_mutex> lock(g_mutex);
-    g_table[digest] = std::move(r);
+    const std::int32_t ordinal = r->ordinal;
+    g_table[{ digest, ordinal }] = std::move(r);
     return EAGLE_XLA_OK;
 }
 

@@ -37,6 +37,12 @@ def _same(a, b) -> bool:
 
 
 def _body(child, ctx):
+    if child.kind == "sequence":
+        part = next(p for p in child.payload if p.grad)
+        raise ValueError(
+            f"eagle.diff.Reverse: node {ctx.label!r} repeats a sequence holding the "
+            f"differentiated part {part.label!r}; mark it grad=False (a controller), or "
+            "move it outside the loop")
     if child.kind != "launch":
         raise ValueError(
             f"eagle.diff.Reverse: node {ctx.label!r} repeats a {child.kind!r} step; a "

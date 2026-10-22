@@ -242,3 +242,69 @@ def test_a_node_vjp_runs_in_the_reverse(tmp_path):
     back = opaque(lambda: np.multiply(cz, 3.0, out=gy), reads={"z": cz}, writes={"y": gy})
     grads = eagle.diff.reverse(g.record, {"addone.y": np.full(16, 2.0)}, vjps={"model": back})
     np.testing.assert_array_equal(grads["y"], np.full(16, 6.0))
+
+
+@pytest.mark.gpu
+def test_a_launch_inside_a_stream_capture_is_refused(tmp_path, monkeypatch):
+    """Inside torch.cuda.graph an eagle graph's launch and enqueue refuse by name
+    (they used to record an empty graph); outside a capture they run."""
+    pytest.importorskip("hawk")
+    from test_interop_inject import _torch_cuda, inj_lin
+
+    from eagle import pipeline
+    from eagle.interop import import_buffer
+
+    torch = _torch_cuda()
+    import cupy as cp
+
+    (p,) = eagle.plan.auto([inj_lin], targets=("cuda",), cache_dir=str(tmp_path / "c"))
+    w = torch.tensor([2.0, 0.5], dtype=torch.float64, device="cuda")
+    x, y = cp.linspace(-1, 1, 64), cp.zeros(64)
+    g = eagle.Graph().add(p.bind(w=import_buffer(w), x=x, y=y), name="lin").build()
+    g.launch()
+    want = y.copy()
+    assert bool((y == 2.0 * x + 0.5).all())          # outside a capture: unaffected
+    for call in ("launch", "enqueue"):
+        tg = torch.cuda.CUDAGraph()
+        with pytest.raises(RuntimeError, match="inside a stream capture.*eagle.graph.child"):
+            with torch.cuda.graph(tg, stream=torch.cuda.Stream()):
+                getattr(g, call)()
+    g.launch()
+    assert bool((y == want).all())
+    # delete the check: the capture records nothing and the replay is silently wrong
+    monkeypatch.setattr(G, "refuse_in_capture", lambda what: None)
+    monkeypatch.setattr(pipeline, "refuse_in_capture", lambda what: None)
+    tg = torch.cuda.CUDAGraph()
+    y[...] = 0
+    torch.cuda.synchronize()
+    with pytest.warns(UserWarning, match="empty"), torch.cuda.graph(tg, stream=torch.cuda.Stream()):
+        g.enqueue()
+    y[...] = 0                      # the launch ran live; the graph itself holds nothing
+    torch.cuda.synchronize()
+    tg.replay()
+    torch.cuda.synchronize()
+    assert not bool((y == want).all())
+
+
+@pytest.mark.gpu
+def test_a_launch_inside_a_warp_capture_is_refused(tmp_path):
+    """Under wp.ScopedCapture the refusal is the named one, not a raw CUDA error."""
+    pytest.importorskip("hawk")
+    wp = pytest.importorskip("warp")
+    from test_interop_inject import inj_lin
+
+    from eagle.interop import import_buffer
+
+    wp.init()
+    cp = pytest.importorskip("cupy")
+    (p,) = eagle.plan.auto([inj_lin], targets=("cuda",), cache_dir=str(tmp_path / "c"))
+    w = cp.asarray([2.0, 0.5])
+    x, y = cp.linspace(-1, 1, 64), cp.zeros(64)
+    g = eagle.Graph().add(p.bind(w=import_buffer(w), x=x, y=y), name="lin").build()
+    g.launch()
+    for call in ("launch", "enqueue"):
+        with pytest.raises(RuntimeError, match="inside a stream capture.*eagle.graph.child"):
+            with wp.ScopedCapture(device="cuda:0"):
+                getattr(g, call)()
+    g.launch()
+    assert bool((y == 2.0 * x + 0.5).all())

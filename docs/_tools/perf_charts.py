@@ -46,7 +46,6 @@ CPU_TOOLS = (("eagle_term8", "eagle, 8 threads", "--mark-eagle"),
              ("torch_masked", "PyTorch", "--tool-pytorch"),
              ("numpy_masked", "NumPy", "--tool-numpy"))
 
-_TOKENS = Path(__file__).resolve().parent.parent / "_static" / "raptor-tokens.css"
 
 
 def _tool_colours(css: str, opener: str) -> dict:
@@ -56,11 +55,12 @@ def _tool_colours(css: str, opener: str) -> dict:
     return {f"--tool-{n}": v for n, v in re.findall(r"--tool-([a-z]+):\s*(#[0-9a-fA-F]{6})", block)}
 
 
-# Light and dark values of the colour variables, for the standalone SVG: the
-# site's token file is the one source.
-_CSS = _TOKENS.read_text(encoding="utf-8")
-_LIGHT = {"--mark-eagle": "#cf416b", **_tool_colours(_CSS, ":root {")}
-_DARK = _tool_colours(_CSS, '[data-theme="dark"] {')
+def _colours():
+    """Light and dark values of the colour variables, for the standalone SVG: the family token file (shipped by the
+    ``raptor_docs`` package, imported only here) is the one source."""
+    import raptor_docs
+    css = (Path(raptor_docs.__file__).resolve().parent / "_static" / "raptor-tokens.css").read_text(encoding="utf-8")
+    return {"--mark-eagle": "#cf416b", **_tool_colours(css, ":root {")}, _tool_colours(css, '[data-theme="dark"] {')
 
 
 def _rank(name: str, preference) -> int:
@@ -149,6 +149,7 @@ def chart_svg(chart_bars, title: str, where: str) -> str:
     w, label_w, track_w, row_h, top = 700, 150, 480, 30, 56
     h = top + row_h * (len(chart_bars) - 1) + 24
     full_w, full_h = w + 2 * pad, h + 2 * pad
+    _LIGHT, _DARK = _colours()
     light = "\n".join(f".c{i}{{fill:{_LIGHT[b[1]]}}}" for i, b in enumerate(chart_bars))
     dark = "\n".join(f".c{i}{{fill:{_DARK[b[1]]}}}" for i, b in enumerate(chart_bars) if b[1] in _DARK)
     parts = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{full_w}" height="{full_h}" viewBox="0 0 {full_w} {full_h}" '

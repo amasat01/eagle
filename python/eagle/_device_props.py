@@ -64,8 +64,8 @@ class DeviceProps:
 _FIELD_NAMES = tuple(f.name for f in fields(DeviceProps))
 
 
-def device_props(device: int = 0) -> DeviceProps:
-    """Query device ``device``'s properties via ``eagle._core.device_props()``
+def device_props(device: int = -1) -> DeviceProps:
+    """Query device ``device``'s properties (``-1``: the current device) via ``eagle._core.device_props()``
     and wrap the resulting dict in a frozen :class:`DeviceProps` — no
     Python-side computation, only a dict-to-dataclass reshape.
 

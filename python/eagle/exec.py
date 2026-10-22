@@ -72,12 +72,15 @@ class _DeviceKernel(Structure):
         super().__init__("device_kernel")
 
     def run(
-        self, function, params, partition, *, stream: int = 0, block: int = 256
+        self, function, params, partition, *, stream: int = 0, block: int = 256,
+        device: int = -1,
     ) -> int:
         """Launch ``function`` (a ``CUfunction`` handle, as an int) once
         over ``partition``. ``params`` is a sequence of int addresses, one
         per already-packed by-value argument; the partition triple is
-        appended by the binding. Returns 1 if launched, 0 for an empty
+        appended by the binding. ``device`` is the CUDA device the function
+        was loaded on (``-1``: the stream's, else the current one); ``stream=0``
+        is that device's default stream. Returns 1 if launched, 0 for an empty
         partition."""
         return _call(
             _core.run_device,
@@ -86,6 +89,7 @@ class _DeviceKernel(Structure):
             partition,
             stream=stream,
             block=block,
+            device=device,
         )
 
     def grid(self, count: int, block: int = 256) -> int:

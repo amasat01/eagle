@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "pattern": "pure",
+  "aether_abi": "aether-abi/1",
+  "plugins": [
+    {
+      "id": "toy_energy32",
+      "order": 0,
+      "enabled": true,
+      "artifact": "host_plugin_f32.so",
+      "sidecar": "toy_energy32.json",
+      "format": "host"
+    }
+  ]
+}

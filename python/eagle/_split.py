@@ -176,10 +176,19 @@ class SplitBound:
     The caller's planes are those of :func:`arg_spec`; a cell handed back may
     be bound to the caller's own one-element array, else eagle makes it."""
 
-    __slots__ = ("plan", "_arg_spec", "_planes", "_bound", "_rows", "_cupy", "_dtype",
+    __slots__ = ("plan", "_arg_spec", "_planes", "_bound", "_rows", "_cupy", "_dtype", "_device",
                  "_copies", "_active_count", "_origins", "_stages")
 
-    def __init__(self, p, planes: dict, bind_one, *, policy: str = "compensated"):
+    def __init__(self, p, planes: dict, bind_one, *, policy: str = "compensated", device=None):
+        from ._plan_planes import device_scope, planes_device
+
+        self._device = None
+        if p.structure.name == "device_kernel":
+            self._device = planes_device(arg_spec(p.plugin), planes, door="plan.bind", device=device)
+        with device_scope(self._device):        # the rows and cells are allocated on the planes' GPU
+            self._build(p, planes, bind_one, policy)
+
+    def _build(self, p, planes, bind_one, policy):
         from ._plan_pack import _n_from_kw
         from ._plan_planes import _plane_dtype
 
@@ -260,11 +269,13 @@ class SplitBound:
         from ._plan_binding import _stream_handle
         from .interop import _wrap_external_stream
 
-        handle = _stream_handle(stream, self._cupy)
+        from ._plan_planes import device_scope
+
+        handle = _stream_handle(stream, self._cupy, self._device)
         for bound, rows in zip(self._bound, self._rows):
             bound.launch(handle, grid=grid, block=block)
             if rows is not None:
-                with _wrap_external_stream(handle):
+                with device_scope(self._device), _wrap_external_stream(handle):
                     rows.finish()
         return None
 

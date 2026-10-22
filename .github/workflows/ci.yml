@@ -18,6 +18,27 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  release-gate:
+    # Every merge to main is a release unless docs-only (tools/release_gate.sh). Skipped on other PRs.
+    if: github.event_name == 'pull_request' && github.base_ref == 'main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: bash tools/release_gate.sh "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}"
+  version:
+    # Every version string and the CHANGELOG heading agree (tools/version_sites.toml)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: python tools/version.py check
   docs-fresh:
     # Freshness check, never a commit: the generator re-renders the pages and fails on any difference.
     runs-on: ubuntu-latest
@@ -33,8 +54,11 @@ jobs:
           path: site
           token: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
           pins: .github/companions
-      - name: documented numbers and family visuals match the committed cards
-        run: bash tools/docs_fresh.sh site
+      - run: python -m pip install --quiet ./site
+      - name: documented numbers and the capability map match the committed cards
+        run: python -m raptor_docs.fresh --check --site site
+      - name: manifesto copy
+        run: bash tools/manifesto_check.sh CONTRIBUTING.md
   test-cpp:
     needs: docs-fresh
     runs-on: ubuntu-latest
@@ -304,6 +328,14 @@ jobs:
           token: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
           pins: eagle/.github/companions
 
+      # companion site: the shared docs package (raptor_docs) the docs-include and card-coverage tests import
+      - uses: ./eagle/.github/actions/companion
+        with:
+          repo: amasat01.github.io
+          path: site
+          token: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
+          pins: eagle/.github/companions
+
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
@@ -381,6 +413,7 @@ jobs:
           # (read by test_backend_wall where cuobjdump is present)
           export EAGLE_PLUGIN_EXPECTED_ARCHS=70/70
           pip install ../raptor   # the sibling checkout, so unreleased raptor changes are tested
+          pip install ../site     # raptor_docs, so the docs tests run here instead of skipping
           # editable, as in development: python/conftest.py puts this source tree first
           # on sys.path, and only the editable hook then resolves the compiled eagle._core
           pip install --no-build-isolation --only-binary=:all: -e ./python
@@ -712,18 +745,22 @@ jobs:
           python -m pip install --quiet build
           cd eagle/python && python -m build --sdist --outdir ../../dist
 
+      # raptor-core: PyPI when the checkout's version is released, else built from it
+      - id: sib
+        uses: ./eagle/.github/actions/install-siblings
+        with:
+          siblings: raptor-core=raptor
+
       - name: Clean venv, pip install the sdist (warnings are errors)
+        env:
+          SIB_DIR: ${{ steps.sib.outputs.dir }}
+          SIB_PINS: ${{ steps.sib.outputs.pins }}
         run: |
           set -euo pipefail
           python -m venv "$RUNNER_TEMP/venv"
           . "$RUNNER_TEMP/venv/bin/activate"
           pip install --quiet --upgrade pip
-          # raptor-core from PyPI like any user, unless the sibling's version is not released yet
-          CORE_V=$(sed -n 's/^version = "\(.*\)"/\1/p' raptor/pyproject.toml)
-          if ! pip download --quiet --no-deps --only-binary=:all: -d "$RUNNER_TEMP/rc" "raptor-core==$CORE_V"; then
-            echo "raptor-core $CORE_V: not on PyPI yet, installing the sibling checkout"
-            pip install --quiet ./raptor
-          fi
+          pip install --quiet --find-links "$SIB_DIR" $SIB_PINS
           pip install -v -Ccmake.define.EAGLE_PYTHON_WARN_AS_ERR=ON dist/raptor_eagle-*.tar.gz
           pip check
 

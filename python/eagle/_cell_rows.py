@@ -16,7 +16,7 @@ import threading
 
 import numpy as np
 
-from ._graph_reduce import POLICIES, _lower_cpu, _lower_gpu, reduce
+from ._graph_reduce import _lower_cpu, _lower_gpu, check_policy, reduce
 
 #: samples per row, fixed by the kernel
 ROW = 32
@@ -64,6 +64,30 @@ def row_names(cells) -> frozenset:
 def hidden(plugin) -> frozenset:
     """The companion planes a door does not hand back."""
     return row_planes(plugin) - frozenset(cells_of(plugin))
+
+
+def whole_rows(part) -> tuple:
+    """``(first row, rows, total rows)`` a whole partition covers. Its base must
+    sit on a row (a multiple of :data:`ROW`), or a row would start before it."""
+    if part.base % ROW:
+        raise ValueError(
+            f"eagle.plan: a kernel that reduces over samples is cut across ranks "
+            f"in rows of {ROW} samples, so a partition must start on a multiple "
+            f"of {ROW}; got base {part.base}")
+    first = part.base // ROW
+    return first, -(-(part.base + part.count) // ROW) - first, -(-part.n_samples // ROW)
+
+
+def rank_samples(part, rank: int, size: int) -> tuple:
+    """``(base, count, n_samples)`` rank ``rank`` of ``size`` runs of a whole
+    partition: the rows are split as eagle splits samples (the first
+    ``rows % size`` ranks take one more), so no row has two writers and the
+    rows are the single-rank run's, bit for bit."""
+    first, rows, _ = whole_rows(part)
+    q, rem = divmod(rows, size)
+    lo = (first + rank * q + min(rank, rem)) * ROW
+    hi = min(lo + (q + (rank < rem)) * ROW, part.base + part.count)
+    return lo, max(hi - lo, 0), part.n_samples
 
 
 class CellRows:
@@ -133,8 +157,7 @@ def scratch(owner, n, xp, dtype, policy="compensated", cells=None):
     cells = cells_of(owner) if cells is None else cells
     if not cells:
         return None
-    if policy not in POLICIES:
-        raise ValueError(f"policy {policy!r} is not one of {sorted(POLICIES)}")
+    check_policy(policy, "eagle.reduce")
     held = owner.__dict__.setdefault("_cell_scratch", {})
     key = _key(n, policy, xp, dtype)
     with _LOCK:

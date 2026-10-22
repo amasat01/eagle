@@ -179,6 +179,11 @@ class Adapter:
         """Export the cupy result ``a`` back to this adapter's framework."""
         raise NotImplementedError
 
+    def from_numpy(self, a):
+        """Export the host array ``a`` to this adapter's framework (a host
+        tensor); the caller hands over ownership of ``a``."""
+        raise NotImplementedError
+
 
 class _CupyAdapter(Adapter):
     name, cuda = "cupy", True
@@ -203,6 +208,9 @@ class _NumpyAdapter(Adapter):
         import cupy as cp
 
         return cp.asnumpy(a)  # device -> host (the historical numpy-out path)
+
+    def from_numpy(self, a):
+        return a
 
 
 class _DlpackImport(Adapter):
@@ -254,6 +262,9 @@ class _DlpackAdapter(_DlpackImport):
 
         return cp.asnumpy(a)
 
+    def from_numpy(self, a):
+        return a
+
 
 class _TorchAdapter(_DlpackImport):
     name = "torch"
@@ -281,7 +292,12 @@ class _TorchAdapter(_DlpackImport):
             return torch.from_dlpack(a)  # zero-copy device view of the cupy result
         import cupy as cp
 
-        return torch.from_numpy(cp.asnumpy(a))  # device result -> host torch tensor
+        return self.from_numpy(cp.asnumpy(a))  # device result -> host torch tensor
+
+    def from_numpy(self, a):
+        import torch
+
+        return torch.from_numpy(a)
 
 
 class _JaxAdapter(_DlpackImport):
@@ -316,7 +332,12 @@ class _JaxAdapter(_DlpackImport):
         if self.cuda:
             return jax.dlpack.from_dlpack(a)  # zero-copy device view
 
-        return jax.device_put(a.get(), jax.devices("cpu")[0])  # host result -> CPU jax
+        return self.from_numpy(a.get())  # host result -> CPU jax
+
+    def from_numpy(self, a):
+        import jax
+
+        return jax.device_put(a, jax.devices("cpu")[0])
 
 
 class _TfAdapter(_DlpackImport):
@@ -335,7 +356,12 @@ class _TfAdapter(_DlpackImport):
             return tf.experimental.dlpack.from_dlpack(a.__dlpack__())
         import cupy as cp
 
-        return tf.constant(cp.asnumpy(a))
+        return self.from_numpy(cp.asnumpy(a))
+
+    def from_numpy(self, a):
+        import tensorflow as tf
+
+        return tf.constant(a)
 
 
 # Singletons for the stateless adapters (the framework-tagged ones carry a
@@ -365,6 +391,18 @@ def detect(x) -> Adapter | None:
     if hasattr(x, "__cuda_array_interface__"):
         return _CAI
     return None
+
+
+def export_like(like, native):
+    """A NEW array of ``like``'s framework holding a copy of ``native`` (a
+    numpy or cupy array): the way a result leaves for a framework whose arrays
+    eagle never writes (a jax array is immutable). ``native`` is untouched."""
+    ad = detect(like)
+    if ad is None or ad.name == "numpy":
+        return native.copy()
+    if hasattr(native, "__cuda_array_interface__"):
+        return ad.from_cupy(native.copy())
+    return ad.from_numpy(native.copy())
 
 
 def _refuse_permuted_export(a, framework: str) -> None:
@@ -749,10 +787,14 @@ def import_buffer(obj, *, stream=None, require=None,
     return view
 
 
-def refence(producer_stream, consumer_stream, device: int = 0) -> None:
+def refence(producer_stream, consumer_stream, device: int = -1) -> None:
     """Order ``producer_stream`` before ``consumer_stream`` (DLPack stream
-    codes) on ``device`` without blocking the host: one event record + one
+    codes) on ``device`` (``-1``: the current one) without blocking the host: one event record + one
     stream wait."""
     from eagle import _core
 
+    if device < 0:
+        import cupy
+
+        device = int(cupy.cuda.runtime.getDevice())
     _core.fence(producer_stream, consumer_stream, device)

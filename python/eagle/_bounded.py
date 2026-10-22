@@ -117,7 +117,7 @@ def _plain_resources(fn) -> tuple:
     return int(attrs["num_regs"]), int(attrs.get("local_size_bytes", 0))
 
 
-def _load_bounded(loaded, name: str, cap: int):
+def _load_bounded(loaded, name: str, cap: int, device=None):
     """``name`` from ``loaded``'s PTX JIT-compiled under ``cap`` registers, or
     ``None`` when the image cannot be (a cubin, an unreadable file, a driver
     refusal)."""
@@ -134,7 +134,7 @@ def _load_bounded(loaded, name: str, cap: int):
     module, func = ctypes.c_void_p(), ctypes.c_void_p()
     options = (ctypes.c_int * 1)(_CU_JIT_MAX_REGISTERS)
     values = (ctypes.c_void_p * 1)(cap)
-    with cupy.cuda.Device(loaded.device_id):
+    with cupy.cuda.Device(loaded.device_id if device is None else device):
         if cuda.cuModuleLoadDataEx(ctypes.byref(module), image, 1, options, values) != 0:
             return None
         if cuda.cuModuleGetFunction(ctypes.byref(func), module, name.encode()) != 0:
@@ -166,7 +166,7 @@ def elf_section_size(image: bytes, section: str) -> int:
     return 0
 
 
-def _text_bytes(loaded, name: str, cap: int) -> int:
+def _text_bytes(loaded, name: str, cap: int, device=None) -> int:
     """The ``.text`` size of entry ``name`` compiled from ``loaded``'s PTX under
     ``cap`` registers (0: unbounded), or ``0`` when it cannot be measured."""
     try:
@@ -181,7 +181,7 @@ def _text_bytes(loaded, name: str, cap: int) -> int:
     state, cubin, size = ctypes.c_void_p(), ctypes.c_void_p(), ctypes.c_size_t()
     options = (ctypes.c_int * 1)(_CU_JIT_MAX_REGISTERS)
     values = (ctypes.c_void_p * 1)(cap)
-    with cupy.cuda.Device(loaded.device_id):
+    with cupy.cuda.Device(loaded.device_id if device is None else device):
         if cuda.cuLinkCreate_v2(1 if cap else 0, options, values, ctypes.byref(state)) != 0:
             return 0
         try:
@@ -194,11 +194,13 @@ def _text_bytes(loaded, name: str, cap: int) -> int:
             cuda.cuLinkDestroy(state)
 
 
-def _decide(loaded, name: str, plain, demand=None):
+def _decide(loaded, name: str, plain, demand=None, device=None):
     """``(function that launches, EntryReport)`` for entry ``name``. ``demand``
     is the threads per SM the launch asks for; ``None`` asks for the whole
     residency the edge would give (a hardware-scheduled entry)."""
-    dev = importlib.import_module("eagle.launch")._device_props()
+    props = importlib.import_module("eagle.launch")._device_props
+    dev = props() if device is None else props(device)
+    on = () if device is None else (device,)    # None: the device the kernel was loaded on
     regs, local = _plain_resources(plain)
     residency = _residency(dev)
     threads = _core.resident_warps(*residency, regs) * 32 if _attr(dev, "regsPerMultiprocessor") else 0
@@ -211,12 +213,12 @@ def _decide(loaded, name: str, plain, demand=None):
         return plain, EntryReport(name, regs, local, False, edge, threads, 0, demand,
                                   f"no bound: the launch asks for {demand} threads per SM and "
                                   f"{threads} are resident")
-    bounded = _load_bounded(loaded, name, edge)
+    bounded = _load_bounded(loaded, name, edge, *on)
     if bounded is None:
         return plain, EntryReport(name, regs, local, False, edge, threads, 0, demand,
                                   "the image cannot be recompiled under a bound (a cubin)")
     b_regs, b_local = _plain_resources(bounded)
-    text, b_text = _text_bytes(loaded, name, 0), _text_bytes(loaded, name, edge)
+    text, b_text = _text_bytes(loaded, name, 0, *on), _text_bytes(loaded, name, edge, *on)
     if not _core.keep_bounded(regs, local, text, b_regs, b_local, b_text, edge):
         why = (f"bound {edge} gives {b_regs} registers, {b_local} B local and {b_text} B of code "
                f"against {regs}, {local} B and {text} B unbounded")
@@ -225,23 +227,23 @@ def _decide(loaded, name: str, plain, demand=None):
                                 _core.resident_warps(*residency, b_regs) * 32, b_text, demand, "")
 
 
-def entry(loaded, name: str, plain, demand=None):
+def entry(loaded, name: str, plain, demand=None, device=None):
     """The function to launch for entry ``name`` of ``loaded``'s module: its
     register-bounded recompile when the launch's ``demand`` (threads per SM;
     ``None``: the whole residency a bound would give) exceeds what ``plain``
     holds and a bound was proven free, else ``plain``. Decided once per entry
     and kept with ``loaded``."""
-    return _resolved(loaded, name, plain, demand)[0]
+    return _resolved(loaded, name, plain, demand, device)[0]
 
 
-def entry_report(loaded, name: str, plain, demand=None) -> EntryReport:
+def entry_report(loaded, name: str, plain, demand=None, device=None) -> EntryReport:
     """The :class:`EntryReport` of entry ``name`` (see :func:`entry`)."""
-    return _resolved(loaded, name, plain, demand)[1]
+    return _resolved(loaded, name, plain, demand, device)[1]
 
 
-def _resolved(loaded, name: str, plain, demand=None):
+def _resolved(loaded, name: str, plain, demand=None, device=None):
     with _LOCK:
         cache = loaded.__dict__.setdefault("_bounded_entries", {})
-        if name not in cache:
-            cache[name] = _decide(loaded, name, plain, demand)
-        return cache[name]
+        if (name, device) not in cache:
+            cache[(name, device)] = _decide(loaded, name, plain, demand, device)
+        return cache[(name, device)]

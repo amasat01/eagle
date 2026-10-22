@@ -414,9 +414,17 @@ inline std::string buffer_kinds_joined() {
 // how the registry must load the artifact bytes it names (``cuModuleLoadData`` for
 // PTX text vs. a binary cubin/fatbin), so an unrecognized value must be refused
 // rather than handed to the loader as though it were one of the known kinds.
+// ``host`` is a host shared library, loaded only by the host registry; the device
+// registries refuse it.
 // KEEP IN SYNC with ``eagle/python/eagle/roles.py``'s ``MANIFEST_FORMATS``
 // (order-independent; the cross-check test enforces set equality).
-inline constexpr const char* const kManifestFormats[] = { "ptx", "cubin", "fatbin" };
+inline constexpr const char* const kManifestFormats[] = { "ptx", "cubin", "fatbin", "host" };
+
+// The reserved ``lookup`` plane a finishing kernel counts newly finished samples into: one
+// ``uint32`` cell. Both C++ registries allocate, zero before each run and bind it
+// themselves, so a caller never supplies it (and may not consolidate that name).
+// KEEP IN SYNC with ``eagle/python/eagle/sidecar.py``'s ``FINISH_COUNTER``.
+inline constexpr const char* const kFinishedCounter = "finished_count";
 
 // Is ``format`` one of the canonical schema-v1 manifest-entry artifact formats?
 inline bool is_valid_manifest_format(const std::string& format) {
@@ -425,7 +433,7 @@ inline bool is_valid_manifest_format(const std::string& format) {
     return false;
 }
 
-// A human-readable "ptx, cubin, fatbin" rendering of ``kManifestFormats``, for an
+// A human-readable "ptx, cubin, fatbin, host" rendering of ``kManifestFormats``, for an
 // error message naming the supported set.
 inline std::string manifest_formats_joined() {
     std::string s;

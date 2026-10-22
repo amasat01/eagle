@@ -48,8 +48,8 @@ DEFAULT_BLOCK = 256
 
 
 # -- block-size resolution ---------------------------------------------------
-#: process-wide device-properties cache (queried once per process).
-_device_props_cache = None
+#: device-properties cache, by CUDA ordinal (each queried once per process).
+_device_props_cache: dict = {}
 #: per-kernel-object ``.attributes`` cache (captured at first launch, never
 #: re-queried -- replay-critical paths must not re-touch the driver).
 _kernel_attrs_cache: dict = {}
@@ -121,20 +121,23 @@ def _current_device_ordinal() -> int:
         return 0
 
 
-def _device_props():
-    """The current device's properties, queried once per process and
-    cached thereafter."""
-    global _device_props_cache
-    if _device_props_cache is None:
-        import cupy as cp
+def _device_props(device: int = -1):
+    """Device ``device``'s properties (``-1``: the current device), queried
+    once per ordinal and cached thereafter."""
+    import cupy as cp
 
+    try:
+        ordinal = int(cp.cuda.runtime.getDevice()) if device < 0 else int(device)
+    except Exception:
+        ordinal = 0
+    props = _device_props_cache.get(ordinal)
+    if props is None:
         try:
-            _device_props_cache = cp.cuda.runtime.getDeviceProperties(
-                cp.cuda.runtime.getDevice()
-            )
+            props = cp.cuda.runtime.getDeviceProperties(ordinal)
         except Exception:
-            _device_props_cache = {}
-    return _device_props_cache
+            props = {}
+        _device_props_cache[ordinal] = props
+    return props
 
 
 def _kernel_attrs(fn):
@@ -189,13 +192,14 @@ def _query_kernel_attrs(fn) -> dict:
         return {}
 
 
-def _resolved_block(fn, n, block):
+def _resolved_block(fn, n, block, device=-1):
     """The block size to launch ``fn`` with: ``block`` verbatim if the
     caller passed one, else the policy resolved over the ambient sibling
-    count and cached device/kernel properties."""
+    count and the cached properties of ``device`` (``-1``: the current one)
+    and of the kernel."""
     if block is not None:
         return block
-    return resolve_block(n, current_siblings(), _device_props(), _kernel_attrs(fn))
+    return resolve_block(n, current_siblings(), _device_props(device), _kernel_attrs(fn))
 
 
 def require_cupy(value, name, what="array"):

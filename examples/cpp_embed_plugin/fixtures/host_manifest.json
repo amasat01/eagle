@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "pattern": "pure",
+  "aether_abi": "aether-abi/1",
+  "plugins": [
+    {
+      "id": "mattrace",
+      "order": 0,
+      "enabled": true,
+      "artifact": "host_plugins.so",
+      "sidecar": "mattrace.json",
+      "format": "host"
+    },
+    {
+      "id": "toy_energy",
+      "order": 1,
+      "enabled": true,
+      "artifact": "host_plugins.so",
+      "sidecar": "toy_energy.json",
+      "format": "host"
+    },
+    {
+      "id": "toy_energy_vjp",
+      "order": 2,
+      "enabled": true,
+      "artifact": "host_plugins.so",
+      "sidecar": "toy_energy_vjp.json",
+      "format": "host"
+    }
+  ]
+}

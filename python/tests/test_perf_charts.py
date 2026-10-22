@@ -48,6 +48,7 @@ def test_cpu_server_parts_precede_workstation_parts():
 
 
 def test_dropping_a_card_adds_a_tab_with_no_code_change(tmp_path):
+    pytest.importorskip("raptor_docs")  # the page generator reads the shared docs tokens (pip install ./site)
     gen = _generator()
     root = tmp_path / "eagle"
     shutil.copytree(_REPO / "benchmarks" / "perf_card", root / "benchmarks" / "perf_card",

@@ -33,6 +33,10 @@ on every sample until each one finishes, called exactly like the kernel itself.
 
 from importlib import metadata as _metadata
 
+from ._nvrtc import preload_builtins as _preload_nvrtc_builtins
+
+_preload_nvrtc_builtins()  # before any CuPy compile: see eagle._nvrtc
+
 from ._active_set import ActiveSet, compaction_body
 from ._backend import BackendUnavailable
 from ._conditional import RepeatWhile, SkipGuard, Skippable, repeat_while, skippable

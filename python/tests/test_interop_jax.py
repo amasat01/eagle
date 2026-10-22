@@ -79,13 +79,6 @@ def _jax():
     import jax
 
     jax.config.update("jax_enable_x64", True)  # the kernels are float64
-    try:
-        import cupy
-    except ImportError:
-        return jax
-    here = cupy.cuda.runtime.getDevice()
-    jax.devices()                              # starting JAX leaves its last GPU current
-    cupy.cuda.runtime.setDevice(here)
     return jax
 
 

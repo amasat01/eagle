@@ -217,7 +217,10 @@ def _eager(node, device=True):
         import torch
 
         owned.check()
-        with torch.cuda.stream(torch.cuda.ExternalStream(int(cupy.cuda.get_current_stream().ptr))):
+        ptr = int(cupy.cuda.get_current_stream().ptr)
+        # torch.cuda.ExternalStream(0) is a new stream object, not the null stream
+        stream = torch.cuda.default_stream() if ptr == 0 else torch.cuda.ExternalStream(ptr)
+        with torch.cuda.stream(stream):
             owned.owner.replay()
     return replay
 
@@ -489,6 +492,19 @@ class RunRecorder:
             record._released = True
 
 
+def _node_gradient(xp, got, nm, primal, node, door):
+    """The gradient a node's vjp returned for the read ``nm``, checked against it."""
+    if nm not in got:
+        raise ValueError(f"{door}: vjps[{node.label!r}] returned no gradient for "
+                         f"{nm!r} (it returned {sorted(got)})")
+    g = xp.asarray(got[nm])
+    if g.shape != primal.shape or g.dtype != primal.dtype:
+        raise ValueError(
+            f"{door}: vjps[{node.label!r}] returned {nm!r} of shape {g.shape} "
+            f"and dtype {g.dtype}; the read is {primal.shape} {primal.dtype}")
+    return g
+
+
 def _mb(b):
     return f"{b / 2**20:.3g} MB"
 
@@ -581,6 +597,10 @@ class RunReverse:
                     self.grad[base] = xp.zeros_like(self.reads[base])
         # a node-written plane is an intermediate, not an input
         self.acc = {nm: xp.zeros_like(g) for nm, g in self.grad.items() if nm not in rec.ring}
+        for _n, reads, _w in rec.nodes:     # a parameter only a node reads
+            for _nm, pn, _a in reads:
+                if pn in rec.uniforms and pn not in self.acc:
+                    self.acc[pn] = xp.zeros(m, dtype=rec.scalar)
         self.ring = {nm: xp.empty((W,) + self.reads[nm].shape, dtype=self.reads[nm].dtype)
                      for nm in rec.ring}
         self.offsets = offsets
@@ -655,6 +675,8 @@ class RunReverse:
                     from .events import RefineReverse
 
                     seeds, steps, extra = RefineReverse(rec).seeds(tape, seeds, door)
+                    if rec.nodes:
+                        self._refine_nodes(tape, seeds, extra)
                     tape = RunTape(tape.checkpoints, steps, tape.window, tape.reads,
                                    tape.budget, tape.events)
                 # the nodes' planes are scratch until restored bitwise
@@ -763,38 +785,70 @@ class RunReverse:
             self.reads[pn][..., :count] = ring[j % self.window][..., :count]
 
     def _node_vjp(self, j, count):
-        """After step ``j``'s vjp launch: each node's vjp, host-synchronized, on the live
-        prefix, added to the state adjoint (taped read) or the input's sum (invariant)."""
+        """After step ``j``'s vjp launch: each node's vjp, last node first, host-synchronized,
+        on the live prefix, added to the state adjoint (taped read), the cotangent of a plane
+        an earlier node writes, or the input's sum (invariant)."""
         xp, row, door = self.xp, j % self.window, "eagle.diff.reverse"
         self._sync()
-        for (node, reads, writes), fn in zip(self.rec.nodes, self.fns):
+        for (node, reads, writes), fn in reversed(list(zip(self.rec.nodes, self.fns))):
             primals, into = {}, {}
+            reads_pn = {nm: pn for nm, pn, _a in reads}
             for nm, pn, a in reads:
                 if a.dtype.kind != "f":
                     continue
-                if pn in self.adj[0]:
+                if pn in self.rec.uniforms:     # a parameter: its value, one gradient
+                    primals[nm] = xp.asarray(self.rec.uniforms[pn]).reshape(a.shape)
+                    into[nm] = self.acc[pn]
+                elif pn in self.adj[0]:
                     lo = row * self.rec.width + self.offsets[pn]
                     rows = self.tape[lo:lo + max(int(self.state[pn].size) // self.m, 1)]
                     primals[nm] = rows.reshape(self.state[pn].shape)[..., :count]
                     into[nm] = self.adj[1 - (j & 1)][pn]
-                else:
+                else:       # a plane another node writes passes its cotangent back to it
                     primals[nm] = self.reads[pn][..., :count]
-                    into[nm] = self.acc.get(pn)
+                    into[nm] = self.grad[pn] if pn in self.rec.ring else self.acc.get(pn)
             got = fn(dict(primals), {nm: self.grad[pn][..., :count] for nm, pn, _a in writes})
             self._sync()
             for nm, primal in primals.items():
-                if nm not in got:
-                    raise ValueError(f"{door}: vjps[{node.label!r}] returned no gradient for "
-                                     f"{nm!r} (it returned {sorted(got)})")
-                g = xp.asarray(got[nm])
-                if g.shape != primal.shape or g.dtype != primal.dtype:
-                    raise ValueError(
-                        f"{door}: vjps[{node.label!r}] returned {nm!r} of shape {g.shape} "
-                        f"and dtype {g.dtype}; the read is {primal.shape} {primal.dtype}")
-                if into[nm] is not None:
+                g = _node_gradient(xp, got, nm, primal, node, door)
+                if reads_pn[nm] in self.rec.uniforms:   # summed over samples at the end
+                    into[nm][:1] += g.sum()
+                elif into[nm] is not None:
                     into[nm][..., :count] += g
         if row:
             self._ring_row(j - 1)
+
+    def _refine_nodes(self, tape, pre, extra):
+        """The nodes' vjps at the refined step: the cotangent the refine entry left on a
+        plane a node writes goes through that node, last first, from the state before
+        the stop step; it adds to that state's adjoint ``pre``, to the cotangent of a
+        plane an earlier node writes, to an input's share, or to a parameter's."""
+        xp, ev, door = self.xp, tape.events, "eagle.diff.reverse"
+        self._sync()
+        for (node, reads, writes), fn in reversed(list(zip(self.rec.nodes, self.fns))):
+            primals, into = {}, {}
+            for nm, pn, a in reads:
+                if a.dtype.kind != "f":
+                    continue
+                if pn in self.rec.uniforms:
+                    primals[nm] = xp.asarray(self.rec.uniforms[pn]).reshape(a.shape)
+                elif pn in pre:
+                    primals[nm] = ev[pn]
+                else:
+                    primals[nm] = tape.reads[pn]
+                into[nm] = pn
+            cots = {nm: extra.get(pn, xp.zeros_like(tape.reads[pn])) for nm, pn, _a in writes}
+            got = fn(dict(primals), cots)
+            self._sync()
+            for nm, primal in primals.items():
+                g = _node_gradient(xp, got, nm, primal, node, door)
+                pn = into[nm]
+                if pn in self.rec.uniforms:
+                    extra.setdefault(pn, xp.zeros(self.n, dtype=self.rec.scalar))[:1] += g.sum()
+                elif pn in pre:
+                    pre[pn] += g
+                else:
+                    extra[pn] = extra[pn] + g if pn in extra else g.copy()
 
     def _add_refine(self, values, extra, names):
         """The refine entry's share of each input gradient, added to the
@@ -853,7 +907,7 @@ class RunReverse:
                     rows(buf), int(buf.itemsize)) for nm, buf in self.state.items()]
         code = lambda a: 1 if a.dtype == numpy.float64 else 0
         accums = [(addr(acc), addr(self.grad[nm]), rows(acc), code(acc))
-                  for nm, acc in self.acc.items()]
+                  for nm, acc in self.acc.items() if nm in self.grad]
         step = (0, 0) if self.step_plane is None else (addr(self.step_plane),
                                                       int(self.step_plane.itemsize))
         word = 0 if self.word is None else addr(self.word)

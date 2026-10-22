@@ -11,6 +11,7 @@ import numpy as np
 from . import _layout
 from .abi import DEVICE_CPU, DEVICE_CUDA
 from .dtypes import np_dtype
+from .interop import BufferRefused
 from .roles import INPUT_ROLES, OUTPUT_ROLES, PER_SAMPLE_ROLES
 from ._plan_pack import _data_ptr, _trailing_extent
 
@@ -571,3 +572,67 @@ def _check_bound_names(arg_spec, planes) -> None:
                 f"eagle.plan.bind: {name!r} is not a name this plugin's arg_spec "
                 f"declares (bindable: {bindable})"
             )
+
+
+def array_device(value):
+    """The CUDA device ``value`` lives on, ``None`` for host data."""
+    device = getattr(getattr(value, "data", None), "device_id", None)   # cupy
+    if isinstance(device, int):
+        return device
+    from .interop import BufferView, _cai_device
+
+    if isinstance(value, BufferView):
+        return value.device[1] if value.device[0] == 2 else None
+    if not device_resident(value):
+        return None
+    return _cai_device(value.__cuda_array_interface__["data"][0])
+
+
+def planes_device(arg_spec, kw, *, door: str, device=None):
+    """The one CUDA device the device-resident planes of ``kw`` live on
+    (``None`` when it holds none). Planes on two devices are refused by name;
+    so is an explicit ``device`` the planes are not on -- it never moves data."""
+    found = None
+    for role, name in arg_spec:
+        if name not in kw or (role, name) == FUSED_STEPS_SLOT:
+            continue
+        on = array_device(kw[name])
+        if on is None:
+            continue
+        if found is not None and on != found:
+            kind = "input" if role in INPUT_ROLES else "output"
+            raise BufferRefused(
+                f"eagle.{door}: {kind} {name!r} lives on device {on}, the other "
+                f"planes on device {found}; a run uses one device -- make every "
+                "array inside with cupy.cuda.Device(n):")
+        found = on
+    if device is not None and found is not None and found != device:
+        raise BufferRefused(
+            f"eagle.{door}: device={device} was asked, the arrays live on device {found}")
+    return found if found is not None else device
+
+
+def device_scope(device):
+    """A context making ``device`` current for the planes a call allocates
+    (nothing when it already is, or ``None``)."""
+    import contextlib
+
+    if device is None:
+        return contextlib.nullcontext()
+    import cupy
+
+    if cupy.cuda.runtime.getDevice() == device:
+        return contextlib.nullcontext()
+    return cupy.cuda.Device(device)
+
+
+def function_on(plugin, device: int) -> int:
+    """``plugin``'s device entry as loaded for CUDA device ``device``: the
+    plugin's own handle where its kernel was loaded, else the loaded kernel's
+    function for that device."""
+    entry = plugin.device_function
+    keep = getattr(plugin, "_keepalive", ())
+    loaded = keep[-1] if keep else None
+    if getattr(loaded, "device_id", device) == device or not hasattr(loaded, "function"):
+        return entry
+    return loaded.function(device).kernel.ptr

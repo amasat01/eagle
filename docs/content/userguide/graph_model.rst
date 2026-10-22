@@ -61,6 +61,21 @@ that would have to be *copied* before the launch (a non-contiguous or
 sample-major array) is refused: a graph needs to see the very array you
 hold, so pass a contiguous one.
 
+``Graph.add(bound, grad=False)`` marks the launch as not differentiated, for
+a node such as a controller that writes a step size. A recorded run and
+:class:`eagle.diff.Reverse` skip it: it needs no vjp, nothing it reads is
+saved, and no gradient goes back through its outputs. A differentiated node
+may read what it writes only through a one-cell parameter plane; any other
+plane is refused by name when the graph is built with ``record=True``.
+
+A ``repeat_while`` body added with ``add_node`` may be a tuple of parts run in
+order, and a part may be a ``skippable``: a loop can hold a step, a guarded
+check and a controller. A loop inside a loop is refused. A reverse skips a loop
+whose parts are all ``grad=False`` (build them with
+``eagle.graph.opaque(..., grad=False)``); a loop with a differentiated part is
+refused by name when it is reversed, so mark the controller ``grad=False`` or
+place the differentiated part outside the loop.
+
 Fork and join
 ^^^^^^^^^^^^^
 

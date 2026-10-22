@@ -166,9 +166,9 @@ per launch, so it is safe inside a captured graph. Calling the compiled kernel w
 ``hawk.run`` gives the same cell, added on the host, bitwise equal to ``policy="ordered"``.
 
 Inside ``jax.jit`` the JAX bridge finishes the cells in the same XLA call; see
-:doc:`../interop/jax`. It uses the default policy, since the bridge has no ``policy=``
-argument yet. Where the bits must be fixed, finish the values yourself with
-``eagle.reduce(..., policy="ordered")`` or take the cell from ``hawk.run``.
+:doc:`../interop/jax`. It uses the default policy unless you pass ``policy=`` to ``function(kernel, policy=...)``,
+as the torch and Warp bridges also take. Where the bits must be fixed, pass ``policy="ordered"``
+or take the cell from ``hawk.run``.
 
 Reading a total later in the same kernel
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -184,8 +184,10 @@ so they refuse a split kernel by name (``'<kernel>' runs in N stages; <door> run
 Limits
 ~~~~~~
 
-* Folding a kernel's cells across MPI ranks (an ``eagle.exec.RankPartition`` run) is refused in this
-  release (our scope; it returns in the next): run such a kernel on one rank.
+* A kernel's cells fold across MPI ranks (an ``eagle.exec.RankPartition`` run): the ranks are cut
+  at whole rows of 32 samples, the rows are gathered, and every rank finishes the same rows a
+  single rank would, so the cell is the single rank's bit for bit. A partition must start on a
+  multiple of 32. Pass ``policy="ordered"`` to ``eagle.plan`` for the same bits on the GPU too.
 
 What is promised, and what is not
 ---------------------------------

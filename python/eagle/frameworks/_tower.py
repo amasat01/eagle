@@ -31,7 +31,7 @@ from pathlib import Path
 
 from ._kernel_planes import Signature, promote
 
-__all__ = ["LOCK", "Level", "finished_identity", "plane_names"]
+__all__ = ["LOCK", "Level", "finished_identity", "per_cell_source", "plane_names"]
 
 #: The process-wide lock around derive / name / build / load / register.
 LOCK = threading.RLock()
@@ -65,6 +65,8 @@ class Level:
         self._units = {}
         #: Framework-owned per-level state (a JAX primitive, a torch Function...).
         self.slots = {}
+        #: how a level with no base makes its per-cell twin (see :meth:`cell_twin`)
+        self.cell_source = None
 
     def __repr__(self) -> str:
         return f"Level({self.name!r}, kind={self.kind!r})"
@@ -106,9 +108,15 @@ class Level:
 
                 fn = jvp if which == "jvp" else vjp
                 derivative = fn(self.kernel, wrt=wrt)
+                # the scattered gradient of a per-cell kernel cannot share a bundle with its
+                # primal (hawk builds one execution axis per bundle): it builds alone, untagged
+                alone = self.sig.per_cell and which == "vjp"
                 # a cell's seed is a scalar in the derivative: a one-cell plane here
-                level = Level(promote(Kernel(f"{self.name}_{which}", derivative)), kind=which,
-                              base=self, who=self.who, label=f"{self.label}_{which}")
+                level = Level(promote(Kernel(f"{self.name}_{which}",
+                                             tuple(derivative) if alone else derivative)),
+                              kind=which, base=self, who=self.who, label=f"{self.label}_{which}")
+                if alone:
+                    level.chain = (level.kernel,)
                 self._derived[which] = level
             return level
 
@@ -128,6 +136,58 @@ class Level:
                               kind="vjp", base=self, who=self.who,
                               label=f"{self.label}_step_vjp")
                 self._derived["step_vjp"] = level
+            return level
+
+    def cell_twin(self):
+        """This level with each ``Param`` read from a table of one entry per parameter cell
+        (``hawk.diff.param_planes(per_cell=True)`` and its derivatives), so one launch runs
+        a batch of parameter values; ``None`` when hawk refuses the kernel (it reduces over
+        samples itself, or has a ``jump=`` plan) or this level has no source for one."""
+        with LOCK:
+            if "twin" not in self._derived:
+                from hawk.ir.nodes import HawkError
+
+                try:
+                    if self.base is not None:
+                        below = self.base.cell_twin()
+                        twin = None if below is None else below.derived(self.kind)
+                    else:
+                        twin = None if self.cell_source is None else self.cell_source(self)
+                except HawkError:
+                    twin = None
+                self._derived["twin"] = twin
+            return self._derived["twin"]
+
+    def step_function(self) -> Level:
+        """ONE step of this carried-state level as a pure kernel, derived once:
+        it reads each plane's value before the step and writes
+        ``<output>_next``. It is an ordinary level, so its jvp is hawk's and
+        its transpose is the vjp of one step."""
+        with LOCK:
+            level = self._derived.get("step_function")
+            if level is None:
+                from hawk.diff import tape
+                from hawk.diff.event import as_plain_reads
+                from hawk.diff.tape import APPLIED_STEPS, NEXT_SUFFIX
+                from hawk.ir.nodes import Assign
+                from hawk.trace import Kernel
+
+                kernel = self.kernel
+                step = getattr(kernel, "step", None) or getattr(kernel, "one_step", None) or kernel
+                twin = tape(kernel, 1)
+                single = getattr(twin, "one_step", None) or twin
+                commits = [s for s in single.sinks
+                           if isinstance(s, Assign) and s.name != APPLIED_STEPS]
+                values = as_plain_reads(tuple(s.value for s in commits))
+                function = Kernel(f"{step.name}_function",
+                                  tuple(Assign(s.name + NEXT_SUFFIX, v, s.ttype)
+                                        for s, v in zip(commits, values)), {})
+                function.jump = getattr(step, "jump", None)
+                level = Level(promote(function), who=self.who, label=self.label)
+                level._wrt = tuple(n for n in self.wrt if n in level.wrt)
+                level.cell_source = lambda _me, root=self: (lambda t: t and t.step_function())(
+                    root.cell_twin())
+                self._derived["step_function"] = level
             return level
 
     def step_names(self) -> tuple:
@@ -185,6 +245,18 @@ class Level:
     def artifact(self, unit):
         """This level's artifact in ``unit``."""
         return next(a for a in unit.artifacts if a.name == self.name)
+
+
+def per_cell_source(declared):
+    """The :attr:`Level.cell_source` of the primal level of the kernel ``declared``."""
+    def make(level):
+        from hawk.diff import param_planes
+
+        twin = Level(param_planes(declared, per_cell=True), who=level.who, label=level.label)
+        twin._wrt = tuple(n for n in level.wrt if n in twin.sig.inputs)
+        return twin
+
+    return make
 
 
 def finished_identity(where, mask, bar_next, jt):

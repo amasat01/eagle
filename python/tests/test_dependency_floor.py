@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """The declared lower bounds of numpy and torch are the versions the floor lock tests.
 
-The floor lock (``docs/_tools/hosted_env/floor-cpu.txt``) runs the notebooks with the oldest numpy and torch a
+The floor lock (``raptor_docs/nb/hosted_env/floor-cpu.txt``) runs the notebooks with the oldest numpy and torch a
 user may install. A bound raised in ``pyproject.toml`` without the lock, or the other way round, would publish a
 floor nobody ran.
 """
@@ -25,7 +25,8 @@ def _declared(name):
 
 
 def _pinned(name):
-    text = (ROOT / "docs" / "_tools" / "hosted_env" / "floor-cpu.txt").read_text()
+    nb = pytest.importorskip("raptor_docs.nb")  # the docs tooling (pip install ./site) ships the lock
+    text = (pathlib.Path(nb.__file__).parent / "hosted_env" / "floor-cpu.txt").read_text()
     found = re.findall(rf"^{name}==([0-9.]+)", text, re.MULTILINE)
     assert len(found) == 1, f"expected one {name} pin in floor-cpu.txt, found {found}"
     return found[0]

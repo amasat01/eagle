@@ -1,0 +1,16 @@
+Sphinx==8.2.3
+myst-nb==1.4.0
+sphinx-book-theme==1.2.0
+sphinx-design==0.7.0
+sphinx-copybutton==0.5.2
+sphinx-autodoc-typehints==3.5.2
+breathe==4.36.0
+nbformat
+nbclient
+ipykernel
+matplotlib
+scipy
+# the notebooks that run on JAX (CPU is enough; the floor, as ci.yml pins it)
+jax[cpu]==0.11.2
+# the shared docs tooling; offline, from a checkout of the landing site: pip install ./site
+raptor-docs @ git+https://github.com/amasat01/amasat01.github.io@main

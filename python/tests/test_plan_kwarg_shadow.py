@@ -168,12 +168,12 @@ def _expected(x: np.ndarray, a: float) -> np.ndarray:
     return a * x + np.arange(3, dtype=np.float64)[:, None]
 
 
-#: The three spellings tested: the two collisions this closes
+#: The spellings tested: the two collisions this closes
 #: (``p`` against ``_run_plan``'s own parameter, ``self`` against every
 #: method's own bound-``self``) and ``kw`` — the positive control that was
 #: NEVER broken (see the module docstring) and must stay that way after the
 #: fix.
-_NAMES = ("p", "kw", "self")
+_NAMES = ("p", "kw", "self", "policy")
 
 
 @pytest.mark.parametrize("plane_name", _NAMES)

@@ -557,6 +557,20 @@ if(EAGLE_CPP_MODE)
   target_compile_definitions(eagle_tests PRIVATE
     HOST_PLUGIN_INTUNIFORM_SO="$<TARGET_FILE:host_plugin_intuniform>")
 
+  # float32 host parity: hand-written float32 plugins (addvec, mat_in, vec_in + uniform +
+  # lookup) that test_HostPlugin.cpp loads through cpu::PluginRegistry32.
+  add_library(host_plugin_f32 MODULE
+    ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/host_plugin_f32.cpp)
+  set_target_properties(host_plugin_f32 PROPERTIES
+    POSITION_INDEPENDENT_CODE ON PREFIX "")
+  target_include_directories(host_plugin_f32 PRIVATE ../)
+  if(OpenMP_CXX_FOUND)
+    target_link_libraries(host_plugin_f32 PRIVATE OpenMP::OpenMP_CXX)
+  endif()
+  add_dependencies(eagle_tests host_plugin_f32)
+  target_compile_definitions(eagle_tests PRIVATE
+    HOST_PLUGIN_F32_SO="$<TARGET_FILE:host_plugin_f32>")
+
   # A performance assessment -- a standalone bench (NOT part of eagle_tests, so
   # it never inflates the gated test count). Run on demand:
   #   ./build_cpp/tests/eagle_bench_host_graph

@@ -40,6 +40,7 @@ import numpy as np
 from .interop import BufferRefused
 
 from . import _cell_rows, _counters, _layout, _split
+from ._graph_reduce import check_policy
 from . import exec as eexec
 from .abi import DEVICE_CPU, DEVICE_CUDA
 from .roles import INPUT_ROLES, OUTPUT_ROLES
@@ -64,6 +65,9 @@ from ._plan_planes import (
     _single_returned,
     _write_back_outputs,
     device_resident,
+    device_scope,
+    function_on,
+    planes_device,
     residency,
 )
 
@@ -98,6 +102,11 @@ class Plan:
     #: whole plane); ``False`` is the pre-gather arm, for asserting a rank's
     #: own sub-partition before the gather overwrites it.
     gather: bool = True
+    #: How the rows of a reduction over samples are finished into the cell:
+    #: ``"compensated"`` (the default), ``"ordered"`` (the same bits on every
+    #: run, host and device, and across ranks) or ``"auto"``, as
+    #: :func:`eagle.reduce` takes it.
+    policy: str = "compensated"
 
     def partitions_for(self, n: int) -> tuple:
         """The concrete :class:`eagle.exec.Partition` tuple this plan runs
@@ -123,7 +132,7 @@ class Plan:
         return tuple(parts)
 
     @_layout.door
-    def run(self, /, **kw):
+    def run(self, /, *, device=None, **kw):
         """Drive :attr:`plugin` over every partition through :attr:`structure`
         and return the assembled per-sample result: the declared output
         plane as a numpy array for a single-output plugin, or a ``dict``
@@ -157,13 +166,23 @@ class Plan:
         (:func:`one_step_word`); only :func:`eagle.until_done` takes several
         steps per launch.
 
+        A device run uses the GPU its arrays live on, whatever is current;
+        arrays on two GPUs are refused by name. ``device=n`` is checked against
+        the arrays (it never moves them); with host arrays only, it picks the
+        GPU they are uploaded to.
+
         ``self`` is positional-only, so a plugin may declare a plane
         literally named ``self`` without colliding with this method's own
         bound-method parameter."""
-        return _run_plan(self, **kw)
+        if device is None:
+            return _run_plan(self, **kw)
+        arg_spec = getattr(self.plugin, "arg_spec", None) or ()
+        on = _checked_device(self, arg_spec, kw, "plan.run", device)
+        with device_scope(on):
+            return _run_plan(self, **kw)
 
     @_layout.door
-    def bind(self, /, **planes) -> BoundPlan:
+    def bind(self, /, *, device=None, **planes) -> BoundPlan:
         """Bind the caller's own planes by name and pack the argument block
         once — the capture-legal door (see the module docstring).
 
@@ -198,8 +217,12 @@ class Plan:
         artifact declared. An input plane's component width is NOT checked:
         a v2 sidecar declares widths for its output planes only.
 
+        The plan is bound for the GPU its planes live on (``device=n`` is
+        checked against them, as in :meth:`run`); :meth:`BoundPlan.launch`
+        issues there whatever is current.
+
         ``self`` is positional-only for the same reason :meth:`run`'s is."""
-        bound = _bind_plan(self, planes)
+        bound = _bind_plan(self, planes, device)
         _counters.bump("binds")  # only on a completed bind
         return bound
 
@@ -246,6 +269,7 @@ def plan(
     _exec_access: str | None = None,
     _exec_op: str | None = None,
     _gather: bool = True,
+    policy: str = "compensated",
 ) -> Plan:
     """Build a :class:`Plan` for running ``plugin`` under ``structure``
     (always named explicitly, never residency-derived).
@@ -310,6 +334,7 @@ def plan(
             f"got {npart} partitions"
         )
 
+    check_policy(policy, "eagle.plan")
     if structure is not eexec.RankPartition:
         if inner is not None:
             raise ValueError(
@@ -324,11 +349,12 @@ def plan(
             )
 
     if structure is eexec.RankPartition and _cell_rows.cells_of(plugin):
-        raise ValueError(
-            f"eagle.plan: '{getattr(plugin, 'kernel', 'this kernel')}' reduces over "
-            "samples; folding its cells across ranks is not in this release (it "
-            "returns in the next); run it on one rank")
+        for part in resolved or ():
+            _cell_rows.whole_rows(part)     # a base off a row is refused here
     eexec.check_placement(access, structure, npart)  # placement legality, at PLAN time
+    if any(name == "device" for _role, name in getattr(plugin, "arg_spec", None) or ()):
+        raise ValueError("eagle.plan: a parameter named 'device' clashes with the "
+                         "device= keyword; rename it")
 
     return Plan(
         plugin=plugin,
@@ -340,6 +366,7 @@ def plan(
         n_samples=n_samples,
         inner=inner,
         gather=_gather,
+        policy=policy,
     )
 
 
@@ -364,6 +391,15 @@ def _host_view(name, role, value):
     return np.asarray(value)
 
 
+def _checked_device(p, arg_spec, kw, door, device):
+    """The device a ``device=`` call runs on: the arrays', checked against the
+    one asked for. A host plan has no device to name."""
+    if p.structure is not eexec.DeviceKernel and p.inner is not eexec.DeviceKernel:
+        raise BufferRefused(f"eagle.{door}: device={device} names a CUDA device, "
+                            "and this plan runs on the host")
+    return planes_device(arg_spec, kw, door=door, device=device)
+
+
 def _checked_out(name, role, arr, want, *, device):
     """Refuse, before any launch, a caller-supplied output ``arr`` that is
     not the plane the kernel writes: the dtype, contiguity or device must
@@ -381,10 +417,10 @@ def _checked_out(name, role, arr, want, *, device):
     if device:
         import cupy as cp
 
-        if arr.device.id != cp.cuda.Device().id:
+        if arr.data.device_id != cp.cuda.runtime.getDevice():
             raise BufferRefused(
                 f"eagle.plan.run: {role} {name!r} lives on device "
-                f"{arr.device.id}, the run is on device {cp.cuda.Device().id}"
+                f"{arr.data.device_id}, the run is on device {cp.cuda.runtime.getDevice()}"
             )
     return arr
 
@@ -407,7 +443,7 @@ def _torch_stream_context(kw):
 
 
 def _run_device_plan(plugin, arg_spec, kw, n: int, parts, *, launch=None, gather=None,
-                     keep_device=False):
+                     keep_device=False, policy="compensated"):
     """Run a device plan. Outputs come back as host numpy arrays, except
     when ``keep_device`` (device-resident inputs, no gather follows): then
     they stay as cupy arrays — a caller-supplied contiguous output of the
@@ -419,7 +455,7 @@ def _run_device_plan(plugin, arg_spec, kw, n: int, parts, *, launch=None, gather
     dtype = _plane_dtype(plugin)
     widths = _declared_widths(plugin)
     vec_mut, mat_mut = _mutable_shapes(plugin)
-    cells = _cell_rows.scratch(plugin, n, cp, dtype)
+    cells = _cell_rows.scratch(plugin, n, cp, dtype, policy)
     device_arrays = {}
     for role, name in arg_spec:
         if cells is not None and name in cells.rows:
@@ -440,10 +476,9 @@ def _run_device_plan(plugin, arg_spec, kw, n: int, parts, *, launch=None, gather
 
     if gather is not None:
         for name in out_names:
-            if cells is None or name not in cells.rows:
-                _check_gatherable(device_arrays[name])
+            _check_gatherable(device_arrays[name])
 
-    fn = plugin.device_function
+    fn = function_on(plugin, cp.cuda.runtime.getDevice())
     for part in parts:
         boxes, addrs = _pack_args(
             arg_spec, device_arrays, kw, n, DEVICE_CUDA,
@@ -462,6 +497,10 @@ def _run_device_plan(plugin, arg_spec, kw, n: int, parts, *, launch=None, gather
     if gather is not None:
         for name in planes:
             gather(planes[name], n, parts)
+        for name, rows in (cells.rows if cells is not None else {}).items():
+            host = cp.asnumpy(rows)
+            gather(host, n, parts, rows=True)
+            rows.set(host)
     if cells is not None:
         cells.finish()
         planes.update({name: cp.asnumpy(c) for name, c in cells.cell.items()})
@@ -469,12 +508,13 @@ def _run_device_plan(plugin, arg_spec, kw, n: int, parts, *, launch=None, gather
     return _returned(planes, out_names)
 
 
-def _run_host_plan(plugin, arg_spec, kw, n: int, parts, *, launch=None, gather=None):
+def _run_host_plan(plugin, arg_spec, kw, n: int, parts, *, launch=None, gather=None,
+                   policy="compensated"):
     out_names = _output_names(arg_spec)
     dtype = _plane_dtype(plugin)
     widths = _declared_widths(plugin)
     vec_mut, mat_mut = _mutable_shapes(plugin)
-    cells = _cell_rows.scratch(plugin, n, np, dtype)
+    cells = _cell_rows.scratch(plugin, n, np, dtype, policy)
     host_arrays = {}
     for role, name in arg_spec:
         if cells is not None and name in cells.rows:
@@ -513,7 +553,9 @@ def _run_host_plan(plugin, arg_spec, kw, n: int, parts, *, launch=None, gather=N
         del boxes
     if gather is not None:
         for name in out_names:
-            if cells is None or name not in cells.rows:
+            if cells is not None and name in cells.rows:
+                gather(host_arrays[name], n, parts, rows=True)
+            else:
                 gather(host_arrays[name], n, parts)
     return _returned(*_finished(plugin, cells, host_arrays, out_names))
 
@@ -591,7 +633,24 @@ def _gather_plane(plane, n: int, parts) -> None:
             eexec.RankPartition.allgather_plane(addr + r * stride, part, 1)
 
 
-def _run_rank_plan(p: Plan, plugin, arg_spec, kw, n: int, parts):
+def _gather_aligned(plane, n: int, parts, rows: bool = False) -> None:
+    """The gather of a run whose ranks were cut at whole rows
+    (see :func:`eagle._cell_rows.rank_samples`): ``rows`` is a cell's row plane, gathered
+    one element per row; any other plane goes through a copy padded to whole
+    rows, because the world's cut is over rows, not samples."""
+    for part in parts:
+        whole = eexec.Partition(*_cell_rows.whole_rows(part))
+        if rows:
+            eexec.RankPartition.allgather_plane(plane.ctypes.data, whole, 1)
+            continue
+        for comp in (plane if plane.ndim > 1 else plane[None]):
+            padded = np.zeros(whole.n_samples * _cell_rows.ROW, dtype=np.float64)
+            padded[:n] = comp
+            eexec.RankPartition.allgather_plane(padded.ctypes.data, whole, _cell_rows.ROW)
+            comp[...] = padded[:n]
+
+
+def _run_rank_plan(p: Plan, plugin, arg_spec, kw, n: int, parts, policy="compensated"):
     """Drive ``plugin`` under :data:`eagle.exec.RankPartition` — the same
     packing paths as the single-process runs, with the launch structure
     swapped and a gather appended.
@@ -606,12 +665,22 @@ def _run_rank_plan(p: Plan, plugin, arg_spec, kw, n: int, parts):
             f"device_kernel, got {inner!r}"
         )
 
+    aligned = bool(_cell_rows.cells_of(plugin))
+    inner_launch = _launch_device if inner is eexec.DeviceKernel else _launch_host
+
     def launch(entry, addrs, part):
-        return eexec.RankPartition.run(entry, addrs, part, inner=inner)
+        if not aligned:
+            return eexec.RankPartition.run(entry, addrs, part, inner=inner)
+        # a cells kernel writes one row per 32 samples: cut at whole rows, so
+        # no row has two writers
+        rank, size = eexec.RankPartition.world()
+        mine = eexec.Partition(*_cell_rows.rank_samples(part, rank, size))
+        return inner_launch(entry, addrs, mine) if mine.count else 0
 
     runner = _run_device_plan if inner is eexec.DeviceKernel else _run_host_plan
+    gather = _gather_aligned if aligned else _gather_plane
     return runner(plugin, arg_spec, kw, n, parts, launch=launch,
-                  gather=_gather_plane if p.gather else None)
+                  gather=gather if p.gather else None, policy=policy)
 
 
 def _run_plan(p: Plan, /, **kw):
@@ -626,12 +695,21 @@ def _run_plan(p: Plan, /, **kw):
 def _run_one(p: Plan, /, **kw):
     """One kernel's run: the body of :func:`_run_plan` (a split kernel's stages
     each run through here)."""
-    plugin = p.plugin
-    arg_spec = getattr(plugin, "arg_spec", None)
+    arg_spec = getattr(p.plugin, "arg_spec", None)
     if arg_spec is None:
         raise ValueError(
             "eagle.plan: plugin has no .arg_spec -- .run() cannot pack args"
         )
+    on = None
+    if p.structure is eexec.DeviceKernel or p.inner is eexec.DeviceKernel:
+        on = planes_device(arg_spec, kw, door="plan.run")
+    with device_scope(on):      # the planes' GPU, whatever is current
+        return _run_here(p, arg_spec, kw)
+
+
+def _run_here(p: Plan, arg_spec, kw):
+    """:func:`_run_one` on the device it made current."""
+    plugin = p.plugin
     out_names = _output_names(arg_spec)
     _check_run_writable(arg_spec, out_names, kw)
     kw = one_step_word(arg_spec, kw,
@@ -644,24 +722,24 @@ def _run_one(p: Plan, /, **kw):
     _check_run_shapes(plugin, arg_spec, kw, n)
     parts = p.partitions_for(n)
     if adapted and _is_single_call(adapted):
-        result = _run_structure(p, plugin, arg_spec, kw, n, parts)
+        result = _run_structure(p, plugin, arg_spec, kw, n, parts, p.policy)
         return _single_returned(plugin, arg_spec, out_names, supplied, result)
 
-    result = _run_structure(p, plugin, arg_spec, kw, n, parts)
+    result = _run_structure(p, plugin, arg_spec, kw, n, parts, p.policy)
     result = _restore_layouts(arg_spec, adapted, result)
     return _write_back_outputs(out_names, supplied, adapted, result)
 
 
-def _run_structure(p: Plan, plugin, arg_spec, kw, n: int, parts):
+def _run_structure(p: Plan, plugin, arg_spec, kw, n: int, parts, policy):
     """Run the adapted ``kw`` under the plan's structure; the raw result."""
     if p.structure is eexec.DeviceKernel:
         with _torch_stream_context(kw):
             return _run_device_plan(plugin, arg_spec, kw, n, parts,
-                                    keep_device=_device_inputs(arg_spec, kw))
+                                    keep_device=_device_inputs(arg_spec, kw), policy=policy)
     if p.structure is eexec.HostTeam:
-        return _run_host_plan(plugin, arg_spec, kw, n, parts)
+        return _run_host_plan(plugin, arg_spec, kw, n, parts, policy=policy)
     if p.structure is eexec.RankPartition:
-        return _run_rank_plan(p, plugin, arg_spec, kw, n, parts)
+        return _run_rank_plan(p, plugin, arg_spec, kw, n, parts, policy)
     # DeviceGroup: check_placement already refused it at plan() time for
     # every access class, so .run() can never reach here -- defensive only.
     raise ValueError(

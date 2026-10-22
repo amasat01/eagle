@@ -385,11 +385,11 @@ def test_a_lookup_handle_carries_the_planes_own_length_not_the_sample_count():
     assert table_h.deviceType == DEVICE_CPU and table_h.stride == 1
 
 
-def test_a_cells_kernel_runs_by_name_and_refuses_a_rank_partition(energy_host_unit):
+def test_a_cells_kernel_runs_by_name_and_plans_on_a_rank_partition(energy_host_unit):
     """The cell is the plane the caller reads, by name; the rows are eagle's own
     scratch. Partitions that each cover whole rows land in the same rows, so the
-    cell is the single run's bit for bit. Folding cells across ranks is not in
-    this release, so a rank partition is refused by name."""
+    cell is the single run's bit for bit. A rank partition is planned (the fold
+    itself runs in the two-rank bed); a base off a row is refused."""
     import eagle.exec as eexec
     from eagle import plan as eplan
 
@@ -402,8 +402,10 @@ def test_a_cells_kernel_runs_by_name_and_refuses_a_rank_partition(energy_host_un
                        partitions=[(0, 64, n), (64, 96, n)]).run(v=v)
     np.testing.assert_array_equal(split, whole)
     np.testing.assert_allclose(whole, (v * v).sum(), rtol=1e-14)
-    with pytest.raises(ValueError, match="e4_energy' reduces over samples"):
-        eplan.plan(plugin, structure=eexec.RankPartition)
+    eplan.plan(plugin, structure=eexec.RankPartition)
+    with pytest.raises(ValueError, match="multiple of 32"):
+        eplan.plan(plugin, structure=eexec.RankPartition,
+                   partitions=[(0, 40, n), (40, 120, n)])
 
 
 def test_a_bound_host_team_launch_equals_plan_run_bit_for_bit(vec3_unit):
@@ -1210,6 +1212,7 @@ def _stub_bound(monkeypatch, parts):
     bound._addrs = [ctypes.addressof(b) for b in boxes]
     bound._parts = parts
     bound._gen = 0
+    bound._device = None
     bound._entry = object()
     bound._cupy = SimpleNamespace(cuda=SimpleNamespace(
         driver=SimpleNamespace(launchKernel=launch_kernel),

@@ -2012,7 +2012,7 @@ def test_register_bound_is_spill_free_and_changes_no_bits(auto, monkeypatch, mod
         assert fits or not r.bounded, (suffix, r)
         if r.bounded:
             assert r.regs <= r.edge and r.local_bytes == plain["local_size_bytes"]
-    monkeypatch.setattr(_bounded, "entry", lambda loaded, name, plain, demand=None: plain)
+    monkeypatch.setattr(_bounded, "entry", lambda loaded, name, plain, demand=None, device=None: plain)
     _, rep2, plain_run = _run(auto, "plain", "device", inp, 10 * _S, _fast_mode=mode)
     assert rep2.done
     for key in ("x", "v", "k"):

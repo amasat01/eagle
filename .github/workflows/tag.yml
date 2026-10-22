@@ -1,0 +1,44 @@
+# Copyright 2026 Alessandro Masat
+# SPDX-License-Identifier: Apache-2.0
+#
+# A merge to main with a version that has no tag gets the annotated tag vX.Y.Z on the merged commit, then
+# publish.yml is started on that tag. (A tag pushed with GITHUB_TOKEN starts no workflow, hence the dispatch.)
+# A docs-only merge carries no new version: nothing happens.
+
+name: Tag
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Tag the new version and start publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          V=$(python tools/version.py get)
+          if [ -n "$(git ls-remote --tags origin "refs/tags/v$V")" ]; then
+            echo "no new version: v$V is already tagged"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "v$V" -m "v$V" "$GITHUB_SHA"
+          git push origin "v$V"
+          gh workflow run publish.yml --ref "v$V"

@@ -9,8 +9,8 @@
 # Nothing is built here. release.yml built, checked and tested the wheels on
 # the pull request and stored them under the git tree hash; this workflow
 # fetches that artifact for the tagged tree, verifies its checksums and
-# uploads it. Pushing a tag `v*` publishes. `workflow_dispatch` runs the
-# same fetch and verification but never uploads (a dry run).
+# uploads it. A tag `v*` publishes: pushed by hand, or dispatched on the tag by tag.yml.
+# A dispatch on a branch runs the same fetch and verification but never uploads (a dry run).
 
 name: Publish
 
@@ -58,9 +58,40 @@ jobs:
           retention-days: 7
           path: dist/
 
-  publish:
-    if: github.event_name == 'push' && github.ref_type == 'tag'
+  # Wait until every family requirement of the built wheels is on PyPI; only then ask for the PyPI approval.
+  upstream:
     needs: fetch
+    runs-on: ubuntu-latest
+    timeout-minutes: 310
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: raptor-eagle-dist
+          path: dist
+      - name: Wait for the family packages this release requires
+        run: |
+          python3 - <<'PY' > reqs.txt
+          import glob, re, zipfile
+          fam = re.compile(r"^(raptor-core|aether-dsc|raptor-hawk|raptor-eagle)\b", re.I)
+          for whl in glob.glob("dist/*.whl"):
+              with zipfile.ZipFile(whl) as z:
+                  meta = next(n for n in z.namelist() if n.endswith(".dist-info/METADATA"))
+                  for line in z.read(meta).decode().splitlines():
+                      if line.startswith("Requires-Dist:") and fam.match(line.split(":", 1)[1].strip()):
+                          print(line.split(":", 1)[1].split(";")[0].strip())
+          PY
+          sort -u reqs.txt -o reqs.txt
+          [ -s reqs.txt ] || { echo "no family requirements"; exit 0; }
+          while read -r req; do
+            until python3 -m pip download --no-deps --quiet -d "$RUNNER_TEMP/up" "$req"; do
+              echo "waiting for $req"; sleep 120
+            done
+            echo "$req: on PyPI"
+          done < reqs.txt
+
+  publish:
+    if: github.ref_type == 'tag'
+    needs: [fetch, upstream]
     runs-on: ubuntu-latest
     environment:
       name: pypi
@@ -75,3 +106,27 @@ jobs:
       - uses: pypa/gh-action-pypi-publish@v1.14.2
         with:
           packages-dir: dist/
+
+  github-release:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: raptor-eagle-dist
+          path: dist
+      - uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: dist/*
+      - name: GitHub Release from the CHANGELOG section
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          V=$(python3 tools/version.py get)
+          gh release create "$GITHUB_REF_NAME" dist/* --title "eagle $V" \
+            --notes "$(python3 tools/version.py notes)" --verify-tag

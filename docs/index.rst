@@ -25,10 +25,12 @@ engine.
 .. raw:: html
    :file: content/_generated/perf_glimpse.html
 
-.. raw:: html
-   :file: _static/family_visuals/fragments/map.html
+.. image:: _static/capmap.svg
+   :alt: Which tool has a documented way to do each block of work, on the CPU and the GPU
+   :width: 100%
 
-*Where each tool covers the work, drawn from the committed performance cards; the table behind the chart lists every value.*
+Squares are filled where a tool's own documentation shows a designed way to do the work. How the tools compare on speed and
+fit is on the `family site <https://amasat01.github.io/where_raptor_fits.html>`__.
 
 Thirty seconds: ``eagle.simulate``
 ----------------------------------
