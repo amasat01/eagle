@@ -11,7 +11,7 @@ import pytest
 import eagle
 import eagle.diff
 import eagle.plan
-import hawk
+hawk = pytest.importorskip("hawk")  # the kernels are written in hawk
 from eagle.graph import opaque
 from hawk import Mutable, Param, Scalar
 from hawk.diff import param_planes
