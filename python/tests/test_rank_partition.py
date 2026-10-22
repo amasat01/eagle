@@ -149,6 +149,7 @@ def test_missing_mpi_module_refuses_by_naming_the_build_switch(monkeypatch):
 # --------------------------------------------------------------------------- #
 # The audit: `_core` never links libmpi.
 # --------------------------------------------------------------------------- #
+@pytest.mark.skipif(sys.platform != "linux", reason="the audit uses ldd (Linux)")
 def test_core_extension_does_not_link_libmpi():
     """The reason the rank surface is a SECOND extension: ``eagle._core`` is
     imported by every eagle user, including the ones with no MPI installed, so it

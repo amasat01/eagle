@@ -57,6 +57,8 @@ import ast
 import itertools
 from pathlib import Path
 
+import sys
+
 import numpy as np
 import pytest
 
@@ -465,23 +467,30 @@ def stub_maps(monkeypatch):
     return install
 
 
+_LINUX_ONLY = pytest.mark.skipif(sys.platform != "linux", reason="resolution reads /proc/self/maps (Linux; CUDA is Linux-only here)")
+
+
+@_LINUX_ONLY
 def test_resolution_refuses_when_nothing_is_mapped(stub_maps):
     stub_maps(())
     with pytest.raises(CublasResolutionError, match="no libcublas.so.12 or libcublas.so.13 is mapped"):
         resolve_cublas_path()
 
 
+@_LINUX_ONLY
 def test_resolution_refuses_an_ambiguous_process(stub_maps):
     stub_maps(("/opt/a/libcublas.so.12", "/opt/b/libcublas.so.12"))
     with pytest.raises(CublasResolutionError, match="2 different"):
         resolve_cublas_path()
 
 
+@_LINUX_ONLY
 def test_resolution_takes_the_cuda_13_cublas(stub_maps):
     stub_maps(("/opt/a/libcublas.so.13.0.0.19",))
     assert resolve_cublas_path() == "/opt/a/libcublas.so.13.0.0.19"
 
 
+@_LINUX_ONLY
 def test_resolution_returns_the_sole_match(stub_maps):
     stub_maps(("/opt/a/libcublas.so.12",))
     assert resolve_cublas_path() == "/opt/a/libcublas.so.12"

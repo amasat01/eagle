@@ -10,6 +10,7 @@ runner's use of them."""
 from __future__ import annotations
 
 import subprocess
+import sys
 import threading
 
 import numpy as np
@@ -292,6 +293,7 @@ def test_the_pick_state_is_swapped_whole():
 # --------------------------------------------------------------------------- #
 # The code-size reader the bound test uses
 # --------------------------------------------------------------------------- #
+@pytest.mark.skipif(sys.platform != "linux", reason="reads an ELF object; macOS objects are Mach-O")
 def test_elf_section_size_reads_a_real_object(tmp_path):
     gcc = subprocess.run(["which", "gcc"], capture_output=True, text=True).stdout.strip()
     if not gcc:
