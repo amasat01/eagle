@@ -838,9 +838,19 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_run_device(const struct eag
         for (std::int64_t i = 0; i < d.nparams; ++i)
             params.push_back(reinterpret_cast<void*>(d.params[i]));
         const eagle::exec::Partition part{ d.base, d.count, d.n_samples };
-        out(launched,
-            static_cast<std::int32_t>(eagle::exec::DeviceKernel::run(reinterpret_cast<CUfunction>(d.function), params,
-                part, reinterpret_cast<CUstream>(d.stream), d.block)));
+        try {
+            out(launched,
+                static_cast<std::int32_t>(eagle::exec::DeviceKernel::run(reinterpret_cast<CUfunction>(d.function),
+                    params, part, reinterpret_cast<CUstream>(d.stream), d.block)));
+        } catch (const std::runtime_error&) {
+            // Cold path: a stream of another device is the one launch failure left to name.
+            int streamOn = device;
+            try { streamOn = streamDevice(d.stream); } catch (...) {}
+            if (streamOn != device)
+                throw std::runtime_error("eagle: the stream belongs to device " + std::to_string(streamOn)
+                    + "; this launch runs on device " + std::to_string(device));
+            throw;
+        }
     });
 }
 

@@ -326,8 +326,22 @@ def test_a_call_on_another_gpu_is_refused_by_name(ops):
                            ordinal=device.local_hardware_id + 1,
                            function=keep.device_function, seam=seam)
         out = jax.ShapeDtypeStruct((3, 4), jnp.float64)
-        with pytest.raises(Exception, match="one GPU per process until 0.7"):
+        with pytest.raises(Exception, match="one function per GPU"):
             jax.block_until_ready(_ffi("cuda", "eagle-test/other-gpu", [out], x, p, e["t"]))
+
+
+@pytest.mark.gpu2
+def test_one_function_per_gpu_coexists(ops):
+    gpus = [d for d in jax.devices() if d.platform in ("gpu", "cuda")]
+    if len(gpus) < 2:
+        pytest.skip("needs two CUDA devices under JAX")
+    results = []
+    for device in (gpus[0], gpus[1], gpus[0]):      # the second build must not displace the first
+        with jax.default_device(device):
+            x, p, e = _drag_make(4, np.float64, np.random.default_rng(0))
+            results.append(np.asarray(ops["drag"](x, p, e["t"])))
+    np.testing.assert_array_equal(results[0], results[1])
+    np.testing.assert_array_equal(results[0], results[2])
 
 
 def test_a_cuda_call_without_the_cuda_backend_raises_the_typed_error(monkeypatch):

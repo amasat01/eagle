@@ -1212,6 +1212,7 @@ def _stub_bound(monkeypatch, parts):
     bound._addrs = [ctypes.addressof(b) for b in boxes]
     bound._parts = parts
     bound._gen = 0
+    bound._device = None
     bound._entry = object()
     bound._cupy = SimpleNamespace(cuda=SimpleNamespace(
         driver=SimpleNamespace(launchKernel=launch_kernel),

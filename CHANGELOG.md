@@ -2,6 +2,8 @@
 
 ## 0.6.4 (2026-10-22)
 
+**A run follows its arrays' GPU.** `plan.run`, `Plan.bind(...).launch()`, plan graphs and `eagle.reduce` run on the GPU their arrays live on, whatever device is current or the kernel was loaded on (before, a kernel loaded on one GPU failed with `invalid resource handle` while another was current, and a correct run on the second GPU was refused). Arrays on two GPUs are refused by name, as is a pipeline given a plan of another GPU. `device=n` on `plan.run`, `Plan.bind`, `Graph.build` and `eagle.reduce` is checked against the arrays and never moves them. A JAX function is kept per GPU, so one function per GPU coexist. Smaller changes: `_core.run_device` and `DeviceKernel.run` take `device=-1` (a stream of another GPU is refused by name), `LoadedKernel.function(device)` loads the kernel per GPU (`.fn` and `.device_id` stay), `GraphPipeline(device=-1)`, and `refence` and `device_props` default to `device=-1`, the current GPU (it was 0; the same on one GPU).
+
 **`until_done` takes any DLPack array.** JAX, torch, CuPy and NumPy planes are read in place; a host plane runs on the host, a device plane on the device, and a mix is refused by name. An array of another framework is never written: `Runner.result(name)` returns the answer as a new array of the caller's type (a NumPy or CuPy plane is still written in place).
 
 **The CPU host runs float32 plugins.** `eagle::cpu::PluginRegistry32` (and `HostPluginLibrary` for `scalar_type: float32`), for C++ users running plugins on the CPU, runs float32 plugins beside the float64 `PluginRegistry`; a real uniform is narrowed once at bind, and a sidecar whose `scalar_type` is the other one is refused by name.

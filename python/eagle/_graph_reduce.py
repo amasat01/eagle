@@ -82,7 +82,8 @@ def _overlaps(a, b) -> bool:
     return bool(np.shares_memory(a, b))
 
 
-def reduce(x, out, *, op: str = "sum", comp=None, policy: str = "compensated") -> Node:
+def reduce(x, out, *, op: str = "sum", comp=None, policy: str = "compensated",
+           device=None) -> Node:
     """A graph node that reduces the samples of ``x`` into ``out``.
 
     Args:
@@ -100,6 +101,8 @@ def reduce(x, out, *, op: str = "sum", comp=None, policy: str = "compensated") -
         policy: ``"compensated"`` (default), ``"ordered"`` or ``"auto"``
             (``compensated`` in this release). Integer sums, max and all
             ignore it.
+        device: a CUDA device checked against the arrays' (``None``: the
+            arrays decide); it never moves data.
 
     Returns:
         A node for :meth:`eagle.Graph.add_node`. The edges to the nodes that
@@ -147,6 +150,13 @@ def reduce(x, out, *, op: str = "sum", comp=None, policy: str = "compensated") -
     for label, arr in arrays[::2]:
         if _overlaps(arr, out):
             raise ValueError(_door(f"out overlaps {label}"))
+    if type(x).__module__.partition(".")[0] == "cupy":    # a cupy plane: one GPU, the arrays' (device= is checked, never a move)
+        found = sorted({int(a.device.id) for a in (x, out, comp) if a is not None})
+        if len(found) > 1 or (device is not None and found != [device]):
+            raise ValueError(
+                f"eagle.reduce: the planes span devices {found}; a reduction runs on one device"
+                if len(found) > 1 else
+                f"eagle.reduce: device={device} was asked, the arrays live on device {found[0]}")
     return Node("reduce", (x, out, code, _DTYPES[name], comp, POLICIES[policy]))
 
 

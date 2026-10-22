@@ -1,10 +1,17 @@
 [
  {
-  "id": "one-gpu",
-  "text": "One GPU per process until 0.7 (our scope): run one process per GPU, or choose it with `CUDA_VISIBLE_DEVICES` (tutorial 20 shows the pattern).",
-  "way_out": "one process per GPU",
+  "id": "one-device-per-run",
+  "text": "A call uses one GPU: the one its arrays live on (plans, graphs and reductions follow their planes; a JAX function runs on the JAX device it was built under, one function per GPU). Arrays on two GPUs in one call are refused by name.",
+  "way_out": "put the arrays on the GPU you want",
   "cause": "ours",
-  "lifted_in": "0.7"
+  "lifted_in": "none"
+ },
+ {
+  "id": "foreign-context",
+  "text": "eagle works in each GPU's primary context, the one CuPy, torch, JAX and Warp share; memory or streams from a context you created yourself are outside our scope.",
+  "way_out": "use the framework's own context",
+  "cause": "ours",
+  "lifted_in": "none"
  },
  {
   "id": "float64-copy",
@@ -211,8 +218,8 @@
  },
  {
   "id": "jax-current-device",
-  "text": "Starting JAX makes its last GPU the thread's current device, and each JAX call then makes its own GPU current (JAX's behavior); eagle graphs and `jax.node` still run on their planes' GPU: make other cupy arrays inside `with cupy.cuda.Device(n):`, or show one GPU with `CUDA_VISIBLE_DEVICES`.",
-  "way_out": "cupy.cuda.Device(n), or one visible GPU",
+  "text": "JAX leaves its last GPU current; eagle follows your arrays, so only NEW cupy allocations are affected (cupy allocates on the current device): make them inside `with cupy.cuda.Device(n):`.",
+  "way_out": "cupy.cuda.Device(n)",
   "cause": "framework",
   "lifted_in": "none"
  },

@@ -33,7 +33,11 @@ from ._plan_planes import (
     _check_uniform,
     _declared_widths,
     _plane_dtype,
+    device_scope,
+    function_on,
+    planes_device,
 )
+from .interop import BufferRefused
 
 
 
@@ -54,16 +58,17 @@ def one_step_word(arg_spec, planes: dict, framework: str = "numpy") -> dict:
     return {**planes, name: xp.ones(1, dtype=xp.int64)}
 
 
-def _bind_plan(p: Plan, planes: dict) -> BoundPlan:
+def _bind_plan(p: Plan, planes: dict, device=None) -> BoundPlan:
     """:meth:`Plan.bind`'s body — see that method for the contract. A split
     kernel binds each of its stages (:class:`eagle._split.SplitBound`)."""
     if _split.stages_of(p.plugin):
-        return _split.SplitBound(p, planes, _bind_one)
-    return _bind_one(p, planes)
+        return _split.SplitBound(p, planes, _bind_one, device=device)
+    return _bind_one(p, planes, device)
 
 
-def _bind_one(p: Plan, planes: dict) -> BoundPlan:
-    """One kernel's bind."""
+def _bind_one(p: Plan, planes: dict, device=None) -> BoundPlan:
+    """One kernel's bind, for the GPU its planes live on (``device`` checked
+    against them)."""
     plugin = p.plugin
     arg_spec = getattr(plugin, "arg_spec", None)
     if arg_spec is None:
@@ -78,6 +83,20 @@ def _bind_one(p: Plan, planes: dict) -> BoundPlan:
             "rank/group run is a collective, and a collective has no single "
             "launch to record; drive it through Plan.run()"
         )
+    attr, device_type, framework = target
+    on = None
+    if device_type == DEVICE_CUDA:
+        on = planes_device(arg_spec, planes, door="plan.bind", device=device)
+        if on is None:
+            on = int(importlib.import_module("cupy").cuda.runtime.getDevice())
+    elif device is not None:
+        raise BufferRefused(f"eagle.plan.bind: device={device} names a CUDA device, "
+                            "and this plan runs on the host")
+    with device_scope(on):      # allocations (the step word) land on the planes' GPU
+        return _bind_on(p, planes, plugin, arg_spec, target, on)
+
+
+def _bind_on(p, planes, plugin, arg_spec, target, on):
     attr, device_type, framework = target
     entry = getattr(plugin, attr, None)
     if entry is None:
@@ -112,7 +131,8 @@ def _bind_one(p: Plan, planes: dict) -> BoundPlan:
         int_uniforms=_integer_uniforms(plugin),
     )
     return BoundPlan(
-        p, arg_spec, dict(planes), n, parts, boxes, addrs, int(entry),
+        p, arg_spec, dict(planes), n, parts, boxes, addrs,
+        int(function_on(plugin, on) if on is not None else entry), device=on,
         device_type=device_type, framework=framework, dtype=dtype, widths=widths,
         vec_mutables=vec_mut, mat_mutables=mat_mut,
         int_uniforms=_integer_uniforms(plugin), active_count=active,
@@ -186,7 +206,7 @@ class BoundPlan:
 
     __slots__ = (
         "plan", "_arg_spec", "_planes", "_n", "_parts", "_boxes", "_addrs",
-        "_entry", "_device_type", "_framework", "_dtype", "_widths",
+        "_entry", "_device", "_device_type", "_framework", "_dtype", "_widths",
         "_vec_mutables", "_mat_mutables", "_int_uniforms", "_slot_of", "_cupy",
         "_active_count", "_copies", "_persist_fn", "_range_fn",
         "_gen", "_origins",
@@ -198,7 +218,7 @@ class BoundPlan:
     _PERSIST_UNRESOLVED = object()
 
     def __init__(self, plan, arg_spec, planes, n, parts, boxes, addrs, entry, *,
-                 device_type, framework, dtype, widths, vec_mutables,
+                 device=None, device_type, framework, dtype, widths, vec_mutables,
                  mat_mutables, int_uniforms=frozenset(), active_count=None,
                  copies=(), origins=()):
         self.plan = plan
@@ -209,6 +229,8 @@ class BoundPlan:
         self._boxes = list(boxes)
         self._addrs = list(addrs)
         self._entry = entry
+        #: The CUDA device the planes live on (``None`` for a host plan).
+        self._device = device
         self._device_type = device_type
         self._framework = framework
         self._dtype = dtype
@@ -281,7 +303,7 @@ class BoundPlan:
         from ._launch_policy import latency_regime_capacity
 
         return latency_regime_capacity(
-            _launch._device_props(), _launch._kernel_attrs(self._entry)
+            _launch._device_props(self._device), _launch._kernel_attrs(self._entry)
         )
 
     def _persist_demand(self) -> int:
@@ -291,7 +313,13 @@ class BoundPlan:
 
         _launch = importlib.import_module("eagle.launch")
         scalar_type = getattr(self.plan.plugin, "scalar_type", None) or "float64"
-        return persistent_demand(_launch._device_props(), scalar_type)
+        return persistent_demand(_launch._device_props(self._device), scalar_type)
+
+    def _entry_fn(self, loaded, name: str):
+        """Entry ``name`` of ``loaded``'s module as loaded for the planes' GPU."""
+        if self._device is not None and hasattr(loaded, "function"):
+            return loaded.function(self._device, name)
+        return loaded.module.get_function(name)
 
     def entry_reports(self) -> tuple:
         """The launch policy's view of this plan's device entries: one
@@ -308,12 +336,12 @@ class BoundPlan:
         name = getattr(plugin, "name", None)
         if module is None or not name:
             return ()
-        reports = [_bounded.entry_report(loaded, name, loaded.fn)]
+        reports = [_bounded.entry_report(loaded, name, self._entry_fn(loaded, name), device=self._device)]
         for suffix, resolve in (("range", self.range_entry), ("persist", self.persist_entry)):
             if resolve() is not None:
                 reports.append(_bounded.entry_report(
-                    loaded, f"{name}_{suffix}", module.get_function(f"{name}_{suffix}"),
-                    self._persist_demand() if suffix == "persist" else None))
+                    loaded, f"{name}_{suffix}", self._entry_fn(loaded, f"{name}_{suffix}"),
+                    self._persist_demand() if suffix == "persist" else None, device=self._device))
         return tuple(reports)
 
     def persist_entry(self):
@@ -336,8 +364,8 @@ class BoundPlan:
             if module is not None and name:
                 try:
                     fn = _bounded.entry(loaded, f"{name}_persist",
-                                        module.get_function(f"{name}_persist"),
-                                        self._persist_demand())
+                                        self._entry_fn(loaded, f"{name}_persist"),
+                                        self._persist_demand(), device=self._device)
                 except Exception:
                     fn = None
         self._persist_fn = fn
@@ -450,10 +478,13 @@ class BoundPlan:
                 addrs = self._addrs + [ctypes.addressof(box) for box in extra]
                 packed[:] = [self._gen, (ctypes.c_void_p * len(addrs))(*addrs)]
             params = packed[1]
-            cupy.cuda.driver.launchKernel(
-                ptr, grid, 1, 1, block, 1, 1, 0, _stream_handle(stream, cupy),
-                ctypes.addressof(params), 0,
-            )
+            handle = _stream_handle(stream, cupy, self._device)
+            # the null stream is the current device's: make the planes' device current for it
+            with device_scope(self._device if handle == 0 else None):
+                cupy.cuda.driver.launchKernel(
+                    ptr, grid, 1, 1, block, 1, 1, 0, handle,
+                    ctypes.addressof(params), 0,
+                )
 
         return call
 
@@ -479,7 +510,8 @@ class BoundPlan:
             if module is not None and name:
                 try:
                     fn = _bounded.entry(loaded, f"{name}_range",
-                                        module.get_function(f"{name}_range"))
+                                        self._entry_fn(loaded, f"{name}_range"),
+                                        device=self._device)
                 except Exception:
                     fn = None
         self._range_fn = fn
@@ -558,10 +590,13 @@ class BoundPlan:
                 addrs = self._addrs + [ctypes.addressof(box) for box in extra]
                 packed[:] = [self._gen, (ctypes.c_void_p * len(addrs))(*addrs)]
             params = packed[1]
-            cupy.cuda.driver.launchKernel(
-                ptr, grid, 1, 1, resolved, 1, 1, 0, _stream_handle(stream, cupy),
-                ctypes.addressof(params), 0,
-            )
+            handle = _stream_handle(stream, cupy, self._device)
+            # the null stream is the current device's: make the planes' device current for it
+            with device_scope(self._device if handle == 0 else None):
+                cupy.cuda.driver.launchKernel(
+                    ptr, grid, 1, 1, resolved, 1, 1, 0, handle,
+                    ctypes.addressof(params), 0,
+                )
 
         return call
 
@@ -639,19 +674,19 @@ class BoundPlan:
         # by module name: eagle exports a `launch` function that shadows the
         # submodule, and a per-call lookup picks up a consumer's monkeypatch
         _launch = importlib.import_module("eagle.launch")
-        handle = _stream_handle(stream, self._cupy)
+        handle = _stream_handle(stream, self._cupy, self._device)
         if self._copies:
             # the copies ride the launch's own stream: ordered, no sync
-            with _wrap_external_stream(handle):
+            with device_scope(self._device), _wrap_external_stream(handle):
                 for a in self._copies.values():
                     a.copy_in()
         for part in self._parts:
             eexec.DeviceKernel.run(
-                self._entry, addrs, part, stream=handle,
-                block=int(_launch._resolved_block(self._entry, part.count, block)),
+                self._entry, addrs, part, stream=handle, device=self._device,
+                block=int(_launch._resolved_block(self._entry, part.count, block, self._device)),
             )
         if self._copies:
-            with _wrap_external_stream(handle):
+            with device_scope(self._device), _wrap_external_stream(handle):
                 for a in self._copies.values():
                     if a.writes:
                         a.copy_back()
@@ -721,12 +756,15 @@ class BoundPlan:
         return self
 
 
-def _stream_handle(stream, cupy) -> int:
+def _stream_handle(stream, cupy, device=None) -> int:
     """The ``CUstream`` a launch issues on, as an int. ``None`` resolves to
     the framework's current stream, read late (at launch, not at bind):
     cupy's capture idiom makes the capturing stream current only inside the
     capture region, so reading it earlier would record onto the wrong
-    stream — and the default stream may not even be capturable."""
+    stream — and the default stream may not even be capturable. It is
+    ``device``'s current stream, whatever device is current."""
     if stream is None:
-        return int(cupy.cuda.get_current_stream().ptr)
+        stream = cupy.cuda.get_current_stream() if device is None \
+            else cupy.cuda.get_current_stream(device)
+        return int(stream.ptr)
     return _handle_of(stream)

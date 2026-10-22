@@ -18,7 +18,7 @@ def test_graph_methods_and_signatures():
     assert _sig(C.add) == "(self, bound, *, name=None, grad=True) -> 'Graph'"
     assert _sig(C.add_node) == "(self, node, *, name=None) -> 'Graph'"
     assert _sig(C.add_group) == "(self, branches, *, names=None) -> 'Graph'"
-    assert _sig(C.build) == "(self, *, backend=None, record=False, dispatch=None) -> 'Graph'"
+    assert _sig(C.build) == "(self, *, backend=None, record=False, dispatch=None, device=None) -> 'Graph'"
     assert _sig(C.launch) == "(self, n: 'int' = 1) -> 'Graph'"
     assert _sig(C.enqueue) == "(self, n: 'int' = 1) -> 'Graph'"
     assert _sig(C.synchronize) == "(self) -> 'Graph'"

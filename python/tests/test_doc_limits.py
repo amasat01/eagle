@@ -82,5 +82,6 @@ def test_no_limit_outlives_its_lifted_in_release():
 
 def test_the_expiry_check_fires_when_the_version_reaches_lifted_in(monkeypatch):
     monkeypatch.setattr(sys.modules[__name__], "_version", lambda: "0.7.0")
+    monkeypatch.setattr(sys.modules[__name__], "_registry", lambda: {"x": {"lifted_in": "0.7"}})
     with pytest.raises(AssertionError, match="lifts a limit"):
         test_no_limit_outlives_its_lifted_in_release()

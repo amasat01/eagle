@@ -43,8 +43,9 @@ of its first floating plane; a plane of another float dtype is refused by
 name. Without ``jax_enable_x64`` every JAX array is float32, so the float32
 build is what runs.
 
-Devices: the CPU platform and ONE CUDA device per process (a call on another
-GPU is refused by name; multi-GPU arrives in 0.7). Modules carry only a
+Devices: the CPU platform and CUDA. A function runs on the JAX device it was
+built under (build one per GPU; a call on a GPU it was not built for is refused
+by name). Modules carry only a
 kernel's digest, never an address, so the persistent compilation cache hits
 across processes and an exported module is portable; running one in a fresh
 process needs its kernels loaded first (:func:`preload`).

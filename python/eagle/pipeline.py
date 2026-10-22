@@ -183,6 +183,15 @@ def _concurrent_write_conflict_check(write_targets) -> None:
                 )
 
 
+def member_device(step):
+    """The CUDA device a step's planes (a bound plan's launch) or stream (a
+    pipeline) live on, ``None`` when it names none."""
+    from ._plan_binding import BoundPlan
+
+    owner = getattr(step, "__self__", step)
+    return owner._device if isinstance(owner, (BoundPlan, GraphPipeline)) else None
+
+
 class GraphPipeline:
     """A CUDA-graph wrapper: capture a sequence of launches once,
     replay cheaply. Backed by the :mod:`eagle._core` binding of the
@@ -190,15 +199,17 @@ class GraphPipeline:
     code a native C++ consumer runs.
     """
 
-    def __init__(self):
+    def __init__(self, device: int = -1):
         import cupy as cp
 
         from . import _core
 
         self._core = _core
+        #: The CUDA device this pipeline's stream is on (``-1``: the current one).
+        self._device = int(cp.cuda.runtime.getDevice()) if device < 0 else int(device)
         # non-blocking so capture never entangles the legacy default stream that
         # cupy/torch launch on (matches the pre-uniformization cupy pipeline).
-        self._stream = _core.Stream(non_blocking=True)  # owns the cudaStream_t
+        self._stream = _core.Stream(non_blocking=True, device=self._device)  # owns the cudaStream_t
         self._sptr = self._stream.ptr()  # raw handle shared with cupy + the graph
         self._ext = _wrap_external_stream(self._sptr)
         self._steps = []
@@ -233,9 +244,17 @@ class GraphPipeline:
         is a member, named or not.
         """
         refuse_derived(step, door="eagle.GraphPipeline.add", what="the step")
+        self._check_device(step)
         self._registry.register(name)
         self._steps.append(step)
         return self
+
+    def _check_device(self, step) -> None:
+        """Refuse, by name, a bound plan whose planes live on another device."""
+        on = member_device(step)
+        if on is not None and on != self._device:
+            raise ValueError(f"eagle.pipeline: this pipeline runs on device {self._device}, "
+                             f"the plan's planes live on device {on}")
 
     def add_concurrent(self, members, *, names=None):
         """Register a fork/join stage: every member is a sibling of
@@ -269,6 +288,7 @@ class GraphPipeline:
         for i, member in enumerate(members):
             refuse_derived(member, door="eagle.GraphPipeline.add_concurrent",
                            what=f"member {i}")
+            self._check_device(member)
         for i in range(len(members)):
             self._registry.register(names[i] if names is not None else None)
         self._steps.append(_ConcurrentGroup(members))

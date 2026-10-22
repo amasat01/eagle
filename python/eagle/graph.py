@@ -295,12 +295,18 @@ def _on_device(device):
         yield
 
 
-def _plane_device(accesses):
-    """The CUDA ordinal the graph's planes live on (the first one's)."""
-    for a in accesses:
-        for _n, arr, _r in (*a.reads, *a.writes):
-            return arr.device.id
-    return None
+def _plane_device(accesses, device=None):
+    """The CUDA ordinal the graph's planes live on. Planes on two devices are
+    refused by name, and so is an explicit ``device`` they are not on."""
+    found = sorted({arr.device.id for a in accesses
+                    for _n, arr, _r in (*a.reads, *a.writes)})
+    if len(found) > 1:
+        raise ValueError(f"eagle.graph: the planes span devices {found}; "
+                         "a graph runs on one device")
+    if device is not None and found and found[0] != device:
+        raise ValueError(f"eagle.graph: device={device} was asked, "
+                         f"the arrays live on device {found[0]}")
+    return found[0] if found else device
 
 
 def _array_backend(arr):
@@ -538,11 +544,14 @@ class Graph:
                              f"planes live on the {inferred}")
         return backend
 
-    def build(self, *, backend=None, record=False, dispatch=None) -> Graph:
+    def build(self, *, backend=None, record=False, dispatch=None, device=None) -> Graph:
         """Derive the edges, refuse conflicts (always), and lower. ``backend``
         is inferred from where the planes live. ``record=True`` keeps what a
         reverse pass needs (:mod:`eagle.diff`): after each :meth:`launch`,
         :attr:`record` is that launch's ``Record``.
+
+        The graph runs on the GPU its planes live on (``device=n`` is checked
+        against them); planes on two GPUs are refused.
 
         ``dispatch`` lowers the ``policy="auto"`` dispatch groups of the
         graph's hawk kernels (``None`` or ``"switch"``: the fused kernel;
@@ -587,7 +596,7 @@ class Graph:
             if be == "gpu":
                 import cupy
 
-                self._device = _plane_device(accesses)
+                self._device = _plane_device(accesses, device)
                 pin.enter_context(_on_device(self._device))
 
                 from .pipeline import GraphPipeline

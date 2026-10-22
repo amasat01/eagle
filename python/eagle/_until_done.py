@@ -1057,7 +1057,7 @@ class Runner:
 
         from ._launch_policy import _attr, _fp64_args
 
-        dev = importlib.import_module("eagle.launch")._device_props()
+        dev = importlib.import_module("eagle.launch")._device_props(self._run_device())
         major, minor, sms, ratio, fp64 = _fp64_args(dev, self._scalar_type())
         rate = _core.band_rate(major, minor, sms, ratio, _attr(dev, "clockRate"), fp64,
                                self.n, ops_per_step(self.step.plan.plugin),
@@ -1135,12 +1135,17 @@ class Runner:
                            if self._fast_util_on else None)
         self._size_persist()
 
+    def _run_device(self) -> int:
+        """The CUDA ordinal the step's planes live on (``-1``: the current one)."""
+        on = getattr(self.step, "_device", None)
+        return -1 if on is None else int(on)
+
     def _device_and_ops(self) -> tuple:
         """The device properties and the step's operation count
         (:func:`ops_per_step`) the launch rules read."""
         import importlib
 
-        return (importlib.import_module("eagle.launch")._device_props(),
+        return (importlib.import_module("eagle.launch")._device_props(self._run_device()),
                 ops_per_step(self.step.plan.plugin))
 
     def _chunk_for(self, mean_steps: float) -> int:
@@ -1164,7 +1169,7 @@ class Runner:
         # that shadows the submodule (same reason _plan_binding.py's own
         # .launch() resolves it this way).
         _launch = importlib.import_module("eagle.launch")
-        return persistent_launch(_launch._device_props(),
+        return persistent_launch(_launch._device_props(self._run_device()),
                                  _launch._kernel_attrs(self.step.persist_entry()),
                                  self.n, fill, self._scalar_type(), chunk, self._device_and_ops()[1])
 
@@ -1219,7 +1224,7 @@ class Runner:
         if persist is None:
             return 0
         launch = importlib.import_module("eagle.launch")
-        return capacity(launch._device_props(), launch._kernel_attrs(persist))
+        return capacity(launch._device_props(self._run_device()), launch._kernel_attrs(persist))
 
     def _entry_model(self) -> tuple:
         """``(model, key)`` of a runner that can time both entries. ``model`` holds
@@ -1232,7 +1237,7 @@ class Runner:
         from ._launch_policy import _attr, _fp64_args, capacity
 
         launch = importlib.import_module("eagle.launch")
-        dev = launch._device_props()
+        dev = launch._device_props(self._run_device())
         scalar = self._scalar_type()
         major, minor, sms, ratio, fp64 = _fp64_args(dev, scalar)
         resident = capacity(dev, launch._kernel_attrs(self.step._entry))
@@ -1242,7 +1247,7 @@ class Runner:
         if sms > 0 and clock > 0 and resident > 0:
             model = (major, minor, sms, ratio, clock, fp64, resident, ops)
         name = dev.get("name", b"") if isinstance(dev, dict) else getattr(dev, "name", b"")
-        key = (launch._current_device_ordinal(), str(name), major, minor, sms, clock // 50000,
+        key = (self._run_device() if self._run_device() >= 0 else launch._current_device_ordinal(), str(name), major, minor, sms, clock // 50000,
                _artifact_digest(self.step), scalar, self.n.bit_length())
         return model, key
 

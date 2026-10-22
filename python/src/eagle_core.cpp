@@ -844,9 +844,9 @@ NB_MODULE(_core, m)
 
     m.def("run_device",
         [](std::uintptr_t function, const std::vector<std::uintptr_t>& params,
-           const Partition& part, std::uintptr_t stream, unsigned block) {
+           const Partition& part, std::uintptr_t stream, unsigned block, int device) {
             std::vector<std::uint64_t> p(params.begin(), params.end());
-            auto d = makeDesc<eagle_backend_launch_desc>(-1);
+            auto d = makeDesc<eagle_backend_launch_desc>(device);
             d.block = block;
             d.function = function;
             d.params = p.data();
@@ -860,11 +860,12 @@ NB_MODULE(_core, m)
             return static_cast<int>(launched);
         },
         nb::arg("function"), nb::arg("params"), nb::arg("partition"),
-        nb::arg("stream") = 0, nb::arg("block") = 256,
+        nb::arg("stream") = 0, nb::arg("block") = 256, nb::arg("device") = -1,
         "ONE cuLaunchKernel over one partition, with the int64 triple appended "
         "after the role args and the grid derived from the partition's `count` "
         "`function` is a CUfunction handle and `params` a list of "
-        "pointers, both as integers. Returns 1, or 0 for an empty partition.");
+        "pointers, both as integers. `device` -1 is the stream's device, else the current one; "
+        "a stream of another device is refused by name. Returns 1, or 0 for an empty partition.");
 
     m.def("time_launch",
         [](std::uintptr_t entry, const std::vector<std::uintptr_t>& params, const Partition& part,

@@ -81,6 +81,20 @@ class LoadedKernel(LaunchMixin):
         self.device_id = cp.cuda.Device().id
         self.module = cp.RawModule(path=str(ptx_path))  # driver load (JITs PTX)
         self.fn = self.module.get_function(self.kernel_name)
+        self._functions = {(self.device_id, self.kernel_name): self.fn}
+
+    def function(self, device: int, name: str | None = None):
+        """The function ``name`` (default: the kernel) on CUDA device
+        ``device``, loaded under that device the first time it is asked for
+        (a kernel has no device of its own)."""
+        name = name or self.kernel_name
+        fn = self._functions.get((device, name))
+        if fn is None:
+            import cupy as cp
+
+            with cp.cuda.Device(device):
+                fn = self._functions[(device, name)] = self.module.get_function(name)
+        return fn
 
     def _refuse_v2_door(self, door: str) -> None:
         """Refuse an ``aether-abi/2`` artifact at this v1 launcher, loudly.

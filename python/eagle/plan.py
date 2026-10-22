@@ -65,6 +65,9 @@ from ._plan_planes import (
     _single_returned,
     _write_back_outputs,
     device_resident,
+    device_scope,
+    function_on,
+    planes_device,
     residency,
 )
 
@@ -129,7 +132,7 @@ class Plan:
         return tuple(parts)
 
     @_layout.door
-    def run(self, /, **kw):
+    def run(self, /, *, device=None, **kw):
         """Drive :attr:`plugin` over every partition through :attr:`structure`
         and return the assembled per-sample result: the declared output
         plane as a numpy array for a single-output plugin, or a ``dict``
@@ -163,13 +166,23 @@ class Plan:
         (:func:`one_step_word`); only :func:`eagle.until_done` takes several
         steps per launch.
 
+        A device run uses the GPU its arrays live on, whatever is current;
+        arrays on two GPUs are refused by name. ``device=n`` is checked against
+        the arrays (it never moves them); with host arrays only, it picks the
+        GPU they are uploaded to.
+
         ``self`` is positional-only, so a plugin may declare a plane
         literally named ``self`` without colliding with this method's own
         bound-method parameter."""
-        return _run_plan(self, **kw)
+        if device is None:
+            return _run_plan(self, **kw)
+        arg_spec = getattr(self.plugin, "arg_spec", None) or ()
+        on = _checked_device(self, arg_spec, kw, "plan.run", device)
+        with device_scope(on):
+            return _run_plan(self, **kw)
 
     @_layout.door
-    def bind(self, /, **planes) -> BoundPlan:
+    def bind(self, /, *, device=None, **planes) -> BoundPlan:
         """Bind the caller's own planes by name and pack the argument block
         once — the capture-legal door (see the module docstring).
 
@@ -204,8 +217,12 @@ class Plan:
         artifact declared. An input plane's component width is NOT checked:
         a v2 sidecar declares widths for its output planes only.
 
+        The plan is bound for the GPU its planes live on (``device=n`` is
+        checked against them, as in :meth:`run`); :meth:`BoundPlan.launch`
+        issues there whatever is current.
+
         ``self`` is positional-only for the same reason :meth:`run`'s is."""
-        bound = _bind_plan(self, planes)
+        bound = _bind_plan(self, planes, device)
         _counters.bump("binds")  # only on a completed bind
         return bound
 
@@ -335,6 +352,9 @@ def plan(
         for part in resolved or ():
             _cell_rows.whole_rows(part)     # a base off a row is refused here
     eexec.check_placement(access, structure, npart)  # placement legality, at PLAN time
+    if any(name == "device" for _role, name in getattr(plugin, "arg_spec", None) or ()):
+        raise ValueError("eagle.plan: a parameter named 'device' clashes with the "
+                         "device= keyword; rename it")
 
     return Plan(
         plugin=plugin,
@@ -371,6 +391,15 @@ def _host_view(name, role, value):
     return np.asarray(value)
 
 
+def _checked_device(p, arg_spec, kw, door, device):
+    """The device a ``device=`` call runs on: the arrays', checked against the
+    one asked for. A host plan has no device to name."""
+    if p.structure is not eexec.DeviceKernel and p.inner is not eexec.DeviceKernel:
+        raise BufferRefused(f"eagle.{door}: device={device} names a CUDA device, "
+                            "and this plan runs on the host")
+    return planes_device(arg_spec, kw, door=door, device=device)
+
+
 def _checked_out(name, role, arr, want, *, device):
     """Refuse, before any launch, a caller-supplied output ``arr`` that is
     not the plane the kernel writes: the dtype, contiguity or device must
@@ -388,10 +417,10 @@ def _checked_out(name, role, arr, want, *, device):
     if device:
         import cupy as cp
 
-        if arr.device.id != cp.cuda.Device().id:
+        if arr.data.device_id != cp.cuda.runtime.getDevice():
             raise BufferRefused(
                 f"eagle.plan.run: {role} {name!r} lives on device "
-                f"{arr.device.id}, the run is on device {cp.cuda.Device().id}"
+                f"{arr.data.device_id}, the run is on device {cp.cuda.runtime.getDevice()}"
             )
     return arr
 
@@ -449,7 +478,7 @@ def _run_device_plan(plugin, arg_spec, kw, n: int, parts, *, launch=None, gather
         for name in out_names:
             _check_gatherable(device_arrays[name])
 
-    fn = plugin.device_function
+    fn = function_on(plugin, cp.cuda.runtime.getDevice())
     for part in parts:
         boxes, addrs = _pack_args(
             arg_spec, device_arrays, kw, n, DEVICE_CUDA,
@@ -666,12 +695,21 @@ def _run_plan(p: Plan, /, **kw):
 def _run_one(p: Plan, /, **kw):
     """One kernel's run: the body of :func:`_run_plan` (a split kernel's stages
     each run through here)."""
-    plugin = p.plugin
-    arg_spec = getattr(plugin, "arg_spec", None)
+    arg_spec = getattr(p.plugin, "arg_spec", None)
     if arg_spec is None:
         raise ValueError(
             "eagle.plan: plugin has no .arg_spec -- .run() cannot pack args"
         )
+    on = None
+    if p.structure is eexec.DeviceKernel or p.inner is eexec.DeviceKernel:
+        on = planes_device(arg_spec, kw, door="plan.run")
+    with device_scope(on):      # the planes' GPU, whatever is current
+        return _run_here(p, arg_spec, kw)
+
+
+def _run_here(p: Plan, arg_spec, kw):
+    """:func:`_run_one` on the device it made current."""
+    plugin = p.plugin
     out_names = _output_names(arg_spec)
     _check_run_writable(arg_spec, out_names, kw)
     kw = one_step_word(arg_spec, kw,

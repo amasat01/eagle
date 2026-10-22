@@ -787,10 +787,14 @@ def import_buffer(obj, *, stream=None, require=None,
     return view
 
 
-def refence(producer_stream, consumer_stream, device: int = 0) -> None:
+def refence(producer_stream, consumer_stream, device: int = -1) -> None:
     """Order ``producer_stream`` before ``consumer_stream`` (DLPack stream
-    codes) on ``device`` without blocking the host: one event record + one
+    codes) on ``device`` (``-1``: the current one) without blocking the host: one event record + one
     stream wait."""
     from eagle import _core
 
+    if device < 0:
+        import cupy
+
+        device = int(cupy.cuda.runtime.getDevice())
     _core.fence(producer_stream, consumer_stream, device)

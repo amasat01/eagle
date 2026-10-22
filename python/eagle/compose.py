@@ -62,7 +62,7 @@ from typing import Any
 import numpy as np
 
 from ._conditional import SkipGuard, skippable
-from .pipeline import GraphPipeline
+from .pipeline import GraphPipeline, member_device
 
 #: The four composition mechanisms :class:`GraphComposer` dispatches on.
 #: ``"sequenced"`` is the default; the other three fuse members into one
@@ -152,7 +152,7 @@ class GraphComposer:
     rebind the array itself.
     """
 
-    def __init__(self, member_flags, *, mode: str = "sequenced") -> None:
+    def __init__(self, member_flags, *, mode: str = "sequenced", device: int = -1) -> None:
         if mode not in _MODES:
             raise ValueError(
                 f"GraphComposer: mode must be one of {list(_MODES)}; got "
@@ -161,6 +161,15 @@ class GraphComposer:
         if mode == "conditional":
             _validate_member_flags(member_flags)
         self._mode = mode
+        #: The CUDA device this composer runs on (``-1``: the current one at construction).
+        self._device = device
+        if device < 0:
+            try:
+                import cupy
+
+                self._device = int(cupy.cuda.runtime.getDevice())
+            except Exception:
+                self._device = None
         self._member_flags = member_flags
         self._members: list[_Member] = []
         self._registered_ids: set[int] = set()
@@ -225,6 +234,11 @@ class GraphComposer:
             raise ValueError(
                 f"GraphComposer.register: duplicate member name {name!r}"
             )
+        owner = getattr(obj, "__self__", obj)
+        on = owner._device if isinstance(owner, GraphComposer) else member_device(obj)
+        if on is not None and self._device is not None and on != self._device:
+            raise ValueError(f"eagle.compose: this composer runs on device {self._device}, "
+                             f"the member's planes live on device {on}")
         key = id(obj)
         if key in self._registered_ids:
             raise ValueError(
@@ -344,7 +358,7 @@ class GraphComposer:
             for i, member in enumerate(self._members):
                 guard = SkipGuard.intent(self._member_flags, i)
                 gated.append(skippable(member.obj, guard))
-            self._pipe = _build_flat_pipe(gated, names=None)
+            self._pipe = _build_flat_pipe(gated, names=None, device=self._device)
             self._built = True
             return self
 
@@ -357,7 +371,7 @@ class GraphComposer:
         if self._mode == "enabled":
             members = [m.obj for m in self._members]
             names = [m.name for m in self._members]
-            self._pipe = _build_flat_pipe(members, names=names)
+            self._pipe = _build_flat_pipe(members, names=names, device=self._device)
             for i, on in enumerate(pattern):
                 self._pipe.set_member_enabled(i, on)
             self._active_mask = pattern
@@ -382,7 +396,7 @@ class GraphComposer:
             return
         members = [self._members[i].obj for i in active_indices]
         names = [self._members[i].name for i in active_indices]
-        self._pipe = _build_flat_pipe(members, names=names)
+        self._pipe = _build_flat_pipe(members, names=names, device=self._device)
         self._active_mask = list(pattern)
 
     # ---------------------------------------------------------------- routing
@@ -616,11 +630,11 @@ class GraphComposer:
             )
 
 
-def _build_flat_pipe(members, *, names) -> GraphPipeline:
+def _build_flat_pipe(members, *, names, device=None) -> GraphPipeline:
     """Shared helper for the three flat (single-super-graph) modes'
     construction: ``add_concurrent`` at N>=2 members, plain ``add`` at
     N==1."""
-    pipe = GraphPipeline()
+    pipe = GraphPipeline(-1 if device is None else device)
     if len(members) >= 2:
         if names is not None and any(nm is not None for nm in names):
             pipe.add_concurrent(members, names=names)
