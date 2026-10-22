@@ -1,0 +1,2 @@
+# Export list of libeagle_xla.dylib for Apple's ld, the same names as eagle_xla.map.
+_eagle_xla_*
