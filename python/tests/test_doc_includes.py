@@ -56,6 +56,7 @@ def _generate_perf_pages():
 
 
 def test_eagle_docs_includes_resolve():
+    pytest.importorskip("raptor_docs")  # the page generator reads the shared docs tokens (pip install ./site)
     assert _DOCS_ROOT.is_dir(), f"missing eagle docs tree: {_DOCS_ROOT}"
     _generate_perf_pages()
     report = scan_docs(_DOCS_ROOT)

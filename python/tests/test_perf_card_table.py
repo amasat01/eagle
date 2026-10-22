@@ -483,6 +483,7 @@ def test_generated_families_cover_every_committed_card():
 
     RED: a card whose device the generator does not pick up (e.g. a slug the
     glob misses) fails here naming the family and the missing fragment."""
+    pytest.importorskip("raptor_docs")  # the page generator reads the shared docs tokens (pip install ./site)
     module = _gen_module()
     with tempfile.TemporaryDirectory() as tmp:
         out_dir = pathlib.Path(tmp)

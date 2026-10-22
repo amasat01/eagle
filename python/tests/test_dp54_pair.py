@@ -23,6 +23,8 @@ import pathlib
 import numpy as np
 import pytest
 
+hawk = pytest.importorskip("hawk")  # the card writes its attempt kernel with hawk
+
 pytestmark = pytest.mark.repo_local
 
 _DP54 = pathlib.Path(__file__).resolve().parents[2] / "benchmarks" / "rk78_card" / "dp54.py"
