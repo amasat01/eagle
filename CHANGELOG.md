@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.4 (2026-10-22)
 
 **`until_done` takes any DLPack array.** JAX, torch, CuPy and NumPy planes are read in place; a host plane runs on the host, a device plane on the device, and a mix is refused by name. An array of another framework is never written: `Runner.result(name)` returns the answer as a new array of the caller's type (a NumPy or CuPy plane is still written in place).
 

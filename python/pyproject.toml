@@ -13,7 +13,7 @@ backend-path = ["."]
 
 [project]
 name = "raptor-eagle"
-version = "0.6.3"
+version = "0.6.4"
 description = "EAGLE — the Python face of the launch engine for compiled CUDA kernels"
 # A copy of the repository README, made by _build_backend.py (git-ignored).
 readme = "README.md"
@@ -48,7 +48,7 @@ classifiers = [
 # `raptor.schema.blocks.validate_neural_block_descriptor` (first shipped in 0.2.0), which
 # `eagle.sidecar` imports. The constraint is expressed where a resolver can act on it,
 # never as a runtime surprise.
-dependencies = ["numpy>=1.26", "raptor-core>=0.3.3,<0.4"]
+dependencies = ["numpy>=1.26", "raptor-core>=0.3.4,<0.4"]
 
 # The "raptor.pattern_loaders" entry-point declaration for
 # "neural_block" moved to a separate package — eagle.neural was extracted there
