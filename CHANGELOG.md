@@ -22,6 +22,8 @@
 
 **Fixed: wrong answers when a torch `CUDAGraph` is a node of a recorded run on the GPU.** It was replayed on a stream not ordered against eagle's launches, so a run that did this on a 0.6 release may have given wrong results; re-run it. A node after the plan stays refused; the `[node, plan]` form covers it.
 
+**Fixed: CuPy could not compile after JAX started on CUDA 13.** With NVIDIA's pip wheels, starting JAX's CUDA plugin before CuPy's first kernel compile made NVRTC fail with "failed to open libnvrtc-builtins.so.13.0". `import eagle` now loads the wheels' NVRTC builtins library first, so the order no longer matters.
+
 **Fixed: wrong torch gradients in 0.6.3.** If you trained through the torch bridge with a kernel that carries state and some samples finish early, the gradient of its `Param` was too large (it also summed the steps a finished sample never took); it now matches finite differences. Re-run any training done on 0.6.3 that used this.
 
 **`vmap` over a batch of `Param` values is one launch** in the JAX and torch bridges: each sample reads its entry of a table, and the gradient of an entry is the sum over the samples that read it. A kernel that reduces over samples itself, or has a `jump=` plan, still runs one launch per entry.
