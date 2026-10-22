@@ -328,6 +328,14 @@ jobs:
           token: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
           pins: eagle/.github/companions
 
+      # companion site: the shared docs package (raptor_docs) the docs-include and card-coverage tests import
+      - uses: ./eagle/.github/actions/companion
+        with:
+          repo: amasat01.github.io
+          path: site
+          token: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
+          pins: eagle/.github/companions
+
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
@@ -405,6 +413,7 @@ jobs:
           # (read by test_backend_wall where cuobjdump is present)
           export EAGLE_PLUGIN_EXPECTED_ARCHS=70/70
           pip install ../raptor   # the sibling checkout, so unreleased raptor changes are tested
+          pip install ../site     # raptor_docs, so the docs tests run here instead of skipping
           # editable, as in development: python/conftest.py puts this source tree first
           # on sys.path, and only the editable hook then resolves the compiled eagle._core
           pip install --no-build-isolation --only-binary=:all: -e ./python
