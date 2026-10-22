@@ -34,7 +34,7 @@ runs:
           echo "ref=${pinned}" >> "$GITHUB_OUTPUT"
           exit 0
         fi
-        auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "${GH_TOKEN:-none}" | base64 -w0)"
+        auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "${GH_TOKEN:-none}" | base64 | tr -d '\n')"
         [ -n "${GH_TOKEN:-}" ] || auth="X-Unauthenticated: 1"
         found="$(git -c http.extraHeader="$auth" ls-remote --heads "https://github.com/amasat01/${COMPANION_REPO}" "refs/heads/${BRANCH_NAME}" | awk '{print $2}')"
         if [ "$found" = "refs/heads/${BRANCH_NAME}" ]; then ref="$BRANCH_NAME"; else ref=main; fi
