@@ -1,0 +1,14 @@
+repo = "eagle"
+helper_dirs = ["docs/content/_shared", "examples/python"]
+preinstalled = ["numpy", "IPython", "jax"]
+image_budget = 80000
+nb_roots = ["docs/content"]
+jax_floor = "python/pyproject.toml"
+fresh = [
+  "python tools/sync_readme_cards.py",
+  "python -m raptor_docs.capmap -o docs/_static/capmap.svg",
+]
+
+[helper_needs]
+"docs/content/_shared/nb_helpers.py" = ["matplotlib"]
+"examples/python/zero_copy_interop.py" = ["torch"]

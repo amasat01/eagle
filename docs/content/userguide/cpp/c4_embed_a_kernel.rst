@@ -5,9 +5,9 @@ C4 — Embed a compiled kernel in your own C++ program
     eagle's binary ABI — no aether headers, no Python, no code generator at
     build or run time.
 
-**Time:** ~5 min · **Runs on:** CUDA GPU only · **You need:** a CUDA
-toolchain, CMake (its own standalone build, separate from C1–C3's
-``exampletest`` gate above)
+**Time:** ~5 min · **Runs on:** CUDA GPU, or CPU only · **You need:** CMake,
+and a CUDA toolchain for the GPU arm (its own standalone build, separate from
+C1–C3's ``exampletest`` gate above)
 
 The examples above show eagle's own core facilities (graph, host, reduce). A
 separate, larger example shows the *other* side of eagle: **embedding** a
@@ -45,6 +45,34 @@ Driver-API demos, build/run instructions, expected output) and
 
    .. literalinclude:: ../../../../examples/cpp_embed_plugin/embedding_demo.cu
       :language: cuda
+      :linenos:
+
+The same program on a CPU
+^^^^^^^^^^^^^^^^^^^^^^^^^
+
+No GPU? ``eagle::cpu::PluginRegistry`` (``plugin/host_registry.h``) is the
+host twin of the registry above: same sidecars, same ``arg_spec`` roles, same
+binding calls, and each plugin is a shared object exporting ``<kernel>_host``
+that runs its own OpenMP loop. ``embedding_demo_cpu.cpp`` runs the same three
+plugins on the same inputs and holds them to the same references; there is no
+CUDA in the build.
+
+.. code-block:: bash
+
+   cmake -S examples/cpp_embed_plugin -B build_cpu -DEMBED_CPU_ONLY=ON
+   cmake --build build_cpu && build_cpu/embedding_demo_cpu     # prints PASS
+
+``PluginRegistry`` runs float64 plugins and ``PluginRegistry32`` float32 ones (the demo
+runs one of each): a sidecar whose ``scalar_type`` is the other one is refused at load by name. A host artifact is a ``.so``, so its manifest entries carry
+``"format": "host"`` (``fixtures/host_manifest.json``) and the demo loads them
+with ``load(manifest, dir)``, as on the device. The device registry refuses
+a ``host`` entry.
+
+.. dropdown:: embedding_demo_cpu.cpp
+   :icon: code
+
+   .. literalinclude:: ../../../../examples/cpp_embed_plugin/embedding_demo_cpu.cpp
+      :language: cpp
       :linenos:
 
 What just happened

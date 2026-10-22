@@ -405,6 +405,33 @@ def _until_done_state(platform, k0, stop):
 
 
 @pytest.mark.parametrize("platform", PLATFORMS)
+def test_until_done_compacts_on_jax_arrays_outside_jit(platform):
+    """Compaction runs on the non-jit path: a JAX array is read in place (DLPack), the
+    caller's buffer is never written, and ``result`` returns the answer as a new JAX array."""
+    import eagle
+    import eagle.plan as eplan
+    from hawk.ext import Guard, Kind
+
+    @hawk.kernel(kind=Kind("jax_compact", guard=Guard(active_set=True)), steps=1)
+    def count_compact(nstop: Param, terminated: Terminated, k: Mutable[Scalar]):
+        k = k + 1.0
+        terminated = k >= nstop
+
+    stop, n = 500.0, 1 << 12
+    k0 = np.random.default_rng(0).uniform(0, 490, n)
+    with jax.default_device(_device(platform)):
+        k_in = jnp.asarray(k0)
+        runner = eagle.until_done(eplan.auto(count_compact), max_steps=1000, k=k_in, nstop=stop)
+        rep = runner.run()
+        k_out = runner.result("k")
+    assert rep.done and rep.finished == n
+    assert rep.compactions >= 1                       # the loop really compacted
+    assert isinstance(k_out, jax.Array) and k_out is not k_in
+    np.testing.assert_array_equal(np.asarray(k_in), k0)           # the input is untouched
+    np.testing.assert_allclose(np.asarray(k_out), k0 + np.ceil(stop - k0), atol=1e-9)
+
+
+@pytest.mark.parametrize("platform", PLATFORMS)
 def test_a_carried_state_plane_keeps_its_value_in_a_loop_with_no_where(tmp_path, platform):
     from jax import lax
 
@@ -848,6 +875,175 @@ def test_vmap_of_a_capped_while_finishes(tmp_path, platform):
         assert np.all(np.abs(np.asarray(steps) - 200) <= 1)
 
 
+def _osc_rollout(K, steps, tf):
+    """``x`` after ``steps`` steps of ``osc`` as a function of ``(c, x0, v0)``."""
+    n = tf.shape[0]
+    t0, done0 = jnp.zeros(n), jnp.zeros(n, bool)
+
+    def run(c, x0, v0):
+        x, v, t, done = x0, v0, t0, done0
+        for _ in range(steps):
+            t, v, x, done = K(DT, c, tf, done, x, v, t)
+        return x
+
+    return run
+
+
+@pytest.mark.parametrize("platform", PLATFORMS)
+@pytest.mark.parametrize("finishing", [False, True], ids=["live", "terminated"])
+def test_forward_mode_of_a_carried_state_kernel_matches_differences_and_reverse(
+        tmp_path, platform, finishing):
+    n = 6
+    # finishing: samples 0-1 finish after step 1, 2-3 after step 2, the rest never
+    tf = (jnp.asarray([0.005, 0.005, 0.015, 0.015, 5.0, 5.0]) if finishing
+          else jnp.full(n, 5.0))
+    x0, v0 = jnp.linspace(0.5, 1.5, n), jnp.linspace(-0.2, 0.3, n)
+    c = jnp.asarray([0.3])
+    with jax.default_device(_device(platform)):
+        K = eagle_jax.function(osc, cache_dir=tmp_path)
+        run = _osc_rollout(K, 4, tf)
+        f = lambda x: run(c, x, v0)
+        tx = jnp.linspace(1.0, 2.0, n)
+        out, tan = jax.jvp(f, (x0,), (tx,))
+        eps = 1e-6
+        diff = (f(x0 + eps * tx) - f(x0 - eps * tx)) / (2 * eps)
+        np.testing.assert_allclose(np.asarray(tan), np.asarray(diff), atol=1e-8)
+        fwd, rev = jax.jacfwd(f)(x0), jax.jacrev(f)(x0)
+        np.testing.assert_allclose(np.asarray(fwd), np.asarray(rev), atol=1e-12)
+        g = lambda cc: run(cc, x0, v0)
+        np.testing.assert_allclose(np.asarray(jax.jit(jax.jacfwd(g))(c)),
+                                   np.asarray(jax.jacrev(g)(c)), atol=1e-12)
+        if finishing:
+            # a sample finished after step 1 ran ONE step: dx/dx0 = 1 + dt * (dv/dx0 = 0)
+            np.testing.assert_allclose(np.asarray(jnp.diag(fwd))[:2], 1.0, atol=1e-14)
+            assert np.asarray(jnp.diag(fwd))[4] != 1.0
+
+
+# the reverse of a carried-state kernel, as the step-vjp path (custom_vjp) gave it before the
+# transposed-jvp rule; the plane gradients are pinned to it, the Param's is not (see below)
+_OSC_GRAD_X0 = [0.986, 1.3880000000000001, 1.7796700180000002, 2.1835836226000005,
+                2.572987863442422, 2.9804674789531442]
+_OSC_GRAD_V0 = [1.00696, 1.01098, 1.0298514054, 1.03791836678, 1.0915509991095553,
+                1.1077850773265565]
+
+
+@pytest.mark.parametrize("platform", PLATFORMS)
+def test_reverse_of_a_carried_state_kernel_equals_the_step_vjp_path(tmp_path, platform):
+    """``jax.grad`` of a rollout with samples finishing at different steps: the
+    plane gradients equal what the earlier step-vjp reverse gave (within a few ulp);
+    the ``Param`` gradient is the finite difference (the earlier path also summed the
+    steps a finished sample did not take: it gave -0.0096379 here)."""
+    tf = jnp.asarray([0.005, 0.005, 0.015, 0.015, 5.0, 5.0])
+    x0, v0, c = jnp.linspace(0.5, 1.5, 6), jnp.linspace(-0.2, 0.3, 6), jnp.asarray([0.3])
+    with jax.default_device(_device(platform)):
+        K = eagle_jax.function(osc, cache_dir=tmp_path)
+        def loss(c, x, v):
+            n = 6
+            t, d = jnp.zeros(n), jnp.zeros(n, bool)
+            for _ in range(4):
+                t, v, x, d = K(DT, c, tf, d, x, v, t)
+            return (x * x + v).sum()
+
+        gc, gx, gv = jax.grad(loss, (0, 1, 2))(c, x0, v0)
+        np.testing.assert_allclose(np.asarray(gx), _OSC_GRAD_X0, rtol=1e-14)
+        np.testing.assert_allclose(np.asarray(gv), _OSC_GRAD_V0, rtol=1e-14)
+        eps = 1e-6
+        fd = (loss(c + eps, x0, v0) - loss(c - eps, x0, v0)) / (2 * eps)
+        np.testing.assert_allclose(np.asarray(gc), [float(fd)], rtol=1e-6)
+
+
+# -- a batch of Param values under vmap: one launch over n * B samples ----------------
+
+def _eagle_primitives(f, *args):
+    """The names of eagle's primitives and whether a ``scan``/``while`` loop is in ``f``'s jaxpr."""
+    text = str(jax.make_jaxpr(f)(*args))
+    names = re.findall(r"eagle_\w+", text)
+    return names, ("scan" in text or "while" in text)
+
+
+@pytest.mark.parametrize("platform", PLATFORMS)
+def test_vmap_over_a_param_is_one_launch_equal_to_the_loop(tmp_path, platform):
+    x, gs = jnp.linspace(0.1, 1.0, 7), jnp.asarray([0.5, 1.5, -0.8])
+    with jax.default_device(_device(platform)):
+        K = eagle_jax.function(drag, cache_dir=tmp_path)
+        m = jnp.zeros(7, bool)
+        f = lambda c: K(jnp.stack([x, x * 2, x * 3]), c.reshape(1), m)
+        got = jax.vmap(f)(gs)
+        loop = jnp.stack([f(c) for c in gs])
+        assert got.shape == (3, 3, 7)
+        np.testing.assert_array_equal(np.asarray(got), np.asarray(loop))
+        names, looped = _eagle_primitives(jax.vmap(f), gs)
+        assert names == ["eagle_drag_params_cells"] and not looped
+        loss = lambda c: (f(c) ** 2).sum()
+        # the entry's gradient sums its samples in the kernel's scatter, the loop's in the
+        # finished cell: the same terms, a different order
+        np.testing.assert_allclose(np.asarray(jax.vmap(jax.grad(loss))(gs)),
+                                   np.asarray(jnp.stack([jax.grad(loss)(c) for c in gs])), rtol=1e-13)
+        eps = 1e-6
+        fd = (jax.vmap(loss)(gs + eps) - jax.vmap(loss)(gs - eps)) / (2 * eps)
+        np.testing.assert_allclose(np.asarray(jax.vmap(jax.grad(loss))(gs)), np.asarray(fd), rtol=1e-6)
+        np.testing.assert_allclose(np.asarray(jax.vmap(jax.jacfwd(loss))(gs)),
+                                   np.asarray(jax.vmap(jax.grad(loss))(gs)), rtol=1e-13)
+
+
+@pytest.mark.parametrize("platform", PLATFORMS)
+def test_jacrev_over_planes_of_a_kernel_with_a_param_is_one_launch(tmp_path, platform):
+    """The reverse Jacobian maps the vjp over cotangents; the ``Param``'s gradient is one
+    entry per cotangent, not a loop."""
+    x = jnp.asarray(np.random.default_rng(0).uniform(0.5, 1.5, (3, 6)))
+    with jax.default_device(_device(platform)):
+        K = eagle_jax.function(drag, cache_dir=tmp_path)
+        m = jnp.zeros(6, bool)
+        f = lambda v: K(v, jnp.asarray([0.05]), m)
+        _, looped = _eagle_primitives(jax.jacrev(f), x)
+        assert not looped
+        np.testing.assert_allclose(np.asarray(jax.jacrev(f)(x)), np.asarray(jax.jacfwd(f)(x)),
+                                   rtol=1e-12, atol=1e-14)
+
+
+@pytest.mark.parametrize("platform", PLATFORMS)
+def test_vmap_over_a_param_of_a_carried_state_kernel_with_finished_samples(tmp_path, platform):
+    tf = jnp.asarray([0.005, 0.005, 0.015, 0.015, 5.0, 5.0])
+    x0, v0, cs = jnp.linspace(0.5, 1.5, 6), jnp.linspace(-0.2, 0.3, 6), jnp.asarray([0.3, 0.0, 1.2])
+    with jax.default_device(_device(platform)):
+        K = eagle_jax.function(osc, cache_dir=tmp_path)
+
+        def loss(c):
+            x, v, t, done = x0, v0, jnp.zeros(6), jnp.zeros(6, bool)
+            for _ in range(4):
+                t, v, x, done = K(DT, c.reshape(1), tf, done, x, v, t)
+            return (x * x + v).sum()
+
+        np.testing.assert_array_equal(np.asarray(jax.vmap(loss)(cs)),
+                                      np.asarray(jnp.stack([loss(c) for c in cs])))
+        grads = np.asarray(jax.vmap(jax.grad(loss))(cs))
+        np.testing.assert_allclose(grads, np.asarray(jnp.stack([jax.grad(loss)(c) for c in cs])),
+                                   rtol=1e-13)
+        eps = 1e-6
+        np.testing.assert_allclose(
+            grads, np.asarray((jax.vmap(loss)(cs + eps) - jax.vmap(loss)(cs - eps)) / (2 * eps)),
+            rtol=1e-6)
+        np.testing.assert_allclose(np.asarray(jax.vmap(jax.jacfwd(loss))(cs)), grads, rtol=1e-13)
+        names, looped = _eagle_primitives(jax.vmap(loss), cs)
+        assert set(names) == {"eagle_osc_params_cells"} and not looped
+
+
+@pytest.mark.skipif(not hasattr(hawk, "all_samples"), reason="this hawk has no reductions over samples")
+def test_vmap_over_a_param_of_a_kernel_with_cells_keeps_the_loop(tmp_path):
+    @hawk.kernel
+    def scaled_sum(x: Scalar, k: Param, t: Mutable[Scalar]):
+        t = hawk.all_samples(k * x).sum()  # noqa: F841
+
+    x, ks = jnp.linspace(0.1, 1.0, 9), jnp.asarray([0.5, 1.5, -0.8])
+    with jax.default_device(_device("cpu")):
+        K = eagle_jax.function(scaled_sum, cache_dir=tmp_path)
+        f = lambda k: K(x, k.reshape(1))
+        np.testing.assert_array_equal(np.asarray(jax.vmap(f)(ks)),
+                                      np.asarray(jnp.stack([f(k) for k in ks])))
+        names, looped = _eagle_primitives(jax.vmap(f), ks)
+        assert names == ["eagle_scaled_sum_params"] and looped
+
+
 @pytest.mark.parametrize("platform", PLATFORMS)
 def test_outputs_follow_the_kernels_slot_order_not_the_declaration(tmp_path, platform):
     with jax.default_device(_device(platform)):
@@ -855,15 +1051,40 @@ def test_outputs_follow_the_kernels_slot_order_not_the_declaration(tmp_path, pla
         assert K.outputs == ("t", "v", "x", "terminated")
 
 
-def test_a_guard_active_set_kernel_is_refused_by_name(tmp_path):
+def _active_kernel():
     from hawk.ext import Guard, Kind
 
     @hawk.kernel(kind=Kind("jax_active", guard=Guard(active_set=True)))
-    def bump(k: Scalar, terminated: Terminated, k_next: Mutable[Scalar]):
-        k_next = k + 1.0
+    def spring(w: Scalar, a: Param, terminated: Terminated, y: Mutable[Scalar]):
+        y = a * w * w + sqrt(w)
 
-    with pytest.raises(ValueError, match=r"bump.*Guard\(active_set=True\).*run it with eagle"):
-        eagle_jax.function(bump, cache_dir=tmp_path)
+    return spring
+
+
+@pytest.mark.parametrize("platform", PLATFORMS)
+def test_an_active_set_kernel_runs_every_sample_and_differentiates(tmp_path, platform):
+    """The bridge binds the identity index map: the answer is eagle.plan's with
+    every sample live, and the derivative kernels read the same planes."""
+    import eagle.plan as eplan
+    from eagle import ActiveSet
+
+    n = 1000
+    w = np.random.default_rng(3).uniform(0.5, 2.0, n)
+    with jax.default_device(_device(platform)):
+        spring = _active_kernel()
+        K = eagle_jax.function(spring, cache_dir=tmp_path)
+        assert K.inputs == ("w", "a", "terminated")
+        m = jnp.zeros(n, bool)
+        got = np.asarray(jax.jit(lambda w: K(w, 0.7, m))(jnp.asarray(w)))
+        y, term = np.zeros(n), np.zeros(n, dtype=bool)
+        eplan.auto(spring).bind(w=w, a=0.7, terminated=term, y=y, **ActiveSet(term).planes()).launch()
+        np.testing.assert_array_equal(got, y)
+        np.testing.assert_allclose(got, 0.7 * w * w + np.sqrt(w), rtol=1e-14)
+        gw = jax.grad(lambda w, a: K(w, a, m).sum(), (0, 1))(jnp.asarray(w), 0.7)
+        np.testing.assert_allclose(np.asarray(gw[0]), 1.4 * w + 0.5 / np.sqrt(w), rtol=1e-13)
+        np.testing.assert_allclose(float(gw[1]), (w * w).sum(), rtol=1e-13)
+        tangent = jax.jvp(lambda w: K(w, 0.7, m), (jnp.asarray(w),), (jnp.ones(n),))[1]
+        np.testing.assert_allclose(np.asarray(tangent), 1.4 * w + 0.5 / np.sqrt(w), rtol=1e-13)
 
 
 def test_a_finished_count_of_the_wrong_width_is_refused_by_name():

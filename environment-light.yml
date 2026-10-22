@@ -19,3 +19,10 @@ dependencies:
   - sphinx-design
   - breathe>=4.35.0
   - myst-parser
+  - myst-nb
+  - sphinx-copybutton
+  - sphinx-autodoc-typehints
+  - jax
+  - pip
+  - pip:
+      - raptor-docs @ git+https://github.com/amasat01/amasat01.github.io@main

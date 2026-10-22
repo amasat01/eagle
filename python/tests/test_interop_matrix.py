@@ -160,6 +160,108 @@ def test_torch_cpu_input_copies_with_write_isolation():
 
 
 # --------------------------------------------------------------------------- #
+# numpy rows (NP-HOST-ALIAS, NP-IN-CPU-COPY)
+# --------------------------------------------------------------------------- #
+@register_row("NP-HOST-ALIAS", leg="cpu")
+def test_numpy_host_import_is_a_zero_copy_view_with_write_through():
+    """A writable NumPy array imports as a zero-copy host view: pointer identity,
+    write-through from the DLPack re-export, and a read-only array is flagged
+    read-only. A copy has another address, so the pointer check can tell."""
+    certified_framework("numpy")
+    from eagle.interop import import_buffer
+
+    a = np.arange(12.0)
+    v = import_buffer(a)
+    assert v.ptr == a.ctypes.data
+    assert (v.access, v.owner, v.device) == ("read-write", "external", (1, 0))
+    assert import_buffer(a.copy()).ptr != a.ctypes.data   # the falsifier: a copy is told apart
+
+    back = np.from_dlpack(v)
+    assert back.ctypes.data == a.ctypes.data
+    back[3] = 7.25
+    assert a[3] == 7.25                                   # write-through
+
+    ro = np.arange(6.0)
+    ro.flags.writeable = False
+    assert import_buffer(ro).access == "read-only"
+
+
+@register_row("NP-IN-CPU-COPY", leg="cuda")
+def test_numpy_input_copies_with_write_isolation():
+    """A NumPy array given to a CUDA kernel comes back as a NumPy array via a
+    host upload, and, being a copy, is write-isolated in both directions."""
+    certified_framework("numpy")
+    certified_framework("cupy")
+
+    plugin = LoadedVector(FIX / "gravity.ptx")
+    P = _make_positions(64, seed=2)
+    x = P.copy()
+    out = plugin(position=x, mu=MU)
+    assert type(out) is np.ndarray
+    assert _max_rel(out, _gravity_ref(P, MU)) < 1e-12
+
+    snapshot = out.copy()
+    x[0, 0] = 555.0                                       # mutate the input after the call
+    assert np.array_equal(out, snapshot)
+    x_snapshot = x.copy()
+    out[0, 0] = -555.0                                    # mutate the output after the call
+    assert np.array_equal(x, x_snapshot)
+    assert not np.shares_memory(out, x)
+
+
+# --------------------------------------------------------------------------- #
+# cupy hand-over rows (CP-IN-ALIAS, CP-OUT-ALIAS)
+# --------------------------------------------------------------------------- #
+@register_row("CP-IN-ALIAS")
+def test_cupy_input_import_is_a_zero_copy_device_view():
+    """A CuPy array imports as a zero-copy device view that outlives its producer,
+    and a write through the re-export is visible on the CuPy side."""
+    certified_framework("cupy")
+    import gc
+
+    import cupy as cp
+    from eagle.interop import import_buffer
+
+    a = cp.arange(6, dtype=cp.float64)
+    ptr = a.data.ptr
+    v = import_buffer(a)
+    assert v.ptr == ptr
+    assert (v.access, v.owner, v.producer, v.device) == ("read-write", "external", "cupy.ndarray", (2, 0))
+    assert import_buffer(a.copy()).ptr != ptr             # the falsifier: a copy is told apart
+
+    view = cp.from_dlpack(v)
+    assert view.data.ptr == ptr
+    view[0] = 7.25
+    cp.cuda.Stream.null.synchronize()
+    assert float(a[0]) == 7.25                            # write-through
+    del a
+    gc.collect()
+    assert cp.from_dlpack(v).data.ptr == ptr              # the view keeps the buffer alive
+
+
+@register_row("CP-OUT-ALIAS")
+def test_cupy_output_is_filled_in_place_or_is_a_new_array():
+    """With ``out=`` a CuPy buffer is filled where it is; without, the result is a
+    new CuPy array that does not alias the input."""
+    certified_framework("cupy")
+    import cupy as cp
+
+    plugin = LoadedVector(FIX / "gravity.ptx")
+    P = _make_positions(64, seed=1)
+    pos = cp.asarray(P)
+    buf = cp.zeros((3, P.shape[1]), dtype=cp.float64)
+    ptr = buf.data.ptr
+    ret = plugin(position=pos, mu=MU, out=buf)
+    assert ret is buf and buf.data.ptr == ptr             # filled in place, no reallocation
+    assert _max_rel(cp.asnumpy(buf), _gravity_ref(P, MU)) < 1e-12
+
+    fresh = plugin(position=pos, mu=MU)
+    assert isinstance(fresh, cp.ndarray)
+    assert fresh.data.ptr not in (pos.data.ptr, ptr)      # a new buffer, not the input
+    assert _max_rel(cp.asnumpy(fresh), _gravity_ref(P, MU)) < 1e-12
+
+
+# --------------------------------------------------------------------------- #
 # cupy adapter/pipeline row (CP-CAPTURE-REJECT)
 # --------------------------------------------------------------------------- #
 @register_row("CP-CAPTURE-REJECT")

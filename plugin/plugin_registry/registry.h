@@ -104,6 +104,7 @@ public:
         std::vector<UniformInt> ints;
         std::vector<unsigned> counts;
         std::vector<void*> params;
+        CUdeviceptr finished = 0;   // the registry's finished_count cell (0: the kernel has none)
     };
 
     // Owns consolidated-table device memory, so the registry is move-only: a copy
@@ -292,7 +293,20 @@ public:
             staged.push_back(p);
         }
         for (auto& p : staged) plugins_.push_back(std::move(p));
+        own_finished_counter_();
     }
+
+    // The finished-sample counter's current value (0 when no plugin names it): a blocking
+    // device-to-host read, so call it after the stream that ran the kernels has synchronized.
+    std::uint32_t finished_count() const {
+        auto it = tables_.find(kFinishedCounter);
+        if (it == tables_.end()) return 0;
+        std::uint32_t v = 0;
+        check_(cuMemcpyDtoH(&v, it->second.dptr, sizeof v), "cuMemcpyDtoH(finished_count)",
+               kFinishedCounter);
+        return v;
+    }
+
 
     // Force the plugin at `index` (registry order, i.e. merge order) on or off,
     // overriding the per-entry `enabled` its manifest declared (v0.2.3).
@@ -369,6 +383,9 @@ public:
     // Re-consolidating the same name replaces the prior allocation. ``count`` is
     // the flat element count (== prod(shape)); the table is read as ``handle[k]``.
     void consolidate(const std::string& name, const double* host, std::size_t count) {
+        if (name == kFinishedCounter)
+            throw std::runtime_error("lookup '" + name + "' is allocated and bound by the "
+                "registry (the finished-sample counter); drop the consolidate call");
         const std::size_t bytes = count * sizeof(double);
         auto it = tables_.find(name);
         // Budget counts what this name occupies AFTER replacement (a re-consolidation
@@ -452,6 +469,7 @@ public:
     int inject_partition(CUstream stream, const eagle::exec::Partition& part,
                          int block = 256) {
         if (!enabled_) return 0;
+        zero_finished_(stream);
         int launched = 0;
         for (auto& p : plugins_) {
             if (!p.enabled) continue;
@@ -490,6 +508,7 @@ public:
                 " is out of range: " + std::to_string(plugins_.size()) +
                 " plugin(s) loaded");
         if (!will_launch(index)) return 0;
+        zero_finished_(stream);
         launch_(plugins_[index], stream, unsigned(block),
                 eagle::exec::Partition::whole(n));
         return 1;
@@ -504,6 +523,7 @@ public:
                 " is out of range: " + std::to_string(plugins_.size()) +
                 " plugin(s) loaded");
         if (!will_launch(index)) return 0;
+        zero_finished_(stream);
         launch_(plugins_[index], stream, unsigned(block), part);
         return 1;
     }
@@ -531,6 +551,17 @@ public:
     }
 
 private:
+    // Zero the registry-owned finished-sample counter on `stream` (an async memset, a no-op
+    // when no loaded plugin names it). The `inject*` entries call it on the stream they
+    // launch on; `pack()` hands the cell to `DeviceKernel::run`, which zeroes it on ITS stream.
+    void zero_finished_(CUstream stream) const {
+        auto it = tables_.find(kFinishedCounter);
+        if (it != tables_.end())
+            check_(cuMemsetD32Async(it->second.dptr, 0, 1, stream),
+                   "cuMemsetD32Async(finished_count)", kFinishedCounter);
+    }
+
+
     // Is `id` already loaded? The merge door's collision test (v0.2.3).
     bool has_id_(const std::string& id) const {
         for (const auto& p : plugins_) if (p.id == id) return true;
@@ -639,6 +670,8 @@ private:
                 handles.push_back(make_handle(
                     lookup_table_(p.id, a.name), unsigned(n), kEagleAbiDeviceCUDA));
                 params.push_back(&handles.back());
+                if (a.name == kFinishedCounter)
+                    out.finished = tables_.at(kFinishedCounter).dptr;  // run() zeroes it
             } else if (a.role == "uniform") {
                 // A uniform is packed BY VALUE, in one of two same-width but
                 // differently-INTERPRETED spellings: float64 (`Real p_<name>`) or
@@ -767,6 +800,23 @@ private:
                 name + "' but it was not supplied at consolidation "
                 "(call registry.consolidate(\"" + name + "\", data, count))");
         return reinterpret_cast<void*>(it->second.dptr);
+    }
+
+    // The finished-sample counter (one uint32 cell): allocated here, once, when a loaded
+    // plugin's arg_spec names it, and held with the tables so it is freed and moved with
+    // them. Bound by `lookup_table_` like any lookup.
+    void own_finished_counter_() {
+        if (tables_.count(kFinishedCounter)) return;
+        for (const auto& p : plugins_)
+            for (const auto& a : p.sidecar.arg_spec)
+                if (a.role == "lookup" && a.name == kFinishedCounter) {
+                    CUdeviceptr d = 0;
+                    check_(cuMemAlloc(&d, sizeof(std::uint32_t)),
+                           "cuMemAlloc(finished_count)", p.id);
+                    check_(cuMemsetD32(d, 0, 1), "cuMemsetD32(finished_count)", p.id);
+                    tables_[kFinishedCounter] = OwnedTable{d, sizeof(std::uint32_t)};
+                    return;
+                }
     }
 
     // A registry-OWNED device allocation for a consolidated lookup table.

@@ -5,7 +5,9 @@
 
 #include "TestBase.h"
 
+#include <cmath>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 using namespace eagle::plugin;  // the ABI protocol PODs (Sidecar / ArgEntry / handles)
@@ -275,6 +277,153 @@ TEST(HostPluginTest, ConflictingTableShapesAcrossPluginsIsError)
     } catch (const std::runtime_error& e) {
         const std::string msg = e.what();
         EXPECT_NE(msg.find("conflicting element counts"), std::string::npos) << msg;
+    }
+}
+
+// --- float32 plugins: eagle::cpu::PluginRegistry32 -------------------------------------
+
+static Sidecar f32Sidecar(const std::string& kernel, std::vector<ArgEntry> args)
+{
+    Sidecar sc;
+    sc.kernel         = kernel;
+    sc.aether_abi     = EAGLE_AETHER_ABI;
+    sc.schema_version = kPluginSchemaVersion;
+    sc.scalar_type    = "float32";
+    sc.arg_spec       = std::move(args);
+    sc.mutables       = { MutableInfo{ "out", "float", 1 } };
+    return sc;
+}
+
+TEST(HostPluginTest, Float32AddvecMatchesNumpyFloat32)
+{
+    const std::int32_t n = 4096;
+    std::vector<float> a(n), b(n), out(n, -1.0f);
+    for (std::int32_t i = 0; i < n; ++i) {
+        a[i] = 0.1f * float(i);
+        b[i] = 1.0f / float(i + 1);
+    }
+    eagle::cpu::PluginRegistry32 reg;
+    reg.add_plugin(f32Sidecar("addvec32", { { "mutable", "out" }, { "per_sample", "a" },
+                                           { "per_sample", "b" }, { "nsamples", "n" } }),
+                   HOST_PLUGIN_F32_SO);
+    reg.bind_handle("out", out.data());
+    reg.bind_handle("a", a.data());
+    reg.bind_handle("b", b.data());
+    ASSERT_EQ(reg.run(n), 1);
+    for (std::int32_t i = 0; i < n; ++i)
+        ASSERT_NEAR(out[i], a[i] + b[i], 1e-6 * std::abs(a[i] + b[i]));
+}
+
+TEST(HostPluginTest, Float32MatrixTraceMatchesNumpyFloat32)
+{
+    const std::int32_t n = 2048;
+    std::vector<float> M(9 * std::size_t(n)), out(n, -1.0f);
+    for (std::int32_t d = 0; d < 9; ++d)
+        for (std::int32_t i = 0; i < n; ++i)
+            M[std::size_t(d) * n + i] = float(d) + 0.25f * float(i);
+    Sidecar sc = f32Sidecar("mattrace32", { { "mutable", "out" }, { "mat_in", "M" },
+                                           { "nsamples", "n" } });
+    sc.mat_shapes = { { "M", { 3, 3 } } };
+    eagle::cpu::PluginRegistry32 reg;
+    reg.add_plugin(sc, HOST_PLUGIN_F32_SO);
+    reg.bind_handle("out", out.data());
+    reg.bind_matrix("M", M.data(), std::uint32_t(n), 3, 3);
+    ASSERT_EQ(reg.run(n), 1);
+    for (std::int32_t i = 0; i < n; ++i) {
+        const float want = M[std::size_t(0) * n + i] + M[std::size_t(4) * n + i] + M[std::size_t(8) * n + i];
+        ASSERT_NEAR(out[i], want, 1e-6 * std::abs(want));
+    }
+}
+
+// vec_in + a real uniform (narrowed once at bind) + a lookup table, all 4-byte floats.
+static Sidecar makeVecgain32Sidecar()
+{
+    Sidecar sc = f32Sidecar("vecgain32", { { "mutable", "out" }, { "vec_in", "x" },
+                                          { "uniform", "gain" }, { "lookup", "tab" },
+                                          { "nsamples", "n" } });
+    sc.buffers = { BufferInfo{ "tab", "lookup", "float", 4 } };
+    return sc;
+}
+
+TEST(HostPluginTest, Float32VecInUniformAndLookupMatchNumpyFloat32)
+{
+    const std::int32_t n = 4096;
+    std::vector<float> x(n), out(n, -1.0f);
+    for (std::int32_t i = 0; i < n; ++i)
+        x[i] = 0.01f * float(i);
+    std::vector<float> tab = { 0.5f, 1.5f, 2.5f, 3.5f };
+    const double gain = 0.3;  // a double at the call, a float in the kernel slot
+
+    eagle::cpu::PluginRegistry32 reg;
+    reg.add_plugin(makeVecgain32Sidecar(), HOST_PLUGIN_F32_SO);
+    reg.bind_vector("x", x.data(), std::uint32_t(n));
+    reg.bind_handle("out", out.data());
+    reg.bind_uniform("gain", gain);
+    reg.consolidate("tab", tab.data(), 4);
+    ASSERT_EQ(reg.run(n), 1);
+    for (std::int32_t i = 0; i < n; ++i) {
+        const float want = x[i] * float(gain) + tab[i % 4];
+        ASSERT_NEAR(out[i], want, 1e-6 * std::abs(want));
+    }
+}
+
+// The scalar must match the registry: a float32 plugin into the float64 registry (and the
+// reverse) is refused by name, before dlopen.
+TEST(HostPluginTest, Float32PluginIntoFloat64RegistryIsRefusedByName)
+{
+    eagle::cpu::PluginRegistry reg;
+    try {
+        reg.add_plugin(makeVecgain32Sidecar(), HOST_PLUGIN_F32_SO);
+        FAIL() << "expected the scalar mismatch to be refused";
+    } catch (const std::runtime_error& e) {
+        const std::string msg = e.what();
+        EXPECT_NE(msg.find("float32"), std::string::npos) << msg;
+        EXPECT_NE(msg.find("PluginRegistry32"), std::string::npos) << msg;
+    }
+}
+
+TEST(HostPluginTest, Float64PluginIntoFloat32RegistryIsRefusedByName)
+{
+    eagle::cpu::PluginRegistry32 reg;
+    ASSERT_THROW(reg.add_plugin(makeAddvecSidecar(), HOST_PLUGIN_ADDVEC_SO), std::runtime_error);
+}
+
+// The registry owns the finished_count cell: no caller table, zeroed at the start of every run.
+static Sidecar makeCountfinSidecar()
+{
+    Sidecar sc = f32Sidecar("countfin32", { { "mutable", "k" }, { "terminated", "terminated" },
+                                           { "lookup", "finished_count" }, { "nsamples", "n" } });
+    sc.mutables = { MutableInfo{ "k", "float", 1 } };
+    return sc;
+}
+
+TEST(HostPluginTest, FinishedCounterIsOwnedAndZeroedEachRun)
+{
+    const std::int32_t n = 1000;
+    std::vector<float> k(n);
+    for (std::int32_t i = 0; i < n; ++i)
+        k[i] = (i % 4 == 0) ? 1.0f : -1.0f;
+    std::vector<unsigned char> mask(n, 0);
+
+    eagle::cpu::PluginRegistry32 reg;
+    reg.add_plugin(makeCountfinSidecar(), HOST_PLUGIN_F32_SO);
+    reg.bind_handle("k", k.data());
+    reg.bind_handle("terminated", mask.data());
+    ASSERT_EQ(reg.run(n), 1);  // no consolidate call: the registry supplies the counter
+    EXPECT_EQ(reg.finished_count(), 250u);
+    ASSERT_EQ(reg.run(n), 1);
+    EXPECT_EQ(reg.finished_count(), 250u);  // zeroed again, not 500
+}
+
+TEST(HostPluginTest, ConsolidatingTheFinishedCounterIsRefusedByName)
+{
+    eagle::cpu::PluginRegistry32 reg;
+    std::vector<float> t(1, 0.0f);
+    try {
+        reg.consolidate("finished_count", t.data(), 1);
+        FAIL() << "expected the reserved name to be refused";
+    } catch (const std::runtime_error& e) {
+        EXPECT_NE(std::string(e.what()).find("finished_count"), std::string::npos);
     }
 }
 

@@ -3,7 +3,7 @@
 #
 # The script Kaggle runs on a T4: it installs the family, checks that JAX sees the GPU, then either
 #   --mode tests      runs the interop certification rows plus the JAX rows, or
-#   --mode notebooks  runs EVERY docs notebook (site, eagle, hawk; found by glob, see nb_run_gate.discover),
+#   --mode notebooks  runs EVERY docs notebook (site, eagle, hawk; found by glob, see raptor_docs.nb.discover),
 #                     each from a copy in an empty directory with its setup cell executing for real (the
 #                     Kaggle branch), and records PASS / FAIL / SKIP + seconds per notebook,
 # and writes result.json. drive.py pushes it with the settings below filled in, one kernel per mode and
@@ -54,7 +54,7 @@ def settings():
     ap.add_argument("--pre", action="store_true")
     ap.add_argument("--version", default="")
     ap.add_argument("--sibling-pins", default="", help="source wheel: exact sibling pins, `pkg==V ...`")
-    for name in ("eagle", "hawk", "raptor", "aether"):
+    for name in ("eagle", "hawk", "raptor", "aether", "site"):
         ap.add_argument(f"--{name}-ref", default="main")
     ap.add_argument("--eagle-src", help="local eagle checkout (default: the one holding this script)")
     ap.add_argument("--raptor-src", help="local raptor checkout, sets RAPTOR_ROOT")
@@ -291,11 +291,9 @@ def table_of(rows):
 def run_notebooks(cfg, py, work, roots, result, out):
     """Every notebook of the checkouts in ``roots`` (repo name -> path; 'site' = the site repository), one by one.
     result.json is rewritten after each one, so a kernel that dies still shows what ran."""
-    tools = roots["eagle"] / "docs" / "_tools"
-    sys.path.insert(0, str(tools))
-    import nb_hosted
-    import nb_run_gate
-    found = nb_run_gate.discover({r: roots[r] for r in ("site", "eagle", "hawk") if r in roots})
+    sys.path.insert(0, str(roots["site"]))  # raptor_docs, the family's docs tooling, lives in the site checkout
+    from raptor_docs.nb import discover, hosted as nb_hosted, run_gate as nb_run_gate
+    found = discover({r: roots[r] for r in ("site", "eagle", "hawk") if r in roots})
     todo = [(repo, p, p.relative_to(roots[repo] / ("notebooks" if repo == "site" else "docs/content")))
             for repo, nbs in found.items() for p in nbs if cfg.only in p.as_posix()]
     header(f"{len(todo)} notebooks: " + ", ".join(f"{r} {len(n)}" for r, n in found.items()))
@@ -386,7 +384,7 @@ def main():
         clone("raptor", cfg.raptor_ref, src / "raptor")
         roots.update(eagle=src / "eagle", raptor=src / "raptor")
         if cfg.mode == "notebooks":
-            clone(SITE_REPO, "main", src / SITE_REPO)
+            clone(SITE_REPO, cfg.site_ref, src / SITE_REPO)
             clone("hawk", cfg.hawk_ref, src / "hawk")
             clone("aether", cfg.aether_ref, src / "aether")
             roots.update(site=src / SITE_REPO, hawk=src / "hawk", aether=src / "aether")

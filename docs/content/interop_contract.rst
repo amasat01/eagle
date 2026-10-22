@@ -3,16 +3,15 @@ Interoperability contract
 
 .. note::
 
-   New here? :doc:`interop` walks through numpy, cupy, torch and NVIDIA
-   Warp crossing the same launcher, worked in a notebook, before this page's
+   New here? :doc:`interop` walks through numpy, cupy, torch, NVIDIA
+   Warp and JAX crossing the same launcher, worked in a notebook, before this page's
    contract and refusal rules. hawk's `planes and roles
    <https://amasat01.github.io/hawk/content/vocabulary.html>`__ vocabulary
    (``Mutable``, ``Scalar``, ``Vector``) is what the shapes below are shapes
    *of*.
 
-Any array that speaks DLPack — NumPy, CuPy, PyTorch, NVIDIA Warp, JAX, and by the
-same protocol TensorFlow and others — becomes a first-class buffer for
-the family: zero-copy, with correct stream ordering and lifetime. The layer
+Any array that speaks DLPack — NumPy, CuPy, PyTorch, NVIDIA Warp or JAX —
+becomes a first-class buffer for the family: zero-copy, with correct stream ordering and lifetime. The layer
 is implemented once, in C++ headers (``aether/interop/Buffer.h`` for the
 buffer record, ``plugin/interop.h`` for the CUDA-aware half), and bound in
 Python as :func:`eagle.interop.import_buffer`. A C++ consumer includes the
@@ -189,6 +188,9 @@ XLA custom call on XLA's own buffers and stream, is certified by four more rows:
 * In one ``jit``, a kernel after a long-running XLA operation runs on XLA's
   stream: the call returns without a host wait and reads the finished values
   (``STREAM-JAX-FFI-ORDER``).
+* ``grad``, ``jit(grad)``, ``vmap(grad)``, ``jacfwd`` and ``jacrev`` of a kernel
+  match the same law written in plain JAX, on CPU and CUDA
+  (``JX-GRAD-TRANSFORMS``).
 
 Three more rows cover JAX code inside an eagle graph:
 
@@ -321,7 +323,10 @@ select the host plan when every per-sample value is host-resident (numpy, a
 number) and the device plan when any is device-resident (cupy); data on both
 sides is refused (``move one side with cp.asarray / .get()``), and so is a
 side the plugin was not built for. ``eagle.until_done`` accepts an
-``AutoPlan``. ``eagle.deploy(kernel)`` (the same function as
+``AutoPlan``, and planes from any DLPack producer (JAX, torch, CuPy, NumPy): it reads them in place, runs
+on the side the data is on (a host plane beside a device plane is refused by name), and never writes an
+array of another framework (eagle's own tests cover this; no row of the certification matrix does yet). ``Runner.result(name)`` returns a plane the kernel writes as a new array of the
+caller's framework; a NumPy or CuPy plane is written in place as before. ``eagle.deploy(kernel)`` (the same function as
 ``eagle.plan.auto``) takes a hawk kernel itself, and ``eagle.deploy([k1, k2])``
 a list (one bundle, a tuple of plans in order): it builds through hawk's
 cache and assembles the plugin with ``hawk.artifact.plugins``. hawk's host runtime restates rules 1 to 3 and 5

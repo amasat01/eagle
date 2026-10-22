@@ -50,7 +50,7 @@ from ._busy import BusyGuard
 from ._compat import zip_strict
 from ._conditional import SkipGuard, Skippable, repeat_while
 from .graph import LowerCtx, Node, get_node_kind
-from .roles import PER_SAMPLE_ROLES
+from .roles import OUTPUT_ROLES, PER_SAMPLE_ROLES
 from .sidecar import FINISH_AUTO, FINISH_COUNTER, read_finish, refuse_derived
 
 #: The reserved ``lookup`` plane a finishing kernel counts newly finished
@@ -530,6 +530,51 @@ def _select_step(plans, planes) -> list:
     return [getattr(p, where) if hasattr(p, "select") else p for p in plans]
 
 
+def _is_foreign(value) -> bool:
+    """A DLPack producer that is neither numpy nor cupy (jax, torch, ...)."""
+    from .interop import _root_module
+
+    return hasattr(value, "__dlpack__") and _root_module(value) not in ("numpy", "cupy")
+
+
+def _import_foreign(planes) -> tuple:
+    """``(planes, foreign)``: each foreign plane as a zero-copy
+    :class:`eagle.interop.BufferView` (the plan door's own intake), and
+    ``{name: the caller's array}``."""
+    foreign = {nm: v for nm, v in planes.items() if _is_foreign(v)}
+    if not foreign:
+        return planes, {}
+    from .interop import import_buffer
+
+    return {**planes, **{nm: import_buffer(v) for nm, v in foreign.items()}}, foreign
+
+
+def _native_planes(planes, foreign, specs, device) -> tuple:
+    """``planes`` with each foreign view as the array the loop runs on: read
+    in place, and, where the kernel writes it, a copy (the caller's array is
+    never written; :meth:`Runner.result` hands the answer back). A view on the
+    other side of the plan's device is refused by name. Returns ``(planes,
+    the names the kernel writes)``."""
+    written = {nm for spec in specs for role, nm in spec
+               if role in OUTPUT_ROLES or role == "terminated"}
+    if not foreign:
+        return planes, written
+    import numpy as np
+
+    from .interop import to_cupy
+    out = dict(planes)
+    for nm in foreign:
+        view = planes[nm]
+        if (view.device[0] == 2) != device:
+            raise ValueError(
+                f"eagle.until_done: {nm!r} is a {'device' if view.device[0] == 2 else 'host'} "
+                f"array but this plan runs on the {'device' if device else 'host'}; move it "
+                "(all planes of one run live in one place)")
+        arr = to_cupy(view) if device else np.from_dlpack(view)
+        out[nm] = arr.copy() if nm in written else arr
+    return out, written
+
+
 def _step_planes(plans, specs, planes) -> tuple:
     """``(planes, n)``: one sample's head-shaped arrays as batch-of-one
     views (same memory, written in place), and the batch size. A
@@ -593,7 +638,7 @@ class Runner:
                  "_fast_counts", "_fast_state", "_fast_probe", "_fast_model", "_fast_key",
                  "_mapped_live", "_fast_ev", "_fast_prep",
                  "_fast_fill", "_fast_chunk", "_fast_chunk_ok", "_fast_chunk_pin", "_fast_fit", "_rate", "_recorder",
-                 "_hooks")
+                 "_hooks", "_foreign", "_work", "_written")
 
     @_layout.door
     def __init__(self, plan, *, max_steps, every=None, reorder=None, record=False,
@@ -624,6 +669,7 @@ class Runner:
         # Internal only: ``False`` keeps the size pick for every run instead of
         # timing the other entry (see :meth:`_pick_entry`).
         self._fast_probe = planes.pop("_fast_probe", True)
+        planes, self._foreign = _import_foreign(planes)
         steps = list(plan) if isinstance(plan, (list, tuple)) else [plan]
         hooks = _hook_nodes(steps, record)
         plans = [p for p in steps if not isinstance(p, Node)]
@@ -725,12 +771,15 @@ class Runner:
         else:
             every = _cadence(name, every, k) if compacting else None
 
+        planes, self._written = _native_planes(planes, self._foreign, specs, device)
+        self._work = dict(planes)
         planes, n = _step_planes(plans, specs, planes)
         if reorder is not None:
             _refuse_moving_node_planes(hooks, specs, planes)
         if mask_name not in planes:
             planes[mask_name] = xp.zeros(n, dtype=xp.bool_)
         mask = planes[mask_name]
+        self._work.setdefault(mask_name, mask)
         nodes = _record_nodes(steps, specs[0], planes) if hooks and record else ()
         # the finished count is word [2] of the fast entries' counter block
         # (see _build_fast): one memset zeroes it with the other counters and
@@ -1650,6 +1699,25 @@ class Runner:
 
     def _reorders(self) -> bool:
         return self.active is not None and self.active.theta is not None
+
+    def result(self, name: str):
+        """The plane ``name`` after a run, as the caller's own array type. A
+        numpy or cupy plane is the caller's array, written in place. A plane
+        from another framework (jax, torch, ...) is read in place and never
+        written: a plane the kernel writes comes back as a NEW array of that
+        framework holding the answer (a copy per call), an unwritten one as
+        the caller's array itself."""
+        if name not in self._work:
+            raise KeyError(f"eagle.until_done: no plane {name!r} (planes: {sorted(self._work)})")
+        original = self._foreign.get(name)
+        native = self._work[name]
+        if original is None:
+            return native
+        if name not in self._written:
+            return original
+        from .interop import export_like
+
+        return export_like(original, native)
 
     def reset(self) -> None:
         """Clear the mask/counter/active set: the next :meth:`run` starts the batch over."""

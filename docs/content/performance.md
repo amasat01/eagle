@@ -12,11 +12,7 @@ every page in this section.
 
 ## Where each tool covers the work
 
-```{raw} html
-:file: ../_static/family_visuals/fragments/performance.html
-```
-
-*Map, rosette and radar of the same committed cards: each tool where it covers a workload, with the table behind every chart.*
+How eagle compares with the other tools on the same committed cards is on the [family site](https://amasat01.github.io/compare.html).
 
 ## RK4 oscillators: GPU
 

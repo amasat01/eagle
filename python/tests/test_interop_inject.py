@@ -963,7 +963,7 @@ class _RunVjp:
     from ``(x, v)`` per step; 50..200 steps per sample, W=16."""
 
     def __init__(self, torch, xp, dev, plan, n=512, counter=False, node_kw=None, around=None,
-                 param=0.0, **kw):
+                 param=0.0, shuffle=False, child=False, **kw):
         torch.manual_seed(0)
         self.torch, self.xp, self.dev, self.calls, self.fwd_calls = torch, xp, dev, 0, None
         self.param = param      # the node also adds param * c, reading the Param c
@@ -972,8 +972,12 @@ class _RunVjp:
         self.params = [*lin1.parameters(), *lin2.parameters()]
         self.model = lambda x, v: lin2(torch.tanh(lin1(torch.stack([x, v], 1)))).squeeze(1)
         self.x0, self.v0 = (xp.asarray(np.linspace(a, b, n)) for a, b in ((0.5, 1.5), (-0.2, 0.3)))
+        t_final = np.linspace(0.5, 2.0, n)
+        if shuffle:     # scattered stop steps: a compaction's reorder fires
+            perm = np.random.default_rng(0).permutation(n)
+            self.x0, self.v0, t_final = self.x0[perm], self.v0[perm], t_final[perm]
         self.p = dict(x=self.x0.copy(), v=self.v0.copy(), t=xp.zeros(n), corr=xp.zeros(n),
-                      t_final=xp.asarray(np.linspace(0.5, 2.0, n)))
+                      t_final=xp.asarray(t_final))
         self.mask = xp.zeros(n, bool)
         self.cpar = xp.asarray([C])
         tt = self.tt = lambda a: torch.as_tensor(a, device=dev)
@@ -985,10 +989,23 @@ class _RunVjp:
                 tt(self.p["corr"])[...] = (self.model(tt(self.p["x"]), tt(self.p["v"]))
                                            + (0.1 * drift if counter else 0.0)
                                            + self.param * tt(self.cpar))
-        self.node = opaque(around(fwd) if around else fwd,
-                           reads={"x": self.p["x"], "v": self.p["v"],
-                                  **({"c": self.cpar} if param else {})},
-                           writes={"corr": self.p["corr"]}, name="model", **(node_kw or {}))
+        if child:       # the model captured once as a torch CUDA graph
+            tx, tv, tc = (tt(self.p[k]) for k in ("x", "v", "corr"))
+            side = torch.cuda.Stream()
+            with torch.cuda.stream(side), torch.no_grad():
+                for _ in range(3):
+                    tc.copy_(self.model(tx, tv))
+            torch.cuda.synchronize()
+            tg = torch.cuda.CUDAGraph(keep_graph=True)
+            with torch.cuda.graph(tg, stream=side), torch.no_grad():
+                tc.copy_(self.model(tx, tv))
+            self.node = G.child(tg, reads={"x": self.p["x"], "v": self.p["v"]},
+                                writes={"corr": self.p["corr"]}, name="model")
+        else:
+            self.node = opaque(around(fwd) if around else fwd,
+                               reads={"x": self.p["x"], "v": self.p["v"],
+                                      **({"c": self.cpar} if param else {})},
+                               writes={"corr": self.p["corr"]}, name="model", **(node_kw or {}))
         if plan is None:        # through eagle.simulation: the step list as given
             self.runner = eagle.simulation([self.node, inj_osc], max_steps=400, record=True,
                                            window=16, dt=DT, c=C, **self.p)
@@ -1079,9 +1096,11 @@ def _run_vjp_row(torch, xp, dev, targets, tmp, monkeypatch):
     bare.run()
     assert bare.record.nbytes == run.runner.record.nbytes
     # compaction arm: same gradients (ULP contract), the hook still once per launch
-    comp = _RunVjp(torch, xp, dev, cplan, every=16, reorder=0.5)
+    comp = _RunVjp(torch, xp, dev, cplan, n=4096, shuffle=True, every=16, reorder=0.5)
     assert comp.calls == comp.rep.launches + 1
-    assert _rel([comp.reverse()[0][k] for k in want], list(want.values())) < 1e-12
+    assert int(_host(comp.runner.active.reorders)[0]) >= 1      # a real reorder, not a vacuous arm
+    cwant = comp.reference()[0]
+    assert _rel([comp.reverse()[0][k] for k in cwant], list(cwant.values())) < 1e-12
     sim = _RunVjp(torch, xp, dev, None)
     assert _rel([sim.reverse()[0][k] for k in want], list(want.values())) < 1e-12
     with pytest.raises(ValueError, match="comes after the plan in a recorded step"):
@@ -1359,21 +1378,29 @@ def _fall(dt: Param, g: Param, terminated: Terminated, corr: Scalar,
 
 
 inj_fall = hawk.kernel(_fall, kind=Kind("inj_fall"), steps=1, time="t", time_step="dt")
+inj_fall_c = hawk.kernel(_fall, kind=Kind("inj_fall_c", guard=Guard(active_set=True)),
+                         steps=1, time="t", time_step="dt")
 
 
-def _run_vjp_refine(torch, xp, dev):
+def _run_vjp_refine(torch, xp, dev, plan=None, n=64, **kw):
     """A fall to the ground with a node's extra acceleration, the impact located inside
     its stop step (events="refine"): the node runs from the state before every step,
     the stop step included; reversed against pure-torch autograd with the root of the
-    step's quadratic as the event time."""
+    step's quadratic as the event time. With a ``plan``, ``n`` samples start shuffled and
+    ``kw`` goes to the run; returns ``(t_stop, gradients, parameter gradients, runner)``."""
     torch.manual_seed(2)
-    n, g0 = 64, 9.81
+    g0 = 9.81
     lin1 = torch.nn.Linear(2, 6, dtype=torch.float64, device=dev)
     lin2 = torch.nn.Linear(6, 1, dtype=torch.float64, device=dev)
     params = [*lin1.parameters(), *lin2.parameters()]
     model = lambda y, v: 0.5 * lin2(torch.tanh(lin1(torch.stack([y, v], 1)))).squeeze(1)  # noqa
     tt = lambda a: torch.as_tensor(a, device=dev)       # noqa: E731
-    y0, v0 = (xp.asarray(np.linspace(a, b, n)) for a, b in ((1.0, 5.0), (-1.0, 2.0)))
+    y0, v0 = (np.linspace(a, b, n) for a, b in (((1.0, 5.0) if plan is None else (0.5, 40.0)),
+                                                (-1.0, 2.0)))
+    if plan is not None:     # scattered stop steps: the reorder fires
+        perm = np.random.default_rng(0).permutation(n)
+        y0, v0 = y0[perm], v0[perm]
+    y0, v0 = xp.asarray(y0), xp.asarray(v0)
     p = dict(y=y0.copy(), v=v0.copy(), t=xp.zeros(n), corr=xp.zeros(n))
 
     def fwd():
@@ -1381,10 +1408,15 @@ def _run_vjp_refine(torch, xp, dev):
             tt(p["corr"])[...] = model(tt(p["y"]), tt(p["v"]))
     node = opaque(fwd, reads={"y": p["y"], "v": p["v"]}, writes={"corr": p["corr"]},
                   name="model")
-    runner = eagle.simulation([node, inj_fall], max_steps=400, events="refine", record=True,
-                              dt=0.05, g=g0, **p)
+    if plan is None:
+        runner = eagle.simulation([node, inj_fall], max_steps=400, events="refine", record=True,
+                                  dt=0.05, g=g0, **p)
+    else:
+        runner = eagle.until_done([node, plan], max_steps=400, events="refine", record=True,
+                                  dt=0.05, g=g0, terminated=xp.zeros(n, bool), **kw, **p)
     res = runner.run()
-    status, t_stop = _host(res.event_status), _host(res.t_stop)
+    res = res if plan is None else runner      # until_done keeps the outcome on the runner
+    status, t_stop = _host(res.event_status).copy(), _host(res.t_stop).copy()
     assert (status == 1).all()
     assert (np.abs(t_stop / 0.05 - np.round(t_stop / 0.05)) > 1e-6).sum() > n // 2  # refined
 
@@ -1418,6 +1450,23 @@ def _run_vjp_refine(torch, xp, dev):
     for k, w in want.items():
         assert _rel([_host(got[k]).reshape(-1)], [_host(w).reshape(-1)]) < 1e-12, k
     assert _rel(got_p, [q.grad for q in params]) < 1e-12
+    return t_stop, {k: _host(a) for k, a in got.items()}, [q.grad.clone() for q in params], runner
+
+
+def _run_vjp_refine_reorder(torch, xp, dev, tmp):
+    """The refine run with a node under compaction and a real reorder (a reorder needs
+    n >= 4096 and scattered stop steps): stop times and gradients bitwise the plain arm's."""
+    tg = "cuda" if xp is not np else "host"
+    plain, comp = (eagle.plan.auto([k], targets=(tg,), cache_dir=str(tmp / k.name))[0]
+                   for k in (inj_fall, inj_fall_c))
+    a = _run_vjp_refine(torch, xp, dev, plain, n=4096)
+    b = _run_vjp_refine(torch, xp, dev, comp, n=4096, every=4, reorder=0.5)
+    assert int(_host(b[3].active.reorders)[0]) >= 1
+    np.testing.assert_array_equal(a[0], b[0])
+    for k in a[1]:
+        np.testing.assert_array_equal(a[1][k], b[1][k], err_msg=k)
+    for x, y in zip(a[2], b[2]):
+        np.testing.assert_array_equal(_host(x), _host(y))
 
 
 @register_row("INJ-RUN-VJP", leg="cpu")
@@ -1432,6 +1481,20 @@ def test_run_vjps_refine_host():
 def test_run_vjps_refine_device():
     torch = _torch_cuda()
     _run_vjp_refine(torch, _cp(), _dev(torch))
+
+
+@register_row("INJ-RUN-VJP", leg="cpu")
+def test_run_vjps_refine_reorder_host(tmp_path):
+    certified_framework("torch")
+    import torch
+
+    _run_vjp_refine_reorder(torch, np, "cpu", tmp_path)
+
+
+@register_row("INJ-RUN-VJP", leg="cuda")
+def test_run_vjps_refine_reorder_device(tmp_path):
+    torch = _torch_cuda()
+    _run_vjp_refine_reorder(torch, _cp(), _dev(torch), tmp_path)
 
 
 def _tier_arm(torch, xp, dev, plan, **kw):
@@ -1459,6 +1522,16 @@ def test_run_node_tiers_device(tmp_path, monkeypatch):
     _same_arm(base, _tier_arm(torch, xp, dev, plan,
                               node_kw=dict(stream=torch.cuda.current_stream())))
     _same_arm(base, _tier_arm(torch, xp, dev, plan, node_kw=dict(eager=True)))
+    # the supported way round to a nested capture: the torch graph is eagle's child node
+    child = _tier_arm(torch, xp, dev, plan, child=True)         # a captured torch graph
+    _same_arm(base, child)
+    assert xp.cuda.ExternalStream(0).ptr == xp.cuda.Stream.null.ptr == 0
+    real_stream = torch.cuda.default_stream
+    monkeypatch.setattr(torch.cuda, "default_stream", lambda *a: torch.cuda.ExternalStream(0))
+    cut = _tier_arm(torch, xp, dev, plan, child=True)           # replayed off the null stream
+    torch.cuda.synchronize()
+    assert _rel([cut[0]["x"]], [base[0]["x"]]) > 1e-6
+    monkeypatch.setattr(torch.cuda, "default_stream", real_stream)
     side = torch.cuda.Stream()
 
     def busy(fn):

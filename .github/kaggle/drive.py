@@ -45,7 +45,7 @@ def username():
 def build(args, user, folder):
     slug = f"eagle-{'nb' if args.mode == 'notebooks' else 'gpu'}-cuda{args.cuda}-{args.run_id}".lower()
     config = {k: getattr(args, k) for k in ("mode", "cuda", "source", "pre", "version", "nb_timeout", "wheel_sha256", "sibling_pins",
-                                            "eagle_ref", "hawk_ref", "raptor_ref", "aether_ref")}
+                                            "eagle_ref", "hawk_ref", "raptor_ref", "aether_ref", "site_ref")}
     text = (HERE / "kernel.py").read_text()
     if "EMBEDDED_CONFIG = None" not in text:
         raise SystemExit("kernel.py has no EMBEDDED_CONFIG line to fill")
@@ -184,7 +184,7 @@ def main():
     ap.add_argument("--sibling-pins", default="", help="--source wheel: exact pins (`pkg==V ...`) of the siblings the dataset may carry")
     ap.add_argument("--pre", action="store_true")
     ap.add_argument("--version", default="")
-    for n in ("eagle", "hawk", "raptor", "aether"):
+    for n in ("eagle", "hawk", "raptor", "aether", "site"):
         ap.add_argument(f"--{n}-ref", default="main")
     ap.add_argument("--out", default="kaggle-out", help="where the kernel output and log are saved")
     ap.add_argument("--dry-run", action="store_true", help="print the metadata and commands; no network")

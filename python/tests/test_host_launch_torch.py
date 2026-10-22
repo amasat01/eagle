@@ -132,16 +132,55 @@ def test_host_ptr_rejects_cuda_tensor():
         interop.host_ptr(t)
 
 
-@pytest.mark.parametrize("scalar_type", ["float32", "softdouble"])
-def test_host_plugin_rejects_nonfloat64_scalar_type(scalar_type):
-    """The Python loader mirrors the C++ ``eagle::cpu::PluginRegistry::add_plugin``
-    gate: the host runner executes native float64 only, so a sidecar declaring a
-    non-``float64`` ``scalar_type`` (a device-only float32 / SoftDouble kernel) is
-    rejected up front — before dlopen — with a clear error naming the offending type.
-    Closes the dtype-asymmetry the parity audit flagged (C++ gated, Python did not)."""
-    sidecar = dict(_SIDECAR, scalar_type=scalar_type)
-    with pytest.raises(ValueError, match=r"float64 only.*" + scalar_type):
+def test_host_plugin_rejects_softdouble_scalar_type():
+    """The Python loader mirrors the C++ ``eagle::cpu`` registries: the host runs
+    ``float64`` and ``float32`` plugins, so a ``softdouble`` sidecar is rejected up
+    front, before dlopen, with an error naming the type."""
+    sidecar = dict(_SIDECAR, scalar_type="softdouble")
+    with pytest.raises(ValueError, match=r"float64 and float32.*softdouble"):
         HostPluginLibrary("/no/such/plugin.so", sidecar)
+
+
+_PLUGIN_SRC_F32 = r"""
+struct ScalarHandle { void* ptr; };
+extern "C" void gain32_host(void* const* p, int n) {
+    float* out      = (float*)((const ScalarHandle*)p[0])->ptr;
+    const float* a  = (const float*)((const ScalarHandle*)p[1])->ptr;
+    const float gain = *(const float*)p[2];
+    for (int i = 0; i < n; ++i)
+        out[i] = a[i] * gain;
+}
+"""
+
+
+def test_host_plugin_float32_packs_the_uniform_at_four_bytes(tmp_path):
+    """A float32 plugin runs over float32 planes and reads its real uniform as a 4-byte
+    float (an 8-byte double there would be read as garbage)."""
+    gxx = _gxx()
+    if gxx is None:
+        pytest.skip("no g++ available to build the host plugin fixture")
+    src = tmp_path / "gain32.cpp"
+    src.write_text(_PLUGIN_SRC_F32)
+    so = tmp_path / "gain32.so"
+    proc = subprocess.run([gxx, "-O3", "-shared", "-fPIC", "-o", str(so), str(src)],
+                          capture_output=True, text=True)
+    if proc.returncode != 0:
+        pytest.skip(f"host plugin compile failed: {proc.stderr.strip()[:400]}")
+    sidecar = {
+        "kernel": "gain32", "aether_abi": "aether-abi/1", "scalar_type": "float32",
+        "arg_spec": [["mutable", "out"], ["per_sample", "a"], ["uniform", "gain"],
+                     ["nsamples", "n"]],
+        "mutables": [{"name": "out", "dtype": "float", "width": 1}],
+    }
+    n = 1024
+    a = np.linspace(0.0, 3.0, n, dtype=np.float32)
+    out = np.full(n, -1.0, dtype=np.float32)
+    lib = HostPluginLibrary(str(so), sidecar)
+    lib.bind_handle("out", interop.host_ptr(out))
+    lib.bind_handle("a", interop.host_ptr(a))
+    lib.bind_uniform("gain", 0.3)
+    lib.run(n)
+    np.testing.assert_allclose(out, a * np.float32(0.3), rtol=1e-6)
 
 
 def test_host_plugin_accepts_absent_or_float64_scalar_type(tmp_path):

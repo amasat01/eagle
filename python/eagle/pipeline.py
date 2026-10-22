@@ -44,6 +44,42 @@ from ._launch_policy import sibling_context
 from ._member_enable import MemberHandle, NonToggleableMemberError, _MemberRegistry
 
 
+
+def refuse_in_capture(what: str) -> None:
+    """Refuse ``what`` (a launch) while a stream capture is open on the calling
+    stream: cupy's current stream, torch's, or warp's. The pipeline replays on its
+    own streams and syncs, so inside a capture it records an empty graph, silently."""
+    import sys
+
+    capturing = False
+    warp = sys.modules.get("warp")
+    if warp is not None:
+        try:
+            capturing = bool(warp.get_device().is_capturing)
+        except Exception:
+            pass
+    torch = sys.modules.get("torch")
+    if not capturing and torch is not None and torch.cuda.is_available():
+        capturing = bool(torch.cuda.is_current_stream_capturing())
+    if not capturing:       # last: cupy's stream may be the legacy one, which a capture refuses to query
+        import cupy
+
+        try:
+            capturing = bool(cupy.cuda.runtime.streamIsCapturing(
+                cupy.cuda.get_current_stream().ptr))
+        except cupy.cuda.runtime.CUDARuntimeError as exc:
+            capturing = "CaptureImplicit" in str(exc)
+            if not capturing:
+                raise
+    if capturing:
+        raise RuntimeError(
+            f"eagle: {what} was called inside a stream capture (torch.cuda.graph, "
+            "wp.capture_begin or a cupy graph): an eagle graph replays on its own "
+            "streams and synchronizes, so the capture would record nothing. Go the other "
+            "way: give your framework's graph to eagle with eagle.graph.child(graph, "
+            "reads=..., writes=...) and launch the eagle graph once, outside any capture.")
+
+
 class _LaunchHandles(NamedTuple):
     """(stream, launcher) pair for enqueue-without-sync replay of one
     built :class:`GraphPipeline`. Module-private: :mod:`eagle.compose`'s
@@ -666,6 +702,7 @@ class GraphPipeline:
             raise RuntimeError("call build() before launch()")
         import cupy as cp
 
+        refuse_in_capture("GraphPipeline.launch/enqueue")
         if seed_events is None:
             seed_events = self._record_seed_events(cp)
         for event in seed_events:

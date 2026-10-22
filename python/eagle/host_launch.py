@@ -105,14 +105,15 @@ class HostPluginLibrary:
         )
         # Presence-required, like every other loader in both languages.
         check_aether_abi(sidecar, kind="host plugin", name=sidecar.get("kernel", "?"))
-        # The CPU runner executes NATIVE float64 only (the same gate the
-        # C++ registry enforces); checked before dlopen.
-        scalar_type = sidecar.get("scalar_type", "")
-        if scalar_type and scalar_type != "float64":
+        # The scalar the plugin reads and writes: float64 (the default) or float32.
+        # A real by-value uniform is packed at that width; checked before dlopen.
+        scalar_type = sidecar.get("scalar_type", "") or "float64"
+        if scalar_type not in ("float64", "float32"):
             raise ValueError(
                 f"host plugin '{sidecar.get('kernel', '?')}': the host runner "
-                f"executes float64 only (got '{scalar_type}')"
+                f"executes float64 and float32 plugins (got '{scalar_type}')"
             )
+        self._real = ctypes.c_float if scalar_type == "float32" else ctypes.c_double
         self._lib   = ctypes.CDLL(str(so_path))
         entry       = sidecar.get("host_entry") or (sidecar["kernel"] + "_host")
         self._fn    = getattr(self._lib, entry)
@@ -371,11 +372,11 @@ class HostPluginLibrary:
                 box = ctypes.c_uint32(n)
             elif tag == "UNIFORM":
                 # follows the binder the caller used (reconciled already by
-                # _check_uniform_kind); c_longlong, not c_double.
+                # _check_uniform_kind); c_longlong, not a real.
                 if name in (self._uniform_int or {}):
                     box = ctypes.c_longlong(self._uniform_int[name])
                 else:
-                    box = ctypes.c_double(self._uniform[name])
+                    box = self._real(self._uniform[name])
             else:
                 # Defensive only: classify_arg's return is exactly ARG_TAGS.
                 raise ValueError(

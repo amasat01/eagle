@@ -8,7 +8,7 @@ default out of the box; no flag is required for a standard CUDA build.
 
 .. note::
 
-   Platform scope: Linux only.  Windows and macOS are not tested.
+   Platform scope: Linux and macOS (CPU only on macOS).  Windows is not tested.
    More platforms may be added in future releases.
 
 CMake option reference
@@ -99,8 +99,7 @@ and AVX2-only CPUs) and on aarch64 Linux; the performance page lists the CPUs.
 On aarch64 the step is not vectorised and there is no vector-math profile.
 The aether headers eagle builds on are compiled with ``-march=x86-64-v3``
 (AVX2 and FMA) by default on x86-64, so the host path needs an x86-64 CPU of
-that level or newer; the ``AETHER_MARCH`` CMake variable overrides it. There
-are no ARM wheels yet.
+that level or newer; the ``AETHER_MARCH`` CMake variable overrides it.
 
 On the device side, eagle is built with CUDA 12.6 or newer; the register gate
 pins the toolkits it exercises, and each performance card records the toolkit

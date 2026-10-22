@@ -26,7 +26,7 @@ Building the docs
    cd docs/
    make doxygen html    # Doxygen XML, then the full Sphinx build
    make strict          # same, with -W --keep-going (0 warnings required)
-   make nbexec          # execute every tutorial/example notebook IN PLACE (needs a GPU)
+   make nbexec          # execute every tutorial/example notebook IN PLACE (uses the GPU when one is visible)
    make nbcheck         # refuse the build unless every notebook cell has run
    make linkcheck        # crawl every link 
    make livehtml         # watch + auto-rebuild (requires watchdog)
@@ -41,6 +41,11 @@ committed with their outputs — the Sphinx build itself never re-executes
 them (``nb_execution_mode = "off"`` in ``conf.py``); ``make nbcheck`` is the
 gate that catches a notebook committed without having been (re-)run.
 
+The notebook gates, the family skin (font, stylesheets, favicons) and the capability map come from the ``raptor-docs``
+package; ``docs/raptor_docs.toml`` holds this repo's settings and its list of generated files.
+``python -m raptor_docs.fresh --check`` (run by CI) fails when one is stale; ``--write`` regenerates them. It also fails when
+a copy of a file the package ships is back in ``docs/``.
+
 Dependencies
 ------------
 
@@ -50,12 +55,12 @@ A lightweight conda environment ships as ``environment-light.yml``:
 
    micromamba create -p .envs/eagle_docs -f environment-light.yml -y
 
-Or install manually:
+Or install with pip (the shared docs tooling, ``raptor-docs``, comes from the landing site; offline, use
+``pip install ./site`` from a checkout of it):
 
 .. code-block:: bash
 
-   pip install sphinx sphinx-book-theme sphinx-design sphinx-copybutton \
-       sphinx-autodoc-typehints myst-nb breathe nbformat nbclient
+   pip install -r docs/requirements.txt
 
 Doxygen must also be on ``PATH``. Building the Python API reference needs the
 ``eagle`` package importable (``pip install -e ./python``, see
@@ -68,7 +73,7 @@ prints a note and carries on without it.
 Notebooks
 ---------
 
-A notebook declares what it needs in its ``gate`` metadata, and ``nb_run_gate.py`` (run by ``make nbcheck``) reads it:
+A notebook declares what it needs in its ``gate`` metadata, and the notebook gate (``python -m raptor_docs.nb run_gate``, run by ``make nbcheck``) reads it:
 
 * ``"needs": ["pkg", ...]`` in the notebook metadata: skip the notebook where a package is not installed.
 * ``"gpu_only": "reason"`` in the notebook metadata: skip the whole notebook on the CPU leg.
@@ -76,7 +81,7 @@ A notebook declares what it needs in its ``gate`` metadata, and ``nb_run_gate.py
   a GPU-only section.
 
 ``make nbcheck-hosted`` runs the notebooks the way a Colab user does (a fresh environment, only the installed
-packages), so a notebook should import the package API, never a path in a checkout.
+packages; it needs ``uv``, Python 3.13 and a C++23 compiler, see ``docs/Makefile``), so a notebook should import the package API, never a path in a checkout.
 
 Writing docstrings
 ------------------

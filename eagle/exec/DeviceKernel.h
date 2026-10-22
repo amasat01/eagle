@@ -81,6 +81,27 @@ struct DeviceKernel {
     }
 
     /**
+     * @brief :func:`run` over packed args that may carry the registry's finish-counter
+     *        cell: zeroes it on @p stream (async, no sync) before the launch, so each
+     *        run through ``pack()`` + this call counts from zero with no caller step.
+     *        @p packed needs ``params`` (the role args) and ``finished`` (a device
+     *        address, 0 when the kernel has no counter).
+     */
+    template <class Packed>
+    static int run(CUfunction fn, const Packed& packed, const Partition& part,
+                   CUstream stream, unsigned block = 256) {
+        if (packed.finished != 0 && part.count > 0) {
+            static const auto zero =
+                detail::driver_entry<decltype(&::cuMemsetD32Async)>("cuMemsetD32Async");
+            const CUresult r = zero(packed.finished, 0, 1, stream);
+            if (r != CUDA_SUCCESS)
+                throw std::runtime_error(std::string("DeviceKernel::run: zeroing the "
+                    "finished counter failed: ") + detail::driver_error_text(r));
+        }
+        return run(fn, packed.params, part, stream, block);
+    }
+
+    /**
      * @brief Combine @p n device-resident partials under @p op, in eagle's FIXED
      *        ascending order (never atomics for the deterministic arm).
      *

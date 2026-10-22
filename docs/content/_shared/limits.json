@@ -1,7 +1,7 @@
 [
  {
   "id": "one-gpu",
-  "text": "One GPU per process until 0.7 (our scope): run one process per GPU, or choose it with `CUDA_VISIBLE_DEVICES`.",
+  "text": "One GPU per process until 0.7 (our scope): run one process per GPU, or choose it with `CUDA_VISIBLE_DEVICES` (tutorial 20 shows the pattern).",
   "way_out": "one process per GPU",
   "cause": "ours",
   "lifted_in": "0.7"
@@ -22,7 +22,7 @@
  },
  {
   "id": "jax-param-vmap",
-  "text": "`vmap` over a batch of `Param` values runs one launch per entry, because a `Param` is one number per launch (our scope). Put the varying value in a plane for one launch; over planes it is free for `in_axes=-1` and one transpose for a leading axis.",
+  "text": "`vmap` over a batch of `Param` values is one launch over every entry; a kernel that reduces over samples itself, or has a `jump=` plan, runs one launch per entry instead (our scope): put the varying value in a plane for one launch.",
   "way_out": "put the varying value in a plane",
   "cause": "ours",
   "lifted_in": "none"
@@ -38,13 +38,6 @@
   "id": "jax-terminated",
   "text": "`Terminated` is a stop decision, not a number, so it carries no derivative and a finished sample's derivatives are zero. Keep any soft version of the decision in `jnp`, and differentiate the planes.",
   "way_out": "keep a soft version in jnp",
-  "cause": "ours",
-  "lifted_in": "none"
- },
- {
-  "id": "jax-active-set",
-  "text": "`function()` refuses a kernel built with `Guard(active_set=True)`, because its index map belongs to eagle's launcher (our scope): run that kernel with eagle, or build it without `active_set`.",
-  "way_out": "run it with eagle, or drop active_set",
   "cause": "ours",
   "lifted_in": "none"
  },
@@ -78,16 +71,37 @@
  },
  {
   "id": "torch-param-vmap",
-  "text": "`torch.func.vmap` over a batch of `Param` values runs one launch per entry, because a `Param` is one number per launch (our scope); put the varying value in a plane for one launch.",
+  "text": "`torch.func.vmap` over a batch of `Param` values is one launch over every entry; a kernel with a `jump=` plan runs one launch per entry instead (our scope): put the varying value in a plane for one launch.",
   "way_out": "put the varying value in a plane",
   "cause": "ours",
   "lifted_in": "none"
  },
  {
   "id": "numpy-cupy-no-autodiff",
-  "text": "No gradients through NumPy or CuPy, because neither has autodiff (the frameworks' design): write the vjp yourself and pass it as `vjps=`, or use the [torch](torch.ipynb) or [JAX](jax.ipynb) bridge.",
+  "text": "No gradients through NumPy or CuPy, because neither has autodiff (the frameworks' design): write the vjp yourself and pass it as `vjps=` (see [the graph model](../userguide/graph_model)), or use the [torch](torch.ipynb) or [JAX](jax.ipynb) bridge.",
   "way_out": "write the vjp, or use the torch or JAX bridge",
   "cause": "framework",
+  "lifted_in": "none"
+ },
+ {
+  "id": "until-done-read-only",
+  "text": "`until_done` never writes a JAX or torch array (our design: your arrays stay yours): take the answer from `Runner.result(name)`, a new array of your framework. A NumPy or CuPy plane is still written in place.",
+  "way_out": "Runner.result(name)",
+  "cause": "ours",
+  "lifted_in": "none"
+ },
+ {
+  "id": "until-done-mixed-planes",
+  "text": "`until_done` refuses a host plane beside a device plane, by name (our scope): move one side, so that every plane is on the host or every plane is on the device.",
+  "way_out": "move one side",
+  "cause": "ours",
+  "lifted_in": "none"
+ },
+ {
+  "id": "host-float32-gaps",
+  "text": "The CPU host runs float32 plugins, but not yet the ones with integer mutables, a `Terminated` mask or derivative kernels (our scope): use float64 for those on the host, or the GPU.",
+  "way_out": "float64 on the host, or the GPU",
+  "cause": "ours",
   "lifted_in": "none"
  },
  {
@@ -148,17 +162,17 @@
  },
  {
   "id": "run-vjps-node-after-plan",
-  "text": "In a recorded loop a node runs before the plan, preparing the step from the current state (our scope until 0.6.4): write the step as `[node, plan]`.",
+  "text": "In a recorded loop a node runs before the plan, preparing the step from the current state (our design): write the step as `[node, plan]`. The run calls the node on the initial state before step 0; applying it once more after the last step is yours, and your framework's autograd of that call gives the seeds.",
   "way_out": "the [node, plan] form",
   "cause": "ours",
-  "lifted_in": "0.6.4"
+  "lifted_in": "none"
  },
  {
   "id": "run-vjps-node-vjp",
-  "text": "In a recorded loop the node's vjp is a callable run host-synchronized once per step (our scope until 0.6.4): a captured backward as a `Node` vjp is refused by name.",
+  "text": "In a recorded loop the node's vjp is a callable run host-synchronized once per step (our scope): a `Node` as the vjp is refused by name. A hooked reverse costs what your model costs per step.",
   "way_out": "the callable vjp",
   "cause": "ours",
-  "lifted_in": "0.6.4"
+  "lifted_in": "none"
  },
  {
   "id": "torch-capture-alloc",
@@ -176,8 +190,8 @@
  },
  {
   "id": "nested-capture",
-  "text": "An eagle graph cannot be captured inside `torch.cuda.graph` or `wp.capture_begin` (our scope): build the eagle graph first and replay it next to your framework's.",
-  "way_out": "build the eagle graph first",
+  "text": "An eagle graph is not launched inside `torch.cuda.graph` or `wp.capture_begin` (our design: one owner of the streams and syncs, and the call is refused by name). Go the other way: hand your torch `CUDAGraph` or Warp graph to eagle with `child(graph, reads=..., writes=...)`, and one eagle launch runs the whole thing (section 6, torch model inside an eagle batch).",
+  "way_out": "child(graph, reads=..., writes=...)",
   "cause": "ours",
   "lifted_in": "none"
  },
@@ -231,13 +245,6 @@
   "lifted_in": "none"
  },
  {
-  "id": "jax-state-forward",
-  "text": "Forward mode (`jvp`, `jacfwd`) of a kernel that carries state is not available yet (our scope): use reverse mode (`grad`, `jacrev`), or a kernel that writes a separate output plane.",
-  "way_out": "reverse mode, or a separate output plane",
-  "cause": "ours",
-  "lifted_in": "none"
- },
- {
   "id": "jax-inside-jit",
   "text": "Compaction, conditionals and event refinement belong to `until_done`; inside `jit` the loop is XLA's (`while_loop`, `scan`), so they do not apply there (XLA's design): use `until_done` when you need them.",
   "way_out": "until_done outside jit",
@@ -255,6 +262,13 @@
   "id": "torch-ft-wheel",
   "text": "torch's CPU wheels cover free-threaded Python 3.14t only, none for 3.13t (torch's release choice): use 3.14t for free-threaded torch, or a regular 3.13 build.",
   "way_out": "3.14t, or a regular 3.13",
+  "cause": "framework",
+  "lifted_in": "none"
+ },
+ {
+  "id": "py315-interop",
+  "text": "cupy and torch publish no Python 3.15 wheels yet (their release choice), so the CuPy and torch interop tests skip on 3.15: use Python 3.14 for them.",
+  "way_out": "Python 3.14 for CuPy and torch",
   "cause": "framework",
   "lifted_in": "none"
  }

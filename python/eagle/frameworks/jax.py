@@ -15,8 +15,9 @@ further level is derived on demand. So ``jax.grad``, ``jvp``, ``vjp``,
 ``linearize``, ``jacfwd``, ``jacrev``, ``hessian`` and nested derivatives of
 any order work, under ``jit`` or not. ``jax.vmap`` folds the batch into the
 sample axis (one launch; zero-copy for ``in_axes=-1``, a leading batch axis
-costs one transpose); a batched ``Param`` runs one launch per batch entry
-(``lax.map``).
+costs one transpose); a batched ``Param`` is one launch too (each sample
+reads its entry of a table; a kernel that reduces over samples itself, or has a
+``jump=`` plan, runs one launch per entry with ``lax.map``).
 
 Conventions, off the kernel's own declaration (as for the torch bridge):
 inputs are its planes, ``Param`` uniforms and ``Terminated`` mask in declared
@@ -28,11 +29,12 @@ allocated by XLA and zero where the kernel does not write (a terminated
 sample). A ``Mutable`` plane the kernel also reads (carried state, the shape
 ``until_done`` steps) is an input too, in declared order, and comes back aliased
 to it: a sample the kernel does not write keeps its input value, so a loop body
-carries it with no ``jnp.where``. Its reverse runs the vjp of one step
-(``hawk.diff.step_vjp``) at the values the step read, and a sample already
-finished passes its adjoint through, so ``jax.grad`` of a ``lax.scan`` over it
-needs no ``where`` either (``grad`` through ``while_loop`` is JAX's own refusal;
-forward mode is refused too). ``function(kernel, wrt=())`` wraps any kernel
+carries it with no ``jnp.where``. Its derivatives are those of ONE step at the
+values the step read (hawk's jvp of the step; its transpose is the vjp of one
+step), and a sample already finished passes its tangent and its adjoint
+through, so ``jax.grad`` or ``jacfwd`` of a ``lax.scan`` over it needs no
+``where`` either (``grad`` through ``while_loop`` is JAX's own refusal).
+``function(kernel, wrt=())`` wraps any kernel
 forward-only. The mask carries no derivative; a terminated sample's
 derivatives are zero.
 
@@ -74,8 +76,8 @@ from jax.interpreters import ad, batching, mlir
 from .. import FINISHED_PLANE, _cell_rows, _split
 from .._graph_reduce import POLICIES, check_policy
 from .._graph_reduce import fixed_f64 as _fixed_f64
-from ._kernel_planes import FUSED_STEPS, SAMPLE_ROLES, call_mode, promote
-from ._tower import LOCK, Level, finished_identity
+from ._kernel_planes import ACTIVE_PLANES, FUSED_STEPS, SAMPLE_ROLES, call_mode, promote
+from ._tower import LOCK, Level, finished_identity, per_cell_source
 
 __all__ = ["KernelFunction", "XLA_FFI_API", "function", "node", "preload"]
 
@@ -162,11 +164,6 @@ class KernelFunction:
     def __init__(self, kernel, *, wrt=None, cache_dir=None, device_arch=None,
                  policy="compensated"):
         self._policy = POLICIES[check_policy(policy, _WHO)]
-        if getattr(getattr(getattr(kernel, "kind", None), "guard", None), "active_set", False):
-            raise ValueError(
-                f"{_WHO}: kernel {kernel.name!r} is built with Guard(active_set=True), whose index "
-                "map is eagle's launcher's input, not a JAX array; run it with eagle "
-                "(eagle.plan / eagle.until_done), or build it without active_set")
         self._declared = kernel
         promoted = promote(kernel)
         self._tmp = None
@@ -178,6 +175,7 @@ class KernelFunction:
         with LOCK:
             self.level = Level(promoted, wrt=wrt, who=_WHO, label=kernel.name)
             self.level.slots["owner"] = self
+            self.level.cell_source = per_cell_source(kernel)
         sig = self.level.sig
         self.name = kernel.name
         role = {n: r for r, n in kernel.arg_spec}
@@ -235,45 +233,48 @@ class KernelFunction:
 
 
 def _stepped(owner):
-    """The call of a carried-state kernel with its reverse rule: the primitive
-    forward (state planes alias their operands), and backward the vjp of ONE
-    step (``hawk.diff.step_vjp``) at the values the step read, where a sample
-    that was already finished is the identity (its step changed nothing).
-    Forward mode (``jvp``) has no rule here and JAX refuses it."""
+    """The call of a carried-state kernel with its derivative rule: the
+    primitive forward (state planes alias their operands), and its tangent is
+    the jvp of ONE step (the kernel's pure step function, whose transpose is
+    the vjp of one step) at the values the step read. A sample that was already
+    finished is the identity (its step changed nothing): its state tangent
+    passes through and its other outputs have none. Reverse mode is that rule
+    transposed."""
     level, sig = owner.level, owner.level.sig
     prim = _primitive(level, owner)
+    step = level.step_function()
+    fstep = _primitive(step, owner)
+    wrt = tuple(step.wrt)
 
-    @jax.custom_vjp
+    @jax.custom_jvp
     def call(*operands):
         return tuple(prim(*operands))
 
-    def forward(*operands):
-        return tuple(prim(*operands)), operands      # the residual: the state before the step
+    @call.defjvp
+    def rule(primals, tangents):
+        outs = call(*primals)
+        by, tan = dict(zip(sig.inputs, primals)), dict(zip(sig.inputs, tangents))
+        fixed = {n: by[n] for n in step.sig.inputs}
 
-    def backward(operands, cts):
-        back = level.stepped()
-        nexts, grads = level.step_names()
-        by = dict(zip(sig.inputs, operands))
-        after = {o: ct for o, ct in zip(sig.outputs, cts) if o in nexts}
-        by.update({nexts[o]: ct for o, ct in after.items()})
-        out = _primitive(back, owner)(*(by[n] for n in back.sig.inputs))
-        mask = by.get(sig.terminated) if sig.finishes else None
+        def run(*moving):
+            return tuple(fstep(*(dict(fixed, **dict(zip(wrt, moving)))[n] for n in step.sig.inputs)))
+
+        _, moved = jax.jvp(run, tuple(by[n] for n in wrt), tuple(tan[n] for n in wrt))
+        mask = by[sig.terminated] if sig.finishes else None
         res = []
-        for name, a in zip(sig.inputs, operands):
-            g_name = grads.get(name)
-            if g_name not in back.sig.outputs:
-                res.append(None)
+        for name, o in zip(sig.outputs, outs):
+            nxt = name + "_next"
+            if not sig.is_float(name) or nxt not in step.sig.outputs:
+                res.append(np.zeros(o.shape, jax.dtypes.float0) if not sig.is_float(name)
+                           else jnp.zeros_like(o))
                 continue
-            g = out[back.sig.outputs.index(g_name)]
-            if mask is not None and g_name not in back.sig.cells:
-                g = (finished_identity(jnp.where, mask, after[name], g) if name in sig.state
-                     else jnp.where(mask, jnp.zeros_like(g), g))
-            if tuple(g.shape) != tuple(a.shape):    # a cell arrives finished (hawk main: per-sample terms)
-                g = (g if g_name in back.sig.cells else jnp.sum(g)).reshape(a.shape)
-            res.append(g.astype(a.dtype))
-        return tuple(res)
+            t = moved[step.sig.outputs.index(nxt)]
+            if mask is not None:
+                t = finished_identity(jnp.where, mask, tan[name], t) if name in sig.state \
+                    else jnp.where(mask, jnp.zeros_like(t), t)
+            res.append(t)
+        return outs, tuple(res)
 
-    call.defvjp(forward, backward)
     return call
 
 
@@ -402,8 +403,9 @@ class _Prim:
                   if (sig.role[nm] in SAMPLE_ROLES or nm in sig.state) and a.ndim), given)
         if n is None:
             raise ValueError(f"{_WHO}: {self.level.label!r} needs a per-sample input plane")
+        cells = self._cells(avals)
         for name, a in zip(sig.inputs, avals):
-            want = sig.shape(name, n)
+            want = sig.shape(name, n, cells)
             dt = sig.dtype(name, mode)
             if tuple(a.shape) != want:
                 raise ValueError(f"{_WHO}: {self.level.label}: input {name!r} must have "
@@ -413,18 +415,25 @@ class _Prim:
                                 f"{dt.name} in a {mode} call, got {np.dtype(a.dtype).name}")
         return mode, n
 
+    def _cells(self, avals):
+        """The entries of a per-cell kernel's parameter tables (1 for any other kernel)."""
+        sig = self.sig
+        return next((a.shape[0] for nm, a in zip(sig.inputs, avals) if sig.is_table(nm)), 1)
+
     def _abstract(self, *avals, n=None):
         mode, n = self._mode_n(avals, n)
-        return [jax.core.ShapedArray(self.sig.shape(o, n), self.sig.dtype(o, mode))
+        cells = self._cells(avals)
+        return [jax.core.ShapedArray(self.sig.shape(o, n, cells), self.sig.dtype(o, mode))
                 for o in self.sig.outputs]
 
     # -- lowering -------------------------------------------------------------
     def _lower(self, platform, ctx, *args, n=None):
         mode, n = self._mode_n(ctx.avals_in, n)
+        cells = self._cells(ctx.avals_in)
         if not self.stages:
-            run = self._ffi(self.level, platform, mode, n)
+            run = self._ffi(self.level, platform, mode, n, cells)
         else:
-            calls = [(st, self._ffi(st, platform, mode, n)) for st in self.stages]
+            calls = [(st, self._ffi(st, platform, mode, n, cells)) for st in self.stages]
 
             def run(*operands):
                 values = dict(zip(self.sig.inputs, operands))
@@ -434,7 +443,7 @@ class _Prim:
 
         return mlir.lower_fun(run, multiple_results=True)(ctx, *args)
 
-    def _ffi(self, level, platform, mode, n):
+    def _ffi(self, level, platform, mode, n, cells=1):
         """One kernel's FFI call: its input planes in, its outputs out."""
         sig = level.sig
         device = platform == "cuda"
@@ -443,7 +452,8 @@ class _Prim:
         conv = _convention(sig, device)
         # a cell's rows sit in the first ceil(n / ROW) of an n-sample plane (the handler sizes every
         # per-sample slot at n); the handler finishes them into the (1,) cell result
-        shapes = [jax.ShapeDtypeStruct(_result_shape(sig, r, n, work), _result_dtype(sig, r, mode))
+        shapes = [jax.ShapeDtypeStruct(_result_shape(sig, r, n, work, cells),
+                                       _result_dtype(sig, r, mode))
                   for r in conv["results"]]
         call = jax.ffi.ffi_call(TARGET, shapes, input_output_aliases=conv["aliases"] or None)
 
@@ -452,6 +462,14 @@ class _Prim:
                 # the step-count word, always 1: an int64 cell. Passed as its two
                 # little-endian int32 halves, since without x64 JAX has no int64
                 operands = (*operands, jnp.asarray([1, 0], np.int32))
+            if sig.active:
+                # the identity index map over all n samples: the unguarded answer
+                operands = (*operands, jnp.arange(n, dtype=np.int32), jnp.asarray([n], np.uint32))
+            if sig.per_cell:
+                # each sample's parameter cell, sample ``i`` reading cell ``i % cells``: the
+                # int64 plane as its little-endian int32 halves (JAX has no int64 without x64)
+                index = jnp.tile(jnp.arange(cells, dtype=np.int32), n // cells)
+                operands = (*operands, jnp.stack([index, jnp.zeros_like(index)], -1).reshape(-1))
             out = call(*operands, digest=digest)
             return [out[i] for i in conv["visible"]]
 
@@ -553,9 +571,15 @@ class _Prim:
     def _batch(self, args, dims, *, n=None):
         sig = self.sig
         size = next(a.shape[d] for a, d in zip(args, dims) if d is not None)
-        # a batched cell input, or a cell output (a sum over the folded samples), cannot fold
-        if sig.cells or any(d is not None and sig.is_cell(n)
-                            for n, d in zip(sig.inputs, dims)):
+        batched_param = any(d is not None and sig.is_cell(nm) for nm, d in zip(sig.inputs, dims))
+        # a Param's gradient is a sum over the folded samples: one entry per batch entry
+        twin = self.level.cell_twin() if (batched_param or sig.cells) and not sig.per_cell else None
+        if twin is not None and set(sig.inputs) <= set(twin.sig.inputs) \
+                and set(sig.outputs) <= set(twin.sig.outputs):
+            return self._batch_cells(twin, args, dims, size, n)
+        # a batched cell input, or a cell output (a sum over the folded samples), cannot fold;
+        # nor can a per-cell kernel (its cell index counts the samples of one entry)
+        if sig.cells or batched_param or sig.per_cell:
             moved = [jnp.moveaxis(a, d, 0) if d is not None else None
                      for a, d in zip(args, dims)]
 
@@ -565,19 +589,47 @@ class _Prim:
 
             outs = jax.lax.map(one, moved)
             return outs, [0] * len(outs)
-        folded = []
-        for name, a, d in zip(sig.inputs, args, dims):
-            if sig.is_cell(name):
-                folded.append(a)
-                continue
-            if d is None:
-                a = jnp.broadcast_to(a[..., None], a.shape + (size,))
-            else:
-                a = jnp.moveaxis(a, d, -1)
-            folded.append(a.reshape(a.shape[:-2] + (a.shape[-2] * size,)))
+        folded = [a if sig.is_cell(nm) else _fold(a, d, size)
+                  for nm, a, d in zip(sig.inputs, args, dims)]
         outs = self.prim.bind(*folded, n=None if n is None else n * size)
         res = [o.reshape(o.shape[:-1] + (o.shape[-1] // size, size)) for o in outs]
         return res, [o.ndim - 1 for o in res]
+
+    def _batch_cells(self, twin, args, dims, size, n):
+        """A batch of ``Param`` values as ONE launch over ``n * size`` samples, sample ``i``
+        of entry ``b`` at ``i * size + b`` reading cell ``b`` of the parameter tables
+        (entry ``b`` of a table is its gradient too: the table's scatter is the sum over
+        the samples that read it)."""
+        sig, by = self.sig, {nm: (a, d) for nm, a, d in zip(self.sig.inputs, args, dims)}
+        folded = []
+        for name in twin.sig.inputs:
+            a, d = by[name]
+            if sig.is_cell(name):
+                a = (jnp.broadcast_to(a, (size,)) if d is None
+                     else jnp.moveaxis(a, d, 0).reshape(size))
+            else:
+                a = _fold(a, d, size)
+            folded.append(a)
+        outs = _primitive(twin, self.owner)(*folded, n=None if n is None else n * size)
+        res, bdims = [], []
+        for name in sig.outputs:
+            o = outs[twin.sig.outputs.index(name)]
+            if name in sig.cells:                  # a sum over the samples: one entry per cell
+                res.append(o.reshape(size, 1))
+                bdims.append(0)
+            else:
+                res.append(o.reshape(o.shape[:-1] + (o.shape[-1] // size, size)))
+                bdims.append(o.ndim)
+        return res, bdims
+
+
+def _fold(a, d, size):
+    """A plane batched along axis ``d`` (or not at all) as one sample axis, sample-major."""
+    if d is None:
+        a = jnp.broadcast_to(a[..., None], a.shape + (size,))
+    else:
+        a = jnp.moveaxis(a, d, -1)
+    return a.reshape(a.shape[:-2] + (a.shape[-2] * size,))
 
 
 def _zero(x):
@@ -600,11 +652,11 @@ def _result_dtype(sig, name, mode):
     return sig.dtype(name, mode)
 
 
-def _result_shape(sig, name, n, work):
+def _result_shape(sig, name, n, work, cells=1):
     """The shape of a result: a cell's (1,), a work buffer's own, the rows' n samples."""
     if isinstance(name, tuple):
         return (1,) if name[0] == "cell" else (work,)
-    return (n,) if name in sig.rows else sig.shape(name, n)
+    return (n,) if name in sig.rows else sig.shape(name, n, cells)
 
 
 def _work_elems(sig, n, mode, policy):
@@ -640,7 +692,9 @@ def _convention(sig, device=False):
     aliases = {sig.inputs.index(s): results.index(s) for s in _carried(sig)}
     if sig.finishes:
         aliases[sig.inputs.index(sig.terminated)] = len(results) - 1
-    return {"operands": list(sig.inputs) + ([FUSED_STEPS] if sig.fused else []),
+    return {"operands": list(sig.inputs) + ([FUSED_STEPS] if sig.fused else [])
+            + (list(ACTIVE_PLANES) if sig.active else [])
+            + ([sig.cell_plane] if sig.per_cell else []),
             "results": results, "visible": visible, "cells": cells,
             "work": [results.index(("work", k)) for k in range(2 if device and sig.cells else 0)],
             "aliases": aliases}
@@ -654,7 +708,8 @@ def _recipe_fields(level, artifact, mode, device=False):
     conv = _convention(sig, device)
     sidecar = artifact.sidecar
     spec = [tuple(p) for p in sidecar["arg_spec"]]
-    if spec != list(sig.arg_spec):
+    own = [p for p in spec if not (sig.active and p[1] in ACTIVE_PLANES)]
+    if own != list(sig.arg_spec):
         raise RuntimeError(f"{_WHO}: {level.label}: the built artifact's arg_spec "
                            f"{spec} is not the kernel's {list(sig.arg_spec)}")
     kinds = descriptor_for_sidecar(sidecar)
@@ -666,7 +721,7 @@ def _recipe_fields(level, artifact, mode, device=False):
         if not isinstance(name, tuple) and name in declared and name != FINISHED_PLANE and np.dtype(declared[name]) != dt:
             raise RuntimeError(f"{_WHO}: {level.label}: slot {name!r} is built as "
                                f"{declared[name]}, the bridge expects {dt.name}")
-        dtype.append(_XLA_DTYPE[np.dtype(np.int32) if name == FUSED_STEPS else dt])
+        dtype.append(_XLA_DTYPE[np.dtype(np.int32) if name in (FUSED_STEPS, sig.cell_plane) else dt])
     zero = [0 if (sig.finishes and r == sig.terminated) or r in _carried(sig) or isinstance(r, tuple) else 1
             for r in rets]
     slot_kind, slot_buffer, slot_cell = [], [], []
@@ -686,7 +741,8 @@ def _recipe_fields(level, artifact, mode, device=False):
         else:
             slot_kind.append(_SLOT[kind])
             slot_buffer.append(ops.index(name))
-        slot_cell.append(1 if role == "lookup" else 0)
+        # the cell plane (int64 as two int32 halves) is checked against no sample count
+        slot_cell.append(1 if role in ("lookup", "accum_out") or name == sig.cell_plane else 0)
     sample = next((i for i, n in enumerate(ops) if sig.role[n] in SAMPLE_ROLES), None)
     if sample is None:
         sample = len(ops) + next(i for i, r in enumerate(rets) if r != FINISHED_PLANE)

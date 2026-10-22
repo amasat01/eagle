@@ -529,3 +529,93 @@ def test_policy_reaches_the_gradient_cell_finish(tmp_path, monkeypatch, policy):
 def test_unknown_policy_is_refused_like_eagle_reduce(tmp_path):
     with pytest.raises(ValueError, match=r"policy 'fast' is not one of \['auto', 'compensated', 'ordered'\]"):
         eagle_torch.function(drag, cache_dir=tmp_path, policy="fast")
+
+
+@hawk.kernel(steps=1)
+def osc_finishing(dt: Param, c: Param, t_final: Scalar, terminated: Terminated,
+                  x: Mutable[Scalar], v: Mutable[Scalar], t: Mutable[Scalar]):
+    vn = v - dt * (x + c * v)
+    x = x + dt * v
+    v = vn
+    tn = t + dt
+    t = tn
+    terminated = tn >= t_final  # noqa: F841 (DSL output)
+
+
+@torch_internal_jit
+@pytest.mark.parametrize("dev", DEVICES)
+def test_a_params_gradient_skips_the_steps_a_finished_sample_did_not_take(tmp_path, dev):
+    """A carried-state kernel whose samples finish at different steps: the ``Param``
+    gradient is the central finite difference (it once also summed the steps a
+    finished sample never took: -0.0096379 here, not -0.0177819)."""
+    device = _device(dev)
+    fn = eagle_torch.function(osc_finishing, cache_dir=tmp_path)
+    kw = dict(dtype=torch.float64, device=device)
+    tf = torch.tensor([0.005, 0.005, 0.015, 0.015, 5.0, 5.0], **kw)
+    x0, v0 = torch.linspace(0.5, 1.5, 6, **kw), torch.linspace(-0.2, 0.3, 6, **kw)
+
+    def loss(c, x, v):
+        t, d = torch.zeros(6, **kw), torch.zeros(6, dtype=torch.bool, device=device)
+        for _ in range(4):
+            outs = dict(zip(fn.outputs, fn(0.01, c, tf, d, x, v, t)))
+            t, v, x, d = outs["t"], outs["v"], outs["x"], outs["terminated"]
+        return (x * x + v).sum()
+
+    c = torch.tensor(0.3, requires_grad=True, **kw)
+    loss(c, x0, v0).backward()
+    eps = 1e-6
+    fd = (loss(c.detach() + eps, x0, v0) - loss(c.detach() - eps, x0, v0)) / (2 * eps)
+    assert abs(float(fd) + 0.0177819) < 1e-6
+    assert abs(float(c.grad) - float(fd)) < 1e-6 * abs(float(fd))
+
+
+# -- a batch of Param values under torch.func.vmap: one launch over n * B samples -----------
+
+@hawk.kernel
+def spring(w: Scalar, a: Param, y: Mutable[Scalar]):
+    y = a * w * w + sqrt(w)
+
+
+def _launches(monkeypatch):
+    """A list that records one entry per kernel launch."""
+    calls = []
+    real = eagle_torch._Level.launch
+
+    def counted(self, mode, planes):
+        calls.append(self.kernel.name)
+        return real(self, mode, planes)
+
+    monkeypatch.setattr(eagle_torch._Level, "launch", counted)
+    return calls
+
+
+@torch_internal_jit
+def test_vmap_over_a_param_is_one_launch_equal_to_the_loop(tmp_path, monkeypatch):
+    from torch.func import grad, vmap
+
+    n = 9
+    w = torch.linspace(0.5, 2.0, n, dtype=torch.float64)
+    a = torch.tensor([0.5, 1.5, -0.8], dtype=torch.float64)
+    op = eagle_torch.function(spring, cache_dir=tmp_path)
+
+    def run(c):
+        return op(w, c.reshape(1))
+
+    loop = torch.stack([run(c) for c in a])
+    calls = _launches(monkeypatch)
+    got = vmap(run)(a)
+    assert calls == ["spring_params_cells"]
+    assert got.shape == (3, n)
+    assert torch.equal(got, loop)
+
+    def loss(c):
+        return (run(c) ** 2).sum()
+
+    calls.clear()
+    grads = vmap(grad(loss))(a)
+    # the forward and its vjp, each ONE launch over all entries
+    assert sorted(calls) == ["spring_cv", "spring_params_cells"]
+    eps = 1e-6
+    fd = (vmap(loss)(a + eps) - vmap(loss)(a - eps)) / (2 * eps)
+    torch.testing.assert_close(grads, fd, rtol=1e-6, atol=0)
+    torch.testing.assert_close(grads, torch.stack([grad(loss)(c) for c in a]), rtol=1e-13, atol=0)

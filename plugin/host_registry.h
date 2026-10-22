@@ -40,6 +40,7 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -63,13 +64,17 @@ using HostEntryV2 = eagle::exec::HostEntryV2;
 /**
  * @brief Host-side plugin registry — dlopen + dlsym + host-run, ABI-only.
  *
- * Mirrors ``PluginRegistry`` for the CPU graph executor: bind the kernel's
+ * Mirrors ``PluginRegistry`` for the CPU graph executor (``cpu::PluginRegistry`` runs float64
+ * plugins, ``cpu::PluginRegistry32`` float32 ones; the sidecar's ``scalar_type`` must match): bind the kernel's
  * by-name buffers from host memory the caller already owns (no device upload —
  * the data is already where the kernel reads it), then ``run(n)`` packs each
  * plugin's args in ``arg_spec`` order and calls its host entry. Move-only; the
  * destructor ``dlclose``s every loaded object.
  */
-class PluginRegistry {
+template <class Scalar>
+class BasicPluginRegistry {
+    static_assert(std::is_same_v<Scalar, double> || std::is_same_v<Scalar, float>,
+                  "a host plugin runs float64 or float32");
     // Forward-declared here (private, as it has always been) so the accessors
     // below can name it in a RETURN type: the definition lives with the rest of
     // this class's private data, far below.
@@ -88,17 +93,17 @@ public:
     struct PackedArgs {
         std::vector<GRefMirror> grefs;
         std::vector<ScalarHandle> handles;
-        std::vector<double> scalars;
+        std::vector<Scalar> scalars;
         std::vector<UniformInt> ints;
         std::vector<unsigned> counts;
         std::vector<void*> params;
     };
 
-    PluginRegistry()                                 = default;
-    PluginRegistry(const PluginRegistry&)            = delete;
-    PluginRegistry& operator=(const PluginRegistry&) = delete;
+    BasicPluginRegistry()                                      = default;
+    BasicPluginRegistry(const BasicPluginRegistry&)            = delete;
+    BasicPluginRegistry& operator=(const BasicPluginRegistry&) = delete;
 
-    PluginRegistry(PluginRegistry&& o) noexcept
+    BasicPluginRegistry(BasicPluginRegistry&& o) noexcept
         : plugins_(std::move(o.plugins_))
         , vec_(std::move(o.vec_))
         , mat_(std::move(o.mat_))
@@ -112,7 +117,7 @@ public:
             .clear(); // moved-from owns nothing -> its dtor dlcloses nothing
     }
 
-    ~PluginRegistry()
+    ~BasicPluginRegistry()
     {
         for (auto& p : plugins_)
             if (p.handle)
@@ -124,8 +129,8 @@ public:
      *  The programmatic entry (used by tests and by ``load`` below): validates
      * the ABI tag + schema version exactly like the device registry,
      * ``dlopen``s the object, and resolves the host entry symbol. The CPU
-     * runner executes native float64 only (a float32 / SoftDouble kernel is
-     * device-only), matching the device host runner's dtype policy.
+     * registry runs the plugin scalar it is instantiated on (``float64`` or
+     * ``float32``): a sidecar declaring the other one is refused by name.
      *
      *  @p enabled (v0.2.3) mirrors the device registry's per-plugin manifest
      *  enable: a disabled plugin is LOADED — so its lookup tables still resolve
@@ -155,11 +160,12 @@ public:
         // forget. Presence-required semantics and message shape live in the ONE
         // shared gate (gref_abi.h).
         check_aether_abi(sc.aether_abi, "host plugin '" + sc.kernel + "': sidecar");
-        if (!sc.scalar_type.empty() && sc.scalar_type != "float64")
+        if (!sc.scalar_type.empty() && sc.scalar_type != scalar_name())
             throw std::runtime_error("host plugin '" + sc.kernel
-                + "': the C++ host "
-                  "runner executes float64 only (got '"
-                + sc.scalar_type + "')");
+                + "': scalar_type '" + sc.scalar_type + "' does not match this registry ("
+                + scalar_name() + "); use "
+                + (sc.scalar_type == "float32" ? "PluginRegistry32" : "PluginRegistry")
+                + " (the host runs float64 and float32 plugins)");
 
         Plugin p;
         p.sidecar = sc;
@@ -270,7 +276,7 @@ public:
         // entry's artifact-container tag must be one this build knows how to load,
         // checked before any sidecar parse / dlopen (manifest.h
         // `validate_manifest_formats`, shared with the device registry).
-        validate_manifest_formats(m);
+        validate_manifest_formats(m, /*host=*/true);
         for (const auto& e : m.plugins) {
             Sidecar sc = parse_sidecar(dir + "/" + e.sidecar);
             // The per-entry `enabled` flag is CARRIED, not
@@ -311,7 +317,7 @@ public:
 
     /** @brief Bind a vector (``out`` / ``vec_in`` / vector ``mutable``) buffer
      * by name — a host SoA pointer + sample count. */
-    void bind_vector(const std::string& name, double* data, std::uint32_t n)
+    void bind_vector(const std::string& name, Scalar* data, std::uint32_t n)
     {
         vec_[name] = VB{ data, n };
     }
@@ -322,7 +328,7 @@ public:
      *  device path's matrix shape guard). Packing is otherwise identical to a vector:
      *  a matrix GRef is a width-``R*C`` vector GRef (``dim = r*C + c``, sample-fastest). */
     void bind_matrix(
-        const std::string& name, double* data, std::uint32_t n, int rows, int cols)
+        const std::string& name, Scalar* data, std::uint32_t n, int rows, int cols)
     {
         mat_[name] = MB{ data, n, rows, cols };
     }
@@ -335,7 +341,8 @@ public:
     {
         handle_[name] = ptr;
     }
-    /** @brief Bind a float64 ``uniform`` scalar by name — the kernel's
+    /** @brief Bind a real ``uniform`` scalar by name (the caller's ``double``, narrowed
+     *  ONCE here to the plugin's ``Scalar``) — the kernel's
      *  ``AETHER_GRID_CONSTANT() Real p_<name>`` by-value parameter slot. Re-binding the same
      *  name overwrites (unchanged); binding a name already bound as int64 is refused
      *  (``plugin_registry/uniform_binding.h`` carries the reason and the wording,
@@ -344,7 +351,7 @@ public:
     {
         check_uniform_kind_free(UniformKind::Real, uniform_.count(name) != 0,
             uniform_int_.count(name) != 0, name, "host plugin registry");
-        uniform_[name] = value;
+        uniform_[name] = static_cast<Scalar>(value);
     }
     /** @brief Bind an int64 ``uniform`` by name — the ADDITIVE int arm of the same
      *  role, the host twin of the device registry's ``bind_uniform_int``.
@@ -369,8 +376,11 @@ public:
      *  same name replaces the prior binding. Unlike the interface bindings, a declared
      *  table MUST be consolidated before ``run`` or the launch fails loudly (naming it).
      */
-    void consolidate(const std::string& name, const double* host, std::size_t count)
+    void consolidate(const std::string& name, const Scalar* host, std::size_t count)
     {
+        if (name == kFinishedCounter)
+            throw std::runtime_error("lookup '" + name + "' is allocated and bound by the "
+                "registry (the finished-sample counter); drop the consolidate call");
         tables_[name] = TB{ host, count };
     }
 
@@ -426,6 +436,7 @@ public:
     {
         if (!enabled_)
             return 0;
+        finished_ = 0;
         int launched = 0;
         for (auto& p : plugins_) {
             if (!p.enabled) // added in v0.2.3: honour the manifest's flag
@@ -468,10 +479,15 @@ public:
      *  ``nSamples``, never a partition's ``count``. */
     PackedArgs pack(std::size_t index, std::int64_t nSamples) const
     {
+        finished_ = 0; // a pack opens a run: the finished counter starts at zero
         return pack_(at_(index), nSamples);
     }
 
     std::size_t size() const { return plugins_.size(); }
+
+    /** @brief Samples a finishing kernel counted as finished in the current/last run (the
+     *  registry-owned ``finished_count`` cell, zeroed at the start of each run). */
+    std::uint32_t finished_count() const { return finished_; }
 
 private:
     const Plugin& at_(std::size_t index) const
@@ -494,7 +510,7 @@ private:
             grefs.reserve(na);
             std::vector<ScalarHandle>& handles = out.handles;
             handles.reserve(na);
-            std::vector<double>& scalars = out.scalars;
+            std::vector<Scalar>& scalars = out.scalars;
             scalars.reserve(na);
             std::vector<UniformInt>& ints = out.ints;
             ints.reserve(na);
@@ -506,7 +522,7 @@ private:
             for (const auto& a : p.sidecar.arg_spec) {
                 if (a.role == "out" || a.role == "vec_in") {
                     const VB vb = lookup_vec_(p.sidecar.kernel, a.name);
-                    grefs.push_back(make_gref(vb.data, vb.n, kEagleAbiDeviceCPU));
+                    grefs.push_back(make_gref(as_abi_(vb.data), vb.n, kEagleAbiDeviceCPU));
                     params.push_back(&grefs.back());
                 } else if (a.role == "mat_in") {
                     // a matrix binds through the SAME GRef mirror as a vector.
@@ -521,7 +537,7 @@ private:
                         }
                     if (dt == "vector") {
                         const VB vb = lookup_vec_(p.sidecar.kernel, a.name);
-                        grefs.push_back(make_gref(vb.data, vb.n, kEagleAbiDeviceCPU));
+                        grefs.push_back(make_gref(as_abi_(vb.data), vb.n, kEagleAbiDeviceCPU));
                         params.push_back(&grefs.back());
                     } else if (dt == "matrix") {
                         grefs.push_back(
@@ -540,6 +556,10 @@ private:
                     handles.push_back(
                         make_handle(lookup_handle_(p.sidecar.kernel, a.name),
                             unsigned(n), kEagleAbiDeviceCPU));
+                    params.push_back(&handles.back());
+                } else if (a.role == "lookup" && a.name == kFinishedCounter) {
+                    // The registry's own finished-sample counter: one uint32 cell.
+                    handles.push_back(make_handle(&finished_, 1, kEagleAbiDeviceCPU));
                     params.push_back(&handles.back());
                 } else if (a.role == "lookup") {
                     // A consolidated read-only table: a flat handle over the host
@@ -592,11 +612,11 @@ private:
     }
 
     struct VB {
-        double* data    = nullptr;
+        Scalar* data    = nullptr;
         std::uint32_t n = 0;
     };
     struct MB {
-        double* data    = nullptr;
+        Scalar* data    = nullptr;
         std::uint32_t n = 0;
         int rows        = 0;
         int cols        = 0;
@@ -604,7 +624,7 @@ private:
     // A consolidated lookup table: the caller's host pointer + its flat element count.
     // NOT owned (no upload, no free) — it aliases host memory the caller keeps alive.
     struct TB {
-        const double* data = nullptr;
+        const Scalar* data = nullptr;
         std::size_t count  = 0;
     };
     struct Plugin {
@@ -615,6 +635,14 @@ private:
         int abi_version = 1;
         bool enabled = true;      // the manifest's per-entry flag (v0.2.3)
     };
+
+    static constexpr const char* scalar_name()
+    {
+        return std::is_same_v<Scalar, float> ? "float32" : "float64";
+    }
+    // The GRef mirror's data pointer is a width-neutral address (it is typed ``double*``
+    // only in the POD); the plugin reads it at the sidecar's scalar.
+    static double* as_abi_(Scalar* p) { return reinterpret_cast<double*>(p); }
 
     VB lookup_vec_(const std::string& k, const std::string& name) const
     {
@@ -647,7 +675,7 @@ private:
                 + std::to_string(mb.cols) + ") but the kernel was compiled for ("
                 + std::to_string(ds->second.first) + ", "
                 + std::to_string(ds->second.second) + ')');
-        return make_gref(mb.data, mb.n, kEagleAbiDeviceCPU);
+        return make_gref(as_abi_(mb.data), mb.n, kEagleAbiDeviceCPU);
     }
     void* lookup_handle_(const std::string& k, const std::string& name) const
     {
@@ -671,7 +699,7 @@ private:
                 + name + "\", data, count))");
         return const_cast<void*>(static_cast<const void*>(it->second.data));
     }
-    double lookup_uniform_(const std::string& k, const std::string& name) const
+    Scalar lookup_uniform_(const std::string& k, const std::string& name) const
     {
         auto it = uniform_.find(name);
         if (it == uniform_.end())
@@ -696,11 +724,17 @@ private:
     std::map<std::string, VB> vec_;
     std::map<std::string, MB> mat_;
     std::map<std::string, void*> handle_;
-    std::map<std::string, double> uniform_;
+    std::map<std::string, Scalar> uniform_; // narrowed once, at bind
     std::map<std::string, UniformInt> uniform_int_; // int64 uniforms
     std::map<std::string, TB> tables_; // consolidated lookup tables (aliased, not owned)
+    mutable std::uint32_t finished_ = 0; // the finished_count cell (see kFinishedCounter)
     bool enabled_ = true;
 };
+
+/** @brief The float64 host registry (the public name every caller uses). */
+using PluginRegistry = BasicPluginRegistry<double>;
+/** @brief The float32 host registry, for plugins built with ``scalar_type: float32``. */
+using PluginRegistry32 = BasicPluginRegistry<float>;
 
 } // namespace cpu
 } // namespace eagle

@@ -60,4 +60,13 @@ for src in "$DIR"/[0-9]*.cpp; do
     else echo "FAIL  C++  ${name} (compile)"; sed 's/^/    /' "$WORK/${name}_cpp.log"; fail=1; fi
 done
 
+# The C4 embedding example, CPU arm only (no CUDA needed): host plugins loaded through
+# eagle::cpu::PluginRegistry. It prints PASS and exits 0 when every check holds.
+EMBED_SRC="$DIR/../../examples/cpp_embed_plugin"
+if cmake -S "$EMBED_SRC" -B "$WORK/embed_cpu" -DEMBED_CPU_ONLY=ON -DCMAKE_BUILD_TYPE=Release \
+        > "$WORK/embed_cpu.log" 2>&1 \
+   && cmake --build "$WORK/embed_cpu" >> "$WORK/embed_cpu.log" 2>&1; then
+    run_and_check "C++  cpp_embed_plugin (CPU)" "$WORK/embed_cpu/embedding_demo_cpu" ""
+else echo "FAIL  C++  cpp_embed_plugin (CPU build)"; sed 's/^/    /' "$WORK/embed_cpu.log"; fail=1; fi
+
 if [[ $fail -eq 0 ]]; then echo "ALL EXAMPLES PASSED"; else echo "SOME EXAMPLES FAILED"; exit 1; fi

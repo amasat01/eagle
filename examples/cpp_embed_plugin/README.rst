@@ -82,6 +82,22 @@ run time via ``cuModuleLoadData``, exactly like a real generated-plugin deploy) 
 ``embedding_demo.cu`` against the CUDA driver stub, mirroring
 ``plugin/pure_inject/CMakeLists.txt``.
 
+CPU arm (no CUDA)
+------------------
+
+``embedding_demo_cpu.cpp`` runs the same three plugins through
+``eagle::cpu::PluginRegistry`` as host code (``fixtures/host_plugins.cpp``, one
+shared object), on the same inputs and against the same references
+(``demo_common.h``). It needs no CUDA toolchain; the host runs float64 and float32 plugins.
+
+.. code-block:: bash
+
+   cmake -S examples/cpp_embed_plugin -B /tmp/embed_cpu -DEMBED_CPU_ONLY=ON
+   cmake --build /tmp/embed_cpu
+   /tmp/embed_cpu/embedding_demo_cpu               # ends with PASS
+
+``docs/examples/run_examples.sh`` builds and runs this arm.
+
 Expected output
 ----------------
 

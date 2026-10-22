@@ -217,7 +217,10 @@ def _eager(node, device=True):
         import torch
 
         owned.check()
-        with torch.cuda.stream(torch.cuda.ExternalStream(int(cupy.cuda.get_current_stream().ptr))):
+        ptr = int(cupy.cuda.get_current_stream().ptr)
+        # torch.cuda.ExternalStream(0) is a new stream object, not the null stream
+        stream = torch.cuda.default_stream() if ptr == 0 else torch.cuda.ExternalStream(ptr)
+        with torch.cuda.stream(stream):
             owned.owner.replay()
     return replay
 

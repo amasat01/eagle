@@ -88,8 +88,10 @@ endif()
 # its libstdc++-static package) links them dynamically instead.
 include(CheckLinkerFlag)
 check_linker_flag(CXX "-static-libstdc++" EAGLE_STATIC_LIBSTDCXX)
-if(EAGLE_STATIC_LIBSTDCXX)
+if(EAGLE_STATIC_LIBSTDCXX AND NOT APPLE)
   set(_eagle_static_runtime -static-libstdc++ -static-libgcc)
+elseif(APPLE)
+  set(_eagle_static_runtime "")  # macOS links libc++ from the system
 else()
   set(_eagle_static_runtime "")
   message(WARNING "eagle: no static libstdc++ in this toolchain; linking it dynamically")
@@ -397,13 +399,23 @@ target_compile_options(eagle_xla PRIVATE ${_eagle_no_gnu_unique} ${_eagle_warn_a
 set(_eagle_xla_map "${CMAKE_CURRENT_SOURCE_DIR}/src/xla/eagle_xla.map")
 # A sanitized build leaves the sanitizer runtime's symbols to the (sanitized)
 # interpreter that loads the library, so --no-undefined would reject them.
-if("${CMAKE_CXX_FLAGS} ${CMAKE_SHARED_LINKER_FLAGS}" MATCHES "-fsanitize")
-  set(_eagle_xla_no_undefined "")
+if(APPLE)
+  # Apple's ld: the same three rules as the GNU ld flags below (export list, undefined symbols are errors,
+  # unreferenced code dropped). The list is eagle_xla.map's `global:` section.
+  set(_eagle_xla_exports "${CMAKE_CURRENT_SOURCE_DIR}/src/xla/eagle_xla.exp")
+  target_link_options(eagle_xla PRIVATE
+    "LINKER:-exported_symbols_list,${_eagle_xla_exports}" "LINKER:-undefined,error" "LINKER:-dead_strip")
+  set_property(TARGET eagle_xla APPEND PROPERTY LINK_DEPENDS "${_eagle_xla_exports}")
+  set_property(TARGET eagle_xla PROPERTY SUFFIX ".so")  # eagle.frameworks.jax opens libeagle_xla.so on every platform
 else()
-  set(_eagle_xla_no_undefined "LINKER:--no-undefined")
+  if("${CMAKE_CXX_FLAGS} ${CMAKE_SHARED_LINKER_FLAGS}" MATCHES "-fsanitize")
+    set(_eagle_xla_no_undefined "")
+  else()
+    set(_eagle_xla_no_undefined "LINKER:--no-undefined")
+  endif()
+  target_link_options(eagle_xla PRIVATE
+    "LINKER:--version-script=${_eagle_xla_map}" ${_eagle_xla_no_undefined} "LINKER:--gc-sections" ${_eagle_static_runtime})
 endif()
-target_link_options(eagle_xla PRIVATE
-  "LINKER:--version-script=${_eagle_xla_map}" ${_eagle_xla_no_undefined} "LINKER:--gc-sections" ${_eagle_static_runtime})
 set_target_properties(eagle_xla PROPERTIES
   OUTPUT_NAME eagle_xla
   LINK_DEPENDS "${_eagle_xla_map}"

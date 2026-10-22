@@ -79,6 +79,7 @@ def _fake_cupy(event_cls, current_ptr):
         Event=event_cls,
         Stream=types.SimpleNamespace(null=_FakeStream(_LEGACY_PTR)),
         get_current_stream=lambda: _FakeStream(current_ptr),
+        runtime=types.SimpleNamespace(streamIsCapturing=lambda ptr: False),   # no capture open
     )
     mod = types.ModuleType("cupy")
     mod.cuda = cuda

@@ -57,6 +57,14 @@ why eagle presents one calling shape (write the per-item body, call
 hardware executing it differs, and eagle's dual-mode API is what lets your
 code not care which one it's running on.
 
+A sum over samples
+------------------
+
+When a kernel adds up values over all its samples, the order of the additions decides the last bits. The
+``policy=`` argument (``eagle.plan``, ``eagle.reduce`` and the JAX, torch and Warp bridges) chooses between a
+fast accurate sum and ``"ordered"``, the same bits on every run. Under MPI, ``eagle.exec.RankPartition`` cuts the
+ranks at 32-sample rows, so every rank gets the single-rank cell bit for bit. :doc:`determinism` has the details.
+
 Host and device memory are separate
 --------------------------------------
 

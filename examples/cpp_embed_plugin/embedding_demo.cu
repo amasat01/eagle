@@ -32,18 +32,16 @@
 //   artifact_dir defaults to the fixtures this target compiles to PTX at build
 //   time (baked in via EMBED_DEMO_ART_DIR); N defaults to 4096.
 
-#include <algorithm>
-#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
-#include <random>
 #include <string>
 #include <vector>
 
 #include <cuda.h>           // Driver API -- loads + launches the JIT plugins
 #include <cuda_runtime.h>  // Runtime API -- capture, graph
 
+#include "demo_common.h"
 #include "plugin/plugin_registry/registry.h"
 
 #ifndef EMBED_DEMO_ART_DIR
@@ -51,11 +49,6 @@
 #endif
 
 namespace {
-
-constexpr double TOL     = 1e-12;  // mattrace / primal: exact closed-form agreement
-constexpr double FD_H    = 1e-6;   // central-difference step
-constexpr double FD_RTOL = 1e-5;   // VJP-vs-FD relative tolerance
-constexpr double FD_ATOL = 1e-8;
 
 void cu_check(CUresult r, const char* what) {
     if (r != CUDA_SUCCESS) {
@@ -73,13 +66,6 @@ void rt_check(cudaError_t e, const char* what) {
 }
 #define CU_CHECK(c) cu_check((c), #c)
 #define RT_CHECK(c) rt_check((c), #c)
-
-// The SAME closed form fixtures/toy_energy.cu computes on device -- an
-// independent (different language, different hardware) host implementation.
-double host_energy(double x0, double x1, double x2, double p) {
-    const double r2 = x0 * x0 + x1 * x1 + x2 * x2;
-    return p * std::exp(-0.5 * r2);
-}
 
 }  // namespace
 
@@ -104,24 +90,12 @@ int run(int argc, char** argv) {
     eagle::cuda::PluginRegistry registry =
         eagle::cuda::PluginRegistry::from_manifest(dir + "manifest.json");
 
-    // --- host inputs (deterministic RNG; no external data files) ---------------
-    std::mt19937_64 rng(20260719);
-    std::uniform_real_distribution<double> ux(-1.3, 1.3);
-    std::uniform_real_distribution<double> ueb(0.3, 2.0);
-    const double p = 1.7;
-
-    std::vector<double> M(9 * std::size_t(N));   // flat (9, N) SoA, mattrace input
-    for (int d = 0; d < 9; ++d)
-        for (std::uint32_t i = 0; i < N; ++i)
-            M[std::size_t(d) * N + i] = double(d) + 0.25 * double(i);
-
-    std::vector<double> x(3 * std::size_t(N));   // flat (3, N) SoA, shared primal input
-    for (int k = 0; k < 3; ++k)
-        for (std::uint32_t i = 0; i < N; ++i)
-            x[std::size_t(k) * N + i] = ux(rng);
-
-    std::vector<double> e_bar(N);
-    for (std::uint32_t i = 0; i < N; ++i) e_bar[i] = ueb(rng);
+    // --- host inputs (shared with the CPU demo) -----------------------------
+    const demo::Inputs in(N);
+    const std::vector<double>& M = in.M;
+    const std::vector<double>& x = in.x;
+    const std::vector<double>& e_bar = in.e_bar;
+    const double p = in.p;
 
     // --- device buffers (all PRE-ALLOCATED; the registry only references them) --
     double *d_M, *d_out, *d_x, *d_e, *d_e_bar, *d_x_bar, *d_p_bar;
@@ -162,64 +136,20 @@ int run(int argc, char** argv) {
     RT_CHECK(cudaGraphLaunch(exec, stream));   // replay: every plugin here is idempotent
     RT_CHECK(cudaStreamSynchronize(stream));
 
-    std::vector<double> out(N), e(N), x_bar(3 * std::size_t(N)), p_bar(N);
-    RT_CHECK(cudaMemcpy(out.data(), d_out, N * sizeof(double), cudaMemcpyDeviceToHost));
-    RT_CHECK(cudaMemcpy(e.data(), d_e, N * sizeof(double), cudaMemcpyDeviceToHost));
-    RT_CHECK(cudaMemcpy(x_bar.data(), d_x_bar, x_bar.size() * sizeof(double),
+    demo::Outputs o(N);
+    RT_CHECK(cudaMemcpy(o.out.data(), d_out, N * sizeof(double), cudaMemcpyDeviceToHost));
+    RT_CHECK(cudaMemcpy(o.e.data(), d_e, N * sizeof(double), cudaMemcpyDeviceToHost));
+    RT_CHECK(cudaMemcpy(o.x_bar.data(), d_x_bar, o.x_bar.size() * sizeof(double),
                         cudaMemcpyDeviceToHost));
-    RT_CHECK(cudaMemcpy(p_bar.data(), d_p_bar, N * sizeof(double), cudaMemcpyDeviceToHost));
-
-    // --- gap 1 check: mattrace vs the direct host sum ---------------------------
-    double mat_max_rel = 0.0;
-    for (std::uint32_t i = 0; i < N; ++i) {
-        const double ref = M[0 * N + i] + M[4 * N + i] + M[8 * N + i];
-        const double rel = std::abs(out[i] - ref) / std::max(std::abs(ref), 1.0);
-        mat_max_rel = std::max(mat_max_rel, rel);
-    }
-
-    // --- gap 2 check, primal: e vs the closed-form host reference ---------------
-    double primal_max_rel = 0.0;
-    for (std::uint32_t i = 0; i < N; ++i) {
-        const double ref = host_energy(x[0 * N + i], x[1 * N + i], x[2 * N + i], p);
-        const double rel = std::abs(e[i] - ref) / std::max(std::abs(ref), 1e-12);
-        primal_max_rel = std::max(primal_max_rel, rel);
-    }
-
-    // --- gap 2 check, VJP: x_bar/p_bar vs an INDEPENDENT central-difference of the
-    // same host closed form (not the analytic formula the device kernel uses) ----
-    double vjp_x_max_rel = 0.0, vjp_p_max_rel = 0.0;
-    for (std::uint32_t i = 0; i < N; ++i) {
-        const double x0 = x[0 * N + i], x1 = x[1 * N + i], x2 = x[2 * N + i];
-        double want_x[3];
-        want_x[0] = e_bar[i] *
-            (host_energy(x0 + FD_H, x1, x2, p) - host_energy(x0 - FD_H, x1, x2, p)) / (2 * FD_H);
-        want_x[1] = e_bar[i] *
-            (host_energy(x0, x1 + FD_H, x2, p) - host_energy(x0, x1 - FD_H, x2, p)) / (2 * FD_H);
-        want_x[2] = e_bar[i] *
-            (host_energy(x0, x1, x2 + FD_H, p) - host_energy(x0, x1, x2 - FD_H, p)) / (2 * FD_H);
-        const double want_p = e_bar[i] *
-            (host_energy(x0, x1, x2, p + FD_H) - host_energy(x0, x1, x2, p - FD_H)) / (2 * FD_H);
-        for (int k = 0; k < 3; ++k) {
-            const double got = x_bar[std::size_t(k) * N + i];
-            const double rel = std::abs(got - want_x[k]) / std::max(std::abs(want_x[k]), FD_ATOL);
-            vjp_x_max_rel = std::max(vjp_x_max_rel, rel);
-        }
-        const double relp = std::abs(p_bar[i] - want_p) / std::max(std::abs(want_p), FD_ATOL);
-        vjp_p_max_rel = std::max(vjp_p_max_rel, relp);
-    }
+    RT_CHECK(cudaMemcpy(o.p_bar.data(), d_p_bar, N * sizeof(double), cudaMemcpyDeviceToHost));
 
     std::printf("N_PLUGINS=%zu\n", registry.size());
     std::printf("ACTIVE=%d\n", registry.active());
     std::printf("INJECTED=%d\n", injected);
     std::printf("TOTAL_NODES=%zu\n", n_nodes);
-    std::printf("MATTRACE_MAX_REL=%.3e\n", mat_max_rel);
-    std::printf("PRIMAL_MAX_REL=%.3e\n", primal_max_rel);
-    std::printf("VJP_X_MAX_REL_VS_FD=%.3e\n", vjp_x_max_rel);
-    std::printf("VJP_P_MAX_REL_VS_FD=%.3e\n", vjp_p_max_rel);
+    const bool checks_ok = demo::check(in, o);
 
-    const bool ok = (injected == 3) && (n_nodes == 3)
-        && (mat_max_rel < TOL) && (primal_max_rel < TOL)
-        && (vjp_x_max_rel < FD_RTOL) && (vjp_p_max_rel < FD_RTOL);
+    const bool ok = (injected == 3) && (n_nodes == 3) && checks_ok;
     std::printf("%s\n", ok ? "PASS" : "FAIL");
     return ok ? 0 : 1;
 }

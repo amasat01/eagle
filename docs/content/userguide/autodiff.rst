@@ -369,6 +369,10 @@ vjp gets views of eagle's buffers, valid during the call: copy what you keep.
 they come back bitwise at the end. Do not read them while a reverse of that run
 is in flight; a second reverse of it raises :class:`eagle.Busy`.
 
+A node runs before the plan in a step: write the step as ``[node, plan]``. The run calls the
+node on the initial state before step 0, and applying it once more after the last step is
+yours; your framework's autograd of that call gives the seeds.
+
 What a reverse refuses
 ----------------------
 

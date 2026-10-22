@@ -662,6 +662,8 @@ class Graph:
         keeps that run's ``Record`` in :attr:`record`."""
         with self._busy("launch"), _on_device(self._device):
             self._need_built("launch")
+            if self._device is not None:
+                refuse_in_capture("eagle.Graph.launch")
             self._check_live()
             if self._recorder is not None:
                 self._recorder.begin(n, "launch")
@@ -686,6 +688,8 @@ class Graph:
         ``enqueue`` and :meth:`synchronize`."""
         with self._busy("enqueue"), _on_device(self._device):
             self._need_built("enqueue")
+            if self._device is not None:
+                refuse_in_capture("eagle.Graph.enqueue")
             self._check_live()
             if self._recorder is not None:
                 raise RuntimeError(
@@ -844,3 +848,4 @@ def _live_checks(accesses):
 # the built-in kinds register themselves on import; Graph needs a few of their helpers
 from ._graph_kinds import _Child, _Cond, _Late, _is_bound, child, opaque  # noqa: E402,F401
 from .interop import _wrap_external_stream  # noqa: E402
+from .pipeline import refuse_in_capture  # noqa: E402

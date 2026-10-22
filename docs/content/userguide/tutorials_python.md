@@ -48,6 +48,7 @@ tutorials/15_a_learned_correction_per_step
 tutorials/16_a_warp_kernel_in_a_graph
 tutorials/17_a_jax_model_between_eagle_launches
 tutorials/18_the_eagle_batch_inside_jit
+tutorials/20_simulated_batches_for_jax_training
 ```
 
 - [Gradients through a physics kernel](tutorials/03_torch_training): a hawk kernel inside `loss.backward()`.
@@ -62,6 +63,7 @@ tutorials/18_the_eagle_batch_inside_jit
 - [A Warp kernel in the middle of an eagle graph](tutorials/16_a_warp_kernel_in_a_graph): your kernel between two eagle steps, with its gradient.
 - [A JAX model between eagle launches](tutorials/17_a_jax_model_between_eagle_launches): your network writes the correction, eagle steps the batch.
 - [The eagle batch inside `jit`](tutorials/18_the_eagle_batch_inside_jit): `while_loop` to run, `scan` to differentiate, no `where`.
+- [Simulated batches for a JAX training loop](tutorials/20_simulated_batches_for_jax_training): eagle makes fresh data every step, one process per GPU for a bigger set.
 
 ## Seeing what ran
 

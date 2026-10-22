@@ -35,7 +35,7 @@ struct ManifestEntry {
     bool enabled = true;
     std::string artifact;   // filename, relative to the manifest's directory
     std::string sidecar;    // filename, relative to the manifest's directory
-    std::string format;     // "ptx" | "cubin" | "fatbin"
+    std::string format;     // "ptx" | "cubin" | "fatbin" | "host"
 };
 
 struct Manifest {
@@ -285,7 +285,7 @@ inline void validate_execution_axis(const Manifest& m, const std::string& what) 
 // called over every entry BEFORE any sidecar parse / module load, so a bad
 // manifest fails fast with no partial load — the manifest-level twin of the
 // duplicate-id structural check both registries already run at this point.
-inline void validate_manifest_formats(const Manifest& m) {
+inline void validate_manifest_formats(const Manifest& m, bool host = false) {
     // The orphaned-blocks guard: a "blocks[]" section is neural-block machinery
     // reachable ONLY under pattern "neural_block" — and the pattern gate already
     // refused that family before this shared helper runs (both registries'
@@ -297,11 +297,16 @@ inline void validate_manifest_formats(const Manifest& m) {
         throw std::runtime_error("manifest carrying blocks[] must declare pattern "
             "'neural_block'; got pattern '" + m.pattern + "' (block descriptors would "
             "be silently ignored by a kernel-manifest loader)");
-    for (const auto& e : m.plugins)
+    for (const auto& e : m.plugins) {
+        if (!host && e.format == "host")
+            throw std::runtime_error("manifest plugin '" + e.id +
+                "': format 'host' is a host library; load it with the host "
+                "(CPU) registry");
         if (!is_valid_manifest_format(e.format))
             throw std::runtime_error("manifest plugin '" + e.id +
                 "': unknown artifact format '" + e.format + "' (supported: " +
                 manifest_formats_joined() + "); upgrade eagle");
+    }
 }
 
 }  // namespace plugin

@@ -41,8 +41,8 @@ record. Two things hold the design together:
   file. Two drivers read it, ``tests/test_ConformanceCorpus.cpp`` and ``python/tests/test_conformance_corpus.py``, and
   must give the same outcome, so the C++ and Python validators cannot drift apart.
 
-Host and plugin parity between the CUDA and CPU paths is closed, and ``python/tests/test_pipeline_parity.py`` keeps it
-closed.
+Host and plugin parity between the CUDA and CPU paths is tracked cell by cell in :doc:`host-plugin-parity`, and
+``python/tests/test_pipeline_parity.py`` keeps the closed cells closed.
 
 Add a thing
 -----------

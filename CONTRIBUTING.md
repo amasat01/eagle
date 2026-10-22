@@ -40,8 +40,8 @@ pytest python/tests -q -m "not gpu and not interop_matrix"     # drop the -m fil
 pytest python/tests -m ft -W error::RuntimeWarning              # free-threading rows, on a free-threaded Python
 ```
 
-Docs: `cd docs && make strict` (zero warnings), then `make nbexec` (needs a GPU) and `make nbcheck` for notebooks, `make linkcheck`
-for links. `make nbcheck-hosted` runs the notebooks the way a Colab user does (needs and notebook rules: the Documentation guide). Toolchain and docstring style: [Documentation guide](https://amasat01.github.io/eagle/content/devguide/docs_guide.html).
+Docs: `cd docs && make strict` (zero warnings), then `make nbexec` (uses the GPU when one is visible) and `make nbcheck` for notebooks, `make linkcheck`
+for links. `make nbcheck-hosted` runs the notebooks the way a Colab user does (needs uv, Python 3.13 and a C++23 compiler; see `docs/Makefile`, and the Documentation guide for the notebook rules). Toolchain and docstring style: [Documentation guide](https://amasat01.github.io/eagle/content/devguide/docs_guide.html).
 
 ## Where things live
 
