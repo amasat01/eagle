@@ -683,7 +683,7 @@ jobs:
           # (read by test_backend_wall where cuobjdump is present)
           export EAGLE_PLUGIN_EXPECTED_ARCHS=70/70
           pip install --prefer-binary ../raptor   # the sibling checkout, so unreleased raptor changes are tested
-          pip install ../site     # raptor_docs, so the docs tests run here instead of erroring
+          pip install --no-deps ../site     # raptor_docs alone, so the docs tests run here instead of erroring; its notebook dependencies have no free-threaded wheels
           # editable, as in development: python/conftest.py puts this source tree first
           # on sys.path, and only the editable hook then resolves the compiled eagle._core
           pip install --no-build-isolation --only-binary=:all: -e ./python

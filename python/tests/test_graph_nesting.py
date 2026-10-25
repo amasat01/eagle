@@ -150,10 +150,10 @@ def ref_f(_):
 
 
 def shape_g(xp):      # a fork whose second branch waits for the first (one edge on a GPU)
-    import cupy
     o, g = Ops(xp), eagle.Graph()
     x, y, z, c, s = (arr(xp, [0] * 4) for _ in range(5))
     x0, z0, c0 = arr(xp, [1, 2, 3, 4]), arr(xp, [10, 20, 30, 40]), arr(xp, [100, 200, 300, 400])
+    cupy = None if xp is np else __import__("cupy")
     ev = cupy.cuda.Event(disable_timing=True) if xp is not np else None
     sig = (lambda: ev.record()) if ev else (lambda: None)
     wait = (lambda: cupy.cuda.get_current_stream().wait_event(ev)) if ev else (lambda: None)

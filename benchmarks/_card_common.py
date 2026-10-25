@@ -19,7 +19,6 @@ repository. Nothing here imports a GPU library at import time.
 from __future__ import annotations
 
 import hashlib
-import importlib.util
 import json
 import os
 import pathlib
@@ -442,25 +441,6 @@ def wins(card):
 # --------------------------------------------------------------------------- #
 # GPU state and facts
 # --------------------------------------------------------------------------- #
-def lib_installed(lib):
-    """Whether ``lib`` can be imported here, decided WITHOUT importing it
-    (``find_spec``); a library blocked through ``sys.modules[lib] = None``
-    counts as not installed."""
-    try:
-        return importlib.util.find_spec(lib) is not None
-    except (ImportError, ValueError):
-        return False
-
-
-def touch_device():
-    """Create the CUDA context with one tiny device operation, so a baseline
-    read right after it sees the context and nothing else."""
-    import cupy as cp
-
-    cp.zeros(1, dtype=cp.uint8).sum()
-    cp.cuda.Device().synchronize()
-
-
 def sync():
     import cupy as cp
 

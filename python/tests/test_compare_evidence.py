@@ -40,6 +40,7 @@ def _load(name):
     return module
 
 
+pytest.importorskip("raptor_docs")  # tools/sync_readme_cards reads the shared docs tokens (pip install ./site)
 sync = _load("sync_readme_cards")
 ingest = _load("ingest_compare")
 pcl = sync.pcl
