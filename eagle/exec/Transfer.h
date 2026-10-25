@@ -72,7 +72,7 @@ inline void* hostAlloc(std::size_t bytes)
     return p;
 }
 
-/** @brief Release memory from @ref hostAlloc (null is fine). */
+/** @brief Release memory from hostAlloc() (null is fine). */
 inline void hostFree(void* p)
 {
 #ifdef EAGLE_CPU_ONLY
