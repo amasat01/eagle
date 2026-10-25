@@ -43,7 +43,7 @@ venv_py="$work/venv/bin/python"
 # pip into the venv from a wheel (the interpreter is built without ensurepip)
 curl -fsSL -o "$work/get-pip.py" https://bootstrap.pypa.io/get-pip.py
 "$venv_py" "$work/get-pip.py" --quiet
-"$venv_py" -m pip install --quiet --only-binary=:all: pytest numpy "scikit-build-core>=0.10" "nanobind>=3.1,<4"
+"$venv_py" -m pip install --quiet --only-binary=:all: pytest numpy "scikit-build-core>=0.10" "setuptools-scm>=8" "nanobind>=3.1,<4"
 if [ -n "${RAPTOR_DIR:-}" ]; then
     "$venv_py" -m pip install --quiet --no-deps "$RAPTOR_DIR"
 else

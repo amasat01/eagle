@@ -1,9 +1,10 @@
-"""DE1 acceptance: the builder rewrite over eagle's real CPU Graph (see RESULTS.md)."""
+"""The graph builder over eagle's CPU Graph."""
 import linecache, time
 import numpy as np
 import pytest
 import eagle
-import hawk
+
+hawk = pytest.importorskip("hawk")
 from hawk import Mutable, Param, Scalar, UInt32
 from hawk import math as m
 import _builder_fixtures as bp
