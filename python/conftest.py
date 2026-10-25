@@ -36,6 +36,9 @@ sys.path.insert(0, RAPTOR_ROOT)
 
 os.environ.setdefault("CUDA_PATH", "/usr/local/cuda")
 
+# These two files exercise `match` statements in builders, which Python 3.9 cannot even parse.
+collect_ignore = ["tests/test_builder.py", "tests/test_builder_gpu.py"] if sys.version_info < (3, 10) else []
+
 # Records which certification rows RAN and passed, for assert_rows_complete("eagle", ran=True).
 pytest_plugins = ["raptor.conformance.pytest_rows"]
 

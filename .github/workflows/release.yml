@@ -410,6 +410,15 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v7
+        with:
+          path: eagle
+          fetch-depth: 0
+      - uses: ./eagle/.github/actions/tag-version
+        with:
+          path: eagle
+      - uses: ./eagle/.github/actions/companion
+        with: {repo: raptor, path: raptor, pins: eagle/.github/companions, token: "${{ secrets.SIBLING_READ_TOKEN || github.token }}"}
       - uses: actions/download-artifact@v8
         with:
           name: dist-${{ needs.build.outputs.tree }}
@@ -427,14 +436,22 @@ jobs:
           sudo apt-get install -y --no-install-recommends cuda-nvcc-12-6 cuda-cudart-dev-12-6 cuda-driver-dev-12-6
           echo "/usr/local/cuda-12.6/bin" >> "$GITHUB_PATH"
           echo "CUDA_HOME=/usr/local/cuda-12.6" >> "$GITHUB_ENV"
+      # raptor-core: PyPI when the checkout's version is released, else built from the sibling raptor checkout
+      - id: sib
+        uses: ./eagle/.github/actions/install-siblings
+        with:
+          siblings: raptor-core=raptor
       - name: Build the wheel from the sdist, install it, import eagle.cuda
         env:
           CC: gcc-13
           CXX: g++-13
+          SIB_DIR: ${{ steps.sib.outputs.dir }}
+          SIB_PINS: ${{ steps.sib.outputs.pins }}
         run: |
           python -m pip wheel --no-deps -w wheelhouse dist/raptor_eagle-*.tar.gz
           python -m venv sv
-          sv/bin/python -m pip install --quiet wheelhouse/*.whl
+          # shellcheck disable=SC2086  # the pins are separate arguments
+          sv/bin/python -m pip install --quiet --find-links "$SIB_DIR" $SIB_PINS wheelhouse/*.whl
           cd "$RUNNER_TEMP" && "$GITHUB_WORKSPACE/sv/bin/python" -c "import eagle, eagle.cuda; print(eagle.__version__, eagle.cuda)"
 
   test-wheel:
@@ -669,13 +686,23 @@ jobs:
       - uses: ./eagle/.github/actions/companion
         with: {repo: hawk, path: hawk, pins: eagle/.github/companions, token: "${{ secrets.SIBLING_READ_TOKEN || github.token }}"}
 
+      # aether-dsc and hawk: PyPI when the checkout's version is released, else built from it
+      - id: sib
+        uses: ./eagle/.github/actions/install-siblings
+        with:
+          siblings: aether-dsc=aether/dsc raptor-hawk=hawk
+
       - name: Install what the notebooks run on
+        env:
+          SIB_DIR: ${{ steps.sib.outputs.dir }}
+          SIB_PINS: ${{ steps.sib.outputs.pins }}
         run: |
           export HAWK_AETHER_INCLUDE="${GITHUB_WORKSPACE}/aether" HAWK_EAGLE_INCLUDE="${GITHUB_WORKSPACE}/eagle"
           python -m pip install --quiet ipykernel matplotlib scipy
           python -m pip install --quiet torch --index-url https://download.pytorch.org/whl/cpu
           python -m pip install --quiet --only-binary=:all: "jax[cpu]==0.11.2"   # the JAX notebooks (the floor, as ci.yml pins it)
-          python -m pip install --quiet ./hawk
+          # shellcheck disable=SC2086  # the pins are separate arguments
+          python -m pip install --quiet --find-links "$SIB_DIR" $SIB_PINS
 
       - name: make nbcheck (refuse an unfilled notebook; run every notebook on the CPU)
         run: cd eagle/docs && make nbcheck

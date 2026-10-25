@@ -63,8 +63,10 @@ def test_plugin_exports_exactly_the_seam_manifests():
 
 
 def test_the_plugin_reports_the_seam_minor_of_the_header_it_was_built_from():
-    header = (pathlib.Path(__file__).parents[1] / "src" / "seam" / "eagle_backend.h").read_text()
-    minor = re.search(r"#define EAGLE_BACKEND_VERSION_MINOR (\d+)u", header).group(1)
+    header_file = pathlib.Path(__file__).parents[1] / "src" / "seam" / "eagle_backend.h"
+    if not header_file.is_file():
+        pytest.skip("repository files are not present")  # the suite copied outside the repository
+    minor = re.search(r"#define EAGLE_BACKEND_VERSION_MINOR (\d+)u", header_file.read_text()).group(1)
     from eagle import _core
 
     if not _core.cuda_backend("cuda")["loaded"]:
