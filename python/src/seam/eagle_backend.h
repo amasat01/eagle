@@ -44,9 +44,11 @@
  * | 8   | (reserved)  | the composer group, when it is promoted from ``x_``     |
  * | 9   | exec        | run_device                                            |
  * | 10  | device      | device_props                                          |
- * | 11  | interop     | fence, event_pool_created (+ memset_device, memcpy_device, bound per symbol) |
+ * | 11  | interop     | fence, event_pool_created (+ memset_device, memcpy_device, memcpy, host_alloc, host_free, host_func, bound per symbol) |
  * | 12  | filtering   | compact_device (+ reorder_device, bound per symbol)   |
- * | 13..62 | reserved | new families only (additions to a family are per-symbol) |
+ * | 13  | conditional IF/ELSE | none: ``conditional_desc.kind`` IF_ELSE is accepted (driver >= 12.8) |
+ * | 14  | conditional SWITCH  | none: ``conditional_desc.kind`` SWITCH is accepted (driver >= 12.8)  |
+ * | 15..62 | reserved | new families only (additions to a family are per-symbol) |
  * | 63  | never assigned                                                       |
  *
  * EXPERIMENTAL (``eagle_backend_x_*``): optional one by one, may change in any
@@ -101,7 +103,7 @@ extern "C" {
 /** Seam major version: the core accepts exactly this major. */
 #define EAGLE_BACKEND_VERSION_MAJOR 1u
 /** Seam minor version this header describes (informational). */
-#define EAGLE_BACKEND_VERSION_MINOR 4u
+#define EAGLE_BACKEND_VERSION_MINOR 6u
 /** The packed version a backend built from this header reports. */
 #define EAGLE_BACKEND_VERSION ((EAGLE_BACKEND_VERSION_MAJOR << 16) | EAGLE_BACKEND_VERSION_MINOR)
 
@@ -134,6 +136,14 @@ typedef int32_t eagle_backend_status;
 #define EAGLE_BACKEND_CAP_DEVICE (UINT64_C(1) << 10)
 #define EAGLE_BACKEND_CAP_INTEROP (UINT64_C(1) << 11)
 #define EAGLE_BACKEND_CAP_FILTERING (UINT64_C(1) << 12)
+#define EAGLE_BACKEND_CAP_CONDITIONAL_IF_ELSE (UINT64_C(1) << 13)
+#define EAGLE_BACKEND_CAP_CONDITIONAL_SWITCH (UINT64_C(1) << 14)
+
+/** ``eagle_backend_conditional_desc.kind`` (0: WHILE with ``counter_ptr``, else IF). */
+#define EAGLE_BACKEND_COND_IF 1u
+#define EAGLE_BACKEND_COND_IF_ELSE 2u
+#define EAGLE_BACKEND_COND_WHILE 3u
+#define EAGLE_BACKEND_COND_SWITCH 4u
 
 /** "No stream given" in a ``fence`` stream argument. */
 #define EAGLE_BACKEND_STREAM_NONE INT64_MIN
@@ -200,6 +210,7 @@ struct eagle_backend_fork_desc {
     int32_t reserved0;
     uint64_t origin;          /**< the stream the branches fork from */
     uint64_t branch_count;
+    uint64_t wait_count;      /**< marks ``fork_mark`` may make (minor 5) */
 };
 
 struct eagle_backend_conditional_desc {
@@ -211,6 +222,13 @@ struct eagle_backend_conditional_desc {
     uint64_t count_ptr;       /**< device uint32* */
     uint64_t baseline_ptr;    /**< device uint32*, 0 = none */
     uint64_t counter_ptr;     /**< device uint32[2] for a WHILE loop, 0 = IF */
+    /* minor 5 */
+    uint32_t kind;            /**< EAGLE_BACKEND_COND_*, 0 = from counter_ptr */
+    uint32_t arms;            /**< 0 = the kind's own; SWITCH: the arm count */
+    uint32_t negate;          /**< nonzero inverts the guard */
+    uint32_t reserved1;
+    uint64_t brk_ptr;         /**< WHILE: device uint32 break cell, 0 = none */
+    uint64_t limit_ptr;       /**< WHILE: device uint32 trip count, 0 = none */
 };
 
 struct eagle_backend_graph_desc {
@@ -267,6 +285,8 @@ void eagle_backend_stream_release(eagle_backend_stream h);
 eagle_backend_status eagle_backend_capturer_create(const struct eagle_backend_capturer_desc* desc, eagle_backend_capturer* out);
 eagle_backend_status eagle_backend_capturer_begin(eagle_backend_capturer h);
 eagle_backend_status eagle_backend_capturer_end(eagle_backend_capturer h, eagle_backend_captured* out);
+/** The graph the in-flight capture records into (0: none). Added in minor 5. */
+eagle_backend_status eagle_backend_capturer_graph(eagle_backend_capturer h, uint64_t* graph);
 void eagle_backend_capturer_release(eagle_backend_capturer h);
 
 /* ---- captured (bit 2) -------------------------------------------------------- */
@@ -285,6 +305,11 @@ eagle_backend_status eagle_backend_fork_origin(eagle_backend_fork h, uint64_t* s
 eagle_backend_status eagle_backend_fork_forked(eagle_backend_fork h, int32_t* forked);
 eagle_backend_status eagle_backend_fork_size(eagle_backend_fork h, uint64_t* n);
 void eagle_backend_fork_release(eagle_backend_fork h);
+/** Mark branch ``producer``'s tip; ``*mark`` indexes it. INDEX past ``wait_count``
+ *  marks. Added in minor 5; bound per symbol. */
+eagle_backend_status eagle_backend_fork_mark(eagle_backend_fork h, uint64_t producer, uint64_t* mark);
+/** Branch ``waiter`` waits for ``mark``: one captured edge. Added in minor 5. */
+eagle_backend_status eagle_backend_fork_wait(eagle_backend_fork h, uint64_t waiter, uint64_t mark);
 
 /* ---- conditional (bit 4) ----------------------------------------------------- */
 
@@ -294,6 +319,13 @@ eagle_backend_status eagle_backend_conditional_body_stream(eagle_backend_conditi
 eagle_backend_status eagle_backend_conditional_is_loop(eagle_backend_conditional h, int32_t* is_loop);
 eagle_backend_status eagle_backend_conditional_end(eagle_backend_conditional h);
 void eagle_backend_conditional_release(eagle_backend_conditional h);
+/** Arm ``k``'s capture stream. Added in minor 5; bound per symbol. */
+eagle_backend_status eagle_backend_conditional_arm_stream(eagle_backend_conditional h, uint64_t k, uint64_t* stream);
+/** ``which`` >= 0: the nodes of arm ``which``'s body graph; -1: the setter nodes
+ *  (head, + the tail of a WHILE). ``*nodes`` is backend-allocated
+ *  (``eagle_backend_free``). Added in minor 5. */
+eagle_backend_status eagle_backend_conditional_nodes(eagle_backend_conditional h, int64_t which, uint64_t** nodes,
+    int64_t* count);
 
 /* ---- attribution (bit 5) ----------------------------------------------------- */
 
@@ -328,6 +360,17 @@ eagle_backend_status eagle_backend_launcher_set_logical_size(eagle_backend_launc
 eagle_backend_status eagle_backend_launcher_kernel_node_count(eagle_backend_launcher h, int64_t* count);
 eagle_backend_status eagle_backend_launcher_set_node_enabled(eagle_backend_launcher h, uint64_t node, int32_t enabled);
 void eagle_backend_launcher_release(eagle_backend_launcher h);
+/** Patch kernel node ``node``'s first ``n`` arguments from the addresses in
+ *  ``params`` (0 keeps one); later arguments keep their captured values. Added
+ *  in minor 5, like the two below; bound per symbol. */
+eagle_backend_status eagle_backend_launcher_set_kernel_params(eagle_backend_launcher h, uint64_t node,
+    const uint64_t* params, int64_t n);
+/** Re-point memcpy node ``node``'s source; everything else stays as captured. */
+eagle_backend_status eagle_backend_launcher_set_memcpy_source(eagle_backend_launcher h, uint64_t node, uint64_t src);
+/** Update the exec from ``captured`` (not consumed); ``*accepted`` = 0 when the
+ *  driver rejects it (the exec is unchanged). */
+eagle_backend_status eagle_backend_launcher_exec_update(eagle_backend_launcher h, eagle_backend_captured captured,
+    int32_t* accepted);
 
 /* ---- exec (bit 9) ------------------------------------------------------------ */
 
@@ -353,6 +396,33 @@ eagle_backend_status eagle_backend_memset_device(uint64_t ptr, uint64_t bytes, u
  *  ``dst`` (distinct, non-overlapping), enqueued on ``stream`` like
  *  ``memset_device``. Added in minor 4; bound per symbol. */
 eagle_backend_status eagle_backend_memcpy_device(uint64_t dst, uint64_t src, uint64_t bytes, uint64_t stream);
+
+/** Directions of ``eagle_backend_memcpy``. */
+#define EAGLE_BACKEND_COPY_H2D 0
+#define EAGLE_BACKEND_COPY_D2H 1
+#define EAGLE_BACKEND_COPY_D2D 2
+#define EAGLE_BACKEND_COPY_H2H 3
+
+/** Copy ``bytes`` bytes from ``src`` to ``dst`` in direction ``kind``
+ *  (``EAGLE_BACKEND_COPY_*``), enqueued on ``stream`` like ``memset_device``:
+ *  capture-legal, a memcpy node inside a capture. The two ranges are distinct
+ *  and non-overlapping, or the same address, which enqueues nothing. A host
+ *  range need not be pinned (an unpinned one is staged, with no overlap). A
+ *  backend whose memory is unified may make every copy a no-op. Added in
+ *  minor 6; bound per symbol. */
+eagle_backend_status eagle_backend_memcpy(uint64_t dst, uint64_t src, uint64_t bytes, int32_t kind, uint64_t stream);
+/** Allocate ``bytes`` bytes of page-locked host memory the device can DMA
+ *  from; its address goes to ``*out`` (0 for ``bytes == 0``). Added in minor 6;
+ *  bound per symbol. */
+eagle_backend_status eagle_backend_host_alloc(uint64_t bytes, uint64_t* out);
+/** Free an address from ``host_alloc`` (0 is fine). Added in minor 6; bound per
+ *  symbol. */
+eagle_backend_status eagle_backend_host_free(uint64_t ptr);
+/** Call ``fn(arg)`` on a backend thread once the work enqueued before it on
+ *  ``stream`` is done; capture-legal, a host node inside a capture that runs on
+ *  every replay. ``fn`` must not call the backend, and ``arg`` must outlive
+ *  every execution. Added in minor 6; bound per symbol. */
+eagle_backend_status eagle_backend_host_func(uint64_t stream, void (*fn)(void*), void* arg);
 
 /* ---- filtering (bit 12) ------------------------------------------------------ */
 

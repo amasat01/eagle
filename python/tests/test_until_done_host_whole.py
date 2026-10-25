@@ -28,11 +28,13 @@ import os
 import numpy as np
 import pytest
 from test_until_done import _DT, _planes
-from test_until_done_auto import _S, _batch, _exact_host_profile, auto  # noqa: F401
+from test_until_done_auto import _S, _batch, auto  # noqa: F401
 
 import eagle
 from eagle import _host_loop
 from eagle import exec as eexec
+
+pytestmark = pytest.mark.usefixtures("_exact_host_profile")
 
 
 def _per_launch(monkeypatch):

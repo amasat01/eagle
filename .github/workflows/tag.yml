@@ -1,9 +1,9 @@
 # Copyright 2026 Alessandro Masat
 # SPDX-License-Identifier: Apache-2.0
 #
-# A merge to main with a version that has no tag gets the annotated tag vX.Y.Z on the merged commit, then
-# publish.yml is started on that tag. (A tag pushed with GITHUB_TOKEN starts no workflow, hence the dispatch.)
-# A docs-only merge carries no new version: nothing happens.
+# A merge to main whose pull request carries a release label gets the annotated tag vX.Y.Z on the merged commit
+# (X.Y.Z from tools/next_version.py), then publish.yml is started on that tag. (A tag pushed with GITHUB_TOKEN
+# starts no workflow, hence the dispatch.) release:none (docs-only) tags nothing.
 
 name: Tag
 
@@ -14,6 +14,7 @@ on:
 permissions:
   contents: write
   actions: write
+  pull-requests: read
 
 concurrency:
   group: ${{ github.workflow }}
@@ -24,6 +25,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
@@ -32,11 +35,18 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          V=$(python tools/version.py get)
+          labels=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls" --jq '.[0].labels[].name' | tr '\n' ' ')
+          grep -q 'release:' <<< "$labels" || { echo "no release: label on the merged pull request: nothing to tag"; exit 0; }
+          V=$(python tools/next_version.py "$labels" "$GITHUB_SHA")
+          [ -n "$V" ] || { echo "release:none: nothing to tag"; exit 0; }
           if [ -n "$(git ls-remote --tags origin "refs/tags/v$V")" ]; then
-            echo "no new version: v$V is already tagged"
-            exit 0
+            echo "::error::tag v$V already exists"
+            exit 1
           fi
+          # The build ran under the label of that moment: a relabel afterwards would tag a version the artifact does not carry.
+          bash tools/ci_fetch_artifact.sh dist "$(git rev-parse 'HEAD^{tree}')" dist
+          built=$(basename dist/*.tar.gz .tar.gz); built=${built##*-}
+          [ "$built" = "$V" ] || { echo "::error::relabelled after the last build (built $built, label gives $V): push an empty commit"; exit 1; }
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag -a "v$V" -m "v$V" "$GITHUB_SHA"

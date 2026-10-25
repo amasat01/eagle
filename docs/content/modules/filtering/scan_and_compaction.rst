@@ -92,3 +92,36 @@ From Python the same step is :class:`eagle.ActiveSet` (through the CUDA
 backend's ``filtering`` capability group, ``eagle_backend_compact_device``),
 and :func:`eagle.compaction_body` builds the loop body that compacts every
 few steps inside :func:`eagle.repeat_while`.
+
+Compacting by groups
+~~~~~~~~~~~~~~~~~~~~
+
+Some kernels need whole groups of lanes together: a sum over a lane space's fastest axis
+adds the lanes of one group, so a group with one live lane must run in full. A hawk kernel
+declares this with ``@hawk.kernel(group=32)``, and ``ActiveSet(mask, group=32)`` then keeps a
+group while any of its lanes is live. ``map`` holds group indices and ``count`` is the number
+of lanes launched, the live groups times the group size.
+
+.. code-block:: python
+
+   import numpy as np
+   import eagle
+
+   done = np.zeros(100, dtype=bool)
+   done[:70] = True                       # lanes 0 to 69 have finished ...
+   done[75] = True                        # ... and lane 75
+
+   by_lane = eagle.ActiveSet(done)
+   by_lane.compact()
+   by_group = eagle.ActiveSet(done, group=32)
+   by_group.compact()
+   print(int(by_lane.count[0]), int(by_group.count[0]), by_group.map[:2])
+
+.. code-block:: text
+
+   29 64 [2 3]
+
+Groups 0 and 1 are finished, groups 2 and 3 (the last one partial) are not. ``reorder=`` does
+not combine with ``group=``. At bind, a kernel that declares a group in its sidecar's
+``launch.lane_space`` is checked against the set: a set that compacts at another group is
+refused, naming both groups.

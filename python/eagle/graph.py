@@ -22,21 +22,26 @@ from __future__ import annotations
 
 import contextlib
 import threading
+import warnings
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Callable
 
 from . import _counters, _graph_view
 from ._busy import BusyGuard
-from ._conditional import RepeatWhile, Skippable
+from ._conditional import (Branches, RepeatWhile, SkipGuard, Skippable,
+                           has_branch_nodes)
+from ._device_kind import GPU_KINDS, device_kind, gpu_kind
 from ._graph_edges import (SHARES_MEMORY_MAX_WORK, Edge, check_conflicts,
-                           derive_edges)
+                           arrays_overlap, derive_edges)
+from ._active_set import _address
+from .interop import _xp_of
 from .sidecar import refuse_derived
 
 __all__ = ["Edge", "Graph", "Node", "NodeKind", "SHARES_MEMORY_MAX_WORK",
            "child", "get_node_kind", "opaque", "register_node_kind"]
 
-_BACKENDS = ("gpu", "cpu")
+_BACKENDS = ("gpu", "cpu", *GPU_KINDS)
 #: How a node runs on the GPU, and what ``g.schedule`` names its stage there.
 _TIERS = MappingProxyType({"capture": "capture", "stream": "eager_stream", "host": "eager_host"})
 
@@ -180,24 +185,32 @@ class ForkStage:
     """What a group's ``lower_gpu`` returns: the members of one fork/join
     stage, run concurrently under capture."""
 
-    __slots__ = ("members",)
+    __slots__ = ("members", "syncs")
 
-    def __init__(self, members):
+    def __init__(self, members, syncs=()):
         self.members = list(members)
+        self.syncs = list(syncs)       # the cross-branch waits the weave wires
 
 
 @dataclass(frozen=True)
 class LowerCtx:
     """What a lowering hook receives: the ``backend`` (``"gpu"``/``"cpu"``),
     whether the node is lowered into a conditional or loop ``body``, and
-    :meth:`lower`, which lowers a child node for that backend."""
+    :meth:`lower`, which lowers a child node for that backend. ``host`` holds
+    the ids of the nodes of a GPU graph whose planes are all host arrays: they
+    lower to their CPU arm, run from the capture as a host function."""
 
     backend: str
     body: bool = False
+    host: frozenset = frozenset()
 
     def lower(self, node: Node):
         k = get_node_kind(node.kind)
-        return (k.lower_gpu if self.backend == "gpu" else k.lower_cpu)(node, self)
+        if self.backend != "gpu":
+            return k.lower_cpu(node, self)
+        if self.host and id(node) in self.host:
+            return _transfer.HostNode(k.lower_cpu(node, self))
+        return k.lower_gpu(node, self)
 
 
 class _Eager:
@@ -265,6 +278,53 @@ def _run_seeds(cache, tail):
     return events
 
 
+_CONDITIONALS = ("skippable", "repeat_while", "branches")
+
+
+def _refuse_mixed(access):
+    names = {k: next((n, a) for n, a, _r in (*access.reads, *access.writes) if (device_kind(a) == "host") == (k == "host"))
+             for k in ("host", "device")}
+    host, device = names["host"][0], names["device"][0]
+    raise ValueError(
+        f"eagle.Graph.build: node {access.label!r} has planes on the host ({host!r}) and on the "
+        f"device ({device!r}); a node runs where its planes live. Add "
+        f"eagle.copy(<{host}>, into=<a device array>) before it, or "
+        f"eagle.copy(<a device array>, into=<{host}>) after it")
+
+
+@contextlib.contextmanager
+def _pinned_hint(nodes):
+    """CUDA instantiates a host copy inside a device body only from page-locked
+    memory; its refusal names nothing, so say what to change."""
+    try:
+        yield
+    except RuntimeError as exc:
+        copy = next((n for c in _walk(nodes) if c.kind in _CONDITIONALS
+                     for n in _walk([c.payload.child])
+                     if n.kind == "copy" and any(device_kind(a) == "host" for a in n.payload[:2])), None)
+        if copy is None:
+            raise
+        raise ValueError(
+            "eagle.Graph.build: a copy between host and device inside a device if/for body needs "
+            "page-locked host memory; make the host array with eagle.pinned(shape, dtype) "
+            f"(or move the copy out of the body) [{str(exc).strip().splitlines()[-1]}]") from None
+
+
+def _refuse_host_in_body(access):
+    """A node of host arrays inside a device ``if`` / ``for`` body cannot be
+    captured (CUDA has no host function node in a conditional body)."""
+    for node in _walk([access.node.payload.child]):
+        if node.kind in ("group", "sequence", *_CONDITIONALS, "copy"):
+            continue
+        k = get_node_kind(node.kind)
+        if {device_kind(a) for _n, a, _r in (*k.reads(node), *k.writes(node))} == {"host"}:
+            raise ValueError(
+                f"eagle.Graph.build: node {node.label!r} runs on the host (its planes are host "
+                f"arrays) inside the device if/for body of {access.label!r}, and CUDA cannot run "
+                "a host function there. Move it out of the body, or make its planes device "
+                "arrays so it runs on the device (eagle.copy is allowed in a body)")
+
+
 # --- The Graph --- #
 class _Access:
     """One executable node for the edge derivation."""
@@ -299,7 +359,7 @@ def _plane_device(accesses, device=None):
     """The CUDA ordinal the graph's planes live on. Planes on two devices are
     refused by name, and so is an explicit ``device`` they are not on."""
     found = sorted({arr.device.id for a in accesses
-                    for _n, arr, _r in (*a.reads, *a.writes)})
+                    for _n, arr, _r in (*a.reads, *a.writes) if device_kind(arr) != "host"})
     if len(found) > 1:
         raise ValueError(f"eagle.graph: the planes span devices {found}; "
                          "a graph runs on one device")
@@ -309,8 +369,44 @@ def _plane_device(accesses, device=None):
     return found[0] if found else device
 
 
+def _walk(nodes):
+    """Every node of the tree, bodies and branches included."""
+    for node in nodes:
+        yield node
+        if node.kind in ("skippable", "repeat_while"):
+            yield from _walk([node.payload.child])
+        elif node.kind == "branches":
+            yield from _walk(node.payload.child.payload)
+        elif node.kind == "sequence":
+            yield from _walk(node.payload)
+        elif node.kind == "group":
+            yield from _walk(n for branch in node.payload for n in branch)
+
+
+def _inner_groups(nodes, inside=False):
+    """The fork/join groups held in the bodies of conditionals and loops: the
+    leaves of the Graph see such a body as one node, so each is checked on its
+    own (a group nested in a group is covered by its outer group's check)."""
+    for node in nodes:
+        if node.kind in ("skippable", "repeat_while", "branches"):
+            yield from _inner_groups([node.payload.child], True)
+        elif node.kind == "sequence":
+            yield from _inner_groups(node.payload, inside)
+        elif node.kind == "group":
+            if inside:
+                yield node
+            yield from _inner_groups((n for branch in node.payload for n in branch))
+
+
+def _writes_only_cells(bound) -> bool:
+    """Does the launch write only ``uint32`` planes (a loop or branch guard's
+    cells)? Such a launch carries no gradient."""
+    writes = [arr for _n, arr, _r in get_node_kind("launch").writes(Node("launch", bound))]
+    return bool(writes) and all(str(arr.dtype) == "uint32" for arr in writes)
+
+
 def _array_backend(arr):
-    return "gpu" if type(arr).__module__.split(".")[0] == "cupy" else "cpu"
+    return "cpu" if device_kind(arr) == "host" else "gpu"
 
 
 class Graph:
@@ -320,12 +416,23 @@ class Graph:
     the edges, refuses conflicts, and lowers to the GPU or CPU; ``launch`` /
     ``enqueue`` / ``synchronize`` are :class:`eagle.GraphPipeline`'s verbs
     (on the CPU ``enqueue`` is ``launch``). ``show()`` / ``str()`` /
-    ``plot()`` / ``to_mermaid()`` / ``to_dot()`` draw it."""
+    ``plot()`` / ``to_mermaid()`` / ``to_dot()`` draw it. The keywords
+    ``record``, ``backend``, ``dispatch`` and ``device`` are the defaults of
+    :meth:`build`'s."""
 
-    def __init__(self):
+    def __init__(self, *, record=False, backend=None, dispatch=None, device=None):
+        from . import _builder
+
+        self._defaults = dict(record=record, backend=backend, dispatch=dispatch, device=device)
+        self._bld = _builder.State()
         self._nodes: list = []
         self._busy = BusyGuard("eagle.Graph")
         self._built = False
+        self._waited = (set(), [])
+        self._steps: list = []     # a GPU build's captured steps, each with its graph nodes
+        self._host_nodes: list = []   # its host function nodes, which keep the error they hit
+        self._rebuilt = False
+        self._patch = None         # where each array is used, for _rebind
         self._backend = None
         self._edges: tuple = ()
         self._labels: list = []
@@ -342,6 +449,7 @@ class Graph:
         self._record = None
         self._is_reverse = False
         self._dispatch = {}
+        _builder.attach(self)
 
     @property
     def dispatch(self) -> dict:
@@ -356,32 +464,23 @@ class Graph:
                                "make a new Graph to add nodes")
 
     def _child_of(self, step, door, loop=False):
-        """The Node a conditional's step stands for: a Node itself, a
-        ``BoundPlan.launch`` (its planes are then derived), or any other
-        zero-arg callable (opaque: no declared planes). A repeat_while
-        (``loop``) also takes a tuple of such parts, run in order, and a
-        ``skippable`` part: a ``"sequence"`` node."""
-        if isinstance(step, RepeatWhile) and loop:
-            raise ValueError(f"{door}: nesting a repeat_while inside a "
-                             "repeat_while is not supported; flatten it")
-        if isinstance(step, Skippable) and loop:
+        """The Node a conditional's step stands for: a Node itself (a group
+        too), a ``BoundPlan.launch`` (its planes are then derived), a
+        ``skippable`` / ``repeat_while`` (adopted: conditionals nest), a tuple
+        of such parts run in order (a ``"sequence"`` node), or any other
+        zero-arg callable (opaque: no declared planes). A loop's single
+        conditional step is wrapped in a sequence."""
+        if isinstance(step, list):
+            step = tuple(step)
+        if loop and isinstance(step, (Skippable, RepeatWhile)):
             step = (step,)
-        if isinstance(step, (Skippable, RepeatWhile)):
-            raise ValueError(f"{door}: nesting a conditional inside a "
-                             "conditional is not supported; flatten it")
         if isinstance(step, tuple):
-            if not loop:
-                raise ValueError(f"{door}: only a repeat_while takes a tuple of "
-                                 "body parts")
-            parts = tuple(self._node_of(p, None, door=door) if isinstance(p, Skippable)
-                          else self._child_of(p, door, loop=True) for p in step)
-            if any(p.kind == "repeat_while" for p in parts):
-                raise ValueError(f"{door}: nesting a repeat_while inside a "
-                                 "repeat_while is not supported; flatten it")
-            return Node("sequence", parts, None, all(p.grad for p in parts))
+            parts = tuple(self._child_of(p, door) if not isinstance(p, (Skippable, RepeatWhile))
+                          else self._node_of(p, None, door=door) for p in step)
+            return Node("sequence", parts, None, any(p.grad for p in parts))
+        if isinstance(step, (Skippable, RepeatWhile)):
+            return self._node_of(step, None, door=door)
         if isinstance(step, Node):
-            if step.kind in ("group",):
-                raise ValueError(f"{door}: a group cannot be a conditional's step")
             return step
         owner = getattr(step, "__self__", None)
         if owner is not None and _is_bound(owner) and step.__name__ == "launch":
@@ -390,7 +489,20 @@ class Graph:
             raise TypeError(f"{door}: a conditional's step must be callable")
         return Node("opaque", (step, (), ()))
 
+    def _adopt_branches(self, cond, door):
+        if isinstance(cond.arms[0], _Late):
+            if cond.arms[0].owner is not self:
+                raise ValueError(f"{door}: this Branches already belongs to another Graph")
+            lates = cond.arms
+        else:
+            lates = cond.arms = tuple(_Late(self._child_of(a, door), self) for a in cond.arms)
+        seq = Node("sequence", tuple(late.child for late in lates), None,
+                   any(late.child.grad for late in lates))
+        return Node("branches", _Cond(cond, seq, lates), None, seq.grad)
+
     def _adopt(self, cond, door):
+        if isinstance(cond, Branches):
+            return self._adopt_branches(cond, door)
         late = cond.step
         if isinstance(late, _Late):
             if late.owner is not self:
@@ -404,7 +516,7 @@ class Graph:
         return Node(kind, _Cond(cond, child, late), None, child.grad)
 
     def _node_of(self, item, name=None, *, door):
-        if isinstance(item, (Skippable, RepeatWhile)):
+        if isinstance(item, (Skippable, RepeatWhile, Branches)):
             return self._adopt(item, door)._named(name)
         if isinstance(item, Node):
             return item._named(name)
@@ -417,7 +529,7 @@ class Graph:
                     "(non-contiguous or sample-major); a Graph needs zero-copy "
                     "planes -- pass contiguous component-major arrays "
                     "(numpy.ascontiguousarray, or eagle.samples_last(x))")
-            return Node("launch", item, name)
+            return Node("launch", item, name, not _writes_only_cells(item))
         raise TypeError(f"{door}: expected a BoundPlan or an eagle.graph.Node, "
                         f"got {type(item).__name__}")
 
@@ -465,93 +577,173 @@ class Graph:
         """Append any registered-kind :class:`Node`, or an existing
         ``eagle.skippable`` / ``eagle.repeat_while`` object."""
         self._check_open("add_node")
-        if not isinstance(node, (Node, Skippable, RepeatWhile)):
+        if not isinstance(node, (Node, Skippable, RepeatWhile, Branches)):
             raise TypeError("eagle.Graph.add_node: expected an eagle.graph.Node, "
                             "or an eagle.skippable / eagle.repeat_while")
+        if isinstance(node, Node) and _transfer.record(node._named(name), self):
+            return self       # inside a builder: kept in the order of its calls
         node = self._node_of(node, name, door="eagle.Graph.add_node")
         get_node_kind(node.kind)          # unregistered -> refusal naming the registry
         self._validate(node)
         self._nodes.append(node)
         return self
 
-    def add_group(self, branches, *, names=None) -> Graph:
-        """Append a fork/join stage: at least two independent branches, each
-        a BoundPlan, a Node, or a list of them (run in order inside the
-        branch), joined before the next node. Siblings that overlap are
-        refused at :meth:`build`."""
-        self._check_open("add_group")
+    def _group_node(self, branches, names=None, door="eagle.Graph.add_group") -> Node:
+        """A fork/join group :class:`Node`: each branch a BoundPlan, a Node
+        (a nested group, a conditional) or a list of them."""
         branches = list(branches)
         if len(branches) < 2:
-            raise ValueError("eagle.Graph.add_group: a group needs at least 2 "
+            raise ValueError(f"{door}: a group needs at least 2 "
                              f"branches, got {len(branches)}")
         if names is not None and len(names) != len(branches):
-            raise ValueError(f"eagle.Graph.add_group: names has {len(names)} "
+            raise ValueError(f"{door}: names has {len(names)} "
                              f"entries but there are {len(branches)} branches")
         built = []
         for i, br in enumerate(branches):
             items = list(br) if isinstance(br, (list, tuple)) else [br]
             if not items:
-                raise ValueError(f"eagle.Graph.add_group: branch {i} is empty")
+                raise ValueError(f"{door}: branch {i} is empty")
             nm = None if names is None else names[i]
-            nodes = []
-            for it in items:
-                n = self._node_of(it, nm if len(items) == 1 else None,
-                                  door="eagle.Graph.add_group")
-                if n.kind == "group":
-                    raise ValueError("eagle.Graph.add_group: groups do not nest "
-                                     "(series-parallel stages only)")
+            nodes = [self._node_of(it, nm if len(items) == 1 else None, door=door)
+                     for it in items]
+            for n in nodes:
                 self._validate(n)
-                nodes.append(n)
             built.append(tuple(nodes))
-        self._nodes.append(Node("group", tuple(built)))
+        return Node("group", tuple(built))
+
+    def add_group(self, branches, *, names=None) -> Graph:
+        """Append a fork/join stage: at least two independent branches, each
+        a BoundPlan, a Node, or a list of them (run in order inside the
+        branch; a branch may hold a nested group or a conditional), joined
+        before the next node. Siblings that overlap are refused at
+        :meth:`build`."""
+        self._check_open("add_group")
+        self._nodes.append(self._group_node(branches, names))
+        return self
+
+    def _decision(self, cell):
+        """A fresh ``uint32`` cell holding a copy of ``cell``, taken by a node
+        added here: what the arms of a conditional read."""
+        decision = _xp_of(cell).zeros(1, dtype="uint32")
+        self.add_node(_copy(cell, decision), name="decision")
+        return decision
+
+    def _if_else(self, guard, then, other=None) -> Graph:
+        """Append ``then`` guarded by ``guard`` and, when given, ``other``
+        guarded by its negation. The guard's count cell is copied once into a
+        decision cell first, so an arm that writes its own guard cannot make
+        both arms run."""
+        self._check_open("if_else")
+        i = guard.count_idx
+        decision = self._decision(guard.count_arr[i:i + 1])
+        held = SkipGuard(decision, 0, guard.baseline_arr, guard.baseline_idx, guard.negate)
+        if other is not None and _array_backend(decision) == "gpu" and has_branch_nodes():
+            return self.add_node(Branches((then, other), held))       # one IF/ELSE node
+        self.add_node(Skippable(then, held))
+        if other is not None:
+            self.add_node(Skippable(other, held.negated()))
+        return self
+
+    def _chain(self, index, arms, otherwise=None) -> Graph:
+        """An ``if``/``elif``/``else`` chain over ONE decision: ``index`` is a
+        ``uint32`` cell holding the number of the arm to run, evaluated once
+        by the caller; ``len(arms)`` runs ``otherwise``. The cell is copied
+        once at the head, then each arm is an IF over ``decision == k``."""
+        self._check_open("chain")
+        decision = self._decision(index)
+        xp = _xp_of(index)
+        if _array_backend(decision) == "gpu" and has_branch_nodes(switch=True):
+            return self.add_node(Branches((*arms, *([otherwise] if otherwise is not None else [])),
+                                          SkipGuard(decision, 0), switch=True))     # one SWITCH node
+        for k, arm in enumerate((*arms, otherwise)):
+            if arm is None:
+                continue
+            base = xp.full(1, k, dtype=xp.uint32) if k else None
+            self.add_node(Skippable(arm, SkipGuard(decision, 0, base, 0, True)))
         return self
 
     # -- build -- #
     def _leaves(self):
         """``(leaves, groups)``: the executable nodes in add order, and per
-        fork/join group its branches as lists of leaf indices."""
-        out, groups = [], []
-        for node in self._nodes:
-            if node.kind == "group":
-                branches = []
-                for branch in node.payload:
-                    ids = []
-                    for n in branch:
-                        ids.append(len(out))
-                        out.append(_Access(n))
-                    branches.append(ids)
-                groups.append(branches)
-            else:
+        fork/join group (nested ones too) its branches as lists of leaf
+        indices; an outer branch holds the leaves of its nested groups. The
+        ``wait`` points of the groups leave ``self._waited = (ordered leaf
+        pairs, intra-group edges)``."""
+        out, groups, ordered, edges = [], [], set(), []
+
+        def walk(node, in_branch=False):
+            if node.kind == "wait" and not in_branch:
+                raise RuntimeError("eagle.Graph.wait: only inside a parallel region, on a branch handle")
+            if node.kind != "group":
                 out.append(_Access(node))
+                return [len(out) - 1]
+            rows = [[walk(n, True) for n in branch] for branch in node.payload]
+            for q, k, j, m, arrays in _wait_links(node):
+                src, name = rows[j][m][-1], next(n for n, w, _r in out[rows[j][m][-1]].writes
+                                                 if any(arrays_overlap(w, a) for a in arrays))
+                for later in rows[q][k:]:
+                    if later is rows[q][k] or any(arrays_overlap(arr, a) for i in later for _n, arr, _r
+                                                  in (*out[i].reads, *out[i].writes) for a in arrays):
+                        edges.extend(Edge(src, i, name, "RAW") for i in later)
+                ordered.update((i, o) for row in rows[j][:m + 1] for i in row
+                               for later in rows[q][k:] for o in later)
+            branches = [[i for ids in row for i in ids] for row in rows]
+            groups.append(branches)
+            return [i for ids in branches for i in ids]
+
+        for node in self._nodes:
+            walk(node)
+        self._waited = (ordered, edges)
         return out, groups
 
     def _resolve_backend(self, accesses, backend):
-        seen = set()
-        for a in accesses:
-            for _n, arr, _r in (*a.reads, *a.writes):
-                seen.add(_array_backend(arr))
-        if len(seen) > 1:
-            raise ValueError("eagle.Graph.build: the graph mixes host and device "
-                             "planes; a Graph runs on one backend")
-        inferred = seen.pop() if seen else "cpu"
-        if backend is None:
-            return inferred
-        if backend not in _BACKENDS:
+        """``(backend, host)``: where the graph runs, and the ids of the
+        nodes of a GPU graph that run on the host (``None`` when no plane of a
+        GPU graph is on the host). A node runs where its planes
+        live; a node with both is refused (a copy is the one node that spans)."""
+        kinds = {device_kind(arr) for a in accesses for _n, arr, _r in (*a.reads, *a.writes)}
+        gpus = kinds - {"host"}
+        if len(gpus) > 1:
+            raise ValueError(f"eagle.Graph.build: the planes live on {sorted(gpus)}; "
+                             "a Graph runs on one backend")
+        if backend is not None and backend not in _BACKENDS:
             raise ValueError(f"eagle.Graph.build: backend must be one of "
                              f"{_BACKENDS} or None, got {backend!r}")
-        if backend != inferred and any(a.reads or a.writes for a in accesses):
-            raise ValueError(f"eagle.Graph.build: backend={backend!r} but the "
-                             f"planes live on the {inferred}")
-        return backend
+        kind = next(iter(gpus)) if gpus else "host" if kinds else None
+        if backend is None:
+            be = "cpu" if kind in (None, "host") else "gpu"
+        else:
+            want = "host" if backend == "cpu" else gpu_kind() if backend == "gpu" else backend
+            if kind is not None and kind != want:
+                raise ValueError(f"eagle.Graph.build: backend={backend!r} but the "
+                                 f"planes live on the {'cpu' if kind == 'host' else 'gpu'}")
+            be = "cpu" if want == "host" else "gpu"
+        if be != "gpu" or "host" not in kinds:
+            return be, None
+        host = set()
+        for a in accesses:
+            ks = {device_kind(arr) for _n, arr, _r in (*a.reads, *a.writes)}
+            if a.node.kind in _CONDITIONALS:
+                _refuse_host_in_body(a)
+            elif a.node.kind != "copy" and "host" in ks:
+                if len(ks) > 1:
+                    _refuse_mixed(a)
+                if get_node_kind(a.node.kind).tier == "capture":
+                    host.add(id(a.node))
+        return be, frozenset(host)
 
     def build(self, *, backend=None, record=False, dispatch=None, device=None) -> Graph:
         """Derive the edges, refuse conflicts (always), and lower. ``backend``
-        is inferred from where the planes live. ``record=True`` keeps what a
+        is inferred from where the planes live; ``"cpu"``, ``"gpu"`` (the one
+        installed GPU kind; two installed kinds are refused) or a kind such as
+        ``"cuda"`` states it. ``record=True`` keeps what a
         reverse pass needs (:mod:`eagle.diff`): after each :meth:`launch`,
         :attr:`record` is that launch's ``Record``.
 
         The graph runs on the GPU its planes live on (``device=n`` is checked
         against them); planes on two GPUs are refused.
+
+        The keywords of :class:`Graph` are the defaults of the same-named ones here.
 
         ``dispatch`` lowers the ``policy="auto"`` dispatch groups of the
         graph's hawk kernels (``None`` or ``"switch"``: the fused kernel;
@@ -569,6 +761,10 @@ class Graph:
             self._check_open("build")
             if not self._nodes:
                 raise ValueError("eagle.Graph.build: the graph is empty")
+            backend = self._defaults["backend"] if backend is None else backend
+            record = record or self._defaults["record"]
+            dispatch = self._defaults["dispatch"] if dispatch is None else dispatch
+            device = self._defaults["device"] if device is None else device
             self._dispatch = {}
             if not self._is_reverse and (dispatch is not None or any(
                     n.kind == "launch" and getattr(getattr(n.payload.plan, "plugin", None),
@@ -586,18 +782,26 @@ class Graph:
                 from . import diff  # noqa: F401  (installs the recorder)
             recorder = _RECORD_FACTORY(self) if record else None
             accesses, groups = self._leaves()
-            check_conflicts(accesses, groups)
-            be = self._resolve_backend(accesses, backend)
-            edges = tuple(derive_edges(accesses, groups))
+            check_conflicts(accesses, groups, self._waited[0])
+            for inner in _inner_groups(self._nodes):    # groups inside conditional and loop bodies
+                sub = Graph()
+                sub._nodes = [inner]
+                check_conflicts(*sub._leaves(), sub._waited[0])
+            be, host = self._resolve_backend(accesses, backend)
+            edges = tuple(derive_edges(accesses, groups, self._waited[1]))
             if recorder is not None:
                 recorder.attach(accesses)
             before = recorder.before if recorder else (lambda stage: ())
-            ctx = LowerCtx(be)
+            ctx = LowerCtx(be, host=host) if host else LowerCtx(be)
             if be == "gpu":
                 import cupy
 
                 self._device = _plane_device(accesses, device)
                 pin.enter_context(_on_device(self._device))
+                self._steps, self._host_nodes = [], []
+                pin.callback(_STEP_SINK.reset, _STEP_SINK.set(self._steps))
+                if host:
+                    pin.callback(_transfer.HOST_SINK.reset, _transfer.HOST_SINK.set(self._host_nodes))
 
                 from .pipeline import GraphPipeline
 
@@ -622,12 +826,13 @@ class Graph:
                     stages += [("step", copy) for copy in before(i)]
                     res = ctx.lower(node)
                     if isinstance(res, ForkStage):
-                        stages.append(("group", res.members))
+                        stages.append(("group", res.members, res.syncs))
                     else:
                         stages.append(("step", res))
                 if not segments:
                     pipe = GraphPipeline()
-                    pipe._capture_stages(stages)      # bumps `captures` once
+                    with _pinned_hint(self._nodes) if host is not None else contextlib.nullcontext():
+                        pipe._capture_stages(stages)      # bumps `captures` once
                     self._pipe = pipe
                 else:
                     if stages:
@@ -651,8 +856,121 @@ class Graph:
             self._record_on = bool(record)
             self._recorder = recorder
             self._built = True
+            self._built_with = dict(backend=backend, record=record, dispatch=dispatch, device=device)
             _counters.bump("graph_builds")
         return self
+
+    def _rebind(self, mapping) -> Graph:
+        """Swap arrays under a built graph: ``mapping`` is ``(old array, new
+        array)`` pairs (arrays do not hash, so not a dict; same shape, dtype
+        and device). Every plan launch, copy source and guard cell holding an
+        old array is rebound in place; on the GPU the instantiated graph's
+        kernel, memcpy and conditional-setter nodes are patched in one call
+        each, with no re-capture. What cannot be patched (a node of your own
+        code, a copy's destination, a plan of several kernels) rebuilds the
+        graph, with one ``PerformanceWarning`` per graph."""
+        self._need_built("_rebind")
+        if self._recorder is not None:
+            raise ValueError("eagle.Graph.bind: a record=True graph is bound by the builder again")
+        patch = self._patch or self._patch_index()
+        todo, rebuild = [], False
+        for old, new in mapping:
+            if (old.shape, old.dtype, _array_backend(old)) != (new.shape, new.dtype, _array_backend(new)) \
+                    or (_array_backend(new) == "gpu" and old.device.id != new.device.id):
+                raise ValueError(
+                    f"eagle.Graph.bind: the new array is {new.shape} {new.dtype} where the graph was "
+                    f"built over {old.shape} {old.dtype}; call the builder again")
+            if id(old) in patch.own:
+                raise ValueError("eagle.Graph.bind: a node runs your own code over an array to swap; "
+                                 "call the builder again")
+            todo.append((old, new, patch.index.pop(id(old), ())))
+        bounds, wrappers = {}, {}
+        for old, new, uses in todo:
+            patch.index[id(new)] = uses
+            for kind, obj, name in uses:
+                if kind == "plan":
+                    swap = getattr(obj, "_swap", None)
+                    swap(name, new) if swap else obj.rebind(**{name: new})
+                    bounds[id(obj)] = obj
+                elif kind == "src":
+                    obj.payload[0] = new
+                elif kind == "dst":
+                    obj.payload[1] = new
+                    rebuild = True
+                else:
+                    setattr(obj[0], obj[1], new)
+                    wrappers[id(name)] = name
+        if self._backend == "gpu":
+            self._patch_or_rebuild(bounds.values(), todo, wrappers.values(), rebuild)
+        return self
+
+    def _patch_index(self):
+        """Where each array of the graph is used (built once per build): plan
+        planes, copy ends, guard cells, and what only your own code holds."""
+        from ._graph_kinds import _Patch
+
+        patch = self._patch = _Patch()
+        for node in _walk(self._nodes):
+            if node.kind == "launch":
+                for name, arr in node.payload._planes.items():
+                    if hasattr(arr, "shape"):
+                        patch.index.setdefault(id(arr), []).append(("plan", node.payload, name))
+            elif node.kind == "copy":
+                patch.index.setdefault(id(node.payload[0]), []).append(("src", node, None))
+                patch.index.setdefault(id(node.payload[1]), []).append(("dst", node, None))
+            elif node.kind in ("skippable", "repeat_while", "branches"):
+                wrapper = node.payload.wrapper
+                guard = wrapper.guard
+                for obj, attr in (((guard, "count_arr"), (guard, "baseline_arr")) if guard is not None else ()) + (
+                        (wrapper, "limit"), (wrapper, "brk")):
+                    arr = getattr(obj, attr, None)
+                    if arr is not None:
+                        patch.index.setdefault(id(arr), []).append(("attr", (obj, attr), wrapper))
+            elif node.kind not in ("group", "sequence"):
+                for _n, arr, _r in (*get_node_kind(node.kind).reads(node), *get_node_kind(node.kind).writes(node)):
+                    patch.own.add(id(arr))
+        return patch
+
+    def _patch_or_rebuild(self, bounds, todo, wrappers, rebuild):
+        """Patch the instantiated graph's nodes after a rebind (one native
+        call per node kind); re-capture it when a node cannot be patched."""
+        steps = self._patch.steps
+        pipe, launcher = self._pipe, getattr(self._pipe, "_launcher", None)
+        try:
+            if rebuild or pipe is None or launcher is None:
+                raise LookupError
+            if steps is None:
+                steps = self._patch.steps = {id(s.key): s for s in self._steps}
+            nodes, params = [], []
+            for b in bounds:
+                step_nodes = steps[id(b)].nodes
+                if len(step_nodes) != 1:
+                    raise LookupError
+                nodes.append(step_nodes[0])
+                params.append(b._addrs)
+            copies = [steps[id(u[1].payload)] for _o, _n, uses in todo for u in uses if u[0] == "src"]
+            if any(len(s.nodes) != 1 for s in copies):
+                raise LookupError
+            with _on_device(self._device):
+                launcher.set_kernel_params_many(nodes, params)
+                launcher.set_memcpy_source_many([s.nodes[0] for s in copies],
+                                                [_address(s.key[0])[0] for s in copies])
+                for wrapper in wrappers:
+                    pipe._patch_setters(launcher, wrapper)
+        except (LookupError, ValueError, RuntimeError, KeyError, AttributeError):
+            self._rebuild()
+
+    def _rebuild(self):
+        if not self._rebuilt:
+            from ._dispatch_door import PerformanceWarning
+
+            self._rebuilt = True
+            warnings.warn("eagle.Graph.bind: the swap could not be patched into the instantiated "
+                          "graph, so it was captured again", PerformanceWarning, stacklevel=4)
+        keep = self._built_with
+        self._patch = None
+        self._built, self._pipe, self._segments, self._tail_ev = False, None, None, None
+        self.build(**keep)
 
     # -- run -- #
     def _need_built(self, method):
@@ -685,6 +1003,8 @@ class Graph:
                 for _ in range(n):
                     for step in self._cpu_steps:
                         step()
+            if self._host_nodes:
+                _transfer.raise_host_errors(self._host_nodes)
             if self._recorder is not None:
                 self._record = self._recorder.finish()
         return self
@@ -733,7 +1053,8 @@ class Graph:
         return self
 
     def synchronize(self) -> Graph:
-        """Block until enqueued runs complete (CPU: a no-op)."""
+        """Block until enqueued runs complete (CPU: a no-op). An exception a host
+        node raised in those runs is raised here."""
         self._need_built("synchronize")
         if self._backend == "gpu":
             with _on_device(self._device):
@@ -741,6 +1062,8 @@ class Graph:
                     self._pipe.synchronize()
                 else:
                     self._sync_tail()
+            if self._host_nodes:
+                _transfer.raise_host_errors(self._host_nodes)
         return self
 
     def _sync_tail(self):
@@ -785,7 +1108,7 @@ class Graph:
         if self._built:
             return self._edges
         leaves, groups = self._leaves()
-        return tuple(derive_edges(leaves, groups))
+        return tuple(derive_edges(leaves, groups, self._waited[1]))
 
     @property
     def schedule(self) -> tuple:
@@ -837,6 +1160,56 @@ class Graph:
         return (f"<eagle.Graph {len(self._leaves()[0])} nodes, {len(self._nodes)} stages, "
                 f"{self._backend if self._built else 'unbuilt'}>")
 
+    # -- the builder surface (eagle._builder) -- #
+    @classmethod
+    def builder(cls, fn):
+        """Decorate ``fn``: a parameter annotated ``eagle.Graph`` makes a
+        block that appends to the graph it is given; none makes a builder
+        that makes, records into and returns its Graph (calling it on arrays
+        builds that Graph; nothing runs). Control flow on 1-cell uint32 arrays
+        becomes device control flow."""
+        from ._builder import make_builder
+
+        return make_builder(fn)
+
+    def parallel(self):
+        """``with g.parallel() as p:`` opens a fork in the builder; leaving
+        the ``with`` joins. ``p.branch()`` yields a branch handle."""
+        from ._builder import parallel
+
+        return parallel(self)
+
+    def wait(self, *planes):
+        raise RuntimeError("eagle.Graph.wait: only inside a parallel region, on a branch handle")
+
+    @property
+    def result(self):
+        """The arrays this graph returns: set while building (an array, or a
+        tuple / list / dict of arrays), read-only after."""
+        return self._bld.result
+
+    @result.setter
+    def result(self, tree):
+        from ._builder import tree_leaves
+
+        if self._built:
+            raise RuntimeError("eagle.Graph.result: declared while building only")
+        tree_leaves(tree)
+        self._bld.result = tree
+
+    def __call__(self, n: int = 1, /):
+        """Replay ``n`` times and wait; returns :attr:`result` (``None``
+        without one)."""
+        self.launch(n)
+        return self._bld.result
+
+    def bind(self, **planes) -> Graph:
+        """New arrays for the builder's parameters, by name, in place: same
+        shape, dtype and device, no copy, no rebuild."""
+        from ._builder import bind
+
+        return bind(self, planes)
+
 
 def _live_checks(accesses):
     """The per-launch checks of a built graph: each node kind's ``check``
@@ -855,6 +1228,8 @@ def _live_checks(accesses):
 
 
 # the built-in kinds register themselves on import; Graph needs a few of their helpers
-from ._graph_kinds import _Child, _Cond, _Late, _is_bound, child, opaque  # noqa: E402,F401
+from ._graph_kinds import (_STEP_SINK, _Cond, _copy, _Late, _is_bound, _wait_links,  # noqa: E402
+                           child, opaque)  # noqa: E402,F401
+from . import _transfer  # noqa: E402
 from .interop import _wrap_external_stream  # noqa: E402
 from .pipeline import refuse_in_capture  # noqa: E402

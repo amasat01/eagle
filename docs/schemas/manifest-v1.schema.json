@@ -58,8 +58,8 @@
           "description": "Sidecar filename (<id>.json), relative to the manifest directory."
         },
         "format": {
-          "enum": ["ptx", "cubin", "fatbin"],
-          "description": "Artifact format: arch-portable PTX, single-arch cubin, or multi-arch fatbin."
+          "enum": ["ptx", "cubin", "fatbin", "host"],
+          "description": "Artifact format: arch-portable PTX, single-arch cubin, multi-arch fatbin, or host (a host shared library)."
         }
       }
     }

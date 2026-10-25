@@ -34,6 +34,7 @@ Docs: `cd docs && make strict`, then `make nbcheck` for notebooks and `make link
 devguide/dev_guide
 devguide/graph_capture_replay
 devguide/docs_guide
+devguide/add_an_execution_backend
 ```
 
-Adding a thing: the [Developer guide](devguide/dev_guide). Writing a notebook or a docstring: the [Documentation guide](devguide/docs_guide). A page about how capture and replay work: [Capture and replay](devguide/graph_capture_replay).
+Adding a thing: the [Developer guide](devguide/dev_guide). Writing a notebook or a docstring: the [Documentation guide](devguide/docs_guide). A page about how capture and replay work: [Capture and replay](devguide/graph_capture_replay). A new device kind: [Add an execution backend](devguide/add_an_execution_backend).

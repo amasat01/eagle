@@ -30,20 +30,10 @@ from contextlib import contextmanager
 from .. import _core, _counters
 from .._active_set import _address, _overlaps, _reordering_snapshot
 from .._busy import Busy
+from ..interop import _xp_of as xp_of
 from ..roles import STATE_ROLES
 
 __all__ = ["Record"]
-
-
-def xp_of(arr):
-    """numpy or cupy, whichever owns ``arr``."""
-    if type(arr).__module__.split(".")[0] == "cupy":
-        import cupy
-
-        return cupy
-    import numpy
-
-    return numpy
 
 
 class Planes:

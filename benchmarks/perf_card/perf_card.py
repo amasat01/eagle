@@ -168,7 +168,6 @@ card's test requires both).
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
 import math
 import os
@@ -1436,20 +1435,10 @@ ARM_LIBRARY = {"torch_masked": "torch", "torch_graphed": "torch",
                "torch_compiled": "torch", "jax_vmap": "jax", "warp_kernel": "warp"}
 
 
-def _lib_installed(lib):
-    """Whether ``lib`` can be imported here, decided WITHOUT importing it
-    (``find_spec``); a library blocked through ``sys.modules[lib] = None``
-    counts as not installed."""
-    try:
-        return importlib.util.find_spec(lib) is not None
-    except (ImportError, ValueError):
-        return False
-
-
 def _triton_ok():
     """(True, None) where torch.compile's Inductor GPU backend can run
     (Triton needs compute capability >= 7.0), else (False, reason)."""
-    if not _lib_installed("torch"):
+    if not cc.lib_installed("torch"):
         return False, "torch not installed in this profile"
     import torch
 
@@ -1481,7 +1470,7 @@ def _optional_arms():
     does not run): a missing library -- "<lib> not installed in this profile"
     -- or, for torch_compiled, a GPU Triton cannot target."""
     not_run = {arm: f"{lib} not installed in this profile"
-               for arm, lib in ARM_LIBRARY.items() if not _lib_installed(lib)}
+               for arm, lib in ARM_LIBRARY.items() if not cc.lib_installed(lib)}
     ok, why = _triton_ok()
     if not ok and "torch_compiled" not in not_run:
         not_run["torch_compiled"] = why
@@ -1491,7 +1480,7 @@ def _optional_arms():
 def _fp32_arms():
     """The FP32 pass arms this machine can run: the pass compares eagle with
     Warp and JAX, so it is skipped (empty) unless all three are installed."""
-    missing = [a for a in FP32_ARMS if a in ARM_LIBRARY and not _lib_installed(ARM_LIBRARY[a])]
+    missing = [a for a in FP32_ARMS if a in ARM_LIBRARY and not cc.lib_installed(ARM_LIBRARY[a])]
     return () if missing else FP32_ARMS
 
 
@@ -2832,6 +2821,9 @@ def _library_counters():
     return out
 
 
+_touch_device = cc.touch_device
+
+
 def _probe_arm(arm, n, max_steps, jax_compiled=None):
     """One arm for a probe process (an eagle arm deploys its kernel here)."""
     if arm == "cpu_openmp":
@@ -2847,15 +2839,6 @@ def _probe_once(a, inp):
     a["run"]()
     cc.probe_sync()
     return a["download"]()
-
-
-def _touch_device():
-    """Create the CUDA context with one tiny device operation, so a baseline
-    read right after it sees the context and nothing else."""
-    import cupy as cp
-
-    cp.zeros(1, dtype=cp.uint8).sum()
-    cp.cuda.Device().synchronize()
 
 
 def _memory_probe(arm, distribution, max_steps, n, bus_id):

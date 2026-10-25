@@ -12,10 +12,11 @@ import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from . import _layout, _split
+from . import _cell_rows, _lane_bind, _layout, _recording, _split
 from . import exec as eexec
 from ._plan_binding import BoundPlan
-from ._plan_planes import residency
+from ._plan_planes import _output_names, residency
+from .roles import OUTPUT_ROLES
 
 if TYPE_CHECKING:
     from .plan import Plan
@@ -31,13 +32,15 @@ class AutoPlan:
     delegate to the selected plan. A default deploy with a usable GPU returns
     with the device side built and the host side still building."""
 
-    __slots__ = ("plugin", "plan_kw", "_plans", "_host")
+    __slots__ = ("plugin", "plan_kw", "kernel", "_plans", "_host", "_call")
 
-    def __init__(self, plugin, plan_kw: dict, host=None):
+    def __init__(self, plugin, plan_kw: dict, host=None, kernel=None):
         self.plugin = plugin
         self.plan_kw = dict(plan_kw)
+        self.kernel = kernel  # the hawk kernel it was built from (None: a prebuilt plugin)
         self._plans = {}
         self._host = host  # (_HostSide, index) when the host side builds in the background
+        self._call = None  # the call's signature, built on the first call
 
     def __repr__(self) -> str:
         targets = list(_exec_targets(self.plugin))
@@ -98,6 +101,113 @@ class AutoPlan:
         """:meth:`Plan.bind` on the plan :meth:`select` picks for ``planes``."""
         return self.select(planes).bind(**planes)
 
+    def _signature(self) -> tuple:
+        """``(Signature, required names, prior reads, kernel name, all names,
+        required set)``
+        of a call, bound as :func:`eagle.simulate` binds a kernel's own
+        arguments."""
+        from ._simulate import _prior_reads, _signature
+        from ._until_done import _RESERVED, _kernel_name
+
+        arg_spec = self.plugin.arg_spec
+        rows = _cell_rows.row_planes(self.plugin) | frozenset(_cell_rows.companions_of(self.plugin))
+        decl = {nm: ("mutable" if role in OUTPUT_ROLES else role,)
+                for role, nm in arg_spec
+                if role not in ("nsamples", "terminated") and nm not in _RESERVED
+                and nm not in rows}
+        kernel = self.kernel
+        order = [nm for nm in (kernel.planes if kernel is not None else decl) if nm in decl]
+        prior = _prior_reads([kernel])
+        name = kernel.name if kernel is not None else _kernel_name(self.plugin)
+        sig, required = _signature(decl, order, prior)
+        return sig, tuple(required), prior, name, frozenset(order), frozenset(required)
+
+    def bind_args(self, args, kw) -> dict:
+        """``{plane: value}`` for a call ``k(*args, **kw)``: positional in the
+        kernel's own order and/or by name, an un-prior-read Mutable left out
+        when omitted. An omittable Mutable or a reduction's cell may also be
+        passed by position, after the required arguments. A compensated sum's
+        companion is eagle's and takes no position; a caller binds its own by
+        name only."""
+        call = self._call
+        if call is None:
+            call = self._call = self._signature()
+        kernel = self.kernel
+        if kernel is not None and (len(args) > len(call[1]) or kw.keys() - call[4]):
+            comps = _cell_rows.companions_of(self.plugin)
+            order = [nm for nm, decl in kernel.planes.items()   # the Grid declaration is no plane
+                     if not getattr(decl, "grid", None) and nm not in comps]
+            if len(args) > len(order):
+                raise ValueError(f"{call[3]}() too many positional arguments")
+            given = dict(zip(order, args))
+            if given.keys() & kw.keys():
+                raise ValueError(f"{call[3]}() got multiple values for argument {sorted(given.keys() & kw.keys())[0]!r}")
+            given.update(kw)
+            cells = {nm: given.pop(nm) for nm in list(given)
+                     if nm in order and nm not in call[4] or nm in comps}
+            return {**self._bind_args((), given, call), **cells}
+        return self._bind_args(args, kw, call)
+
+    def _bind_args(self, args, kw, call) -> dict:
+        sig, required, prior, name, names, needed = call
+        if self.kernel is not None or not args:     # a bad call takes the slow path
+            if not kw and len(args) == len(required):
+                return dict(zip(required, args))
+            if len(args) <= len(required):
+                bound = dict(zip(required, args))
+                count = len(bound) + len(kw)
+                bound.update(kw)
+                if len(bound) == count and kw.keys() <= names and bound.keys() >= needed:
+                    return bound
+        if args and self.kernel is None:
+            raise ValueError(f"{name}() was built from a prebuilt plugin, which has no call "
+                             "signature of its own; pass its planes by name")
+        from ._simulate import _bind
+
+        try:
+            return _bind(name, sig, required, prior, args, kw)
+        except ValueError as exc:       # the call's own words, not the door's
+            raise ValueError(str(exc).removeprefix("eagle.simulate: ")) from None
+
+    def returned(self, planes: dict):
+        """The kernel's ``returns`` tree filled from ``planes`` (``{slot name:
+        value}``); ``planes`` itself when the kernel declares none."""
+        tree = getattr(self.kernel, "returns", None)
+        return planes if tree is None else _fill(tree, planes)
+
+    def __call__(self, /, *args, **kw):
+        """Run the kernel once, as a call to it: ``plan(x, a, b)`` binds
+        like :func:`eagle.simulate` binds a kernel's arguments, runs one
+        launch where the arrays live (:meth:`select`), and returns the
+        kernel's ``returns`` tree, else what :meth:`Plan.run` returns. A
+        Mutable argument is the caller's array, written in place. Under an
+        active recorder (:mod:`eagle._recording`) the call is handed to it
+        instead of launching."""
+        recorder = _recording.current()
+        if recorder is not None:
+            return recorder.record_call(self, args, kw)
+        kw, extent = _lane_bind.take_extent(self.plugin, kw)
+        bound = self.bind_args(args, kw)
+        if extent is not None:
+            bound[_lane_bind.declared_axes(self.plugin)[0][0]] = extent
+        result = self.select(bound).run(**bound)
+        if getattr(self.kernel, "returns", None) is None:
+            return result
+        if not isinstance(result, dict):
+            (out,) = _output_names(self.plugin.arg_spec)
+            result = {out: result}
+        return self.returned(result)
+
+
+def _fill(tree, planes):
+    """``tree`` (nested tuples, lists and dicts of slot names) with each name
+    replaced by its value in ``planes``."""
+    if isinstance(tree, str):
+        return planes[tree]
+    if isinstance(tree, dict):
+        return {k: _fill(v, planes) for k, v in tree.items()}
+    return type(tree)(_fill(v, planes) for v in tree)
+
 
 #: :func:`auto`'s two sides: ``(entry attribute, structure)``.
 _AUTO_TARGETS = {"host": ("host_entry", eexec.HostTeam),
@@ -125,8 +235,7 @@ def auto(plugin, *, targets=None, cache_dir=None, scalar_type=None,
     cache under ``cache_dir`` (``None``: hawk's default); a repeat call
     compiles nothing. ``targets`` (``None``: both sides when a GPU is
     usable -- the call returns with the device built, the host still
-    building beside it -- else
-    ``("host",)``), ``cache_dir`` and ``scalar_type`` are refused
+    building beside it -- else the host alone), ``cache_dir`` and ``scalar_type`` are refused
     for an already-built plugin. ``scalar_type`` is the precision hawk builds
     in: ``"float64"`` (``None``, the default) or ``"float32"``; the planes
     passed at run time must match it.
@@ -157,11 +266,11 @@ def auto(plugin, *, targets=None, cache_dir=None, scalar_type=None,
                     f"item must be a hawk kernel, but item {i} is a "
                     f"{type(k).__name__}; pass a built plugin on its own: "
                     "eagle.plan.auto(plugin)")
-        return tuple(AutoPlan(p, plan_kw, host)
-                     for p, host in _deploy_hawk(kernels, targets, cache_dir, scalar_type))
+        return tuple(AutoPlan(p, plan_kw, host, k) for k, (p, host)
+                     in zip(kernels, _deploy_hawk(kernels, targets, cache_dir, scalar_type)))
     if _is_hawk_kernel(plugin):
         p, host = _deploy_hawk([plugin], targets, cache_dir, scalar_type)[0]
-        return AutoPlan(p, plan_kw, host)
+        return AutoPlan(p, plan_kw, host, plugin)
     for key, value in (("targets", targets), ("cache_dir", cache_dir),
                        ("scalar_type", scalar_type)):
         if value is not None:
@@ -176,14 +285,14 @@ def _deploy_hawk(kernels, targets, cache_dir, scalar_type) -> list:
 
     With ``targets=None`` and a usable GPU the call returns once the device
     side is built, the host side building on beside it (:class:`_HostSide`):
-    a GPU run never waits for the host compiler. Any build including ``cuda``
-    compiles the loop's own small device kernels on a second thread
+    a GPU run never waits for the host compiler. Any build including a device
+    target compiles the loop's own small device kernels on a second thread
     meanwhile (:func:`eagle._until_done._warm_device_kernels`)."""
     _hawk_api()  # the refusal naming hawk comes first
     host = None
     if targets is None:
         targets = _eager_targets()
-        if targets == ("cuda",):
+        if targets == _targets_of(_DEVICE):
             host = _HostSide(kernels, cache_dir, scalar_type)
     warm = _warm_in_background(tuple(targets))
     try:
@@ -205,7 +314,7 @@ class _HostSide:
     __slots__ = ("_args", "_plugins", "_error", "_thread", "_pid")
 
     def __init__(self, kernels, cache_dir, scalar_type):
-        self._args = (list(kernels), ("host",), cache_dir, scalar_type)
+        self._args = (list(kernels), _targets_of(_HOST), cache_dir, scalar_type)
         self._plugins = self._error = None
         self._pid = os.getpid()
         self._thread = threading.Thread(target=self._build, name="eagle-host-build")
@@ -234,9 +343,9 @@ _WARMED: set = set()
 
 def _warm_in_background(targets):
     """Start :func:`eagle._until_done._warm_device_kernels` on its own thread
-    for a build including ``cuda`` (once per device per process); the
+    for a build including a device target (once per device per process); the
     thread, or ``None``. A failure there only loses the head start."""
-    if "cuda" not in targets:
+    if not _has_entry(targets, _DEVICE):
         return None
     try:
         import cupy
@@ -273,14 +382,14 @@ def _wants_fast_entries(kernels, targets) -> bool:
     (``<name>_range``, and an active-set kernel's ``<name>_persist``, behind
     ``HAWK_FAST_ENTRIES=1``) -- ANY kernel here automatic (``.one_step``
     set, :mod:`hawk.trace.steps`'s own ``auto`` marker), on a build that
-    includes ``cuda`` (the entries are device-only). One flag for the
+    includes a device target (the entries are device-only). One flag for the
     whole bundle call, matching :func:`eagle._until_done._build_auto`'s
     own ONE-place eligibility: this is the single spot that decides eagle
     builds these kernels with the define by DEFAULT, so the ordinary
     deploy/simulate path gets the fast entries without the caller asking.
     A non-automatic kernel is unaffected either way -- the define gates
     code its own emission never reaches."""
-    if "cuda" not in targets:
+    if not _has_entry(targets, _DEVICE):
         return False
     return any(getattr(k, "one_step", None) is not None for k in kernels)
 
@@ -351,30 +460,47 @@ def _hawk_plugins(kernels, targets, cache_dir, scalar_type=None) -> tuple:
     return tuple(by_name[k.name] for k in kernels)
 
 
+#: The two ways eagle enters a built kernel: hawk's rows name theirs.
+_HOST, _DEVICE = "host", "device"
+
+
+def _targets_of(entry: str) -> tuple:
+    """The ids of hawk's target rows eagle enters as ``entry``."""
+    from hawk.targets import TARGETS
+
+    return tuple(t for t, row in TARGETS.items() if row.entry == entry)
+
+
+def _has_entry(targets, entry: str) -> bool:
+    """Whether any of the target ids ``targets`` is entered as ``entry``."""
+    return bool(set(targets) & set(_targets_of(entry)))
+
+
 def _default_targets() -> tuple:
-    """``("host", "cuda")`` with a usable device and compiler, else ``("host",)``."""
+    """Every host row, plus every device row with a usable device and compiler."""
+    host = _targets_of(_HOST)
     try:
         import cupy
 
         if cupy.cuda.runtime.getDeviceCount() < 1:
-            return ("host",)
+            return host
     except Exception:
-        return ("host",)
+        return host
     from hawk.compile import device_compiler_kind, nvrtc
 
-    if device_compiler_kind() == "nvcc":
-        return ("host", "cuda")
-    try:
-        nvrtc.nvrtc_version()
-    except Exception:
-        return ("host",)
-    return ("host", "cuda")
+    if device_compiler_kind() != "nvcc":
+        try:
+            nvrtc.nvrtc_version()
+        except Exception:
+            return host
+    return host + _targets_of(_DEVICE)
 
 
 def _eager_targets() -> tuple:
     """What a default deploy waits for: the device alone when a GPU is usable
     (the host builds in the background, :class:`_HostSide`), else the host."""
-    return ("cuda",) if "cuda" in _default_targets() else ("host",)
+    device = _targets_of(_DEVICE)
+    return device if _has_entry(_default_targets(), _DEVICE) else _targets_of(_HOST)
 
 
 def _bundle_key(kernels, targets, defines=(), mode="float64") -> str:
@@ -385,12 +511,17 @@ def _bundle_key(kernels, targets, defines=(), mode="float64") -> str:
     kernel, so it is folded in here explicitly -- the same reason
     ``host_profile``/``opt_level``/the device arch are below: two requests
     that build different bytes never share one folder."""
-    h = hashlib.sha256(b"eagle.plan.auto/2\n")
+    from hawk.artifact.unit_cache import declaration_digest
+
+    h = hashlib.sha256(b"eagle.plan.auto/3\n")
     for k in kernels:
         sinks = k.sinks
         tag = tuple(repr(getattr(sinks, a, None))
                     for a in ("primal", "kind", "wrt", "primal_unit"))
-        h.update(json.dumps([k.name, str(k.walk.digest), repr(k.kind), tag]).encode())
+        # The declarations (plane sizes, Grid extents) never reach the walk, so two
+        # sizes of one kernel would otherwise share, and race on, one folder.
+        h.update(json.dumps([k.name, str(k.walk.digest), declaration_digest(k),
+                             repr(k.kind), tag]).encode())
     h.update(json.dumps(list(targets)).encode())
     h.update(json.dumps(list(defines)).encode())
     if mode != "float64":  # float64 keys stay as before, so existing caches still hit
@@ -406,10 +537,10 @@ def _bundle_key(kernels, targets, defines=(), mode="float64") -> str:
     h.update(opt_level().encode())
     # And again for the resolved device arch (hawk.artifact.arch; this call
     # passes no device_arch= of its own, so it follows the running GPU) --
-    # called only when "cuda" is actually a target, same gate as hawk's own
+    # called only when a device row is actually a target, same gate as hawk's own
     # unit key, so a host-only request never pays for the device probe and
     # two different GPUs' default builds never share one folder.
-    if "cuda" in targets:
+    if _has_entry(targets, _DEVICE):
         from hawk.artifact import arch as _hawk_arch
 
         h.update(_hawk_arch().encode())

@@ -32,22 +32,24 @@ def _tier(node) -> str:
 
 
 def rows(g, drawing=True):
-    """``(nodes, edges, frames)`` as ``_core.GraphDescription`` takes them.
-    ``drawing=False`` is the reverse pass's copy: labels without tier tags and
+    """``(nodes, edges, frames)`` as ``_core.GraphDescription`` takes them: a
+    ``"stage"`` frame per top-level add-stage (the row the layout gives its
+    nodes), the conditionals inside them. ``drawing=False`` is the reverse pass's copy: labels without tier tags and
     no node opaque (eagle.diff has checked each has a vjp)."""
     from ._graph_kinds import OWN_CODE_KINDS
 
     leaves, _groups = g._leaves()
     stage_of = _stage_of_leaves(g)
     schedule = g._schedule if g._built else ()
-    nodes, frames = [], []
+    nodes = []
+    frames = [("stage", f"stage {k}", -1) for k in range(len(g._nodes))]   # one row each
     for i, leaf in enumerate(leaves):
         n = leaf.node
-        shown, frame = n, -1
+        shown, frame = n, stage_of[i]
         label = n.label
         if n.kind in _COND_FRAMES:
             kind, text = _COND_FRAMES[n.kind]
-            frames.append((kind, text(n.payload), -1))
+            frames.append((kind, text(n.payload), stage_of[i]))
             frame = len(frames) - 1
             shown = n.payload.child
             label = n.name or shown.label
@@ -87,8 +89,10 @@ def text(g) -> str:
 def _draw_frames(ax, frames, nodes, pos, half):
     from matplotlib.patches import Rectangle
 
-    for fi, (_kind, label, _parent) in enumerate(frames):
+    for fi, (kind, label, _parent) in enumerate(frames):
         members = [i for i, n in enumerate(nodes) if n[3] == fi]
+        if kind == "stage":         # a row, tagged in the gutter
+            continue
         x0 = min(pos[i][0] - half[i][0] for i in members) - 0.3
         x1 = max(pos[i][0] + half[i][0] for i in members) + 0.3
         y0 = min(pos[i][1] - half[i][1] for i in members) - 0.3
@@ -127,11 +131,16 @@ def _draw_edges(ax, edges, pos, half, labels):
                     ha="center", va="bottom", bbox=dict(facecolor="white", edgecolor="none", pad=0.5))
 
 
-def _draw_schedule(ax, layer, nodes, left, step):
+def _draw_schedule(ax, layer, nodes, frames, left, step):
+    """Tag the first row of each stage in the gutter (a stage may span rows)."""
+    stage = [n[3] if frames[n[3]][0] == "stage" else frames[n[3]][2] for n in nodes]
     for lv in sorted(set(layer)):
-        tags = {nodes[i][2] for i in range(len(nodes)) if layer[i] == lv} - {""}
+        here = [i for i in range(len(nodes)) if layer[i] == lv]
+        if lv and any(layer[i] == lv - 1 and stage[i] == stage[here[0]] for i in range(len(nodes))):
+            continue
+        tags = {nodes[i][2] for i in here} - {""}
         tag = f"  {tags.pop()}" if len(tags) == 1 else ""
-        ax.text(left, -lv * step, f"stage {lv}{tag}", fontsize=8, color="0.4",
+        ax.text(left, -lv * step, f"stage {stage[here[0]]}{tag}", fontsize=8, color="0.4",
                 ha="right", va="center")
 
 
@@ -159,7 +168,7 @@ def plot(g, ax, edge_labels: bool, show_schedule: bool):
     left = min(p[0] - h[0] for p, h in zip(pos, half))
     right = max(p[0] + h[0] for p, h in zip(pos, half))
     if show_schedule:
-        _draw_schedule(ax, layer, nodes, left - 0.5, step)
+        _draw_schedule(ax, layer, nodes, frames, left - 0.5, step)
     ys = [p[1] for p in pos]
     ax.set_xlim(left - (3.4 if show_schedule else 0.8), right + 0.8)
     ax.set_ylim(min(ys) - 1.1, max(ys) + 1.1)

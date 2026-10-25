@@ -60,7 +60,7 @@ TEST_F(NativeNodeTest, ChainReusesScratchAndReducesCorrectly)
     const idx_t nA
         = g.addNative(RN(&ra, a.deviceView().as_const(), n, 0.0, stream), {});
     g.addNative(RN(&rb, b.deviceView().as_const(), n, 0.0, stream), { nA });
-    g.finalizeNatives();
+    g.finalize();
 
     // The whole point of the graph-level arena: B reuses A's dead scratch.
     ASSERT_EQ(g.scratchArena().slotCount(), (idx_t)1);
@@ -93,7 +93,7 @@ TEST_F(NativeNodeTest, IndependentReductionsDoNotShareScratch)
     eagle::cuda::Graph g;
     g.addNative(RN(&ra, a.deviceView().as_const(), n, 0.0, stream), {});
     g.addNative(RN(&rb, b.deviceView().as_const(), n, 0.0, stream), {});
-    g.finalizeNatives();
+    g.finalize();
 
     ASSERT_EQ(g.scratchArena().slotCount(), (idx_t)2);
 
@@ -127,7 +127,7 @@ TEST_F(NativeNodeTest, MatchesFreeBuilder)
     double rn = 0.0;
     eagle::cuda::Graph g;
     g.addNative(RN(&rn, a.deviceView().as_const(), n, 0.0, stream), {});
-    g.finalizeNatives();
+    g.finalize();
     eagle::cuda::Launcher launcher = g.launcher();
     launcher.launch();
     launcher.synchronize();
@@ -168,7 +168,7 @@ TEST_F(NativeNodeTest, ScanChainReusesScratchAndScansCorrectly)
     const idx_t nA
         = g.addNative(SN(ina.deviceView().as_const(), outa.deviceView(), stream), {});
     g.addNative(SN(inb.deviceView().as_const(), outb.deviceView(), stream), { nA });
-    g.finalizeNatives();
+    g.finalize();
 
     // Chain (B depends on A) reuses A's BLOCKSUMS buffer: one slot, not two.
     ASSERT_EQ(g.scratchArena().slotCount(), (idx_t)1);
@@ -234,7 +234,7 @@ TEST_F(NativeNodeTest, FilteringSliceChainReusesScratchAndCompactsCorrectly)
         FSN(sliceA.deviceRef(), predA.deviceView().data(), n, stream), {});
     g.addNative(
         FSN(sliceB.deviceRef(), predB.deviceView().data(), n, stream), { nA });
-    g.finalizeNatives();
+    g.finalize();
 
     // Both compactions share one 3N scanner slot (peak, not sum).
     ASSERT_EQ(g.scratchArena().slotCount(), (idx_t)1);
@@ -276,7 +276,7 @@ TEST_F(NativeNodeTest, HostAndDeviceReductionAgree)
     double rd = 0.0;
     eagle::cuda::Graph g;
     g.addNative(RN(&rd, a.deviceView().as_const(), n, 0.0, stream), {});
-    g.finalizeNatives();
+    g.finalize();
     eagle::cuda::Launcher launcher = g.launcher();
     launcher.launch();
     launcher.synchronize();

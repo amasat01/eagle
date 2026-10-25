@@ -1,0 +1,19 @@
+# Copyright 2026 Alessandro Masat
+# SPDX-License-Identifier: Apache-2.0
+name: Tag the checkout with its version
+description: On a pull request, tag this checkout (fetch-depth 0) with the version its release label gives, so every build reads it from git.
+inputs:
+  path:
+    description: The checkout directory.
+    default: "."
+runs:
+  using: composite
+  steps:
+    - if: github.event_name == 'pull_request'
+      shell: bash
+      working-directory: ${{ inputs.path }}
+      env:
+        PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ' ') }}
+      run: |
+        v=$(python3 tools/next_version.py "$PR_LABELS" 2>/dev/null || true)  # no label or release:none: build untagged (the gate reports a missing label)
+        [ -z "$v" ] || git tag "v$v"

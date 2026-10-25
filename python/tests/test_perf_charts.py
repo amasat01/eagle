@@ -73,7 +73,8 @@ def test_dropping_a_card_adds_a_tab_with_no_code_change(tmp_path):
 def test_readme_svg_names_the_tools_and_the_machine():
     svg = (_REPO / "docs" / "_static" / "perf" / "readme_gpu.svg").read_text()
     assert "<desc" in svg and "eagle.simulate" in svg and "NVIDIA Warp" in svg
-    assert "prefers-color-scheme: dark" in svg
+    dark = (_REPO / "docs" / "_static" / "perf" / "readme_gpu-dark.svg").read_text()
+    assert "prefers-color-scheme" not in svg + dark and "#1a1a19" in dark and "#1a1a19" not in svg
 
 
 def _walls(**arms):

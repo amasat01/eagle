@@ -89,7 +89,6 @@ Reproduce (from the eagle repository root)::
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
 import math
 import os
@@ -147,22 +146,12 @@ ARM_LIBRARY = {"torch_masked": "torch", "torch_graphed": "torch",
                "jax_vmap": "jax", "warp_kernel": "warp"}
 
 
-def _lib_installed(lib):
-    """Whether ``lib`` can be imported here, decided WITHOUT importing it
-    (``find_spec``); a library blocked through ``sys.modules[lib] = None``
-    counts as not installed."""
-    try:
-        return importlib.util.find_spec(lib) is not None
-    except (ImportError, ValueError):
-        return False
-
-
 def _select_arms(requested):
     """(the requested arms this machine runs, in table order, {arm: reason}
     for each requested arm whose library is not installed)."""
     not_run = {a: f"{ARM_LIBRARY[a]} not installed in this profile"
                for a in ARMS if a in requested and a in ARM_LIBRARY
-               and not _lib_installed(ARM_LIBRARY[a])}
+               and not cc.lib_installed(ARM_LIBRARY[a])}
     return tuple(a for a in ARMS if a in requested and a not in not_run), not_run
 EAGLE_GPU_ARMS = ARMS[:5]
 ARM_LABELS = {
@@ -1266,20 +1255,14 @@ _MEMORY_METHOD = (
     "bytes) = N x 72 bytes.")
 
 
+_touch_device = cc.touch_device
+
+
 def _probe_arm(arm, n, compiled=None):
     """One arm for a probe process (an eagle arm deploys its kernel here)."""
     if arm == "jax_vmap":
         return _make_jax_arm(n, compiled)
     return _make_arms(n, (arm,))[arm]
-
-
-def _touch_device():
-    """Create the CUDA context with one tiny device operation, so a baseline
-    read right after it sees the context and nothing else."""
-    import cupy as cp
-
-    cp.zeros(1, dtype=cp.uint8).sum()
-    cp.cuda.Device().synchronize()
 
 
 def _memory_probe(arm, n, bus_id):

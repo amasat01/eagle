@@ -19,6 +19,7 @@ from __future__ import annotations
 from typing import NamedTuple
 
 from . import _core
+from ._active_set import _address
 
 __all__ = ["Edge", "RAW", "WAR", "WAW", "OVERLAP_MAX_WORK", "SHARES_MEMORY_MAX_WORK", "arrays_overlap",
            "check_conflicts", "derive_edges", "plane_ref"]
@@ -51,16 +52,11 @@ class Edge(NamedTuple):
 
 
 def _pointer(arr) -> int:
-    data = getattr(arr, "data", None)
-    ptr = getattr(data, "ptr", None)               # cupy
-    if ptr is not None:
-        return int(ptr)
-    for attr in ("__cuda_array_interface__", "__array_interface__"):
-        iface = getattr(arr, attr, None)
-        if iface is not None:
-            return int(iface["data"][0])
-    raise TypeError(f"eagle.Graph: {type(arr).__name__} exposes no address "
-                    "(expected a numpy or cupy array)")
+    where = _address(arr)
+    if where is None:
+        raise TypeError(f"eagle.Graph: {type(arr).__name__} exposes no address "
+                        "(expected a numpy or cupy array)")
+    return where[0]
 
 
 def plane_ref(name: str, node: int, arr, access: int):
@@ -91,23 +87,29 @@ def _refs(nodes) -> list:
     return refs
 
 
-def derive_edges(nodes, groups=()) -> list:
+def derive_edges(nodes, groups=(), waits=()) -> list:
     """Every hazard edge between nodes, in add order. ``groups`` lists, per
     fork/join group, its branches as lists of node indices; siblings get no
-    edge (their overlap is a conflict, see :func:`check_conflicts`)."""
-    return [Edge(*e) for e in _core.derive_edges(_refs(nodes), [list(g) for g in groups])]
+    edge (their overlap is a conflict, see :func:`check_conflicts`). ``waits``
+    are the intra-group edges of ``wait`` points, as :class:`Edge` rows."""
+    return [*(Edge(*e) for e in _core.derive_edges(_refs(nodes), [list(g) for g in groups])),
+            *waits]
 
 
-def check_conflicts(nodes, groups=()) -> None:
+def check_conflicts(nodes, groups=(), ordered=frozenset()) -> None:
     """Raise ``ValueError`` when two sibling nodes of one fork/join group
     overlap and at least one writes: they may run concurrently, so one
-    writing what the other touches is a race, not an ordering."""
+    writing what the other touches is a race, not an ordering. A pair in
+    ``ordered`` (``(i, j)`` node indices, either way round) is ordered by a
+    ``wait`` and is no race."""
     nodes = list(nodes)
     for a, b, plane_a, plane_b, kind in _core.sibling_conflicts(
             _refs(nodes), [list(g) for g in groups]):
+        if (a, b) in ordered or (b, a) in ordered:
+            continue
         la, lb = nodes[a].label, nodes[b].label
         raise ValueError(
             f"eagle.Graph.build: {la!r} (node {a}) and {lb!r} (node {b}) "
             f"are siblings of one fork/join group but overlap ({kind}): "
             f"{la!r} plane {plane_a!r} and {lb!r} plane {plane_b!r} share "
-            "memory; give each branch its own plane, or order them in one branch")
+            "memory; give each branch its own plane, order them in one branch, or order them with a wait")

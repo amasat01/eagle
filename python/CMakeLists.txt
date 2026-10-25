@@ -31,10 +31,16 @@ project(eagle_python LANGUAGES CXX)
 get_filename_component(_eagle_src "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
 set(_eagle_sdist_include "${CMAKE_CURRENT_SOURCE_DIR}/_sdist_include")
 set(_eagle_from_sdist OFF)
+# The eagle headers' root: the repo, else the sdist's copy (an sdist has no repo above it, even
+# when an installed eagle is named by eagle_DIR; the installed package lacks plugin/).
+set(_eagle_hdr_root "${_eagle_src}")
 if(NOT EXISTS "${_eagle_src}/eagle/cuda/CaptureFork.h"
    AND EXISTS "${_eagle_sdist_include}/eagle/cuda/CaptureFork.h"
    AND NOT DEFINED eagle_DIR)
   set(_eagle_from_sdist ON)
+endif()
+if(NOT EXISTS "${_eagle_src}/eagle/cuda/CaptureFork.h" AND EXISTS "${_eagle_sdist_include}/eagle/cuda/CaptureFork.h")
+  set(_eagle_hdr_root "${_eagle_sdist_include}")
 endif()
 if(_eagle_from_sdist)
   set(_eagle_plugin_default "AUTO")
@@ -95,6 +101,12 @@ elseif(APPLE)
 else()
   set(_eagle_static_runtime "")
   message(WARNING "eagle: no static libstdc++ in this toolchain; linking it dynamically")
+endif()
+# The extensions export only PyInit_*: keep the bundled runtime's symbols out of
+# the dynamic table and drop unreferenced sections, as the plugins already do.
+if(NOT APPLE AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  set(_eagle_ext_compile -ffunction-sections -fdata-sections)
+  set(_eagle_ext_link "LINKER:--exclude-libs,ALL" "LINKER:--gc-sections")
 endif()
 
 # Only the plugin needs the CUDA toolkit; the core is plain C++.
@@ -256,7 +268,7 @@ set(_eagle_no_gnu_unique
 if(_eagle_plugin_mode STREQUAL "BUILD")
   add_library(eagle_cuda SHARED src/plugin/eagle_cuda.cu src/plugin/cuda_driver.cpp)
   target_compile_features(eagle_cuda PRIVATE cxx_std_20)
-  target_include_directories(eagle_cuda PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+  target_include_directories(eagle_cuda PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src" "${_eagle_hdr_root}")
   # Headers only (cuda.h, cudaTypedefs.h, cuda_runtime_api.h); nothing from the
   # toolkit is linked.
   target_include_directories(eagle_cuda SYSTEM PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
@@ -356,13 +368,13 @@ target_compile_features(_core PRIVATE cxx_std_23)
 # aether's own include directories first: an installed eagle's prefix may also
 # hold an (older) aether copy, and the aether this configure resolved must win.
 # the live eagle root ahead of aether's prefix, which may hold an installed (older) eagle copy
-target_include_directories(_core PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src" "${_eagle_src}" ${_aether_incs} ${_eagle_core_incs})
+target_include_directories(_core PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src" "${_eagle_hdr_root}" ${_aether_incs} ${_eagle_core_incs})
 target_compile_definitions(_core PRIVATE EAGLE_CPU_ONLY=1 AETHER_CPP_MODE=1 EAGLE_BLOCKSIZE=256 NDEBUG
   $<$<BOOL:${_eagle_plugin_skipped}>:EAGLE_CORE_BUILT_WITHOUT_CUDA_PLUGIN=1>)
 target_link_libraries(_core PRIVATE OpenMP::OpenMP_CXX ${CMAKE_DL_LIBS})
-target_compile_options(_core PRIVATE ${_eagle_no_gnu_unique} ${_eagle_warn_as_err})
+target_compile_options(_core PRIVATE ${_eagle_no_gnu_unique} ${_eagle_warn_as_err} ${_eagle_ext_compile})
 # libstdc++/libgcc bundled where the toolchain allows (see _eagle_static_runtime).
-target_link_options(_core PRIVATE ${_eagle_static_runtime})
+target_link_options(_core PRIVATE ${_eagle_static_runtime} ${_eagle_ext_link})
 set_target_properties(_core PROPERTIES
   CXX_VISIBILITY_PRESET "hidden"
   POSITION_INDEPENDENT_CODE ON
@@ -391,7 +403,7 @@ install(TARGETS _core LIBRARY DESTINATION eagle)
 add_library(eagle_xla SHARED src/xla/eagle_xla.cpp)
 target_compile_features(eagle_xla PRIVATE cxx_std_23)
 # the host finish is eagle's canonical reduction (eagle/reduce/canonical.h), header only
-target_include_directories(eagle_xla PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src" "${_eagle_src}" ${_aether_incs} ${_eagle_core_incs})
+target_include_directories(eagle_xla PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src" "${_eagle_hdr_root}" ${_aether_incs} ${_eagle_core_incs})
 target_compile_definitions(eagle_xla PRIVATE EAGLE_CPU_ONLY=1 AETHER_CPP_MODE=1 EAGLE_BLOCKSIZE=256 NDEBUG)
 target_include_directories(eagle_xla SYSTEM PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/xla/vendor")
 # one section per function/datum so the linker can drop the static runtime code the handler never calls
@@ -482,7 +494,7 @@ elseif(_eagle_python_mpi STREQUAL "ON" OR _eagle_python_mpi STREQUAL "AUTO")
     nanobind_add_module(_mpi MODULE FREE_THREADED src/eagle_mpi.cpp)
     target_compile_features(_mpi PRIVATE cxx_std_23)
     target_include_directories(_mpi PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src"
-      "${CMAKE_CURRENT_SOURCE_DIR}/.." ${_aether_incs} ${_eagle_core_incs})
+      "${_eagle_hdr_root}" ${_aether_incs} ${_eagle_core_incs})
     # EAGLE_MPI is PRIVATE to this target, exactly as it is on the C++ bed: it is
     # what makes RankPartition.h compile at all, and it must not leak to anything
     # else in the build.
@@ -490,9 +502,9 @@ elseif(_eagle_python_mpi STREQUAL "ON" OR _eagle_python_mpi STREQUAL "AUTO")
       EAGLE_CPU_ONLY=1 AETHER_CPP_MODE=1 EAGLE_BLOCKSIZE=256 NDEBUG
       EAGLE_MPI=1 EAGLE_MPI_LIBRARY="${_eagle_mpi_library}")
     target_link_libraries(_mpi PRIVATE OpenMP::OpenMP_CXX MPI::MPI_CXX ${CMAKE_DL_LIBS})
-    target_compile_options(_mpi PRIVATE ${_eagle_no_gnu_unique} ${_eagle_warn_as_err})
+    target_compile_options(_mpi PRIVATE ${_eagle_no_gnu_unique} ${_eagle_warn_as_err} ${_eagle_ext_compile})
     # The same wheel-portability link flags `_core` carries, for the same reason.
-    target_link_options(_mpi PRIVATE ${_eagle_static_runtime})
+    target_link_options(_mpi PRIVATE ${_eagle_static_runtime} ${_eagle_ext_link})
     set_target_properties(_mpi PROPERTIES
       CXX_VISIBILITY_PRESET "hidden"
       POSITION_INDEPENDENT_CODE ON)

@@ -5,6 +5,10 @@
 
 #include "eagle/cuda/Graph.h"
 
+#include <string>
+#include <unordered_map>
+#include <vector>
+
 #ifndef EAGLE_CPU_ONLY
 
 namespace eagle {
@@ -56,6 +60,7 @@ public:
         , instantiated_{ other.instantiated_ }
         , stream_{ other.stream_ }
         , kernelNodes_{ std::move(other.kernelNodes_) }
+        , kernelSnapshots_{ std::move(other.kernelSnapshots_) }
     {
         other.instance_     = nullptr;
         other.instantiated_ = false;
@@ -80,6 +85,7 @@ public:
         instantiated_ = other.instantiated_;
         stream_       = other.stream_;
         kernelNodes_  = std::move(other.kernelNodes_);
+        kernelSnapshots_ = std::move(other.kernelSnapshots_);
 
         other.instance_     = nullptr;
         other.instantiated_ = false;
@@ -180,6 +186,83 @@ public:
     }
 
 
+    /** @brief Patch what kernel node @p node reads, in this exec only.
+     *
+     *  Argument ``i < n`` takes the value stored at ``params[i]``
+     *  (``nullptr`` keeps the captured value); arguments past @p n keep
+     *  theirs (the partition tail). Function, grid, block and shared memory
+     *  stay as captured: the node's driver parameters are snapshotted once,
+     *  on first patch, from the source graph (the driver call, so a
+     *  driver-launched ``CUfunction`` node is accepted). The values are
+     *  copied at the call. @p node may live in the root graph or in any
+     *  conditional body graph. Microsecond-class -- no re-capture. */
+    void setKernelParams(cudaGraphNode_t node, void* const* params, std::size_t n)
+    {
+        EAGLE_ASSERT(instantiated_,
+            "Launcher::setKernelParams requires an instantiated graph");
+        static const auto set = detail::driver_entry<decltype(&::cuGraphExecKernelNodeSetParams)>(
+            "cuGraphExecKernelNodeSetParams");
+        const KernelSnapshot& snap = kernelSnapshot_(node);
+        if (n > snap.args.size())
+            throw std::invalid_argument("eagle: Launcher::setKernelParams got "
+                + std::to_string(n) + " arguments for a kernel taking "
+                + std::to_string(snap.args.size()) + ".");
+        std::vector<void*> args(snap.args);
+        for (std::size_t i = 0; i < n; ++i)
+            if (params[i] != nullptr)
+                args[i] = params[i];
+        CUDA_KERNEL_NODE_PARAMS p = snap.params;
+        p.kernelParams = args.data();
+        p.extra        = nullptr;
+        driverCheck_(set(reinterpret_cast<CUgraphExec>(instance_),
+            reinterpret_cast<CUgraphNode>(node), &p), "patching a kernel node's arguments");
+    }
+
+    /** @brief Re-point captured memcpy node @p node at source @p src, in this
+     *  exec only. Size, destination and the source's memory type stay as
+     *  captured (the runtime's 1-D setter would re-derive the kind and
+     *  refuses a device-to-device one). */
+    void setMemcpySource(cudaGraphNode_t node, const void* src)
+    {
+        EAGLE_ASSERT(instantiated_,
+            "Launcher::setMemcpySource requires an instantiated graph");
+        static const auto get = detail::driver_entry<decltype(&::cuGraphMemcpyNodeGetParams)>(
+            "cuGraphMemcpyNodeGetParams");
+        static const auto set = detail::driver_entry<decltype(&::cuGraphExecMemcpyNodeSetParams)>(
+            "cuGraphExecMemcpyNodeSetParams");
+        static const auto current = detail::driver_entry<decltype(&::cuCtxGetCurrent)>("cuCtxGetCurrent");
+        CUDA_MEMCPY3D p{};
+        driverCheck_(get(reinterpret_cast<CUgraphNode>(node), &p), "reading a memcpy node");
+        if (p.srcMemoryType == CU_MEMORYTYPE_HOST)
+            p.srcHost = src;
+        else if (p.srcMemoryType == CU_MEMORYTYPE_DEVICE || p.srcMemoryType == CU_MEMORYTYPE_UNIFIED)
+            p.srcDevice = reinterpret_cast<CUdeviceptr>(src);
+        else
+            throw std::invalid_argument("eagle: Launcher::setMemcpySource: the node copies from an array.");
+        CUcontext ctx = nullptr;
+        driverCheck_(current(&ctx), "reading the current context");
+        driverCheck_(set(reinterpret_cast<CUgraphExec>(instance_), reinterpret_cast<CUgraphNode>(node), &p, ctx),
+            "re-pointing a memcpy node");
+    }
+
+    /** @brief Update this exec in place from @p sameTopology (a re-capture of
+     *  the same shape): the fallback when a patch is refused. Returns false
+     *  when the driver rejects the update (the exec is unchanged: rebuild).
+     *  Node handles of the original graph keep addressing the exec. */
+    bool tryExecUpdate(cudaGraph_t sameTopology)
+    {
+        EAGLE_ASSERT(instantiated_,
+            "Launcher::tryExecUpdate requires an instantiated graph");
+        static const auto update = detail::driver_entry<decltype(&::cuGraphExecUpdate)>("cuGraphExecUpdate");
+        CUgraphExecUpdateResultInfo info{};
+        const CUresult r = update(reinterpret_cast<CUgraphExec>(instance_),
+            reinterpret_cast<CUgraph>(sameTopology), &info);
+        if (r == CUDA_ERROR_GRAPH_EXEC_UPDATE_FAILURE)
+            return false;
+        driverCheck_(r, "updating the exec graph");
+        return true;
+    }
+
     /** @brief Number of registered kernel records (for tests / debug). */
     idx_t kernelNodeCount() const
     {
@@ -217,6 +300,66 @@ public:
 
 private:
 #ifndef EAGLE_CPU_ONLY
+    /** @brief A kernel node's driver parameters and argument pointers, as
+     *  captured (the pointers address the source graph's own storage, alive
+     *  with ``storage_``). */
+    struct KernelSnapshot {
+        CUDA_KERNEL_NODE_PARAMS params;
+        std::vector<void*> args;
+    };
+
+    const KernelSnapshot& kernelSnapshot_(cudaGraphNode_t node)
+    {
+        if (auto it = kernelSnapshots_.find(node); it != kernelSnapshots_.end())
+            return it->second;
+        static const auto get = detail::driver_entry<decltype(&::cuGraphKernelNodeGetParams)>(
+            "cuGraphKernelNodeGetParams");
+        KernelSnapshot snap{};
+        driverCheck_(get(reinterpret_cast<CUgraphNode>(node), &snap.params), "reading a kernel node");
+        CUfunction f = snap.params.func;
+        if (f == nullptr) {
+            static const auto fromKernel = detail::driver_entry<decltype(&::cuKernelGetFunction)>(
+                "cuKernelGetFunction");
+            driverCheck_(fromKernel(&f, snap.params.kern), "resolving a kernel node's function");
+        }
+        const std::size_t count = paramCount_(f);
+        auto** captured = static_cast<void**>(snap.params.kernelParams);
+        snap.args.assign(captured, captured + count);
+        return kernelSnapshots_.emplace(node, std::move(snap)).first->second;
+    }
+
+    /** @brief Number of parameters @p f takes (``cuFuncGetParamInfo``, a
+     *  CUDA 12.4 driver entry, asked for at its own ABI). */
+    static std::size_t paramCount_(CUfunction f)
+    {
+        using Info = CUresult (*)(CUfunction, std::size_t, std::size_t*, std::size_t*);
+        static const Info info = [] {
+            void* fn = nullptr;
+#if CUDART_VERSION >= 12050
+            cudaDriverEntryPointQueryResult found{};
+            if (cudaGetDriverEntryPointByVersion("cuFuncGetParamInfo", &fn, 12040,
+                    cudaEnableDefault, &found) != cudaSuccess
+                || found != cudaDriverEntryPointSuccess)
+                fn = nullptr;
+#endif
+            return reinterpret_cast<Info>(fn);
+        }();
+        if (info == nullptr)
+            throw std::runtime_error("eagle: patching kernel arguments needs an NVIDIA driver "
+                ">= 12.4 and a CUDA >= 12.5 build (cuFuncGetParamInfo).");
+        std::size_t n = 0, offset = 0, size = 0;
+        while (info(f, n, &offset, &size) == CUDA_SUCCESS)
+            ++n;
+        return n;
+    }
+
+    static void driverCheck_(CUresult r, const char* what)
+    {
+        if (r != CUDA_SUCCESS)
+            throw std::runtime_error(std::string("eagle: ") + what + " failed ("
+                + detail::driver_error_text(r) + ").");
+    }
+
     /** @brief Patch a driver-launched kernel node's grid and block through the
      *  driver API (the runtime refuses its ``CUfunction``). */
     void patchDriverNode_(const KernelNodeRecord& rec, idx_t grid, idx_t block)
@@ -304,6 +447,9 @@ protected:
      *  do not affect this list. Handles inside reference internals
      *  of ``storage_->graph``. */
     std::vector<KernelNodeRecord> kernelNodes_;
+
+    /** @brief Per-node snapshots taken by ``setKernelParams``. */
+    std::unordered_map<cudaGraphNode_t, KernelSnapshot> kernelSnapshots_;
 };
 
 /* Inline definition of Graph::launcher(); requires the full Launcher

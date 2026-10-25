@@ -100,6 +100,12 @@ for _name in _backend.__all__:
 
 def build_sdist(sdist_directory, config_settings=None):
     """Write the sdist with the README and the header trees copied in."""
+    # The version is read from git before the symlinks below become files: that edit would mark the tree dirty.
+    import setuptools_scm
+
+    env_name = "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_RAPTOR_EAGLE"
+    pretend = os.environ.get(env_name)
+    os.environ[env_name] = pretend or setuptools_scm.get_version(root=_REPO)
     _stage_readme()
     _stage_headers()
     links = _outside_links()
@@ -110,6 +116,8 @@ def build_sdist(sdist_directory, config_settings=None):
             path.write_bytes(data)
         return _backend.build_sdist(sdist_directory, config_settings)
     finally:
+        if pretend is None:
+            del os.environ[env_name]
         shutil.rmtree(_INCLUDE, ignore_errors=True)
         for path, target in links:
             path.unlink(missing_ok=True)

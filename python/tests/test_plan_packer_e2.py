@@ -26,13 +26,12 @@ device index, and the ``eagle_layout_sizes`` export.
 from __future__ import annotations
 
 import ctypes
-import os
 import pathlib
-import shutil
 import subprocess
 
 import numpy as np
 import pytest
+from _device_file import find_gxx, find_nvcc
 
 EAGLE_ROOT = pathlib.Path(__file__).resolve().parents[2]  # holds plugin/gref_abi.h
 
@@ -227,22 +226,11 @@ class _E2Plugin:
 
 
 def _gxx() -> str:
-    found = shutil.which(os.environ.get("CXX", "")) or shutil.which("g++")
-    if found is None and os.path.exists("/usr/bin/g++"):
-        found = "/usr/bin/g++"
-    if found is None:
-        raise RuntimeError("the E2 packer rows need g++ to build the host fixture")
-    return found
+    return find_gxx("the E2 packer rows")
 
 
 def _nvcc() -> str:
-    found = shutil.which("nvcc")
-    if found:
-        return found
-    cand = pathlib.Path(os.environ.get("CUDA_PATH", "/usr/local/cuda")) / "bin" / "nvcc"
-    if cand.exists():
-        return str(cand)
-    raise RuntimeError("the E2 device rows need nvcc to build the device fixture")
+    return find_nvcc("the E2 device rows")
 
 
 @pytest.fixture(scope="module")
@@ -398,7 +386,7 @@ def test_e2_float32_planes_follow_the_declared_scalar_type_host(e2_host_lib):
     plugin = _host_plugin(e2_host_lib, "e2_vec3_f32_host", _VEC3_SPEC,
                           scalar_type="float32", arg_widths={"y": 3})
 
-    y = eplan.plan(plugin, structure=eexec.HostTeam).run(x=x, a=a)
+    y = eplan.plan(plugin, structure=eexec.HostTeam).run(x=x.astype(np.float32), a=a)
 
     assert y.dtype == np.float32
     expected = (a * x.astype(np.float32)
@@ -432,7 +420,7 @@ def test_e2_float32_planes_follow_the_declared_scalar_type_device(e2_device_modu
     plugin = _device_plugin(e2_device_module, "e2_vec3_f32", _VEC3_SPEC,
                             scalar_type="float32", arg_widths={"y": 3})
 
-    y = eplan.plan(plugin, structure=eexec.DeviceKernel).run(x=x, a=a)
+    y = eplan.plan(plugin, structure=eexec.DeviceKernel).run(x=x.astype("float32"), a=a)
 
     assert y.dtype == np.float32
     expected = (a * x.astype(np.float32)

@@ -76,11 +76,12 @@ class Gradients(Mapping):
     plane, and a 0-d array (the sum over samples, bit-reproducible) for a
     shared parameter. :attr:`report` says how it was made."""
 
-    __slots__ = ("_values", "report")
+    __slots__ = ("_values", "report", "cotangents")
 
-    def __init__(self, values: dict, report: Report):
+    def __init__(self, values: dict, report: Report, cotangents=None):
         self._values = dict(values)
         self.report = report
+        self.cotangents = cotangents or {}
 
     def __getitem__(self, name):
         return self._values[name]
@@ -438,7 +439,7 @@ class Reverse:
             out[key] = value
         return out
 
-    def __call__(self, record, seeds, *, wrt=None) -> Gradients:
+    def __call__(self, record, seeds, *, wrt=None, _at=()) -> Gradients:
         """The gradients for one recorded launch. ``seeds`` maps output planes
         to ∂J/∂(output), one value per sample in sample order (unnamed outputs
         are seeded 0; JAX calls these cotangents, PyTorch grad_outputs, CasADi
@@ -456,10 +457,11 @@ class Reverse:
             seeded = self._seed_keys(seeds, tape)
             program = self._program(tape, frozenset(seeded))
             values, bitwise = program.run(tape, seeded, keys)
+            cot = {at: program.cot[at].copy() for at in _at}
         _counters.bump("reverses")
         names = {self._inputs[k]: v for k, v in values.items()}
         return Gradients(names, Report(record.generation,
-                                       {self._inputs[k]: bitwise[k] for k in values}))
+                                       {self._inputs[k]: bitwise[k] for k in values}), cot)
 
     def _input_key(self, name):
         key = self._input_names.get(name)
@@ -505,6 +507,7 @@ class _Program:
 
         out, taint = {}, {}
         self.comp = {}
+        self.cot = {}     # {(forward leaf, plane): the adjoint arriving at it}
 
         def source(s, key):
             if s == _core.DIFF_SEED:
@@ -540,6 +543,7 @@ class _Program:
             incoming, came = {}, None
             for (local, key), s in zip(writes, plan["seed_of"][r]):
                 incoming[local], t = source(s, key)
+                self.cot[(fwd, local)] = incoming[local]
                 came = came or t
             read_of = dict(zip((k for _, k in reads), plan["read_of"][r]))
             local_key = dict(reads)
@@ -673,4 +677,14 @@ def reverse(record, seeds, *, wrt=None, vjps=None, strict=False, policy="compens
     if not isinstance(record, Record):
         raise TypeError("eagle.diff.reverse: expected a Record (the .record of a "
                         f"record=True forward), got {type(record).__name__}")
-    return Reverse(record.forward, vjps=vjps, strict=strict, policy=policy)(record, seeds, wrt=wrt)
+    keys = None
+    if getattr(getattr(record._graph, "_bld", None), "builder", False):
+        from ._keys import translate
+
+        seeds, wrt, keys = translate(record._graph, seeds, wrt)
+    at = [] if keys is None else [v[1] for v in keys.values() if not isinstance(v, str)]
+    grads = Reverse(record.forward, vjps=vjps, strict=strict, policy=policy)(record, seeds, wrt=wrt, _at=at)
+    if keys is None:
+        return grads
+    return Gradients({name: grads.cotangents[k[1]] if not isinstance(k, str) else grads[k if k in grads else k.split(".", 1)[1]]
+                      for name, k in keys.items()}, grads.report)

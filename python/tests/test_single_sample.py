@@ -33,6 +33,8 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from conftest import CUPY_AVAILABLE
+from _ulp import ulps
 
 import eagle
 import eagle.exec as eexec
@@ -69,15 +71,6 @@ def ss_osc(omega: Scalar, nstop: Scalar, dt: Param, terminated: Terminated,
     terminated = k1 >= nstop
 
 
-def _have_gpu():
-    try:
-        import cupy
-
-        return cupy.cuda.runtime.getDeviceCount() > 0
-    except Exception:
-        return False
-
-
 def _plugins(kernels, work):
     """``{name: plugin}``: each plugin carries the host entry and, when a GPU
     is present, the device function — the one object ``eagle.plan.auto``
@@ -85,7 +78,7 @@ def _plugins(kernels, work):
     from hawk import _core as hcore
     from hawk.artifact import build_bundle, plan_view
 
-    targets = ("host", "cuda") if _have_gpu() else ("host",)
+    targets = ("host", "cuda") if CUPY_AVAILABLE else ("host",)
     bundle = build_bundle(kernels, work, targets=targets)
     registry = None
     if "cuda" in targets:
@@ -121,7 +114,7 @@ def osc(tmp_path_factory):
 
 
 def _need_gpu():
-    if not _have_gpu():
+    if not CUPY_AVAILABLE:
         pytest.skip("no CUDA device")
 
 
@@ -140,12 +133,6 @@ def _row(planes, i, heads):
     """Sample ``i`` of every batch plane, in its head shape."""
     return {k: (v[..., i].reshape(heads[k]) if heads.get(k) != () else v[i])
             for k, v in planes.items()}
-
-
-def _ulp(a, b) -> int:
-    a, b = np.asarray(a, np.float64).ravel(), np.asarray(b, np.float64).ravel()
-    ia, ib = a.view(np.int64), b.view(np.int64)
-    return int(np.max(np.abs(ia - ib))) if a.size else 0
 
 
 def _named(plugin, result):
@@ -242,10 +229,10 @@ def test_one_sample_on_the_device_matches_its_batch_column(mix, record_property)
         one = tuple(one.values()) if isinstance(one, dict) else (one,)
         for b, o in zip(batch, one):
             assert isinstance(o, cp.ndarray)
-            worst = max(worst, _ulp(o.get(), b[..., i].get()))
+            worst = max(worst, ulps(o.get().ravel(), b[..., i].get().ravel()).max())
             for j in range(N):
                 if j != i:
-                    assert _ulp(o.get(), b[..., j].get()) > 1
+                    assert ulps(o.get().ravel(), b[..., j].get().ravel()).max() > 1
     record_property("max_ulp_device_single", worst)
     assert worst <= 1
 
@@ -261,7 +248,7 @@ def test_one_trajectory_on_the_device_matches_its_batch_column(osc):
         one = _osc_run(p, inp, cp, i)
         assert one["x"].shape == ()
         assert float(one["k"]) == batch["k"][i]
-        assert _ulp(one["x"].get(), batch["x"][i]) <= 1
+        assert ulps(one["x"].get(), batch["x"][i]).max() <= 1
 
 
 # --------------------------------------------------------------------------- #
@@ -380,7 +367,7 @@ def test_auto_routes_by_residency_never_by_count(mix, n):
     assert ap.select(host).structure is eexec.HostTeam
     out = _named(mix["ss_mix"], ap.run(a=0.0, **host))
     assert out["y"].shape == ((2,) if n == 1 else (2, n))
-    if not _have_gpu():
+    if not CUPY_AVAILABLE:
         return
     import cupy as cp
 

@@ -4,6 +4,7 @@
 [build-system]
 requires = [
     "scikit-build-core>=0.10",
+    "setuptools-scm>=8",
     # nanobind 3 needs Python 3.10+; 3.9 (no free-threaded build) uses nanobind 2
     "nanobind>=3.1,<4; python_version>='3.10'",
     "nanobind>=2.2,<3; python_version<'3.10'",
@@ -13,7 +14,7 @@ backend-path = ["."]
 
 [project]
 name = "raptor-eagle"
-version = "0.6.4"
+dynamic = ["version"]
 description = "EAGLE — the Python face of the launch engine for compiled CUDA kernels"
 # A copy of the repository README, made by _build_backend.py (git-ignored).
 readme = "README.md"
@@ -48,7 +49,7 @@ classifiers = [
 # `raptor.schema.blocks.validate_neural_block_descriptor` (first shipped in 0.2.0), which
 # `eagle.sidecar` imports. The constraint is expressed where a resolver can act on it,
 # never as a runtime surprise.
-dependencies = ["numpy>=1.26", "raptor-core>=0.3.4,<0.4"]
+dependencies = ["numpy>=1.26", "raptor-core>=0.7.0,<0.8"]
 
 # The "raptor.pattern_loaders" entry-point declaration for
 # "neural_block" moved to a separate package — eagle.neural was extracted there
@@ -82,13 +83,13 @@ cuda = [
 # eagle.frameworks.torch: the torch.autograd bridge. torch is imported only by
 # that submodule, so plain `import eagle` never needs it. The bridges compile
 # kernels with hawk; 0.5.1 is the first to derive nested derivatives.
-torch = ["torch>=2.2", "raptor-hawk>=0.6.3"]
+torch = ["torch>=2.2", "raptor-hawk>=0.7.0,<0.8"]
 # eagle's JAX interop and eagle.frameworks.jax (see docs: interop contract).
 # JAX publishes wheels for Python 3.12 and newer, so this extra resolves there
 # and nowhere else; for GPU arrays install JAX's own CUDA extra (jax[cuda12] or
 # jax[cuda13]). The floor is the jaxlib whose XLA FFI headers libeagle_xla.so
 # vendors (an older runtime with newer headers is the unsupported direction).
-jax = ["jax>=0.11.2", "raptor-hawk>=0.6.3"]
+jax = ["jax>=0.11.2", "raptor-hawk>=0.7.0,<0.8"]
 # eagle.Graph.plot: the graph drawn with matplotlib (imported only by that
 # method; show()/to_mermaid()/to_dot() need nothing).
 plot = ["matplotlib>=3.7"]
@@ -99,6 +100,13 @@ plot = ["matplotlib>=3.7"]
 # (EAGLE_PYTHON_CUDA_PLUGIN=BUILD, EAGLE_PYTHON_SKIP_CORE=ON) and handed to every
 # per-Python build as EAGLE_PYTHON_CUDA_PLUGIN=<path>; see python/CMakeLists.txt.
 # The eagle C++ headers + aether come from CMAKE_PREFIX_PATH (set by CI/dev).
+# The version is the latest vX.Y.Z git tag (a PR build tags its checkout first); the sdist carries it in PKG-INFO.
+[tool.scikit-build.metadata.version]
+provider = "scikit_build_core.metadata.setuptools_scm"
+
+[tool.setuptools_scm]
+root = ".."
+
 [tool.scikit-build]
 minimum-version = "build-system.requires"
 build-dir = "build/{wheel_tag}"

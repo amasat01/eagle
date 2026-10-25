@@ -4,6 +4,7 @@
 #pragma once
 
 #include "eagle/cuda/Stream.h"
+#include "eagle/util/throw.h"
 
 #ifndef EAGLE_CPU_ONLY
 
@@ -107,9 +108,12 @@ public:
      *  @param[in] origin        Stream being captured — the one that forks and
      *                           that the branches rejoin.
      *  @param[in] branchCount   Number of independent branches.
+     *  @param[in] waitCount     Number of cross-branch ``mark``s the capture
+     *                           will make (0: none).
      *  @throws aether::Error  If stream or event creation fails.
      */
-    CaptureFork(const cudaStream_t& origin, const std::size_t& branchCount)
+    CaptureFork(const cudaStream_t& origin, const std::size_t& branchCount,
+        const std::size_t& waitCount = 0)
         : origin_{ origin }
         , forkEvent_{ cudaEventDisableTiming }
     {
@@ -119,6 +123,9 @@ public:
             branches_.emplace_back(/*nonBlocking=*/true);
             joinEvents_.emplace_back(cudaEventDisableTiming);
         }
+        markEvents_.reserve(waitCount);
+        for (std::size_t i = 0; i < waitCount; i++)
+            markEvents_.emplace_back(cudaEventDisableTiming);
     }
 
     /** @brief Not copyable — it owns streams and events. */
@@ -192,6 +199,34 @@ public:
     /** @brief Number of branches. */
     std::size_t size() const { return branches_.size(); }
 
+    /** @brief Mark the current tip of branch @p producer (after its last
+     *  launch so far) for a later ``wait``; returns the mark's index.
+     *
+     *  The mark is one of the events pre-created by the constructor's
+     *  @p waitCount -- event creation is illegal mid-capture -- so at most
+     *  that many marks can be made per fork. Call between ``fork()`` and
+     *  ``join()``. */
+    std::size_t mark(const std::size_t& producer)
+    {
+        if (marked_ >= markEvents_.size())
+            EAGLE_THROW(std::out_of_range, "CaptureFork::mark: every pre-created "
+                "mark is used (construct the fork with a larger waitCount)");
+        if (producer >= branches_.size())
+            EAGLE_THROW(std::out_of_range, "CaptureFork::mark: branch index out of range");
+        EAGLE_CHECK_ALWAYS(cudaEventRecord(markEvents_[marked_].cuda(), branches_[producer].cuda()));
+        return marked_++;
+    }
+
+    /** @brief Make branch @p waiter wait for mark @p markIndex: captured as
+     *  ONE edge from the producer's marked node to the waiter's next node
+     *  (no node, zero replay cost). */
+    void wait(const std::size_t& waiter, const std::size_t& markIndex)
+    {
+        if (waiter >= branches_.size() || markIndex >= marked_)
+            EAGLE_THROW(std::out_of_range, "CaptureFork::wait: branch or mark index out of range");
+        EAGLE_CHECK_ALWAYS(cudaStreamWaitEvent(branches_[waiter].cuda(), markEvents_[markIndex].cuda(), 0));
+    }
+
     /** @brief True once ``fork()`` has run and ``join()`` has not. */
     bool forked() const { return forked_ && !joined_; }
 
@@ -220,6 +255,8 @@ protected:
     Event forkEvent_;
     std::vector<Stream> branches_;
     std::vector<Event> joinEvents_;
+    std::vector<Event> markEvents_;
+    std::size_t marked_ = 0;
     bool forked_ = false;
     bool joined_ = false;
 };

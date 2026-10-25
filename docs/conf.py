@@ -7,7 +7,6 @@
 # https://www.sphinx-doc.org/en/master/usage/configuration.html
 
 import os
-import re
 import sys
 
 # -- Make the `eagle` Python package importable for autosummary + notebooks.
@@ -21,22 +20,10 @@ project = 'eagle'
 copyright = '2026, Alessandro Masat'
 author = 'Alessandro Masat'
 
-# Read version from CMakeLists.txt
-_version = "unknown"
-_cmake = os.path.join(os.path.dirname(__file__), '..', 'CMakeLists.txt')
-_pattern = re.compile(r'project\s*\(\s*eagle\s+VERSION\s+(\d+\.\d+\.\d+)', re.IGNORECASE)
-try:
-    with open(_cmake) as _f:
-        for _line in _f:
-            _m = _pattern.search(_line)
-            if _m:
-                _version = _m.group(1)
-                break
-except FileNotFoundError:
-    pass
+# The version is the latest git tag (setuptools-scm), never written into the tree.
+import setuptools_scm
 
-version = _version
-release = _version
+release = version = setuptools_scm.get_version(root="..", relative_to=__file__, fallback_version="0.0.0")
 
 # -- General configuration ---------------------------------------------------
 

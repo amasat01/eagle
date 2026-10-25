@@ -378,7 +378,7 @@ public:
      *  Phase 1 (here): the node reserves its working buffers in this graph's
      *  ``ScratchArena``, which assigns each a slot reused from this node's
      *  dependency ancestors (nodes with disjoint lifetimes share memory — peak,
-     *  not sum). Nothing is captured yet. Phase 2 (``finalizeNatives``, run once
+     *  not sum). Nothing is captured yet. Phase 2 (``finalize``, run once
      *  before ``launcher()``): the arena commits and each node's subgraph is
      *  captured with the resolved pointers.
      *
@@ -433,7 +433,7 @@ public:
      *  pointers, mapping each node's native dependencies to the graph-node
      *  indices its ancestors produced. Idempotent; a no-op with no native nodes.
      *  Call once after the last ``addNative`` and before ``launcher()``. */
-    void finalizeNatives()
+    void finalize()
     {
         if (nativesFinalized_ || nativeBuilds_.empty())
             return;
@@ -592,7 +592,7 @@ protected:
     /** @brief Per-graph scratch arena for native nodes (peak-not-sum reuse). */
     ScratchArena arena_;
 
-    /** @brief Native-node phase-1 records, consumed at ``finalizeNatives``:
+    /** @brief Native-node phase-1 records, consumed at ``finalize``:
      *  each node's native dependencies, its transitive ancestor set (for arena
      *  reuse), and a build closure that captures its subgraph in phase 2. */
     std::vector<std::vector<idx_t>> nativeDeps_;

@@ -6,7 +6,9 @@
 /**
  * @file graph/Layout.h
  * @brief A deterministic layered layout of a Description: layers are the
- *        longest path from the sources (the stages), the order inside a layer
+ *        longest path from the sources, or, when every node sits in a
+ *        ``"stage"`` frame, one row per stage (a stage grows extra rows only
+ *        for edges between its own nodes); the order inside a layer
  *        comes from barycenter sweeps with ties broken by node id, and the
  *        coordinates sit on a unit grid. The same input always gives the same
  *        output; nothing here builds, launches or touches a device.
@@ -18,6 +20,8 @@
 #include <array>
 #include <numeric>
 #include <set>
+#include <stdexcept>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -33,6 +37,27 @@ struct Layout {
 };
 
 namespace detail {
+
+/** @brief The stage of each node: the rank, among the ``"stage"`` frames, of
+ *  the one enclosing it; empty unless every node sits in a stage. */
+inline std::vector<gidx> stagesOf(const Description& d)
+{
+    std::vector<gidx> rank(d.frames.size(), -1);
+    gidx count = 0;
+    for (const Frame& f : d.frames)
+        if (f.kind == "stage")
+            rank[f.id] = count++;
+    std::vector<gidx> out;
+    for (const Node& nd : d.nodes) {
+        gidx s = -1;
+        for (gidx f = nd.frame; f != -1; f = d.frames[f].parent)
+            s = rank[f] >= 0 ? rank[f] : s;
+        if (s < 0)
+            return {};
+        out.push_back(s);
+    }
+    return out;
+}
 
 /** @brief Crossings between adjacent layers for the given positions. Edges
  *  that skip a layer carry no crossing here (no dummy nodes are inserted). */
@@ -80,21 +105,36 @@ inline Layout layout(const Description& d, int sweeps = 4)
     out.order.assign(n, 0);
     out.xy.assign(n, { 0.0, 0.0 });
 
-    // layers: longest path, in a topological order that takes the smallest id
+    // layers: longest path, in a topological order that takes the lowest stage
+    // then the smallest id; a stage starts below the last row of the one before
+    std::vector<gidx> stage = detail::stagesOf(d);
+    if (stage.empty())
+        stage.assign(n, 0);
+    for (auto [a, b] : edges)
+        if (stage[a] > stage[b])
+            throw std::invalid_argument("eagle::graph::layout: edge " + std::to_string(a)
+                + " -> " + std::to_string(b) + " runs back to an earlier stage");
     std::vector<gidx> indeg(n, 0);
     for (gidx v = 0; v < n; ++v)
         indeg[v] = gidx(preds[v].size());
-    std::set<gidx> ready;
+    std::set<std::pair<gidx, gidx>> ready;
     for (gidx v = 0; v < n; ++v)
         if (indeg[v] == 0)
-            ready.insert(v);
+            ready.emplace(stage[v], v);
+    gidx current = 0, base = 0, deepest = -1;
     while (!ready.empty()) {
-        const gidx v = *ready.begin();
+        const gidx v = ready.begin()->second;
         ready.erase(ready.begin());
+        if (stage[v] != current) {
+            current = stage[v];
+            base = deepest + 1;
+        }
+        out.layer[v] = std::max(out.layer[v], base);
+        deepest = std::max(deepest, out.layer[v]);
         for (gidx w : succs[v]) {
             out.layer[w] = std::max(out.layer[w], out.layer[v] + 1);
             if (--indeg[w] == 0)
-                ready.insert(w);
+                ready.emplace(stage[w], w);
         }
     }
     gidx layers = 0;

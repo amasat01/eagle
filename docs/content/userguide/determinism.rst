@@ -151,8 +151,8 @@ compensated sums above.
 Cells from a kernel
 -------------------
 
-A hawk kernel that stores ``hawk.all_samples(x).sum()`` (or ``.mean()``, ``.max()``,
-``.min()``) to a ``Mutable`` output makes a **cell**: one value for the whole batch. The
+A hawk kernel that stores ``hawk.sum(x)`` (or ``hawk.mean(x)``, ``hawk.max(x)``,
+``hawk.min(x)``) to a ``Mutable`` output makes a **cell**: one value for the whole batch. The
 kernel does not write that value itself. It writes **rows**, one partial per 32 samples,
 and a ``<name>_comp`` row of rounding corrections for a sum. A vector or matrix cell is one
 such pair per entry (``total_0``, ``total_1``, ...).
@@ -174,7 +174,7 @@ Reading a total later in the same kernel
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 A kernel that reads a reduced value after computing it, such as
-``z = x / hawk.all_samples(x).sum()``, is built as stages: one launch, the finish of its
+``z = x / hawk.sum(x)``, is built as stages: one launch, the finish of its
 cells, then the next launch, with the sidecar listing them under ``stages``.
 ``Plan.run`` and ``Plan.bind`` run the stages in sequence, and so does every door built on
 them: a ``Graph``, the reverse, and the torch, JAX and Warp bridges. ``eagle.until_done``

@@ -111,12 +111,15 @@ if(NOT EAGLE_CPP_MODE AND NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
   message(STATUS "> Compiling for CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
 endif()
 
+include(${CMAKE_CURRENT_LIST_DIR}/cmake/GitVersion.cmake)
+git_version(EAGLE)
+
 if (EAGLE_CPP_MODE)
   message(STATUS "> Configuring eagle in C++ only mode")
-  project(eagle VERSION 0.6.4 LANGUAGES CXX)
+  project(eagle VERSION ${EAGLE_VERSION_NUMERIC} LANGUAGES CXX)
 else()
   message(STATUS "> Configuring eagle in CUDA/C++ mode")
-  project(eagle VERSION 0.6.4 LANGUAGES CUDA CXX)
+  project(eagle VERSION ${EAGLE_VERSION_NUMERIC} LANGUAGES CUDA CXX)
 endif()
 
 ###########################
@@ -132,9 +135,9 @@ endif()
 find_package(OpenMP REQUIRED)
 message(STATUS "> Found OpenMP")
 
-# Dependency versions (also referenced by CI pipeline). aether 0.2.5 brings the
-# compensated-sum helpers eagle/reduce/canonical.h uses.
-set(EAGLE_AETHER_VERSION "0.2.5")
+# Dependency versions (also referenced by CI pipeline). aether and eagle share one
+# version from 0.7.0.
+set(EAGLE_AETHER_VERSION "0.7.0")
 
 # The VERSION argument is fixed
 # on the MAJOR-matching CMake ConfigVersion rule: aether is 0.x, so an

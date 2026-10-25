@@ -27,12 +27,12 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from conftest import CUPY_AVAILABLE
 from test_until_done import (
     _DT,
     _build,
     _explicit,
     _get,
-    _have_gpu,
     _inputs,
     _oscillator,
     _planes,
@@ -47,17 +47,7 @@ _KS = (4, 32)
 _TARGETS = ["host", pytest.param("device", marks=pytest.mark.gpu)]
 
 
-@pytest.fixture(scope="module", autouse=True)
-def _exact_host_profile():
-    """Every host build in this module under hawk's EXACT ``native`` profile
-    (FMA contraction off): the rows compare host runs of separate compiles bit
-    for bit, which only the exact profiles promise. hawk's default x86-64
-    profile contracts ``a*b + c`` into FMAs and is gated by ULP bounds in
-    hawk's own suite instead."""
-    mp = pytest.MonkeyPatch()
-    mp.setenv("HAWK_HOST_PROFILE", "native")
-    yield
-    mp.undo()
+pytestmark = pytest.mark.usefixtures("_exact_host_profile")
 
 
 @pytest.fixture(scope="module")
@@ -67,7 +57,7 @@ def fused(tmp_path_factory):
     hawk = pytest.importorskip("hawk")
     from hawk.ext import Guard, Kind
 
-    targets = ("host", "cuda") if _have_gpu() else ("host",)
+    targets = ("host", "cuda") if CUPY_AVAILABLE else ("host",)
     out = {}
     oracle = _build(_oscillator(None, False), tmp_path_factory.mktemp("oracle"),
                     targets)

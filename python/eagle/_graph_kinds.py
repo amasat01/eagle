@@ -2,15 +2,20 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """The built-in node kinds of :class:`eagle.graph.Graph`: a plan launch, an
-opaque callable with declared planes, a fork/join group, and the existing
+opaque callable with declared planes, a copy, a cell setter, a fork/join
+group, a sequence, and the existing
 ``eagle.skippable`` / ``eagle.repeat_while``. Each registers itself with the
 node-kind registry; a new kind lives in a module like this one and never
 touches ``graph.py``."""
 
 from __future__ import annotations
 
-from ._conditional import RepeatWhile, Skippable
+import contextvars
+
+from ._conditional import RepeatWhile
 from .graph import ForkStage, LowerCtx, Node, get_node_kind, register_node_kind
+from ._graph_edges import arrays_overlap
+from . import _core, _transfer
 from .interop import _stream_handle
 from .roles import OUTPUT_ROLES, STATE_ROLES
 
@@ -42,11 +47,56 @@ def _launch_step(node, ctx):
     return step
 
 
+#: Where a capturing build collects the steps it lowers (see :class:`_Captured`).
+_STEP_SINK = contextvars.ContextVar("eagle_graph_step_sink", default=None)
+
+
+class _Captured:
+    """A captured step that remembers which graph nodes (handles of the
+    capture graph, root or body) it contributed: what an in-place rebind
+    patches. ``key`` is the plan or copy payload it stands for. Only the GPU
+    lowering makes one, so the host path pays nothing."""
+
+    __slots__ = ("key", "run", "nodes")
+
+    def __init__(self, key, run):
+        self.key, self.run, self.nodes = key, run, ()
+
+    def __call__(self):
+        import cupy
+
+        stream = cupy.cuda.get_current_stream().ptr
+        before = _core.capture_snapshot_nodes(stream)
+        self.run()
+        self.nodes = sorted(set(_core.capture_snapshot_nodes(stream)) - set(before))
+
+
+class _Patch:
+    """What ``Graph._rebind`` needs: array id -> its uses, the arrays only
+    your own code holds, and the captured step of each plan or copy."""
+
+    __slots__ = ("index", "own", "steps")
+
+    def __init__(self):
+        self.index, self.own, self.steps = {}, set(), None
+
+
+def _capturing(step):
+    sink = _STEP_SINK.get()
+    if sink is not None:
+        sink.append(step)
+    return step
+
+
+def _launch_gpu(node, ctx):
+    return _capturing(_Captured(node.payload, node.payload.launch))
+
+
 def _launch_native(node, ctx):
     b = node.payload
     if b._cupy is not None or getattr(b, "_stages", None):
         return None
-    if b._copies or b._active_count is not None:
+    if b._copies or b._active_count is not None or b._fold is not None:
         return None
     return b._entry, b._addrs, b._parts
 
@@ -109,7 +159,7 @@ register_node_kind(
     "launch",
     reads=lambda n: _launch_access(n, writing=False),
     writes=lambda n: _launch_access(n, writing=True),
-    lower_gpu=_launch_step, lower_cpu=_launch_step, native_entry=_launch_native,
+    lower_gpu=_launch_gpu, lower_cpu=_launch_step, native_entry=_launch_native,
     transpose=_launch_transpose)
 
 
@@ -172,9 +222,10 @@ def opaque(fn, *, reads=(), writes=(), eager=False, stream=None, name=None,
     if not callable(fn):
         raise TypeError("eagle.graph.opaque: fn must be a zero-arg callable")
     planes = (fn, _named_arrays(reads, "in"), _named_arrays(writes, "out"))
-    if stream is not None:
-        return Node("opaque_stream", (*planes, stream, _stream_handle(stream)), name, grad)
-    return Node("opaque_host" if eager else "opaque", planes, name, grad)
+    node = (Node("opaque_stream", (*planes, stream, _stream_handle(stream)), name, grad)
+            if stream is not None else Node("opaque_host" if eager else "opaque", planes, name, grad))
+    _transfer.record(node)
+    return node
 
 
 def _opaque_transpose(node, incoming, ctx):
@@ -226,6 +277,45 @@ register_node_kind("opaque_stream", reads=_declared(1), writes=_declared(2), tie
 register_node_kind("opaque_host", reads=_declared(1), writes=_declared(2), tier="host",
                    lower_gpu=lambda n, ctx: n.payload[0], lower_cpu=lambda n, ctx: n.payload[0],
                    transpose=_opaque_transpose)
+
+
+# --- Built-in kinds: copy (a seed or tape copy), cell (a guard or decision cell) --- #
+def _copy(src, dst, name=None) -> Node:
+    """``dst[...] = src`` as a node: it reads ``src``, writes ``dst``; the
+    reverse hands the cotangent of ``dst`` to ``src``."""
+    return Node("copy", [src, dst], name)      # a list: a rebind swaps the arrays in place
+
+
+def _copy_transpose(node, incoming, ctx):
+    src = node.payload[0]
+    if str(src.dtype) not in ("float32", "float64") or "dst" not in incoming:
+        return {}
+    cot = incoming["dst"]
+    buf = ctx.empty_like(src)           # lives where src does: a transfer's reverse is the copy back
+    ctx.add(_copy(cot, buf))
+    return {"src": buf}
+
+
+register_node_kind("copy", reads=lambda n: (("src", n.payload[0], "declared"),),
+                   writes=lambda n: (("dst", n.payload[1], "declared"),),
+                   lower_gpu=lambda n, ctx: _capturing(_Captured(n.payload, _transfer.copy_run(n.payload))),
+                   lower_cpu=lambda n, ctx: _transfer.copy_run_host(n.payload),
+                   transpose=_copy_transpose)
+
+
+def _no_transpose(node, incoming, ctx):
+    return {}
+
+
+def _cell(fn, reads=(), writes=(), name=None) -> Node:
+    """A zero-arg callable that sets a decision or guard cell: declared like
+    :func:`opaque`, but never differentiated and needing no vjp."""
+    return Node("cell", (fn, _named_arrays(reads, "in"), _named_arrays(writes, "out")), name, False)
+
+
+register_node_kind("cell", reads=_declared(1), writes=_declared(2),
+                   lower_gpu=lambda n, ctx: n.payload[0], lower_cpu=lambda n, ctx: n.payload[0],
+                   transpose=_no_transpose)
 
 
 class _Child:
@@ -321,37 +411,116 @@ def _group_union(which):
     return get
 
 
+class _Sync:
+    """One cross-branch wait of a fork: the producer branch marks, the waiting
+    branch waits on the mark (:class:`_MarkStep`, :class:`_WaitStep`); the fork
+    is set where the weave builds it."""
+
+    __slots__ = ("branch", "fork", "index")
+
+    def __init__(self, branch):
+        self.branch, self.fork, self.index = branch, None, None
+
+
+class _MarkStep:
+    __slots__ = ("sync",)
+
+    def __init__(self, sync):
+        self.sync = sync
+
+    def __call__(self):
+        self.sync.index = self.sync.fork.mark(self.sync.branch)
+
+
+class _WaitStep:
+    __slots__ = ("sync", "branch")
+
+    def __init__(self, sync, branch):
+        self.sync, self.branch = sync, branch
+
+    def __call__(self):
+        self.sync.fork.wait(self.branch, self.sync.index)
+
+
+def _wait(*planes, name=None) -> Node:
+    """A sync point inside a fork/join branch: continue after the node of an
+    earlier sibling branch that wrote ``planes``. One edge, no node."""
+    return Node("wait", (tuple(planes),), name, False)
+
+
+def _wait_links(group):
+    """``[(branch, position, producer branch, producer position, arrays)]``:
+    for each ``wait`` of ``group``'s branches, the latest node of the nearest
+    earlier branch that writes what it waits for."""
+    links = []
+    for q, branch in enumerate(group.payload):
+        for k, n in enumerate(branch):
+            if n.kind != "wait":
+                continue
+            arrays = n.payload[0]
+            found = next(((j, m) for j in reversed(range(q))
+                          for m in reversed(range(len(group.payload[j])))
+                          if any(arrays_overlap(w, a) for _n, w, _r
+                                 in get_node_kind(group.payload[j][m].kind).writes(group.payload[j][m])
+                                 for a in arrays)), None)
+            if found is None:
+                raise ValueError(
+                    "eagle.Graph.wait: that plane is not written by an earlier branch of this "
+                    "parallel region: before the fork everything is already ordered, and a later "
+                    "branch cannot be waited for (no cycles)")
+            links.append((q, k, *found, arrays))
+    return links
+
+
+register_node_kind(
+    "wait", reads=lambda n: tuple((f"wait{i}", a, "guard") for i, a in enumerate(n.payload[0])),
+    writes=lambda n: (), lower_gpu=lambda n, ctx: (lambda: None), lower_cpu=lambda n, ctx: (lambda: None),
+    transpose=_no_transpose)
+
+
 def _group_members(node, ctx):
-    members = []
-    for branch in node.payload:
-        parts = [ctx.lower(n) for n in branch]
-        if len(parts) > 1 and any(isinstance(p, (Skippable, RepeatWhile)) for p in parts):
-            raise ValueError(
-                "eagle.Graph.build: a fork/join branch holding a skippable or "
-                "repeat_while must hold only that node (a conditional is woven "
-                "as one region); split the branch")
-        members.append(parts[0] if len(parts) == 1 else _Seq(parts))
-    return members
+    """``(members, syncs)``: each branch a lowered part or a :class:`_Seq` of
+    them; on the GPU a ``wait`` becomes a wait on the producer branch's mark,
+    taken right after the producing part."""
+    parts = [[ctx.lower(n) for n in branch] for branch in node.payload]
+    syncs = {}
+    if ctx.backend == "gpu":
+        links = _wait_links(node)
+        for q, k, j, m, _arrays in links:
+            parts[q][k] = _WaitStep(syncs.setdefault((j, m), _Sync(j)), q)
+        for (j, m), sync in syncs.items():
+            parts[j][m] = _Seq([parts[j][m], _MarkStep(sync)])
+    return [p[0] if len(p) == 1 else _Seq(p) for p in parts], list(syncs.values())
+
+
+def _group_gpu(node, ctx):
+    members, syncs = _group_members(node, ctx)
+    return ForkStage(members, syncs)
 
 
 def _group_cpu(node, ctx):
-    return _Seq(_group_members(node, ctx))
+    return _Seq(_group_members(node, ctx)[0])
 
 
 register_node_kind(
     "group", reads=_group_union("reads"), writes=_group_union("writes"),
-    lower_gpu=lambda n, ctx: ForkStage(_group_members(n, ctx)), lower_cpu=_group_cpu)
+    lower_gpu=_group_gpu, lower_cpu=_group_cpu)
 
 
-# --- Built-in kind: sequence (the parts of a repeat_while body, in order) --- #
-def _sequence_union(which):
+# --- Built-in kind: sequence (the parts of a body or an arm, in order) --- #
+def _sequence_planes(which):
+    """The parts' planes, each qualified ``"<part>.<plane>"`` (two parts may
+    name a plane alike); what a part that is not differentiated reads is a
+    ``guard`` (never taped)."""
     def get(node):
-        return tuple(a for n in node.payload for a in getattr(get_node_kind(n.kind), which)(n))
+        return tuple((f"{i}.{n}", a, r if (p.grad or which == "writes") else "guard")
+                     for i, p in enumerate(node.payload)
+                     for n, a, r in getattr(get_node_kind(p.kind), which)(p))
     return get
 
 
 register_node_kind(
-    "sequence", reads=_sequence_union("reads"), writes=_sequence_union("writes"),
+    "sequence", reads=_sequence_planes("reads"), writes=_sequence_planes("writes"),
     lower_gpu=lambda n, ctx: _Seq([ctx.lower(p) for p in n.payload]),
     lower_cpu=lambda n, ctx: _Seq([ctx.lower(p) for p in n.payload]))
 
@@ -383,16 +552,23 @@ class _Cond:
         self.late = late
 
 
-def _guard_arrays(guard):
-    out = [("guard", guard.count_arr, "guard")]
-    if guard.baseline_arr is not None:
-        out.append(("guard_baseline", guard.baseline_arr, "guard"))
+def _guard_arrays(wrapper):
+    out = []
+    guard = wrapper.guard
+    if guard is not None:
+        out.append(("guard", guard.count_arr, "guard"))
+        if guard.baseline_arr is not None:
+            out.append(("guard_baseline", guard.baseline_arr, "guard"))
+    for name in ("limit", "brk"):
+        cell = getattr(wrapper, name, None)
+        if cell is not None:
+            out.append((name, cell, "guard"))
     return tuple(out)
 
 
 def _cond_reads(node):
     c = node.payload
-    return (*get_node_kind(c.child.kind).reads(c.child), *_guard_arrays(c.wrapper.guard))
+    return (*get_node_kind(c.child.kind).reads(c.child), *_guard_arrays(c.wrapper))
 
 
 def _cond_writes(node):
@@ -405,11 +581,23 @@ def _cond_writes(node):
 
 def _cond_lower(node, ctx):
     c = node.payload
-    if c.child.kind == "sequence":      # the loop's parts, woven one by one by the pipeline
+    if c.child.kind == "sequence":      # a loop's parts are woven one by one; a skippable's as one
         body = LowerCtx(ctx.backend, body=True)
-        c.wrapper.step = tuple(body.lower(p) for p in c.child.payload)
+        parts = [body.lower(p) for p in c.child.payload]
+        if isinstance(c.wrapper, RepeatWhile):
+            c.wrapper.step = tuple(parts)
+        else:
+            c.late.fn = _Seq(parts)
         return c.wrapper
     c.late.fn = LowerCtx(ctx.backend, body=True).lower(c.child)
+    return c.wrapper
+
+
+def _branches_lower(node, ctx):
+    c = node.payload
+    body = LowerCtx(ctx.backend, body=True)
+    for late, child in zip(c.late, c.child.payload):
+        late.fn = body.lower(child)
     return c.wrapper
 
 
@@ -437,3 +625,8 @@ for _kind in ("skippable", "repeat_while"):
     register_node_kind(_kind, reads=_cond_reads, writes=_cond_writes,
                        lower_gpu=_cond_lower, lower_cpu=_cond_lower,
                        transpose=_cond_transpose, record_planes=_cond_record)
+
+
+# a branches node (IF/ELSE, SWITCH) has no reverse yet: Reverse refuses it by name
+register_node_kind("branches", reads=_cond_reads, writes=lambda n: get_node_kind("sequence").writes(n.payload.child),
+                   lower_gpu=_branches_lower, lower_cpu=_branches_lower)

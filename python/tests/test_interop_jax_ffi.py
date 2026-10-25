@@ -32,14 +32,13 @@ import ctypes
 import functools
 import os
 import pathlib
-import shutil
-import subprocess
 import time
 
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
 import numpy as np
 import pytest
+from _ulp import ulps
 from raptor.conformance.interop import certified_framework, register_row
 
 pytestmark = pytest.mark.interop_matrix
@@ -124,23 +123,6 @@ def _register_twin(K, platform, digest, *, zero=True, entry=None, device=None):
 # --------------------------------------------------------------------------- #
 # JX-FFI-CPU-ALIAS
 # --------------------------------------------------------------------------- #
-@pytest.fixture(scope="module")
-def probe(tmp_path_factory):
-    """``fixtures/xla_pack_probe.cpp``: a launch entry that records the argument
-    structures (and so the buffer addresses) it is handed instead of running a kernel."""
-    cxx = shutil.which(os.environ.get("CXX", "") or "c++") or shutil.which("g++")
-    if cxx is None:
-        pytest.fail("a C++ compiler is needed to build fixtures/xla_pack_probe.cpp")
-    so = tmp_path_factory.mktemp("xla_probe") / "libxla_pack_probe.so"
-    build = subprocess.run([cxx, "-std=c++17", "-O1", "-fPIC", "-shared",
-                            str(FIX / "xla_pack_probe.cpp"), "-o", str(so)],
-                           capture_output=True, text=True)
-    assert build.returncode == 0, build.stderr
-    lib = ctypes.CDLL(str(so))
-    lib.probe_read.restype = ctypes.c_int32
-    return lib
-
-
 def _seen_addresses(lib):
     """The buffer address of each slot of the last recorded call (field 0 of each box)."""
     buf = (ctypes.c_ubyte * 8192)()
@@ -264,20 +246,11 @@ def test_outputs_are_xla_owned_and_zero_where_unwritten_cuda(tmp_path_factory):
 ULP_BOUND = 8
 
 
-def _ulps(a, b):
-    """Units in the last place between two float64 arrays (an ordered integer map)."""
-    def key(x):
-        i = np.ascontiguousarray(x, np.float64).view(np.int64)
-        return np.where(i < 0, np.int64(-(2**63)) - i, i)
-
-    return np.abs(key(a) - key(b))
-
-
 def _agree(got, want, bitwise):
     got, want = np.asarray(got), np.asarray(want)
     if bitwise:
         return got.shape == want.shape and np.array_equal(got.view(np.uint64), want.view(np.uint64))
-    return got.shape == want.shape and int(_ulps(got, want).max()) <= ULP_BOUND
+    return got.shape == want.shape and int(ulps(got, want).max()) <= ULP_BOUND
 
 
 def _invariance(jax, jnp, K, device, bitwise):

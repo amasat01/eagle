@@ -49,12 +49,13 @@ def _stated():
 
 
 def _version():
-    text = (ROOT / "python/pyproject.toml").read_text()
-    return re.search(r'^version\s*=\s*"([^"]+)"', text, re.M)[1]  # tomllib is 3.11+
+    from importlib.metadata import version  # what eagle.__version__ reads; no binding import
+
+    return version("raptor-eagle")
 
 
 def _tuple(version):
-    return tuple(int(re.match(r"\d+", p)[0]) for p in version.split("."))  # 0.6.2rc2 counts as 0.6.2
+    return tuple(int(re.match(r"\d+", p)[0]) for p in version.split(".")[:3])  # 0.6.2rc2 counts as 0.6.2
 
 
 def _expired(registry, version):

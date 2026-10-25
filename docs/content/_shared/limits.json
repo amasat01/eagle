@@ -285,5 +285,40 @@
   "way_out": "NumPy 2.2 or later",
   "cause": "framework",
   "lifted_in": "none"
+ },
+ {
+  "id": "buffer-in-body-wrt",
+  "text": "A `buffer=` array made inside a device loop or branch is not a gradient key, because the body rewrites it every turn and no one array is its value (our scope): make the `buffer=` outside the body, or seed `result`.",
+  "way_out": "buffer outside the body",
+  "cause": "ours",
+  "lifted_in": "none"
+ },
+ {
+  "id": "record-loop-control",
+  "text": "A `record=True` loop body holds kernel launches only: a `break`, `continue`, `if`/`elif`/`else` or `match` inside it is refused (our scope): keep the control flow outside the recorded loop, or build with `record=False`.",
+  "way_out": "control flow outside the loop",
+  "cause": "ours",
+  "lifted_in": "none"
+ },
+ {
+  "id": "record-uncapped-while",
+  "text": "An uncapped `while cell:` cannot be recorded with `record=True` (our scope): cap it with `for _ in range(N): if not cell: break`.",
+  "way_out": "cap the loop",
+  "cause": "ours",
+  "lifted_in": "none"
+ },
+ {
+  "id": "record-loop-two-names",
+  "text": "A recorded loop that reads one array under two names is refused (our scope): pass it under one name.",
+  "way_out": "one name per array",
+  "cause": "ours",
+  "lifted_in": "none"
+ },
+ {
+  "id": "conditional-driver-floor",
+  "text": "IF/ELSE and SWITCH conditional nodes need an NVIDIA driver that supports CUDA 12.8 (SWITCH: driver 570); on an older driver eagle builds the same arms from plain IF nodes, with one extra node for the decision, and the results are the same (the driver's feature): update the driver for the single nodes.",
+  "way_out": "update the driver",
+  "cause": "framework",
+  "lifted_in": "none"
  }
 ]

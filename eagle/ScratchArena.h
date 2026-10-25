@@ -42,7 +42,7 @@ struct ScratchHandle {
  *   - **reserve** (``beginNode`` / ``reserve`` / ``endNode``, driven by
  *     ``Graph::addNative``): assign every native node's working buffers to slots,
  *     growing the tracked peak. No device memory yet.
- *   - **commit + resolve** (``Graph::finalizeNatives``): allocate the single
+ *   - **commit + resolve** (``Graph::finalize``): allocate the single
  *     backing buffer once at the computed peak; ``resolve`` hands out pointers.
  *
  * The v1 policy is a greedy first-fit ancestor allocator: correct (never aliases

@@ -471,7 +471,7 @@ class RunRecorder:
         word = 0 if self.word is None else int(self.word.data.ptr)
         ran = int(_core.diff_record_device(
             b._entry, b._addrs, self.n, max_steps, window, self.max_k, word,
-            int(self.runner.finished.data.ptr), int(launch._resolved_block(b._entry, self.n, None)),
+            int(self.runner.finished.data.ptr), int(launch._resolved_block(b._entry, self.n, None, declared=b._declared_block)),
             state, checkpoint, after, int(xp.cuda.get_current_stream().ptr), -1))
         return ran, self._launch_count(ran)
 
@@ -929,7 +929,7 @@ class RunReverse:
 
         launch = importlib.import_module("eagle.launch")
         gathers, accums, step, word = self._plans(lambda a: int(a.data.ptr))
-        block = lambda b: int(launch._resolved_block(b._entry, self.m, None))
+        block = lambda b: int(launch._resolved_block(b._entry, self.m, None, declared=b._declared_block))
         stream = int(self.xp.cuda.get_current_stream().ptr)
         _core.diff_reverse_device(self.m, self.n, self.window, live,
                                   [int(o.data.ptr) for o in orders], gathers,

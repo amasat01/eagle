@@ -50,7 +50,7 @@ import numpy as np
 import pytest
 from raptor.conformance.interop import register_row
 
-from _device_file import compile_device
+from _device_file import compile_device, find_nvcc
 from eagle import LoadedVector
 
 pytestmark = pytest.mark.interop_matrix
@@ -151,14 +151,6 @@ def _gxx() -> str | None:
     )
 
 
-def _nvcc() -> str | None:
-    found = shutil.which("nvcc")
-    if found:
-        return found
-    cand = pathlib.Path(os.environ.get("CUDA_PATH", "/usr/local/cuda")) / "bin" / "nvcc"
-    return str(cand) if cand.exists() else None
-
-
 @pytest.fixture(scope="module")
 def v2_sample_local(tmp_path_factory):
     tmp = tmp_path_factory.mktemp("execv2_sample_local")
@@ -169,7 +161,7 @@ def v2_sample_local(tmp_path_factory):
             "execution_partition_identity/execution_host_device_twin need g++ "
             "to build the v2 host fixture; none found on PATH or at /usr/bin/g++"
         )
-    nvcc = _nvcc()
+    nvcc = find_nvcc()
     if nvcc is None:
         raise RuntimeError(
             "execution_partition_identity/execution_host_device_twin need nvcc "

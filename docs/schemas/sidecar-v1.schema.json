@@ -22,8 +22,8 @@
       "description": "Plugin-schema version this sidecar conforms to. Single-sourced from eagle.roles.SCHEMA_VERSION. Absent ⇒ treated as v1 (backward-lenient); newer than the loader ⇒ rejected (forward-strict). Orthogonal to aether_abi."
     },
     "format": {
-      "enum": ["ptx", "cubin", "fatbin"],
-      "description": "Artifact format the sidecar accompanies: arch-portable PTX, single-arch cubin, or multi-arch fatbin."
+      "enum": ["ptx", "cubin", "fatbin", "host"],
+      "description": "Artifact format the sidecar accompanies: arch-portable PTX, single-arch cubin, multi-arch fatbin, or host (a host shared library)."
     },
     "pattern": {
       "enum": ["vector", "pure"],

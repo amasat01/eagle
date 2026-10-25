@@ -3,6 +3,7 @@
 </p>
 <h1 align="center">eagle</h1>
 <p align="center">Runs kernels on CPU and GPU, with precise control. Part of the RAPTOR family.</p>
+<p align="center">Linux and macOS wheels; on Windows, use WSL2.</p>
 
 <h3 align="center">eagle: run a million per-sample kernels on the GPU or the CPU</h3>
 <p align="center">Each sample stops when it is done. eagle records the loop on the GPU once, replays it,
@@ -29,12 +30,52 @@ eagle is the execution layer of the [RAPTOR family](https://amasat01.github.io/)
 as CUDA graphs to keep work efficient on the GPU, and connects them to the code you already have. See
 [where RAPTOR fits](https://amasat01.github.io/where_raptor_fits.html) for the full four-part story.
 
-Wheels for Linux x86_64 and aarch64 and macOS arm64 (Python 3.9-3.15); the GPU plugin is in the x86_64 wheels only. On Windows, open the notebook on Colab or Kaggle (the Kaggle badge above).
+Wheels for Linux x86_64 and aarch64 and macOS arm64 (Python 3.9-3.15); the GPU plugin is in the x86_64 wheels only. **On Windows, use WSL2** (the Linux wheels), or open the notebook on Colab or Kaggle (the Kaggle badge above).
 
 ```bash
 pip install raptor-eagle raptor-hawk                           # CPU threads, no NVIDIA packages
 pip install "raptor-eagle[cuda12]" "raptor-hawk[cuda12]"       # NVIDIA GPU ([cuda13] for a CUDA 13 driver)
 ```
+
+A kernel, run over an array, then two kernels as one graph (NumPy arrays, so it runs on the CPU):
+
+```python
+import numpy as np
+import eagle
+import hawk
+from hawk import Param, Scalar
+
+
+@hawk.kernel
+def scale(x: Scalar, a: Param, b: Param) -> Scalar:
+    return a * x + b
+
+
+@hawk.kernel
+def square(v: Scalar) -> Scalar:
+    return v * v
+
+
+x = np.arange(4.0)
+print(eagle.deploy(scale).run(x=x, a=2.0, b=1.0))        # [1. 3. 5. 7.]
+
+
+@eagle.Graph.builder
+def chain(x):
+    g = eagle.Graph()
+    g.result = square(scale(x, 2.0, 1.0))
+    return g
+
+
+g = chain(x)                                             # build: records, runs nothing
+print(g())                                               # [ 1.  9. 25. 49.]
+```
+
+The same lines with CuPy arrays make a CUDA graph: the arrays decide where it runs.
+The [graph model](https://amasat01.github.io/eagle/content/userguide/graph_model.html)
+has branches, device-side `if` and `while`, `bind` and gradients.
+
+On a GPU, `eagle.simulate` runs a million per-sample loops, each stopping at its own step:
 
 ```python
 import cupy as cp
@@ -66,11 +107,7 @@ print(result.status, result.steps, result.x[:3])
 # (steps counts whole check intervals, so it varies with the launch strategy eagle picks; x does not)
 ```
 
-The same call runs on CPU threads with NumPy arrays. No GPU? Change the first line of the example to:
-
-```python
-import numpy as cp   # CPU route: the rest runs unchanged (steps then prints 1024, not 1000: it counts whole check intervals, which differ by route)
-```
+With NumPy arrays the same call runs on CPU threads (`steps` then prints 1024, not 1000: it counts whole check intervals, which differ by route).
 
 Errors: `no CUDA GPU visible` means there is no GPU (or `CUDA_VISIBLE_DEVICES` hides it); `cudaErrorInsufficientDriver` means the
 installed extra does not match the driver, so install `raptor-eagle[cuda12]` for a CUDA 12 driver or `[cuda13]` for CUDA 13.
@@ -79,12 +116,21 @@ With the `[torch]` extra, a hawk kernel works inside PyTorch autograd:
 
 ```python
 import torch
+import hawk
+from hawk import Mutable, Scalar
 from eagle.frameworks import torch as eagle_torch
 
-step = eagle_torch.function(decay, wrt=("k", "x"))   # decay: a hawk kernel
+
+@hawk.kernel
+def decay(k: Scalar, x: Scalar, x_next: Mutable[Scalar]):
+    x_next = x * (1.0 - k)
+
+
+step = eagle_torch.function(decay, wrt=("k",))
 k = torch.full((1000,), 0.5, dtype=torch.float64, requires_grad=True)
-x_next = step(k, torch.ones(1000, dtype=torch.float64), torch.zeros(1000, dtype=torch.bool))
-x_next.sum().backward()      # fills k.grad
+x_next = step(k, torch.ones(1000, dtype=torch.float64))
+x_next.sum().backward()
+print(x_next[0].item(), k.grad[0].item())     # 0.5 -1.0
 ```
 
 **[Quickstart](https://amasat01.github.io/eagle/content/userguide/quickstart_python.html)** ·
@@ -98,17 +144,13 @@ x_next.sum().backward()      # fills k.grad
 <sub>NVIDIA H100 80GB HBM3 (card of 2026-10-13). NVIDIA Warp's per-thread kernel is the fastest GPU arm in 2 of 12 RK4 cells; on the dense batch (every sample running all 1000 steps) at N = 1,000,000 it takes 1.71 ms and `eagle.simulate` 1.75 ms. See [every number, every arm](#performance).</sub>
 <!-- hero:end -->
 
-## What's new in 0.6.4
+## What's new in 0.7.0
 
-- Sums over samples work across MPI ranks: every rank gets the single-rank cell bit for bit (`eagle.exec.RankPartition`).
-- The JAX, torch and Warp bridges take `policy=` for how a sum is finished.
-- `grad=False` marks a node as not differentiated (a step-size controller); a loop body may be several parts, and a node in a recorded loop can read another node's plane and a `Param`.
-- `until_done` takes any DLPack array (JAX, torch, CuPy, NumPy) and returns the answer with `Runner.result`.
-- `vmap` over a batch of `Param` values is one launch; forward mode works through a kernel that carries state.
-- The CPU host runs float32 plugins, and host plugins load from a manifest with `format: host`.
-- The C++ registries own the finished counter.
-- Fixed: torch bridge `Param` gradients were too large when some samples finished early (0.6.3), and a torch `CUDAGraph` node of a recorded run on the GPU could give wrong results. Re-run any training that used either.
-- Wheels for Linux aarch64, macOS arm64, and Python 3.15 and 3.15t.
+- Write a graph as a function: `@eagle.Graph.builder`, `g.result`, `g()` to run, `g.bind(x=...)` for new arrays.
+- Branches that run together (`g.parallel()`, `p.branch()`, `wait`) and `if`, `while`, `for` and `match` on a device cell, inside one graph.
+- Blocks: a function that takes the graph and appends to it, also on a hand-made graph.
+- `buffer=` keeps a kernel's result; gradients take explicit `wrt` and seeds by name.
+- Results agree within the ULP contract across releases, not bit for bit: a result may differ from the previous release's in the last digits.
 
 Full list in the [changelog](CHANGELOG.md).
 
@@ -252,7 +294,7 @@ table is the headline cut (both distributions, N = 1,000,000), and the
 
 [Where the performance comes from](https://amasat01.github.io/eagle/content/performance/mechanism.html) explains why eagle is ahead where samples finish at different times and level where they do not.
 
-<p align="center"><a href="https://amasat01.github.io/eagle/content/performance.html"><img src="https://raw.githubusercontent.com/amasat01/eagle/main/docs/_static/perf/readme_gpu.svg" alt="Wall time per tool for a million RK4 oscillators on the default GPU: eagle.simulate, NVIDIA Warp, JAX, CuPy and PyTorch; the numbers are on the performance page." width="732"></a></p>
+<p align="center"><a href="https://amasat01.github.io/eagle/content/performance.html"><picture><source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/amasat01/eagle/main/docs/_static/perf/readme_gpu-dark.svg"><img src="https://raw.githubusercontent.com/amasat01/eagle/main/docs/_static/perf/readme_gpu.svg" alt="Wall time per tool for a million RK4 oscillators on the default GPU: eagle.simulate, NVIDIA Warp, JAX, CuPy and PyTorch; the numbers are on the performance page." width="732"></picture></a></p>
 
 The chart shows the H100; [the performance page](https://amasat01.github.io/eagle/content/performance.html) has a tab for every device and CPU measured.
 

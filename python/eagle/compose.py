@@ -62,6 +62,7 @@ from typing import Any
 import numpy as np
 
 from ._conditional import SkipGuard, skippable
+from .interop import _root_module
 from .pipeline import GraphPipeline, member_device
 
 #: The four composition mechanisms :class:`GraphComposer` dispatches on.
@@ -89,17 +90,13 @@ class _Member:
     pre_launch: Any = None
 
 
-def _module_name(arr) -> str:
-    return type(arr).__module__.split(".")[0]
-
-
 def _validate_member_flags(flags) -> None:
     """``mode="conditional"``'s intent-guard contract: a uint32 device
     array, since ``SkipGuard._device_ptrs()`` reads ``arr.data.ptr`` and
     capture itself is cupy-only. Both rejects are named here rather than
     left to surface as a bare ``AttributeError`` deep inside the capture
     weave. The other three modes are host-paced and never call this."""
-    module = _module_name(flags)
+    module = _root_module(flags)
     if module != "cupy":
         raise TypeError(
             "GraphComposer: member_flags must be a cupy (device) uint32 "

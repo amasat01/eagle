@@ -283,6 +283,34 @@ def test_mandatory_only_backend_python_entries_raise_naming_the_group(tmp_path):
             assert why.endswith(f"does not provide {group}"), (key, why)
 
 
+def test_a_backend_older_than_the_transfer_symbols_refuses_each_by_name(tmp_path):
+    # Minor 6 added memcpy, host_alloc, host_free and host_func, each bound on its own: a
+    # backend without them loads, and only a call that needs one raises, naming it.
+    stub = _compile(tmp_path, "mandatory", _MANDATORY_STUB.format(filled="sizeof full"))
+    out = _run_child(
+        """
+        c = eagle._core
+        calls = {
+            "eagle_backend_memcpy": lambda: c.memcpy(8, 16, 8, c.COPY_H2H),
+            "eagle_backend_host_alloc": lambda: c.host_alloc(8),
+            "eagle_backend_host_free": lambda: c.host_free(8),
+            "eagle_backend_host_func": lambda: c.HostFunc(lambda: None).enqueue(0),
+        }
+        res = {}
+        for k, f in calls.items():
+            try:
+                f()
+                res[k] = None
+            except eagle.BackendUnavailable as e:
+                res[k] = str(e)
+        print(json.dumps(res))
+        """,
+        stub,
+    )
+    for symbol, why in out.items():
+        assert why is not None and why.endswith(f"does not provide {symbol}"), (symbol, why)
+
+
 def test_smaller_build_info_struct_is_honoured(tmp_path):
     # An older backend: build_info ends before backend_kind (offset 176).
     stub = _compile(tmp_path, "oldinfo", _MANDATORY_STUB.format(filled="176u"))

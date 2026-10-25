@@ -19,6 +19,7 @@ repository. Nothing here imports a GPU library at import time.
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
 import pathlib
@@ -222,6 +223,34 @@ def write_card(card, json_path, md_text, md_path):
     md_path.write_text(md_text)
 
 
+def demo_facts(script, example, example_script):
+    """The facts block of a demo card; the device fields are None without a GPU."""
+    try:
+        device, peak = device_facts()[:2]
+    except Exception:  # no GPU or no cupy: the dry path
+        device = peak = None
+    return {
+        "device": device, "peak": peak, "software": software(),
+        "script_md5": md5(script),
+        "example_script_md5": md5(example.__file__),
+        "example_script": example_script,
+        "generated_utc": utc_now_iso(),
+    }
+
+
+def demo_md(card, name, dry_note):
+    """The markdown of a demo card; ``dry_note`` explains why a dry run is not the real measurement."""
+    lines = [f"# {name} card", ""]
+    if card.get("dry"):
+        lines += ["**DRY RUN -- not authoritative, and not the same "
+                  f"measurement as the real card** ({dry_note}).", ""]
+    lines += [f"Schema: `{card['schema']}`  ·  generated {card['facts']['generated_utc']}",
+             "", "## Facts", "", "```json", json.dumps(card["facts"], indent=2, sort_keys=True),
+             "```", "", "## Results", "", "```json",
+             json.dumps(card["results"], indent=2, sort_keys=True), "```", ""]
+    return "\n".join(lines)
+
+
 def cpu_model():
     try:
         for line in pathlib.Path("/proc/cpuinfo").read_text().splitlines():
@@ -413,6 +442,25 @@ def wins(card):
 # --------------------------------------------------------------------------- #
 # GPU state and facts
 # --------------------------------------------------------------------------- #
+def lib_installed(lib):
+    """Whether ``lib`` can be imported here, decided WITHOUT importing it
+    (``find_spec``); a library blocked through ``sys.modules[lib] = None``
+    counts as not installed."""
+    try:
+        return importlib.util.find_spec(lib) is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def touch_device():
+    """Create the CUDA context with one tiny device operation, so a baseline
+    read right after it sees the context and nothing else."""
+    import cupy as cp
+
+    cp.zeros(1, dtype=cp.uint8).sum()
+    cp.cuda.Device().synchronize()
+
+
 def sync():
     import cupy as cp
 

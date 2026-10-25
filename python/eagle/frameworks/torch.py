@@ -54,7 +54,7 @@ from types import MappingProxyType
 
 import torch
 
-from .. import FINISHED_PLANE, _cell_rows, _split
+from .. import FINISHED_PLANE, _cell_rows, _layout, _split
 from .._graph_reduce import check_policy
 from ._kernel_planes import INPUT_ROLES, OUTPUT_ROLES, _prior_reads, call_mode, promote
 from ._tower import LOCK, finished_identity, plane_names
@@ -214,7 +214,7 @@ def _mode_of(tensors):
         for i, t in enumerate(tensors)
         if isinstance(t, torch.Tensor) and t.dtype.is_floating_point
     ]
-    return call_mode("eagle.frameworks.torch", floats) if floats else "float64"
+    return call_mode("eagle.frameworks.torch", floats, promote=True) if floats else "float64"
 
 
 class _Level:
@@ -935,6 +935,10 @@ class KernelFunction:
                     value = value.reshape(1)
                     if promoted and device is not None and value.device != device:
                         value = value.to(device)
+            if isinstance(value, torch.Tensor) and value.dtype.is_floating_point \
+                    and value.dtype != dtype:
+                _layout.warn_promoted(name, str(value.dtype).rsplit(".", 1)[-1], mode)
+                value = value.to(dtype)
             out.append(value)
         return out
 

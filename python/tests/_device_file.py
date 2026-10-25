@@ -18,8 +18,11 @@ does not.
 
 from __future__ import annotations
 
+import os
 import re
+import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 _RELEASE = re.compile(r"release (\d+)\.(\d+)")
@@ -31,6 +34,47 @@ def device_artifact(directory: Path, stem: str) -> Path:
              if (directory / f"{stem}{ext}").is_file()]
     assert len(found) == 1, (stem, sorted(p.name for p in directory.iterdir()))
     return found[0]
+
+
+def _find_aether_include() -> str | None:
+    """Return the directory containing aether/aether.h, checking env override then
+    the active Python prefix (works when aether is installed into the conda env)."""
+    candidates = [
+        os.environ.get("EAGLE_AETHER_INCLUDE"),
+        os.path.join(sys.prefix, "include"),
+    ]
+    for d in filter(None, candidates):
+        if os.path.isfile(os.path.join(d, "aether", "aether.h")):
+            return d
+    return None
+
+
+AETHER_INCLUDE = _find_aether_include()
+
+
+def find_gxx(need: str | None = None) -> str | None:
+    """The host C++ compiler (``$CXX``, ``g++``, ``/usr/bin/g++``); ``None`` when
+    absent, or ``RuntimeError`` naming ``need`` when it is given."""
+    found = shutil.which(os.environ.get("CXX", "")) or shutil.which("g++")
+    if found is None and os.path.exists("/usr/bin/g++"):
+        found = "/usr/bin/g++"
+    if found is None and need:
+        raise RuntimeError(f"{need} needs g++ for the host object; none found on "
+                           "$CXX, $PATH or /usr/bin/g++")
+    return found
+
+
+def find_nvcc(need: str | None = None) -> str | None:
+    """``nvcc`` from ``$PATH`` or ``$CUDA_PATH``; ``None`` when absent, or
+    ``RuntimeError`` naming ``need`` when it is given."""
+    found = shutil.which("nvcc")
+    if not found:
+        cand = Path(os.environ.get("CUDA_PATH", "/usr/local/cuda")) / "bin" / "nvcc"
+        found = str(cand) if cand.exists() else None
+    if found is None and need:
+        raise RuntimeError(f"{need} needs nvcc for the device image; none found on "
+                           "$PATH or under $CUDA_PATH")
+    return found
 
 
 def nvcc_version(nvcc: str) -> tuple[int, int] | None:

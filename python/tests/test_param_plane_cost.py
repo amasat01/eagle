@@ -4,24 +4,10 @@
 a one-cell plane (a recorded graph's form) against the by-value immediate,
 one launch against the other and nothing else, within the forward floor."""
 
-import time
-
 import numpy as np
 
 from _reverse_fixtures import chain, plans
-
-N = 1 << 18
-FLOOR = 1.10
-
-
-def _paired_best(a, b, reps=41):
-    best = [float("inf"), float("inf")]
-    for _ in range(reps):
-        for i, fn in enumerate((a, b)):
-            t0 = time.perf_counter()
-            fn()
-            best[i] = min(best[i], time.perf_counter() - t0)
-    return best
+from test_forward_no_regression_record_off import FLOOR, N, _paired_best
 
 
 def test_a_parameter_plane_costs_no_more_than_the_floor(tmp_path):

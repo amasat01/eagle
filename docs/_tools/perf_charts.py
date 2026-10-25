@@ -141,23 +141,25 @@ def chart_html(chart_bars, where: str, note: str) -> str:
             f'<p class="axis-note">Log scale, from {_time(lo)} to {_time(hi)}.{' ' + note if note else ''}</p>')
 
 
-def chart_svg(chart_bars, title: str, where: str) -> str:
-    """A standalone SVG of the same chart for the READMEs: no script, light and
-    dark by ``prefers-color-scheme``, the numbers in ``<desc>``."""
+def chart_svg(chart_bars, title: str, where: str, palette: dict) -> str:
+    """A standalone SVG of the same chart for the READMEs, in one fixed palette
+    (``raptor_docs.themed_svg``: a light and a dark file, the numbers in ``<desc>``)."""
+    from raptor_docs.themed_svg import DARK
+
     lo, hi, pct = _positions(chart_bars)
     pad = 16
     w, label_w, track_w, row_h, top = 700, 150, 480, 30, 56
     h = top + row_h * (len(chart_bars) - 1) + 24
     full_w, full_h = w + 2 * pad, h + 2 * pad
-    _LIGHT, _DARK = _colours()
-    light = "\n".join(f".c{i}{{fill:{_LIGHT[b[1]]}}}" for i, b in enumerate(chart_bars))
-    dark = "\n".join(f".c{i}{{fill:{_DARK[b[1]]}}}" for i, b in enumerate(chart_bars) if b[1] in _DARK)
+    tools = _colours()[palette is DARK]
+    chips = "\n".join(f".c{i}{{fill:{tools[b[1]]}}}" for i, b in enumerate(chart_bars) if b[1] in tools)
     parts = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{full_w}" height="{full_h}" viewBox="0 0 {full_w} {full_h}" '
              f'role="img" aria-labelledby="t d" font-family="system-ui, -apple-system, Segoe UI, sans-serif">',
              f'<title id="t">{html.escape(title)}</title>',
              f'<desc id="d">{html.escape(alt_text(chart_bars, where))}</desc>',
-             "<style>.bg{fill:#fcfcfb;stroke:#e1e0d9}.ink{fill:#0b0b0b}.sub{fill:#52514e}.bar{fill:rgba(127,126,120,.5)}.us{fill:#7d53dc}",
-             light, "@media (prefers-color-scheme: dark){.bg{fill:#1a1a19;stroke:#2c2c2a}.ink{fill:#f2f2ee}.sub{fill:#c3c2b7}", dark, "}</style>",
+             f"<style>.bg{{fill:{palette['bg']};stroke:{palette['edge']}}}.ink{{fill:{palette['ink']}}}.sub{{fill:{palette['sub']}}}"
+             f".bar{{fill:{palette['bar']}}}.us{{fill:{palette['us']}}}",
+             chips, "</style>",
              f'<rect class="bg" x="0.5" y="0.5" width="{full_w - 1}" height="{full_h - 1}" rx="8"/>',
              f'<g transform="translate({pad},{pad})">',
              f'<text class="ink" x="0" y="22" font-size="16" font-weight="600">{html.escape(title)}</text>',

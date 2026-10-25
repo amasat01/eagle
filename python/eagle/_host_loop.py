@@ -487,11 +487,11 @@ def _run_measured(runner, entry, addrs, n, count) -> int:
     live count halved, stay fused under the band once a probe wins.
     Leaves the runner's policy/``go``/word cells and ``launches_by_k``
     histogram as the band does. Returns the loop iterations run."""
-    from ._until_done import _CAP, _DONE, _FIN_AT, _K, AUTO_K0, AUTO_K_MIN, _next_k
+    from ._until_done import _CAP, _DONE, _FIN_AT, _K, AUTO_K0, AUTO_K_MIN
 
     team = eexec.HostTeam
     cells, go, hist, word = runner._cells, runner._go, runner._hist, runner.fused_steps
-    finished, total, k_max = runner.finished, runner.n, runner._k_max
+    finished, total = runner.finished, runner.n
     compact = runner.loop.parts[1:-1]   # compaction (+ reorder): never the policy
     whole = runner.step.partitions[0]
     if not go[0]:

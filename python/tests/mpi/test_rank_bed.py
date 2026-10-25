@@ -45,6 +45,7 @@ import pytest
 import v2_artifact
 
 import eagle.exec as eexec
+from eagle import _lane_bind
 from eagle import plan as eplan
 
 #: A value no body in any artifact writes, so "still the sentinel" is unambiguous
@@ -152,7 +153,7 @@ def _serial_oracle(plugin, **kw):
     structure). Packing it a second time here would risk the oracle and the
     subject disagreeing about the argument block rather than about the answer."""
     arg_spec = plugin.arg_spec
-    n = eplan._n_from_kw(arg_spec, kw)
+    n = _lane_bind.n_of(arg_spec, kw)
     return eplan._run_host_plan(
         plugin,
         arg_spec,

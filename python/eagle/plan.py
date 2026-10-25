@@ -45,7 +45,8 @@ from . import exec as eexec
 from .abi import DEVICE_CPU, DEVICE_CUDA
 from .roles import INPUT_ROLES, OUTPUT_ROLES
 from ._plan_binding import BoundPlan, FUSED_STEPS_SLOT, _bind_plan, one_step_word
-from ._plan_pack import _integer_uniforms, _mutable_shapes, _n_from_kw, _pack_args
+from . import _lane_bind
+from ._plan_pack import _integer_uniforms, _mutable_shapes, _pack_args
 from ._plan_planes import (
     _adapt_planes,
     _bound,
@@ -59,7 +60,6 @@ from ._plan_planes import (
     _is_single_call,
     _output_names,
     _plane_dtype,
-    _plane_shape,
     _restore_layouts,
     _returned,
     _single_returned,
@@ -112,7 +112,8 @@ class Plan:
         """The concrete :class:`eagle.exec.Partition` tuple this plan runs
         over a sample count of ``n``: the resolved :attr:`partitions` when
         explicit, else a fresh even split into :attr:`npartitions`
-        contiguous partitions."""
+        contiguous partitions. A thread-box kernel splits its threads
+        (:func:`eagle._lane_bind.threads`), each partition still over ``n``."""
         if self.partitions is not None:
             if self.n_samples is not None and self.n_samples != n:
                 raise ValueError(
@@ -120,9 +121,10 @@ class Plan:
                     f"{self.n_samples}, but .run() observed n={n}"
                 )
             return self.partitions
+        m = _lane_bind.threads(self.plugin, n)
         if self.npartitions == 1:
-            return (eexec.Partition.whole(n),)
-        base, parts, remaining, left = 0, [], n, self.npartitions
+            return (eexec.Partition(0, m, n),)
+        base, parts, remaining, left = 0, [], m, self.npartitions
         for _ in range(self.npartitions):
             count = -(-remaining // left)  # ceil division: spread the remainder early
             parts.append(eexec.Partition(base, count, n))
@@ -206,7 +208,10 @@ class Plan:
         copying back after for a written plane — capture-legal, no
         device-wide sync. The output planes are always the caller's own:
         this door cannot allocate one, since it would have to outlive the
-        graph that writes it with no handle for the caller to hold.
+        graph that writes it with no handle for the caller to hold. An
+        ``int32`` input plane for an ``int64`` ``Index`` is widened by one
+        copy here, once (the bound plan holds the copy; :meth:`BoundPlan.rebind`
+        widens again), so a launch copies nothing.
 
         What's checked here (every refusal names the field): every declared
         name is bound and no stray one is; each plane is an array of the
@@ -308,6 +313,11 @@ def plan(
     op = _exec_op if _exec_op is not None else getattr(plugin, "exec_op", None)
 
     if partitions is not None:
+        if getattr(plugin, "box", None):
+            raise ValueError(
+                "eagle.plan: this kernel computes several lanes per thread (a thread "
+                "box), so its partitions count threads, not lanes; use npartitions=, "
+                "or build the kernel with HAWK_BOX=0")
         resolved, resolved_n = _resolve_explicit_partitions(partitions)
         if n_samples is not None and resolved_n is not None and n_samples != resolved_n:
             raise ValueError(
@@ -450,7 +460,12 @@ def _run_device_plan(plugin, arg_spec, kw, n: int, parts, *, launch=None, gather
     declared dtype is the caller's own buffer, written in place."""
     import cupy as cp
 
-    launch = launch if launch is not None else _launch_device
+    if launch is None:
+        declared = getattr(plugin, "block", None)     # the artifact's exact threads per block
+
+        def launch(fn, addrs, part):
+            return _launch_device(fn, addrs, part, declared)
+
     out_names = _output_names(arg_spec)
     dtype = _plane_dtype(plugin)
     widths = _declared_widths(plugin)
@@ -463,22 +478,28 @@ def _run_device_plan(plugin, arg_spec, kw, n: int, parts, *, launch=None, gather
             device_arrays[name] = cells.rows[name]
         elif role in OUTPUT_ROLES:
             device_arrays[name] = (
-                _checked_out(name, role, cp.asarray(kw[name]),
-                             _output_dtype(plugin, name, dtype), device=True)
+                _lane_bind.check_sink(
+                    plugin, name,
+                    _checked_out(name, role, cp.asarray(kw[name]),
+                                 _output_dtype(plugin, name, dtype), device=True), n)
                 if name in kw
-                else cp.zeros(_plane_shape(widths.get(name, 1), n),
+                else cp.zeros(_lane_bind.output_shape(plugin, name, widths.get(name, 1), n),
                                dtype=_output_dtype(plugin, name, dtype))
             )
         elif role in INPUT_ROLES:
             device_arrays[name] = _device_plane(_bound(kw, name, role), dtype,
                                                    declared=_declared_dtype(plugin, name),
                                                    name=name, role=role)
+    owned = _cell_rows.owned_pairs(plugin, kw)
+    for target, comp in owned:      # the run owns it: the target's shape, zeroed
+        device_arrays[comp] = cp.zeros_like(device_arrays[target])
 
     if gather is not None:
         for name in out_names:
             _check_gatherable(device_arrays[name])
 
-    fn = function_on(plugin, cp.cuda.runtime.getDevice())
+    device = cp.cuda.runtime.getDevice()
+    fn = function_on(plugin, device)
     for part in parts:
         boxes, addrs = _pack_args(
             arg_spec, device_arrays, kw, n, DEVICE_CUDA,
@@ -486,6 +507,8 @@ def _run_device_plan(plugin, arg_spec, kw, n: int, parts, *, launch=None, gather
             int_uniforms=_integer_uniforms(plugin),
         )
         launch(fn, addrs, part)
+        for entry, whole in _cell_rows.fold_steps(plugin, device_arrays, owned, device):
+            _launch_device(entry, addrs, whole)
         del boxes  # kept alive until run() returns, below this loop's scope
     cp.cuda.runtime.deviceSynchronize()
     if keep_device and gather is None:
@@ -504,7 +527,7 @@ def _run_device_plan(plugin, arg_spec, kw, n: int, parts, *, launch=None, gather
     if cells is not None:
         cells.finish()
         planes.update({name: cp.asnumpy(c) for name, c in cells.cell.items()})
-        out_names = tuple(nm for nm in out_names if nm not in _cell_rows.hidden(plugin))
+    out_names = tuple(nm for nm in out_names if nm not in _cell_rows.hidden(plugin))
     return _returned(planes, out_names)
 
 
@@ -526,16 +549,21 @@ def _run_host_plan(plugin, arg_spec, kw, n: int, parts, *, launch=None, gather=N
             # is refused before the launch (the kernel would write through
             # the wrong element size).
             host_arrays[name] = (
-                _checked_out(name, role, _host_view(name, role, kw[name]),
-                             _output_dtype(plugin, name, dtype), device=False)
+                _lane_bind.check_sink(
+                    plugin, name,
+                    _checked_out(name, role, _host_view(name, role, kw[name]),
+                                 _output_dtype(plugin, name, dtype), device=False), n)
                 if name in kw
-                else np.zeros(_plane_shape(widths.get(name, 1), n),
+                else np.zeros(_lane_bind.output_shape(plugin, name, widths.get(name, 1), n),
                                dtype=_output_dtype(plugin, name, dtype))
             )
         elif role in INPUT_ROLES:
             host_arrays[name] = _host_plane(_bound(kw, name, role), dtype,
                                                declared=_declared_dtype(plugin, name),
                                                name=name, role=role)
+    owned = _cell_rows.owned_pairs(plugin, kw)
+    for target, comp in owned:      # the run owns it: the target's shape, zeroed
+        host_arrays[comp] = np.zeros_like(host_arrays[target])
 
     if gather is not None:
         for name in out_names:
@@ -550,6 +578,8 @@ def _run_host_plan(plugin, arg_spec, kw, n: int, parts, *, launch=None, gather=N
             int_uniforms=_integer_uniforms(plugin),
         )
         launch(entry, addrs, part)
+        for fold, whole in _cell_rows.fold_steps(plugin, host_arrays, owned):
+            eexec.HostTeam.run_serial(fold, addrs, whole)
         del boxes
     if gather is not None:
         for name in out_names:
@@ -572,7 +602,7 @@ def _finished(plugin, cells, arrays, out_names):
     """``(arrays, names)`` of a run's result: the finished cell in place of its
     rows (the ``_comp`` companions are not handed back)."""
     if cells is None:
-        return arrays, out_names
+        return arrays, tuple(nm for nm in out_names if nm not in _cell_rows.hidden(plugin))
     cells.finish()
     arrays = {**arrays, **cells.cell}
     return arrays, tuple(nm for nm in out_names if nm not in _cell_rows.hidden(plugin))
@@ -585,14 +615,15 @@ def _launch_host(entry, addrs, part):
     return eexec.HostTeam.run(entry, addrs, part)
 
 
-def _launch_device(fn, addrs, part):
-    """The single-process device launch — the twin of :func:`_launch_host`."""
+def _launch_device(fn, addrs, part, block=None):
+    """The single-process device launch — the twin of :func:`_launch_host`.
+    ``block`` is the artifact's declared ``launch.block`` (``None``: the default)."""
     import cupy as cp
 
     # the caller's current stream (cupy's, which a torch call has made its
     # own for the run): the legacy stream does not wait for a non-blocking one
-    return eexec.DeviceKernel.run(fn, addrs, part,
-                                  stream=int(cp.cuda.get_current_stream().ptr))
+    return eexec.DeviceKernel.run(fn, addrs, part, stream=int(cp.cuda.get_current_stream().ptr),
+                                  **({} if block is None else {"block": block}))
 
 
 def _check_gatherable(plane) -> None:
@@ -704,30 +735,28 @@ def _run_one(p: Plan, /, **kw):
     if p.structure is eexec.DeviceKernel or p.inner is eexec.DeviceKernel:
         on = planes_device(arg_spec, kw, door="plan.run")
     with device_scope(on):      # the planes' GPU, whatever is current
-        return _run_here(p, arg_spec, kw)
-
-
-def _run_here(p: Plan, arg_spec, kw):
-    """:func:`_run_one` on the device it made current."""
-    plugin = p.plugin
-    out_names = _output_names(arg_spec)
-    _check_run_writable(arg_spec, out_names, kw)
-    kw = one_step_word(arg_spec, kw,
-                       "cupy" if p.structure is eexec.DeviceKernel else "numpy")
-    # the caller's original output objects, before _adapt_planes can replace
-    # a sample-major one with its native-layout view/scratch
-    supplied = {name: kw[name] for name in out_names if name in kw}
-    kw, adapted = _adapt_planes(plugin, arg_spec, kw)
-    n = _n_from_kw(arg_spec, kw)
-    _check_run_shapes(plugin, arg_spec, kw, n)
-    parts = p.partitions_for(n)
-    if adapted and _is_single_call(adapted):
+        plugin = p.plugin
+        owned = _cell_rows.companions_of(plugin)
+        out_names = tuple(nm for nm in _output_names(arg_spec) if nm not in owned)
+        _check_run_writable(arg_spec, out_names, kw)
+        kw = one_step_word(arg_spec, kw,
+                           "cupy" if p.structure is eexec.DeviceKernel else "numpy")
+        # the caller's original output objects, before _adapt_planes can replace
+        # a sample-major one with its native-layout view/scratch
+        kw, n, lane_dims = _lane_bind.bind_n(plugin, arg_spec, kw, _declared_widths(plugin))
+        supplied = {name: kw[name] for name in out_names if name in kw}
+        kw, adapted = _adapt_planes(plugin, arg_spec, kw)
+        if n is None:
+            n = _lane_bind.n_of(arg_spec, kw)
+        _check_run_shapes(plugin, arg_spec, kw, n)
+        parts = p.partitions_for(n)
         result = _run_structure(p, plugin, arg_spec, kw, n, parts, p.policy)
-        return _single_returned(plugin, arg_spec, out_names, supplied, result)
-
-    result = _run_structure(p, plugin, arg_spec, kw, n, parts, p.policy)
-    result = _restore_layouts(arg_spec, adapted, result)
-    return _write_back_outputs(out_names, supplied, adapted, result)
+        if adapted and _is_single_call(adapted):
+            return _single_returned(plugin, arg_spec, out_names, supplied, result)
+        result = _restore_layouts(arg_spec, adapted, result)
+        result = _write_back_outputs(out_names, supplied, adapted, result)
+        return _lane_bind.shape_result(plugin, result, out_names, lane_dims, n,
+                                       _declared_widths(plugin))
 
 
 def _run_structure(p: Plan, plugin, arg_spec, kw, n: int, parts, policy):

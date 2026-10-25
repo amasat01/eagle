@@ -47,7 +47,7 @@ curl -fsSL -o "$work/get-pip.py" https://bootstrap.pypa.io/get-pip.py
 if [ -n "${RAPTOR_DIR:-}" ]; then
     "$venv_py" -m pip install --quiet --no-deps "$RAPTOR_DIR"
 else
-    "$venv_py" -m pip install --quiet --only-binary=:all: "raptor-core>=0.3"
+    "$venv_py" -m pip install --quiet --only-binary=:all: "raptor-core>=0.7,<0.8"
 fi
 
 # the binding, instrumented, with debug info so reports name file:line

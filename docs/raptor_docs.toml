@@ -7,6 +7,7 @@ jax_floor = "python/pyproject.toml"
 fresh = [
   "python tools/sync_readme_cards.py",
   "python -m raptor_docs.capmap -o docs/_static/capmap.svg",
+  "python -m raptor_docs.themed_figure --sync docs/content/_shared/themed_figure.py",
 ]
 
 [helper_needs]

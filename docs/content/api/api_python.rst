@@ -33,6 +33,21 @@ and is the same function as :func:`eagle.plan.auto`:
 .. autofunction:: eagle.deploy
    :no-index:
 
+Host nodes and copies
+---------------------
+
+A graph may hold GPU nodes, host nodes and the copies between them
+(:doc:`../userguide/graph_across_devices`):
+
+.. autofunction:: eagle.copy
+   :no-index:
+
+.. autofunction:: eagle.pinned
+   :no-index:
+
+.. autofunction:: eagle.opaque
+   :no-index:
+
 K-class active sets
 -------------------
 

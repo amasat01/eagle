@@ -35,7 +35,7 @@ class Graph;         // forward: the graph a native node contributes itself to
  *      node, so downstream nodes can depend on it.
  *
  * The arena and the two phases are internal to ``Graph::addNative`` /
- * ``Graph::finalizeNatives``; the reuse policy inside the arena is a contained,
+ * ``Graph::finalize``; the reuse policy inside the arena is a contained,
  * swappable component. This keeps the node authors and graph builders free of any
  * allocation concern — the whole point of the graph-level arena.
  */

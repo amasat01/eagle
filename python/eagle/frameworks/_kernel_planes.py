@@ -202,10 +202,12 @@ class ModeError(TypeError, ValueError):
     """A call's floating planes name no single float32/float64 build."""
 
 
-def call_mode(who, dtypes) -> str:
+def call_mode(who, dtypes, *, promote=False) -> str:
     """The float mode of one call, read off ``dtypes`` (``[(name, dtype)]`` for
     its floating planes, in input order; a numpy or torch dtype): the first
-    plane's. A plane that is not float32/float64, or disagrees with the first,
+    plane's, a disagreeing plane refused by name -- or, with ``promote=True``,
+    the widest plane's, the narrower ones being copied up by the caller
+    (:func:`eagle._layout.warn_promoted`). A plane that is not float32/float64
     is refused by name. Plain string work, so a framework can trace it."""
     mode = None
     for name, dt in dtypes:
@@ -217,10 +219,12 @@ def call_mode(who, dtypes) -> str:
         if mode is None:
             mode = found
         elif found != mode:
-            raise ModeError(
-                f"{who}: mixed floating dtypes in one call (plane {name!r} is {found}, the "
-                f"first plane is {mode}); pass every plane in one float dtype (a call runs "
-                "the float32 build or the float64 one, never a mix)")
+            if not promote:
+                raise ModeError(
+                    f"{who}: mixed floating dtypes in one call (plane {name!r} is {found}, the "
+                    f"first plane is {mode}); pass every plane in one float dtype (a call runs "
+                    "the float32 build or the float64 one, never a mix)")
+            mode = "float64"
     if mode is None:
         raise ModeError(f"{who}: no floating plane bound")
     return mode

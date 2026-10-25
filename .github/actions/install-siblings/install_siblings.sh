@@ -14,11 +14,16 @@ for pair in $siblings; do
   pkg=${pair%%=*}
   path=$(cd "${pair#*=}" && pwd)
   root=$path
-  until [ -f "$root/tools/version.py" ]; do
-    [ "$root" != / ] || { echo "no tools/version.py above $path" >&2; exit 1; }
+  until [ -e "$root/.git" ]; do
+    [ "$root" != / ] || { echo "no git checkout above $path" >&2; exit 1; }
     root=$(dirname "$root")
   done
-  v=$(python "$root/tools/version.py" get)
+  # the version the sibling is (or will be): its exact tag, else what setuptools-scm gives the checkout
+  v=$(git -C "$root" describe --tags --match 'v*' --exact-match 2>/dev/null | sed 's/^v//' || true)
+  if [ -z "$v" ]; then
+    python -m pip install --quiet setuptools-scm
+    v=$(python -m setuptools_scm -r "$root")
+  fi
   pins="$pins $pkg==$v"
   if [ "$(curl -s -o /dev/null -w '%{http_code}' "https://pypi.org/pypi/$pkg/$v/json")" = 200 ]; then
     echo "$pkg $v: PyPI"

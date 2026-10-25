@@ -36,6 +36,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from conftest import CUPY_AVAILABLE
 
 import eagle
 from eagle import SkipGuard, compaction_body, repeat_while
@@ -118,15 +119,6 @@ def _oscillator(kind, finishing, steps=1):
     return hawk.kernel(oscillator_step, kind=kind, steps=steps)
 
 
-def _have_gpu():
-    try:
-        import cupy
-
-        return cupy.cuda.runtime.getDeviceCount() > 0
-    except Exception:
-        return False
-
-
 def _build(kern, work, targets, cache_dir=None, defines=()):
     import ctypes
 
@@ -166,7 +158,7 @@ def plans(tmp_path_factory):
     pytest.importorskip("hawk")
     from hawk.ext import Guard, Kind
 
-    targets = ("host", "cuda") if _have_gpu() else ("host",)
+    targets = ("host", "cuda") if CUPY_AVAILABLE else ("host",)
     out = {}
     for label, guard in (("plain", None), ("map", Guard(active_set=True))):
         for prefix, finishing in (("", False), ("f", True)):
@@ -374,15 +366,15 @@ def test_a_kernel_without_the_count_runs_to_the_cap(plans, tmp_path, monkeypatch
     """Red case: the same kernel emitted with the epilogue's count dropped; the
     guard never fires and the loop runs to its cap."""
     _need(plans, ("fplain", target))
-    from hawk.emit import aether
+    from hawk.emit import render
 
-    original = aether._Renderer._emit
+    original = render._Renderer._emit
 
     def no_count(self, line):
         original(self, line.replace(" hawk_abi::finish_count(lut_finished_count);",
                                     ""))
 
-    monkeypatch.setattr(aether._Renderer, "_emit", no_count)
+    monkeypatch.setattr(render._Renderer, "_emit", no_count)
     targets = ("host", "cuda") if target == "device" else ("host",)
     stripped = _build(_oscillator(None, True), tmp_path, targets,
                       cache_dir=str(tmp_path / "cache"))[target]
@@ -569,3 +561,29 @@ def test_non_compacting_run_reports_zero_compactions_with_no_pre_read(plans):
     # exactly one packed call (the post-launch snapshot: iterations + finished),
     # none for a pre-launch snapshot that would only ever read a stuck 0.
     assert calls == [2], f"expected one packed call of 2 cells, got {calls}"
+
+
+# --------------------------------------------------------------------------- #
+# A declared lane space: lane-shaped planes are viewed flat
+# --------------------------------------------------------------------------- #
+def test_until_done_takes_lane_shaped_planes_and_writes_them_in_place(plans):
+    import dataclasses
+
+    from eagle.sidecar import LaneSpace
+
+    base = plans[("fplain", "host")]
+    plugin = SimpleNamespace(**{**vars(base.plugin),
+                                "lane_space": LaneSpace((("row", None), ("col", 4)), 1)})
+    p = dataclasses.replace(base, plugin=plugin)
+    inp = _inputs(64, "spread", 20)
+    want, _ = _explicit(plans, "host", inp, 40)
+    flat = _planes(inp, np)
+    shaped = {k: v.reshape(16, 4) for k, v in _planes(inp, np).items()}
+    flat_run = eagle.until_done(p, max_steps=40, dt=_DT, **flat)
+    shaped_run = eagle.until_done(p, max_steps=40, dt=_DT, **shaped)
+    flat_run.run()
+    shaped_run.run()
+    for key in ("x", "v", "k"):
+        np.testing.assert_array_equal(shaped[key].reshape(-1), flat[key])
+        np.testing.assert_array_equal(flat[key], want[key])
+    assert shaped_run.n == 64 and shaped_run.finished == 64

@@ -1,5 +1,7 @@
 # Changelog
 
+Releases after 0.6.4 are on [GitHub](https://github.com/amasat01/eagle/releases): the notes are the pull request body.
+
 ## 0.6.4 (2026-10-22)
 
 **A run follows its arrays' GPU.** `plan.run`, `Plan.bind(...).launch()`, plan graphs and `eagle.reduce` run on the GPU their arrays live on, whatever device is current or the kernel was loaded on (before, a kernel loaded on one GPU failed with `invalid resource handle` while another was current, and a correct run on the second GPU was refused). Arrays on two GPUs are refused by name, as is a pipeline given a plan of another GPU. `device=n` on `plan.run`, `Plan.bind`, `Graph.build` and `eagle.reduce` is checked against the arrays and never moves them. A JAX function is kept per GPU, so one function per GPU coexist. Smaller changes: `_core.run_device` and `DeviceKernel.run` take `device=-1` (a stream of another GPU is refused by name), `LoadedKernel.function(device)` loads the kernel per GPU (`.fn` and `.device_id` stay), `GraphPipeline(device=-1)`, and `refence` and `device_props` default to `device=-1`, the current GPU (it was 0; the same on one GPU).

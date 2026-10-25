@@ -418,6 +418,15 @@ _GIL_RELEASE_ALLOWED = {
         "its busy state is the run's RecordSlot (begin() refuses a second recording while "
         "one is live or held); entry and params are copied before the release, and the "
         "checkpoint callback re-acquires the GIL",
+    "eagle_core.cpp:launch":
+        "Launcher.launch detaches only around the backend replay call, on a handle read "
+        "before the release, because a host node's Python callback takes the GIL; the "
+        "replay is ordered by the stream, and the Python object is held (lock_self) by "
+        "its caller",
+    "eagle_core.cpp:synchronize":
+        "Launcher.synchronize and Stream.synchronize detach only around the backend wait, "
+        "on a handle read before the release, because it waits on host nodes whose Python "
+        "callback needs the GIL (else a pending host node deadlocks the waiter)",
     "eagle_core.cpp:diff_reverse_host":
         "its busy state is the Reverse's BusyGuard plus the run's tape BusyGuard, held "
         "across the call; entries, params and gathers are copied before the release",
@@ -431,7 +440,7 @@ def test_bindings_never_release_the_gil():
     # thread detaches, so a binding that releases the GIL needs a per-object
     # busy state instead (and an allow-list entry naming it).
     pattern = re.compile(r"gil_scoped_release|call_guard|Py_BEGIN_ALLOW_THREADS")
-    binding = re.compile(r'm\.def\("(\w+)"')
+    binding = re.compile(r'\.def\("(\w+)"|^\s*"(\w+)",\s*$')   # `.def("x"` or `.def(` then `"x",`
     hits, used = [], set()
     for p in sorted(_SRC.rglob("*")):
         if p.suffix not in {".cpp", ".h", ".cu"}:
@@ -439,7 +448,7 @@ def test_bindings_never_release_the_gil():
         current = None
         for n, line in enumerate(p.read_text().splitlines(), 1):
             found = binding.search(line)
-            current = found.group(1) if found else current
+            current = (found.group(1) or found.group(2)) if found else current
             if pattern.search(line) and not line.lstrip().startswith("//"):
                 key = f"{p.name}:{current}"
                 if key in _GIL_RELEASE_ALLOWED:

@@ -76,7 +76,7 @@ TEST_F(ConditionalGroupTest, ThreeLegSkipProof)
     ConditionalGroup group(CountGuard{ count, nullptr });
     addTracerNode(group.body(), &tracer);
     g.addNative(std::move(group), {});
-    g.finalizeNatives();
+    g.finalize();
 
     eagle::cuda::Launcher launcher = g.launcher();
 
@@ -134,7 +134,7 @@ TEST_F(ConditionalGroupTest, NestedGroupThrowsNotSupported)
     outer.body().addNative(std::move(inner), {});
     g.addNative(std::move(outer), {});
 
-    ASSERT_THROW(g.finalizeNatives(), aether::Error)
+    ASSERT_THROW(g.finalize(), aether::Error)
         << "nesting a ConditionalGroup must fail loudly (801), not silently";
 
     EAGLE_CHECK_ALWAYS(cudaFree(count));
@@ -204,7 +204,7 @@ TEST_F(ConditionalGroupTest, EmptyBodyIsRefused)
         eagle::cuda::Graph g;
         ConditionalGroup group(CountGuard{ count, nullptr });
         g.addNative(std::move(group), {});
-        ASSERT_THROW(g.finalizeNatives(), std::invalid_argument)
+        ASSERT_THROW(g.finalize(), std::invalid_argument)
             << "ConditionalGroup must refuse an empty body";
     }
 
@@ -434,7 +434,7 @@ TEST_F(ConditionalGroupTest, MultiLauncherFanOut)
     ConditionalGroup group(CountGuard{ count, nullptr });
     addTracerNode(group.body(), &tracer);
     g.addNative(std::move(group), {});
-    g.finalizeNatives();
+    g.finalize();
 
     cudaGetLastError();  // clear any pre-existing sticky error before probing
     eagle::cuda::Launcher launcher1 = g.launcher();

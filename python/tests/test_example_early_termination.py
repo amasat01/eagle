@@ -16,6 +16,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from conftest import CUPY_AVAILABLE
 
 EXAMPLE = Path(__file__).resolve().parents[2] / "examples" / "python" / "early_termination.py"
 
@@ -50,14 +51,6 @@ def example():
     return _load_example()
 
 
-def _gpu_available() -> bool:
-    cupy = pytest.importorskip("cupy")
-    try:
-        return cupy.cuda.runtime.getDeviceCount() > 0
-    except Exception:
-        return False
-
-
 def _torch_available() -> bool:
     return importlib.util.find_spec("torch") is not None
 
@@ -90,7 +83,7 @@ def test_the_device_arm_matches_the_eager_arm_and_skips_when_done(example):
     re-checks them so a failure names which one gave way, and this is the
     row that proves the device arm actually ran (not skipped).
     """
-    if not _gpu_available():
+    if not CUPY_AVAILABLE:
         pytest.skip("no CUDA device visible to this process")
 
     results = example.run_demo(steps=200, batch=48, dt=0.02, seed=0,
@@ -131,7 +124,7 @@ def test_the_torch_comparison_agrees_and_every_arm_terminates(example):
     ``STATE_REL_TOL``, termination mismatches reported not hidden) and that
     every arm's own physics actually terminates the whole batch.
     """
-    if not _gpu_available():
+    if not CUPY_AVAILABLE:
         pytest.skip("no CUDA device visible to this process")
     if not _torch_available():
         pytest.skip("torch is not installed")
@@ -163,17 +156,18 @@ def test_the_torch_comparison_agrees_and_every_arm_terminates(example):
 
 def test_the_traced_kernel_declares_the_ping_pong_planes_and_the_live_count(example):
     """The kernel is ONE gated RK4 step: state, alive and age all ping-pong,
-    guarded by one accumulator."""
+    guarded by one accumulator (its compensation companion is declared beside
+    it and owned by eagle)."""
     kernel = example.step_kernel()
     roles = {name: role for role, name in kernel.arg_spec}
 
     assert kernel.name == example.KERNEL_NAME
     assert set(roles) == {
         "x", "alive", "age", "dt", "r_esc2", "r_col2",
-        "x_next", "alive_next", "age_next", "n_active",
+        "x_next", "alive_next", "age_next", "n_active", "n_active_c",
     }
     assert roles["x"] == "vec_in" and roles["x_next"] == "mutable"
     assert roles["alive"] == "per_sample" and roles["alive_next"] == "mutable"
     assert roles["age"] == "per_sample" and roles["age_next"] == "mutable"
     assert roles["dt"] == roles["r_esc2"] == roles["r_col2"] == "uniform"
-    assert roles["n_active"] == "accum_out"
+    assert roles["n_active"] == roles["n_active_c"] == "accum_out"

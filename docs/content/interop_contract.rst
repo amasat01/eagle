@@ -333,6 +333,66 @@ cache and assembles the plugin with ``hawk.artifact.plugins``. hawk's host runti
 (``hawk.runtime.plane_layout`` answers ``"single"``) and binds one sample as a
 0-d or ``(w,)`` array; it refuses a Python number, since it binds by address.
 
+The lane count of a ``Grid`` kernel
+-----------------------------------
+
+A hawk kernel can declare the shape of its lanes, ``lane: Grid["channel", "sample":50]``
+(see hawk's *Across lanes*). The plan reads that declaration from the kernel's sidecar
+(``launch.lane_space``) when it binds, so the caller gives the lane count in the kernel's own
+terms:
+
+.. code-block:: python
+
+   import numpy as np
+   import eagle
+   import hawk
+   from hawk import Grid, Scalar
+
+
+   @hawk.kernel
+   def per_channel(lane: Grid["channel", "sample":50], x: Scalar) -> Scalar:
+       return hawk.sum(x * x, over="sample")
+
+
+   plan = eagle.deploy(per_channel)
+   x = np.random.default_rng(1).normal(size=(4, 50))
+   print(plan.run(x=x).shape, plan.run(x=x, channel=4).shape)
+
+.. code-block:: text
+
+   (4,) (4,)
+
+- The runtime extent is the first axis's label (``channel=4``), or comes from a lane-shaped
+  plane: ``x`` of shape ``(4, 50)``, or ``(w, 4, 50)`` for a vector plane. The plane is used as
+  a flat view; nothing is copied.
+- ``n=`` is refused on such a kernel and names the label to pass instead. A plane whose
+  static axes differ from the declaration is refused by name.
+- Outputs come back lane-shaped. A reduced output (``hawk.sum(..., over=)``) or a
+  ``Mutable["bin":256]`` sink is allocated in its own shape and zeroed; one you pass must match
+  that shape, and keeps its contents.
+- A launch that binds only ``Table`` planes has no lane count to read, since a table's length is
+  never the lane count; it is refused, for every kernel. Pass a per-sample plane or the extent.
+- An ``Index`` plane of ``int32`` is accepted and widened once.
+- ``Plan.rebind`` and ``eagle.until_done`` take lane-shaped planes the same way. A kernel
+  with a ``group`` compacts with ``ActiveSet(mask, group=G)``: see
+  :doc:`modules/filtering/scan_and_compaction`.
+
+The block size of a kernel
+--------------------------
+
+A kernel whose sidecar states ``launch.block`` was emitted for exactly that many threads per
+block (hawk writes it when an emit fixes one). Every device launch of its plan uses that
+size, and the launch policy does not choose another. A ``block=`` argument that agrees is
+accepted; one that contradicts it is refused, naming both:
+
+.. code-block:: text
+
+   ValueError: eagle.launch: block=128 contradicts the artifact's launch.block 256
+   (the kernel was emitted for exactly that many threads per block)
+
+A kernel that states no block keeps the policy's choice, and ``block=`` pins it as before. A
+``launch.block`` that is not an integer of at least 1 is refused when the plan loads, naming the key.
+
 Roadmap
 -------
 

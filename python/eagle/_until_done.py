@@ -45,10 +45,10 @@ from ._active_set import (
     ActiveSet,
     compaction_body,
 )
-from . import _core, _layout, _split
+from . import _core, _lane_bind, _layout, _split
 from ._busy import BusyGuard
 from ._compat import zip_strict
-from ._conditional import SkipGuard, Skippable, repeat_while
+from ._conditional import SkipGuard, Skippable, _host_scalar, repeat_while
 from .graph import LowerCtx, Node, get_node_kind
 from .roles import OUTPUT_ROLES, PER_SAMPLE_ROLES
 from .sidecar import FINISH_AUTO, FINISH_COUNTER, read_finish, refuse_derived
@@ -581,11 +581,15 @@ def _step_planes(plans, specs, planes) -> tuple:
     several-plan step shares one namespace: a name is one plane in every
     plan that declares it; an undeclared name is refused."""
     from ._plan_pack import _n_from_kw
-    from ._plan_planes import _adapt_planes
+    from ._plan_planes import _adapt_planes, _declared_widths
+
+    def flat(plan, spec, sub):
+        return _lane_bind.flatten(plan.plugin, spec, sub, _declared_widths(plan.plugin),
+                                  door="bind")
 
     if len(plans) == 1:
-        adapted, _ = _adapt_planes(plans[0].plugin, specs[0], planes, door="bind",
-                                   single_only=True)
+        adapted, _ = _adapt_planes(plans[0].plugin, specs[0], flat(plans[0], specs[0], planes),
+                                   door="bind", single_only=True)
         return adapted, _n_from_kw(specs[0], adapted)
     declared = {nm for spec in specs for _role, nm in spec}
     unknown = sorted(set(planes) - declared)
@@ -595,7 +599,7 @@ def _step_planes(plans, specs, planes) -> tuple:
             f"(their planes: {sorted(declared)})")
     views = {}
     for plan, spec in zip_strict(plans, specs):
-        sub = {nm: planes[nm] for _role, nm in spec if nm in planes}
+        sub = flat(plan, spec, {nm: planes[nm] for _role, nm in spec if nm in planes})
         adapted, _ = _adapt_planes(plan.plugin, spec, sub, door="bind",
                                    single_only=True)
         for nm, value in adapted.items():
@@ -788,8 +792,8 @@ class Runner:
         word = xp.zeros(1, dtype=xp.int64) if auto else None
         active = None
         if compacting:
-            active = ActiveSet(mask, reorder=reorder, _lazy_scratch=True,
-                               _lazy_map=True)
+            active = ActiveSet(mask, reorder=reorder, group=_lane_bind.space_of(plans[0].plugin).group,
+                               _lazy_scratch=True, _lazy_map=True)
             if active.theta is not None:
                 roles = {}
                 for spec in specs:
@@ -1518,7 +1522,7 @@ class Runner:
         cells = self._cells.get() if self._device else self._cells
         return {"k": int(cells[_K]), "finished_at_launch": int(cells[_FIN_AT]),
                 "steps_done": int(cells[_DONE]), "max_steps": int(cells[_CAP]),
-                "go": self._word(self._go)}
+                "go": _host_scalar(self._go, 0)}
 
     @property
     def launch_policy(self) -> dict:
@@ -1541,7 +1545,7 @@ class Runner:
         """Seed the automatic loop's cells from the host before a run (the
         counter is already re-synchronised to the mask)."""
         xp = self._xp
-        fin = self._word(self.finished)
+        fin = _host_scalar(self.finished, 0)
         first = min(self._k0, self._max_steps)
         go = fin != self.n and self._max_steps > 0
         self._cells[...] = xp.asarray(
@@ -1576,16 +1580,6 @@ class Runner:
                 f"steps_per_launch={self.steps_per_launch}, every={self.every}, "
                 f"launches_per_compaction={self.launches_per_compaction}, "
                 f"active={self.active is not None})")
-
-    def _word_at(self, arr, index: int) -> int:
-        value = arr[index]
-        get = getattr(value, "get", None)
-        return int(get()) if get is not None else int(value)
-
-    def _word(self, arr) -> int:
-        value = arr[0]
-        get = getattr(value, "get", None)
-        return int(get()) if get is not None else int(value)
 
     def run(self) -> RunReport:
         """Run until every sample is done (or the cap is reached) and
@@ -1656,7 +1650,7 @@ class Runner:
         mapped = launches * self.n
         if self.auto:
             if self._mapped_live and launches:
-                mapped = self._word_at(self._cells, _MAPPED) or mapped
+                mapped = _host_scalar(self._cells, _MAPPED) or mapped
             hist = self._hist.get() if self._device else self._hist
             nz = hist.nonzero()[0]
             by_k = dict(zip(nz.tolist(), hist[nz].tolist()))
@@ -1664,7 +1658,7 @@ class Runner:
             # exact when nothing launched, the cap stopped an unfinished
             # sample, or the last launch took one step
             exact = (launches == 0 or finished != self.n
-                     or self._word(self.fused_steps) == 1)
+                     or _host_scalar(self.fused_steps, 0) == 1)
         else:
             ran = launches * self.launches_per_compaction
             by_k = {self.steps_per_launch: ran} if ran else {}

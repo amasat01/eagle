@@ -137,7 +137,7 @@ populate its own body graph, then add the whole group into a parent
 
    eagle::cuda::Graph g;
    g.addNative(std::move(group), {});
-   g.finalizeNatives();
+   g.finalize();
 
    eagle::cuda::Launcher launcher = g.launcher();
    launcher.launch();   // the body fires iff *livePtr != 0, read fresh every replay

@@ -12,34 +12,13 @@ implementation — multi-node capture, introspection, and replay accumulation th
 smaller ``test_graph_plugin`` cases don't cover.
 """
 
-import pathlib
-
 import numpy as np
 import pytest
 
 from eagle import GraphPipeline, LoadedPure, LoadedVector
-
-FIX = pathlib.Path(__file__).resolve().parent / "fixtures"
-N = 4096
-MU = 3.986004418e5
+from test_graph_plugin import FIX, MU, N, _gravity_ref, _make_P, _max_rel
 
 pytestmark = pytest.mark.gpu
-
-
-def _gravity_ref(pos, mu):
-    r = np.linalg.norm(pos, axis=0)
-    return -mu * pos / r**3
-
-
-def _make_P(seed=0):
-    rng = np.random.default_rng(seed)
-    d = rng.normal(size=(3, N))
-    d /= np.linalg.norm(d, axis=0)
-    return np.ascontiguousarray((d * rng.uniform(7e3, 4.2e4, N)).astype(np.float64))
-
-
-def _max_rel(g, ref):
-    return float(np.max(np.linalg.norm(g - ref, axis=0) / np.linalg.norm(ref, axis=0)))
 
 
 def _run(spec, replays):
