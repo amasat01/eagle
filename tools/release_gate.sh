@@ -20,7 +20,7 @@ if [ "$label" = none ]; then
 fi
 [ "$docs_only" = 0 ] || err "release:$label on a docs-only change: label it release:none"
 [ -n "$(tr -d '[:space:]' <<< "${PR_BODY:-}")" ] || err "the PR body is the release notes: write it"
-v=$(python "$(dirname "$0")/next_version.py" "$label" "$head") || err "no version for label $label"
+v=$(python "$(dirname "$0")/next_version.py" "release:$label" "$head") || err "no version for label $label"
 if git rev-parse -q --verify "refs/tags/v$v" > /dev/null || [ -n "$(git ls-remote --tags origin "refs/tags/v$v" 2>/dev/null)" ]; then
   err "tag v$v already exists: rebase on main, or relabel"
 fi
