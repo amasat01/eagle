@@ -95,7 +95,8 @@ enum Slot : int {
     sGraphCreate, sGraphDestroy, sGraphExecDestroy, sGraphInstantiateWithFlags, sGraphLaunch, sGraphGetNodes,
     sGraphNodeGetType, sGraphAddKernelNode, sGraphKernelNodeGetParams, sGraphExecKernelNodeSetParams,
     sGraphAddEmptyNode, sGraphAddChildGraphNode, sGraphChildGraphNodeGetGraph, sGraphNodeSetEnabled,
-    sGraphDebugDotPrint, sGraphConditionalHandleCreate, sGraphAddNode,
+    sGraphDebugDotPrint, sGraphConditionalHandleCreate, sGraphAddNode, sDriverGetVersion,
+    sMemHostAlloc, sMemFreeHost, sLaunchHostFunc,
     kSlots
 };
 
@@ -159,6 +160,10 @@ Entry g_entries[kSlots] = {
     { "cuGraphDebugDotPrint", 11030, 0, nullptr },
     { "cuGraphConditionalHandleCreate", 12030, COND, nullptr },
     { "cuGraphAddNode", 12020, COND, nullptr },
+    { "cuDriverGetVersion", 2020, 0, nullptr },
+    { "cuMemHostAlloc", 2020, 0, nullptr },
+    { "cuMemFreeHost", 2000, 0, nullptr },
+    { "cuLaunchHostFunc", 10000, 0, nullptr },
 };
 
 struct Driver {
@@ -738,6 +743,12 @@ const char* cudaGetErrorString(cudaError_t error)
 
 // ---- devices and contexts ----------------------------------------------------
 
+cudaError_t cudaDriverGetVersion(int* version)
+{
+    EAGLE_DRV(get, sDriverGetVersion, PFN_cuDriverGetVersion_v2020);
+    return fromDriver(get(version));
+}
+
 cudaError_t cudaGetDeviceCount(int* count)
 {
     EAGLE_DRV(getCount, sDeviceGetCount, PFN_cuDeviceGetCount_v2000);
@@ -889,6 +900,35 @@ cudaError_t cudaMemsetAsync(void* dst, int value, size_t count, cudaStream_t str
 cudaError_t cudaMemsetAsync_ptsz(void* dst, int value, size_t count, cudaStream_t stream)
 {
     return memsetAsync(dst, value, count, perThread(stream));
+}
+
+cudaError_t cudaHostAlloc(void** ptr, size_t size, unsigned int flags)
+{
+    EAGLE_CTX();
+    EAGLE_DRV(alloc, sMemHostAlloc, PFN_cuMemHostAlloc_v2020);
+    return fromDriver(alloc(ptr, size, flags));
+}
+
+cudaError_t cudaFreeHost(void* ptr)
+{
+    EAGLE_CTX();
+    EAGLE_DRV(release, sMemFreeHost, PFN_cuMemFreeHost_v2000);
+    return fromDriver(release(ptr));
+}
+
+static cudaError_t launchHostFunc(CUstream s, cudaHostFn_t hostFn, void* arg)
+{
+    EAGLE_CTX();
+    EAGLE_DRV(launch, sLaunchHostFunc, PFN_cuLaunchHostFunc_v10000);
+    return fromDriver(launch(s, reinterpret_cast<CUhostFn>(hostFn), arg));
+}
+cudaError_t cudaLaunchHostFunc(cudaStream_t stream, cudaHostFn_t hostFn, void* arg)
+{
+    return launchHostFunc(legacy(stream), hostFn, arg);
+}
+cudaError_t cudaLaunchHostFunc_ptsz(cudaStream_t stream, cudaHostFn_t hostFn, void* arg)
+{
+    return launchHostFunc(perThread(stream), hostFn, arg);
 }
 
 static cudaError_t entryPoint(const char* symbol, void** funcPtr, unsigned int cudaVersion, unsigned long long flags,

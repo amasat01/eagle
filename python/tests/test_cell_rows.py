@@ -12,29 +12,26 @@ import eagle.plan  # noqa: E402
 from eagle import _cell_rows  # noqa: E402
 from hawk import Mutable, Param, Scalar, Terminated  # noqa: E402
 
-if not hasattr(hawk, "all_samples"):
-    pytest.skip("this hawk has no reductions over samples", allow_module_level=True)
-
 
 @hawk.kernel
 def cell_sum(x: Scalar, t: Mutable[Scalar]):
-    t = hawk.all_samples(x * x).sum()
+    t = hawk.sum(x * x)
 
 
 @hawk.kernel
 def cell_max(x: Scalar, t: Mutable[Scalar]):
-    t = hawk.all_samples(x * 1.5).max()
+    t = hawk.max(x * 1.5)
 
 
 @hawk.kernel
 def cell_min(x: Scalar, t: Mutable[Scalar]):
-    t = hawk.all_samples(x).min()
+    t = hawk.min(x)
 
 
 @hawk.kernel
 def sim_cell(x: Mutable[Scalar], s: Mutable[Scalar], terminated: Terminated):
     x = x + 1.0
-    s = hawk.all_samples(x * x).sum()
+    s = hawk.sum(x * x)
     terminated = x >= 3.0
 
 
@@ -61,7 +58,7 @@ def test_plan_run_returns_the_finished_sum_and_max(tmp_path, n):
 @pytest.mark.parametrize("n", [1, 33, 1000])
 def test_plan_run_returns_a_vector_cell_one_plane_per_component(tmp_path, n):
     def vcell(v: hawk.Vector[3], t: Mutable[hawk.Vector[3]]):
-        t = hawk.all_samples(v).sum(axis="samples")  # noqa: F841
+        t = hawk.sum(v)  # noqa: F841
     try:
         k = hawk.kernel(vcell)
         k.walk.cells

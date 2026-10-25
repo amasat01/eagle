@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import warnings
 
+from themed_figure import show  # noqa: F401  re-exported: a chart is shown as a light/dark pair
+
 # Two optional dependencies' own notices, seen on some builds of torch and
 # cupy alongside this family's own code; not something any notebook's
 # lesson is about.

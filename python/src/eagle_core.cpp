@@ -102,6 +102,7 @@
 #include "eagle/exec/HostTeam.h"
 #include "eagle/exec/Partition.h"
 #include "eagle/exec/TimeLaunch.h"
+#include "eagle/exec/Transfer.h"
 #include "eagle/filtering/ReorderClasses.h"
 #include "eagle/graph/Edges.h"
 #include "eagle/graph/Layout.h"
@@ -158,7 +159,7 @@ inline std::vector<void*> asParams(const std::vector<std::uintptr_t>& args)
 /** @brief The CUDA backend (loaded on first use; see src/seam/Loader.h). */
 inline eagle_seam::Backend& cuda()
 {
-    return eagle_seam::backend("cuda");
+    return eagle_seam::backend(eagle_seam::kDefaultKind);
 }
 
 /** @brief Raise the Python exception a nonzero status of the CUDA backend means. */
@@ -176,6 +177,14 @@ struct HostPtr {
     const T* p;
     T operator()(eagle::idx_t i) const { return p[i]; }
 };
+
+/** @brief A backend-allocated node buffer as a list of ints (the buffer is freed). */
+inline std::vector<std::uintptr_t> takeNodes(std::uint64_t* nodes, std::int64_t count)
+{
+    std::vector<std::uintptr_t> out(nodes, nodes + count);
+    cuda().meta().free(nodes);
+    return out;
+}
 
 /** @brief A zero-filled, size-prefixed desc naming device @p device. */
 template <class D>
@@ -302,6 +311,25 @@ std::int32_t voidTrampoline(void* ctx)
     }
 }
 
+// A host node's function runs on a backend thread, not inside a seam call: it takes the
+// GIL, calls the Python callable, never touches the backend, and cannot raise into the
+// caller, so an exception it raises is reported as unraisable.
+void hostFuncTrampoline(void* ctx)
+{
+    nb::gil_scoped_acquire gil;
+    try {
+        nb::handle(static_cast<PyObject*>(ctx))();
+    } catch (nb::python_error& e) {
+        e.discard_as_unraisable("eagle host node");
+    } catch (...) {
+    }
+}
+
+/** @brief A Python callable the backend may call from a stream: the owner of the reference. */
+struct PyHostFunc {
+    nb::object fn;
+};
+
 /**
  * @brief Write a captured graph to Graphviz ``dot`` and return the text.
  *
@@ -408,6 +436,81 @@ NB_MODULE(_core, m)
     // -- The device backend (eagle-backend/1 seam, see src/seam/) -------------
     eagle_seam::registerTranslators();
     m.attr("BackendUnavailable") = eagle_seam::unavailableType();
+    m.attr("CAP_CONDITIONAL_IF_ELSE") = EAGLE_BACKEND_CAP_CONDITIONAL_IF_ELSE;
+    m.attr("CAP_CONDITIONAL_SWITCH") = EAGLE_BACKEND_CAP_CONDITIONAL_SWITCH;
+    m.attr("LOOP_UNCAPPED") = 0xFFFFFFFFu;
+    m.def(
+        "memcpy_device",
+        [](std::uintptr_t dst, std::uintptr_t src, std::uint64_t nbytes, std::uintptr_t stream) {
+            ck(EBX(eagle_backend_memcpy_device)(dst, src, nbytes, stream));
+        },
+        nb::arg("dst"), nb::arg("src"), nb::arg("nbytes"), nb::arg("stream"),
+        "Stream-ordered, capture-legal device copy of `nbytes` (a captured "
+        "memcpy node inside a capture): e.g. the decision-cell copy at the "
+        "head of an if/elif chain.");
+    // Copies, pinned memory and host functions: the backend's when one is loaded, the same
+    // call on plain host memory otherwise (a core-only build).
+    m.attr("COPY_H2D") = EAGLE_BACKEND_COPY_H2D;
+    m.attr("COPY_D2H") = EAGLE_BACKEND_COPY_D2H;
+    m.attr("COPY_D2D") = EAGLE_BACKEND_COPY_D2D;
+    m.attr("COPY_H2H") = EAGLE_BACKEND_COPY_H2H;
+    m.def(
+        "memcpy",
+        [](std::uintptr_t dst, std::uintptr_t src, std::uint64_t nbytes, std::int32_t kind, std::uintptr_t stream) {
+            if (cuda().loaded()) {
+                ck(EBX(eagle_backend_memcpy)(dst, src, nbytes, kind, stream));
+                return;
+            }
+            if (!eagle::exec::validCopyKind(kind))
+                throw std::invalid_argument("memcpy: unknown copy kind " + std::to_string(kind));
+            eagle::exec::memcpyAsync(reinterpret_cast<void*>(dst), reinterpret_cast<const void*>(src), nbytes,
+                static_cast<eagle::exec::CopyKind>(kind), nullptr);
+        },
+        nb::arg("dst"), nb::arg("src"), nb::arg("nbytes"), nb::arg("kind"), nb::arg("stream") = 0,
+        "Stream-ordered, capture-legal copy of `nbytes` in direction `kind` (COPY_H2D, COPY_D2H, "
+        "COPY_D2D, COPY_H2H): a memcpy node inside a capture. The ranges are distinct or the same "
+        "address, which is a no-op. Without a backend it is a plain memcpy.");
+    m.def(
+        "host_alloc",
+        [](std::uint64_t nbytes) {
+            if (cuda().loaded()) {
+                std::uint64_t p = 0;
+                ck(EBX(eagle_backend_host_alloc)(nbytes, &p));
+                return static_cast<std::uintptr_t>(p);
+            }
+            return nbytes == 0 ? std::uintptr_t(0)
+                               : reinterpret_cast<std::uintptr_t>(eagle::exec::hostAlloc(nbytes));
+        },
+        nb::arg("nbytes"),
+        "Address of `nbytes` of page-locked host memory (0 for none); free it with `host_free`. "
+        "Without a backend it is aligned plain memory.");
+    m.def(
+        "host_free",
+        [](std::uintptr_t ptr) {
+            if (cuda().loaded())
+                ck(EBX(eagle_backend_host_free)(ptr));
+            else
+                eagle::exec::hostFree(reinterpret_cast<void*>(ptr));
+        },
+        nb::arg("ptr"), "Free an address from `host_alloc` (0 is fine).");
+    nb::class_<PyHostFunc>(m, "HostFunc")
+        .def("__init__", [](PyHostFunc* self, nb::callable fn) { new (self) PyHostFunc{nb::object(fn)}; }, nb::arg("fn"),
+            "Holds the Python callable `fn` for the backend to call from a stream. Keep this object "
+            "alive for as long as the graph that captured it can replay.")
+        .def(
+            "enqueue",
+            [](PyHostFunc& h, std::uintptr_t stream) {
+                if (cuda().loaded()) {
+                    ck(EBX(eagle_backend_host_func)(stream, &hostFuncTrampoline, h.fn.ptr()));
+                    return;
+                }
+                h.fn();  // no stream to wait for: a direct call, its exception raised here
+            },
+            nb::arg("stream") = 0,
+            "Call `fn()` once the work enqueued before it on `stream` is done; inside a capture, a "
+            "host node that runs on every replay. `fn` runs on a backend thread with the GIL, must not "
+            "call CUDA, and an exception it raises is reported as unraisable. Without a backend it is "
+            "called now and its exception propagates.");
     // The interop layer re-fences a device buffer through a provider per DLPack
     // device type: the CUDA types route to the cuda backend (loaded on that first
     // use), every other device type raises BackendUnavailable naming it.
@@ -425,8 +528,8 @@ NB_MODULE(_core, m)
         "How many events the fence pool has created.");
     m.def(
         "cuda_backend",
-        [] {
-            eagle_seam::Backend& b = eagle_seam::backend("cuda");
+        [](const std::string& kind) {
+            eagle_seam::Backend& b = eagle_seam::backend(kind);
             nb::dict d;
             d["kind"] = b.kind();
             d["loaded"] = b.loaded();
@@ -466,7 +569,8 @@ NB_MODULE(_core, m)
             d["experimental"] = experimental;
             return d;
         },
-        "Load (once) and describe the CUDA backend plugin: whether it loaded, "
+        nb::arg("kind") = eagle_seam::kDefaultKind,
+        "Load (once) and describe the backend plugin of `kind` (CUDA by default): whether it loaded, "
         "from where, its seam version and capability bits, its build info, "
         "and per capability group the reason it is unavailable ('' when "
         "bound). Diagnostics only; never raises.");
@@ -605,7 +709,7 @@ NB_MODULE(_core, m)
         [](const std::string& symbol, const std::string& kind) {
             return eagle_seam::backend(kind).optional(symbol.c_str()) != nullptr;
         },
-        nb::arg("symbol"), nb::arg("kind") = "cuda",
+        nb::arg("symbol"), nb::arg("kind") = eagle_seam::kDefaultKind,
         "Whether the loaded backend `kind` resolves the seam symbol `symbol` (a symbol bound "
         "one by one: its presence is the capability). False when the backend is not loaded.");
 
@@ -1411,7 +1515,13 @@ NB_MODULE(_core, m)
             "Raw cudaStream_t as a Python int (wrap with "
             "cupy.cuda.ExternalStream).")
         .def("synchronize", [](PyStream& s) {
-            ck(EB("stream", eagle_backend_stream_synchronize)(need(s.h, "Stream")));
+            auto h = need(s.h, "Stream");
+            eagle_backend_status status;
+            {
+                nb::gil_scoped_release release;  // waits on host nodes that need the GIL
+                status = EB("stream", eagle_backend_stream_synchronize)(h);
+            }
+            ck(status);
         }, nb::lock_self());
 
     // -- CapturedGraph: move-only owner of the captured cudaGraph_t -----------
@@ -1454,7 +1564,16 @@ NB_MODULE(_core, m)
                 return out;
             }, nb::lock_self(),
             nb::rv_policy::take_ownership,
-            "End capture and return a CapturedGraph owning the cudaGraph_t.");
+            "End capture and return a CapturedGraph owning the cudaGraph_t.")
+        .def(
+            "graph",
+            [](const PyCapturer& c) {
+                std::uint64_t g = 0;
+                ck(EBX(eagle_backend_capturer_graph)(need(c.h, "StreamCapturer"), &g));
+                return static_cast<std::uintptr_t>(g);
+            }, nb::lock_self(),
+            "The cudaGraph_t the in-flight capture records into, as an int (0 "
+            "when no capture is active).");
 
     // -- CaptureFork: sibling branches inside one capture --------------------
     // Mirrors the C++ contract exactly: forking grants the scheduler PERMISSION
@@ -1466,19 +1585,38 @@ NB_MODULE(_core, m)
     nb::class_<PyFork>(m, "CaptureFork")
         .def(
             "__init__",
-            [](PyFork* self, std::uintptr_t origin, std::size_t branch_count, int device) {
+            [](PyFork* self, std::uintptr_t origin, std::size_t branch_count, int device, std::size_t waits) {
                 auto d = makeDesc<eagle_backend_fork_desc>(device);
                 d.origin = origin;
                 d.branch_count = branch_count;
+                d.wait_count = waits;
                 eagle_backend_fork h = nullptr;
                 ck(EB("fork", eagle_backend_fork_create)(&d, &h));
                 new (self) PyFork();
                 self->h = h;
             },
-            nb::arg("origin"), nb::arg("branch_count"), nb::arg("device") = -1,
+            nb::arg("origin"), nb::arg("branch_count"), nb::arg("device") = -1, nb::arg("waits") = 0,
             "Create branch streams/events for a later fork. MUST be "
             "constructed BEFORE StreamCapturer.begin(): stream and event "
-            "creation is illegal while a capture is in flight.")
+            "creation is illegal while a capture is in flight. `waits` is the "
+            "number of mark() calls the capture will make.")
+        .def(
+            "mark",
+            [](PyFork& f, std::size_t producer) {
+                std::uint64_t m = 0;
+                ck(EBX(eagle_backend_fork_mark)(need(f.h, "CaptureFork"), producer, &m));
+                return static_cast<std::size_t>(m);
+            }, nb::lock_self(),
+            nb::arg("producer"),
+            "Mark branch `producer`'s tip (after its last launch so far) and "
+            "return the mark index for wait(). At most `waits` marks.")
+        .def(
+            "wait",
+            [](PyFork& f, std::size_t waiter, std::size_t mark) {
+                ck(EBX(eagle_backend_fork_wait)(need(f.h, "CaptureFork"), waiter, mark));
+            }, nb::lock_self(),
+            nb::arg("waiter"), nb::arg("mark"),
+            "Branch `waiter` waits for `mark`: one captured edge, no node.")
         .def("fork", [](PyFork& f) { ck(EB("fork", eagle_backend_fork_fork)(need(f.h, "CaptureFork"))); }, nb::lock_self(),
             "Open the fork: every branch becomes a sibling of every other, and "
             "everything captured so far becomes a predecessor of all branches. "
@@ -1543,20 +1681,43 @@ NB_MODULE(_core, m)
         .def(
             "__init__",
             [](PyConditional* self, std::uintptr_t origin, std::uintptr_t count_ptr, std::uintptr_t baseline_ptr,
-                unsigned int loop_cap, std::uintptr_t counter_ptr, int device) {
+                unsigned int loop_cap, std::uintptr_t counter_ptr, int device, const std::string& kind,
+                unsigned int arms, bool negate, std::uintptr_t brk_ptr, std::uintptr_t limit_ptr) {
                 auto d = makeDesc<eagle_backend_conditional_desc>(device);
                 d.origin = origin;
                 d.count_ptr = count_ptr;
                 d.baseline_ptr = baseline_ptr;
                 d.loop_cap = loop_cap;
                 d.counter_ptr = counter_ptr;
+                if (kind == "if")
+                    d.kind = EAGLE_BACKEND_COND_IF;
+                else if (kind == "if_else")
+                    d.kind = EAGLE_BACKEND_COND_IF_ELSE;
+                else if (kind == "while")
+                    d.kind = EAGLE_BACKEND_COND_WHILE;
+                else if (kind == "switch")
+                    d.kind = EAGLE_BACKEND_COND_SWITCH;
+                else if (!kind.empty())
+                    throw nb::value_error(("CaptureConditional: unknown kind '" + kind
+                        + "' (if, if_else, while, switch)").c_str());
+                d.arms = arms;
+                d.negate = negate ? 1u : 0u;
+                d.brk_ptr = brk_ptr;
+                d.limit_ptr = limit_ptr;
+                // A minor-4 backend reads only the fields it knows: refuse rather
+                // than let it drop the new ones silently.
+                const bool extended = d.kind || arms || negate || brk_ptr || limit_ptr;
+                if (extended && (cuda().version() & 0xffffu) < 5u)
+                    throw eagle_seam::Unavailable("the " + cuda().label()
+                        + " predates CaptureConditional kind/arms/negate/brk_ptr/limit_ptr (seam minor 5)");
                 eagle_backend_conditional h = nullptr;
                 ck(EB("conditional", eagle_backend_conditional_create)(&d, &h));
                 new (self) PyConditional();
                 self->h = h;
             },
             nb::arg("origin"), nb::arg("count_ptr"), nb::arg("baseline_ptr") = 0,
-            nb::arg("loop_cap") = 0, nb::arg("counter_ptr") = 0, nb::arg("device") = -1,
+            nb::arg("loop_cap") = 0, nb::arg("counter_ptr") = 0, nb::arg("device") = -1, nb::arg("kind") = "",
+            nb::arg("arms") = 0, nb::arg("negate") = false, nb::arg("brk_ptr") = 0, nb::arg("limit_ptr") = 0,
             "Create the guarded region's body stream. MUST be constructed "
             "BEFORE StreamCapturer.begin() -- stream creation is illegal "
             "while a capture is in flight on the calling thread. `origin` is the "
@@ -1566,8 +1727,14 @@ NB_MODULE(_core, m)
             "`baseline_ptr` are raw device uint32 pointers (0 == nullptr == "
             "no baseline, reads as 0). With `counter_ptr` (raw device pointer "
             "of a uint32[2] [remaining, ran] cell) the weave is a WHILE loop "
-            "capped at `loop_cap` (>= 1) iterations per replay; without it, "
-            "an IF.")
+            "capped at `loop_cap` (>= 1, LOOP_UNCAPPED for none) iterations "
+            "per replay; without it, an IF. `kind` ('if', 'if_else', 'while', "
+            "'switch'; '' = from counter_ptr) and `arms` (0 = the kind's own; "
+            "SWITCH: the arm count) pick the node form; `negate` inverts the "
+            "guard; a WHILE also takes `limit_ptr` (uint32 trip count, "
+            "ran < *limit) and `brk_ptr` (uint32 break cell, reset to 0 by the "
+            "head, stops the loop once nonzero). 'if_else'/'switch' need "
+            "driver >= 12.8 and are refused at construction below it.")
         .def(
             "begin",
             [](PyConditional& c) {
@@ -1604,7 +1771,37 @@ NB_MODULE(_core, m)
             [](PyConditional& c) {
                 ck(EB("conditional", eagle_backend_conditional_end)(need(c.h, "CaptureConditional")));
             }, nb::lock_self(),
-            "Close the body capture. Idempotent, dtor-safe.");
+            "Close the body capture. Idempotent, dtor-safe.")
+        .def(
+            "arm_stream",
+            [](const PyConditional& c, std::uint64_t k) {
+                std::uint64_t s = 0;
+                ck(EBX(eagle_backend_conditional_arm_stream)(need(c.h, "CaptureConditional"), k, &s));
+                return static_cast<std::uintptr_t>(s);
+            }, nb::lock_self(),
+            nb::arg("k"),
+            "Arm `k`'s pre-created stream as a raw int (arm 0 = body_stream()).")
+        .def(
+            "body_nodes",
+            [](const PyConditional& c, std::int64_t arm) {
+                std::uint64_t* nodes = nullptr;
+                std::int64_t count = 0;
+                ck(EBX(eagle_backend_conditional_nodes)(need(c.h, "CaptureConditional"), arm, &nodes, &count));
+                return takeNodes(nodes, count);
+            }, nb::lock_self(),
+            nb::arg("arm") = 0,
+            "Node handles (ints) of arm `arm`'s body graph, valid from begin(); "
+            "after end() a WHILE body ends with eagle's tail setter.")
+        .def(
+            "setter_nodes",
+            [](const PyConditional& c) {
+                std::uint64_t* nodes = nullptr;
+                std::int64_t count = 0;
+                ck(EBX(eagle_backend_conditional_nodes)(need(c.h, "CaptureConditional"), -1, &nodes, &count));
+                return takeNodes(nodes, count);
+            }, nb::lock_self(),
+            "eagle's setter nodes: [head] (from begin()), plus the tail of a "
+            "WHILE (from end()) -- the nodes reading the guard and loop cells.");
 
     // -- Capture attribution (member-enable "mode=enabled"): mid- ------
     // capture node-set snapshotting + toggleability classification. Free
@@ -1622,9 +1819,7 @@ NB_MODULE(_core, m)
             std::uint64_t* nodes = nullptr;
             std::int64_t count = 0;
             ck(EB("attribution", eagle_backend_capture_snapshot_nodes)(stream, &nodes, &count));
-            std::vector<std::uintptr_t> out(nodes, nodes + count);
-            cuda().meta().free(nodes);
-            return out;
+            return takeNodes(nodes, count);
         },
         nb::arg("stream"),
         "Node handles (as ints) of the graph currently being captured "
@@ -1731,13 +1926,29 @@ NB_MODULE(_core, m)
     nb::class_<PyLauncher>(m, "Launcher")
         .def(
             "launch",
-            [](PyLauncher& l) { ck(EB("launcher", eagle_backend_launcher_launch)(need(l.h, "Launcher"))); }, nb::lock_self(),
+            [](PyLauncher& l) {
+                auto h = need(l.h, "Launcher");
+                eagle_backend_status status;
+                {
+                    nb::gil_scoped_release release;  // a host node's Python callback takes the GIL
+                    status = EB("launcher", eagle_backend_launcher_launch)(h);
+                }
+                ck(status);
+            }, nb::lock_self(),
             "Replay the instantiated exec graph once. Raises RuntimeError if "
             "cudaGetLastError() is nonzero after the replay; see "
             "eagle/python/eagle/pipeline.py's "
             "launch() for the companion stream-ordering fix).")
         .def("synchronize",
-            [](PyLauncher& l) { ck(EB("launcher", eagle_backend_launcher_synchronize)(need(l.h, "Launcher"))); }, nb::lock_self())
+            [](PyLauncher& l) {
+                auto h = need(l.h, "Launcher");
+                eagle_backend_status status;
+                {
+                    nb::gil_scoped_release release;  // waits on host nodes that need the GIL
+                    status = EB("launcher", eagle_backend_launcher_synchronize)(h);
+                }
+                ck(status);
+            }, nb::lock_self())
         .def(
             "stream",
             [](PyLauncher& l, std::uintptr_t s) {
@@ -1773,7 +1984,62 @@ NB_MODULE(_core, m)
             "structure change (mode=\"enabled\"). "
             "Raises RuntimeError (name+code) if the node's type "
             "is not one CUDA supports toggling -- check "
-            "is_node_toggleable() ahead of time.");
+            "is_node_toggleable() ahead of time.")
+        .def(
+            "set_kernel_params",
+            [](PyLauncher& l, std::uintptr_t node, const std::vector<std::uint64_t>& params) {
+                ck(EBX(eagle_backend_launcher_set_kernel_params)(need(l.h, "Launcher"), node, params.data(),
+                    static_cast<std::int64_t>(params.size())));
+            }, nb::lock_self(),
+            nb::arg("node"), nb::arg("params"),
+            "Patch kernel node `node` (root or body graph) in this exec: "
+            "params[i] is the ADDRESS of argument i's new value (0 keeps it); "
+            "arguments past len(params) keep their captured values (the "
+            "partition tail). Values are copied at the call.")
+        .def(
+            "set_memcpy_source",
+            [](PyLauncher& l, std::uintptr_t node, std::uintptr_t src) {
+                ck(EBX(eagle_backend_launcher_set_memcpy_source)(need(l.h, "Launcher"), node, src));
+            }, nb::lock_self(),
+            nb::arg("node"), nb::arg("src"),
+            "Re-point memcpy node `node`'s source in this exec; size, "
+            "destination and memory kind stay as captured.")
+        .def(
+            "set_kernel_params_many",
+            [](PyLauncher& l, const std::vector<std::uintptr_t>& nodes,
+                const std::vector<std::vector<std::uint64_t>>& params) {
+                if (nodes.size() != params.size())
+                    throw std::invalid_argument("set_kernel_params_many: one parameter list per node");
+                auto* h = need(l.h, "Launcher");
+                for (std::size_t i = 0; i < nodes.size(); ++i)
+                    ck(EBX(eagle_backend_launcher_set_kernel_params)(h, nodes[i], params[i].data(),
+                        static_cast<std::int64_t>(params[i].size())));
+            }, nb::lock_self(),
+            nb::arg("nodes"), nb::arg("params"),
+            "set_kernel_params over many nodes in one call: params[i] is node i's "
+            "address list.")
+        .def(
+            "set_memcpy_source_many",
+            [](PyLauncher& l, const std::vector<std::uintptr_t>& nodes,
+                const std::vector<std::uintptr_t>& srcs) {
+                if (nodes.size() != srcs.size())
+                    throw std::invalid_argument("set_memcpy_source_many: one source per node");
+                auto* h = need(l.h, "Launcher");
+                for (std::size_t i = 0; i < nodes.size(); ++i)
+                    ck(EBX(eagle_backend_launcher_set_memcpy_source)(h, nodes[i], srcs[i]));
+            }, nb::lock_self(),
+            nb::arg("nodes"), nb::arg("srcs"),
+            "set_memcpy_source over many nodes in one call.")
+        .def(
+            "try_exec_update",
+            [](PyLauncher& l, const PyCaptured& c) {
+                std::int32_t ok = 0;
+                ck(EBX(eagle_backend_launcher_exec_update)(need(l.h, "Launcher"), need(c.h, "CapturedGraph"), &ok));
+                return ok != 0;
+            }, nb::lock_self(),
+            nb::arg("captured"),
+            "Update this exec from a same-topology re-capture (not consumed). "
+            "False when the driver rejects it: the exec is unchanged, rebuild.");
 
     // -- Graph: parent container; folds in the capture, instantiates ---------
     nb::class_<PyGraph>(m, "Graph")

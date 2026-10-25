@@ -21,6 +21,8 @@ import eagle  # noqa: E402
 from eagle import _dispatch_door as door  # noqa: E402
 from eagle import _dispatch_policy as policy  # noqa: E402
 
+pytestmark = pytest.mark.usefixtures("_exact_host_profile")
+
 N = 2000
 
 

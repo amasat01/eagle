@@ -18,6 +18,11 @@ leave the run, and where the work runs.
 tutorials/02_cuda_graphs_python
 tutorials/05_steps_per_launch
 tutorials/06_compaction_and_reorder
+tutorials/21_monte_carlo_early_termination
+tutorials/22_heat_energy_check
+tutorials/23_fluids_pinned_frames
+tutorials/24_fem_solve_early_stop
+tutorials/25_particle_binning_stream
 tutorials/04_multi_kernel_workflow
 tutorials/07_host_or_device
 ```
@@ -25,6 +30,11 @@ tutorials/07_host_or_device
 - [What a graph is](tutorials/02_cuda_graphs_python): one launch replays a whole run.
 - [Steps per launch](tutorials/05_steps_per_launch): fuse steps to cut host-device chatter.
 - [Finished samples](tutorials/06_compaction_and_reorder): compaction, reorder, and when not to.
+- [Trajectories that stop early](tutorials/21_monte_carlo_early_termination): a Monte Carlo batch thins out, and `ActiveSet(group=)` gathers the live samples, animated.
+- [Heat diffusion with an energy check](tutorials/22_heat_energy_check): the steps as one graph, the total heat checked on the host every few steps.
+- [Shallow water: frames come home while the steps run](tutorials/23_fluids_pinned_frames): a copy to pinned host memory beside the GPU steps, with the schedule drawn.
+- [A finite-element solve that stops when it has converged](tutorials/24_fem_solve_early_stop): assemble, then iterate in one graph with a device loop that leaves when the residual is small.
+- [Particle binning, streamed from the host](tutorials/25_particle_binning_stream): a host loader and a host-to-device copy beside the GPU binning, one replay per batch.
 - [A multi-kernel step](tutorials/04_multi_kernel_workflow): propagate, diagnose and stop, declaratively.
 - [Host or device?](tutorials/07_host_or_device): let the data decide where it runs.
 

@@ -58,6 +58,7 @@ _TOOLS_DIR = pathlib.Path(__file__).resolve().parent
 if str(_TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOLS_DIR))
 import perf_charts as charts  # noqa: E402
+from raptor_docs.themed_svg import dark_path, write_pair  # noqa: E402
 
 #: One entry per generated family. ``twin``/``simulate`` name the RK7(8)-or-RK4
 #: pair this script reports a ratio between on every non-reference device;
@@ -568,8 +569,8 @@ def write_readme_svgs(eagle_root: pathlib.Path, entries_by_family: dict[str, lis
         out_dir.mkdir(parents=True, exist_ok=True)
         title = f"RK4 oscillators, {n:,} samples" + (f", {_config_label(cfg)}" if cfg else "")
         path = out_dir / f"readme_{kind}.svg"
-        path.write_text(charts.chart_svg(chart_bars, title, entries[0]["name"]))
-        written.append(path)
+        write_pair(path, lambda palette: charts.chart_svg(chart_bars, title, entries[0]["name"], palette))
+        written += [path, dark_path(path)]
     return written
 
 
@@ -589,8 +590,9 @@ def write_glimpse(out_dir: pathlib.Path, entries_by_family: dict[str, list[dict]
     alt = html.escape(charts.alt_text(chart_bars, e["name"]), quote=True)
     target.write_text(
         '<figure class="perf-glimpse">\n'
-        '<a href="content/performance.html"><img src="_static/perf/readme_gpu.svg" '
-        f'alt="{alt}" style="max-width:100%;height:auto"></a>\n'
+        '<a href="content/performance.html">'
+        f'<img class="only-light" src="_static/perf/readme_gpu.svg" alt="{alt}" style="max-width:100%;height:auto">'
+        f'<img class="only-dark" src="_static/perf/readme_gpu-dark.svg" alt="{alt}" style="max-width:100%;height:auto"></a>\n'
         f'<figcaption>{n:,} samples, each stopping at its own step, on {html.escape(e["name"])}: '
         'wall time per tool, log scale. <a href="content/performance.html">Every device, workload '
         'and arm</a>.</figcaption>\n</figure>\n')

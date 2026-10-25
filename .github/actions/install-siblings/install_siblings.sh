@@ -14,11 +14,16 @@ for pair in $siblings; do
   pkg=${pair%%=*}
   path=$(cd "${pair#*=}" && pwd)
   root=$path
-  until [ -f "$root/tools/version.py" ]; do
-    [ "$root" != / ] || { echo "no tools/version.py above $path" >&2; exit 1; }
+  until [ -e "$root/.git" ]; do
+    [ "$root" != / ] || { echo "no git checkout above $path" >&2; exit 1; }
     root=$(dirname "$root")
   done
-  v=$(python "$root/tools/version.py" get)
+  # the version the sibling is (or will be): its exact tag, else what setuptools-scm gives the checkout
+  v=$(git -C "$root" describe --tags --match 'v*' --exact-match 2>/dev/null | sed 's/^v//' || true)
+  if [ -z "$v" ]; then
+    python -m pip install --quiet setuptools-scm
+    v=$(python -m setuptools_scm -r "$root")
+  fi
   pins="$pins $pkg==$v"
   if [ "$(curl -s -o /dev/null -w '%{http_code}' "https://pypi.org/pypi/$pkg/$v/json")" = 200 ]; then
     echo "$pkg $v: PyPI"
@@ -30,8 +35,13 @@ for pair in $siblings; do
   python -m pip install --quiet --prefer-binary build
   case $pkg in
     aether-dsc)  # sealing runs the NVRTC-clean gate; the runner has no CUDA toolkit, so NVRTC and CCCL come from PyPI
-      python -m pip install --quiet --prefer-binary cuda-bindings nvidia-cuda-nvrtc-cu12 nvidia-cuda-cccl-cu12
-      (cd "$path" && python -m aether_dsc.seal && python -m build --wheel --outdir "$out") ;;
+      gate=--no-gate  # CPU-only macOS has no NVRTC: the same headers pass the gate in the Linux seal, and only the host route reads the blob there
+      if [ "$(uname -s)" = Linux ]; then
+        python -m pip install --quiet --prefer-binary cuda-bindings nvidia-cuda-nvrtc-cu12 nvidia-cuda-cccl-cu12
+        gate=
+      fi
+      # shellcheck disable=SC2086  # $gate is one flag or nothing
+      (cd "$path" && python -m aether_dsc.seal $gate && python -m build --wheel --outdir "$out") ;;
     raptor-core) (cd "$path" && python -m build --wheel --outdir "$out") ;;
     *) (cd "$path" && python -m build --sdist --outdir "$out") ;;
   esac

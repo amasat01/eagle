@@ -12,6 +12,9 @@ foundations
 parallel_execution
 cuda_graphs
 graph_model
+graph_forms
+graph_across_devices
+under_the_hood
 graph_view
 autodiff
 determinism
@@ -27,6 +30,9 @@ threading
 - [Parallel execution](parallel_execution): one body of code run across many items, on a GPU or a CPU.
 - [CUDA graphs](cuda_graphs): record once, replay many times; the execution model.
 - [Graph model](graph_model): a step as nodes, and how eagle works out what depends on what.
+- [Every form of a graph builder](graph_forms): each form, one line each, executed.
+- [Graphs across the CPU and the GPU](graph_across_devices): host nodes, `eagle.copy` and `eagle.pinned` in one captured graph.
+- [What happens under the hood](under_the_hood): from the decorator to a replay.
 - [Graph view](graph_view): draw any graph as ASCII, Mermaid or DOT.
 - [Gradients through a graph](autodiff): reverse mode over a whole graph, on the CPU or the GPU.
 - {doc}`Same bits, every time <determinism>`: the fixed-order sum behind reproducible reductions.

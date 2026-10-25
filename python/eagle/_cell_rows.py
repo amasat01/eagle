@@ -3,8 +3,8 @@
 
 """The rows of a reduction over samples, and the finish that turns them into the cell.
 
-A kernel that stores ``all_samples(x).sum()`` (or ``.mean()``, ``.max()``,
-``.min()``) writes one row per 32 samples into its plane, with a ``<name>_comp``
+A kernel that stores ``hawk.sum(x)`` (or ``hawk.mean``, ``hawk.max``,
+``hawk.min``) writes one row per 32 samples into its plane, with a ``<name>_comp``
 companion for a sum. Every eagle door that launches such a kernel owns that
 scratch (made once per kernel and sample count, never per launch), launches,
 and finishes the rows into the one-element cell with :func:`eagle.reduce`.
@@ -51,6 +51,62 @@ def cells_of(plugin) -> dict:
     return cells
 
 
+def companions_of(plugin) -> dict:
+    """``{companion plane: its target}`` for the compensated keyed sums the
+    kernel holds (sidecar ``companions``). Every eagle door makes these planes
+    itself, zeroed, with the bind; the caller never passes them and they are
+    not handed back."""
+    source = getattr(plugin, "_hawk_source", None)
+    if source is not None:
+        return source[0].walk.companions
+    return (getattr(plugin, "companions", None)
+            or (getattr(plugin, "_meta", None) or {}).get("companions") or {})
+
+
+def fold_steps(plugin, planes: dict, pairs, device=None) -> tuple:
+    """``(entry, partition)`` for each owned companion of ``pairs``
+    (``(target, companion)`` names, :func:`owned_pairs`): the kernel's own
+    fold entry, which takes the kernel's argument block and folds one slot per
+    lane, over the slots of the target in ``planes``. Launched after the
+    kernel on the same structure and stream, it leaves the target alone
+    holding the compensated sum and the residual in the companion.
+    ``device`` is the CUDA device (``None``: the host entry)."""
+    from .exec import Partition
+
+    out = []
+    for target, _comp in pairs:
+        size = int(planes[target].size)
+        out.append((_fold_entry(plugin, target, device), Partition(0, size, size)))
+    return tuple(out)
+
+
+def _fold_entry(plugin, target: str, device):
+    """The entry folding ``target``'s companion: the host address the plugin
+    carries, or the device function of the plugin's loaded module."""
+    name = f"{plugin.kernel}__fold_{target}"
+    if device is None:
+        found = (getattr(plugin, "fold_entries", None) or {}).get(target)
+    else:
+        keep = getattr(plugin, "_keepalive", ())
+        loaded = keep[-1] if isinstance(keep, tuple) and keep else None
+        found = (loaded.function(device, name).kernel.ptr
+                 if hasattr(loaded, "function") else None)
+    if found is None:
+        raise ValueError(
+            f"eagle: kernel {plugin.kernel!r} owns the companion of {target!r} but "
+            f"its artifact carries no fold entry {name!r}; rebuild it with the "
+            "hawk that wrote the companion")
+    return found
+
+
+def owned_pairs(plugin, bound: dict) -> tuple:
+    """``(target, companion)`` of each companion a door makes itself: the
+    kernel's compensated keyed sums whose companion ``bound`` (what the caller
+    passed) lacks. A companion the caller passes is the caller's: never folded."""
+    return tuple((target, comp) for comp, target in companions_of(plugin).items()
+                 if comp not in bound)
+
+
 def row_planes(plugin) -> frozenset:
     """Every plane the rows occupy: each cell and its ``_comp`` companion."""
     return row_names(cells_of(plugin))
@@ -63,7 +119,7 @@ def row_names(cells) -> frozenset:
 
 def hidden(plugin) -> frozenset:
     """The companion planes a door does not hand back."""
-    return row_planes(plugin) - frozenset(cells_of(plugin))
+    return row_planes(plugin) - frozenset(cells_of(plugin)) | frozenset(companions_of(plugin))
 
 
 def whole_rows(part) -> tuple:

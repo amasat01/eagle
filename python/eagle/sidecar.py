@@ -32,8 +32,10 @@ Python-side launch hint the C++ registry has no use for.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import NamedTuple
 
 from raptor.schema.blocks import validate_neural_block_descriptor
+from raptor.schema.manifest import check_lane_space
 
 from .roles import (
     BUFFER_KINDS,
@@ -132,6 +134,111 @@ def read_finish(meta: dict, *, name: str) -> dict | None:
             f"{where} declares a kernel that WRITES its mask, but the sidecar also "
             f"stamps '{TERMINATED_READONLY_KEY}': true")
     return out
+
+
+class LaneSpace(NamedTuple):
+    """A kernel's lane space (sidecar ``launch.lane_space``): ``axes`` is
+    ``((label | None, extent | None), ...)``, row-major with the last axis
+    fastest; only the first extent may be ``None`` (known at run time).
+    ``group`` is the compaction group, a lane count."""
+
+    axes: tuple
+    group: int
+
+
+#: What a kernel that declares no lane space has: one unlabeled run-time
+#: axis, compacted lane by lane.
+UNDECLARED_LANE_SPACE = LaneSpace(((None, None),), 1)
+
+
+def lane_space_from(block: dict) -> LaneSpace:
+    """The :class:`LaneSpace` of a ``launch.lane_space`` block already
+    checked by :func:`raptor.schema.manifest.check_lane_space`."""
+    return LaneSpace(tuple((a["label"], a["extent"]) for a in block["axes"]),
+                     block["group"])
+
+
+def read_lane_space(meta: dict, *, name: str) -> LaneSpace:
+    """The sidecar's ``launch.lane_space`` (:data:`UNDECLARED_LANE_SPACE`
+    when absent). A malformed block raises ``ValueError`` naming the key."""
+    check_lane_space(meta, name=name)
+    block = (meta.get("launch") or {}).get("lane_space")
+    return UNDECLARED_LANE_SPACE if block is None else lane_space_from(block)
+
+
+def read_block(meta: dict, *, name: str):
+    """``launch.block``, the exact threads per block the artifact was
+    emitted for, or ``None`` when absent."""
+    launch = meta.get("launch")
+    if not isinstance(launch, dict) or "block" not in launch:
+        return None
+    block = launch["block"]
+    if isinstance(block, bool) or not isinstance(block, int) or block < 1:
+        raise ValueError(
+            f"{name}: sidecar launch.block must be an integer >= 1 (the exact "
+            f"threads per block); got {block!r}")
+    return block
+
+
+def read_box(meta: dict, *, name: str):
+    """``launch.box``, a thread box ``{"axis", "T", "stride"}`` (one thread
+    computes ``T`` lanes ``stride`` apart, so a launch's ``base``/``count``
+    count threads), or ``None`` when absent."""
+    launch = meta.get("launch")
+    if not isinstance(launch, dict) or "box" not in launch:
+        return None
+    box = launch["box"]
+    low = {"axis": 0, "T": 2, "stride": 1}
+    if not (isinstance(box, dict) and set(box) == set(low)
+            and all(type(box[k]) is int and box[k] >= v for k, v in low.items())):
+        raise ValueError(
+            f"{name}: sidecar launch.box must be {{'axis': int >= 0, 'T': int >= 2, "
+            f"'stride': int >= 1}}; got {box!r}")
+    return dict(box)
+
+
+def read_plane_axes(meta: dict, *, name: str) -> dict:
+    """``{plane: {"payload": [...], "axes": [{"label", "extent"}, ...]}}`` for
+    the sinks declared with named axes (a plane bound ``(*payload, *axes)``,
+    an ``extent`` of ``None`` the launch's runtime axis); ``{}`` when none."""
+    declared = meta.get("plane_axes")
+    if declared is None:
+        return {}
+    planes = {nm for _role, nm in meta.get("arg_spec", ())}
+    ok = isinstance(declared, dict)
+    for plane, spec in (declared.items() if ok else ()):
+        ok = (ok and plane in planes and isinstance(spec, dict)
+              and isinstance(spec.get("payload"), list) and isinstance(spec.get("axes"), list)
+              and all(isinstance(e, int) and e >= 1 for e in spec["payload"])
+              and all(isinstance(a, dict) and isinstance(a.get("label"), str)
+                      and (a.get("extent") is None or isinstance(a["extent"], int) and a["extent"] >= 1)
+                      for a in spec["axes"]))
+    if not ok:
+        raise ValueError(
+            f"{name}: sidecar plane_axes must map each plane of the arg_spec to "
+            "{'payload': [extent, ...], 'axes': [{'label', 'extent'}, ...]}")
+    return declared
+
+
+class LaunchDecl(NamedTuple):
+    """What a sidecar declares about the launch shape: ``lane_space``
+    (:class:`LaneSpace`), ``block`` (threads per block or ``None``),
+    ``plane_axes`` (:func:`read_plane_axes`), ``sorted_inputs`` (names) and
+    ``box`` (:func:`read_box`)."""
+
+    lane_space: LaneSpace
+    block: int | None
+    plane_axes: dict
+    sorted_inputs: tuple
+    box: dict | None
+
+
+def read_launch(meta: dict, *, name: str) -> LaunchDecl:
+    """The launch declaration of ``meta``, the one reader both loaders use
+    (the device launcher and :class:`eagle.host_launch.HostPluginLibrary`)."""
+    return LaunchDecl(read_lane_space(meta, name=name), read_block(meta, name=name),
+                      read_plane_axes(meta, name=name), tuple(meta.get("sorted_inputs", ())),
+                      read_box(meta, name=name))
 
 
 # The decl-carrying ``params`` block (the int-uniform addition). Read here,
@@ -242,8 +349,9 @@ def validate_sidecar(meta: dict, *, name: str) -> dict:
     :data:`~eagle.roles.RECOGNIZED_PATTERNS`, absent stays lenient); the
     ``neural_block`` clause (pattern-conditional, called from
     :func:`raptor.schema.blocks.validate_neural_block_descriptor`, before
-    derivative/buffer since it forbids both); ``derivative``'s shape; buffer
-    ``kind`` (value-strict against :data:`~eagle.roles.BUFFER_KINDS`).
+    derivative/buffer since it forbids both); ``derivative``'s shape; ``launch.lane_space`` and
+    ``launch.block`` (shape only); buffer ``kind`` (value-strict against
+    :data:`~eagle.roles.BUFFER_KINDS`).
 
     Not checked here: the presence of ``kernel`` / ``arg_spec`` -- those are
     required keys a loader reads directly (``KeyError`` naming the key), as
@@ -280,6 +388,7 @@ def validate_sidecar(meta: dict, *, name: str) -> dict:
         validate_neural_block_descriptor(meta, name=name)
 
     parse_derivative(meta, name=name)
+    read_launch(meta, name=name)
 
     for buf in meta.get("buffers", ()):
         kind = buf.get("kind")

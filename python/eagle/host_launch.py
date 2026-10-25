@@ -25,7 +25,7 @@ import math
 
 from .abi import DEVICE_CPU, check_aether_abi
 from .roles import check_launch_certified_pattern, classify_arg
-from .sidecar import PARAMS_SCHEMA_KEY, read_params, validate_sidecar
+from .sidecar import PARAMS_SCHEMA_KEY, read_launch, read_params, validate_sidecar
 
 
 class GRefMirror(ctypes.Structure):
@@ -96,7 +96,11 @@ class HostPluginLibrary:
         # Gate order: shared validate_sidecar -> launch certification ->
         # loader-specific gates. Family refusal precedes ABI-tag
         # complaints, since a descriptor at a host door is the wrong KIND.
-        validate_sidecar(sidecar, name=f"host plugin '{sidecar.get('kernel', '?')}'")
+        label = f"host plugin '{sidecar.get('kernel', '?')}'"
+        validate_sidecar(sidecar, name=label)
+        #: The launch declaration, as :class:`eagle.loaded.LoadedKernel` carries it.
+        (self.lane_space, self.block, self.plane_axes,
+         self.sorted_inputs, self.box) = read_launch(sidecar, name=label)
         # The manifest-bypassing door (C++ ``add_plugin``'s mirror), so it
         # runs its own launch certification.
         check_launch_certified_pattern(

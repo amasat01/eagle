@@ -222,6 +222,34 @@ def write_card(card, json_path, md_text, md_path):
     md_path.write_text(md_text)
 
 
+def demo_facts(script, example, example_script):
+    """The facts block of a demo card; the device fields are None without a GPU."""
+    try:
+        device, peak = device_facts()[:2]
+    except Exception:  # no GPU or no cupy: the dry path
+        device = peak = None
+    return {
+        "device": device, "peak": peak, "software": software(),
+        "script_md5": md5(script),
+        "example_script_md5": md5(example.__file__),
+        "example_script": example_script,
+        "generated_utc": utc_now_iso(),
+    }
+
+
+def demo_md(card, name, dry_note):
+    """The markdown of a demo card; ``dry_note`` explains why a dry run is not the real measurement."""
+    lines = [f"# {name} card", ""]
+    if card.get("dry"):
+        lines += ["**DRY RUN -- not authoritative, and not the same "
+                  f"measurement as the real card** ({dry_note}).", ""]
+    lines += [f"Schema: `{card['schema']}`  ·  generated {card['facts']['generated_utc']}",
+             "", "## Facts", "", "```json", json.dumps(card["facts"], indent=2, sort_keys=True),
+             "```", "", "## Results", "", "```json",
+             json.dumps(card["results"], indent=2, sort_keys=True), "```", ""]
+    return "\n".join(lines)
+
+
 def cpu_model():
     try:
         for line in pathlib.Path("/proc/cpuinfo").read_text().splitlines():

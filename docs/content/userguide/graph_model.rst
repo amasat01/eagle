@@ -22,8 +22,218 @@ one idea to carry through the page.
    step by step. :class:`~eagle.GraphPipeline` is unchanged: it is still
    the right tool when you want to record opaque callables yourself.
 
-Your first graph
-----------------
+Write the graph as a function
+-----------------------------
+
+The shortest way to a graph is a function that calls your kernels. Decorate
+it with ``@eagle.Graph.builder``, make an :class:`eagle.Graph` inside it, and
+declare what comes out with ``g.result``:
+
+.. code-block:: python
+
+   import numpy as np
+   import eagle
+   import hawk
+   from hawk import Param, Scalar
+
+
+   @hawk.kernel
+   def scale(x: Scalar, a: Param, b: Param) -> Scalar:
+       return a * x + b
+
+
+   @hawk.kernel
+   def square(v: Scalar) -> Scalar:
+       return v * v
+
+
+   @eagle.Graph.builder
+   def chain(x):
+       g = eagle.Graph()
+       g.result = square(scale(x, 2.0, 1.0))
+       return g
+
+
+   g = chain(np.arange(4.0))      # build: records the graph, runs nothing
+   print(g())                     # run: (2x + 1)**2
+
+.. code-block:: text
+
+   [ 1.  9. 25. 49.]
+
+Calling the builder on arrays builds the graph; calling the graph runs it and
+returns ``result``. The arrays decide the backend (NumPy is the CPU, CuPy is a
+CUDA graph), and eagle works the edges out from which kernel reads what, as
+below. Everything in the rest of this section is the same function with more
+in it.
+
+**New arrays, same graph.** ``bind`` swaps the arrays by the builder's
+parameter names, in place: no copy and no rebuild. The shape and dtype must stay;
+otherwise call the builder again. ``g(n)`` replays ``n`` times and returns the
+result after the last.
+
+.. code-block:: python
+
+   g.bind(x=np.arange(4.0) + 1.0)
+   print(g())
+   print(g(10))
+
+.. code-block:: text
+
+   [ 9. 25. 49. 81.]
+   [ 9. 25. 49. 81.]
+
+**Branches that run at the same time.** ``g.parallel()`` opens a fork,
+``p.branch()`` a branch, and leaving the ``with`` joins. A branch that needs
+what another branch wrote says so with ``wait``, naming the array:
+
+.. code-block:: python
+
+   @eagle.Graph.builder
+   def forked(x):
+       g = eagle.Graph()
+       a = dbl(x)
+       with g.parallel() as p:
+           with p.branch() as b:          # branch b: two nodes
+               l = inc(a)
+               l2 = dbl(l)
+           with p.branch() as w:          # branch w starts once `l` is written
+               w.wait(l)
+               r = add(l, a)
+       g.result = (l2, r)                 # after the join
+       return g
+
+(``inc``, ``dbl`` and ``add`` are one-line kernels like ``square``.) Two
+branches that touch one array, one of them writing it, are refused unless one
+waits for the other.
+
+**Control flow on the device.** A 1-cell ``uint32`` array is a device
+condition. ``if``, ``elif``, ``else``, ``while``, ``for`` with ``break`` and
+``match`` on it become conditional nodes inside the one graph, read at every
+replay. Plain Python values are decided once, at build, and a Python ``for``
+is unrolled.
+
+.. code-block:: python
+
+   @eagle.Graph.builder
+   def pick(x, flag, which):
+       g = eagle.Graph()
+       if flag:
+           x = dbl(x)
+       elif which:
+           x = inc(x)
+       else:
+           x = add(x, x)
+       g.result = x
+       return g
+
+   @eagle.Graph.builder
+   def settle(x, flag):
+       g = eagle.Graph()
+       for _ in range(50):                # capped: at most 50 turns
+           if not flag: break             # leave when the cell reads 0
+           x = dbl(x)
+           below(x, 100.0, flag)          # a kernel rewrites the cell
+       g.result = x
+       return g
+
+Here ``below`` is a kernel that writes the guard through a ``Mutable[UInt32]``
+(``flag = hm.uint32(hawk.sum(s < lim))``). Cap a loop with
+``range(N)``: a bare ``while cell:`` works, but a body that never clears its
+cell never returns, so eagle warns once. ``match`` on a cell takes literal
+cases and ``_``:
+
+.. code-block:: python
+
+   @eagle.Graph.builder
+   def chooser(x, sel):
+       g = eagle.Graph()
+       match sel:
+           case 0:
+               x = dbl(x)
+           case 2:
+               x = inc(x)
+           case _:
+               x = square(x)
+       g.result = x
+       return g
+
+With ``pick(x, cell, which)``, setting ``cell[0] = 0`` and calling
+``g()`` again takes the next arm with no rebuild.
+
+**Keep an array: ``buffer=``.** A kernel's result is a temporary. Pass
+``buffer=True`` to a kernel call and eagle keeps the array (or
+``buffer=my_array`` to use yours). It stays readable after a run and becomes a
+name a gradient can use.
+
+**Gradients name what enters and leaves.** Build with ``record=True`` and
+reverse. Seeds and ``wrt`` are always explicit: the seed is ``"result"`` (or
+``"result.key"`` for a dict) an array a kernel wrote through a ``Mutable``, or a ``buffer=`` array;
+``wrt`` names builder arguments or a top-level ``buffer=`` array (one made inside a loop or branch is not a key).
+
+.. code-block:: python
+
+   @eagle.Graph.builder
+   def fit(x, record=False):
+       g = eagle.Graph(record=record)
+       a = scale(x, 2.0, 1.0, buffer=True)   # a name the gradient can use
+       g.result = square(a)
+       return g
+
+   gr = fit(np.arange(4.0), record=True)
+   gr()
+   grads = eagle.diff.reverse(gr.record, {"result": np.ones(4)}, wrt=("x", "a"))
+   print(grads["x"], grads["a"])
+
+.. code-block:: text
+
+   [ 4. 12. 20. 28.] [ 2.  6. 10. 14.]
+
+A recorded graph runs with ``g()`` or ``launch()``, not ``enqueue``. Inside a
+recorded loop, keep the body to kernels and cap the loop; the limits are listed
+in :doc:`tutorials/10_gradients_through_a_graph`.
+
+**Blocks.** A function with a parameter annotated ``eagle.Graph`` appends to
+the graph it is given instead of making one, so builders can share pieces:
+
+.. code-block:: python
+
+   @eagle.Graph.builder
+   def twice(g: eagle.Graph, v):
+       return dbl(dbl(v))
+
+Call it as ``twice(g, v)`` with the handle of the scope you are in (the
+branch handle inside a branch). A block may also extend a hand-made graph,
+which is the light way to give ``add`` and ``build`` code ``if`` and ``while``:
+
+.. code-block:: python
+
+   from eagle.graph import opaque
+
+   x, y = np.arange(4.0), np.zeros(4)
+   h = eagle.Graph()
+   h.add_node(opaque(lambda: np.add(x, 1.0, out=y), reads={"x": x}, writes={"y": y}),
+              name="shift")
+   z = twice(h, y)               # two nodes, after `shift`
+   h.build().launch()
+   print(z)
+
+.. code-block:: text
+
+   [ 4.  8. 12. 16.]
+
+A hand-made graph has no ``bind`` and no builder names; the next section is
+that path in full.
+
+When you need more: ``add`` and ``build``
+-----------------------------------------
+
+Everything above is built on the calls below, and they stay when you want
+control of each node: plan launches you bound yourself, your own code as an
+``opaque`` node, an explicit ``add_group``.
+
+Your first hand-made graph
+^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 .. code-block:: python
 
@@ -60,6 +270,11 @@ kernel (read, write, or both) tells eagle how the node touches it. A plane
 that would have to be *copied* before the launch (a non-contiguous or
 sample-major array) is refused: a graph needs to see the very array you
 hold, so pass a contiguous one.
+
+To start a new epoch or replay with an empty sink, call
+``bound.clear("acc")`` rather than zeroing ``acc`` yourself: it also zeroes
+the compensation plane eagle keeps for a keyed sum, which you cannot reach.
+Call it between launches or replays, not inside a captured graph.
 
 ``Graph.add(bound, grad=False)`` marks the launch as not differentiated, for
 a node such as a controller that writes a step size. A recorded run and
@@ -251,8 +466,10 @@ Each of these is a message that names what to change:
 - **Copy-bound planes** (see above), at ``add``.
 - **Derivative kernels.** A ``vjp``/``jvp`` kernel enters a graph only through
   ``eagle.diff``, never directly.
-- **A graph that mixes host and device planes,** or a ``backend=`` that
-  disagrees with where the planes live.
+- **A node whose planes are on both the host and the device,** or a
+  ``backend=`` that disagrees with where the planes live. A graph may hold
+  host nodes and GPU nodes side by side; a transfer is a node of its own,
+  ``eagle.copy`` (see :doc:`graph_across_devices`).
 - **An empty graph, a second build, adding to a built graph.**
 - **A conditional that is already another graph's.**
 
@@ -416,6 +633,7 @@ registering a *different* kind under an existing name is refused.
 Where next
 ----------
 
+- :doc:`graph_forms`: every form of the builder, executed; :doc:`under_the_hood`: how it works.
 - :doc:`tutorials/09_graph_model`: build, inspect and break a graph, hands on.
 - :doc:`graph_view`: print and lay out a C++ graph with the same engine.
 - :doc:`cuda_graphs`: the C++ capture/replay machinery a GPU build lowers to.

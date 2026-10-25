@@ -103,6 +103,7 @@ __all__ = [
     "assemble_args",
     "check_aether_abi",
     "compaction_body",
+    "copy",
     "deploy",
     "detect",
     "device_props",
@@ -111,7 +112,9 @@ __all__ = [
     "make_gref",
     "make_handle",
     "np_dtype",
+    "opaque",
     "origin_adapter",
+    "pinned",
     "pure_prepare",
     "reduce",
     "repeat_while",
@@ -141,6 +144,12 @@ def __getattr__(name):
         import importlib
 
         return importlib.import_module(".diff", __name__)
+    if name in ("copy", "pinned", "opaque"):
+        import importlib
+
+        value = getattr(importlib.import_module(".graph" if name == "opaque" else "._transfer", __name__), name)
+        globals()[name] = value
+        return value
     if name == "Graph":
         from .graph import Graph
 

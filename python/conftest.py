@@ -9,9 +9,12 @@ tests use: the ``gpu`` marker (needs cupy + a CUDA device) and the ``torch`` mar
 pulls in a compiler.
 """
 
+import ctypes
 import functools
 import os
 import pathlib
+import shutil
+import subprocess
 import sys
 import sysconfig
 
@@ -32,6 +35,9 @@ RAPTOR_ROOT = os.environ.get("RAPTOR_ROOT", str(ROOT.parent.parent / f"raptor{SF
 sys.path.insert(0, RAPTOR_ROOT)
 
 os.environ.setdefault("CUDA_PATH", "/usr/local/cuda")
+
+# These two files exercise `match` statements in builders, which Python 3.9 cannot even parse.
+collect_ignore = ["tests/test_builder.py", "tests/test_builder_gpu.py"] if sys.version_info < (3, 10) else []
 
 # Records which certification rows RAN and passed, for assert_rows_complete("eagle", ran=True).
 pytest_plugins = ["raptor.conformance.pytest_rows"]
@@ -68,6 +74,19 @@ def _torch_available() -> bool:
         return True
     except Exception:
         return False
+
+
+@pytest.fixture(scope="module")
+def _exact_host_profile():
+    """Host builds of the module under hawk's EXACT ``native`` profile (FMA
+    contraction off): rows that compare host runs of separate compiles bit for
+    bit are only promised by the exact profiles. hawk's default x86-64 profile
+    contracts ``a*b + c`` into FMAs and is gated by ULP bounds in hawk's own
+    suite instead. Apply with ``pytestmark = pytest.mark.usefixtures("_exact_host_profile")``."""
+    mp = pytest.MonkeyPatch()
+    mp.setenv("HAWK_HOST_PROFILE", "native")
+    yield
+    mp.undo()
 
 
 CUPY_AVAILABLE = _cupy_available()
@@ -175,3 +194,20 @@ def _ft_row_needs_the_gil_off(request):
         pytest.skip(f"{framework} switched the GIL back on when imported, so its free-threading rows are skipped")
     yield
     assert not sys._is_gil_enabled(), f"the GIL came back on during a {framework} free-threading row"
+
+
+@pytest.fixture(scope="module")
+def probe(tmp_path_factory):
+    """``tests/fixtures/xla_pack_probe.cpp``: a launch entry that records the argument
+    structures (and so the buffer addresses) it is handed instead of running a kernel."""
+    cxx = shutil.which(os.environ.get("CXX", "") or "c++") or shutil.which("g++")
+    if cxx is None:
+        pytest.fail("a C++ compiler is needed to build fixtures/xla_pack_probe.cpp")
+    so = tmp_path_factory.mktemp("xla_probe") / "libxla_pack_probe.so"
+    build = subprocess.run([cxx, "-std=c++17", "-O1", "-fPIC", "-shared",
+                            str(ROOT / "tests" / "fixtures" / "xla_pack_probe.cpp"),
+                            "-o", str(so)], capture_output=True, text=True)
+    assert build.returncode == 0, build.stderr
+    lib = ctypes.CDLL(str(so))
+    lib.probe_read.restype = ctypes.c_int32
+    return lib

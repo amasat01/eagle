@@ -127,7 +127,8 @@ def test_refusals():
         eagle.Graph().launch()
     with pytest.raises(ValueError, match="backend must be one of"):
         eagle.Graph().add_node(opaque(lambda: None)).build(backend="tpu")
-    with pytest.raises(ValueError, match="nesting"):
-        flag = np.ones(1, dtype=np.uint32)
-        inner = skippable(opaque(lambda: None), SkipGuard.nonzero(flag))
-        eagle.Graph().add_node(skippable(inner, SkipGuard.nonzero(flag)))
+    flag = np.ones(1, dtype=np.uint32)         # conditionals nest
+    ran = []
+    inner = skippable(opaque(lambda: ran.append(1)), SkipGuard.nonzero(flag))
+    eagle.Graph().add_node(skippable(inner, SkipGuard.nonzero(flag))).build().launch()
+    assert ran == [1]

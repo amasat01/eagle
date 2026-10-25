@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """A ``repeat_while`` body that is a tuple of parts (with a ``skippable`` part)
 runs in ``eagle.Graph``; a loop whose parts are all ``grad=False`` is skipped
-by a reverse; a differentiated part inside a loop and a loop inside a loop are
-refused by name."""
+by a reverse; a part of a reversed loop that is not a plan launch is refused
+by name, and a loop in a loop is adopted."""
 
 import numpy as np
 import pytest
@@ -76,7 +76,7 @@ def test_a_loop_of_grad_false_parts_leaves_the_gradient_as_without_it(tmp_path):
     np.testing.assert_array_equal(grads["x"], 2.0 * 0.125 * x)
 
 
-def test_a_differentiated_part_in_a_loop_is_refused_by_name(tmp_path):
+def test_a_part_that_is_not_a_launch_in_a_reversed_loop_is_refused_by_name(tmp_path):
     (pm,) = eagle.plan.auto([param_planes(model)], targets=("host",),
                             cache_dir=str(tmp_path), scalar_type="float64")
     x = np.linspace(-1.0, 1.0, N)
@@ -86,13 +86,12 @@ def test_a_differentiated_part_in_a_loop_is_refused_by_name(tmp_path):
                                                       name="model")
     g.build(record=True)
     g.launch()
-    with pytest.raises(ValueError, match=r"'loop'.*differentiated part.*grad=False"):
+    with pytest.raises(ValueError, match=r"'loop'.*'opaque' part.*plan launches only"):
         eagle.diff.reverse(g.record, {"model.y": np.ones(N)}, vjps={"loop": lambda p, c: {}})
 
 
-def test_a_loop_in_a_loop_is_still_refused():
+def test_a_loop_in_a_loop_is_adopted():
     go = np.ones(1, dtype=np.uint32)
     inner = eagle.repeat_while(lambda: None, eagle.SkipGuard.intent(go, 0), 2)
     outer = eagle.repeat_while((inner,), eagle.SkipGuard.intent(go, 0), 2)
-    with pytest.raises(ValueError, match="repeat_while inside a repeat_while"):
-        eagle.Graph().add_node(outer)
+    assert eagle.Graph().add_node(outer)._nodes[0].payload.child.payload[0].kind == "repeat_while"

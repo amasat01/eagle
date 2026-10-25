@@ -4,6 +4,7 @@
 #pragma once
 
 #include "eagle/cuda/Stream.h"
+#include "eagle/cuda/detail/RuntimeCompat.h"
 #include "eagle/util/CaptureGuard.h"
 
 #include <optional>
@@ -140,6 +141,22 @@ public:
         captureScope_.reset();
         EAGLE_CHECK_ALWAYS(captureErr);
         return graph;
+    }
+
+    /** @brief The graph the in-flight capture is recording into (nullptr
+     *  when no capture is active on the stream): the root a graph patch
+     *  attributes nodes against before ``end()`` hands the graph out. */
+    cudaGraph_t graph() const
+    {
+        cudaStreamCaptureStatus status    = cudaStreamCaptureStatusNone;
+        unsigned long long id             = 0;
+        cudaGraph_t graph                 = nullptr;
+        const cudaGraphNode_t* deps       = nullptr;
+        const cudaGraphEdgeData* edgeData = nullptr;
+        std::size_t numDeps               = 0;
+        EAGLE_CHECK_ALWAYS(detail::streamGetCaptureInfo(
+            stream_, &status, &id, &graph, &deps, &edgeData, &numDeps));
+        return status == cudaStreamCaptureStatusActive ? graph : nullptr;
     }
 
 protected:

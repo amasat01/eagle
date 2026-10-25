@@ -385,7 +385,7 @@ def test_unsupported_role_is_refused():
 
     @hawk.kernel
     def scatter(x: Scalar, lane: Index, acc: Mutable[Scalar]):
-        hawk.all_samples(acc)[lane] += x
+        hawk.scatter(acc)[lane] += x
 
     with pytest.raises(ValueError, match="acc"):
         eagle_torch.function(scatter)

@@ -27,7 +27,12 @@ from .launch import (
     pure_origin,
     pure_prepare,
 )
-from .sidecar import read_params, read_terminated_readonly, validate_sidecar
+from .sidecar import (
+    read_launch,
+    read_params,
+    read_terminated_readonly,
+    validate_sidecar,
+)
 
 #: The sidecar's minimal Mutable descriptor: name / dtype / width / shape,
 #: enough to size N and pick the ABI (vector/matrix -> GRef, scalar/int ->
@@ -63,6 +68,11 @@ class LoadedKernel(LaunchMixin):
         # "float64" when absent -- pre-dtype sidecars.
         self.scalar_type = self._meta.get("scalar_type", "float64")
         self.kernel_name = self._meta["kernel"]
+        #: ``launch.lane_space`` (:class:`~eagle.sidecar.LaneSpace`), the exact
+        #: ``launch.block`` (``None`` when the artifact states none), the sinks
+        #: with named axes, the ``Sorted`` inputs and the thread ``box``.
+        (self.lane_space, self.block, self.plane_axes,
+         self.sorted_inputs, self.box) = read_launch(self._meta, name=ptx_path.name)
         self.vector_inputs = tuple(self._meta["vector_inputs"])
         self.params = read_params(self._meta, name=ptx_path.name)
         #: The binding names of :attr:`params`.

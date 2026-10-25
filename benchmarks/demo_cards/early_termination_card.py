@@ -114,37 +114,8 @@ def _guard_vs_unguarded_host(batch: int, steps: int, reps: int, dt: float,
            "wall_s_per_step": {name: cc.median_iqr(v) for name, v in times.items()}}
 
 
-def _facts() -> dict:
-    try:
-        device, peak = cc.device_facts()[:2]
-    except Exception:  # no GPU or no cupy: the dry path
-        device = peak = None
-    return {
-        "device": device, "peak": peak, "software": cc.software(),
-        "script_md5": cc.md5(__file__),
-        "example_script_md5": cc.md5(example.__file__),
-        "example_script": "examples/python/early_termination.py",
-        "generated_utc": cc.utc_now_iso(),
-    }
-
-
 def _code() -> dict:
     return {"kernel_source": inspect.getsource(example.step_kernel)}
-
-
-def render_md(card: dict) -> str:
-    import json
-
-    lines = [f"# {CARD_NAME} card", ""]
-    if card.get("dry"):
-        lines += ["**DRY RUN -- not authoritative, and not the same "
-                  "measurement as the real card** (there is no CUDA graph "
-                  "on a host; see this script's own docstring).", ""]
-    lines += [f"Schema: `{card['schema']}`  ·  generated {card['facts']['generated_utc']}",
-             "", "## Facts", "", "```json", json.dumps(card["facts"], indent=2, sort_keys=True),
-             "```", "", "## Results", "", "```json",
-             json.dumps(card["results"], indent=2, sort_keys=True), "```", ""]
-    return "\n".join(lines)
 
 
 def main(argv=None) -> int:
@@ -160,7 +131,7 @@ def main(argv=None) -> int:
     if args.dry == args.device:
         p.error("pass exactly one of --dry / --device")
 
-    facts = _facts()
+    facts = cc.demo_facts(__file__, example, "examples/python/early_termination.py")
     if args.dry:
         reps = args.reps or DRY_REPS
         batch = args.batch or DRY_BATCH
@@ -174,7 +145,7 @@ def main(argv=None) -> int:
         out_dir.mkdir(parents=True, exist_ok=True)
         json_path = out_dir / f"{CARD_NAME}_card.DRY.json"
         md_path = out_dir / f"{CARD_NAME}_card.DRY.md"
-        cc.write_card(card, json_path, render_md(card), md_path)
+        cc.write_card(card, json_path, cc.demo_md(card, CARD_NAME, "there is no CUDA graph on a host; see this script's own docstring"), md_path)
         print(f"[dry] wrote {json_path} and {md_path} (not committed)")
         return 0
 
@@ -183,7 +154,6 @@ def main(argv=None) -> int:
     import cupy as cp
     import eagle
     import eagle.exec as eexec
-    import numpy as np
     from eagle import plan as eplan
     from eagle.pipeline import GraphPipeline
 
@@ -259,7 +229,7 @@ def main(argv=None) -> int:
            "facts": facts, "code": _code(), "results": results}
     out_dir = pathlib.Path(args.out) if args.out else _HERE
     json_path, md_path = out_dir / f"{CARD_NAME}_card.json", out_dir / f"{CARD_NAME}_card.md"
-    cc.write_card(card, json_path, render_md(card), md_path)
+    cc.write_card(card, json_path, cc.demo_md(card, CARD_NAME, "there is no CUDA graph on a host; see this script's own docstring"), md_path)
     print(f"wrote {json_path} and {md_path}")
     return 0
 

@@ -21,29 +21,14 @@ the accessor-based equivalence check below is the aether-shaped replacement.
 """
 from __future__ import annotations
 
-import os
 import pathlib
 
 import pytest
+from _device_file import AETHER_INCLUDE
 
 from eagle.abi import GREF_DTYPE
 
 
-def _find_aether_include() -> str | None:
-    """Return the directory containing aether/aether.h, checking env override then
-    the active Python prefix (works when aether is installed into the conda env)."""
-    import sys
-    candidates = [
-        os.environ.get("EAGLE_AETHER_INCLUDE"),
-        os.path.join(sys.prefix, "include"),
-    ]
-    for d in filter(None, candidates):
-        if os.path.isfile(os.path.join(d, "aether", "aether.h")):
-            return d
-    return None
-
-
-AETHER_INCLUDE = _find_aether_include()
 HOST_DIR = pathlib.Path(__file__).resolve().parent.parent.parent / "plugin"
 
 

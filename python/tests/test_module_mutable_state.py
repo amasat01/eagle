@@ -24,7 +24,12 @@ TABLE = "read-only table, never mutated after import"
 MEMO = "memo of a pure function: single atomic dict calls, a lost race recomputes the same value"
 
 ALLOWED = {
+    ("_builder.py", "_DTYPES"): "read-only table",
+    ("_builder.py", "_MEMO"): "idempotent memo of compiled code, keyed by file, line and code object: a race compiles the same code twice",
     ("_active_set.py", "_REORDERING"): "guarded by _REORDER_LOCK",
+    ("_active_set.py", "_GROUP_BY_COUNT"): "every operation is one atomic dict call: set once at construction, popped by the finalizer, keyed by the count plane's address",
+    ("_device_kind.py", "_DLPACK_KINDS"): "read-only table",
+    ("_transfer.py", "_LIVE"): "a WeakSet: add is one atomic call, and the only iteration is the exit hook, which copies it under the set's own iteration guard",
     ("_counters.py", "_COUNTERS"): "guarded by _LOCK",
     ("_dispatch_door.py", "_PARTS"): "guarded by _PARTS_LOCK",
     ("_graph_reduce.py", "_OPS"): TABLE,

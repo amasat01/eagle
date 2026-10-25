@@ -44,6 +44,17 @@ def _root_module(x) -> str:
     return type(x).__module__.partition(".")[0]
 
 
+def _xp_of(arr):
+    """numpy or cupy, whichever owns ``arr``."""
+    if _root_module(arr) == "cupy":
+        import cupy
+
+        return cupy
+    import numpy
+
+    return numpy
+
+
 def _is_cuda(x) -> bool:
     """Whether ``x`` is device-resident, probed without importing its
     framework: the DLPack device tag first, else attribute sniffing (torch

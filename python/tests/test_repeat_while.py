@@ -267,8 +267,8 @@ def test_repeat_while_empty_body_is_refused_at_build_under_process_timeout():
 
 
 # --------------------------------------------------------------------------- #
-# (f) nesting. RED 1: drop the inner weave (run the Skippable's step bare) ->
-#     flag 0 still fires the tracer. RED 2: drop the while-in-while refusal.
+# (f) nesting. RED: drop the inner weave (run the Skippable's step bare) ->
+#     flag 0 still fires the tracer.
 # --------------------------------------------------------------------------- #
 def test_repeat_while_with_skippable_inside_body_follows_its_flag():
     y = cp.zeros(_N, dtype=cp.float32)
@@ -298,20 +298,30 @@ def test_repeat_while_with_skippable_inside_body_follows_its_flag():
     del y
 
 
-def test_repeat_while_inside_repeat_while_is_refused_at_build():
+def test_repeat_while_inside_repeat_while_and_inside_skippable_run():
     guard = cp.ones(1, dtype=cp.uint32)
-    inner = repeat_while(lambda: None, SkipGuard.nonzero(guard), 2)
-    pipe = GraphPipeline().add(repeat_while(inner, SkipGuard.nonzero(guard), 2))
-    with pytest.raises(ValueError, match="repeat_while inside repeat_while"):
-        pipe.build()
-    pipe2 = GraphPipeline().add(skippable(inner, SkipGuard.nonzero(guard)))
-    with pytest.raises(ValueError, match="repeat_while inside skippable"):
-        pipe2.build()
+    tracer = cp.zeros(1, dtype=cp.int32)
+    inner = repeat_while(lambda: _tracer((1,), (1,), (tracer,)), SkipGuard.nonzero(guard), 2)
+    outer = repeat_while(inner, SkipGuard.nonzero(guard), 3)
+    pipe = GraphPipeline().add(outer)
+    pipe.build()
+    pipe.launch()
+    assert outer.iterations() == 3 and inner.iterations() == 2
+    assert _tracer_value(tracer) == 6
+    tracer[:] = 0
+    flag = cp.ones(1, dtype=cp.uint32)
+    pipe2 = GraphPipeline().add(skippable(inner, SkipGuard.intent(flag, 0)))
+    pipe2.build()
+    pipe2.launch()
+    assert _tracer_value(tracer) == 2
+    flag[:] = 0
+    pipe2.launch()
+    assert _tracer_value(tracer) == 2
 
 
 # --------------------------------------------------------------------------- #
 # (g) enabled-mode refusal. RED: drop the RepeatWhile isinstance in
-#     _prebuild_guarded (treat it as a plain step) -> the member is recorded
+#     _weave (treat it as a plain step) -> the member is recorded
 #     toggleable (or is_node_toggleable is called on the WHILE node).
 # --------------------------------------------------------------------------- #
 def test_repeat_while_member_is_not_toggleable_and_enabled_mode_refuses_it():
@@ -432,6 +442,18 @@ def test_repeat_while_host_arm_numpy_parity():
     loop()
     assert loop.iterations() == 0 and calls == []
     assert not isinstance(loop, Skippable)
+
+
+def test_repeat_while_without_a_cap_is_uncapped():
+    guard = np.ones(1, dtype=np.uint32)
+    ran = []
+
+    def body():
+        ran.append(1)
+        guard[0] = len(ran) < 5
+    loop = repeat_while(body, SkipGuard.nonzero(guard))
+    loop()
+    assert loop.max_iters is None and loop.iterations() == 5
 
 
 @pytest.mark.parametrize(

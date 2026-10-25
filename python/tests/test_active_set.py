@@ -39,9 +39,12 @@ import math
 
 import numpy as np
 import pytest
+from conftest import CUPY_AVAILABLE
 
 import eagle
 from eagle import ActiveSet, SkipGuard, compaction_body, repeat_while, skippable
+
+pytestmark = pytest.mark.usefixtures("_exact_host_profile")
 
 _SIZES = (0, 1, 7, 256, 257, 4096, 100_003)
 
@@ -240,15 +243,6 @@ def _oscillator(kind):
     return hawk.kernel(oscillator_step, kind=kind)
 
 
-def _have_gpu():
-    try:
-        import cupy
-
-        return cupy.cuda.runtime.getDeviceCount() > 0
-    except Exception:
-        return False
-
-
 @pytest.fixture(scope="module")
 def plans(tmp_path_factory):
     """(map-free, map) x (device, host) plans of the same oscillator step."""
@@ -264,7 +258,7 @@ def plans(tmp_path_factory):
     from eagle import plan as eplan
     from eagle.registry import load_manifest
 
-    gpu = _have_gpu()
+    gpu = CUPY_AVAILABLE
     targets = ("host", "cuda") if gpu else ("host",)
     out = {}
     for label, kind in (("plain", None),

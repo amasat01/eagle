@@ -37,6 +37,7 @@
 #include "eagle/stream.h"
 
 #include "eagle/cuda.h"
+#include "eagle/ExecGraph.h"
 
 #include "eagle/filtering.h"
 #include "eagle/reduce.h"

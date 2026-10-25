@@ -21,15 +21,12 @@ from eagle import _cell_rows, _split  # noqa: E402
 from hawk import Mutable, Param, Scalar  # noqa: E402
 from hawk.artifact import build_bundle, plugins  # noqa: E402
 
-if not hasattr(hawk, "all_samples"):
-    pytest.skip("this hawk has no reductions over samples", allow_module_level=True)
-
 SIZES = (1, 31, 33, 1000, 65536)
 
 
 @hawk.kernel
 def one_sum(x: Scalar, t: Mutable[Scalar]):
-    t = hawk.all_samples(x).sum()
+    t = hawk.sum(x)
 
 
 @hawk.kernel
@@ -39,7 +36,7 @@ def divide(x: Scalar, t: Param, z: Mutable[Scalar]):
 
 @hawk.kernel
 def weighted_sum(x: Scalar, t: Param, u: Mutable[Scalar]):
-    u = hawk.all_samples(x * t).sum()
+    u = hawk.sum(x * t)
 
 
 @hawk.kernel
@@ -181,13 +178,13 @@ def test_two_stages_on_cuda(tmp_path, n):
 # --- the kernels hawk splits itself: the same doors over its own bundles --- #
 @hawk.kernel
 def over_total(x: Scalar, z: Mutable[Scalar]):
-    z = x / hawk.all_samples(x).sum()
+    z = x / hawk.sum(x)
 
 
 @hawk.kernel
 def chain(x: Scalar, z: Mutable[Scalar]):
-    s = hawk.all_samples(x).sum()
-    u = hawk.all_samples(x * s).sum()
+    s = hawk.sum(x)
+    u = hawk.sum(x * s)
     z = x / u
 
 
@@ -248,7 +245,7 @@ def test_hawk_split_three_stages_in_a_graph(tmp_path):
 
 @hawk.kernel
 def weighted(x: Scalar, w: Param, z: Mutable[Scalar]):
-    z = w * x / hawk.all_samples(x * x).sum()
+    z = w * x / hawk.sum(x * x)
 
 
 def _reverse_vs_fd(tmp_path, targets, xp):
@@ -332,12 +329,12 @@ def test_jax_bridge_chains_the_stages(tmp_path, jit):
 
 @hawk.kernel
 def total(x: Scalar, t: Mutable[Scalar]):
-    t = hawk.all_samples(x * x).sum()
+    t = hawk.sum(x * x)
 
 
 @hawk.kernel
 def weighted_total(x: Scalar, w: Param, z: Mutable[Scalar]):
-    z = w * x / hawk.all_samples(x * x).sum()
+    z = w * x / hawk.sum(x * x)
 
 
 @pytest.fixture

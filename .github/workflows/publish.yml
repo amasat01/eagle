@@ -123,10 +123,10 @@ jobs:
       - uses: actions/attest-build-provenance@v4
         with:
           subject-path: dist/*
-      - name: GitHub Release from the CHANGELOG section
+      - name: GitHub Release, notes from the merged pull request
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          V=$(python3 tools/version.py get)
-          gh release create "$GITHUB_REF_NAME" dist/* --title "eagle $V" \
-            --notes "$(python3 tools/version.py notes)" --verify-tag
+          gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls" --jq '.[0].body' > notes.md
+          gh release create "$GITHUB_REF_NAME" dist/* --title "eagle ${GITHUB_REF_NAME#v}" \
+            --notes-file notes.md --verify-tag

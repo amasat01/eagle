@@ -365,12 +365,16 @@ def test_float32_values_and_derivatives_match_float64(op, dev):
 
 
 @pytest.mark.parametrize("dev", DEVICES)
-def test_mixed_dtypes_are_refused_by_name(op, dev):
+def test_mixed_dtypes_promote_to_the_widest(op, dev):
+    from eagle import PerformanceWarning
+
     v, cd, terminated = _case(_device(dev), "float64", grad=False)
-    with pytest.raises(ValueError, match="mixed floating dtypes"):
-        op(v.float(), cd, terminated)
-    with pytest.raises(ValueError, match="mixed floating dtypes"):
-        op(v, cd.float(), terminated)
+    want = op(v, cd, terminated)
+    for args in ((v.float(), cd, terminated), (v, cd.float(), terminated)):
+        with pytest.warns(PerformanceWarning, match="promoted to float64"):
+            got = op(*args)
+        assert got.dtype == torch.float64
+        torch.testing.assert_close(got, want, rtol=1e-5, atol=1e-5)
 
 
 def test_half_precision_is_refused_by_name(op):

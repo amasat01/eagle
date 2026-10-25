@@ -49,17 +49,29 @@ inline std::string dotEscape(const std::string& s)
     return out;
 }
 
-/** @brief Frame ids by parent (``-1`` first), and node ids by frame. */
+/** @brief Frame ids by parent (``-1`` first), and node ids by frame. A
+ *  ``"stage"`` frame is a layout row, not a region: it is left out, its
+ *  contents hang on its parent, and ``number`` renumbers the frames that remain. */
 struct FrameTree {
     std::vector<std::vector<gidx>> childFrames;   // index parent + 1
     std::vector<std::vector<gidx>> frameNodes;    // index frame + 1
+    std::vector<gidx> number;                     // drawn number per frame id
     explicit FrameTree(const Description& d)
-        : childFrames(d.frames.size() + 1), frameNodes(d.frames.size() + 1)
+        : childFrames(d.frames.size() + 1), frameNodes(d.frames.size() + 1), number(d.frames.size(), -1)
     {
+        auto shown = [&](gidx f) {
+            while (f != -1 && d.frames[f].kind == "stage")
+                f = d.frames[f].parent;
+            return f;
+        };
+        gidx next = 0;
         for (const Frame& f : d.frames)
-            childFrames[f.parent + 1].push_back(f.id);
+            if (f.kind != "stage") {
+                number[f.id] = next++;
+                childFrames[shown(f.parent) + 1].push_back(f.id);
+            }
         for (const Node& n : d.nodes)
-            frameNodes[n.frame + 1].push_back(n.id);
+            frameNodes[shown(n.frame) + 1].push_back(n.id);
     }
 };
 
@@ -105,7 +117,7 @@ inline std::string mermaid(const Description& d)
         for (gidx v : tree.frameNodes[frame + 1])
             node(d.nodes[v], pad);
         for (gidx f : tree.childFrames[frame + 1]) {
-            out += pad + "subgraph f" + std::to_string(f) + "[\""
+            out += pad + "subgraph f" + std::to_string(tree.number[f]) + "[\""
                 + detail::escape(d.frames[f].text(), '"', "#quot;") + "\"]\n";
             self(self, f, pad + "  ");
             out += pad + "end\n";
@@ -147,7 +159,7 @@ inline std::string dot(const Description& d)
         for (gidx v : tree.frameNodes[frame + 1])
             node(d.nodes[v], pad);
         for (gidx f : tree.childFrames[frame + 1]) {
-            out += pad + "subgraph cluster_f" + std::to_string(f) + " {\n" + pad
+            out += pad + "subgraph cluster_f" + std::to_string(tree.number[f]) + " {\n" + pad
                 + "  label=\"" + detail::dotEscape(d.frames[f].text()) + "\";\n";
             self(self, f, pad + "  ");
             out += pad + "}\n";

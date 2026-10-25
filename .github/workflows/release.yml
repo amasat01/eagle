@@ -48,7 +48,7 @@ name: Release
 on:
   pull_request:
     branches: [main]
-    types: [opened, synchronize, reopened, labeled]
+    types: [opened, synchronize, reopened, labeled, unlabeled]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -69,7 +69,7 @@ jobs:
       # /tmp path that lands in every compile line, so ccache could never hit across runs
       CIBW_BUILD_FRONTEND: "build; args: --no-isolation"
       CIBW_BEFORE_BUILD: >-
-        python -m pip install 'scikit-build-core>=0.10' 'ninja>=1.5'
+        python -m pip install 'scikit-build-core>=0.10' 'setuptools-scm>=8' 'ninja>=1.5'
         'nanobind>=3.1,<4; python_version >= "3.10"'
         'nanobind>=2.2,<3; python_version < "3.10"'
       CIBW_CONTAINER_ENGINE: "docker; create_args: --volume ${{ github.workspace }}/aether:/sib/aether:ro --volume ${{ github.workspace }}/eagle:/sib/eagle:ro --volume ${{ github.workspace }}/.ccache-cibw:/ccache"
@@ -80,6 +80,7 @@ jobs:
       # `dnf config-manager` needs dnf-plugins-core).
       # EPEL mirrors fail often on aarch64: retry, then run uncached through a pass-through ccache stand-in
       CIBW_BEFORE_ALL_LINUX: >-
+        git config --global --add safe.directory '*';
         for i in 1 2 3; do dnf install -y epel-release && dnf install -y ccache && break; dnf clean all; done;
         command -v ccache >/dev/null || { printf '%s\n' '#!/bin/sh' 'case $1 in -*) exit 0;; esac' 'exec "$@"' > /usr/local/bin/ccache;
         chmod +x /usr/local/bin/ccache; };
@@ -125,6 +126,10 @@ jobs:
       - uses: actions/checkout@v7
         with:
           path: eagle
+          fetch-depth: 0
+      - uses: ./eagle/.github/actions/tag-version
+        with:
+          path: eagle
 
       - uses: ./eagle/.github/actions/companion
         with: {repo: aether, path: aether, pins: eagle/.github/companions, token: "${{ secrets.SIBLING_READ_TOKEN || github.token }}"}
@@ -168,12 +173,13 @@ jobs:
       CIBW_MANYLINUX_AARCH64_IMAGE: manylinux_2_28
       CIBW_BUILD_FRONTEND: "build; args: --no-isolation"
       CIBW_BEFORE_BUILD: >-
-        python -m pip install 'scikit-build-core>=0.10' 'ninja>=1.5'
+        python -m pip install 'scikit-build-core>=0.10' 'setuptools-scm>=8' 'ninja>=1.5'
         'nanobind>=3.1,<4; python_version >= "3.10"'
         'nanobind>=2.2,<3; python_version < "3.10"'
       CIBW_CONTAINER_ENGINE: "docker; create_args: --volume ${{ github.workspace }}/.ccache-cibw:/ccache"
       # EPEL mirrors fail often on aarch64: retry, then run uncached through a pass-through ccache stand-in
       CIBW_BEFORE_ALL_LINUX: >-
+        git config --global --add safe.directory '*';
         for i in 1 2 3; do dnf install -y epel-release && dnf install -y ccache && break; dnf clean all; done;
         command -v ccache >/dev/null || { printf '%s\n' '#!/bin/sh' 'case $1 in -*) exit 0;; esac' 'exec "$@"' > /usr/local/bin/ccache;
         chmod +x /usr/local/bin/ccache; };
@@ -190,6 +196,10 @@ jobs:
       CIBW_TEST_SKIP: "*"
     steps:
       - uses: actions/checkout@v7
+        with:
+          path: eagle
+          fetch-depth: 0
+      - uses: ./eagle/.github/actions/tag-version
         with:
           path: eagle
 
@@ -245,7 +255,7 @@ jobs:
     env:
       CIBW_BUILD_FRONTEND: "build; args: --no-isolation"
       CIBW_BEFORE_BUILD: >-
-        python -m pip install 'scikit-build-core>=0.10' 'ninja>=1.5'
+        python -m pip install 'scikit-build-core>=0.10' 'setuptools-scm>=8' 'ninja>=1.5'
         'nanobind>=3.1,<4; python_version >= "3.10"'
         'nanobind>=2.2,<3; python_version < "3.10"'
       # the host path uses OpenMP and includes <omp.h>, which Apple's clang lacks: Homebrew's libomp, which delocate
@@ -260,6 +270,10 @@ jobs:
       CIBW_TEST_SKIP: "*"
     steps:
       - uses: actions/checkout@v7
+        with:
+          path: eagle
+          fetch-depth: 0
+      - uses: ./eagle/.github/actions/tag-version
         with:
           path: eagle
 
@@ -309,6 +323,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          path: eagle
+          fetch-depth: 0
+      - uses: ./eagle/.github/actions/tag-version
         with:
           path: eagle
 
@@ -387,6 +405,55 @@ jobs:
           retention-days: 90
           path: dist/
 
+  # The CUDA wheel built from the sdist alone (nvcc, no GPU): the sdist carries every header the plugin and the core compile against.
+  sdist-cuda-wheel:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: eagle
+          fetch-depth: 0
+      - uses: ./eagle/.github/actions/tag-version
+        with:
+          path: eagle
+      - uses: ./eagle/.github/actions/companion
+        with: {repo: raptor, path: raptor, pins: eagle/.github/companions, token: "${{ secrets.SIBLING_READ_TOKEN || github.token }}"}
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist-${{ needs.build.outputs.tree }}
+          path: dist
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: sudo apt-get update && sudo apt-get install -y g++-13
+      - name: Install compile-only CUDA 12.6 toolchain (nvcc; no driver/GPU)
+        run: |
+          curl -fsSL -o /tmp/cuda-keyring.deb \
+            https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+          sudo dpkg -i /tmp/cuda-keyring.deb
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cuda-nvcc-12-6 cuda-cudart-dev-12-6 cuda-driver-dev-12-6
+          echo "/usr/local/cuda-12.6/bin" >> "$GITHUB_PATH"
+          echo "CUDA_HOME=/usr/local/cuda-12.6" >> "$GITHUB_ENV"
+      # raptor-core: PyPI when the checkout's version is released, else built from the sibling raptor checkout
+      - id: sib
+        uses: ./eagle/.github/actions/install-siblings
+        with:
+          siblings: raptor-core=raptor
+      - name: Build the wheel from the sdist, install it, import eagle.cuda
+        env:
+          CC: gcc-13
+          CXX: g++-13
+          SIB_DIR: ${{ steps.sib.outputs.dir }}
+          SIB_PINS: ${{ steps.sib.outputs.pins }}
+        run: |
+          python -m pip wheel --no-deps -w wheelhouse dist/raptor_eagle-*.tar.gz
+          python -m venv sv
+          # shellcheck disable=SC2086  # the pins are separate arguments
+          sv/bin/python -m pip install --quiet --find-links "$SIB_DIR" $SIB_PINS wheelhouse/*.whl
+          cd "$RUNNER_TEMP" && "$GITHUB_WORKSPACE/sv/bin/python" -c "import eagle, eagle.cuda; print(eagle.__version__, eagle.cuda)"
+
   test-wheel:
     needs: build
     runs-on: ${{ matrix.os }}
@@ -398,6 +465,10 @@ jobs:
         python-version: ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14", "3.15", "3.13t", "3.14t", "3.15t"]
     steps:
       - uses: actions/checkout@v7
+        with:
+          path: eagle
+          fetch-depth: 0
+      - uses: ./eagle/.github/actions/tag-version
         with:
           path: eagle
       - uses: ./eagle/.github/actions/companion
@@ -512,6 +583,10 @@ jobs:
       - uses: actions/checkout@v7
         with:
           path: eagle
+          fetch-depth: 0
+      - uses: ./eagle/.github/actions/tag-version
+        with:
+          path: eagle
 
       - uses: ./eagle/.github/actions/companion
         with: {repo: aether, path: aether, pins: eagle/.github/companions, token: "${{ secrets.SIBLING_READ_TOKEN || github.token }}"}
@@ -592,7 +667,7 @@ jobs:
           # random /tmp build env, so every compile line differs and ccache never hits;
           # --only-binary=:all: still builds this local project but never a dependency from
           # source, so no third-party sdist is ever built without its own isolated env
-          python -m pip install --quiet "scikit-build-core>=0.10" "nanobind>=3.1,<4"
+          python -m pip install --quiet "scikit-build-core>=0.10" "setuptools-scm>=8" "nanobind>=3.1,<4"
           export CMAKE_PREFIX_PATH="${GITHUB_WORKSPACE}/__install:${CMAKE_PREFIX_PATH}"
           export SKBUILD_CMAKE_ARGS="-DCMAKE_CUDA_COMPILER=$(which nvcc);-DCMAKE_CUDA_ARCHITECTURES=70"
           pip install ../raptor   # the sibling checkout, so unreleased raptor changes are tested
@@ -611,13 +686,23 @@ jobs:
       - uses: ./eagle/.github/actions/companion
         with: {repo: hawk, path: hawk, pins: eagle/.github/companions, token: "${{ secrets.SIBLING_READ_TOKEN || github.token }}"}
 
+      # aether-dsc and hawk: PyPI when the checkout's version is released, else built from it
+      - id: sib
+        uses: ./eagle/.github/actions/install-siblings
+        with:
+          siblings: aether-dsc=aether/dsc raptor-hawk=hawk
+
       - name: Install what the notebooks run on
+        env:
+          SIB_DIR: ${{ steps.sib.outputs.dir }}
+          SIB_PINS: ${{ steps.sib.outputs.pins }}
         run: |
           export HAWK_AETHER_INCLUDE="${GITHUB_WORKSPACE}/aether" HAWK_EAGLE_INCLUDE="${GITHUB_WORKSPACE}/eagle"
           python -m pip install --quiet ipykernel matplotlib scipy
           python -m pip install --quiet torch --index-url https://download.pytorch.org/whl/cpu
           python -m pip install --quiet --only-binary=:all: "jax[cpu]==0.11.2"   # the JAX notebooks (the floor, as ci.yml pins it)
-          python -m pip install --quiet ./hawk
+          # shellcheck disable=SC2086  # the pins are separate arguments
+          python -m pip install --quiet --find-links "$SIB_DIR" $SIB_PINS
 
       - name: make nbcheck (refuse an unfilled notebook; run every notebook on the CPU)
         run: cd eagle/docs && make nbcheck
@@ -639,7 +724,7 @@ jobs:
       - if: always()
         run: ccache -s
 
-  # Informational: a non-release PR carries an already published version.
+  # Informational: a docs-only PR carries an already published version.
   pypi-version:
     needs: build
     runs-on: ubuntu-latest
@@ -666,6 +751,10 @@ jobs:
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v7
+        with:
+          path: eagle
+          fetch-depth: 0
+      - uses: ./eagle/.github/actions/tag-version
         with:
           path: eagle
       # companions: the ref pinned in .github/companions, else a same-named branch, else main

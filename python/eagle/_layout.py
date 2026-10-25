@@ -62,6 +62,8 @@ import functools
 import sys
 import warnings
 
+from .interop import _root_module
+
 __all__ = ["LayoutWarning", "LayoutError", "classify", "is_single", "adapt",
            "Adapted", "samples_first", "samples_last", "split_marks",
            "check_layout", "scope", "door", "rewrap", "sample_extent"]
@@ -342,14 +344,41 @@ def _warn(name, shape, head, *, writes: bool) -> None:
         f"argument. To avoid the copy, allocate it as {native}, or pass the "
         f"transposed view of a contiguous {native} array."
     )
+    warn_once(LayoutWarning, name, message)
+
+
+def warn_once(category, name, message) -> None:
+    """Warn ``message`` as ``category`` once per call site and ``name``
+    (the first frame outside eagle and the frameworks that call it)."""
     frame, depth = _user_frame()
     key = (None if frame is None else (frame.f_code.co_filename, frame.f_lineno),
-           name)
+           name, category)
     if key in _seen:
         return
-    # `depth` counts _warn's own frame as 1, exactly as stacklevel does
-    warnings.warn(message, LayoutWarning, stacklevel=depth)
+    # `depth` counts this frame as 1, exactly as stacklevel does
+    warnings.warn(message, category, stacklevel=depth)
     _seen.add(key)       # only once the warning did not raise (strict mode)
+
+
+def warn_promoted(name, have, want) -> None:
+    """The one :class:`~eagle.PerformanceWarning` per call site for a float
+    plane ``have`` copied up to the build's ``want`` (dtype names)."""
+    from ._dispatch_door import PerformanceWarning
+
+    warn_once(PerformanceWarning, name,
+              f"plane {name!r} is {have}; promoted to {want} (a copy each call) "
+              f"\u2014 pass {want}, or build in {have}: "
+              f"eagle.deploy(k, scalar_type=\"{have}\")")
+
+
+def warn_copied(name) -> None:
+    """The one :class:`~eagle.PerformanceWarning` per call site for a strided
+    plane copied contiguous."""
+    from ._dispatch_door import PerformanceWarning
+
+    warn_once(PerformanceWarning, name,
+              f"{name!r} is not C-contiguous; copied each call \u2014 pass "
+              f"np.ascontiguousarray({name})")
 
 
 def _shape_text(shape) -> str:
@@ -422,7 +451,7 @@ class Adapted:
         ``(R*C, N)``) — back into the caller's array."""
         dst = self.caller_view()
         src = result.reshape(tuple(dst.shape))
-        dst_mod, src_mod = _module(dst), _module(src)
+        dst_mod, src_mod = _root_module(dst), _root_module(src)
         if dst_mod == src_mod:
             _copyto(dst, src)
         elif dst_mod == "torch":
@@ -437,10 +466,6 @@ class Adapted:
             import numpy
 
             numpy.copyto(dst, src.get() if src_mod == "cupy" else src)
-
-
-def _module(value) -> str:
-    return type(value).__module__.split(".")[0]
 
 
 def _copyto(dst, src) -> None:

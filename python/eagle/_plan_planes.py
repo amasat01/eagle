@@ -177,17 +177,79 @@ def _refuse_dtype_mismatch(door, role, name, declared, given) -> None:
     )
 
 
+def widen_index(value, declared):
+    """``value`` widened by one copy to ``declared`` when it is a narrower
+    integer plane under a wider signed declaration (an ``int32`` ``Index``
+    for a kernel emitted for ``int64`` keys); anything else is returned as
+    it is, for :func:`_refuse_dtype_mismatch` to judge (a float never
+    widens). The doors call this where they take the plane in: ``run`` per
+    call, ``bind``/``rebind`` once, so a launch copies nothing."""
+    try:
+        given = np.dtype(getattr(value, "dtype", None))
+    except TypeError:
+        return value
+    if (declared is not None and declared.kind == "i" and given.kind in "iu"
+            and given.itemsize < declared.itemsize):
+        return value.astype(declared)
+    return value
+
+
+def widen_indices(plugin, arg_spec, planes: dict) -> dict:
+    """``planes`` with each input plane :func:`widen_index`-ed to the dtype the
+    sidecar declares for it."""
+    out = planes
+    for role, name in arg_spec:
+        if role in INPUT_ROLES and name in planes:
+            wide = widen_index(planes[name], _declared_dtype(plugin, name))
+            if wide is not planes[name]:
+                out = dict(out) if out is planes else out
+                out[name] = wide
+    return out
+
+
+def _plan_float(arr, dtype, name, xp):
+    """``arr`` (an array the caller holds) as a C-contiguous plane of the
+    plan's float ``dtype``. A narrower float is promoted and a strided plane
+    copied, each with one :class:`~eagle.PerformanceWarning` per call site;
+    a wider float is refused (never a silent downcast)."""
+    plan, copied = np.dtype(dtype), False
+    if arr.dtype != plan:
+        if arr.dtype.kind == "f":
+            if arr.dtype.itemsize > plan.itemsize:
+                raise ValueError(
+                    f"eagle.plan.run: plane {name!r} is {arr.dtype} but this plan is "
+                    f"{plan}; pass np.asarray({name}, np.{plan}), or deploy in {arr.dtype}")
+            _layout.warn_promoted(name, arr.dtype, plan)
+            copied = True
+        arr = arr.astype(dtype)
+    if not arr.flags.c_contiguous:
+        if not copied:
+            _layout.warn_copied(name)
+        arr = xp.ascontiguousarray(arr)
+    return arr
+
+
 def _host_plane(value, dtype, *, declared=None, name=None, role="input"):
     """A caller-supplied input plane as a contiguous host array of the
     artifact's Real dtype; an integer/bool array (an index table, a
     ``terminated`` mask) passes through at its own dtype instead, after
-    being checked against the integer/bool dtype the sidecar declares."""
+    being checked against the integer/bool dtype the sidecar declares. A
+    float array of another width follows :func:`_plan_float`."""
     arr = np.asarray(value)
     if declared is not None and declared.kind in "iub":
+        arr = widen_index(arr, declared)
         _refuse_dtype_mismatch("run", role, name, declared, arr.dtype)
-    if arr.dtype.kind not in "iub":
-        arr = arr.astype(dtype, copy=False)
-    return np.ascontiguousarray(arr)
+    if arr.dtype.kind in "iub":
+        return np.ascontiguousarray(arr)
+    if arr.dtype == dtype and arr.flags.c_contiguous:
+        return arr
+    if not hasattr(value, "dtype"):          # a list or number: converted, not promoted
+        return np.ascontiguousarray(arr, dtype=dtype)
+    return _plan_float(arr, dtype, name, np)
+
+
+#: Value types known to live on the host.
+_HOST_TYPES = frozenset({np.ndarray, float, int})
 
 
 def residency(planes, *, door: str = "eagle.plan.auto", what: str = "kernel") -> str:
@@ -196,7 +258,9 @@ def residency(planes, *, door: str = "eagle.plan.auto", what: str = "kernel") ->
     each (``door``/``what`` name the caller)."""
     on_device = on_host = None
     for name, value in planes.items():
-        if device_resident(value):
+        if type(value) in _HOST_TYPES:
+            on_host = on_host or name
+        elif device_resident(value.array if _layout._mark_of(value) is not None else value):
             on_device = on_device or name
         else:
             on_host = on_host or name
@@ -243,10 +307,13 @@ def _device_plane(value, dtype, *, declared=None, name=None, role="input"):
                                       name=name, role=role))
     arr = cp.asarray(value)
     if declared is not None and declared.kind in "iub":
+        arr = widen_index(arr, declared)
         _refuse_dtype_mismatch("run", role, name, declared, arr.dtype)
-    if arr.dtype.kind not in "iub":
-        arr = arr.astype(dtype, copy=False)
-    return cp.ascontiguousarray(arr)
+    if arr.dtype.kind in "iub":
+        return cp.ascontiguousarray(arr)
+    if arr.dtype == dtype and arr.flags.c_contiguous:
+        return arr
+    return _plan_float(arr, dtype, name, cp)
 
 
 def _adapt_planes(plugin, arg_spec, kw, *, door: str = "run",

@@ -245,7 +245,8 @@ install_pypi() {
   # The lock pins the released wheels; the card scripts come from THIS checkout. A lock older than the
   # checkout would run new scripts against old wheels and write cards that claim the wrong version.
   local want have
-  want=$(sed -n 's/^version = "\(.*\)"/\1/p' "$EAGLE_ROOT/python/pyproject.toml" | head -1)
+  # the release this checkout is at: its tag, else the latest release tag behind it (a checkout between tags)
+  want=$(git -C "$EAGLE_ROOT" describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null | sed 's/^v//; s/rc[0-9]*$//' || true)
   have=$(sed -n 's/^raptor-eagle\(\[[a-z0-9,]*\]\)\{0,1\}==\([0-9][^ ;]*\).*/\2/p' "$lock" | head -1)
   if [[ -n $want && $have != "$want" && ${REPRO_ALLOW_LOCK_MISMATCH:-0} != 1 ]]; then
     die "$lock pins raptor-eagle ${have:-<none>} but this checkout is eagle $want: re-lock (locks/make_locks.py pip $PROFILE) after the release is on PyPI, or check out the tag that matches the lock (REPRO_ALLOW_LOCK_MISMATCH=1 overrides)"

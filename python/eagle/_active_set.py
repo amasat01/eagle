@@ -43,6 +43,8 @@ from __future__ import annotations
 import threading
 import weakref
 
+from ._conditional import _host_scalar
+from .interop import _root_module, _xp_of
 from .roles import PER_SAMPLE_ROLES
 
 #: The reserved ``lookup`` plane holding the ascending live slot indices.
@@ -106,19 +108,12 @@ __all__ = ["ActiveSet", "compaction_body", "MAP_PLANE", "COUNT_PLANE",
 
 
 def _module_of(arr):
-    mod = type(arr).__module__.split(".")[0]
-    if mod == "cupy":
-        import cupy
-
-        return cupy
-    if mod == "numpy":
-        import numpy
-
-        return numpy
-    raise TypeError(
-        f"eagle.ActiveSet: the mask must be a cupy (device) or numpy (host) "
-        f"array, got {type(arr).__module__}.{type(arr).__name__}"
-    )
+    if _root_module(arr) not in ("cupy", "numpy"):
+        raise TypeError(
+            f"eagle.ActiveSet: the mask must be a cupy (device) or numpy (host) "
+            f"array, got {type(arr).__module__}.{type(arr).__name__}"
+        )
+    return _xp_of(arr)
 
 
 def _address(arr):
@@ -247,6 +242,14 @@ class ActiveSet:
     every plane given to :meth:`own`. The set starts as the identity
     (every sample live, ``count == n``).
 
+    ``group=G`` compacts whole groups of ``G`` lanes, for a kernel emitted for
+    that group (its ``lane_space.group``): a group is live while any of its
+    lanes is, the map holds group indices (``map[t / G] * G + t % G`` is the
+    lane thread ``t`` runs) and ``count`` the lanes launched, live groups times
+    ``G``, so a last partial group launches past ``n``. It does not combine
+    with ``reorder=``. :func:`check_group` refuses, at bind, a kernel
+    emitted for another group.
+
     ``classes=K`` (with ``class_plane``) makes it a K-class set, for a kernel
     whose samples fall into ``K`` branches that diverge a warp when
     interleaved. ``class_plane`` is a C-contiguous ``uint8`` array of ``n``
@@ -289,10 +292,11 @@ class ActiveSet:
                  "live32", "reorders", "_owned", "_indirect", "_frozen",
                  "_reorder_scratch", "_zero", "_reorders_at_restore", "_map_lazy",
                  "classes", "class_theta", "stale_count", "class_plane", "offsets", "class_sorts", "mixed32",
-                 "class_fire", "_epochs", "_lock", "__weakref__")
+                 "class_fire", "_epochs", "_lock", "group", "n_groups", "_group_drop",
+                 "_group_count", "__weakref__")
 
     def __init__(self, mask, *, reorder=None, classes=None, class_plane=None,
-                 class_theta=None, epochs=False, _lazy_scratch=False, _lazy_map=False):
+                 class_theta=None, epochs=False, group=1, _lazy_scratch=False, _lazy_map=False):
         xp = _module_of(mask)
         if getattr(mask, "ndim", None) != 1:
             raise ValueError(
@@ -312,6 +316,15 @@ class ActiveSet:
                 f"samples, got {n}"
             )
         self.theta = None if reorder is None or reorder is False else _check_theta(reorder)
+        if isinstance(group, bool) or not isinstance(group, int) or group < 1:
+            raise ValueError(f"eagle.ActiveSet: group is an int >= 1 (lanes per group), got {group!r}")
+        if group > 1 and self.theta is not None:
+            raise ValueError(
+                f"eagle.ActiveSet: group={group} compacts whole groups of lanes, which a "
+                "physical reorder (reorder=) would split; use one or the other")
+        self.group = group
+        self.n_groups = -(-n // group)
+        self._group_drop = self._group_count = None
         self.classes = self.class_plane = self.offsets = None
         self.class_theta = self.stale_count = None
         self.class_sorts = self.mixed32 = self.class_fire = None
@@ -357,6 +370,9 @@ class ActiveSet:
         self._map_lazy = bool(_lazy_map) and self._device and self.theta is None
         self.map = xp.empty(1 if self._map_lazy else n, dtype=xp.int32)
         self.count = xp.zeros(1, dtype=xp.uint32)
+        if group > 1:   # check_group finds the set by its count plane
+            _GROUP_BY_COUNT[_address(self.count)[0]] = group
+            weakref.finalize(self, _GROUP_BY_COUNT.pop, _address(self.count)[0], None)
         self._done_at_last = xp.zeros(1, dtype=xp.uint32)
         self._scratch = None
         self._owned = []
@@ -398,6 +414,8 @@ class ActiveSet:
     def __repr__(self) -> str:
         where = "device" if self._device else "host"
         extra = "" if self.theta is None else f", reorder={self.theta}"
+        if self.group > 1:
+            extra += f", group={self.group}"
         return f"ActiveSet(n={self.n}, {where}{extra})"
 
     def reset(self) -> None:
@@ -420,7 +438,7 @@ class ActiveSet:
         else:
             if not self._map_lazy:
                 identity(self.map)
-            self.count[0] = self.n
+            self.count[0] = self.n_groups * self.group
             if self.theta is not None:
                 identity(self.perm)
                 identity(self.inv)
@@ -452,7 +470,12 @@ class ActiveSet:
     def compact(self) -> None:
         """Recompute the map and the count from the mask (and, for a
         reordering set, ``live32``/``fire``). Device: enqueued on the
-        current cupy stream (capturable). Host: computed now."""
+        current cupy stream (capturable). Host: computed now. With
+        ``group > 1`` a group of lanes is live while any of its lanes is, the
+        map holds group indices and ``count`` the lanes launched (live groups
+        times ``group``)."""
+        if self.group > 1:
+            return self._compact_groups()
         if self._device:
             import cupy
 
@@ -511,12 +534,44 @@ class ActiveSet:
             if self.classes is not None:
                 self._host_mixed32(live, live32, span)
 
+    def _compact_groups(self) -> None:
+        """:meth:`compact` for ``group > 1``: the group's drop byte is the AND of
+        its lanes' mask bytes (lanes past ``n`` count as finished), then the
+        same predicate, scan and ascending map run over ``n / group`` bytes."""
+        g, ng, n = self.group, self.n_groups, self.n
+        if not self._device:
+            import numpy as np
+
+            m = self.mask != 0
+            if ng * g != n:
+                m = np.concatenate([m, np.ones(ng * g - n, dtype=bool)])
+            live = np.flatnonzero(~m.reshape(ng, g).all(axis=1)).astype(np.int32, copy=False)
+            self.map[: live.size] = live
+            self.count[0] = live.size * g
+            return
+        import cupy
+
+        from . import _core
+
+        if self._scratch is None:
+            if cupy.cuda.get_current_stream().is_capturing():
+                raise RuntimeError(
+                    "eagle: an ActiveSet's first device compaction cannot run "
+                    "under graph capture; call prepare_compaction() before capturing")
+            self.prepare_compaction()
+        _group_and()(self.mask.view(cupy.uint8), n, g, self._group_drop, size=ng)
+        _core.compact_device(
+            int(self._group_drop.data.ptr), int(self.map.data.ptr),
+            int(self._group_count.data.ptr), int(self._scratch.data.ptr), ng,
+            int(cupy.cuda.get_current_stream().ptr), _MASK_IS_DROP, int(self.mask.device.id))
+        _scale_count()(self._group_count, g, self.count, size=1)
+
     __call__ = compact
 
     @property
     def live(self) -> int:
         """The live count as a Python int (a device sync for a device set)."""
-        return _read_word(self.count)
+        return _host_scalar(self.count, 0)
 
     def prepare_compaction(self) -> None:
         """Allocate the device compaction scratch (once). The first
@@ -527,7 +582,10 @@ class ActiveSet:
             return
         from . import _core
 
-        nbytes = _core.compact_device(0, 0, 0, 0, self.n, 0, _MASK_IS_DROP,
+        if self.group > 1:
+            self._group_drop = self._xp.zeros(self.n_groups, dtype=self._xp.uint8)
+            self._group_count = self._xp.zeros(1, dtype=self._xp.uint32)
+        nbytes = _core.compact_device(0, 0, 0, 0, self.n_groups, 0, _MASK_IS_DROP,
                                       int(self.mask.device.id))
         self._scratch = self._xp.empty(max(int(nbytes), 1), dtype=self._xp.uint8)
 
@@ -881,8 +939,8 @@ class ActiveSet:
 
     def _moves(self) -> int:
         """Reorders plus class sorts so far: the count :attr:`permuted` compares."""
-        n = _read_word(self.reorders)
-        return n + (0 if self.class_sorts is None else _read_word(self.class_sorts))
+        n = _host_scalar(self.reorders, 0)
+        return n + (0 if self.class_sorts is None else _host_scalar(self.class_sorts, 0))
 
     def in_sample_order(self, plane):
         """A copy of ``plane`` in sample order (``plane[..., inv]``);
@@ -947,10 +1005,74 @@ def _count_fired():
     return _COUNT_FIRED
 
 
-def _read_word(arr) -> int:
-    value = arr[0]
-    get = getattr(value, "get", None)
-    return int(get()) if get is not None else int(value)
+_GROUP_AND = _SCALE_COUNT = None
+
+
+def _group_and():
+    """``drop[g] = AND of mask[g * group .. +group)`` (lanes past ``n`` count as
+    finished), one thread per group."""
+    global _GROUP_AND
+    if _GROUP_AND is None:
+        import cupy
+
+        _GROUP_AND = cupy.ElementwiseKernel(
+            "raw uint8 m, int64 n, int32 group", "raw uint8 d",
+            "unsigned char a = 1; long long s = (long long)i * group;"
+            " for (int j = 0; j < group && s + j < n; ++j) a &= (m[s + j] != 0);"
+            " d[i] = a;", "eagle_active_set_group_and")
+    return _GROUP_AND
+
+
+def _scale_count():
+    """``out[0] = groups[0] * group``: the lanes a compaction by groups launches."""
+    global _SCALE_COUNT
+    if _SCALE_COUNT is None:
+        import cupy
+
+        _SCALE_COUNT = cupy.ElementwiseKernel(
+            "raw uint32 c, int32 group", "raw uint32 o", "o[0] = c[0] * (unsigned)group;",
+            "eagle_active_set_scale_count")
+    return _SCALE_COUNT
+
+
+#: Compaction group of each live set built with ``group > 1``, by the address of
+#: its count plane (all :func:`check_group` sees of the set).
+_GROUP_BY_COUNT: dict = {}
+
+
+def check_group(plugin, count_plane) -> None:
+    """The bind-time group check. A kernel's ``lane_space.group`` is the group it
+    was emitted for: it reads its neighbours inside a group, and decodes the map
+    as ``map[t / group] * group + t % group``. Refused, naming both groups: a set
+    compacting at a group that is no multiple of it (the neighbours are no longer
+    adjacent), and any group other than it (the map would be read in the wrong
+    form, silently wrong). A kernel with a thread box (``box``: ``T`` lanes
+    ``stride`` apart per thread) is refused first unless the group holds whole
+    boxes, ``T * stride`` lanes each."""
+    from ._lane_bind import space_of
+
+    where = _address(count_plane)
+    group = _GROUP_BY_COUNT.get(where[0], 1) if where is not None else 1
+    required = space_of(plugin).group
+    name = getattr(plugin, "name", "?")
+    box = getattr(plugin, "box", None)
+    if box and group % (box["T"] * box["stride"]):
+        span = box["T"] * box["stride"]
+        raise ValueError(
+            f"eagle.plan.bind: kernel {name!r} computes T={box['T']} lanes per thread "
+            f"(a box of {span} lanes), but the ActiveSet compacts at group {group}, which "
+            f"splits a box; build it with ActiveSet(mask, group={span}) (or a multiple), "
+            "or build the kernel with HAWK_BOX=0")
+    if group % required:
+        raise ValueError(
+            f"eagle.plan.bind: kernel {name!r} needs compaction groups of a multiple of "
+            f"{required} lanes (its lane_space.group), but the ActiveSet compacts at "
+            f"group {group}; build it with ActiveSet(mask, group={required})")
+    if group != required:
+        raise ValueError(
+            f"eagle.plan.bind: kernel {name!r} reads its active map at group {required}, "
+            f"but the ActiveSet compacts at group {group}; build it with "
+            f"ActiveSet(mask, group={required})")
 
 
 def compaction_body(step, active: ActiveSet, *, every: int = DEFAULT_EVERY,

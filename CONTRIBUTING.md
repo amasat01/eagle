@@ -73,4 +73,4 @@ for links. `make nbcheck-hosted` runs the notebooks the way a Colab user does (n
 
 ## Release
 
-Record changes under `## Unreleased` in `CHANGELOG.md`; release with `python tools/version.py bump X.Y.Z` (never edit version strings by hand); the whole flow is in [RELEASING.md](https://github.com/amasat01/raptor/blob/main/RELEASING.md).
+Every pull request to main carries one label: `release:patch`, `release:minor`, `release:major`, `release:rc`, or `release:none` for a docs-only change. The version is the latest `vX.Y.Z` git tag plus that label; nothing in the tree holds it. The pull request body is the release note. The whole flow is in [RELEASING.md](https://github.com/amasat01/raptor/blob/main/RELEASING.md).

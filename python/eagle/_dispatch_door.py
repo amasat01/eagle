@@ -244,8 +244,8 @@ def time_launch(bound, reps: int, fused_steps: int = 1) -> list:
         return list(_core.time_launch(bound._entry, bound._addrs, part, reps))
     import cupy
 
-    block = int(importlib.import_module("eagle.launch")._resolved_block(bound._entry, part.count,
-                                                                        None))
+    block = int(importlib.import_module("eagle.launch")._resolved_block(
+        bound._entry, part.count, None, declared=bound._declared_block))
     return list(_core.time_launch(bound._entry, bound._addrs, part, reps, device=True,
                                   stream=int(cupy.cuda.get_current_stream().ptr), block=block))
 
@@ -446,7 +446,8 @@ class DispatchRunner:
         self._run_len = np.diff(self._host(self._offsets).astype(np.int64))
         if self._device:
             _launch = importlib.import_module("eagle.launch")
-            self._blocks = [int(_launch._resolved_block(u._entry, max(int(c), 1), None))
+            self._blocks = [int(_launch._resolved_block(u._entry, max(int(c), 1), None,
+                                                        declared=u._declared_block))
                             for u, c in zip_strict(self._units, self._run_len)]
         self._sorted = True
 

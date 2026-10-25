@@ -246,7 +246,7 @@ class RefinePass:
             import importlib
 
             launch = importlib.import_module("eagle.launch")
-            block = int(launch._resolved_block(b._entry, self.n, None))
+            block = int(launch._resolved_block(b._entry, self.n, None, declared=b._declared_block))
             _core.events_refine_device(b._entry, b._addrs, block, self.bytes, args,
                                        int(xp.cuda.get_current_stream().ptr), -1)
         else:

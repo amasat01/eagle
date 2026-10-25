@@ -51,12 +51,11 @@ from __future__ import annotations
 
 import ctypes
 import json
-import os
 import pathlib
 import shutil
 import subprocess
 
-from _device_file import portable_arch
+from _device_file import find_gxx, find_nvcc, portable_arch
 
 #: The repo root — it holds ``plugin/gref_abi.h`` (the header both fixture TUs
 #: include) and ``tests/fixtures/`` (their sources).
@@ -113,28 +112,11 @@ REQUIRED_ACCESS_CLASSES = (
 # Producing an artifact.
 # --------------------------------------------------------------------------- #
 def _gxx() -> str:
-    found = shutil.which(os.environ.get("CXX", "")) or shutil.which("g++")
-    if found is None and os.path.exists("/usr/bin/g++"):
-        found = "/usr/bin/g++"
-    if found is None:
-        raise RuntimeError(
-            "building the default aether-abi/2 bed artifact needs g++ for the host "
-            "object; none found on $CXX, $PATH or /usr/bin/g++"
-        )
-    return found
+    return find_gxx("building the default aether-abi/2 bed artifact")
 
 
 def _nvcc() -> str:
-    found = shutil.which("nvcc")
-    if found:
-        return found
-    cand = pathlib.Path(os.environ.get("CUDA_PATH", "/usr/local/cuda")) / "bin" / "nvcc"
-    if cand.exists():
-        return str(cand)
-    raise RuntimeError(
-        "building the default aether-abi/2 bed artifact needs nvcc for the device "
-        "PTX; none found on $PATH or under $CUDA_PATH"
-    )
+    return find_nvcc("building the default aether-abi/2 bed artifact")
 
 
 def _run(cmd, what: str) -> None:

@@ -40,12 +40,49 @@ namespace conditional {
 #error "eagle::conditional (ConditionalGroup / CaptureConditional): the conditional-node facility requires CUDA >= 12.3 (CUDART_VERSION >= 12030) for cudaGraphConditionalHandleCreate/cudaGraphSetConditional/cudaGraphNodeTypeConditional/cudaStreamGetCaptureInfo_v3; this toolkit's CUDART_VERSION is older."
 #endif
 
+/**
+ * @brief The loop terms of a WHILE conditional node, passed by value to its
+ *        head and tail setters (``nullptr`` = the term is absent).
+ *
+ * - ``cap``: iterations allowed per replay, >= 1; ``kLoopUncapped`` is the
+ *   uncapped ``while`` (the guard alone ends it).
+ * - ``counter``: the caller-owned device ``unsigned int[2]`` cell
+ *   ``[remaining, ran]``, never nullptr; ``ran`` is the device-visible
+ *   iteration index (0 during the first iteration).
+ * - ``limit``: a runtime trip count, ``ran < *limit`` (``for i in range(n)``).
+ * - ``brk``: a break cell the body may set; the head resets it to 0 every
+ *   replay and the tail stops the loop once it is nonzero.
+ */
+struct LoopTerms {
+    unsigned int cap            = 0;
+    unsigned int* counter       = nullptr;
+    const unsigned int* limit   = nullptr;
+    unsigned int* brk           = nullptr;
+};
+
+/** @brief ``LoopTerms::cap`` of an uncapped loop. */
+inline constexpr unsigned int kLoopUncapped = 0xFFFFFFFFu;
+
 namespace detail {
+
+/**
+ * @brief The guard every eagle setter evaluates: ``(*count != base) !=
+ *        negate``, ``base`` = ``*baseline`` or 0; a null ``count`` always
+ *        holds (a loop bounded by its terms alone).
+ */
+__device__ inline bool guardHolds(const CountGuard& guard, unsigned int negate)
+{
+    if (guard.count == nullptr)
+        return true;
+    const unsigned int base = (guard.baseline != nullptr) ? *guard.baseline : 0u;
+    return (*guard.count != base) != (negate != 0u);
+}
 
 /**
  * @brief eagle-owned device predicate for ``CountGuard``: sets a
  *        conditional handle's branch decision from a device-resident
- *        compare -- never a host round-trip.
+ *        compare -- never a host round-trip. An IF runs its body on 1; an
+ *        IF/ELSE runs arm 0 on 1 and arm 1 on 0.
  *
  * Templated (rather than a plain free ``__global__`` function) purely so
  * this header stays multi-TU-safe: more than one translation unit in the
@@ -56,104 +93,84 @@ namespace detail {
  */
 template<int = 0>
 AETHER_KERNEL() void setCountGuardKernel(cudaGraphConditionalHandle handle,
-    const unsigned int* count, const unsigned int* baseline)
+    CountGuard guard, unsigned int negate)
 {
-    const unsigned int base = (baseline != nullptr) ? *baseline : 0u;
-    cudaGraphSetConditional(handle, (*count != base) ? 1u : 0u);
+    cudaGraphSetConditional(handle, guardHolds(guard, negate) ? 1u : 0u);
+}
+
+/** @brief SWITCH predicate: the handle is the arm index ``*value`` (an
+ *  index past the last arm runs no arm). */
+template<int = 0>
+AETHER_KERNEL() void setSwitchKernel(cudaGraphConditionalHandle handle,
+    const unsigned int* value)
+{
+    cudaGraphSetConditional(handle, *value);
 }
 
 /**
- * @brief Add the ``setCountGuardKernel`` node evaluating @p guard into
- *        @p graph, depending on @p deps (``numDeps == 0`` permits
- *        ``deps == nullptr``). Returns the new node -- the IF node's sole
- *        dependency.
- *
- * A cold, once-per-build control-plane call: checked with
- * ``EAGLE_CHECK_ALWAYS`` (never the debug-only ``EAGLE_CHECK``), exactly the
- * ``StreamCapturer`` / ``CaptureFork`` convention -- a swallowed failure
- * here would silently leave the branch decision undefined.
- */
-inline cudaGraphNode_t addSetCondKernelNode(cudaGraph_t graph,
-    cudaGraphConditionalHandle handle, const CountGuard& guard,
-    const cudaGraphNode_t* deps, std::size_t numDeps)
-{
-    cudaGraphNode_t node;
-    void* args[] = { (void*)&handle, (void*)&guard.count,
-        (void*)&guard.baseline };
-    cudaKernelNodeParams kp = {};
-    kp.func         = (void*)setCountGuardKernel<>;
-    kp.gridDim      = { 1, 1, 1 };
-    kp.blockDim     = { 1, 1, 1 };
-    kp.kernelParams = args;
-    EAGLE_CHECK_ALWAYS(
-        cudaGraphAddKernelNode(&node, graph, deps, numDeps, &kp));
-    return node;
-}
-
-/**
- * @brief Loop head for a WHILE conditional node: reset the eagle-owned
- *        ``[remaining, ran]`` cell for this replay and decide whether the
- *        body runs at all.
- *
- * ``counter[0] = cap`` (iterations still allowed), ``counter[1] = 0``
- * (iterations completed -- the device-visible iteration index a body
- * kernel may read), ``handle = guard && cap > 0``. The reset lives HERE, in
- * a kernel the graph already needs, so no memset node and no per-launch
- * ``cudaGraphCondAssignDefault`` reset is ever woven in. ``cap`` is a
- * kernel argument frozen at build like the graph shape: a bounded
- * iteration count is a structural guarantee, not device state.
+ * @brief Loop head for a WHILE conditional node: reset the loop state for
+ *        this replay (``counter = [cap, 0]``, ``*brk = 0``) and decide
+ *        whether the body runs at all: ``guard && cap > 0 && (no limit ||
+ *        *limit > 0)``. The reset lives HERE, in a kernel the graph already
+ *        needs, so no memset node and no per-launch
+ *        ``cudaGraphCondAssignDefault`` reset is ever woven in.
  */
 template<int = 0>
 AETHER_KERNEL() void setLoopHeadKernel(cudaGraphConditionalHandle handle,
-    const unsigned int* count, const unsigned int* baseline,
-    unsigned int cap, unsigned int* counter)
+    CountGuard guard, unsigned int negate, LoopTerms t)
 {
-    const unsigned int base = (baseline != nullptr) ? *baseline : 0u;
-    counter[0] = cap;
-    counter[1] = 0u;
-    cudaGraphSetConditional(handle, (*count != base && cap != 0u) ? 1u : 0u);
+    t.counter[0] = t.cap;
+    t.counter[1] = 0u;
+    if (t.brk != nullptr)
+        *t.brk = 0u;
+    const bool more = t.cap != 0u && (t.limit == nullptr || *t.limit != 0u);
+    cudaGraphSetConditional(handle, (more && guardHolds(guard, negate)) ? 1u : 0u);
 }
 
 /**
- * @brief Loop tail for a WHILE conditional node: the body's LAST node.
- *        One iteration completed; the loop continues iff the guard still
- *        holds AND iterations remain: ``handle = guard && --remaining > 0``,
- *        ``++ran``.
+ * @brief Loop tail for a WHILE conditional node: the body's LAST node. One
+ *        iteration completed (``--remaining``, ``++ran``); the loop
+ *        continues iff the guard still holds, iterations remain, ``ran <
+ *        *limit`` and the break cell is clear.
  */
 template<int = 0>
 AETHER_KERNEL() void setLoopTailKernel(cudaGraphConditionalHandle handle,
-    const unsigned int* count, const unsigned int* baseline,
-    unsigned int* counter)
+    CountGuard guard, unsigned int negate, LoopTerms t)
 {
-    const unsigned int base      = (baseline != nullptr) ? *baseline : 0u;
-    const unsigned int remaining = --counter[0];
-    ++counter[1];
-    cudaGraphSetConditional(handle,
-        (*count != base && remaining != 0u) ? 1u : 0u);
+    const unsigned int remaining = --t.counter[0];
+    const unsigned int ran       = ++t.counter[1];
+    const bool more = remaining != 0u && (t.limit == nullptr || ran < *t.limit)
+        && (t.brk == nullptr || *t.brk == 0u);
+    cudaGraphSetConditional(handle, (more && guardHolds(guard, negate)) ? 1u : 0u);
 }
 
-/**
- * @brief Add the ``setLoopHeadKernel`` node for a WHILE node into @p graph
- *        (the loop sibling of ``addSetCondKernelNode``; same checking
- *        convention). Returns the new node -- the WHILE node's sole
- *        dependency.
- */
-inline cudaGraphNode_t addSetLoopHeadKernelNode(cudaGraph_t graph,
-    cudaGraphConditionalHandle handle, const CountGuard& guard,
-    unsigned int cap, unsigned int* counter, const cudaGraphNode_t* deps,
-    std::size_t numDeps)
+/** @brief Add a 1x1 setter kernel node running @p func with @p args into
+ *  @p graph after @p deps (``numDeps == 0`` permits ``deps == nullptr``).
+ *  A cold, once-per-build control-plane call: checked with
+ *  ``EAGLE_CHECK_ALWAYS`` (never the debug-only ``EAGLE_CHECK``) -- a
+ *  swallowed failure would leave the branch decision undefined. */
+inline cudaGraphNode_t addSetterNode(cudaGraph_t graph, void* func, void** args,
+    const cudaGraphNode_t* deps, std::size_t numDeps)
 {
     cudaGraphNode_t node;
-    void* args[] = { (void*)&handle, (void*)&guard.count,
-        (void*)&guard.baseline, (void*)&cap, (void*)&counter };
     cudaKernelNodeParams kp = {};
-    kp.func         = (void*)setLoopHeadKernel<>;
+    kp.func         = func;
     kp.gridDim      = { 1, 1, 1 };
     kp.blockDim     = { 1, 1, 1 };
     kp.kernelParams = args;
     EAGLE_CHECK_ALWAYS(
         cudaGraphAddKernelNode(&node, graph, deps, numDeps, &kp));
     return node;
+}
+
+/** @brief Add the ``setCountGuardKernel`` node evaluating @p guard; returns
+ *  the new node -- the IF node's sole dependency. */
+inline cudaGraphNode_t addSetCondKernelNode(cudaGraph_t graph,
+    cudaGraphConditionalHandle handle, const CountGuard& guard,
+    const cudaGraphNode_t* deps, std::size_t numDeps, unsigned int negate = 0)
+{
+    void* args[] = { (void*)&handle, (void*)&guard, (void*)&negate };
+    return addSetterNode(graph, (void*)setCountGuardKernel<>, args, deps, numDeps);
 }
 
 } // namespace detail
@@ -205,7 +222,7 @@ inline cudaGraphNode_t addSetLoopHeadKernelNode(cudaGraph_t graph,
  * @par Nesting fails loudly
  * A ``ConditionalGroup`` nested inside another's ``body()`` is a documented
  * v1 limit, not a checked-and-rejected input: once the nested group's own
- * ``buildInto`` (run from the outer's ``body().finalizeNatives()``) adds an
+ * ``buildInto`` (run from the outer's ``body().finalize()``) adds an
  * IF node into the outer body's graph, that graph itself becomes
  * conditional-bearing, and this class's own
  * ``cudaGraphAddChildGraphNode`` -- entering that now-conditional-bearing
@@ -265,13 +282,13 @@ public:
      *        ``g.adoptNode`` -- the raw-handle currency bridge adds to
      *        ``cuda::Graph`` for exactly this kind of direct graph surgery.
      *
-     *  ``body().finalizeNatives()`` is called explicitly here: unlike
+     *  ``body().finalize()`` is called explicitly here: unlike
      *  ``launcher()``, it is NOT auto-invoked, so a body populated purely
      *  through ``addNative`` would otherwise never capture its subgraph.
      */
     idx_t buildInto(cuda::Graph& g, const std::vector<idx_t>& deps)
     {
-        body_->finalizeNatives();
+        body_->finalize();
 
         // A guarded body with no work is refused at build time, matching
         // CaptureConditional::end (where a truly empty IF body hangs the

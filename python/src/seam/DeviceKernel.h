@@ -42,7 +42,7 @@ struct DeviceKernel {
         d.n_samples = part.nSamples;
         d.stream = stream;
         std::int32_t launched = 0;
-        check(backend("cuda"), EAGLE_SEAM_FN("exec", eagle_backend_run_device)(&d, &launched));
+        check(backend(kDefaultKind), EAGLE_SEAM_FN("exec", eagle_backend_run_device)(&d, &launched));
         return static_cast<int>(launched);
     }
 };

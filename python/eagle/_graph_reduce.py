@@ -26,6 +26,7 @@ from functools import lru_cache
 from types import MappingProxyType
 
 from .graph import Node, register_node_kind
+from .interop import _root_module
 
 __all__ = ["reduce"]
 
@@ -70,12 +71,8 @@ def _door(msg: str) -> str:
     return f"eagle.reduce: {msg}"
 
 
-def _is_cupy(arr) -> bool:
-    return type(arr).__module__.split(".")[0] == "cupy"
-
-
 def _overlaps(a, b) -> bool:
-    if _is_cupy(a):
+    if _root_module(a) == "cupy":
         return a.data.ptr < b.data.ptr + b.nbytes and b.data.ptr < a.data.ptr + a.nbytes
     import numpy as np
 
@@ -138,7 +135,7 @@ def reduce(x, out, *, op: str = "sum", comp=None, policy: str = "compensated",
     for label, arr in arrays[1:]:
         if str(arr.dtype) != name:
             raise TypeError(_door(f"{label} dtype {arr.dtype} must equal the x dtype {name}"))
-        if _is_cupy(x) != _is_cupy(arr):
+        if (_root_module(x) == "cupy") != (_root_module(arr) == "cupy"):
             raise TypeError(_door(f"x and {label} must live on the same backend (both numpy or both cupy)"))
     if comp is not None:
         if op != "sum" or name not in ("float32", "float64"):

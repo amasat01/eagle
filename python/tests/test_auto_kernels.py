@@ -43,6 +43,8 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from conftest import CUPY_AVAILABLE
+from _ulp import ulps
 
 import eagle
 import eagle.exec as eexec
@@ -80,15 +82,6 @@ def ak_osc(omega: Scalar, nstop: Scalar, dt: Param, terminated: Terminated,
 
 
 ak_energy_jvp = Kernel("ak_energy_jvp", jvp(ak_energy, wrt=("v",)))
-
-
-def _have_gpu():
-    try:
-        import cupy
-
-        return cupy.cuda.runtime.getDeviceCount() > 0
-    except Exception:
-        return False
 
 
 def _hand_plugins(kernels, work, targets=("host",)):
@@ -133,11 +126,6 @@ def _inputs(name):
 def _bytes(result):
     result = result.values() if isinstance(result, dict) else (result,)
     return [np.asarray(r).tobytes() for r in result]
-
-
-def _ulp(a, b) -> int:
-    a, b = np.asarray(a, np.float64).ravel(), np.asarray(b, np.float64).ravel()
-    return int(np.max(np.abs(a.view(np.int64) - b.view(np.int64)))) if a.size else 0
 
 
 @pytest.fixture(scope="module")
@@ -186,7 +174,7 @@ def test_auto_kernel_on_the_device_matches_the_hand_plan_and_the_host(
     """Bit for bit against the hand-assembled DEVICE plan (the same compiled
     bytes), and within one ULP of the host per multiply-add the device may
     contract (no cancellation in these inputs)."""
-    if not _have_gpu():
+    if not CUPY_AVAILABLE:
         pytest.skip("no CUDA device")
     import cupy as cp
 
@@ -201,7 +189,7 @@ def test_auto_kernel_on_the_device_matches_the_hand_plan_and_the_host(
     hand = _hand_plugins([kernel], tmp_path, targets=("host", "cuda"))[kernel.name]
     want = eplan.plan(hand, structure=eexec.DeviceKernel).run(**on_device)
     assert dev.get().tobytes() == want.get().tobytes()
-    assert _ulp(dev.get(), host) <= _CONTRACTIONS[kernel.name]
+    assert ulps(dev.get(), host).max() <= _CONTRACTIONS[kernel.name]
 
 
 # --------------------------------------------------------------------------- #

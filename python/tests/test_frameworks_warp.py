@@ -243,7 +243,9 @@ def test_named_refusals(op, dev):
     _skip_without(dev)
     c = _case(dev, "float64", grad=False)
     v32 = wp.array(c["v_np"].astype(np.float32), dtype=wp.float32, device=dev)
-    with pytest.raises(TypeError, match="float32 build or the float64 one"):
+    from eagle import PerformanceWarning
+
+    with pytest.warns(PerformanceWarning, match="promoted to float64"):
         op(v32, c["cd"], c["t"])
     with pytest.raises(TypeError, match="must be a wp.array"):
         op(c["v_np"], c["cd"], c["t"])
@@ -622,14 +624,12 @@ def test_a_warp_without_the_private_tape_attribute_fails_by_name(op, monkeypatch
 
 @hawk.kernel
 def cell_sum(x: Scalar, t: Mutable[Scalar]):
-    t = hawk.all_samples(x).sum()  # noqa: F841
+    t = hawk.sum(x)  # noqa: F841
 
 
 @pytest.mark.parametrize("policy", ["compensated", "ordered"])
 def test_policy_reaches_the_cell_finish(tmp_path, monkeypatch, policy):
     """The cell's finishing is built with the policy given, and the sum is right."""
-    if not hasattr(hawk, "all_samples"):
-        pytest.skip("this hawk has no reductions over samples")
     import numpy as np
 
     from eagle import _cell_rows

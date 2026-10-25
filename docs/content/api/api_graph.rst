@@ -15,7 +15,7 @@ Namespace ``eagle::cuda``
    when it provides ``reserveScratch(ScratchArena&)`` and
    ``buildInto(Graph&, deps) -> idx_t``. ``Graph::addNative(node, deps)``
    (constrained on the concept, hence also not listed below) registers such a
-   node; ``Graph::finalizeNatives()`` commits the shared scratch arena and
+   node; ``Graph::finalize()`` commits the shared scratch arena and
    builds every registered node in add-order.
 
 .. doxygennamespace:: eagle::cuda

@@ -54,7 +54,7 @@ Add a thing
 **A Python feature.** The behaviour goes into the C++ core first, with a test; the Python side only exposes it. If the
 feature validates a manifest or sidecar, add a fixture and its expectation file to ``tests/conformance/`` so both
 drivers check it. A new Python feature also gets an ``ft`` test (run with ``pytest -m ft`` on a free-threaded Python).
-If it needs a new backend symbol, bump ``EAGLE_BACKEND_VERSION_MINOR`` and add a ``CHANGELOG.md`` line.
+If it needs a new backend symbol, bump ``EAGLE_BACKEND_VERSION_MINOR`` and say so in the pull request body (the release notes).
 
 **A docs notebook.** Put it under ``docs/content/``, give it a title, a time and a "runs on" line, run ``make nbexec``
 to store its outputs, then ``make nbcheck``. The notebook rules are in :doc:`docs_guide`. For a page about how eagle

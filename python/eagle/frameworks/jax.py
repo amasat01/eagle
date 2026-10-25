@@ -74,7 +74,7 @@ import numpy as np
 from jax import extend as jex
 from jax.interpreters import ad, batching, mlir
 
-from .. import FINISHED_PLANE, _cell_rows, _split
+from .. import FINISHED_PLANE, _cell_rows, _layout, _split
 from .._graph_reduce import POLICIES, check_policy
 from .._graph_reduce import fixed_f64 as _fixed_f64
 from ._kernel_planes import ACTIVE_PLANES, FUSED_STEPS, SAMPLE_ROLES, call_mode, promote
@@ -222,7 +222,12 @@ class KernelFunction:
         floats = [(n, v.dtype) for n, v in planes.items()
                   if sig.is_float(n) and n not in self._params]
         mode = call_mode(f"{_WHO} {self.name}", floats or
-                         [(n, v.dtype) for n, v in planes.items() if sig.is_float(n)])
+                         [(n, v.dtype) for n, v in planes.items() if sig.is_float(n)],
+                         promote=True)
+        for n, v in planes.items():
+            if sig.is_float(n) and v.dtype != sig.dtype(n, mode):
+                _layout.warn_promoted(n, v.dtype, sig.dtype(n, mode))
+                planes[n] = v.astype(sig.dtype(n, mode))
         for name in self._params:
             value = bound[name] if name not in planes else planes[name]
             if not hasattr(value, "dtype"):

@@ -1,8 +1,0 @@
-# Version sites: first entry is the primary; each regex has ONE capture group around the version.
-[[site]]
-file = "python/pyproject.toml"
-pattern = '^version = "([^"]+)"'
-
-[[site]]
-file = "CMakeLists.txt"
-pattern = 'project\(eagle VERSION ([0-9.]+) '

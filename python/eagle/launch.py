@@ -192,11 +192,19 @@ def _query_kernel_attrs(fn) -> dict:
         return {}
 
 
-def _resolved_block(fn, n, block, device=-1):
-    """The block size to launch ``fn`` with: ``block`` verbatim if the
-    caller passed one, else the policy resolved over the ambient sibling
-    count and the cached properties of ``device`` (``-1``: the current one)
-    and of the kernel."""
+def _resolved_block(fn, n, block, device=-1, declared=None):
+    """The block size to launch ``fn`` with: the artifact's ``declared``
+    ``launch.block`` verbatim when it states one (a ``block`` that disagrees is
+    refused), else ``block`` verbatim if the caller passed one, else the policy
+    resolved over the ambient sibling count and the cached properties of
+    ``device`` (``-1``: the current one) and of the kernel."""
+    if declared is not None:
+        if block is not None and int(block) != declared:
+            raise ValueError(
+                f"eagle.launch: block={block} contradicts the artifact's launch.block "
+                f"{declared} (the kernel was emitted for exactly that many threads per block)"
+            )
+        return declared
     if block is not None:
         return block
     return resolve_block(n, current_siblings(), _device_props(device), _kernel_attrs(fn))

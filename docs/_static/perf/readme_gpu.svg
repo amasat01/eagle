@@ -1,18 +1,13 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="732" height="232" viewBox="0 0 732 232" role="img" aria-labelledby="t d" font-family="system-ui, -apple-system, Segoe UI, sans-serif">
 <title id="t">RK4 oscillators, 1,000,000 samples, spread (up to 1000 steps)</title>
 <desc id="d">Wall time on NVIDIA H100 80GB HBM3: eagle.simulate 613 µs, NVIDIA Warp 1.54 ms, JAX 47.0 ms, PyTorch with torch.compile 84.5 ms, CuPy 368 ms.</desc>
-<style>.bg{fill:#fcfcfb;stroke:#e1e0d9}.ink{fill:#0b0b0b}.sub{fill:#52514e}.bar{fill:rgba(127,126,120,.5)}.us{fill:#7d53dc}
+<style>.bg{fill:#fcfcfb;stroke:#e1e0d9}.ink{fill:#0b0b0b}.sub{fill:#52514e}.bar{fill:#9a9992}.us{fill:#7d53dc}
 .c0{fill:#cf416b}
 .c1{fill:#6d9f09}
 .c2{fill:#0e9d9b}
 .c3{fill:#df5345}
 .c4{fill:#157b21}
-@media (prefers-color-scheme: dark){.bg{fill:#1a1a19;stroke:#2c2c2a}.ink{fill:#f2f2ee}.sub{fill:#c3c2b7}
-.c1{fill:#b6fd13}
-.c2{fill:#36fcd8}
-.c3{fill:#eb7e61}
-.c4{fill:#22d434}
-}</style>
+</style>
 <rect class="bg" x="0.5" y="0.5" width="731" height="231" rx="8"/>
 <g transform="translate(16,16)">
 <text class="ink" x="0" y="22" font-size="16" font-weight="600">RK4 oscillators, 1,000,000 samples, spread (up to 1000 steps)</text>

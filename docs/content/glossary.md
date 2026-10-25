@@ -14,7 +14,7 @@ bitwise
 canonical tree
 : The one fixed grouping of additions eagle uses for sums, so a total has the same bits for any thread count.
 cell
-: One value for the whole batch, made by a hawk kernel that stores a reduction over samples (`hawk.all_samples(x).sum()`) to a `Mutable` output. The kernel writes rows; eagle finishes them into the cell with {func}`eagle.reduce`; see {ref}`determinism-cells`.
+: One value for the whole batch, made by a hawk kernel that stores a reduction over lanes (`hawk.sum(x)`) to a `Mutable` output. The kernel writes rows; eagle finishes them into the cell with {func}`eagle.reduce`; see {ref}`determinism-cells`.
 compaction
 : Shrinking a per-sample array to just the samples that are still active, so later kernels launch over a smaller count; also called stream compaction.
 dual-mode
@@ -29,10 +29,14 @@ graph
 : A recorded, dependency-ordered set of launches (a CUDA graph on the GPU, a host executor on the CPU) that is built once and replayed many times.
 graph capture
 : Recording the kernel launches issued on a stream, instead of running them, into a graph that can be replayed.
+group
+: A lane count, the unit in which finished lanes are compacted away: {class}`eagle.ActiveSet` takes it as `group=`, and a kernel that needs it declares it in its sidecar's `launch.lane_space`.
 guard
 : The cell a conditional node reads: an {func}`eagle.skippable` runs its step only while the cell is non-zero. A recorded graph saves the value each launch saw, and the reverse replays it; see {ref}`autodiff-conditionals`.
 lane
-: One sample's slot inside a packet on the CPU side.
+: One work item: a sample, seen through the shape its kernel declares for its lanes. On the CPU side, also one sample's slot inside a packet.
+lane space
+: The shape a hawk kernel gives its flat sample axis, as an ordered list of axes. Memory stays flat; eagle reads the shape from the sidecar at bind to take the lane count by axis label.
 launch
 : One submission of work: a single kernel call, or one replay of a whole graph.
 Launcher (C++)

@@ -45,6 +45,7 @@
 #include "eagle/diff/Reverse.h"
 #include "eagle/events/Sensitivity.h"
 #include "eagle/exec/DeviceKernel.h"
+#include "eagle/exec/Transfer.h"
 #include "eagle/filtering/Compact.h"
 #include "eagle/filtering/Reorder.h"
 #include "eagle/filtering/ReorderClasses.h"
@@ -64,6 +65,7 @@
 using eagle::CountGuard;
 using eagle::compose::GraphComposer;
 using eagle::cuda::CaptureConditional;
+using eagle::cuda::CondKind;
 using eagle::cuda::CaptureFork;
 using eagle::cuda::CapturedGraph;
 using eagle::cuda::Graph;
@@ -418,7 +420,14 @@ EAGLE_BACKEND_API void eagle_backend_free(void* p)
 EAGLE_BACKEND_API eagle_backend_status eagle_backend_capabilities(std::uint64_t* groups)
 {
     // A group whose driver entry points this driver lacks is not offered.
-    return guarded([&] { out(groups, eagle_cuda_plugin::driverGroups(kCapabilities)); });
+    return guarded([&] {
+        std::uint64_t groups_ = eagle_cuda_plugin::driverGroups(kCapabilities);
+        // IF/ELSE and SWITCH add no driver entry (the same cuGraphAddNode): the
+        // driver's version is their capability.
+        if ((groups_ & EAGLE_BACKEND_CAP_CONDITIONAL) && eagle::cuda::conditionalArmsSupported())
+            groups_ |= EAGLE_BACKEND_CAP_CONDITIONAL_IF_ELSE | EAGLE_BACKEND_CAP_CONDITIONAL_SWITCH;
+        out(groups, groups_);
+    });
 }
 
 EAGLE_BACKEND_API eagle_backend_status eagle_backend_device_types(std::int32_t* types, std::int32_t cap,
@@ -499,6 +508,14 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_capturer_end(eagle_backend_
     });
 }
 
+EAGLE_BACKEND_API eagle_backend_status eagle_backend_capturer_graph(eagle_backend_capturer h, std::uint64_t* graph)
+{
+    return guarded([&] {
+        DeviceScope scope(live(h)->device);
+        out(graph, reinterpret_cast<std::uint64_t>(h->capturer.graph()));
+    });
+}
+
 EAGLE_BACKEND_API void eagle_backend_capturer_release(eagle_backend_capturer h)
 {
     release(h);
@@ -529,7 +546,8 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_fork_create(const struct ea
         if (h == nullptr)
             throw std::invalid_argument("eagle: null output pointer");
         *h = new eagle_backend_fork_s{ device,
-            CaptureFork(reinterpret_cast<cudaStream_t>(d.origin), static_cast<std::size_t>(d.branch_count)) };
+            CaptureFork(reinterpret_cast<cudaStream_t>(d.origin), static_cast<std::size_t>(d.branch_count),
+                static_cast<std::size_t>(d.wait_count)) };
     });
 }
 
@@ -574,6 +592,24 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_fork_size(eagle_backend_for
     return guarded([&] { out(n, static_cast<std::uint64_t>(live(h)->fork.size())); });
 }
 
+EAGLE_BACKEND_API eagle_backend_status eagle_backend_fork_mark(eagle_backend_fork h, std::uint64_t producer,
+    std::uint64_t* mark)
+{
+    return guarded([&] {
+        DeviceScope scope(live(h)->device);
+        out(mark, static_cast<std::uint64_t>(h->fork.mark(static_cast<std::size_t>(producer))));
+    });
+}
+
+EAGLE_BACKEND_API eagle_backend_status eagle_backend_fork_wait(eagle_backend_fork h, std::uint64_t waiter,
+    std::uint64_t mark)
+{
+    return guarded([&] {
+        DeviceScope scope(live(h)->device);
+        h->fork.wait(static_cast<std::size_t>(waiter), static_cast<std::size_t>(mark));
+    });
+}
+
 EAGLE_BACKEND_API void eagle_backend_fork_release(eagle_backend_fork h)
 {
     release(h);
@@ -596,11 +632,19 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_conditional_create(
             reinterpret_cast<const unsigned int*>(d.count_ptr),
             d.baseline_ptr ? reinterpret_cast<const unsigned int*>(d.baseline_ptr) : nullptr,
         };
-        if (d.counter_ptr)
-            *h = new eagle_backend_conditional_s{ device,
-                CaptureConditional(origin, guard, d.loop_cap, reinterpret_cast<unsigned int*>(d.counter_ptr)) };
-        else
-            *h = new eagle_backend_conditional_s{ device, CaptureConditional(origin, guard) };
+        CondKind kind = d.counter_ptr ? CondKind::While : CondKind::If;
+        switch (d.kind) {
+        case 0: break;
+        case EAGLE_BACKEND_COND_IF: kind = CondKind::If; break;
+        case EAGLE_BACKEND_COND_IF_ELSE: kind = CondKind::IfElse; break;
+        case EAGLE_BACKEND_COND_WHILE: kind = CondKind::While; break;
+        case EAGLE_BACKEND_COND_SWITCH: kind = CondKind::Switch; break;
+        default: throw Unsupported("eagle_backend_conditional_create: unknown kind " + std::to_string(d.kind));
+        }
+        const eagle::conditional::LoopTerms loop{ d.loop_cap, reinterpret_cast<unsigned int*>(d.counter_ptr),
+            reinterpret_cast<const unsigned int*>(d.limit_ptr), reinterpret_cast<unsigned int*>(d.brk_ptr) };
+        *h = new eagle_backend_conditional_s{ device,
+            CaptureConditional(origin, kind, guard, d.arms, d.negate, loop) };
     });
 }
 
@@ -630,6 +674,38 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_conditional_end(eagle_backe
     return guarded([&] {
         DeviceScope scope(live(h)->device);
         h->conditional.end();
+    });
+}
+
+EAGLE_BACKEND_API eagle_backend_status eagle_backend_conditional_arm_stream(eagle_backend_conditional h,
+    std::uint64_t k, std::uint64_t* stream)
+{
+    return guarded([&] {
+        if (k >= live(h)->conditional.arms())
+            throw std::out_of_range("arm index out of range for this CaptureConditional");
+        out(stream, reinterpret_cast<std::uint64_t>(h->conditional.armStream(static_cast<unsigned int>(k))));
+    });
+}
+
+EAGLE_BACKEND_API eagle_backend_status eagle_backend_conditional_nodes(eagle_backend_conditional h,
+    std::int64_t which, std::uint64_t** nodes, std::int64_t* count)
+{
+    return guarded([&] {
+        if (nodes == nullptr || count == nullptr)
+            throw std::invalid_argument("eagle: null output pointer");
+        DeviceScope scope(live(h)->device);
+        if (which < -1 || which >= static_cast<std::int64_t>(h->conditional.arms()))
+            throw std::out_of_range("arm index out of range for this CaptureConditional");
+        const std::vector<cudaGraphNode_t> found = which < 0
+            ? h->conditional.setterNodes()
+            : h->conditional.bodyNodes(static_cast<unsigned int>(which));
+        auto* buf = static_cast<std::uint64_t*>(std::malloc(std::max<std::size_t>(1, found.size()) * 8));
+        if (buf == nullptr)
+            throw std::bad_alloc();
+        for (std::size_t i = 0; i < found.size(); ++i)
+            buf[i] = reinterpret_cast<std::uint64_t>(found[i]);
+        *nodes = buf;
+        *count = static_cast<std::int64_t>(found.size());
     });
 }
 
@@ -813,6 +889,40 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_launcher_set_node_enabled(e
     return guarded([&] {
         DeviceScope scope(live(h)->device);
         eagle::cuda::setNodeEnabled(h->launcher.execHandle(), reinterpret_cast<cudaGraphNode_t>(node), enabled != 0);
+    });
+}
+
+EAGLE_BACKEND_API eagle_backend_status eagle_backend_launcher_set_kernel_params(eagle_backend_launcher h,
+    std::uint64_t node, const std::uint64_t* params, std::int64_t n)
+{
+    return guarded([&] {
+        if (n < 0 || (n > 0 && params == nullptr))
+            throw std::invalid_argument("eagle_backend_launcher_set_kernel_params: bad params");
+        DeviceScope scope(live(h)->device);
+        std::vector<void*> args(static_cast<std::size_t>(n));
+        for (std::size_t i = 0; i < args.size(); ++i)
+            args[i] = reinterpret_cast<void*>(params[i]);
+        h->launcher.setKernelParams(reinterpret_cast<cudaGraphNode_t>(node), args.data(), args.size());
+    });
+}
+
+EAGLE_BACKEND_API eagle_backend_status eagle_backend_launcher_set_memcpy_source(eagle_backend_launcher h,
+    std::uint64_t node, std::uint64_t src)
+{
+    return guarded([&] {
+        DeviceScope scope(live(h)->device);
+        h->launcher.setMemcpySource(reinterpret_cast<cudaGraphNode_t>(node), reinterpret_cast<const void*>(src));
+    });
+}
+
+EAGLE_BACKEND_API eagle_backend_status eagle_backend_launcher_exec_update(eagle_backend_launcher h,
+    eagle_backend_captured captured, std::int32_t* accepted)
+{
+    return guarded([&] {
+        DeviceScope scope(live(h)->device);
+        if (!live(captured)->graph)
+            throw std::invalid_argument("eagle_backend_launcher_exec_update: the CapturedGraph is empty");
+        out(accepted, static_cast<std::int32_t>(h->launcher.tryExecUpdate(captured->graph.graph())));
     });
 }
 
@@ -1510,6 +1620,57 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_memcpy_device(std::uint64_t
         DeviceScope scope(device);
         EAGLE_CHECK_ALWAYS(cudaMemcpyAsync(reinterpret_cast<void*>(dst), reinterpret_cast<const void*>(src),
             static_cast<std::size_t>(bytes), cudaMemcpyDeviceToDevice, seamStream(stream)));
+    });
+}
+
+EAGLE_BACKEND_API eagle_backend_status eagle_backend_memcpy(std::uint64_t dst, std::uint64_t src, std::uint64_t bytes,
+    std::int32_t kind, std::uint64_t stream)
+{
+    return guarded([&] {
+        if (!eagle::exec::validCopyKind(kind))
+            throw std::invalid_argument("eagle_backend_memcpy: unknown copy kind " + std::to_string(kind));
+        if (bytes == 0)
+            return;
+        if (dst == 0 || src == 0)
+            throw std::invalid_argument("eagle_backend_memcpy: null address");
+        requireDevice();
+        const int device = resolveDevice(-1, stream);
+        DeviceScope scope(device);
+        eagle::exec::memcpyAsync(reinterpret_cast<void*>(dst), reinterpret_cast<const void*>(src),
+            static_cast<std::size_t>(bytes), static_cast<eagle::exec::CopyKind>(kind), seamStream(stream));
+    });
+}
+
+EAGLE_BACKEND_API eagle_backend_status eagle_backend_host_alloc(std::uint64_t bytes, std::uint64_t* addr)
+{
+    return guarded([&] {
+        if (addr == nullptr)
+            throw std::invalid_argument("eagle: null output pointer");
+        *addr = 0;
+        if (bytes == 0)
+            return;
+        requireDevice();
+        *addr = reinterpret_cast<std::uint64_t>(eagle::exec::hostAlloc(static_cast<std::size_t>(bytes)));
+    });
+}
+
+EAGLE_BACKEND_API eagle_backend_status eagle_backend_host_free(std::uint64_t ptr)
+{
+    return guarded([&] {
+        if (ptr != 0)
+            eagle::exec::hostFree(reinterpret_cast<void*>(ptr));
+    });
+}
+
+EAGLE_BACKEND_API eagle_backend_status eagle_backend_host_func(std::uint64_t stream, void (*fn)(void*), void* arg)
+{
+    return guarded([&] {
+        if (fn == nullptr)
+            throw std::invalid_argument("eagle_backend_host_func: null function");
+        requireDevice();
+        const int device = resolveDevice(-1, stream);
+        DeviceScope scope(device);
+        eagle::exec::hostFunc(seamStream(stream), fn, arg);
     });
 }
 

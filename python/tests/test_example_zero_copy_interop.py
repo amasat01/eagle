@@ -16,6 +16,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from conftest import CUPY_AVAILABLE
 
 pytestmark = pytest.mark.repo_local
 
@@ -43,14 +44,6 @@ def example():
     return _load_example()
 
 
-def _gpu_available() -> bool:
-    cupy = pytest.importorskip("cupy")
-    try:
-        return cupy.cuda.runtime.getDeviceCount() > 0
-    except Exception:
-        return False
-
-
 def _torch_and_gpu_available() -> bool:
     """Torch installed, a CUDA device visible to cupy, AND torch itself
     built with CUDA support -- the third check is the one that was missing:
@@ -60,7 +53,7 @@ def _torch_and_gpu_available() -> bool:
     enabled" instead of a clean skip."""
     if importlib.util.find_spec("torch") is None:
         return False
-    if not _gpu_available():
+    if not CUPY_AVAILABLE:
         return False
     import torch
     return torch.cuda.is_available()

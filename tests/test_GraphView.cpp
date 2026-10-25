@@ -249,7 +249,7 @@ R"GOLD(  stage 0      ┌───────┐
   stage 1 │ ┌──────┴──────┐ │
           │ │    maybe    │ │
           │ └──────┬──────┘ │
-          ╰────────│────────╯
+          ╰────────┼────────╯
                    z
                    │
   stage 2      ┌───┴───┐
@@ -262,19 +262,20 @@ TEST(GraphViewTest, AsciiGoldenLayerSkippingEdgeAndOpaqueBorder)
 {
     const Description d = layerSkip();
     EXPECT_EQ(ascii(d, layout(d)),
-R"GOLD(  stage 0   ┌───┐
-            │ a │
-            └─┬─┘
-              x,x,w…
-            ┌─┴───┐
-  stage 1 ┌─┴─┐   │
-          │ b │   │
-          └─┬─┘   │
-            y     │
-            └─┬───┘
+R"GOLD(  stage 0 ┌───┐
+          │ a │
+          └─┬─┘
+            x,x,w
+            ├┄┄┄┄┄┐
+  stage 1 ┌─┴─┐   ┆
+          │ b │   ┆
+          └─┬─┘   ┆
+            y     ┆
+            └─┬┄┄┄┘
   stage 2   ┌╌┴╌┐
             ╎ c ╎
             └╌╌╌┘
+  edges:  ── RAW data flows  ┄┄ WAR must wait to overwrite
 )GOLD");
 }
 
@@ -290,13 +291,14 @@ R"GOLD(  stage 0       ┌───────┐
   stage 1 ┌───┴───┐   ┌╌╌╌┴╌╌╌┐
           │ left  │   ╎ right ╎
           └───┬───┘   └╌╌╌┬╌╌╌┘
-              a           b:WAW
-              └─────┬─────┘
+              a           b
+              └─────┬┈┈┈┈┈┘
             ╭─ repeat <= 4 ─╮
   stage 2   │ ┌─────┴─────┐ │
             │ │   join    │ │
             │ └───────────┘ │
             ╰───────────────╯
+  edges:  ── RAW data flows  ┈┈ WAW same output
 )GOLD");
 }
 
@@ -328,6 +330,313 @@ TEST(GraphViewTest, AsciiFallbackFoldsNonAsciiLabels)
     EXPECT_NE(plain.find("repeat <= 4 - more"), std::string::npos) << plain;
     EXPECT_NE(plain.find("caf?"), std::string::npos) << plain;
     EXPECT_EQ(detail::asciiFold("\xE2\x89\xA5 \xE2\x80\xA6"), ">= ...");
+}
+
+// Stage rows: every top-level add-stage is a "stage" frame, and the layout gives
+// its nodes one row (a stage grows a second row only for an edge between its own
+// nodes). Built by hand, in the shapes the Python Graph hands over.
+Description staged(int stages)
+{
+    Description d;
+    for (int s = 0; s < stages; ++s)
+        d.frames.push_back({ s, "stage", "stage " + std::to_string(s), -1 });
+    return d;
+}
+
+Description twoInSequence()
+{
+    Description d = staged(2);
+    d.nodes = { node(0, "first", true, 0), node(1, "second", true, 1) };
+    return d;
+}
+
+Description skipsAStage()
+{
+    Description d = staged(3);
+    d.nodes = { node(0, "s0", true, 0), node(1, "s1", true, 1), node(2, "s2", true, 2) };
+    d.edges = { edge(0, 2, "a"), edge(1, 2, "b") };
+    return d;
+}
+
+Description longNames()
+{
+    Description d = staged(3);
+    d.nodes = { node(0, "integrate_positions", true, 0), node(1, "measure_energy", true, 1),
+        node(2, "reset_positions", true, 2) };
+    d.edges = { edge(0, 1, "state_position"), edge(0, 2, "state_position", EdgeKind::WAW),
+        edge(1, 2, "state_position", EdgeKind::WAR) };
+    return d;
+}
+
+Description forkWithConditionalAndLoop()
+{
+    Description d = staged(3);
+    d.frames.push_back({ 3, "if", "skip if guard", 1 });
+    d.frames.push_back({ 4, "while", "repeat <= 5", 2 });
+    d.nodes = { node(0, "seed", true, 0), node(1, "l", true, 1), node(2, "m", true, 3),
+        node(3, "r", true, 1), node(4, "loop", true, 4) };
+    d.edges = { edge(0, 1, "a"), edge(0, 2, "a"), edge(0, 3, "a"), edge(0, 4, "a", EdgeKind::WAW),
+        edge(1, 4, "b"), edge(1, 4, "a", EdgeKind::WAR), edge(2, 4, "c"),
+        edge(2, 4, "a", EdgeKind::WAR), edge(3, 4, "d"), edge(3, 4, "a", EdgeKind::WAR) };
+    return d;
+}
+
+/** A fork inside a branch of a fork: {inc_p, inc_q} then add, beside mul_s. */
+Description forkInBranch()
+{
+    Description d = staged(3);
+    d.nodes = { node(0, "reset", false, 0), node(1, "inc_p", false, 1), node(2, "inc_q", false, 1),
+        node(3, "add", false, 1), node(4, "mul_s", false, 1), node(5, "out", false, 2) };
+    d.edges = { edge(0, 1, "p"), edge(0, 2, "q"), edge(0, 4, "s"), edge(1, 3, "p"),
+        edge(2, 3, "q"), edge(3, 5, "r"), edge(4, 5, "s") };
+    return d;
+}
+
+/** A conditional arm of three launches in series. */
+Description conditionalArm()
+{
+    Description d = staged(2);
+    d.frames.push_back({ 2, "if", "skip if guard", 1 });
+    d.nodes = { node(0, "reset", false, 0), node(1, "inc", false, 2), node(2, "mul", false, 2),
+        node(3, "inc10", false, 2) };
+    d.edges = { edge(0, 1, "x"), edge(1, 2, "x"), edge(2, 3, "x") };
+    return d;
+}
+
+/** A loop inside a loop, with a node after the inner one. */
+Description loopInLoop()
+{
+    Description d = staged(2);
+    d.frames.push_back({ 2, "while", "repeat <= 3", 1 });
+    d.frames.push_back({ 3, "while", "repeat <= 2", 2 });
+    d.nodes = { node(0, "seed", false, 0), node(1, "step", false, 3), node(2, "fold", false, 2) };
+    d.edges = { edge(0, 1, "a"), edge(1, 2, "a") };
+    return d;
+}
+
+TEST(GraphViewTest, RowIsTheStageNotTheDependencyDepth)
+{
+    const Description d = twoInSequence();           // no edge: dependency depth says both row 0
+    EXPECT_EQ(layout(d).layer, (std::vector<gidx>{ 0, 1 }));
+    for (const Description& s : { skipsAStage(), longNames(), forkWithConditionalAndLoop() }) {
+        const Layout lay = layout(s);
+        for (const Node& n : s.nodes) {
+            gidx stage = n.frame;
+            while (s.frames[stage].kind != "stage")
+                stage = s.frames[stage].parent;
+            EXPECT_EQ(lay.layer[n.id], stage) << n.label;
+        }
+    }
+    // an edge between two nodes of one stage gives the stage a second row, and the next stage starts below it
+    const Description f = forkInBranch();
+    EXPECT_EQ(layout(f).layer, (std::vector<gidx>{ 0, 1, 1, 2, 1, 3 }));
+    Description back = twoInSequence();
+    back.edges = { edge(1, 0) };
+    EXPECT_THROW(layout(back), std::invalid_argument);
+}
+
+TEST(GraphViewTest, AsciiSnapshotsOfTheStageRows)
+{
+    {
+        const Description d = twoInSequence();
+        EXPECT_EQ(ascii(d, layout(d)),
+R"GOLD(  stage 0  ┌╌╌╌╌╌╌╌┐
+           ╎ first ╎
+           └╌╌╌╌╌╌╌┘
+
+
+  stage 1 ┌╌╌╌╌╌╌╌╌╌┐
+          ╎ second  ╎
+          └╌╌╌╌╌╌╌╌╌┘
+)GOLD");
+    }
+    {
+        const Description d = skipsAStage();
+        EXPECT_EQ(ascii(d, layout(d)),
+R"GOLD(  stage 0   ┌╌╌╌╌╌┐
+            ╎ s0  ╎
+            └╌╌┬╌╌┘
+               a
+               └────┐
+  stage 1 ┌╌╌╌╌╌┐   │
+          ╎ s1  ╎   │
+          └╌╌┬╌╌┘   │
+             b      │
+             └─┬────┘
+  stage 2   ┌╌╌┴╌╌┐
+            ╎ s2  ╎
+            └╌╌╌╌╌┘
+)GOLD");
+    }
+    {
+        const Description d = longNames();
+        EXPECT_EQ(ascii(d, layout(d)),
+R"GOLD(  stage 0 ┌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┐
+          ╎ integrate_positions ╎
+          └╌╌╌╌╌╌╌╌╌╌┬╌╌╌╌╌╌╌╌╌╌┘
+                     state_position
+                    ┌┴┈┈┈┈┈┈┈┈┈┈┈┈┈┐
+  stage 1  ┌╌╌╌╌╌╌╌╌┴╌╌╌╌╌╌╌╌┐     ┊
+           ╎ measure_energy  ╎     ┊
+           └╌╌╌╌╌╌╌╌┬╌╌╌╌╌╌╌╌┘     ┊
+                    state_position ┊
+                    └┄┄┬┈┈┈┈┈┈┈┈┈┈┈┘
+  stage 2     ┌╌╌╌╌╌╌╌╌┴╌╌╌╌╌╌╌╌┐
+              ╎ reset_positions ╎
+              └╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┘
+  edges:  ── RAW data flows  ┄┄ WAR must wait to overwrite  ┈┈ WAW same output
+)GOLD");
+    }
+    {
+        const Description d = longNames();
+        EXPECT_EQ(ascii(d, layout(d), false),
+R"GOLD(  stage 0 +.....................+
+          : integrate_positions :
+          +..........+..........+
+                     state_position
+                    ++~~~~~~~~~~~~~+
+  stage 1  +........+........+     !
+           : measure_energy  :     !
+           +........+........+     !
+                    state_position !
+                    +..+~~~~~~~~~~~+
+  stage 2     +........+........+
+              : reset_positions :
+              +.................+
+  edges:  -- RAW data flows  .. WAR must wait to overwrite  ~~ WAW same output
+)GOLD");
+    }
+    {
+        const Description d = forkWithConditionalAndLoop();
+        EXPECT_EQ(ascii(d, layout(d)),
+R"GOLD(  stage 0                 ┌╌╌╌╌╌╌╌┐
+                          ╎ seed  ╎
+                          └╌╌╌┬╌╌╌┘
+                              a
+            ┌─────┬───────────┴┬──────────────┐
+            │     ┊   ╭─ skip if guard ─╮     │
+  stage 1 ┌╌┴╌┐   ┊   │ ┌╌╌╌╌╌╌┴╌╌╌╌╌╌┐ │   ┌╌┴╌┐
+          ╎ l ╎   ┊   │ ╎      m      ╎ │   ╎ r ╎
+          └╌┬╌┘   ┊   │ └╌╌╌╌╌╌┬╌╌╌╌╌╌┘ │   └╌┬╌┘
+            │     ┊   ╰────────┼────────╯     │
+            b,a   ┊            c,a            d,a
+            └─────┴───────────┬┴──────────────┘
+                      ╭─ repeat <= 5 ─╮
+  stage 2             │ ┌╌╌╌╌╌┴╌╌╌╌╌┐ │
+                      │ ╎   loop    ╎ │
+                      │ └╌╌╌╌╌╌╌╌╌╌╌┘ │
+                      ╰───────────────╯
+  edges:  ── RAW data flows  ┈┈ WAW same output
+)GOLD");
+    }
+    {
+        const Description d = forkInBranch();
+        EXPECT_EQ(ascii(d, layout(d)),
+R"GOLD(  stage 0            ┌───────┐
+                     │ reset │
+                     └───┬───┘
+                         p,q,s
+              ┌──────────┴┬───────────┐
+  stage 1 ┌───┴───┐   ┌───┴───┐   ┌───┴───┐
+          │ inc_p │   │ inc_q │   │ mul_s │
+          └───┬───┘   └───┬───┘   └───┬───┘
+              p           q           s
+              └─────────┬─┘    ┌──────┘
+                     ┌──┴──┐   │
+                     │ add │   │
+                     └──┬──┘   │
+                        r      │
+                        └─┬────┘
+  stage 2              ┌──┴──┐
+                       │ out │
+                       └─────┘
+)GOLD");
+    }
+    {
+        const Description d = conditionalArm();
+        EXPECT_EQ(ascii(d, layout(d)),
+R"GOLD(  stage 0      ┌───────┐
+               │ reset │
+               └───┬───┘
+                   x
+                   │
+          ╭─ skip if guard ─╮
+  stage 1 │ ┌──────┴──────┐ │
+          │ │     inc     │ │
+          │ └──────┬──────┘ │
+          │        x        │
+          │        │        │
+          │ ┌──────┴──────┐ │
+          │ │     mul     │ │
+          │ └──────┬──────┘ │
+          │        x        │
+          │        │        │
+          │ ┌──────┴──────┐ │
+          │ │    inc10    │ │
+          │ └─────────────┘ │
+          ╰─────────────────╯
+)GOLD");
+    }
+    {
+        const Description d = loopInLoop();
+        EXPECT_EQ(ascii(d, layout(d)),
+R"GOLD(  stage 0       ┌───────┐
+                │ seed  │
+                └───┬───┘
+                    a
+                    │
+          ╭─ repeat <= 3 ─────╮
+          │ ╭─ repeat <= 2 ─╮ │
+  stage 1 │ │ ┌─────┴─────┐ │ │
+          │ │ │   step    │ │ │
+          │ │ └─────┬─────┘ │ │
+          │ ╰───────┼───────╯ │
+          │         a         │
+          │         │         │
+          │   ┌─────┴─────┐   │
+          │   │   fold    │   │
+          │   └───────────┘   │
+          ╰───────────────────╯
+)GOLD");
+    }
+}
+
+TEST(GraphViewTest, AsciiNamesAreWholeAndEachEdgeIsOneLabel)
+{
+    const std::string text = ascii(longNames());
+    EXPECT_NE(text.find("state_position"), std::string::npos);
+    EXPECT_EQ(text.find("\xE2\x80\xA6"), std::string::npos) << text;       // no ellipsis anywhere
+    Description d = forkInBranch();
+    for (std::size_t i = 0; i < d.edges.size(); ++i)
+        d.edges[i].plane = "plane" + std::to_string(i);
+    const std::string named = ascii(d);
+    for (const Edge& e : d.edges) {
+        std::size_t count = 0;
+        for (std::size_t at = named.find(e.plane); at != std::string::npos; at = named.find(e.plane, at + 1))
+            ++count;
+        EXPECT_EQ(count, 1u) << e.plane << "\n" << named;
+    }
+}
+
+TEST(GraphViewTest, AsciiHazardKindIsLineStyleWithOneLegendLine)
+{
+    const std::string text = ascii(longNames());
+    EXPECT_NE(text.find("\xE2\x94\x84"), std::string::npos);                // WAR dashed
+    EXPECT_NE(text.find("\xE2\x94\x88"), std::string::npos);                // WAW dotted
+    EXPECT_EQ(text.find(":WAR"), std::string::npos);
+    EXPECT_EQ(text.find(":WAW"), std::string::npos);
+    EXPECT_EQ(ascii(skipsAStage()).find("edges:"), std::string::npos);      // all RAW: no legend
+    std::size_t legends = 0;
+    for (std::size_t at = text.find("edges:"); at != std::string::npos; at = text.find("edges:", at + 1))
+        ++legends;
+    EXPECT_EQ(legends, 1u);
+}
+
+TEST(GraphViewTest, AsciiFramePaintsLastAndJoinsTheLinesCrossingIt)
+{
+    EXPECT_NE(ascii(conditional()).find("\xE2\x94\xBC"), std::string::npos);        // a crossing is a junction
+    const std::string plain = ascii(conditional(), layout(conditional()), false);
+    EXPECT_NE(plain.find("====="), std::string::npos) << plain;
 }
 
 TEST(GraphViewTest, EdgeKindsHavePlainMeanings)

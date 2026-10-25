@@ -45,6 +45,9 @@
 
 namespace eagle_seam {
 
+/** @brief The backend kind a call uses when its caller names none. */
+inline constexpr const char* kDefaultKind = "cuda";
+
 /** @brief The backend (or the part of it asked for) cannot serve the call. */
 class Unavailable : public std::runtime_error {
 public:
@@ -441,16 +444,16 @@ Fn optionalFn(const char* kind, const char* sym)
 
 } // namespace eagle_seam
 
-/** Bound address of a 1.0 group symbol of the cuda backend, cached per call site. */
+/** Bound address of a 1.0 group symbol of the default backend, cached per call site. */
 #define EAGLE_SEAM_FN(groupName, sym)                                                                 \
     ([]() -> decltype(&::sym) {                                                                       \
-        static const auto f = ::eagle_seam::groupFn<decltype(&::sym)>("cuda", groupName, #sym);       \
+        static const auto f = ::eagle_seam::groupFn<decltype(&::sym)>(::eagle_seam::kDefaultKind, groupName, #sym);       \
         return f;                                                                                     \
     }())
 
-/** Bound address of an optional (``x_`` or post-1.0) symbol of the cuda backend. */
+/** Bound address of an optional (``x_`` or post-1.0) symbol of the default backend. */
 #define EAGLE_SEAM_XFN(sym)                                                                           \
     ([]() -> decltype(&::sym) {                                                                       \
-        static const auto f = ::eagle_seam::optionalFn<decltype(&::sym)>("cuda", #sym);               \
+        static const auto f = ::eagle_seam::optionalFn<decltype(&::sym)>(::eagle_seam::kDefaultKind, #sym);               \
         return f;                                                                                     \
     }())

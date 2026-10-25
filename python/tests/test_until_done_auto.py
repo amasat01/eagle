@@ -44,12 +44,12 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from conftest import CUPY_AVAILABLE
 from test_until_done import (
     _DT,
     _build,
     _explicit,
     _get,
-    _have_gpu,
     _inputs,
     _oscillator,
     _planes,
@@ -68,17 +68,7 @@ _S = 300          # longest sample of the spread / uniform batches
 _NEVER = 1e9      # a stop step no run reaches
 
 
-@pytest.fixture(scope="module", autouse=True)
-def _exact_host_profile():
-    """Every host build in this module under hawk's EXACT ``native`` profile
-    (FMA contraction off): the rows compare host runs of separate compiles bit
-    for bit, which only the exact profiles promise. hawk's default x86-64
-    profile contracts ``a*b + c`` into FMAs and is gated by ULP bounds in
-    hawk's own suite instead."""
-    mp = pytest.MonkeyPatch()
-    mp.setenv("HAWK_HOST_PROFILE", "native")
-    yield
-    mp.undo()
+pytestmark = pytest.mark.usefixtures("_exact_host_profile")
 
 
 @pytest.fixture(scope="module")
@@ -95,7 +85,7 @@ def auto(tmp_path_factory):
         pytest.skip("this hawk has no steps='auto'")
     from hawk.ext import Guard, Kind
 
-    targets = ("host", "cuda") if _have_gpu() else ("host",)
+    targets = ("host", "cuda") if CUPY_AVAILABLE else ("host",)
     out = {}
     kernels = {
         "oracle": _oscillator(None, False),
@@ -743,7 +733,7 @@ def active_auto():
     """A fresh active-set (map-kind) automatic oscillator kernel, deployed
     the ordinary way (``eagle.deploy``): the fast entries ride along by
     default, no caller opt-in. ``None`` (skip) with no CUDA device."""
-    if not _have_gpu():
+    if not CUPY_AVAILABLE:
         return None
     hawk = pytest.importorskip("hawk")
     from hawk.ext import Guard, Kind
@@ -791,7 +781,7 @@ def test_active_set_auto_carries_the_fast_entries_under_nvrtc(monkeypatch, tmp_p
     fast-entries define reaches the device compile, so the active-set
     automatic kernel carries ``<name>_persist`` and ``<name>_range`` and
     the ordinary decision picks the fast path, not the band path."""
-    if not _have_gpu():
+    if not CUPY_AVAILABLE:
         pytest.skip("no CUDA device")
     hawk = pytest.importorskip("hawk")
     cp = pytest.importorskip("cupy")

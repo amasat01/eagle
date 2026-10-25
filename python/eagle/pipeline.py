@@ -31,6 +31,8 @@ mid-capture); pre-allocate all arrays and pre-compile JIT kernels
 
 from __future__ import annotations
 
+import ctypes
+import struct
 import os
 import re
 import tempfile
@@ -39,7 +41,7 @@ from typing import NamedTuple
 from . import _counters
 from .interop import _wrap_external_stream
 from .sidecar import refuse_derived
-from ._conditional import RepeatWhile, Skippable
+from ._conditional import Branches, RepeatWhile, Skippable, _device_ptr
 from ._launch_policy import sibling_context
 from ._member_enable import MemberHandle, NonToggleableMemberError, _MemberRegistry
 
@@ -106,50 +108,12 @@ class _ConcurrentGroup:
     which is illegal once capture is in flight.
     """
 
-    __slots__ = ("members", "_fork")
+    __slots__ = ("members", "syncs", "_fork")
 
-    def __init__(self, members):
+    def __init__(self, members, syncs=()):
         self.members = members
+        self.syncs = syncs
         self._fork = None
-
-
-class _GuardedRun:
-    """The pre-built weave(s) of ONE conditional step -- a
-    :class:`~eagle._conditional.Skippable` (an IF weave) or a
-    :class:`~eagle._conditional.RepeatWhile` (a WHILE weave, plus one
-    inner IF weave per ``Skippable`` part of its body). Module-private.
-    Built by :meth:`GraphPipeline.build`'s pre-capture pass, since every
-    ``_core.CaptureConditional`` creates its body stream at construction
-    (illegal mid-capture), and the inner weave's origin is the outer
-    weave's body stream. :meth:`run` is the in-capture half: nested
-    begin/end pairs, innermost body launched on the innermost body
-    stream; for a loop the outer ``end()`` also launches eagle's tail
-    setter as the body's last node, after the inner IF node, so the
-    continue/stop decision follows the whole iteration.
-    """
-
-    __slots__ = ("step", "outer", "inners")
-
-    def __init__(self, step, outer, inners=None):
-        self.step = step
-        self.outer = outer
-        # One entry per body part of a RepeatWhile (the part's inner IF weave,
-        # or None for a plain part); None for a top-level Skippable.
-        self.inners = inners
-
-    def run(self, cp):
-        with _wrap_external_stream(self.outer.begin()):
-            if self.inners is None:
-                self.step.step()  # a Skippable's body
-            else:
-                for part, inner in zip(self.step.parts, self.inners):
-                    if inner is None:
-                        part()
-                        continue
-                    with _wrap_external_stream(inner.begin()):
-                        part.step()  # the Skippable part's body, inside the loop body
-                    inner.end()
-        self.outer.end()
 
 
 def _concurrent_write_conflict_check(write_targets) -> None:
@@ -215,6 +179,7 @@ class GraphPipeline:
         self._steps = []
         self._graph = None
         self._launcher = None
+        self._setters = {}   # id(conditional) -> its setter nodes, for Graph._rebind
         self._dot_str = None
         # Member-enable surface (mode="enabled"): every add()/add_concurrent()
         # step gets a stable index (and optionally a name) at registration
@@ -256,7 +221,7 @@ class GraphPipeline:
             raise ValueError(f"eagle.pipeline: this pipeline runs on device {self._device}, "
                              f"the plan's planes live on device {on}")
 
-    def add_concurrent(self, members, *, names=None):
+    def add_concurrent(self, members, *, names=None, syncs=()):
         """Register a fork/join stage: every member is a sibling of
         every other, and both join before whatever is registered next.
         ``members`` is a sequence of zero-arg callables,
@@ -291,7 +256,7 @@ class GraphPipeline:
             self._check_device(member)
         for i in range(len(members)):
             self._registry.register(names[i] if names is not None else None)
-        self._steps.append(_ConcurrentGroup(members))
+        self._steps.append(_ConcurrentGroup(members, syncs))
         return self
 
     def _capture_stages(self, stages):
@@ -302,11 +267,11 @@ class GraphPipeline:
         :class:`~eagle._conditional.Skippable`/``RepeatWhile``. Equivalent
         to the matching :meth:`add`/:meth:`add_concurrent` calls then
         :meth:`build`; returns ``self``."""
-        for kind, payload in stages:
+        for kind, *payload in stages:
             if kind == "step":
-                self.add(payload)
+                self.add(payload[0])
             elif kind == "group":
-                self.add_concurrent(payload)
+                self.add_concurrent(*payload[:1], syncs=payload[1] if len(payload) > 1 else ())
             else:
                 raise ValueError(f"unknown stage kind {kind!r}")
         return self.build()
@@ -334,19 +299,22 @@ class GraphPipeline:
         # CaptureFork and CaptureConditional both create streams/events,
         # which must happen before capture begins (illegal mid-capture), so
         # every group's fork and every Skippable's/RepeatWhile's weave are
-        # built in this up-front pass (_prebuild_guarded); the capture loop
+        # built in this up-front pass (_weave); the capture loop
         # below only calls fork()/branch()/join() and weave.begin()/end().
         runs = [None] * len(self._steps)  # top-level Skippable/RepeatWhile steps
-        group_runs = {}  # id(_ConcurrentGroup) -> [_GuardedRun-or-None per member]
+        group_runs = {}  # id(_ConcurrentGroup) -> [weave-or-None per member]
         for i, step in enumerate(self._steps):
             if isinstance(step, _ConcurrentGroup):
-                step._fork = self._core.CaptureFork(self._sptr, len(step.members))
+                step._fork = self._core.CaptureFork(self._sptr, len(step.members),
+                                                    waits=len(step.syncs))
+                for sync in step.syncs:
+                    sync.fork = step._fork
                 group_runs[id(step)] = [
-                    self._prebuild_guarded(step._fork.branch(j), member)
+                    self._weave(step._fork.branch(j), member)
                     for j, member in enumerate(step.members)
                 ]
             else:
-                runs[i] = self._prebuild_guarded(self._sptr, step)
+                runs[i] = self._weave(self._sptr, step)
 
         capturer = self._core.StreamCapturer(self._sptr)
         self._member_nodes = []
@@ -359,7 +327,7 @@ class GraphPipeline:
                         self._run_concurrent(cp, step, group_runs[id(step)])
                     elif runs[i] is not None:
                         before = self._core.capture_snapshot_nodes(self._sptr)
-                        runs[i].run(cp)
+                        runs[i]()
                         self._record_member_(before, self._sptr, skippable=True)
                     else:
                         before = self._core.capture_snapshot_nodes(self._sptr)
@@ -538,10 +506,8 @@ class GraphPipeline:
         sets it to anything but the default 1 -- so an eagle kernel
         launched from inside a member can resolve a co-residency-aware
         block size. ``member_runs[i]`` is the pre-built
-        :class:`_GuardedRun` for
-        member ``i`` if it is a :class:`~eagle._conditional.Skippable`
-        or :class:`~eagle._conditional.RepeatWhile` (``None`` otherwise,
-        built via :meth:`_prebuild_guarded`). Each member's node-set
+        weave runner for member ``i`` if it holds a conditional or a fork
+        (``None`` otherwise, built via :meth:`_weave`). Each member's node-set
         attribution (:meth:`_record_member_`) is taken on its own
         branch stream, immediately before and after it runs -- capture
         is single-threaded host-side, so member ``i``'s launches fully
@@ -558,7 +524,7 @@ class GraphPipeline:
                     with sibling_context(siblings):
                         run = member_runs[i]
                         if run is not None:
-                            run.run(cp)
+                            run()
                         else:
                             member()
                 self._record_member_(before, branch, skippable=(run is not None))
@@ -572,64 +538,104 @@ class GraphPipeline:
             raise
         fork.join()
 
-    def _prebuild_guarded(self, origin, step):
-        """Pre-capture half of a conditional step: construct the
-        ``_core.CaptureConditional`` weave(s) a
-        :class:`~eagle._conditional.Skippable` (one IF weave) or a
-        :class:`~eagle._conditional.RepeatWhile` (one WHILE weave, plus
-        an inner IF weave when the body step is a ``Skippable``) needs
-        on ``origin``. Returns a :class:`_GuardedRun`, or ``None`` for a
-        plain step. Dispatches on the exact type: ``RepeatWhile`` is not
-        a ``Skippable`` subclass (0..N runs vs 0..1 runs). The guard
-        predicate of every weave is evaluated device-side, by eagle's
-        own setter kernels, on every replay -- never baked in at
-        build/capture time. Refused here, at build: a ``RepeatWhile``
-        directly inside a
-        ``RepeatWhile`` (no nested-loop contract in v1) and a
-        ``RepeatWhile`` inside a ``Skippable`` (v1 supports only the
-        other way round)."""
-        if isinstance(step, RepeatWhile):
-            parts = step.parts
-            if any(isinstance(part, RepeatWhile) for part in parts):
-                raise ValueError(
-                    "repeat_while inside repeat_while is not supported: nest "
-                    "the inner iteration inside the body callable, or flatten "
-                    "the two loops into one guard"
-                )
-            if any(isinstance(part, Skippable) and isinstance(part.step, RepeatWhile)
-                   for part in parts):
-                raise ValueError(
-                    "repeat_while inside skippable is not supported: put the "
-                    "skippable region inside the loop body instead "
-                    "(repeat_while(skippable(step, flag), guard, max_iters))"
-                )
-            count_ptr, baseline_ptr = step.guard._device_ptrs()
-            outer = self._core.CaptureConditional(
-                origin, count_ptr, baseline_ptr,
-                loop_cap=step.max_iters, counter_ptr=step._counter_ptr(),
-            )
-            inners = []
-            for part in parts:
-                inner = None
-                if isinstance(part, Skippable):
-                    inner_count, inner_baseline = part.guard._device_ptrs()
-                    inner = self._core.CaptureConditional(
-                        outer.body_stream(), inner_count, inner_baseline
-                    )
-                inners.append(inner)
-            return _GuardedRun(step, outer, tuple(inners))
-        if isinstance(step, Skippable):
-            if isinstance(step.step, RepeatWhile):
-                raise ValueError(
-                    "repeat_while inside skippable is not supported: put the "
-                    "skippable region inside the loop body instead "
-                    "(repeat_while(skippable(step, flag), guard, max_iters))"
-                )
-            count_ptr, baseline_ptr = step.guard._device_ptrs()
-            return _GuardedRun(
-                step, self._core.CaptureConditional(origin, count_ptr, baseline_ptr)
-            )
+    def _weave(self, origin, item):
+        """Pre-capture half of a structured step: the in-capture runner of
+        ``item`` with its regions pre-built on ``origin`` (recursively: a
+        region's children are built on its own body or branch stream), or
+        ``None`` when ``item`` holds none. Every guard is evaluated
+        device-side, by eagle's own setter kernels, on every replay. Dispatches
+        on the exact type: ``RepeatWhile`` is not a ``Skippable`` subclass
+        (0..N runs vs 0..1 runs)."""
+        from ._graph_kinds import _Late, _Seq
+        from .graph import ForkStage
+
+        core = self._core
+        if isinstance(item, _Late):
+            item = item.fn if item.fn is not None else item.child
+        if isinstance(item, (Skippable, RepeatWhile)):
+            loop = isinstance(item, RepeatWhile)
+            guard = item.guard
+            count_ptr, baseline_ptr = guard._device_ptrs() if guard is not None else (0, 0)
+            terms = dict(negate=guard.negate) if guard is not None else {}
+            if loop:
+                terms.update(loop_cap=item.cap, counter_ptr=item._counter_ptr())
+                if item.limit is not None:
+                    terms["limit_ptr"] = _device_ptr(item.limit, 0)
+                if item.brk is not None:
+                    terms["brk_ptr"] = _device_ptr(item.brk, 0)
+            region = core.CaptureConditional(origin, count_ptr, baseline_ptr, **terms)
+            body = region.body_stream()
+            kids = [self._weave_or_call(body, p) for p in (item.parts if loop else (item.step,))]
+
+            def go():
+                with _wrap_external_stream(region.begin()):
+                    for kid in kids:
+                        kid()
+                region.end()
+                self._setters[id(item)] = region.setter_nodes()
+            return go
+        if isinstance(item, Branches):
+            guard = item.guard
+            count_ptr, baseline_ptr = guard._device_ptrs()
+            terms = dict(kind="switch", arms=len(item.arms)) if item.switch else dict(
+                kind="if_else", negate=guard.negate)
+            region = core.CaptureConditional(origin, count_ptr, baseline_ptr, **terms)
+            kids = [self._weave_or_call(region.arm_stream(k), arm) for k, arm in enumerate(item.arms)]
+
+            def go():
+                streams = [region.begin(), *(region.arm_stream(k) for k in range(1, len(kids)))]
+                for stream, kid in zip(streams, kids):
+                    with _wrap_external_stream(stream):
+                        kid()
+                region.end()
+                self._setters[id(item)] = region.setter_nodes()
+            return go
+        if isinstance(item, ForkStage):
+            fork = core.CaptureFork(origin, len(item.members), waits=len(item.syncs))
+            for sync in item.syncs:
+                sync.fork = fork
+            kids = [self._weave_or_call(fork.branch(j), m) for j, m in enumerate(item.members)]
+
+            def go():
+                fork.fork()
+                try:
+                    for j, kid in enumerate(kids):
+                        with _wrap_external_stream(fork.branch(j)):
+                            kid()
+                finally:
+                    fork.join()
+            return go
+        if isinstance(item, _Seq):
+            kids = [self._weave(origin, p) or p for p in item.parts]
+            if all(k is p for k, p in zip(kids, item.parts)):
+                return None
+
+            def go():
+                for kid in kids:
+                    kid()
+            return go
         return None
+
+    def _patch_setters(self, launcher, wrapper):
+        """Re-point a conditional's setter kernels at the guard, limit and
+        break cells ``wrapper`` holds now (arguments 1-3 of the setter, see
+        ``CaptureConditional``); argument 0 and the partition tail keep their
+        captured values."""
+        guard = wrapper.guard
+        count, base = guard._device_ptrs() if guard is not None else (0, 0)
+        cells = [ctypes.c_uint64(count)] if getattr(wrapper, "switch", False) else [
+            (ctypes.c_uint64 * 2)(count, base), ctypes.c_uint32(int(guard.negate) if guard else 0)]
+        if isinstance(wrapper, RepeatWhile):
+            cells.append(ctypes.create_string_buffer(struct.pack(
+                "<IIQQQ", wrapper.cap, 0, wrapper._counter_ptr(),
+                _device_ptr(wrapper.limit, 0) if wrapper.limit is not None else 0,
+                _device_ptr(wrapper.brk, 0) if wrapper.brk is not None else 0)))
+        params = [0, *(ctypes.addressof(c) for c in cells)]
+        nodes = self._setters[id(wrapper)]
+        launcher.set_kernel_params_many(nodes, [params] * len(nodes))
+
+    def _weave_or_call(self, origin, item):
+        return self._weave(origin, item) or item
 
     def launch(self, n=1):
         """Replay the captured graph ``n`` times. ``launch(n)``

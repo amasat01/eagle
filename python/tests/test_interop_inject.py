@@ -418,7 +418,8 @@ def test_child_owns_the_framework_graph(monkeypatch):
     with pytest.raises(TypeError, match="pass the graph object; eagle must keep it alive"):
         G.child(tg3.raw_cuda_graph(), reads={"x": x}, writes={"y": y})
     # falsifier: without the handle check, nothing stands between a reset and a launch
-    monkeypatch.setattr(G._Child, "check", lambda self: None)
+    from eagle._graph_kinds import _Child
+    monkeypatch.setattr(_Child, "check", lambda self: None)
     g2._check_live()
 
 

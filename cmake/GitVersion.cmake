@@ -1,0 +1,40 @@
+# The version of this checkout, from git, before project(): a `vX.Y.Z[rcN]` tag on HEAD, else
+# `.git_archival.txt` (filled in by `git archive` / a GitHub release tarball), else a hard error.
+# Sets <PREFIX>_VERSION_FULL (e.g. 0.6.5rc1, or 0.6.5.dev3+gabc1234 between tags) and
+# <PREFIX>_VERSION_NUMERIC (0.6.5: what project(VERSION) accepts).
+function(git_version PREFIX)
+  set(full "$ENV{${PREFIX}_VERSION}")
+  if(NOT full)
+    find_package(Git QUIET)
+    if(Git_FOUND)
+      execute_process(COMMAND "${GIT_EXECUTABLE}" -C "${CMAKE_CURRENT_SOURCE_DIR}" describe --tags --match "v[0-9]*" --long --dirty
+                      OUTPUT_VARIABLE desc OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET RESULT_VARIABLE rc)
+      if(NOT rc EQUAL 0)
+        set(desc "")
+      endif()
+    endif()
+    if(NOT desc AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git_archival.txt")
+      file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/.git_archival.txt" line REGEX "^describe-name: v[0-9]")
+      string(REGEX REPLACE "^describe-name: " "" desc "${line}")
+    endif()
+    if(NOT desc)
+      message(FATAL_ERROR "${PREFIX}: no version: build from a git clone with its tags, a release tarball, "
+                          "or set ${PREFIX}_VERSION=X.Y.Z in the environment")
+    endif()
+    # v0.6.5-0-g1234abc[-dirty]  ->  0.6.5 ;  v0.6.4-3-g1234abc  ->  0.6.5.dev3+g1234abc ; archives carry no -0-g suffix
+    if(desc MATCHES "^v([0-9]+)\\.([0-9]+)\\.([0-9]+)(rc[0-9]+)?(-([0-9]+)-g([0-9a-f]+))?(-dirty)?$")
+      set(full "${CMAKE_MATCH_1}.${CMAKE_MATCH_2}.${CMAKE_MATCH_3}${CMAKE_MATCH_4}")
+      if(CMAKE_MATCH_6 AND NOT CMAKE_MATCH_6 EQUAL 0)
+        math(EXPR next "${CMAKE_MATCH_3} + 1")
+        set(full "${CMAKE_MATCH_1}.${CMAKE_MATCH_2}.${next}.dev${CMAKE_MATCH_6}+g${CMAKE_MATCH_7}")
+      endif()
+    else()
+      message(FATAL_ERROR "${PREFIX}: cannot read a version from '${desc}'")
+    endif()
+  endif()
+  if(NOT full MATCHES "^([0-9]+\\.[0-9]+\\.[0-9]+)")
+    message(FATAL_ERROR "${PREFIX}: '${full}' is not X.Y.Z[...]")
+  endif()
+  set(${PREFIX}_VERSION_FULL "${full}" PARENT_SCOPE)
+  set(${PREFIX}_VERSION_NUMERIC "${CMAKE_MATCH_1}" PARENT_SCOPE)
+endfunction()

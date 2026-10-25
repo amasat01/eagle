@@ -78,8 +78,8 @@ import pytest
 from _device_file import device_artifact
 import eagle._plan_pack as plan_pack  # noqa: E402
 
+hawk = pytest.importorskip("hawk")
 hawk_trace = pytest.importorskip("hawk.trace")
-all_samples = hawk_trace.all_samples
 hawk_artifact = pytest.importorskip("hawk.artifact")
 hawk_math = pytest.importorskip("hawk.math")
 
@@ -116,7 +116,7 @@ def e4_gather(table: hawk_trace.Table[hawk_trace.Scalar], where: hawk_trace.Inde
 @hawk_trace.kernel
 def e4_energy(v: hawk_trace.Vector[W], total: hawk_trace.Mutable[hawk_trace.Scalar]):
     """A sum over samples, finished into one cell."""
-    total = all_samples(hawk_math.dot(v, v)).sum()
+    total = hawk.sum(hawk_math.dot(v, v), over=0)
 
 
 @hawk_trace.kernel
@@ -124,7 +124,7 @@ def e4_scatter(x: hawk_trace.Scalar, lane: hawk_trace.Index,
                acc: hawk_trace.Mutable[hawk_trace.Scalar]):
     """``cross_sample_write``: a by-key plane that is read-modify-written, so
     launching it twice is visibly twice, which is what a replay row needs."""
-    all_samples(acc)[lane] += x
+    hawk.scatter(acc)[lane] += x
 
 
 def _x_plane(n=N, w=W, dtype=np.float64) -> np.ndarray:
@@ -830,13 +830,13 @@ def test_bind_refuses_a_plane_of_the_wrong_dtype(vec3_unit):
                y=cp.zeros((W, N)), a=2.0)
 
 
-_INDEX_MSG = r"'where' has dtype int32.*declares int64.*pass where as int64: where\.astype"
+_INDEX_MSG = r"'where' has dtype float32.*declares int64.*pass where as int64: where\.astype"
 
 
-def test_bind_refuses_an_int32_plane_for_an_int64_index_on_the_host(gather_host_unit):
-    """The sidecar declares ``where`` int64; the body reads 8-byte indices, so
-    an int32 plane was accepted and the launch SEGFAULTED. Refused at bind (and
-    at run), never cast; the int64 twin binds and runs."""
+def test_bind_widens_an_int32_plane_for_an_int64_index_on_the_host(gather_host_unit):
+    """The sidecar declares ``where`` int64; the body reads 8-byte indices. An
+    ``int32`` plane is widened by one copy (at bind once, at run per call); a
+    float plane is refused, never cast."""
     import eagle.exec as eexec
     from eagle import plan as eplan
 
@@ -846,12 +846,22 @@ def test_bind_refuses_an_int32_plane_for_an_int64_index_on_the_host(gather_host_
     where = ((np.arange(N) * 5 + 2) % (2 * N)).astype(np.int64)
     y = np.zeros(N)
     with pytest.raises(ValueError, match=_INDEX_MSG):
-        p.bind(table=table, where=where.astype(np.int32), y=y)
+        p.bind(table=table, where=where.astype(np.float32), y=y)
     with pytest.raises(ValueError, match=_INDEX_MSG):
-        p.run(table=table, where=where.astype(np.int32))
+        p.run(table=table, where=where.astype(np.float32))
     p.bind(table=table, where=where, y=y).launch()
     np.testing.assert_array_equal(y, table[where])
     np.testing.assert_array_equal(p.run(table=table, where=where), table[where])
+    y32 = np.zeros(N)
+    bound = p.bind(table=table, where=where.astype(np.int32), y=y32)
+    bound.launch()
+    np.testing.assert_array_equal(y32, table[where])
+    other = (where[::-1]).copy()
+    bound.rebind(where=other.astype(np.int32)).launch()
+    np.testing.assert_array_equal(y32, table[other])
+    np.testing.assert_array_equal(p.run(table=table, where=where.astype(np.int32)), table[where])
+    with pytest.raises(ValueError, match=_INDEX_MSG):
+        bound.rebind(where=where.astype(np.float32))
 
 
 def test_bind_still_refuses_a_float_plane_of_the_wrong_dtype_on_the_host(vec3_unit):
@@ -865,20 +875,32 @@ def test_bind_still_refuses_a_float_plane_of_the_wrong_dtype_on_the_host(vec3_un
 
 
 @pytest.mark.gpu
-def test_bind_refuses_an_int32_plane_for_an_int64_index_on_the_device(gather_unit):
+def test_bind_widens_an_int32_plane_for_an_int64_index_on_the_device(gather_unit):
     import cupy as cp
 
     import eagle.exec as eexec
     from eagle import plan as eplan
 
     plugin = _device_subject(gather_unit, "e4_gather")
+    assert plugin.arg_dtypes["where"] == "int64"
     p = eplan.plan(plugin, structure=eexec.DeviceKernel)
     table = cp.arange(2 * N, dtype=cp.float64)
-    where = (cp.arange(N) % (2 * N)).astype(cp.int32)
+    where = (cp.arange(N) * 5 % (2 * N)).astype(cp.int64)
     with pytest.raises(ValueError, match=_INDEX_MSG):
-        p.bind(table=table, where=where, y=cp.zeros(N))
+        p.bind(table=table, where=where.astype(cp.float32), y=cp.zeros(N))
     with pytest.raises(ValueError, match=_INDEX_MSG):
-        p.run(table=table, where=where)
+        p.run(table=table, where=where.astype(cp.float32))
+    y = cp.zeros(N)
+    bound = p.bind(table=table, where=where.astype(cp.int32), y=y)
+    bound.launch()
+    cp.cuda.runtime.deviceSynchronize()
+    np.testing.assert_array_equal(y.get(), table.get()[where.get()])
+    other = where[::-1].copy()
+    bound.rebind(where=other.astype(cp.int32)).launch()
+    cp.cuda.runtime.deviceSynchronize()
+    np.testing.assert_array_equal(y.get(), table.get()[other.get()])
+    np.testing.assert_array_equal(
+        cp.asnumpy(p.run(table=table, where=where.astype(cp.int32))), table.get()[where.get()])
 
 
 @pytest.mark.gpu
@@ -1214,6 +1236,7 @@ def _stub_bound(monkeypatch, parts):
     bound._gen = 0
     bound._device = None
     bound._entry = object()
+    bound.plan = SimpleNamespace(plugin=SimpleNamespace())
     bound._cupy = SimpleNamespace(cuda=SimpleNamespace(
         driver=SimpleNamespace(launchKernel=launch_kernel),
         get_current_stream=lambda: SimpleNamespace(ptr=5)))

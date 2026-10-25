@@ -279,6 +279,20 @@ class SplitBound:
                     rows.finish()
         return None
 
+    def clear(self, *names) -> None:
+        """:meth:`BoundPlan.clear` across every stage that binds a name."""
+        valid = tuple(nm for nm in self.names if nm in self._planes
+                      and any(nm in b.names for b in self._bound)
+                      and nm not in cells(self.plan.plugin))
+        stray = [nm for nm in names if nm not in valid]
+        if stray:
+            raise ValueError(f"eagle.plan.clear: {stray} are not bound planes "
+                             f"(valid: {list(valid)})")
+        for bound in self._bound:
+            mine = [nm for nm in names if nm in bound.names]
+            if mine:
+                bound.clear(*mine)
+
     def rebind(self, /, **changed):
         """Re-pack the named planes in every stage that binds them; a cell
         handed back is fixed at bind."""

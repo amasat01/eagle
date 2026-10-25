@@ -44,7 +44,7 @@ import tempfile
 import numpy as np
 import warp as wp
 
-from .. import FINISHED_PLANE, _cell_rows, _split
+from .. import FINISHED_PLANE, _cell_rows, _layout, _split
 from .._graph_reduce import check_policy
 from ._kernel_planes import call_mode, promote
 from ._tower import LOCK, Level
@@ -217,7 +217,14 @@ class WarpFunction:
         values = self._bind(args, kwargs)
         device, n = self._check(values)
         mode = call_mode("eagle.frameworks.warp",
-                         [(k, _np_dtype(v)) for k, v in values.items() if sig.is_float(k)])
+                         [(k, _np_dtype(v)) for k, v in values.items() if sig.is_float(k)],
+                         promote=True)
+        for k, v in values.items():
+            if sig.is_float(k) and _np_dtype(v) != sig.dtype(k, mode):
+                want = sig.dtype(k, mode)
+                _layout.warn_promoted(k, _np_dtype(v), want)
+                values[k] = wp.array(v.numpy().astype(want), dtype=wp.dtype_from_numpy(want),
+                                     device=v.device, requires_grad=v.requires_grad)
         wants = any(v.requires_grad for k, v in values.items() if sig.differentiable(k))
         if wants and tape is None:
             tape = _active_tape()

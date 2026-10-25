@@ -62,6 +62,24 @@ def test_plugin_exports_exactly_the_seam_manifests():
     assert not problems, "\n".join(problems)
 
 
+def test_the_plugin_reports_the_seam_minor_of_the_header_it_was_built_from():
+    header_file = pathlib.Path(__file__).parents[1] / "src" / "seam" / "eagle_backend.h"
+    if not header_file.is_file():
+        pytest.skip("repository files are not present")  # the suite copied outside the repository
+    minor = re.search(r"#define EAGLE_BACKEND_VERSION_MINOR (\d+)u", header_file.read_text()).group(1)
+    from eagle import _core
+
+    if not _core.cuda_backend("cuda")["loaded"]:
+        pytest.skip("no CUDA plugin loaded (a core-only build)")
+    assert _core.cuda_backend("cuda")["version"] == f"1.{minor}"
+
+
+def test_the_transfer_symbols_are_in_the_locked_manifest():
+    locked = backend_wall.read_manifest(backend_wall.LOCKED_MANIFEST)
+    for name in ("memcpy", "host_alloc", "host_free", "host_func"):
+        assert f"eagle_backend_{name}" in locked
+
+
 def test_manifests_are_sorted_and_disjoint():
     locked = backend_wall.read_manifest(backend_wall.LOCKED_MANIFEST)
     experimental = backend_wall.read_manifest(backend_wall.X_MANIFEST)

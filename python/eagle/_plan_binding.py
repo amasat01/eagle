@@ -10,16 +10,17 @@ import importlib
 
 import numpy as np
 
-from . import _bounded, _counters, _layout, _split
+from . import _bounded, _cell_rows, _counters, _lane_bind, _layout, _split
 from .interop import _stream_handle as _handle_of
 from .interop import _wrap_external_stream
 from . import exec as eexec
 from .abi import DEVICE_CPU, DEVICE_CUDA
-from .roles import OUTPUT_ROLES, PER_SAMPLE_ROLES
+from .roles import INPUT_ROLES, OUTPUT_ROLES, PER_SAMPLE_ROLES
+from .host_launch import ScalarHandle
 from ._plan_pack import (
+    _data_ptr,
     _integer_uniforms,
     _mutable_shapes,
-    _n_from_kw,
     _pack_args,
     _pack_one,
 )
@@ -36,6 +37,8 @@ from ._plan_planes import (
     device_scope,
     function_on,
     planes_device,
+    widen_index,
+    widen_indices,
 )
 from .interop import BufferRefused
 
@@ -56,6 +59,19 @@ def one_step_word(arg_spec, planes: dict, framework: str = "numpy") -> dict:
     else:
         xp = np
     return {**planes, name: xp.ones(1, dtype=xp.int64)}
+
+
+def own_companions(plugin, planes: dict, framework: str = "numpy") -> dict:
+    """``planes`` plus, for each compensated keyed sum whose target is bound,
+    a zeroed companion of the target's shape that the caller did not bind: the
+    plan owns it from here, so a launch or a replay allocates nothing for it."""
+    owned = {comp: target for comp, target in _cell_rows.companions_of(plugin).items()
+             if comp not in planes and target in planes}
+    if not owned:
+        return planes
+    xp = importlib.import_module("cupy") if framework == "cupy" else np
+    return {**planes, **{comp: xp.zeros(planes[target].shape, dtype=planes[target].dtype)
+                         for comp, target in owned.items()}}
 
 
 def _bind_plan(p: Plan, planes: dict, device=None) -> BoundPlan:
@@ -93,51 +109,55 @@ def _bind_one(p: Plan, planes: dict, device=None) -> BoundPlan:
         raise BufferRefused(f"eagle.plan.bind: device={device} names a CUDA device, "
                             "and this plan runs on the host")
     with device_scope(on):      # allocations (the step word) land on the planes' GPU
-        return _bind_on(p, planes, plugin, arg_spec, target, on)
+        entry = getattr(plugin, attr, None)
+        if entry is None:
+            raise ValueError(
+                f"eagle.plan.bind: this plan runs under eagle.exec.{p.structure.name} "
+                f"but the plugin declares no .{attr} to launch"
+            )
 
+        planes = one_step_word(arg_spec, planes, framework)
+        planes, origins = _from_views(planes, device_type)
+        owned = tuple(pair for pair in _cell_rows.owned_pairs(plugin, planes)
+                      if pair[0] in planes)
+        planes = own_companions(plugin, planes, framework)
+        widths = _declared_widths(plugin)
+        planes, n, _dims = _lane_bind.bind_n(plugin, arg_spec, planes, widths, door="bind")
+        _check_bound_names(arg_spec, planes)
+        planes, adapted = _adapt_planes(plugin, arg_spec, planes, door="bind")
+        planes = widen_indices(plugin, arg_spec, planes)
+        if n is None:
+            n = _lane_bind.n_of(arg_spec, planes)
+        parts = p.partitions_for(n)
+        active = _active_count_plane(arg_spec, planes, parts, plugin)
+        dtype = _plane_dtype(plugin)
+        vec_mut, mat_mut = _mutable_shapes(plugin)
+        for role, name in arg_spec:
+            if role == "nsamples":
+                continue
+            if role == "uniform":
+                _check_uniform(name, planes[name])
+            else:
+                _check_plane(role, name, planes[name], n=n, dtype=dtype,
+                             width=widths.get(name), framework=framework,
+                             declared=_declared_dtype(plugin, name))
+                _lane_bind.check_sink(plugin, name, planes[name], n, door="bind")
 
-def _bind_on(p, planes, plugin, arg_spec, target, on):
-    attr, device_type, framework = target
-    entry = getattr(plugin, attr, None)
-    if entry is None:
-        raise ValueError(
-            f"eagle.plan.bind: this plan runs under eagle.exec.{p.structure.name} "
-            f"but the plugin declares no .{attr} to launch"
+        int_uniforms = _integer_uniforms(plugin)
+        boxes, addrs = _pack_args(
+            arg_spec, planes, planes, n, device_type,
+            vec_mutables=vec_mut, mat_mutables=mat_mut, dtype=dtype,
+            int_uniforms=int_uniforms,
         )
-
-    planes = one_step_word(arg_spec, planes, framework)
-    planes, origins = _from_views(planes, device_type)
-    _check_bound_names(arg_spec, planes)
-    planes, adapted = _adapt_planes(plugin, arg_spec, planes, door="bind")
-    n = _n_from_kw(arg_spec, planes)
-    parts = p.partitions_for(n)
-    active = _active_count_plane(arg_spec, planes, parts)
-    dtype = _plane_dtype(plugin)
-    widths = _declared_widths(plugin)
-    vec_mut, mat_mut = _mutable_shapes(plugin)
-    for role, name in arg_spec:
-        if role == "nsamples":
-            continue
-        if role == "uniform":
-            _check_uniform(name, planes[name])
-        else:
-            _check_plane(role, name, planes[name], n=n, dtype=dtype,
-                         width=widths.get(name), framework=framework,
-                         declared=_declared_dtype(plugin, name))
-
-    boxes, addrs = _pack_args(
-        arg_spec, planes, planes, n, device_type,
-        vec_mutables=vec_mut, mat_mutables=mat_mut, dtype=dtype,
-        int_uniforms=_integer_uniforms(plugin),
-    )
-    return BoundPlan(
-        p, arg_spec, dict(planes), n, parts, boxes, addrs,
-        int(function_on(plugin, on) if on is not None else entry), device=on,
-        device_type=device_type, framework=framework, dtype=dtype, widths=widths,
-        vec_mutables=vec_mut, mat_mutables=mat_mut,
-        int_uniforms=_integer_uniforms(plugin), active_count=active,
-        copies=[a for a in adapted.values() if a.scratch is not None], origins=origins,
-    )
+        return BoundPlan(
+            p, arg_spec, dict(planes), n, parts, boxes, addrs,
+            int(function_on(plugin, on) if on is not None else entry), device=on,
+            device_type=device_type, framework=framework, dtype=dtype, widths=widths,
+            vec_mutables=vec_mut, mat_mutables=mat_mut,
+            int_uniforms=int_uniforms, active_count=active,
+            copies=[a for a in adapted.values() if a.scratch is not None], origins=origins,
+            owned=owned,
+        )
 
 
 def _from_views(planes: dict, device_type) -> tuple:
@@ -155,7 +175,7 @@ def _from_views(planes: dict, device_type) -> tuple:
     return planes, tuple((nm, v._obj, v.ptr) for nm, v in views.items())
 
 
-def _data_ptr(obj) -> int:
+def _producer_ptr(obj) -> int:
     """The current data address of a producer (torch, or any array protocol)."""
     ptr = getattr(obj, "data_ptr", None)
     if callable(ptr):
@@ -165,7 +185,7 @@ def _data_ptr(obj) -> int:
     return int(face["data"][0])
 
 
-def _active_count_plane(arg_spec, planes, parts):
+def _active_count_plane(arg_spec, planes, parts, plugin):
     """The bound active-set count plane, when the artifact reads an index
     map (:mod:`eagle._active_set`'s ``active_map``/``active_count``), else
     ``None``. Such a kernel addresses samples through one map over the whole
@@ -183,8 +203,9 @@ def _active_count_plane(arg_spec, planes, parts):
             f"({MAP_PLANE!r}/{COUNT_PLANE!r}), which addresses the whole batch; "
             f"bind it under a single partition, not {len(parts)}"
         )
-    from ._active_set import check_bound_planes
+    from ._active_set import check_bound_planes, check_group
 
+    check_group(plugin, planes[COUNT_PLANE])
     check_bound_planes(planes[MAP_PLANE], [
         (role, name, planes[name]) for role, name in arg_spec
         if name in planes and name not in (MAP_PLANE, COUNT_PLANE)])
@@ -199,7 +220,11 @@ class BoundPlan:
     plane those mirrors point at (a captured graph holds raw device
     pointers, so a plane freed too early reads as a correct answer once and
     somebody else's memory afterwards), but no plane itself: nothing here
-    is allocated, uploaded, cast or copied home, at bind or at launch.
+    is uploaded, cast or copied home, and nothing is allocated at launch. The
+    one plane made at bind is the companion of a compensated keyed sum
+    (:func:`own_companions`), which this plan owns, folds into its target
+    after each launch through the kernel's fold entry
+    (:func:`eagle._cell_rows.fold_steps`) and replays reuse.
 
     The bound block is a snapshot, frozen at bind; :meth:`rebind` changes
     only the slots it is given."""
@@ -209,7 +234,7 @@ class BoundPlan:
         "_entry", "_device", "_device_type", "_framework", "_dtype", "_widths",
         "_vec_mutables", "_mat_mutables", "_int_uniforms", "_slot_of", "_cupy",
         "_active_count", "_copies", "_persist_fn", "_range_fn",
-        "_gen", "_origins",
+        "_gen", "_origins", "_fold", "_owned",
     )
 
     #: Sentinel for "not yet looked up" (the persist/range entry's own cupy
@@ -220,7 +245,7 @@ class BoundPlan:
     def __init__(self, plan, arg_spec, planes, n, parts, boxes, addrs, entry, *,
                  device=None, device_type, framework, dtype, widths, vec_mutables,
                  mat_mutables, int_uniforms=frozenset(), active_count=None,
-                 copies=(), origins=()):
+                 copies=(), origins=(), owned=()):
         self.plan = plan
         self._arg_spec = tuple(arg_spec)
         self._planes = planes
@@ -261,6 +286,11 @@ class BoundPlan:
         self._gen = 0
         # (name, producer, address) of each plane bound from a BufferView
         self._origins = tuple(origins)
+        # {target: companion} of the companions eagle made at bind
+        self._owned = dict(owned)
+        # the owned companions' fold entries, launched after the kernel
+        self._fold = (_cell_rows.fold_steps(plan.plugin, self._planes, owned, device)
+                      if owned else None)
 
     def _check_origins(self) -> None:
         """Refuse a launch once the producer of a plane bound from a
@@ -268,7 +298,7 @@ class BoundPlan:
         ...``, ``load_state_dict(assign=True)``): the plane would read the old
         storage. One address read per such plane."""
         for name, obj, ptr in self._origins:
-            if _data_ptr(obj) != ptr:
+            if _producer_ptr(obj) != ptr:
                 raise ValueError(
                     f"eagle.plan: plane {name!r} was rebound (its data pointer moved); "
                     "bind the new tensor (with FSDP or AMP master weights, bind the "
@@ -488,6 +518,12 @@ class BoundPlan:
 
         return call
 
+    @property
+    def _declared_block(self):
+        """The artifact's ``launch.block`` (``None`` when it states none): the
+        exact threads per block every device launch of this plan uses."""
+        return getattr(self.plan.plugin, "block", None)
+
     def range_entry(self):
         """This bound plan's ``<kernel>_range`` cupy ``Function`` -- an
         automatic kernel's contiguous-range sibling entry (same cubin as
@@ -573,7 +609,8 @@ class BoundPlan:
         if part.count <= 0:
             return lambda stream=None: None
         _launch = importlib.import_module("eagle.launch")
-        resolved = int(_launch._resolved_block(self._entry, part.count, block))
+        resolved = int(_launch._resolved_block(self._entry, part.count, block,
+                                               declared=self._declared_block))
         grid = int(eexec.DeviceKernel.grid(part.count, resolved))
         extra = (
             ctypes.c_longlong(part.base), ctypes.c_longlong(part.count),
@@ -667,6 +704,8 @@ class BoundPlan:
                 a.copy_in()
             for part in parts:
                 eexec.HostTeam.run(self._entry, addrs, part)
+            for entry, part in self._fold or ():     # O(slots): serial, no team to wake
+                eexec.HostTeam.run_serial(entry, addrs, part)
             for a in copies:
                 if a.writes:
                     a.copy_back()
@@ -683,14 +722,67 @@ class BoundPlan:
         for part in self._parts:
             eexec.DeviceKernel.run(
                 self._entry, addrs, part, stream=handle, device=self._device,
-                block=int(_launch._resolved_block(self._entry, part.count, block, self._device)),
+                block=int(_launch._resolved_block(self._entry, part.count, block, self._device,
+                                                  self._declared_block)),
             )
+        for entry, part in self._fold or ():
+            eexec.DeviceKernel.run(entry, addrs, part, stream=handle, device=self._device)
         if self._copies:
             with device_scope(self._device), _wrap_external_stream(handle):
                 for a in self._copies.values():
                     if a.writes:
                         a.copy_back()
         return None
+
+    def _swap(self, name, value):
+        """``rebind`` for one plane without its checks, for a caller that
+        holds the invariants (same shape, dtype and device: ``Graph._rebind``).
+        A plane with a layout copy, an origin or an active count takes the
+        checked path."""
+        slot = self._slot_of[name]
+        role = self._arg_spec[slot][0]
+        if (self._copies or self._origins or self._active_count is not None
+                or role in ("uniform", "nsamples") or self._widths.get(name, 1) > 1):
+            return self.rebind(**{name: value})
+        self._planes[name] = value
+        box = self._boxes[slot]
+        if type(box) is ScalarHandle and box.samples == self._n:       # same extent: move the pointer
+            box.data = _data_ptr(value)
+            self._gen += 1
+            return self
+        box = _pack_one(
+            role, name, self._planes, self._planes, self._n,
+            self._device_type, vec_mutables=self._vec_mutables,
+            mat_mutables=self._mat_mutables, dtype=self._dtype,
+            int_uniforms=self._int_uniforms,
+        )
+        self._boxes[slot] = box
+        self._addrs[slot] = ctypes.addressof(box)
+        self._gen += 1
+        return self
+
+    def clear(self, *names) -> None:
+        """Zero each named output plane in place, and the compensation
+        companion eagle owns for it: the call for a caller who starts a new
+        epoch (or a new replay) with an empty sink. Zeroing only the target
+        would leave the companion's old error terms to be folded into the next
+        run. A name with no owned companion (a plain policy, or a companion
+        the caller bound) has just the target zeroed; a companion the caller
+        bound is theirs to clear. Call it between launches or replays; it is
+        not a node inside a captured graph."""
+        valid = tuple(nm for role, nm in self._arg_spec
+                      if role in OUTPUT_ROLES
+                      and nm not in _cell_rows.companions_of(self.plan.plugin))
+        stray = [nm for nm in names if nm not in valid]
+        if stray:
+            raise ValueError(f"eagle.plan.clear: {stray} are not bound output planes "
+                             f"(valid: {list(valid)})")
+        with device_scope(self._device):
+            for nm in names:
+                self._planes[nm].fill(0)
+                comp = self._owned.get(nm)
+                if comp is not None:
+                    self._planes[comp].fill(0)
 
     @_layout.door
     def rebind(self, /, **changed):
@@ -722,16 +814,21 @@ class BoundPlan:
                 _check_uniform(name, value)
             else:
                 a = None
+                value = _lane_bind.flatten(self.plan.plugin, self._arg_spec, {name: value},
+                                           self._widths, door="rebind")[name]
                 width = self._widths.get(name, 1)
                 if role in PER_SAMPLE_ROLES and width > 1:
                     a = _layout.adapt(name, value, (width,),
                                       writes=role in OUTPUT_ROLES)
                     if a is not None:
                         value = a.native
+                if role in INPUT_ROLES:
+                    value = widen_index(value, _declared_dtype(self.plan.plugin, name))
                 _check_plane(role, name, value, n=self._n, dtype=self._dtype,
                              width=self._widths.get(name),
                              framework=self._framework,
                              declared=_declared_dtype(self.plan.plugin, name))
+                _lane_bind.check_sink(self.plan.plugin, name, value, self._n, door="rebind")
                 self._copies.pop(name, None)
                 if a is not None and a.scratch is not None:
                     self._copies[name] = a
@@ -751,9 +848,40 @@ class BoundPlan:
             )
             self._boxes[slot] = box
             self._addrs[slot] = ctypes.addressof(box)
+        self._renew_companions(changed)
         self._gen += 1
         _counters.bump("rebinds")  # only on a completed rebind
         return self
+
+    def _renew_companions(self, changed: dict) -> None:
+        """After a rebind: the owned companion of each rebound target cleared
+        in place, or made afresh (and its slot re-packed) when the new target
+        has another shape, so no residual of the old target folds into it."""
+        renewed = False
+        for target, comp in self._owned.items():
+            if target not in changed or comp in changed:
+                continue
+            held, new = self._planes[comp], self._planes[target]
+            if held.shape == new.shape:
+                with device_scope(self._device):
+                    held.fill(0)
+                continue
+            with device_scope(self._device):
+                self._planes.update(own_companions(self.plan.plugin, {target: new},
+                                                   self._framework))
+            slot = self._slot_of[comp]
+            box = _pack_one(
+                self._arg_spec[slot][0], comp, self._planes, self._planes, self._n,
+                self._device_type, vec_mutables=self._vec_mutables,
+                mat_mutables=self._mat_mutables, dtype=self._dtype,
+                int_uniforms=self._int_uniforms,
+            )
+            self._boxes[slot] = box
+            self._addrs[slot] = ctypes.addressof(box)
+            renewed = True
+        if renewed:     # the fold runs over the new target's slots
+            self._fold = _cell_rows.fold_steps(self.plan.plugin, self._planes,
+                                               tuple(self._owned.items()), self._device)
 
 
 def _stream_handle(stream, cupy, device=None) -> int:

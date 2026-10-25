@@ -72,14 +72,14 @@ def drag(v: Vector[3], cd: Param, terminated: Terminated, a: Mutable[Vector[3]])
     a = -cd * sqrt(dot(v, v)) * v
 
 
-if hasattr(hawk, "all_samples"):
-    @hawk.kernel
-    def cell_min(x: Scalar, t: Mutable[Scalar]):
-        t = hawk.all_samples(x).min()  # noqa: F841
+@hawk.kernel
+def cell_min(x: Scalar, t: Mutable[Scalar]):
+    t = hawk.min(x)  # noqa: F841
 
-    @hawk.kernel
-    def cell_sum(x: Scalar, t: Mutable[Scalar]):
-        t = hawk.all_samples(x).sum()  # noqa: F841
+
+@hawk.kernel
+def cell_sum(x: Scalar, t: Mutable[Scalar]):
+    t = hawk.sum(x)  # noqa: F841
 
 
 @hawk.kernel
@@ -258,10 +258,12 @@ def test_signature_is_read_off_the_kernel(ops):
 
 # -- refusals ----------------------------------------------------------------------
 
-def test_mixed_float_dtypes_are_refused_by_name(ops):
+def test_mixed_float_dtypes_promote_and_others_are_refused(ops):
+    import eagle
+
     with jax.default_device(_device("cpu")):
         x, _, e = _drag_make(4, np.float32, np.random.default_rng(0))
-        with pytest.raises(TypeError, match="never a mix"):
+        with pytest.warns(eagle.PerformanceWarning, match="promoted to float64"):
             ops["drag"](x, jnp.asarray([0.3], jnp.float64), e["t"])
         with pytest.raises(TypeError, match="float32 or float64"):
             ops["vec_sum"](x.astype(jnp.int32), x.astype(jnp.int32))
@@ -491,8 +493,6 @@ def test_wrt_empty_wraps_a_state_kernel_forward_only(tmp_path, platform):
 @pytest.mark.parametrize("platform", PLATFORMS)
 @pytest.mark.parametrize("jit", [False, True])
 def test_min_cell_is_the_exact_minimum(tmp_path, platform, jit):
-    if not hasattr(hawk, "all_samples"):
-        pytest.skip("this hawk has no reductions over samples")
     for n in (1, 33, 1000):
         x = np.random.default_rng(n).uniform(-5, 5, n)
         with jax.default_device(_device(platform)):
@@ -508,8 +508,6 @@ def test_float64_sum_cell_on_the_cpu_matches_eagle_reduce(tmp_path):
     """The host finish of a float64 sum cell takes the arithmetic eagle.reduce
     takes on this machine (the fixed-point leaf where the GPU has slow FP64),
     so it equals the GPU's finish bit for bit."""
-    if not hasattr(hawk, "all_samples"):
-        pytest.skip("this hawk has no reductions over samples")
     import eagle
     from eagle import _cell_rows
     from eagle._graph_reduce import fixed_f64
@@ -536,8 +534,6 @@ def test_float64_sum_cell_on_the_cpu_matches_eagle_reduce(tmp_path):
 @pytest.mark.parametrize("policy", ["compensated", "ordered"])
 def test_policy_reaches_the_cell_recipe(tmp_path, policy):
     """The recipe the handler runs carries the policy given, and the sum is right."""
-    if not hasattr(hawk, "all_samples"):
-        pytest.skip("this hawk has no reductions over samples")
     from eagle import _cell_rows
     from eagle._graph_reduce import POLICIES
 
@@ -597,21 +593,6 @@ def test_refusals_name_the_users_kernel(ops):
 
 
 # -- the argument PODs against eagle's own packer -------------------------------------
-
-@pytest.fixture(scope="module")
-def probe(tmp_path_factory):
-    cxx = shutil.which(os.environ.get("CXX", "") or "c++") or shutil.which("g++")
-    if cxx is None:
-        pytest.fail("a C++ compiler is needed to build fixtures/xla_pack_probe.cpp")
-    so = tmp_path_factory.mktemp("xla_probe") / "libxla_pack_probe.so"
-    build = subprocess.run([cxx, "-std=c++17", "-O1", "-fPIC", "-shared",
-                            str(FIX / "xla_pack_probe.cpp"), "-o", str(so)],
-                           capture_output=True, text=True)
-    assert build.returncode == 0, build.stderr
-    lib = ctypes.CDLL(str(so))
-    lib.probe_read.restype = ctypes.c_int32
-    return lib
-
 
 def _recorded(lib):
     buf = (ctypes.c_ubyte * 8192)()
@@ -1042,11 +1023,10 @@ def test_vmap_over_a_param_of_a_carried_state_kernel_with_finished_samples(tmp_p
         assert set(names) == {"eagle_osc_params_cells"} and not looped
 
 
-@pytest.mark.skipif(not hasattr(hawk, "all_samples"), reason="this hawk has no reductions over samples")
 def test_vmap_over_a_param_of_a_kernel_with_cells_keeps_the_loop(tmp_path):
     @hawk.kernel
     def scaled_sum(x: Scalar, k: Param, t: Mutable[Scalar]):
-        t = hawk.all_samples(k * x).sum()  # noqa: F841
+        t = hawk.sum(k * x)  # noqa: F841
 
     x, ks = jnp.linspace(0.1, 1.0, 9), jnp.asarray([0.5, 1.5, -0.8])
     with jax.default_device(_device("cpu")):

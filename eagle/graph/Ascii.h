@@ -6,8 +6,9 @@
 /**
  * @file graph/Ascii.h
  * @brief The box block diagram behind ``ascii()`` (see Render.h): one box per
- *        node on its layout stage, edges routed between the boxes, a frame
- *        around the nodes of a conditional, a stage tag in the left gutter.
+ *        node on its layout row, edges routed between the boxes (the hazard
+ *        kind as line style), a frame around the nodes of a conditional, a
+ *        stage tag in the left gutter.
  *
  * The diagram is built in small passes over one working state (items, rows,
  * columns, frame extents, a character canvas); each pass is a method.
@@ -70,14 +71,29 @@ inline std::vector<std::string> truncated(const std::string& text, std::size_t c
 
 enum Bits : unsigned { kU = 1, kD = 2, kL = 4, kR = 8 };
 
+/** @brief The look of an edge run: the hazard kind, solid for ``RAW``. */
+enum Style : unsigned char { kSolid = 0, kDashed = 1, kDotted = 2, kNoStyle = 255 };
+
+inline Style styleOf(EdgeKind k) { return k == EdgeKind::RAW ? kSolid : k == EdgeKind::WAR ? kDashed : kDotted; }
+
+/** @brief A straight vertical (or horizontal) line piece in the given style. */
+inline const char* lineChar(bool vertical, Style st, bool unicode)
+{
+    static const char* uni[2][3] = { { "\xE2\x94\x80", "\xE2\x94\x84", "\xE2\x94\x88" },
+                                     { "\xE2\x94\x82", "\xE2\x94\x86", "\xE2\x94\x8A" } };
+    static const char* ascii[2][3] = { { "-", ".", "~" }, { "|", ":", "!" } };
+    return (unicode ? uni : ascii)[vertical][st];
+}
+
 /** @brief The box-drawing character for the lines meeting at a cell. */
-inline const char* maskChar(unsigned m, bool unicode)
+inline const char* maskChar(unsigned m, bool unicode, Style st = kSolid)
 {
     if (!unicode)
-        return (m & (kL | kR)) == 0 ? "|" : (m & (kU | kD)) == 0 ? "-" : "+";
+        return (m & (kL | kR)) == 0 ? lineChar(true, st, false)
+            : (m & (kU | kD)) == 0 ? lineChar(false, st, false) : "+";
     switch (m) {
-    case kU: case kD: case kU | kD: return "\xE2\x94\x82";               // |
-    case kL: case kR: case kL | kR: return "\xE2\x94\x80";               // -
+    case kU: case kD: case kU | kD: return lineChar(true, st, true);
+    case kL: case kR: case kL | kR: return lineChar(false, st, true);
     case kU | kR: return "\xE2\x94\x94";
     case kU | kL: return "\xE2\x94\x98";
     case kD | kR: return "\xE2\x94\x8C";
@@ -104,6 +120,7 @@ public:
             return "";
         for (gidx l : lay_.layer)
             layers_ = std::max(layers_, l + 1);
+        stages_ = stagesOf(d_);
         buildItems();
         buildSegments();
         orderLayers();
@@ -126,6 +143,7 @@ private:
         bool out = false, in = false;      // has an outgoing / incoming segment
         std::vector<std::string> planes;   // names shown under the source
         gidx layer = 0;
+        Style style = kSolid;              // of the run a pass-through carries
         std::size_t center() const { return x + width / 2; }
         bool within(gidx frame) const
         {
@@ -135,7 +153,8 @@ private:
 
     struct Segment {
         std::size_t from, to;              // items in adjacent layers
-        std::string label;                 // planes, shown under `from` when it is a node
+        std::vector<std::string> names;    // planes, shown under `from` when it is a node
+        Style style = kSolid;
     };
 
     /** @brief Where a frame sits: its first and last layer, the rows of border
@@ -158,18 +177,22 @@ private:
     std::vector<Segment> segments_;
     std::vector<std::vector<std::size_t>> rows_;   // item ids per layer, left to right
     std::vector<FrameSpan> frames_;
+    std::vector<gidx> stages_;                     // per node, empty without stage frames
     std::vector<std::string> gutter_;
     std::vector<std::size_t> boxY_, labelRow_, busRow_, layerWidth_;
     std::size_t left_ = 0, maxWidth_ = 0, width_ = 0, height_ = 0;
     std::vector<std::vector<std::string>> cells_;
     std::vector<std::vector<unsigned>> lines_;
+    std::vector<std::vector<Style>> styles_;
+    bool kindSeen_[3] = { false, false, false };
 
     // ---- items and segments ----
     std::vector<gidx> chainOf(gidx frame) const
     {
         std::vector<gidx> c;
         for (gidx f = frame; f != -1; f = d_.frames[f].parent)
-            c.push_back(f);
+            if (d_.frames[f].kind != "stage")      // a stage is a row, never drawn
+                c.push_back(f);
         std::reverse(c.begin(), c.end());
         return c;
     }
@@ -196,22 +219,27 @@ private:
         return out;
     }
 
-    /** @brief One segment per layer step of every edge; a step through a layer
-     *  with no node of the edge gets a pass-through item. */
+    /** @brief One segment per layer step of every node pair joined by an edge;
+     *  a step through a layer with no node of the pair gets a pass-through
+     *  item. A pair is one run: its plane names once, in the style of its
+     *  first hazard kind (read-after-write over write-after-read over
+     *  write-after-write). */
     void buildSegments()
     {
-        std::map<std::pair<gidx, gidx>, std::vector<std::string>> pairs;
+        struct Run {
+            std::vector<std::string> names;
+            Style style = kNoStyle;
+        };
+        std::map<std::pair<gidx, gidx>, Run> pairs;
         for (const Edge& e : d_.edges) {
-            std::string tag = e.plane;
-            if (e.kind != EdgeKind::RAW)
-                tag += (tag.empty() ? "" : ":") + std::string(kindName(e.kind));
-            auto& v = pairs[{ e.src, e.dst }];
-            if (!tag.empty() && std::find(v.begin(), v.end(), tag) == v.end())
-                v.push_back(tag);
+            Run& run = pairs[{ e.src, e.dst }];
+            run.style = std::min(run.style, styleOf(e.kind));
+            if (!e.plane.empty() && std::find(run.names.begin(), run.names.end(), e.plane) == run.names.end())
+                run.names.push_back(e.plane);
         }
-        for (const auto& [ends, planes] : pairs) {
+        for (const auto& [ends, run] : pairs) {
+            kindSeen_[run.style] = true;
             const std::size_t first = nodeItem_[ends.first], last = nodeItem_[ends.second];
-            const std::string label = joinPlanes(planes);
             std::vector<gidx> shared;      // frames holding both ends
             for (std::size_t i = 0; i < items_[first].chain.size() && i < items_[last].chain.size()
                  && items_[first].chain[i] == items_[last].chain[i]; ++i)
@@ -223,20 +251,23 @@ private:
                     Item through;
                     through.chain = shared;
                     through.layer = l;
+                    through.style = run.style;
                     next = items_.size();
                     items_.push_back(through);
                 }
-                segments_.push_back({ prev, next, prev == first ? label : std::string() });
+                segments_.push_back({ prev, next, prev == first ? run.names : std::vector<std::string>(), run.style });
                 prev = next;
             }
         }
         for (const Segment& s : segments_) {
             items_[s.from].out = true;
             items_[s.to].in = true;
+            if (items_[s.from].node == -1)
+                continue;
             auto& names = items_[s.from].planes;
-            if (items_[s.from].node != -1 && !s.label.empty()
-                && std::find(names.begin(), names.end(), s.label) == names.end())
-                names.push_back(s.label);
+            for (const std::string& n : s.names)
+                if (std::find(names.begin(), names.end(), n) == names.end())
+                    names.push_back(n);
         }
     }
 
@@ -335,41 +366,66 @@ private:
 
     std::size_t edgePad(std::size_t item) const { return 2 * items_[item].chain.size(); }
 
+    std::size_t planeCells(std::size_t item) const
+    {
+        return cellsOf(unicode_ ? joinPlanes(items_[item].planes) : asciiFold(joinPlanes(items_[item].planes))).size();
+    }
+
+    /** @brief The offsets of a row's items from its left edge, and its width.
+     *  A plane name is written from its source's centre, so the next line in
+     *  the row starts a column after it: the row grows to fit the names. */
+    std::pair<std::vector<std::size_t>, std::size_t> rowOffsets(gidx l) const
+    {
+        const auto& r = rows_[l];
+        std::vector<std::size_t> at;
+        std::size_t x = edgePad(r.front()), need = 0;
+        for (std::size_t i = 0; i < r.size(); ++i) {
+            const Item& it = items_[r[i]];
+            x += i ? gap(r[i - 1], r[i]) : 0;
+            if (it.out) {
+                const std::size_t half = it.width / 2;
+                x = std::max(x, need > half ? need - half : 0);
+                need = it.planes.empty() ? 0 : x + half + planeCells(r[i]) + 1;
+            }
+            at.push_back(x);
+            x += it.width;
+        }
+        return { at, std::max(x + edgePad(r.back()), need + 1) };
+    }
+
     void placeColumns()
     {
         layerWidth_.assign(layers_, 0);
         for (gidx l = 0; l < layers_; ++l) {
-            const auto& r = rows_[l];
-            std::size_t w = edgePad(r.front()) + edgePad(r.back());
-            for (std::size_t i = 0; i < r.size(); ++i)
-                w += items_[r[i]].width + (i + 1 < r.size() ? gap(r[i], r[i + 1]) : 0);
-            layerWidth_[l] = w;
-            maxWidth_ = std::max(maxWidth_, w);
+            layerWidth_[l] = rowOffsets(l).second;
+            maxWidth_ = std::max(maxWidth_, layerWidth_[l]);
         }
         gutter_.assign(layers_, "");
         std::size_t gutterWidth = 0;
+        gidx shown = -1;
         for (gidx l = 0; l < layers_; ++l) {
-            std::string stage;
+            std::string schedule;
             bool same = true, any = false;
+            gidx stage = l;
             for (std::size_t i : rows_[l])
                 if (items_[i].node != -1) {
                     const std::string& s = d_.nodes[items_[i].node].stage;
-                    same = same && (!any || s == stage);
-                    stage = any ? stage : s;
+                    same = same && (!any || s == schedule);
+                    schedule = any ? schedule : s;
+                    stage = stages_.empty() ? l : stages_[items_[i].node];
                     any = true;
                 }
-            gutter_[l] = "stage " + std::to_string(l) + (same && !stage.empty() ? " " + stage : "");
+            if (stage != shown)                  // a stage's later rows carry no tag
+                gutter_[l] = "stage " + std::to_string(stage) + (same && !schedule.empty() ? " " + schedule : "");
+            shown = stage;
             gutterWidth = std::max(gutterWidth, cellsOf(gutter_[l]).size());
         }
         left_ = gutterWidth + 3;
         width_ = left_ + maxWidth_ + 2;
         for (gidx l = 0; l < layers_; ++l) {
-            const auto& r = rows_[l];
-            std::size_t x = left_ + (maxWidth_ - layerWidth_[l]) / 2 + edgePad(r.front());
-            for (std::size_t i = 0; i < r.size(); ++i) {
-                items_[r[i]].x = x;
-                x += items_[r[i]].width + (i + 1 < r.size() ? gap(r[i], r[i + 1]) : 0);
-            }
+            const auto [at, total] = rowOffsets(l);
+            for (std::size_t i = 0; i < at.size(); ++i)
+                items_[rows_[l][i]].x = left_ + (maxWidth_ - total) / 2 + at[i];
         }
     }
 
@@ -430,20 +486,22 @@ private:
                 placeFrame(f);
     }
 
-    /** @brief The frame's box: its nodes' columns (and its child frames'), padded by 2. */
+    /** @brief The frame's box: its items' columns padded by 2 for it and for
+     *  each frame nested between it and the item. */
     void placeFrame(gidx f)
     {
         FrameSpan& fs = frames_[f];
         std::size_t c0 = width_, c1 = 0;
         for (const Item& it : items_)
             if (it.within(f)) {
-                c0 = std::min(c0, it.x);
-                c1 = std::max(c1, it.x + it.width - 1);
+                const std::size_t pad = 2 * (it.chain.end() - std::find(it.chain.begin(), it.chain.end(), f));
+                c0 = std::min(c0, it.x - pad);
+                c1 = std::max(c1, it.x + it.width - 1 + pad);
             }
         fs.r0 = boxY_[fs.top] - fs.extTop;
         fs.r1 = boxY_[fs.bottom] + 2 + fs.extBottom;
-        fs.c0 = c0 - 2;
-        fs.c1 = c1 + 2;
+        fs.c0 = c0;
+        fs.c1 = c1;
     }
 
     // ---- painting ----
@@ -459,39 +517,51 @@ private:
             put(r, c + i, text[i]);
     }
 
-    void line(std::size_t r, std::size_t c, unsigned bits) { lines_[r][c] |= bits; }
+    void line(std::size_t r, std::size_t c, unsigned bits, Style st)
+    {
+        lines_[r][c] |= bits;
+        styles_[r][c] = std::min(styles_[r][c], st);
+    }
 
     void paint()
     {
         cells_.assign(height_, std::vector<std::string>(width_, " "));
         lines_.assign(height_, std::vector<unsigned>(width_, 0));
-        drawFrames();
+        styles_.assign(height_, std::vector<Style>(width_, kNoStyle));
         routeSegments();
         for (std::size_t r = 0; r < height_; ++r)
             for (std::size_t c = 0; c < width_; ++c)
                 if (lines_[r][c])
-                    cells_[r][c] = maskChar(lines_[r][c], unicode_);
-        drawFrameLabels();      // over any line that crosses the top border
+                    cells_[r][c] = maskChar(lines_[r][c], unicode_, styles_[r][c]);
+        drawFrames();           // over the lines: a line crossing a border makes a junction
+        drawFrameLabels();
         drawBoxes();
         drawPlaneNames();
         for (gidx l = 0; l < layers_; ++l)
             putText(boxY_[l], 2, cellsOf(gutter_[l]));
     }
 
+    /** @brief A frame border cell: a junction where an edge line already crosses it. */
+    void border(std::size_t r, std::size_t c, unsigned bits)
+    {
+        if (r < height_ && c < width_)
+            put(r, c, lines_[r][c] ? maskChar(lines_[r][c] | bits, unicode_)
+                : !unicode_ && bits == (kL | kR) ? "=" : maskChar(bits, unicode_));
+    }
+
     void drawFrames()
     {
         static const char* round[] = { "\xE2\x95\xAD", "\xE2\x95\xAE", "\xE2\x95\xB0", "\xE2\x95\xAF" };
-        const std::string h = unicode_ ? "\xE2\x94\x80" : "=", v = unicode_ ? "\xE2\x94\x82" : "|";
         for (const FrameSpan& fs : frames_) {
             if (!fs.used())
                 continue;
-            for (std::size_t c = fs.c0; c <= fs.c1; ++c) {
-                put(fs.r0, c, h);
-                put(fs.r1, c, h);
+            for (std::size_t c = fs.c0 + 1; c < fs.c1; ++c) {
+                border(fs.r0, c, kL | kR);
+                border(fs.r1, c, kL | kR);
             }
-            for (std::size_t r = fs.r0; r <= fs.r1; ++r) {
-                put(r, fs.c0, v);
-                put(r, fs.c1, v);
+            for (std::size_t r = fs.r0 + 1; r < fs.r1; ++r) {
+                border(r, fs.c0, kU | kD);
+                border(r, fs.c1, kU | kD);
             }
             put(fs.r0, fs.c0, unicode_ ? round[0] : "+");
             put(fs.r0, fs.c1, unicode_ ? round[1] : "+");
@@ -521,23 +591,24 @@ private:
             const Item &a = items_[s.from], &b = items_[s.to];
             const gidx l = a.layer;
             const std::size_t from = a.center(), to = b.center(), bus = busRow_[l];
+            const Style st = s.style;
             for (std::size_t r = boxY_[l] + 3; r <= labelRow_[l]; ++r)
-                line(r, from, kU | kD);
+                line(r, from, kU | kD, st);
             if (from == to) {
-                line(bus, from, kU | kD);
+                line(bus, from, kU | kD, st);
             } else {
-                line(bus, from, kU | (to > from ? kR : kL));
-                line(bus, to, kD | (to > from ? kL : kR));
+                line(bus, from, kU | (to > from ? kR : kL), st);
+                line(bus, to, kD | (to > from ? kL : kR), st);
                 for (std::size_t c = std::min(from, to) + 1; c < std::max(from, to); ++c)
-                    line(bus, c, kL | kR);
+                    line(bus, c, kL | kR, st);
             }
             for (std::size_t r = bus + 1; r < boxY_[l + 1]; ++r)
-                line(r, to, kU | kD);
+                line(r, to, kU | kD, st);
         }
         for (const Item& it : items_)
             if (it.node == -1)
                 for (std::size_t r = boxY_[it.layer]; r < boxY_[it.layer] + 3; ++r)
-                    line(r, it.center(), kU | kD);
+                    line(r, it.center(), kU | kD, it.style);
     }
 
     void drawBoxes()
@@ -569,23 +640,28 @@ private:
         }
     }
 
-    /** @brief Plane names under their source; a name stops short of the next one. */
+    /** @brief Plane names under their source, whole: the columns leave room for them. */
     void drawPlaneNames()
     {
-        for (gidx l = 0; l + 1 < layers_; ++l) {
-            std::vector<std::size_t> sources;
+        for (gidx l = 0; l + 1 < layers_; ++l)
             for (std::size_t i : rows_[l])
-                if (items_[i].out)
-                    sources.push_back(i);
-            for (std::size_t k = 0; k < sources.size(); ++k) {
-                const Item& it = items_[sources[k]];
-                if (it.planes.empty())
-                    continue;
-                const std::size_t stop = k + 1 < sources.size() ? items_[sources[k + 1]].center() : width_;
-                const std::size_t room = stop > it.center() + 1 ? stop - it.center() - 1 : 1;
-                putText(labelRow_[l], it.center(), truncated(joinPlanes(it.planes), room, unicode_));
+                if (items_[i].out && !items_[i].planes.empty())
+                    putText(labelRow_[l], items_[i].center(),
+                        cellsOf(unicode_ ? joinPlanes(items_[i].planes) : asciiFold(joinPlanes(items_[i].planes))));
+    }
+
+    /** @brief One line naming the style of each non-solid run drawn. */
+    std::string legend() const
+    {
+        if (!kindSeen_[kDashed] && !kindSeen_[kDotted])
+            return "";
+        std::string out = "  edges:";
+        for (EdgeKind k : { EdgeKind::RAW, EdgeKind::WAR, EdgeKind::WAW })
+            if (kindSeen_[styleOf(k)]) {
+                const char* g = lineChar(false, styleOf(k), unicode_);
+                out += std::string("  ") + g + g + " " + kindName(k) + " " + kindMeaning(k);
             }
-        }
+        return out + "\n";
     }
 
     std::string text() const
@@ -599,7 +675,7 @@ private:
                 out += row[c];
             out += "\n";
         }
-        return out;
+        return out + legend();
     }
 };
 

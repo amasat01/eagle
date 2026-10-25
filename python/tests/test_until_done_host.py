@@ -185,17 +185,7 @@ def _oscillator(kind=None, finishing=False):
     return hawk.kernel(oscillator_step, kind=kind, steps=1)
 
 
-@pytest.fixture(scope="module", autouse=True)
-def _exact_host_profile():
-    """Every host build in this module under hawk's EXACT ``native`` profile
-    (FMA contraction off): the rows compare host runs of separate compiles bit
-    for bit, which only the exact profiles promise. hawk's default x86-64
-    profile contracts ``a*b + c`` into FMAs and is gated by ULP bounds in
-    hawk's own suite instead."""
-    mp = pytest.MonkeyPatch()
-    mp.setenv("HAWK_HOST_PROFILE", "native")
-    yield
-    mp.undo()
+pytestmark = pytest.mark.usefixtures("_exact_host_profile")
 
 
 @pytest.fixture(scope="module")

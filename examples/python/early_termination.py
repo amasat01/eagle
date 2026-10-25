@@ -172,7 +172,7 @@ def step_kernel():
         x_next = hm.select(live, xn, x)
         alive_next = still
         age_next = age + alive
-        hawk.all_samples(n_active)[0] += still - alive
+        hawk.scatter(n_active)[0] += still - alive
 
     return et_step
 
@@ -203,14 +203,14 @@ def _sidecar(bundle, name: str) -> dict:
 
 def host_plugin(bundle, name: str):
     """The plan-able view of the bundle's HOST entry (mirrors two_body_hybrid.py)."""
-    from hawk.artifact import plan_view
+    from hawk.artifact import fold_entries, plan_view
 
     library = ctypes.CDLL(str(pathlib.Path(bundle.directory) / f"{name}.so"))
     view = plan_view(_sidecar(bundle, name))
     entry = getattr(library, view.pop("host_entry"))
     return SimpleNamespace(
         host_entry=ctypes.cast(entry, ctypes.c_void_p).value,
-        _keepalive=library, **view)
+        _keepalive=library, **fold_entries(library, _sidecar(bundle, name)), **view)
 
 
 def device_plugin(bundle, name: str):

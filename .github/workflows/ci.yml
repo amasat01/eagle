@@ -11,6 +11,7 @@ name: CI
 # Pull requests only: main receives the tested tree, nothing re-runs there.
 on:
   pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
   workflow_dispatch: {}
 
 concurrency:
@@ -19,7 +20,7 @@ concurrency:
 
 jobs:
   release-gate:
-    # Every merge to main is a release unless docs-only (tools/release_gate.sh). Skipped on other PRs.
+    # The release label, the diff, the PR body and the tag it would create agree (tools/release_gate.sh). Skipped on other PRs.
     if: github.event_name == 'pull_request' && github.base_ref == 'main'
     runs-on: ubuntu-latest
     steps:
@@ -29,16 +30,10 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - run: bash tools/release_gate.sh "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}"
-  version:
-    # Every version string and the CHANGELOG heading agree (tools/version_sites.toml)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.12"
-      - run: python tools/version.py check
+      - env:
+          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ' ') }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: bash tools/release_gate.sh "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}"
   docs-fresh:
     # Freshness check, never a commit: the generator re-renders the pages and fails on any difference.
     runs-on: ubuntu-latest
@@ -74,6 +69,10 @@ jobs:
       CMAKE_CUDA_COMPILER_LAUNCHER: ccache
     steps:
       - uses: actions/checkout@v7
+        with:
+          path: eagle
+          fetch-depth: 0
+      - uses: ./eagle/.github/actions/tag-version
         with:
           path: eagle
 
@@ -144,6 +143,10 @@ jobs:
       CMAKE_CXX_COMPILER_LAUNCHER: ccache
     steps:
       - uses: actions/checkout@v7
+        with:
+          path: eagle
+          fetch-depth: 0
+      - uses: ./eagle/.github/actions/tag-version
         with:
           path: eagle
 
@@ -239,6 +242,10 @@ jobs:
       - uses: actions/checkout@v7
         with:
           path: eagle
+          fetch-depth: 0
+      - uses: ./eagle/.github/actions/tag-version
+        with:
+          path: eagle
 
       # companion aether: the ref pinned in .github/companions, else a same-named branch, else main
       - uses: ./eagle/.github/actions/companion
@@ -309,6 +316,10 @@ jobs:
       CMAKE_CUDA_COMPILER_LAUNCHER: ccache
     steps:
       - uses: actions/checkout@v7
+        with:
+          path: eagle
+          fetch-depth: 0
+      - uses: ./eagle/.github/actions/tag-version
         with:
           path: eagle
 
@@ -406,7 +417,7 @@ jobs:
           # random /tmp build env, so every compile line differs and ccache never hits;
           # --only-binary=:all: still builds this local project but never a dependency from
           # source, so no third-party sdist is ever built without its own isolated env
-          python -m pip install --quiet "scikit-build-core>=0.10" "nanobind>=3.1,<4"
+          python -m pip install --quiet "scikit-build-core>=0.10" "setuptools-scm>=8" "nanobind>=3.1,<4"
           export CMAKE_PREFIX_PATH="${GITHUB_WORKSPACE}/__install:${CMAKE_PREFIX_PATH}"
           export SKBUILD_CMAKE_ARGS="-DCMAKE_CUDA_COMPILER=$(which nvcc);-DCMAKE_CUDA_ARCHITECTURES=70"
           # the plugin carries the single arch built above, not the shipped list
@@ -446,6 +457,10 @@ jobs:
       CMAKE_CUDA_COMPILER_LAUNCHER: ccache
     steps:
       - uses: actions/checkout@v7
+        with:
+          path: eagle
+          fetch-depth: 0
+      - uses: ./eagle/.github/actions/tag-version
         with:
           path: eagle
 
@@ -505,7 +520,7 @@ jobs:
         run: |
           python -m venv "${RUNNER_TEMP}/venv"
           . "${RUNNER_TEMP}/venv/bin/activate"
-          pip install --quiet --upgrade pip pytest numpy build scikit-build-core nanobind
+          pip install --quiet --upgrade pip pytest numpy build scikit-build-core setuptools-scm nanobind
           pip install ./raptor   # the sibling checkout, so unreleased raptor changes are tested
           export CMAKE_PREFIX_PATH="${GITHUB_WORKSPACE}/__install"
           python -m build --wheel --no-isolation --outdir dist \
@@ -570,6 +585,10 @@ jobs:
       - uses: actions/checkout@v7
         with:
           path: eagle
+          fetch-depth: 0
+      - uses: ./eagle/.github/actions/tag-version
+        with:
+          path: eagle
 
       # companion aether: the ref pinned in .github/companions, else a same-named branch, else main
       - uses: ./eagle/.github/actions/companion
@@ -584,6 +603,14 @@ jobs:
         with:
           repo: raptor
           path: raptor
+          token: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
+          pins: eagle/.github/companions
+
+      # companion site: the shared docs package (raptor_docs) the docs tests import
+      - uses: ./eagle/.github/actions/companion
+        with:
+          repo: amasat01.github.io
+          path: site
           token: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
           pins: eagle/.github/companions
 
@@ -649,13 +676,14 @@ jobs:
           # random /tmp build env, so every compile line differs and ccache never hits;
           # --only-binary=:all: still builds this local project but never a dependency from
           # source, so no third-party sdist is ever built without its own isolated env
-          python -m pip install --quiet --prefer-binary "scikit-build-core>=0.10" "nanobind>=3.1,<4"
+          python -m pip install --quiet --prefer-binary "scikit-build-core>=0.10" "setuptools-scm>=8" "nanobind>=3.1,<4"
           export CMAKE_PREFIX_PATH="${GITHUB_WORKSPACE}/__install:${CMAKE_PREFIX_PATH}"
           export SKBUILD_CMAKE_ARGS="-DCMAKE_CUDA_COMPILER=$(which nvcc);-DCMAKE_CUDA_ARCHITECTURES=70"
           # the plugin carries the single arch built above, not the shipped list
           # (read by test_backend_wall where cuobjdump is present)
           export EAGLE_PLUGIN_EXPECTED_ARCHS=70/70
           pip install --prefer-binary ../raptor   # the sibling checkout, so unreleased raptor changes are tested
+          pip install --no-deps ../site     # raptor_docs alone, so the docs tests run here instead of erroring; its notebook dependencies have no free-threaded wheels
           # editable, as in development: python/conftest.py puts this source tree first
           # on sys.path, and only the editable hook then resolves the compiled eagle._core
           pip install --no-build-isolation --only-binary=:all: -e ./python
@@ -715,6 +743,10 @@ jobs:
       CXX: g++-13
     steps:
       - uses: actions/checkout@v7
+        with:
+          path: eagle
+          fetch-depth: 0
+      - uses: ./eagle/.github/actions/tag-version
         with:
           path: eagle
 

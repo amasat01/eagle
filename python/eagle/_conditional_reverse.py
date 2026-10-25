@@ -18,7 +18,10 @@ its iteration started with. Those states are rebuilt from checkpoints kept
 every ``window`` iterations (one forward sweep, then one window at a time),
 on private copies, so the recorded planes are never written. The adjoint of
 a plane the body only reads sums the iterations' terms oldest first, the
-order of the same chain written out as separate nodes.
+order of the same chain written out as separate nodes. A body of several
+launches (a ``sequence`` node) is reversed the same way, each iteration's
+parts newest first, each seeing the state it started with; a part that is
+not a plan launch cannot be re-run on those private copies and is refused.
 """
 
 from __future__ import annotations
@@ -28,26 +31,13 @@ import numpy
 from . import _core
 from ._active_set import _address
 from ._conditional import SkipGuard
-from .graph import Node, get_node_kind
+from .graph import get_node_kind
+from .interop import _xp_of
 from .roles import STATE_ROLES
 
 
 def _same(a, b) -> bool:
     return a is b or _address(a) == _address(b)
-
-
-def _body(child, ctx):
-    if child.kind == "sequence":
-        part = next(p for p in child.payload if p.grad)
-        raise ValueError(
-            f"eagle.diff.Reverse: node {ctx.label!r} repeats a sequence holding the "
-            f"differentiated part {part.label!r}; mark it grad=False (a controller), or "
-            "move it outside the loop")
-    if child.kind != "launch":
-        raise ValueError(
-            f"eagle.diff.Reverse: node {ctx.label!r} repeats a {child.kind!r} step; a "
-            "repeat_while reverses only a plan launch as its body")
-    return child.payload
 
 
 def _in_place(child):
@@ -60,16 +50,17 @@ def _in_place(child):
     return pairs, [r for r in reads if r not in pairs], [w for w in writes if w not in pairs.values()]
 
 
-def _flag_cell(ctx, xp, count, baseline):
+def _flag_cell(ctx, xp, count, baseline, negate=False):
     """A one-element flag the reverse owns, set from the saved guard cells."""
+    differ = xp.equal if negate else xp.not_equal
     flag = xp.zeros(1, dtype=xp.uint32)
     if baseline is None:
         def step():
-            xp.not_equal(count, 0, out=flag)
+            differ(count, 0, out=flag)
         ctx.add(step, reads=[count], writes=[flag])
     else:
         def step():
-            xp.not_equal(count, baseline, out=flag)
+            differ(count, baseline, out=flag)
         ctx.add(step, reads=[count, baseline], writes=[flag])
     return SkipGuard(flag, 0)
 
@@ -86,11 +77,14 @@ def _insert_front(ctx, start, add):
 def _skippable(node, incoming, ctx):
     child = node.payload.child
     kind = get_node_kind(child.kind)
+    if kind.transpose is None:
+        raise ValueError(f"eagle.diff.Reverse: node {ctx.label!r} guards a {child.kind!r} "
+                         "step, which has no transpose; it cannot be reversed")
     count = ctx.recorded("guard")
     baseline = ctx.recorded("guard_baseline") if node.payload.wrapper.guard.baseline_arr is not None else None
-    xp = _numpy_or_cupy(count)
+    xp = _xp_of(count)
     start = len(ctx._steps)
-    guard = _flag_cell(ctx, xp, count, baseline)
+    guard = _flag_cell(ctx, xp, count, baseline, node.payload.wrapper.guard.negate)
     with ctx.gated(guard):
         result = kind.transpose(child, incoming, ctx)
     pairs, _reads, outs = _in_place(child)
@@ -115,128 +109,23 @@ def _skippable(node, incoming, ctx):
     return result
 
 
-def _numpy_or_cupy(arr):
-    if type(arr).__module__.split(".")[0] == "cupy":
-        import cupy
-
-        return cupy
-    return numpy
-
-
 def _copy(ctx, xp, dst, src):
     ctx.add(lambda: xp.copyto(dst, src), reads=[src], writes=[dst])
 
 
-def _repeat_while(node, incoming, ctx):
-    cond = node.payload
-    cap = cond.wrapper.max_iters
-    child = cond.child
-    bound = _body(child, ctx)
-    kind = get_node_kind("launch")
-    pairs, consts, outs = _in_place(child)
-    names = {n: a for n, a, _r in kind.reads(child)}
-    xp = bound._cupy or numpy
-    count = ctx.written("iterations")
+def _sum_terms(ctx, xp, terms):
+    """``{name: total}`` of each loop constant's per-iteration terms, summed
+    oldest first (one fixed order, as the same chain written out)."""
+    from .diff._reverse import _ordered_sum
 
-    window = min(cap, int(_core.diff_default_window(cap)))
-    groups = -(-cap // window)
-    like = lambda r: xp.empty_like(names[r])
-    cur = {r: like(r) for r in pairs}
-    ckpt = [{r: like(r) for r in pairs} for _ in range(groups)]
-    win = [{r: like(r) for r in pairs} for _ in range(window)]
-    # an integer state plane (a counter) is re-run state, never differentiated
-    adjoint = {r: w for r, w in pairs.items() if names[r].dtype.kind == "f"}
-    abar = {r: xp.empty_like(incoming[w]) for r, w in adjoint.items()}
-    pbar = {w: xp.empty_like(incoming[w]) for w in outs}
-
-    # the body on private copies of the state it updates
-    private = dict(bound._planes)
-    for r, w in pairs.items():
-        private[r] = private[w] = cur[r]
-    for w in outs:
-        private[w] = xp.empty_like(incoming[w])
-    for r in consts:
-        private[r] = ctx.primal(r)
-    advance = bound.plan.bind(**private).launch
-    scratch = [*cur.values(), *(private[w] for w in outs)]
-
-    live = xp.zeros(cap, dtype=xp.uint32)
-    index = xp.arange(cap, dtype=xp.uint32)
-    ran = count[1:2]
-
-    def flag():
-        xp.greater(ran, index, out=live)
-    ctx.add(flag, reads=[count], writes=[live])
-    on = [SkipGuard(live, j) for j in range(cap)]
-
-    def save(dst, src, j):
-        with ctx.gated(on[j]):
-            for r in pairs:
-                _copy(ctx, xp, dst[r], src[r])
-
-    def step(j):
-        with ctx.gated(on[j]):
-            ctx.add(advance, reads=scratch, writes=scratch)
-
-    for r in pairs:
-        _copy(ctx, xp, cur[r], ctx.primal(r))
-    for r in adjoint:
-        _copy(ctx, xp, abar[r], incoming[adjoint[r]])
-    for w in outs:
-        _copy(ctx, xp, pbar[w], incoming[w])
-    last = (groups - 1) * window
-    for j in range(last + 1):                  # checkpoints, oldest first
-        if j % window == 0:
-            save(ckpt[j // window], cur, j)
-        if j < last:
-            step(j)
-
-    zeroed, terms = [], {r: [] for r in consts}
     result = {}
-    for g in reversed(range(groups)):
-        first, end = g * window, min((g + 1) * window, cap)
-        save(cur, ckpt[g], first)
-        for j in range(first, end):             # the window's start states
-            save(win[j - first], cur, j)
-            if j < end - 1:
-                step(j)
-        for j in reversed(range(first, end)):
-            states = win[j - first]
-            sub = type(ctx)(ctx.backend, ctx.label, ctx.vjp,
-                            lambda n, states=states: states[n] if n in states else ctx.primal(n))
-            inc = {w: abar[r] for r, w in adjoint.items()} | pbar
-            with sub.gated(on[j]):
-                out = get_node_kind("launch").transpose(child, inc, sub)
-            ctx._steps.extend(sub._steps)
-            ctx.inexact |= sub.inexact
-            ctx.comp.update(sub.comp)
-            for r in consts:
-                if r in out:
-                    terms[r].append((j, out[r]))
-                    zeroed.append(out[r])
-                    if id(out[r]) in ctx.comp:
-                        zeroed.append(ctx.comp[id(out[r])])
-            with ctx.gated(on[j]):
-                for r in adjoint:
-                    _copy(ctx, xp, abar[r], out[r])
-                for w in outs:
-                    ctx.add(lambda b=pbar[w]: b.fill(0), writes=[pbar[w]])
-    for r in adjoint:
-        result[r] = abar[r]
-    for w in outs:
-        if w in ctx.reads:      # no iteration ran: the adjoint goes on to the plane's earlier writer
-            carry = result[w] = xp.empty_like(incoming[w])
-            _copy(ctx, xp, carry, incoming[w])
-            with ctx.gated(on[0]):
-                ctx.add(lambda b=carry: b.fill(0), writes=[carry])
-    _insert_front(ctx, 0, lambda: [ctx.add(lambda b=b: b.fill(0), writes=[b]) for b in zeroed])
     for r, parts in terms.items():
-        arrays = [a for _j, a in sorted(parts, key=lambda p: p[0])]
+        arrays = [a for _k, a in sorted(parts, key=lambda p: p[0])]
+        if not arrays:
+            continue
         if len(arrays) == 1:
             result[r] = arrays[0]
             continue
-        from .diff._reverse import _ordered_sum
-
         total = xp.empty_like(arrays[0])
         ctx.add(_ordered_sum(total, arrays), reads=arrays, writes=[total])
         if any(id(a) in ctx.comp for a in arrays):
@@ -245,6 +134,147 @@ def _repeat_while(node, incoming, ctx):
             ctx.comp[id(total)] = lo_total = xp.empty_like(total)
             ctx.add(_ordered_sum(lo_total, los), reads=los, writes=[lo_total])
         result[r] = total
+    return result
+
+
+def _repeat_while(node, incoming, ctx):
+    """The reverse of a ``repeat_while`` whose body is a plan launch, or a
+    ``sequence`` of them (a part that is not differentiated, a guard writer,
+    is re-run and not transposed). A lone launch is a one-part sequence whose
+    planes keep their own names."""
+    from .diff._reverse import _vjp_plan
+
+    cond = node.payload
+    cap = cond.wrapper.max_iters
+    if cap is None:
+        raise ValueError(f"eagle.diff.Reverse: node {ctx.label!r} is a repeat_while with no "
+                         "max_iters; a reverse pass needs the cap")
+    single = cond.child.kind != "sequence"
+    parts = (cond.child,) if single else cond.child.payload
+    bad = [p for p in parts if p.kind != "launch"]
+    if bad:
+        raise ValueError(
+            f"eagle.diff.Reverse: node {ctx.label!r} repeats a {bad[0].kind!r} " +
+            ("step; a repeat_while reverses a plan launch, or several as a sequence" if single else
+             "part; a reversed loop body holds plan launches only (a decision cell cannot be re-run)"))
+    key = (lambda i, n: n) if single else (lambda i, n: f"{i}.{n}")
+    launch = get_node_kind("launch")
+    access = [(launch.reads(p), launch.writes(p)) for p in parts]
+    xp = parts[0].payload._cupy or numpy
+    written = {}
+    for _reads, writes in access:
+        for _n, arr, _r in writes:
+            written.setdefault(_address(arr), arr)
+    floats = {ad for ad, arr in written.items() if arr.dtype.kind == "f"}
+    fresh = lambda: {ad: xp.empty_like(arr) for ad, arr in written.items()}  # noqa: E731
+    window = min(cap, int(_core.diff_default_window(cap)))
+    groups = -(-cap // window)
+    cur, before = fresh(), [fresh() for _ in parts]
+    ckpt, win = [fresh() for _ in range(groups)], [fresh() for _ in range(window)]
+
+    def state_of(i, name, states):
+        arr = next(a for n, a, _r in (*access[i][0], *access[i][1]) if n == name)
+        return states[_address(arr)] if _address(arr) in states else ctx.primal(key(i, name))
+
+    def private(i, states):
+        planes = dict(parts[i].payload._planes)
+        for n, _a, _r in (*access[i][0], *access[i][1]):
+            planes[n] = state_of(i, n, states)
+        return parts[i].payload.plan.bind(**planes).launch
+    advance = [private(i, cur) for i in range(len(parts))]
+    scratch = list(cur.values())
+
+    live = xp.zeros(cap, dtype=xp.uint32)
+    ran = ctx.written("iterations")[1:2]
+    index = xp.arange(cap, dtype=xp.uint32)
+    ctx.add(lambda: xp.greater(ran, index, out=live),
+            reads=[ran], writes=[live])
+    on = [SkipGuard(live, j) for j in range(cap)]
+
+    def save(dst, src, j):
+        with ctx.gated(on[j]):
+            for ad in written:
+                _copy(ctx, xp, dst[ad], src[ad])
+
+    def step(j):
+        with ctx.gated(on[j]):
+            for run in advance:
+                ctx.add(run, reads=scratch, writes=scratch)
+
+    taped = {}      # array address -> the loop node's name for it (taped at entry)
+    for i, (reads, _w) in enumerate(access):
+        for n, arr, _r in reads:
+            if key(i, n) in ctx.reads:
+                taped.setdefault(_address(arr), key(i, n))
+    for ad, name in taped.items():
+        if ad in written:
+            _copy(ctx, xp, cur[ad], ctx.primal(name))
+    adjoint = {ad: xp.zeros_like(written[ad]) for ad in floats}
+    for i, (_r, writes) in enumerate(access):
+        for n, arr, _ in writes:
+            if key(i, n) in incoming and _address(arr) in adjoint:
+                _copy(ctx, xp, adjoint[_address(arr)], incoming[key(i, n)])
+
+    last = (groups - 1) * window
+    for j in range(last + 1):                  # checkpoints, oldest first
+        if j % window == 0:
+            save(ckpt[j // window], cur, j)
+        if j < last:
+            step(j)
+    terms, zeroed = {}, []
+    for g in reversed(range(groups)):
+        first, end = g * window, min((g + 1) * window, cap)
+        save(cur, ckpt[g], first)
+        for j in range(first, end):             # the window's start states
+            save(win[j - first], cur, j)
+            if j < end - 1:
+                step(j)
+        for j in reversed(range(first, end)):
+            save(cur, win[j - first], j)
+            for i, run in enumerate(advance):   # the state each part starts with
+                save(before[i], cur, j)
+                with ctx.gated(on[j]):
+                    ctx.add(run, reads=scratch, writes=scratch)
+            for i in reversed(range(len(parts))):
+                reads, writes = access[i]
+                if parts[i].grad:
+                    sub = type(ctx)(ctx.backend, ctx.label,
+                                    ctx.vjp if single else _vjp_plan(f"{ctx.label}[{i}]", parts[i].payload, None),
+                                    lambda n, i=i: state_of(i, n, before[i]))
+                    inc = {n: adjoint[_address(a)] for n, a, _r in writes if _address(a) in adjoint}
+                    with sub.gated(on[j]):
+                        out = launch.transpose(parts[i], inc, sub)
+                    ctx._steps.extend(sub._steps)
+                    ctx.inexact |= sub.inexact
+                    ctx.comp.update(sub.comp)
+                else:
+                    out = {}
+                with ctx.gated(on[j]):
+                    for _n, a, _r in writes:    # overwritten: no adjoint before this part
+                        if _address(a) in adjoint:
+                            ctx.add(lambda b=adjoint[_address(a)]: b.fill(0), writes=[adjoint[_address(a)]])
+                    for n, a, _r in reads:
+                        if n not in out:
+                            continue
+                        if _address(a) in adjoint:
+                            t = adjoint[_address(a)]
+                            ctx.add(lambda t=t, o=out[n]: xp.add(t, o, out=t), reads=[t, out[n]], writes=[t])
+                        else:                   # a loop constant: one term per (iteration, part)
+                            terms.setdefault(_address(a), []).append(((j, i), out[n]))
+                            zeroed += [out[n], ctx.comp[id(out[n])]] if id(out[n]) in ctx.comp else [out[n]]
+    _insert_front(ctx, 0, lambda: [ctx.add(lambda b=b: b.fill(0), writes=[b]) for b in zeroed])
+    totals = _sum_terms(ctx, xp, terms)
+    result = {name: adjoint[ad] if ad in adjoint else totals[ad]
+              for ad, name in taped.items() if ad in adjoint or ad in totals}
+    for i, (_r, writes) in enumerate(access):
+        for n, arr, _ in writes:
+            name = key(i, n)
+            if name in ctx.reads and name in incoming and name not in result:
+                # no iteration ran: the adjoint goes on to the plane's earlier writer
+                carry = result[name] = xp.empty_like(incoming[name])
+                _copy(ctx, xp, carry, incoming[name])
+                with ctx.gated(on[0]):
+                    ctx.add(lambda b=carry: b.fill(0), writes=[carry])
     return result
 
 
