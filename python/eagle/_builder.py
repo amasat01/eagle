@@ -35,6 +35,7 @@ from .graph import Graph, Node, get_node_kind
 from ._plan_planes import _declared_widths
 from .interop import _xp_of
 
+_MATCH = getattr(ast, "Match", ())  # a `match` statement exists from Python 3.10
 _COUNT = itertools.count()
 _MISSING = object()
 _DTYPES = {"f64": "float64", "f32": "float32", "uint32": "uint32", "int32": "int32"}
@@ -627,7 +628,7 @@ class Rewriter:
     def stmt(self, st, after):
         if isinstance(st, ast.If): return self.if_(st, after)
         if isinstance(st, ast.While): return self.while_(st, after)
-        if isinstance(st, ast.Match): return self.match_(st, after)
+        if isinstance(st, _MATCH): return self.match_(st, after)
         if isinstance(st, ast.For):
             g = self.guarded_for(st, after) or self.counted_for(st, after)
             if g is not None: return g
