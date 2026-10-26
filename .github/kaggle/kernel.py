@@ -103,6 +103,12 @@ def torch_index(cfg):
     return ["--extra-index-url", "https://download.pytorch.org/whl/cu130"] if cfg.cuda == "13" else []
 
 
+def upload_name(name):
+    """As wheel.py's upload_name (the kernel runs alone on Kaggle, so it carries its own copy)."""
+    name = name.replace("+", "")
+    return name + ".sdist" if name.endswith(".tar.gz") else name
+
+
 def shipped_wheel(cfg, py):
     """The mounted dataset's raptor-eagle wheel for ``py``'s CPython tag, after checking the shipped SHA256SUMS file
     against the sha256 in the config and the wheel against its line there (a dataset overwritten by another run fails
@@ -120,15 +126,18 @@ def shipped_wheel(cfg, py):
     if f"{got}  {wheel.name}" not in sums.decode().splitlines():
         raise SystemExit(f"{wheel.name}: sha256 {got} is not the one in the shipped SHA256SUMS")
     listed = {ln.split()[-1]: ln.split()[0] for ln in sums.decode().splitlines()}
-    # Kaggle drops "+" from dataset file names, so a sibling with a local version (0.7.1.dev1+g...) arrives
-    # without it: each file is matched to its listed name, checked, and copied back under that name for pip.
-    by_upload = {name.replace("+", ""): name for name in listed}
+    # wheel.py uploads each file under upload_name() (Kaggle drops "+" and unpacks .tar.gz): each is matched to its
+    # listed name, checked, and copied back under that name for pip; a listed file that never arrived fails here.
+    by_upload = {upload_name(name): name for name in listed}
     staged = pathlib.Path(tempfile.mkdtemp(prefix="eagle-wheels-"))
     for f in sorted(p for p in wheel.parent.iterdir() if p.is_file() and p.name != "SHA256SUMS"):
         name = by_upload.get(f.name)
         if name is None or listed[name] != hashlib.sha256(f.read_bytes()).hexdigest():
             raise SystemExit(f"{f.name}: not in the shipped SHA256SUMS or its sha256 differs")
         shutil.copy2(f, staged / name)
+    missing = sorted(set(listed) - {p.name for p in staged.iterdir()})
+    if missing:
+        raise SystemExit(f"listed in SHA256SUMS but not in the dataset: {', '.join(missing)}")
     print("wheel", wheel.name, "sha256 ok")
     return staged / by_upload[wheel.name]
 

@@ -913,11 +913,13 @@ jobs:
         with:
           name: dist-${{ needs.build.outputs.tree }}
           path: dist
-      # PyPI when a sibling's version is released, else built from its checkout (hawk as an sdist, built on Kaggle)
+      # PyPI when a sibling's version is released, else built from its checkout (hawk and aether-dsc as sdists, built
+      # on Kaggle for its Python; aether-dsc's CUDA plugin from Kaggle's toolkit)
       - id: sib
         if: steps.plan.outputs.run == 'true'
         uses: ./.github/actions/install-siblings
         env:
+          SIBLING_SDISTS: aether-dsc
           HAWK_AETHER_INCLUDE: ${{ github.workspace }}/aether
           HAWK_EAGLE_INCLUDE: ${{ github.workspace }}
         with:

@@ -43,7 +43,10 @@ for pair in $siblings; do
         gate=
       fi
       # shellcheck disable=SC2086  # $gate is one flag or nothing
-      (cd "$path" && python -m aether_dsc.seal $gate --layout-header "$eagle_root/plugin/gref_layout.h" && python -m build --wheel --outdir "$out") ;;
+      # SIBLING_SDISTS names packages to ship as an sdist instead (the Kaggle leg: built on Kaggle for its own
+      # Python, with the CUDA plugin from its toolkit); the sealed payload is inside either way
+      form=--wheel; case " ${SIBLING_SDISTS:-} " in *" $pkg "*) form=--sdist ;; esac
+      (cd "$path" && python -m aether_dsc.seal $gate --layout-header "$eagle_root/plugin/gref_layout.h" && python -m build $form --outdir "$out") ;;
     raptor-core) (cd "$path" && python -m build --wheel --outdir "$out") ;;
     *) (cd "$path" && python -m build --sdist --outdir "$out") ;;
   esac

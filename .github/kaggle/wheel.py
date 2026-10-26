@@ -27,6 +27,14 @@ WHEEL = re.compile(r"^raptor_eagle-[^-]+-(cp3(1[2-9]|[2-9]\d))-\1-manylinux[\w.]
 READY_SECONDS = 600
 
 
+def upload_name(name):
+    """The name a file is uploaded under: Kaggle drops "+" from file names (a local version 0.7.1.dev1+g...) and
+    unpacks .tar.gz archives (a sibling sdist), so both are avoided here; SHA256SUMS keeps the real names and
+    kernel.py maps each upload back with the same function."""
+    name = name.replace("+", "")
+    return name + ".sdist" if name.endswith(".tar.gz") else name
+
+
 def stage(dist, folder, siblings=None):
     """Copy the matching wheels and their checksum lines into ``folder``, plus every file of the ``siblings`` folder
     (built sibling wheels and sdists) with a checksum line of its own; return (file names, sha256 of SHA256SUMS)."""
@@ -39,10 +47,10 @@ def stage(dist, folder, siblings=None):
         raise SystemExit(f"SHA256SUMS has {len(lines)} lines for {len(wheels)} wheels")
     folder.mkdir(parents=True, exist_ok=True)
     for p in wheels:
-        shutil.copy2(p, folder)
+        shutil.copy2(p, folder / upload_name(p.name))
     extra = sorted(p for p in pathlib.Path(siblings).iterdir() if p.is_file()) if siblings else []
     for p in extra:
-        shutil.copy2(p, folder)
+        shutil.copy2(p, folder / upload_name(p.name))
         lines.append(f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}")
         names.add(p.name)
     sums = "\n".join(lines) + "\n"
