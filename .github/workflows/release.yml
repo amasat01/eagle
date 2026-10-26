@@ -706,8 +706,9 @@ jobs:
           python -m pip install --quiet ipykernel matplotlib scipy
           python -m pip install --quiet torch --index-url https://download.pytorch.org/whl/cpu
           python -m pip install --quiet --only-binary=:all: "jax[cpu]==0.11.2"   # the JAX notebooks (the floor, as ci.yml pins it)
+          # the sealed sibling builds replace the unsealed aether-dsc installed above for eagle (same version, so pip would keep it)
           # shellcheck disable=SC2086  # the pins are separate arguments
-          python -m pip install --quiet --find-links "$SIB_DIR" $SIB_PINS
+          python -m pip install --quiet --force-reinstall --no-deps --find-links "$SIB_DIR" $SIB_PINS
 
       - name: make nbcheck (refuse an unfilled notebook; run every notebook on the CPU)
         run: cd eagle/docs && make nbcheck
