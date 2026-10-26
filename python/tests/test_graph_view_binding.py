@@ -24,7 +24,7 @@ def test_description_round_trip():
     assert layer == [0, 1, 1, 2] and sorted(order[1:3]) == [0, 1]
     assert xy[0] == (0.0, 0.0) and xy[3][1] == 2.0
     text = d.ascii()
-    assert "skip if guard" in text and "stage 2" in text and "╌" in text
+    assert "skip if guard" in text and "stage 2" in text
     assert all(ord(c) < 128 for c in d.ascii(unicode=False))
     assert d.ascii() == d.ascii()
     m, g = d.mermaid(), d.dot()

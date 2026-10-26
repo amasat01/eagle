@@ -710,6 +710,9 @@ jobs:
       - name: make strict (0 Sphinx warnings)
         run: cd eagle/docs && make strict
 
+      - name: every public name has a page
+        run: python eagle/tools/docs_inventory_check.py eagle/docs/_build/html/objects.inv eagle
+
       - name: raptor_docs.fresh --check
         run: cd eagle && python -m raptor_docs.fresh --check --site ../site
 

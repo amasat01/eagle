@@ -137,7 +137,7 @@ message(STATUS "> Found OpenMP")
 
 # Dependency versions (also referenced by CI pipeline). aether and eagle share one
 # version from 0.7.0.
-set(EAGLE_AETHER_VERSION "0.7.0")
+set(EAGLE_AETHER_VERSION "0.7.1")
 
 # The VERSION argument is fixed
 # on the MAJOR-matching CMake ConfigVersion rule: aether is 0.x, so an

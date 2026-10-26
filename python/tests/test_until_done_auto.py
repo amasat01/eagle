@@ -1967,6 +1967,10 @@ def test_fast_entries_count_the_mask_so_the_run_launches_no_mask_count(auto, mon
 
     real_rt = cp.cuda.runtime
     monkeypatch.setattr(cp.cuda, "runtime", _Runtime())
+    import aether
+    real_zero = aether.Array.zero          # eagle zeroes through aether now: count that memset too
+    monkeypatch.setattr(aether.Array, "zero",
+                        lambda self, stream=None: rt_calls.append("memsetAsync") or real_zero(self, stream))
     report = runner.run()
     monkeypatch.setattr(cp.cuda, "runtime", real_rt)
     assert not calls

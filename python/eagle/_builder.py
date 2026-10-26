@@ -26,6 +26,7 @@ import warnings
 
 import numpy
 
+from . import _alloc
 from . import _cell_rows, _lane_bind, _recording
 from ._graph_reduce import reduce
 from ._conditional import RepeatWhile, SkipGuard
@@ -213,9 +214,9 @@ def _index_cell(kinds):
     """The arm to run: the first condition that holds, else ``len(kinds)``. Plain ufuncs with ``out=``: capturable."""
     xp = _xp_of(kinds[0][1])
     n = len(kinds)
-    idx, t = xp.zeros(1, dtype=numpy.uint32), xp.zeros(1, dtype=numpy.uint32)
-    gap = xp.zeros(1, dtype=numpy.uint32)
-    picks = [xp.full(1, i, dtype=numpy.uint32) for i in range(n)]
+    idx, t = _alloc.zeros(xp, 1, dtype=numpy.uint32), _alloc.zeros(xp, 1, dtype=numpy.uint32)
+    gap = _alloc.zeros(xp, 1, dtype=numpy.uint32)
+    picks = [_alloc.full(xp, 1, i, dtype=numpy.uint32) for i in range(n)]
 
     def run():
         idx.fill(n)
@@ -247,6 +248,7 @@ class Rec:
         self.scopes = [Scope(self.top, graph, "top")]
         self.frames, self.block_depth, self.target = [], 0, None
         self.labels, self.buffers, self.deep = {}, {}, set()
+        self.views = {}
         self.stats = {"allocs": 0, "seeds": 0}
         self.rewrite = 0.0
 
@@ -269,12 +271,15 @@ class Rec:
         buffer = kw.pop("buffer", None)
         target, self.target = self.target, None
         kernel = plan.kernel
-        kw, extent = _lane_bind.take_extent(plan.plugin, kw)    # the direct call's own helper
+        kw, lifted = _lane_bind.take_extent(plan.plugin, kw)    # the direct call's own helper
+        axes0 = _lane_bind.declared_axes(plan.plugin)
+        extent = lifted.get(axes0[0][0]) if axes0 else None
         if kernel is None:
             planes = plan.bind_args(args, kw)
         else:   # a kernel call: positional in the kernel's own order, a reduction's cell by position or name
             comps = _cell_rows.companions_of(plan.plugin)  # eagle's: no position, by name only
-            order = [nm for nm in kernel.planes if nm not in comps]
+            order = [nm for nm, decl in kernel.planes.items()      # the Grid declaration is no plane
+                     if not getattr(decl, "grid", None) and nm not in comps]
             if len(args) > len(order):
                 raise ValueError(f"{kernel.name}() too many positional arguments")
             given = dict(zip(order, args))
@@ -290,7 +295,8 @@ class Rec:
         label = self.label(target[0] if target else (kernel.name if kernel is not None else "kernel"))
         arrs = [v for v in planes.values() if hasattr(v, "shape")]
         samples = next((a for a in arrs if not is_cell(a)), arrs[0] if arrs else None)
-        lanes = self._lanes(plan, planes, extent)
+        lanes, dims = self._lanes(plan, planes, extent)
+        extents = {} if lanes is None else _lane_bind.extents_of(plan.plugin, {**kw, **lifted, **planes})
         out = {}
         for i, nm in enumerate(omitted):
             spec = buffer.get(nm) if isinstance(buffer, dict) else buffer[i] if isinstance(buffer, (tuple, list)) else buffer
@@ -300,12 +306,12 @@ class Rec:
             else:
                 out[nm] = self._inplace(target, nm, kernel, arrs) if spec is None else None
                 if out[nm] is None:
-                    if slot.dims:
+                    if slot.dims and lanes is None:
                         raise ValueError(f"{self.fname}: {kernel.name}() writes {nm!r} per vector: pass the array yourself")
                     floats = [a.dtype for a in arrs if a.dtype.kind == "f"]
                     dt = _DTYPES[slot.ttype.dtype] if slot.ttype.dtype != "f64" or not floats else numpy.result_type(*floats)
-                    out[nm] = _xp_of(samples).zeros(
-                        samples.shape[-1] if lanes is None else _lane_bind.output_shape(plan.plugin, nm, 1, lanes), dtype=dt)
+                    out[nm] = _alloc.zeros(_xp_of(samples), 
+                        samples.shape[-1] if lanes is None else _lane_bind.output_shape(plan.plugin, nm, 1, lanes, extents), dtype=dt)
                     self.stats["allocs"] += 1
             if spec is not None:
                 key = label if len(omitted) == 1 else f"{label}.{nm}"
@@ -315,13 +321,24 @@ class Rec:
         rows = self._own_rows(plan, planes, samples.shape[-1] if lanes is None else lanes) \
             if _cell_rows.cells_of(plan.plugin) else ()
         if extent is not None:
-            planes[_lane_bind.declared_axes(plan.plugin)[0][0]] = extent
+            planes[axes0[0][0]] = extent       # a free label sized the sinks above; bind reads their shapes
         bound = plan.bind(**planes)
+        for nm, held in planes.items():       # the caller's lane-shaped array is a view of the flat plane the graph holds
+            flat = bound._planes.get(nm)
+            if flat is not None and flat is not held and hasattr(held, "shape"):
+                self.views[id(held)] = (held, flat)
         k = K(bound, label)
         self.cur.append(k)
         self.cur.extend(rows)
-        if getattr(kernel, "returns", None) is not None: return plan.returned(out)
-        return next(iter(out.values())) if len(out) == 1 else (out or None)
+        # the planes stay flat in the graph; the caller sees the lane shape a direct call returns
+        shaped = _lane_bind.shape_result(plan.plugin, next(iter(out.values())) if len(out) == 1 else out,
+                                         list(out), dims, lanes, _declared_widths(plan.plugin)) if out and lanes is not None else out
+        for nm, view in (shaped if isinstance(shaped, dict) else {next(iter(out), None): shaped}).items():
+            if view is not out.get(nm) and hasattr(view, "shape"):
+                self.views[id(view)] = (view, out[nm])
+        if getattr(kernel, "returns", None) is not None:
+            return plan.returned(shaped if isinstance(shaped, dict) else {next(iter(out)): shaped})
+        return shaped if out else None
 
     @staticmethod
     def _own_rows(plan, planes, n):
@@ -335,9 +352,9 @@ class Rec:
                 continue
             cell = planes[name]
             xp, rows = _xp_of(cell), -(-int(n) // _cell_rows.ROW)
-            planes[name] = hi = xp.zeros(rows, cell.dtype)
+            planes[name] = hi = _alloc.zeros(xp, rows, cell.dtype)
             if op in ("sum", "mean"):
-                planes[_cell_rows.comp_name(name)] = lo = xp.zeros(rows, cell.dtype)
+                planes[_cell_rows.comp_name(name)] = lo = _alloc.zeros(xp, rows, cell.dtype)
                 nodes.append(reduce(hi, cell, comp=lo))
             else:
                 nodes.append(reduce(hi, cell, op=op))
@@ -345,16 +362,17 @@ class Rec:
 
     @staticmethod
     def _lanes(plan, planes, extent):
-        """The lane count of a launch of a kernel that declares a lane space (``None``
-        for any other): what sizes an output the call omits, since a Table or a
+        """``(lane count, lane shape)`` of a launch of a kernel that declares a lane space
+        (``(None, None)`` for any other): what sizes an output the call omits, since a Table or a
         lane-shaped plane is not ``samples.shape[-1]``."""
         axes = _lane_bind.declared_axes(plan.plugin)
         if not axes:
-            return None
+            return None, None
         if extent is not None:
             planes = {**planes, axes[0][0]: extent}
-        return _lane_bind.bind_n(plan.plugin, plan.plugin.arg_spec, planes,
-                                 _declared_widths(plan.plugin), door="call")[1]
+        _kw, n, dims = _lane_bind.bind_n(plan.plugin, plan.plugin.arg_spec, planes,
+                                         _declared_widths(plan.plugin), door="call")
+        return n, dims
 
     def _inplace(self, target, slot, kernel, arrs):
         if target is None: return None
@@ -385,7 +403,7 @@ class Rec:
                                  f"before it: bind it first ({n} = ...)")
             if not hasattr(v, "shape"): continue
             if id(v) in self.args:
-                G = _xp_of(v).zeros_like(v); self.stats["seeds"] += 1
+                G = _alloc.zeros_like(_xp_of(v), v); self.stats["seeds"] += 1
                 self.top.insert(0, _copy(v, G, f"seed({n})"))
                 inplace[n] = rebind[n] = G
             else:
@@ -481,7 +499,7 @@ class LoopCtl:
         if what == "continue":
             return SkipGuard(v, 0).negated() if k == "cell" else SkipGuard(v, 0)
         xp = _xp_of(v)
-        if self.brk is None: self.brk = xp.zeros(1, dtype=numpy.uint32)
+        if self.brk is None: self.brk = _alloc.zeros(xp, 1, dtype=numpy.uint32)
         brk = self.brk
         self.rec.cur.append(_copy(v, brk, "break") if k == "cell"
                             else _cell(lambda: xp.equal(v, 0, out=brk), [v], [brk], "break"))
@@ -851,6 +869,8 @@ class State:
         self.result, self.args, self.names = None, {}, ()
         self.stats = {"allocs": 0, "seeds": 0}
         self.buffers, self.timing, self.builder, self.deep = {}, {}, False, set()
+        #: ``{id(view): (view, array the graph holds)}``: a lane-shaped view the caller holds of a flat plane.
+        self.views = {}
 
 
 def _is_graph_ann(a):
@@ -918,7 +938,7 @@ def run_builder(fn, newfn, sig, args, kw):
     if out is not g: raise TypeError(f"{fn.__name__}: a builder returns its graph: `return g`; declare the arrays with `g.result = ...`")
     st = g._bld
     st.args, st.names, st.stats, st.buffers = dict(bound.arguments), tuple(bound.arguments), rec.stats, rec.buffers
-    st.builder, st.deep = True, rec.deep
+    st.builder, st.deep, st.views = True, rec.deep, rec.views
     lower_into(g, rec.top)
     try:
         Graph.build(g)

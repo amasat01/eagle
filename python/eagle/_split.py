@@ -16,12 +16,18 @@ reverse, the device bridges). A door that cannot sequence the stages calls
 The caller sees the kernel's own planes (:func:`arg_spec`): the rows of every
 cell and the cells a later stage reads are eagle's. A cell the sidecar marks
 ``internal`` (only a later stage reads it) is never handed back.
+
+A kernel that reads ``hawk.sum/mean(x, over=...)`` in its body has a keyed
+plane (sidecar ``keyed``): the first stage accumulates into it by key, a later
+one reads it at its own lane's key. Eagle owns the plane and zeroes it, with
+the companion of a compensated sum, for every run.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
 
+from . import _alloc
 from . import _cell_rows
 from .roles import OUTPUT_ROLES
 
@@ -60,6 +66,7 @@ def link(by_name: dict, bundle) -> None:
         # hawk marks a cell only a later stage reads ("internal"): eagle's own
         mine = [c for c, spec in side.get("cells", cells).items() if spec.get("internal")]
         first._internal = frozenset(planes(mine))
+        first._keyed = side.get("keyed") or {}
         # the declared dtype of every plane a caller binds, whichever stage reads it
         if isinstance(getattr(first, "arg_dtypes", None), dict):
             for st in built[1:]:
@@ -74,13 +81,52 @@ def stages_of(plugin) -> tuple:
     return getattr(plugin, "_stages", None) or ()
 
 
-def _plumbing(stages) -> frozenset:
-    """Every plane eagle owns between the stages: the rows of each cell and
-    the cells read back as one-cell planes."""
-    out = set()
+def _keyed(plugin) -> dict:
+    """``{plane: spec}`` of the keyed planes eagle owns between the stages."""
+    return getattr(plugin, "_keyed", None) or {}
+
+
+def _keyed_names(plugin, stages) -> frozenset:
+    """The keyed planes eagle owns between the stages, and the companions of
+    their compensated sums."""
+    keyed = _keyed(plugin)
+    return frozenset(keyed) | {comp for st in stages
+                               for comp, target in _cell_rows.companions_of(st.plugin).items()
+                               if target in keyed}
+
+
+def _plumbing(plugin, stages) -> frozenset:
+    """Every plane eagle owns between the stages: the rows of each cell, the
+    cells read back as one-cell planes, and the keyed planes."""
+    out = set(_keyed_names(plugin, stages))
     for st in stages:
         out |= _cell_rows.row_planes(st.plugin) | set(st.cells_in)
     return frozenset(out)
+
+
+def _array_module(p):
+    """The array module the planes of ``p`` live in."""
+    if p.structure.name == "device_kernel":
+        import cupy
+
+        return cupy
+    return __import__("numpy")
+
+
+def _keyed_planes(plugin, spec, planes, xp, dtype) -> dict:
+    """The zeroed keyed planes of a split kernel for a launch binding ``planes``
+    (``spec`` the caller's planes), sized by the kept lane axes."""
+    keyed = _keyed(plugin)
+    if not keyed:
+        return {}
+    from . import _lane_bind
+    from ._plan_planes import _declared_widths
+
+    kw, n, _dims = _lane_bind.bind_n(plugin, spec, planes, _declared_widths(plugin), door="bind")
+    if n is None:
+        n = _lane_bind.n_of(spec, kw)
+    return {cell: _alloc.zeros(xp, _lane_bind.keyed_size(plugin, s, n), dtype=dtype)
+            for cell, s in keyed.items()}
 
 
 def arg_spec(plugin) -> tuple:
@@ -91,7 +137,7 @@ def arg_spec(plugin) -> tuple:
     stages = stages_of(plugin)
     if not stages:
         return tuple(plugin.arg_spec)
-    skip, role = _plumbing(stages), {}
+    skip, role = _plumbing(plugin, stages), {}
     for st in stages:
         for r, nm in st.plugin.arg_spec:
             if nm not in skip and (nm not in role or r in OUTPUT_ROLES):
@@ -147,20 +193,26 @@ def run(p, kw: dict, run_plan):
     the finished cells of a stage bound as the one-cell inputs of the next.
     Returns what a single kernel returns: the plane for one output, else a
     ``dict`` by name, without the internal cells."""
-    carried, out = {}, {}
     stages = stages_of(p.plugin)
+    from ._plan_planes import _plane_dtype
+
+    carried = _keyed_planes(p.plugin, arg_spec(p.plugin), kw, _array_module(p),
+                            _plane_dtype(p.plugin))
+    out = {}
     later = {c for st in stages for c in st.cells_in}
     for st in stages:
         sp = st.plugin
         planes = {nm for _role, nm in sp.arg_spec}
         got = run_plan(replace(p, plugin=sp),
-                       **{k: v for k, v in kw.items() if k in planes}, **carried)
+                       **{k: v for k, v in kw.items() if k in planes},
+                       **{k: v for k, v in carried.items() if k in planes})
         names = tuple(nm for role, nm in sp.arg_spec
                       if role in OUTPUT_ROLES and nm not in _cell_rows.hidden(sp))
         got = {names[0]: got} if not isinstance(got, dict) else got
         out.update(got)
         carried.update({c: got[c] for c in st.cells_out if c in later})
-    out = {nm: v for nm, v in out.items() if nm not in p.plugin._internal}
+    hide = p.plugin._internal | _keyed_names(p.plugin, stages)
+    out = {nm: v for nm, v in out.items() if nm not in hide}
     return next(iter(out.values())) if len(out) == 1 else out
 
 
@@ -177,7 +229,7 @@ class SplitBound:
     be bound to the caller's own one-element array, else eagle makes it."""
 
     __slots__ = ("plan", "_arg_spec", "_planes", "_bound", "_rows", "_cupy", "_dtype", "_device",
-                 "_copies", "_active_count", "_origins", "_stages")
+                 "_copies", "_active_count", "_origins", "_stages", "_keyed")
 
     def __init__(self, p, planes: dict, bind_one, *, policy: str = "compensated", device=None):
         from ._plan_planes import device_scope, planes_device
@@ -209,9 +261,10 @@ class SplitBound:
 
             self._cupy = xp = cupy
         self._dtype = _plane_dtype(p.plugin)
-        skip = _plumbing(stages)
+        skip = _plumbing(p.plugin, stages)
         n = _n_from_kw([(r, nm) for r, nm in spec if nm not in skip], planes)
         cell, self._bound, self._rows = {}, [], []
+        keyed = _keyed_planes(p.plugin, spec, planes, xp, self._dtype)
         for st in stages:
             ops = getattr(st.plugin, "_stage_cells", {})
             rows = (_cell_rows.CellRows(ops, n, xp, self._dtype, policy,
@@ -223,8 +276,14 @@ class SplitBound:
                    if nm in planes and nm not in skip}
             own.update(rows.rows if rows is not None else {})
             own.update({c: cell[c] for c in st.cells_in})
+            names = {nm for _r, nm in st.plugin.arg_spec}
+            own.update({c: a for c, a in keyed.items() if c in names})
             self._bound.append(bind_one(replace(p, plugin=st.plugin), own))
             self._rows.append(rows)
+        # what a launch zeroes: each keyed plane and the companion its stage owns
+        self._keyed = tuple(keyed.values()) + tuple(
+            b._planes[comp] for b in self._bound
+            for target, comp in b._owned.items() if target in keyed)
         self._planes = {**planes, **{c: cell[c] for _r, c in spec if c in cell}}
         self._copies, self._active_count, self._origins = {}, None, ()
 
@@ -261,6 +320,8 @@ class SplitBound:
         """Every stage, each followed by the finish of its cells, on
         ``stream`` (see :meth:`BoundPlan.launch`)."""
         if self._cupy is None:
+            for plane in self._keyed:
+                plane.fill(0)
             for bound, rows in zip(self._bound, self._rows):
                 bound.launch(stream, grid=grid, block=block)
                 if rows is not None:
@@ -272,6 +333,8 @@ class SplitBound:
         from ._plan_planes import device_scope
 
         handle = _stream_handle(stream, self._cupy, self._device)
+        for plane in self._keyed:       # a memset node when captured
+            _alloc.zero(self._cupy, plane, handle)
         for bound, rows in zip(self._bound, self._rows):
             bound.launch(handle, grid=grid, block=block)
             if rows is not None:

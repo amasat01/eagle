@@ -32,12 +32,16 @@ class AutoPlan:
     delegate to the selected plan. A default deploy with a usable GPU returns
     with the device side built and the host side still building."""
 
-    __slots__ = ("plugin", "plan_kw", "kernel", "_plans", "_host", "_call")
+    __slots__ = ("plugin", "plan_kw", "kernel", "_plans", "_host", "_call", "_build",
+                 "_variants", "_vlock")
 
-    def __init__(self, plugin, plan_kw: dict, host=None, kernel=None):
+    def __init__(self, plugin, plan_kw: dict, host=None, kernel=None, build=None):
         self.plugin = plugin
         self.plan_kw = dict(plan_kw)
         self.kernel = kernel  # the hawk kernel it was built from (None: a prebuilt plugin)
+        self._build = build  # (targets, cache_dir, scalar_type) it was built with
+        self._variants = {}  # {id(variant): (variant, its AutoPlan)}, see _routed
+        self._vlock = threading.Lock()
         self._plans = {}
         self._host = host  # (_HostSide, index) when the host side builds in the background
         self._call = None  # the call's signature, built on the first call
@@ -91,14 +95,52 @@ class AutoPlan:
                  if role not in ("uniform", "nsamples") and name in planes}
         return self.device if residency(bound) == "device" else self.host
 
+    def _routed(self, args, kw):
+        """``(plan, args, kw)`` for a call: a per-lane input of a ``Grid`` kernel given
+        broadcast runs the kernel's variant of that pattern (hawk's rule,
+        :mod:`hawk._broadcast`: built once per pattern, with this plan's build
+        options), the caller's buffer bound compact. Anything else, and a plan of a
+        prebuilt plugin or of a variant, is returned as it came."""
+        kernel = self.kernel
+        if kernel is None or getattr(kernel, "broadcast", None) or not hasattr(kernel, "lane_space"):
+            return self, args, kw      # no kernel, a variant, or a stand-in that declares no lanes
+        from hawk import _broadcast
+
+        try:
+            run, args, kw = _broadcast.route(kernel, args, kw)
+        except _broadcast.HawkError as exc:     # eagle's own doors refuse with ValueError
+            raise ValueError(str(exc)) from None
+        if run is kernel:
+            return self, args, kw
+        with self._vlock:
+            held = self._variants.get(id(run))
+            if held is None:
+                if getattr(run.sinks, "source", None) is not None:   # a derivative: hawk's own build
+                    plan = run._plan or run._deploy()
+                else:
+                    targets, cache_dir, scalar_type = self._build
+                    plan = auto(run, targets=targets, cache_dir=cache_dir,
+                                scalar_type=scalar_type, **self.plan_kw)
+                held = self._variants[id(run)] = (run, plan)
+        return held[1], args, kw
+
     @_layout.door
     def run(self, /, **kw):
-        """:meth:`Plan.run` on the plan :meth:`select` picks for ``kw``."""
+        """:meth:`Plan.run` on the plan :meth:`select` picks for ``kw``; a per-lane
+        input given broadcast runs that pattern's variant (:meth:`_routed`)."""
+        plan, _args, kw = self._routed((), kw)
+        if plan is not self:
+            return plan.run(**kw)
         return self.select(kw).run(**kw)
 
     @_layout.door
     def bind(self, /, **planes) -> BoundPlan:
-        """:meth:`Plan.bind` on the plan :meth:`select` picks for ``planes``."""
+        """:meth:`Plan.bind` on the plan :meth:`select` picks for ``planes``; a per-lane
+        input given broadcast binds that pattern's variant (:meth:`_routed`), whose
+        plane is the caller's buffer, compact."""
+        plan, _args, planes = self._routed((), planes)
+        if plan is not self:
+            return plan.bind(**planes)
         return self.select(planes).bind(**planes)
 
     def _signature(self) -> tuple:
@@ -109,14 +151,15 @@ class AutoPlan:
         from ._simulate import _prior_reads, _signature
         from ._until_done import _RESERVED, _kernel_name
 
-        arg_spec = self.plugin.arg_spec
+        arg_spec = _split.arg_spec(self.plugin)       # a split kernel: every stage's planes
         rows = _cell_rows.row_planes(self.plugin) | frozenset(_cell_rows.companions_of(self.plugin))
         decl = {nm: ("mutable" if role in OUTPUT_ROLES else role,)
                 for role, nm in arg_spec
                 if role not in ("nsamples", "terminated") and nm not in _RESERVED
                 and nm not in rows}
         kernel = self.kernel
-        order = [nm for nm in (kernel.planes if kernel is not None else decl) if nm in decl]
+        declared = kernel.planes if kernel is not None and kernel.planes else decl   # a derivative declares none
+        order = [nm for nm in declared if nm in decl]
         prior = _prior_reads([kernel])
         name = kernel.name if kernel is not None else _kernel_name(self.plugin)
         sig, required = _signature(decl, order, prior)
@@ -183,18 +226,21 @@ class AutoPlan:
         Mutable argument is the caller's array, written in place. Under an
         active recorder (:mod:`eagle._recording`) the call is handed to it
         instead of launching."""
+        plan, args, kw = self._routed(args, kw)
+        if plan is not self:
+            return plan(*args, **kw)
         recorder = _recording.current()
         if recorder is not None:
             return recorder.record_call(self, args, kw)
-        kw, extent = _lane_bind.take_extent(self.plugin, kw)
+        kw, lifted = _lane_bind.take_extent(self.plugin, kw)
         bound = self.bind_args(args, kw)
-        if extent is not None:
-            bound[_lane_bind.declared_axes(self.plugin)[0][0]] = extent
+        bound.update(lifted)
         result = self.select(bound).run(**bound)
         if getattr(self.kernel, "returns", None) is None:
             return result
         if not isinstance(result, dict):
-            (out,) = _output_names(self.plugin.arg_spec)
+            tree = self.kernel.returns
+            (out,) = (tree,) if isinstance(tree, str) else _output_names(_split.arg_spec(self.plugin))
             result = {out: result}
         return self.returned(result)
 
@@ -266,11 +312,12 @@ def auto(plugin, *, targets=None, cache_dir=None, scalar_type=None,
                     f"item must be a hawk kernel, but item {i} is a "
                     f"{type(k).__name__}; pass a built plugin on its own: "
                     "eagle.plan.auto(plugin)")
-        return tuple(AutoPlan(p, plan_kw, host, k) for k, (p, host)
+        return tuple(AutoPlan(p, plan_kw, host, k, (targets, cache_dir, scalar_type))
+                     for k, (p, host)
                      in zip(kernels, _deploy_hawk(kernels, targets, cache_dir, scalar_type)))
     if _is_hawk_kernel(plugin):
         p, host = _deploy_hawk([plugin], targets, cache_dir, scalar_type)[0]
-        return AutoPlan(p, plan_kw, host, plugin)
+        return AutoPlan(p, plan_kw, host, plugin, (targets, cache_dir, scalar_type))
     for key, value in (("targets", targets), ("cache_dir", cache_dir),
                        ("scalar_type", scalar_type)):
         if value is not None:

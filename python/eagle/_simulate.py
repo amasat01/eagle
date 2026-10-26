@@ -37,6 +37,7 @@ from __future__ import annotations
 import inspect
 import time
 
+from . import _alloc
 from . import _cell_rows, _split
 from ._busy import BusyGuard
 from ._plan_planes import _plane_dtype
@@ -574,9 +575,9 @@ class Simulation:
                     f"{nm!r} is updated from its previous value, so it needs an "
                     f"initial value: pass {nm}=...")
             shape = _head(width) if single else (_head(width) + (n,))
-            final[nm] = xp.zeros(shape, dtype=_dtype(xp, selected[0], nm, decl))
+            final[nm] = _alloc.zeros(xp, shape, dtype=_dtype(xp, selected[0], nm, decl))
             allocated.append(nm)
-        final[mask] = xp.zeros(() if single else (n,), dtype=xp.bool_)
+        final[mask] = _alloc.zeros(xp, () if single else (n,), dtype=xp.bool_)
         # a reduction over samples: the rows are eagle's scratch, the cell is returned
         self._cells = [c for c in (_cell_rows.scratch(p.plugin, n, xp, _plane_dtype(p.plugin))
                                    for p in plans) if c is not None]

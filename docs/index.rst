@@ -125,12 +125,19 @@ eagle is the execution layer of the RAPTOR family — it launches what
       ``eagle.simulate``, end to end, in under a minute. Start here.
 
    .. grid-item-card:: :octicon:`mortar-board` Tutorials
-      :link: content/userguide/tutorials
+      :link: content/userguide/tutorials_python
       :link-type: doc
 
       Build up eagle's core patterns step by step: graphs, launch cadence,
       compaction, multi-kernel steps, training through a kernel — in
       Python, with a C++ track alongside.
+
+   .. grid-item-card:: :octicon:`workflow` Build a graph
+      :link: content/userguide/graph_forms
+      :link-type: doc
+
+      Write a step as a graph in code, in any of its forms: the how-to for
+      ``eagle.Graph.builder``.
 
    .. grid-item-card:: :octicon:`code-square` API reference
       :link: content/api/api_reference
@@ -152,8 +159,7 @@ eagle is the execution layer of the RAPTOR family — it launches what
    :caption: Tutorials
    :hidden:
 
-   Python tutorials <content/userguide/tutorials_python>
-   C++ tutorials <content/userguide/tutorials>
+   content/userguide/tutorials_python
 
 .. toctree::
    :maxdepth: 1
@@ -161,7 +167,6 @@ eagle is the execution layer of the RAPTOR family — it launches what
    :hidden:
 
    content/userguide/howto
-   Interoperability guides <content/interop>
 
 .. toctree::
    :maxdepth: 1
@@ -169,7 +174,6 @@ eagle is the execution layer of the RAPTOR family — it launches what
    :hidden:
 
    content/userguide/concepts
-   content/modules/modules
 
 .. toctree::
    :maxdepth: 1

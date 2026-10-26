@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import numpy
 
+from .. import _alloc
 from .. import _core, _split
 from ._record import xp_of
 
@@ -163,12 +164,12 @@ class RefinePass:
         # the state before each sample's stop step: the one tape row it wrote last
         self.prestop = {nm: tape[lo:lo + rows].reshape(rec.state[nm].shape)
                         for nm, (lo, rows) in offsets.items()}
-        self.steps = xp.zeros(n, dtype=rec.planes["applied_steps"].dtype)
-        self.tau = xp.zeros(n, dtype=scalar)
-        self.lo, self.hi = xp.zeros(n, dtype=scalar), xp.zeros(n, dtype=scalar)
-        self.status = xp.zeros(n, dtype=xp.int8)
-        self.which = xp.zeros(n, dtype=xp.int8)
-        self.t_stop = xp.zeros(n, dtype=scalar)
+        self.steps = _alloc.zeros(xp, n, dtype=rec.planes["applied_steps"].dtype)
+        self.tau = _alloc.zeros(xp, n, dtype=scalar)
+        self.lo, self.hi = _alloc.zeros(xp, n, dtype=scalar), _alloc.zeros(xp, n, dtype=scalar)
+        self.status = _alloc.zeros(xp, n, dtype=xp.int8)
+        self.which = _alloc.zeros(xp, n, dtype=xp.int8)
+        self.t_stop = _alloc.zeros(xp, n, dtype=scalar)
         self.h = rec.planes[k.time_step]
         self.out = {}
         bind = {}
@@ -177,15 +178,15 @@ class RefinePass:
                 base = nm[len(_DOT):] if nm.startswith(_DOT) else nm
                 base = base[:-len(_REFINED)] if base.endswith(_REFINED) else base
                 like = rec.state.get(base)
-                self.out[nm] = (xp.zeros_like(like) if like is not None
-                                else xp.zeros(n, dtype=scalar))
+                self.out[nm] = (_alloc.zeros_like(xp, like) if like is not None
+                                else _alloc.zeros(xp, n, dtype=scalar))
                 bind[nm] = self.out[nm]
             elif nm == "applied_steps":
                 bind[nm] = self.steps
             elif nm == k.tau:
                 bind[nm] = self.tau
             elif nm == _DOT + k.tau:
-                bind[nm] = xp.ones(n, dtype=scalar)
+                bind[nm] = _alloc.ones(xp, n, dtype=scalar)
             elif nm in self.prestop:
                 bind[nm] = self.prestop[nm]
             else:
@@ -198,14 +199,14 @@ class RefinePass:
         self.phi_tau = {nm: self.out[_DOT + nm + _REFINED] for nm in k.state}
         # g_x at the refined state, for the graze test
         gb, self.gx = {}, {}
-        self.seeds = [xp.zeros(n, dtype=scalar) for _ in range(k.guards)]
+        self.seeds = [_alloc.zeros(xp, n, dtype=scalar) for _ in range(k.guards)]
         for role, nm in k.guard_vjp.arg_spec:
             if nm.startswith(_BAR + _GUARD):
                 gb[nm] = self.seeds[int(nm[len(_BAR + _GUARD):])]
             elif nm.startswith(_BAR):
                 base = nm[len(_BAR):]
                 like = rec.state.get(base)
-                gb[nm] = xp.zeros_like(like) if like is not None else xp.zeros(n, dtype=scalar)
+                gb[nm] = _alloc.zeros_like(xp, like) if like is not None else _alloc.zeros(xp, n, dtype=scalar)
                 if base in self.refined:
                     self.gx[base] = gb[nm]
             elif nm in self.refined:
@@ -213,7 +214,7 @@ class RefinePass:
             else:
                 gb[nm] = rec.planes[nm]
         self.guard_vjp = make_plan(k.guard_vjp, structure=rec.structure).bind(**gb)
-        self.zero = xp.zeros(n, dtype=scalar)
+        self.zero = _alloc.zeros(xp, n, dtype=scalar)
 
     def _scalars(self):
         rec = self.rec
@@ -331,9 +332,9 @@ class RefineReverse:
         xp, n = rec.xp, rec.n
         ev = tape.events
         xbar = {nm: (xp.asarray(seeds[nm], dtype=rec.state[nm].dtype) if nm in seeds
-                     else xp.zeros_like(rec.state[nm])) for nm in k.state}
-        rbar = {nm: xp.zeros_like(xbar[nm]) for nm in k.state}
-        gbar = [xp.zeros(n, dtype=rec.scalar) for _ in range(k.guards)]
+                     else _alloc.zeros_like(xp, rec.state[nm])) for nm in k.state}
+        rbar = {nm: _alloc.zeros_like(xp, xbar[nm]) for nm in k.state}
+        gbar = [_alloc.zeros(xp, n, dtype=rec.scalar) for _ in range(k.guards)]
         dg = [ev[f"dg{j}"] for j in range(k.guards)]
         scal = [0, 0, 0, 0, _addr(ev["status"]), _addr(ev["which"]), 0, 0, 0, 0]
         rows = lambda planes: [r for nm in k.state for r in _rows(planes[nm])]
@@ -353,9 +354,9 @@ class RefineReverse:
                 base = nm[len(_BAR):]
                 like = ev.get(base, rec.planes.get(base))
                 if like is None or not hasattr(like, "shape") or base in rec.uniforms:
-                    grads[base] = bind[nm] = xp.zeros(n, dtype=rec.scalar)
+                    grads[base] = bind[nm] = _alloc.zeros(xp, n, dtype=rec.scalar)
                 else:
-                    grads[base] = bind[nm] = xp.zeros_like(like)
+                    grads[base] = bind[nm] = _alloc.zeros_like(xp, like)
             elif nm == "applied_steps":
                 bind[nm] = ev["steps"]
             elif nm == k.tau:
@@ -367,9 +368,9 @@ class RefineReverse:
             else:
                 bind[nm] = rec.planes[nm]
         make_plan(k.vjp, structure=rec.structure).bind(**bind).launch()
-        pre = {nm: xp.empty_like(xbar[nm]) for nm in k.state}
+        pre = {nm: _alloc.empty_like(xp, xbar[nm]) for nm in k.state}
         op(_SELECT, (n, [], [], [], rows(pre), rows(xbar),
-                     rows({nm: grads[nm] if nm in grads else xp.zeros_like(rbar[nm])
+                     rows({nm: grads[nm] if nm in grads else _alloc.zeros_like(xp, rbar[nm])
                            for nm in k.state}), scal))
         steps = tape.steps.copy()
         status = ev["status"].get() if rec.device else ev["status"]
@@ -480,7 +481,7 @@ def _phase_transpose(node, incoming, ctx):
     rec = runner._recorder
     reverse = RunReverse(rec, "eagle.diff.reverse")
     reads = [nm for nm, _a, _r in _phase_planes(node, False)]
-    out = {nm: rec.xp.zeros_like(rec.planes[nm]) for nm in reads}
+    out = {nm: _alloc.zeros_like(rec.xp, rec.planes[nm]) for nm in reads}
     seeds = {nm: a for nm, a in incoming.items() if nm in reverse.taped}
 
     def step():

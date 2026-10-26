@@ -330,7 +330,7 @@ literature). The number of phases is the graph's, so a phase inside
 reads its own progress back between launches), and the graph is captured in
 segments around it. The checked version of both examples is in
 :doc:`tutorials/11_conditionals_budgets_events`. A discontinuity in the model itself, a branch on a learnable
-threshold, is trained through in :doc:`tutorials/19_train_through_a_branch`.
+threshold, is trained through in :doc:`tutorials/train_through_a_branch`.
 
 .. _autodiff-run-vjps:
 

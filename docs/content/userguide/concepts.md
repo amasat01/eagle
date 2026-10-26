@@ -1,8 +1,29 @@
-# Concepts
+# Explanation
 
-The ideas behind eagle, one page each. Read [Foundations](foundations) first;
-the rest can be read in any order. The [glossary](../glossary) defines the
-words.
+The ideas behind eagle, grouped by topic. Read [Foundations](foundations) first; the rest can be read in any order. The [glossary](../glossary) defines the words.
+
+## Build and control graphs
+
+How a step becomes a graph, how it replays, and how to look at one. To write one, see [Build a graph programmatically](graph_forms).
+
+```{toctree}
+:maxdepth: 1
+:hidden:
+
+cuda_graphs
+graph_model
+graph_across_devices
+graph_view
+```
+
+- [CUDA graphs](cuda_graphs): record once, replay many times; the execution model.
+- [Graph model](graph_model): a step as nodes, and how eagle works out what depends on what; the builder forms are in [Build a graph programmatically](graph_forms).
+- [Graphs across the CPU and the GPU](graph_across_devices): host nodes, `eagle.copy` and `eagle.pinned` in one captured graph.
+- [Graph view](graph_view): draw any graph as ASCII, Mermaid or DOT.
+
+## Run kernels
+
+What a launch is, what runs under it, and why a run gives the same bits every time.
 
 ```{toctree}
 :maxdepth: 1
@@ -10,37 +31,41 @@ words.
 
 foundations
 parallel_execution
-cuda_graphs
-graph_model
-graph_forms
-graph_across_devices
 under_the_hood
-graph_view
-autodiff
 determinism
 threading
-../interop
-../interop/torch
-../interop/jax
-../interop/cupy_numpy
-../interop/warp
+why_infrastructure
 ```
 
 - [Foundations](foundations): the words the documentation uses, with an example each.
 - [Parallel execution](parallel_execution): one body of code run across many items, on a GPU or a CPU.
-- [CUDA graphs](cuda_graphs): record once, replay many times; the execution model.
-- [Graph model](graph_model): a step as nodes, and how eagle works out what depends on what.
-- [Every form of a graph builder](graph_forms): each form, one line each, executed.
-- [Graphs across the CPU and the GPU](graph_across_devices): host nodes, `eagle.copy` and `eagle.pinned` in one captured graph.
-- [What happens under the hood](under_the_hood): from the decorator to a replay.
-- [Graph view](graph_view): draw any graph as ASCII, Mermaid or DOT.
-- [Gradients through a graph](autodiff): reverse mode over a whole graph, on the CPU or the GPU.
+- [How eagle runs a graph](under_the_hood): from the decorator to a replay.
 - {doc}`Same bits, every time <determinism>`: the fixed-order sum behind reproducible reductions.
-- [Interoperability](../interop): numpy, cupy and PyTorch arrays in and out through DLPack.
-- [eagle in your PyTorch program](../interop/torch): one changed line in a training loop.
-- [eagle in your JAX program](../interop/jax): one changed line in a jitted training step.
-- [eagle in your NumPy and CuPy pipeline](../interop/cupy_numpy): the same call on either, with streams and the memory pool.
-- [eagle in your NVIDIA Warp program](../interop/warp): swap one `wp.launch`, keep the rest.
+- [Using eagle from several threads](threading): what is safe, and how it is checked. The contract is [raptor's threading page](https://amasat01.github.io/raptor/content/threading.html).
+- [Why scheduling is infrastructure](why_infrastructure): what eagle owns so applications do not.
 
-The library's modules are toured on the [Library structure](../modules/modules) page,
-and the measured speed-ups are on the [Performance](../performance) page.
+## Derivatives
+
+Reverse mode over a whole graph.
+
+```{toctree}
+:maxdepth: 1
+:hidden:
+
+autodiff
+```
+
+- [Gradients through a graph](autodiff): reverse mode over a whole graph, on the CPU or the GPU.
+
+## Library structure
+
+The modules of the library.
+
+```{toctree}
+:maxdepth: 1
+:hidden:
+
+../modules/modules
+```
+
+- [Library structure](../modules/modules): a tour of each module.

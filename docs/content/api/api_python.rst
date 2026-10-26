@@ -167,3 +167,19 @@ GEMM helpers
 
    :doc:`api_reference` — the C++ API (breathe/Doxygen).
    :doc:`../interop` — numpy, cupy and torch interoperability, worked.
+
+Constants
+---------
+
+The names the plugin ABI is built from.
+
+.. currentmodule:: eagle
+
+.. autosummary::
+   :toctree: generated
+
+   ABI_VERSION
+   FINISHED_PLANE
+   FUSED_STEPS_PLANE
+   KERNEL_NAME
+   SCALAR_TYPES

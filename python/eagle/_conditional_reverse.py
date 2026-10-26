@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import numpy
 
+from . import _alloc
 from . import _core
 from ._active_set import _address
 from ._conditional import SkipGuard
@@ -53,7 +54,7 @@ def _in_place(child):
 def _flag_cell(ctx, xp, count, baseline, negate=False):
     """A one-element flag the reverse owns, set from the saved guard cells."""
     differ = xp.equal if negate else xp.not_equal
-    flag = xp.zeros(1, dtype=xp.uint32)
+    flag = _alloc.zeros(xp, 1, dtype=xp.uint32)
     if baseline is None:
         def step():
             differ(count, 0, out=flag)
@@ -102,7 +103,7 @@ def _skippable(node, incoming, ctx):
     _insert_front(ctx, start + 1, skipped)
     for w in outs:
         if w in ctx.reads:      # skipped, the adjoint goes on to the plane's earlier writer
-            carry = result[w] = xp.empty_like(incoming[w])
+            carry = result[w] = _alloc.empty_like(xp, incoming[w])
             _insert_front(ctx, start + 1, lambda: _copy(ctx, xp, carry, incoming[w]))
             with ctx.gated(guard):
                 ctx.add(lambda b=carry: b.fill(0), writes=[carry])
@@ -126,12 +127,12 @@ def _sum_terms(ctx, xp, terms):
         if len(arrays) == 1:
             result[r] = arrays[0]
             continue
-        total = xp.empty_like(arrays[0])
+        total = _alloc.empty_like(xp, arrays[0])
         ctx.add(_ordered_sum(total, arrays), reads=arrays, writes=[total])
         if any(id(a) in ctx.comp for a in arrays):
             los = [ctx.comp.get(id(a)) for a in arrays]
-            los = [lo if lo is not None else xp.zeros_like(arrays[0]) for lo in los]
-            ctx.comp[id(total)] = lo_total = xp.empty_like(total)
+            los = [lo if lo is not None else _alloc.zeros_like(xp, arrays[0]) for lo in los]
+            ctx.comp[id(total)] = lo_total = _alloc.empty_like(xp, total)
             ctx.add(_ordered_sum(lo_total, los), reads=los, writes=[lo_total])
         result[r] = total
     return result
@@ -166,7 +167,7 @@ def _repeat_while(node, incoming, ctx):
         for _n, arr, _r in writes:
             written.setdefault(_address(arr), arr)
     floats = {ad for ad, arr in written.items() if arr.dtype.kind == "f"}
-    fresh = lambda: {ad: xp.empty_like(arr) for ad, arr in written.items()}  # noqa: E731
+    fresh = lambda: {ad: _alloc.empty_like(xp, arr) for ad, arr in written.items()}  # noqa: E731
     window = min(cap, int(_core.diff_default_window(cap)))
     groups = -(-cap // window)
     cur, before = fresh(), [fresh() for _ in parts]
@@ -184,7 +185,7 @@ def _repeat_while(node, incoming, ctx):
     advance = [private(i, cur) for i in range(len(parts))]
     scratch = list(cur.values())
 
-    live = xp.zeros(cap, dtype=xp.uint32)
+    live = _alloc.zeros(xp, cap, dtype=xp.uint32)
     ran = ctx.written("iterations")[1:2]
     index = xp.arange(cap, dtype=xp.uint32)
     ctx.add(lambda: xp.greater(ran, index, out=live),
@@ -209,7 +210,7 @@ def _repeat_while(node, incoming, ctx):
     for ad, name in taped.items():
         if ad in written:
             _copy(ctx, xp, cur[ad], ctx.primal(name))
-    adjoint = {ad: xp.zeros_like(written[ad]) for ad in floats}
+    adjoint = {ad: _alloc.zeros_like(xp, written[ad]) for ad in floats}
     for i, (_r, writes) in enumerate(access):
         for n, arr, _ in writes:
             if key(i, n) in incoming and _address(arr) in adjoint:
@@ -271,7 +272,7 @@ def _repeat_while(node, incoming, ctx):
             name = key(i, n)
             if name in ctx.reads and name in incoming and name not in result:
                 # no iteration ran: the adjoint goes on to the plane's earlier writer
-                carry = result[name] = xp.empty_like(incoming[name])
+                carry = result[name] = _alloc.empty_like(xp, incoming[name])
                 _copy(ctx, xp, carry, incoming[name])
                 with ctx.gated(on[0]):
                     ctx.add(lambda b=carry: b.fill(0), writes=[carry])

@@ -91,7 +91,8 @@ Print it
 The box diagram draws one box per node on its stage, routes the edges with the
 plane names under the source, carries an edge that skips a stage as a vertical
 line through the stages in between, draws a frame around the nodes of a
-conditional with its label, and gives an opaque node a dashed border. A
+conditional with its label, and wraps an opaque node's name in ``<>``. Only ASCII and the light
+box-drawing glyphs are drawn, so it lines up in a browser or a log as in a terminal. A
 label longer than ``maxLabel`` (24 by default) is cut with an ellipsis.
 Mermaid draws frames as subgraphs and DOT as clusters.
 

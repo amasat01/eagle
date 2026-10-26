@@ -32,7 +32,6 @@ import sysconfig
 import threading
 import time
 import types
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -201,6 +200,7 @@ class _FakeCupy:
     bool_ = np.bool_
 
     def __init__(self):
+        self.__name__ = "fake_cupy"            # not cupy: eagle._alloc takes the plain path
         self.cuda = types.SimpleNamespace(
             runtime=types.SimpleNamespace(getDevice=lambda: 0))
 

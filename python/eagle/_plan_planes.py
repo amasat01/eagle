@@ -135,6 +135,27 @@ def _declared_widths(plugin) -> dict:
     return {str(k): int(v) for k, v in declared.items()}
 
 
+def gathered(plugin) -> frozenset:
+    """The ``mat_in`` planes the kernel reads only at lane indices (sidecar
+    ``gather_mats``): a broadcast Matrix binds compact, ``(rows*cols, m)`` with the
+    caller's column count ``m``, which is not the lane count."""
+    declared = (getattr(plugin, "gather_mats", None)
+                or (getattr(plugin, "_meta", None) or {}).get("gather_mats"))
+    if declared is None:
+        source = getattr(plugin, "_hawk_source", None)
+        declared = () if source is None else source[0].walk.gather_mats
+    return frozenset(declared)
+
+
+def sample_spec(plugin, arg_spec):
+    """``arg_spec`` without the compact planes (:func:`gathered`): the slots whose
+    extent is the lane count."""
+    compact = gathered(plugin)
+    if not compact:
+        return arg_spec
+    return [(role, name) for role, name in arg_spec if not (role == "mat_in" and name in compact)]
+
+
 def _plane_shape(width: int, n: int):
     return (n,) if int(width) <= 1 else (int(width), n)
 
@@ -328,6 +349,7 @@ def _adapt_planes(plugin, arg_spec, kw, *, door: str = "run",
     ``single_only`` adapts one-sample values alone, leaving batches as
     given."""
     widths = _declared_widths(plugin)
+    arg_spec = sample_spec(plugin, arg_spec)
     adapted = {}
     out = kw
     single = None
@@ -489,7 +511,7 @@ def _check_run_shapes(plugin, arg_spec, kw, n: int) -> None:
     a sample-major ``(N, 3)`` input silently read as a 3-sample run).
     Runtime-length buffers are not shape-checked, as in :meth:`Plan.bind`."""
     widths = _declared_widths(plugin)
-    for role, name in arg_spec:
+    for role, name in sample_spec(plugin, arg_spec):
         if role not in PER_SAMPLE_ROLES or name not in kw:
             continue
         value = kw[name]
@@ -549,7 +571,7 @@ def _check_uniform(name, value) -> None:
 
 
 def _check_plane(role, name, value, *, n, dtype, width, framework,
-                 declared=None) -> None:
+                 declared=None, compact=False, columns=None) -> None:
     """Refuse a bound plane this door cannot address, naming the field:
     :meth:`BoundPlan.launch` uploads, allocates or casts nothing, so a
     plane wrong at bind time is wrong in every replay it is recorded into."""
@@ -597,7 +619,14 @@ def _check_plane(role, name, value, *, n, dtype, width, framework,
             "bool plane — an index vector, a terminated mask — is passed at its "
             "own dtype and is not this case)"
         )
-    if width is not None:
+    if compact:
+        if (value.ndim != 2 or value.shape[0] != width or value.shape[1] < 1
+                or columns is not None and value.shape[1] != columns):
+            raise ValueError(
+                f"eagle.plan.bind: {role} {name!r} is read at lane indices only, so it "
+                f"binds compact as ({width}, {'columns' if columns is None else columns}) "
+                f"at n={n}; got shape {tuple(value.shape)}")
+    elif width is not None:
         want = _plane_shape(width, n)
         if tuple(value.shape) != want:
             raise ValueError(

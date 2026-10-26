@@ -1,11 +1,11 @@
 """The graph builder over eagle's CPU Graph."""
-import linecache, time
+import linecache
 import numpy as np
 import pytest
 import eagle
 
 hawk = pytest.importorskip("hawk")
-from hawk import Mutable, Param, Scalar, UInt32
+from hawk import Grid, Index, Mutable, Param, Scalar, Table, UInt32
 from hawk import math as m
 import _builder_fixtures as bp
 
@@ -805,3 +805,75 @@ def test_g_return_form_kernels_called_directly_keep_their_labels():
     g = fit(x); g()
     gr = eagle.diff.reverse(g.record, {"result": np.ones(4)}, wrt=("x", "a"))
     np.testing.assert_allclose(gr["x"], 4 * (2 * x + 1)); np.testing.assert_allclose(gr["a"], 2 * (2 * x + 1))
+
+
+# ============================================================================ a Grid kernel in a builder
+@hawk.kernel
+def g_scale(lane: Grid["a", "b":4], x: Scalar) -> Scalar: return 2.0 * x * x
+@hawk.kernel
+def g_rows(lane: Grid["a", "b":4], x: Scalar, r: Mutable["a"]): hawk.scatter(r)[lane.a] += x
+@hawk.kernel
+def g_total(lane: Grid["a", "b":4], x: Scalar) -> Scalar: return hawk.sum(x, over="b")
+
+
+def _grid_plan(k): return eagle.deploy(k, targets=("host",), cache_dir=bp.CACHE)
+
+
+G = {k.name: _grid_plan(k) for k in (g_scale, g_rows, g_total)}
+GX = np.arange(1.0, 13.0).reshape(3, 4)
+
+
+@eagle.Graph.builder
+def b_scale(x):
+    g = eagle.Graph(); g.result = G["g_scale"](x, a=3); return g
+@eagle.Graph.builder
+def b_rows(x):
+    g = eagle.Graph(); g.result = G["g_rows"](x, a=3); return g
+@eagle.Graph.builder
+def b_total(x):
+    g = eagle.Graph(); g.result = G["g_total"](x, a=3); return g
+@eagle.Graph.builder
+def b_scale_rec(x):
+    g = eagle.Graph(record=True); g.result = G["g_scale"](x, a=3); return g
+
+
+@pytest.mark.parametrize("name, build", [("g_scale", b_scale), ("g_rows", b_rows), ("g_total", b_total)],
+                         ids=["mutable", "axis_mutable_runtime_label", "sum_output"])
+def test_g_a_builder_returns_what_a_direct_call_returns(name, build):
+    direct = G[name](GX, a=3)
+    graph = build(GX)
+    got = graph()
+    assert got.shape == direct.shape == graph.result.shape
+    np.testing.assert_array_equal(got, direct)
+
+
+def test_g_a_builder_gradient_comes_back_in_the_inputs_own_shape():
+    from hawk.diff import vjp
+    from hawk.trace.kernel import Kernel
+
+    direct = Kernel("g_scale_vjp", vjp(g_scale, wrt=("x",)))(x=GX, bar_out=np.ones((3, 4)), a=3)
+    graph = b_scale_rec(GX)
+    graph()
+    got = eagle.diff.reverse(graph.record, {"result": np.ones((3, 4))}, wrt=("x",))["x"]
+    assert got.shape == direct.shape == (3, 4)
+    np.testing.assert_allclose(got, direct, rtol=1e-14)
+
+
+@hawk.kernel
+def g_count(lane: Grid["e", "a":3], conn: Table[Index], b: Mutable["node"]):
+    hawk.scatter(b)[conn.at(lane.flat)] += 1.0
+
+
+def test_g_a_free_runtime_label_is_a_keyword_of_the_builder_call():
+    plan, conn = _grid_plan(g_count), np.arange(6, dtype=np.int32) % 4
+
+    @eagle.Graph.builder
+    def b_count(c):
+        g = eagle.Graph(); g.result = plan(c, e=2, node=4); return g
+
+    direct = plan(conn, e=2, node=4)
+    got = b_count(conn)()
+    assert got.shape == direct.shape == (4,)
+    np.testing.assert_array_equal(got, direct)
+    with pytest.raises(ValueError, match="node"):
+        plan(conn, b=np.zeros(5), e=2, node=4)

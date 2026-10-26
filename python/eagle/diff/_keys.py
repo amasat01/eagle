@@ -35,9 +35,10 @@ def translate(graph, seeds, wrt):
 
     st = graph._bld
     out, inp, where = _end_planes(graph)
-    named = {n: a for n, a in st.args.items() if hasattr(a, "shape")}
-    leaves = {f"result{p}": a for p, a in tree_leaves(st.result)}
-    labelled = dict(st.buffers)
+    held = lambda a: st.views[id(a)][1] if id(a) in st.views else a      # the flat plane behind a lane-shaped view
+    named = {n: held(a) for n, a in st.args.items() if hasattr(a, "shape")}
+    leaves = {f"result{p}": held(a) for p, a in tree_leaves(st.result)}
+    labelled = {k: held(a) for k, a in st.buffers.items()}
 
     def refuse_deep(k):
         if k in st.deep:
@@ -70,4 +71,16 @@ def translate(graph, seeds, wrt):
     wrt = (wrt,) if isinstance(wrt, str) else tuple(wrt)
     keys = {k: wrt_key(k) for k in wrt}
     inputs = tuple(v for v in keys.values() if isinstance(v, str))
-    return {seed_key(k): v for k, v in seeds.items()}, inputs, keys
+    def flat(k, v):
+        """A seed given in the lane shape of the view the caller holds, as the flat plane."""
+        arr = leaves.get(k) if k.startswith("result") else named.get(k, labelled.get(k))
+        return v.reshape(arr.shape) if hasattr(v, "shape") and v.shape != arr.shape and v.size == arr.size else v
+
+    return {seed_key(k): flat(k, v) for k, v in seeds.items()}, inputs, keys
+
+
+def own_shape(graph, name, grad):
+    """``grad`` in the shape of the builder argument ``name`` it is the gradient of."""
+    arg = graph._bld.args.get(name)
+    shape = getattr(arg, "shape", None)
+    return grad.reshape(shape) if shape is not None and grad.shape != tuple(shape) and grad.size == arg.size else grad

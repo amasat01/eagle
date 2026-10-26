@@ -333,7 +333,7 @@ class _FakeCupyArray:
 
 
 def _fake_cp(current_device=0):
-    mod = types.ModuleType("cupy")
+    mod = types.ModuleType("fake_cupy")
     mod.ndarray = _FakeCupyArray
     mod.bool_ = np.bool_
     mod.int64 = np.int64

@@ -130,3 +130,16 @@ jobs:
           gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls" --jq '.[0].body' > notes.md
           gh release create "$GITHUB_REF_NAME" dist/* --title "eagle ${GITHUB_REF_NAME#v}" \
             --notes-file notes.md --verify-tag
+
+  # The last step of a release: the documentation the pull request built went live with the release's own version.
+  docs-current:
+    needs: github-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - name: Live documentation shows this release
+        env:
+          RETRIES: "40"
+        run: bash tools/docs_current_check.sh eagle "${GITHUB_REF_NAME#v}"

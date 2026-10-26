@@ -54,6 +54,10 @@ jobs:
         run: python -m raptor_docs.fresh --check --site site
       - name: manifesto copy
         run: bash tools/manifesto_check.sh CONTRIBUTING.md
+      - name: ruff, pyflakes rules (repo config)
+        run: |
+          python -m pip install --quiet --only-binary=:all: ruff==0.15.18
+          ruff check
   test-cpp:
     needs: docs-fresh
     runs-on: ubuntu-latest

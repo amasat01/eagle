@@ -28,6 +28,7 @@ import warnings
 
 import numpy as np
 
+from . import _alloc
 from . import _dispatch_policy as _policy
 from . import _split
 from . import exec as eexec
@@ -355,14 +356,14 @@ class DispatchRunner:
         self._k = len(self._cost.branches)
         self._state = _policy.DispatchState("segmented" if forced == "segmented" else "switch")
         self._gain, self._mix, self._theta = 1.0, (0,) * self._k, theta
-        self._cells = xp.zeros(6, dtype=xp.uint32)
+        self._cells = _alloc.zeros(xp, 6, dtype=xp.uint32)
         self.finished = self._cells[2:3]
         self._aset = self._cls = None
         self._sorted = False
         if not self._static:
             self._sweep_plan = sweep
-            self._smap = xp.zeros(self.n, dtype=xp.int32)
-            self._scount = xp.zeros(1, dtype=xp.uint32)
+            self._smap = _alloc.zeros(xp, self.n, dtype=xp.int32)
+            self._scount = _alloc.zeros(xp, 1, dtype=xp.uint32)
         self._seg_ready = False
 
     # -- binding -- #
@@ -376,7 +377,7 @@ class DispatchRunner:
         if ("lookup", FINISHED_PLANE) in spec:
             bind[FINISHED_PLANE] = self._cells[2:3]
         if ("lookup", FUSED_STEPS_PLANE) in spec:
-            bind[FUSED_STEPS_PLANE] = xp.ones(1, dtype=xp.int64)
+            bind[FUSED_STEPS_PLANE] = _alloc.ones(xp, 1, dtype=xp.int64)
         if ("lookup", MAP_PLANE) in spec:
             bind[MAP_PLANE], bind[COUNT_PLANE] = self._smap, self._scount
         return plan.bind(**bind)
@@ -385,11 +386,11 @@ class DispatchRunner:
         from ._plan_deploy import AutoPlan
 
         xp, n, k, g = self._xp, self.n, self._k, self._group
-        self._cls = xp.zeros(n, dtype=xp.int64)
-        self._offsets = xp.zeros(k + 1, dtype=xp.int64)
+        self._cls = _alloc.zeros(xp, n, dtype=xp.int64)
+        self._offsets = _alloc.zeros(xp, k + 1, dtype=xp.int64)
         self._extra = {f"{g}_class": self._cls, f"{g}_offsets": self._offsets}
         if not self._static:
-            self._stale = xp.zeros(n, dtype=xp.bool_)
+            self._stale = _alloc.zeros(xp, n, dtype=xp.bool_)
             self._extra[f"{g}_stale"] = self._stale
         self._classify = (self._bind(AutoPlan(self._classify_plugin, {}), self._extra)
                           if self._classify_plugin is not None else None)
@@ -400,7 +401,7 @@ class DispatchRunner:
         if self._cls is None:
             self._classify_setup()
         xp, n, k, extra = self._xp, self.n, self._k, self._extra
-        self._cls8 = xp.zeros(n, dtype=xp.uint8)
+        self._cls8 = _alloc.zeros(xp, n, dtype=xp.uint8)
         self._aset = ActiveSet(self._mask, reorder=self._theta, classes=k, class_plane=self._cls8)
         readers = list(self._unit_plugins)
         if self._classify_plugin is not None:

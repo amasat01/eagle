@@ -144,19 +144,19 @@ print(x_next[0].item(), k.grad[0].item())     # 0.5 -1.0
 <sub>NVIDIA H100 80GB HBM3 (card of 2026-10-13). NVIDIA Warp's per-thread kernel is the fastest GPU arm in 2 of 12 RK4 cells; on the dense batch (every sample running all 1000 steps) at N = 1,000,000 it takes 1.71 ms and `eagle.simulate` 1.75 ms. See [every number, every arm](#performance).</sub>
 <!-- hero:end -->
 
-## What's new in 0.7.0
+## What's new in 0.7.1
 
-- Write a graph as a function: `@eagle.Graph.builder`, `g.result`, `g()` to run, `g.bind(x=...)` for new arrays.
-- Branches that run together (`g.parallel()`, `p.branch()`, `wait`) and `if`, `while`, `for` and `match` on a device cell, inside one graph.
-- Blocks: a function that takes the graph and appends to it, also on a hand-made graph.
-- `buffer=` keeps a kernel's result; gradients take explicit `wrt` and seeds by name.
-- Results agree within the ULP contract across releases, not bit for bit: a result may differ from the previous release's in the last digits.
+- GPU planes are allocated through the `aether` arrays (`aether-dsc`); the `cuda12`, `cuda13` and `cuda` extras pull `aether-dsc[cudaXX]>=0.7.1`.
+- The free of a plane is queued on its own stream and deferred during a graph capture.
+- `bound.clear(*names)` zeroes a keyed output and its compensation term, also on a split kernel.
+- hawk's new features reach eagle through the same kernels: per-lane linear algebra, broadcasting at `eagle.deploy`, a run-time first axis and `if ...: break`.
+- Random kernels give different numbers than 0.7.0, because aether's random stream changed.
 
 Full list in the [changelog](CHANGELOG.md).
 
 ## Gradients, certified
 
-JAX (`grad`, `jit`, `vmap`, `jacfwd`, `jacrev`), PyTorch (`backward`, `torch.func`) and NVIDIA Warp (`wp.Tape`) differentiate through an eagle kernel, and each is certified against the same law written in that framework alone. NumPy and CuPy have no autodiff: pass your own `vjps=`. The [interoperability page](https://amasat01.github.io/eagle/content/interop.html) lists the certified rows, with tutorials for [JAX](https://amasat01.github.io/eagle/content/userguide/tutorials/13_jax_vmap_and_jacobians.html), [PyTorch](https://amasat01.github.io/eagle/content/userguide/tutorials/03_torch_training.html), [Warp](https://amasat01.github.io/eagle/content/userguide/tutorials/16_a_warp_kernel_in_a_graph.html) and [whole graphs](https://amasat01.github.io/eagle/content/userguide/tutorials/10_gradients_through_a_graph.html). To use your own CUDA graph inside an eagle graph, hand it over as a `child` node (see the Warp tutorial); eagle does not launch inside your capture.
+JAX (`grad`, `jit`, `vmap`, `jacfwd`, `jacrev`), PyTorch (`backward`, `torch.func`) and NVIDIA Warp (`wp.Tape`) differentiate through an eagle kernel, and each is certified against the same law written in that framework alone. NumPy and CuPy have no autodiff: pass your own `vjps=`. The [interoperability page](https://amasat01.github.io/eagle/content/interop.html) lists the certified rows, with tutorials for [JAX](https://amasat01.github.io/eagle/content/userguide/tutorials/jax_vmap_and_jacobians.html), [PyTorch](https://amasat01.github.io/eagle/content/userguide/tutorials/03_torch_training.html), [Warp](https://amasat01.github.io/eagle/content/userguide/tutorials/warp_kernel_in_a_graph.html) and [whole graphs](https://amasat01.github.io/eagle/content/userguide/tutorials/10_gradients_through_a_graph.html). To use your own CUDA graph inside an eagle graph, hand it over as a `child` node (see the Warp tutorial); eagle does not launch inside your capture.
 
 ## Threading
 

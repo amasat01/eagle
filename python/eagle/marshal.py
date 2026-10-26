@@ -23,6 +23,7 @@ import threading
 
 import numpy as np
 
+from . import _alloc
 from . import _layout
 from .roles import param_decls
 
@@ -396,12 +397,12 @@ def fill_mutable(name, value, decl, n, dt=np.float64):
             "(a scalar broadcast / default fill is not supported for a matrix slot)"
         )
     if decl.dtype == "int":
-        return cp.full(n, int(value), dtype=cp.int64)
-    return cp.full(n, float(value), dtype=dt)
+        return _alloc.full(cp, n, int(value), dtype=cp.int64)
+    return _alloc.full(cp, n, float(value), dtype=dt)
 
 
 # The opt-in all-false ``terminated`` mask cache. An omitted mask gets a
-# fresh ``cp.zeros(n, bool)`` per call -- identical every time, so
+# fresh ``_alloc.zeros(cp, n, bool)`` per call -- identical every time, so
 # cacheable, but ONLY for a kernel known never to write it, which this
 # module (marshalling arbitrary plugins) cannot know on its own. So it is
 # sidecar-declared opt-in (see :mod:`eagle.sidecar`'s
@@ -451,10 +452,10 @@ def _cached_zero_mask(n, cp):
             _ZERO_MASK_COUNTS["bypassed"] += 1
         else:
             _ZERO_MASK_COUNTS["misses"] += 1
-            mask = cp.zeros(int(n), dtype=cp.bool_)
+            mask = _alloc.zeros(cp, int(n), dtype=cp.bool_)
             _zero_mask_cache[key] = mask
             return mask
-    return cp.zeros(int(n), dtype=cp.bool_)
+    return _alloc.zeros(cp, int(n), dtype=cp.bool_)
 
 
 def coerce_terminated(kw, n, *, readonly_mask=False):
@@ -469,7 +470,7 @@ def coerce_terminated(kw, n, *, readonly_mask=False):
     if term is None:
         if readonly_mask:
             return _cached_zero_mask(n, cp)
-        return cp.zeros(n, dtype=cp.bool_)
+        return _alloc.zeros(cp, n, dtype=cp.bool_)
     if not readonly_mask:
         from . import interop
 

@@ -82,8 +82,8 @@ struct FrameTree {
  *  plane names under the source (``:WAR`` / ``:WAW`` appended when the hazard
  *  is not a read-after-write), an edge that skips layers carried down as a
  *  vertical line through the layers in between, a conditional as a frame
- *  around its nodes (its label in the top border), an opaque node with a
- *  dashed border, and a ``stage <k> <schedule>`` tag in the left gutter.
+ *  around its nodes (its label in the top border), an opaque node name wrapped in
+ *  ``<>``, and a ``stage <k> <schedule>`` tag in the left gutter.
  *  ``unicode = false`` draws with ``+ - |`` only. A label longer than
  *  ``maxLabel`` cells is cut with an ellipsis. Deterministic: the same
  *  Description and Layout always give the same text.

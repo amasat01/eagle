@@ -43,6 +43,7 @@ from __future__ import annotations
 import threading
 import weakref
 
+from . import _alloc
 from ._conditional import _host_scalar
 from .interop import _root_module, _xp_of
 from .roles import PER_SAMPLE_ROLES
@@ -368,12 +369,12 @@ class ActiveSet:
         # one-word stand-in is bound until a compacting loop needs the real
         # one (:meth:`materialize_map`); a run that never reads it pays nothing
         self._map_lazy = bool(_lazy_map) and self._device and self.theta is None
-        self.map = xp.empty(1 if self._map_lazy else n, dtype=xp.int32)
-        self.count = xp.zeros(1, dtype=xp.uint32)
+        self.map = _alloc.empty(xp, 1 if self._map_lazy else n, dtype=xp.int32)
+        self.count = _alloc.zeros(xp, 1, dtype=xp.uint32)
         if group > 1:   # check_group finds the set by its count plane
             _GROUP_BY_COUNT[_address(self.count)[0]] = group
             weakref.finalize(self, _GROUP_BY_COUNT.pop, _address(self.count)[0], None)
-        self._done_at_last = xp.zeros(1, dtype=xp.uint32)
+        self._done_at_last = _alloc.zeros(xp, 1, dtype=xp.uint32)
         self._scratch = None
         self._owned = []
         self._indirect = []
@@ -385,25 +386,25 @@ class ActiveSet:
         if self.theta is not None:
             with _REORDER_LOCK:
                 self._claim(mask)
-                self.perm = xp.empty(n, dtype=xp.int32)
-                self.inv = xp.empty(n, dtype=xp.int32)
-                self.span = xp.zeros(1, dtype=xp.uint32)
-                self.fire = xp.zeros(1, dtype=xp.uint32)
-                self.live32 = xp.zeros(1, dtype=xp.uint32)
-                self.reorders = xp.zeros(1, dtype=xp.uint32)
-                self._zero = xp.zeros(1, dtype=xp.uint32)
+                self.perm = _alloc.empty(xp, n, dtype=xp.int32)
+                self.inv = _alloc.empty(xp, n, dtype=xp.int32)
+                self.span = _alloc.zeros(xp, 1, dtype=xp.uint32)
+                self.fire = _alloc.zeros(xp, 1, dtype=xp.uint32)
+                self.live32 = _alloc.zeros(xp, 1, dtype=xp.uint32)
+                self.reorders = _alloc.zeros(xp, 1, dtype=xp.uint32)
+                self._zero = _alloc.zeros(xp, 1, dtype=xp.uint32)
                 self._owned.append(mask)
                 if self.classes is not None:
                     self._claim(class_plane)
                     self.class_plane = class_plane
                     self._owned.append(class_plane)
-                    self.offsets = xp.zeros(self.classes + 1, dtype=xp.uint32)
-                    self.class_sorts = xp.zeros(1, dtype=xp.uint32)
-                    self.mixed32 = xp.zeros(1, dtype=xp.uint32)
-                    self.class_fire = xp.zeros(1, dtype=xp.uint32)
+                    self.offsets = _alloc.zeros(xp, self.classes + 1, dtype=xp.uint32)
+                    self.class_sorts = _alloc.zeros(xp, 1, dtype=xp.uint32)
+                    self.mixed32 = _alloc.zeros(xp, 1, dtype=xp.uint32)
+                    self.class_fire = _alloc.zeros(xp, 1, dtype=xp.uint32)
                     #: IN: samples whose class changed since the last sort (written
                     #: by the units of a forced segmented policy; 0 = none)
-                    self.stale_count = xp.zeros(1, dtype=xp.uint32)
+                    self.stale_count = _alloc.zeros(xp, 1, dtype=xp.uint32)
                     if epochs:
                         self._epochs = []
                 _REORDERING.add(self)
@@ -462,7 +463,7 @@ class ActiveSet:
         every bound plan at :attr:`map`; ``False`` when it already is real."""
         if not self._map_lazy:
             return False
-        self.map = self._xp.empty(self.n, dtype=self._xp.int32)
+        self.map = _alloc.empty(self._xp, self.n, dtype=self._xp.int32)
         self._map_lazy = False
         _identity(self.map)
         return True
@@ -583,11 +584,11 @@ class ActiveSet:
         from . import _core
 
         if self.group > 1:
-            self._group_drop = self._xp.zeros(self.n_groups, dtype=self._xp.uint8)
-            self._group_count = self._xp.zeros(1, dtype=self._xp.uint32)
+            self._group_drop = _alloc.zeros(self._xp, self.n_groups, dtype=self._xp.uint8)
+            self._group_count = _alloc.zeros(self._xp, 1, dtype=self._xp.uint32)
         nbytes = _core.compact_device(0, 0, 0, 0, self.n_groups, 0, _MASK_IS_DROP,
                                       int(self.mask.device.id))
-        self._scratch = self._xp.empty(max(int(nbytes), 1), dtype=self._xp.uint8)
+        self._scratch = _alloc.empty(self._xp, max(int(nbytes), 1), dtype=self._xp.uint8)
 
     def planes(self) -> dict:
         """The two reserved planes as :meth:`eagle.plan.Plan.bind` keywords."""
@@ -732,9 +733,9 @@ class ActiveSet:
                 nbytes = _core.reorder_device(self._table(), 0, 0, 0, 0, 0, 0, 0, 0,
                                               self.n, 0, _MASK_IS_DROP,
                                               int(self.mask.device.id))
-            self._reorder_scratch = self._xp.empty(max(int(nbytes), 1),
+            self._reorder_scratch = _alloc.empty(self._xp, max(int(nbytes), 1),
                                                    dtype=self._xp.uint8)
-            _count_fired()(self._zero, self._xp.zeros(1, dtype=self._xp.uint32))  # compile now, not under capture
+            _count_fired()(self._zero, _alloc.zeros(self._xp, 1, dtype=self._xp.uint32))  # compile now, not under capture
 
     def reorder(self) -> None:
         """Run the reorder now if the last compaction fired it: owned

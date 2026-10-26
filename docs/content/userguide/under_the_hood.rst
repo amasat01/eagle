@@ -1,5 +1,5 @@
-What happens under the hood
-===========================
+How eagle runs a graph
+======================
 
 This page follows a graph builder from the decorator to a replay, so you can see
 where each piece of eagle lives. None of it is needed to use the builder; it is

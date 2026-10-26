@@ -20,7 +20,7 @@ from __future__ import annotations
 import threading
 
 import numpy as np
-from raptor.schema.manifest import KERNEL_NAME
+from raptor.schema.manifest import KERNEL_NAME as KERNEL_NAME
 
 from ._launch_policy import current_siblings, resolve_block
 from .abi import DEVICE_CUDA, GREF_DTYPE, HANDLE_DTYPE, make_gref, make_handle
