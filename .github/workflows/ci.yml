@@ -428,6 +428,7 @@ jobs:
           # (read by test_backend_wall where cuobjdump is present)
           export EAGLE_PLUGIN_EXPECTED_ARCHS=70/70
           pip install ../raptor   # the sibling checkout, so unreleased raptor changes are tested
+          pip install ../aether/dsc   # the sibling aether-dsc (the `aether` arrays eagle allocates with)
           pip install ../site     # raptor_docs, so the docs tests run here instead of skipping
           # editable, as in development: python/conftest.py puts this source tree first
           # on sys.path, and only the editable hook then resolves the compiled eagle._core
@@ -526,6 +527,7 @@ jobs:
           . "${RUNNER_TEMP}/venv/bin/activate"
           pip install --quiet --upgrade pip pytest numpy build scikit-build-core setuptools-scm nanobind
           pip install ./raptor   # the sibling checkout, so unreleased raptor changes are tested
+          pip install ./aether/dsc   # the sibling aether-dsc (the `aether` arrays eagle allocates with)
           export CMAKE_PREFIX_PATH="${GITHUB_WORKSPACE}/__install"
           python -m build --wheel --no-isolation --outdir dist \
             -Ccmake.define.EAGLE_PYTHON_CUDA_PLUGIN=OFF \
@@ -687,6 +689,7 @@ jobs:
           # (read by test_backend_wall where cuobjdump is present)
           export EAGLE_PLUGIN_EXPECTED_ARCHS=70/70
           pip install --prefer-binary ../raptor   # the sibling checkout, so unreleased raptor changes are tested
+          pip install --prefer-binary ../aether/dsc   # the sibling aether-dsc (the `aether` arrays eagle allocates with)
           pip install --no-deps ../site     # raptor_docs alone, so the docs tests run here instead of erroring; its notebook dependencies have no free-threaded wheels
           # editable, as in development: python/conftest.py puts this source tree first
           # on sys.path, and only the editable hook then resolves the compiled eagle._core
@@ -785,7 +788,7 @@ jobs:
       - id: sib
         uses: ./eagle/.github/actions/install-siblings
         with:
-          siblings: raptor-core=raptor
+          siblings: raptor-core=raptor aether-dsc=aether/dsc
 
       - name: Clean venv, pip install the sdist (warnings are errors)
         env:

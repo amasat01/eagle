@@ -419,6 +419,8 @@ jobs:
           path: eagle
       - uses: ./eagle/.github/actions/companion
         with: {repo: raptor, path: raptor, pins: eagle/.github/companions, token: "${{ secrets.SIBLING_READ_TOKEN || github.token }}"}
+      - uses: ./eagle/.github/actions/companion
+        with: {repo: aether, path: aether, pins: eagle/.github/companions, token: "${{ secrets.SIBLING_READ_TOKEN || github.token }}"}
       - uses: actions/download-artifact@v8
         with:
           name: dist-${{ needs.build.outputs.tree }}
@@ -440,7 +442,7 @@ jobs:
       - id: sib
         uses: ./eagle/.github/actions/install-siblings
         with:
-          siblings: raptor-core=raptor
+          siblings: raptor-core=raptor aether-dsc=aether/dsc
       - name: Build the wheel from the sdist, install it, import eagle.cuda
         env:
           CC: gcc-13
@@ -473,6 +475,8 @@ jobs:
           path: eagle
       - uses: ./eagle/.github/actions/companion
         with: {repo: raptor, path: raptor, pins: eagle/.github/companions, token: "${{ secrets.SIBLING_READ_TOKEN || github.token }}"}
+      - uses: ./eagle/.github/actions/companion
+        with: {repo: aether, path: aether, pins: eagle/.github/companions, token: "${{ secrets.SIBLING_READ_TOKEN || github.token }}"}
       - uses: actions/download-artifact@v8
         with:
           name: dist-${{ needs.build.outputs.tree }}
@@ -491,7 +495,7 @@ jobs:
       - id: sib
         uses: ./eagle/.github/actions/install-siblings
         with:
-          siblings: raptor-core=raptor
+          siblings: raptor-core=raptor aether-dsc=aether/dsc
 
       - name: Assert this runner has no NVIDIA driver (the precondition this leg is for)
         if: runner.os == 'Linux'
@@ -671,6 +675,7 @@ jobs:
           export CMAKE_PREFIX_PATH="${GITHUB_WORKSPACE}/__install:${CMAKE_PREFIX_PATH}"
           export SKBUILD_CMAKE_ARGS="-DCMAKE_CUDA_COMPILER=$(which nvcc);-DCMAKE_CUDA_ARCHITECTURES=70"
           pip install ../raptor   # the sibling checkout, so unreleased raptor changes are tested
+          pip install ../aether/dsc   # the sibling aether-dsc (the `aether` arrays eagle allocates with)
           pip install --no-build-isolation --only-binary=:all: -e ./python
 
       # companion site (amasat01.github.io): the shared docs tooling
