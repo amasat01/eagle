@@ -146,7 +146,7 @@ print(x_next[0].item(), k.grad[0].item())     # 0.5 -1.0
 
 ## What's new in 0.7.1
 
-- GPU planes are allocated through the `aether` arrays (`aether-dsc`); the `cuda12`, `cuda13` and `cuda` extras pull `aether-dsc[cudaXX]>=0.7.1`.
+- Planes are allocated through the `aether` arrays from `aether-dsc`, now a base dependency: the GPU needs no extra package.
 - The free of a plane is queued on its own stream and deferred during a graph capture.
 - `bound.clear(*names)` zeroes a keyed output and its compensation term, also on a split kernel.
 - hawk's new features reach eagle through the same kernels: per-lane linear algebra, broadcasting at `eagle.deploy`, a run-time first axis and `if ...: break`.

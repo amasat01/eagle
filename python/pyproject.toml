@@ -49,7 +49,8 @@ classifiers = [
 # `raptor.schema.blocks.validate_neural_block_descriptor` (first shipped in 0.2.0), which
 # `eagle.sidecar` imports. The constraint is expressed where a resolver can act on it,
 # never as a runtime surprise.
-dependencies = ["numpy>=1.26", "raptor-core>=0.7.0,<0.8"]
+# aether-dsc: the `aether` arrays eagle allocates its planes with (CPU and GPU, no extra needed).
+dependencies = ["numpy>=1.26", "raptor-core>=0.7.0,<0.8", "aether-dsc>=0.7.1,<0.8"]
 
 # The "raptor.pattern_loaders" entry-point declaration for
 # "neural_block" moved to a separate package — eagle.neural was extracted there
@@ -62,7 +63,6 @@ dependencies = ["numpy>=1.26", "raptor-core>=0.7.0,<0.8"]
 # CuPy compiles its kernels at run time and needs the CUDA runtime headers and NVRTC:
 # cuda-toolkit[cudart,nvrtc] brings exactly those as pip wheels (no system toolkit),
 # without the math libraries CuPy's own [ctk] extra adds (cuBLAS, cuFFT, ...).
-# aether-dsc brings the `aether` device arrays eagle allocates its GPU planes with.
 # CuPy 14 dropped Python 3.9 (its last 3.9 release is 13.6), so the extras pick by
 # marker. CuPy 14 ships no cp313t wheel: on free-threaded 3.13 the GPU extras do not
 # resolve and eagle runs on the CPU route only.
@@ -70,19 +70,16 @@ cuda12 = [
     "cupy-cuda12x>=14; python_version>='3.10'",
     "cupy-cuda12x>=13.6,<14; python_version<'3.10'",
     "cuda-toolkit[cudart,nvrtc]==12.*",
-    "aether-dsc[cuda12]>=0.7.1,<0.8",
 ]
 cuda13 = [
     "cupy-cuda13x>=14; python_version>='3.10'",
     "cupy-cuda13x>=13.6,<14; python_version<'3.10'",
     "cuda-toolkit[cudart,nvrtc]==13.*",
-    "aether-dsc[cuda13]>=0.7.1,<0.8",
 ]
 cuda = [
     "cupy-cuda12x>=14; python_version>='3.10'",
     "cupy-cuda12x>=13.6,<14; python_version<'3.10'",
     "cuda-toolkit[cudart,nvrtc]==12.*",
-    "aether-dsc[cuda12]>=0.7.1,<0.8",
 ]
 # eagle.frameworks.torch: the torch.autograd bridge. torch is imported only by
 # that submodule, so plain `import eagle` never needs it. The bridges compile
