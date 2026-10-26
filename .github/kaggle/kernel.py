@@ -120,11 +120,17 @@ def shipped_wheel(cfg, py):
     if f"{got}  {wheel.name}" not in sums.decode().splitlines():
         raise SystemExit(f"{wheel.name}: sha256 {got} is not the one in the shipped SHA256SUMS")
     listed = {ln.split()[-1]: ln.split()[0] for ln in sums.decode().splitlines()}
+    # Kaggle drops "+" from dataset file names, so a sibling with a local version (0.7.1.dev1+g...) arrives
+    # without it: each file is matched to its listed name, checked, and copied back under that name for pip.
+    by_upload = {name.replace("+", ""): name for name in listed}
+    staged = pathlib.Path(tempfile.mkdtemp(prefix="eagle-wheels-"))
     for f in sorted(p for p in wheel.parent.iterdir() if p.is_file() and p.name != "SHA256SUMS"):
-        if listed.get(f.name) != hashlib.sha256(f.read_bytes()).hexdigest():
+        name = by_upload.get(f.name)
+        if name is None or listed[name] != hashlib.sha256(f.read_bytes()).hexdigest():
             raise SystemExit(f"{f.name}: not in the shipped SHA256SUMS or its sha256 differs")
+        shutil.copy2(f, staged / name)
     print("wheel", wheel.name, "sha256 ok")
-    return wheel
+    return staged / by_upload[wheel.name]
 
 
 def install_args(cfg, py, cu, pre, pin, others):
