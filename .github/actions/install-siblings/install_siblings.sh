@@ -3,7 +3,8 @@
 # built from its companion checkout into OUT (wheel for pure Python, sdist otherwise).
 # usage: install_siblings.sh "pkg=path pkg=path ..." OUT [dry]     (path = package dir inside the checkout)
 # Prints `<pkg> <V>: PyPI | built from <path>`; with $GITHUB_OUTPUT set, writes `dir`, `pins` and `built`
-# (the packages built from source). `dry` only resolves: nothing is built.
+# (the packages built from source). `dry` only resolves: nothing is built. A package whose file for that
+# exact version is already in OUT prints `cached` and is not built again.
 set -euo pipefail
 # this eagle checkout: its plugin/gref_layout.h goes into the sealed aether payload, wherever the job checked eagle out
 eagle_root=$(cd "$(dirname "$0")/../../.." && pwd)
@@ -34,6 +35,12 @@ for pair in $siblings; do
   echo "$pkg $v: built from $path"
   built="$built $pkg"
   [ -z "$dry" ] || continue
+  # the action restores $out by a digest of the checkout, so a file for this exact version is what a build would give
+  norm=${pkg//-/_}
+  if compgen -G "$out/${norm}-${v}-*.whl" > /dev/null || [ -e "$out/${norm}-${v}.tar.gz" ]; then
+    echo "$pkg $v: cached"
+    continue
+  fi
   python -m pip install --quiet --prefer-binary build
   case $pkg in
     aether-dsc)  # sealing runs the NVRTC-clean gate; the runner has no CUDA toolkit, so NVRTC and CCCL come from PyPI
