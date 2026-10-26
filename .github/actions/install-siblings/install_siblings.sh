@@ -5,6 +5,8 @@
 # Prints `<pkg> <V>: PyPI | built from <path>`; with $GITHUB_OUTPUT set, writes `dir`, `pins` and `built`
 # (the packages built from source). `dry` only resolves: nothing is built.
 set -euo pipefail
+# this eagle checkout: its plugin/gref_layout.h goes into the sealed aether payload, wherever the job checked eagle out
+eagle_root=$(cd "$(dirname "$0")/../../.." && pwd)
 siblings=$1
 out=$(mkdir -p "$2" && cd "$2" && pwd)
 dry=${3:-}
@@ -41,7 +43,7 @@ for pair in $siblings; do
         gate=
       fi
       # shellcheck disable=SC2086  # $gate is one flag or nothing
-      (cd "$path" && python -m aether_dsc.seal $gate && python -m build --wheel --outdir "$out") ;;
+      (cd "$path" && python -m aether_dsc.seal $gate --layout-header "$eagle_root/plugin/gref_layout.h" && python -m build --wheel --outdir "$out") ;;
     raptor-core) (cd "$path" && python -m build --wheel --outdir "$out") ;;
     *) (cd "$path" && python -m build --sdist --outdir "$out") ;;
   esac
