@@ -166,13 +166,15 @@ jobs:
       # toolchain pins) and the runner image. On a hit the job succeeds without building.
       - id: memo
         run: |
-          echo "digest=$(eagle/.github/ci_digest.sh --tree eagle --skip docs/ --skip .github/ --tree aether --skip docs/ --skip .github/ --tag eagle \
-            --file eagle/.github/workflows/ci.yml --str "${ImageVersion:-}" --str "$(g++-13 --version 2>/dev/null | head -1 || true)")" >> "$GITHUB_OUTPUT"
+          digest=$(eagle/.github/ci_digest.sh --tree eagle --skip docs/ --skip .github/ --tree aether --skip docs/ --skip .github/ --tag eagle \
+            --file eagle/.github/workflows/ci.yml --str "${ImageVersion:-}" --str "$(g++-13 --version 2>/dev/null | head -1 || true)") || exit 1
+          [ -n "$digest" ] || { echo "::error::empty digest"; exit 1; }
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
       - id: pass
         uses: actions/cache/restore@v6
         with:
           path: ci-pass
-          key: ci-pass-v1-sanitize-cpp-${{ steps.memo.outputs.digest }}
+          key: ci-pass-v2-sanitize-cpp-${{ steps.memo.outputs.digest }}
           lookup-only: true
       - id: plan
         env:
@@ -266,7 +268,7 @@ jobs:
         uses: actions/cache/save@v6
         with:
           path: ci-pass
-          key: ci-pass-v1-sanitize-cpp-${{ steps.memo.outputs.digest }}
+          key: ci-pass-v2-sanitize-cpp-${{ steps.memo.outputs.digest }}
 
   # tsan-ft — eagle._core under ThreadSanitizer on a free-threaded CPython built
   # with --with-thread-sanitizer (cached per version + compiler), running the ft
@@ -314,13 +316,15 @@ jobs:
       # toolchain pins) and the runner image. On a hit the job succeeds without building.
       - id: memo
         run: |
-          echo "digest=$(eagle/.github/ci_digest.sh --tree eagle --skip docs/ --skip .github/ --tree aether --skip docs/ --skip .github/ --tree raptor --skip docs/ --skip .github/ --tag eagle \
-            --file eagle/.github/workflows/ci.yml --str "${ImageVersion:-}" --str "$TSAN_PY_VERSION")" >> "$GITHUB_OUTPUT"
+          digest=$(eagle/.github/ci_digest.sh --tree eagle --skip docs/ --skip .github/ --tree aether --skip docs/ --skip .github/ --tree raptor --skip docs/ --skip .github/ --tag eagle \
+            --file eagle/.github/workflows/ci.yml --str "${ImageVersion:-}" --str "$TSAN_PY_VERSION") || exit 1
+          [ -n "$digest" ] || { echo "::error::empty digest"; exit 1; }
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
       - id: pass
         uses: actions/cache/restore@v6
         with:
           path: ci-pass
-          key: ci-pass-v1-tsan-ft-${{ steps.memo.outputs.digest }}
+          key: ci-pass-v2-tsan-ft-${{ steps.memo.outputs.digest }}
           lookup-only: true
       - id: plan
         env:
@@ -383,7 +387,7 @@ jobs:
         uses: actions/cache/save@v6
         with:
           path: ci-pass
-          key: ci-pass-v1-tsan-ft-${{ steps.memo.outputs.digest }}
+          key: ci-pass-v2-tsan-ft-${{ steps.memo.outputs.digest }}
 
   # test:python — builds eagle._core (plain C++) AND the libeagle_cuda.so backend
   # plugin (python/CMakeLists.txt's default EAGLE_PYTHON_CUDA_PLUGIN=BUILD needs nvcc)

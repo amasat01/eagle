@@ -142,7 +142,9 @@ jobs:
           args=(--tree eagle --skip docs/ --skip .github/ --tree aether --skip docs/ --skip .github/
                 --version eagle --file eagle/.github/workflows/release.yml --str "x86_64 $RUNNER_OS $RUNNER_ARCH")
           args+=(--str "manylinux_2_28 $(docker buildx imagetools inspect "quay.io/pypa/manylinux_2_28_$(uname -m)" --format '{{.Manifest.Digest}}' 2>/dev/null || true)")
-          echo "key=wheels-v1-x86_64-$(eagle/.github/ci_digest.sh "${args[@]}")" >> "$GITHUB_OUTPUT"
+          digest=$(eagle/.github/ci_digest.sh "${args[@]}") || exit 1
+          [ -n "$digest" ] || { echo "::error::empty digest"; exit 1; }
+          echo "key=wheels-v2-x86_64-$digest" >> "$GITHUB_OUTPUT"
       - id: wh
         uses: actions/cache@v6
         with:
@@ -244,7 +246,9 @@ jobs:
           args=(--tree eagle --skip docs/ --skip .github/ --tree aether --skip docs/ --skip .github/
                 --version eagle --file eagle/.github/workflows/release.yml --str "aarch64 $RUNNER_OS $RUNNER_ARCH")
           args+=(--str "manylinux_2_28 $(docker buildx imagetools inspect "quay.io/pypa/manylinux_2_28_$(uname -m)" --format '{{.Manifest.Digest}}' 2>/dev/null || true)")
-          echo "key=wheels-v1-aarch64-$(eagle/.github/ci_digest.sh "${args[@]}")" >> "$GITHUB_OUTPUT"
+          digest=$(eagle/.github/ci_digest.sh "${args[@]}") || exit 1
+          [ -n "$digest" ] || { echo "::error::empty digest"; exit 1; }
+          echo "key=wheels-v2-aarch64-$digest" >> "$GITHUB_OUTPUT"
       - id: wh
         uses: actions/cache@v6
         with:
@@ -347,7 +351,9 @@ jobs:
         run: |
           args=(--tree eagle --skip docs/ --skip .github/ --tree aether --skip docs/ --skip .github/
                 --version eagle --file eagle/.github/workflows/release.yml --str "macosx_arm64 $RUNNER_OS $RUNNER_ARCH")
-          echo "key=wheels-v1-macos-arm64-$(eagle/.github/ci_digest.sh "${args[@]}")" >> "$GITHUB_OUTPUT"
+          digest=$(eagle/.github/ci_digest.sh "${args[@]}") || exit 1
+          [ -n "$digest" ] || { echo "::error::empty digest"; exit 1; }
+          echo "key=wheels-v2-macos-arm64-$digest" >> "$GITHUB_OUTPUT"
       - id: wh
         uses: actions/cache@v6
         with:
