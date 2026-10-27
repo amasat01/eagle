@@ -38,6 +38,7 @@ PLUGIN_ALLOWED_NEEDED = (
     "librt.so.",
     "libgomp.so.",
     "ld-linux-x86-64.so.",
+    "ld-linux-aarch64.so.",
 )
 #: The ship build's device code: SASS for every architecture the toolkit
 #: compiles from sm_60 up, which always includes at least these, plus PTX at

@@ -42,7 +42,7 @@ needs only the driver. To write kernels for it with hawk, install
    Without an extra pip installs no NVIDIA package: you get the CPU route, or the GPU route through a CUDA setup you already have. Pick the extra matching the CUDA
    version your driver reports (``nvidia-smi``, top right).
 
-**Platforms:** the wheels are Linux x86_64 and aarch64 and macOS arm64 (CPython 3.9–3.15, including free-threaded 3.13t, 3.14t and 3.15t). Only the x86_64 wheels carry the GPU plugin; the others run on the CPU. The performance page lists the NVIDIA GPUs and the x86-64 and ARM (aarch64) CPUs the code has been run and measured on. There are no wheels for Windows, and WSL2 is untested. ``raptor-core`` and ``aether-dsc`` are pure Python and install anywhere.
+**Platforms:** the wheels are Linux x86_64 and aarch64 and macOS arm64 (CPython 3.9–3.15, including free-threaded 3.13t, 3.14t and 3.15t). The Linux wheels carry the GPU plugin; the aarch64 one is built and load-tested without a GPU and has not run on one (``python -m eagle.cuda --selftest`` reports what it finds on your machine). The macOS wheels run on the CPU. The performance page lists the NVIDIA GPUs and the x86-64 and ARM (aarch64) CPUs the code has been run and measured on. There are no wheels for Windows, and WSL2 is untested. ``raptor-core`` and ``aether-dsc`` are pure Python and install anywhere.
 
 To build from source, and for the supported-version table, see `build from source <https://amasat01.github.io/build_from_source.html>`__.
 

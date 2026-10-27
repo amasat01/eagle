@@ -58,9 +58,9 @@ permissions:
   contents: read
 
 jobs:
-  # One job per platform; `build` below assembles them. x86_64 carries the CUDA plugin. aarch64 and macOS arm64 are
-  # CPU-only wheels built from the sdist (the plugin has never run on an ARM GPU, and macOS has no CUDA): same Python
-  # versions, native runners, no emulation.
+  # One job per platform; `build` below assembles them. x86_64 and aarch64 carry the CUDA plugin (the aarch64 one is built
+  # from the sdist and load-tested without a GPU; it has not run on one). macOS arm64 wheels are CPU-only (no CUDA):
+  # same Python versions, native runners, no emulation.
   wheels-x86_64:
     runs-on: ubuntu-latest
     env:
@@ -204,16 +204,25 @@ jobs:
         for i in 1 2 3; do dnf install -y epel-release && dnf install -y ccache && break; dnf clean all; done;
         command -v ccache >/dev/null || { printf '%s\n' '#!/bin/sh' 'case $1 in -*) exit 0;; esac' 'exec "$@"' > /usr/local/bin/ccache;
         chmod +x /usr/local/bin/ccache; };
-        CCACHE_DIR=/ccache ccache -z
+        CCACHE_DIR=/ccache ccache -z &&
+        curl -fsSL -o /etc/yum.repos.d/cuda-rhel8.repo
+        https://developer.download.nvidia.com/compute/cuda/repos/rhel8/sbsa/cuda-rhel8.repo &&
+        dnf install -y --setopt=install_weak_deps=False
+        cuda-nvcc-12-9 cuda-cudart-devel-12-9 cuda-driver-devel-12-9 gcc-toolset-13-gcc-c++
+      # The plugin builds from the sdist, which carries every header it needs (see sdist-cuda-wheel); the nvcc is the
+      # sbsa build of the x86_64 leg's 12.9, so the architecture list is the same.
       CIBW_ENVIRONMENT_LINUX: >-
+        PATH=/usr/local/cuda-12.9/bin:$PATH
         CMAKE_BUILD_PARALLEL_LEVEL=4
-        SKBUILD_CMAKE_ARGS="-DEAGLE_PYTHON_CUDA_PLUGIN=OFF"
+        CUDAHOSTCXX=/opt/rh/gcc-toolset-13/root/usr/bin/g++
+        SKBUILD_CMAKE_ARGS="-DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.9/bin/nvcc"
         CCACHE_DIR=/ccache
         CCACHE_MAXSIZE=1G
         CCACHE_COMPILERCHECK=content
         CMAKE_C_COMPILER_LAUNCHER=ccache
         CMAKE_CXX_COMPILER_LAUNCHER=ccache
-      CIBW_REPAIR_WHEEL_COMMAND_LINUX: "ccache -s; auditwheel repair -w {dest_dir} {wheel}"
+        CMAKE_CUDA_COMPILER_LAUNCHER=ccache
+      CIBW_REPAIR_WHEEL_COMMAND_LINUX: "ccache -s; auditwheel repair -w {dest_dir} --exclude libcuda.so.1 {wheel}"
       CIBW_TEST_SKIP: "*"
     steps:
       - uses: actions/checkout@v7
@@ -459,16 +468,45 @@ jobs:
             fi
           done
           echo "OK: no wheel vendors libcuda"
-      - name: aarch64 and macOS wheels carry no GPU plugin
+      - name: macOS wheels carry no GPU plugin
         run: |
-          for whl in dist/*aarch64.whl dist/*arm64.whl; do
+          for whl in dist/*arm64.whl; do
             if unzip -l "$whl" | grep -q 'libeagle_cuda\.so'; then echo "$whl carries the GPU plugin"; exit 1; fi
           done
-          echo "OK: the aarch64 and macOS wheels are CPU-only"
-      - name: x86_64 plugin carries Blackwell SASS (sm_100, sm_120) and compute_100 PTX
+          echo "OK: the macOS wheels are CPU-only"
+      # A silent skip of the plugin (no nvcc found) would leave a CPU-only wheel that imports fine, so the Linux
+      # wheels must carry it, built for the architecture the wheel names, exporting the same symbols on both.
+      - name: Linux plugins are present, the right ELF architecture, and export the same seam on x86_64 and aarch64
+        run: |
+          python - <<'PY'
+          import glob, subprocess, tempfile, zipfile
+          exports = {}
+          for whl in sorted(glob.glob("dist/*manylinux*.whl")):
+              arch = "x86_64" if whl.endswith("x86_64.whl") else "aarch64"
+              z = zipfile.ZipFile(whl)
+              assert "eagle/libeagle_cuda.so" in z.namelist(), f"{whl}: no GPU plugin"
+              blob = z.read("eagle/libeagle_cuda.so")
+              assert int.from_bytes(blob[18:20], "little") == {"x86_64": 62, "aarch64": 183}[arch], whl
+              with tempfile.NamedTemporaryFile(suffix=".so") as f:
+                  f.write(blob)
+                  f.flush()
+                  out = subprocess.run(["readelf", "--dyn-syms", "--wide", f.name], capture_output=True, text=True, check=True).stdout
+              syms = set()
+              for line in out.splitlines():
+                  fields = line.split()
+                  if len(fields) >= 8 and fields[0][:-1].isdigit() and fields[6] != "UND" and fields[3] != "SECTION":
+                      syms.add(fields[7].split("@")[0])
+              exports.setdefault(arch, set()).add(frozenset(syms))
+          for arch, sets in exports.items():
+              assert len(sets) == 1, (arch, "wheels disagree on the export set")
+          assert set(exports) == {"x86_64", "aarch64"}, sorted(exports)
+          assert exports["x86_64"] == exports["aarch64"], (sorted(exports["x86_64"]), sorted(exports["aarch64"]))
+          print("OK: plugin in every Linux wheel, ELF arch matches, one export set:", sorted(next(iter(exports["x86_64"]))))
+          PY
+      - name: Linux plugins carry Blackwell SASS (sm_100, sm_120) and compute_100 PTX
         run: |
           shopt -s nullglob
-          for whl in dist/*x86_64.whl; do
+          for whl in dist/*x86_64.whl dist/*aarch64.whl; do
             archs="$(unzip -p "$whl" eagle/libeagle_cuda.so | strings -n 8 | grep -E '^[0-9]+(,[0-9]+)*/[0-9]+(,[0-9]+)*$' | head -1)"
             sass=",${archs%%/*},"
             ptx=",${archs##*/},"
@@ -617,6 +655,8 @@ jobs:
           # without one; what must hold is that USING the GPU refuses, typed.
           d = eagle._core.cuda_backend()
           print("cuda plugin:", {k: d[k] for k in ("loaded", "error")})
+          if sys.platform == "linux":
+              assert d["loaded"], d   # x86_64 and aarch64 wheels both carry the plugin: it must dlopen without a driver
           try:
               eagle._core.Stream()
               raise SystemExit("Stream() did not refuse")
@@ -627,6 +667,15 @@ jobs:
               assert "libcuda" not in maps and "libcudart" not in maps
           print("OK: host-only CPU smoke, CUDA correctly unavailable")
           EOF
+
+      - name: The self-test reports "no driver" (exit 2) on a runner without a GPU
+        if: runner.os == 'Linux'
+        run: |
+          . venv/bin/activate
+          cd "$RUNNER_TEMP"
+          rc=0
+          python -m eagle.cuda --selftest || rc=$?
+          [ "$rc" -eq 2 ] || { echo "selftest exited $rc, expected 2 (no driver)"; exit 1; }
 
       - name: Host suite (a copy, outside the repository) against the installed wheel
         run: |
