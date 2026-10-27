@@ -20,6 +20,7 @@ a host loop when called directly.
 from __future__ import annotations
 
 
+from . import _alloc
 from . import _core
 from .interop import _xp_of
 
@@ -239,7 +240,7 @@ class RepeatWhile:
         self.max_iters = max_iters
         self.limit, self.brk = limit, brk
         xp = _xp_of(anchor)
-        self._cell = xp.zeros(2, dtype=xp.uint32)  # [remaining, ran]
+        self._cell = _alloc.zeros(xp, 2, dtype=xp.uint32)  # [remaining, ran]
 
     @property
     def parts(self) -> tuple:

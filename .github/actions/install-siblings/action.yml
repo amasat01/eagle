@@ -27,6 +27,29 @@ outputs:
 runs:
   using: composite
   steps:
+    # A restored OUT makes the script print `cached` for what it finds there. The key covers each sibling's tracked tree
+    # and version, the script, the Python (version, ABI, platform), SIBLING_SDISTS and the eagle plugin headers the seal reads.
+    - id: key
+      if: inputs.dry == ''
+      shell: bash
+      env:
+        SIBLINGS: ${{ inputs.siblings }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        eagle_root=$(cd "$ACTION_PATH/../../.." && pwd)
+        args=(--file "$ACTION_PATH/install_siblings.sh" --file "$eagle_root/plugin/gref_layout.h" --file "$eagle_root/plugin/gref_abi.h")
+        args+=(--str "$(python -c 'import sys, sysconfig; print(sys.version, sysconfig.get_platform())')" --str "sdists:${SIBLING_SDISTS:-}" --str "$SIBLINGS")
+        for pair in $SIBLINGS; do
+          root=$(cd "${pair#*=}" && pwd)
+          until [ -e "$root/.git" ]; do root=$(dirname "$root"); done
+          args+=(--tree "$root" --version "$root")
+        done
+        echo "key=siblings-v1-$RUNNER_OS-$RUNNER_ARCH-$("$ACTION_PATH/../../ci_digest.sh" "${args[@]}")" >> "$GITHUB_OUTPUT"
+    - uses: actions/cache@v6
+      if: inputs.dry == ''
+      with:
+        path: ${{ inputs.dir }}
+        key: ${{ steps.key.outputs.key }}
     - id: run
       shell: bash
       env:

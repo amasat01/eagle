@@ -4,6 +4,9 @@
 
 Pillow comes with matplotlib. Frames are PIL images; the GIF uses a small palette to stay within the media budget
 (1.5 MB per GIF, 3 MB per MP4).
+
+Embed a GIF with ``{image}`` and ``:class: only-light`` / ``only-dark``. If the figure is square or tall (height / width >= 0.8)
+add ``narrow`` (``:class: only-light narrow``): the page then shows it at 60% of the column instead of full width.
 """
 import pathlib
 
@@ -23,7 +26,7 @@ def frame_of(fig, facecolor):
     from PIL import Image
 
     buf = io.BytesIO()
-    fig.savefig(buf, format="png", facecolor=facecolor)
+    fig.savefig(buf, format="png", facecolor=facecolor, dpi=150)
     plt.close(fig)
     return Image.open(buf).convert("RGB")
 

@@ -560,25 +560,25 @@ Print it:
 
    eagle.Graph  4 nodes · 1 group · backend: cpu
 
-     stage 0 work_share       ┌╌╌╌╌╌╌╌┐
-                              ╎ seed  ╎
-                              └╌╌╌┬╌╌╌┘
-                                  x
-                            ┌─────┴─────┐
-     stage 1 work_share ┌╌╌╌┴╌╌╌┐   ┌╌╌╌┴╌╌╌┐
-                        ╎ left  ╎   ╎ right ╎
-                        └╌╌╌┬╌╌╌┘   └╌╌╌┬╌╌╌┘
-                            left_out    right…
-                            └─────┬─────┘
-                         ╭─ skip if guard ─╮
-     stage 2 work_share  │ ┌╌╌╌╌╌╌┴╌╌╌╌╌╌┐ │
-                         │ ╎   combine   ╎ │
-                         │ └╌╌╌╌╌╌╌╌╌╌╌╌╌┘ │
-                         ╰─────────────────╯
+     stage 0 work_share          ┌─────────┐
+                                 │ <seed>  │
+                                 └────┬────┘
+                                      x
+                             ┌────────┴────┐
+     stage 1 work_share ┌────┴────┐   ┌────┴────┐
+                        │ <left>  │   │ <right> │
+                        └────┬────┘   └────┬────┘
+                             left_out      right_out
+                             └────────┬────┘
+                             ┌─ skip if guard ─┐
+     stage 2 work_share      │ ┌──────┴──────┐ │
+                             │ │  <combine>  │ │
+                             │ └─────────────┘ │
+                             └─────────────────┘
 
 Each node is a box on its stage, the plane names sit under the node that
 writes them, a conditional is a frame carrying its label (``skip if guard``,
-``repeat ≤ N``), a dashed border marks an opaque node, and after ``build()``
+``repeat ≤ N``), an opaque node's name is wrapped in ``<>``, and after ``build()``
 each stage shows how it runs. The header line says what the graph is so far
 (and ``recorded`` once the graph records for a reverse pass). It works on the
 graph as it stands, built or not.

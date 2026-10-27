@@ -19,6 +19,7 @@ import json
 import pathlib
 from collections import namedtuple
 
+from . import _alloc
 from . import _layout
 from .abi import check_aether_abi
 from .launch import (
@@ -222,7 +223,7 @@ class LoadedVector(LoadedKernel):
             )
             # Fill a provided device buffer in place (zeroed first), else allocate.
             if out is None:
-                out_cu = cp.zeros((3, n), dtype=dt)
+                out_cu = _alloc.zeros(cp, (3, n), dtype=dt)
             else:
                 out_cu = interop.as_out_buffer(out, (3, n), dt)
                 out_cu.fill(0)

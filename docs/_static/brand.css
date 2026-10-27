@@ -71,6 +71,7 @@ img.sidebar-logo,
  * dark panels sit as subtle raised cards over the near-black page. */
 .bd-content img.only-light,
 .bd-content img.only-dark {
+    width: 100%;
     max-width: 100%;
     height: auto;
     margin: 1rem auto;

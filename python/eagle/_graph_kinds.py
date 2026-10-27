@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import contextvars
 
+from . import _alloc
 from ._conditional import RepeatWhile
 from .graph import ForkStage, LowerCtx, Node, get_node_kind, register_node_kind
 from ._graph_edges import arrays_overlap
@@ -120,12 +121,13 @@ def _launch_transpose(node, incoming, ctx):
     else:
         finished = frozenset()
     planes, out = {}, {}
+    owned = _cell_rows.companions_of(vjp)
     for role, name in _split.arg_spec(vjp):
         src = name[4:] if name.startswith("bar_") else None
-        if role == "nsamples":
+        if role == "nsamples" or name in owned:     # a keyed sum's companion is the bind's own
             continue
         if name in finished:
-            planes[name] = out[src] = xp.zeros(1, dtype=bound._dtype)
+            planes[name] = out[src] = _alloc.zeros(xp, 1, dtype=bound._dtype)
         elif name in role_of:
             planes[name] = ctx.primal(name)
         elif src in incoming:
@@ -133,7 +135,7 @@ def _launch_transpose(node, incoming, ctx):
         elif name in rowset:
             # a parameter's gradient arrives as rows of 32-sample partial sums
             # (and their companions); the reverse finishes them into the cell
-            planes[name] = buf = xp.zeros(-(-bound.n // _cell_rows.ROW), dtype=bound._dtype)
+            planes[name] = buf = _alloc.zeros(xp, -(-bound.n // _cell_rows.ROW), dtype=bound._dtype)
             if name in cells:
                 out[src] = buf
             else:
@@ -141,8 +143,8 @@ def _launch_transpose(node, incoming, ctx):
         elif src in role_of and role_of[src] not in OUTPUT_ROLES:
             # a parameter cell's gradient comes back per sample; the reverse sums it
             per_sample = role_of[src] == "lookup" and role == "mutable"
-            buf = (xp.empty(bound.n, dtype=bound._dtype) if per_sample
-                   else xp.empty_like(bound._planes[src]))
+            buf = (_alloc.empty(xp, bound.n, dtype=bound._dtype) if per_sample
+                   else _alloc.empty_like(xp, bound._planes[src]))
             if role == "accum_out":     # a scatter-add accumulates: start from zero
                 ctx.add(lambda b=buf: b.fill(0), writes=[buf])
                 ctx.not_bitwise(src)

@@ -1,6 +1,8 @@
 Using eagle from several threads
 ================================
 
+The family-wide model, and how it is checked, is in `raptor's threading page <https://amasat01.github.io/raptor/content/threading.html>`__; this page covers eagle's objects only.
+
 The rule is the same for every object that owns a run: one object, one caller
 at a time. Separate objects run in parallel without any care.
 

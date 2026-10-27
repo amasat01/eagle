@@ -190,9 +190,9 @@ def test_jax_array_in_a_written_role_is_refused_by_name(tmp_path):
 @register_row("JX-OUT-CUDA-ALIAS")
 def test_jax_cuda_result_is_eagles_result_buffer(monkeypatch):
     """The jax result IS eagle's fresh result buffer: pointer-equal, complete
-    at return, owned only by the jax array (eagle's array dies with it and the
-    device memory returns to cupy's pool), never written
-    again, and a second call returns a distinct buffer."""
+    at return, owned only by the jax array (eagle's array, allocated through
+    aether, dies with it), never written again, and a second call returns a
+    distinct buffer."""
     certified_framework("jax")
     certified_framework("cupy")
     import cupy as cp
@@ -215,14 +215,11 @@ def test_jax_cuda_result_is_eagles_result_buffer(monkeypatch):
         return original(self, a)
 
     monkeypatch.setattr(interop._JaxAdapter, "from_cupy", spy)
-    pool = cp.get_default_memory_pool()
     cp.cuda.runtime.deviceSynchronize()
-    before = pool.used_bytes()
 
     y = plugin(position=x, mu=MU)
     assert y.unsafe_buffer_pointer() == seen["ptr"]  # the same buffer
     assert seen["ref"]() is not None  # the jax array keeps eagle's array alive
-    assert pool.used_bytes() - before >= y.nbytes  # the jax array holds the memory
     assert _max_rel(np.asarray(y), ref) < 1e-12  # complete at return
     snapshot = np.asarray(y).copy()
 
@@ -233,7 +230,6 @@ def test_jax_cuda_result_is_eagles_result_buffer(monkeypatch):
     del y, y2
     cp.cuda.runtime.deviceSynchronize()
     assert seen["ref"]() is None  # nothing else owned it: it dies with the jax array
-    assert pool.used_bytes() == before  # the memory went back to the pool
 
 
 @register_row("JX-IN-CPU-COPY")

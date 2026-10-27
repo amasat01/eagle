@@ -245,11 +245,11 @@ R"GOLD(  stage 0      ┌───────┐
                └───┬───┘
                    y
                    │
-          ╭─ skip if flag ──╮
+          ┌─ skip if flag ──┐
   stage 1 │ ┌──────┴──────┐ │
           │ │    maybe    │ │
           │ └──────┬──────┘ │
-          ╰────────┼────────╯
+          └────────┼────────┘
                    z
                    │
   stage 2      ┌───┴───┐
@@ -266,16 +266,16 @@ R"GOLD(  stage 0 ┌───┐
           │ a │
           └─┬─┘
             x,x,w
-            ├┄┄┄┄┄┐
-  stage 1 ┌─┴─┐   ┆
-          │ b │   ┆
-          └─┬─┘   ┆
-            y     ┆
-            └─┬┄┄┄┘
-  stage 2   ┌╌┴╌┐
-            ╎ c ╎
-            └╌╌╌┘
-  edges:  ── RAW data flows  ┄┄ WAR must wait to overwrite
+            ├.....┐
+  stage 1 ┌─┴─┐   :
+          │ b │   :
+          └─┬─┘   :
+            y     :
+            └─┬...┘
+  stage 2  ┌──┴──┐
+           │ <c> │
+           └─────┘
+  edges:  ── RAW data flows  .. WAR must wait to overwrite
 )GOLD");
 }
 
@@ -283,22 +283,22 @@ TEST(GraphViewTest, AsciiGoldenDiamondLoopWithOpaqueNode)
 {
     const Description d = diamondLoop();
     EXPECT_EQ(ascii(d, layout(d)),
-R"GOLD(  stage 0       ┌───────┐
-                │ scale │
-                └───┬───┘
-                    y
-              ┌─────┴─────┐
-  stage 1 ┌───┴───┐   ┌╌╌╌┴╌╌╌┐
-          │ left  │   ╎ right ╎
-          └───┬───┘   └╌╌╌┬╌╌╌┘
-              a           b
-              └─────┬┈┈┈┈┈┘
-            ╭─ repeat <= 4 ─╮
-  stage 2   │ ┌─────┴─────┐ │
-            │ │   join    │ │
-            │ └───────────┘ │
-            ╰───────────────╯
-  edges:  ── RAW data flows  ┈┈ WAW same output
+R"GOLD(  stage 0        ┌───────┐
+                 │ scale │
+                 └───┬───┘
+                     y
+              ┌──────┴─────┐
+  stage 1 ┌───┴───┐   ┌────┴────┐
+          │ left  │   │ <right> │
+          └───┬───┘   └────┬────┘
+              a            b
+              └──────┬~~~~~┘
+             ┌─ repeat <= 4 ─┐
+  stage 2    │ ┌─────┴─────┐ │
+             │ │   join    │ │
+             │ └───────────┘ │
+             └───────────────┘
+  edges:  ── RAW data flows  ~~ WAW same output
 )GOLD");
 }
 
@@ -440,93 +440,93 @@ TEST(GraphViewTest, AsciiSnapshotsOfTheStageRows)
     {
         const Description d = twoInSequence();
         EXPECT_EQ(ascii(d, layout(d)),
-R"GOLD(  stage 0  ┌╌╌╌╌╌╌╌┐
-           ╎ first ╎
-           └╌╌╌╌╌╌╌┘
+R"GOLD(  stage 0  ┌─────────┐
+           │ <first> │
+           └─────────┘
 
 
-  stage 1 ┌╌╌╌╌╌╌╌╌╌┐
-          ╎ second  ╎
-          └╌╌╌╌╌╌╌╌╌┘
+  stage 1 ┌───────────┐
+          │ <second>  │
+          └───────────┘
 )GOLD");
     }
     {
         const Description d = skipsAStage();
         EXPECT_EQ(ascii(d, layout(d)),
-R"GOLD(  stage 0   ┌╌╌╌╌╌┐
-            ╎ s0  ╎
-            └╌╌┬╌╌┘
-               a
-               └────┐
-  stage 1 ┌╌╌╌╌╌┐   │
-          ╎ s1  ╎   │
-          └╌╌┬╌╌┘   │
-             b      │
-             └─┬────┘
-  stage 2   ┌╌╌┴╌╌┐
-            ╎ s2  ╎
-            └╌╌╌╌╌┘
+R"GOLD(  stage 0   ┌───────┐
+            │ <s0>  │
+            └───┬───┘
+                a
+                └─────┐
+  stage 1 ┌───────┐   │
+          │ <s1>  │   │
+          └───┬───┘   │
+              b       │
+              └─┬─────┘
+  stage 2   ┌───┴───┐
+            │ <s2>  │
+            └───────┘
 )GOLD");
     }
     {
         const Description d = longNames();
         EXPECT_EQ(ascii(d, layout(d)),
-R"GOLD(  stage 0 ┌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┐
-          ╎ integrate_positions ╎
-          └╌╌╌╌╌╌╌╌╌╌┬╌╌╌╌╌╌╌╌╌╌┘
-                     state_position
-                    ┌┴┈┈┈┈┈┈┈┈┈┈┈┈┈┐
-  stage 1  ┌╌╌╌╌╌╌╌╌┴╌╌╌╌╌╌╌╌┐     ┊
-           ╎ measure_energy  ╎     ┊
-           └╌╌╌╌╌╌╌╌┬╌╌╌╌╌╌╌╌┘     ┊
-                    state_position ┊
-                    └┄┄┬┈┈┈┈┈┈┈┈┈┈┈┘
-  stage 2     ┌╌╌╌╌╌╌╌╌┴╌╌╌╌╌╌╌╌┐
-              ╎ reset_positions ╎
-              └╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┘
-  edges:  ── RAW data flows  ┄┄ WAR must wait to overwrite  ┈┈ WAW same output
+R"GOLD(  stage 0 ┌───────────────────────┐
+          │ <integrate_positions> │
+          └───────────┬───────────┘
+                      state_position
+                     ┌┴~~~~~~~~~~~~~┐
+  stage 1  ┌─────────┴─────────┐    !
+           │ <measure_energy>  │    !
+           └─────────┬─────────┘    !
+                     state_position !
+                     └.┬~~~~~~~~~~~~┘
+  stage 2    ┌─────────┴─────────┐
+             │ <reset_positions> │
+             └───────────────────┘
+  edges:  ── RAW data flows  .. WAR must wait to overwrite  ~~ WAW same output
 )GOLD");
     }
     {
         const Description d = longNames();
         EXPECT_EQ(ascii(d, layout(d), false),
-R"GOLD(  stage 0 +.....................+
-          : integrate_positions :
-          +..........+..........+
-                     state_position
-                    ++~~~~~~~~~~~~~+
-  stage 1  +........+........+     !
-           : measure_energy  :     !
-           +........+........+     !
-                    state_position !
-                    +..+~~~~~~~~~~~+
-  stage 2     +........+........+
-              : reset_positions :
-              +.................+
+R"GOLD(  stage 0 +-----------------------+
+          | <integrate_positions> |
+          +-----------+-----------+
+                      state_position
+                     ++~~~~~~~~~~~~~+
+  stage 1  +---------+---------+    !
+           | <measure_energy>  |    !
+           +---------+---------+    !
+                     state_position !
+                     +.+~~~~~~~~~~~~+
+  stage 2    +---------+---------+
+             | <reset_positions> |
+             +-------------------+
   edges:  -- RAW data flows  .. WAR must wait to overwrite  ~~ WAW same output
 )GOLD");
     }
     {
         const Description d = forkWithConditionalAndLoop();
         EXPECT_EQ(ascii(d, layout(d)),
-R"GOLD(  stage 0                 ┌╌╌╌╌╌╌╌┐
-                          ╎ seed  ╎
-                          └╌╌╌┬╌╌╌┘
-                              a
-            ┌─────┬───────────┴┬──────────────┐
-            │     ┊   ╭─ skip if guard ─╮     │
-  stage 1 ┌╌┴╌┐   ┊   │ ┌╌╌╌╌╌╌┴╌╌╌╌╌╌┐ │   ┌╌┴╌┐
-          ╎ l ╎   ┊   │ ╎      m      ╎ │   ╎ r ╎
-          └╌┬╌┘   ┊   │ └╌╌╌╌╌╌┬╌╌╌╌╌╌┘ │   └╌┬╌┘
-            │     ┊   ╰────────┼────────╯     │
-            b,a   ┊            c,a            d,a
-            └─────┴───────────┬┴──────────────┘
-                      ╭─ repeat <= 5 ─╮
-  stage 2             │ ┌╌╌╌╌╌┴╌╌╌╌╌┐ │
-                      │ ╎   loop    ╎ │
-                      │ └╌╌╌╌╌╌╌╌╌╌╌┘ │
-                      ╰───────────────╯
-  edges:  ── RAW data flows  ┈┈ WAW same output
+R"GOLD(  stage 0                 ┌─────────┐
+                          │ <seed>  │
+                          └────┬────┘
+                               a
+             ┌──────┬──────────┴─┬───────────────┐
+             │      !   ┌─ skip if guard ─┐      │
+  stage 1 ┌──┴──┐   !   │ ┌──────┴──────┐ │   ┌──┴──┐
+          │ <l> │   !   │ │     <m>     │ │   │ <r> │
+          └──┬──┘   !   │ └──────┬──────┘ │   └──┬──┘
+             │      !   └────────┼────────┘      │
+             b,a    !            c,a             d,a
+             └──────┴──────────┬─┴───────────────┘
+                       ┌─ repeat <= 5 ─┐
+  stage 2              │ ┌─────┴─────┐ │
+                       │ │  <loop>   │ │
+                       │ └───────────┘ │
+                       └───────────────┘
+  edges:  ── RAW data flows  ~~ WAW same output
 )GOLD");
     }
     {
@@ -560,7 +560,7 @@ R"GOLD(  stage 0      ┌───────┐
                └───┬───┘
                    x
                    │
-          ╭─ skip if guard ─╮
+          ┌─ skip if guard ─┐
   stage 1 │ ┌──────┴──────┐ │
           │ │     inc     │ │
           │ └──────┬──────┘ │
@@ -574,7 +574,7 @@ R"GOLD(  stage 0      ┌───────┐
           │ ┌──────┴──────┐ │
           │ │    inc10    │ │
           │ └─────────────┘ │
-          ╰─────────────────╯
+          └─────────────────┘
 )GOLD");
     }
     {
@@ -585,18 +585,18 @@ R"GOLD(  stage 0       ┌───────┐
                 └───┬───┘
                     a
                     │
-          ╭─ repeat <= 3 ─────╮
-          │ ╭─ repeat <= 2 ─╮ │
+          ┌─ repeat <= 3 ─────┐
+          │ ┌─ repeat <= 2 ─┐ │
   stage 1 │ │ ┌─────┴─────┐ │ │
           │ │ │   step    │ │ │
           │ │ └─────┬─────┘ │ │
-          │ ╰───────┼───────╯ │
+          │ └───────┼───────┘ │
           │         a         │
           │         │         │
           │   ┌─────┴─────┐   │
           │   │   fold    │   │
           │   └───────────┘   │
-          ╰───────────────────╯
+          └───────────────────┘
 )GOLD");
     }
 }
@@ -618,11 +618,32 @@ TEST(GraphViewTest, AsciiNamesAreWholeAndEachEdgeIsOneLabel)
     }
 }
 
+// Jupyter and Sphinx render in a browser monospace font; a glyph it lacks falls
+// back to a font of another advance width and shears the diagram. Every drawn
+// glyph is ASCII, the light box-drawing block (U+2500-U+253C, no dashed,
+// heavy or rounded variants) or one of the few symbols labels carry.
+TEST(GraphViewTest, AsciiUsesOnlyGlyphsEveryMonospaceFontHas)
+{
+    for (const Description& d : { longNames(), layerSkip(), diamondLoop(), forkWithConditionalAndLoop() }) {
+        const std::string text = ascii(d);
+        for (const std::string& cell : detail::cellsOf(text)) {
+            if (cell.size() == 1)
+                continue;
+            ASSERT_EQ(cell.size(), 3u) << text;
+            const unsigned cp = ((static_cast<unsigned char>(cell[0]) & 0x0Fu) << 12)
+                | ((static_cast<unsigned char>(cell[1]) & 0x3Fu) << 6) | (static_cast<unsigned char>(cell[2]) & 0x3Fu);
+            const bool light = cp >= 0x2500 && cp <= 0x253C && cp != 0x2504 && cp != 0x2506 && cp != 0x2508 && cp != 0x250A;
+            const bool symbol = cp == 0x2264 || cp == 0x2265 || cp == 0x2026 || cp == 0xB7;
+            EXPECT_TRUE(light || symbol) << std::hex << cp << "\n" << text;
+        }
+    }
+}
+
 TEST(GraphViewTest, AsciiHazardKindIsLineStyleWithOneLegendLine)
 {
     const std::string text = ascii(longNames());
-    EXPECT_NE(text.find("\xE2\x94\x84"), std::string::npos);                // WAR dashed
-    EXPECT_NE(text.find("\xE2\x94\x88"), std::string::npos);                // WAW dotted
+    EXPECT_NE(text.find(".."), std::string::npos);                          // WAR dashed
+    EXPECT_NE(text.find("~~"), std::string::npos);                          // WAW dotted
     EXPECT_EQ(text.find(":WAR"), std::string::npos);
     EXPECT_EQ(text.find(":WAW"), std::string::npos);
     EXPECT_EQ(ascii(skipsAStage()).find("edges:"), std::string::npos);      // all RAW: no legend

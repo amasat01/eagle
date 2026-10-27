@@ -483,7 +483,6 @@ def test_the_artifact_is_hawks_own(tmp_path):
     from hawk.artifact import build_bundle
     from hawk.compile import default_cache_dir
 
-    from eagle import plan as eplan
 
     eagle.simulate(sim_osc, **_osc_kw())
     from hawk.emit import FAST_ENTRIES_MACRO

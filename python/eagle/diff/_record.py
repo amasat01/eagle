@@ -27,6 +27,7 @@ from __future__ import annotations
 import threading
 from contextlib import contextmanager
 
+from .. import _alloc
 from .. import _core, _counters
 from .._active_set import _address, _overlaps, _reordering_snapshot
 from .._busy import Busy
@@ -193,7 +194,7 @@ def _with_parameter_planes(node, cells):
     xp = _xp_of_bound(bound)
     planes = dict(bound._planes)
     for name in uniforms:
-        planes[name] = cells[(label, name)] = xp.full(
+        planes[name] = cells[(label, name)] = _alloc.full(xp, 
             1, bound._planes[name], dtype=variant.arg_dtypes[name])
     rebound = plan(variant, structure=bound.plan.structure,
                    npartitions=bound.plan.npartitions).bind(**planes)

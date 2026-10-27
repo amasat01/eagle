@@ -33,26 +33,26 @@ def test_fork_join_snapshot_before_and_after_build():
     assert str(g) == (
         "eagle.Graph  3 nodes \u00b7 1 group \u00b7 backend: (not built)\n"
         "\n"
-        "  stage 0 \u250c\u254c\u254c\u254c\u2510   \u250c\u254c\u254c\u254c\u2510\n"
-        "          \u254e l \u254e   \u254e r \u254e\n"
-        "          \u2514\u254c\u252c\u254c\u2518   \u2514\u254c\u252c\u254c\u2518\n"
-        "            a       b\n"
-        "            \u2514\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2518\n"
-        "  stage 1   \u250c\u254c\u254c\u254c\u2534\u254c\u254c\u254c\u2510\n"
-        "            \u254e join  \u254e\n"
-        "            \u2514\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u2518\n")
+        "  stage 0 ┌─────┐   ┌─────┐\n"
+        "          │ <l> │   │ <r> │\n"
+        "          └──┬──┘   └──┬──┘\n"
+        "             a         b\n"
+        "             └────┬────┘\n"
+        "  stage 1    ┌────┴────┐\n"
+        "             │ <join>  │\n"
+        "             └─────────┘\n")
     g.build()
     assert str(g) == (
         "eagle.Graph  3 nodes \u00b7 1 group \u00b7 backend: cpu\n"
         "\n"
-        "  stage 0 work_share \u250c\u254c\u254c\u254c\u2510   \u250c\u254c\u254c\u254c\u2510\n"
-        "                     \u254e l \u254e   \u254e r \u254e\n"
-        "                     \u2514\u254c\u252c\u254c\u2518   \u2514\u254c\u252c\u254c\u2518\n"
-        "                       a       b\n"
-        "                       \u2514\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2518\n"
-        "  stage 1 work_share   \u250c\u254c\u254c\u254c\u2534\u254c\u254c\u254c\u2510\n"
-        "                       \u254e join  \u254e\n"
-        "                       \u2514\u254c\u254c\u254c\u254c\u254c\u254c\u254c\u2518\n")
+        "  stage 0 work_share ┌─────┐   ┌─────┐\n"
+        "                     │ <l> │   │ <r> │\n"
+        "                     └──┬──┘   └──┬──┘\n"
+        "                        a         b\n"
+        "                        └────┬────┘\n"
+        "  stage 1 work_share    ┌────┴────┐\n"
+        "                        │ <join>  │\n"
+        "                        └─────────┘\n")
     assert repr(g) == "<eagle.Graph 3 nodes, 2 stages, cpu>"
 
 
@@ -90,8 +90,8 @@ def test_conditionals_are_frames_with_their_labels():
                    name="loop"))
     text = str(g)
     assert "skip if guard" in text and "repeat ≤ 7" in text
-    assert "╭" in text and "╰" in text          # rounded frame corners
-    assert text.count("╌") > 0                        # opaque nodes are dashed
+    assert "┌─ skip if guard" in text and "┌─ repeat" in text   # frames are light boxes
+    assert "<inc>" not in text and "╌" not in text and "╭" not in text   # no glyphs a browser font may lack
     ascii_only = _graph_view.description(g).ascii(unicode=False)
     assert all(ord(c) < 128 for c in ascii_only) and "skip if guard" in ascii_only
 
@@ -236,68 +236,68 @@ def _fork_conditional_loop():
 
 _GOLD_A = r"""eagle.Graph  2 nodes · 0 groups · backend: (not built)
 
-  stage 0  ┌╌╌╌╌╌╌╌┐
-           ╎ first ╎
-           └╌╌╌╌╌╌╌┘
+  stage 0  ┌─────────┐
+           │ <first> │
+           └─────────┘
 
 
-  stage 1 ┌╌╌╌╌╌╌╌╌╌┐
-          ╎ second  ╎
-          └╌╌╌╌╌╌╌╌╌┘
+  stage 1 ┌───────────┐
+          │ <second>  │
+          └───────────┘
 """
 _GOLD_B = r"""eagle.Graph  3 nodes · 0 groups · backend: (not built)
 
-  stage 0   ┌╌╌╌╌╌┐
-            ╎ s0  ╎
-            └╌╌┬╌╌┘
-               a
-               └────┐
-  stage 1 ┌╌╌╌╌╌┐   │
-          ╎ s1  ╎   │
-          └╌╌┬╌╌┘   │
-             b      │
-             └─┬────┘
-  stage 2   ┌╌╌┴╌╌┐
-            ╎ s2  ╎
-            └╌╌╌╌╌┘
+  stage 0   ┌───────┐
+            │ <s0>  │
+            └───┬───┘
+                a
+                └─────┐
+  stage 1 ┌───────┐   │
+          │ <s1>  │   │
+          └───┬───┘   │
+              b       │
+              └─┬─────┘
+  stage 2   ┌───┴───┐
+            │ <s2>  │
+            └───────┘
 """
 _GOLD_C = r"""eagle.Graph  3 nodes · 0 groups · backend: (not built)
 
-  stage 0 ┌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┐
-          ╎ integrate_positions ╎
-          └╌╌╌╌╌╌╌╌╌╌┬╌╌╌╌╌╌╌╌╌╌┘
-                     state_position
-                    ┌┴┈┈┈┈┈┈┈┈┈┈┈┈┈┐
-  stage 1  ┌╌╌╌╌╌╌╌╌┴╌╌╌╌╌╌╌╌┐     ┊
-           ╎ measure_energy  ╎     ┊
-           └╌╌╌╌╌╌╌╌┬╌╌╌╌╌╌╌╌┘     ┊
-                    state_position ┊
-                    └┄┄┬┈┈┈┈┈┈┈┈┈┈┈┘
-  stage 2     ┌╌╌╌╌╌╌╌╌┴╌╌╌╌╌╌╌╌┐
-              ╎ reset_positions ╎
-              └╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┘
-  edges:  ── RAW data flows  ┄┄ WAR must wait to overwrite  ┈┈ WAW same output
+  stage 0 ┌───────────────────────┐
+          │ <integrate_positions> │
+          └───────────┬───────────┘
+                      state_position
+                     ┌┴~~~~~~~~~~~~~┐
+  stage 1  ┌─────────┴─────────┐    !
+           │ <measure_energy>  │    !
+           └─────────┬─────────┘    !
+                     state_position !
+                     └.┬~~~~~~~~~~~~┘
+  stage 2    ┌─────────┴─────────┐
+             │ <reset_positions> │
+             └───────────────────┘
+  edges:  ── RAW data flows  .. WAR must wait to overwrite  ~~ WAW same output
 """
 _GOLD_D = r"""eagle.Graph  5 nodes · 1 group · backend: (not built)
 
-  stage 0                 ┌╌╌╌╌╌╌╌┐
-                          ╎ seed  ╎
-                          └╌╌╌┬╌╌╌┘
-                              a
-            ┌─────┬───────────┴┬──────────────┐
-            │     ┊   ╭─ skip if guard ─╮     │
-  stage 1 ┌╌┴╌┐   ┊   │ ┌╌╌╌╌╌╌┴╌╌╌╌╌╌┐ │   ┌╌┴╌┐
-          ╎ l ╎   ┊   │ ╎      m      ╎ │   ╎ r ╎
-          └╌┬╌┘   ┊   │ └╌╌╌╌╌╌┬╌╌╌╌╌╌┘ │   └╌┬╌┘
-            │     ┊   ╰────────┼────────╯     │
-            b,a   ┊            c,a            d,a
-            └─────┴───────────┬┴──────────────┘
-                      ╭─ repeat ≤ 5 ──╮
-  stage 2             │ ┌╌╌╌╌╌┴╌╌╌╌╌┐ │
-                      │ ╎   loop    ╎ │
-                      │ └╌╌╌╌╌╌╌╌╌╌╌┘ │
-                      ╰───────────────╯
-  edges:  ── RAW data flows  ┈┈ WAW same output
+  stage 0                 ┌─────────┐
+                          │ <seed>  │
+                          └────┬────┘
+                               a
+             ┌──────┬──────────┴─┬───────────────┐
+             │      !   ┌─ skip if guard ─┐      │
+  stage 1 ┌──┴──┐   !   │ ┌──────┴──────┐ │   ┌──┴──┐
+          │ <l> │   !   │ │     <m>     │ │   │ <r> │
+          └──┬──┘   !   │ └──────┬──────┘ │   └──┬──┘
+             │      !   └────────┼────────┘      │
+             b,a    !            c,a             d,a
+             └──────┴──────────┬─┴───────────────┘
+                       ┌─ repeat ≤ 5 ──┐
+  stage 2              │ ┌─────┴─────┐ │
+                       │ │  <loop>   │ │
+                       │ └───────────┘ │
+                       └───────────────┘
+  edges:  ── RAW data flows  ~~ WAW same output
 """
 _GOLD_NESTED = {
     "fork_in_branch": r"""  stage 0            ┌───────┐
@@ -324,7 +324,7 @@ _GOLD_NESTED = {
                └───┬───┘
                    x
                    │
-          ╭─ skip if guard ─╮
+          ┌─ skip if guard ─┐
   stage 1 │ ┌──────┴──────┐ │
           │ │     inc     │ │
           │ └──────┬──────┘ │
@@ -338,25 +338,25 @@ _GOLD_NESTED = {
           │ ┌──────┴──────┐ │
           │ │    inc10    │ │
           │ └─────────────┘ │
-          ╰─────────────────╯
+          └─────────────────┘
 """,
     "loop_in_loop": r"""  stage 0       ┌───────┐
                 │ seed  │
                 └───┬───┘
                     a
                     │
-          ╭─ repeat <= 3 ─────╮
-          │ ╭─ repeat <= 2 ─╮ │
+          ┌─ repeat <= 3 ─────┐
+          │ ┌─ repeat <= 2 ─┐ │
   stage 1 │ │ ┌─────┴─────┐ │ │
           │ │ │   step    │ │ │
           │ │ └─────┬─────┘ │ │
-          │ ╰───────┼───────╯ │
+          │ └───────┼───────┘ │
           │         a         │
           │         │         │
           │   ┌─────┴─────┐   │
           │   │   fold    │   │
           │   └───────────┘   │
-          ╰───────────────────╯
+          └───────────────────┘
 """,
 }
 
@@ -397,7 +397,7 @@ def test_nothing_is_cut_when_there_is_room_and_each_edge_has_one_label():
 
 def test_hazard_kind_is_line_style_with_one_legend_line():
     text = str(_long_names())
-    assert "┄" in text and "┈" in text and ":WAR" not in text and ":WAW" not in text
+    assert ".." in text and "~~" in text and ":WAR" not in text and ":WAW" not in text
     assert text.count("edges:") == 1 and "edges:" not in str(_skips_a_stage())
 
 

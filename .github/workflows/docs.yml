@@ -47,3 +47,24 @@ jobs:
     steps:
       - id: deployment
         uses: actions/deploy-pages@v5
+
+  # After the deploy: the live pages must show exactly the version of the site that was deployed (never a dev string),
+  # and serve a sitemap with lastmod. Pages can take a few minutes to publish, so it retries.
+  current:
+    needs: deploy
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v7
+      - name: Fetch the site that was deployed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash tools/ci_fetch_artifact.sh site "$(git rev-parse 'HEAD^{tree}')" site
+      - name: The live version is the deployed one
+        env:
+          RETRIES: "20"
+        run: |
+          want=$(sed -n "s/.*VERSION: *'\([^']*\)'.*/\1/p" site/_static/documentation_options.js | head -1)
+          bash tools/docs_current_check.sh eagle "$want"

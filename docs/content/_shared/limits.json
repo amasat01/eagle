@@ -85,7 +85,7 @@
  },
  {
   "id": "numpy-cupy-no-autodiff",
-  "text": "No gradients through NumPy or CuPy, because neither has autodiff (the frameworks' design): write the vjp yourself and pass it as `vjps=` (see [the graph model](../userguide/graph_model)), or use the [torch](torch.ipynb) or [JAX](jax.ipynb) bridge.",
+  "text": "No gradients through NumPy or CuPy, because neither has autodiff (the frameworks' design): write the vjp yourself and pass it as `vjps=` (see [the graph model](../userguide/graph_model)), or use the [torch](use_eagle_with_torch.ipynb) or [JAX](use_eagle_with_jax.ipynb) bridge.",
   "way_out": "write the vjp, or use the torch or JAX bridge",
   "cause": "framework",
   "lifted_in": "none"
@@ -141,7 +141,7 @@
  },
  {
   "id": "warp-reverse-only",
-  "text": "Gradients are reverse mode only: `Tape.record_func`, which records eagle's backward, has no forward mode and no second derivative (Warp's design): differentiate once with `tape.backward`, or use the [JAX](jax.ipynb) bridge for forward mode and higher orders.",
+  "text": "Gradients are reverse mode only: `Tape.record_func`, which records eagle's backward, has no forward mode and no second derivative (Warp's design): differentiate once with `tape.backward`, or use the [JAX](use_eagle_with_jax.ipynb) bridge for forward mode and higher orders.",
   "way_out": "differentiate once, or the JAX bridge",
   "cause": "framework",
   "lifted_in": "none"

@@ -38,6 +38,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import NamedTuple
 
+from . import _alloc
 from ._active_set import (
     COUNT_PLANE,
     DEFAULT_EVERY,
@@ -271,7 +272,7 @@ def _packed_read(xp, device: bool, cells) -> tuple:
     if all(arr is first and idx == lo + j for j, (arr, idx) in enumerate(cells)):
         # consecutive words of one array: no staging copies, the ONE read
         return tuple(int(v) for v in first[lo : lo + len(cells)].get())
-    staging = xp.empty(len(cells), dtype=xp.uint32)
+    staging = _alloc.empty(xp, len(cells), dtype=xp.uint32)
     for i, (arr, idx) in enumerate(cells):
         staging[i : i + 1] = arr[idx : idx + 1]
     host = staging.get()
@@ -399,9 +400,8 @@ def _mask_count(xp, device: bool, finished, terminated) -> None:
     if not device:
         finished[0] = xp.count_nonzero(terminated)
         return
-    rt = xp.cuda.runtime
     stream = xp.cuda.get_current_stream().ptr
-    rt.memsetAsync(finished.data.ptr, 0, finished.nbytes, stream)
+    _alloc.zero(xp, finished, stream)
     if terminated.shape[0] > 0:
         _mask_count_kernel()(terminated, finished)
 
@@ -416,12 +416,12 @@ def _warm_device_kernels() -> None:
 
     from ._active_set import ActiveSet
 
-    mask = xp.zeros(1, dtype=xp.bool_)
+    mask = _alloc.zeros(xp, 1, dtype=xp.bool_)
     ActiveSet(mask, _lazy_scratch=True)
-    word = xp.zeros(1, dtype=xp.int64)
+    word = _alloc.zeros(xp, 1, dtype=xp.int64)
     word[0] = 1
-    _bump_kernel()(xp.zeros(1, dtype=xp.uint32), size=1)
-    _mask_count(xp, True, xp.zeros(1, dtype=xp.uint32), mask)
+    _bump_kernel()(_alloc.zeros(xp, 1, dtype=xp.uint32), size=1)
+    _mask_count(xp, True, _alloc.zeros(xp, 1, dtype=xp.uint32), mask)
     xp.cuda.get_current_stream().synchronize()
 
 
@@ -781,15 +781,15 @@ class Runner:
         if reorder is not None:
             _refuse_moving_node_planes(hooks, specs, planes)
         if mask_name not in planes:
-            planes[mask_name] = xp.zeros(n, dtype=xp.bool_)
+            planes[mask_name] = _alloc.zeros(xp, n, dtype=xp.bool_)
         mask = planes[mask_name]
         self._work.setdefault(mask_name, mask)
         nodes = _record_nodes(steps, specs[0], planes) if hooks and record else ()
         # the finished count is word [2] of the fast entries' counter block
         # (see _build_fast): one memset zeroes it with the other counters and
         # one read returns it with them
-        finished = xp.zeros(6, dtype=xp.uint32)[2:3]
-        word = xp.zeros(1, dtype=xp.int64) if auto else None
+        finished = _alloc.zeros(xp, 6, dtype=xp.uint32)[2:3]
+        word = _alloc.zeros(xp, 1, dtype=xp.int64) if auto else None
         active = None
         if compacting:
             active = ActiveSet(mask, reorder=reorder, group=_lane_bind.space_of(plans[0].plugin).group,
@@ -826,7 +826,7 @@ class Runner:
                 bind[FINISHED_PLANE] = finished
             if ("lookup", FUSED_STEPS_PLANE) in spec:
                 bind[FUSED_STEPS_PLANE] = (word if auto
-                                           else xp.ones(1, dtype=xp.int64))
+                                           else _alloc.ones(xp, 1, dtype=xp.int64))
             if active is not None:
                 bind.update(active.planes())
             bound.append(plan_i.bind(**bind))
@@ -858,7 +858,7 @@ class Runner:
         self._device = device
         self._xp = xp
         self._total = xp.asarray([self.n], dtype=xp.uint32)
-        self._compactions = xp.zeros(1, dtype=xp.uint32)
+        self._compactions = _alloc.zeros(xp, 1, dtype=xp.uint32)
         self._build_s = 0.0
         self._bump = None
         self._fast_mode = None
@@ -879,7 +879,7 @@ class Runner:
         self._fast_util_on = False
         if device:
             self._bump = _bump_kernel()
-            self._bump(xp.zeros(1, dtype=xp.uint32), size=1)  # compile before capture
+            self._bump(_alloc.zeros(xp, 1, dtype=xp.uint32), size=1)  # compile before capture
 
         self._recorder = None
         if record or refine:
@@ -1007,9 +1007,9 @@ class Runner:
             self.active.prepare_compaction()
         xp = self._xp
         self._rate = self._band_rate()
-        self._cells = xp.zeros(6, dtype=xp.int64)
-        self._go = xp.zeros(1, dtype=xp.uint32)
-        self._hist = xp.zeros(self._k_max + 1, dtype=xp.int64)
+        self._cells = _alloc.zeros(xp, 6, dtype=xp.int64)
+        self._go = _alloc.zeros(xp, 1, dtype=xp.uint32)
+        self._hist = _alloc.zeros(xp, self._k_max + 1, dtype=xp.int64)
         cells, go, hist, word = self._cells, self._go, self._hist, self.fused_steps
         finished, total, k_max = self.finished, self._total, self._k_max
 
@@ -1029,11 +1029,11 @@ class Runner:
             kernel = _policy_kernel(k_max, k_min)
             args = (finished, total, cells, word, go, hist)
             # compile (and check) before any capture, on scratch cells
-            kernel((1,), (1,), (xp.zeros(1, dtype=xp.uint32), total,
-                                xp.zeros(6, dtype=xp.int64),
-                                xp.zeros(1, dtype=xp.int64),
-                                xp.zeros(1, dtype=xp.uint32),
-                                xp.zeros(k_max + 1, dtype=xp.int64)))
+            kernel((1,), (1,), (_alloc.zeros(xp, 1, dtype=xp.uint32), total,
+                                _alloc.zeros(xp, 6, dtype=xp.int64),
+                                _alloc.zeros(xp, 1, dtype=xp.int64),
+                                _alloc.zeros(xp, 1, dtype=xp.uint32),
+                                _alloc.zeros(xp, k_max + 1, dtype=xp.int64)))
 
             def policy():
                 kernel((1,), (1,), args)
@@ -1135,7 +1135,7 @@ class Runner:
                 prep["range_bare"] = self.step.prepare_range(steps=steps_cell)
         if mode != "persist" and not probe:
             return
-        self._fast_util = (xp.zeros(2, dtype=xp.uint64)
+        self._fast_util = (_alloc.zeros(xp, 2, dtype=xp.uint64)
                            if self._fast_util_on else None)
         self._size_persist()
 
@@ -1452,9 +1452,9 @@ class Runner:
         summed = probed and (timed or state.runs % STEP_FILL_EVERY == 0)
         bare = "" if summed or not probed else "_bare"
         if self._fast_exact:
-            rt.memsetAsync(counter.data.ptr, 0, 24 if summed else 12, stream)
+            _alloc.zero(self._xp, counter, stream, 24 if summed else 12)
         elif counts:
-            rt.memsetAsync(self.finished.data.ptr, 0, self.finished.nbytes, stream)
+            _alloc.zero(self._xp, self.finished, stream)
         if not counts:
             _mask_count(xp, self._device, self.finished, self.terminated)
         next_cell, steps_cell, stepsum = self._fast_views
@@ -1724,10 +1724,9 @@ class Runner:
             self.active.restore()
         if self._device and self.terminated.flags.c_contiguous:
             # two async memsets on the current stream, not two fill kernels
-            rt = self._xp.cuda.runtime
             stream = self._xp.cuda.get_current_stream().ptr
-            rt.memsetAsync(self.terminated.data.ptr, 0, self.terminated.nbytes, stream)
-            rt.memsetAsync(self.finished.data.ptr, 0, self.finished.nbytes, stream)
+            _alloc.zero(self._xp, self.terminated, stream)
+            _alloc.zero(self._xp, self.finished, stream)
         else:
             self.terminated.fill(False)
             self.finished.fill(0)

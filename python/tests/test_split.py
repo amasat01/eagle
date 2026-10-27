@@ -11,7 +11,7 @@ finished cell of one is the one-cell ``lookup`` plane of the next, and the
 import numpy as np
 import pytest
 
-hawk = pytest.importorskip("hawk")
+pytest.importorskip("hawk")
 import hawk.diff  # noqa: E402
 import eagle  # noqa: E402
 import eagle.exec as eexec  # noqa: E402

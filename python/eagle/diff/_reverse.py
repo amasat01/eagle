@@ -23,6 +23,7 @@ from contextlib import contextmanager
 from typing import NamedTuple
 
 
+from .. import _alloc
 from .. import _core, _counters
 from .._busy import BusyGuard
 from .._conditional import skippable
@@ -53,7 +54,7 @@ def broadcast_adjoint(cotangent, n: int, *, out=None):
         raise ValueError("eagle.diff.broadcast_adjoint: the cotangent of a sum is one "
                          f"value, got shape {tuple(cotangent.shape)}")
     if out is None:
-        out = xp.empty(n, dtype=cot.dtype)
+        out = _alloc.empty(xp, n, dtype=cot.dtype)
     out[...] = cot
     return out
 
@@ -494,15 +495,15 @@ class _Program:
         self.xp = xp = xp_of(next(iter(tape.arrays.values())))
         self.perm = tape.perm
         n = None if tape.perm is None else int(tape.perm.shape[0])
-        self.inv = None if n is None else xp.empty(n, dtype=xp.int32)
-        self.seed = {k: xp.empty_like(tape.arrays[k]) for k in seeded}
+        self.inv = None if n is None else _alloc.empty(xp, n, dtype=xp.int32)
+        self.seed = {k: _alloc.empty_like(xp, tape.arrays[k]) for k in seeded}
         zeros = {}
 
         def zero(key):
             arr = tape.arrays[key]
             k = (tuple(arr.shape), str(arr.dtype))
             if k not in zeros:
-                zeros[k] = xp.zeros(arr.shape, dtype=arr.dtype)
+                zeros[k] = _alloc.zeros(xp, arr.shape, dtype=arr.dtype)
             return zeros[k]
 
         out, taint = {}, {}
@@ -525,12 +526,12 @@ class _Program:
                     continue
                 parts = [source(s, plane) for s in srcs]
                 arrays = [a for a, _ in parts]
-                dst = xp.empty_like(arrays[0])
+                dst = _alloc.empty_like(xp, arrays[0])
                 g.add_node(opaque(_ordered_sum(dst, arrays), reads=arrays, writes=[dst]),
                            name=f"sum({plane})")
                 if any(id(a) in self.comp for a in arrays):     # rows: their companions add too
                     los = [self.comp.get(id(a), zero(plane)) for a in arrays]
-                    self.comp[id(dst)] = lo = xp.empty_like(dst)
+                    self.comp[id(dst)] = lo = _alloc.empty_like(xp, dst)
                     g.add_node(opaque(_ordered_sum(lo, los), reads=los, writes=[lo]),
                                name=f"sum({plane}, comp)")
                 out[(r, plane)] = dst
@@ -593,7 +594,7 @@ class _Program:
                 self.bitwise[key] = origin is None and rev._policy == "ordered"
                 if lo is None:
                     arr = self._sample_order_step(g, arr)
-                total = xp.empty(1, dtype=arr.dtype)
+                total = _alloc.empty(xp, 1, dtype=arr.dtype)
                 from .._graph_reduce import reduce
 
                 g.add_node(reduce(arr, total, comp=lo, policy=rev._policy),
@@ -609,7 +610,7 @@ class _Program:
         batch), so the parameter sum runs in sample order, never slot order."""
         if self.inv is None:
             return arr
-        xp, inv, dst = self.xp, self.inv, self.xp.empty_like(arr)
+        xp, inv, dst = self.xp, self.inv, _alloc.empty_like(self.xp, arr)
         g.add_node(opaque(lambda: xp.take(arr, inv, axis=-1, out=dst),
                           reads=[arr, inv], writes=[dst]), name="sample order")
         return dst
@@ -686,5 +687,8 @@ def reverse(record, seeds, *, wrt=None, vjps=None, strict=False, policy="compens
     grads = Reverse(record.forward, vjps=vjps, strict=strict, policy=policy)(record, seeds, wrt=wrt, _at=at)
     if keys is None:
         return grads
-    return Gradients({name: grads.cotangents[k[1]] if not isinstance(k, str) else grads[k if k in grads else k.split(".", 1)[1]]
+    from ._keys import own_shape
+
+    return Gradients({name: own_shape(record._graph, name, grads.cotangents[k[1]] if not isinstance(k, str)
+                                      else grads[k if k in grads else k.split(".", 1)[1]])
                       for name, k in keys.items()}, grads.report)

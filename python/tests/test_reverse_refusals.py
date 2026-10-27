@@ -7,7 +7,6 @@ import pytest
 
 import eagle
 import eagle.plan
-from eagle import SkipGuard, skippable
 from eagle.graph import opaque
 from _reverse_fixtures import chain, plans
 

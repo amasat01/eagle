@@ -1,0 +1,27 @@
+target-version = "py39"
+# notebooks are executed by nbcheck, not linted
+extend-exclude = ["*.ipynb"]
+
+[lint]
+select = ["F"]
+# kernel bodies assign named values the tracer reads; deleting them changes the kernel
+ignore = ["F841"]
+
+# files that use syntax newer than the package floor (they run under a newer interpreter)
+[per-file-target-version]
+"python/tests/test_builder.py" = "py310"
+"python/tests/test_builder_gpu.py" = "py310"
+"docs/_tools/perf_charts.py" = "py312"
+
+[lint.per-file-ignores]
+# A named-axis plane declares its layout with Python's slice syntax inside an
+# annotation (`Grid["row", "col":8]`); ruff reads each axis label as an
+# undefined name. Scoped to the modules that author such kernels.
+"python/tests/test_bound_clear.py" = ["F821"]
+"python/tests/test_builder.py" = ["F821"]
+"python/tests/test_lane_space_bind.py" = ["F821"]
+"python/tests/test_split_keyed.py" = ["F821"]
+# A fixture imported from a sibling test module and taken by parameter name.
+"python/tests/test_plan_run_device_inputs.py" = ["F811"]
+"python/tests/test_plan_run_outputs.py" = ["F811"]
+"python/tests/test_until_done_host_whole.py" = ["F811"]

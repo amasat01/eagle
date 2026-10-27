@@ -21,9 +21,25 @@ copyright = '2026, Alessandro Masat'
 author = 'Alessandro Masat'
 
 # The version is the latest git tag (setuptools-scm), never written into the tree.
-import setuptools_scm
 
-release = version = setuptools_scm.get_version(root="..", relative_to=__file__, fallback_version="0.0.0")
+
+# -- Version and indexing ------------------------------------------------------
+# The version shown is the release this build is for, never a development string (tools/docs_version.py). The sitemap
+# and the canonical links come from html_baseurl; sphinx-sitemap adds the lastmod of each page from git history.
+import pathlib as _pathlib
+import sys as _sys
+
+_sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parents[1] / "tools"))
+import docs_version  # noqa: E402
+
+release = version = docs_version.release_version(_pathlib.Path(__file__).resolve().parents[1])
+html_baseurl = "https://amasat01.github.io/eagle/"
+sitemap_url_scheme = "{link}"
+try:
+    import sphinx_sitemap  # noqa: F401
+    _SITEMAP = True
+except ImportError:   # docs/requirements.txt installs it; an offline local build goes without
+    _SITEMAP = False
 
 # -- General configuration ---------------------------------------------------
 
@@ -145,3 +161,10 @@ suppress_warnings = [
     "ref.python",
     "duplicate_declaration.cpp",
 ]
+
+if _SITEMAP:
+    extensions.append("sphinx_sitemap")
+
+
+def setup(app):
+    app.connect("build-finished", docs_version.sitemap_lastmod)   # each page's lastmod, from git, into sitemap.xml

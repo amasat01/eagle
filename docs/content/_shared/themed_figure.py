@@ -27,7 +27,12 @@ DARK = {"bg": "#1a1a19", "edge": "#2c2c2a", "ink": "#f2f2ee", "sub": "#c3c2b7", 
         "on": "#a99bff", "off": "#8793ab", "grid": "#2a3347", "rule": "#454541"}
 PALETTES = {"light": LIGHT, "dark": DARK}
 
-DPI = 100
+DPI = 200
+
+#: A figure at least this tall for its width (height / width) is shown at most ``NARROW_CAP`` wide, so a square chart does not
+#: fill the column.
+NARROW_ASPECT = 0.8
+NARROW_CAP = "60%"
 
 
 def _rgb(color):
@@ -100,7 +105,7 @@ def _alt(fig) -> str:
     return "Chart: " + "; ".join(texts) if texts else "Chart"
 
 
-def pair_html(fig, alt=None) -> str:
+def pair_html(fig, alt=None, narrow=None) -> str:
     """The HTML of the two-image output for ``fig`` (recolours ``fig`` in place)."""
     alt = html.escape(alt if alt is not None else _alt(fig), quote=True)
     imgs = []
@@ -109,7 +114,11 @@ def pair_html(fig, alt=None) -> str:
         data = base64.b64encode(_png(fig)).decode("ascii")
         extra = ' style="display:none"' if mode == "dark" else ""
         imgs.append(f'<img class="only-{mode}" alt="{alt if mode == "light" else ""}"{extra} src="data:image/png;base64,{data}">')
-    return '<div class="themed-figure">' + "".join(imgs) + "</div>"
+    if narrow is None:
+        w, h = fig.get_size_inches()
+        narrow = h / w >= NARROW_ASPECT
+    style = f' style="max-width:{NARROW_CAP};margin:0 auto"' if narrow else ""
+    return f'<div class="themed-figure"{style}>' + "".join(imgs) + "</div>"
 
 
 def show(fig=None, alt=None) -> None:

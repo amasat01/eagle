@@ -33,6 +33,7 @@ import threading
 
 import numpy
 
+from .. import _alloc
 from .. import _core, _counters, _split
 from .._busy import Busy, BusyGuard
 from ..graph import get_node_kind
@@ -153,15 +154,15 @@ def record_planes(plan, max_steps, window, device, xp, n, planes, events="step")
                       "eagle.until_done", device, events)
     twin = k.fused or k.single
     scalar = planes[k.taped[0][0]].dtype
-    out = {APPLIED_STEPS: xp.zeros(n, dtype=twin.arg_dtypes[APPLIED_STEPS])}
+    out = {APPLIED_STEPS: _alloc.zeros(xp, n, dtype=twin.arg_dtypes[APPLIED_STEPS])}
     if k.time is not None:
-        out[f"{k.time}_0"] = xp.empty_like(planes[k.time])
+        out[f"{k.time}_0"] = _alloc.empty_like(xp, planes[k.time])
     for role, nm in twin.arg_spec:
         if role == "per_sample" and nm in planes and not hasattr(planes[nm], "shape"):
-            out[nm] = xp.full(n, planes[nm], dtype=scalar)
+            out[nm] = _alloc.full(xp, n, planes[nm], dtype=scalar)
     width = sum(rows for _nm, rows in k.taped)
     if refine:
-        row = xp.zeros((width, n), dtype=scalar)
+        row = _alloc.zeros(xp, (width, n), dtype=scalar)
         out[TAPE] = (row, row)
         return out
     rows = resolve_window(window, max_steps, "eagle.until_done") * width
@@ -175,7 +176,7 @@ def _dummy_tape(xp, rows, width, n, dtype):
     switched off (``tape_on = 0``), so it never touches the tape, and binding
     needs a contiguous plane of the full shape; the reverse owns the real
     tape."""
-    backing = xp.empty((width, n), dtype=dtype)
+    backing = _alloc.empty(xp, (width, n), dtype=dtype)
     if xp is numpy:
         view = numpy.lib.stride_tricks.as_strided(
             backing, shape=(rows, n), strides=(n * backing.itemsize, backing.itemsize))
@@ -229,8 +230,8 @@ def _columns(a, m):
     """A new plane shaped like ``a`` with ``m`` samples."""
     xp = xp_of(a)
     if a.ndim == 0:
-        return xp.empty((), dtype=a.dtype)
-    return xp.empty(a.shape[:-1] + (m,), dtype=a.dtype)
+        return _alloc.empty(xp, (), dtype=a.dtype)
+    return _alloc.empty(xp, a.shape[:-1] + (m,), dtype=a.dtype)
 
 
 class RunTape:
@@ -312,7 +313,7 @@ class RunRecorder:
         planes[TAPE_ON] = 1 if refine else 0
         self.word = None
         if self.fused:
-            self.word = planes[FUSED_STEPS] = xp.ones(1, dtype=xp.int64)
+            self.word = planes[FUSED_STEPS] = _alloc.ones(xp, 1, dtype=xp.int64)
         self.structure = plan.structure
         self.planes = planes
         self.width, self.scalar = width, numpy.dtype(scalar)
@@ -365,7 +366,7 @@ class RunRecorder:
     def _checkpoint(self, k, copy=True):
         held = self._held()
         if k == len(self.pool):
-            self.pool.append({nm: self.xp.empty_like(a) for nm, a in held.items()})
+            self.pool.append({nm: _alloc.empty_like(self.xp, a) for nm, a in held.items()})
         if copy:
             for nm, a in held.items():
                 self.xp.copyto(self.pool[k][nm], a)
@@ -557,7 +558,7 @@ class RunReverse:
         self.passes = -(-n // m)
         self.state = {nm: _columns(a, m) for nm, a in rec.state.items()}
         self.reads = {nm: _columns(rec.planes[nm], m) for nm in rec.read_names}
-        self.tape = xp.empty((W * rec.width, m), dtype=rec.scalar)
+        self.tape = _alloc.empty(xp, (W * rec.width, m), dtype=rec.scalar)
         twin = k.fused if rec.fused else k.single
         twin_planes = dict(rec.planes)
         twin_planes.update(self.state)
@@ -569,9 +570,9 @@ class RunReverse:
             if nm == MAP_PLANE:
                 twin_planes[nm] = xp.arange(m, dtype=rec.planes[nm].dtype)
             elif nm == COUNT_PLANE:
-                twin_planes[nm] = xp.full(rec.planes[nm].shape, m, dtype=rec.planes[nm].dtype)
+                twin_planes[nm] = _alloc.full(xp, rec.planes[nm].shape, m, dtype=rec.planes[nm].dtype)
             elif role == "lookup":
-                twin_planes[nm] = xp.zeros_like(rec.planes[nm])
+                twin_planes[nm] = _alloc.zeros_like(xp, rec.planes[nm])
         self.word = twin_planes.get(FUSED_STEPS) if rec.fused else None
         self.recompute = _split.single(make_plan(twin, structure=rec.structure).bind(**twin_planes),
                                        "eagle.diff.reverse")
@@ -586,22 +587,22 @@ class RunReverse:
         self.adj = [{nm: _columns(rec.state[nm], m) for nm in taped} for _ in range(2)]
         self.step_plane = None
         if any(nm == APPLIED_STEPS for _r, nm in vspec):
-            self.step_plane = xp.zeros(m, dtype=k.vjp.arg_dtypes[APPLIED_STEPS])
+            self.step_plane = _alloc.zeros(xp, m, dtype=k.vjp.arg_dtypes[APPLIED_STEPS])
         self.grad = {}        # input name -> its share of one step, per slot
         for _role, nm in vspec:
             if nm.startswith("bar_") and not nm.endswith(_NEXT) and nm[4:] not in taped:
                 base = nm[4:]
                 if base in rec.uniforms:
-                    self.grad[base] = xp.zeros(m, dtype=rec.scalar)
+                    self.grad[base] = _alloc.zeros(xp, m, dtype=rec.scalar)
                 elif base in self.reads:
-                    self.grad[base] = xp.zeros_like(self.reads[base])
+                    self.grad[base] = _alloc.zeros_like(xp, self.reads[base])
         # a node-written plane is an intermediate, not an input
-        self.acc = {nm: xp.zeros_like(g) for nm, g in self.grad.items() if nm not in rec.ring}
+        self.acc = {nm: _alloc.zeros_like(xp, g) for nm, g in self.grad.items() if nm not in rec.ring}
         for _n, reads, _w in rec.nodes:     # a parameter only a node reads
             for _nm, pn, _a in reads:
                 if pn in rec.uniforms and pn not in self.acc:
-                    self.acc[pn] = xp.zeros(m, dtype=rec.scalar)
-        self.ring = {nm: xp.empty((W,) + self.reads[nm].shape, dtype=self.reads[nm].dtype)
+                    self.acc[pn] = _alloc.zeros(xp, m, dtype=rec.scalar)
+        self.ring = {nm: _alloc.empty(xp, (W,) + self.reads[nm].shape, dtype=self.reads[nm].dtype)
                      for nm in rec.ring}
         self.offsets = offsets
         self.vjps = []
@@ -698,8 +699,8 @@ class RunReverse:
     def _run(self, tape, seeds, names):
         rec, xp, n, m = self.rec, self.xp, self.n, self.m
         flat = lambda a, width: a.reshape(-1, width)
-        out = {nm: xp.zeros_like(rec.state[nm]) for nm in self.taped}
-        per = {nm: xp.zeros_like(tape.reads[nm]) for nm in self.acc if nm not in self.summed}
+        out = {nm: _alloc.zeros_like(xp, rec.state[nm]) for nm in self.taped}
+        per = {nm: _alloc.zeros_like(xp, tape.reads[nm]) for nm in self.acc if nm not in self.summed}
         partials = {nm: [] for nm in self.summed}
         seeded = {nm: xp.asarray(v, dtype=rec.state[nm].dtype) for nm, v in seeds.items()}
         self._tape = tape
@@ -731,7 +732,7 @@ class RunReverse:
                 flat(out[nm], n)[:, cols] = flat(self.adj[1][nm], m)[:, :cnt]
             for nm, acc in self.acc.items():
                 if nm in self.summed:
-                    sample = xp.empty(cnt, dtype=acc.dtype)
+                    sample = _alloc.empty(xp, cnt, dtype=acc.dtype)
                     sample[xp.asarray(order)] = acc[:cnt]
                     partials[nm].append(self._sum(sample, pair=True))
                 else:
@@ -837,14 +838,14 @@ class RunReverse:
                 else:
                     primals[nm] = tape.reads[pn]
                 into[nm] = pn
-            cots = {nm: extra.get(pn, xp.zeros_like(tape.reads[pn])) for nm, pn, _a in writes}
+            cots = {nm: extra.get(pn, _alloc.zeros_like(xp, tape.reads[pn])) for nm, pn, _a in writes}
             got = fn(dict(primals), cots)
             self._sync()
             for nm, primal in primals.items():
                 g = _node_gradient(xp, got, nm, primal, node, door)
                 pn = into[nm]
                 if pn in self.rec.uniforms:
-                    extra.setdefault(pn, xp.zeros(self.n, dtype=self.rec.scalar))[:1] += g.sum()
+                    extra.setdefault(pn, _alloc.zeros(xp, self.n, dtype=self.rec.scalar))[:1] += g.sum()
                 elif pn in pre:
                     pre[pn] += g
                 else:
@@ -874,7 +875,7 @@ class RunReverse:
             if perm is None:
                 out.append(cols)
                 continue
-            inv = xp.empty(perm.shape[0], dtype=xp.int64)
+            inv = _alloc.empty(xp, perm.shape[0], dtype=xp.int64)
             inv[perm] = xp.arange(perm.shape[0], dtype=xp.int64)
             out.append(inv[cols])
         return out
@@ -886,8 +887,8 @@ class RunReverse:
         n2 = 2 if pair else 1
         if self.rec.device:
             work = int(_core.reduce_canonical_device(0, x.size, code, 0, 0, 0, 0, 0, -1, self.policy))
-            wa, wb = (self.xp.empty(max(work, 1), dtype=x.dtype) for _ in range(2))
-            res = self.xp.empty(n2, dtype=x.dtype)
+            wa, wb = (_alloc.empty(self.xp, max(work, 1), dtype=x.dtype) for _ in range(2))
+            res = _alloc.empty(self.xp, n2, dtype=x.dtype)
             stream = int(self.xp.cuda.get_current_stream().ptr)
             _core.reduce_canonical_device(int(x.data.ptr), x.size, code, 0, int(res.data.ptr),
                                           int(wa.data.ptr), int(wb.data.ptr), stream, -1,

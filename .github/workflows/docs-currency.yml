@@ -1,0 +1,23 @@
+# Copyright 2026 Alessandro Masat
+# SPDX-License-Identifier: Apache-2.0
+#
+# Read-only, once a day: the live documentation must show the newest release and serve a sitemap with lastmod.
+# A red run here means the public pages are out of date (or a development version leaked): redeploy with docs.yml.
+
+name: docs-currency
+
+on:
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  current:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: eagle
+        run: bash tools/docs_current_check.sh eagle

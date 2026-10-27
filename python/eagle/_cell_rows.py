@@ -16,6 +16,7 @@ import threading
 
 import numpy as np
 
+from . import _alloc
 from ._graph_reduce import _lower_cpu, _lower_gpu, check_policy, reduce
 
 #: samples per row, fixed by the kernel
@@ -56,11 +57,12 @@ def companions_of(plugin) -> dict:
     kernel holds (sidecar ``companions``). Every eagle door makes these planes
     itself, zeroed, with the bind; the caller never passes them and they are
     not handed back."""
+    declared = (getattr(plugin, "companions", None)
+                or (getattr(plugin, "_meta", None) or {}).get("companions"))
+    if declared:                # a stage of a split kernel is not its source kernel
+        return declared
     source = getattr(plugin, "_hawk_source", None)
-    if source is not None:
-        return source[0].walk.companions
-    return (getattr(plugin, "companions", None)
-            or (getattr(plugin, "_meta", None) or {}).get("companions") or {})
+    return {} if source is None else source[0].walk.companions
 
 
 def fold_steps(plugin, planes: dict, pairs, device=None) -> tuple:
@@ -159,12 +161,12 @@ class CellRows:
         self._steps = []        # plain callables: legal inside a stream capture
         for name, op in cells.items():
             dt = np.dtype(dtype)
-            hi = self.rows[name] = xp.zeros(rows, dtype=dt)
+            hi = self.rows[name] = _alloc.zeros(xp, rows, dtype=dt)
             out = self.cell[name] = (outs or {}).get(name)
             if out is None:
-                out = self.cell[name] = xp.zeros(1, dtype=dt)
+                out = self.cell[name] = _alloc.zeros(xp, 1, dtype=dt)
             if op in ("sum", "mean"):
-                lo = self.rows[comp_name(name)] = xp.zeros(rows, dtype=dt)
+                lo = self.rows[comp_name(name)] = _alloc.zeros(xp, rows, dtype=dt)
                 self._steps.append(lower(reduce(hi, out, comp=lo, policy=policy), None))
             else:
                 self._steps.append(lower(reduce(hi, out, op=op), None))

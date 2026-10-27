@@ -13,7 +13,6 @@ import threading
 import numpy as np
 import pytest
 
-import eagle
 from eagle import ActiveSet, _active_set
 
 

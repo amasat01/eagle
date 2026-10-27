@@ -483,7 +483,6 @@ def test_run_marker_samples_first_is_zero_copy(vec3_unit):
 
 
 def test_bound_buffer_address_is_the_inputs_for_a_marked_plane(vec3_unit):
-    import ctypes
 
     p = _host_plan(vec3_unit)
     xf = np.asfortranarray(_sm(3))

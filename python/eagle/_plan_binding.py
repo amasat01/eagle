@@ -7,9 +7,11 @@ from __future__ import annotations
 
 import ctypes
 import importlib
+from typing import TYPE_CHECKING
 
 import numpy as np
 
+from . import _alloc
 from . import _bounded, _cell_rows, _counters, _lane_bind, _layout, _split
 from .interop import _stream_handle as _handle_of
 from .interop import _wrap_external_stream
@@ -34,6 +36,8 @@ from ._plan_planes import (
     _check_uniform,
     _declared_widths,
     _plane_dtype,
+    gathered,
+    sample_spec,
     device_scope,
     function_on,
     planes_device,
@@ -42,23 +46,29 @@ from ._plan_planes import (
 )
 from .interop import BufferRefused
 
+if TYPE_CHECKING:
+    from .plan import Plan
 
 
 def one_step_word(arg_spec, planes: dict, framework: str = "numpy") -> dict:
     """``planes`` plus a one-cell ``int64`` word of ``1`` under
     ``fused_steps`` when the artifact reads that word and the caller binds
     none, so a launch outside :func:`eagle.until_done` takes exactly one
-    step. ``framework`` is where the word lives (``"cupy"`` for a device
+    step, and a ``jump_seed`` of ``0`` for a ``jump=`` derivative that draws.
+    ``framework`` is where the word lives (``"cupy"`` for a device
     bind, ``"numpy"`` otherwise). Any other artifact gets ``planes`` back
     unchanged."""
+    spec = tuple(arg_spec)
+    if ("uniform", "jump_seed") in spec and "jump_seed" not in planes:
+        planes = {**planes, "jump_seed": 0}     # a hawk jump= derivative's draw key
     name = FUSED_STEPS_SLOT[1]
-    if FUSED_STEPS_SLOT not in tuple(arg_spec) or name in planes:
+    if FUSED_STEPS_SLOT not in spec or name in planes:
         return planes
     if framework == "cupy":
         import cupy as xp
     else:
         xp = np
-    return {**planes, name: xp.ones(1, dtype=xp.int64)}
+    return {**planes, name: _alloc.full(xp, 1, 1, dtype=xp.int64)}
 
 
 def own_companions(plugin, planes: dict, framework: str = "numpy") -> dict:
@@ -70,7 +80,7 @@ def own_companions(plugin, planes: dict, framework: str = "numpy") -> dict:
     if not owned:
         return planes
     xp = importlib.import_module("cupy") if framework == "cupy" else np
-    return {**planes, **{comp: xp.zeros(planes[target].shape, dtype=planes[target].dtype)
+    return {**planes, **{comp: _alloc.zeros(xp, planes[target].shape, dtype=planes[target].dtype)
                          for comp, target in owned.items()}}
 
 
@@ -127,11 +137,12 @@ def _bind_one(p: Plan, planes: dict, device=None) -> BoundPlan:
         planes, adapted = _adapt_planes(plugin, arg_spec, planes, door="bind")
         planes = widen_indices(plugin, arg_spec, planes)
         if n is None:
-            n = _lane_bind.n_of(arg_spec, planes)
+            n = _lane_bind.n_of(sample_spec(plugin, arg_spec), planes)
         parts = p.partitions_for(n)
         active = _active_count_plane(arg_spec, planes, parts, plugin)
         dtype = _plane_dtype(plugin)
         vec_mut, mat_mut = _mutable_shapes(plugin)
+        compact = gathered(plugin)
         for role, name in arg_spec:
             if role == "nsamples":
                 continue
@@ -140,8 +151,11 @@ def _bind_one(p: Plan, planes: dict, device=None) -> BoundPlan:
             else:
                 _check_plane(role, name, planes[name], n=n, dtype=dtype,
                              width=widths.get(name), framework=framework,
-                             declared=_declared_dtype(plugin, name))
-                _lane_bind.check_sink(plugin, name, planes[name], n, door="bind")
+                             declared=_declared_dtype(plugin, name),
+                             compact=role == "mat_in" and name in compact,
+                             columns=_lane_bind.gather_columns(plugin, name, n))
+                _lane_bind.check_sink(plugin, name, planes[name], n,
+                                      _lane_bind.extents_of(plugin, planes), planes, door="bind")
 
         int_uniforms = _integer_uniforms(plugin)
         boxes, addrs = _pack_args(
@@ -805,6 +819,7 @@ class BoundPlan:
                     f"(bound: {list(self.names)})"
                 )
             role = self._arg_spec[slot][0]
+            self._guard_broadcast(name, value)
             if role == "nsamples":
                 raise ValueError(
                     f"eagle.plan.rebind: {name!r} is the 'nsamples' role, which "
@@ -817,7 +832,8 @@ class BoundPlan:
                 value = _lane_bind.flatten(self.plan.plugin, self._arg_spec, {name: value},
                                            self._widths, door="rebind")[name]
                 width = self._widths.get(name, 1)
-                if role in PER_SAMPLE_ROLES and width > 1:
+                compact = role == "mat_in" and name in gathered(self.plan.plugin)
+                if role in PER_SAMPLE_ROLES and width > 1 and not compact:
                     a = _layout.adapt(name, value, (width,),
                                       writes=role in OUTPUT_ROLES)
                     if a is not None:
@@ -827,8 +843,12 @@ class BoundPlan:
                 _check_plane(role, name, value, n=self._n, dtype=self._dtype,
                              width=self._widths.get(name),
                              framework=self._framework,
-                             declared=_declared_dtype(self.plan.plugin, name))
-                _lane_bind.check_sink(self.plan.plugin, name, value, self._n, door="rebind")
+                             declared=_declared_dtype(self.plan.plugin, name),
+                             compact=compact,
+                             columns=_lane_bind.gather_columns(self.plan.plugin, name, self._n))
+                _lane_bind.check_sink(self.plan.plugin, name, value, self._n,
+                                      _lane_bind.extents_of(self.plan.plugin, {name: value}),
+                                      door="rebind")
                 self._copies.pop(name, None)
                 if a is not None and a.scratch is not None:
                     self._copies[name] = a
@@ -852,6 +872,15 @@ class BoundPlan:
         self._gen += 1
         _counters.bump("rebinds")  # only on a completed rebind
         return self
+
+    def _guard_broadcast(self, name: str, value) -> None:
+        """A plane of a hawk kernel built to read it broadcast keeps the pattern
+        it was bound with (hawk's rule, :mod:`hawk._broadcast`)."""
+        source = getattr(self.plan.plugin, "_hawk_source", None)
+        if source is not None and name in (getattr(source[0], "broadcast", None) or ()):
+            from hawk import _broadcast
+
+            _broadcast.guard_rebind(source[0], name, self._planes[name], value)
 
     def _renew_companions(self, changed: dict) -> None:
         """After a rebind: the owned companion of each rebound target cleared

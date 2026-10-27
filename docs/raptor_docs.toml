@@ -1,7 +1,7 @@
 repo = "eagle"
 helper_dirs = ["docs/content/_shared", "examples/python"]
 preinstalled = ["numpy", "IPython", "jax"]
-image_budget = 80000
+image_budget = 500_000
 nb_roots = ["docs/content"]
 jax_floor = "python/pyproject.toml"
 fresh = [

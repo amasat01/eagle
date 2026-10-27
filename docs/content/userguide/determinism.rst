@@ -166,7 +166,7 @@ per launch, so it is safe inside a captured graph. Calling the compiled kernel w
 ``hawk.run`` gives the same cell, added on the host, bitwise equal to ``policy="ordered"``.
 
 Inside ``jax.jit`` the JAX bridge finishes the cells in the same XLA call; see
-:doc:`../interop/jax`. It uses the default policy unless you pass ``policy=`` to ``function(kernel, policy=...)``,
+:doc:`../interop/use_eagle_with_jax`. It uses the default policy unless you pass ``policy=`` to ``function(kernel, policy=...)``,
 as the torch and Warp bridges also take. Where the bits must be fixed, pass ``policy="ordered"``
 or take the cell from ``hawk.run``.
 

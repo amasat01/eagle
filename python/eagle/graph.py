@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Callable
 
+from . import _alloc
 from . import _counters, _graph_view
 from ._busy import BusyGuard
 from ._conditional import (Branches, RepeatWhile, SkipGuard, Skippable,
@@ -624,7 +625,7 @@ class Graph:
     def _decision(self, cell):
         """A fresh ``uint32`` cell holding a copy of ``cell``, taken by a node
         added here: what the arms of a conditional read."""
-        decision = _xp_of(cell).zeros(1, dtype="uint32")
+        decision = _alloc.zeros(_xp_of(cell), 1, dtype="uint32")
         self.add_node(_copy(cell, decision), name="decision")
         return decision
 
@@ -658,7 +659,7 @@ class Graph:
         for k, arm in enumerate((*arms, otherwise)):
             if arm is None:
                 continue
-            base = xp.full(1, k, dtype=xp.uint32) if k else None
+            base = _alloc.full(xp, 1, k, dtype=xp.uint32) if k else None
             self.add_node(Skippable(arm, SkipGuard(decision, 0, base, 0, True)))
         return self
 

@@ -49,7 +49,8 @@ classifiers = [
 # `raptor.schema.blocks.validate_neural_block_descriptor` (first shipped in 0.2.0), which
 # `eagle.sidecar` imports. The constraint is expressed where a resolver can act on it,
 # never as a runtime surprise.
-dependencies = ["numpy>=1.26", "raptor-core>=0.7.0,<0.8"]
+# aether-dsc: the `aether` arrays eagle allocates its planes with (CPU and GPU, no extra needed).
+dependencies = ["numpy>=1.26", "raptor-core>=0.7.0,<0.8", "aether-dsc>=0.7.1,<0.8"]
 
 # The "raptor.pattern_loaders" entry-point declaration for
 # "neural_block" moved to a separate package — eagle.neural was extracted there
@@ -83,13 +84,13 @@ cuda = [
 # eagle.frameworks.torch: the torch.autograd bridge. torch is imported only by
 # that submodule, so plain `import eagle` never needs it. The bridges compile
 # kernels with hawk; 0.5.1 is the first to derive nested derivatives.
-torch = ["torch>=2.2", "raptor-hawk>=0.7.0,<0.8"]
+torch = ["torch>=2.2", "raptor-hawk>=0.7.1,<0.8"]
 # eagle's JAX interop and eagle.frameworks.jax (see docs: interop contract).
 # JAX publishes wheels for Python 3.12 and newer, so this extra resolves there
 # and nowhere else; for GPU arrays install JAX's own CUDA extra (jax[cuda12] or
 # jax[cuda13]). The floor is the jaxlib whose XLA FFI headers libeagle_xla.so
 # vendors (an older runtime with newer headers is the unsupported direction).
-jax = ["jax>=0.11.2", "raptor-hawk>=0.7.0,<0.8"]
+jax = ["jax>=0.11.2", "raptor-hawk>=0.7.1,<0.8"]
 # eagle.Graph.plot: the graph drawn with matplotlib (imported only by that
 # method; show()/to_mermaid()/to_dot() need nothing).
 plot = ["matplotlib>=3.7"]
@@ -143,30 +144,3 @@ markers = [
     "repo_local: venv-gate guardrail — certifies the REPOSITORY (docs/pyproject/source-as-text, or a dev-env package-presence assumption), never the installed DISTRIBUTION, so a wheel legitimately cannot carry what it checks. Deselect only in the isolated-venv leg (release.yml test-wheel, -m 'not repo_local'); the repo-rooted suite (CI, dev runs) always runs these — never deselected there. The venv leg enumerates and pins the count by collection, never a hand list.",
     "wall_clock: compares measured run times, which flip with machine load; skipped unless EAGLE_WALL_CLOCK_ROWS=1 is set (run on a quiet machine)",
 ]
-
-[tool.ruff]
-line-length = 88
-target-version = "py39"
-
-[tool.ruff.lint]
-select = ["E", "F", "I", "UP", "D"]
-ignore = [
-    "D102",
-    "D105",
-    "D107", # per-method / magic / __init__ docstrings optional
-    "D205",
-    "D209",
-    "D401", # docstring whitespace / imperative-mood pedantry
-    "E741", # single-letter loop vars (l/i) used deliberately
-]
-
-[tool.ruff.lint.pydocstyle]
-convention = "pep257"
-
-[tool.ruff.lint.per-file-ignores]
-"tests/*" = ["D"]        # tests are self-describing; no docstring requirement
-"__init__.py" = ["D104"]
-# These layout gates embed CUDA static_assert strings whose lines are intrinsically
-# > 88 cols and cannot carry a per-line noqa (they live inside string literals).
-"tests/test_gref_layout.py" = ["D", "E501"]
-"tests/test_handle_layout.py" = ["D", "E501"]

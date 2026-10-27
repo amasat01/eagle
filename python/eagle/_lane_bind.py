@@ -10,7 +10,8 @@ its label (``channel=64``) or reads it off a lane-shaped plane, ``head +
 lane shape`` (``(64, 8192)``, ``(W, 64, 8192)``). C-contiguous, such a plane
 IS the flat lane-fastest plane the launch addresses, so it is flattened with a
 view. A shape that contradicts the declared static extents is refused by name;
-nothing broadcasts.
+nothing broadcasts here (``eagle.deploy(k)`` of a hawk kernel routes a broadcast
+shape to the variant of its pattern before it reaches this door).
 
 The lane form has ``len(head) + len(axes)`` dimensions and the flat form
 ``len(head) + 1``, so with the declared head (a Scalar's ``()``, a Vector's
@@ -63,6 +64,14 @@ def spelling(axes) -> str:
             return "None" if extent is None else str(extent)
         return f'"{label}"' if extent is None else f'"{label}":{extent}'
     return "Grid[" + ", ".join(one(a, e) for a, e in axes) + "]"
+
+
+def free_labels(plugin) -> set:
+    """The labels of the sinks' runtime axes that no lane axis shares: each is its
+    own extent, given as ``<label>=N`` or by the plane passed."""
+    lane = {a for a, _e in declared_axes(plugin)}
+    return {ax["label"] for spec in (getattr(plugin, "plane_axes", None) or {}).values()
+            for ax in spec["axes"] if ax["extent"] is None and ax["label"] not in lane}
 
 
 def _total(axes, runtime) -> int:
@@ -145,11 +154,14 @@ def _flatten(axes, arg_spec, kw: dict, widths, door):
         first = axes[0][1] is None
         if (dims[1:] != static[1:]) if first else (dims != static):
             want = "(" + ", ".join(["n" if first else str(static[0])] + [str(e) for e in static[1:]]) + ")"
+            hint = ("; a read-only input that varies along fewer axes binds through the hawk "
+                    "kernel (eagle.deploy(k), or a built variant), not a prebuilt plugin"
+                    if all(d in (1, e) for d, e in zip(dims[1:], static[1:])) else "")
             raise ValueError(
                 f"eagle.plan.{door}: argument {name!r} has lane shape {dims}, which "
                 f"contradicts the kernel's declared {spelling(axes)} = {want}: the "
                 "static extents are part of the kernel, only the runtime first axis "
-                "is the caller's")
+                f"is the caller's{hint}")
         if not _contiguous(value):
             raise ValueError(
                 f"eagle.plan.{door}: lane-shaped argument {name!r} (shape {got}) must be "
@@ -192,6 +204,11 @@ def bind_n(plugin, arg_spec, kw, widths, *, door="run"):
         n = want
     elif n is None and axes and axes[0][1] is not None:
         n = _total(axes, 1)                         # every axis static
+    for label in free_labels(plugin) & out.keys() - {nm for _r, nm in arg_spec}:
+        if isinstance(out[label], bool) or not isinstance(out[label], int) or out[label] < 1:
+            raise ValueError(
+                f"eagle.plan.{door}: {label}= is the extent of the runtime axis {label!r}, "
+                f"a positive int; got {out[label]!r}")
     if n is None:
         bound = {role for role, name in arg_spec if name in out}
         if bound & set(_BUFFER_SHAPED_ROLES) and not bound & (
@@ -221,34 +238,121 @@ def n_of(arg_spec, kw) -> int:
     return _n_from_kw([(r, nm) for r, nm in arg_spec if r not in _BUFFER_SHAPED_ROLES], kw)
 
 
-def output_shape(plugin, name, width, n):
+def output_shape(plugin, name, width, n, extents=None, planes=None):
     """The shape of output plane ``name`` for ``n`` lanes and per-lane
     ``width``. A sink declared with named axes (sidecar ``plane_axes``; a
     reduction's output, a ``Mutable["bin":256]``) is ``(*payload, *axes)``,
-    a runtime axis as long as the launch's first lane axis. Any other
+    a runtime axis as long as the launch's first lane axis, or, when no lane
+    axis shares its label, the ``extents[label]`` the caller gave. Any other
     output is the flat plane, which :func:`shape_result` views lane-shaped.
 
     This is the rule of ``hawk._lane_bind.output_shape`` (eagle does not
     import hawk): the kept axes are not ``n``, so a sink sized ``(n,)`` is
-    the wrong shape, and overruns when ``payload * kept > n``."""
+    the wrong shape, and overruns when ``payload * kept > n``. The adjoint of a
+    lookup plane the caller bound (``planes``) is that plane's shape."""
+    shape = _like_shape(plugin, name, planes)
+    if shape is not None:
+        return shape
     spec = (getattr(plugin, "plane_axes", None) or {}).get(name)
     if spec is None:
         return _plane_shape(width, n)
     axes = declared_axes(plugin)
     runtime = n // prod(e for _a, e in axes[1:]) if axes else n
-    return tuple(spec["payload"]) + tuple(
-        runtime if a["extent"] is None else a["extent"] for a in spec["axes"])
+    free = free_labels(plugin)
+
+    def extent(a):
+        if a["extent"] is not None:
+            return a["extent"]
+        if a["label"] not in free:
+            return runtime
+        if (extents or {}).get(a["label"]) is None:
+            raise ValueError(f"{name!r} has a runtime axis {a['label']!r}; pass "
+                             f"{a['label']}=<extent of {a['label']!r}>")
+        return extents[a["label"]]
+
+    return tuple(spec["payload"]) + tuple(extent(a) for a in spec["axes"])
 
 
-def check_sink(plugin, name, plane, n, *, door="run"):
+def keyed_size(plugin, spec: dict, n: int) -> int:
+    """The elements of a keyed plane eagle owns between the stages of a split
+    kernel (sidecar ``keyed``): ``spec["width"]`` payload entries over the kept
+    lane axes, a runtime one as long as the first lane axis (the rule of
+    ``hawk._lane_bind.keyed_size``)."""
+    axes = declared_axes(plugin)
+    runtime = n // prod(e for _a, e in axes[1:]) if axes else n
+    return spec["width"] * prod(runtime if e is None else e for _a, e in spec["axes"])
+
+
+def gather_columns(plugin, name, n):
+    """The column count the compact Matrix plane ``name`` must have at ``n`` lanes:
+    the product of the extents of the axes it varies along (sidecar ``gather_mats``;
+    a runtime axis is ``n`` over the static ones). ``None`` when no pattern is recorded."""
+    declared = (getattr(plugin, "gather_mats", None)
+                or (getattr(plugin, "_meta", None) or {}).get("gather_mats"))
+    kept = declared.get(name) if isinstance(declared, dict) else None
+    axes = declared_axes(plugin)
+    if kept is None or not axes:
+        return None
+    static = prod(e for _a, e in axes if e is not None)
+    return prod((n // static if e is None else e) for (_a, e), k in zip(axes, kept) if k)
+
+
+def adjoint_like(plugin) -> dict:
+    """``{adjoint plane: the lookup plane it is the gradient of}`` (sidecar
+    ``adjoint_like``): such a plane is the lookup plane's size, not the lane
+    count; a Table's length is the caller's."""
+    declared = (getattr(plugin, "adjoint_like", None)
+                or (getattr(plugin, "_meta", None) or {}).get("adjoint_like"))
+    if declared:
+        return declared
+    source = getattr(plugin, "_hawk_source", None)
+    return {} if source is None else source[0].walk.adjoint_like
+
+
+def _like_shape(plugin, name, planes):
+    """The shape of the lookup plane ``name`` is the adjoint of, when the caller
+    bound it; else ``None``."""
+    like = (planes or {}).get(adjoint_like(plugin).get(name))
+    shape = None if like is None else getattr(like, "shape", None)
+    return None if shape is None else tuple(int(e) for e in shape)
+
+
+def extents_of(plugin, kw) -> dict:
+    """``{label: N}`` for each runtime axis no lane axis shares: the caller's
+    ``<label>=N``, else the length of the first sink plane passed with that axis."""
+    free, out = free_labels(plugin), {}
+    for name, spec in (getattr(plugin, "plane_axes", None) or {}).items():
+        shape = getattr(kw.get(name), "shape", None)
+        for i, a in enumerate(spec["axes"]):
+            at = len(spec["payload"]) + i
+            if a["label"] in free and a["label"] not in out:
+                if a["label"] in kw:
+                    out[a["label"]] = kw[a["label"]]
+                elif shape is not None and at < len(shape):
+                    out[a["label"]] = int(shape[at])
+    return out
+
+
+def check_sink(plugin, name, plane, n, extents=None, planes=None, *, door="run"):
     """``plane`` (a sink the caller passed) when it has exactly the shape
-    :func:`output_shape` gives, else refused by name. Other planes pass."""
+    :func:`output_shape` gives, else refused by name; the adjoint of a lookup
+    plane only has to hold as many elements as that plane. Other planes pass."""
+    like = _like_shape(plugin, name, planes)
+    if like is not None:
+        if prod(int(e) for e in plane.shape) < prod(like):
+            raise ValueError(
+                f"eagle.plan.{door}: {name!r} is the gradient of the lookup plane "
+                f"{adjoint_like(plugin)[name]!r} (shape {like}), so it needs that many "
+                f"elements; got shape {tuple(int(e) for e in plane.shape)}")
+        return plane
     if name not in (getattr(plugin, "plane_axes", None) or {}):
         return plane
-    want, got = output_shape(plugin, name, 1, n), tuple(int(e) for e in plane.shape)
+    got = tuple(int(e) for e in plane.shape)
+    spec = plugin.plane_axes[name]
+    want = output_shape(plugin, name, 1, n, extents)
     if got != want:
-        axes = ", ".join(f'{a["label"]}={a["extent"]}'
-                         for a in plugin.plane_axes[name]["axes"])
+        axes = ", ".join(a["label"] if a["extent"] is None else f'{a["label"]}={a["extent"]}'
+                         for a in spec["axes"])
         raise ValueError(
             f"eagle.plan.{door}: {name!r} is declared with the axes ({axes}), so at "
             f"n={n} it is bound {want} (payload first); got {got}")
@@ -282,23 +386,24 @@ def shape_result(plugin, result, out_names, dims, n, widths):
 
 
 def take_extent(plugin, kw: dict):
-    """``(kw without the extent, extent | None)`` for a kernel CALL: the
-    first axis' label is lifted out before the call signature binds the
+    """``(kw without the extents, {label: extent})`` for a kernel CALL: the first
+    axis' label and each free runtime label (a sink's own extent, see
+    :func:`free_labels`) are lifted out before the call signature binds the
     planes (a plane of that name keeps it)."""
     axes = declared_axes(plugin)
     if not axes:
-        return kw, None
-    names = {nm for _r, nm in plugin.arg_spec}
+        return kw, {}
+    names = {nm for _r, nm in plugin.arg_spec} | {
+        nm for st in getattr(plugin, "_stages", None) or () for _r, nm in st.plugin.arg_spec}
     _refuse_n(kw, axes, names, "call")
     _refuse_static(kw, axes, names, "call")
     label = axes[0][0]
-    stray = [k for k in kw if k not in names and k != label]
+    wanted = ({label} if label is not None else set()) | free_labels(plugin)
+    stray = [k for k in kw if k not in names and k not in wanted]
     if stray:
         raise ValueError(
             f"eagle.plan.call: unexpected keyword {stray[0]!r}; this kernel declares "
             f"{spelling(axes)}, so its run-time extent is passed as "
             + (f"{label}=<extent>" if label is not None else "a lane-shaped plane"))
-    if label is None or label not in kw or label in names:
-        return kw, None
-    rest = dict(kw)
-    return rest, rest.pop(axes[0][0])
+    lifted = {k: kw[k] for k in wanted if k in kw and k not in names}
+    return {k: v for k, v in kw.items() if k not in lifted}, lifted

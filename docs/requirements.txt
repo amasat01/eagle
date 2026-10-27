@@ -15,3 +15,4 @@ jax[cpu]==0.11.2
 # the shared docs tooling; offline, from a checkout of the landing site: pip install ./site
 raptor-docs @ git+https://github.com/amasat01/amasat01.github.io@main
 setuptools-scm
+sphinx-sitemap>=2.6

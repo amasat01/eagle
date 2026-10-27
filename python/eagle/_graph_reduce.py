@@ -25,6 +25,7 @@ from __future__ import annotations
 from functools import lru_cache
 from types import MappingProxyType
 
+from . import _alloc
 from .graph import Node, register_node_kind
 from .interop import _root_module
 
@@ -196,7 +197,7 @@ def _lower_gpu(node, ctx):
     with cupy.cuda.Device(device):
         # the work buffers belong to the lowered step, not to a launch
         elems = int(_core.reduce_canonical_device(0, rows, dtype, op, 0, 0, 0, 0, device, policy, cols))
-        work = [cupy.zeros(elems, dtype=x.dtype if x.dtype != cupy.bool_ else cupy.uint8) for _ in range(2)]
+        work = [_alloc.zeros(cupy, elems, dtype=x.dtype if x.dtype != cupy.bool_ else cupy.uint8) for _ in range(2)]
     xp, op_ptr = int(x.data.ptr), int(out.data.ptr)
     cp = 0 if comp is None else int(comp.data.ptr)
     wa, wb = int(work[0].data.ptr), int(work[1].data.ptr)

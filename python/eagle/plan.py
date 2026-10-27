@@ -37,6 +37,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from . import _alloc
 from .interop import BufferRefused
 
 from . import _cell_rows, _counters, _layout, _split
@@ -50,6 +51,7 @@ from ._plan_pack import _integer_uniforms, _mutable_shapes, _pack_args
 from ._plan_planes import (
     _adapt_planes,
     _bound,
+    sample_spec,
     _check_run_shapes,
     _check_run_writable,
     _declared_widths,
@@ -470,6 +472,7 @@ def _run_device_plan(plugin, arg_spec, kw, n: int, parts, *, launch=None, gather
     dtype = _plane_dtype(plugin)
     widths = _declared_widths(plugin)
     vec_mut, mat_mut = _mutable_shapes(plugin)
+    extents = _lane_bind.extents_of(plugin, kw)
     cells = _cell_rows.scratch(plugin, n, cp, dtype, policy)
     device_arrays = {}
     for role, name in arg_spec:
@@ -481,9 +484,9 @@ def _run_device_plan(plugin, arg_spec, kw, n: int, parts, *, launch=None, gather
                 _lane_bind.check_sink(
                     plugin, name,
                     _checked_out(name, role, cp.asarray(kw[name]),
-                                 _output_dtype(plugin, name, dtype), device=True), n)
+                                 _output_dtype(plugin, name, dtype), device=True), n, extents, kw)
                 if name in kw
-                else cp.zeros(_lane_bind.output_shape(plugin, name, widths.get(name, 1), n),
+                else _alloc.zeros(cp, _lane_bind.output_shape(plugin, name, widths.get(name, 1), n, extents, kw),
                                dtype=_output_dtype(plugin, name, dtype))
             )
         elif role in INPUT_ROLES:
@@ -492,7 +495,7 @@ def _run_device_plan(plugin, arg_spec, kw, n: int, parts, *, launch=None, gather
                                                    name=name, role=role)
     owned = _cell_rows.owned_pairs(plugin, kw)
     for target, comp in owned:      # the run owns it: the target's shape, zeroed
-        device_arrays[comp] = cp.zeros_like(device_arrays[target])
+        device_arrays[comp] = _alloc.zeros_like(cp, device_arrays[target])
 
     if gather is not None:
         for name in out_names:
@@ -537,6 +540,7 @@ def _run_host_plan(plugin, arg_spec, kw, n: int, parts, *, launch=None, gather=N
     dtype = _plane_dtype(plugin)
     widths = _declared_widths(plugin)
     vec_mut, mat_mut = _mutable_shapes(plugin)
+    extents = _lane_bind.extents_of(plugin, kw)
     cells = _cell_rows.scratch(plugin, n, np, dtype, policy)
     host_arrays = {}
     for role, name in arg_spec:
@@ -552,9 +556,9 @@ def _run_host_plan(plugin, arg_spec, kw, n: int, parts, *, launch=None, gather=N
                 _lane_bind.check_sink(
                     plugin, name,
                     _checked_out(name, role, _host_view(name, role, kw[name]),
-                                 _output_dtype(plugin, name, dtype), device=False), n)
+                                 _output_dtype(plugin, name, dtype), device=False), n, extents, kw)
                 if name in kw
-                else np.zeros(_lane_bind.output_shape(plugin, name, widths.get(name, 1), n),
+                else np.zeros(_lane_bind.output_shape(plugin, name, widths.get(name, 1), n, extents, kw),
                                dtype=_output_dtype(plugin, name, dtype))
             )
         elif role in INPUT_ROLES:
@@ -747,7 +751,7 @@ def _run_one(p: Plan, /, **kw):
         supplied = {name: kw[name] for name in out_names if name in kw}
         kw, adapted = _adapt_planes(plugin, arg_spec, kw)
         if n is None:
-            n = _lane_bind.n_of(arg_spec, kw)
+            n = _lane_bind.n_of(sample_spec(plugin, arg_spec), kw)
         _check_run_shapes(plugin, arg_spec, kw, n)
         parts = p.partitions_for(n)
         result = _run_structure(p, plugin, arg_spec, kw, n, parts, p.policy)

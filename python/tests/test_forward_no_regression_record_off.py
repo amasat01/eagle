@@ -8,7 +8,6 @@ import time
 
 import numpy as np
 
-import eagle
 from _reverse_fixtures import chain, plans
 
 N = 1 << 18

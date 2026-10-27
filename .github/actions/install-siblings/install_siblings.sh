@@ -3,8 +3,11 @@
 # built from its companion checkout into OUT (wheel for pure Python, sdist otherwise).
 # usage: install_siblings.sh "pkg=path pkg=path ..." OUT [dry]     (path = package dir inside the checkout)
 # Prints `<pkg> <V>: PyPI | built from <path>`; with $GITHUB_OUTPUT set, writes `dir`, `pins` and `built`
-# (the packages built from source). `dry` only resolves: nothing is built.
+# (the packages built from source). `dry` only resolves: nothing is built. A package whose file for that
+# exact version is already in OUT prints `cached` and is not built again.
 set -euo pipefail
+# this eagle checkout: its plugin/gref_layout.h goes into the sealed aether payload, wherever the job checked eagle out
+eagle_root=$(cd "$(dirname "$0")/../../.." && pwd)
 siblings=$1
 out=$(mkdir -p "$2" && cd "$2" && pwd)
 dry=${3:-}
@@ -32,6 +35,12 @@ for pair in $siblings; do
   echo "$pkg $v: built from $path"
   built="$built $pkg"
   [ -z "$dry" ] || continue
+  # the action restores $out by a digest of the checkout, so a file for this exact version is what a build would give
+  norm=${pkg//-/_}
+  if compgen -G "$out/${norm}-${v}-*.whl" > /dev/null || [ -e "$out/${norm}-${v}.tar.gz" ]; then
+    echo "$pkg $v: cached"
+    continue
+  fi
   python -m pip install --quiet --prefer-binary build
   case $pkg in
     aether-dsc)  # sealing runs the NVRTC-clean gate; the runner has no CUDA toolkit, so NVRTC and CCCL come from PyPI
@@ -41,7 +50,10 @@ for pair in $siblings; do
         gate=
       fi
       # shellcheck disable=SC2086  # $gate is one flag or nothing
-      (cd "$path" && python -m aether_dsc.seal $gate && python -m build --wheel --outdir "$out") ;;
+      # SIBLING_SDISTS names packages to ship as an sdist instead (the Kaggle leg: built on Kaggle for its own
+      # Python, with the CUDA plugin from its toolkit); the sealed payload is inside either way
+      form=--wheel; case " ${SIBLING_SDISTS:-} " in *" $pkg "*) form=--sdist ;; esac
+      (cd "$path" && python -m aether_dsc.seal $gate --layout-header "$eagle_root/plugin/gref_layout.h" && python -m build $form --outdir "$out") ;;
     raptor-core) (cd "$path" && python -m build --wheel --outdir "$out") ;;
     *) (cd "$path" && python -m build --sdist --outdir "$out") ;;
   esac

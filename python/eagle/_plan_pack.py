@@ -66,6 +66,8 @@ def _gref_mirror_box(arr, n: int, device_type: int):
     strides = [s // arr.itemsize for s in arr.strides]
     comp = strides[0] if arr.ndim >= 2 else int(n)
     sample = strides[-1] if strides else 1
+    if arr.ndim == 2:
+        n = arr.shape[-1]               # a compact plane's own column count
     return GRefMirror(
         _data_ptr(arr), int(n), int(comp), int(sample), int(device_type), 0
     )

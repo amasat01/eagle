@@ -115,3 +115,125 @@ def test_rebinding_the_target_to_another_shape_makes_a_companion_of_that_shape(h
     assert bound._planes["acc_c"].shape == (3,)
     bound.launch()
     np.testing.assert_array_equal(wider, [clean[0], 0.0, 0.0])
+
+
+# --- SplitBound.clear: every stage that binds the name, and the keyed read-back --- #
+@hawk_trace.kernel
+def split_acc(x: hawk_trace.Scalar, key: hawk_trace.Index,
+              acc: hawk_trace.Mutable[hawk_trace.Scalar],
+              z: hawk_trace.Mutable[hawk_trace.Scalar]):
+    hawk.scatter(acc)[key] += x
+    z = x / hawk.sum(x)
+
+
+@hawk_trace.kernel
+def split_keyed_share(lane: hawk_trace.Grid["row", "col":8], x: hawk_trace.Scalar,
+                      acc: hawk_trace.Mutable[hawk_trace.Scalar],
+                      key: hawk_trace.Index) -> hawk_trace.Scalar:
+    hawk.scatter(acc)[key] += x
+    return x / hawk.sum(x, over="col", policy="compensated")
+
+
+def _xp(framework):
+    if framework == "numpy":
+        return np
+    return pytest.importorskip("cupy")
+
+
+def _host(a):
+    return a.get() if hasattr(a, "get") else np.asarray(a)
+
+
+def _split_bind(tmp_path, framework):
+    import eagle.plan
+
+    xp = _xp(framework)
+    target = "host" if framework == "numpy" else "cuda"
+    (p,) = eagle.plan.auto([split_acc], targets=(target,), cache_dir=str(tmp_path))
+    x = xp.asarray(np.array([2.0**53, 1.0, 1.0, 1.0]))
+    key = xp.zeros(4, dtype=xp.int64)
+    acc, z = xp.zeros(1), xp.zeros(4)
+    return p.bind(x=x, key=key, acc=acc, z=z), acc, z
+
+
+FRAMEWORKS = [pytest.param("numpy"), pytest.param("cupy", marks=pytest.mark.gpu)]
+
+
+@pytest.mark.parametrize("framework", FRAMEWORKS)
+def test_split_clear_zeroes_the_output_and_its_owned_companion(tmp_path, framework):
+    bound, acc, z = _split_bind(tmp_path, framework)
+    bound.launch()
+    clean_acc, clean_z = _host(acc).copy(), _host(z).copy()
+    comps = [b._planes["acc_c"] for b in bound.stages if "acc_c" in b._planes]
+    assert comps and _host(comps[0]).any(), "the subject must leave a nonzero companion"
+
+    bound.clear("acc", "z")
+    assert not _host(acc).any() and not _host(z).any()
+    assert not any(_host(c).any() for c in comps)
+
+    bound.launch()                      # equals a fresh first launch, bit for bit
+    np.testing.assert_array_equal(_host(acc), clean_acc)
+    np.testing.assert_array_equal(_host(z), clean_z)
+
+
+@pytest.mark.parametrize("framework", FRAMEWORKS)
+def test_split_clear_of_the_target_alone_is_not_enough(tmp_path, framework):
+    """The control: zeroing the target by hand leaves the residual."""
+    bound, acc, _z = _split_bind(tmp_path, framework)
+    bound.launch()
+    clean = _host(acc).copy()
+    acc.fill(0)
+    bound.launch()
+    assert not np.array_equal(_host(acc), clean)
+
+
+@pytest.mark.parametrize("framework", FRAMEWORKS)
+def test_split_clear_refuses_what_is_not_a_plain_output(tmp_path, framework):
+    bound, _acc, _z = _split_bind(tmp_path, framework)
+    for bad in ("nope", "acc_c", "cut0", "x"):
+        with pytest.raises(ValueError, match="are not bound planes|not bound output"):
+            bound.clear(bad)
+
+
+@pytest.mark.parametrize("framework", FRAMEWORKS)
+def test_split_clear_after_a_keyed_read_back_repeats_the_first_launch(tmp_path, framework):
+    import eagle.plan
+
+    xp = _xp(framework)
+    target = "host" if framework == "numpy" else "cuda"
+    (p,) = eagle.plan.auto([split_keyed_share], targets=(target,), cache_dir=str(tmp_path))
+    rng = np.random.default_rng(4)
+    x = xp.asarray(rng.uniform(0.5, 2.0, (4, 8)))
+    key = xp.asarray(np.zeros(32, dtype=np.int64))
+    acc, out = xp.zeros(1), xp.zeros((4, 8))
+    bound = p.bind(x=x, key=key, acc=acc, out=out)
+    bound.launch()
+    first_acc, first_out = _host(acc).copy(), _host(out).copy()
+    bound.clear("acc", "out")
+    assert not _host(acc).any() and not _host(out).any()
+    bound.launch()
+    np.testing.assert_array_equal(_host(acc), first_acc)
+    np.testing.assert_array_equal(_host(out), first_out)
+
+
+@pytest.mark.gpu
+def test_bound_clear_on_the_device_zeroes_the_target_and_its_companion(tmp_path):
+    cp = pytest.importorskip("cupy")
+    import eagle.exec as eexec
+    from eagle import plan as eplan
+    import eagle.plan
+
+    (p,) = eagle.plan.auto([clear_scatter], targets=("cuda",), cache_dir=str(tmp_path))
+    x = cp.asarray(np.array([2.0**53, 1.0, 1.0, 1.0]))
+    acc = cp.zeros(1)
+    bound = eplan.plan(p.plugin, structure=eexec.DeviceKernel).bind(
+        x=x, key=cp.zeros(4, dtype=cp.int64), acc=acc)
+    bound.launch()
+    clean = acc.get().copy()
+    comp = bound._planes["acc_c"]
+    bound.clear("acc")
+    assert not acc.any() and not comp.any()
+    bound.launch()
+    np.testing.assert_array_equal(acc.get(), clean)
+    with pytest.raises(ValueError, match="acc_c"):
+        bound.clear("acc_c")

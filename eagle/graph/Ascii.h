@@ -79,8 +79,11 @@ inline Style styleOf(EdgeKind k) { return k == EdgeKind::RAW ? kSolid : k == Edg
 /** @brief A straight vertical (or horizontal) line piece in the given style. */
 inline const char* lineChar(bool vertical, Style st, bool unicode)
 {
-    static const char* uni[2][3] = { { "\xE2\x94\x80", "\xE2\x94\x84", "\xE2\x94\x88" },
-                                     { "\xE2\x94\x82", "\xE2\x94\x86", "\xE2\x94\x8A" } };
+    // Light box-drawing (U+2500 block) for solid runs only; the dashed and
+    // dotted styles are ASCII: the heavy/dashed glyphs (U+2504.., U+254C..) are
+    // missing from common browser monospace fonts, and the fallback font's
+    // different advance width shears the diagram in Jupyter and Sphinx.
+    static const char* uni[2][3] = { { "\xE2\x94\x80", ".", "~" }, { "\xE2\x94\x82", ":", "!" } };
     static const char* ascii[2][3] = { { "-", ".", "~" }, { "|", ":", "!" } };
     return (unicode ? uni : ascii)[vertical][st];
 }
@@ -204,6 +207,10 @@ private:
             it.node = nd.id;
             it.chain = chainOf(nd.frame);
             it.label = truncated(nd.label, maxLabel_, unicode_);
+            if (nd.opaque) {   // own code: tagged, since the box glyphs stay solid
+                it.label.insert(it.label.begin(), "<");
+                it.label.push_back(">");
+            }
             it.width = it.label.size() + 4 + (it.label.size() % 2 == 0 ? 1 : 0);   // odd: a centre column
             it.layer = lay_.layer[nd.id];
             nodeItem_.push_back(items_.size());
@@ -551,7 +558,7 @@ private:
 
     void drawFrames()
     {
-        static const char* round[] = { "\xE2\x95\xAD", "\xE2\x95\xAE", "\xE2\x95\xB0", "\xE2\x95\xAF" };
+        static const char* corner[] = { "\xE2\x94\x8C", "\xE2\x94\x90", "\xE2\x94\x94", "\xE2\x94\x98" };   // light corners: rounded ones are missing from common fonts
         for (const FrameSpan& fs : frames_) {
             if (!fs.used())
                 continue;
@@ -563,10 +570,10 @@ private:
                 border(r, fs.c0, kU | kD);
                 border(r, fs.c1, kU | kD);
             }
-            put(fs.r0, fs.c0, unicode_ ? round[0] : "+");
-            put(fs.r0, fs.c1, unicode_ ? round[1] : "+");
-            put(fs.r1, fs.c0, unicode_ ? round[2] : "+");
-            put(fs.r1, fs.c1, unicode_ ? round[3] : "+");
+            put(fs.r0, fs.c0, unicode_ ? corner[0] : "+");
+            put(fs.r0, fs.c1, unicode_ ? corner[1] : "+");
+            put(fs.r1, fs.c0, unicode_ ? corner[2] : "+");
+            put(fs.r1, fs.c1, unicode_ ? corner[3] : "+");
         }
     }
 
@@ -617,9 +624,8 @@ private:
         for (const Item& it : items_) {
             if (it.node == -1)
                 continue;
-            const bool dashed = d_.nodes[it.node].opaque;
-            const std::string h = unicode_ ? (dashed ? "\xE2\x95\x8C" : "\xE2\x94\x80") : (dashed ? "." : "-");
-            const std::string v = unicode_ ? (dashed ? "\xE2\x95\x8E" : "\xE2\x94\x82") : (dashed ? ":" : "|");
+            const std::string h = unicode_ ? "\xE2\x94\x80" : "-";
+            const std::string v = unicode_ ? "\xE2\x94\x82" : "|";
             const std::size_t y = boxY_[it.layer], right = it.x + it.width - 1;
             for (std::size_t c = it.x + 1; c < right; ++c) {
                 put(y, c, h);

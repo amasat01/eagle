@@ -7,7 +7,6 @@ refusals."""
 import numpy as np
 import pytest
 
-import eagle
 from _reverse_fixtures import chain, plans
 
 N = 16

@@ -293,7 +293,7 @@ def probe(target, out):
 
     for kind in ("auto", "persist"):
         runner, _arm, _inp = _probe_runner(card, kind, PROBE_NS[0], device)
-        step = _ask(lambda: runner.step)
+        step = _ask(lambda runner=runner: runner.step)
         head(f"kernel: {kind} ({'active-set kind, compacting' if kind == 'auto' else 'plain kind'})")
         compacting = kind == "auto"
         put(f"{kind}.persist_entry", lambda: step.persist_entry() is not None)
@@ -328,12 +328,12 @@ def probe(target, out):
         head(f"real runs: {kind}, spread, S={PROBE_STEPS}")
         for n in PROBE_NS:
             runner, arm, inp = _probe_runner(card, kind, n, device)
-            report = _ask(lambda: runner.run())
+            report = _ask(lambda runner=runner: runner.run())
             report = getattr(report, "report", report)
             put(f"{kind}.run_mode(n={n})", lambda: report.mode)
             put(f"{kind}.run_launches(n={n})", lambda: report.launches)
             put(f"{kind}.launch_fields(n={n})",
-                lambda: read_fields(runner, report) or "unavailable in this eagle (no T, c, f, R, k or text_bytes exposed)")
+                lambda runner=runner: read_fields(runner, report) or "unavailable in this eagle (no T, c, f, R, k or text_bytes exposed)")
             if slot_fill_of(report) is not None:
                 put(f"{kind}.lane_utilisation(n={n})", f"{slot_fill_of(report):.3f}")
             del runner, arm
