@@ -44,6 +44,7 @@ This section covers what changes from 0.7.1; the notes for 0.7.0 and 0.7.1 are o
 |---|---|
 | `eagle.to_cupy(x)` | `eagle.to_array(x)` for an `eagle.Array`, then `a.to("cupy")` or `cupy.from_dlpack(a)` |
 | `eagle.np_dtype(name)` | `eagle.dtypes.dtype_of(scalar_type)` (an `eagle.DType`) or `eagle.DType` |
+| elementwise comparisons on `eagle.Array` (`==`, `<`, ...) | compare on `np.asarray(a)` or `a.to("numpy")` |
 | a NumPy or CuPy array as the result of `plan.run`, `simulate`, `Record`, `Gradients` | `eagle.Array`; `.to("numpy")`, `.to("cupy")` or `returns=` |
 | `numpy` installed with eagle | `pip install raptor-eagle[numpy]` |
 | eagle following CuPy's current stream | `with eagle.stream(s):` or `stream=s` |
