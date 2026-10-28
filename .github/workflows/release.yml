@@ -117,7 +117,7 @@ jobs:
         CMAKE_C_COMPILER_LAUNCHER=ccache
         CMAKE_CXX_COMPILER_LAUNCHER=ccache
         CMAKE_CUDA_COMPILER_LAUNCHER=ccache
-      CIBW_REPAIR_WHEEL_COMMAND_LINUX: "ccache -s; auditwheel repair -w {dest_dir} --exclude libcuda.so.1 {wheel}"
+      CIBW_REPAIR_WHEEL_COMMAND_LINUX: "ccache -s; auditwheel repair -w {dest_dir} --exclude libcuda.so.1 --exclude libgomp.so.1 {wheel}"
       # The dedicated test-wheel job below (with the raptor-core sibling
       # wheel + the no-driver smoke) replaces cibuildwheel's built-in
       # --test-command.
@@ -224,7 +224,7 @@ jobs:
         CMAKE_C_COMPILER_LAUNCHER=ccache
         CMAKE_CXX_COMPILER_LAUNCHER=ccache
         CMAKE_CUDA_COMPILER_LAUNCHER=ccache
-      CIBW_REPAIR_WHEEL_COMMAND_LINUX: "ccache -s; auditwheel repair -w {dest_dir} --exclude libcuda.so.1 {wheel}"
+      CIBW_REPAIR_WHEEL_COMMAND_LINUX: "ccache -s; auditwheel repair -w {dest_dir} --exclude libcuda.so.1 --exclude libgomp.so.1 {wheel}"
       CIBW_TEST_SKIP: "*"
     steps:
       - uses: actions/checkout@v7
@@ -319,6 +319,8 @@ jobs:
       # the host path uses OpenMP and includes <omp.h>, which Apple's clang lacks: Homebrew's libomp, which delocate
       # copies into the wheel. Its deployment target is the runner's macOS, so the wheels declare that too.
       CIBW_BEFORE_ALL_MACOS: "brew install libomp"
+      # the OpenMP runtime is aether-dsc's (aether/_omp/libomp.dylib): delocate leaves it, nothing is vendored here
+      CIBW_REPAIR_WHEEL_COMMAND_MACOS: "delocate-wheel --require-archs {delocate_archs} --exclude libomp.dylib -w {dest_dir} -v {wheel}"
       CIBW_ENVIRONMENT_MACOS: >-
         MACOSX_DEPLOYMENT_TARGET=14.0
         CCACHE_DIR=${{ github.workspace }}/.ccache-cibw
@@ -474,6 +476,15 @@ jobs:
             fi
           done
           echo "OK: no wheel vendors libcuda"
+      - name: No wheel vendors an OpenMP runtime (aether-dsc ships the one)
+        run: |
+          shopt -s nullglob
+          for whl in dist/*.whl; do
+            if unzip -l "$whl" | grep -Eqi 'libgomp|libomp|libiomp'; then
+              echo "$whl vendors an OpenMP runtime — the repair --exclude was not honoured"; exit 1
+            fi
+          done
+          echo "OK: no wheel vendors an OpenMP runtime"
       - name: macOS wheels carry no GPU plugin
         run: |
           for whl in dist/*arm64.whl; do
@@ -621,8 +632,8 @@ jobs:
             eagle/python/pyproject.toml
             raptor/pyproject.toml
 
-      # aether-dsc builds from its sibling checkout until its version is on PyPI, and its host FFT needs OpenMP:
-      # Apple's clang has no <omp.h>, so Homebrew's libomp (as hawk's macOS legs do)
+      # aether-dsc builds from its sibling checkout until its version is on PyPI; building it on macOS needs a libomp to
+      # copy into its package (Apple's clang has none). This is a build-time input of aether only: eagle's wheel ships none.
       - if: runner.os == 'macOS'
         run: brew install libomp && { echo "OpenMP_ROOT=$(brew --prefix libomp)"; echo "CMAKE_PREFIX_PATH=$(brew --prefix libomp)"; } >> "$GITHUB_ENV"
 
@@ -688,17 +699,6 @@ jobs:
           python -m eagle.cuda --selftest || rc=$?
           [ "$rc" -eq 2 ] || { echo "selftest exited $rc, expected 2 (no driver)"; exit 1; }
 
-      # Diagnostic (macOS only, never fails the job): which OpenMP runtimes the installed eagle and aether load, and the
-      # first host FFT test run alone with the OpenMP environment printed. Removed once the macOS FFT abort is understood.
-      - name: macOS OpenMP diagnostic
-        if: runner.os == 'macOS'
-        continue-on-error: true
-        run: |
-          . venv/bin/activate
-          for f in $(python -c "import eagle,aether,pathlib;[print(p) for m in (eagle,aether) for p in pathlib.Path(m.__file__).parent.rglob('*') if p.suffix in ('.so','.dylib')]"); do echo "== $f"; otool -L "$f" | grep -iE "omp|c\+\+" || true; done
-          find venv /opt/homebrew/opt/libomp -name 'libomp*' 2>/dev/null || true
-          cp -r eagle/python/tests "$RUNNER_TEMP/diag_tests"
-          cd "$RUNNER_TEMP/diag_tests/.." && OMP_DISPLAY_ENV=VERBOSE KMP_VERSION=1 python -X faulthandler -m pytest -x -q -p no:cacheprovider diag_tests/test_fft_step.py 2>&1 | tail -60 || true
       - name: Host suite (a copy, outside the repository) against the installed wheel
         run: |
           . venv/bin/activate
