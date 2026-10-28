@@ -252,10 +252,7 @@ class WarpFunction:
         """The row scratch of ``level`` at ``n`` samples (``None`` without a reduction)."""
         if not level.sig.cells:
             return None
-        if device.is_cuda:
-            import cupy as xp
-        else:
-            xp = np
+        xp = f"cuda:{device.ordinal}" if device.is_cuda else "cpu"
         if (device.is_cuda and device.is_capturing
                 and not _cell_rows.has(level, n, xp, mode, self._policy)):
             raise RuntimeError(

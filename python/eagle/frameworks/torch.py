@@ -100,7 +100,9 @@ def function(kernel, *, wrt=None, cache_dir=None, device_arch=None, policy="comp
 
 # -- the generic op ----------------------------------------------------------
 def _as_tensor(array, device):
-    """A tensor over the same memory as the numpy/cupy ``array``."""
+    """A tensor over the same memory as ``array`` (an :class:`eagle.Array`, or a numpy/cupy array)."""
+    if type(array).__module__.split(".")[0] == "eagle":
+        return torch.from_dlpack(array)
     if device.type == "cuda":
         return torch.as_tensor(array, device=device)
     return torch.from_numpy(array)
@@ -515,9 +517,9 @@ class _Level:
         """The row scratch of this kernel at ``n`` samples (``None`` without a reduction)."""
         import numpy
 
-        xp = numpy
+        xp = "cpu"
         if device.type == "cuda":
-            import cupy as xp
+            xp = f"cuda:{device.index if device.index is not None else torch.cuda.current_device()}"
         return _cell_rows.scratch(self, n, xp, numpy.dtype(mode), self.owner.policy,
                                   cells=self.cells)
 

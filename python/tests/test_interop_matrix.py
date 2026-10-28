@@ -45,6 +45,7 @@ import numpy as np
 import pytest
 from raptor.conformance.interop import certified_framework, register_row
 
+import eagle
 from eagle import GraphPipeline, LoadedVector, detect, to_array
 from eagle.frameworks.cupy import to_cupy
 
@@ -389,7 +390,7 @@ def _s2_leg(stream, sentinel: float, n: int = 64) -> float:
 
     cycles = _cupy_spin_cycles(0.06)
     spin = _s2_spin_kernel()
-    with stream:
+    with stream, eagle.stream(stream):      # eagle works on the stream it is given; it does not follow cupy's
         spin((1,), (1,), (cycles,))
         pos[...] = sentinel  # queued behind the spin
         pipe.launch(1)  # NO sync between the seed write and this replay

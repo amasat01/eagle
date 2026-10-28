@@ -83,6 +83,13 @@ def resolve_budget(budget, device, door):
     return budget
 
 
+def _uniform_plane(value, like):
+    """A parameter's recorded value as a plane shaped and placed like ``like``: a scalar fills one."""
+    if hasattr(value, "reshape"):
+        return value.reshape(like.shape)
+    return arrays.full(like.shape, value, like.dtype, like.device)
+
+
 class _Kernels:
     """The kernels a recorded run needs, built once per window and device:
     the single-step taping twin, the fused twin of an automatic kernel, the
@@ -739,7 +746,7 @@ class RunReverse:
             for _n, r, _w in rec.nodes:     # step-invariant reads, in reverse slot order
                 for _nm, pn, a in r:
                     if pn in self.reads and pn not in rec.ring:
-                        a[..., :cnt] = self.reads[pn][..., :cnt]
+                        arrays.asarray(a)[..., :cnt] = self.reads[pn][..., :cnt]
             for nm in self.taped:
                 for a in self.adj:
                     a[nm].fill(0)
@@ -790,15 +797,16 @@ class RunReverse:
         for _n, reads, _w in self.rec.nodes:
             for _nm, pn, a in reads:
                 if pn in self.state and pn in self.adj[0]:
-                    a[..., :count] = self.state[pn][..., :count]
+                    arrays.asarray(a)[..., :count] = self.state[pn][..., :count]
                 elif self.rec.roles.get(pn) == "terminated":
                     a[:count], a[count:] = False, True
         for call in self.rec.calls:
             call()
         for _n, _r, writes in self.rec.nodes:
             for _nm, pn, a in writes:
-                self.reads[pn][..., :count] = a[..., :count]
-                self.ring[pn][row][..., :count] = a[..., :count]
+                written = arrays.asarray(a)[..., :count]      # the caller's plane, viewed in place
+                self.reads[pn][..., :count] = written
+                self.ring[pn][row][..., :count] = written
 
     def _ring_row(self, j):
         """Step ``j``'s node writes back in the twin's read buffer, for its vjp."""
@@ -819,7 +827,7 @@ class RunReverse:
                 if a.dtype.kind != "f":
                     continue
                 if pn in self.rec.uniforms:     # a parameter: its value, one gradient
-                    primals[nm] = self.rec.uniforms[pn].reshape(a.shape)
+                    primals[nm] = _uniform_plane(self.rec.uniforms[pn], a)
                     into[nm] = self.acc[pn]
                 elif pn in self.adj[0]:
                     lo = row * self.rec.width + self.offsets[pn]
@@ -853,7 +861,7 @@ class RunReverse:
                 if a.dtype.kind != "f":
                     continue
                 if pn in self.rec.uniforms:
-                    primals[nm] = self.rec.uniforms[pn].reshape(a.shape)
+                    primals[nm] = _uniform_plane(self.rec.uniforms[pn], a)
                 elif pn in pre:
                     primals[nm] = ev[pn]
                 else:

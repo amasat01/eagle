@@ -1076,7 +1076,7 @@ class _RunVjp:
 def _host(a):
     if hasattr(a, "detach"):
         return a.detach().cpu().numpy()
-    return a.get() if hasattr(a, "get") else np.asarray(a)
+    return np.asarray(a.get() if hasattr(a, "get") else a)
 
 
 def _rel(a, b):
@@ -1101,7 +1101,7 @@ def _run_vjp_row(torch, xp, dev, targets, tmp, monkeypatch):
     eagle.diff.reverse(run.runner.record, {"x": xp.ones_like(run.x0)}, vjps={"model": run.vjp})
     wall = time.perf_counter() - t0
     assert _rel([p.grad for p in run.params], [2 * g for g in got_p]) < 1e-12   # accumulate
-    steps = int(run.runner.record.steps.max())      # the reverse's steps (the device
+    steps = int(np.asarray(run.runner.record.steps).max())      # the reverse's steps (the device
     if xp is not np:                                # forward pads to the window)
         assert _counters.snapshot()["host_syncs"] - syncs == 2 * steps
         if os.environ.get("EAGLE_WALL_CLOCK_ROWS"):   # a wall-time bound: opt-in, like every wall_clock row
