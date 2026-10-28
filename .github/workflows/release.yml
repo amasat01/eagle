@@ -965,7 +965,8 @@ jobs:
           if [ "$LABELLED" = true ]; then
             run=true; echo "label release"
           else
-            files="$(gh pr diff "$PR" --repo "$GITHUB_REPOSITORY" --name-only)"
+            # the files API, not `gh pr diff`: GitHub refuses a text diff over 20000 lines (a release pull request)
+            files="$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/files" --jq '.[].filename')"
             if grep -Eq '^(eagle/cuda|plugin/|python/src/|python/eagle/(frameworks/|interop\.py|cuda\.py)|python/tests/test_interop|docs/raptor_docs\.toml|\.github/kaggle/|\.github/workflows/release\.yml)' <<< "$files"; then
               run=true; echo "GPU or interop paths changed"
             fi
