@@ -14,6 +14,7 @@ import eagle
 import eagle.arrays as xp
 import eagle.fft as efft
 
+_FRAMEWORKS = {"torch", "jax", "tensorflow", "cupy"}
 _RUNTIME = re.compile(r"lib(gomp|omp|iomp5)[^/]*\.(so(\.\d+)*|dylib)$")
 
 
@@ -43,8 +44,10 @@ def test_aether_and_eagle_share_one_openmp_runtime_and_use_threads():
     assert eagle.exec.fold("sum", [1.0, 2.0]) == 3.0
     assert aether.__file__
     runtimes = _loaded_runtimes()
-    assert runtimes == {os.path.realpath(str(shipped.library))}, runtimes
-    openmp = ctypes.CDLL(str(shipped.library))
+    assert len(runtimes) == 1, runtimes
+    if not _FRAMEWORKS & set(sys.modules):      # a framework imported first (torch) may have loaded the soname before aether
+        assert runtimes == {os.path.realpath(str(shipped.library))}, runtimes
+    openmp = ctypes.CDLL(next(iter(runtimes)))
     threads = openmp.omp_get_max_threads()
     if (os.cpu_count() or 1) > 1 and "OMP_NUM_THREADS" not in os.environ:
         assert threads > 1, threads
