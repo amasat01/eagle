@@ -113,8 +113,8 @@ def _axes(axes, rank: int):
     return tuple(out)
 
 
-def _refuse_in_capture():
-    if _core.stream_is_capturing(_stream.current()):
+def _refuse_in_capture(device):
+    if device != "cpu" and _core.stream_is_capturing(_stream.current()):   # a host plan has no stream to capture
         raise RuntimeError(_door("a plan is built outside a stream capture (build the node first, capture after)"))
 
 
@@ -157,7 +157,7 @@ def _make(mode, x, out, axes, forward, norm, weights=None, pre=False, plan=None)
         real = tuple(out.shape)                      # real output
         if len(real) != len(data) or real[ax[-1]] // 2 + 1 != data[ax[-1]]:
             raise ValueError(_door(f"out shape {real} does not match a half spectrum of {data} along axis {ax[-1]}"))
-    _refuse_in_capture()
+    _refuse_in_capture(device)
     if plan is None:
         shape_for = real if mode != "c2c" else data
         plan = aether_fft.plan(mode, dtype_name(x.dtype), shape_for, ax, forward, norm, "cpu" if device == "cpu" else device)

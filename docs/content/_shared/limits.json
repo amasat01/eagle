@@ -120,7 +120,7 @@
  },
  {
   "id": "cupy-plan-run-stream",
-  "text": "`plan.run` does not follow a CuPy stream you opened (our scope): bind the arrays and call `bind(...).launch()` as above to stay ordered on it.",
+  "text": "`plan.run` does not follow a CuPy stream you opened (our scope): bind the arrays and call `bind(...).launch(stream)` as above to stay ordered on it.",
   "way_out": "bind(...).launch()",
   "cause": "ours",
   "lifted_in": "none"

@@ -59,7 +59,6 @@ from .abi import (
     make_gref,
     make_handle,
 )
-from . import arrays
 from ._index_set import IndexSet, check_index_set
 from .arrays import Array, DType
 from .compose import GraphComposer
@@ -112,7 +111,6 @@ __all__ = [
     "IndexSet",
     "check_index_set",
     "DType",
-    "arrays",
     "deploy",
     "detect",
     "device_props",

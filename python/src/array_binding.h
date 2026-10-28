@@ -136,8 +136,12 @@ inline std::uint64_t stream_of(const Array& a, const std::optional<std::uint64_t
 inline void sync(const Array& a)
 {
     if (!a.placement().host()) {
-        nb::gil_scoped_release release;
-        ck(EBX(eagle_backend_stream_sync)(a.placement().device, a.stream()));   // this array's stream only
+        eagle_backend_status status;
+        {
+            nb::gil_scoped_release release;
+            status = EBX(eagle_backend_stream_sync)(a.placement().device, a.stream());   // this array's stream only
+        }
+        ck(status);                                                                       // raising needs the GIL back
     }
 }
 
@@ -148,8 +152,12 @@ inline void memcpy_kind(void* dst, const void* src, std::size_t bytes, bool dst_
     if (bytes == 0) return;
     if (dst_host && src_host) { std::memcpy(dst, src, bytes); return; }
     const int kind = dst_host ? EAGLE_BACKEND_COPY_D2H : src_host ? EAGLE_BACKEND_COPY_H2D : EAGLE_BACKEND_COPY_D2D;
-    nb::gil_scoped_release release;
-    ck(EBX(eagle_backend_memcpy)(reinterpret_cast<std::uintptr_t>(dst), reinterpret_cast<std::uintptr_t>(src), bytes, kind, stream));
+    eagle_backend_status status;
+    {
+        nb::gil_scoped_release release;
+        status = EBX(eagle_backend_memcpy)(reinterpret_cast<std::uintptr_t>(dst), reinterpret_cast<std::uintptr_t>(src), bytes, kind, stream);
+    }
+    ck(status);
 }
 
 /// Element-wise copy between host arrays of any strides (rank <= 6), parallel over the elements.

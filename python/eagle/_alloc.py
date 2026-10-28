@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from . import _core, arrays
+from ._backend import BackendUnavailable
 
 
 def place(like) -> str:
@@ -52,7 +53,10 @@ def asarray(xp, data, dtype=None):
 
 def synchronize() -> None:
     """Block the host until the current device's work is done."""
-    _core.device_synchronize(-1)
+    try:
+        _core.device_synchronize(-1)
+    except BackendUnavailable:      # no usable device: nothing of ours is in flight on one
+        pass
 
 
 def zero(xp, array, stream, nbytes=None):

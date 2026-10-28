@@ -189,8 +189,12 @@ def check_launch(kernel: str, device: int = -1) -> None:
 
     if _CALLBACK.on:
         return
+    from ._backend import BackendUnavailable
+
     try:
         _core.launch_status(device)
+    except BackendUnavailable:                  # no usable driver: no device launch could have been issued
+        return
     except RuntimeError as exc:
         if "cudaErrorNoDevice" in str(exc):     # a pipeline of host steps: there is no launch to read
             return

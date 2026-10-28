@@ -564,7 +564,11 @@ NB_MODULE(_core, m)
         "set_device", [](std::int32_t device) { ck(EBX(eagle_backend_set_device)(device)); }, nb::arg("device"),
         "Make `device` this thread's current device (its primary context).");
     m.def(
-        "launch_status", [](std::int32_t device) { ck(EBX(eagle_backend_launch_status)(device)); },
+        "launch_status",
+        [](std::int32_t device) {
+            if (cuda().loaded())  // no backend loaded: no device launch was ever issued, so nothing is pending
+                ck(EBX(eagle_backend_launch_status)(device));
+        },
         nb::arg("device") = -1,
         "Raise RuntimeError naming the CUDA error when a launch issued on `device` (-1: the current one) left one "
         "pending (and clear it). A query of the launch error, not a wait.");
@@ -579,8 +583,12 @@ NB_MODULE(_core, m)
         "device_synchronize",
         [](std::int32_t device) {
             eagle_array_binding::run_sync_hook(-1);
-            nb::gil_scoped_release release;
-            ck(EBX(eagle_backend_device_synchronize)(device));
+            eagle_backend_status status;
+            {
+                nb::gil_scoped_release release;
+                status = EBX(eagle_backend_device_synchronize)(device);
+            }
+            ck(status);                  // raising needs the GIL back
         },
         nb::arg("device") = -1, "Block the host until every stream of `device` (-1: the current one) is idle.");
     m.def("set_sync_hook", [](nb::object fn) { eagle_array_binding::sync_hook() = fn; }, nb::arg("fn"),
@@ -809,8 +817,12 @@ NB_MODULE(_core, m)
     m.def(
         "stream_sync",
         [](std::uintptr_t stream, std::int32_t device) {
-            nb::gil_scoped_release release;
-            ck(EBX(eagle_backend_stream_sync)(device, stream));
+            eagle_backend_status status;
+            {
+                nb::gil_scoped_release release;
+                status = EBX(eagle_backend_stream_sync)(device, stream);
+            }
+            ck(status);
         },
         nb::arg("stream") = 0, nb::arg("device") = -1,
         "Block the host until `stream` (0: the legacy default stream) is idle; only that stream. Fails inside a capture.");
