@@ -283,6 +283,16 @@ if(_eagle_omp)
   add_library(eagle_openmp SHARED IMPORTED)
   set_target_properties(eagle_openmp PROPERTIES IMPORTED_LOCATION "${_eagle_omp_library}")
   message(STATUS "> OpenMP runtime (aether-dsc's): ${_eagle_omp_library}")
+  # The compiler and the shipped runtime must be one family: clang's -fopenmp calls LLVM's __kmpc_*, which libgomp does
+  # not export (the extension would build, then fail to import), and gcc's calls GOMP_*, which libomp does not export.
+  file(STRINGS "${_eagle_omp_library}" _eagle_omp_kmpc REGEX "^__kmpc_reduce_nowait$" LIMIT_COUNT 1)
+  if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND NOT APPLE AND NOT _eagle_omp_kmpc)
+    message(FATAL_ERROR "${CMAKE_CXX_COMPILER_ID} compiles OpenMP against libomp, but aether-dsc ships ${_eagle_omp_library}, a libgomp. "
+                        "Build aether-dsc with the same compiler (it must ship libomp), or build eagle with GCC.")
+  elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND _eagle_omp_kmpc)
+    message(FATAL_ERROR "GNU compiles OpenMP against libgomp, but aether-dsc ships ${_eagle_omp_library}, a libomp. "
+                        "Build aether-dsc with the same compiler (it must ship libgomp), or build eagle with Clang.")
+  endif()
 else()
   find_package(OpenMP REQUIRED COMPONENTS CXX)
   message(STATUS "> OpenMP runtime (the toolchain's; aether-dsc reports none here)")
