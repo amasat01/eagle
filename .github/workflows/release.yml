@@ -156,6 +156,8 @@ jobs:
       # no isolation, deps installed per Python first: an isolated build env sits at a random
       # /tmp path that lands in every compile line, so ccache could never hit across runs
       CIBW_BUILD_FRONTEND: "build; args: --no-isolation"
+      # cp313t still needs this group in cibuildwheel 3.x, which warns that it is deprecated (3.13t wheels go in 0.7.3)
+      CIBW_ENABLE: ${{ matrix.tag == 'cp313t' && 'cpython-freethreading' || '' }}
       CIBW_BEFORE_BUILD: >-
         python -m pip install 'scikit-build-core>=0.10' 'setuptools-scm>=8' 'ninja>=1.5'
         'nanobind>=3.1,<4; python_version >= "3.10"'
@@ -278,6 +280,8 @@ jobs:
         tag: [cp39, cp310, cp311, cp312, cp313, cp314, cp313t, cp314t, cp315, cp315t]
     env:
       CIBW_BUILD_FRONTEND: "build; args: --no-isolation"
+      # cp313t still needs this group in cibuildwheel 3.x, which warns that it is deprecated (3.13t wheels go in 0.7.3)
+      CIBW_ENABLE: ${{ matrix.tag == 'cp313t' && 'cpython-freethreading' || '' }}
       CIBW_BEFORE_BUILD: >-
         python -m pip install 'scikit-build-core>=0.10' 'setuptools-scm>=8' 'ninja>=1.5'
         'nanobind>=3.1,<4; python_version >= "3.10"'
