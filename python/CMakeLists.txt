@@ -555,3 +555,15 @@ else()
   message(FATAL_ERROR
     "EAGLE_PYTHON_MPI must be ON, OFF or AUTO; got '${EAGLE_PYTHON_MPI}'")
 endif()
+
+# The install step rewrites the installed extensions (rpaths, install names), which invalidates their code signatures,
+# and Apple silicon kills a process that maps an invalid one: re-sign (ad hoc) and verify every installed extension.
+if(APPLE)
+  install(CODE [[
+    file(GLOB _exts "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/eagle/*.so")
+    foreach(_f IN LISTS _exts)
+      execute_process(COMMAND codesign --force --sign - "${_f}" COMMAND_ERROR_IS_FATAL ANY)
+      execute_process(COMMAND codesign --verify --strict "${_f}" COMMAND_ERROR_IS_FATAL ANY)
+    endforeach()
+  ]])
+endif()
