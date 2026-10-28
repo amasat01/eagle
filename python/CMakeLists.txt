@@ -294,7 +294,7 @@ function(eagle_link_openmp target)
       foreach(_l IN LISTS OpenMP_CXX_LIBRARIES)
         if(_l MATCHES "libomp\\.dylib" AND EXISTS "${_l}")
           add_custom_command(TARGET ${target} POST_BUILD VERBATIM
-            COMMAND sh -c "id=$(otool -D '${_l}' | tail -n 1); install_name_tool -change \"$id\" @rpath/libomp.dylib '$<TARGET_FILE:${target}>'")
+            COMMAND sh -c "id=$(otool -D '${_l}' | tail -n 1); install_name_tool -change \"$id\" @rpath/libomp.dylib '$<TARGET_FILE:${target}>' && codesign --force --sign - '$<TARGET_FILE:${target}>'")
         endif()
       endforeach()
     endif()

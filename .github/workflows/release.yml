@@ -701,7 +701,7 @@ jobs:
 
       # One OpenMP runtime: every OpenMP reference of the installed eagle and aether extensions is @rpath/libomp.dylib
       # (resolved into aether/_omp), never an absolute Homebrew path: a second runtime in the process aborts it.
-      - name: OpenMP references are @rpath/libomp.dylib only
+      - name: OpenMP references are @rpath/libomp.dylib only, signatures valid
         if: runner.os == 'macOS'
         run: |
           . venv/bin/activate
@@ -713,6 +713,9 @@ jobs:
             while read -r ref; do
               [ "$ref" = "@rpath/libomp.dylib" ] || { echo "$f: OpenMP reference $ref (expected @rpath/libomp.dylib)"; bad=1; }
             done <<< "$refs"
+          done
+          for f in "$sp"/eagle/_core*.so "$sp"/aether/_core*.so "$sp"/aether/_omp/libomp.dylib; do   # Apple silicon kills a process mapping an invalid signature
+            codesign --verify --strict "$f" || { echo "$f: invalid code signature"; bad=1; }
           done
           exit $bad
       - name: Host suite (a copy, outside the repository) against the installed wheel
