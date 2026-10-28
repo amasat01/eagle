@@ -107,6 +107,9 @@ endif()
 if(NOT APPLE AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   set(_eagle_ext_compile -ffunction-sections -fdata-sections)
   set(_eagle_ext_link "LINKER:--exclude-libs,ALL" "LINKER:--gc-sections")
+elseif(APPLE)
+  # drop local symbols at link time: the install then needs no `strip`, which warns on a signed binary
+  set(_eagle_ext_link "LINKER:-x")
 endif()
 
 # Only the plugin needs the CUDA toolkit; the core is plain C++.
@@ -351,6 +354,9 @@ if(_eagle_plugin_mode STREQUAL "BUILD")
     EAGLE_CUDA_PLUGIN_ARCHS="${_eagle_plugin_archs}"
     $<$<BOOL:${EAGLE_BACKEND_INJECT_MISSING}>:EAGLE_BACKEND_INJECT_MISSING=1>)
   target_compile_options(eagle_cuda PRIVATE ${_eagle_no_gnu_unique} ${_eagle_warn_as_err})
+  # Maxwell and Pascal (sm_5x/6x) are shipped on purpose; nvcc's notice that offline compilation for them will be
+  # removed in a future release is the one warning we accept for that (the narrowest documented flag).
+  target_compile_options(eagle_cuda PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Wno-deprecated-gpu-targets>)
   set(_eagle_map "${CMAKE_CURRENT_SOURCE_DIR}/src/plugin/eagle_cuda.map")
   target_link_options(eagle_cuda PRIVATE
     "LINKER:--version-script=${_eagle_map}" "LINKER:--no-undefined" ${_eagle_static_runtime})
@@ -455,11 +461,12 @@ set(_eagle_xla_map "${CMAKE_CURRENT_SOURCE_DIR}/src/xla/eagle_xla.map")
 # A sanitized build leaves the sanitizer runtime's symbols to the (sanitized)
 # interpreter that loads the library, so --no-undefined would reject them.
 if(APPLE)
-  # Apple's ld: the same three rules as the GNU ld flags below (export list, undefined symbols are errors,
-  # unreferenced code dropped). The list is eagle_xla.map's `global:` section.
+  # Apple's ld: the same rules as the GNU ld flags below (export list, unreferenced code dropped; undefined symbols
+  # are errors by default there, and spelling that out as -undefined,error is deprecated). The list is
+  # eagle_xla.map's `global:` section.
   set(_eagle_xla_exports "${CMAKE_CURRENT_SOURCE_DIR}/src/xla/eagle_xla.exp")
   target_link_options(eagle_xla PRIVATE
-    "LINKER:-exported_symbols_list,${_eagle_xla_exports}" "LINKER:-undefined,error" "LINKER:-dead_strip")
+    "LINKER:-exported_symbols_list,${_eagle_xla_exports}" "LINKER:-dead_strip")
   set_property(TARGET eagle_xla APPEND PROPERTY LINK_DEPENDS "${_eagle_xla_exports}")
   set_property(TARGET eagle_xla PROPERTY SUFFIX ".so")  # eagle.frameworks.jax opens libeagle_xla.so on every platform
 else()

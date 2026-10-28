@@ -6,7 +6,8 @@
 /**
  * @file host.h
  * @brief The host twins of the array ops: ``#pragma omp parallel for simd`` over the SAME
- *        ``body<Op, T>`` the device kernels use. Build with ``-ffp-contract=off``.
+ *        ``body<Op, T>`` the device kernels use, where the loop vectorizes (``simd_ok``; an unmet ``simd`` request is a
+ *        compiler warning). Build with ``-ffp-contract=off``.
  */
 
 #include <omp.h>
@@ -19,11 +20,27 @@
 
 namespace eagle::array::host {
 
+/// Which loops the vectorizer accepts as ``simd`` (clang 19, x86-64): 32-bit and wider float / int32 elements (not the
+/// 64-bit integers or bytes), the 16-bit floats only when moved (Where / Take / Scatter), and never the compares
+/// (they narrow to a byte). Elsewhere the loop is a plain ``parallel for`` and the optimizer decides alone.
+template <class T> inline constexpr bool simd_wide =
+    std::is_same_v<T, float> || std::is_same_v<T, double> || std::is_same_v<T, std::int32_t> || std::is_same_v<T, std::uint32_t>;
+template <class T> inline constexpr bool simd_half = is_float_v<T> && sizeof(T) == 2;
+template <Op op, class T> inline constexpr bool simd_ok =
+    op == Op::Eq || op == Op::Ne || op == Op::Gt || op == Op::EqS || op == Op::NeS || op == Op::GtS || op == Op::LtS
+        ? false
+        : (op == Op::Where || op == Op::Take || op == Op::Scatter) ? simd_wide<T> || simd_half<T> : simd_wide<T>;
+
 template <Op op, class T>
 inline void run(const Args& a)
 {
+    if constexpr (simd_ok<op, T>) {
 #pragma omp parallel for simd schedule(static)
-    for (std::int64_t j = 0; j < a.n; ++j) body<op, T>(a, j);
+        for (std::int64_t j = 0; j < a.n; ++j) body<op, T>(a, j);
+    } else {
+#pragma omp parallel for schedule(static)
+        for (std::int64_t j = 0; j < a.n; ++j) body<op, T>(a, j);
+    }
 }
 
 /// Inclusive prefix sum, modular in ``T``: per-thread chunk sums, a serial combine, a second pass.
@@ -57,8 +74,13 @@ inline void count_nonzero(const Args& a)
 {
     const T* x = static_cast<const T*>(a.p1);
     std::int64_t c = 0;
+    if constexpr (!simd_half<T>) {
 #pragma omp parallel for simd reduction(+ : c) schedule(static)
-    for (std::int64_t j = 0; j < a.n; ++j) c += nonzero(x[j]) ? 1 : 0;
+        for (std::int64_t j = 0; j < a.n; ++j) c += nonzero(x[j]) ? 1 : 0;
+    } else {
+#pragma omp parallel for reduction(+ : c) schedule(static)
+        for (std::int64_t j = 0; j < a.n; ++j) c += nonzero(x[j]) ? 1 : 0;
+    }
     *static_cast<std::int64_t*>(a.p0) = c;
 }
 
@@ -140,8 +162,15 @@ inline void cast(void* dst, int dst_dtype, const void* src, int src_dtype, std::
             using S = typename decltype(st)::type;
             D* d = static_cast<D*>(dst);
             const S* s = static_cast<const S*>(src);
+            // simd where it vectorizes: a 32-bit-or-wider float / int32 / bool destination from anything but a 16-bit float,
+            // or a 16-bit float copied as itself
+            if constexpr (((simd_wide<D> || std::is_same_v<D, bool>) && !simd_half<S>) || (simd_half<D> && std::is_same_v<D, S>)) {
 #pragma omp parallel for simd schedule(static)
-            for (std::int64_t j = 0; j < n; ++j) d[j] = static_cast<D>(s[j]);
+                for (std::int64_t j = 0; j < n; ++j) d[j] = static_cast<D>(s[j]);
+            } else {
+#pragma omp parallel for schedule(static)
+                for (std::int64_t j = 0; j < n; ++j) d[j] = static_cast<D>(s[j]);
+            }
         });
     });
 }

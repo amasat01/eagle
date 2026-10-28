@@ -87,6 +87,7 @@ def _uniform_plane(value, like):
     """A parameter's recorded value as a plane shaped and placed like ``like``: a scalar fills one."""
     if hasattr(value, "reshape"):
         return value.reshape(like.shape)
+    like = arrays.asarray(like)         # the caller's plane (cupy, torch, numpy) as eagle's own view: its dtype and device
     return arrays.full(like.shape, value, like.dtype, like.device)
 
 

@@ -62,6 +62,9 @@
  *                     the named post-boundary follow-on, not this binding.
  */
 
+// Python.h (through nanobind) first: it defines feature-test macros the standard headers also set
+#include <nanobind/nanobind.h>
+
 #include <algorithm>
 #include <array>
 #include <initializer_list>
@@ -82,7 +85,6 @@
 
 #include <unistd.h>
 
-#include <nanobind/nanobind.h>
 #include <nanobind/stl/optional.h>  // std::optional <-> None (GraphComposer named args)
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>  // std::vector<uintptr_t> <-> list[int] (capture_snapshot_nodes)

@@ -129,6 +129,7 @@ jobs:
             mkdir /src && tar xzf /w/sdist/raptor_eagle-*.tar.gz -C /src --strip-components=1
             cmake -S /src -B /tmp/b -DCMAKE_BUILD_TYPE=Release -DEAGLE_PYTHON_CUDA_PLUGIN=BUILD -DEAGLE_PYTHON_SKIP_CORE=ON \
               -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.9/bin/nvcc -DCMAKE_CUDA_HOST_COMPILER=/opt/rh/gcc-toolset-13/root/usr/bin/g++ \
+              -DCMAKE_CXX_COMPILER=/opt/rh/gcc-toolset-13/root/usr/bin/g++ \
               -DPython_EXECUTABLE=/opt/python/cp312-cp312/bin/python
             cmake --build /tmp/b --target eagle_cuda -j4
             cp /tmp/b/libeagle_cuda.so /w/plugin/libeagle_cuda.so'
@@ -251,7 +252,6 @@ jobs:
           output-dir: dist
         env:
           CIBW_BUILD: "${{ matrix.tag }}-manylinux_${{ matrix.arch }}"
-          CIBW_ENABLE: cpython-freethreading
         if: steps.wh.outputs.cache-hit != 'true' && !startsWith(matrix.tag, 'cp315')
       # 3.15 needs cibuildwheel 4.x, which dropped the free-threaded 3.13 build
       - name: Build the wheel (CPython 3.15 and 3.15t, cibuildwheel 4.x)
@@ -261,7 +261,6 @@ jobs:
           output-dir: dist
         env:
           CIBW_BUILD: "${{ matrix.tag }}-manylinux_${{ matrix.arch }}"
-          CIBW_ENABLE: ""
         if: steps.wh.outputs.cache-hit != 'true' && startsWith(matrix.tag, 'cp315')
 
       - uses: actions/upload-artifact@v7
@@ -285,7 +284,7 @@ jobs:
         'nanobind>=2.2,<3; python_version < "3.10"'
       # the host path uses OpenMP and includes <omp.h>, which Apple's clang lacks: Homebrew's libomp, which delocate
       # copies into the wheel. Its deployment target is the runner's macOS, so the wheels declare that too.
-      CIBW_BEFORE_ALL_MACOS: "brew install libomp"
+      CIBW_BEFORE_ALL_MACOS: "brew list libomp >/dev/null 2>&1 || brew install libomp"
       # the OpenMP runtime is aether-dsc's (aether/_omp/libomp.dylib): delocate leaves it, nothing is vendored here
       CIBW_REPAIR_WHEEL_COMMAND_MACOS: "delocate-wheel --require-archs {delocate_archs} --exclude libomp.dylib --ignore-missing-dependencies -w {dest_dir} -v {wheel}"
       CIBW_ENVIRONMENT_MACOS: >-
@@ -362,7 +361,6 @@ jobs:
           output-dir: dist
         env:
           CIBW_BUILD: "${{ matrix.tag }}-macosx_arm64"
-          CIBW_ENABLE: cpython-freethreading
         if: steps.wh.outputs.cache-hit != 'true' && !startsWith(matrix.tag, 'cp315')
       # 3.15 needs cibuildwheel 4.x, which dropped the free-threaded 3.13 build
       - name: Build the wheel (CPython 3.15 and 3.15t, cibuildwheel 4.x)
@@ -372,7 +370,6 @@ jobs:
           output-dir: dist
         env:
           CIBW_BUILD: "${{ matrix.tag }}-macosx_arm64"
-          CIBW_ENABLE: ""
         if: steps.wh.outputs.cache-hit != 'true' && startsWith(matrix.tag, 'cp315')
       - if: always() && steps.wh.outputs.cache-hit != 'true'
         env:
@@ -621,7 +618,9 @@ jobs:
       # aether-dsc builds from its sibling checkout until its version is on PyPI; building it on macOS needs a libomp to
       # copy into its package (Apple's clang has none). This is a build-time input of aether only: eagle's wheel ships none.
       - if: runner.os == 'macOS'
-        run: brew install libomp && { echo "OpenMP_ROOT=$(brew --prefix libomp)"; echo "CMAKE_PREFIX_PATH=$(brew --prefix libomp)"; } >> "$GITHUB_ENV"
+        run: |
+          brew list libomp >/dev/null 2>&1 || brew install libomp
+          { echo "OpenMP_ROOT=$(brew --prefix libomp)"; echo "CMAKE_PREFIX_PATH=$(brew --prefix libomp)"; } >> "$GITHUB_ENV"
 
       # raptor-core, eagle's one runtime dependency: PyPI when the checkout's version is released
       # (what a user gets), else built from the sibling raptor checkout.

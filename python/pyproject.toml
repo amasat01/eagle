@@ -129,13 +129,23 @@ sdist.include = ["README.md", "_sdist_include/**"]
 # Apache classifier above needs.
 wheel.license-files = ["LICENSE", "NOTICE"]
 
+# macOS: the linker already drops local symbols (python/CMakeLists.txt), and `strip` on the signed extension only
+# warns that it invalidates the signature (the install step signs it again).
+[[tool.scikit-build.overrides]]
+if.platform-system = "^darwin"
+install.strip = false
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # cupy 14 deprecated ExternalStream in favor of Stream.from_external, but the latter
 # wants a __cuda_stream__ protocol object while torch exposes a raw integer stream
 # handle — so ExternalStream stays the right bridge (see interop.py). Silence the
 # cosmetic per-launch DeprecationWarning it emits.
-filterwarnings = ["ignore:ExternalStream is deprecated:DeprecationWarning"]
+# warp (a framework under test, Python 3.14) declares a ctypes Structure with _pack_ and no _layout_ at import
+filterwarnings = [
+  "ignore:ExternalStream is deprecated:DeprecationWarning",
+  "ignore:Due to '_pack_':DeprecationWarning:warp",
+]
 markers = [
     "ft: free-threading rows (need a free-threaded interpreter; skip on a GIL build)",
     "gpu: requires cupy + a CUDA GPU",

@@ -1799,17 +1799,6 @@ namespace cellop {
 
 constexpr int kBlock = 256;
 
-template <class T>
-struct Dt;
-template <> struct Dt<bool> { static constexpr int code = EAGLE_BACKEND_DTYPE_BOOL; };
-template <> struct Dt<std::uint8_t> { static constexpr int code = EAGLE_BACKEND_DTYPE_UINT8; };
-template <> struct Dt<std::int32_t> { static constexpr int code = EAGLE_BACKEND_DTYPE_INT32; };
-template <> struct Dt<std::uint32_t> { static constexpr int code = EAGLE_BACKEND_DTYPE_UINT32; };
-template <> struct Dt<std::int64_t> { static constexpr int code = EAGLE_BACKEND_DTYPE_INT64; };
-template <> struct Dt<std::uint64_t> { static constexpr int code = EAGLE_BACKEND_DTYPE_UINT64; };
-template <> struct Dt<float> { static constexpr int code = EAGLE_BACKEND_DTYPE_FLOAT32; };
-template <> struct Dt<double> { static constexpr int code = EAGLE_BACKEND_DTYPE_FLOAT64; };
-
 __device__ inline long long globalIndex()
 {
     return static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;

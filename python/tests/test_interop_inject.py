@@ -57,7 +57,7 @@ from raptor.conformance.interop import certified_framework, register_row
 import eagle
 import eagle.diff
 import eagle.plan
-from eagle import _counters
+from eagle import _counters, _stream
 from eagle import graph as G
 from eagle.graph import opaque
 
@@ -1580,7 +1580,7 @@ def test_run_node_tiers_device(tmp_path, monkeypatch):
 
     def no_wait(self, waits):
         real(self, waits)
-        return _cp().cuda.Event()       # never recorded: waiting on it waits for nothing
+        return _stream.Event()     # never recorded: waiting on it waits for nothing
     monkeypatch.setattr(G._Eager, "run", no_wait)
     cut = _tier_arm(torch, xp, dev, plan, **on_side)
     torch.cuda.synchronize()

@@ -3,18 +3,18 @@
 
 #pragma once
 
-// CUDA headers define AETHER_NOINLINE() which interferes with libstdc++'s use of
-// `__attribute((AETHER_NOINLINE()))`. In order to avoid compilation error,
-// temporarily unset AETHER_NOINLINE() when we include affected libstdc++ header.
+// CUDA headers define the macro __noinline__, which interferes with libstdc++'s use of
+// `__attribute((__noinline__))`. In order to avoid compilation error,
+// temporarily unset __noinline__ when we include affected libstdc++ header.
 // This issue only affects clang/clangd
 
 #ifdef __clang__
-#pragma push_macro("AETHER_NOINLINE()")
-#undef AETHER_NOINLINE()
+#pragma push_macro("__noinline__")
+#undef __noinline__
 #endif
 #include <string>
 #ifdef __clang__
-#pragma pop_macro("AETHER_NOINLINE()")
+#pragma pop_macro("__noinline__")
 #endif
 
 /** @brief Log a message at ERROR severity (does not throw; use ``EAGLE_THROW`` for that). */
