@@ -699,7 +699,15 @@ def _jax_spin(tmp_path_factory):
 
     jax = _jax()
     spin = _spin_op(tmp_path_factory)
+    jax.devices()                   # start every backend now: JAX leaves its last GPU current once it has
+    _planes_on_device_zero()
     return jax, spin, _spin_cycles
+
+
+def _planes_on_device_zero():
+    """Make GPU 0, the graph's device, the thread's current one: what the test allocates next lands there
+    whichever GPU the framework started last."""
+    _cp().cuda.runtime.setDevice(0)
 
 
 def test_jax_node_made_in_a_foreign_context_runs_on_the_planes_device():
@@ -786,6 +794,7 @@ def test_jax_node_is_stream_ordered_and_retained(tmp_path_factory, monkeypatch):
     def trials(g, k):
         bad = 0
         for _ in range(k):
+            _planes_on_device_zero()    # the JAX calls of the last trial may have left another GPU current
             y.fill(-7.0)
             z.fill(0.0)
             cp.cuda.Device().synchronize()

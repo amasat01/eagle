@@ -345,18 +345,26 @@ def _on_device(device):
 
 
 def _plane_device(accesses, device=None):
-    """The CUDA ordinal the graph's planes live on. Planes on two devices are
-    refused by name, and so is an explicit ``device`` they are not on."""
+    """The CUDA ordinal the graph's planes live on, which is the one device it runs on. A plane on another
+    device is refused by name (plane, its device, the graph's device) before any kernel is reached: planes
+    on two devices, and an explicit ``device`` a plane is not on."""
     from ._plan_planes import array_device
 
-    found = sorted({array_device(arr) for a in accesses
-                    for _n, arr, _r in (*a.reads, *a.writes) if device_kind(arr) != "host"})
+    first = {}          # device ordinal -> the first plane found on it
+    for a in accesses:
+        for name, arr, _r in (*a.reads, *a.writes):
+            if device_kind(arr) != "host":
+                first.setdefault(array_device(arr), name)
+    found = sorted(first)
     if len(found) > 1:
-        raise ValueError(f"eagle.graph: the planes span devices {found}; "
-                         "a graph runs on one device")
+        raise ValueError(
+            f"eagle.graph: plane {first[found[1]]!r} lives on device {found[1]}, the graph runs on "
+            f"device {found[0]} (where plane {first[found[0]]!r} is); the planes span devices {found}, "
+            "and a graph runs on one device")
     if device is not None and found and found[0] != device:
-        raise ValueError(f"eagle.graph: device={device} was asked, "
-                         f"the arrays live on device {found[0]}")
+        raise ValueError(
+            f"eagle.graph: plane {first[found[0]]!r} lives on device {found[0]}, the graph runs on "
+            f"device {device} (device={device} was asked); device= is checked, never a move")
     return found[0] if found else device
 
 

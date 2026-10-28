@@ -321,11 +321,15 @@ def node(fn, *, reads, writes, name=None):
     from .cupy import to_cupy
 
     reads, writes = dict(reads), dict(writes)
-    ordinals = {a.device.id for a in (*reads.values(), *writes.values())
-                if type(a).__module__.split(".")[0] == "cupy"}
+    first = {}          # device ordinal -> the first plane found on it
+    for plane, a in (*reads.items(), *writes.items()):
+        if type(a).__module__.split(".")[0] == "cupy":
+            first.setdefault(a.device.id, plane)
+    ordinals = sorted(first)
     if len(ordinals) > 1:
-        raise ValueError(f"{_WHO}.node: the planes span devices {sorted(ordinals)}; "
-                         "a node runs on one device")
+        raise ValueError(f"{_WHO}.node: the planes span devices {ordinals} ("
+                         + ", ".join(f"{p!r} is on device {o}" for o, p in sorted(first.items()))
+                         + "); a node runs on one device")
     ordinal = next(iter(ordinals), None)
     stream = None
     if ordinal is not None:
