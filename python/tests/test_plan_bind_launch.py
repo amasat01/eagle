@@ -838,21 +838,30 @@ def test_bind_refuses_a_plane_of_the_wrong_dtype(vec3_unit):
                y=cp.zeros((W, N)), a=2.0)
 
 
-_INDEX_MSG = r"'where' has dtype float32.*declares int64.*pass where as int64: where\.astype"
+_INDEX_MSG = r"'where' has dtype float32.*declares int32.*pass where as int32: where\.astype"
+_RANGE_MSG = r"kernel 'e4_gather': argument 'where': values exceed int32; declare Index\[int64\]"
 
 
-def test_bind_widens_an_int32_plane_for_an_int64_index_on_the_host(gather_host_unit):
-    """The sidecar declares ``where`` int64; the body reads 8-byte indices. An
-    ``int32`` plane is widened by one copy (at bind once, at run per call); a
-    float plane is refused, never cast."""
+def test_bind_narrows_an_int64_index_plane_for_an_int32_index_on_the_host(gather_host_unit):
+    """The sidecar declares ``where`` int32; the body reads 4-byte indices. An
+    ``int64`` plane that fits is narrowed by one copy (at bind once, at run per
+    call), one that does not is refused by name; an ``int32`` plane binds as it is;
+    a float plane is refused, never cast."""
     import eagle.exec as eexec
     from eagle import plan as eplan
 
     plugin = _host_subject(gather_host_unit, "e4_gather")
+    assert plugin.arg_dtypes["where"] == "int32"
     p = eplan.plan(plugin, structure=eexec.HostTeam)
     table = np.arange(2 * N, dtype=np.float64) * 3.0
     where = ((np.arange(N) * 5 + 2) % (2 * N)).astype(np.int64)
     y = np.zeros(N)
+    too_big = where.copy()
+    too_big[0] = 2**31
+    with pytest.raises(ValueError, match=_RANGE_MSG):
+        p.bind(table=table, where=too_big, y=y)
+    with pytest.raises(ValueError, match=_RANGE_MSG):
+        p.run(table=table, where=too_big)
     with pytest.raises(ValueError, match=_INDEX_MSG):
         p.bind(table=table, where=where.astype(np.float32), y=y)
     with pytest.raises(ValueError, match=_INDEX_MSG):
@@ -883,17 +892,25 @@ def test_bind_still_refuses_a_float_plane_of_the_wrong_dtype_on_the_host(vec3_un
 
 
 @pytest.mark.gpu
-def test_bind_widens_an_int32_plane_for_an_int64_index_on_the_device(gather_unit):
+def test_bind_narrows_an_int64_index_plane_for_an_int32_index_on_the_device(gather_unit):
     import cupy as cp
 
     import eagle.exec as eexec
     from eagle import plan as eplan
 
     plugin = _device_subject(gather_unit, "e4_gather")
-    assert plugin.arg_dtypes["where"] == "int64"
+    assert plugin.arg_dtypes["where"] == "int32"
     p = eplan.plan(plugin, structure=eexec.DeviceKernel)
     table = cp.arange(2 * N, dtype=cp.float64)
     where = (cp.arange(N) * 5 % (2 * N)).astype(cp.int64)
+    too_big = where.copy()
+    too_big[0] = 2**31
+    with pytest.raises(ValueError, match=_RANGE_MSG):
+        p.bind(table=table, where=too_big, y=cp.zeros(N))
+    y64 = cp.zeros(N)
+    p.bind(table=table, where=where, y=y64).launch()
+    cp.cuda.runtime.deviceSynchronize()
+    np.testing.assert_array_equal(y64.get(), table.get()[where.get()])
     with pytest.raises(ValueError, match=_INDEX_MSG):
         p.bind(table=table, where=where.astype(cp.float32), y=cp.zeros(N))
     with pytest.raises(ValueError, match=_INDEX_MSG):
@@ -1333,3 +1350,30 @@ def test_launch_persist_packs_its_chunk_and_refuses_a_bad_one(monkeypatch):
         with pytest.raises(ValueError, match="multiple of 32"):
             bound.launch_persist(grid=2, counter=cell(0x100), block=block)
     assert len(issued) == 3
+
+
+def _narrowing_rows(make, place):
+    import eagle.arrays as xp
+    from eagle._plan_planes import _dt, widen_index
+
+    i32 = _dt("int32")
+    fits = place(make(np.array([0, 7, -2**31, 2**31 - 1], dtype=np.int64)))
+    got = widen_index(fits, i32, name="idx", kernel="k")
+    assert str(got.dtype) == "int32" and got.tolist() == [0, 7, -2**31, 2**31 - 1]
+    for bad in (2**31, -2**31 - 1):
+        with pytest.raises(ValueError, match=r"kernel 'k': argument 'idx': values exceed int32; declare Index\[int64\]"):
+            widen_index(place(make(np.array([1, bad], dtype=np.int64))), i32, name="idx", kernel="k")
+    same = place(make(np.array([1, 2], dtype=np.int32)))
+    assert widen_index(same, i32, name="idx", kernel="k") is same           # the declared width binds untouched
+    host = np.array([3, 4], dtype=np.int32)
+    assert xp.asarray(host).dtype == "int32"
+
+
+def test_an_int64_index_plane_narrows_to_a_declared_int32_when_it_fits_on_the_host():
+    _narrowing_rows(lambda a: a, lambda a: a)
+
+
+@pytest.mark.gpu
+def test_an_int64_index_plane_narrows_to_a_declared_int32_when_it_fits_on_the_device():
+    cp = pytest.importorskip("cupy")
+    _narrowing_rows(lambda a: a, cp.asarray)

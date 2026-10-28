@@ -252,7 +252,7 @@ class RefinePass:
         else:
             _core.events_refine_host(b._entry, b._addrs, self.bytes, args)
         for j, s in enumerate(self.seeds):
-            arrays.copyto(s, (self.which == j).astype(s.dtype))
+            arrays.copyto(s, arrays.equal(self.which, j).astype(s.dtype))
         self.guard_vjp.launch()
         rows = lambda planes: [r for nm in self.k.state for r in _rows(planes[nm])]
         gx = {nm: self.gx.get(nm, None) for nm in self.k.state}
@@ -287,7 +287,7 @@ class RefinePass:
     def _refuse(self):
         status = self.status.get() if self.device else self.status
         for code, text in ((TWO_RULES, None), (GRAZE, "graze"), (NO_EVENT, "none")):
-            hit = arrays.flatnonzero(status == code)
+            hit = arrays.flatnonzero(arrays.equal(status, code))
             if not hit.size or (code == NO_EVENT and self.on_no_event == "zero"):
                 continue
             first = int(hit[0])

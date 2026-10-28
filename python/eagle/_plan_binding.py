@@ -901,7 +901,8 @@ class BoundPlan:
                     if a is not None:
                         value = a.native
                 if role in INPUT_ROLES:
-                    value = widen_index(value, _declared_dtype(self.plan.plugin, name))
+                    value = widen_index(value, _declared_dtype(self.plan.plugin, name), name=name,
+                                       kernel=self._kernel_name())
                 _check_plane(role, name, value, n=self._n, dtype=self._dtype,
                              width=self._widths.get(name),
                              framework=self._framework,

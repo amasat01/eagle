@@ -196,30 +196,44 @@ def _refuse_dtype_mismatch(door, role, name, declared, given) -> None:
     )
 
 
-def widen_index(value, declared):
-    """``value`` widened by one copy to ``declared`` when it is a narrower
-    integer plane under a wider signed declaration (an ``int32`` ``Index``
-    for a kernel emitted for ``int64`` keys); anything else is returned as
-    it is, for :func:`_refuse_dtype_mismatch` to judge (a float never
-    widens). The doors call this where they take the plane in: ``run`` per
-    call, ``bind``/``rebind`` once, so a launch copies nothing."""
+def _plugin_name(plugin) -> str:
+    return str(getattr(plugin, "name", None) or getattr(plugin, "kernel", "?"))
+
+
+def widen_index(value, declared, *, name=None, kernel=None):
+    """``value`` converted by one copy to ``declared`` when it is an integer
+    plane of another width under a signed integer declaration: a narrower
+    one widens (an ``int32`` ``Index`` for a kernel emitted for ``int64``
+    keys); a wider one (an ``int64`` array for an ``int32`` ``Index``)
+    narrows when every value fits and is refused by name when one does not.
+    Anything else is returned as it is, for :func:`_refuse_dtype_mismatch`
+    to judge (a float never converts). The doors call this where they take
+    the plane in: ``run`` per call, ``bind``/``rebind`` once, so a launch
+    copies nothing; a plane of the declared width is returned untouched."""
     try:
         given = _dt(getattr(value, "dtype", None))
     except TypeError:
         return value
-    if (declared is not None and declared.kind == "i" and given.kind in "iu"
-            and given.itemsize < declared.itemsize):
+    if declared is None or declared.kind != "i" or given.kind not in "iu" or given.itemsize == declared.itemsize:
+        return value
+    if given.itemsize < declared.itemsize:
         return value.astype(declared.name)
-    return value
+    wide = arrays.asarray(value)
+    narrow = wide.astype(declared.name)
+    if arrays.flatnonzero(arrays.not_equal(narrow.astype(given.name), wide)).size:
+        raise ValueError(f"kernel {kernel!r}: argument {name!r}: values exceed {declared}; "
+                         f"declare Index[{given}]")
+    return narrow
 
 
 def widen_indices(plugin, arg_spec, planes: dict) -> dict:
     """``planes`` with each input plane :func:`widen_index`-ed to the dtype the
     sidecar declares for it."""
     out = planes
+    kernel = _plugin_name(plugin)
     for role, name in arg_spec:
         if role in INPUT_ROLES and name in planes:
-            wide = widen_index(planes[name], _declared_dtype(plugin, name))
+            wide = widen_index(planes[name], _declared_dtype(plugin, name), name=name, kernel=kernel)
             if wide is not planes[name]:
                 out = dict(out) if out is planes else out
                 out[name] = wide
@@ -248,7 +262,7 @@ def _plan_float(arr, dtype, name):
     return arr
 
 
-def _host_plane(value, dtype, *, declared=None, name=None, role="input"):
+def _host_plane(value, dtype, *, declared=None, name=None, role="input", kernel=None):
     """A caller-supplied input plane as a contiguous host array of the
     artifact's Real dtype; an integer/bool array (an index table, a
     ``terminated`` mask) passes through at its own dtype instead, after
@@ -256,7 +270,7 @@ def _host_plane(value, dtype, *, declared=None, name=None, role="input"):
     float array of another width follows :func:`_plan_float`."""
     arr = arrays.asarray(value)
     if declared is not None and declared.kind in "iub":
-        arr = widen_index(arr, declared)
+        arr = widen_index(arr, declared, name=name, kernel=kernel)
         _refuse_dtype_mismatch("run", role, name, declared, arr.dtype)
     if arr.dtype.kind in "iub":
         return arrays.ascontiguousarray(arr)
@@ -315,18 +329,18 @@ def _device_inputs(arg_spec, kw) -> bool:
     )
 
 
-def _device_plane(value, dtype, *, declared=None, name=None, role="input"):
+def _device_plane(value, dtype, *, declared=None, name=None, role="input", kernel=None):
     """:func:`_host_plane`'s device twin: a device-resident plane is
     wrapped where it lies and cast only on the device when needed; anything
     else goes through :func:`_host_plane` and is uploaded once."""
     from .launch import _current_device_ordinal
 
     if not device_resident(value):
-        return arrays.asarray(_host_plane(value, dtype, declared=declared, name=name, role=role),
+        return arrays.asarray(_host_plane(value, dtype, declared=declared, name=name, role=role, kernel=kernel),
                               device=f"cuda:{_current_device_ordinal()}")
     arr = arrays.asarray(value)
     if declared is not None and declared.kind in "iub":
-        arr = widen_index(arr, declared)
+        arr = widen_index(arr, declared, name=name, kernel=kernel)
         _refuse_dtype_mismatch("run", role, name, declared, arr.dtype)
     if arr.dtype.kind in "iub":
         return arrays.ascontiguousarray(arr)

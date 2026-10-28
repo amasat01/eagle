@@ -321,7 +321,7 @@ def _out_of_range_case(tmp_path, cache, target):
     plan_, _ = _plan([add_term], tmp_path, cache, target)
     n, cells = 6000, 9
     rng = np.random.default_rng(13)
-    key, x = rng.integers(0, cells, n).astype(np.int64), rng.standard_normal(n)
+    key, x = rng.integers(0, cells, n).astype(np.int32), rng.standard_normal(n)
     bad = key.copy()
     bad[4321] = cells + 3
     xp = _xp(target)

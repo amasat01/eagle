@@ -54,6 +54,7 @@ from ._plan_pack import _data_ptr, _integer_uniforms, _mutable_shapes, _pack_arg
 from ._plan_planes import (
     _adapt_planes,
     _bound,
+    _plugin_name,
     sample_spec,
     _check_run_shapes,
     _check_run_writable,
@@ -508,7 +509,7 @@ def _run_device_plan(plugin, arg_spec, kw, n: int, parts, *, launch=None, gather
         elif role in INPUT_ROLES:
             device_arrays[name] = _device_plane(_bound(kw, name, role), dtype,
                                                    declared=_declared_dtype(plugin, name),
-                                                   name=name, role=role)
+                                                   name=name, role=role, kernel=_plugin_name(plugin))
     owned = _cell_rows.owned_pairs(plugin, kw)
     for target, comp in owned:      # the run owns it: the target's shape, zeroed
         device_arrays[comp] = _alloc.zeros_like(xp, device_arrays[target])
@@ -585,7 +586,7 @@ def _run_host_plan(plugin, arg_spec, kw, n: int, parts, *, launch=None, gather=N
         elif role in INPUT_ROLES:
             host_arrays[name] = _host_plane(_bound(kw, name, role), dtype,
                                                declared=_declared_dtype(plugin, name),
-                                               name=name, role=role)
+                                               name=name, role=role, kernel=_plugin_name(plugin))
     owned = _cell_rows.owned_pairs(plugin, kw)
     for target, comp in owned:      # the run owns it: the target's shape, zeroed
         host_arrays[comp] = arrays.zeros_like(host_arrays[target])

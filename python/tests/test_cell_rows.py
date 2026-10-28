@@ -50,7 +50,7 @@ def test_plan_run_returns_the_finished_sum_and_max(tmp_path, n):
     (ps,) = eagle.plan.auto([cell_sum], targets=("host",), cache_dir=str(tmp_path))
     (pm,) = eagle.plan.auto([cell_max], targets=("host",), cache_dir=str(tmp_path))
     got = ps.run(x=x)
-    assert got.shape == (1,) and got[0] == (x * x).sum()
+    assert got.shape == (1,) and np.asarray(got)[0] == (x * x).sum()
     got = pm.run(x=x)
     assert got.shape == (1,) and got[0] == (x * 1.5).max()
 
