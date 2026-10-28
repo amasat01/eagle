@@ -146,8 +146,10 @@ def seed_events(cache: list) -> list:
 
 @contextlib.contextmanager
 def on_device(device):
-    """Make ``device`` (a CUDA ordinal; ``None`` for a host graph) the calling thread's current device for the
-    block, restoring the previous one after."""
+    """Make ``device`` (a CUDA ordinal; ``None`` for a host graph) the calling thread's current device, and its
+    primary context, for the block, restoring the previous device after. The set is unconditional: a framework's
+    own context on the same device would otherwise stay current, and whatever is created under it (a stream, an
+    event) dies with it."""
     if device is None:
         yield
         return
@@ -155,8 +157,7 @@ def on_device(device):
     from .launch import _current_device_ordinal
 
     previous = _current_device_ordinal()     # 0 on a thread that has no context yet: the CUDA default
-    if previous != device:
-        _core.set_device(int(device))
+    _core.set_device(int(device))
     try:
         yield
     finally:

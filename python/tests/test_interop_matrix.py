@@ -45,7 +45,7 @@ import numpy as np
 import pytest
 from raptor.conformance.interop import certified_framework, register_row
 
-from eagle import GraphPipeline, LoadedVector, detect
+from eagle import GraphPipeline, LoadedVector, detect, to_array
 from eagle.frameworks.cupy import to_cupy
 
 pytestmark = pytest.mark.interop_matrix
@@ -75,9 +75,8 @@ def _max_rel(g, ref):
 # --------------------------------------------------------------------------- #
 @register_row("T-IN-CUDA-ALIAS")
 def test_torch_cuda_input_dlpack_alias_and_write_through():
-    """``eagle.to_cupy(t)`` for a CUDA torch tensor is ``_TorchAdapter.to_cupy``,
-    which is literally ``cp.from_dlpack(t)`` (``_TorchAdapter.to_cupy``): a
-    zero-copy device view. Three legs: pointer-alias, ``__dlpack_device__``
+    """``eagle.frameworks.cupy.to_cupy(t)`` for a CUDA torch tensor is
+    ``cp.from_dlpack(t)``: a zero-copy device view. Three legs: pointer-alias, ``__dlpack_device__``
     (device ordinal) agreement, and write-through (a write on the cupy side is
     visible on the torch side with no copy in between)."""
     certified_framework("torch")
@@ -103,7 +102,7 @@ def test_torch_cuda_input_dlpack_alias_and_write_through():
 def test_torch_cuda_output_handoff_and_export_alias():
     """The ``out=`` handoff leg (a caller-provided torch CUDA buffer filled in
     place, no reallocation) PLUS the export leg: the engine's raw cupy result,
-    exported back through ``_TorchAdapter.from_cupy`` (== ``torch.from_dlpack``),
+    exported back through ``_TorchAdapter.from_array`` (== ``torch.from_dlpack``),
     is pointer-equal to the cupy array and write-through in both directions."""
     certified_framework("torch")
     certified_framework("cupy")
@@ -124,7 +123,7 @@ def test_torch_cuda_output_handoff_and_export_alias():
 
     # export leg: the engine's raw cupy result, exported via the adapter.
     y_cp = cp.asarray(plugin(position=cp.asarray(P), mu=MU))
-    y_t = detect(t_in).from_cupy(y_cp)
+    y_t = detect(t_in).from_array(to_array(y_cp))
     assert isinstance(y_t, torch.Tensor)
     assert y_t.data_ptr() == y_cp.data.ptr  # pointer-equal, no copy on export
     sentinel = 3.5
