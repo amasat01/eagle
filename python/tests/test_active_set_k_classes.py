@@ -39,7 +39,7 @@ def test_class_sort_matches_serial_oracle(k):
     a.compact()
     assert a.class_sort()
     want = _oracle(mask0, cls0, k)
-    assert list(a.perm) == want
+    assert a.perm.tolist() == want
     # perm is a permutation and inv is its inverse
     assert sorted(a.perm.tolist()) == list(range(n))
     assert np.array_equal(np.asarray(a.inv)[np.asarray(a.perm)], np.arange(n))
@@ -161,7 +161,7 @@ def test_liveness_reorder_is_the_class_sort():
     assert int(a.fire[0]) == 1 and int(a.class_fire[0]) == 1  # the liveness term is OR-ed in
     a.reorder()
     assert int(a.reorders[0]) == 0 and int(a.class_sorts[0]) == 1
-    assert list(a.perm) == _oracle(mask0, cls0, 3)
+    assert a.perm.tolist() == _oracle(mask0, cls0, 3)
     a.compact()
     a.reorder()  # nothing fired: no second sort
     assert int(a.class_sorts[0]) == 1

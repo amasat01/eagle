@@ -520,7 +520,7 @@ def test_e2_packed_mirror_bytes_match_the_cpp_layout(e2_host_lib):
         "e2_decode_host",
         (("wide_out", "probe"), ("vec_in", "x"), ("nsamples", "n")),
     )
-    probe = eplan.plan(plugin, structure=eexec.HostTeam).run(x=x)
+    probe = eplan.plan(plugin, structure=eexec.HostTeam).run(x=x).tolist()   # an eagle.Array: compare its values
 
     assert probe[0] == 40                      # sizeof(GRefMirror), C++ side
     assert probe[1] == n                       # samples_ = the run's sample count
