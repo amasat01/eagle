@@ -345,8 +345,9 @@ if(_eagle_plugin_mode STREQUAL "BUILD")
   list(JOIN _eagle_sass "," _eagle_sass)
   list(JOIN _eagle_ptx "," _eagle_ptx)
   set(_eagle_plugin_archs "${_eagle_sass}/${_eagle_ptx}")
+  # No version here: the plugin object depends only on its sources, headers, flags and architectures, so one build
+  # serves every commit (eagle._core reports the package version, from src/eagle_version.cpp).
   target_compile_definitions(eagle_cuda PRIVATE
-    EAGLE_PYTHON_VERSION="${eagle_VERSION}"
     EAGLE_CUDA_PLUGIN_ARCHS="${_eagle_plugin_archs}"
     $<$<BOOL:${EAGLE_BACKEND_INJECT_MISSING}>:EAGLE_BACKEND_INJECT_MISSING=1>)
   target_compile_options(eagle_cuda PRIVATE ${_eagle_no_gnu_unique} ${_eagle_warn_as_err})
@@ -402,7 +403,9 @@ endif()
 # exported definitions describe the CUDA-mode package (AETHER_HAS_CUDA, ...).
 get_target_property(_eagle_core_incs eagle::eagle INTERFACE_INCLUDE_DIRECTORIES)
 get_target_property(_aether_incs aether::aether INTERFACE_INCLUDE_DIRECTORIES)
-nanobind_add_module(_core MODULE FREE_THREADED src/eagle_core.cpp)
+nanobind_add_module(_core MODULE FREE_THREADED src/eagle_core.cpp src/eagle_version.cpp)
+# the package version lives in this one small file: a new version recompiles it alone
+set_source_files_properties(src/eagle_version.cpp PROPERTIES COMPILE_DEFINITIONS EAGLE_PYTHON_VERSION="${eagle_VERSION}")
 target_compile_features(_core PRIVATE cxx_std_23)
 # aether's own include directories first: an installed eagle's prefix may also
 # hold an (older) aether copy, and the aether this configure resolved must win.

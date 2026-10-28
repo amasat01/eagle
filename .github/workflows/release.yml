@@ -58,13 +58,100 @@ permissions:
   contents: read
 
 jobs:
-  # One job per platform; `build` below assembles them. x86_64 and aarch64 carry the CUDA plugin (the aarch64 one is built
-  # from the sdist and load-tested without a GPU; it has not run on one). macOS arm64 wheels are CPU-only (no CUDA):
-  # same Python versions, native runners, no emulation.
-  wheels-x86_64:
-    runs-on: ubuntu-latest
+  # The wheels are built one Python version per job, in parallel. The CUDA plugin (libeagle_cuda.so) does not depend
+  # on the Python version, so `plugin` builds it ONCE per architecture, remembered under a digest of exactly what
+  # reaches it (its sources, the eagle and aether headers it includes, the toolkit and the architecture); the wheel jobs
+  # install that file (EAGLE_PYTHON_CUDA_PLUGIN=<path>) and build only the core. macOS arm64 wheels are CPU-only
+  # (no CUDA): same Python versions, native runners, no emulation. `wheels-*` below keep the per-platform check names;
+  # `build` assembles them. The aarch64 plugin is built and load-tested without a GPU; it has not run on one.
+
+  # libeagle_cuda.so, from the sdist (it carries every header the plugin needs), in the manylinux container.
+  # nvcc + CUDA headers only (no driver, nothing executed); the rhel8 repo matches manylinux_2_28's AlmaLinux 8 base,
+  # and CUDA 12.9 is the newest toolkit that still compiles Pascal and Volta (it adds Blackwell; its nvcc takes
+  # gcc-toolset-13 as the host compiler). python/CMakeLists.txt's default architecture list (SASS for every
+  # architecture this nvcc compiles from sm_60 up, plus PTX at the newest) is what ships.
+  plugin:
+    name: plugin (${{ matrix.arch }})
+    runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+    env:
+      # bump the suffix to rebuild every plugin when this recipe (toolkit, flags) changes
+      PLUGIN_RECIPE: "recipe-v1 cuda-12-9 gcc-toolset-13 Release"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: eagle
+          fetch-depth: 0
+      - uses: ./eagle/.github/actions/tag-version
+        with:
+          path: eagle
+      - uses: ./eagle/.github/actions/companion
+        with: {repo: aether, path: aether, pins: eagle/.github/companions, token: "${{ secrets.SIBLING_READ_TOKEN || github.token }}"}
+
+      # No version and no commit in the key: the plugin object depends on its inputs alone.
+      - id: pk
+        run: |
+          args=(--tree eagle --only eagle/ --only plugin/ --only python/src/plugin/ --only python/src/seam/ --only python/CMakeLists.txt
+                --tree aether --only aether/ --str "$PLUGIN_RECIPE ${{ matrix.arch }}")
+          args+=(--str "manylinux_2_28 $(docker buildx imagetools inspect "quay.io/pypa/manylinux_2_28_$(uname -m)" --format '{{.Manifest.Digest}}' 2>/dev/null || true)")
+          digest=$(eagle/.github/ci_digest.sh "${args[@]}") || exit 1
+          [ -n "$digest" ] || { echo "::error::empty digest"; exit 1; }
+          echo "key=plugin-v1-${{ matrix.arch }}-$digest" >> "$GITHUB_OUTPUT"
+      - id: pc
+        uses: actions/cache@v6
+        with:
+          path: plugin
+          key: ${{ steps.pk.outputs.key }}
+      - if: steps.pc.outputs.cache-hit == 'true'
+        run: ls -l plugin
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+        if: steps.pc.outputs.cache-hit != 'true'
+      - run: python -m pip install --quiet build
+        if: steps.pc.outputs.cache-hit != 'true'
+      - name: Build the sdist the plugin is built from
+        run: (cd eagle/python && python -m build --sdist --outdir "$GITHUB_WORKSPACE/sdist")
+        if: steps.pc.outputs.cache-hit != 'true'
+      - name: Build libeagle_cuda.so in the manylinux container
+        if: steps.pc.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p plugin
+          case "${{ matrix.arch }}" in x86_64) repo=x86_64;; aarch64) repo=sbsa;; esac
+          docker run --rm -e REPO="$repo" -v "$GITHUB_WORKSPACE:/w" "quay.io/pypa/manylinux_2_28_$(uname -m)" bash -euo pipefail -c '
+            curl -fsSL -o /etc/yum.repos.d/cuda-rhel8.repo "https://developer.download.nvidia.com/compute/cuda/repos/rhel8/$REPO/cuda-rhel8.repo"
+            dnf install -y --setopt=install_weak_deps=False cuda-nvcc-12-9 cuda-cudart-devel-12-9 cuda-driver-devel-12-9 gcc-toolset-13-gcc-c++
+            mkdir /src && tar xzf /w/sdist/raptor_eagle-*.tar.gz -C /src --strip-components=1
+            cmake -S /src -B /tmp/b -DCMAKE_BUILD_TYPE=Release -DEAGLE_PYTHON_CUDA_PLUGIN=BUILD -DEAGLE_PYTHON_SKIP_CORE=ON \
+              -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.9/bin/nvcc -DCMAKE_CUDA_HOST_COMPILER=/opt/rh/gcc-toolset-13/root/usr/bin/g++ \
+              -DPython_EXECUTABLE=/opt/python/cp312-cp312/bin/python
+            cmake --build /tmp/b --target eagle_cuda -j4
+            cp /tmp/b/libeagle_cuda.so /w/plugin/libeagle_cuda.so'
+          ls -l plugin
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: plugin-${{ matrix.arch }}
+          retention-days: 7
+          path: plugin/libeagle_cuda.so
+
+  wheel-linux:
+    name: wheel (${{ matrix.arch }}, ${{ matrix.tag }})
+    needs: plugin
+    runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+        tag: [cp39, cp310, cp311, cp312, cp313, cp314, cp313t, cp314t, cp315, cp315t]
     env:
       CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
+      CIBW_MANYLINUX_AARCH64_IMAGE: manylinux_2_28
       # no isolation, deps installed per Python first: an isolated build env sits at a random
       # /tmp path that lands in every compile line, so ccache could never hit across runs
       CIBW_BUILD_FRONTEND: "build; args: --no-isolation"
@@ -72,55 +159,28 @@ jobs:
         python -m pip install 'scikit-build-core>=0.10' 'setuptools-scm>=8' 'ninja>=1.5'
         'nanobind>=3.1,<4; python_version >= "3.10"'
         'nanobind>=2.2,<3; python_version < "3.10"'
-      CIBW_CONTAINER_ENGINE: "docker; create_args: --volume ${{ github.workspace }}/aether:/sib/aether:ro --volume ${{ github.workspace }}/eagle:/sib/eagle:ro --volume ${{ github.workspace }}/.ccache-cibw:/ccache"
-      # nvcc + CUDA headers only (no driver, nothing executed); rhel8
-      # repo matches manylinux_2_28's AlmaLinux 8 base. Installed once
-      # per container, ahead of every per-Python wheel build. The .repo
-      # file is fetched with curl (dnf cannot `install` a .repo file, and
-      # `dnf config-manager` needs dnf-plugins-core).
+      # the prebuilt plugin (the `plugin` job) and the ccache directory are mounted into the container
+      CIBW_CONTAINER_ENGINE: "docker; create_args: --volume ${{ github.workspace }}/.ccache-cibw:/ccache --volume ${{ github.workspace }}/plugin:/plugin:ro"
       # EPEL mirrors fail often on aarch64: retry, then run uncached through a pass-through ccache stand-in
       CIBW_BEFORE_ALL_LINUX: >-
         git config --global --add safe.directory '*';
         for i in 1 2 3; do dnf install -y epel-release && dnf install -y ccache && break; dnf clean all; done;
         command -v ccache >/dev/null || { printf '%s\n' '#!/bin/sh' 'case $1 in -*) exit 0;; esac' 'exec "$@"' > /usr/local/bin/ccache;
         chmod +x /usr/local/bin/ccache; };
-        CCACHE_DIR=/ccache ccache -z &&
-        curl -fsSL -o /etc/yum.repos.d/cuda-rhel8.repo
-        https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo &&
-        dnf install -y --setopt=install_weak_deps=False
-        cuda-nvcc-12-9 cuda-cudart-devel-12-9 cuda-driver-devel-12-9 gcc-toolset-13-gcc-c++ &&
-        cmake -DAETHER_CPP_MODE=OFF -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.9/bin/nvcc
-        -DCMAKE_CUDA_HOST_COMPILER=/opt/rh/gcc-toolset-13/root/usr/bin/g++
-        -DCMAKE_INSTALL_PREFIX=/opt/eagle-build-prefix -B /tmp/aether-build -S /sib/aether &&
-        cmake --install /tmp/aether-build &&
-        cmake -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.9/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES=61
-        -DCMAKE_CUDA_HOST_COMPILER=/opt/rh/gcc-toolset-13/root/usr/bin/g++
-        -DCMAKE_INSTALL_PREFIX=/opt/eagle-build-prefix -B /tmp/eagle-hdr -S /sib/eagle &&
-        cmake --install /tmp/eagle-hdr
-      # CUDA 12.9 is the newest toolkit that still compiles Pascal and Volta,
-      # and it adds Blackwell; its nvcc takes gcc-toolset-13 as the host
-      # compiler (CUDAHOSTCXX). No CMAKE_CUDA_ARCHITECTURES here:
-      # python/CMakeLists.txt's default (SASS for every architecture this
-      # nvcc compiles from sm_60 up, plus PTX at the newest) is what ships.
-      # cibuildwheel parses this with a shell grammar: a value holding
-      # `;` (or spaces) must be double-quoted, or the whole option is
-      # rejected as malformed.
+        CCACHE_DIR=/ccache ccache -z
+      # cibuildwheel parses this with a shell grammar: a value holding `;` (or spaces) must be double-quoted, or the
+      # whole option is rejected as malformed. No CUDA toolkit here: the plugin is the file mounted at /plugin.
       CIBW_ENVIRONMENT_LINUX: >-
-        PATH=/usr/local/cuda-12.9/bin:$PATH
-        CMAKE_PREFIX_PATH=/opt/eagle-build-prefix
         CMAKE_BUILD_PARALLEL_LEVEL=4
-        CUDAHOSTCXX=/opt/rh/gcc-toolset-13/root/usr/bin/g++
-        SKBUILD_CMAKE_ARGS="-DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.9/bin/nvcc"
+        SKBUILD_CMAKE_ARGS="-DEAGLE_PYTHON_CUDA_PLUGIN=/plugin/libeagle_cuda.so"
         CCACHE_DIR=/ccache
         CCACHE_MAXSIZE=1G
         CCACHE_COMPILERCHECK=content
         CMAKE_C_COMPILER_LAUNCHER=ccache
         CMAKE_CXX_COMPILER_LAUNCHER=ccache
-        CMAKE_CUDA_COMPILER_LAUNCHER=ccache
       CIBW_REPAIR_WHEEL_COMMAND_LINUX: "ccache -s; auditwheel repair -w {dest_dir} --exclude libcuda.so.1 --exclude libgomp.so.1 {wheel}"
-      # The dedicated test-wheel job below (with the raptor-core sibling
-      # wheel + the no-driver smoke) replaces cibuildwheel's built-in
-      # --test-command.
+      # The dedicated test-wheel job below (with the raptor-core sibling wheel + the no-driver smoke) replaces
+      # cibuildwheel's built-in --test-command.
       CIBW_TEST_SKIP: "*"
     steps:
       - uses: actions/checkout@v7
@@ -134,17 +194,18 @@ jobs:
       - uses: ./eagle/.github/actions/companion
         with: {repo: aether, path: aether, pins: eagle/.github/companions, token: "${{ secrets.SIBLING_READ_TOKEN || github.token }}"}
 
-      # The finished wheels are remembered under a digest of everything that goes into them: the eagle and aether trees,
-      # the version, this workflow (cibuildwheel, CUDA and compiler pins) and the platform. A hit skips the build; the
-      # checks downstream run on what is restored.
+      # The finished wheel is remembered under a digest of what reaches it: the eagle and aether sources (not the tests,
+      # docs, CI files or CHANGELOG), the release tag, this workflow (cibuildwheel and compiler pins) and the platform.
+      # A hit skips the build; the checks downstream run on what is restored.
       - id: wk
         run: |
-          args=(--tree eagle --skip docs/ --skip .github/ --tree aether --skip docs/ --skip .github/
-                --version eagle --file eagle/.github/workflows/release.yml --str "x86_64 $RUNNER_OS $RUNNER_ARCH")
+          args=(--tree eagle --only eagle/ --only plugin/ --only python/ --only README.md --skip python/tests/
+                --tree aether --only aether/
+                --tag eagle --file eagle/.github/workflows/release.yml --str "${{ matrix.arch }} ${{ matrix.tag }} $RUNNER_OS $RUNNER_ARCH")
           args+=(--str "manylinux_2_28 $(docker buildx imagetools inspect "quay.io/pypa/manylinux_2_28_$(uname -m)" --format '{{.Manifest.Digest}}' 2>/dev/null || true)")
           digest=$(eagle/.github/ci_digest.sh "${args[@]}") || exit 1
           [ -n "$digest" ] || { echo "::error::empty digest"; exit 1; }
-          echo "key=wheels-v2-x86_64-$digest" >> "$GITHUB_OUTPUT"
+          echo "key=wheels-v3-${{ matrix.arch }}-${{ matrix.tag }}-$digest" >> "$GITHUB_OUTPUT"
       - id: wh
         uses: actions/cache@v6
         with:
@@ -152,6 +213,12 @@ jobs:
           key: ${{ steps.wk.outputs.key }}
       - if: steps.wh.outputs.cache-hit == 'true'
         run: ls -l dist
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: plugin-${{ matrix.arch }}
+          path: plugin
+        if: steps.wh.outputs.cache-hit != 'true'
 
       # ccache inside the manylinux container: the runner directory is bind-mounted at /ccache
       - run: mkdir -p .ccache-cibw
@@ -159,157 +226,57 @@ jobs:
       - uses: actions/cache@v6
         with:
           path: ${{ github.workspace }}/.ccache-cibw
-          key: ccache-v2-${{ runner.os }}-${{ runner.arch }}-cibw-${{ hashFiles('**/*.h', '**/*.hpp', '**/*.cpp', '**/*.cu', '**/*.cuh', '**/CMakeLists.txt') }}
+          key: ccache-v3-${{ runner.os }}-${{ runner.arch }}-${{ matrix.tag }}-${{ hashFiles('eagle/python/src/**', 'eagle/python/CMakeLists.txt', 'eagle/eagle/**', 'aether/aether/**') }}
           restore-keys: |
-            ccache-v2-${{ runner.os }}-${{ runner.arch }}-cibw-
+            ccache-v3-${{ runner.os }}-${{ runner.arch }}-${{ matrix.tag }}-
         if: steps.wh.outputs.cache-hit != 'true'
-
-      - name: Build wheels (cibuildwheel 3.x; CPython 3.9-3.14 plus free-threaded 3.13t/3.14t)
-        uses: pypa/cibuildwheel@v3.4.1
-        with:
-          package-dir: eagle/python
-          output-dir: dist
-        env:
-          CIBW_BUILD: "cp39-manylinux_x86_64 cp310-manylinux_x86_64 cp311-manylinux_x86_64 cp312-manylinux_x86_64 cp313-manylinux_x86_64 cp314-manylinux_x86_64 cp313t-manylinux_x86_64 cp314t-manylinux_x86_64"
-          CIBW_ENABLE: cpython-freethreading
-        if: steps.wh.outputs.cache-hit != 'true'
-      # 3.15 needs cibuildwheel 4.x, which dropped the free-threaded 3.13 build: a second pass for the 3.15 tags only
-      - name: Build the CPython 3.15 and 3.15t wheels (cibuildwheel 4.x)
-        uses: pypa/cibuildwheel@v4.3.3
-        with:
-          package-dir: eagle/python
-          output-dir: dist
-        env:
-          CIBW_BUILD: "cp315-manylinux_x86_64 cp315t-manylinux_x86_64"
-          CIBW_ENABLE: ""
-        if: steps.wh.outputs.cache-hit != 'true'
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: wheels-x86_64
-          retention-days: 7
-          path: dist/
-
-  wheels-aarch64:
-    runs-on: ubuntu-24.04-arm
-    env:
-      CIBW_MANYLINUX_AARCH64_IMAGE: manylinux_2_28
-      CIBW_BUILD_FRONTEND: "build; args: --no-isolation"
-      CIBW_BEFORE_BUILD: >-
-        python -m pip install 'scikit-build-core>=0.10' 'setuptools-scm>=8' 'ninja>=1.5'
-        'nanobind>=3.1,<4; python_version >= "3.10"'
-        'nanobind>=2.2,<3; python_version < "3.10"'
-      CIBW_CONTAINER_ENGINE: "docker; create_args: --volume ${{ github.workspace }}/.ccache-cibw:/ccache"
-      # EPEL mirrors fail often on aarch64: retry, then run uncached through a pass-through ccache stand-in
-      CIBW_BEFORE_ALL_LINUX: >-
-        git config --global --add safe.directory '*';
-        for i in 1 2 3; do dnf install -y epel-release && dnf install -y ccache && break; dnf clean all; done;
-        command -v ccache >/dev/null || { printf '%s\n' '#!/bin/sh' 'case $1 in -*) exit 0;; esac' 'exec "$@"' > /usr/local/bin/ccache;
-        chmod +x /usr/local/bin/ccache; };
-        CCACHE_DIR=/ccache ccache -z &&
-        curl -fsSL -o /etc/yum.repos.d/cuda-rhel8.repo
-        https://developer.download.nvidia.com/compute/cuda/repos/rhel8/sbsa/cuda-rhel8.repo &&
-        dnf install -y --setopt=install_weak_deps=False
-        cuda-nvcc-12-9 cuda-cudart-devel-12-9 cuda-driver-devel-12-9 gcc-toolset-13-gcc-c++
-      # The plugin builds from the sdist, which carries every header it needs (see sdist-cuda-wheel); the nvcc is the
-      # sbsa build of the x86_64 leg's 12.9, so the architecture list is the same.
-      CIBW_ENVIRONMENT_LINUX: >-
-        PATH=/usr/local/cuda-12.9/bin:$PATH
-        CMAKE_BUILD_PARALLEL_LEVEL=4
-        CUDAHOSTCXX=/opt/rh/gcc-toolset-13/root/usr/bin/g++
-        SKBUILD_CMAKE_ARGS="-DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.9/bin/nvcc"
-        CCACHE_DIR=/ccache
-        CCACHE_MAXSIZE=1G
-        CCACHE_COMPILERCHECK=content
-        CMAKE_C_COMPILER_LAUNCHER=ccache
-        CMAKE_CXX_COMPILER_LAUNCHER=ccache
-        CMAKE_CUDA_COMPILER_LAUNCHER=ccache
-      CIBW_REPAIR_WHEEL_COMMAND_LINUX: "ccache -s; auditwheel repair -w {dest_dir} --exclude libcuda.so.1 --exclude libgomp.so.1 {wheel}"
-      CIBW_TEST_SKIP: "*"
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          path: eagle
-          fetch-depth: 0
-      - uses: ./eagle/.github/actions/tag-version
-        with:
-          path: eagle
-
-      - uses: ./eagle/.github/actions/companion
-        with: {repo: aether, path: aether, pins: eagle/.github/companions, token: "${{ secrets.SIBLING_READ_TOKEN || github.token }}"}
-
-      # The finished wheels are remembered under a digest of everything that goes into them: the eagle and aether trees,
-      # the version, this workflow (cibuildwheel, CUDA and compiler pins) and the platform. A hit skips the build; the
-      # checks downstream run on what is restored.
-      - id: wk
-        run: |
-          args=(--tree eagle --skip docs/ --skip .github/ --tree aether --skip docs/ --skip .github/
-                --version eagle --file eagle/.github/workflows/release.yml --str "aarch64 $RUNNER_OS $RUNNER_ARCH")
-          args+=(--str "manylinux_2_28 $(docker buildx imagetools inspect "quay.io/pypa/manylinux_2_28_$(uname -m)" --format '{{.Manifest.Digest}}' 2>/dev/null || true)")
-          digest=$(eagle/.github/ci_digest.sh "${args[@]}") || exit 1
-          [ -n "$digest" ] || { echo "::error::empty digest"; exit 1; }
-          echo "key=wheels-v2-aarch64-$digest" >> "$GITHUB_OUTPUT"
-      - id: wh
-        uses: actions/cache@v6
-        with:
-          path: dist
-          key: ${{ steps.wk.outputs.key }}
-      - if: steps.wh.outputs.cache-hit == 'true'
-        run: ls -l dist
 
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
         if: steps.wh.outputs.cache-hit != 'true'
-
       - run: python -m pip install --quiet build
         if: steps.wh.outputs.cache-hit != 'true'
-
-      # ccache inside the manylinux container: the runner directory is bind-mounted at /ccache
-      - run: mkdir -p .ccache-cibw
-        if: steps.wh.outputs.cache-hit != 'true'
-      - uses: actions/cache@v6
-        with:
-          path: ${{ github.workspace }}/.ccache-cibw
-          key: ccache-v2-${{ runner.os }}-${{ runner.arch }}-cibw-${{ hashFiles('**/*.h', '**/*.hpp', '**/*.cpp', '**/*.cu', '**/*.cuh', '**/CMakeLists.txt') }}
-          restore-keys: |
-            ccache-v2-${{ runner.os }}-${{ runner.arch }}-cibw-
-        if: steps.wh.outputs.cache-hit != 'true'
-
-      - name: Build the sdist the wheels are built from
+      - name: Build the sdist the wheel is built from
         id: sdist
         run: |
           (cd eagle/python && python -m build --sdist --outdir "$GITHUB_WORKSPACE/sdist-cpu")
           echo "path=$(find "$GITHUB_WORKSPACE/sdist-cpu" -name 'raptor_eagle-*.tar.gz')" >> "$GITHUB_OUTPUT"
         if: steps.wh.outputs.cache-hit != 'true'
-      - name: Build wheels (cibuildwheel 3.x; CPython 3.9-3.14 plus free-threaded 3.13t/3.14t)
+
+      - name: Build the wheel (cibuildwheel 3.x; CPython 3.9-3.14 plus free-threaded 3.13t/3.14t)
         uses: pypa/cibuildwheel@v3.4.1
         with:
           package-dir: ${{ steps.sdist.outputs.path }}
           output-dir: dist
         env:
-          CIBW_BUILD: "cp39-manylinux_aarch64 cp310-manylinux_aarch64 cp311-manylinux_aarch64 cp312-manylinux_aarch64 cp313-manylinux_aarch64 cp314-manylinux_aarch64 cp313t-manylinux_aarch64 cp314t-manylinux_aarch64"
+          CIBW_BUILD: "${{ matrix.tag }}-manylinux_${{ matrix.arch }}"
           CIBW_ENABLE: cpython-freethreading
-        if: steps.wh.outputs.cache-hit != 'true'
-      # 3.15 needs cibuildwheel 4.x, which dropped the free-threaded 3.13 build: a second pass for the 3.15 tags only
-      - name: Build the CPython 3.15 and 3.15t wheels (cibuildwheel 4.x)
+        if: steps.wh.outputs.cache-hit != 'true' && !startsWith(matrix.tag, 'cp315')
+      # 3.15 needs cibuildwheel 4.x, which dropped the free-threaded 3.13 build
+      - name: Build the wheel (CPython 3.15 and 3.15t, cibuildwheel 4.x)
         uses: pypa/cibuildwheel@v4.3.3
         with:
           package-dir: ${{ steps.sdist.outputs.path }}
           output-dir: dist
         env:
-          CIBW_BUILD: "cp315-manylinux_aarch64 cp315t-manylinux_aarch64"
+          CIBW_BUILD: "${{ matrix.tag }}-manylinux_${{ matrix.arch }}"
           CIBW_ENABLE: ""
-        if: steps.wh.outputs.cache-hit != 'true'
+        if: steps.wh.outputs.cache-hit != 'true' && startsWith(matrix.tag, 'cp315')
 
       - uses: actions/upload-artifact@v7
         with:
-          name: wheels-aarch64
+          name: wheels-${{ matrix.arch }}-${{ matrix.tag }}
           retention-days: 7
           path: dist/
 
-  wheels-macos-arm64:
+  wheel-macos:
+    name: wheel (macos-arm64, ${{ matrix.tag }})
     runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        tag: [cp39, cp310, cp311, cp312, cp313, cp314, cp313t, cp314t, cp315, cp315t]
     env:
       CIBW_BUILD_FRONTEND: "build; args: --no-isolation"
       CIBW_BEFORE_BUILD: >-
@@ -346,16 +313,15 @@ jobs:
       - uses: ./eagle/.github/actions/companion
         with: {repo: aether, path: aether, pins: eagle/.github/companions, token: "${{ secrets.SIBLING_READ_TOKEN || github.token }}"}
 
-      # The finished wheels are remembered under a digest of everything that goes into them: the eagle and aether trees,
-      # the version, this workflow (cibuildwheel, CUDA and compiler pins) and the platform. A hit skips the build; the
-      # checks downstream run on what is restored.
+      # The finished wheel is remembered under a digest of what reaches it (see wheel-linux).
       - id: wk
         run: |
-          args=(--tree eagle --skip docs/ --skip .github/ --tree aether --skip docs/ --skip .github/
-                --version eagle --file eagle/.github/workflows/release.yml --str "macosx_arm64 $RUNNER_OS $RUNNER_ARCH")
+          args=(--tree eagle --only eagle/ --only plugin/ --only python/ --only README.md --skip python/tests/
+                --tree aether --only aether/
+                --tag eagle --file eagle/.github/workflows/release.yml --str "macosx_arm64 ${{ matrix.tag }} $RUNNER_OS $RUNNER_ARCH")
           digest=$(eagle/.github/ci_digest.sh "${args[@]}") || exit 1
           [ -n "$digest" ] || { echo "::error::empty digest"; exit 1; }
-          echo "key=wheels-v2-macos-arm64-$digest" >> "$GITHUB_OUTPUT"
+          echo "key=wheels-v3-macos-arm64-${{ matrix.tag }}-$digest" >> "$GITHUB_OUTPUT"
       - id: wh
         uses: actions/cache@v6
         with:
@@ -370,9 +336,9 @@ jobs:
       - uses: actions/cache@v6
         with:
           path: ${{ github.workspace }}/.ccache-cibw
-          key: ccache-v2-${{ runner.os }}-${{ runner.arch }}-cibw-${{ hashFiles('**/*.h', '**/*.hpp', '**/*.cpp', '**/*.cu', '**/*.cuh', '**/CMakeLists.txt') }}
+          key: ccache-v3-${{ runner.os }}-${{ runner.arch }}-${{ matrix.tag }}-${{ hashFiles('eagle/python/src/**', 'eagle/python/CMakeLists.txt', 'eagle/eagle/**', 'aether/aether/**') }}
           restore-keys: |
-            ccache-v2-${{ runner.os }}-${{ runner.arch }}-cibw-
+            ccache-v3-${{ runner.os }}-${{ runner.arch }}-${{ matrix.tag }}-
         if: steps.wh.outputs.cache-hit != 'true'
 
       - uses: actions/setup-python@v7
@@ -383,31 +349,31 @@ jobs:
       - run: python -m pip install --quiet build
         if: steps.wh.outputs.cache-hit != 'true'
 
-      - name: Build the sdist the wheels are built from
+      - name: Build the sdist the wheel is built from
         id: sdist
         run: |
           (cd eagle/python && python -m build --sdist --outdir "$GITHUB_WORKSPACE/sdist-cpu")
           echo "path=$(find "$GITHUB_WORKSPACE/sdist-cpu" -name 'raptor_eagle-*.tar.gz')" >> "$GITHUB_OUTPUT"
         if: steps.wh.outputs.cache-hit != 'true'
-      - name: Build wheels (cibuildwheel 3.x; CPython 3.9-3.14 plus free-threaded 3.13t/3.14t)
+      - name: Build the wheel (cibuildwheel 3.x; CPython 3.9-3.14 plus free-threaded 3.13t/3.14t)
         uses: pypa/cibuildwheel@v3.4.1
         with:
           package-dir: ${{ steps.sdist.outputs.path }}
           output-dir: dist
         env:
-          CIBW_BUILD: "cp39-macosx_arm64 cp310-macosx_arm64 cp311-macosx_arm64 cp312-macosx_arm64 cp313-macosx_arm64 cp314-macosx_arm64 cp313t-macosx_arm64 cp314t-macosx_arm64"
+          CIBW_BUILD: "${{ matrix.tag }}-macosx_arm64"
           CIBW_ENABLE: cpython-freethreading
-        if: steps.wh.outputs.cache-hit != 'true'
-      # 3.15 needs cibuildwheel 4.x, which dropped the free-threaded 3.13 build: a second pass for the 3.15 tags only
-      - name: Build the CPython 3.15 and 3.15t wheels (cibuildwheel 4.x)
+        if: steps.wh.outputs.cache-hit != 'true' && !startsWith(matrix.tag, 'cp315')
+      # 3.15 needs cibuildwheel 4.x, which dropped the free-threaded 3.13 build
+      - name: Build the wheel (CPython 3.15 and 3.15t, cibuildwheel 4.x)
         uses: pypa/cibuildwheel@v4.3.3
         with:
           package-dir: ${{ steps.sdist.outputs.path }}
           output-dir: dist
         env:
-          CIBW_BUILD: "cp315-macosx_arm64 cp315t-macosx_arm64"
+          CIBW_BUILD: "${{ matrix.tag }}-macosx_arm64"
           CIBW_ENABLE: ""
-        if: steps.wh.outputs.cache-hit != 'true'
+        if: steps.wh.outputs.cache-hit != 'true' && startsWith(matrix.tag, 'cp315')
       - if: always() && steps.wh.outputs.cache-hit != 'true'
         env:
           CCACHE_DIR: ${{ github.workspace }}/.ccache-cibw
@@ -415,9 +381,29 @@ jobs:
 
       - uses: actions/upload-artifact@v7
         with:
-          name: wheels-macos-arm64
+          name: wheels-macos-arm64-${{ matrix.tag }}
           retention-days: 7
           path: dist/
+
+  # The per-platform checks keep their names (rulesets name them): each passes when every wheel of its platform built.
+  wheels-x86_64:
+    needs: wheel-linux
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: '[ "${{ needs.wheel-linux.result }}" = success ] || { echo "a Linux wheel job: ${{ needs.wheel-linux.result }}"; exit 1; }'
+  wheels-aarch64:
+    needs: wheel-linux
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: '[ "${{ needs.wheel-linux.result }}" = success ] || { echo "a Linux wheel job: ${{ needs.wheel-linux.result }}"; exit 1; }'
+  wheels-macos-arm64:
+    needs: wheel-macos
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: '[ "${{ needs.wheel-macos.result }}" = success ] || { echo "a macOS wheel job: ${{ needs.wheel-macos.result }}"; exit 1; }'
 
   # Assembles what the `wheels-*` jobs built into the one artifact the rest of the workflow and publish.yml use.
   build:

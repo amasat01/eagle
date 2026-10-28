@@ -127,6 +127,8 @@
 #include "seam/Loader.h"
 #include "seam/Status.h"
 
+const char* eagle_python_version();   // src/eagle_version.cpp
+
 namespace nb = nanobind;
 
 using eagle::exec::HostTeam;
@@ -920,8 +922,11 @@ NB_MODULE(_core, m)
                     info["abi_version"] = i.abi_version;
                 if (has(offsetof(BI, cudart_version) + sizeof i.cudart_version))
                     info["cudart_version"] = i.cudart_version;
-                if (has(offsetof(BI, eagle_version) + sizeof i.eagle_version))
-                    info["eagle_version"] = std::string(i.eagle_version);
+                if (has(offsetof(BI, eagle_version) + sizeof i.eagle_version)) {
+                    // a plugin built once for every commit carries no version ("unknown"): the core's stands for it
+                    std::string version(i.eagle_version);
+                    info["eagle_version"] = version == "unknown" ? std::string(eagle_python_version()) : version;
+                }
                 if (has(offsetof(BI, archs) + sizeof i.archs))
                     info["archs"] = std::string(i.archs);
                 if (has(offsetof(BI, backend_kind) + sizeof i.backend_kind))
