@@ -259,6 +259,20 @@ def junit_summary(path):
     return s
 
 
+def diagnose_jax_retention(py, pydir):
+    # TEMPORARY diagnostic (0.7.2 CI): the jax node row alone, each in its own process. The platform allocator makes
+    # every JAX free a real cudaFree, so a read of freed memory faults every time; memcheck names the kernel.
+    sel = ["tests/test_interop_inject.py", "-k", "stream_ordered_and_retained", "-x", "-q", "-p", "no:cacheprovider"]
+    for alloc in ("platform", "bfc", "platform", "bfc"):
+        header(f"diagnostic: jax node row, XLA_PYTHON_CLIENT_ALLOCATOR={alloc}")
+        print("exit", sh(py, "-m", "pytest", *sel, cwd=pydir, env=dict(os.environ, XLA_PYTHON_CLIENT_ALLOCATOR=alloc)))
+    san = shutil.which("compute-sanitizer") or next(iter(sorted(pathlib.Path("/usr/local").glob("cuda*/bin/compute-sanitizer"))), None)
+    header(f"diagnostic: memcheck ({san})")
+    if san:
+        print("exit", sh(san, "--tool", "memcheck", "--print-limit", "20", py, "-m", "pytest", *sel, cwd=pydir,
+                         env=dict(os.environ, XLA_PYTHON_CLIENT_ALLOCATOR="platform")))
+
+
 def run_tests(py, eagle_src, work):
     # a copy of the suite outside the checkout, as CI runs it: from inside, the source tree's eagle/ (no compiled
     # extension) would shadow the installed package
@@ -267,6 +281,7 @@ def run_tests(py, eagle_src, work):
     pydir.mkdir()
     shutil.copytree(eagle_src / "python" / "tests", pydir / "tests")
     shutil.copy2(eagle_src / "python" / "conftest.py", pydir)
+    diagnose_jax_retention(py, pydir)
     runs = (("interop_matrix", ["tests", "-m", "interop_matrix and not repo_local"]),
             ("jax", ["tests/test_interop_jax.py", "-m", "not repo_local"]))
     total = {"tests": 0, "failures": 0, "errors": 0, "skipped": 0, "failed": []}
