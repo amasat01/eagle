@@ -582,4 +582,4 @@ def test_until_done_takes_lane_shaped_planes_and_writes_them_in_place(plans):
     for key in ("x", "v", "k"):
         np.testing.assert_array_equal(shaped[key].reshape(-1), flat[key])
         np.testing.assert_array_equal(flat[key], want[key])
-    assert shaped_run.n == 64 and shaped_run.finished == 64
+    assert shaped_run.n == 64 and int(shaped_run.finished) == 64

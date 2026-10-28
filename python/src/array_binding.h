@@ -659,7 +659,7 @@ inline Array array_from_dlpack(nb::object obj, nb::object stream = nb::none())
     else {
         nb::dict kw;
         if (!stream.is_none()) kw["stream"] = stream;
-        nb::dict versioned(kw);
+        nb::dict versioned = nb::steal<nb::dict>(PyDict_Copy(kw.ptr()));   // a copy: nb::dict(kw) would share kw, and the retry would still pass max_version
         versioned["max_version"] = nb::make_tuple(1, 0);
         try { cap = obj.attr("__dlpack__")(**versioned); }
         catch (nb::python_error& e) {
@@ -886,12 +886,6 @@ inline void bind(nb::module_& m)
             if (ea::is_float(a.dtype())) throw nb::type_error("only integer arrays can be an index");
             return nb::steal(PyNumber_Index(item_of_array(a).ptr())); })
         .def("tolist", [](const Array& a) { if (!a.placement().host()) run_sync_hook(static_cast<std::int64_t>(a.stream())); return tolist_rec(host_copy(a)); })
-        .def("__eq__", [](nb::handle a, nb::handle o) { return nb::module_::import_("eagle.arrays").attr("_compare")(a, o, "eq"); }, nb::arg("o").none())
-        .def("__ne__", [](nb::handle a, nb::handle o) { return nb::module_::import_("eagle.arrays").attr("_compare")(a, o, "ne"); }, nb::arg("o").none())
-        .def("__lt__", [](nb::handle a, nb::handle o) { return nb::module_::import_("eagle.arrays").attr("_compare")(a, o, "lt"); }, nb::arg("o").none())
-        .def("__le__", [](nb::handle a, nb::handle o) { return nb::module_::import_("eagle.arrays").attr("_compare")(a, o, "le"); }, nb::arg("o").none())
-        .def("__gt__", [](nb::handle a, nb::handle o) { return nb::module_::import_("eagle.arrays").attr("_compare")(a, o, "gt"); }, nb::arg("o").none())
-        .def("__ge__", [](nb::handle a, nb::handle o) { return nb::module_::import_("eagle.arrays").attr("_compare")(a, o, "ge"); }, nb::arg("o").none())
         .def("__len__", [](const Array& a) { if (a.rank() == 0) throw nb::type_error("len() of a 0-d array"); return a.extent(0); })
         .def("__repr__", [](const Array& a) {
             std::string s = "eagle.Array(shape=(";

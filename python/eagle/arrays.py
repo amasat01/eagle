@@ -178,26 +178,6 @@ def _binary(op, a, b, out, boolean=False):
     return out
 
 
-def _compare(a, b, name):
-    """``a <name> b`` elementwise (the operators of :class:`Array`): a bool array, from the EQ/NE/GT cell ops
-    (``<`` swaps the operands; ``<=`` and ``>=`` are ``>`` or ``==``, so NaN compares false)."""
-    if not isinstance(b, Array):
-        if isinstance(b, float) and a.dtype.kind != "f":
-            b = full(a.shape, b, float64, a.device)
-        elif isinstance(b, (bool, int, float)):
-            pass
-        elif isinstance(b, (list, tuple)) or hasattr(b, "__dlpack__") or hasattr(b, "__cuda_array_interface__") or hasattr(b, "__buffer__"):
-            b = asarray(b, device=a.device)
-        else:
-            return NotImplemented
-    if name == "eq": return equal(a, b)
-    if name == "ne": return not_equal(a, b)
-    if name == "lt": a, b, name = b, a, "gt"
-    if name == "gt": return greater(a, b)
-    both = (greater(a, b).astype(uint8), equal(a, b).astype(uint8)) if name == "ge" else (greater(b, a).astype(uint8), equal(a, b).astype(uint8))
-    return maximum(*both).astype(bool_)
-
-
 def add(a, b, out=None): return _binary(_ADD, a, b, out)
 def subtract(a, b, out=None): return _binary(_SUB, a, b, out)
 def multiply(a, b, out=None): return _binary(_MUL, a, b, out)

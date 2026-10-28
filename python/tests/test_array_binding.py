@@ -95,7 +95,7 @@ def test_a_scalar_operand_on_either_side_matches_the_array_spelling_and_allocate
     for name in ("add", "subtract", "multiply", "maximum", "equal", "not_equal", "greater"):
         f = getattr(xp, name)
         assert f(a, 3).tolist() == f(a, three).tolist() and f(3, a).tolist() == f(three, a).tolist(), name
-    assert (a < 3).tolist() == [False, True, True, True, False] and (3 > a).tolist() == (a < 3).tolist()
+    assert xp.greater(3, a).tolist() == [False, True, True, True, False]
     assert xp.subtract(10, a).tolist() == [7, 11, 8, 10, 5] and xp.add(a, 2.5).dtype == "int32"
     f = xp.asarray([1.5, -0.0, float("nan")], xp.float64)
     assert xp.maximum(f, 0.0).tolist()[:2] == [1.5, 0.0] and xp.equal(f, 1.5).tolist() == [True, False, False]
@@ -399,14 +399,16 @@ def test_reduction_and_compaction_ops_capture_replay_and_equal_the_host_twin(str
 _NAN, _INF = float("nan"), float("inf")
 
 
-def test_comparison_operators_are_elementwise_and_nan_is_false():
+def test_array_has_no_comparison_operators_and_the_cell_ops_make_nan_false():
     x = xp.asarray([1.0, _NAN, 3.0, -_INF])
-    got = {e: eval(e, {}, {"x": x}).tolist() for e in ("x == 3.0", "x != 3.0", "x < 3", "x <= 3", "x > 3", "x >= 3", "3 <= x")}
-    assert got["x == 3.0"] == [False, False, True, False] and got["x != 3.0"] == [True, True, False, True]
-    assert got["x < 3"] == [True, False, False, True] and got["x <= 3"] == [True, False, True, True]
-    assert got["x > 3"] == [False] * 4 and got["x >= 3"] == [False, False, True, False] and got["3 <= x"] == got["x >= 3"]
-    assert (xp.asarray([1, 2, 3]) == 2.0).tolist() == [False, True, False]
-    assert (xp.asarray(-_INF) == -_INF) and xp.asarray([5]) > 0 and not (x == None)  # noqa: E711
+    assert x == x and not (x == xp.asarray([1.0, _NAN, 3.0, -_INF]))      # identity, never elementwise
+    for e in ("x < 3", "x >= 3"):
+        with pytest.raises(TypeError):
+            eval(e, {"x": x})
+    assert xp.equal(x, 3.0).tolist() == [False, False, True, False]
+    assert xp.not_equal(x, 3.0).tolist() == [True, True, False, True]
+    assert xp.greater(x, 3.0).tolist() == [False] * 4
+    assert xp.greater(3.0, x).tolist() == [True, False, False, True]
 
 
 def test_truth_value_of_a_size_one_array_and_the_ambiguity_refusal():
@@ -418,11 +420,11 @@ def test_truth_value_of_a_size_one_array_and_the_ambiguity_refusal():
 
 
 @pytest.mark.gpu
-def test_comparisons_on_the_device_match_the_host():
+def test_comparison_cell_ops_on_the_device_match_the_host():
     host = xp.asarray([1.0, _NAN, 3.0, -_INF])
     dev = xp.asarray(host, device="cuda:0")
-    for e in ("x == 3.0", "x != 3.0", "x < 3", "x <= 3", "x >= 3"):
-        assert eval(e, {"x": dev}).tolist() == eval(e, {"x": host}).tolist(), e
+    for f in (xp.equal, xp.not_equal, xp.greater):
+        assert f(dev, 3.0).tolist() == f(host, 3.0).tolist(), f.__name__
 
 
 @pytest.mark.gpu
@@ -493,3 +495,23 @@ def test_to_cupy_aliases_device_memory(stream):
     d = _to(xp.arange(8, dtype=xp.float64), "cuda:0", stream.ptr())
     c = d.to("cupy")
     assert isinstance(c, cp.ndarray) and int(c.data.ptr) == d.ptr
+
+
+def test_a_dlpack_producer_that_predates_max_version_is_imported_zero_copy():
+    import numpy as np
+
+    class Old:
+        def __init__(self, data):
+            self.data = data
+
+        def __dlpack_device__(self):
+            return (1, 0)
+
+        def __dlpack__(self, stream=None):                  # no max_version, as NumPy before 2.1
+            assert stream is None
+            return self.data.__dlpack__()
+
+    host = np.arange(6, dtype=np.float64)
+    a = xp.asarray(Old(host))
+    host[0] = 42.0
+    assert a.tolist()[0] == 42.0 and a.tolist()[1:] == [1.0, 2.0, 3.0, 4.0, 5.0]

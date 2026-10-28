@@ -75,9 +75,9 @@ def test_plan_run_returns_the_finished_min(tmp_path, n):
     x = _x(n)
     (p,) = eagle.plan.auto([cell_min], targets=("host",), cache_dir=str(tmp_path))
     got = p.run(x=x)
-    assert got.shape == (1,) and got[0] == x.min()
+    assert got.shape == (1,) and np.asarray(got)[0] == x.min()
     x[n // 2] = -np.inf
-    assert p.run(x=x)[0] == -np.inf
+    assert np.asarray(p.run(x=x))[0] == -np.inf
 
 
 @pytest.mark.gpu
@@ -106,7 +106,7 @@ def test_simulate_returns_the_cell_of_the_last_step(tmp_path):
     n = 40
     res = eagle.simulate(sim_cell, x=np.zeros(n), max_steps=10)
     assert res["s"].shape == (1,)
-    assert res["s"][0] == 9.0 * n
+    assert np.asarray(res["s"])[0] == 9.0 * n
     assert "s_comp" not in res.state
 
 
@@ -119,9 +119,9 @@ def test_reverse_param_gradient_is_the_finished_cell(tmp_path, policy):
     g.launch()
     rev = eagle.diff.Reverse(g, policy=policy)
     grads = rev(g.record, {"y": seed})
-    assert grads["a"] == (seed * x).sum()           # integer terms: exact in any order
+    assert np.asarray(grads["a"]) == (seed * x).sum()           # integer terms: exact in any order
     assert np.array_equal(grads["x"], 2.0 * seed)
-    assert rev(g.record, {"y": seed})["a"] == grads["a"]
+    assert np.asarray(rev(g.record, {"y": seed})["a"]) == np.asarray(grads["a"])
 
 
 def test_returns_routes_plan_run_and_simulate_through_the_bridge(tmp_path):
