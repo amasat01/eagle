@@ -688,6 +688,17 @@ jobs:
           python -m eagle.cuda --selftest || rc=$?
           [ "$rc" -eq 2 ] || { echo "selftest exited $rc, expected 2 (no driver)"; exit 1; }
 
+      # Diagnostic (macOS only, never fails the job): which OpenMP runtimes the installed eagle and aether load, and the
+      # first host FFT test run alone with the OpenMP environment printed. Removed once the macOS FFT abort is understood.
+      - name: macOS OpenMP diagnostic
+        if: runner.os == 'macOS'
+        continue-on-error: true
+        run: |
+          . venv/bin/activate
+          for f in $(python -c "import eagle,aether,pathlib;[print(p) for m in (eagle,aether) for p in pathlib.Path(m.__file__).parent.rglob('*') if p.suffix in ('.so','.dylib')]"); do echo "== $f"; otool -L "$f" | grep -iE "omp|c\+\+" || true; done
+          find venv /opt/homebrew/opt/libomp -name 'libomp*' 2>/dev/null || true
+          cp -r eagle/python/tests "$RUNNER_TEMP/diag_tests"
+          cd "$RUNNER_TEMP/diag_tests/.." && OMP_DISPLAY_ENV=VERBOSE KMP_VERSION=1 python -X faulthandler -m pytest -x -q -p no:cacheprovider diag_tests/test_fft_step.py 2>&1 | tail -60 || true
       - name: Host suite (a copy, outside the repository) against the installed wheel
         run: |
           . venv/bin/activate
