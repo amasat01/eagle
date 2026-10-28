@@ -699,27 +699,22 @@ jobs:
           python -m eagle.cuda --selftest || rc=$?
           [ "$rc" -eq 2 ] || { echo "selftest exited $rc, expected 2 (no driver)"; exit 1; }
 
-      # Diagnostic (macOS only, never fails the job): where the installed libraries point for OpenMP, the one-runtime
-      # row alone (its failure text), and the first host FFT under lldb for the native stack of the abort.
-      - name: macOS OpenMP diagnostic
+      # One OpenMP runtime: every OpenMP reference of the installed eagle and aether extensions is @rpath/libomp.dylib
+      # (resolved into aether/_omp), never an absolute Homebrew path: a second runtime in the process aborts it.
+      - name: OpenMP references are @rpath/libomp.dylib only
         if: runner.os == 'macOS'
-        continue-on-error: true
         run: |
           . venv/bin/activate
           sp=$(python -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")
-          for f in "$sp"/eagle/_core*.so "$sp"/aether/_core*.so "$sp"/aether/_omp/libomp.dylib; do
-            echo "== $f"; otool -L "$f" | grep -i omp || true
-            otool -l "$f" | grep -A2 LC_RPATH | grep path || true
+          bad=0
+          for f in "$sp"/eagle/_core*.so "$sp"/aether/_core*.so; do
+            refs=$(otool -L "$f" | tail -n +2 | awk '{print $1}' | grep -i omp || true)
+            [ -n "$refs" ] || { echo "$f: no OpenMP reference"; bad=1; continue; }
+            while read -r ref; do
+              [ "$ref" = "@rpath/libomp.dylib" ] || { echo "$f: OpenMP reference $ref (expected @rpath/libomp.dylib)"; bad=1; }
+            done <<< "$refs"
           done
-          mkdir -p "$RUNNER_TEMP/diag"
-          cp -rL eagle/python/tests eagle/python/conftest.py "$RUNNER_TEMP/diag/"
-          cd "$RUNNER_TEMP/diag"
-          echo "== test_one_openmp_runtime alone"
-          python -X faulthandler -m pytest -s -x -q -p no:cacheprovider tests/test_one_openmp_runtime.py 2>&1 | tail -40 || true
-          echo "== first host FFT under lldb"
-          OMP_DISPLAY_ENV=VERBOSE DYLD_PRINT_LIBRARIES=1 lldb --batch -o run -o "bt all" -k "bt all" -k quit -- \
-            python -m pytest -s -x -q -p no:cacheprovider tests/test_fft_step.py -k c2c_values 2>&1 \
-            | grep -iE "omp|OMP|stop reason|frame #|Abort|Error" | head -200 || true
+          exit $bad
       - name: Host suite (a copy, outside the repository) against the installed wheel
         run: |
           . venv/bin/activate
