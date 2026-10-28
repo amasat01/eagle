@@ -60,8 +60,11 @@ def test_no_cuda_build_imports_and_runs_the_host_rows_and_core_links_no_cudart()
                CUDA_VISIBLE_DEVICES="", EAGLE_BACKEND_CUDA="/nonexistent/libeagle_cuda.so")
     assert "rows ok" in out
     so = _core.__file__
-    assert "cudart" not in subprocess.run(["ldd", so], capture_output=True, text=True).stdout
-    nm = subprocess.run(["nm", "-D", "--undefined-only", so], capture_output=True, text=True).stdout
+    darwin = sys.platform == "darwin"
+    deps = subprocess.run(["otool", "-L", so] if darwin else ["ldd", so], capture_output=True, text=True, check=True)
+    assert "cudart" not in deps.stdout
+    nm = subprocess.run(["nm", "-u", so] if darwin else ["nm", "-D", "--undefined-only", so],
+                        capture_output=True, text=True, check=True).stdout
     assert " cuda" not in nm and "cuMem" not in nm
 
 
