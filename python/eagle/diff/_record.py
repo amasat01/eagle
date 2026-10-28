@@ -27,11 +27,11 @@ from __future__ import annotations
 import threading
 from contextlib import contextmanager
 
-from .. import _alloc
-from .. import _core, _counters
+from .. import _alloc, _core, _counters
+from .. import arrays as _arrays
+from .._layout import _view
 from .._active_set import _address, _overlaps, _reordering_snapshot
 from .._busy import Busy
-from ..interop import _xp_of as xp_of
 from ..roles import STATE_ROLES
 
 __all__ = ["Record"]
@@ -138,7 +138,7 @@ class Tape:
         return sum(int(c.nbytes) for c in self.copies)
 
     def copy(self):
-        dup = lambda a: xp_of(a).array(a, copy=True)
+        dup = lambda a: a.copy()
         return Tape(None, {k: dup(a) for k, a in self.arrays.items()},
                     [dup(c) for c in self.copies],
                     None if self.perm is None else dup(self.perm))
@@ -164,7 +164,7 @@ def _parameter_variant(bound, label, uniforms):
 
     from .._plan_deploy import _hawk_plugins
 
-    targets = ("cuda",) if bound._cupy is not None else ("host",)
+    targets = ("cuda",) if bound._device is not None else ("host",)
     (plugin._params,) = _hawk_plugins([param_planes(kernel)], targets, cache_dir,
                                       plugin.scalar_type)
     return plugin._params
@@ -191,20 +191,14 @@ def _with_parameter_planes(node, cells):
     if not uniforms:
         return node
     variant = _parameter_variant(bound, label, uniforms)
-    xp = _xp_of_bound(bound)
+    xp = "cpu" if bound._device is None else f"cuda:{bound._device}"
     planes = dict(bound._planes)
     for name in uniforms:
-        planes[name] = cells[(label, name)] = _alloc.full(xp, 
-            1, bound._planes[name], dtype=variant.arg_dtypes[name])
+        planes[name] = cells[(label, name)] = _alloc.full(
+            xp, 1, bound._planes[name], dtype=variant.arg_dtypes[name])
     rebound = plan(variant, structure=bound.plan.structure,
                    npartitions=bound.plan.npartitions).bind(**planes)
     return Node("launch", rebound, label, node.grad)
-
-
-def _xp_of_bound(bound):
-    import numpy
-
-    return bound._cupy or numpy
 
 
 def _param_plane_names(node):
@@ -240,10 +234,10 @@ def _refuse_ungraded_feed(accesses, planes):
 
 
 def _copier(dst, src):
-    xp = xp_of(dst)
+    src = _view(src)
 
     def copy():
-        xp.copyto(dst, src)
+        _arrays.copyto(dst, src)
     return copy
 
 
@@ -277,7 +271,7 @@ class Recorder:
         copies, self._before = [], {}
         for leaf, key in _core.diff_snapshots(planes.rows()):
             src = planes.array[key]
-            buf = xp_of(src).empty_like(src)
+            buf = _arrays.empty_like(_view(src))
             self.copy_of[(leaf, key)] = len(copies)
             copies.append(buf)
             self._before.setdefault(stage_of[leaf], []).append(_copier(buf, src))
@@ -285,14 +279,14 @@ class Recorder:
         for leaf, a in enumerate(accesses):
             saved = get_node_kind(a.node.kind).record_planes
             for name, src in (saved(a.node) if saved else ()):
-                buf = xp_of(src).empty_like(src)
+                buf = _arrays.empty_like(_view(src))
                 self.recorded[(leaf, name)] = len(copies)
                 copies.append(buf)
                 self._before.setdefault(stage_of[leaf], []).append(_copier(buf, src))
         aset = _pairing_set(planes)
         self._aset = aset
-        perm = None if aset is None else xp_of(aset.perm).empty_like(aset.perm)
-        self._live_tape = (dict(planes.array), copies, perm)
+        perm = None if aset is None else _arrays.empty_like(aset.perm)
+        self._live_tape = ({k: _view(a) for k, a in planes.array.items()}, copies, perm)
 
     def before(self, stage):
         """The copies to run before top-level stage ``stage``."""
@@ -316,7 +310,7 @@ class Recorder:
                     "its reverse reads these parameters; reverse it, or "
                     "record.keep() first")
             for cell, value in targets:
-                cell[...] = value
+                cell.fill(value.item() if hasattr(value, "item") else value)
 
     def begin(self, n, method):
         if n != 1:

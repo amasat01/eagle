@@ -20,9 +20,8 @@ a host loop when called directly.
 from __future__ import annotations
 
 
-from . import _alloc
+from . import _alloc, arrays
 from . import _core
-from .interop import _xp_of
 
 #: The device cap of a loop with no ``max_iters``: "until the guard fails".
 UNCAPPED = _core.LOOP_UNCAPPED
@@ -42,7 +41,8 @@ def _device_ptr(arr, idx: int) -> int:
     """Raw device pointer to ``arr[idx]`` as a Python int (cupy arrays
     only). ``idx`` is scaled by the array's own element size, so this
     works for any uint32-sized dtype view."""
-    return int(arr.data.ptr) + int(idx) * arr.dtype.itemsize
+    ptr = arr.ptr if hasattr(arr, "ptr") else arr.data.ptr
+    return int(ptr) + int(idx) * arr.dtype.itemsize
 
 
 class SkipGuard:
@@ -239,8 +239,7 @@ class RepeatWhile:
         self.guard = guard
         self.max_iters = max_iters
         self.limit, self.brk = limit, brk
-        xp = _xp_of(anchor)
-        self._cell = _alloc.zeros(xp, 2, dtype=xp.uint32)  # [remaining, ran]
+        self._cell = _alloc.zeros(_alloc.place(anchor), 2, dtype=arrays.uint32)  # [remaining, ran]
 
     @property
     def parts(self) -> tuple:

@@ -721,8 +721,14 @@ private:
         PackedArgs packed = pack_(p, part.nSamples);
         if (p.abi_version >= 2) {
             // ONE spelling of "what a partition means at launch" — the execution
-            // structure appends the triple and derives the grid from `count`.
-            eagle::exec::DeviceKernel::run(p.fn, packed.params, part, stream, block);
+            // structure appends the triple and derives the grid from `count`. For a
+            // kernel with a thread box (`launch.box`) the triple counts THREADS, so
+            // the lane partition is converted first (or refused, by name).
+            const auto [tb, tc] = box_partition(p.sidecar, part.base, part.count,
+                                                part.nSamples, "plugin '" + p.id + "'");
+            eagle::exec::DeviceKernel::run(p.fn, packed.params,
+                                           eagle::exec::Partition{ tb, tc, part.nSamples },
+                                           stream, block);
             return;
         }
         // Legacy (aether-abi/1): today's packing, byte for byte — no triple, and

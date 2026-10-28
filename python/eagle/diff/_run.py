@@ -31,13 +31,10 @@ from __future__ import annotations
 import os
 import threading
 
-import numpy
-
-from .. import _alloc
+from .. import _alloc, _stream, arrays
 from .. import _core, _counters, _split
 from .._busy import Busy, BusyGuard
 from ..graph import get_node_kind
-from ._record import xp_of
 
 __all__ = []
 
@@ -78,9 +75,7 @@ def resolve_budget(budget, device, door):
     (device runs) or half the available host RAM."""
     if budget is None:
         if device:
-            import cupy
-
-            return int(cupy.cuda.runtime.memGetInfo()[0]) // 2
+            return int(_core.device_mem_info(-1)[1]) // 2
         return int(os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")) // 2
     if isinstance(budget, bool) or not isinstance(budget, int) or budget < 1:
         raise ValueError(f"{door}: memory_budget is a positive int of bytes or None "
@@ -141,6 +136,22 @@ def _step_kernels(plugin, window, door, device, events="step"):
     return out
 
 
+def array_module(device):
+    """The device token (``"cuda:N"`` or ``"cpu"``) where a recording or event-refining run keeps its planes."""
+    if device:
+        from ..launch import _current_device_ordinal
+
+        return f"cuda:{_current_device_ordinal()}"
+    return "cpu"
+
+
+def _plane(value):
+    """A plane the runner holds (a scalar stays a number) as an :class:`eagle.Array` over the same memory."""
+    from .._layout import _view, is_number
+
+    return value if is_number(value) else _view(value)
+
+
 def record_planes(plan, max_steps, window, device, xp, n, planes, events="step"):
     """The per-sample planes a recorded run adds, made before the runner
     binds so a reordering ActiveSet can own them: ``applied_steps``, the
@@ -177,11 +188,7 @@ def _dummy_tape(xp, rows, width, n, dtype):
     needs a contiguous plane of the full shape; the reverse owns the real
     tape."""
     backing = _alloc.empty(xp, (width, n), dtype=dtype)
-    if xp is numpy:
-        view = numpy.lib.stride_tricks.as_strided(
-            backing, shape=(rows, n), strides=(n * backing.itemsize, backing.itemsize))
-        return view, backing
-    return xp.ndarray((rows, n), dtype=dtype, memptr=backing.data), backing
+    return arrays.view_as(backing, (rows, n)), backing
 
 
 def _eager(node, device=True):
@@ -200,13 +207,12 @@ def _eager(node, device=True):
         if tier == "host":
             return lambda: eager.run([])
 
-        def on_stream():
-            import cupy
+        fence = _stream.Event()
 
-            current = cupy.cuda.get_current_stream()
-            fence = cupy.cuda.Event(disable_timing=True)
+        def on_stream():
+            current = _stream.current()
             fence.record(current)
-            current.wait_event(eager.run([fence]))
+            eager.run([fence]).wait(current)
         return on_stream
     owned = node.payload[0]
     if not callable(getattr(owned.owner, "replay", None)):
@@ -214,13 +220,12 @@ def _eager(node, device=True):
                          "a torch.cuda.CUDAGraph; run another framework's graph in an opaque")
 
     def replay():
-        import cupy
         import torch
 
         owned.check()
-        ptr = int(cupy.cuda.get_current_stream().ptr)
+        ptr = _stream.current()
         # torch.cuda.ExternalStream(0) is a new stream object, not the null stream
-        stream = torch.cuda.default_stream() if ptr == 0 else torch.cuda.ExternalStream(ptr)
+        stream = torch.cuda.default_stream() if ptr == _stream.LEGACY else torch.cuda.ExternalStream(ptr)
         with torch.cuda.stream(stream):
             owned.owner.replay()
     return replay
@@ -228,10 +233,7 @@ def _eager(node, device=True):
 
 def _columns(a, m):
     """A new plane shaped like ``a`` with ``m`` samples."""
-    xp = xp_of(a)
-    if a.ndim == 0:
-        return _alloc.empty(xp, (), dtype=a.dtype)
-    return _alloc.empty(xp, a.shape[:-1] + (m,), dtype=a.dtype)
+    return _alloc.empty(a.device, () if a.ndim == 0 else a.shape[:-1] + (m,), dtype=a.dtype)
 
 
 class RunTape:
@@ -255,7 +257,7 @@ class RunTape:
         return sum(int(a.nbytes) for c in self.checkpoints for a in c.values())
 
     def copy(self):
-        dup = lambda a: xp_of(a).array(a, copy=True)
+        dup = lambda a: a.copy()
         from .events import copy_events
 
         return RunTape([{k: dup(a) for k, a in c.items()} for c in self.checkpoints],
@@ -281,7 +283,7 @@ class RunRecorder:
         self.window = (resolve_window(window, runner._max_steps, door) if record
                        else max(int(runner._max_steps), 1))
         self.budget = resolve_budget(budget, runner._device, door) if record else 0
-        xp, n = runner._xp, runner.n
+        xp, n = array_module(runner._device), runner.n
         self.xp, self.n, self.device = xp, n, runner._device
         # the forward of a refined run tapes one row (the state before the
         # stop step); the reverse recomputes with the window's own twin
@@ -297,10 +299,10 @@ class RunRecorder:
         fk = self.fwd_kernels
         twin = fk.fused if self.fused else fk.single
         self.roles = roles = {nm: role for role, nm in twin.arg_spec}
-        planes = {nm: v for nm, v in runner.step._planes.items() if nm in roles}
+        planes = {nm: _plane(v) for nm, v in runner.step._planes.items() if nm in roles}
         if runner.active is not None:   # the real map, not a deferred placeholder
             runner._materialize_map()
-            planes.update({nm: v for nm, v in runner.active.planes().items() if nm in roles})
+            planes.update({nm: _plane(v) for nm, v in runner.active.planes().items() if nm in roles})
         scalar = planes[k.taped[0][0]].dtype
         planes.update(extras)
         planes[TAPE], self._backing = planes[TAPE]
@@ -313,10 +315,10 @@ class RunRecorder:
         planes[TAPE_ON] = 1 if refine else 0
         self.word = None
         if self.fused:
-            self.word = planes[FUSED_STEPS] = _alloc.ones(xp, 1, dtype=xp.int64)
+            self.word = planes[FUSED_STEPS] = _alloc.ones(xp, 1, dtype=arrays.int64)
         self.structure = plan.structure
         self.planes = planes
-        self.width, self.scalar = width, numpy.dtype(scalar)
+        self.width, self.scalar = width, scalar
         self.forward = _split.single(make_plan(twin, structure=plan.structure).bind(**planes),
                                      "eagle.diff (record=True)")
         self.state = {nm: planes[nm] for nm, role in roles.items() if role in _STATE}
@@ -326,7 +328,7 @@ class RunRecorder:
                                 if role not in _STATE and role not in ("uniform", "lookup", "out"))
         # the step's nodes ([node, ..., plan]): re-run per step in the reverse,
         # their writes kept in a W-row ring; exclusive, as they run over your planes
-        self.nodes, self.calls = nodes, [_eager(node, xp is not numpy) for node, _r, _w in nodes]
+        self.nodes, self.calls = nodes, [_eager(node, runner._device) for node, _r, _w in nodes]
         self.ring = tuple(dict.fromkeys(pn for _n, _r, w in nodes for _nm, pn, _a in w))
         self.node_lock = threading.Lock()
         for node, reads, _w in nodes:
@@ -369,7 +371,7 @@ class RunRecorder:
             self.pool.append({nm: _alloc.empty_like(self.xp, a) for nm, a in held.items()})
         if copy:
             for nm, a in held.items():
-                self.xp.copyto(self.pool[k][nm], a)
+                arrays.copyto(self.pool[k][nm], a)
         self._taken = k + 1
 
     def _compact(self, done):
@@ -387,7 +389,7 @@ class RunRecorder:
         from .._until_done import RunReport, _mask_count
         from ._record import Record
 
-        runner, xp, n = self.runner, self.xp, self.n
+        runner, n = self.runner, self.n
         status = self.slot.begin()
         if status == 1:
             raise Busy(f"{self.door}: a reverse is reading the previous run's Record; "
@@ -397,12 +399,12 @@ class RunRecorder:
                                "reverse it, or record.keep() to keep it, before "
                                "recording again")
         try:
-            _mask_count(xp, self.device, runner.finished, runner.terminated)
+            _mask_count(runner._dev, runner.finished, runner.terminated)
             if self.active is not None:     # the map follows the mask from the first launch
                 self.active.compact()
             self.planes[APPLIED_STEPS].fill(0)
             if self.t0 is not None:
-                xp.copyto(self.planes[self.t0], self.planes[self.kernels.time])
+                arrays.copyto(self.planes[self.t0], self.planes[self.kernels.time])
             self._taken = 0
             max_steps, window = runner._max_steps, self.window
             for call in self.calls:     # the nodes before step 0
@@ -414,10 +416,10 @@ class RunRecorder:
                 if b._copies:
                     raise ValueError(f"{self.door}: record=True binds every plane "
                                      "directly; pass contiguous arrays")
-                word = 0 if self.word is None else int(self.word.ctypes.data)
+                word = 0 if self.word is None else int(self.word.ptr)
                 after = self._compact if self.active is not None or self.calls else None
                 ran = int(_core.diff_record_host(b._entry, b._addrs, n, max_steps, window,
-                                                 self.max_k, word, runner.finished.ctypes.data,
+                                                 self.max_k, word, runner.finished.ptr,
                                                  self._checkpoint, after))
                 launches = self._launch_count(ran)
             if self.reorders:
@@ -431,7 +433,8 @@ class RunRecorder:
                                  launches=launches, steps=ran, compactions=0, reorders=0,
                                  build_s=0.0, exact_steps=True, mode="refine")
             steps = self.planes[APPLIED_STEPS]
-            steps = (steps.get() if self.device else steps).astype("int64").reshape(-1)
+            steps = steps.astype(arrays.int64)
+            steps = steps.get() if self.device else steps
             reads = {nm: self.planes[nm] for nm in self.read_names}
             tape = RunTape(self.pool[:self._taken], steps, window, reads, self.budget,
                            None if self.refine is None else self.refine.held())
@@ -461,19 +464,19 @@ class RunRecorder:
         import importlib
 
         launch = importlib.import_module("eagle.launch")
-        b, xp = self.forward, self.xp
-        state = [(int(a.data.ptr), int(a.nbytes)) for a in self._held().values()]
+        b = self.forward
+        state = [(int(a.ptr), int(a.nbytes)) for a in self._held().values()]
 
         def checkpoint(k):
             self._checkpoint(k, copy=False)
-            return [int(a.data.ptr) for a in self.pool[k].values()]
+            return [int(a.ptr) for a in self.pool[k].values()]
 
         after = self._compact if self.active is not None or self.calls else None
-        word = 0 if self.word is None else int(self.word.data.ptr)
+        word = 0 if self.word is None else int(self.word.ptr)
         ran = int(_core.diff_record_device(
             b._entry, b._addrs, self.n, max_steps, window, self.max_k, word,
-            int(self.runner.finished.data.ptr), int(launch._resolved_block(b._entry, self.n, None, declared=b._declared_block)),
-            state, checkpoint, after, int(xp.cuda.get_current_stream().ptr), -1))
+            int(self.runner.finished.ptr), int(launch._resolved_block(b._entry, self.n, None, declared=b._declared_block)),
+            state, checkpoint, after, _stream.current(), -1))
         return ran, self._launch_count(ran)
 
     # --- the Record's slot protocol --- #
@@ -493,17 +496,34 @@ class RunRecorder:
             record._released = True
 
 
-def _node_gradient(xp, got, nm, primal, node, door):
+def _node_gradient(got, nm, primal, node, door):
     """The gradient a node's vjp returned for the read ``nm``, checked against it."""
     if nm not in got:
         raise ValueError(f"{door}: vjps[{node.label!r}] returned no gradient for "
                          f"{nm!r} (it returned {sorted(got)})")
-    g = xp.asarray(got[nm])
+    g = arrays.asarray(got[nm], device=primal.device)
     if g.shape != primal.shape or g.dtype != primal.dtype:
         raise ValueError(
             f"{door}: vjps[{node.label!r}] returned {nm!r} of shape {g.shape} "
             f"and dtype {g.dtype}; the read is {primal.shape} {primal.dtype}")
     return g
+
+
+def _take_columns(dst, src, cols, count):
+    """``dst[:, :count] = src[:, cols]`` for 2-D ``(rows, samples)`` planes; ``cols`` is int32."""
+    for r in range(dst.shape[0]):
+        arrays.take(src[r], cols, out=dst[r, :count])
+
+
+def _accumulate(view, g):
+    """``view += g`` in place (same size and dtype)."""
+    arrays.add(view, g, out=view)
+
+
+def _put_columns(dst, cols, src, count):
+    """``dst[:, cols] = src[:, :count]`` for 2-D ``(rows, samples)`` planes; ``cols`` is int32."""
+    for r in range(dst.shape[0]):
+        arrays.scatter(dst[r], cols, src[r, :count])
 
 
 def _mb(b):
@@ -568,7 +588,7 @@ class RunReverse:
 
         for nm, role in rec.roles.items():      # every slot live, in place: identity map
             if nm == MAP_PLANE:
-                twin_planes[nm] = xp.arange(m, dtype=rec.planes[nm].dtype)
+                twin_planes[nm] = arrays.arange(m, dtype=rec.planes[nm].dtype, device=xp)
             elif nm == COUNT_PLANE:
                 twin_planes[nm] = _alloc.full(xp, rec.planes[nm].shape, m, dtype=rec.planes[nm].dtype)
             elif role == "lookup":
@@ -698,22 +718,23 @@ class RunReverse:
 
     def _run(self, tape, seeds, names):
         rec, xp, n, m = self.rec, self.xp, self.n, self.m
-        flat = lambda a, width: a.reshape(-1, width)
+        flat = lambda a, width: a.reshape((a.size // width, width))
         out = {nm: _alloc.zeros_like(xp, rec.state[nm]) for nm in self.taped}
         per = {nm: _alloc.zeros_like(xp, tape.reads[nm]) for nm in self.acc if nm not in self.summed}
         partials = {nm: [] for nm in self.summed}
-        seeded = {nm: xp.asarray(v, dtype=rec.state[nm].dtype) for nm, v in seeds.items()}
+        seeded = {nm: arrays.asarray(v, rec.state[nm].dtype, xp) for nm, v in seeds.items()}
         self._tape = tape
         for s0 in range(0, n, m):
             cnt = min(m, n - s0)
-            steps = numpy.ascontiguousarray(tape.steps[s0:s0 + cnt])
-            order = numpy.asarray(_core.diff_stop_order(steps.ctypes.data, cnt), dtype=numpy.int64)
-            live = _core.diff_live_counts(steps.ctypes.data, cnt)
-            cols = xp.asarray(order + s0)
-            orders = self._orders(tape, cols)
+            steps = arrays.ascontiguousarray(tape.steps[s0:s0 + cnt])
+            order = arrays.asarray(_core.diff_stop_order(steps.ptr, cnt), arrays.int64)
+            live = _core.diff_live_counts(steps.ptr, cnt)
+            cols = arrays.asarray(arrays.add(order, s0), device=xp)
+            cols32 = cols.astype(arrays.int32)
+            orders = self._orders(tape, cols, cols32)
             self._restore()     # a node's planes may be the record's reads
             for nm, buf in self.reads.items():
-                flat(buf, m)[:, :cnt] = flat(tape.reads[nm], n)[:, cols]
+                _take_columns(flat(buf, m), flat(tape.reads[nm], n), cols32, cnt)
             self._live = live
             for _n, r, _w in rec.nodes:     # step-invariant reads, in reverse slot order
                 for _nm, pn, a in r:
@@ -723,43 +744,43 @@ class RunReverse:
                 for a in self.adj:
                     a[nm].fill(0)
                     if nm in seeded:
-                        flat(a[nm], m)[:, :cnt] = flat(seeded[nm], n)[:, cols]
+                        _take_columns(flat(a[nm], m), flat(seeded[nm], n), cols32, cnt)
             for a in self.acc.values():
                 a.fill(0)
             if live:
                 (self._device if rec.device else self._host)(orders, live)
             for nm in self.taped:
-                flat(out[nm], n)[:, cols] = flat(self.adj[1][nm], m)[:, :cnt]
+                _put_columns(flat(out[nm], n), cols32, flat(self.adj[1][nm], m), cnt)
             for nm, acc in self.acc.items():
                 if nm in self.summed:
                     sample = _alloc.empty(xp, cnt, dtype=acc.dtype)
-                    sample[xp.asarray(order)] = acc[:cnt]
+                    arrays.scatter(sample, arrays.asarray(order, arrays.int32, xp), acc[:cnt])
                     partials[nm].append(self._sum(sample, pair=True))
                 else:
-                    flat(per[nm], n)[:, cols] = flat(acc, m)[:, :cnt]
+                    _put_columns(flat(per[nm], n), cols32, flat(acc, m), cnt)
         values = {}
         for nm in names:
             if nm in out:
                 values[nm] = out[nm]
             elif nm in partials:
-                code = 1 if self.acc[nm].dtype == numpy.float64 else 0
-                values[nm] = xp.asarray(_combine(partials[nm], code), dtype=self.acc[nm].dtype)
+                code = 1 if self.acc[nm].dtype == arrays.float64 else 0
+                values[nm] = arrays.asarray(_combine(partials[nm], code), self.acc[nm].dtype, xp)
             elif nm in per:
                 values[nm] = per[nm]
         for t0, t in self.folded.items():
             if t in values:
-                values[t] = values[t] + per[t0]
+                values[t] = arrays.add(values[t], per[t0])
         if rec.device:
-            xp.cuda.get_current_stream().synchronize()
+            _core.stream_sync(_stream.current(), -1)
         return values
 
     def _restore(self):
         for a, b in self._saved:
-            self.xp.copyto(a, b)
+            arrays.copyto(a, b)
 
     def _sync(self):
         if self.rec.device:
-            self.xp.cuda.Device().synchronize()
+            _core.device_synchronize(-1)
             _counters.bump("host_syncs")
 
     def _hook(self, j):
@@ -789,7 +810,7 @@ class RunReverse:
         """After step ``j``'s vjp launch: each node's vjp, last node first, host-synchronized,
         on the live prefix, added to the state adjoint (taped read), the cotangent of a plane
         an earlier node writes, or the input's sum (invariant)."""
-        xp, row, door = self.xp, j % self.window, "eagle.diff.reverse"
+        row, door = j % self.window, "eagle.diff.reverse"
         self._sync()
         for (node, reads, writes), fn in reversed(list(zip(self.rec.nodes, self.fns))):
             primals, into = {}, {}
@@ -798,7 +819,7 @@ class RunReverse:
                 if a.dtype.kind != "f":
                     continue
                 if pn in self.rec.uniforms:     # a parameter: its value, one gradient
-                    primals[nm] = xp.asarray(self.rec.uniforms[pn]).reshape(a.shape)
+                    primals[nm] = self.rec.uniforms[pn].reshape(a.shape)
                     into[nm] = self.acc[pn]
                 elif pn in self.adj[0]:
                     lo = row * self.rec.width + self.offsets[pn]
@@ -811,11 +832,11 @@ class RunReverse:
             got = fn(dict(primals), {nm: self.grad[pn][..., :count] for nm, pn, _a in writes})
             self._sync()
             for nm, primal in primals.items():
-                g = _node_gradient(xp, got, nm, primal, node, door)
+                g = _node_gradient(got, nm, primal, node, door)
                 if reads_pn[nm] in self.rec.uniforms:   # summed over samples at the end
-                    into[nm][:1] += g.sum()
+                    _accumulate(into[nm][:1], g.sum())
                 elif into[nm] is not None:
-                    into[nm][..., :count] += g
+                    _accumulate(into[nm][..., :count], g)
         if row:
             self._ring_row(j - 1)
 
@@ -832,7 +853,7 @@ class RunReverse:
                 if a.dtype.kind != "f":
                     continue
                 if pn in self.rec.uniforms:
-                    primals[nm] = xp.asarray(self.rec.uniforms[pn]).reshape(a.shape)
+                    primals[nm] = self.rec.uniforms[pn].reshape(a.shape)
                 elif pn in pre:
                     primals[nm] = ev[pn]
                 else:
@@ -842,14 +863,14 @@ class RunReverse:
             got = fn(dict(primals), cots)
             self._sync()
             for nm, primal in primals.items():
-                g = _node_gradient(xp, got, nm, primal, node, door)
+                g = _node_gradient(got, nm, primal, node, door)
                 pn = into[nm]
                 if pn in self.rec.uniforms:
-                    extra.setdefault(pn, _alloc.zeros(xp, self.n, dtype=self.rec.scalar))[:1] += g.sum()
+                    _accumulate(extra.setdefault(pn, _alloc.zeros(xp, self.n, dtype=self.rec.scalar))[:1], g.sum())
                 elif pn in pre:
-                    pre[pn] += g
+                    _accumulate(pre[pn], g)
                 else:
-                    extra[pn] = extra[pn] + g if pn in extra else g.copy()
+                    extra[pn] = arrays.add(extra[pn], g) if pn in extra else g.copy()
 
     def _add_refine(self, values, extra, names):
         """The refine entry's share of each input gradient, added to the
@@ -861,10 +882,10 @@ class RunReverse:
             if target not in names:
                 continue
             summed = target in self.summed or target in rec.uniforms
-            share = self.xp.asarray(self._sum(g), dtype=g.dtype) if summed else g
-            values[target] = values[target] + share if target in values else share
+            share = arrays.asarray(self._sum(g), g.dtype, self.xp) if summed else g
+            values[target] = arrays.add(values[target], share) if target in values else share
 
-    def _orders(self, tape, cols):
+    def _orders(self, tape, cols, cols32):
         """Per window, the checkpoint column of each reverse slot: the
         sample's own column, or its slot at that checkpoint when compaction
         reordered the planes."""
@@ -875,38 +896,39 @@ class RunReverse:
             if perm is None:
                 out.append(cols)
                 continue
-            inv = _alloc.empty(xp, perm.shape[0], dtype=xp.int64)
-            inv[perm] = xp.arange(perm.shape[0], dtype=xp.int64)
-            out.append(inv[cols])
+            inv = _alloc.empty(xp, perm.shape[0], dtype=arrays.int64)
+            arrays.scatter(inv, arrays.asarray(perm, arrays.int32), arrays.arange(perm.shape[0], dtype=arrays.int64, device=xp))
+            out.append(arrays.take(inv, cols32))
         return out
 
     def _sum(self, x, pair=False):
         """The canonical sum of ``x`` (one pass, sample order) as a float, or
         its unrounded (hi, comp) partial with ``pair``."""
-        code = 1 if x.dtype == numpy.float64 else 0
+        code = 1 if x.dtype == arrays.float64 else 0
         n2 = 2 if pair else 1
         if self.rec.device:
             work = int(_core.reduce_canonical_device(0, x.size, code, 0, 0, 0, 0, 0, -1, self.policy))
             wa, wb = (_alloc.empty(self.xp, max(work, 1), dtype=x.dtype) for _ in range(2))
             res = _alloc.empty(self.xp, n2, dtype=x.dtype)
-            stream = int(self.xp.cuda.get_current_stream().ptr)
-            _core.reduce_canonical_device(int(x.data.ptr), x.size, code, 0, int(res.data.ptr),
-                                          int(wa.data.ptr), int(wb.data.ptr), stream, -1,
+            _core.reduce_canonical_device(int(x.ptr), x.size, code, 0, int(res.ptr),
+                                          int(wa.ptr), int(wb.ptr), _stream.current(), -1,
                                           self.policy, 1, 0, pair)
             res = res.get()
         else:
-            res = numpy.empty(n2, dtype=x.dtype)
+            res = arrays.empty(n2, x.dtype, "cpu")
             from .._graph_reduce import fixed_f64
 
-            _core.reduce_canonical_host(x.ctypes.data, x.size, code, 0, res.ctypes.data, 1, 0, pair,
+            _core.reduce_canonical_host(x.ptr, x.size, code, 0, res.ptr, 1, 0, pair,
                                         code == 1 and not pair and fixed_f64())
-        return (float(res[0]), float(res[1])) if pair else float(res[0])
+        got = res.tolist()
+        return (float(got[0]), float(got[1])) if pair else float(got[0])
 
-    def _plans(self, addr):
+    def _plans(self):
+        addr = lambda a: int(a.ptr)
         rows = lambda a: max(int(a.size) // self.m, 1)
         gathers = [(addr(buf), [addr(c[nm]) for c in self._tape.checkpoints],
                     rows(buf), int(buf.itemsize)) for nm, buf in self.state.items()]
-        code = lambda a: 1 if a.dtype == numpy.float64 else 0
+        code = lambda a: 1 if a.dtype == arrays.float64 else 0
         accums = [(addr(acc), addr(self.grad[nm]), rows(acc), code(acc))
                   for nm, acc in self.acc.items() if nm in self.grad]
         step = (0, 0) if self.step_plane is None else (addr(self.step_plane),
@@ -918,9 +940,9 @@ class RunReverse:
         return (self._hook, self._node_vjp) if self.rec.nodes else (None, None)
 
     def _host(self, orders, live):
-        gathers, accums, step, word = self._plans(lambda a: int(a.ctypes.data))
+        gathers, accums, step, word = self._plans()
         _core.diff_reverse_host(self.m, self.n, self.window, live,
-                                [int(o.ctypes.data) for o in orders], gathers,
+                                [int(o.ptr) for o in orders], gathers,
                                 self.recompute._entry, self.recompute._addrs, word,
                                 self.vjps[0]._entry, [v._addrs for v in self.vjps], accums,
                                 step[0], step[1], *self._callbacks())
@@ -929,11 +951,11 @@ class RunReverse:
         import importlib
 
         launch = importlib.import_module("eagle.launch")
-        gathers, accums, step, word = self._plans(lambda a: int(a.data.ptr))
+        gathers, accums, step, word = self._plans()
         block = lambda b: int(launch._resolved_block(b._entry, self.m, None, declared=b._declared_block))
-        stream = int(self.xp.cuda.get_current_stream().ptr)
+        stream = _stream.current()
         _core.diff_reverse_device(self.m, self.n, self.window, live,
-                                  [int(o.data.ptr) for o in orders], gathers,
+                                  [int(o.ptr) for o in orders], gathers,
                                   self.recompute._entry, self.recompute._addrs, word,
                                   block(self.recompute), self.vjps[0]._entry,
                                   [v._addrs for v in self.vjps], block(self.vjps[0]), accums,

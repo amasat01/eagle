@@ -12,9 +12,9 @@ side only orchestrates it. The C++ core owns capture/instantiate/replay;
 kernels are still issued by the caller onto the capture stream (a
 launcher's ``launch`` defaults to the current stream, so the launch
 becomes a graph node with no special plugin machinery). EAGLE creates
-the stream and hands its raw handle to cupy via
-:class:`cupy.cuda.ExternalStream`, so cupy ``RawKernel`` launches land
-on the C++-owned stream and are captured.
+the stream and hands its raw handle out (``pipe.stream``); the pipeline's
+own capture runs inside ``eagle.stream`` on it, so eagle launches land on
+the C++-owned stream and are captured.
 
 Usage::
 
@@ -39,7 +39,9 @@ import tempfile
 from typing import NamedTuple
 
 from . import _counters
-from .interop import _wrap_external_stream
+from . import _split
+from . import _stream
+from .interop import scoped_stream
 from .sidecar import refuse_derived
 from ._conditional import Branches, RepeatWhile, Skippable, _device_ptr
 from ._launch_policy import sibling_context
@@ -49,7 +51,7 @@ from ._member_enable import MemberHandle, NonToggleableMemberError, _MemberRegis
 
 def refuse_in_capture(what: str) -> None:
     """Refuse ``what`` (a launch) while a stream capture is open on the calling
-    stream: cupy's current stream, torch's, or warp's. The pipeline replays on its
+    stream: eagle's current stream, torch's, or warp's. The pipeline replays on its
     own streams and syncs, so inside a capture it records an empty graph, silently."""
     import sys
 
@@ -63,13 +65,12 @@ def refuse_in_capture(what: str) -> None:
     torch = sys.modules.get("torch")
     if not capturing and torch is not None and torch.cuda.is_available():
         capturing = bool(torch.cuda.is_current_stream_capturing())
-    if not capturing:       # last: cupy's stream may be the legacy one, which a capture refuses to query
-        import cupy
+    if not capturing:       # last: the legacy stream, which a capture refuses to query, raises "CaptureImplicit"
+        from . import _core
 
         try:
-            capturing = bool(cupy.cuda.runtime.streamIsCapturing(
-                cupy.cuda.get_current_stream().ptr))
-        except cupy.cuda.runtime.CUDARuntimeError as exc:
+            capturing = bool(_core.stream_is_capturing(_stream.current()))
+        except Exception as exc:
             capturing = "CaptureImplicit" in str(exc)
             if not capturing:
                 raise
@@ -95,7 +96,7 @@ class _LaunchHandles(NamedTuple):
     stream?" structural probe, and the C++-composer parity tests bind
     through it directly."""
 
-    ext: object  #: cupy.cuda.ExternalStream wrapping this pipeline's own stream
+    stream: int  #: this pipeline's own raw ``cudaStream_t``
     launcher: object  #: the bound eagle._core Launcher (async.launch() /.synchronize())
 
 
@@ -163,19 +164,20 @@ class GraphPipeline:
     code a native C++ consumer runs.
     """
 
-    def __init__(self, device: int = -1):
-        import cupy as cp
+    _kernels = ()
+    _scatter = ()       # the split binds a capture launched (set by build): none, for a pipeline without one
 
+    def __init__(self, device: int = -1):
         from . import _core
+        from .launch import _current_device_ordinal
 
         self._core = _core
         #: The CUDA device this pipeline's stream is on (``-1``: the current one).
-        self._device = int(cp.cuda.runtime.getDevice()) if device < 0 else int(device)
+        self._device = _current_device_ordinal() if device < 0 else int(device)
         # non-blocking so capture never entangles the legacy default stream that
-        # cupy/torch launch on (matches the pre-uniformization cupy pipeline).
+        # cupy/torch launch on.
         self._stream = _core.Stream(non_blocking=True, device=self._device)  # owns the cudaStream_t
-        self._sptr = self._stream.ptr()  # raw handle shared with cupy + the graph
-        self._ext = _wrap_external_stream(self._sptr)
+        self._sptr = self._stream.ptr()  # raw handle, shared with the graph
         self._steps = []
         self._graph = None
         self._launcher = None
@@ -193,8 +195,7 @@ class GraphPipeline:
         # enqueue() and re-recorded thereafter (cudaStreamWaitEvent snapshots
         # the event's state at the wait). _legacy_event stays None when the
         # caller's stream IS the legacy stream. See enqueue()'s ONE-IN-FLIGHT rule.
-        self._seed_event = None
-        self._legacy_event = None
+        self._seeds = []
 
     def add(self, step, *, name=None):
         """Register a zero-arg callable that issues launches on the
@@ -294,8 +295,6 @@ class GraphPipeline:
         conditional/IF node). Either way the member is recorded
         non-toggleable, never silently accepted.
         """
-        import cupy as cp
-
         # CaptureFork and CaptureConditional both create streams/events,
         # which must happen before capture begins (illegal mid-capture), so
         # every group's fork and every Skippable's/RepeatWhile's weave are
@@ -317,14 +316,18 @@ class GraphPipeline:
                 runs[i] = self._weave(self._sptr, step)
 
         capturer = self._core.StreamCapturer(self._sptr)
+        self._scatter = []              # the split binds this capture launches: a replay marks them pending
         self._member_nodes = []
         self._member_structurally_toggleable = []
-        with self._ext:  # make the C++-owned stream cupy's current stream
+        _split.COLLECT.found = self._scatter
+        self._kernels = []
+        _split.COLLECT.names = self._kernels
+        with scoped_stream(self._sptr):  # make the C++-owned stream the current one
             capturer.begin()
             try:
                 for i, step in enumerate(self._steps):
                     if isinstance(step, _ConcurrentGroup):
-                        self._run_concurrent(cp, step, group_runs[id(step)])
+                        self._run_concurrent(step, group_runs[id(step)])
                     elif runs[i] is not None:
                         before = self._core.capture_snapshot_nodes(self._sptr)
                         runs[i]()
@@ -338,7 +341,9 @@ class GraphPipeline:
                     capturer.end()  # leave the stream out of capture mode
                 except Exception:
                     pass
+                _split.COLLECT.found = _split.COLLECT.names = None
                 raise
+            _split.COLLECT.found = _split.COLLECT.names = None
             captured = capturer.end()  # CapturedGraph owning the cudaGraph_t
             _counters.bump("captures")  # only on a completed capture
 
@@ -370,6 +375,7 @@ class GraphPipeline:
         g.stream(self._sptr)
         self._graph = g
         self._launcher = g.launcher()
+        self._check('instantiate')
         _counters.bump("instantiations")  # only on a completed instantiate
         self._launcher.stream(self._sptr)
         # Every registered member starts enabled: a freshly-instantiated
@@ -495,7 +501,7 @@ class GraphPipeline:
         idx = self._registry.resolve(handle_or_index)
         return list(self._member_nodes[idx])
 
-    def _run_concurrent(self, cp, group, member_runs):
+    def _run_concurrent(self, group, member_runs):
         """Fork ``group.members`` onto separate branch streams inside
         the current capture, then join -- the ``_ConcurrentGroup``
         dispatch for :meth:`add_concurrent`. ``group._fork`` was already
@@ -520,7 +526,7 @@ class GraphPipeline:
             for i, member in enumerate(group.members):
                 branch = fork.branch(i)
                 before = self._core.capture_snapshot_nodes(branch)
-                with _wrap_external_stream(branch):
+                with scoped_stream(branch):
                     with sibling_context(siblings):
                         run = member_runs[i]
                         if run is not None:
@@ -568,7 +574,7 @@ class GraphPipeline:
             kids = [self._weave_or_call(body, p) for p in (item.parts if loop else (item.step,))]
 
             def go():
-                with _wrap_external_stream(region.begin()):
+                with scoped_stream(region.begin()):
                     for kid in kids:
                         kid()
                 region.end()
@@ -585,7 +591,7 @@ class GraphPipeline:
             def go():
                 streams = [region.begin(), *(region.arm_stream(k) for k in range(1, len(kids)))]
                 for stream, kid in zip(streams, kids):
-                    with _wrap_external_stream(stream):
+                    with scoped_stream(stream):
                         kid()
                 region.end()
                 self._setters[id(item)] = region.setter_nodes()
@@ -600,7 +606,7 @@ class GraphPipeline:
                 fork.fork()
                 try:
                     for j, kid in enumerate(kids):
-                        with _wrap_external_stream(fork.branch(j)):
+                        with scoped_stream(fork.branch(j)):
                             kid()
                 finally:
                     fork.join()
@@ -639,8 +645,8 @@ class GraphPipeline:
 
     def launch(self, n=1):
         """Replay the captured graph ``n`` times. ``launch(n)``
-        guarantees all work previously enqueued on the caller's current
-        cupy stream and the legacy default stream is visible to replay
+        guarantees all work previously enqueued on the stream eagle works
+        on for the caller (``eagle.stream``) and the legacy default stream is visible to replay
         1.
 
         **A stream-ordering fix.** The pipeline's own stream is
@@ -650,7 +656,7 @@ class GraphPipeline:
         host-side seeding (``buffer[...] = ...``) done on the caller's
         current or legacy stream. Under ambient GPU load the seed can
         lose the race and replay 1 reads pre-seed buffer contents. The
-        fix: record a cupy Event on the caller's current stream and on
+        fix: record an event on the caller's stream (``eagle.stream``) and on
         the legacy ``Stream.null`` (when different) and wait on both,
         on the pipeline's own stream, before the replay loop. This
         orders every consumer of :meth:`launch` for free, at the
@@ -660,24 +666,6 @@ class GraphPipeline:
         are also available separately (see :meth:`enqueue`) for a
         caller that wants several pipelines' replays in flight at once."""
         return self.enqueue(n).synchronize()
-
-    def _record_seed_events(self, cp) -> list:
-        """Record the ordering events and return the list to wait on.
-        The event objects are this pipeline's cached pair (see
-        :meth:`__init__`); this re-records them on the caller's current
-        stream and, only when that is not already the legacy default
-        stream, on ``Stream.null``."""
-        current = cp.cuda.get_current_stream()
-        if self._seed_event is None:
-            self._seed_event = cp.cuda.Event()
-        self._seed_event.record(current)
-        events = [self._seed_event]
-        if current.ptr != cp.cuda.Stream.null.ptr:
-            if self._legacy_event is None:
-                self._legacy_event = cp.cuda.Event()
-            self._legacy_event.record(cp.cuda.Stream.null)
-            events.append(self._legacy_event)
-        return events
 
     def enqueue(self, n=1, *, pre_launch=None, seed_events=None):
         """Enqueue ``n`` replays on this pipeline's own stream and
@@ -726,21 +714,32 @@ class GraphPipeline:
         :meth:`build`."""
         if self._launcher is None:
             raise RuntimeError("call build() before launch()")
-        import cupy as cp
-
         refuse_in_capture("GraphPipeline.launch/enqueue")
         if seed_events is None:
-            seed_events = self._record_seed_events(cp)
+            seed_events = _stream.seed_events(self._seeds)
         for event in seed_events:
-            self._ext.wait_event(event)
+            event.wait(self._sptr)
 
         if pre_launch is not None:
-            with self._ext:
+            with scoped_stream(self._sptr):
                 pre_launch()
 
         for _ in range(int(n)):
-            self._launcher.launch()
+            try:
+                self._launcher.launch()
+            except RuntimeError as exc:
+                raise RuntimeError(f"eagle: graph replay of {self._kernel_list()}: the launch failed ({exc})") from None
+        self._check("replay")
+        for bound in self._scatter:
+            _split.mark_pending(bound, self._sptr)
         return self
+
+    def _kernel_list(self) -> str:
+        return "[" + ", ".join(dict.fromkeys(self._kernels)) + "]" if self._kernels else "the captured steps"
+
+    def _check(self, when: str) -> None:
+        """Read the launch error left by the graph's ``when`` (``instantiate`` or ``replay``): a query, no wait."""
+        _stream.check_launch(f"graph {self._kernel_list()} at {when}", getattr(self, "_device", -1))
 
     def synchronize(self):
         """Block the host until this pipeline's enqueued replays have
@@ -751,6 +750,7 @@ class GraphPipeline:
         if self._launcher is None:
             raise RuntimeError("call build() before launch()")
         self._launcher.synchronize()
+        _split.run_pending(self._sptr)
         return self
 
     def _launch_handles(self) -> _LaunchHandles:
@@ -762,7 +762,7 @@ class GraphPipeline:
         Raises ``RuntimeError`` if called before :meth:`build`."""
         if self._launcher is None:
             raise RuntimeError("call build() before _launch_handles()")
-        return _LaunchHandles(self._ext, self._launcher)
+        return _LaunchHandles(self._sptr, self._launcher)
 
     @property
     def graph(self):

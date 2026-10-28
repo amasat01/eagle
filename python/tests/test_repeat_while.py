@@ -374,7 +374,7 @@ def test_repeat_while_iteration_index_is_visible_to_the_body():
     y = cp.zeros(_N, dtype=cp.float32)
     guard = cp.ones(1, dtype=cp.uint32)
     loop = repeat_while(
-        lambda: _add_index(_GRID, _BLOCK, (y, np.int32(_N), loop.iteration_index)),
+        lambda: _add_index(_GRID, _BLOCK, (y, np.int32(_N), np.uint64(loop.iteration_index.ptr))),
         SkipGuard.nonzero(guard), 8,
     )
     pipe = GraphPipeline().add(loop)

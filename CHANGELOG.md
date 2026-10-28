@@ -2,6 +2,54 @@
 
 Releases after 0.6.4 are on [GitHub](https://github.com/amasat01/eagle/releases): the notes are the pull request body.
 
+## 0.7.2
+
+This section covers what changes from 0.7.1; the notes for 0.7.0 and 0.7.1 are on the [GitHub releases page](https://github.com/amasat01/eagle/releases). Names that left are in the table at the end.
+
+### Added
+
+**eagle no longer needs numpy or cupy.** Planes are `eagle.Array`, eagle's own array over aether memory, on the CPU and the GPU. The array layer is eagle's own C++ (host and device allocation, fill, copy, the array operations eagle's graphs use), so the CPU route needs no CUDA toolkit or driver. NumPy, CuPy, torch, JAX and Warp stay what they were: libraries you can hand arrays to and take arrays from, through DLPack, `__cuda_array_interface__` and the buffer protocol.
+
+**`Array.to(framework)` and `returns=`.** `a.to("numpy" | "cupy" | "torch" | "jax" | "warp")` gives the array in that library, sharing memory where the library can. `plan.run(..., returns="numpy")` does it for every result. If the library is missing, `to()` raises `ImportError` with the install line, and `returns=` warns once and returns `eagle.Array`.
+
+**`with eagle.stream(s):`** sets the stream eagle works on. With none open, eagle uses the default stream; it never reads CuPy's or torch's current stream. `s` is a raw handle or any stream object with `__cuda_stream__`, `.cuda_stream` or `.ptr`; `stream=` does the same for one call, where a door takes one. A raw int handle is yours to keep valid: eagle does not check it.
+
+**`eagle.fft`.** Batched C2C, R2C and C2R transforms as graph steps, on the CPU and the GPU, legal inside a capture. Complex data is a float array with a trailing axis of 2 (re, im). The transforms take NumPy, CuPy, torch or any DLPack array as well as an `eagle.Array`, and write the output in place (a read-only output is refused by name). `eagle.fft.vjp` and `jvp` are graph steps too, and `eagle.diff.Reverse` pulls an FFT back. The GPU needs cuFFT (`pip install aether-dsc[cufft12]` or `[cufft13]`); without it the call says so. Needs `aether-dsc>=0.7.2`.
+
+**Lane sets from the host.** `eagle.IndexSet.planes(mask_or_ids, extent)` builds the `active_map` and `active_count` planes of a kernel declared with `lanes=IndexSet()`, 32-bit, or 64-bit past `2**31 - 1` lanes. `eagle.check_index_set(map, count, extent)` checks them: every id in range, none twice. `plan.run` and `bind` run it; run it yourself after rewriting a bound map in place, because a captured graph replays without checking.
+
+**A batch size that changes between launches.** `bind(..., capacity=n_max)` on a kernel built with `IndexSet(prefix=True)` makes the count plane for you; `bound.set_count(m)` then runs the first `m` lanes of the same bind and the same captured graph. A count above the capacity is refused by name.
+
+**Large matrices and keyed sums in one plan.** Kernels that hawk splits into team stages (LU and Cholesky solves past 32 by 32, QR least squares, keyed block sums, ordered scatter) run through `Plan.run`, `bind` and graphs. The stages are captured and replayed bit for bit. A bind whose scratch is larger than the free device memory is refused with the byte sum and the stage. Keyed outputs come back as `(*payload, keys)`.
+
+**Ordered scatter.** eagle refills an ordered scatter's key log on every launch, graph replays included, and reports a key outside the target by name. The error is raised at eagle's next wait: stream synchronise, eagle read-back, device synchronise or the next launch. No device synchronise is added.
+
+**Launch failures are named.** eagle reads the launch status after every device launch (eager, graph instantiate and replay) and raises a failure that names the kernel. A bind whose per-thread local memory cannot fit the device is refused by name.
+
+**GPU plugin on Linux aarch64.** The aarch64 wheels carry the CUDA plugin, built and load-tested without a GPU; it has not run on one. `python -m eagle.cuda --selftest` prints what your machine can do (exit 0 pass, 1 fail, 2 no driver); paste its report in an issue. CuPy's own wheels stop at Python 3.14 on aarch64, so the CuPy extras do not resolve on 3.15 and 3.15t there.
+
+**GEMM through the plugin.** The GEMM node loads cuBLAS at run time (`EAGLE_CUBLAS_LIBRARY` names the library) and has an OpenMP twin on the CPU.
+
+### Changed
+
+- `numpy` is no longer a dependency. Install `raptor-eagle[numpy]` for the NumPy bridge. `aether-dsc>=0.7.2`; the `torch` and `jax` extras ask for `raptor-hawk>=0.7.2`.
+- Results are `eagle.Array`: what `plan.run` returns, and the fields of `Simulation`, `Record` and `Gradients`. Use `.to("numpy")` or `returns=` for another type, or hand the result to a library through DLPack.
+- A complex array is refused by name; pass its `(re, im)` pairs as a float array with a trailing axis of 2.
+- The seam is 1.7: `device_synchronize`, `set_device`, `device_count`, `stream_is_capturing`, `module_load`, `module_function`, `module_release`, `launch_raw`, `cell_op`, `memcpy_strided`, plus the event and GEMM entries.
+- The C++ registries read the sidecar's box partition; a partition that cuts a box is refused by name.
+
+### Removed
+
+| Gone | Use instead |
+|---|---|
+| `eagle.to_cupy(x)` | `eagle.to_array(x)` for an `eagle.Array`, then `a.to("cupy")` or `cupy.from_dlpack(a)` |
+| `eagle.np_dtype(name)` | `eagle.dtypes.dtype_of(scalar_type)` (an `eagle.DType`) or `eagle.DType` |
+| a NumPy or CuPy array as the result of `plan.run`, `simulate`, `Record`, `Gradients` | `eagle.Array`; `.to("numpy")`, `.to("cupy")` or `returns=` |
+| `numpy` installed with eagle | `pip install raptor-eagle[numpy]` |
+| eagle following CuPy's current stream | `with eagle.stream(s):` or `stream=s` |
+| `Adapter.to_cupy`, `from_cupy`, `from_numpy` (`eagle.origin_adapter`) | `to_array`, `from_array` |
+| `eagle.interop.external_stream(ptr)` | `eagle.stream(ptr)`, or `eagle.interop.scoped_stream(ptr)` |
+
 ## 0.6.4 (2026-10-22)
 
 **A run follows its arrays' GPU.** `plan.run`, `Plan.bind(...).launch()`, plan graphs and `eagle.reduce` run on the GPU their arrays live on, whatever device is current or the kernel was loaded on (before, a kernel loaded on one GPU failed with `invalid resource handle` while another was current, and a correct run on the second GPU was refused). Arrays on two GPUs are refused by name, as is a pipeline given a plan of another GPU. `device=n` on `plan.run`, `Plan.bind`, `Graph.build` and `eagle.reduce` is checked against the arrays and never moves them. A JAX function is kept per GPU, so one function per GPU coexist. Smaller changes: `_core.run_device` and `DeviceKernel.run` take `device=-1` (a stream of another GPU is refused by name), `LoadedKernel.function(device)` loads the kernel per GPU (`.fn` and `.device_id` stay), `GraphPipeline(device=-1)`, and `refence` and `device_props` default to `device=-1`, the current GPU (it was 0; the same on one GPU).

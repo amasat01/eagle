@@ -45,10 +45,11 @@ def test_copy_refuses_a_shape_a_dtype_and_a_strided_array():
         eagle.copy(1.0, into=np.zeros(4))
 
 
-def test_pinned_is_a_numpy_array_of_the_shape_and_dtype():
-    p = eagle.pinned((3, 5), np.float32)
-    assert p.shape == (3, 5) and p.dtype == np.float32 and p.flags.c_contiguous
-    p[...] = 1.5
+def test_pinned_is_an_eagle_array_of_the_shape_and_dtype():
+    p = eagle.pinned((3, 5), "float32")
+    assert p.shape == (3, 5) and p.dtype == "float32" and p.is_contiguous
+    p.fill(1.5)
+    assert np.asarray(p).sum() == 3 * 5 * 1.5
     assert eagle.pinned(0).shape == (0,)
 
 
@@ -74,7 +75,7 @@ def _bump(arr):
 
 
 def _host_scale(h, k):
-    return opaque(lambda: h.__imul__(k), reads=[h], writes=[h], name="host_scale")
+    return opaque(lambda: eagle.arrays.multiply(h, k, out=h), reads=[h], writes=[h], name="host_scale")
 
 
 @gpu
@@ -248,9 +249,9 @@ def _child(code, **env):
                           env={**os.environ, **env})
 
 
-def test_pinned_is_plain_numpy_when_no_device_is_visible():
-    done = _child("import eagle, numpy as np\np = eagle.pinned((2, 3), np.float32)\n"
-                  "assert type(p) is np.ndarray and p.base is None and p.shape == (2, 3)\n",
+def test_pinned_is_a_host_array_when_no_device_is_visible():
+    done = _child("import eagle\np = eagle.pinned((2, 3), 'float32')\n"
+                  "assert type(p) is eagle.arrays.Array and p.device == 'cpu' and p.shape == (2, 3)\n",
                   CUDA_VISIBLE_DEVICES="")
     assert done.returncode == 0, done.stderr
 

@@ -45,7 +45,7 @@ def _xp(device):
 
 def _host(a):
     get = getattr(a, "get", None)
-    return get() if get is not None else np.asarray(a)
+    return np.asarray(get() if get is not None else a)
 
 
 FACES = [pytest.param(False, id="host"), pytest.param(True, id="device", marks=pytest.mark.gpu)]
@@ -113,7 +113,7 @@ def _batch(xp, n, seed=0):
         x=xp.asarray(rng.random(n)),
         k=xp.asarray(rng.integers(0, 2**31, n).astype(np.int32)),
         h=xp.asarray(rng.random(n).astype(np.float16)),
-        c=xp.asarray((rng.random(n) + 1j * rng.random(n)).astype(np.complex128)),
+        c=xp.asarray(rng.random((2, n))),      # complex data travels as a float64 (re, im) pair view
         w=xp.asarray(rng.random((3, n)).astype(np.float32)),
     )
     return planes, {key: _host(v).copy() for key, v in planes.items()}
@@ -230,7 +230,7 @@ def test_exports_of_an_owned_plane_are_refused_while_permuted(device):
     a, planes, _ = _permuted_set(xp)
     from eagle import interop
 
-    for door in (interop.import_buffer, interop.to_cupy if device else None):
+    for door in (interop.import_buffer, __import__("eagle.frameworks.cupy", fromlist=["x"]).to_cupy if device else None):
         if door is None:
             continue
         for arr in (planes["x"], planes["w"][1], a.mask):
@@ -258,7 +258,7 @@ def test_device_hook_reads_a_sample_through_inv():
         if (i < n) out[i] = x[inv[i]];
     }""", "hook")
     out = cp.empty(a.n)
-    hook(((a.n + 255) // 256,), (256,), (planes["x"], a.inv, out, np.int32(a.n)))
+    hook(((a.n + 255) // 256,), (256,), (planes["x"], cp.asarray(a.inv), out, np.int32(a.n)))
     assert np.array_equal(out.get(), ref["x"])
 
 
@@ -342,7 +342,7 @@ def test_captured_compaction_and_conditional_reorder_follow_the_mask():
     for frac in (0.1, 0.5, 0.9, 0.97):  # thinning: the live set shrinks every replay
         drop = np.random.default_rng(int(frac * 100)).random(n) < frac
         m = hmask.copy()
-        m[h.inv[drop]] = True
+        m[np.asarray(h.inv)[drop]] = True
         hmask[...] = m
         dmask.set(m)
         h.compact()

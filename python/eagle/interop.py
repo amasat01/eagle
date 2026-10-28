@@ -4,20 +4,19 @@
 """DLPack multi-framework tensor I/O for the kernel launchers.
 
 A compiled kernel's inputs must reach the launch as contiguous ``(3, N)`` /
-``(N,)`` float64 cupy arrays. This module lets a caller pass a PyTorch /
+``(N,)`` float64 device arrays. This module lets a caller pass a PyTorch /
 JAX / TensorFlow / cupy / numpy tensor (or any DLPack producer) instead:
-import to cupy (zero-copy via DLPack when already on CUDA, a host upload
-otherwise), remember the *origin* framework, and export the result back to
-it (``torch`` in -> ``torch`` out). ``Device::CUDA_DEVICE == 2 == DLPack
-kDLCUDA`` underpins the exchange.
+import to an :class:`eagle.Array` (:func:`to_array`, zero-copy over DLPack,
+``__cuda_array_interface__`` or the buffer protocol), remember the *origin*
+framework, and export the result back to it (``torch`` in -> ``torch`` out)
+through DLPack. ``Device::CUDA_DEVICE == 2 == DLPack kDLCUDA`` underpins the
+exchange.
 
-Nothing is imported at module load, not even cupy: :func:`detect`
-identifies a framework from ``type(x).__module__`` and DLPack/CUDA-array
-attributes alone, so the real import happens inside an adapter's
-``to_cupy``/``from_cupy``, preserving the GPU-free CPU test contract.
-:func:`to_cupy` performs only the import; each launcher's own ``(3, N)`` /
-float64 coercion on top is a no-op view when already conforming, a copy
-otherwise.
+No array library is imported here: :func:`detect` identifies a framework from
+``type(x).__module__`` and DLPack/CUDA-array attributes alone, and the
+framework's own import happens inside its adapter (``eagle.frameworks``),
+preserving the GPU-free CPU test contract. Each launcher's own ``(3, N)`` /
+float64 coercion on top is a no-op when already conforming, a copy otherwise.
 
 The zero-copy contract itself is :func:`import_buffer` / :class:`BufferView`:
 any DLPack / ``__cuda_array_interface__`` / ``__array_interface__``
@@ -28,7 +27,8 @@ re-exporting through ``__dlpack__`` under the DLPack 1.0 stream contract.
 
 from __future__ import annotations
 
-import threading
+import contextlib
+
 
 # kDLCUDA in the DLPack device taxonomy (matching aether's own device tag).
 _KDLCUDA = 2
@@ -42,17 +42,6 @@ _STRONG = ("torch", "jax", "tensorflow")
 def _root_module(x) -> str:
     """Top-level package a value's type comes from (``"torch"``, ``"numpy"``, ...)."""
     return type(x).__module__.partition(".")[0]
-
-
-def _xp_of(arr):
-    """numpy or cupy, whichever owns ``arr``."""
-    if _root_module(arr) == "cupy":
-        import cupy
-
-        return cupy
-    import numpy
-
-    return numpy
 
 
 def _is_cuda(x) -> bool:
@@ -78,59 +67,6 @@ def _is_cuda(x) -> bool:
     return False
 
 
-# ExternalStream cache: a pure wrapper over a raw cudaStream_t that creates,
-# owns and destroys nothing, so one per stream handle suffices for the
-# process (and cuts a cupy DeprecationWarning per construction to one).
-# Keyed on the raw handle, which stays correct even if torch reallocates a
-# stream at the same address.
-_external_stream_cache: dict = {}
-_EXTERNAL_STREAM_COUNTS = {"hits": 0, "misses": 0}
-#: Serialises the cache and its tallies: one wrapper per handle, exact counts.
-_EXTERNAL_STREAM_LOCK = threading.Lock()
-
-
-def _external_stream_stats() -> dict:
-    """A copy of the :func:`external_stream` cache's hit/miss counters
-    (record-only; the gate reads them)."""
-    with _EXTERNAL_STREAM_LOCK:
-        return dict(_EXTERNAL_STREAM_COUNTS)
-
-
-def _reset_external_stream_cache() -> None:
-    """Drop the cached ``ExternalStream`` wrappers and zero their counters
-    (tests / teardown)."""
-    with _EXTERNAL_STREAM_LOCK:
-        _external_stream_cache.clear()
-        _EXTERNAL_STREAM_COUNTS["hits"] = 0
-        _EXTERNAL_STREAM_COUNTS["misses"] = 0
-
-
-class _StreamProtocol:
-    """Minimal CUDA stream protocol object around a raw ``cudaStream_t``."""
-
-    __slots__ = ("_ptr",)
-
-    def __init__(self, ptr: int):
-        self._ptr = int(ptr)
-
-    def __cuda_stream__(self):
-        return (0, self._ptr)
-
-
-def _wrap_external_stream(ptr: int):
-    """A fresh cupy stream wrapping raw handle ``ptr`` (not cached).
-
-    CuPy >= 14 deprecates ``cupy.cuda.ExternalStream`` in favour of
-    ``Stream.from_external``; older CuPy (13.x, CPython 3.9) lacks the
-    latter and keeps the ExternalStream fallback."""
-    import cupy as cp
-
-    from_external = getattr(getattr(cp.cuda, "Stream", None), "from_external", None)
-    if from_external is not None:
-        return from_external(_StreamProtocol(ptr))
-    return cp.cuda.ExternalStream(int(ptr))
-
-
 def _stream_handle(stream) -> int:
     """The raw ``cudaStream_t`` of ``stream`` as an int, from any spelling the
     family uses: an int, the ``__cuda_stream__()`` protocol, ``.cuda_stream``
@@ -148,25 +84,23 @@ def _stream_handle(stream) -> int:
                     f"(.cuda_stream) or a CuPy stream (.ptr); got {type(stream).__name__}")
 
 
-def external_stream(ptr: int):
-    """The cached ``cupy.cuda.ExternalStream`` wrapping raw handle ``ptr``
-    (same handle -> same wrapper object, identity not equality)."""
-    key = int(ptr)
-    with _EXTERNAL_STREAM_LOCK:
-        stream = _external_stream_cache.get(key)
-        if stream is None:
-            _EXTERNAL_STREAM_COUNTS["misses"] += 1
-            stream = _wrap_external_stream(key)
-            _external_stream_cache[key] = stream
-        else:
-            _EXTERNAL_STREAM_COUNTS["hits"] += 1
-        return stream
+@contextlib.contextmanager
+def scoped_stream(ptr: int):
+    """Make raw stream ``ptr`` the stream eagle's own work goes on (``eagle.stream``). When the caller has
+    imported cupy it is also cupy's current stream while the block runs, so the caller's own cupy code in a
+    node or hook lands on it; eagle itself never reads that."""
+    from . import _stream
+    from .frameworks.cupy import user_stream
+
+    with _stream.scope(int(ptr)), user_stream(int(ptr)):
+        yield
 
 
 class Adapter:
-    """Import a framework's tensor to cupy and export a cupy result back
-    to it. ``name`` is the framework tag (:func:`origin_adapter`); ``cuda``
-    records whether the origin tensor was device-resident."""
+    """Import a framework's tensor to an :class:`eagle.Array` and export an
+    :class:`eagle.Array` result back to it. ``name`` is the framework tag
+    (:func:`origin_adapter`); ``cuda`` records whether the origin tensor was
+    device-resident."""
 
     name = "base"
     cuda = True
@@ -175,67 +109,43 @@ class Adapter:
     blocking = True
 
     def launch_context(self):
-        """The cupy stream context the kernel launches *within*. Defaults
-        to a no-op (cupy's current stream); an async device adapter
-        overrides this to make its own current stream the cupy one."""
-        import contextlib
-
+        """The stream context the kernel launches *within*. Defaults to a
+        no-op; an async device adapter overrides this to make its own
+        current stream the one eagle launches on."""
         return contextlib.nullcontext()
 
-    def to_cupy(self, x):
-        """Import ``x`` to a ``cupy.ndarray`` (zero-copy when possible)."""
+    def to_array(self, x):
+        """Import ``x`` to an :class:`eagle.Array` (zero-copy)."""
+        return to_array(x)
+
+    def from_array(self, a):
+        """Export the :class:`eagle.Array` result ``a`` back to this adapter's framework."""
         raise NotImplementedError
 
-    def from_cupy(self, a):
-        """Export the cupy result ``a`` back to this adapter's framework."""
-        raise NotImplementedError
-
-    def from_numpy(self, a):
-        """Export the host array ``a`` to this adapter's framework (a host
-        tensor); the caller hands over ownership of ``a``."""
-        raise NotImplementedError
+    def _placed(self, a):
+        """``a`` where this adapter's tensors live: a device result of a host call comes to the host."""
+        _refuse_permuted_export(a, self.name)
+        return a if self.cuda or not a.device.startswith("cuda") else a.get()
 
 
 class _CupyAdapter(Adapter):
     name, cuda = "cupy", True
-    blocking = False  # async on cupy's current stream (its default semantics)
+    blocking = False  # async on the stream the launch ran on
 
-    def to_cupy(self, x):
-        return x
+    def from_array(self, a):
+        from .frameworks import cupy
 
-    def from_cupy(self, a):
-        return a
+        return cupy.from_array(self._placed(a))
 
 
 class _NumpyAdapter(Adapter):
     name, cuda = "numpy", False
 
-    def to_cupy(self, x):
-        import cupy as cp
+    def from_array(self, a):
+        from .frameworks import numpy
 
-        return cp.asarray(x)  # host -> device upload (the historical numpy path)
-
-    def from_cupy(self, a):
-        import cupy as cp
-
-        return cp.asnumpy(a)  # device -> host (the historical numpy-out path)
-
-    def from_numpy(self, a):
-        return a
-
-
-class _DlpackImport(Adapter):
-    """An adapter whose tensors enter through DLPack: a device tensor as a
-    zero-copy cupy view, a host tensor uploaded."""
-
-    def to_cupy(self, x):
-        import cupy as cp
-
-        if self.cuda:
-            return cp.from_dlpack(x)
-        import numpy as np
-
-        return cp.asarray(np.from_dlpack(x))
+        _refuse_permuted_export(a, self.name)
+        return numpy.from_array(a)
 
 
 class _CaiAdapter(Adapter):
@@ -243,18 +153,15 @@ class _CaiAdapter(Adapter):
     round-trip to; imported zero-copy, exported as cupy."""
 
     name, cuda = "cai", True
-    blocking = False  # cupy-backed device buffer -> async on cupy's current stream
+    blocking = False  # a device buffer is async on the stream the launch ran on
 
-    def to_cupy(self, x):
-        import cupy as cp
+    def from_array(self, a):
+        from .frameworks import cupy
 
-        return cp.asarray(x)  # cupy consumes __cuda_array_interface__ zero-copy
-
-    def from_cupy(self, a):
-        return a
+        return cupy.from_array(self._placed(a))
 
 
-class _DlpackAdapter(_DlpackImport):
+class _DlpackAdapter(Adapter):
     """A generic ``__dlpack__`` producer with no framework we specifically
     know; exported as cupy (device) or numpy (host), since no owning
     framework exists to make."""
@@ -263,21 +170,20 @@ class _DlpackAdapter(_DlpackImport):
 
     def __init__(self, cuda: bool):
         self.cuda = cuda
-        self.blocking = not cuda  # CUDA -> async on cupy's current stream; CPU -> sync
+        self.blocking = not cuda  # CUDA -> async on the launch stream; CPU -> sync
 
-    def from_cupy(self, a):
-        _refuse_permuted_export(a, self.name)
+    def from_array(self, a):
         if self.cuda:
-            return a
-        import cupy as cp
+            from .frameworks import cupy
 
-        return cp.asnumpy(a)
+            return cupy.from_array(self._placed(a))
+        from .frameworks import numpy
 
-    def from_numpy(self, a):
-        return a
+        _refuse_permuted_export(a, self.name)
+        return numpy.from_array(a)
 
 
-class _TorchAdapter(_DlpackImport):
+class _TorchAdapter(Adapter):
     name = "torch"
 
     def __init__(self, cuda: bool):
@@ -286,32 +192,20 @@ class _TorchAdapter(_DlpackImport):
 
     def launch_context(self):
         if not self.cuda:
-            import contextlib
-
             return contextlib.nullcontext()
         import torch
 
-        # Make torch's current stream the cupy current stream so the
+        # Make torch's current stream the stream eagle launches on, so the
         # launch inherits torch's ordering, no host sync.
-        return external_stream(torch.cuda.current_stream().cuda_stream)
+        return scoped_stream(torch.cuda.current_stream().cuda_stream)
 
-    def from_cupy(self, a):
-        _refuse_permuted_export(a, self.name)
+    def from_array(self, a):
         import torch
 
-        if self.cuda:
-            return torch.from_dlpack(a)  # zero-copy device view of the cupy result
-        import cupy as cp
-
-        return self.from_numpy(cp.asnumpy(a))  # device result -> host torch tensor
-
-    def from_numpy(self, a):
-        import torch
-
-        return torch.from_numpy(a)
+        return torch.from_dlpack(self._placed(a))  # zero-copy over the result buffer (device), or its host copy
 
 
-class _JaxAdapter(_DlpackImport):
+class _JaxAdapter(Adapter):
     """A JAX array in, a JAX array out.
 
     In: a jax array in a read-only role (state vectors, per-sample planes,
@@ -336,43 +230,27 @@ class _JaxAdapter(_DlpackImport):
         # the DLPack round-trip still works, just synchronously.
         self.blocking = True
 
-    def from_cupy(self, a):
-        _refuse_permuted_export(a, self.name)
+    def from_array(self, a):
         import jax
 
-        if self.cuda:
+        a = self._placed(a)
+        if a.device.startswith("cuda"):
             return jax.dlpack.from_dlpack(a)  # zero-copy device view
-
-        return self.from_numpy(a.get())  # host result -> CPU jax
-
-    def from_numpy(self, a):
-        import jax
-
-        return jax.device_put(a, jax.devices("cpu")[0])
+        return jax.device_put(jax.dlpack.from_dlpack(a), jax.devices("cpu")[0])
 
 
-class _TfAdapter(_DlpackImport):
+class _TfAdapter(Adapter):
     name = "tensorflow"
 
     def __init__(self, cuda: bool):
         self.cuda = cuda
         self.blocking = True  # v1: sync (TF stream not injected yet); see _JaxAdapter
 
-    def from_cupy(self, a):
-        _refuse_permuted_export(a, self.name)
+    def from_array(self, a):
         import tensorflow as tf
 
-        if self.cuda:
-            # TF's from_dlpack consumes a PyCapsule, not the array object.
-            return tf.experimental.dlpack.from_dlpack(a.__dlpack__())
-        import cupy as cp
-
-        return self.from_numpy(cp.asnumpy(a))
-
-    def from_numpy(self, a):
-        import tensorflow as tf
-
-        return tf.constant(a)
+        # TF's from_dlpack consumes a PyCapsule, not the array object.
+        return tf.experimental.dlpack.from_dlpack(self._placed(a).__dlpack__())
 
 
 # Singletons for the stateless adapters (the framework-tagged ones carry a
@@ -384,8 +262,8 @@ _CAI = _CaiAdapter()
 
 def detect(x) -> Adapter | None:
     """Identify ``x``'s framework adapter without importing the framework.
-    ``None`` for a value we don't recognize as a tensor (:func:`to_cupy`
-    then treats it as a host upload)."""
+    ``None`` for a value we don't recognize as a tensor (:func:`to_array`
+    then treats it as a host buffer)."""
     root = _root_module(x)
     if root == "cupy":
         return _CUPY
@@ -405,15 +283,13 @@ def detect(x) -> Adapter | None:
 
 
 def export_like(like, native):
-    """A NEW array of ``like``'s framework holding a copy of ``native`` (a
-    numpy or cupy array): the way a result leaves for a framework whose arrays
-    eagle never writes (a jax array is immutable). ``native`` is untouched."""
+    """A NEW array of ``like``'s framework holding a copy of ``native`` (an
+    :class:`eagle.Array`, or a numpy or cupy array): the way a result leaves for a framework whose
+    arrays eagle never writes (a jax array is immutable). ``native`` is untouched."""
     ad = detect(like)
     if ad is None or ad.name == "numpy":
         return native.copy()
-    if hasattr(native, "__cuda_array_interface__"):
-        return ad.from_cupy(native.copy())
-    return ad.from_numpy(native.copy())
+    return ad.from_array(to_array(native.copy()))
 
 
 def _refuse_permuted_export(a, framework: str) -> None:
@@ -424,20 +300,36 @@ def _refuse_permuted_export(a, framework: str) -> None:
     refuse_if_permuted(a, f"eagle.interop: the {framework} bridge")
 
 
-def to_cupy(x):
-    """Import a framework / DLPack tensor to a cupy array: zero-copy for a
-    CUDA-resident producer, a host upload otherwise. Also the pre-import
-    helper for the capturable ``launch`` path, since a DLPack import can
-    synchronize and is unsafe mid-capture."""
+def to_array(x, *, device=None, stream=None):
+    """Import a framework / DLPack / CUDA-array-interface / buffer-protocol tensor as an
+    :class:`eagle.Array`, zero-copy: the array views the producer's memory and keeps the producer alive.
+    ``device`` (``"cpu"``, ``"pinned"`` or ``"cuda:N"``) moves it there when it lives elsewhere.
+    ``stream`` (any ``__cuda_stream__`` object, a ``.cuda_stream`` / ``.ptr`` stream or a raw handle,
+    default eagle's current stream) is the stream the caller will use a device producer's data on: the
+    producer's pending work is ordered before it. Also the pre-import helper for the capturable ``launch``
+    path, since a DLPack import can synchronize and is unsafe mid-capture."""
+    from . import _core, _stream, arrays
     from ._active_set import refuse_if_permuted
 
-    refuse_if_permuted(x, "eagle.interop.to_cupy")
-    ad = detect(x)
-    if ad is None:
-        import cupy as cp
-
-        return cp.asarray(x)
-    return ad.to_cupy(x)
+    if isinstance(x, arrays.Array):
+        a = x
+    else:
+        refuse_if_permuted(x, "eagle.interop.to_array")
+        if getattr(x, "requires_grad", False) and hasattr(x, "detach"):
+            x = x.detach()      # torch exports a grad-tracked tensor's data, never its graph
+        if hasattr(x, "__dlpack__") and _is_cuda(x):
+            handle = _stream.current() if stream is None else _stream_handle(stream)
+            try:
+                capsule = x.__dlpack__(stream=handle, max_version=(1, 0))
+            except TypeError:
+                capsule = x.__dlpack__(stream=handle)
+            a = _core.array_from_dlpack(capsule)
+        else:
+            try:
+                a = arrays.asarray(x)
+            except BufferError:
+                a = _core.array_from_buffer(x)      # a read-only host producer that DLPack refuses
+    return a if device is None else arrays.asarray(a, device=device)
 
 
 def refuse_jax_written(x, role: str) -> None:
@@ -455,7 +347,7 @@ def refuse_jax_written(x, role: str) -> None:
 def host_ptr(x, *, writable: bool = False) -> int:
     """Raw host data pointer of a contiguous CPU tensor, for a zero-copy
     host-plugin launch (:class:`eagle.host_launch.HostPluginLibrary`) --
-    no import, no copy, no cupy. Accepts a torch CPU tensor or a numpy
+    no copy. Accepts a torch CPU tensor or a numpy
     array; a device tensor or non-contiguous buffer raises. ``writable=True``
     is for a buffer the kernel writes: a jax array or any read-only view is
     refused."""
@@ -468,44 +360,42 @@ def host_ptr(x, *, writable: bool = False) -> int:
         if not x.is_contiguous():
             raise ValueError("host_ptr: tensor must be contiguous")
         return int(x.data_ptr())
-    import numpy as np
+    from .frameworks import numpy
 
-    a = np.asarray(x)
-    if not a.flags.c_contiguous:
-        raise ValueError("host_ptr: array must be C-contiguous")
-    if writable and not a.flags.writeable:
-        raise BufferRefused("host_ptr: the buffer is read-only, so a kernel cannot write it")
-    return int(a.ctypes.data)
+    return numpy.host_ptr(x, writable)
 
 
 def as_out_buffer(out, shape, dtype=None):
-    """Import a caller-provided device buffer as a zero-copy cupy view to
-    fill in place -- strict where :func:`to_cupy` is lenient: a wrong
+    """Import a caller-provided device buffer as a zero-copy :class:`eagle.Array`
+    to fill in place -- strict where :func:`to_array` is lenient: a wrong
     dtype/shape/stride raises rather than copies (the caller's buffer would
     never get the result). ``out`` must be device-resident and a
     C-contiguous ``shape`` buffer of ``dtype`` (default float64)."""
-    import cupy as cp
-
     refuse_jax_written(out, "out=")
     if dtype is None:
-        dtype = cp.float64
+        dtype = "float64"
     ad = detect(out)
     if ad is None or not getattr(ad, "cuda", False):
         raise TypeError(
             "out= must be a device tensor (cupy / CUDA torch / CUDA-DLPack); a host "
             "buffer cannot be filled in place"
         )
-    cu = to_cupy(out)  # zero-copy device view (no cast, no contiguation)
+    cu = to_array(out)  # zero-copy device view (no cast, no contiguation)
     if (
         cu.dtype != dtype
         or tuple(cu.shape) != tuple(shape)
-        or not cu.flags.c_contiguous
+        or not cu.is_contiguous
     ):
         raise ValueError(
-            f"out= must be a C-contiguous {tuple(shape)} {cp.dtype(dtype).name} CUDA "
+            f"out= must be a C-contiguous {tuple(shape)} {_dtype_name(dtype)} CUDA "
             f"buffer; got shape {tuple(cu.shape)} dtype {cu.dtype}"
         )
     return cu
+
+
+def _dtype_name(dtype) -> str:
+    """The spelling of a dtype given as a name, an :class:`eagle.DType` or a numpy-style class or dtype."""
+    return dtype if isinstance(dtype, str) else (dtype.__name__ if isinstance(dtype, type) else dtype.name)
 
 
 def origin_adapter(candidates) -> Adapter:
@@ -566,12 +456,12 @@ class Requirements:
 
     def __init__(self, *, dtype=None, count=None, shape=None, contiguous=False,
                  alignment=0, device=None, device_id=None, writable=False):
-        if dtype is not None and str(dtype) not in _DTYPE_CODES:
+        if dtype is not None and _dtype_name(dtype) not in _DTYPE_CODES:
             raise ValueError(f"Requirements: unknown dtype {dtype!r}")
         if device is not None and device not in _DEVICE_TYPES:
             raise ValueError(
                 f"Requirements: device must be 'cuda' or 'cpu', got {device!r}")
-        self.dtype = None if dtype is None else str(dtype)
+        self.dtype = None if dtype is None else _dtype_name(dtype)
         self.count = count
         self.shape = None if shape is None else tuple(int(s) for s in shape)
         self.contiguous = bool(contiguous)
@@ -661,9 +551,9 @@ def _cai_device(ptr) -> int:
     """The ordinal owning a CAI pointer (the protocol does not carry it)."""
     if not ptr:
         return 0
-    import cupy as cp
+    from . import _core
 
-    return int(cp.cuda.runtime.pointerGetAttributes(int(ptr)).device)
+    return max(0, int(_core.pointer_device(int(ptr))))
 
 
 class BufferView:
@@ -789,7 +679,7 @@ def import_buffer(obj, *, stream=None, require=None,
     its data, and the view keeps the tensor itself: a plan plane bound from
     the view is refused at launch once the tensor's data pointer moves
     (``param.data = ...``)."""
-    buf = _core_buffer_from(obj, stream)
+    buf = _core_buffer_from(obj, None if stream is None else _stream_handle(stream))
     if assume_writable:
         buf.assume_writable()
     view = BufferView(buf, obj)
@@ -805,7 +695,5 @@ def refence(producer_stream, consumer_stream, device: int = -1) -> None:
     from eagle import _core
 
     if device < 0:
-        import cupy
-
-        device = int(cupy.cuda.runtime.getDevice())
+        device = int(_core.device_props(-1)["device"])
     _core.fence(producer_stream, consumer_stream, device)

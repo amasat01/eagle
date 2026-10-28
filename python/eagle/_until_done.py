@@ -44,9 +44,10 @@ from ._active_set import (
     DEFAULT_EVERY,
     MAP_PLANE,
     ActiveSet,
+    _view,
     compaction_body,
 )
-from . import _core, _lane_bind, _layout, _split
+from . import _core, _lane_bind, _layout, _split, _stream, arrays
 from ._busy import BusyGuard
 from ._compat import zip_strict
 from ._conditional import SkipGuard, Skippable, _host_scalar, repeat_while
@@ -170,14 +171,19 @@ class RunReport:
     mapped: int = 0
 
 
-def _array_module(device: bool):
-    if device:
-        import cupy
+def _device_token(device: bool, planes) -> str:
+    """Where the run's own arrays live: ``"cpu"``, or ``"cuda:N"`` for the GPU the caller's device planes are
+    on (the current one when it passed none)."""
+    if not device:
+        return "cpu"
+    for value in planes.values():
+        if hasattr(value, "shape") or hasattr(value, "__cuda_array_interface__"):
+            where = _view(value).device
+            if where.startswith("cuda"):
+                return where
+    from .launch import _current_device_ordinal
 
-        return cupy
-    import numpy
-
-    return numpy
+    return f"cuda:{_current_device_ordinal()}"
 
 
 #: A settled runner sums its steps (the step fill f) on one run in this many;
@@ -256,27 +262,26 @@ def _artifact_digest(step) -> str:
     return digest.hexdigest()
 
 
-def _packed_read(xp, device: bool, cells) -> tuple:
+def _packed_read(dev: str, cells) -> tuple:
     """Read several 1-element uint32 counter cells as ONE combined transfer
     instead of a separate full round-trip sync per cell (a run's
     fixed overhead is dominated by sync COUNT, not by what each one moves).
     ``cells`` is a sequence of ``(array, index)`` pairs, each a uint32 cell
-    (device: cupy; host: numpy, where there is no sync to fold, so each is
-    just read directly). Device: every cell is copied -- async, no sync --
-    into one small staging buffer on the current stream, then ONE ``.get()``
-    reads them all together. Returns the values as plain Python ints, in
-    ``cells`` order."""
-    if not device:
+    of an :class:`eagle.Array` on ``dev`` (``"cpu"``, where there is no sync
+    to fold, so each is just read directly). Device: every cell is copied
+    -- async, no sync -- into one small staging buffer on the current
+    stream, then ONE read returns them all together. Returns the values as
+    plain Python ints, in ``cells`` order."""
+    if dev == "cpu":
         return tuple(int(arr[idx]) for arr, idx in cells)
     first, lo = cells[0]
     if all(arr is first and idx == lo + j for j, (arr, idx) in enumerate(cells)):
         # consecutive words of one array: no staging copies, the ONE read
-        return tuple(int(v) for v in first[lo : lo + len(cells)].get())
-    staging = _alloc.empty(xp, len(cells), dtype=xp.uint32)
+        return tuple(int(v) for v in first[lo : lo + len(cells)].tolist())
+    staging = _alloc.empty(dev, len(cells), dtype=arrays.uint32)
     for i, (arr, idx) in enumerate(cells):
         staging[i : i + 1] = arr[idx : idx + 1]
-    host = staging.get()
-    return tuple(int(v) for v in host)
+    return tuple(int(v) for v in staging.tolist())
 
 
 def _fast_mode_for(step, n: int, *, compacting: bool = False) -> str | None:
@@ -361,115 +366,31 @@ def _check_count(label: str, value) -> int:
     return value
 
 
-def _bump_kernel():
-    """``cell[0] += 1`` as one single-thread device kernel (cupy), compiled
-    before any capture."""
-    import cupy
-
-    return cupy.ElementwiseKernel("", "raw uint32 cell", "if (i == 0) cell[0] += 1u;",
-                                  "eagle_until_done_bump")
+def _bump(dev: str, cell) -> None:
+    """``cell[0] += 1`` as one single-thread built-in kernel node on the current stream."""
+    _core.cell_op(_core.CELL_BUMP, _stream.current(), 1, [cell.ptr], [], int(dev.split(":")[1]))
 
 
-_MASK_COUNT = None
-
-
-def _mask_count_kernel():
-    """``cell[0] = count_nonzero(mask)`` as one device kernel (cupy), built
-    once per process: a plain per-element ``atomicAdd`` into a cell the
-    caller has already zeroed, dispatched over the mask's own N elements --
-    NOT cupy's own :func:`cupy.count_nonzero` (a cub reduction whose kernel
-    JIT-compiles slowly on a cold ``CUPY_CACHE_DIR``, ~2.9 s measured) nor a
-    single-thread trick like :func:`_bump_kernel` (this one scans N
-    elements, so it needs N threads, not one)."""
-    global _MASK_COUNT
-    if _MASK_COUNT is None:
-        import cupy
-
-        _MASK_COUNT = cupy.ElementwiseKernel(
-            "bool mask", "raw uint32 cell",
-            "if (mask) atomicAdd(&cell[0], 1u);",
-            "eagle_until_done_mask_count")
-    return _MASK_COUNT
-
-
-def _mask_count(xp, device: bool, finished, terminated) -> None:
-    """``finished[0] = count_nonzero(terminated)``, re-synced to the mask
-    EVERY call (never cached): on the device, :func:`_mask_count_kernel`
-    (not cupy's own ``count_nonzero``, see there); on the host, numpy's
-    ``count_nonzero`` is a plain loop, no JIT, so it stays."""
-    if not device:
-        finished[0] = xp.count_nonzero(terminated)
+def _mask_count(dev: str, finished, terminated) -> None:
+    """``finished[0] = count_nonzero(terminated)``, re-synced to the mask EVERY call (never cached): on the
+    device the built-in ``MASK_COUNT`` kernel (one per-element ``atomicAdd`` into a cell zeroed first, a memset
+    node under capture); on the host a plain count."""
+    mask = _view(terminated)
+    if dev == "cpu":
+        finished[0] = int(arrays.count_nonzero(mask))
         return
-    stream = xp.cuda.get_current_stream().ptr
-    _alloc.zero(xp, finished, stream)
-    if terminated.shape[0] > 0:
-        _mask_count_kernel()(terminated, finished)
-
-
-def _warm_device_kernels() -> None:
-    """Compile the cupy kernels a device run of the loop launches first --
-    the active set's identity map and count, the step word's fill, the
-    bump and the mask count -- on a one-sample batch. None depends on the
-    kernel being run, so :func:`eagle.deploy` overlaps them with its own
-    device build; the run then finds them compiled."""
-    import cupy as xp
-
-    from ._active_set import ActiveSet
-
-    mask = _alloc.zeros(xp, 1, dtype=xp.bool_)
-    ActiveSet(mask, _lazy_scratch=True)
-    word = _alloc.zeros(xp, 1, dtype=xp.int64)
-    word[0] = 1
-    _bump_kernel()(_alloc.zeros(xp, 1, dtype=xp.uint32), size=1)
-    _mask_count(xp, True, _alloc.zeros(xp, 1, dtype=xp.uint32), mask)
-    xp.cuda.get_current_stream().synchronize()
-
-
-#: The policy band, device face: ``k_next`` from ``k`` (current steps per
-#: launch), ``newly`` (finished in the launch), ``live`` (not finished) and
-#: ``rate`` (R). The same expression, in the same order, as
-#: ``eagle::policy::bandK``.
-_BAND_SRC = (
-    "if (newly <= 0) k_next = KMAX;\n"
-    "else {\n"
-    "    const double e2 = 2.0 * rate * (double)live * (double)k / (double)newly;\n"
-    "    long long p = 1;\n"
-    "    while (p < (1LL << 30) && e2 >= 2.0 * (double)p * (double)p) p *= 2;\n"
-    "    k_next = p < KMIN ? KMIN : (p > KMAX ? KMAX : p);\n"
-    "}\n")
-
-_POLICY_SRC = r"""
-extern "C" __global__ void eagle_until_done_policy(
-        const unsigned int* finished, const unsigned int* total, long long* cells,
-        long long* word, unsigned int* go, long long* hist) {
-    if (blockIdx.x != 0 || threadIdx.x != 0) return;
-    const long long KMIN = %(kmin)d, KMAX = %(kmax)d;
-    const long long fin = finished[0], all = total[0];
-    const long long live = all - fin, newly = fin - cells[%(fin_at)d];
-    const long long done = cells[%(done)d] + word[0];
-    cells[%(mapped)d] += all - cells[%(fin_at)d];
-    cells[%(fin_at)d] = fin;
-    cells[%(done)d] = done;
-    const long long k = cells[%(k)d];
-    const double rate = (double)cells[%(r)d] / %(scale)d.0;
-    long long k_next = k;
-    %(band)s
-    cells[%(k)d] = k_next;
-    const long long left = cells[%(cap)d] - done;
-    const unsigned int g = (fin != all) && (left > 0);
-    go[0] = g;
-    if (g) {
-        const long long w = k_next < left ? k_next : left;
-        word[0] = w;
-        hist[w] += 1;
-    }
-}
-"""
+    stream = _stream.current()
+    _alloc.zero(dev, finished, stream)
+    if mask.shape[0] > 0:
+        if not mask.is_contiguous:
+            mask = mask.copy()
+        _core.cell_op(_core.CELL_MASK_COUNT, stream, mask.shape[0], [mask.ptr, finished.ptr], [], int(dev.split(":")[1]))
 
 
 def _next_k(k: int, newly: int, live: int, k_max: int, k_min: int = AUTO_K_MIN,
             rate: float = AUTO_RATE0) -> int:
-    """Steps to the next compaction, host face (the twin of :data:`_BAND_SRC`):
+    """Steps to the next compaction, host face (the twin of the device ``POLICY`` op, the same
+    expression as ``eagle::policy::bandK``):
     the power of two nearest ``sqrt(2R / h)`` held to ``[k_min, k_max]``, with
     ``R = rate`` and ``h = newly / (live * k)`` the rate samples finish at
     (:func:`eagle._core.band_k`). A caller that pins ``k_min == k_max`` (a
@@ -480,11 +401,12 @@ def _next_k(k: int, newly: int, live: int, k_max: int, k_min: int = AUTO_K_MIN,
 
 def _host_policy(cells, finished, total, word, go, hist, k_max: int,
                  k_min: int = AUTO_K_MIN) -> None:
-    """One policy step on numpy cells: the twin of the device kernel."""
+    """One policy step on host cells: the twin of the device ``POLICY`` op."""
     fin, all_ = int(finished[0]), int(total[0])
-    live, newly = all_ - fin, fin - int(cells[_FIN_AT])
+    fin_at = int(cells[_FIN_AT])
+    live, newly = all_ - fin, fin - fin_at
     done = int(cells[_DONE]) + int(word[0])
-    cells[_MAPPED] += all_ - int(cells[_FIN_AT])
+    cells[_MAPPED] = int(cells[_MAPPED]) + all_ - fin_at
     cells[_FIN_AT] = fin
     cells[_DONE] = done
     k_next = _next_k(int(cells[_K]), newly, live, k_max, k_min,
@@ -496,17 +418,14 @@ def _host_policy(cells, finished, total, word, go, hist, k_max: int,
     if g:
         w = min(k_next, left)
         word[0] = w
-        hist[w] += 1
+        hist[w] = int(hist[w]) + 1
 
 
-def _policy_kernel(k_max: int, k_min: int = AUTO_K_MIN):
-    """The device policy as one single-thread cupy kernel."""
-    import cupy
-
-    src = _POLICY_SRC % {"kmin": k_min, "kmax": k_max, "k": _K,
-                         "fin_at": _FIN_AT, "done": _DONE, "cap": _CAP,
-                         "r": _R, "mapped": _MAPPED, "scale": RATE_SCALE, "band": _BAND_SRC}
-    return cupy.RawKernel(src, "eagle_until_done_policy")
+def _policy_op(device: int, cells_args, k_max: int, k_min: int = AUTO_K_MIN) -> None:
+    """One policy step as the built-in ``POLICY`` kernel node on the current stream.
+    ``cells_args`` is ``(finished, total, cells, word, go, hist)``, all device arrays."""
+    _core.cell_op(_core.CELL_POLICY, _stream.current(), 1, [a.ptr for a in cells_args],
+                  [k_min, k_max, _K, _FIN_AT, _DONE, _CAP, _R, _MAPPED, RATE_SCALE], device)
 
 
 def _run_host(runner) -> None:
@@ -531,10 +450,11 @@ def _select_step(plans, planes) -> list:
 
 
 def _is_foreign(value) -> bool:
-    """A DLPack producer that is neither numpy nor cupy (jax, torch, ...)."""
+    """A DLPack producer that is not eagle's own array, numpy or cupy (jax, torch, ...): eagle's own arrays
+    are the planes themselves, never imported or copied."""
     from .interop import _root_module
 
-    return hasattr(value, "__dlpack__") and _root_module(value) not in ("numpy", "cupy")
+    return hasattr(value, "__dlpack__") and _root_module(value) not in ("eagle", "numpy", "cupy")
 
 
 def _import_foreign(planes) -> tuple:
@@ -559,9 +479,6 @@ def _native_planes(planes, foreign, specs, device) -> tuple:
                if role in OUTPUT_ROLES or role == "terminated"}
     if not foreign:
         return planes, written
-    import numpy as np
-
-    from .interop import to_cupy
     out = dict(planes)
     for nm in foreign:
         view = planes[nm]
@@ -570,7 +487,7 @@ def _native_planes(planes, foreign, specs, device) -> tuple:
                 f"eagle.until_done: {nm!r} is a {'device' if view.device[0] == 2 else 'host'} "
                 f"array but this plan runs on the {'device' if device else 'host'}; move it "
                 "(all planes of one run live in one place)")
-        arr = to_cupy(view) if device else np.from_dlpack(view)
+        arr = arrays.asarray(view)
         out[nm] = arr.copy() if nm in written else arr
     return out, written
 
@@ -634,9 +551,9 @@ class Runner:
     __slots__ = ("_busy", "step", "loop", "pipeline", "active", "finished", "terminated",
                  "n", "steps_per_launch", "every", "launches_per_compaction",
                  "fused_steps", "auto", "host_policy", "host_threads",
-                 "_device", "_xp", "_total", "_max_steps", "_k_max", "_k_min", "_k0",
+                 "_device", "_dev", "_counter", "_total", "_max_steps", "_k_max", "_k_min", "_k0",
                  "_cells", "_go", "_hist",
-                 "_compactions", "_bump", "_build_s",
+                 "_compactions", "_build_s",
                  "_fast_mode", "_fast_counter", "_fast_grid", "_fast_block", "_fast_util",
                  "_fast_util_on", "_fast_exact", "_fast_views",
                  "_fast_counts", "_fast_state", "_fast_probe", "_fast_model", "_fast_key",
@@ -711,7 +628,7 @@ class Runner:
                 "eagle.until_done: the plans of one step run in one place; got "
                 f"{sorted(structures)}")
         device = _STRUCTURES[structures.pop()]
-        xp = _array_module(device)
+        dev = _device_token(device, planes)
         for i in finishers:
             _require_counter_slot(specs[i], names[i])
         from .diff.events import check_events
@@ -781,15 +698,16 @@ class Runner:
         if reorder is not None:
             _refuse_moving_node_planes(hooks, specs, planes)
         if mask_name not in planes:
-            planes[mask_name] = _alloc.zeros(xp, n, dtype=xp.bool_)
+            planes[mask_name] = _alloc.zeros(dev, n, dtype=arrays.bool_)
         mask = planes[mask_name]
         self._work.setdefault(mask_name, mask)
         nodes = _record_nodes(steps, specs[0], planes) if hooks and record else ()
         # the finished count is word [2] of the fast entries' counter block
         # (see _build_fast): one memset zeroes it with the other counters and
         # one read returns it with them
-        finished = _alloc.zeros(xp, 6, dtype=xp.uint32)[2:3]
-        word = _alloc.zeros(xp, 1, dtype=xp.int64) if auto else None
+        counter = _alloc.zeros(dev, 6, dtype=arrays.uint32)
+        finished = counter[2:3]
+        word = _alloc.zeros(dev, 1, dtype=arrays.int64) if auto else None
         active = None
         if compacting:
             active = ActiveSet(mask, reorder=reorder, group=_lane_bind.space_of(plans[0].plugin).group,
@@ -806,9 +724,9 @@ class Runner:
 
         extras = {}
         if record or refine:    # the run's own per-sample planes move with a reorder
-            from .diff._run import record_planes
+            from .diff._run import array_module, record_planes
 
-            extras = record_planes(plans[0], max_steps, window, device, xp, n, planes,
+            extras = record_planes(plans[0], max_steps, window, device, array_module(device), n, planes,
                                    events=events)
             if active is not None and active.theta is not None:
                 active.own(*(v for nm, v in extras.items() if nm != "tape" and v.shape))
@@ -826,7 +744,7 @@ class Runner:
                 bind[FINISHED_PLANE] = finished
             if ("lookup", FUSED_STEPS_PLANE) in spec:
                 bind[FUSED_STEPS_PLANE] = (word if auto
-                                           else _alloc.ones(xp, 1, dtype=xp.int64))
+                                           else _alloc.ones(dev, 1, dtype=arrays.int64))
             if active is not None:
                 bind.update(active.planes())
             bound.append(plan_i.bind(**bind))
@@ -856,11 +774,11 @@ class Runner:
         self._rate = AUTO_RATE0
         self._cells = self._go = self._hist = None
         self._device = device
-        self._xp = xp
-        self._total = xp.asarray([self.n], dtype=xp.uint32)
-        self._compactions = _alloc.zeros(xp, 1, dtype=xp.uint32)
+        self._dev = dev
+        self._counter = counter
+        self._total = _alloc.asarray(dev, [self.n], arrays.uint32)
+        self._compactions = _alloc.zeros(dev, 1, dtype=arrays.uint32)
         self._build_s = 0.0
-        self._bump = None
         self._fast_mode = None
         self._fast_state = _NO_PICK
         self._fast_model = self._fast_key = None
@@ -877,10 +795,6 @@ class Runner:
         self._fast_counts = False
         self._fast_views = None
         self._fast_util_on = False
-        if device:
-            self._bump = _bump_kernel()
-            self._bump(_alloc.zeros(xp, 1, dtype=xp.uint32), size=1)  # compile before capture
-
         self._recorder = None
         if record or refine:
             from .diff._run import RunRecorder
@@ -929,7 +843,7 @@ class Runner:
         compaction's rebuild/copy/policy nodes are pure cost, so
         this skips the compaction body entirely and pins the band's floor at
         its own ceiling (``k_min = k_max``), which makes both arms of
-        :data:`_BAND_SRC`/:func:`_next_k` a no-op once K reaches ``k_max`` --
+        :func:`_next_k` a no-op once K reaches ``k_max`` --
         every launch then takes as many steps as the kernel's own clamp
         allows, seeded there from the first launch via ``_k0``. A batch
         ABOVE capacity keeps today's band and compaction-every-launch cadence
@@ -1005,11 +919,11 @@ class Runner:
         if self.active is not None:
             self._materialize_map()
             self.active.prepare_compaction()
-        xp = self._xp
+        dev = self._dev
         self._rate = self._band_rate()
-        self._cells = _alloc.zeros(xp, 6, dtype=xp.int64)
-        self._go = _alloc.zeros(xp, 1, dtype=xp.uint32)
-        self._hist = _alloc.zeros(xp, self._k_max + 1, dtype=xp.int64)
+        self._cells = _alloc.zeros(dev, 6, dtype=arrays.int64)
+        self._go = _alloc.zeros(dev, 1, dtype=arrays.uint32)
+        self._hist = _alloc.zeros(dev, self._k_max + 1, dtype=arrays.int64)
         cells, go, hist, word = self._cells, self._go, self._hist, self.fused_steps
         finished, total, k_max = self.finished, self._total, self._k_max
 
@@ -1026,17 +940,10 @@ class Runner:
         k_min = self._k_min
 
         if self._device:
-            kernel = _policy_kernel(k_max, k_min)
-            args = (finished, total, cells, word, go, hist)
-            # compile (and check) before any capture, on scratch cells
-            kernel((1,), (1,), (_alloc.zeros(xp, 1, dtype=xp.uint32), total,
-                                _alloc.zeros(xp, 6, dtype=xp.int64),
-                                _alloc.zeros(xp, 1, dtype=xp.int64),
-                                _alloc.zeros(xp, 1, dtype=xp.uint32),
-                                _alloc.zeros(xp, k_max + 1, dtype=xp.int64)))
+            args, ordinal = (finished, total, cells, word, go, hist), int(dev.split(":")[1])
 
             def policy():
-                kernel((1,), (1,), args)
+                _policy_op(ordinal, args, k_max, k_min)
         else:
             def policy():
                 _host_policy(cells, finished, total, word, go, hist, k_max, k_min)
@@ -1107,11 +1014,12 @@ class Runner:
         self._fast_fit = None
         self._fast_chunk = self._chunk_for(1e9)
         # the timing events, allocated once: only a probing runner times runs
-        self._fast_ev = (self._xp.cuda.Event(), self._xp.cuda.Event()) if probe else None
+        self._fast_ev = (tuple(_stream.Event(int(self._dev.split(":")[1]), timed=True) for _ in range(2))
+                         if probe else None)
         self.loop = None  # no WHILE-graph body exists in this mode
         self.fused_steps[0] = self._max_steps
         self._fast_util_on = bool(slot_fill_override) and (mode == "persist" or probe)
-        xp = self._xp
+        dev = self._dev
         # [0] the persist entry's lane-stealing counter, [1] the run's exact
         # step count (both entries max each sample's steps into it): ONE
         # memset zeroes both per run. A plain fused_one with no range entry
@@ -1119,9 +1027,9 @@ class Runner:
         # uint32 words: [0] next, [1] steps, [2] finished, [3] pad, [4:6] the
         # uint64 sum of every lane's executed steps (a probing runner's
         # step-fill report): one memset zeroes all, one read returns them
-        self._fast_counter = self.finished.base
+        self._fast_counter = self._counter
         self._fast_views = (self._fast_counter[0:1], self._fast_counter[1:2],
-                            self._fast_counter[4:6].view(xp.uint64) if probe else None)
+                            self._fast_counter[4:6].view(arrays.uint64) if probe else None)
         self._fast_exact = (mode == "persist"
                             or self.step.range_entry() is not None)
         # the launch argument blocks, packed once for the entries this runner
@@ -1135,7 +1043,7 @@ class Runner:
                 prep["range_bare"] = self.step.prepare_range(steps=steps_cell)
         if mode != "persist" and not probe:
             return
-        self._fast_util = (_alloc.zeros(xp, 2, dtype=xp.uint64)
+        self._fast_util = (_alloc.zeros(dev, 2, dtype=arrays.uint64)
                            if self._fast_util_on else None)
         self._size_persist()
 
@@ -1393,8 +1301,7 @@ class Runner:
         OTHER sync either.
 
         ``finished`` is re-synced to the mask EVERY call, fresh
-        (:func:`_mask_count`, eagle's own kernel -- never cupy's
-        ``count_nonzero``, see there): the public contract (:meth:`run`'s
+        (:func:`_mask_count`, eagle's own built-in kernel): the public contract (:meth:`run`'s
         own docstring) is that a run continues from the CURRENT state, so a
         caller who edits ``terminated`` between calls without
         :meth:`reset` must see that edit reflected in this call's report
@@ -1422,15 +1329,14 @@ class Runner:
         with its own ``.get()`` only when it was asked for at bind
         (:meth:`_build_fast`) -- an extra sync, opted into, never the
         default."""
-        xp = self._xp
+        dev = self._dev
         slot_fill = None
         # ONE device word block per run: [0] the persist entry's
         # lane-stealing counter, [1] the run's exact step count, [2] the
         # finished count -- zeroed by one async memset, read back by ONE
         # transfer.
         counter = self._fast_counter
-        rt = xp.cuda.runtime
-        stream = xp.cuda.get_current_stream().ptr
+        stream = _stream.current()
         mode, probing = self._pick_entry()
         # the range/persist entry counts the samples finished on entry
         # itself, as the step counts those finishing in the run: the memset
@@ -1444,7 +1350,7 @@ class Runner:
         timed = probed and self._carries_timing(probing)
         if timed:
             t0, t1 = self._fast_ev
-            t0.record()
+            t0.record(stream)
         # the step sum: on every run that decides, and on every
         # STEP_FILL_EVERY-th settled one (a batch whose spread changed under
         # the same readback is seen within that many runs); the other runs
@@ -1452,11 +1358,11 @@ class Runner:
         summed = probed and (timed or state.runs % STEP_FILL_EVERY == 0)
         bare = "" if summed or not probed else "_bare"
         if self._fast_exact:
-            _alloc.zero(self._xp, counter, stream, 24 if summed else 12)
+            _alloc.zero(dev, counter, stream, 24 if summed else 12)
         elif counts:
-            _alloc.zero(self._xp, self.finished, stream)
+            _alloc.zero(dev, self.finished, stream)
         if not counts:
-            _mask_count(xp, self._device, self.finished, self.terminated)
+            _mask_count(dev, self.finished, self.terminated)
         next_cell, steps_cell, stepsum = self._fast_views
         if not summed:
             stepsum = None
@@ -1476,7 +1382,7 @@ class Runner:
             util = None
             key = "persist"
             if self._fast_util_on:
-                self._fast_util[...] = 0
+                self._fast_util.fill(0)
                 util = self._fast_util
                 key = "persist_util"
             self.step.launch_persist(grid=self._fast_grid,
@@ -1485,9 +1391,9 @@ class Runner:
                                      stepsum=stepsum, chunk=self._fast_chunk,
                                      prepared=self._fast_prep[key + bare])
         if timed:
-            t1.record()
+            t1.record(stream)
         cells = [(counter, i) for i in (range(1, 6) if summed else (1, 2))]
-        words = _packed_read(xp, self._device, cells)
+        words = _packed_read(dev, cells)
         steps_read, finished = words[0], words[1]
         if probed:
             # the step fill f = (sum of the lanes' steps) / (n * longest lane's steps)
@@ -1495,12 +1401,10 @@ class Runner:
             if summed:
                 total = words[3] | (words[4] << 32)
                 f = total / (self.n * steps_read) if steps_read > 0 else 1.0
-            self._note_run(mode, xp.cuda.get_elapsed_time(t0, t1) if timed else None,
+            self._note_run(mode, t1.elapsed_ms(t0) if timed else None,
                            steps_read, finished, f)
         if self._fast_util_on and mode == "persist":
-            steps_run, slots = (
-                self._fast_util.get() if self._device else self._fast_util
-            )
+            steps_run, slots = self._fast_util.tolist()
             if slots > 0:
                 slot_fill = float(steps_run) / float(slots)
         done = finished == self.n
@@ -1519,7 +1423,7 @@ class Runner:
         ``go``; ``None`` for a fixed artifact."""
         if not self.auto:
             return None
-        cells = self._cells.get() if self._device else self._cells
+        cells = self._cells.tolist()
         return {"k": int(cells[_K]), "finished_at_launch": int(cells[_FIN_AT]),
                 "steps_done": int(cells[_DONE]), "max_steps": int(cells[_CAP]),
                 "go": _host_scalar(self._go, 0)}
@@ -1536,7 +1440,7 @@ class Runner:
         persist = self._fast_block is not None
         k = None
         if self.auto and self._cells is not None:
-            k = int((self._cells.get() if self._device else self._cells)[_K])
+            k = int(self._cells[_K])
         return {"block": self._fast_block if persist else None,
                 "grid": self._fast_grid if persist else None,
                 "chunk": self._fast_chunk, "fill": self._fast_fill, "rate": self._rate, "k": k}
@@ -1544,12 +1448,10 @@ class Runner:
     def _seed(self) -> None:
         """Seed the automatic loop's cells from the host before a run (the
         counter is already re-synchronised to the mask)."""
-        xp = self._xp
         fin = _host_scalar(self.finished, 0)
         first = min(self._k0, self._max_steps)
         go = fin != self.n and self._max_steps > 0
-        self._cells[...] = xp.asarray(
-            [self._k0, fin, 0, self._max_steps, round(self._rate * RATE_SCALE), 0], dtype=xp.int64)
+        self._cells[...] = [self._k0, fin, 0, self._max_steps, round(self._rate * RATE_SCALE), 0]
         self.fused_steps[0] = first
         self._go[0] = 1 if go else 0
         self._hist.fill(0)
@@ -1560,15 +1462,15 @@ class Runner:
         """The compaction tail, also counting each compaction it runs."""
         cell = self._compactions
         if self._device:
-            bump = self._bump
+            dev = self._dev
 
             def compact():
                 tail.step()
-                bump(cell, size=1)
+                _bump(dev, cell)
         else:
             def compact():
                 tail.step()
-                cell[0] += 1
+                cell[0] = int(cell[0]) + 1
         return Skippable(compact, tail.guard)
 
     def __repr__(self) -> str:
@@ -1611,14 +1513,14 @@ class Runner:
             return self._recorder.run()
         if self._fast_mode is not None:
             return self._run_fast()
-        xp = self._xp
-        _mask_count(xp, self._device, self.finished, self.terminated)
+        dev = self._dev
+        _mask_count(dev, self.finished, self.terminated)
         pre_cells = []
         if self.active is not None:
             pre_cells.append((self._compactions, 0))
             if self._reorders():
                 pre_cells.append((self.active.reorders, 0))
-        pre = _packed_read(xp, self._device, pre_cells) if pre_cells else ()
+        pre = _packed_read(dev, pre_cells) if pre_cells else ()
         compactions0 = pre[0] if pre_cells else 0
         reorders0 = pre[1] if len(pre_cells) > 1 else 0
         if self.auto:
@@ -1629,7 +1531,7 @@ class Runner:
 
                 t0 = time.perf_counter()
                 self.pipeline = GraphPipeline().add(self.loop).build()
-                xp.cuda.Device().synchronize()
+                _core.device_synchronize()
                 self._build_s = time.perf_counter() - t0
             self.pipeline.launch()
         else:
@@ -1639,7 +1541,7 @@ class Runner:
             post_cells.append((self._compactions, 0))
             if self._reorders():
                 post_cells.append((self.active.reorders, 0))
-        launches, finished, *rest = _packed_read(xp, self._device, post_cells)
+        launches, finished, *rest = _packed_read(dev, post_cells)
         reorders = 0
         compactions_post = 0
         if self.active is not None:
@@ -1651,9 +1553,7 @@ class Runner:
         if self.auto:
             if self._mapped_live and launches:
                 mapped = _host_scalar(self._cells, _MAPPED) or mapped
-            hist = self._hist.get() if self._device else self._hist
-            nz = hist.nonzero()[0]
-            by_k = dict(zip(nz.tolist(), hist[nz].tolist()))
+            by_k = {k: v for k, v in enumerate(self._hist.tolist()) if v}
             steps = self.policy["steps_done"]
             # exact when nothing launched, the cap stopped an unfinished
             # sample, or the last launch took one step
@@ -1722,11 +1622,12 @@ class Runner:
         """Clear the mask/counter/active set: the next :meth:`run` starts the batch over."""
         if self._reorders():
             self.active.restore()
-        if self._device and self.terminated.flags.c_contiguous:
+        mask = _view(self.terminated)
+        if self._device and (not mask.size or mask.is_contiguous):
             # two async memsets on the current stream, not two fill kernels
-            stream = self._xp.cuda.get_current_stream().ptr
-            _alloc.zero(self._xp, self.terminated, stream)
-            _alloc.zero(self._xp, self.finished, stream)
+            stream = _stream.current()
+            _alloc.zero(self._dev, mask, stream)
+            _alloc.zero(self._dev, self.finished, stream)
         else:
             self.terminated.fill(False)
             self.finished.fill(0)

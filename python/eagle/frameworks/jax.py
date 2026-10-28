@@ -317,7 +317,8 @@ def node(fn, *, reads, writes, name=None):
     For a JAX call that reads values back on the host use
     ``opaque(fn, eager=True)``."""
     from ..graph import _on_device, opaque
-    from ..interop import import_buffer, to_cupy
+    from ..interop import import_buffer
+    from .cupy import to_cupy
 
     reads, writes = dict(reads), dict(writes)
     ordinals = {a.device.id for a in (*reads.values(), *writes.values())
@@ -882,7 +883,7 @@ def preload(cache_dir, *, platform=None):
                 loaded = registry[record["kernel"]]
                 _KEEP.append((registry, loaded))
                 _install(record["digest"], fields, policy=record["policy"], platform="cuda",
-                         entry=seam["run"], ordinal=ordinal, function=loaded.fn.kernel.ptr, seam=seam)
+                         entry=seam["run"], ordinal=ordinal, function=int(loaded.fn), seam=seam)
             done.append(record["digest"])
     return done
 
@@ -1006,3 +1007,8 @@ def _has_gpu():
 
 
 _register_targets()
+
+
+def from_eagle(a):
+    """The :class:`eagle.Array` ``a`` as a jax array (DLPack)."""
+    return jax.dlpack.from_dlpack(a)

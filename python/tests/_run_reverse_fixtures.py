@@ -65,7 +65,7 @@ def xp_for(backend):
 
 
 def host(a):
-    return a.get() if hasattr(a, "get") else np.asarray(a)
+    return np.asarray(a.get() if hasattr(a, "get") else a)
 
 
 def inputs(xp, n=N, dtype="float64"):

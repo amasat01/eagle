@@ -59,10 +59,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-import numpy as np
 
+from . import _stream
 from ._conditional import SkipGuard, skippable
-from .interop import _root_module
+from .interop import to_array
 from .pipeline import GraphPipeline, member_device
 
 #: The four composition mechanisms :class:`GraphComposer` dispatches on.
@@ -90,27 +90,33 @@ class _Member:
     pre_launch: Any = None
 
 
-def _validate_member_flags(flags) -> None:
+def _validate_member_flags(flags):
     """``mode="conditional"``'s intent-guard contract: a uint32 device
-    array, since ``SkipGuard._device_ptrs()`` reads ``arr.data.ptr`` and
-    capture itself is cupy-only. Both rejects are named here rather than
-    left to surface as a bare ``AttributeError`` deep inside the capture
-    weave. The other three modes are host-paced and never call this."""
-    module = _root_module(flags)
-    if module != "cupy":
+    array (any array :func:`eagle.to_array` takes), since
+    ``SkipGuard._device_ptrs()`` reads its device pointer. Both rejects are
+    named here rather than left to surface as a bare ``AttributeError`` deep
+    inside the capture weave. The other three modes are host-paced and never
+    call this. Returns the flags as an :class:`eagle.Array` over the same memory."""
+    try:
+        view = to_array(flags)
+    except (TypeError, ValueError, BufferError):
+        view = None
+    if view is None or not view.device.startswith("cuda"):
         raise TypeError(
-            "GraphComposer: member_flags must be a cupy (device) uint32 "
-            f"array — got a {module!r}-module array ({type(flags).__name__}); "
+            "GraphComposer: member_flags must be a device uint32 "
+            f"array — got a {type(flags).__name__}; "
             "this composer's single shared capture needs a device pointer "
             "per lane (eagle.SkipGuard._device_ptrs() has no host-array "
-            "path) — upload with cupy.asarray(...) first"
+            "path) — upload it to the device first"
         )
-    if flags.dtype != np.uint32:
+    flags = view
+    if flags.dtype != "uint32":
         raise TypeError(
             f"GraphComposer: member_flags dtype must be uint32; got "
             f"{flags.dtype} (the intent-guard contract: "
             "eagle.SkipGuard.intent(...) reads one uint32 word per lane)"
         )
+    return flags
 
 
 def _normalize_pattern(pattern, n: int) -> list:
@@ -156,15 +162,15 @@ class GraphComposer:
                 f"{mode!r}"
             )
         if mode == "conditional":
-            _validate_member_flags(member_flags)
+            member_flags = _validate_member_flags(member_flags)
         self._mode = mode
         #: The CUDA device this composer runs on (``-1``: the current one at construction).
         self._device = device
         if device < 0:
             try:
-                import cupy
+                from .launch import _current_device_ordinal
 
-                self._device = int(cupy.cuda.runtime.getDevice())
+                self._device = _current_device_ordinal()
             except Exception:
                 self._device = None
         self._member_flags = member_flags
@@ -172,6 +178,7 @@ class GraphComposer:
         self._registered_ids: set[int] = set()
         self._names: set[Any] = set()
         self._pipe = None
+        self._seeds: list = []      # the two re-recorded ordering events of a shared enqueue
         self._built = False
         #: Host-known active-member mask, index-aligned with
         #: ``self._members`` -- authoritative for every mode except
@@ -548,16 +555,7 @@ class GraphComposer:
         device buffers until the second pass returns, and a
         ``pre_launch`` hook must not touch a different member's buffers.
         """
-        import cupy as cp
-
-        current = cp.cuda.get_current_stream()
-        seed_event = cp.cuda.Event()
-        seed_event.record(current)
-        seed_events = [seed_event]
-        if current.ptr != cp.cuda.Stream.null.ptr:
-            legacy_event = cp.cuda.Event()
-            legacy_event.record(cp.cuda.Stream.null)
-            seed_events.append(legacy_event)
+        seed_events = _stream.seed_events(self._seeds)
 
         for member in members:
             member.obj.enqueue(

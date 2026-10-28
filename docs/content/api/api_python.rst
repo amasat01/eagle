@@ -108,6 +108,9 @@ and the GPU/CPU device-dispatch internals.
 .. automodule:: eagle.cuda
    :members:
 
+.. automodule:: eagle.fft
+   :members: c2c, r2c, c2r, vjp, jvp
+
 The low-level launch stack
 --------------------------
 

@@ -760,5 +760,150 @@ TEST(ExecContractTest, EmptyPartitionRunsNothing)
     EXPECT_DOUBLE_EQ(t[0], -7.0);  // untouched
 }
 
+// ---------------------------------------------------------------------------
+// A kernel with a THREAD BOX (`launch.box`): the registry reads the box from the sidecar and
+// counts a partition in threads. T = 4, stride = 8, so a span is 32 lanes.
+// ---------------------------------------------------------------------------
+namespace {
+constexpr std::int64_t kBoxSpan = 32;
+
+Sidecar boxedSidecar(const std::string& box)
+{
+    const std::string json = R"({
+  "kernel": "exec_boxed",
+  "aether_abi": "aether-abi/2",
+  "schema_version": 2,
+  "pattern": "pure",
+  "scalar_type": "float64",
+  "launch": {"block": 128)" + box + R"(},
+  "arg_spec": [["mutable","y"],["nsamples","nsamples"]]
+})";
+    return parse_sidecar(writeTmp("ec_exec_boxed_sidecar.json", json));
+}
+
+const char* kBox = R"(, "box": {"axis": 0, "T": 4, "stride": 8})";
+
+// Run each of `parts` (in lanes) through `how` on a fresh y of N lanes.
+//   0: PluginRegistry::run_partition   1: HostTeam on thread_partition()
+std::vector<double> runBoxed(const std::vector<ex::Partition>& parts, std::int64_t N, int how)
+{
+    std::vector<double> y(std::size_t(N), 0.0);
+    eagle::cpu::PluginRegistry reg;
+    reg.add_plugin(boxedSidecar(kBox), HOST_PLUGIN_EXECV2_SO);
+    reg.bind_handle("y", y.data());
+    for (const ex::Partition& p : parts) {
+        if (how == 0) {
+            reg.run_partition(p);
+        } else {
+            auto packed = reg.pack(0, N);
+            ex::HostTeam::run(reg.entry_v2(0), packed.params, reg.thread_partition(0, p), 0);
+        }
+    }
+    return y;
+}
+
+// Each part alone writes exactly its own lanes once; all of them together write every lane once.
+void expectOwnership(const std::vector<ex::Partition>& parts, std::int64_t N, int how)
+{
+    for (const ex::Partition& p : parts) {
+        const auto y = runBoxed({ p }, N, how);
+        for (std::int64_t l = 0; l < N; ++l)
+            ASSERT_DOUBLE_EQ(y[std::size_t(l)], (l >= p.base && l < p.base + p.count) ? 1.0 : 0.0)
+                << "lane " << l << " of partition [" << p.base << ", " << p.base + p.count << ")";
+    }
+    const auto all = runBoxed(parts, N, how);
+    for (std::int64_t l = 0; l < N; ++l)
+        ASSERT_DOUBLE_EQ(all[std::size_t(l)], 1.0) << "lane " << l << " of the whole set";
+}
+}  // namespace
+
+TEST(ExecContractTest, HostBoxedSidecarCarriesItsBox)
+{
+    const Sidecar sc = boxedSidecar(kBox);
+    EXPECT_TRUE(sc.box.present);
+    EXPECT_EQ(sc.box.axis, 0);
+    EXPECT_EQ(sc.box.T, 4);
+    EXPECT_EQ(sc.box.stride, 8);
+    EXPECT_FALSE(v2Sidecar("exec_local", kLocalArgs).box.present);
+    EXPECT_THROW(validate_sidecar(boxedSidecar(R"(, "box": {"axis": 0, "T": 1, "stride": 8})"), "x"),
+                 std::runtime_error);
+    EXPECT_THROW(validate_sidecar(boxedSidecar(R"(, "box": {"axis": 0, "T": 4})"), "x"),
+                 std::runtime_error);
+}
+
+TEST(ExecContractTest, HostBoxedWholeAndAlignedPartitionsOwnTheirLanes)
+{
+    for (int how : { 0, 1 }) {
+        for (std::int64_t rows : { 31, 32, 64 }) {          // 31 rows: the last span has 3 of T = 4
+            const std::int64_t N = rows * 8;
+            expectOwnership({ ex::Partition::whole(N) }, N, how);                        // whole
+            const std::int64_t half = N / kBoxSpan / 2 * kBoxSpan;
+            expectOwnership({ ex::Partition{ 0, half, N }, ex::Partition{ half, N - half, N } }, N, how);
+            const std::int64_t q = std::max<std::int64_t>(1, N / kBoxSpan / 4) * kBoxSpan;   // 4 parts
+            std::vector<ex::Partition> four;
+            for (std::int64_t b = 0; b < N; b += q)
+                four.push_back(ex::Partition{ b, std::min(q, N - b), N });
+            expectOwnership(four, N, how);
+        }
+    }
+}
+
+TEST(ExecContractTest, HostBoxedPartialRangeRunsOnlyItsSpans)
+{
+    const std::int64_t N = 31 * 8;
+    for (int how : { 0, 1 }) {
+        const ex::Partition mid{ 2 * kBoxSpan, 3 * kBoxSpan, N };
+        const auto y = runBoxed({ mid }, N, how);
+        for (std::int64_t l = 0; l < N; ++l)
+            ASSERT_DOUBLE_EQ(y[std::size_t(l)], (l >= mid.base && l < mid.base + mid.count) ? 1.0 : 0.0)
+                << "lane " << l;
+        // a range that ends at the last lane may end inside a span
+        const ex::Partition tail{ 4 * kBoxSpan, N - 4 * kBoxSpan, N };
+        const auto z = runBoxed({ tail }, N, how);
+        for (std::int64_t l = 0; l < N; ++l)
+            ASSERT_DOUBLE_EQ(z[std::size_t(l)], l >= tail.base ? 1.0 : 0.0) << "lane " << l;
+    }
+}
+
+TEST(ExecContractTest, HostBoxedPartitionOffASpanIsRefusedByName)
+{
+    const std::int64_t N = 31 * 8;
+    for (int how : { 0, 1 }) {
+        for (const ex::Partition p : { ex::Partition{ 0, 100, N }, ex::Partition{ 10, 64, N },
+                                       ex::Partition{ kBoxSpan, 5, N } }) {
+            try {
+                runBoxed({ p }, N, how);
+                FAIL() << "expected the partition [" << p.base << ", " << p.base + p.count << ") to be refused";
+            } catch (const std::runtime_error& e) {
+                const std::string what = e.what();
+                EXPECT_NE(what.find("exec_boxed"), std::string::npos) << what;
+                EXPECT_NE(what.find("thread box"), std::string::npos) << what;
+                EXPECT_NE(what.find("32"), std::string::npos) << what;
+            }
+        }
+    }
+}
+
+TEST(ExecContractTest, HostBoxedRunWithFewerRowsThanTIsWholeOnly)
+{
+    const std::int64_t N = 3 * 8;     // 3 rows < T
+    for (int how : { 0, 1 }) {
+        expectOwnership({ ex::Partition::whole(N) }, N, how);
+        EXPECT_THROW(runBoxed({ ex::Partition{ 0, 8, N } }, N, how), std::runtime_error);
+    }
+}
+
+TEST(ExecContractTest, HostBoxFreeKernelPartitionsAreUnchanged)
+{
+    // No box: a partition is the lane range itself (the whole and split rows above pin the values).
+    eagle::cpu::PluginRegistry reg;
+    reg.add_plugin(v2Sidecar("exec_local", kLocalArgs), HOST_PLUGIN_EXECV2_SO);
+    const ex::Partition p{ 10, 37, 100 };
+    const ex::Partition t = reg.thread_partition(0, p);
+    EXPECT_EQ(t.base, 10);
+    EXPECT_EQ(t.count, 37);
+    EXPECT_EQ(t.nSamples, 100);
+}
+
 }  // namespace ExecContractTest
 }  // namespace eagle_tests

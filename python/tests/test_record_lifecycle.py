@@ -40,8 +40,8 @@ def test_record_defaults():
     assert rec.window == default_window(MAX_STEPS) == 20
     assert rec.generation == 1 and not rec.held
     assert rec.steps.dtype == np.int64 and rec.steps.shape == (N,)
-    assert rec.steps.max() == res.steps
-    windows = -(-int(rec.steps.max()) // rec.window)
+    assert np.asarray(rec.steps).max() == res.steps
+    windows = -(-int(np.asarray(rec.steps).max()) // rec.window)
     assert rec.nbytes == windows * N * (4 * 8 + 1)    # x, v, t, applied_steps, mask
     assert _sim(window="full").run().record.window == MAX_STEPS
 

@@ -25,7 +25,7 @@ def test_detect_numpy_list_and_scalar():
 
 def test_public_helpers_exported():
     # eagle surfaces the import helper and the two probes on its public API.
-    assert eagle.to_cupy is interop.to_cupy
+    assert not hasattr(eagle, "to_cupy") and not hasattr(eagle, "np_dtype")
     assert eagle.detect is interop.detect
     assert eagle.origin_adapter is interop.origin_adapter
 

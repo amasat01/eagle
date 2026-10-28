@@ -22,16 +22,16 @@ from collections.abc import Mapping
 from contextlib import contextmanager
 from typing import NamedTuple
 
-
-from .. import _alloc
-from .. import _core, _counters
+from .. import _alloc, _core, _counters, arrays
 from .._busy import BusyGuard
 from .._conditional import skippable
 from .._graph_kinds import OWN_CODE_KINDS
 from ..graph import _DERIVED_DOOR, Graph, Node, get_node_kind, opaque
 from ..roles import OUTPUT_ROLES
 from ..sidecar import derived_tag, refuse_prior_read
-from ._record import Record, xp_of
+from .._layout import _view
+from ._record import Record
+from ._run import _take_columns
 
 __all__ = ["Gradients", "Report", "Reverse", "broadcast_adjoint", "reverse"]
 
@@ -46,16 +46,15 @@ def _is_float(arr) -> bool:
 def broadcast_adjoint(cotangent, n: int, *, out=None):
     """The adjoint of a sum over ``n`` samples: every sample receives the
     cotangent of the sum. ``cotangent`` is one value (a one-element numpy or
-    cupy array); the result is ``n`` values on the same backend, written into
-    ``out`` when given. Safe inside a captured graph."""
-    xp = xp_of(cotangent)
-    cot = cotangent.reshape(-1)
+    cupy array); the result is an :class:`eagle.Array` of ``n`` values on the same device, written
+    into ``out`` when given. Safe inside a captured graph."""
+    cot = _view(cotangent)
     if cot.size != 1:
         raise ValueError("eagle.diff.broadcast_adjoint: the cotangent of a sum is one "
-                         f"value, got shape {tuple(cotangent.shape)}")
+                         f"value, got shape {tuple(cot.shape)}")
     if out is None:
-        out = _alloc.empty(xp, n, dtype=cot.dtype)
-    out[...] = cot
+        out = _alloc.empty(cot.device, n, dtype=cot.dtype)
+    arrays.copyto(_view(out), arrays.view_as(cot, (n,), (0,)))      # a zero stride repeats the one value
     return out
 
 
@@ -138,7 +137,7 @@ class ReverseCtx:
 
     @staticmethod
     def empty_like(arr):
-        return xp_of(arr).empty_like(arr)
+        return arrays.empty_like(_view(arr))
 
     @contextmanager
     def gated(self, guard):
@@ -190,7 +189,7 @@ def _vjp_from_auto(bound):
     from .._plan_deploy import _hawk_plugins
 
     derived = Kernel(f"{kernel.name}_vjp", vjp(kernel, primal_unit=unit))
-    targets = ("cuda",) if bound._cupy is not None else ("host",)
+    targets = ("cuda",) if bound._device is not None else ("host",)
     (plugin._vjp,) = _hawk_plugins([derived], targets, cache_dir, plugin.scalar_type)
     return plugin._vjp
 
@@ -492,10 +491,10 @@ class _Program:
         plan = _core.diff_transpose(rev._desc, rev._rows, sorted(seeded))
         planes, accesses = rev._planes, rev._accesses
         backend = rev._graph.backend
-        self.xp = xp = xp_of(next(iter(tape.arrays.values())))
+        self.xp = xp = next(iter(tape.arrays.values())).device
         self.perm = tape.perm
         n = None if tape.perm is None else int(tape.perm.shape[0])
-        self.inv = None if n is None else _alloc.empty(xp, n, dtype=xp.int32)
+        self.inv = None if n is None else _alloc.empty(xp, n, dtype=arrays.int32)
         self.seed = {k: _alloc.empty_like(xp, tape.arrays[k]) for k in seeded}
         zeros = {}
 
@@ -525,12 +524,12 @@ class _Program:
                 if not _is_float(tape.arrays[plane]):
                     continue
                 parts = [source(s, plane) for s in srcs]
-                arrays = [a for a, _ in parts]
-                dst = _alloc.empty_like(xp, arrays[0])
-                g.add_node(opaque(_ordered_sum(dst, arrays), reads=arrays, writes=[dst]),
+                terms = [a for a, _ in parts]
+                dst = _alloc.empty_like(xp, terms[0])
+                g.add_node(opaque(_ordered_sum(dst, terms), reads=terms, writes=[dst]),
                            name=f"sum({plane})")
-                if any(id(a) in self.comp for a in arrays):     # rows: their companions add too
-                    los = [self.comp.get(id(a), zero(plane)) for a in arrays]
+                if any(id(a) in self.comp for a in terms):     # rows: their companions add too
+                    los = [self.comp.get(id(a), zero(plane)) for a in terms]
                     self.comp[id(dst)] = lo = _alloc.empty_like(xp, dst)
                     g.add_node(opaque(_ordered_sum(lo, los), reads=los, writes=[lo]),
                                name=f"sum({plane}, comp)")
@@ -610,23 +609,22 @@ class _Program:
         batch), so the parameter sum runs in sample order, never slot order."""
         if self.inv is None:
             return arr
-        xp, inv, dst = self.xp, self.inv, _alloc.empty_like(self.xp, arr)
-        g.add_node(opaque(lambda: xp.take(arr, inv, axis=-1, out=dst),
-                          reads=[arr, inv], writes=[dst]), name="sample order")
+        inv, dst = self.inv, _alloc.empty_like(self.xp, arr)
+        g.add_node(opaque(lambda: _gather_last(dst, arr, inv), reads=[arr, inv], writes=[dst]),
+                   name="sample order")
         return dst
 
     def run(self, tape, seeded, keys):
         xp = self.xp
-        if self.perm is not None:
-            self.inv[self.perm] = xp.arange(self.perm.shape[0], dtype=xp.int32)
+        perm = None if self.perm is None else arrays.asarray(self.perm, arrays.int32)
+        if perm is not None:
+            arrays.scatter(self.inv, perm, arrays.arange(perm.shape[0], dtype=arrays.int32, device=xp))
         for key, buf in self.seed.items():
-            value = xp.asarray(seeded[key], dtype=buf.dtype)
-            if self.perm is None:
-                buf[...] = value
+            value = arrays.asarray(_view(seeded[key]), buf.dtype, xp)
+            if perm is None:
+                arrays.copyto(buf, value)
             else:
-                xp.take(value, self.perm, axis=-1, out=buf)
-        if xp.__name__ == "cupy":
-            xp.cuda.get_current_stream().synchronize()
+                _gather_last(buf, value, perm)
         self.graph.launch()
         values = {}
         for key in keys:
@@ -634,29 +632,43 @@ class _Program:
                 values[key] = self.reduced[key].reshape(()).copy()
             elif key in self.grads:
                 arr = self.grads[key]
-                values[key] = arr.copy() if self.inv is None else xp.take(arr, self.inv, axis=-1)
+                values[key] = arr.copy() if self.inv is None else _gather_last(_alloc.empty_like(xp, arr), arr, self.inv)
         return values, self.bitwise
 
 
-def _ordered_sum(dst, arrays):
-    """``dst = ((a0 + a1) + a2) + ...``: one fixed order, no atomics."""
-    if xp_of(dst).__name__ == "cupy":
-        import cupy
+def _gather_last(dst, src, index):
+    """``dst = src[..., index]`` (int32 ``index`` over the last axis); returns ``dst``."""
+    n, m = src.shape[-1], index.shape[0]
+    _take_columns(dst.reshape((dst.size // m, m)), src.reshape((src.size // n, n)), index, m)
+    return dst
 
+
+def _ordered_sum(dst, parts):
+    """``dst = ((a0 + a1) + a2) + ...``: one fixed order, no atomics."""
+    if dst.device != "cpu":
         def step():
-            cupy.add(arrays[0], arrays[1], out=dst)
-            for a in arrays[2:]:
-                cupy.add(dst, a, out=dst)
+            arrays.add(parts[0], parts[1], out=dst)
+            for a in parts[2:]:
+                arrays.add(dst, a, out=dst)
         return step
-    code = 1 if str(dst.dtype) == "float64" else 0
-    ptrs = [a.ctypes.data for a in arrays]
+    code = 1 if dst.dtype == arrays.float64 else 0
+    ptrs = [a.ptr for a in parts]
 
     def step():
-        _core.ordered_sum(dst.ctypes.data, ptrs, dst.size, code)
+        _core.ordered_sum(dst.ptr, ptrs, dst.size, code)
     return step
 
 
-def reverse(record, seeds, *, wrt=None, vjps=None, strict=False, policy="compensated") -> Gradients:
+def _returned(grads, returns):
+    """``grads`` with its arrays as ``returns``'s type (``None``: :class:`eagle.Array` s)."""
+    if returns is None:
+        return grads
+    from ..frameworks._bridge import route
+
+    return Gradients(route(dict(grads._values), returns), grads.report, route(grads.cotangents, returns))
+
+
+def reverse(record, seeds, *, wrt=None, vjps=None, strict=False, policy="compensated", returns=None) -> Gradients:
     """The gradients of one recorded forward, in one call:
     ``grads = eagle.diff.reverse(sim.record, seeds={"x": dJ_dx})``.
 
@@ -686,9 +698,9 @@ def reverse(record, seeds, *, wrt=None, vjps=None, strict=False, policy="compens
     at = [] if keys is None else [v[1] for v in keys.values() if not isinstance(v, str)]
     grads = Reverse(record.forward, vjps=vjps, strict=strict, policy=policy)(record, seeds, wrt=wrt, _at=at)
     if keys is None:
-        return grads
+        return _returned(grads, returns)
     from ._keys import own_shape
 
-    return Gradients({name: own_shape(record._graph, name, grads.cotangents[k[1]] if not isinstance(k, str)
+    return _returned(Gradients({name: own_shape(record._graph, name, grads.cotangents[k[1]] if not isinstance(k, str)
                                       else grads[k if k in grads else k.split(".", 1)[1]])
-                      for name, k in keys.items()}, grads.report)
+                      for name, k in keys.items()}, grads.report), returns)

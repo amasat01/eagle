@@ -34,6 +34,7 @@ import time
 import types
 
 import numpy as np
+from eagle.frameworks import cupy as interop_cupy
 import pytest
 
 from raptor.conformance import freethreading as ft
@@ -153,7 +154,7 @@ def test_counters_exact_under_threads(monkeypatch):
     ft.require_free_threaded()
     import importlib
 
-    from eagle import _counters, interop, marshal
+    from eagle import _counters, marshal
 
     launch = importlib.import_module("eagle.launch")  # `eagle.launch` the name is a function
 
@@ -179,16 +180,17 @@ def test_counters_exact_under_threads(monkeypatch):
     assert launch.launch_plan(spec) is first
 
     # external-stream cache tallies
-    monkeypatch.setattr(interop, "_wrap_external_stream", lambda ptr: object())
-    interop._reset_external_stream_cache()
-    ft.hammer(lambda: interop.external_stream(7), THREADS, n_iter)
-    s = interop._external_stream_stats()
+    monkeypatch.setattr(interop_cupy, "wrap_external_stream", lambda ptr: object())
+    interop_cupy.reset_external_stream_cache()
+    ft.hammer(lambda: interop_cupy.external_stream(7), THREADS, n_iter)
+    s = interop_cupy.external_stream_stats()
     assert s == {"hits": total - 1, "misses": 1}, s
 
     # zero-mask cache tallies
-    cp = _FakeCupy()
+    monkeypatch.setattr(marshal, "_device", lambda: "cuda:0")
+    monkeypatch.setattr(marshal._alloc, "zeros", lambda xp, n, dtype=None: object())
     marshal._reset_zero_mask_cache()
-    ft.hammer(lambda: marshal._cached_zero_mask(16, cp), THREADS, n_iter)
+    ft.hammer(lambda: marshal._cached_zero_mask(16), THREADS, n_iter)
     z = marshal._zero_mask_stats()
     assert z == {"hits": total - 1, "misses": 1, "bypassed": 0}, z
     marshal._reset_zero_mask_cache()
@@ -214,7 +216,6 @@ class _FakeCupy:
 # --------------------------------------------------------------------------- #
 @register_ft_row("FT-3-EAGLE-STREAM-IDENTITY")
 def test_external_stream_identity_under_threads(monkeypatch):
-    from eagle import interop
 
     made = []
 
@@ -224,19 +225,19 @@ def test_external_stream_identity_under_threads(monkeypatch):
         made.append(ptr)
         return w
 
-    monkeypatch.setattr(interop, "_wrap_external_stream", slow_wrap)
-    interop._reset_external_stream_cache()
+    monkeypatch.setattr(interop_cupy, "wrap_external_stream", slow_wrap)
+    interop_cupy.reset_external_stream_cache()
     try:
         results, errors = _run_threads(
-            16, lambda i: interop.external_stream(0x1000 + i % 2))
+            16, lambda i: interop_cupy.external_stream(0x1000 + i % 2))
         assert errors == [None] * 16, errors
         for handle in (0x1000, 0x1001):
             mine = [r for i, r in enumerate(results) if 0x1000 + i % 2 == handle]
             assert all(r is mine[0] for r in mine), handle
         assert sorted(made) == [0x1000, 0x1001], made
-        assert interop._external_stream_stats() == {"hits": 14, "misses": 2}
+        assert interop_cupy.external_stream_stats() == {"hits": 14, "misses": 2}
     finally:
-        interop._reset_external_stream_cache()
+        interop_cupy.reset_external_stream_cache()
 
 
 # --------------------------------------------------------------------------- #
@@ -250,14 +251,15 @@ def test_caches_never_exceed_their_caps(monkeypatch):
 
     launch = importlib.import_module("eagle.launch")  # `eagle.launch` the name is a function
 
-    cp = _FakeCupy()
+    monkeypatch.setattr(marshal, "_device", lambda: "cuda:0")
+    monkeypatch.setattr(marshal._alloc, "zeros", lambda xp, n, dtype=None: object())
     marshal._reset_zero_mask_cache()
     calls_each = 400
     distinct = 200
 
     def hit_masks(t):
         for k in range(calls_each):
-            marshal._cached_zero_mask(1 + (k * (t + 1)) % distinct, cp)
+            marshal._cached_zero_mask(1 + (k * (t + 1)) % distinct)
 
     _, errors = _run_threads(THREADS, hit_masks)
     assert errors == [None] * THREADS, errors

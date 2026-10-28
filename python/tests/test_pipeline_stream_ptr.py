@@ -28,9 +28,8 @@ def test_stream_property_exists_and_is_read_only():
         pipe.stream = 0
 
 
-def test_stream_matches_the_external_stream_cupy_was_handed():
-    """``self._ext`` (the ``cp.cuda.ExternalStream`` cupy launches on) is
-    built from the exact same raw handle ``stream`` now publishes --
-    the property must not be a second, independently-derived value."""
+def test_stream_is_the_handle_the_pipeline_captures_and_replays_on():
+    """``self._sptr`` is the one raw handle ``stream`` publishes -- the property
+    must not be a second, independently-derived value."""
     pipe = GraphPipeline()
-    assert pipe.stream == pipe._ext.ptr
+    assert pipe.stream == pipe._sptr

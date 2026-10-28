@@ -53,7 +53,6 @@ nothing checks for such a case. Recorded here rather than silently omitted.
 
 from __future__ import annotations
 
-import ast
 import itertools
 from pathlib import Path
 
@@ -65,12 +64,9 @@ import pytest
 from eagle.gemm import capture as gemm_capture
 from eagle.gemm.capture import (
     CUBLAS_OP,
-    CublasResolutionError,
     GemmMappingUnavailable,
     check_plan_capturable,
-    mapped_library_paths,
     require_float32,
-    resolve_cublas_path,
     sgemm_params,
     sgemm_params_for_arrays,
 )
@@ -392,128 +388,98 @@ def test_a_float32_gemm_plan_is_accepted():
 
 
 # ============================================================================
-# Library resolution: the refusals, and the laziness that keeps this file
-# host-only.
+# The seam call: the host twin, the device product, one captured node, the
+# absent-cuBLAS refusal.
 # ============================================================================
-_MAPS = """\
-55a1b2c00000-55a1b2c21000 r--p 00000000 08:02 100 /usr/bin/python3.12
-7f2a00000000-7f2a01000000 r--p 00000000 08:02 200 {p}
-7f2a01000000-7f2a05000000 r-xp 01000000 08:02 200 {p}
-7f2a05000000-7f2a05100000 rw-p 00000000 00:00 0
-7f2a06000000-7f2a06100000 r--p 00000000 08:02 300 /lib/libcublasLt.so.12
-"""
-
-
-def test_many_mappings_of_one_library_are_one_path():
-    text = _MAPS.format(p="/opt/cuda/lib/libcublas.so.12")
-    assert mapped_library_paths(text) == ("/opt/cuda/lib/libcublas.so.12",)
-
-
-def test_a_process_without_the_library_yields_nothing():
-    assert mapped_library_paths(_MAPS.format(p="/lib/libfoo.so.1")) == ()
-
-
-def test_two_different_files_are_two_paths():
-    text = (
-        _MAPS.format(p="/opt/conda/lib/libcublas.so.12")
-        + "7f2a07000000-7f2a08000000 r-xp 0 08:02 400 /opt/pip/libcublas.so.12\n"
-    )
-    assert mapped_library_paths(text) == (
-        "/opt/conda/lib/libcublas.so.12",
-        "/opt/pip/libcublas.so.12",
-    )
-
-
-def test_a_similarly_named_library_is_not_a_match():
-    assert mapped_library_paths(_MAPS.format(p="/lib/libcublasLt.so.12")) == ()
-
-
-def test_the_pip_wheel_s_exact_soname_matches():
-    """The bare ``libcublas.so.12`` name a pip wheel maps (the equality arm
-    the match already had, kept working by the fix)."""
-    text = _MAPS.format(p="/opt/pip/lib/libcublas.so.12")
-    assert mapped_library_paths(text) == ("/opt/pip/lib/libcublas.so.12",)
-
-
-def test_a_conda_style_versioned_file_matches_the_soname():
-    """The real gap this row closes: conda maps the ACTUAL file behind the
-    soname, further versioned (``libcublas.so.12.9.1.4``), which a bare
-    equality check never matched -- every captured GEMM raised
-    ``CublasResolutionError`` in a conda env before this fix."""
-    text = _MAPS.format(p="/opt/conda/lib/libcublas.so.12.9.1.4")
-    assert mapped_library_paths(text) == ("/opt/conda/lib/libcublas.so.12.9.1.4",)
-
-
-def test_a_bare_numeric_extension_of_the_soname_is_not_a_match():
-    """The trap the fix must NOT fall into: ``startswith(soname)`` alone
-    (no separating dot) would also accept ``libcublas.so.120`` -- a
-    DIFFERENT, unversioned-looking name that merely happens to start with
-    the same characters. Only ``soname`` extended by a real ``.`` suffix
-    counts."""
-    text = _MAPS.format(p="/lib/libcublas.so.120")
-    assert mapped_library_paths(text) == ()
-
-
-def test_a_versioned_cublasLt_is_still_not_a_match():
-    assert mapped_library_paths(_MAPS.format(p="/lib/libcublasLt.so.12.9.1.4")) == ()
-
-
-@pytest.fixture
-def stub_maps(monkeypatch):
-    def install(paths):
-        monkeypatch.setattr(gemm_capture, "_warm_cupy_cublas", lambda: None)
-        monkeypatch.setattr(gemm_capture, "mapped_library_paths", lambda text: paths)
-
-    return install
-
-
-_LINUX_ONLY = pytest.mark.skipif(sys.platform != "linux", reason="resolution reads /proc/self/maps (Linux; CUDA is Linux-only here)")
-
-
-@_LINUX_ONLY
-def test_resolution_refuses_when_nothing_is_mapped(stub_maps):
-    stub_maps(())
-    with pytest.raises(CublasResolutionError, match="no libcublas.so.12 or libcublas.so.13 is mapped"):
-        resolve_cublas_path()
-
-
-@_LINUX_ONLY
-def test_resolution_refuses_an_ambiguous_process(stub_maps):
-    stub_maps(("/opt/a/libcublas.so.12", "/opt/b/libcublas.so.12"))
-    with pytest.raises(CublasResolutionError, match="2 different"):
-        resolve_cublas_path()
-
-
-@_LINUX_ONLY
-def test_resolution_takes_the_cuda_13_cublas(stub_maps):
-    stub_maps(("/opt/a/libcublas.so.13.0.0.19",))
-    assert resolve_cublas_path() == "/opt/a/libcublas.so.13.0.0.19"
-
-
-@_LINUX_ONLY
-def test_resolution_returns_the_sole_match(stub_maps):
-    stub_maps(("/opt/a/libcublas.so.12",))
-    assert resolve_cublas_path() == "/opt/a/libcublas.so.12"
-
-
-def test_importing_the_module_touches_no_device():
-    """Structural: no module-level statement calls the resolving entry points,
-    and cupy is imported only inside a function."""
+def test_the_module_binds_no_library_itself():
     source = Path(gemm_capture.__file__).read_text()
-    tree = ast.parse(source)
-    forbidden = {"_warm_cupy_cublas", "resolve_cublas_path", "load_cublas"}
-    for node in tree.body:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            continue
-        for call in ast.walk(node):
-            if isinstance(call, ast.Call):
-                name = getattr(call.func, "id", None) or getattr(
-                    call.func, "attr", None
-                )
-                assert name not in forbidden, f"module-level {name}()"
-    for line in source.splitlines():
-        if "import cupy" in line:
-            assert line.startswith(" "), f"module-level cupy import: {line!r}"
+    assert "ctypes" not in source and "import cupy" not in source and "libcublas" not in source.split('"""', 2)[2]
+
+
+def _eagle_operands(device, stream=0):
+    import eagle.arrays as xp
+
+    rng = np.random.default_rng(7)
+    a_h = rng.standard_normal((M, K)).astype(np.float32)
+    b_h = rng.standard_normal((K, N)).astype(np.float32)
+    make = lambda h: xp.asarray(h, device=device)       # noqa: E731
+    a, b, out = make(a_h), make(b_h), xp.zeros((M, N), xp.float32, device)
+    return a_h, b_h, a, b, out
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_the_host_twin_matches_numpy_for_both_precisions(dtype):
+    import eagle.arrays as xp
+
+    rng = np.random.default_rng(3)
+    a_h = rng.standard_normal((M, K)).astype(dtype)
+    b_h = rng.standard_normal((K, N)).astype(dtype)
+    a, b, out = xp.asarray(a_h), xp.asarray(b_h), xp.zeros((M, N), dtype)
+    step = matmul_step("c", a="a", b="b", out="c")
+    step.run({"a": a, "b": b, "c": out}, "host")
+    np.testing.assert_allclose(np.asarray(out), a_h @ b_h, rtol=1e-5 if dtype == "float32" else 1e-12)
+
+
+@pytest.mark.gpu
+def test_the_seam_gemm_on_eagle_arrays_matches_the_host_twin():
+    a_h, b_h, a, b, out = _eagle_operands("cuda:0")
+    params = sgemm_params_for_arrays(a, b, out)
+    from eagle import _core
+    from eagle.gemm.capture import gemm_call
+
+    gemm_call(params, {"a": a, "b": b, "out": out})
+    _core.device_synchronize()
+    np.testing.assert_allclose(np.asarray(out.get()), a_h @ b_h, rtol=1e-5, atol=_band(a_h @ b_h))
+
+
+@pytest.mark.gpu
+def test_a_captured_seam_gemm_is_one_kernel_node_and_replays():
+    from eagle import _core
+    from eagle.gemm.capture import CublasCaptureHandle
+
+    a_h, b_h, a, b, out = _eagle_operands("cuda:0")
+    stream = _core.Stream(non_blocking=True)
+    handle = CublasCaptureHandle(stream.ptr())
+    params = sgemm_params_for_arrays(a, b, out)
+    try:
+        handle.warm(params, {"a": a, "b": b, "out": out})
+        out.fill(0.0, stream.ptr())
+        cap = _core.StreamCapturer(stream.ptr())
+        cap.begin()
+        try:
+            handle.sgemm(params, {"a": a, "b": b, "out": out})
+        finally:
+            captured = cap.end()
+        _core.device_synchronize()
+        assert np.asarray(out.get()).max() == 0.0               # nothing ran at build
+        dot = captured.debug_dot("/local/scratch/amasat/tmp/w072/scratch/S1a/tmp/gemm_capture.dot", 0)
+        assert dot.count('shape="octagon"') >= 1
+        launcher = _core.Graph.from_captured(captured).launcher()
+        launcher.stream(stream.ptr())
+        launcher.launch()
+        launcher.synchronize()
+        np.testing.assert_allclose(np.asarray(out.get()), a_h @ b_h, rtol=1e-5, atol=_band(a_h @ b_h))
+    finally:
+        handle.destroy()
+
+
+@pytest.mark.gpu
+def test_an_absent_cublas_is_refused_by_name():
+    import os
+    import subprocess
+
+    code = (
+        "import eagle.arrays as xp\n"
+        "from eagle.gemm.capture import GemmCaptureUnavailable, gemm_call, sgemm_params_for_arrays\n"
+        "a = xp.ones((3, 4), xp.float32, 'cuda:0'); b = xp.ones((4, 5), xp.float32, 'cuda:0'); o = xp.zeros((3, 5), xp.float32, 'cuda:0')\n"
+        "try:\n"
+        "    gemm_call(sgemm_params_for_arrays(a, b, o), {'a': a, 'b': b, 'out': o})\n"
+        "except GemmCaptureUnavailable as e:\n"
+        "    assert 'cuBLAS is not available' in str(e), str(e); print('REFUSED')\n"
+    )
+    env = dict(os.environ, EAGLE_CUBLAS_LIBRARY="libeagle_no_such_cublas.so")
+    r = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, text=True, env=env)
+    assert r.returncode == 0 and "REFUSED" in r.stdout, r.stdout + r.stderr
 
 
 # ============================================================================

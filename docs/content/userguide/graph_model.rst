@@ -62,7 +62,7 @@ declare what comes out with ``g.result``:
    [ 1.  9. 25. 49.]
 
 Calling the builder on arrays builds the graph; calling the graph runs it and
-returns ``result``. The arrays decide the backend (NumPy is the CPU, CuPy is a
+returns ``result``. The arrays decide the backend (a host array is the CPU, a CUDA array is a
 CUDA graph), and eagle works the edges out from which kernel reads what, as
 below. Everything in the rest of this section is the same function with more
 in it.
@@ -253,7 +253,7 @@ Your first hand-made graph
 
 ``add_node`` takes a node; a plan launch is added with ``add(bound_plan)``
 (a :class:`~eagle.plan.BoundPlan` from ``plan.bind(...)``). ``build()``
-looks at where the planes live (numpy means the CPU, cupy means the GPU),
+looks at where the planes live (host memory means the CPU, a CUDA array means the GPU),
 derives the edges, refuses anything unsafe and lowers the graph.
 ``launch()`` runs it, ``launch(n)`` runs it ``n`` times. Every method returns
 the graph, so a build reads as one chain.
@@ -422,6 +422,90 @@ one zero-copy buffer, so the optimizer's in-place step is the refresh. Update
 weights after ``launch()`` returns (or ``synchronize()`` first), never between
 ``enqueue`` and ``synchronize``. A launch after ``param.data = ...`` is
 refused by name: bind the tensor the optimizer updates.
+
+Run some of the lanes
+^^^^^^^^^^^^^^^^^^^^^
+
+A hawk kernel declared with ``lanes=IndexSet()`` runs only the lanes in a map you bind, as the planes
+``active_map`` and ``active_count``. Build them on the host with ``eagle.IndexSet.planes(mask_or_ids, extent)``
+(32-bit ids, or 64-bit past ``2**31 - 1`` lanes) and pass them to ``plan.run`` or ``bind``:
+
+.. code-block:: python
+
+   planes = eagle.IndexSet.planes(close_pairs, extent=n_pairs)   # ids, or a boolean mask over n_pairs
+   plan.run(pos=pos, d=d, **planes)
+
+``plan.run`` and ``bind`` check the map when they bind it (every id inside ``[0, extent)``, none twice) and name the
+first bad position. A captured graph replays *without* that check. If you rewrite a bound map or its count in
+place between replays, the contents are yours until you run ``eagle.check_index_set(map, count, extent)``.
+
+For a batch whose size changes from launch to launch, build the kernel with ``IndexSet(prefix=True)`` and bind with a
+capacity. ``bind(..., capacity=n_max)`` makes the count plane, and ``set_count(m)`` runs the first ``m`` lanes of the
+same bind and the same captured graph:
+
+.. code-block:: python
+
+   bound = plan.bind(x=x, y=y, capacity=8192)   # planes hold 8192 lanes
+   bound.set_count(1000); bound.launch()        # 1000 lanes
+   bound.set_count(8192); bound.launch()        # all of them
+
+A count above the capacity is refused by name; bind again with a larger capacity. Writing the count plane yourself,
+without ``set_count``, is your contract: nothing then checks the count.
+
+Large matrices and keyed sums
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+hawk splits a kernel into stages when a launch cannot do the job in one: a solve of a matrix past 32 by 32 (a team
+of threads per matrix), a least-squares fit, a keyed block sum such as ``J^T J``, or an ordered ``hawk.scatter``.
+eagle launches the stages in order inside the plan's graph, so they are captured and replayed like any other
+node, and the answer is the same bits on every replay. ``Plan.run`` works on these kernels; a keyed output comes
+back as ``(*payload, keys)``.
+
+The stages need scratch (the matrices, a key log). eagle sizes it at bind and keeps it with the bound plan. A bind
+whose scratch is larger than the free device memory is refused, naming the byte sum and the stage. Per-matrix
+sizes are on aether's team linear algebra page.
+
+An ordered scatter keeps a key log. eagle refills it on every launch, graph replays included, and checks the keys
+afterwards: a key outside the target is reported by name. The error is raised at eagle's own next wait (a stream
+synchronise, an eagle read-back, a device synchronise or the next launch), not at the scatter. A CuPy
+``.get()`` is not one of those waits.
+
+Fourier transforms
+^^^^^^^^^^^^^^^^^^
+
+``eagle.fft`` adds batched transforms as graph steps: ``eagle.fft.c2c``, ``r2c`` and ``c2r``. Complex data is a
+float array whose last axis has extent 2, ``(re, im)``; eagle has no complex dtype.
+
+.. code-block:: python
+
+   import numpy as np
+   import eagle, eagle.fft as efft
+
+   x = np.zeros((64, 1024, 2))                    # 64 signals of 1024 points: (re, im) pairs
+   X = np.zeros((64, 1024, 2))
+   g = (eagle.Graph()
+        .add_node(efft.c2c(x, X, axes=(1,)), name="fft")
+        .build())
+   g.launch()                                     # X holds the result, written in place
+
+On the GPU pass cupy arrays the same way (``x = cupy.zeros((64, 1024, 2))``). Any array ``plan.run`` takes works, and the
+output is the caller's own buffer: a read-only one is refused.
+
+The transform runs on the stream the graph is built on, allocates nothing when it runs, and is legal inside a
+capture. Its plan is made when you build the node, so build the node first and capture after. The CPU runs
+pocketfft and the GPU runs cuFFT, through aether; the GPU needs ``pip install "aether-dsc[cufft12]"`` (or
+``[cufft13]``) and says so if it is missing. The CPU and GPU results agree to rounding.
+
+The derivative is the transform in the opposite direction, with the scaling pinned: the vjp of
+``c2c(norm="backward")`` is the unscaled inverse. ``efft.vjp(node, cotangent, out)`` and ``efft.jvp(node, tangent,
+out)`` are graph steps too, and :class:`eagle.diff.Reverse` pulls an FFT node back through the same rule.
+
+When a launch fails
+^^^^^^^^^^^^^^^^^^^
+
+eagle reads the launch status after every device launch (eager, graph instantiate and graph replay) and raises an
+error naming the kernel. A bind whose per-thread local memory cannot fit the device is refused by name, before any
+launch; hawk records the figure in the sidecar (``launch.local_bytes``).
 
 How the edges are found
 -----------------------

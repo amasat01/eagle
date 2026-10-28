@@ -50,7 +50,8 @@ import numpy as np
 import pytest
 from raptor.conformance.interop import certified_framework, register_row
 
-from eagle import LoadedPure, LoadedVector, to_cupy
+from eagle import LoadedPure, LoadedVector
+from eagle.frameworks.cupy import to_cupy
 from eagle.interop import BufferRefused, host_ptr, import_buffer
 
 pytestmark = pytest.mark.interop_matrix

@@ -25,9 +25,10 @@ from __future__ import annotations
 from functools import lru_cache
 from types import MappingProxyType
 
-from . import _alloc
+from . import _stream, arrays
+from .abi import device_ptr
+from .dtypes import dtype_name
 from .graph import Node, register_node_kind
-from .interop import _root_module
 
 __all__ = ["reduce"]
 
@@ -55,16 +56,12 @@ def check_policy(policy, who):
 def fixed_f64(device: int = -1) -> bool:
     """True when float64 sums use the fixed-point leaf on this machine: the
     GPU ``device`` (-1: the current one) has slow FP64. False without a GPU."""
-    try:
-        import cupy
-
-        dev = cupy.cuda.runtime.getDevice() if device < 0 else device
-        ratio = cupy.cuda.runtime.deviceGetAttribute(
-            cupy.cuda.runtime.cudaDevAttrSingleToDoublePrecisionPerfRatio, dev)
-    except Exception:  # no cupy or no GPU: the CPU keeps (hi, comp)
-        return False
     from . import _core
 
+    try:
+        ratio = int(_core.device_props(device)["fp64_ratio"])
+    except Exception:  # no GPU backend or no device: the CPU keeps (hi, comp)
+        return False
     return bool(_core.reduce_fixed_leaf(int(ratio)))
 
 
@@ -72,12 +69,30 @@ def _door(msg: str) -> str:
     return f"eagle.reduce: {msg}"
 
 
-def _overlaps(a, b) -> bool:
-    if _root_module(a) == "cupy":
-        return a.data.ptr < b.data.ptr + b.nbytes and b.data.ptr < a.data.ptr + a.nbytes
-    import numpy as np
+def _contiguous(a) -> bool:
+    return a.is_contiguous if hasattr(a, "is_contiguous") else a.flags.c_contiguous
 
-    return bool(np.shares_memory(a, b))
+
+def _host_ptr(a) -> int:
+    return a.ptr if hasattr(a, "ptr") else a.ctypes.data
+
+
+def _on_device(a) -> bool:
+    return hasattr(a, "__cuda_array_interface__")
+
+
+def _ordinal(a) -> int:
+    """The CUDA device of a device array (an ``eagle.Array`` token ``"cuda:N"`` or a cupy ``.device.id``)."""
+    d = a.device
+    return int(d.split(":")[1]) if isinstance(d, str) else int(d.id)
+
+
+def _overlaps(a, b) -> bool:
+    if _on_device(a):
+        return device_ptr(a) < device_ptr(b) + b.nbytes and device_ptr(b) < device_ptr(a) + a.nbytes
+    from .arrays import asarray, shares_memory
+
+    return shares_memory(asarray(a), asarray(b))
 
 
 def reduce(x, out, *, op: str = "sum", comp=None, policy: str = "compensated",
@@ -130,26 +145,26 @@ def reduce(x, out, *, op: str = "sum", comp=None, policy: str = "compensated",
     if tuple(out.shape) != want:
         raise ValueError(_door(f"out must have shape {want} for x of shape {tuple(x.shape)}, got {tuple(out.shape)}"))
     code, allowed = _OPS[op]
-    name = str(x.dtype)
+    name = dtype_name(x.dtype)
     if name not in allowed:
         raise TypeError(_door(f"op {op!r} takes {list(allowed)} planes, got {name}"))
     for label, arr in arrays[1:]:
-        if str(arr.dtype) != name:
+        if dtype_name(arr.dtype) != name:
             raise TypeError(_door(f"{label} dtype {arr.dtype} must equal the x dtype {name}"))
-        if (_root_module(x) == "cupy") != (_root_module(arr) == "cupy"):
+        if _on_device(x) != _on_device(arr):
             raise TypeError(_door(f"x and {label} must live on the same backend (both numpy or both cupy)"))
     if comp is not None:
         if op != "sum" or name not in ("float32", "float64"):
             raise TypeError(_door("comp= takes a float32 or float64 sum"))
         if tuple(comp.shape) != tuple(x.shape):
             raise ValueError(_door(f"comp shape {tuple(comp.shape)} must equal the x shape {tuple(x.shape)}"))
-    if not all(arr.flags.c_contiguous for _, arr in arrays):
+    if not all(_contiguous(arr) for _, arr in arrays):
         raise ValueError(_door("x, out and comp must be contiguous (numpy.ascontiguousarray)"))
     for label, arr in arrays[::2]:
         if _overlaps(arr, out):
             raise ValueError(_door(f"out overlaps {label}"))
-    if type(x).__module__.partition(".")[0] == "cupy":    # a cupy plane: one GPU, the arrays' (device= is checked, never a move)
-        found = sorted({int(a.device.id) for a in (x, out, comp) if a is not None})
+    if _on_device(x):    # a device plane: one GPU, the arrays' (device= is checked, never a move)
+        found = sorted({_ordinal(a) for a in (x, out, comp) if a is not None})
         if len(found) > 1 or (device is not None and found != [device]):
             raise ValueError(
                 f"eagle.reduce: the planes span devices {found}; a reduction runs on one device"
@@ -177,7 +192,7 @@ def _lower_cpu(node, ctx):
     from . import _core
 
     rows, cols = _shape(x)
-    xp, op_ptr, cp = x.ctypes.data, out.ctypes.data, (0 if comp is None else comp.ctypes.data)
+    xp, op_ptr, cp = _host_ptr(x), _host_ptr(out), (0 if comp is None else _host_ptr(comp))
 
     fixed = dtype == _DTYPES["float64"] and op == _OPS["sum"][0] and fixed_f64()
 
@@ -188,23 +203,21 @@ def _lower_cpu(node, ctx):
 
 def _lower_gpu(node, ctx):
     x, out, op, dtype, comp, policy = node.payload
-    import cupy
-
     from . import _core
 
     rows, cols = _shape(x)
-    device = int(x.device.id)
-    with cupy.cuda.Device(device):
-        # the work buffers belong to the lowered step, not to a launch
-        elems = int(_core.reduce_canonical_device(0, rows, dtype, op, 0, 0, 0, 0, device, policy, cols))
-        work = [_alloc.zeros(cupy, elems, dtype=x.dtype if x.dtype != cupy.bool_ else cupy.uint8) for _ in range(2)]
-    xp, op_ptr = int(x.data.ptr), int(out.data.ptr)
-    cp = 0 if comp is None else int(comp.data.ptr)
-    wa, wb = int(work[0].data.ptr), int(work[1].data.ptr)
+    device = _ordinal(x)
+    # the work buffers belong to the lowered step, not to a launch
+    elems = int(_core.reduce_canonical_device(0, rows, dtype, op, 0, 0, 0, 0, device, policy, cols))
+    name = dtype_name(x.dtype)
+    work = [arrays.zeros((elems,), "uint8" if name == "bool" else name, device=f"cuda:{device}") for _ in range(2)]
+    xp, op_ptr = device_ptr(x), device_ptr(out)
+    cp = 0 if comp is None else device_ptr(comp)
+    wa, wb = work[0].ptr, work[1].ptr
 
     def step():
         _core.reduce_canonical_device(xp, rows, dtype, op, op_ptr, wa, wb,
-                                      int(cupy.cuda.get_current_stream().ptr), device, policy, cols, cp)
+                                      _stream.current(device), device, policy, cols, cp)
     step.work = work
     return step
 

@@ -30,6 +30,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <dlfcn.h>
+#include <map>
+#include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -45,6 +48,8 @@
 #include "eagle/diff/Reverse.h"
 #include "eagle/events/Sensitivity.h"
 #include "eagle/exec/DeviceKernel.h"
+#include "aether/chunk/Chunk.h"
+#include "eagle/array/launch.h"
 #include "eagle/exec/Transfer.h"
 #include "eagle/filtering/Compact.h"
 #include "eagle/filtering/Reorder.h"
@@ -168,6 +173,20 @@ void checkCuda(cudaError_t e, const char* what)
 {
     if (e != cudaSuccess)
         throw std::runtime_error(std::string("eagle: ") + what + ": " + cudaGetErrorString(e));
+}
+
+void checkDriver(CUresult r, const char* what)
+{
+    if (r == CUDA_SUCCESS)
+        return;
+    throw std::runtime_error(std::string("eagle: ") + what + " failed with CUresult " + std::to_string(static_cast<int>(r)));
+}
+
+/** Make sure the calling thread has a current context (the runtime's lazy initialisation), for the
+ *  entries that call the driver directly. */
+void ensureContext()
+{
+    checkCuda(static_cast<cudaError_t>(eagle_cuda_plugin::makeContextCurrent()), "the primary context");
 }
 
 /** The calling thread's current device (the static runtime follows the driver's
@@ -443,6 +462,85 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_device_types(std::int32_t* 
 
 // ---- stream ------------------------------------------------------------------
 
+namespace {
+
+/** The streams ``stream_create`` made, with the device chunks still allocated on each. A stream released while
+ *  chunks (or a capture-deferred free) still name it is not destroyed yet: the last free, which runs on that
+ *  stream, destroys it, so a free never touches a dead stream. */
+struct StreamLedger {
+    struct Entry {
+        eagle_backend_stream h = nullptr;
+        std::int64_t chunks = 0;
+        bool closed = false;
+    };
+    std::mutex mu;
+    std::map<cudaStream_t, Entry> live;
+
+    void add(eagle_backend_stream h)
+    {
+        std::lock_guard<std::mutex> lock(mu);
+        live[h->stream.cuda()].h = h;
+    }
+    void ref(cudaStream_t s)
+    {
+        std::lock_guard<std::mutex> lock(mu);
+        if (auto it = live.find(s); it != live.end())
+            ++it->second.chunks;
+    }
+    void unref(cudaStream_t s)
+    {
+        if (s != nullptr) {
+            std::lock_guard<std::mutex> lock(mu);
+            if (auto it = live.find(s); it != live.end())
+                --it->second.chunks;
+        }
+        reap();
+    }
+    void close(eagle_backend_stream h)
+    {
+        {
+            std::lock_guard<std::mutex> lock(mu);
+            if (auto it = live.find(h->stream.cuda()); it != live.end())
+                it->second.closed = true;
+        }
+        reap();
+    }
+    /** Destroy every closed stream no chunk names, once no capture-deferred free is left that could name it. */
+    void reap() noexcept
+    {
+        std::vector<eagle_backend_stream> dead;
+        {
+            std::lock_guard<std::mutex> lock(mu);
+            bool any = false;
+            for (auto& [s, e] : live)
+                any = any || (e.closed && e.chunks == 0);
+            if (!any)
+                return;
+            aether::drainDeferredFrees();
+            if (aether::deferredFreeCount() != 0)
+                return;
+            for (auto it = live.begin(); it != live.end();) {
+                if (it->second.closed && it->second.chunks == 0) {
+                    dead.push_back(it->second.h);
+                    it = live.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+        }
+        for (auto* h : dead)
+            release(h);
+    }
+};
+
+StreamLedger& streams()
+{
+    static StreamLedger* l = new StreamLedger();
+    return *l;
+}
+
+} // namespace
+
 EAGLE_BACKEND_API eagle_backend_status eagle_backend_stream_create(const struct eagle_backend_stream_desc* desc,
     eagle_backend_stream* h)
 {
@@ -451,7 +549,9 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_stream_create(const struct 
         requireDevice();
         const int device = resolveDevice(d.device, std::nullopt);
         DeviceScope scope(device);
-        out(h, new eagle_backend_stream_s{ device, Stream((d.flags & EAGLE_BACKEND_STREAM_NON_BLOCKING) != 0) });
+        auto* made = new eagle_backend_stream_s{ device, Stream((d.flags & EAGLE_BACKEND_STREAM_NON_BLOCKING) != 0) };
+        streams().add(made);
+        out(h, made);
     });
 }
 
@@ -470,7 +570,8 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_stream_synchronize(eagle_ba
 
 EAGLE_BACKEND_API void eagle_backend_stream_release(eagle_backend_stream h)
 {
-    release(h);
+    if (h != nullptr)
+        streams().close(h);
 }
 
 // ---- capturer ----------------------------------------------------------------
@@ -1562,6 +1663,16 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_device_props(std::int32_t d
         full.fp64_ratio = p.fp64_ratio;
         full.ridge_flops_per_byte_sp = p.ridgeFlopsPerByte("float32");
         full.ridge_flops_per_byte_dp = p.ridgeFlopsPerByte("float64");
+        {
+            // memory, read with the device current (cuMemGetInfo is per context)
+            DeviceScope scope(dev);
+            ensureContext();
+            static const auto info = driverEntry12<CUresult (*)(std::size_t*, std::size_t*)>("cuMemGetInfo");
+            std::size_t freeBytes = 0, totalBytes = 0;
+            checkDriver(info(&freeBytes, &totalBytes), "cuMemGetInfo");
+            full.free_mem_bytes = static_cast<std::int64_t>(freeBytes);
+            full.total_mem_bytes = static_cast<std::int64_t>(totalBytes);
+        }
         const std::uint32_t n = std::min<std::uint32_t>(props->struct_size, sizeof full);
         full.struct_size = n;
         std::memcpy(props, &full, n);
@@ -1671,6 +1782,978 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_host_func(std::uint64_t str
         const int device = resolveDevice(-1, stream);
         DeviceScope scope(device);
         eagle::exec::hostFunc(seamStream(stream), fn, arg);
+    });
+}
+
+// ---- minor 7: device scope, modules, raw launch, cell ops --------------------------
+
+namespace {
+
+/** The primary context of @p device current for the scope (device -1: the current one). */
+int deviceOrCurrent(std::int32_t device)
+{
+    return resolveDevice(device, std::nullopt);
+}
+
+namespace cellop {
+
+constexpr int kBlock = 256;
+
+template <class T>
+struct Dt;
+template <> struct Dt<bool> { static constexpr int code = EAGLE_BACKEND_DTYPE_BOOL; };
+template <> struct Dt<std::uint8_t> { static constexpr int code = EAGLE_BACKEND_DTYPE_UINT8; };
+template <> struct Dt<std::int32_t> { static constexpr int code = EAGLE_BACKEND_DTYPE_INT32; };
+template <> struct Dt<std::uint32_t> { static constexpr int code = EAGLE_BACKEND_DTYPE_UINT32; };
+template <> struct Dt<std::int64_t> { static constexpr int code = EAGLE_BACKEND_DTYPE_INT64; };
+template <> struct Dt<std::uint64_t> { static constexpr int code = EAGLE_BACKEND_DTYPE_UINT64; };
+template <> struct Dt<float> { static constexpr int code = EAGLE_BACKEND_DTYPE_FLOAT32; };
+template <> struct Dt<double> { static constexpr int code = EAGLE_BACKEND_DTYPE_FLOAT64; };
+
+__device__ inline long long globalIndex()
+{
+    return static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+}
+
+__global__ void bump(unsigned int* cell)
+{
+    if (globalIndex() == 0)
+        cell[0] += 1u;
+}
+
+__global__ void maskCount(const std::uint8_t* mask, unsigned int* cell, long long n)
+{
+    const long long i = globalIndex();
+    if (i < n && mask[i] != 0)
+        atomicAdd(&cell[0], 1u);
+}
+
+__global__ void identity(std::int32_t* a, long long n)
+{
+    const long long i = globalIndex();
+    if (i < n)
+        a[i] = static_cast<std::int32_t>(i);
+}
+
+__global__ void countFired(const unsigned int* fire, unsigned int* reorders)
+{
+    if (globalIndex() == 0)
+        reorders[0] += fire[0] != 0u ? 1u : 0u;
+}
+
+__global__ void groupAnd(const std::uint8_t* m, std::uint8_t* d, long long lanes, int group, long long groups)
+{
+    const long long i = globalIndex();
+    if (i >= groups)
+        return;
+    unsigned char a = 1;
+    const long long s = i * group;
+    for (int j = 0; j < group && s + j < lanes; ++j)
+        a &= (m[s + j] != 0);
+    d[i] = a;
+}
+
+__global__ void scaleCount(const unsigned int* c, unsigned int* o, int group)
+{
+    if (globalIndex() == 0)
+        o[0] = c[0] * static_cast<unsigned>(group);
+}
+
+/** One step of the until_done policy, the same expressions in the same order as
+ *  ``eagle::policy::bandK`` (and as the NVRTC kernel this replaces). */
+__global__ void policy(const unsigned int* finished, const unsigned int* total, long long* cells, long long* word,
+    unsigned int* go, long long* hist, long long kmin, long long kmax, int iK, int iFin, int iDone, int iCap, int iR,
+    int iMapped, int scale)
+{
+    if (globalIndex() != 0)
+        return;
+    const long long KMIN = kmin, KMAX = kmax;
+    const long long fin = finished[0], all = total[0];
+    const long long live = all - fin, newly = fin - cells[iFin];
+    const long long done = cells[iDone] + word[0];
+    cells[iMapped] += all - cells[iFin];
+    cells[iFin] = fin;
+    cells[iDone] = done;
+    const long long k = cells[iK];
+    const double rate = static_cast<double>(cells[iR]) / static_cast<double>(scale);
+    long long k_next = k;
+    if (newly <= 0) {
+        k_next = KMAX;
+    } else {
+        const double e2 = 2.0 * rate * static_cast<double>(live) * static_cast<double>(k) / static_cast<double>(newly);
+        long long p = 1;
+        while (p < (1LL << 30) && e2 >= 2.0 * static_cast<double>(p) * static_cast<double>(p))
+            p *= 2;
+        k_next = p < KMIN ? KMIN : (p > KMAX ? KMAX : p);
+    }
+    cells[iK] = k_next;
+    const long long left = cells[iCap] - done;
+    const unsigned int g = (fin != all) && (left > 0);
+    go[0] = g;
+    if (g) {
+        const long long w = k_next < left ? k_next : left;
+        word[0] = w;
+        hist[w] += 1;
+    }
+}
+
+/** A value as the type a cast widens it to: the 16-bit floats go through float, everything else is itself. */
+template <class V>
+__device__ inline auto widen(V v)
+{
+    if constexpr (std::is_same_v<V, __half> || std::is_same_v<V, __nv_bfloat16>)
+        return static_cast<float>(v);
+    else if constexpr (std::is_same_v<V, bool>)
+        return static_cast<int>(v);
+    else
+        return v;
+}
+
+/** ``dst[j] = static_cast<D>(v)`` for the dtype code @p dt (v keeps its own category: signed, unsigned or real). */
+template <class V>
+__device__ inline void storeAs(void* dst, int dt, long long j, V v)
+{
+    const auto w = widen(v);
+    switch (dt) {
+    case EAGLE_BACKEND_DTYPE_BOOL: static_cast<bool*>(dst)[j] = static_cast<bool>(v); break;
+    case EAGLE_BACKEND_DTYPE_UINT8: static_cast<std::uint8_t*>(dst)[j] = static_cast<std::uint8_t>(w); break;
+    case EAGLE_BACKEND_DTYPE_INT32: static_cast<std::int32_t*>(dst)[j] = static_cast<std::int32_t>(w); break;
+    case EAGLE_BACKEND_DTYPE_UINT32: static_cast<std::uint32_t*>(dst)[j] = static_cast<std::uint32_t>(w); break;
+    case EAGLE_BACKEND_DTYPE_INT64: static_cast<std::int64_t*>(dst)[j] = static_cast<std::int64_t>(w); break;
+    case EAGLE_BACKEND_DTYPE_UINT64: static_cast<std::uint64_t*>(dst)[j] = static_cast<std::uint64_t>(w); break;
+    case EAGLE_BACKEND_DTYPE_FLOAT32: static_cast<float*>(dst)[j] = static_cast<float>(w); break;
+    case EAGLE_BACKEND_DTYPE_FLOAT16: static_cast<__half*>(dst)[j] = static_cast<__half>(w); break;
+    case EAGLE_BACKEND_DTYPE_BFLOAT16: static_cast<__nv_bfloat16*>(dst)[j] = static_cast<__nv_bfloat16>(w); break;
+    default: static_cast<double*>(dst)[j] = static_cast<double>(w); break;
+    }
+}
+
+template <class S>
+__global__ void castFrom(void* dst, const S* src, long long n, int dstType)
+{
+    const long long j = globalIndex();
+    if (j < n)
+        storeAs<S>(dst, dstType, j, src[j]);
+}
+
+template <class E>
+__global__ void gather(E* dst, const char* src, long long n, long long s0, long long s1, long long s2,
+    long long s3, long long e0, long long e1, long long e2, long long e3)
+{
+    long long j = globalIndex();
+    if (j >= n)
+        return;
+    const long long dst_j = j;
+    // row-major multi-index of j over (e0, e1, e2, e3); unused leading axes have extent 1
+    const long long ext[4] = { e0, e1, e2, e3 };
+    const long long str[4] = { s0, s1, s2, s3 };
+    long long off = 0;
+    for (int a = 3; a >= 0; --a) {
+        off += (j % ext[a]) * str[a];
+        j /= ext[a];
+    }
+    dst[dst_j] = *reinterpret_cast<const E*>(src + off);
+}
+
+template <class E>
+__global__ void copyStrided(char* dst, const char* src, long long n, long long d0, long long d1, long long d2,
+    long long d3, long long s0, long long s1, long long s2, long long s3, long long e0, long long e1, long long e2,
+    long long e3)
+{
+    long long j = globalIndex();
+    if (j >= n)
+        return;
+    const long long ext[4] = { e0, e1, e2, e3 };
+    const long long dstr[4] = { d0, d1, d2, d3 };
+    const long long sstr[4] = { s0, s1, s2, s3 };
+    long long doff = 0, soff = 0;
+    for (int a = 3; a >= 0; --a) {
+        const long long i = j % ext[a];
+        doff += i * dstr[a];
+        soff += i * sstr[a];
+        j /= ext[a];
+    }
+    *reinterpret_cast<E*>(dst + doff) = *reinterpret_cast<const E*>(src + soff);
+}
+
+unsigned gridFor(long long n)
+{
+    constexpr long long maxGrid = 2147483647LL;
+    const long long g = (n + kBlock - 1) / kBlock;
+    if (g > maxGrid)
+        throw Unsupported("eagle_backend_cell_op: n = " + std::to_string(n) + " is past the launch grid");
+    return static_cast<unsigned>(g);
+}
+
+template <class E>
+void launchGather(const eagle_backend_cell_op_desc& d, cudaStream_t s)
+{
+    const int nd = static_cast<int>(d.i[1]);
+    long long ext[4] = { 1, 1, 1, 1 }, str[4] = { 0, 0, 0, 0 };
+    // right-align the used axes so the kernel's loop walks ndim..0 over a fixed 4-slot array
+    for (int a = 0; a < nd; ++a) {
+        ext[4 - nd + a] = d.i[2 + a];
+        str[4 - nd + a] = d.i[6 + a];
+    }
+    gather<E><<<gridFor(d.n), kBlock, 0, s>>>(reinterpret_cast<E*>(d.p[0]), reinterpret_cast<const char*>(d.p[1]), d.n,
+        str[0], str[1], str[2], str[3], ext[0], ext[1], ext[2], ext[3]);
+}
+
+template <class E>
+void launchCopyStrided(const eagle_backend_cell_op_desc& d, cudaStream_t s)
+{
+    const int nd = static_cast<int>(d.i[1]);
+    long long ext[4] = { 1, 1, 1, 1 }, dstr[4] = { 0, 0, 0, 0 }, sstr[4] = { 0, 0, 0, 0 };
+    for (int a = 0; a < nd; ++a) {
+        ext[4 - nd + a] = d.i[2 + a];
+        dstr[4 - nd + a] = d.i[6 + a];
+        sstr[4 - nd + a] = d.j[a];
+    }
+    copyStrided<E><<<gridFor(d.n), kBlock, 0, s>>>(reinterpret_cast<char*>(d.p[0]), reinterpret_cast<const char*>(d.p[1]),
+        d.n, dstr[0], dstr[1], dstr[2], dstr[3], sstr[0], sstr[1], sstr[2], sstr[3], ext[0], ext[1], ext[2], ext[3]);
+}
+
+void launchCast(const eagle_backend_cell_op_desc& d, cudaStream_t s)
+{
+    void* dst = reinterpret_cast<void*>(d.p[0]);
+    const int dt = static_cast<int>(d.i[0]);
+#define EAGLE_CAST_FROM(T)                                                                                       \
+    castFrom<T><<<gridFor(d.n), kBlock, 0, s>>>(dst, reinterpret_cast<const T*>(d.p[1]), d.n, dt)
+    switch (d.i[1]) {
+    case EAGLE_BACKEND_DTYPE_BOOL: EAGLE_CAST_FROM(bool); break;
+    case EAGLE_BACKEND_DTYPE_UINT8: EAGLE_CAST_FROM(std::uint8_t); break;
+    case EAGLE_BACKEND_DTYPE_INT32: EAGLE_CAST_FROM(std::int32_t); break;
+    case EAGLE_BACKEND_DTYPE_UINT32: EAGLE_CAST_FROM(std::uint32_t); break;
+    case EAGLE_BACKEND_DTYPE_INT64: EAGLE_CAST_FROM(std::int64_t); break;
+    case EAGLE_BACKEND_DTYPE_UINT64: EAGLE_CAST_FROM(std::uint64_t); break;
+    case EAGLE_BACKEND_DTYPE_FLOAT32: EAGLE_CAST_FROM(float); break;
+    case EAGLE_BACKEND_DTYPE_FLOAT16: EAGLE_CAST_FROM(__half); break;
+    case EAGLE_BACKEND_DTYPE_BFLOAT16: EAGLE_CAST_FROM(__nv_bfloat16); break;
+    default: EAGLE_CAST_FROM(double); break;
+    }
+#undef EAGLE_CAST_FROM
+}
+
+bool validDtype(std::int64_t c)
+{
+    return c >= EAGLE_BACKEND_DTYPE_BOOL && c <= EAGLE_BACKEND_DTYPE_BFLOAT16;
+}
+
+/** Compute capability of the current device (the caller's DeviceScope is active). */
+void computeCapability(int, int& major, int& minor)
+{
+    const int dev = currentDevice();
+    checkCuda(cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev), "cudaDeviceGetAttribute");
+    checkCuda(cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, dev), "cudaDeviceGetAttribute");
+}
+
+void need(const eagle_backend_cell_op_desc& d, int pointers, const char* who)
+{
+    for (int k = 0; k < pointers; ++k)
+        if (d.p[k] == 0)
+            throw std::invalid_argument(std::string(who) + ": p" + std::to_string(k) + " must be a device address");
+}
+
+/** Validate @p d for its op and enqueue it on @p s. Returns false when there is nothing to launch. */
+void run(const eagle_backend_cell_op_desc& d, cudaStream_t s)
+{
+    constexpr const char* who = "eagle_backend_cell_op";
+    if (d.n < 0)
+        throw std::invalid_argument(std::string(who) + ": n must be >= 0");
+    switch (d.op) {
+    case EAGLE_BACKEND_CELL_BUMP:
+        need(d, 1, who);
+        bump<<<1, 1, 0, s>>>(reinterpret_cast<unsigned int*>(d.p[0]));
+        break;
+    case EAGLE_BACKEND_CELL_MASK_COUNT:
+        if (d.n == 0)
+            return;
+        need(d, 2, who);
+        maskCount<<<gridFor(d.n), kBlock, 0, s>>>(reinterpret_cast<const std::uint8_t*>(d.p[0]),
+            reinterpret_cast<unsigned int*>(d.p[1]), d.n);
+        break;
+    case EAGLE_BACKEND_CELL_POLICY:
+        need(d, 6, who);
+        policy<<<1, 1, 0, s>>>(reinterpret_cast<const unsigned int*>(d.p[0]),
+            reinterpret_cast<const unsigned int*>(d.p[1]), reinterpret_cast<long long*>(d.p[2]),
+            reinterpret_cast<long long*>(d.p[3]), reinterpret_cast<unsigned int*>(d.p[4]),
+            reinterpret_cast<long long*>(d.p[5]), d.i[0], d.i[1], static_cast<int>(d.i[2]), static_cast<int>(d.i[3]),
+            static_cast<int>(d.i[4]), static_cast<int>(d.i[5]), static_cast<int>(d.i[6]), static_cast<int>(d.i[7]),
+            static_cast<int>(d.i[8]));
+        break;
+    case EAGLE_BACKEND_CELL_IDENTITY:
+        if (d.n == 0)
+            return;
+        need(d, 1, who);
+        identity<<<gridFor(d.n), kBlock, 0, s>>>(reinterpret_cast<std::int32_t*>(d.p[0]), d.n);
+        break;
+    case EAGLE_BACKEND_CELL_COUNT_FIRED:
+        need(d, 2, who);
+        countFired<<<1, 1, 0, s>>>(reinterpret_cast<const unsigned int*>(d.p[0]),
+            reinterpret_cast<unsigned int*>(d.p[1]));
+        break;
+    case EAGLE_BACKEND_CELL_GROUP_AND:
+        if (d.n == 0)
+            return;
+        need(d, 2, who);
+        if (d.i[1] < 1)
+            throw std::invalid_argument(std::string(who) + ": GROUP_AND group must be >= 1");
+        groupAnd<<<gridFor(d.n), kBlock, 0, s>>>(reinterpret_cast<const std::uint8_t*>(d.p[0]),
+            reinterpret_cast<std::uint8_t*>(d.p[1]), d.i[0], static_cast<int>(d.i[1]), d.n);
+        break;
+    case EAGLE_BACKEND_CELL_SCALE_COUNT:
+        need(d, 2, who);
+        scaleCount<<<1, 1, 0, s>>>(reinterpret_cast<const unsigned int*>(d.p[0]),
+            reinterpret_cast<unsigned int*>(d.p[1]), static_cast<int>(d.i[0]));
+        break;
+    case EAGLE_BACKEND_CELL_CAST:
+        if (d.n == 0)
+            return;
+        need(d, 2, who);
+        if (!validDtype(d.i[0]) || !validDtype(d.i[1]))
+            throw std::invalid_argument(std::string(who) + ": CAST needs dtype codes in [0, 9]");
+        launchCast(d, s);
+        break;
+    case EAGLE_BACKEND_CELL_CONTIGUOUS_GATHER: {
+        if (d.n == 0)
+            return;
+        need(d, 2, who);
+        const std::int64_t nd = d.i[1];
+        if (nd < 1 || nd > 4)
+            throw std::invalid_argument(std::string(who) + ": CONTIGUOUS_GATHER ndim must be 1..4");
+        std::int64_t prod = 1;
+        for (std::int64_t a = 0; a < nd; ++a) {
+            if (d.i[2 + a] < 1)
+                throw std::invalid_argument(std::string(who) + ": CONTIGUOUS_GATHER shape entries must be >= 1");
+            prod *= d.i[2 + a];
+        }
+        if (prod != d.n)
+            throw std::invalid_argument(std::string(who) + ": CONTIGUOUS_GATHER n must be the product of the shape");
+        switch (d.i[0]) {
+        case 1: launchGather<std::uint8_t>(d, s); break;
+        case 2: launchGather<std::uint16_t>(d, s); break;
+        case 4: launchGather<std::uint32_t>(d, s); break;
+        case 8: launchGather<std::uint64_t>(d, s); break;
+        default:
+            throw std::invalid_argument(std::string(who) + ": CONTIGUOUS_GATHER elem bytes must be 1, 2, 4 or 8");
+        }
+        break;
+    }
+    case EAGLE_BACKEND_CELL_STRIDED_COPY: {
+        if (d.n == 0)
+            return;
+        need(d, 2, who);
+        const std::int64_t nd = d.i[1];
+        if (nd < 1 || nd > 4)
+            throw std::invalid_argument(std::string(who) + ": STRIDED_COPY ndim must be 1..4");
+        std::int64_t prod = 1;
+        for (std::int64_t a = 0; a < nd; ++a) {
+            if (d.i[2 + a] < 1)
+                throw std::invalid_argument(std::string(who) + ": STRIDED_COPY shape entries must be >= 1");
+            prod *= d.i[2 + a];
+        }
+        if (prod != d.n)
+            throw std::invalid_argument(std::string(who) + ": STRIDED_COPY n must be the product of the shape");
+        switch (d.i[0]) {
+        case 1: launchCopyStrided<std::uint8_t>(d, s); break;
+        case 2: launchCopyStrided<std::uint16_t>(d, s); break;
+        case 4: launchCopyStrided<std::uint32_t>(d, s); break;
+        case 8: launchCopyStrided<std::uint64_t>(d, s); break;
+        default:
+            throw std::invalid_argument(std::string(who) + ": STRIDED_COPY elem bytes must be 1, 2, 4 or 8");
+        }
+        break;
+    }
+    case EAGLE_BACKEND_CELL_ADD: case EAGLE_BACKEND_CELL_FILL: case EAGLE_BACKEND_CELL_SUB: case EAGLE_BACKEND_CELL_MUL:
+    case EAGLE_BACKEND_CELL_MAX: case EAGLE_BACKEND_CELL_EQ: case EAGLE_BACKEND_CELL_NE:
+    case EAGLE_BACKEND_CELL_GT: case EAGLE_BACKEND_CELL_WHERE: case EAGLE_BACKEND_CELL_CLIP:
+    case EAGLE_BACKEND_CELL_ARANGE: case EAGLE_BACKEND_CELL_LINSPACE: case EAGLE_BACKEND_CELL_TAKE:
+    case EAGLE_BACKEND_CELL_CUMSUM: case EAGLE_BACKEND_CELL_SCATTER: case EAGLE_BACKEND_CELL_COUNT_NONZERO:
+    case EAGLE_BACKEND_CELL_FLATNONZERO:
+    case EAGLE_BACKEND_CELL_ADDS: case EAGLE_BACKEND_CELL_SUBS: case EAGLE_BACKEND_CELL_MULS:
+    case EAGLE_BACKEND_CELL_MAXS: case EAGLE_BACKEND_CELL_EQS: case EAGLE_BACKEND_CELL_NES:
+    case EAGLE_BACKEND_CELL_GTS: case EAGLE_BACKEND_CELL_RSUBS: case EAGLE_BACKEND_CELL_LTS: {
+        if (d.n == 0)
+            return;
+        need(d, 1, who);
+        eagle::array::Args a;
+        a.p0 = reinterpret_cast<void*>(d.p[0]);
+        a.p1 = reinterpret_cast<const void*>(d.p[1]);
+        a.p2 = reinterpret_cast<const void*>(d.p[2]);
+        a.p3 = reinterpret_cast<const void*>(d.p[3]);
+        a.n = d.n;
+        a.i0 = d.i[0];
+        a.i1 = d.i[1];
+        a.f0 = d.f[0];
+        a.f1 = d.f[1];
+        a.dtype = static_cast<int>(d.op == EAGLE_BACKEND_CELL_ADD ? d.i[0] : d.i[9]);
+        {
+            int major = 0, minor = 0;
+            computeCapability(d.device, major, minor);
+            eagle::array::check_arch(static_cast<eagle::array::Op>(d.op), a.dtype, major, minor);
+        }
+        eagle::array::device::enqueue(static_cast<eagle::array::Op>(d.op), a, s);
+        break;
+    }
+    default:
+        throw Unsupported(std::string(who) + ": the CUDA backend has no op " + std::to_string(d.op));
+    }
+}
+
+} // namespace cellop
+
+} // namespace
+
+EAGLE_BACKEND_API eagle_backend_status eagle_backend_device_count(std::int32_t* count)
+{
+    return guarded([&] {
+        requireDevice();
+        int n = 0;
+        checkCuda(cudaGetDeviceCount(&n), "cudaGetDeviceCount");
+        out(count, static_cast<std::int32_t>(n));
+    });
+}
+
+EAGLE_BACKEND_API eagle_backend_status eagle_backend_set_device(std::int32_t device)
+{
+    return guarded([&] {
+        requireDevice();
+        if (device < 0)
+            throw std::invalid_argument("eagle_backend_set_device: device must be >= 0, got " + std::to_string(device));
+        checkCuda(cudaSetDevice(device), "cudaSetDevice");
+    });
+}
+
+EAGLE_BACKEND_API eagle_backend_status eagle_backend_get_device(std::int32_t* device)
+{
+    return guarded([&] {
+        if (device == nullptr)
+            throw std::invalid_argument("eagle_backend_get_device: device is null");
+        requireDevice();
+        *device = currentDevice();
+    });
+}
+
+EAGLE_BACKEND_API eagle_backend_status eagle_backend_launch_status(std::int32_t device)
+{
+    return guarded([&] {
+        requireDevice();
+        DeviceScope scope(deviceOrCurrent(device));
+        const cudaError_t e = cudaGetLastError();      // reads and clears the error; waits for nothing
+        if (e != cudaSuccess)
+            throw std::runtime_error(std::string("CUDA launch error ") + cudaGetErrorName(e) + ": " + cudaGetErrorString(e));
+    });
+}
+
+EAGLE_BACKEND_API eagle_backend_status eagle_backend_device_synchronize(std::int32_t device)
+{
+    return guarded([&] {
+        requireDevice();
+        DeviceScope scope(deviceOrCurrent(device));
+        ensureContext();
+        static const auto sync = driverEntry12<CUresult (*)()>("cuCtxSynchronize");
+        checkDriver(sync(), "cuCtxSynchronize");
+    });
+}
+
+EAGLE_BACKEND_API eagle_backend_status eagle_backend_stream_is_capturing(std::uint64_t stream, std::int32_t* capturing)
+{
+    return guarded([&] {
+        requireDevice();
+        DeviceScope scope(resolveDevice(-1, stream));
+        ensureContext();
+        static const auto query = driverEntry12<CUresult (*)(CUstream, CUstreamCaptureStatus*)>("cuStreamIsCapturing");
+        CUstreamCaptureStatus status = CU_STREAM_CAPTURE_STATUS_NONE;
+        checkDriver(query(reinterpret_cast<CUstream>(seamStream(stream)), &status), "cuStreamIsCapturing");
+        out(capturing, status == CU_STREAM_CAPTURE_STATUS_ACTIVE ? 1 : 0);
+    });
+}
+
+EAGLE_BACKEND_API eagle_backend_status eagle_backend_module_load(const void* image, std::uint64_t bytes,
+    std::int32_t device, std::uint64_t* module)
+{
+    return guarded([&] {
+        if (image == nullptr || bytes == 0)
+            throw std::invalid_argument("eagle_backend_module_load: empty image");
+        requireDevice();
+        DeviceScope scope(deviceOrCurrent(device));
+        ensureContext();
+        static const auto load = driverEntry12<CUresult (*)(CUmodule*, const void*)>("cuModuleLoadData");
+        // PTX text must end in NUL; a cubin or fatbin ignores the extra byte.
+        std::string copy(static_cast<const char*>(image), static_cast<std::size_t>(bytes));
+        CUmodule m = nullptr;
+        checkDriver(load(&m, copy.c_str()), "cuModuleLoadData");
+        out(module, reinterpret_cast<std::uint64_t>(m));
+    });
+}
+
+EAGLE_BACKEND_API eagle_backend_status eagle_backend_module_load_jit(const void* image, std::uint64_t bytes,
+    std::int32_t device, std::uint32_t max_registers, std::uint64_t* module)
+{
+    return guarded([&] {
+        if (image == nullptr || bytes == 0)
+            throw std::invalid_argument("eagle_backend_module_load_jit: empty image");
+        requireDevice();
+        DeviceScope scope(deviceOrCurrent(device));
+        ensureContext();
+        static const auto load = driverEntry12<CUresult (*)(CUmodule*, const void*, unsigned int, CUjit_option*, void**)>(
+            "cuModuleLoadDataEx");
+        std::string copy(static_cast<const char*>(image), static_cast<std::size_t>(bytes));
+        CUjit_option option = CU_JIT_MAX_REGISTERS;
+        void* value = reinterpret_cast<void*>(static_cast<std::uintptr_t>(max_registers));
+        CUmodule m = nullptr;
+        checkDriver(load(&m, copy.c_str(), max_registers != 0 ? 1u : 0u, &option, &value), "cuModuleLoadDataEx");
+        out(module, reinterpret_cast<std::uint64_t>(m));
+    });
+}
+
+EAGLE_BACKEND_API eagle_backend_status eagle_backend_link_ptx(const void* image, std::uint64_t bytes, std::int32_t device,
+    std::uint32_t max_registers, void* outBuf, std::uint64_t capacity, std::uint64_t* size)
+{
+    return guarded([&] {
+        if (image == nullptr || bytes == 0 || size == nullptr)
+            throw std::invalid_argument("eagle_backend_link_ptx: empty image or null size");
+        requireDevice();
+        DeviceScope scope(deviceOrCurrent(device));
+        ensureContext();
+        static const auto create = driverEntry12<CUresult (*)(unsigned int, CUjit_option*, void**, CUlinkState*)>("cuLinkCreate");
+        static const auto add = driverEntry12<CUresult (*)(CUlinkState, CUjitInputType, void*, std::size_t, const char*, unsigned int,
+                                                           CUjit_option*, void**)>("cuLinkAddData");
+        static const auto complete = driverEntry12<CUresult (*)(CUlinkState, void**, std::size_t*)>("cuLinkComplete");
+        static const auto destroy = driverEntry12<CUresult (*)(CUlinkState)>("cuLinkDestroy");
+        std::string copy(static_cast<const char*>(image), static_cast<std::size_t>(bytes));
+        CUjit_option option = CU_JIT_MAX_REGISTERS;
+        void* value = reinterpret_cast<void*>(static_cast<std::uintptr_t>(max_registers));
+        CUlinkState state = nullptr;
+        checkDriver(create(max_registers != 0 ? 1u : 0u, &option, &value, &state), "cuLinkCreate");
+        try {
+            checkDriver(add(state, CU_JIT_INPUT_PTX, copy.data(), copy.size() + 1, "entry", 0, nullptr, nullptr), "cuLinkAddData");
+            void* cubin = nullptr;
+            std::size_t n = 0;
+            checkDriver(complete(state, &cubin, &n), "cuLinkComplete");
+            if (outBuf != nullptr) {
+                if (capacity < n)
+                    throw std::invalid_argument("eagle_backend_link_ptx: output buffer too small");
+                std::memcpy(outBuf, cubin, n);
+            }
+            out(size, static_cast<std::uint64_t>(n));
+        } catch (...) {
+            destroy(state);
+            throw;
+        }
+        destroy(state);
+    });
+}
+
+EAGLE_BACKEND_API eagle_backend_status eagle_backend_module_function(std::uint64_t module, const char* name,
+    std::uint64_t* function)
+{
+    return guarded([&] {
+        if (module == 0 || name == nullptr)
+            throw BadHandle("eagle_backend_module_function: null module or name");
+        requireDevice();
+        static const auto get = driverEntry12<CUresult (*)(CUfunction*, CUmodule, const char*)>("cuModuleGetFunction");
+        CUfunction f = nullptr;
+        const CUresult r = get(&f, reinterpret_cast<CUmodule>(module), name);
+        if (r == CUDA_ERROR_NOT_FOUND)
+            throw std::out_of_range(std::string("eagle_backend_module_function: no function named '") + name + "'");
+        checkDriver(r, "cuModuleGetFunction");
+        out(function, reinterpret_cast<std::uint64_t>(f));
+    });
+}
+
+EAGLE_BACKEND_API void eagle_backend_module_release(std::uint64_t module, std::int32_t device)
+{
+    if (module == 0)
+        return;
+    try {
+        DeviceScope scope(deviceOrCurrent(device));
+        ensureContext();
+        static const auto unload = driverEntry12<CUresult (*)(CUmodule)>("cuModuleUnload");
+        unload(reinterpret_cast<CUmodule>(module));
+    } catch (...) {
+    }
+}
+
+EAGLE_BACKEND_API eagle_backend_status eagle_backend_function_attribute(std::uint64_t function, std::int32_t attribute,
+    std::int32_t* value)
+{
+    return guarded([&] {
+        if (function == 0)
+            throw BadHandle("eagle_backend_function_attribute: null function");
+        if (value == nullptr)
+            throw std::invalid_argument("eagle_backend_function_attribute: value is null");
+        requireDevice();
+        ensureContext();
+        static const auto query = driverEntry12<CUresult (*)(int*, int, CUfunction)>("cuFuncGetAttribute");
+        int out = 0;
+        checkDriver(query(&out, attribute, reinterpret_cast<CUfunction>(function)), "cuFuncGetAttribute");
+        *value = out;
+    });
+}
+
+EAGLE_BACKEND_API eagle_backend_status eagle_backend_launch_raw(const struct eagle_backend_launch_raw_desc* desc)
+{
+    return guarded([&] {
+        const auto d = readDesc(desc, 0u);
+        if (d.function == 0)
+            throw BadHandle("eagle_backend_launch_raw: null function");
+        if (d.arg_count != 0 && d.args == 0)
+            throw std::invalid_argument("eagle_backend_launch_raw: args is null but arg_count is not");
+        for (int a = 0; a < 3; ++a)
+            if (d.grid[a] == 0 || d.block[a] == 0)
+                return; // an empty launch: nothing to enqueue
+        requireDevice();
+        DeviceScope scope(resolveDevice(d.device, d.stream));
+        ensureContext();
+        static const auto launch = driverEntry12<CUresult (*)(CUfunction, unsigned, unsigned, unsigned, unsigned,
+            unsigned, unsigned, unsigned, CUstream, void**, void**)>("cuLaunchKernel");
+        checkDriver(launch(reinterpret_cast<CUfunction>(d.function), d.grid[0], d.grid[1], d.grid[2], d.block[0],
+                        d.block[1], d.block[2], d.shared_bytes, reinterpret_cast<CUstream>(seamStream(d.stream)),
+                        reinterpret_cast<void**>(d.args), nullptr),
+            "cuLaunchKernel");
+    });
+}
+
+EAGLE_BACKEND_API eagle_backend_status eagle_backend_cell_op(const struct eagle_backend_cell_op_desc* desc)
+{
+    return guarded([&] {
+        const auto d = readDesc(desc, 0xFFFFFFFFu);
+        requireDevice();
+        DeviceScope scope(resolveDevice(d.device, d.stream));
+        bracketed("eagle_backend_cell_op", "enqueue", [&] {
+            cellop::run(d, seamStream(d.stream));
+            return 0;
+        });
+    });
+}
+
+EAGLE_BACKEND_API eagle_backend_status eagle_backend_memcpy_strided(std::uint64_t dst, std::uint64_t dstPitch,
+    std::uint64_t src, std::uint64_t srcPitch, std::uint64_t widthBytes, std::uint64_t height, std::int32_t kind,
+    std::uint64_t stream)
+{
+    return guarded([&] {
+        if (!eagle::exec::validCopyKind(kind) || kind == EAGLE_BACKEND_COPY_H2H)
+            throw std::invalid_argument("eagle_backend_memcpy_strided: unknown or unsupported copy kind "
+                + std::to_string(kind));
+        if (widthBytes == 0 || height == 0)
+            return;
+        if (dst == 0 || src == 0)
+            throw std::invalid_argument("eagle_backend_memcpy_strided: null address");
+        if (dstPitch < widthBytes || srcPitch < widthBytes)
+            throw std::invalid_argument("eagle_backend_memcpy_strided: a pitch is smaller than width_bytes");
+        requireDevice();
+        DeviceScope scope(resolveDevice(-1, stream));
+        ensureContext();
+        // Unified addressing: the memory types are read from the addresses, so one
+        // descriptor serves every direction.
+        CUDA_MEMCPY2D c {};
+        c.srcMemoryType = CU_MEMORYTYPE_UNIFIED;
+        c.dstMemoryType = CU_MEMORYTYPE_UNIFIED;
+        c.srcDevice = static_cast<CUdeviceptr>(src);
+        c.dstDevice = static_cast<CUdeviceptr>(dst);
+        c.srcPitch = static_cast<std::size_t>(srcPitch);
+        c.dstPitch = static_cast<std::size_t>(dstPitch);
+        c.WidthInBytes = static_cast<std::size_t>(widthBytes);
+        c.Height = static_cast<std::size_t>(height);
+        static const auto copy = driverEntry12<CUresult (*)(const CUDA_MEMCPY2D*, CUstream)>("cuMemcpy2DAsync");
+        checkDriver(copy(&c, reinterpret_cast<CUstream>(seamStream(stream))), "cuMemcpy2DAsync");
+    });
+}
+
+
+// ---- minor 7: stream-ordered memory --------------------------------------------------
+
+namespace {
+
+/** The seam's chunk handle is an ``aether::Chunk*``: aether owns the memory rules (stream-ordered allocation, the free
+ *  queued on the allocation stream and DEFERRED while that stream is capturing, drained by ``drainDeferredFrees``). */
+bool capturing(std::uint64_t stream)
+{
+    static const auto query = driverEntry12<CUresult (*)(CUstream, CUstreamCaptureStatus*)>("cuStreamIsCapturing");
+    CUstreamCaptureStatus st = CU_STREAM_CAPTURE_STATUS_NONE;
+    return query(reinterpret_cast<CUstream>(seamStream(stream)), &st) == CUDA_SUCCESS
+        && st != CU_STREAM_CAPTURE_STATUS_NONE;
+}
+
+} // namespace
+
+EAGLE_BACKEND_API eagle_backend_status eagle_backend_mem_alloc(std::int32_t kind, std::int32_t device,
+    std::uint64_t bytes, std::uint64_t stream, std::uint64_t* chunk, std::uint64_t* ptr)
+{
+    return guarded([&] {
+        if (chunk == nullptr || ptr == nullptr)
+            throw std::invalid_argument("eagle: null output pointer");
+        *chunk = 0;
+        *ptr = 0;
+        if (kind != EAGLE_BACKEND_MEM_DEVICE && kind != EAGLE_BACKEND_MEM_PINNED)
+            throw std::invalid_argument("eagle_backend_mem_alloc: unknown kind " + std::to_string(kind));
+        if (bytes == 0)
+            return;
+        requireDevice();
+        const int dev = resolveDevice(device, kind == EAGLE_BACKEND_MEM_DEVICE ? std::optional<std::uint64_t>(stream)
+                                                                                : std::nullopt);
+        DeviceScope scope(dev);
+        ensureContext();
+        if (kind == EAGLE_BACKEND_MEM_DEVICE && capturing(stream))
+            throw std::runtime_error("eagle_backend_mem_alloc: allocation inside a stream capture is refused "
+                                     "(allocate before the capture begins)");
+        auto c = std::make_unique<aether::Chunk>(aether::Chunk::allocate(
+            kind == EAGLE_BACKEND_MEM_DEVICE ? aether::Device(kDLCUDA, dev) : aether::Device(kDLCUDAHost, 0),
+            static_cast<std::size_t>(bytes), static_cast<aether::Stream>(seamStream(stream))));
+        if (kind == EAGLE_BACKEND_MEM_DEVICE)
+            streams().ref(c->stream());
+        *ptr = reinterpret_cast<std::uint64_t>(c->data());
+        *chunk = reinterpret_cast<std::uint64_t>(c.release());
+    });
+}
+
+EAGLE_BACKEND_API void eagle_backend_mem_release(std::uint64_t chunk)
+{
+    auto* c = reinterpret_cast<aether::Chunk*>(chunk);
+    if (c == nullptr)
+        return;
+    const bool onStream = c->device().type() == kDLCUDA && c->streamOrdered();
+    const cudaStream_t stream = onStream ? c->stream() : nullptr;
+    try {
+        DeviceScope scope(c->device().type() == kDLCUDA ? c->device().id() : currentDevice());
+        ensureContext();
+        delete c;   // frees on the allocation stream, or defers while it is capturing
+    } catch (...) {
+    }
+    streams().unref(stream);
+}
+
+EAGLE_BACKEND_API eagle_backend_status eagle_backend_mem_drain(std::int64_t* left)
+{
+    return guarded([&] {
+        aether::drainDeferredFrees();
+        streams().reap();
+        if (left != nullptr)
+            *left = static_cast<std::int64_t>(aether::deferredFreeCount());
+    });
+}
+
+EAGLE_BACKEND_API eagle_backend_status eagle_backend_stream_sync(std::int32_t device, std::uint64_t stream)
+{
+    return guarded([&] {
+        requireDevice();
+        DeviceScope scope(resolveDevice(device, stream));
+        ensureContext();
+        checkCuda(cudaStreamSynchronize(seamStream(stream)), "cudaStreamSynchronize");
+    });
+}
+
+EAGLE_BACKEND_API eagle_backend_status eagle_backend_event_create(std::int32_t device, std::uint64_t* event)
+{
+    return guarded([&] {
+        if (event == nullptr)
+            throw std::invalid_argument("eagle_backend_event_create: event is null");
+        requireDevice();
+        DeviceScope scope(deviceOrCurrent(device));
+        ensureContext();
+        cudaEvent_t e = nullptr;
+        checkCuda(cudaEventCreateWithFlags(&e, cudaEventDisableTiming), "cudaEventCreateWithFlags");
+        *event = reinterpret_cast<std::uint64_t>(e);
+    });
+}
+
+EAGLE_BACKEND_API eagle_backend_status eagle_backend_event_create_timed(std::int32_t device, std::uint64_t* event)
+{
+    return guarded([&] {
+        if (event == nullptr)
+            throw std::invalid_argument("eagle_backend_event_create_timed: event is null");
+        requireDevice();
+        DeviceScope scope(deviceOrCurrent(device));
+        ensureContext();
+        cudaEvent_t e = nullptr;
+        checkCuda(cudaEventCreateWithFlags(&e, cudaEventDefault), "cudaEventCreateWithFlags");
+        *event = reinterpret_cast<std::uint64_t>(e);
+    });
+}
+
+EAGLE_BACKEND_API eagle_backend_status eagle_backend_event_elapsed(std::uint64_t start, std::uint64_t end, float* ms)
+{
+    return guarded([&] {
+        if (ms == nullptr)
+            throw std::invalid_argument("eagle_backend_event_elapsed: ms is null");
+        if (start == 0 || end == 0)
+            throw BadHandle("eagle_backend_event_elapsed: null event");
+        requireDevice();
+        ensureContext();
+        checkCuda(cudaEventElapsedTime(ms, reinterpret_cast<cudaEvent_t>(start), reinterpret_cast<cudaEvent_t>(end)),
+                  "cudaEventElapsedTime");
+    });
+}
+
+EAGLE_BACKEND_API eagle_backend_status eagle_backend_event_record(std::uint64_t event, std::uint64_t stream)
+{
+    return guarded([&] {
+        if (event == 0)
+            throw BadHandle("eagle_backend_event_record: null event");
+        requireDevice();
+        DeviceScope scope(resolveDevice(-1, stream));
+        ensureContext();
+        checkCuda(cudaEventRecord(reinterpret_cast<cudaEvent_t>(event), seamStream(stream)), "cudaEventRecord");
+    });
+}
+
+EAGLE_BACKEND_API eagle_backend_status eagle_backend_event_wait(std::uint64_t stream, std::uint64_t event)
+{
+    return guarded([&] {
+        if (event == 0)
+            throw BadHandle("eagle_backend_event_wait: null event");
+        requireDevice();
+        DeviceScope scope(resolveDevice(-1, stream));
+        ensureContext();
+        checkCuda(cudaStreamWaitEvent(seamStream(stream), reinterpret_cast<cudaEvent_t>(event), 0), "cudaStreamWaitEvent");
+    });
+}
+
+// ---- GEMM: cuBLAS, loaded when first asked for --------------------------------------------------
+
+namespace {
+
+struct Cublas {
+    void* lib = nullptr;
+    int (*create)(void**) = nullptr;
+    int (*destroy)(void*) = nullptr;
+    int (*setStream)(void*, void*) = nullptr;
+    int (*sgemm)(void*, int, int, int, int, int, const float*, const float*, int, const float*, int, const float*, float*, int) = nullptr;
+    int (*dgemm)(void*, int, int, int, int, int, const double*, const double*, int, const double*, int, const double*, double*, int) = nullptr;
+    int (*sgemmB)(void*, int, int, int, int, int, const float*, const float*, int, long long, const float*, int, long long, const float*, float*, int, long long, int) = nullptr;
+    int (*dgemmB)(void*, int, int, int, int, int, const double*, const double*, int, long long, const double*, int, long long, const double*, double*, int, long long, int) = nullptr;
+};
+
+const Cublas& cublas()
+{
+    static const Cublas c = [] {
+        Cublas r;
+        // EAGLE_CUBLAS_LIBRARY names the one library to load (a path or soname), instead of the default search
+        static const char* const names[] = { "libcublas.so.13", "libcublas.so.12", "libcublas.so" };
+        if (const char* only = std::getenv("EAGLE_CUBLAS_LIBRARY"); only != nullptr && *only != '\0') {
+            r.lib = dlopen(only, RTLD_NOW | RTLD_GLOBAL);
+        } else {
+            for (const char* nm : names)
+                if ((r.lib = dlopen(nm, RTLD_NOW | RTLD_GLOBAL)) != nullptr)
+                    break;
+        }
+        if (r.lib == nullptr)
+            return r;
+        auto sym = [&](const char* s) { return dlsym(r.lib, s); };
+        r.create = reinterpret_cast<decltype(r.create)>(sym("cublasCreate_v2"));
+        r.destroy = reinterpret_cast<decltype(r.destroy)>(sym("cublasDestroy_v2"));
+        r.setStream = reinterpret_cast<decltype(r.setStream)>(sym("cublasSetStream_v2"));
+        r.sgemm = reinterpret_cast<decltype(r.sgemm)>(sym("cublasSgemm_v2"));
+        r.dgemm = reinterpret_cast<decltype(r.dgemm)>(sym("cublasDgemm_v2"));
+        r.sgemmB = reinterpret_cast<decltype(r.sgemmB)>(sym("cublasSgemmStridedBatched"));
+        r.dgemmB = reinterpret_cast<decltype(r.dgemmB)>(sym("cublasDgemmStridedBatched"));
+        if (!r.create || !r.destroy || !r.setStream || !r.sgemm || !r.dgemm || !r.sgemmB || !r.dgemmB)
+            r.lib = nullptr;
+        return r;
+    }();
+    if (c.lib == nullptr)
+        throw DeviceUnavailable("eagle: cuBLAS is not available (libcublas.so.13 / .12 could not be loaded); install "
+                                "the CUDA cuBLAS library (pip install nvidia-cublas-cu12 or nvidia-cublas) to run a GEMM on the device");
+    return c;
+}
+
+std::mutex gGemmLock;
+std::map<std::pair<int, std::uint64_t>, void*> gGemmHandles;
+
+void checkBlas(int status, const char* what)
+{
+    if (status != 0)
+        throw std::runtime_error(std::string("eagle: ") + what + " returned cuBLAS status " + std::to_string(status));
+}
+
+}  // namespace
+
+EAGLE_BACKEND_API eagle_backend_status eagle_backend_gemm(const eagle_backend_gemm_desc* d)
+{
+    return guarded([&] {
+        if (d == nullptr || d->struct_size < sizeof(eagle_backend_gemm_desc))
+            throw std::invalid_argument("eagle_backend_gemm: bad descriptor");
+        if (d->m < 0 || d->n < 0 || d->k < 0 || d->batch < 1 || d->op_a > 1 || d->op_b > 1 || d->dtype > 1)
+            throw std::invalid_argument("eagle_backend_gemm: bad shape, batch, op or dtype");
+        const Cublas& b = cublas();
+        requireDevice();
+        const int dev = d->device >= 0 ? d->device : streamDevice(d->stream);
+        DeviceScope scope(dev);
+        ensureContext();
+        void* handle = nullptr;
+        {
+            std::lock_guard<std::mutex> g(gGemmLock);
+            void*& h = gGemmHandles[{ dev, d->stream }];
+            if (h == nullptr) {
+                checkBlas(b.create(&h), "cublasCreate");
+                void* s = d->stream == 0 ? nullptr : reinterpret_cast<void*>(d->stream);
+                checkBlas(b.setStream(h, s), "cublasSetStream");
+            }
+            handle = h;
+        }
+        const int m = static_cast<int>(d->m), n = static_cast<int>(d->n), k = static_cast<int>(d->k);
+        const int lda = static_cast<int>(d->lda), ldb = static_cast<int>(d->ldb), ldc = static_cast<int>(d->ldc);
+        const void* A = reinterpret_cast<const void*>(d->a);
+        const void* B = reinterpret_cast<const void*>(d->b);
+        void* C = reinterpret_cast<void*>(d->c);
+        if (d->dtype == EAGLE_BACKEND_GEMM_F32) {
+            const float al = static_cast<float>(d->alpha), be = static_cast<float>(d->beta);
+            if (d->batch == 1)
+                checkBlas(b.sgemm(handle, d->op_a, d->op_b, m, n, k, &al, static_cast<const float*>(A), lda, static_cast<const float*>(B), ldb, &be, static_cast<float*>(C), ldc), "cublasSgemm");
+            else
+                checkBlas(b.sgemmB(handle, d->op_a, d->op_b, m, n, k, &al, static_cast<const float*>(A), lda, d->stride_a, static_cast<const float*>(B), ldb, d->stride_b, &be, static_cast<float*>(C), ldc, d->stride_c, static_cast<int>(d->batch)), "cublasSgemmStridedBatched");
+        } else {
+            if (d->batch == 1)
+                checkBlas(b.dgemm(handle, d->op_a, d->op_b, m, n, k, &d->alpha, static_cast<const double*>(A), lda, static_cast<const double*>(B), ldb, &d->beta, static_cast<double*>(C), ldc), "cublasDgemm");
+            else
+                checkBlas(b.dgemmB(handle, d->op_a, d->op_b, m, n, k, &d->alpha, static_cast<const double*>(A), lda, d->stride_a, static_cast<const double*>(B), ldb, d->stride_b, &d->beta, static_cast<double*>(C), ldc, d->stride_c, static_cast<int>(d->batch)), "cublasDgemmStridedBatched");
+        }
+    });
+}
+
+EAGLE_BACKEND_API void eagle_backend_gemm_release(std::int32_t device, std::uint64_t stream)
+{
+    try {
+        const Cublas& b = cublas();
+        std::lock_guard<std::mutex> g(gGemmLock);
+        const auto it = gGemmHandles.find({ device >= 0 ? device : streamDevice(stream), stream });
+        if (it == gGemmHandles.end())
+            return;
+        b.destroy(it->second);
+        gGemmHandles.erase(it);
+    } catch (...) {
+    }
+}
+
+EAGLE_BACKEND_API void eagle_backend_event_release(std::uint64_t event, std::int32_t device)
+{
+    if (event == 0)
+        return;
+    try {
+        DeviceScope scope(deviceOrCurrent(device));
+        ensureContext();
+        cudaEventDestroy(reinterpret_cast<cudaEvent_t>(event));
+    } catch (...) {
+    }
+}
+
+EAGLE_BACKEND_API eagle_backend_status eagle_backend_pointer_device(std::uint64_t ptr, std::int32_t* device)
+{
+    return guarded([&] {
+        if (device == nullptr)
+            throw std::invalid_argument("eagle: null output pointer");
+        *device = -1;
+        requireDevice();
+        ensureContext();
+        static const auto attr = driverEntry12<CUresult (*)(void*, CUpointer_attribute, CUdeviceptr)>(
+            "cuPointerGetAttribute");
+        unsigned memType = 0;
+        int ordinal = -1;
+        if (attr(&memType, CU_POINTER_ATTRIBUTE_MEMORY_TYPE, static_cast<CUdeviceptr>(ptr)) == CUDA_SUCCESS
+            && memType == CU_MEMORYTYPE_DEVICE
+            && attr(&ordinal, CU_POINTER_ATTRIBUTE_DEVICE_ORDINAL, static_cast<CUdeviceptr>(ptr)) == CUDA_SUCCESS)
+            *device = ordinal;
     });
 }
 

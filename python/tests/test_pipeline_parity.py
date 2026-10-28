@@ -13,6 +13,7 @@ smaller ``test_graph_plugin`` cases don't cover.
 """
 
 import numpy as np
+from eagle import _stream
 import pytest
 
 from eagle import GraphPipeline, LoadedPure, LoadedVector
@@ -52,7 +53,7 @@ def _spec_gravity_zero():
 
     def _zero():
         return cp.cuda.runtime.memsetAsync(
-            out.data.ptr, 0, out.nbytes, cp.cuda.get_current_stream().ptr
+            out.data.ptr, 0, out.nbytes, _stream.current()
         )
 
     return {
@@ -77,7 +78,7 @@ def _spec_two_accel():
 
     def _zero():
         return cp.cuda.runtime.memsetAsync(
-            out.data.ptr, 0, out.nbytes, cp.cuda.get_current_stream().ptr
+            out.data.ptr, 0, out.nbytes, _stream.current()
         )
 
     return {

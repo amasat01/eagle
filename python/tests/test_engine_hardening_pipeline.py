@@ -6,7 +6,7 @@
 Two mechanisms in ``eagle/pipeline.py`` are gated here:
 
 * **Cached replay events.** ``GraphPipeline.launch`` reuses an
-  INSTANCE-CACHED ``cupy.cuda.Event`` pair (two, on the common path) across
+  INSTANCE-CACHED event pair (``eagle._stream.Event``) (two, on the common path) across
   calls, re-recording rather than reallocating them on the
   replay-critical path. This probe established that re-recording a cached event is legal
   (``cudaStreamWaitEvent`` SNAPSHOTS the event at the wait, so a later record
@@ -17,11 +17,11 @@ Two mechanisms in ``eagle/pipeline.py`` are gated here:
   REVERSE hazard an unconditional sync would hide.
 
 **How this file tests them WITHOUT a device.** ``GraphPipeline.enqueue`` /
-``synchronize`` / ``_record_seed_events`` reach cupy only through a
-function-local ``import cupy as cp``, and touch the outside world only through
-``self._ext`` (the pipeline's own stream) and ``self._launcher``. So a pipeline
-built with ``object.__new__`` (no capture, no driver) plus a stand-in ``cupy``
-module in ``sys.modules`` exercises the REAL methods and records the exact
+``synchronize`` reach events and the caller's stream only through
+``eagle._stream`` (``Event``, ``current``), and touch the outside world only through
+``self._sptr`` (the pipeline's own stream) and ``self._launcher``. So a pipeline
+built with ``object.__new__`` (no capture, no driver) plus stand-in ``Event`` and
+``current`` in ``eagle._stream`` exercises the REAL methods and records the exact
 sequence of event records, stream waits and launcher calls they issue. That is
 the whole ordering contract, observable, on a host-only worker.
 
@@ -35,8 +35,6 @@ test, and must reject it.
 
 from __future__ import annotations
 
-import sys
-import types
 
 import pytest
 
@@ -47,12 +45,10 @@ from eagle.pipeline import GraphPipeline
 # The device-free stand-ins.
 # --------------------------------------------------------------------------- #
 
-_LEGACY_PTR = 0  # what cupy's Stream.null.ptr is
+_LEGACY_PTR = 1  # the legacy default stream, as eagle spells it
 
-
-class _FakeStream:
-    def __init__(self, ptr):
-        self.ptr = ptr
+#: stub pipeline handle -> ``(log, tag)``: where a stand-in event's ``wait`` logs.
+_STUB_STREAMS: dict = {}
 
 
 def _event_class():
@@ -62,47 +58,19 @@ def _event_class():
     class _FakeEvent:
         constructed = 0
 
-        def __init__(self):
+        def __init__(self, device=-1):
             _FakeEvent.constructed += 1
             self.uid = _FakeEvent.constructed
-            self.records = []  # stream ptrs this event was recorded on
+            self.records = []  # stream handles this event was recorded on
 
         def record(self, stream):
-            self.records.append(stream.ptr)
+            self.records.append(int(stream))
+
+        def wait(self, stream):
+            log, tag = _STUB_STREAMS[stream]
+            log.append(("wait", tag, self.uid))
 
     return _FakeEvent
-
-
-def _fake_cupy(event_cls, current_ptr):
-    """A stand-in ``cupy`` module exposing only what pipeline.py reaches for."""
-    cuda = types.SimpleNamespace(
-        Event=event_cls,
-        Stream=types.SimpleNamespace(null=_FakeStream(_LEGACY_PTR)),
-        get_current_stream=lambda: _FakeStream(current_ptr),
-        runtime=types.SimpleNamespace(streamIsCapturing=lambda ptr: False),   # no capture open
-    )
-    mod = types.ModuleType("cupy")
-    mod.cuda = cuda
-    return mod
-
-
-class _FakeExt:
-    """The pipeline's own stream: a ``wait_event`` sink and a ``with``-able."""
-
-    def __init__(self, log, tag="ext"):
-        self.log = log
-        self.tag = tag
-
-    def wait_event(self, event):
-        self.log.append(("wait", self.tag, event.uid))
-
-    def __enter__(self):
-        self.log.append(("stream_enter", self.tag))
-        return self
-
-    def __exit__(self, *exc):
-        self.log.append(("stream_exit", self.tag))
-        return False
 
 
 class _FakeLauncher:
@@ -117,27 +85,54 @@ class _FakeLauncher:
         self.log.append(("sync", self.tag))
 
 
+#: stub pipeline handle -> ``(log, tag)``: what a stand-in ``ExternalStream`` logs into.
+_STUB_STREAMS: dict = {}
+
+
 def _stub_pipeline(log, tag="ext"):
     """A ``GraphPipeline`` with exactly the state ``enqueue``/``synchronize``
     read — built without ``__init__`` so no stream, graph or driver is
     needed. The METHODS under test are the shipped ones."""
     pipe = GraphPipeline.__new__(GraphPipeline)
-    pipe._ext = _FakeExt(log, tag)
+    handle = 4242 + len(_STUB_STREAMS)
+    _STUB_STREAMS[handle] = (log, tag)
+    pipe._sptr = handle
     pipe._launcher = _FakeLauncher(log, tag)
-    pipe._seed_event = None
-    pipe._legacy_event = None
+    pipe._seeds = []
     return pipe
+
+
+def _pair(pipe):
+    """``(seed_event, legacy_event)`` of a stub pipeline, ``None`` for one it never made."""
+    seeds = pipe._seeds + [None, None]
+    return seeds[0], seeds[1]
 
 
 @pytest.fixture
 def fake_cupy(monkeypatch):
-    """Install a stand-in ``cupy``; yields ``(install, uninstalled_event_cls)``
-    where ``install(current_ptr)`` puts the module in ``sys.modules`` and
-    returns the Event class whose ``constructed`` counter the gates read."""
+    """Stand-ins for ``eagle._stream.Event`` and ``eagle._stream.current``; ``install(current)`` returns the
+    Event class whose ``constructed`` counter the gates read. A scope opened on a stub pipeline's stream logs
+    its enter and exit."""
+    import contextlib
+
+    from eagle import _core, _stream, pipeline
 
     def install(current_ptr=7777):
         event_cls = _event_class()
-        monkeypatch.setitem(sys.modules, "cupy", _fake_cupy(event_cls, current_ptr))
+        monkeypatch.setattr(_stream, "Event", event_cls)
+        monkeypatch.setattr(_stream, "current", lambda device=None: current_ptr)
+
+        @contextlib.contextmanager
+        def scoped(handle):
+            log, tag = _STUB_STREAMS[handle]
+            log.append(("stream_enter", tag))
+            try:
+                yield
+            finally:
+                log.append(("stream_exit", tag))
+
+        monkeypatch.setattr(pipeline, "scoped_stream", scoped)
+        monkeypatch.setattr(_core, "stream_is_capturing", lambda stream: False)   # no capture open
         return event_cls
 
     return install
@@ -171,18 +166,16 @@ def test_launch_allocates_its_event_pair_exactly_once(fake_cupy):
         "should have been created on the first launch"
     )
     # ...and the SAME objects are re-recorded every call.
-    assert len(pipe._seed_event.records) == 5
-    assert len(pipe._legacy_event.records) == 5
+    assert [len(e.records) for e in _pair(pipe)] == [5, 5]
 
 
 def test_the_cached_events_are_the_same_objects_across_launches(fake_cupy):
     fake_cupy()
     pipe = _stub_pipeline([])
     pipe.launch(1)
-    first_seed, first_legacy = pipe._seed_event, pipe._legacy_event
+    first_seed, first_legacy = _pair(pipe)
     pipe.launch(1)
-    assert pipe._seed_event is first_seed
-    assert pipe._legacy_event is first_legacy
+    assert _pair(pipe) == (first_seed, first_legacy) and all(e is not None for e in _pair(pipe))
 
 
 def test_legacy_event_is_never_created_when_the_caller_is_on_the_legacy_stream(
@@ -195,7 +188,7 @@ def test_legacy_event_is_never_created_when_the_caller_is_on_the_legacy_stream(
     for _ in range(4):
         pipe.launch(1)
     assert event_cls.constructed == 1
-    assert pipe._legacy_event is None
+    assert _pair(pipe)[1] is None
 
 
 def test_red_leg_a_per_call_allocating_launch_fails_the_event_identity_gate(
@@ -209,16 +202,16 @@ def test_red_leg_a_per_call_allocating_launch_fails_the_event_identity_gate(
     pipe = _stub_pipeline(log)
 
     def _defeated_launch(self, n=1):
-        import cupy as cp  # the stand-in
+        from eagle import _stream
 
-        current = cp.cuda.get_current_stream()
-        seed_event = cp.cuda.Event()  # <- fresh, every call: the defect
+        current = _stream.current()
+        seed_event = _stream.Event()  # <- fresh, every call: the defect
         seed_event.record(current)
-        self._ext.wait_event(seed_event)
-        if current.ptr != cp.cuda.Stream.null.ptr:
-            legacy_event = cp.cuda.Event()
-            legacy_event.record(cp.cuda.Stream.null)
-            self._ext.wait_event(legacy_event)
+        seed_event.wait(self._sptr)
+        if current != _stream.LEGACY:
+            legacy_event = _stream.Event()
+            legacy_event.record(_stream.LEGACY)
+            legacy_event.wait(self._sptr)
         for _ in range(int(n)):
             self._launcher.launch()
         self._launcher.synchronize()
@@ -306,7 +299,7 @@ def test_enqueue_with_seed_events_records_nothing_of_its_own(fake_cupy):
     before = event_cls.constructed
     pipe.enqueue(1, seed_events=shared)
     assert event_cls.constructed == before, "enqueue recorded its own events anyway"
-    assert pipe._seed_event is None and pipe._legacy_event is None
+    assert _pair(pipe) == (None, None)
     assert [e for e in log if e[0] == "wait"] == [
         ("wait", "ext", shared[0].uid),
         ("wait", "ext", shared[1].uid),
@@ -375,10 +368,10 @@ def test_red_leg_dropping_a_seed_wait_fails_the_ordering_gate(fake_cupy):
     pipe = _stub_pipeline(log)
 
     def _defeated_enqueue(self, n=1):
-        import cupy as cp
+        from eagle import _stream
 
-        events = self._record_seed_events(cp)
-        self._ext.wait_event(events[0])  # <- the second wait is DROPPED
+        events = _stream.seed_events(self._seeds)
+        events[0].wait(self._sptr)  # <- the second wait is DROPPED
         for _ in range(int(n)):
             self._launcher.launch()
 
@@ -395,13 +388,13 @@ def test_red_leg_launching_before_the_waits_fails_the_ordering_gate(fake_cupy):
     pipe = _stub_pipeline(log)
 
     def _defeated_enqueue(self, n=1):
-        import cupy as cp
+        from eagle import _stream
 
-        events = self._record_seed_events(cp)
+        events = _stream.seed_events(self._seeds)
         for _ in range(int(n)):
             self._launcher.launch()  # <- enqueued BEFORE the waits
         for event in events:
-            self._ext.wait_event(event)
+            event.wait(self._sptr)
 
     _defeated_enqueue(pipe, 1)
     with pytest.raises(AssertionError, match="BEFORE the seed waits"):
@@ -462,9 +455,9 @@ def test_one_in_flight_rule_re_records_the_same_events(fake_cupy):
     log: list = []
     pipe = _stub_pipeline(log)
     pipe.enqueue(1)
-    first = pipe._seed_event
+    first = _pair(pipe)[0]
     pipe.enqueue(1)  # second enqueue, nothing synchronized in between
-    assert pipe._seed_event is first
+    assert _pair(pipe)[0] is first
     assert event_cls.constructed == 2
     assert len(first.records) == 2
 
@@ -502,13 +495,14 @@ def test_compose_overlap_group_drives_enqueue_then_synchronize_with_one_event_pa
     ]
 
     composer = GraphComposer.__new__(GraphComposer)
+    composer._seeds = []
     composer._async_launch_group(members, 2)
 
     assert event_cls.constructed == 2, (
         f"the group must record ONE shared event pair, not one per member "
         f"(saw {event_cls.constructed} events for 2 members)"
     )
-    assert a._seed_event is None and b._seed_event is None, (
+    assert _pair(a) == (None, None) and _pair(b) == (None, None), (
         "a member must not record its own events in shared-event mode"
     )
     uids = sorted({e[2] for e in log if e[0] == "wait"})
@@ -588,7 +582,7 @@ def test_device_replay_parity_across_repeated_launches():
         "a replay through the cached event pair did not match a fresh "
         "pipeline's replay bit for bit"
     )
-    assert pipe._seed_event is not None
+    assert pipe._seeds and pipe._seeds[0] is not None
     expected = np.asarray(cp.asnumpy(src)) * 3.0 + 1.0
     assert np.array_equal(cp.asnumpy(out_shared), expected)
 

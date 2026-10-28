@@ -68,7 +68,7 @@ def test_cupy_input_returns_a_device_output(scale_device_module, no_download):
     cp = no_download
     x = cp.arange(8, dtype=cp.float64)
     y = _scale_plan(scale_device_module).run(x=x, a=2.0, b=1.0)
-    assert isinstance(y, cp.ndarray)
+    assert y.device.startswith("cuda")        # an eagle.Array on the device, never brought home
     np.testing.assert_array_equal(y.get(), 2.0 * np.arange(8.0) + 1.0)
 
 
@@ -79,8 +79,7 @@ def test_cupy_input_writes_the_supplied_device_output_in_place(
     x = cp.arange(8, dtype=cp.float64)
     y = cp.zeros(8)
     got = _scale_plan(scale_device_module).run(x=x, a=-1.0, b=0.5, y=y)
-    assert isinstance(got, cp.ndarray)
-    assert got.data.ptr == y.data.ptr                # the caller's own buffer
+    assert got.ptr == y.data.ptr                # the caller's own buffer
     np.testing.assert_array_equal(y.get(), -np.arange(8.0) + 0.5)
 
 
@@ -90,7 +89,7 @@ def test_cupy_input_of_another_dtype_is_cast_on_the_device(
     cp = no_download
     x = cp.arange(8, dtype=cp.float32)[::-1]          # float32 and non-contiguous
     y = _scale_plan(scale_device_module).run(x=x, a=1.0, b=0.0)
-    assert isinstance(y, cp.ndarray) and y.dtype == cp.float64
+    assert y.device.startswith("cuda") and y.dtype == cp.float64
     np.testing.assert_array_equal(y.get(), np.arange(8.0)[::-1])
 
 
@@ -141,6 +140,6 @@ def test_host_inputs_still_return_host_outputs(scale_device_module):
 
     y_dev = cp.zeros(8)
     got = _scale_plan(scale_device_module).run(x=np.arange(8.0), a=2.0, b=0.0, y=y_dev)
-    assert isinstance(got, np.ndarray)
+    assert isinstance(got, eagle.Array) and got.device == "cpu"
     np.testing.assert_array_equal(got, 2.0 * np.arange(8.0))
     np.testing.assert_array_equal(y_dev.get(), 2.0 * np.arange(8.0))

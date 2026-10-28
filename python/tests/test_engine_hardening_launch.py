@@ -344,12 +344,20 @@ def _fake_cp(current_device=0):
     return mod
 
 
+def _install_fake_cupy(monkeypatch, cp):
+    """Stand ``cp`` in for the device: its ``getDevice`` names the current device and zero masks are fake arrays."""
+    import sys
+
+    monkeypatch.setitem(sys.modules, "cupy", cp)
+    monkeypatch.setattr(marshal_mod, "_device", lambda: f"cuda:{cp.cuda.runtime.getDevice()}")
+    monkeypatch.setattr(marshal_mod._alloc, "zeros", lambda xp, n, dtype=None: _FakeCupyArray(np.bool_))
+
+
 def test_a_conforming_cupy_array_takes_the_fast_path():
-    cp = _fake_cp()
-    assert marshal_mod._fast_path_ok(_FakeCupyArray(np.float64), np.float64, cp)
-    assert marshal_mod._fast_path_ok(_FakeCupyArray(np.float32), np.float32, cp)
-    assert marshal_mod._fast_path_ok(_FakeCupyArray(np.bool_), np.bool_, cp)
-    assert marshal_mod._fast_path_ok(_FakeCupyArray(np.int64), np.int64, cp)
+    assert marshal_mod._fast_path_ok(_FakeCupyArray(np.float64), np.float64)
+    assert marshal_mod._fast_path_ok(_FakeCupyArray(np.float32), np.float32)
+    assert marshal_mod._fast_path_ok(_FakeCupyArray(np.bool_), np.bool_)
+    assert marshal_mod._fast_path_ok(_FakeCupyArray(np.int64), np.int64)
 
 
 @pytest.mark.parametrize(
@@ -364,7 +372,7 @@ def test_a_conforming_cupy_array_takes_the_fast_path():
     ],
 )
 def test_a_non_conforming_input_never_takes_the_fast_path(value, dt, why):
-    assert not marshal_mod._fast_path_ok(value, dt, _fake_cp()), (
+    assert not marshal_mod._fast_path_ok(value, dt), (
         f"a {why} input was admitted to the fast path — it would be bound "
         "without the coercion that makes it launchable"
     )
@@ -378,12 +386,12 @@ def test_red_leg_a_strided_input_admitted_to_the_fast_path_fails_the_gate():
     cp = _fake_cp()
     strided = _FakeCupyArray(np.float64, c_contiguous=False)
 
-    def _defeated_fast_path_ok(value, dt, cp):
+    def _defeated_fast_path_ok(value, dt):
         return isinstance(value, cp.ndarray) and value.dtype == dt
 
-    assert _defeated_fast_path_ok(strided, np.float64, cp) is True
+    assert _defeated_fast_path_ok(strided, np.float64) is True
     with pytest.raises(AssertionError, match="admitted to the fast path"):
-        assert not _defeated_fast_path_ok(strided, np.float64, cp), (
+        assert not _defeated_fast_path_ok(strided, np.float64), (
             "a strided input was admitted to the fast path"
         )
 
@@ -391,22 +399,20 @@ def test_red_leg_a_strided_input_admitted_to_the_fast_path_fails_the_gate():
 def test_force_slow_coercion_defeats_the_fast_path_for_every_input():
     """The launch-parity corpus's forced-slow arm — it must actually bite, or
     the corpus would compare the fast path against itself."""
-    cp = _fake_cp()
     conforming = _FakeCupyArray(np.float64)
-    assert marshal_mod._fast_path_ok(conforming, np.float64, cp)
+    assert marshal_mod._fast_path_ok(conforming, np.float64)
     marshal_mod._force_slow_coercion(True)
     try:
-        assert not marshal_mod._fast_path_ok(conforming, np.float64, cp)
+        assert not marshal_mod._fast_path_ok(conforming, np.float64)
     finally:
         marshal_mod._force_slow_coercion(False)
-    assert marshal_mod._fast_path_ok(conforming, np.float64, cp)
+    assert marshal_mod._fast_path_ok(conforming, np.float64)
 
 
 def test_coercion_counters_move_with_the_path_taken(monkeypatch):
-    import sys
 
     cp = _fake_cp()
-    monkeypatch.setitem(sys.modules, "cupy", cp)
+    _install_fake_cupy(monkeypatch, cp)
     marshal_mod._reset_coercion_stats()
     conforming = _FakeCupyArray(np.float64)
     assert marshal_mod._as_dtype(conforming, np.float64) is conforming
@@ -421,18 +427,16 @@ def test_undeclared_plugins_never_reach_the_zero_mask_cache(monkeypatch):
     a FRESH private buffer and the cache must record nothing at all — a plugin
     that writes its mask would silently corrupt every other plugin's if this
     ever defaulted on."""
-    import sys
 
-    monkeypatch.setitem(sys.modules, "cupy", _fake_cp())
+    _install_fake_cupy(monkeypatch, _fake_cp())
     masks = [marshal_mod.coerce_terminated({}, 16) for _ in range(6)]
     assert marshal_mod._zero_mask_stats() == {"hits": 0, "misses": 0, "bypassed": 0}
     assert len({id(m) for m in masks}) == 6, "undeclared masks were shared"
 
 
 def test_a_declaring_plugin_is_served_from_the_cache(monkeypatch):
-    import sys
 
-    monkeypatch.setitem(sys.modules, "cupy", _fake_cp())
+    _install_fake_cupy(monkeypatch, _fake_cp())
     masks = [
         marshal_mod.coerce_terminated({}, 16, readonly_mask=True) for _ in range(6)
     ]
@@ -441,12 +445,11 @@ def test_a_declaring_plugin_is_served_from_the_cache(monkeypatch):
 
 
 def test_the_zero_mask_cache_keys_on_n_and_device(monkeypatch):
-    import sys
 
     device = {"id": 0}
     cp = _fake_cp()
     cp.cuda.runtime.getDevice = lambda: device["id"]
-    monkeypatch.setitem(sys.modules, "cupy", cp)
+    _install_fake_cupy(monkeypatch, cp)
 
     m16 = marshal_mod.coerce_terminated({}, 16, readonly_mask=True)
     m32 = marshal_mod.coerce_terminated({}, 32, readonly_mask=True)
@@ -461,10 +464,9 @@ def test_the_zero_mask_cache_keys_on_n_and_device(monkeypatch):
 def test_a_passed_mask_is_never_cached_under_either_setting(monkeypatch):
     """Only an OMITTED mask is cacheable. A caller-supplied mask is the
     caller's buffer and must be bound, checked and handed back as always."""
-    import sys
 
     cp = _fake_cp()
-    monkeypatch.setitem(sys.modules, "cupy", cp)
+    _install_fake_cupy(monkeypatch, cp)
     supplied = _FakeCupyArray(np.bool_)
     supplied.shape = (16,)
     for flag in (False, True):
@@ -482,9 +484,8 @@ def test_the_zero_mask_cache_bypasses_at_its_cap_instead_of_growing(monkeypatch)
     exactly what an undeclared plugin gets — which is always correct here, so a
     silent fallback is the right answer at this seam (unlike the kernel-attrs
     cap, where a fallback would mean a driver query mid-replay)."""
-    import sys
 
-    monkeypatch.setitem(sys.modules, "cupy", _fake_cp())
+    _install_fake_cupy(monkeypatch, _fake_cp())
     monkeypatch.setattr(marshal_mod, "ZERO_MASK_CACHE_CAP", 4)
     for n in range(1, 5):
         marshal_mod.coerce_terminated({}, n, readonly_mask=True)
@@ -505,14 +506,13 @@ def test_the_zero_mask_cache_bypasses_at_its_cap_instead_of_growing(monkeypatch)
 def test_red_leg_a_default_on_mask_cache_fails_the_opt_in_gate(monkeypatch):
     """RED LEG, executable: a ``coerce_terminated`` whose cache is default-ON
     must be REJECTED by the opt-in assertion."""
-    import sys
 
     cp = _fake_cp()
-    monkeypatch.setitem(sys.modules, "cupy", cp)
+    _install_fake_cupy(monkeypatch, cp)
 
     def _defeated_coerce_terminated(kw, n, *, readonly_mask=False):
         if kw.get("terminated") is None:
-            return marshal_mod._cached_zero_mask(n, cp)  # <- ignores the flag
+            return marshal_mod._cached_zero_mask(n)  # <- ignores the flag
         raise AssertionError("unreachable in this leg")
 
     masks = [_defeated_coerce_terminated({}, 16) for _ in range(6)]
@@ -548,9 +548,8 @@ def test_a_synthetic_declaring_sidecar_threads_the_flag_end_to_end(monkeypatch):
     the same key in a later window): the loader reads it, and every layer down
     to ``coerce_terminated`` honors it. Threaded here without a driver load by
     driving the same functions the loader chains."""
-    import sys
 
-    monkeypatch.setitem(sys.modules, "cupy", _fake_cp())
+    _install_fake_cupy(monkeypatch, _fake_cp())
     declaring = {
         "kernel": "raptor_kernel",
         "aether_abi": "aether-abi/1",

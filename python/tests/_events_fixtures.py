@@ -104,7 +104,7 @@ def xp_for(backend):
 
 
 def host(a):
-    return a.get() if hasattr(a, "get") else np.asarray(a)
+    return np.asarray(a.get() if hasattr(a, "get") else a)
 
 
 def osc(xp, n, *, w=2.0, a=0.3, dt=0.1, x0=1.0, record=True, model=ev_osc, **kw):

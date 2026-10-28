@@ -17,14 +17,17 @@ inherits.
 
 from __future__ import annotations
 
+import ctypes
 import threading
+from types import SimpleNamespace
 
-import numpy as np
 from raptor.schema.manifest import KERNEL_NAME as KERNEL_NAME
 
+from . import _core, _stream
 from ._launch_policy import current_siblings, resolve_block
-from .abi import DEVICE_CUDA, GREF_DTYPE, HANDLE_DTYPE, make_gref, make_handle
+from .abi import DEVICE_CUDA, GRef, HandleT, device_ptr, make_gref, make_handle
 from .marshal import (
+    Scalar,
     _is_array_value,
     _reconcile_n,
     coerce_mat_inputs,
@@ -114,26 +117,31 @@ def _reset_pick_cache() -> None:
 def _current_device_ordinal() -> int:
     """The ordinal of the current device (``0`` when it cannot be read)."""
     try:
-        import cupy as cp
-
-        return int(cp.cuda.runtime.getDevice())
+        return int(_core.get_device())
     except Exception:
         return 0
 
 
-def _device_props(device: int = -1):
-    """Device ``device``'s properties (``-1``: the current device), queried
-    once per ordinal and cached thereafter."""
-    import cupy as cp
+#: max resident threads per SM by compute capability (major, minor); the default is 2048
+_THREADS_PER_SM = {(7, 5): 1024, (8, 6): 1536, (8, 7): 1536, (8, 9): 1536, (12, 0): 1536, (12, 1): 1536}
 
-    try:
-        ordinal = int(cp.cuda.runtime.getDevice()) if device < 0 else int(device)
-    except Exception:
-        ordinal = 0
+
+def _device_props(device: int = -1):
+    """Device ``device``'s properties (``-1``: the current device) under the CUDA property names the
+    launch policy reads, queried once per ordinal and cached thereafter."""
+    ordinal = _current_device_ordinal() if device < 0 else int(device)
     props = _device_props_cache.get(ordinal)
     if props is None:
         try:
-            props = cp.cuda.runtime.getDeviceProperties(ordinal)
+            p = _core.device_props(ordinal)
+            props = {
+                "name": p["name"].encode(), "major": p["cc_major"], "minor": p["cc_minor"],
+                "multiProcessorCount": p["sm_count"], "regsPerMultiprocessor": p["regs_per_sm"],
+                "regsPerBlock": p["regs_per_block"], "sharedMemPerBlock": p["shared_mem_per_block"],
+                "sharedMemPerMultiprocessor": p["shared_mem_per_sm"],
+                "warpSize": p["warp_size"],
+                "maxThreadsPerMultiProcessor": _THREADS_PER_SM.get((p["cc_major"], p["cc_minor"]), 2048),
+            }
         except Exception:
             props = {}
         _device_props_cache[ordinal] = props
@@ -170,24 +178,21 @@ def _kernel_attrs(fn):
 
 
 #: ``CUfunction_attribute`` enumerators (cuda.h): the four the launch
-#: policy reads, under the names cupy's ``RawKernel.attributes`` gives them.
+#: policy reads, under the names the launch policy reads.
 _FUNC_ATTRIBUTES = (("max_threads_per_block", 0), ("shared_size_bytes", 1),
                     ("local_size_bytes", 3), ("num_regs", 4))
 
 
 def _query_kernel_attrs(fn) -> dict:
-    """The kernel properties this module caches: a cupy ``RawKernel``
-    answers through ``.attributes``; a v2 door's raw ``CUfunction`` handle
-    through the driver itself. ``{}`` on anything that goes wrong."""
-    if isinstance(fn, int):
-        try:
-            from cupy_backends.cuda.api import driver
-            return {name: int(driver.funcGetAttribute(attr, fn))
-                    for name, attr in _FUNC_ATTRIBUTES}
-        except Exception:
-            return {}
+    """The kernel properties this module caches: ``fn.attributes``, or the seam's for a bare handle."""
+    attributes = getattr(fn, "attributes", None)
+    return _seam_attributes(fn) if attributes is None else attributes
+
+
+def _seam_attributes(handle) -> dict:
+    """The properties of the function behind raw ``handle``, read through the seam; ``{}`` on anything that goes wrong."""
     try:
-        return fn.attributes
+        return {name: int(_core.function_attribute(int(handle), attr)) for name, attr in _FUNC_ATTRIBUTES}
     except Exception:
         return {}
 
@@ -211,17 +216,42 @@ def _resolved_block(fn, n, block, device=-1, declared=None):
 
 
 def require_cupy(value, name, what="array"):
-    """The capturable-path contract: ``value`` must be a pre-allocated
-    cupy array (``launch`` never imports, casts, or allocates -- that
-    would break a CUDA-graph stream capture)."""
-    import cupy as cp
-
-    if not isinstance(value, cp.ndarray):
+    """The capturable-path contract: ``value`` must be a pre-allocated device array (an :class:`eagle.Array`
+    or anything exporting ``__cuda_array_interface__``); ``launch`` never imports, casts, or allocates --
+    that would break a CUDA-graph stream capture."""
+    if not hasattr(value, "__cuda_array_interface__"):
         raise TypeError(
-            f"launch requires a pre-allocated cupy {what}; '{name}' is "
+            f"launch requires a pre-allocated cupy (or eagle device) {what}; '{name}' is "
             f"{type(value).__name__} (no allocation is allowed during graph capture)"
         )
     return value
+
+
+_BY_VALUE = {"float64": ctypes.c_double, "float32": ctypes.c_float, "uint32": ctypes.c_uint32,
+             "int64": ctypes.c_int64, "int32": ctypes.c_int32, "uint64": ctypes.c_uint64}
+
+
+class SeamFunction(int):
+    """A loaded device function: the seam's raw handle, callable as ``fn(grid, block, args)`` to enqueue one
+    launch on the current stream (``args``: the ctypes PODs and :class:`~eagle.marshal.Scalar` values of
+    :func:`assemble_args`)."""
+
+    __slots__ = ()
+
+    def __call__(self, grid, block, args):
+        keep = [_BY_VALUE[a.dtype](a.value) if isinstance(a, Scalar) else a for a in args]
+        grid3 = tuple(grid) + (1,) * (3 - len(grid))
+        block3 = tuple(block) + (1,) * (3 - len(block))
+        _core.launch_raw(int(self), grid3, block3, [ctypes.addressof(a) for a in keep], _stream.current())
+
+    @property
+    def attributes(self) -> dict:
+        return _seam_attributes(self)
+
+    @property
+    def kernel(self):
+        """``.kernel.ptr``: the raw handle, as hawk's plan view reads it."""
+        return SimpleNamespace(ptr=int(self))
 
 
 def _vec_mutables(mdecl) -> set:
@@ -266,9 +296,9 @@ def _new_box(tag):
     position, or ``None`` for a non-POD tag (``NSAMPLES``/``UNIFORM``, built
     fresh per call)."""
     if tag in ("GREF_VEC", "GREF_MAT"):
-        return np.zeros((), dtype=GREF_DTYPE)
+        return GRef()
     if tag in ("HANDLE", "WIDE_IN", "WIDE_OUT"):
-        return np.zeros((), dtype=HANDLE_DTYPE)
+        return HandleT()
     return None
 
 
@@ -321,11 +351,11 @@ def _bind_gref(box, arr, n):
     either way."""
     if box is None:
         return make_gref(arr, n)
-    box["data_"] = arr.data.ptr
-    box["samples_"] = n
-    box["compStride_"] = n
-    box["sampleStride_"] = 1
-    box["deviceType_"] = DEVICE_CUDA
+    box.data_ = device_ptr(arr)
+    box.samples_ = n
+    box.compStride_ = n
+    box.sampleStride_ = 1
+    box.deviceType_ = DEVICE_CUDA
     return box
 
 
@@ -334,10 +364,10 @@ def _bind_handle(box, arr, n):
     refilled in place, or a fresh :func:`~eagle.abi.make_handle`."""
     if box is None:
         return make_handle(arr, n)
-    box["data"] = arr.data.ptr
-    box["samples"] = n
-    box["stride"] = 1
-    box["deviceType"] = DEVICE_CUDA
+    box.data = device_ptr(arr)
+    box.samples = n
+    box.stride = 1
+    box.deviceType = DEVICE_CUDA
     return box
 
 
@@ -402,8 +432,6 @@ def assemble_args(
     instead of being re-derived here; the resulting argument list is
     byte-identical either way (read :class:`LaunchPlan`'s box-reuse note
     first). Omit ``plan`` for fresh boxes per call, as always."""
-    import numpy as np
-
     tables = tables or {}
     mutables = mutables or {}
     mutable_vec = mutable_vec or set()
@@ -452,7 +480,7 @@ def assemble_args(
         elif tag == "WIDE_OUT":
             args.append(_bind_handle(box, wide_out[name], n))
         elif tag == "NSAMPLES":
-            args.append(np.uint32(n))
+            args.append(Scalar("uint32", n))
         elif tag == "UNIFORM":
             args.append(uniforms[name])
         else:
@@ -478,7 +506,7 @@ def _launch_vector(
     grid,
     block,
     matrix_inputs=(),
-    dt=np.float64,
+    dt="float64",
 ):
     """Issue ONE vector-kernel launch on the current stream -- capturable.
     Every array argument must be pre-allocated cupy (nothing is allocated
@@ -510,7 +538,7 @@ def _launch_vector(
     )
     block = _resolved_block(fn, n, block)
     g = grid or ((n + block - 1) // block,)
-    fn(g, (block,), tuple(args))
+    fn(g, (block,), args)
     return out
 
 
@@ -529,7 +557,7 @@ def _launch_pure(
     wide_inputs=(),
     wide_outputs=(),
     wide_out_exempt=(),
-    dt=np.float64,
+    dt="float64",
 ):
     """Issue ONE pure launch on the current stream -- capturable. Every
     per-sample array (writable ``Mutable`` buffers, vector/matrix inputs,
@@ -615,13 +643,13 @@ def _launch_pure(
     )
     block = _resolved_block(fn, n, block)
     g = grid or ((n + block - 1) // block,)
-    fn(g, (block,), tuple(args))
+    fn(g, (block,), args)
     return {**wide_out, **mut}  # merged exactly as pure_prepare merges them
 
 
 def launch(
     kind, fn, arg_spec, vector_inputs, params, per_sample, *, kw, grid, block,
-    dt=np.float64, **extra,
+    dt="float64", **extra,
 ):
     """Issue ONE capturable launch of any kernel kind on the current
     stream. ``kind`` (``"vector"`` | ``"pure"``) selects the ABI binding
@@ -681,7 +709,7 @@ def pure_prepare(
     wide_inputs=None,
     wide_outputs=None,
     wide_out_exempt=(),
-    dt=np.float64,
+    dt="float64",
     readonly_mask=False,
 ):
     """Coerce inputs, bind the writable ``Mutable``\\ s, assemble args,
@@ -772,7 +800,7 @@ def pure_prepare(
     # siblings=1 fixed, single-sourced rather than a second DEFAULT_BLOCK.
     block = resolve_block(n, 1, _device_props(), _kernel_attrs(fn))
     grid = ((n + block - 1) // block,)
-    fn(grid, (block,), tuple(args))
+    fn(grid, (block,), args)
     for name, a in adapted.items():
         if a.scratch is not None:
             a.write_back_from(mut[name])
@@ -803,10 +831,8 @@ class LaunchMixin:
         """Run ``prepare`` inside the origin framework's launch context,
         synchronize only for a blocking framework, then hand the result
         back via ``export``. ``prepare``/``export`` are the per-kind hooks."""
-        import cupy as cp
-
         with origin.launch_context():
             artifacts = prepare()
         if origin.blocking:
-            cp.cuda.runtime.deviceSynchronize()
+            _core.device_synchronize(-1)
         return export(artifacts)

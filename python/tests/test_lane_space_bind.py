@@ -258,8 +258,8 @@ def test_device_arm_lane_shaped_planes_and_extent_by_label(tmp_path):
     k = AutoPlan(plugin, {}, None, auto.kernel)
     x = cp.arange(5 * 16, dtype=cp.float64).reshape(5, 16)
     y = k(x, 3.0)
-    assert isinstance(y, cp.ndarray) and y.shape == (5, 16)
-    assert cp.array_equal(y, 3.0 * x)
+    assert isinstance(y, eagle.Array) and y.shape == (5, 16)
+    assert cp.array_equal(cp.asarray(y), 3.0 * x)
     bound = k.bind(x=x, a=2.0, y=cp.zeros((5, 16)))
     assert bound.n == 80
     with pytest.raises(ValueError, match=r"pass channel=<extent>"):

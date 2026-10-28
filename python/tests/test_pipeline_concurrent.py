@@ -131,6 +131,14 @@ def test_capture_fork_round_trip_two_branches():
         _core.Graph.from_captured(captured)
 
 
+def _on_eagle(kernel, *args):
+    """Run a cupy kernel on the stream eagle is capturing (cupy does not follow eagle's stream)."""
+    from eagle import _stream
+
+    with cp.cuda.ExternalStream(_stream.current()):
+        kernel(*args)
+
+
 # --------------------------------------------------------------------------- #
 # 2. GraphPipeline.add_concurrent -- fork topology + replay conformance.
 # --------------------------------------------------------------------------- #
@@ -145,7 +153,7 @@ def test_add_concurrent_fork_topology_no_sibling_edge():
     cp.cuda.runtime.deviceSynchronize()
 
     pipe = GraphPipeline()
-    pipe.add_concurrent([lambda: kA(a, outA), lambda: kB(b, outB)])
+    pipe.add_concurrent([lambda: _on_eagle(kA, a, outA), lambda: _on_eagle(kB, b, outB)])
     pipe.build()
 
     assert pipe.introspection_available()
@@ -166,7 +174,7 @@ def test_add_concurrent_replay_conformance():
     oracleB = cp.asnumpy(b) + 1.0
 
     pipe = GraphPipeline()
-    pipe.add_concurrent([lambda: kA(a, outA), lambda: kB(b, outB)])
+    pipe.add_concurrent([lambda: _on_eagle(kA, a, outA), lambda: _on_eagle(kB, b, outB)])
     pipe.build()
 
     outA.fill(0.0)

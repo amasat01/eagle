@@ -189,6 +189,48 @@ Limits
   single rank would, so the cell is the single rank's bit for bit. A partition must start on a
   multiple of 32. Pass ``policy="ordered"`` to ``eagle.plan`` for the same bits on the GPU too.
 
+.. _determinism-policy:
+
+What each policy promises
+-------------------------
+
+One table for every sum eagle and hawk finish: ``eagle.reduce``, a hawk ``hawk.sum`` stored to a cell, a keyed
+``hawk.sum(x, over=...)`` and a ``hawk.scatter``. ``policy=`` picks the row.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 16 42 42
+
+   * - ``policy=``
+     - Same bits on every run?
+     - Error of the sum
+   * - ``"ordered"``
+     - **Yes**: every run, every thread count, CPU and GPU. No atomics anywhere. A scatter adds each key's lanes
+       in fixed chunks of lane order, so the same lane count and target size give the same bits; a different
+       lane count or target size can differ from ``np.add.at`` in the last bits.
+     - Plain floating-point addition in that fixed order. It grows with the number of terms.
+   * - ``"compensated"``
+     - CPU: yes (it runs ``"ordered"``). GPU: no, the leaves commit with two-sum atomics, so the last bits can
+       change from run to run. A scatter keeps its correction in a companion plane eagle owns.
+     - The tightest: a correction term is kept.
+   * - ``"auto"`` (default)
+     - As ``"compensated"`` in this release for ``eagle.reduce``. For a hawk sum over lanes, the fast form
+       (atomics or a segmented sum).
+     - Bound grows with the number of terms for the fast form.
+   * - ``"plain"`` (scatter only)
+     - No: the atomic add alone.
+     - Bound grows with the number of terms.
+
+Things that are not a policy:
+
+* ``"max"``, ``"min"``, ``"all"`` and integer sums are exact. Any order gives the same value.
+* A keyed sum under an index set (``lanes=IndexSet()``) adds in the order the lanes arrive. It matches a dense
+  launch to the ULP contract, not bit for bit. Use ``"ordered"`` when the bits must not move.
+* A bound lane-set map or count rewritten in place is the caller's contract until ``eagle.check_index_set`` runs.
+* ``eagle.fft`` runs pocketfft on the CPU (bit-identical for any thread count) and cuFFT on the GPU. The two
+  agree to rounding, not bit for bit.
+* A ``float32`` sum is not the same number as the ``float64`` one under any policy; compare within a tolerance.
+
 What is promised, and what is not
 ---------------------------------
 

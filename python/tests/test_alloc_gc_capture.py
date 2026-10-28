@@ -12,12 +12,12 @@ pytestmark = pytest.mark.gpu
 
 @pytest.mark.parametrize("mode", ["legacy", "stream"])
 def test_gc_free_of_an_alloc_array_mid_capture(mode):
-    from eagle import _alloc
+    from eagle import _alloc, _stream
     if cp.cuda.runtime.getDeviceCount() < 1:
         pytest.skip("no device")
     own = cp.cuda.Stream(non_blocking=True)
-    with (own if mode == "stream" else cp.cuda.Stream.null):
-        a = _alloc.zeros(cp, 1024)
+    with _stream.scope(int(own.ptr) if mode == "stream" else _stream.LEGACY):
+        a = _alloc.zeros("cuda:0", 1024)
     cyc = [a]
     cyc.append(cyc)
     del a, cyc
@@ -42,11 +42,11 @@ def test_gc_free_of_an_alloc_array_mid_capture(mode):
 
 
 def test_arrays_outlive_the_stream_the_caller_dropped():
-    from eagle import _alloc
-    own = cp.cuda.Stream(non_blocking=True)
-    with own:
-        a = _alloc.full(cp, 256, 3.0, dtype="float64")
-        b = _alloc.zeros(cp, 256)
+    from eagle import _alloc, _core, _stream
+    own = _core.Stream(non_blocking=True)
+    with _stream.scope(own.ptr()):
+        a = _alloc.full("cuda:0", 256, 3.0, dtype="float64")
+        b = _alloc.zeros("cuda:0", 256)
     del own                              # the caller lets go of its stream
     gc.collect()
     cp.cuda.runtime.deviceSynchronize()

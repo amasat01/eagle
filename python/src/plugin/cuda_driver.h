@@ -24,4 +24,11 @@ namespace eagle_cuda_plugin {
  */
 std::uint64_t driverGroups(std::uint64_t wanted);
 
+/**
+ * @brief Make the calling thread's selected device's primary context current when the thread has none (a
+ *        ``cudaError_t`` value, 0 on success). ``cudaFree(nullptr)`` is not this: the driver-runtime shim
+ *        returns before it touches the context.
+ */
+int makeContextCurrent();
+
 } // namespace eagle_cuda_plugin

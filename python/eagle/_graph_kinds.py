@@ -12,11 +12,11 @@ from __future__ import annotations
 
 import contextvars
 
-from . import _alloc
+from . import _alloc, arrays
 from ._conditional import RepeatWhile
 from .graph import ForkStage, LowerCtx, Node, get_node_kind, register_node_kind
 from ._graph_edges import arrays_overlap
-from . import _core, _transfer
+from . import _core, _stream, _transfer
 from .interop import _stream_handle
 from .roles import OUTPUT_ROLES, STATE_ROLES
 
@@ -64,9 +64,7 @@ class _Captured:
         self.key, self.run, self.nodes = key, run, ()
 
     def __call__(self):
-        import cupy
-
-        stream = cupy.cuda.get_current_stream().ptr
+        stream = _stream.current()
         before = _core.capture_snapshot_nodes(stream)
         self.run()
         self.nodes = sorted(set(_core.capture_snapshot_nodes(stream)) - set(before))
@@ -95,7 +93,7 @@ def _launch_gpu(node, ctx):
 
 def _launch_native(node, ctx):
     b = node.payload
-    if b._cupy is not None or getattr(b, "_stages", None):
+    if b._device is not None or getattr(b, "_stages", None):
         return None
     if b._copies or b._active_count is not None or b._fold is not None:
         return None
@@ -106,13 +104,11 @@ def _launch_transpose(node, incoming, ctx):
     """A plan launch's reverse (:mod:`eagle.diff`): its vjp kernel bound to the
     recorded values of the planes it read, the incoming adjoints of the planes
     it wrote, and fresh adjoint planes for everything it read."""
-    import numpy
-
     from . import _cell_rows, _split
 
     bound = node.payload
     role_of = {name: role for role, name in bound._arg_spec}
-    xp = bound._cupy or numpy
+    xp = f"cuda:{bound._device}" if bound._device is not None else "cpu"
     vjp = ctx.vjp.plugin
     cells, rowset = _cell_rows.cells_of(vjp), _cell_rows.row_planes(vjp)
     if _split.stages_of(vjp):
@@ -146,7 +142,7 @@ def _launch_transpose(node, incoming, ctx):
             buf = (_alloc.empty(xp, bound.n, dtype=bound._dtype) if per_sample
                    else _alloc.empty_like(xp, bound._planes[src]))
             if role == "accum_out":     # a scatter-add accumulates: start from zero
-                ctx.add(lambda b=buf: b.fill(0), writes=[buf])
+                ctx.add(lambda b=buf: b.fill(0, _stream.current()), writes=[buf])
                 ctx.not_bitwise(src)
             planes[name] = out[src] = buf
         else:
@@ -260,7 +256,7 @@ def _opaque_transpose(node, incoming, ctx):
             if nm not in got:
                 raise ValueError(f"eagle.diff.reverse: vjps[{ctx.label!r}] returned no "
                                  f"gradient for {nm!r} (it returned {sorted(got)})")
-            buf[...] = got[nm]
+            arrays.copyto(buf, arrays.asarray(got[nm]))     # the gradient is the caller's: numpy, cupy or eagle
     ctx.add(Node("opaque_host", (step, _named_arrays([*primals.values(), *cots.values()], "in"),
                                  _named_arrays(list(out.values()), "out"))))
     return out
@@ -355,11 +351,7 @@ class _Child:
                                "re-captured; rebuild the eagle Graph")
 
     def insert(self, body):
-        import cupy
-
-        from . import _core
-
-        _core.capture_add_child(cupy.cuda.get_current_stream().ptr, self.handle, body)
+        _core.capture_add_child(_stream.current(), self.handle, body)
 
 
 def child(owner, *, reads=(), writes=(), name=None) -> Node:

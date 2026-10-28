@@ -503,10 +503,12 @@ class _Level:
             return rows.finish()
         import cupy
 
-        from eagle.interop import _stream_handle, external_stream
+        from eagle.frameworks.cupy import external_stream
+        from eagle.interop import _stream_handle, scoped_stream
 
         index = device.index if device.index is not None else torch.cuda.current_device()
-        with cupy.cuda.Device(index), external_stream(_stream_handle(torch.cuda.current_stream(index))):
+        handle = _stream_handle(torch.cuda.current_stream(index))
+        with cupy.cuda.Device(index), external_stream(handle), scoped_stream(handle):
             return rows.finish()
 
     def _cell_rows(self, n, mode, device):
@@ -709,11 +711,12 @@ class _Level:
     def _run_device(self, mode, values, device):
         import cupy
 
+        from eagle.frameworks.cupy import external_stream
         from eagle.interop import (
             Requirements,
             _stream_handle,
-            external_stream,
             import_buffer,
+            scoped_stream,
         )
 
         index = (
@@ -721,7 +724,7 @@ class _Level:
         )
         stream = _stream_handle(torch.cuda.current_stream(index))
         plan = self._built_for(mode, index, lambda: self._load_device(mode, index))
-        with cupy.cuda.Device(index), external_stream(stream):
+        with cupy.cuda.Device(index), external_stream(stream), scoped_stream(stream):
             arrays = {}
             for name, value in values.items():
                 if isinstance(value, torch.Tensor):
@@ -1065,3 +1068,14 @@ def _autograd_function(level, forward_ad):
         f"HawkKernel_{level.owner.name}_{level.path_dir}"
     )
     return _HawkKernel
+
+
+def from_eagle(a):
+    """The :class:`eagle.Array` ``a`` as a torch tensor: a view of the same memory (DLPack, ordered on torch's
+    current stream)."""
+    return torch.from_dlpack(a)
+
+
+def stream_handle(stream) -> int:
+    """The raw handle of a torch CUDA stream object."""
+    return int(stream.cuda_stream)

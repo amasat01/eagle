@@ -127,7 +127,9 @@ extern "C" __global__ void gate_c_add(GRefMirror out) {
 }
 """
     mod = cp.RawModule(code=src)
-    fn = mod.get_function("gate_c_add")
+    from test_launch_policy_gate_b import _ByValue
+
+    fn = _ByValue(mod.get_function("gate_c_add"))
 
     props = cp.cuda.runtime.getDeviceProperties(cp.cuda.runtime.getDevice())
     # Same pinned n as test_launch_policy_gate_b.py's `_pinned_n()` (SMs*64):

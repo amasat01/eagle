@@ -372,7 +372,7 @@ target_include_directories(_core PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src" "${_e
 target_compile_definitions(_core PRIVATE EAGLE_CPU_ONLY=1 AETHER_CPP_MODE=1 EAGLE_BLOCKSIZE=256 NDEBUG
   $<$<BOOL:${_eagle_plugin_skipped}>:EAGLE_CORE_BUILT_WITHOUT_CUDA_PLUGIN=1>)
 target_link_libraries(_core PRIVATE OpenMP::OpenMP_CXX ${CMAKE_DL_LIBS})
-target_compile_options(_core PRIVATE ${_eagle_no_gnu_unique} ${_eagle_warn_as_err} ${_eagle_ext_compile})
+target_compile_options(_core PRIVATE -ffp-contract=off ${_eagle_no_gnu_unique} ${_eagle_warn_as_err} ${_eagle_ext_compile})
 # libstdc++/libgcc bundled where the toolchain allows (see _eagle_static_runtime).
 target_link_options(_core PRIVATE ${_eagle_static_runtime} ${_eagle_ext_link})
 set_target_properties(_core PROPERTIES

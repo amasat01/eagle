@@ -12,7 +12,7 @@ typing, and the specs of every buffer it touches.
 Three properties, each a deliberate exclusion:
 
 * **backend-parametric.** Every step carries both a device form and a
-  host twin, so a plan is checked against a numpy reference without a
+  host twin, so a plan is checked against a reference without a
   GPU;
 * **it allocates nothing.** Every buffer is the caller's, bound by
   name; the plan publishes :class:`WorkspaceSpec` s and validates what
@@ -29,9 +29,13 @@ to the same shape, drives this module identically.
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass, field
 
-import numpy as np
+from .. import _stream
+from ..dtypes import dtype_name
+from .capture import GemmCaptureUnavailable, GemmMappingUnavailable, gemm_call, sgemm_params
+
 
 __all__ = [
     "CapturedGemmCall",
@@ -72,8 +76,8 @@ _DENSE_GEMM_DETERMINISM = (
 
 
 # --------------------------------------------------------------------------- #
-# The dtype-name cache behind ``WorkspaceSpec.check``: ``np.dtype(x).name``
-# costs real microseconds, and ``check`` runs on every bound buffer of every
+# The dtype-name cache behind ``WorkspaceSpec.check``: a dtype-name
+# lookup costs real microseconds, and ``check`` runs on every bound buffer of every
 # plan call. Keyed by value (numpy dtypes hash/compare structurally), so the
 # cache is bounded by the handful of distinct dtypes a process sees. An
 # unhashable descriptor simply bypasses the cache.
@@ -82,16 +86,17 @@ _DTYPE_NAME_CACHE: dict = {}
 
 
 def _dtype_name(descriptor) -> str:
-    """``np.dtype(descriptor).name``, memoized per distinct descriptor
-    value. Byte-identical to the expression it replaces, including for
-    non-dtype descriptors (``None``, a type object, a string)."""
+    """:func:`eagle.dtypes.dtype_name`, memoized per distinct descriptor
+    value; ``None`` (an object with no dtype) reads as ``float64``."""
+    if descriptor is None:
+        return "float64"
     try:
         hit = _DTYPE_NAME_CACHE.get(descriptor)
-    except TypeError:  # unhashable descriptor: no cache, original path
-        return np.dtype(descriptor).name
+    except TypeError:  # unhashable descriptor: no cache
+        return dtype_name(descriptor)
     if hit is not None:
         return hit
-    name = np.dtype(descriptor).name
+    name = dtype_name(descriptor)
     _DTYPE_NAME_CACHE[descriptor] = name
     return name
 
@@ -319,12 +324,18 @@ class LoweredPlan:
 # --------------------------------------------------------------------------- #
 # Step factories — each builds BOTH forms from one description
 # --------------------------------------------------------------------------- #
-def _cupy():
-    try:
-        import cupy
-    except Exception as exc:  # pragma: no cover - exercised by the poisoned test
-        raise MatmulUnavailable(f"cupy is not importable: {exc}") from exc
-    return cupy
+def _array_module(buffers):
+    """The array module the bound buffers belong to: ``eagle.arrays`` for an
+    ``eagle.Array``, else the (already imported) top-level module of the
+    first buffer's own type. eagle imports no array library itself."""
+    for array in buffers.values():
+        top = type(array).__module__.partition(".")[0]
+        if top == "eagle":
+            from .. import arrays
+            return arrays
+        if top in sys.modules:
+            return sys.modules[top]
+    raise MatmulUnavailable("no bound buffer belongs to an array module")
 
 
 def matmul_step(
@@ -332,13 +343,12 @@ def matmul_step(
 ) -> PlanStep:
     """``out = op(a) @ op(b)``, where ``op`` is a transpose when asked.
 
-    A transpose is a view in both array modules, so an operand
-    orientation costs nothing; the product is written through ``out=``
-    the same way. ``transpose_out`` writes through a transposed view of
+    A transpose is a flag of the seam's GEMM, so an operand
+    orientation costs nothing; the product is written through ``out`` the same way. ``transpose_out`` writes through a transposed view of
     the destination, which is how a gradient lands in its operand's own
     declared layout when that layout puts the contracted axis first. The
     device form re-raises :class:`MatmulUnavailable` on every call, since
-    a broken cuBLAS shows up on the first one."""
+    a missing cuBLAS shows up on the first one."""
     spec = MatmulSpec(
         a=a,
         b=b,
@@ -348,27 +358,26 @@ def matmul_step(
         transpose_out=bool(transpose_out),
     )
 
-    def run(buffers, xp):
-        left = buffers[a]
-        right = buffers[b]
-        target = buffers[out]
-        xp.matmul(
-            left.T if transpose_a else left,
-            right.T if transpose_b else right,
-            out=target.T if transpose_out else target,
-        )
+    def run(buffers, host):
+        left, right, target = buffers[a], buffers[b], buffers[out]
+        try:
+            params = sgemm_params(
+                left.shape, left.strides, right.shape, right.strides, target.shape, target.strides, int(left.dtype.itemsize),
+                transpose_a=bool(transpose_a), transpose_b=bool(transpose_b), transpose_out=bool(transpose_out),
+                allow_double=True)
+        except GemmMappingUnavailable as exc:
+            raise MatmulUnavailable(f"matmul step {name!r}: {exc}") from exc
+        stream = 0 if host else _stream.current()
+        try:
+            gemm_call(params, {"a": left, "b": right, "out": target}, itemsize=int(left.dtype.itemsize), stream=stream, host=host)
+        except GemmCaptureUnavailable as exc:
+            raise MatmulUnavailable(f"matmul step {name!r}: {exc}") from exc
 
     def device_fn(buffers):
-        xp = _cupy()
-        try:
-            run(buffers, xp)
-        except MatmulUnavailable:
-            raise
-        except Exception as exc:
-            raise MatmulUnavailable(
-                f"matmul step {name!r} failed on the device: "
-                f"{type(exc).__name__}: {exc}"
-            ) from exc
+        run(buffers, False)
+
+    def host_fn(buffers):
+        run(buffers, True)
 
     return PlanStep(
         name=name,
@@ -376,7 +385,7 @@ def matmul_step(
         reads=(a, b),
         writes=(out,),
         device_fn=device_fn,
-        host_fn=lambda buffers: run(buffers, np),
+        host_fn=host_fn,
         matmul=spec,
     )
 
@@ -386,21 +395,16 @@ def assembly_step(name, *, reads, writes, fn) -> PlanStep:
     ``fn(buffers, xp)``. Where a plan puts the reshape/scale/scatter-free
     rearrangement a matmul cannot express; writing it twice is how the
     two backends drift apart."""
-    cupy_fn = None
-
-    def device_fn(buffers):
-        nonlocal cupy_fn
-        if cupy_fn is None:
-            cupy_fn = _cupy()
-        fn(buffers, cupy_fn)
+    def run(buffers):
+        fn(buffers, _array_module(buffers))
 
     return PlanStep(
         name=name,
         kind="assembly",
         reads=tuple(reads),
         writes=tuple(writes),
-        device_fn=device_fn,
-        host_fn=lambda buffers: fn(buffers, np),
+        device_fn=run,
+        host_fn=run,
     )
 
 

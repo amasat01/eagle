@@ -17,7 +17,7 @@ def test_the_fast_coercion_tally_is_exact_under_threads(monkeypatch):
     # The tally is host-side; a stand-in cupy lets the row run on every runner,
     # free-threaded ones included, where no cupy wheel is installed.
     monkeypatch.setitem(sys.modules, "cupy", types.ModuleType("cupy"))
-    monkeypatch.setattr(marshal, "_fast_path_ok", lambda value, dt, cp: True)
+    monkeypatch.setattr(marshal, "_fast_path_ok", lambda value, dt: True)
     marshal._reset_coercion_stats()
     start = threading.Barrier(THREADS)
 

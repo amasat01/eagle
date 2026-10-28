@@ -122,3 +122,32 @@ def test_reverse_param_gradient_is_the_finished_cell(tmp_path, policy):
     assert grads["a"] == (seed * x).sum()           # integer terms: exact in any order
     assert np.array_equal(grads["x"], 2.0 * seed)
     assert rev(g.record, {"y": seed})["a"] == grads["a"]
+
+
+def test_returns_routes_plan_run_and_simulate_through_the_bridge(tmp_path):
+    import warnings
+
+    from eagle.frameworks import _bridge
+
+    x = _x(33)
+    (ps,) = eagle.plan.auto([cell_sum], targets=("host",), cache_dir=str(tmp_path))
+    assert isinstance(ps.run(x=x), eagle.Array)                                  # the default
+    got = ps.run(x=x, returns="numpy")
+    assert isinstance(got, np.ndarray) and got[0] == (x * x).sum()
+    res = eagle.simulate(sim_cell, x=np.zeros(40), max_steps=10, returns="numpy")
+    assert isinstance(res["s"], np.ndarray) and res["s"][0] == 9.0 * 40 and isinstance(res.finished, np.ndarray)
+    _bridge._WARNED.discard("torch")
+    import sys
+    saved = sys.modules.get("torch", 0)
+    sys.modules["torch"] = None
+    try:
+        with warnings.catch_warnings(record=True) as seen:
+            warnings.simplefilter("always")
+            again = ps.run(x=x, returns="torch")
+            ps.run(x=x, returns="torch")
+    finally:
+        if saved == 0:
+            del sys.modules["torch"]
+        else:
+            sys.modules["torch"] = saved
+    assert isinstance(again, eagle.Array) and len([w for w in seen if "pip install torch" in str(w.message)]) == 1

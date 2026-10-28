@@ -24,7 +24,7 @@ Coverage:
 4. loud rejections: unknown mode, non-sequenced nesting (both directions),
    duplicate registration, the flag-array contract (length/dtype/device).
 5. the retired ``expert_composer.py`` reach-in
-   (``entry.obj._pipe``/``pipe._ext``/``pipe._launcher``), now formalized as
+   (``entry.obj._pipe``/``pipe._sptr``/``pipe._launcher``), now formalized as
    :meth:`~eagle.pipeline.GraphPipeline._launch_handles` — behavioral proof
    it exists and powers :meth:`~eagle.compose.GraphComposer.
    _async_launch_group`, not attribute-poking.
@@ -386,7 +386,7 @@ def test_reject_flag_array_wrong_dtype():
 
 
 def test_reject_flag_array_wrong_device():
-    with pytest.raises(TypeError, match="cupy"):
+    with pytest.raises(TypeError, match="device uint32"):
         GraphComposer(np.ones(2, dtype=np.uint32), mode="conditional")
 
 
@@ -403,7 +403,7 @@ def test_reject_flag_array_length_mismatch():
 # ============================================================================
 def test_launch_handles_exists_and_powers_the_overlap_group():
     """``expert_composer.py``'s old :715-727 DEVIATION reached directly into
-    a built ``GraphPipeline``'s private ``_ext``/``_launcher`` attributes to
+    a built ``GraphPipeline``'s private ``_sptr``/``_launcher`` attributes to
     drive enqueue-without-sync replay across several pipelines. That reach-
     in is RETIRED by relocation: :meth:`GraphPipeline._launch_handles` is
     now the ONE sanctioned (still module-private -- no new PUBLIC surface)
@@ -438,7 +438,7 @@ def test_launch_handles_exists_and_powers_the_overlap_group():
     pipeB.build()
 
     handles = pipeA._launch_handles()
-    assert hasattr(handles, "ext")
+    assert handles.stream == pipeA.stream
     assert hasattr(handles, "launcher")
     assert pipeA._launch_handles().launcher is handles.launcher, (
         "stable handles, not rebuilt per call"

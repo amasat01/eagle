@@ -444,9 +444,11 @@ public:
             eagle::exec::check_legacy_whole_view(p.abi_version, part,
                 "host plugin '" + p.sidecar.kernel + "'");
             PackedArgs packed = pack_(p, part.nSamples);
-            if (p.abi_version >= 2)
-                p.fn2(packed.params.data(), part.base, part.count, part.nSamples);
-            else
+            if (p.abi_version >= 2) {
+                const auto [tb, tc] = box_partition(p.sidecar, part.base, part.count, part.nSamples,
+                    "host plugin '" + p.sidecar.kernel + "'");
+                p.fn2(packed.params.data(), tb, tc, part.nSamples);
+            } else
                 p.fn(packed.params.data(), std::int32_t(part.count));
             ++launched;
         }
@@ -467,6 +469,18 @@ public:
                 + "' is aether-abi/1 and has no partitioned entry; it can only be "
                   "run whole-view (L13)");
         return p.fn2;
+    }
+
+    /** @brief @p part (in lanes) as the plugin at @p index's entry counts it: the same
+     *  partition for a box-free kernel, in THREADS for one with a thread box (``launch.box``),
+     *  or a refusal naming the kernel when the partition does not start and end on a span of
+     *  ``T * stride`` lanes. What a caller driving :func:`entry_v2` with ``HostTeam`` hands it. */
+    eagle::exec::Partition thread_partition(std::size_t index, const eagle::exec::Partition& part) const
+    {
+        const Plugin& p = at_(index);
+        const auto [tb, tc] = box_partition(p.sidecar, part.base, part.count, part.nSamples,
+            "host plugin '" + p.sidecar.kernel + "'");
+        return eagle::exec::Partition{ tb, tc, part.nSamples };
     }
 
     /** @brief The plugin at @p index's legacy entry (null for a v2 plugin). */

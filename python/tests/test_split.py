@@ -66,7 +66,7 @@ def _bundle(tmp_path, mode, stages, targets=("host",), internal=()):
 
 def _host(a):
     """``a`` as a numpy array (a cupy one copied home)."""
-    return a.get() if hasattr(a, "get") and not isinstance(a, dict) else np.asarray(a)
+    return np.asarray(a.get() if hasattr(a, "get") and not isinstance(a, dict) else a)
 
 
 def _x(n, mode):

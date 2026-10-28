@@ -26,13 +26,11 @@ import importlib
 import threading
 import warnings
 
-import numpy as np
-
-from . import _alloc
+from . import _alloc, _core, _stream, arrays
 from . import _dispatch_policy as _policy
 from . import _split
 from . import exec as eexec
-from ._active_set import STALE_MAX, ActiveSet
+from ._active_set import STALE_MAX, ActiveSet, _view
 from ._compat import zip_strict
 from ._active_set import COUNT_PLANE, MAP_PLANE
 from ._busy import BusyGuard
@@ -233,7 +231,6 @@ def time_launch(bound, reps: int, fused_steps: int = 1) -> list:
     The host team run is timed with ``steady_clock``, a device launch with a
     CUDA event pair. A plan that reads a steps-per-launch word runs
     ``fused_steps`` steps per launch."""
-    from . import _core
     from ._plan_binding import DEVICE_CUDA
 
     _split.single(bound, "eagle dispatch timing")
@@ -243,12 +240,10 @@ def time_launch(bound, reps: int, fused_steps: int = 1) -> list:
     part = bound._parts[0]
     if bound._device_type != DEVICE_CUDA:
         return list(_core.time_launch(bound._entry, bound._addrs, part, reps))
-    import cupy
-
     block = int(importlib.import_module("eagle.launch")._resolved_block(
         bound._entry, part.count, None, declared=bound._declared_block))
     return list(_core.time_launch(bound._entry, bound._addrs, part, reps, device=True,
-                                  stream=int(cupy.cuda.get_current_stream().ptr), block=block))
+                                  stream=_stream.current(), block=block))
 
 
 _PARTS: dict = {}
@@ -338,37 +333,35 @@ class DispatchRunner:
         self._plain_of, self._plains = plain, {}
         self.terminated = mask
         self.n = int(mask.shape[-1])
-        self._device = type(mask).__module__.split(".")[0] == "cupy"
+        self._m = _view(mask)       # the mask as an eagle.Array (the same memory): every op below runs on it
+        self._device = self._m.device.startswith("cuda")
         if self._device:
-            import cupy
-
-            self._xp = cupy
+            self._dev = self._m.device
             self._target = "device"
             from ._device_props import device_props
 
-            self._props = device_props(int(mask.device.id))
+            self._props = device_props(int(self._dev.split(":")[1]))
         else:
-            self._xp, self._target, self._props = np, "host", None
-        xp = self._xp
+            self._dev, self._target, self._props = "cpu", "host", None
+        dev = self._dev
         self._cost, self._unit_plugins, self._classify_plugin, sweep = _split_parts(
             kernel, group, self._device)
         self._static = bool(self._cost.static_selector)
         self._k = len(self._cost.branches)
         self._state = _policy.DispatchState("segmented" if forced == "segmented" else "switch")
         self._gain, self._mix, self._theta = 1.0, (0,) * self._k, theta
-        self._cells = _alloc.zeros(xp, 6, dtype=xp.uint32)
+        self._cells = _alloc.zeros(dev, 6, dtype=arrays.uint32)
         self.finished = self._cells[2:3]
         self._aset = self._cls = None
         self._sorted = False
         if not self._static:
             self._sweep_plan = sweep
-            self._smap = _alloc.zeros(xp, self.n, dtype=xp.int32)
-            self._scount = _alloc.zeros(xp, 1, dtype=xp.uint32)
+            self._smap = _alloc.zeros(dev, self.n, dtype=arrays.int32)
+            self._scount = _alloc.zeros(dev, 1, dtype=arrays.uint32)
         self._seg_ready = False
 
     # -- binding -- #
     def _bind(self, plan, extra=None):
-        xp = self._xp
         plan = plan.select(self._planes) if hasattr(plan, "select") else plan
         spec = plan.plugin.arg_spec
         bind = {nm: self._planes[nm] for _r, nm in spec if nm in self._planes}
@@ -377,7 +370,7 @@ class DispatchRunner:
         if ("lookup", FINISHED_PLANE) in spec:
             bind[FINISHED_PLANE] = self._cells[2:3]
         if ("lookup", FUSED_STEPS_PLANE) in spec:
-            bind[FUSED_STEPS_PLANE] = _alloc.ones(xp, 1, dtype=xp.int64)
+            bind[FUSED_STEPS_PLANE] = _alloc.ones(self._dev, 1, dtype=arrays.int64)
         if ("lookup", MAP_PLANE) in spec:
             bind[MAP_PLANE], bind[COUNT_PLANE] = self._smap, self._scount
         return plan.bind(**bind)
@@ -385,12 +378,12 @@ class DispatchRunner:
     def _classify_setup(self) -> None:
         from ._plan_deploy import AutoPlan
 
-        xp, n, k, g = self._xp, self.n, self._k, self._group
-        self._cls = _alloc.zeros(xp, n, dtype=xp.int64)
-        self._offsets = _alloc.zeros(xp, k + 1, dtype=xp.int64)
+        dev, n, k, g = self._dev, self.n, self._k, self._group
+        self._cls = _alloc.zeros(dev, n, dtype=arrays.int64)
+        self._offsets = _alloc.zeros(dev, k + 1, dtype=arrays.int64)
         self._extra = {f"{g}_class": self._cls, f"{g}_offsets": self._offsets}
         if not self._static:
-            self._stale = _alloc.zeros(xp, n, dtype=xp.bool_)
+            self._stale = _alloc.zeros(dev, n, dtype=arrays.bool_)
             self._extra[f"{g}_stale"] = self._stale
         self._classify = (self._bind(AutoPlan(self._classify_plugin, {}), self._extra)
                           if self._classify_plugin is not None else None)
@@ -400,8 +393,8 @@ class DispatchRunner:
 
         if self._cls is None:
             self._classify_setup()
-        xp, n, k, extra = self._xp, self.n, self._k, self._extra
-        self._cls8 = _alloc.zeros(xp, n, dtype=xp.uint8)
+        n, k, extra = self.n, self._k, self._extra
+        self._cls8 = _alloc.zeros(self._dev, n, dtype=arrays.uint8)
         self._aset = ActiveSet(self._mask, reorder=self._theta, classes=k, class_plane=self._cls8)
         readers = list(self._unit_plugins)
         if self._classify_plugin is not None:
@@ -415,7 +408,7 @@ class DispatchRunner:
         self._units = [_split.single(self._bind(AutoPlan(p, {}), extra), "eagle dispatch")
                        for p in self._unit_plugins]
         self._sweep = None if self._static else self._bind(self._sweep_plan)
-        self._run_len = np.zeros(k, dtype=np.int64)
+        self._run_len = [0] * k
         self._blocks = [256] * k
         self._sorted = False
         self._stale_now = 0
@@ -426,7 +419,7 @@ class DispatchRunner:
         part = eexec.Partition(0, int(count), self.n)
         if self._device:
             eexec.DeviceKernel.run(bound._entry, bound._addrs, part,
-                                   stream=self._xp.cuda.get_current_stream().ptr, block=block)
+                                   stream=_stream.current(), block=block)
         else:
             eexec.HostTeam.run(bound._entry, bound._addrs, part)
 
@@ -444,7 +437,8 @@ class DispatchRunner:
             self._cls8[...] = self._cls
         aset.class_sort()
         self._offsets[...] = aset.offsets
-        self._run_len = np.diff(self._host(self._offsets).astype(np.int64))
+        offsets = self._offsets.tolist()
+        self._run_len = [b - a for a, b in zip(offsets, offsets[1:])]
         if self._device:
             _launch = importlib.import_module("eagle.launch")
             self._blocks = [int(_launch._resolved_block(u._entry, max(int(c), 1), None,
@@ -462,50 +456,46 @@ class DispatchRunner:
                 self._launch(unit, count, block)
 
     def _step_drifting(self) -> None:
-        xp, aset = self._xp, self._aset
-        live_count = int(xp.count_nonzero(self._mask == 0))
+        aset = self._aset
+        live_count = self.n - int(arrays.count_nonzero(self._m))
         aset.stale_count[0] = self._stale_now
         if not self._sorted or self._stale_now > STALE_MAX * max(live_count, 1):
-            self._cls8[...] = xp.clip(self._cls, 0, self._k - 1).astype(xp.uint8)
+            self._cls8[...] = arrays.clip(self._cls, 0, self._k - 1).astype(arrays.uint8)
             self._sort()
         for unit, count, block in zip_strict(self._units, self._run_len, self._blocks):
             if count > 0:
                 self._launch(unit, count, block)
-        stale = xp.flatnonzero(self._stale & (self._mask == 0))
+        live = arrays.equal(self._m, 0).view(arrays.uint8)
+        stale = arrays.flatnonzero(arrays.multiply(self._stale.view(arrays.uint8), live))
         self._stale_now = int(stale.size)
         if self._stale_now:
             self._smap[: self._stale_now] = stale
             self._scount[0] = self._stale_now
             self._sweep.launch()
 
-    def _host(self, array):
-        return array.get() if self._device else array
-
     # -- the decision -- #
-    def _live_mix(self) -> np.ndarray:
+    def _live_mix(self) -> list:
         """Live samples per class: from the sorted class plane while sorted,
-        else from the classes in sample order."""
-        xp = self._xp
+        else from the classes in sample order. Reductions and one read, never
+        a bincount: it piles every sample of a dominant class onto one atomic."""
         cls = self._cls8 if self._sorted else self._cls
-        if not self._device:
-            if self._sorted or np.count_nonzero(self._mask):
-                cls = cls[self._mask == 0]
-            return np.bincount(cls, minlength=self._k)
-        # reductions and one read, never a device bincount: it piles every
-        # sample of a dominant class onto one atomic
+        k = self._k
+        cells = arrays.empty((k,), arrays.int64, self._dev)
         if not self._sorted:            # the whole batch live: no mask in the counts
-            others = [xp.count_nonzero(cls if self._k == 2 else cls == j)
-                      for j in range(1, self._k)]
-            done, *rest = (int(v) for v in xp.stack([xp.count_nonzero(self._mask), *others]).get())
+            arrays.count_nonzero(self._m, out=cells[0])
+            for j in range(1, k):
+                arrays.count_nonzero(cls if k == 2 else arrays.equal(cls, j), out=cells[j])
+            done, *rest = cells.tolist()
             if done == 0:
-                return np.array([self.n - sum(rest), *rest], dtype=np.int64)
-        live = self._mask == 0
-        counts = xp.stack([xp.count_nonzero((cls == j) & live) for j in range(self._k)])
-        return counts.get().astype(np.int64)
+                return [self.n - sum(rest), *rest]
+        live = arrays.equal(self._m, 0).view(arrays.uint8)
+        for j in range(k):
+            arrays.count_nonzero(arrays.multiply(arrays.equal(cls, j).view(arrays.uint8), live), out=cells[j])
+        return cells.tolist()
 
     def _look(self, steps_left: int) -> None:
         counts = self._live_mix()
-        if counts.sum() == 0:
+        if sum(counts) == 0:
             return
         self._mix = tuple(int(c) for c in counts)
         if self._forced is None:
@@ -524,7 +514,7 @@ class DispatchRunner:
 
     # -- the loop -- #
     def _live(self) -> bool:
-        return bool((self._mask == 0).any())
+        return int(arrays.count_nonzero(self._m)) < self.n
 
     def _run_plain(self, steps: int):
         if self._sorted:
@@ -563,9 +553,9 @@ class DispatchRunner:
         sorts = int(self._aset.class_sorts[0]) if self._aset is not None else 0
         if self._aset is not None:
             self._aset.class_sorts[0] = 0
-        finished = int(self._xp.count_nonzero(self._mask))
+        finished = int(arrays.count_nonzero(self._m))
         if self._device:
-            self._xp.cuda.Device().synchronize()
+            _core.device_synchronize()
         launches = split_steps * self._k + (plain.launches if plain else 0)
         by_k = dict(plain.launches_by_k) if plain else {}
         if split_steps:
@@ -581,7 +571,7 @@ class DispatchRunner:
             class_sorts=sorts)
 
     def reset(self) -> None:
-        self._mask[...] = 0
+        self._m.fill(0)
         self._sorted = False
         if self._aset is not None:
             self._aset.reset()

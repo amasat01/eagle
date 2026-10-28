@@ -231,7 +231,9 @@ def test_the_fast_path_binds_the_callers_own_buffer_not_a_copy():
         marshal._force_slow_coercion(False)
     via_fast = marshal._as_dtype(conforming, np.float64)
     assert via_fast is conforming
-    assert via_slow.data.ptr == conforming.data.ptr
+    from eagle.abi import device_ptr
+
+    assert device_ptr(via_slow) == device_ptr(conforming)
 
 
 # --------------------------------------------------------------------------- #

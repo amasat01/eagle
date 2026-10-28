@@ -41,7 +41,7 @@ def test_full_tape_matches_central_differences(name):
     dx, dv, dc = central_difference(model, *inputs(np))
     _close(grads["x"], dx)
     _close(grads["v"], dv)
-    assert grads["c"] == pytest.approx(dc, rel=1e-6)
+    assert float(grads["c"]) == pytest.approx(dc, rel=1e-6)
 
 
 def test_linear_matches_the_analytic_adjoint():
@@ -71,7 +71,7 @@ def test_full_tape_matches_central_differences_gpu(name):
     dx, dv, dc = central_difference(model, *inputs(np))
     _close(grads["x"], dx)
     _close(grads["v"], dv)
-    assert grads["c"] == pytest.approx(dc, rel=1e-6)
+    assert float(grads["c"]) == pytest.approx(dc, rel=1e-6)
 
 
 @pytest.mark.gpu

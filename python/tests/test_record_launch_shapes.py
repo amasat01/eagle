@@ -53,8 +53,8 @@ def _bitwise(a, b):
 def test_automatic_kernel_fused_launches(window):
     sim, got = _grads(rr_pend_auto, window)
     assert sim.runner._recorder.fused and sim.runner._recorder.max_k > 1
-    report_launches = sim.runner._recorder._launch_count(int(sim.record.steps.max()))
-    assert report_launches < int(sim.record.steps.max())      # fewer launches than steps
+    report_launches = sim.runner._recorder._launch_count(int(host(sim.record.steps).max()))
+    assert report_launches < int(host(sim.record.steps).max())      # fewer launches than steps
     _close(got, _grads(rr_pend, "full")[1])
     _bitwise(got, _grads(rr_pend_auto, 16)[1])
 
@@ -209,7 +209,7 @@ def test_four_steps_per_launch_matches_the_oracle(window):
     sim, got = _run(rr_pend_k4, window)
     rec = sim.runner._recorder
     assert rec.fused and rec.max_k == 4
-    assert rec._launch_count(int(sim.record.steps.max())) < int(sim.record.steps.max())
+    assert rec._launch_count(int(host(sim.record.steps).max())) < int(host(sim.record.steps).max())
     _close(got, _run(rr_pend, "full")[1])
     _bitwise(got, _run(rr_pend_k4, "full")[1])
 

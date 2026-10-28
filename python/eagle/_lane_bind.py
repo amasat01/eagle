@@ -283,6 +283,52 @@ def keyed_size(plugin, spec: dict, n: int) -> int:
     return spec["width"] * prod(runtime if e is None else e for _a, e in spec["axes"])
 
 
+def key_count(plugin, spec: dict, n: int) -> int:
+    """The keys of a block sum over ``n`` lanes (``spec``: a team stage's ``keyed`` or a team plane's
+    ``keys``): the kept lane axes' extents, a runtime axis as long as the first lane axis."""
+    return keyed_size(plugin, spec, n) // spec["width"]
+
+
+#: The most lane chunks an ordered ``hawk.scatter`` adds in (a chunk is one thread's run of lanes).
+SCATTER_CHUNKS = 256
+
+
+def _cells_of(plane) -> int:
+    """Elements of a bound plane (any array with a ``shape``)."""
+    return prod(plane.shape)
+
+
+def scatter_chunks(n: int, targets: int) -> int:
+    """The chunks an ordered scatter of ``n`` lanes into ``targets`` cells adds in:
+    ``clamp(n // targets, 1, 256)``, so the partial sums (``chunks * targets`` cells) stay O(n)."""
+    return min(SCATTER_CHUNKS, max(1, n // max(targets, 1)))
+
+
+def team_grid(plugin, team: dict, n: int, planes: dict) -> int:
+    """The blocks a team stage (sidecar ``stages[k].team``) launches over ``n`` lanes: a lane, a key of a
+    block sum (``"keys"``), a lane chunk (``"chunks"``) or a target cell (``"targets"``) of an ordered
+    scatter into the plane ``team["of"]``."""
+    kind = team.get("grid", "lanes")
+    if kind == "keys":
+        return key_count(plugin, team["keyed"], n)
+    if kind == "chunks":
+        return scatter_chunks(n, _cells_of(planes[team["of"]]))
+    if kind == "targets":
+        return _cells_of(planes[team["of"]])
+    return n
+
+
+def team_units(plugin, spec: dict, n: int, planes: dict) -> int:
+    """The units a team scratch plane (sidecar ``team_planes``) holds ``per_lane`` elements of: lanes,
+    keys, one (``once``), or (``per_target``) the ``chunks * targets`` cells of an ordered scatter's partial sums."""
+    if spec.get("once"):
+        return 1
+    if "per_target" in spec:
+        size = _cells_of(planes[spec["per_target"]])
+        return scatter_chunks(n, size) * size
+    return n if "keys" not in spec else key_count(plugin, spec["keys"], n)
+
+
 def gather_columns(plugin, name, n):
     """The column count the compact Matrix plane ``name`` must have at ``n`` lanes:
     the product of the extents of the axes it varies along (sidecar ``gather_mats``;

@@ -26,15 +26,16 @@ not a plan launch cannot be re-run on those private copies and is refused.
 
 from __future__ import annotations
 
-import numpy
-
-from . import _alloc
-from . import _core
+from . import _alloc, _core, _stream, arrays
 from ._active_set import _address
 from ._conditional import SkipGuard
 from .graph import get_node_kind
-from .interop import _xp_of
 from .roles import STATE_ROLES
+
+
+def _zero(buf):
+    """Zero ``buf`` on the stream the step runs on (a capture's, in a captured graph)."""
+    buf.fill(0, _stream.current())
 
 
 def _same(a, b) -> bool:
@@ -53,15 +54,18 @@ def _in_place(child):
 
 def _flag_cell(ctx, xp, count, baseline, negate=False):
     """A one-element flag the reverse owns, set from the saved guard cells."""
-    differ = xp.equal if negate else xp.not_equal
-    flag = _alloc.zeros(xp, 1, dtype=xp.uint32)
+    differ = arrays.equal if negate else arrays.not_equal
+    flag = _alloc.zeros(xp, 1, dtype=arrays.uint32)
+    raw = _alloc.zeros(xp, 1, dtype=arrays.uint8)       # a comparison writes bytes; the flag is a uint32
     if baseline is None:
         def step():
-            differ(count, 0, out=flag)
+            differ(count, 0, out=raw)
+            arrays.copyto(flag, raw)
         ctx.add(step, reads=[count], writes=[flag])
     else:
         def step():
-            differ(count, baseline, out=flag)
+            differ(count, baseline, out=raw)
+            arrays.copyto(flag, raw)
         ctx.add(step, reads=[count, baseline], writes=[flag])
     return SkipGuard(flag, 0)
 
@@ -83,7 +87,7 @@ def _skippable(node, incoming, ctx):
                          "step, which has no transpose; it cannot be reversed")
     count = ctx.recorded("guard")
     baseline = ctx.recorded("guard_baseline") if node.payload.wrapper.guard.baseline_arr is not None else None
-    xp = _xp_of(count)
+    xp = count.device
     start = len(ctx._steps)
     guard = _flag_cell(ctx, xp, count, baseline, node.payload.wrapper.guard.negate)
     with ctx.gated(guard):
@@ -94,24 +98,24 @@ def _skippable(node, incoming, ctx):
         for name, buf in result.items():
             if name in pairs:
                 src = incoming[pairs[name]]
-                ctx.add(lambda d=buf, s=src: xp.copyto(d, s), reads=[src], writes=[buf])
+                ctx.add(lambda d=buf, s=src: arrays.copyto(d, s), reads=[src], writes=[buf])
             else:
-                ctx.add(lambda d=buf: d.fill(0), writes=[buf])
+                ctx.add(lambda d=buf: _zero(d), writes=[buf])
             lo = ctx.comp.get(id(buf))      # a row sum's companion rows
             if lo is not None:
-                ctx.add(lambda d=lo: d.fill(0), writes=[lo])
+                ctx.add(lambda d=lo: _zero(d), writes=[lo])
     _insert_front(ctx, start + 1, skipped)
     for w in outs:
         if w in ctx.reads:      # skipped, the adjoint goes on to the plane's earlier writer
             carry = result[w] = _alloc.empty_like(xp, incoming[w])
             _insert_front(ctx, start + 1, lambda: _copy(ctx, xp, carry, incoming[w]))
             with ctx.gated(guard):
-                ctx.add(lambda b=carry: b.fill(0), writes=[carry])
+                ctx.add(lambda b=carry: _zero(b), writes=[carry])
     return result
 
 
 def _copy(ctx, xp, dst, src):
-    ctx.add(lambda: xp.copyto(dst, src), reads=[src], writes=[dst])
+    ctx.add(lambda: arrays.copyto(dst, src), reads=[src], writes=[dst])
 
 
 def _sum_terms(ctx, xp, terms):
@@ -121,17 +125,17 @@ def _sum_terms(ctx, xp, terms):
 
     result = {}
     for r, parts in terms.items():
-        arrays = [a for _k, a in sorted(parts, key=lambda p: p[0])]
-        if not arrays:
+        terms_in = [a for _k, a in sorted(parts, key=lambda p: p[0])]
+        if not terms_in:
             continue
-        if len(arrays) == 1:
-            result[r] = arrays[0]
+        if len(terms_in) == 1:
+            result[r] = terms_in[0]
             continue
-        total = _alloc.empty_like(xp, arrays[0])
-        ctx.add(_ordered_sum(total, arrays), reads=arrays, writes=[total])
-        if any(id(a) in ctx.comp for a in arrays):
-            los = [ctx.comp.get(id(a)) for a in arrays]
-            los = [lo if lo is not None else _alloc.zeros_like(xp, arrays[0]) for lo in los]
+        total = _alloc.empty_like(xp, terms_in[0])
+        ctx.add(_ordered_sum(total, terms_in), reads=terms_in, writes=[total])
+        if any(id(a) in ctx.comp for a in terms_in):
+            los = [ctx.comp.get(id(a)) for a in terms_in]
+            los = [lo if lo is not None else _alloc.zeros_like(xp, terms_in[0]) for lo in los]
             ctx.comp[id(total)] = lo_total = _alloc.empty_like(xp, total)
             ctx.add(_ordered_sum(lo_total, los), reads=los, writes=[lo_total])
         result[r] = total
@@ -161,7 +165,8 @@ def _repeat_while(node, incoming, ctx):
     key = (lambda i, n: n) if single else (lambda i, n: f"{i}.{n}")
     launch = get_node_kind("launch")
     access = [(launch.reads(p), launch.writes(p)) for p in parts]
-    xp = parts[0].payload._cupy or numpy
+    device = parts[0].payload._device
+    xp = "cpu" if device is None else f"cuda:{device}"
     written = {}
     for _reads, writes in access:
         for _n, arr, _r in writes:
@@ -185,11 +190,16 @@ def _repeat_while(node, incoming, ctx):
     advance = [private(i, cur) for i in range(len(parts))]
     scratch = list(cur.values())
 
-    live = _alloc.zeros(xp, cap, dtype=xp.uint32)
+    live = _alloc.zeros(xp, cap, dtype=arrays.uint32)
     ran = ctx.written("iterations")[1:2]
-    index = xp.arange(cap, dtype=xp.uint32)
-    ctx.add(lambda: xp.greater(ran, index, out=live),
-            reads=[ran], writes=[live])
+    index = arrays.arange(cap, dtype=ran.dtype, device=xp)
+    ran_all, hit = _alloc.empty(xp, cap, dtype=ran.dtype), _alloc.empty(xp, cap, dtype=arrays.uint8)
+
+    def count_live():
+        arrays.copyto(ran_all, arrays.view_as(ran, (cap,), (0,)))      # one value, repeated: no temporary
+        arrays.greater(ran_all, index, out=hit)
+        arrays.copyto(live, hit)
+    ctx.add(count_live, reads=[ran], writes=[live])
     on = [SkipGuard(live, j) for j in range(cap)]
 
     def save(dst, src, j):
@@ -253,17 +263,17 @@ def _repeat_while(node, incoming, ctx):
                 with ctx.gated(on[j]):
                     for _n, a, _r in writes:    # overwritten: no adjoint before this part
                         if _address(a) in adjoint:
-                            ctx.add(lambda b=adjoint[_address(a)]: b.fill(0), writes=[adjoint[_address(a)]])
+                            ctx.add(lambda b=adjoint[_address(a)]: _zero(b), writes=[adjoint[_address(a)]])
                     for n, a, _r in reads:
                         if n not in out:
                             continue
                         if _address(a) in adjoint:
                             t = adjoint[_address(a)]
-                            ctx.add(lambda t=t, o=out[n]: xp.add(t, o, out=t), reads=[t, out[n]], writes=[t])
+                            ctx.add(lambda t=t, o=out[n]: arrays.add(t, o, out=t), reads=[t, out[n]], writes=[t])
                         else:                   # a loop constant: one term per (iteration, part)
                             terms.setdefault(_address(a), []).append(((j, i), out[n]))
                             zeroed += [out[n], ctx.comp[id(out[n])]] if id(out[n]) in ctx.comp else [out[n]]
-    _insert_front(ctx, 0, lambda: [ctx.add(lambda b=b: b.fill(0), writes=[b]) for b in zeroed])
+    _insert_front(ctx, 0, lambda: [ctx.add(lambda b=b: _zero(b), writes=[b]) for b in zeroed])
     totals = _sum_terms(ctx, xp, terms)
     result = {name: adjoint[ad] if ad in adjoint else totals[ad]
               for ad, name in taped.items() if ad in adjoint or ad in totals}
@@ -275,7 +285,7 @@ def _repeat_while(node, incoming, ctx):
                 carry = result[name] = _alloc.empty_like(xp, incoming[name])
                 _copy(ctx, xp, carry, incoming[name])
                 with ctx.gated(on[0]):
-                    ctx.add(lambda b=carry: b.fill(0), writes=[carry])
+                    ctx.add(lambda b=carry: _zero(b), writes=[carry])
     return result
 
 

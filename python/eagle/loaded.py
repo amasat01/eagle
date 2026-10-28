@@ -63,7 +63,7 @@ class LoadedKernel(LaunchMixin):
         #: and by ``eagle.plan.plan``'s legacy-partition bridge.
         self.abi_tag = self._meta.get("aether_abi")
         # Run BEFORE the driver module load below, so a rejected artifact
-        # never reaches cupy.
+        # never reaches the driver.
         validate_sidecar(self._meta, name=ptx_path.name)
         self.derivative = self._meta.get("derivative")  # a VJP/JVP artifact, or None
         # "float64" when absent -- pre-dtype sidecars.
@@ -86,25 +86,28 @@ class LoadedKernel(LaunchMixin):
             self._meta, name=ptx_path.name
         )
 
-        import cupy as cp
+        from .launch import _current_device_ordinal
 
         self.image_path = str(ptx_path)
-        self.device_id = cp.cuda.Device().id
-        self.module = cp.RawModule(path=str(ptx_path))  # driver load (JITs PTX)
-        self.fn = self.module.get_function(self.kernel_name)
-        self._functions = {(self.device_id, self.kernel_name): self.fn}
+        self._image = ptx_path.read_bytes()
+        self.device_id = _current_device_ordinal()
+        self._modules = {}
+        self._functions = {}
+        self.fn = self.function(self.device_id)
 
     def function(self, device: int, name: str | None = None):
-        """The function ``name`` (default: the kernel) on CUDA device
-        ``device``, loaded under that device the first time it is asked for
-        (a kernel has no device of its own)."""
+        """The function ``name`` (default: the kernel) on CUDA device ``device``, loaded into that
+        device's context the first time it is asked for (a kernel has no device of its own)."""
+        from . import _core
+        from .launch import SeamFunction
+
         name = name or self.kernel_name
         fn = self._functions.get((device, name))
         if fn is None:
-            import cupy as cp
-
-            with cp.cuda.Device(device):
-                fn = self._functions[(device, name)] = self.module.get_function(name)
+            module = self._modules.get(device)
+            if module is None:
+                module = self._modules[device] = _core.module_load(self._image, device)
+            fn = self._functions[(device, name)] = SeamFunction(_core.module_function(module, name))
         return fn
 
     def _refuse_v2_door(self, door: str) -> None:
@@ -193,10 +196,9 @@ class LoadedVector(LoadedKernel):
         DLPack): blocking for numpy, non-blocking on the framework's stream
         otherwise. Pass ``out=`` a pre-allocated device buffer to fill it
         in place -- see :func:`~eagle.interop.as_out_buffer`."""
-        import cupy as cp
-
         from . import interop
         from .marshal import (
+            _device,
             coerce_per_sample,
             coerce_tables,
             coerce_terminated,
@@ -210,9 +212,9 @@ class LoadedVector(LoadedKernel):
         origin = self._origin_from(kw, self.vector_inputs)
 
         def prepare():
-            from .dtypes import np_dtype
+            from .dtypes import dtype_of
 
-            dt = np_dtype(self.scalar_type)
+            dt = dtype_of(self.scalar_type)
             vec, n = coerce_vec_inputs(kw, self.vector_inputs, dt=dt)
             n = require_n(n)
             ps, n = coerce_per_sample(kw, self.per_sample, n, dt=dt)
@@ -223,7 +225,7 @@ class LoadedVector(LoadedKernel):
             )
             # Fill a provided device buffer in place (zeroed first), else allocate.
             if out is None:
-                out_cu = _alloc.zeros(cp, (3, n), dtype=dt)
+                out_cu = _alloc.zeros(_device(), (3, n), dtype=dt)
             else:
                 out_cu = interop.as_out_buffer(out, (3, n), dt)
                 out_cu.fill(0)
@@ -233,7 +235,7 @@ class LoadedVector(LoadedKernel):
             return out_cu
 
         def export(out_cu):
-            return out if out is not None else origin.from_cupy(out_cu)
+            return out if out is not None else origin.from_array(out_cu)
 
         return self._dispatch(origin=origin, prepare=prepare, export=export)
 
@@ -335,9 +337,9 @@ class LoadedPure(LoadedKernel):
         )
 
         def prepare():
-            from .dtypes import np_dtype
+            from .dtypes import dtype_of
 
-            dt = np_dtype(self.scalar_type)
+            dt = dtype_of(self.scalar_type)
             return pure_prepare(
                 self.fn,
                 self.arg_spec,
@@ -364,10 +366,10 @@ class LoadedPure(LoadedKernel):
                 shape = self._mut_mat_shapes.get(name)
                 if shape is None:
                     return mut[name]
-                return mut[name].reshape(*shape, mut[name].shape[-1])
+                return mut[name].reshape((*shape, mut[name].shape[-1]))
 
             return {
-                name: origin.from_cupy(_shaped(name))
+                name: origin.from_array(_shaped(name))
                 for name in (*self._mutables, *self.wide_outputs)
             }
 

@@ -441,9 +441,10 @@ class WarpFunction:
                 self._launch_device(level, mode, spec, planes, device, rows=rows.rows)
                 stream = device.stream.cuda_stream or 0
                 import cupy
-                from eagle.interop import external_stream
+                from eagle.frameworks.cupy import external_stream
+                from eagle.interop import scoped_stream
 
-                with cupy.cuda.Device(device.ordinal), external_stream(stream):
+                with cupy.cuda.Device(device.ordinal), external_stream(stream), scoped_stream(stream):
                     for nm, cell in rows.finish().items():
                         _cupy_view(planes[nm], device)[...] = cell
             else:
@@ -468,12 +469,13 @@ class WarpFunction:
     def _launch_device(self, level, mode, spec, planes, device, rows=None):
         import cupy
 
-        from eagle.interop import external_stream
+        from eagle.frameworks.cupy import external_stream
+        from eagle.interop import scoped_stream
 
         plan = self._built(level, mode, device)
         # a device's default stream carries no handle: it is the CUDA legacy stream, 0
         stream = device.stream.cuda_stream or 0
-        with cupy.cuda.Device(device.ordinal), external_stream(stream):
+        with cupy.cuda.Device(device.ordinal), external_stream(stream), scoped_stream(stream):
             arrays = {}
             for role, name in spec:
                 if role == "lookup" and name == FINISHED_PLANE:
@@ -521,3 +523,13 @@ class WarpFunction:
         built = plugins(unit, device_loader=load_manifest)
         _split.link(built, unit)
         return eplan.plan(built[level.name], structure=eexec.DeviceKernel)
+
+
+def from_eagle(a):
+    """The :class:`eagle.Array` ``a`` as a warp array (DLPack)."""
+    return wp.from_dlpack(a)
+
+
+def stream_handle(stream) -> int:
+    """The raw handle of a warp stream object."""
+    return int(stream.cuda_stream)

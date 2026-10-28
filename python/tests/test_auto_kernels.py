@@ -185,11 +185,11 @@ def test_auto_kernel_on_the_device_matches_the_hand_plan_and_the_host(
     host = ap.run(**inputs)
     dev = ap.run(**on_device)
     assert ap.select(on_device).structure is eexec.DeviceKernel
-    assert isinstance(dev, cp.ndarray)
+    assert isinstance(dev, eagle.Array)
     hand = _hand_plugins([kernel], tmp_path, targets=("host", "cuda"))[kernel.name]
     want = eplan.plan(hand, structure=eexec.DeviceKernel).run(**on_device)
-    assert dev.get().tobytes() == want.get().tobytes()
-    assert ulps(dev.get(), host).max() <= _CONTRACTIONS[kernel.name]
+    assert np.asarray(dev.get()).tobytes() == np.asarray(want.get()).tobytes()
+    assert ulps(np.asarray(dev.get()), np.asarray(host)).max() <= _CONTRACTIONS[kernel.name]
 
 
 # --------------------------------------------------------------------------- #

@@ -68,6 +68,16 @@ list(REMOVE_DUPLICATES TEST_FILES)
 list(APPEND TEST_FILES ${CMAKE_CURRENT_SOURCE_DIR}/test_DeviceProps.cpp)
 list(REMOVE_DUPLICATES TEST_FILES)
 
+# The array-op host twins (eagle/array/kernels.h + host.h) are CUDA-free and dependency-free: they run in
+# BOTH build modes. -ffp-contract=off keeps the host arithmetic single-rounded, as the device twins are.
+list(APPEND TEST_FILES ${CMAKE_CURRENT_SOURCE_DIR}/test_ArrayOps.cpp ${CMAKE_CURRENT_SOURCE_DIR}/test_Array.cpp)
+list(REMOVE_DUPLICATES TEST_FILES)
+set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/test_ArrayOps.cpp
+  PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+# The device twin row (CUDA mode only, picked up by the .cu glob): host and device bit-equal.
+set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/test_ArrayOpsDevice.cu
+  PROPERTIES COMPILE_OPTIONS "-Xcompiler=-ffp-contract=off;--fmad=false")
+
 # eagle::launch::Traits unit test is CUDA-free,
 # so -- same reasoning as the conformance corpus append above -- it must
 # compile+run in BOTH build modes rather than being left to the

@@ -100,7 +100,7 @@ def test_a_horizon_on_the_step_grid_stops_on_its_step(backend):
     n = len(pairs)
     res = eagle.simulate(ev_grid, dt=xp.asarray(h), big_t=xp.asarray(big_t), x=xp.zeros(n),
                          t=xp.zeros(n), max_steps=80, events="refine", record=True)
-    assert (res.record.steps == m).all()
+    assert (host(res.record.steps) == m).all()
     assert (np.abs(host(res.t_stop) - big_t) <= np.spacing(big_t)).all()
     assert set(host(res.event_status).tolist()) <= {1, 2}
     grads = eagle.diff.reverse(res.record, {"t": xp.ones(n)})

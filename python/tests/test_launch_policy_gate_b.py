@@ -103,8 +103,24 @@ extern "C" __global__ void {name}(GRefMirror out) {{
     }}
 }}
 """
-    mod = cp.RawModule(code=src)
-    return mod.get_function(name)
+    return _ByValue(cp.RawModule(code=src).get_function(name))
+
+
+class _ByValue:
+    """A cupy kernel that takes eagle's ctypes by-value boxes (``GRef``) as cupy wants them: raw bytes."""
+
+    def __init__(self, fn):
+        self._fn = fn
+
+    def __getattr__(self, name):
+        return getattr(self._fn, name)
+
+    def __call__(self, grid, block, args, **kw):
+        import ctypes
+
+        import numpy as np
+        packed = tuple(np.void(bytes(a)) if isinstance(a, ctypes.Structure) else a for a in args)
+        return self._fn(grid, block, packed, **kw)
 
 
 def _launch_add(fn, out, term):

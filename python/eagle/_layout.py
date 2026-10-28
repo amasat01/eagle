@@ -62,6 +62,8 @@ import functools
 import sys
 import warnings
 
+from . import _core, _stream, arrays
+from .dtypes import dtype_name
 from .interop import _root_module
 
 __all__ = ["LayoutWarning", "LayoutError", "classify", "is_single", "adapt",
@@ -451,63 +453,47 @@ class Adapted:
         ``(R*C, N)``) — back into the caller's array."""
         dst = self.caller_view()
         src = result.reshape(tuple(dst.shape))
-        dst_mod, src_mod = _root_module(dst), _root_module(src)
-        if dst_mod == src_mod:
-            _copyto(dst, src)
-        elif dst_mod == "torch":
-            import torch
+        _copyto(dst, src)
 
-            dst.copy_(torch.from_dlpack(src))
-        elif dst_mod == "cupy":
-            import cupy
 
-            cupy.copyto(dst, cupy.asarray(src))
-        else:
-            import numpy
-
-            numpy.copyto(dst, src.get() if src_mod == "cupy" else src)
+def _view(x):
+    """``x`` as an :class:`eagle.Array`, zero-copy. A device array goes through the CUDA array interface: a
+    DLPack export would hand-shake with the legacy stream, which a capture in progress refuses."""
+    if isinstance(x, arrays.Array):
+        return x
+    try:
+        if getattr(x, "__cuda_array_interface__", None) is not None:
+            return _core.array_from_cai(x)
+    except Exception:           # noqa: BLE001 -- a grad-tracked torch tensor raises there: DLPack takes it
+        pass
+    return arrays.asarray(x)
 
 
 def _copyto(dst, src) -> None:
     copy_ = getattr(dst, "copy_", None)
     if copy_ is not None:            # torch
+        if _root_module(src) != "torch":
+            import torch
+
+            src = torch.from_dlpack(src)
         copy_(src)
         return
-    module = type(dst).__module__.split(".")[0]
-    if module == "cupy":
-        import cupy
-
-        cupy.copyto(dst, src)
-    else:
-        import numpy
-
-        numpy.copyto(dst, src)
+    arrays.copyto(_view(dst), _view(src), _stream.current())
 
 
 def _contiguous_copy(view):
     contiguous = getattr(view, "contiguous", None)
     if contiguous is not None and not hasattr(view, "flags"):   # torch
         return contiguous()
-    module = type(view).__module__.split(".")[0]
-    if module == "cupy":
-        import cupy
-
-        return cupy.ascontiguousarray(view)
-    import numpy
-
-    return numpy.ascontiguousarray(view)
+    return arrays.ascontiguousarray(_view(view))
 
 
 def is_number(value) -> bool:
     """A Python (or numpy) scalar number: one sample's value, never a plane."""
     if isinstance(value, (int, float, complex)):
         return True
-    module = type(value).__module__
-    if module != "numpy":
-        return False
-    import numpy
-
-    return isinstance(value, numpy.generic)
+    cls = type(value)
+    return cls.__module__ == "numpy" and cls.__name__ != "ndarray" and getattr(value, "shape", None) == () and hasattr(value, "item")
 
 
 def adapt(name, value, head, *, writes: bool, single: bool = False, dtype=None,
@@ -530,9 +516,8 @@ def adapt(name, value, head, *, writes: bool, single: bool = False, dtype=None,
     shape = getattr(value, "shape", None)
     if (shape is None or shape == ()) and single and not writes \
             and is_number(value):
-        import numpy
-
-        cell = numpy.asarray([value], dtype=dtype)
+        item = value.item() if hasattr(value, "item") else value
+        cell = arrays.asarray([item], dtype=None if dtype is None else dtype_name(dtype))
         return Adapted(name, value, cell, None, writes, "single")
     if shape is None:
         return None

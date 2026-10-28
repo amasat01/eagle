@@ -44,6 +44,7 @@ from ._device_props import DeviceProps, device_props
 from ._dispatch_door import PerformanceWarning
 from ._layout import LayoutWarning, samples_first, samples_last
 from ._simulate import SimResult, Simulation, simulate, simulation
+from ._stream import stream
 from ._until_done import (
     FINISHED_PLANE,
     FUSED_STEPS_PLANE,
@@ -58,9 +59,12 @@ from .abi import (
     make_gref,
     make_handle,
 )
+from . import arrays
+from ._index_set import IndexSet, check_index_set
+from .arrays import Array, DType
 from .compose import GraphComposer
-from .dtypes import SCALAR_TYPES, np_dtype
-from .interop import detect, origin_adapter, to_cupy
+from .dtypes import SCALAR_TYPES
+from .interop import detect, origin_adapter, to_array
 from .launch import KERNEL_NAME, assemble_args, launch, pure_prepare
 from .loaded import LoadedKernel, LoadedPure, LoadedVector
 from ._busy import Busy
@@ -104,6 +108,11 @@ __all__ = [
     "check_aether_abi",
     "compaction_body",
     "copy",
+    "Array",
+    "IndexSet",
+    "check_index_set",
+    "DType",
+    "arrays",
     "deploy",
     "detect",
     "device_props",
@@ -111,7 +120,6 @@ __all__ = [
     "load_manifest",
     "make_gref",
     "make_handle",
-    "np_dtype",
     "opaque",
     "origin_adapter",
     "pinned",
@@ -122,7 +130,8 @@ __all__ = [
     "simulate",
     "simulation",
     "skippable",
-    "to_cupy",
+    "stream",
+    "to_array",
     "until_done",
 ]
 
@@ -140,10 +149,10 @@ def __getattr__(name):
 
         globals()["reduce"] = reduce
         return reduce
-    if name == "diff":
+    if name in ("diff", "fft"):
         import importlib
 
-        return importlib.import_module(".diff", __name__)
+        return importlib.import_module("." + name, __name__)
     if name in ("copy", "pinned", "opaque"):
         import importlib
 

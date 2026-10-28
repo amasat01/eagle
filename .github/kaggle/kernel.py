@@ -160,7 +160,8 @@ def install(cfg, py, use_uv, work):
     cu = f"cuda{cfg.cuda}"
     pre = ["--pre"] if cfg.pre else []
     pin = f"=={cfg.version}" if cfg.version else ""
-    others = ["jax[" + cu + "]", "torch", "warp-lang", "pytest", "nbclient", "ipykernel", "nbformat", "matplotlib"]
+    others = ["jax[" + cu + "]", "torch", "warp-lang", "numpy", f"cupy-cuda{cfg.cuda}x",
+              "pytest", "nbclient", "ipykernel", "nbformat", "matplotlib"]
     if cfg.source in ("pypi", "wheel"):
         rc = pip(py, use_uv, *install_args(cfg, py, cu, pre, pin, others))
     else:
@@ -183,7 +184,7 @@ def install(cfg, py, use_uv, work):
         rc = pip(py, use_uv, src / "raptor")
         rc = rc or pip(py, use_uv, "--no-build-isolation", src / "eagle" / "python")
         rc = rc or pip(py, use_uv, "--no-build-isolation", src / "hawk")
-        rc = rc or pip(py, use_uv, *pre, *torch_index(cfg), f"jax[{cu}]", "torch", "warp-lang", f"cupy-cuda{cfg.cuda}x",
+        rc = rc or pip(py, use_uv, *pre, *torch_index(cfg), f"jax[{cu}]", "torch", "warp-lang", "numpy", f"cupy-cuda{cfg.cuda}x",
                        "pytest", "nbclient", "ipykernel", "nbformat", "matplotlib")
     if rc != 0:
         raise SystemExit("install failed (see the pip output above)")

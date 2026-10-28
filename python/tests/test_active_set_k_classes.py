@@ -42,7 +42,7 @@ def test_class_sort_matches_serial_oracle(k):
     assert list(a.perm) == want
     # perm is a permutation and inv is its inverse
     assert sorted(a.perm.tolist()) == list(range(n))
-    assert np.array_equal(a.inv[a.perm], np.arange(n))
+    assert np.array_equal(np.asarray(a.inv)[np.asarray(a.perm)], np.arange(n))
     # owned planes follow perm: payload at slot s is sample perm[s]'s
     assert np.array_equal(payload, np.asarray(want) * 7 + 3)
     assert np.array_equal(a.class_plane, cls0[want])
@@ -427,7 +427,7 @@ def test_device_restore_and_pairing():
     d.compact()
     d.class_sort()
     assert d.permuted
-    assert np.array_equal(_get(dp), (d.perm.get() * 7 + 3))
+    assert np.array_equal(_get(dp), (np.asarray(d.perm.get()) * 7 + 3))
     d.restore()
     assert np.array_equal(_get(dp), np.arange(5000) * 7 + 3)
 

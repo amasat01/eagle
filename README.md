@@ -30,7 +30,7 @@ eagle is the execution layer of the [RAPTOR family](https://amasat01.github.io/)
 as CUDA graphs to keep work efficient on the GPU, and connects them to the code you already have. See
 [where RAPTOR fits](https://amasat01.github.io/where_raptor_fits.html) for the full four-part story.
 
-Wheels for Linux x86_64 and aarch64 and macOS arm64 (Python 3.9-3.15); the GPU plugin is in the x86_64 wheels only. **On Windows, use WSL2** (the Linux wheels), or open the notebook on Colab or Kaggle (the Kaggle badge above).
+Wheels for Linux x86_64 and aarch64 and macOS arm64 (Python 3.9-3.15); the GPU plugin is in the Linux wheels, x86_64 and aarch64 (the aarch64 plugin is built and load-tested without a GPU; it has not run on one). **On Windows, use WSL2** (the Linux wheels), or open the notebook on Colab or Kaggle (the Kaggle badge above).
 
 ```bash
 pip install raptor-eagle raptor-hawk                           # CPU threads, no NVIDIA packages

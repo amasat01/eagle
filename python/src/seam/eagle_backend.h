@@ -45,6 +45,7 @@
  * | 9   | exec        | run_device                                            |
  * | 10  | device      | device_props                                          |
  * | 11  | interop     | fence, event_pool_created (+ memset_device, memcpy_device, memcpy, host_alloc, host_free, host_func, bound per symbol) |
+ * |     | (minor 7)   | device_count, set_device, get_device, launch_status, device_synchronize, stream_is_capturing, module_load, module_load_jit, module_function, module_release, link_ptx, gemm, gemm_release, function_attribute, launch_raw, cell_op, memcpy_strided, mem_alloc, mem_release, mem_drain, pointer_device, stream_sync, event_create, event_create_timed, event_elapsed, event_record, event_wait, event_release: bound per symbol, no group bit |
  * | 12  | filtering   | compact_device (+ reorder_device, bound per symbol)   |
  * | 13  | conditional IF/ELSE | none: ``conditional_desc.kind`` IF_ELSE is accepted (driver >= 12.8) |
  * | 14  | conditional SWITCH  | none: ``conditional_desc.kind`` SWITCH is accepted (driver >= 12.8)  |
@@ -103,7 +104,7 @@ extern "C" {
 /** Seam major version: the core accepts exactly this major. */
 #define EAGLE_BACKEND_VERSION_MAJOR 1u
 /** Seam minor version this header describes (informational). */
-#define EAGLE_BACKEND_VERSION_MINOR 6u
+#define EAGLE_BACKEND_VERSION_MINOR 7u
 /** The packed version a backend built from this header reports. */
 #define EAGLE_BACKEND_VERSION ((EAGLE_BACKEND_VERSION_MAJOR << 16) | EAGLE_BACKEND_VERSION_MINOR)
 
@@ -186,6 +187,8 @@ struct eagle_backend_device_props {
     int64_t shared_mem_per_block, shared_mem_per_sm;
     double peak_bytes_per_s, peak_flops_sp, peak_flops_dp, fp64_ratio;
     double ridge_flops_per_byte_sp, ridge_flops_per_byte_dp;
+    /* Appended in minor 7: device memory in bytes, read with the device current. */
+    int64_t total_mem_bytes, free_mem_bytes;
 };
 
 struct eagle_backend_stream_desc {
@@ -423,6 +426,232 @@ eagle_backend_status eagle_backend_host_free(uint64_t ptr);
  *  every replay. ``fn`` must not call the backend, and ``arg`` must outlive
  *  every execution. Added in minor 6; bound per symbol. */
 eagle_backend_status eagle_backend_host_func(uint64_t stream, void (*fn)(void*), void* arg);
+
+/* ---- minor 7: device scope, modules, raw launch, built-in cell ops ----------- */
+
+/** Number of devices the backend sees. Added in minor 7; bound per symbol, as
+ *  are the nine after it. */
+eagle_backend_status eagle_backend_device_count(int32_t* count);
+/** Make @p device the calling thread's current device (its primary context). */
+eagle_backend_status eagle_backend_set_device(int32_t device);
+/** ``*device`` = the calling thread's current device ordinal (the selected one while the thread has no context
+ *  yet: 0 by default). Reads no device properties and creates no context. */
+eagle_backend_status eagle_backend_get_device(int32_t* device);
+/** Read (and clear) the calling thread's pending launch error on @p device (-1: the current one): success when the
+ *  launches issued so far left none, else a failure whose ``eagle_backend_last_error()`` names the CUDA error. A
+ *  launch-error query, not a wait: it never synchronises. */
+eagle_backend_status eagle_backend_launch_status(int32_t device);
+/** Block the host until all work on @p device (-1: the current one) is done. */
+eagle_backend_status eagle_backend_device_synchronize(int32_t device);
+/** ``*capturing`` = 1 when @p stream (0: the legacy default) is inside a capture. */
+eagle_backend_status eagle_backend_stream_is_capturing(uint64_t stream, int32_t* capturing);
+
+/** Load a device module from @p image (``bytes`` bytes of cubin, fatbin or
+ *  PTX text) in the primary context of @p device (-1: the current one).
+ *  The module handle goes to ``*module``; free it with ``module_release`` on the
+ *  same device. */
+eagle_backend_status eagle_backend_module_load(const void* image, uint64_t bytes, int32_t device, uint64_t* module);
+/** ``module_load`` of PTX text, JIT-compiled under a cap of @p max_registers registers per thread
+ *  (``CU_JIT_MAX_REGISTERS``; 0: no cap). A cubin ignores the cap. */
+eagle_backend_status eagle_backend_module_load_jit(const void* image, uint64_t bytes, int32_t device,
+                                                   uint32_t max_registers, uint64_t* module);
+/** Link PTX text (@p image, ``bytes`` bytes) for @p device under a cap of @p max_registers registers per thread
+ *  (0: no cap) and copy the resulting cubin to @p out (``capacity`` bytes; may be null to only measure). ``*size``
+ *  is the cubin's size; the call fails if @p out is too small. */
+eagle_backend_status eagle_backend_link_ptx(const void* image, uint64_t bytes, int32_t device, uint32_t max_registers,
+                                            void* out, uint64_t capacity, uint64_t* size);
+/** The function @p name of @p module; its raw handle goes to ``*function``. Valid
+ *  until the module is released. */
+eagle_backend_status eagle_backend_module_function(uint64_t module, const char* name, uint64_t* function);
+/** Unload @p module (0 is fine) on @p device. */
+void eagle_backend_module_release(uint64_t module, int32_t device);
+/** One ``CUfunction`` attribute (the driver's ``CUfunction_attribute`` code: 0 max threads per block, 1 static
+ *  shared bytes, 2 constant bytes, 3 local bytes, 4 registers) of @p function (``cuFuncGetAttribute``). */
+eagle_backend_status eagle_backend_function_attribute(uint64_t function, int32_t attribute, int32_t* value);
+
+/** One launch of a raw function (``launch_raw``). */
+struct eagle_backend_launch_raw_desc {
+    uint32_t struct_size;
+    uint32_t flags;           /**< zero */
+    int32_t device;           /**< -1: the stream's device */
+    uint32_t shared_bytes;    /**< dynamic shared memory */
+    uint64_t function;        /**< from ``module_function`` */
+    uint64_t stream;          /**< 0: the legacy default stream */
+    uint32_t grid[3];
+    uint32_t block[3];
+    uint64_t args;            /**< ``void*[arg_count]``, each element the address of one argument value */
+    uint32_t arg_count;
+    uint32_t reserved;        /**< zero */
+};
+/** ``cuLaunchKernel`` of ``desc->function``: enqueue only, capture-legal. */
+eagle_backend_status eagle_backend_launch_raw(const struct eagle_backend_launch_raw_desc* desc);
+
+/** ``eagle_backend_cell_op_desc.op`` values. Append-only. Integer kernels, so a
+ *  result is bit-equal to the plain C expression it names. ``p`` are device
+ *  addresses, ``i`` integer arguments, ``n`` the element count.
+ *
+ *  | op | name              | p                                  | i |
+ *  |----|-------------------|------------------------------------|---|
+ *  | 0  | BUMP              | p0 u32[1]: ++                      | |
+ *  | 1  | MASK_COUNT        | p0 u8[n] mask, p1 u32[1]: += count of set bytes | |
+ *  | 2  | POLICY            | p0 finished u32[1], p1 total u32[1], p2 cells i64[], p3 word i64[1], p4 go u32[1], p5 hist i64[]: one policy step | i0 k_min, i1 k_max, i2..i7 the cell indices k, fin_at, done, cap, r, mapped, i8 rate scale |
+ *  | 3  | IDENTITY          | p0 i32[n]: a[j] = j                | |
+ *  | 4  | COUNT_FIRED       | p0 fire u32[1], p1 reorders u32[1]: += (fire != 0) | |
+ *  | 5  | GROUP_AND         | p0 u8[i0] mask, p1 u8[n] drop: drop[g] = AND of the group's lanes (lanes past i0 count as set) | i0 lanes, i1 group |
+ *  | 6  | SCALE_COUNT       | p0 u32[1] c, p1 u32[1] o: o = c * group | i0 group |
+ *  | 7  | CAST              | p0 dst[n], p1 src[n] (contiguous)  | i0 dst dtype, i1 src dtype (``EAGLE_BACKEND_DTYPE_*``) |
+ *  | 8  | CONTIGUOUS_GATHER | p0 dst (contiguous), p1 src (first element) | i0 elem bytes (1,2,4,8), i1 ndim (1..4), i2..i5 shape, i6..i9 src strides in bytes (signed); n = product of shape |
+ *  | 9  | ADD               | p0 dst[n], p1 a[n], p2 b[n]        | i0 dtype (any dtype but bool; minor 7: u8, u32, u64, f16, bf16 join) |
+ */
+#define EAGLE_BACKEND_CELL_BUMP 0u
+#define EAGLE_BACKEND_CELL_MASK_COUNT 1u
+#define EAGLE_BACKEND_CELL_POLICY 2u
+#define EAGLE_BACKEND_CELL_IDENTITY 3u
+#define EAGLE_BACKEND_CELL_COUNT_FIRED 4u
+#define EAGLE_BACKEND_CELL_GROUP_AND 5u
+#define EAGLE_BACKEND_CELL_SCALE_COUNT 6u
+#define EAGLE_BACKEND_CELL_CAST 7u
+#define EAGLE_BACKEND_CELL_CONTIGUOUS_GATHER 8u
+#define EAGLE_BACKEND_CELL_ADD 9u
+/* 10-23: the array ops (eagle/array/kernels.h defines each, one body shared by the device kernel and the
+ * host twin). dtype = ``i[9]`` (``EAGLE_BACKEND_DTYPE_*``), n = elements, scalar parameters ``i[0]``/``i[1]``
+ * (integral dtypes) or ``f[0]``/``f[1]`` (float dtypes). Operands per op are listed in kernels.h. */
+#define EAGLE_BACKEND_CELL_FILL 10u
+#define EAGLE_BACKEND_CELL_SUB 11u
+#define EAGLE_BACKEND_CELL_MUL 12u
+#define EAGLE_BACKEND_CELL_MAX 13u
+#define EAGLE_BACKEND_CELL_EQ 14u
+#define EAGLE_BACKEND_CELL_NE 15u
+#define EAGLE_BACKEND_CELL_GT 16u
+#define EAGLE_BACKEND_CELL_WHERE 17u
+#define EAGLE_BACKEND_CELL_CLIP 18u
+#define EAGLE_BACKEND_CELL_ARANGE 19u
+#define EAGLE_BACKEND_CELL_LINSPACE 20u
+#define EAGLE_BACKEND_CELL_TAKE 21u
+#define EAGLE_BACKEND_CELL_CUMSUM 22u
+#define EAGLE_BACKEND_CELL_SCATTER 23u
+/* 24 COUNT_NONZERO: p0 int64[1] (zeroed by the op, then the count), p1 x[n] (dtype i[9]).
+ * 25 FLATNONZERO:   p0 int32[n] (the indices of the nonzero elements, first count slots), p1 x[n], p2 zeroed-by-the-op
+ *                   scan scratch of cumsum_scratch_bytes(n), p3 int64[1] (the count). Both: any compute dtype. */
+#define EAGLE_BACKEND_CELL_COUNT_NONZERO 24u
+#define EAGLE_BACKEND_CELL_FLATNONZERO 25u
+/* 26-34: the scalar-operand forms (minor 7): p0 dst[n], p1 x[n], the scalar in ``i[0]`` (integral dtypes) or ``f[0]``
+ * (float dtypes), dtype ``i[9]``. ADDS/SUBS/MULS/MAXS = x op s; EQS/NES/GTS = u8[n] of x op s; RSUBS = s - x;
+ * LTS = u8[n] of x < s (the scalar-on-the-left spellings of subtraction and greater-than). One kernel node each. */
+#define EAGLE_BACKEND_CELL_ADDS 26u
+#define EAGLE_BACKEND_CELL_SUBS 27u
+#define EAGLE_BACKEND_CELL_MULS 28u
+#define EAGLE_BACKEND_CELL_MAXS 29u
+#define EAGLE_BACKEND_CELL_EQS 30u
+#define EAGLE_BACKEND_CELL_NES 31u
+#define EAGLE_BACKEND_CELL_GTS 32u
+#define EAGLE_BACKEND_CELL_RSUBS 33u
+#define EAGLE_BACKEND_CELL_LTS 34u
+/* 35 STRIDED_COPY (minor 7): p0 dst, p1 src (each the first element, any strides), i0 elem bytes (1,2,4,8), i1 ndim
+ * (1..4), i2..i5 shape, i6..i9 dst strides in bytes (signed), j[0..3] src strides in bytes (signed); n = product of
+ * shape. One kernel node, no allocation: both offsets come from the logical index. A contiguous side is the
+ * contiguous strides, so this is also the gather and the scatter. */
+#define EAGLE_BACKEND_CELL_STRIDED_COPY 35u
+
+/** ``cell_op`` dtype codes. */
+#define EAGLE_BACKEND_DTYPE_BOOL 0
+#define EAGLE_BACKEND_DTYPE_UINT8 1
+#define EAGLE_BACKEND_DTYPE_INT32 2
+#define EAGLE_BACKEND_DTYPE_UINT32 3
+#define EAGLE_BACKEND_DTYPE_INT64 4
+#define EAGLE_BACKEND_DTYPE_UINT64 5
+#define EAGLE_BACKEND_DTYPE_FLOAT32 6
+#define EAGLE_BACKEND_DTYPE_FLOAT64 7
+#define EAGLE_BACKEND_DTYPE_FLOAT16 8   /* minor 7: array ops and casts; arithmetic needs sm_53 */
+#define EAGLE_BACKEND_DTYPE_BFLOAT16 9  /* minor 7: array ops and casts; arithmetic needs sm_80 */
+
+struct eagle_backend_cell_op_desc {
+    uint32_t struct_size;
+    uint32_t flags;           /**< zero */
+    uint32_t op;              /**< EAGLE_BACKEND_CELL_* */
+    int32_t device;           /**< -1: the stream's device */
+    uint64_t stream;          /**< 0: the legacy default stream */
+    int64_t n;                /**< element or thread count, per op */
+    uint64_t p[6];
+    int64_t i[10];
+    double f[2];              /**< appended in minor 7: float scalars of the array ops */
+    int64_t j[4];             /**< appended in minor 7: the source byte strides of STRIDED_COPY */
+};
+/** Enqueue the built-in op ``desc->op`` (the plugin carries SASS for every ship
+ *  arch; no JIT). Capture-legal: enqueue only, no allocation, no sync. */
+eagle_backend_status eagle_backend_cell_op(const struct eagle_backend_cell_op_desc* desc);
+
+/** ``eagle_backend_gemm_desc.dtype`` values. */
+#define EAGLE_BACKEND_GEMM_F32 0
+#define EAGLE_BACKEND_GEMM_F64 1
+
+/** A batched GEMM in cuBLAS's column-major terms: ``C[i] = alpha * op(A[i]) * op(B[i]) + beta * C[i]`` for
+ *  ``batch`` matrices ``stride_*`` ELEMENTS apart (``batch`` 1: one product; the strides are then unused).
+ *  ``op_*`` 0: as is, 1: transposed. ``a``, ``b``, ``c`` are device addresses. */
+struct eagle_backend_gemm_desc {
+    uint32_t struct_size;
+    uint32_t dtype;           /**< EAGLE_BACKEND_GEMM_* */
+    int32_t device;           /**< -1: the stream's device */
+    uint32_t op_a, op_b;
+    uint64_t stream;          /**< 0: the legacy default stream */
+    int64_t m, n, k;
+    int64_t lda, ldb, ldc;
+    uint64_t a, b, c;
+    int64_t batch, stride_a, stride_b, stride_c;
+    double alpha, beta;
+};
+/** Enqueue the GEMM on ``desc->stream`` through cuBLAS, which the plugin loads at run time (``dlopen``; the
+ *  plugin links none). One cuBLAS handle per (device, stream) is created at its first call (which allocates:
+ *  call once before a capture) and reused; capture-legal after that. Fails as unavailable, naming the
+ *  libraries tried, when cuBLAS is absent. */
+eagle_backend_status eagle_backend_gemm(const struct eagle_backend_gemm_desc* desc);
+/** Destroy the cuBLAS handle of (@p device, @p stream), if any (call once the stream's work is done). */
+void eagle_backend_gemm_release(int32_t device, uint64_t stream);
+
+/** Strided copy (``cuMemcpy2DAsync``): ``height`` rows of ``width_bytes``, row
+ *  starts ``dst_pitch`` / ``src_pitch`` bytes apart, direction ``kind``
+ *  (``EAGLE_BACKEND_COPY_*``, not H2H), enqueued on ``stream`` like ``memcpy``. */
+eagle_backend_status eagle_backend_memcpy_strided(uint64_t dst, uint64_t dst_pitch, uint64_t src, uint64_t src_pitch,
+    uint64_t width_bytes, uint64_t height, int32_t kind, uint64_t stream);
+
+/* ---- minor 7: stream-ordered memory (the array layer's device storage) ------- */
+
+/** ``mem_alloc`` kinds. */
+#define EAGLE_BACKEND_MEM_DEVICE 0
+#define EAGLE_BACKEND_MEM_PINNED 1
+
+/** Allocate ``bytes`` of ``kind`` memory on ``device`` (-1: the stream's). A device allocation is
+ *  stream-ordered on ``stream`` (0: the legacy default stream) and aligned to 256 bytes; its address goes to
+ *  ``*ptr`` and the handle to free it to ``*chunk``. Refused by name while ``stream`` is capturing (an
+ *  allocation is not capture-legal). ``bytes == 0`` gives a null ``*ptr`` and ``*chunk``. */
+eagle_backend_status eagle_backend_mem_alloc(int32_t kind, int32_t device, uint64_t bytes, uint64_t stream,
+    uint64_t* chunk, uint64_t* ptr);
+/** Free ``chunk`` (0 is fine), stream-ordered on its allocation stream. While that stream is capturing the
+ *  free is DEFERRED (queued) and runs at the next ``mem_alloc`` or ``mem_drain`` outside a capture. */
+void eagle_backend_mem_release(uint64_t chunk);
+/** Run every deferred free now; ``*left`` (may be null) gets the number still queued (0 unless a stream is
+ *  still capturing). */
+eagle_backend_status eagle_backend_mem_drain(int64_t* left);
+/** The device ordinal of the allocation holding ``ptr`` (``-1``: host or unknown memory). */
+eagle_backend_status eagle_backend_pointer_device(uint64_t ptr, int32_t* device);
+
+/** Block the host until everything queued on ``stream`` (0: the legacy default stream) is done, on ``device``
+ *  (-1: the stream's). Only that stream, not the device. Not capture-legal: inside a capture it fails by name. */
+eagle_backend_status eagle_backend_stream_sync(int32_t device, uint64_t stream);
+
+/** A timing-free event on @p device (-1: the current one); its raw handle goes to ``*event``. */
+eagle_backend_status eagle_backend_event_create(int32_t device, uint64_t* event);
+/** Like ``event_create`` but the event keeps its timestamp, so ``event_elapsed`` can measure between two. */
+eagle_backend_status eagle_backend_event_create_timed(int32_t device, uint64_t* event);
+/** Milliseconds between two recorded timed events, to ``*ms``. Both must have completed (synchronize the later
+ *  one first): an unfinished event fails by name. Not capture-legal. */
+eagle_backend_status eagle_backend_event_elapsed(uint64_t start, uint64_t end, float* ms);
+/** Record @p event on @p stream (0: the legacy default stream). Enqueue only, capture-legal. */
+eagle_backend_status eagle_backend_event_record(uint64_t event, uint64_t stream);
+/** Make @p stream wait for the work @p event last recorded. Enqueue only, capture-legal. */
+eagle_backend_status eagle_backend_event_wait(uint64_t stream, uint64_t event);
+/** Destroy @p event (0 is fine) on @p device (-1: the current one). */
+void eagle_backend_event_release(uint64_t event, int32_t device);
 
 /* ---- filtering (bit 12) ------------------------------------------------------ */
 

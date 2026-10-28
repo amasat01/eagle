@@ -68,7 +68,8 @@ def _loop_graph(xp, backend, start, max_iters):
     flag = xp.full(1, start, dtype=xp.uint32)
 
     def body():
-        xp.subtract(flag, 1, out=flag)
+        with cp.cuda.ExternalStream(eagle._stream.current()):    # cupy's work joins the capture
+            xp.subtract(flag, 1, out=flag)
 
     rw = repeat_while(opaque(body, writes=[flag]), SkipGuard.nonzero(flag), max_iters)
     g = eagle.Graph().add_node(rw).build(backend=backend)

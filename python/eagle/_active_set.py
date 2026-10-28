@@ -40,12 +40,12 @@ the reverse's form) leaves ``count``/``span`` alone. Both are counted as
 
 from __future__ import annotations
 
+import ctypes
 import threading
 import weakref
 
-from . import _alloc
+from . import _alloc, _core, _stream, arrays
 from ._conditional import _host_scalar
-from .interop import _root_module, _xp_of
 from .roles import PER_SAMPLE_ROLES
 
 #: The reserved ``lookup`` plane holding the ascending live slot indices.
@@ -108,18 +108,32 @@ __all__ = ["ActiveSet", "compaction_body", "MAP_PLANE", "COUNT_PLANE",
            "MAX_CLASSES", "MIN_CLASS_SORT_SPAN", "CLASS_THETA", "STALE_MAX"]
 
 
-def _module_of(arr):
-    if _root_module(arr) not in ("cupy", "numpy"):
-        raise TypeError(
-            f"eagle.ActiveSet: the mask must be a cupy (device) or numpy (host) "
-            f"array, got {type(arr).__module__}.{type(arr).__name__}"
-        )
-    return _xp_of(arr)
+def _view(arr):
+    """``arr`` (an :class:`eagle.Array` or any array-protocol producer: DLPack, CUDA array interface, buffer
+    protocol) as an :class:`eagle.Array` over the same memory."""
+    if isinstance(arr, arrays.Array):
+        return arr
+    if any(hasattr(arr, f) for f in ("__dlpack__", "__cuda_array_interface__", "__array_interface__")):
+        return arrays.asarray(arr)
+    raise TypeError(
+        f"eagle.ActiveSet: expected an array (device or host), got {type(arr).__module__}.{type(arr).__name__}")
+
+
+def _host_bytes(a) -> bytes:
+    """The bytes of a host one-byte-per-element array."""
+    return bytes(memoryview(a))
+
+
+def _float32(x: float) -> float:
+    """``x`` rounded to float32, as the device rule reads the threshold."""
+    return ctypes.c_float(x).value
 
 
 def _address(arr):
     """``(first byte, byte count)`` of an array's storage, or ``None`` when
     it exposes none of the array interfaces."""
+    if hasattr(arr, "ptr") and hasattr(arr, "nbytes"):     # an eagle.Array
+        return int(arr.ptr), int(arr.nbytes)
     data = getattr(arr, "data", None)
     ptr = getattr(data, "ptr", None)  # cupy
     if ptr is not None:
@@ -158,15 +172,9 @@ def _check_theta(theta) -> float:
 
 
 def _capturing() -> bool:
-    """Whether cupy's current stream is being captured into a graph."""
-    import cupy
-
-    stream = cupy.cuda.get_current_stream()
-    probe = getattr(stream, "is_capturing", None)
-    if probe is None:
-        return False
+    """Whether eagle's current stream is being captured into a graph."""
     try:
-        return bool(probe())
+        return bool(_core.stream_is_capturing(_stream.current()))
     except Exception:
         return True  # a stream that cannot say is treated as capturing
 
@@ -233,7 +241,7 @@ class ActiveSet:
     as an ascending index map plus a count -- and, with ``reorder=theta``,
     the occasional physical reorder of the planes it owns.
     ``mask`` is a one-dimensional, C-contiguous ``bool``/``uint8`` array
-    (cupy or numpy), held by reference and read where it is every time.
+    (any device or host array), held by reference and read where it is every time.
     The map, count and device scratch are allocated once, before any
     capture, and live as long as this object.
     ``reorder`` is an explicit opt-in: the locality threshold ``theta``
@@ -289,7 +297,7 @@ class ActiveSet:
     naming the backend and the symbol."""
 
     __slots__ = ("mask", "n", "map", "count", "_xp", "_device", "_scratch",
-                 "_done_at_last", "theta", "perm", "inv", "span", "fire",
+                 "_done_at_last", "theta", "_m", "_cls", "_views", "_dev", "_fired", "_one", "_tmp", "_group_flag", "_group_zero", "_group_scale", "perm", "inv", "span", "fire",
                  "live32", "reorders", "_owned", "_indirect", "_frozen",
                  "_reorder_scratch", "_zero", "_reorders_at_restore", "_map_lazy",
                  "classes", "class_theta", "stale_count", "class_plane", "offsets", "class_sorts", "mixed32",
@@ -298,19 +306,21 @@ class ActiveSet:
 
     def __init__(self, mask, *, reorder=None, classes=None, class_plane=None,
                  class_theta=None, epochs=False, group=1, _lazy_scratch=False, _lazy_map=False):
-        xp = _module_of(mask)
-        if getattr(mask, "ndim", None) != 1:
+        m = _view(mask)
+        if m.ndim != 1:
             raise ValueError(
                 f"eagle.ActiveSet: the mask is one-dimensional (one byte per "
-                f"sample), got shape {tuple(getattr(mask, 'shape', ()))}"
+                f"sample), got shape {tuple(m.shape)}"
             )
-        if mask.dtype.itemsize != 1 or mask.dtype.kind not in "bu":
+        if m.dtype.itemsize != 1 or m.dtype.kind not in "bu":
             raise ValueError(
-                f"eagle.ActiveSet: the mask is bool or uint8, got {mask.dtype}"
+                f"eagle.ActiveSet: the mask is bool or uint8, got {m.dtype}"
             )
-        if not mask.flags.c_contiguous:
+        if m.size and not m.is_contiguous:
             raise ValueError("eagle.ActiveSet: the mask must be C-contiguous")
-        n = int(mask.shape[0])
+        on_device = m.device.startswith("cuda")
+        xp = m.device if on_device else "cpu"
+        n = int(m.shape[0])
         if n > MAX_SAMPLES:
             raise ValueError(
                 f"eagle.ActiveSet: the int32 map addresses at most {MAX_SAMPLES} "
@@ -346,35 +356,41 @@ class ActiveSet:
                 raise ValueError(
                     "eagle.ActiveSet: classes=K needs class_plane, the per-sample "
                     "uint8 plane holding each sample's class in [0, K)")
-            if _module_of(class_plane) is not xp:
+            cm = _view(class_plane)
+            if cm.device.startswith("cuda") != on_device:
                 raise TypeError(
                     f"eagle.ActiveSet: class_plane lives where the mask lives "
-                    f"({xp.__name__})")
-            if class_plane.dtype != xp.uint8 or tuple(class_plane.shape) != (n,) \
-                    or not class_plane.flags.c_contiguous:
+                    f"({'device' if on_device else 'host'})")
+            if cm.dtype != arrays.uint8 or tuple(cm.shape) != (n,) or (cm.size and not cm.is_contiguous):
                 raise ValueError(
                     f"eagle.ActiveSet: class_plane is a C-contiguous uint8 ({n},) "
-                    f"array, got {class_plane.dtype} {tuple(class_plane.shape)}")
-            if xp.__name__ == "cupy":
+                    f"array, got {cm.dtype} {tuple(cm.shape)}")
+            if on_device:
                 _require_class_symbols()
             self.classes = classes
             self.class_theta = CLASS_THETA if class_theta is None else _check_theta(class_theta)
         elif class_plane is not None:
             raise ValueError("eagle.ActiveSet: class_plane needs classes=K")
         self.mask = mask
+        self._views = {id(mask): m}      # the views taken at bind: nothing imports a producer under a capture
+        self._m = m if m.dtype == arrays.uint8 else (m.view(arrays.uint8) if n else arrays.empty((0,), arrays.uint8, xp))
+        self._cls = cm if classes is not None else None
+        self._dev = int(xp.split(":")[1]) if on_device else -1
+        self._fired = self._one = self._tmp = None
+        self._group_flag = self._group_zero = self._group_scale = None
         self.n = n
         self._xp = xp
-        self._device = xp.__name__ == "cupy"
+        self._device = on_device
         # a device, non-reordering set may defer the (n * 4 byte) map: a
         # one-word stand-in is bound until a compacting loop needs the real
         # one (:meth:`materialize_map`); a run that never reads it pays nothing
         self._map_lazy = bool(_lazy_map) and self._device and self.theta is None
-        self.map = _alloc.empty(xp, 1 if self._map_lazy else n, dtype=xp.int32)
-        self.count = _alloc.zeros(xp, 1, dtype=xp.uint32)
+        self.map = _alloc.empty(xp, 1 if self._map_lazy else n, dtype=arrays.int32)
+        self.count = _alloc.zeros(xp, 1, dtype=arrays.uint32)
         if group > 1:   # check_group finds the set by its count plane
             _GROUP_BY_COUNT[_address(self.count)[0]] = group
             weakref.finalize(self, _GROUP_BY_COUNT.pop, _address(self.count)[0], None)
-        self._done_at_last = _alloc.zeros(xp, 1, dtype=xp.uint32)
+        self._done_at_last = _alloc.zeros(xp, 1, dtype=arrays.uint32)
         self._scratch = None
         self._owned = []
         self._indirect = []
@@ -386,25 +402,26 @@ class ActiveSet:
         if self.theta is not None:
             with _REORDER_LOCK:
                 self._claim(mask)
-                self.perm = _alloc.empty(xp, n, dtype=xp.int32)
-                self.inv = _alloc.empty(xp, n, dtype=xp.int32)
-                self.span = _alloc.zeros(xp, 1, dtype=xp.uint32)
-                self.fire = _alloc.zeros(xp, 1, dtype=xp.uint32)
-                self.live32 = _alloc.zeros(xp, 1, dtype=xp.uint32)
-                self.reorders = _alloc.zeros(xp, 1, dtype=xp.uint32)
-                self._zero = _alloc.zeros(xp, 1, dtype=xp.uint32)
+                self.perm = _alloc.empty(xp, n, dtype=arrays.int32)
+                self.inv = _alloc.empty(xp, n, dtype=arrays.int32)
+                self.span = _alloc.zeros(xp, 1, dtype=arrays.uint32)
+                self.fire = _alloc.zeros(xp, 1, dtype=arrays.uint32)
+                self.live32 = _alloc.zeros(xp, 1, dtype=arrays.uint32)
+                self.reorders = _alloc.zeros(xp, 1, dtype=arrays.uint32)
+                self._zero = _alloc.zeros(xp, 1, dtype=arrays.uint32)
                 self._owned.append(mask)
                 if self.classes is not None:
                     self._claim(class_plane)
                     self.class_plane = class_plane
                     self._owned.append(class_plane)
-                    self.offsets = _alloc.zeros(xp, self.classes + 1, dtype=xp.uint32)
-                    self.class_sorts = _alloc.zeros(xp, 1, dtype=xp.uint32)
-                    self.mixed32 = _alloc.zeros(xp, 1, dtype=xp.uint32)
-                    self.class_fire = _alloc.zeros(xp, 1, dtype=xp.uint32)
+                    self._views[id(class_plane)] = cm
+                    self.offsets = _alloc.zeros(xp, self.classes + 1, dtype=arrays.uint32)
+                    self.class_sorts = _alloc.zeros(xp, 1, dtype=arrays.uint32)
+                    self.mixed32 = _alloc.zeros(xp, 1, dtype=arrays.uint32)
+                    self.class_fire = _alloc.zeros(xp, 1, dtype=arrays.uint32)
                     #: IN: samples whose class changed since the last sort (written
                     #: by the units of a forced segmented policy; 0 = none)
-                    self.stale_count = _alloc.zeros(xp, 1, dtype=xp.uint32)
+                    self.stale_count = _alloc.zeros(xp, 1, dtype=arrays.uint32)
                     if epochs:
                         self._epochs = []
                 _REORDERING.add(self)
@@ -424,18 +441,12 @@ class ActiveSet:
         a reordering set, ``perm``/``inv`` identity, ``span == n``, reorder
         counter zero). Run before a launch, never recorded; a reordering device
         set resets with one kernel on the current stream."""
-        identity = _identity if self._device else _host_identity
+        identity = _identity
         self._done_at_last[0] = 0
         if self.theta is not None and self._device:
-            import cupy
-
-            from . import _core
-
             _core.reset_device(
-                int(self.perm.data.ptr), int(self.inv.data.ptr),
-                0 if self._map_lazy else int(self.map.data.ptr),
-                int(self.count.data.ptr), int(self.span.data.ptr), self.n,
-                int(cupy.cuda.get_current_stream().ptr), int(self.mask.device.id))
+                self.perm.ptr, self.inv.ptr, 0 if self._map_lazy else self.map.ptr,
+                self.count.ptr, self.span.ptr, self.n, _stream.current(), self._dev)
         else:
             if not self._map_lazy:
                 identity(self.map)
@@ -463,7 +474,7 @@ class ActiveSet:
         every bound plan at :attr:`map`; ``False`` when it already is real."""
         if not self._map_lazy:
             return False
-        self.map = _alloc.empty(self._xp, self.n, dtype=self._xp.int32)
+        self.map = _alloc.empty(self._xp, self.n, dtype=arrays.int32)
         self._map_lazy = False
         _identity(self.map)
         return True
@@ -471,69 +482,57 @@ class ActiveSet:
     def compact(self) -> None:
         """Recompute the map and the count from the mask (and, for a
         reordering set, ``live32``/``fire``). Device: enqueued on the
-        current cupy stream (capturable). Host: computed now. With
+        eagle's current stream (capturable). Host: computed now. With
         ``group > 1`` a group of lanes is live while any of its lanes is, the
         map holds group indices and ``count`` the lanes launched (live groups
         times ``group``)."""
         if self.group > 1:
             return self._compact_groups()
         if self._device:
-            import cupy
-
-            from . import _core
-
             trig = {}
             if self.theta is not None:
-                trig = dict(live32=int(self.live32.data.ptr),
-                            span=int(self.span.data.ptr),
-                            fire=int(self.fire.data.ptr), theta=self.theta)
+                trig = dict(live32=self.live32.ptr, span=self.span.ptr,
+                            fire=self.fire.ptr, theta=self.theta)
             if self.classes is not None:
                 if self._scratch is None:
-                    if cupy.cuda.get_current_stream().is_capturing():
+                    if _capturing():
                         raise RuntimeError(
                             "eagle: an ActiveSet's first device compaction cannot run "
                             "under graph capture; call prepare_compaction() before capturing")
                     self.prepare_compaction()
                 _core.compact_classes_device(
-                    int(self.mask.data.ptr), int(self.map.data.ptr),
-                    int(self.count.data.ptr), int(self._scratch.data.ptr), self.n,
-                    int(cupy.cuda.get_current_stream().ptr), _MASK_IS_DROP,
-                    int(self.mask.device.id), class_plane=int(self.class_plane.data.ptr),
+                    self._m.ptr, self.map.ptr, self.count.ptr, self._scratch.ptr, self.n,
+                    _stream.current(), _MASK_IS_DROP,
+                    self._dev, class_plane=self._cls.ptr,
                     classes=self.classes, class_theta=self.class_theta,
-                    mixed32=int(self.mixed32.data.ptr),
-                    stale_count=int(self.stale_count.data.ptr),
-                    class_fire=int(self.class_fire.data.ptr), **trig)
+                    mixed32=self.mixed32.ptr, stale_count=self.stale_count.ptr,
+                    class_fire=self.class_fire.ptr, **trig)
                 return
             if self._scratch is None:
-                if cupy.cuda.get_current_stream().is_capturing():
+                if _capturing():
                     raise RuntimeError(
                         "eagle: an ActiveSet's first device compaction cannot run "
                         "under graph capture; call prepare_compaction() before capturing")
                 self.prepare_compaction()
             _core.compact_device(
-                int(self.mask.data.ptr), int(self.map.data.ptr),
-                int(self.count.data.ptr), int(self._scratch.data.ptr), self.n,
-                int(cupy.cuda.get_current_stream().ptr), _MASK_IS_DROP,
-                int(self.mask.device.id), **trig,
+                self._m.ptr, self.map.ptr, self.count.ptr, self._scratch.ptr, self.n,
+                _stream.current(), _MASK_IS_DROP, self._dev, **trig,
             )
             return
-        import numpy as np
-
-        live = np.flatnonzero(self.mask == 0).astype(np.int32, copy=False)
-        self.map[: live.size] = live
-        self.count[0] = live.size
+        live = arrays.flatnonzero(arrays.equal(self._m, 0))
+        k = int(live.shape[0])
+        self.map[:k] = live
+        self.count[0] = k
         if self.theta is not None:
-            groups = np.zeros(-(-self.n // 32), dtype=bool)
-            groups[live // 32] = True
-            live32 = int(np.count_nonzero(groups))
+            mask = _host_bytes(self._m)
+            live32 = sum(1 for g in range(0, self.n, 32) if mask.find(0, g, g + 32) >= 0)
             self.live32[0] = live32
             # the device rule, to the bit: double(theta) * 32 * live32
-            limit = float(np.float32(self.theta)) * 32.0 * float(live32)
+            limit = _float32(self.theta) * 32.0 * float(live32)
             span = int(self.span[0])
-            self.fire[0] = int(live.size < limit and live.size < span
-                               and span >= MIN_REORDER_SPAN)
+            self.fire[0] = int(k < limit and k < span and span >= MIN_REORDER_SPAN)
             if self.classes is not None:
-                self._host_mixed32(live, live32, span)
+                self._host_mixed32(live.tolist(), live32, span)
 
     def _compact_groups(self) -> None:
         """:meth:`compact` for ``group > 1``: the group's drop byte is the AND of
@@ -541,31 +540,30 @@ class ActiveSet:
         same predicate, scan and ascending map run over ``n / group`` bytes."""
         g, ng, n = self.group, self.n_groups, self.n
         if not self._device:
-            import numpy as np
-
-            m = self.mask != 0
-            if ng * g != n:
-                m = np.concatenate([m, np.ones(ng * g - n, dtype=bool)])
-            live = np.flatnonzero(~m.reshape(ng, g).all(axis=1)).astype(np.int32, copy=False)
-            self.map[: live.size] = live
-            self.count[0] = live.size * g
+            mask = _host_bytes(self._m)
+            live = [i for i in range(ng) if mask.find(0, i * g, min(n, (i + 1) * g)) >= 0]     # any lane unfinished
+            self.map[:len(live)] = arrays.asarray(live, arrays.int32, "cpu")
+            self.count[0] = len(live) * g
             return
-        import cupy
-
-        from . import _core
-
         if self._scratch is None:
-            if cupy.cuda.get_current_stream().is_capturing():
+            if _capturing():
                 raise RuntimeError(
                     "eagle: an ActiveSet's first device compaction cannot run "
                     "under graph capture; call prepare_compaction() before capturing")
             self.prepare_compaction()
-        _group_and()(self.mask.view(cupy.uint8), n, g, self._group_drop, size=ng)
+        # drop[i] = AND of the group's lanes' finished flags (a lane past n counts as finished): one multiply per
+        # lane position over the groups that have it
+        arrays.not_equal(self._m, self._group_zero, out=self._group_flag)
+        arrays.copyto(self._group_drop, self._group_flag[0::g])
+        for j in range(1, g):
+            have = -(-(n - j) // g) if n > j else 0
+            if have:
+                head = self._group_drop[:have]
+                arrays.multiply(head, self._group_flag[j::g], out=head)
         _core.compact_device(
-            int(self._group_drop.data.ptr), int(self.map.data.ptr),
-            int(self._group_count.data.ptr), int(self._scratch.data.ptr), ng,
-            int(cupy.cuda.get_current_stream().ptr), _MASK_IS_DROP, int(self.mask.device.id))
-        _scale_count()(self._group_count, g, self.count, size=1)
+            self._group_drop.ptr, self.map.ptr, self._group_count.ptr, self._scratch.ptr, ng,
+            _stream.current(), _MASK_IS_DROP, self._dev)
+        arrays.multiply(self._group_count, self._group_scale, out=self.count)
 
     __call__ = compact
 
@@ -581,14 +579,14 @@ class ActiveSet:
         fast path never pays for it."""
         if not self._device or self._scratch is not None:
             return
-        from . import _core
-
         if self.group > 1:
-            self._group_drop = _alloc.zeros(self._xp, self.n_groups, dtype=self._xp.uint8)
-            self._group_count = _alloc.zeros(self._xp, 1, dtype=self._xp.uint32)
-        nbytes = _core.compact_device(0, 0, 0, 0, self.n_groups, 0, _MASK_IS_DROP,
-                                      int(self.mask.device.id))
-        self._scratch = _alloc.empty(self._xp, max(int(nbytes), 1), dtype=self._xp.uint8)
+            self._group_drop = _alloc.zeros(self._xp, self.n_groups, dtype=arrays.uint8)
+            self._group_count = _alloc.zeros(self._xp, 1, dtype=arrays.uint32)
+            self._group_flag = _alloc.empty(self._xp, self.n, dtype=arrays.uint8)
+            self._group_zero = _alloc.zeros(self._xp, self.n, dtype=arrays.uint8)
+            self._group_scale = _alloc.full(self._xp, 1, self.group, dtype=arrays.uint32)
+        nbytes = _core.compact_device(0, 0, 0, 0, self.n_groups, 0, _MASK_IS_DROP, self._dev)
+        self._scratch = _alloc.empty(self._xp, max(int(nbytes), 1), dtype=arrays.uint8)
 
     def planes(self) -> dict:
         """The two reserved planes as :meth:`eagle.plan.Plan.bind` keywords."""
@@ -601,17 +599,17 @@ class ActiveSet:
         from ._conditional import SkipGuard, Skippable
 
         self.prepare_compaction()  # before any capture of the compaction
-        xp = self._xp
-        if getattr(finished, "dtype", None) != xp.uint32 or finished.shape != (1,):
+        fin = _view(finished)
+        if fin.dtype != arrays.uint32 or tuple(fin.shape) != (1,):
             raise ValueError(
                 "eagle.ActiveSet.when_finished: `finished` is a one-element "
-                f"uint32 array of the mask's array module, got {finished!r}"
+                f"uint32 array where the mask lives, got {finished!r}"
             )
         snapshot = self._done_at_last
 
         def compact_and_remember():
             self.compact()
-            xp.copyto(snapshot, finished)
+            arrays.copyto(snapshot, fin)
 
         return Skippable(compact_and_remember, SkipGuard(finished, 0, snapshot, 0))
 
@@ -637,38 +635,42 @@ class ActiveSet:
                         f"{who} already owns; a plane is moved by one set, once")
 
     def _check_mapped_host(self, arr, what: str) -> None:
-        """A numpy plane on a device set must be mapped pinned host memory
+        """A host plane on a device set must be mapped pinned host memory
         (checked once, here: a pageable buffer would fault the kernel)."""
         from . import _core
 
         where = _address(arr)
-        cls = _core.pointer_residency(where[0], int(self.mask.device.id))
+        cls = _core.pointer_residency(where[0], self._dev)
         if cls != 3:
             raise TypeError(
-                f"eagle.ActiveSet.{what}: a numpy plane on a device set must live in "
+                f"eagle.ActiveSet.{what}: a host plane on a device set must live in "
                 "pinned (mapped) host memory, but this one is pageable or not "
                 "device-addressable; allocate it with pinned memory (for example "
-                "cupyx.empty_pinned) or register the buffer (cudaHostRegister with "
+                "eagle.arrays.empty(shape, dtype, 'pinned')) or register the buffer (cudaHostRegister with "
                 "the mapped flag) before owning it")
 
     def _check_plane(self, arr, what: str, mapped_host: bool = False) -> None:
-        xp = self._xp
-        if mapped_host and self._device and _module_of(arr).__name__ == "numpy":
+        try:
+            v = _view(arr)
+        except (BufferError, ValueError) as err:      # a dtype eagle has no name for
+            raise ValueError(f"eagle.ActiveSet.{what}: this plane's dtype is not movable ({err})") from err
+        here = v.device.startswith("cuda")
+        if mapped_host and self._device and not here:
             self._check_mapped_host(arr, what)
-        elif _module_of(arr) is not xp:
+        elif here != self._device:
             raise TypeError(
                 f"eagle.ActiveSet.{what}: a plane lives where the mask lives "
-                f"({xp.__name__}), got {type(arr).__module__}.{type(arr).__name__}")
-        shape = tuple(arr.shape)
+                f"({'device' if self._device else 'host'}), got {type(arr).__module__}.{type(arr).__name__}")
+        shape = tuple(v.shape)
         if not (shape == (self.n,) or (len(shape) == 2 and shape[1] == self.n)):
             raise ValueError(
                 f"eagle.ActiveSet.{what}: a plane is ({self.n},) or (D, {self.n}) "
                 f"(one element per sample, D planes for a 2-D array), got {shape}")
-        if not arr.flags.c_contiguous:
+        if v.size and not v.is_contiguous:
             raise ValueError(f"eagle.ActiveSet.{what}: a plane must be C-contiguous")
-        if arr.dtype.itemsize not in ELEM_BYTES:
+        if v.dtype.itemsize not in ELEM_BYTES:
             raise ValueError(
-                f"eagle.ActiveSet.{what}: {arr.dtype.itemsize}-byte elements are "
+                f"eagle.ActiveSet.{what}: {v.dtype.itemsize}-byte elements are "
                 f"not movable; supported sizes are {ELEM_BYTES}")
 
     def own(self, *planes) -> "ActiveSet":
@@ -685,6 +687,7 @@ class ActiveSet:
             with _REORDER_LOCK:
                 self._claim(arr)
                 self._owned.append(arr)
+                self._views[id(arr)] = _view(arr)
         return self
 
     def indirect(self, *planes) -> "ActiveSet":
@@ -697,6 +700,7 @@ class ActiveSet:
         for arr in planes:
             self._check_plane(arr, "indirect")
             self._indirect.append(arr)
+            self._views[id(arr)] = _view(arr)
         return self
 
     def _table(self) -> list:
@@ -705,16 +709,17 @@ class ActiveSet:
         out = []
         for arr in self._owned:
             ptr, _ = _address(arr)
-            size = arr.dtype.itemsize
-            rows = 1 if arr.ndim == 1 else int(arr.shape[0])
+            v = self._views[id(arr)]
+            size = v.dtype.itemsize
+            rows = 1 if v.ndim == 1 else int(v.shape[0])
             out.extend((ptr + r * self.n * size, size) for r in range(rows))
         return out
 
     def bytes_per_sample(self) -> int:
         """Bytes one sample's owned planes occupy: what a step moves per live
         sample, read by the compaction cadence's memory term."""
-        return sum(arr.dtype.itemsize * (1 if arr.ndim == 1 else int(arr.shape[0]))
-                   for arr in self._owned)
+        return sum(v.dtype.itemsize * (1 if v.ndim == 1 else int(v.shape[0]))
+                   for v in (self._views[id(a)] for a in self._owned))
 
     def _freeze(self) -> None:
         """Fix the owned planes and allocate the reorder scratch, before
@@ -723,19 +728,19 @@ class ActiveSet:
             return
         self._frozen = True
         if self._device:
-            from . import _core
-
             if self.classes is not None:
                 nbytes = _core.reorder_classes_device(
                     self._table(), 0, 0, 0, 0, 0, 0, 0, 0, self.n, 0, _MASK_IS_DROP,
-                    int(self.mask.device.id), 0, self.classes, 0, 0)
+                    self._dev, 0, self.classes, 0, 0)
             else:
                 nbytes = _core.reorder_device(self._table(), 0, 0, 0, 0, 0, 0, 0, 0,
-                                              self.n, 0, _MASK_IS_DROP,
-                                              int(self.mask.device.id))
+                                              self.n, 0, _MASK_IS_DROP, self._dev)
             self._reorder_scratch = _alloc.empty(self._xp, max(int(nbytes), 1),
-                                                   dtype=self._xp.uint8)
-            _count_fired()(self._zero, _alloc.zeros(self._xp, 1, dtype=self._xp.uint32))  # compile now, not under capture
+                                                   dtype=arrays.uint8)
+            # the scratch of ``reorders += fire != 0`` (three kernels; nothing may allocate under a capture)
+            self._fired = _alloc.empty(self._xp, 1, dtype=arrays.bool_)
+            self._one = _alloc.full(self._xp, 1, 1, dtype=arrays.uint32)
+            self._tmp = _alloc.empty(self._xp, 1, dtype=arrays.uint32)
 
     def reorder(self) -> None:
         """Run the reorder now if the last compaction fired it: owned
@@ -747,39 +752,34 @@ class ActiveSet:
         if self.classes is not None:  # one permutation: the liveness reorder IS the class sort
             self.class_sort(if_fired=True)
             return
-        xp = self._xp
         if self._device:
-            import cupy
-
-            from . import _core
-
             # counted before the moves clear `fire`, and only when it is set
-            _count_fired()(self.fire, self.reorders)
+            arrays.not_equal(self.fire, self._zero, out=self._fired)
+            arrays.where(self._fired, self._one, self._zero, out=self._tmp)
+            arrays.add(self.reorders, self._tmp, out=self.reorders)
             _core.reorder_device(
-                self._table(), int(self.mask.data.ptr), int(self.perm.data.ptr),
-                int(self.inv.data.ptr), int(self.map.data.ptr),
-                int(self.count.data.ptr), int(self.span.data.ptr),
-                int(self.fire.data.ptr), int(self._reorder_scratch.data.ptr),
-                self.n, int(cupy.cuda.get_current_stream().ptr), _MASK_IS_DROP,
-                int(self.mask.device.id))
+                self._table(), self._m.ptr, self.perm.ptr, self.inv.ptr, self.map.ptr,
+                self.count.ptr, self.span.ptr, self.fire.ptr, self._reorder_scratch.ptr,
+                self.n, _stream.current(), _MASK_IS_DROP, self._dev)
             return
         if int(self.fire[0]) == 0:
             return
         sp = int(self.span[0])
-        keep = self.mask[:sp] == 0
-        incl = xp.cumsum(keep, dtype=xp.int64)
-        cnt = int(incl[-1]) if sp else 0
-        slots = xp.arange(sp, dtype=xp.int64)
-        dst = xp.where(keep, incl - 1, cnt + slots - incl)
-        for arr in self._owned:
-            arr[..., dst] = arr[..., :sp].copy()
-        self.perm[dst] = self.perm[:sp].copy()
-        self.inv[self.perm[:sp]] = slots.astype(xp.int32)
-        self.map[:cnt] = xp.arange(cnt, dtype=xp.int32)
+        keep = arrays.equal(self._m[:sp], 0)
+        incl = arrays.cumsum(keep.astype(arrays.int64))
+        cnt = int(incl[sp - 1]) if sp else 0
+        slots = arrays.arange(sp, dtype=arrays.int64)
+        dst = arrays.where(keep, arrays.subtract(incl, 1), arrays.subtract(arrays.add(slots, cnt), incl)).astype(arrays.int32)
+        for arr in (self._views[id(a)] for a in self._owned):
+            for row in ([arr] if arr.ndim == 1 else [arr[r] for r in range(arr.shape[0])]):
+                arrays.scatter(row[:sp], dst, row[:sp].copy())
+        arrays.scatter(self.perm[:sp], dst, self.perm[:sp].copy())
+        arrays.scatter(self.inv, self.perm[:sp], slots.astype(arrays.int32))
+        arrays.copyto(self.map[:cnt], arrays.arange(cnt, dtype=arrays.int32))
         self.count[0] = cnt
         self.span[0] = cnt
         self.fire[0] = 0
-        self.reorders[0] += 1
+        self.reorders[0] = int(self.reorders[0]) + 1
 
     def reorder_if_degraded(self):
         """The reorder as a :class:`eagle.Skippable` guarded by ``fire``
@@ -798,7 +798,7 @@ class ActiveSet:
                 f"eagle.ActiveSet.{what}: this set has no classes; construct it as "
                 f"ActiveSet(mask, reorder={DEFAULT_THETA}, classes=K, class_plane=...)")
 
-    def _host_mixed32(self, live, live32: int, span: int) -> None:
+    def _host_mixed32(self, live: list, live32: int, span: int) -> None:
         """The host form of the class trigger: ``mixed32`` = 32-slot groups
         holding two or more classes among the live samples, and
         ``class_fire = (mixed32 > 0 and mixed32 >= class_theta * live32 and
@@ -806,16 +806,15 @@ class ActiveSet:
         fire`` (the last term: the liveness trigger of the same compaction, so a
         thinning batch is never lost because the classes happen to be grouped).
         The device rule, to the bit."""
-        import numpy as np
-
-        cls = self.class_plane[live].astype(np.int64)
-        pair = np.unique((live.astype(np.int64) // 32) * self.classes + cls)
-        per_group = np.bincount(pair // self.classes, minlength=1)
-        mixed = int(np.count_nonzero(per_group >= 2))
+        cls = _host_bytes(self._cls)
+        seen: dict = {}
+        for i in live:
+            seen.setdefault(i >> 5, set()).add(cls[i])
+        mixed = sum(1 for classes in seen.values() if len(classes) >= 2)
         self.mixed32[0] = mixed
-        limit = float(np.float32(self.class_theta)) * float(live32)
+        limit = _float32(self.class_theta) * float(live32)
         warp_mix = mixed > 0 and float(mixed) >= limit and span >= MIN_CLASS_SORT_SPAN
-        drift = float(int(self.stale_count[0])) > STALE_MAX * float(live.size)
+        drift = float(int(self.stale_count[0])) > STALE_MAX * float(len(live))
         self.class_fire[0] = int(warp_mix or drift or int(self.fire[0]) != 0)
 
     def _record_epoch(self) -> None:
@@ -844,20 +843,12 @@ class ActiveSet:
         self._need_classes("class_sort")
         self._freeze()
         if self._device:
-            import cupy
-
-            from . import _core
-
             _core.reorder_classes_device(
-                self._table(), int(self.mask.data.ptr), int(self.perm.data.ptr),
-                int(self.inv.data.ptr), int(self.map.data.ptr),
-                int(self.count.data.ptr), int(self.span.data.ptr),
-                int(self.class_fire.data.ptr) if if_fired else 0,
-                int(self._reorder_scratch.data.ptr), self.n,
-                int(cupy.cuda.get_current_stream().ptr),
+                self._table(), self._m.ptr, self.perm.ptr, self.inv.ptr, self.map.ptr,
+                self.count.ptr, self.span.ptr, self.class_fire.ptr if if_fired else 0,
+                self._reorder_scratch.ptr, self.n, _stream.current(),
                 _MASK_IS_DROP | (_CLASSES_WITHIN_LIVE if within_live else 0),
-                int(self.mask.device.id), int(self.class_plane.data.ptr), self.classes,
-                int(self.offsets.data.ptr), int(self.class_sorts.data.ptr))
+                self._dev, self._cls.ptr, self.classes, self.offsets.ptr, self.class_sorts.ptr)
             if self._epochs is not None and not _capturing():
                 self._record_epoch()
             return True  # enqueued (an if_fired sort is a no-op on the device when it did not fire)
@@ -866,21 +857,16 @@ class ActiveSet:
                 return False
             k = self.classes
             sp = int(self.count[0]) if within_live else int(self.span[0])
-            top = int(self.class_plane[:sp].max()) if sp else 0
+            top = max(_host_bytes(self._cls)[:sp], default=0)
             if top >= k:
                 raise ValueError(
                     f"eagle.ActiveSet.class_sort: the class plane holds "
                     f"{top}, outside [0, {k})")
-            from . import _core
-
-            def at(arr) -> int:
-                return int(arr.ctypes.data)
-
             _core.reorder_classes_host(
-                self._table(), at(self.mask), at(self.perm), at(self.inv), at(self.map),
-                at(self.count), at(self.span), 0, self.n,
+                self._table(), self._m.ptr, self.perm.ptr, self.inv.ptr, self.map.ptr,
+                self.count.ptr, self.span.ptr, 0, self.n,
                 _MASK_IS_DROP | (_CLASSES_WITHIN_LIVE if within_live else 0),
-                at(self.class_plane), k, at(self.offsets), at(self.class_sorts))
+                self._cls.ptr, k, self.offsets.ptr, self.class_sorts.ptr)
             self.fire[0] = 0
             self.class_fire[0] = 0
             self._record_epoch()
@@ -902,7 +888,6 @@ class ActiveSet:
         if self.theta is None:
             return
         self._freeze()
-        xp = self._xp
         if self._device and _capturing():
             raise RuntimeError(
                 "eagle.ActiveSet.restore: refused under stream capture; it is "
@@ -911,24 +896,14 @@ class ActiveSet:
             self.fire[0] = 0
             return  # nothing moved since the last restore / reset
         if self._device:
-            import cupy
-
-            from . import _core
-
-            if _capturing():
-                raise RuntimeError(
-                    "eagle.ActiveSet.restore: refused under stream capture; it is "
-                    "the end-of-run exit, run it eagerly after the graph launch")
-            stream = cupy.cuda.get_current_stream()
-            _core.restore_device(self._table(), int(self.perm.data.ptr),
-                                 int(self.inv.data.ptr),
-                                 int(self._reorder_scratch.data.ptr), self.n,
-                                 int(stream.ptr), int(self.mask.device.id))
+            _core.restore_device(self._table(), self.perm.ptr, self.inv.ptr,
+                                 self._reorder_scratch.ptr, self.n, _stream.current(), self._dev)
         else:
-            for arr in self._owned:
-                arr[..., self.perm] = arr.copy()
-            self.perm[...] = xp.arange(self.n, dtype=xp.int32)
-            self.inv[...] = xp.arange(self.n, dtype=xp.int32)
+            for arr in (self._views[id(a)] for a in self._owned):
+                for row in ([arr] if arr.ndim == 1 else [arr[r] for r in range(arr.shape[0])]):
+                    arrays.scatter(row, self.perm, row.copy())
+            _identity(self.perm)
+            _identity(self.inv)
         self.span[0] = self.n
         self.fire[0] = 0
         self.compact()
@@ -952,7 +927,14 @@ class ActiveSet:
             raise ValueError(
                 "eagle.ActiveSet.in_sample_order: the plane is not one this set "
                 "owns (an indirect plane is already in sample order)")
-        return self._xp.take(plane, self.inv, axis=-1)
+        src = self._views.get(id(plane))
+        src = _view(plane) if src is None else src
+        if src.ndim == 1:
+            return arrays.take(src, self.inv)
+        out = arrays.empty(src.shape, src.dtype, src.device)
+        for r in range(src.shape[0]):
+            arrays.take(src[r], self.inv, out=out[r])
+        return out
 
 
 def _require_class_symbols() -> None:
@@ -969,71 +951,10 @@ def _require_class_symbols() -> None:
                 f"the {info.get('kind', 'cuda')} backend ({where}) does not provide it")
 
 
-def _host_identity(arr) -> None:
-    import numpy
-
-    arr[...] = numpy.arange(arr.shape[0], dtype=arr.dtype)
-
-
-_IDENTITY = None
-
-
 def _identity(arr) -> None:
-    """``arr[i] = i`` in place on the device: no ``arange`` temporary, which
-    cupy's pool would keep as large as the batch after it is freed."""
-    global _IDENTITY
-    if _IDENTITY is None:
-        import cupy
-
-        _IDENTITY = cupy.ElementwiseKernel("", "raw int32 a", "a[i] = (int)i;",
-                                           "eagle_active_set_identity")
+    """``arr[i] = i`` in place (one kernel on the device)."""
     if arr.shape[0] > 0:
-        _IDENTITY(arr, size=arr.shape[0])
-
-
-_COUNT_FIRED = None
-
-
-def _count_fired():
-    """``reorders += fire != 0`` as one device kernel (cupy)."""
-    global _COUNT_FIRED
-    if _COUNT_FIRED is None:
-        import cupy
-
-        _COUNT_FIRED = cupy.ElementwiseKernel(
-            "raw uint32 fire", "uint32 reorders",
-            "reorders += fire[0] != 0u ? 1u : 0u;", "eagle_active_set_count_fired")
-    return _COUNT_FIRED
-
-
-_GROUP_AND = _SCALE_COUNT = None
-
-
-def _group_and():
-    """``drop[g] = AND of mask[g * group .. +group)`` (lanes past ``n`` count as
-    finished), one thread per group."""
-    global _GROUP_AND
-    if _GROUP_AND is None:
-        import cupy
-
-        _GROUP_AND = cupy.ElementwiseKernel(
-            "raw uint8 m, int64 n, int32 group", "raw uint8 d",
-            "unsigned char a = 1; long long s = (long long)i * group;"
-            " for (int j = 0; j < group && s + j < n; ++j) a &= (m[s + j] != 0);"
-            " d[i] = a;", "eagle_active_set_group_and")
-    return _GROUP_AND
-
-
-def _scale_count():
-    """``out[0] = groups[0] * group``: the lanes a compaction by groups launches."""
-    global _SCALE_COUNT
-    if _SCALE_COUNT is None:
-        import cupy
-
-        _SCALE_COUNT = cupy.ElementwiseKernel(
-            "raw uint32 c, int32 group", "raw uint32 o", "o[0] = c[0] * (unsigned)group;",
-            "eagle_active_set_scale_count")
-    return _SCALE_COUNT
+        arrays.iota(arr)
 
 
 #: Compaction group of each live set built with ``group > 1``, by the address of

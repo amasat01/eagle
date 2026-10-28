@@ -12,12 +12,16 @@ import eagle
 from eagle import _counters
 from _reverse_fixtures import chain, plans, xp_for
 
+def _bytes(a):
+    return np.asarray(a.get() if hasattr(a, "get") else a).tobytes()
+
+
 N, ITERS = 256, 100
 CASES = [pytest.param("cpu", id="cpu"), pytest.param("gpu", id="gpu", marks=pytest.mark.gpu)]
 
 
 def _host(a):
-    return a.get() if hasattr(a, "get") else np.asarray(a)
+    return np.asarray(a.get() if hasattr(a, "get") else a)
 
 
 @pytest.mark.parametrize("backend", CASES)
@@ -46,7 +50,7 @@ def test_update_in_a_loop_rebuilds_nothing(tmp_path, backend):
         fresh, _ = chain(ps, x.copy(), k, record=True)
         want = eagle.diff.reverse(fresh.launch().record, seed)
         if backend == "cpu":
-            assert gx.tobytes() == _host(want["x"]).tobytes() and ga == float(want["a"])
+            assert _bytes(gx) == _host(want["x"]).tobytes() and ga == float(want["a"])
         else:
             np.testing.assert_allclose(gx, _host(want["x"]), rtol=1e-13, atol=1e-15)
             np.testing.assert_allclose(ga, float(want["a"]), rtol=1e-13)

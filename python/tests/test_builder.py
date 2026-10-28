@@ -455,10 +455,10 @@ def test_b_probe_rebind_three_cases():
     assert g()[0] == 3.0 and (x == 0).all()
     # case 2: if flag: j = correct(j) with the flag OFF -> j stays j0 (Python), NOT the unwritten slot
     j0 = np.ones(4)
-    assert (b_if(j0, cell(0))() == j0).all() and (j0 == 1).all()
+    assert (np.asarray(b_if(j0, cell(0))()) == j0).all() and (j0 == 1).all()
     # case 3: if/else with the flag ON -> the IF arm's value, not the else arm's buffer
-    assert (b_if_else(j0, cell(1))() == 10.0).all()
-    assert (b_if_else(j0, cell(0))() == 0.5).all()
+    assert (np.asarray(b_if_else(j0, cell(1))()) == 10.0).all()
+    assert (np.asarray(b_if_else(j0, cell(0))()) == 0.5).all()
 
 
 # ============================================================================ (c) refusals

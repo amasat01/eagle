@@ -24,9 +24,9 @@ import textwrap
 import time
 import warnings
 
-import numpy
 
 from . import _alloc
+from .dtypes import dtype_name
 from . import _cell_rows, _lane_bind, _recording
 from ._graph_reduce import reduce
 from ._conditional import RepeatWhile, SkipGuard
@@ -34,11 +34,13 @@ from ._graph_kinds import _cell, _copy, _wait
 from ._conditional import skippable
 from .graph import Graph, Node, get_node_kind
 from ._plan_planes import _declared_widths
-from .interop import _xp_of
+from ._layout import _view
+from . import arrays as _arrays
 
 _MATCH = getattr(ast, "Match", ())  # a `match` statement exists from Python 3.10
 _COUNT = itertools.count()
 _MISSING = object()
+_FLOAT_BYTES = {"float16": 2, "float32": 4, "float64": 8}
 _DTYPES = {"f64": "float64", "f32": "float32", "uint32": "uint32", "int32": "int32"}
 
 
@@ -211,19 +213,21 @@ def _chain_nodes(g, it):
 
 
 def _index_cell(kinds):
-    """The arm to run: the first condition that holds, else ``len(kinds)``. Plain ufuncs with ``out=``: capturable."""
-    xp = _xp_of(kinds[0][1])
+    """The arm to run: the first condition that holds, else ``len(kinds)``. Plain array ops with ``out=``: capturable."""
+    dev = _view(kinds[0][1]).device
     n = len(kinds)
-    idx, t = _alloc.zeros(xp, 1, dtype=numpy.uint32), _alloc.zeros(xp, 1, dtype=numpy.uint32)
-    gap = _alloc.zeros(xp, 1, dtype=numpy.uint32)
-    picks = [_alloc.full(xp, 1, i, dtype=numpy.uint32) for i in range(n)]
+    idx, t, gap = (_alloc.zeros(dev, 1, dtype="uint32") for _ in range(3))
+    raw = _alloc.zeros(dev, 1, dtype="uint8")        # a comparison writes bool bytes; ``t`` is the uint32 flag
+    picks = [_alloc.full(dev, 1, i, dtype="uint32") for i in range(n)]
+    conds = [_view(c) for _k, c, _v in kinds]
 
     def run():
         idx.fill(n)
         for i in reversed(range(n)):
-            k, c, v = kinds[i]
-            (xp.not_equal if k == "cell" else xp.equal)(c, 0 if v is None else v, out=t)
-            xp.subtract(picks[i], idx, out=gap); xp.multiply(gap, t, out=gap); xp.add(idx, gap, out=idx)
+            k, _c, v = kinds[i]
+            (_arrays.not_equal if k == "cell" else _arrays.equal)(conds[i], 0 if v is None else v, out=raw)
+            _arrays.copyto(t, raw)
+            _arrays.subtract(picks[i], idx, out=gap); _arrays.multiply(gap, t, out=gap); _arrays.add(idx, gap, out=idx)
     return _cell(run, [c for _, c, _v in kinds], [idx], "index"), idx
 
 
@@ -309,8 +313,8 @@ class Rec:
                     if slot.dims and lanes is None:
                         raise ValueError(f"{self.fname}: {kernel.name}() writes {nm!r} per vector: pass the array yourself")
                     floats = [a.dtype for a in arrs if a.dtype.kind == "f"]
-                    dt = _DTYPES[slot.ttype.dtype] if slot.ttype.dtype != "f64" or not floats else numpy.result_type(*floats)
-                    out[nm] = _alloc.zeros(_xp_of(samples), 
+                    dt = _DTYPES[slot.ttype.dtype] if slot.ttype.dtype != "f64" or not floats else max((dtype_name(a) for a in floats), key=_FLOAT_BYTES.get)
+                    out[nm] = _alloc.zeros(_view(samples).device,
                         samples.shape[-1] if lanes is None else _lane_bind.output_shape(plan.plugin, nm, 1, lanes, extents), dtype=dt)
                     self.stats["allocs"] += 1
             if spec is not None:
@@ -351,10 +355,11 @@ class Rec:
             if name not in planes:          # a stage-internal cell, not a plane of the call
                 continue
             cell = planes[name]
-            xp, rows = _xp_of(cell), -(-int(n) // _cell_rows.ROW)
-            planes[name] = hi = _alloc.zeros(xp, rows, cell.dtype)
+            cv, rows = _view(cell), -(-int(n) // _cell_rows.ROW)
+            xp = cv.device
+            planes[name] = hi = _alloc.zeros(xp, rows, cv.dtype)
             if op in ("sum", "mean"):
-                planes[_cell_rows.comp_name(name)] = lo = _alloc.zeros(xp, rows, cell.dtype)
+                planes[_cell_rows.comp_name(name)] = lo = _alloc.zeros(xp, rows, cv.dtype)
                 nodes.append(reduce(hi, cell, comp=lo))
             else:
                 nodes.append(reduce(hi, cell, op=op))
@@ -403,7 +408,7 @@ class Rec:
                                  f"before it: bind it first ({n} = ...)")
             if not hasattr(v, "shape"): continue
             if id(v) in self.args:
-                G = _alloc.zeros_like(_xp_of(v), v); self.stats["seeds"] += 1
+                vv = _view(v); G = _alloc.zeros(vv.device, vv.shape, vv.dtype); self.stats["seeds"] += 1
                 self.top.insert(0, _copy(v, G, f"seed({n})"))
                 inplace[n] = rebind[n] = G
             else:
@@ -498,11 +503,14 @@ class LoopCtl:
             raise ValueError(f"{self.where}: `{what}` on a Python value inside a device loop: use a 1-cell uint32 array")
         if what == "continue":
             return SkipGuard(v, 0).negated() if k == "cell" else SkipGuard(v, 0)
-        xp = _xp_of(v)
-        if self.brk is None: self.brk = _alloc.zeros(xp, 1, dtype=numpy.uint32)
+        dev = _view(v).device
+        if self.brk is None: self.brk = _alloc.zeros(dev, 1, dtype="uint32")
         brk = self.brk
-        self.rec.cur.append(_copy(v, brk, "break") if k == "cell"
-                            else _cell(lambda: xp.equal(v, 0, out=brk), [v], [brk], "break"))
+        if k == "cell":
+            self.rec.cur.append(_copy(v, brk, "break"))
+        else:
+            vv, raw = _view(v), _alloc.zeros(dev, 1, dtype="uint8")
+            self.rec.cur.append(_cell(lambda: (_arrays.equal(vv, 0, out=raw), _arrays.copyto(brk, raw)), [v], [brk], "break"))
         return SkipGuard(brk, 0).negated()
 
     def rest(self, guard):

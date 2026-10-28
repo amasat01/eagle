@@ -233,7 +233,7 @@ def test_execution_host_device_twin_within_ruled_band(v2_sample_local):
     host = eplan.plan(v2_sample_local, structure=eexec.HostTeam).run(x=x, a=a, b=b)
 
     band = x.size * 2 * np.finfo(np.float64).eps  # F-d default anchor
-    assert np.max(np.abs(device - host)) <= band
+    assert np.max(np.abs(np.asarray(device.get()) - np.asarray(host))) <= band
 
 
 @register_row("execution_illegal_placement_refused")
