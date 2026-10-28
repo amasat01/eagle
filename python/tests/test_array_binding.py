@@ -401,7 +401,7 @@ _NAN, _INF = float("nan"), float("inf")
 
 def test_comparison_operators_are_elementwise_and_nan_is_false():
     x = xp.asarray([1.0, _NAN, 3.0, -_INF])
-    got = {e: eval(e).tolist() for e in ("x == 3.0", "x != 3.0", "x < 3", "x <= 3", "x > 3", "x >= 3", "3 <= x")}
+    got = {e: eval(e, {}, {"x": x}).tolist() for e in ("x == 3.0", "x != 3.0", "x < 3", "x <= 3", "x > 3", "x >= 3", "3 <= x")}
     assert got["x == 3.0"] == [False, False, True, False] and got["x != 3.0"] == [True, True, False, True]
     assert got["x < 3"] == [True, False, False, True] and got["x <= 3"] == [True, False, True, True]
     assert got["x > 3"] == [False] * 4 and got["x >= 3"] == [False, False, True, False] and got["3 <= x"] == got["x >= 3"]

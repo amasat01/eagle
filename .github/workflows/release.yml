@@ -621,6 +621,11 @@ jobs:
             eagle/python/pyproject.toml
             raptor/pyproject.toml
 
+      # aether-dsc builds from its sibling checkout until its version is on PyPI, and its host FFT needs OpenMP:
+      # Apple's clang has no <omp.h>, so Homebrew's libomp (as hawk's macOS legs do)
+      - if: runner.os == 'macOS'
+        run: brew install libomp && { echo "OpenMP_ROOT=$(brew --prefix libomp)"; echo "CMAKE_PREFIX_PATH=$(brew --prefix libomp)"; } >> "$GITHUB_ENV"
+
       # raptor-core, eagle's one runtime dependency: PyPI when the checkout's version is released
       # (what a user gets), else built from the sibling raptor checkout.
       - id: sib
