@@ -170,6 +170,9 @@ def install(cfg, py, use_uv, work):
         for repo, ref in (("raptor", cfg.raptor_ref), ("aether", cfg.aether_ref),
                           ("eagle", cfg.eagle_ref), ("hawk", cfg.hawk_ref)):
             clone(repo, ref, src / repo)
+        # shallow clones carry no tags: the version comes from --version (or a dev marker)
+        ver = cfg.version or "0.0.0.dev0"
+        os.environ.update(AETHER_VERSION=ver, EAGLE_VERSION=ver, SETUPTOOLS_SCM_PRETEND_VERSION=ver)
         prefix = work / "install"
         arch = "-DCMAKE_CUDA_ARCHITECTURES=75"
         for lib in ("aether", "eagle"):
@@ -177,11 +180,12 @@ def install(cfg, py, use_uv, work):
                   f"-DCMAKE_INSTALL_PREFIX={prefix}") != 0 or \
                sh("cmake", "--install", work / f"build_{lib}") != 0:
                 raise SystemExit(f"{lib} headers did not install")
-        pip(py, use_uv, "scikit-build-core>=0.10", "nanobind>=3.1,<4", "cmake", "ninja")
+        pip(py, use_uv, "scikit-build-core>=0.10", "setuptools-scm>=8", "nanobind>=3.1,<4", "cmake", "ninja")
         env = dict(os.environ, CMAKE_PREFIX_PATH=f"{prefix}:{os.environ.get('CMAKE_PREFIX_PATH', '')}",
                    SKBUILD_CMAKE_ARGS=f"{arch};-DCMAKE_CUDA_COMPILER={shutil.which('nvcc') or 'nvcc'}")
         os.environ.update(env)
         rc = pip(py, use_uv, src / "raptor")
+        rc = rc or pip(py, use_uv, "--no-build-isolation", src / "aether" / "dsc")
         rc = rc or pip(py, use_uv, "--no-build-isolation", src / "eagle" / "python")
         rc = rc or pip(py, use_uv, "--no-build-isolation", src / "hawk")
         rc = rc or pip(py, use_uv, *pre, *torch_index(cfg), f"jax[{cu}]", "torch", "warp-lang", "numpy", f"cupy-cuda{cfg.cuda}x",
@@ -259,20 +263,6 @@ def junit_summary(path):
     return s
 
 
-def diagnose_jax_retention(py, pydir):
-    # TEMPORARY diagnostic (0.7.2 CI): the jax node row alone, each in its own process. The platform allocator makes
-    # every JAX free a real cudaFree, so a read of freed memory faults every time; memcheck names the kernel.
-    sel = ["tests/test_interop_inject.py", "-k", "stream_ordered_and_retained", "-x", "-q", "-p", "no:cacheprovider"]
-    for alloc in ("platform", "bfc", "platform", "bfc"):
-        header(f"diagnostic: jax node row, XLA_PYTHON_CLIENT_ALLOCATOR={alloc}")
-        print("exit", sh(py, "-m", "pytest", *sel, cwd=pydir, env=dict(os.environ, XLA_PYTHON_CLIENT_ALLOCATOR=alloc)))
-    san = shutil.which("compute-sanitizer") or next(iter(sorted(pathlib.Path("/usr/local").glob("cuda*/bin/compute-sanitizer"))), None)
-    header(f"diagnostic: memcheck ({san})")
-    if san:
-        print("exit", sh(san, "--tool", "memcheck", "--print-limit", "20", py, "-m", "pytest", *sel, cwd=pydir,
-                         env=dict(os.environ, XLA_PYTHON_CLIENT_ALLOCATOR="platform")))
-
-
 def run_tests(py, eagle_src, work):
     # a copy of the suite outside the checkout, as CI runs it: from inside, the source tree's eagle/ (no compiled
     # extension) would shadow the installed package
@@ -281,7 +271,6 @@ def run_tests(py, eagle_src, work):
     pydir.mkdir()
     shutil.copytree(eagle_src / "python" / "tests", pydir / "tests")
     shutil.copy2(eagle_src / "python" / "conftest.py", pydir)
-    diagnose_jax_retention(py, pydir)
     runs = (("interop_matrix", ["tests", "-m", "interop_matrix and not repo_local"]),
             ("jax", ["tests/test_interop_jax.py", "-m", "not repo_local"]))
     total = {"tests": 0, "failures": 0, "errors": 0, "skipped": 0, "failed": []}
