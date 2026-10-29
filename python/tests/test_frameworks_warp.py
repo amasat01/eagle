@@ -243,8 +243,9 @@ def test_named_refusals(op, dev):
     _skip_without(dev)
     c = _case(dev, "float64", grad=False)
     v32 = wp.array(c["v_np"].astype(np.float32), dtype=wp.float32, device=dev)
-    from eagle import PerformanceWarning
+    from eagle import PerformanceWarning, _layout
 
+    _layout._reset_seen()               # the warning is once per call site: the other device's run used it
     with pytest.warns(PerformanceWarning, match="promoted to float64"):
         op(v32, c["cd"], c["t"])
     with pytest.raises(TypeError, match="must be a wp.array"):
@@ -402,7 +403,7 @@ def test_a_call_rides_warps_stream_and_never_syncs(op):
 
     # known answers of the same instrument: a host-synced call reads the whole spin ...
     _, synced = _spin_then(op, c, stream, cycles, sync=True)
-    assert synced > 0.5 * wall
+    assert synced > 0.2, f"a host-synced call returned before the spin ended ({synced:.3f}s)"
     # ... and the same call on ANOTHER Warp stream is unordered after the spin: stale input
     other = wp.Stream(dev)
     c["v"].zero_()
