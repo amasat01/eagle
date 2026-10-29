@@ -109,6 +109,16 @@ struct NeuralInfo {
     std::map<std::string, ExecRef> execs;   // keyed by kNeuralExecRefFields name
 };
 
+// ``launch.box``: a kernel emitted with a thread box, one thread computing ``T`` lanes
+// ``stride`` apart, so a launch's ``base``/``count`` count THREADS, not lanes (the twin of
+// ``eagle.sidecar.read_box``). ``present`` is false for a box-free kernel.
+struct Box {
+    bool present = false;
+    long long axis = -1;
+    long long T = 0;
+    long long stride = 0;
+};
+
 struct Sidecar {
     std::string kernel;
     std::string aether_abi;  // binary-ABI tag (empty if an older sidecar lacks it)
@@ -135,6 +145,8 @@ struct Sidecar {
     Derivative derivative;
     // The ``neural_block`` descriptor surface (inert on a kernel sidecar).
     NeuralInfo neural;
+    // ``launch.box`` (absent on a box-free kernel).
+    Box box;
 };
 
 inline std::string _slurp(const std::string& path) {
@@ -231,6 +243,19 @@ inline bool _array_populated(const std::string& s, const std::string& key) {
     for (std::size_t i = open + 1; i < close; ++i)
         if (!std::isspace(static_cast<unsigned char>(s[i]))) return true;
     return false;
+}
+
+// The ``{ ... }`` object that follows the key at ``key_pos`` in ``s`` (braces matched); empty
+// when there is none or it is truncated.
+inline std::string _object_text(const std::string& s, std::size_t key_pos) {
+    auto ob = s.find('{', key_pos);
+    if (ob == std::string::npos) return {};
+    int d = 0;
+    for (std::size_t j = ob; j < s.size(); ++j) {
+        if (s[j] == '{') ++d;
+        else if (s[j] == '}' && --d == 0) return s.substr(ob, j - ob + 1);
+    }
+    return {};
 }
 
 inline Sidecar parse_sidecar(const std::string& path) {
@@ -452,6 +477,25 @@ inline Sidecar parse_sidecar(const std::string& path) {
                 int(std::strtol(s.c_str() + cm + 1, nullptr, 10)),
             };
             i = s.find(']', cm) + 1;
+        }
+    }
+
+    // Optional: ``launch.box``, a thread box ``{"axis", "T", "stride"}``. Bound the ``launch``
+    // object, then its ``box`` object; a field the box lacks stays -1 / 0, which
+    // validate_sidecar refuses by name.
+    if (auto l = _key_pos(s, "launch"); l != std::string::npos) {
+        const std::string launch = _object_text(s, l);
+        if (auto b = _key_pos(launch, "box"); b != std::string::npos) {
+            const std::string obj = _object_text(launch, b);
+            sc.box.present = true;
+            auto field = [&](const char* key, long long absent) {
+                auto k = _key_pos(obj, key);
+                return k == std::string::npos
+                    ? absent : std::strtoll(obj.c_str() + obj.find(':', k) + 1, nullptr, 10);
+            };
+            sc.box.axis = field("axis", -1);
+            sc.box.T = field("T", 0);
+            sc.box.stride = field("stride", 0);
         }
     }
 
@@ -715,6 +759,11 @@ inline void validate_sidecar(const Sidecar& sc, const std::string& ctx) {
     // confused producer that copied kernel machinery onto a descriptor must be told
     // that, not nitpicked on the shape of a block it should not carry at all.
     if (sc.pattern == kNeuralBlockPattern) _validate_neural_block(sc, ctx);
+    // ``launch.box``: the same ranges ``eagle.sidecar.read_box`` accepts.
+    if (sc.box.present && (sc.box.axis < 0 || sc.box.T < 2 || sc.box.stride < 1))
+        throw std::runtime_error(ctx + ": sidecar launch.box must be {'axis': int >= 0, 'T': int >= 2, "
+            "'stride': int >= 1}; got axis=" + std::to_string(sc.box.axis) + " T=" + std::to_string(sc.box.T) +
+            " stride=" + std::to_string(sc.box.stride));
     // Optional derivative block, Phase A shape check: ``kind`` must be vjp|jvp,
     // and ``residuals`` must be empty (recompute-only). A populated ``residuals`` list
     // is a future schema revision — reject it, naming the schema-bump rule, rather than
@@ -740,6 +789,26 @@ inline void validate_sidecar(const Sidecar& sc, const std::string& ctx) {
             throw std::runtime_error(ctx + ": buffer '" + b.name + "' has unknown "
                 "kind '" + b.kind + "' (supported: " + buffer_kinds_joined() +
                 "); upgrade eagle");
+}
+
+// A lane partition ``[base, base + count)`` of a run over ``n`` lanes, in the units a launch of
+// ``sc`` counts: lanes for a box-free kernel, THREADS for a boxed one (``T`` lanes ``stride``
+// apart per thread; the thread count of a whole run is ``eagle._lane_bind.threads``'s).
+// A boxed kernel owns whole spans of ``T * stride`` lanes, so a partition is expressible only
+// if it starts on a span and ends on one or at ``n``; any other is refused by name, never run
+// with lanes landing in the wrong partition. Returns ``{base, count}``.
+inline std::pair<long long, long long> box_partition(const Sidecar& sc, long long base,
+                                                     long long count, long long n,
+                                                     const std::string& what) {
+    if (!sc.box.present) return {base, count};
+    const long long span = sc.box.T * sc.box.stride;
+    if (base % span != 0 || (count % span != 0 && base + count != n))
+        throw std::runtime_error(what + ": a kernel with a thread box (T=" + std::to_string(sc.box.T) +
+            ", stride=" + std::to_string(sc.box.stride) + ") runs whole spans of " + std::to_string(span) +
+            " lanes: a partition must start on a multiple of " + std::to_string(span) +
+            " and end on one or at the last lane; got base=" + std::to_string(base) + " count=" +
+            std::to_string(count) + " of " + std::to_string(n) + " lanes");
+    return {base / span * sc.box.stride, (count + span - 1) / span * sc.box.stride};
 }
 
 }  // namespace plugin

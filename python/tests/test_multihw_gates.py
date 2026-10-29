@@ -147,7 +147,7 @@ def _mixed_pipeline():
     g = eagle.Graph()
     g.add_node(opaque(lambda: cp.add(d, 1.0, out=d), reads=[d], writes=[d], name="bump"))
     g.add_node(eagle.copy(d, into=h))
-    g.add_node(opaque(lambda: h.__imul__(2.0), reads=[h], writes=[h], name="host_scale"))
+    g.add_node(opaque(lambda: eagle.arrays.multiply(h, 2.0, out=h), reads=[h], writes=[h], name="host_scale"))
     g.add_node(eagle.copy(h, into=d))
     return d, g
 
@@ -273,15 +273,7 @@ _ORCHESTRATION = ("graph.py", "_graph_kinds.py", "_transfer.py", "_builder.py", 
                   "_plan_binding.py")
 #: The array-library calls the orchestration makes: stream and event handles, device selection.
 #: Copies, page-locked memory and host functions are not among them; they go through ``eagle._core``.
-_ALLOWED = {
-    "graph.py": {"cupy.cuda.Event", "cupy.cuda.Device", "cupy.cuda.Stream", "cupy.cuda.runtime.setDevice",
-                 "cupy.cuda.get_current_stream"},
-    "_graph_kinds.py": {"cupy.cuda.get_current_stream"},
-    "_transfer.py": {"cupy.cuda.get_current_stream"},
-    # the persist and range entries' own launch; the plain launch and the
-    # companion fold go through eagle.exec
-    "_plan_binding.py": {"cupy.cuda.get_current_stream", "cupy.cuda.driver.launchKernel"},
-}
+_ALLOWED: dict = {}
 _DATA_MOVEMENT = ("memcpy", "launchHostFunc", "mallocHost", "hostAlloc", "pinned_memory", "PinnedMemory",
                   "empty_pinned", "zeros_pinned", "copy_to_host", "copyto")
 
@@ -326,6 +318,6 @@ def test_no_array_library_runtime_in_the_orchestration_modules():
             assert any(c == a or c.startswith(a + ".") for a in allowed), f"{name}: {c} is not an allowed call"
 
 
-def test_the_one_array_library_call_in_transfer_is_the_current_stream_read():
+def test_transfer_makes_no_array_library_call():
     calls, _ = _cupy_calls(pathlib.Path(_transfer.__file__))
-    assert calls == ["cupy.cuda.get_current_stream"]
+    assert calls == []

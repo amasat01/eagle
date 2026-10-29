@@ -412,7 +412,7 @@ def test_one_sample_is_a_batch_row():
     one = eagle.simulate(sim_osc, omega=float(omegas[i]), t_end=float(t_ends[i]),
                          dt=1e-3, x=float(x0s[i]), v=0.0, t=0.0, max_steps=10_000)
     for name in ("x", "v", "t"):
-        assert one[name].shape == () and isinstance(one[name], np.ndarray)
+        assert one[name].shape == () and isinstance(one[name], eagle.Array)
         _bits_equal(one[name], batch[name][i])
         assert all(_host(one[name]).tobytes() != _host(batch[name][j]).tobytes()
                    for j in range(7) if j != i)

@@ -13,6 +13,10 @@ import eagle
 from _reverse_block import Gate, block
 from _reverse_fixtures import chain, plans
 
+def _bytes(a):
+    return np.asarray(a.get() if hasattr(a, "get") else a).tobytes()
+
+
 N = 32
 SEED = {"sin.y": np.linspace(1, 2, N)}
 
@@ -47,7 +51,7 @@ def test_a_stale_record_is_refused_and_a_kept_one_is_kept(graph):
             r"the forward ran again \(generation 1 -> 2\) since this Record was made")):
         eagle.diff.reverse(live, SEED)
     after = eagle.diff.reverse(kept, SEED)
-    assert after["x"].tobytes() == before["x"].tobytes()
+    assert _bytes(after["x"]) == _bytes(before["x"])
     assert after.report.generation == 1
 
 
@@ -78,7 +82,7 @@ def test_a_launch_during_a_reverse_is_busy():
 
 def test_forward_and_reverse_racing_never_give_a_third_value(graph):
     graph.launch()
-    want = eagle.diff.reverse(graph.record, SEED)["x"].tobytes()
+    want = _bytes(eagle.diff.reverse(graph.record, SEED)["x"])
     seen, stop = set(), threading.Event()
 
     def forward():
@@ -93,7 +97,7 @@ def test_forward_and_reverse_racing_never_give_a_third_value(graph):
     try:
         for _ in range(200):
             try:
-                seen.add(eagle.diff.reverse(graph.record, SEED)["x"].tobytes())
+                seen.add(_bytes(eagle.diff.reverse(graph.record, SEED)["x"]))
             except (RuntimeError, eagle.Busy):
                 pass
     finally:

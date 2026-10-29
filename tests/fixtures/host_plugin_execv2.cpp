@@ -142,3 +142,32 @@ extern "C" void exec_legacy_host(void* const* params, std::int32_t n)
     for (std::int32_t i = 0; i < n; ++i)
         y[i] = x[i] + 1.0;
 }
+
+// A kernel with a THREAD BOX (`launch.box` {axis 0, T 4, stride 8}): a launch's `base`/`count`
+// count THREADS, and thread `t` owns the lanes of its box -- the same body the code generator
+// emits for a boxed kernel (own lane, the box-free arm for fewer than T rows, the shifted last
+// box). It adds 1 to every lane it owns, so a lane written twice, or by a launch that does not
+// own it, is visible.
+// arg_spec: [mutable y, nsamples]
+static constexpr std::int64_t kBoxT = 4, kBoxS = 8;
+extern "C" void exec_boxed_host(void* const* params, std::int64_t base,
+                                std::int64_t count, std::int64_t nSamples)
+{
+    double* y = handle_data(params, 0);
+    for (std::int64_t t = base; t < base + count; ++t) {
+        const std::int64_t own = t + t / kBoxS * (kBoxT - 1) * kBoxS;
+        if (own >= nSamples) continue;
+        if (nSamples < kBoxT * kBoxS) {
+            for (std::int64_t k = 0; k < kBoxT; ++k) {
+                const std::int64_t lane = own + k * kBoxS;
+                if (lane >= nSamples) break;
+                y[lane] += 1.0;
+            }
+        } else {
+            const std::int64_t first = own + (kBoxT - 1) * kBoxS < nSamples
+                ? own : nSamples - kBoxT * kBoxS + own % kBoxS;
+            for (std::int64_t k = 0; k < kBoxT; ++k)
+                if (first + k * kBoxS >= own) y[first + k * kBoxS] += 1.0;
+        }
+    }
+}

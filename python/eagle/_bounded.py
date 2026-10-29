@@ -25,7 +25,6 @@ rather than as a constant in the generated code.
 
 from __future__ import annotations
 
-import ctypes
 import importlib
 import struct
 import threading
@@ -37,14 +36,11 @@ from ._launch_policy import _attr, _residency
 
 __all__ = ["EntryReport", "elf_section_size", "entry", "entry_report"]
 
-_CU_JIT_MAX_REGISTERS = 0
-_CU_JIT_INPUT_PTX = 1
 _CU_FUNC_ATTR_REGS = 4
 _CU_FUNC_ATTR_LOCAL = 3
 _ELF = b"\x7fELF"
 
 _LOCK = threading.Lock()
-_driver = None
 
 
 class EntryReport(NamedTuple):
@@ -65,8 +61,8 @@ class _Bounded:
     """A function loaded under a register bound, in the shape a launch reads
     (``.kernel.ptr``) and the policy queries (``.attributes``)."""
 
-    def __init__(self, module, handle):
-        self._module = module
+    def __init__(self, module, handle, device):
+        self._module, self._device = module, device
         self.kernel = SimpleNamespace(ptr=handle)
 
     @property
@@ -78,37 +74,15 @@ class _Bounded:
 
     def __del__(self):
         try:
-            _cuda().cuModuleUnload(self._module)
+            _core.module_release(self._module, self._device)
         except Exception:
             pass
 
 
-def _cuda():
-    global _driver
-    if _driver is None:
-        _driver = ctypes.CDLL("libcuda.so.1")
-        _driver.cuModuleLoadDataEx.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_char_p,
-                                               ctypes.c_uint, ctypes.POINTER(ctypes.c_int),
-                                               ctypes.POINTER(ctypes.c_void_p)]
-        _driver.cuModuleGetFunction.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p,
-                                                ctypes.c_char_p]
-        _driver.cuModuleUnload.argtypes = [ctypes.c_void_p]
-        _driver.cuLinkCreate_v2.argtypes = [ctypes.c_uint, ctypes.POINTER(ctypes.c_int),
-                                            ctypes.POINTER(ctypes.c_void_p),
-                                            ctypes.POINTER(ctypes.c_void_p)]
-        _driver.cuLinkAddData_v2.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_char_p,
-                                             ctypes.c_size_t, ctypes.c_char_p, ctypes.c_uint,
-                                             ctypes.c_void_p, ctypes.c_void_p]
-        _driver.cuLinkComplete.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p),
-                                           ctypes.POINTER(ctypes.c_size_t)]
-        _driver.cuLinkDestroy.argtypes = [ctypes.c_void_p]
-    return _driver
-
-
 def _func_attr(handle, attr: int) -> int:
-    from cupy_backends.cuda.api import driver
+    from . import _core
 
-    return int(driver.funcGetAttribute(attr, handle))
+    return int(_core.function_attribute(int(handle), attr))
 
 
 def _plain_resources(fn) -> tuple:
@@ -121,26 +95,23 @@ def _load_bounded(loaded, name: str, cap: int, device=None):
     """``name`` from ``loaded``'s PTX JIT-compiled under ``cap`` registers, or
     ``None`` when the image cannot be (a cubin, an unreadable file, a driver
     refusal)."""
-    import cupy
-
     try:
         image = open(loaded.image_path, "rb").read()
     except OSError:
         return None
     if image.startswith(_ELF):
         return None
-    image += b"\0"
-    cuda = _cuda()
-    module, func = ctypes.c_void_p(), ctypes.c_void_p()
-    options = (ctypes.c_int * 1)(_CU_JIT_MAX_REGISTERS)
-    values = (ctypes.c_void_p * 1)(cap)
-    with cupy.cuda.Device(loaded.device_id if device is None else device):
-        if cuda.cuModuleLoadDataEx(ctypes.byref(module), image, 1, options, values) != 0:
-            return None
-        if cuda.cuModuleGetFunction(ctypes.byref(func), module, name.encode()) != 0:
-            cuda.cuModuleUnload(module)
-            return None
-    return _Bounded(module, func.value)
+    device = loaded.device_id if device is None else device
+    try:
+        module = _core.module_load_jit(image + b"\0", cap, device)
+    except Exception:           # a driver refusal
+        return None
+    try:
+        func = _core.module_function(module, name)
+    except Exception:
+        _core.module_release(module, device)
+        return None
+    return _Bounded(module, func, device)
 
 
 def elf_section_size(image: bytes, section: str) -> int:
@@ -175,23 +146,11 @@ def _text_bytes(loaded, name: str, cap: int, device=None) -> int:
         return 0
     if image.startswith(_ELF):
         return elf_section_size(image, f".text.{name}")
-    import cupy
-
-    cuda = _cuda()
-    state, cubin, size = ctypes.c_void_p(), ctypes.c_void_p(), ctypes.c_size_t()
-    options = (ctypes.c_int * 1)(_CU_JIT_MAX_REGISTERS)
-    values = (ctypes.c_void_p * 1)(cap)
-    with cupy.cuda.Device(loaded.device_id if device is None else device):
-        if cuda.cuLinkCreate_v2(1 if cap else 0, options, values, ctypes.byref(state)) != 0:
-            return 0
-        try:
-            data = image + b"\0"
-            if (cuda.cuLinkAddData_v2(state, _CU_JIT_INPUT_PTX, data, len(data), b"entry", 0, None, None) != 0
-                    or cuda.cuLinkComplete(state, ctypes.byref(cubin), ctypes.byref(size)) != 0):
-                return 0
-            return elf_section_size(ctypes.string_at(cubin.value, size.value), f".text.{name}")
-        finally:
-            cuda.cuLinkDestroy(state)
+    try:
+        cubin = _core.link_ptx(image + b"\0", cap, loaded.device_id if device is None else device)
+    except Exception:       # noqa: BLE001 -- an unmeasurable entry reads as 0
+        return 0
+    return elf_section_size(cubin, f".text.{name}")
 
 
 def _decide(loaded, name: str, plain, demand=None, device=None):

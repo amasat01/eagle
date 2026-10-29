@@ -455,5 +455,127 @@ TEST(ExecContractDeviceTest, HostDeviceArmsAgreeWithinBand)
     EXPECT_NE(y[0], y[1]);
 }
 
+// ---------------------------------------------------------------------------
+// A kernel with a THREAD BOX (`launch.box`, T = 4, stride = 8: a span is 32 lanes): the device
+// registry reads the box from the sidecar and counts a partition in threads.
+// ---------------------------------------------------------------------------
+namespace {
+constexpr std::int64_t kBoxSpan = 32;
+
+// stage() with a `launch` block in the sidecar.
+std::string stageBoxed(const std::string& tag)
+{
+    writeTmp(tag + ".ptx", slurp(DEVICE_PLUGIN_EXECV2_PTX));
+    writeTmp(tag + "_sidecar.json", R"({
+  "kernel": "exec_boxed",
+  "aether_abi": "aether-abi/2",
+  "schema_version": 2,
+  "pattern": "pure",
+  "scalar_type": "float64",
+  "launch": {"block": 128, "box": {"axis": 0, "T": 4, "stride": 8}},
+  "arg_spec": [["mutable","y"],["nsamples","nsamples"]]
+})");
+    return writeTmp(tag + "_manifest.json", R"({
+  "schema_version": 2,
+  "pattern": "pure",
+  "aether_abi": "aether-abi/2",
+  "exec_targets": ["device"],
+  "exec_access": "sample_local",
+  "plugins": [
+    {"id": ")" + tag + R"(", "order": 0, "enabled": true,
+     "artifact": ")" + tag + R"(.ptx", "sidecar": ")" + tag + R"(_sidecar.json",
+     "format": "ptx"}
+  ]
+})");
+}
+
+// `parts` (in lanes) injected, in order, on a fresh y of N lanes.
+std::vector<double> boxedDevice(const std::vector<ex::Partition>& parts, std::int64_t N, const char* tag)
+{
+    eagle::cuda::PluginRegistry reg = eagle::cuda::PluginRegistry::from_manifest(stageBoxed(tag));
+    double* d_y = nullptr;
+    EXPECT_EQ(cudaMalloc(&d_y, std::size_t(N) * sizeof(double)), cudaSuccess);
+    EXPECT_EQ(cudaMemset(d_y, 0, std::size_t(N) * sizeof(double)), cudaSuccess);
+    reg.bind_handle("y", d_y);
+    try {
+        for (const ex::Partition& p : parts)
+            reg.inject_partition(CUstream(nullptr), p, 64);
+    } catch (...) {
+        cudaFree(d_y);
+        throw;
+    }
+    EXPECT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    std::vector<double> y(std::size_t(N), 0.0);
+    EXPECT_EQ(cudaMemcpy(y.data(), d_y, std::size_t(N) * sizeof(double), cudaMemcpyDeviceToHost), cudaSuccess);
+    cudaFree(d_y);
+    return y;
+}
+
+// Each part alone writes exactly its own lanes once; all of them together write every lane once.
+void expectDeviceOwnership(const std::vector<ex::Partition>& parts, std::int64_t N)
+{
+    for (const ex::Partition& p : parts) {
+        const auto y = boxedDevice({ p }, N, "dboxp");
+        for (std::int64_t l = 0; l < N; ++l)
+            ASSERT_DOUBLE_EQ(y[std::size_t(l)], (l >= p.base && l < p.base + p.count) ? 1.0 : 0.0)
+                << "lane " << l << " of partition [" << p.base << ", " << p.base + p.count << ")";
+    }
+    const auto all = boxedDevice(parts, N, "dboxa");
+    for (std::int64_t l = 0; l < N; ++l)
+        ASSERT_DOUBLE_EQ(all[std::size_t(l)], 1.0) << "lane " << l << " of the whole set";
+}
+}  // namespace
+
+TEST(ExecContractDeviceTest, DeviceBoxedWholeAndAlignedPartitionsOwnTheirLanes)
+{
+    ensureContext();
+    for (std::int64_t rows : { 31, 32, 64 }) {          // 31 rows: the last span has 3 of T = 4
+        const std::int64_t N = rows * 8;
+        expectDeviceOwnership({ ex::Partition::whole(N) }, N);
+        const std::int64_t half = N / kBoxSpan / 2 * kBoxSpan;
+        expectDeviceOwnership({ ex::Partition{ 0, half, N }, ex::Partition{ half, N - half, N } }, N);
+        const std::int64_t q = std::max<std::int64_t>(1, N / kBoxSpan / 4) * kBoxSpan;
+        std::vector<ex::Partition> four;
+        for (std::int64_t b = 0; b < N; b += q)
+            four.push_back(ex::Partition{ b, std::min(q, N - b), N });
+        expectDeviceOwnership(four, N);
+    }
+}
+
+TEST(ExecContractDeviceTest, DeviceBoxedPartialRangeRunsOnlyItsSpans)
+{
+    ensureContext();
+    const std::int64_t N = 31 * 8;
+    const ex::Partition mid{ 2 * kBoxSpan, 3 * kBoxSpan, N };
+    const auto y = boxedDevice({ mid }, N, "dboxm");
+    for (std::int64_t l = 0; l < N; ++l)
+        ASSERT_DOUBLE_EQ(y[std::size_t(l)], (l >= mid.base && l < mid.base + mid.count) ? 1.0 : 0.0)
+            << "lane " << l;
+    const ex::Partition tail{ 4 * kBoxSpan, N - 4 * kBoxSpan, N };
+    const auto z = boxedDevice({ tail }, N, "dboxt");
+    for (std::int64_t l = 0; l < N; ++l)
+        ASSERT_DOUBLE_EQ(z[std::size_t(l)], l >= tail.base ? 1.0 : 0.0) << "lane " << l;
+}
+
+TEST(ExecContractDeviceTest, DeviceBoxedPartitionOffASpanIsRefusedByName)
+{
+    ensureContext();
+    const std::int64_t N = 31 * 8;
+    for (const ex::Partition p : { ex::Partition{ 0, 100, N }, ex::Partition{ 10, 64, N },
+                                   ex::Partition{ kBoxSpan, 5, N } }) {
+        try {
+            boxedDevice({ p }, N, "dboxr");
+            FAIL() << "expected the partition [" << p.base << ", " << p.base + p.count << ") to be refused";
+        } catch (const std::runtime_error& e) {
+            const std::string what = e.what();
+            EXPECT_NE(what.find("thread box"), std::string::npos) << what;
+            EXPECT_NE(what.find("32"), std::string::npos) << what;
+        }
+    }
+    // fewer rows than T: whole only
+    expectDeviceOwnership({ ex::Partition::whole(3 * 8) }, 3 * 8);
+    EXPECT_THROW(boxedDevice({ ex::Partition{ 0, 8, 24 } }, 24, "dboxf"), std::runtime_error);
+}
+
 }  // namespace ExecContractDeviceTest
 }  // namespace eagle_tests

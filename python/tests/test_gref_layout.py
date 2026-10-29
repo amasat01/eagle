@@ -26,7 +26,7 @@ import pathlib
 import pytest
 from _device_file import AETHER_INCLUDE
 
-from eagle.abi import GREF_DTYPE
+from eagle.abi import GREF_SIZE
 
 
 HOST_DIR = pathlib.Path(__file__).resolve().parent.parent.parent / "plugin"
@@ -43,7 +43,7 @@ def test_gref_dtype_matches_aether_layout():
     import cupy as cp
 
     asserts = [
-        f'static_assert(sizeof(GRef) == {GREF_DTYPE.itemsize}, "GRef size drift");',
+        f'static_assert(sizeof(GRef) == {GREF_SIZE}, "GRef size drift");',
         # aether real type <-> the ported eagle/host mirror
         'static_assert(sizeof(GRef) == sizeof(GRefMirror), "aether View vs host mirror size");',
         'static_assert(alignof(GRef) == alignof(GRefMirror), "aether View vs host mirror alignment");',

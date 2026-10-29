@@ -5,7 +5,7 @@ import pytest
 
 cp = pytest.importorskip("cupy")
 
-from eagle.interop import _StreamProtocol, _wrap_external_stream, external_stream  # noqa: E402
+from eagle.frameworks.cupy import _StreamProtocol, external_stream, wrap_external_stream as _wrap_external_stream  # noqa: E402
 
 pytestmark = pytest.mark.skipif(
     not cp.cuda.is_available(), reason="needs a CUDA device")

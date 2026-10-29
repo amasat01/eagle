@@ -76,7 +76,7 @@ def test_assemble_args_wide_in_pulls_from_its_own_dict():
         arg_spec, out=None, vec={}, per_sample={}, terminated=None,
         uniforms={}, n=8, wide_in={"theta": _FakeArr(0xABCD)},
     )
-    assert args[0]["data"] == 0xABCD
+    assert args[0].data == 0xABCD
     assert int(args[1]) == 8
 
 
@@ -86,7 +86,7 @@ def test_assemble_args_wide_out_pulls_from_its_own_dict():
         arg_spec, out=None, vec={}, per_sample={}, terminated=None,
         uniforms={}, n=8, wide_out={"theta_bar": _FakeArr(0x1234)},
     )
-    assert args[0]["data"] == 0x1234
+    assert args[0].data == 0x1234
 
 
 def test_assemble_args_missing_wide_in_raises_keyerror():

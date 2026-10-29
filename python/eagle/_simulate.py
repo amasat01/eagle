@@ -27,7 +27,7 @@ otherwise. ``Terminated`` is never passed: every sample starts running.
 eagle's own options (``until``, ``max_steps``, ``every``, ``reorder``) are
 keyword-only, after the kernel's own arguments; a kernel parameter sharing
 one of those names is refused. The data decides where the model runs
-(numpy on the CPU, cupy on the GPU); a sample of plain numbers comes back
+(host arrays on the CPU, cupy on the GPU); a sample of plain numbers comes back
 head-shaped. Reaching ``max_steps`` is a result (``status ==
 "max_steps"``), not an error.
 """
@@ -37,15 +37,16 @@ from __future__ import annotations
 import inspect
 import time
 
-from . import _alloc
+from . import _alloc, arrays
 from . import _cell_rows, _split
+from .dtypes import dtype_name
 from ._busy import BusyGuard
 from ._plan_planes import _plane_dtype
 from ._compat import zip_strict
+from .diff._run import array_module as _array_module
 from ._until_done import (
     refuse_derived,
     _RESERVED,
-    _array_module,
     _check_count,
     _finish_of,
     _kernel_name,
@@ -429,7 +430,7 @@ def _dtype(xp, plan, name, decl):
     from ._plan_planes import _plane_dtype
 
     declared = decl[name][2]
-    return xp.dtype(declared) if declared else xp.dtype(_plane_dtype(plan.plugin))
+    return dtype_name(declared or _plane_dtype(plan.plugin))
 
 
 def _select(plans, planes):
@@ -490,6 +491,18 @@ class SimResult:
 
     def __getitem__(self, name):
         return self.state[name]
+
+    def returned(self, returns):
+        """This result with its arrays as ``returns``'s type (``"numpy"``, ``"cupy"``, ``"torch"``, ``"jax"``; see
+        :meth:`eagle.Array.to`); ``None`` keeps the :class:`eagle.Array` s. A framework that is not installed warns
+        once and keeps them."""
+        if returns is None:
+            return self
+        from .frameworks._bridge import route
+
+        return SimResult(state=route(self.state, returns), finished=route(self.finished, returns), report=self.report,
+                         wall_s=self.wall_s, allocated=self.allocated, record=self.record,
+                         t_stop=route(self.t_stop, returns), event_status=route(self.event_status, returns))
 
     def __repr__(self) -> str:
         return (f"SimResult(status={self.status!r}, n={self.n}, steps={self.steps}, "
@@ -564,7 +577,7 @@ class Simulation:
             role = decl[nm][0]
             if _is_number(value) and role != "uniform":
                 # one sample: a fresh 0-d array of the artifact's dtype
-                value = xp.asarray(value, dtype=_dtype(xp, selected[0], nm, decl))
+                value = arrays.asarray(value, _dtype(xp, selected[0], nm, decl), xp)
             final[nm] = value
         allocated = []
         for nm, (role, width, _dt, _k) in decl.items():
@@ -577,7 +590,7 @@ class Simulation:
             shape = _head(width) if single else (_head(width) + (n,))
             final[nm] = _alloc.zeros(xp, shape, dtype=_dtype(xp, selected[0], nm, decl))
             allocated.append(nm)
-        final[mask] = _alloc.zeros(xp, () if single else (n,), dtype=xp.bool_)
+        final[mask] = _alloc.zeros(xp, () if single else (n,), dtype=arrays.bool_)
         # a reduction over samples: the rows are eagle's scratch, the cell is returned
         self._cells = [c for c in (_cell_rows.scratch(p.plugin, n, xp, _plane_dtype(p.plugin))
                                    for p in plans) if c is not None]
@@ -653,7 +666,7 @@ class Simulation:
         if self._device and self.runner._fast_mode is None:
             # a fast run ends on its own blocking readback; the band path can
             # still queue work after its read (a reordering set's restore)
-            self._xp.cuda.Device().synchronize()
+            _alloc.synchronize()
         wall = time.perf_counter() - t0
         state = self._state
         if self._cells:
@@ -708,7 +721,7 @@ def simulate(model, *args, until=None, max_steps: int,
              every: int | None = None, reorder=None, scalar_type=None,
              layout=None, record: bool = False, window=None,
              memory_budget: int | None = None, dispatch=None, events: str = "step",
-             on_no_event: str = "raise", **kwargs) -> SimResult:
+             on_no_event: str = "raise", returns: str | None = None, **kwargs) -> SimResult:
     """Run ``model`` on every sample until each one finishes (or ``max_steps``
     is reached) and return the :class:`SimResult`.
 
@@ -726,7 +739,9 @@ def simulate(model, *args, until=None, max_steps: int,
     instead), a ``Param`` a number shared by every sample, a
     ``Scalar``/``Vector``/``Table`` plane one value per sample (a number
     where the kernel allows it, an array otherwise); ``Terminated`` is
-    never passed. numpy/numbers run on the CPU, cupy on the GPU.
+    never passed. host arrays and numbers run on the CPU, cupy on the GPU.
+    ``returns`` ("numpy", "cupy", "torch" or "jax") hands the result arrays back as that framework's
+    arrays through its bridge; the default is :class:`eagle.Array`.
     ``max_steps`` is required; ``every``/``reorder`` are
     :func:`eagle.until_done`'s compaction cadence and reorder threshold,
     ``scalar_type`` the precision the kernels are built in (``"float64"``,
@@ -742,7 +757,7 @@ def simulate(model, *args, until=None, max_steps: int,
     ``memory_budget`` are :func:`eagle.until_done`'s, for advanced tuning). Example::
 
         res = eagle.simulate(model, x=x0, v=v0, max_steps=1000, record=True)
-        grads = eagle.diff.reverse(res.record, {"x": numpy.ones_like(x0)})
+        grads = eagle.diff.reverse(res.record, {"x": eagle.arrays.ones_like(x0)})
 
     ``events="refine"`` stops each sample AT its stop rule's crossing, inside
     the stop step, instead of at the step's end (``on_no_event`` is
@@ -752,7 +767,7 @@ def simulate(model, *args, until=None, max_steps: int,
         res = eagle.simulate(fall, y=y0, v=v0, t=t0, dt=0.01, max_steps=1000,
                              events="refine", record=True)
         res.t_stop                    # when each sample hit the ground
-        grads = eagle.diff.reverse(res.record, {"t": numpy.ones_like(y0)})
+        grads = eagle.diff.reverse(res.record, {"t": eagle.arrays.ones_like(y0)})
 
     ``dispatch`` chooses how the model's ``policy="auto"`` dispatch groups run.
     ``None`` (default) keeps every group the author declared and decides the
@@ -775,4 +790,4 @@ def simulate(model, *args, until=None, max_steps: int,
                       every=every, reorder=reorder, scalar_type=scalar_type,
                       layout=layout, record=record, window=window,
                       memory_budget=memory_budget, dispatch=dispatch, events=events,
-                      on_no_event=on_no_event, **kwargs).run()
+                      on_no_event=on_no_event, **kwargs).run().returned(returns)

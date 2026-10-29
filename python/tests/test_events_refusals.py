@@ -85,8 +85,8 @@ def test_on_no_event_zero_keeps_the_stepped_stop():
     assert host(res.event_status).tolist()[2:] == [3, 3]
     np.testing.assert_array_equal(res.t_stop[2:], 40 * 0.05)
     grads = eagle.diff.reverse(res.record, {"t": np.ones(N)})
-    assert (grads["y"][2:] == 0).all()
-    assert (grads["y"][:2] != 0).all()
+    assert (host(grads["y"])[2:] == 0).all()
+    assert (host(grads["y"])[:2] != 0).all()
 
 
 def test_a_grazing_crossing_is_refused():

@@ -36,11 +36,8 @@ under that runner's record slot; distinct runners refine concurrently.
 
 from __future__ import annotations
 
-import numpy
-
-from .. import _alloc
+from .. import _alloc, _stream, arrays
 from .. import _core, _split
-from ._record import xp_of
 
 __all__ = ["phase"]
 
@@ -71,6 +68,8 @@ def check_events(events, on_no_event, door):
 
 
 def _addr(a):
+    if hasattr(a, "ptr"):       # an eagle.Array
+        return int(a.ptr)
     return int(a.data.ptr) if hasattr(a, "data") and hasattr(a.data, "ptr") else int(a.ctypes.data)
 
 
@@ -167,8 +166,8 @@ class RefinePass:
         self.steps = _alloc.zeros(xp, n, dtype=rec.planes["applied_steps"].dtype)
         self.tau = _alloc.zeros(xp, n, dtype=scalar)
         self.lo, self.hi = _alloc.zeros(xp, n, dtype=scalar), _alloc.zeros(xp, n, dtype=scalar)
-        self.status = _alloc.zeros(xp, n, dtype=xp.int8)
-        self.which = _alloc.zeros(xp, n, dtype=xp.int8)
+        self.status = _alloc.zeros(xp, n, dtype=arrays.uint8)
+        self.which = _alloc.zeros(xp, n, dtype=arrays.uint8)
         self.t_stop = _alloc.zeros(xp, n, dtype=scalar)
         self.h = rec.planes[k.time_step]
         self.out = {}
@@ -231,17 +230,17 @@ class RefinePass:
         args = self._args(**planes)
         if self.device:
             _core.events_apply_device(op, self.bytes, args,
-                                      int(self.xp.cuda.get_current_stream().ptr), -1)
+                                      _stream.current(), -1)
         else:
             _core.events_apply_host(op, self.bytes, args)
 
     def run(self):
         """Refine the forward that just ran; raise the pinned refusals."""
-        xp, rec, b = self.xp, self.rec, self.newton
+        rec, b = self.rec, self.newton
         self._nodes_at_prestop()
-        xp.subtract(rec.planes["applied_steps"], 1, out=self.steps)
-        xp.maximum(self.steps, 0, out=self.steps)
-        xp.copyto(self.tau, self.h)          # the first evaluation is the step's end
+        arrays.subtract(rec.planes["applied_steps"], 1, out=self.steps)
+        arrays.maximum(self.steps, 0, out=self.steps)
+        arrays.copyto(self.tau, self.h)          # the first evaluation is the step's end
         args = self._args(g=self.g, dg=self.dg)
         if self.device:
             import importlib
@@ -249,11 +248,11 @@ class RefinePass:
             launch = importlib.import_module("eagle.launch")
             block = int(launch._resolved_block(b._entry, self.n, None, declared=b._declared_block))
             _core.events_refine_device(b._entry, b._addrs, block, self.bytes, args,
-                                       int(xp.cuda.get_current_stream().ptr), -1)
+                                       _stream.current(), -1)
         else:
             _core.events_refine_host(b._entry, b._addrs, self.bytes, args)
         for j, s in enumerate(self.seeds):
-            xp.copyto(s, (self.which == j).astype(s.dtype))
+            arrays.copyto(s, arrays.equal(self.which, j).astype(s.dtype))
         self.guard_vjp.launch()
         rows = lambda planes: [r for nm in self.k.state for r in _rows(planes[nm])]
         gx = {nm: self.gx.get(nm, None) for nm in self.k.state}
@@ -277,18 +276,18 @@ class RefinePass:
                                            or rec.roles.get(pn) == "terminated"):
                     saved[id(a)] = (a, a.copy())
                     if pn in self.prestop:
-                        self.xp.copyto(a, self.prestop[pn])
+                        arrays.copyto(a, self.prestop[pn])
                     else:
                         a.fill(False)
         for call in rec.calls:
             call()
         for a, held in saved.values():
-            self.xp.copyto(a, held)
+            arrays.copyto(a, held)
 
     def _refuse(self):
         status = self.status.get() if self.device else self.status
         for code, text in ((TWO_RULES, None), (GRAZE, "graze"), (NO_EVENT, "none")):
-            hit = numpy.flatnonzero(status == code)
+            hit = arrays.flatnonzero(arrays.equal(status, code))
             if not hit.size or (code == NO_EVENT and self.on_no_event == "zero"):
                 continue
             first = int(hit[0])
@@ -331,7 +330,7 @@ class RefineReverse:
         rec, k = self.rec, self.k
         xp, n = rec.xp, rec.n
         ev = tape.events
-        xbar = {nm: (xp.asarray(seeds[nm], dtype=rec.state[nm].dtype) if nm in seeds
+        xbar = {nm: (arrays.asarray(seeds[nm], rec.state[nm].dtype, xp) if nm in seeds
                      else _alloc.zeros_like(xp, rec.state[nm])) for nm in k.state}
         rbar = {nm: _alloc.zeros_like(xp, xbar[nm]) for nm in k.state}
         gbar = [_alloc.zeros(xp, n, dtype=rec.scalar) for _ in range(k.guards)]
@@ -339,7 +338,7 @@ class RefineReverse:
         scal = [0, 0, 0, 0, _addr(ev["status"]), _addr(ev["which"]), 0, 0, 0, 0]
         rows = lambda planes: [r for nm in k.state for r in _rows(planes[nm])]
         op = (lambda code, args: _core.events_apply_device(
-            code, rec.scalar.itemsize, args, int(xp.cuda.get_current_stream().ptr), -1)
+            code, rec.scalar.itemsize, args, _stream.current(), -1)
             ) if rec.device else (lambda code, args: _core.events_apply_host(
                 code, rec.scalar.itemsize, args))
         op(_SEED, (n, [_addr(x) for x in dg], [_addr(x) for x in dg], [_addr(x) for x in gbar],
@@ -369,21 +368,19 @@ class RefineReverse:
                 bind[nm] = rec.planes[nm]
         make_plan(k.vjp, structure=rec.structure).bind(**bind).launch()
         pre = {nm: _alloc.empty_like(xp, xbar[nm]) for nm in k.state}
-        op(_SELECT, (n, [], [], [], rows(pre), rows(xbar),
-                     rows({nm: grads[nm] if nm in grads else _alloc.zeros_like(xp, rbar[nm])
-                           for nm in k.state}), scal))
+        share = {nm: grads[nm] if nm in grads else _alloc.zeros_like(xp, rbar[nm]) for nm in k.state}
+        op(_SELECT, (n, [], [], [], rows(pre), rows(xbar), rows(share), scal))      # `share` outlives the call
         steps = tape.steps.copy()
         status = ev["status"].get() if rec.device else ev["status"]
-        status = numpy.ascontiguousarray(status)
-        _core.events_reverse_steps(steps.ctypes.data, status.ctypes.data, n)
+        status = arrays.ascontiguousarray(status)
+        _core.events_reverse_steps(steps.ptr, status.ptr, n)
         extra = {nm: g for nm, g in grads.items() if nm not in k.state and nm != k.tau}
         return pre, steps, extra
 
 
 def copy_events(events):
     """A private copy of a refinement's held planes (``Record.keep``)."""
-    return None if events is None else {k: xp_of(a).array(a, copy=True)
-                                        for k, a in events.items()}
+    return None if events is None else {k: a.copy() for k, a in events.items()}
 
 
 # --- phases: a hybrid trajectory as a static Graph of refined runs --- #
@@ -488,7 +485,7 @@ def _phase_transpose(node, incoming, ctx):
         grads = reverse(runner.record, seeds, None, "eagle.diff.reverse")
         for nm, buf in out.items():
             if nm in grads:
-                rec.xp.copyto(buf, grads[nm])
+                arrays.copyto(buf, grads[nm])
             else:
                 buf.fill(0)
 

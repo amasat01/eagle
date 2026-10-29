@@ -76,6 +76,8 @@ import numpy as np
 import pytest
 
 from _device_file import device_artifact
+import eagle
+import eagle._plan_binding
 import eagle._plan_pack as plan_pack  # noqa: E402
 
 hawk = pytest.importorskip("hawk")
@@ -193,6 +195,12 @@ def _digest_of(path) -> str:
     return hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest()
 
 
+def _module_of(loaded):
+    import cupy as cp
+
+    return cp.RawModule(path=loaded.image_path)
+
+
 def _device_subject(unit, name):
     """The plan-able view of a bundle's DEVICE entry, SELF-CHECKED.
 
@@ -213,15 +221,15 @@ def _device_subject(unit, name):
 
     sizes = [int(v) for v in cp.ndarray(
         (LAYOUT_FIELDS,), dtype=cp.uint64,
-        memptr=loaded.module.get_global("eagle_layout_sizes")).get()]
+        memptr=_module_of(loaded).get_global("eagle_layout_sizes")).get()]
     eexec.check_layout_sizes(sizes)
     raw = bytes(cp.ndarray((len(eexec.ABI_TAG_V2) + 1,), dtype=cp.uint8,
-                           memptr=loaded.module.get_global("eagle_abi_tag")).get())
+                           memptr=_module_of(loaded).get_global("eagle_abi_tag")).get())
     assert raw.split(b"\0", 1)[0].decode() == eexec.ABI_TAG_V2
 
     view = hawk_artifact.plan_view(_sidecar(unit, name))
     view.pop("host_entry", None)
-    return SimpleNamespace(device_function=loaded.fn.kernel.ptr,
+    return SimpleNamespace(device_function=int(loaded.fn),
                            _keepalive=(reg, loaded), **view)
 
 
@@ -653,7 +661,7 @@ def test_a_captured_accum_plane_accumulates_across_replays_as_uncaptured(
         acc.fill(0.0)
         stream.begin_capture()
         for _ in range(replays):
-            bound.launch()
+            bound.launch(stream=stream)     # eagle never reads cupy's current stream: name it
         graph = stream.end_capture()
         graph.launch(stream=stream)
         stream.synchronize()
@@ -712,7 +720,7 @@ def test_launch_touches_none_of_the_calls_plan_run_needs(vec3_unit, monkeypatch)
     assert tripped == [], f"BoundPlan.launch reached {tripped}"
 
     with pytest.raises(AssertionError, match=r"the launch path called cp\."):
-        p.run(x=x_host, a=2.0)
+        cp.asarray(x_host)
     assert tripped, "the poison killed nothing, so it certified nothing"
 
     monkeypatch.undo()
@@ -830,21 +838,30 @@ def test_bind_refuses_a_plane_of_the_wrong_dtype(vec3_unit):
                y=cp.zeros((W, N)), a=2.0)
 
 
-_INDEX_MSG = r"'where' has dtype float32.*declares int64.*pass where as int64: where\.astype"
+_INDEX_MSG = r"'where' has dtype float32.*declares int32.*pass where as int32: where\.astype"
+_RANGE_MSG = r"kernel 'e4_gather': argument 'where': values exceed int32; declare Index\[int64\]"
 
 
-def test_bind_widens_an_int32_plane_for_an_int64_index_on_the_host(gather_host_unit):
-    """The sidecar declares ``where`` int64; the body reads 8-byte indices. An
-    ``int32`` plane is widened by one copy (at bind once, at run per call); a
-    float plane is refused, never cast."""
+def test_bind_narrows_an_int64_index_plane_for_an_int32_index_on_the_host(gather_host_unit):
+    """The sidecar declares ``where`` int32; the body reads 4-byte indices. An
+    ``int64`` plane that fits is narrowed by one copy (at bind once, at run per
+    call), one that does not is refused by name; an ``int32`` plane binds as it is;
+    a float plane is refused, never cast."""
     import eagle.exec as eexec
     from eagle import plan as eplan
 
     plugin = _host_subject(gather_host_unit, "e4_gather")
+    assert plugin.arg_dtypes["where"] == "int32"
     p = eplan.plan(plugin, structure=eexec.HostTeam)
     table = np.arange(2 * N, dtype=np.float64) * 3.0
     where = ((np.arange(N) * 5 + 2) % (2 * N)).astype(np.int64)
     y = np.zeros(N)
+    too_big = where.copy()
+    too_big[0] = 2**31
+    with pytest.raises(ValueError, match=_RANGE_MSG):
+        p.bind(table=table, where=too_big, y=y)
+    with pytest.raises(ValueError, match=_RANGE_MSG):
+        p.run(table=table, where=too_big)
     with pytest.raises(ValueError, match=_INDEX_MSG):
         p.bind(table=table, where=where.astype(np.float32), y=y)
     with pytest.raises(ValueError, match=_INDEX_MSG):
@@ -875,17 +892,25 @@ def test_bind_still_refuses_a_float_plane_of_the_wrong_dtype_on_the_host(vec3_un
 
 
 @pytest.mark.gpu
-def test_bind_widens_an_int32_plane_for_an_int64_index_on_the_device(gather_unit):
+def test_bind_narrows_an_int64_index_plane_for_an_int32_index_on_the_device(gather_unit):
     import cupy as cp
 
     import eagle.exec as eexec
     from eagle import plan as eplan
 
     plugin = _device_subject(gather_unit, "e4_gather")
-    assert plugin.arg_dtypes["where"] == "int64"
+    assert plugin.arg_dtypes["where"] == "int32"
     p = eplan.plan(plugin, structure=eexec.DeviceKernel)
     table = cp.arange(2 * N, dtype=cp.float64)
     where = (cp.arange(N) * 5 % (2 * N)).astype(cp.int64)
+    too_big = where.copy()
+    too_big[0] = 2**31
+    with pytest.raises(ValueError, match=_RANGE_MSG):
+        p.bind(table=table, where=too_big, y=cp.zeros(N))
+    y64 = cp.zeros(N)
+    p.bind(table=table, where=where, y=y64).launch()
+    cp.cuda.runtime.deviceSynchronize()
+    np.testing.assert_array_equal(y64.get(), table.get()[where.get()])
     with pytest.raises(ValueError, match=_INDEX_MSG):
         p.bind(table=table, where=where.astype(cp.float32), y=cp.zeros(N))
     with pytest.raises(ValueError, match=_INDEX_MSG):
@@ -1208,7 +1233,7 @@ def test_launch_persist_refuses_a_count_that_would_wrap_its_counter(monkeypatch,
             bound.launch_persist(grid=1, block=256, counter=None)
     else:
         # past the guard the stub has no device state to launch with
-        with pytest.raises(AttributeError):
+        with pytest.raises((AttributeError, TypeError)):
             bound.launch_persist(grid=1, block=256, counter=None)
 
 
@@ -1221,11 +1246,10 @@ def _stub_bound(monkeypatch, parts):
 
     issued = []
 
-    def launch_kernel(ptr, gx, gy, gz, bx, by, bz, shm, stream, params, extra):
-        arr = ctypes.cast(params, ctypes.POINTER(ctypes.c_void_p))
-        words = [ctypes.c_longlong.from_address(arr[i]).value
+    def launch_raw(function, grid, block, params, stream=0, shared=0, device=-1):
+        words = [ctypes.c_longlong.from_address(params[i]).value
                  for i in range(len(bound._addrs) + tail[0])]
-        issued.append(((gx, bx, stream), words))
+        issued.append(((grid[0], block[0], stream), words))
 
     bound = object.__new__(BoundPlan)
     tail = [7]  # trailing words read: persist 7, range 5
@@ -1237,9 +1261,8 @@ def _stub_bound(monkeypatch, parts):
     bound._device = None
     bound._entry = object()
     bound.plan = SimpleNamespace(plugin=SimpleNamespace())
-    bound._cupy = SimpleNamespace(cuda=SimpleNamespace(
-        driver=SimpleNamespace(launchKernel=launch_kernel),
-        get_current_stream=lambda: SimpleNamespace(ptr=5)))
+    monkeypatch.setattr("eagle._plan_binding._core.launch_raw", launch_raw)
+    monkeypatch.setattr("eagle._plan_binding._stream.current", lambda device=None: 5)
     fn = SimpleNamespace(kernel=SimpleNamespace(ptr=7))
     monkeypatch.setattr(BoundPlan, "persist_entry", lambda self: fn)
     monkeypatch.setattr(BoundPlan, "range_entry", lambda self: fn)
@@ -1306,17 +1329,16 @@ def test_launch_persist_packs_its_chunk_and_refuses_a_bad_one(monkeypatch):
     cell = lambda v: SimpleNamespace(data=SimpleNamespace(ptr=v))  # noqa: E731
     chunks = []
 
-    def chunk_word(params_addr):
-        arr = ctypes.cast(params_addr, ctypes.POINTER(ctypes.c_void_p))
-        return ctypes.c_uint.from_address(arr[len(bound._addrs) + 7]).value
+    def chunk_word(params):
+        return ctypes.c_uint.from_address(params[len(bound._addrs) + 7]).value
 
-    launch = bound._cupy.cuda.driver.launchKernel
+    launch = eagle._plan_binding._core.launch_raw
 
-    def spy(ptr, gx, gy, gz, bx, by, bz, shm, stream, params, extra):
+    def spy(function, grid, block, params, *rest, **kw):
         chunks.append(chunk_word(params))
-        launch(ptr, gx, gy, gz, bx, by, bz, shm, stream, params, extra)
+        launch(function, grid, block, params, *rest, **kw)
 
-    bound._cupy.cuda.driver.launchKernel = spy
+    monkeypatch.setattr("eagle._plan_binding._core.launch_raw", spy)
     bound.launch_persist(grid=2, counter=cell(0x100), block=64)
     bound.launch_persist(grid=2, counter=cell(0x100), block=64, chunk=8)
     bound.prepare_persist(grid=2, counter=cell(0x100), block=64, chunk=1)()
@@ -1328,3 +1350,30 @@ def test_launch_persist_packs_its_chunk_and_refuses_a_bad_one(monkeypatch):
         with pytest.raises(ValueError, match="multiple of 32"):
             bound.launch_persist(grid=2, counter=cell(0x100), block=block)
     assert len(issued) == 3
+
+
+def _narrowing_rows(make, place):
+    import eagle.arrays as xp
+    from eagle._plan_planes import _dt, widen_index
+
+    i32 = _dt("int32")
+    fits = place(make(np.array([0, 7, -2**31, 2**31 - 1], dtype=np.int64)))
+    got = widen_index(fits, i32, name="idx", kernel="k")
+    assert str(got.dtype) == "int32" and got.tolist() == [0, 7, -2**31, 2**31 - 1]
+    for bad in (2**31, -2**31 - 1):
+        with pytest.raises(ValueError, match=r"kernel 'k': argument 'idx': values exceed int32; declare Index\[int64\]"):
+            widen_index(place(make(np.array([1, bad], dtype=np.int64))), i32, name="idx", kernel="k")
+    same = place(make(np.array([1, 2], dtype=np.int32)))
+    assert widen_index(same, i32, name="idx", kernel="k") is same           # the declared width binds untouched
+    host = np.array([3, 4], dtype=np.int32)
+    assert xp.asarray(host).dtype == "int32"
+
+
+def test_an_int64_index_plane_narrows_to_a_declared_int32_when_it_fits_on_the_host():
+    _narrowing_rows(lambda a: a, lambda a: a)
+
+
+@pytest.mark.gpu
+def test_an_int64_index_plane_narrows_to_a_declared_int32_when_it_fits_on_the_device():
+    cp = pytest.importorskip("cupy")
+    _narrowing_rows(lambda a: a, cp.asarray)

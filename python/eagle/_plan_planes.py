@@ -5,12 +5,10 @@
 
 from __future__ import annotations
 
-
-import numpy as np
-
-from . import _layout
+from . import _layout, _stream
 from .abi import DEVICE_CPU, DEVICE_CUDA
-from .dtypes import np_dtype
+from . import arrays
+from .dtypes import dtype_name, dtype_of
 from .interop import BufferRefused
 from .roles import INPUT_ROLES, OUTPUT_ROLES, PER_SAMPLE_ROLES
 from ._plan_pack import _data_ptr, _trailing_extent
@@ -19,6 +17,24 @@ from ._plan_pack import _data_ptr, _trailing_extent
 #: The reserved ``lookup`` word an automatic kernel reads its steps per
 #: launch from; every launch but :func:`eagle.until_done`'s binds it to 1.
 FUSED_STEPS_SLOT = ("lookup", "fused_steps")
+
+
+def _dt(dtype):
+    """The :class:`eagle.DType` of a dtype-like (a name, a DType, a numpy dtype or scalar class); a
+    :class:`TypeError` when eagle has no such dtype."""
+    if isinstance(dtype, arrays.DType):
+        return dtype
+    name = {"bool_": "bool"}.get(dtype_name(dtype), dtype_name(dtype)) if dtype is not None else None
+    found = getattr(arrays, "bool_" if name == "bool" else str(name), None)
+    if not isinstance(found, arrays.DType):
+        raise TypeError(f"no eagle dtype for {dtype!r}")
+    return found
+
+
+def _shape_of(value) -> tuple:
+    """The shape of an array, a number (``()``) or a nested list."""
+    shape = getattr(value, "shape", None)
+    return tuple(int(e) for e in (arrays.asarray(value).shape if shape is None else shape))
 
 
 def _output_names(arg_spec) -> tuple:
@@ -66,27 +82,9 @@ def _check_run_writable(arg_spec, out_names, kw) -> None:
 
 def _write_into(dst, src) -> None:
     """Copy ``src`` into ``dst`` (the caller's output object) in dst's own
-    framework: torch's in-place ``copy_``, ``cupy.copyto``, or plain numpy.
+    framework (see :func:`eagle._layout._copyto`).
     Safe when ``dst``/``src`` already alias the same buffer (a no-op)."""
-    src_on_device = not isinstance(src, np.ndarray)
-    copy_ = getattr(dst, "copy_", None)
-    if copy_ is not None:  # torch
-        import torch
-
-        copy_(torch.as_tensor(src, device=dst.device) if src_on_device
-              else torch.from_numpy(src))
-        return
-    if type(dst).__module__.partition(".")[0] == "cupy":
-        import cupy as cp
-
-        cp.copyto(dst, cp.asarray(src))
-    elif device_resident(dst):  # any other CUDA-array producer (a warp array)
-        import cupy as cp
-
-        cp.copyto(cp.asarray(dst), cp.asarray(src))
-    else:
-        host = src.get() if src_on_device else src
-        np.copyto(dst if isinstance(dst, np.ndarray) else np.asarray(dst), host)
+    _layout._copyto(dst, src)
 
 
 def _write_back_outputs(out_names, supplied, adapted, result):
@@ -123,9 +121,9 @@ def _returned(arrays, names, to_host=None):
 
 
 def _plane_dtype(plugin):
-    """The numpy dtype of every Real-typed plane this artifact reads and
+    """The :class:`eagle.DType` of every Real-typed plane this artifact reads and
     writes; ``float64`` when it declares no ``scalar_type``."""
-    return np.dtype(np_dtype(getattr(plugin, "scalar_type", None) or "float64"))
+    return dtype_of(getattr(plugin, "scalar_type", None) or "float64")
 
 
 def _declared_widths(plugin) -> dict:
@@ -176,7 +174,7 @@ def _declared_dtype(plugin, name):
     (the reserved 4-byte planes included: ``active_map`` is ``int32``, the
     ``finished_count``/``active_count``/``<group>_mix`` counters ``uint32``)."""
     declared = (getattr(plugin, "arg_dtypes", None) or {}).get(name)
-    return np.dtype(declared) if declared else None
+    return _dt(declared) if declared else None
 
 
 def _refuse_dtype_mismatch(door, role, name, declared, given) -> None:
@@ -185,55 +183,69 @@ def _refuse_dtype_mismatch(door, role, name, declared, given) -> None:
     plane is walked off its end (or reinterpreted) at launch. Never cast.
     An integer plane's signedness is not policed (an ``int32`` view of a
     ``uint32`` counter reads the same bytes), only its kind and width."""
-    given = np.dtype(given)
+    given = _dt(given)
     if declared is None or given == declared:
         return
     if given.kind in "iu" and declared.kind in "iu" and given.itemsize == declared.itemsize:
         return
     raise ValueError(
-        f"eagle.plan.{door}: {role} {name!r} has dtype {np.dtype(given)}, but "
+        f"eagle.plan.{door}: {role} {name!r} has dtype {given}, but "
         f"this artifact declares {declared} for it and its body reads "
         f"{declared.itemsize}-byte elements; pass {name} as {declared}: "
         f"{name}.astype(np.{declared})"
     )
 
 
-def widen_index(value, declared):
-    """``value`` widened by one copy to ``declared`` when it is a narrower
-    integer plane under a wider signed declaration (an ``int32`` ``Index``
-    for a kernel emitted for ``int64`` keys); anything else is returned as
-    it is, for :func:`_refuse_dtype_mismatch` to judge (a float never
-    widens). The doors call this where they take the plane in: ``run`` per
-    call, ``bind``/``rebind`` once, so a launch copies nothing."""
+def _plugin_name(plugin) -> str:
+    return str(getattr(plugin, "name", None) or getattr(plugin, "kernel", "?"))
+
+
+def widen_index(value, declared, *, name=None, kernel=None):
+    """``value`` converted by one copy to ``declared`` when it is an integer
+    plane of another width under a signed integer declaration: a narrower
+    one widens (an ``int32`` ``Index`` for a kernel emitted for ``int64``
+    keys); a wider one (an ``int64`` array for an ``int32`` ``Index``)
+    narrows when every value fits and is refused by name when one does not.
+    Anything else is returned as it is, for :func:`_refuse_dtype_mismatch`
+    to judge (a float never converts). The doors call this where they take
+    the plane in: ``run`` per call, ``bind``/``rebind`` once, so a launch
+    copies nothing; a plane of the declared width is returned untouched."""
     try:
-        given = np.dtype(getattr(value, "dtype", None))
+        given = _dt(getattr(value, "dtype", None))
     except TypeError:
         return value
-    if (declared is not None and declared.kind == "i" and given.kind in "iu"
-            and given.itemsize < declared.itemsize):
-        return value.astype(declared)
-    return value
+    if declared is None or declared.kind != "i" or given.kind not in "iu" or given.itemsize == declared.itemsize:
+        return value
+    if given.itemsize < declared.itemsize:
+        return value.astype(declared.name)
+    wide = arrays.asarray(value)
+    narrow = wide.astype(declared.name)
+    if arrays.flatnonzero(arrays.not_equal(narrow.astype(given.name), wide)).size:
+        raise ValueError(f"kernel {kernel!r}: argument {name!r}: values exceed {declared}; "
+                         f"declare Index[{given}]")
+    return narrow
 
 
 def widen_indices(plugin, arg_spec, planes: dict) -> dict:
     """``planes`` with each input plane :func:`widen_index`-ed to the dtype the
     sidecar declares for it."""
     out = planes
+    kernel = _plugin_name(plugin)
     for role, name in arg_spec:
         if role in INPUT_ROLES and name in planes:
-            wide = widen_index(planes[name], _declared_dtype(plugin, name))
+            wide = widen_index(planes[name], _declared_dtype(plugin, name), name=name, kernel=kernel)
             if wide is not planes[name]:
                 out = dict(out) if out is planes else out
                 out[name] = wide
     return out
 
 
-def _plan_float(arr, dtype, name, xp):
+def _plan_float(arr, dtype, name):
     """``arr`` (an array the caller holds) as a C-contiguous plane of the
     plan's float ``dtype``. A narrower float is promoted and a strided plane
     copied, each with one :class:`~eagle.PerformanceWarning` per call site;
     a wider float is refused (never a silent downcast)."""
-    plan, copied = np.dtype(dtype), False
+    plan, copied = _dt(dtype), False
     if arr.dtype != plan:
         if arr.dtype.kind == "f":
             if arr.dtype.itemsize > plan.itemsize:
@@ -242,35 +254,35 @@ def _plan_float(arr, dtype, name, xp):
                     f"{plan}; pass np.asarray({name}, np.{plan}), or deploy in {arr.dtype}")
             _layout.warn_promoted(name, arr.dtype, plan)
             copied = True
-        arr = arr.astype(dtype)
-    if not arr.flags.c_contiguous:
+        arr = arr.astype(plan)
+    if not arr.is_contiguous:
         if not copied:
             _layout.warn_copied(name)
-        arr = xp.ascontiguousarray(arr)
+        arr = arrays.ascontiguousarray(arr)
     return arr
 
 
-def _host_plane(value, dtype, *, declared=None, name=None, role="input"):
+def _host_plane(value, dtype, *, declared=None, name=None, role="input", kernel=None):
     """A caller-supplied input plane as a contiguous host array of the
     artifact's Real dtype; an integer/bool array (an index table, a
     ``terminated`` mask) passes through at its own dtype instead, after
     being checked against the integer/bool dtype the sidecar declares. A
     float array of another width follows :func:`_plan_float`."""
-    arr = np.asarray(value)
+    arr = arrays.asarray(value)
     if declared is not None and declared.kind in "iub":
-        arr = widen_index(arr, declared)
+        arr = widen_index(arr, declared, name=name, kernel=kernel)
         _refuse_dtype_mismatch("run", role, name, declared, arr.dtype)
     if arr.dtype.kind in "iub":
-        return np.ascontiguousarray(arr)
-    if arr.dtype == dtype and arr.flags.c_contiguous:
+        return arrays.ascontiguousarray(arr)
+    if arr.dtype == dtype and arr.is_contiguous:
         return arr
     if not hasattr(value, "dtype"):          # a list or number: converted, not promoted
-        return np.ascontiguousarray(arr, dtype=dtype)
-    return _plan_float(arr, dtype, name, np)
+        return arrays.ascontiguousarray(arr.astype(_dt(dtype)))
+    return _plan_float(arr, dtype, name)
 
 
 #: Value types known to live on the host.
-_HOST_TYPES = frozenset({np.ndarray, float, int})
+_HOST_TYPES = frozenset({float, int})
 
 
 def residency(planes, *, door: str = "eagle.plan.auto", what: str = "kernel") -> str:
@@ -317,24 +329,24 @@ def _device_inputs(arg_spec, kw) -> bool:
     )
 
 
-def _device_plane(value, dtype, *, declared=None, name=None, role="input"):
+def _device_plane(value, dtype, *, declared=None, name=None, role="input", kernel=None):
     """:func:`_host_plane`'s device twin: a device-resident plane is
     wrapped where it lies and cast only on the device when needed; anything
     else goes through :func:`_host_plane` and is uploaded once."""
-    import cupy as cp
+    from .launch import _current_device_ordinal
 
     if not device_resident(value):
-        return cp.asarray(_host_plane(value, dtype, declared=declared,
-                                      name=name, role=role))
-    arr = cp.asarray(value)
+        return arrays.asarray(_host_plane(value, dtype, declared=declared, name=name, role=role, kernel=kernel),
+                              device=f"cuda:{_current_device_ordinal()}")
+    arr = arrays.asarray(value)
     if declared is not None and declared.kind in "iub":
-        arr = widen_index(arr, declared)
+        arr = widen_index(arr, declared, name=name, kernel=kernel)
         _refuse_dtype_mismatch("run", role, name, declared, arr.dtype)
     if arr.dtype.kind in "iub":
-        return cp.ascontiguousarray(arr)
-    if arr.dtype == dtype and arr.flags.c_contiguous:
+        return arrays.ascontiguousarray(arr)
+    if arr.dtype == dtype and arr.is_contiguous:
         return arr
-    return _plan_float(arr, dtype, name, cp)
+    return _plan_float(arr, dtype, name)
 
 
 def _adapt_planes(plugin, arg_spec, kw, *, door: str = "run",
@@ -359,7 +371,7 @@ def _adapt_planes(plugin, arg_spec, kw, *, door: str = "run",
         value = kw[name]
         width = widths.get(name, 1)
         shape = getattr(value, "shape", None)
-        if shape is None or isinstance(value, np.generic):
+        if shape is None or _layout.is_number(value):
             if not _layout.is_number(value):
                 continue                    # a list or sequence: bound as given
             _check_number(door, role, name, value)
@@ -408,9 +420,9 @@ def _number_dtype(plugin, name, value):
     else the artifact's Real dtype."""
     declared = (getattr(plugin, "arg_dtypes", None) or {}).get(name)
     if declared:
-        return np.dtype(declared)
-    if isinstance(value, (bool, np.bool_)):
-        return np.dtype(bool)
+        return _dt(declared)
+    if isinstance(value, bool) or type(value).__name__ in ("bool", "bool_"):
+        return arrays.bool_
     return _plane_dtype(plugin)
 
 
@@ -424,7 +436,7 @@ def _check_one_call(arg_spec, planes, adapted, single) -> None:
         if a is not None and a.layout == "single":
             continue
         caller = planes[name] if a is None else a.caller
-        shape = tuple(int(e) for e in getattr(caller, "shape", np.shape(caller)))
+        shape = _shape_of(caller)
         n = _trailing_extent(planes[name]) if shape else 0
         s_name, s_shape = single
         tile = (f"np.full({n}, {s_name})" if s_shape == ()
@@ -475,8 +487,14 @@ def _single_returned(plugin, arg_spec, out_names, supplied, result):
             continue
         head = _result_head(plugin, name, widths.get(name, 1))
         view = plane.reshape(head)
-        planes[name] = view[()] if head == () and isinstance(view, np.ndarray) else view
+        planes[name] = view[()] if head == () and type(view).__module__ == "numpy" else view
     return planes if len(out_names) > 1 else planes[out_names[0]]
+
+
+def _on_host(value) -> bool:
+    """Whether ``value`` is a host array (numpy or :class:`eagle.Array` on cpu or pinned memory)."""
+    root = type(value).__module__.partition(".")[0]
+    return root == "numpy" or (root == "eagle" and not value.device.startswith("cuda"))
 
 
 def _restore_layouts(arg_spec, adapted, result):
@@ -493,14 +511,14 @@ def _restore_layouts(arg_spec, adapted, result):
         if a is None:
             continue
         r = planes[name]
-        host_caller = isinstance(a.caller, np.ndarray)
-        host_result = isinstance(r, np.ndarray)
-        if a.scratch is not None and not isinstance(a.scratch, np.ndarray):
+        host_caller = _on_host(a.caller)
+        host_result = _on_host(r)
+        if a.scratch is not None and not _on_host(a.scratch):
             a.copy_back()                       # device scratch -> device caller
         elif host_caller and not host_result:
-            np.copyto(a.caller_view(), r.get())  # device result -> host caller
-        elif host_caller and not np.shares_memory(r, a.caller):
-            np.copyto(a.caller_view(), r)        # host result -> host caller
+            arrays.copyto(arrays.asarray(a.caller_view()), r)    # device result -> host caller
+        elif host_caller and not arrays.shares_memory(arrays.asarray(r), arrays.asarray(a.caller)):
+            arrays.copyto(arrays.asarray(a.caller_view()), arrays.asarray(r))   # host result -> host caller
         planes[name] = a.caller if host_caller == host_result else r.T
     return planes if len(names) > 1 else planes[names[0]]
 
@@ -515,10 +533,7 @@ def _check_run_shapes(plugin, arg_spec, kw, n: int) -> None:
         if role not in PER_SAMPLE_ROLES or name not in kw:
             continue
         value = kw[name]
-        shape = getattr(value, "shape", None)
-        if shape is None:
-            shape = np.shape(value)
-        shape = tuple(int(s) for s in shape)
+        shape = _shape_of(value)
         width = widths.get(name)
         if width is not None:
             want = _plane_shape(width, n)
@@ -596,12 +611,12 @@ def _check_plane(role, name, value, *, n, dtype, width, framework,
                 "plan runs under eagle.exec.host_team, whose entry dereferences "
                 "the pointer on the host; bind a numpy array"
             )
-        if not isinstance(value, np.ndarray):
+        if type(value).__module__.partition(".")[0] not in ("numpy", "eagle"):
             raise ValueError(
-                f"eagle.plan.bind: {role} {name!r} must be a numpy array for a "
+                f"eagle.plan.bind: {role} {name!r} must be a host array (numpy or eagle.Array) for a "
                 f"host_team plan, got {type(value).__name__}"
             )
-    if not value.flags.c_contiguous:
+    if not (value.is_contiguous if hasattr(value, "is_contiguous") else value.flags.c_contiguous):
         raise ValueError(
             f"eagle.plan.bind: {role} {name!r} is not C-contiguous "
             f"(shape {tuple(value.shape)}, strides {tuple(value.strides)}). A "
@@ -609,7 +624,7 @@ def _check_plane(role, name, value, *, n, dtype, width, framework,
             "may not repack, so a strided plane would be decoded at the wrong "
             "addresses; bind a contiguous plane"
         )
-    bound_dtype = np.dtype(value.dtype)
+    bound_dtype = _dt(value.dtype)
     _refuse_dtype_mismatch("bind", role, name, declared, bound_dtype)
     if bound_dtype.kind not in "iub" and bound_dtype != dtype:
         raise ValueError(
@@ -711,15 +726,7 @@ def planes_device(arg_spec, kw, *, door: str, device=None):
 def device_scope(device):
     """A context making ``device`` current for the planes a call allocates
     (nothing when it already is, or ``None``)."""
-    import contextlib
-
-    if device is None:
-        return contextlib.nullcontext()
-    import cupy
-
-    if cupy.cuda.runtime.getDevice() == device:
-        return contextlib.nullcontext()
-    return cupy.cuda.Device(device)
+    return _stream.on_device(device)
 
 
 def function_on(plugin, device: int) -> int:
@@ -731,4 +738,4 @@ def function_on(plugin, device: int) -> int:
     loaded = keep[-1] if keep else None
     if getattr(loaded, "device_id", device) == device or not hasattr(loaded, "function"):
         return entry
-    return loaded.function(device).kernel.ptr
+    return int(loaded.function(device))

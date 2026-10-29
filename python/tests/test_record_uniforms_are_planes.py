@@ -21,7 +21,7 @@ def test_recorded_parameters_are_cells_plain_ones_are_values(tmp_path):
     assert ("uniform", "a") in p._arg_spec and p._planes["a"] == 0.5
     assert ("lookup", "a") in r._arg_spec
     cell = r._planes["a"]
-    assert cell.shape == (1,) and cell[0] == 0.5
+    assert cell.shape == (1,) and np.asarray(cell)[0] == 0.5
     assert recorded._recorder.cells[("square", "a")] is cell
     assert recorded.node_labels() == plain.node_labels() == ["square", "sin"]
 

@@ -58,8 +58,11 @@ xp = xp_for(DEVICE)
 
 def to_numpy(a):
     """``a`` as a NumPy array, regardless of which device it came from --
-    what eagle's own notebooks used to spell ``to_host``."""
-    return xp.asnumpy(a) if DEVICE == "gpu" else a
+    what eagle's own notebooks used to spell ``to_host``. An ``eagle.Array`` (what a plan returns) or a CuPy array is read
+    back; a NumPy array is returned as it is."""
+    import numpy as np
+
+    return np.asarray(a.get() if hasattr(a, "get") else a)      # cupy and eagle.Array read back with .get()
 
 
 def plot_style() -> None:

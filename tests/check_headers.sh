@@ -9,8 +9,8 @@ cxx=${1:?usage: check_headers.sh <c++ compiler> <aether include dir>}
 aether=${2:?usage: check_headers.sh <c++ compiler> <aether include dir>}
 cd "$(dirname "$0")/.."
 
-# Headers that need a toolkit this check does not install: CUDA (cuda.h) or MPI.
-skip='^eagle/cuda/|^eagle/cuda\.h$|^eagle/exec/DeviceKernel\.h$|^eagle/exec/RankPartition\.h$'
+# Headers that need a toolkit this check does not install: CUDA (cuda.h, nvcc-only) or MPI.
+skip='^eagle/cuda/|^eagle/cuda\.h$|^eagle/array/launch\.h$|^eagle/exec/DeviceKernel\.h$|^eagle/exec/RankPartition\.h$'
 
 probe=$(mktemp --suffix=.cpp)
 trap 'rm -f "$probe"' EXIT

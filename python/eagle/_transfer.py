@@ -13,13 +13,9 @@ from __future__ import annotations
 
 import atexit
 import contextvars
-import ctypes
-import math
 import weakref
 
-import numpy as np
-
-from . import _core, _recording
+from . import _core, _recording, _stream, arrays
 from ._active_set import _address
 from ._backend import BackendUnavailable
 from ._device_kind import device_kind
@@ -32,42 +28,25 @@ HOST_SINK = contextvars.ContextVar("eagle_graph_host_sink", default=None)
 
 
 # --- pinned host arrays --- #
-class _Owner:
-    """Frees the page-locked block when the last array viewing it is gone."""
-
-    __slots__ = ("address",)
-
-    def __init__(self, address):
-        self.address = address
-
-    def __del__(self):
-        _core.host_free(self.address)
-
-
-def pinned(shape, dtype=np.float64) -> np.ndarray:
-    """A host array in page-locked memory, uninitialised like ``numpy.empty``.
+def pinned(shape, dtype="float64"):
+    """An :class:`eagle.Array` in page-locked host memory, uninitialised.
 
     A copy between the device and a pinned array is a plain DMA transfer; from an
-    ordinary numpy array the driver stages it first (it works, without overlap).
+    ordinary host array the driver stages it first (it works, without overlap).
     Pinning is yours: eagle never pins an array behind your back. The memory is
-    freed with the array. Without a GPU backend, or with no device visible, this is ``numpy.empty``.
+    freed with the array. Without a GPU backend, or with no device visible, this is an ordinary
+    host array (not page-locked). ``numpy.asarray(h)`` views it with no copy.
 
     Example::
 
         h_probe = eagle.pinned((3, n))
         eagle.copy(probe, into=h_probe)     # device -> host"""
-    dtype = np.dtype(dtype)
-    shape = (int(shape),) if np.isscalar(shape) else tuple(int(s) for s in shape)
-    nbytes = math.prod(shape) * dtype.itemsize
-    if nbytes == 0 or not _core.cuda_backend()["loaded"]:
-        return np.empty(shape, dtype)
-    try:
-        address = _core.host_alloc(nbytes)
-    except BackendUnavailable:           # the plugin is installed and no device is visible
-        return np.empty(shape, dtype)
-    block = (ctypes.c_char * nbytes).from_address(address)
-    block._owner = _Owner(address)
-    return np.frombuffer(block, dtype=dtype).reshape(shape)
+    if _core.cuda_backend()["loaded"]:
+        try:
+            return arrays.empty(shape, dtype, device="pinned")
+        except BackendUnavailable:       # the plugin is installed and no device is visible
+            pass
+    return arrays.empty(shape, dtype)
 
 
 # --- copy --- #
@@ -110,7 +89,7 @@ def copy(src, *, into, name=None):
     for label, arr in (("src", src), ("into", into)):
         if not _contiguous(arr):
             raise ValueError(f"eagle.copy: {label} is not contiguous; copy a contiguous array "
-                             "(numpy.ascontiguousarray, or a kernel that writes one)")
+                             "(eagle.arrays.ascontiguousarray, or a kernel that writes one)")
     node = Node("copy", [src, into], name)
     return into if record(node) else node
 
@@ -135,9 +114,9 @@ def _direction(src, dst) -> int:
 
 def current_stream() -> int:
     """The stream a capture is recording on (the one a node issues its work to)."""
-    import cupy
+    from ._stream import current
 
-    return cupy.cuda.get_current_stream().ptr
+    return current()
 
 
 def copy_run(payload):
@@ -193,7 +172,8 @@ class HostNode:
 
         def run():
             try:
-                call()
+                with _stream.host_callback():
+                    call()
             except BaseException as exc:    # the backend thread cannot raise it
                 errors.append(exc)
         self.func = _core.HostFunc(run)

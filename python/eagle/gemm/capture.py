@@ -1,56 +1,39 @@
-# Copyright 2026 Alessandro Masat
-# SPDX-License-Identifier: Apache-2.0
+"""A capture-legal GEMM step: cuBLAS behind eagle's backend seam.
 
-"""A capture-legal single-precision GEMM step: raw cuBLAS, bound by ctypes.
+A strides-only shape mapping plus :class:`CublasCaptureHandle`, which enqueues the product through the seam's
+``gemm`` call (:func:`eagle._core.gemm`). The plugin loads cuBLAS when it is first asked for one; without it the
+call is refused by name (:class:`GemmCaptureUnavailable`), never silently replaced. Operands are
+:class:`eagle.Array` s or any array that exposes its device address (``.ptr``, ``.data.ptr`` or an integer).
 
-Pure ``ctypes`` plus a strides-only shape mapping, with zero
-code-generator imports -- this is eagle runtime, not codegen.
-Cross-module references point at :mod:`eagle.gemm.plan`.
+:mod:`eagle.gemm.plan`'s ``matmul_step`` runs the same seam call outside a capture.
 
-:mod:`eagle.gemm.plan`'s ``matmul_step`` calls the array module's
-``matmul``, which cupy refuses to record into a CUDA graph during
-stream capture. This module is the direct cuBLAS call that bypasses
-that restriction: it never selects a mechanism, never allocates, and is
-not wired into ``matmul_step``, which remains the uncaptured
-implementation.
+Two pieces: :class:`CublasCaptureHandle` (the cuBLAS handle of one captured-graph build's stream) and
+:func:`sgemm_params`, the row-major to column-major mapping, a pure function over shapes and strides.
 
-Three pieces: :func:`load_cublas` resolves the shared library from the
-process's existing mappings; :class:`CublasCaptureHandle` is one handle
-per captured-graph build; :func:`sgemm_params` is the row-major to
-column-major mapping, a pure function over shapes and strides.
-
-Refusals are typed and loud (:class:`GemmCaptureUnavailable` and its
-two subclasses), never fallbacks.
+Refusals are typed and loud (:class:`GemmCaptureUnavailable` and its subclass), never fallbacks.
 """
 
 from __future__ import annotations
 
-import ctypes
-import re
 from typing import NamedTuple
+
+from .. import _core
+from ..dtypes import dtype_name
+from ..launch import _current_device_ordinal
 
 __all__ = [
     "CUBLAS_OP",
     "CublasCaptureHandle",
-    "CublasResolutionError",
     "GemmCaptureUnavailable",
     "GemmMappingUnavailable",
     "SgemmParams",
     "check_plan_capturable",
-    "load_cublas",
-    "mapped_library_paths",
+    "gemm_call",
     "require_float32",
     "sgemm_params",
     "sgemm_params_for_arrays",
 ]
 
-#: The libraries this module binds. Version-pinned deliberately: the CUDA 12
-#: and CUDA 13 cuBLAS are the ones the supported stacks map, and a soname
-#: change is a fact a reader should have to see, not a silently widened match.
-CUBLAS_SONAME = "libcublas.so.12"
-CUBLAS_SONAMES = (CUBLAS_SONAME, "libcublas.so.13")
-
-#: cuBLAS' own transpose enum, by the letters this module's mapping speaks.
 CUBLAS_OP = {"N": 0, "T": 1}
 
 #: Sgemm is single precision by definition; the zero-FP64 discipline makes
@@ -61,14 +44,7 @@ GEMM_ITEMSIZE = 4
 
 
 class GemmCaptureUnavailable(Exception):
-    """Base for "this GEMM cannot be run as a captured raw-cuBLAS step"."""
-
-
-class CublasResolutionError(GemmCaptureUnavailable):
-    """The cuBLAS library could not be resolved unambiguously. Zero
-    matches means cupy's own cuBLAS never initialized; more than one means
-    two different ``libcublas`` files are mapped, and picking either would
-    risk a wrong answer or a crash far from here."""
+    """Base for "this GEMM cannot be run as a captured cuBLAS step"."""
 
 
 class GemmMappingUnavailable(GemmCaptureUnavailable):
@@ -79,169 +55,57 @@ class GemmMappingUnavailable(GemmCaptureUnavailable):
 
 
 # --------------------------------------------------------------------------- #
-# Library resolution
+# The seam call
 # --------------------------------------------------------------------------- #
-_MAPS_LINE = re.compile(r"\s(/\S+)$")
-
-_loaded_lib = None
-
-
-def mapped_library_paths(maps_text: str, soname=CUBLAS_SONAMES) -> tuple:
-    """Every distinct file path in ``maps_text`` whose basename is
-    ``soname`` (one name, or any of a tuple of names) itself or extended by a
-    real-file suffix -- never a bare
-    prefix match (conda's real file is further-versioned, e.g.
-    ``libcublas.so.12.9.1.4``, and ``libcublasLt.so.12`` must not match).
-    Pure function over a ``/proc/<pid>/maps`` dump: the refusals are
-    provable without a GPU. Sorted and deduplicated."""
-    found = []
-    for line in maps_text.splitlines():
-        match = _MAPS_LINE.search(line)
-        if match is None:
-            continue
-        path = match.group(1)
-        basename = path.rsplit("/", 1)[-1]
-        names = (soname,) if isinstance(soname, str) else soname
-        is_match = any(basename == s or basename.startswith(s + ".") for s in names)
-        if is_match and path not in found:
-            found.append(path)
-    return tuple(sorted(found))
-
-
-def _warm_cupy_cublas() -> None:
-    """Force cupy to initialize its own cuBLAS, so the library is mapped.
-    Touches the GPU, which is why nothing at import time calls it --
-    resolution happens at graph-build time, on the machine with the
-    device."""
-    import cupy as cp
-
-    a = cp.zeros((2, 2), dtype=cp.float32)
-    cp.matmul(a, a)
-    cp.cuda.runtime.deviceSynchronize()
-
-
-def resolve_cublas_path() -> str:
-    """The single ``libcublas`` file this process has mapped. Warms
-    cupy's cuBLAS first, then reads its own mappings. Refuses on zero or
-    more than one distinct path (see :class:`CublasResolutionError`)."""
-    _warm_cupy_cublas()
-    with open("/proc/self/maps") as handle:
-        maps_text = handle.read()
-    paths = mapped_library_paths(maps_text)
-    if not paths:
-        raise CublasResolutionError(
-            f"no {' or '.join(CUBLAS_SONAMES)} is mapped into this process even after warming "
-            "cupy's cuBLAS -- the captured GEMM step binds the library the "
-            "process ALREADY uses, so there is nothing here to bind"
-        )
-    if len(paths) > 1:
-        raise CublasResolutionError(
-            f"{len(paths)} different libcublas files are mapped into this "
-            f"process: {list(paths)}. Binding one of them would be a guess, and "
-            "a mismatched pair fails inside a later library call rather than "
-            "here -- run in an environment with exactly one"
-        )
-    return paths[0]
-
-
-def load_cublas():
-    """The ``ctypes.CDLL`` for :func:`resolve_cublas_path`'s library, cached
-    per process (the handle-per-graph rule is about the cuBLAS handle, not
-    this library object)."""
-    global _loaded_lib
-    if _loaded_lib is None:
-        lib = ctypes.CDLL(resolve_cublas_path())
-        _bind_signatures(lib)
-        _loaded_lib = lib
-    return _loaded_lib
-
-
-def _bind_signatures(lib) -> None:
-    """Declare the four entry points' ctypes signatures. Explicit
-    ``argtypes`` rather than ctypes' default int coercion: a device
-    pointer is 64-bit and would be silently truncated otherwise."""
-    lib.cublasCreate_v2.restype = ctypes.c_int
-    lib.cublasCreate_v2.argtypes = [ctypes.POINTER(ctypes.c_void_p)]
-    lib.cublasDestroy_v2.restype = ctypes.c_int
-    lib.cublasDestroy_v2.argtypes = [ctypes.c_void_p]
-    lib.cublasSetStream_v2.restype = ctypes.c_int
-    lib.cublasSetStream_v2.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-    lib.cublasSgemm_v2.restype = ctypes.c_int
-    lib.cublasSgemm_v2.argtypes = [
-        ctypes.c_void_p,
-        ctypes.c_int,
-        ctypes.c_int,
-        ctypes.c_int,
-        ctypes.c_int,
-        ctypes.c_int,
-        ctypes.POINTER(ctypes.c_float),  # alpha (host pointer mode)
-        ctypes.c_void_p,
-        ctypes.c_int,
-        ctypes.c_void_p,
-        ctypes.c_int,
-        ctypes.POINTER(ctypes.c_float),  # beta (host pointer mode)
-        ctypes.c_void_p,
-        ctypes.c_int,
-    ]
-
-
-def _check(status: int, what: str) -> None:
-    """Raise unless a cuBLAS call returned ``CUBLAS_STATUS_SUCCESS``."""
-    if status != 0:
-        raise GemmCaptureUnavailable(f"{what} returned cuBLAS status {status}")
-
-
 def _device_ptr(operand) -> int:
-    """``operand``'s device address: a cupy array's ``.data.ptr``, or an
-    address already given as an integer."""
-    data = getattr(operand, "data", None)
-    ptr = getattr(data, "ptr", None)
-    return int(ptr if ptr is not None else operand)
+    """``operand``'s address: an :class:`eagle.Array`'s ``ptr``, a cupy array's ``.data.ptr``, a numpy array's
+    interface address, or an address already given as an integer."""
+    ptr = getattr(operand, "ptr", None)
+    if ptr is None:
+        ptr = getattr(getattr(operand, "data", None), "ptr", None)
+    if ptr is None:
+        interface = getattr(operand, "__array_interface__", None)
+        ptr = interface["data"][0] if interface else None
+    return int(operand if ptr is None else ptr)
+
+
+def gemm_call(params, operands: dict, *, itemsize: int = GEMM_ITEMSIZE, stream: int = 0, device: int = -1,
+              host: bool = False, alpha: float = 1.0, beta: float = 0.0) -> None:
+    """Enqueue ONE GEMM ``params`` describes through the seam (``host``: plain C++ loops on host memory, else
+    cuBLAS on ``stream``). Raises :class:`GemmCaptureUnavailable` when the backend cannot run it (no cuBLAS)."""
+    first, second = params.operands
+    try:
+        _core.gemm(0 if itemsize == 4 else 1, CUBLAS_OP[params.op_a], CUBLAS_OP[params.op_b], params.m, params.n, params.k,
+                   _device_ptr(operands[first]), params.lda, _device_ptr(operands[second]), params.ldb,
+                   _device_ptr(operands["out"]), params.ldc, 1, 0, 0, 0, alpha, beta, stream, device, host)
+    except RuntimeError as exc:                 # the seam's refusal (no cuBLAS, a bad call), by name
+        raise GemmCaptureUnavailable(str(exc)) from exc
 
 
 # --------------------------------------------------------------------------- #
 # The handle
 # --------------------------------------------------------------------------- #
 class CublasCaptureHandle:
-    """One cuBLAS handle, owned by ONE captured-graph build. The
-    lifetime rules are why this is an object, not a function:
-    ``cublasSetStream`` is called once, in the constructor, outside the
-    capture region (cupy itself sets the stream per call, which is why it
-    blanket-refuses cuBLAS during capture); the handle outlives its graph
-    (cuBLAS keeps a per-handle workspace, so destroying it early is a
-    use-after-free at replay); :meth:`warm` runs on the capture stream,
-    after ``setStream`` and before ``begin_capture``, once per GEMM shape
-    (its workspace allocates lazily, so warming elsewhere leaves a
-    ``cudaMalloc`` inside the capture region); only :meth:`sgemm` runs
-    inside the capture region; teardown order is graph, then handle, then
-    pool. ``alpha``/``beta`` are host-side scalars baked into the
-    recorded graph node at enqueue time: changing them means recording
-    again."""
+    """The cuBLAS handle of ONE captured-graph build's stream, kept by the backend per (device, stream). The
+    lifetime rules are why this is an object, not a function: the handle is created at the first call, which
+    allocates, so :meth:`warm` runs on the capture stream before ``begin_capture``, once per GEMM shape; only
+    :meth:`sgemm` runs inside the capture region; the handle outlives its graph (cuBLAS keeps a per-handle
+    workspace, so destroying it early is a use-after-free at replay), and teardown order is graph, then
+    :meth:`destroy`, then pool. ``alpha``/``beta`` are host-side scalars baked into the recorded graph node at
+    enqueue time: changing them means recording again."""
 
     def __init__(self, stream_ptr, device=None):
-        import cupy as cp
-
         #: The CUDA device the handle (and its stream) belong to; ``None``
         #: is the current one. Operands on another device are refused by name.
-        self.device = int(cp.cuda.runtime.getDevice()) if device is None else int(device)
-        self._lib = load_cublas()
-        self._handle = ctypes.c_void_p()
-        with cp.cuda.Device(self.device):    # a cuBLAS handle belongs to the device current at creation
-            _check(self._lib.cublasCreate_v2(ctypes.byref(self._handle)), "cublasCreate")
-        _check(
-            self._lib.cublasSetStream_v2(
-                self._handle, ctypes.c_void_p(int(stream_ptr))
-            ),
-            "cublasSetStream",
-        )
-        self._alpha = ctypes.c_float(1.0)
-        self._beta = ctypes.c_float(0.0)
+        self.device = _current_device_ordinal() if device is None else int(device)
+        self._stream = int(stream_ptr)
+        self._alive = True
         self._warmed = set()
 
     @property
     def alive(self) -> bool:
-        """Whether the handle is still created (``False`` after :meth:`destroy`)."""
-        return self._handle is not None
+        """Whether the handle is still usable (``False`` after :meth:`destroy`)."""
+        return self._alive
 
     def warm(self, params: SgemmParams, operands: dict) -> None:
         """Run this GEMM shape once, outside the capture region.
@@ -261,51 +125,29 @@ class CublasCaptureHandle:
         ``a``/``b`` is the first cuBLAS operand is ``params.operands``,
         since the row-major to column-major mapping swaps them for every
         case except ``transpose_out``."""
-        if self._handle is None:
+        if not self._alive:
             raise GemmCaptureUnavailable(
                 "this cuBLAS handle was destroyed; a handle outlives its graph "
                 "and is never reused across builds"
             )
-        first, second = params.operands
         for name, operand in operands.items():
-            on = getattr(getattr(operand, "data", None), "device_id", self.device)
+            on = getattr(getattr(operand, "data", None), "device_id", None)
+            if on is None:
+                device = getattr(operand, "device", None)
+                on = int(device.split(":")[1]) if isinstance(device, str) and ":" in device else self.device
             if on != self.device:
                 raise ValueError(
                     f"eagle.gemm: operand {name!r} lives on device {on}, the handle on "
                     f"device {self.device}; a gemm uses one device")
-        import cupy as cp
-
-        with cp.cuda.Device(self.device):    # cuBLAS runs on the device current at the call
-            _check(
-                self._lib.cublasSgemm_v2(
-                    self._handle,
-                    CUBLAS_OP[params.op_a],
-                    CUBLAS_OP[params.op_b],
-                    params.m,
-                    params.n,
-                    params.k,
-                    ctypes.byref(self._alpha),
-                    ctypes.c_void_p(_device_ptr(operands[first])),
-                    params.lda,
-                    ctypes.c_void_p(_device_ptr(operands[second])),
-                    params.ldb,
-                    ctypes.byref(self._beta),
-                    ctypes.c_void_p(_device_ptr(operands["out"])),
-                    params.ldc,
-                ),
-                "cublasSgemm",
-            )
+        gemm_call(params, operands, stream=self._stream, device=self.device)
 
     def destroy(self) -> None:
         """Destroy the handle. Call after destroying the graph that
         recorded work against it, and before freeing the memory pool.
         Idempotent."""
-        if self._handle is not None:
-            import cupy as cp
-
-            with cp.cuda.Device(self.device):
-                _check(self._lib.cublasDestroy_v2(self._handle), "cublasDestroy")
-            self._handle = None
+        if self._alive:
+            _core.gemm_release(self._stream, self.device)
+            self._alive = False
 
 
 # --------------------------------------------------------------------------- #
@@ -376,6 +218,7 @@ def sgemm_params(
     transpose_a,
     transpose_b,
     transpose_out,
+    allow_double=False,
 ) -> SgemmParams:
     """Map ``matmul_step``'s row-major contraction onto one column-major Sgemm.
     The contraction is ``out_view = op(a) @ op(b)``; a row-major ``(r, c)``
@@ -386,7 +229,7 @@ def sgemm_params(
     back to natural order with opposite flags. Leading dimensions come
     from the strides (:func:`_leading_dimension`); refuses anything one
     Sgemm cannot address, or any itemsize that is not float32's."""
-    if itemsize != GEMM_ITEMSIZE:
+    if itemsize != GEMM_ITEMSIZE and not (allow_double and itemsize == 8):
         raise GemmMappingUnavailable(
             f"the captured GEMM step is {GEMM_DTYPE}-only (the "
             f"zero-FP64 discipline); got an itemsize of {itemsize} bytes"
@@ -449,13 +292,11 @@ def sgemm_params_for_arrays(
     Also enforces the dtype fence on all three, since here it can be seen.
     ``.strides`` is in BYTES for both array modules, which is what
     the pure function takes."""
-    import numpy as np
-
     for name, arr in (("a", a), ("b", b), ("out", out)):
-        if np.dtype(arr.dtype).name != GEMM_DTYPE:
+        if dtype_name(arr.dtype) != GEMM_DTYPE:
             raise GemmMappingUnavailable(
                 f"the captured GEMM step is {GEMM_DTYPE}-only; "
-                f"operand {name!r} is {np.dtype(arr.dtype).name}"
+                f"operand {name!r} is {dtype_name(arr.dtype)}"
             )
     itemsizes = {int(a.itemsize), int(b.itemsize), int(out.itemsize)}
     if len(itemsizes) != 1:

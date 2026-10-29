@@ -160,7 +160,8 @@ def install(cfg, py, use_uv, work):
     cu = f"cuda{cfg.cuda}"
     pre = ["--pre"] if cfg.pre else []
     pin = f"=={cfg.version}" if cfg.version else ""
-    others = ["jax[" + cu + "]", "torch", "warp-lang", "pytest", "nbclient", "ipykernel", "nbformat", "matplotlib"]
+    others = ["jax[" + cu + "]", "torch", "warp-lang", "numpy", f"cupy-cuda{cfg.cuda}x",
+              "pytest", "nbclient", "ipykernel", "nbformat", "matplotlib"]
     if cfg.source in ("pypi", "wheel"):
         rc = pip(py, use_uv, *install_args(cfg, py, cu, pre, pin, others))
     else:
@@ -169,6 +170,9 @@ def install(cfg, py, use_uv, work):
         for repo, ref in (("raptor", cfg.raptor_ref), ("aether", cfg.aether_ref),
                           ("eagle", cfg.eagle_ref), ("hawk", cfg.hawk_ref)):
             clone(repo, ref, src / repo)
+        # shallow clones carry no tags: the version comes from --version (or a dev marker)
+        ver = cfg.version or "0.0.0.dev0"
+        os.environ.update(AETHER_VERSION=ver, EAGLE_VERSION=ver, SETUPTOOLS_SCM_PRETEND_VERSION=ver)
         prefix = work / "install"
         arch = "-DCMAKE_CUDA_ARCHITECTURES=75"
         for lib in ("aether", "eagle"):
@@ -176,14 +180,15 @@ def install(cfg, py, use_uv, work):
                   f"-DCMAKE_INSTALL_PREFIX={prefix}") != 0 or \
                sh("cmake", "--install", work / f"build_{lib}") != 0:
                 raise SystemExit(f"{lib} headers did not install")
-        pip(py, use_uv, "scikit-build-core>=0.10", "nanobind>=3.1,<4", "cmake", "ninja")
+        pip(py, use_uv, "scikit-build-core>=0.10", "setuptools-scm>=8", "nanobind>=3.1,<4", "cmake", "ninja")
         env = dict(os.environ, CMAKE_PREFIX_PATH=f"{prefix}:{os.environ.get('CMAKE_PREFIX_PATH', '')}",
                    SKBUILD_CMAKE_ARGS=f"{arch};-DCMAKE_CUDA_COMPILER={shutil.which('nvcc') or 'nvcc'}")
         os.environ.update(env)
         rc = pip(py, use_uv, src / "raptor")
+        rc = rc or pip(py, use_uv, "--no-build-isolation", src / "aether" / "dsc")
         rc = rc or pip(py, use_uv, "--no-build-isolation", src / "eagle" / "python")
         rc = rc or pip(py, use_uv, "--no-build-isolation", src / "hawk")
-        rc = rc or pip(py, use_uv, *pre, *torch_index(cfg), f"jax[{cu}]", "torch", "warp-lang", f"cupy-cuda{cfg.cuda}x",
+        rc = rc or pip(py, use_uv, *pre, *torch_index(cfg), f"jax[{cu}]", "torch", "warp-lang", "numpy", f"cupy-cuda{cfg.cuda}x",
                        "pytest", "nbclient", "ipykernel", "nbformat", "matplotlib")
     if rc != 0:
         raise SystemExit("install failed (see the pip output above)")
@@ -267,15 +272,27 @@ def run_tests(py, eagle_src, work):
     shutil.copytree(eagle_src / "python" / "tests", pydir / "tests")
     shutil.copy2(eagle_src / "python" / "conftest.py", pydir)
     runs = (("interop_matrix", ["tests", "-m", "interop_matrix and not repo_local"]),
-            ("jax", ["tests/test_interop_jax.py", "-m", "not repo_local"]))
+            ("jax", ["tests/test_interop_jax.py", "-m", "not repo_local"]),
+            ("warp", ["tests/test_frameworks_warp.py", "-m", "not repo_local"]))
     total = {"tests": 0, "failures": 0, "errors": 0, "skipped": 0, "failed": []}
     rcs = {}
     for name, sel in runs:
         header(f"pytest: {name}")
         xml = work / f"junit_{name}.xml"
         base = pathlib.Path(tempfile.mkdtemp(prefix=f"pytest_{name}_", dir=work))
-        rcs[name] = sh(py, "-m", "pytest", *sel, "-q", "-rs", "-p", "no:cacheprovider", "--basetemp", base / "t",
-                       "-W", "error::pytest.PytestUnknownMarkWarning", f"--junitxml={xml}", cwd=pydir)
+        # a GPU fault leaves a core file naming the kernel and the faulting address; it costs nothing until one occurs
+        cores = base / "gpu_cores"
+        cores.mkdir()
+        env = dict(os.environ, CUDA_ENABLE_COREDUMP_ON_EXCEPTION="1", CUDA_ENABLE_CPU_COREDUMP_ON_EXCEPTION="0",
+                   CUDA_ENABLE_LIGHTWEIGHT_COREDUMP="1",
+                   CUDA_COREDUMP_FILE=str(cores / "gpu.%p"))
+        rcs[name] = sh(py, "-m", "pytest", *sel, "-v", "-rs", "-p", "no:cacheprovider", "--basetemp", base / "t",
+                       "-W", "error::pytest.PytestUnknownMarkWarning", f"--junitxml={xml}", cwd=pydir, env=env)
+        gdb = shutil.which("cuda-gdb") or next(iter(sorted(pathlib.Path("/usr/local").glob("cuda*/bin/cuda-gdb"))), None)
+        for core in sorted(cores.iterdir()):
+            header(f"GPU fault core: {core.name}")
+            if gdb:
+                sh(gdb, "-batch", "-ex", f"target cudacore {core}", "-ex", "info cuda kernels", "-ex", "bt")
         s = junit_summary(xml)
         if s is None:
             total["errors"] += 1

@@ -100,6 +100,8 @@ _RUNS: dict = {}
 _MEMO_LIMIT = 256
 #: one lock per run entry's rounds cell: the cell is one global per artifact
 _RUN_LOCKS: dict = {}
+#: the thread inside each lock, so a re-entrant run is refused instead of deadlocking
+_RUN_OWNERS: dict = {}
 
 
 def _remember(memo: dict, entry, value):
@@ -384,6 +386,11 @@ def _run_host_loop(runner, threads: int) -> None:
     loop._cell[1] = ran
 
 
+def _add(cells, i, by) -> None:
+    """``cells[i] += by`` on a host cell array."""
+    cells[i] = int(cells[i]) + by
+
+
 def _run_tiled(runner, entry, addrs, n, count) -> int:
     """The tiled host policy of an automatic artifact (see the module
     docstring): every launch asks for ``steps_max`` steps, the last cut to
@@ -399,7 +406,7 @@ def _run_tiled(runner, entry, addrs, n, count) -> int:
     whole = runner.step.partitions[0]
     if not go[0]:
         return 0
-    hist[int(word[0])] -= 1             # the seed counted its first word
+    _add(hist, int(word[0]), -1)            # the seed counted its first word
     fin = int(cells[_FIN_AT])
     done = int(cells[_DONE])
     left = int(cells[_CAP]) - done
@@ -408,7 +415,7 @@ def _run_tiled(runner, entry, addrs, n, count) -> int:
     while fin != total and left > 0:
         k = min(k_max, left)
         word[0] = k
-        hist[k] += 1
+        _add(hist, k, 1)
         if count is None:
             team.run(entry, addrs, whole)
         else:
@@ -445,7 +452,7 @@ def _run_whole(runner, run, addrs) -> int:
     whole = runner.step.partitions[0]
     if not go[0]:
         return 0
-    hist[int(word[0])] -= 1             # the seed counted its first word
+    _add(hist, int(word[0]), -1)            # the seed counted its first word
     fin = int(cells[_FIN_AT])
     done = int(cells[_DONE])
     left = int(cells[_CAP]) - done
@@ -453,10 +460,12 @@ def _run_whole(runner, run, addrs) -> int:
     k = int(word[0])
     if fin != total and left > 0:
         lock = _RUN_LOCKS.setdefault(ctypes.addressof(rounds), threading.Lock())
-        if not lock.acquire(blocking=False):
+        if _RUN_OWNERS.get(id(lock)) == threading.get_ident():
             raise RuntimeError(
                 "eagle.until_done: this artifact is already running a host run "
-                "on another thread; one host run per artifact at a time")
+                "on this thread; one host run per artifact at a time")
+        lock.acquire()                      # runs on other threads serialise on the shared rounds cell
+        _RUN_OWNERS[id(lock)] = threading.get_ident()
         try:
             rounds.value = 0
             word[0] = left
@@ -467,10 +476,11 @@ def _run_whole(runner, run, addrs) -> int:
                 team.run(entry, addrs, whole, bytes_per_sample=per)
             most = int(rounds.value)
         finally:
+            _RUN_OWNERS.pop(id(lock), None)
             lock.release()
         for _ in range(most):
             k = min(k_max, left)
-            hist[k] += 1
+            _add(hist, k, 1)
             done += k
             left -= k
             ran += 1
@@ -496,7 +506,7 @@ def _run_measured(runner, entry, addrs, n, count) -> int:
     whole = runner.step.partitions[0]
     if not go[0]:
         return 0
-    hist[int(word[0])] -= 1             # the seed counted its first word
+    _add(hist, int(word[0]), -1)            # the seed counted its first word
     fin = int(cells[_FIN_AT])
     done = int(cells[_DONE])
     left = int(cells[_CAP]) - done
@@ -545,14 +555,14 @@ def _run_measured(runner, entry, addrs, n, count) -> int:
             sweep_s = (clock() - t0) / sweeps
         ran += sweeps
         done += sweeps
-        hist[1] += sweeps
+        _add(hist, 1, sweeps)
         if sweeps:
             k = 1
         if fin == total or left <= 0:
             break
         k = min(AUTO_K_MIN, left)
         word[0] = k
-        hist[k] += 1
+        _add(hist, k, 1)
         look = total - fin
         t0 = clock()
         launch()
@@ -574,7 +584,7 @@ def _run_measured(runner, entry, addrs, n, count) -> int:
     tails = runner.loop.parts[1:]
     k = min(AUTO_K0, left)
     word[0] = k
-    hist[k] += 1
+    _add(hist, k, 1)
     while go[0]:
         launch()
         for tail in tails:              # compaction (+ reorder) and the band

@@ -345,7 +345,7 @@ def b_wait(x):
 def test_a_python_references():
     x = np.zeros(4)
     for flag0, want in ((1, 3.0),):
-        assert b_first_hour(x, cell(flag0))()[0] == want
+        assert np.asarray(b_first_hour(x, cell(flag0))())[0] == want
     # python values decided once, loop over python data unrolled
     x = np.arange(8.0)
     for debug in (True, False):
@@ -452,13 +452,13 @@ def test_b_probe_rebind_three_cases():
     x = np.zeros(4)
     # case 1: while flag: j = step(j)  -> Python: 3 iterations, j == 3 (the recorded-once body replays)
     g = b_first_hour(x, cell(1))
-    assert g()[0] == 3.0 and (x == 0).all()
+    assert np.asarray(g())[0] == 3.0 and (x == 0).all()
     # case 2: if flag: j = correct(j) with the flag OFF -> j stays j0 (Python), NOT the unwritten slot
     j0 = np.ones(4)
-    assert (b_if(j0, cell(0))() == j0).all() and (j0 == 1).all()
+    assert (np.asarray(b_if(j0, cell(0))()) == j0).all() and (j0 == 1).all()
     # case 3: if/else with the flag ON -> the IF arm's value, not the else arm's buffer
-    assert (b_if_else(j0, cell(1))() == 10.0).all()
-    assert (b_if_else(j0, cell(0))() == 0.5).all()
+    assert (np.asarray(b_if_else(j0, cell(1))()) == 10.0).all()
+    assert (np.asarray(b_if_else(j0, cell(0))()) == 0.5).all()
 
 
 # ============================================================================ (c) refusals

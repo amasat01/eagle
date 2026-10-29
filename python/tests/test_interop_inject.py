@@ -57,7 +57,7 @@ from raptor.conformance.interop import certified_framework, register_row
 import eagle
 import eagle.diff
 import eagle.plan
-from eagle import _counters
+from eagle import _counters, _stream
 from eagle import graph as G
 from eagle.graph import opaque
 
@@ -699,7 +699,15 @@ def _jax_spin(tmp_path_factory):
 
     jax = _jax()
     spin = _spin_op(tmp_path_factory)
+    jax.devices()                   # start every backend now: JAX leaves its last GPU current once it has
+    _planes_on_device_zero()
     return jax, spin, _spin_cycles
+
+
+def _planes_on_device_zero():
+    """Make GPU 0, the graph's device, the thread's current one: what the test allocates next lands there
+    whichever GPU the framework started last."""
+    _cp().cuda.runtime.setDevice(0)
 
 
 def test_jax_node_made_in_a_foreign_context_runs_on_the_planes_device():
@@ -786,6 +794,7 @@ def test_jax_node_is_stream_ordered_and_retained(tmp_path_factory, monkeypatch):
     def trials(g, k):
         bad = 0
         for _ in range(k):
+            _planes_on_device_zero()    # the JAX calls of the last trial may have left another GPU current
             y.fill(-7.0)
             z.fill(0.0)
             cp.cuda.Device().synchronize()
@@ -1076,7 +1085,7 @@ class _RunVjp:
 def _host(a):
     if hasattr(a, "detach"):
         return a.detach().cpu().numpy()
-    return a.get() if hasattr(a, "get") else np.asarray(a)
+    return np.asarray(a.get() if hasattr(a, "get") else a)
 
 
 def _rel(a, b):
@@ -1101,7 +1110,7 @@ def _run_vjp_row(torch, xp, dev, targets, tmp, monkeypatch):
     eagle.diff.reverse(run.runner.record, {"x": xp.ones_like(run.x0)}, vjps={"model": run.vjp})
     wall = time.perf_counter() - t0
     assert _rel([p.grad for p in run.params], [2 * g for g in got_p]) < 1e-12   # accumulate
-    steps = int(run.runner.record.steps.max())      # the reverse's steps (the device
+    steps = int(np.asarray(run.runner.record.steps).max())      # the reverse's steps (the device
     if xp is not np:                                # forward pads to the window)
         assert _counters.snapshot()["host_syncs"] - syncs == 2 * steps
         if os.environ.get("EAGLE_WALL_CLOCK_ROWS"):   # a wall-time bound: opt-in, like every wall_clock row
@@ -1580,7 +1589,7 @@ def test_run_node_tiers_device(tmp_path, monkeypatch):
 
     def no_wait(self, waits):
         real(self, waits)
-        return _cp().cuda.Event()       # never recorded: waiting on it waits for nothing
+        return _stream.Event()     # never recorded: waiting on it waits for nothing
     monkeypatch.setattr(G._Eager, "run", no_wait)
     cut = _tier_arm(torch, xp, dev, plan, **on_side)
     torch.cuda.synchronize()

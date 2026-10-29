@@ -34,7 +34,7 @@ N = 1000                    # not a multiple of G: the last group is partial
 def _lanes(aset, xp):
     """The lanes a group-emitted kernel runs for threads ``0 .. count``."""
     t = xp.arange(int(aset.count[0]))
-    lane = aset.map[t // aset.group] * aset.group + t % aset.group
+    lane = xp.asarray(aset.map)[t // aset.group] * aset.group + t % aset.group
     return lane[lane < aset.n]
 
 

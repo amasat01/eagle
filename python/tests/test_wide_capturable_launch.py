@@ -61,6 +61,16 @@ class _StubFn:
         self.calls.append((grid, block, args))
 
 
+def _seam_kernel(source, name):
+    """``source``'s kernel ``name`` as a launchable seam function."""
+    from cupy.cuda import compiler
+
+    from eagle import _core
+    from eagle.launch import SeamFunction
+
+    return SeamFunction(_core.module_function(_core.module_load(compiler.compile_using_nvrtc(source)[0]), name))
+
+
 # ============================================================================
 # HOST: the refusals. Every one is a call that ``pure_prepare`` would have
 # ACCEPTED by allocating -- which is precisely what may not happen here.
@@ -235,8 +245,8 @@ def test_launch_pure_binds_wide_in_and_out_and_merges_the_handoff():
     assert len(fn.calls) == 1, "the kernel must be launched exactly once"
     _grid, _block, args = fn.calls[0]
     assert len(args) == 3  # one per arg_spec entry
-    assert args[0]["data"] == kw["x"].data.ptr
-    assert args[1]["data"] == kw["x_bar"].data.ptr
+    assert args[0].data == kw["x"].data.ptr
+    assert args[1].data == kw["x_bar"].data.ptr
     # the wide gradient output rides the SAME returned dict as the Mutable
     # handoff, exactly as pure_prepare returns it.
     assert result["x_bar"] is kw["x_bar"]
@@ -407,7 +417,7 @@ def test_a_real_pure_kernel_reads_wide_planes_and_an_atomic_dest():
     y = cp.zeros(n, dtype=cp.float64)
     result = launch(
         "pure",
-        cp.RawKernel(_WIDE_PROBE_SRC, "cb1a_wide_probe"),
+        _seam_kernel(_WIDE_PROBE_SRC, "cb1a_wide_probe"),
         [
             ("wide_in", "x"),
             ("wide_out", "x_bar"),
@@ -451,7 +461,7 @@ def test_the_real_kernel_launch_allocates_nothing():
     import cupy as cp
 
     n = 8
-    kernel = cp.RawKernel(_WIDE_PROBE_SRC, "cb1a_wide_probe")
+    kernel = _seam_kernel(_WIDE_PROBE_SRC, "cb1a_wide_probe")
     kw = {
         "x": cp.arange(2 * n, dtype=cp.float64).reshape(2, n),
         "x_bar": cp.zeros((2, n), dtype=cp.float64),

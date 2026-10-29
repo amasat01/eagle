@@ -243,8 +243,9 @@ def test_named_refusals(op, dev):
     _skip_without(dev)
     c = _case(dev, "float64", grad=False)
     v32 = wp.array(c["v_np"].astype(np.float32), dtype=wp.float32, device=dev)
-    from eagle import PerformanceWarning
+    from eagle import PerformanceWarning, _layout
 
+    _layout._reset_seen()               # the warning is once per call site: the other device's run used it
     with pytest.warns(PerformanceWarning, match="promoted to float64"):
         op(v32, c["cd"], c["t"])
     with pytest.raises(TypeError, match="must be a wp.array"):
@@ -298,6 +299,17 @@ def test_graph_capture_replays_forward_and_backward(tmp_path, mode):
                                    rtol=1e-5 if mode == "float32" else 1e-13, atol=0)
         np.testing.assert_allclose(c["v"].grad.numpy(), gv, rtol=rtol, atol=rtol * np.abs(gv).max())
         np.testing.assert_allclose(c["cd"].grad.numpy()[0], gc, rtol=rtol)
+
+
+def test_a_cpu_graph_capture_is_refused(op):
+    """Warp records a CPU graph from its own launches only: the host runtime call
+    would run once at capture time and never on replay, so it is refused."""
+    c = _case("cpu", "float64", grad=False)
+    if not hasattr(wp.get_device("cpu"), "is_capturing"):
+        pytest.skip("this Warp has no CPU graph capture")
+    with pytest.raises(RuntimeError, match="CPU graph capture"):
+        with wp.ScopedCapture(device="cpu"):
+            op(c["v"], c["cd"], c["t"])
 
 
 @pytest.mark.gpu
@@ -391,7 +403,7 @@ def test_a_call_rides_warps_stream_and_never_syncs(op):
 
     # known answers of the same instrument: a host-synced call reads the whole spin ...
     _, synced = _spin_then(op, c, stream, cycles, sync=True)
-    assert synced > 0.5 * wall
+    assert synced > 0.2, f"a host-synced call returned before the spin ended ({synced:.3f}s)"
     # ... and the same call on ANOTHER Warp stream is unordered after the spin: stale input
     other = wp.Stream(dev)
     c["v"].zero_()

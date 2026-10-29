@@ -50,7 +50,7 @@ def test_plan_run_returns_the_finished_sum_and_max(tmp_path, n):
     (ps,) = eagle.plan.auto([cell_sum], targets=("host",), cache_dir=str(tmp_path))
     (pm,) = eagle.plan.auto([cell_max], targets=("host",), cache_dir=str(tmp_path))
     got = ps.run(x=x)
-    assert got.shape == (1,) and got[0] == (x * x).sum()
+    assert got.shape == (1,) and np.asarray(got)[0] == (x * x).sum()
     got = pm.run(x=x)
     assert got.shape == (1,) and got[0] == (x * 1.5).max()
 
@@ -75,9 +75,9 @@ def test_plan_run_returns_the_finished_min(tmp_path, n):
     x = _x(n)
     (p,) = eagle.plan.auto([cell_min], targets=("host",), cache_dir=str(tmp_path))
     got = p.run(x=x)
-    assert got.shape == (1,) and got[0] == x.min()
+    assert got.shape == (1,) and np.asarray(got)[0] == x.min()
     x[n // 2] = -np.inf
-    assert p.run(x=x)[0] == -np.inf
+    assert np.asarray(p.run(x=x))[0] == -np.inf
 
 
 @pytest.mark.gpu
@@ -106,7 +106,7 @@ def test_simulate_returns_the_cell_of_the_last_step(tmp_path):
     n = 40
     res = eagle.simulate(sim_cell, x=np.zeros(n), max_steps=10)
     assert res["s"].shape == (1,)
-    assert res["s"][0] == 9.0 * n
+    assert np.asarray(res["s"])[0] == 9.0 * n
     assert "s_comp" not in res.state
 
 
@@ -119,6 +119,35 @@ def test_reverse_param_gradient_is_the_finished_cell(tmp_path, policy):
     g.launch()
     rev = eagle.diff.Reverse(g, policy=policy)
     grads = rev(g.record, {"y": seed})
-    assert grads["a"] == (seed * x).sum()           # integer terms: exact in any order
+    assert np.asarray(grads["a"]) == (seed * x).sum()           # integer terms: exact in any order
     assert np.array_equal(grads["x"], 2.0 * seed)
-    assert rev(g.record, {"y": seed})["a"] == grads["a"]
+    assert np.asarray(rev(g.record, {"y": seed})["a"]) == np.asarray(grads["a"])
+
+
+def test_returns_routes_plan_run_and_simulate_through_the_bridge(tmp_path):
+    import warnings
+
+    from eagle.frameworks import _bridge
+
+    x = _x(33)
+    (ps,) = eagle.plan.auto([cell_sum], targets=("host",), cache_dir=str(tmp_path))
+    assert isinstance(ps.run(x=x), eagle.Array)                                  # the default
+    got = ps.run(x=x, returns="numpy")
+    assert isinstance(got, np.ndarray) and got[0] == (x * x).sum()
+    res = eagle.simulate(sim_cell, x=np.zeros(40), max_steps=10, returns="numpy")
+    assert isinstance(res["s"], np.ndarray) and res["s"][0] == 9.0 * 40 and isinstance(res.finished, np.ndarray)
+    _bridge._WARNED.discard("torch")
+    import sys
+    saved = sys.modules.get("torch", 0)
+    sys.modules["torch"] = None
+    try:
+        with warnings.catch_warnings(record=True) as seen:
+            warnings.simplefilter("always")
+            again = ps.run(x=x, returns="torch")
+            ps.run(x=x, returns="torch")
+    finally:
+        if saved == 0:
+            del sys.modules["torch"]
+        else:
+            sys.modules["torch"] = saved
+    assert isinstance(again, eagle.Array) and len([w for w in seen if "pip install torch" in str(w.message)]) == 1

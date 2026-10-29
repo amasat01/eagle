@@ -21,6 +21,8 @@ ignore = ["F841"]
 "python/tests/test_builder.py" = ["F821"]
 "python/tests/test_lane_space_bind.py" = ["F821"]
 "python/tests/test_split_keyed.py" = ["F821"]
+"python/tests/test_index_set_bind.py" = ["F821"]
+"python/tests/test_split_team.py" = ["F821"]
 # A fixture imported from a sibling test module and taken by parameter name.
 "python/tests/test_plan_run_device_inputs.py" = ["F811"]
 "python/tests/test_plan_run_outputs.py" = ["F811"]

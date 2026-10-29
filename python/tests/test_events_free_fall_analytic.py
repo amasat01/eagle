@@ -30,7 +30,7 @@ def test_free_fall_matches_the_closed_form(backend, model):
     y0 = np.linspace(1.0, 20.0, N)
     res = fall(xp, y0, dt=0.1, model=model)
     t_star = np.sqrt(2.0 * y0 / GRAVITY)
-    steps = res.record.steps
+    steps = host(res.record.steps)
     rtol = np.finfo(float).eps * (64 + 4 * steps)
     _within(host(res.t_stop), t_star, rtol)
     assert set(host(res.event_status).tolist()) <= {1, 2}

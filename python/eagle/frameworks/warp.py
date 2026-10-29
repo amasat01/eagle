@@ -162,6 +162,20 @@ def _cupy_view(array, device):
                         memptr=cupy.cuda.MemoryPointer(memory, 0))
 
 
+def _cupy_of(array, device):
+    """An eagle device array as a cupy array over the same memory, without cupy's
+    import path: that path synchronizes the stream the array names, which a graph
+    capture refuses."""
+    import cupy
+
+    face = array.__cuda_array_interface__
+    dtype = np.dtype(face["typestr"])
+    nbytes = int(np.prod(face["shape"], dtype=np.int64)) * dtype.itemsize
+    memory = cupy.cuda.UnownedMemory(face["data"][0], nbytes, array, device.ordinal)
+    return cupy.ndarray(face["shape"], dtype=dtype, memptr=cupy.cuda.MemoryPointer(memory, 0),
+                        strides=face["strides"])
+
+
 def _copy_values(dst, src):
     """Copy ``src``'s values into ``dst`` and nothing else: ``wp.copy`` also copies
     the gradient arrays and records itself on a tape, which the state's own
@@ -242,6 +256,8 @@ class WarpFunction:
         reduces over samples also needs ``samples``, the batch size the capture
         will run (the row scratch cannot be allocated inside a capture)."""
         device = wp.get_device(device)
+        if backward and device.is_cuda:
+            _no_mask(device)        # made outside the capture, which would own its memory
         levels = [self._root] + ([self._adjoint()[0]] if backward else [])
         for level in levels:
             self._built(level, mode, device)
@@ -252,10 +268,7 @@ class WarpFunction:
         """The row scratch of ``level`` at ``n`` samples (``None`` without a reduction)."""
         if not level.sig.cells:
             return None
-        if device.is_cuda:
-            import cupy as xp
-        else:
-            xp = np
+        xp = f"cuda:{device.ordinal}" if device.is_cuda else "cpu"
         if (device.is_cuda and device.is_capturing
                 and not _cell_rows.has(level, n, xp, mode, self._policy)):
             raise RuntimeError(
@@ -441,11 +454,12 @@ class WarpFunction:
                 self._launch_device(level, mode, spec, planes, device, rows=rows.rows)
                 stream = device.stream.cuda_stream or 0
                 import cupy
-                from eagle.interop import external_stream
+                from eagle.frameworks.cupy import external_stream
+                from eagle.interop import scoped_stream
 
-                with cupy.cuda.Device(device.ordinal), external_stream(stream):
+                with cupy.cuda.Device(device.ordinal), external_stream(stream), scoped_stream(stream):
                     for nm, cell in rows.finish().items():
-                        _cupy_view(planes[nm], device)[...] = cell
+                        _cupy_view(planes[nm], device)[...] = _cupy_of(cell, device)
             else:
                 self._launch_host(level, mode, spec, planes, device, rows=rows.rows)
                 for nm, cell in rows.finish().items():
@@ -454,6 +468,13 @@ class WarpFunction:
     def _launch_host(self, level, mode, spec, planes, device, rows=None):
         from hawk.runtime import run
 
+        if getattr(device, "is_capturing", False):
+            # Warp records a CPU graph from its own launches only: this host call would
+            # run once now, on inputs the capture has not computed, and never on replay
+            raise RuntimeError(
+                f"eagle.frameworks.warp: {level.label!r} runs on the host runtime, which a Warp "
+                "CPU graph capture does not record (its replay would skip it); call it outside "
+                "wp.capture_begin, or capture on a CUDA device")
         host = self._built(level, mode, device)
         arrays = {}
         for role, name in spec:
@@ -468,12 +489,13 @@ class WarpFunction:
     def _launch_device(self, level, mode, spec, planes, device, rows=None):
         import cupy
 
-        from eagle.interop import external_stream
+        from eagle.frameworks.cupy import external_stream
+        from eagle.interop import scoped_stream
 
         plan = self._built(level, mode, device)
         # a device's default stream carries no handle: it is the CUDA legacy stream, 0
         stream = device.stream.cuda_stream or 0
-        with cupy.cuda.Device(device.ordinal), external_stream(stream):
+        with cupy.cuda.Device(device.ordinal), external_stream(stream), scoped_stream(stream):
             arrays = {}
             for role, name in spec:
                 if role == "lookup" and name == FINISHED_PLANE:
@@ -521,3 +543,13 @@ class WarpFunction:
         built = plugins(unit, device_loader=load_manifest)
         _split.link(built, unit)
         return eplan.plan(built[level.name], structure=eexec.DeviceKernel)
+
+
+def from_eagle(a):
+    """The :class:`eagle.Array` ``a`` as a warp array (DLPack)."""
+    return wp.from_dlpack(a)
+
+
+def stream_handle(stream) -> int:
+    """The raw handle of a warp stream object."""
+    return int(stream.cuda_stream)

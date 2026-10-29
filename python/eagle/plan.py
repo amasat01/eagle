@@ -35,22 +35,26 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import numpy as np
 
-from . import _alloc
-from .interop import BufferRefused
+from . import _alloc, _core, _stream, arrays
+from .dtypes import dtype_name
+from .interop import BufferRefused, scoped_stream
+from .launch import _current_device_ordinal
 
 from . import _cell_rows, _counters, _layout, _split
 from ._graph_reduce import check_policy
+from .frameworks._bridge import route
+from . import _index_set
 from . import exec as eexec
 from .abi import DEVICE_CPU, DEVICE_CUDA
 from .roles import INPUT_ROLES, OUTPUT_ROLES
 from ._plan_binding import BoundPlan, FUSED_STEPS_SLOT, _bind_plan, one_step_word
 from . import _lane_bind
-from ._plan_pack import _integer_uniforms, _mutable_shapes, _pack_args
+from ._plan_pack import _data_ptr, _integer_uniforms, _mutable_shapes, _pack_args
 from ._plan_planes import (
     _adapt_planes,
     _bound,
+    _plugin_name,
     sample_spec,
     _check_run_shapes,
     _check_run_writable,
@@ -67,7 +71,6 @@ from ._plan_planes import (
     _single_returned,
     _write_back_outputs,
     device_resident,
-    device_scope,
     function_on,
     planes_device,
     residency,
@@ -117,7 +120,8 @@ class Plan:
         contiguous partitions. A thread-box kernel splits its threads
         (:func:`eagle._lane_bind.threads`), each partition still over ``n``."""
         if self.partitions is not None:
-            if self.n_samples is not None and self.n_samples != n:
+            if self.n_samples is not None and self.n_samples != n and not (
+                    _index_set.is_prefix(self.plugin) and n < self.n_samples):   # a prefix kernel runs any count below its bound
                 raise ValueError(
                     f"eagle.plan: this plan was built for n_samples="
                     f"{self.n_samples}, but .run() observed n={n}"
@@ -139,7 +143,7 @@ class Plan:
     def run(self, /, *, device=None, **kw):
         """Drive :attr:`plugin` over every partition through :attr:`structure`
         and return the assembled per-sample result: the declared output
-        plane as a numpy array for a single-output plugin, or a ``dict``
+        plane as an :class:`eagle.Array` for a single-output plugin, or a ``dict``
         keyed by plane NAME when it declares several (never a positional
         tuple — the same shape :class:`~eagle._simulate.SimResult`/
         :func:`eagle.loaded.LoadedPure` already return).
@@ -150,7 +154,7 @@ class Plan:
         outputs then come back as cupy arrays, never brought home — a
         caller-supplied contiguous output of the declared dtype is the
         caller's own buffer, written in place. With host inputs only, the
-        outputs come home as numpy arrays. A rank-partitioned run always
+        outputs come home as :class:`eagle.Array` objects. A rank-partitioned run always
         gathers on the host.
 
         Every output/mutable plane the caller supplies is written into in
@@ -175,18 +179,23 @@ class Plan:
         the arrays (it never moves them); with host arrays only, it picks the
         GPU they are uploaded to.
 
+        ``returns="numpy"|"cupy"|"torch"|"jax"`` hands the results back as that
+        framework's arrays through its bridge (a missing framework warns once and
+        returns :class:`eagle.Array` s); the default is :class:`eagle.Array`.
+
         ``self`` is positional-only, so a plugin may declare a plane
         literally named ``self`` without colliding with this method's own
         bound-method parameter."""
+        returns = kw.pop("returns", None)
         if device is None:
-            return _run_plan(self, **kw)
+            return route(_run_plan(self, **kw), returns)
         arg_spec = getattr(self.plugin, "arg_spec", None) or ()
         on = _checked_device(self, arg_spec, kw, "plan.run", device)
-        with device_scope(on):
-            return _run_plan(self, **kw)
+        with _stream.on_device(on):
+            return route(_run_plan(self, **kw), returns)
 
     @_layout.door
-    def bind(self, /, *, device=None, **planes) -> BoundPlan:
+    def bind(self, /, *, device=None, capacity=None, **planes) -> BoundPlan:
         """Bind the caller's own planes by name and pack the argument block
         once — the capture-legal door (see the module docstring).
 
@@ -228,8 +237,12 @@ class Plan:
         checked against them, as in :meth:`run`); :meth:`BoundPlan.launch`
         issues there whatever is current.
 
+        ``capacity=n_max`` is for a kernel built with ``IndexSet(prefix=True)``: the planes hold ``n_max`` lanes,
+        eagle makes the ``active_count`` plane (set to ``n_max``), and ``bound.set_count(m)`` then runs the first
+        ``m`` lanes of the same bind and captured graph. A larger ``m`` is refused by name.
+
         ``self`` is positional-only for the same reason :meth:`run`'s is."""
-        bound = _bind_plan(self, planes, device)
+        bound = _bind_plan(self, planes, device, capacity)
         _counters.bump("binds")  # only on a completed bind
         return bound
 
@@ -387,11 +400,11 @@ def _output_dtype(plugin, name, real):
     dtype (an ``Int32`` plane is ``int32``, an ``Index`` one ``int64``), else
     the artifact's Real."""
     declared = (getattr(plugin, "arg_dtypes", None) or {}).get(name)
-    return np.dtype(declared) if declared else real
+    return dtype_name(declared) if declared else real
 
 
 def _host_view(name, role, value):
-    """``value`` as a host numpy view, zero-copy; a device-resident output
+    """``value`` as a host :class:`eagle.Array` view, zero-copy; a device-resident output
     is refused by name (a host plan cannot write device memory)."""
     from ._plan_planes import device_resident
 
@@ -400,7 +413,7 @@ def _host_view(name, role, value):
             f"eagle.plan.run: {role} {name!r} is device-resident but this plan "
             "runs on the host; pass a host array or omit it to get one back"
         )
-    return np.asarray(value)
+    return arrays.asarray(value)
 
 
 def _checked_device(p, arg_spec, kw, door, device):
@@ -416,51 +429,55 @@ def _checked_out(name, role, arr, want, *, device):
     """Refuse, before any launch, a caller-supplied output ``arr`` that is
     not the plane the kernel writes: the dtype, contiguity or device must
     match. Returns ``arr``."""
-    if arr.dtype != np.dtype(want):
+    if dtype_name(arr.dtype) != dtype_name(want):
         raise BufferRefused(
-            f"eagle.plan.run: {role} {name!r} must be {np.dtype(want).name} "
-            f"(the plane's dtype); got {arr.dtype.name}"
+            f"eagle.plan.run: {role} {name!r} must be {dtype_name(want)} "
+            f"(the plane's dtype); got {dtype_name(arr.dtype)}"
         )
-    if not arr.flags.c_contiguous:
+    if not (arr.is_contiguous if hasattr(arr, "is_contiguous") else arr.flags.c_contiguous):
         raise BufferRefused(
             f"eagle.plan.run: {role} {name!r} must be C-contiguous (the "
             f"kernel writes the plane in place); got strides {arr.strides}"
         )
     if device:
-        import cupy as cp
-
-        if arr.data.device_id != cp.cuda.runtime.getDevice():
+        on, here = _core.pointer_device(_data_ptr(arr)), _current_device_ordinal()
+        if on != here:
             raise BufferRefused(
-                f"eagle.plan.run: {role} {name!r} lives on device "
-                f"{arr.data.device_id}, the run is on device {cp.cuda.runtime.getDevice()}"
+                f"eagle.plan.run: {role} {name!r} lives on device {on}, the run is on device {here}"
             )
     return arr
+
+
+def _on_run_device(value, device: str):
+    """``value`` (a caller's output) as an :class:`eagle.Array`: where it lies on a device, else uploaded to the
+    run's ``device`` (the result is written back to the caller's own buffer afterwards)."""
+    a = arrays.asarray(value)
+    return a if a.device.startswith("cuda") else arrays.asarray(a, device=device)
 
 
 def _torch_stream_context(kw):
     """The context the device run executes within: torch's current stream
     when a CUDA torch tensor was passed (so every copy and the launch ride
-    it), else cupy's current stream as it stands."""
+    it), else eagle's own stream scope as it stands."""
     import contextlib
 
     for value in kw.values():
         if type(value).__module__.partition(".")[0] == "torch" and \
                 getattr(value, "is_cuda", False):
-            from .interop import external_stream
-
             import torch
 
-            return external_stream(torch.cuda.current_stream(value.device).cuda_stream)
+            # eagle's launch rides it, and so does a caller's cupy (scoped_stream sets it when imported)
+            return scoped_stream(torch.cuda.current_stream(value.device).cuda_stream)
     return contextlib.nullcontext()
 
 
 def _run_device_plan(plugin, arg_spec, kw, n: int, parts, *, launch=None, gather=None,
                      keep_device=False, policy="compensated"):
-    """Run a device plan. Outputs come back as host numpy arrays, except
+    """Run a device plan. Outputs come back as host :class:`eagle.Array` objects, except
     when ``keep_device`` (device-resident inputs, no gather follows): then
     they stay as cupy arrays — a caller-supplied contiguous output of the
     declared dtype is the caller's own buffer, written in place."""
-    import cupy as cp
+    xp = f"cuda:{_current_device_ordinal()}"
 
     if launch is None:
         declared = getattr(plugin, "block", None)     # the artifact's exact threads per block
@@ -473,7 +490,7 @@ def _run_device_plan(plugin, arg_spec, kw, n: int, parts, *, launch=None, gather
     widths = _declared_widths(plugin)
     vec_mut, mat_mut = _mutable_shapes(plugin)
     extents = _lane_bind.extents_of(plugin, kw)
-    cells = _cell_rows.scratch(plugin, n, cp, dtype, policy)
+    cells = _cell_rows.scratch(plugin, n, xp, dtype, policy)
     device_arrays = {}
     for role, name in arg_spec:
         if cells is not None and name in cells.rows:
@@ -483,25 +500,25 @@ def _run_device_plan(plugin, arg_spec, kw, n: int, parts, *, launch=None, gather
             device_arrays[name] = (
                 _lane_bind.check_sink(
                     plugin, name,
-                    _checked_out(name, role, cp.asarray(kw[name]),
+                    _checked_out(name, role, _on_run_device(kw[name], xp),
                                  _output_dtype(plugin, name, dtype), device=True), n, extents, kw)
                 if name in kw
-                else _alloc.zeros(cp, _lane_bind.output_shape(plugin, name, widths.get(name, 1), n, extents, kw),
+                else _alloc.zeros(xp, _lane_bind.output_shape(plugin, name, widths.get(name, 1), n, extents, kw),
                                dtype=_output_dtype(plugin, name, dtype))
             )
         elif role in INPUT_ROLES:
             device_arrays[name] = _device_plane(_bound(kw, name, role), dtype,
                                                    declared=_declared_dtype(plugin, name),
-                                                   name=name, role=role)
+                                                   name=name, role=role, kernel=_plugin_name(plugin))
     owned = _cell_rows.owned_pairs(plugin, kw)
     for target, comp in owned:      # the run owns it: the target's shape, zeroed
-        device_arrays[comp] = _alloc.zeros_like(cp, device_arrays[target])
+        device_arrays[comp] = _alloc.zeros_like(xp, device_arrays[target])
 
     if gather is not None:
         for name in out_names:
             _check_gatherable(device_arrays[name])
 
-    device = cp.cuda.runtime.getDevice()
+    device = _current_device_ordinal()
     fn = function_on(plugin, device)
     for part in parts:
         boxes, addrs = _pack_args(
@@ -513,23 +530,28 @@ def _run_device_plan(plugin, arg_spec, kw, n: int, parts, *, launch=None, gather
         for entry, whole in _cell_rows.fold_steps(plugin, device_arrays, owned, device):
             _launch_device(entry, addrs, whole)
         del boxes  # kept alive until run() returns, below this loop's scope
-    cp.cuda.runtime.deviceSynchronize()
+    name = str(getattr(plugin, "name", None) or getattr(plugin, "kernel", "?"))
+    _stream.check_launch(name)
+    try:
+        _core.device_synchronize()
+    except RuntimeError as exc:
+        raise RuntimeError(f"eagle: kernel {name!r}: the launch failed ({exc})") from None
     if keep_device and gather is None:
         return _returned(*_finished(plugin, cells, device_arrays, out_names))
     # planes come home before anything else looks at them: this makes the
     # rank gather a HOST gather (CUDA-aware MPI was ruled out)
-    planes = {name: cp.asnumpy(device_arrays[name]) for name in out_names
+    planes = {name: arrays.asarray(device_arrays[name], device="cpu") for name in out_names
               if cells is None or name not in cells.rows}
     if gather is not None:
         for name in planes:
             gather(planes[name], n, parts)
         for name, rows in (cells.rows if cells is not None else {}).items():
-            host = cp.asnumpy(rows)
+            host = arrays.asarray(rows, device="cpu")
             gather(host, n, parts, rows=True)
             rows.set(host)
     if cells is not None:
         cells.finish()
-        planes.update({name: cp.asnumpy(c) for name, c in cells.cell.items()})
+        planes.update({name: arrays.asarray(c, device="cpu") for name, c in cells.cell.items()})
     out_names = tuple(nm for nm in out_names if nm not in _cell_rows.hidden(plugin))
     return _returned(planes, out_names)
 
@@ -541,7 +563,7 @@ def _run_host_plan(plugin, arg_spec, kw, n: int, parts, *, launch=None, gather=N
     widths = _declared_widths(plugin)
     vec_mut, mat_mut = _mutable_shapes(plugin)
     extents = _lane_bind.extents_of(plugin, kw)
-    cells = _cell_rows.scratch(plugin, n, np, dtype, policy)
+    cells = _cell_rows.scratch(plugin, n, "cpu", dtype, policy)
     host_arrays = {}
     for role, name in arg_spec:
         if cells is not None and name in cells.rows:
@@ -558,16 +580,16 @@ def _run_host_plan(plugin, arg_spec, kw, n: int, parts, *, launch=None, gather=N
                     _checked_out(name, role, _host_view(name, role, kw[name]),
                                  _output_dtype(plugin, name, dtype), device=False), n, extents, kw)
                 if name in kw
-                else np.zeros(_lane_bind.output_shape(plugin, name, widths.get(name, 1), n, extents, kw),
+                else arrays.zeros(_lane_bind.output_shape(plugin, name, widths.get(name, 1), n, extents, kw),
                                dtype=_output_dtype(plugin, name, dtype))
             )
         elif role in INPUT_ROLES:
             host_arrays[name] = _host_plane(_bound(kw, name, role), dtype,
                                                declared=_declared_dtype(plugin, name),
-                                               name=name, role=role)
+                                               name=name, role=role, kernel=_plugin_name(plugin))
     owned = _cell_rows.owned_pairs(plugin, kw)
     for target, comp in owned:      # the run owns it: the target's shape, zeroed
-        host_arrays[comp] = np.zeros_like(host_arrays[target])
+        host_arrays[comp] = arrays.zeros_like(host_arrays[target])
 
     if gather is not None:
         for name in out_names:
@@ -591,7 +613,8 @@ def _run_host_plan(plugin, arg_spec, kw, n: int, parts, *, launch=None, gather=N
                 gather(host_arrays[name], n, parts, rows=True)
             else:
                 gather(host_arrays[name], n, parts)
-    return _returned(*_finished(plugin, cells, host_arrays, out_names))
+    supplied = {name: kw[name] for name in out_names if name in kw}     # handed back as the caller's own objects
+    return _returned(*_finished(plugin, cells, {**host_arrays, **supplied}, out_names))
 
 
 def _refuse_supplied_cell(name, kw) -> None:
@@ -622,11 +645,9 @@ def _launch_host(entry, addrs, part):
 def _launch_device(fn, addrs, part, block=None):
     """The single-process device launch — the twin of :func:`_launch_host`.
     ``block`` is the artifact's declared ``launch.block`` (``None``: the default)."""
-    import cupy as cp
-
-    # the caller's current stream (cupy's, which a torch call has made its
-    # own for the run): the legacy stream does not wait for a non-blocking one
-    return eexec.DeviceKernel.run(fn, addrs, part, stream=int(cp.cuda.get_current_stream().ptr),
+    # eagle's current stream (the ``eagle.stream`` scope, which a torch call opens for the run): the legacy
+    # stream does not wait for a non-blocking one
+    return eexec.DeviceKernel.run(fn, addrs, part, stream=_stream.current(),
                                   **({} if block is None else {"block": block}))
 
 
@@ -636,13 +657,13 @@ def _check_gatherable(plane) -> None:
     non-float64 or non-contiguous plane cannot cross it correctly — and a
     refusal issued after the launch would already be reporting a buffer the
     body had overrun."""
-    if plane.dtype != np.float64:
+    if dtype_name(plane.dtype) != "float64":
         raise ValueError(
             "eagle.plan: eagle.exec.RankPartition gathers output planes over "
             f"MPI_DOUBLE, so a {plane.dtype} plane cannot cross the wire "
             "correctly; declare scalar_type 'float64' for a rank-partitioned run"
         )
-    if not plane.flags["C_CONTIGUOUS"]:
+    if not plane.is_contiguous:
         raise ValueError(
             "eagle.plan: eagle.exec.RankPartition gathers an output plane at "
             "computed sample offsets, so the plane must be C-contiguous"
@@ -660,7 +681,7 @@ def _gather_plane(plane, n: int, parts) -> None:
 
     ``parts`` are the WHOLE partitions the plan launched — the world's cut,
     before the per-rank one."""
-    addr = plane.ctypes.data
+    addr = plane.ptr
     rows = 1 if plane.ndim < 2 else int(plane.size // n)
     stride = 0 if rows == 1 else int(n) * plane.itemsize
     for part in parts:
@@ -676,13 +697,13 @@ def _gather_aligned(plane, n: int, parts, rows: bool = False) -> None:
     for part in parts:
         whole = eexec.Partition(*_cell_rows.whole_rows(part))
         if rows:
-            eexec.RankPartition.allgather_plane(plane.ctypes.data, whole, 1)
+            eexec.RankPartition.allgather_plane(plane.ptr, whole, 1)
             continue
-        for comp in (plane if plane.ndim > 1 else plane[None]):
-            padded = np.zeros(whole.n_samples * _cell_rows.ROW, dtype=np.float64)
-            padded[:n] = comp
-            eexec.RankPartition.allgather_plane(padded.ctypes.data, whole, _cell_rows.ROW)
-            comp[...] = padded[:n]
+        for comp in ([plane[i] for i in range(plane.shape[0])] if plane.ndim > 1 else [plane]):
+            padded = arrays.zeros(whole.n_samples * _cell_rows.ROW, dtype="float64")
+            arrays.copyto(padded[:n], comp)
+            eexec.RankPartition.allgather_plane(padded.ptr, whole, _cell_rows.ROW)
+            arrays.copyto(comp, padded[:n])
 
 
 def _run_rank_plan(p: Plan, plugin, arg_spec, kw, n: int, parts, policy="compensated"):
@@ -738,7 +759,7 @@ def _run_one(p: Plan, /, **kw):
     on = None
     if p.structure is eexec.DeviceKernel or p.inner is eexec.DeviceKernel:
         on = planes_device(arg_spec, kw, door="plan.run")
-    with device_scope(on):      # the planes' GPU, whatever is current
+    with _stream.on_device(on):      # the planes' GPU, whatever is current
         plugin = p.plugin
         owned = _cell_rows.companions_of(plugin)
         out_names = tuple(nm for nm in _output_names(arg_spec) if nm not in owned)
@@ -748,6 +769,7 @@ def _run_one(p: Plan, /, **kw):
         # the caller's original output objects, before _adapt_planes can replace
         # a sample-major one with its native-layout view/scratch
         kw, n, lane_dims = _lane_bind.bind_n(plugin, arg_spec, kw, _declared_widths(plugin))
+        _index_set.check_bound(plugin, arg_spec, kw, n)
         supplied = {name: kw[name] for name in out_names if name in kw}
         kw, adapted = _adapt_planes(plugin, arg_spec, kw)
         if n is None:

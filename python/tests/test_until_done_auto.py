@@ -595,9 +595,9 @@ print("COMPILES", at_deploy, seen[0], done)
 
 @pytest.mark.gpu
 def test_the_first_device_run_after_a_deploy_compiles_nothing(auto, tmp_path):
-    """The loop's own small cupy kernels compile during the deploy (beside
-    its device build), so the first run compiles none; a fresh process and
-    an empty cupy cache, or an earlier test's compiles would hide it."""
+    """The loop's own small kernels are built-in ops of the backend, so neither the deploy nor
+    the first run compiles a cupy kernel; a fresh process and an empty cupy cache, or an
+    earlier test's compiles, would hide it."""
     import os
     import pathlib
     import subprocess
@@ -609,7 +609,7 @@ def test_the_first_device_run_after_a_deploy_compiles_nothing(auto, tmp_path):
                           str(pathlib.Path(__file__).parent)],
                          env=env, capture_output=True, text=True, check=True).stdout
     at_deploy, at_run, done = out.split("COMPILES", 1)[1].split()
-    assert int(at_deploy) >= 5 and int(at_run) == 0 and done == "True", out
+    assert int(at_deploy) == 0 and int(at_run) == 0 and done == "True", out
 
 @pytest.mark.parametrize("bad", ["persistent", "fused", True, 1])
 def test_fast_mode_rejects_an_unknown_value(auto, bad):
@@ -706,9 +706,9 @@ def test_fast_path_run_does_one_sync(auto, mode):
     calls = []
     real = ud._packed_read
 
-    def spy(xp, device, cells):
+    def spy(dev, cells):
         calls.append(len(cells))
-        return real(xp, device, cells)
+        return real(dev, cells)
 
     ud._packed_read = spy
     try:
@@ -1163,7 +1163,9 @@ def test_a_constant_k_policy_turns_the_band_red(auto, target, monkeypatch):
     monkeypatch.setattr(
         ud, "_next_k",
         lambda k, newly, live, k_max, k_min=ud.AUTO_K_MIN, rate=0: ud.AUTO_K0)
-    monkeypatch.setattr(ud, "_BAND_SRC", f"k_next = {ud.AUTO_K0};")
+    real_op = ud._policy_op      # the device policy is a built-in op: pin its band to AUTO_K0 on both sides
+    monkeypatch.setattr(ud, "_policy_op", lambda device, args, k_max, k_min=ud.AUTO_K_MIN:
+                        real_op(device, args, ud.AUTO_K0, ud.AUTO_K0))
     with pytest.raises(AssertionError):
         _band_rows(auto, target)
 
@@ -1275,7 +1277,7 @@ def test_device_plan_run_puts_the_one_step_word_on_the_device(auto, monkeypatch)
 
     def spy(spec, planes, *a):
         out = real(spec, planes, *a)
-        seen.append(type(out.get(FUSED_STEPS)).__module__.split(".")[0])
+        seen.append(out.get(FUSED_STEPS).device.split(":")[0])
         return out
 
     monkeypatch.setattr(eplan, "one_step_word", spy)
@@ -1284,7 +1286,7 @@ def test_device_plan_run_puts_the_one_step_word_on_the_device(auto, monkeypatch)
     auto[("default", "device")].run(
         dt=_DT, terminated=np.zeros(n, dtype=bool),
         finished_count=np.zeros(1, dtype=np.uint32), **g)
-    assert seen == ["cupy"]
+    assert seen == ["cuda"]
     assert isinstance(g["k"], np.ndarray)
     np.testing.assert_array_equal(g["k"], 1.0)
 
@@ -1776,14 +1778,15 @@ def test_entry_pick_settled_runs_are_untimed(auto, monkeypatch):
     assert set(runner._fast_wall) == {"persist", "fused_one"}
     wall = dict(runner._fast_wall)
     records = []
-    ev_cls = type(runner._fast_ev[0])
-    real = ev_cls.record
+    from eagle import _stream
 
-    def spy(self, *a, **k):
+    real = _stream.Event.record      # a timed run is one that records its event pair
+
+    def spy(self, stream):
         records.append(1)
-        return real(self, *a, **k)
+        return real(self, stream)
 
-    monkeypatch.setattr(ev_cls, "record", spy)
+    monkeypatch.setattr(_stream.Event, "record", spy)
     for _ in range(10):
         rerun()
     assert runner._fast_wall == wall and not records
@@ -1821,20 +1824,23 @@ def test_settled_runs_sum_their_steps_one_run_in_step_fill_every(auto, monkeypat
 
 @pytest.mark.gpu
 def test_device_reset_launches_no_fill_kernel(auto, monkeypatch):
-    """reset() clears the mask and the finished count by async memset on the
-    current stream: neither array's ``fill`` (a cupy kernel launch) runs."""
+    """reset() clears the mask and the finished count with two zeroing ops on the current
+    stream, enqueued only: no host-side ``fill`` of either array runs and no host read."""
+    from eagle import _core
+
     runner, _, rerun = _prior_runner(auto, "uniform")
     report = rerun()
     assert report.finished == runner.n
-
-    def no_fill(self, *a, **k):
-        raise AssertionError("reset() launched a fill kernel")
-
-    cp = pytest.importorskip("cupy")
-    monkeypatch.setattr(cp.ndarray, "fill", no_fill, raising=False)
+    zeroed = []
+    real = ud._alloc.zero
+    monkeypatch.setattr(ud._alloc, "zero", lambda dev, array, stream, nbytes=None:
+                        zeroed.append(array.size) or real(dev, array, stream, nbytes))
     runner.reset()
-    cp.cuda.Device().synchronize()
-    assert not bool(runner.terminated.any()) and int(runner.finished[0]) == 0
+    _core.device_synchronize()
+    assert zeroed == [runner.n, 1]
+    from eagle import arrays
+
+    assert int(arrays.count_nonzero(ud._view(runner.terminated))) == 0 and int(runner.finished[0]) == 0
 
 
 @pytest.mark.gpu
@@ -1920,15 +1926,16 @@ def test_fast_run_takes_one_device_to_host_transfer(auto, monkeypatch):
     runner, _, rerun = _prior_runner(auto, "uniform")
     for _ in range(3):
         rerun()
-    cp = pytest.importorskip("cupy")
+    from eagle import arrays
+
     gets = []
-    real = cp.ndarray.get
+    real = arrays.Array.tolist
 
     def counting(self, *a, **k):
         gets.append(1)
         return real(self, *a, **k)
 
-    monkeypatch.setattr(cp.ndarray, "get", counting)
+    monkeypatch.setattr(arrays.Array, "tolist", counting)
     for _ in range(4):
         before = len(gets)
         rerun()
@@ -1967,16 +1974,14 @@ def test_fast_entries_count_the_mask_so_the_run_launches_no_mask_count(auto, mon
 
     real_rt = cp.cuda.runtime
     monkeypatch.setattr(cp.cuda, "runtime", _Runtime())
-    import aether
-    real_zero = aether.Array.zero          # eagle zeroes through aether now: count that memset too
-    monkeypatch.setattr(aether.Array, "zero",
-                        lambda self, stream=None: rt_calls.append("memsetAsync") or real_zero(self, stream))
+    real_zero = ud._alloc.zero             # eagle zeroes through its own op: count those enqueues
+    monkeypatch.setattr(ud._alloc, "zero", lambda *a, **k: rt_calls.append("zero") or real_zero(*a, **k))
     report = runner.run()
     monkeypatch.setattr(cp.cuda, "runtime", real_rt)
     assert not calls
-    # one memset zeroes every counter word, the finished count among them;
+    # one zeroing op covers every counter word, the finished count among them;
     # no device-to-device copy gathers the count for the readback
-    assert rt_calls == ["memsetAsync"]
+    assert rt_calls == ["zero"]
     assert report.done and report.finished == n
 
 

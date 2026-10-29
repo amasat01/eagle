@@ -27,7 +27,7 @@ import pathlib
 import pytest
 from _device_file import AETHER_INCLUDE
 
-from eagle.abi import HANDLE_DTYPE
+from eagle.abi import HANDLE_SIZE
 
 
 HOST_DIR = pathlib.Path(__file__).resolve().parent.parent.parent / "plugin"
@@ -43,7 +43,7 @@ def _nvcc_options():
 def test_handle_dtype_matches_aether_layout():
     import cupy as cp
 
-    size = HANDLE_DTYPE.itemsize
+    size = HANDLE_SIZE
     asserts = [
         # aether real View <-> the ported eagle/host mirrors (Real/bool ScalarHandle, IntHandle)
         f'static_assert(sizeof(ScalarHandle) == {size}, "ScalarHandle size drift");',

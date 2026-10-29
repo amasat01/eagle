@@ -332,21 +332,14 @@ def _deploy_hawk(kernels, targets, cache_dir, scalar_type) -> list:
 
     With ``targets=None`` and a usable GPU the call returns once the device
     side is built, the host side building on beside it (:class:`_HostSide`):
-    a GPU run never waits for the host compiler. Any build including a device
-    target compiles the loop's own small device kernels on a second thread
-    meanwhile (:func:`eagle._until_done._warm_device_kernels`)."""
+    a GPU run never waits for the host compiler."""
     _hawk_api()  # the refusal naming hawk comes first
     host = None
     if targets is None:
         targets = _eager_targets()
         if targets == _targets_of(_DEVICE):
             host = _HostSide(kernels, cache_dir, scalar_type)
-    warm = _warm_in_background(tuple(targets))
-    try:
-        built = _hawk_plugins(kernels, targets, cache_dir, scalar_type)
-    finally:
-        if warm is not None:
-            warm.join()
+    built = _hawk_plugins(kernels, targets, cache_dir, scalar_type)
     return [(p, None if host is None else (host, i)) for i, p in enumerate(built)]
 
 
@@ -382,39 +375,6 @@ class _HostSide:
         if self._error is not None:
             raise self._error
         return self._plugins[index]
-
-
-#: Devices whose loop kernels this process already compiled.
-_WARMED: set = set()
-
-
-def _warm_in_background(targets):
-    """Start :func:`eagle._until_done._warm_device_kernels` on its own thread
-    for a build including a device target (once per device per process); the
-    thread, or ``None``. A failure there only loses the head start."""
-    if not _has_entry(targets, _DEVICE):
-        return None
-    try:
-        import cupy
-
-        device = cupy.cuda.Device().id
-    except Exception:
-        return None
-    if device in _WARMED:
-        return None
-    from ._until_done import _warm_device_kernels
-
-    def warm():
-        try:
-            with cupy.cuda.Device(device):
-                _warm_device_kernels()
-            _WARMED.add(device)
-        except Exception:
-            pass
-
-    thread = threading.Thread(target=warm, name="eagle-warm", daemon=True)
-    thread.start()
-    return thread
 
 
 def _is_hawk_kernel(obj) -> bool:
@@ -527,9 +487,9 @@ def _default_targets() -> tuple:
     """Every host row, plus every device row with a usable device and compiler."""
     host = _targets_of(_HOST)
     try:
-        import cupy
+        from . import _core
 
-        if cupy.cuda.runtime.getDeviceCount() < 1:
+        if _core.device_count() < 1:
             return host
     except Exception:
         return host

@@ -6,15 +6,16 @@
 from __future__ import annotations
 
 import ctypes
+from dataclasses import replace
 import importlib
 from typing import TYPE_CHECKING
 
-import numpy as np
-
 from . import _alloc
-from . import _bounded, _cell_rows, _counters, _lane_bind, _layout, _split
+from . import _bounded, _cell_rows, _counters, _index_set, _lane_bind, _layout, _split
+from . import _core, _stream, arrays
+from .launch import _current_device_ordinal
 from .interop import _stream_handle as _handle_of
-from .interop import _wrap_external_stream
+from .interop import scoped_stream
 from . import exec as eexec
 from .abi import DEVICE_CPU, DEVICE_CUDA
 from .roles import INPUT_ROLES, OUTPUT_ROLES, PER_SAMPLE_ROLES
@@ -38,7 +39,6 @@ from ._plan_planes import (
     _plane_dtype,
     gathered,
     sample_spec,
-    device_scope,
     function_on,
     planes_device,
     widen_index,
@@ -48,6 +48,11 @@ from .interop import BufferRefused
 
 if TYPE_CHECKING:
     from .plan import Plan
+
+
+def _token(framework: str) -> str:
+    """The device token (``"cpu"`` or ``"cuda:N"`` for the current device) a ``framework`` bind allocates on."""
+    return f"cuda:{_current_device_ordinal()}" if framework == "cupy" else "cpu"
 
 
 def one_step_word(arg_spec, planes: dict, framework: str = "numpy") -> dict:
@@ -64,11 +69,7 @@ def one_step_word(arg_spec, planes: dict, framework: str = "numpy") -> dict:
     name = FUSED_STEPS_SLOT[1]
     if FUSED_STEPS_SLOT not in spec or name in planes:
         return planes
-    if framework == "cupy":
-        import cupy as xp
-    else:
-        xp = np
-    return {**planes, name: _alloc.full(xp, 1, 1, dtype=xp.int64)}
+    return {**planes, name: _alloc.full(_token(framework), 1, 1, dtype=arrays.int64)}
 
 
 def own_companions(plugin, planes: dict, framework: str = "numpy") -> dict:
@@ -79,17 +80,27 @@ def own_companions(plugin, planes: dict, framework: str = "numpy") -> dict:
              if comp not in planes and target in planes}
     if not owned:
         return planes
-    xp = importlib.import_module("cupy") if framework == "cupy" else np
+    xp = _token(framework)
     return {**planes, **{comp: _alloc.zeros(xp, planes[target].shape, dtype=planes[target].dtype)
                          for comp, target in owned.items()}}
 
 
-def _bind_plan(p: Plan, planes: dict, device=None) -> BoundPlan:
+def _bind_plan(p: Plan, planes: dict, device=None, capacity=None) -> BoundPlan:
     """:meth:`Plan.bind`'s body — see that method for the contract. A split
     kernel binds each of its stages (:class:`eagle._split.SplitBound`)."""
+    planes, count, capacity = _index_set.prefix_planes(p.plugin, planes, capacity)
+    staged = _split.staged(p.plugin, planes)
+    if staged is not p.plugin:
+        p = replace(p, plugin=staged)
     if _split.stages_of(p.plugin):
-        return _split.SplitBound(p, planes, _bind_one, device=device)
-    return _bind_one(p, planes, device)
+        bound = _split.SplitBound(p, planes, _bind_one, device=device)
+    else:
+        bound = _bind_one(p, planes, device)
+    if capacity is not None:
+        if capacity > bound.n:
+            raise ValueError(f"eagle.plan.bind: capacity={capacity} is above the {bound.n} lanes the planes hold")
+        bound._capacity, bound._count = capacity, count
+    return bound
 
 
 def _bind_one(p: Plan, planes: dict, device=None) -> BoundPlan:
@@ -114,11 +125,11 @@ def _bind_one(p: Plan, planes: dict, device=None) -> BoundPlan:
     if device_type == DEVICE_CUDA:
         on = planes_device(arg_spec, planes, door="plan.bind", device=device)
         if on is None:
-            on = int(importlib.import_module("cupy").cuda.runtime.getDevice())
+            on = _current_device_ordinal()
     elif device is not None:
         raise BufferRefused(f"eagle.plan.bind: device={device} names a CUDA device, "
                             "and this plan runs on the host")
-    with device_scope(on):      # allocations (the step word) land on the planes' GPU
+    with _stream.on_device(on):      # allocations (the step word) land on the planes' GPU
         entry = getattr(plugin, attr, None)
         if entry is None:
             raise ValueError(
@@ -133,6 +144,7 @@ def _bind_one(p: Plan, planes: dict, device=None) -> BoundPlan:
         planes = own_companions(plugin, planes, framework)
         widths = _declared_widths(plugin)
         planes, n, _dims = _lane_bind.bind_n(plugin, arg_spec, planes, widths, door="bind")
+        _index_set.check_bound(plugin, arg_spec, planes, n)
         _check_bound_names(arg_spec, planes)
         planes, adapted = _adapt_planes(plugin, arg_spec, planes, door="bind")
         planes = widen_indices(plugin, arg_spec, planes)
@@ -157,6 +169,9 @@ def _bind_one(p: Plan, planes: dict, device=None) -> BoundPlan:
                 _lane_bind.check_sink(plugin, name, planes[name], n,
                                       _lane_bind.extents_of(plugin, planes), planes, door="bind")
 
+        if device_type == DEVICE_CUDA:
+            _refuse_local_memory(plugin, n, on)
+
         int_uniforms = _integer_uniforms(plugin)
         boxes, addrs = _pack_args(
             arg_spec, planes, planes, n, device_type,
@@ -178,14 +193,14 @@ def _from_views(planes: dict, device_type) -> tuple:
     """``(planes, origins)``: each :class:`eagle.interop.BufferView` plane as
     a zero-copy array, and ``(name, producer, address)`` for each, so a
     launch can refuse a producer whose data moved since the bind."""
-    from .interop import BufferView, to_cupy
+    from .interop import BufferView, to_array
 
     views = {nm: v for nm, v in planes.items() if isinstance(v, BufferView)}
     if not views:
         return planes, ()
     planes = dict(planes)
     for nm, view in views.items():
-        planes[nm] = to_cupy(view) if device_type == DEVICE_CUDA else np.from_dlpack(view)
+        planes[nm] = to_array(view)
     return planes, tuple((nm, v._obj, v.ptr) for nm, v in views.items())
 
 
@@ -246,9 +261,9 @@ class BoundPlan:
     __slots__ = (
         "plan", "_arg_spec", "_planes", "_n", "_parts", "_boxes", "_addrs",
         "_entry", "_device", "_device_type", "_framework", "_dtype", "_widths",
-        "_vec_mutables", "_mat_mutables", "_int_uniforms", "_slot_of", "_cupy",
+        "_vec_mutables", "_mat_mutables", "_int_uniforms", "_slot_of",
         "_active_count", "_copies", "_persist_fn", "_range_fn",
-        "_gen", "_origins", "_fold", "_owned",
+        "_gen", "_origins", "_fold", "_owned", "_team", "_capacity", "_count",
     )
 
     #: Sentinel for "not yet looked up" (the persist/range entry's own cupy
@@ -280,13 +295,6 @@ class BoundPlan:
         self._slot_of = {name: i for i, (_role, name) in enumerate(self._arg_spec)}
         # the bound active-set count plane (see _active_count_plane), or None
         self._active_count = active_count
-        # imported once, at bind: resolving cupy per launch would cost a
-        # sys.modules lookup on a path that promises launch-and-nothing-else
-        self._cupy = None
-        if device_type == DEVICE_CUDA:
-            import cupy
-
-            self._cupy = cupy
         # sample-major planes copied at bind (eagle._layout.Adapted):
         # refreshed before each launch, written ones copied back after
         self._copies = {a.name: a for a in copies}
@@ -302,6 +310,10 @@ class BoundPlan:
         self._origins = tuple(origins)
         # {target: companion} of the companions eagle made at bind
         self._owned = dict(owned)
+        # (threads, grid, tail boxes) of a team stage (see team_stage), else None
+        self._team = None
+        # the largest sample count and the count plane of a prefix kernel bound with capacity= (else None)
+        self._capacity = self._count = None
         # the owned companions' fold entries, launched after the kernel
         self._fold = (_cell_rows.fold_steps(plan.plugin, self._planes, owned, device)
                       if owned else None)
@@ -363,7 +375,7 @@ class BoundPlan:
         """Entry ``name`` of ``loaded``'s module as loaded for the planes' GPU."""
         if self._device is not None and hasattr(loaded, "function"):
             return loaded.function(self._device, name)
-        return loaded.module.get_function(name)
+        return loaded.function(self._device if self._device is not None else importlib.import_module("eagle.launch")._current_device_ordinal(), name)
 
     def entry_reports(self) -> tuple:
         """The launch policy's view of this plan's device entries: one
@@ -376,7 +388,7 @@ class BoundPlan:
         plugin = self.plan.plugin
         keep = getattr(plugin, "_keepalive", ())
         loaded = keep[-1] if keep else None
-        module = getattr(loaded, "module", None)
+        module = getattr(loaded, "_modules", None)   # the modules loaded per device
         name = getattr(plugin, "name", None)
         if module is None or not name:
             return ()
@@ -403,7 +415,7 @@ class BoundPlan:
             plugin = self.plan.plugin
             keep = getattr(plugin, "_keepalive", ())
             loaded = keep[-1] if keep else None
-            module = getattr(loaded, "module", None)
+            module = getattr(loaded, "_modules", None)   # the modules loaded per device
             name = getattr(plugin, "name", None)
             if module is not None and name:
                 try:
@@ -502,33 +514,30 @@ class BoundPlan:
                 f"samples per launch (count {part.count:,} plus "
                 f"{int(grid) * int(block):,} lanes); split the batch"
             )
-        util_ptr = 0 if util is None else int(util.data.ptr)
-        steps_ptr = 0 if steps is None else int(steps.data.ptr)
-        stepsum_ptr = 0 if stepsum is None else int(stepsum.data.ptr)
+        util_ptr = 0 if util is None else _data_ptr(util)
+        steps_ptr = 0 if steps is None else _data_ptr(steps)
+        stepsum_ptr = 0 if stepsum is None else _data_ptr(stepsum)
         extra = (
             ctypes.c_longlong(part.base), ctypes.c_longlong(part.count),
             ctypes.c_longlong(part.n_samples),
-            ctypes.c_void_p(int(counter.data.ptr)), ctypes.c_void_p(util_ptr),
+            ctypes.c_void_p(_data_ptr(counter)), ctypes.c_void_p(util_ptr),
             ctypes.c_void_p(steps_ptr), ctypes.c_void_p(stepsum_ptr),
             ctypes.c_uint(chunk),
         )
         grid, block = int(grid), int(block)
-        cupy, ptr = self._cupy, fn.kernel.ptr
+        ptr = int(fn.kernel.ptr)
         addrs = self._addrs + [ctypes.addressof(box) for box in extra]
-        packed = [self._gen, (ctypes.c_void_p * len(addrs))(*addrs)]
+        packed = [self._gen, list(addrs)]
 
         def call(stream=None) -> None:
             if packed[0] != self._gen:
                 addrs = self._addrs + [ctypes.addressof(box) for box in extra]
-                packed[:] = [self._gen, (ctypes.c_void_p * len(addrs))(*addrs)]
+                packed[:] = [self._gen, list(addrs)]
             params = packed[1]
-            handle = _stream_handle(stream, cupy, self._device)
+            handle = _stream_handle(stream, self._device)
             # the null stream is the current device's: make the planes' device current for it
-            with device_scope(self._device if handle == 0 else None):
-                cupy.cuda.driver.launchKernel(
-                    ptr, grid, 1, 1, block, 1, 1, 0, handle,
-                    ctypes.addressof(params), 0,
-                )
+            with _stream.on_device(self._device if handle == 0 else None):
+                _core.launch_raw(ptr, (grid, 1, 1), (block, 1, 1), params, handle)
 
         return call
 
@@ -555,7 +564,7 @@ class BoundPlan:
             plugin = self.plan.plugin
             keep = getattr(plugin, "_keepalive", ())
             loaded = keep[-1] if keep else None
-            module = getattr(loaded, "module", None)
+            module = getattr(loaded, "_modules", None)   # the modules loaded per device
             name = getattr(plugin, "name", None)
             if module is not None and name:
                 try:
@@ -629,25 +638,22 @@ class BoundPlan:
         extra = (
             ctypes.c_longlong(part.base), ctypes.c_longlong(part.count),
             ctypes.c_longlong(part.n_samples),
-            ctypes.c_void_p(0 if steps is None else int(steps.data.ptr)),
-            ctypes.c_void_p(0 if stepsum is None else int(stepsum.data.ptr)),
+            ctypes.c_void_p(0 if steps is None else _data_ptr(steps)),
+            ctypes.c_void_p(0 if stepsum is None else _data_ptr(stepsum)),
         )
-        cupy, ptr = self._cupy, fn.kernel.ptr
+        ptr = int(fn.kernel.ptr)
         addrs = self._addrs + [ctypes.addressof(box) for box in extra]
-        packed = [self._gen, (ctypes.c_void_p * len(addrs))(*addrs)]
+        packed = [self._gen, list(addrs)]
 
         def call(stream=None) -> None:
             if packed[0] != self._gen:
                 addrs = self._addrs + [ctypes.addressof(box) for box in extra]
-                packed[:] = [self._gen, (ctypes.c_void_p * len(addrs))(*addrs)]
+                packed[:] = [self._gen, list(addrs)]
             params = packed[1]
-            handle = _stream_handle(stream, cupy, self._device)
+            handle = _stream_handle(stream, self._device)
             # the null stream is the current device's: make the planes' device current for it
-            with device_scope(self._device if handle == 0 else None):
-                cupy.cuda.driver.launchKernel(
-                    ptr, grid, 1, 1, resolved, 1, 1, 0, handle,
-                    ctypes.addressof(params), 0,
-                )
+            with _stream.on_device(self._device if handle == 0 else None):
+                _core.launch_raw(ptr, (grid, 1, 1), (resolved, 1, 1), params, handle)
 
         return call
 
@@ -677,6 +683,56 @@ class BoundPlan:
             f"partitions={len(self._parts)}, names={list(self.names)})"
         )
 
+    def set_count(self, m: int, stream=None) -> None:
+        """Run only the first ``m`` lanes of a prefix kernel bound with ``capacity=``: one stream-ordered write of the
+        count plane (no host wait; legal between replays of a captured graph, which then runs at ``m`` with no
+        re-capture, rebind or build). ``m`` above the capacity is refused by name; lanes at or past ``m`` keep their
+        outputs. Writing the plane yourself instead is your contract: nothing then checks it."""
+        _set_count(self, m, stream)
+
+    def _kernel_name(self) -> str:
+        return str(getattr(self.plan.plugin, "name", None) or getattr(self.plan.plugin, "kernel", "?"))
+
+    def _named(self, call, *args, **kw):
+        """``call(*args, **kw)``, a launch failure re-raised naming this plan's kernel."""
+        try:
+            return call(*args, **kw)
+        except (RuntimeError, ValueError) as exc:
+            raise RuntimeError(f"eagle: kernel {self._kernel_name()!r}: the launch failed ({exc})") from None
+
+    def team_stage(self, threads: int, grid: int, lanes: int) -> None:
+        """Make this plan a team stage of a split kernel: :meth:`launch` then issues ``grid`` blocks
+        of ``threads`` threads (one block per work item: a lane, a key, a chunk or a target cell),
+        with the tail ``(0, grid, lanes)`` the stage reads, and nothing else. Fixed at bind."""
+        self._team = (int(threads), int(grid),
+                      (ctypes.c_longlong(0), ctypes.c_longlong(grid), ctypes.c_longlong(lanes)))
+
+    def _launch_team(self, stream) -> None:
+        """:meth:`launch` of a team stage: one launch of exactly ``grid`` blocks (a stage with no
+        work launches nothing)."""
+        threads, grid, tail = self._team
+        if self._origins:
+            self._check_origins()
+        if grid == 0:
+            return None
+        if self._device_type == DEVICE_CPU:
+            if stream is not None:
+                raise ValueError(
+                    "eagle.plan: a host_team run has no stream to issue on; "
+                    f"got stream={stream!r}")
+            # one call over the whole grid: a stage reads its own work count (a scatter's cells, a sum's
+            # keys) off ``count``, so a tiled launch would hand it a fraction
+            eexec.HostTeam.run_serial(self._entry, self._addrs, eexec.Partition(0, grid, tail[2].value))
+            return None
+        handle = _stream_handle(stream, self._device)
+        addrs = self._addrs + [ctypes.addressof(box) for box in tail]
+        if _split.COLLECT.names is not None:
+            _split.COLLECT.names.append(self._kernel_name())
+        with _stream.on_device(self._device if handle == 0 else None):
+            self._named(_core.launch_raw, self._entry, (grid, 1, 1), (threads, 1, 1), addrs, handle)
+            _stream.check_launch(self._kernel_name(), -1 if self._device is None else self._device)
+        return None
+
     def launch(self, stream=None, *, grid=None, block=None) -> None:
         """Issue this plan's launches — one per partition — and nothing
         else. Returns ``None``: the answers are already in the caller's own
@@ -697,6 +753,8 @@ class BoundPlan:
                 "eagle.plan: BoundPlan.launch takes no grid — eagle derives it "
                 f"from each partition's own count; got grid={grid!r}"
             )
+        if self._team is not None:
+            return self._launch_team(stream)
         addrs = self._addrs
         if self._origins:
             self._check_origins()
@@ -727,22 +785,26 @@ class BoundPlan:
         # by module name: eagle exports a `launch` function that shadows the
         # submodule, and a per-call lookup picks up a consumer's monkeypatch
         _launch = importlib.import_module("eagle.launch")
-        handle = _stream_handle(stream, self._cupy, self._device)
+        handle = _stream_handle(stream, self._device)
+        if _split.COLLECT.names is not None:
+            _split.COLLECT.names.append(self._kernel_name())
         if self._copies:
             # the copies ride the launch's own stream: ordered, no sync
-            with device_scope(self._device), _wrap_external_stream(handle):
+            with _stream.on_device(self._device), scoped_stream(handle):
                 for a in self._copies.values():
                     a.copy_in()
         for part in self._parts:
-            eexec.DeviceKernel.run(
+            self._named(
+                eexec.DeviceKernel.run,
                 self._entry, addrs, part, stream=handle, device=self._device,
                 block=int(_launch._resolved_block(self._entry, part.count, block, self._device,
                                                   self._declared_block)),
             )
         for entry, part in self._fold or ():
-            eexec.DeviceKernel.run(entry, addrs, part, stream=handle, device=self._device)
+            self._named(eexec.DeviceKernel.run, entry, addrs, part, stream=handle, device=self._device)
+        _stream.check_launch(self._kernel_name(), -1 if self._device is None else self._device)
         if self._copies:
-            with device_scope(self._device), _wrap_external_stream(handle):
+            with _stream.on_device(self._device), scoped_stream(handle):
                 for a in self._copies.values():
                     if a.writes:
                         a.copy_back()
@@ -791,7 +853,7 @@ class BoundPlan:
         if stray:
             raise ValueError(f"eagle.plan.clear: {stray} are not bound output planes "
                              f"(valid: {list(valid)})")
-        with device_scope(self._device):
+        with _stream.on_device(self._device):
             for nm in names:
                 self._planes[nm].fill(0)
                 comp = self._owned.get(nm)
@@ -839,7 +901,8 @@ class BoundPlan:
                     if a is not None:
                         value = a.native
                 if role in INPUT_ROLES:
-                    value = widen_index(value, _declared_dtype(self.plan.plugin, name))
+                    value = widen_index(value, _declared_dtype(self.plan.plugin, name), name=name,
+                                       kernel=self._kernel_name())
                 _check_plane(role, name, value, n=self._n, dtype=self._dtype,
                              width=self._widths.get(name),
                              framework=self._framework,
@@ -892,10 +955,10 @@ class BoundPlan:
                 continue
             held, new = self._planes[comp], self._planes[target]
             if held.shape == new.shape:
-                with device_scope(self._device):
+                with _stream.on_device(self._device):
                     held.fill(0)
                 continue
-            with device_scope(self._device):
+            with _stream.on_device(self._device):
                 self._planes.update(own_companions(self.plan.plugin, {target: new},
                                                    self._framework))
             slot = self._slot_of[comp]
@@ -913,15 +976,43 @@ class BoundPlan:
                                                tuple(self._owned.items()), self._device)
 
 
-def _stream_handle(stream, cupy, device=None) -> int:
-    """The ``CUstream`` a launch issues on, as an int. ``None`` resolves to
-    the framework's current stream, read late (at launch, not at bind):
-    cupy's capture idiom makes the capturing stream current only inside the
-    capture region, so reading it earlier would record onto the wrong
-    stream — and the default stream may not even be capturable. It is
-    ``device``'s current stream, whatever device is current."""
-    if stream is None:
-        stream = cupy.cuda.get_current_stream() if device is None \
-            else cupy.cuda.get_current_stream(device)
-        return int(stream.ptr)
-    return _handle_of(stream)
+def _stream_handle(stream, device=None) -> int:
+    """The raw stream a launch issues on, as an int. ``None`` resolves to the open ``eagle.stream`` scope for
+    ``device`` (else the legacy default stream), read late (at launch, not at bind)."""
+    return _stream.current(device) if stream is None else _handle_of(stream)
+
+
+def _set_count(bound, m, stream) -> None:
+    """:meth:`BoundPlan.set_count` / :meth:`eagle._split.SplitBound.set_count`: write ``bound``'s count plane."""
+    if bound._capacity is None:
+        raise ValueError("eagle.plan.set_count: this plan was not bound with capacity= (a prefix kernel's run-time "
+                         "count); bind it with bind(..., capacity=n_max)")
+    if bound._device is None:
+        _index_set.write_count(bound._count, m, bound._capacity)
+        return
+    with _stream.on_device(bound._device):
+        _index_set.write_count(bound._count, m, bound._capacity, _stream_handle(stream, bound._device))
+
+
+def _refuse_local_memory(plugin, n: int, device) -> None:
+    """Refuse at bind a device kernel whose per-thread local memory (the plugin's ``local_bytes``, from the sidecar) over the
+    threads the device keeps resident would not fit its free memory (or passes the per-thread limit), naming
+    the kernel and the bytes. A sidecar without the fields is not checked."""
+    per = getattr(plugin, "local_bytes", None)
+    if not per:
+        return
+    name = getattr(plugin, "name", None) or getattr(plugin, "kernel", "?")
+    limit = getattr(plugin, "local_limit", None)
+    if limit and per > limit:
+        raise ValueError(f"eagle.plan.bind: kernel {name!r} needs {per:,} bytes of local memory per thread, past the "
+                         f"device limit of {limit:,}")
+    _launch = importlib.import_module("eagle.launch")
+    props = _launch._device_props(-1 if device is None else device)
+    resident = min(int(n), int(props.get("multiProcessorCount", 0)) * int(props.get("maxThreadsPerMultiProcessor", 0))
+                   ) if props else int(n)
+    need, free = per * resident, _split._free_bytes(device)
+    if need > free:
+        raise ValueError(
+            f"eagle.plan.bind: kernel {name!r} keeps {per:,} bytes of local memory per thread "
+            f"({getattr(plugin, 'local_source', 'sidecar')}) over {resident:,} resident threads = {need:,} bytes, but the "
+            f"device has {free:,} bytes free; the launch would fail")

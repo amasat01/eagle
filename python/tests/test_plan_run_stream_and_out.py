@@ -66,7 +66,7 @@ def test_run_waits_for_a_producer_on_a_nonblocking_stream(plan):
             y = cp.zeros_like(vg)
             slow(vg, y)
             r = plan.run(v=y, cd=cdg, dt=.05, g=9.81)
-            w = r * 1.0
+            w = cp.asarray(r) * 1.0
         s.synchronize()
         bad += not np.allclose(cp.asnumpy(w), ref)
     assert bad == 0

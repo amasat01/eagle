@@ -14,9 +14,9 @@ from __future__ import annotations
 
 import threading
 
-import numpy as np
 
 from . import _alloc
+from .dtypes import dtype_name
 from ._graph_reduce import _lower_cpu, _lower_gpu, check_policy, reduce
 
 #: samples per row, fixed by the kernel
@@ -91,7 +91,7 @@ def _fold_entry(plugin, target: str, device):
     else:
         keep = getattr(plugin, "_keepalive", ())
         loaded = keep[-1] if isinstance(keep, tuple) and keep else None
-        found = (loaded.function(device, name).kernel.ptr
+        found = (int(loaded.function(device, name))
                  if hasattr(loaded, "function") else None)
     if found is None:
         raise ValueError(
@@ -148,6 +148,11 @@ def rank_samples(part, rank: int, size: int) -> tuple:
     return lo, max(hi - lo, 0), part.n_samples
 
 
+def _on_device(xp) -> bool:
+    """Is ``xp`` a CUDA device token (``"cuda:N"``)?"""
+    return xp.startswith("cuda")
+
+
 class CellRows:
     """The row scratch of one kernel at one sample count, and its finish.
     ``outs`` (``{plane: (1,) array}``) names cells finished into the caller's
@@ -157,10 +162,10 @@ class CellRows:
         rows = -(-int(n) // ROW)
         self.rows = {}
         self.cell = {}
-        lower = _lower_gpu if xp.__name__ == "cupy" else _lower_cpu
+        lower = _lower_gpu if _on_device(xp) else _lower_cpu
         self._steps = []        # plain callables: legal inside a stream capture
         for name, op in cells.items():
-            dt = np.dtype(dtype)
+            dt = dtype_name(dtype)
             hi = self.rows[name] = _alloc.zeros(xp, rows, dtype=dt)
             out = self.cell[name] = (outs or {}).get(name)
             if out is None:
@@ -204,7 +209,7 @@ def _planes(cells) -> dict:
 
 
 def _key(n, policy, xp, dtype):
-    return (int(n), policy, xp.__name__, str(np.dtype(dtype)))
+    return (int(n), policy, xp, dtype_name(dtype))
 
 
 def scratch(owner, n, xp, dtype, policy="compensated", cells=None):

@@ -54,9 +54,8 @@ def test_host_policy_cells_take_the_same_rows(rate, want):
 @pytest.mark.parametrize("rate", [1.3, 8.4, 44.0, 0.5, 200.0])
 @pytest.mark.parametrize("newly", [0, 3_000, 220_000, 900_000])
 def test_device_policy_kernel_matches_the_host_face(rate, newly):
-    """The device kernel and ``_next_k`` round the same way."""
+    """The device ``POLICY`` op and ``_next_k`` round the same way."""
     cp = pytest.importorskip("cupy")
-    kernel = ud._policy_kernel(1000, ud.AUTO_K_MIN)
     cells = cp.zeros(6, dtype=cp.int64)
     cells[ud._K], cells[ud._CAP] = _K, 10 ** 6
     cells[ud._R] = round(rate * ud.RATE_SCALE)
@@ -64,7 +63,11 @@ def test_device_policy_kernel_matches_the_host_face(rate, newly):
     total = cp.asarray([_LIVE + newly], dtype=cp.uint32)
     word, go = cp.asarray([_K], dtype=cp.int64), cp.zeros(1, dtype=cp.uint32)
     hist = cp.zeros(1001, dtype=cp.int64)
-    kernel((1,), (1,), (finished, total, cells, word, go, hist))
+    from eagle import _core
+
+    _core.cell_op(_core.CELL_POLICY, 0, 1, [a.data.ptr for a in (finished, total, cells, word, go, hist)],
+                  [ud.AUTO_K_MIN, 1000, ud._K, ud._FIN_AT, ud._DONE, ud._CAP, ud._R, ud._MAPPED, ud.RATE_SCALE])
+    cp.cuda.Device().synchronize()
     want = ud._next_k(_K, newly, _LIVE, 1000, ud.AUTO_K_MIN, round(rate * ud.RATE_SCALE) / ud.RATE_SCALE)
     assert int(cells[ud._K].get()) == want
 

@@ -411,6 +411,14 @@ def test_other_thread_alloc_free_during_capture():
 # --------------------------------------------------------------------------- #
 # A binding that detaches names itself here with the busy state that makes it safe.
 _GIL_RELEASE_ALLOWED = {
+    "eagle_core.cpp:device_synchronize":
+        "a blocking wait on the device: it touches no Python object, and a host node's callback needs the GIL",
+    "eagle_core.cpp:stream_sync":
+        "a blocking wait on one stream: it touches no Python object, and a host node's callback needs the GIL",
+    "array_binding.h:None":
+        "the array helpers release only around work that touches no Python object: a stream wait, a "
+        "host<->device copy, a host op or sum over raw pointers; the Array arguments are held by the "
+        "calling binding for the whole call, and every device enqueue (a short call) keeps the GIL",
     "eagle_core.cpp:run_host_branches":
         "its busy state is the eagle.Graph BusyGuard held across launch/enqueue; "
         "it works on copies of entries, params and partitions taken before the release",
@@ -427,6 +435,9 @@ _GIL_RELEASE_ALLOWED = {
         "Launcher.synchronize and Stream.synchronize detach only around the backend wait, "
         "on a handle read before the release, because it waits on host nodes whose Python "
         "callback needs the GIL (else a pending host node deadlocks the waiter)",
+    "eagle_core.cpp:gemm":
+        "the host twin multiplies raw addresses the caller passed as integers and touches no Python object; "
+        "it holds no per-object state, and the device form is a short enqueue that keeps the GIL",
     "eagle_core.cpp:diff_reverse_host":
         "its busy state is the Reverse's BusyGuard plus the run's tape BusyGuard, held "
         "across the call; entries, params and gathers are copied before the release",

@@ -228,7 +228,7 @@ def test_one_sample_on_the_device_matches_its_batch_column(mix, record_property)
         one = p.run(a=0.25, **row)
         one = tuple(one.values()) if isinstance(one, dict) else (one,)
         for b, o in zip(batch, one):
-            assert isinstance(o, cp.ndarray)
+            assert isinstance(o, eagle.Array)
             worst = max(worst, ulps(o.get().ravel(), b[..., i].get().ravel()).max())
             for j in range(N):
                 if j != i:
@@ -259,10 +259,10 @@ def test_results_take_the_head_shape_in_the_callers_framework(mix):
     r = _named(mix["ss_mix"], p.run(x=np.array([1.0, 2.0, 3.0]), s=2.0,
                                     m=np.ones((2, 3)), a=0.5))
     y, z, w = r["y"], r["z"], r["w"]
-    assert isinstance(z, np.float64) and isinstance(z, float) and z.shape == ()
+    assert isinstance(z, eagle.Array) and z.shape == ()
     assert float(z) == 28.5
-    assert isinstance(y, np.ndarray) and y.shape == (2,)
-    assert isinstance(w, np.ndarray) and w.shape == (2, 3)
+    assert isinstance(y, eagle.Array) and y.shape == (2,)
+    assert isinstance(w, eagle.Array) and w.shape == (2, 3)
     np.testing.assert_array_equal(y, [12.0, 12.0])
 
 
@@ -292,7 +292,7 @@ def test_device_inputs_give_cupy_head_shaped_results(mix):
     r = _named(mix["ss_mix"], p.run(x=cp.asarray([1.0, 2.0, 3.0]), s=cp.asarray(2.0),
                                     m=cp.ones((2, 3)), a=0.5))
     y, z, w = r["y"], r["z"], r["w"]
-    assert isinstance(z, cp.ndarray) and z.shape == ()
+    assert isinstance(z, eagle.Array) and z.shape == ()
     assert y.shape == (2,) and w.shape == (2, 3)
     assert float(z) == 28.5
 
@@ -374,7 +374,7 @@ def test_auto_routes_by_residency_never_by_count(mix, n):
     dev = {k: (cp.asarray(v) if not isinstance(v, float) else cp.asarray(v))
            for k, v in host.items()}
     assert ap.select(dev).structure is eexec.DeviceKernel
-    assert isinstance(_named(mix["ss_mix"], ap.run(a=0.0, **dev))["y"], cp.ndarray)
+    assert isinstance(_named(mix["ss_mix"], ap.run(a=0.0, **dev))["y"], eagle.Array)
 
 
 def test_until_done_takes_an_auto_plan(osc):

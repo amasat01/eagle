@@ -231,7 +231,7 @@ def _need(plans, key):
 
 
 def _get(a):
-    return a.get() if hasattr(a, "get") else a
+    return np.asarray(a.get() if hasattr(a, "get") else a)
 
 
 def _explicit(plans, target, inp, max_steps):
@@ -494,41 +494,37 @@ def test_compaction_body_is_what_the_runner_runs(plans):
 # --------------------------------------------------------------------------- #
 def test_packed_read_host_reads_each_cell_directly():
     """The host (non-device) branch: no sync exists to fold, so each cell is
-    just read, in order, off plain numpy arrays."""
+    just read, in order, off host arrays."""
+    from eagle import arrays
     from eagle._until_done import _packed_read
 
-    a = np.asarray([7], dtype=np.uint32)
-    b = np.asarray([0, 3], dtype=np.uint32)
-    assert _packed_read(np, False, [(a, 0), (b, 1)]) == (7, 3)
+    a = arrays.asarray([7], arrays.uint32)
+    b = arrays.asarray([0, 3], arrays.uint32)
+    assert _packed_read("cpu", [(a, 0), (b, 1)]) == (7, 3)
 
 
 @pytest.mark.gpu
 def test_packed_read_device_matches_direct_reads_in_one_transfer():
     """The device branch: the SAME values as reading each cell directly
-    (``.get()``), combined into ONE staging buffer and ONE ``.get()`` --
-    verified by counting ``RawArray.get`` calls through a spy, so this is a
+    (``int(cell)``), combined into ONE staging buffer and ONE ``tolist`` --
+    verified by counting ``eagle.Array.tolist`` reads through a spy, so this is a
     structural check on sync COUNT, not just the returned values."""
-    cp = pytest.importorskip("cupy")
+    from eagle import arrays
     from eagle._until_done import _packed_read
 
-    finished = cp.asarray([5], dtype=cp.uint32)
-    compactions = cp.asarray([2], dtype=cp.uint32)
-    got = _packed_read(cp, True, [(finished, 0), (compactions, 0)])
+    finished = arrays.asarray([5], arrays.uint32, "cuda:0")
+    compactions = arrays.asarray([2], arrays.uint32, "cuda:0")
+    got = _packed_read("cuda:0", [(finished, 0), (compactions, 0)])
     assert got == (5, 2)
 
-    gets = []
-    real_get = cp.ndarray.get
-
-    def spy_get(self, *a, **kw):
-        gets.append(1)
-        return real_get(self, *a, **kw)
-
-    cp.ndarray.get = spy_get
+    reads = []
+    real = arrays.Array.tolist
+    arrays.Array.tolist = lambda self: reads.append(1) or real(self)
     try:
-        _packed_read(cp, True, [(finished, 0), (compactions, 0)])
+        _packed_read("cuda:0", [(finished, 0), (compactions, 0)])
     finally:
-        cp.ndarray.get = real_get
-    assert gets == [1], f"expected exactly ONE .get() for two packed cells, got {gets}"
+        arrays.Array.tolist = real
+    assert reads == [1], f"expected exactly ONE read for two packed cells, got {reads}"
 
 
 @pytest.mark.gpu
@@ -545,9 +541,9 @@ def test_non_compacting_run_reports_zero_compactions_with_no_pre_read(plans):
     calls = []
     real = ud._packed_read
 
-    def spy(xp, device, cells):
+    def spy(dev, cells):
         calls.append(len(cells))
-        return real(xp, device, cells)
+        return real(dev, cells)
 
     g = _planes(_inputs(256, "spread", 20), cp)
     runner = _runner(plans, "fplain", "device", max_steps=20, dt=_DT, **g)
@@ -586,4 +582,4 @@ def test_until_done_takes_lane_shaped_planes_and_writes_them_in_place(plans):
     for key in ("x", "v", "k"):
         np.testing.assert_array_equal(shaped[key].reshape(-1), flat[key])
         np.testing.assert_array_equal(flat[key], want[key])
-    assert shaped_run.n == 64 and shaped_run.finished == 64
+    assert shaped_run.n == 64 and int(shaped_run.finished) == 64

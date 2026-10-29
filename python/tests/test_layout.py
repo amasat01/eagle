@@ -292,7 +292,7 @@ def test_device_bind_copies_ride_the_stream_and_replay_in_a_graph(vec3_unit):
         stream.synchronize()
         y.fill(0.0)
         stream.begin_capture()
-        bound.launch()
+        bound.launch(stream=stream)               # eagle never reads cupy's current stream
         graph = stream.end_capture()
         x *= 3.0                                  # the replay re-reads the input
         graph.launch(stream=stream)
@@ -336,7 +336,7 @@ def test_marshal_adapts_inputs_and_writes_mutables_back():
     with pytest.warns(eagle.LayoutWarning, match="'m'"):
         arr, n = coerce_mutable("m", caller, Decl, adapted=adapted)
     assert n == N and arr.shape == (W, N)
-    arr[...] = cp.asarray(x)                     # what a kernel would write
+    eagle.arrays.copyto(arr, cp.asarray(x))      # what a kernel would write
     adapted["m"].write_back_from(arr)
     np.testing.assert_array_equal(cp.asnumpy(caller), x.T)
 

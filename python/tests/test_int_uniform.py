@@ -166,9 +166,9 @@ def test_param_decls_refuses_an_entry_it_cannot_type():
 # --------------------------------------------------------------------------- #
 def test_coerce_uniforms_float_arm_is_unchanged():
     out = marshal.coerce_uniforms({"mu": 1.5}, ["mu"])
-    assert out["mu"].dtype == np.float64 and out["mu"] == 1.5
+    assert out["mu"].dtype == "float64" and float(out["mu"]) == 1.5
     out32 = marshal.coerce_uniforms({"mu": 1.5}, ["mu"], dt=np.float32)
-    assert out32["mu"].dtype == np.float32
+    assert out32["mu"].dtype == "float32"
 
 
 def test_coerce_uniforms_int_arm_is_exact_beyond_double_precision():
@@ -177,7 +177,7 @@ def test_coerce_uniforms_int_arm_is_exact_beyond_double_precision():
     out = marshal.coerce_uniforms(
         {"k": BEYOND_DOUBLE}, [ParamSpec("k", "int")]
     )
-    assert out["k"].dtype == np.int64
+    assert out["k"].dtype == "int64"
     assert int(out["k"]) == BEYOND_DOUBLE
     # the defeated path, for contrast: dt(...) is what every uniform used to take
     assert int(np.int64(np.float64(BEYOND_DOUBLE))) != BEYOND_DOUBLE
@@ -189,7 +189,7 @@ def test_coerce_uniforms_int_arm_ignores_the_real_dtype():
     out = marshal.coerce_uniforms(
         {"k": 7}, [ParamSpec("k", "int")], dt=np.float32
     )
-    assert out["k"].dtype == np.int64
+    assert out["k"].dtype == "int64"
 
 
 def test_coerce_int_uniform_refuses_what_it_cannot_carry_exactly():

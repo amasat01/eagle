@@ -48,6 +48,19 @@ using eagle::interop::OrderedBuffer;
 inline constexpr const char* kVersionedName = "dltensor_versioned";
 inline constexpr const char* kLegacyName = "dltensor";
 
+/// ``eagle::interop::fence`` (a pure C++ core reaches CUDA through the provider its backend installed).
+inline void fence_streams(std::optional<std::intptr_t> producer, std::optional<std::intptr_t> consumer, int device)
+{
+#ifndef EAGLE_CPU_ONLY
+    eagle::interop::fence(producer, consumer, device);
+#else
+    eagle::interop::FenceProvider provider = eagle::interop::fence_provider(kDLCUDA);
+    if (provider == nullptr)
+        throw eagle::interop::InteropError("device: a CUDA fence needs a CUDA build of eagle, this build is CPU-only");
+    provider(kDLCUDA, device, producer, consumer);
+#endif
+}
+
 inline void versioned_capsule_destructor(PyObject* cap)
 {
     if (PyCapsule_IsValid(cap, kVersionedName)) {
@@ -221,19 +234,7 @@ inline void bind(nb::module_& m)
             nb::arg("consumer").none(), "Order the buffer's stream before ``consumer`` again.");
 
     m.def(
-        "fence",
-        [](std::optional<std::intptr_t> producer, std::optional<std::intptr_t> consumer, int device) {
-#ifndef EAGLE_CPU_ONLY
-            eagle::interop::fence(producer, consumer, device);
-#else
-            // A pure C++ core reaches CUDA through the fence provider its device
-            // backend installed for the CUDA device type.
-            eagle::interop::FenceProvider provider = eagle::interop::fence_provider(kDLCUDA);
-            if (provider == nullptr)
-                throw eagle::interop::InteropError("device: a CUDA fence needs a CUDA build of eagle, this build is CPU-only");
-            provider(kDLCUDA, device, producer, consumer);
-#endif
-        },
+        "fence", &fence_streams,
         nb::arg("producer").none(), nb::arg("consumer").none(), nb::arg("device") = 0,
         "Order ``producer`` before ``consumer`` (DLPack stream codes) without blocking the host.");
 #ifndef EAGLE_CPU_ONLY

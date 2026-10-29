@@ -90,8 +90,10 @@ def test_device_props_values_identical_to_the_raw_core_dict():
 
     raw = _core.device_props(0)
     props = device_props(0)
+    assert raw["device"] == 0      # the ordinal the dict was read for; the view carries the properties only
     for name, value in raw.items():
-        assert getattr(props, name) == value
+        if name != "device":
+            assert getattr(props, name) == value
 
 
 @pytest.mark.gpu

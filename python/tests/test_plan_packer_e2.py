@@ -29,6 +29,7 @@ import ctypes
 import pathlib
 import subprocess
 
+import eagle
 import numpy as np
 import pytest
 from _device_file import find_gxx, find_nvcc
@@ -464,7 +465,7 @@ def test_e2_single_output_still_returns_a_bare_array(e2_host_lib):
     plugin = _host_plugin(e2_host_lib, "e2_vec3_host", _VEC3_SPEC,
                           arg_widths={"y": 3})
     y = eplan.plan(plugin, structure=eexec.HostTeam).run(x=_x(8), a=1.0)
-    assert isinstance(y, np.ndarray)
+    assert isinstance(y, eagle.Array)
 
 
 @pytest.mark.repo_local
@@ -519,7 +520,7 @@ def test_e2_packed_mirror_bytes_match_the_cpp_layout(e2_host_lib):
         "e2_decode_host",
         (("wide_out", "probe"), ("vec_in", "x"), ("nsamples", "n")),
     )
-    probe = eplan.plan(plugin, structure=eexec.HostTeam).run(x=x)
+    probe = eplan.plan(plugin, structure=eexec.HostTeam).run(x=x).tolist()   # an eagle.Array: compare its values
 
     assert probe[0] == 40                      # sizeof(GRefMirror), C++ side
     assert probe[1] == n                       # samples_ = the run's sample count

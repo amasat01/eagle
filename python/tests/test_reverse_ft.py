@@ -14,6 +14,10 @@ from eagle import _counters
 from _reverse_block import Gate, block
 from _reverse_fixtures import chain, plans
 
+def _bytes(a):
+    return np.asarray(a.get() if hasattr(a, "get") else a).tobytes()
+
+
 N = 2048
 THREADS = 8
 
@@ -22,7 +26,7 @@ def test_distinct_reverses_of_one_record_agree_and_leave_it_unwritten(tmp_path):
     g, _z = chain(plans(tmp_path, "cpu"), np.linspace(-1, 1, N), 0.5, record=True)
     g.launch()
     tape = g.record._tape
-    before = {k: a.tobytes() for k, a in tape.arrays.items()}
+    before = {k: _bytes(a) for k, a in tape.arrays.items()}
     seed = {"sin.y": np.linspace(1, 2, N)}
     revs = [eagle.diff.Reverse(g) for _ in range(THREADS)]
     out = [None] * THREADS
@@ -39,9 +43,9 @@ def test_distinct_reverses_of_one_record_agree_and_leave_it_unwritten(tmp_path):
         t.start()
     for t in threads:
         t.join(60)
-    assert len({o["x"].tobytes() for o in out}) == 1
-    assert len({o["a"].tobytes() for o in out}) == 1
-    assert {k: a.tobytes() for k, a in tape.arrays.items()} == before
+    assert len({_bytes(o["x"]) for o in out}) == 1
+    assert len({_bytes(o["a"]) for o in out}) == 1
+    assert {k: _bytes(a) for k, a in tape.arrays.items()} == before
     assert _counters.snapshot()["reverses"] - counted == 10 * THREADS
 
 

@@ -44,7 +44,9 @@ runs:
           until [ -e "$root/.git" ]; do root=$(dirname "$root"); done
           args+=(--tree "$root" --version "$root")
         done
-        echo "key=siblings-v1-$RUNNER_OS-$RUNNER_ARCH-$("$ACTION_PATH/../../ci_digest.sh" "${args[@]}")" >> "$GITHUB_OUTPUT"
+        digest=$("$ACTION_PATH/../../ci_digest.sh" "${args[@]}") || exit 1
+        [ -n "$digest" ] || { echo "::error::empty digest: every leg would share one cache entry"; exit 1; }
+        echo "key=siblings-v2-$RUNNER_OS-$RUNNER_ARCH-$digest" >> "$GITHUB_OUTPUT"
     - uses: actions/cache@v6
       if: inputs.dry == ''
       with:

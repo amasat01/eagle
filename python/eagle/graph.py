@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Callable
 
-from . import _alloc
+from . import _alloc, _split
 from . import _counters, _graph_view
 from ._busy import BusyGuard
 from ._conditional import (Branches, RepeatWhile, SkipGuard, Skippable,
@@ -36,7 +36,7 @@ from ._device_kind import GPU_KINDS, device_kind, gpu_kind
 from ._graph_edges import (SHARES_MEMORY_MAX_WORK, Edge, check_conflicts,
                            arrays_overlap, derive_edges)
 from ._active_set import _address
-from .interop import _xp_of
+from .interop import scoped_stream
 from .sidecar import refuse_derived
 
 __all__ = ["Edge", "Graph", "Node", "NodeKind", "SHARES_MEMORY_MAX_WORK",
@@ -222,13 +222,11 @@ class _Eager:
     __slots__ = ("copies", "call", "stream", "event")
 
     def __init__(self, copies, call, stream):
-        import cupy
-
         self.copies, self.call = copies, call
         self.stream = self.event = None
         if stream is not None:
-            self.stream = _wrap_external_stream(stream)
-            self.event = cupy.cuda.Event(disable_timing=True)
+            self.stream = int(stream)
+            self.event = _stream.Event()
 
     def run(self, waits):
         """Run once after ``waits`` (events); returns the event that ends it,
@@ -241,7 +239,7 @@ class _Eager:
             _device_sync()
             return None
         _wait_stream(self.stream, waits)
-        with self.stream:
+        with scoped_stream(self.stream):
             for copy in self.copies:
                 copy()
             self.call()
@@ -252,28 +250,21 @@ class _Eager:
 def _device_sync():
     """A host node's fence: every stream of the device, whichever framework
     issued on it, is done (this also waits other threads' device work)."""
-    import cupy
+    from . import _core
 
-    cupy.cuda.Device().synchronize()
+    _core.device_synchronize(-1)
 
 
 def _wait_stream(stream, events):
     for event in events:
-        stream.wait_event(event)
+        event.wait(stream)
 
 
 def _run_seeds(cache, tail):
-    """What the first stage of a run waits on: the caller's current stream,
+    """What the first stage of a run waits on: the stream the caller works on,
     the legacy stream (``cache`` holds the two re-recorded events) and the
     previous run's ``tail`` event (run-to-run WAR/WAW)."""
-    import cupy
-
-    current = cupy.cuda.get_current_stream()
-    cache[0].record(current)
-    events = [cache[0]]
-    if current.ptr != cupy.cuda.Stream.null.ptr:
-        cache[1].record(cupy.cuda.Stream.null)
-        events.append(cache[1])
+    events = _stream.seed_events(cache)
     if tail is not None:
         events.append(tail)
     return events
@@ -349,25 +340,41 @@ def _on_device(device):
     if device is None:
         yield
         return
-    import cupy
-
-    with cupy.cuda.Device(device):
-        cupy.cuda.runtime.setDevice(device)   # Device() skips this when the id already matches
+    with _stream.on_device(device):
         yield
 
 
 def _plane_device(accesses, device=None):
-    """The CUDA ordinal the graph's planes live on. Planes on two devices are
-    refused by name, and so is an explicit ``device`` they are not on."""
-    found = sorted({arr.device.id for a in accesses
-                    for _n, arr, _r in (*a.reads, *a.writes) if device_kind(arr) != "host"})
+    """The CUDA ordinal the graph's planes live on, which is the one device it runs on. A plane on another
+    device is refused by name (plane, its device, the graph's device) before any kernel is reached: planes
+    on two devices, and an explicit ``device`` a plane is not on."""
+    from ._plan_planes import array_device
+
+    first = {}          # device ordinal -> the first plane found on it
+    for a in accesses:
+        for name, arr, _r in (*a.reads, *a.writes):
+            if device_kind(arr) != "host":
+                first.setdefault(array_device(arr), name)
+    found = sorted(first)
     if len(found) > 1:
-        raise ValueError(f"eagle.graph: the planes span devices {found}; "
-                         "a graph runs on one device")
+        raise ValueError(
+            f"eagle.graph: plane {first[found[1]]!r} lives on device {found[1]}, the graph runs on "
+            f"device {found[0]} (where plane {first[found[0]]!r} is); the planes span devices {found}, "
+            "and a graph runs on one device")
     if device is not None and found and found[0] != device:
-        raise ValueError(f"eagle.graph: device={device} was asked, "
-                         f"the arrays live on device {found[0]}")
+        raise ValueError(
+            f"eagle.graph: plane {first[found[0]]!r} lives on device {found[0]}, the graph runs on "
+            f"device {device} (device={device} was asked); device= is checked, never a move")
     return found[0] if found else device
+
+
+def _place(array) -> str:
+    """The device token (``"cpu"`` or ``"cuda:N"``) ``array`` lives on, for allocating next to it."""
+    if device_kind(array) == "host":
+        return "cpu"
+    from ._plan_planes import array_device
+
+    return f"cuda:{array_device(array)}"
 
 
 def _walk(nodes):
@@ -625,7 +632,7 @@ class Graph:
     def _decision(self, cell):
         """A fresh ``uint32`` cell holding a copy of ``cell``, taken by a node
         added here: what the arms of a conditional read."""
-        decision = _alloc.zeros(_xp_of(cell), 1, dtype="uint32")
+        decision = _alloc.zeros(_place(cell), 1, dtype="uint32")
         self.add_node(_copy(cell, decision), name="decision")
         return decision
 
@@ -652,14 +659,14 @@ class Graph:
         once at the head, then each arm is an IF over ``decision == k``."""
         self._check_open("chain")
         decision = self._decision(index)
-        xp = _xp_of(index)
+        where = _place(index)
         if _array_backend(decision) == "gpu" and has_branch_nodes(switch=True):
             return self.add_node(Branches((*arms, *([otherwise] if otherwise is not None else [])),
                                           SkipGuard(decision, 0), switch=True))     # one SWITCH node
         for k, arm in enumerate((*arms, otherwise)):
             if arm is None:
                 continue
-            base = _alloc.full(xp, 1, k, dtype=xp.uint32) if k else None
+            base = _alloc.full(where, 1, k, dtype="uint32") if k else None
             self.add_node(Skippable(arm, SkipGuard(decision, 0, base, 0, True)))
         return self
 
@@ -795,8 +802,6 @@ class Graph:
             before = recorder.before if recorder else (lambda stage: ())
             ctx = LowerCtx(be, host=host) if host else LowerCtx(be)
             if be == "gpu":
-                import cupy
-
                 self._device = _plane_device(accesses, device)
                 pin.enter_context(_on_device(self._device))
                 self._steps, self._host_nodes = [], []
@@ -839,9 +844,9 @@ class Graph:
                     if stages:
                         segments.append(stages)
                     self._segments = [
-                        (GraphPipeline()._capture_stages(seg), cupy.cuda.Event(disable_timing=True))
+                        (GraphPipeline()._capture_stages(seg), _stream.Event())
                         if isinstance(seg, list) else seg for seg in segments]
-                    self._seeds = [cupy.cuda.Event(disable_timing=True) for _ in range(2)]
+                    self._seeds = []
                 self._schedule = tuple(_TIERS[get_node_kind(n.kind).tier] for n in self._nodes)
             else:
                 from ._host_schedule import lower_cpu_stage
@@ -1008,6 +1013,7 @@ class Graph:
                 _transfer.raise_host_errors(self._host_nodes)
             if self._recorder is not None:
                 self._record = self._recorder.finish()
+            self._scatter_status(wait=True)
         return self
 
     def enqueue(self, n: int = 1) -> Graph:
@@ -1033,7 +1039,19 @@ class Graph:
                 for _ in range(n):
                     for step in self._cpu_steps:
                         step()
+            self._scatter_status(wait=False)
         return self
+
+    def _scatter_status(self, *, wait: bool) -> None:
+        """A segmented GPU graph replays through captures of its own: its split binds are marked pending on
+        the stream its tail event closes. (A plain GPU graph is one pipeline, which marks its own.)"""
+        if self._segments is None or self._tail_ev is None:
+            return
+        for node in _walk(self._nodes):
+            if node.kind == "launch" and hasattr(node.payload, "_status"):
+                _split.mark_pending(node.payload, self._tail_ev._stream)
+        if wait:
+            _split.run_pending(self._tail_ev._stream)
 
     def update(self, values=None, /, **kw) -> Graph:
         """Change parameters of a ``record=True`` graph between launches:
@@ -1065,6 +1083,8 @@ class Graph:
                     self._sync_tail()
             if self._host_nodes:
                 _transfer.raise_host_errors(self._host_nodes)
+            if self._segments is not None and self._tail_ev is not None:
+                _split.run_pending(self._tail_ev._stream)
         return self
 
     def _sync_tail(self):
@@ -1088,7 +1108,7 @@ class Graph:
                 else:
                     pipe, event = seg
                     pipe.enqueue(1, seed_events=waits if first or prev is not None else None)
-                    event.record(pipe._ext)
+                    event.record(pipe._sptr)
                     prev = event
                 first = False
             tail = prev
@@ -1232,5 +1252,5 @@ def _live_checks(accesses):
 from ._graph_kinds import (_STEP_SINK, _Cond, _copy, _Late, _is_bound, _wait_links,  # noqa: E402
                            child, opaque)  # noqa: E402,F401
 from . import _transfer  # noqa: E402
-from .interop import _wrap_external_stream  # noqa: E402
+from . import _stream  # noqa: E402
 from .pipeline import refuse_in_capture  # noqa: E402

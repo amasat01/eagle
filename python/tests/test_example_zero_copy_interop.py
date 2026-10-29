@@ -111,7 +111,7 @@ def test_a_deliberately_copied_input_fails_the_alias_check(example):
     import torch
 
     t = torch.arange(12, dtype=torch.float32, device="cuda").reshape(3, 4).contiguous()
-    cu_alias = eagle.to_cupy(t)
+    cu_alias = __import__("cupy").from_dlpack(eagle.to_array(t))
     assert cu_alias.data.ptr == t.data_ptr()  # the real alias, for contrast
 
     forced_copy = cp.asarray(t.clone().cpu().numpy())  # host round-trip, fresh allocation
@@ -147,7 +147,7 @@ def test_a_copied_input_does_not_see_an_in_place_mutation(example):
                           structure=eexec.DeviceKernel)
 
         t_in = torch.arange(12, dtype=torch.float32, device="cuda").reshape(3, 4).contiguous()
-        cu_in_copy = cp.asarray(eagle.to_cupy(t_in).get())  # a real, disconnected copy
+        cu_in_copy = cp.asarray(cp.from_dlpack(eagle.to_array(t_in)).get())  # a real, disconnected copy
         cu_out = cp.empty_like(cu_in_copy)
         bound = plan.bind(x=cu_in_copy, k=k, y=cu_out)
         bound.launch()

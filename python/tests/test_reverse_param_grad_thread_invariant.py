@@ -33,7 +33,7 @@ _CHILD = textwrap.dedent('''
     g = eagle.Graph().add(p.bind(x=x, a=0.3, y=y), name="step").build(record=True)
     g.launch()
     grads = eagle.diff.reverse(g.record, {"y": rng.standard_normal(n)})
-    sys.stdout.write(grads["a"].tobytes().hex() + " " + grads["x"].tobytes().hex()[:4096])
+    sys.stdout.write(np.asarray(grads["a"]).tobytes().hex() + " " + np.asarray(grads["x"]).tobytes().hex()[:4096])
 ''')
 
 

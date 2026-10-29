@@ -106,6 +106,34 @@ argument other than ``None`` is refused.
 ``GraphPipeline.stream`` exposes a pipeline's own stream under the same
 name, so a capture can import a buffer straight onto it.
 
+Your stream, and results in your library
+----------------------------------------
+
+**eagle's stream.** With nothing open, eagle works on the default stream. It never reads CuPy's or torch's
+current stream, so opening one of theirs changes nothing for eagle. To put eagle's work on your stream, for one
+call pass ``stream=``, or for a block write ``with eagle.stream(s):``. ``s`` is a raw handle, an object with
+``__cuda_stream__``, a torch or Warp stream (``.cuda_stream``) or a CuPy stream (``.ptr``); eagle turns it into a
+raw handle once, at that boundary. Inside your own CuPy or torch capture, ``with eagle.stream(s):`` puts eagle's
+launches in the same capture.
+
+A raw int handle is your contract. eagle does not check that it is a live stream, or that it belongs to the right
+device. Pass a stream object when you have one.
+
+**Results.** eagle returns ``eagle.Array``: eagle's own array over aether memory, which every library above
+reads through DLPack or ``__cuda_array_interface__`` and which speaks the buffer protocol on the host. To get a
+library's own type, ask for it:
+
+.. code-block:: python
+
+   y = plan.run(x=x, ...)                         # eagle.Array
+   y_np = y.to("numpy")                           # "numpy", "cupy", "torch", "jax" or "warp"
+   y_t = plan.run(x=x, ..., returns="torch")      # every result, converted
+
+``to()`` shares the memory where the library can (DLPack with your stream handed over) and copies otherwise. If the
+library is not installed, ``to()`` raises ``ImportError`` with the install line, and ``returns=`` warns once and
+returns ``eagle.Array``. ``eagle.to_array(x)`` goes the other way, zero-copy. A complex array is refused by
+name: hold the ``(re, im)`` pairs as a float array with a trailing axis of 2.
+
 Lifetime
 --------
 

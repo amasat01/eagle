@@ -37,6 +37,7 @@ import numpy as np
 import pytest
 
 from eagle import interop
+from eagle.frameworks import cupy as interop_cupy
 from eagle.host_launch import HostPluginLibrary
 
 # --------------------------------------------------------------------------- #
@@ -266,22 +267,22 @@ def fake_cupy_streams(monkeypatch):
     mod = types.ModuleType("cupy")
     mod.cuda = types.SimpleNamespace(ExternalStream=_FakeExternalStream)
     monkeypatch.setitem(sys.modules, "cupy", mod)
-    interop._reset_external_stream_cache()
+    interop_cupy.reset_external_stream_cache()
     yield _FakeExternalStream
-    interop._reset_external_stream_cache()
+    interop_cupy.reset_external_stream_cache()
 
 
 def test_the_same_stream_handle_returns_the_same_wrapper(fake_cupy_streams):
-    first = interop.external_stream(0xDEAD)
+    first = interop_cupy.external_stream(0xDEAD)
     for _ in range(9):
-        assert interop.external_stream(0xDEAD) is first
+        assert interop_cupy.external_stream(0xDEAD) is first
     assert fake_cupy_streams.constructed == 1
-    assert interop._external_stream_stats() == {"hits": 9, "misses": 1}
+    assert interop_cupy.external_stream_stats() == {"hits": 9, "misses": 1}
 
 
 def test_a_different_stream_handle_gets_its_own_wrapper(fake_cupy_streams):
-    a = interop.external_stream(0x1000)
-    b = interop.external_stream(0x2000)
+    a = interop_cupy.external_stream(0x1000)
+    b = interop_cupy.external_stream(0x2000)
     assert a is not b
     assert a.ptr == 0x1000 and b.ptr == 0x2000
     assert fake_cupy_streams.constructed == 2
@@ -291,7 +292,7 @@ def test_the_wrapper_wraps_exactly_the_requested_handle(fake_cupy_streams):
     """PARITY: a cached wrapper must be indistinguishable from a fresh one —
     it wraps the handle it was asked for, and nothing else."""
     for ptr in (0, 1, 0xFFFF_FFFF, 0x7FFF_FFFF_FFFF):
-        assert interop.external_stream(ptr).ptr == ptr
+        assert interop_cupy.external_stream(ptr).ptr == ptr
 
 
 def test_red_leg_defeating_the_stream_cache_zeroes_the_hits(fake_cupy_streams):
@@ -299,9 +300,9 @@ def test_red_leg_defeating_the_stream_cache_zeroes_the_hits(fake_cupy_streams):
     uncached per-call construction) the hit counter stays at zero and a
     new wrapper is built every time."""
     for _ in range(9):
-        interop._reset_external_stream_cache()
-        interop.external_stream(0xDEAD)
-    assert interop._external_stream_stats()["hits"] == 0
+        interop_cupy.reset_external_stream_cache()
+        interop_cupy.external_stream(0xDEAD)
+    assert interop_cupy.external_stream_stats()["hits"] == 0
     assert fake_cupy_streams.constructed == 9
 
 
@@ -315,9 +316,9 @@ def test_torch_launch_context_reuses_the_cached_external_stream():
 
     if not torch.cuda.is_available():  # pragma: no cover - marker-gated
         pytest.skip("torch CUDA not available")
-    interop._reset_external_stream_cache()
+    interop_cupy.reset_external_stream_cache()
     adapter = _TorchAdapter(cuda=True)
     first = adapter.launch_context()
     for _ in range(5):
         assert adapter.launch_context() is first
-    assert interop._external_stream_stats()["hits"] == 5
+    assert interop_cupy.external_stream_stats()["hits"] == 5

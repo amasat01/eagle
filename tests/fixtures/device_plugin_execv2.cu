@@ -120,3 +120,32 @@ extern "C" __global__ void exec_legacy(ScalarHandle y, ScalarHandle x,
     if (i >= n) return;
     static_cast<double*>(y.data)[i] = static_cast<const double*>(x.data)[i] + 1.0;
 }
+
+// A kernel with a THREAD BOX (`launch.box` {axis 0, T 4, stride 8}): the launch's `base`/`count`
+// count THREADS, and thread `base + flat` owns the lanes of its box (the body the code generator
+// emits for a boxed kernel). It adds 1 to every lane it owns, so a lane written twice, or by a
+// launch that does not own it, is visible.
+// arg_spec: [mutable y, nsamples]
+static constexpr long long kBoxT = 4, kBoxS = 8;
+extern "C" __global__ void exec_boxed(ScalarHandle y, std::uint32_t /*n*/,
+                                      long long base, long long count,
+                                      long long nSamples)
+{
+    long long t;
+    if (!sample_index(base, count, t)) return;
+    double* out = static_cast<double*>(y.data);
+    const long long own = t + t / kBoxS * (kBoxT - 1) * kBoxS;
+    if (own >= nSamples) return;
+    if (nSamples < kBoxT * kBoxS) {
+        for (long long k = 0; k < kBoxT; ++k) {
+            const long long lane = own + k * kBoxS;
+            if (lane >= nSamples) break;
+            out[lane] += 1.0;
+        }
+    } else {
+        const long long first = own + (kBoxT - 1) * kBoxS < nSamples
+            ? own : nSamples - kBoxT * kBoxS + own % kBoxS;
+        for (long long k = 0; k < kBoxT; ++k)
+            if (first + k * kBoxS >= own) out[first + k * kBoxS] += 1.0;
+    }
+}

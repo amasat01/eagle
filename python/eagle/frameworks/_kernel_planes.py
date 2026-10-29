@@ -175,7 +175,8 @@ class Signature:
     def dtype(self, name, mode) -> np.dtype:
         """The array dtype of slot ``name`` in build ``mode``."""
         if name in ACTIVE_PLANES:
-            return np.dtype(np.int32) if name == MAP_PLANE else np.dtype(np.uint32)
+            wide = name == MAP_PLANE and name in self._ir and self._ir[name].dtype in ("i64", "int64")
+            return np.dtype(np.int64 if wide else np.int32) if name == MAP_PLANE else np.dtype(np.uint32)
         ir = self._ir[name].dtype
         if ir in _FLOAT_IR:
             return FLOAT_MODES[mode]

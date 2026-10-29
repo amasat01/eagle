@@ -17,6 +17,7 @@ ground is the RETURN SHAPE, not the packing those rows already certify.
 
 from __future__ import annotations
 
+import eagle
 import numpy as np
 import pytest
 
@@ -59,7 +60,7 @@ def test_one_output_still_returns_the_bare_array_never_a_1_item_dict(e2_host_lib
                           arg_widths={"y": 3})
     result = eplan.plan(plugin, structure=eexec.HostTeam).run(x=_x(8), a=1.0)
 
-    assert isinstance(result, np.ndarray), (
+    assert isinstance(result, eagle.Array), (
         f"a single-output plugin must return the bare plane, got "
         f"{type(result).__name__}"
     )

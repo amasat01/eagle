@@ -10,20 +10,20 @@ lookup table, broadcast uniform, writable ``Mutable``, the ``terminated``
 mask, wide per-sample buffer/gradient), shared verbatim by every launch
 path so the input contract can never drift between kinds.
 
-Each foreign tensor is imported to cupy through :mod:`eagle.interop`
+Each foreign tensor is imported as an :class:`eagle.Array` through :mod:`eagle.interop`
 (zero-copy DLPack for a CUDA-resident tensor, a host upload otherwise); the
 cast/contiguate after that is a copy only when not already the target dtype
 / C-contiguous. The launchable's producer resolves ``scalar_type`` to the
-Real dtype ``dt`` threaded through here (:func:`eagle.dtypes.np_dtype`).
+Real dtype ``dt`` threaded through here (a dtype name, DType or class: :func:`eagle.dtypes.dtype_name`).
 """
 
 from __future__ import annotations
 
 import threading
+from typing import Any, NamedTuple
 
-import numpy as np
-
-from . import _alloc
+from . import _alloc, arrays
+from .dtypes import dtype_name
 from . import _layout
 from .roles import param_decls
 
@@ -45,13 +45,11 @@ def require_n(n, *, hint="state-vector input"):
     return n
 
 
-# The conforming fast path: for the common case -- a cupy array already
-# the target dtype, C-contiguous, and on the current device -- the
-# coercion triple ``cp.ascontiguousarray(cp.asarray(interop.to_cupy(value),
-# dtype=dt))`` is three no-ops, so returning the input object directly is
-# bitwise identical. Anything else takes the general path unchanged.
-# ``_fast_path_ok`` takes the cupy module as an argument so it is
-# unit-testable with no device.
+# The conforming fast path: for the common case -- an eagle or cupy array already
+# the target dtype, C-contiguous, and on the current device -- the coercion
+# (import, ``arrays.asarray(..., dtype, device)``, ``ascontiguousarray``) is
+# three no-ops, so returning the input object directly is bitwise identical.
+# Anything else takes the general path unchanged.
 
 #: fast/slow counters over :func:`_as_dtype` (record-only; the gate reads them).
 _coerce_stats = {"fast": 0, "slow": 0}
@@ -84,33 +82,35 @@ def _force_slow_coercion(enabled: bool = True) -> None:
     _force_slow = bool(enabled)
 
 
-def _fast_path_ok(value, dt, cp) -> bool:
-    """True only for a cupy array already the exact target dtype,
-    C-contiguous, and on the current device (a cross-device array takes
-    the general path)."""
+def _device() -> str:
+    """The current CUDA device as a device token (``"cuda:N"``)."""
+    from .launch import _current_device_ordinal
+
+    return f"cuda:{_current_device_ordinal()}"
+
+
+def _fast_path_ok(value, dt) -> bool:
+    """True only for an :class:`eagle.Array` or a cupy-like array (``flags``, ``device.id``) already the exact
+    target dtype, C-contiguous, and on the current device (a cross-device
+    array takes the general path)."""
     if _force_slow:
         return False
-    if not isinstance(value, cp.ndarray):
-        return False
-    if value.dtype != dt:
-        return False
-    if not value.flags.c_contiguous:
-        return False
     try:
-        return int(value.device.id) == int(cp.cuda.runtime.getDevice())
+        if isinstance(value, arrays.Array):
+            return value.dtype == dt and value.is_contiguous and value.device == _device()
+        return (value.dtype == dt and bool(value.flags.c_contiguous)
+                and f"cuda:{int(value.device.id)}" == _device())
     except Exception:
         return False  # cannot report its device -> not safe to bind blind
 
 
-def _as_dtype(value, dt=np.float64):
-    """Import ``value`` to a contiguous ``dt`` cupy array (zero-copy DLPack
+def _as_dtype(value, dt="float64"):
+    """Import ``value`` as a contiguous ``dt`` device array (zero-copy DLPack
     where possible, else a cast/copy). ``dt`` is the resolved Real dtype
     (float64 default; float32 in float32 mode -- SoftDouble stays float64).
-    An already-conforming cupy array is returned as-is (see the FAST PATH
+    An already-conforming array is returned as-is (see the FAST PATH
     note above)."""
-    import cupy as cp
-
-    if _fast_path_ok(value, dt, cp):
+    if _fast_path_ok(value, dt):
         with _COERCE_LOCK:
             _coerce_stats["fast"] += 1
         return value
@@ -120,10 +120,10 @@ def _as_dtype(value, dt=np.float64):
 
     from . import interop
 
-    return cp.ascontiguousarray(cp.asarray(interop.to_cupy(value), dtype=dt))
+    return arrays.ascontiguousarray(arrays.asarray(interop.to_array(value), dt, device=_device()))
 
 
-def coerce_vec_inputs(kw, names, n=None, widths=None, dt=np.float64):
+def coerce_vec_inputs(kw, names, n=None, widths=None, dt="float64"):
     """State vectors -> contiguous ``(W, N)`` ``dt`` device arrays; returns
     ``(dict, n)`` with N reconciled. ``widths`` maps a name to its
     component count (default 3; a synthesized derivative seed may differ)."""
@@ -142,7 +142,7 @@ def coerce_vec_inputs(kw, names, n=None, widths=None, dt=np.float64):
     return out, n
 
 
-def coerce_wide_inputs(kw, names, n=None, dt=np.float64):
+def coerce_wide_inputs(kw, names, n=None, dt="float64"):
     """Wide per-sample flat inputs -> contiguous 2-D ``(rows, N)`` ``dt``
     device arrays; returns ``(dict, n)``. Unlike a fixed-width state
     vector, a wide buffer's true row count (``stride * n_in``) is a
@@ -163,7 +163,7 @@ def coerce_wide_inputs(kw, names, n=None, dt=np.float64):
     return out, n
 
 
-def coerce_wide_outputs(kw, names, n=None, dt=np.float64, exempt=()):
+def coerce_wide_outputs(kw, names, n=None, dt="float64", exempt=()):
     """Wide gradient-scatter outputs (a VJP-derived kernel's disjoint
     scatter targets) -> contiguous 2-D ``(rows, N)`` ``dt`` device arrays,
     written in place; returns ``(dict, n)``. Never auto-allocated (the row
@@ -195,7 +195,7 @@ def coerce_wide_outputs(kw, names, n=None, dt=np.float64, exempt=()):
     return out, n
 
 
-def coerce_mat_inputs(kw, shapes, n=None, dt=np.float64):
+def coerce_mat_inputs(kw, shapes, n=None, dt="float64"):
     """Per-sample matrix inputs -> contiguous flat ``(R*C, N)`` ``dt``
     device arrays; returns ``(dict, n)``. ``shapes`` maps each name to its
     declared ``(R, C)``; the caller passes either ``(R, C, N)`` or flat
@@ -208,7 +208,7 @@ def coerce_mat_inputs(kw, shapes, n=None, dt=np.float64):
             raise TypeError(f"missing required matrix input '{name}'")
         arr = _as_dtype(kw[name], dt)
         if arr.ndim == 3 and arr.shape[:2] == (r, c):
-            arr = arr.reshape(r * c, arr.shape[2])
+            arr = arr.reshape((r * c, arr.shape[2]))
         elif not (arr.ndim == 2 and arr.shape[0] == r * c):
             raise ValueError(
                 f"matrix input '{name}' must have shape ({r}, {c}, N) or "
@@ -219,7 +219,7 @@ def coerce_mat_inputs(kw, shapes, n=None, dt=np.float64):
     return out, n
 
 
-def coerce_per_sample(kw, names, n=None, dt=np.float64):
+def coerce_per_sample(kw, names, n=None, dt="float64"):
     """Per-sample scalars -> contiguous ``(N,)`` ``dt`` device arrays
     (strict: a 2-D input is rejected, never silently flattened); returns
     ``(dict, n)``."""
@@ -238,7 +238,7 @@ def coerce_per_sample(kw, names, n=None, dt=np.float64):
     return out, n
 
 
-def coerce_tables(kw, lookup_counts, dt=np.float64):
+def coerce_tables(kw, lookup_counts, dt="float64"):
     """Lookup tables / shared constants -> flat ``(count,)`` ``dt``
     handles. The row-major flatten is the binding contract (the kernel
     reads ``handle[flat_index]``); the count is checked against the
@@ -256,8 +256,21 @@ def coerce_tables(kw, lookup_counts, dt=np.float64):
     return out
 
 
+class Scalar(NamedTuple):
+    """A by-value kernel scalar: its dtype spelling and Python value. """
+
+    dtype: str
+    value: Any
+
+    def __float__(self):
+        return float(self.value)
+
+    def __int__(self):
+        return int(self.value)
+
+
 def coerce_int_uniform(name, value):
-    """One ``int`` broadcast param -> an exact ``np.int64``, never through
+    """One ``int`` broadcast param -> an exact int64 :class:`Scalar`, never through
     ``dt(value)``: a float/double route is bit-exact only below 2^53. Not
     an exact integer (``2.5``) is refused rather than truncated; ``2.0`` is
     accepted, matching :func:`fill_mutable`."""
@@ -265,7 +278,7 @@ def coerce_int_uniform(name, value):
         raise TypeError(
             f"int parameter '{name}' was passed a bool ({value!r}); pass an integer"
         )
-    if isinstance(value, (float, np.floating)):
+    if hasattr(value, "__float__") and not isinstance(value, int):
         if float(value) != int(value):
             raise TypeError(
                 f"int parameter '{name}' was passed a non-integral value "
@@ -273,23 +286,21 @@ def coerce_int_uniform(name, value):
                 "(GRID_CONSTANT() Int p_" + str(name) + ") and is never rounded"
             )
         value = int(value)
-    out = np.int64(value)
-    # Round-trip guard: np.int64() of a Python int larger than 2^63-1 raises,
-    # but a numpy float128/Decimal-ish input could still land off by one.
-    if int(out) != int(value):
+    out = int(value)
+    if not -(1 << 63) <= out < (1 << 63):
         raise TypeError(
             f"int parameter '{name}' does not survive the int64 slot exactly "
-            f"({value!r} -> {int(out)}); it is out of range for a 64-bit signed "
+            f"({value!r}); it is out of range for a 64-bit signed "
             "uniform"
         )
-    return out
+    return Scalar("int64", out)
 
 
-def coerce_uniforms(kw, params, dt=np.float64):
+def coerce_uniforms(kw, params, dt="float64"):
     """Broadcast ``Param`` constants -> their declared by-value type.
     ``params`` may be bare names (v1, all float) or decl-carrying entries
     (:func:`eagle.roles.param_decls` normalizes both); an ``int`` param
-    binds ``np.int64`` exactly (:func:`coerce_int_uniform`), never ``dt``."""
+    binds an int64 :class:`Scalar` exactly (:func:`coerce_int_uniform`), never ``dt``."""
     out = {}
     for name, dtype in param_decls(params):
         if name not in kw:
@@ -297,7 +308,7 @@ def coerce_uniforms(kw, params, dt=np.float64):
         if dtype == "int":
             out[name] = coerce_int_uniform(name, kw[name])
         elif dtype == "float":
-            out[name] = dt(kw[name])
+            out[name] = Scalar(dtype_name(dt), float(kw[name]))
         else:  # defensive: param_decls does not validate the vocabulary
             raise ValueError(
                 f"parameter '{name}' declares unknown dtype {dtype!r} "
@@ -333,7 +344,7 @@ def _adapt_mutable(name, value, heads, adapted):
     return value
 
 
-def coerce_mutable(name, value, decl, dt=np.float64, adapted=None):
+def coerce_mutable(name, value, decl, dt="float64", adapted=None):
     """Coerce a provided per-sample ``Mutable`` array to its device buffer;
     returns ``(device_array, n)``. A ``float``/``int`` slot is contiguous
     ``(N,)`` (``int`` always ``int64``); a ``vector`` slot a ``(W, N)`` SoA
@@ -344,8 +355,6 @@ def coerce_mutable(name, value, decl, dt=np.float64, adapted=None):
     A sample-major ``vector``/``matrix`` slot is adapted first
     (:mod:`eagle._layout`); when ``adapted`` is a dict its record is
     stored there by name, so the caller can write the result back."""
-    import cupy as cp
-
     from . import interop
 
     interop.refuse_jax_written(value, f"the Mutable '{name}'")
@@ -363,14 +372,14 @@ def coerce_mutable(name, value, decl, dt=np.float64, adapted=None):
         value = _adapt_mutable(name, value, ((r, c), (r * c,)), adapted)
         arr = _as_dtype(value, dt)
         if arr.ndim == 3 and arr.shape[:2] == (r, c):
-            arr = arr.reshape(r * c, arr.shape[2])
+            arr = arr.reshape((r * c, arr.shape[2]))
         elif not (arr.ndim == 2 and arr.shape[0] == r * c):
             raise ValueError(
                 f"Mutable matrix '{name}' must be a ({r}, {c}, N) or flat "
                 f"({r * c}, N) array; got shape {tuple(arr.shape)}"
             )
         return arr, int(arr.shape[1])
-    dtype = cp.int64 if decl.dtype == "int" else dt
+    dtype = "int64" if decl.dtype == "int" else dt
     arr = _as_dtype(value, dtype)
     if arr.ndim != 1:
         raise ValueError(
@@ -379,12 +388,10 @@ def coerce_mutable(name, value, decl, dt=np.float64, adapted=None):
     return arr, int(arr.size)
 
 
-def fill_mutable(name, value, decl, n, dt=np.float64):
+def fill_mutable(name, value, decl, n, dt="float64"):
     """A broadcast / default ``Mutable`` buffer: a scalar ``value`` filled
     to ``(N,)`` as ``dt``/``int64``. A vector/matrix slot has no scalar
     fill -- it must be passed as an array."""
-    import cupy as cp
-
     if decl.dtype == "vector":
         raise TypeError(
             f"Mutable vector '{name}' must be passed as a ({decl.width}, N) array "
@@ -397,12 +404,12 @@ def fill_mutable(name, value, decl, n, dt=np.float64):
             "(a scalar broadcast / default fill is not supported for a matrix slot)"
         )
     if decl.dtype == "int":
-        return _alloc.full(cp, n, int(value), dtype=cp.int64)
-    return _alloc.full(cp, n, float(value), dtype=dt)
+        return _alloc.full(_device(), n, int(value), dtype="int64")
+    return _alloc.full(_device(), n, float(value), dtype=dt)
 
 
 # The opt-in all-false ``terminated`` mask cache. An omitted mask gets a
-# fresh ``_alloc.zeros(cp, n, bool)`` per call -- identical every time, so
+# fresh ``_alloc.zeros(<device>, n, bool)`` per call -- identical every time, so
 # cacheable, but ONLY for a kernel known never to write it, which this
 # module (marshalling arbitrary plugins) cannot know on its own. So it is
 # sidecar-declared opt-in (see :mod:`eagle.sidecar`'s
@@ -410,7 +417,7 @@ def fill_mutable(name, value, decl, n, dt=np.float64):
 # buffer. Helps the uncaptured path only -- a captured launch already
 # requires a pre-allocated mask.
 
-#: ``(device_id, n)`` -> the shared all-false mask for a DECLARING plugin.
+#: ``(device token, n)`` -> the shared all-false mask for a DECLARING plugin.
 _zero_mask_cache: dict = {}
 _ZERO_MASK_COUNTS = {"hits": 0, "misses": 0, "bypassed": 0}
 
@@ -438,11 +445,11 @@ def _reset_zero_mask_cache() -> None:
         _ZERO_MASK_COUNTS["bypassed"] = 0
 
 
-def _cached_zero_mask(n, cp):
+def _cached_zero_mask(n):
     """The shared all-false ``(n,)`` bool mask for the current device,
     keyed on ``(device, n)``. Only reached for a plugin that declared the
     mask read-only."""
-    key = (int(cp.cuda.runtime.getDevice()), int(n))
+    key = (_device(), int(n))
     with _ZERO_MASK_LOCK:
         mask = _zero_mask_cache.get(key)
         if mask is not None:
@@ -452,10 +459,10 @@ def _cached_zero_mask(n, cp):
             _ZERO_MASK_COUNTS["bypassed"] += 1
         else:
             _ZERO_MASK_COUNTS["misses"] += 1
-            mask = _alloc.zeros(cp, int(n), dtype=cp.bool_)
+            mask = _alloc.zeros(key[0], int(n), dtype="bool")
             _zero_mask_cache[key] = mask
             return mask
-    return _alloc.zeros(cp, int(n), dtype=cp.bool_)
+    return _alloc.zeros(_device(), int(n), dtype="bool")
 
 
 def coerce_terminated(kw, n, *, readonly_mask=False):
@@ -464,18 +471,16 @@ def coerce_terminated(kw, n, *, readonly_mask=False):
     sidecar-declared opt-in: when ``True`` and the mask is omitted, it is
     served from the per-``(device, n)`` cache. A passed mask is never
     cached."""
-    import cupy as cp
-
     term = kw.get("terminated")
     if term is None:
         if readonly_mask:
-            return _cached_zero_mask(n, cp)
-        return _alloc.zeros(cp, n, dtype=cp.bool_)
+            return _cached_zero_mask(n)
+        return _alloc.zeros(_device(), n, dtype="bool")
     if not readonly_mask:
         from . import interop
 
         interop.refuse_jax_written(term, "the terminated mask")
-    term = _as_dtype(term, cp.bool_)
-    if term.shape != (n,):
+    term = _as_dtype(term, "bool")
+    if tuple(term.shape) != (n,):
         raise ValueError(f"'terminated' must have shape ({n},); got {term.shape}")
     return term

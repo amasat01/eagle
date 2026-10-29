@@ -644,4 +644,4 @@ def test_device_reset_allocates_nothing(reorder):
         s.reset()
     cp.cuda.Device().synchronize()
     assert Count.allocated == 0
-    assert bool((s.map == cp.arange(1 << 20, dtype=cp.int32)).all())
+    assert bool((cp.asarray(s.map) == cp.arange(1 << 20, dtype=cp.int32)).all())

@@ -107,6 +107,9 @@ endif()
 if(NOT APPLE AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   set(_eagle_ext_compile -ffunction-sections -fdata-sections)
   set(_eagle_ext_link "LINKER:--exclude-libs,ALL" "LINKER:--gc-sections")
+elseif(APPLE)
+  # drop local symbols at link time: the install then needs no `strip`, which warns on a signed binary
+  set(_eagle_ext_link "LINKER:-x")
 endif()
 
 # Only the plugin needs the CUDA toolkit; the core is plain C++.
@@ -265,6 +268,58 @@ set(_eagle_no_gnu_unique
 # --no-undefined turns a runtime call the translation layer does not implement
 # into a link error instead of a load-time failure.
 # ---------------------------------------------------------------------------
+# OpenMP: ONE runtime per process, owned by aether-dsc (aether/_omp/). Every eagle extension finds it at run time by a
+# relative rpath into the installed aether package (the wheel repair is told to leave it, so nothing here is vendored).
+# At build time it links aether's own file when aether_dsc.openmp() reports one, else the toolchain's OpenMP of the same
+# soname (Linux) or, on macOS, the toolchain's libomp renamed to @rpath/libomp.dylib so it resolves to aether's copy.
+find_package(Python 3.9 REQUIRED COMPONENTS Interpreter)
+execute_process(
+  COMMAND "${Python_EXECUTABLE}" -c
+    "import aether_dsc\no = aether_dsc.openmp()\nprint(';'.join([str(o.library), *o.compile_flags]) if o else '')"
+  OUTPUT_VARIABLE _eagle_omp OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+if(_eagle_omp)
+  list(POP_FRONT _eagle_omp _eagle_omp_library)
+  set(_eagle_omp_compile ${_eagle_omp})
+  add_library(eagle_openmp SHARED IMPORTED)
+  set_target_properties(eagle_openmp PROPERTIES IMPORTED_LOCATION "${_eagle_omp_library}")
+  message(STATUS "> OpenMP runtime (aether-dsc's): ${_eagle_omp_library}")
+  # The compiler and the shipped runtime must be one family: clang's -fopenmp calls LLVM's __kmpc_*, which libgomp does
+  # not export (the extension would build, then fail to import), and gcc's calls GOMP_*, which libomp does not export.
+  file(STRINGS "${_eagle_omp_library}" _eagle_omp_kmpc REGEX "^__kmpc_reduce_nowait$" LIMIT_COUNT 1)
+  if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND NOT APPLE AND NOT _eagle_omp_kmpc)
+    message(FATAL_ERROR "${CMAKE_CXX_COMPILER_ID} compiles OpenMP against libomp, but aether-dsc ships ${_eagle_omp_library}, a libgomp. "
+                        "Build aether-dsc with the same compiler (it must ship libomp), or build eagle with GCC.")
+  elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND _eagle_omp_kmpc)
+    message(FATAL_ERROR "GNU compiles OpenMP against libgomp, but aether-dsc ships ${_eagle_omp_library}, a libomp. "
+                        "Build aether-dsc with the same compiler (it must ship libgomp), or build eagle with Clang.")
+  endif()
+else()
+  find_package(OpenMP REQUIRED COMPONENTS CXX)
+  message(STATUS "> OpenMP runtime (the toolchain's; aether-dsc reports none here)")
+endif()
+function(eagle_link_openmp target)
+  if(TARGET eagle_openmp)
+    target_link_libraries(${target} PRIVATE eagle_openmp)
+    target_compile_options(${target} PRIVATE $<$<COMPILE_LANGUAGE:CXX>:${_eagle_omp_compile}>)
+  else()
+    target_link_libraries(${target} PRIVATE OpenMP::OpenMP_CXX)
+    if(APPLE)
+      foreach(_l IN LISTS OpenMP_CXX_LIBRARIES)
+        if(_l MATCHES "libomp\\.dylib" AND EXISTS "${_l}")
+          add_custom_command(TARGET ${target} POST_BUILD VERBATIM
+            COMMAND sh -c "id=$(otool -D '${_l}' | tail -n 1); install_name_tool -change \"$id\" @rpath/libomp.dylib '$<TARGET_FILE:${target}>' && codesign --force --sign - '$<TARGET_FILE:${target}>'")
+        endif()
+      endforeach()
+    endif()
+  endif()
+  if(APPLE)
+    set_property(TARGET ${target} APPEND PROPERTY INSTALL_RPATH "@loader_path/../aether/_omp")
+  else()
+    set_property(TARGET ${target} APPEND PROPERTY INSTALL_RPATH "$ORIGIN/../aether/_omp")
+  endif()
+  set_property(TARGET ${target} PROPERTY BUILD_WITH_INSTALL_RPATH ON)
+endfunction()
+
 if(_eagle_plugin_mode STREQUAL "BUILD")
   add_library(eagle_cuda SHARED src/plugin/eagle_cuda.cu src/plugin/cuda_driver.cpp)
   target_compile_features(eagle_cuda PRIVATE cxx_std_20)
@@ -276,7 +331,6 @@ if(_eagle_plugin_mode STREQUAL "BUILD")
   # The installed aether/eagle packages name libgomp by path, from whichever
   # toolset built them; a second toolset's directories on the link line can hide
   # it. Drop those paths and let the compiler link OpenMP (-fopenmp) instead.
-  find_package(OpenMP REQUIRED COMPONENTS CXX)
   foreach(_t aether::aether eagle::eagle)
     get_target_property(_libs ${_t} INTERFACE_LINK_LIBRARIES)
     if(_libs)
@@ -284,8 +338,7 @@ if(_eagle_plugin_mode STREQUAL "BUILD")
       set_property(TARGET ${_t} PROPERTY INTERFACE_LINK_LIBRARIES "${_libs}")
     endif()
   endforeach()
-  target_compile_options(eagle_cuda PRIVATE $<$<COMPILE_LANGUAGE:CXX>:${OpenMP_CXX_FLAGS}>)
-  target_link_options(eagle_cuda PRIVATE ${OpenMP_CXX_FLAGS})
+  eagle_link_openmp(eagle_cuda)
   # Compact listing, e.g. "61,70,90/90": a long arch list must fit the
   # build_info archs field (checked at compile time in eagle_cuda.cu).
   set(_eagle_sass "")
@@ -305,11 +358,15 @@ if(_eagle_plugin_mode STREQUAL "BUILD")
   list(JOIN _eagle_sass "," _eagle_sass)
   list(JOIN _eagle_ptx "," _eagle_ptx)
   set(_eagle_plugin_archs "${_eagle_sass}/${_eagle_ptx}")
+  # No version here: the plugin object depends only on its sources, headers, flags and architectures, so one build
+  # serves every commit (eagle._core reports the package version, from src/eagle_version.cpp).
   target_compile_definitions(eagle_cuda PRIVATE
-    EAGLE_PYTHON_VERSION="${eagle_VERSION}"
     EAGLE_CUDA_PLUGIN_ARCHS="${_eagle_plugin_archs}"
     $<$<BOOL:${EAGLE_BACKEND_INJECT_MISSING}>:EAGLE_BACKEND_INJECT_MISSING=1>)
   target_compile_options(eagle_cuda PRIVATE ${_eagle_no_gnu_unique} ${_eagle_warn_as_err})
+  # Maxwell and Pascal (sm_5x/6x) are shipped on purpose; nvcc's notice that offline compilation for them will be
+  # removed in a future release is the one warning we accept for that (the narrowest documented flag).
+  target_compile_options(eagle_cuda PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Wno-deprecated-gpu-targets>)
   set(_eagle_map "${CMAKE_CURRENT_SOURCE_DIR}/src/plugin/eagle_cuda.map")
   target_link_options(eagle_cuda PRIVATE
     "LINKER:--version-script=${_eagle_map}" "LINKER:--no-undefined" ${_eagle_static_runtime})
@@ -360,10 +417,11 @@ endif()
 # through the plugin, so it needs no CUDA toolkit to build and no driver to load.
 # It takes the eagle/aether HEADERS only — not eagle::eagle / aether::aether, whose
 # exported definitions describe the CUDA-mode package (AETHER_HAS_CUDA, ...).
-find_package(OpenMP REQUIRED COMPONENTS CXX)
 get_target_property(_eagle_core_incs eagle::eagle INTERFACE_INCLUDE_DIRECTORIES)
 get_target_property(_aether_incs aether::aether INTERFACE_INCLUDE_DIRECTORIES)
-nanobind_add_module(_core MODULE FREE_THREADED src/eagle_core.cpp)
+nanobind_add_module(_core MODULE FREE_THREADED src/eagle_core.cpp src/eagle_version.cpp)
+# the package version lives in this one small file: a new version recompiles it alone
+set_source_files_properties(src/eagle_version.cpp PROPERTIES COMPILE_DEFINITIONS EAGLE_PYTHON_VERSION="${eagle_VERSION}")
 target_compile_features(_core PRIVATE cxx_std_23)
 # aether's own include directories first: an installed eagle's prefix may also
 # hold an (older) aether copy, and the aether this configure resolved must win.
@@ -371,8 +429,9 @@ target_compile_features(_core PRIVATE cxx_std_23)
 target_include_directories(_core PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src" "${_eagle_hdr_root}" ${_aether_incs} ${_eagle_core_incs})
 target_compile_definitions(_core PRIVATE EAGLE_CPU_ONLY=1 AETHER_CPP_MODE=1 EAGLE_BLOCKSIZE=256 NDEBUG
   $<$<BOOL:${_eagle_plugin_skipped}>:EAGLE_CORE_BUILT_WITHOUT_CUDA_PLUGIN=1>)
-target_link_libraries(_core PRIVATE OpenMP::OpenMP_CXX ${CMAKE_DL_LIBS})
-target_compile_options(_core PRIVATE ${_eagle_no_gnu_unique} ${_eagle_warn_as_err} ${_eagle_ext_compile})
+target_link_libraries(_core PRIVATE ${CMAKE_DL_LIBS})
+eagle_link_openmp(_core)
+target_compile_options(_core PRIVATE -ffp-contract=off ${_eagle_no_gnu_unique} ${_eagle_warn_as_err} ${_eagle_ext_compile})
 # libstdc++/libgcc bundled where the toolchain allows (see _eagle_static_runtime).
 target_link_options(_core PRIVATE ${_eagle_static_runtime} ${_eagle_ext_link})
 set_target_properties(_core PROPERTIES
@@ -412,11 +471,12 @@ set(_eagle_xla_map "${CMAKE_CURRENT_SOURCE_DIR}/src/xla/eagle_xla.map")
 # A sanitized build leaves the sanitizer runtime's symbols to the (sanitized)
 # interpreter that loads the library, so --no-undefined would reject them.
 if(APPLE)
-  # Apple's ld: the same three rules as the GNU ld flags below (export list, undefined symbols are errors,
-  # unreferenced code dropped). The list is eagle_xla.map's `global:` section.
+  # Apple's ld: the same rules as the GNU ld flags below (export list, unreferenced code dropped; undefined symbols
+  # are errors by default there, and spelling that out as -undefined,error is deprecated). The list is
+  # eagle_xla.map's `global:` section.
   set(_eagle_xla_exports "${CMAKE_CURRENT_SOURCE_DIR}/src/xla/eagle_xla.exp")
   target_link_options(eagle_xla PRIVATE
-    "LINKER:-exported_symbols_list,${_eagle_xla_exports}" "LINKER:-undefined,error" "LINKER:-dead_strip")
+    "LINKER:-exported_symbols_list,${_eagle_xla_exports}" "LINKER:-dead_strip")
   set_property(TARGET eagle_xla APPEND PROPERTY LINK_DEPENDS "${_eagle_xla_exports}")
   set_property(TARGET eagle_xla PROPERTY SUFFIX ".so")  # eagle.frameworks.jax opens libeagle_xla.so on every platform
 else()
@@ -501,7 +561,8 @@ elseif(_eagle_python_mpi STREQUAL "ON" OR _eagle_python_mpi STREQUAL "AUTO")
     target_compile_definitions(_mpi PRIVATE
       EAGLE_CPU_ONLY=1 AETHER_CPP_MODE=1 EAGLE_BLOCKSIZE=256 NDEBUG
       EAGLE_MPI=1 EAGLE_MPI_LIBRARY="${_eagle_mpi_library}")
-    target_link_libraries(_mpi PRIVATE OpenMP::OpenMP_CXX MPI::MPI_CXX ${CMAKE_DL_LIBS})
+    target_link_libraries(_mpi PRIVATE MPI::MPI_CXX ${CMAKE_DL_LIBS})
+    eagle_link_openmp(_mpi)
     target_compile_options(_mpi PRIVATE ${_eagle_no_gnu_unique} ${_eagle_warn_as_err} ${_eagle_ext_compile})
     # The same wheel-portability link flags `_core` carries, for the same reason.
     target_link_options(_mpi PRIVATE ${_eagle_static_runtime} ${_eagle_ext_link})
@@ -513,4 +574,16 @@ elseif(_eagle_python_mpi STREQUAL "ON" OR _eagle_python_mpi STREQUAL "AUTO")
 else()
   message(FATAL_ERROR
     "EAGLE_PYTHON_MPI must be ON, OFF or AUTO; got '${EAGLE_PYTHON_MPI}'")
+endif()
+
+# The install step rewrites the installed extensions (rpaths, install names), which invalidates their code signatures,
+# and Apple silicon kills a process that maps an invalid one: re-sign (ad hoc) and verify every installed extension.
+if(APPLE)
+  install(CODE [[
+    file(GLOB _exts "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/eagle/*.so")
+    foreach(_f IN LISTS _exts)
+      execute_process(COMMAND codesign --force --sign - "${_f}" COMMAND_ERROR_IS_FATAL ANY)
+      execute_process(COMMAND codesign --verify --strict "${_f}" COMMAND_ERROR_IS_FATAL ANY)
+    endforeach()
+  ]])
 endif()

@@ -3,8 +3,8 @@
 
 """Host-side ABI mirrors, by-value argument builders, and the ABI version tag.
 
-The numpy POD mirrors of the by-value kernel-parameter types -- ``GRef`` and
-``HandleT`` -- plus the ``make_*`` helpers that pack a cupy array's device
+The ctypes POD mirrors of the by-value kernel-parameter types -- ``GRef`` and
+``HandleT`` -- plus the ``make_*`` helpers that pack an array's device
 pointer into one. The C++ twin is ``plugin/gref_abi.h``; every loader in
 both languages validates an artifact's ABI tag via :func:`check_aether_abi`
 before binding any by-value struct.
@@ -12,7 +12,7 @@ before binding any by-value struct.
 
 from __future__ import annotations
 
-import numpy as np
+import ctypes
 
 #: The by-value POD layout contract between producers and loaders. Changing
 #: it needs a coordinated bump of the C++ ``EAGLE_AETHER_ABI`` macro.
@@ -55,53 +55,50 @@ def check_aether_abi(meta: dict, *, kind: str, name: str) -> None:
 DEVICE_CPU = 1
 DEVICE_CUDA = 2
 
-# Host mirror of ``aether::Array<double,3>::ViewT`` (sizeof == 40, alignof
-# == 8; verified by ``tests/test_gref_layout.py``). Width-independent.
-GREF_DTYPE = np.dtype(
-    {
-        "names": [
-            "data_",
-            "samples_",
-            "compStride_",
-            "sampleStride_",
-            "deviceType_",
-            "deviceId_",
-        ],
-        "formats": [np.uintp, np.uint64, np.uint64, np.uint64, np.int32, np.int32],
-        "offsets": [0, 8, 16, 24, 32, 36],
-        "itemsize": 40,
-    }
-)
+class GRef(ctypes.Structure):
+    """Host mirror of ``aether::Array<double,3>::ViewT`` (sizeof == 40, alignof == 8; verified by
+    ``tests/test_gref_layout.py``). Width-independent."""
 
-# Host mirror of ``aether::Array<T>::ViewT``, GREF_DTYPE's rank-1 sibling
-# (sizeof == 32; verified by ``tests/test_handle_layout.py``).
-HANDLE_DTYPE = np.dtype(
-    {
-        "names": ["data", "samples", "stride", "deviceType", "deviceId"],
-        "formats": [np.uintp, np.uint64, np.uint64, np.int32, np.int32],
-        "offsets": [0, 8, 16, 24, 28],
-        "itemsize": 32,
-    }
-)
+    _fields_ = [
+        ("data_", ctypes.c_size_t),
+        ("samples_", ctypes.c_uint64),
+        ("compStride_", ctypes.c_uint64),
+        ("sampleStride_", ctypes.c_uint64),
+        ("deviceType_", ctypes.c_int32),
+        ("deviceId_", ctypes.c_int32),
+    ]
+
+
+class HandleT(ctypes.Structure):
+    """Host mirror of ``aether::Array<T>::ViewT``, GRef's rank-1 sibling (sizeof == 32; verified by
+    ``tests/test_handle_layout.py``)."""
+
+    _fields_ = [
+        ("data", ctypes.c_size_t),
+        ("samples", ctypes.c_uint64),
+        ("stride", ctypes.c_uint64),
+        ("deviceType", ctypes.c_int32),
+        ("deviceId", ctypes.c_int32),
+    ]
+
+
+GREF_SIZE = ctypes.sizeof(GRef)
+HANDLE_SIZE = ctypes.sizeof(HandleT)
+
+
+def device_ptr(arr) -> int:
+    """The device address of ``arr``: an :class:`eagle.Array` (``.ptr``) or a cupy array (``.data.ptr``)."""
+    ptr = getattr(arr, "ptr", None)
+    return arr.data.ptr if ptr is None else ptr
+
 
 def make_gref(arr, n):
-    """Build a by-value ``GRef`` struct over a contiguous ``(3, N)`` cupy
-    array: ``compStride_ == samples_ == n``, ``sampleStride_ == 1``."""
-    g = np.zeros((), dtype=GREF_DTYPE)
-    g["data_"] = arr.data.ptr
-    g["samples_"] = n
-    g["compStride_"] = n
-    g["sampleStride_"] = 1
-    g["deviceType_"] = DEVICE_CUDA
-    return g
+    """Build a by-value ``GRef`` over a contiguous ``(3, N)`` device array (anything with ``.ptr``):
+    ``compStride_ == samples_ == n``, ``sampleStride_ == 1``."""
+    return GRef(device_ptr(arr), n, n, 1, DEVICE_CUDA, 0)
 
 
 def make_handle(arr, n):
-    """Build a by-value scalar-array ``HandleT`` over a contiguous ``(N,)``
-    array; ``n`` is required since the struct carries its own extent."""
-    h = np.zeros((), dtype=HANDLE_DTYPE)
-    h["data"] = arr.data.ptr
-    h["samples"] = n
-    h["stride"] = 1
-    h["deviceType"] = DEVICE_CUDA
-    return h
+    """Build a by-value scalar-array ``HandleT`` over a contiguous ``(N,)`` device array; ``n`` is
+    required since the struct carries its own extent."""
+    return HandleT(device_ptr(arr), n, 1, DEVICE_CUDA, 0)

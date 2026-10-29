@@ -14,6 +14,10 @@ from _reverse_fixtures import chain, plans
 hawk = pytest.importorskip("hawk")
 from hawk import Index, Mutable, Scalar, Table  # noqa: E402
 
+def _bytes(a):
+    return np.asarray(a.get() if hasattr(a, "get") else a).tobytes()
+
+
 N = 64
 
 
@@ -55,5 +59,5 @@ def test_a_gather_free_graph_is_bitwise_and_repeats_exactly(tmp_path):
     again = rev(g.record, {"sin.y": np.linspace(1, 2, N)})
     assert first.report.bitwise == {"x": True, "a": True}
     assert first.report.generation == again.report.generation == 1
-    assert first["x"].tobytes() == again["x"].tobytes()
-    assert first["a"].tobytes() == again["a"].tobytes()
+    assert _bytes(first["x"]) == _bytes(again["x"])
+    assert _bytes(first["a"]) == _bytes(again["a"])

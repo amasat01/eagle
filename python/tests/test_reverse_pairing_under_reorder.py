@@ -10,6 +10,10 @@ import numpy as np
 import eagle
 from _reverse_fixtures import chain, plans
 
+def _bytes(a):
+    return np.asarray(a.get() if hasattr(a, "get") else a).tobytes()
+
+
 N = 6000
 
 
@@ -46,5 +50,5 @@ def test_gradients_come_back_in_sample_order_bitwise(tmp_path):
     assert perm0 is None
     assert not np.array_equal(perm, np.arange(N))   # the reorder really moved samples
     np.testing.assert_array_equal(sid, perm)        # the sample-id plane rode with them
-    assert got["x"].tobytes() == ref["x"].tobytes()
-    assert got["a"].tobytes() == ref["a"].tobytes()  # summed in sample order, not slot order
+    assert _bytes(got["x"]) == _bytes(ref["x"])
+    assert _bytes(got["a"]) == _bytes(ref["a"])  # summed in sample order, not slot order

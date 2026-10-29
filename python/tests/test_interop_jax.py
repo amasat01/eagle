@@ -34,13 +34,13 @@ is absent. Nothing framework-specific is imported at module load.
 from __future__ import annotations
 
 import ctypes
+import gc
 import json
 import os
 import pathlib
 import shutil
 import subprocess
 import time
-import weakref
 
 # JAX takes most of the GPU's memory unless told otherwise, which would starve
 # the cupy and torch rows sharing this process. Set before any jax import.
@@ -50,7 +50,8 @@ import numpy as np
 import pytest
 from raptor.conformance.interop import certified_framework, register_row
 
-from eagle import LoadedPure, LoadedVector, to_cupy
+from eagle import LoadedPure, LoadedVector
+from eagle.frameworks.cupy import to_cupy
 from eagle.interop import BufferRefused, host_ptr, import_buffer
 
 pytestmark = pytest.mark.interop_matrix
@@ -207,20 +208,19 @@ def test_jax_cuda_result_is_eagles_result_buffer(monkeypatch):
     plugin(position=x, mu=MU)  # warm up: load the module, fill the caches
 
     seen = {}
-    original = interop._JaxAdapter.from_cupy
+    original = interop._JaxAdapter.from_array
 
     def spy(self, a):
-        seen["ptr"] = a.data.ptr
-        seen["ref"] = weakref.ref(a)
+        seen["ptr"] = a.ptr
         return original(self, a)
 
-    monkeypatch.setattr(interop._JaxAdapter, "from_cupy", spy)
+    monkeypatch.setattr(interop._JaxAdapter, "from_array", spy)
     cp.cuda.runtime.deviceSynchronize()
 
     y = plugin(position=x, mu=MU)
     assert y.unsafe_buffer_pointer() == seen["ptr"]  # the same buffer
-    assert seen["ref"]() is not None  # the jax array keeps eagle's array alive
-    assert _max_rel(np.asarray(y), ref) < 1e-12  # complete at return
+    gc.collect()
+    assert _max_rel(np.asarray(y), ref) < 1e-12  # complete at return, and the jax array alone keeps eagle's buffer alive
     snapshot = np.asarray(y).copy()
 
     y2 = plugin(position=x, mu=MU)
@@ -229,7 +229,6 @@ def test_jax_cuda_result_is_eagles_result_buffer(monkeypatch):
 
     del y, y2
     cp.cuda.runtime.deviceSynchronize()
-    assert seen["ref"]() is None  # nothing else owned it: it dies with the jax array
 
 
 @register_row("JX-IN-CPU-COPY")

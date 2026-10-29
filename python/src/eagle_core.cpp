@@ -62,7 +62,13 @@
  *                     the named post-boundary follow-on, not this binding.
  */
 
+// Python.h (through nanobind) first: it defines feature-test macros the standard headers also set
+#include <nanobind/nanobind.h>
+
 #include <algorithm>
+#include <array>
+#include <initializer_list>
+#include <iterator>
 #include <thread>
 #include <cstddef>
 #include <cstdint>
@@ -79,11 +85,11 @@
 
 #include <unistd.h>
 
-#include <nanobind/nanobind.h>
 #include <nanobind/stl/optional.h>  // std::optional <-> None (GraphComposer named args)
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>  // std::vector<uintptr_t> <-> list[int] (capture_snapshot_nodes)
 #include <nanobind/stl/pair.h>  // (address, element bytes) plane pairs (reorder_device)
+#include <nanobind/stl/array.h>  // launch_raw grid and block triples
 #include <nanobind/stl/tuple.h>  // graph-view rows (nodes, edges, plane refs)
 #include <nanobind/stl/function.h>  // the recording forward's checkpoint callback
 
@@ -97,6 +103,7 @@
 #include "eagle/diff/Reverse.h"
 #include "eagle/diff/Transpose.h"
 #include "eagle/diff/Window.h"
+#include "eagle/array/host.h"
 #include "eagle/events/Sensitivity.h"
 #include "eagle/exec/HostSchedule.h"
 #include "eagle/exec/HostTeam.h"
@@ -121,6 +128,8 @@
 #include "seam/Groups.h"
 #include "seam/Loader.h"
 #include "seam/Status.h"
+
+const char* eagle_python_version();   // src/eagle_version.cpp
 
 namespace nb = nanobind;
 
@@ -417,6 +426,33 @@ struct PyDescription {
 
 } // namespace
 
+#include "array_binding.h"  // eagle.Array / eagle.DType (uses ck and EBX above)
+
+// Column-major batched GEMM on the host (plain loops, parallel over the columns of C): the twin of the device
+// seam call, so a plan's host and device forms agree to rounding.
+template <class T>
+void gemm_host(int op_a, int op_b, std::int64_t m, std::int64_t n, std::int64_t k, const T* a, std::int64_t lda, const T* b,
+               std::int64_t ldb, T* c, std::int64_t ldc, std::int64_t batch, std::int64_t sa, std::int64_t sb,
+               std::int64_t sc, T alpha, T beta)
+{
+    for (std::int64_t i = 0; i < batch; ++i) {
+        const T* A = a + i * sa;
+        const T* B = b + i * sb;
+        T* C = c + i * sc;
+#pragma omp parallel for schedule(static)
+        for (std::int64_t j = 0; j < n; ++j)
+            for (std::int64_t r = 0; r < m; ++r) {
+                T acc = 0;
+                for (std::int64_t l = 0; l < k; ++l) {
+                    const T x = op_a ? A[l + r * lda] : A[r + l * lda];
+                    const T y = op_b ? B[j + l * ldb] : B[l + j * ldb];
+                    acc += x * y;
+                }
+                C[r + j * ldc] = alpha * acc + (beta == T(0) ? T(0) : beta * C[r + j * ldc]);
+            }
+    }
+}
+
 NB_MODULE(_core, m)
 {
     m.doc() = "eagle._core — nanobind binding of the eagle::cuda CUDA-graph "
@@ -432,6 +468,7 @@ NB_MODULE(_core, m)
     // The generic DLPack layer: buffer import/validation/export and the
     // stream contract (plugin/interop.h). See interop_binding.h.
     eagle_interop_binding::bind(m);
+    eagle_array_binding::bind(m);
 
     // -- The device backend (eagle-backend/1 seam, see src/seam/) -------------
     eagle_seam::registerTranslators();
@@ -439,6 +476,13 @@ NB_MODULE(_core, m)
     m.attr("CAP_CONDITIONAL_IF_ELSE") = EAGLE_BACKEND_CAP_CONDITIONAL_IF_ELSE;
     m.attr("CAP_CONDITIONAL_SWITCH") = EAGLE_BACKEND_CAP_CONDITIONAL_SWITCH;
     m.attr("LOOP_UNCAPPED") = 0xFFFFFFFFu;
+    m.def(
+        "memset_device",
+        [](std::uintptr_t ptr, std::uint64_t nbytes, std::uintptr_t stream) {
+            ck(EBX(eagle_backend_memset_device)(ptr, nbytes, stream));
+        },
+        nb::arg("ptr"), nb::arg("nbytes"), nb::arg("stream"),
+        "Stream-ordered, capture-legal zero of `nbytes` of device memory (a captured memset node inside a capture).");
     m.def(
         "memcpy_device",
         [](std::uintptr_t dst, std::uintptr_t src, std::uint64_t nbytes, std::uintptr_t stream) {
@@ -511,6 +555,335 @@ NB_MODULE(_core, m)
             "host node that runs on every replay. `fn` runs on a backend thread with the GIL, must not "
             "call CUDA, and an exception it raises is reported as unraisable. Without a backend it is "
             "called now and its exception propagates.");
+    // Seam minor 7: device scope, modules, raw launch, built-in cell ops, strided copy. Each is
+    // bound on its own: a backend without one raises BackendUnavailable naming it.
+    m.def(
+        "device_count", [] {
+            std::int32_t n = 0;
+            ck(EBX(eagle_backend_device_count)(&n));
+            return n;
+        },
+        "How many devices the backend sees.");
+    m.def(
+        "set_device", [](std::int32_t device) { ck(EBX(eagle_backend_set_device)(device)); }, nb::arg("device"),
+        "Make `device` this thread's current device (its primary context).");
+    m.def(
+        "launch_status",
+        [](std::int32_t device) {
+            if (cuda().loaded())  // no backend loaded: no device launch was ever issued, so nothing is pending
+                ck(EBX(eagle_backend_launch_status)(device));
+        },
+        nb::arg("device") = -1,
+        "Raise RuntimeError naming the CUDA error when a launch issued on `device` (-1: the current one) left one "
+        "pending (and clear it). A query of the launch error, not a wait.");
+    m.def(
+        "get_device", [] {
+            std::int32_t d = 0;
+            ck(EBX(eagle_backend_get_device)(&d));
+            return d;
+        },
+        "This thread's current device ordinal (no device properties read, no context made).");
+    m.def(
+        "device_synchronize",
+        [](std::int32_t device) {
+            eagle_array_binding::run_sync_hook(-1);
+            eagle_backend_status status;
+            {
+                nb::gil_scoped_release release;
+                status = EBX(eagle_backend_device_synchronize)(device);
+            }
+            ck(status);                  // raising needs the GIL back
+        },
+        nb::arg("device") = -1, "Block the host until every stream of `device` (-1: the current one) is idle.");
+    m.def("set_sync_hook", [](nb::object fn) { eagle_array_binding::sync_hook() = fn; }, nb::arg("fn"),
+          "Run `fn(stream)` before eagle waits on the device (`fn(-1)`) or a stream, or reads "
+          "device data back to the host (`get`, `tolist`). `None` unsets it.");
+    m.def(
+        "stream_is_capturing",
+        [](std::uintptr_t stream) {
+            std::int32_t capturing = 0;
+            ck(EBX(eagle_backend_stream_is_capturing)(stream, &capturing));
+            return capturing != 0;
+        },
+        nb::arg("stream") = 0, "Is `stream` (0: the legacy default stream) inside a capture?");
+    m.def(
+        "device_mem_info",
+        [](std::int32_t device) {
+            struct eagle_backend_device_props p {};
+            p.struct_size = sizeof p;
+            ck(EB("device", eagle_backend_device_props)(device, &p));
+            if (p.struct_size < offsetof(struct eagle_backend_device_props, free_mem_bytes) + sizeof p.free_mem_bytes)
+                throw std::runtime_error("device_mem_info: the backend reports no memory fields (seam older than 1.7)");
+            return std::make_pair(p.total_mem_bytes, p.free_mem_bytes);
+        },
+        nb::arg("device") = -1, "`(total_bytes, free_bytes)` of `device` (-1: the current one).");
+    m.def(
+        "module_load",
+        [](nb::bytes image, std::int32_t device) {
+            std::uint64_t module = 0;
+            ck(EBX(eagle_backend_module_load)(image.c_str(), image.size(), device, &module));
+            return static_cast<std::uintptr_t>(module);
+        },
+        nb::arg("image"), nb::arg("device") = -1,
+        "Load a cubin, fatbin or PTX text (bytes) into `device`'s primary context; the module handle, "
+        "as an int. Free it with `module_release` on the same device.");
+    m.def(
+        "module_load_jit",
+        [](nb::bytes image, std::uint32_t max_registers, std::int32_t device) {
+            std::uint64_t module = 0;
+            ck(EBX(eagle_backend_module_load_jit)(image.c_str(), image.size(), device, max_registers, &module));
+            return static_cast<std::uintptr_t>(module);
+        },
+        nb::arg("image"), nb::arg("max_registers") = 0, nb::arg("device") = -1,
+        "`module_load` of PTX text compiled under a cap of `max_registers` registers per thread (0: no cap).");
+    m.def(
+        "gemm",
+        [](std::uint32_t dtype, std::uint32_t op_a, std::uint32_t op_b, std::int64_t mm, std::int64_t nn, std::int64_t kk,
+           std::uintptr_t a, std::int64_t lda, std::uintptr_t b, std::int64_t ldb, std::uintptr_t c, std::int64_t ldc,
+           std::int64_t batch, std::int64_t sa, std::int64_t sb, std::int64_t sc, double alpha, double beta,
+           std::uintptr_t stream, std::int32_t device, bool host) {
+            if (host) {
+                nb::gil_scoped_release release;
+                if (dtype == EAGLE_BACKEND_GEMM_F32)
+                    gemm_host<float>(op_a, op_b, mm, nn, kk, reinterpret_cast<const float*>(a), lda, reinterpret_cast<const float*>(b), ldb,
+                                     reinterpret_cast<float*>(c), ldc, batch, sa, sb, sc, static_cast<float>(alpha), static_cast<float>(beta));
+                else
+                    gemm_host<double>(op_a, op_b, mm, nn, kk, reinterpret_cast<const double*>(a), lda, reinterpret_cast<const double*>(b), ldb,
+                                      reinterpret_cast<double*>(c), ldc, batch, sa, sb, sc, alpha, beta);
+                return;
+            }
+            eagle_backend_gemm_desc d {};
+            d.struct_size = sizeof d; d.dtype = dtype; d.device = device; d.op_a = op_a; d.op_b = op_b; d.stream = stream;
+            d.m = mm; d.n = nn; d.k = kk; d.lda = lda; d.ldb = ldb; d.ldc = ldc; d.a = a; d.b = b; d.c = c;
+            d.batch = batch; d.stride_a = sa; d.stride_b = sb; d.stride_c = sc; d.alpha = alpha; d.beta = beta;
+            ck(EBX(eagle_backend_gemm)(&d));
+        },
+        nb::arg("dtype"), nb::arg("op_a"), nb::arg("op_b"), nb::arg("m"), nb::arg("n"), nb::arg("k"), nb::arg("a"), nb::arg("lda"),
+        nb::arg("b"), nb::arg("ldb"), nb::arg("c"), nb::arg("ldc"), nb::arg("batch") = 1, nb::arg("stride_a") = 0,
+        nb::arg("stride_b") = 0, nb::arg("stride_c") = 0, nb::arg("alpha") = 1.0, nb::arg("beta") = 0.0, nb::arg("stream") = 0,
+        nb::arg("device") = -1, nb::arg("host") = false,
+        "Batched column-major GEMM on raw addresses: C = alpha op(A) op(B) + beta C. `host`: plain loops (OpenMP); else "
+        "cuBLAS through the backend (raises BackendUnavailable when cuBLAS is absent).");
+    m.def(
+        "gemm_release", [](std::uintptr_t stream, std::int32_t device) { EBX(eagle_backend_gemm_release)(device, stream); },
+        nb::arg("stream"), nb::arg("device") = -1, "Destroy the cuBLAS handle kept for (device, stream), if any.");
+    m.def(
+        "link_ptx",
+        [](nb::bytes image, std::uint32_t max_registers, std::int32_t device) {
+            std::uint64_t size = 0;
+            ck(EBX(eagle_backend_link_ptx)(image.c_str(), image.size(), device, max_registers, nullptr, 0, &size));
+            std::string cubin(size, '\0');
+            ck(EBX(eagle_backend_link_ptx)(image.c_str(), image.size(), device, max_registers, cubin.data(), size, &size));
+            return nb::bytes(cubin.data(), cubin.size());
+        },
+        nb::arg("image"), nb::arg("max_registers") = 0, nb::arg("device") = -1,
+        "Link PTX text for `device` under a cap of `max_registers` registers per thread (0: no cap): the cubin, as bytes.");
+    m.def(
+        "module_function",
+        [](std::uintptr_t module, const std::string& name) {
+            std::uint64_t f = 0;
+            ck(EBX(eagle_backend_module_function)(module, name.c_str(), &f));
+            return static_cast<std::uintptr_t>(f);
+        },
+        nb::arg("module"), nb::arg("name"), "The function `name` of a loaded module (a raw handle, as an int).");
+    m.def(
+        "module_release",
+        [](std::uintptr_t module, std::int32_t device) { EBX(eagle_backend_module_release)(module, device); },
+        nb::arg("module"), nb::arg("device") = -1, "Unload a module (0 is fine).");
+    m.def(
+        "function_attribute",
+        [](std::uintptr_t function, std::int32_t attribute) {
+            std::int32_t value = 0;
+            ck(EBX(eagle_backend_function_attribute)(function, attribute, &value));
+            return value;
+        },
+        nb::arg("function"), nb::arg("attribute"),
+        "One CUfunction attribute (0 max threads per block, 1 static shared, 2 const, 3 local, 4 registers) of a raw function.");
+    m.def(
+        "launch_raw",
+        [](std::uintptr_t function, std::array<std::uint32_t, 3> grid, std::array<std::uint32_t, 3> block,
+           const std::vector<std::uintptr_t>& args, std::uintptr_t stream, std::uint32_t shared, std::int32_t device) {
+            std::vector<void*> a = asParams(args);
+            eagle_backend_launch_raw_desc d {};
+            d.struct_size = sizeof d;
+            d.device = device;
+            d.shared_bytes = shared;
+            d.function = function;
+            d.stream = stream;
+            std::copy(grid.begin(), grid.end(), d.grid);
+            std::copy(block.begin(), block.end(), d.block);
+            d.args = reinterpret_cast<std::uintptr_t>(a.data());
+            d.arg_count = static_cast<std::uint32_t>(a.size());
+            ck(EBX(eagle_backend_launch_raw)(&d));
+        },
+        nb::arg("function"), nb::arg("grid"), nb::arg("block"), nb::arg("args"), nb::arg("stream") = 0,
+        nb::arg("shared") = 0, nb::arg("device") = -1,
+        "One kernel launch of a raw function on `stream` (capture-legal). `grid` and `block` are 3-tuples; "
+        "`args` is a list of integers, each the ADDRESS of one argument value, which the caller keeps alive "
+        "until the call returns.");
+    for (const auto& [name, code] : std::initializer_list<std::pair<const char*, std::uint32_t>> {
+             { "CELL_BUMP", EAGLE_BACKEND_CELL_BUMP }, { "CELL_MASK_COUNT", EAGLE_BACKEND_CELL_MASK_COUNT },
+             { "CELL_POLICY", EAGLE_BACKEND_CELL_POLICY }, { "CELL_IDENTITY", EAGLE_BACKEND_CELL_IDENTITY },
+             { "CELL_COUNT_FIRED", EAGLE_BACKEND_CELL_COUNT_FIRED }, { "CELL_GROUP_AND", EAGLE_BACKEND_CELL_GROUP_AND },
+             { "CELL_SCALE_COUNT", EAGLE_BACKEND_CELL_SCALE_COUNT }, { "CELL_CAST", EAGLE_BACKEND_CELL_CAST },
+             { "CELL_CONTIGUOUS_GATHER", EAGLE_BACKEND_CELL_CONTIGUOUS_GATHER },
+             { "CELL_ADD", EAGLE_BACKEND_CELL_ADD }, { "CELL_FILL", EAGLE_BACKEND_CELL_FILL },
+             { "CELL_SUB", EAGLE_BACKEND_CELL_SUB }, { "CELL_MUL", EAGLE_BACKEND_CELL_MUL },
+             { "CELL_MAX", EAGLE_BACKEND_CELL_MAX }, { "CELL_EQ", EAGLE_BACKEND_CELL_EQ },
+             { "CELL_NE", EAGLE_BACKEND_CELL_NE }, { "CELL_GT", EAGLE_BACKEND_CELL_GT },
+             { "CELL_WHERE", EAGLE_BACKEND_CELL_WHERE }, { "CELL_CLIP", EAGLE_BACKEND_CELL_CLIP },
+             { "CELL_ARANGE", EAGLE_BACKEND_CELL_ARANGE }, { "CELL_LINSPACE", EAGLE_BACKEND_CELL_LINSPACE },
+             { "CELL_TAKE", EAGLE_BACKEND_CELL_TAKE }, { "CELL_CUMSUM", EAGLE_BACKEND_CELL_CUMSUM },
+             { "CELL_SCATTER", EAGLE_BACKEND_CELL_SCATTER }, { "CELL_COUNT_NONZERO", EAGLE_BACKEND_CELL_COUNT_NONZERO },
+             { "CELL_FLATNONZERO", EAGLE_BACKEND_CELL_FLATNONZERO }, { "CELL_ADDS", EAGLE_BACKEND_CELL_ADDS },
+             { "CELL_SUBS", EAGLE_BACKEND_CELL_SUBS }, { "CELL_MULS", EAGLE_BACKEND_CELL_MULS },
+             { "CELL_MAXS", EAGLE_BACKEND_CELL_MAXS }, { "CELL_EQS", EAGLE_BACKEND_CELL_EQS },
+             { "CELL_NES", EAGLE_BACKEND_CELL_NES }, { "CELL_GTS", EAGLE_BACKEND_CELL_GTS },
+             { "CELL_RSUBS", EAGLE_BACKEND_CELL_RSUBS }, { "CELL_LTS", EAGLE_BACKEND_CELL_LTS },
+             { "CELL_STRIDED_COPY", EAGLE_BACKEND_CELL_STRIDED_COPY } })
+        m.attr(name) = code;
+    for (const auto& [name, code] : std::initializer_list<std::pair<const char*, int>> {
+             { "DTYPE_BOOL", EAGLE_BACKEND_DTYPE_BOOL }, { "DTYPE_UINT8", EAGLE_BACKEND_DTYPE_UINT8 },
+             { "DTYPE_INT32", EAGLE_BACKEND_DTYPE_INT32 }, { "DTYPE_UINT32", EAGLE_BACKEND_DTYPE_UINT32 },
+             { "DTYPE_INT64", EAGLE_BACKEND_DTYPE_INT64 }, { "DTYPE_UINT64", EAGLE_BACKEND_DTYPE_UINT64 },
+             { "DTYPE_FLOAT32", EAGLE_BACKEND_DTYPE_FLOAT32 }, { "DTYPE_FLOAT64", EAGLE_BACKEND_DTYPE_FLOAT64 },
+             { "DTYPE_FLOAT16", EAGLE_BACKEND_DTYPE_FLOAT16 }, { "DTYPE_BFLOAT16", EAGLE_BACKEND_DTYPE_BFLOAT16 } })
+        m.attr(name) = code;
+    m.def(
+        "cell_op",
+        [](std::uint32_t op, std::uintptr_t stream, std::int64_t n, const std::vector<std::uintptr_t>& p,
+           const std::vector<std::int64_t>& i, std::int32_t device, const std::vector<double>& f) {
+            eagle_backend_cell_op_desc d {};
+            d.struct_size = sizeof d;
+            d.op = op;
+            d.device = device;
+            d.stream = stream;
+            d.n = n;
+            if (p.size() > std::size(d.p) || i.size() > std::size(d.i))
+                throw std::invalid_argument("cell_op: at most 6 addresses and 10 integers");
+            std::copy(p.begin(), p.end(), d.p);
+            std::copy(i.begin(), i.end(), d.i);
+            if (f.size() > std::size(d.f))
+                throw std::invalid_argument("cell_op: at most 2 floats");
+            std::copy(f.begin(), f.end(), d.f);
+            ck(EBX(eagle_backend_cell_op)(&d));
+        },
+        nb::arg("op"), nb::arg("stream"), nb::arg("n") = 0, nb::arg("p") = std::vector<std::uintptr_t> {},
+        nb::arg("i") = std::vector<std::int64_t> {}, nb::arg("device") = -1, nb::arg("f") = std::vector<double> {},
+        "Enqueue one built-in op (the CELL_* codes) on `stream`: capture-legal, integer kernels, no JIT. "
+        "`p` are device addresses and `i` integer arguments, per op (see eagle_backend.h).");
+    m.def(
+        "cumsum_scratch_bytes", [](std::int64_t n) { return eagle::array::cumsum_scratch_bytes(n); }, nb::arg("n"),
+        "Bytes of scratch `cell_op(CELL_CUMSUM, ...)` needs (as `p[2]`) for `n` elements; the op zeroes it itself.");
+    m.def(
+        "host_op",
+        [](std::uint32_t op, std::int64_t n, const std::vector<std::uintptr_t>& p, const std::vector<std::int64_t>& i,
+           const std::vector<double>& f) {
+            if (p.size() > 4 || i.size() > 10 || f.size() > 2)
+                throw std::invalid_argument("host_op: at most 4 addresses, 10 integers, 2 floats");
+            eagle::array::Args a;
+            auto at = [&](std::size_t k) { return k < p.size() ? reinterpret_cast<void*>(p[k]) : nullptr; };
+            a.p0 = at(0); a.p1 = at(1); a.p2 = at(2); a.p3 = at(3);
+            a.n = n;
+            a.i0 = i.size() > 0 ? i[0] : 0;
+            a.i1 = i.size() > 1 ? i[1] : 0;
+            a.f0 = f.size() > 0 ? f[0] : 0.0;
+            a.f1 = f.size() > 1 ? f[1] : 0.0;
+            a.dtype = i.size() > 9 ? static_cast<int>(i[9]) : 7;
+            eagle::array::host::run(static_cast<eagle::array::Op>(op), a);
+        },
+        nb::arg("op"), nb::arg("n"), nb::arg("p"), nb::arg("i") = std::vector<std::int64_t> {},
+        nb::arg("f") = std::vector<double> {},
+        "The host twin of `cell_op` for the array ops 10-23 (OpenMP + SIMD over the same body), on host memory.");
+    m.attr("MEM_DEVICE") = EAGLE_BACKEND_MEM_DEVICE;
+    m.attr("MEM_PINNED") = EAGLE_BACKEND_MEM_PINNED;
+    m.def(
+        "mem_alloc",
+        [](std::int32_t kind, std::int32_t device, std::uint64_t nbytes, std::uintptr_t stream) {
+            std::uint64_t chunk = 0, ptr = 0;
+            ck(EBX(eagle_backend_mem_alloc)(kind, device, nbytes, stream, &chunk, &ptr));
+            return std::make_pair(static_cast<std::uintptr_t>(chunk), static_cast<std::uintptr_t>(ptr));
+        },
+        nb::arg("kind"), nb::arg("device") = -1, nb::arg("nbytes"), nb::arg("stream") = 0,
+        "`(chunk, address)` of `nbytes` of MEM_DEVICE (stream-ordered on `stream`) or MEM_PINNED memory; refused by "
+        "name inside a capture. Free with `mem_release(chunk)`.");
+    m.def(
+        "mem_release", [](std::uintptr_t chunk) { EBX(eagle_backend_mem_release)(chunk); }, nb::arg("chunk"),
+        "Free a `mem_alloc` chunk (0 is fine); stream-ordered, deferred while its stream is capturing.");
+    m.def(
+        "mem_drain",
+        [] {
+            std::int64_t left = 0;
+            ck(EBX(eagle_backend_mem_drain)(&left));
+            return left;
+        },
+        "Run the deferred frees now; the number still queued.");
+    m.def(
+        "stream_sync",
+        [](std::uintptr_t stream, std::int32_t device) {
+            eagle_backend_status status;
+            {
+                nb::gil_scoped_release release;
+                status = EBX(eagle_backend_stream_sync)(device, stream);
+            }
+            ck(status);
+        },
+        nb::arg("stream") = 0, nb::arg("device") = -1,
+        "Block the host until `stream` (0: the legacy default stream) is idle; only that stream. Fails inside a capture.");
+    m.def(
+        "event_create",
+        [](std::int32_t device) {
+            std::uint64_t e = 0;
+            ck(EBX(eagle_backend_event_create)(device, &e));
+            return static_cast<std::uintptr_t>(e);
+        },
+        nb::arg("device") = -1, "A timing-free event on `device` (a raw handle, as an int).");
+    m.def(
+        "event_create_timed",
+        [](std::int32_t device) {
+            std::uint64_t e = 0;
+            ck(EBX(eagle_backend_event_create_timed)(device, &e));
+            return static_cast<std::uintptr_t>(e);
+        },
+        nb::arg("device") = -1, "An event that keeps its timestamp, on `device` (a raw handle, as an int).");
+    m.def(
+        "event_elapsed",
+        [](std::uintptr_t start, std::uintptr_t end) {
+            float ms = 0.f;
+            ck(EBX(eagle_backend_event_elapsed)(start, end, &ms));
+            return ms;
+        },
+        nb::arg("start"), nb::arg("end"), "Milliseconds between two completed timed events.");
+    m.def(
+        "event_record",
+        [](std::uintptr_t event, std::uintptr_t stream) { ck(EBX(eagle_backend_event_record)(event, stream)); },
+        nb::arg("event"), nb::arg("stream") = 0, "Record `event` on `stream` (0: the legacy default). Capture-legal.");
+    m.def(
+        "event_wait",
+        [](std::uintptr_t stream, std::uintptr_t event) { ck(EBX(eagle_backend_event_wait)(stream, event)); },
+        nb::arg("stream"), nb::arg("event"), "Make `stream` wait for what `event` last recorded. Capture-legal.");
+    m.def(
+        "event_release",
+        [](std::uintptr_t event, std::int32_t device) { EBX(eagle_backend_event_release)(event, device); },
+        nb::arg("event"), nb::arg("device") = -1, "Destroy an event (0 is fine).");
+    m.def(
+        "pointer_device",
+        [](std::uintptr_t ptr) {
+            std::int32_t dev = -1;
+            ck(EBX(eagle_backend_pointer_device)(ptr, &dev));
+            return dev;
+        },
+        nb::arg("ptr"), "The device ordinal holding `ptr`, or -1 for host / unknown memory.");
+    m.def(
+        "memcpy_strided",
+        [](std::uintptr_t dst, std::uint64_t dstPitch, std::uintptr_t src, std::uint64_t srcPitch,
+           std::uint64_t widthBytes, std::uint64_t height, std::int32_t kind, std::uintptr_t stream) {
+            ck(EBX(eagle_backend_memcpy_strided)(dst, dstPitch, src, srcPitch, widthBytes, height, kind, stream));
+        },
+        nb::arg("dst"), nb::arg("dst_pitch"), nb::arg("src"), nb::arg("src_pitch"), nb::arg("width_bytes"),
+        nb::arg("height"), nb::arg("kind"), nb::arg("stream") = 0,
+        "Stream-ordered, capture-legal copy of `height` rows of `width_bytes` bytes, row starts `dst_pitch` / "
+        "`src_pitch` bytes apart, direction `kind` (COPY_H2D, COPY_D2H, COPY_D2D).");
     // The interop layer re-fences a device buffer through a provider per DLPack
     // device type: the CUDA types route to the cuda backend (loaded on that first
     // use), every other device type raises BackendUnavailable naming it.
@@ -551,8 +924,11 @@ NB_MODULE(_core, m)
                     info["abi_version"] = i.abi_version;
                 if (has(offsetof(BI, cudart_version) + sizeof i.cudart_version))
                     info["cudart_version"] = i.cudart_version;
-                if (has(offsetof(BI, eagle_version) + sizeof i.eagle_version))
-                    info["eagle_version"] = std::string(i.eagle_version);
+                if (has(offsetof(BI, eagle_version) + sizeof i.eagle_version)) {
+                    // a plugin built once for every commit carries no version ("unknown"): the core's stands for it
+                    std::string version(i.eagle_version);
+                    info["eagle_version"] = version == "unknown" ? std::string(eagle_python_version()) : version;
+                }
                 if (has(offsetof(BI, archs) + sizeof i.archs))
                     info["archs"] = std::string(i.archs);
                 if (has(offsetof(BI, backend_kind) + sizeof i.backend_kind))
@@ -1516,6 +1892,11 @@ NB_MODULE(_core, m)
             "cupy.cuda.ExternalStream).")
         .def("synchronize", [](PyStream& s) {
             auto h = need(s.h, "Stream");
+            {
+                std::uint64_t p = 0;
+                ck(EB("stream", eagle_backend_stream_ptr)(h, &p));
+                eagle_array_binding::run_sync_hook(static_cast<std::int64_t>(p));
+            }
             eagle_backend_status status;
             {
                 nb::gil_scoped_release release;  // waits on host nodes that need the GIL
@@ -1894,6 +2275,7 @@ NB_MODULE(_core, m)
             p.name[sizeof p.name - 1] = '\0';
             nb::dict d;
             d["name"]                     = std::string(p.name);
+            d["device"]                   = p.device;
             d["cc_major"]                 = p.cc_major;
             d["cc_minor"]                 = p.cc_minor;
             d["sm_count"]                 = p.sm_count;

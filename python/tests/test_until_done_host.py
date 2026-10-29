@@ -341,7 +341,7 @@ def test_run_until_done_matches_the_explicit_path_and_the_serial_oracle(
     rep = runner.run()
     _assert_planes_equal(ref, g)
     _assert_planes_equal(serial, g)
-    assert runner.terminated.all() and rep.finished == n and rep.done
+    assert np.asarray(runner.terminated).all() and rep.finished == n and rep.done
     assert np.array_equal(g["k"], inp["nstop"])
     assert rep.launches == int(inp["nstop"].max())
     assert rep.compactions == 0 and rep.reorders == 0 and rep.build_s == 0.0
@@ -498,7 +498,7 @@ def test_the_active_set_artifact_compacts_through_the_same_call(plans,
     assert runner.active is not None and runner.active.theta is None
     rep = runner.run()
     _assert_planes_equal(ref, g)
-    assert rep.done and rep.finished == n and runner.terminated.all()
+    assert rep.done and rep.finished == n and np.asarray(runner.terminated).all()
     if distribution == "spread":
         assert rep.compactions >= 1 and runner.active.live < n
     assert rep.steps == rep.launches * 4
@@ -518,6 +518,6 @@ def test_reorder_runs_and_restores_sample_order(plans):
     assert rep.reorders >= 1 and rep.compactions >= 1 and rep.done
     a = runner.active
     ident = np.arange(n, dtype=np.int32)
-    assert np.array_equal(a.perm[a.inv], ident)
-    assert np.array_equal(a.in_sample_order(g["x"]), g["x"])
+    assert np.array_equal(np.asarray(a.perm)[np.asarray(a.inv)], ident)
+    assert np.array_equal(np.asarray(a.in_sample_order(g["x"])), g["x"])
     _assert_planes_equal(ref, g)

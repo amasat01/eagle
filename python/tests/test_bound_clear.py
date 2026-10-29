@@ -63,10 +63,10 @@ def test_clear_zeroes_the_target_and_its_owned_companion(host_plugin):
     bound.launch()
     clean = acc.copy()
     comp = bound._planes["acc_c"]
-    assert comp.any(), "the subject must leave a nonzero companion"
+    assert _host(comp).any(), "the subject must leave a nonzero companion"
 
     bound.clear("acc")
-    assert not acc.any() and not comp.any()
+    assert not _host(acc).any() and not _host(comp).any()
 
     bound.launch()
     np.testing.assert_array_equal(acc, clean)
@@ -97,7 +97,7 @@ def test_rebinding_the_target_renews_its_owned_companion(host_plugin):
     bound, acc = _bind(host_plugin)
     bound.launch()
     clean = acc.copy()
-    assert bound._planes["acc_c"].any(), "the subject must leave a nonzero companion"
+    assert _host(bound._planes["acc_c"]).any(), "the subject must leave a nonzero companion"
 
     fresh = np.zeros(1)
     bound.rebind(acc=fresh)
@@ -141,7 +141,7 @@ def _xp(framework):
 
 
 def _host(a):
-    return a.get() if hasattr(a, "get") else np.asarray(a)
+    return np.asarray(a.get() if hasattr(a, "get") else a)
 
 
 def _split_bind(tmp_path, framework):
@@ -232,7 +232,7 @@ def test_bound_clear_on_the_device_zeroes_the_target_and_its_companion(tmp_path)
     clean = acc.get().copy()
     comp = bound._planes["acc_c"]
     bound.clear("acc")
-    assert not acc.any() and not comp.any()
+    assert not _host(acc).any() and not _host(comp).any()
     bound.launch()
     np.testing.assert_array_equal(acc.get(), clean)
     with pytest.raises(ValueError, match="acc_c"):

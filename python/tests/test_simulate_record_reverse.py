@@ -41,7 +41,7 @@ def test_full_tape_matches_central_differences(name):
     dx, dv, dc = central_difference(model, *inputs(np))
     _close(grads["x"], dx)
     _close(grads["v"], dv)
-    assert grads["c"] == pytest.approx(dc, rel=1e-6)
+    assert float(grads["c"]) == pytest.approx(dc, rel=1e-6)
 
 
 def test_linear_matches_the_analytic_adjoint():
@@ -57,10 +57,12 @@ def test_a_sample_that_never_steps_keeps_its_seed():
     sim = simulation(rr_osc, x0, v0, tf)
     sim.runner.terminated[3:5] = True             # never steps at all
     sim.run()
-    assert sim.record.steps[3] == 0 and sim.record.steps[0] == 1
+    steps = np.asarray(sim.record.steps)
+    assert steps[3] == 0 and steps[0] == 1
     grads = eagle.diff.reverse(sim.record, {"x": np.full(N, 2.0)})
-    assert grads["x"][3] == 2.0 and grads["v"][3] == 0.0
-    assert grads["x"][0] == 2.0 and grads["v"][0] == pytest.approx(2.0 * 0.01)
+    gx, gv = np.asarray(grads["x"]), np.asarray(grads["v"])
+    assert gx[3] == 2.0 and gv[3] == 0.0
+    assert gx[0] == 2.0 and gv[0] == pytest.approx(2.0 * 0.01)
 
 
 @pytest.mark.gpu
@@ -71,7 +73,7 @@ def test_full_tape_matches_central_differences_gpu(name):
     dx, dv, dc = central_difference(model, *inputs(np))
     _close(grads["x"], dx)
     _close(grads["v"], dv)
-    assert grads["c"] == pytest.approx(dc, rel=1e-6)
+    assert float(grads["c"]) == pytest.approx(dc, rel=1e-6)
 
 
 @pytest.mark.gpu

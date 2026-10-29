@@ -148,7 +148,7 @@ def test_the_extent_by_label_sizes_a_launch_without_a_plane_of_that_shape(built)
     k = declared(built, "first", CHANNEL_BY_SAMPLE)
     t = np.array([1.5, 0.0])
     y = k(t, channel=7)
-    assert y.shape == (7, 16) and np.all(y == 3.0)
+    assert y.shape == (7, 16) and np.all(np.asarray(y) == 3.0)
     assert eplan(k.plugin, structure=eexec.HostTeam).run(t=t, channel=3).shape == (3, 16)
 
 
@@ -180,7 +180,7 @@ def test_a_vector_plane_takes_head_then_lane_shape(built):
 def test_an_all_static_space_needs_no_extent(built):
     k = declared(built, "first", ALL_STATIC)
     y = k(np.array([1.0]))
-    assert y.shape == (4, 16) and np.all(y == 2.0)
+    assert y.shape == (4, 16) and np.all(np.asarray(y) == 2.0)
     with pytest.raises(ValueError, match="every axis.*static"):
         k(np.array([1.0]), channel=4)
 
@@ -258,8 +258,8 @@ def test_device_arm_lane_shaped_planes_and_extent_by_label(tmp_path):
     k = AutoPlan(plugin, {}, None, auto.kernel)
     x = cp.arange(5 * 16, dtype=cp.float64).reshape(5, 16)
     y = k(x, 3.0)
-    assert isinstance(y, cp.ndarray) and y.shape == (5, 16)
-    assert cp.array_equal(y, 3.0 * x)
+    assert isinstance(y, eagle.Array) and y.shape == (5, 16)
+    assert cp.array_equal(cp.asarray(y), 3.0 * x)
     bound = k.bind(x=x, a=2.0, y=cp.zeros((5, 16)))
     assert bound.n == 80
     with pytest.raises(ValueError, match=r"pass channel=<extent>"):

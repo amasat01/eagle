@@ -7,8 +7,9 @@ from __future__ import annotations
 
 import ctypes
 
-import numpy as np
 
+from . import arrays
+from .dtypes import dtype_name
 from .roles import OUTPUT_ROLES, classify_arg
 
 #: The input roles in the order :func:`_n_from_kw` reads them: the sample
@@ -18,14 +19,11 @@ _BUFFER_SHAPED_ROLES = ("lookup", "wide_in")
 
 
 def _trailing_extent(value) -> int:
-    """``value``'s last axis, without dragging it through host memory:
-    ``np.asarray`` on a cupy array raises rather than silently copying
-    device to host, so the extent is read as metadata (``.shape``) first,
-    falling back to ``np.asarray`` only for values with no shape of their
-    own (a list, a scalar sequence)."""
+    """``value``'s last axis, read as metadata (``.shape``) so a device array is never dragged
+    through host memory; a value with no shape of its own (a list) goes through ``arrays.asarray``."""
     shape = getattr(value, "shape", None)
     if shape is None:
-        shape = np.asarray(value).shape
+        shape = arrays.asarray(value).shape
     return int(shape[-1])
 
 
@@ -45,9 +43,9 @@ def _n_from_kw(arg_spec, kw) -> int:
 
 
 def _data_ptr(arr) -> int:
-    """The raw address of ``arr``'s buffer (cupy device pointer, or numpy host one)."""
-    ptr = getattr(getattr(arr, "data", None), "ptr", None)
-    return int(ptr) if ptr is not None else int(arr.ctypes.data)
+    """The raw address of ``arr``'s buffer: an :class:`eagle.Array`, a cupy array, or any host buffer."""
+    ptr = getattr(arr, "ptr", None) or getattr(getattr(arr, "data", None), "ptr", None)
+    return int(ptr) if ptr is not None else int(arrays.asarray(arr).ptr)
 
 
 def _scalar_handle_box(addr: int, n: int, device_type: int):
@@ -80,7 +78,7 @@ def _uniform_box(value, dtype, *, integer: bool = False):
     box would put its bit pattern in the integer argument."""
     if integer:
         return ctypes.c_longlong(int(value))
-    if dtype == np.float32:
+    if dtype is not None and dtype_name(dtype) == "float32":
         return ctypes.c_float(float(value))
     return ctypes.c_double(float(value))
 

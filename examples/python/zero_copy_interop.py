@@ -48,6 +48,15 @@ KERNEL_NAME = "zc_scale"
 REL_TOL = 1e-5
 
 
+def to_cupy(x):
+    """``x`` as a cupy array: a zero-copy view of device memory, an upload of host memory."""
+    import cupy as cp
+    import eagle
+
+    a = eagle.to_array(x)
+    return cp.from_dlpack(a) if a.device.startswith("cuda") else cp.asarray(a.get())
+
+
 # --------------------------------------------------------------------------- #
 # The kernel: ONE traced hawk kernel = one per-sample vector scale.
 # --------------------------------------------------------------------------- #
@@ -159,7 +168,7 @@ def run_device(bundle, positions: np.ndarray, k: float) -> dict:
     (``T-IN-CUDA-ALIAS``), a CUDA torch buffer the kernel writes into in
     place (``T-OUT-CUDA-ALIAS``), and a CPU torch tensor read by the SAME
     kernel through the SAME adapter, which uploads it (``T-IN-CPU-COPY``).
-    All three go through :func:`eagle.to_cupy`, the one public entry point
+    All three go through :func:`to_cupy` below (``eagle.to_array`` then ``cupy.from_dlpack``)
     that imports a foreign tensor to a cupy view -- zero-copy when the
     tensor is already device-resident, a host upload otherwise.
 
@@ -169,7 +178,6 @@ def run_device(bundle, positions: np.ndarray, k: float) -> dict:
     bound plan (no rebind) is what actually exercises that memory.
     """
     import cupy as cp
-    import eagle
     import eagle.exec as eexec
     import torch
     from eagle import plan as eplan
@@ -179,14 +187,14 @@ def run_device(bundle, positions: np.ndarray, k: float) -> dict:
 
     # ---- T-IN-CUDA-ALIAS: a CUDA torch tensor, viewed as cupy, no copy. ----
     t_in = torch.from_numpy(x32.copy()).cuda().contiguous()
-    cu_in = eagle.to_cupy(t_in)
+    cu_in = to_cupy(t_in)
     in_cuda_alias = cu_in.data.ptr == t_in.data_ptr()
     _check_row("T-IN-CUDA-ALIAS", in_cuda_alias)
 
     # ---- T-OUT-CUDA-ALIAS: a CUDA torch buffer, filled in place through its
     # own cupy view -- "viewed as CuPy", written, then read back. ----
     t_out = torch.empty_like(t_in)
-    cu_out = eagle.to_cupy(t_out)
+    cu_out = to_cupy(t_out)
     out_cuda_alias = cu_out.data.ptr == t_out.data_ptr()
     _check_row("T-OUT-CUDA-ALIAS", out_cuda_alias)
 
@@ -211,10 +219,10 @@ def run_device(bundle, positions: np.ndarray, k: float) -> dict:
         np.allclose(mutated_result, mutated_ref, rtol=REL_TOL, atol=1e-6))
 
     # ---- T-IN-CPU-COPY: a CPU torch tensor, read by the same kernel. The
-    # SAME eagle.to_cupy call this time uploads (no device memory to alias
+    # SAME to_cupy call this time uploads (no device memory to alias
     # from a host tensor), so the row declares COPY, not ALIAS. ----
     t_in_cpu = torch.from_numpy(x32.copy()).contiguous()
-    cu_in_cpu = eagle.to_cupy(t_in_cpu)
+    cu_in_cpu = to_cupy(t_in_cpu)
     in_cpu_alias = cu_in_cpu.data.ptr == t_in_cpu.data_ptr()
     _check_row("T-IN-CPU-COPY", in_cpu_alias)
 
@@ -279,7 +287,6 @@ def run_copy_cost_demo(size_mb: float = 256.0, k: float = 2.0, reps: int = 5,
     targets has 5 GB, shared with everything else on the box.
     """
     import cupy as cp
-    import eagle
     import eagle.exec as eexec
     import torch
     from eagle import plan as eplan
@@ -300,8 +307,8 @@ def run_copy_cost_demo(size_mb: float = 256.0, k: float = 2.0, reps: int = 5,
         # never needs to reallocate between calls -- that is the point.
 
         def aliased():
-            cu_in = eagle.to_cupy(t_in)
-            cu_out = eagle.to_cupy(t_out)
+            cu_in = to_cupy(t_in)
+            cu_out = to_cupy(t_out)
             bound = plan.bind(x=cu_in, k=k, y=cu_out)
             bound.launch()
             cp.cuda.runtime.deviceSynchronize()

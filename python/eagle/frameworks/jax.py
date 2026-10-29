@@ -317,14 +317,19 @@ def node(fn, *, reads, writes, name=None):
     For a JAX call that reads values back on the host use
     ``opaque(fn, eager=True)``."""
     from ..graph import _on_device, opaque
-    from ..interop import import_buffer, to_cupy
+    from ..interop import import_buffer
+    from .cupy import to_cupy
 
     reads, writes = dict(reads), dict(writes)
-    ordinals = {a.device.id for a in (*reads.values(), *writes.values())
-                if type(a).__module__.split(".")[0] == "cupy"}
+    first = {}          # device ordinal -> the first plane found on it
+    for plane, a in (*reads.items(), *writes.items()):
+        if type(a).__module__.split(".")[0] == "cupy":
+            first.setdefault(a.device.id, plane)
+    ordinals = sorted(first)
     if len(ordinals) > 1:
-        raise ValueError(f"{_WHO}.node: the planes span devices {sorted(ordinals)}; "
-                         "a node runs on one device")
+        raise ValueError(f"{_WHO}.node: the planes span devices {ordinals} ("
+                         + ", ".join(f"{p!r} is on device {o}" for o, p in sorted(first.items()))
+                         + "); a node runs on one device")
     ordinal = next(iter(ordinals), None)
     stream = None
     if ordinal is not None:
@@ -882,7 +887,7 @@ def preload(cache_dir, *, platform=None):
                 loaded = registry[record["kernel"]]
                 _KEEP.append((registry, loaded))
                 _install(record["digest"], fields, policy=record["policy"], platform="cuda",
-                         entry=seam["run"], ordinal=ordinal, function=loaded.fn.kernel.ptr, seam=seam)
+                         entry=seam["run"], ordinal=ordinal, function=int(loaded.fn), seam=seam)
             done.append(record["digest"])
     return done
 
@@ -1006,3 +1011,8 @@ def _has_gpu():
 
 
 _register_targets()
+
+
+def from_eagle(a):
+    """The :class:`eagle.Array` ``a`` as a jax array (DLPack)."""
+    return jax.dlpack.from_dlpack(a)

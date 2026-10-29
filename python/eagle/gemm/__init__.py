@@ -16,12 +16,8 @@ of that line because nothing else had a stream-capture story yet.
 Two modules move whole:
 
 * :mod:`eagle.gemm.capture` — :class:`~eagle.gemm.capture.CublasCaptureHandle`,
-  the raw ``ctypes`` binding to ``libcublas.so.12`` (or ``.13``) that legally issues an
-  ``Sgemm`` inside a CUDA-graph stream capture where cupy >=14.1.1 refuses
-  (cupy's own ``cublas.setStream`` wrapper sets the stream on every call, which
-  it must not do inside a capture region). Ported VERBATIM — this module
-  already had zero producer imports; it is pure ``ctypes`` + a strides-only
-  shape mapping, which is exactly why it was portable in the first place.
+  the backend seam's cuBLAS ``gemm`` (loaded by the plugin when first asked for) that legally issues an
+  ``Sgemm`` inside a CUDA-graph stream capture, plus a strides-only shape mapping.
 * :mod:`eagle.gemm.plan` — the BACKEND-PARAMETRIC step/plan machinery
   (:class:`~eagle.gemm.plan.LoweredPlan`, :func:`~eagle.gemm.plan.matmul_step`,
   :func:`~eagle.gemm.plan.lower_dense_gemm`,
@@ -60,13 +56,10 @@ from __future__ import annotations
 from .capture import (
     CUBLAS_OP,
     CublasCaptureHandle,
-    CublasResolutionError,
     GemmCaptureUnavailable,
     GemmMappingUnavailable,
     SgemmParams,
     check_plan_capturable,
-    load_cublas,
-    mapped_library_paths,
     require_float32,
     sgemm_params,
     sgemm_params_for_arrays,
@@ -94,7 +87,6 @@ __all__ = [
     "CapturedGemmCall",
     "ContractionOperand",
     "CublasCaptureHandle",
-    "CublasResolutionError",
     "GemmCaptureUnavailable",
     "GemmMappingUnavailable",
     "LoweredPlan",
@@ -110,9 +102,7 @@ __all__ = [
     "captured_gemm_calls",
     "check_plan_capturable",
     "generated_step",
-    "load_cublas",
     "lower_dense_gemm",
-    "mapped_library_paths",
     "matmul_fallback_note",
     "matmul_step",
     "require_float32",

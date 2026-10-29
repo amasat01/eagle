@@ -122,7 +122,9 @@ def test_plugin_names_no_library_but_the_driver():
     def lib(name):
         return backend_wall.unvendored(name).split(".so", 1)[0]
 
-    allowed = {lib(n) for n in needed} | {"libcuda", lib(plugin.name)}
+    # libcublas: the one optional library the plugin may ``dlopen`` at run time (the GEMM behind the seam; absent
+    # cuBLAS is a named refusal, never a load-time need). ``EAGLE_CUBLAS_LIBRARY`` only overrides which file.
+    allowed = {lib(n) for n in needed} | {"libcuda", "libcublas", lib(plugin.name)}
     extra = {n.decode() for n in names if lib(n.decode()) not in allowed}
     assert not extra, f"libeagle_cuda.so names libraries it may load: {sorted(extra)}"
 
