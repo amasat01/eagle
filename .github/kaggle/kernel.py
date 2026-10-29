@@ -272,15 +272,27 @@ def run_tests(py, eagle_src, work):
     shutil.copytree(eagle_src / "python" / "tests", pydir / "tests")
     shutil.copy2(eagle_src / "python" / "conftest.py", pydir)
     runs = (("interop_matrix", ["tests", "-m", "interop_matrix and not repo_local"]),
-            ("jax", ["tests/test_interop_jax.py", "-m", "not repo_local"]))
+            ("jax", ["tests/test_interop_jax.py", "-m", "not repo_local"]),
+            ("warp", ["tests/test_frameworks_warp.py", "-m", "not repo_local"]))
     total = {"tests": 0, "failures": 0, "errors": 0, "skipped": 0, "failed": []}
     rcs = {}
     for name, sel in runs:
         header(f"pytest: {name}")
         xml = work / f"junit_{name}.xml"
         base = pathlib.Path(tempfile.mkdtemp(prefix=f"pytest_{name}_", dir=work))
-        rcs[name] = sh(py, "-m", "pytest", *sel, "-q", "-rs", "-p", "no:cacheprovider", "--basetemp", base / "t",
-                       "-W", "error::pytest.PytestUnknownMarkWarning", f"--junitxml={xml}", cwd=pydir)
+        # a GPU fault leaves a core file naming the kernel and the faulting address; it costs nothing until one occurs
+        cores = base / "gpu_cores"
+        cores.mkdir()
+        env = dict(os.environ, CUDA_ENABLE_COREDUMP_ON_EXCEPTION="1", CUDA_ENABLE_CPU_COREDUMP_ON_EXCEPTION="0",
+                   CUDA_ENABLE_LIGHTWEIGHT_COREDUMP="1",
+                   CUDA_COREDUMP_FILE=str(cores / "gpu.%p"))
+        rcs[name] = sh(py, "-m", "pytest", *sel, "-v", "-rs", "-p", "no:cacheprovider", "--basetemp", base / "t",
+                       "-W", "error::pytest.PytestUnknownMarkWarning", f"--junitxml={xml}", cwd=pydir, env=env)
+        gdb = shutil.which("cuda-gdb") or next(iter(sorted(pathlib.Path("/usr/local").glob("cuda*/bin/cuda-gdb"))), None)
+        for core in sorted(cores.iterdir()):
+            header(f"GPU fault core: {core.name}")
+            if gdb:
+                sh(gdb, "-batch", "-ex", f"target cudacore {core}", "-ex", "info cuda kernels", "-ex", "bt")
         s = junit_summary(xml)
         if s is None:
             total["errors"] += 1

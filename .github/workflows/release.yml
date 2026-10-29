@@ -1110,11 +1110,15 @@ jobs:
           else
             sleep ${{ matrix.stagger }}  # let the first leg's push land before the second asks for a GPU slot
             rc=0
-            # the site at this pull request's branch when it has one, else main (the companion rule)
-            site_ref=main
-            git ls-remote --exit-code --heads https://github.com/amasat01/amasat01.github.io "$EAGLE_REF" >/dev/null 2>&1 && site_ref="$EAGLE_REF"
+            # each sibling at this pull request's branch when it has one, else main (the companion rule)
+            refs=()
+            for pair in site=amasat01.github.io hawk=hawk raptor=raptor aether=aether; do
+              ref=main
+              git ls-remote --exit-code --heads "https://github.com/amasat01/${pair#*=}" "$EAGLE_REF" >/dev/null 2>&1 && ref="$EAGLE_REF"
+              refs+=("--${pair%%=*}-ref" "$ref")
+            done
             python .github/kaggle/drive.py --cuda ${{ matrix.cuda }} --mode ${{ matrix.mode }} \
-              --run-id "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" --eagle-ref "$EAGLE_REF" --site-ref "$site_ref" \
+              --run-id "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" --eagle-ref "$EAGLE_REF" "${refs[@]}" \
               --source wheel --dataset "$DATASET" --wheel-sha256 "$WHEEL_SHA256" --sibling-pins "$SIBLING_PINS" \
               --out "kaggle-out/$LEG" || rc=$?
           fi
