@@ -300,6 +300,17 @@ def test_graph_capture_replays_forward_and_backward(tmp_path, mode):
         np.testing.assert_allclose(c["cd"].grad.numpy()[0], gc, rtol=rtol)
 
 
+def test_a_cpu_graph_capture_is_refused(op):
+    """Warp records a CPU graph from its own launches only: the host runtime call
+    would run once at capture time and never on replay, so it is refused."""
+    c = _case("cpu", "float64", grad=False)
+    if not hasattr(wp.get_device("cpu"), "is_capturing"):
+        pytest.skip("this Warp has no CPU graph capture")
+    with pytest.raises(RuntimeError, match="CPU graph capture"):
+        with wp.ScopedCapture(device="cpu"):
+            op(c["v"], c["cd"], c["t"])
+
+
 @pytest.mark.gpu
 @pytest.mark.parametrize("mode", MODES)
 def test_graph_capture_replays_a_state_loop_and_its_backward(tmp_path, mode):
