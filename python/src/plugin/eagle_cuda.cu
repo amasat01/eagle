@@ -289,7 +289,7 @@ void out(T* p, T v)
 
 /** Run @p body, mapping whatever it throws to a status + thread-local message. */
 template <class Body>
-eagle_backend_status guarded(Body&& body) noexcept
+eagle_backend_status guardedStatus(Body&& body) noexcept
 {
     try {
         body();
@@ -323,6 +323,18 @@ eagle_backend_status guarded(Body&& body) noexcept
         g_lastError = "eagle: unknown C++ exception in the CUDA backend";
         return EAGLE_BACKEND_ERROR;
     }
+}
+
+/** @ref guardedStatus, and a failure leaves nothing pending: a CUDA runtime call that failed inside @p body set the
+ *  thread's last error, which the returned status has now reported. Left there, the next launch's check
+ *  (``eagle_backend_launch_status``) would name an innocent kernel for it. */
+template <class Body>
+eagle_backend_status guarded(Body&& body) noexcept
+{
+    const eagle_backend_status status = guardedStatus(std::forward<Body>(body));
+    if (status != EAGLE_BACKEND_OK)
+        (void)cudaGetLastError();
+    return status;
 }
 
 /** Destroy @p h with its device current; never throws. */

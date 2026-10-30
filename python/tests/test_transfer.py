@@ -207,6 +207,8 @@ def test_a_pageable_copy_in_a_device_body_says_to_pin():
     g = eagle.Graph().add_node(eagle.skippable(eagle.copy(h, into=d), eagle.SkipGuard.nonzero(cell)))
     with pytest.raises(ValueError, match=r"eagle\.pinned"):
         g.build()
+    # the refusal is reported once: no CUDA error is left pending for the next launch to be blamed for
+    eagle._stream.check_launch("the launch after the refusal")
 
 
 @gpu
