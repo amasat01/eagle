@@ -281,7 +281,7 @@ jobs:
 
   wheel-macos:
     name: wheel (macos-arm64, ${{ matrix.tag }})
-    runs-on: macos-14
+    runs-on: macos-15
     strategy:
       fail-fast: false
       matrix:
@@ -593,7 +593,7 @@ jobs:
       # every Python version and architecture reports, even when one fails
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-14]
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-15]
         python-version: ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14", "3.15", "3.13t", "3.14t", "3.15t"]
     steps:
       - uses: actions/checkout@v7
