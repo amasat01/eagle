@@ -220,6 +220,20 @@ def read_plane_axes(meta: dict, *, name: str) -> dict:
     return declared
 
 
+def read_plane_meta(meta: dict, *, name: str) -> dict:
+    """``{plane: {key: value}}``: the opaque notes a sidecar carries for planes of its arg_spec
+    (``plane_meta``), handed back by name and never read by eagle; ``{}`` when none."""
+    declared = meta.get("plane_meta")
+    if declared is None:
+        return {}
+    planes = {nm for _role, nm in meta.get("arg_spec", ())}
+    if not (isinstance(declared, dict) and all(
+            plane in planes and isinstance(notes, dict) for plane, notes in declared.items())):
+        raise ValueError(
+            f"{name}: sidecar plane_meta must map each plane of the arg_spec to a dict of notes")
+    return declared
+
+
 class LaunchDecl(NamedTuple):
     """What a sidecar declares about the launch shape: ``lane_space``
     (:class:`LaneSpace`), ``block`` (threads per block or ``None``),
@@ -389,6 +403,7 @@ def validate_sidecar(meta: dict, *, name: str) -> dict:
 
     parse_derivative(meta, name=name)
     read_launch(meta, name=name)
+    read_plane_meta(meta, name=name)
 
     for buf in meta.get("buffers", ()):
         kind = buf.get("kind")
