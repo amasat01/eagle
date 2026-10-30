@@ -1,0 +1,19 @@
+# Copyright 2026 Alessandro Masat
+# SPDX-License-Identifier: Apache-2.0
+name: CUDA 12.9 toolchain
+description: nvcc, the runtime headers (with the driver stub) and CCCL from NVIDIA's pinned redist archives, unpacked to /usr/local/cuda-12.9 and put on PATH. The pins are in .github/cuda_redist.sh; the download cache is keyed by their sha256 sums.
+runs:
+  using: composite
+  steps:
+    - id: key
+      shell: bash
+      run: echo "key=cuda-redist-$(sh "${{ github.action_path }}/../../cuda_redist.sh" key "$(uname -m)")" >> "$GITHUB_OUTPUT"
+    - uses: actions/cache@v6
+      with:
+        path: ${{ runner.temp }}/cuda-redist
+        key: ${{ steps.key.outputs.key }}
+    - shell: bash
+      run: |
+        sudo sh "${{ github.action_path }}/../../cuda_redist.sh" fetch "$(uname -m)" /usr/local/cuda-12.9 "$RUNNER_TEMP/cuda-redist"
+        echo /usr/local/cuda-12.9/bin >> "$GITHUB_PATH"
+        echo CUDA_HOME=/usr/local/cuda-12.9 >> "$GITHUB_ENV"

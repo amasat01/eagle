@@ -95,7 +95,7 @@ jobs:
       - id: pk
         run: |
           args=(--tree eagle --only eagle/ --only plugin/ --only python/src/plugin/ --only python/src/seam/ --only python/CMakeLists.txt
-                --tree aether --only aether/ --str "$PLUGIN_RECIPE ${{ matrix.arch }}")
+                --tree aether --only aether/ --file eagle/.github/cuda_redist.sh --str "$PLUGIN_RECIPE ${{ matrix.arch }}")
           args+=(--str "manylinux_2_28 $(docker buildx imagetools inspect "quay.io/pypa/manylinux_2_28_$(uname -m)" --format '{{.Manifest.Digest}}' 2>/dev/null || true)")
           digest=$(eagle/.github/ci_digest.sh "${args[@]}") || exit 1
           [ -n "$digest" ] || { echo "::error::empty digest"; exit 1; }
@@ -117,15 +117,23 @@ jobs:
       - name: Build the sdist the plugin is built from
         run: (cd eagle/python && python -m build --sdist --outdir "$GITHUB_WORKSPACE/sdist")
         if: steps.pc.outputs.cache-hit != 'true'
+      # The CUDA redist archives, kept under the pinned versions and sha256 sums; each is verified on use
+      - id: cr
+        if: steps.pc.outputs.cache-hit != 'true'
+        run: echo "key=cuda-redist-$(sh eagle/.github/cuda_redist.sh key "$(uname -m)")" >> "$GITHUB_OUTPUT"
+      - if: steps.pc.outputs.cache-hit != 'true'
+        uses: actions/cache@v6
+        with:
+          path: .cuda-redist
+          key: ${{ steps.cr.outputs.key }}
       - name: Build libeagle_cuda.so in the manylinux container
         if: steps.pc.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
           mkdir -p plugin
-          case "${{ matrix.arch }}" in x86_64) repo=x86_64;; aarch64) repo=sbsa;; esac
-          docker run --rm -e REPO="$repo" -v "$GITHUB_WORKSPACE:/w" "quay.io/pypa/manylinux_2_28_$(uname -m)" bash -euo pipefail -c '
-            curl -fsSL -o /etc/yum.repos.d/cuda-rhel8.repo "https://developer.download.nvidia.com/compute/cuda/repos/rhel8/$REPO/cuda-rhel8.repo"
-            dnf install -y --setopt=install_weak_deps=False cuda-nvcc-12-9 cuda-cudart-devel-12-9 cuda-driver-devel-12-9 gcc-toolset-13-gcc-c++
+          docker run --rm -v "$GITHUB_WORKSPACE:/w" "quay.io/pypa/manylinux_2_28_$(uname -m)" bash -euo pipefail -c '
+            dnf install -y --setopt=install_weak_deps=False gcc-toolset-13-gcc-c++
+            sh /w/eagle/.github/cuda_redist.sh fetch "$(uname -m)" /usr/local/cuda-12.9 /w/.cuda-redist
             mkdir /src && tar xzf /w/sdist/raptor_eagle-*.tar.gz -C /src --strip-components=1
             cmake -S /src -B /tmp/b -DCMAKE_BUILD_TYPE=Release -DEAGLE_PYTHON_CUDA_PLUGIN=BUILD -DEAGLE_PYTHON_SKIP_CORE=ON \
               -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.9/bin/nvcc -DCMAKE_CUDA_HOST_COMPILER=/opt/rh/gcc-toolset-13/root/usr/bin/g++ \
@@ -558,15 +566,8 @@ jobs:
         with:
           python-version: "3.12"
       - run: sudo apt-get update && sudo apt-get install -y g++-13
-      - name: Install compile-only CUDA 12.6 toolchain (nvcc; no driver/GPU)
-        run: |
-          curl -fsSL -o /tmp/cuda-keyring.deb \
-            https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
-          sudo dpkg -i /tmp/cuda-keyring.deb
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends cuda-nvcc-12-6 cuda-cudart-dev-12-6 cuda-driver-dev-12-6
-          echo "/usr/local/cuda-12.6/bin" >> "$GITHUB_PATH"
-          echo "CUDA_HOME=/usr/local/cuda-12.6" >> "$GITHUB_ENV"
+      # compile-only CUDA 12.9 toolchain (nvcc, headers, driver stub, CCCL) from the pinned redist archives; no driver, no GPU
+      - uses: ./eagle/.github/actions/cuda
       # raptor-core: PyPI when the checkout's version is released, else built from the sibling raptor checkout
       - id: sib
         uses: ./eagle/.github/actions/install-siblings
@@ -801,92 +802,25 @@ jobs:
 
       # NVIDIA's apt repo for Ubuntu 24.04 (noble), x86_64 — compile-only
       # toolchain, no driver/GPU (mirrors ci.yml's test-python job).
-      - name: Install compile-only CUDA 12.6 toolchain (nvcc; no driver/GPU)
-        run: |
-          curl -fsSL -o /tmp/cuda-keyring.deb \
-            https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
-          sudo dpkg -i /tmp/cuda-keyring.deb
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            cuda-nvcc-12-6 cuda-cudart-dev-12-6 cuda-driver-dev-12-6
-          echo "/usr/local/cuda-12.6/bin" >> "$GITHUB_PATH"
-          echo "CUDA_HOME=/usr/local/cuda-12.6" >> "$GITHUB_ENV"
-
-      # aether installed in its default CUDA-language mode (eagle._core is
-      # CUDA-language regardless of EAGLE_CPP_MODE).
-      - run: |
-          cmake -DAETHER_CPP_MODE=OFF -DCMAKE_CUDA_COMPILER="$(which nvcc)" \
-            -DCMAKE_INSTALL_PREFIX="${GITHUB_WORKSPACE}/__install" \
-            -B aether/build -S aether
-          cmake --install aether/build
-
-      # eagle's own header-only C++ config, installed next to aether so the
-      # binding's find_package(eagle) resolves.
-      - run: |
-          cd eagle
-          cmake -B __eagle_hdr -DCMAKE_CUDA_COMPILER="$(which nvcc)" \
-            -DCMAKE_CUDA_ARCHITECTURES=70 \
-            -DCMAKE_INSTALL_PREFIX="${GITHUB_WORKSPACE}/__install" .
-          cmake --install __eagle_hdr
-
-      - name: Build the eagle._core binding (compile-only, no GPU needed)
-        run: |
-          cd eagle
-          python -m pip install --quiet --upgrade pip
-          # build deps preinstalled + --no-build-isolation: an isolated build compiles nanobind from a
-          # random /tmp build env, so every compile line differs and ccache never hits;
-          # --only-binary=:all: still builds this local project but never a dependency from
-          # source, so no third-party sdist is ever built without its own isolated env
-          python -m pip install --quiet "scikit-build-core>=0.10" "setuptools-scm>=8" "nanobind>=3.1,<4"
-          export CMAKE_PREFIX_PATH="${GITHUB_WORKSPACE}/__install:${CMAKE_PREFIX_PATH}"
-          export SKBUILD_CMAKE_ARGS="-DCMAKE_CUDA_COMPILER=$(which nvcc);-DCMAKE_CUDA_ARCHITECTURES=70"
-          pip install ../raptor   # the sibling checkout, so unreleased raptor changes are tested
-          pip install ../aether/dsc   # the sibling aether-dsc (the `aether` arrays eagle allocates with)
-          pip install --no-build-isolation --only-binary=:all: -e ./python
+      # compile-only CUDA 12.9 toolchain (nvcc, headers, driver stub, CCCL) from the pinned redist archives; no driver, no GPU
+      - uses: ./eagle/.github/actions/cuda
 
       # companion site (amasat01.github.io): the shared docs tooling
       - uses: ./eagle/.github/actions/companion
         with: {repo: amasat01.github.io, path: site, pins: eagle/.github/companions, token: "${{ secrets.SIBLING_READ_TOKEN || github.token }}"}
 
-      - name: Install docs dependencies
-        run: |
-          grep -v '^raptor-docs\|^jax\|^ipykernel\|^matplotlib\|^scipy' eagle/docs/requirements.txt > "$RUNNER_TEMP/docs-reqs.txt"
-          python -m pip install --quiet -r "$RUNNER_TEMP/docs-reqs.txt" ./site
-
       # nbcheck also executes every notebook on the CPU: it needs hawk (sibling checkout), a kernel, torch and JAX
       - uses: ./eagle/.github/actions/companion
         with: {repo: hawk, path: hawk, pins: eagle/.github/companions, token: "${{ secrets.SIBLING_READ_TOKEN || github.token }}"}
 
-      # aether-dsc and hawk: PyPI when the checkout's version is released, else built from it
-      - id: sib
-        uses: ./eagle/.github/actions/install-siblings
-        with:
-          siblings: aether-dsc=aether/dsc raptor-hawk=hawk
-
-      - name: Install what the notebooks run on
-        env:
-          SIB_DIR: ${{ steps.sib.outputs.dir }}
-          SIB_PINS: ${{ steps.sib.outputs.pins }}
+      # the docs gate, from the Makefile: the binding built compile-only, the docs dependencies, nbcheck (refuse an
+      # unfilled notebook, run every notebook on the CPU), strict Sphinx (0 warnings), the public-name inventory,
+      # raptor_docs.fresh --check
+      - name: make gate-docs
         run: |
-          export HAWK_AETHER_INCLUDE="${GITHUB_WORKSPACE}/aether" HAWK_EAGLE_INCLUDE="${GITHUB_WORKSPACE}/eagle"
-          python -m pip install --quiet numpy ipykernel matplotlib scipy
-          python -m pip install --quiet torch --index-url https://download.pytorch.org/whl/cpu
-          python -m pip install --quiet --only-binary=:all: "jax[cpu]==0.11.2"   # the JAX notebooks (the floor, as ci.yml pins it)
-          # the sealed sibling builds replace the unsealed aether-dsc installed above for eagle (same version, so pip would keep it)
-          # shellcheck disable=SC2086  # the pins are separate arguments
-          python -m pip install --quiet --force-reinstall --no-deps --find-links "$SIB_DIR" $SIB_PINS
-
-      - name: make nbcheck (refuse an unfilled notebook; run every notebook on the CPU)
-        run: cd eagle/docs && make nbcheck
-
-      - name: make strict (0 Sphinx warnings)
-        run: cd eagle/docs && make strict
-
-      - name: every public name has a page
-        run: python eagle/tools/docs_inventory_check.py eagle/docs/_build/html/objects.inv eagle
-
-      - name: raptor_docs.fresh --check
-        run: cd eagle && python -m raptor_docs.fresh --check --site ../site
+          make gate-docs AETHER_SRC="${GITHUB_WORKSPACE}/aether" RAPTOR_SRC="${GITHUB_WORKSPACE}/raptor" \
+            HAWK_SRC="${GITHUB_WORKSPACE}/hawk" SITE_SRC="${GITHUB_WORKSPACE}/site" CUDACXX="$(which nvcc)"
+        working-directory: eagle
 
       - id: tree
         run: echo "tree=$(git -C eagle rev-parse 'HEAD^{tree}')" >> "$GITHUB_OUTPUT"
