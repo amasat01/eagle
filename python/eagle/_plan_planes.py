@@ -154,6 +154,45 @@ def sample_spec(plugin, arg_spec):
     return [(role, name) for role, name in arg_spec if not (role == "mat_in" and name in compact)]
 
 
+def shared_shapes(plugin, kernel=None) -> dict:
+    """``{name: natural shape}`` of the planes the kernel declares as ONE value shared by every
+    lane (``Param[Vector[W]]``, ``Param[Matrix[R,C]]``, ``Param[Table[...]]``): the kernel's own
+    declarations, else the sidecar's ``param_shapes``."""
+    source = getattr(plugin, "_hawk_source", None)
+    planes = getattr(kernel if kernel is not None else (source[0] if source else None), "planes", None) or {}
+    declared = {nm: tuple(d.shared) for nm, d in planes.items() if getattr(d, "shared", ())}
+    return declared or {nm: tuple(sh) for nm, sh in
+                        ((getattr(plugin, "_meta", None) or {}).get("param_shapes") or {}).items()}
+
+
+def flat_shared(shapes: dict, bound: dict, kernel_name: str = "") -> dict:
+    """``bound`` with each shared plane checked against its natural shape and bound flat,
+    row-major (a view when the array is C-contiguous)."""
+    if not shapes or not any(nm in bound for nm in shapes):
+        return bound
+    out = dict(bound)
+    for name, shape in shapes.items():
+        value = out.get(name)
+        if value is None:
+            continue
+        got = _shape_of(value)
+        if got != tuple(shape):
+            raise ValueError(
+                f"{kernel_name or 'kernel'}(): {name!r} is a shared parameter of shape "
+                f"{tuple(shape)} (one value for every lane), got shape {got}")
+        if hasattr(value, "reshape"):
+            try:
+                out[name] = value.reshape(-1) if _c_contiguous(value) else value.copy().reshape(-1)
+            except AttributeError:
+                out[name] = value.reshape(-1)
+    return out
+
+
+def _c_contiguous(value) -> bool:
+    flags = getattr(value, "flags", None)
+    return True if flags is None else bool(getattr(flags, "c_contiguous", True))
+
+
 def _plane_shape(width: int, n: int):
     return (n,) if int(width) <= 1 else (int(width), n)
 

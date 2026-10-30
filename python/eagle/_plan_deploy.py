@@ -16,6 +16,7 @@ from . import _cell_rows, _lane_bind, _layout, _recording, _split
 from . import exec as eexec
 from ._plan_binding import BoundPlan
 from ._plan_planes import _output_names, residency
+from .frameworks._bridge import route
 from .roles import OUTPUT_ROLES
 
 if TYPE_CHECKING:
@@ -232,17 +233,23 @@ class AutoPlan:
         recorder = _recording.current()
         if recorder is not None:
             return recorder.record_call(self, args, kw)
+        # ``returns=`` is the call's, as in :meth:`Plan.run`: not a plane of the kernel
+        returns = None if "returns" in self._plane_names() else kw.pop("returns", None)
         kw, lifted = _lane_bind.take_extent(self.plugin, kw)
         bound = self.bind_args(args, kw)
         bound.update(lifted)
         result = self.select(bound).run(**bound)
         if getattr(self.kernel, "returns", None) is None:
-            return result
+            return route(result, returns)
         if not isinstance(result, dict):
             tree = self.kernel.returns
             (out,) = (tree,) if isinstance(tree, str) else _output_names(_split.arg_spec(self.plugin))
             result = {out: result}
-        return self.returned(result)
+        return route(self.returned(result), returns)
+
+    def _plane_names(self) -> set:
+        """The names the kernel declares as planes (a plane named ``returns`` keeps its name)."""
+        return set(getattr(self.kernel, "planes", None) or ())
 
 
 def _fill(tree, planes):
