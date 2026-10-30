@@ -483,7 +483,7 @@ def _eager_band(arm, runner):
     ud = importlib.import_module("eagle._until_done")
 
     def run():
-        ud._mask_count(runner._xp, runner._device, runner.finished, runner.terminated)
+        ud._mask_count(runner._dev, runner.finished, runner.terminated)
         runner.loop()
         arm["report"] = SimpleNamespace(mode="band-eager", launches=int(runner.loop.iterations()),
                                         compactions=None)

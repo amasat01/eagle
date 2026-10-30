@@ -10,6 +10,10 @@ from hawk import math as m
 import _builder_fixtures as bp
 
 kernel = bp.kernel
+
+# The loop fixtures here are uncapped on purpose (they pin the builder's lowering, not the cap advice); the warning
+# itself is pinned by test_c_uncapped_while_warns_and_record_refuses.
+pytestmark = pytest.mark.filterwarnings("ignore:uncapped device loop:UserWarning")
 U = np.uint32
 
 

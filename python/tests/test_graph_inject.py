@@ -245,6 +245,7 @@ def test_a_node_vjp_runs_in_the_reverse(tmp_path):
 
 
 @pytest.mark.gpu
+@pytest.mark.interop_matrix  # certifies torch: deselected with the other framework rows, run by the Kaggle leg
 def test_a_launch_inside_a_stream_capture_is_refused(tmp_path, monkeypatch):
     """Inside torch.cuda.graph an eagle graph's launch and enqueue refuse by name
     (they used to record an empty graph); outside a capture they run."""
