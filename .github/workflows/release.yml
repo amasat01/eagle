@@ -300,7 +300,7 @@ jobs:
       # the OpenMP runtime is aether-dsc's (aether/_omp/libomp.dylib): delocate leaves it, nothing is vendored here
       CIBW_REPAIR_WHEEL_COMMAND_MACOS: "delocate-wheel --require-archs {delocate_archs} --exclude libomp.dylib --ignore-missing-dependencies -w {dest_dir} -v {wheel}"
       CIBW_ENVIRONMENT_MACOS: >-
-        MACOSX_DEPLOYMENT_TARGET=14.0
+        MACOSX_DEPLOYMENT_TARGET=15.0
         CCACHE_DIR=${{ github.workspace }}/.ccache-cibw
         CCACHE_MAXSIZE=1G
         CCACHE_COMPILERCHECK=content
