@@ -45,6 +45,7 @@ comma := ,
 GD := $(abspath $(GATE_DIR))
 # the notebooks a gate runs write their animations here, not into docs/_static (a gate never changes tracked files)
 export DOCS_ANIM_DIR := $(GD)/anim
+WARP_CU12_WHEEL := https://github.com/NVIDIA/warp/releases/download/v1.18.0/warp_lang-1.18.0+cu12-py3-none-manylinux_2_28_x86_64.whl#sha256=6dda3c163dde4edaa7d46ade9fff3ddb1126ee7b147d9d890cd38cc70dafd656
 export CMAKE_BUILD_PARALLEL_LEVEL := $(GATE_JOBS)
 export PIP_DISABLE_PIP_VERSION_CHECK := 1
 CONSTRAINTS := $(CURDIR)/ci/constraints.txt
@@ -54,6 +55,8 @@ need = @command -v $(1) >/dev/null 2>&1 || { echo "gate: $(2) is not available (
 need_aether = @[ -n "$(AETHER_SRC)" ] && [ -d "$(AETHER_SRC)/aether" ] || { echo "gate: AETHER_SRC (the aether repository root) is required for the C++ legs" >&2; exit 2; }
 need_cxx = @[ "$(origin CXX)" != default ] || { echo "gate: CXX is not set in the environment (a g++ for the C++ legs)" >&2; exit 2; }
 NVCC = $(or $(CUDACXX),$(if $(CUDA_PATH),$(CUDA_PATH)/bin/nvcc))
+# hawk (which builds the kernels the tests deploy) compiles with the same nvcc, never whichever one is on PATH
+export HAWK_NVCC ?= $(NVCC)
 need_nvcc = @[ -n "$(NVCC)" ] && [ -x "$(NVCC)" ] || { echo "gate: no nvcc: set CUDACXX (or CUDA_PATH with bin/nvcc)" >&2; exit 2; }
 
 .PHONY: help gate gate-gpu gate-all gate-fresh gate-lint gate-cpp gate-py gate-docs gate-cpp-cuda gate-py-gpu \
@@ -130,6 +133,9 @@ gate-env-cpu:
 # the device's own architecture: CMake's EAGLE_CUDA_ARCHS=native reads it from the driver at configure time
 gate-env-gpu:
 	$(call ENV_RECIPE,gpu,,-DEAGLE_CUDA_ARCHS=native,test$(comma)cuda12)
+	# the profile kit's preflight and comparison arm run Warp: its GPU rows run here, not only on Kaggle. PyPI's
+	# warp-lang is built for CUDA 13 and finds no device under a CUDA 12 driver, so the release's CUDA 12 wheel, by hash
+	"$(GD)/venv_gpu/bin/python" -m pip install --quiet --no-deps -c "$(CONSTRAINTS)" "warp-lang @ $(WARP_CU12_WHEEL)"
 
 # -- lint ---------------------------------------------------------------------------------------------------------
 gate-lint:

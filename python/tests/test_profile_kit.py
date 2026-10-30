@@ -123,7 +123,6 @@ def kit(tmp_path):
 
 
 @pytest.mark.gpu
-@pytest.mark.interop_matrix  # needs Warp (the kit's preflight and comparison arm): the gate venv has none, the Kaggle leg installs it
 def test_a_failing_stage_does_not_stop_the_next(kit):
     rc, out = kit({"PROFILE_TEST_FAIL": "nsys-quick"})
     status, names = kit.results()
@@ -136,7 +135,6 @@ def test_a_failing_stage_does_not_stop_the_next(kit):
 
 
 @pytest.mark.gpu
-@pytest.mark.interop_matrix  # needs Warp (the kit's preflight and comparison arm): the gate venv has none, the Kaggle leg installs it
 def test_a_stage_over_its_cap_is_failed_and_the_tarball_still_lands(kit):
     rc, out = kit({"PROFILE_TEST_CAP_S": "1"})
     status, _ = kit.results()
@@ -146,7 +144,6 @@ def test_a_stage_over_its_cap_is_failed_and_the_tarball_still_lands(kit):
 
 
 @pytest.mark.gpu
-@pytest.mark.interop_matrix  # needs Warp (the kit's preflight and comparison arm): the gate venv has none, the Kaggle leg installs it
 def test_a_killed_run_resumes_from_its_markers(kit):
     proc = kit.start()
     deadline = time.time() + 300
@@ -170,7 +167,6 @@ def test_a_killed_run_resumes_from_its_markers(kit):
 
 
 @pytest.mark.gpu
-@pytest.mark.interop_matrix  # needs Warp (the kit's preflight and comparison arm): the gate venv has none, the Kaggle leg installs it
 def test_a_missing_ncu_is_a_skipped_stage(kit, tmp_path):
     shim = tmp_path / "shim"
     shim.mkdir()
@@ -610,7 +606,6 @@ def test_the_kit_scripts_are_shellcheck_clean():
 
 
 @pytest.mark.gpu
-@pytest.mark.interop_matrix  # needs Warp (the kit's preflight and comparison arm): the gate venv has none, the Kaggle leg installs it
 def test_compare_times_every_arm_and_the_override_really_changes_the_launch(tmp_path):
     done = run_py("--stage", "compare-quick", "--kernels", "osc,rk78", "--out", str(tmp_path), env=_one_gpu_env())
     assert done.returncode == 0, done.stdout[-1500:] + done.stderr[-1500:]
@@ -681,7 +676,6 @@ def test_the_cadence_sweep_sees_the_band_kernels_through_the_eager_run(tmp_path)
 
 
 @pytest.mark.gpu
-@pytest.mark.interop_matrix  # its Warp arm: the gate venv has no Warp, the Kaggle leg installs it
 def test_the_ncu_stages_are_validated_without_a_supported_gpu(tmp_path):
     nsys, ncu = shutil.which("nsys"), shutil.which("ncu")
     if nsys is None or ncu is None:
