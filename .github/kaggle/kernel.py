@@ -122,10 +122,12 @@ def shipped_wheel(cfg, py):
     sums = (wheel.parent / "SHA256SUMS").read_bytes()
     if hashlib.sha256(sums).hexdigest() != cfg.wheel_sha256:
         raise SystemExit(f"shipped SHA256SUMS does not match the expected {cfg.wheel_sha256}")
-    got = hashlib.sha256(wheel.read_bytes()).hexdigest()
-    if f"{got}  {wheel.name}" not in sums.decode().splitlines():
-        raise SystemExit(f"{wheel.name}: sha256 {got} is not the one in the shipped SHA256SUMS")
     listed = {ln.split()[-1]: ln.split()[0] for ln in sums.decode().splitlines()}
+    # the dataset holds the wheel under its upload name; SHA256SUMS lists the real one (a dev version keeps its "+")
+    real = {upload_name(name): name for name in listed}.get(wheel.name)
+    got = hashlib.sha256(wheel.read_bytes()).hexdigest()
+    if real is None or listed[real] != got:
+        raise SystemExit(f"{wheel.name}: sha256 {got} is not the one in the shipped SHA256SUMS")
     # wheel.py uploads each file under upload_name() (Kaggle drops "+" and unpacks .tar.gz): each is matched to its
     # listed name, checked, and copied back under that name for pip; a listed file that never arrived fails here.
     by_upload = {upload_name(name): name for name in listed}
