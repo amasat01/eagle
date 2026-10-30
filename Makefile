@@ -170,10 +170,12 @@ gate-doxygen:
 	@v="$$(doxygen --version | cut -d' ' -f1)"; [ "$$(printf '%s\n1.10\n' "$$v" | sort -V | head -1)" = 1.10 ] || \
 	  { echo "gate: doxygen $$v is too old to parse the C++20 requires clauses; >= 1.10 is needed" >&2; exit 2; }
 
-gate-docs: gate-doxygen gate-env-cpu
+# the cpu env with the docs extra: the binding is built by the same recipe (prefix, no isolation), never a second way
+gate-docs: gate-doxygen
 	@[ -n "$(SITE_SRC)" ] && [ -d "$(SITE_SRC)" ] || { echo "gate: SITE_SRC (the landing-site checkout holding raptor_docs) is required for the docs" >&2; exit 2; }
+	$(call ENV_RECIPE,cpu,-DCMAKE_CUDA_ARCHITECTURES=$(CPU_CUDA_ARCH),-DCMAKE_CUDA_ARCHITECTURES=$(CPU_CUDA_ARCH),test$(comma)docs)
 	PIP="$(GD)/venv_cpu/bin/python -m pip"; \
-	$$PIP install --quiet -c "$(CONSTRAINTS)" -e "./python[docs]" "$(SITE_SRC)" "jax[cpu]" $(if $(HAWK_SRC),,raptor-hawk) ; \
+	$$PIP install --quiet -c "$(CONSTRAINTS)" "$(SITE_SRC)" "jax[cpu]" $(if $(HAWK_SRC),,raptor-hawk) ; \
 	$$PIP install --quiet -c "$(CONSTRAINTS)" torch --index-url "$(TORCH_INDEX)"
 	export PATH="$(GD)/venv_cpu/bin:$$PATH" $(if $(HAWK_SRC),HAWK_AETHER_INCLUDE="$(AETHER_SRC)" HAWK_EAGLE_INCLUDE="$(CURDIR)",); \
 	$(MAKE) -C docs nbcheck; \
