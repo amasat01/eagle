@@ -22,7 +22,7 @@
 # e.g. GPU_RUN="gpu_run.sh --gpu 1 taskset -c 2-7".
 # PYTEST_ARGS replaces the default python/tests path (the probe: GATE_REUSE=1 make gate PYTEST_ARGS="python/tests/test_x.py").
 # JOBS: GATE_JOBS (default 2) is passed to every build; PYTEST_JOBS (default GATE_JOBS) is the CPU pytest workers, one test
-# file per worker; the GPU leg runs in one process (one card).
+# file per worker; GPU_PYTEST_JOBS (default 3) the GPU ones, sharing the card.
 
 SHELL := /bin/bash
 .SHELLFLAGS := -eu -o pipefail -c
@@ -32,6 +32,8 @@ PYTHON      ?= python3
 GATE_DIR    ?= build/gate
 GATE_JOBS   ?= 2
 PYTEST_JOBS ?= $(GATE_JOBS)
+# GPU rows share the one card: their time is mostly host work, so a few workers overlap it with the device runs
+GPU_PYTEST_JOBS ?= 3
 GATE_REUSE  ?=
 PYTEST_ARGS ?=
 RAPTOR_SRC  ?=
@@ -215,7 +217,7 @@ gate-cpp-cuda:
 gate-py-gpu: gate-env-gpu
 	$(if $(GPU_RUN),,@echo "gate: GPU_RUN is empty; the GPU rows run on whatever GPU is visible")
 	$(if $(AETHER_SRC),EAGLE_TEST_AETHER_INCLUDE="$(AETHER_SRC)",) \
-	  $(GPU_RUN) env -u PYTHONPATH -u LD_LIBRARY_PATH "$(GD)/venv_gpu/bin/python" -m pytest -q -m "gpu and not interop_matrix" $(or $(PYTEST_ARGS),python/tests)
+	  $(GPU_RUN) env -u PYTHONPATH -u LD_LIBRARY_PATH "$(GD)/venv_gpu/bin/python" -m pytest -q -m "gpu and not interop_matrix" -n $(GPU_PYTEST_JOBS) --dist loadfile $(or $(PYTEST_ARGS),python/tests)
 
 # ======================================================================================================================
 # The CI-only jobs. CI calls these; they are not part of `gate`. The commands are the ones the workflow carried.
