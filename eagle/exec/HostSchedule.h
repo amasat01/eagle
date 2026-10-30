@@ -20,6 +20,7 @@
 // branches run in place on the calling thread.
 #pragma once
 
+#include "eagle/exec/HostTeam.h"
 #include "eagle/exec/Partition.h"
 
 #include <algorithm>
@@ -91,13 +92,55 @@ inline void runHostBranches(const std::vector<HostBranch>& branches) {
     const auto count = static_cast<std::int64_t>(branches.size());
 #ifdef _OPENMP
     if (omp_get_level() == 0 && count > 1) {
-        const int team = static_cast<int>(std::min<std::int64_t>(count, omp_get_max_threads()));
+        const int team = static_cast<int>(std::min<std::int64_t>(count, host_max_threads()));
 #pragma omp parallel for schedule(dynamic, 1) num_threads(team)
         for (std::int64_t b = 0; b < count; ++b) detail::runBranch(branches[b]);
         return;
     }
 #endif
     for (const HostBranch& branch : branches) detail::runBranch(branch);
+}
+
+/**
+ * @brief Run a `work_share` stage: the nodes one after another (branch by branch,
+ *        in order), each over the whole team, inside ONE OpenMP region.
+ *
+ * The same tiles, in the same per-node order, as a `HostTeam::run` per node --
+ * so the values are bit-identical -- but the team is woken once per stage, not
+ * once per node; the loop's end is the barrier between nodes. A stage whose
+ * widest node has one tile (or a team of one) runs in place with no region.
+ */
+inline void runHostStage(const std::vector<HostBranch>& branches) {
+    struct Item { HostEntryV2 entry; void* const* params; Partition part; };
+    std::vector<Item> items;
+    for (const HostBranch& branch : branches)
+        for (const HostBranchNode& node : branch) {
+            if (node.entry == nullptr)
+                throw std::runtime_error("runHostStage: null host entry");
+            for (const Partition& part : node.parts)
+                if (part.count > 0) items.push_back({ node.entry, node.params.data(), part });
+        }
+    const std::int64_t tile = static_cast<std::int64_t>(HostTeam::tile_size(0));
+    std::int64_t widest = 0;
+    for (const Item& it : items) widest = std::max(widest, (it.part.count + tile - 1) / tile);
+#ifdef _OPENMP
+    const int team = static_cast<int>(std::min<std::int64_t>(widest, host_max_threads()));
+    if (team > 1 && omp_get_level() == 0) {
+#pragma omp parallel num_threads(team)
+        for (const Item& it : items) {
+            const std::int64_t ntiles = (it.part.count + tile - 1) / tile;
+#pragma omp for schedule(dynamic)
+            for (std::int64_t t = 0; t < ntiles; ++t) {
+                const std::int64_t base = it.part.base + t * tile;
+                const std::int64_t count = (t + 1 == ntiles)
+                    ? (it.part.base + it.part.count - base) : tile;
+                it.entry(it.params, base, count, it.part.nSamples);
+            }
+        }
+        return;
+    }
+#endif
+    for (const Item& it : items) HostTeam::run(it.entry, it.params, it.part);
 }
 
 }  // namespace exec

@@ -393,14 +393,40 @@ protected:
         instantiate_();
     }
 
+    /** @brief What an out-of-memory failure needs: the largest local memory per thread
+     *  among this graph's driver-launched kernels, and free/total GPU memory now. */
+    std::string oomContext_() const
+    {
+        std::string kernels;
+        int widest = 0;
+#ifndef EAGLE_CPU_ONLY
+        static const auto attr = detail::driver_entry<decltype(&::cuFuncGetAttribute)>("cuFuncGetAttribute");
+        for (const auto& rec : kernelNodes_) {
+            int local = 0;     // eagle's kernels are driver-launched (a plugin's cuLaunchKernel)
+            if (rec.driverLaunched && rec.driverParams.func != nullptr &&
+                attr(&local, CU_FUNC_ATTRIBUTE_LOCAL_SIZE_BYTES, rec.driverParams.func) != CUDA_SUCCESS)
+                local = 0;
+            widest = std::max(widest, local);
+        }
+#endif
+        kernels = std::to_string(kernelNodes_.size()) + " kernel node(s), largest local memory "
+            + std::to_string(widest) + " bytes per thread; ";
+        return kernels + detail::oom_context(nullptr);
+    }
+
     /** @brief Create the instance */
     void instantiate_()
     {
         if (!instantiated_) {
             EAGLE_ASSERT(storage_ && storage_->graph != nullptr,
                 "Cannot instantiate a non-created graph");
-            EAGLE_CHECK_ALWAYS(cudaGraphInstantiate(
-                &instance_, storage_->graph, NULL, NULL, 0));
+            const cudaError_t made = cudaGraphInstantiate(
+                &instance_, storage_->graph, NULL, NULL, 0);
+            if (made == cudaErrorMemoryAllocation)
+                ::eagle::err::detail::throwAt<::aether::Error>(__FILE__, __LINE__, __func__,
+                    "cudaErrorMemoryAllocation (2): out of memory at cudaGraphInstantiate; "
+                    + oomContext_());
+            EAGLE_CHECK_ALWAYS(made);
             instantiated_ = true;
         }
     }

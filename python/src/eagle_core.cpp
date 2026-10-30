@@ -1432,7 +1432,19 @@ NB_MODULE(_core, m)
         "One call, one triple -- the SERIAL arm, and the correctness oracle the "
         "band rows are judged against (fork F-c).");
 
-    m.def("host_threads",
+    m.def("host_threads", [] { return eagle::exec::host_max_threads(); },
+        "The most threads a host launch uses right now: the process-wide setting, else the OpenMP "
+        "default (OMP_NUM_THREADS).");
+    m.def("set_host_threads",
+        [](int threads) {
+            if (threads < 0)
+                throw std::invalid_argument("set_host_threads: threads must be >= 0 (0 = the OpenMP default)");
+            eagle::exec::host_threads_setting().store(threads, std::memory_order_relaxed);
+        },
+        nb::arg("threads"),
+        "Cap the threads of every host launch of this process (all Python threads); 0 restores the "
+        "OpenMP default.");
+    m.def("omp_threads",
         [] {
 #ifdef _OPENMP
             return omp_get_max_threads();
@@ -1440,7 +1452,17 @@ NB_MODULE(_core, m)
             return 1;
 #endif
         },
-        "The size of the host team a launch would use right now.");
+        "omp_get_max_threads() of the OpenMP runtime this extension links (the calling thread's setting).");
+    m.def("omp_set_threads",
+        [](int threads) {
+#ifdef _OPENMP
+            omp_set_num_threads(threads);
+#else
+            (void)threads;
+#endif
+        },
+        nb::arg("threads"),
+        "omp_set_num_threads() on the OpenMP runtime this extension links.");
 
     m.attr("BRANCH_TASKS_MAX_SAMPLES") = eagle::exec::BRANCH_TASKS_MAX_SAMPLES;
 
@@ -1809,6 +1831,24 @@ NB_MODULE(_core, m)
         "Run one stage's independent branches at once, one per thread, with the GIL "
         "released. `stage` is a list of branches; a branch is a list of "
         "(entry, params, partitions) host nodes run in order on one thread.");
+
+    m.def("run_host_stage",
+        [](const std::vector<std::vector<std::tuple<std::uintptr_t,
+               std::vector<std::uintptr_t>, std::vector<Partition>>>>& stage) {
+            std::vector<eagle::exec::HostBranch> branches;
+            for (const auto& branch : stage) {
+                auto& out = branches.emplace_back();
+                for (const auto& [entry, params, parts] : branch)
+                    out.push_back({ reinterpret_cast<eagle::exec::HostEntryV2>(entry),
+                                    asParams(params), parts });
+            }
+            nb::gil_scoped_release release;
+            eagle::exec::runHostStage(branches);
+        },
+        nb::arg("stage"),
+        "Run one stage's nodes in order, each over the whole host team, inside ONE OpenMP "
+        "region (the GIL released). Same shape as run_host_branches; same values as a "
+        "run_host per node.");
 
     m.def("host_tile_size", &HostTeam::tile_size, nb::arg("bytes_per_sample") = 0,
         "The team's tile size in samples -- `Host::launch`'s own rule "

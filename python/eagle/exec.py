@@ -347,3 +347,18 @@ def check_layout_sizes(sizes) -> None:
                 "wrong-arch binding is earlier on the import path); rebuild "
                 "the plugin"
             )
+
+
+def host_threads() -> int:
+    """The most threads a host launch of this process uses right now (the host-thread
+    setting; default ``$OMP_NUM_THREADS``, else the CPUs this process may run on)."""
+    return _core.host_threads()
+
+
+def set_host_threads(threads: int | None) -> None:
+    """Set the most threads any host launch of this process uses (process-wide). A launch
+    uses ``min(its tiles, this)``; one tile runs in place on the calling thread. ``None``
+    restores the default."""
+    from ._host_loop import set_host_threads as _set
+
+    _set(threads)

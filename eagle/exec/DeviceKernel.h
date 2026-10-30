@@ -74,6 +74,9 @@ struct DeviceKernel {
             detail::driver_entry<decltype(&::cuLaunchKernel)>("cuLaunchKernel");
         const CUresult r = launch(fn, grid(part.count, block), 1, 1,
                                   block, 1, 1, 0, stream, params.data(), nullptr);
+        if (r == CUDA_ERROR_OUT_OF_MEMORY)
+            throw std::runtime_error(std::string("DeviceKernel::run: cuLaunchKernel failed: ")
+                + detail::driver_error_text(r) + " (out of memory): " + cuda::detail::oom_context(fn));
         if (r != CUDA_SUCCESS)
             throw std::runtime_error(std::string("DeviceKernel::run: cuLaunchKernel "
                 "failed: ") + detail::driver_error_text(r));

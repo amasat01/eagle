@@ -2397,10 +2397,13 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_launch_raw(const struct eag
         ensureContext();
         static const auto launch = driverEntry12<CUresult (*)(CUfunction, unsigned, unsigned, unsigned, unsigned,
             unsigned, unsigned, unsigned, CUstream, void**, void**)>("cuLaunchKernel");
-        checkDriver(launch(reinterpret_cast<CUfunction>(d.function), d.grid[0], d.grid[1], d.grid[2], d.block[0],
-                        d.block[1], d.block[2], d.shared_bytes, reinterpret_cast<CUstream>(seamStream(d.stream)),
-                        reinterpret_cast<void**>(d.args), nullptr),
-            "cuLaunchKernel");
+        const CUresult launched = launch(reinterpret_cast<CUfunction>(d.function), d.grid[0], d.grid[1], d.grid[2],
+            d.block[0], d.block[1], d.block[2], d.shared_bytes, reinterpret_cast<CUstream>(seamStream(d.stream)),
+            reinterpret_cast<void**>(d.args), nullptr);
+        if (launched == CUDA_ERROR_OUT_OF_MEMORY)
+            throw std::runtime_error("eagle: cuLaunchKernel failed with CUresult 2 (out of memory): "
+                + eagle::cuda::detail::oom_context(reinterpret_cast<CUfunction>(d.function)));
+        checkDriver(launched, "cuLaunchKernel");
     });
 }
 
