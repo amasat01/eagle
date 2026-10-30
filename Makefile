@@ -43,6 +43,8 @@ TORCH_INDEX ?= https://download.pytorch.org/whl/cpu
 
 comma := ,
 GD := $(abspath $(GATE_DIR))
+# the notebooks a gate runs write their animations here, not into docs/_static (a gate never changes tracked files)
+export DOCS_ANIM_DIR := $(GD)/anim
 export CMAKE_BUILD_PARALLEL_LEVEL := $(GATE_JOBS)
 export PIP_DISABLE_PIP_VERSION_CHECK := 1
 CONSTRAINTS := $(CURDIR)/ci/constraints.txt
