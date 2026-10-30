@@ -195,7 +195,7 @@ gate-docs: gate-doxygen
 	export PATH="$(GD)/venv_cpu/bin:$$PATH" $(if $(HAWK_SRC),HAWK_AETHER_INCLUDE="$(AETHER_SRC)" HAWK_EAGLE_INCLUDE="$(CURDIR)",); \
 	$(MAKE) -C docs nbcheck; \
 	$(MAKE) -C docs strict; \
-	python tools/docs_inventory_check.py docs/_build/html/objects.inv .; \
+	python tools/docs_inventory_check.py docs/_build/html/objects.inv eagle; \
 	python -m raptor_docs.fresh --check --site "$(SITE_SRC)"
 
 # -- the GPU legs -------------------------------------------------------------------------------------------------
