@@ -387,6 +387,9 @@ def single(bound, door: str):
 def refuse(plugin, door: str) -> None:
     """Refuse a split kernel at a door that launches one stage at a time."""
     stages = stages_of(plugin)
+    if len(stages) == 1 and stages[0].team is None and not (stages[0].cells_in or stages[0].cells_out) \
+            and _team_planes(plugin):
+        return   # placement only: one launch, its scratch planes bound like any other plane eagle owns
     if stages:
         raise ValueError(
             f"{door}: kernel {plugin.name!r} is split in {len(stages)} stages (it reads a "
