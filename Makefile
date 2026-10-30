@@ -136,7 +136,7 @@ gate-lint:
 	"$(GD)/venv_lint/bin/python" -m pip install --quiet -c "$(CONSTRAINTS)" ruff
 	"$(GD)/venv_lint/bin/ruff" check
 	bash tools/manifesto_check.sh CONTRIBUTING.md
-	$(PYTHON) tools/public_name_coverage.py $(if $(COVERAGE_BASE),--base $(COVERAGE_BASE),)
+	$(PYTHON) tools/public_names.py $(if $(COVERAGE_BASE),--base $(COVERAGE_BASE),)
 
 # -- the C++ gate, host mode: the manifest-backed integrity gate and the header self-containment check -----------
 gate-cpp:

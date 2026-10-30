@@ -1,5 +1,0 @@
-# Public names no test names yet (one per line, "name  # reason"). This list may only shrink.
-KernelRegistry  # a type exposed for annotations; reached through eagle.registry in tests
-SCALAR_TYPES    # a constant re-exported for callers; no test reads it by name
-SimResult       # the type eagle.simulate returns; tests use the result, never the name
-DType           # the dtype type for annotations; tests use dtype strings
