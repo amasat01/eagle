@@ -9,7 +9,7 @@
 #   make gate-gpu   the legs that need a GPU: the C++ gate (cuda mode, -Werror) and the python suite (-m gpu)
 #   make gate-all   both
 #
-# Stages, for the inner loop and for CI jobs that run one leg: gate-lint gate-cpp gate-py gate-docs gate-cpp-cuda gate-py-gpu
+# Stages, for the inner loop and for CI jobs that run one leg: gate-lint gate-names gate-cpp gate-py gate-docs gate-cpp-cuda gate-py-gpu
 #
 # THE ENVIRONMENT. Each run builds its venv under $(GATE_DIR) (default build/gate, git-ignored), fresh, with
 # `pip install -e python[test] -c ci/constraints.txt`. GATE_REUSE=1 keeps it (inner loop only).
@@ -59,7 +59,7 @@ NVCC = $(or $(CUDACXX),$(if $(CUDA_PATH),$(CUDA_PATH)/bin/nvcc))
 export HAWK_NVCC ?= $(NVCC)
 need_nvcc = @[ -n "$(NVCC)" ] && [ -x "$(NVCC)" ] || { echo "gate: no nvcc: set CUDACXX (or CUDA_PATH with bin/nvcc)" >&2; exit 2; }
 
-.PHONY: help gate gate-gpu gate-all gate-fresh gate-lint gate-cpp gate-py gate-docs gate-cpp-cuda gate-py-gpu \
+.PHONY: help gate gate-gpu gate-all gate-fresh gate-lint gate-names gate-cpp gate-py gate-docs gate-cpp-cuda gate-py-gpu \
         gate-env-cpu gate-env-gpu gate-clean gate-doxygen sanitize-cpp tsan-ft ft-stress nodriver sdist-install release-gate
 
 help:
@@ -83,6 +83,7 @@ ifneq ($(strip $(PYTEST_ARGS)),)
 else
 	$(MAKE) --no-print-directory gate-fresh
 	$(MAKE) --no-print-directory gate-lint
+	$(MAKE) --no-print-directory gate-names
 	$(MAKE) --no-print-directory gate-cpp
 	$(MAKE) --no-print-directory gate-py
 	$(MAKE) --no-print-directory gate-docs
@@ -144,7 +145,11 @@ gate-lint:
 	"$(GD)/venv_lint/bin/python" -m pip install --quiet -c "$(CONSTRAINTS)" ruff
 	"$(GD)/venv_lint/bin/ruff" check
 	bash tools/manifesto_check.sh CONTRIBUTING.md
-	$(PYTHON) tools/public_names.py $(if $(COVERAGE_BASE),--base $(COVERAGE_BASE),)
+
+# every public name is named by a test, or on ci/public_names_untested.txt (which may only shrink): raptor's check
+gate-names:
+	$(if $(RAPTOR_SRC),PYTHONPATH="$(abspath $(RAPTOR_SRC))") $(PYTHON) -m raptor.conformance.public_names --src python --tests python/tests \
+	  --allow ci/public_names_untested.txt --module eagle $(if $(COVERAGE_BASE),--base $(COVERAGE_BASE),)
 
 # -- the C++ gate, host mode: the manifest-backed integrity gate and the header self-containment check -----------
 gate-cpp:

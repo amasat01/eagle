@@ -52,8 +52,17 @@ jobs:
       - run: python -m pip install --quiet ./site
       - name: documented numbers and the capability map match the committed cards
         run: python -m raptor_docs.fresh --check --site site
-      - name: ruff (repo config), manifesto copy, public-name coverage
-        run: make gate-lint COVERAGE_BASE="${{ github.event.pull_request.base.sha }}"
+      - name: ruff (repo config), manifesto copy
+        run: make gate-lint
+      # the public-name check is raptor's (raptor.conformance.public_names): this branch's raptor, else main
+      - uses: ./.github/actions/companion
+        with:
+          repo: raptor
+          path: raptor
+          token: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
+          pins: .github/companions
+      - name: public-name coverage
+        run: make gate-names RAPTOR_SRC=raptor COVERAGE_BASE="${{ github.event.pull_request.base.sha }}"
   test-cpp:
     needs: docs-fresh
     runs-on: ubuntu-latest
