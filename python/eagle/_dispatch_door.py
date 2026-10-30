@@ -405,8 +405,11 @@ class DispatchRunner:
                  if hasattr(a, "shape") and a.shape[-1:] == (n,) and a is not self._mask
                  and a is not self._cls}
         self._aset.own(*owned.values())
-        self._units = [_split.single(self._bind(AutoPlan(p, {}), extra), "eagle dispatch")
-                       for p in self._unit_plugins]
+        self._units, lent = [], {}      # the units run one after another: one set of scratch planes (wide values) serves all
+        for p in self._unit_plugins:
+            bound = self._bind(AutoPlan(p, {}), {**extra, **lent})
+            lent.update(getattr(bound, "_team", None) or {})
+            self._units.append(_split.single(bound, "eagle dispatch"))
         self._sweep = None if self._static else self._bind(self._sweep_plan)
         self._run_len = [0] * k
         self._blocks = [256] * k
@@ -499,7 +502,7 @@ class DispatchRunner:
             return
         self._mix = tuple(int(c) for c in counts)
         if self._forced is None:
-            fused = _fused_steps_of(self._plain(steps_left), steps_left)
+            fused = _fused_steps_of(self._reference_plain(), steps_left)
             self._gain = _policy.predicted_gain(self._cost, counts, target=self._target,
                                                 props=self._props, fused_steps=fused,
                                                 remaining_steps=steps_left)
@@ -511,6 +514,18 @@ class DispatchRunner:
         if runner is None:
             runner = self._plains[steps] = self._plain_of(steps)
         return runner
+
+    def _reference_plain(self):
+        """A plain runner to read the fused steps per launch from. Never builds one while the planes
+        are sorted: a bind narrows an ``int64`` selector to the kernel's ``int32`` by a COPY, so a
+        runner built over sorted planes would keep the selector in sorted order and misroute every
+        sample once the planes are put back. The one build waits for sample order."""
+        if not self._plains:
+            if self._sorted:
+                self._aset.restore()
+                self._sorted = False
+            return self._plain(self._max_steps)
+        return next(iter(self._plains.values()))
 
     # -- the loop -- #
     def _live(self) -> bool:

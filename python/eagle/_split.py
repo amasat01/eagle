@@ -85,6 +85,8 @@ def link(by_name: dict, bundle) -> None:
         first._internal = frozenset(planes(mine))
         first._keyed = side.get("keyed") or {}
         first._team_planes = side.get("team_planes") or {}
+        first._wide = {nm: rec for entry in stages                   # hawk's placement of wide values: a plane's layout
+                       for nm, rec in ((arts[entry["kernel"]].get("launch") or {}).get("wide") or {}).items()}
         # the declared dtype of every plane a caller binds, whichever stage reads it
         if isinstance(getattr(first, "arg_dtypes", None), dict):
             for st in built[1:]:
@@ -174,6 +176,11 @@ def _run_team(p, kw):
            for r, nm in spec if r in OUTPUT_ROLES}
     out = {nm: (v if nm in kw or v is None or v.device in ("cpu", "pinned") else v.get()) for nm, v in out.items()}
     return next(iter(out.values())) if len(out) == 1 else out
+
+
+def _wide(plugin) -> dict:
+    """``{plane: record}`` of the planes a kernel keeps wide per-lane values in (sidecar ``launch.wide``)."""
+    return getattr(plugin, "_wide", None) or {}
 
 
 def _team_planes(plugin) -> dict:
@@ -277,8 +284,15 @@ def _team_scratch(plugin, stages, n, planes, xp, dtype, device) -> dict:
     specs = _team_planes(plugin)
     if not specs:
         return {}
-    size = {nm: max(1, spec.get("per_lane", 1) * _lane_bind.team_units(plugin, spec, n, planes))
-            for nm, spec in specs.items()}
+    wide = _wide(plugin)
+
+    def units(nm, spec):
+        count = _lane_bind.team_units(plugin, spec, n, planes)
+        if wide.get(nm, {}).get("layout") == "warp_tiled":      # a wide value tiles the lanes by warp: a whole tile each
+            return 1 if xp == "cpu" else -(-count // 32) * 32   # (the host text never touches the plane)
+        return count
+
+    size = {nm: max(1, spec.get("per_lane", 1) * units(nm, spec)) for nm, spec in specs.items()}
     item = {nm: 4 if spec["dtype"] == "int32" else dtype.itemsize for nm, spec in specs.items()}
     nbytes = {nm: size[nm] * item[nm] for nm in specs}
     if xp != "cpu":
@@ -291,9 +305,13 @@ def _team_scratch(plugin, stages, n, planes, xp, dtype, device) -> dict:
                 f"eagle.plan.bind: kernel {plugin.name!r} needs {total:,} bytes of team scratch "
                 f"({', '.join(f'{nm} {b:,}' for nm, b in nbytes.items())}) at {n:,} lanes, but the device "
                 f"has {free:,} bytes free; stage {stage!r} alone needs {most:,}")
-    made = {nm: _alloc.full(xp, (size[nm],), spec.get("fill", 0),
-                            arrays.int32 if spec["dtype"] == "int32" else dtype)
-            for nm, spec in specs.items()}
+    def make(nm, spec):
+        if nm in wide:          # a wide value: every element is written before it is read, so nothing is filled
+            return _alloc.empty(xp, (size[nm],), dtype)
+        return _alloc.full(xp, (size[nm],), spec.get("fill", 0), arrays.int32 if spec["dtype"] == "int32" else dtype)
+
+    made = {nm: planes[nm] if nm in planes and planes[nm].shape[-1] >= size[nm] else make(nm, spec)      # lent by a door that runs
+            for nm, spec in specs.items()}                                                              # kernels one after another
     if xp != "cpu":
         _alloc.synchronize()            # the fills are ordered before any stream a launch uses
     return made
@@ -345,10 +363,20 @@ def kernels_of(kernel) -> tuple:
         for st in found)
 
 
+def _placement_only(bound) -> bool:
+    """Whether ``bound`` is one kernel that is a stage only for the scratch planes of its wide values (hawk's placement):
+    no cells, no team, nothing refilled or zeroed between launches."""
+    stages = bound._stages
+    return (len(stages) == 1 and stages[0].team is None and not stages[0].cells_in and not stages[0].cells_out
+            and not bound._keyed and not bound._fills and not bound._status and bool(bound._team))
+
+
 def single(bound, door: str):
     """``bound``, refused by name when it is a :class:`SplitBound`: for a door
     that drives one kernel entry itself (a step loop, a recorded run, a
     timing)."""
+    if isinstance(bound, SplitBound) and _placement_only(bound):
+        return bound._bound[0]      # its scratch planes are among the stage's own planes: they live as long as it does
     if isinstance(bound, SplitBound):
         raise ValueError(
             f"{door}: {bound.plan.plugin.name!r} runs in {len(bound.stages)} stages; "
@@ -431,7 +459,7 @@ class SplitBound:
         named = {nm for _r, nm in spec}
         axes = _lane_bind.declared_axes(p.plugin)
         labels = ({axes[0][0]} if axes and axes[0][0] is not None else set()) | _lane_bind.free_labels(p.plugin)
-        stray = sorted(set(planes) - named - labels)
+        stray = sorted(set(planes) - named - labels - set(_team_planes(p.plugin)))     # a caller may lend scratch planes
         if stray:
             raise ValueError(
                 f"eagle.plan.bind: {stray} are not planes of kernel {p.plugin.name!r} "

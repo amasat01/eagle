@@ -41,7 +41,7 @@ from . import _alloc, arrays
 from . import _cell_rows, _split
 from .dtypes import dtype_name
 from ._busy import BusyGuard
-from ._plan_planes import _plane_dtype
+from ._plan_planes import _plane_dtype, widen_indices
 from ._compat import zip_strict
 from .diff._run import array_module as _array_module
 from ._until_done import (
@@ -579,6 +579,8 @@ class Simulation:
                 # one sample: a fresh 0-d array of the artifact's dtype
                 value = arrays.asarray(value, _dtype(xp, selected[0], nm, decl), xp)
             final[nm] = value
+        for p in plans:      # an Index plane at the declared width, once: the planes a run's sets own are the kernel's
+            final = widen_indices(p.plugin, p.plugin.arg_spec, final)
         allocated = []
         for nm, (role, width, _dt, _k) in decl.items():
             if role != "mutable" or nm in final:

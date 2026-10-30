@@ -52,7 +52,7 @@ def _bind(plugin):
     from eagle import plan as eplan
 
     x = np.array([2.0**53, 1.0, 1.0, 1.0])
-    key = np.zeros(4, dtype=np.int64)
+    key = np.zeros(4, dtype=np.int32)
     acc = np.zeros(1)
     bound = eplan.plan(plugin, structure=eexec.HostTeam).bind(x=x, key=key, acc=acc)
     return bound, acc
@@ -151,7 +151,7 @@ def _split_bind(tmp_path, framework):
     target = "host" if framework == "numpy" else "cuda"
     (p,) = eagle.plan.auto([split_acc], targets=(target,), cache_dir=str(tmp_path))
     x = xp.asarray(np.array([2.0**53, 1.0, 1.0, 1.0]))
-    key = xp.zeros(4, dtype=xp.int64)
+    key = xp.zeros(4, dtype=xp.int32)
     acc, z = xp.zeros(1), xp.zeros(4)
     return p.bind(x=x, key=key, acc=acc, z=z), acc, z
 
@@ -204,7 +204,7 @@ def test_split_clear_after_a_keyed_read_back_repeats_the_first_launch(tmp_path, 
     (p,) = eagle.plan.auto([split_keyed_share], targets=(target,), cache_dir=str(tmp_path))
     rng = np.random.default_rng(4)
     x = xp.asarray(rng.uniform(0.5, 2.0, (4, 8)))
-    key = xp.asarray(np.zeros(32, dtype=np.int64))
+    key = xp.asarray(np.zeros(32, dtype=np.int32))
     acc, out = xp.zeros(1), xp.zeros((4, 8))
     bound = p.bind(x=x, key=key, acc=acc, out=out)
     bound.launch()
@@ -227,7 +227,7 @@ def test_bound_clear_on_the_device_zeroes_the_target_and_its_companion(tmp_path)
     x = cp.asarray(np.array([2.0**53, 1.0, 1.0, 1.0]))
     acc = cp.zeros(1)
     bound = eplan.plan(p.plugin, structure=eexec.DeviceKernel).bind(
-        x=x, key=cp.zeros(4, dtype=cp.int64), acc=acc)
+        x=x, key=cp.zeros(4, dtype=cp.int32), acc=acc)
     bound.launch()
     clean = acc.get().copy()
     comp = bound._planes["acc_c"]

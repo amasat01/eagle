@@ -139,7 +139,7 @@ def _lane(n=N) -> np.ndarray:
     """A PERMUTATION of ``[0, n)``: every lane has exactly one writer, so the
     scatter is exact rather than a race (the fixture convention HAWK's own
     deployment set uses, and for the same reason)."""
-    return ((np.arange(n) * 3 + 1) % n).astype(np.int64)
+    return ((np.arange(n) * 3 + 1) % n).astype(np.int32)
 
 
 # --------------------------------------------------------------------------- #
@@ -345,7 +345,7 @@ def test_a_bound_table_read_binds_the_lookup_plane_by_name(gather_unit):
     # count, and a table exactly n long would let a packer that confused the two
     # pass this row by coincidence.
     table = np.arange(2 * N, dtype=np.float64) * 3.0
-    where = ((np.arange(N) * 5 + 2) % (2 * N)).astype(np.int64)
+    where = ((np.arange(N) * 5 + 2) % (2 * N)).astype(np.int32)
     assert where.max() >= N, "the row reaches past the sample count, or proves less"
     p = eplan.plan(plugin, structure=eexec.DeviceKernel)
 
@@ -842,11 +842,14 @@ _INDEX_MSG = r"'where' has dtype float32.*declares int32.*pass where as int32: w
 _RANGE_MSG = r"kernel 'e4_gather': argument 'where': values exceed int32; declare Index\[int64\]"
 
 
-def test_bind_narrows_an_int64_index_plane_for_an_int32_index_on_the_host(gather_host_unit):
-    """The sidecar declares ``where`` int32; the body reads 4-byte indices. An
-    ``int64`` plane that fits is narrowed by one copy (at bind once, at run per
-    call), one that does not is refused by name; an ``int32`` plane binds as it is;
-    a float plane is refused, never cast."""
+_WIDTH_MSG = r"'where' has dtype int64.*declares int32.*pass where as int32: where\.astype"
+
+
+def test_bind_refuses_an_int64_index_plane_for_an_int32_index_and_run_narrows_it_on_the_host(gather_host_unit):
+    """The sidecar declares ``where`` int32; the body reads 4-byte indices. ``bind`` and
+    ``rebind`` keep the plane they are given for the life of the bound plan, so a plane of
+    another width is refused by name (a copy made then would go stale); ``run`` narrows per
+    call (one that does not fit is refused by name); a float plane is never cast."""
     import eagle.exec as eexec
     from eagle import plan as eplan
 
@@ -859,15 +862,13 @@ def test_bind_narrows_an_int64_index_plane_for_an_int32_index_on_the_host(gather
     too_big = where.copy()
     too_big[0] = 2**31
     with pytest.raises(ValueError, match=_RANGE_MSG):
-        p.bind(table=table, where=too_big, y=y)
-    with pytest.raises(ValueError, match=_RANGE_MSG):
         p.run(table=table, where=too_big)
+    with pytest.raises(ValueError, match=_WIDTH_MSG):
+        p.bind(table=table, where=where, y=y)
     with pytest.raises(ValueError, match=_INDEX_MSG):
         p.bind(table=table, where=where.astype(np.float32), y=y)
     with pytest.raises(ValueError, match=_INDEX_MSG):
         p.run(table=table, where=where.astype(np.float32))
-    p.bind(table=table, where=where, y=y).launch()
-    np.testing.assert_array_equal(y, table[where])
     np.testing.assert_array_equal(p.run(table=table, where=where), table[where])
     y32 = np.zeros(N)
     bound = p.bind(table=table, where=where.astype(np.int32), y=y32)
@@ -876,7 +877,8 @@ def test_bind_narrows_an_int64_index_plane_for_an_int32_index_on_the_host(gather
     other = (where[::-1]).copy()
     bound.rebind(where=other.astype(np.int32)).launch()
     np.testing.assert_array_equal(y32, table[other])
-    np.testing.assert_array_equal(p.run(table=table, where=where.astype(np.int32)), table[where])
+    with pytest.raises(ValueError, match=_WIDTH_MSG):
+        bound.rebind(where=other)
     with pytest.raises(ValueError, match=_INDEX_MSG):
         bound.rebind(where=where.astype(np.float32))
 
@@ -892,7 +894,7 @@ def test_bind_still_refuses_a_float_plane_of_the_wrong_dtype_on_the_host(vec3_un
 
 
 @pytest.mark.gpu
-def test_bind_narrows_an_int64_index_plane_for_an_int32_index_on_the_device(gather_unit):
+def test_bind_refuses_an_int64_index_plane_for_an_int32_index_on_the_device(gather_unit):
     import cupy as cp
 
     import eagle.exec as eexec
@@ -906,26 +908,17 @@ def test_bind_narrows_an_int64_index_plane_for_an_int32_index_on_the_device(gath
     too_big = where.copy()
     too_big[0] = 2**31
     with pytest.raises(ValueError, match=_RANGE_MSG):
-        p.bind(table=table, where=too_big, y=cp.zeros(N))
-    y64 = cp.zeros(N)
-    p.bind(table=table, where=where, y=y64).launch()
+        p.run(table=table, where=too_big)
+    with pytest.raises(ValueError, match=_WIDTH_MSG):
+        p.bind(table=table, where=where, y=cp.zeros(N))
+    y32 = cp.zeros(N)
+    p.bind(table=table, where=where.astype(cp.int32), y=y32).launch()
     cp.cuda.runtime.deviceSynchronize()
-    np.testing.assert_array_equal(y64.get(), table.get()[where.get()])
+    np.testing.assert_array_equal(y32.get(), table.get()[where.get()])
     with pytest.raises(ValueError, match=_INDEX_MSG):
         p.bind(table=table, where=where.astype(cp.float32), y=cp.zeros(N))
     with pytest.raises(ValueError, match=_INDEX_MSG):
         p.run(table=table, where=where.astype(cp.float32))
-    y = cp.zeros(N)
-    bound = p.bind(table=table, where=where.astype(cp.int32), y=y)
-    bound.launch()
-    cp.cuda.runtime.deviceSynchronize()
-    np.testing.assert_array_equal(y.get(), table.get()[where.get()])
-    other = where[::-1].copy()
-    bound.rebind(where=other.astype(cp.int32)).launch()
-    cp.cuda.runtime.deviceSynchronize()
-    np.testing.assert_array_equal(y.get(), table.get()[other.get()])
-    np.testing.assert_array_equal(
-        cp.asnumpy(p.run(table=table, where=where.astype(cp.int32))), table.get()[where.get()])
 
 
 @pytest.mark.gpu

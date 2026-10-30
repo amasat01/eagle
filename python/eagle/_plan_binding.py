@@ -18,7 +18,7 @@ from .interop import _stream_handle as _handle_of
 from .interop import scoped_stream
 from . import exec as eexec
 from .abi import DEVICE_CPU, DEVICE_CUDA
-from .roles import INPUT_ROLES, OUTPUT_ROLES, PER_SAMPLE_ROLES
+from .roles import OUTPUT_ROLES, PER_SAMPLE_ROLES
 from .host_launch import ScalarHandle
 from ._plan_pack import (
     _data_ptr,
@@ -41,8 +41,6 @@ from ._plan_planes import (
     sample_spec,
     function_on,
     planes_device,
-    widen_index,
-    widen_indices,
 )
 from .interop import BufferRefused
 
@@ -147,7 +145,6 @@ def _bind_one(p: Plan, planes: dict, device=None) -> BoundPlan:
         _index_set.check_bound(plugin, arg_spec, planes, n)
         _check_bound_names(arg_spec, planes)
         planes, adapted = _adapt_planes(plugin, arg_spec, planes, door="bind")
-        planes = widen_indices(plugin, arg_spec, planes)
         if n is None:
             n = _lane_bind.n_of(sample_spec(plugin, arg_spec), planes)
         parts = p.partitions_for(n)
@@ -900,9 +897,6 @@ class BoundPlan:
                                       writes=role in OUTPUT_ROLES)
                     if a is not None:
                         value = a.native
-                if role in INPUT_ROLES:
-                    value = widen_index(value, _declared_dtype(self.plan.plugin, name), name=name,
-                                       kernel=self._kernel_name())
                 _check_plane(role, name, value, n=self._n, dtype=self._dtype,
                              width=self._widths.get(name),
                              framework=self._framework,

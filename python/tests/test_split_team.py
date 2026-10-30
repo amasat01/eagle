@@ -172,7 +172,7 @@ def test_an_ordered_scatter_skips_terminated_lanes_and_replays_bitwise(tmp_path,
     plan_, _ = _plan([add_term], tmp_path, cache, target)
     n, cells = 6000, 9
     rng = np.random.default_rng(5)
-    key, x = rng.integers(0, cells, n).astype(np.int64), rng.standard_normal(n)
+    key, x = rng.integers(0, cells, n).astype(np.int32), rng.standard_normal(n)
     xp = _xp(target)
     first, second = rng.random(n) < 0.5, rng.random(n) < 0.3
     for term in (first, second, first):              # a lane live in one run and terminated in the next
@@ -190,7 +190,7 @@ def test_the_bind_records_its_chunks_and_makes_the_key_log_filled_with_minus_one
     plan_, _ = _plan([add_term], tmp_path, cache, target)
     xp = _xp(target)
     for n, cells, chunks in ((6000, 9, 256), (50, 200, 1), (1000, 1000, 1)):
-        planes = {"key": xp.zeros(n, dtype=np.int64), "x": xp.zeros(n), "terminated": xp.zeros(n, dtype=bool),
+        planes = {"key": xp.zeros(n, dtype=np.int32), "x": xp.zeros(n), "terminated": xp.zeros(n, dtype=bool),
                   "acc": xp.zeros(cells)}
         bound = plan_.bind(**planes)
         assert bound.chunks == {"acc": chunks}
@@ -286,7 +286,7 @@ def test_a_launch_stopped_after_the_first_stage_leaves_no_trace_in_the_next_repl
     plan_, _ = _plan([add_term], tmp_path, cache, target)
     n, cells = 6000, 9
     rng = np.random.default_rng(11)
-    key, x = rng.integers(0, cells, n).astype(np.int64), rng.standard_normal(n)
+    key, x = rng.integers(0, cells, n).astype(np.int32), rng.standard_normal(n)
     term = rng.random(n) < 0.5
     xp = _xp(target)
     planes = {"key": xp.asarray(key), "x": xp.asarray(x), "terminated": xp.zeros(n, dtype=bool), "acc": xp.zeros(cells)}
@@ -306,7 +306,7 @@ def test_the_once_plane_is_one_copy_whatever_the_lane_count(tmp_path, cache, tar
     xp = _xp(target)
     sizes = set()
     for n in (50, 6000):
-        planes = {"key": xp.zeros(n, dtype=np.int64), "x": xp.zeros(n), "terminated": xp.zeros(n, dtype=bool),
+        planes = {"key": xp.zeros(n, dtype=np.int32), "x": xp.zeros(n), "terminated": xp.zeros(n, dtype=bool),
                   "acc": xp.zeros(9)}
         sizes.add(plan_.bind(**planes)._team["tms_acc_m"].shape)
     assert sizes == {(257,)}

@@ -443,7 +443,7 @@ def group_a(ctx):
         given = {}
         if cls == "ga":
             given = {"tab": rig.host_to(rig.rng.random(2048)),
-                     "gi": rig.host_to(rig.rng.integers(0, 1024, n).astype(np.int64))}
+                     "gi": rig.host_to(rig.rng.integers(0, 1024, n).astype(np.int32))}
         if cls == "ld":
             given = {"v": rig.host_to(rig.rng.random((mm, n)))}
         bound, _ = rig.bind(plugin, n, **given)
@@ -474,7 +474,7 @@ def group_b(ctx):
 
 def _classes_for(rig, n, k_branches, shares):
     """A class plane with the given share per branch (iid), and its counts."""
-    cls = rig.rng.choice(k_branches, size=n, p=shares).astype(np.int64)
+    cls = rig.rng.choice(k_branches, size=n, p=shares).astype(np.int32)
     return cls, np.bincount(cls, minlength=k_branches)
 
 
@@ -531,7 +531,7 @@ def _pair(ctx, ker, mod, group, ps, held_out, heavy, kinds, name="cal_pair"):
     costs = branch_costs(getattr(mod, name))
     for p in ps:
         k, counts = _classes_for(rig, n, 2, [1 - p, p]) if p > 0 else (
-            np.zeros(n, dtype=np.int64), np.array([n, 0]))
+            np.zeros(n, dtype=np.int32), np.array([n, 0]))
         if "fused" in kinds:
             bound, _ = rig.bind(fused, n, k=rig.host_to(k))
             secs = rig.time(bound, n, ctx["reps"] + 1)
