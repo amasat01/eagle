@@ -8,10 +8,9 @@
  * record/wait, cudaLaunchHostFunc, one cudaMalloc) now goes through the
  * unconditional `EAGLE_CHECK_ALWAYS`.
  *
- * This exercises one of those formerly-EAGLE_CHECK sites --
- * `ScratchArena::alloc_()`'s `cudaMalloc` (ScratchArena.h) -- through
- * `ScratchArena`'s PUBLIC API only (`beginNode`/`reserve`/`endNode`/
- * `commit`), never touching a raw handle. The failure trigger is
+ * This exercises one of those formerly-EAGLE_CHECK sites -- the `cudaMalloc`
+ * of a graph's device scratch buffer (`cuda::detail::allocateDeviceScratch`,
+ * cuda/Graph.h; the arena itself only plans and never allocates). The failure trigger is
  * deterministic rather than an empirical hardware/driver quirk: a
  * `reserve()` request far beyond any real device's memory guarantees
  * `cudaErrorMemoryAllocation`, unlike the handle-poisoning techniques used
@@ -20,10 +19,10 @@
  *
  * Two checks, mirroring existing idioms in this suite:
  *  1. Type (test_DeviceErrorNothrow.cu's EXPECT_THROW/EXPECT_NO_THROW
- *     contrast idiom): `commit()` must now THROW the typed
+ *     contrast idiom): the allocation must THROW the typed
  *     `aether::Error` -- pre-conversion, the release-mode-silent
- *     `EAGLE_CHECK` would have discarded the status and left the arena
- *     silently un-backed.
+ *     `EAGLE_CHECK` would have discarded the status and left the graph's
+ *     scratch silently un-backed.
  *  2. Message identity (ConditionalGroupTest.MultiLauncherFanOut's
  *     thrownWhat idiom): the message must anchor on the STABLE
  *     CUDA error NAME (`cudaErrorMemoryAllocation`), not only the
@@ -46,32 +45,26 @@ TEST(DeviceErrorReleaseGate, FormerEagleCheckSiteThrowsTyped)
     // cudaErrorMemoryAllocation, not a driver/hardware-dependent guess.
     const std::size_t hugeRequest = static_cast<std::size_t>(1) << 50;
 
-    eagle::ScratchArena arena;
-    arena.beginNode(0, {});
-    arena.reserve(hugeRequest);
-    arena.endNode();
-
     // 1. Type: must throw the typed aether::Error, not silently
     //    swallow the failing cudaMalloc.
-    EXPECT_THROW(arena.commit(), aether::Error)
-        << "ScratchArena::commit() must throw aether::Error on a "
+    EXPECT_THROW(eagle::cuda::detail::allocateDeviceScratch(hugeRequest), aether::Error)
+        << "allocateDeviceScratch() must throw aether::Error on a "
            "failing cudaMalloc -- pre-conversion, this site used the "
            "release-mode-silent EAGLE_CHECK and would have discarded the "
            "status instead.";
 
-    // 2. Message identity: `committed_` never got set on the
-    //    first (thrown) attempt, so retrying `commit()` deterministically
-    //    re-fails the same way and lets us inspect the message.
+    // 2. Message identity: a second attempt re-fails the same way and lets
+    //    us inspect the message.
     bool threw = false;
     std::string thrownWhat;
     try {
-        arena.commit();
+        eagle::cuda::detail::allocateDeviceScratch(hugeRequest);
     } catch (const aether::Error& e) {
         threw      = true;
         thrownWhat = e.what();
     }
     ASSERT_TRUE(threw)
-        << "expected aether::Error from a retried commit()";
+        << "expected aether::Error from a retried allocation";
     EXPECT_NE(thrownWhat.find("cudaErrorMemoryAllocation"), std::string::npos)
         << "expected the stable cudaErrorMemoryAllocation NAME in the "
            "message, not just the English description; got: "
