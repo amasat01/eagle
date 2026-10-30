@@ -96,7 +96,7 @@ torch = ["torch>=2.2", "raptor-hawk>=0.7.2,<0.8"]
 jax = ["jax>=0.11.2", "raptor-hawk>=0.7.2,<0.8"]
 # What the test suite imports (the gate installs this, with ci/constraints.txt): pytest and numpy. Rows that need
 # torch, jax, warp or cupy sit behind their own extras and markers (interop_matrix, gpu, torch).
-test = ["pytest>=8", "numpy", "ruff"]
+test = ["pytest>=8", "pytest-xdist", "numpy", "ruff"]
 # What the docs build and notebook check import: the Sphinx stack docs/requirements.txt pins, and the notebooks' libraries.
 # raptor-docs (the shared tooling) is a checkout of the landing site, installed beside this (see the Makefile's SITE_SRC).
 docs = [

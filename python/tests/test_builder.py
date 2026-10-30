@@ -593,6 +593,7 @@ def test_d_seed_adds_exactly_one_node_over_twin():
 
 
 # ============================================================================ (e) record-time cost
+@pytest.mark.wall_clock   # a measured time: it flips with machine load (parallel gate workers)
 def test_e_record_time_cost(doc, capsys):
     whole = doc["whole"]
     x = np.arange(8.0); times = []

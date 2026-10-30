@@ -21,7 +21,8 @@
 # GPU: GPU_RUN is the prefix the GPU runs are launched with (the GPU is held for the run only, never for a build),
 # e.g. GPU_RUN="gpu_run.sh --gpu 1 taskset -c 2-7".
 # PYTEST_ARGS replaces the default python/tests path (the probe: GATE_REUSE=1 make gate PYTEST_ARGS="python/tests/test_x.py").
-# JOBS: GATE_JOBS (default 2) is passed to every build; pytest runs serially, in one process.
+# JOBS: GATE_JOBS (default 2) is passed to every build; PYTEST_JOBS (default GATE_JOBS) is the CPU pytest workers, one test
+# file per worker; the GPU leg runs in one process (one card).
 
 SHELL := /bin/bash
 .SHELLFLAGS := -eu -o pipefail -c
@@ -30,6 +31,7 @@ SHELL := /bin/bash
 PYTHON      ?= python3
 GATE_DIR    ?= build/gate
 GATE_JOBS   ?= 2
+PYTEST_JOBS ?= $(GATE_JOBS)
 GATE_REUSE  ?=
 PYTEST_ARGS ?=
 RAPTOR_SRC  ?=
@@ -170,7 +172,7 @@ gate-cpp:
 gate-py: gate-env-cpu
 	EAGLE_PLUGIN_EXPECTED_ARCHS=$(CPU_CUDA_ARCH)/$(CPU_CUDA_ARCH) \
 	  $(if $(HAWK_SRC),HAWK_AETHER_INCLUDE="$(AETHER_SRC)" HAWK_EAGLE_INCLUDE="$(CURDIR)",) \
-	  env -u PYTHONPATH -u LD_LIBRARY_PATH "$(GD)/venv_cpu/bin/python" -m pytest -q -m "not gpu and not interop_matrix" $(or $(PYTEST_ARGS),python/tests)
+	  env -u PYTHONPATH -u LD_LIBRARY_PATH "$(GD)/venv_cpu/bin/python" -m pytest -q -m "not gpu and not interop_matrix" -n $(PYTEST_JOBS) --dist loadfile $(or $(PYTEST_ARGS),python/tests)
 # LD_LIBRARY_PATH is dropped: a conda lib dir on it brings its own OpenMP runtime next to the one aether ships
 # interop_matrix rows certify a framework (torch, jax, warp, cupy) and FAIL when it is absent, by design: this is the
 # one sanctioned deselect, as in CI. gpu rows run in gate-gpu.
