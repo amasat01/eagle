@@ -34,4 +34,5 @@ while [ $# -gt 0 ]; do
   echo "$sum  $cache/$archive" | sha256sum -c -
   tar -xJf "$cache/$archive" -C "$prefix" --strip-components=1
 done
+[ -e "$prefix/lib64" ] || ln -s lib "$prefix/lib64"   # the archives unpack to lib/; CMake and nvcc look in lib64/
 "$prefix/bin/nvcc" --version
