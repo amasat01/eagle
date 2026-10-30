@@ -94,6 +94,16 @@ torch = ["torch>=2.2", "raptor-hawk>=0.7.2,<0.8"]
 # jax[cuda13]). The floor is the jaxlib whose XLA FFI headers libeagle_xla.so
 # vendors (an older runtime with newer headers is the unsupported direction).
 jax = ["jax>=0.11.2", "raptor-hawk>=0.7.2,<0.8"]
+# What the test suite imports (the gate installs this, with ci/constraints.txt): pytest and numpy. Rows that need
+# torch, jax, warp or cupy sit behind their own extras and markers (interop_matrix, gpu, torch).
+test = ["pytest>=8", "numpy", "ruff"]
+# What the docs build and notebook check import: the Sphinx stack docs/requirements.txt pins, and the notebooks' libraries.
+# raptor-docs (the shared tooling) is a checkout of the landing site, installed beside this (see the Makefile's SITE_SRC).
+docs = [
+    "Sphinx==8.2.3", "myst-nb==1.4.0", "sphinx-book-theme==1.2.0", "sphinx-design==0.7.0",
+    "sphinx-copybutton==0.5.2", "sphinx-autodoc-typehints==3.5.2", "breathe==4.36.0",
+    "nbformat", "nbclient", "ipykernel", "matplotlib", "scipy", "setuptools-scm", "sphinx-sitemap>=2.6",
+]
 # eagle.Graph.plot: the graph drawn with matplotlib (imported only by that
 # method; show()/to_mermaid()/to_dot() need nothing).
 plot = ["matplotlib>=3.7"]

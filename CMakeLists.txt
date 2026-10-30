@@ -181,10 +181,10 @@ list(APPEND EAGLE_CXX_FLAGS ${EAGLE_COMMON_FLAGS} ${OpenMP_CXX_FLAGS} -Wpedantic
 
 # Treat warnings as errors - for CI pipeline
 if (EAGLE_WARN_AS_ERR)
-  list(APPEND ${EAGLE_CXX_FLAGS} -Werror)
+  list(APPEND EAGLE_CXX_FLAGS -Werror)
   # CUDA only flag
   if (NOT EAGLE_CPP_MODE)
-    list(APPEND ${EAGLE_CUDA_FLAGS} -Werror=all-warnings)
+    list(APPEND EAGLE_CUDA_FLAGS -Werror=all-warnings)
   endif()
 endif()
 
