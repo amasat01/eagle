@@ -97,14 +97,14 @@ class _Kernels:
     vjp of one step as a pure function, the taped ``(name, rows)``, and the
     time plane name of a ``time_step=`` kernel."""
 
-    __slots__ = ("single", "fused", "vjp", "taped", "time")
+    __slots__ = ("single", "fused", "vjp", "fused_vjp", "taped", "time")
 
 
-def _step_kernels(plugin, window, door, device, events="step"):
+def _step_kernels(plugin, window, door, device, events="step", reverse="per_step"):
     cache = getattr(plugin, "_tapes", None)
     if cache is None:
         cache = plugin._tapes = {}
-    key = (window, device, events)
+    key = (window, device, events, reverse)
     if key in cache:
         return cache[key]
     source = getattr(plugin, "_hawk_source", None)
@@ -132,12 +132,15 @@ def _step_kernels(plugin, window, door, device, events="step"):
     # the fused twin shares the single twin's name (its word-1 branch IS that
     # step), so a bundle holds one or the other; the step itself is there as
     # the primal the vjp names
-    built = _hawk_plugins([fused or single, step, derived], targets, cache_dir,
-                          plugin.scalar_type)
+    built = _hawk_plugins([fused or single, step, derived], targets, cache_dir, plugin.scalar_type)
     out = _Kernels()
     out.single = None if fused is not None else built[0]
     out.fused = built[0] if fused is not None else None
     out.vjp = built[2]
+    out.fused_vjp = None
+    if reverse == "fused":      # all K steps of a window in one launch; a unit of its own (its kind differs)
+        whole = Kernel(f"{step.name}_fused_vjp", step_vjp(kernel, steps_reverse="fused"))
+        out.fused_vjp = _hawk_plugins([kernel, whole], targets, cache_dir, plugin.scalar_type)[1]
     out.taped = tuple((name, element_count(t)) for name, t in taped_planes(single))
     out.time = getattr(step, "time", None) if getattr(step, "time_step", None) else None
     cache[key] = out
@@ -279,7 +282,7 @@ class RunRecorder:
     planes (tape off) and the checkpoint pool."""
 
     def __init__(self, runner, plan, door, window, budget, extras, owner, *, record=True,
-                 events="step", on_no_event="raise", nodes=()):
+                 events="step", on_no_event="raise", nodes=(), steps_reverse="per_step"):
         from ..plan import plan as make_plan
 
         self.runner = runner
@@ -297,7 +300,11 @@ class RunRecorder:
         # stop step); the reverse recomputes with the window's own twin
         self.fwd_kernels = (_step_kernels(plan.plugin, 1, door, runner._device, events)
                             if refine else None)
-        self.kernels = k = (_step_kernels(plan.plugin, self.window, door, runner._device, events)
+        if steps_reverse == "fused" and nodes:
+            raise ValueError(f"{door}: steps_reverse='fused' does not reverse nodes; use per_step")
+        self.steps_reverse = steps_reverse
+        self.kernels = k = (_step_kernels(plan.plugin, self.window, door, runner._device, events,
+                                          steps_reverse)
                             if record else self.fwd_kernels)
         self.fwd_kernels = self.fwd_kernels or k
         # an automatic or steps=K kernel replays its fused twin: at most its
@@ -633,31 +640,39 @@ class RunReverse:
         self.ring = {nm: _alloc.empty(xp, (W,) + self.reads[nm].shape, dtype=self.reads[nm].dtype)
                      for nm in rec.ring}
         self.offsets = offsets
-        self.vjps = []
-        for row in range(W):
-            for parity in range(2):
-                bind = {}
-                for _role, nm in vspec:
-                    if nm.startswith("bar_") and nm.endswith(_NEXT):
-                        bind[nm] = self.adj[parity][nm[4:-len(_NEXT)]]
-                    elif nm.startswith("bar_") and nm[4:] in taped:
-                        bind[nm] = self.adj[1 - parity][nm[4:]]
-                    elif nm.startswith("bar_"):
-                        bind[nm] = self.grad[nm[4:]]
-                    elif nm in taped:
-                        lo = row * rec.width + offsets[nm]
-                        bind[nm] = self.tape[lo:lo + taped[nm]].reshape(self.state[nm].shape)
-                    elif nm == APPLIED_STEPS:
-                        bind[nm] = self.step_plane
-                    elif nm in rec.uniforms:
-                        bind[nm] = rec.uniforms[nm]
-                    elif nm in self.reads:
-                        bind[nm] = self.reads[nm]
-                    else:
-                        raise ValueError(f"{door}: the step's vjp reads {nm!r}, which "
-                                         "the recorded run does not hold")
-                self.vjps.append(_split.single(make_plan(k.vjp, structure=rec.structure)
-                                              .bind(**bind), "eagle.diff.reverse"))
+        def bind_vjp(kern, parity, row):
+            """``kern``'s planes for one launch reading adjoint plane ``parity``: the state
+            before the step (a tape row), or, for a fused window, the window's start."""
+            bind = {}
+            for role, nm in kern.arg_spec:
+                if nm.startswith("bar_") and nm.endswith(_NEXT):
+                    bind[nm] = self.adj[parity][nm[4:-len(_NEXT)]]
+                elif nm.startswith("bar_") and nm[4:] in taped:
+                    bind[nm] = self.adj[1 - parity][nm[4:]]
+                elif nm.startswith("bar_"):
+                    bind[nm] = self.grad[nm[4:]]
+                elif nm in taped and row is None:
+                    bind[nm] = self.state[nm]
+                elif nm in taped:
+                    lo = row * rec.width + offsets[nm]
+                    bind[nm] = self.tape[lo:lo + taped[nm]].reshape(self.state[nm].shape)
+                elif role == "terminated":      # a fused window's entry flag: none stopped yet
+                    bind[nm] = _alloc.zeros(xp, m, dtype=rec.planes[nm].dtype)
+                elif nm == APPLIED_STEPS:
+                    bind[nm] = self.step_plane
+                elif nm in rec.uniforms:
+                    bind[nm] = rec.uniforms[nm]
+                elif nm in self.reads:
+                    bind[nm] = self.reads[nm]
+                else:
+                    raise ValueError(f"{door}: the step's vjp reads {nm!r}, which "
+                                     "the recorded run does not hold")
+            return _split.single(make_plan(kern, structure=rec.structure).bind(**bind),
+                                 "eagle.diff.reverse")
+
+        self.vjps = [bind_vjp(k.vjp, parity, row) for row in range(W) for parity in range(2)]
+        self.fused_vjps = ([bind_vjp(k.fused_vjp, parity, None) for parity in range(2)]
+                           if k.fused_vjp is not None else [])
         # parameters sum over samples; a time-indexed run's t_0 share belongs to t
         self.summed = {nm for nm in self.acc if nm in rec.uniforms or nm in rec.promoted}
         self.folded = {rec.t0: k.time} if rec.t0 in self.acc else {}
@@ -945,6 +960,13 @@ class RunReverse:
         word = 0 if self.word is None else addr(self.word)
         return gathers, accums, step, word
 
+    def _fused(self, block=None):
+        """The fused-window arguments of the C++ driver: ``(K, entry, [block,] params)``."""
+        if not self.fused_vjps:
+            return (0, 0) + ((0,) if block else ()) + ([],)
+        head = (self.window, int(self.fused_vjps[0]._entry))
+        return head + ((block(self.fused_vjps[0]),) if block else ()) + ([v._addrs for v in self.fused_vjps],)
+
     def _callbacks(self):
         return (self._hook, self._node_vjp) if self.rec.nodes else (None, None)
 
@@ -954,7 +976,7 @@ class RunReverse:
                                 [int(o.ptr) for o in orders], gathers,
                                 self.recompute._entry, self.recompute._addrs, word,
                                 self.vjps[0]._entry, [v._addrs for v in self.vjps], accums,
-                                step[0], step[1], *self._callbacks())
+                                step[0], step[1], *self._callbacks(), *self._fused())
 
     def _device(self, orders, live):
         import importlib
@@ -968,7 +990,8 @@ class RunReverse:
                                   self.recompute._entry, self.recompute._addrs, word,
                                   block(self.recompute), self.vjps[0]._entry,
                                   [v._addrs for v in self.vjps], block(self.vjps[0]), accums,
-                                  step[0], step[1], stream, -1, *self._callbacks())
+                                  step[0], step[1], stream, -1, *self._callbacks(),
+                                  *self._fused(block))
 
 
 def reverse_of(forward):

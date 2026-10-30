@@ -563,7 +563,7 @@ class Runner:
 
     @_layout.door
     def __init__(self, plan, *, max_steps, every=None, reorder=None, record=False,
-                 window=None, memory_budget=None, events="step", on_no_event="raise",
+                 window=None, steps_reverse="per_step", memory_budget=None, events="step", on_no_event="raise",
                  **planes):
         self._busy = BusyGuard("eagle.Runner")
         # Internal only (never a bound plane name, popped before the
@@ -672,6 +672,12 @@ class Runner:
         auto = k == FINISH_AUTO
         if record or refine:
             _refuse_record(len(plans))
+        if steps_reverse not in ("per_step", "fused", "auto"):
+            raise ValueError(f"eagle.until_done: steps_reverse is 'per_step', 'fused' or 'auto', "
+                             f"got {steps_reverse!r}")
+        if steps_reverse == "fused" and (not record or refine):
+            raise ValueError("eagle.until_done: steps_reverse='fused' reverses a plain "
+                             "record=True run (no refined events)")
         if record:
             pass
         elif window is not None or memory_budget is not None:
@@ -722,6 +728,20 @@ class Runner:
                          and hasattr(planes.get(nm), "shape")]
                 active.own(*owned)
 
+        if record and steps_reverse == "auto":      # the table's answer for this batch, K and device
+            from hawk.ir.steps_class import choose
+
+            fits = not auto and k > 1 and window in (None, k) and not refine
+            width = sum(1 for role, _nm in specs[0] if role == "mutable")
+            steps_reverse = choose(device, width, k, n) if fits else "per_step"
+        elif steps_reverse == "auto":
+            steps_reverse = "per_step"
+        if steps_reverse == "fused":
+            if auto or k <= 1 or window not in (None, k):
+                raise ValueError("eagle.until_done: steps_reverse='fused' needs a steps=K kernel "
+                                 "(K > 1) and window=None or window=K: each window of K steps "
+                                 "is one reverse launch")
+            window = k
         extras = {}
         if record or refine:    # the run's own per-sample planes move with a reorder
             from .diff._run import array_module, record_planes
@@ -801,7 +821,8 @@ class Runner:
 
             self._recorder = RunRecorder(self, plans[0], "eagle.until_done", window,
                                          memory_budget, extras, self, record=record,
-                                         events=events, on_no_event=on_no_event, nodes=nodes)
+                                         events=events, on_no_event=on_no_event, nodes=nodes,
+                                         steps_reverse=steps_reverse)
         self._hooks = tuple(hooks)
         ctx = LowerCtx("gpu" if device else "cpu", body=True)
         by_plan = iter(b.launch for b in bound)
@@ -1747,7 +1768,7 @@ def _cadence(name: str, every, k: int) -> int:
 
 
 def until_done(plan, *, max_steps: int, every: int | None = None, reorder=None,
-               record: bool = False, window=None, memory_budget: int | None = None,
+               record: bool = False, window=None, steps_reverse="per_step", memory_budget: int | None = None,
                events: str = "step", on_no_event: str = "raise", **planes) -> Runner:
     """Bind ``plan`` and build the loop that runs it until every sample is
     done; returns the :class:`Runner` (``.run()`` runs it).
@@ -1805,15 +1826,15 @@ def until_done(plan, *, max_steps: int, every: int | None = None, reorder=None,
         runner.t_stop                       # the event time of each sample
         grads = eagle.diff.reverse(runner.record, {"t": numpy.ones(n)})"""
     return Runner(plan, max_steps=max_steps, every=every, reorder=reorder,
-                  record=record, window=window, memory_budget=memory_budget,
+                  record=record, window=window, steps_reverse=steps_reverse, memory_budget=memory_budget,
                   events=events, on_no_event=on_no_event, **planes)
 
 
 def run_until_done(plan, *, max_steps: int, every: int | None = None, reorder=None,
-                   record: bool = False, window=None, memory_budget: int | None = None,
+                   record: bool = False, window=None, steps_reverse="per_step", memory_budget: int | None = None,
                    events: str = "step", on_no_event: str = "raise",
                    **planes) -> RunReport:
     """:func:`until_done` then :meth:`Runner.run`: the one-call form."""
     return until_done(plan, max_steps=max_steps, every=every, reorder=reorder,
-                      record=record, window=window, memory_budget=memory_budget,
+                      record=record, window=window, steps_reverse=steps_reverse, memory_budget=memory_budget,
                       events=events, on_no_event=on_no_event, **planes).run()
