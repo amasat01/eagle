@@ -87,7 +87,8 @@ def _device(jax, platform):
 
 
 def _digest(K, platform):
-    return K.level.slots[("digest", platform, "float64")]
+    # the digest is the same on every GPU of an arch: the registration slot is keyed per device
+    return next(v for k, v in K.level.slots.items() if k[:3] == ("digest", platform, "float64"))
 
 
 def _ffi(jax, platform, digest, results, *args):

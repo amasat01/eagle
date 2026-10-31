@@ -30,7 +30,8 @@ from collections.abc import Callable
 
 #: The bounded per-process memo of loaded plugins, keyed by the CONTENT of the
 #: artifact + sidecar bytes (never a path or mtime, since republishing
-#: identical bytes elsewhere must not pay a fresh driver JIT). Every
+#: identical bytes elsewhere must not pay a fresh driver JIT) and by the device
+#: it was loaded on (a loaded module's functions belong to that device's context). Every
 #: :func:`load_manifest` call builds its own :class:`KernelRegistry` and
 #: re-runs the schema/ABI checks; nothing else is memoised.
 _PLUGIN_MEMO: dict = {}
@@ -71,6 +72,8 @@ def _plugin_key(loader: Callable, entry: dict, artifact: pathlib.Path,
 
     Raises ``OSError`` if either file cannot be read; the caller falls back
     to loading it the long way."""
+    from .launch import _current_device_ordinal
+
     h = hashlib.sha256()
     h.update(b"eagle.registry.plugin/1\n")
     h.update(getattr(loader, "__name__", repr(loader)).encode())
@@ -80,6 +83,7 @@ def _plugin_key(loader: Callable, entry: dict, artifact: pathlib.Path,
     h.update(artifact.read_bytes())
     h.update(b"\0")
     h.update(sidecar.read_bytes())
+    h.update(b"\0device=%d" % _current_device_ordinal())   # the device the load puts its module on
     return h.hexdigest()
 
 
