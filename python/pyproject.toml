@@ -21,7 +21,7 @@ readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "Apache-2.0" }
 # Python versions match the cibuildwheel matrix release.yml actually builds
-# and the test-wheel job actually runs (cp39-cp315 plus the free-threaded cp313t/cp314t/cp315t; manylinux_2_28 x86_64 and aarch64, macOS arm64) —
+# and the test-wheel job actually runs (cp39-cp315 plus the free-threaded cp314t/cp315t; manylinux_2_28 x86_64 and aarch64, macOS arm64) —
 # never wider than what a real wheel ships.
 classifiers = [
     "License :: OSI Approved :: Apache Software License",
@@ -66,9 +66,8 @@ numpy = ["numpy>=1.26"]
 # cuda-toolkit[cudart,nvrtc] brings exactly those as pip wheels (no system toolkit),
 # without the math libraries CuPy's own [ctk] extra adds (cuBLAS, cuFFT, ...).
 # CuPy 14 dropped Python 3.9 (its last 3.9 release is 13.6), so the extras pick by
-# marker. CuPy 14 ships no cp313t wheel: on free-threaded 3.13 the GPU extras do not
-# resolve and eagle runs on the CPU route only. The same holds on aarch64, where CuPy's wheels
-# also stop at 3.14 (no 3.15 or 3.15t build either).
+# marker. CuPy's wheels stop at 3.14: on 3.15 and 3.15t, and on aarch64 above 3.14, the GPU extras do not
+# resolve and eagle runs on the CPU route only.
 cuda12 = [
     "cupy-cuda12x>=14; python_version>='3.10'",
     "cupy-cuda12x>=13.6,<14; python_version<'3.10'",

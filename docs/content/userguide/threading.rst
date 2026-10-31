@@ -40,6 +40,6 @@ Host threads
 
 A host launch splits its samples into tiles and runs them on an OpenMP team; ``min(its tiles, N)`` threads run, and one tile runs in place on the calling thread, so a single-sample launch starts no team. ``eagle.exec.set_host_threads(N)`` sets that cap for the whole process (``None`` restores the default, ``OMP_NUM_THREADS``).
 
-Free-threaded CPython (3.13t and 3.14t) is supported and tested in CI. See
+Free-threaded CPython (3.14t and 3.15t) is supported and tested in CI. See
 :doc:`graph_model` for the graph guard in context and :doc:`installation` for
 the free-threaded install notes.

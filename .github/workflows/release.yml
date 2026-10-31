@@ -157,15 +157,13 @@ jobs:
       fail-fast: false
       matrix:
         arch: [x86_64, aarch64]
-        tag: [cp39, cp310, cp311, cp312, cp313, cp314, cp313t, cp314t, cp315, cp315t]
+        tag: [cp39, cp310, cp311, cp312, cp313, cp314, cp314t, cp315, cp315t]
     env:
       CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
       CIBW_MANYLINUX_AARCH64_IMAGE: manylinux_2_28
       # no isolation, deps installed per Python first: an isolated build env sits at a random
       # /tmp path that lands in every compile line, so ccache could never hit across runs
       CIBW_BUILD_FRONTEND: "build; args: --no-isolation"
-      # cp313t still needs this group in cibuildwheel 3.x, which warns that it is deprecated (3.13t wheels go in 0.7.3)
-      CIBW_ENABLE: ${{ matrix.tag == 'cp313t' && 'cpython-freethreading' || '' }}
       CIBW_BEFORE_BUILD: >-
         python -m pip install 'scikit-build-core>=0.10' 'setuptools-scm>=8' 'ninja>=1.5'
         'nanobind>=3.1,<4; python_version >= "3.10"'
@@ -255,7 +253,7 @@ jobs:
           echo "path=$(find "$GITHUB_WORKSPACE/sdist-cpu" -name 'raptor_eagle-*.tar.gz')" >> "$GITHUB_OUTPUT"
         if: steps.wh.outputs.cache-hit != 'true'
 
-      - name: Build the wheel (cibuildwheel 3.x; CPython 3.9-3.14 plus free-threaded 3.13t/3.14t)
+      - name: Build the wheel (cibuildwheel 3.x; CPython 3.9-3.14 plus free-threaded 3.14t)
         uses: pypa/cibuildwheel@v3.4.1
         with:
           package-dir: ${{ steps.sdist.outputs.path }}
@@ -285,11 +283,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        tag: [cp39, cp310, cp311, cp312, cp313, cp314, cp313t, cp314t, cp315, cp315t]
+        tag: [cp39, cp310, cp311, cp312, cp313, cp314, cp314t, cp315, cp315t]
     env:
       CIBW_BUILD_FRONTEND: "build; args: --no-isolation"
-      # cp313t still needs this group in cibuildwheel 3.x, which warns that it is deprecated (3.13t wheels go in 0.7.3)
-      CIBW_ENABLE: ${{ matrix.tag == 'cp313t' && 'cpython-freethreading' || '' }}
       CIBW_BEFORE_BUILD: >-
         python -m pip install 'scikit-build-core>=0.10' 'setuptools-scm>=8' 'ninja>=1.5'
         'nanobind>=3.1,<4; python_version >= "3.10"'
@@ -366,7 +362,7 @@ jobs:
           (cd eagle/python && python -m build --sdist --outdir "$GITHUB_WORKSPACE/sdist-cpu")
           echo "path=$(find "$GITHUB_WORKSPACE/sdist-cpu" -name 'raptor_eagle-*.tar.gz')" >> "$GITHUB_OUTPUT"
         if: steps.wh.outputs.cache-hit != 'true'
-      - name: Build the wheel (cibuildwheel 3.x; CPython 3.9-3.14 plus free-threaded 3.13t/3.14t)
+      - name: Build the wheel (cibuildwheel 3.x; CPython 3.9-3.14 plus free-threaded 3.14t)
         uses: pypa/cibuildwheel@v3.4.1
         with:
           package-dir: ${{ steps.sdist.outputs.path }}
@@ -452,14 +448,14 @@ jobs:
           merge-multiple: true
           path: dist
 
-      - name: Ten wheels per platform (3.9-3.15 plus 3.13t, 3.14t, 3.15t), none unrepaired
+      - name: Nine wheels per platform (3.9-3.15 plus 3.14t, 3.15t), none unrepaired
         run: |
           for plat in manylinux*_x86_64 manylinux*_aarch64 macosx_*_arm64; do
             n=$(find dist -name "*-${plat}.whl" | wc -l)
-            [ "$n" -eq 10 ] || { echo "::error::$n wheels for $plat, expected 10"; exit 1; }
+            [ "$n" -eq 9 ] || { echo "::error::$n wheels for $plat, expected 9"; exit 1; }
           done
-          [ "$(find dist -name '*.whl' | wc -l)" -eq 30 ] || { echo "::error::unexpected wheel in dist"; ls dist; exit 1; }
-          echo "OK: 10 wheels each for x86_64, aarch64 and macOS arm64"
+          [ "$(find dist -name '*.whl' | wc -l)" -eq 27 ] || { echo "::error::unexpected wheel in dist"; ls dist; exit 1; }
+          echo "OK: 9 wheels each for x86_64, aarch64 and macOS arm64"
 
       - run: python -m twine check --strict dist/*
       - name: No wheel vendors libcuda
@@ -594,7 +590,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04, ubuntu-24.04-arm, macos-15]
-        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14", "3.15", "3.13t", "3.14t", "3.15t"]
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14", "3.15", "3.14t", "3.15t"]
     steps:
       - uses: actions/checkout@v7
         with:
@@ -717,7 +713,7 @@ jobs:
           RAPTOR_ROOT="${GITHUB_WORKSPACE}/raptor" python -m pytest tests -q -p no:cacheprovider -W error::pytest.PytestUnknownMarkWarning \
             -m "not gpu and not gpu2 and not torch and not interop_matrix and not repo_local" -n auto --dist loadfile
 
-      # Free-threaded legs only (3.13t / 3.14t): the ft rows against the INSTALLED
+      # Free-threaded legs only (3.14t / 3.15t): the ft rows against the INSTALLED
       # wheel, then the whole suite with RuntimeWarning as an error (a re-enabled
       # GIL is that warning). Zero collected ft rows fails the leg, and the
       # interpreter must be GIL-off by default with no override set.

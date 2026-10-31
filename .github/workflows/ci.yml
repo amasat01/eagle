@@ -481,7 +481,7 @@ jobs:
       # both free-threaded interpreters report, even when one fails
       fail-fast: false
       matrix:
-        python-version: ["3.13t", "3.14t"]
+        python-version: ["3.14t"]
     env:
       CC: gcc-13
       CXX: g++-13

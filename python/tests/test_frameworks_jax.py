@@ -42,7 +42,7 @@ import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 
 jax = pytest.importorskip("jax",
-    reason="jax is not installed here (jax's jaxlib ships free-threaded wheels for 3.14t only (none for 3.13t))")
+    reason="jax is not installed here (jax's jaxlib ships free-threaded wheels for 3.14t only)")
 hawk = pytest.importorskip("hawk")
 
 import jax.numpy as jnp  # noqa: E402
