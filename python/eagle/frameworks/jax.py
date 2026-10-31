@@ -811,10 +811,12 @@ def _install(digest, fields, *, platform, entry, ordinal=0, block=256, function=
 
 
 def _register(level, owner, platform, mode):
-    """Build ``level`` for ``platform`` in ``mode`` (once), register its recipe
+    """Build ``level`` for ``platform`` in ``mode`` (once per CUDA device), register its recipe
     and return its digest -- the only thing the lowered module carries."""
     with LOCK:
-        key = ("digest", platform, mode)
+        # one recipe per device: the same function called under another GPU loads its kernel there too
+        ordinal, arch = _cuda_device(owner._device_arch) if platform != "cpu" else (None, None)
+        key = ("digest", platform, mode, ordinal)
         digest = level.slots.get(key)
         if digest is not None:
             return digest
@@ -830,14 +832,13 @@ def _register(level, owner, platform, mode):
             _write_recipe(unit, level, digest, fields, owner._policy, "cpu", mode, "")
         else:
             seam = _seam()
-            ordinal, arch = _cuda_device(owner._device_arch)
             unit = level.unit(owner._dir, "cuda", mode, arch)
             plugin = _load_device(unit, level.name, ordinal)
             digest = f"{unit.digest}/{level.name}/{mode}/p{owner._policy}/cuda-{arch}"
             fields = _recipe_fields(level, level.artifact(unit), mode, device=True)
             _install(digest, fields, policy=owner._policy, platform="cuda", entry=seam["run"],
                      ordinal=ordinal, function=plugin.device_function, seam=seam)
-            level.slots[("keep", platform, mode)] = plugin
+            level.slots[("keep", platform, mode, ordinal)] = plugin
             _write_recipe(unit, level, digest, fields, owner._policy, "cuda", mode, arch)
         level.slots[key] = digest
         return digest
