@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -59,7 +60,7 @@ def sh(*cmd, cwd=None, env=None, capture=False):
 
 def settings():
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--mode", default="tests", choices=("tests", "notebooks"), help="the interop test rows, or every docs notebook")
+    ap.add_argument("--mode", default="tests", choices=("tests", "notebooks", "cards"), help="the interop test rows, every docs notebook, or the benchmark cards")
     ap.add_argument("--nb-timeout", type=int, default=900, help="notebooks mode: seconds one notebook may run before it FAILs")
     ap.add_argument("--only", default="", help="notebooks mode: run only notebooks whose path contains this text")
     ap.add_argument("--hawk-src", help="local hawk checkout (notebooks mode)")
@@ -445,6 +446,35 @@ def run_notebooks(cfg, py, work, roots, result, out):
     return ok
 
 
+#: Wall-clock budget of the cards kernel (Kaggle: 15 minutes, install included); each card gets what is left.
+CARDS_BUDGET_S = 12 * 60
+
+
+def run_cards(py, roots, out, result):
+    """The GPU card (RKF7(8) ensemble, committed arms, no profiler/memory/compile passes) and the
+    feature card, written under ``out/cards``; ``result['cards']`` lists each with its exit code."""
+    eagle = roots["eagle"]
+    env = dict(os.environ, HAWK_SRC=str(roots.get("hawk", "")))
+    cards_out = out / "cards"
+    cards_out.mkdir(parents=True, exist_ok=True)
+    plan = (("perf_card", ["benchmarks/perf_card/perf_card.py", "--no-nsys", "--no-memory", "--no-compile"]),
+            ("feature_card", ["benchmarks/perf_card/feature_card.py"]))
+    result["cards"] = []
+    t_start = time.time()
+    for name, argv in plan:
+        left = CARDS_BUDGET_S - (time.time() - t_start)
+        t0 = time.time()
+        try:
+            rc = subprocess.run([str(py), *argv, "--out-dir", str(cards_out)], cwd=eagle, env=env,
+                                timeout=max(left, 60)).returncode
+        except subprocess.TimeoutExpired:
+            rc = 124
+        result["cards"].append({"name": name, "rc": rc, "seconds": round(time.time() - t0)})
+    ok = all(c["rc"] == 0 for c in result["cards"])
+    result.update(status="pass" if ok else "fail")
+    return ok
+
+
 def write_result(out, result, quiet=False):
     out.mkdir(parents=True, exist_ok=True)
     (out / "result.json").write_text(json.dumps(result, indent=2) + "\n")
@@ -501,6 +531,9 @@ def main():
         clone("eagle", cfg.eagle_ref, src / "eagle")
         clone("raptor", cfg.raptor_ref, src / "raptor")
         roots.update(eagle=src / "eagle", raptor=src / "raptor")
+        if cfg.mode == "cards":
+            clone("hawk", cfg.hawk_ref, src / "hawk")
+            roots["hawk"] = src / "hawk"
         if cfg.mode == "notebooks":
             clone(SITE_REPO, cfg.site_ref, src / SITE_REPO)
             clone("hawk", cfg.hawk_ref, src / "hawk")
@@ -514,6 +547,10 @@ def main():
     result["mode"] = cfg.mode
     if cfg.mode == "notebooks":
         ok = run_notebooks(cfg, py, work, roots, result, out)
+        write_result(out, result)
+        return 0 if ok else 1
+    if cfg.mode == "cards":
+        ok = run_cards(py, roots, out, result)
         write_result(out, result)
         return 0 if ok else 1
     tests = run_tests(py, roots["eagle"], work)

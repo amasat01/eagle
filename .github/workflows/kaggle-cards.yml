@@ -1,0 +1,73 @@
+# Copyright 2026 Alessandro Masat
+# SPDX-License-Identifier: Apache-2.0
+#
+# Runs the GPU benchmark cards (the adaptive-step ensemble card and the feature card) on a free Kaggle T4,
+# where PyTorch, JAX, CuPy and Warp are installed, in one private kernel of at most 15 minutes. Started by
+# hand only (workflow_dispatch); nothing here runs on a pull request. The card JSON and Markdown come back
+# as the artifact `kaggle-cards`; they are reviewed before anything is committed.
+
+name: Kaggle cards
+
+on:
+  workflow_dispatch:
+    inputs:
+      eagle_ref:
+        description: eagle ref (the card scripts and the build when source is git); empty = the branch you run from
+        default: ""
+      hawk_ref:
+        description: hawk ref (its examples, and the build when source is git)
+        default: main
+      raptor_ref:
+        description: raptor ref
+        default: main
+      source:
+        description: Where the packages come from
+        type: choice
+        options: [pypi, git]
+        default: pypi
+      pre:
+        description: Allow pre-release packages (pip --pre)
+        type: boolean
+        default: false
+      version:
+        description: Exact raptor-eagle version (pypi only, optional)
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  kaggle-cards:
+    runs-on: ubuntu-24.04
+    environment: kaggle
+    timeout-minutes: 30
+    env:
+      KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --quiet kaggle
+      - name: Run the cards kernel on Kaggle
+        env:
+          INPUT_EAGLE_REF: ${{ inputs.eagle_ref || github.ref_name }}
+          INPUT_HAWK_REF: ${{ inputs.hawk_ref || 'main' }}
+          INPUT_RAPTOR_REF: ${{ inputs.raptor_ref || 'main' }}
+          INPUT_SOURCE: ${{ inputs.source }}
+          INPUT_PRE: ${{ inputs.pre && 'true' || 'false' }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          args=(--cuda 12 --mode cards --run-id "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+                --eagle-ref "$INPUT_EAGLE_REF" --hawk-ref "$INPUT_HAWK_REF" --raptor-ref "$INPUT_RAPTOR_REF"
+                --source "$INPUT_SOURCE" --out kaggle-out)
+          if [ "$INPUT_PRE" = true ]; then args+=(--pre); fi
+          if [ -n "$INPUT_VERSION" ]; then args+=(--version "$INPUT_VERSION"); fi
+          python .github/kaggle/drive.py "${args[@]}"
+      - name: Keep the cards, kernel log and result
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: kaggle-cards
+          path: kaggle-out
+          if-no-files-found: warn

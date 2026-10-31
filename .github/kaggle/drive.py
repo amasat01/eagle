@@ -20,7 +20,7 @@ POLL_SECONDS = 30
 START_SECONDS = 10 * 60  # a kernel still QUEUED after this is deleted and pushed again
 START_ATTEMPTS = 3
 UNRUN = 3  # exit code when Kaggle never ran the kernel (inconclusive, not a failure)
-LIMITS = {"tests": 75 * 60, "notebooks": 180 * 60}  # per kernel, by mode
+LIMITS = {"tests": 75 * 60, "notebooks": 180 * 60, "cards": 15 * 60}  # per kernel, by mode
 # PEP 440 (the public version grammar of packaging's VERSION_PATTERN, lower case): 0.6.2, 0.6.2rc1, 1!2.0.post1.dev3
 PEP440 = re.compile(r"^(?:\d+!)?\d+(?:\.\d+)*(?:(?:a|b|rc)\d+)?(?:\.post\d+)?(?:\.dev\d+)?$")
 GPU = "NvidiaTeslaT4"  # the machine_shape the push takes; the kernel records the GPU it got
@@ -43,7 +43,7 @@ def username():
 
 
 def build(args, user, folder):
-    slug = f"eagle-{'nb' if args.mode == 'notebooks' else 'gpu'}-cuda{args.cuda}-{args.run_id}".lower()
+    slug = f"eagle-{ {'notebooks': 'nb', 'cards': 'cards'}.get(args.mode, 'gpu') }-cuda{args.cuda}-{args.run_id}".lower()
     config = {k: getattr(args, k) for k in ("mode", "cuda", "source", "pre", "version", "nb_timeout", "wheel_sha256", "sibling_pins",
                                             "eagle_ref", "hawk_ref", "raptor_ref", "aether_ref", "site_ref")}
     text = (HERE / "kernel.py").read_text()
@@ -86,7 +86,8 @@ def summary(lines):
 
 
 def title(args):
-    return f"### Kaggle GPU, CUDA {args.cuda}, {'every docs notebook' if args.mode == 'notebooks' else 'interop tests'}"
+    what = {"notebooks": "every docs notebook", "cards": "benchmark cards"}.get(args.mode, "interop tests")
+    return f"### Kaggle GPU, CUDA {args.cuda}, {what}"
 
 
 def table(args, res):
@@ -97,6 +98,7 @@ def table(args, res):
     if j:
         rows += [("tests", j["tests"]), ("failures", j["failures"]), ("errors", j["errors"]), ("skipped", j["skipped"])]
     rows += [("failed test", t) for t in res.get("failed_tests", [])]
+    rows += [(f"card {c['name']}", f"rc {c['rc']}, {c['seconds']} s") for c in res.get("cards", [])]
     out = [title(args), "", "| item | value |", "|---|---|"]
     out += [f"| {k} | {v} |" for k, v in rows if v not in (None, "")]
     return out + notebook_table(res)
@@ -174,7 +176,7 @@ def fetch_result(outdir):
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--cuda", required=True, choices=("12", "13"))
-    ap.add_argument("--mode", default="tests", choices=("tests", "notebooks"), help="the interop test rows, or every docs notebook")
+    ap.add_argument("--mode", default="tests", choices=("tests", "notebooks", "cards"), help="the interop test rows, every docs notebook, or the benchmark cards")
     ap.add_argument("--nb-timeout", type=int, default=900, help="notebooks mode: seconds one notebook may run (default 900)")
     ap.add_argument("--run-id", default=os.environ.get("GITHUB_RUN_ID", "local"))
     ap.add_argument("--source", default="pypi", choices=("pypi", "git", "wheel"),
