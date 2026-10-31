@@ -131,6 +131,7 @@ def test_gc_during_active_capture_defers_teardown_and_capture_survives():
     import cupy as cp
 
     from eagle import _core
+    from eagle.frameworks.cupy import wrap_external_stream
     from eagle.pipeline import GraphPipeline
 
     gc.disable()  # only this test's own gc.collect() call drives cyclic GC
@@ -155,7 +156,7 @@ def test_gc_during_active_capture_defers_teardown_and_capture_survives():
         pipe2 = GraphPipeline()
         capturer = _core.StreamCapturer(pipe2._sptr)
         fdcap = _CapturedFd2()
-        with cp.cuda.ExternalStream(pipe2._sptr):
+        with wrap_external_stream(pipe2._sptr):
             capturer.begin()
             assert _core.capture_guard_depth() >= 1, (
                 "depth must be >=1 once this capture is open"

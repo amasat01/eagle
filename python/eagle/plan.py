@@ -45,6 +45,7 @@ from . import _cell_rows, _counters, _layout, _split
 from ._graph_reduce import check_policy
 from .frameworks._bridge import route
 from . import _index_set
+from . import _plan_planes as _planes
 from . import exec as eexec
 from .abi import DEVICE_CPU, DEVICE_CUDA
 from .roles import INPUT_ROLES, OUTPUT_ROLES
@@ -187,6 +188,7 @@ class Plan:
         literally named ``self`` without colliding with this method's own
         bound-method parameter."""
         returns = kw.pop("returns", None)
+        kw = _planes.flat_shared(_planes.shared_shapes(self.plugin), kw)
         if device is None:
             return route(_run_plan(self, **kw), returns)
         arg_spec = getattr(self.plugin, "arg_spec", None) or ()
@@ -242,6 +244,7 @@ class Plan:
         ``m`` lanes of the same bind and captured graph. A larger ``m`` is refused by name.
 
         ``self`` is positional-only for the same reason :meth:`run`'s is."""
+        planes = _planes.flat_shared(_planes.shared_shapes(self.plugin), planes)
         bound = _bind_plan(self, planes, device, capacity)
         _counters.bump("binds")  # only on a completed bind
         return bound

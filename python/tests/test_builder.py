@@ -10,6 +10,10 @@ from hawk import math as m
 import _builder_fixtures as bp
 
 kernel = bp.kernel
+
+# The loop fixtures here are uncapped on purpose (they pin the builder's lowering, not the cap advice); the warning
+# itself is pinned by test_c_uncapped_while_warns_and_record_refuses.
+pytestmark = pytest.mark.filterwarnings("ignore:uncapped device loop:UserWarning")
 U = np.uint32
 
 
@@ -589,6 +593,7 @@ def test_d_seed_adds_exactly_one_node_over_twin():
 
 
 # ============================================================================ (e) record-time cost
+@pytest.mark.wall_clock   # a measured time: it flips with machine load (parallel gate workers)
 def test_e_record_time_cost(doc, capsys):
     whole = doc["whole"]
     x = np.arange(8.0); times = []

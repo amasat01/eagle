@@ -7,6 +7,7 @@ wall stays within a few percent of launching the same plans by hand."""
 import time
 
 import numpy as np
+import pytest
 
 from _reverse_fixtures import chain, plans
 
@@ -33,6 +34,7 @@ def test_a_plain_graph_records_nothing(tmp_path):
     assert g.record is None
 
 
+@pytest.mark.wall_clock
 def test_plain_graph_forward_wall_matches_the_plans_launched_by_hand(tmp_path):
     g, _z = chain(plans(tmp_path, "cpu"), np.linspace(-1, 1, N), 0.5)
     bounds = [n.payload for n in g._nodes]

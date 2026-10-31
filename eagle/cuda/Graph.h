@@ -37,6 +37,30 @@ class Launcher;
 /** @brief Node labels */
 using LabelsT = std::map<std::string, idx_t>;
 
+namespace detail {
+
+/** @brief Frees a graph's device scratch buffer. ``Graph`` is Python-bound and reachable from ``GraphPipeline``,
+ *  so its destruction timing is GC-governed like ``Stream``/``Launcher``/``Graph::Storage``: the buffer is
+ *  released through the same deferred-if-capturing path. */
+struct DeviceScratchFree {
+    void operator()(std::byte* base) const
+    {
+        util::CaptureGuardState::instance().destroyOrDefer([base]() { cudaFree(base); });
+    }
+};
+
+using DeviceScratch = std::unique_ptr<std::byte, DeviceScratchFree>;
+
+/** @brief A device buffer of @p bytes, owned; a failing ``cudaMalloc`` throws ``aether::Error``. */
+inline DeviceScratch allocateDeviceScratch(std::size_t bytes)
+{
+    void* base = nullptr;
+    EAGLE_CHECK_ALWAYS(cudaMalloc(&base, bytes));
+    return DeviceScratch(static_cast<std::byte*>(base));
+}
+
+}  // namespace detail
+
 /**
  * @brief Per-kernel-node record captured at graph-build time.
  *
@@ -437,7 +461,10 @@ public:
     {
         if (nativesFinalized_ || nativeBuilds_.empty())
             return;
-        arena_.commit();
+        const std::size_t bytes = arena_.commit();
+        if (bytes > 0)
+            scratch_ = detail::allocateDeviceScratch(bytes);
+        arena_.attach({ scratch_.get(), bytes });
         std::vector<idx_t> nativeToGraphNode(nativeBuilds_.size(), 0);
         for (std::size_t i = 0; i < nativeBuilds_.size(); ++i) {
             std::vector<idx_t> gdeps;
@@ -589,7 +616,9 @@ protected:
      *  patch tables. */
     std::vector<KernelNodeRecord> kernelNodes_;
 
-    /** @brief Per-graph scratch arena for native nodes (peak-not-sum reuse). */
+    /** @brief The scratch buffer this graph owns (device memory), and the arena
+     *  that plans and resolves into it for native nodes (peak-not-sum reuse). */
+    detail::DeviceScratch scratch_;
     ScratchArena arena_;
 
     /** @brief Native-node phase-1 records, consumed at ``finalize``:

@@ -41,7 +41,7 @@ from . import _alloc, arrays
 from . import _cell_rows, _split
 from .dtypes import dtype_name
 from ._busy import BusyGuard
-from ._plan_planes import _plane_dtype
+from ._plan_planes import _plane_dtype, widen_indices
 from ._compat import zip_strict
 from .diff._run import array_module as _array_module
 from ._until_done import (
@@ -71,7 +71,7 @@ _FAMILY = {"uniform": "Param", "per_sample": "per-sample", "mutable": "per-sampl
 
 #: eagle's own call-time options: keyword-only, after the kernel's own
 #: arguments; a kernel parameter sharing one of these names is refused.
-_DOOR_OPTIONS = frozenset({"until", "max_steps", "every", "reorder", "record", "window",
+_DOOR_OPTIONS = frozenset({"until", "max_steps", "every", "reorder", "record", "window", "steps_reverse",
                            "memory_budget", "events", "on_no_event"})
 
 
@@ -524,7 +524,7 @@ class Simulation:
 
     def __init__(self, model, args, kwargs, *, until=None, max_steps,
                  every=None, reorder=None, scalar_type=None, layout=None,
-                 record=False, window=None, memory_budget=None, dispatch=None,
+                 record=False, window=None, steps_reverse="per_step", memory_budget=None, dispatch=None,
                  events="step", on_no_event="raise"):
         from ._layout import rewrap, split_marks
 
@@ -579,6 +579,8 @@ class Simulation:
                 # one sample: a fresh 0-d array of the artifact's dtype
                 value = arrays.asarray(value, _dtype(xp, selected[0], nm, decl), xp)
             final[nm] = value
+        for p in plans:      # an Index plane at the declared width, once: the planes a run's sets own are the kernel's
+            final = widen_indices(p.plugin, p.plugin.arg_spec, final)
         allocated = []
         for nm, (role, width, _dt, _k) in decl.items():
             if role != "mutable" or nm in final:
@@ -621,7 +623,7 @@ class Simulation:
                                          plain=plain, forced=spec[2], theta=reorder or True)
         else:
             self.runner = until_done(step, max_steps=max_steps, every=every,
-                                     reorder=reorder, record=record, window=window,
+                                     reorder=reorder, record=record, window=window, steps_reverse=steps_reverse,
                                      memory_budget=memory_budget, layout=layout,
                                      events=events, on_no_event=on_no_event,
                                      **rewrap(final, axes))
@@ -703,7 +705,7 @@ def _check_step(selected, names, finishers, compacting, every, reorder) -> None:
 
 def simulation(model, *args, until=None, max_steps: int,
                every: int | None = None, reorder=None, scalar_type=None,
-               layout=None, record: bool = False, window=None,
+               layout=None, record: bool = False, window=None, steps_reverse="per_step",
                memory_budget: int | None = None, dispatch=None, events: str = "step",
                on_no_event: str = "raise", **kwargs) -> Simulation:
     """Bind and build ``model`` once; returns the :class:`Simulation`, whose
@@ -712,14 +714,14 @@ def simulation(model, *args, until=None, max_steps: int,
     exactly like a call to it; the rest are :func:`simulate`'s own options."""
     return Simulation(model, args, kwargs, until=until, max_steps=max_steps,
                       every=every, reorder=reorder, scalar_type=scalar_type,
-                      layout=layout, record=record, window=window,
+                      layout=layout, record=record, window=window, steps_reverse=steps_reverse,
                       memory_budget=memory_budget, dispatch=dispatch, events=events,
                       on_no_event=on_no_event)
 
 
 def simulate(model, *args, until=None, max_steps: int,
              every: int | None = None, reorder=None, scalar_type=None,
-             layout=None, record: bool = False, window=None,
+             layout=None, record: bool = False, window=None, steps_reverse="per_step",
              memory_budget: int | None = None, dispatch=None, events: str = "step",
              on_no_event: str = "raise", returns: str | None = None, **kwargs) -> SimResult:
     """Run ``model`` on every sample until each one finishes (or ``max_steps``
@@ -788,6 +790,6 @@ def simulate(model, *args, until=None, max_steps: int,
         result.report.dispatch   # {"dispatch0": ("segmented", (990, 6, 4), 1.9)}"""
     return simulation(model, *args, until=until, max_steps=max_steps,
                       every=every, reorder=reorder, scalar_type=scalar_type,
-                      layout=layout, record=record, window=window,
+                      layout=layout, record=record, window=window, steps_reverse=steps_reverse,
                       memory_budget=memory_budget, dispatch=dispatch, events=events,
                       on_no_event=on_no_event, **kwargs).run().returned(returns)

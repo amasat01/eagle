@@ -6,6 +6,7 @@ import ast
 import inspect
 import os
 import subprocess
+import tempfile
 import sys
 
 import pytest
@@ -140,8 +141,8 @@ def test_array_ops_reachable_from_a_capture_hold_no_host_read_or_sync():
 # ---- GPU rows -----------------------------------------------------------------------------------------
 
 def _dot_kernel_nodes(captured, tag):
-    path = f"/local/scratch/amasat/tmp/w072/scratch/S1a/tmp/arr_{tag}.dot"
-    return captured.debug_dot(path, 0).count('shape="octagon"')
+    with tempfile.TemporaryDirectory() as d:
+        return captured.debug_dot(os.path.join(d, f"arr_{tag}.dot"), 0).count('shape="octagon"')
 
 
 def _capture(s, enqueue):

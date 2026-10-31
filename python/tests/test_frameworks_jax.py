@@ -271,7 +271,8 @@ def test_mixed_float_dtypes_promote_and_others_are_refused(ops):
 
 def _digest(K, platform, mode):
     level = K.level
-    return level.slots[("digest", platform, mode)]
+    # the digest is the same on every GPU of an arch: the registration slot is keyed per device
+    return next(v for k, v in level.slots.items() if k[:3] == ("digest", platform, mode))
 
 
 @pytest.mark.parametrize("platform", PLATFORMS)

@@ -42,6 +42,7 @@ import pytest
 
 from eagle import _core
 from eagle.compose import GraphComposer
+from eagle.frameworks.cupy import wrap_external_stream
 from eagle.pipeline import GraphPipeline
 
 pytestmark = pytest.mark.gpu
@@ -264,11 +265,11 @@ extern "C" __global__ void compose_parity_enabled_inc(double* buf, int n) {
     cpp_bufA, cpp_bufB = _fresh("cpp")
 
     def cpp_stepA(stream):
-        with cp.cuda.ExternalStream(stream):
+        with wrap_external_stream(stream):
             kernel((1,), (n,), (cpp_bufA, n))
 
     def cpp_stepB(stream):
-        with cp.cuda.ExternalStream(stream):
+        with wrap_external_stream(stream):
             kernel((1,), (n,), (cpp_bufB, n))
 
     cpp_composer = _core.GraphComposer(mode="enabled")

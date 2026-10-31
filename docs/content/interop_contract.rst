@@ -400,7 +400,9 @@ terms:
   that shape, and keeps its contents.
 - A launch that binds only ``Table`` planes has no lane count to read, since a table's length is
   never the lane count; it is refused, for every kernel. Pass a per-sample plane or the extent.
-- An ``Index`` plane of ``int32`` is accepted and widened once.
+- An ``Index`` plane has the width the kernel declares (``int32`` unless declared ``Index[int64]``). ``bind``
+  and ``rebind`` refuse another width by name and say which type to pass; ``run`` converts per call and
+  ``eagle.simulate`` once at entry, so nothing is copied at a launch.
 - ``Plan.rebind`` and ``eagle.until_done`` take lane-shaped planes the same way. A kernel
   with a ``group`` compacts with ``ActiveSet(mask, group=G)``: see
   :doc:`modules/filtering/scan_and_compaction`.

@@ -253,6 +253,27 @@ def test_a_scripted_gain_flips_the_policy_only_when_it_leaves_the_band(monkeypat
     np.testing.assert_array_equal(got.x, ref.x)          # flipping changed no result
 
 
+def test_no_fused_runner_is_built_over_sorted_planes(monkeypatch):
+    """A bind narrows an int64 selector to int32 by a copy, so a runner built while the planes are
+    sorted keeps a sorted selector and misroutes the samples after the flip back to fused."""
+    gains = iter([1.16, 1.10, 1.04, 1.10])
+    monkeypatch.setattr(policy, "predicted_gain", lambda *a, **k: next(gains))
+    built = []
+    real = door.DispatchRunner._plain
+
+    def spy(self, steps):
+        if steps not in self._plains:
+            built.append((steps, self._sorted))
+        return real(self, steps)
+
+    monkeypatch.setattr(door.DispatchRunner, "_plain", spy)
+    sim = eagle.simulation(long_walker, k=rare_classes(), x=np.zeros(N), t=np.zeros(N), max_steps=200)
+    got = sim.run()
+    assert built and not any(sorted_ for _steps, sorted_ in built)
+    ref = run(long_walker, rare_classes(), dispatch="switch")
+    np.testing.assert_array_equal(got.x, ref.x)
+
+
 # --- zero cost when unused --- #
 def test_a_model_without_an_auto_group_never_touches_the_door(monkeypatch):
     def boom(*a, **k):
@@ -390,6 +411,29 @@ def _device_run(kernel, k, **options):
 
 
 @pytest.mark.gpu
+def test_device_scripted_flip_builds_no_fused_runner_over_sorted_planes(monkeypatch):
+    """The host row's twin: the device narrows the int64 selector by a copy too."""
+    cp = pytest.importorskip("cupy")
+    gains = iter([1.16, 1.10, 1.04, 1.10])
+    monkeypatch.setattr(policy, "predicted_gain", lambda *a, **k: next(gains))
+    built = []
+    real = door.DispatchRunner._plain
+
+    def spy(self, steps):
+        if steps not in self._plains:
+            built.append((steps, self._sorted))
+        return real(self, steps)
+
+    monkeypatch.setattr(door.DispatchRunner, "_plain", spy)
+    sim = eagle.simulation(long_walker, k=cp.asarray(rare_classes()), x=cp.zeros(N), t=cp.zeros(N),
+                           max_steps=200)
+    got = sim.run()
+    assert built and not any(sorted_ for _steps, sorted_ in built)
+    ref = _device_run(long_walker, rare_classes(), dispatch="switch")
+    np.testing.assert_array_equal(cp.asnumpy(got.x), cp.asnumpy(ref.x))
+
+
+@pytest.mark.gpu
 @pytest.mark.parametrize("dispatch", [None, "segmented", {"dispatch0": "segmented"}])
 def test_device_every_policy_gives_the_fused_result_bit_for_bit(dispatch):
     cp = pytest.importorskip("cupy")
@@ -427,7 +471,7 @@ def test_the_band_alone_decides_at_its_edges():
 def _graph_with(kernel):
     from eagle._plan_deploy import auto
 
-    planes = dict(k=rare_classes(), x=np.zeros(N), t=np.zeros(N),
+    planes = dict(k=rare_classes().astype(np.int32), x=np.zeros(N), t=np.zeros(N),
                   terminated=np.zeros(N, dtype=bool), dispatch0_mix=np.zeros(3, dtype=np.uint32),
                   finished_count=np.zeros(1, dtype=np.uint32))
     step = kernel.step if kernel.step is not None else kernel

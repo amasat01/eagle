@@ -88,6 +88,44 @@ void reverseWindows(idx_t window, const std::vector<idx_t>& live, Gather&& gathe
     }
 }
 
+/**
+ * @brief Which of the two adjoint planes the next backward launch reads, for a
+ *        reverse whose full windows of @c fusedK steps are each ONE launch.
+ *
+ * A step flips the plane (reads one, writes the other), and so does a fused
+ * window, so the plane the run ends on (plane 1) fixes the one it starts on.
+ * @c fusedK = 0 is the plain reverse: plane (steps - 1) & 1 for the first step,
+ * i.e. step j reads plane j & 1. A window of exactly @c fusedK steps skips its
+ * recompute and its per-step launches; a short window keeps both.
+ */
+struct AdjointChain {
+    idx_t fusedK = 0;      ///< steps per fused window, 0 for none.
+    idx_t cur = 0;         ///< the plane the next launch reads.
+    idx_t start = 0;       ///< first step of the current window.
+    idx_t len = 0;         ///< its length.
+
+    AdjointChain(idx_t steps, idx_t window, idx_t fusedKSteps) : fusedK(fusedKSteps) {
+        idx_t flips = steps;
+        if (fusedK > 0) {
+            const WindowPlan plan = planWindows(steps, window);
+            idx_t full = 0;
+            for (idx_t k = 0; k < plan.count(); ++k) full += plan.length(k) == fusedK ? 1 : 0;
+            flips = steps - full * fusedK + full;
+        }
+        cur = 1 ^ (flips & 1);
+    }
+    /** @brief Enter window [c, c+len); true when it is one fused launch. */
+    bool begin(idx_t c, idx_t length) {
+        start = c;
+        len = length;
+        return fused();
+    }
+    bool fused() const { return fusedK > 0 && len == fusedK; }
+    /** @brief The one step of a fused window that issues the launch. */
+    idx_t top() const { return start + len - 1; }
+    void flip() { cur ^= 1; }
+};
+
 /** @brief acc[s] += g[s] for s < @p count: one step's share of a gradient
  *  that sums over steps (a parameter, a read-only input), in step order. */
 template <class T>

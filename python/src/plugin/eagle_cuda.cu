@@ -289,7 +289,7 @@ void out(T* p, T v)
 
 /** Run @p body, mapping whatever it throws to a status + thread-local message. */
 template <class Body>
-eagle_backend_status guarded(Body&& body) noexcept
+eagle_backend_status guardedStatus(Body&& body) noexcept
 {
     try {
         body();
@@ -323,6 +323,18 @@ eagle_backend_status guarded(Body&& body) noexcept
         g_lastError = "eagle: unknown C++ exception in the CUDA backend";
         return EAGLE_BACKEND_ERROR;
     }
+}
+
+/** @ref guardedStatus, and a failure leaves nothing pending: a CUDA runtime call that failed inside @p body set the
+ *  thread's last error, which the returned status has now reported. Left there, the next launch's check
+ *  (``eagle_backend_launch_status``) would name an innocent kernel for it. */
+template <class Body>
+eagle_backend_status guarded(Body&& body) noexcept
+{
+    const eagle_backend_status status = guardedStatus(std::forward<Body>(body));
+    if (status != EAGLE_BACKEND_OK)
+        (void)cudaGetLastError();
+    return status;
 }
 
 /** Destroy @p h with its device current; never throws. */
@@ -2397,10 +2409,13 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_launch_raw(const struct eag
         ensureContext();
         static const auto launch = driverEntry12<CUresult (*)(CUfunction, unsigned, unsigned, unsigned, unsigned,
             unsigned, unsigned, unsigned, CUstream, void**, void**)>("cuLaunchKernel");
-        checkDriver(launch(reinterpret_cast<CUfunction>(d.function), d.grid[0], d.grid[1], d.grid[2], d.block[0],
-                        d.block[1], d.block[2], d.shared_bytes, reinterpret_cast<CUstream>(seamStream(d.stream)),
-                        reinterpret_cast<void**>(d.args), nullptr),
-            "cuLaunchKernel");
+        const CUresult launched = launch(reinterpret_cast<CUfunction>(d.function), d.grid[0], d.grid[1], d.grid[2],
+            d.block[0], d.block[1], d.block[2], d.shared_bytes, reinterpret_cast<CUstream>(seamStream(d.stream)),
+            reinterpret_cast<void**>(d.args), nullptr);
+        if (launched == CUDA_ERROR_OUT_OF_MEMORY)
+            throw std::runtime_error("eagle: cuLaunchKernel failed with CUresult 2 (out of memory): "
+                + eagle::cuda::detail::oom_context(reinterpret_cast<CUfunction>(d.function)));
+        checkDriver(launched, "cuLaunchKernel");
     });
 }
 

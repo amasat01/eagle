@@ -121,7 +121,7 @@ def _run(plan, xp, rows):
     x = xp.asarray(rng.standard_normal(4 * ROW))
     w = xp.asarray(rng.standard_normal(4 * rows))
     y = xp.full(n, np.nan)
-    plan.bind(lane=xp.arange(n, dtype=np.int64), x=x, w=w, y=y).launch()
+    plan.bind(lane=xp.arange(n, dtype=np.int32), x=x, w=w, y=y).launch()
     return np.asarray(y.get() if hasattr(y, "get") else y)
 
 

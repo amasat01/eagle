@@ -8,6 +8,7 @@
 
 #include <concepts>
 #include <functional>
+#include <memory>
 #include <set>
 #include <utility>
 #include <vector>
@@ -127,7 +128,10 @@ public:
     void finalize()
     {
         if (!finalized_) {
-            arena_.commit();
+            const std::size_t bytes = arena_.commit();
+            if (bytes > 0)
+                scratch_ = std::make_unique_for_overwrite<std::byte[]>(bytes);
+            arena_.attach({ scratch_.get(), bytes });
             finalized_ = true;
         }
     }
@@ -169,8 +173,9 @@ public:
     }
 
 private:
-    /** @brief Per-graph scratch arena (peak-not-sum reuse), shared design with
-     *  the CUDA path; host ``malloc`` backing in ``EAGLE_CPU_ONLY`` mode. */
+    /** @brief The scratch buffer this graph owns (host memory), and the arena
+     *  that plans and resolves into it (peak-not-sum reuse). */
+    std::unique_ptr<std::byte[]> scratch_;
     ScratchArena arena_;
 
     /** @brief Native-node bookkeeping. ``nativeDeps_`` / ``nativeAncestors_``

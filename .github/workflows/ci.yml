@@ -22,7 +22,7 @@ jobs:
   release-gate:
     # The release label, the diff, the PR body and the tag it would create agree (tools/release_gate.sh). Skipped on other PRs.
     if: github.event_name == 'pull_request' && github.base_ref == 'main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
         with:
@@ -33,10 +33,10 @@ jobs:
       - env:
           PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ' ') }}
           PR_BODY: ${{ github.event.pull_request.body }}
-        run: bash tools/release_gate.sh "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}"
+        run: make release-gate BASE_SHA="${{ github.event.pull_request.base.sha }}" HEAD_SHA="${{ github.event.pull_request.head.sha }}"
   docs-fresh:
     # Freshness check, never a commit: the generator re-renders the pages and fails on any difference.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -52,15 +52,20 @@ jobs:
       - run: python -m pip install --quiet ./site
       - name: documented numbers and the capability map match the committed cards
         run: python -m raptor_docs.fresh --check --site site
-      - name: manifesto copy
-        run: bash tools/manifesto_check.sh CONTRIBUTING.md
-      - name: ruff, pyflakes rules (repo config)
-        run: |
-          python -m pip install --quiet --only-binary=:all: ruff==0.15.18
-          ruff check
+      - name: ruff (repo config), manifesto copy
+        run: make gate-lint
+      # the public-name check is raptor's (raptor.conformance.public_names): this branch's raptor, else main
+      - uses: ./.github/actions/companion
+        with:
+          repo: raptor
+          path: raptor
+          token: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
+          pins: .github/companions
+      - name: public-name coverage
+        run: make gate-names RAPTOR_SRC=raptor COVERAGE_BASE="${{ github.event.pull_request.base.sha }}"
   test-cpp:
     needs: docs-fresh
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       CC: gcc-13
       CXX: g++-13
@@ -100,32 +105,10 @@ jobs:
             ccache-v2-${{ runner.os }}-${{ runner.arch }}-test-cpp-
       - run: ccache -z
 
-      # deps stage: install aether's headers (CPP_MODE) into a local prefix.
-      - run: |
-          cmake -DAETHER_CPP_MODE=ON \
-            -DCMAKE_INSTALL_PREFIX="${GITHUB_WORKSPACE}/__install" \
-            -B aether/build -S aether
-          cmake --install aether/build
-
-      # build:cpp, with the project's standard CPP_MODE configure variables.
-      - run: |
-          cd eagle
-          cmake -B build \
-            -DCMAKE_PREFIX_PATH="${GITHUB_WORKSPACE}/__install" \
-            -DFETCHCONTENT_QUIET=ON \
-            -DEAGLE_BUILD_TESTS=ON \
-            -DEAGLE_TEST_REPORT=ON \
-            -DEAGLE_DEBUG_MODE=ON \
-            -DEAGLE_CPP_MODE=ON .
-          cmake --build build -j"$(nproc)"
-
-      # test:cpp — the manifest-backed integrity gate, not the binary bare.
-      - run: cd eagle && tests/check_gate.sh cpp build/tests/eagle_tests
-
-      # every header parses on its own with both compilers (clang rejects some code GCC accepts)
-      - run: |
-          eagle/tests/check_headers.sh g++-13 "${GITHUB_WORKSPACE}/__install/include"
-          eagle/tests/check_headers.sh clang++-18 "${GITHUB_WORKSPACE}/__install/include"
+      # the host C++ gate: aether's headers installed, eagle built with -Werror, the manifest-backed integrity gate,
+      # and every header on its own with both compilers (the commands live in the Makefile)
+      - run: make gate-cpp AETHER_SRC="${GITHUB_WORKSPACE}/aether" CLANGXX=clang++-18
+        working-directory: eagle
       - if: always()
         run: ccache -s
 
@@ -136,7 +119,7 @@ jobs:
   # (tests/sanitize/README.md).
   sanitize-cpp:
     needs: docs-fresh
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       CC: gcc-13
       CXX: g++-13
@@ -200,65 +183,9 @@ jobs:
       - run: ccache -z
         if: steps.plan.outputs.run == 'true'
 
-      # aether headers (CPP_MODE) into a local prefix, unsanitized: header-only.
-      - run: |
-          cmake -DAETHER_CPP_MODE=ON \
-            -DCMAKE_INSTALL_PREFIX="${GITHUB_WORKSPACE}/__install" \
-            -B aether/build -S aether
-          cmake --install aether/build
-        if: steps.plan.outputs.run == 'true'
-
-      - run: |
-          cd eagle
-          cmake -B build \
-            -DCMAKE_PREFIX_PATH="${GITHUB_WORKSPACE}/__install" \
-            -DFETCHCONTENT_QUIET=ON \
-            -DEAGLE_BUILD_TESTS=ON \
-            -DEAGLE_DEBUG_MODE=ON \
-            -DEAGLE_CPP_MODE=ON \
-            -DEAGLE_SANITIZERS=address,undefined .
-          cmake --build build -j"$(nproc)"
-        if: steps.plan.outputs.run == 'true'
-
-      # Non-vacuity (i): the binary must actually carry the ASan runtime.
-      - name: sanitizer runtime is linked
-        run: |
-          cd eagle
-          { nm -D build/tests/eagle_tests; nm build/tests/eagle_tests; } 2>/dev/null | grep -q __asan_init \
-            || { echo "RED: eagle_tests carries no __asan_init — this job is not sanitizing"; exit 1; }
-        if: steps.plan.outputs.run == 'true'
-
-      # Non-vacuity (ii): each canary mode must exit non-zero AND print its banner.
-      - name: canaries trip
-        env:
-          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
-          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
-        run: |
-          cd eagle
-          fail=0
-          for pair in "heap-oob:AddressSanitizer: heap-buffer-overflow" \
-                      "leak:LeakSanitizer: detected memory leaks" \
-                      "uninit:runtime error: load of value" \
-                      "shift-ub:runtime error: shift exponent"; do
-            mode="${pair%%:*}"; banner="${pair#*:}"
-            set +e; build/tests/eagle_canary "$mode" > canary.out 2>&1; rc=$?; set -e
-            if [ "$rc" -eq 0 ] || ! grep -q "$banner" canary.out; then
-              echo "RED: canary '$mode' rc=$rc, banner '$banner' present: $(grep -c "$banner" canary.out)"; cat canary.out; fail=1
-            else
-              echo "canary '$mode' tripped (rc=$rc)"
-            fi
-          done
-          exit $fail
-        if: steps.plan.outputs.run == 'true'
-
-      # Non-vacuity (iii): the manifest gate, with the sanitizer environment.
-      - name: suite under check_gate
-        env:
-          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
-          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
-        run: |
-          cd eagle
-          LSAN_OPTIONS="suppressions=$PWD/tests/sanitize/lsan.supp" tests/check_gate.sh cpp build/tests/eagle_tests
+      # the build, the three non-vacuity checks and the manifest gate, from the Makefile
+      - run: make sanitize-cpp AETHER_SRC="${GITHUB_WORKSPACE}/aether"
+        working-directory: eagle
         if: steps.plan.outputs.run == 'true'
       - if: always() && steps.plan.outputs.run == 'true'
         run: ccache -s
@@ -277,7 +204,7 @@ jobs:
   # tests/sanitize/tsan_ft.sh and tests/sanitize/tsan.supp.
   tsan-ft:
     needs: docs-fresh
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       CC: clang-18
       CXX: clang++-18
@@ -358,26 +285,10 @@ jobs:
 
       - run: ccache -z
         if: steps.plan.outputs.run == 'true'
-      - name: TSan free-threaded CPython (cached)
-        run: eagle/tests/sanitize/build_tsan_python.sh "$TSAN_PY_VERSION" "$RUNNER_TEMP/tsan-python"
-        if: steps.plan.outputs.run == 'true'
-
-      - run: |
-          cmake -DAETHER_CPP_MODE=ON \
-            -DCMAKE_INSTALL_PREFIX="${GITHUB_WORKSPACE}/__install" \
-            -B aether/build -S aether
-          cmake --install aether/build
-          cmake -B eagle/__eagle_hdr -S eagle -DEAGLE_CPP_MODE=ON \
-            -DCMAKE_PREFIX_PATH="${GITHUB_WORKSPACE}/__install" \
-            -DCMAKE_INSTALL_PREFIX="${GITHUB_WORKSPACE}/__install"
-          cmake --install eagle/__eagle_hdr
-        if: steps.plan.outputs.run == 'true'
-
+      # the TSan CPython (cached under $RUNNER_TEMP/tsan-python), the header installs and the ft rows, from the Makefile
       - name: ft rows under ThreadSanitizer
-        run: |
-          cd eagle
-          CMAKE_PREFIX_PATH="${GITHUB_WORKSPACE}/__install" RAPTOR_DIR="${GITHUB_WORKSPACE}/raptor" \
-            tests/sanitize/tsan_ft.sh "$RUNNER_TEMP/tsan-python/bin/python${TSAN_PY_VERSION%.*}t"
+        run: make tsan-ft AETHER_SRC="${GITHUB_WORKSPACE}/aether" RAPTOR_SRC="${GITHUB_WORKSPACE}/raptor" TSAN_PY_VERSION="$TSAN_PY_VERSION" GATE_DIR="$RUNNER_TEMP"
+        working-directory: eagle
         if: steps.plan.outputs.run == 'true'
       - if: always() && steps.plan.outputs.run == 'true'
         run: ccache -s
@@ -400,7 +311,7 @@ jobs:
   # below are UNVERIFIED — not run on a live runner.
   test-python:
     needs: docs-fresh
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read   # the read-only token the card download uses
     env:
@@ -465,37 +376,8 @@ jobs:
             ccache-v2-${{ runner.os }}-${{ runner.arch }}-test-python-
       - run: ccache -z
 
-      # NVIDIA's apt repo for Ubuntu 24.04 (noble), x86_64.
-      - name: Install compile-only CUDA 12.6 toolchain (nvcc; no driver/GPU)
-        run: |
-          curl -fsSL -o /tmp/cuda-keyring.deb \
-            https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
-          sudo dpkg -i /tmp/cuda-keyring.deb
-          sudo apt-get update
-          # cuda-nvcc-12-6 + cuda-cudart-dev-12-6 as suggested; cuda-driver-dev-12-6
-          # added for the libcuda.so DRIVER STUB (stubs/, no actual driver) that
-          # python/CMakeLists.txt's CUDA::cuda_driver link target needs.
-          sudo apt-get install -y --no-install-recommends \
-            cuda-nvcc-12-6 cuda-cudart-dev-12-6 cuda-driver-dev-12-6
-          echo "/usr/local/cuda-12.6/bin" >> "$GITHUB_PATH"
-          echo "CUDA_HOME=/usr/local/cuda-12.6" >> "$GITHUB_ENV"
-
-      # deps: [OFF] — aether installed in its default CUDA-language mode
-      # (needed because eagle._core is CUDA-language regardless of EAGLE_CPP_MODE).
-      - run: |
-          cmake -DAETHER_CPP_MODE=OFF -DCMAKE_CUDA_COMPILER="$(which nvcc)" \
-            -DCMAKE_INSTALL_PREFIX="${GITHUB_WORKSPACE}/__install" \
-            -B aether/build -S aether
-          cmake --install aether/build
-
-      # eagle's own header-only C++ config, installed next to aether so the
-      # binding's find_package(eagle) resolves.
-      - run: |
-          cd eagle
-          cmake -B __eagle_hdr -DCMAKE_CUDA_COMPILER="$(which nvcc)" \
-            -DCMAKE_CUDA_ARCHITECTURES=70 \
-            -DCMAKE_INSTALL_PREFIX="${GITHUB_WORKSPACE}/__install" .
-          cmake --install __eagle_hdr
+      # compile-only CUDA 12.9 toolchain (nvcc, headers, driver stub, CCCL) from the pinned redist archives; no driver, no GPU
+      - uses: ./eagle/.github/actions/cuda
 
       # the full card rows are a release asset; with EAGLE_CARD_RAW_DIR set, a missing or altered file fails
       - name: download the full performance cards
@@ -506,29 +388,12 @@ jobs:
           gh release download perf-cards-raw --repo "${GITHUB_REPOSITORY}" -p cards.tar.gz -O - | tar -xz -C "${RUNNER_TEMP}/cards"
           echo "EAGLE_CARD_RAW_DIR=${RUNNER_TEMP}/cards" >> "${GITHUB_ENV}"
 
-      # The binding build itself, with a single arch (70,
-      # Volta) instead of the 4-way list since nothing here executes device
-      # code.
+      # The binding build with a single arch (nothing here executes device code) and the suite, from the Makefile:
+      # aether and eagle headers installed, siblings from their checkouts, `pytest -m "not gpu and not interop_matrix"`
       - run: |
-          cd eagle
-          python -m pip install --quiet --upgrade pip pytest numpy
-          # build deps preinstalled + --no-build-isolation: an isolated build compiles nanobind from a
-          # random /tmp build env, so every compile line differs and ccache never hits;
-          # --only-binary=:all: still builds this local project but never a dependency from
-          # source, so no third-party sdist is ever built without its own isolated env
-          python -m pip install --quiet "scikit-build-core>=0.10" "setuptools-scm>=8" "nanobind>=3.1,<4"
-          export CMAKE_PREFIX_PATH="${GITHUB_WORKSPACE}/__install:${CMAKE_PREFIX_PATH}"
-          export SKBUILD_CMAKE_ARGS="-DCMAKE_CUDA_COMPILER=$(which nvcc);-DCMAKE_CUDA_ARCHITECTURES=70"
-          # the plugin carries the single arch built above, not the shipped list
-          # (read by test_backend_wall where cuobjdump is present)
-          export EAGLE_PLUGIN_EXPECTED_ARCHS=70/70
-          pip install ../raptor   # the sibling checkout, so unreleased raptor changes are tested
-          pip install ../aether/dsc   # the sibling aether-dsc (the `aether` arrays eagle allocates with)
-          pip install ../site     # raptor_docs, so the docs tests run here instead of skipping
-          # editable, as in development: python/conftest.py puts this source tree first
-          # on sys.path, and only the editable hook then resolves the compiled eagle._core
-          pip install --no-build-isolation --only-binary=:all: -e ./python
-          pytest python/tests -q -m "not gpu and not interop_matrix"
+          make gate-py AETHER_SRC="${GITHUB_WORKSPACE}/aether" RAPTOR_SRC="${GITHUB_WORKSPACE}/raptor" \
+            SITE_SRC="${GITHUB_WORKSPACE}/site" CUDACXX="$(which nvcc)" GATE_JOBS="$(nproc)"
+        working-directory: eagle
       - if: always()
         run: ccache -s
 
@@ -544,7 +409,7 @@ jobs:
   # unless deselected explicitly. All four are deselected in this leg.
   test-python-nodriver:
     needs: docs-fresh
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       CC: gcc-13
       CXX: g++-13
@@ -600,64 +465,9 @@ jobs:
       - run: ccache -z
 
       # The precondition this leg exists for: no driver library, no nvcc.
-      - name: Assert the runner has no NVIDIA driver and no CUDA toolkit
-        run: |
-          if ldconfig -p | grep -q 'libcuda\.so\.1'; then echo "libcuda.so.1 present"; exit 1; fi
-          if command -v nvcc; then echo "nvcc present"; exit 1; fi
-
-      # Pure C++ aether + eagle headers (the core is compiled EAGLE_CPU_ONLY).
-      - run: |
-          cmake -DAETHER_CPP_MODE=ON \
-            -DCMAKE_INSTALL_PREFIX="${GITHUB_WORKSPACE}/__install" \
-            -B aether/build -S aether
-          cmake --install aether/build
-          cmake -B eagle/__eagle_hdr -S eagle -DEAGLE_CPP_MODE=ON \
-            -DCMAKE_PREFIX_PATH="${GITHUB_WORKSPACE}/__install" \
-            -DCMAKE_INSTALL_PREFIX="${GITHUB_WORKSPACE}/__install"
-          cmake --install eagle/__eagle_hdr
-
-      - name: Build the core-only wheel and install it into a fresh venv
-        run: |
-          python -m venv "${RUNNER_TEMP}/venv"
-          . "${RUNNER_TEMP}/venv/bin/activate"
-          pip install --quiet --upgrade pip pytest numpy build scikit-build-core setuptools-scm nanobind
-          pip install ./raptor   # the sibling checkout, so unreleased raptor changes are tested
-          pip install ./aether/dsc   # the sibling aether-dsc (the `aether` arrays eagle allocates with)
-          export CMAKE_PREFIX_PATH="${GITHUB_WORKSPACE}/__install"
-          python -m build --wheel --no-isolation --outdir dist \
-            -Ccmake.define.EAGLE_PYTHON_CUDA_PLUGIN=OFF \
-            -Ccmake.define.EAGLE_PYTHON_MPI=OFF eagle/python
-          if unzip -l dist/*.whl | grep -q libeagle_cuda; then echo "plugin in a core-only wheel"; exit 1; fi
-          pip install dist/*.whl
-
-      - name: The installed wheel imports and refuses device work, typed
-        run: |
-          . "${RUNNER_TEMP}/venv/bin/activate"
-          cd "${RUNNER_TEMP}"
-          python - <<'EOF'
-          import eagle, eagle._core, eagle.exec
-          assert "site-packages" in eagle._core.__file__, eagle._core.__file__
-          assert eagle.exec.fold("sum", [1.0, 2.0]) == 3.0
-          d = eagle._core.cuda_backend()
-          assert not d["loaded"], d
-          try:
-              eagle._core.Stream()
-              raise SystemExit("Stream() did not refuse")
-          except eagle.BackendUnavailable as e:
-              print("typed refusal:", e)
-          maps = open("/proc/self/maps").read()
-          assert "libcuda" not in maps and "libcudart" not in maps
-          EOF
-
-      - name: Host suite (a copy, outside the repository) against the installed wheel
-        run: |
-          . "${RUNNER_TEMP}/venv/bin/activate"
-          mkdir -p "${RUNNER_TEMP}/suite"
-          cp -rL eagle/python/tests eagle/python/conftest.py "${RUNNER_TEMP}/suite/"
-          cd "${RUNNER_TEMP}/suite"
-          RAPTOR_ROOT="${GITHUB_WORKSPACE}/raptor" python -m pytest tests -q -p no:cacheprovider -W error::pytest.PytestUnknownMarkWarning \
-            -m "not gpu and not gpu2 and not torch and not interop_matrix and not repo_local"
-          python -c 'import eagle; assert "site-packages" in eagle.__file__, eagle.__file__'
+      # the no-driver assertions, the core-only wheel in a fresh venv, the import checks and the suite copy, from the Makefile
+      - run: make nodriver AETHER_SRC="${GITHUB_WORKSPACE}/aether" RAPTOR_SRC="${GITHUB_WORKSPACE}/raptor"
+        working-directory: eagle
       - if: always()
         run: ccache -s
 
@@ -666,7 +476,7 @@ jobs:
   # as test-python is (the same compile-only toolchain, editable install).
   ft-stress:
     needs: docs-fresh
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       # both free-threaded interpreters report, even when one fails
       fail-fast: false
@@ -734,96 +544,16 @@ jobs:
             ccache-v2-${{ runner.os }}-${{ runner.arch }}-ft-stress-${{ matrix.python-version }}-
       - run: ccache -z
 
-      # NVIDIA's apt repo for Ubuntu 24.04 (noble), x86_64.
-      - name: Install compile-only CUDA 12.6 toolchain (nvcc; no driver/GPU)
-        run: |
-          curl -fsSL -o /tmp/cuda-keyring.deb \
-            https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
-          sudo dpkg -i /tmp/cuda-keyring.deb
-          sudo apt-get update
-          # cuda-nvcc-12-6 + cuda-cudart-dev-12-6 as suggested; cuda-driver-dev-12-6
-          # added for the libcuda.so DRIVER STUB (stubs/, no actual driver) that
-          # python/CMakeLists.txt's CUDA::cuda_driver link target needs.
-          sudo apt-get install -y --no-install-recommends \
-            cuda-nvcc-12-6 cuda-cudart-dev-12-6 cuda-driver-dev-12-6
-          echo "/usr/local/cuda-12.6/bin" >> "$GITHUB_PATH"
-          echo "CUDA_HOME=/usr/local/cuda-12.6" >> "$GITHUB_ENV"
+      # compile-only CUDA 12.9 toolchain (nvcc, headers, driver stub, CCCL) from the pinned redist archives; no driver, no GPU
+      - uses: ./eagle/.github/actions/cuda
 
       # deps: [OFF] — aether installed in its default CUDA-language mode
       # (needed because eagle._core is CUDA-language regardless of EAGLE_CPP_MODE).
+      # the binding build, the free-threaded checks, torch/jax/warp, the ft rows and the full suite, from the Makefile
       - run: |
-          cmake -DAETHER_CPP_MODE=OFF -DCMAKE_CUDA_COMPILER="$(which nvcc)" \
-            -DCMAKE_INSTALL_PREFIX="${GITHUB_WORKSPACE}/__install" \
-            -B aether/build -S aether
-          cmake --install aether/build
-
-      # eagle's own header-only C++ config, installed next to aether so the
-      # binding's find_package(eagle) resolves.
-      - run: |
-          cd eagle
-          cmake -B __eagle_hdr -DCMAKE_CUDA_COMPILER="$(which nvcc)" \
-            -DCMAKE_CUDA_ARCHITECTURES=70 \
-            -DCMAKE_INSTALL_PREFIX="${GITHUB_WORKSPACE}/__install" .
-          cmake --install __eagle_hdr
-
-      # The binding build itself, with a single arch (70,
-      # Volta) instead of the 4-way list since nothing here executes device
-      # code.
-      - run: |
-          cd eagle
-          # newest NumPy/SciPy ship no cp313t wheel: prefer a wheel over an sdist build
-          python -m pip install --quiet --prefer-binary --upgrade pip pytest numpy
-          # build deps preinstalled + --no-build-isolation: an isolated build compiles nanobind from a
-          # random /tmp build env, so every compile line differs and ccache never hits;
-          # --only-binary=:all: still builds this local project but never a dependency from
-          # source, so no third-party sdist is ever built without its own isolated env
-          python -m pip install --quiet --prefer-binary "scikit-build-core>=0.10" "setuptools-scm>=8" "nanobind>=3.1,<4"
-          export CMAKE_PREFIX_PATH="${GITHUB_WORKSPACE}/__install:${CMAKE_PREFIX_PATH}"
-          export SKBUILD_CMAKE_ARGS="-DCMAKE_CUDA_COMPILER=$(which nvcc);-DCMAKE_CUDA_ARCHITECTURES=70"
-          # the plugin carries the single arch built above, not the shipped list
-          # (read by test_backend_wall where cuobjdump is present)
-          export EAGLE_PLUGIN_EXPECTED_ARCHS=70/70
-          pip install --prefer-binary ../raptor   # the sibling checkout, so unreleased raptor changes are tested
-          pip install --prefer-binary ../aether/dsc   # the sibling aether-dsc (the `aether` arrays eagle allocates with)
-          pip install --no-deps ../site     # raptor_docs alone, so the docs tests run here instead of erroring; its notebook dependencies have no free-threaded wheels
-          # editable, as in development: python/conftest.py puts this source tree first
-          # on sys.path, and only the editable hook then resolves the compiled eagle._core
-          pip install --no-build-isolation --only-binary=:all: -e ./python
-
-      # An ft leg is vacuous on a GIL interpreter (every ft row skips) and the
-      # harness refuses a forced GIL-off (-X gil=0 / PYTHON_GIL): assert the
-      # interpreter is free-threaded with the GIL off by default, no override.
-      - name: Interpreter is free-threaded, GIL off, no override
-        run: |
-          [ -z "${PYTHON_GIL:-}" ] || { echo "PYTHON_GIL is set"; exit 1; }
-          python -c "import sys; assert sys._is_gil_enabled() is False, 'GIL is enabled'; print(sys.version)"
-
-      # Interop under stress: CPU torch, JAX and Warp beside eagle, so their thread rows run on the
-      # free-threaded interpreter. A framework with no wheel for this interpreter is a limit of its
-      # release, not a failure of this job: the install is tried, and its rows then skip with a reason
-      # naming the framework (torch publishes cp314t only, jaxlib cp314t only; warp-lang is pure Python).
-      - name: interop under stress (CPU torch, JAX, Warp)
-        run: |
-          python -m pip install --quiet --only-binary=:all: "torch==2.14.1" --index-url https://download.pytorch.org/whl/cpu \
-            --extra-index-url https://pypi.org/simple || echo "::warning::no torch wheel for ${{ matrix.python-version }}: its rows skip"
-          python -m pip install --quiet --only-binary=:all: "jax[cpu]==0.11.2" \
-            || echo "::warning::no jax wheel for ${{ matrix.python-version }}: its rows skip"
-          python -m pip install --quiet --only-binary=:all: "warp-lang==1.18.0" \
-            || echo "::warning::no warp wheel for ${{ matrix.python-version }}: its rows skip"
-
-      # ft rows first: zero collected rows fails the leg (never a green no-op),
-      # then the full suite. -W error::RuntimeWarning turns the interpreter's
-      # "GIL re-enabled by an extension" warning into a failure.
-      - name: ft rows (collected count must be > 0), then the full suite
-        run: |
-          set -euo pipefail
-          cd eagle
-          export EAGLE_PLUGIN_EXPECTED_ARCHS=70/70
-          N="$(python -m pytest python/tests -m ft --collect-only -q -p no:cacheprovider | grep -c '::' || true)"
-          echo "ft rows collected: $N"
-          [ "$N" -gt 0 ] || { echo "ft selection collected zero tests"; exit 1; }
-          python -m pytest python/tests -m ft -q -rs -p no:cacheprovider -W error::RuntimeWarning
-          python -m pytest python/tests -q -p no:cacheprovider -W error::RuntimeWarning -m "not gpu and not interop_matrix"
+          make ft-stress PYTHON=python AETHER_SRC="${GITHUB_WORKSPACE}/aether" RAPTOR_SRC="${GITHUB_WORKSPACE}/raptor" \
+            SITE_SRC="${GITHUB_WORKSPACE}/site" CUDACXX="$(which nvcc)" GATE_JOBS="$(nproc)"
+        working-directory: eagle
       - if: always()
         run: ccache -s
 
@@ -838,7 +568,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm]
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
     runs-on: ${{ matrix.os }}
     env:
       CC: gcc-13
@@ -879,43 +609,6 @@ jobs:
 
       - run: sudo apt-get update && sudo apt-get install -y g++-13
 
-      - name: Build the sdist (as release.yml does)
-        run: |
-          python -m pip install --quiet build
-          cd eagle/python && python -m build --sdist --outdir ../../dist
-
-      # raptor-core: PyPI when the checkout's version is released, else built from it
-      - id: sib
-        uses: ./eagle/.github/actions/install-siblings
-        with:
-          siblings: raptor-core=raptor aether-dsc=aether/dsc
-
-      - name: Clean venv, pip install the sdist (warnings are errors)
-        env:
-          SIB_DIR: ${{ steps.sib.outputs.dir }}
-          SIB_PINS: ${{ steps.sib.outputs.pins }}
-        run: |
-          set -euo pipefail
-          python -m venv "$RUNNER_TEMP/venv"
-          . "$RUNNER_TEMP/venv/bin/activate"
-          pip install --quiet --upgrade pip
-          pip install --quiet --find-links "$SIB_DIR" $SIB_PINS
-          pip install -v -Ccmake.define.EAGLE_PYTHON_WARN_AS_ERR=ON dist/raptor_eagle-*.tar.gz
-          pip check
-
-      - name: The installed package imports and computes
-        run: |
-          . "$RUNNER_TEMP/venv/bin/activate"
-          cd "$RUNNER_TEMP"
-          python - <<'PY'
-          import platform
-          from importlib.metadata import version
-
-          import eagle
-          import eagle._core
-          import eagle.exec
-
-          assert "site-packages" in eagle._core.__file__, eagle._core.__file__
-          assert eagle.exec.fold("sum", [1.0, 2.0]) == 3.0
-          print(f"OK: raptor-eagle {version('raptor-eagle')} from its sdist on {platform.machine()}")
-          PY
+      - name: make sdist-install (the sdist as release.yml builds it, installed warnings-as-errors into a clean venv)
+        run: make sdist-install AETHER_SRC="${GITHUB_WORKSPACE}/aether" RAPTOR_SRC="${GITHUB_WORKSPACE}/raptor"
+        working-directory: eagle

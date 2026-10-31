@@ -60,6 +60,7 @@ import eagle.plan
 from eagle import _counters, _stream
 from eagle import graph as G
 from eagle.graph import opaque
+from eagle.frameworks.cupy import wrap_external_stream
 
 pytestmark = pytest.mark.interop_matrix
 
@@ -335,7 +336,7 @@ def test_host_node_sees_a_non_default_torch_stream(monkeypatch):
     torch = _torch_cuda()
     cp = _cp()
     ts = torch.cuda.Stream()
-    on_ts = cp.cuda.ExternalStream(ts.cuda_stream)
+    on_ts = wrap_external_stream(ts.cuda_stream)
     x = cp.arange(N, dtype=cp.float64)
     y, z = cp.zeros(N), cp.zeros(N)
     yt = torch.as_tensor(y, device=_dev(torch))
@@ -1553,7 +1554,7 @@ def test_run_node_tiers_device(tmp_path, monkeypatch):
     # the supported way round to a nested capture: the torch graph is eagle's child node
     child = _tier_arm(torch, xp, dev, plan, child=True)         # a captured torch graph
     _same_arm(base, child)
-    assert xp.cuda.ExternalStream(0).ptr == xp.cuda.Stream.null.ptr == 0
+    assert wrap_external_stream(0).ptr == xp.cuda.Stream.null.ptr == 0
     # the cut's premise: work on ExternalStream(0) is NOT ordered behind torch's default stream.
     # Probe it: an event recorded there while a long sleep is queued on the default stream.
     probe = torch.cuda.Event()

@@ -1,0 +1,5 @@
+# Public names no test names yet (one per line, "name  # reason"). This list may only shrink.
+eagle.KernelRegistry  # a type exposed for annotations; reached through eagle.registry in tests
+eagle.SCALAR_TYPES    # a constant re-exported for callers; no test reads it by name
+eagle.SimResult       # the type eagle.simulate returns; tests use the result, never the name
+eagle.DType           # the dtype type for annotations; tests use dtype strings

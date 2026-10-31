@@ -17,7 +17,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor
 
 # drive.py replaces the next line with the run settings.
 EMBEDDED_CONFIG = None
@@ -25,6 +27,21 @@ EMBEDDED_CONFIG = None
 ORG = "https://github.com/amasat01"
 SITE_REPO = "amasat01.github.io"
 FAMILY = ("raptor-eagle", "raptor-hawk", "jax", "jaxlib", "cupy-cuda12x", "cupy-cuda13x", "torch")
+
+
+def gpu_slots():
+    """The GPUs this run may use: the ``CUDA_VISIBLE_DEVICES`` it was given, else every GPU ``nvidia-smi -L`` lists."""
+    given = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if given is not None:
+        return [g for g in given.split(",") if g.strip()]
+    r = sh("nvidia-smi", "-L", capture=True)
+    return [str(i) for i, ln in enumerate(r.stdout.splitlines()) if ln.startswith("GPU ")] if r.returncode == 0 else []
+
+
+def slot_env(gpu, slots):
+    """One worker's share: its own GPU and an equal share of the CPU cores."""
+    cores = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else (os.cpu_count() or 1)
+    return {"CUDA_VISIBLE_DEVICES": gpu, "OMP_NUM_THREADS": str(max(1, cores // max(1, len(slots))))}
 
 
 def header(text):
@@ -122,10 +139,12 @@ def shipped_wheel(cfg, py):
     sums = (wheel.parent / "SHA256SUMS").read_bytes()
     if hashlib.sha256(sums).hexdigest() != cfg.wheel_sha256:
         raise SystemExit(f"shipped SHA256SUMS does not match the expected {cfg.wheel_sha256}")
-    got = hashlib.sha256(wheel.read_bytes()).hexdigest()
-    if f"{got}  {wheel.name}" not in sums.decode().splitlines():
-        raise SystemExit(f"{wheel.name}: sha256 {got} is not the one in the shipped SHA256SUMS")
     listed = {ln.split()[-1]: ln.split()[0] for ln in sums.decode().splitlines()}
+    # the dataset holds the wheel under its upload name; SHA256SUMS lists the real one (a dev version keeps its "+")
+    real = {upload_name(name): name for name in listed}.get(wheel.name)
+    got = hashlib.sha256(wheel.read_bytes()).hexdigest()
+    if real is None or listed[real] != got:
+        raise SystemExit(f"{wheel.name}: sha256 {got} is not the one in the shipped SHA256SUMS")
     # wheel.py uploads each file under upload_name() (Kaggle drops "+" and unpacks .tar.gz): each is matched to its
     # listed name, checked, and copied back under that name for pip; a listed file that never arrived fails here.
     by_upload = {upload_name(name): name for name in listed}
@@ -271,9 +290,11 @@ def run_tests(py, eagle_src, work):
     pydir.mkdir()
     shutil.copytree(eagle_src / "python" / "tests", pydir / "tests")
     shutil.copy2(eagle_src / "python" / "conftest.py", pydir)
+    # one process for the interop rows: their conformance row tallies, in-process, that every declared row ran
     runs = (("interop_matrix", ["tests", "-m", "interop_matrix and not repo_local"]),
             ("jax", ["tests/test_interop_jax.py", "-m", "not repo_local"]),
-            ("warp", ["tests/test_frameworks_warp.py", "-m", "not repo_local"]))
+            ("warp", ["tests/test_frameworks_warp.py", "-m", "not repo_local"]),
+            ("gpu2", ["tests", "-m", "gpu2 and not repo_local"]))   # every GPU visible: these rows need two
     total = {"tests": 0, "failures": 0, "errors": 0, "skipped": 0, "failed": []}
     rcs = {}
     for name, sel in runs:
@@ -321,7 +342,9 @@ def table_of(rows):
 
 
 def run_notebooks(cfg, py, work, roots, result, out):
-    """Every notebook of the checkouts in ``roots`` (repo name -> path; 'site' = the site repository), one by one.
+    """Every notebook of the checkouts in ``roots`` (repo name -> path; 'site' = the site repository): the first alone
+    (its setup cell installs the GPU extras the rest reuse), then one per GPU at a time with an equal share of the CPU
+    cores, and last, alone with every GPU, those that place work on GPUs themselves (they set CUDA_VISIBLE_DEVICES).
     result.json is rewritten after each one, so a kernel that dies still shows what ran."""
     sys.path.insert(0, str(roots["site"]))  # raptor_docs, the family's docs tooling, lives in the site checkout
     from raptor_docs.nb import discover, hosted as nb_hosted, run_gate as nb_run_gate
@@ -341,14 +364,45 @@ def run_notebooks(cfg, py, work, roots, result, out):
         os.environ.setdefault("KAGGLE_KERNEL_RUN_TYPE", "Interactive")
     rows = []
     result.update(status="incomplete", reason="notebooks still running", discovered=len(todo), notebooks=rows)
-    for repo, path, rel in todo:
-        header(f"notebook: {repo}/{rel}")
-        status, msg, tail, secs = nb_hosted.run_notebook(py, work / "kernels", path, dict(os.environ), cfg.nb_timeout)
-        print(f"{status} {repo}/{rel} [{secs} s] {msg}", flush=True)
-        if tail:
-            print("\n".join(tail), flush=True)
-        rows.append({"name": f"{repo}/{rel}", "status": status, "seconds": secs, "reason": msg, "error": tail})
-        write_result(out, result, quiet=True)
+    lock = threading.Lock()
+
+    def one(item, extra):
+        repo, path, rel = item
+        status, msg, tail, secs = nb_hosted.run_notebook(py, work / "kernels", path, dict(os.environ, **extra),
+                                                         cfg.nb_timeout)
+        with lock:   # one notebook's report at a time, and result.json after each
+            header(f"notebook: {repo}/{rel}" + (f" (GPU {extra['CUDA_VISIBLE_DEVICES']})" if extra else ""))
+            print(f"{status} {repo}/{rel} [{secs} s] {msg}", flush=True)
+            if tail:
+                print("\n".join(tail), flush=True)
+            rows.append({"name": f"{repo}/{rel}", "status": status, "seconds": secs, "reason": msg, "error": tail})
+            write_result(out, result, quiet=True)
+
+    slots = gpu_slots()
+    whole = [t for t in todo if "CUDA_VISIBLE_DEVICES" in t[1].read_text(encoding="utf-8")]
+    shared = [t for t in todo if t not in whole]
+    for item in shared[:1]:
+        one(item, {})
+    if len(slots) > 1:
+        free = list(slots)
+        free_lock = threading.Lock()
+
+        def on_a_gpu(item):
+            with free_lock:
+                gpu = free.pop()
+            try:
+                one(item, slot_env(gpu, slots))
+            finally:
+                with free_lock:
+                    free.append(gpu)
+
+        with ThreadPoolExecutor(len(slots)) as pool:
+            list(pool.map(on_a_gpu, shared[1:]))
+    else:
+        for item in shared[1:]:
+            one(item, {})
+    for item in whole:
+        one(item, {})
     server.shutdown()
     counts = table_of(rows)
     ok = counts["FAIL"] == 0 and counts["PASS"] > 0 and len(rows) == len(todo)
