@@ -265,6 +265,14 @@ parameter gradients bitwise, is refused with the bytes and the fix: raise
 ``memory_budget``, lower ``max_steps``, or set ``window``. ``window=`` and
 ``memory_budget=`` without ``record=True`` are refused too.
 
+``steps_reverse="per_step"`` (the default), ``"fused"`` or ``"auto"`` picks how a
+``hawk.steps(kernel, K)`` run is reversed. ``"fused"`` sets the window to ``K`` and
+reverses each window in one launch (the window's steps are re-run inside it); state
+gradients match the per-step reverse bit for bit, parameter gradients to a few ULP.
+``"auto"`` takes the choice from a measured table: today it picks ``"fused"`` on the
+host for small batches (up to 64 samples), and ``"per_step"`` everywhere else, so
+the GPU stays per-step until its rows are measured.
+
 .. _autodiff-events:
 
 Event refinement
