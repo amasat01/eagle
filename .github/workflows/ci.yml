@@ -22,7 +22,7 @@ jobs:
   release-gate:
     # The release label, the diff, the PR body and the tag it would create agree (tools/release_gate.sh). Skipped on other PRs.
     if: github.event_name == 'pull_request' && github.base_ref == 'main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
         with:
@@ -36,7 +36,7 @@ jobs:
         run: make release-gate BASE_SHA="${{ github.event.pull_request.base.sha }}" HEAD_SHA="${{ github.event.pull_request.head.sha }}"
   docs-fresh:
     # Freshness check, never a commit: the generator re-renders the pages and fails on any difference.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -65,7 +65,7 @@ jobs:
         run: make gate-names RAPTOR_SRC=raptor COVERAGE_BASE="${{ github.event.pull_request.base.sha }}"
   test-cpp:
     needs: docs-fresh
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       CC: gcc-13
       CXX: g++-13
@@ -119,7 +119,7 @@ jobs:
   # (tests/sanitize/README.md).
   sanitize-cpp:
     needs: docs-fresh
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       CC: gcc-13
       CXX: g++-13
@@ -204,7 +204,7 @@ jobs:
   # tests/sanitize/tsan_ft.sh and tests/sanitize/tsan.supp.
   tsan-ft:
     needs: docs-fresh
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       CC: clang-18
       CXX: clang++-18
@@ -311,7 +311,7 @@ jobs:
   # below are UNVERIFIED — not run on a live runner.
   test-python:
     needs: docs-fresh
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read   # the read-only token the card download uses
     env:
@@ -409,7 +409,7 @@ jobs:
   # unless deselected explicitly. All four are deselected in this leg.
   test-python-nodriver:
     needs: docs-fresh
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       CC: gcc-13
       CXX: g++-13
@@ -476,7 +476,7 @@ jobs:
   # as test-python is (the same compile-only toolchain, editable install).
   ft-stress:
     needs: docs-fresh
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       # both free-threaded interpreters report, even when one fails
       fail-fast: false
@@ -568,7 +568,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm]
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
     runs-on: ${{ matrix.os }}
     env:
       CC: gcc-13

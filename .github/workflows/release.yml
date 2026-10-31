@@ -72,7 +72,7 @@ jobs:
   # architecture this nvcc compiles from sm_60 up, plus PTX at the newest) is what ships.
   plugin:
     name: plugin (${{ matrix.arch }})
-    runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
     strategy:
       fail-fast: false
       matrix:
@@ -152,7 +152,7 @@ jobs:
   wheel-linux:
     name: wheel (${{ matrix.arch }}, ${{ matrix.tag }})
     needs: plugin
-    runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
     strategy:
       fail-fast: false
       matrix:
@@ -398,19 +398,19 @@ jobs:
   wheels-x86_64:
     needs: wheel-linux
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - run: '[ "${{ needs.wheel-linux.result }}" = success ] || { echo "a Linux wheel job: ${{ needs.wheel-linux.result }}"; exit 1; }'
   wheels-aarch64:
     needs: wheel-linux
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - run: '[ "${{ needs.wheel-linux.result }}" = success ] || { echo "a Linux wheel job: ${{ needs.wheel-linux.result }}"; exit 1; }'
   wheels-macos-arm64:
     needs: wheel-macos
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - run: '[ "${{ needs.wheel-macos.result }}" = success ] || { echo "a macOS wheel job: ${{ needs.wheel-macos.result }}"; exit 1; }'
 
@@ -419,7 +419,7 @@ jobs:
     needs: [wheels-x86_64, wheels-aarch64, wheels-macos-arm64]
     outputs:
       tree: ${{ steps.tree.outputs.tree }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
         with:
@@ -545,7 +545,7 @@ jobs:
   # The CUDA wheel built from the sdist alone (nvcc, no GPU): the sdist carries every header the plugin and the core compile against.
   sdist-cuda-wheel:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
         with:
@@ -593,7 +593,7 @@ jobs:
       # every Python version and architecture reports, even when one fails
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-15]
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-15]
         python-version: ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14", "3.15", "3.13t", "3.14t", "3.15t"]
     steps:
       - uses: actions/checkout@v7
@@ -739,7 +739,7 @@ jobs:
           python -m pytest tests -q -p no:cacheprovider -W error::RuntimeWarning -W error::pytest.PytestUnknownMarkWarning -m "not gpu and not gpu2 and not torch and not interop_matrix and not repo_local"
 
   docs:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       CC: gcc-13
       CXX: g++-13
@@ -836,7 +836,7 @@ jobs:
   # Informational: a docs-only PR carries an already published version.
   pypi-version:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v8
         with:
@@ -856,7 +856,7 @@ jobs:
   # companion checkouts. A GPU-only notebook is skipped here; the kaggle job runs it on a T4.
   notebooks:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v7
@@ -905,7 +905,7 @@ jobs:
 
   # Whether the Kaggle GPU jobs run: the pull request carries the label `release`, or it changes GPU or interop code.
   kaggle-plan:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       pull-requests: read
@@ -945,7 +945,7 @@ jobs:
   kaggle-leg:
     needs: [build, kaggle-plan]
     if: needs.kaggle-plan.outputs.run == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment: kaggle
     timeout-minutes: ${{ matrix.timeout }}  # up to 30 waiting for Kaggle to start the kernel, then the run itself
     strategy:
@@ -1087,7 +1087,7 @@ jobs:
   kaggle:
     needs: [kaggle-leg]
     if: always() && needs.kaggle-leg.result != 'skipped'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       pull-requests: write
