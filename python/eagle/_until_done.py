@@ -767,7 +767,7 @@ class Runner:
                                            else _alloc.ones(dev, 1, dtype=arrays.int64))
             if active is not None:
                 bind.update(active.planes())
-            bound.append(plan_i.bind(**bind))
+            bound.append(_split.single(plan_i.bind(**bind), "eagle.until_done"))    # a kernel that is a stage only for its scratch planes, or a warp per lane, is its one launch
 
         self.step = bound[0] if len(bound) == 1 else tuple(bound)
         self.n = bound[0].n
