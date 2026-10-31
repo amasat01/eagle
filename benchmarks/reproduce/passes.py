@@ -36,7 +36,7 @@ CHUNK = {"perf": {"compile": 4}, "rk78": {"memory": 5, "compile": 3}}
 
 
 def _load_card(card):
-    sub, name = ("perf_card", "perf_card") if card == "perf" else ("rk78_card", "rk78_card")
+    sub, name = ("perf_card", "perf_card") if card == "perf" else ("perf_card", "rkf78")
     sys.path.insert(0, str(BENCH / sub))
     return __import__(name)
 

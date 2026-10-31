@@ -47,8 +47,8 @@ _CARD_DIR = _REPO / "benchmarks" / "perf_card"
 _GEN_SCRIPT = _REPO / "docs" / "_tools" / "gen_perf_pages.py"
 #: Every card script and the helpers they share.
 _CARD_SCRIPTS = (_CARD_DIR / "perf_card.py", _CARD_DIR / "cpu_card.py",
-                 _REPO / "benchmarks" / "rk78_card" / "rk78_card.py",
-                 _REPO / "benchmarks" / "rk78_card" / "cpu_rk78_card.py",
+                 _REPO / "benchmarks" / "perf_card" / "rkf78.py",
+                 _REPO / "benchmarks" / "perf_card" / "cpu_rkf78.py",
                  _REPO / "benchmarks" / "_card_common.py")
 _PAGE_DIR = _REPO / "docs" / "content" / "performance"
 _PAGE = _PAGE_DIR / "reading.md"   # carries the stale-prose gates
@@ -975,7 +975,7 @@ def test_readme_stale_prose_gate_lists_the_cpu_cards():
 
 def _rk78_script():
     spec = importlib.util.spec_from_file_location(
-        "eagle_rk78_card", _REPO / "benchmarks" / "rk78_card" / "rk78_card.py")
+        "eagle_rk78_card", _REPO / "benchmarks" / "perf_card" / "rkf78.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module

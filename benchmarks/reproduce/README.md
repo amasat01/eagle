@@ -1,8 +1,9 @@
 # Reproduce the performance cards
 
-eagle publishes four cards, each written by its own script: the RK4 and RK7(8)
-**GPU** cards (`perf_card/perf_card.py`, `rk78_card/rk78_card.py`) and their
-**CPU** twins (`perf_card/cpu_card.py`, `rk78_card/cpu_rk78_card.py`). The
+eagle publishes three card scripts: the ensemble card (`perf_card/perf_card.py`, adaptive
+RKF7(8) Kepler orbits; `--step rk4` runs the fixed-step oscillator), its CPU twin
+(`perf_card/cpu_card.py`) and the feature card (`perf_card/feature_card.py`, one row per feature).
+The
 scripts here set up any Linux x86_64 machine to run them with the same pinned
 software and write the cards for that machine.
 
@@ -12,7 +13,6 @@ software and write the cards for that machine.
 | `bootstrap.sh --from-pypi` | the no-compiler route: a plain venv with the released `raptor-eagle` / `raptor-hawk` wheels, pins in `locks/pypi-{gpu,cpu}.txt` |
 | `run_cards.sh` | runs the cards (`--which gpu\|cpu\|all`, `--preset smoke\|short\|full`) into `cards/<machine-slug>/` |
 | `passes.py` | runs a GPU card one pass at a time (used by `run_cards.sh --split`) |
-| `calibrate.sh`, `calibrate.py` | the calibration data collector (see below), with its own notebook `kaggle_calibrate.ipynb` and pins `locks/calibrate-{gpu,cpu}.txt` |
 | `profile.sh`, `gpu_profile.py` | the profiling kit: decision probe, Nsight Systems and Nsight Compute captures, one tarball (see below) |
 | `kaggle.ipynb` | a thin notebook calling the two scripts |
 | `locks/` | the pinned environments and `make_locks.py`, which regenerates them |
@@ -45,7 +45,7 @@ Committed cards are slim: the raw rows are release assets. After `--publish`, ru
 `python benchmarks/slim_card.py --raw-out <dir> <card>.json` to slim a card and keep the full one in `<dir>`;
 the tests that read raw rows take `EAGLE_CARD_RAW_DIR=<dir>`, are skipped without it, and fail by file name when it is set
 and a file is missing or its md5 is not the card's `slim_of_md5`. CI downloads the release asset `cards.tar.gz` (the
-`<dir>` tree: `perf_card/` and `rk78_card/`) from the `perf-cards-raw` release:
+`<dir>` tree: `perf_card/` and the earlier `rk78_card/` cards) from the `perf-cards-raw` release:
 `tar -C <dir> -czf cards.tar.gz perf_card rk78_card && gh release create perf-cards-raw cards.tar.gz --latest=false --notes "Full performance cards"`
 (a later card run: `gh release upload perf-cards-raw cards.tar.gz --clobber`). After a re-slim, the card md5s that moved are
 pinned in the READMEs and notebooks (`python tools/sync_readme_cards.py --check` names them), the site's
@@ -76,33 +76,6 @@ the run is split into resumable steps (`run_cards.sh --split`) and stops before
 the cap. To continue, save the version, attach its output to a new session and
 set `RESUME_FROM`. Kaggle's 4 shared vCPUs make its CPU cards a different
 machine class from the 8-thread arms the CPU cards time, so run the GPU cards there.
-
-## Calibration data
-
-`calibrate.sh` times a few isolated micro-kernels on this machine and writes one CSV of raw
-timings: the cost of each operation class (arithmetic and special functions in both
-precisions, plane loads, gathers), the launch and plane-traffic overhead, the extra cost of a
-split step and of the class sort, a fused cheap/heavy kernel at four heavy fractions (GPU
-only), and held-out fused-vs-split pairs that a later fit must reproduce. Every repetition is
-kept (the first of each case is marked cold); nothing is fitted here and nothing on the
-machine is changed. The data is fitted later, elsewhere, into the weights the dispatch
-chooser uses.
-
-```bash
-eagle/benchmarks/reproduce/calibrate.sh --quick     # about a minute: checks the setup
-eagle/benchmarks/reproduce/calibrate.sh             # a few minutes per target
-```
-
-It installs the pinned pre-release `raptor-eagle` / `raptor-hawk` wheels (`locks/calibrate-*.txt`,
-`pip install --pre`) into a private venv under `--work`, then writes
-`WORK/calibration/<machine-slug>/calibration-<gpu|cpu>-<date>.csv` (`--out` to change) and prints
-its path. The profile follows the visible hardware (`--profile gpu|cpu`); run it once for each
-of the GPU and the host. The run takes under 10 minutes per target including kernel compiles
-(the CSV header records the compile time, the clocks and temperature before and after, the
-thread count and `OMP_PROC_BIND`). It needs a C++ compiler; Debian/Ubuntu:
-`sudo apt-get install build-essential python3-venv python3-dev`. `--local` uses the eagle and
-hawk already installed for `--python` instead of a venv. On Kaggle open `kaggle_calibrate.ipynb`
-(GPU T4, Internet on).
 
 ## Profiling (nsys + ncu)
 

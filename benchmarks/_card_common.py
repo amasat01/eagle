@@ -128,7 +128,8 @@ def net_peak_bytes(row, card_kind):
 # --------------------------------------------------------------------------- #
 def median_iqr(values):
     """Median and interquartile range (inclusive quartiles), with the samples."""
-    q = statistics.quantiles(values, n=4, method="inclusive")
+    q = (statistics.quantiles(values, n=4, method="inclusive") if len(values) > 1
+         else [values[0]] * 3)  # a smoke run has one repetition
     return {"median": statistics.median(values), "iqr": q[2] - q[0],
             "q1": q[0], "q3": q[2], "samples": list(values)}
 
@@ -288,6 +289,31 @@ def git_commit(module, short=False):
     except (OSError, subprocess.SubprocessError):
         pass
     return None
+
+
+def release_string():
+    """``eagle X, hawk Y`` of the installed packages (written into every card by the run)."""
+    import eagle
+    import hawk
+
+    return f"eagle {eagle.__version__}, hawk {getattr(hawk, '__version__', None)}"
+
+
+def record_provenance(card_path):
+    """Record the release, eagle and hawk commits of this run for ``card_path`` in
+    ``benchmarks/card_provenance.json``."""
+    import eagle
+    import hawk
+
+    prov_path = pathlib.Path(__file__).resolve().with_name("card_provenance.json")
+    prov = json.loads(prov_path.read_text()) if prov_path.exists() else {
+        "schema": "eagle-card-provenance-1", "cards": {}}
+    prov["release"] = release_string()
+    rel = pathlib.Path(card_path).resolve().relative_to(prov_path.parent.parent)
+    prov["cards"][str(rel)] = {"eagle_version": eagle.__version__,
+                               "eagle": git_commit(eagle), "hawk": git_commit(hawk),
+                               "source": "written by the run"}
+    prov_path.write_text(json.dumps(prov, indent=1) + "\n")
 
 
 def software(modules=("numpy", "cupy", "torch", "jax", "jaxlib", "warp")):

@@ -3272,8 +3272,19 @@ def _code_blocks(path=None):
 # Main
 # --------------------------------------------------------------------------- #
 def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--step", choices=("rkf78", "rk4"), default="rkf78")
+    step, argv = pre.parse_known_args(argv)
+    # the RK4 oscillator's own sub-processes re-enter this file with their hidden flags
+    if step.step == "rkf78" and not {"--kernel-pass", "--memory-probe", "--compile-probe"} & set(argv):
+        import rkf78
+
+        return rkf78.main(argv)
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--out-dir", type=pathlib.Path, default=HERE)
+    ap.add_argument("--smoke", action="store_true",
+                    help="smallest N, one repetition, no extra passes, card in a temporary directory")
     ap.add_argument("--reps", type=int, default=REPS,
                     help="timed runs per arm and cell (default 12; the mean "
                          "drops the highest and the lowest)")
@@ -3309,7 +3320,13 @@ def main(argv=None):
     if args.compile_probe:
         _compile_probe(args.compile_probe)
         return 0
-    if args.reps < 5:
+    if args.smoke:
+        args.ns, args.reps = [1_000], 1
+        args.no_nsys = args.no_sweep = args.no_memory = args.no_compile = True
+        args.no_fp32 = args.no_fixed_overhead = True
+        if args.out_dir == HERE:
+            args.out_dir = pathlib.Path(tempfile.mkdtemp(prefix="perf_card_smoke_"))
+    if args.reps < 5 and not args.smoke:
         ap.error("--reps must be >= 5")
     if args.quick:
         args.ns = [n for n in args.ns if n <= 10_000]

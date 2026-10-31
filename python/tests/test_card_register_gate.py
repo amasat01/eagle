@@ -131,7 +131,7 @@ def _units():
     from hawk.targets import TARGETS
 
     perf = _load("eagle_perf_card_gate", "perf_card/perf_card.py")
-    rk78 = _load("eagle_rk78_card_gate", "rk78_card/rk78_card.py")
+    rk78 = _load("eagle_rk78_card_gate", "perf_card/rkf78.py")
     out = {}
     for label, k in (("osc", perf._define_persist_kernel()), ("rk78", rk78._define_kernel())):
         out[label] = render_source(k.name, k.sinks, k.walk, TARGETS["cuda"],

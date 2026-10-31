@@ -37,7 +37,7 @@ pytestmark = pytest.mark.repo_local
 
 _REPO = pathlib.Path(__file__).resolve().parents[2]
 _CARD_DIR = _REPO / "benchmarks" / "rk78_card"
-_SCRIPT = _CARD_DIR / "rk78_card.py"
+_SCRIPT = _REPO / "benchmarks" / "perf_card" / "rkf78.py"
 
 
 def _script():
@@ -96,7 +96,7 @@ def test_committed_tables_match_their_cards():
         assert table_path.is_file(), f"{card_path.name}: no rendered {table_path.name}"
         assert table_path.read_text() == render(card), (
             f"{table_path.name} is not the rendering of {card_path.name}: re-run "
-            "benchmarks/rk78_card/rk78_card.py instead of editing either file")
+            "benchmarks/perf_card/rkf78.py instead of editing either file")
 
 
 def test_cards_name_their_script_and_are_complete():
@@ -138,7 +138,8 @@ def test_card_line_counts_match_the_script():
     now = module.code_line_counts()
     for card_path in _cards():
         card = json.loads(card_path.read_text())
-        assert card["code_lines"]["arms"] == now["arms"], (
+        recorded = card["code_lines"]["arms"]  # a card from before an arm existed lacks it
+        assert recorded == {a: now["arms"][a] for a in recorded}, (
             f"{card_path.name}: recorded lines of code differ from the script's "
             "markers")
 
@@ -153,7 +154,8 @@ def test_missing_optional_libraries_become_arms_not_run(monkeypatch):
     monkeypatch.setitem(sys.modules, "jax", None)
     monkeypatch.setitem(sys.modules, "warp", None)
     names, not_run = module._select_arms(module.ARMS)
-    assert set(not_run) == {"torch_masked", "torch_graphed", "jax_vmap", "warp_kernel"}
+    assert set(not_run) == {"torch_masked", "torch_graphed", "torch_compiled", "jax_vmap",
+                            "warp_kernel"}
     assert all(why.endswith("not installed in this profile") for why in not_run.values())
     assert not set(names) & set(not_run) and "eagle_graph" in names
     assert not any(k.startswith("jax:") for k, _, _ in module._compile_keys([1000], names))

@@ -1747,8 +1747,19 @@ def _merge(parts_dir, configs, ns, reps, slug, cpu, peak, out_dir, allow_partial
 
 
 def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--step", choices=("rkf78", "rk4"), default="rkf78")
+    step, argv = pre.parse_known_args(argv)
+    # the RK4 oscillator's own sub-processes re-enter this file with their hidden flags
+    if step.step == "rkf78" and not {"--worker", "--memory-probe", "--compile-probe"} & set(argv):
+        import cpu_rkf78
+
+        return cpu_rkf78.main(argv)
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--out-dir", type=pathlib.Path, default=HERE)
+    ap.add_argument("--smoke", action="store_true",
+                    help="smallest N, one repetition, no memory/compile pass, card in a temporary directory")
     ap.add_argument("--parts-dir", type=pathlib.Path, default=None)
     ap.add_argument("--reps", type=int, default=pc.REPS)
     ap.add_argument("--ns", type=int, nargs="+", default=list(pc.NS))
@@ -1775,7 +1786,12 @@ def main(argv=None):
         a, d, s, n = args.memory_probe
         _memory_probe(a, d, int(s), int(n))
         return 0
-    if args.reps < 5:
+    if args.smoke:
+        args.ns, args.reps, args.configs = [1_000], 1, ["spread:100"]
+        args.no_memory = args.no_compile = True
+        if args.out_dir == HERE:
+            args.out_dir = pathlib.Path(tempfile.mkdtemp(prefix="cpu_card_smoke_"))
+    if args.reps < 5 and not args.smoke:
         ap.error("--reps must be >= 5")
     run_arms = [a for a in ARMS if any(a in ARM_GROUPS[g] for g in args.groups)]
     run_cfgs = [(c.split(":")[0], int(c.split(":")[1])) for c in args.configs]

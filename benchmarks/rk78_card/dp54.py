@@ -3,13 +3,13 @@
 
 """A second embedded pair on the same problem: Dormand-Prince 5(4).
 
-``rk78_card.py`` fixes one pair, Fehlberg's RKF7(8). A pair is only a
+``rkf78.py`` fixes one pair, Fehlberg's RKF7(8). A pair is only a
 tableau, so this file writes the attempt kernel once for any tableau
 (:func:`attempt_kernel`) and gives it Dormand-Prince 5(4) (Dormand and Prince,
 1980). The controller, the clip onto the final time, the accept/reject rule
 and the ``Terminated`` mask are the RKF7(8) attempt's, and the problem and the
-analytic truth are the card's own (``rk78_card._inputs`` and
-``rk78_card.kepler_truth``).
+analytic truth are the card's own (``rkf78._inputs`` and
+``rkf78.kepler_truth``).
 
 The attempt below is the plain, non-FSAL form: all 7 stages every attempt,
 the 5th-order solution is kept (local extrapolation), the 4th-order one only
@@ -25,7 +25,7 @@ import sys
 
 _HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE.parent))  # benchmarks/: the cards' shared helpers
-_spec = importlib.util.spec_from_file_location("eagle_rk78_card", _HERE / "rk78_card.py")
+_spec = importlib.util.spec_from_file_location("eagle_rk78_card", _HERE.parent / "perf_card" / "rkf78.py")
 rc = importlib.util.module_from_spec(_spec)
 sys.modules.setdefault("eagle_rk78_card", rc)
 _spec.loader.exec_module(rc)

@@ -4,7 +4,7 @@
 """The adaptive-step card on the CPU: the RKF7(8) Kepler workload, the common CPU ways.
 
 The workload, the scheme, the truth and the agreement checks are those of
-``rk78_card.py`` (imported from it). The arms:
+``rkf78.py`` (imported from it). The arms:
 
 ``eagle_cpu8`` / ``eagle_cpu1``
     The GPU card's hawk attempt kernel, deployed by ``eagle.deploy`` (NumPy
@@ -34,7 +34,7 @@ compile time on empty caches, are recorded per (arm, N).
 
 Reproduce (from the eagle repository root)::
 
-    python benchmarks/rk78_card/cpu_rk78_card.py
+    python benchmarks/perf_card/cpu_rkf78.py
 """
 
 from __future__ import annotations
@@ -51,13 +51,13 @@ import tempfile
 import time
 
 HERE = pathlib.Path(__file__).resolve().parent
-for _p in (HERE, HERE.parent):  # rk78_card.py; benchmarks/: the shared helpers
+for _p in (HERE, HERE.parent):  # rkf78.py; benchmarks/: the shared helpers
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 import _card_common as cc  # noqa: E402
-import rk78_card as rc  # noqa: E402
+import rkf78 as rc  # noqa: E402
 
-SCRIPT_REL = "benchmarks/rk78_card/cpu_rk78_card.py"
+SCRIPT_REL = "benchmarks/perf_card/cpu_rkf78.py"
 THREADS = 8
 ARMS = ("eagle_cpu8", "eagle_cpu1", "numba_prange", "jax_vmap", "torch_masked",
         "numpy_masked")
@@ -73,13 +73,16 @@ ARM_CODE = {"eagle_cpu8": ("hawk_kernel", "eagle_cpu_deploy", "eagle_cpu"),
             "eagle_cpu1": ("hawk_kernel", "eagle_cpu_deploy", "eagle_cpu"),
             "numba_prange": ("numba_prange",), "jax_vmap": ("jax_vmap",),
             "torch_masked": ("torch_masked",), "numpy_masked": ("numpy_masked",)}
+ARM_LIBRARY = {"numba_prange": "numba", "jax_vmap": "jax", "torch_masked": "torch"}
 MASKED_ARMS = ("torch_masked", "numpy_masked")
 #: Arms with no compile step (PyTorch's and NumPy's kernels ship prebuilt).
 NO_COMPILE_ARMS = MASKED_ARMS
 MASKED_MAX_N = 100_000
-NS = (1_000, 10_000, 100_000, 1_000_000)
+NS = (10_000, 100_000, 1_000_000)
 REPS = 5
 WARM_N = 64
+#: The fixed-overhead cell: the eagle arms alone at this N (launch and join cost).
+OVERHEAD_N = 64
 
 
 # >>> code:numpy_masked
@@ -195,11 +198,11 @@ class _Worker:
         self.arm = arm
         self.compile_s = 0.0
 
-    def setup(self, n):
+    def setup(self, n, distribution="spread"):
         import numpy as np
 
         self.n = n
-        self.inp = rc._inputs(n)
+        self.inp = rc._inputs(n, distribution)
         arm = self.arm
         t0 = time.perf_counter()
         if arm.startswith("eagle_cpu"):
@@ -292,7 +295,7 @@ def _worker_main(arm):
             w.compile_s = 0.0
             w.setup(WARM_N)
             w.run()  # warm-up at WARM_N: every compile happens here
-            w.setup(cmd["n"])
+            w.setup(cmd["n"], cmd.get("distribution", "spread"))
             rss = cc.status_kib("VmRSS")
             cc.reset_host_peak()
             sec, out = w.run()  # the verification run
@@ -323,7 +326,7 @@ def _proc(arm, cache):
     return cc.LineWorker(__file__, ["--worker", arm], _env(arm, cache), arm)
 
 
-def _run_n(n, reps, names, work):
+def _run_n(n, reps, names, work, distribution="spread"):
     import numpy as np
 
     arms = [a for a in names if a not in MASKED_ARMS or n <= MASKED_MAX_N]
@@ -332,11 +335,12 @@ def _run_n(n, reps, names, work):
         setup, outs = {}, {}
         for a in arms:
             path = work / f"out_{a}_{n}.npz"
-            setup[a] = procs[a].call({"op": "setup", "n": n, "out": str(path)})
+            setup[a] = procs[a].call({"op": "setup", "n": n, "out": str(path),
+                                      "distribution": distribution})
             with np.load(path) as z:
                 outs[a] = {k: z[k] for k in z.files}
         ref = REFERENCE_ARM if REFERENCE_ARM in outs else arms[0]
-        agreement, steps = rc._verify(outs, rc._inputs(n), ref)
+        agreement, steps = rc._verify(outs, rc._inputs(n, distribution), ref)
         walls = {a: [] for a in arms}
         load_before = cc.load_avg_1m()
         for r in range(reps):
@@ -351,14 +355,14 @@ def _run_n(n, reps, names, work):
     for a in arms:
         att = agreement[a]["attempts_total"]
         wall = cc.median_iqr(walls[a])
-        rows.append({"n": n, "arm": a, "threads": ARM_THREADS[a], "wall_s": wall,
+        rows.append({"n": n, "distribution": distribution, "arm": a, "threads": ARM_THREADS[a], "wall_s": wall,
                      "attempts": att, "attempt_samples_per_s": att / wall["median"],
                      "useful_flops_per_s": rc.FLOPS_PER_ATTEMPT * att / wall["median"],
                      "host_peak_bytes": setup[a]["host_peak_bytes"],
                      "compile_s_cold": (None if a in NO_COMPILE_ARMS
                                         else setup[a]["compile_s"]),
                      "slot_fill": None})
-    return rows, {"n": n, "reference_arm": ref, "agreement": agreement, "steps": steps,
+    return rows, {"n": n, "distribution": distribution, "reference_arm": ref, "agreement": agreement, "steps": steps,
                   "load_avg_before": load_before, "load_avg_after": load_after}
 
 
@@ -381,9 +385,10 @@ def render_markdown(card):
              "| N | arm | threads | wall (IQR) | attempts·samples/s | useful FLOP/s "
              "| host memory | compile (cold) | lines of code |",
              "|---:|---|---:|---:|---:|---:|---:|---:|---:|"]
-    for r in sorted(card["results"], key=lambda r: (r["n"], ARMS.index(r["arm"]))):
+    for r in sorted(card["results"], key=lambda r: (r["n"], r.get("distribution", ""),
+                                                   ARMS.index(r["arm"]))):
         lines.append(
-            f"| {r['n']:,} | {ARM_LABELS[r['arm']]} | {r['threads']} "
+            f"| {r['n']:,} ({r.get('distribution', 'spread')}) | {ARM_LABELS[r['arm']]} | {r['threads']} "
             f"| {cc.fmt_time_si(r['wall_s']['median'])} ({cc.fmt_time_si(r['wall_s']['iqr'])}) "
             f"| {cc.fmt_rate_si(r['attempt_samples_per_s'])} "
             f"| {cc.fmt_rate_si(r['useful_flops_per_s'])} "
@@ -406,21 +411,39 @@ def main(argv=None):
     ap.add_argument("--reps", type=int, default=REPS)
     ap.add_argument("--ns", type=int, nargs="+", default=list(NS))
     ap.add_argument("--arms", nargs="+", default=list(ARMS))
+    ap.add_argument("--distributions", nargs="+", choices=rc.DISTRIBUTIONS,
+                    default=list(rc.DISTRIBUTIONS))
+    ap.add_argument("--smoke", action="store_true",
+                    help="smallest N, one repetition, card written to a temporary directory")
     ap.add_argument("--worker", help=argparse.SUPPRESS)
     args = ap.parse_args(argv)
     if args.worker:
         _worker_main(args.worker)
         return 0
-    names = tuple(a for a in ARMS if a in args.arms)
+    arms_not_run = {a: f"{ARM_LIBRARY[a]} not installed in this profile"
+                    for a in ARMS if a in args.arms and a in ARM_LIBRARY
+                    and not rc._lib_installed(ARM_LIBRARY[a])}
+    for a, why in arms_not_run.items():
+        print(f"arm {a} not run: {why}", flush=True)
+    names = tuple(a for a in ARMS if a in args.arms and a not in arms_not_run)
+    if args.smoke:
+        args.ns, args.reps, args.distributions = [1_000], 1, ["spread"]
+        if args.out_dir == HERE:
+            args.out_dir = pathlib.Path(tempfile.mkdtemp(prefix="cpu_rkf78_smoke_"))
+    t_start = time.perf_counter()
     work = pathlib.Path(tempfile.mkdtemp(prefix="rk78_cpucard_"))
     results, per_n = [], []
     try:
-        for n in args.ns:
+        cells = [(d, n, names) for d in args.distributions for n in args.ns]
+        if not args.smoke:
+            cells += [(d, OVERHEAD_N, tuple(a for a in names if a.startswith("eagle")))
+                      for d in args.distributions]
+        for dist, n, arms in cells:
             t0 = time.perf_counter()
-            rows, extra = _run_n(n, args.reps, names, work)
+            rows, extra = _run_n(n, args.reps, arms, work, dist)
             results += rows
             per_n.append(extra)
-            print(f"N={n:>8,} ({time.perf_counter() - t0:.1f}s)", flush=True)
+            print(f"{dist} N={n:>8,} ({time.perf_counter() - t0:.1f}s)", flush=True)
     finally:
         shutil.rmtree(work, ignore_errors=True)
     cpu = cc.cpu_model()
@@ -433,7 +456,10 @@ def main(argv=None):
             "software": {"python": platform.python_version(),
                          **{m: cc.version_of(m) for m in ("numpy", "numba", "jax",
                                                           "torch")}},
-            "ns": list(args.ns), "arms": {a: ARM_LABELS[a] for a in names},
+            "ns": list(args.ns), "distributions": list(args.distributions),
+            "fixed_overhead_n": OVERHEAD_N, "release": cc.release_string(),
+            "arms_not_run": arms_not_run,
+            "arms": {a: ARM_LABELS[a] for a in names},
             "code_lines": code_line_counts(),
             "method": {"repetitions": args.reps, "reference_arm": REFERENCE_ARM,
                        "masked_max_n": MASKED_MAX_N,
@@ -449,13 +475,16 @@ def main(argv=None):
                        "simd": "not measured on this card (see cpu_card.py's simd.summary "
                                "for the same hawk host build's scalar/packed op counts)",
                        "slot_fill": "n/a on the host (device-only hook)",
-                       "fixed_overhead": "not re-measured as a dedicated cell on this card"},
-            "results": results, "per_n": per_n}
+                       "fixed_overhead": f"the eagle arms alone at N = {OVERHEAD_N}"},
+            "results": results, "per_n": per_n,
+            "wall_s": time.perf_counter() - t_start}
     args.out_dir.mkdir(parents=True, exist_ok=True)
     path = args.out_dir / f"cpu_card_{slug}.json"
     path.write_text(json.dumps(card, indent=1) + "\n")
     (args.out_dir / f"cpu_card_{slug}.md").write_text(render_markdown(card))
     print(f"wrote {path}")
+    if not args.smoke and args.out_dir.resolve().is_relative_to(HERE.parent):
+        cc.record_provenance(path)
     return 0
 
 

@@ -80,7 +80,7 @@ pass gives kernel-only time. The run writes ``card_<device-slug>.json`` and
 
 Reproduce (from the eagle repository root)::
 
-    python benchmarks/rk78_card/rk78_card.py
+    python benchmarks/perf_card/perf_card.py --step rkf78
 
 ``--quick`` runs N up to 1e4; ``--no-nsys``, ``--no-memory`` and
 ``--no-compile`` skip those passes (dry runs only).
@@ -107,7 +107,7 @@ if str(HERE.parent) not in sys.path:
     sys.path.insert(0, str(HERE.parent))  # benchmarks/: the cards' shared helpers
 import _card_common as cc  # noqa: E402
 
-SCRIPT_REL = "benchmarks/rk78_card/rk78_card.py"
+SCRIPT_REL = "benchmarks/perf_card/rkf78.py"
 
 # --------------------------------------------------------------------------- #
 # The problem
@@ -138,12 +138,12 @@ SEED = 20261002
 
 ARMS = ("eagle_graph", "eagle_graph_compact", "eagle_graph_reorder",
         "eagle_graph_persist", "eagle_simulate",
-        "cupy_masked", "torch_masked", "torch_graphed", "jax_vmap", "warp_kernel",
-        "eagle_cpu")
+        "cupy_masked", "torch_masked", "torch_graphed", "torch_compiled", "jax_vmap",
+        "warp_kernel", "eagle_cpu")
 GPU_ARMS = ARMS[:-1]
 #: The optional library each arm needs: an arm whose library is not installed
 #: in this profile is listed under ``arms_not_run`` and the run continues.
-ARM_LIBRARY = {"torch_masked": "torch", "torch_graphed": "torch",
+ARM_LIBRARY = {"cupy_masked": "cupy", "torch_masked": "torch", "torch_graphed": "torch", "torch_compiled": "torch",
                "jax_vmap": "jax", "warp_kernel": "warp"}
 
 
@@ -163,9 +163,25 @@ def _select_arms(requested):
     not_run = {a: f"{ARM_LIBRARY[a]} not installed in this profile"
                for a in ARMS if a in requested and a in ARM_LIBRARY
                and not _lib_installed(ARM_LIBRARY[a])}
+    if "torch_compiled" in requested and "torch_compiled" not in not_run:
+        why = _compiled_unavailable()
+        if why:
+            not_run["torch_compiled"] = why
     return tuple(a for a in ARMS if a in requested and a not in not_run), not_run
+def _compiled_unavailable():
+    """Why torch.compile's Triton backend cannot run here (None when it can)."""
+    if not _lib_installed("triton"):
+        return "triton not installed in this profile"
+    import torch
+
+    if not torch.cuda.is_available() or torch.cuda.get_device_capability() < (7, 0):
+        return "torch.compile's Triton backend needs a GPU of compute capability 7.0 or newer"
+    return None
+
+
 EAGLE_GPU_ARMS = ARMS[:5]
 ARM_LABELS = {
+    "torch_compiled": "PyTorch torch.compile (reduce-overhead)",
     "eagle_graph": "eagle graph",
     "eagle_graph_compact": "eagle graph + compaction",
     "eagle_graph_reorder": "eagle graph + compaction + reorder",
@@ -179,6 +195,8 @@ ARM_LABELS = {
     "eagle_cpu": "eagle CPU (OpenMP)",
 }
 ARM_LOOP = {
+    "torch_compiled": "host loop: a block of 16 masked attempts compiled by Inductor "
+                      "(Triton) and replayed as a CUDA graph, host check per block",
     "eagle_graph": "one CUDA graph: device WHILE loop of the attempt kernel, which "
                    "marks and counts its finished samples and runs the attempts per "
                    "launch eagle's policy picks; finished samples skipped by the "
@@ -208,7 +226,19 @@ ARM_LOOP = {
     "eagle_cpu": "host loop: one attempt over the batch (OpenMP), the kernel marks "
                  "and counts its finished samples",
 }
-NS = (1_000, 10_000, 100_000, 1_000_000)
+NS = (100_000, 1_000_000, 10_000_000)
+#: ``spread``: e uniform in E_RANGE (divergent per-sample work); ``uniform``:
+#: every sample the same orbit, e = UNIFORM_E (no divergence).
+DISTRIBUTIONS = ("spread", "uniform")
+UNIFORM_E = 0.45
+#: The arms of the committed card; the others stay CLI arms (``--arms``).
+COMMITTED_ARMS = ("eagle_graph", "eagle_graph_persist", "eagle_simulate", "cupy_masked",
+                  "torch_graphed", "torch_compiled", "jax_vmap", "warp_kernel")
+#: The tail floor: the same kernel on this many samples (launch + tail cost).
+TAIL_FLOOR_N = 32
+#: A cell whose median SM clock is more than this fraction below the session
+#: maximum is timed again (once).
+CLOCK_RETIME = 0.03
 REPS = 5
 #: An arm whose warm-up run says ``reps`` repetitions would take longer than
 #: ``SLOW_ARM_BUDGET_S`` runs ``SLOW_ARM_REPS`` instead (the masked baselines
@@ -432,14 +462,17 @@ def _rotations(rng, n):
     return p, q
 
 
-def _inputs(n):
-    """Initial states at periapsis (a = 1, e uniform in E_RANGE, random
-    orientation) and the orbit elements the truth needs."""
+def _inputs(n, distribution="spread"):
+    """Initial states at periapsis (a = 1, e uniform in E_RANGE or, for
+    ``uniform``, UNIFORM_E, random orientation) and the orbit elements the truth needs."""
     import numpy as np
 
     rng = np.random.default_rng([SEED, n])
     e = rng.uniform(E_RANGE[0], E_RANGE[1], n)
-    e[0] = E_RANGE[1]  # the batch always holds the most eccentric orbit
+    if distribution == "uniform":
+        e[:] = UNIFORM_E
+    else:
+        e[0] = E_RANGE[1]  # the batch always holds the most eccentric orbit
     p, q = _rotations(rng, n)
     rp = SEMI_MAJOR * (1.0 - e)
     vp = np.sqrt(MU / SEMI_MAJOR * (1.0 + e) / (1.0 - e))
@@ -726,9 +759,33 @@ def torch_graphed_run(graph, flag, block):
 # <<< code:torch_graphed
 
 
-def _make_array_arms(n, names):
+# >>> code:torch_compiled
+def _compiled_block(s, t, h, n_acc, n_rej):
+    """GRAPH_BLOCK masked attempts; compiled once, replayed as a CUDA graph."""
+    for _ in range(GRAPH_BLOCK):
+        s, t, h, n_acc, n_rej, _ = torch_attempt(s, t, h, n_acc, n_rej)
+    return s, t, h, n_acc, n_rej
+
+
+def torch_compiled_run(st, block_fn):
     import torch
 
+    with torch.inference_mode():
+        p = st.planes
+        s, t, h = [p[k].clone() for k in STATE_NAMES], p["t"].clone(), p["h"].clone()
+        n_acc, n_rej = p["n_acc"].clone(), p["n_rej"].clone()
+        for _ in range(-(-MAX_ATTEMPTS // GRAPH_BLOCK)):
+            torch.compiler.cudagraph_mark_step_begin()
+            s, t, h, n_acc, n_rej = block_fn(s, t, h, n_acc, n_rej)
+            s = [x.clone() for x in s]  # the graph's outputs are reused by the next replay
+            t, h, n_acc, n_rej = t.clone(), h.clone(), n_acc.clone(), n_rej.clone()
+            if not bool((t < T_FINAL).any()):
+                break
+    return s, t, h, n_acc, n_rej
+# <<< code:torch_compiled
+
+
+def _make_array_arms(n, names):
     arms = {}
     if "cupy_masked" in names:
         c = _ArrayState("cupy", n)
@@ -746,7 +803,25 @@ def _make_array_arms(n, names):
             tm.out = dict(zip(PLANE_NAMES, (*s, t, h, a, r)))
 
         arms["torch_masked"] = dict(state=tm, run=run_torch, download=tm.download)
+    if "torch_compiled" in names:
+        import torch
+
+        tc = _ArrayState("torch", n)
+        tc.upload(_inputs(n))
+        block_fn = torch.compile(_compiled_block, mode="reduce-overhead")
+
+        def run_compiled():
+            s, t, h, a, r = torch_compiled_run(tc, block_fn)
+            tc.out = dict(zip(PLANE_NAMES, (*s, t, h, a, r)))
+
+        t0 = time.perf_counter()
+        run_compiled()  # the compile happens here, outside the timed span
+        torch.cuda.synchronize()
+        arms["torch_compiled"] = dict(state=tc, run=run_compiled, download=tc.download,
+                                      compile_s=time.perf_counter() - t0)
     if "torch_graphed" in names:
+        import torch
+
         tg = _ArrayState("torch", n)
         tg.upload(_inputs(n))
         t0 = time.perf_counter()
@@ -1019,7 +1094,8 @@ def _make_arms(n, names):
     arms = {}
     if any(a in names for a in EAGLE_GPU_ARMS):
         arms.update(_make_eagle_arms(n, names))
-    if any(a in names for a in ("cupy_masked", "torch_masked", "torch_graphed")):
+    if any(a in names for a in ("cupy_masked", "torch_masked", "torch_graphed",
+                                "torch_compiled")):
         arms.update(_make_array_arms(n, names))
     if "jax_vmap" in names:
         arms["jax_vmap"] = _make_jax_arm(n)
@@ -1174,9 +1250,9 @@ def _verify(outs, inp, ref_arm):
     return report, steps
 
 
-def _run_n(n, reps, bus_id, names, kernel_pass=False):
+def _run_n(n, reps, bus_id, names, kernel_pass=False, distribution="spread"):
     """All arms at one N: build, warm-up + verify, interleaved repetitions."""
-    inp = _inputs(n)
+    inp = _inputs(n, distribution)
     arms = _make_arms(n, names)
     order = list(arms)
     outs, reps_for = {}, {}
@@ -1186,6 +1262,7 @@ def _run_n(n, reps, bus_id, names, kernel_pass=False):
                           else min(reps, SLOW_ARM_REPS))
     ref = "eagle_graph" if "eagle_graph" in outs else order[0]
     agreement, steps = _verify(outs, inp, ref)
+    max_attempts = float(steps["accepted"]["max"] + steps["rejected"]["max"]) or 1.0
     if kernel_pass:
         from cupy.cuda import nvtx
 
@@ -1215,7 +1292,9 @@ def _run_n(n, reps, bus_id, names, kernel_pass=False):
         attempts = agreement[name]["attempts_total"]
         wall = _median_iqr(walls[name])
         row = {
-            "n": n, "arm": name, "wall_s": wall, "repetitions": len(walls[name]),
+            "n": n, "distribution": distribution, "arm": name, "wall_s": wall,
+            "repetitions": len(walls[name]),
+            "running_fraction_mean": attempts / (n * max_attempts),
             "end_to_end_s": _median_iqr(e2e[name]),
             "attempts": attempts,
             "attempt_samples_per_s": attempts / wall["median"],
@@ -1233,7 +1312,7 @@ def _run_n(n, reps, bus_id, names, kernel_pass=False):
         if "fired" in arms[name]:
             row["reorders_fired"] = arms[name]["fired"][-1] if arms[name]["fired"] else None
         rows.append(row)
-    extra = {"n": n, "reference_arm": ref, "agreement": agreement, "steps": steps,
+    extra = {"n": n, "distribution": distribution, "reference_arm": ref, "agreement": agreement, "steps": steps,
              "gpu_state_during": clocks}
     return rows, extra
 
@@ -1427,7 +1506,7 @@ KERNEL_PASS_RUNS = 3
 #: The masked arms' traced runs are long (every sample, every attempt, until
 #: the slowest finishes): one traced run each, after the warm-up.
 KERNEL_PASS_RUNS_MASKED = 1
-MASKED_ARMS = ("cupy_masked", "torch_masked", "torch_graphed")
+MASKED_ARMS = ("cupy_masked", "torch_masked", "torch_graphed", "torch_compiled")
 
 
 def _nsys_kernel_times(ns, work, names):
@@ -1482,6 +1561,7 @@ ARM_CODE = {
     "cupy_masked": ("cupy_masked",),
     "torch_masked": ("torch_masked",),
     "torch_graphed": ("torch_masked", "torch_graphed"),
+    "torch_compiled": ("torch_masked", "torch_compiled"),
     "jax_vmap": ("jax_vmap",),
     "warp_kernel": ("warp_kernel", "warp_launch"),
     "eagle_cpu": ("hawk_kernel", "eagle_cpu_deploy", "eagle_cpu"),
@@ -1628,17 +1708,17 @@ def render_markdown(card: dict) -> str:
               f"({card['code_lines']['shared_scheme_lines']} lines).", ""]
     mem = {(r["n"], r["arm"]): r for r in (card.get("memory") or {}).get("rows", [])}
     lines += [
-        "| N | arm | wall (IQR) | kernel-only | end-to-end | attempts·samples/s "
+        "| N | distribution | arm | wall (IQR) | kernel-only | end-to-end | attempts·samples/s "
         "| useful FLOP/s (% peak) | device memory (× minimum) | host memory |",
-        "|---:|---|---:|---:|---:|---:|---:|---:|---:|",
+        "|---:|---|---|---:|---:|---:|---:|---:|---:|---:|",
     ]
     peak = card["peak"]["fp64_flops"]
-    for row in sorted(card["results"], key=lambda r: (r["n"], ARMS.index(r["arm"]))):
+    for row in sorted(card["results"], key=lambda r: (r["n"], r.get("distribution", ""), ARMS.index(r["arm"]))):
         m = mem.get((row["n"], row["arm"]))
         pct = (None if row["arm"] == "eagle_cpu" or not peak
                else row["useful_flops_per_s"] / peak)
         lines.append(
-            f"| {row['n']:,} | {ARM_LABELS[row['arm']]} "
+            f"| {row['n']:,} | {row.get('distribution', 'spread')} | {ARM_LABELS[row['arm']]} "
             f"| {_fmt_time(row['wall_s']['median'])} ({_fmt_time(row['wall_s']['iqr'])}) "
             f"| {_fmt_time(row['kernel_only_s'])} "
             f"| {_fmt_time(row['end_to_end_s']['median'])} "
@@ -1665,7 +1745,7 @@ def render_markdown(card: dict) -> str:
                 f"| {a['max_abs_accepted_difference']} / "
                 f"{a['max_abs_rejected_difference']} |")
     lines.append("")
-    top = max(card["per_n"], key=lambda e: e["n"])
+    top = max(card["per_n"], key=lambda e: (e["n"], e.get("distribution") == "spread"))
     st = top["steps"]
     lines += [f"Steps per sample at N = {top['n']:,} (reference arm): accepted "
               f"min {st['accepted']['min']:.0f} / median {st['accepted']['p50']:.0f} / "
@@ -1686,24 +1766,17 @@ def render_markdown(card: dict) -> str:
 # --------------------------------------------------------------------------- #
 # Main
 # --------------------------------------------------------------------------- #
-def _torch_compile_note():
-    import torch
-
-    major, minor = torch.cuda.get_device_capability()
-    if (major, minor) >= (7, 0):
-        return None
-    return (f"torch.compile is not run: its GPU code generator (Inductor, through "
-            f"Triton) needs compute capability 7.0 or newer, and this GPU is "
-            f"{major}.{minor}. The PyTorch + CUDA graph arm removes the same "
-            f"per-kernel launch cost without generating code.")
-
-
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--out-dir", type=pathlib.Path, default=HERE)
     ap.add_argument("--reps", type=int, default=REPS)
     ap.add_argument("--ns", type=int, nargs="+", default=list(NS))
-    ap.add_argument("--arms", nargs="+", default=list(ARMS))
+    ap.add_argument("--arms", nargs="+", default=list(COMMITTED_ARMS))
+    ap.add_argument("--distributions", nargs="+", choices=DISTRIBUTIONS,
+                    default=list(DISTRIBUTIONS))
+    ap.add_argument("--smoke", action="store_true",
+                    help="smallest N, one repetition, no memory/compile/nsys passes, "
+                         "card written to a temporary directory")
     ap.add_argument("--quick", action="store_true")
     ap.add_argument("--no-nsys", action="store_true")
     ap.add_argument("--no-memory", action="store_true")
@@ -1721,7 +1794,12 @@ def main(argv=None):
     if args.compile_probe:
         _compile_probe(args.compile_probe)
         return 0
-    if args.reps < 5 and not (args.check or args.kernel_pass):
+    if args.smoke:
+        args.ns, args.reps, args.distributions = [1_000], 1, ["spread"]
+        args.no_nsys = args.no_memory = args.no_compile = True
+        if args.out_dir == HERE:
+            args.out_dir = pathlib.Path(tempfile.mkdtemp(prefix="rkf78_smoke_"))
+    if args.reps < 5 and not (args.check or args.kernel_pass or args.smoke):
         ap.error("--reps must be >= 5")
     if args.quick:
         args.ns = [n for n in args.ns if n <= 10_000]
@@ -1729,7 +1807,8 @@ def main(argv=None):
     for arm, why in arms_not_run.items():
         print(f"arm {arm} not run: {why}", flush=True)
 
-    work = pathlib.Path(tempfile.mkdtemp(prefix="rk78_card_"))
+    t_start = time.perf_counter()
+    work = pathlib.Path(tempfile.mkdtemp(prefix="rkf78_card_"))
     device, peak, slug, bus_id = _device_facts()
 
     if args.kernel_pass:
@@ -1754,20 +1833,34 @@ def main(argv=None):
 
     _check_kernel_bodies()
     sources = _kernel_sources(work)
-    results, per_n = [], []
-    for n in args.ns:
-        t0 = time.perf_counter()
-        rows, extra = _run_n(n, args.reps, bus_id, names)
-        results += rows
-        per_n.append(extra)
-        best = min(rows, key=lambda r: r["wall_s"]["median"])
-        print(f"N={n:>8,} fastest={best['arm']} ({time.perf_counter() - t0:.1f}s)",
-              flush=True)
+    cells = {}
+    for dist in args.distributions:
+        for n in args.ns:
+            t0 = time.perf_counter()
+            cells[(dist, n)] = _run_n(n, args.reps, bus_id, names, distribution=dist)
+            best = min(cells[(dist, n)][0], key=lambda r: r["wall_s"]["median"])
+            print(f"{dist} N={n:>8,} fastest={best['arm']} "
+                  f"({time.perf_counter() - t0:.1f}s)", flush=True)
+
+    def cell_mhz(key):
+        return cells[key][1]["gpu_state_during"].get("sm_clock_mhz_median")
+
+    top = max((cell_mhz(k) or 0 for k in cells), default=0)
+    for key in list(cells):  # a cell timed more than CLOCK_RETIME below the best clock: again
+        if top and (cell_mhz(key) or top) < top * (1 - CLOCK_RETIME):
+            rows, extra = _run_n(key[1], args.reps, bus_id, names, distribution=key[0])
+            extra["retimed_from_sm_mhz"] = cell_mhz(key)
+            cells[key] = (rows, extra)
+    results = [r for rows, _ in cells.values() for r in rows]
+    per_n = [extra for _, extra in cells.values()]
+    tail = {d: _run_n(TAIL_FLOOR_N, args.reps, bus_id, ("eagle_graph",) if "eagle_graph" in names
+                      else names[:1], distribution=d)[0][0]["wall_s"]["median"] * 1e3
+            for d in args.distributions}
     ktimes, kcounts, kernel_note = None, None, "skipped (--no-nsys)"
     if not args.no_nsys:
         ktimes, kcounts, kernel_note = _nsys_kernel_times(args.ns, work, names)
         for row in results:
-            if row["arm"] != "eagle_cpu" and ktimes is not None:
+            if row["arm"] != "eagle_cpu" and ktimes is not None and row["distribution"] == "spread":
                 row["kernel_only_s"] = ktimes.get((row["n"], row["arm"]))
     for row in results:
         row["fraction_of_peak_fp64"] = (
@@ -1829,6 +1922,9 @@ def main(argv=None):
             "graph_block": GRAPH_BLOCK,
         },
         "ns": list(args.ns),
+        "distributions": list(args.distributions),
+        "tail_floor_ms": tail,
+        "release": cc.release_string(),
         "arms": {a: ARM_LABELS[a] for a in names},
         "arms_not_run": arms_not_run,
         "code_lines": code_line_counts(),
@@ -1862,14 +1958,17 @@ def main(argv=None):
         "memory": {"method": _MEMORY_METHOD, "rows": memory_rows},
         "compile_time": {"method": _COMPILE_METHOD, "rows": compile_rows,
                          "none": [a for a in NO_COMPILE_ARMS if a in names]},
-        "torch_compile_note": _torch_compile_note(),
+        "torch_compile_note": arms_not_run.get("torch_compiled"),
     }
     card["fit"] = _fit_notes(card)
+    card["wall_s"] = time.perf_counter() - t_start
     args.out_dir.mkdir(parents=True, exist_ok=True)
     json_path = args.out_dir / f"card_{slug}.json"
     json_path.write_text(json.dumps(card, indent=1) + "\n")
     (args.out_dir / f"card_{slug}.md").write_text(render_markdown(card))
     print(f"wrote {json_path}")
+    if not args.smoke and args.out_dir.resolve().is_relative_to(HERE.parent):
+        cc.record_provenance(json_path)
     shutil.rmtree(work, ignore_errors=True)
     return 0
 

@@ -14,7 +14,7 @@
 #     --work DIR      bootstrap's work directory (default: $REPRO_WORK, else per target)
 #     --out DIR       output root (default WORK/cards); cards go to OUT/<machine-slug>/
 #     --slug S        machine slug (default: <gpu>--<cpu>, from the hardware)
-#     --publish       write into eagle/benchmarks/{perf_card,rk78_card}/, replacing
+#     --publish       write into eagle/benchmarks/perf_card/, replacing
 #                     the committed card of the same device; never done otherwise
 #     --split         run the GPU cards pass by pass and the CPU RK4 card config by
 #                     config, resumable (default on Kaggle); re-run the same command
@@ -77,17 +77,16 @@ eagle_root() {
 NS_SMOKE=(1000) NS_SHORT=(1000 10000 100000)
 case $PRESET in
   smoke) NS=("${NS_SMOKE[@]}")
-         A_PERF=(--reps 5 --no-sweep --no-nsys --no-memory --no-compile)
          A_RK78=(--reps 5 --no-nsys --no-memory --no-compile)
-         A_CPU=(--reps 5 --configs spread:100 --allow-partial --no-memory --no-compile)
          A_CPU78=(--reps 5) ;;
   short) NS=("${NS_SHORT[@]}")
-         A_PERF=(--sweep-ns 100000) A_RK78=() A_CPU=(--allow-partial) A_CPU78=() ;;
-  full)  NS=() A_PERF=() A_RK78=() A_CPU=() A_CPU78=() ;;
+         A_RK78=() A_CPU78=() ;;
+  full)  NS=() A_RK78=() A_CPU78=() ;;
 esac
 if [[ $NSYS == off ]] || ! command -v nsys >/dev/null 2>&1; then
-  [[ $PRESET == smoke ]] || { A_PERF+=(--no-nsys); A_RK78+=(--no-nsys); }
+  [[ $PRESET == smoke ]] || { A_RK78+=(--no-nsys); }
 fi
+EXTRA_FEATURE=(); [[ $PRESET == smoke ]] && EXTRA_FEATURE=(--smoke)
 NSARG=(); [[ ${#NS[@]} -gt 0 ]] && NSARG=(--ns "${NS[@]}")
 
 if [[ $PUBLISH == 1 ]]; then
@@ -132,17 +131,17 @@ run_gpu_cards() {
   local eroot; eroot=$(eagle_root "$GPU_ENV")
   local out=$OUT/$SLUG; [[ $PUBLISH == 1 ]] && out=$eroot/benchmarks
   local parts=$OUT/$SLUG/parts-$PRESET
-  STEPS=$OUT/$SLUG/.steps-$PRESET; run mkdir -p "$STEPS" "$out/perf_card" "$out/rk78_card"
+  STEPS=$OUT/$SLUG/.steps-$PRESET; run mkdir -p "$STEPS" "$out/perf_card"
   if [[ $SPLIT == 0 ]]; then
     step gpu-perf "$GPU_ENV" GPU "$eroot" python benchmarks/perf_card/perf_card.py \
-      "${NSARG[@]}" "${A_PERF[@]}" --out-dir "$out/perf_card" "${EXTRA[@]}"
-    step gpu-rk78 "$GPU_ENV" GPU "$eroot" python benchmarks/rk78_card/rk78_card.py \
-      "${NSARG[@]}" "${A_RK78[@]}" --out-dir "$out/rk78_card" "${EXTRA[@]}"
+      "${NSARG[@]}" "${A_RK78[@]}" --out-dir "$out/perf_card" "${EXTRA[@]}"
+    step gpu-features "$GPU_ENV" GPU "$eroot" python benchmarks/perf_card/feature_card.py \
+      --out-dir "$out/perf_card" "${EXTRA_FEATURE[@]}"
     return
   fi
   local card args pass n i
-  for card in perf rk78; do
-    if [[ $card == perf ]]; then args=("${A_PERF[@]}"); else args=("${A_RK78[@]}"); fi
+  for card in rk78; do
+    args=("${A_RK78[@]}")
     for pass in nsys memory compile; do
       [[ " ${args[*]} " == *" --no-$pass "* ]] && continue
       if [[ $REPRO_DRY_RUN == 1 ]]; then n=1; else
@@ -159,7 +158,7 @@ run_gpu_cards() {
     local fin=()
     for a in "${args[@]}"; do [[ $a == --no-nsys || $a == --no-memory || $a == --no-compile ]] || fin+=("$a"); done
     step "gpu-$card-final" "$GPU_ENV" GPU "$eroot" python "$HERE/passes.py" "$card" final \
-      --parts "$parts/$card" "${NSARG[@]}" "${fin[@]}" --out-dir "$out/${card}_card" "${EXTRA[@]}"
+      --parts "$parts/$card" "${NSARG[@]}" "${fin[@]}" --out-dir "$out/perf_card" "${EXTRA[@]}"
   done
 }
 
@@ -167,22 +166,11 @@ run_cpu_cards() {
   local eroot; eroot=$(eagle_root "$CPU_ENV")
   local out=$OUT/$SLUG; [[ $PUBLISH == 1 ]] && out=$eroot/benchmarks
   local parts=$OUT/$SLUG/parts-$PRESET/cpu
-  STEPS=$OUT/$SLUG/.steps-$PRESET; run mkdir -p "$STEPS" "$out/perf_card" "$out/rk78_card" "$parts"
-  if [[ $SPLIT == 0 || $PRESET == smoke ]]; then
-    step cpu-rk4 "$CPU_ENV" CPU "$eroot" python benchmarks/perf_card/cpu_card.py \
-      "${NSARG[@]}" "${A_CPU[@]}" --parts-dir "$parts" --out-dir "$out/perf_card" "${EXTRA[@]}"
-  else
-    local cfg
-    for cfg in spread:100 spread:1000 uniform:1000; do
-      step "cpu-rk4-timing-${cfg/:/-}" "$CPU_ENV" CPU "$eroot" python benchmarks/perf_card/cpu_card.py \
-        "${NSARG[@]}" "${A_CPU[@]}" --configs "$cfg" --no-memory --no-compile --allow-partial \
-        --parts-dir "$parts" --out-dir "$parts/partial" "${EXTRA[@]}"
-    done
-    step cpu-rk4-final "$CPU_ENV" CPU "$eroot" python benchmarks/perf_card/cpu_card.py \
-      "${NSARG[@]}" "${A_CPU[@]}" --no-timing --parts-dir "$parts" --out-dir "$out/perf_card" "${EXTRA[@]}"
-  fi
-  step cpu-rk78 "$CPU_ENV" CPU "$eroot" python benchmarks/rk78_card/cpu_rk78_card.py \
-    "${NSARG[@]}" "${A_CPU78[@]}" --out-dir "$out/rk78_card" "${EXTRA[@]}"
+  STEPS=$OUT/$SLUG/.steps-$PRESET; run mkdir -p "$STEPS" "$out/perf_card" "$parts"
+  step cpu-perf "$CPU_ENV" CPU "$eroot" python benchmarks/perf_card/cpu_card.py \
+    "${NSARG[@]}" "${A_CPU78[@]}" --out-dir "$out/perf_card" "${EXTRA[@]}"
+  step cpu-features "$CPU_ENV" CPU "$eroot" python benchmarks/perf_card/feature_card.py \
+    --out-dir "$out/perf_card" "${EXTRA_FEATURE[@]}"
 }
 
 [[ $WHICH == gpu || $WHICH == all ]] && run_gpu_cards
