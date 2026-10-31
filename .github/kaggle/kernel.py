@@ -18,6 +18,8 @@ import subprocess
 import sys
 import tempfile
 import threading
+import urllib.error
+import urllib.request
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
 
@@ -194,6 +196,12 @@ def install(cfg, py, use_uv, work):
         os.environ.update(AETHER_VERSION=ver, EAGLE_VERSION=ver, SETUPTOOLS_SCM_PRETEND_VERSION=ver)
         prefix = work / "install"
         arch = "-DCMAKE_CUDA_ARCHITECTURES=75"
+        # a sibling whose pinned version is on PyPI installs from there, whatever branch was cloned (the clone still
+        # supplies headers); the others are built from their checkout
+        pins = dict(p.split("==", 1) for p in (getattr(cfg, "sibling_pins", "") or "").split() if "==" in p)
+        released = {repo: f"{PACKAGE[repo]}=={pins[PACKAGE[repo]]}" for repo in PACKAGE
+                    if PACKAGE[repo] in pins and on_pypi(PACKAGE[repo], pins[PACKAGE[repo]])}
+        print("siblings from PyPI:", ", ".join(released.values()) or "none")
         for lib in ("aether", "eagle"):
             if sh("cmake", "-S", src / lib, "-B", work / f"build_{lib}", arch,
                   f"-DCMAKE_INSTALL_PREFIX={prefix}") != 0 or \
@@ -203,21 +211,45 @@ def install(cfg, py, use_uv, work):
         env = dict(os.environ, CMAKE_PREFIX_PATH=f"{prefix}:{os.environ.get('CMAKE_PREFIX_PATH', '')}",
                    SKBUILD_CMAKE_ARGS=f"{arch};-DCMAKE_CUDA_COMPILER={shutil.which('nvcc') or 'nvcc'}")
         os.environ.update(env)
-        rc = pip(py, use_uv, src / "raptor")
-        rc = rc or pip(py, use_uv, "--no-build-isolation", src / "aether" / "dsc")
+        rc = pip(py, use_uv, released.get("raptor", src / "raptor"))
+        if "aether" not in released:
+            # the release job seals the payload hawk compiles against before building aether-dsc; do the same, so every
+            # source gives hawk the aether headers as aether_dsc.payload()
+            rc = rc or pip(py, use_uv, "cuda-bindings", "nvidia-cuda-nvrtc-cu12", "nvidia-cuda-cccl-cu12", "pyyaml")
+            rc = rc or sh(py, "-m", "aether_dsc.seal", "--layout-header", src / "eagle" / "plugin" / "gref_layout.h",
+                          cwd=src / "aether" / "dsc")
+        rc = rc or pip(py, use_uv, *(["--no-build-isolation", src / "aether" / "dsc"] if "aether" not in released
+                                      else [released["aether"]]))
         rc = rc or pip(py, use_uv, "--no-build-isolation", src / "eagle" / "python")
-        rc = rc or pip(py, use_uv, "--no-build-isolation", src / "hawk")
+        rc = rc or pip(py, use_uv, *(["--no-build-isolation", src / "hawk"] if "hawk" not in released else [released["hawk"]]))
         rc = rc or pip(py, use_uv, *pre, *torch_index(cfg), f"jax[{cu}]", "torch", "warp-lang", "numpy", f"cupy-cuda{cfg.cuda}x",
                        "pytest", "nbclient", "ipykernel", "nbformat", "matplotlib")
     if rc != 0:
         raise SystemExit("install failed (see the pip output above)")
 
 
+PACKAGE = {"raptor": "raptor-core", "aether": "aether-dsc", "eagle": "raptor-eagle", "hawk": "raptor-hawk"}
+
+
+def on_pypi(package, version):
+    """Whether this exact release is on PyPI."""
+    try:
+        with urllib.request.urlopen(f"https://pypi.org/pypi/{package}/{version}/json", timeout=30):
+            return True
+    except urllib.error.URLError:
+        return False
+
+
 def clone(repo, ref, dest):
+    """A sibling checkout at ``ref``; a branch deleted since the plan was made (merged mid-run) falls back to main."""
     if dest.exists():
         return
-    if sh("git", "clone", "-q", "--depth", "1", "--branch", ref, f"{ORG}/{repo}.git", dest) != 0:
-        raise SystemExit(f"could not clone {repo} at {ref}")
+    for attempt in dict.fromkeys((ref, "main")):
+        if sh("git", "clone", "-q", "--depth", "1", "--branch", attempt, f"{ORG}/{repo}.git", dest) == 0:
+            break
+        print(f"{repo}: no ref {attempt}", "(trying main)" if attempt != "main" else "")
+    else:
+        raise SystemExit(f"could not clone {repo} at {ref} or main")
     print(repo, subprocess.run(["git", "-C", dest, "log", "--oneline", "-1"], capture_output=True, text=True).stdout.strip())
 
 
