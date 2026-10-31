@@ -17,7 +17,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor
 
 # drive.py replaces the next line with the run settings.
 EMBEDDED_CONFIG = None
@@ -25,6 +27,21 @@ EMBEDDED_CONFIG = None
 ORG = "https://github.com/amasat01"
 SITE_REPO = "amasat01.github.io"
 FAMILY = ("raptor-eagle", "raptor-hawk", "jax", "jaxlib", "cupy-cuda12x", "cupy-cuda13x", "torch")
+
+
+def gpu_slots():
+    """The GPUs this run may use: the ``CUDA_VISIBLE_DEVICES`` it was given, else every GPU ``nvidia-smi -L`` lists."""
+    given = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if given is not None:
+        return [g for g in given.split(",") if g.strip()]
+    r = sh("nvidia-smi", "-L", capture=True)
+    return [str(i) for i, ln in enumerate(r.stdout.splitlines()) if ln.startswith("GPU ")] if r.returncode == 0 else []
+
+
+def slot_env(gpu, slots):
+    """One worker's share: its own GPU and an equal share of the CPU cores."""
+    cores = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else (os.cpu_count() or 1)
+    return {"CUDA_VISIBLE_DEVICES": gpu, "OMP_NUM_THREADS": str(max(1, cores // max(1, len(slots))))}
 
 
 def header(text):
@@ -163,7 +180,7 @@ def install(cfg, py, use_uv, work):
     pre = ["--pre"] if cfg.pre else []
     pin = f"=={cfg.version}" if cfg.version else ""
     others = ["jax[" + cu + "]", "torch", "warp-lang", "numpy", f"cupy-cuda{cfg.cuda}x",
-              "pytest", "nbclient", "ipykernel", "nbformat", "matplotlib"]
+              "pytest", "pytest-xdist", "nbclient", "ipykernel", "nbformat", "matplotlib"]
     if cfg.source in ("pypi", "wheel"):
         rc = pip(py, use_uv, *install_args(cfg, py, cu, pre, pin, others))
     else:
@@ -191,7 +208,7 @@ def install(cfg, py, use_uv, work):
         rc = rc or pip(py, use_uv, "--no-build-isolation", src / "eagle" / "python")
         rc = rc or pip(py, use_uv, "--no-build-isolation", src / "hawk")
         rc = rc or pip(py, use_uv, *pre, *torch_index(cfg), f"jax[{cu}]", "torch", "warp-lang", "numpy", f"cupy-cuda{cfg.cuda}x",
-                       "pytest", "nbclient", "ipykernel", "nbformat", "matplotlib")
+                       "pytest", "pytest-xdist", "nbclient", "ipykernel", "nbformat", "matplotlib")
     if rc != 0:
         raise SystemExit("install failed (see the pip output above)")
 
@@ -273,9 +290,13 @@ def run_tests(py, eagle_src, work):
     pydir.mkdir()
     shutil.copytree(eagle_src / "python" / "tests", pydir / "tests")
     shutil.copy2(eagle_src / "python" / "conftest.py", pydir)
-    runs = (("interop_matrix", ["tests", "-m", "interop_matrix and not repo_local"]),
+    slots = gpu_slots()
+    spread = [a for g in slots for a in ("--tx", "popen//" + "//".join(f"env:{k}={v}" for k, v in slot_env(g, slots).items()))]
+    spread = ["--dist", "loadfile", *spread] if len(slots) > 1 else []
+    runs = (("interop_matrix", ["tests", "-m", "interop_matrix and not repo_local", *spread]),
             ("jax", ["tests/test_interop_jax.py", "-m", "not repo_local"]),
-            ("warp", ["tests/test_frameworks_warp.py", "-m", "not repo_local"]))
+            ("warp", ["tests/test_frameworks_warp.py", "-m", "not repo_local"]),
+            ("gpu2", ["tests", "-m", "gpu2 and not repo_local"]))   # every GPU visible: these rows need two
     total = {"tests": 0, "failures": 0, "errors": 0, "skipped": 0, "failed": []}
     rcs = {}
     for name, sel in runs:
@@ -323,7 +344,9 @@ def table_of(rows):
 
 
 def run_notebooks(cfg, py, work, roots, result, out):
-    """Every notebook of the checkouts in ``roots`` (repo name -> path; 'site' = the site repository), one by one.
+    """Every notebook of the checkouts in ``roots`` (repo name -> path; 'site' = the site repository): the first alone
+    (its setup cell installs the GPU extras the rest reuse), then one per GPU at a time with an equal share of the CPU
+    cores, and last, alone with every GPU, those that place work on GPUs themselves (they set CUDA_VISIBLE_DEVICES).
     result.json is rewritten after each one, so a kernel that dies still shows what ran."""
     sys.path.insert(0, str(roots["site"]))  # raptor_docs, the family's docs tooling, lives in the site checkout
     from raptor_docs.nb import discover, hosted as nb_hosted, run_gate as nb_run_gate
@@ -343,14 +366,45 @@ def run_notebooks(cfg, py, work, roots, result, out):
         os.environ.setdefault("KAGGLE_KERNEL_RUN_TYPE", "Interactive")
     rows = []
     result.update(status="incomplete", reason="notebooks still running", discovered=len(todo), notebooks=rows)
-    for repo, path, rel in todo:
-        header(f"notebook: {repo}/{rel}")
-        status, msg, tail, secs = nb_hosted.run_notebook(py, work / "kernels", path, dict(os.environ), cfg.nb_timeout)
-        print(f"{status} {repo}/{rel} [{secs} s] {msg}", flush=True)
-        if tail:
-            print("\n".join(tail), flush=True)
-        rows.append({"name": f"{repo}/{rel}", "status": status, "seconds": secs, "reason": msg, "error": tail})
-        write_result(out, result, quiet=True)
+    lock = threading.Lock()
+
+    def one(item, extra):
+        repo, path, rel = item
+        status, msg, tail, secs = nb_hosted.run_notebook(py, work / "kernels", path, dict(os.environ, **extra),
+                                                         cfg.nb_timeout)
+        with lock:   # one notebook's report at a time, and result.json after each
+            header(f"notebook: {repo}/{rel}" + (f" (GPU {extra['CUDA_VISIBLE_DEVICES']})" if extra else ""))
+            print(f"{status} {repo}/{rel} [{secs} s] {msg}", flush=True)
+            if tail:
+                print("\n".join(tail), flush=True)
+            rows.append({"name": f"{repo}/{rel}", "status": status, "seconds": secs, "reason": msg, "error": tail})
+            write_result(out, result, quiet=True)
+
+    slots = gpu_slots()
+    whole = [t for t in todo if "CUDA_VISIBLE_DEVICES" in t[1].read_text(encoding="utf-8")]
+    shared = [t for t in todo if t not in whole]
+    for item in shared[:1]:
+        one(item, {})
+    if len(slots) > 1:
+        free = list(slots)
+        free_lock = threading.Lock()
+
+        def on_a_gpu(item):
+            with free_lock:
+                gpu = free.pop()
+            try:
+                one(item, slot_env(gpu, slots))
+            finally:
+                with free_lock:
+                    free.append(gpu)
+
+        with ThreadPoolExecutor(len(slots)) as pool:
+            list(pool.map(on_a_gpu, shared[1:]))
+    else:
+        for item in shared[1:]:
+            one(item, {})
+    for item in whole:
+        one(item, {})
     server.shutdown()
     counts = table_of(rows)
     ok = counts["FAIL"] == 0 and counts["PASS"] > 0 and len(rows) == len(todo)
