@@ -34,6 +34,21 @@ examples
 - [Zero-copy interop](examples/zero_copy_interop): one kernel fed from and handed back into NumPy, CuPy and PyTorch arrays with no copy.
 - [C++ examples](examples): complete, tested C++ programs and how their gate runs.
 
+## Keep the state at every step
+
+`eagle.simulate` returns the final state. To keep every step, build the run once with `sim = eagle.simulation(model, ..., max_steps=1)` and call `sim.run()` in a loop: each call advances the state in place by one step, so the history is what you copy after each call. Call `sim.reset()` and re-seed the state to start over. The result is the same as `eagle.simulate(..., max_steps=k)` for each `k`.
+
+## Direct calls and bound planes
+
+- A direct kernel call takes `returns="numpy"` (or `"cupy"`, `"torch"`, `"jax"`), as `run` does.
+- A kernel parameter declared `Param[Matrix[2, 2]]` (or `Vector`, `Table`) is one value shared by every lane. `run`, `bind` and a direct call take it in its own shape and refuse another by name.
+- An `Index` plane has the width the kernel declares (`int32` unless `Index[int64]`). `bind` and `rebind` refuse another width by name and say which to pass; `run` converts on each call.
+- Opaque notes a kernel's author put on a plane (`hawk.Meta`) are on the loaded kernel as `plane_meta`, by plane name.
+
+## Failures
+
+A device out-of-memory error says which kernel needed what: the largest local memory per thread among the graph's kernels, and the GPU's free and total memory at the moment of failure.
+
 ## Deploy
 
 Take a compiled kernel out of Python.

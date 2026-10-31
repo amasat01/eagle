@@ -25,7 +25,7 @@ import math
 
 from .abi import DEVICE_CPU, check_aether_abi
 from .roles import check_launch_certified_pattern, classify_arg
-from .sidecar import PARAMS_SCHEMA_KEY, read_launch, read_params, validate_sidecar
+from .sidecar import PARAMS_SCHEMA_KEY, read_launch, read_params, read_plane_meta, validate_sidecar
 
 
 class GRefMirror(ctypes.Structure):
@@ -101,6 +101,8 @@ class HostPluginLibrary:
         #: The launch declaration, as :class:`eagle.loaded.LoadedKernel` carries it.
         (self.lane_space, self.block, self.plane_axes,
          self.sorted_inputs, self.box) = read_launch(sidecar, name=label)
+        #: The opaque notes on planes (``plane_meta``), by plane name.
+        self.plane_meta = read_plane_meta(sidecar, name=label)
         # The manifest-bypassing door (C++ ``add_plugin``'s mirror), so it
         # runs its own launch certification.
         check_launch_certified_pattern(
