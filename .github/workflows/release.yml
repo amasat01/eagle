@@ -46,6 +46,8 @@ name: Release
 
 # Pull requests only: main receives the tested tree, nothing re-runs there.
 on:
+  schedule:
+    - cron: "23 4 * * 1"   # weekly on main: every remembered pass runs again
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened, labeled, unlabeled]
@@ -554,21 +556,32 @@ jobs:
         with: {repo: raptor, path: raptor, pins: eagle/.github/companions, token: "${{ secrets.SIBLING_READ_TOKEN || github.token }}"}
       - uses: ./eagle/.github/actions/companion
         with: {repo: aether, path: aether, pins: eagle/.github/companions, token: "${{ secrets.SIBLING_READ_TOKEN || github.token }}"}
+      - id: memo
+        uses: ./eagle/.github/actions/memo
+        with:
+          name: release-sdist-cuda-wheel
+          args: >-
+            --tree eagle --skip docs/ --skip CHANGELOG.md --skip .github/ --tree raptor --skip docs/ --skip CHANGELOG.md --skip README.md --skip .github/ --tree aether --skip docs/ --skip CHANGELOG.md --skip README.md --skip .github/ --tree eagle --only .github/actions/ --only .github/ci_digest.sh --only .github/cuda_redist.sh --only .github/companions --tag eagle --file eagle/.github/workflows/release.yml
       - uses: actions/download-artifact@v8
         with:
           name: dist-${{ needs.build.outputs.tree }}
           path: dist
+        if: steps.memo.outputs.run == 'true'
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+        if: steps.memo.outputs.run == 'true'
       - run: sudo apt-get update && sudo apt-get install -y g++-13
+        if: steps.memo.outputs.run == 'true'
       # compile-only CUDA 12.9 toolchain (nvcc, headers, driver stub, CCCL) from the pinned redist archives; no driver, no GPU
       - uses: ./eagle/.github/actions/cuda
+        if: steps.memo.outputs.run == 'true'
       # raptor-core: PyPI when the checkout's version is released, else built from the sibling raptor checkout
       - id: sib
         uses: ./eagle/.github/actions/install-siblings
         with:
           siblings: raptor-core=raptor aether-dsc=aether/dsc
+        if: steps.memo.outputs.run == 'true'
       - name: Build the wheel from the sdist, install it, import eagle.cuda
         env:
           CC: gcc-13
@@ -581,6 +594,12 @@ jobs:
           # shellcheck disable=SC2086  # the pins are separate arguments
           sv/bin/python -m pip install --quiet --find-links "$SIB_DIR" $SIB_PINS wheelhouse/*.whl
           cd "$RUNNER_TEMP" && "$GITHUB_WORKSPACE/sv/bin/python" -c "import eagle, eagle.cuda; print(eagle.__version__, eagle.cuda)"
+        if: steps.memo.outputs.run == 'true'
+      - if: success() && steps.memo.outputs.run == 'true'
+        uses: ./eagle/.github/actions/memo-save
+        with:
+          name: release-sdist-cuda-wheel
+          digest: ${{ steps.memo.outputs.digest }}
 
   test-wheel:
     needs: build
@@ -603,10 +622,18 @@ jobs:
         with: {repo: raptor, path: raptor, pins: eagle/.github/companions, token: "${{ secrets.SIBLING_READ_TOKEN || github.token }}"}
       - uses: ./eagle/.github/actions/companion
         with: {repo: aether, path: aether, pins: eagle/.github/companions, token: "${{ secrets.SIBLING_READ_TOKEN || github.token }}"}
+      - id: memo
+        uses: ./eagle/.github/actions/memo
+        with:
+          name: release-test-wheel
+          args: >-
+            --tree eagle --skip docs/ --skip CHANGELOG.md --skip .github/ --tree raptor --skip docs/ --skip CHANGELOG.md --skip README.md --skip .github/ --tree aether --skip docs/ --skip CHANGELOG.md --skip README.md --skip .github/ --tree eagle --only .github/actions/ --only .github/ci_digest.sh --only .github/cuda_redist.sh --only .github/companions --tag eagle --file eagle/.github/workflows/release.yml
+          extra: ${{ toJSON(matrix) }}
       - uses: actions/download-artifact@v8
         with:
           name: dist-${{ needs.build.outputs.tree }}
           path: dist
+        if: steps.memo.outputs.run == 'true'
       - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
@@ -615,10 +642,11 @@ jobs:
           cache-dependency-path: |
             eagle/python/pyproject.toml
             raptor/pyproject.toml
+        if: steps.memo.outputs.run == 'true'
 
       # aether-dsc builds from its sibling checkout until its version is on PyPI; building it on macOS needs a libomp to
       # copy into its package (Apple's clang has none). This is a build-time input of aether only: eagle's wheel ships none.
-      - if: runner.os == 'macOS'
+      - if: steps.memo.outputs.run == 'true' && (runner.os == 'macOS')
         run: |
           brew list libomp >/dev/null 2>&1 || brew install libomp
           { echo "OpenMP_ROOT=$(brew --prefix libomp)"; echo "CMAKE_PREFIX_PATH=$(brew --prefix libomp)"; } >> "$GITHUB_ENV"
@@ -629,9 +657,10 @@ jobs:
         uses: ./eagle/.github/actions/install-siblings
         with:
           siblings: raptor-core=raptor aether-dsc=aether/dsc
+        if: steps.memo.outputs.run == 'true'
 
       - name: Assert this runner has no NVIDIA driver (the precondition this leg is for)
-        if: runner.os == 'Linux'
+        if: steps.memo.outputs.run == 'true' && (runner.os == 'Linux')
         run: |
           if ldconfig -p | grep -q 'libcuda\.so\.1'; then echo "libcuda.so.1 present"; exit 1; fi
 
@@ -649,6 +678,7 @@ jobs:
           pip install --quiet --prefer-binary --find-links "$SIB_DIR" $SIB_PINS numpy pytest pytest-xdist -c eagle/ci/constraints.txt
           pip install --quiet --no-index --only-binary=raptor-eagle --find-links dist raptor-eagle
           pip check
+        if: steps.memo.outputs.run == 'true'
 
       - name: The installed wheel imports and refuses device work, typed
         run: |
@@ -675,9 +705,10 @@ jobs:
               assert "libcuda" not in maps and "libcudart" not in maps
           print("OK: host-only CPU smoke, CUDA correctly unavailable")
           EOF
+        if: steps.memo.outputs.run == 'true'
 
       - name: The self-test reports "no driver" (exit 2) on a runner without a GPU
-        if: runner.os == 'Linux'
+        if: steps.memo.outputs.run == 'true' && (runner.os == 'Linux')
         run: |
           . venv/bin/activate
           cd "$RUNNER_TEMP"
@@ -688,7 +719,7 @@ jobs:
       # One OpenMP runtime: every OpenMP reference of the installed eagle and aether extensions is @rpath/libomp.dylib
       # (resolved into aether/_omp), never an absolute Homebrew path: a second runtime in the process aborts it.
       - name: OpenMP references are @rpath/libomp.dylib only, signatures valid
-        if: runner.os == 'macOS'
+        if: steps.memo.outputs.run == 'true' && (runner.os == 'macOS')
         run: |
           . venv/bin/activate
           sp=$(python -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")
@@ -712,13 +743,14 @@ jobs:
           cd "$RUNNER_TEMP/suite"
           RAPTOR_ROOT="${GITHUB_WORKSPACE}/raptor" python -m pytest tests -q -p no:cacheprovider -W error::pytest.PytestUnknownMarkWarning \
             -m "not gpu and not gpu2 and not torch and not interop_matrix and not repo_local" -n auto --dist loadfile
+        if: steps.memo.outputs.run == 'true'
 
       # Free-threaded legs only (3.14t / 3.15t): the ft rows against the INSTALLED
       # wheel, then the whole suite with RuntimeWarning as an error (a re-enabled
       # GIL is that warning). Zero collected ft rows fails the leg, and the
       # interpreter must be GIL-off by default with no override set.
       - name: ft-stress (ft rows + full suite, -W error::RuntimeWarning)
-        if: endsWith(matrix.python-version, 't')
+        if: steps.memo.outputs.run == 'true' && (endsWith(matrix.python-version, 't'))
         run: |
           set -euo pipefail
           . venv/bin/activate
@@ -733,6 +765,11 @@ jobs:
           [ "$N" -gt 0 ] || { echo "ft selection collected zero tests"; exit 1; }
           python -m pytest tests -m "ft and not repo_local" -q -rs -p no:cacheprovider -W error::RuntimeWarning -W error::pytest.PytestUnknownMarkWarning
           python -m pytest tests -q -p no:cacheprovider -W error::RuntimeWarning -W error::pytest.PytestUnknownMarkWarning -m "not gpu and not gpu2 and not torch and not interop_matrix and not repo_local" -n auto --dist loadfile
+      - if: success() && steps.memo.outputs.run == 'true'
+        uses: ./eagle/.github/actions/memo-save
+        with:
+          name: release-test-wheel
+          digest: ${{ steps.memo.outputs.digest }}
 
   docs:
     runs-on: ubuntu-24.04
@@ -871,18 +908,29 @@ jobs:
         with: {repo: hawk, path: hawk, pins: eagle/.github/companions, token: "${{ secrets.SIBLING_READ_TOKEN || github.token }}"}
       - uses: ./eagle/.github/actions/companion
         with: {repo: amasat01.github.io, path: site, pins: eagle/.github/companions, token: "${{ secrets.SIBLING_READ_TOKEN || github.token }}"}
+      - id: memo
+        uses: ./eagle/.github/actions/memo
+        with:
+          name: release-notebooks
+          args: >-
+            --tree eagle --skip CHANGELOG.md --skip .github/ --tree aether --skip CHANGELOG.md --skip .github/ --tree raptor --skip CHANGELOG.md --skip .github/ --tree hawk --skip CHANGELOG.md --skip .github/ --tree site --skip CHANGELOG.md --skip .github/ --tree eagle --only .github/actions/ --only .github/ci_digest.sh --only .github/cuda_redist.sh --only .github/companions --tag eagle --file eagle/.github/workflows/release.yml
       - uses: actions/download-artifact@v8
         with:
           name: dist-${{ needs.build.outputs.tree }}
           path: dist
+        if: steps.memo.outputs.run == 'true'
       # the Colab lock is Python 3.13
       - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
+        if: steps.memo.outputs.run == 'true'
       - run: sudo apt-get update && sudo apt-get install -y g++-13
+        if: steps.memo.outputs.run == 'true'
       - run: python -m pip install --quiet uv ./site
+        if: steps.memo.outputs.run == 'true'
       - name: Discovery (every notebook, with its gate class)
         run: python -m raptor_docs.nb hosted --list --repos all --eagle eagle --hawk hawk --raptor raptor --aether aether --site site
+        if: steps.memo.outputs.run == 'true'
       - name: Run every notebook on the CPU
         env:
           CC: gcc-13
@@ -891,13 +939,19 @@ jobs:
           python -m raptor_docs.nb hosted --python "$(which python)" --lock colab --repos all --timeout 900 \
             --eagle eagle --hawk hawk --raptor raptor --aether aether --site site \
             --work "$RUNNER_TEMP/nbh" --cleanup --json notebooks-cpu.json --source built --eagle-wheels dist
+        if: steps.memo.outputs.run == 'true'
       - name: Keep the per-notebook results
-        if: always()
+        if: always() && steps.memo.outputs.run == 'true'
         uses: actions/upload-artifact@v7
         with:
           name: notebooks-cpu
           path: notebooks-cpu.json
           if-no-files-found: ignore
+      - if: success() && steps.memo.outputs.run == 'true'
+        uses: ./eagle/.github/actions/memo-save
+        with:
+          name: release-notebooks
+          digest: ${{ steps.memo.outputs.digest }}
 
   # Whether the Kaggle GPU jobs run: the pull request carries the label `release`, or it changes GPU or interop code.
   kaggle-plan:
@@ -936,7 +990,7 @@ jobs:
   # leg stays green and says INCONCLUSIVE, and the kaggle job labels the pull request `gpu-inconclusive`: merging
   # without the GPU run is the maintainer's call. A failing test or notebook is always red. A leg that passed is
   # remembered (actions cache) under a digest of the files a leg can read (not workflows, tools, top-level text or docs
-  # prose), so a push that changes only those skips it.
+  # prose), so a push that changes only those skips it; a tests leg also ignores the notebooks and a notebooks leg the test files.
   # GPU_BACKEND (repository variable, default kaggle) picks the runner.
   kaggle-leg:
     needs: [build, kaggle-plan]
@@ -980,13 +1034,16 @@ jobs:
         env:
           SIB_PINS: ${{ steps.sibpins.outputs.pins }}
           SIB_BUILT: ${{ steps.sibpins.outputs.built }}
+          MODE: ${{ matrix.mode }}
         run: |
+          # a tests leg never reads the notebooks, a notebooks leg never reads the test files: an edit to either reruns only its own legs
+          case "$MODE" in tests) UNREAD='\sdocs/.*\.ipynb$' ;; *) UNREAD='\spython/tests/' ;; esac
           trees=""
           for p in $SIB_BUILT; do
             case $p in raptor-core) d=raptor ;; aether-dsc) d=aether ;; raptor-hawk) d=hawk ;; esac
             trees="$trees $(git -C $d rev-parse 'HEAD^{tree}')"
           done
-          digest=$( { echo "$SIB_PINS$trees"; git ls-tree -r HEAD | grep -vE $'\t(\\.github/workflows/|tools/|ThirdPartyLicenses/|[^/]+\\.(md|cff)$|LICENSE$|NOTICE$|docs/.*\\.(rst|md|css|js|html|svg|png|jpg)$)'; } | sha256sum | cut -c1-16)
+          digest=$( { echo "$SIB_PINS$trees"; git ls-tree -r HEAD | grep -vE $'\t(\\.github/workflows/|tools/|ThirdPartyLicenses/|[^/]+\\.(md|cff)$|LICENSE$|NOTICE$|docs/.*\\.(rst|md|css|js|html|svg|png|jpg)$)' | grep -vE "$UNREAD"; } | sha256sum | cut -c1-16)
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
       - id: pass
         uses: actions/cache/restore@v6
