@@ -970,7 +970,9 @@ jobs:
         run: |
           set -euo pipefail
           run=false
-          if [ "$LABELLED" = true ]; then
+          if [ -z "$PR" ]; then
+            echo "not a pull request (the weekly run): the Kaggle legs run on pull requests only"
+          elif [ "$LABELLED" = true ]; then
             run=true; echo "label release"
           else
             # the files API, not `gh pr diff`: GitHub refuses a text diff over 20000 lines (a release pull request)
