@@ -59,5 +59,5 @@ def prefix(x: Scalar, y: Mutable[Scalar]):
 
 
 @hawk.kernel
-def keyed_sum(key: Index, v: Scalar, rs: Mutable["node"]):
+def keyed_sum(key: Index, v: Scalar, rs: Mutable["node"]):  # noqa: F821  (a named extent, not a name)
     hawk.scatter(rs)[key] += v
