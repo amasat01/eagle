@@ -263,8 +263,12 @@ def test_mixed_float_dtypes_promote_and_others_are_refused(ops):
 
     with jax.default_device(_device("cpu")):
         x, _, e = _drag_make(4, np.float32, np.random.default_rng(0))
-        with pytest.warns(eagle.PerformanceWarning, match="promoted to float64"):
+        # a uniform follows the sample planes' float mode: cd is copied to float32
+        with pytest.warns(eagle.PerformanceWarning, match="'cd' is float64; promoted to float32"):
             ops["drag"](x, jnp.asarray([0.3], jnp.float64), e["t"])
+        # two sample planes: the wider float wins
+        with pytest.warns(eagle.PerformanceWarning, match="'v' is float32; promoted to float64"):
+            ops["vec_sum"](x, x.astype(jnp.float64))
         with pytest.raises(TypeError, match="float32 or float64"):
             ops["vec_sum"](x.astype(jnp.int32), x.astype(jnp.int32))
 
@@ -1103,5 +1107,5 @@ def test_a_jax_node_name_is_the_vjps_key():
     with pytest.raises(ValueError, match=r"node 'model' is opaque: pass vjps=\{'model'"):
         eagle.diff.reverse(g.record, {"model.y": np.ones(4)})
     grads = eagle.diff.reverse(g.record, {"model.y": np.ones(4)},
-                               vjps={"model": lambda primals, cts: {"w": 2.0 * cts["y"]}})
+                               vjps={"model": lambda primals, cts: {"w": 2.0 * np.from_dlpack(cts["y"])}})
     np.testing.assert_array_equal(grads["w"], np.full(4, 2.0))
