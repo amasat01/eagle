@@ -30,6 +30,7 @@ CHILD = textwrap.dedent(
     import sys, time
     import cupy as cp
     from eagle import _core
+    from eagle.frameworks.cupy import wrap_external_stream
 
     source, sink = sys.argv[1], sys.argv[2]
     hits = []
@@ -38,7 +39,7 @@ CHILD = textwrap.dedent(
         hits.append(1)
 
     s = _core.Stream(non_blocking=True)
-    es = cp.cuda.ExternalStream(s.ptr())
+    es = wrap_external_stream(s.ptr())
     side = cp.cuda.Stream(non_blocking=True)
     gate = cp.cuda.Event()
     x = cp.zeros(4)

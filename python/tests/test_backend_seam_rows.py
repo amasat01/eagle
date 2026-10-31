@@ -46,11 +46,12 @@ def test_a_raising_composer_step_surfaces_its_own_exception():
 @pytest.mark.gpu
 def test_a_consumed_launcher_refuses_reuse():
     from eagle import _core
+    from eagle.frameworks.cupy import wrap_external_stream
 
     s = _core.Stream(non_blocking=True)
     a = cp.arange(8, dtype=cp.float64)
     cap = _core.StreamCapturer(s.ptr())
-    with cp.cuda.ExternalStream(s.ptr()):
+    with wrap_external_stream(s.ptr()):
         cap.begin()
         a *= 2.0
         captured = cap.end()
@@ -68,11 +69,12 @@ def test_a_consumed_launcher_refuses_reuse():
 )
 def test_eagle_objects_follow_the_frameworks_device():
     from eagle import _core
+    from eagle.frameworks.cupy import wrap_external_stream
 
     def roundtrip(stream_ptr):
         x = cp.arange(16, dtype=cp.float64)
         cap = _core.StreamCapturer(stream_ptr)
-        with cp.cuda.ExternalStream(stream_ptr):
+        with wrap_external_stream(stream_ptr):
             cap.begin()
             x *= 3.0
             graph = cap.end()

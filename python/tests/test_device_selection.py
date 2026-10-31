@@ -88,7 +88,7 @@ def test_r1_plan_runs_on_the_planes_device_whatever_is_current(unit):
     plugin = _subject(unit, 1)
     x, _ = _planes(1)
     cp.cuda.Device(0).use()
-    out = _plan(plugin).run(x=x, a=2.0)
+    out = _plan(plugin).run(x=x, a=2.0, returns="cupy")
     assert out.device.id == 1
     np.testing.assert_array_equal(_host(out), 2.0 * _host(x))
 
@@ -97,7 +97,7 @@ def test_r2_a_kernel_loaded_on_one_device_runs_on_the_other(unit):
     plugin = _subject(unit, 0)
     x, _ = _planes(1)
     cp.cuda.Device(0).use()
-    out = _plan(plugin).run(x=x, a=2.0)
+    out = _plan(plugin).run(x=x, a=2.0, returns="cupy")
     assert out.device.id == 1
     np.testing.assert_array_equal(_host(out), 2.0 * _host(x))
 
@@ -213,7 +213,7 @@ def test_r13_a_device_keyword_matches_the_arrays_or_refuses(unit):
     x, y = _planes(1)
     cp.cuda.Device(0).use()
     p = _plan(plugin)
-    out = p.run(x=x, a=2.0, device=1)
+    out = p.run(x=x, a=2.0, device=1, returns="cupy")
     np.testing.assert_array_equal(_host(out), 2.0 * _host(x))
     with pytest.raises(BufferRefused, match=r"device=0 was asked, the arrays live on device 1"):
         p.run(x=x, y=y, a=2.0, device=0)
