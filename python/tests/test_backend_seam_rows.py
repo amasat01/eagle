@@ -377,6 +377,7 @@ def test_a_module_loads_its_function_launches_raw_and_unloads():
     module = _core.module_load(image)
     fn = _core.module_function(module, "fill")
     out = cp.zeros(8, dtype=cp.int32)
+    cp.cuda.Device().synchronize()  # the zero fill was written on cupy's stream; the raw launch below does not wait for it
     ptr, base = ctypes.c_void_p(out.data.ptr), ctypes.c_int(100)
     s = _fresh_stream()
     _core.launch_raw(fn, (1, 1, 1), (8, 1, 1), [ctypes.addressof(ptr), ctypes.addressof(base)], s.ptr())
