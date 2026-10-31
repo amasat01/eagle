@@ -180,7 +180,7 @@ def install(cfg, py, use_uv, work):
     pre = ["--pre"] if cfg.pre else []
     pin = f"=={cfg.version}" if cfg.version else ""
     others = ["jax[" + cu + "]", "torch", "warp-lang", "numpy", f"cupy-cuda{cfg.cuda}x",
-              "pytest", "pytest-xdist", "nbclient", "ipykernel", "nbformat", "matplotlib"]
+              "pytest", "nbclient", "ipykernel", "nbformat", "matplotlib"]
     if cfg.source in ("pypi", "wheel"):
         rc = pip(py, use_uv, *install_args(cfg, py, cu, pre, pin, others))
     else:
@@ -208,7 +208,7 @@ def install(cfg, py, use_uv, work):
         rc = rc or pip(py, use_uv, "--no-build-isolation", src / "eagle" / "python")
         rc = rc or pip(py, use_uv, "--no-build-isolation", src / "hawk")
         rc = rc or pip(py, use_uv, *pre, *torch_index(cfg), f"jax[{cu}]", "torch", "warp-lang", "numpy", f"cupy-cuda{cfg.cuda}x",
-                       "pytest", "pytest-xdist", "nbclient", "ipykernel", "nbformat", "matplotlib")
+                       "pytest", "nbclient", "ipykernel", "nbformat", "matplotlib")
     if rc != 0:
         raise SystemExit("install failed (see the pip output above)")
 
@@ -290,10 +290,8 @@ def run_tests(py, eagle_src, work):
     pydir.mkdir()
     shutil.copytree(eagle_src / "python" / "tests", pydir / "tests")
     shutil.copy2(eagle_src / "python" / "conftest.py", pydir)
-    slots = gpu_slots()
-    spread = [a for g in slots for a in ("--tx", "popen//" + "//".join(f"env:{k}={v}" for k, v in slot_env(g, slots).items()))]
-    spread = ["--dist", "loadfile", *spread] if len(slots) > 1 else []
-    runs = (("interop_matrix", ["tests", "-m", "interop_matrix and not repo_local", *spread]),
+    # one process for the interop rows: their conformance row tallies, in-process, that every declared row ran
+    runs = (("interop_matrix", ["tests", "-m", "interop_matrix and not repo_local"]),
             ("jax", ["tests/test_interop_jax.py", "-m", "not repo_local"]),
             ("warp", ["tests/test_frameworks_warp.py", "-m", "not repo_local"]),
             ("gpu2", ["tests", "-m", "gpu2 and not repo_local"]))   # every GPU visible: these rows need two
