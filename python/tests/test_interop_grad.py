@@ -37,7 +37,7 @@ from raptor.conformance.interop import certified_framework, register_row
 pytestmark = [
     pytest.mark.interop_matrix,
     # torch >= 2.14 deprecates torch.jit.script and warns from its own code during these rows; eagle never calls it
-    pytest.mark.filterwarnings("ignore:`torch.jit.script` is deprecated:DeprecationWarning"),
+    pytest.mark.filterwarnings("ignore:`torch.jit.script` is deprecated"),  # a DeprecationWarning or a FutureWarning, by version
 ]
 
 #: one part in a million: the falsifier's perturbation, far above the tolerances below
