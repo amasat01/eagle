@@ -301,7 +301,8 @@ def _worker_main(arm):
             sec, out = w.run()  # the verification run
             peak = max(0, cc.status_kib("VmHWM") - rss) * 1024
             np.savez(cmd["out"], **out)
-            msg = {"warm_s": sec, "host_peak_bytes": peak, "compile_s": w.compile_s}
+            live = max(0, cc.status_kib("VmRSS") - rss) * 1024
+            msg = {"warm_s": sec, "host_peak_bytes": peak, "host_live_bytes": live, "compile_s": w.compile_s}
         elif cmd["op"] == "run":
             sec, _ = w.run()
             msg = {"wall_s": sec}
@@ -359,9 +360,14 @@ def _run_n(n, reps, names, work, distribution="spread"):
                      "attempts": att, "attempt_samples_per_s": att / wall["median"],
                      "useful_flops_per_s": rc.FLOPS_PER_ATTEMPT * att / wall["median"],
                      "host_peak_bytes": setup[a]["host_peak_bytes"],
+                     "host_live_bytes": setup[a]["host_live_bytes"],
                      "compile_s_cold": (None if a in NO_COMPILE_ARMS
                                         else setup[a]["compile_s"]),
                      "slot_fill": None})
+    control = next((r for r in rows if r["arm"] == "numpy_masked"), None)
+    for r in rows:  # memory net of the NumPy control: the harness bytes every arm shares are not the arm's
+        r["host_peak_net_of_control_bytes"] = (
+            None if control is None or r is control else max(0, r["host_peak_bytes"] - control["host_peak_bytes"]))
     return rows, {"n": n, "distribution": distribution, "reference_arm": ref, "agreement": agreement, "steps": steps,
                   "load_avg_before": load_before, "load_avg_after": load_after}
 
@@ -403,6 +409,13 @@ def render_markdown(card):
                          f"| {g['max_error_over_bound']:.2e} "
                          f"| {g['samples_with_step_counts_differing_from_reference']:,} |")
     return "\n".join(lines) + "\n"
+
+
+def _cpu_slug(model):
+    """The card's file stem: the CPU model, or ``aarch64`` where /proc/cpuinfo names none (Arm)."""
+    if platform.machine() in ("aarch64", "arm64") and (not model or model.lower() in ("aarch64", "arm64", "arm")):
+        return "aarch64"
+    return re.sub(r"[^a-z0-9]+", "-", (model or "unknown-cpu").lower()).strip("-")
 
 
 def main(argv=None):
@@ -447,7 +460,7 @@ def main(argv=None):
     finally:
         shutil.rmtree(work, ignore_errors=True)
     cpu = cc.cpu_model()
-    slug = re.sub(r"[^a-z0-9]+", "-", cpu.lower()).strip("-")
+    slug = _cpu_slug(cpu)
     card = {"schema": "eagle-rk78-cpu-card/2", "toolchain": cc.toolchain(), "cpu": cpu, "cpu_slug": slug,
             "logical_cpus": os.cpu_count(), "script": SCRIPT_REL,
             "script_md5": cc.md5(__file__), "workload_script_md5": cc.md5(rc.__file__),
@@ -463,8 +476,11 @@ def main(argv=None):
             "code_lines": code_line_counts(),
             "method": {"repetitions": args.reps, "reference_arm": REFERENCE_ARM,
                        "masked_max_n": MASKED_MAX_N,
-                       "memory": "peak resident set (VmHWM) of the verification run "
-                                 "above the worker's RSS after its warm-up compile",
+                       "memory": "per phase, in the worker, after its warm-up compile: the peak resident set "
+                                 "(VmHWM) of the verification run above the RSS before it (host_peak_bytes) "
+                                 "and the RSS the run leaves live above that baseline (host_live_bytes); "
+                                 "host_peak_net_of_control_bytes subtracts the NumPy control's peak at the "
+                                 "same N (null where the control did not run)",
                        "compile": "the worker's compile time on empty caches (hawk "
                                   "host build, Numba JIT, XLA compile at N)",
                        "threads": dict(ARM_THREADS),

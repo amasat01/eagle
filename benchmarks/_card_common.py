@@ -751,12 +751,34 @@ def host_hot_loop_fp_simd_counts(binary_path, symbol_substr):
     if not blocks:
         return None
     body = "\n".join(line for block in blocks for line in block)
-    packed = len(re.findall(r"\b(?:v?(?:fmadd|fmsub|mul|add|sub)[a-z]*pd)\b", body))
-    scalar = len(re.findall(r"\b(?:v?(?:fmadd|fmsub|mul|add|sub)[a-z]*sd)\b", body))
-    return {"packed": packed, "scalar": scalar, "method": (
-        f"objdump -d --demangle; vfmadd*/vmul*/vadd*/vsub* with the pd "
-        "(packed double) vs sd (scalar double) suffix, counted only inside "
+    counts = fp_simd_counts(body)
+    return {**counts, "method": (
+        "objdump -d --demangle; x86: vfmadd*/vmul*/vadd*/vsub* with the pd (packed double) vs sd (scalar "
+        "double) suffix; aarch64: fmla/fmls/fmul/fadd/fsub/fmad/fmsb and fmadd/fmsub on .2d (NEON) or z.d "
+        "(SVE) registers are packed, on d registers scalar; counted only inside "
         f"the symbol(s) matching '{symbol_substr}'")}
+
+
+_A64_OPS = r"(?:fmla|fmls|fmul|fadd|fsub|fmad|fmsb|fnmla|fnmls|fmadd|fmsub|fnmadd|fnmsub)"
+
+
+def fp_simd_counts(asm):
+    """Packed vs scalar double-precision FP instruction counts in disassembly text: x86 (``pd`` against ``sd``
+    suffix) and aarch64 (``.2d`` NEON or ``z<n>.d`` SVE operands against ``d<n>`` scalar registers).
+    ``{"packed", "scalar", "sve"}``; ``sve`` counts the SVE share of ``packed``."""
+    packed = len(re.findall(r"\b(?:v?(?:fmadd|fmsub|mul|add|sub)[a-z0-9]*pd)\b", asm))
+    scalar = len(re.findall(r"\b(?:v?(?:fmadd|fmsub|mul|add|sub)[a-z0-9]*sd)\b", asm))
+    sve = 0
+    for m in re.finditer(r"(?m)\s" + _A64_OPS + r"\s+(.*)$", asm):
+        operands = m.group(1)
+        if re.search(r"\bz\d+\.d\b", operands):
+            packed += 1
+            sve += 1
+        elif re.search(r"\bv\d+\.2d\b", operands):
+            packed += 1
+        elif re.search(r"\bd\d+\b", operands):
+            scalar += 1
+    return {"packed": packed, "scalar": scalar, "sve": sve}
 
 
 #: 64-bit floating-point fused multiply-add results per clock per SM, by
