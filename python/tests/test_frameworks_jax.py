@@ -282,7 +282,7 @@ def test_lowering_carries_the_digest_and_no_address(ops, platform):
         text = jax.jit(lambda x, p: ops["drag"](x, p, e["t"])).lower(x, p).as_text()
     digest = _digest(ops["drag"], platform, "float64")
     assert digest in text
-    keep = ops["drag"].level.slots[("keep", platform, "float64")]
+    keep = next(v for k, v in ops["drag"].level.slots.items() if k[:3] == ("keep", platform, "float64"))
     address = getattr(keep, "host_entry", None) or keep.device_function
     assert str(address) not in text and hex(address) not in text
 
@@ -324,7 +324,7 @@ def test_a_call_on_another_gpu_is_refused_by_name(ops):
                           _digest(ops["drag"], "cuda", "float64").rsplit("cuda-", 1)[1])
         fields = eagle_jax._recipe_fields(level, level.artifact(unit), "float64")
         seam = eagle_jax._seam()
-        keep = level.slots[("keep", "cuda", "float64")]
+        keep = level.slots[("keep", "cuda", "float64", device.local_hardware_id)]
         eagle_jax._install("eagle-test/other-gpu", fields, platform="cuda", entry=seam["run"],
                            ordinal=device.local_hardware_id + 1,
                            function=keep.device_function, seam=seam)

@@ -292,7 +292,7 @@ def run_tests(py, eagle_src, work):
     shutil.copy2(eagle_src / "python" / "conftest.py", pydir)
     # one process for the interop rows: their conformance row tallies, in-process, that every declared row ran
     runs = (("interop_matrix", ["tests", "-m", "interop_matrix and not repo_local"]),
-            ("jax", ["tests/test_interop_jax.py", "-m", "not repo_local"]),
+            ("jax", ["tests/test_interop_jax.py", "tests/test_frameworks_jax.py", "-m", "not repo_local and not gpu2"]),
             ("warp", ["tests/test_frameworks_warp.py", "-m", "not repo_local"]),
             ("gpu2", ["tests", "-m", "gpu2 and not repo_local"]))   # every GPU visible: these rows need two
     total = {"tests": 0, "failures": 0, "errors": 0, "skipped": 0, "failed": []}
