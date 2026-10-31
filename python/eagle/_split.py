@@ -368,7 +368,10 @@ def _one_launch(stage, has_planes: bool) -> bool:
     values (hawk's placement), or a warp per lane (hawk's warp form: a team of 32 and nothing else)."""
     if stage.cells_in or stage.cells_out:
         return False
-    return has_planes if stage.team is None else dict(stage.team) == {"threads": 32}
+    if stage.team is None:
+        return has_planes
+    lanes = stage.team.get("lanes", 1)          # a warp per lane, a block serving ``lanes`` of them
+    return set(stage.team) <= {"threads", "lanes"} and stage.team["threads"] == 32 * lanes
 
 
 def _placement_only(bound) -> bool:
