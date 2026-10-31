@@ -12,9 +12,9 @@ would). The card written is the same schema the monolithic run writes.
 
 Usage::
 
-    passes.py perf|rk78 count nsys|memory|compile     # number of chunks
-    passes.py perf|rk78 nsys|memory|compile --index I --parts DIR [--ns ...]
-    passes.py perf|rk78 final --parts DIR --out-dir DIR [--ns ...] [--reps R]
+    passes.py rk78 count nsys|memory|compile     # number of chunks
+    passes.py rk78 nsys|memory|compile --index I --parts DIR [--ns ...]
+    passes.py rk78 final --parts DIR --out-dir DIR [--ns ...] [--reps R]
 """
 
 from __future__ import annotations
@@ -32,20 +32,19 @@ import tempfile
 _HERE_BENCH = pathlib.Path(__file__).resolve().parent.parent
 BENCH = (pathlib.Path.cwd() / "benchmarks"
          if (pathlib.Path.cwd() / "benchmarks" / "perf_card" / "perf_card.py").is_file() else _HERE_BENCH)
-CHUNK = {"perf": {"compile": 4}, "rk78": {"memory": 5, "compile": 3}}
+CHUNK = {"rk78": {"memory": 5, "compile": 3}}
 
 
 def _load_card(card):
-    sub, name = ("perf_card", "perf_card") if card == "perf" else ("perf_card", "rkf78")
-    sys.path.insert(0, str(BENCH / sub))
-    return __import__(name)
+    sys.path.insert(0, str(BENCH / "perf_card"))
+    return __import__("rkf78")
 
 
 def _chunks(mod, card, what, ns):
     if what == "nsys":
-        return len(mod.CONFIGS) if card == "perf" else len(mod.ARMS)
+        return len(mod.COMMITTED_ARMS)
     if what == "memory":
-        return len(mod.CONFIGS) if card == "perf" else math.ceil(len(mod.ARMS) / CHUNK[card]["memory"])
+        return math.ceil(len(mod.COMMITTED_ARMS) / CHUNK[card]["memory"])
     if what == "compile":
         return math.ceil(len(mod._compile_keys(ns)) / CHUNK[card]["compile"])
     raise SystemExit(f"unknown pass {what}")
@@ -79,33 +78,18 @@ def run_chunk(mod, card, what, idx, ns, parts):
         return
     _, _, _, bus = mod.cc.device_facts()
     work = pathlib.Path(tempfile.mkdtemp(prefix=f"{card}_{what}_"))
-    if card == "perf":
-        cfgs = mod.CONFIGS
-        if what == "nsys":
-            mod.CONFIGS = (cfgs[idx],)
-            out, note = mod._nsys_kernel_times(ns, work)
-            obj = {"note": note, "out": [[list(k), v] for k, v in (out or {}).items()]}
-        elif what == "memory":
-            mod.CONFIGS = (cfgs[idx],)
-            obj = mod._run_memory_pass(ns, bus)
-        else:
-            keys = mod._compile_keys(ns)
-            lo = idx * CHUNK[card]["compile"]
-            mod._compile_keys = lambda ns, arms=None: keys[lo:lo + CHUNK[card]["compile"]]
-            obj = mod._run_compile_pass(ns)
+    arms = mod.COMMITTED_ARMS
+    if what == "nsys":
+        out, note = mod._nsys_kernel_times(ns, work, (arms[idx],))
+        obj = {"note": note, "out": [[list(k), v] for k, v in (out or {}).items()]}
+    elif what == "memory":
+        lo = idx * CHUNK[card]["memory"]
+        obj = mod._run_memory_pass(ns, bus, arms[lo:lo + CHUNK[card]["memory"]])
     else:
-        arms = mod.ARMS
-        if what == "nsys":
-            out, note = mod._nsys_kernel_times(ns, work, (arms[idx],))
-            obj = {"note": note, "out": [[list(k), v] for k, v in (out or {}).items()]}
-        elif what == "memory":
-            lo = idx * CHUNK[card]["memory"]
-            obj = mod._run_memory_pass(ns, bus, arms[lo:lo + CHUNK[card]["memory"]])
-        else:
-            keys = mod._compile_keys(ns)
-            lo = idx * CHUNK[card]["compile"]
-            mod._compile_keys = lambda ns, arms=None: keys[lo:lo + CHUNK[card]["compile"]]
-            obj = mod._run_compile_pass(ns)
+        keys = mod._compile_keys(ns)
+        lo = idx * CHUNK[card]["compile"]
+        mod._compile_keys = lambda ns, arms=None: keys[lo:lo + CHUNK[card]["compile"]]
+        obj = mod._run_compile_pass(ns)
     _save(parts, name, obj)
     print(f"{card} {name}: saved", flush=True)
 
@@ -117,18 +101,12 @@ def final(mod, card, ns, parts, rest):
         out = {tuple(k): v for part in nsys for k, v in part["out"]}
         notes = list(dict.fromkeys(p["note"] for p in nsys))
         note = "; ".join(notes)
-        if card == "perf":
-            mod._nsys_kernel_times = lambda ns, work: (out, note)
-        else:
-            mod._nsys_kernel_times = lambda ns, work, names: (out, note)
+        mod._nsys_kernel_times = lambda ns, work, names: (out, note)
     else:
         flags.append("--no-nsys")
     mem = [r for part in _load(parts, "memory") for r in part]
     if mem:
-        if card == "perf":
-            mod._run_memory_pass = lambda ns, bus_id: mem
-        else:
-            mod._run_memory_pass = lambda ns, bus_id, names: mem
+        mod._run_memory_pass = lambda ns, bus_id, names: mem
     else:
         flags.append("--no-memory")
     comp = [r for part in _load(parts, "compile") for r in part]
@@ -141,7 +119,7 @@ def final(mod, card, ns, parts, rest):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("card", choices=["perf", "rk78"])
+    ap.add_argument("card", choices=["rk78"])
     ap.add_argument("what", choices=["count", "nsys", "memory", "compile", "final"])
     ap.add_argument("--index", type=int)
     ap.add_argument("--parts", type=pathlib.Path)
