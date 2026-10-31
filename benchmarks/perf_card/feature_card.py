@@ -13,7 +13,8 @@ this card times a handful of features, each on the kernel its example notebook s
 ``linalg_lane`` / ``linalg_team``
     per-lane solve + eigh at n = 8, 16, 32 and a team solve at n = 512, against NumPy and CuPy (cuSOLVER).
 ``fft``
-    no hawk FFT in this build: reported as not run, with the reason.
+    batched c2c over 1e5 x 1024 (``eagle.fft`` graph step, replayed) against cupy.fft, numpy.fft as the oracle; the
+    per-lane n = 64 butterfly is not run (hawk has no per-lane FFT in 0.7.3).
 ``rays_bvh``
     closest hit of a ray per lane against a BVH, device against host (a capability row).
 ``prefix_index_set``
@@ -473,8 +474,47 @@ def row_linalg_team(smoke, reps):
 
 
 def row_fft(smoke, reps):
-    return _not_run("fft", "hawk has no FFT in this build (the per-lane butterfly is not in 0.7.3); "
-                           "the cuFFT/CuPy baseline is therefore not paired with a hawk arm")
+    """Batched c2c over the last axis (``eagle.fft`` graph step, replayed) against cupy.fft; numpy.fft is the oracle."""
+    import numpy as np
+    import eagle
+    import eagle.fft as F
+    from eagle import arrays
+
+    count, n = (64, 1024) if smoke else (100_000, 1024)
+    rng = np.random.default_rng(5)
+    pairs = np.ascontiguousarray(rng.uniform(-1, 1, (count, n, 2)))
+    z = pairs[..., 0] + 1j * pairs[..., 1]
+    ok, graphs, outs = True, {}, {}
+    devices = ["cpu"] + (["cuda:0"] if _has_gpu() else [])
+    for dev in devices:
+        out = arrays.zeros((count, n, 2), "float64", dev)
+        graphs[dev] = eagle.Graph().add_node(F.c2c(arrays.asarray(pairs, "float64", dev), out, (1,), forward=True)).build()
+        graphs[dev].launch()
+        _sync("cuda" if dev != "cpu" else "host")
+        got = _host(out)[:8]
+        ok &= bool(np.abs(got[..., 0] + 1j * got[..., 1] - np.fft.fft(z[:8], axis=1)).max() < 1e-9 * n)
+        outs[dev] = out
+    best = devices[-1]
+
+    def eagle_arm():
+        graphs[best].launch()
+        _sync("cuda" if best != "cpu" else "host")
+    arms = {f"eagle_fft_{best}": eagle_arm, "numpy.fft": lambda: np.fft.fft(z, axis=1)}
+    note = "per-lane n = 64 butterfly: not run, hawk has no per-lane FFT in 0.7.3"
+    if _installed("cupy") and _has_gpu():
+        import cupy as cp
+
+        zc = cp.asarray(z)
+
+        def cupy_arm():
+            cp.fft.fft(zc, axis=1)
+            _cupy_sync()
+        arms["cupy.fft"] = cupy_arm
+    else:
+        note += "; cupy.fft: not installed"
+    wall = _interleaved(arms, reps)
+    row = _row("fft", count * n, "numpy.fft; cupy.fft (cuFFT) when present", wall, f"eagle_fft_{best}", note)
+    return _checked(row, ok, "eagle.fft equals numpy.fft on every device it ran on")
 
 
 # --------------------------------------------------------------------------- #
