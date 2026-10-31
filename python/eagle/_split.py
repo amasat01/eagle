@@ -363,12 +363,23 @@ def kernels_of(kernel) -> tuple:
         for st in found)
 
 
+def _one_launch(stage, has_planes: bool) -> bool:
+    """Whether the one ``stage`` of a kernel is that kernel's own launch: a stage only for the scratch planes of its wide
+    values (hawk's placement), or a warp per lane (hawk's warp form: a team of 32 and nothing else)."""
+    if stage.cells_in or stage.cells_out:
+        return False
+    if stage.team is None:
+        return has_planes
+    lanes = stage.team.get("lanes", 1)          # a warp per lane, a block serving ``lanes`` of them
+    return set(stage.team) <= {"threads", "lanes"} and stage.team["threads"] == 32 * lanes
+
+
 def _placement_only(bound) -> bool:
-    """Whether ``bound`` is one kernel that is a stage only for the scratch planes of its wide values (hawk's placement):
-    no cells, no team, nothing refilled or zeroed between launches."""
+    """Whether ``bound`` is one kernel that is a stage only for the scratch planes of its wide values or a warp per lane:
+    no cells, nothing refilled or zeroed between launches."""
     stages = bound._stages
-    return (len(stages) == 1 and stages[0].team is None and not stages[0].cells_in and not stages[0].cells_out
-            and not bound._keyed and not bound._fills and not bound._status and bool(bound._team))
+    return (len(stages) == 1 and _one_launch(stages[0], bool(bound._team))
+            and not bound._keyed and not bound._fills and not bound._status)
 
 
 def single(bound, door: str):
@@ -387,9 +398,8 @@ def single(bound, door: str):
 def refuse(plugin, door: str) -> None:
     """Refuse a split kernel at a door that launches one stage at a time."""
     stages = stages_of(plugin)
-    if len(stages) == 1 and stages[0].team is None and not (stages[0].cells_in or stages[0].cells_out) \
-            and _team_planes(plugin):
-        return   # placement only: one launch, its scratch planes bound like any other plane eagle owns
+    if len(stages) == 1 and _one_launch(stages[0], bool(_team_planes(plugin))):
+        return   # placement only, or a warp per lane: one launch, its scratch planes bound like any other plane eagle owns
     if stages:
         raise ValueError(
             f"{door}: kernel {plugin.name!r} is split in {len(stages)} stages (it reads a "
