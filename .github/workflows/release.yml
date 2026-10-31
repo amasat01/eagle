@@ -650,7 +650,7 @@ jobs:
           python -m venv venv
           . venv/bin/activate
           pip install --quiet --upgrade pip
-          pip install --quiet --prefer-binary --find-links "$SIB_DIR" $SIB_PINS numpy pytest
+          pip install --quiet --prefer-binary --find-links "$SIB_DIR" $SIB_PINS numpy pytest pytest-xdist -c eagle/ci/constraints.txt
           pip install --quiet --no-index --only-binary=raptor-eagle --find-links dist raptor-eagle
           pip check
 
@@ -715,7 +715,7 @@ jobs:
           cp -rL eagle/python/tests eagle/python/conftest.py "$RUNNER_TEMP/suite/"
           cd "$RUNNER_TEMP/suite"
           RAPTOR_ROOT="${GITHUB_WORKSPACE}/raptor" python -m pytest tests -q -p no:cacheprovider -W error::pytest.PytestUnknownMarkWarning \
-            -m "not gpu and not gpu2 and not torch and not interop_matrix and not repo_local"
+            -m "not gpu and not gpu2 and not torch and not interop_matrix and not repo_local" -n auto --dist loadfile
 
       # Free-threaded legs only (3.13t / 3.14t): the ft rows against the INSTALLED
       # wheel, then the whole suite with RuntimeWarning as an error (a re-enabled
@@ -736,7 +736,7 @@ jobs:
           echo "ft rows collected: $N"
           [ "$N" -gt 0 ] || { echo "ft selection collected zero tests"; exit 1; }
           python -m pytest tests -m "ft and not repo_local" -q -rs -p no:cacheprovider -W error::RuntimeWarning -W error::pytest.PytestUnknownMarkWarning
-          python -m pytest tests -q -p no:cacheprovider -W error::RuntimeWarning -W error::pytest.PytestUnknownMarkWarning -m "not gpu and not gpu2 and not torch and not interop_matrix and not repo_local"
+          python -m pytest tests -q -p no:cacheprovider -W error::RuntimeWarning -W error::pytest.PytestUnknownMarkWarning -m "not gpu and not gpu2 and not torch and not interop_matrix and not repo_local" -n auto --dist loadfile
 
   docs:
     runs-on: ubuntu-24.04

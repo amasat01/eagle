@@ -392,7 +392,7 @@ jobs:
       # aether and eagle headers installed, siblings from their checkouts, `pytest -m "not gpu and not interop_matrix"`
       - run: |
           make gate-py AETHER_SRC="${GITHUB_WORKSPACE}/aether" RAPTOR_SRC="${GITHUB_WORKSPACE}/raptor" \
-            SITE_SRC="${GITHUB_WORKSPACE}/site" CUDACXX="$(which nvcc)"
+            SITE_SRC="${GITHUB_WORKSPACE}/site" CUDACXX="$(which nvcc)" GATE_JOBS="$(nproc)"
         working-directory: eagle
       - if: always()
         run: ccache -s
@@ -552,7 +552,7 @@ jobs:
       # the binding build, the free-threaded checks, torch/jax/warp, the ft rows and the full suite, from the Makefile
       - run: |
           make ft-stress PYTHON=python AETHER_SRC="${GITHUB_WORKSPACE}/aether" RAPTOR_SRC="${GITHUB_WORKSPACE}/raptor" \
-            SITE_SRC="${GITHUB_WORKSPACE}/site" CUDACXX="$(which nvcc)"
+            SITE_SRC="${GITHUB_WORKSPACE}/site" CUDACXX="$(which nvcc)" GATE_JOBS="$(nproc)"
         working-directory: eagle
       - if: always()
         run: ccache -s
