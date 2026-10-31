@@ -130,8 +130,9 @@ def _tangents():
 
 
 def _row(planes, i, heads):
-    """Sample ``i`` of every batch plane, in its head shape."""
-    return {k: (v[..., i].reshape(heads[k]) if heads.get(k) != () else v[i])
+    """Sample ``i`` of every batch plane, in its head shape (a sample's column is strided in the batch: a
+    contiguous copy, as a caller passes one)."""
+    return {k: (np.ascontiguousarray(v[..., i].reshape(heads[k])) if heads.get(k) != () else v[i])
             for k, v in planes.items()}
 
 
