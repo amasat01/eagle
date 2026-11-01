@@ -1702,6 +1702,10 @@ def _fit_notes(card):
             f"records {card['workload']['graph_block']} attempts as a CUDA graph and "
             f"replays them, removing per-kernel launch cost: {w('torch_graphed')}; "
             f"eager PyTorch takes {ratio('torch_masked', 'torch_graphed')} as long."),
+        "torch_compiled": (
+            f"compiles a block of {card['workload']['graph_block']} masked attempts with "
+            f"torch.compile (reduce-overhead): {w('torch_compiled')}; eager PyTorch takes "
+            f"{ratio('torch_masked', 'torch_compiled')} as long."),
         "jax_vmap": (
             f"writes the per-sample loop directly ({lines['jax_vmap']} lines) and "
             f"compiles the whole batch into one executable: {w('jax_vmap')}."),

@@ -1051,3 +1051,20 @@ def test_rk78_card_memory_baseline_is_read_before_the_warm_up(monkeypatch):
         module, monkeypatch,
         lambda: module._memory_probe("eagle_graph", 8, "0000:00:00.0"), patches)
     _assert_baseline_before_warmup(calls, "_timed")
+
+
+def test_every_arm_has_a_fit_note(monkeypatch):
+    """'Where each tool fits' names every arm the script can run, even one
+    absent from the committed cards (an arm whose library is not installed
+    where the cards were last made).
+
+    RED: delete one arm's entry from ``rkf78._fit_notes`` and this fails
+    with a ``KeyError`` naming the arm."""
+    import importlib
+
+    monkeypatch.syspath_prepend(str(_CARD_DIR))
+    rkf78 = importlib.import_module("rkf78")
+    card = {"results": [], "ns": [1000], "arms": list(rkf78.ARMS),
+            "code_lines": {"arms": dict.fromkeys(rkf78.ARMS, 1)},
+            "workload": {"n_stages": 13, "graph_block": 16}}
+    assert set(rkf78._fit_notes(card)["arms"]) == set(rkf78.ARMS)
