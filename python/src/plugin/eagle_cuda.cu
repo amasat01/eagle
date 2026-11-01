@@ -2438,7 +2438,14 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_launch_raw(const struct eag
             if (d.grid[a] == 0 || d.block[a] == 0)
                 return; // an empty launch: nothing to enqueue
         requireDevice();
-        DeviceScope scope(resolveDevice(d.device, d.stream));
+        const int device = resolveDevice(d.device, d.stream);
+        if (d.stream != 0 && !isDefaultStream(d.stream)) {
+            const int streamOn = streamDevice(d.stream);
+            if (streamOn != device)
+                throw std::runtime_error("eagle: the stream belongs to device " + std::to_string(streamOn)
+                    + "; this launch runs on device " + std::to_string(device));
+        }
+        DeviceScope scope(device);
         ensureContext();
         static const auto launch = driverEntry12<CUresult (*)(CUfunction, unsigned, unsigned, unsigned, unsigned,
             unsigned, unsigned, unsigned, CUstream, void**, void**)>("cuLaunchKernel");

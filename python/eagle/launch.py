@@ -236,13 +236,14 @@ class SeamFunction(int):
     launch on the current stream (``args``: the ctypes PODs and :class:`~eagle.marshal.Scalar` values of
     :func:`assemble_args`)."""
 
-    __slots__ = ()
+    device = -1     # the CUDA device whose module holds this function (set where it is loaded)
 
     def __call__(self, grid, block, args):
         keep = [_BY_VALUE[a.dtype](a.value) if isinstance(a, Scalar) else a for a in args]
         grid3 = tuple(grid) + (1,) * (3 - len(grid))
         block3 = tuple(block) + (1,) * (3 - len(block))
-        _core.launch_raw(int(self), grid3, block3, [ctypes.addressof(a) for a in keep], _stream.current())
+        _core.launch_raw(int(self), grid3, block3, [ctypes.addressof(a) for a in keep], _stream.current(),
+                          device=self.device)
 
     @property
     def attributes(self) -> dict:

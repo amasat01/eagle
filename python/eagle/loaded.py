@@ -111,6 +111,7 @@ class LoadedKernel(LaunchMixin):
             if module is None:
                 module = self._modules[device] = _core.module_load(self._image, device)
             fn = self._functions[(device, name)] = SeamFunction(_core.module_function(module, name))
+            fn.device = device
         return fn
 
     def _refuse_v2_door(self, door: str) -> None:
