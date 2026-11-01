@@ -446,8 +446,10 @@ def run_notebooks(cfg, py, work, roots, result, out):
     return ok
 
 
-#: Wall-clock budget of the cards kernel (Kaggle: 15 minutes, install included); each card gets what is left.
-CARDS_BUDGET_S = 12 * 60
+#: Wall-clock budget of the cards, counted from the kernel's start (Kaggle stops it at 3 hours, install included); the
+#: margin leaves time to write result.json. Each card gets what is left.
+CARDS_BUDGET_S = 170 * 60
+KERNEL_START = time.time()
 
 
 def run_cards(py, roots, out, result):
@@ -460,9 +462,8 @@ def run_cards(py, roots, out, result):
     plan = (("perf_card", ["benchmarks/perf_card/perf_card.py", "--no-nsys", "--no-memory", "--no-compile"]),
             ("feature_card", ["benchmarks/perf_card/feature_card.py"]))
     result["cards"] = []
-    t_start = time.time()
     for name, argv in plan:
-        left = CARDS_BUDGET_S - (time.time() - t_start)
+        left = CARDS_BUDGET_S - (time.time() - KERNEL_START)
         t0 = time.time()
         try:
             rc = subprocess.run([str(py), *argv, "--out-dir", str(cards_out)], cwd=eagle, env=env,
