@@ -89,6 +89,7 @@ Reproduce (from the eagle repository root)::
 from __future__ import annotations
 
 import argparse
+import gc
 import importlib.util
 import json
 import math
@@ -106,6 +107,9 @@ HERE = pathlib.Path(__file__).resolve().parent
 if str(HERE.parent) not in sys.path:
     sys.path.insert(0, str(HERE.parent))  # benchmarks/: the cards' shared helpers
 import _card_common as cc  # noqa: E402
+
+# JAX reserves 75 % of the GPU when it starts; the arms of a cell share the device, so it takes what it uses
+os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
 SCRIPT_REL = "benchmarks/perf_card/rkf78.py"
 
@@ -1866,6 +1870,8 @@ def main(argv=None):
             print(f"{dist} N={n:>8,} fastest={best['arm']} "
                   f"({time.perf_counter() - t0:.1f}s)", flush=True)
         del arms
+        gc.collect()
+        cc.trim_pools()  # the next N's arms start from an empty device
 
     def cell_mhz(key):
         return cells[key][1]["gpu_state_during"].get("sm_clock_mhz_median")

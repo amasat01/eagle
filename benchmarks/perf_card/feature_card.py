@@ -616,9 +616,10 @@ def row_mpi_partition(smoke, reps):
     done = subprocess.run(["mpirun", "--allow-run-as-root", "-n", "2", sys.executable, __file__, "--mpi-worker",
                            "1000000" if not smoke else "4096", str(reps)], capture_output=True, text=True, timeout=600)
     if done.returncode:
-        # mpirun frames its messages in lines of dashes: report the last line that says something
-        said = [ln.strip() for ln in done.stderr.splitlines() if ln.strip().strip("-")]
-        last = (said or ["no output"])[-1][:200]
+        # mpirun frames its own messages in lines of dashes and ends with its exit summary: report a rank's
+        # error line when there is one, else the last line that says something
+        said = [ln.strip() for ln in (done.stderr + done.stdout).splitlines() if ln.strip().strip("-")]
+        last = ([ln for ln in said if "Error" in ln] or said or ["no output"])[-1][:200]
         return _not_run("mpi_partition", f"the two-rank run failed (rc {done.returncode}): {last}")
     walls = json.loads(done.stdout.strip().splitlines()[-1])
     wall = {a: cc.median_iqr(v) for a, v in walls.items()}
