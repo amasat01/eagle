@@ -75,6 +75,8 @@ def _planes(device):
 
 
 def _host(arr):
+    if isinstance(arr.device, str):  # an eagle.Array ("cuda:N"): view it through cupy
+        arr = cp.from_dlpack(arr)
     with cp.cuda.Device(arr.device.id):
         cp.cuda.Device().synchronize()
         return cp.asnumpy(arr)
@@ -318,7 +320,8 @@ def test_r19_backend_entries_follow_their_memory_whatever_is_current(unit):
     _core.memcpy(dst.data.ptr, z.data.ptr, z.nbytes, _core.COPY_D2D, 0)
     eagle.Graph().add_node(eagle.reduce(z, total)).build().launch()
     bound = _plan(plugin).bind(x=x, y=y, a=2.0)
-    assert _core.run_device(plugin.device_function, list(bound._addrs), bound.partitions[0], stream=0) == 1
+    # a raw CUfunction does not say which GPU it belongs to: its caller names the device (eagle's own callers do)
+    assert _core.run_device(plugin.device_function, list(bound._addrs), bound.partitions[0], stream=0, device=0) == 1
     _core.memset_device(dst.data.ptr, 8 * 32, 0)
     cp.cuda.Device(0).synchronize()
     np.testing.assert_array_equal(_host(dst), np.r_[np.zeros(32), np.ones(32)])
