@@ -616,7 +616,8 @@ def row_mpi_partition(smoke, reps):
     done = subprocess.run(["mpirun", "--allow-run-as-root", "-n", "2", sys.executable, __file__, "--mpi-worker",
                            "1000000" if not smoke else "4096", str(reps)], capture_output=True, text=True, timeout=600)
     if done.returncode:
-        return _not_run("mpi_partition", f"the two-rank run failed (rc {done.returncode})")
+        last = (done.stderr.strip().splitlines() or ["no output"])[-1][:200]
+        return _not_run("mpi_partition", f"the two-rank run failed (rc {done.returncode}): {last}")
     walls = json.loads(done.stdout.strip().splitlines()[-1])
     wall = {a: cc.median_iqr(v) for a, v in walls.items()}
     return _row("mpi_partition", 4096 if smoke else 1_000_000, "the same plan on one rank", wall, "one_rank")
@@ -661,8 +662,9 @@ def render_markdown(card):
             if r.get("checks"):
                 lines.append(f"| {r['row']} | – | check: {next(iter(r['checks']))} | {next(iter(r['checks'].values()))} | – |")
             for a, w in r["wall_s"].items():
+                spread = cc.fmt_time(w["iqr"]) if len(w["samples"]) > 1 else "–"  # one value has no spread
                 lines.append(f"| {r['row']} | {r['n']:,} | {a} | {cc.fmt_time(w['median'])} "
-                             f"({cc.fmt_time(w['iqr'])}) | {r['ratio_to_reference'][a]:.3g}x |")
+                             f"({spread}) | {r['ratio_to_reference'][a]:.3g}x |")
     return "\n".join(lines) + "\n"
 
 
