@@ -283,3 +283,21 @@ def test_r17_a_parameter_named_device_is_refused_at_plan_build(unit):
     clash = SimpleNamespace(**{**vars(plugin), "arg_spec": spec})
     with pytest.raises(ValueError, match=r"parameter named 'device' clashes with the device= keyword"):
         _plan(clash)
+
+
+def test_r18_a_simulation_resets_and_reruns_on_its_planes_device_whatever_is_current():
+    """JAX leaves another device current when it starts; a simulation's reset and rerun still use its planes'."""
+    from test_simulate import _osc_batch, sim_osc
+
+    with cp.cuda.Device(1):
+        a = _osc_batch(cp)
+        x0, v0 = a["x"].copy(), a["v"].copy()
+        sim = eagle.simulation(sim_osc, omega=a["omega"], t_end=a["t_end"], dt=1e-3,
+                               x=a["x"], v=a["v"], t=a["t"], max_steps=5000)
+        first = _host(sim.run()["x"])
+        a["x"][...], a["v"][...], a["t"][...] = x0, v0, 0.0
+    cp.cuda.Device(0).use()
+    sim.reset()
+    again = sim.run()
+    np.testing.assert_array_equal(_host(again["x"]), first)
+    assert int(_host(again.finished).sum()) == x0.size

@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from . import _core, arrays
+from . import _core, _stream, arrays
 from ._backend import BackendUnavailable
 
 
@@ -62,7 +62,9 @@ def synchronize() -> None:
 def zero(xp, array, stream, nbytes=None):
     """Zero ``array`` (or its first ``nbytes``) on ``stream`` (a raw handle): a memset node under capture."""
     if array.device.startswith("cuda") and array.is_contiguous:
-        _core.memset_device(array.ptr, array.nbytes if nbytes is None else nbytes, stream)
+        # the legacy stream belongs to the current device, which another library may have moved: use the array's
+        with _stream.on_device(int(array.device.split(":")[1]) if stream in (0, _stream.LEGACY) else None):
+            _core.memset_device(array.ptr, array.nbytes if nbytes is None else nbytes, stream)
         return
     if nbytes is not None:
         array = array.ravel().view(arrays.uint8)[:nbytes]
