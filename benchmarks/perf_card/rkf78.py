@@ -1375,7 +1375,11 @@ _MEMORY_METHOD = (
 def _probe_arm(arm, n, compiled=None):
     """One arm for a probe process (an eagle arm deploys its kernel here)."""
     if arm == "jax_vmap":
-        return _make_jax_arm(n, compiled)
+        device = _current_device()
+        built = _make_jax_arm(n, compiled)
+        _use_device(device)
+        built["device"] = device
+        return built
     return _make_arms(n, (arm,))[arm]
 
 

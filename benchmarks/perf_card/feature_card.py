@@ -632,10 +632,14 @@ def _mpi_worker(n, reps):
     import eagle.exec as eexec
     from eagle import plan as eplan
 
+    import hawk
+
     ex = _interop_module()
-    x = np.ascontiguousarray(ex.seed_positions(n, 0), dtype=np.float32)
+    # the rank gather carries float64 planes only: the example's kernel, built in float64
+    x = np.ascontiguousarray(ex.seed_positions(n, 0))
     with tempfile.TemporaryDirectory() as tmp:
-        plugin = ex.device_plugin(ex.build_artifact(pathlib.Path(tmp) / "mpi", ("cuda",)), ex.KERNEL_NAME)
+        bundle = hawk.build([ex.step_kernel()], pathlib.Path(tmp) / "mpi", mode="float64", targets=("cuda",))
+        plugin = ex.device_plugin(bundle, ex.KERNEL_NAME)
         whole = eplan.plan(plugin, structure=eexec.DeviceKernel)
         ranked = eplan.plan(plugin, structure=eexec.RankPartition, inner=eexec.DeviceKernel)
         arms = {"one_rank": lambda: whole.run(x=x, k=2.0, y=np.zeros_like(x)),
