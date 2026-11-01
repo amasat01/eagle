@@ -301,3 +301,28 @@ def test_r18_a_simulation_resets_and_reruns_on_its_planes_device_whatever_is_cur
     again = sim.run()
     np.testing.assert_array_equal(_host(again["x"]), first)
     assert int(_host(again.finished).sum()) == x0.size
+
+
+def test_r19_backend_entries_follow_their_memory_whatever_is_current(unit):
+    """Planes on GPU 0, GPU 1 current (as JAX leaves it), unscoped stream: each backend entry works on GPU 0."""
+    plugin = _subject(unit, 0)
+    x, y = _planes(0)
+    with cp.cuda.Device(0):
+        z = cp.ones(64, dtype=cp.float64)
+        dst = cp.zeros(64, dtype=cp.float64)
+        total = cp.zeros(1)
+    with cp.cuda.Device(1):
+        other = cp.zeros(64, dtype=cp.float64)
+    cp.cuda.Device(1).use()
+    _core.memcpy_device(dst.data.ptr, z.data.ptr, z.nbytes, 0)
+    _core.memcpy(dst.data.ptr, z.data.ptr, z.nbytes, _core.COPY_D2D, 0)
+    eagle.Graph().add_node(eagle.reduce(z, total)).build().launch()
+    bound = _plan(plugin).bind(x=x, y=y, a=2.0)
+    assert _core.run_device(plugin.device_function, list(bound._addrs), bound.partitions[0], stream=0) == 1
+    _core.memset_device(dst.data.ptr, 8 * 32, 0)
+    cp.cuda.Device(0).synchronize()
+    np.testing.assert_array_equal(_host(dst), np.r_[np.zeros(32), np.ones(32)])
+    assert float(_host(total)[0]) == 64.0
+    np.testing.assert_array_equal(_host(y), 2.0 * _host(x))
+    with pytest.raises(Exception, match=r"(?s)devices 0 and 1|devices 1 and 0"):
+        _core.memcpy_device(dst.data.ptr, other.data.ptr, other.nbytes, 0)

@@ -1351,7 +1351,7 @@ NB_MODULE(_core, m)
 
     m.def("time_launch",
         [](std::uintptr_t entry, const std::vector<std::uintptr_t>& params, const Partition& part,
-           int reps, bool device, std::uintptr_t stream, unsigned block) {
+           int reps, bool device, std::uintptr_t stream, unsigned block, int ordinal) {
             if (!device) {
                 const std::vector<void*> p = asParams(params);
                 return eagle::exec::timeHostLaunch(reinterpret_cast<eagle::exec::HostEntryV2>(entry),
@@ -1359,7 +1359,7 @@ NB_MODULE(_core, m)
             }
             if (reps < 1) throw std::invalid_argument("time_launch: reps must be at least 1");
             std::vector<std::uint64_t> p(params.begin(), params.end());
-            auto d = makeDesc<eagle_backend_launch_desc>(-1);
+            auto d = makeDesc<eagle_backend_launch_desc>(ordinal);
             d.block = block;
             d.function = entry;
             d.params = p.data();
@@ -1373,7 +1373,7 @@ NB_MODULE(_core, m)
             return seconds;
         },
         nb::arg("entry"), nb::arg("params"), nb::arg("partition"), nb::arg("reps"),
-        nb::arg("device") = false, nb::arg("stream") = 0, nb::arg("block") = 256,
+        nb::arg("device") = false, nb::arg("stream") = 0, nb::arg("block") = 256, nb::arg("ordinal") = -1,
         "Seconds of each of `reps` launches of one entry over one partition, every repetition "
         "kept: the host team run timed with steady_clock, or (device=True; `entry` a CUfunction) "
         "a CUDA event pair around each launch on `stream` (experimental at the seam: "

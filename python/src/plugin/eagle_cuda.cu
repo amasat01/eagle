@@ -216,11 +216,17 @@ Fn driverEntry12(const char* symbol)
     return reinterpret_cast<Fn>(fn);
 }
 
+/** The unscoped streams: they belong to whichever device is current, so they say nothing about the work. */
+bool isDefaultStream(std::uint64_t stream)
+{
+    return stream == 0 || stream == reinterpret_cast<std::uint64_t>(cudaStreamLegacy)
+        || stream == reinterpret_cast<std::uint64_t>(cudaStreamPerThread);
+}
+
 /** The device @p stream belongs to; the current device for the default streams. */
 int streamDevice(std::uint64_t stream)
 {
-    if (stream == 0 || stream == reinterpret_cast<std::uint64_t>(cudaStreamLegacy)
-        || stream == reinterpret_cast<std::uint64_t>(cudaStreamPerThread))
+    if (isDefaultStream(stream))
         return currentDevice();
     // Pinned to the 12.0 ABI of each entry: asked for at this toolkit's version,
     // "cuStreamGetCtx" resolves to cuStreamGetCtx_v2 (12.5+, one more argument).
@@ -242,14 +248,41 @@ int streamDevice(std::uint64_t stream)
     return static_cast<int>(dev);
 }
 
-/** Resolve a desc's ``device`` (-1 = the stream's, or the current one). */
-int resolveDevice(int device, std::optional<std::uint64_t> stream)
+/** The device holding the device (or managed) memory at @p p, else -1 (null, host, unregistered). A managed
+ *  allocation reports attributes.device; its preferred location is ignored. */
+int pointerDevice(std::uint64_t p)
+{
+    if (p == 0)
+        return -1;
+    cudaPointerAttributes a{};
+    if (cudaPointerGetAttributes(&a, reinterpret_cast<const void*>(p)) != cudaSuccess) {
+        cudaGetLastError(); // not a pointer the runtime knows: clear the sticky error
+        return -1;
+    }
+    return a.type == cudaMemoryTypeDevice || a.type == cudaMemoryTypeManaged ? a.device : -1;
+}
+
+/** The device a call runs on: an explicit @p device >= 0; else a real @p stream's device; else the device of the
+ *  device memory in @p ptrs (two devices are refused by name); else, for a call touching none, the current one. */
+int resolveDevice(int device, std::optional<std::uint64_t> stream, std::initializer_list<std::uint64_t> ptrs = {})
 {
     if (device >= 0)
         return device;
     if (device != -1)
         throw std::invalid_argument("eagle: device must be >= 0 or -1, got " + std::to_string(device));
-    return stream ? streamDevice(*stream) : currentDevice();
+    if (stream && !isDefaultStream(*stream))
+        return streamDevice(*stream);
+    int found = -1;
+    for (const std::uint64_t p : ptrs) {
+        const int pd = pointerDevice(p);
+        if (pd < 0)
+            continue;
+        if (found >= 0 && pd != found)
+            throw std::invalid_argument("eagle: the call's device pointers sit on devices " + std::to_string(found)
+                + " and " + std::to_string(pd));
+        found = pd;
+    }
+    return found >= 0 ? found : currentDevice();
 }
 
 /** Makes @p device current for the scope (restores the previous one). */
@@ -736,7 +769,7 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_conditional_create(
     return guarded([&] {
         const auto d = readDesc(desc, 0);
         requireDevice();
-        const int device = resolveDevice(d.device, d.origin);
+        const int device = resolveDevice(d.device, d.origin, { d.count_ptr, d.baseline_ptr, d.counter_ptr });
         DeviceScope scope(device);
         if (h == nullptr)
             throw std::invalid_argument("eagle: null output pointer");
@@ -1152,7 +1185,7 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_compact_device(struct eagle
                 reinterpret_cast<std::uint32_t*>(d.fire), d.theta };
         }
         requireDevice();
-        const int device = resolveDevice(d.device, d.stream);
+        const int device = resolveDevice(d.device, d.stream, { d.mask, d.index_map, d.count });
         DeviceScope scope(device);
         bracketed("eagle_backend_compact_device", "enqueue", [&] {
             eagle::filtering::compactDevice(reinterpret_cast<const std::uint8_t*>(d.mask), d.flags,
@@ -1229,7 +1262,7 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_reorder_device(struct eagle
             throw std::invalid_argument("eagle_backend_reorder_device: mask, perm, inv, index_map, count and span "
                                         "must be device addresses");
         requireDevice();
-        const int device = resolveDevice(d.device, d.stream);
+        const int device = resolveDevice(d.device, d.stream, { d.mask, d.perm, d.inv, d.index_map, d.count });
         DeviceScope scope(device);
         bracketed("eagle_backend_reorder_device", "enqueue", [&] {
             eagle::filtering::reorderDevice(planes.data(), static_cast<std::uint32_t>(planes.size()),
@@ -1256,7 +1289,7 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_reset_device(struct eagle_b
         if (d.count == 0 || d.span == 0 || (d.n > 0 && (d.perm == 0 || d.inv == 0)))
             throw std::invalid_argument(std::string(who) + ": perm, inv, count and span must be device addresses");
         requireDevice();
-        const int device = resolveDevice(d.device, d.stream);
+        const int device = resolveDevice(d.device, d.stream, { d.perm, d.inv, d.count });
         DeviceScope scope(device);
         bracketed(who, "enqueue", [&] {
             eagle::filtering::resetDevice(reinterpret_cast<std::int32_t*>(d.perm),
@@ -1275,7 +1308,7 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_pointer_residency(
         if (cls == nullptr)
             throw std::invalid_argument("eagle_backend_pointer_residency: null cls");
         requireDevice();
-        const int dev = resolveDevice(device, std::nullopt);
+        const int dev = resolveDevice(device, std::nullopt, { ptr });
         DeviceScope scope(dev);
         // The plugin links the driver only (no cudart): the classes of
         // eagle::filtering::classifyPointer, read through cuPointerGetAttribute.
@@ -1352,7 +1385,7 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_compact_classes_device(
         if (d.reserved2 != 0 || d.reserved3 != 0)
             throw std::invalid_argument(std::string(who) + ": reserved fields must be zero");
         requireDevice();
-        const int device = resolveDevice(d.device, d.stream);
+        const int device = resolveDevice(d.device, d.stream, { d.mask, d.index_map, d.count });
         DeviceScope scope(device);
         bracketed(who, "enqueue", [&] {
             eagle::filtering::ReorderTrigger trig{ reinterpret_cast<std::uint32_t*>(d.live32),
@@ -1400,7 +1433,7 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_reorder_classes_device(
             throw std::invalid_argument(std::string(who) + ": mask, perm, inv, index_map, count, span, class_plane, "
                                                            "offsets and class_sorts must be device addresses");
         requireDevice();
-        const int device = resolveDevice(d.device, d.stream);
+        const int device = resolveDevice(d.device, d.stream, { d.mask, d.perm, d.inv, d.index_map, d.count });
         DeviceScope scope(device);
         bracketed(who, "enqueue", [&] {
             eagle::filtering::reorderClassesDevice(planes.data(), static_cast<std::uint32_t>(planes.size()),
@@ -1427,7 +1460,7 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_x_restore_device(struct eag
         if (d.n > 0 && (d.perm == 0 || d.inv == 0))
             throw std::invalid_argument("eagle_backend_x_restore_device: perm and inv must be device addresses");
         requireDevice();
-        const int device = resolveDevice(d.device, d.stream);
+        const int device = resolveDevice(d.device, d.stream, { d.perm, d.inv });
         DeviceScope scope(device);
         bracketed("eagle_backend_x_restore_device", "enqueue", [&] {
             eagle::filtering::restoreDevice(planes.data(), static_cast<std::uint32_t>(planes.size()),
@@ -1502,7 +1535,7 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_x_reduce_canonical(struct e
         if (d.in == 0 || d.out == 0 || d.work_b == 0)
             throw std::invalid_argument(std::string(who) + ": in, out, work_a and work_b must be device addresses");
         requireDevice();
-        const int device = resolveDevice(d.device, d.stream);
+        const int device = resolveDevice(d.device, d.stream, { d.in, d.out, d.work_b });
         DeviceScope scope(device);
         bracketed(who, "enqueue", [&] {
             const auto stream = seamStream(d.stream);
@@ -1541,7 +1574,7 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_x_diff_columns(struct eagle
         if (d.count < 0 || d.rows < 0 || d.op > EAGLE_BACKEND_DIFF_READ)
             throw std::invalid_argument(std::string(who) + ": unknown op, or a negative count/rows");
         requireDevice();
-        const int device = resolveDevice(d.device, d.stream);
+        const int device = resolveDevice(d.device, d.stream, { d.dst, d.src, d.index });
         DeviceScope scope(device);
         bracketed(who, "enqueue", [&] {
             namespace dd = eagle::diff::device;
@@ -1626,7 +1659,7 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_x_event_columns(struct eagl
             || d.components > EAGLE_BACKEND_EVENT_COMPONENTS)
             throw std::invalid_argument(std::string(who) + ": unknown op, or n/guards/components out of range");
         requireDevice();
-        const int device = resolveDevice(d.device, d.stream);
+        const int device = resolveDevice(d.device, d.stream, { d.terminated, d.t0, d.h, d.a[0], d.g[0] });
         DeviceScope scope(device);
         bracketed(who, "enqueue", [&] {
             const auto stream = seamStream(d.stream);
@@ -1723,7 +1756,7 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_memset_device(std::uint64_t
         if (ptr == 0)
             throw std::invalid_argument("eagle_backend_memset_device: null address");
         requireDevice();
-        const int device = resolveDevice(-1, stream);
+        const int device = resolveDevice(-1, stream, { ptr });
         DeviceScope scope(device);
         EAGLE_CHECK_ALWAYS(cudaMemsetAsync(reinterpret_cast<void*>(ptr), 0, static_cast<std::size_t>(bytes),
             seamStream(stream)));
@@ -1739,7 +1772,7 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_memcpy_device(std::uint64_t
         if (dst == 0 || src == 0)
             throw std::invalid_argument("eagle_backend_memcpy_device: null address");
         requireDevice();
-        const int device = resolveDevice(-1, stream);
+        const int device = resolveDevice(-1, stream, { dst, src });
         DeviceScope scope(device);
         EAGLE_CHECK_ALWAYS(cudaMemcpyAsync(reinterpret_cast<void*>(dst), reinterpret_cast<const void*>(src),
             static_cast<std::size_t>(bytes), cudaMemcpyDeviceToDevice, seamStream(stream)));
@@ -1757,7 +1790,7 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_memcpy(std::uint64_t dst, s
         if (dst == 0 || src == 0)
             throw std::invalid_argument("eagle_backend_memcpy: null address");
         requireDevice();
-        const int device = resolveDevice(-1, stream);
+        const int device = resolveDevice(-1, stream, { dst, src });
         DeviceScope scope(device);
         eagle::exec::memcpyAsync(reinterpret_cast<void*>(dst), reinterpret_cast<const void*>(src),
             static_cast<std::size_t>(bytes), static_cast<eagle::exec::CopyKind>(kind), seamStream(stream));
@@ -2424,7 +2457,7 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_cell_op(const struct eagle_
     return guarded([&] {
         const auto d = readDesc(desc, 0xFFFFFFFFu);
         requireDevice();
-        DeviceScope scope(resolveDevice(d.device, d.stream));
+        DeviceScope scope(resolveDevice(d.device, d.stream, { d.p[0], d.p[1], d.p[2], d.p[3], d.p[4], d.p[5] }));
         bracketed("eagle_backend_cell_op", "enqueue", [&] {
             cellop::run(d, seamStream(d.stream));
             return 0;
@@ -2447,7 +2480,7 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_memcpy_strided(std::uint64_
         if (dstPitch < widthBytes || srcPitch < widthBytes)
             throw std::invalid_argument("eagle_backend_memcpy_strided: a pitch is smaller than width_bytes");
         requireDevice();
-        DeviceScope scope(resolveDevice(-1, stream));
+        DeviceScope scope(resolveDevice(-1, stream, { dst, src }));
         ensureContext();
         // Unified addressing: the memory types are read from the addresses, so one
         // descriptor serves every direction.
@@ -2682,7 +2715,7 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_gemm(const eagle_backend_ge
             throw std::invalid_argument("eagle_backend_gemm: bad shape, batch, op or dtype");
         const Cublas& b = cublas();
         requireDevice();
-        const int dev = d->device >= 0 ? d->device : streamDevice(d->stream);
+        const int dev = resolveDevice(d->device, d->stream, { d->a, d->b, d->c });
         DeviceScope scope(dev);
         ensureContext();
         void* handle = nullptr;

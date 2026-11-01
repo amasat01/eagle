@@ -243,7 +243,8 @@ def time_launch(bound, reps: int, fused_steps: int = 1) -> list:
     block = int(importlib.import_module("eagle.launch")._resolved_block(
         bound._entry, part.count, None, declared=bound._declared_block))
     return list(_core.time_launch(bound._entry, bound._addrs, part, reps, device=True,
-                                  stream=_stream.current(), block=block))
+                                  stream=_stream.current(), block=block,
+                                  ordinal=-1 if bound._device is None else bound._device))
 
 
 _PARTS: dict = {}
@@ -422,7 +423,8 @@ class DispatchRunner:
         part = eexec.Partition(0, int(count), self.n)
         if self._device:
             eexec.DeviceKernel.run(bound._entry, bound._addrs, part,
-                                   stream=_stream.current(), block=block)
+                                   stream=_stream.current(), block=block,
+                                   device=-1 if bound._device is None else bound._device)
         else:
             eexec.HostTeam.run(bound._entry, bound._addrs, part)
 

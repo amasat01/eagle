@@ -532,9 +532,7 @@ class BoundPlan:
                 packed[:] = [self._gen, list(addrs)]
             params = packed[1]
             handle = _stream_handle(stream, self._device)
-            # the null stream is the current device's: make the planes' device current for it
-            with _stream.on_device(self._device if handle == 0 else None):
-                _core.launch_raw(ptr, (grid, 1, 1), (block, 1, 1), params, handle)
+            _core.launch_raw(ptr, (grid, 1, 1), (block, 1, 1), params, handle, device=_ordinal(self._device))
 
         return call
 
@@ -648,9 +646,7 @@ class BoundPlan:
                 packed[:] = [self._gen, list(addrs)]
             params = packed[1]
             handle = _stream_handle(stream, self._device)
-            # the null stream is the current device's: make the planes' device current for it
-            with _stream.on_device(self._device if handle == 0 else None):
-                _core.launch_raw(ptr, (grid, 1, 1), (resolved, 1, 1), params, handle)
+            _core.launch_raw(ptr, (grid, 1, 1), (resolved, 1, 1), params, handle, device=_ordinal(self._device))
 
         return call
 
@@ -725,9 +721,9 @@ class BoundPlan:
         addrs = self._addrs + [ctypes.addressof(box) for box in tail]
         if _split.COLLECT.names is not None:
             _split.COLLECT.names.append(self._kernel_name())
-        with _stream.on_device(self._device if handle == 0 else None):
-            self._named(_core.launch_raw, self._entry, (grid, 1, 1), (threads, 1, 1), addrs, handle)
-            _stream.check_launch(self._kernel_name(), -1 if self._device is None else self._device)
+        self._named(_core.launch_raw, self._entry, (grid, 1, 1), (threads, 1, 1), addrs, handle,
+                    device=_ordinal(self._device))
+        _stream.check_launch(self._kernel_name(), _ordinal(self._device))
         return None
 
     def launch(self, stream=None, *, grid=None, block=None) -> None:
@@ -799,7 +795,7 @@ class BoundPlan:
             )
         for entry, part in self._fold or ():
             self._named(eexec.DeviceKernel.run, entry, addrs, part, stream=handle, device=self._device)
-        _stream.check_launch(self._kernel_name(), -1 if self._device is None else self._device)
+        _stream.check_launch(self._kernel_name(), _ordinal(self._device))
         if self._copies:
             with _stream.on_device(self._device), scoped_stream(handle):
                 for a in self._copies.values():
@@ -986,6 +982,11 @@ def _set_count(bound, m, stream) -> None:
         return
     with _stream.on_device(bound._device):
         _index_set.write_count(bound._count, m, bound._capacity, _stream_handle(stream, bound._device))
+
+
+def _ordinal(device) -> int:
+    """The seam's device argument: the planes' CUDA ordinal, ``-1`` (the stream's or the memory's) for none."""
+    return -1 if device is None else device
 
 
 def _refuse_local_memory(plugin, n: int, device) -> None:
