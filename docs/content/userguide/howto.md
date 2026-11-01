@@ -62,6 +62,17 @@ howto_streams
 - An `Index` plane has the width the kernel declares (`int32` unless `Index[int64]`). `bind` and `rebind` refuse another width by name and say which to pass; `run` converts on each call.
 - Opaque notes a kernel's author put on a plane (`hawk.Meta`) are on the loaded kernel as `plane_meta`, by plane name.
 
+## Run on several GPUs
+
+```{toctree}
+:maxdepth: 1
+:hidden:
+
+howto_several_gpus
+```
+
+- [Run one kernel across several GPUs](howto_several_gpus): `RankPartition` over MPI ranks, the same answer as one rank.
+
 ## Failures
 
 A device out-of-memory error says which kernel needed what: the largest local memory per thread among the graph's kernels, and the GPU's free and total memory at the moment of failure.
