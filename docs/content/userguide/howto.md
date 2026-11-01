@@ -43,9 +43,11 @@ Graph steps for Fourier transforms and matrix products, and how to put eagle's w
 :hidden:
 
 howto_fft
+howto_gemm
 ```
 
 - [Fourier transforms in a graph](howto_fft): `eagle.fft` on the CPU and GPU, with derivatives, replayed in a captured graph.
+- [Matrix products in a graph](howto_gemm): `eagle.gemm` host products and a cuBLAS product recorded in a capture.
 
 ## Keep the state at every step
 
