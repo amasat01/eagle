@@ -1090,17 +1090,36 @@ class _CpuArm:
         return out
 
 
+def _current_device():
+    """This thread's current CUDA device: where eagle's unscoped work (the legacy stream) goes."""
+    import cupy as cp
+
+    return int(cp.cuda.runtime.getDevice())
+
+
+def _require_device(device, when):
+    """Stop when a framework left another device current: eagle's work would then go to the wrong GPU."""
+    if device is not None and (now := _current_device()) != device:
+        raise SystemExit(f"CUDA device {now} is current {when}; the arms were built on device {device}")
+
+
 def _make_arms(n, names):
     arms = {}
+    device = _current_device() if any(a in GPU_ARMS for a in names) else None
     if any(a in names for a in EAGLE_GPU_ARMS):
         arms.update(_make_eagle_arms(n, names))
     if any(a in names for a in ("cupy_masked", "torch_masked", "torch_graphed",
                                 "torch_compiled")):
         arms.update(_make_array_arms(n, names))
+        _require_device(device, "after building the array arms")
     if "jax_vmap" in names:
         arms["jax_vmap"] = _make_jax_arm(n)
+        _require_device(device, "after building the jax arm")
     if "warp_kernel" in names:
         arms["warp_kernel"] = _make_warp_arm(n)
+        _require_device(device, "after building the warp arm")
+    for arm in arms.values():
+        arm["device"] = device
     if "eagle_cpu" in names:
         import eagle
 
@@ -1180,6 +1199,7 @@ def _sync_all(arm_name):
 
 
 def _timed(name, arm, inp):
+    _require_device(arm["device"], f"before the {name} arm")
     t_a = time.perf_counter()
     arm["state"].upload(inp)
     _sync_all(name)
