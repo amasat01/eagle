@@ -175,7 +175,11 @@ def test_a_missing_ncu_is_a_skipped_stage(kit, tmp_path):
         (shim / "nsys").symlink_to(nsys)
     keep = [d for d in os.environ["PATH"].split(os.pathsep) if not (Path(d) / "ncu").exists()
             and not (Path(d) / "nsys").exists()]
-    rc, _ = kit({"PATH": os.pathsep.join([str(shim), *keep]), "PROFILE_TOOLS_PATH_ONLY": "1"})
+    env = {"PATH": os.pathsep.join([str(shim), *keep]), "PROFILE_TOOLS_PATH_ONLY": "1"}
+    nvcc = os.environ.get("HAWK_NVCC") or shutil.which("nvcc")
+    if nvcc:  # a toolkit's bin holds ncu next to nvcc: dropping that dir must not drop the kernel compiler too
+        env["HAWK_NVCC"] = nvcc
+    rc, _ = kit(env)
     status, _ = kit.results()
     assert rc == 0
     assert "ncu-quick: skipped: ncu not found" in status
