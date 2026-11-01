@@ -64,7 +64,7 @@ from types import SimpleNamespace
 
 HERE = pathlib.Path(__file__).resolve().parent
 CARD_PATH = HERE.parent / "perf_card" / "perf_card.py"
-RK78_CARD_PATH = HERE.parent / "rk78_card" / "rk78_card.py"
+RK78_CARD_PATH = HERE.parent / "perf_card" / "rkf78.py"
 
 #: The probe's sample counts and the workload step budget its real runs use.
 PROBE_NS = (1_000, 100_000, 1_000_000)
@@ -379,9 +379,9 @@ def make_inputs(card, n, steps, dist):
 
 def load_rk78():
     """The RK78 card's module (its kernel, inputs and planes), loaded like the oscillator card."""
-    spec = importlib.util.spec_from_file_location("rk78_card", RK78_CARD_PATH)
+    spec = importlib.util.spec_from_file_location("rkf78", RK78_CARD_PATH)
     mod = importlib.util.module_from_spec(spec)
-    sys.modules["rk78_card"] = mod
+    sys.modules["rkf78"] = mod
     spec.loader.exec_module(mod)
     return mod
 
@@ -754,7 +754,7 @@ def judge(kernel, out, ref, inp, same_entry, truth=None, atol=None):
         if diff > card_atol:
             return False, bitwise, diff, f"state differs from the reference by {diff:.2e} > {card_atol:.0e}"
     else:
-        rk = sys.modules["rk78_card"]
+        rk = sys.modules["rkf78"]
         if not np.all(out["t"] == rk.T_FINAL):
             return False, bitwise, diff, "a sample did not reach the final time"
         pos_t, _ = truth

@@ -3,9 +3,9 @@
 
 """Helpers the performance cards share.
 
-``perf_card/perf_card.py`` (RK4, GPU), ``perf_card/cpu_card.py`` (RK4, CPU),
-``rk78_card/rk78_card.py`` (RKF7(8), GPU) and ``rk78_card/cpu_rk78_card.py``
-(RKF7(8), CPU) each define a workload, its arms and the card they write; what
+``perf_card/perf_card.py`` (GPU; the RKF7(8) workload in ``perf_card/rkf78.py``, RK4 with ``--step rk4``),
+``perf_card/cpu_card.py`` (its CPU twin, ``perf_card/cpu_rkf78.py``) and ``perf_card/feature_card.py``
+each define a workload, its arms and the card they write; what
 they have in common lives here: number formatting, the median/IQR statistic,
 the ``# >>> code:NAME`` snippet markers, the device and software facts, the
 memory probes' process protocol, the cold/warm compile-time loop and the
