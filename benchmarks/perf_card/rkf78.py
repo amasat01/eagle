@@ -1421,16 +1421,31 @@ def _memory_probe(arm, n, bus_id):
         "host_peak_bytes": max(0, cc.status_kib("VmHWM") - rss_base) * 1024})
 
 
+#: A memory probe runs the arm once at N; one that takes longer is reported as not measured.
+MEMORY_PROBE_TIMEOUT_S = 1800
+#: How each library reports a device allocation it could not make.
+_OUT_OF_MEMORY = ("out of memory", "OutOfMemory", "RESOURCE_EXHAUSTED", "cudaErrorMemoryAllocation")
+
+
 def _run_memory_pass(ns, bus_id, names):
+    """One fresh process per (arm, N); an arm that does not fit the device is a row too ("out of memory")."""
     rows = []
     for n in ns:
         for arm in names:
-            r = cc.run_probe(__file__, ["--memory-probe", arm, str(n), bus_id],
-                             timeout=1800, what=f"memory probe {arm} {n}")
+            try:
+                r = cc.run_probe(__file__, ["--memory-probe", arm, str(n), bus_id],
+                                 timeout=MEMORY_PROBE_TIMEOUT_S, what=f"memory probe {arm} {n}")
+            except subprocess.TimeoutExpired:
+                r = {"timed_out": True, "device_peak_bytes": None, "host_peak_bytes": None}
+            except RuntimeError as err:
+                if not any(k in str(err) for k in _OUT_OF_MEMORY):
+                    raise
+                r = {"out_of_memory": True, "device_peak_bytes": None, "host_peak_bytes": None}
             r.update(n=n, arm=arm, minimum_bytes=n * MIN_BYTES_PER_SAMPLE)
             rows.append(r)
             print(f"memory {arm:20s} N={n:>8,} device "
-                  f"{(r['device_peak_bytes'] or 0) / 2**20:.3g} MiB", flush=True)
+                  + _dev_cell(r),
+                  flush=True)
     return rows
 
 
@@ -1696,6 +1711,10 @@ def _fit_notes(card):
 
 
 def _dev_cell(m):
+    if m is not None and m.get("out_of_memory"):
+        return "out of memory"
+    if m is not None and m.get("timed_out"):
+        return f"not measured (one run > {MEMORY_PROBE_TIMEOUT_S // 60} min)"
     if m is None or m["device_peak_bytes"] is None:
         return "–"
     return (f"{_fmt_mib(m['device_peak_bytes'])} "
@@ -1752,8 +1771,17 @@ def render_markdown(card: dict) -> str:
             f"| {_fmt_rate(row['attempt_samples_per_s'])} "
             f"| {_fmt_rate(row['useful_flops_per_s'])} ({_fmt_pct(pct)}) "
             f"| {_dev_cell(m)} "
-            f"| {_fmt_mib(m['host_peak_bytes']) if m else '–'} |")
+            f"| {_fmt_mib(m['host_peak_bytes']) if m and m['host_peak_bytes'] is not None else '–'} |")
     lines.append("")
+    untimed = sorted({n for n, _ in mem} - {r["n"] for r in card["results"]})
+    if untimed:  # memory-only sizes: too long to time on this device, but whether an arm fits is the point
+        lines += ["### Device memory at sizes not timed here", "",
+                  "| N | " + " | ".join(ARM_LABELS[a] for a in card["arms"] if a != "eagle_cpu") + " |",
+                  "|---:|" + "---:|" * sum(a != "eagle_cpu" for a in card["arms"])]
+        for n in untimed:
+            lines.append(f"| {n:,} | " + " | ".join(_dev_cell(mem.get((n, a))) for a in card["arms"]
+                                                     if a != "eagle_cpu") + " |")
+        lines.append("")
     lines += ["### Agreement with the analytic orbit", "",
               card["method"]["verification"], "",
               "| N | arm | max position error | max error / bound "
@@ -1807,6 +1835,8 @@ def main(argv=None):
     ap.add_argument("--quick", action="store_true")
     ap.add_argument("--no-nsys", action="store_true")
     ap.add_argument("--no-memory", action="store_true")
+    ap.add_argument("--memory-ns", type=int, nargs="+",
+                    help="sizes of the memory pass (default: --ns); a size too long to time can still show what fits")
     ap.add_argument("--no-compile", action="store_true")
     ap.add_argument("--check", action="store_true",
                     help="build, run every arm once per N, print agreement, no card")
@@ -1922,7 +1952,7 @@ def main(argv=None):
             row["fraction_of_peak_fp64_at_observed_clock"] = (
                 None if row["fraction_of_peak_fp64"] is None
                 else row["useful_flops_per_s"] / peak["fp64_flops_at_observed_sm_clock"])
-    memory_rows = [] if args.no_memory else _run_memory_pass(args.ns, bus_id, names)
+    memory_rows = [] if args.no_memory else _run_memory_pass(args.memory_ns or args.ns, bus_id, names)
     compile_rows = [] if args.no_compile else _run_compile_pass(args.ns, names)
     card = {
         "schema": "eagle-rk78-card/3",
