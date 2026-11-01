@@ -10,9 +10,18 @@ import importlib.util
 import pathlib
 import sys
 
+import pytest
+
+pytestmark = pytest.mark.repo_local
+
 _BENCH = pathlib.Path(__file__).resolve().parents[2] / "benchmarks"
-sys.path.insert(0, str(_BENCH))
-import _card_common as cc  # noqa: E402
+
+
+def _card_common():
+    spec = importlib.util.spec_from_file_location("card_common_t", _BENCH / "_card_common.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 AARCH64 = """
   4005a0:	4e60cc20 	fmla	v0.2d, v1.2d, v2.2d
@@ -32,12 +41,12 @@ X86 = """
 
 
 def test_aarch64_neon_sve_and_scalar_double_ops_are_told_apart():
-    got = cc.fp_simd_counts(AARCH64)
+    got = _card_common().fp_simd_counts(AARCH64)
     assert got == {"packed": 3, "scalar": 3, "sve": 1}  # the 4s single-precision fmla is none of them
 
 
 def test_x86_packed_and_scalar_double_ops_are_still_counted():
-    assert cc.fp_simd_counts(X86) == {"packed": 2, "scalar": 1, "sve": 0}
+    assert _card_common().fp_simd_counts(X86) == {"packed": 2, "scalar": 1, "sve": 0}
 
 
 def test_an_arm_machine_without_a_model_name_gets_the_aarch64_stem(monkeypatch):
