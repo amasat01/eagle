@@ -189,7 +189,7 @@ def row_zero_copy_interop(smoke, reps):
             t_out = torch.empty_like(t_in)
 
             def aliased():
-                plan.bind(x=eagle.to_cupy(t_in), k=2.0, y=eagle.to_cupy(t_out)).launch()
+                plan.bind(x=cp.from_dlpack(eagle.to_array(t_in)), k=2.0, y=cp.from_dlpack(eagle.to_array(t_out))).launch()
                 cp.cuda.runtime.deviceSynchronize()
 
             def copied():
