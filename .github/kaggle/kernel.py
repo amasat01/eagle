@@ -446,20 +446,22 @@ def run_notebooks(cfg, py, work, roots, result, out):
     return ok
 
 
-#: Wall-clock budget of the cards, counted from the kernel's start (Kaggle stops it at 3 hours, install included); the
+#: Wall-clock budget of the cards, counted from the kernel's start (Kaggle stops it at 90 minutes, install included); the
 #: margin leaves time to write result.json. Each card gets what is left.
-CARDS_BUDGET_S = 170 * 60
+CARDS_BUDGET_S = 80 * 60
 KERNEL_START = time.time()
 
 
 def run_cards(py, roots, out, result):
-    """The GPU card (RKF7(8) ensemble, committed arms, no profiler/memory/compile passes) and the
-    feature card, written under ``out/cards``; ``result['cards']`` lists each with its exit code."""
+    """The GPU card (RKF7(8) ensemble, committed arms, N up to a million: ten million takes hours and more memory
+    than a T4 holds; no profiler/memory/compile passes) and the feature card, written under ``out/cards``;
+    ``result['cards']`` lists each with its exit code."""
     eagle = roots["eagle"]
     env = dict(os.environ, HAWK_SRC=str(roots.get("hawk", "")))
     cards_out = out / "cards"
     cards_out.mkdir(parents=True, exist_ok=True)
-    plan = (("perf_card", ["benchmarks/perf_card/perf_card.py", "--no-nsys", "--no-memory", "--no-compile"]),
+    plan = (("perf_card", ["benchmarks/perf_card/perf_card.py", "--ns", "100000", "1000000", "--no-nsys",
+                           "--no-memory", "--no-compile"]),
             ("feature_card", ["benchmarks/perf_card/feature_card.py"]))
     result["cards"] = []
     for name, argv in plan:

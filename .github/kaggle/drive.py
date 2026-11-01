@@ -20,7 +20,7 @@ POLL_SECONDS = 30
 START_SECONDS = 10 * 60  # a kernel still QUEUED after this is deleted and pushed again
 START_ATTEMPTS = 3
 UNRUN = 3  # exit code when Kaggle never ran the kernel (inconclusive, not a failure)
-LIMITS = {"tests": 75 * 60, "notebooks": 180 * 60, "cards": 180 * 60}  # per kernel, by mode
+LIMITS = {"tests": 75 * 60, "notebooks": 180 * 60, "cards": 90 * 60}  # per kernel, by mode
 # PEP 440 (the public version grammar of packaging's VERSION_PATTERN, lower case): 0.6.2, 0.6.2rc1, 1!2.0.post1.dev3
 PEP440 = re.compile(r"^(?:\d+!)?\d+(?:\.\d+)*(?:(?:a|b|rc)\d+)?(?:\.post\d+)?(?:\.dev\d+)?$")
 GPU = "NvidiaTeslaT4"  # the machine_shape the push takes; the kernel records the GPU it got
