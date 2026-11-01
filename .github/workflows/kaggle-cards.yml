@@ -72,6 +72,10 @@ jobs:
               refs+=("--${pair%%=*}-ref" "$ref")
             done
             INPUT_SOURCE=git
+            # shallow clones carry no tags and the sibling pins need a real version: the patch after the newest release
+            tag=$(git ls-remote --tags --refs https://github.com/amasat01/eagle 'v*' | sed 's#.*/v##' |
+                  grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+            INPUT_VERSION="${tag%.*}.$(( ${tag##*.} + 1 )).dev0"
           else
             refs=(--eagle-ref "$INPUT_EAGLE_REF" --hawk-ref "$INPUT_HAWK_REF" --raptor-ref "$INPUT_RAPTOR_REF")
           fi
