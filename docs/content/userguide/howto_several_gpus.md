@@ -32,7 +32,7 @@ The same script run alone (`python my_run.py`) is one rank and gives the same an
 - **Split:** the samples. Rank `r` of `R` takes one contiguous block; when the count does not divide evenly, the first `n % R` ranks take one extra.
 - **Replicated:** the inputs. Every rank holds all of them, so a kernel that reads other samples' inputs (`cross_sample_read`) is legal.
 - **Gathered:** the outputs, through the host. They must be `float64` and C-contiguous; another dtype is refused by name before anything launches. Device outputs are copied home, so this is not a way to keep a plane resident on one card.
-- **Reductions:** a `mapreduce` combines the per-rank partials in a fixed rank order, never with atomics, so every rank gets the same value. Kernels that write cells are cut at whole rows of 32 samples, and each rank finishes the rows exactly as a single rank would. See [Determinism](determinism).
+- **Reductions:** a `mapreduce` combines the per-rank partials in a fixed rank order, never with atomics, so every rank gets the same value. Kernels that write cells are cut at whole rows of 32 samples, and each rank finishes the rows exactly as a single rank would. See {doc}`Determinism <determinism>`.
 - **Refused:** a kernel that writes other samples (`cross_sample_write`) cannot be rank-partitioned, at any world size, and the plan says so.
 
 `eagle.exec.RankPartition.local(partition)` gives this rank's share of a partition, and `allgather_plane` and `allgather_fold` are the two collectives the run uses.
