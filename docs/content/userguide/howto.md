@@ -34,6 +34,19 @@ examples
 - [Zero-copy interop](examples/zero_copy_interop): one kernel fed from and handed back into NumPy, CuPy and PyTorch arrays with no copy.
 - [C++ examples](examples): complete, tested C++ programs and how their gate runs.
 
+## Transforms, products and streams
+
+Graph steps for Fourier transforms and matrix products, and how to put eagle's work on your own stream.
+
+```{toctree}
+:maxdepth: 1
+:hidden:
+
+howto_fft
+```
+
+- [Fourier transforms in a graph](howto_fft): `eagle.fft` on the CPU and GPU, with derivatives, replayed in a captured graph.
+
 ## Keep the state at every step
 
 `eagle.simulate` returns the final state. To keep every step, build the run once with `sim = eagle.simulation(model, ..., max_steps=1)` and call `sim.run()` in a loop: each call advances the state in place by one step, so the history is what you copy after each call. Call `sim.reset()` and re-seed the state to start over. The result is the same as `eagle.simulate(..., max_steps=k)` for each `k`.
