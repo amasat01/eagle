@@ -26,7 +26,7 @@ c = np.asarray(bufs["c"])           # equals a @ b
 A captured product is float32 only. cuBLAS makes its handle on first use, which allocates, so the handle is made and warmed outside the capture and only `sgemm` runs inside it. `sgemm_params_for_arrays` reads the layout off your three arrays.
 
 ```python
-from eagle import _core
+from eagle import cuda
 from eagle.gemm import CublasCaptureHandle, sgemm_params_for_arrays
 
 a = arrays.asarray(a.astype("float32"), device="cuda:0")
@@ -34,19 +34,19 @@ b = arrays.asarray(b.astype("float32"), device="cuda:0")
 out = arrays.zeros((3, 5), "float32", "cuda:0")
 operands = {"a": a, "b": b, "out": out}
 
-stream = _core.Stream(non_blocking=True)
+stream = cuda.Stream(non_blocking=True)
 handle = CublasCaptureHandle(stream.ptr())
 params = sgemm_params_for_arrays(a, b, out)
 try:
     handle.warm(params, operands)            # once per shape, before the capture
     out.fill(0.0, stream.ptr())              # warm() wrote `out`: clear it
-    cap = _core.StreamCapturer(stream.ptr())
+    cap = cuda.StreamCapturer(stream.ptr())
     cap.begin()
     try:
         handle.sgemm(params, operands)       # recorded, not run
     finally:
         captured = cap.end()
-    launcher = _core.Graph.from_captured(captured).launcher()
+    launcher = cuda.Graph.from_captured(captured).launcher()
     launcher.stream(stream.ptr())
     launcher.launch()                        # replay as often as you like
     launcher.synchronize()
