@@ -3,12 +3,15 @@
 #
 # Runs the GPU benchmark cards (the adaptive-step ensemble card and the feature card) on a free Kaggle T4,
 # where PyTorch, JAX, CuPy and Warp are installed, in one private kernel of at most 15 minutes. Started by
-# hand only (workflow_dispatch); nothing here runs on a pull request. The card JSON and Markdown come back
+# hand (workflow_dispatch), or on a pull request by adding the label `cards`: then the packages are built
+# from that branch, each sibling at its same-named branch, else main. The card JSON and Markdown come back
 # as the artifact `kaggle-cards`; they are reviewed before anything is committed.
 
 name: Kaggle cards
 
 on:
+  pull_request:
+    types: [labeled]
   workflow_dispatch:
     inputs:
       eagle_ref:
@@ -38,6 +41,7 @@ permissions:
 
 jobs:
   kaggle-cards:
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'cards'
     runs-on: ubuntu-24.04
     environment: kaggle
     timeout-minutes: 30
@@ -51,6 +55,7 @@ jobs:
       - run: python -m pip install --quiet kaggle
       - name: Run the cards kernel on Kaggle
         env:
+          PR_REF: ${{ github.head_ref }}
           INPUT_EAGLE_REF: ${{ inputs.eagle_ref || github.ref_name }}
           INPUT_HAWK_REF: ${{ inputs.hawk_ref || 'main' }}
           INPUT_RAPTOR_REF: ${{ inputs.raptor_ref || 'main' }}
@@ -58,8 +63,19 @@ jobs:
           INPUT_PRE: ${{ inputs.pre && 'true' || 'false' }}
           INPUT_VERSION: ${{ inputs.version }}
         run: |
-          args=(--cuda 12 --mode cards --run-id "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-                --eagle-ref "$INPUT_EAGLE_REF" --hawk-ref "$INPUT_HAWK_REF" --raptor-ref "$INPUT_RAPTOR_REF"
+          if [ -n "$PR_REF" ]; then
+            # a labelled pull request: build from its branch; each sibling at the same-named branch, else main
+            refs=(--eagle-ref "$PR_REF")
+            for pair in hawk=hawk raptor=raptor aether=aether; do
+              ref=main
+              git ls-remote --exit-code --heads "https://github.com/amasat01/${pair#*=}" "$PR_REF" >/dev/null 2>&1 && ref="$PR_REF"
+              refs+=("--${pair%%=*}-ref" "$ref")
+            done
+            INPUT_SOURCE=git
+          else
+            refs=(--eagle-ref "$INPUT_EAGLE_REF" --hawk-ref "$INPUT_HAWK_REF" --raptor-ref "$INPUT_RAPTOR_REF")
+          fi
+          args=(--cuda 12 --mode cards --run-id "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${refs[@]}"
                 --source "$INPUT_SOURCE" --out kaggle-out)
           if [ "$INPUT_PRE" = true ]; then args+=(--pre); fi
           if [ -n "$INPUT_VERSION" ]; then args+=(--version "$INPUT_VERSION"); fi
