@@ -1273,10 +1273,10 @@ def _verify(outs, inp, ref_arm):
     return report, steps
 
 
-def _run_n(n, reps, bus_id, names, kernel_pass=False, distribution="spread"):
-    """All arms at one N: build, warm-up + verify, interleaved repetitions."""
+def _run_n(n, reps, bus_id, names, kernel_pass=False, distribution="spread", arms=None):
+    """All arms at one N: build (unless ``arms`` are given), warm-up + verify, interleaved repetitions."""
     inp = _inputs(n, distribution)
-    arms = _make_arms(n, names)
+    arms = arms if arms is not None else _make_arms(n, names)
     order = list(arms)
     outs, reps_for = {}, {}
     for name in order:  # warm-up, also the verification run
@@ -1857,13 +1857,15 @@ def main(argv=None):
     _check_kernel_bodies()
     sources = _kernel_sources(work)
     cells = {}
-    for dist in args.distributions:
-        for n in args.ns:
+    for n in args.ns:
+        arms = _make_arms(n, names)  # one build per N: the distributions share the shapes
+        for dist in args.distributions:
             t0 = time.perf_counter()
-            cells[(dist, n)] = _run_n(n, args.reps, bus_id, names, distribution=dist)
+            cells[(dist, n)] = _run_n(n, args.reps, bus_id, names, distribution=dist, arms=arms)
             best = min(cells[(dist, n)][0], key=lambda r: r["wall_s"]["median"])
             print(f"{dist} N={n:>8,} fastest={best['arm']} "
                   f"({time.perf_counter() - t0:.1f}s)", flush=True)
+        del arms
 
     def cell_mhz(key):
         return cells[key][1]["gpu_state_during"].get("sm_clock_mhz_median")
