@@ -1097,10 +1097,13 @@ def _current_device():
     return int(cp.cuda.runtime.getDevice())
 
 
-def _require_device(device, when):
-    """Stop when a framework left another device current: eagle's work would then go to the wrong GPU."""
-    if device is not None and (now := _current_device()) != device:
-        raise SystemExit(f"CUDA device {now} is current {when}; the arms were built on device {device}")
+def _use_device(device):
+    """Make the arms' device current again: JAX start-up leaves the last GPU current, and the CuPy and torch arms
+    run on the current device."""
+    if device is not None and _current_device() != device:
+        import cupy as cp
+
+        cp.cuda.runtime.setDevice(device)
 
 
 def _make_arms(n, names):
@@ -1111,13 +1114,13 @@ def _make_arms(n, names):
     if any(a in names for a in ("cupy_masked", "torch_masked", "torch_graphed",
                                 "torch_compiled")):
         arms.update(_make_array_arms(n, names))
-        _require_device(device, "after building the array arms")
+        _use_device(device)
     if "jax_vmap" in names:
         arms["jax_vmap"] = _make_jax_arm(n)
-        _require_device(device, "after building the jax arm")
+        _use_device(device)
     if "warp_kernel" in names:
         arms["warp_kernel"] = _make_warp_arm(n)
-        _require_device(device, "after building the warp arm")
+        _use_device(device)
     for arm in arms.values():
         arm["device"] = device
     if "eagle_cpu" in names:
@@ -1199,7 +1202,7 @@ def _sync_all(arm_name):
 
 
 def _timed(name, arm, inp):
-    _require_device(arm["device"], f"before the {name} arm")
+    _use_device(arm["device"])
     t_a = time.perf_counter()
     arm["state"].upload(inp)
     _sync_all(name)
