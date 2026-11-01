@@ -1063,7 +1063,7 @@ jobs:
             echo run=true >> "$GITHUB_OUTPUT"
           fi
       - if: steps.plan.outputs.run == 'true'
-        run: python -m pip install --quiet kaggle
+        run: python -m pip install --quiet kaggle six  # kaggle 2.2.5 imports six without declaring it
       - uses: actions/download-artifact@v8
         if: steps.plan.outputs.run == 'true'
         with:
