@@ -1,0 +1,103 @@
+# Copyright 2026 Alessandro Masat
+# SPDX-License-Identifier: Apache-2.0
+
+"""The ensemble card script (``benchmarks/perf_card/perf_card.py``): the order of its memory probe, a fit note for every
+arm it can run, and arm selection without the optional libraries."""
+
+from __future__ import annotations
+
+import contextlib
+import importlib
+import importlib.util
+import pathlib
+import types
+
+_REPO = pathlib.Path(__file__).resolve().parents[2]
+_CARD_DIR = _REPO / "benchmarks" / "perf_card"
+
+
+def _rk78_script():
+    spec = importlib.util.spec_from_file_location("eagle_perf_card", _CARD_DIR / "perf_card.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _fake_memory_probe_run(module, monkeypatch, probe, patches):
+    """Run ``module._memory_probe`` with every device and process reading faked;
+    returns the ordered list of the calls that matter to the baseline."""
+    calls = []
+
+    def note(name, ret=None):
+        def fake(*a, **k):
+            calls.append(name)
+            return ret
+        return fake
+
+    cc = module.cc
+    monkeypatch.setattr(cc, "probe_reply_fd", note("reply_fd", 1))
+    monkeypatch.setattr(cc, "probe_reply", note("reply"))
+    monkeypatch.setattr(cc, "process_device_bytes", note("baseline", (123, "fake")))
+    monkeypatch.setattr(cc, "DevicePeak", lambda bus_id: contextlib.nullcontext(types.SimpleNamespace(peak=0)))
+    monkeypatch.setattr(cc, "trim_pools", note("trim"))
+    monkeypatch.setattr(cc, "probe_sync", note("sync"))
+    monkeypatch.setattr(cc, "status_kib", note("rss", 1))
+    monkeypatch.setattr(cc, "reset_host_peak", note("reset", True))
+    monkeypatch.setattr(module, "_touch_device", note("touch"))
+    for name, ret in patches.items():
+        monkeypatch.setattr(module, name, note(name, ret))
+    probe()
+    return calls
+
+
+def _assert_baseline_before_warmup(calls, warm_call):
+    assert calls.count("baseline") == 2, calls  # the baseline, then the reading after the run
+    first = calls.index("baseline")
+    assert "touch" in calls[:first], (
+        f"the CUDA context must exist (one tiny device op) before the baseline: {calls}")
+    assert first < calls.index(warm_call), (
+        f"the device baseline must be read before the warm-up call {warm_call}: {calls}")
+    assert first < calls.index("trim"), (
+        f"the device baseline must be read before any allocator is trimmed: {calls}")
+    assert calls.index("trim") < calls.index("baseline", first + 1), calls
+
+
+def test_rk78_card_memory_baseline_is_read_before_the_warm_up(monkeypatch):
+    """Same order check for the second card's memory probe.
+
+    RED: read the baseline after the warm-up and this fails."""
+    import numpy as np
+
+    module = _rk78_script()
+    out = (0.0, 0.0, {"t": np.full(2, module.T_FINAL)})
+    patches = {"_probe_arm": {}, "_timed": out, "_inputs": {}, "_sync": None}
+    calls = _fake_memory_probe_run(
+        module, monkeypatch,
+        lambda: module._memory_probe("eagle_graph", 8, "0000:00:00.0"), patches)
+    _assert_baseline_before_warmup(calls, "_timed")
+
+
+def test_every_arm_has_a_fit_note(monkeypatch):
+    """'Where each tool fits' names every arm the script can run.
+
+    RED: delete one arm's entry from ``perf_card._fit_notes`` and this fails with a ``KeyError`` naming the arm."""
+    monkeypatch.syspath_prepend(str(_CARD_DIR))
+    card_mod = importlib.import_module("perf_card")
+    card = {"results": [], "ns": [1000], "arms": list(card_mod.ARMS),
+            "code_lines": {"arms": dict.fromkeys(card_mod.ARMS, 1)},
+            "workload": {"n_stages": 13, "graph_block": 16}}
+    assert set(card_mod._fit_notes(card)["arms"]) == set(card_mod.ARMS)
+
+
+def test_missing_optional_libraries_become_arms_not_run(monkeypatch):
+    """With torch and jax blocked arm selection raises nothing and lists them, with the reason, under arms_not_run."""
+    import sys
+
+    module = _rk78_script()
+    monkeypatch.setitem(sys.modules, "torch", None)
+    monkeypatch.setitem(sys.modules, "jax", None)
+    names, not_run = module._select_arms(module.COMMITTED_ARMS)
+    for arm in ("torch_graphed", "torch_compiled"):
+        assert not_run[arm] == "torch not installed in this profile"
+    assert not_run["jax_vmap"] == "jax not installed in this profile"
+    assert not set(not_run) & set(names) and "eagle_graph" in names

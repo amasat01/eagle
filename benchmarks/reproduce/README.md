@@ -1,7 +1,7 @@
 # Reproduce the performance cards
 
 eagle publishes three card scripts: the ensemble card (`perf_card/perf_card.py`, adaptive
-RKF7(8) Kepler orbits; `--step rk4` runs the fixed-step oscillator), its CPU twin
+RKF7(8) Kepler orbits), its CPU twin
 (`perf_card/cpu_card.py`) and the feature card (`perf_card/feature_card.py`, one row per feature).
 The
 scripts here set up any Linux x86_64 machine to run them with the same pinned
@@ -45,8 +45,8 @@ Committed cards are slim: the raw rows are release assets. After `--publish`, ru
 `python benchmarks/slim_card.py --raw-out <dir> <card>.json` to slim a card and keep the full one in `<dir>`;
 the tests that read raw rows take `EAGLE_CARD_RAW_DIR=<dir>`, are skipped without it, and fail by file name when it is set
 and a file is missing or its md5 is not the card's `slim_of_md5`. CI downloads the release asset `cards.tar.gz` (the
-`<dir>` tree: `perf_card/` and the earlier `rk78_card/` cards) from the `perf-cards-raw` release:
-`tar -C <dir> -czf cards.tar.gz perf_card rk78_card && gh release create perf-cards-raw cards.tar.gz --latest=false --notes "Full performance cards"`
+`<dir>` tree: `perf_card/`) from the `perf-cards-raw` release:
+`tar -C <dir> -czf cards.tar.gz perf_card && gh release create perf-cards-raw cards.tar.gz --latest=false --notes "Full performance cards"`
 (a later card run: `gh release upload perf-cards-raw cards.tar.gz --clobber`). After a re-slim, the card md5s that moved are
 pinned in the READMEs and notebooks (`python tools/sync_readme_cards.py --check` names them), the site's
 `_generated/SOURCES.json` (`tools/sync_cards.py <eagle>`), each repo's docs (`python -m raptor_docs.fresh --write`) and hawk's `docs/perf_claims.json` (`tools/sync_perf_claims.py --eagle-root <eagle>`).

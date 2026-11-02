@@ -80,7 +80,7 @@ pass gives kernel-only time. The run writes ``card_<device-slug>.json`` and
 
 Reproduce (from the eagle repository root)::
 
-    python benchmarks/perf_card/perf_card.py --step rkf78
+    python benchmarks/perf_card/perf_card.py
 
 ``--quick`` runs N up to 1e4; ``--no-nsys``, ``--no-memory`` and
 ``--no-compile`` skip those passes (dry runs only).
@@ -97,7 +97,6 @@ import math
 import os
 import pathlib
 import shutil
-import sqlite3
 import statistics
 import subprocess
 import sys
@@ -112,7 +111,7 @@ import _card_common as cc  # noqa: E402
 # JAX reserves 75 % of the GPU when it starts; the arms of a cell share the device, so it takes what it uses
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
-SCRIPT_REL = "benchmarks/perf_card/rkf78.py"
+SCRIPT_REL = "benchmarks/perf_card/perf_card.py"
 
 # --------------------------------------------------------------------------- #
 # The problem
@@ -231,26 +230,17 @@ ARM_LOOP = {
     "eagle_cpu": "host loop: one attempt over the batch (OpenMP), the kernel marks "
                  "and counts its finished samples",
 }
-NS = (100_000, 1_000_000, 10_000_000)
+NS = (1_000_000, 10_000_000)
 #: ``spread``: e uniform in E_RANGE (divergent per-sample work); ``uniform``:
 #: every sample the same orbit, e = UNIFORM_E (no divergence).
-DISTRIBUTIONS = ("spread", "uniform")
+DISTRIBUTIONS = ("spread", "uniform", "spread-short")  # the cells' distributions
 UNIFORM_E = 0.45
 #: The arms of the committed card; the others stay CLI arms (``--arms``).
 COMMITTED_ARMS = ("eagle_graph", "eagle_graph_persist", "eagle_simulate", "cupy_masked",
                   "torch_graphed", "torch_compiled", "jax_vmap", "warp_kernel")
 #: The tail floor: the same kernel on this many samples (launch + tail cost).
 TAIL_FLOOR_N = 32
-REPS = 5
-#: An arm whose warm-up run says ``reps`` repetitions would take longer than
-#: ``SLOW_ARM_BUDGET_S`` runs ``SLOW_ARM_REPS`` instead (the masked baselines
-#: at a million samples take minutes each; their spread is already tight), and
-#: no more than fit in ``SLOW_ARM_CELL_S`` (at least one): at ten million
-#: samples one masked run takes many minutes. Every row records the
-#: repetitions it ran.
-SLOW_ARM_BUDGET_S = 60.0
-SLOW_ARM_REPS = 3
-SLOW_ARM_CELL_S = 300.0
+OVERHEAD_N = 64
 COMPACT_EVERY = 16
 REORDER_THETA = 0.5
 GRAPH_BLOCK = 16
@@ -1278,73 +1268,217 @@ def _verify(outs, inp, ref_arm):
     return report, steps
 
 
-def _run_n(n, reps, bus_id, names, kernel_pass=False, distribution="spread", arms=None):
-    """All arms at one N: build (unless ``arms`` are given), warm-up + verify, interleaved repetitions."""
-    inp = _inputs(n, distribution)
-    arms = arms if arms is not None else _make_arms(n, names)
-    order = list(arms)
-    outs, reps_for = {}, {}
-    for name in order:  # warm-up, also the verification run
-        warm, _, outs[name] = _timed(name, arms[name], inp)
-        reps_for[name] = (reps if warm * reps <= SLOW_ARM_BUDGET_S
-                          else max(1, min(reps, SLOW_ARM_REPS, int(SLOW_ARM_CELL_S // warm))))
-    ref = "eagle_graph" if "eagle_graph" in outs else order[0]
-    agreement, steps = _verify(outs, inp, ref)
-    max_attempts = float(steps["accepted"]["max"] + steps["rejected"]["max"]) or 1.0
-    if kernel_pass:
-        from cupy.cuda import nvtx
+# --------------------------------------------------------------------------- #
+# Timing: one fresh process per (arm, N, distribution) on a clean device
+# --------------------------------------------------------------------------- #
+#: A warm-up run longer than this makes the arm ``not_run: budget`` at that N and larger.
+ARM_RUN_BUDGET_S = 120.0
+#: Timed rounds of one (arm, cell) stop at this many seconds (at least one round is always timed).
+CELL_BUDGET_S = 300.0
+ROUNDS_MIN, ROUNDS_MAX, IQR_STOP = 3, 9, 0.02
+TIMING_PROBE_TIMEOUT_S = 3600
+#: ``spread-short`` ends at T_FINAL / SHORT_DIVISOR: the short-lived-sample regime.
+SHORT_DIVISOR = 16
+T_FINAL_FULL = T_FINAL
+CELLS = ((1_000_000, "spread"), (1_000_000, "uniform"), (10_000_000, "spread"),
+         (10_000_000, "uniform"), (10_000_000, "spread-short"))
+#: Test hook: ``EAGLE_CARD_FAULT=<oom|slow|abort>:<arm>[,...]`` makes that arm's timing child fail that way.
+_FAULT_ENV = "EAGLE_CARD_FAULT"
+_OOM_TEXT = _OUT_OF_MEMORY = ("out of memory", "OutOfMemory", "RESOURCE_EXHAUSTED", "cudaErrorMemoryAllocation",
+                              "MemoryError")
 
-        for r in range(reps):
-            for name in [a for a in order if r < reps_for[a]]:
-                nvtx.RangePush(f"rk78|{n}|{name}|{r}")
-                _timed(name, arms[name], inp)
-                nvtx.RangePop()
-        return None
-    walls = {a: [] for a in order}
-    e2e = {a: [] for a in order}
-    kern = {a: [] for a in order}
+
+def _set_cell(distribution):
+    """Apply a cell's distribution to this process; returns the input distribution ('spread' or 'uniform')."""
+    global T_FINAL
+    T_FINAL = T_FINAL_FULL / SHORT_DIVISOR if distribution == "spread-short" else T_FINAL_FULL
+    return "uniform" if distribution == "uniform" else "spread"
+
+
+def _fault(arm):
+    for item in os.environ.get(_FAULT_ENV, "").split(","):
+        kind, _, target = item.partition(":")
+        if target == arm:
+            return kind
+    return None
+
+
+def _time_probe(arm, n, distribution, bus_id, rounds_max, out_path):
+    """Child body: build ``arm`` at N alone, warm up, time rounds 3..9 until IQR/median <= 2 %, reply with the walls,
+    the agreement with the analytic truth and (in ``out_path``) the step counts the parent compares with the reference."""
+    import numpy as np
+
+    reply_fd = cc.probe_reply_fd()
+    gpu = arm != "eagle_cpu"
+    base = _set_cell(distribution)
+    if gpu:
+        _touch_device()
+    inp = _inputs(n, base)
     poller = cc.ClockPoller(bus_id)
     try:
-        for r in range(reps):
-            rot = order[r % len(order):] + order[:r % len(order)]
-            for name in [a for a in rot if r < reps_for[a]]:
-                poller.mark(name)
-                w, e, _ = _timed(name, arms[name], inp)
-                walls[name].append(w)
-                e2e[name].append(e)
-                if name == "eagle_cpu" and arms[name]["state"].kernel_s is not None:
-                    kern[name].append(arms[name]["state"].kernel_s)
-    finally:
-        clocks = poller.stop()
-    rows = []
-    for name in order:
-        attempts = agreement[name]["attempts_total"]
-        wall = _median_iqr(walls[name])
-        row = {
-            "n": n, "distribution": distribution, "arm": name, "wall_s": wall,
-            "repetitions": len(walls[name]),
-            "sm_clock_mhz": clocks.get("sm_clock_mhz_by_label", {}).get(name),
-            "running_fraction_mean": attempts / (n * max_attempts),
-            "end_to_end_s": _median_iqr(e2e[name]),
-            "attempts": attempts,
-            "attempt_samples_per_s": attempts / wall["median"],
-            "useful_flops_per_s": FLOPS_PER_ATTEMPT * attempts / wall["median"],
-            "kernel_only_s": (statistics.median(kern[name]) if kern[name] else None),
-            "build_s": arms[name].get("build_s"),
-            "compile_s": arms[name].get("compile_s"),
-            "slot_fill": getattr(arms[name].get("report"),
-                                       "slot_fill", None),
-            # the launch shape the runner actually took ("band", "fused_one"
-            # or "persist"; None for a non-eagle arm) -- eagle_simulate
-            # auto-routes past the band at/above capacity, so this is read off the run, never assumed.
-            "run_mode": getattr(arms[name].get("report"), "mode", None),
-        }
-        if "fired" in arms[name]:
-            row["reorders_fired"] = arms[name]["fired"][-1] if arms[name]["fired"] else None
-        rows.append(row)
-    extra = {"n": n, "distribution": distribution, "reference_arm": ref, "agreement": agreement, "steps": steps,
-             "gpu_state_during": clocks}
-    return rows, extra
+        if _fault(arm) == "abort":
+            os.abort()
+        if _fault(arm) == "oom":
+            raise MemoryError("out of memory (forced by EAGLE_CARD_FAULT)")
+        a = _make_arms(n, (arm,))[arm]
+        warm, _, out = _timed(arm, a, inp)
+    except BaseException as err:  # noqa: BLE001  (an allocation failure of any library is a row, not a crash)
+        poller.stop()
+        if any(k in f"{type(err).__name__} {err}" for k in _OOM_TEXT):
+            cc.probe_reply(reply_fd, {"status": "out_of_memory"})
+            return
+        raise
+    if _fault(arm) == "slow":
+        warm = ARM_RUN_BUDGET_S + 1.0
+    reply = {"build_s": a.get("build_s"), "compile_s": a.get("compile_s"), "warm_s": warm}
+    if warm > ARM_RUN_BUDGET_S:
+        poller.stop()
+        cc.probe_reply(reply_fd, {**reply, "status": "not_run: budget"})
+        return
+    agreement, steps = _verify({arm: out}, inp, arm)
+    np.savez(out_path, n_acc=out["n_acc"].astype(np.uint32), n_rej=out["n_rej"].astype(np.uint32))
+    walls, e2e, kern, rule = [], [], [], "rounds_max"
+    started = time.perf_counter()
+    while len(walls) < rounds_max:
+        poller.mark(arm)
+        w, e, _ = _timed(arm, a, inp)
+        walls.append(w)
+        e2e.append(e)
+        if arm == "eagle_cpu" and a["state"].kernel_s is not None:
+            kern.append(a["state"].kernel_s)
+        if len(walls) >= min(ROUNDS_MIN, rounds_max):
+            q1, med, q3 = np.percentile(walls, [25, 50, 75])
+            if q3 - q1 <= IQR_STOP * med:
+                rule = "iqr<=2%"
+                break
+        if time.perf_counter() - started > CELL_BUDGET_S:
+            rule = "cell budget 300 s"
+            break
+    clocks = poller.stop()
+    cc.probe_reply(reply_fd, {
+        **reply, "status": "ok", "walls": walls, "e2e": e2e, "stop_rule": rule, "kernel_s": kern,
+        "agreement": agreement[arm], "steps": steps, "gpu_state_during": clocks,
+        "sm_clock_mhz": clocks.get("sm_clock_mhz_by_label", {}).get(arm),
+        "slot_fill": getattr(a.get("report"), "slot_fill", None),
+        "run_mode": getattr(a.get("report"), "mode", None),
+        "reorders_fired": (a["fired"][-1] if a.get("fired") else None) if "fired" in a else None})
+
+
+def _time_cell_arm(arm, n, distribution, bus_id, rounds_max, work):
+    """Parent: one timing child. A failure is a row: ``out_of_memory`` or ``failed: <last error line>``."""
+    out_path = work / f"counts_{arm}_{n}_{distribution}.npz"
+    try:
+        r = cc.run_probe(__file__, ["--timing-probe", arm, str(n), distribution, bus_id, str(rounds_max),
+                                    str(out_path)], timeout=TIMING_PROBE_TIMEOUT_S,
+                         what=f"timing probe {arm} {n} {distribution}")
+    except subprocess.TimeoutExpired:
+        r = {"status": f"failed: no result in {TIMING_PROBE_TIMEOUT_S} s"}
+    except (RuntimeError, ValueError, IndexError) as err:
+        text = str(err)
+        lines = [ln for ln in text.splitlines() if ln.strip()]
+        r = {"status": "out_of_memory" if any(k in text for k in _OOM_TEXT)
+             else "failed: " + (lines[-1][:300] if len(lines) > 1 else "the process ended without a result")}
+    r.update(n=n, distribution=distribution, arm=arm, counts_path=str(out_path))
+    return r
+
+
+def _row_of(r, fma_dev, ops_per_attempt, samples_per_lane):
+    """One result row from a timing reply; a non-``ok`` reply is a row with its status and the rule that applied."""
+    row = {"n": r["n"], "distribution": r["distribution"], "arm": r["arm"], "status": r["status"]}
+    if r["status"] != "ok":
+        row["rule"] = {"not_run: budget": f"> {ARM_RUN_BUDGET_S:g} s per run (warm-up {r.get('warm_s', 0):.0f} s)"
+                       }.get(r["status"], r["status"])
+        return row
+    wall = _median_iqr(r["walls"])
+    attempts = r["agreement"]["attempts_total"]
+    rate = attempts / wall["median"]
+    row.update(
+        wall_s=wall, rounds=len(r["walls"]), rule=r["stop_rule"],
+        sm_clock_mhz=r.get("sm_clock_mhz"), end_to_end_s=_median_iqr(r["e2e"]),
+        attempts=attempts, attempt_samples_per_s=rate,
+        useful_flops_per_s=FLOPS_PER_ATTEMPT * attempts / wall["median"],
+        eff_sol=(None if fma_dev is None or r["arm"] == "eagle_cpu" else rate * ops_per_attempt / fma_dev),
+        samples_per_lane=samples_per_lane, build_s=r.get("build_s"), compile_s=r.get("compile_s"),
+        kernel_only_s=(statistics.median(r["kernel_s"]) if r.get("kernel_s") else None),
+        slot_fill=r.get("slot_fill"), run_mode=r.get("run_mode"))
+    if r.get("reorders_fired") is not None:
+        row["reorders_fired"] = r["reorders_fired"]
+    return row
+
+
+def _compare_with_reference(replies):
+    """The agreement of every ok reply with the truth (from the child) and the reference arm (step counts, here)."""
+    import numpy as np
+
+    ok = {r["arm"]: r for r in replies if r["status"] == "ok"}
+    if not ok:
+        return None, "none", {}
+    ref = "eagle_graph" if "eagle_graph" in ok else next(iter(ok))
+    with np.load(ok[ref]["counts_path"]) as z:
+        ref_acc, ref_rej = z["n_acc"].astype(np.int64), z["n_rej"].astype(np.int64)
+    agreement = {}
+    for arm, r in ok.items():
+        with np.load(r["counts_path"]) as z:
+            d_acc, d_rej = z["n_acc"].astype(np.int64) - ref_acc, z["n_rej"].astype(np.int64) - ref_rej
+        agreement[arm] = {**r["agreement"],
+                          "samples_with_step_counts_differing_from_reference": int(((d_acc != 0) | (d_rej != 0)).sum()),
+                          "max_abs_accepted_difference": int(np.abs(d_acc).max()),
+                          "max_abs_rejected_difference": int(np.abs(d_rej).max())}
+    for r in replies:
+        pathlib.Path(r["counts_path"]).unlink(missing_ok=True)
+    return agreement, ref, ok[ref]["steps"]
+
+
+#: Register-only DFMA chains: the device's FP64 instruction rate, the speed of light eff_sol is a fraction of.
+_FMA_PROBE_SRC = r'''
+extern "C" __global__ void fma_chain(double* out, int iters) {
+  double a0 = threadIdx.x * 1e-3 + 1.0, a1 = a0 + 1, a2 = a0 + 2, a3 = a0 + 3, a4 = a0 + 4, a5 = a0 + 5, a6 = a0 + 6, a7 = a0 + 7;
+  const double b = 1.0000001, c = 1e-9;
+  for (int i = 0; i < iters; ++i) {
+    a0 = fma(a0, b, c); a1 = fma(a1, b, c); a2 = fma(a2, b, c); a3 = fma(a3, b, c);
+    a4 = fma(a4, b, c); a5 = fma(a5, b, c); a6 = fma(a6, b, c); a7 = fma(a7, b, c);
+  }
+  out[blockIdx.x * blockDim.x + threadIdx.x] = a0 + a1 + a2 + a3 + a4 + a5 + a6 + a7;
+}'''
+FMA_PROBE_ITERS = 20000
+FMA_PER_ITER = 8
+
+
+def _fma_probe(sm_count):
+    """Thread-level DFMA instructions per second the device sustains (best of three launches)."""
+    import cupy as cp
+
+    kernel = cp.RawKernel(_FMA_PROBE_SRC, "fma_chain")
+    blocks, threads = sm_count * 8, 256
+    out = cp.empty(blocks * threads)
+    kernel((blocks,), (threads,), (out, FMA_PROBE_ITERS))
+    cp.cuda.runtime.deviceSynchronize()
+    best = None
+    for _ in range(3):
+        t0 = time.perf_counter()
+        kernel((blocks,), (threads,), (out, FMA_PROBE_ITERS))
+        cp.cuda.runtime.deviceSynchronize()
+        dt = time.perf_counter() - t0
+        best = dt if best is None else min(best, dt)
+    return blocks * threads * FMA_PROBE_ITERS * FMA_PER_ITER / best
+
+
+def _ops_per_attempt(work, arch):
+    """(the workload constant of ``sol_reference.json``, the audit: DP instructions counted in the fused attempt's PTX)."""
+    const = json.loads((HERE.parent / "sol_reference.json").read_text()).get("ops_per_attempt")
+    audit = {}
+    try:
+        from hawk.artifact import build_bundle
+
+        d = work / "ops_audit"
+        build_bundle([_define_kernel()], d, targets=("cuda",))
+        for ptx in sorted(d.glob("*.ptx"))[:1]:
+            for a in sorted({arch, "sm_80"}):
+                got = cc.sass_dp_instruction_count(ptx, a)
+                audit[a] = None if got is None else got["count"]
+    except Exception as err:  # noqa: BLE001  (the audit is a record; its absence is recorded)
+        audit["error"] = f"{type(err).__name__}: {err}"[:200]
+    return const, audit
 
 
 # --------------------------------------------------------------------------- #
@@ -1396,7 +1530,6 @@ def _touch_device():
 
 
 def _memory_probe(arm, n, bus_id):
-    import gc
 
     reply_fd = cc.probe_reply_fd()
     gpu = arm != "eagle_cpu"
@@ -1457,151 +1590,6 @@ def _run_memory_pass(ns, bus_id, names):
     return rows
 
 
-# --------------------------------------------------------------------------- #
-# Compile-time pass (fresh process per measurement; cold = empty caches)
-# --------------------------------------------------------------------------- #
-COMPILE_REPS = 3
-NO_COMPILE_ARMS = ("torch_masked", "torch_graphed")
-_CACHE_ENV = {"HAWK_CACHE_DIR": "hawk", "CUPY_CACHE_DIR": "cupy",
-              "CUDA_CACHE_PATH": "cuda", "RK78_JAX_CACHE": "jax",
-              "WARP_CACHE_PATH": "warp"}
-_COMPILE_METHOD = (
-    "Its own pass, never part of any wall. Each measurement is a fresh process: "
-    "imports and the GPU context run untimed, then the timer spans the first "
-    "call to a ready kernel (trace + code generation + compile + load, or the "
-    "cache lookup). Cold: every cache empty (HAWK_CACHE_DIR, CUPY_CACHE_DIR, "
-    "CUDA_CACHE_PATH, WARP_CACHE_PATH and JAX's persistent compilation cache, "
-    "each a fresh directory); warm: a new process on the caches the first cold "
-    "run populated. eagle GPU: eagle.deploy of the hawk attempt kernel and of "
-    "its active-set variant (host and device builds each), and one eagle graph "
-    f"of each built and run on {WARM_N} samples (eagle.simulate deploys the "
-    "first again, a cache hit). eagle CPU: the same eagle.deploy of the attempt "
-    "kernel (host and device builds) and one host run. CuPy: one "
-    f"masked attempt on {WARM_N} samples (every elementwise kernel compiled on "
-    "first use). JAX: lower + compile from abstract shapes at N. Warp: the "
-    "kernel module (code generation, compile, load) and one launch. Medians "
-    "of 3 cold and 3 warm processes.")
-
-
-def _compile_keys(ns, arms=ARMS):
-    keys = [("hawk_cuda", list(EAGLE_GPU_ARMS),
-             "eagle.deploy of the attempt kernel and its active-set variant"),
-            ("hawk_host", ["eagle_cpu"], "eagle.deploy of the attempt kernel, host run"),
-            ("cupy", ["cupy_masked"], "CuPy elementwise kernels")]
-    if "jax_vmap" in arms:
-        keys += [(f"jax:{n}", ["jax_vmap"], f"XLA executable, N = {n:,}") for n in ns]
-    if "warp_kernel" in arms:
-        keys.append(("warp", ["warp_kernel"], "Warp kernel module"))
-    return keys
-
-
-def _compile_probe(key):
-    reply_fd = cc.probe_reply_fd()
-    tiny = _inputs(WARM_N)
-    if key.startswith("jax:"):
-        import jax
-
-        cc.jax_persistent_cache(os.environ["RK78_JAX_CACHE"])
-        jax.devices("gpu")
-        t0 = time.perf_counter()
-        _jax_compile(int(key.split(":")[1]))
-        seconds = time.perf_counter() - t0
-    else:
-        import cupy as cp
-
-        import eagle  # noqa: F401  (imports untimed)
-        import eagle.plan  # noqa: F401
-        import hawk  # noqa: F401
-        import hawk.artifact  # noqa: F401
-        import hawk.compile  # noqa: F401
-        if key == "warp":
-            import warp  # noqa: F401
-        cp.cuda.Device().synchronize()
-        names = {"hawk_cuda": ("eagle_graph", "eagle_graph_compact"),
-                 "hawk_host": ("eagle_cpu",), "cupy": ("cupy_masked",),
-                 "warp": ("warp_kernel",)}[key]
-        t0 = time.perf_counter()
-        arms = _make_arms(WARM_N, names)
-        if key == "cupy":
-            st = arms["cupy_masked"]["state"]
-            st.upload(tiny)
-            p = st.planes
-            cupy_attempt([p[k] for k in STATE_NAMES], p["t"], p["h"], p["n_acc"],
-                         p["n_rej"])
-            cp.cuda.Device().synchronize()
-        else:
-            for name, a in arms.items():
-                _timed(name, a, tiny)
-        seconds = time.perf_counter() - t0
-    cc.probe_reply(reply_fd, {"seconds": seconds})
-
-
-def _run_compile_pass(ns, run_arms=ARMS):
-    rows = []
-    for key, arms, what in _compile_keys(ns, run_arms):
-        cold, warm = cc.cold_warm(__file__, ["--compile-probe", key], _CACHE_ENV,
-                                  reps=COMPILE_REPS, prefix="rk78_cache_", timeout=900,
-                                  what=f"compile probe {key}")
-        rows.append({"key": key, "arms": arms, "what": what,
-                     "cold_s": _median_iqr(cold), "warm_s": _median_iqr(warm)})
-        print(f"compile {key:12s} cold {statistics.median(cold):.3g}s "
-              f"warm {statistics.median(warm):.3g}s", flush=True)
-    return rows
-
-
-# --------------------------------------------------------------------------- #
-# Kernel-only pass (Nsight Systems)
-# --------------------------------------------------------------------------- #
-KERNEL_PASS_RUNS = 3
-#: The masked arms' traced runs are long (every sample, every attempt, until
-#: the slowest finishes): one traced run each, after the warm-up.
-KERNEL_PASS_RUNS_MASKED = 1
-MASKED_ARMS = ("cupy_masked", "torch_masked", "torch_graphed", "torch_compiled")
-
-
-def _nsys_kernel_times(ns, work, names):
-    nsys = cc.which("nsys")
-    if nsys is None:
-        return None, None, "nsys not found"
-    gpu = [a for a in names if a != "eagle_cpu"]
-    out, out_counts, failed = {}, {}, []
-    for n in ns:
-        for arm in gpu:
-            try:
-                ranges = cc.nsys_ranges(nsys, work / f"kp_{n}_{arm}", __file__,
-                                        ["--kernel-pass", "--ns", str(n), "--arms", arm],
-                                        f"rk78|{n}|{arm}|", timeout=3600)
-                valid = [(seconds, memcpy, api) for _text, count, seconds, memcpy, api
-                        in ranges if count > 0]
-                out[(n, arm)] = (statistics.median(s for s, _, _ in valid)
-                                 if valid else None)
-                if valid:
-                    memcpys = [m for _, m, _ in valid if m is not None]
-                    apis = [a for _, _, a in valid if a is not None]
-                    out_counts[(n, arm)] = {
-                        "memcpy": statistics.median(memcpys) if memcpys else None,
-                        "api_calls": statistics.median(apis) if apis else None}
-                else:
-                    out_counts[(n, arm)] = None
-            except (subprocess.SubprocessError, sqlite3.Error, OSError):
-                failed.append(f"{arm}@{n}")
-                out[(n, arm)] = None
-                out_counts[(n, arm)] = None
-    note = (f"{cc.nsys_version(nsys)}: sum of kernel durations over one run, median of "
-            f"{KERNEL_PASS_RUNS} traced runs ({KERNEL_PASS_RUNS_MASKED} for the masked "
-            "arms; --cuda-graph-trace=node) after a warm-up, a separate "
-            "process per (arm, N); includes the loop-control kernels "
-            "and every library kernel")
-    if failed:
-        note += "; traced process failed for: " + ", ".join(failed)
-    return out, out_counts, note
-
-
-# --------------------------------------------------------------------------- #
-# Code comparison (the marked blocks of this file)
-# --------------------------------------------------------------------------- #
-#: Which marked blocks make up each arm's code (the scheme block is shared by
-#: every arm except Warp, which writes its stages in its own kernel).
 ARM_CODE = {
     "eagle_graph": ("hawk_kernel", "hawk_launch"),
     "eagle_graph_compact": ("hawk_kernel_active", "hawk_launch"),
@@ -1748,12 +1736,8 @@ def render_markdown(card: dict) -> str:
         "",
         f"**Device:** {dev['name']} (compute capability {dev['compute_capability']}, "
         f"{dev['sm_count']} SMs). **Peak FP64:** {_fmt_rate(card['peak']['fp64_flops'])} "
-        f"FLOP/s. Medians of {card['method']['repetitions']} interleaved repetitions"
-        + (f" ({card['method']['slow_arm_reps']} for an arm whose warm-up says "
-           f"{card['method']['repetitions']} would take over "
-           f"{card['method']['slow_arm_budget_s']:g} s)"
-           if 'slow_arm_reps' in card['method'] else "")
-        + "; IQR in parentheses.",
+        f"FLOP/s. Medians of {min(card['method']['rounds']['min'], card['method']['rounds']['max'])} to {card['method']['rounds']['max']} rounds "
+        f"per arm, each arm in its own process (rounds stop at IQR/median <= 2 %); IQR in parentheses.",
         "",
         f"**Workload:** {wl['problem']} Tolerance rtol = atol = {wl['rtol']:g}; "
         f"final time {wl['t_final']:g} ({wl['t_final'] / (2 * math.pi):.3g} periods). "
@@ -1771,27 +1755,35 @@ def render_markdown(card: dict) -> str:
               f"({card['code_lines']['shared_scheme_lines']} lines).", ""]
     mem = {(r["n"], r["arm"]): r for r in (card.get("memory") or {}).get("rows", [])}
     lines += [
-        "| N | distribution | arm | wall (IQR) | kernel-only | end-to-end | attempts·samples/s "
-        "| useful FLOP/s (% peak) | SM clock | device memory (× minimum) | host memory |",
-        "|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| N | distribution | arm | wall (IQR) | rounds | end-to-end | attempts·samples/s "
+        "| useful FLOP/s (% peak) | eff_sol | SM clock | device memory (× minimum) | host memory |",
+        "|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     peak = card["peak"]["fp64_flops"]
     for row in sorted(card["results"], key=lambda r: (r["n"], r.get("distribution", ""), ARMS.index(r["arm"]))):
         m = mem.get((row["n"], row["arm"]))
+        if row["status"] != "ok":
+            lines.append(f"| {row['n']:,} | {row.get('distribution', 'spread')} | {ARM_LABELS[row['arm']]} "
+                         f"| {row['status'].replace('_', ' ')} ({row['rule']}) | – | – | – | – | – | – "
+                         f"| {_dev_cell(m)} | – |")
+            continue
         pct = (None if row["arm"] == "eagle_cpu" or not peak
                else row["useful_flops_per_s"] / peak)
         lines.append(
             f"| {row['n']:,} | {row.get('distribution', 'spread')} | {ARM_LABELS[row['arm']]} "
             f"| {_fmt_time(row['wall_s']['median'])} ({_fmt_time(row['wall_s']['iqr'])}) "
-            f"| {_fmt_time(row['kernel_only_s'])} "
+            f"| {row['rounds']} "
             f"| {_fmt_time(row['end_to_end_s']['median'])} "
             f"| {_fmt_rate(row['attempt_samples_per_s'])} "
             f"| {_fmt_rate(row['useful_flops_per_s'])} ({_fmt_pct(pct)}) "
+            f"| {'–' if row['eff_sol'] is None else format(row['eff_sol'], '.3f')} "
             f"| {_fmt_mhz(row.get('sm_clock_mhz'))} "
             f"| {_dev_cell(m)} "
             f"| {_fmt_mib(m['host_peak_bytes']) if m and m['host_peak_bytes'] is not None else '–'} |")
     lines.append("")
     untimed = sorted({n for n, _ in mem} - {r["n"] for r in card["results"]})
+    lines += [f"Device FP64 FMA rate (probe): {_fmt_rate(card['device_fma_per_s'])} instructions/s; "
+              f"ops per attempt {card['workload']['ops_per_attempt']}.", ""] if card.get("device_fma_per_s") else []
     if untimed:  # memory-only sizes: too long to time on this device, but whether an arm fits is the point
         lines += ["### Device memory at sizes not timed here", "",
                   "| N | " + " | ".join(ARM_LABELS[a] for a in card["arms"] if a != "eagle_cpu") + " |",
@@ -1811,24 +1803,22 @@ def render_markdown(card: dict) -> str:
             if a is None:
                 continue
             lines.append(
-                f"| {extra['n']:,} | {ARM_LABELS[arm]} "
+                f"| {extra['n']:,} ({extra.get('distribution', 'spread')}) | {ARM_LABELS[arm]} "
                 f"| {a['max_position_error_vs_truth']:.2e} "
                 f"| {a['max_error_over_bound']:.2e} "
                 f"| {a['samples_with_step_counts_differing_from_reference']:,} "
                 f"| {a['max_abs_accepted_difference']} / "
                 f"{a['max_abs_rejected_difference']} |")
     lines.append("")
-    top = max(card["per_n"], key=lambda e: (e["n"], e.get("distribution") == "spread"))
-    st = top["steps"]
-    lines += [f"Steps per sample at N = {top['n']:,} (reference arm): accepted "
+    seen = [e for e in card["per_n"] if e["steps"]]
+    top = max(seen, key=lambda e: (e["n"], e.get("distribution") == "spread")) if seen else None
+    st = top["steps"] if top else None
+    lines += [] if top is None else [f"Steps per sample at N = {top['n']:,} (reference arm): accepted "
               f"min {st['accepted']['min']:.0f} / median {st['accepted']['p50']:.0f} / "
               f"p90 {st['accepted']['p90']:.0f} / max {st['accepted']['max']:.0f}; "
               f"rejected min {st['rejected']['min']:.0f} / median "
               f"{st['rejected']['p50']:.0f} / max {st['rejected']['max']:.0f}.", ""]
     lines += cc.fit_section(card, ARM_LABELS)
-    lines += cc.compile_table(card.get("compile_time") or {}, ARM_LABELS, _fmt_time,
-                              " (PyTorch's eager kernels ship prebuilt; the CUDA graph "
-                              "is recorded, not compiled).")
     if (card.get("memory") or {}).get("rows"):
         lines += ["### Memory method", "", card["memory"]["method"], ""]
     if card.get("torch_compile_note"):
@@ -1839,210 +1829,192 @@ def render_markdown(card: dict) -> str:
 # --------------------------------------------------------------------------- #
 # Main
 # --------------------------------------------------------------------------- #
+def _stub(arm, n, dist, status, work, warm_s=None):
+    return {"arm": arm, "n": n, "distribution": dist, "status": status, "warm_s": warm_s or 0.0,
+            "counts_path": str(work / "missing.npz")}
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--out-dir", type=pathlib.Path, default=HERE)
-    ap.add_argument("--reps", type=int, default=REPS)
-    ap.add_argument("--ns", type=int, nargs="+", default=list(NS))
+    ap.add_argument("--reps", type=int, default=ROUNDS_MAX,
+                    help=f"most timed rounds per (arm, cell); rounds stop at IQR/median <= {IQR_STOP:.0%} (default {ROUNDS_MAX})")
+    ap.add_argument("--ns", type=int, nargs="+", help="sizes (default: the committed cells)")
     ap.add_argument("--arms", nargs="+", default=list(COMMITTED_ARMS))
     ap.add_argument("--distributions", nargs="+", choices=DISTRIBUTIONS,
-                    default=list(DISTRIBUTIONS))
+                    help="with --ns: the distributions of each size (default: spread, uniform)")
     ap.add_argument("--smoke", action="store_true",
-                    help="smallest N, one repetition, no memory/compile/nsys passes, "
-                         "card written to a temporary directory")
-    ap.add_argument("--quick", action="store_true")
-    ap.add_argument("--no-nsys", action="store_true")
+                    help="smallest N, one round, no memory pass, card written to a temporary directory")
     ap.add_argument("--no-memory", action="store_true")
     ap.add_argument("--memory-ns", type=int, nargs="+",
-                    help="sizes of the memory pass (default: --ns); a size too long to time can still show what fits")
-    ap.add_argument("--no-compile", action="store_true")
-    ap.add_argument("--check", action="store_true",
-                    help="build, run every arm once per N, print agreement, no card")
-    ap.add_argument("--kernel-pass", action="store_true", help=argparse.SUPPRESS)
+                    help="sizes of the memory pass (default: the cells' sizes); a size too long to time can still show what fits")
     ap.add_argument("--memory-probe", nargs=3, help=argparse.SUPPRESS)
-    ap.add_argument("--compile-probe", help=argparse.SUPPRESS)
+    ap.add_argument("--timing-probe", nargs=6, help=argparse.SUPPRESS)
     args = ap.parse_args(argv)
     if args.memory_probe:
         a, n, bus = args.memory_probe
         _memory_probe(a, int(n), bus)
         return 0
-    if args.compile_probe:
-        _compile_probe(args.compile_probe)
+    if args.timing_probe:
+        a, n, dist, bus, rounds, out = args.timing_probe
+        _time_probe(a, int(n), dist, bus, int(rounds), out)
         return 0
     if args.smoke:
-        args.ns, args.reps, args.distributions = [1_000], 1, ["spread"]
-        args.no_nsys = args.no_memory = args.no_compile = True
+        args.ns, args.reps, args.distributions, args.no_memory = [1_000], 1, ["spread"], True
         if args.out_dir == HERE:
-            args.out_dir = pathlib.Path(tempfile.mkdtemp(prefix="rkf78_smoke_"))
-    if args.reps < 5 and not (args.check or args.kernel_pass or args.smoke):
-        ap.error("--reps must be >= 5")
-    if args.quick:
-        args.ns = [n for n in args.ns if n <= 10_000]
+            args.out_dir = pathlib.Path(tempfile.mkdtemp(prefix="perf_card_smoke_"))
+    if args.ns:
+        cells = [(n, d) for n in args.ns for d in (args.distributions or ("spread", "uniform"))]
+    else:
+        cells = list(CELLS)
+    ns = sorted({n for n, _ in cells})
     names, arms_not_run = _select_arms(args.arms)
     for arm, why in arms_not_run.items():
         print(f"arm {arm} not run: {why}", flush=True)
 
     t_start = time.perf_counter()
-    work = pathlib.Path(tempfile.mkdtemp(prefix="rkf78_card_"))
+    work = pathlib.Path(tempfile.mkdtemp(prefix="perf_card_"))
     device, peak, slug, bus_id = _device_facts()
-
-    if args.kernel_pass:
-        runs = (KERNEL_PASS_RUNS_MASKED if set(names) <= set(MASKED_ARMS)
-                else KERNEL_PASS_RUNS)
-        for n in args.ns:
-            _run_n(n, runs, bus_id, names, kernel_pass=True)
-        shutil.rmtree(work, ignore_errors=True)
-        return 0
-    if args.check:
-        for n in args.ns:
-            inp = _inputs(n)
-            arms = _make_arms(n, names)
-            outs = {}
-            for name, arm in arms.items():
-                w, _, outs[name] = _timed(name, arm, inp)
-                print(f"N={n:>8,} {name:20s} {w:9.4f}s", flush=True)
-            report, steps = _verify(outs, inp, names[0])
-            print(json.dumps({"steps": steps, "agreement": report}, indent=1), flush=True)
-        shutil.rmtree(work, ignore_errors=True)
-        return 0
-
     _check_kernel_bodies()
     sources = _kernel_sources(work)
-    cells = {}
-    for n in args.ns:
-        arms = _make_arms(n, names)  # one build per N: the distributions share the shapes
-        for dist in args.distributions:
-            t0 = time.perf_counter()
-            cells[(dist, n)] = _run_n(n, args.reps, bus_id, names, distribution=dist, arms=arms)
-            best = min(cells[(dist, n)][0], key=lambda r: r["wall_s"]["median"])
-            print(f"{dist} N={n:>8,} fastest={best['arm']} "
-                  f"({time.perf_counter() - t0:.1f}s)", flush=True)
-        del arms
-        gc.collect()
-        cc.trim_pools()  # the next N's arms start from an empty device
 
-    # no re-time at a low clock: the heavy arms run at their own lower clock (a power-capped card holds them there,
-    # a second timing reads the same), so each row records the clock it ran at instead
-    results = [r for rows, _ in cells.values() for r in rows]
-    per_n = [extra for _, extra in cells.values()]
-    tail = {d: _run_n(TAIL_FLOOR_N, args.reps, bus_id, ("eagle_graph",) if "eagle_graph" in names
-                      else names[:1], distribution=d)[0][0]["wall_s"]["median"] * 1e3
-            for d in args.distributions}
-    ktimes, kcounts, kernel_note = None, None, "skipped (--no-nsys)"
-    if not args.no_nsys:
-        ktimes, kcounts, kernel_note = _nsys_kernel_times(args.ns, work, names)
-        for row in results:
-            if row["arm"] != "eagle_cpu" and ktimes is not None and row["distribution"] == "spread":
-                row["kernel_only_s"] = ktimes.get((row["n"], row["arm"]))
+    # the memory pass first: an arm out of memory at N is never built at N or larger
+    memory_rows = [] if args.no_memory else _run_memory_pass(args.memory_ns or ns, bus_id, names)
+    oom_from = {}
+    for r in memory_rows:
+        if r.get("out_of_memory"):
+            oom_from[r["arm"]] = min(r["n"], oom_from.get(r["arm"], r["n"]))
+
+    budget_from, replies, per_cell = {}, [], []
+    for n, dist in cells:
+        t0 = time.perf_counter()
+        cell = []
+        for arm in names:
+            if arm in oom_from and n >= oom_from[arm]:
+                r = _stub(arm, n, dist, "out_of_memory", work)
+            elif arm in budget_from and n >= budget_from[arm]:
+                r = _stub(arm, n, dist, "not_run: budget", work)
+            else:
+                r = _time_cell_arm(arm, n, dist, bus_id, args.reps, work)
+                if r["status"] == "not_run: budget":
+                    budget_from[arm] = n
+                if r["status"] == "out_of_memory":
+                    oom_from[arm] = n
+            cell.append(r)
+            print(f"{dist} N={n:>9,} {arm:22s} {r['status']}", flush=True)
+        agreement, ref, steps = _compare_with_reference(cell)
+        per_cell.append({"n": n, "distribution": dist, "reference_arm": ref, "agreement": agreement or {},
+                         "steps": steps})
+        replies += cell
+        print(f"{dist} N={n:>9,} done ({time.perf_counter() - t0:.1f}s)", flush=True)
+
+    # method cells: the floor a launch plus a tail costs, and the fixed overhead of a tiny batch
+    def method_cell(n, arm, dist="spread"):
+        r = _time_cell_arm(arm, n, dist, bus_id, args.reps, work)
+        pathlib.Path(r["counts_path"]).unlink(missing_ok=True)
+        if r["status"] != "ok":
+            return {"status": r["status"]}
+        return {"status": "ok", "wall_s": _median_iqr(r["walls"]), "rounds": len(r["walls"])}
+
+    floor_arm = "eagle_graph" if "eagle_graph" in names else names[0]
+    tail = {d: method_cell(TAIL_FLOOR_N, floor_arm, d) for d in (args.distributions or ("spread", "uniform"))}
+    overhead = {} if args.smoke else {a: method_cell(OVERHEAD_N, a) for a in names if a.startswith("eagle")}
+
+    sm_count = device["sm_count"]
+    try:
+        fma_dev = _fma_probe(sm_count)
+    except Exception as err:  # noqa: BLE001
+        print(f"FMA probe failed: {err}", flush=True)
+        fma_dev = None
+    ops, audit = _ops_per_attempt(work, f"sm_{device['compute_capability'].replace('.', '')}")
+    threads_per_sm = _threads_per_sm()
+    results = [_row_of(r, fma_dev, ops, r["n"] / (sm_count * threads_per_sm)) for r in replies]
     for row in results:
-        row["fraction_of_peak_fp64"] = (
-            None if row["arm"] == "eagle_cpu" or not peak["fp64_flops"]
-            else row["useful_flops_per_s"] / peak["fp64_flops"])
-        # nsys_counts: memcpy/runtime-API-call counts from the same nsys pass.
-        row["nsys_counts"] = (kcounts.get((row["n"], row["arm"]))
-                              if row["arm"] != "eagle_cpu" and kcounts is not None
-                              else None)
-        # slot_fill: filled per row from the persist arm's own report (the
-        # persistent launch); every other arm's row has none, so default it to None.
-        row.setdefault("slot_fill", None)
-    # The SM clock the repetitions ran at (ClockPoller: NVML where
-    # available, else nvidia-smi) and the FP64 peak at that clock.
-    clocks = [e["gpu_state_during"].get("sm_clock_mhz_median") for e in per_n]
-    clock_sources = {e["gpu_state_during"].get("source") for e in per_n
-                     if e["gpu_state_during"].get("source")}
-    clocks = [c for c in clocks if c is not None]
-    if clocks and peak["fp64_flops"]:
-        observed_hz = statistics.median(clocks) * 1e6
-        peak["observed_sm_clock_hz"] = observed_hz
-        peak["fp64_flops_at_observed_sm_clock"] = (
-            peak["fp64_flops"] * observed_hz / device["clock_rate_hz"])
-        peak["observed_clock_source"] = (
-            "median over N of the median per-repetition clock reading ("
-            + "; ".join(sorted(clock_sources)) + ")")
-        for row in results:
-            row["fraction_of_peak_fp64_at_observed_clock"] = (
-                None if row["fraction_of_peak_fp64"] is None
-                else row["useful_flops_per_s"] / peak["fp64_flops_at_observed_sm_clock"])
-    memory_rows = [] if args.no_memory else _run_memory_pass(args.memory_ns or args.ns, bus_id, names)
-    compile_rows = [] if args.no_compile else _run_compile_pass(args.ns, names)
+        if row["status"] == "ok":
+            row["fraction_of_peak_fp64"] = (None if row["arm"] == "eagle_cpu" or not peak["fp64_flops"]
+                                            else row["useful_flops_per_s"] / peak["fp64_flops"])
+    over = [r for r in results if r.get("eff_sol") is not None and r["eff_sol"] > 1.0]
+    memory_card = {"method": _MEMORY_METHOD, "rows": memory_rows}
     card = {
-        "schema": "eagle-rk78-card/3",
-        "toolchain": cc.toolchain(),
-        "device_slug": slug,
-        "script": SCRIPT_REL,
-        "script_md5": cc.md5(__file__),
-        "common_md5": cc.md5(cc.__file__),
+        "schema": "eagle-ensemble-card/1",
+        "toolchain": cc.toolchain(), "device_slug": slug, "script": SCRIPT_REL,
+        "script_md5": cc.md5(__file__), "common_md5": cc.md5(cc.__file__),
         "generated_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "device": device, "peak": peak, "software": _software(),
-        "kernel_sources_md5": sources,
+        "release": cc.release_string(),
+        "device": device, "peak": peak, "software": _software(), "kernel_sources_md5": sources,
         "workload": {
             "problem": ("two-body Kepler orbits (mu = 1, float64) from periapsis, "
-                        f"a = {SEMI_MAJOR:g}, e uniform in [{E_RANGE[0]:g}, "
-                        f"{E_RANGE[1]:g}], random orientation; adaptive RKF7(8) "
+                        f"a = {SEMI_MAJOR:g}, e uniform in [{E_RANGE[0]:g}, {E_RANGE[1]:g}] "
+                        f"(uniform: e = {UNIFORM_E:g}), random orientation; adaptive RKF7(8) "
                         "(Fehlberg's tableau, a mixed absolute/relative max-norm error "
                         "control and a standard step-size controller)."),
-            "scheme_source": "E. Fehlberg, NASA Technical Report R-287 (1968): "
-                             "the RKF7(8) pair",
-            "n_stages": N_STAGES, "rtol": RTOL, "atol": ATOL, "t_final": T_FINAL,
-            "h0": H0, "safety": SAFETY, "min_scale": MIN_SCALE, "max_scale": MAX_SCALE,
+            "scheme_source": "E. Fehlberg, NASA Technical Report R-287 (1968): the RKF7(8) pair",
+            "n_stages": N_STAGES, "rtol": RTOL, "atol": ATOL, "t_final": T_FINAL_FULL,
+            "t_final_short": T_FINAL_FULL / SHORT_DIVISOR, "h0": H0, "safety": SAFETY,
+            "min_scale": MIN_SCALE, "max_scale": MAX_SCALE,
             "exponents": {"reject": EXP_REJECT, "accept": EXP_ACCEPT},
             "max_attempts": MAX_ATTEMPTS, "seed": SEED,
-            "last_step": "clipped to land on the final time (a common alternative rejects "
-                         "an overshooting attempt and retries it shortened)",
-            "flops_per_attempt": FLOPS_PER_ATTEMPT,
-            "compaction_every_attempts": COMPACT_EVERY, "reorder_theta": REORDER_THETA,
-            "graph_block": GRAPH_BLOCK,
+            "last_step": "clipped to land on the final time",
+            "flops_per_attempt": FLOPS_PER_ATTEMPT, "ops_per_attempt": ops,
+            "ops_per_attempt_audit": audit, "graph_block": GRAPH_BLOCK,
         },
-        "ns": list(args.ns),
-        "distributions": list(args.distributions),
-        "tail_floor_ms": tail,
-        "release": cc.release_string(),
-        "arms": {a: ARM_LABELS[a] for a in names},
-        "arms_not_run": arms_not_run,
+        "cells": [list(c) for c in cells], "ns": ns,
+        "distributions": sorted({d for _, d in cells}),
+        "arms": {a: ARM_LABELS[a] for a in names}, "arms_not_run": arms_not_run,
         "code_lines": code_line_counts(),
+        "tail_floor_ms": {d: (None if v["status"] != "ok" else v["wall_s"]["median"] * 1e3) for d, v in tail.items()},
+        "tail_floor": tail, "fixed_overhead_n": OVERHEAD_N, "fixed_overhead": overhead,
+        "fp32": {"status": "not_run: the float32 arms are not built in this version of the card"},
+        "device_fma_per_s": fma_dev, "samples_per_lane_threads_per_sm": threads_per_sm,
+        "eff_sol_over_one": [[r["arm"], r["n"], r["distribution"]] for r in over],
         "method": {
-            "repetitions": args.reps,
-            "slow_arm_budget_s": SLOW_ARM_BUDGET_S, "slow_arm_reps": SLOW_ARM_REPS, "slow_arm_cell_s": SLOW_ARM_CELL_S,
+            "rounds": {"min": ROUNDS_MIN, "max": args.reps, "stop": f"IQR/median <= {IQR_STOP:.0%}"},
+            "isolation": "every (arm, N, cell) times in its own fresh process on a clean device; arms run one after another, "
+                         "the SM clock of each row shows the drift between them; the memory pass runs first and an arm out "
+                         "of memory at N is not built at N or larger",
+            "budget": {"per_run_s": ARM_RUN_BUDGET_S, "per_cell_s": CELL_BUDGET_S,
+                       "rule": "a warm-up run over the per-run budget makes the arm not_run: budget at that N and larger; "
+                               "timed rounds stop at the per-cell budget (at least one round)"},
             "statistic": "median, interquartile range (inclusive quartiles)",
             "warm_up": "one run per arm, excluded; it is also the verification run",
-            "interleaving": "the arm order rotates by one every repetition",
-            "wall": "the integration alone, inputs already on the device, to the "
-                    "device synchronised",
+            "wall": "the integration alone, inputs already on the device, to the device synchronised",
             "end_to_end": "inputs uploaded, integration, outputs downloaded",
+            "eff_sol": "attempts per second x ops_per_attempt / device_fma_per_s (the register-only DFMA probe run in this "
+                       "script after the arms); ops_per_attempt is the DP-pipe instruction count of one fused eagle attempt "
+                       "(sol_reference.json), audited against cuobjdump in workload.ops_per_attempt_audit",
+            "samples_per_lane": "N / (SMs x resident threads per SM)",
             "verification": (
-                "Every arm, every sample: final time reached exactly; position "
-                "error against the analytic Kepler state (Newton on Kepler's "
-                "equation to machine precision) below the stated bound n_acc tol "
-                "(1 + v_p)(1 + 6 pi n_orbits v_p), derived from the controller's "
-                "per-step budget and the Kepler along-track amplification (see "
-                "truth_bound; not fitted). Step counts are compared with the "
-                "reference arm (eagle graph): any difference comes from a "
-                "floating-point difference flipping one accept/reject decision "
-                "(contraction into fused multiply-adds, pow and sqrt "
-                "implementations differ between compilers and libraries); the "
-                "table reports how many samples differ and by how much."),
-            "counting_rule": _COUNTING_RULE,
-            "kernel_only": kernel_note,
-            "cpu_threads": os.environ.get("OMP_NUM_THREADS"),
+                "Every arm, every sample: final time reached exactly; position error against the analytic Kepler state "
+                "(Newton on Kepler's equation to machine precision) below the stated bound n_acc tol (1 + v_p)(1 + 6 pi "
+                "n_orbits v_p), derived from the controller's per-step budget and the Kepler along-track amplification "
+                "(see truth_bound; not fitted). The truth check runs in the arm's own process; the step counts it returns "
+                "are compared with the reference arm (eagle graph) in the parent: any difference comes from a "
+                "floating-point difference flipping one accept/reject decision."),
+            "counting_rule": _COUNTING_RULE, "cpu_threads": os.environ.get("OMP_NUM_THREADS"),
         },
-        "results": results,
-        "per_n": per_n,
-        "memory": {"method": _MEMORY_METHOD, "rows": memory_rows},
-        "compile_time": {"method": _COMPILE_METHOD, "rows": compile_rows,
-                         "none": [a for a in NO_COMPILE_ARMS if a in names]},
+        "results": results, "per_n": per_cell, "memory": memory_card,
         "torch_compile_note": arms_not_run.get("torch_compiled"),
     }
-    card["fit"] = _fit_notes(card)
+    card["fit"] = _fit_notes({**card, "results": [r for r in results if r["status"] == "ok" and r["distribution"] == "spread"]})
     card["wall_s"] = time.perf_counter() - t_start
     args.out_dir.mkdir(parents=True, exist_ok=True)
     json_path = args.out_dir / f"card_{slug}.json"
     json_path.write_text(json.dumps(card, indent=1) + "\n")
     (args.out_dir / f"card_{slug}.md").write_text(render_markdown(card))
     print(f"wrote {json_path}")
+    if over:
+        print("eff_sol > 1 on " + ", ".join(f"{r['arm']}@{r['n']}" for r in over) + ": not publishable", flush=True)
     if not args.smoke and args.out_dir.resolve().is_relative_to(HERE.parent):
         cc.record_provenance(json_path)
     shutil.rmtree(work, ignore_errors=True)
     return 0
+
+
+def _threads_per_sm():
+    import cupy as cp
+
+    return cp.cuda.Device().attributes["MaxThreadsPerMultiProcessor"]
+
 
 
 if __name__ == "__main__":

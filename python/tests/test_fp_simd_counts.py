@@ -50,7 +50,7 @@ def test_x86_packed_and_scalar_double_ops_are_still_counted():
 
 
 def test_an_arm_machine_without_a_model_name_gets_the_aarch64_stem(monkeypatch):
-    spec = importlib.util.spec_from_file_location("cpu_rkf78_t", _BENCH / "perf_card" / "cpu_rkf78.py")
+    spec = importlib.util.spec_from_file_location("cpu_card_t", _BENCH / "perf_card" / "cpu_card.py")
     sys.path.insert(0, str(_BENCH / "perf_card"))
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)

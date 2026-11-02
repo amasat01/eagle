@@ -460,8 +460,8 @@ def run_cards(py, roots, out, result):
     env = dict(os.environ, HAWK_SRC=str(roots.get("hawk", "")))
     cards_out = out / "cards"
     cards_out.mkdir(parents=True, exist_ok=True)
-    plan = (("perf_card", ["benchmarks/perf_card/perf_card.py", "--ns", "100000", "1000000",
-                           "--memory-ns", "100000", "1000000", "10000000", "--no-nsys", "--no-compile"]),
+    plan = (("perf_card", ["benchmarks/perf_card/perf_card.py", "--ns", "1000000",
+                           "--memory-ns", "100000", "1000000", "10000000"]),
             ("feature_card", ["benchmarks/perf_card/feature_card.py"]))
     result["cards"] = []
     for name, argv in plan:

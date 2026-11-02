@@ -4,7 +4,7 @@
 """The adaptive-step card on the CPU: the RKF7(8) Kepler workload, the common CPU ways.
 
 The workload, the scheme, the truth and the agreement checks are those of
-``rkf78.py`` (imported from it). The arms:
+``perf_card.py`` (imported from it). The arms:
 
 ``eagle_cpu8`` / ``eagle_cpu1``
     The GPU card's hawk attempt kernel, deployed by ``eagle.deploy`` (NumPy
@@ -22,7 +22,7 @@ The workload, the scheme, the truth and the agreement checks are those of
     The same masked attempt in NumPy (one thread).
 
 The masked arms advance every sample every attempt until the slowest one
-finishes; they run up to ``MASKED_MAX_N`` samples.
+finishes; they stop at the per-run budget.
 
 Every arm runs in its own persistent worker process (its thread pool pinned
 by that process's environment); the driver process interleaves the repetitions
@@ -34,7 +34,7 @@ compile time on empty caches, are recorded per (arm, N).
 
 Reproduce (from the eagle repository root)::
 
-    python benchmarks/perf_card/cpu_rkf78.py
+    python benchmarks/perf_card/cpu_card.py
 """
 
 from __future__ import annotations
@@ -51,13 +51,13 @@ import tempfile
 import time
 
 HERE = pathlib.Path(__file__).resolve().parent
-for _p in (HERE, HERE.parent):  # rkf78.py; benchmarks/: the shared helpers
+for _p in (HERE, HERE.parent):  # perf_card.py; benchmarks/: the shared helpers
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 import _card_common as cc  # noqa: E402
-import rkf78 as rc  # noqa: E402
+import perf_card as rc  # noqa: E402
 
-SCRIPT_REL = "benchmarks/perf_card/cpu_rkf78.py"
+SCRIPT_REL = "benchmarks/perf_card/cpu_card.py"
 THREADS = 8
 ARMS = ("eagle_cpu8", "eagle_cpu1", "numba_prange", "jax_vmap", "torch_masked",
         "numpy_masked")
@@ -77,9 +77,9 @@ ARM_LIBRARY = {"numba_prange": "numba", "jax_vmap": "jax", "torch_masked": "torc
 MASKED_ARMS = ("torch_masked", "numpy_masked")
 #: Arms with no compile step (PyTorch's and NumPy's kernels ship prebuilt).
 NO_COMPILE_ARMS = MASKED_ARMS
-MASKED_MAX_N = 100_000
-NS = (10_000, 100_000, 1_000_000)
-REPS = 5
+NS = (1_000_000,)
+REPS = rc.ROUNDS_MAX
+COMMITTED_ARMS = ("eagle_cpu8", "eagle_cpu1", "numba_prange", "jax_vmap", "numpy_masked")
 WARM_N = 64
 #: The fixed-overhead cell: the eagle arms alone at this N (launch and join cost).
 OVERHEAD_N = 64
@@ -292,10 +292,11 @@ def _worker_main(arm):
     for line in sys.stdin:
         cmd = json.loads(line)
         if cmd["op"] == "setup":
+            base = rc._set_cell(cmd.get("distribution", "spread"))
             w.compile_s = 0.0
             w.setup(WARM_N)
             w.run()  # warm-up at WARM_N: every compile happens here
-            w.setup(cmd["n"], cmd.get("distribution", "spread"))
+            w.setup(cmd["n"], base)
             rss = cc.status_kib("VmRSS")
             cc.reset_host_peak()
             sec, out = w.run()  # the verification run
@@ -327,49 +328,88 @@ def _proc(arm, cache):
     return cc.LineWorker(__file__, ["--worker", arm], _env(arm, cache), arm)
 
 
-def _run_n(n, reps, names, work, distribution="spread"):
+def _time_arm(a, n, distribution, work):
+    """One arm in its own worker process: set up, warm up (the verification run), then rounds 3..9 until
+    IQR/median <= 2 %. A failure is a status: ``out_of_memory``, ``not_run: budget`` or ``failed: <last error line>``."""
     import numpy as np
 
-    arms = [a for a in names if a not in MASKED_ARMS or n <= MASKED_MAX_N]
-    procs = {a: _proc(a, work / f"cache_{a}_{n}") for a in arms}
+    p = _proc(a, work / f"cache_{a}_{n}")
+    path = work / f"out_{a}_{n}.npz"
+    reply = {"arm": a, "n": n, "distribution": distribution}
     try:
-        setup, outs = {}, {}
-        for a in arms:
-            path = work / f"out_{a}_{n}.npz"
-            setup[a] = procs[a].call({"op": "setup", "n": n, "out": str(path),
-                                      "distribution": distribution})
-            with np.load(path) as z:
-                outs[a] = {k: z[k] for k in z.files}
-        ref = REFERENCE_ARM if REFERENCE_ARM in outs else arms[0]
-        agreement, steps = rc._verify(outs, rc._inputs(n, distribution), ref)
-        walls = {a: [] for a in arms}
-        load_before = cc.load_avg_1m()
-        for r in range(reps):
-            rot = arms[r % len(arms):] + arms[:r % len(arms)]
-            for a in rot:
-                walls[a].append(procs[a].call({"op": "run"})["wall_s"])
-        load_after = cc.load_avg_1m()
+        if rc._fault(a) == "oom":
+            raise MemoryError("out of memory (forced by EAGLE_CARD_FAULT)")
+        setup = p.call({"op": "setup", "n": n, "out": str(path), "distribution": distribution})
+        if rc._fault(a) == "slow":
+            setup["warm_s"] = rc.ARM_RUN_BUDGET_S + 1.0
+        if setup["warm_s"] > rc.ARM_RUN_BUDGET_S:
+            return {**reply, "status": "not_run: budget", "warm_s": setup["warm_s"]}
+        with np.load(path) as z:
+            reply["out"] = {k: z[k] for k in z.files}
+        walls, rule, started = [], "rounds_max", time.perf_counter()
+        while len(walls) < REPS:
+            walls.append(p.call({"op": "run"})["wall_s"])
+            if len(walls) >= min(rc.ROUNDS_MIN, REPS):
+                q1, med, q3 = np.percentile(walls, [25, 50, 75])
+                if q3 - q1 <= rc.IQR_STOP * med:
+                    rule = "iqr<=2%"
+                    break
+            if time.perf_counter() - started > rc.CELL_BUDGET_S:
+                rule = "cell budget 300 s"
+                break
+        return {**reply, "status": "ok", "walls": walls, "stop_rule": rule, "setup": setup}
+    except (RuntimeError, OSError, MemoryError, ValueError, KeyError) as err:
+        text = str(err)
+        lines = [ln for ln in text.splitlines() if ln.strip()]
+        return {**reply, "status": "out_of_memory" if any(k in text for k in rc._OOM_TEXT)
+                else "failed: " + (lines[-1][:300] if lines else type(err).__name__)}
     finally:
-        for p in procs.values():
+        try:
             p.close({"op": "quit"})
+        except Exception:  # noqa: BLE001  (a dead worker has nothing to close)
+            pass
+
+
+def _run_cell(n, names, work, distribution, state):
+    """All arms at one cell, one after another. ``state`` carries the arms already over budget (at a smaller N)."""
+    base = rc._set_cell(distribution)
+    replies = []
+    for a in names:
+        if a in state["budget"] and n >= state["budget"][a]:
+            r = {"arm": a, "n": n, "distribution": distribution, "status": "not_run: budget"}
+        else:
+            r = _time_arm(a, n, distribution, work)
+            if r["status"] == "not_run: budget":
+                state["budget"][a] = n
+        replies.append(r)
+        print(f"{distribution} N={n:>9,} {a:14s} {r['status']}", flush=True)
+    ok = {r["arm"]: r["out"] for r in replies if r["status"] == "ok"}
+    agreement, ref, steps = ({}, "none", {})
+    if ok:
+        ref = REFERENCE_ARM if REFERENCE_ARM in ok else next(iter(ok))
+        agreement, steps = rc._verify(ok, rc._inputs(n, base), ref)
     rows = []
-    for a in arms:
-        att = agreement[a]["attempts_total"]
-        wall = cc.median_iqr(walls[a])
-        rows.append({"n": n, "distribution": distribution, "arm": a, "threads": ARM_THREADS[a], "wall_s": wall,
-                     "attempts": att, "attempt_samples_per_s": att / wall["median"],
-                     "useful_flops_per_s": rc.FLOPS_PER_ATTEMPT * att / wall["median"],
-                     "host_peak_bytes": setup[a]["host_peak_bytes"],
-                     "host_live_bytes": setup[a]["host_live_bytes"],
-                     "compile_s_cold": (None if a in NO_COMPILE_ARMS
-                                        else setup[a]["compile_s"]),
-                     "slot_fill": None})
-    control = next((r for r in rows if r["arm"] == "numpy_masked"), None)
+    for r in replies:
+        row = {"n": n, "distribution": distribution, "arm": r["arm"], "status": r["status"],
+               "threads": ARM_THREADS[r["arm"]]}
+        if r["status"] != "ok":
+            row["rule"] = (f"> {rc.ARM_RUN_BUDGET_S:g} s per run" if r["status"] == "not_run: budget" else r["status"])
+        else:
+            att = agreement[r["arm"]]["attempts_total"]
+            wall = cc.median_iqr(r["walls"])
+            row.update(wall_s=wall, rounds=len(r["walls"]), rule=r["stop_rule"], attempts=att,
+                       attempt_samples_per_s=att / wall["median"],
+                       useful_flops_per_s=rc.FLOPS_PER_ATTEMPT * att / wall["median"],
+                       host_peak_bytes=r["setup"]["host_peak_bytes"], host_live_bytes=r["setup"]["host_live_bytes"],
+                       compile_s_cold=(None if r["arm"] in NO_COMPILE_ARMS else r["setup"]["compile_s"]),
+                       slot_fill=None)
+        rows.append(row)
+    control = next((r for r in rows if r["arm"] == "numpy_masked" and r["status"] == "ok"), None)
     for r in rows:  # memory net of the NumPy control: the harness bytes every arm shares are not the arm's
-        r["host_peak_net_of_control_bytes"] = (
-            None if control is None or r is control else max(0, r["host_peak_bytes"] - control["host_peak_bytes"]))
-    return rows, {"n": n, "distribution": distribution, "reference_arm": ref, "agreement": agreement, "steps": steps,
-                  "load_avg_before": load_before, "load_avg_after": load_after}
+        if r["status"] == "ok":
+            r["host_peak_net_of_control_bytes"] = (
+                None if control is None or r is control else max(0, r["host_peak_bytes"] - control["host_peak_bytes"]))
+    return rows, {"n": n, "distribution": distribution, "reference_arm": ref, "agreement": agreement, "steps": steps}
 
 
 def code_line_counts():
@@ -385,20 +425,25 @@ def render_markdown(card):
     lines = [f"<!-- Generated by {SCRIPT_REL} from cpu_card_{card['cpu_slug']}.json; "
              "do not edit. -->", "",
              f"**CPU:** {card['cpu']}, {card['logical_cpus']} logical CPUs. "
-             f"Medians of {card['method']['repetitions']} interleaved repetitions; IQR "
-             f"in parentheses. Workload as the GPU card ({rc.FLOPS_PER_ATTEMPT} FLOP per "
-             f"attempt); masked arms up to N = {MASKED_MAX_N:,}.", "",
-             "| N | arm | threads | wall (IQR) | attempts·samples/s | useful FLOP/s "
-             "| host memory | compile (cold) | lines of code |",
-             "|---:|---|---:|---:|---:|---:|---:|---:|---:|"]
+             f"Medians of {min(card['method']['rounds']['min'], card['method']['rounds']['max'])} to "
+             f"{card['method']['rounds']['max']} rounds per arm, each arm in its own process (rounds stop at "
+             f"IQR/median <= 2 %); IQR in parentheses. Workload as the GPU card ({rc.FLOPS_PER_ATTEMPT} FLOP per "
+             f"attempt).", "",
+             "| N | arm | threads | wall (IQR) | rounds | attempts·samples/s | useful FLOP/s "
+             "| host memory | host memory net of NumPy | lines of code |",
+             "|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|"]
     for r in sorted(card["results"], key=lambda r: (r["n"], r.get("distribution", ""),
                                                    ARMS.index(r["arm"]))):
+        head = f"| {r['n']:,} ({r.get('distribution', 'spread')}) | {ARM_LABELS[r['arm']]} | {r['threads']} "
+        if r["status"] != "ok":
+            lines.append(head + f"| {r['status'].replace('_', ' ')} ({r['rule']}) | – | – | – | – | – | – |")
+            continue
+        net = r.get("host_peak_net_of_control_bytes")
         lines.append(
-            f"| {r['n']:,} ({r.get('distribution', 'spread')}) | {ARM_LABELS[r['arm']]} | {r['threads']} "
-            f"| {cc.fmt_time_si(r['wall_s']['median'])} ({cc.fmt_time_si(r['wall_s']['iqr'])}) "
-            f"| {cc.fmt_rate_si(r['attempt_samples_per_s'])} "
+            head + f"| {cc.fmt_time_si(r['wall_s']['median'])} ({cc.fmt_time_si(r['wall_s']['iqr'])}) "
+            f"| {r['rounds']} | {cc.fmt_rate_si(r['attempt_samples_per_s'])} "
             f"| {cc.fmt_rate_si(r['useful_flops_per_s'])} "
-            f"| {cc.fmt_mib(r['host_peak_bytes'])} | {cc.fmt_time_si(r['compile_s_cold'])} "
+            f"| {cc.fmt_mib(r['host_peak_bytes'])} | {'–' if net is None else cc.fmt_mib(net)} "
             f"| {card['code_lines']['arms'][r['arm']]} |")
     lines += ["", "| N | arm | max position error | max error / bound "
               "| samples with different step counts |", "|---:|---|---:|---:|---:|"]
@@ -421,9 +466,9 @@ def _cpu_slug(model):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--out-dir", type=pathlib.Path, default=HERE)
-    ap.add_argument("--reps", type=int, default=REPS)
+    ap.add_argument("--reps", type=int, default=REPS, help="most rounds per (arm, cell); they stop at IQR/median <= 2 %%")
     ap.add_argument("--ns", type=int, nargs="+", default=list(NS))
-    ap.add_argument("--arms", nargs="+", default=list(ARMS))
+    ap.add_argument("--arms", nargs="+", default=list(COMMITTED_ARMS))
     ap.add_argument("--distributions", nargs="+", choices=rc.DISTRIBUTIONS,
                     default=list(rc.DISTRIBUTIONS))
     ap.add_argument("--smoke", action="store_true",
@@ -442,18 +487,18 @@ def main(argv=None):
     if args.smoke:
         args.ns, args.reps, args.distributions = [1_000], 1, ["spread"]
         if args.out_dir == HERE:
-            args.out_dir = pathlib.Path(tempfile.mkdtemp(prefix="cpu_rkf78_smoke_"))
+            args.out_dir = pathlib.Path(tempfile.mkdtemp(prefix="cpu_card_smoke_"))
     t_start = time.perf_counter()
-    work = pathlib.Path(tempfile.mkdtemp(prefix="rk78_cpucard_"))
+    work = pathlib.Path(tempfile.mkdtemp(prefix="cpu_card_"))
     results, per_n = [], []
     try:
         cells = [(d, n, names) for d in args.distributions for n in args.ns]
         if not args.smoke:
-            cells += [(d, OVERHEAD_N, tuple(a for a in names if a.startswith("eagle")))
-                      for d in args.distributions]
+            cells += [("spread", OVERHEAD_N, tuple(a for a in names if a.startswith("eagle")))]
+        state = {"budget": {}}
         for dist, n, arms in cells:
             t0 = time.perf_counter()
-            rows, extra = _run_n(n, args.reps, arms, work, dist)
+            rows, extra = _run_cell(n, arms, work, dist, state)
             results += rows
             per_n.append(extra)
             print(f"{dist} N={n:>8,} ({time.perf_counter() - t0:.1f}s)", flush=True)
@@ -474,8 +519,7 @@ def main(argv=None):
             "arms_not_run": arms_not_run,
             "arms": {a: ARM_LABELS[a] for a in names},
             "code_lines": code_line_counts(),
-            "method": {"repetitions": args.reps, "reference_arm": REFERENCE_ARM,
-                       "masked_max_n": MASKED_MAX_N,
+            "method": {"rounds": {"min": rc.ROUNDS_MIN, "max": args.reps, "stop": "IQR/median <= 2 %"}, "reference_arm": REFERENCE_ARM,
                        "memory": "per phase, in the worker, after its warm-up compile: the peak resident set "
                                  "(VmHWM) of the verification run above the RSS before it (host_peak_bytes) "
                                  "and the RSS the run leaves live above that baseline (host_live_bytes); "

@@ -4,7 +4,7 @@
 
 """Generate the performance page's per-family MyST includes from the committed cards.
 
-``benchmarks/{perf_card,rk78_card}/`` each hold a GPU card (``card_<slug>.json``)
+``benchmarks/perf_card/`` holds a GPU card (``card_<slug>.json``)
 and a CPU card (``cpu_card_<slug>.json``); a *family* here is one of those four
 (perf GPU, perf CPU, rk78 GPU, rk78 CPU). Dropping a new device's card next to
 the existing ones (same prefix, new slug) is enough for it to appear everywhere
@@ -64,18 +64,12 @@ from raptor_docs.themed_svg import dark_path, write_pair  # noqa: E402
 #: pair this script reports a ratio between on every non-reference device;
 #: CPU cards run neither arm, so they stay unset.
 FAMILIES = [
-    {"key": "perf_card_gpu", "page": "rk4", "dir": "benchmarks/perf_card", "prefix": "card_",
-     "reference_slug": "nvidia-h100-80gb-hbm3", "heading": "GPU", "has_config": True,
-     "simulate": "eagle_simulate", "twin": "eagle_graph_auto"},
-    {"key": "perf_card_cpu", "page": "rk4", "dir": "benchmarks/perf_card", "prefix": "cpu_card_",
-     "reference_slug": "amd-epyc-9b45", "heading": "CPU", "has_config": True,
-     "simulate": None, "twin": None},
-    {"key": "rk78_card_gpu", "page": "rk78", "dir": "benchmarks/rk78_card", "prefix": "card_",
-     "reference_slug": "nvidia-h100-80gb-hbm3", "heading": "GPU", "has_config": False,
+    {"key": "perf_card_gpu", "page": "rk78", "dir": "benchmarks/perf_card", "prefix": "card_",
+     "reference_slug": "nvidia-a100-sxm4-40gb", "heading": "GPU", "has_config": False,
      "simulate": "eagle_simulate", "twin": "eagle_graph"},
-    {"key": "rk78_card_cpu", "page": "rk78", "dir": "benchmarks/rk78_card", "prefix": "cpu_card_",
-     "reference_slug": "amd-epyc-9b45", "heading": "CPU",
-     "has_config": False, "simulate": None, "twin": None},
+    {"key": "perf_card_cpu", "page": "rk78", "dir": "benchmarks/perf_card", "prefix": "cpu_card_",
+     "reference_slug": "amd-epyc-9b45", "heading": "CPU", "has_config": False,
+     "simulate": None, "twin": None},
 ]
 
 

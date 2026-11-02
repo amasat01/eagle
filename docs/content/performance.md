@@ -36,8 +36,6 @@ How eagle compares with the other tools on the same committed cards is on the [f
 
 ## Where to go next
 
-- [RK4 oscillators: results](performance/rk4.md): every workload, every arm and
-  every N, per device.
 - [Adaptive RK7(8): results](performance/rk78.md): the same for an adaptive solver.
 - [Which commits ran](https://github.com/amasat01/eagle/blob/main/benchmarks/card_provenance.json): the eagle and hawk
   commit behind every card file.
@@ -54,7 +52,6 @@ How eagle compares with the other tools on the same committed cards is on the [f
 :hidden:
 :maxdepth: 1
 
-performance/rk4
 performance/rk78
 performance/reading
 performance/mechanism

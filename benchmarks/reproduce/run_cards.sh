@@ -20,7 +20,6 @@
 #                     config, resumable (default on Kaggle); re-run the same command
 #                     to continue after a session ends
 #     --deadline-h H  stop before starting a step once H hours have passed (exit 3)
-#     --nsys M        auto | off   (auto: Nsight Systems kernel times when nsys is on PATH)
 #     --dry-run       print every command, run nothing
 set -euo pipefail
 
@@ -29,7 +28,7 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 . "$HERE/lib.sh"
 
 WHICH="" PRESET=full GPU_ENV="" CPU_ENV="" WORK=${REPRO_WORK:-} OUT="" SLUG="" PUBLISH=0
-SPLIT="" DEADLINE_H="" NSYS=auto EXTRA=()
+SPLIT="" DEADLINE_H="" EXTRA=()
 while [[ $# -gt 0 ]]; do
   case $1 in
     --which) WHICH=$2; shift 2 ;;
@@ -44,7 +43,6 @@ while [[ $# -gt 0 ]]; do
     --split) SPLIT=1; shift ;;
     --no-split) SPLIT=0; shift ;;
     --deadline-h) DEADLINE_H=$2; shift 2 ;;
-    --nsys) NSYS=$2; shift 2 ;;
     --dry-run) REPRO_DRY_RUN=1; shift ;;
     --) shift; EXTRA=("$@"); break ;;
     -h|--help) sed -n '5,28p' "$0"; exit 0 ;;
@@ -77,15 +75,12 @@ eagle_root() {
 NS_SMOKE=(1000) NS_SHORT=(1000 10000 100000)
 case $PRESET in
   smoke) NS=("${NS_SMOKE[@]}")
-         A_RK78=(--reps 5 --no-nsys --no-memory --no-compile)
-         A_CPU78=(--reps 5) ;;
+         A_RK78=(--no-memory)
+         A_CPU78=(--reps 3) ;;
   short) NS=("${NS_SHORT[@]}")
          A_RK78=() A_CPU78=() ;;
   full)  NS=() A_RK78=() A_CPU78=() ;;
 esac
-if [[ $NSYS == off ]] || ! command -v nsys >/dev/null 2>&1; then
-  [[ $PRESET == smoke ]] || { A_RK78+=(--no-nsys); }
-fi
 EXTRA_FEATURE=(); [[ $PRESET == smoke ]] && EXTRA_FEATURE=(--smoke)
 NSARG=(); [[ ${#NS[@]} -gt 0 ]] && NSARG=(--ns "${NS[@]}")
 
@@ -142,7 +137,7 @@ run_gpu_cards() {
   local card args pass n i
   for card in rk78; do
     args=("${A_RK78[@]}")
-    for pass in nsys memory compile; do
+    for pass in memory; do
       [[ " ${args[*]} " == *" --no-$pass "* ]] && continue
       if [[ $REPRO_DRY_RUN == 1 ]]; then n=1; else
         # shellcheck disable=SC1090
@@ -156,7 +151,7 @@ run_gpu_cards() {
     # final: the timing pass + the card, from the saved passes; only the
     # arguments main() still needs (the passes come from --parts).
     local fin=()
-    for a in "${args[@]}"; do [[ $a == --no-nsys || $a == --no-memory || $a == --no-compile ]] || fin+=("$a"); done
+    for a in "${args[@]}"; do [[ $a == --no-memory ]] || fin+=("$a"); done
     step "gpu-$card-final" "$GPU_ENV" GPU "$eroot" python "$HERE/passes.py" "$card" final \
       --parts "$parts/$card" "${NSARG[@]}" "${fin[@]}" --out-dir "$out/perf_card" "${EXTRA[@]}"
   done

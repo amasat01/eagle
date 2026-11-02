@@ -357,7 +357,7 @@ def _rk78_card():
     from pathlib import Path
 
     path = (Path(__file__).resolve().parents[2]
-            / "benchmarks" / "rk78_card" / "rk78_card.py")
+            / "benchmarks" / "perf_card" / "perf_card.py")
     if not path.is_file():
         pytest.skip("this checkout carries no RK7(8) card")
     spec = importlib.util.spec_from_file_location("eagle_rk78_card_host", path)

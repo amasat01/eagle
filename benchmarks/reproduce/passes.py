@@ -12,8 +12,8 @@ would). The card written is the same schema the monolithic run writes.
 
 Usage::
 
-    passes.py rk78 count nsys|memory|compile     # number of chunks
-    passes.py rk78 nsys|memory|compile --index I --parts DIR [--ns ...]
+    passes.py rk78 count memory     # number of chunks
+    passes.py rk78 memory --index I --parts DIR [--ns ...]
     passes.py rk78 final --parts DIR --out-dir DIR [--ns ...] [--reps R]
 """
 
@@ -32,12 +32,12 @@ import tempfile
 _HERE_BENCH = pathlib.Path(__file__).resolve().parent.parent
 BENCH = (pathlib.Path.cwd() / "benchmarks"
          if (pathlib.Path.cwd() / "benchmarks" / "perf_card" / "perf_card.py").is_file() else _HERE_BENCH)
-CHUNK = {"rk78": {"memory": 5, "compile": 3}}
+CHUNK = {"rk78": {"memory": 5}}
 
 
 def _load_card(card):
     sys.path.insert(0, str(BENCH / "perf_card"))
-    return __import__("rkf78")
+    return __import__("perf_card")
 
 
 def _arms(mod):
@@ -46,12 +46,8 @@ def _arms(mod):
 
 
 def _chunks(mod, card, what, ns):
-    if what == "nsys":
-        return len(_arms(mod))
     if what == "memory":
         return math.ceil(len(_arms(mod)) / CHUNK[card]["memory"])
-    if what == "compile":
-        return math.ceil(len(mod._compile_keys(ns, _arms(mod))) / CHUNK[card]["compile"])
     raise SystemExit(f"unknown pass {what}")
 
 
@@ -84,55 +80,30 @@ def run_chunk(mod, card, what, idx, ns, parts):
     _, _, _, bus = mod.cc.device_facts()
     work = pathlib.Path(tempfile.mkdtemp(prefix=f"{card}_{what}_"))
     arms = _arms(mod)
-    if what == "nsys":
-        out, counts, note = mod._nsys_kernel_times(ns, work, (arms[idx],))
-        obj = {"note": note, "out": [[list(k), v] for k, v in (out or {}).items()],
-               "counts": [[list(k), v] for k, v in (counts or {}).items()]}
-    elif what == "memory":
-        lo = idx * CHUNK[card]["memory"]
-        obj = mod._run_memory_pass(ns, bus, arms[lo:lo + CHUNK[card]["memory"]])
-    else:
-        keys = mod._compile_keys(ns, arms)
-        lo = idx * CHUNK[card]["compile"]
-        mod._compile_keys = lambda ns, arms=None: keys[lo:lo + CHUNK[card]["compile"]]
-        obj = mod._run_compile_pass(ns, arms)
+    lo = idx * CHUNK[card]["memory"]
+    obj = mod._run_memory_pass(ns, bus, arms[lo:lo + CHUNK[card]["memory"]])
     _save(parts, name, obj)
     print(f"{card} {name}: saved", flush=True)
 
 
 def final(mod, card, ns, parts, rest):
     flags = []
-    for what in ("nsys", "memory", "compile"):
-        # a pass is either skipped whole or complete: a partial one means a chunk failed
-        have, want = len(_load(parts, what)), _chunks(mod, card, what, ns)
-        if have and have != want:
-            raise SystemExit(f"{parts}: {have} of {want} {what} chunks saved; run the missing ones first")
-    nsys = _load(parts, "nsys")
-    if nsys:
-        out = {tuple(k): v for part in nsys for k, v in part["out"]}
-        counts = {tuple(k): v for part in nsys for k, v in part.get("counts", [])}
-        notes = list(dict.fromkeys(p["note"] for p in nsys))
-        note = "; ".join(notes)
-        mod._nsys_kernel_times = lambda ns, work, names: (out, counts, note)
-    else:
-        flags.append("--no-nsys")
+    # the memory pass is either skipped whole or complete: a partial one means a chunk failed
+    have, want = len(_load(parts, "memory")), _chunks(mod, card, "memory", ns)
+    if have and have != want:
+        raise SystemExit(f"{parts}: {have} of {want} memory chunks saved; run the missing ones first")
     mem = [r for part in _load(parts, "memory") for r in part]
     if mem:
         mod._run_memory_pass = lambda ns, bus_id, names: mem
     else:
         flags.append("--no-memory")
-    comp = [r for part in _load(parts, "compile") for r in part]
-    if comp:
-        mod._run_compile_pass = lambda ns, *a: comp
-    else:
-        flags.append("--no-compile")
     return mod.main(["--ns", *map(str, sorted(ns, key=lambda n: (n != max(ns), n))), *flags, *rest])
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("card", choices=["rk78"])
-    ap.add_argument("what", choices=["count", "nsys", "memory", "compile", "final"])
+    ap.add_argument("what", choices=["count", "memory", "final"])
     ap.add_argument("--index", type=int)
     ap.add_argument("--parts", type=pathlib.Path)
     ap.add_argument("--ns", type=int, nargs="+")
@@ -140,8 +111,8 @@ def main(argv=None):
     mod = _load_card(args.card)
     ns = args.ns or list(mod.NS)
     if args.what == "count":
-        if not rest or rest[0] not in ("nsys", "memory", "compile"):
-            ap.error("count wants a pass: nsys, memory or compile")
+        if not rest or rest[0] != "memory":
+            ap.error("count wants the pass: memory")
         print(_chunks(mod, args.card, rest[0], ns))
         return 0
     if args.parts is None:

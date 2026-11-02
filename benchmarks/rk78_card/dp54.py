@@ -25,7 +25,7 @@ import sys
 
 _HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE.parent))  # benchmarks/: the cards' shared helpers
-_spec = importlib.util.spec_from_file_location("eagle_rk78_card", _HERE.parent / "perf_card" / "rkf78.py")
+_spec = importlib.util.spec_from_file_location("eagle_rk78_card", _HERE.parent / "perf_card" / "perf_card.py")
 rc = importlib.util.module_from_spec(_spec)
 sys.modules.setdefault("eagle_rk78_card", rc)
 _spec.loader.exec_module(rc)
