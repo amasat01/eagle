@@ -30,6 +30,7 @@ This section covers what changes from 0.7.2. Names that left are in the table at
 - macOS wheels need macOS 15 or newer. CPython 3.13t is dropped: nine wheels per platform, and the free-threading tests run on 3.14t.
 - The CUDA toolchain for CI and local gates is NVIDIA's pinned 12.9 redist archives. CI runs on `ubuntu-24.04`; `make gate`, `make gate-gpu` and `make gate-all` are what CI runs.
 - The `neural_block` pattern is now `graph_block`, and the `NEURAL_*` field constants are `BLOCK_*`. Schema version stays 1; the old pattern name is refused by name. The table at the end lists the names.
+- The "Reverse mode over a graph" page moved into the tutorial "Gradients through a graph"; the old address redirects there.
 
 ### Fixed
 
