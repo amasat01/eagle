@@ -93,7 +93,7 @@ def _launch_gpu(node, ctx):
 
 def _launch_native(node, ctx):
     b = node.payload
-    if b._device is not None or getattr(b, "_stages", None):
+    if b._device is not None or getattr(b, "_stages", None) or getattr(b, "_gemm", None):
         return None
     if b._copies or b._active_count is not None or b._fold is not None:
         return None

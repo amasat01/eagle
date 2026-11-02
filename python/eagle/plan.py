@@ -746,6 +746,10 @@ def _run_plan(p: Plan, /, **kw):
     """``Plan.run``'s body. ``p`` is positional-only: a plugin declaring a
     plane literally named ``p`` would otherwise collide with this
     function's own first parameter."""
+    from .gemm import _route
+
+    if _route.routes(p):
+        return _route.run(p, kw)
     if _split.stages_of(p.plugin):
         return _split.run(p, kw, _run_one)
     return _run_one(p, **kw)

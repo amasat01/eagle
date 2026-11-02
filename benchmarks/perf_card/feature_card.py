@@ -502,22 +502,11 @@ def setup_contraction(ctx):
         run, planes = _launcher(fk.contract, planes_in, {"y": ((fk.ROWS * fk.SAMPLES,), None)}, ctx)
         return run, (lambda: (run() or _close(_get(planes["y"]), want, ctx.dtype), "y equals the NumPy matrix product"))
     if ctx.arm == "gemm":
-        from eagle.gemm.plan import lower_dense_gemm
-        from hawk.ir import recognize
+        from hawk.emit import policy
 
-        rec = recognize(fk.contract)
-        if rec is None or not rec.dense:
-            raise NotRun("the contraction is not recognised as a dense GEMM")
-        plan = lower_dense_gemm(rec, dtype=ctx.dtype)
-        xp = _xp(ctx)
-        bufs = {s.name: xp.asarray(planes_in[s.name]) for s in plan.inputs}
-        bufs.update({s.name: xp.zeros(s.shape, _real(ctx.dtype)) for s in plan.outputs})
-        backend, out = ("device" if ctx.target == "cuda" else "host"), bufs[plan.outputs[0].name]
-
-        def run():
-            plan(backend, bufs)
-            _sync(ctx)
-        return run, (lambda: (run() or _close(_get(out).T.reshape(-1), want, ctx.dtype), "the product equals the NumPy matrix product"))
+        with policy.using(contraction="gemm"):      # the opt-in route: one GEMM into the lane plane
+            run, planes = _launcher(fk.contract, planes_in, {"y": ((fk.ROWS * fk.SAMPLES,), None)}, ctx)
+        return run, (lambda: (run() or _close(_get(planes["y"]), want, ctx.dtype), "y equals the NumPy matrix product"))
     if ctx.target != "cuda":
         raise NotRun("needs a GPU")
     cp = _need("cupy")
