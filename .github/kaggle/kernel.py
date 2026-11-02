@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import pathlib
+import platform
 import shutil
 import subprocess
 import sys
@@ -116,7 +117,9 @@ def pip(py, use_uv, *args):
     # uv takes a package from the first index that has it; best-match keeps PyPI's versions beside the torch index
     cmd = ([sys.executable, "-m", "uv", "pip", "install", "--python", py, "--index-strategy", "unsafe-best-match"]
            if use_uv else [py, "-m", "pip", "install"])
-    return sh(*cmd, *args)
+    rc = sh(*cmd, *args)
+    # pip hides the compiler's output on a failed build; run it once more verbose so the log shows the error
+    return sh(*cmd, "-v", *args) if rc else rc
 
 
 def torch_index(cfg):
@@ -196,6 +199,13 @@ def install(cfg, py, use_uv, work):
         # shallow clones carry no tags: the version comes from --version (or a dev marker)
         ver = cfg.version or "0.0.0.dev0"
         os.environ.update(AETHER_VERSION=ver, EAGLE_VERSION=ver, SETUPTOOLS_SCM_PRETEND_VERSION=ver)
+        if cfg.cuda == "12":
+            # the image's nvcc is newer than CUDA 12 (13 since late 2026): build with the pinned 12.9 toolchain instead
+            tool = work / "cuda12"
+            if sh("sh", src / "eagle" / ".github" / "cuda_redist.sh", "fetch", platform.machine(), tool, work / "cuda12_cache") != 0:
+                raise SystemExit("could not fetch the CUDA 12.9 toolchain")
+            os.environ.update(CUDA_PATH=str(tool), CUDA_HOME=str(tool), CUDACXX=str(tool / "bin" / "nvcc"),
+                              PATH=f"{tool / 'bin'}{os.pathsep}{os.environ['PATH']}")
         prefix = work / "install"
         arch = "-DCMAKE_CUDA_ARCHITECTURES=75"
         # a sibling whose pinned version is on PyPI installs from there, whatever branch was cloned (the clone still
