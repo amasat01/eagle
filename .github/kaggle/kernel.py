@@ -195,8 +195,38 @@ def pin_cuda12(cfg, work):
                       PATH=f"{tool / 'bin'}{os.pathsep}{os.environ['PATH']}")
 
 
+CUDA13_FINDER = """
+import importlib.metadata as md, json, re
+out = []
+for d in md.distributions():
+    name, ver = d.metadata["Name"] or "", d.version or ""
+    low = name.lower().replace("_", "-")
+    stack = (re.fullmatch(r"nvidia-.*-cu13", low) or "cuda13" in low or low.startswith("jax-cuda13")
+             or (low in ("torch", "torchvision", "torchaudio") and "+cu13" in ver)
+             or any(str(f).startswith("nvidia/cu13/") for f in (d.files or [])))   # the CUDA 13 wheels' shared include/lib root
+    if stack:
+        out.append(name)
+print(json.dumps(sorted(set(out))))
+"""
+
+
+def purge_cuda13(cfg, py, use_uv):
+    """Kaggle's image carries a CUDA 13 Python stack; a CUDA 12 run installs its own on top, and the leftovers win (NVRTC
+    reads nvidia/cu13/include, JAX loads the 13 plugin). Remove the image's CUDA 13 packages before installing anything."""
+    if cfg.cuda != "12":
+        return
+    found = sh(py, "-c", CUDA13_FINDER, capture=True)
+    names = json.loads(found.stdout or "[]") if found.returncode == 0 else []
+    print("CUDA 13 packages removed from the image:", ", ".join(names) or "none", flush=True)
+    if names:
+        cmd = ([sys.executable, "-m", "uv", "pip", "uninstall", "--python", py] if use_uv else [py, "-m", "pip", "uninstall", "-y"])
+        if sh(*cmd, *names) != 0:
+            raise SystemExit("could not remove the image's CUDA 13 packages")
+
+
 def install(cfg, py, use_uv, work):
     (work / "src").mkdir(exist_ok=True)
+    purge_cuda13(cfg, py, use_uv)
     pin_cuda12(cfg, work)
     cu = f"cuda{cfg.cuda}"
     pre = ["--pre"] if cfg.pre else []
