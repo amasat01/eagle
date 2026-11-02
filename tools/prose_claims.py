@@ -5,15 +5,15 @@
 """Performance numbers in prose, generated from the committed cards.
 
 Every measured number a reader sees in a README, a docs page or a tutorial is
-written by this module from ``benchmarks/{perf_card,rk78_card}/*.json``; none
+written by this module from the ensemble cards, ``benchmarks/perf_card/{card,cpu_card}_*.json``; none
 is typed by hand. A page marks each number with a claim span::
 
-    <!--ctx dev=p2000 n=1e6 dist=spread steps=1000-->
+    <!--ctx dev=p2000 n=1e6 dist=spread-->
     ... takes <!--c wall arm=eagle_simulate-->156 ms<!--/c--> ...
 
 ``ctx`` sets defaults for the spans after it (cumulative; a span's own
 ``key=value`` overrides them). A span names its claim completely: kind, card
-family, device, arm, N, distribution and steps. The text between ``c`` and
+family, device, arm, N, distribution. The text between ``c`` and
 ``/c`` is rewritten from the card; ``--check`` mode only compares.
 
 ROUNDING RULE (the one rule, applied to every claim kind below)
@@ -32,26 +32,20 @@ Claim kinds (``kind`` is the first word of a span)
   mib    device memory        xmem  a ratio of two device-memory peaks
   xmin   factor over the minimum state   pct   a percentage of a card field
   eff    efficiency on an uneven batch (see EFFICIENCY below)
-  rate   a rate card field    comp  a cold/warm compile time (``which=``)
+  rate   a rate card field
 EFFICIENCY (``eff``)
-  ``eff = R_spread / R_SOL``. ``R_spread`` is the fastest ``sample_steps_per_s``
-  among the named arm(s) on the card's largest N for the span's ``dist`` and
-  ``steps`` (``arm=<arm>`` for one arm, ``tool=eagle|warp|jax|torch|cupy`` for
-  the fastest arm of a tool). ``R_SOL = F_dev / 22``: the sample-steps per
-  second the device would deliver if every FP64 pipe issued the step's 22
-  instructions (16 DFMA + 4 DMUL + 2 DADD) back to back, with no divergence and
-  no memory stall. ``F_dev`` is read from ``benchmarks/sol_reference.json``
-  (measured by a register-only FMA probe, or from the published FP64 rate at the
-  clock recorded during the run). The span prints whole percent, floored, never
-  rounded up. It is refused (``ClaimError``) when the reference is pending or
-  when ANY row of the card exceeds 1.00 x R_SOL: a row above the speed of light
-  means the reference is wrong, so nothing is clamped and nothing is published::
+  ``eff`` is the card's own ``eff_sol`` column (attempts per second x the step's DP-pipe instructions / the device's FMA rate,
+  measured in the card's run): the fastest arm of the span's ``arm=`` or ``tool=`` at the largest N of its ``dist``. It is
+  refused (``ClaimError``) when ANY row of the card is above 1.00: a row above the speed of light means the constant is wrong,
+  so nothing is clamped and nothing is published::
 
     <!--c eff tool=eagle dist=spread-->92%<!--/c-->
 
-Selectors: ``card`` (rk4 | rk4cpu | rk78 | rk78cpu), ``dev`` (a device alias
-below, or ``headline``), ``arm``, ``n``, ``dist``, ``steps``; ``src``
-(results | fixed | sweep) with ``variant``/``k`` for the cadence sweep. A ratio
+A row that is not ``ok`` shows its label, the way the cards print it: "out of memory", "> 120 s per run", "failed".
+
+Selectors: ``card`` (ensemble | ensemblecpu), ``dev`` (a device alias
+below, or ``headline``), ``arm``, ``n``, ``dist``; ``src``
+(results | fixed | memory). A ratio
 takes its denominator's selectors as ``den_<selector>``.
 
 A claim whose card is not committed (the headline device before its card is
@@ -78,10 +72,9 @@ import _card_common as cc  # noqa: E402
 #: The README headline: ONE line to change the device / sizes it quotes.
 #: ``ns`` is (the headline N, the N shown beside it).
 HEADLINE = {
-    "dev": "h100",
-    "ns": (1_000_000, 100_000),
+    "dev": "a100",
+    "ns": (1_000_000, 10_000_000),
     "dist": "spread",
-    "steps": 1000,
 }
 
 #: Device alias -> glob of the card slug (the file's ``card_<slug>.json``).
@@ -96,19 +89,16 @@ DEVICES = {
 
 #: Card family -> (directory, filename prefix).
 FAMILIES = {
-    "rk4": ("benchmarks/perf_card", "card_"),
-    "rk4cpu": ("benchmarks/perf_card", "cpu_card_"),
-    "rk78": ("benchmarks/rk78_card", "card_"),
-    "rk78cpu": ("benchmarks/rk78_card", "cpu_card_"),
+    "ensemble": ("benchmarks/perf_card", "card_"),
+    "ensemblecpu": ("benchmarks/perf_card", "cpu_card_"),
 }
 
 #: Defaults a page starts from (before its first ``ctx``).
 BASE_CTX = {
-    "card": "rk4",
+    "card": "ensemble",
     "dev": "p2000",
     "n": "1e6",
     "dist": "spread",
-    "steps": "1000",
 }
 
 
@@ -214,25 +204,8 @@ class Cards:
 
 
 # --------------------------------------------------------------------------- #
-# Speed-of-light reference (efficiency on uneven batches)
+# Efficiency (the card's own eff_sol column)
 # --------------------------------------------------------------------------- #
-#: FP64 pipe instructions per sample-step of the benchmark step: 16 DFMA + 4 DMUL + 2 DADD.
-SOL_OPS_PER_STEP = 22
-
-#: FP64 FMA per clock per SM by compute capability (CUDA C++ Programming Guide,
-#: arithmetic instruction throughput). A capability absent here has no spec value.
-FP64_FMA_PER_CLK_PER_SM = {
-    "6.0": 32,
-    "6.1": 4,
-    "7.0": 32,
-    "7.5": 2,
-    "8.0": 32,
-    "8.6": 2,
-    "8.9": 2,
-    "9.0": 64,
-    "12.0": 2,
-}
-
 #: A tool name -> a predicate on the arm name (the tool's arms on a GPU or CPU card).
 TOOL_ARMS = {
     "eagle": lambda a: a.startswith("eagle_") and a != "eager_loop",
@@ -241,9 +214,6 @@ TOOL_ARMS = {
     "torch": lambda a: a.startswith("torch"),
     "cupy": lambda a: a.startswith("cupy"),
 }
-
-EFF_CARDS = ("rk4", "rk4cpu")
-
 
 def card_slug(path):
     """The device slug of a card file: its name without the family prefix."""
@@ -254,92 +224,35 @@ def card_slug(path):
     raise ClaimError(f"{path}: not a card file name")
 
 
-def load_sol_reference(root):
-    """``benchmarks/sol_reference.json`` as a dict (``devices`` and ``aliases``)."""
-    path = pathlib.Path(root) / "benchmarks" / "sol_reference.json"
-    if not path.is_file():
-        raise ClaimError(f"missing speed-of-light reference: {path}")
-    return json.loads(path.read_text())
-
-
-def sol_spec_fma_per_s(card):
-    """The specification F_dev of a GPU card: SMs x FMA/clk/SM x the run's top SM clock.
-
-    The clock is the card's ``max_sm_mhz`` (the highest ``wall_s.sm_mhz`` over its rows;
-    a full card is read from the rows) and must not exceed the device's reported maximum SM clock. Returns (F_dev, clock_mhz)."""
-    dev = card["device"]
-    cap = dev["compute_capability"]
-    if cap not in FP64_FMA_PER_CLK_PER_SM:
-        raise ClaimError(f"no FP64 FMA/clk/SM entry for compute capability {cap}")
-    f_run = card.get("max_sm_mhz") or max(
-        (m for r in card["results"] for m in r["wall_s"].get("sm_mhz", [])), default=None)
-    if not f_run:
-        raise ClaimError("card records no SM clock; the specification rate needs one")
-    smi_max = float(str(dev["nvidia_smi"]["clocks_max_sm"]).split()[0])
-    if f_run > smi_max:
-        raise ClaimError(f"run clock {f_run} MHz exceeds the device maximum {smi_max} MHz")
-    return dev["sm_count"] * FP64_FMA_PER_CLK_PER_SM[cap] * f_run * 1e6, f_run
-
-
-def sol_fma_per_s(root, path):
-    """F_dev (FMA/s) for the card at `path` from the committed reference.
-
-    Raises ``ClaimError`` when the device has no entry or its entry is pending."""
-    ref = load_sol_reference(root)
-    slug = card_slug(path)
-    slug = ref.get("aliases", {}).get(slug, slug)
-    entry = ref["devices"].get(slug)
-    if entry is None:
-        raise ClaimError(f"no speed-of-light reference for device {slug!r}")
-    if entry.get("source") not in ("measured", "spec"):
-        raise ClaimError(
-            f"speed-of-light reference for {slug!r} is {entry.get('source')!r}; "
-            "an efficiency is not published until it is measured"
-        )
-    value = entry.get("fma_per_s")
-    if not isinstance(value, (int, float)) or value <= 0:
-        raise ClaimError(f"speed-of-light reference for {slug!r} has no fma_per_s")
-    return float(value)
-
-
-def check_rows_under_sol(card, fma_per_s):
-    """Raise ``ClaimError`` if any row of the card exceeds 1.00 x R_SOL (never clamps)."""
-    r_sol = fma_per_s / SOL_OPS_PER_STEP
+def check_rows_under_sol(card):
+    """Raise ``ClaimError`` if any row of the card is above the speed of light (never clamps)."""
     for r in card["results"]:
-        rate = r.get("sample_steps_per_s")
-        if rate and rate > r_sol:
+        if (r.get("eff_sol") or 0) > 1.0:
             raise ClaimError(
-                f"row {r['arm']} n={r['n']} {r['distribution']} steps={r['max_steps']} runs at "
-                f"{rate / r_sol:.3f} x the speed of light; the reference is wrong and must be re-measured"
+                f"row {r['arm']} n={r['n']} {r['distribution']} runs at {r['eff_sol']:.3f} x the speed of light; "
+                "the operation count is wrong and must be re-derived"
             )
 
 
 def efficiency(cards, sel):
-    """``R_spread / R_SOL`` of one tool/arm on the card's largest N (a fraction)."""
-    if sel["card"] not in EFF_CARDS:
-        raise ClaimError(f"eff is defined for the RK4 cards only, not {sel['card']!r}")
+    """The card's ``eff_sol`` of one tool/arm at the largest N of the span's distribution (a fraction)."""
     card = cards.load(sel["card"], sel["dev"])
-    fma = sol_fma_per_s(cards.root, cards.path(sel["card"], sel["dev"]))
-    check_rows_under_sol(card, fma)
+    check_rows_under_sol(card)
     if "arm" in sel:
         match = lambda a: a == sel["arm"]  # noqa: E731
     elif sel.get("tool") in TOOL_ARMS:
         match = TOOL_ARMS[sel["tool"]]
     else:
         raise ClaimError("eff needs arm=<arm> or tool=<eagle|warp|jax|torch|cupy>")
-    dist, steps = sel["dist"], _num(sel["steps"])
-    cell = [
-        r
-        for r in card["results"]
-        if r["distribution"] == dist and r["max_steps"] == steps and r.get("sample_steps_per_s")
-    ]
+    cell = [r for r in card["results"] if r["distribution"] == sel["dist"] and r.get("status") == "ok"
+            and r.get("eff_sol") is not None]
     if not cell:
-        raise ClaimError(f"card has no {dist} rows at {steps} steps")
+        raise ClaimError(f"card has no {sel['dist']} rows with an efficiency")
     n_max = max(r["n"] for r in cell)
-    rates = [r["sample_steps_per_s"] for r in cell if r["n"] == n_max and match(r["arm"])]
+    rates = [r["eff_sol"] for r in cell if r["n"] == n_max and match(r["arm"])]
     if not rates:
         raise ClaimError(f"no arm matches {sel.get('arm') or sel.get('tool')!r} at N={n_max:,}")
-    return max(rates) / (fma / SOL_OPS_PER_STEP)
+    return max(rates)
 
 
 def _num(text):
@@ -355,7 +268,6 @@ def _select(rows, sel):
             ("arm", "arm", str),
             ("n", "n", _num),
             ("dist", "distribution", str),
-            ("steps", "max_steps", _num),
         ):
             if key in sel and field in r and r[field] != conv(sel[key]):
                 ok = False
@@ -379,14 +291,10 @@ def _resolve(cards, sel):
     if src == "results":
         return card, _one(card["results"], sel, f"{sel['dev']}/{sel['card']} results")
     if src == "fixed":
-        return card, _one(card["fixed_overhead"]["rows"], sel, "fixed_overhead")
-    if src == "sweep":
-        rows = [
-            r
-            for r in card["compaction_sweep"]["rows"]
-            if r["variant"] == sel["variant"] and r["k"] == _num(sel["k"])
-        ]
-        return card, _one(rows, sel, "compaction_sweep")
+        arm = (card["fixed_overhead"] or {}).get(sel.get("arm"))
+        if arm is None:
+            raise ClaimError(f"fixed_overhead: no row for arm {sel.get('arm')!r}")
+        return card, arm
     if src == "memory":
         return card, _one(card["memory"]["rows"], sel, "memory")
     raise ClaimError(f"unknown src {src!r}")
@@ -402,24 +310,43 @@ def _split(sel):
     return num, den
 
 
+def row_label(row):
+    """How a row without a time reads ("out of memory", "> 120 s per run", "failed"), else None."""
+    status = row.get("status", "ok")
+    if status == "ok":
+        return None
+    return {"out_of_memory": "out of memory", "not_run: budget": "> 120 s per run"}.get(
+        status, "failed" if status.startswith("failed") else status)
+
+
+def memory_label(row):
+    """The memory pass's label for a row that has no reading, else None."""
+    if row.get("out_of_memory"):
+        return "out of memory"
+    if row.get("timed_out"):
+        return "> 120 s per run"
+    return None
+
+
 def render(cards, kind, sel):
     """The text one claim stands for."""
     if kind == "wall":
         _c, row = _resolve(cards, sel)
-        return fmt_time(cc.center(row["wall_s"]))
+        return row_label(row) or fmt_time(cc.center(row["wall_s"]))
     if kind == "x":
         num, den = _split(sel)
         (_a, rn), (_b, rd) = _resolve(cards, num), _resolve(cards, den)
-        return fmt_ratio(cc.center(rn["wall_s"]) / cc.center(rd["wall_s"]))
+        bad = row_label(rn) or row_label(rd)
+        return bad or fmt_ratio(cc.center(rn["wall_s"]) / cc.center(rd["wall_s"]))
     if kind in ("mib", "xmem", "xmin"):
         if kind == "xmem":
             num, den = _split(dict(sel, src="memory"))
             (_a, rn), (_b, rd) = _resolve(cards, num), _resolve(cards, den)
-            return fmt_ratio(rn["device_peak_bytes"] / rd["device_peak_bytes"])
+            return memory_label(rn) or memory_label(rd) or fmt_ratio(rn["device_peak_bytes"] / rd["device_peak_bytes"])
         _c, row = _resolve(cards, dict(sel, src="memory"))
         if kind == "mib":
-            return fmt_mib(row["device_peak_bytes"])
-        return fmt_ratio(row["device_factor"])
+            return memory_label(row) or fmt_mib(row["device_peak_bytes"])
+        return memory_label(row) or fmt_ratio(row["device_peak_bytes"] / row["minimum_bytes"])
     if kind == "eff":
         return fmt_eff(efficiency(cards, sel))
     if kind == "pct":
@@ -438,15 +365,7 @@ def render(cards, kind, sel):
         return fmt_pct(cc.center(rn["wall_s"]) / cc.center(rd["wall_s"]) - 1.0)
     if kind == "rate":
         _c, row = _resolve(cards, sel)
-        fmt = cc.fmt_rate_si if sel["card"].startswith("rk78") else cc.fmt_rate
-        return fmt(row[sel["field"]])
-    if kind == "comp":
-        card = cards.load(sel["card"], sel["dev"])
-        rows = [r for r in card["compile_time"]["rows"] if r["key"] == sel["key"]]
-        if len(rows) != 1:
-            raise ClaimError(f"compile_time: {len(rows)} rows for key {sel['key']!r}")
-        value = rows[0][f"{sel['which']}_s"]
-        return fmt_time(value["median"] if isinstance(value, dict) else value)
+        return cc.fmt_rate_si(row[sel["field"]])
     raise ClaimError(f"unknown claim kind {kind!r}")
 
 
@@ -545,24 +464,19 @@ HEAD_MEM_TOOLS = ("CuPy", "PyTorch")
 BASE_ARM = "eagle_simulate"
 
 
-def _head_cell(card, n, dist, steps):
+def _head_cell(card, n, dist):
     return {
         r["arm"]: r
         for r in card["results"]
-        if r["n"] == n and r["distribution"] == dist and r["max_steps"] == steps
+        if r["n"] == n and r["distribution"] == dist and r.get("status") == "ok"
     }
 
 
-def _head_mem(card, arm, n, dist, steps):
+def _head_mem(card, arm, n):
     for r in card["memory"]["rows"]:
-        if (r["arm"], r["n"], r["distribution"], r["max_steps"]) == (
-            arm,
-            n,
-            dist,
-            steps,
-        ):
+        if (r["arm"], r["n"]) == (arm, n) and r.get("device_peak_bytes"):
             return r
-    raise ClaimError(f"headline card has no memory row for {arm} at N={n:,}")
+    raise ClaimError(f"headline card has no memory reading for {arm} at N={n:,}")
 
 
 def headline_facts(cards):
@@ -571,20 +485,19 @@ def headline_facts(cards):
     Raises ``ClaimError`` naming the missing card when the configured headline
     device has none (no other device is ever substituted)."""
     hl = cards.headline
-    card = cards.load("rk4", hl["dev"])
-    dist, steps = hl["dist"], hl["steps"]
+    card = cards.load("ensemble", hl["dev"])
+    dist = hl["dist"]
     facts = {
         "device": card["device"]["name"],
         "date": card["generated_utc"][:10],
         "dist": dist,
-        "steps": steps,
         "ns": [],
     }
     for n in hl["ns"]:
-        cell = _head_cell(card, n, dist, steps)
+        cell = _head_cell(card, n, dist)
         if BASE_ARM not in cell:
             raise ClaimError(
-                f"headline card lacks {BASE_ARM} at N={n:,} ({dist}, {steps} steps)"
+                f"headline card lacks {BASE_ARM} at N={n:,} ({dist})"
             )
         base = cc.center(cell[BASE_ARM]["wall_s"])
         speed, chosen = [], {}
@@ -595,10 +508,10 @@ def headline_facts(cards):
                 chosen[name] = arm
                 speed.append((HEAD_ARM_NAMES.get(arm, name),
                               floor_sig(cc.center(cell[arm]["wall_s"]) / base)))
-        base_mem = _head_mem(card, BASE_ARM, n, dist, steps)
+        base_mem = _head_mem(card, BASE_ARM, n)
         mem = [
             floor_sig(
-                _head_mem(card, chosen[t], n, dist, steps)["device_peak_bytes"]
+                _head_mem(card, chosen[t], n)["device_peak_bytes"]
                 / base_mem["device_peak_bytes"]
             )
             for t in HEAD_MEM_TOOLS
@@ -611,18 +524,17 @@ def headline_facts(cards):
                 "speed": speed,
                 "mem": mem,
                 "mib": fmt_mib(base_mem["device_peak_bytes"]),
-                "xmin": fmt_ratio(base_mem["device_factor"]),
+                "xmin": fmt_ratio(base_mem["device_peak_bytes"] / base_mem["minimum_bytes"]),
             }
         )
     # the dense batch and how often Warp is the fastest GPU arm
     n_dense = hl["ns"][0]
-    dense = _head_cell(card, n_dense, "uniform", steps)
-    gpu = [a for a in card["arms"] if a != "cpu_openmp"]
+    dense = _head_cell(card, n_dense, "uniform")
+    gpu = list(card["arms"])
     cells, warp_first = {}, 0
     for r in card["results"]:
-        cells.setdefault((r["n"], r["distribution"], r["max_steps"]), {})[r["arm"]] = (
-            cc.center(r["wall_s"])
-        )
+        if r.get("status") == "ok":
+            cells.setdefault((r["n"], r["distribution"]), {})[r["arm"]] = cc.center(r["wall_s"])
     for walls in cells.values():
         ours = [w for a, w in walls.items() if a in gpu]
         if "warp_kernel" in walls and ours and walls["warp_kernel"] == min(ours):
@@ -662,25 +574,24 @@ def render_hero(facts):
         lo, hi = min(vals), max(vals)
         return fmt_ratio(lo) if lo == hi else f"{fmt_ratio(lo)}\u2013{fmt_ratio(hi)}"
 
-    steps = facts["steps"]
     lines = [
         f"| **{a['wall']}** at N = {a['n']:,}, {b['wall']} at N = {b['n']:,} "
         f"| **{_span(a['speed'])} faster** at N = {a['n']:,}, {_span(b['speed'])} at N = {b['n']:,} "
         f"| **{mspan(a)} less GPU memory** at N = {a['n']:,}, {mspan(b)} at N = {b['n']:,} |",
         "|:---:|:---:|:---:|",
-        f"| RK4 oscillators, each stopping at its own step, up to {steps} steps "
+        f"| RKF7(8) Kepler orbits, each stopping at its own time "
         f"| than {_caption(a['speed'])} at N = {a['n']:,}"
-        + ("; Warp is level or ahead when every sample runs all its steps" if "dense" in facts else "")
+        + ("; Warp is level or ahead when every sample runs the same orbit" if "dense" in facts else "")
         + " "
         f"| than {' and '.join(a['mem_names'])}: {a['mib']} for N = {a['n']:,}, {a['xmin']} the bare minimum state |",
         "",
         f"<sub>{facts['device']} (card of {facts['date']}). NVIDIA Warp's per-thread kernel is the "
-        f"fastest GPU arm in {facts['warp_first']} of {facts['cells']} RK4 cells",
+        f"fastest GPU arm in {facts['warp_first']} of {facts['cells']} cells",
     ]
     if "dense" in facts:
         n, warp, sim = facts["dense"]
         lines[-1] += (
-            f"; on the dense batch (every sample running all {steps} steps) at N = {n:,} "
+            f"; on the dense batch (every sample the same orbit) at N = {n:,} "
             f"it takes {warp} and `eagle.simulate` {sim}"
         )
     lines[-1] += ". See [every number, every arm](#performance).</sub>"
@@ -696,7 +607,7 @@ def render_hero_sentence(facts, subject="`eagle.simulate`"):
     """The same headline as one sentence, for a README that only quotes it."""
     a, b = facts["ns"]
     return (
-        f"{subject} integrates {a['n']:,} RK4 oscillators, each stopping at its own step, "
+        f"{subject} integrates {a['n']:,} Kepler orbits with an adaptive RKF7(8), each stopping at its own time, "
         f"in {a['wall']} on {_a(facts['device'])} {facts['device']} ({b['wall']} for {b['n']:,}), "
         f"{_span(a['speed'])} faster than {_caption(a['speed'])} at N = {a['n']:,}"
         f" ({_span(b['speed'])} at N = {b['n']:,}), in {a['mib']} of GPU memory"

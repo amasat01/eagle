@@ -6,7 +6,7 @@
 
 ``benchmarks/perf_card/`` holds a GPU card (``card_<slug>.json``)
 and a CPU card (``cpu_card_<slug>.json``); a *family* here is one of those four
-(perf GPU, perf CPU, rk78 GPU, rk78 CPU). Dropping a new device's card next to
+(the ensemble card on a GPU and on a CPU). Dropping a new device's card next to
 the existing ones (same prefix, new slug) is enough for it to appear everywhere
 this script writes to, with no hand edit: this is what keeps
 ``docs/content/performance.md`` from drifting when a card is re-run (same
@@ -449,7 +449,7 @@ def _table_fragment(spec: dict, e: dict, entries=()) -> str:
     borrowed = borrowed_readings(e, entries)
     used, withheld = {}, False
     out, fenced = [], False
-    net_kind = "rk4_cpu" if spec["key"] == "perf_card_cpu" else None
+    net_kind = None   # the RK4 net-memory reading belonged to the deleted oscillator cards
     by_config = _config_rows(e["card"]) if net_kind else []
     all_rows = e["card"]["memory"]["rows"] if net_kind else None
     section = -1  # the configuration section a row belongs to: the card's "###" headings in order

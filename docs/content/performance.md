@@ -46,6 +46,7 @@ How eagle compares with the other tools on the same committed cards is on the [f
   measured and what each arm does.
 - [Method](performance/method.md): how a number is produced.
 - [Reproduce](performance/reproduce.md): the cards on your machine or a cloud VM.
+- [What the cards cover](performance/coverage.md): every feature, its row, stage or reason.
 - [Hardware caveat](performance/hardware.md): what transfers to other devices.
 
 ```{toctree}
@@ -59,4 +60,5 @@ performance/workload
 performance/method
 performance/reproduce
 performance/hardware
+performance/coverage
 ```

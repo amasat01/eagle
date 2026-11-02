@@ -80,7 +80,7 @@ def test_the_pages_keep_their_spans():
     total = 0
     for rel in sync.PROSE_FILES:
         total += pcl.count_claims((_REPO / rel).read_text())
-    assert total >= 250, f"only {total} claim spans left across the prose pages"
+    assert total >= 30, f"only {total} claim spans left across the prose pages"
 
 
 def test_a_hand_edited_number_is_caught():
@@ -93,17 +93,17 @@ def test_a_hand_edited_number_is_caught():
     assert pcl.process(edited, cards, "reading.md") != edited
 
 
-def test_a_card_without_the_cell_names_it():
-    cards = pcl.Cards(_REPO)
+def test_a_card_without_the_cell_names_it(tmp_path):
+    _synthetic(tmp_path)
     with pytest.raises(pcl.ClaimError, match="0 rows match"):
-        pcl.process("<!--c wall arm=no_such_arm-->1 ms<!--/c-->", cards, "x.md")
+        pcl.process("<!--c wall arm=no_such_arm-->1 ms<!--/c-->", pcl.Cards(tmp_path), "x.md")
 
 
 def _headline_card_committed():
     return bool(
         list(
             (_REPO / "benchmarks" / "perf_card").glob(
-                pcl.FAMILIES["rk4"][1] + pcl.DEVICES[pcl.HEADLINE["dev"]] + ".json"
+                pcl.FAMILIES["ensemble"][1] + pcl.DEVICES[pcl.HEADLINE["dev"]] + ".json"
             )
         )
     )
@@ -114,11 +114,11 @@ def test_missing_headline_card_fails_loudly_and_writes_nothing(tmp_path, capsys)
         pytest.skip("the headline card is committed")
     with pytest.raises(
         pcl.ClaimError,
-        match=r"missing card: benchmarks/perf_card/card_nvidia-h100\*\.json",
+        match=r"missing card: benchmarks/perf_card/card_nvidia-a100\*\.json",
     ):
         sync.render_hero_block(_REPO)
     before = (_REPO / "README.md").read_bytes()
-    assert sync.main(["--check"]) == 2
+    assert sync.main(["--check"]) == pcl.EXIT_MISSING_CARD
     assert "headline card missing" in capsys.readouterr().err
     assert (_REPO / "README.md").read_bytes() == before
 
@@ -134,69 +134,71 @@ def test_committed_hero_matches_the_headline_card():
     assert text[start:end].strip("\n") == sync.render_hero_block(_REPO)
 
 
-def _synthetic_h100(root: pathlib.Path):
-    """A tree holding the P2000 card relabelled as an H100 card with an extra
-    N = 10,000,000 (walls and memory x10), to exercise the headline."""
+def _card(name, slug, scale=1.0, eff=0.5):
+    """A small ensemble card: five GPU arms at two sizes, spread and uniform, with memory rows."""
+    arms = {"eagle_simulate": "eagle simulate", "warp_kernel": "NVIDIA Warp", "jax_vmap": "JAX", "cupy_masked": "CuPy",
+            "torch_graphed": "PyTorch with CUDA graphs"}
+    results, memory = [], []
+    for n in (1_000_000, 10_000_000):
+        for dist in ("spread", "uniform"):
+            for k, arm in enumerate(arms):
+                wall = scale * n * 1e-9 * (1 + k) * (2 if dist == "uniform" else 1)
+                results.append({"n": n, "distribution": dist, "arm": arm, "status": "ok",
+                                "wall_s": {"median": wall, "iqr": wall / 100}, "eff_sol": eff / (1 + k),
+                                "attempt_samples_per_s": n / wall})
+        for arm in arms:
+            memory.append({"n": n, "arm": arm, "device_peak_bytes": n * 80, "minimum_bytes": n * 72})
+    return {"device": {"name": name, "sm_count": 108}, "device_slug": slug, "generated_utc": "2026-11-01T00:00:00Z",
+            "arms": arms, "results": results, "memory": {"rows": memory}}
+
+
+def _synthetic(root: pathlib.Path):
     dst = root / "benchmarks" / "perf_card"
     dst.mkdir(parents=True)
-    card = json.loads(
-        (_REPO / "benchmarks/perf_card/card_quadro-p2000.json").read_text()
-    )
-    card["device"]["name"] = "NVIDIA H100 (fixture)"
-    card["device_slug"] = "nvidia-h100-fixture"
-    extra = []
-    for row in card["results"]:
-        if row["n"] == 1_000_000:
-            big = json.loads(json.dumps(row))
-            big["n"] = 10_000_000
-            for key in ("mean", "lo", "hi", "median"):
-                big["wall_s"][key] *= 10
-            extra.append(big)
-    card["results"] += extra
-    mem = []
-    for row in card["memory"]["rows"]:
-        if row["n"] == 1_000_000:
-            if row["device_peak_bytes"]:
-                mem.append(
-                    dict(
-                        row,
-                        n=10_000_000,
-                        device_peak_bytes=row["device_peak_bytes"] * 10,
-                    )
-                )
-    card["memory"]["rows"] += mem
-    (dst / "card_nvidia-h100-fixture.json").write_text(json.dumps(card))
-    shutil.copy(_REPO / "benchmarks/perf_card/card_quadro-p2000.json", dst)
+    (dst / "card_nvidia-h100-fixture.json").write_text(json.dumps(_card("NVIDIA H100 (fixture)", "nvidia-h100-fixture")))
+    (dst / "card_quadro-p2000.json").write_text(json.dumps(_card("Quadro P2000", "quadro-p2000", 10.0)))
 
 
 def test_headline_renders_from_a_configured_device(tmp_path):
-    _synthetic_h100(tmp_path)
+    _synthetic(tmp_path)
     pcl.DEVICES["h100fix"] = "nvidia-h100-fixture"
     try:
-        head = {
-            "dev": "h100fix",
-            "ns": (10_000_000, 1_000_000),
-            "dist": "spread",
-            "steps": 1000,
-        }
+        head = {"dev": "h100fix", "ns": (10_000_000, 1_000_000), "dist": "spread"}
         hero = sync.render_hero_block(tmp_path, head)
         walls = [f["wall"] for f in pcl.headline_facts(pcl.Cards(tmp_path, head))["ns"]]
         # the other device is selectable with the same one-line switch
-        p2000 = sync.render_hero_block(
-            tmp_path,
-            {
-                "dev": "p2000",
-                "ns": (1_000_000, 100_000),
-                "dist": "spread",
-                "steps": 1000,
-            },
-        )
+        p2000 = sync.render_hero_block(tmp_path, {"dev": "p2000", "ns": (1_000_000, 10_000_000), "dist": "spread"})
     finally:
         del pcl.DEVICES["h100fix"]
     assert "N = 10,000,000" in hero and "N = 1,000,000" in hero
     assert "NVIDIA H100 (fixture)" in hero and all(w in hero for w in walls)
-    assert "Quadro P2000" in p2000 and "N = 100,000" in p2000
-    assert hero != p2000
+    assert "Quadro P2000" in p2000 and hero != p2000
+
+
+def test_a_row_that_did_not_run_shows_its_label(tmp_path):
+    _synthetic(tmp_path)
+    path = tmp_path / "benchmarks" / "perf_card" / "card_quadro-p2000.json"
+    card = json.loads(path.read_text())
+    for row in card["results"]:
+        if row["arm"] == "cupy_masked" and row["n"] == 10_000_000:
+            row.update(status="out_of_memory")
+        if row["arm"] == "torch_graphed" and row["n"] == 10_000_000:
+            row.update(status="not_run: budget")
+    path.write_text(json.dumps(card))
+    cards = pcl.Cards(tmp_path)
+    text = pcl.process("<!--c wall arm=cupy_masked n=1e7-->x<!--/c--> / <!--c wall arm=torch_graphed n=1e7-->x<!--/c-->", cards)
+    assert "out of memory" in text and "> 120 s per run" in text
+
+
+def test_a_row_above_the_speed_of_light_blocks_an_efficiency_claim(tmp_path):
+    _synthetic(tmp_path)
+    path = tmp_path / "benchmarks" / "perf_card" / "card_quadro-p2000.json"
+    card = json.loads(path.read_text())
+    assert pcl.process("<!--c eff arm=eagle_simulate-->x<!--/c-->", pcl.Cards(tmp_path)).endswith("50%<!--/c-->")
+    card["results"][0]["eff_sol"] = 1.2
+    path.write_text(json.dumps(card))
+    with pytest.raises(pcl.ClaimError, match="speed of light"):
+        pcl.process("<!--c eff arm=eagle_simulate-->x<!--/c-->", pcl.Cards(tmp_path))
 
 
 _UNIT_NUMBER = re.compile(r"(?<![\w.])\d[\d,]*(?:\.\d+)? ?(?:µs|ms|×|MiB)(?![\w])")
