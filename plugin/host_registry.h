@@ -257,7 +257,7 @@ public:
         // subset of recognized families this registry will actually bind and run.
         // Two branches, ONE spelling (roles.h ``check_launch_certified_pattern``,
         // shared with the device registry): an UNRECOGNIZED family is told to upgrade
-        // eagle; a RECOGNIZED-but-uncertified one (today: ``neural_block``) is told it
+        // eagle; a RECOGNIZED-but-uncertified one (today: ``graph_block``) is told it
         // is not launchable here, with no upgrade suffix.
         check_launch_certified_pattern(m.pattern, "host manifest");
         // The structural invariant ("duplicate ids are rejected"), mirroring the

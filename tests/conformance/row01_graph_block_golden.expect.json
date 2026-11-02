@@ -1,6 +1,6 @@
 {
   "row": 1,
-  "title": "a valid `neural_block` descriptor is accepted by the shared validator but refused by every plugin-loading door",
+  "title": "a valid `graph_block` descriptor is accepted by the shared validator but refused by every plugin-loading door",
   "level": "sidecar",
   "expect": "accept",
   "error_substring": null,
@@ -15,7 +15,7 @@
     }
   },
   "why": [
-    "`neural_block` is a real, well-formed descriptor, so the shared validator",
+    "`graph_block` is a real, well-formed descriptor, so the shared validator",
     "accepts it as structurally valid. But a descriptor only names other kernels",
     "(a forward kernel and a VJP kernel) instead of containing runnable code, so",
     "no loader that actually launches a kernel may accept it — each loader must",

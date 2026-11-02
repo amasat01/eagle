@@ -3,14 +3,14 @@
 
 """The registered pattern-loader hook (registry inversion).
 
-``eagle.neural`` was extracted in full to a standalone downstream
+the block code was extracted in full to a standalone downstream
 package, and ``_LAZY_PROVIDERS`` is now permanently ``{}`` (registry.py carries no
 in-tree-but-optional provider left to lazy-import by name). That package's own suite
-exercises the "neural_block" dispatch
+exercises the "graph_block" dispatch
 end-to-end through its explicit registration leg; THIS suite covers what is
 specific to the hook mechanism itself, independent of any one provider:
 
-* item 2 (AST half): registry.py carries zero ``neural`` import statements.
+* item 2 (AST half): registry.py carries zero graph-block import statements.
 * item 3: an unresolvable pattern fails LOUD with ``UnknownPatternError`` naming the
   pattern, never silently falling back — exercised both against the private resolver
   directly and end-to-end through :func:`eagle.registry.load_manifest` (the REAL
@@ -41,7 +41,7 @@ REGISTRY_PY = pathlib.Path(registry.__file__)
 
 
 # --------------------------------------------------------------------------- #
-# item 2 (AST half): zero `neural` import statements in registry.py.
+# item 2 (AST half): zero `graph_block` import statements in registry.py.
 # --------------------------------------------------------------------------- #
 def _imported_names(tree: ast.Module) -> list[str]:
     names: list[str] = []
@@ -55,12 +55,12 @@ def _imported_names(tree: ast.Module) -> list[str]:
     return names
 
 
-def test_registry_has_zero_neural_import_statements():
+def test_registry_has_zero_graph_block_import_statements():
     tree = ast.parse(REGISTRY_PY.read_text())
     names = _imported_names(tree)
-    hits = [n for n in names if "neural" in n]
+    hits = [n for n in names if "graph_block" in n]
     assert not hits, (
-        f"registry.py must carry zero `neural` import statements (AST-level); "
+        f"registry.py must carry zero `graph_block` import statements (AST-level); "
         f"found {hits} among {names}"
     )
 
@@ -121,7 +121,7 @@ def test_resolve_pattern_loader_fails_loud_naming_the_pattern(monkeypatch):
         registry._resolve_pattern_loader("_r2_never_registered_pattern")
 
 
-def test_load_manifest_fails_loud_for_neural_block_with_nothing_resolvable(
+def test_load_manifest_fails_loud_for_graph_block_with_nothing_resolvable(
     tmp_path, monkeypatch
 ):
     """Current reality (the lazy-default map is empty by default now, so this
@@ -139,11 +139,11 @@ def test_load_manifest_fails_loud_for_neural_block_with_nothing_resolvable(
 
     manifest = {
         "schema_version": 1,
-        "pattern": "neural_block",
+        "pattern": "graph_block",
         "aether_abi": ABI_VERSION,
         "plugins": [],
     }
     path = tmp_path / "manifest.json"
     path.write_text(json.dumps(manifest))
-    with pytest.raises(UnknownPatternError, match="neural_block"):
+    with pytest.raises(UnknownPatternError, match="graph_block"):
         load_manifest(path)

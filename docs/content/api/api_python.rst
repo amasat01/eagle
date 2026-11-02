@@ -120,7 +120,7 @@ host launcher :mod:`eagle.host_launch` are the LOW-LEVEL launch stack: one
 compiled ``aether-abi/1`` kernel launched by hand, with its arguments marshalled
 per call. New code reaches kernels through :func:`eagle.plan.plan`,
 :func:`eagle.deploy`, :func:`eagle.until_done` and :func:`eagle.simulate`; the
-low-level stack stays for neural-block manifests and for callers that need
+low-level stack stays for graph-block manifests and for callers that need
 exactly one launch and nothing else.
 
 .. autoclass:: eagle.launch.LaunchMixin

@@ -29,6 +29,7 @@ This section covers what changes from 0.7.2. Names that left are in the table at
 - Scratch arenas only plan: each graph owns its scratch buffer.
 - macOS wheels need macOS 15 or newer. CPython 3.13t is dropped: nine wheels per platform, and the free-threading tests run on 3.14t.
 - The CUDA toolchain for CI and local gates is NVIDIA's pinned 12.9 redist archives. CI runs on `ubuntu-24.04`; `make gate`, `make gate-gpu` and `make gate-all` are what CI runs.
+- The `neural_block` pattern is now `graph_block`, and the `NEURAL_*` field constants are `BLOCK_*`. Schema version stays 1; the old pattern name is refused by name. The table at the end lists the names.
 
 ### Fixed
 
@@ -41,6 +42,8 @@ This section covers what changes from 0.7.2. Names that left are in the table at
 |---|---|
 | the RK4 and oscillator demo cards, the old committed cards, the compare card and the calibration kit | the RKF7(8) ensemble card, its CPU twin and the feature card |
 | the 16-stage profile kit | the 6-stage kit: `sol_probe`, `wide_sweep`, `ncu_corpus`, `ncu_ensemble`, `chunk_residency`, `launch_shape` |
+| `eagle.roles.NEURAL_REQUIRED_FIELDS`, `NEURAL_EXEC_REF_FIELDS`, `NEURAL_FORBIDDEN_FIELDS` | `BLOCK_REQUIRED_FIELDS`, `BLOCK_EXEC_REF_FIELDS`, `BLOCK_FORBIDDEN_FIELDS` |
+| the pattern value `"neural_block"` (sidecar, manifest, `raptor.pattern_loaders` key) and the C++ `kNeuralBlockPattern`, `kNeural*Fields` | `"graph_block"`, `kGraphBlockPattern`, `kBlock*Fields` |
 
 ## 0.7.2 (2026-10-29)
 

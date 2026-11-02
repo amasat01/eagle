@@ -103,7 +103,7 @@ inline constexpr int kPluginMaxSchemaVersion = 3;
 //     entry point will actually bind and run.
 //
 // LAUNCH-CERTIFIED is a subset of RECOGNIZED. The two DIVERGED when
-// ``neural_block`` was added: the neural
+// ``graph_block`` was added: the graph block
 // descriptor family — is RECOGNIZED (the shared ``validate_sidecar`` structurally
 // validates it) but NOT launch-certified (no loader in this build binds or runs a
 // descriptor; its referenced kernels are ordinary ``pure`` artifacts that load
@@ -153,7 +153,7 @@ inline constexpr int kPluginMaxSchemaVersion = 3;
 //   #4 eagle/python/eagle/loaded.py ``LoadedVector`` / ``LoadedPure``. Gates:
 //      shared ``validate_sidecar`` via ``LoadedKernel``, then ``_require_pattern``
 //      — a hardcoded literal per class, retained DISPATCH (each class binds
-//      exactly one family, so the literal is what it means; a ``neural_block``
+//      exactly one family, so the literal is what it means; a ``graph_block``
 //      descriptor is refused there as "not a vector/pure plugin").   Launch
 //      set: the one family each class names (``vector`` / ``pure``).
 //   #5 eagle/python/eagle/host_launch.py ``HostPluginLibrary`` — the Python
@@ -176,7 +176,7 @@ inline constexpr int kPluginMaxSchemaVersion = 3;
 // dict in ``eagle/python/eagle/registry.py::load_manifest`` (door #6, so its keys
 // are the launch-certified set).
 inline constexpr const char* const kRecognizedPatterns[] = {
-    "vector", "pure", "neural_block",
+    "vector", "pure", "graph_block",
 };
 
 // The families a launching loader will bind and run (subset of the recognized set).
@@ -250,9 +250,9 @@ inline void check_launch_certified_pattern(const std::string& pattern,
 }
 
 // ---------------------------------------------------------------------------
-// The ``neural_block`` descriptor vocabulary (schema v1)
+// The ``graph_block`` descriptor vocabulary (schema v1)
 // ---------------------------------------------------------------------------
-// A ``neural_block`` sidecar is a DESCRIPTOR, not a kernel: it carries no arg_spec,
+// A ``graph_block`` sidecar is a DESCRIPTOR, not a kernel: it carries no arg_spec,
 // no artifact of its own, and nothing launches it. It names the kernels that
 // implement it through ``*_exec`` references; those are ordinary ``pure`` artifacts
 // that load through the normal doors. Everything below is single-sourced here and
@@ -287,24 +287,24 @@ inline constexpr const char* const kExecRefKinds[] = { "kernel" };
 // KEEP IN SYNC with ``SCATTER_POLICIES``.
 inline constexpr const char* const kScatterPolicies[] = { "unique_write", "accumulate" };
 
-// The fields a ``neural_block`` descriptor MUST carry, beyond the general required
+// The fields a ``graph_block`` descriptor MUST carry, beyond the general required
 // set (``schema_version``, ``kernel``, ``pattern``, ``scalar_type``, and an
 // ``arg_spec`` that is present and EMPTY). The validators ITERATE this list rather
 // than hand-writing a presence ``if`` per field, so the list is the only place the
-// requiredness can drift. KEEP IN SYNC with ``NEURAL_REQUIRED_FIELDS``.
+// requiredness can drift. KEEP IN SYNC with ``BLOCK_REQUIRED_FIELDS``.
 // A schema-key rename (both-ends): ``fanin``/``fanout`` ->
 // ``in_degree``/``out_degree``. SCHEMA_VERSION stays 1 (pre-release hard break).
-inline constexpr const char* const kNeuralRequiredFields[] = {
+inline constexpr const char* const kBlockRequiredFields[] = {
     "in_degree", "out_degree", "input_width", "output_width", "state_width",
     "param_width", "scatter_policy", "forward_exec",
 };
 
 // The keys whose values are exec references. ``forward_exec`` is required (it is in
-// ``kNeuralRequiredFields`` above); the two derivative refs are optional-additive,
+// ``kBlockRequiredFields`` above); the two derivative refs are optional-additive,
 // strictly shaped when present. The C++ parser also uses this list to BOUND each
 // nested object before scanning top-level keys — see parse_sidecar.
-// KEEP IN SYNC with ``NEURAL_EXEC_REF_FIELDS``.
-inline constexpr const char* const kNeuralExecRefFields[] = {
+// KEEP IN SYNC with ``BLOCK_EXEC_REF_FIELDS``.
+inline constexpr const char* const kBlockExecRefFields[] = {
     "forward_exec", "vjp_exec", "jvp_exec",
 };
 
@@ -317,8 +317,8 @@ inline constexpr const char* const kNeuralExecRefFields[] = {
 // binds nothing. The rule is "absent or empty": eagle's own representation uses an
 // empty string / empty container for absence throughout, so a present-but-empty
 // value is indistinguishable from absence by construction, and any real copy of
-// one of these fields is non-empty. KEEP IN SYNC with ``NEURAL_FORBIDDEN_FIELDS``.
-inline constexpr const char* const kNeuralForbiddenFields[] = {
+// one of these fields is non-empty. KEEP IN SYNC with ``BLOCK_FORBIDDEN_FIELDS``.
+inline constexpr const char* const kBlockForbiddenFields[] = {
     "aether_abi", "derivative", "buffers", "mutables", "mat_shapes", "host_entry",
 };
 
@@ -346,24 +346,24 @@ inline std::string exec_ref_kinds_joined() {
     return s;
 }
 
-// A human-readable rendering of ``kNeuralRequiredFields`` (declaration order).
-inline std::string neural_required_fields_joined() {
+// A human-readable rendering of ``kBlockRequiredFields`` (declaration order).
+inline std::string block_required_fields_joined() {
     std::string s;
     for (std::size_t i = 0;
-         i < sizeof(kNeuralRequiredFields) / sizeof(kNeuralRequiredFields[0]); ++i) {
+         i < sizeof(kBlockRequiredFields) / sizeof(kBlockRequiredFields[0]); ++i) {
         if (i) s += ", ";
-        s += kNeuralRequiredFields[i];
+        s += kBlockRequiredFields[i];
     }
     return s;
 }
 
-// A human-readable rendering of ``kNeuralForbiddenFields`` (declaration order).
-inline std::string neural_forbidden_fields_joined() {
+// A human-readable rendering of ``kBlockForbiddenFields`` (declaration order).
+inline std::string block_forbidden_fields_joined() {
     std::string s;
     for (std::size_t i = 0;
-         i < sizeof(kNeuralForbiddenFields) / sizeof(kNeuralForbiddenFields[0]); ++i) {
+         i < sizeof(kBlockForbiddenFields) / sizeof(kBlockForbiddenFields[0]); ++i) {
         if (i) s += ", ";
-        s += kNeuralForbiddenFields[i];
+        s += kBlockForbiddenFields[i];
     }
     return s;
 }

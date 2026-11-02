@@ -13,8 +13,8 @@ every reject case is exercisable with stub bytes and no GPU.
 Absence is lenient here for ``pattern`` and ``scalar_type`` (a pre-freeze
 sidecar never stamped either); per-loader absence rules (e.g.
 ``LoadedVector`` defaulting an absent ``pattern`` to ``"vector"``) stay with
-the loader. The ``neural_block`` clause is imported, not defined here
-(:func:`raptor.schema.blocks.validate_neural_block_descriptor`): the spine
+the loader. The ``graph_block`` clause is imported, not defined here
+(:func:`raptor.schema.blocks.validate_block_descriptor`): the spine
 declares that wire contract, this module owns only the kernel-family checks
 (``schema_version``, ``arg_spec`` roles, ``scalar_type``, ``pattern``,
 ``derivative``, buffer ``kind``).
@@ -34,7 +34,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import NamedTuple
 
-from raptor.schema.blocks import validate_neural_block_descriptor
+from raptor.schema.blocks import validate_block_descriptor
 from raptor.schema.manifest import check_lane_space
 
 from .roles import (
@@ -46,9 +46,9 @@ from .roles import (
     validate_roles,
 )
 
-#: The ``neural_block`` family name. A literal here (rather than a constant)
+#: The ``graph_block`` family name. A literal here (rather than a constant)
 #: is deliberate: this clause validates exactly one family.
-_NEURAL_BLOCK = "neural_block"
+_GRAPH_BLOCK = "graph_block"
 
 #: The optional sidecar key a producer stamps to opt its kernel into the
 #: shared all-false ``terminated`` mask. See this module's docstring.
@@ -361,8 +361,8 @@ def validate_sidecar(meta: dict, *, name: str) -> dict:
     v1); ``arg_spec`` roles; ``scalar_type`` (absent/empty stays lenient);
     ``pattern`` (value-strict against
     :data:`~eagle.roles.RECOGNIZED_PATTERNS`, absent stays lenient); the
-    ``neural_block`` clause (pattern-conditional, called from
-    :func:`raptor.schema.blocks.validate_neural_block_descriptor`, before
+    ``graph_block`` clause (pattern-conditional, called from
+    :func:`raptor.schema.blocks.validate_block_descriptor`, before
     derivative/buffer since it forbids both); ``derivative``'s shape; ``launch.lane_space`` and
     ``launch.block`` (shape only); buffer ``kind`` (value-strict against
     :data:`~eagle.roles.BUFFER_KINDS`).
@@ -370,7 +370,7 @@ def validate_sidecar(meta: dict, *, name: str) -> dict:
     Not checked here: the presence of ``kernel`` / ``arg_spec`` -- those are
     required keys a loader reads directly (``KeyError`` naming the key), as
     the C++ ``parse_sidecar`` enforces at parse rather than validate. A
-    ``neural_block`` descriptor is the exception, since no Python loader
+    ``graph_block`` descriptor is the exception, since no Python loader
     reads it: its clause requires both keys itself.
     """
     from .dtypes import SCALAR_TYPES
@@ -398,8 +398,8 @@ def validate_sidecar(meta: dict, *, name: str) -> dict:
 
     # Runs before the derivative/buffer checks below because it forbids both
     # on a descriptor.
-    if pattern == _NEURAL_BLOCK:
-        validate_neural_block_descriptor(meta, name=name)
+    if pattern == _GRAPH_BLOCK:
+        validate_block_descriptor(meta, name=name)
 
     parse_derivative(meta, name=name)
     read_launch(meta, name=name)

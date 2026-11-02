@@ -1,6 +1,6 @@
 {
   "row": 22,
-  "title": "a `neural_block` exec reference carrying an unrecognized third key is rejected (the object is CLOSED)",
+  "title": "a `graph_block` exec reference carrying an unrecognized third key is rejected (the object is CLOSED)",
   "level": "sidecar",
   "expect": "reject",
   "error_substring": "forward_exec carries unknown key(s)",

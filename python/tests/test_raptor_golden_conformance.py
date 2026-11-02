@@ -11,7 +11,7 @@ raptor's own ``validate_manifest`` is a MINIMAL shape validator by design (rapto
 manifest wrappers (``pure/manifest.json``, ``vector/manifest.json`` — hand-built
 around the harvested sidecars, never previously run through eagle's own reader) are
 run through :func:`eagle.registry.load_manifest`, using the same "reaches the
-artifact-load step" acceptance idiom ``test_neural_manifest.py`` already establishes
+artifact-load step" acceptance idiom ``test_graph_block_manifest.py`` already establishes
 for a schema-only fixture with no compiled ``.ptx`` artifact on disk: a ``ValueError``
 means eagle's validator REJECTED something it should have accepted (test failure); any
 other exception (missing artifact file, or cupy unavailable) means every validation
@@ -50,7 +50,7 @@ pytestmark = pytest.mark.skipif(
 
 
 def _assert_manifest_wrapper_accepted(path):
-    """The STUB-reach criterion (mirrors test_neural_manifest.py's
+    """The STUB-reach criterion (mirrors test_graph_block_manifest.py's
     ``_assert_accept_reaches_stub``): every eagle validation clause must accept the
     wrapper, so the ONLY acceptable failure is the artifact load itself."""
     try:
@@ -74,10 +74,10 @@ def test_vector_sidecar_golden_accepted_by_validate_sidecar():
     validate_sidecar(doc, name="raptor goldens/vector/gravity.json")  # must not raise
 
 
-def test_neural_block_sidecar_golden_accepted_by_validate_sidecar():
-    doc = json.loads((GOLDENS / "row01_neural_block_golden.sidecar.json").read_text())
+def test_graph_block_sidecar_golden_accepted_by_validate_sidecar():
+    doc = json.loads((GOLDENS / "row01_graph_block_golden.sidecar.json").read_text())
     validate_sidecar(
-        doc, name="raptor goldens/row01_neural_block_golden.sidecar.json"
+        doc, name="raptor goldens/row01_graph_block_golden.sidecar.json"
     )  # must not raise
 
 

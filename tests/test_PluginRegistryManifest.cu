@@ -136,7 +136,7 @@ TEST(PluginRegistryManifestTest, DistinctIdsAreNotRejectedByTheDuplicateGuard)
 // Since a later atomic widening
 // DEV-1) this door speaks TWO messages, and both are pinned below:
 // UNRECOGNIZED -> "not a supported plugin family ...; upgrade eagle", and
-// RECOGNIZED-but-uncertified (`neural_block`, the neural descriptor family)
+// RECOGNIZED-but-uncertified (`graph_block`, the graph_block descriptor family)
 // -> "recognized but not launchable by this loader", with NO upgrade suffix,
 // because this build knows the family and simply does not run descriptors.
 // ----------------------------------------------------------------------- //
@@ -172,28 +172,28 @@ TEST(PluginRegistryManifestTest, RejectsUnrecognizedManifestPattern)
     }
 }
 
-// The second branch: `neural_block` used to be this file's inert placeholder for
+// The second branch: `graph_block` used to be this file's inert placeholder for
 // "a family this build has never heard of". The step-1b widening made it REAL —
 // RECOGNIZED by the shared validator, never launch-certified — so the message it
 // earns here changed, and this test is where that change is pinned rather than
 // silently absorbed.
-TEST(PluginRegistryManifestTest, RejectsRecognizedButUnlaunchableNeuralBlockManifest)
+TEST(PluginRegistryManifestTest, RejectsRecognizedButUnlaunchableGraphBlockManifest)
 {
     const std::string manifestPath = writeManifestWithPattern(
-        "neural_block_manifest.json", R"(
-  "pattern": "neural_block",)");
+        "graph_block_manifest.json", R"(
+  "pattern": "graph_block",)");
     try {
         eagle::cuda::PluginRegistry::from_manifest(manifestPath);
-        FAIL() << "expected from_manifest to refuse to launch a neural_block manifest";
+        FAIL() << "expected from_manifest to refuse to launch a graph_block manifest";
     } catch (const std::runtime_error& e) {
         const std::string msg = e.what();
-        EXPECT_NE(msg.find("neural_block"), std::string::npos) << msg;
+        EXPECT_NE(msg.find("graph_block"), std::string::npos) << msg;
         EXPECT_NE(msg.find("recognized but not launchable"), std::string::npos) << msg;
         EXPECT_EQ(msg.find("upgrade eagle"), std::string::npos) << msg;
     }
 }
 
-// A "blocks[]" section under a NON-neural pattern is the live
+// A "blocks[]" section under a NON-graph_block pattern is the live
 // hazard — a kernel-manifest loader would silently ignore the descriptors and
 // load bare kernels. The shared manifest-validation helper (validate_manifest_formats,
 // reached AFTER the pattern gate lets "pure"/"vector" through) refuses it loudly with
@@ -206,10 +206,10 @@ TEST(PluginRegistryManifestTest, RejectsOrphanedBlocksSection)
   "blocks": [{"kernel": "orphan"}],)");
     try {
         eagle::cuda::PluginRegistry::from_manifest(manifestPath);
-        FAIL() << "expected from_manifest to reject blocks[] under a non-neural pattern";
+        FAIL() << "expected from_manifest to reject blocks[] under a non-graph_block pattern";
     } catch (const std::runtime_error& e) {
         const std::string msg = e.what();
-        EXPECT_NE(msg.find("carrying blocks[] must declare pattern 'neural_block'"),
+        EXPECT_NE(msg.find("carrying blocks[] must declare pattern 'graph_block'"),
                   std::string::npos) << msg;
         EXPECT_NE(msg.find("pure"), std::string::npos) << msg;
     }

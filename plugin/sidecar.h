@@ -74,7 +74,7 @@ struct Derivative {
     bool residuals_populated = false;  // Phase A: always false (residuals == [])
 };
 
-// One ``*_exec`` reference on a ``neural_block`` descriptor:
+// One ``*_exec`` reference on a ``graph_block`` descriptor:
 // ``{"kind": "kernel", "kernel": "<id>"}``. It names WHICH artifact implements a leg of
 // the block (forward / vjp / jvp) and HOW the reference must be read. The referenced
 // artifact is an ordinary ``pure`` plugin that loads through the normal doors — this is
@@ -92,7 +92,7 @@ struct ExecRef {
     std::vector<std::string> unknown_keys;
 };
 
-// The parse-side surface of a ``neural_block`` DESCRIPTOR (C++ gets parse +
+// The parse-side surface of a ``graph_block`` DESCRIPTOR (C++ gets parse +
 // validate, NOT a public descriptor type). Filled by parse_sidecar
 // for every sidecar — the fields simply stay absent on a kernel sidecar — and consumed
 // ONLY by validate_sidecar's pattern-conditional clause. A typed C++ descriptor, and the
@@ -100,13 +100,13 @@ struct ExecRef {
 // struct layout nobody reads is the compile-probe lesson inverted.
 //
 // Everything is keyed by name because the requiredness loop ITERATES roles.h's
-// ``kNeuralRequiredFields`` rather than hand-writing a check per field — so ABSENT must
+// ``kBlockRequiredFields`` rather than hand-writing a check per field — so ABSENT must
 // be distinguishable from zero, which is what the map (not a struct of ints) buys.
-struct NeuralInfo {
+struct BlockInfo {
     std::map<std::string, long long> ints;  // present integer fields only
     bool has_scatter_policy = false;
     std::string scatter_policy;
-    std::map<std::string, ExecRef> execs;   // keyed by kNeuralExecRefFields name
+    std::map<std::string, ExecRef> execs;   // keyed by kBlockExecRefFields name
 };
 
 // ``launch.box``: a kernel emitted with a thread box, one thread computing ``T`` lanes
@@ -143,8 +143,8 @@ struct Sidecar {
     std::map<std::string, std::pair<int, int>> mat_shapes;
     // Optional derivative-kernel metadata (absent on a primal / ordinary kernel).
     Derivative derivative;
-    // The ``neural_block`` descriptor surface (inert on a kernel sidecar).
-    NeuralInfo neural;
+    // The ``graph_block`` descriptor surface (inert on a kernel sidecar).
+    BlockInfo block;
     // ``launch.box`` (absent on a box-free kernel).
     Box box;
 };
@@ -264,7 +264,7 @@ inline Sidecar parse_sidecar(const std::string& path) {
 
     // ---- NESTING SAFETY, and it is not optional --------------------
     // This scanner finds a key by text, so a NESTED object's keys are visible to every
-    // top-level scan. On a ``neural_block`` descriptor that is not theoretical: an exec
+    // top-level scan. On a ``graph_block`` descriptor that is not theoretical: an exec
     // reference is literally ``{"kind": "kernel", "kernel": "<id>"}``, so a descriptor
     // whose ``forward_exec`` precedes its own ``kernel`` key parses its wire identity as
     // the FORWARD kernel's id. Reproduced against this very header before the fix
@@ -277,7 +277,7 @@ inline Sidecar parse_sidecar(const std::string& path) {
     // so every offset is preserved) and scan all top-level keys from the masked copy. A
     // sidecar with no exec objects is masked nowhere and parses exactly as before.
     std::string s = raw;
-    for (const char* key : kNeuralExecRefFields) {
+    for (const char* key : kBlockExecRefFields) {
         auto kp = _key_pos(raw, key);
         if (kp == std::string::npos) continue;
         auto ob = raw.find('{', kp);
@@ -296,7 +296,7 @@ inline Sidecar parse_sidecar(const std::string& path) {
         if (_has_key(obj, "kernel")) ref.kernel = _string_value(obj, "kernel");
         for (const auto& k : _object_keys(obj))
             if (k != "kind" && k != "kernel") ref.unknown_keys.push_back(k);
-        sc.neural.execs[key] = ref;
+        sc.block.execs[key] = ref;
         std::fill(s.begin() + static_cast<std::ptrdiff_t>(kp),
                   s.begin() + static_cast<std::ptrdiff_t>(oe) + 1, ' ');
     }
@@ -319,7 +319,7 @@ inline Sidecar parse_sidecar(const std::string& path) {
     if (auto sv = _key_pos(s, "schema_version"); sv != std::string::npos)
         sc.schema_version = std::atoi(s.c_str() + s.find(':', sv) + 1);
 
-    // ``neural_block`` descriptor fields. Parsed unconditionally (parsing stays
+    // ``graph_block`` descriptor fields. Parsed unconditionally (parsing stays
     // validation-free and pattern-agnostic, like every other field here); they are read
     // only by validate_sidecar's pattern-conditional clause, so a kernel sidecar that
     // happens to carry one of these names is unaffected. The integer scan's failure mode
@@ -327,20 +327,20 @@ inline Sidecar parse_sidecar(const std::string& path) {
     // yields 0, which the positive-integer check rejects. Which fields are integers is
     // DERIVED from roles.h (everything required that is neither the scatter contract nor
     // an exec reference), so the set cannot drift from the requiredness list.
-    for (const char* f : kNeuralRequiredFields) {
+    for (const char* f : kBlockRequiredFields) {
         const std::string field = f;
         if (field == "scatter_policy") continue;
         bool is_exec = false;
-        for (const char* e : kNeuralExecRefFields)
+        for (const char* e : kBlockExecRefFields)
             if (field == e) is_exec = true;
         if (is_exec) continue;
         if (auto p = _key_pos(s, field); p != std::string::npos)
-            sc.neural.ints[field] =
+            sc.block.ints[field] =
                 std::strtoll(s.c_str() + s.find(':', p) + 1, nullptr, 10);
     }
     if (_has_key(s, "scatter_policy")) {
-        sc.neural.has_scatter_policy = true;
-        sc.neural.scatter_policy = _string_value(s, "scatter_policy");
+        sc.block.has_scatter_policy = true;
+        sc.block.scatter_policy = _string_value(s, "scatter_policy");
     }
 
     // Bound the arg_spec array: from "arg_spec" find its opening '[' and the
@@ -530,11 +530,11 @@ inline Sidecar parse_sidecar(const std::string& path) {
     return sc;
 }
 
-// The ``neural_block`` family name. A literal here (rather than a constant) is
+// The ``graph_block`` family name. A literal here (rather than a constant) is
 // DISPATCH — this clause validates exactly one family — the ``_require_pattern``
 // precedent. Membership in ``kRecognizedPatterns`` is what makes the
 // value legal; this is what selects the clause.
-inline constexpr const char* kNeuralBlockPattern = "neural_block";
+inline constexpr const char* kGraphBlockPattern = "graph_block";
 
 // One ``{"kind": ..., "kernel": ...}`` exec reference: strict shape, value-strict
 // ``kind``. An exec ref names WHICH artifact implements a leg of the block and HOW the
@@ -554,47 +554,47 @@ inline void _validate_exec_ref(const ExecRef& ref, const std::string& field,
             if (i) rendered += ", ";
             rendered += "'" + unknown[i] + "'";
         }
-        throw std::runtime_error(ctx + ": neural_block " + field +
+        throw std::runtime_error(ctx + ": graph_block " + field +
             " carries unknown key(s) [" + rendered + "] (exec references are closed "
             "to 'kind', 'kernel')");
     }
     if (!is_valid_exec_ref_kind(ref.kind))
-        throw std::runtime_error(ctx + ": neural_block " + field + ".kind '" +
+        throw std::runtime_error(ctx + ": graph_block " + field + ".kind '" +
             ref.kind + "' is not a supported exec reference kind (supported: " +
             exec_ref_kinds_joined() + "); upgrade eagle");
     if (ref.kernel.empty())
-        throw std::runtime_error(ctx + ": neural_block " + field +
+        throw std::runtime_error(ctx + ": graph_block " + field +
             ".kernel must be a non-empty kernel id");
 }
 
-// The pattern-conditional ``neural_block`` clause of the shared validator —
-// the C++ twin of ``eagle.sidecar._validate_neural_block``, pinned check for check and
+// The pattern-conditional ``graph_block`` clause of the shared validator —
+// the C++ twin of ``eagle.sidecar._validate_graph_block``, pinned check for check and
 // leading-clause for leading-clause by the shared conformance corpus.
 //
 // A descriptor is not a kernel: it carries no ``arg_spec`` entries, no artifact of its
-// own, and nothing launches it (``neural_block`` is RECOGNIZED but never
+// own, and nothing launches it (``graph_block`` is RECOGNIZED but never
 // LAUNCH-CERTIFIED). It declares the block's shape and NAMES the kernels that implement
 // it; those are ordinary ``pure`` artifacts loaded through the normal doors.
-inline void _validate_neural_block(const Sidecar& sc, const std::string& ctx) {
+inline void _validate_graph_block(const Sidecar& sc, const std::string& ctx) {
     // The descriptor's wire identity. ``parse_sidecar`` already
     // required the KEY; this rejects an empty value.
     if (sc.kernel.empty())
-        throw std::runtime_error(ctx + ": a 'neural_block' descriptor must carry a "
+        throw std::runtime_error(ctx + ": a 'graph_block' descriptor must carry a "
             "non-empty 'kernel' (its wire identity)");
     // ABSENCE-STRICT, unlike the general lenient check above: the leniencies exist for
     // pre-freeze backward compatibility, and a family minted after the freeze has no
     // backward to be compatible with. ALLOWLIST form (never a rejected-value literal),
-    // which is what keeps the neural tree's SoftDouble grep meaningful.
+    // which is what keeps the graph-block tree's SoftDouble grep meaningful.
     if (sc.scalar_type != "float32" && sc.scalar_type != "float64")
-        throw std::runtime_error(ctx + ": neural_block requires scalar_type in "
-            "(float32, float64); got '" + sc.scalar_type + "' (a neural block's "
+        throw std::runtime_error(ctx + ": graph_block requires scalar_type in "
+            "(float32, float64); got '" + sc.scalar_type + "' (a graph block's "
             "arithmetic is native-float only)");
     // Present and EMPTY. ``parse_sidecar`` throws if the key is absent (which is why the
     // Python clause requires it explicitly — one behaviour, two enforcement points);
     // a POPULATED arg_spec means the producer built a kernel sidecar and stamped it as a
     // descriptor.
     if (!sc.arg_spec.empty())
-        throw std::runtime_error(ctx + ": a 'neural_block' descriptor must carry an "
+        throw std::runtime_error(ctx + ": a 'graph_block' descriptor must carry an "
             "EMPTY arg_spec ([]); got " + std::to_string(sc.arg_spec.size()) +
             " entries (a descriptor binds nothing — the kernels it references carry "
             "their own arg_spec)");
@@ -602,18 +602,18 @@ inline void _validate_neural_block(const Sidecar& sc, const std::string& ctx) {
     // Presence is ITERATED over roles.h's constant, never hand-written per field, so the
     // requiredness lives in exactly one place (single-sourced). Sorted,
     // so that a multi-defect descriptor reports the SAME missing field as Python does.
-    std::vector<std::string> required(std::begin(kNeuralRequiredFields),
-                                      std::end(kNeuralRequiredFields));
+    std::vector<std::string> required(std::begin(kBlockRequiredFields),
+                                      std::end(kBlockRequiredFields));
     std::sort(required.begin(), required.end());
     for (const auto& f : required) {
         bool present = false;
-        if (f == "scatter_policy")          present = sc.neural.has_scatter_policy;
-        else if (sc.neural.execs.count(f))  present = true;
-        else                                present = sc.neural.ints.count(f) > 0;
+        if (f == "scatter_policy")          present = sc.block.has_scatter_policy;
+        else if (sc.block.execs.count(f))  present = true;
+        else                                present = sc.block.ints.count(f) > 0;
         if (!present)
-            throw std::runtime_error(ctx + ": missing required neural_block field '" +
-                f + "' (schema-v1 neural_block requires " +
-                neural_required_fields_joined() + ")");
+            throw std::runtime_error(ctx + ": missing required graph_block field '" +
+                f + "' (schema-v1 graph_block requires " +
+                block_required_fields_joined() + ")");
     }
 
     // Widths and counts. ``param_width`` is the one that may legitimately be zero: a
@@ -621,40 +621,40 @@ inline void _validate_neural_block(const Sidecar& sc, const std::string& ctx) {
     // is not. The scanner is type-blind by construction (like every other integer it
     // reads), so a non-numeric value arrives here as 0 and is rejected by exactly this
     // check — the safe-by-construction failure mode pins it.
-    // The upper bound every neural_block integer field must respect — uint32
+    // The upper bound every graph_block integer field must respect — uint32
     // representability, mirroring the runtime tier's cap on the DERIVED
     // N_BLOCKS/PARAM_POOL_SIZE (buffers.py's ``_UINT32_CAP``). The descriptor tier had
     // no analogous cap on its own fanin/fanout/*_width fields until this mint
     // closed the gap.
-    constexpr long long kNeuralIntUpperBound = 1LL << 32;  // 2**32
-    for (const auto& [field, value] : sc.neural.ints) {
+    constexpr long long kBlockIntUpperBound = 1LL << 32;  // 2**32
+    for (const auto& [field, value] : sc.block.ints) {
         const bool non_negative = (field == "param_width");
         if ((non_negative ? (value < 0) : (value <= 0)) ||
-            value >= kNeuralIntUpperBound)
-            throw std::runtime_error(ctx + ": neural_block " + field + " must be " +
+            value >= kBlockIntUpperBound)
+            throw std::runtime_error(ctx + ": graph_block " + field + " must be " +
                 (non_negative ? "a non-negative integer" : "a positive integer") +
                 " representable in a uint32 (< 2**32); got " + std::to_string(value));
     }
     // A wire-checkable width lock: the block's outputs are committed into the
     // per-block state row, so they cannot be wider than it.
-    const long long ow = sc.neural.ints.at("output_width");
-    const long long sw = sc.neural.ints.at("state_width");
+    const long long ow = sc.block.ints.at("output_width");
+    const long long sw = sc.block.ints.at("state_width");
     if (ow > sw)
-        throw std::runtime_error(ctx + ": neural_block output_width (" +
+        throw std::runtime_error(ctx + ": graph_block output_width (" +
             std::to_string(ow) + ") must not exceed state_width (" +
             std::to_string(sw) + ")");
 
-    if (!is_valid_scatter_policy(sc.neural.scatter_policy))
-        throw std::runtime_error(ctx + ": neural_block scatter_policy '" +
-            sc.neural.scatter_policy + "' is not a supported terminal-write contract "
+    if (!is_valid_scatter_policy(sc.block.scatter_policy))
+        throw std::runtime_error(ctx + ": graph_block scatter_policy '" +
+            sc.block.scatter_policy + "' is not a supported terminal-write contract "
             "(supported: " + scatter_policies_joined() + "); upgrade eagle");
 
-    std::vector<std::string> execFields(std::begin(kNeuralExecRefFields),
-                                        std::end(kNeuralExecRefFields));
+    std::vector<std::string> execFields(std::begin(kBlockExecRefFields),
+                                        std::end(kBlockExecRefFields));
     std::sort(execFields.begin(), execFields.end());
     for (const auto& f : execFields) {
-        auto it = sc.neural.execs.find(f);
-        if (it != sc.neural.execs.end()) _validate_exec_ref(it->second, f, ctx);
+        auto it = sc.block.execs.find(f);
+        if (it != sc.block.execs.end()) _validate_exec_ref(it->second, f, ctx);
     }
 
     // Forbidden kernel-machinery fields — ITERATED over the constant, same rule as
@@ -662,8 +662,8 @@ inline void _validate_neural_block(const Sidecar& sc, const std::string& ctx) {
     // hazard), so a producer that copied one must fail loudly. The populated-check is a
     // lookup with NO default branch: adding a name to roles.h without teaching this
     // function how to see it is a loud runtime failure, never a silently unchecked field.
-    std::vector<std::string> forbidden(std::begin(kNeuralForbiddenFields),
-                                       std::end(kNeuralForbiddenFields));
+    std::vector<std::string> forbidden(std::begin(kBlockForbiddenFields),
+                                       std::end(kBlockForbiddenFields));
     std::sort(forbidden.begin(), forbidden.end());
     for (const auto& f : forbidden) {
         bool populated;
@@ -673,12 +673,12 @@ inline void _validate_neural_block(const Sidecar& sc, const std::string& ctx) {
         else if (f == "mutables")   populated = !sc.mutables.empty();
         else if (f == "mat_shapes") populated = !sc.mat_shapes.empty();
         else if (f == "host_entry") populated = !sc.host_entry.empty();
-        else throw std::runtime_error(ctx + ": internal — kNeuralForbiddenFields names "
+        else throw std::runtime_error(ctx + ": internal — kBlockForbiddenFields names "
             "'" + f + "' but validate_sidecar has no populated-check for it");
         if (populated)
-            throw std::runtime_error(ctx + ": a 'neural_block' descriptor must not "
+            throw std::runtime_error(ctx + ": a 'graph_block' descriptor must not "
                 "carry '" + f + "' (forbidden on a descriptor: " +
-                neural_forbidden_fields_joined() + "); it belongs on the kernel "
+                block_forbidden_fields_joined() + "); it belongs on the kernel "
                 "artifact the descriptor references");
     }
 }
@@ -743,7 +743,7 @@ inline void validate_sidecar(const Sidecar& sc, const std::string& ctx) {
     // to upgrade eagle. This is the ONLY place that closes the ``add_plugin`` path
     // (host_registry.h): a caller who bypasses a manifest and hands a Sidecar
     // straight to ``add_plugin`` never goes through either registry's manifest-level
-    // check, so without this a hand-built or future (e.g. neural-ABI) sidecar with
+    // check, so without this a hand-built or future (e.g. graph-block ABI) sidecar with
     // an unrecognized ``pattern`` would load and launch as a bare ordinary kernel
     // with zero diagnostics. Absence stays lenient (pre-freeze sidecars never
     // stamped one) — this loader never dispatches on ``pattern`` either way.
@@ -753,12 +753,12 @@ inline void validate_sidecar(const Sidecar& sc, const std::string& ctx) {
     if (!sc.pattern.empty() && !is_recognized_pattern(sc.pattern))
         throw std::runtime_error(ctx + ": unknown sidecar pattern '" + sc.pattern +
             "' (supported: " + recognized_patterns_joined() + "); upgrade eagle");
-    // The pattern-conditional ``neural_block`` clause — the ONE validator of
+    // The pattern-conditional ``graph_block`` clause — the ONE validator of
     // the descriptor wire shape, in both languages. It runs BEFORE the derivative and
     // buffer checks below because it FORBIDS both of those blocks on a descriptor: a
     // confused producer that copied kernel machinery onto a descriptor must be told
     // that, not nitpicked on the shape of a block it should not carry at all.
-    if (sc.pattern == kNeuralBlockPattern) _validate_neural_block(sc, ctx);
+    if (sc.pattern == kGraphBlockPattern) _validate_graph_block(sc, ctx);
     // ``launch.box``: the same ranges ``eagle.sidecar.read_box`` accepts.
     if (sc.box.present && (sc.box.axis < 0 || sc.box.T < 2 || sc.box.stride < 1))
         throw std::runtime_error(ctx + ": sidecar launch.box must be {'axis': int >= 0, 'T': int >= 2, "

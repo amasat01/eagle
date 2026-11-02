@@ -87,22 +87,22 @@ MAX_SCHEMA_VERSION = manifest.MAX_SCHEMA_VERSION
 
 #: The plugin families the shared sidecar validator
 #: (:func:`eagle.sidecar.validate_sidecar`) can structurally validate.
-#: ``neural_block`` is recognized but not launched by any loader. Keep in
+#: ``graph_block`` is recognized but not launched by any loader. Keep in
 #: sync with ``plugin/roles.h::kRecognizedPatterns``; sourced from
 #: ``raptor.schema.blocks.ALL_PATTERNS``.
 RECOGNIZED_PATTERNS = blocks.ALL_PATTERNS
 
 #: The plugin families a launching entry point will actually bind and
-#: run — a subset of :data:`RECOGNIZED_PATTERNS`. ``neural_block`` is
+#: run — a subset of :data:`RECOGNIZED_PATTERNS`. ``graph_block`` is
 #: recognized but never launched; every launching door uses the shared
 #: message in :func:`check_launch_certified_pattern`. The Python manifest
 #: door (:func:`eagle.registry.load_manifest`) dispatches on this set plus
-#: ``neural_block`` itself (its sole descriptor-consuming branch). Keep in
+#: ``graph_block`` itself (its sole descriptor-consuming branch). Keep in
 #: sync with ``plugin/roles.h::kLaunchCertifiedPatterns``.
 LAUNCH_CERTIFIED_PATTERNS = frozenset({"vector", "pure"})
 
 #: The ``kind`` discriminant of an exec reference
-#: (``{"kind": ..., "kernel": ...}``) on a ``neural_block`` descriptor.
+#: (``{"kind": ..., "kernel": ...}``) on a ``graph_block`` descriptor.
 #: One value in v1: the referenced artifact is a plain plugin kernel. A
 #: future aggregate/plan-bundle kind is a meaning change, so a
 #: ``schema_version`` bump. Keep in sync with
@@ -123,26 +123,26 @@ EXEC_REF_KINDS = manifest.EXEC_REF_KINDS
 #: sourced from ``raptor.schema.blocks.SCATTER_POLICIES``.
 SCATTER_POLICIES = blocks.SCATTER_POLICIES
 
-#: The fields a ``neural_block`` descriptor must carry, beyond the
+#: The fields a ``graph_block`` descriptor must carry, beyond the
 #: general required set (``schema_version``, ``kernel``, ``pattern``,
 #: ``scalar_type``, an empty ``arg_spec``). Keep in sync with
-#: ``plugin/roles.h::kNeuralRequiredFields``; sourced from
-#: ``raptor.schema.blocks.NEURAL_REQUIRED_FIELDS``.
-NEURAL_REQUIRED_FIELDS = blocks.NEURAL_REQUIRED_FIELDS
+#: ``plugin/roles.h::kBlockRequiredFields``; sourced from
+#: ``raptor.schema.blocks.BLOCK_REQUIRED_FIELDS``.
+BLOCK_REQUIRED_FIELDS = blocks.BLOCK_REQUIRED_FIELDS
 
 #: The keys whose values are exec references. ``forward_exec`` is
 #: required; the two derivative refs are optional-additive. Keep in sync
-#: with ``plugin/roles.h::kNeuralExecRefFields``; sourced from
-#: ``raptor.schema.blocks.NEURAL_EXEC_REF_FIELDS``.
-NEURAL_EXEC_REF_FIELDS = blocks.NEURAL_EXEC_REF_FIELDS
+#: with ``plugin/roles.h::kBlockExecRefFields``; sourced from
+#: ``raptor.schema.blocks.BLOCK_EXEC_REF_FIELDS``.
+BLOCK_EXEC_REF_FIELDS = blocks.BLOCK_EXEC_REF_FIELDS
 
 #: Kernel-machinery fields a descriptor must not carry (each would
 #: otherwise be silently ignored rather than fail loudly). ``aether_abi``,
 #: ``derivative``, ``buffers``, ``mutables``, ``mat_shapes``,
 #: ``host_entry`` — a descriptor binds nothing. Keep in sync with
-#: ``plugin/roles.h::kNeuralForbiddenFields``; sourced from
-#: ``raptor.schema.blocks.NEURAL_FORBIDDEN_FIELDS``.
-NEURAL_FORBIDDEN_FIELDS = blocks.NEURAL_FORBIDDEN_FIELDS
+#: ``plugin/roles.h::kBlockForbiddenFields``; sourced from
+#: ``raptor.schema.blocks.BLOCK_FORBIDDEN_FIELDS``.
+BLOCK_FORBIDDEN_FIELDS = blocks.BLOCK_FORBIDDEN_FIELDS
 
 #: The declared-buffer ``kind`` vocabulary (schema v1) — the only kinds a
 #: loader can bind; an unrecognized kind is rejected up front rather
@@ -254,7 +254,7 @@ def check_launch_certified_pattern(pattern, *, subject: str) -> None:
     * ``pattern`` outside :data:`RECOGNIZED_PATTERNS` — this build has
       never heard of the family: the message names the supported set and
       says ``upgrade eagle``.
-    * ``pattern`` recognized but not certified (e.g. a ``neural_block``
+    * ``pattern`` recognized but not certified (e.g. a ``graph_block``
       descriptor, not runnable) — the message says ``recognized but not
       launchable by this loader``, with no upgrade suffix.
 
