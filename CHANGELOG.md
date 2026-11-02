@@ -2,6 +2,46 @@
 
 Releases after 0.6.4 are on [GitHub](https://github.com/amasat01/eagle/releases): the notes are the pull request body.
 
+## 0.7.3 (unreleased)
+
+This section covers what changes from 0.7.2. Names that left are in the table at the end.
+
+### Added
+
+**Work runs on the GPU its arrays live on.** The CUDA backend decides the device for each call: an explicit device wins, then the device of the stream, then the device of the memory the call touches. Launch, memset, copy and graph calls no longer need the caller to select the GPU, whatever another library left current (JAX does this at start-up). A call whose device memory sits on two GPUs is refused by name, and a loaded device function launches only on the device it was loaded on, refusing a stream of another. A failed call now consumes the runtime error it reported, so the next launch is never blamed for it.
+
+**Warp-form kernels from hawk run as one launch.** A warp per lane (the form hawk chooses for wide per-sample values) is one launch of `ceil(lanes / serves)` blocks through `simulate`, `until_done` and the stepping doors; a kernel whose only cut is its wide-value scratch needs no sequencing.
+
+**Fused K-step reverse on host and device.** `steps_reverse="fused"` (or `"auto"`) runs a window of `K` steps as one `vjp` launch. See the autodiff guide.
+
+**`plane_meta`.** Notes that a kernel's author attached to a plane with `hawk.Meta` are read back by plane name from the loaded kernel.
+
+**Host threads and run-time information.** `exec.set_host_threads` sets the threads for host stages, which run in one OpenMP region per stage; broadcast `Param` values work in `run` and `bind`; a direct call returns NumPy arrays; and out-of-memory failures name their context.
+
+**New how-to pages.** Running a kernel across several GPUs with `RankPartition`, `eagle.stream`, `eagle.gemm` and `eagle.fft`.
+
+**New benchmark cards.** One adaptive RKF7(8) ensemble card, its CPU twin, an 11-row feature card (wide values, lane and team linear algebra, rays, index sets, keyed sums, rank partitions, early termination, FFT, zero-copy and the gradient row against torch) and a 6-stage profile kit. Each arm times in its own process, and rows that do not fit are labelled out of memory or over budget. `--smoke` runs a quick pass. See the performance pages for results.
+
+### Changed
+
+- The performance pages, README and prose claims read the new ensemble card, and the coverage page lists what each claim rests on.
+- Dispatch refuses a fused runner over sorted planes; index planes narrow once at entry, and `bind` refuses a wrong width. Grouped and segmented kernels are placed.
+- Scratch arenas only plan: each graph owns its scratch buffer.
+- macOS wheels need macOS 15 or newer. CPython 3.13t is dropped: nine wheels per platform, and the free-threading tests run on 3.14t.
+- The CUDA toolchain for CI and local gates is NVIDIA's pinned 12.9 redist archives. CI runs on `ubuntu-24.04`; `make gate`, `make gate-gpu` and `make gate-all` are what CI runs.
+
+### Fixed
+
+- A memset on the legacy stream runs on the array's device, not on whichever device another library left current.
+- The JAX bridge registers a kernel on the GPU a function is called under, and the plugin memo is per device.
+
+### Removed
+
+| Gone | Use instead |
+|---|---|
+| the RK4 and oscillator demo cards, the old committed cards, the compare card and the calibration kit | the RKF7(8) ensemble card, its CPU twin and the feature card |
+| the 16-stage profile kit | the 6-stage kit: `sol_probe`, `wide_sweep`, `ncu_corpus`, `ncu_ensemble`, `chunk_residency`, `launch_shape` |
+
 ## 0.7.2 (2026-10-29)
 
 This section covers what changes from 0.7.1; the notes for 0.7.0 and 0.7.1 are on the [GitHub releases page](https://github.com/amasat01/eagle/releases). Names that left are in the table at the end.
