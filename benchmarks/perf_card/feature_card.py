@@ -43,6 +43,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from types import SimpleNamespace
 
@@ -55,7 +56,8 @@ SCRIPT_REL = "benchmarks/perf_card/feature_card.py"
 RUN_BUDGET_S = 120.0     # a warm-up run over this is not_run: budget
 CELL_CAP_S = 300.0       # timed rounds stop here (at least one runs)
 MIN_ROUNDS, MAX_ROUNDS, IQR_STOP = 3, 9, 0.05
-PROCESS_TIMEOUT_S = 1200.0
+PROCESS_TIMEOUT_S = cc.BUILD_S + RUN_BUDGET_S + CELL_CAP_S + RUN_BUDGET_S   # setup, warm-up, rounds, a last round
+STEP_LIMIT = "not_run: step time limit"
 MARK = "FEATURE_ARM "
 F64, F32 = "float64", "float32"
 
@@ -735,8 +737,19 @@ def _is_oom(exc):
 
 def _time(run, smoke, on_gpu, slow=False):
     """A warm-up, then rounds until the IQR/median is under 5 % (3 to 9 rounds), at most 300 s: ((stats, SM MHz), rule)."""
+    def stop():       # the warm-up is stopped at the budget, not labelled afterwards
+        print(MARK + json.dumps({"status": "not_run: budget", "rule": "budget",
+                                 "detail": f"> {RUN_BUDGET_S:g} s per run (warm-up stopped at {RUN_BUDGET_S:g} s)"}), flush=True)
+        os._exit(0)
+
+    timer = threading.Timer(RUN_BUDGET_S, stop)
+    timer.daemon = True
+    timer.start()
     t0 = time.perf_counter()
-    run()
+    try:
+        run()
+    finally:
+        timer.cancel()
     warm = time.perf_counter() - t0
     if slow:      # a test hook: the warm-up reads as 121 s
         warm = RUN_BUDGET_S + 1
@@ -748,6 +761,7 @@ def _time(run, smoke, on_gpu, slow=False):
         t0 = time.perf_counter()
         run()
         samples.append(time.perf_counter() - t0)
+        cc.heartbeat()
         clock = cc.nvml_sm_clock_mhz(bus) if bus else None
         if smoke:
             rule = "smoke"
@@ -772,8 +786,10 @@ def child(row, case, dtype, arm, smoke):
     try:
         if os.environ.get("FEATURE_CARD_FORCE") == f"{arm}:oom":       # a test hook: a failed allocation
             raise MemoryError("out of memory (forced by FEATURE_CARD_FORCE)")
+        cc.heartbeat("build")
         run, check = spec["setup"](ctx)
         ok, what = check()
+        cc.heartbeat()
         timed, rule = _time(run, smoke, on_gpu, os.environ.get("FEATURE_CARD_FORCE") == f"{arm}:slow")
         rec.update(checks={what: bool(ok)}, rule=rule, note=ctx.note)
         if timed is None:
@@ -795,6 +811,7 @@ def child(row, case, dtype, arm, smoke):
 
 
 _PARTS = None   # --parts: every finished arm is saved here and a re-run reuses it
+_ASSEMBLE = False   # --assemble: run nothing, write the card from the saved parts
 
 
 def run_arm(row, case, dtype, arm, smoke):
@@ -804,6 +821,8 @@ def run_arm(row, case, dtype, arm, smoke):
     saved = cc.part_load(_PARTS, key)
     if saved is not None:
         return saved
+    if _ASSEMBLE:
+        return {"status": STEP_LIMIT}
     rec = _run_arm_process(row, case, dtype, arm, smoke)
     cc.part_save(_PARTS, key, rec)
     return rec
@@ -812,9 +831,11 @@ def run_arm(row, case, dtype, arm, smoke):
 def _run_arm_process(row, case, dtype, arm, smoke):
     cmd = [sys.executable, str(pathlib.Path(__file__).resolve()), "--arm", row, case, dtype, arm] + (["--smoke"] if smoke else [])
     try:
-        done = subprocess.run(cmd, capture_output=True, text=True, timeout=PROCESS_TIMEOUT_S)
+        done = cc.run_watched(cmd, timeout=PROCESS_TIMEOUT_S, progress=pathlib.Path(tempfile.mkdtemp(prefix="feature_alive_")) / "alive")
     except subprocess.TimeoutExpired:
         return {"status": f"failed: no result in {PROCESS_TIMEOUT_S:.0f} s"}
+    except cc.Stalled:
+        return {"status": "failed: no progress"}
     lines = [ln for ln in done.stdout.splitlines() if ln.startswith(MARK)]
     if lines:
         return json.loads(lines[-1][len(MARK):])
@@ -829,7 +850,9 @@ def _mpi(smoke):
     """The two-rank arm under mpirun (a fresh process pair), the one-rank arm as any other arm."""
     n = 8192 if smoke else 2_000_000
     why = None
-    if _gpu_count() < 2:
+    if _ASSEMBLE:
+        why = STEP_LIMIT.removeprefix("not_run: ")
+    elif _gpu_count() < 2:
         why = f"needs 2 GPUs (this machine has {_gpu_count()}); a Kaggle T4 x2 row"
     elif not shutil.which("mpirun"):
         why = "mpirun not found"
@@ -925,12 +948,14 @@ def main(argv=None):
     ap.add_argument("--rows", nargs="+", choices=list(ROWS), default=list(ROWS))
     ap.add_argument("--arm", nargs=4, metavar=("ROW", "CASE", "DTYPE", "ARM"), help=argparse.SUPPRESS)
     ap.add_argument("--mpi-worker", metavar="N", help=argparse.SUPPRESS)
+    ap.add_argument("--assemble", action="store_true",
+                    help="run nothing: write the card from the saved parts (--parts), a missing arm reads not_run: step time limit")
     ap.add_argument("--parts", type=pathlib.Path,
                     help="save each finished arm here and reuse what is there: a cap or a preemption costs one arm")
     ap.add_argument("--smoke", action="store_true", help="smallest sizes, one round, card in a temporary directory")
     args = ap.parse_args(argv)
-    global _PARTS
-    _PARTS = args.parts
+    global _PARTS, _ASSEMBLE
+    _PARTS, _ASSEMBLE = args.parts, args.assemble
     if args.mpi_worker:
         _mpi_worker(int(args.mpi_worker), args.smoke)
         return 0

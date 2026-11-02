@@ -42,7 +42,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# The plans: NAME:EXPECTED_MIN:CAP_MIN per step, and the session cap in minutes. Expected minutes are derived, not guessed:
+# The plans: NAME:EXPECTED_MIN:WORST_MIN per step. Expected minutes (the cost estimate) are derived, not guessed:
 #   C1 = sum over (arm, cell) of 10 s process + (warm-up + 3 rounds) x the per-run wall, a warm-up only for an arm over the
 #        120 s budget, no process at all for an arm predicted over budget at a larger N; + 20 s per (arm, N) of the memory pass.
 #   Per-run walls at N=1e6 spread (uniform x 0.5, spread-short x 1/16, N=1e7 x 10, fp32 x 0.6):
@@ -53,16 +53,21 @@ done
 #     A100:  the T4 walls / 39 (FP64 9.7 / 0.25 TFLOP/s); L4: the T4 walls / 1.9 (FP64 0.47 / 0.25 TFLOP/s).
 #   Estimates: P2000 24.8 min (timing N <= 1e6, memory to 1e7), L4 25.7, A100 27.0, T4 89.0 (the five cells, 1e7 included).
 #   C2: the P2000 run measured 7.6 min without torch; T4, L4 and A100 add the torch arms and, on the T4 pair, mpi_partition.
-#   P0, P4, P5, ncu: the stage's own cap in profile.sh (sol_probe 180 s, chunk_residency 900 s, launch_shape 600 s,
-#   ncu_ensemble --quick 300 s) + 1 min; P1 (the full sweep): the quick sweep took 30 s for 18 cells, the full grid is 90.
-#   A step cap is 1.3 x the estimate and never below its stage's own cap; p25 (stages 2-5) stops starting stages after 20 min.
+# WORST case = what the per-process bounds allow, never less, so a cap cannot force a re-run: every timing process is limited to
+#   300 s of build (no progress before it: killed, "failed: no progress"), a warm-up stopped at 120 s, 300 s of rounds and one
+#   last round of at most 120 s = 840 s; a memory probe to 900 s. C1 worst = processes x 840 s + memory probes x 900 s;
+#   C2 worst = processes x 840 s. P0, P1, P4, P5, ncu and p25 (stages 2-5; it stops starting stages after 20 min) are bounded
+#   by their stage caps in profile.sh (sol_probe 180 s, wide_sweep 600 s, chunk_residency 900 s, launch_shape 600 s,
+#   ncu_ensemble --quick 300 s) + 1 min. The counts: arms x cells + fp32 (4) + tail floor (2) + overhead (3), memory arms x 2 N.
 # p25 = profile stages 2-5; ncu = the quick Nsight Compute smoke of the L4.
+PROC_S=840 MEM_S=900
+worst_c() { echo $(( ($1 * PROC_S + $2 * MEM_S + 59) / 60 )); }      # processes, memory probes -> minutes
 case $PLAN in
-  a100)  STEPS=(p0:1:4 p1:4:6 c1:27:36 c2:14:18 p25:18:35)         SESSION_CAP=120; KIND=GPU ;;
-  l4)    STEPS=(p0:1:4 p1:4:6 c1:26:34 c2:12:16 p4:8:16 ncu:2:6)   SESSION_CAP=90;  KIND=GPU ;;
-  t4)    STEPS=(p0:1:4 p1:4:6 c1:89:116 c2:12:16 p4:8:16)          SESSION_CAP=180; KIND=GPU ;;
-  p2000) STEPS=(p0:1:4 p1:4:6 c1:25:33 c2:8:11 p4:8:16 p5:3:11)    SESSION_CAP=90;  KIND=GPU ;;
-  zen5|c4a) STEPS=(c1cpu:15:20 c2cpu:8:11)                         SESSION_CAP=45;  KIND=CPU ;;
+  a100)  STEPS=(p0:1:4 p1:4:11 "c1:27:$(worst_c 49 16)" "c2:14:$(worst_c 62 0)" p25:18:35) ;      KIND=GPU ;;
+  l4)    STEPS=(p0:1:4 p1:4:11 "c1:26:$(worst_c 25 16)" "c2:12:$(worst_c 62 0)" p4:8:16 ncu:2:6) ; KIND=GPU ;;
+  t4)    STEPS=(p0:1:4 p1:4:11 "c1:89:$(worst_c 49 16)" "c2:12:$(worst_c 62 0)" p4:8:16) ;        KIND=GPU ;;
+  p2000) STEPS=(p0:1:4 p1:4:11 "c1:25:$(worst_c 19 10)" "c2:8:$(worst_c 62 0)" p4:8:16 p5:3:11) ; KIND=GPU ;;
+  zen5|c4a) STEPS=(c1cpu:15:20 "c2cpu:8:$(worst_c 37 0)")                                         KIND=CPU ;;
   *) die "--plan takes a100, l4, t4, p2000, zen5 or c4a" ;;
 esac
 
@@ -100,15 +105,14 @@ step_cmd() {
   esac
 }
 
-expected=0 capsum=0
+expected=0 worst=0
 log "plan $PLAN on $SLUG (target $TARGET)"
 for s in "${STEPS[@]}"; do
   IFS=: read -r name exp cap <<<"$s"
-  printf '[repro]   %-7s expected %3s min, cap %3s min\n' "$name" "$exp" "$cap" >&2
-  expected=$((expected + exp)); capsum=$((capsum + cap))
+  printf '[repro]   %-7s expected %4s min, worst case %5s min (the step cap)\n' "$name" "$exp" "$cap" >&2
+  expected=$((expected + exp)); worst=$((worst + cap))
 done
-log "expected $expected min, step caps $capsum min, session cap $SESSION_CAP min (boot and upload not counted)"
-(( capsum <= SESSION_CAP )) || die "plan $PLAN: step caps ($capsum min) exceed the session cap ($SESSION_CAP min)"
+log "expected $expected min, worst case $worst min; --max-run-duration = worst case + boot 5 + upload 2 = $((worst + 7)) min (boot and upload not counted above)"
 [[ $REPRO_DRY_RUN == 1 ]] && log "dry run: commands are printed, nothing is run"
 
 MARKS=$RES/.steps
@@ -119,12 +123,38 @@ push() {
   run gcloud storage rsync -r "$RES" "$UPLOAD/$SLUG" || log "upload failed: the results stay in $RES"
 }
 
+# in_env CMD...: CMD in the plan's env from the eagle root (HAWK_SRC and EAGLE_SRC set; no GPU for a CPU plan).
+in_env() {
+  ( # shellcheck disable=SC1090
+    . "$ENVF"
+    [[ $KIND == CPU ]] && export CUDA_VISIBLE_DEVICES=""
+    export HAWK_SRC=${RAPTOR_HAWK_ROOT:-${HAWK_SRC:-}} EAGLE_SRC=$EROOT
+    cd "$EROOT" && "$@" )
+}
+
+# assemble NAME: the card of a C1/C2 step written from its saved parts, a missing arm labelled not_run: step time limit.
+assemble() {
+  case $1 in c1|c2|c2cpu) ;; *) return 0 ;; esac
+  mapfile -t acmd < <(step_cmd "$1")
+  log "assembling the card of step $1 from its saved parts"
+  if [[ $REPRO_DRY_RUN == 1 ]]; then printf '+ (... %s --assemble)\n' "$(_quote "${acmd[@]}")"; return 0; fi
+  in_env timeout 10m "${acmd[@]}" --assemble || log "assembling step $1 failed"
+}
+finish_cards() {   # session end (or a deadline): every C1/C2 step that did not finish still leaves a complete labelled card
+  local st
+  for st in "${STEPS[@]}"; do
+    [[ -f $MARKS/${st%%:*}.done ]] || assemble "${st%%:*}"
+  done
+  push
+}
+
 failed=0
 for s in "${STEPS[@]}"; do
   IFS=: read -r name _ cap <<<"$s"
   if [[ $REPRO_DRY_RUN == 0 && -f $MARKS/$name.done ]]; then log "step $name: done earlier, skipped"; continue; fi
   if [[ -n $DEADLINE_H ]] && (( $(date +%s) - START > $(awk -v h="$DEADLINE_H" 'BEGIN {printf "%d", h * 3600}') )); then
     log "deadline of ${DEADLINE_H} h reached before step $name; run the same command to resume"
+    finish_cards
     exit 3
   fi
   mapfile -t cmd < <(step_cmd "$name")
@@ -137,19 +167,17 @@ for s in "${STEPS[@]}"; do
   fi
   [[ -f $ENVF ]] || die "env script $ENVF not found: run bootstrap.sh --profile ${KIND,,} first"
   mkdir -p "$RES"
-  if ( # shellcheck disable=SC1090
-       . "$ENVF"
-       [[ $KIND == CPU ]] && export CUDA_VISIBLE_DEVICES=""
-       export HAWK_SRC=${RAPTOR_HAWK_ROOT:-${HAWK_SRC:-}} EAGLE_SRC=$EROOT
-       cd "$EROOT" && timeout "${cap}m" "${cmd[@]}" ); then
+  if in_env timeout "${cap}m" "${cmd[@]}"; then
     touch "$MARKS/$name.done"
   else
     log "step $name FAILED or ran over its cap of $cap min; the next step runs"
     failed=1
+    assemble "$name"
   fi
   push
 done
 
+finish_cards
 if [[ $REPRO_DRY_RUN == 0 ]]; then
   log "inventory of $RES"
   ( cd "$RES" && find . -type f ! -path './sweep_cache/*' ! -path './.steps/*' -printf '%8s  %p\n' | sort -k2 | head -200 ) >&2

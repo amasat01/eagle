@@ -510,7 +510,7 @@ def render_markdown(card):
             head + f"| {cc.fmt_time_si(r['wall_s']['median'])} ({cc.fmt_time_si(r['wall_s']['iqr'])}) "
             f"| {r['rounds']} | {cc.fmt_rate_si(r['attempt_samples_per_s'])} "
             f"| {cc.fmt_rate_si(r['useful_flops_per_s'])} "
-            f"| {'–' if r.get('eff_sol') is None else format(r['eff_sol'], '.3f')} "
+            f"| {r.get('eff_sol_note') or ('–' if r.get('eff_sol') is None else format(r['eff_sol'], '.3f'))} "
             f"| {cc.fmt_mib(r['host_peak_bytes'])} | {'–' if net is None else cc.fmt_mib(net)} "
             f"| {card['code_lines']['arms'][r['arm']]} |")
     lines += ["", "| N | arm | max position error | max error / bound "
@@ -579,7 +579,7 @@ def main(argv=None):
     ops = json.loads((HERE.parent / "sol_reference.json").read_text()).get("ops_per_attempt")
     for r in results:
         if r["status"] == "ok":
-            r["eff_sol"] = None if not fma else r["attempt_samples_per_s"] * ops / fma
+            r.update(cc.derive_eff_sol(r["attempt_samples_per_s"], fma, ops))
     cpu = cc.cpu_model()
     slug = _cpu_slug(cpu)
     card = {"schema": "eagle-rk78-cpu-card/2", "toolchain": cc.toolchain(), "cpu": cpu, "cpu_slug": slug,
@@ -595,7 +595,7 @@ def main(argv=None):
             "device_fma_per_s": fma, "ops_per_attempt": ops,
             "ops_per_attempt_source": "hand count; A100 dynamic count pending",
             "eff_sol_over_one": [[r["arm"], r["n"], r["distribution"]] for r in results
-                                 if (r.get("eff_sol") or 0) > 1.0],
+                                 if r.get("eff_sol_note")],
             "fma_probe": f"gcc -O3 -march=native -fopenmp register-only FMA chains, {_cpu_cores()} threads (cores), 8 lanes",
             "arms_not_run": arms_not_run,
             "arms": {a: ARM_LABELS[a] for a in names},

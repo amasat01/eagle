@@ -35,5 +35,5 @@ def test_a_failing_arm_is_a_row_and_the_card_completes(tmp_path):
     row = next(r for r in card["results"] if r["arm"] == "warp_kernel")
     assert "> 120 s per run" in row["rule"]
     ok = [r for r in card["results"] if r["status"] == "ok"]
-    assert ok and all(0 < r["eff_sol"] <= 1.0 and 1 <= r["rounds"] <= 9 for r in ok)
+    assert ok and all((r["eff_sol"] is None and r.get("eff_sol_note")) or (0 < r["eff_sol"] <= 1.0) for r in ok) and all(1 <= r["rounds"] <= 9 for r in ok)
     assert card["tail_floor_ms"]["spread"] is not None

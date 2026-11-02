@@ -101,6 +101,7 @@ import statistics
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -1276,7 +1277,7 @@ ARM_RUN_BUDGET_S = 120.0
 #: Timed rounds of one (arm, cell) stop at this many seconds (at least one round is always timed).
 CELL_BUDGET_S = 300.0
 ROUNDS_MIN, ROUNDS_MAX, IQR_STOP = 3, 9, 0.02
-TIMING_PROBE_TIMEOUT_S = 3600
+TIMING_PROBE_TIMEOUT_S = cc.BUILD_S + ARM_RUN_BUDGET_S + CELL_BUDGET_S + ARM_RUN_BUDGET_S   # build, warm-up, rounds, a last round
 #: ``spread-short`` ends at T_FINAL / SHORT_DIVISOR: the short-lived-sample regime.
 SHORT_DIVISOR = 16
 T_FINAL_FULL = T_FINAL
@@ -1310,6 +1311,22 @@ def _fault(arm):
     return None
 
 
+def _warm_up(arm, a, inp, reply_fd, poller):
+    """The warm-up run, stopped at the per-run budget: a timer replies ``not_run: budget`` and ends this process."""
+    def stop():
+        poller.stop()
+        cc.probe_reply(reply_fd, {"status": "not_run: budget", "warm_s": ARM_RUN_BUDGET_S, "stopped": True})
+        os._exit(0)
+
+    timer = threading.Timer(ARM_RUN_BUDGET_S, stop)
+    timer.daemon = True
+    timer.start()
+    try:
+        return _timed(arm, a, inp)
+    finally:
+        timer.cancel()
+
+
 def _time_probe(arm, n, distribution, bus_id, rounds_max, out_path):
     """Child body: build ``arm`` at N alone, warm up, time rounds 3..9 until IQR/median <= 2 %, reply with the walls,
     the agreement with the analytic truth and (in ``out_path``) the step counts the parent compares with the reference."""
@@ -1327,8 +1344,11 @@ def _time_probe(arm, n, distribution, bus_id, rounds_max, out_path):
             os.abort()
         if _fault(arm) == "oom":
             raise MemoryError("out of memory (forced by EAGLE_CARD_FAULT)")
+        cc.heartbeat("build")
         a = _make_arms(n, (arm,))[arm]
-        warm, _, out = _timed(arm, a, inp)
+        cc.heartbeat()
+        warm, _, out = _warm_up(arm, a, inp, reply_fd, poller)
+        cc.heartbeat()
     except BaseException as err:  # noqa: BLE001  (an allocation failure of any library is a row, not a crash)
         poller.stop()
         if any(k in f"{type(err).__name__} {err}" for k in _OOM_TEXT):
@@ -1349,6 +1369,7 @@ def _time_probe(arm, n, distribution, bus_id, rounds_max, out_path):
     while len(walls) < rounds_max:
         poller.mark(arm)
         w, e, _ = _timed(arm, a, inp)
+        cc.heartbeat()
         walls.append(w)
         e2e.append(e)
         if arm == "eagle_cpu" and a["state"].kernel_s is not None:
@@ -1371,6 +1392,8 @@ def _time_probe(arm, n, distribution, bus_id, rounds_max, out_path):
         "reorders_fired": (a["fired"][-1] if a.get("fired") else None) if "fired" in a else None})
 
 
+STEP_LIMIT = "not_run: step time limit"
+_ASSEMBLE = False   # --assemble: run nothing, write the card from the saved parts
 _PARTS = None   # --parts: every finished (arm, cell) is saved here and a re-run reuses it
 
 
@@ -1384,12 +1407,16 @@ def _time_cell_arm(arm, n, distribution, bus_id, rounds_max, work):
         if (_PARTS / f"{key}.npz").exists():
             shutil.copy(_PARTS / f"{key}.npz", out_path)
         return {**saved, "counts_path": str(out_path)}
+    if _ASSEMBLE:
+        return _stub(arm, n, distribution, STEP_LIMIT, work)
     try:
         r = cc.run_probe(__file__, ["--timing-probe", arm, str(n), distribution, bus_id, str(rounds_max),
                                     str(out_path)], timeout=TIMING_PROBE_TIMEOUT_S,
-                         what=f"timing probe {arm} {n} {distribution}")
+                         what=f"timing probe {arm} {n} {distribution}", progress=out_path.with_suffix(".alive"))
     except subprocess.TimeoutExpired:
-        r = {"status": f"failed: no result in {TIMING_PROBE_TIMEOUT_S} s"}
+        r = {"status": f"failed: no result in {TIMING_PROBE_TIMEOUT_S:.0f} s"}
+    except cc.Stalled:
+        r = {"status": "failed: no progress"}
     except (RuntimeError, ValueError, IndexError) as err:
         text = str(err)
         lines = [ln for ln in text.splitlines() if ln.strip()]
@@ -1417,7 +1444,9 @@ def _row_of(r, fma_dev, ops_per_attempt, samples_per_lane):
     """One result row from a timing reply; a non-``ok`` reply is a row with its status and the rule that applied."""
     row = {"n": r["n"], "distribution": r["distribution"], "arm": r["arm"], "status": r["status"]}
     if r["status"] != "ok":
-        budget = (f"> {ARM_RUN_BUDGET_S:g} s per run, predicted from N={r['predicted_from']:,}" if r.get("predicted_from")
+        budget = (f"> {ARM_RUN_BUDGET_S:g} s per run, predicted from {r['predicted_dist']} N={r['predicted_from']:,}"
+                  if r.get("predicted_from") else
+                  f"> {ARM_RUN_BUDGET_S:g} s per run (warm-up stopped at {ARM_RUN_BUDGET_S:g} s)" if r.get("stopped")
                   else f"> {ARM_RUN_BUDGET_S:g} s per run (warm-up {r.get('warm_s', 0):.0f} s)")
         row["rule"] = {"not_run: budget": budget}.get(r["status"], r["status"])
         return row
@@ -1429,8 +1458,8 @@ def _row_of(r, fma_dev, ops_per_attempt, samples_per_lane):
         sm_clock_mhz=r.get("sm_clock_mhz"), end_to_end_s=_median_iqr(r["e2e"]),
         attempts=attempts, attempt_samples_per_s=rate,
         useful_flops_per_s=FLOPS_PER_ATTEMPT * attempts / wall["median"],
-        eff_sol=(None if not fma_dev or r["arm"] == "eagle_cpu"
-                 else rate * ops_per_attempt / fma_dev["float32" if r["distribution"] == "fp32" else "float64"]),
+        **(cc.derive_eff_sol(rate, fma_dev["float32" if r["distribution"] == "fp32" else "float64"], ops_per_attempt)
+           if fma_dev and r["arm"] != "eagle_cpu" else {"eff_sol": None, "eff_sol_note": None}),
         samples_per_lane=samples_per_lane, build_s=r.get("build_s"), compile_s=r.get("compile_s"),
         kernel_only_s=(statistics.median(r["kernel_s"]) if r.get("kernel_s") else None),
         slot_fill=r.get("slot_fill"), run_mode=r.get("run_mode"))
@@ -1599,7 +1628,7 @@ def _memory_probe(arm, n, bus_id):
 
 
 #: A memory probe runs the arm once at N; one that takes longer is reported as not measured.
-MEMORY_PROBE_TIMEOUT_S = 1800
+MEMORY_PROBE_TIMEOUT_S = 900
 #: How each library reports a device allocation it could not make.
 _OUT_OF_MEMORY = ("out of memory", "OutOfMemory", "RESOURCE_EXHAUSTED", "cudaErrorMemoryAllocation")
 
@@ -1612,6 +1641,10 @@ def _run_memory_pass(ns, bus_id, names):
             saved = cc.part_load(_PARTS, f"memory_{arm}_{n}")
             if saved is not None:
                 rows.append(saved)
+                continue
+            if _ASSEMBLE:
+                rows.append({"n": n, "arm": arm, "status": STEP_LIMIT, "device_peak_bytes": None, "host_peak_bytes": None,
+                             "minimum_bytes": n * MIN_BYTES_PER_SAMPLE})
                 continue
             try:
                 r = cc.run_probe(__file__, ["--memory-probe", arm, str(n), bus_id],
@@ -1752,6 +1785,8 @@ def _fit_notes(card):
 
 
 def _dev_cell(m):
+    if m is not None and m.get("status") == STEP_LIMIT:
+        return STEP_LIMIT
     if m is not None and m.get("out_of_memory"):
         return "out of memory"
     if m is not None and m.get("timed_out"):
@@ -1817,7 +1852,7 @@ def render_markdown(card: dict) -> str:
             f"| {_fmt_time(row['end_to_end_s']['median'])} "
             f"| {_fmt_rate(row['attempt_samples_per_s'])} "
             f"| {_fmt_rate(row['useful_flops_per_s'])} ({_fmt_pct(pct)}) "
-            f"| {'–' if row['eff_sol'] is None else format(row['eff_sol'], '.3f')} "
+            f"| {row.get('eff_sol_note') or ('–' if row['eff_sol'] is None else format(row['eff_sol'], '.3f'))} "
             f"| {_fmt_mhz(row.get('sm_clock_mhz'))} "
             f"| {_dev_cell(m)} "
             f"| {_fmt_mib(m['host_peak_bytes']) if m and m['host_peak_bytes'] is not None else '–'} |")
@@ -1887,6 +1922,8 @@ def main(argv=None):
     ap.add_argument("--smoke", action="store_true",
                     help="smallest N, one round, no memory pass, card written to a temporary directory")
     ap.add_argument("--no-memory", action="store_true")
+    ap.add_argument("--assemble", action="store_true",
+                    help="run nothing: write the card from the saved parts (--parts), a missing arm reads not_run: step time limit")
     ap.add_argument("--parts", type=pathlib.Path,
                     help="save each finished (arm, cell) here and reuse what is there: a cap or a preemption costs one arm")
     ap.add_argument("--memory-ns", type=int, nargs="+",
@@ -1902,8 +1939,8 @@ def main(argv=None):
         a, n, dist, bus, rounds, out = args.timing_probe
         _time_probe(a, int(n), dist, bus, int(rounds), out)
         return 0
-    global _PARTS
-    _PARTS = args.parts
+    global _PARTS, _ASSEMBLE
+    _PARTS, _ASSEMBLE = args.parts, args.assemble
     if args.smoke:
         args.ns, args.reps, args.distributions, args.no_memory = [1_000], 1, ["spread"], True
         if args.out_dir == HERE:
@@ -1937,14 +1974,15 @@ def main(argv=None):
         for arm in names:
             if arm in oom_from and n >= oom_from[arm]:
                 r = _stub(arm, n, dist, "out_of_memory", work)
-            elif arm in budget_from and n >= budget_from[arm]:
-                r = _stub(arm, n, dist, "not_run: budget", work)
+            elif arm in budget_from and n >= budget_from[arm][0]:
+                r = {**_stub(arm, n, dist, "not_run: budget", work), "predicted_from": budget_from[arm][0],
+                     "predicted_dist": budget_from[arm][1]}
             elif (pred := _predicted_over_budget(wall_at.get((arm, dist), {}), n)) is not None:
-                r = {**_stub(arm, n, dist, "not_run: budget", work), "predicted_from": pred}
+                r = {**_stub(arm, n, dist, "not_run: budget", work), "predicted_from": pred, "predicted_dist": dist}
             else:
                 r = _time_cell_arm(arm, n, dist, bus_id, args.reps, work)
                 if r["status"] == "not_run: budget":
-                    budget_from[arm] = n
+                    budget_from[arm] = (n, dist)
                 if r["status"] == "out_of_memory":
                     oom_from[arm] = n
             if r["status"] == "ok":
@@ -1998,7 +2036,7 @@ def main(argv=None):
         if row["status"] == "ok":
             row["fraction_of_peak_fp64"] = (None if row["arm"] == "eagle_cpu" or not peak["fp64_flops"]
                                             else row["useful_flops_per_s"] / peak["fp64_flops"])
-    over = [r for r in results if r.get("eff_sol") is not None and r["eff_sol"] > 1.0]
+    over = [r for r in results if r.get("eff_sol_note")]      # pending: the reference count would score them above 1
     memory_card = {"method": _MEMORY_METHOD, "rows": memory_rows}
     card = {
         "schema": "eagle-ensemble-card/1",

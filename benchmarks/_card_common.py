@@ -28,6 +28,7 @@ import sqlite3
 import statistics
 import subprocess
 import sys
+import time
 import tempfile
 
 # --------------------------------------------------------------------------- #
@@ -947,10 +948,54 @@ def probe_reply(fd, obj):
     os.write(fd, (json.dumps(obj) + "\n").encode())
 
 
-def run_probe(script, args, *, env=None, timeout=600, what="probe"):
-    """Run ``script args`` in a fresh interpreter; its last stdout line, parsed."""
-    out = subprocess.run([sys.executable, str(pathlib.Path(script).resolve()), *args],
-                         capture_output=True, text=True, env=env, timeout=timeout)
+class Stalled(Exception):
+    """A child that made no progress for too long (see :func:`run_watched`)."""
+
+
+#: A child's build may take this long before its first progress; after it, no round may take longer than STALL_S.
+BUILD_S, STALL_S = 300.0, 600.0
+
+
+def heartbeat(phase="run"):
+    """Tell the parent this child is alive (``$CARD_PROGRESS``: a file whose mtime and text the parent reads)."""
+    path = os.environ.get("CARD_PROGRESS")
+    if path:
+        pathlib.Path(path).write_text(phase)
+
+
+def run_watched(cmd, *, timeout, progress, env=None):
+    """``subprocess.run`` of ``cmd`` with a total ``timeout`` and a no-progress watchdog: the child touches ``progress`` (see
+    :func:`heartbeat`); more than :data:`BUILD_S` s without it while building, or :data:`STALL_S` s once running, kills
+    that child alone and raises :class:`Stalled`."""
+    progress = pathlib.Path(progress)
+    progress.parent.mkdir(parents=True, exist_ok=True)
+    progress.write_text("build")
+    env = {**(os.environ if env is None else env), "CARD_PROGRESS": str(progress)}
+    child = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+    start = time.monotonic()
+    while True:
+        try:
+            out, err = child.communicate(timeout=2)
+            return subprocess.CompletedProcess(cmd, child.returncode, out, err)
+        except subprocess.TimeoutExpired:
+            limit = BUILD_S if progress.read_text() == "build" else STALL_S
+            over = time.monotonic() - start > timeout
+            if over or time.time() - progress.stat().st_mtime > limit:
+                child.kill()
+                child.communicate()
+                if over:
+                    raise subprocess.TimeoutExpired(cmd, timeout) from None
+                raise Stalled(f"no progress for {limit:.0f} s") from None
+
+
+def run_probe(script, args, *, env=None, timeout=600, what="probe", progress=None):
+    """Run ``script args`` in a fresh interpreter; its last stdout line, parsed. With ``progress`` (a file), the child is
+    watched (:func:`run_watched`) and a stall raises :class:`Stalled`."""
+    cmd = [sys.executable, str(pathlib.Path(script).resolve()), *args]
+    if progress is not None:
+        out = run_watched(cmd, timeout=timeout, progress=progress, env=env)
+    else:
+        out = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=timeout)
     if out.returncode != 0:
         raise RuntimeError(f"{what}:\n{out.stderr[-4000:]}")
     return json.loads(out.stdout.strip().splitlines()[-1])
@@ -1124,3 +1169,28 @@ def part_save(parts, key, obj):
         tmp = d / f".{key}.tmp"
         tmp.write_text(json.dumps(obj, default=str))
         tmp.replace(d / f"{key}.json")
+
+
+PENDING_EFF = "pending (reference count)"
+
+
+def derive_eff_sol(rate, fma, ops):
+    """``{"eff_sol", "eff_sol_note"}`` from the raw inputs: attempts per second, the device's FMA per second and the
+    reference ``ops_per_attempt``. A value over 1 means the reference count overstates the executed ops: it is not a
+    number until the dynamic count replaces it (``eff_sol`` None, the note says why)."""
+    if not fma or not rate or not ops:
+        return {"eff_sol": None, "eff_sol_note": None}
+    eff = rate * ops / fma
+    return {"eff_sol": None, "eff_sol_note": PENDING_EFF} if eff > 1.0 else {"eff_sol": eff, "eff_sol_note": None}
+
+
+def rescore_card(card, ops=None):
+    """Every ensemble-card row's ``eff_sol`` derived again from the card's raw fields and ``ops`` (default: the reference
+    file's ``ops_per_attempt``): a better count re-scores every card without a re-run."""
+    if ops is None:
+        ops = json.loads((pathlib.Path(__file__).resolve().parent / "sol_reference.json").read_text())["ops_per_attempt"]
+    for row in card["results"]:
+        if row.get("status") == "ok" and row["arm"] != "eagle_cpu":
+            fma = card.get("device_fma_per_s_float32" if row["distribution"] == "fp32" else "device_fma_per_s")
+            row.update(derive_eff_sol(row["attempt_samples_per_s"], fma, ops))
+    return card
