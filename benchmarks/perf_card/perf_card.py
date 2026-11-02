@@ -536,8 +536,8 @@ class _GpuArm:
         import cupy as cp
 
         self.n = n
-        self.planes = {"s": cp.empty((6, n))}
-        self.planes.update({name: cp.empty(n, dtype=COUNTER_DTYPES.get(name, "float64"))
+        self.planes = {"s": cp.empty((6, n), dtype=SCALAR)}
+        self.planes.update({name: cp.empty(n, dtype=COUNTER_DTYPES.get(name, SCALAR))
                             for name in PLANE_NAMES[6:]})
         self.terminated = cp.zeros(n, dtype=cp.bool_)
         self.runner = None
@@ -545,7 +545,7 @@ class _GpuArm:
     def upload(self, inp):
         import numpy as np
 
-        self.planes["s"].set(np.stack([inp[name] for name in STATE_NAMES]))
+        self.planes["s"].set(np.stack([inp[name] for name in STATE_NAMES]).astype(SCALAR))
         self.planes["t"].fill(0.0)
         self.planes["h"].fill(H0)
         self.planes["n_acc"].fill(0)
@@ -557,7 +557,7 @@ class _GpuArm:
         import numpy as np
 
         s = self.planes["s"].get()
-        out = {name: s[d].copy() for d, name in enumerate(STATE_NAMES)}
+        out = {name: s[d].astype(np.float64) for d, name in enumerate(STATE_NAMES)}
         out.update({name: self.planes[name].get().astype(np.float64)
                     for name in PLANE_NAMES[6:]})  # the counters compared as float64
         return out
@@ -588,12 +588,12 @@ def _make_eagle_arms(n, names):
         st = _GpuArm(n)
         if name == "eagle_simulate":
             # >>> code:eagle_simulate
-            st.runner = eagle.simulation(rkf78_attempt, t_final=T_FINAL,
+            st.runner = eagle.simulation(rkf78_attempt, t_final=T_FINAL, scalar_type=SCALAR,
                                          max_steps=MAX_ATTEMPTS, **st.planes)
             # <<< code:eagle_simulate
         else:
             # >>> code:hawk_launch
-            st.runner = eagle.until_done(eagle.deploy(rkf78_attempt), max_steps=MAX_ATTEMPTS,
+            st.runner = eagle.until_done(eagle.deploy(rkf78_attempt, scalar_type=SCALAR), max_steps=MAX_ATTEMPTS,
                                          t_final=T_FINAL, terminated=st.terminated,
                                          **st.planes, **options)
             # <<< code:hawk_launch
@@ -920,7 +920,7 @@ def _warp_kernel():
     import warp as wp
 
     cc.warp_init()
-    f64 = wp.float64
+    f64 = wp.float32 if SCALAR == "float32" else wp.float64  # the cell's plane type
     mat_a = wp.types.matrix(shape=(N_STAGES, N_STAGES), dtype=f64)
     vec_s = wp.types.vector(length=N_STAGES, dtype=f64)
     mat_k = wp.types.matrix(shape=(N_STAGES, 6), dtype=f64)
@@ -1016,16 +1016,16 @@ class _WarpState:
         import warp as wp
 
         self.wp = wp
-        self.planes = {k: wp.empty(n, dtype=wp.float64, device="cuda:0")
-                       for k in PLANE_NAMES}
+        real = wp.float32 if SCALAR == "float32" else wp.float64
+        self.planes = {k: wp.empty(n, dtype=real, device="cuda:0") for k in PLANE_NAMES}
 
     def upload(self, inp):
         for k in STATE_NAMES:
-            self.planes[k].assign(inp[k])
+            self.planes[k].assign(inp[k].astype(SCALAR))
         self.wp.synchronize_device("cuda:0")
 
     def download(self):
-        return {k: v.numpy().copy() for k, v in self.planes.items()}
+        return {k: v.numpy().astype("float64") for k, v in self.planes.items()}
 
 
 def _make_warp_arm(n):
@@ -1288,10 +1288,17 @@ _OOM_TEXT = _OUT_OF_MEMORY = ("out of memory", "OutOfMemory", "RESOURCE_EXHAUSTE
                               "MemoryError")
 
 
+#: The plane precision of this process; the ``fp32`` cell runs the spread inputs in float32 at this tolerance.
+SCALAR = "float64"
+FP32_TOL = 1e-6
+
+
 def _set_cell(distribution):
     """Apply a cell's distribution to this process; returns the input distribution ('spread' or 'uniform')."""
-    global T_FINAL
+    global T_FINAL, SCALAR, RTOL, ATOL
     T_FINAL = T_FINAL_FULL / SHORT_DIVISOR if distribution == "spread-short" else T_FINAL_FULL
+    if distribution == "fp32":
+        SCALAR, RTOL, ATOL = "float32", FP32_TOL, FP32_TOL
     return "uniform" if distribution == "uniform" else "spread"
 
 
@@ -1397,7 +1404,8 @@ def _row_of(r, fma_dev, ops_per_attempt, samples_per_lane):
         sm_clock_mhz=r.get("sm_clock_mhz"), end_to_end_s=_median_iqr(r["e2e"]),
         attempts=attempts, attempt_samples_per_s=rate,
         useful_flops_per_s=FLOPS_PER_ATTEMPT * attempts / wall["median"],
-        eff_sol=(None if fma_dev is None or r["arm"] == "eagle_cpu" else rate * ops_per_attempt / fma_dev),
+        eff_sol=(None if not fma_dev or r["arm"] == "eagle_cpu"
+                 else rate * ops_per_attempt / fma_dev["float32" if r["distribution"] == "fp32" else "float64"]),
         samples_per_lane=samples_per_lane, build_s=r.get("build_s"), compile_s=r.get("compile_s"),
         kernel_only_s=(statistics.median(r["kernel_s"]) if r.get("kernel_s") else None),
         slot_fill=r.get("slot_fill"), run_mode=r.get("run_mode"))
@@ -1444,13 +1452,16 @@ FMA_PROBE_ITERS = 20000
 FMA_PER_ITER = 8
 
 
-def _fma_probe(sm_count):
-    """Thread-level DFMA instructions per second the device sustains (best of three launches)."""
+def _fma_probe(sm_count, dtype="float64"):
+    """Thread-level FMA instructions per second the device sustains in ``dtype`` (best of three launches)."""
     import cupy as cp
 
-    kernel = cp.RawKernel(_FMA_PROBE_SRC, "fma_chain")
+    src = _FMA_PROBE_SRC
+    if dtype == "float32":
+        src = src.replace("double", "float").replace("1.0000001", "1.0000001f").replace("1e-9", "1e-9f")
+    kernel = cp.RawKernel(src, "fma_chain")
     blocks, threads = sm_count * 8, 256
-    out = cp.empty(blocks * threads)
+    out = cp.empty(blocks * threads, dtype=dtype)
     kernel((blocks,), (threads,), (out, FMA_PROBE_ITERS))
     cp.cuda.runtime.deviceSynchronize()
     best = None
@@ -1908,6 +1919,22 @@ def main(argv=None):
         replies += cell
         print(f"{dist} N={n:>9,} done ({time.perf_counter() - t0:.1f}s)", flush=True)
 
+    # the float32 method cell: the spread inputs at 1e6 (1e3 in a smoke run), eagle and Warp, float32 planes
+    fp32_n = ns[0] if args.smoke or args.ns else 1_000_000
+    fp32_arms = [a for a in names if a.startswith("eagle") or a == "warp_kernel"]
+    if args.smoke:
+        fp32_arms = [a for a in fp32_arms if a in ("eagle_graph", "warp_kernel")]
+    cell = []
+    for arm in fp32_arms:
+        r = _time_cell_arm(arm, fp32_n, "fp32", bus_id, args.reps, work)
+        cell.append(r)
+        print(f"fp32 N={fp32_n:>9,} {arm:22s} {r['status']}", flush=True)
+    if cell:
+        agreement, ref, steps = _compare_with_reference(cell)
+        per_cell.append({"n": fp32_n, "distribution": "fp32", "reference_arm": ref,
+                         "agreement": agreement or {}, "steps": steps})
+        replies += cell
+
     # method cells: the floor a launch plus a tail costs, and the fixed overhead of a tiny batch
     def method_cell(n, arm, dist="spread"):
         r = _time_cell_arm(arm, n, dist, bus_id, args.reps, work)
@@ -1922,7 +1949,7 @@ def main(argv=None):
 
     sm_count = device["sm_count"]
     try:
-        fma_dev = _fma_probe(sm_count)
+        fma_dev = {d: _fma_probe(sm_count, d) for d in ("float64", "float32")}
     except Exception as err:  # noqa: BLE001
         print(f"FMA probe failed: {err}", flush=True)
         fma_dev = None
@@ -1956,16 +1983,18 @@ def main(argv=None):
             "max_attempts": MAX_ATTEMPTS, "seed": SEED,
             "last_step": "clipped to land on the final time",
             "flops_per_attempt": FLOPS_PER_ATTEMPT, "ops_per_attempt": ops,
+            "ops_per_attempt_source": "hand count; A100 dynamic count pending",
             "ops_per_attempt_audit": audit, "graph_block": GRAPH_BLOCK,
         },
         "cells": [list(c) for c in cells], "ns": ns,
-        "distributions": sorted({d for _, d in cells}),
+        "distributions": sorted({d for _, d in cells} | {"fp32"}),
         "arms": {a: ARM_LABELS[a] for a in names}, "arms_not_run": arms_not_run,
         "code_lines": code_line_counts(),
         "tail_floor_ms": {d: (None if v["status"] != "ok" else v["wall_s"]["median"] * 1e3) for d, v in tail.items()},
         "tail_floor": tail, "fixed_overhead_n": OVERHEAD_N, "fixed_overhead": overhead,
-        "fp32": {"status": "not_run: the float32 arms are not built in this version of the card"},
-        "device_fma_per_s": fma_dev, "samples_per_lane_threads_per_sm": threads_per_sm,
+        "fp32": {"n": fp32_n, "arms": fp32_arms, "tolerance": FP32_TOL},
+        "device_fma_per_s": None if fma_dev is None else fma_dev["float64"],
+        "device_fma_per_s_float32": None if fma_dev is None else fma_dev["float32"], "samples_per_lane_threads_per_sm": threads_per_sm,
         "eff_sol_over_one": [[r["arm"], r["n"], r["distribution"]] for r in over],
         "method": {
             "rounds": {"min": ROUNDS_MIN, "max": args.reps, "stop": f"IQR/median <= {IQR_STOP:.0%}"},
