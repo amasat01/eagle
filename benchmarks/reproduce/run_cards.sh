@@ -8,7 +8,7 @@
 #     --plan NAME     a100 | l4 | t4 | p2000 | zen5 | c4a: the steps of that device, in session order
 #                     (P0 sol_probe, P1 wide_sweep with its rows written, C1, C2, then the profile stages)
 #     --upload URL    after each step, copy the results to URL/<slug> (gcloud storage rsync); a new machine given
-#                     the same URL pulls what is there first and skips the steps already done
+#                     the same URL pulls what is there first and skips the steps and the C1/C2 parts already done
 #     --work DIR      bootstrap's work directory (default: $REPRO_WORK, else per target)
 #     --out DIR       results root (default WORK/cards); results go to OUT/<machine-slug>/
 #     --slug S        machine slug (default: <gpu>--<cpu>, from the hardware)
@@ -42,14 +42,27 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# The plans (ruling section 4): NAME:EXPECTED_MIN:CAP_MIN per step, and the session cap in minutes.
+# The plans: NAME:EXPECTED_MIN:CAP_MIN per step, and the session cap in minutes. Expected minutes are derived, not guessed:
+#   C1 = sum over (arm, cell) of 10 s process + (warm-up + 3 rounds) x the per-run wall, a warm-up only for an arm over the
+#        120 s budget, no process at all for an arm predicted over budget at a larger N; + 20 s per (arm, N) of the memory pass.
+#   Per-run walls at N=1e6 spread (uniform x 0.5, spread-short x 1/16, N=1e7 x 10, fp32 x 0.6):
+#     P2000: eagle_graph 23.9 s, persist and simulate 13.6 s (measured by the rehearsal); warp 25.1 s and cupy_masked 286 s
+#            scaled from the T4 ratios to persist (1.85, 21): estimates, to be replaced by the rehearsal's card.
+#     T4:    graph 7.22, persist 4.28, simulate 4.28, cupy 90.6, torch_graphed 95.3, torch_compiled 23.1, jax 13.0, warp 7.9 s
+#            (the Kaggle T4 card of the 11th run); + 40 s / 30 s compile per torch_compiled / jax process.
+#     A100:  the T4 walls / 39 (FP64 9.7 / 0.25 TFLOP/s); L4: the T4 walls / 1.9 (FP64 0.47 / 0.25 TFLOP/s).
+#   Estimates: P2000 24.8 min (timing N <= 1e6, memory to 1e7), L4 25.7, A100 27.0, T4 89.0 (the five cells, 1e7 included).
+#   C2: the P2000 run measured 7.6 min without torch; T4, L4 and A100 add the torch arms and, on the T4 pair, mpi_partition.
+#   P0, P4, P5, ncu: the stage's own cap in profile.sh (sol_probe 180 s, chunk_residency 900 s, launch_shape 600 s,
+#   ncu_ensemble --quick 300 s) + 1 min; P1 (the full sweep): the quick sweep took 30 s for 18 cells, the full grid is 90.
+#   A step cap is 1.3 x the estimate and never below its stage's own cap; p25 (stages 2-5) stops starting stages after 20 min.
 # p25 = profile stages 2-5; ncu = the quick Nsight Compute smoke of the L4.
 case $PLAN in
-  a100)  STEPS=(p0:1:2 p1:5:8 c1:10:20 c2:8:16 p25:18:30)        SESSION_CAP=90;  KIND=GPU ;;
-  l4)    STEPS=(p0:1:2 p1:5:8 c1:20:30 c2:10:16 p4:8:12 ncu:2:5) SESSION_CAP=90;  KIND=GPU ;;
-  t4)    STEPS=(p0:1:2 p1:5:8 c1:40:50 c2:20:25 p4:10:15)        SESSION_CAP=120; KIND=GPU ;;
-  p2000) STEPS=(p0:1:2 p1:8:10 c1:20:25 c2:10:12 p4:6:8 p5:2:3)  SESSION_CAP=60;  KIND=GPU ;;
-  zen5|c4a) STEPS=(c1cpu:15:25 c2cpu:8:12)                       SESSION_CAP=45;  KIND=CPU ;;
+  a100)  STEPS=(p0:1:4 p1:4:6 c1:27:36 c2:14:18 p25:18:35)         SESSION_CAP=120; KIND=GPU ;;
+  l4)    STEPS=(p0:1:4 p1:4:6 c1:26:34 c2:12:16 p4:8:16 ncu:2:6)   SESSION_CAP=90;  KIND=GPU ;;
+  t4)    STEPS=(p0:1:4 p1:4:6 c1:89:116 c2:12:16 p4:8:16)          SESSION_CAP=180; KIND=GPU ;;
+  p2000) STEPS=(p0:1:4 p1:4:6 c1:25:33 c2:8:11 p4:8:16 p5:3:11)    SESSION_CAP=90;  KIND=GPU ;;
+  zen5|c4a) STEPS=(c1cpu:15:20 c2cpu:8:11)                         SESSION_CAP=45;  KIND=CPU ;;
   *) die "--plan takes a100, l4, t4, p2000, zen5 or c4a" ;;
 esac
 
@@ -73,14 +86,14 @@ step_cmd() {
   case $1 in
     p0)    printf '%s\n' python benchmarks/reproduce/gpu_profile.py --stage sol_probe --out "$RES/profile" ;;
     p1)    printf '%s\n' python -m hawk.targets.cards.sweep --write --out "$RES/wide_sweep.json" --cache "$RES/sweep_cache" ;;
-    c1)    if [[ $PLAN == l4 ]]; then   # L4: timing to 1e6, memory to 1e7
-             printf '%s\n' python benchmarks/perf_card/perf_card.py --ns 1000000 --memory-ns 1000000 10000000 --out-dir "$RES/perf_card"
+    c1)    if [[ $PLAN == l4 || $PLAN == p2000 ]]; then   # timing to 1e6, memory to 1e7
+             printf '%s\n' python benchmarks/perf_card/perf_card.py --ns 1000000 --memory-ns 1000000 10000000 --parts "$RES/parts/c1" --out-dir "$RES/perf_card"
            else
-             printf '%s\n' python benchmarks/perf_card/perf_card.py --out-dir "$RES/perf_card"
+             printf '%s\n' python benchmarks/perf_card/perf_card.py --parts "$RES/parts/c1" --out-dir "$RES/perf_card"
            fi ;;
     c1cpu) printf '%s\n' python benchmarks/perf_card/cpu_card.py --out-dir "$RES/perf_card" ;;
-    c2|c2cpu) printf '%s\n' python benchmarks/perf_card/feature_card.py --out-dir "$RES/perf_card" ;;
-    p25)   printf '%s\n' bash benchmarks/reproduce/profile.sh --env "$ENVF" --out "$RES/profile" --only ncu_corpus,ncu_ensemble,chunk_residency,launch_shape ;;
+    c2|c2cpu) printf '%s\n' python benchmarks/perf_card/feature_card.py --parts "$RES/parts/c2" --out-dir "$RES/perf_card" ;;
+    p25)   printf '%s\n' bash benchmarks/reproduce/profile.sh --env "$ENVF" --out "$RES/profile" --deadline-min 20 --only ncu_corpus,ncu_ensemble,chunk_residency,launch_shape ;;
     p4)    printf '%s\n' bash benchmarks/reproduce/profile.sh --env "$ENVF" --out "$RES/profile" --only chunk_residency ;;
     p5)    printf '%s\n' bash benchmarks/reproduce/profile.sh --env "$ENVF" --out "$RES/profile" --only launch_shape ;;
     ncu)   printf '%s\n' bash benchmarks/reproduce/profile.sh --env "$ENVF" --out "$RES/profile" --only ncu_ensemble --quick ;;

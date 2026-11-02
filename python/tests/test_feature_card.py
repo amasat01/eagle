@@ -76,3 +76,46 @@ def test_an_arm_that_runs_records_its_clock_and_rounds(card_module, monkeypatch,
     card_module.main(["--smoke", "--rows", "scatter", "--out-dir", str(tmp_path)])
     arm = json.loads(next(tmp_path.glob("feature_card_*.json")).read_text())["rows"][0]["arms"]["np_add_at"]
     assert arm["status"] == "ok" and {"median", "iqr", "rounds"} <= set(arm["wall_s"]) and "sm_mhz" in arm
+
+
+def test_a_killed_run_resumes_from_its_saved_parts(card_module, monkeypatch, tmp_path):
+    """Kill the card after one arm, run it again: the finished arm is reused (its process is not started) and the card completes."""
+    pytest.importorskip("hawk")
+    monkeypatch.delenv("FEATURE_CARD_FORCE", raising=False)
+    row = card_module.ROWS["scatter"]
+    monkeypatch.setitem(row, "arms", ("np_add_at",))
+    monkeypatch.setitem(row, "ref", "np_add_at")
+    monkeypatch.setitem(row, "dtypes", ("float64", "float32"))   # two parts of one row
+    real, started = card_module._run_arm_process, []
+
+    def die_after_one(*args):
+        started.append(args)
+        if len(started) == 2:
+            raise KeyboardInterrupt
+        return real(*args)
+
+    parts = ["--parts", str(tmp_path / "parts")]
+    monkeypatch.setattr(card_module, "_run_arm_process", die_after_one)
+    with pytest.raises(KeyboardInterrupt):
+        card_module.main(["--smoke", "--rows", "scatter", "--out-dir", str(tmp_path / "out"), *parts])
+    assert len(list((tmp_path / "parts").glob("*.json"))) == 1
+    started.clear()
+    monkeypatch.setattr(card_module, "_run_arm_process", lambda *a: started.append(a) or real(*a))
+    assert card_module.main(["--smoke", "--rows", "scatter", "--out-dir", str(tmp_path / "out"), *parts]) == 0
+    assert [a[2] for a in started] == ["float32"]          # float64 came from its saved part
+    card = json.loads(next((tmp_path / "out").glob("feature_card_*.json")).read_text())
+    assert [r["dtype"] for r in card["rows"]] == ["float64", "float32"]
+    assert all(r["arms"]["np_add_at"]["status"] == "ok" for r in card["rows"])
+
+
+def test_an_arm_predicted_over_the_budget_is_not_warmed_up():
+    """A wall measured at a smaller N, scaled linearly, over 120 s at a larger N: not run there, the rule names the N."""
+    import sys
+
+    sys.path.insert(0, str(_BENCH / "perf_card"))
+    spec = importlib.util.spec_from_file_location("perf_card", _BENCH / "perf_card" / "perf_card.py")
+    pc = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(pc)
+    assert pc._predicted_over_budget({1_000_000: 13.0}, 10_000_000) == 1_000_000      # 130 s predicted
+    assert pc._predicted_over_budget({1_000_000: 11.0}, 10_000_000) is None           # 110 s: it runs
+    assert pc._predicted_over_budget({}, 10_000_000) is None                          # nothing measured: the warm-up decides

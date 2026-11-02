@@ -1104,3 +1104,23 @@ def published_peak_bytes(row, rows, card_kind):
     if not is_resolved(row, floor_estimate(rows, row["arm"])):
         return None
     return net_peak_bytes(row, card_kind)
+
+
+def part_load(parts, key):
+    """The result an earlier run saved under ``key`` in the ``parts`` directory (None: no directory or no part), unless it failed."""
+    path = parts and pathlib.Path(parts) / f"{key}.json"
+    if path and path.exists():
+        obj = json.loads(path.read_text())
+        if not str(obj.get("status", "")).startswith("failed"):
+            return obj
+    return None
+
+
+def part_save(parts, key, obj):
+    """Save one finished result, so a cap or a preemption costs one part and never the card."""
+    if parts:
+        d = pathlib.Path(parts)
+        d.mkdir(parents=True, exist_ok=True)
+        tmp = d / f".{key}.tmp"
+        tmp.write_text(json.dumps(obj, default=str))
+        tmp.replace(d / f"{key}.json")

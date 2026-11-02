@@ -1371,9 +1371,19 @@ def _time_probe(arm, n, distribution, bus_id, rounds_max, out_path):
         "reorders_fired": (a["fired"][-1] if a.get("fired") else None) if "fired" in a else None})
 
 
+_PARTS = None   # --parts: every finished (arm, cell) is saved here and a re-run reuses it
+
+
 def _time_cell_arm(arm, n, distribution, bus_id, rounds_max, work):
-    """Parent: one timing child. A failure is a row: ``out_of_memory`` or ``failed: <last error line>``."""
+    """Parent: one timing child. A failure is a row: ``out_of_memory`` or ``failed: <last error line>``.
+    With ``--parts`` a finished result is saved, and an earlier one is reused."""
+    key = f"timing_{arm}_{n}_{distribution}"
     out_path = work / f"counts_{arm}_{n}_{distribution}.npz"
+    saved = cc.part_load(_PARTS, key)
+    if saved is not None:
+        if (_PARTS / f"{key}.npz").exists():
+            shutil.copy(_PARTS / f"{key}.npz", out_path)
+        return {**saved, "counts_path": str(out_path)}
     try:
         r = cc.run_probe(__file__, ["--timing-probe", arm, str(n), distribution, bus_id, str(rounds_max),
                                     str(out_path)], timeout=TIMING_PROBE_TIMEOUT_S,
@@ -1386,15 +1396,30 @@ def _time_cell_arm(arm, n, distribution, bus_id, rounds_max, work):
         r = {"status": "out_of_memory" if any(k in text for k in _OOM_TEXT)
              else "failed: " + (lines[-1][:300] if len(lines) > 1 else "the process ended without a result")}
     r.update(n=n, distribution=distribution, arm=arm, counts_path=str(out_path))
+    if _PARTS is not None:
+        if out_path.exists():
+            _PARTS.mkdir(parents=True, exist_ok=True)
+            shutil.copy(out_path, _PARTS / f"{key}.npz")
+        cc.part_save(_PARTS, key, {k: v for k, v in r.items() if k != "counts_path"})
     return r
+
+
+def _predicted_over_budget(walls, n):
+    """The smaller N whose measured per-run wall, scaled linearly to ``n``, is over the per-run budget (else None):
+    the arm is not warmed up at ``n``."""
+    for small, wall in sorted(walls.items(), reverse=True):
+        if small < n and wall * n / small > ARM_RUN_BUDGET_S:
+            return small
+    return None
 
 
 def _row_of(r, fma_dev, ops_per_attempt, samples_per_lane):
     """One result row from a timing reply; a non-``ok`` reply is a row with its status and the rule that applied."""
     row = {"n": r["n"], "distribution": r["distribution"], "arm": r["arm"], "status": r["status"]}
     if r["status"] != "ok":
-        row["rule"] = {"not_run: budget": f"> {ARM_RUN_BUDGET_S:g} s per run (warm-up {r.get('warm_s', 0):.0f} s)"
-                       }.get(r["status"], r["status"])
+        budget = (f"> {ARM_RUN_BUDGET_S:g} s per run, predicted from N={r['predicted_from']:,}" if r.get("predicted_from")
+                  else f"> {ARM_RUN_BUDGET_S:g} s per run (warm-up {r.get('warm_s', 0):.0f} s)")
+        row["rule"] = {"not_run: budget": budget}.get(r["status"], r["status"])
         return row
     wall = _median_iqr(r["walls"])
     attempts = r["agreement"]["attempts_total"]
@@ -1584,6 +1609,10 @@ def _run_memory_pass(ns, bus_id, names):
     rows = []
     for n in ns:
         for arm in names:
+            saved = cc.part_load(_PARTS, f"memory_{arm}_{n}")
+            if saved is not None:
+                rows.append(saved)
+                continue
             try:
                 r = cc.run_probe(__file__, ["--memory-probe", arm, str(n), bus_id],
                                  timeout=MEMORY_PROBE_TIMEOUT_S, what=f"memory probe {arm} {n}")
@@ -1594,6 +1623,7 @@ def _run_memory_pass(ns, bus_id, names):
                     raise
                 r = {"out_of_memory": True, "device_peak_bytes": None, "host_peak_bytes": None}
             r.update(n=n, arm=arm, minimum_bytes=n * MIN_BYTES_PER_SAMPLE)
+            cc.part_save(_PARTS, f"memory_{arm}_{n}", r)
             rows.append(r)
             print(f"memory {arm:20s} N={n:>8,} device "
                   + _dev_cell(r),
@@ -1857,6 +1887,8 @@ def main(argv=None):
     ap.add_argument("--smoke", action="store_true",
                     help="smallest N, one round, no memory pass, card written to a temporary directory")
     ap.add_argument("--no-memory", action="store_true")
+    ap.add_argument("--parts", type=pathlib.Path,
+                    help="save each finished (arm, cell) here and reuse what is there: a cap or a preemption costs one arm")
     ap.add_argument("--memory-ns", type=int, nargs="+",
                     help="sizes of the memory pass (default: the cells' sizes); a size too long to time can still show what fits")
     ap.add_argument("--memory-probe", nargs=3, help=argparse.SUPPRESS)
@@ -1870,6 +1902,8 @@ def main(argv=None):
         a, n, dist, bus, rounds, out = args.timing_probe
         _time_probe(a, int(n), dist, bus, int(rounds), out)
         return 0
+    global _PARTS
+    _PARTS = args.parts
     if args.smoke:
         args.ns, args.reps, args.distributions, args.no_memory = [1_000], 1, ["spread"], True
         if args.out_dir == HERE:
@@ -1896,7 +1930,7 @@ def main(argv=None):
         if r.get("out_of_memory"):
             oom_from[r["arm"]] = min(r["n"], oom_from.get(r["arm"], r["n"]))
 
-    budget_from, replies, per_cell = {}, [], []
+    budget_from, replies, per_cell, wall_at = {}, [], [], {}
     for n, dist in cells:
         t0 = time.perf_counter()
         cell = []
@@ -1905,12 +1939,16 @@ def main(argv=None):
                 r = _stub(arm, n, dist, "out_of_memory", work)
             elif arm in budget_from and n >= budget_from[arm]:
                 r = _stub(arm, n, dist, "not_run: budget", work)
+            elif (pred := _predicted_over_budget(wall_at.get((arm, dist), {}), n)) is not None:
+                r = {**_stub(arm, n, dist, "not_run: budget", work), "predicted_from": pred}
             else:
                 r = _time_cell_arm(arm, n, dist, bus_id, args.reps, work)
                 if r["status"] == "not_run: budget":
                     budget_from[arm] = n
                 if r["status"] == "out_of_memory":
                     oom_from[arm] = n
+            if r["status"] == "ok":
+                wall_at.setdefault((arm, dist), {})[n] = statistics.median(r["walls"])
             cell.append(r)
             print(f"{dist} N={n:>9,} {arm:22s} {r['status']}", flush=True)
         agreement, ref, steps = _compare_with_reference(cell)

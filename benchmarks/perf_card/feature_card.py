@@ -794,8 +794,22 @@ def child(row, case, dtype, arm, smoke):
     return 0
 
 
+_PARTS = None   # --parts: every finished arm is saved here and a re-run reuses it
+
+
 def run_arm(row, case, dtype, arm, smoke):
-    """One arm in a fresh process: the record it printed, or the reason it did not."""
+    """One arm in a fresh process: the record it printed, or the reason it did not. With ``--parts`` the record is saved,
+    and an earlier one is reused."""
+    key = f"{row}_{case}_{dtype}_{arm}" + ("_smoke" if smoke else "")
+    saved = cc.part_load(_PARTS, key)
+    if saved is not None:
+        return saved
+    rec = _run_arm_process(row, case, dtype, arm, smoke)
+    cc.part_save(_PARTS, key, rec)
+    return rec
+
+
+def _run_arm_process(row, case, dtype, arm, smoke):
     cmd = [sys.executable, str(pathlib.Path(__file__).resolve()), "--arm", row, case, dtype, arm] + (["--smoke"] if smoke else [])
     try:
         done = subprocess.run(cmd, capture_output=True, text=True, timeout=PROCESS_TIMEOUT_S)
@@ -911,8 +925,12 @@ def main(argv=None):
     ap.add_argument("--rows", nargs="+", choices=list(ROWS), default=list(ROWS))
     ap.add_argument("--arm", nargs=4, metavar=("ROW", "CASE", "DTYPE", "ARM"), help=argparse.SUPPRESS)
     ap.add_argument("--mpi-worker", metavar="N", help=argparse.SUPPRESS)
+    ap.add_argument("--parts", type=pathlib.Path,
+                    help="save each finished arm here and reuse what is there: a cap or a preemption costs one arm")
     ap.add_argument("--smoke", action="store_true", help="smallest sizes, one round, card in a temporary directory")
     args = ap.parse_args(argv)
+    global _PARTS
+    _PARTS = args.parts
     if args.mpi_worker:
         _mpi_worker(int(args.mpi_worker), args.smoke)
         return 0

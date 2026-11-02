@@ -447,18 +447,18 @@ def run_notebooks(cfg, py, work, roots, result, out):
     return ok
 
 
-#: The T4 row of the card plan (ruling section 4), at most two hours: (name, argv, cap in seconds). The profile
+#: The T4 row of the card plan (ruling section 4), caps derived in benchmarks/reproduce/run_cards.sh: (name, argv, cap in seconds). The profile
 #: stages and the sweep run from the eagle checkout; the sweep reads hawk's tests and writes hawk's wide.json rows.
 CARDS_PLAN = (
-    ("p0_sol_probe", ["benchmarks/reproduce/gpu_profile.py", "--stage", "sol_probe", "--out", "{out}/profile"], 2 * 60),
+    ("p0_sol_probe", ["benchmarks/reproduce/gpu_profile.py", "--stage", "sol_probe", "--out", "{out}/profile"], 4 * 60),
     ("p1_wide_sweep", ["-m", "hawk.targets.cards.sweep", "--write", "--out", "{out}/wide_sweep.json",
-                       "--cache", "{work}/sweep_cache"], 8 * 60),
-    ("c1_perf_card", ["benchmarks/perf_card/perf_card.py", "--out-dir", "{out}"], 50 * 60),
-    ("c2_feature_card", ["benchmarks/perf_card/feature_card.py", "--out-dir", "{out}"], 25 * 60),
-    ("p4_chunk_residency", ["benchmarks/reproduce/gpu_profile.py", "--stage", "chunk_residency", "--out", "{out}/profile"], 15 * 60),
+                       "--cache", "{work}/sweep_cache"], 6 * 60),
+    ("c1_perf_card", ["benchmarks/perf_card/perf_card.py", "--parts", "{out}/parts/c1", "--out-dir", "{out}"], 116 * 60),
+    ("c2_feature_card", ["benchmarks/perf_card/feature_card.py", "--parts", "{out}/parts/c2", "--out-dir", "{out}"], 16 * 60),
+    ("p4_chunk_residency", ["benchmarks/reproduce/gpu_profile.py", "--stage", "chunk_residency", "--out", "{out}/profile"], 16 * 60),
 )
-#: Wall-clock budget of the plan counted from the kernel's start (Kaggle stops it at 3 hours, install included).
-CARDS_BUDGET_S = 145 * 60
+#: Wall-clock budget of the plan counted from the kernel's start (Kaggle allows up to 12 hours, install included).
+CARDS_BUDGET_S = 195 * 60
 KERNEL_START = time.time()
 
 

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Runs the GPU benchmark cards (the T4 plan: sol_probe, the wide sweep, the ensemble card, the feature card and the chunk-residency profile) on a free Kaggle T4,
-# where PyTorch, JAX, CuPy and Warp are installed, in one private kernel of at most 2.5 hours. Started by
+# where PyTorch, JAX, CuPy and Warp are installed, in one private kernel of at most 3.5 hours. Started by
 # hand (workflow_dispatch), or on a pull request by adding the label `cards`: then the packages are built
 # from that branch, each sibling at its same-named branch, else main. The card JSON and Markdown come back
 # as the artifact `kaggle-cards`; they are reviewed before anything is committed.
@@ -44,7 +44,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'cards'
     runs-on: ubuntu-24.04
     environment: kaggle
-    timeout-minutes: 170
+    timeout-minutes: 230
     env:
       KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
     steps:
