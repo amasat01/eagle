@@ -1045,9 +1045,17 @@ class LineWorker:
                                    *args], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                   text=True, env=env)
 
-    def call(self, obj):
+    def call(self, obj, timeout=None):
+        """Send one command and read its reply; past ``timeout`` seconds the worker is killed and
+        ``TimeoutError`` raised (a stuck or over-budget command never holds the card)."""
+        import select
+
         self.p.stdin.write(json.dumps(obj) + "\n")
         self.p.stdin.flush()
+        if timeout is not None and not select.select([self.p.stdout], [], [], timeout)[0]:
+            self.p.kill()
+            self.p.wait()
+            raise TimeoutError(f"worker {self.name}: no reply to {obj.get('op')} within {timeout:.0f} s")
         line = self.p.stdout.readline()
         if not line:
             raise RuntimeError(f"worker {self.name} exited (rc={self.p.poll()}) on {obj}")

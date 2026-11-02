@@ -403,10 +403,15 @@ def _time_arm(a, n, distribution, work):
     p = _proc(a, work / f"cache_{a}_{n}")
     path = work / f"out_{a}_{n}.npz"
     reply = {"arm": a, "n": n, "distribution": distribution}
+    walls, setup = [], None
     try:
         if rc._fault(a) == "oom":
             raise MemoryError("out of memory (forced by EAGLE_CARD_FAULT)")
-        setup = p.call({"op": "setup", "n": n, "out": str(path), "distribution": distribution})
+        try:  # setup = build + the warm-up run: the warm-up is stopped at the per-run budget, as on the GPU card
+            setup = p.call({"op": "setup", "n": n, "out": str(path), "distribution": distribution},
+                           timeout=cc.BUILD_S + rc.ARM_RUN_BUDGET_S)
+        except TimeoutError:
+            return {**reply, "status": "not_run: budget", "warm_s": rc.ARM_RUN_BUDGET_S, "stopped": True}
         if rc._fault(a) == "slow":
             setup["warm_s"] = rc.ARM_RUN_BUDGET_S + 1.0
         if setup["warm_s"] > rc.ARM_RUN_BUDGET_S:
@@ -415,7 +420,7 @@ def _time_arm(a, n, distribution, work):
             reply["out"] = {k: z[k] for k in z.files}
         walls, rule, started = [], "rounds_max", time.perf_counter()
         while len(walls) < REPS:
-            walls.append(p.call({"op": "run"})["wall_s"])
+            walls.append(p.call({"op": "run"}, timeout=2 * rc.ARM_RUN_BUDGET_S)["wall_s"])
             if len(walls) >= min(rc.ROUNDS_MIN, REPS):
                 q1, med, q3 = np.percentile(walls, [25, 50, 75])
                 if q3 - q1 <= rc.IQR_STOP * med:
@@ -425,6 +430,9 @@ def _time_arm(a, n, distribution, work):
                 rule = "cell budget 300 s"
                 break
         return {**reply, "status": "ok", "walls": walls, "stop_rule": rule, "setup": setup}
+    except TimeoutError as err:
+        return {**reply, "status": f"failed: {err}"} if not walls else {
+            **reply, "status": "ok", "walls": walls, "stop_rule": "a round over the budget was stopped", "setup": setup}
     except (RuntimeError, OSError, MemoryError, ValueError, KeyError) as err:
         text = str(err)
         lines = [ln for ln in text.splitlines() if ln.strip()]

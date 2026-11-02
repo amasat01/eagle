@@ -155,3 +155,20 @@ def test_the_cpu_card_resumes_from_its_saved_parts(monkeypatch, tmp_path):
     assert cpu.main([*cli, *parts]) == 0
     assert [a[1] for a in started] == [2000]            # N = 1000 came from its saved part
     assert list((tmp_path / "out").glob("cpu_card_*.json"))
+
+
+def test_a_worker_that_does_not_reply_in_time_is_stopped(tmp_path):
+    """A CPU card worker past its call's time limit is killed and the call raises ``TimeoutError``, so an over-budget
+    warm-up never holds the card (the CPU warm-up is stopped like the GPU one).
+
+    RED: drop the ``timeout`` handling in ``LineWorker.call`` and this hangs for the sleep, then fails."""
+    import time
+
+    cc = _load("eagle_card_common_limits", _BENCH / "_card_common.py")
+    script = tmp_path / "slow_worker.py"
+    script.write_text("import sys, time\nfor line in sys.stdin:\n    time.sleep(60)\n")
+    worker = cc.LineWorker(script, [], None, "slow")
+    started = time.perf_counter()
+    with pytest.raises(TimeoutError, match="within 1 s"):
+        worker.call({"op": "setup"}, timeout=1.0)
+    assert time.perf_counter() - started < 10 and worker.p.poll() is not None
