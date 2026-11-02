@@ -182,6 +182,11 @@ def _pack_one(
         extent = _trailing_extent(arr) if role in _BUFFER_SHAPED_ROLES else n
         return _scalar_handle_box(_data_ptr(arr), extent, device_type)
     if tag == "UNIFORM":
+        shape = tuple(getattr(kw[name], "shape", ()))
+        if shape:
+            raise ValueError(
+                f"eagle.plan: {name!r} is a shared parameter (one number for every lane), got shape {shape}; "
+                "pass a number or a 0-d array")
         return _uniform_box(kw[name], dtype, integer=name in int_uniforms)
     if tag == "NSAMPLES":
         return ctypes.c_uint32(int(n))  # the ROLE is aether::idx_t-wide

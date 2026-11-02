@@ -34,6 +34,7 @@ This section covers what changes from 0.7.2. Names that left are in the table at
 
 ### Fixed
 
+- A direct call takes a number or 0-d value for a per-lane `Scalar` beside a batch, as that value on every lane, and a `Param` given an array is refused by name instead of a `TypeError`.
 - A memset on the legacy stream runs on the array's device, not on whichever device another library left current.
 - The JAX bridge registers a kernel on the GPU a function is called under, and the plugin memo is per device.
 

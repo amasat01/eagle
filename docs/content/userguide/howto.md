@@ -58,6 +58,7 @@ howto_streams
 ## Direct calls and bound planes
 
 - A direct kernel call takes `returns="numpy"` (or `"cupy"`, `"torch"`, `"jax"`), as `run` does.
+- A number or 0-d value for a per-lane `Scalar` beside a batch is that value on every lane. A `Param` takes a number or 0-d array; an array for it is refused by name.
 - A kernel parameter declared `Param[Matrix[2, 2]]` (or `Vector`, `Table`) is one value shared by every lane. `run`, `bind` and a direct call take it in its own shape and refuse another by name.
 - An `Index` plane has the width the kernel declares (`int32` unless `Index[int64]`). `bind` and `rebind` refuse another width by name and say which to pass; `run` converts on each call.
 - Opaque notes a kernel's author put on a plane (`hawk.Meta`) are on the loaded kernel as `plane_meta`, by plane name.
