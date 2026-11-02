@@ -116,7 +116,9 @@ def pip(py, use_uv, *args):
     # uv takes a package from the first index that has it; best-match keeps PyPI's versions beside the torch index
     cmd = ([sys.executable, "-m", "uv", "pip", "install", "--python", py, "--index-strategy", "unsafe-best-match"]
            if use_uv else [py, "-m", "pip", "install"])
-    return sh(*cmd, *args)
+    rc = sh(*cmd, *args)
+    # pip hides the compiler's output on a failed build; run it once more verbose so the log shows the error
+    return sh(*cmd, "-v", *args) if rc else rc
 
 
 def torch_index(cfg):
