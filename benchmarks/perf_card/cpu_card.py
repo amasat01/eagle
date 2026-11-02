@@ -46,6 +46,7 @@ import pathlib
 import platform
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -328,6 +329,72 @@ def _proc(arm, cache):
     return cc.LineWorker(__file__, ["--worker", arm], _env(arm, cache), arm)
 
 
+#: Register-only FMA chains, one OpenMP thread per core and a vector of lanes per chain: the host's FP64 FMA rate.
+_CPU_FMA_SRC = r'''
+#include <omp.h>
+#include <cstdio>
+#include <cstdlib>
+#define W 8
+#define CH 8
+int main(int argc, char** argv) {
+  long iters = atol(argv[1]);
+  int nt = atoi(argv[2]);
+  double best = 1e30, sink = 0;
+  for (int rep = 0; rep < 3; ++rep) {
+    double t0 = omp_get_wtime();
+    #pragma omp parallel num_threads(nt) reduction(+ : sink)
+    {
+      double a[CH][W];
+      for (int c = 0; c < CH; ++c) for (int w = 0; w < W; ++w) a[c][w] = 1.0 + 0.1 * c + 0.01 * w;
+      const double b = 1.0000001, d = 1e-9;
+      for (long i = 0; i < iters; ++i)
+        for (int c = 0; c < CH; ++c) {
+          #pragma omp simd
+          for (int w = 0; w < W; ++w) a[c][w] = a[c][w] * b + d;
+        }
+      double s = 0;
+      for (int c = 0; c < CH; ++c) for (int w = 0; w < W; ++w) s += a[c][w];
+      sink += s;
+    }
+    double t = omp_get_wtime() - t0;
+    if (t < best) best = t;
+  }
+  std::fprintf(stderr, "%g\n", sink);
+  std::printf("%.6e\n", (double)nt * CH * W * (double)iters / best);
+  return 0;
+}
+'''
+CPU_FMA_ITERS = 2_000_000
+
+
+def _cpu_cores():
+    """Physical cores this process may run on (logical CPUs over the SMT width)."""
+    logical = len(os.sched_getaffinity(0))
+    try:
+        width = int(next(ln.split(":")[1] for ln in subprocess.run(["lscpu"], capture_output=True, text=True,
+                                                                    timeout=30).stdout.splitlines()
+                         if ln.startswith("Thread(s) per core")))
+    except (OSError, subprocess.SubprocessError, StopIteration, ValueError):
+        width = 1
+    return max(1, logical // max(1, width))
+
+
+def _cpu_fma_probe(work):
+    """FP64 FMA lane-operations per second of the host: ``gcc -O3 -march=native -fopenmp`` register-only chains on
+    one thread per core, W = 8 lanes per chain. None when no compiler is found."""
+    compiler = os.environ.get("CXX") or shutil.which("g++")
+    if not compiler:
+        return None
+    src, exe = work / "cpu_fma_probe.cpp", work / "cpu_fma_probe"
+    src.write_text(_CPU_FMA_SRC)
+    built = subprocess.run([compiler, "-O3", "-march=native", "-ffp-contract=fast", "-fopenmp", str(src), "-o", str(exe)],
+                           capture_output=True, text=True, timeout=300)
+    if built.returncode:
+        return None
+    done = subprocess.run([str(exe), str(CPU_FMA_ITERS), str(_cpu_cores())], capture_output=True, text=True, timeout=300)
+    return float(done.stdout.split()[0]) if done.returncode == 0 else None
+
+
 def _time_arm(a, n, distribution, work):
     """One arm in its own worker process: set up, warm up (the verification run), then rounds 3..9 until
     IQR/median <= 2 %. A failure is a status: ``out_of_memory``, ``not_run: budget`` or ``failed: <last error line>``."""
@@ -429,20 +496,21 @@ def render_markdown(card):
              f"{card['method']['rounds']['max']} rounds per arm, each arm in its own process (rounds stop at "
              f"IQR/median <= 2 %); IQR in parentheses. Workload as the GPU card ({rc.FLOPS_PER_ATTEMPT} FLOP per "
              f"attempt).", "",
-             "| N | arm | threads | wall (IQR) | rounds | attempts·samples/s | useful FLOP/s "
+             "| N | arm | threads | wall (IQR) | rounds | attempts·samples/s | useful FLOP/s | eff_sol "
              "| host memory | host memory net of NumPy | lines of code |",
-             "|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|"]
+             "|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|"]
     for r in sorted(card["results"], key=lambda r: (r["n"], r.get("distribution", ""),
                                                    ARMS.index(r["arm"]))):
         head = f"| {r['n']:,} ({r.get('distribution', 'spread')}) | {ARM_LABELS[r['arm']]} | {r['threads']} "
         if r["status"] != "ok":
-            lines.append(head + f"| {r['status'].replace('_', ' ')} ({r['rule']}) | – | – | – | – | – | – |")
+            lines.append(head + f"| {r['status'].replace('_', ' ')} ({r['rule']}) | – | – | – | – | – | – | – |")
             continue
         net = r.get("host_peak_net_of_control_bytes")
         lines.append(
             head + f"| {cc.fmt_time_si(r['wall_s']['median'])} ({cc.fmt_time_si(r['wall_s']['iqr'])}) "
             f"| {r['rounds']} | {cc.fmt_rate_si(r['attempt_samples_per_s'])} "
             f"| {cc.fmt_rate_si(r['useful_flops_per_s'])} "
+            f"| {'–' if r.get('eff_sol') is None else format(r['eff_sol'], '.3f')} "
             f"| {cc.fmt_mib(r['host_peak_bytes'])} | {'–' if net is None else cc.fmt_mib(net)} "
             f"| {card['code_lines']['arms'][r['arm']]} |")
     lines += ["", "| N | arm | max position error | max error / bound "
@@ -504,6 +572,14 @@ def main(argv=None):
             print(f"{dist} N={n:>8,} ({time.perf_counter() - t0:.1f}s)", flush=True)
     finally:
         shutil.rmtree(work, ignore_errors=True)
+    try:
+        fma = _cpu_fma_probe(pathlib.Path(tempfile.mkdtemp(prefix="cpu_fma_")))
+    except (OSError, subprocess.SubprocessError, ValueError):
+        fma = None
+    ops = json.loads((HERE.parent / "sol_reference.json").read_text()).get("ops_per_attempt")
+    for r in results:
+        if r["status"] == "ok":
+            r["eff_sol"] = None if not fma else r["attempt_samples_per_s"] * ops / fma
     cpu = cc.cpu_model()
     slug = _cpu_slug(cpu)
     card = {"schema": "eagle-rk78-cpu-card/2", "toolchain": cc.toolchain(), "cpu": cpu, "cpu_slug": slug,
@@ -516,6 +592,11 @@ def main(argv=None):
                                                           "torch")}},
             "ns": list(args.ns), "distributions": list(args.distributions),
             "fixed_overhead_n": OVERHEAD_N, "release": cc.release_string(),
+            "device_fma_per_s": fma, "ops_per_attempt": ops,
+            "ops_per_attempt_source": "hand count; A100 dynamic count pending",
+            "eff_sol_over_one": [[r["arm"], r["n"], r["distribution"]] for r in results
+                                 if (r.get("eff_sol") or 0) > 1.0],
+            "fma_probe": f"gcc -O3 -march=native -fopenmp register-only FMA chains, {_cpu_cores()} threads (cores), 8 lanes",
             "arms_not_run": arms_not_run,
             "arms": {a: ARM_LABELS[a] for a in names},
             "code_lines": code_line_counts(),
