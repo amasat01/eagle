@@ -531,7 +531,7 @@ class DevicePeak:
     working set through the run, where a sample sees it."""
 
     def __init__(self, bus_id, period_s=0.002):
-        self.bus_id, self.period_s, self.peak = bus_id, period_s, 0
+        self.bus_id, self.period_s, self.peak, self._error = bus_id, period_s, 0, None
 
     def __enter__(self):
         import threading
@@ -544,19 +544,24 @@ class DevicePeak:
     def _sample(self):
         import pynvml
 
-        pynvml.nvmlInit()
         try:
-            h, pid = pynvml.nvmlDeviceGetHandleByPciBusId(self.bus_id), os.getpid()
-            while True:
-                self.peak = max(self.peak, _device_bytes(pynvml, h, pid)[0])
-                if self._stop.wait(self.period_s):
-                    break
-        finally:
-            pynvml.nvmlShutdown()
+            pynvml.nvmlInit()
+            try:
+                h, pid = pynvml.nvmlDeviceGetHandleByPciBusId(self.bus_id), os.getpid()
+                while True:
+                    self.peak = max(self.peak, _device_bytes(pynvml, h, pid)[0])
+                    if self._stop.wait(self.period_s):
+                        break
+            finally:
+                pynvml.nvmlShutdown()
+        except Exception as err:  # noqa: BLE001 - handed to the caller in __exit__
+            self._error = err
 
-    def __exit__(self, *exc):
+    def __exit__(self, exc_type, *exc):
         self._stop.set()
         self._thread.join()
+        if exc_type is None and self._error is not None:
+            raise RuntimeError(f"device peak sampler on {self.bus_id}: {self._error}") from self._error
 
 
 GPU_STATE_FIELDS = ("clocks.sm,clocks.mem,clocks.max.sm,temperature.gpu,"

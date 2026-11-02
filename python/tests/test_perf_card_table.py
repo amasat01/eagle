@@ -30,12 +30,14 @@ never shipped in the wheel.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import importlib.util
 import json
 import pathlib
 import re
 import tempfile
+import types
 
 import pytest
 from _raw_cards import raw_card
@@ -996,6 +998,7 @@ def _fake_memory_probe_run(module, monkeypatch, probe, patches):
     monkeypatch.setattr(cc, "probe_reply_fd", note("reply_fd", 1))
     monkeypatch.setattr(cc, "probe_reply", note("reply"))
     monkeypatch.setattr(cc, "process_device_bytes", note("baseline", (123, "fake")))
+    monkeypatch.setattr(cc, "DevicePeak", lambda bus_id: contextlib.nullcontext(types.SimpleNamespace(peak=0)))
     monkeypatch.setattr(cc, "trim_pools", note("trim"))
     monkeypatch.setattr(cc, "probe_sync", note("sync"))
     monkeypatch.setattr(cc, "status_kib", note("rss", 1))
