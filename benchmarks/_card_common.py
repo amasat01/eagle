@@ -622,6 +622,7 @@ class ClockPoller:
         self._bus_id = bus_id
         self._handle = _nvml_handle(bus_id)
         self._samples = []
+        self._label = None
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._poll, daemon=True)
         self._thread.start()
@@ -636,7 +637,7 @@ class ClockPoller:
                 temp = pynvml.nvmlDeviceGetTemperature(
                     self._handle, pynvml.NVML_TEMPERATURE_GPU)
                 self._samples.append({"clocks.sm": sm, "utilization.gpu": util,
-                                      "temperature.gpu": temp})
+                                      "temperature.gpu": temp, "label": self._label})
             except Exception:
                 pass
 
@@ -647,7 +648,12 @@ class ClockPoller:
         while not self._stop.wait(1.0):
             st = gpu_state(self._bus_id)
             if st is not None:
-                self._samples.append(st)
+                self._samples.append({**st, "label": self._label})
+
+    def mark(self, label):
+        """Tag the samples taken from now on with ``label`` (an arm's name), so
+        :meth:`stop` reports each label's own median clock."""
+        self._label = label
 
     def stop(self):
         self._stop.set()
@@ -668,7 +674,12 @@ class ClockPoller:
                    "nvidia-smi clocks.sm, sampled every 1 s (NVML unavailable)")
         if not sm:
             return {"samples": 0, "source": source}
+        by_label = {}
+        for st in self._samples:
+            if st.get("label") is not None and st.get("clocks.sm") is not None:
+                by_label.setdefault(st["label"], []).append(float(st["clocks.sm"]))
         return {"samples": len(sm), "sm_clock_mhz_min": min(sm),
+                "sm_clock_mhz_by_label": {k: statistics.median(v) for k, v in by_label.items()},
                 "sm_clock_mhz_median": statistics.median(sm),
                 "sm_clock_mhz_max": max(sm),
                 "temperature_c_max": max(temp) if temp else None,

@@ -2865,8 +2865,7 @@ def _memory_probe(arm, distribution, max_steps, n, bus_id):
     (every JIT compiles here; JAX also compiles for shape N from abstract
     shapes), the CuPy and PyTorch caches trimmed; then the batch's inputs generated, the arm built for N (eagle's graph,
     PyTorch's recorded CUDA graph) and one full run with upload and download;
-    then the reading again, with every allocator still holding its
-    high-water reservation."""
+    the device read every 2 ms throughout, its highest reading kept."""
     import gc
 
     reply_fd = cc.probe_reply_fd()
@@ -3085,13 +3084,9 @@ _MEMORY_METHOD = (
     "inputs generated, the arm set up for N (eagle builds its graph, PyTorch "
     "captures its CUDA graph, whose private memory pool counts) and one full run with upload and download. "
     "Device memory = the memory the CUDA driver accounts to the process (NVML "
-    "per-process used memory) after the run minus at the baseline. The caching "
-    "allocators of CuPy, PyTorch and JAX are left at their defaults and are not "
-    "trimmed after the run; each keeps the memory it reserved until "
-    "trimmed, so the reading after the run is the allocator's high-water "
-    "reservation, the same measure for every arm. A disabled pool returns "
-    "memory between operations, so its peak could only be caught by sampling, "
-    "which misses short peaks; the held reservation needs no sampling. Caveats: "
+    "per-process used memory) at its highest during the build and the run (read "
+    "every 2 ms and once after the run) minus at the baseline, so memory an arm "
+    "hands back before the run ends still counts. Caveats: "
     "the reading is what the process holds, so each allocator's rounding and "
     "growth policy count (JAX's allocator grows in regions that can exceed the "
     "request; PyTorch's rounds blocks up; a captured CUDA graph keeps a private "

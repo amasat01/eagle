@@ -241,16 +241,19 @@ COMMITTED_ARMS = ("eagle_graph", "eagle_graph_persist", "eagle_simulate", "cupy_
                   "torch_graphed", "torch_compiled", "jax_vmap", "warp_kernel")
 #: The tail floor: the same kernel on this many samples (launch + tail cost).
 TAIL_FLOOR_N = 32
-#: A cell whose median SM clock is more than this fraction below the session
-#: maximum is timed again (once).
+#: A row (one arm in one cell) whose median SM clock is more than this fraction
+#: below the session's best row clock is timed again, that arm alone (once).
 CLOCK_RETIME = 0.03
 REPS = 5
 #: An arm whose warm-up run says ``reps`` repetitions would take longer than
 #: ``SLOW_ARM_BUDGET_S`` runs ``SLOW_ARM_REPS`` instead (the masked baselines
-#: at a million samples take minutes each; their spread is already tight).
-#: Every row records the repetitions it ran.
+#: at a million samples take minutes each; their spread is already tight), and
+#: no more than fit in ``SLOW_ARM_CELL_S`` (at least one): at ten million
+#: samples one masked run takes many minutes. Every row records the
+#: repetitions it ran.
 SLOW_ARM_BUDGET_S = 60.0
 SLOW_ARM_REPS = 3
+SLOW_ARM_CELL_S = 300.0
 COMPACT_EVERY = 16
 REORDER_THETA = 0.5
 GRAPH_BLOCK = 16
@@ -1287,7 +1290,7 @@ def _run_n(n, reps, bus_id, names, kernel_pass=False, distribution="spread", arm
     for name in order:  # warm-up, also the verification run
         warm, _, outs[name] = _timed(name, arms[name], inp)
         reps_for[name] = (reps if warm * reps <= SLOW_ARM_BUDGET_S
-                          else min(reps, SLOW_ARM_REPS))
+                          else max(1, min(reps, SLOW_ARM_REPS, int(SLOW_ARM_CELL_S // warm))))
     ref = "eagle_graph" if "eagle_graph" in outs else order[0]
     agreement, steps = _verify(outs, inp, ref)
     max_attempts = float(steps["accepted"]["max"] + steps["rejected"]["max"]) or 1.0
@@ -1308,6 +1311,7 @@ def _run_n(n, reps, bus_id, names, kernel_pass=False, distribution="spread", arm
         for r in range(reps):
             rot = order[r % len(order):] + order[:r % len(order)]
             for name in [a for a in rot if r < reps_for[a]]:
+                poller.mark(name)
                 w, e, _ = _timed(name, arms[name], inp)
                 walls[name].append(w)
                 e2e[name].append(e)
@@ -1322,6 +1326,7 @@ def _run_n(n, reps, bus_id, names, kernel_pass=False, distribution="spread", arm
         row = {
             "n": n, "distribution": distribution, "arm": name, "wall_s": wall,
             "repetitions": len(walls[name]),
+            "sm_clock_mhz": clocks.get("sm_clock_mhz_by_label", {}).get(name),
             "running_fraction_mean": attempts / (n * max_attempts),
             "end_to_end_s": _median_iqr(e2e[name]),
             "attempts": attempts,
@@ -1357,11 +1362,11 @@ _MEMORY_METHOD = (
     "shape N), so every library's pool reserved during the warm-up counts in "
     "the reading; CuPy's pools and PyTorch's cache trimmed after the warm-up; "
     "then the arm built for N (eagle's graph, "
-    "PyTorch's captured graph) and one full run with upload and download; then "
-    "the reading again, the allocators still holding their high-water "
-    "reservation (the same measure for every arm, no sampling needed). Device: "
-    "the memory NVML accounts to the process on the timed GPU, after minus "
-    "baseline. Caveats: each allocator's rounding and growth policy count (JAX's "
+    "PyTorch's captured graph) and one full run with upload and download, "
+    "the device read every 2 ms throughout (the masked arms hand their "
+    "temporaries back after each run, so a reading after it would miss them). "
+    "Device: the most memory NVML accounted to the process on the timed GPU "
+    "during the build and the run, minus the baseline. Caveats: each allocator's rounding and growth policy count (JAX's "
     "allocator grows in regions that can exceed the request; PyTorch rounds "
     "blocks up and a captured CUDA graph keeps a private pool; Warp's "
     "stream-ordered pool reserves in chunks of tens of MiB, its release "
@@ -1913,15 +1918,15 @@ def main(argv=None):
         gc.collect()
         cc.trim_pools()  # the next N's arms start from an empty device
 
-    def cell_mhz(key):
-        return cells[key][1]["gpu_state_during"].get("sm_clock_mhz_median")
-
-    top = max((cell_mhz(k) or 0 for k in cells), default=0)
-    for key in list(cells):  # a cell timed more than CLOCK_RETIME below the best clock: again
-        if top and (cell_mhz(key) or top) < top * (1 - CLOCK_RETIME):
-            rows, extra = _run_n(key[1], args.reps, bus_id, names, distribution=key[0])
-            extra["retimed_from_sm_mhz"] = cell_mhz(key)
-            cells[key] = (rows, extra)
+    top = max((r["sm_clock_mhz"] or 0 for rows, _ in cells.values() for r in rows), default=0)
+    for (dist, n), (rows, _) in cells.items():  # a row timed more than CLOCK_RETIME below the best clock: that arm again
+        for i, row in enumerate(rows):
+            if top and (row["sm_clock_mhz"] or top) < top * (1 - CLOCK_RETIME):
+                again = _run_n(n, args.reps, bus_id, (row["arm"],), distribution=dist)[0][0]
+                again["retimed_from_sm_mhz"] = row["sm_clock_mhz"]
+                rows[i] = again
+                gc.collect()
+                cc.trim_pools()
     results = [r for rows, _ in cells.values() for r in rows]
     per_n = [extra for _, extra in cells.values()]
     tail = {d: _run_n(TAIL_FLOOR_N, args.reps, bus_id, ("eagle_graph",) if "eagle_graph" in names
@@ -2001,7 +2006,7 @@ def main(argv=None):
         "code_lines": code_line_counts(),
         "method": {
             "repetitions": args.reps,
-            "slow_arm_budget_s": SLOW_ARM_BUDGET_S, "slow_arm_reps": SLOW_ARM_REPS,
+            "slow_arm_budget_s": SLOW_ARM_BUDGET_S, "slow_arm_reps": SLOW_ARM_REPS, "slow_arm_cell_s": SLOW_ARM_CELL_S,
             "statistic": "median, interquartile range (inclusive quartiles)",
             "warm_up": "one run per arm, excluded; it is also the verification run",
             "interleaving": "the arm order rotates by one every repetition",
