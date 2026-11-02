@@ -218,15 +218,6 @@ TOOL_ARMS = {
     "cupy": lambda a: a.startswith("cupy"),
 }
 
-def card_slug(path):
-    """The device slug of a card file: its name without the family prefix."""
-    name = pathlib.Path(path).name[:-5]
-    for prefix in ("cpu_card_", "card_"):
-        if name.startswith(prefix):
-            return name[len(prefix) :]
-    raise ClaimError(f"{path}: not a card file name")
-
-
 def check_rows_under_sol(card):
     """Raise ``ClaimError`` if any row of the card is above the speed of light (never clamps)."""
     for r in card["results"]:
