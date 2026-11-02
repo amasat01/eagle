@@ -953,7 +953,16 @@ class Stalled(Exception):
 
 
 #: A child's build may take this long before its first progress; after it, no round may take longer than STALL_S.
-BUILD_S, STALL_S = 300.0, 600.0
+BUILD_S, STALL_S = 120.0, 600.0
+
+#: A row dropped because the session deadline passed (or the step ended early): the lowest-priority rows go first.
+SESSION_LIMIT = "not_run: session time limit"
+
+
+def deadline_passed():
+    """True once ``$CARD_DEADLINE`` (epoch seconds, set by run_cards.sh) has passed: no new arm starts."""
+    deadline = os.environ.get("CARD_DEADLINE")
+    return bool(deadline) and time.time() > float(deadline)
 
 
 def heartbeat(phase="run"):
@@ -1190,7 +1199,7 @@ def rescore_card(card, ops=None):
     if ops is None:
         ops = json.loads((pathlib.Path(__file__).resolve().parent / "sol_reference.json").read_text())["ops_per_attempt"]
     for row in card["results"]:
-        if row.get("status") == "ok" and row["arm"] != "eagle_cpu":
+        if row.get("status") == "ok" and not (row["arm"] == "eagle_cpu" and "device" in card):
             fma = card.get("device_fma_per_s_float32" if row["distribution"] == "fp32" else "device_fma_per_s")
             row.update(derive_eff_sol(row["attempt_samples_per_s"], fma, ops))
     return card

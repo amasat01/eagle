@@ -199,7 +199,10 @@ class Cards:
     def load(self, card, dev):
         p = self.path(card, dev)
         if p not in self._cache:
-            self._cache[p] = json.loads(p.read_text())
+            card = json.loads(p.read_text())
+            # an ensemble card's eff_sol is derived from its raw fields and the reference count: a value over 1 is
+            # "pending (reference count)", and a better count re-scores the card without a re-run
+            self._cache[p] = cc.rescore_card(card) if "results" in card and card.get("device_fma_per_s") else card
         return self._cache[p]
 
 

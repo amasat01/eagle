@@ -1392,8 +1392,20 @@ def _time_probe(arm, n, distribution, bus_id, rounds_max, out_path):
         "reorders_fired": (a["fired"][-1] if a.get("fired") else None) if "fired" in a else None})
 
 
-STEP_LIMIT = "not_run: step time limit"
 _ASSEMBLE = False   # --assemble: run nothing, write the card from the saved parts
+# The order everything runs in, so a session deadline only ever drops the tail. Arms: eagle first (the claim), then the fast
+# libraries, then the slow masked arms (cupy_masked, torch_graphed: minutes per run) last. Cells: the headline cell first
+# (1e7 spread where the plan times 1e7, else 1e6 spread), the other cells after it, method cells (fp32, tail, overhead) last.
+ARM_PRIORITY = ("eagle_graph_persist", "eagle_simulate", "eagle_graph", "eagle_graph_compact", "eagle_graph_reorder",
+                "warp_kernel", "jax_vmap", "torch_compiled", "cupy_masked", "torch_graphed", "torch_masked", "eagle_cpu")
+
+
+def _ordered_cells(cells):
+    """``cells`` with the headline cell first, the rest in their order."""
+    head = (10_000_000, "spread") if (10_000_000, "spread") in cells else (1_000_000, "spread")
+    return sorted(cells, key=lambda c: c != head)
+
+
 _PARTS = None   # --parts: every finished (arm, cell) is saved here and a re-run reuses it
 
 
@@ -1407,8 +1419,8 @@ def _time_cell_arm(arm, n, distribution, bus_id, rounds_max, work):
         if (_PARTS / f"{key}.npz").exists():
             shutil.copy(_PARTS / f"{key}.npz", out_path)
         return {**saved, "counts_path": str(out_path)}
-    if _ASSEMBLE:
-        return _stub(arm, n, distribution, STEP_LIMIT, work)
+    if _ASSEMBLE or cc.deadline_passed():
+        return _stub(arm, n, distribution, cc.SESSION_LIMIT, work)
     try:
         r = cc.run_probe(__file__, ["--timing-probe", arm, str(n), distribution, bus_id, str(rounds_max),
                                     str(out_path)], timeout=TIMING_PROBE_TIMEOUT_S,
@@ -1642,8 +1654,8 @@ def _run_memory_pass(ns, bus_id, names):
             if saved is not None:
                 rows.append(saved)
                 continue
-            if _ASSEMBLE:
-                rows.append({"n": n, "arm": arm, "status": STEP_LIMIT, "device_peak_bytes": None, "host_peak_bytes": None,
+            if _ASSEMBLE or cc.deadline_passed():
+                rows.append({"n": n, "arm": arm, "status": cc.SESSION_LIMIT, "device_peak_bytes": None, "host_peak_bytes": None,
                              "minimum_bytes": n * MIN_BYTES_PER_SAMPLE})
                 continue
             try:
@@ -1785,8 +1797,8 @@ def _fit_notes(card):
 
 
 def _dev_cell(m):
-    if m is not None and m.get("status") == STEP_LIMIT:
-        return STEP_LIMIT
+    if m is not None and m.get("status") == cc.SESSION_LIMIT:
+        return cc.SESSION_LIMIT
     if m is not None and m.get("out_of_memory"):
         return "out of memory"
     if m is not None and m.get("timed_out"):
@@ -1951,6 +1963,8 @@ def main(argv=None):
         cells = list(CELLS)
     ns = sorted({n for n, _ in cells})
     names, arms_not_run = _select_arms(args.arms)
+    names = tuple(sorted(names, key=ARM_PRIORITY.index))
+    cells = _ordered_cells(cells)
     for arm, why in arms_not_run.items():
         print(f"arm {arm} not run: {why}", flush=True)
 

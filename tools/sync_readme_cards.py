@@ -96,7 +96,7 @@ def _row_cells(row):
     if row is None or label:
         return label or "not run", "–", "–"
     return (_wall_cell(row["wall_s"]), cc.fmt_rate_si(row["attempt_samples_per_s"]),
-            "–" if row.get("eff_sol") is None else pcl.fmt_eff(row["eff_sol"]))
+            row.get("eff_sol_note") or ("–" if row.get("eff_sol") is None else pcl.fmt_eff(row["eff_sol"])))
 
 
 def render_table(card: dict) -> str:
@@ -167,6 +167,8 @@ def render_block(eagle_root: pathlib.Path) -> str:
     if not REFERENCE_CARD.is_file():
         return NO_CARD
     card = json.loads(REFERENCE_CARD.read_text())
+    if card.get("device_fma_per_s"):
+        card = cc.rescore_card(card)       # eff_sol derived from the raw fields; a value over 1 reads pending
     lead = f"**{card['device']['name']}, card of {card['generated_utc'][:10]}**"
     return lead + "\n\n" + render_table(card) + "\n\n" + render_measured_on(eagle_root)
 

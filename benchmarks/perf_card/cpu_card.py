@@ -437,6 +437,33 @@ def _time_arm(a, n, distribution, work):
             pass
 
 
+_PARTS = None       # --parts: every finished (arm, cell) is saved here and a re-run reuses it
+_ASSEMBLE = False   # --assemble: run nothing, write the card from the saved parts
+
+
+def _cached_arm(a, n, distribution, work):
+    """``_time_arm`` with the saved parts and the session deadline: a finished arm is reused, an arm the deadline (or an
+    ``--assemble``) reaches is ``not_run: session time limit``."""
+    import numpy as np
+
+    key = f"timing_{a}_{n}_{distribution}"
+    saved = cc.part_load(_PARTS, key)
+    if saved is not None:
+        if (_PARTS / f"{key}.npz").exists():
+            with np.load(_PARTS / f"{key}.npz") as z:
+                saved["out"] = {k: z[k] for k in z.files}
+        return saved
+    if _ASSEMBLE or cc.deadline_passed():
+        return {"arm": a, "n": n, "distribution": distribution, "status": cc.SESSION_LIMIT}
+    r = _time_arm(a, n, distribution, work)
+    if _PARTS is not None:
+        if r.get("out"):
+            _PARTS.mkdir(parents=True, exist_ok=True)
+            np.savez(_PARTS / f"{key}.npz", **r["out"])
+        cc.part_save(_PARTS, key, {k: v for k, v in r.items() if k != "out"})
+    return r
+
+
 def _run_cell(n, names, work, distribution, state):
     """All arms at one cell, one after another. ``state`` carries the arms already over budget (at a smaller N)."""
     base = rc._set_cell(distribution)
@@ -445,7 +472,7 @@ def _run_cell(n, names, work, distribution, state):
         if a in state["budget"] and n >= state["budget"][a]:
             r = {"arm": a, "n": n, "distribution": distribution, "status": "not_run: budget"}
         else:
-            r = _time_arm(a, n, distribution, work)
+            r = _cached_arm(a, n, distribution, work)
             if r["status"] == "not_run: budget":
                 state["budget"][a] = n
         replies.append(r)
@@ -541,11 +568,17 @@ def main(argv=None):
                     default=list(rc.DISTRIBUTIONS))
     ap.add_argument("--smoke", action="store_true",
                     help="smallest N, one repetition, card written to a temporary directory")
+    ap.add_argument("--assemble", action="store_true",
+                    help="run nothing: write the card from the saved parts (--parts), a missing arm reads not_run: session time limit")
+    ap.add_argument("--parts", type=pathlib.Path,
+                    help="save each finished (arm, cell) here and reuse what is there: a preemption costs one arm")
     ap.add_argument("--worker", help=argparse.SUPPRESS)
     args = ap.parse_args(argv)
     if args.worker:
         _worker_main(args.worker)
         return 0
+    global _PARTS, _ASSEMBLE
+    _PARTS, _ASSEMBLE = args.parts, args.assemble
     arms_not_run = {a: f"{ARM_LIBRARY[a]} not installed in this profile"
                     for a in ARMS if a in args.arms and a in ARM_LIBRARY
                     and not rc._lib_installed(ARM_LIBRARY[a])}
@@ -560,7 +593,8 @@ def main(argv=None):
     work = pathlib.Path(tempfile.mkdtemp(prefix="cpu_card_"))
     results, per_n = [], []
     try:
-        cells = [(d, n, names) for d in args.distributions for n in args.ns]
+        # the headline cell (N = 1e6 spread) first, the method cell last: a session deadline drops the tail
+        cells = sorted(((d, n, names) for d in args.distributions for n in args.ns), key=lambda c: (c[0], c[1]) != ("spread", 1_000_000))
         if not args.smoke:
             cells += [("spread", OVERHEAD_N, tuple(a for a in names if a.startswith("eagle")))]
         state = {"budget": {}}

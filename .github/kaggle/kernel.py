@@ -447,20 +447,19 @@ def run_notebooks(cfg, py, work, roots, result, out):
     return ok
 
 
-#: The T4 row of the card plan (ruling section 4), caps are the worst cases derived in benchmarks/reproduce/run_cards.sh (C1 and C2 are also bounded by the kernel budget): (name, argv, cap in seconds). The profile
-#: stages and the sweep run from the eagle checkout; the sweep reads hawk's tests and writes hawk's wide.json rows.
+#: The T4 row of the card plan (ruling section 4): (name, argv, expected minutes, cap in seconds; None: a hang guard of the time
+#: left to the session deadline + 12 min). Cost is bounded by the session deadline, 1.5 x the expected minutes counted from the start of
+#: the plan: no arm starts after it (the cards read it from $CARD_DEADLINE), the cards are assembled from their saved parts with the arms
+#: not run labelled ``not_run: session time limit``, and the steps not started are listed in result.json.
 CARDS_PLAN = (
-    ("p0_sol_probe", ["benchmarks/reproduce/gpu_profile.py", "--stage", "sol_probe", "--out", "{out}/profile"], 4 * 60),
+    ("p0_sol_probe", ["benchmarks/reproduce/gpu_profile.py", "--stage", "sol_probe", "--out", "{out}/profile"], 1, 4 * 60),
     ("p1_wide_sweep", ["-m", "hawk.targets.cards.sweep", "--write", "--out", "{out}/wide_sweep.json",
-                       "--cache", "{work}/sweep_cache"], 6 * 60),
-    ("c1_perf_card", ["benchmarks/perf_card/perf_card.py", "--parts", "{out}/parts/c1", "--out-dir", "{out}"], 926 * 60),
-    ("c2_feature_card", ["benchmarks/perf_card/feature_card.py", "--parts", "{out}/parts/c2", "--out-dir", "{out}"], 868 * 60),
-    ("p4_chunk_residency", ["benchmarks/reproduce/gpu_profile.py", "--stage", "chunk_residency", "--out", "{out}/profile"], 16 * 60),
+                       "--cache", "{work}/sweep_cache"], 4, 11 * 60),
+    ("c1_perf_card", ["benchmarks/perf_card/perf_card.py", "--parts", "{out}/parts/c1", "--out-dir", "{out}"], 89, None),
+    ("c2_feature_card", ["benchmarks/perf_card/feature_card.py", "--parts", "{out}/parts/c2", "--out-dir", "{out}"], 12, None),
+    ("p4_chunk_residency", ["benchmarks/reproduce/gpu_profile.py", "--stage", "chunk_residency", "--out", "{out}/profile"], 8, 16 * 60),
 )
-#: Wall-clock budget of the plan counted from the kernel's start (Kaggle allows up to 12 hours, install included).
-CARDS_BUDGET_S = 11 * 3600 + 30 * 60      # Kaggle stops a kernel at 12 hours; the rest is for assembling the cards
-ASSEMBLE_S = 20 * 60
-KERNEL_START = time.time()
+DEADLINE_FACTOR, INFLIGHT_S, ASSEMBLE_S = 1.5, 12 * 60, 20 * 60
 
 
 def link_hawk_tests(py, hawk):
@@ -482,17 +481,21 @@ def run_cards(py, roots, out, result, work):
     cards_out.mkdir(parents=True, exist_ok=True)
     if "hawk" in roots:
         link_hawk_tests(py, roots["hawk"])
-    result["cards"] = []
-    for name, argv, cap in CARDS_PLAN:
-        left = CARDS_BUDGET_S - (time.time() - KERNEL_START) - ASSEMBLE_S
+    deadline = time.time() + DEADLINE_FACTOR * 60 * sum(m for _, _, m, _ in CARDS_PLAN)
+    env["CARD_DEADLINE"] = str(deadline)
+    result["cards"], result["skipped"] = [], []
+    for name, argv, _, cap in CARDS_PLAN:
+        if time.time() > deadline:
+            result["skipped"].append(name)
+            continue
         t0 = time.time()
         cmd = [str(py), *[a.format(out=cards_out, work=work) for a in argv]]
         try:
-            rc = subprocess.run(cmd, cwd=eagle, env=env, timeout=max(min(cap, left), 60)).returncode
+            rc = subprocess.run(cmd, cwd=eagle, env=env, timeout=cap or deadline - time.time() + INFLIGHT_S).returncode
         except subprocess.TimeoutExpired:
             rc = 124
         result["cards"].append({"name": name, "rc": rc, "seconds": round(time.time() - t0)})
-    for name, argv, _ in CARDS_PLAN:       # whatever ended early, the cards are written from their saved parts
+    for name, argv, _, _ in CARDS_PLAN:       # whatever ended early, the cards are written from their saved parts
         if name[:2] in ("c1", "c2"):
             subprocess.run([str(py), *[a.format(out=cards_out, work=work) for a in argv], "--assemble"], cwd=eagle, env=env,
                            timeout=ASSEMBLE_S)
@@ -512,9 +515,10 @@ def write_result(out, result, quiet=False):
 def main():
     cfg = settings()
     if cfg.print_plan:
-        for name, argv, cap in CARDS_PLAN:
-            print(f"{name:20s} cap {cap // 60:3d} min  python {' '.join(argv)}")
-        print(f"plan total {sum(c for _, _, c in CARDS_PLAN) // 60} min of {CARDS_BUDGET_S // 60} min budget")
+        for name, argv, minutes, _ in CARDS_PLAN:
+            print(f"{name:20s} expected {minutes:3d} min  python {' '.join(argv)}")
+        total = sum(m for _, _, m, _ in CARDS_PLAN)
+        print(f"expected {total} min, session deadline {DEADLINE_FACTOR * total:.0f} min")
         return 0
     out = pathlib.Path(cfg.out or ("./out" if cfg.local else "/kaggle/working"))
     temp_root = "/kaggle/temp" if not cfg.local and pathlib.Path("/kaggle/temp").is_dir() else None

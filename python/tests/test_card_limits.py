@@ -67,7 +67,7 @@ def test_the_card_is_assembled_from_saved_parts_and_missing_arms_are_labelled(fe
     monkeypatch.setattr(feature, "_run_arm_process", lambda *a: pytest.fail("an assemble run starts no process"))
     assert feature.main(["--smoke", "--rows", "scatter", "--out-dir", str(tmp_path / "b"), "--assemble", *parts]) == 0
     arms = json.loads(next((tmp_path / "b").glob("feature_card_*.json")).read_text())["rows"][0]["arms"]
-    assert arms["np_add_at"]["status"] == "ok" and arms["keyed"]["status"] == "not_run: step time limit"
+    assert arms["np_add_at"]["status"] == "ok" and arms["keyed"]["status"] == "not_run: session time limit"
 
 
 def test_a_warm_up_is_stopped_at_the_budget_not_labelled_afterwards(tmp_path):
@@ -97,3 +97,61 @@ def test_eff_sol_is_derived_from_the_raw_fields_and_a_better_count_rescores_it(c
             "results": [{"status": "ok", "arm": "eagle_graph", "distribution": "spread", "attempt_samples_per_s": 1.0e9}]}
     assert cc.rescore_card(card, ops=1106)["results"][0]["eff_sol_note"] == "pending (reference count)"
     assert cc.rescore_card(card, ops=900)["results"][0]["eff_sol"] == pytest.approx(0.9)
+
+
+def test_a_deadline_that_passes_drops_only_the_tail_and_the_card_assembles(feature, monkeypatch, tmp_path):
+    """After the first arm the session deadline passes: the next arms are ``not_run: session time limit``, the card is written."""
+    import os
+    import time
+
+    pytest.importorskip("hawk")
+    monkeypatch.delenv("FEATURE_CARD_FORCE", raising=False)
+    row = feature.ROWS["scatter"]
+    monkeypatch.setitem(row, "arms", ("np_add_at",))
+    monkeypatch.setitem(row, "ref", "np_add_at")
+    monkeypatch.setitem(row, "dtypes", ("float64", "float32"))
+    real = feature._run_arm_process
+
+    def run_then_expire(*args):
+        rec = real(*args)
+        monkeypatch.setenv("CARD_DEADLINE", str(time.time() - 1))
+        return rec
+
+    monkeypatch.setattr(feature, "_run_arm_process", run_then_expire)
+    assert feature.main(["--smoke", "--rows", "scatter", "--out-dir", str(tmp_path)]) == 0
+    rows = json.loads(next(tmp_path.glob("feature_card_*.json")).read_text())["rows"]
+    assert [r["arms"]["np_add_at"]["status"] for r in rows] == ["ok", "not_run: session time limit"]
+    os.environ.pop("CARD_DEADLINE", None)
+
+
+def test_the_priority_order_runs_eagle_first_the_slow_arms_last_and_the_headline_cell_first():
+    pc = _load("perf_card", _BENCH / "perf_card" / "perf_card.py")
+    order = pc.ARM_PRIORITY
+    assert all(order.index(a) < order.index("warp_kernel") for a in order if a.startswith("eagle_graph") or a == "eagle_simulate")
+    assert order.index("jax_vmap") < order.index("cupy_masked") and order.index("torch_compiled") < order.index("torch_graphed")
+    assert pc._ordered_cells(list(pc.CELLS))[0] == (10_000_000, "spread")
+    assert pc._ordered_cells([(1_000_000, "uniform"), (1_000_000, "spread")])[0] == (1_000_000, "spread")
+
+
+def test_the_cpu_card_resumes_from_its_saved_parts(monkeypatch, tmp_path):
+    """Kill the CPU card after one (arm, cell), run it again: that part is reused and the card completes."""
+    cpu = _load("cpu_card", _BENCH / "perf_card" / "cpu_card.py")
+    real, started = cpu._time_arm, []
+
+    def die_on_second(*args):
+        started.append(args)
+        if len(started) == 2:
+            raise KeyboardInterrupt
+        return real(*args)
+
+    parts = ["--parts", str(tmp_path / "parts")]
+    cli = ["--ns", "1000", "2000", "--arms", "numpy_masked", "--distributions", "spread", "--reps", "3", "--out-dir", str(tmp_path / "out")]
+    monkeypatch.setattr(cpu, "_time_arm", die_on_second)
+    with pytest.raises(KeyboardInterrupt):
+        cpu.main([*cli, *parts])
+    assert len(list((tmp_path / "parts").glob("*.json"))) == 1
+    started.clear()
+    monkeypatch.setattr(cpu, "_time_arm", lambda *a: started.append(a) or real(*a))
+    assert cpu.main([*cli, *parts]) == 0
+    assert [a[1] for a in started] == [2000]            # N = 1000 came from its saved part
+    assert list((tmp_path / "out").glob("cpu_card_*.json"))

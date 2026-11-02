@@ -14,7 +14,7 @@
 #     --slug S        machine slug (default: <gpu>--<cpu>, from the hardware)
 #     --gpu-env FILE  env script of the gpu profile (default WORK/env-gpu.sh)
 #     --cpu-env FILE  env script of the cpu profile (default WORK/env-cpu.sh)
-#     --deadline-h H  start no step once H hours have passed (exit 3); run the same command to resume
+#     --deadline-h H  the session deadline in hours (default: 1.5 x the plan's expected minutes)
 #     --dry-run       print the plan with its minutes and every command, run nothing
 #
 # A step that fails or runs over its cap is reported and the next one runs (exit 1 at the end); a step that
@@ -53,21 +53,20 @@ done
 #     A100:  the T4 walls / 39 (FP64 9.7 / 0.25 TFLOP/s); L4: the T4 walls / 1.9 (FP64 0.47 / 0.25 TFLOP/s).
 #   Estimates: P2000 24.8 min (timing N <= 1e6, memory to 1e7), L4 25.7, A100 27.0, T4 89.0 (the five cells, 1e7 included).
 #   C2: the P2000 run measured 7.6 min without torch; T4, L4 and A100 add the torch arms and, on the T4 pair, mpi_partition.
-# WORST case = what the per-process bounds allow, never less, so a cap cannot force a re-run: every timing process is limited to
-#   300 s of build (no progress before it: killed, "failed: no progress"), a warm-up stopped at 120 s, 300 s of rounds and one
-#   last round of at most 120 s = 840 s; a memory probe to 900 s. C1 worst = processes x 840 s + memory probes x 900 s;
-#   C2 worst = processes x 840 s. P0, P1, P4, P5, ncu and p25 (stages 2-5; it stops starting stages after 20 min) are bounded
-#   by their stage caps in profile.sh (sol_probe 180 s, wide_sweep 600 s, chunk_residency 900 s, launch_shape 600 s,
-#   ncu_ensemble --quick 300 s) + 1 min. The counts: arms x cells + fp32 (4) + tail floor (2) + overhead (3), memory arms x 2 N.
+# Cost is bounded by a session DEADLINE, not by step sums: 1.5 x the plan's expected minutes (boot and upload excluded), checked
+#   before EVERY arm by the card scripts ($CARD_DEADLINE) and before every step here. When it passes, no new arm starts, the arms
+#   not yet run read "not_run: session time limit" (the lowest-priority rows go first: see the order comment in each card
+#   script), every card is assembled from its saved parts and the steps not started are listed. A step's timeout is a hang
+#   guard only: the time left to the deadline + 12 min (one arm in flight: build 120 s + warm-up 120 s + rounds 300 s + a round
+#   120 s); the stage steps keep their own caps (sol_probe 180 s, wide_sweep 600 s, chunk_residency 900 s, launch_shape 600 s,
+#   ncu_ensemble --quick 300 s, + 1 min; p25 stops starting stages after 20 min). A step cap "D" means that hang guard.
 # p25 = profile stages 2-5; ncu = the quick Nsight Compute smoke of the L4.
-PROC_S=840 MEM_S=900
-worst_c() { echo $(( ($1 * PROC_S + $2 * MEM_S + 59) / 60 )); }      # processes, memory probes -> minutes
 case $PLAN in
-  a100)  STEPS=(p0:1:4 p1:4:11 "c1:27:$(worst_c 49 16)" "c2:14:$(worst_c 62 0)" p25:18:35) ;      KIND=GPU ;;
-  l4)    STEPS=(p0:1:4 p1:4:11 "c1:26:$(worst_c 25 16)" "c2:12:$(worst_c 62 0)" p4:8:16 ncu:2:6) ; KIND=GPU ;;
-  t4)    STEPS=(p0:1:4 p1:4:11 "c1:89:$(worst_c 49 16)" "c2:12:$(worst_c 62 0)" p4:8:16) ;        KIND=GPU ;;
-  p2000) STEPS=(p0:1:4 p1:4:11 "c1:25:$(worst_c 19 10)" "c2:8:$(worst_c 62 0)" p4:8:16 p5:3:11) ; KIND=GPU ;;
-  zen5|c4a) STEPS=(c1cpu:15:20 "c2cpu:8:$(worst_c 37 0)")                                         KIND=CPU ;;
+  a100)  STEPS=(p0:1:4 p1:4:11 c1:27:D c2:14:D p25:18:35) ;      KIND=GPU ;;
+  l4)    STEPS=(p0:1:4 p1:4:11 c1:26:D c2:12:D p4:8:16 ncu:2:6) ; KIND=GPU ;;
+  t4)    STEPS=(p0:1:4 p1:4:11 c1:89:D c2:12:D p4:8:16) ;        KIND=GPU ;;
+  p2000) STEPS=(p0:1:4 p1:4:11 c1:25:D c2:8:D p4:8:16 p5:3:11) ; KIND=GPU ;;
+  zen5|c4a) STEPS=(c1cpu:15:D c2cpu:8:D) ;                       KIND=CPU ;;
   *) die "--plan takes a100, l4, t4, p2000, zen5 or c4a" ;;
 esac
 
@@ -96,7 +95,7 @@ step_cmd() {
            else
              printf '%s\n' python benchmarks/perf_card/perf_card.py --parts "$RES/parts/c1" --out-dir "$RES/perf_card"
            fi ;;
-    c1cpu) printf '%s\n' python benchmarks/perf_card/cpu_card.py --out-dir "$RES/perf_card" ;;
+    c1cpu) printf '%s\n' python benchmarks/perf_card/cpu_card.py --parts "$RES/parts/c1cpu" --out-dir "$RES/perf_card" ;;
     c2|c2cpu) printf '%s\n' python benchmarks/perf_card/feature_card.py --parts "$RES/parts/c2" --out-dir "$RES/perf_card" ;;
     p25)   printf '%s\n' bash benchmarks/reproduce/profile.sh --env "$ENVF" --out "$RES/profile" --deadline-min 20 --only ncu_corpus,ncu_ensemble,chunk_residency,launch_shape ;;
     p4)    printf '%s\n' bash benchmarks/reproduce/profile.sh --env "$ENVF" --out "$RES/profile" --only chunk_residency ;;
@@ -105,15 +104,19 @@ step_cmd() {
   esac
 }
 
-expected=0 worst=0
+expected=0
 log "plan $PLAN on $SLUG (target $TARGET)"
 for s in "${STEPS[@]}"; do
   IFS=: read -r name exp cap <<<"$s"
-  printf '[repro]   %-7s expected %4s min, worst case %5s min (the step cap)\n' "$name" "$exp" "$cap" >&2
-  expected=$((expected + exp)); worst=$((worst + cap))
+  printf '[repro]   %-7s expected %4s min\n' "$name" "$exp" >&2
+  expected=$((expected + exp))
 done
-log "expected $expected min, worst case $worst min; --max-run-duration = worst case + boot 5 + upload 2 = $((worst + 7)) min (boot and upload not counted above)"
+DEADLINE_MIN=$(( (expected * 3 + 1) / 2 ))
+[[ -n $DEADLINE_H ]] && DEADLINE_MIN=$(awk -v h="$DEADLINE_H" 'BEGIN {printf "%d", h * 60}')
+DEADLINE_AT=$(( START + DEADLINE_MIN * 60 ))
+log "expected $expected min; session deadline $DEADLINE_MIN min (1.5 x); --max-run-duration = deadline + boot + upload + 15 = $((DEADLINE_MIN + 15)) min + boot"
 [[ $REPRO_DRY_RUN == 1 ]] && log "dry run: commands are printed, nothing is run"
+export CARD_DEADLINE=$DEADLINE_AT
 
 MARKS=$RES/.steps
 run mkdir -p "$MARKS"
@@ -128,13 +131,13 @@ in_env() {
   ( # shellcheck disable=SC1090
     . "$ENVF"
     [[ $KIND == CPU ]] && export CUDA_VISIBLE_DEVICES=""
-    export HAWK_SRC=${RAPTOR_HAWK_ROOT:-${HAWK_SRC:-}} EAGLE_SRC=$EROOT
+    export HAWK_SRC=${RAPTOR_HAWK_ROOT:-${HAWK_SRC:-}} EAGLE_SRC=$EROOT CARD_DEADLINE
     cd "$EROOT" && "$@" )
 }
 
 # assemble NAME: the card of a C1/C2 step written from its saved parts, a missing arm labelled not_run: step time limit.
 assemble() {
-  case $1 in c1|c2|c2cpu) ;; *) return 0 ;; esac
+  case $1 in c1|c1cpu|c2|c2cpu) ;; *) return 0 ;; esac
   mapfile -t acmd < <(step_cmd "$1")
   log "assembling the card of step $1 from its saved parts"
   if [[ $REPRO_DRY_RUN == 1 ]]; then printf '+ (... %s --assemble)\n' "$(_quote "${acmd[@]}")"; return 0; fi
@@ -148,17 +151,16 @@ finish_cards() {   # session end (or a deadline): every C1/C2 step that did not 
   push
 }
 
-failed=0
+failed=0 skipped=()
 for s in "${STEPS[@]}"; do
   IFS=: read -r name _ cap <<<"$s"
   if [[ $REPRO_DRY_RUN == 0 && -f $MARKS/$name.done ]]; then log "step $name: done earlier, skipped"; continue; fi
-  if [[ -n $DEADLINE_H ]] && (( $(date +%s) - START > $(awk -v h="$DEADLINE_H" 'BEGIN {printf "%d", h * 3600}') )); then
-    log "deadline of ${DEADLINE_H} h reached before step $name; run the same command to resume"
-    finish_cards
-    exit 3
+  if (( $(date +%s) > DEADLINE_AT )); then
+    skipped+=("$name"); continue
   fi
   mapfile -t cmd < <(step_cmd "$name")
-  log "step $name (cap $cap min)"
+  [[ $cap == D ]] && cap=$(( (DEADLINE_AT - $(date +%s)) / 60 + 12 ))
+  log "step $name (hang guard $cap min)"
   if [[ $REPRO_DRY_RUN == 1 ]]; then
     # shellcheck disable=SC2016  # $RAPTOR_HAWK_ROOT is printed, not expanded
     printf '+ (. %s; cd %s; HAWK_SRC=$RAPTOR_HAWK_ROOT EAGLE_SRC=%s timeout %sm %s)\n' "$ENVF" "$EROOT" "$EROOT" "$cap" "$(_quote "${cmd[@]}")"
@@ -177,6 +179,7 @@ for s in "${STEPS[@]}"; do
   push
 done
 
+[[ ${#skipped[@]} -gt 0 ]] && log "session deadline passed: steps not started: ${skipped[*]} (their cards, if any, are assembled with the arms labelled not_run: session time limit)"
 finish_cards
 if [[ $REPRO_DRY_RUN == 0 ]]; then
   log "inventory of $RES"

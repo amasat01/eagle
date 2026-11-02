@@ -57,7 +57,6 @@ RUN_BUDGET_S = 120.0     # a warm-up run over this is not_run: budget
 CELL_CAP_S = 300.0       # timed rounds stop here (at least one runs)
 MIN_ROUNDS, MAX_ROUNDS, IQR_STOP = 3, 9, 0.05
 PROCESS_TIMEOUT_S = cc.BUILD_S + RUN_BUDGET_S + CELL_CAP_S + RUN_BUDGET_S   # setup, warm-up, rounds, a last round
-STEP_LIMIT = "not_run: step time limit"
 MARK = "FEATURE_ARM "
 F64, F32 = "float64", "float32"
 
@@ -685,6 +684,9 @@ def setup_mpi_partition(ctx):
     return run, (lambda: (run() or bool(_np().isfinite(download()["t"]).all()), "every sample reaches a finite time"))
 
 
+# The order of rows and arms is the priority order: a session deadline drops the tail. Within a row the eagle arms come first, then
+# the fast libraries, the slow ones last; the rows run headline first (the wide-value forms, then the fused steps) and the
+# multi-GPU row last.
 # name -> spec. ``cases``: {case: (N, smoke N)}; ``arms``: eagle arms then baselines; ``host``: the arms that run on the CPU
 # session (empty: GPU only); ``ref``: the arm the others are compared with.
 ROWS = {
@@ -821,8 +823,8 @@ def run_arm(row, case, dtype, arm, smoke):
     saved = cc.part_load(_PARTS, key)
     if saved is not None:
         return saved
-    if _ASSEMBLE:
-        return {"status": STEP_LIMIT}
+    if _ASSEMBLE or cc.deadline_passed():
+        return {"status": cc.SESSION_LIMIT}
     rec = _run_arm_process(row, case, dtype, arm, smoke)
     cc.part_save(_PARTS, key, rec)
     return rec
@@ -850,8 +852,8 @@ def _mpi(smoke):
     """The two-rank arm under mpirun (a fresh process pair), the one-rank arm as any other arm."""
     n = 8192 if smoke else 2_000_000
     why = None
-    if _ASSEMBLE:
-        why = STEP_LIMIT.removeprefix("not_run: ")
+    if _ASSEMBLE or cc.deadline_passed():
+        why = cc.SESSION_LIMIT.removeprefix("not_run: ")
     elif _gpu_count() < 2:
         why = f"needs 2 GPUs (this machine has {_gpu_count()}); a Kaggle T4 x2 row"
     elif not shutil.which("mpirun"):
