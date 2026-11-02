@@ -12,7 +12,10 @@ import importlib.util
 import pathlib
 import types
 
+import pytest
+
 _REPO = pathlib.Path(__file__).resolve().parents[2]
+pytestmark = pytest.mark.repo_local     # the card script lives in the repository, not in the wheel
 _CARD_DIR = _REPO / "benchmarks" / "perf_card"
 
 

@@ -13,6 +13,7 @@ import pathlib
 import pytest
 
 _BENCH = pathlib.Path(__file__).resolve().parents[2] / "benchmarks"
+pytestmark = pytest.mark.repo_local     # the card scripts and the cards live in the repository, not in the wheel
 
 
 def test_ops_per_attempt_is_the_hand_count_of_the_step():

@@ -6,22 +6,35 @@ the feature card appears in it, so a row added to the manifest without a coverag
 
 from __future__ import annotations
 
+import functools
 import json
 import pathlib
 import re
 
+import pytest
+
+pytestmark = pytest.mark.repo_local      # reads the docs page and the manifest: a repository check, not an install one
+
 _ROOT = pathlib.Path(__file__).resolve().parents[2]
 _PAGE = _ROOT / "docs" / "content" / "performance" / "coverage.md"
 _MANIFEST = _ROOT / "benchmarks" / "cards_manifest.json"
-_ROWS = [line.split("|")[1:-1] for line in _PAGE.read_text().splitlines()
-         if line.startswith("| ") and not line.startswith(("| group", "|---"))]
-_C2 = set(json.loads(_MANIFEST.read_text())["c2_feature_card"])
 _STAGE = re.compile(r"\bP[1-5]\b")
 
 
+@functools.cache
+def _rows():
+    return [line.split("|")[1:-1] for line in _PAGE.read_text().splitlines()
+            if line.startswith("| ") and not line.startswith(("| group", "|---"))]
+
+
+@functools.cache
+def _c2():
+    return frozenset(json.loads(_MANIFEST.read_text())["c2_feature_card"])
+
+
 def test_every_row_has_a_card_stage_or_reason():
-    assert len(_ROWS) >= 25
-    for group, item, covered, reason in (tuple(c.strip() for c in row) for row in _ROWS):
+    assert len(_rows()) >= 25
+    for group, item, covered, reason in (tuple(c.strip() for c in row) for row in _rows()):
         assert group and item
         assert reason, f"{item}: no reason"
         named = re.search(r"\bC[12]\b|\bcovered by\b|\bno timing row\b", covered) or _STAGE.search(covered)
@@ -30,10 +43,10 @@ def test_every_row_has_a_card_stage_or_reason():
 
 def test_every_feature_card_row_is_covered():
     text = _PAGE.read_text()
-    missing = sorted(r for r in _C2 if f"`{r}`" not in text)
+    missing = sorted(r for r in _c2() if f"`{r}`" not in text)
     assert not missing, f"feature-card rows with no coverage line: {missing}"
 
 
 def test_every_named_feature_row_is_in_the_manifest():
-    named = {m for row in _ROWS for m in re.findall(r"C2 `(\w+)`", row[2])}
-    assert named <= _C2, sorted(named - _C2)
+    named = {m for row in _rows() for m in re.findall(r"C2 `(\w+)`", row[2])}
+    assert named <= _c2(), sorted(named - _c2())
