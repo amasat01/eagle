@@ -1857,6 +1857,9 @@ NB_MODULE(_core, m)
         nb::arg("bytes_per_sample") = 0,
         "How many tiles a partition would be cut into.");
 
+    m.def("host_op_team", &eagle::array::host::op_team, nb::arg("n"),
+        "How many threads a host array op over n elements uses (1 = in place, no OpenMP region).");
+
     m.def("fold",
         [](const std::string& op, const std::vector<double>& values) {
             return eagle::exec::fold(eagle::exec::op_from_string(op),

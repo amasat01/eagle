@@ -24,6 +24,7 @@ This section covers what changes from 0.7.2. Names that left are in the table at
 
 ### Changed
 
+- `simulate(..., history=True | k)` returns `res.history[name]`, the state before the first step and after every k-th. `record=` must now be `True` or `False`.
 - The performance pages, README and prose claims read the new ensemble card, and the coverage page lists what each claim rests on.
 - Dispatch refuses a fused runner over sorted planes; index planes narrow once at entry, and `bind` refuses a wrong width. Grouped and segmented kernels are placed.
 - Scratch arenas only plan: each graph owns its scratch buffer.
@@ -31,9 +32,11 @@ This section covers what changes from 0.7.2. Names that left are in the table at
 - The CUDA toolchain for CI and local gates is NVIDIA's pinned 12.9 redist archives. CI runs on `ubuntu-24.04`; `make gate`, `make gate-gpu` and `make gate-all` are what CI runs.
 - The `neural_block` pattern is now `graph_block`, and the `NEURAL_*` field constants are `BLOCK_*`. Schema version stays 1; the old pattern name is refused by name. The table at the end lists the names.
 - The "Reverse mode over a graph" page moved into the tutorial "Gradients through a graph"; the old address redirects there.
+- Host array ops (fill, copy, elementwise, `cumsum`, `count_nonzero`, `flatnonzero`) run in place up to one tile and use `min(tiles, host threads)` above it, so `exec.set_host_threads` reaches them. Values are unchanged.
 
 ### Fixed
 
+- A direct call takes a number or 0-d value for a per-lane `Scalar` beside a batch, as that value on every lane, and a `Param` given an array is refused by name instead of a `TypeError`.
 - A memset on the legacy stream runs on the array's device, not on whichever device another library left current.
 - The JAX bridge registers a kernel on the GPU a function is called under, and the plugin memo is per device.
 

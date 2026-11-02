@@ -53,11 +53,12 @@ howto_streams
 
 ## Keep the state at every step
 
-`eagle.simulate` returns the final state. To keep every step, build the run once with `sim = eagle.simulation(model, ..., max_steps=1)` and call `sim.run()` in a loop: each call advances the state in place by one step, so the history is what you copy after each call. Call `sim.reset()` and re-seed the state to start over. The result is the same as `eagle.simulate(..., max_steps=k)` for each `k`.
+`eagle.simulate(model, ..., max_steps=N, history=True)` keeps it: `res.history["x"]` has `N + 1` rows (the initial state, then after each step), and `history=k` keeps every k-th step (`N // k + 1` rows). A sample that finished repeats its final state. The final state is the same as without `history`. It runs one launch per step, so the kernel must advance one step per launch, and the rows take `rows * n * planes` of memory.
 
 ## Direct calls and bound planes
 
 - A direct kernel call takes `returns="numpy"` (or `"cupy"`, `"torch"`, `"jax"`), as `run` does.
+- A number or 0-d value for a per-lane `Scalar` beside a batch is that value on every lane. A `Param` takes a number or 0-d array; an array for it is refused by name.
 - A kernel parameter declared `Param[Matrix[2, 2]]` (or `Vector`, `Table`) is one value shared by every lane. `run`, `bind` and a direct call take it in its own shape and refuse another by name.
 - An `Index` plane has the width the kernel declares (`int32` unless `Index[int64]`). `bind` and `rebind` refuse another width by name and say which to pass; `run` converts on each call.
 - Opaque notes a kernel's author put on a plane (`hawk.Meta`) are on the loaded kernel as `plane_meta`, by plane name.
