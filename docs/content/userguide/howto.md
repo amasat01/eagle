@@ -53,7 +53,7 @@ howto_streams
 
 ## Keep the state at every step
 
-`eagle.simulate` returns the final state. To keep every step, build the run once with `sim = eagle.simulation(model, ..., max_steps=1)` and call `sim.run()` in a loop: each call advances the state in place by one step, so the history is what you copy after each call. Call `sim.reset()` and re-seed the state to start over. The result is the same as `eagle.simulate(..., max_steps=k)` for each `k`.
+`eagle.simulate(model, ..., max_steps=N, history=True)` keeps it: `res.history["x"]` has `N + 1` rows (the initial state, then after each step), and `history=k` keeps every k-th step (`N // k + 1` rows). A sample that finished repeats its final state. The final state is the same as without `history`. It runs one launch per step, so the kernel must advance one step per launch, and the rows take `rows * n * planes` of memory.
 
 ## Direct calls and bound planes
 

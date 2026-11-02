@@ -34,6 +34,7 @@ head-shaped. Reaching ``max_steps`` is a result (``status ==
 
 from __future__ import annotations
 
+import dataclasses
 import inspect
 import time
 
@@ -58,7 +59,7 @@ __all__ = ["SimResult", "Simulation", "simulate", "simulation"]
 
 #: The result's own fields: a state plane must not shadow one.
 _RESULT_FIELDS = ("state", "finished", "done", "steps", "status", "report", "n",
-                  "wall_s", "allocated", "record")
+                  "wall_s", "allocated", "record", "history")
 
 #: The roles that hold one value (or one column) per sample.
 _SAMPLE_ROLES = frozenset({"per_sample", "vec_in", "mat_in", "mutable"})
@@ -72,7 +73,7 @@ _FAMILY = {"uniform": "Param", "per_sample": "per-sample", "mutable": "per-sampl
 #: eagle's own call-time options: keyword-only, after the kernel's own
 #: arguments; a kernel parameter sharing one of these names is refused.
 _DOOR_OPTIONS = frozenset({"until", "max_steps", "every", "reorder", "record", "window", "steps_reverse",
-                           "memory_budget", "events", "on_no_event"})
+                           "memory_budget", "events", "on_no_event", "history"})
 
 
 def _refuse(text: str):
@@ -457,14 +458,17 @@ class SimResult:
     :attr:`steps`/:attr:`report`/:attr:`wall_s` the loop's steps, full
     :class:`eagle.RunReport` and wall time. An ``events="refine"`` run also
     fills :attr:`t_stop` (each sample's event time) and :attr:`event_status`
-    (see :attr:`eagle.Runner.event_status`); both are ``None`` otherwise."""
+    (see :attr:`eagle.Runner.event_status`); both are ``None`` otherwise.
+    A ``history=`` run fills :attr:`history`: each state plane's rows (the
+    state before the first step, then after every k-th), ``None`` otherwise."""
 
     __slots__ = ("state", "finished", "done", "steps", "status", "report", "n", "record",
-                 "wall_s", "allocated", "t_stop", "event_status")
+                 "wall_s", "allocated", "t_stop", "event_status", "history")
 
     def __init__(self, *, state, finished, report, wall_s, allocated, record=None,
-                 t_stop=None, event_status=None):
+                 t_stop=None, event_status=None, history=None):
         put = object.__setattr__
+        put(self, "history", history)
         put(self, "record", record)
         put(self, "t_stop", t_stop)
         put(self, "event_status", event_status)
@@ -502,7 +506,8 @@ class SimResult:
 
         return SimResult(state=route(self.state, returns), finished=route(self.finished, returns), report=self.report,
                          wall_s=self.wall_s, allocated=self.allocated, record=self.record,
-                         t_stop=route(self.t_stop, returns), event_status=route(self.event_status, returns))
+                         t_stop=route(self.t_stop, returns), event_status=route(self.event_status, returns),
+                         history=route(self.history, returns))
 
     def __repr__(self) -> str:
         return (f"SimResult(status={self.status!r}, n={self.n}, steps={self.steps}, "
@@ -520,15 +525,18 @@ class Simulation:
     ``state``/``params``/``allocated`` plane names."""
 
     __slots__ = ("_busy", "runner", "loop", "plans", "n", "names", "active", "finished",
-                 "terminated", "every", "_state", "_device", "_xp", "_cells")
+                 "terminated", "every", "_state", "_device", "_xp", "_cells", "_history", "_max_steps")
 
     def __init__(self, model, args, kwargs, *, until=None, max_steps,
                  every=None, reorder=None, scalar_type=None, layout=None,
                  record=False, window=None, steps_reverse="per_step", memory_budget=None, dispatch=None,
-                 events="step", on_no_event="raise"):
+                 events="step", on_no_event="raise", history=False):
         from ._layout import rewrap, split_marks
 
         self._busy = BusyGuard("eagle.Simulation")
+        if not isinstance(record, bool):
+            _refuse(f"record= is True or False (the reverse tape), got {record!r}; history= keeps the state of each step")
+        self._history = _check_history(history, record, reorder, dispatch, events)
         if record and dispatch is not None:
             raise ValueError("eagle.simulate: record=True runs each step fused, so dispatch= cannot "
                              "be combined with it yet; drop dispatch= to record this run")
@@ -568,6 +576,8 @@ class Simulation:
         n, single = _sample_count(decl, planes, axes, layout)
         _check_params(decl, planes, n, single)
         selected, device = _select(plans, planes)
+        if self._history and any(_finish_of(selected[i].plugin, names[i])["steps"] not in (1, "auto") for i in finishers):
+            _refuse("history= runs one step per launch, but a kernel that finishes the samples advances more; build it with steps=1")
         xp = _array_module(device)
         if len(plans) > 1:
             _check_step(selected, names, finishers, compacting, every, reorder)
@@ -622,7 +632,7 @@ class Simulation:
             self.runner = DispatchRunner(*spec[:2], final, final[mask], max_steps=max_steps,
                                          plain=plain, forced=spec[2], theta=reorder or True)
         else:
-            self.runner = until_done(step, max_steps=max_steps, every=every,
+            self.runner = until_done(step, max_steps=1 if self._history else max_steps, every=every,
                                      reorder=reorder, record=record, window=window, steps_reverse=steps_reverse,
                                      memory_budget=memory_budget, layout=layout,
                                      events=events, on_no_event=on_no_event,
@@ -634,6 +644,7 @@ class Simulation:
         self.n = self.runner.n
         self.active, self.finished = self.runner.active, self.runner.finished
         self.every = self.runner.every
+        self._max_steps = max_steps
 
     @property
     def record(self):
@@ -664,7 +675,10 @@ class Simulation:
 
     def _run(self) -> SimResult:
         t0 = time.perf_counter()
-        report = self.runner.run()
+        if self._history:
+            report, history = self._run_history()
+        else:
+            report, history = self.runner.run(), None
         if self._device and self.runner._fast_mode is None:
             # a fast run ends on its own blocking readback; the band path can
             # still queue work after its read (a reordering set's restore)
@@ -679,12 +693,55 @@ class Simulation:
         return SimResult(state=state, finished=self.terminated, report=report,
                          wall_s=wall, allocated=self.names["allocated"],
                          record=self.runner.record, t_stop=getattr(self.runner, "t_stop", None),
-                         event_status=getattr(self.runner, "event_status", None))
+                         event_status=getattr(self.runner, "event_status", None), history=history)
+
+    def _run_history(self):
+        """The loop the how-to teaches, inside the engine: one step per ``runner.run()``, the state planes copied
+        into ``(rows, ...)`` arrays after every k-th step. A sample that finished repeats its state; once every
+        sample has finished the rows left repeat the final state."""
+        from . import _core
+
+        k = self._history
+        names = self.names["state"] + self.names["allocated"]
+        src = {nm: arrays.asarray(self._state[nm]) for nm in names}
+        rows = self._max_steps // k + 1
+        history = {nm: _alloc.zeros(a.device, (rows,) + tuple(a.shape), a.dtype) for nm, a in src.items()}
+
+        def keep(i):
+            for nm, a in src.items():
+                _core.array_copyto(history[nm][i], a)
+
+        keep(0)
+        steps = 0
+        while steps < self._max_steps:
+            report = self.runner.run()
+            steps += report.steps
+            if steps % k == 0 and steps // k < rows:
+                keep(steps // k)
+            if report.done or not report.steps:
+                break
+        for i in range(steps // k + 1, rows):
+            keep(i)
+        return dataclasses.replace(report, steps=steps), history
 
     def reset(self) -> None:
         """Clear the finished mask (and the active set): the next :meth:`run`
         starts the batch over; the caller re-seeds its state."""
         self.runner.reset()
+
+
+def _check_history(history, record, reorder, dispatch, events) -> int:
+    """``history`` as the row stride ``k`` (``0`` = off); refuse what a per-step loop cannot honour."""
+    if history is False or history is None:
+        return 0
+    if history is True:
+        history = 1
+    if not isinstance(history, int) or history < 1:
+        _refuse(f"history= is True or a step interval k >= 1, got {history!r}")
+    if record or reorder is not None or dispatch is not None or events != "step":
+        _refuse("history= runs one step per launch and keeps the state in place, so it cannot be combined with "
+                "record=, reorder=, dispatch= or events=")
+    return history
 
 
 def _check_step(selected, names, finishers, compacting, every, reorder) -> None:
@@ -707,7 +764,7 @@ def simulation(model, *args, until=None, max_steps: int,
                every: int | None = None, reorder=None, scalar_type=None,
                layout=None, record: bool = False, window=None, steps_reverse="per_step",
                memory_budget: int | None = None, dispatch=None, events: str = "step",
-               on_no_event: str = "raise", **kwargs) -> Simulation:
+               on_no_event: str = "raise", history: bool | int = False, **kwargs) -> Simulation:
     """Bind and build ``model`` once; returns the :class:`Simulation`, whose
     :meth:`~Simulation.run` runs it (again, after :meth:`~Simulation.reset`,
     without rebuilding). ``*args``/``**kwargs`` are the kernel's own, bound
@@ -716,14 +773,15 @@ def simulation(model, *args, until=None, max_steps: int,
                       every=every, reorder=reorder, scalar_type=scalar_type,
                       layout=layout, record=record, window=window, steps_reverse=steps_reverse,
                       memory_budget=memory_budget, dispatch=dispatch, events=events,
-                      on_no_event=on_no_event)
+                      on_no_event=on_no_event, history=history)
 
 
 def simulate(model, *args, until=None, max_steps: int,
              every: int | None = None, reorder=None, scalar_type=None,
              layout=None, record: bool = False, window=None, steps_reverse="per_step",
              memory_budget: int | None = None, dispatch=None, events: str = "step",
-             on_no_event: str = "raise", returns: str | None = None, **kwargs) -> SimResult:
+             on_no_event: str = "raise", history: bool | int = False, returns: str | None = None,
+             **kwargs) -> SimResult:
     """Run ``model`` on every sample until each one finishes (or ``max_steps``
     is reached) and return the :class:`SimResult`.
 
@@ -771,6 +829,15 @@ def simulate(model, *args, until=None, max_steps: int,
         res.t_stop                    # when each sample hit the ground
         grads = eagle.diff.reverse(res.record, {"t": eagle.arrays.ones_like(y0)})
 
+    ``history=True`` (or an interval ``k``) keeps the state of every step: ``res.history[name]`` holds
+    ``max_steps // k + 1`` rows per state plane (row 0 the initial state, then after every k-th step; a sample that
+    finished repeats its state, and rows past the last step repeat the final one). It runs one launch per step, so
+    memory is ``rows * n * planes`` and the kernel must advance one step per launch. The final state equals the run
+    without it::
+
+        res = eagle.simulate(model, x=x0, v=v0, max_steps=100, history=True)
+        res.history["x"]              # (101, n)
+
     ``dispatch`` chooses how the model's ``policy="auto"`` dispatch groups run.
     ``None`` (default) keeps every group the author declared and decides the
     ``"auto"`` ones by measurement: the model starts fused, counts how many
@@ -792,4 +859,4 @@ def simulate(model, *args, until=None, max_steps: int,
                       every=every, reorder=reorder, scalar_type=scalar_type,
                       layout=layout, record=record, window=window, steps_reverse=steps_reverse,
                       memory_budget=memory_budget, dispatch=dispatch, events=events,
-                      on_no_event=on_no_event, **kwargs).run().returned(returns)
+                      on_no_event=on_no_event, history=history, **kwargs).run().returned(returns)
