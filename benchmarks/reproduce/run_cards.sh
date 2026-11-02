@@ -160,6 +160,8 @@ run_gpu_cards() {
     step "gpu-$card-final" "$GPU_ENV" GPU "$eroot" python "$HERE/passes.py" "$card" final \
       --parts "$parts/$card" "${NSARG[@]}" "${fin[@]}" --out-dir "$out/perf_card" "${EXTRA[@]}"
   done
+  step gpu-features "$GPU_ENV" GPU "$eroot" python benchmarks/perf_card/feature_card.py \
+    --out-dir "$out/perf_card" "${EXTRA_FEATURE[@]}"
 }
 
 run_cpu_cards() {
