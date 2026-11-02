@@ -838,8 +838,12 @@ def _run_arm_process(row, case, dtype, arm, smoke):
 
 
 def _mpi(smoke):
-    """The two-rank arm under mpirun (a fresh process pair), the one-rank arm as any other arm."""
+    """The two-rank arm under mpirun (a fresh process pair), the one-rank arm as any other arm; both are saved as parts."""
     n = 8192 if smoke else 2_000_000
+    key = lambda arm: f"mpi_partition_all_{F64}_{arm}" + ("_smoke" if smoke else "")
+    rec = {a: cc.part_load(_PARTS, key(a), keep_failed=_ASSEMBLE) for a in ROWS["mpi_partition"]["arms"]}
+    if None not in rec.values():
+        return rec, n
     why = None
     if _ASSEMBLE or cc.deadline_passed():
         why = cc.SESSION_LIMIT.removeprefix("not_run: ")
@@ -850,15 +854,19 @@ def _mpi(smoke):
     elif not _installed("eagle._mpi"):
         why = "this eagle build has no rank structure (eagle._mpi; -DEAGLE_PYTHON_MPI)"
     if why:
-        return {a: {"status": f"not_run: {why}"} for a in ROWS["mpi_partition"]["arms"]}, n
-    done = subprocess.run(["mpirun", "--allow-run-as-root", "-n", "2", sys.executable, __file__, "--mpi-worker", str(n)]
-                          + (["--smoke"] if smoke else []), capture_output=True, text=True, timeout=PROCESS_TIMEOUT_S)
-    if done.returncode:
-        said = [ln.strip() for ln in (done.stderr + done.stdout).splitlines() if ln.strip().strip("-")]
-        two = {"status": f"failed: the two-rank run failed (rc {done.returncode}): {(said or ['no output'])[-1][:160]}"}
-    else:
-        two = json.loads(done.stdout.strip().splitlines()[-1])
-    return {"two_ranks": two, "one_rank": run_arm("mpi_partition", "all", F64, "one_rank", smoke)}, n
+        return {a: r or {"status": f"not_run: {why}"} for a, r in rec.items()}, n
+    if rec["two_ranks"] is None:
+        done = subprocess.run(["mpirun", "--allow-run-as-root", "-n", "2", sys.executable, __file__, "--mpi-worker", str(n)]
+                              + (["--smoke"] if smoke else []), capture_output=True, text=True, timeout=PROCESS_TIMEOUT_S)
+        if done.returncode:
+            said = [ln.strip() for ln in (done.stderr + done.stdout).splitlines() if ln.strip().strip("-")]
+            rec["two_ranks"] = {"status": f"failed: the two-rank run failed (rc {done.returncode}): {(said or ['no output'])[-1][:160]}"}
+        else:
+            rec["two_ranks"] = json.loads(done.stdout.strip().splitlines()[-1])
+        cc.part_save(_PARTS, key("two_ranks"), rec["two_ranks"])
+    if rec["one_rank"] is None:
+        rec["one_rank"] = run_arm("mpi_partition", "all", F64, "one_rank", smoke)
+    return rec, n
 
 
 def _mpi_worker(n, smoke):
