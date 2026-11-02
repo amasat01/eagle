@@ -182,7 +182,22 @@ def install_args(cfg, py, cu, pre, pin, others):
             f"raptor-hawk[{cu}]" + (f"=={hawk}" if hawk else ""), *rest, *others]
 
 
+def pin_cuda12(cfg, work):
+    """CUDA 12 builds from source (headers, sdists, checkouts) use the pinned 12.9 toolchain, not the image's nvcc (13
+    since late 2026): the one pin list is eagle's cuda_redist.sh, taken from an eagle checkout whatever the source."""
+    if cfg.cuda != "12":
+        return
+    clone("eagle", cfg.eagle_ref, work / "src" / "eagle")
+    tool = work / "cuda12"
+    if sh("sh", work / "src" / "eagle" / ".github" / "cuda_redist.sh", "fetch", platform.machine(), tool, work / "cuda12_cache") != 0:
+        raise SystemExit("could not fetch the CUDA 12.9 toolchain")
+    os.environ.update(CUDA_PATH=str(tool), CUDA_HOME=str(tool), CUDACXX=str(tool / "bin" / "nvcc"),
+                      PATH=f"{tool / 'bin'}{os.pathsep}{os.environ['PATH']}")
+
+
 def install(cfg, py, use_uv, work):
+    (work / "src").mkdir(exist_ok=True)
+    pin_cuda12(cfg, work)
     cu = f"cuda{cfg.cuda}"
     pre = ["--pre"] if cfg.pre else []
     pin = f"=={cfg.version}" if cfg.version else ""
@@ -199,13 +214,6 @@ def install(cfg, py, use_uv, work):
         # shallow clones carry no tags: the version comes from --version (or a dev marker)
         ver = cfg.version or "0.0.0.dev0"
         os.environ.update(AETHER_VERSION=ver, EAGLE_VERSION=ver, SETUPTOOLS_SCM_PRETEND_VERSION=ver)
-        if cfg.cuda == "12":
-            # the image's nvcc is newer than CUDA 12 (13 since late 2026): build with the pinned 12.9 toolchain instead
-            tool = work / "cuda12"
-            if sh("sh", src / "eagle" / ".github" / "cuda_redist.sh", "fetch", platform.machine(), tool, work / "cuda12_cache") != 0:
-                raise SystemExit("could not fetch the CUDA 12.9 toolchain")
-            os.environ.update(CUDA_PATH=str(tool), CUDA_HOME=str(tool), CUDACXX=str(tool / "bin" / "nvcc"),
-                              PATH=f"{tool / 'bin'}{os.pathsep}{os.environ['PATH']}")
         prefix = work / "install"
         arch = "-DCMAKE_CUDA_ARCHITECTURES=75"
         # a sibling whose pinned version is on PyPI installs from there, whatever branch was cloned (the clone still
