@@ -42,7 +42,7 @@ struct Manifest {
     std::string dir;                      // manifest's directory (trailing '/')
     std::string aether_abi;                 // binary-ABI tag (empty if absent)
     int schema_version = 0;               // plugin-schema version (0 = absent -> v1)
-    std::string pattern;                  // "vector" | "pure" | "neural_block" (the plugin family)
+    std::string pattern;                  // "vector" | "pure" | "graph_block" (the plugin family)
     bool has_blocks = false;              // a top-level "blocks[]" key is present (parse-pure record)
     // ---- the schema-v2 EXECUTION AXIS --------------
     // FLAT top-level keys, not a nested ``execution`` object: this reader is a
@@ -126,7 +126,7 @@ inline Manifest parse_manifest(const std::string& path) {
     if (s.find("\"pattern\"") != std::string::npos)
         m.pattern = _string_value(s, "pattern");
     // Parse-pure record; the VALIDATION lives in validate_manifest_formats:
-    // presence of a top-level "blocks" array marks a neural-block manifest carriage.
+    // presence of a top-level "blocks" array marks a graph-block manifest carriage.
     m.has_blocks = s.find("\"blocks\"") != std::string::npos;
     // Optional plugin-schema version; the legacy "version" key is a fallback.
     // Absent (both) -> 0, treated as v1 by the registries (backward-lenient).
@@ -286,8 +286,8 @@ inline void validate_execution_axis(const Manifest& m, const std::string& what) 
 // manifest fails fast with no partial load — the manifest-level twin of the
 // duplicate-id structural check both registries already run at this point.
 inline void validate_manifest_formats(const Manifest& m, bool host = false) {
-    // The orphaned-blocks guard: a "blocks[]" section is neural-block machinery
-    // reachable ONLY under pattern "neural_block" — and the pattern gate already
+    // The orphaned-blocks guard: a "blocks[]" section is graph-block machinery
+    // reachable ONLY under pattern "graph_block" — and the pattern gate already
     // refused that family before this shared helper runs (both registries'
     // `check_launch_certified_pattern` call). A "blocks[]" reaching here means a producer
     // emitted descriptors beside a kernel manifest; a kernel-manifest loader would
@@ -295,7 +295,7 @@ inline void validate_manifest_formats(const Manifest& m, bool host = false) {
     // sharing the Python door's leading clause verbatim.
     if (m.has_blocks)
         throw std::runtime_error("manifest carrying blocks[] must declare pattern "
-            "'neural_block'; got pattern '" + m.pattern + "' (block descriptors would "
+            "'graph_block'; got pattern '" + m.pattern + "' (block descriptors would "
             "be silently ignored by a kernel-manifest loader)");
     for (const auto& e : m.plugins) {
         if (!host && e.format == "host")

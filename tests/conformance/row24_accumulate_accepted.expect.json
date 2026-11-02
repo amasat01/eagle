@@ -1,6 +1,6 @@
 {
   "row": 24,
-  "title": "a `neural_block` descriptor declaring the `accumulate` terminal-write contract is accepted by the shared validator, refused at every launching door",
+  "title": "a `graph_block` descriptor declaring the `accumulate` terminal-write contract is accepted by the shared validator, refused at every launching door",
   "level": "sidecar",
   "expect": "accept",
   "error_substring": null,
@@ -30,7 +30,7 @@
     "Accepted at the shared validator, for the same reason as row01: the",
     "descriptor is structurally valid schema v1. Refused at the",
     "manifest-bypassing plugin loader, with the same message and reasoning as",
-    "row01: a `neural_block` descriptor is recognized but never",
+    "row01: a `graph_block` descriptor is recognized but never",
     "launch-certified, regardless of which terminal-write contract it declares."
   ]
 }

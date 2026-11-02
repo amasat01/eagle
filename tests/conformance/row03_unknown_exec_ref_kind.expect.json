@@ -1,6 +1,6 @@
 {
   "row": 3,
-  "title": "a `neural_block` descriptor's `forward_exec.kind` outside the exec-ref vocabulary is rejected",
+  "title": "a `graph_block` descriptor's `forward_exec.kind` outside the exec-ref vocabulary is rejected",
   "level": "sidecar",
   "expect": "reject",
   "error_substring": "forward_exec.kind",

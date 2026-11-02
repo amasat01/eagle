@@ -25,9 +25,9 @@ counterpart; ``MANIFEST_FORMATS`` and ``RECOGNIZED_PATTERNS`` are raptor's own
 objects.
 
 ``EXEC_REF_KINDS`` was re-pointed too: eagle's copy had exactly one reader, its
-own ``neural_block`` clause, and that clause moved to ``raptor.schema.blocks``. A
+own ``graph_block`` clause, and that clause moved to ``raptor.schema.blocks``. A
 vocabulary twin with no reader is dead weight that can only drift, so it is now a
-re-point like the neural-family names — pinned by
+re-point like the graph_block-family names — pinned by
 ``test_exec_ref_kinds_is_repointed_at_raptor`` below, which is the successor to the
 ``is not`` assert this file used to carry.
 """
@@ -118,11 +118,11 @@ def test_schema_version_has_exactly_one_integer_literal_home():
     assert _integer_literal_schema_version_bindings() == _SANCTIONED_LITERAL_HOMES
 
 
-def test_neural_family_constants_are_identical_objects_to_raptor():
+def test_graph_block_family_constants_are_identical_objects_to_raptor():
     for name in (
-        "NEURAL_REQUIRED_FIELDS",
-        "NEURAL_EXEC_REF_FIELDS",
-        "NEURAL_FORBIDDEN_FIELDS",
+        "BLOCK_REQUIRED_FIELDS",
+        "BLOCK_EXEC_REF_FIELDS",
+        "BLOCK_FORBIDDEN_FIELDS",
         "SCATTER_POLICIES",
         "BUFFER_KINDS",
     ):
@@ -133,24 +133,24 @@ def test_neural_family_constants_are_identical_objects_to_raptor():
         )
 
 
-def test_recognized_patterns_sources_neural_block_from_raptor():
-    assert roles.RECOGNIZED_PATTERNS == {"vector", "pure", blocks.NEURAL_BLOCK_PATTERN}
+def test_recognized_patterns_sources_graph_block_from_raptor():
+    assert roles.RECOGNIZED_PATTERNS == {"vector", "pure", blocks.GRAPH_BLOCK_PATTERN}
     assert roles.RECOGNIZED_PATTERNS == manifest.BASE_PATTERNS | {
-        blocks.NEURAL_BLOCK_PATTERN
+        blocks.GRAPH_BLOCK_PATTERN
     }
     # Source-level: the set is raptor's, never a second hand-spelled literal.
     text = ROLES_PY.read_text()
     assert "blocks.ALL_PATTERNS" in text
-    assert '"vector", "pure", "neural_block"' not in text
+    assert '"vector", "pure", "graph_block"' not in text
 
 
 def test_exec_ref_kinds_is_repointed_at_raptor():
     """Supersedes this file's original ``EXEC_REF_KINDS`` pin.
 
     ``EXEC_REF_KINDS`` was originally left eagle-owned as "schema-general, not
-    neural-family" vocabulary, and this test used to certify exactly that — that
+    graph_block-family" vocabulary, and this test used to certify exactly that — that
     eagle's copy was deliberately NOT raptor's object. The one reader of eagle's
-    copy was its own ``neural_block`` clause; that clause moved to
+    copy was its own ``graph_block`` clause; that clause moved to
     ``raptor.schema.blocks`` and reads raptor's copy, so eagle's literal had
     no reader left. A hand-spelled vocabulary twin nobody reads is a
     drift class, so it is now re-pointed. The successor claim is the re-point itself:

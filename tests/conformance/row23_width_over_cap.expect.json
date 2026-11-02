@@ -1,6 +1,6 @@
 {
   "row": 23,
-  "title": "a `neural_block` integer field at exactly 2**32 is rejected — the descriptor's fields are capped at uint32",
+  "title": "a `graph_block` integer field at exactly 2**32 is rejected — the descriptor's fields are capped at uint32",
   "level": "sidecar",
   "expect": "reject",
   "error_substring": "param_width must be a non-negative integer",
@@ -13,7 +13,7 @@
     "The runtime layer has always capped its own derived buffer sizes at",
     "2**32, but the descriptor's own integer fields (in_degree, out_degree,",
     "and the width fields) previously had no upper bound, only a lower one.",
-    "This fixture closes that gap: each of the six neural integer fields is",
+    "This fixture closes that gap: each of the six graph_block integer fields is",
     "now capped at strictly less than 2**32, checked alongside the existing",
     "lower bound.",
     "The value used is exactly 4294967296 (2**32), not one less, so this pins",

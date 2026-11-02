@@ -32,7 +32,7 @@ import eagle
 from eagle.abi import ABI_VERSION, check_aether_abi
 from eagle.roles import (
     MAX_SCHEMA_VERSION,
-    NEURAL_REQUIRED_FIELDS,
+    BLOCK_REQUIRED_FIELDS,
     SCHEMA_VERSION,
     check_schema_version,
     validate_roles,
@@ -201,11 +201,11 @@ def test_load_manifest_rejects_future_schema_version_naming_upgrade(tmp_path):
 #: this list — proof the frozen guard could not mechanically detect a
 #: strict-field addition; restating membership here is what makes it able to.
 #: The six trailing entries are the atomic-widening additions:
-#: the `neural_block` descriptor's own strict surface. `exec_ref kind` and
+#: the `graph_block` descriptor's own strict surface. `exec_ref kind` and
 #: `scatter_policy` are exactly the TWO reserved discriminant slots the comment
 #: above left open — the register's v1 discriminant set is now closed at seven.
-#: `neural_block required fields` is ONE entry standing for the whole
-#: `eagle.roles.NEURAL_REQUIRED_FIELDS` constant, which both validators ITERATE:
+#: `graph_block required fields` is ONE entry standing for the whole
+#: `eagle.roles.BLOCK_REQUIRED_FIELDS` constant, which both validators ITERATE:
 #: naming the list here rather than its eight members is what keeps this register a
 #: register instead of a second spelling of the vocabulary.
 FROZEN_STRICT_FIELDS = {
@@ -223,7 +223,7 @@ FROZEN_STRICT_FIELDS = {
     "jvp_exec": "optional-additive",
     "exec_ref kind": "discriminant",
     "scatter_policy": "discriminant",
-    "neural_block required fields": "structural",
+    "graph_block required fields": "structural",
 }
 
 #: The CLASS values this register defines — every FROZEN_STRICT_FIELDS value must be
@@ -251,7 +251,7 @@ def test_frozen_strict_field_list_is_exactly_fifteen():
         "arg_spec role", "scalar_type",
         "buffer kind", "derivative.kind", "format",
         "forward_exec", "vjp_exec", "jvp_exec",
-        "exec_ref kind", "scatter_policy", "neural_block required fields",
+        "exec_ref kind", "scatter_policy", "graph_block required fields",
     }, _VERSION_BUMP_RULE
     assert len(FROZEN_STRICT_FIELDS) == 15, _VERSION_BUMP_RULE
 
@@ -277,7 +277,7 @@ def test_frozen_field_classes_match_s9_d2():
         "schema_version", "aether_abi",
     }
     assert {f for f, c in FROZEN_STRICT_FIELDS.items() if c == "structural"} == {
-        "kernel", "arg_spec role", "forward_exec", "neural_block required fields",
+        "kernel", "arg_spec role", "forward_exec", "graph_block required fields",
     }
     assert {
         f for f, c in FROZEN_STRICT_FIELDS.items() if c == "optional-additive"
@@ -388,12 +388,12 @@ def test_loaded_pure_rejects_absent_pattern(tmp_path):
 # just as mute. Pure dict-level, no GPU: the shared validator is the one gate, and
 # nothing launches a descriptor, so there is no full-load-path companion to add.
 # --------------------------------------------------------------------------- #
-def _neural_golden(**patch):
+def _graph_block_golden(**patch):
     """The row01 conformance golden as a dict; ``patch`` merges/overrides top-level
     keys, and a value of ``None`` DELETES the key (to record a missing-field reject)."""
     meta = {
         "schema_version": SCHEMA_VERSION,
-        "pattern": "neural_block",
+        "pattern": "graph_block",
         "scalar_type": "float64",
         "forward_exec": {"kind": "kernel", "kernel": "mlp_block_fwd"},
         "kernel": "mlp_block",
@@ -414,36 +414,36 @@ def _neural_golden(**patch):
     return meta
 
 
-def test_neural_golden_validates():
+def test_graph_block_golden_validates():
     """The counter-gate for every reject below: each one doctors exactly one field of
     THIS dict, so the only thing that can make it fail is the field under test."""
-    validate_sidecar(_neural_golden(), name="descriptor")
+    validate_sidecar(_graph_block_golden(), name="descriptor")
 
 
 def test_frozen_field_forward_exec_is_required():
     assert "forward_exec" in FROZEN_STRICT_FIELDS
     with pytest.raises(
-        ValueError, match="missing required neural_block field 'forward_exec'"
+        ValueError, match="missing required graph_block field 'forward_exec'"
     ):
-        validate_sidecar(_neural_golden(forward_exec=None), name="descriptor")
+        validate_sidecar(_graph_block_golden(forward_exec=None), name="descriptor")
 
 
-def test_frozen_field_neural_required_fields_are_iterated():
+def test_frozen_field_graph_block_required_fields_are_iterated():
     """ONE entry stands for the whole constant, so this test walks it: EVERY member
     must be individually required, or the register entry overstates the check."""
-    assert "neural_block required fields" in FROZEN_STRICT_FIELDS
-    for field in sorted(NEURAL_REQUIRED_FIELDS):
+    assert "graph_block required fields" in FROZEN_STRICT_FIELDS
+    for field in sorted(BLOCK_REQUIRED_FIELDS):
         with pytest.raises(
-            ValueError, match=f"missing required neural_block field '{field}'"
+            ValueError, match=f"missing required graph_block field '{field}'"
         ):
-            validate_sidecar(_neural_golden(**{field: None}), name="descriptor")
+            validate_sidecar(_graph_block_golden(**{field: None}), name="descriptor")
 
 
 def test_frozen_field_exec_ref_kind_rejects_unknown():
     assert "exec_ref kind" in FROZEN_STRICT_FIELDS
     with pytest.raises(ValueError, match="forward_exec.kind"):
         validate_sidecar(
-            _neural_golden(forward_exec={"kind": "plan_bundle", "kernel": "k"}),
+            _graph_block_golden(forward_exec={"kind": "plan_bundle", "kernel": "k"}),
             name="descriptor",
         )
 
@@ -452,7 +452,7 @@ def test_frozen_field_scatter_policy_rejects_unknown():
     assert "scatter_policy" in FROZEN_STRICT_FIELDS
     with pytest.raises(ValueError, match="scatter_policy"):
         validate_sidecar(
-            _neural_golden(scatter_policy="unique_target"), name="descriptor"
+            _graph_block_golden(scatter_policy="unique_target"), name="descriptor"
         )
 
 
@@ -461,14 +461,14 @@ def test_frozen_field_vjp_and_jvp_exec_are_optional_but_strict():
     validated with the same strictness as ``forward_exec``."""
     assert FROZEN_STRICT_FIELDS["vjp_exec"] == "optional-additive"
     assert FROZEN_STRICT_FIELDS["jvp_exec"] == "optional-additive"
-    validate_sidecar(_neural_golden(), name="descriptor")  # both absent -> accept
+    validate_sidecar(_graph_block_golden(), name="descriptor")  # both absent -> accept
     for field in ("vjp_exec", "jvp_exec"):
         validate_sidecar(
-            _neural_golden(**{field: {"kind": "kernel", "kernel": "d"}}),
+            _graph_block_golden(**{field: {"kind": "kernel", "kernel": "d"}}),
             name="descriptor",
         )
         with pytest.raises(ValueError, match=f"{field}.kind"):
             validate_sidecar(
-                _neural_golden(**{field: {"kind": "not_a_kind", "kernel": "d"}}),
+                _graph_block_golden(**{field: {"kind": "not_a_kind", "kernel": "d"}}),
                 name="descriptor",
             )

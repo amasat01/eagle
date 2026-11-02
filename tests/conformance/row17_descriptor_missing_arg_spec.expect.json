@@ -1,6 +1,6 @@
 {
   "row": 17,
-  "title": "a `neural_block` descriptor with no `arg_spec` key at all is rejected in BOTH languages, at DIFFERENT stages",
+  "title": "a `graph_block` descriptor with no `arg_spec` key at all is rejected in BOTH languages, at DIFFERENT stages",
   "level": "sidecar",
   "expect": "reject",
   "error_substring": "arg_spec",
@@ -13,8 +13,8 @@
     "C++ `parse_sidecar` structurally REQUIRES the `arg_spec` key for every",
     "sidecar, unconditionally (pattern-agnostic, like every other field it",
     "reads) — its absence throws 'sidecar missing arg_spec' at PARSE time,",
-    "before `validate_sidecar` (and so the neural clause) ever runs.",
-    "Python has no separate parse step, so its `_validate_neural_block`",
+    "before `validate_sidecar` (and so the graph_block clause) ever runs.",
+    "Python has no separate parse step, so its `_validate_graph_block`",
     "clause requires the key itself, with the message '... the key is absent'.",
     "This is a companion fact: presence IS",
     "enforceable here — unlike the forbidden-field class H1 rules on — because",

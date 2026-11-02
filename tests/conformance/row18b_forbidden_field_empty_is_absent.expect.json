@@ -1,6 +1,6 @@
 {
   "row": 18,
-  "title": "a `neural_block` descriptor carrying an empty `aether_abi` value is accepted — empty counts as absent, not forbidden",
+  "title": "a `graph_block` descriptor carrying an empty `aether_abi` value is accepted — empty counts as absent, not forbidden",
   "level": "sidecar",
   "expect": "accept",
   "error_substring": null,
@@ -10,7 +10,7 @@
   "overrides": {},
   "why": [
     "This is row18's counterpart, pinning the other direction of the same",
-    "rule: a forbidden field on a `neural_block` descriptor means populated,",
+    "rule: a forbidden field on a `graph_block` descriptor means populated,",
     "not merely present. This fixture is row01's golden descriptor plus",
     "`\"aether_abi\": \"\"` — an empty-string form of a forbidden field — with",
     "nothing else changed, so an accept here can only mean the empty-is-absent",

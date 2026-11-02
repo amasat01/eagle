@@ -181,7 +181,7 @@ public:
         // schema variant, so a loader that does not recognize its value must refuse
         // it rather than silently bind an unfamiliar variant as an ordinary kernel.
         // The schema_version gate above does NOT catch this: a future variant's own
-        // keys (e.g. a neural-ABI bundle's fanin/fanout/activation) are colorably
+        // keys (e.g. a graph-block ABI bundle's fanin/fanout/activation) are colorably
         // "additive optional" under the backward-lenient rule, so a v1-stamped bundle
         // of a variant this build has never heard of is schema-LEGAL today — and
         // `pattern` is the only field that names which variant it actually is. This
@@ -194,7 +194,7 @@ public:
         // against the wider RECOGNIZED set.
         // Two branches, ONE spelling (roles.h ``check_launch_certified_pattern``): an
         // UNRECOGNIZED family is told to upgrade eagle; a RECOGNIZED-but-uncertified one
-        // (today: ``neural_block``) is told it is not launchable here, with no upgrade
+        // (today: ``graph_block``) is told it is not launchable here, with no upgrade
         // suffix — this build knows the family, it simply does not run descriptors.
         check_launch_certified_pattern(m.pattern, "plugin manifest");
         // Manifest-level structural invariant ("duplicate ids are rejected") —

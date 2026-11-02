@@ -5,10 +5,10 @@
 
 Graph/binding-tier tests (mirrors ``test_graph_plugin.py`` / ``test_pipeline_
 parity.py``: function-style ``def test_<behavior>:``, module-level
-``pytestmark = pytest.mark.gpu``) rather than ``test_neural_*.py``, since
+``pytestmark = pytest.mark.gpu``) rather than ``test_graph_block_*.py``, since
 ``CaptureFork`` is a bound ``eagle::cuda`` primitive and ``add_concurrent`` is
 ``GraphPipeline``'s Python-surface fork/join sugar over it -- neither is
-neural-engine-specific.
+graph-block-engine-specific.
 
 ``test_capture_fork_round_trip_two_branches`` is PROMOTED from the working
 scratch round-trip (spec acceptance #3):

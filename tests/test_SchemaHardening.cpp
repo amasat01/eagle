@@ -63,7 +63,7 @@ static std::string vectorSidecarJson(const std::string& extra)
         + extra + "\n}\n";
 }
 
-// A minimal well-formed `neural_block` DESCRIPTOR sidecar — the C++ twin of the
+// A minimal well-formed `graph_block` DESCRIPTOR sidecar — the C++ twin of the
 // conformance row01 golden, and identical to it field for field. `extra` is spliced
 // in as additional top-level JSON just before the closing brace.
 //
@@ -72,11 +72,11 @@ static std::string vectorSidecarJson(const std::string& extra)
 // identity. A parser that isn't nesting-safe would misread `kernel` as
 // "mlp_block_fwd". Every test below asserting `sc.kernel == "mlp_block"`
 // guards against that. Do not reorder these keys.
-static std::string neuralSidecarJson(const std::string& extra)
+static std::string graphBlockSidecarJson(const std::string& extra)
 {
     return std::string(R"({
   "schema_version": 1,
-  "pattern": "neural_block",
+  "pattern": "graph_block",
   "scalar_type": "float64",
   "forward_exec": {"kind": "kernel", "kernel": "mlp_block_fwd"},
   "vjp_exec": {"kind": "kernel", "kernel": "mlp_block_vjp"},
@@ -247,9 +247,9 @@ TEST(SchemaHardeningTest, NewerSchemaVersionIsRejectedNamingTheUpgradeRule)
 // Naming membership explicitly here (rather than leaving it implicit) is
 // what lets the frozen guard mechanically detect a strict-field addition.
 // `exec_ref kind` and `scatter_policy` are the two reserved discriminant
-// slots for the `neural_block` descriptor's own strict surface — the v1
-// discriminant register is closed at seven. `neural_block required fields`
-// is ONE entry standing for the whole roles.h `kNeuralRequiredFields`
+// slots for the `graph_block` descriptor's own strict surface — the v1
+// discriminant register is closed at seven. `graph_block required fields`
+// is ONE entry standing for the whole roles.h `kBlockRequiredFields`
 // constant, which both validators ITERATE: naming the list rather than its
 // eight members is what keeps this a register instead of a second spelling
 // of the vocabulary.
@@ -269,7 +269,7 @@ static const std::array<FrozenField, 15> kFrozenStrictFields = {{
     { "jvp_exec", "optional-additive" },
     { "exec_ref kind", "discriminant" },
     { "scatter_policy", "discriminant" },
-    { "neural_block required fields", "structural" },
+    { "graph_block required fields", "structural" },
 }};
 
 TEST(SchemaHardeningTest, FrozenStrictFieldListIsExactlyFifteen)
@@ -285,7 +285,7 @@ TEST(SchemaHardeningTest, FrozenStrictFieldListIsExactlyFifteen)
         "schema_version", "kernel", "pattern", "aether_abi", "arg_spec role",
         "scalar_type", "buffer kind", "derivative.kind", "format",
         "forward_exec", "vjp_exec", "jvp_exec",
-        "exec_ref kind", "scatter_policy", "neural_block required fields",
+        "exec_ref kind", "scatter_policy", "graph_block required fields",
     };
     std::set<std::string> got;
     for (const auto& f : kFrozenStrictFields) got.insert(f.name);
@@ -322,7 +322,7 @@ TEST(SchemaHardeningTest, FrozenFieldClassesMatchTheirRegisters)
     EXPECT_EQ(gates, (std::set<std::string>{ "schema_version", "aether_abi" }));
     EXPECT_EQ(structural, (std::set<std::string>{
         "kernel", "arg_spec role", "forward_exec",
-        "neural_block required fields",
+        "graph_block required fields",
     }));
     EXPECT_EQ(additive, (std::set<std::string>{ "vjp_exec", "jvp_exec" }));
 }
@@ -378,7 +378,7 @@ TEST(SchemaHardeningTest, FrozenField_AetherAbi_RejectsMismatch)
 }
 
 // `add_plugin` is the manifest-BYPASSING entry point (loads a sidecar +
-// `.so` directly, like HostAddPluginRejectsUnknownSidecarPatternNeuralBlock
+// `.so` directly, like HostAddPluginRejectsUnknownSidecarPatternGraphBlock
 // above), so `aether_abi` must be presence-required here too, not just at
 // the two manifest-level gates (HostLoadRejectsMissingAetherAbi below, and
 // the device registry's `from_manifest`). Before this fix, an ABSENT
@@ -462,9 +462,9 @@ TEST(SchemaHardeningTest, ScalarTypeFloat32StillValidatesCleanly)
 // NewerSchemaVersionIsRejectedNamingTheUpgradeRule above, both of which
 // construct their Sidecar/Manifest and validate at the REGISTRY, never at
 // parse). `pattern` IS rejected end to end — see
-// PluginRegistryManifestTest.RejectsUnknownManifestPatternNeuralBlock
+// PluginRegistryManifestTest.RejectsUnknownManifestPatternGraphBlock
 // (eagle/tests/test_PluginRegistryManifest.cu, device) and
-// HostLoadRejectsUnknownManifestPatternNeuralBlock below (host) — just not by
+// HostLoadRejectsUnknownManifestPatternGraphBlock below (host) — just not by
 // this function; parse_manifest stays validation-free by design, mirroring
 // where every other frozen-list gate lives.
 TEST(SchemaHardeningTest, FrozenField_Pattern_ParseManifestValidatesNothing)
@@ -544,7 +544,7 @@ TEST(SchemaHardeningTest, HostAddPluginRejectsUnrecognizedSidecarPattern)
 }
 
 // The OTHER branch of the same door, and the half that did not exist before the
-// atomic widening that added this branch: `neural_block` is RECOGNIZED —
+// atomic widening that added this branch: `graph_block` is RECOGNIZED —
 // `validate_sidecar` above accepts the descriptor as structurally valid schema v1
 // — and then `add_plugin`'s own launch certification refuses it, because nothing
 // in this build binds or runs a descriptor. NO "upgrade eagle": a newer eagle is
@@ -552,19 +552,19 @@ TEST(SchemaHardeningTest, HostAddPluginRejectsUnrecognizedSidecarPattern)
 // exist. This test is the C++ half of what conformance row 1 pins at the shared
 // corpus level; door #7's identical substring is pinned by the named subprocess
 // tests in python/tests/test_cpp_host.py.
-TEST(SchemaHardeningTest, HostAddPluginRejectsRecognizedButUnlaunchableNeuralBlock)
+TEST(SchemaHardeningTest, HostAddPluginRejectsRecognizedButUnlaunchableGraphBlock)
 {
     const Sidecar sc = parse_sidecar(
-        writeTmp("neural_descriptor.json", neuralSidecarJson("")));
-    ASSERT_EQ(sc.pattern, "neural_block");
+        writeTmp("graph_block_descriptor.json", graphBlockSidecarJson("")));
+    ASSERT_EQ(sc.pattern, "graph_block");
     EXPECT_NO_THROW(validate_sidecar(sc, "descriptor"));  // RECOGNIZED: valid
     eagle::cpu::PluginRegistry reg;
     try {
         reg.add_plugin(sc, "unused.so");
-        FAIL() << "expected add_plugin to refuse to launch a neural_block descriptor";
+        FAIL() << "expected add_plugin to refuse to launch a graph_block descriptor";
     } catch (const std::runtime_error& e) {
         const std::string msg = e.what();
-        EXPECT_NE(msg.find("neural_block"), std::string::npos) << msg;
+        EXPECT_NE(msg.find("graph_block"), std::string::npos) << msg;
         EXPECT_NE(msg.find("recognized but not launchable"), std::string::npos) << msg;
         EXPECT_EQ(msg.find("upgrade eagle"), std::string::npos) << msg;
     }
@@ -608,19 +608,19 @@ TEST(SchemaHardeningTest, HostLoadRejectsUnrecognizedManifestPattern)
 }
 
 // The second branch at the manifest level: RECOGNIZED but not launch-certified.
-TEST(SchemaHardeningTest, HostLoadRejectsRecognizedButUnlaunchableNeuralBlock)
+TEST(SchemaHardeningTest, HostLoadRejectsRecognizedButUnlaunchableGraphBlock)
 {
     Manifest m;
     m.aether_abi = EAGLE_AETHER_ABI;
-    m.pattern  = "neural_block";
+    m.pattern  = "graph_block";
     m.plugins  = { oneEntry("gravity") };
     eagle::cpu::PluginRegistry reg;
     try {
         reg.load(m, "unused_dir");
-        FAIL() << "expected load() to refuse to launch a neural_block manifest";
+        FAIL() << "expected load() to refuse to launch a graph_block manifest";
     } catch (const std::runtime_error& e) {
         const std::string msg = e.what();
-        EXPECT_NE(msg.find("neural_block"), std::string::npos) << msg;
+        EXPECT_NE(msg.find("graph_block"), std::string::npos) << msg;
         EXPECT_NE(msg.find("recognized but not launchable"), std::string::npos) << msg;
         EXPECT_EQ(msg.find("upgrade eagle"), std::string::npos) << msg;
     }
@@ -698,10 +698,10 @@ TEST(SchemaHardeningTest, HostLoadRejectsMissingAetherAbi)
 // The golden with the line declaring `field` deleted (one key per line, by
 // construction). The scanner is not a JSON parser, so a dangling comma is
 // immaterial — what matters is that the KEY is gone.
-static std::string neuralJsonWithout(const std::string& field)
+static std::string graphBlockJsonWithout(const std::string& field)
 {
     const std::string  needle = "\"" + field + "\":";
-    std::istringstream in(neuralSidecarJson(""));
+    std::istringstream in(graphBlockSidecarJson(""));
     std::string        out, line;
     while (std::getline(in, line))
         if (line.find(needle) == std::string::npos) out += line + "\n";
@@ -709,11 +709,11 @@ static std::string neuralJsonWithout(const std::string& field)
 }
 
 // The golden with the line declaring `field` replaced by `replacement`.
-static std::string neuralJsonReplacing(const std::string& field,
+static std::string graphBlockJsonReplacing(const std::string& field,
                                         const std::string& replacement)
 {
     const std::string  needle = "\"" + field + "\":";
-    std::istringstream in(neuralSidecarJson(""));
+    std::istringstream in(graphBlockSidecarJson(""));
     std::string        out, line;
     while (std::getline(in, line))
         out += (line.find(needle) == std::string::npos ? line : replacement) + "\n";
@@ -724,10 +724,10 @@ static std::string neuralJsonReplacing(const std::string& field,
 // this fixture, so the only thing that can make one fail is the field under
 // test. It also carries the nesting-order assertion, because the golden's
 // key order is adversarial by design.
-TEST(SchemaHardeningTest, NeuralGoldenParsesAndValidates)
+TEST(SchemaHardeningTest, GraphBlockGoldenParsesAndValidates)
 {
     const Sidecar sc =
-        parse_sidecar(writeTmp("neural_golden.json", neuralSidecarJson("")));
+        parse_sidecar(writeTmp("graph_block_golden.json", graphBlockSidecarJson("")));
     EXPECT_EQ(sc.kernel, "mlp_block");  // NOT "mlp_block_fwd"
     EXPECT_NO_THROW(validate_sidecar(sc, "descriptor"));
 }
@@ -741,15 +741,15 @@ TEST(SchemaHardeningTest, NeuralGoldenParsesAndValidates)
 TEST(SchemaHardeningTest, ParseSidecarIsNestingSafeForExecRefs)
 {
     const Sidecar adversarial =
-        parse_sidecar(writeTmp("pc5_adversarial.json", neuralSidecarJson("")));
+        parse_sidecar(writeTmp("pc5_adversarial.json", graphBlockSidecarJson("")));
     EXPECT_EQ(adversarial.kernel, "mlp_block");
-    EXPECT_EQ(adversarial.neural.execs.at("forward_exec").kernel, "mlp_block_fwd");
-    EXPECT_EQ(adversarial.neural.execs.at("forward_exec").kind, "kernel");
-    EXPECT_EQ(adversarial.neural.execs.at("vjp_exec").kernel, "mlp_block_vjp");
+    EXPECT_EQ(adversarial.block.execs.at("forward_exec").kernel, "mlp_block_fwd");
+    EXPECT_EQ(adversarial.block.execs.at("forward_exec").kind, "kernel");
+    EXPECT_EQ(adversarial.block.execs.at("vjp_exec").kernel, "mlp_block_vjp");
 
     const std::string benign = R"({
   "schema_version": 1,
-  "pattern": "neural_block",
+  "pattern": "graph_block",
   "scalar_type": "float64",
   "kernel": "mlp_block",
   "forward_exec": {"kind": "kernel", "kernel": "mlp_block_fwd"},
@@ -761,19 +761,19 @@ TEST(SchemaHardeningTest, ParseSidecarIsNestingSafeForExecRefs)
 )";
     const Sidecar sc = parse_sidecar(writeTmp("pc5_benign.json", benign));
     EXPECT_EQ(sc.kernel, "mlp_block");
-    EXPECT_EQ(sc.neural.execs.at("forward_exec").kernel, "mlp_block_fwd");
+    EXPECT_EQ(sc.block.execs.at("forward_exec").kernel, "mlp_block_fwd");
 }
 
 TEST(SchemaHardeningTest, FrozenField_ForwardExec_IsRequired)
 {
     const Sidecar sc = parse_sidecar(
-        writeTmp("neural_no_fwd.json", neuralJsonWithout("forward_exec")));
+        writeTmp("graph_block_no_fwd.json", graphBlockJsonWithout("forward_exec")));
     try {
         validate_sidecar(sc, "descriptor");
         FAIL() << "expected a missing forward_exec to be rejected";
     } catch (const std::runtime_error& e) {
         EXPECT_NE(std::string(e.what())
-                      .find("missing required neural_block field 'forward_exec'"),
+                      .find("missing required graph_block field 'forward_exec'"),
                   std::string::npos)
             << e.what();
     }
@@ -782,18 +782,18 @@ TEST(SchemaHardeningTest, FrozenField_ForwardExec_IsRequired)
 // ONE frozen entry stands for the whole roles.h constant, so this test walks
 // it: every member must be individually required, or the register entry
 // overstates what is checked.
-TEST(SchemaHardeningTest, FrozenField_NeuralRequiredFields_AreIterated)
+TEST(SchemaHardeningTest, FrozenField_BlockRequiredFields_AreIterated)
 {
-    for (const char* f : kNeuralRequiredFields) {
+    for (const char* f : kBlockRequiredFields) {
         const std::string field = f;
         const Sidecar sc = parse_sidecar(writeTmp(
-            "neural_without_" + field + ".json", neuralJsonWithout(field)));
+            "graph_block_without_" + field + ".json", graphBlockJsonWithout(field)));
         try {
             validate_sidecar(sc, "descriptor");
             FAIL() << "expected a missing '" << field << "' to be rejected";
         } catch (const std::runtime_error& e) {
             EXPECT_NE(std::string(e.what())
-                          .find("missing required neural_block field '" + field + "'"),
+                          .find("missing required graph_block field '" + field + "'"),
                       std::string::npos)
                 << e.what();
         }
@@ -803,8 +803,8 @@ TEST(SchemaHardeningTest, FrozenField_NeuralRequiredFields_AreIterated)
 TEST(SchemaHardeningTest, FrozenField_ExecRefKind_RejectsUnknown)
 {
     const Sidecar sc = parse_sidecar(writeTmp(
-        "neural_bad_exec_kind.json",
-        neuralJsonReplacing(
+        "graph_block_bad_exec_kind.json",
+        graphBlockJsonReplacing(
             "forward_exec",
             R"(  "forward_exec": {"kind": "plan_bundle", "kernel": "k"},)")));
     try {
@@ -823,8 +823,8 @@ TEST(SchemaHardeningTest, FrozenField_ExecRefKind_RejectsUnknown)
 TEST(SchemaHardeningTest, FrozenField_ScatterPolicy_RejectsUnknown)
 {
     const Sidecar sc = parse_sidecar(writeTmp(
-        "neural_bad_scatter.json",
-        neuralJsonReplacing("scatter_policy",
+        "graph_block_bad_scatter.json",
+        graphBlockJsonReplacing("scatter_policy",
                             R"(  "scatter_policy": "unique_target",)")));
     try {
         validate_sidecar(sc, "descriptor");
@@ -841,20 +841,20 @@ TEST(SchemaHardeningTest, FrozenField_ScatterPolicy_RejectsUnknown)
 TEST(SchemaHardeningTest, FrozenField_JvpExec_IsOptionalButStrict)
 {
     const Sidecar absent = parse_sidecar(
-        writeTmp("neural_no_jvp.json", neuralSidecarJson("")));
-    EXPECT_EQ(absent.neural.execs.count("jvp_exec"), 0u);
+        writeTmp("graph_block_no_jvp.json", graphBlockSidecarJson("")));
+    EXPECT_EQ(absent.block.execs.count("jvp_exec"), 0u);
     EXPECT_NO_THROW(validate_sidecar(absent, "descriptor"));
 
     const Sidecar present = parse_sidecar(writeTmp(
-        "neural_jvp.json",
-        neuralSidecarJson(R"(,
+        "graph_block_jvp.json",
+        graphBlockSidecarJson(R"(,
   "jvp_exec": {"kind": "kernel", "kernel": "mlp_block_jvp"})")));
-    EXPECT_EQ(present.neural.execs.at("jvp_exec").kernel, "mlp_block_jvp");
+    EXPECT_EQ(present.block.execs.at("jvp_exec").kernel, "mlp_block_jvp");
     EXPECT_NO_THROW(validate_sidecar(present, "descriptor"));
 
     const Sidecar bad = parse_sidecar(writeTmp(
-        "neural_bad_jvp.json",
-        neuralSidecarJson(R"(,
+        "graph_block_bad_jvp.json",
+        graphBlockSidecarJson(R"(,
   "jvp_exec": {"kind": "not_a_kind", "kernel": "d"})")));
     try {
         validate_sidecar(bad, "descriptor");
