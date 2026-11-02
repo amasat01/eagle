@@ -471,8 +471,6 @@ def run_cards(py, roots, out, result, work):
     env = dict(os.environ, HAWK_SRC=str(roots.get("hawk", "")), EAGLE_SRC=str(eagle))
     cards_out = out / "cards"
     cards_out.mkdir(parents=True, exist_ok=True)
-    if "hawk" in roots:
-        link_hawk_tests(py, roots["hawk"])
     deadline = time.time() + DEADLINE_FACTOR * 60 * sum(m for _, _, m, _ in CARDS_PLAN)
     env["CARD_DEADLINE"] = str(deadline)
     result["cards"], result["skipped"] = [], []

@@ -147,8 +147,8 @@ def _plan(kernel, ctx, form=None):
 
     cache = os.environ.get("FEATURE_CARD_CACHE") or tempfile.mkdtemp(prefix="feature_cache_")
     if form is not None:
-        _hawk_tests()
-        return importlib.import_module("_probe_wide")._auto(kernel, ctx.dtype, cache, form)
+        from hawk.targets.cards import _probe_wide
+        return _probe_wide._auto(kernel, ctx.dtype, cache, form)
     return eagle.plan.auto(kernel, targets=(ctx.target,), scalar_type=ctx.dtype, cache_dir=cache)
 
 
