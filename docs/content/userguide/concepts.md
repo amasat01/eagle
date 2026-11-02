@@ -48,14 +48,7 @@ why_infrastructure
 
 Reverse mode over a whole graph.
 
-```{toctree}
-:maxdepth: 1
-:hidden:
-
-autodiff
-```
-
-- [Gradients through a graph](autodiff): reverse mode over a whole graph, on the CPU or the GPU.
+- [Gradients through a graph](tutorials/10_gradients_through_a_graph): reverse mode over a whole graph, on the CPU or the GPU.
 
 ## Library structure
 

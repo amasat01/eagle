@@ -7,7 +7,7 @@ the reverse pass (the order of the derivative steps, where each step's incoming
 adjoint comes from, which adjoints are summed and in what order, and which
 forward planes must be copied before they are overwritten).
 ``eagle::diff::orderedSum`` is the fixed-order elementwise sum the joins use.
-Header-only and CUDA-free; the guide is :doc:`../userguide/autodiff`.
+Header-only and CUDA-free; the guide is :doc:`../userguide/tutorials/10_gradients_through_a_graph`.
 
 Namespace ``eagle::diff``
 -------------------------
