@@ -503,6 +503,13 @@ def probe_sync():
         torch.cuda.synchronize()
 
 
+def _device_bytes(pynvml, h, pid):
+    for p in pynvml.nvmlDeviceGetComputeRunningProcesses(h):
+        if p.pid == pid and p.usedGpuMemory is not None:
+            return int(p.usedGpuMemory), "nvml per-process used memory"
+    return int(pynvml.nvmlDeviceGetMemoryInfo(h).used), "nvml device used memory"
+
+
 def process_device_bytes(bus_id):
     """(bytes, source): the device memory the driver accounts to THIS process
     on the timed GPU (NVML's per-process used memory), or, where the driver
@@ -511,14 +518,45 @@ def process_device_bytes(bus_id):
 
     pynvml.nvmlInit()
     try:
-        h = pynvml.nvmlDeviceGetHandleByPciBusId(bus_id)
-        pid = os.getpid()
-        for p in pynvml.nvmlDeviceGetComputeRunningProcesses(h):
-            if p.pid == pid and p.usedGpuMemory is not None:
-                return int(p.usedGpuMemory), "nvml per-process used memory"
-        return int(pynvml.nvmlDeviceGetMemoryInfo(h).used), "nvml device used memory"
+        return _device_bytes(pynvml, pynvml.nvmlDeviceGetHandleByPciBusId(bus_id), os.getpid())
     finally:
         pynvml.nvmlShutdown()
+
+
+class DevicePeak:
+    """The most :func:`process_device_bytes` reads while the ``with`` block
+    runs, sampled every ``period_s``: a reading after the run misses what a
+    library used and handed back before it (the masked arms return their
+    temporaries after each run), while the caching allocators hold their
+    working set through the run, where a sample sees it."""
+
+    def __init__(self, bus_id, period_s=0.002):
+        self.bus_id, self.period_s, self.peak = bus_id, period_s, 0
+
+    def __enter__(self):
+        import threading
+
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._sample, daemon=True)
+        self._thread.start()
+        return self
+
+    def _sample(self):
+        import pynvml
+
+        pynvml.nvmlInit()
+        try:
+            h, pid = pynvml.nvmlDeviceGetHandleByPciBusId(self.bus_id), os.getpid()
+            while True:
+                self.peak = max(self.peak, _device_bytes(pynvml, h, pid)[0])
+                if self._stop.wait(self.period_s):
+                    break
+        finally:
+            pynvml.nvmlShutdown()
+
+    def __exit__(self, *exc):
+        self._stop.set()
+        self._thread.join()
 
 
 GPU_STATE_FIELDS = ("clocks.sm,clocks.mem,clocks.max.sm,temperature.gpu,"

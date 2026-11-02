@@ -89,6 +89,7 @@ Reproduce (from the eagle repository root)::
 from __future__ import annotations
 
 import argparse
+import contextlib
 import gc
 import importlib.util
 import json
@@ -1414,13 +1415,14 @@ def _memory_probe(arm, n, bus_id):
     rss_base = cc.status_kib("VmRSS")
     cc.reset_host_peak()
     inp = _inputs(n)
-    a = _probe_arm(arm, n, compiled)
-    _, _, out = _timed(arm, a, inp)
+    with contextlib.nullcontext() if not gpu else cc.DevicePeak(bus_id) as peak:
+        a = _probe_arm(arm, n, compiled)
+        _, _, out = _timed(arm, a, inp)
     assert (out["t"] == T_FINAL).all(), f"memory probe {arm}: unfinished samples"
     dev_after, _ = cc.process_device_bytes(bus_id) if gpu else (None, None)
     cc.probe_reply(reply_fd, {
         "device_baseline_bytes": dev_base, "device_after_bytes": dev_after,
-        "device_peak_bytes": None if not gpu else max(0, dev_after - dev_base),
+        "device_peak_bytes": None if not gpu else max(0, max(peak.peak, dev_after) - dev_base),
         "device_source": src,
         "host_peak_bytes": max(0, cc.status_kib("VmHWM") - rss_base) * 1024})
 

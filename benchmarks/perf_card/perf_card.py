@@ -168,6 +168,7 @@ card's test requires both).
 from __future__ import annotations
 
 import argparse
+import contextlib
 import importlib.util
 import json
 import math
@@ -2888,14 +2889,15 @@ def _memory_probe(arm, distribution, max_steps, n, bus_id):
     rss_base = cc.status_kib("VmRSS")
     reset_ok = cc.reset_host_peak()
     inp = _inputs(n, distribution, max_steps)
-    a = _probe_arm(arm, n, max_steps, jax_compiled)
-    x, v, k = _probe_once(a, inp)
+    with contextlib.nullcontext() if not gpu else cc.DevicePeak(bus_id) as peak:
+        a = _probe_arm(arm, n, max_steps, jax_compiled)
+        x, v, k = _probe_once(a, inp)
     assert _np_array_equal(k, inp["nstop"]), f"memory probe {arm}: wrong step counts"
     dev_after, _ = cc.process_device_bytes(bus_id) if gpu else (None, None)
     host_peak = _host_peak_kib()
     cc.probe_reply(reply_fd, {
         "device_baseline_bytes": dev_base, "device_after_bytes": dev_after,
-        "device_peak_bytes": None if not gpu else max(0, dev_after - dev_base),
+        "device_peak_bytes": None if not gpu else max(0, max(peak.peak, dev_after) - dev_base),
         "device_source": dev_source,
         "library_counters_baseline": lib_base,
         "library_counters_after": _library_counters() if gpu else {},
