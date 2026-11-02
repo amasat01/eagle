@@ -1,5 +1,5 @@
-Module: filtering
-=================
+Filtering module
+================
 
 **Stream compaction** shrinks a per-sample array down to just the samples
 that are still active, so later kernels can launch over a smaller ``N``

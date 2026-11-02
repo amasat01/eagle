@@ -1,5 +1,5 @@
-API reference — filtering
-=========================
+Filtering API
+=============
 
 Prefix-scan, scatter, and array-slicing for sample compaction.  The two scan
 engines live in the device namespaces as ``eagle::cuda::Scan`` and

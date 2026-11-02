@@ -1,5 +1,5 @@
-C3 — Reduce an array, the same way on either backend
-====================================================
+C3 Reduce an array
+==================
 
     Sum an aether SoA array on the GPU with a multi-level CUDA reduction, or
     on the CPU with a cache-padded OpenMP one -- same call, same answer.

@@ -36,13 +36,13 @@ How eagle compares with the other tools on the same committed cards is on the [f
 
 ## Where to go next
 
-- [Adaptive RK7(8): results](performance/rk78.md): the same for an adaptive solver.
+- [Adaptive RK7(8)](performance/rk78.md): the same for an adaptive solver.
 - [Which commits ran](https://github.com/amasat01/eagle/blob/main/benchmarks/card_provenance.json): the eagle and hawk
   commit behind every card file.
 - [Reading the numbers](performance/reading.md): where each approach wins, and why.
 - [Where the performance comes from](performance/mechanism.md): the mechanisms behind the
   numbers, each with its card evidence.
-- [The workload and the ways of running it](performance/workload.md): what is
+- [Workloads](performance/workload.md): what is
   measured and what each arm does.
 - [Method](performance/method.md): how a number is produced.
 - [Reproduce](performance/reproduce.md): the cards on your machine or a cloud VM.

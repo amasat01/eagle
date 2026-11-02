@@ -1,5 +1,5 @@
-Examples
-========
+C++ examples
+============
 
 A gallery of complete, self-contained eagle programs. Each lives under
 ``docs/examples/`` and is compiled and run by the ``exampletest`` gate

@@ -1,5 +1,5 @@
-Foundations — the words this documentation uses
-=================================================
+Foundations
+===========
 
 .. contents:: On this page
    :local:

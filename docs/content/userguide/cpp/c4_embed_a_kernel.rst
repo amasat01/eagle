@@ -1,5 +1,5 @@
-C4 — Embed a compiled kernel in your own C++ program
-====================================================
+C4 Embed a kernel
+=================
 
     Load a compiled plugin manifest straight into a C++/CUDA host through
     eagle's binary ABI — no aether headers, no Python, no code generator at

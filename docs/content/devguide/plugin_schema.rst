@@ -1,5 +1,5 @@
-Plugin schema (manifest and sidecar)
-====================================
+Plugin schema
+=============
 
 The on-disk contract between a code generator and eagle's loaders — the
 ``manifest.json`` a deployment unit carries, the per-kernel sidecar, the

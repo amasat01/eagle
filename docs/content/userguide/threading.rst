@@ -1,5 +1,5 @@
-Using eagle from several threads
-================================
+Threading
+=========
 
 The family-wide model, and how it is checked, is in `raptor's threading page <https://amasat01.github.io/raptor/content/threading.html>`__; this page covers eagle's objects only.
 

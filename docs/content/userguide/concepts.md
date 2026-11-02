@@ -4,7 +4,7 @@ The ideas behind eagle, grouped by topic. Read [Foundations](foundations) first;
 
 ## Build and control graphs
 
-How a step becomes a graph, how it replays, and how to look at one. To write one, see [Build a graph programmatically](graph_forms).
+How a step becomes a graph, how it replays, and how to look at one. To write one, see [Build a graph in code](graph_forms).
 
 ```{toctree}
 :maxdepth: 1
@@ -17,7 +17,7 @@ graph_view
 ```
 
 - [CUDA graphs](cuda_graphs): record once, replay many times; the execution model.
-- [Graph model](graph_model): a step as nodes, and how eagle works out what depends on what; the builder forms are in [Build a graph programmatically](graph_forms).
+- [Graph model](graph_model): a step as nodes, and how eagle works out what depends on what; the builder forms are in [Build a graph in code](graph_forms).
 - [Graphs across the CPU and the GPU](graph_across_devices): host nodes, `eagle.copy` and `eagle.pinned` in one captured graph.
 - [Graph view](graph_view): draw any graph as ASCII, Mermaid or DOT.
 
@@ -41,7 +41,7 @@ why_infrastructure
 - [Parallel execution](parallel_execution): one body of code run across many items, on a GPU or a CPU.
 - [How eagle runs a graph](under_the_hood): from the decorator to a replay.
 - {doc}`Same bits, every time <determinism>`: the fixed-order sum behind reproducible reductions.
-- [Using eagle from several threads](threading): what is safe, and how it is checked. The contract is [raptor's threading page](https://amasat01.github.io/raptor/content/threading.html).
+- [Threading](threading): what is safe, and how it is checked. The contract is [raptor's threading page](https://amasat01.github.io/raptor/content/threading.html).
 - [Why scheduling is infrastructure](why_infrastructure): what eagle owns so applications do not.
 
 ## Derivatives

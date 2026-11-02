@@ -1,5 +1,5 @@
-The graph model: ``eagle.Graph``
-================================
+The graph model
+===============
 
 .. contents:: On this page
    :local:
