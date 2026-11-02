@@ -6,8 +6,9 @@ values are within a few ulp of the kernel's own loop (another summing
 order), not the same bits, so the route is never taken unless asked.
 
 :func:`attach` marks the built plugin: ``plugin._gemm`` (the route, read by
-the plan doors) and ``plugin._vjp`` (the adjoint, where
-:func:`eagle.diff.reverse` looks for a vjp). Everything else about the
+the plan doors of a DEVICE plan; its ``vjp`` is the adjoint :func:`eagle.diff.reverse`
+takes on the device). The host keeps the kernel's own loop, bit for bit: the
+host product is plain loops, several times slower than the kernel. Everything else about the
 plugin is unchanged, so a door the route does not cover runs the kernel."""
 
 from __future__ import annotations
@@ -36,7 +37,7 @@ def attach(plugin, kernel) -> None:
     if major is None:
         return
     plugin._gemm = route = _Route(record, major, plugin.scalar_type or "float64")
-    plugin._vjp = _VjpPlugin(plugin, route)
+    route.vjp = _VjpPlugin(plugin, route)
 
 
 def _major_operand(kernel, record):
@@ -197,20 +198,22 @@ class _Bound:
         from .. import _core
         from .capture import _device_ptr
 
-        if self._device is None:
-            return
         ptr = _device_ptr(next(iter(self._buffers.values())))
         double = int(self._dtype != "float32")
         _core.gemm(double, 0, 0, 0, 0, 0, ptr, 1, ptr, 1, ptr, 1, 1, 0, 0, 0, 1.0, 0.0, int(stream), self._device, False)
 
     def launch(self, stream=None, *, grid=None, block=None) -> None:
-        if self._device is None:
-            self._steps("host", self._buffers)
-            return None
         handle = _stream.current(self._device) if stream is None else int(getattr(stream, "ptr", stream))
         with _stream.on_device(self._device), _stream.scope(handle, self._device):
             self._steps("device", self._buffers)
         return None
+
+
+def routes(p) -> bool:
+    """Whether plan ``p`` runs the GEMM route: a routed plugin on the device."""
+    from .. import exec as eexec
+
+    return getattr(p.plugin, "_gemm", None) is not None and p.structure is eexec.DeviceKernel
 
 
 def bind(p, planes, device=None):
@@ -219,11 +222,10 @@ def bind(p, planes, device=None):
 
 
 def _placed(value, dtype, xp):
-    """``value`` where the plan runs: a numpy (host) or CUDA-interface (device)
-    array already there is kept as it is (a view may be sliced), else an
-    :class:`eagle.Array` copy."""
-    here = hasattr(value, "__cuda_array_interface__") if xp != "cpu" else hasattr(value, "__array_interface__")
-    if here and str(getattr(value, "dtype", "")) == dtype:
+    """``value`` on the device: a CUDA-interface array of the plan's dtype is
+    kept as it is (a view may be sliced), anything else becomes an
+    :class:`eagle.Array` there."""
+    if hasattr(value, "__cuda_array_interface__") and str(getattr(value, "dtype", "")) == dtype:
         return value
     return arrays.asarray(value, dtype, xp)
 
@@ -231,18 +233,15 @@ def _placed(value, dtype, xp):
 def run(p, kw):
     """:meth:`eagle.plan.Plan.run` of a routed plugin: the inputs where the
     plan's structure runs, the output allocated when not supplied."""
-    from .. import exec as eexec
     from .._plan_planes import planes_device
 
     route = p.plugin._gemm
-    on = None
-    if p.structure is eexec.DeviceKernel:
-        on = planes_device(p.plugin.arg_spec, kw, door="plan.run")
-        if on is None:
-            from ..launch import _current_device_ordinal
+    on = planes_device(p.plugin.arg_spec, kw, door="plan.run")
+    if on is None:
+        from ..launch import _current_device_ordinal
 
-            on = _current_device_ordinal()
-    xp = "cpu" if on is None else f"cuda:{on}"
+        on = _current_device_ordinal()
+    xp = f"cuda:{on}"
     planes = {nm: _placed(kw[nm], route.dtype, xp) for nm in route.inputs}
     out = kw.get(route.out)
     if out is None:

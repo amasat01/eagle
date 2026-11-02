@@ -90,9 +90,9 @@ def _bind_plan(p: Plan, planes: dict, device=None, capacity=None) -> BoundPlan:
     staged = _split.staged(p.plugin, planes)
     if staged is not p.plugin:
         p = replace(p, plugin=staged)
-    if getattr(p.plugin, "_gemm", None) is not None:
-        from .gemm import _route
+    from .gemm import _route
 
+    if _route.routes(p):
         return _route.bind(p, planes, device)
     if _split.stages_of(p.plugin):
         bound = _split.SplitBound(p, planes, _bind_one, device=device)

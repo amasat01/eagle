@@ -18,7 +18,7 @@ This section covers what changes from 0.7.2. Names that left are in the table at
 
 **Host threads and run-time information.** `exec.set_host_threads` sets the threads for host stages, which run in one OpenMP region per stage; broadcast `Param` values work in `run` and `bind`; a direct call returns NumPy arrays; and out-of-memory failures name their context.
 
-**Opt-in matrix-multiply route for contraction kernels.** A hawk kernel built under `hawk.emit.policy.using(contraction="gemm")` that is one dense two-operand contraction runs as one GEMM, forward and in `eagle.diff.reverse`, written straight into its lane plane. Values are within a few ulp of the kernel's loop; the default is unchanged. See the `eagle.gemm` how-to.
+**Opt-in matrix-multiply route for contraction kernels.** A hawk kernel built under `hawk.emit.policy.using(contraction="gemm")` that is one dense two-operand contraction runs as one GEMM on the GPU, forward and in `eagle.diff.reverse`, written straight into its lane plane; the host keeps the direct kernel. Values are within a few ulp of the kernel's loop; the default is unchanged. See the `eagle.gemm` how-to.
 
 **New how-to pages.** Running a kernel across several GPUs with `RankPartition`, `eagle.stream`, `eagle.gemm` and `eagle.fft`.
 

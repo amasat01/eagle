@@ -104,7 +104,12 @@ class _LaunchHandles(NamedTuple):
 def _warm(step, stream) -> None:
     """Before capture: a step whose launch needs per-stream state made outside
     a capture region (a GEMM route's cuBLAS handle) makes it now, on ``stream``."""
-    warm = getattr(getattr(step, "key", None), "_warm_stream", None)
+    from ._graph_kinds import _Late
+
+    if isinstance(step, _Late):         # a conditional's child, lowered at build
+        step = step.fn if step.fn is not None else step.child
+    owner = getattr(step, "key", None) or getattr(step, "__self__", None)     # a launch, or its bound method
+    warm = getattr(owner, "_warm_stream", None)
     if warm is not None:
         warm(stream)
 
@@ -652,7 +657,10 @@ class GraphPipeline:
         launcher.set_kernel_params_many(nodes, [params] * len(nodes))
 
     def _weave_or_call(self, origin, item):
-        return self._weave(origin, item) or item
+        woven = self._weave(origin, item)
+        if woven is None:
+            _warm(item, origin)         # a leaf of a region: its body or branch stream
+        return woven or item
 
     def launch(self, n=1):
         """Replay the captured graph ``n`` times. ``launch(n)``

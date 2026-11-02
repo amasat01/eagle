@@ -76,7 +76,7 @@ with policy.using(contraction="gemm"):
 plan.run(w=w, f=f, y=y)          # one GEMM, written straight into the lane plane y
 ```
 
-`run`, `bind` and graphs take the plan as before. The values are within a few ulp of the kernel's loop (cuBLAS sums in its own order), not the same bits, so nothing changes unless you opt in; two runs on one device and one library build give the same bits. A kernel the route does not fit (two outputs, a transformed term, lanes that are not the product in row-major order) runs its own loop.
+It routes on the GPU; the host keeps the direct kernel (the host product is plain loops, several times slower). `run`, `bind` and graphs take the plan as before. On the GPU the values are within a few ulp of the kernel's loop (cuBLAS sums in its own order), not the same bits, so nothing changes unless you opt in; two runs on one device and one library build give the same bits. A kernel the route does not fit (two outputs, a transformed term, lanes that are not the product in row-major order) runs its own loop.
 
 `eagle.diff.reverse` finds the route's adjoint on its own: the two gradient products add into the gradient planes, so a table read by several launches gets the sum.
 
