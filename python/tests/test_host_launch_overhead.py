@@ -153,3 +153,13 @@ def test_a_work_share_graph_stage_runs_as_one_native_stage_and_matches(tmp_path,
     assert calls == [2]
     for (a, _b), ref in zip(arrays, expected):
         np.testing.assert_array_equal(a, ref)
+
+
+def test_a_host_array_op_runs_in_place_up_to_one_tile_and_honours_the_setting():
+    tile = _core.host_tile_size(0)
+    eexec.set_host_threads(2)
+    assert _core.host_op_team(tile) == 1
+    assert _core.host_op_team(2 * tile) == 2
+    eexec.set_host_threads(None)
+    assert _core.host_op_team(2 * tile) == min(2, _core.omp_threads())
+    assert _core.host_op_team(64 * tile) == _core.omp_threads()

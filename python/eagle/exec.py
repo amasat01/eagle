@@ -345,7 +345,7 @@ def host_threads() -> int:
 
 def set_host_threads(threads: int | None) -> None:
     """Set the most threads any host launch of this process uses (process-wide). A launch
-    uses ``min(its tiles, this)``; one tile runs in place on the calling thread. ``None``
+    uses ``min(its tiles, this)``; one tile runs in place on the calling thread; the setting reaches every host array op too. ``None``
     restores the default."""
     from ._host_loop import set_host_threads as _set
 
