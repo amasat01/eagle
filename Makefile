@@ -218,7 +218,7 @@ gate-cpp-cuda:
 gate-py-gpu: gate-env-gpu
 	$(if $(GPU_RUN),,@echo "gate: GPU_RUN is empty; the GPU rows run on whatever GPU is visible")
 	$(if $(AETHER_SRC),EAGLE_TEST_AETHER_INCLUDE="$(AETHER_SRC)",) \
-	  $(GPU_RUN) env -u PYTHONPATH -u LD_LIBRARY_PATH "$(GD)/venv_gpu/bin/python" -m pytest -q -m "gpu and not interop_matrix" -n $(GPU_PYTEST_JOBS) --dist loadfile $(or $(PYTEST_ARGS),python/tests)
+	  $(GPU_RUN) env -u PYTHONPATH -u LD_LIBRARY_PATH "$(GD)/venv_gpu/bin/python" -m pytest -q -rs -m "gpu and not interop_matrix" -n $(GPU_PYTEST_JOBS) --dist loadfile $(or $(PYTEST_ARGS),python/tests)
 
 # ======================================================================================================================
 # The CI-only jobs. CI calls these; they are not part of `gate`. The commands are the ones the workflow carried.
