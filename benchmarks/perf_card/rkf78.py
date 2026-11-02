@@ -241,9 +241,6 @@ COMMITTED_ARMS = ("eagle_graph", "eagle_graph_persist", "eagle_simulate", "cupy_
                   "torch_graphed", "torch_compiled", "jax_vmap", "warp_kernel")
 #: The tail floor: the same kernel on this many samples (launch + tail cost).
 TAIL_FLOOR_N = 32
-#: A row (one arm in one cell) whose median SM clock is more than this fraction
-#: below the session's best row clock is timed again, that arm alone (once).
-CLOCK_RETIME = 0.03
 REPS = 5
 #: An arm whose warm-up run says ``reps`` repetitions would take longer than
 #: ``SLOW_ARM_BUDGET_S`` runs ``SLOW_ARM_REPS`` instead (the masked baselines
@@ -1129,8 +1126,6 @@ def _make_arms(n, names):
     if "warp_kernel" in names:
         arms["warp_kernel"] = _make_warp_arm(n)
         _use_device(device)
-    for arm in arms.values():
-        arm["device"] = device
     if "eagle_cpu" in names:
         import eagle
 
@@ -1140,6 +1135,8 @@ def _make_arms(n, names):
         # <<< code:eagle_cpu_deploy
         c = _CpuArm(plan, n)
         arms["eagle_cpu"] = dict(state=c, run=c.run, download=c.download)
+    for arm in arms.values():
+        arm["device"] = device
     return {a: arms[a] for a in names}
 
 
@@ -1736,6 +1733,11 @@ def _dev_cell(m):
             f"({m['device_peak_bytes'] / m['minimum_bytes']:.3g}× min.)")
 
 
+def _fmt_mhz(mhz):
+    """A row's median SM clock; '–' for a row too short to sample (or a card from before rows had one)."""
+    return "–" if mhz is None else f"{mhz:.0f} MHz"
+
+
 def render_markdown(card: dict) -> str:
     """The card's tables, as MyST Markdown; deterministic in ``card`` alone."""
     dev = card["device"]
@@ -1770,8 +1772,8 @@ def render_markdown(card: dict) -> str:
     mem = {(r["n"], r["arm"]): r for r in (card.get("memory") or {}).get("rows", [])}
     lines += [
         "| N | distribution | arm | wall (IQR) | kernel-only | end-to-end | attempts·samples/s "
-        "| useful FLOP/s (% peak) | device memory (× minimum) | host memory |",
-        "|---:|---|---|---:|---:|---:|---:|---:|---:|---:|",
+        "| useful FLOP/s (% peak) | SM clock | device memory (× minimum) | host memory |",
+        "|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     peak = card["peak"]["fp64_flops"]
     for row in sorted(card["results"], key=lambda r: (r["n"], r.get("distribution", ""), ARMS.index(r["arm"]))):
@@ -1785,6 +1787,7 @@ def render_markdown(card: dict) -> str:
             f"| {_fmt_time(row['end_to_end_s']['median'])} "
             f"| {_fmt_rate(row['attempt_samples_per_s'])} "
             f"| {_fmt_rate(row['useful_flops_per_s'])} ({_fmt_pct(pct)}) "
+            f"| {_fmt_mhz(row.get('sm_clock_mhz'))} "
             f"| {_dev_cell(m)} "
             f"| {_fmt_mib(m['host_peak_bytes']) if m and m['host_peak_bytes'] is not None else '–'} |")
     lines.append("")
@@ -1918,15 +1921,8 @@ def main(argv=None):
         gc.collect()
         cc.trim_pools()  # the next N's arms start from an empty device
 
-    top = max((r["sm_clock_mhz"] or 0 for rows, _ in cells.values() for r in rows), default=0)
-    for (dist, n), (rows, _) in cells.items():  # a row timed more than CLOCK_RETIME below the best clock: that arm again
-        for i, row in enumerate(rows):
-            if top and (row["sm_clock_mhz"] or top) < top * (1 - CLOCK_RETIME):
-                again = _run_n(n, args.reps, bus_id, (row["arm"],), distribution=dist)[0][0]
-                again["retimed_from_sm_mhz"] = row["sm_clock_mhz"]
-                rows[i] = again
-                gc.collect()
-                cc.trim_pools()
+    # no re-time at a low clock: the heavy arms run at their own lower clock (a power-capped card holds them there,
+    # a second timing reads the same), so each row records the clock it ran at instead
     results = [r for rows, _ in cells.values() for r in rows]
     per_n = [extra for _, extra in cells.values()]
     tail = {d: _run_n(TAIL_FLOOR_N, args.reps, bus_id, ("eagle_graph",) if "eagle_graph" in names

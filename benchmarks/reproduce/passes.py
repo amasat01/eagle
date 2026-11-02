@@ -40,13 +40,18 @@ def _load_card(card):
     return __import__("rkf78")
 
 
+def _arms(mod):
+    """The arms the card itself runs here: the committed ones whose library is installed."""
+    return mod._select_arms(list(mod.COMMITTED_ARMS))[0]
+
+
 def _chunks(mod, card, what, ns):
     if what == "nsys":
-        return len(mod.COMMITTED_ARMS)
+        return len(_arms(mod))
     if what == "memory":
-        return math.ceil(len(mod.COMMITTED_ARMS) / CHUNK[card]["memory"])
+        return math.ceil(len(_arms(mod)) / CHUNK[card]["memory"])
     if what == "compile":
-        return math.ceil(len(mod._compile_keys(ns)) / CHUNK[card]["compile"])
+        return math.ceil(len(mod._compile_keys(ns, _arms(mod))) / CHUNK[card]["compile"])
     raise SystemExit(f"unknown pass {what}")
 
 
@@ -78,30 +83,37 @@ def run_chunk(mod, card, what, idx, ns, parts):
         return
     _, _, _, bus = mod.cc.device_facts()
     work = pathlib.Path(tempfile.mkdtemp(prefix=f"{card}_{what}_"))
-    arms = mod.COMMITTED_ARMS
+    arms = _arms(mod)
     if what == "nsys":
-        out, note = mod._nsys_kernel_times(ns, work, (arms[idx],))
-        obj = {"note": note, "out": [[list(k), v] for k, v in (out or {}).items()]}
+        out, counts, note = mod._nsys_kernel_times(ns, work, (arms[idx],))
+        obj = {"note": note, "out": [[list(k), v] for k, v in (out or {}).items()],
+               "counts": [[list(k), v] for k, v in (counts or {}).items()]}
     elif what == "memory":
         lo = idx * CHUNK[card]["memory"]
         obj = mod._run_memory_pass(ns, bus, arms[lo:lo + CHUNK[card]["memory"]])
     else:
-        keys = mod._compile_keys(ns)
+        keys = mod._compile_keys(ns, arms)
         lo = idx * CHUNK[card]["compile"]
         mod._compile_keys = lambda ns, arms=None: keys[lo:lo + CHUNK[card]["compile"]]
-        obj = mod._run_compile_pass(ns)
+        obj = mod._run_compile_pass(ns, arms)
     _save(parts, name, obj)
     print(f"{card} {name}: saved", flush=True)
 
 
 def final(mod, card, ns, parts, rest):
     flags = []
+    for what in ("nsys", "memory", "compile"):
+        # a pass is either skipped whole or complete: a partial one means a chunk failed
+        have, want = len(_load(parts, what)), _chunks(mod, card, what, ns)
+        if have and have != want:
+            raise SystemExit(f"{parts}: {have} of {want} {what} chunks saved; run the missing ones first")
     nsys = _load(parts, "nsys")
     if nsys:
         out = {tuple(k): v for part in nsys for k, v in part["out"]}
+        counts = {tuple(k): v for part in nsys for k, v in part.get("counts", [])}
         notes = list(dict.fromkeys(p["note"] for p in nsys))
         note = "; ".join(notes)
-        mod._nsys_kernel_times = lambda ns, work, names: (out, note)
+        mod._nsys_kernel_times = lambda ns, work, names: (out, counts, note)
     else:
         flags.append("--no-nsys")
     mem = [r for part in _load(parts, "memory") for r in part]
