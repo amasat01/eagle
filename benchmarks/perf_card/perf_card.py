@@ -1414,7 +1414,7 @@ def _time_cell_arm(arm, n, distribution, bus_id, rounds_max, work):
     With ``--parts`` a finished result is saved, and an earlier one is reused."""
     key = f"timing_{arm}_{n}_{distribution}"
     out_path = work / f"counts_{arm}_{n}_{distribution}.npz"
-    saved = cc.part_load(_PARTS, key)
+    saved = cc.part_load(_PARTS, key, keep_failed=_ASSEMBLE)
     if saved is not None:
         if (_PARTS / f"{key}.npz").exists():
             shutil.copy(_PARTS / f"{key}.npz", out_path)
@@ -1650,7 +1650,7 @@ def _run_memory_pass(ns, bus_id, names):
     rows = []
     for n in ns:
         for arm in names:
-            saved = cc.part_load(_PARTS, f"memory_{arm}_{n}")
+            saved = cc.part_load(_PARTS, f"memory_{arm}_{n}", keep_failed=_ASSEMBLE)
             if saved is not None:
                 rows.append(saved)
                 continue

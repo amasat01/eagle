@@ -809,7 +809,7 @@ def run_arm(row, case, dtype, arm, smoke):
     """One arm in a fresh process: the record it printed, or the reason it did not. With ``--parts`` the record is saved,
     and an earlier one is reused."""
     key = f"{row}_{case}_{dtype}_{arm}" + ("_smoke" if smoke else "")
-    saved = cc.part_load(_PARTS, key)
+    saved = cc.part_load(_PARTS, key, keep_failed=_ASSEMBLE)
     if saved is not None:
         return saved
     if _ASSEMBLE or cc.deadline_passed():

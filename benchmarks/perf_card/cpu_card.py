@@ -455,7 +455,7 @@ def _cached_arm(a, n, distribution, work):
     import numpy as np
 
     key = f"timing_{a}_{n}_{distribution}"
-    saved = cc.part_load(_PARTS, key)
+    saved = cc.part_load(_PARTS, key, keep_failed=_ASSEMBLE)
     if saved is not None:
         if (_PARTS / f"{key}.npz").exists():
             with np.load(_PARTS / f"{key}.npz") as z:
