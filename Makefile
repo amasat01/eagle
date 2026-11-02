@@ -197,6 +197,7 @@ gate-docs: gate-doxygen
 	export PATH="$(GD)/venv_cpu/bin:$$PATH" $(if $(HAWK_SRC),HAWK_AETHER_INCLUDE="$(AETHER_SRC)" HAWK_EAGLE_INCLUDE="$(CURDIR)",); \
 	$(MAKE) -C docs nbcheck; \
 	$(MAKE) -C docs strict; \
+	if [ -f "$(HAWK_SRC)/docs/content/tutorials/01_your_first_kernel.ipynb" ]; then python -m raptor_docs.nb same "$(HAWK_SRC)/docs/content/tutorials/01_your_first_kernel.ipynb" docs/content/userguide/first_kernel.ipynb; else echo "nb same: skipped: no sibling tree (set HAWK_SRC)"; fi; \
 	python -m raptor_docs.inventory docs/_build/html/objects.inv eagle; \
 	python -m raptor_docs.fresh --check --site "$(SITE_SRC)"
 
