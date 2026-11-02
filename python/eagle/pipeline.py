@@ -781,12 +781,6 @@ class GraphPipeline:
         return self._sptr
 
     # -- introspection (proves the JIT launch really is a graph node) --------
-    def introspection_available(self) -> bool:
-        """Whether node introspection works here: the bound core dots
-        the captured graph through ``cudaGraphDebugDotPrint`` (always
-        available), so this is ready as soon as :meth:`build` has run."""
-        return self._dot_str is not None
-
     def _dot(self) -> str:
         if self._dot_str is None:
             raise RuntimeError("call build() first")

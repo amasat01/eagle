@@ -60,8 +60,7 @@ dependencies = ["raptor-core>=0.7.0,<0.8", "aether-dsc>=0.7.2,<0.8"]
 # numpy: the host-array bridge (eagle.frameworks.numpy) and the tests; eagle itself imports none.
 numpy = ["numpy>=1.26"]
 # cupy is env-provided on the deployment boxes (pinned against the local CUDA
-# toolkit); the extras are a convenience for a fresh environment. ``cuda`` is an
-# alias of ``cuda12`` so existing install lines keep working.
+# toolkit); the extras are a convenience for a fresh environment.
 # CuPy compiles its kernels at run time and needs the CUDA runtime headers and NVRTC:
 # cuda-toolkit[cudart,nvrtc] brings exactly those as pip wheels (no system toolkit),
 # without the math libraries CuPy's own [ctk] extra adds (cuBLAS, cuFFT, ...).
@@ -77,11 +76,6 @@ cuda13 = [
     "cupy-cuda13x>=14; python_version>='3.10'",
     "cupy-cuda13x>=13.6,<14; python_version<'3.10'",
     "cuda-toolkit[cudart,nvrtc]==13.*",
-]
-cuda = [
-    "cupy-cuda12x>=14; python_version>='3.10'",
-    "cupy-cuda12x>=13.6,<14; python_version<'3.10'",
-    "cuda-toolkit[cudart,nvrtc]==12.*",
 ]
 # eagle.frameworks.torch: the torch.autograd bridge. torch is imported only by
 # that submodule, so plain `import eagle` never needs it. The bridges compile

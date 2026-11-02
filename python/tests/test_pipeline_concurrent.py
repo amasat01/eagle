@@ -157,7 +157,6 @@ def test_add_concurrent_fork_topology_no_sibling_edge():
     pipe.add_concurrent([lambda: _on_eagle(kA, a, outA), lambda: _on_eagle(kB, b, outB)])
     pipe.build()
 
-    assert pipe.introspection_available()
     assert pipe.num_nodes() == 2
     _assert_no_sibling_edge(pipe._dot(), "branchA", "branchB")
 

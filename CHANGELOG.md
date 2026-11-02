@@ -41,6 +41,8 @@ This section covers what changes from 0.7.2. Names that left are in the table at
 |---|---|
 | the RK4 and oscillator demo cards, the old committed cards, the compare card and the calibration kit | the RKF7(8) ensemble card, its CPU twin and the feature card |
 | the 16-stage profile kit | the 6-stage kit: `sol_probe`, `wide_sweep`, `ncu_corpus`, `ncu_ensemble`, `chunk_residency`, `launch_shape` |
+| the `cuda` install extra (a copy of `cuda12`) | `raptor-eagle[cuda12]` or `raptor-eagle[cuda13]` |
+| `Pipeline.introspection_available()` | nothing: introspection works as soon as `build()` has run; call `num_nodes()` / `node_labels()` |
 
 ## 0.7.2 (2026-10-29)
 
