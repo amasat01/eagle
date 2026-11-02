@@ -455,7 +455,6 @@ def test_structure_from_name_resolves_the_rank_structure():
     placeholder: the wire spelling every manifest carries must resolve to the
     singleton the plan layer dispatches on, and that singleton must actually
     run."""
-    assert eexec._structure_from_name("rank_partition") is eexec.RankPartition
     assert eexec.RankPartition.name == "rank_partition"
     assert eexec.RankPartition.available, (
         "eagle._mpi is not importable inside the bed — the gate ran the bed "

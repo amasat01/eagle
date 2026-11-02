@@ -61,11 +61,6 @@ class SkipGuard:
         self.baseline_idx = int(baseline_idx)
 
     @classmethod
-    def nonempty_bucket(cls, type_offsets, t):
-        """Fencepost liveness: ``type_offsets[t + 1] != type_offsets[t]``."""
-        return cls(type_offsets, t + 1, type_offsets, t)
-
-    @classmethod
     def nonzero(cls, n_active):
         """Plain nonzero count: ``n_active[0] != 0``."""
         return cls(n_active, 0)
