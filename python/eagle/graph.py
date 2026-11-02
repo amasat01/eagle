@@ -950,7 +950,7 @@ class Graph:
             nodes, params = [], []
             for b in bounds:
                 step_nodes = steps[id(b)].nodes
-                if len(step_nodes) != 1:
+                if len(step_nodes) != 1 or getattr(b, "_gemm", None):     # a GEMM route is re-captured
                     raise LookupError
                 nodes.append(step_nodes[0])
                 params.append(b._addrs)

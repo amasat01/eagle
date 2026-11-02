@@ -64,4 +64,20 @@ Rules that matter:
 
 If a producer hands you a recognised contraction (a `RecognizedContraction` record), `lower_dense_gemm(record, direction="forward"|"adjoint", dtype=...)` builds the steps and the buffers it needs (`plan.required`). Call the plan with `plan("host" | "device", buffers)`. To capture it, `captured_gemm_calls(plan, buffers, operand_class="gemm")` gives one `SgemmParams` and operand map per step, ready for `handle.sgemm`. The `"gemv"` class and non-float32 buffers are refused for capture.
 
+## Opt a kernel in
+
+A hawk kernel that is one dense two-operand contraction (a sum over one loop of `w.at(...) * f.at(...)`, one output per lane) can run as this product instead of its own loop. Build it under hawk's policy:
+
+```python
+from hawk.emit import policy
+
+with policy.using(contraction="gemm"):
+    plan = eagle.plan.auto(contract)
+plan.run(w=w, f=f, y=y)          # one GEMM, written straight into the lane plane y
+```
+
+`run`, `bind` and graphs take the plan as before. The values are within a few ulp of the kernel's loop (cuBLAS sums in its own order), not the same bits, so nothing changes unless you opt in; two runs on one device and one library build give the same bits. A kernel the route does not fit (two outputs, a transformed term, lanes that are not the product in row-major order) runs its own loop.
+
+`eagle.diff.reverse` finds the route's adjoint on its own: the two gradient products add into the gradient planes, so a table read by several launches gets the sum.
+
 The API is on the [Python API](../api/api_python) page.

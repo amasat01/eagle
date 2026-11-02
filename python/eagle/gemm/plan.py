@@ -339,7 +339,7 @@ def _array_module(buffers):
 
 
 def matmul_step(
-    name, *, a, b, out, transpose_a=False, transpose_b=False, transpose_out=False
+    name, *, a, b, out, transpose_a=False, transpose_b=False, transpose_out=False, accumulate=False
 ) -> PlanStep:
     """``out = op(a) @ op(b)``, where ``op`` is a transpose when asked.
 
@@ -348,7 +348,8 @@ def matmul_step(
     the destination, which is how a gradient lands in its operand's own
     declared layout when that layout puts the contracted axis first. The
     device form re-raises :class:`MatmulUnavailable` on every call, since
-    a missing cuBLAS shows up on the first one."""
+    a missing cuBLAS shows up on the first one. ``accumulate`` adds the
+    product to ``out`` (``beta = 1``) instead of overwriting it."""
     spec = MatmulSpec(
         a=a,
         b=b,
@@ -369,7 +370,8 @@ def matmul_step(
             raise MatmulUnavailable(f"matmul step {name!r}: {exc}") from exc
         stream = 0 if host else _stream.current()
         try:
-            gemm_call(params, {"a": left, "b": right, "out": target}, itemsize=int(left.dtype.itemsize), stream=stream, host=host)
+            gemm_call(params, {"a": left, "b": right, "out": target}, itemsize=int(left.dtype.itemsize), stream=stream, host=host,
+                      beta=1.0 if accumulate else 0.0)
         except GemmCaptureUnavailable as exc:
             raise MatmulUnavailable(f"matmul step {name!r}: {exc}") from exc
 
@@ -557,14 +559,20 @@ def _plan_metadata(record):
     return _DENSE_GEMM_MECHANISM_NAME, _DENSE_GEMM_DETERMINISM
 
 
-def _gemm_plan(record, direction, dtype):
+def _gemm_plan(record, direction, dtype, *, lane_flat=False, accumulate=False):
     """``C = A' @ B'ᵀ`` and its two adjoints, with every orientation
     read off the operands' declared axes. ``A'`` is the operand with its
     contracted axis last; when the declaration put it first, the primed
     form is a transposed view (free). The adjoint results are written
     back in each operand's own declared layout, via a transposed ``out``
     view when needed, so the caller binds gradient buffers shaped like
-    the operands they belong to."""
+    the operands they belong to.
+
+    ``lane_flat`` hands the product (and takes its cotangent) as ``Cᵀ``,
+    ``b``'s free axis first: the lane plane of a kernel whose lane is
+    ``b_index * a_free + a_index``, written in place with no transpose copy.
+    ``accumulate`` adds the adjoint products into the gradient buffers
+    (``beta = 1``), which a reverse sums into from every consumer."""
     a, b = (_resolve_operand(op, record.reduce_extent) for op in record.operands)
     out_name = record.outputs[0][0]
     mechanism, determinism = _plan_metadata(record)
@@ -574,17 +582,18 @@ def _gemm_plan(record, direction, dtype):
     verify_staged_fanin(record, contracted_extent=b.free_extent, operand=a.name)
     verify_staged_fanin(record, contracted_extent=a.free_extent, operand=b.name)
 
-    c_shape = (a.free_extent, b.free_extent)
+    c_shape = (b.free_extent, a.free_extent) if lane_flat else (a.free_extent, b.free_extent)
     if direction == "forward":
+        first, second = (b, a) if lane_flat else (a, b)
         return LoweredPlan(
             steps=(
                 matmul_step(
                     out_name,
-                    a=a.name,
-                    b=b.name,
+                    a=first.name,
+                    b=second.name,
                     out=out_name,
-                    transpose_a=(a.reduce_axis == 0),
-                    transpose_b=(b.reduce_axis == 1),
+                    transpose_a=(first.reduce_axis == 0),
+                    transpose_b=(second.reduce_axis == 1),
                 ),
             ),
             mechanism=mechanism,
@@ -606,17 +615,20 @@ def _gemm_plan(record, direction, dtype):
                 a=bar,
                 b=b.name,
                 out=f"{a.name}_bar",
+                transpose_a=lane_flat,
                 transpose_b=(b.reduce_axis == 0),
                 transpose_out=(a.reduce_axis == 0),
+                accumulate=accumulate,
             ),
             matmul_step(
                 f"{b.name}_bar",
                 a=bar,
                 b=a.name,
                 out=f"{b.name}_bar",
-                transpose_a=True,
+                transpose_a=not lane_flat,
                 transpose_b=(a.reduce_axis == 0),
                 transpose_out=(b.reduce_axis == 0),
+                accumulate=accumulate,
             ),
         ),
         mechanism=mechanism,

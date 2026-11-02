@@ -361,7 +361,9 @@ class _HostSide:
     __slots__ = ("_args", "_plugins", "_error", "_thread", "_pid")
 
     def __init__(self, kernels, cache_dir, scalar_type):
-        self._args = (list(kernels), _targets_of(_HOST), cache_dir, scalar_type)
+        from hawk.emit import policy     # read here: the build thread does not see the caller's context
+
+        self._args = (list(kernels), _targets_of(_HOST), cache_dir, scalar_type, policy.contraction())
         self._plugins = self._error = None
         self._pid = os.getpid()
         self._thread = threading.Thread(target=self._build, name="eagle-host-build")
@@ -459,8 +461,15 @@ def _build_by_name(kernels, targets, cache_dir, scalar_type=None) -> tuple:
     return by_name, bundle
 
 
-def _hawk_plugins(kernels, targets, cache_dir, scalar_type=None) -> tuple:
-    """Build ``kernels`` into one bundle and return their plugins in order."""
+def _hawk_plugins(kernels, targets, cache_dir, scalar_type=None, contraction=None) -> tuple:
+    """Build ``kernels`` into one bundle and return their plugins in order.
+    ``contraction`` is hawk's policy for a dense contraction (``None``: the
+    caller's ``hawk.emit.policy.contraction()``); ``"gemm"`` routes each
+    kernel that has one through the matrix multiply (:mod:`eagle.gemm._route`)."""
+    if contraction is None:
+        from hawk.emit import policy
+
+        contraction = policy.contraction()
     by_name, bundle = _build_by_name(kernels, targets, cache_dir, scalar_type)
     missing = [k.name for k in kernels if k.name not in by_name]
     if missing:
@@ -471,6 +480,10 @@ def _hawk_plugins(kernels, targets, cache_dir, scalar_type=None) -> tuple:
             "hawk.artifact.plugins(bundle)")
     for k in kernels:  # what eagle.diff needs to build this kernel's vjp beside it
         by_name[k.name]._hawk_source = (k, bundle.digest, cache_dir)
+        if contraction == "gemm":
+            from .gemm import _route
+
+            _route.attach(by_name[k.name], k)
     return tuple(by_name[k.name] for k in kernels)
 
 
