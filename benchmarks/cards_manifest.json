@@ -204,7 +204,7 @@
     "two_ranks",
     "one_rank"
    ],
-   "baseline": "one rank (N = 1e6)",
+   "baseline": "one rank (N = 1e6), the C1 persist arm",
    "cases": {
     "all": 2000000
    },

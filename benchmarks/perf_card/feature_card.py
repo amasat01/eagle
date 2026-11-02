@@ -16,7 +16,7 @@ features (``ROWS``), every arm on the kernel the feature is about:
 ``lane_set``       10 % active lanes: dense, map, prefix
 ``scatter``        keyed, ordered and OR scatter against ``cupyx.scatter_add`` and ``np.add.at``
 ``sample_sum``     a sum over samples: compensated, ordered, auto, against ``cupy.sum``
-``mpi_partition``  the plan through ``RankPartition`` on 2 GPUs (N = 2e6) against one rank (N = 1e6)
+``mpi_partition``  the C1 ensemble through ``RankPartition`` on 2 GPUs (N = 2e6) against one rank (N = 1e6)
 
 Every (row, case, dtype, arm) runs in a FRESH PROCESS on a clean device, so no arm inherits another library's context,
 pool or fragmentation. An allocation failure is the arm ``out_of_memory``; any other failure is ``failed: <reason>``; a
@@ -655,8 +655,32 @@ def setup_sample_sum(ctx):
     return run, (lambda: (run() or abs(float(out["t"]) - exact) <= 8.0 * eps * mag, "cupy.sum is within 8 ULP of math.fsum"))
 
 
+def _perf_card():
+    sys.path.insert(0, str(HERE))
+    return importlib.import_module("perf_card")
+
+
+def _persist_arm(pc, n, inp):
+    """The C1 workload's persist arm over ``n`` samples: (run, download) with the inputs uploaded."""
+    arm = pc._make_eagle_arms(n, ["eagle_graph_persist"])["eagle_graph_persist"]
+    arm["state"].upload(inp)
+
+    def run():
+        arm["state"].upload(inp)
+        arm["run"]()
+    return run, arm["download"]
+
+
 def setup_mpi_partition(ctx):
-    raise NotRun("run by the parent")
+    """The one-rank arm: the C1 ensemble (float64, spread) at N / 2 on one GPU; the two-rank arm is ``_mpi_worker``."""
+    if ctx.arm != "one_rank":
+        raise NotRun("run by the parent under mpirun")
+    if ctx.target != "cuda":
+        raise NotRun("needs a GPU")
+    pc = _perf_card()
+    inp = {k: v[: ctx.n // 2] for k, v in pc._inputs(ctx.n // 2).items() if hasattr(v, "__len__")}
+    run, download = _persist_arm(pc, ctx.n // 2, inp)
+    return run, (lambda: (run() or bool(_np().isfinite(download()["t"]).all()), "every sample reaches a finite time"))
 
 
 # name -> spec. ``cases``: {case: (N, smoke N)}; ``arms``: eagle arms then baselines; ``host``: the arms that run on the CPU
@@ -688,7 +712,7 @@ ROWS = {
     "sample_sum": dict(setup=setup_sample_sum, cases={"all": (1 << 24, 4096)}, dtypes=(F64,), ref="auto",
                        arms=("compensated", "ordered", "auto", "cupy_sum"), host=("compensated", "ordered", "auto"), baseline="cupy.sum"),
     "mpi_partition": dict(setup=setup_mpi_partition, cases={"all": (2_000_000, 8192)}, dtypes=(F64,), ref="one_rank",
-                          arms=("two_ranks", "one_rank"), host=(), baseline="one rank (N = 1e6)"),
+                          arms=("two_ranks", "one_rank"), host=(), baseline="one rank (N = 1e6), the C1 persist arm"),
 }
 # an arm named for its baseline library runs the library branch of its row's setup
 _ALIAS = {"cupy_fft": "cupy", "cupyx_scatter_add": "cupyx", "cupy_sum": "cupy"}
@@ -788,8 +812,8 @@ def run_arm(row, case, dtype, arm, smoke):
 
 
 def _mpi(smoke):
+    """The two-rank arm under mpirun (a fresh process pair), the one-rank arm as any other arm."""
     n = 8192 if smoke else 2_000_000
-    arms = ROWS["mpi_partition"]["arms"]
     why = None
     if _gpu_count() < 2:
         why = f"needs 2 GPUs (this machine has {_gpu_count()}); a Kaggle T4 x2 row"
@@ -798,46 +822,52 @@ def _mpi(smoke):
     elif not _installed("eagle._mpi"):
         why = "this eagle build has no rank structure (eagle._mpi; -DEAGLE_PYTHON_MPI)"
     if why:
-        return {a: {"status": f"not_run: {why}"} for a in arms}, n
-    done = subprocess.run(["mpirun", "--allow-run-as-root", "-n", "2", sys.executable, __file__, "--mpi-worker", str(n // 2)],
-                          capture_output=True, text=True, timeout=600)
+        return {a: {"status": f"not_run: {why}"} for a in ROWS["mpi_partition"]["arms"]}, n
+    done = subprocess.run(["mpirun", "--allow-run-as-root", "-n", "2", sys.executable, __file__, "--mpi-worker", str(n)]
+                          + (["--smoke"] if smoke else []), capture_output=True, text=True, timeout=PROCESS_TIMEOUT_S)
     if done.returncode:
         said = [ln.strip() for ln in (done.stderr + done.stdout).splitlines() if ln.strip().strip("-")]
-        return {a: {"status": f"failed: the two-rank run failed (rc {done.returncode}): {(said or ['no output'])[-1][:160]}"}
-                for a in arms}, n
-    times = json.loads(done.stdout.strip().splitlines()[-1])
-    return {a: {"status": "ok", "n": n if a == "two_ranks" else n // 2, "wall_s": {**cc.median_iqr(v), "rounds": len(v)}, "sm_mhz": None}
-            for a, v in times.items()}, n
+        two = {"status": f"failed: the two-rank run failed (rc {done.returncode}): {(said or ['no output'])[-1][:160]}"}
+    else:
+        two = json.loads(done.stdout.strip().splitlines()[-1])
+    return {"two_ranks": two, "one_rank": run_arm("mpi_partition", "all", F64, "one_rank", smoke)}, n
 
 
-def _mpi_worker(n):
-    """Rank body: a kernel through ``RankPartition`` (device inner) at ``2 n`` lanes against one rank at ``n``."""
+def _mpi_worker(n, smoke):
+    """Rank body: the C1 ensemble (float64) of ``n`` samples cut across the ranks by ``RankPartition.local``, each
+    rank on its own GPU, the planes folded back by ``allgather_plane``: the record of the timed rounds on rank 0."""
+    import ctypes
+
     import numpy as np
-    import hawk
+    import cupy as cp
     import eagle.exec as eexec
-    from eagle import plan as eplan
 
-    spec = importlib.util.spec_from_file_location("zero_copy_interop", REPO / "examples" / "python" / "zero_copy_interop.py")
-    ex = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(ex)
-    x1, x2 = np.ascontiguousarray(ex.seed_positions(n, 0)), np.ascontiguousarray(ex.seed_positions(2 * n, 0))
-    with tempfile.TemporaryDirectory() as tmp:
-        bundle = hawk.build([ex.step_kernel()], pathlib.Path(tmp) / "mpi", mode="float64", targets=("cuda",))
-        plugin = ex.device_plugin(bundle, ex.KERNEL_NAME)
-        whole = eplan.plan(plugin, structure=eexec.DeviceKernel)
-        ranked = eplan.plan(plugin, structure=eexec.RankPartition, inner=eexec.DeviceKernel)
-        arms = {"one_rank": lambda: whole.run(x=x1, k=2.0, y=np.zeros_like(x1)),
-                "two_ranks": lambda: ranked.run(x=x2, k=2.0, y=np.zeros_like(x2))}
-        times = {a: [] for a in arms}
-        for fn in arms.values():
-            fn()
-        for _ in range(MIN_ROUNDS):
-            for a, fn in arms.items():
-                t0 = time.perf_counter()
-                fn()
-                times[a].append(time.perf_counter() - t0)
-    if eexec.RankPartition.world()[0] == 0:
-        print(json.dumps(times))
+    rank, size = eexec.RankPartition.world()
+    cp.cuda.Device(rank % cp.cuda.runtime.getDeviceCount()).use()
+    pc = _perf_card()
+    whole = eexec.Partition(0, n, n)
+    mine = eexec.RankPartition.local(whole)
+    inp = {k: v for k, v in pc._inputs(n).items() if hasattr(v, "__len__")}
+    local = {k: v[mine.base: mine.base + mine.count] for k, v in inp.items()}
+    run, download = _persist_arm(pc, mine.count, local)
+    full = {k: np.zeros(n) for k in pc.STATE_NAMES}
+
+    def fold():
+        run()
+        out = download()
+        for k in full:
+            full[k][mine.base: mine.base + mine.count] = out[k]
+            eexec.RankPartition.allgather_plane(full[k].ctypes.data_as(ctypes.c_void_p).value, whole)
+    fold()
+    times = []
+    while len(times) < (1 if smoke else MAX_ROUNDS):
+        t0 = time.perf_counter()
+        fold()
+        times.append(time.perf_counter() - t0)
+    ok = bool(all(np.isfinite(full[k]).all() for k in full))
+    if rank == 0:
+        print(json.dumps({"status": "ok" if ok else "failed: value check", "n": n, "wall_s": {**cc.median_iqr(times), "rounds": len(times)},
+                          "sm_mhz": None, "checks": {"every folded plane is finite": ok}}))
 
 
 # --------------------------------------------------------------------------- #
@@ -884,7 +914,7 @@ def main(argv=None):
     ap.add_argument("--smoke", action="store_true", help="smallest sizes, one round, card in a temporary directory")
     args = ap.parse_args(argv)
     if args.mpi_worker:
-        _mpi_worker(int(args.mpi_worker))
+        _mpi_worker(int(args.mpi_worker), args.smoke)
         return 0
     if args.arm:
         return child(*args.arm, args.smoke)

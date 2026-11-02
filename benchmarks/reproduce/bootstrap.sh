@@ -37,7 +37,7 @@
 #                     raptor-eagle / raptor-hawk wheels (pins in locks/pypi-PROFILE.txt);
 #                     the card scripts come from the eagle checkout this script lives in
 #
-# Afterwards: . WORK/env-PROFILE.sh  (or run_cards.sh --env WORK/env-PROFILE.sh)
+# Afterwards: . WORK/env-PROFILE.sh  (or run_cards.sh --plan NAME)
 set -euo pipefail
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -365,4 +365,4 @@ if [[ $REPRO_DRY_RUN == 1 ]]; then
 else
   facts | tee "$WORK/machine_facts.txt"
 fi
-log "done. Next: $HERE/run_cards.sh --env $ENV_FILE --preset smoke"
+log "done. Next: $HERE/run_cards.sh --plan <a100|l4|t4|p2000|zen5|c4a> --dry-run"

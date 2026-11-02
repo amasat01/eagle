@@ -65,6 +65,7 @@ def settings():
     ap.add_argument("--only", default="", help="notebooks mode: run only notebooks whose path contains this text")
     ap.add_argument("--hawk-src", help="local hawk checkout (notebooks mode)")
     ap.add_argument("--aether-src", help="local aether checkout (notebooks mode; its helper files)")
+    ap.add_argument("--print-plan", action="store_true", help="cards mode: print the plan and its minutes, run nothing")
     ap.add_argument("--local", action="store_true", help="use the current environment; no install, no Kaggle paths")
     ap.add_argument("--cuda", default="12", help="CUDA major of the extras: 12 or 13")
     ap.add_argument("--source", default="pypi", choices=("pypi", "git", "wheel"),
@@ -446,30 +447,47 @@ def run_notebooks(cfg, py, work, roots, result, out):
     return ok
 
 
-#: Wall-clock budget of the cards, counted from the kernel's start (Kaggle stops it at 3 hours, install included); the
-#: margin leaves time to write result.json. Each card gets what is left.
-CARDS_BUDGET_S = 170 * 60
+#: The T4 row of the card plan (ruling section 4), at most two hours: (name, argv, cap in seconds). The profile
+#: stages and the sweep run from the eagle checkout; the sweep reads hawk's tests and writes hawk's wide.json rows.
+CARDS_PLAN = (
+    ("p0_sol_probe", ["benchmarks/reproduce/gpu_profile.py", "--stage", "sol_probe", "--out", "{out}/profile"], 2 * 60),
+    ("p1_wide_sweep", ["-m", "hawk.targets.cards.sweep", "--write", "--out", "{out}/wide_sweep.json",
+                       "--cache", "{work}/sweep_cache"], 8 * 60),
+    ("c1_perf_card", ["benchmarks/perf_card/perf_card.py", "--out-dir", "{out}"], 50 * 60),
+    ("c2_feature_card", ["benchmarks/perf_card/feature_card.py", "--out-dir", "{out}"], 25 * 60),
+    ("p4_chunk_residency", ["benchmarks/reproduce/gpu_profile.py", "--stage", "chunk_residency", "--out", "{out}/profile"], 15 * 60),
+)
+#: Wall-clock budget of the plan counted from the kernel's start (Kaggle stops it at 3 hours, install included).
+CARDS_BUDGET_S = 145 * 60
 KERNEL_START = time.time()
 
 
-def run_cards(py, roots, out, result):
-    """The GPU card (RKF7(8) ensemble, committed arms, timed up to a million samples: ten million takes hours; its
-    memory pass adds ten million, where an arm that does not fit the T4 is a row; no profiler or compile passes) and
-    the feature card, written under ``out/cards``; ``result['cards']`` lists each with its exit code."""
+def link_hawk_tests(py, hawk):
+    """The wheel's sweep looks for hawk's ``tests/`` beside its site-packages: link the clone's."""
+    site = subprocess.run([str(py), "-c", "import hawk, pathlib; print(pathlib.Path(hawk.__file__).parents[1])"],
+                          capture_output=True, text=True).stdout.strip()
+    link = pathlib.Path(site) / "tests"
+    if site and not link.exists():
+        link.symlink_to(hawk / "tests")
+
+
+def run_cards(py, roots, out, result, work):
+    """The T4 plan: sol_probe, the wide sweep (rows written), the RKF7(8) ensemble card, the feature card (with
+    ``mpi_partition`` on the two T4s) and the chunk-residency profile, written under ``out/cards``;
+    ``result['cards']`` lists each step with its exit code."""
     eagle = roots["eagle"]
-    env = dict(os.environ, HAWK_SRC=str(roots.get("hawk", "")))
+    env = dict(os.environ, HAWK_SRC=str(roots.get("hawk", "")), EAGLE_SRC=str(eagle))
     cards_out = out / "cards"
     cards_out.mkdir(parents=True, exist_ok=True)
-    plan = (("perf_card", ["benchmarks/perf_card/perf_card.py", "--ns", "1000000",
-                           "--memory-ns", "100000", "1000000", "10000000"]),
-            ("feature_card", ["benchmarks/perf_card/feature_card.py"]))
+    if "hawk" in roots:
+        link_hawk_tests(py, roots["hawk"])
     result["cards"] = []
-    for name, argv in plan:
+    for name, argv, cap in CARDS_PLAN:
         left = CARDS_BUDGET_S - (time.time() - KERNEL_START)
         t0 = time.time()
+        cmd = [str(py), *[a.format(out=cards_out, work=work) for a in argv]]
         try:
-            rc = subprocess.run([str(py), *argv, "--out-dir", str(cards_out)], cwd=eagle, env=env,
-                                timeout=max(left, 60)).returncode
+            rc = subprocess.run(cmd, cwd=eagle, env=env, timeout=max(min(cap, left), 60)).returncode
         except subprocess.TimeoutExpired:
             rc = 124
         result["cards"].append({"name": name, "rc": rc, "seconds": round(time.time() - t0)})
@@ -488,6 +506,11 @@ def write_result(out, result, quiet=False):
 
 def main():
     cfg = settings()
+    if cfg.print_plan:
+        for name, argv, cap in CARDS_PLAN:
+            print(f"{name:20s} cap {cap // 60:3d} min  python {' '.join(argv)}")
+        print(f"plan total {sum(c for _, _, c in CARDS_PLAN) // 60} min of {CARDS_BUDGET_S // 60} min budget")
+        return 0
     out = pathlib.Path(cfg.out or ("./out" if cfg.local else "/kaggle/working"))
     temp_root = "/kaggle/temp" if not cfg.local and pathlib.Path("/kaggle/temp").is_dir() else None
     work = pathlib.Path(tempfile.mkdtemp(prefix="eagle_gpu_", dir=temp_root))
@@ -553,7 +576,7 @@ def main():
         write_result(out, result)
         return 0 if ok else 1
     if cfg.mode == "cards":
-        ok = run_cards(py, roots, out, result)
+        ok = run_cards(py, roots, out, result, work)
         write_result(out, result)
         return 0 if ok else 1
     tests = run_tests(py, roots["eagle"], work)

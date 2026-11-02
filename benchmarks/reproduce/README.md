@@ -11,8 +11,7 @@ software and write the cards for that machine.
 |---|---|
 | `bootstrap.sh` | pinned toolchain + Python environment, the four repositories (aether, raptor, eagle, hawk) at their release tags, eagle's `_core` for the GPUs present (CPU-only build without one), hawk, an import smoke test and a machine fact sheet |
 | `bootstrap.sh --from-pypi` | the no-compiler route: a plain venv with the released `raptor-eagle` / `raptor-hawk` wheels, pins in `locks/pypi-{gpu,cpu}.txt` |
-| `run_cards.sh` | runs the cards (`--which gpu\|cpu\|all`, `--preset smoke\|short\|full`) into `cards/<machine-slug>/` |
-| `passes.py` | runs a GPU card one pass at a time (used by `run_cards.sh --split`) |
+| `run_cards.sh` | runs one device's session plan (`--plan a100\|l4\|t4\|p2000\|zen5\|c4a`: P0, P1, C1, C2, the profile stages; resumable, `--upload gs://...` after each step) into `cards/<machine-slug>/` |
 | `profile.sh`, `gpu_profile.py` | the profiling kit: speed-of-light probe, wide sweep, Nsight Systems and Nsight Compute captures, one tarball (see below) |
 | `kaggle.ipynb` | a thin notebook calling the two scripts |
 | `locks/` | the pinned environments and `make_locks.py`, which regenerates them |
@@ -29,8 +28,8 @@ its own) and a GPU of compute capability ≥ 7.5. For a pre-Turing GPU (P100, V1
 git clone --depth 1 --branch v0.6.2 https://github.com/amasat01/eagle.git
 eagle/benchmarks/reproduce/bootstrap.sh                 # gpu profile when a GPU is visible
 eagle/benchmarks/reproduce/bootstrap.sh --profile cpu   # the CPU cards' environment
-eagle/benchmarks/reproduce/run_cards.sh --preset smoke --which all   # minutes: checks the setup
-eagle/benchmarks/reproduce/run_cards.sh --which all                  # the full cards
+eagle/benchmarks/reproduce/run_cards.sh --plan p2000 --dry-run   # the plan and its minutes
+eagle/benchmarks/reproduce/run_cards.sh --plan p2000             # the session (a100, l4, t4, zen5, c4a: the other devices)
 ```
 
 `--dry-run` prints every command of either script without running anything.
@@ -38,10 +37,10 @@ From inside a family checkout (aether/, eagle/, hawk/, raptor/ side by side) the
 checkouts are used as they are; elsewhere they are cloned (`--ref eagle=main`
 or `EAGLE_REF=...` picks another ref). With several GPUs, set
 `CUDA_VISIBLE_DEVICES` to the one to measure. Cards land in
-`~/.cache/raptor-repro/cards/<gpu>--<cpu>/` (`--out` to change);
-`--publish` writes them next to the committed cards instead.
+`~/.cache/raptor-repro/cards/<gpu>--<cpu>/` (`--out` to change); copy the cards you commit into
+`benchmarks/perf_card/`.
 
-Committed cards are slim: the raw rows are release assets. After `--publish`, run
+Committed cards are slim: the raw rows are release assets. After copying a card in, run
 `python benchmarks/slim_card.py --raw-out <dir> <card>.json` to slim a card and keep the full one in `<dir>`;
 the tests that read raw rows take `EAGLE_CARD_RAW_DIR=<dir>`, are skipped without it, and fail by file name when it is set
 and a file is missing or its md5 is not the card's `slim_of_md5`. CI downloads the release asset `cards.tar.gz` (the
@@ -60,8 +59,8 @@ Ubuntu: `sudo apt-get install python3-venv python3-dev git build-essential`.
 ```bash
 git clone --depth 1 https://github.com/amasat01/eagle.git
 eagle/benchmarks/reproduce/bootstrap.sh --from-pypi          # venv + pinned wheels, ~10 GB of disk
-eagle/benchmarks/reproduce/run_cards.sh --split --preset smoke   # minutes: checks the setup
-eagle/benchmarks/reproduce/run_cards.sh --split                  # the full cards
+eagle/benchmarks/reproduce/run_cards.sh --plan a100 --dry-run    # the plan and its minutes
+eagle/benchmarks/reproduce/run_cards.sh --plan a100 --upload gs://BUCKET/cards
 ```
 
 Cards land in `~/.cache/raptor-repro/cards/<gpu>--<cpu>/` (`--out` to change); copy them
@@ -72,7 +71,7 @@ and the exact package versions. `REPRO_PYTHON=/path/to/python` picks the interpr
 
 Open `kaggle.ipynb` in a Kaggle notebook, choose the **GPU T4 x2**
 accelerator, turn Internet on, and run all cells. A session is capped at 12 h:
-the run is split into resumable steps (`run_cards.sh --split`) and stops before
+the run is the T4 plan in resumable steps (`run_cards.sh --plan t4`) and stops before
 the cap. To continue, save the version, attach its output to a new session and
 set `RESUME_FROM`. Kaggle's 4 shared vCPUs make its CPU cards a different
 machine class from the 8-thread arms the CPU cards time, so run the GPU cards there.
@@ -121,15 +120,10 @@ left alone and every row records the SM clock NVML reads.
 
 ## Time and cost
 
-On the Quadro P2000 development box, `bootstrap.sh` took about 2 min (cpu profile)
-and 4 min (gpu profile), and `--preset smoke` 1.5 min for the CPU cards and 3 min
-for the GPU cards; it checks the whole chain. The full matrix
-(N = 10³…10⁶, every pass) takes hours per card on a development GPU: the
-timing pass is the short part, the memory and compile passes (a fresh process
-per arm, size and configuration) and the optional Nsight Systems pass dominate.
-`--preset short` (N ≤ 10⁵) gives a first look at a fraction of that. On vast.ai
-a consumer GPU rents for roughly $0.2–0.5/h and an A100/H100 for $1–3/h at the
-time of writing; Kaggle is free.
+`run_cards.sh --plan NAME --dry-run` prints each device's steps with the minutes expected and the cap of each
+(A100 about 47 min, L4 about 50, Zen5 about 30, the T4 plan under 2 h, the P2000 rehearsal under 60). On the Quadro P2000
+development box `bootstrap.sh` took about 2 min (cpu profile) and 4 min (gpu profile). On vast.ai a consumer GPU rents for
+roughly $0.2-0.5/h and an A100/H100 for $1-3/h at the time of writing; Kaggle is free.
 
 ## The FP64 class caveat
 
