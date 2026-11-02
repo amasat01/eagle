@@ -119,3 +119,24 @@ def test_an_arm_predicted_over_the_budget_is_not_warmed_up():
     assert pc._predicted_over_budget({1_000_000: 13.0}, 10_000_000) == 1_000_000      # 130 s predicted
     assert pc._predicted_over_budget({1_000_000: 11.0}, 10_000_000) is None           # 110 s: it runs
     assert pc._predicted_over_budget({}, 10_000_000) is None                          # nothing measured: the warm-up decides
+
+
+def _assemble(card_module, parts, rows, tmp_path):
+    assert card_module.main(["--smoke", "--assemble", "--rows", rows, "--parts", str(parts), "--out-dir", str(tmp_path / "out")]) == 0
+    return json.loads(next((tmp_path / "out").glob("feature_card_*.json")).read_text())["rows"]
+
+
+def test_assemble_keeps_the_saved_mpi_arms(card_module, tmp_path):
+    parts = tmp_path / "parts"
+    for arm in ("two_ranks", "one_rank"):
+        card_module.cc.part_save(parts, f"mpi_partition_all_float64_{arm}_smoke", {"status": "ok", "wall_s": {"median": 1.0, "iqr": 0.1, "rounds": 3}})
+    (row,) = _assemble(card_module, parts, "mpi_partition", tmp_path)
+    assert {a: r["status"] for a, r in row["arms"].items()} == {"two_ranks": "ok", "one_rank": "ok"}
+
+
+def test_assemble_keeps_a_failed_part_with_its_reason(card_module, tmp_path):
+    parts = tmp_path / "parts"
+    card_module.cc.part_save(parts, "mpi_partition_all_float64_two_ranks_smoke", {"status": "failed: rc 1: boom"})
+    (row,) = _assemble(card_module, parts, "mpi_partition", tmp_path)
+    assert row["arms"]["two_ranks"]["status"] == "failed: rc 1: boom"
+    assert row["arms"]["one_rank"]["status"].startswith("not_run")

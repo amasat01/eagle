@@ -1168,12 +1168,13 @@ def published_peak_bytes(row, rows, card_kind):
     return net_peak_bytes(row, card_kind)
 
 
-def part_load(parts, key):
-    """The result an earlier run saved under ``key`` in the ``parts`` directory (None: no directory or no part), unless it failed."""
+def part_load(parts, key, keep_failed=False):
+    """The result an earlier run saved under ``key`` in the ``parts`` directory (None: no directory or no part), unless it failed:
+    a resumed run tries a failed arm again, ``--assemble`` (``keep_failed``) keeps it with its reason."""
     path = parts and pathlib.Path(parts) / f"{key}.json"
     if path and path.exists():
         obj = json.loads(path.read_text())
-        if not str(obj.get("status", "")).startswith("failed"):
+        if keep_failed or not str(obj.get("status", "")).startswith("failed"):
             return obj
     return None
 
