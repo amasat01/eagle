@@ -33,12 +33,6 @@ Claim kinds (``kind`` is the first word of a span)
   xmin   factor over the minimum state   pct   a percentage of a card field
   eff    efficiency on an uneven batch (see EFFICIENCY below)
   rate   a rate card field    comp  a cold/warm compile time (``which=``)
-  cmp   large-N compare evidence (``benchmarks/compare_card/<slug>.csv``): a
-        ratio of two arms' walls when ``den_arm`` is given, else one arm's wall;
-        selectors ``dev``, ``n``, ``dist``, ``steps``, ``arm`` and optionally
-        ``kernel`` (default ``osc``)::
-
-          <!--c cmp dev=h100 n=1e7 dist=spread steps=1000 arm=warp den_arm=auto-->3.2×<!--/c-->
 EFFICIENCY (``eff``)
   ``eff = R_spread / R_SOL``. ``R_spread`` is the fastest ``sample_steps_per_s``
   among the named arm(s) on the card's largest N for the span's ``dist`` and
@@ -69,7 +63,6 @@ Reads the cards only; imports no GPU library.
 
 from __future__ import annotations
 
-import csv
 import fnmatch
 import json
 import math
@@ -212,24 +205,6 @@ class Cards:
                 f"{pattern!r} matches several cards: {[h.name for h in hits]}"
             )
         return hits[0]
-
-    def compare_rows(self, dev):
-        """The rows of ``benchmarks/compare_card/<slug>.csv`` for a device alias."""
-        if dev == "headline":
-            dev = self.headline["dev"]
-        pattern = DEVICES.get(dev, dev)
-        folder = self.root / "benchmarks" / "compare_card"
-        hits = [h for h in sorted(folder.glob("*.csv")) if fnmatch.fnmatch(h.stem, pattern)]
-        if not hits:
-            raise ClaimError(
-                f"missing compare evidence: benchmarks/compare_card/{pattern}.csv (device {dev!r})"
-            )
-        if len(hits) > 1:
-            raise ClaimError(f"{pattern!r} matches several compare files: {[h.name for h in hits]}")
-        if hits[0] not in self._cache:
-            with open(hits[0], newline="") as fh:
-                self._cache[hits[0]] = list(csv.DictReader(fh))
-        return self._cache[hits[0]]
 
     def load(self, card, dev):
         p = self.path(card, dev)
@@ -427,34 +402,8 @@ def _split(sel):
     return num, den
 
 
-def _cmp_wall(cards, sel):
-    """One compare row's wall in seconds. Reads ``clock_normalised_ms`` when the
-    row has it (the wall rescaled to the device's reference SM clock), else
-    ``median_ms``. A row whose status is not ``ok`` is refused."""
-    want = {
-        "kernel": sel.get("kernel", "osc"),
-        "n": str(_num(sel["n"])),
-        "steps": str(_num(sel["steps"])),
-        "dist": sel["dist"],
-        "arm": sel["arm"],
-    }
-    rows = [r for r in cards.compare_rows(sel["dev"]) if all(r[k] == v for k, v in want.items())]
-    if len(rows) != 1:
-        raise ClaimError(f"compare {sel['dev']}: {len(rows)} rows match {want}")
-    row = rows[0]
-    if row["status"] != "ok":
-        raise ClaimError(f"compare {sel['dev']}: row {want} has status {row['status']!r}, not ok")
-    ms = row["clock_normalised_ms"] or row["median_ms"]
-    return float(ms) / 1000.0
-
-
 def render(cards, kind, sel):
     """The text one claim stands for."""
-    if kind == "cmp":
-        num, den = _split(sel)
-        if "den_arm" not in sel:
-            return fmt_time(_cmp_wall(cards, num))
-        return fmt_ratio(_cmp_wall(cards, num) / _cmp_wall(cards, den))
     if kind == "wall":
         _c, row = _resolve(cards, sel)
         return fmt_time(cc.center(row["wall_s"]))
