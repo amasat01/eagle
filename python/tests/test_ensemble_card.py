@@ -101,3 +101,17 @@ def test_missing_optional_libraries_become_arms_not_run(monkeypatch):
         assert not_run[arm] == "torch not installed in this profile"
     assert not_run["jax_vmap"] == "jax not installed in this profile"
     assert not set(not_run) & set(names) and "eagle_graph" in names
+
+
+def test_a_float32_device_arm_uploads_its_inputs_in_the_plane_dtype():
+    """RED: the cast to the hard-coded float64 ``SCALAR`` raises TypeError on a float32 plane (needs a device)."""
+    import numpy as np
+    import pytest
+
+    cp = pytest.importorskip("cupy")
+
+    module = _rk78_script()
+    arm = module._GpuArm(8)
+    arm.planes = {k: v.astype("float32") if v.dtype == "float64" else v for k, v in arm.planes.items()}
+    arm.upload({name: np.ones(8) for name in module.STATE_NAMES})
+    assert arm.planes["s"].dtype == cp.float32 and float(arm.planes["s"][0, 0]) == 1.0

@@ -546,7 +546,7 @@ class _GpuArm:
     def upload(self, inp):
         import numpy as np
 
-        self.planes["s"].set(np.stack([inp[name] for name in STATE_NAMES]).astype(SCALAR))
+        self.planes["s"].set(np.stack([inp[name] for name in STATE_NAMES]).astype(self.planes["s"].dtype))
         self.planes["t"].fill(0.0)
         self.planes["h"].fill(H0)
         self.planes["n_acc"].fill(0)
