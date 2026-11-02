@@ -457,18 +457,10 @@ CARDS_PLAN = (
                        "--cache", "{work}/sweep_cache"], 4, 11 * 60),
     ("c1_perf_card", ["benchmarks/perf_card/perf_card.py", "--parts", "{out}/parts/c1", "--out-dir", "{out}"], 89, None),
     ("c2_feature_card", ["benchmarks/perf_card/feature_card.py", "--parts", "{out}/parts/c2", "--out-dir", "{out}"], 12, None),
-    ("p4_chunk_residency", ["benchmarks/reproduce/gpu_profile.py", "--stage", "chunk_residency", "--out", "{out}/profile"], 8, 16 * 60),
+    ("p4_chunk_residency", ["benchmarks/reproduce/gpu_profile.py", "--stage", "chunk_residency", "--ns", "1000000", "--budget-s", "870",
+                            "--out", "{out}/profile"], 8, 16 * 60),
 )
 DEADLINE_FACTOR, INFLIGHT_S, ASSEMBLE_S = 1.5, 12 * 60, 20 * 60
-
-
-def link_hawk_tests(py, hawk):
-    """The wheel's sweep looks for hawk's ``tests/`` beside its site-packages: link the clone's."""
-    site = subprocess.run([str(py), "-c", "import hawk, pathlib; print(pathlib.Path(hawk.__file__).parents[1])"],
-                          capture_output=True, text=True).stdout.strip()
-    link = pathlib.Path(site) / "tests"
-    if site and not link.exists():
-        link.symlink_to(hawk / "tests")
 
 
 def run_cards(py, roots, out, result, work):
