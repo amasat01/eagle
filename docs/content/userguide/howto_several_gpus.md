@@ -1,4 +1,4 @@
-# Run one kernel across several GPUs
+# Run on several GPUs
 
 `eagle.exec.RankPartition` splits a kernel's samples across MPI ranks. Every rank ends with the whole output, bit for bit the same as one rank would have computed. Give each rank its own GPU and the samples are spread over the cards.
 
@@ -17,7 +17,7 @@ rank, size = eexec.RankPartition.world()
 out = p.run(device=rank, **planes)          # every rank returns the whole plane
 ```
 
-`plugin` is a deployed kernel (see [Launch a kernel and use the registry](tutorials/01_launch_and_registry)) and `planes` are its inputs by name. `device=rank` uploads this rank's share to GPU number `rank`; eagle does not choose the card for you. Set `CUDA_VISIBLE_DEVICES` per rank in your launcher instead if you prefer.
+`plugin` is a deployed kernel (see [Load a compiled kernel](tutorials/01_launch_and_registry)) and `planes` are its inputs by name. `device=rank` uploads this rank's share to GPU number `rank`; eagle does not choose the card for you. Set `CUDA_VISIBLE_DEVICES` per rank in your launcher instead if you prefer.
 
 ## Launch it
 

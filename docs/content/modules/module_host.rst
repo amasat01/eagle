@@ -1,5 +1,5 @@
-Module: cpu
-===========
+cpu module
+==========
 
 The ``cpu`` module is the pure-C++ (OpenMP + SIMD) counterpart of the CUDA
 graph launchers.  ``cpu::Host`` provides packet-batched launch wrappers: each

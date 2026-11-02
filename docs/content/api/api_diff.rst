@@ -1,5 +1,5 @@
-API reference — reverse of a graph
-==================================
+Reverse API
+===========
 
 The transposition behind :mod:`eagle.diff`: given a graph ``Description`` and
 the planes each node's vjp reads and writes, ``eagle::diff::transpose`` returns

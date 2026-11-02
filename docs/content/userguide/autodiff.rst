@@ -1,5 +1,5 @@
-Gradients through a graph: ``eagle.diff``
-=========================================
+Reverse mode over a graph
+=========================
 
 .. contents:: On this page
    :local:

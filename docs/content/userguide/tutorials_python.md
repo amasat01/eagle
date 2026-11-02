@@ -20,7 +20,7 @@ extra/fork_join_graph
 - [What a graph is](tutorials/02_cuda_graphs_python): one launch replays a whole run.
 - [A multi-kernel step](tutorials/04_multi_kernel_workflow): propagate, diagnose and stop, declaratively.
 - [Build a step as a graph](tutorials/09_graph_model): `eagle.Graph`, built, inspected and run.
-- [Conditionals, budgets and events](tutorials/11_conditionals_budgets_events): reverse through a skipped step, a capped memory budget, and a stop between two steps.
+- [Gradients through conditionals](tutorials/11_conditionals_budgets_events): reverse through a skipped step, a capped memory budget, and a stop between two steps.
 - [A graph with parallel branches](extra/fork_join_graph): fork, join and reduce, optional reading.
 
 ## Run kernels
@@ -59,6 +59,6 @@ tutorials/10_gradients_through_a_graph
 tutorials/train_through_a_branch
 ```
 
-- [Gradients through a physics kernel](tutorials/03_torch_training): a hawk kernel inside `loss.backward()`.
+- [Gradients through a kernel](tutorials/03_torch_training): a hawk kernel inside `loss.backward()`.
 - [Gradients through a graph](tutorials/10_gradients_through_a_graph): `eagle.diff`, checked against finite differences.
 - [Train through a branch](tutorials/train_through_a_branch): `jump=` gives a learnable threshold its gradient, and descent finds it.

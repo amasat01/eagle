@@ -1,5 +1,5 @@
-API reference — reduce
-======================
+reduce API
+==========
 
 GPU (CUDA) and CPU (OpenMP) parallel reductions.  The two engines live in the
 device namespaces as ``eagle::cuda::Reduction`` and ``eagle::cpu::Reduction``;

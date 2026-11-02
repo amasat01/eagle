@@ -1,5 +1,5 @@
-Seeing a graph from C++: ``eagle/graph``
-========================================
+Graph view
+==========
 
 .. contents:: On this page
    :local:

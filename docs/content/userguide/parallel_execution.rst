@@ -1,5 +1,5 @@
-The parallel-execution model
-=============================
+Parallel execution
+==================
 
 .. contents:: On this page
    :local:

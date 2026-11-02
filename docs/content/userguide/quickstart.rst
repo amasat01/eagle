@@ -1,5 +1,5 @@
-C++ quick start
-===============
+C++ quickstart
+==============
 
 .. contents:: On this page
    :local:

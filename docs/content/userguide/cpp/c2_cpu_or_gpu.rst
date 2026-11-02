@@ -1,5 +1,5 @@
-C2 — Run one loop on the CPU or the GPU, unchanged
-==================================================
+C2 CPU or GPU
+=============
 
     The same source file compiles against CUDA and against plain
     C++/OpenMP -- one dispatch call, two backends, no ``#ifdef`` in the body.

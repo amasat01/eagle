@@ -1,5 +1,5 @@
-API reference — util
-====================
+util API
+========
 
 Global typedefs, logging, error handling, observer-pattern primitives,
 array slicing, and OpenMP thread-count management.

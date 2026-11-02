@@ -1,5 +1,5 @@
-API reference — cuda
-====================
+cuda API
+========
 
 CUDA-graph capture and launch machinery, the GPU scan / reduction engines,
 plus the RAII stream primitives.

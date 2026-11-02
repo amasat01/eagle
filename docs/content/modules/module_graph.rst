@@ -1,5 +1,5 @@
-Module: cuda
-============
+cuda module
+===========
 
 The ``cuda`` module is the heart of eagle: it records a stream of kernel
 launches once, assembles them into a CUDA dependency graph, and replays the

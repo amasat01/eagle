@@ -1,4 +1,4 @@
-# The workload and the ways of running it
+# Workloads
 
 
 A large class of scientific code integrates many independent problems at

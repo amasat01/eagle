@@ -1,5 +1,5 @@
-Tutorials
-=========
+C++ tutorials
+=============
 
 .. contents:: On this page
    :local:

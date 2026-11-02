@@ -1,4 +1,4 @@
-# Contributing to eagle
+# Contributing
 
 eagle is the execution layer: kernel launch, graph capture, the plugin registry and the batch runner, with a header-only C++ core and a Python package. Read [How we build](https://amasat01.github.io/raptor/content/principles.html) first: the rules every pull request in the family is read against. The terms are in the repository's `CONTRIBUTING.md`.
 
