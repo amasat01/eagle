@@ -253,18 +253,6 @@ HostTeam = _HostTeam()
 RankPartition = _RankPartition()
 DeviceGroup = _Unimplemented("device_group")
 
-_BY_NAME = {s.name: s for s in (DeviceKernel, HostTeam, RankPartition, DeviceGroup)}
-
-
-def _structure_from_name(name: str) -> Structure:
-    """Resolve a wire-spelled structure name to its singleton :class:`Structure`."""
-    try:
-        return _BY_NAME[name]
-    except KeyError:
-        raise ValueError(
-            f"execution structure {name!r} is not one of {sorted(_BY_NAME)}"
-        ) from None
-
 
 def check_placement(access: str, structure, npartitions: int = 1) -> None:
     """Raise :class:`ValueError` naming the rule if running a body of
