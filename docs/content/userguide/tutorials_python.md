@@ -25,12 +25,13 @@ extra/fork_join_graph
 
 ## Run kernels
 
-Launch a batch, fuse steps, let finished samples leave, choose where it runs and see where the time went. The C++ track is the last entry.
+Build and call one kernel, launch a batch, fuse steps, let finished samples leave, choose where it runs and see where the time went. The C++ track is the last entry.
 
 ```{toctree}
 :maxdepth: 1
 :hidden:
 
+first_kernel
 tutorials/05_steps_per_launch
 tutorials/06_compaction_and_reorder
 tutorials/07_host_or_device
@@ -38,6 +39,7 @@ tutorials/08_profile_your_run
 tutorials
 ```
 
+- [Your first kernel](first_kernel): write a kernel, build it, call it; the other notebooks call kernels the same way.
 - [Steps per launch](tutorials/05_steps_per_launch): fuse steps to cut host-device chatter.
 - [Finished samples](tutorials/06_compaction_and_reorder): compaction, reorder, and when not to.
 - [Host or device?](tutorials/07_host_or_device): let the data decide where it runs.
