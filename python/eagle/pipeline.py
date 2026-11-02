@@ -100,6 +100,14 @@ class _LaunchHandles(NamedTuple):
     launcher: object  #: the bound eagle._core Launcher (async.launch() /.synchronize())
 
 
+
+def _warm(step, stream) -> None:
+    """Before capture: a step whose launch needs per-stream state made outside
+    a capture region (a GEMM route's cuBLAS handle) makes it now, on ``stream``."""
+    warm = getattr(getattr(step, "key", None), "_warm_stream", None)
+    if warm is not None:
+        warm(stream)
+
 class _ConcurrentGroup:
     """Tagged record for a fork/join group registered via
     :meth:`GraphPipeline.add_concurrent`, distinguishable from the bare
@@ -312,8 +320,11 @@ class GraphPipeline:
                     self._weave(step._fork.branch(j), member)
                     for j, member in enumerate(step.members)
                 ]
+                for j, member in enumerate(step.members):
+                    _warm(member, step._fork.branch(j))
             else:
                 runs[i] = self._weave(self._sptr, step)
+                _warm(step, self._sptr)
 
         capturer = self._core.StreamCapturer(self._sptr)
         self._scatter = []              # the split binds this capture launches: a replay marks them pending

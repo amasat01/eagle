@@ -191,6 +191,18 @@ class _Bound:
             spec.check(self._buffers[spec.name])
         return self
 
+    def _warm_stream(self, stream) -> None:
+        """Make this device's cuBLAS handle for ``stream`` (an empty product):
+        creating it allocates, which a capture region refuses."""
+        from .. import _core
+        from .capture import _device_ptr
+
+        if self._device is None:
+            return
+        ptr = _device_ptr(next(iter(self._buffers.values())))
+        double = int(self._dtype != "float32")
+        _core.gemm(double, 0, 0, 0, 0, 0, ptr, 1, ptr, 1, ptr, 1, 1, 0, 0, 0, 1.0, 0.0, int(stream), self._device, False)
+
     def launch(self, stream=None, *, grid=None, block=None) -> None:
         if self._device is None:
             self._steps("host", self._buffers)
@@ -204,6 +216,16 @@ class _Bound:
 def bind(p, planes, device=None):
     """:meth:`eagle.plan.Plan.bind` of a routed plugin."""
     return _Bound(p, planes, device)
+
+
+def _placed(value, dtype, xp):
+    """``value`` where the plan runs: a numpy (host) or CUDA-interface (device)
+    array already there is kept as it is (a view may be sliced), else an
+    :class:`eagle.Array` copy."""
+    here = hasattr(value, "__cuda_array_interface__") if xp != "cpu" else hasattr(value, "__array_interface__")
+    if here and str(getattr(value, "dtype", "")) == dtype:
+        return value
+    return arrays.asarray(value, dtype, xp)
 
 
 def run(p, kw):
@@ -221,7 +243,7 @@ def run(p, kw):
 
             on = _current_device_ordinal()
     xp = "cpu" if on is None else f"cuda:{on}"
-    planes = {nm: arrays.asarray(kw[nm], route.dtype, xp) for nm in route.inputs}
+    planes = {nm: _placed(kw[nm], route.dtype, xp) for nm in route.inputs}
     out = kw.get(route.out)
     if out is None:
         sizes = [_free_size(op) for op in route.record.operands]
@@ -229,7 +251,7 @@ def run(p, kw):
             raise ValueError(f"eagle.plan.run: {p.plugin.name!r} reads a plane counted by the launch, so the "
                              f"count comes from the output: pass {route.out}= (one value per lane)")
         out = _alloc.zeros(xp, sizes[0] * sizes[1], dtype=route.dtype)
-    planes[route.out] = arrays.asarray(out, route.dtype, xp)
+    planes[route.out] = _placed(out, route.dtype, xp)
     for role, nm in p.plugin.arg_spec:
         if role in OUTPUT_ROLES and nm != route.out:
             planes[nm] = kw[nm]

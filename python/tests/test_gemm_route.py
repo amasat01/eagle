@@ -159,3 +159,31 @@ def test_the_default_and_direct_leave_every_value_bit_identical(tmp_path):
         p.run(w=w, f=f, y=y)
         ys.append(y)
     assert ys[0].tobytes() == ys[1].tobytes()
+
+
+@hawk.kernel
+def contract_staged(w: Table["row":R, "neuron":U], feat: hawk.Staged[hawk.Vector[R], m.n_samples],
+                    y: Mutable[Scalar]):
+    sample, unit = m.split_index(U)
+    acc = 0.0
+    for r in range(R):
+        acc = acc + w.at(row=r, neuron=unit) * feat.at(plane=r, sample=sample)
+    y = acc
+
+
+@pytest.mark.parametrize("dtype", ["float64", "float32"])
+def test_a_staged_plane_counted_by_the_launch_routes_within_the_ulp_contract(dtype, tmp_path):
+    """``Staged[..., n_samples]``: the free extent is the run's, ``n // U``; the plane's stride is ``n``."""
+    direct = eagle.plan.auto(contract_staged, targets=("host",), cache_dir=str(tmp_path), scalar_type=dtype)
+    with policy.using(contraction="gemm"):
+        routed = eagle.plan.auto(contract_staged, targets=("host",), cache_dir=str(tmp_path), scalar_type=dtype)
+    assert routed.plugin._gemm is not None
+    w, f, _cot = _planes(dtype)
+    n = S * U
+    feat = np.zeros((R, n), dtype)
+    feat[:, :S] = f
+    y_d, y_r = np.zeros(n, dtype), np.zeros(n, dtype)
+    direct.run(w=w, feat=feat, y=y_d)
+    routed.run(w=w, feat=feat, y=y_r)
+    assert _rel(y_r, y_d) <= (1e-15 if dtype == "float64" else 2 * np.finfo(np.float32).eps)
+    assert _rel(y_r, (f.astype(np.float64).T @ w.astype(np.float64)).reshape(-1)) < 1e-6
