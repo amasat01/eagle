@@ -55,8 +55,9 @@ def to(a, name):
 
 
 def route(result, returns):
-    """``result`` (an array, or a dict / tuple / list of them) with every :class:`eagle.Array` converted to
-    ``returns``'s type. ``None`` returns ``result`` as it is. A framework that is not installed warns ONCE and
+    """``result`` (an array, or a dict / tuple / list of them) with every array converted to ``returns``'s
+    type: each :class:`eagle.Array`, and each plane the caller passed in (NumPy, CuPy, torch, ...), zero-copy where
+    the framework allows. ``None`` returns ``result`` as it is. A framework that is not installed warns ONCE and
     leaves the :class:`eagle.Array` results."""
     if returns is None:
         return result
@@ -81,4 +82,8 @@ def _convert(x, convert):
         return {k: _convert(v, convert) for k, v in x.items()}
     if isinstance(x, (tuple, list)):
         return type(x)(_convert(v, convert) for v in x)
+    if hasattr(x, "__cuda_array_interface__") or hasattr(x, "__dlpack__"):   # a plane the caller passed in
+        from ..arrays import asarray
+
+        return convert(asarray(x))
     return x

@@ -27,6 +27,7 @@ This section covers what changes from 0.7.2. Names that left are in the table at
 ### Changed
 
 - `simulate(..., history=True | k)` returns `res.history[name]`, the state before the first step and after every k-th. `record=` must now be `True` or `False`.
+- `returns=` hands back every result array as the asked type, including the planes you passed in (before, a CuPy state plane came back as your CuPy array under `returns="numpy"`).
 - The performance pages, README and prose claims read the new ensemble card, and the coverage page lists what each claim rests on.
 - Dispatch refuses a fused runner over sorted planes; index planes narrow once at entry, and `bind` refuses a wrong width. Grouped and segmented kernels are placed.
 - Scratch arenas only plan: each graph owns its scratch buffer.
