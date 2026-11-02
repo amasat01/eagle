@@ -699,8 +699,6 @@ class Simulation:
         """The loop the how-to teaches, inside the engine: one step per ``runner.run()``, the state planes copied
         into ``(rows, ...)`` arrays after every k-th step. A sample that finished repeats its state; once every
         sample has finished the rows left repeat the final state."""
-        from . import _core
-
         k = self._history
         names = self.names["state"] + self.names["allocated"]
         src = {nm: arrays.asarray(self._state[nm]) for nm in names}
@@ -709,7 +707,7 @@ class Simulation:
 
         def keep(i):
             for nm, a in src.items():
-                _core.array_copyto(history[nm][i], a)
+                arrays.copyto(history[nm][i], a)
 
         keep(0)
         steps = 0
