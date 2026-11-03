@@ -65,6 +65,11 @@ NVLIB_CELLS = (("contraction", "all", "float64", "einsum"), ("contraction", "all
 NVLIB_SECTIONS = ("SpeedOfLight", "LaunchStats", "Occupancy", "ComputeWorkloadAnalysis", "MemoryWorkloadAnalysis",
                   "WarpStateStats", "SchedulerStats")
 ENSEMBLE_ARMS = ("eagle_graph", "eagle_graph_compact", "eagle_graph_reorder", "eagle_graph_persist", "eagle_simulate")  # the card's eagle arms
+ENSEMBLE_QUICK_ARM = "eagle_graph_persist"    # the smoke's arm: one plain launch, which Nsight Compute can always capture
+#: Nsight Compute cannot capture a kernel inside a CUDA graph that has conditional nodes (the graph arms' device-side loop):
+#: such a row is labelled, not failed; the graph arms' launch shape comes from launch_shape (Nsight Systems).
+NCU_CONDITIONAL_GRAPH = "graph which can have conditional nodes are not supported for profiling"
+NOT_PROFILABLE = "not profilable: Nsight Compute cannot capture kernels in a CUDA graph with conditional nodes"
 LAUNCH_ARMS = ("eagle_graph", "eagle_graph_persist", "eagle_simulate")
 KERNEL = "regex:rkf78"                        # the card's attempt kernel (every eagle arm's)
 
@@ -477,11 +482,13 @@ def capture_row(args, rep, cmd_line, metrics, **kw):
 def ncu_ensemble(args):
     require_ncu(args)
     notes = []
-    for arm in ENSEMBLE_ARMS[:1] if args.quick else ENSEMBLE_ARMS:
+    for arm in (ENSEMBLE_QUICK_ARM,) if args.quick else ENSEMBLE_ARMS:
         for dist in ("spread", "uniform"):
             cell = {"arm": arm, "n": 10_000 if args.quick else POINT[0], "dist": dist}
             row, out, note = capture_row(args, args.out / f"ncu_ensemble_{arm}_{dist}", worker_cmd(cell),
                                          ENSEMBLE_METRICS + DP_METRICS, regex=KERNEL)
+            labelled = NCU_CONDITIONAL_GRAPH in note
+            note = NOT_PROFILABLE if labelled else note
             attempts = worker_row(out).get("sample_steps")
             dp = sum(row[m] or 0.0 for m in DP_METRICS)
             emit(args.out / "ncu_ensemble.csv", {
@@ -489,7 +496,8 @@ def ncu_ensemble(args):
                 "lane_efficiency": row[ENSEMBLE_METRICS[0]] / 32 if row[ENSEMBLE_METRICS[0]] is not None else None,
                 "dp_inst_per_attempt": dp / attempts if row["kernels"] and attempts else None, "note": note})
             say(f"ncu {arm} {dist}: {'ok' if row['kernels'] else note.splitlines()[0][:60]}")
-            notes.append(note)
+            if not labelled:
+                notes.append(note)
     ncu_stage_verdict(notes)
 
 

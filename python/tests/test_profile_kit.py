@@ -593,6 +593,33 @@ def test_the_ensemble_covers_every_eagle_arm_of_the_card_and_only_those(tmp_path
     assert len(rows) == len(calls) == 2 * len(mod.ENSEMBLE_ARMS) and all(k["regex"] == mod.KERNEL for k in calls)
 
 
+def test_a_graph_arm_ncu_cannot_capture_is_labelled_and_the_smoke_profiles_the_persist_arm(tmp_path, monkeypatch):
+    """The L4 smoke 2026-11-03: ncu refuses kernels in graphs with conditional nodes. Such a row is labelled, the stage
+    stays ok when the plain-launch arms capture, and the smoke's one arm is the persist arm.
+    RED: drop the label and the stage fails on the graph arms alone."""
+    mod = _kit_module()
+    monkeypatch.setattr(mod, "require_ncu", lambda args: None)
+    refused = "==WARNING== Kernel nodes of a " + mod.NCU_CONDITIONAL_GRAPH + "."
+    seen = []
+
+    def run(*a, **k):
+        cmd = next(x for x in a if isinstance(x, list))
+        arm = json.loads(cmd[-1])["arm"]
+        seen.append(arm)
+        return ([], refused) if arm.startswith("eagle_graph") and arm != "eagle_graph_persist" else \
+            ([{"name": "rkf78", "gpu_time_s": 1.0}], "")
+
+    monkeypatch.setattr(mod, "ncu_run", run)
+    mod.ncu_ensemble(types.SimpleNamespace(quick=False, out=tmp_path))      # no raise: persist and simulate captured
+    with (tmp_path / "ncu_ensemble.csv").open() as fh:
+        rows = {(r["arm"], r["dist"]): r for r in csv.DictReader(fh)}
+    assert rows[("eagle_graph", "spread")]["note"] == mod.NOT_PROFILABLE and not rows[("eagle_simulate", "spread")]["note"]
+    seen.clear()
+    (tmp_path / "q").mkdir()
+    mod.ncu_ensemble(types.SimpleNamespace(quick=True, out=tmp_path / "q"))
+    assert set(seen) == {"eagle_graph_persist"}
+
+
 def test_every_feature_card_arm_is_classified_as_ours_or_external():
     fc = _kit_module().load_card(_kit_module().FEATURE_PATH)
     arms = {a for spec in fc.ROWS.values() for a in spec["arms"]}
