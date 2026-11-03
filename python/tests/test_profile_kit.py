@@ -482,6 +482,37 @@ def _run_cards(*flags):
     return done.returncode, done.stdout + done.stderr
 
 
+@pytest.mark.parametrize("plan", ["zen5", "c4a"])
+@pytest.mark.parametrize("flags", [(), ("--smoke",)])
+def test_the_cpu_plans_list_the_pcpu_step_with_its_command(plan, flags):
+    rc, out = _run_cards("--plan", plan, *flags)
+    assert rc == 0 and "[repro] step pcpu" in out
+    cmd = [ln for ln in out.splitlines() if ln.startswith("+ (") and "perf_card/pcpu.py" in ln]
+    assert len(cmd) == 1 and ("--smoke" in cmd[0]) == bool(flags), out
+
+
+def _pcpu(monkeypatch, tmp_path, items):
+    spec = importlib.util.spec_from_file_location("pcpu_under_test", REPRO.parent / "perf_card" / "pcpu.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    monkeypatch.setattr(mod.shutil, "which", lambda name: None)              # no perf on this machine
+    monkeypatch.setattr(mod, "plan", lambda cx: items)
+    rc = mod.main(["--smoke", "--out-dir", str(tmp_path / "out"), "--parts", str(tmp_path / "parts")])
+    return rc, json.loads((tmp_path / "out" / "pcpu_summary.json").read_text())["items"]
+
+
+def test_a_pcpu_item_needing_perf_is_labelled_not_run_and_the_rest_run(monkeypatch, tmp_path):
+    rc, items = _pcpu(monkeypatch, tmp_path, [("c_stat_x", lambda: pytest.fail("ran")), ("e_x", lambda: {"status": "ok"})])
+    assert rc == 0 and items["c_stat_x"]["status"] == "not_run: perf not installed" and items["e_x"]["status"] == "ok"
+
+
+def test_a_pcpu_step_in_which_nothing_ran_exits_1(monkeypatch, tmp_path):
+    def boom():
+        raise RuntimeError("no")
+    rc, items = _pcpu(monkeypatch, tmp_path, [("c_stat_x", boom), ("d_record_x", boom), ("e_x", boom)])
+    assert rc == 1 and items["e_x"]["status"].startswith("failed: RuntimeError")
+
+
 @pytest.mark.parametrize("plan", ["l4", "a100", "zen5"])
 def test_a_smoke_session_runs_every_step_small_and_apart_from_the_full_one(plan):
     """--smoke: the plan's steps in order at their smallest, results and markers under <slug>-smoke (so a full run later

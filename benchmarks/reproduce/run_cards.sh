@@ -65,13 +65,15 @@ done
 #   guard only: the time left to the deadline + 12 min (one arm in flight: build 120 s + warm-up 120 s + rounds 300 s + a round
 #   120 s); the stage steps keep their own caps (sol_probe 180 s, wide_sweep 600 s, chunk_residency 900 s, launch_shape 600 s,
 #   ncu_ensemble --quick 300 s, + 1 min; p25 stops starting stages after 20 min). A step cap "D" means that hang guard.
+# pcpu = the CPU profile step (ISA A/B, thread sweep, perf stat/record, small-N baselines, memory phases): 18 min, the local
+#   sequence (about 35 min on a busy 4-core host) x 0.5 for the Zen5 session.
 # p25 = profile stages 2-5; ncu = the quick Nsight Compute smoke of the L4.
 case $PLAN in
   a100)  STEPS=(p0:1:4 p1:4:11 c1:27:D c2:14:D p25:18:35) ;      KIND=GPU ;;
   l4)    STEPS=(p0:1:4 p1:4:11 c1:26:D c2:12:D p4:8:16 ncu:2:6) ; KIND=GPU ;;
   t4)    STEPS=(p0:1:4 p1:4:11 c1:89:D c2:12:D p4:8:16) ;        KIND=GPU ;;
   p2000) STEPS=(p0:1:4 p1:4:11 c1:25:D c2:8:D p4:8:16 p5:3:11) ; KIND=GPU ;;
-  zen5|c4a) STEPS=(c1cpu:15:D c2cpu:8:D) ;                       KIND=CPU ;;
+  zen5|c4a) STEPS=(c1cpu:15:D c2cpu:8:D pcpu:18:D) ;                       KIND=CPU ;;
   *) die "--plan takes a100, l4, t4, p2000, zen5 or c4a" ;;
 esac
 # smoke: every step about 2 min (the card scripts' --smoke: N = 1e3, one round; the stages' --quick)
@@ -105,7 +107,7 @@ smoke_cmd() {
     printf '%s\n' "$w"
   done
   case $1 in
-    c1|c1cpu|c2|c2cpu) printf '%s\n' --smoke ;;
+    c1|c1cpu|c2|c2cpu|pcpu) printf '%s\n' --smoke ;;
     p1|p25|p4|p5) printf '%s\n' --quick ;;
   esac
 }
@@ -119,6 +121,7 @@ full_cmd() {
              printf '%s\n' python benchmarks/perf_card/perf_card.py --parts "$RES/parts/c1" --out-dir "$RES/perf_card"
            fi ;;
     c1cpu) printf '%s\n' python benchmarks/perf_card/cpu_card.py --parts "$RES/parts/c1cpu" --out-dir "$RES/perf_card" ;;
+    pcpu)  printf '%s\n' python benchmarks/perf_card/pcpu.py --parts "$RES/parts/pcpu" --out-dir "$RES/pcpu" ;;
     c2|c2cpu) printf '%s\n' python benchmarks/perf_card/feature_card.py --parts "$RES/parts/c2" --out-dir "$RES/perf_card" ;;
     p25)   printf '%s\n' bash benchmarks/reproduce/profile.sh --env "$ENVF" --out "$RES/profile" --deadline-min 20 --only ncu_corpus,ncu_ensemble,chunk_residency,launch_shape ;;
     p4)    printf '%s\n' bash benchmarks/reproduce/profile.sh --env "$ENVF" --out "$RES/profile" --only chunk_residency ;;
