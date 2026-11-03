@@ -284,17 +284,25 @@ def ncu_capture(args, rep, regex, cmd_line, metrics):
     if args.ncu_sudo and report.exists():
         subprocess.run(["sudo", "-n", "chown", f"{os.getuid()}:{os.getgid()}", str(report)])
     if done.returncode != 0 or not report.exists():
-        return {}, (done.stdout + done.stderr)[-300:]
+        return {}, ncu_failure_note(done.stdout + done.stderr)
     raw = subprocess.run([args.ncu, "--import", str(report), "--csv", "--page", "raw"],
                          capture_output=True, text=True).stdout
     return ncu_values(raw), done.stdout
 
 
+def ncu_failure_note(text):
+    """ncu's own ==ERROR== / ==WARNING== lines when it printed any (a library warning printed later must not hide
+    them), else the output's last 300 characters."""
+    own = [ln.strip() for ln in text.splitlines() if ln.lstrip().startswith(("==ERROR==", "==WARNING=="))]
+    return "\n".join(own[-5:]) if own else text[-300:]
+
+
 def ncu_stage_verdict(notes):
     """A stage whose every capture failed is failed, with ncu's reason: never ok over a table of empty rows."""
     if notes and all(notes):
-        why = next((ln.strip() for ln in reversed(notes[0].splitlines()) if "ERR_" in ln), "")
-        why = why or next((ln.strip() for ln in notes[0].splitlines() if ln.strip()), "no output")
+        lines = notes[0].splitlines()
+        why = next((ln.strip() for ln in lines if "==ERROR==" in ln or "ERR_" in ln), "")
+        why = why or next((ln.strip() for ln in lines if ln.strip()), "no output")
         if "ERR_NVGPUCTRPERM" in why:
             why = "the GPU performance counters are not permitted here (ERR_NVGPUCTRPERM)"
         raise RuntimeError(f"every ncu capture failed ({len(notes)}): {why}")

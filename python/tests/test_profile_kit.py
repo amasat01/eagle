@@ -461,3 +461,15 @@ def test_every_card_lock_carries_setuptools_scm_for_the_editable_builds():
     """bootstrap.sh installs aether-dsc, raptor and hawk with --no-build-isolation; their version comes from setuptools-scm."""
     for lock in sorted((REPRO / "locks").glob("cards-*.txt")):
         assert "setuptools-scm==" in lock.read_text(), lock.name
+
+
+def test_an_ncu_failure_note_keeps_ncus_own_lines_ahead_of_a_later_library_warning():
+    mod = _kit_module()
+    text = ("==PROF== Connected to process 1\n==ERROR== Profiling is not supported on this device\n"
+            "worker {}\n" + "x.py:600: FutureWarning: The pynvml package is deprecated. " * 8 + "\n")
+    note = mod.ncu_failure_note(text)
+    assert note == "==ERROR== Profiling is not supported on this device"
+    with pytest.raises(RuntimeError, match="not supported on this device"):
+        mod.ncu_stage_verdict([note])
+    assert mod.ncu_failure_note("plain output") == "plain output"          # nothing of ncu's own: the tail
+    assert "No kernels were profiled" in mod.ncu_failure_note("==WARNING== No kernels were profiled.\n")
