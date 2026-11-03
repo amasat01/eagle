@@ -139,7 +139,9 @@ full_cmd() {
     corp)  printf '%s\n' bash benchmarks/reproduce/profile.sh --env "$ENVF" --out "$RES/profile" --only ncu_corpus ;;
     ens)   printf '%s\n' bash benchmarks/reproduce/profile.sh --env "$ENVF" --out "$RES/profile" --only ncu_ensemble ;;
     feat)  printf '%s\n' bash benchmarks/reproduce/profile.sh --env "$ENVF" --out "$RES/profile" --only ncu_features ;;
-    p4)    printf '%s\n' bash benchmarks/reproduce/profile.sh --env "$ENVF" --out "$RES/profile" --only chunk_residency ;;
+    p4)    # the card plans keep the 900 s chunk stage (--deadline-min 15 clips profile.sh's cap); the profile plans the full one
+           printf '%s\n' bash benchmarks/reproduce/profile.sh --env "$ENVF" --out "$RES/profile" --only chunk_residency
+           [[ $PLAN == l4-prof || $PLAN == a100 ]] || printf '%s\n' --deadline-min 15 ;;
     p5)    printf '%s\n' bash benchmarks/reproduce/profile.sh --env "$ENVF" --out "$RES/profile" --only launch_shape ;;
     ncu)   printf '%s\n' bash benchmarks/reproduce/profile.sh --env "$ENVF" --out "$RES/profile" --only ncu_ensemble --quick ;;
   esac

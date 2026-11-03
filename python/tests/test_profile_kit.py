@@ -623,3 +623,10 @@ def test_the_full_profile_plans_run_the_five_profile_steps_and_the_smoke_maps_th
     for stage in ("ncu_corpus", "ncu_ensemble", "ncu_features", "chunk_residency", "launch_shape"):
         assert any(stage in ln and "--quick" not in ln for ln in full.splitlines() if ln.startswith("+ ("))
         assert any(stage in ln and "--quick" in ln for ln in smoke.splitlines() if ln.startswith("+ ("))
+
+
+@pytest.mark.parametrize("plan,bounded", [("l4", True), ("t4", True), ("p2000", True), ("l4-prof", False), ("a100", False)])
+def test_only_the_card_plans_bound_the_chunk_stage_to_its_old_900_s(plan, bounded):
+    _, out = _run_cards("--plan", plan)
+    (cmd,) = [ln for ln in out.splitlines() if ln.startswith("+ (") and "--only chunk_residency" in ln]
+    assert ("--deadline-min 15" in cmd) == bounded, cmd
