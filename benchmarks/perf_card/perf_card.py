@@ -811,6 +811,7 @@ def _make_array_arms(n, names):
             tc.out = dict(zip(PLANE_NAMES, (*s, t, h, a, r)))
 
         t0 = time.perf_counter()
+        cc.heartbeat("compile")   # allowed cc.COMPILE_S, not the build's limit
         run_compiled()  # the compile happens here, outside the timed span
         torch.cuda.synchronize()
         arms["torch_compiled"] = dict(state=tc, run=run_compiled, download=tc.download,
@@ -1277,7 +1278,9 @@ ARM_RUN_BUDGET_S = 120.0
 #: Timed rounds of one (arm, cell) stop at this many seconds (at least one round is always timed).
 CELL_BUDGET_S = 300.0
 ROUNDS_MIN, ROUNDS_MAX, IQR_STOP = 3, 9, 0.02
-TIMING_PROBE_TIMEOUT_S = cc.BUILD_S + ARM_RUN_BUDGET_S + CELL_BUDGET_S + ARM_RUN_BUDGET_S   # build, warm-up, rounds, a last round
+TIMING_PROBE_TIMEOUT_S = cc.BUILD_S + cc.COMPILE_S + ARM_RUN_BUDGET_S + CELL_BUDGET_S + ARM_RUN_BUDGET_S   # build, compile, warm-up, rounds, a last round
+#: The row of an arm whose first-call compile did not finish within cc.COMPILE_S (the arm is not tried again at other cells).
+COMPILE_LIMIT = f"not_run: compile > {cc.COMPILE_S / 60:.0f} min"
 #: ``spread-short`` ends at T_FINAL / SHORT_DIVISOR: the short-lived-sample regime.
 SHORT_DIVISOR = 16
 T_FINAL_FULL = T_FINAL
@@ -1325,6 +1328,32 @@ def _warm_up(arm, a, inp, reply_fd, poller):
         return _timed(arm, a, inp)
     finally:
         timer.cancel()
+
+
+def _compile_probe(arm):
+    """Child body: build ``arm`` and run it once at WARM_N on the caches the parent named (empty); reply the seconds."""
+    reply_fd = cc.probe_reply_fd()
+    _touch_device()
+    inp = _inputs(WARM_N)
+    t0 = time.perf_counter()
+    _timed(arm, _make_arms(WARM_N, (arm,))[arm], inp)
+    cc.probe_reply(reply_fd, {"seconds": time.perf_counter() - t0})
+
+
+def _eagle_cold_compile_s(work):
+    """eagle's build and first run of the ensemble kernel from empty caches (hawk's; the CUDA driver's off), once per card:
+    what a torch.compile row over the compile cap is set against. None when it could not be measured."""
+    saved = cc.part_load(_PARTS, "compile_eagle_graph", keep_failed=_ASSEMBLE)
+    if saved is None and not _ASSEMBLE:
+        cache = pathlib.Path(tempfile.mkdtemp(prefix="cold_", dir=work))
+        env = {**os.environ, "HAWK_CACHE_DIR": str(cache / "hawk"), "CUDA_CACHE_DISABLE": "1"}
+        try:
+            saved = cc.run_probe(__file__, ["--compile-probe", "eagle_graph"], env=env, timeout=cc.COMPILE_S,
+                                 what="eagle cold compile")
+        except (subprocess.TimeoutExpired, RuntimeError) as err:
+            saved = {"status": "failed: " + (str(err).strip().splitlines() or ["timeout"])[-1][:200]}
+        cc.part_save(_PARTS, "compile_eagle_graph", saved)
+    return (saved or {}).get("seconds")
 
 
 def _time_probe(arm, n, distribution, bus_id, rounds_max, out_path):
@@ -1427,8 +1456,8 @@ def _time_cell_arm(arm, n, distribution, bus_id, rounds_max, work):
                          what=f"timing probe {arm} {n} {distribution}", progress=out_path.with_suffix(".alive"))
     except subprocess.TimeoutExpired:
         r = {"status": f"failed: no result in {TIMING_PROBE_TIMEOUT_S:.0f} s"}
-    except cc.Stalled:
-        r = {"status": "failed: no progress"}
+    except cc.Stalled as err:
+        r = {"status": COMPILE_LIMIT if err.phase == "compile" else "failed: no progress"}
     except (RuntimeError, ValueError, IndexError) as err:
         text = str(err)
         lines = [ln for ln in text.splitlines() if ln.strip()]
@@ -1955,10 +1984,14 @@ def main(argv=None):
                     help="sizes of the memory pass (default: the cells' sizes); a size too long to time can still show what fits")
     ap.add_argument("--memory-probe", nargs=3, help=argparse.SUPPRESS)
     ap.add_argument("--timing-probe", nargs=6, help=argparse.SUPPRESS)
+    ap.add_argument("--compile-probe", help=argparse.SUPPRESS)
     args = ap.parse_args(argv)
     if args.memory_probe:
         a, n, bus = args.memory_probe
         _memory_probe(a, int(n), bus)
+        return 0
+    if args.compile_probe:
+        _compile_probe(args.compile_probe)
         return 0
     if args.timing_probe:
         a, n, dist, bus, rounds, out = args.timing_probe
@@ -1994,13 +2027,15 @@ def main(argv=None):
         if r.get("out_of_memory"):
             oom_from[r["arm"]] = min(r["n"], oom_from.get(r["arm"], r["n"]))
 
-    budget_from, replies, per_cell, wall_at = {}, [], [], {}
+    budget_from, replies, per_cell, wall_at, compile_over = {}, [], [], {}, set()
     for n, dist in cells:
         t0 = time.perf_counter()
         cell = []
         for arm in names:
             if arm in oom_from and n >= oom_from[arm]:
                 r = _stub(arm, n, dist, "out_of_memory", work)
+            elif arm in compile_over:
+                r = _stub(arm, n, dist, COMPILE_LIMIT, work)
             elif arm in budget_from and n >= budget_from[arm][0]:
                 r = {**_stub(arm, n, dist, "not_run: budget", work), "predicted_from": budget_from[arm][0],
                      "predicted_dist": budget_from[arm][1]}
@@ -2012,6 +2047,8 @@ def main(argv=None):
                     budget_from[arm] = (n, dist)
                 if r["status"] == "out_of_memory":
                     oom_from[arm] = n
+                if r["status"] == COMPILE_LIMIT:
+                    compile_over.add(arm)
             if r["status"] == "ok":
                 wall_at.setdefault((arm, dist), {})[n] = statistics.median(r["walls"])
             cell.append(r)
@@ -2059,6 +2096,12 @@ def main(argv=None):
     ops, audit = _ops_per_attempt(work, f"sm_{device['compute_capability'].replace('.', '')}")
     threads_per_sm = _threads_per_sm()
     results = [_row_of(r, fma_dev, ops, r["n"] / (sm_count * threads_per_sm)) for r in replies]
+    compile_note = None
+    if any(r["arm"] == "torch_compiled" and r["status"] == COMPILE_LIMIT for r in replies):
+        eagle_s = _eagle_cold_compile_s(work)
+        compile_note = (f"torch.compile did not finish compiling this kernel (with its first run) within "
+                        f"{cc.COMPILE_S / 60:.0f} min on this machine"
+                        + (f"; eagle compiles it from empty caches in {eagle_s:.1f} s." if eagle_s else "."))
     for row in results:
         if row["status"] == "ok":
             row["fraction_of_peak_fp64"] = (None if row["arm"] == "eagle_cpu" or not peak["fp64_flops"]
@@ -2125,7 +2168,7 @@ def main(argv=None):
             "counting_rule": _COUNTING_RULE, "cpu_threads": os.environ.get("OMP_NUM_THREADS"),
         },
         "results": results, "per_n": per_cell, "memory": memory_card,
-        "torch_compile_note": arms_not_run.get("torch_compiled"),
+        "torch_compile_note": arms_not_run.get("torch_compiled") or compile_note,
     }
     card["fit"] = _fit_notes({**card, "results": [r for r in results if r["status"] == "ok" and r["distribution"] == "spread"]})
     card["wall_s"] = time.perf_counter() - t_start

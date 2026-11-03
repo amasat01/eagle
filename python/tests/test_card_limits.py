@@ -55,6 +55,37 @@ def test_a_child_that_reports_progress_runs_to_its_end(cc, monkeypatch, tmp_path
     assert done.stdout.strip() == "done"
 
 
+def test_a_compiling_child_gets_the_compile_limit_and_is_named_by_its_phase(cc, monkeypatch, tmp_path):
+    """A child in its "compile" phase outlives the build limit, is killed at COMPILE_S, and the Stalled names the phase.
+    RED: drop "compile" from run_watched's limits and the child dies at the 1 s build limit (elapsed < 2 s)."""
+    monkeypatch.setattr(cc, "BUILD_S", 1.0)
+    monkeypatch.setattr(cc, "COMPILE_S", 4.0)
+    code = f"import sys,time; sys.path.insert(0, {str(_BENCH)!r}); import _card_common as c\nc.heartbeat('compile'); time.sleep(60)"
+    t0 = __import__("time").monotonic()
+    with pytest.raises(cc.Stalled) as err:
+        cc.run_watched([sys.executable, "-c", code], timeout=60, progress=tmp_path / "alive")
+    assert err.value.phase == "compile" and __import__("time").monotonic() - t0 > 3.0
+
+
+def test_a_compile_over_its_limit_is_a_labelled_row_not_a_failure(monkeypatch, tmp_path):
+    """The timing parent turns a compile-phase stall into the COMPILE_LIMIT row (a build stall stays "failed: no progress")."""
+    pc = _load("perf_card", _BENCH / "perf_card" / "perf_card.py")
+
+    def stall(phase):
+        def run_probe(*a, **k):
+            raise pc.cc.Stalled(phase, "no progress")
+        return run_probe
+
+    monkeypatch.setattr(pc, "_PARTS", None)
+    monkeypatch.setattr(pc, "_ASSEMBLE", False)
+    monkeypatch.setattr(pc.cc, "deadline_passed", lambda: False)
+    monkeypatch.setattr(pc.cc, "run_probe", stall("compile"))
+    assert pc._time_cell_arm("torch_compiled", 1000, "spread", "bus", 3, tmp_path)["status"] == pc.COMPILE_LIMIT
+    assert pc.COMPILE_LIMIT == "not_run: compile > 10 min"
+    monkeypatch.setattr(pc.cc, "run_probe", stall("build"))
+    assert pc._time_cell_arm("torch_compiled", 1000, "spread", "bus", 3, tmp_path)["status"] == "failed: no progress"
+
+
 def test_the_card_is_assembled_from_saved_parts_and_missing_arms_are_labelled(feature, monkeypatch, tmp_path):
     pytest.importorskip("hawk")
     monkeypatch.delenv("FEATURE_CARD_FORCE", raising=False)

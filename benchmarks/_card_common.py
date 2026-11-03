@@ -972,11 +972,16 @@ def probe_reply(fd, obj):
 
 
 class Stalled(Exception):
-    """A child that made no progress for too long (see :func:`run_watched`)."""
+    """A child that made no progress for too long (see :func:`run_watched`); ``phase`` is the one it was in."""
+
+    def __init__(self, phase, message):
+        super().__init__(message)
+        self.phase = phase
 
 
-#: A child's build may take this long before its first progress; after it, no round may take longer than STALL_S.
-BUILD_S, STALL_S = 120.0, 600.0
+#: A child's build may take this long before its first progress; after it, no round may take longer than STALL_S. A
+#: library that compiles on its first call reports the "compile" phase, allowed COMPILE_S.
+BUILD_S, STALL_S, COMPILE_S = 120.0, 600.0, 600.0
 
 #: A row dropped because the session deadline passed (or the step ended early): the lowest-priority rows go first.
 SESSION_LIMIT = "not_run: session time limit"
@@ -997,8 +1002,8 @@ def heartbeat(phase="run"):
 
 def run_watched(cmd, *, timeout, progress, env=None):
     """``subprocess.run`` of ``cmd`` with a total ``timeout`` and a no-progress watchdog: the child touches ``progress`` (see
-    :func:`heartbeat`); more than :data:`BUILD_S` s without it while building, or :data:`STALL_S` s once running, kills
-    that child alone and raises :class:`Stalled`."""
+    :func:`heartbeat`); more than :data:`BUILD_S` s without it while building, :data:`COMPILE_S` s while compiling, or
+    :data:`STALL_S` s once running, kills that child alone and raises :class:`Stalled`."""
     progress = pathlib.Path(progress)
     progress.parent.mkdir(parents=True, exist_ok=True)
     progress.write_text("build")
@@ -1010,14 +1015,15 @@ def run_watched(cmd, *, timeout, progress, env=None):
             out, err = child.communicate(timeout=2)
             return subprocess.CompletedProcess(cmd, child.returncode, out, err)
         except subprocess.TimeoutExpired:
-            limit = BUILD_S if progress.read_text() == "build" else STALL_S
+            phase = progress.read_text()
+            limit = {"build": BUILD_S, "compile": COMPILE_S}.get(phase, STALL_S)
             over = time.monotonic() - start > timeout
             if over or time.time() - progress.stat().st_mtime > limit:
                 child.kill()
                 child.communicate()
                 if over:
                     raise subprocess.TimeoutExpired(cmd, timeout) from None
-                raise Stalled(f"no progress for {limit:.0f} s") from None
+                raise Stalled(phase, f"no progress for {limit:.0f} s ({phase})") from None
 
 
 def run_probe(script, args, *, env=None, timeout=600, what="probe", progress=None):
@@ -1203,12 +1209,13 @@ def part_load(parts, key, keep_failed=False):
 
 
 def part_save(parts, key, obj):
-    """Save one finished result, so a cap or a preemption costs one part and never the card."""
+    """Save one finished result, so a cap or a preemption costs one part and never the card. ``saved_unix`` (when it was
+    saved): consecutive parts give each row's whole cost, process start-up included."""
     if parts:
         d = pathlib.Path(parts)
         d.mkdir(parents=True, exist_ok=True)
         tmp = d / f".{key}.tmp"
-        tmp.write_text(json.dumps(obj, default=str))
+        tmp.write_text(json.dumps({**obj, "saved_unix": round(time.time(), 1)}, default=str))
         tmp.replace(d / f"{key}.json")
 
 
