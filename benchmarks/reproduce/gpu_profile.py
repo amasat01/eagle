@@ -11,10 +11,10 @@ Stages (``--stage``; ``profile.sh`` runs them in order); each writes plain text 
 * **wide_sweep**: hawk's wide-value sweep (``python -m hawk.targets.cards.sweep``) over the forms thread, team and
   staged: candidate rows for ``wide.json`` and ``thread_box.json`` in ``wide_sweep.json``;
 * **ncu_corpus**: Nsight Compute on the sweep's ties and on the team and staged kernels (``ncu_corpus.csv``);
-* **ncu_ensemble**: Nsight Compute on every GPU arm of the card (eagle, Warp, JAX, CuPy, PyTorch) at N = 1e6, spread and
-  uniform: lane efficiency, FP64 pipe, issue, occupancy, registers, DRAM, stall classes, and the DP instructions executed
-  per attempt (``ncu_ensemble.csv``); an arm of several kernels is every kernel of one run, up to :data:`LAUNCH_CAP`;
-* **ncu_features**: the same capture of every GPU arm of every feature-card row, case and dtype (``ncu_features.csv``);
+* **ncu_ensemble**: Nsight Compute on every eagle arm of the card at N = 1e6, spread and uniform: lane efficiency, FP64 pipe,
+  issue, occupancy, registers, DRAM, stall classes, and the DP instructions executed per attempt (``ncu_ensemble.csv``);
+* **ncu_features**: the same capture of every arm of ours (eagle / hawk code, never a baseline library) of every
+  feature-card row, case and dtype; the kernels of one run, up to :data:`LAUNCH_CAP` (``ncu_features.csv``);
 * **chunk_residency**: the persist launch over chunk x threads per SM x {f32, f64} at N = 1e6 and 1e7, spread and
   spread-short: wall and slot fill (``chunk_residency.csv``); Nsight Compute on a tie (``chunk_residency_ncu.csv``);
 * **launch_shape**: launches and kernels per run for each card arm (Nsight Systems, one run per arm), and the fused
@@ -49,16 +49,12 @@ CARD_PATH = HERE.parent / "perf_card" / "perf_card.py"
 FEATURE_PATH = HERE.parent / "perf_card" / "feature_card.py"
 NCU_MIN_CC = 7.0
 NCU_CAP_S = 150                               # one --quick capture
-NCU_FULL_CAP_S = 900                          # one --set full capture: ~40 replay passes of every kernel, built and run in it
+NCU_FULL_CAP_S = 600                          # one --set full capture: ~40 replay passes of every kernel, built and run in it
 LAUNCH_CAP = 32                               # kernels captured of an arm that launches many (a run's first 32)
 TIE = 0.10                                    # within this fraction of the best is a tie
-ENSEMBLE_ARMS = ("eagle_graph", "eagle_graph_persist", "eagle_simulate", "warp_kernel",
-                 "jax_vmap", "cupy_masked", "torch_graphed", "torch_compiled")
-CARD_ARMS = ENSEMBLE_ARMS + ("eagle_graph_compact",)
-ATTEMPT_ARMS = ENSEMBLE_ARMS[:4]              # one kernel to capture: the attempt kernel (KERNEL); the others: every kernel
-FEATURE_HOST_ARMS = ("numpy_mask", "np_add_at")   # feature-card baselines that run on the CPU only
-LAUNCH_ARMS = ("eagle_graph", "eagle_graph_persist", "eagle_simulate", "warp_kernel")
-KERNEL = "regex:rkf78"                        # the card's attempt kernel (Warp's is rkf78 as well)
+ENSEMBLE_ARMS = ("eagle_graph", "eagle_graph_compact", "eagle_graph_reorder", "eagle_graph_persist", "eagle_simulate")  # the card's eagle arms
+LAUNCH_ARMS = ("eagle_graph", "eagle_graph_persist", "eagle_simulate")
+KERNEL = "regex:rkf78"                        # the card's attempt kernel (every eagle arm's)
 
 CHUNKS, TPS = (1, 4, 16, 32), (None, "2x")
 CHUNK_NS, CHUNK_DISTS, CHUNK_DTYPES = (1_000_000, 10_000_000), ("spread", "spread-short"), ("float32", "float64")
@@ -176,7 +172,7 @@ def build(card, cell):
 
     n, name = cell["n"], cell["arm"]
     inp = card._inputs(n, card._set_cell(cell["dist"]))
-    if name in CARD_ARMS:
+    if name in ENSEMBLE_ARMS:
         return card._make_arms(n, [name])[name], inp
     f32 = cell.get("dtype") == "float32"
     st = card._GpuArm(n)
@@ -206,7 +202,7 @@ def run_cell(card, cell, reps=3, profile=False):
     fill, the threads per SM that launched and the attempts the run made."""
     import cupy as cp
 
-    sync = cell["arm"]
+    sync = "eagle_graph"
     with persist_threads(cell.get("tps")):
         arm, inp = build(card, cell)
         arm["state"].upload(inp)
@@ -465,36 +461,28 @@ def capture_row(args, rep, cmd_line, metrics, **kw):
 
 def ncu_ensemble(args):
     require_ncu(args)
-    arms = ENSEMBLE_ARMS[:1] if args.quick else ENSEMBLE_ARMS
-    absent = load_card()._select_arms(arms)[1]
     notes = []
-    for arm in arms:
+    for arm in ENSEMBLE_ARMS[:1] if args.quick else ENSEMBLE_ARMS:
         for dist in ("spread", "uniform"):
             cell = {"arm": arm, "n": 10_000 if args.quick else POINT[0], "dist": dist}
-            if arm in absent:
-                row, out, note = kernel_summary([], ENSEMBLE_METRICS + DP_METRICS), "", absent[arm]
-            else:
-                one = arm in ATTEMPT_ARMS
-                row, out, note = capture_row(args, args.out / f"ncu_ensemble_{arm}_{dist}", worker_cmd(cell),
-                                             ENSEMBLE_METRICS + DP_METRICS, regex=KERNEL if one else None,
-                                             count=1 if one else LAUNCH_CAP)
-                notes.append(note)
+            row, out, note = capture_row(args, args.out / f"ncu_ensemble_{arm}_{dist}", worker_cmd(cell),
+                                         ENSEMBLE_METRICS + DP_METRICS, regex=KERNEL)
             attempts = worker_row(out).get("sample_steps")
             dp = sum(row[m] or 0.0 for m in DP_METRICS)
             emit(args.out / "ncu_ensemble.csv", {
                 "arm": arm, "dist": dist, **{k: row[k] for k in ("kernels", "gpu_time_s", "top_kernel", *ENSEMBLE_METRICS)},
                 "lane_efficiency": row[ENSEMBLE_METRICS[0]] / 32 if row[ENSEMBLE_METRICS[0]] is not None else None,
-                "dp_inst_per_attempt": dp / attempts if row["kernels"] and attempts and arm in ATTEMPT_ARMS else None,
-                "note": note})
-            say(f"ncu {arm} {dist}: {'ok' if row['kernels'] else note.splitlines()[0][:60] if note else 'failed'}")
+                "dp_inst_per_attempt": dp / attempts if row["kernels"] and attempts else None, "note": note})
+            say(f"ncu {arm} {dist}: {'ok' if row['kernels'] else note.splitlines()[0][:60]}")
+            notes.append(note)
     ncu_stage_verdict(notes)
 
 
 def feature_cells(quick):
-    """(row, case, dtype, arm, N) of every GPU arm of every feature-card row, case and dtype (``quick``: two, at the smoke N)."""
-    rows = load_card(FEATURE_PATH).ROWS
-    cells = [(r, c, d, a, spec["cases"][c][1 if quick else 0]) for r, spec in rows.items() for c in spec["cases"]
-             for d in spec["dtypes"] for a in spec["arms"] if a not in FEATURE_HOST_ARMS]
+    """(row, case, dtype, arm, N) of every arm of ours of every feature-card row, case and dtype (``quick``: two, smoke N)."""
+    fc = load_card(FEATURE_PATH)
+    cells = [(r, c, d, a, spec["cases"][c][1 if quick else 0]) for r, spec in fc.ROWS.items() for c in spec["cases"]
+             for d in spec["dtypes"] for a in spec["arms"] if a in fc.OUR_ARMS]
     return cells[:2] if quick else cells
 
 

@@ -579,28 +579,31 @@ def test_several_kernels_of_a_raw_page_give_the_count_the_summed_time_and_the_to
     assert mod.kernel_summary([], ("m_a",)) == {"kernels": 0, "gpu_time_s": None, "top_kernel": None, "m_a": None}
 
 
-def test_the_ensemble_covers_every_card_gpu_arm_and_an_absent_library_is_a_row_with_its_reason(tmp_path, monkeypatch):
+def test_the_ensemble_covers_every_eagle_arm_of_the_card_and_only_those(tmp_path, monkeypatch):
     mod = _kit_module()
-    assert set(mod.ENSEMBLE_ARMS) == {"eagle_graph", "eagle_graph_persist", "eagle_simulate", "warp_kernel", "jax_vmap",
-                                      "cupy_masked", "torch_graphed", "torch_compiled"}
-    card = types.SimpleNamespace(_select_arms=lambda arms: (arms[:-1], {arms[-1]: "torch not installed in this profile"}))
+    card = mod.load_card()
+    assert set(mod.ENSEMBLE_ARMS) == {a for a in card.GPU_ARMS if a.startswith("eagle_")}
+    assert "warp_kernel" not in mod.LAUNCH_ARMS and all(a.startswith("eagle_") for a in mod.LAUNCH_ARMS)
     monkeypatch.setattr(mod, "require_ncu", lambda args: None)
-    monkeypatch.setattr(mod, "load_card", lambda *a: card)
     calls = []
     monkeypatch.setattr(mod, "ncu_run", lambda *a, **k: calls.append(k) or ([{"name": "k", "gpu_time_s": 1.0}], ""))
     mod.ncu_ensemble(types.SimpleNamespace(quick=False, out=tmp_path))
     with (tmp_path / "ncu_ensemble.csv").open() as fh:
         rows = list(csv.DictReader(fh))
-    assert len(rows) == 16 and len(calls) == 14
-    assert {r["note"] for r in rows if r["arm"] == "torch_compiled"} == {"torch not installed in this profile"}
-    assert [k["count"] for k in calls[:2]] == [1, 1] and calls[-1]["count"] == mod.LAUNCH_CAP and calls[-1]["regex"] is None
+    assert len(rows) == len(calls) == 2 * len(mod.ENSEMBLE_ARMS) and all(k["regex"] == mod.KERNEL for k in calls)
 
 
-def test_ncu_features_enumerates_every_row_case_dtype_and_gpu_arm_and_fails_when_every_capture_does(tmp_path, monkeypatch):
+def test_every_feature_card_arm_is_classified_as_ours_or_external():
+    fc = _kit_module().load_card(_kit_module().FEATURE_PATH)
+    arms = {a for spec in fc.ROWS.values() for a in spec["arms"]}
+    assert not fc.OUR_ARMS & fc.EXTERNAL_ARMS and arms == fc.OUR_ARMS | fc.EXTERNAL_ARMS, arms ^ (fc.OUR_ARMS | fc.EXTERNAL_ARMS)
+
+
+def test_ncu_features_enumerates_every_row_case_dtype_and_arm_of_ours_and_fails_when_every_capture_does(tmp_path, monkeypatch):
     mod = _kit_module()
     rows = mod.load_card(mod.FEATURE_PATH).ROWS
     want = {(r, c, d, a) for r, s in rows.items() for c in s["cases"] for d in s["dtypes"] for a in s["arms"]
-            if a not in ("numpy_mask", "np_add_at")}
+            if a in mod.load_card(mod.FEATURE_PATH).OUR_ARMS}
     cells = mod.feature_cells(False)
     assert {c[:4] for c in cells} == want and len(cells) == len(want) and len(mod.feature_cells(True)) == 2
     monkeypatch.setattr(mod, "require_ncu", lambda args: None)

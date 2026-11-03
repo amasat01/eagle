@@ -708,6 +708,13 @@ ROWS = {
     "mpi_partition": dict(setup=setup_mpi_partition, cases={"all": (2_000_000, 8192)}, dtypes=(F64,), ref="one_rank",
                           arms=("two_ranks", "one_rank"), host=(), baseline="one rank (N = 1e6), the C1 persist arm"),
 }
+# Every arm is ours (eagle / hawk code: the profile kit captures its kernels) or external (a baseline library: never profiled);
+# a new arm must be added to exactly one set (tests/test_profile_kit.py fails otherwise).
+EXTERNAL_ARMS = frozenset({"numpy_mask", "torch", "warp_loop", "torch_func", "cupy", "einsum", "cupy_fft", "cupyx_scatter_add",
+                           "np_add_at", "cupy_sum", "warp"})
+OUR_ARMS = frozenset({"thread", "team", "staged", "K1", "K8", "K32", "jvp_K8", "vjp_K8_fused", "vjp_K8_auto", "guard", "no_guard",
+                      "jump", "segmented", "hawk", "box", "no_box", "gemm", "fft", "dense", "map", "prefix", "keyed", "ordered",
+                      "or", "compensated", "auto", "two_ranks", "one_rank"})
 # an arm named for its baseline library runs the library branch of its row's setup
 _ALIAS = {"cupy_fft": "cupy", "cupyx_scatter_add": "cupyx", "cupy_sum": "cupy"}
 

@@ -72,17 +72,20 @@ done
 #   corp = ncu_corpus, ens = ncu_ensemble, feat = ncu_features, p4 = chunk_residency (timing grid + captures of its ties),
 #   p5 = launch_shape (nsys). A full capture replays each kernel about 40 times: 30 s of process + (0.12 s + the kernel's own
 #   time) x 40 per kernel, the kernels of one run capped at 32 (the caps below are profile.sh's, ~1.5 x the L4 walls).
-#   L4 (from the 073l4 card walls: persist/simulate 2.3 s spread, 2.0 uniform; warp 4.3 / 2.2; jax 7.2 / 3.4):
-#     ens  = 16 captures x 30 s + 40 x (persist, simulate, warp, jax kernel times 31 s) + 3 multi-kernel arms x 2 x 32 x
-#            5 s + their runs (cupy 78 s, torch_graphed 82 s) = 43 min;  A100: kernel times / 20 (FP64) = 27 min.
-#     feat = 59 arms x (15 s + ~6 kernels x 5 s) + the long kernels (segmented 3.7 s, ordered 0.8 s, x 40) = 60 min; A100 50.
+#   Only our code is profiled (eagle / hawk kernels), never a baseline library: ens = the card's 5 eagle arms, feat = the 39
+#   feature-card cells of ours (feature_card.OUR_ARMS), launch_shape drops Warp.
+#   L4 (from the 073l4 card walls: persist/simulate 2.3 s spread, 2.0 uniform):
+#     ens  = 10 captures (5 arms x spread, uniform; the attempt kernel, one launch) x 30 s + 40 x (persist and simulate kernel
+#            times 17 s) + 6 short captures x 40 x 0.12 s = 10 min;  A100: kernel times / 20 (FP64) = 6 min.
+#     feat = 39 cells x (15 s + ~6 kernels x 5 s) + the long kernels (segmented 3.7 s, ordered 0.8 s, x 40) = 43 min; A100 36.
 #     corp = <= 12 cells x (30 s + 40 x 0.2 s) x ~ 1.2 = 12 min; A100 10.
 #     p4   = the chunk grid (64 cells, 17 min of runs + builds, 21 min) + <= 8 tie captures x 75 s = 32 min; A100: FP64 /20 -> 13.
-#     p5   = nsys, no counters: 6 (L4), 5 (A100).
-#   l4-prof = p0, p1, then the five profile steps (158 min; deadline 1.5 x); a100 = today's card steps, then the same five (151).
+#     p5   = nsys, no counters, 3 arms: 5 (L4), 4 (A100).
+#   NCU capture cap 600 s (persist's 40 passes x 2.3 s = 92 s + build; segmented's 150 s); stage caps ens 15 min, feat 65.
+#   l4-prof = p0, p1, then the five profile steps (107 min; deadline 1.5 x); a100 = today's card steps, then the same five (115).
 case $PLAN in
-  a100)  STEPS=(p0:1:4 p1:4:11 c1:27:D c2:14:D corp:10:35 ens:27:80 feat:50:105 p4:13:55 p5:5:16) ; KIND=GPU ;;
-  l4-prof) STEPS=(p0:1:4 p1:4:11 corp:12:35 ens:43:80 feat:60:105 p4:32:55 p5:6:16) ; KIND=GPU ;;
+  a100)  STEPS=(p0:1:4 p1:4:11 c1:27:D c2:14:D corp:10:35 ens:6:25 feat:36:70 p4:13:55 p5:4:16) ; KIND=GPU ;;
+  l4-prof) STEPS=(p0:1:4 p1:4:11 corp:12:35 ens:10:25 feat:43:70 p4:32:55 p5:5:16) ; KIND=GPU ;;
   l4)    STEPS=(p0:1:4 p1:4:11 c1:26:D c2:12:D p4:8:16 ncu:2:6) ; KIND=GPU ;;
   t4)    STEPS=(p0:1:4 p1:4:11 c1:89:D c2:12:D p4:8:16) ;        KIND=GPU ;;
   p2000) STEPS=(p0:1:4 p1:4:11 c1:25:D c2:8:D p4:8:16 p5:3:11) ; KIND=GPU ;;
