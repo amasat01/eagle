@@ -22,3 +22,4 @@ psutil==7.2.2
 pytest==9.1.1
 nanobind==3.1.0
 scikit-build-core==1.1.0
+setuptools-scm==10.3.4
