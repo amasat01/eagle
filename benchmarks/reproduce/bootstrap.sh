@@ -183,7 +183,8 @@ install_source() {
     if [[ -d $SRC/$r ]]; then
       log "$r: using existing checkout $SRC/$r (left as it is)"
     else
-      run git clone -q --depth 1 --branch "${REF[$r]}" "$GIT_BASE/$r.git" "$SRC/$r" ||
+      # blobless, not shallow: the builds read their version from the nearest tag (git describe)
+      run git clone -q --filter=blob:none --branch "${REF[$r]}" "$GIT_BASE/$r.git" "$SRC/$r" ||
         die "clone of $r at ${REF[$r]} failed: pass --ref $r=<tag|branch> (or ${r^^}_REF)"
     fi
   done
