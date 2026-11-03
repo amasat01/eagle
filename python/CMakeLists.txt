@@ -431,6 +431,22 @@ target_compile_definitions(_core PRIVATE EAGLE_CPU_ONLY=1 AETHER_CPP_MODE=1 EAGL
   $<$<BOOL:${_eagle_plugin_skipped}>:EAGLE_CORE_BUILT_WITHOUT_CUDA_PLUGIN=1>)
 target_link_libraries(_core PRIVATE ${CMAKE_DL_LIBS})
 eagle_link_openmp(_core)
+# x86-64 target ISA: -DAETHER_MARCH wins, then $AETHER_MARCH, then x86-64-v3 when $CI is set (CI builds feed wheels,
+# artifacts and caches that must run elsewhere), else native (a build that stays on this machine). Other processors
+# get no -march. The same rule is in aether/CMakeLists.txt.
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "(x86_64|AMD64)")
+  if(NOT DEFINED AETHER_MARCH)
+    if(DEFINED ENV{AETHER_MARCH})
+      set(AETHER_MARCH "$ENV{AETHER_MARCH}")
+    elseif(DEFINED ENV{CI})
+      set(AETHER_MARCH "x86-64-v3")
+    else()
+      set(AETHER_MARCH "native")
+    endif()
+  endif()
+  target_compile_options(_core PRIVATE -march=${AETHER_MARCH})
+  message(STATUS "> eagle._core target CPU architecture: -march=${AETHER_MARCH}")
+endif()
 target_compile_options(_core PRIVATE -ffp-contract=off ${_eagle_no_gnu_unique} ${_eagle_warn_as_err} ${_eagle_ext_compile})
 # libstdc++/libgcc bundled where the toolchain allows (see _eagle_static_runtime).
 target_link_options(_core PRIVATE ${_eagle_static_runtime} ${_eagle_ext_link})
