@@ -501,8 +501,8 @@ def run_notebooks(cfg, py, work, roots, result, out):
 #: not run labelled ``not_run: session time limit``, and the steps not started are listed in result.json.
 CARDS_PLAN = (
     ("p0_sol_probe", ["benchmarks/reproduce/gpu_profile.py", "--stage", "sol_probe", "--out", "{out}/profile"], 1, 4 * 60),
-    ("p1_wide_sweep", ["-m", "hawk.targets.cards.sweep", "--write", "--out", "{out}/wide_sweep.json",
-                       "--cache", "{work}/sweep_cache"], 4, 11 * 60),
+    ("p1_wide_sweep", ["-m", "hawk.targets.cards.sweep", "--write", "--out", "{out}/profile/wide_sweep.json",
+                       "--cache", "{out}/profile/sweep_cache"], 4, 11 * 60),
     ("c1_perf_card", ["benchmarks/perf_card/perf_card.py", "--parts", "{out}/parts/c1", "--out-dir", "{out}"], 89, None),
     ("c2_feature_card", ["benchmarks/perf_card/feature_card.py", "--parts", "{out}/parts/c2", "--out-dir", "{out}"], 12, None),
     ("p4_chunk_residency", ["benchmarks/reproduce/gpu_profile.py", "--stage", "chunk_residency", "--ns", "1000000", "--budget-s", "870",
