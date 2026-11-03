@@ -290,6 +290,16 @@ def ncu_capture(args, rep, regex, cmd_line, metrics):
     return ncu_values(raw), done.stdout
 
 
+def ncu_stage_verdict(notes):
+    """A stage whose every capture failed is failed, with ncu's reason: never ok over a table of empty rows."""
+    if notes and all(notes):
+        why = next((ln.strip() for ln in reversed(notes[0].splitlines()) if "ERR_" in ln), "")
+        why = why or next((ln.strip() for ln in notes[0].splitlines() if ln.strip()), "no output")
+        if "ERR_NVGPUCTRPERM" in why:
+            why = "the GPU performance counters are not permitted here (ERR_NVGPUCTRPERM)"
+        raise RuntimeError(f"every ncu capture failed ({len(notes)}): {why}")
+
+
 def worker_cmd(cell):
     return [sys.executable, str(pathlib.Path(__file__).resolve()), "--worker", json.dumps(cell)]
 
@@ -380,6 +390,7 @@ def ncu_corpus(args):
     if not sweep_json.exists():
         raise Skip("no wide_sweep.json: run wide_sweep first")
     me = str(pathlib.Path(__file__).resolve())
+    notes = []
     for form, width, fold, dtype in corpus_cells(sweep_json, args.quick):
         label = f"{form}_{width}_{fold}_{dtype}"
         cmd = [sys.executable, me, "--worker-sweep", form, str(width), str(fold), dtype,
@@ -388,10 +399,13 @@ def ncu_corpus(args):
         emit(args.out / "ncu_corpus.csv", {"form": form, "width": width, "fold": fold, "dtype": dtype,
                                            **{m: got.get(m) for m in CORPUS_METRICS}, "note": "" if got else note})
         say(f"ncu {label}: {'ok' if got else 'failed'}")
+        notes.append("" if got else note or "no output")
+    ncu_stage_verdict(notes)
 
 
 def ncu_ensemble(args):
     require_ncu(args)
+    notes = []
     for arm in ENSEMBLE_ARMS[:1] if args.quick else ENSEMBLE_ARMS:
         for dist in ("spread", "uniform"):
             cell = {"arm": arm, "n": 10_000 if args.quick else POINT[0], "dist": dist}
@@ -404,6 +418,8 @@ def ncu_ensemble(args):
                 "lane_efficiency": got[ENSEMBLE_METRICS[0]] / 32 if ENSEMBLE_METRICS[0] in got else None,
                 "dp_inst_per_attempt": dp / attempts if got and attempts else None, "note": "" if got else out})
             say(f"ncu {arm} {dist}: {'ok' if got else 'failed'}")
+            notes.append("" if got else out or "no output")
+    ncu_stage_verdict(notes)
 
 
 def chunk_cells(args):

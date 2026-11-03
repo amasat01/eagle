@@ -17,6 +17,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import types
 import tarfile
 import threading
 import time
@@ -440,3 +441,23 @@ def test_cuda_12_is_the_cu129_runtime_and_12_6_keeps_the_pre_turing_lock():
     assert "toolchain-linux-64.lock" in out and "toolchain-linux-64-cuda126" not in out
 
 
+
+
+def test_an_ncu_stage_whose_every_capture_failed_is_failed_with_the_reason(tmp_path, monkeypatch):
+    """Counters not permitted (a container, or no admin rights): the stage fails naming ERR_NVGPUCTRPERM, the rows stay."""
+    mod = _kit_module()
+    denied = "==ERROR== ERR_NVGPUCTRPERM - The user does not have permission to access NVIDIA GPU Performance Counters"
+    monkeypatch.setattr(mod, "require_ncu", lambda args: None)
+    monkeypatch.setattr(mod, "ncu_capture", lambda *a, **k: ({}, denied))
+    args = types.SimpleNamespace(quick=True, out=tmp_path)
+    with pytest.raises(RuntimeError, match=r"every ncu capture failed \(2\): .*ERR_NVGPUCTRPERM"):
+        mod.ncu_ensemble(args)
+    assert (tmp_path / "ncu_ensemble.csv").read_text().count("ERR_NVGPUCTRPERM") == 2
+    mod.ncu_stage_verdict(["", denied])   # one capture succeeded: the stage is ok, the failed row keeps its note
+    mod.ncu_stage_verdict([])             # nothing to capture: nothing to judge
+
+
+def test_every_card_lock_carries_setuptools_scm_for_the_editable_builds():
+    """bootstrap.sh installs aether-dsc, raptor and hawk with --no-build-isolation; their version comes from setuptools-scm."""
+    for lock in sorted((REPRO / "locks").glob("cards-*.txt")):
+        assert "setuptools-scm==" in lock.read_text(), lock.name
