@@ -278,7 +278,8 @@ def worker_sweep(form, width, fold, dtype, cache):
 # Nsight Compute and Nsight Systems
 # --------------------------------------------------------------------------- #
 NCU_TIME = "gpu__time_duration.sum"
-_UNIT_S = {"nsecond": 1e-9, "usecond": 1e-6, "msecond": 1e-3, "second": 1.0}
+_UNIT_S = {"nsecond": 1e-9, "usecond": 1e-6, "msecond": 1e-3, "second": 1.0,   # older ncu
+           "ns": 1e-9, "us": 1e-6, "ms": 1e-3, "s": 1.0}                         # ncu 2025 (the L4 run of 2026-11-03)
 
 
 def ncu_kernels(raw_csv):

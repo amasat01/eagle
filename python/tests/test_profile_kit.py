@@ -579,6 +579,15 @@ def test_several_kernels_of_a_raw_page_give_the_count_the_summed_time_and_the_to
     assert mod.kernel_summary([], ("m_a",)) == {"kernels": 0, "gpu_time_s": None, "top_kernel": None, "m_a": None}
 
 
+def test_the_short_time_units_of_ncu_2025_are_read_as_seconds():
+    """The L4 run 2026-11-03: ncu 2025.2 prints the duration unit as "s" (older versions "second"); an unmapped unit fell
+    back to ns and turned a 5.94 s kernel into 5.94e-9 s. RED: drop "s" from _UNIT_S."""
+    mod = _kit_module()
+    for unit, scale in (("s", 1.0), ("ms", 1e-3), ("us", 1e-6), ("ns", 1e-9)):
+        raw = f'"ID","Kernel Name","gpu__time_duration.sum"\n"","","{unit}"\n"0","rkf78","5.940861"\n'
+        assert mod.ncu_kernels(raw)[0]["gpu_time_s"] == pytest.approx(5.940861 * scale)
+
+
 def test_the_ensemble_covers_every_eagle_arm_of_the_card_and_only_those(tmp_path, monkeypatch):
     mod = _kit_module()
     card = mod.load_card()
