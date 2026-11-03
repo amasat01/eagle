@@ -81,13 +81,16 @@ done
 #     corp = <= 12 cells x (30 s + 40 x 0.2 s) x ~ 1.2 = 12 min; A100 10.
 #     p4   = the chunk grid (64 cells, 17 min of runs + builds, 21 min) + <= 8 tie captures x 75 s = 32 min; A100: FP64 /20 -> 13.
 #     p5   = nsys, no counters, 3 arms: 5 (L4), 4 (A100).
+#     cmp  = l4-prof only (it runs no card, so the compile caches would stay empty): perf_card.py and feature_card.py --smoke into
+#            $RES/compile_smoke (no card lands in perf_card/): every arm builds and compiles once. perf_card ~11 arms x 20 s +
+#            torch_compiled's compile (limit 10 min) = 14 min; feature_card ~80 arms x 4 s (its full card ran 254 s) = 6 min; 20 min.
 #     nvl  = ncu_nvlibs: 11 cells (closed NVIDIA library kernels of the rows eagle loses; counters only, 7 sections ~ 12 passes, never
 #            --set full or source) x (15 s + ~10 kernels x 12 x 0.15 s) = 6 min, cuSOLVER's longer kernels + 4 = 10 (L4); 8 (A100).
 #   NCU capture cap 600 s (persist's 40 passes x 2.3 s = 92 s + build; segmented's 150 s); stage caps ens 15 min, feat 65.
-#   l4-prof = p0, p1, then the six profile steps (117 min; deadline 1.5 x); a100 = today's card steps, then the same six (123).
+#   l4-prof = p0, p1, then the six profile steps (137 min; deadline 1.5 x); a100 = today's card steps, then the same six (123).
 case $PLAN in
   a100)  STEPS=(p0:1:4 p1:4:11 c1:27:D c2:14:D corp:10:35 ens:6:25 feat:36:70 nvl:8:25 p4:13:55 p5:4:16) ; KIND=GPU ;;
-  l4-prof) STEPS=(p0:1:4 p1:4:11 corp:12:35 ens:10:25 feat:43:70 nvl:10:25 p4:32:55 p5:5:16) ; KIND=GPU ;;
+  l4-prof) STEPS=(p0:1:4 p1:4:11 cmp:20:40 corp:12:35 ens:10:25 feat:43:70 nvl:10:25 p4:32:55 p5:5:16) ; KIND=GPU ;;
   l4)    STEPS=(p0:1:4 p1:4:11 c1:26:D c2:12:D p4:8:16 ncu:2:6) ; KIND=GPU ;;
   t4)    STEPS=(p0:1:4 p1:4:11 c1:89:D c2:12:D p4:8:16) ;        KIND=GPU ;;
   p2000) STEPS=(p0:1:4 p1:4:11 c1:25:D c2:8:D p4:8:16 p5:3:11) ; KIND=GPU ;;
@@ -141,6 +144,8 @@ full_cmd() {
     c1cpu) printf '%s\n' python benchmarks/perf_card/cpu_card.py --parts "$RES/parts/c1cpu" --out-dir "$RES/perf_card" ;;
     pcpu)  printf '%s\n' python benchmarks/perf_card/pcpu.py --parts "$RES/parts/pcpu" --out-dir "$RES/pcpu" ;;
     c2|c2cpu) printf '%s\n' python benchmarks/perf_card/feature_card.py --parts "$RES/parts/c2" --out-dir "$RES/perf_card" ;;
+    cmp)   printf '%s\n' bash -c 'rc=0; python benchmarks/perf_card/perf_card.py --smoke --out-dir "$1" || rc=1
+                               python benchmarks/perf_card/feature_card.py --smoke --out-dir "$1" || rc=1; exit $rc' _ "$RES/compile_smoke" ;;
     corp)  printf '%s\n' bash benchmarks/reproduce/profile.sh --env "$ENVF" --out "$RES/profile" --only ncu_corpus ;;
     ens)   printf '%s\n' bash benchmarks/reproduce/profile.sh --env "$ENVF" --out "$RES/profile" --only ncu_ensemble ;;
     nvl)   printf '%s\n' bash benchmarks/reproduce/profile.sh --env "$ENVF" --out "$RES/profile" --only ncu_nvlibs ;;
