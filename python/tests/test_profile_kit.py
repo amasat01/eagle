@@ -473,3 +473,45 @@ def test_an_ncu_failure_note_keeps_ncus_own_lines_ahead_of_a_later_library_warni
         mod.ncu_stage_verdict([note])
     assert mod.ncu_failure_note("plain output") == "plain output"          # nothing of ncu's own: the tail
     assert "No kernels were profiled" in mod.ncu_failure_note("==WARNING== No kernels were profiled.\n")
+
+
+def _run_cards(*flags):
+    done = subprocess.run(["bash", str(REPRO / "run_cards.sh"), "--dry-run", "--work", "/nonexistent/work", "--slug", "m",
+                           *flags], capture_output=True, text=True)
+    return done.returncode, done.stdout + done.stderr
+
+
+@pytest.mark.parametrize("plan", ["l4", "a100", "zen5"])
+def test_a_smoke_session_runs_every_step_small_and_apart_from_the_full_one(plan):
+    """--smoke: the plan's steps in order at their smallest, results and markers under <slug>-smoke (so a full run later
+    on the same machine skips nothing), and the sweep's rows never written into hawk."""
+    rc_full, full = _run_cards("--plan", plan)
+    rc, smoke = _run_cards("--plan", plan, "--smoke")
+    assert rc == rc_full == 0
+    steps = lambda out: re.findall(r"\[repro\] step (\w+)", out)  # noqa: E731
+    assert steps(smoke) == steps(full) and steps(full)
+    assert "/cards/m-smoke/" in smoke and "/cards/m-smoke" not in full and "/cards/m/" in full
+    commands = [ln for ln in smoke.splitlines() if ln.startswith("+ (")]
+    for ln in commands:
+        if "perf_card/" in ln:
+            assert "--smoke" in ln, ln
+        if "hawk.targets.cards.sweep" in ln:
+            assert "--quick" in ln and "--write" not in ln, ln
+        if "profile.sh" in ln:
+            assert "--quick" in ln, ln
+    if plan != "zen5":
+        assert any("hawk.targets.cards.sweep" in ln and "--write" in ln for ln in full.splitlines())
+    assert int(re.search(r"session deadline (\d+) min", smoke)[1]) <= 18
+
+
+def test_a_card_in_which_no_arm_ran_fails_its_step_and_one_ok_arm_passes_it(capsys):
+    spec = importlib.util.spec_from_file_location("card_common_under_test", REPRO.parent / "_card_common.py")
+    cc = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cc)
+    failed = {"rows": [{"arms": {"thread": {"status": "failed: ModuleNotFoundError: No module named 'pynvml'"},
+                                 "torch": {"status": "not_run: not installed: torch"}}}]}
+    assert cc.no_arm_ran(failed) and cc.no_arm_ran_exit(failed) == 1
+    assert "no arm of this card ran" in capsys.readouterr().err
+    one_ok = {"rows": failed["rows"] + [{"arms": {"team": {"status": "ok"}}}]}
+    assert not cc.no_arm_ran(one_ok) and cc.no_arm_ran_exit(one_ok) == 0
+    assert cc.no_arm_ran({"results": []})                       # nothing measured is no card

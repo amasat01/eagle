@@ -15,6 +15,10 @@
 #     --gpu-env FILE  env script of the gpu profile (default WORK/env-gpu.sh)
 #     --cpu-env FILE  env script of the cpu profile (default WORK/env-cpu.sh)
 #     --deadline-h H  the session deadline in hours (default: 1.5 x the plan's expected minutes)
+#     --smoke         the same steps in the same order at their smallest sizes (one round, --quick stages), the
+#                     plumbing check before a session: results and step markers go to <slug>-smoke (locally and in the
+#                     bucket), so a full run afterwards on the same machine skips nothing and reuses the environment;
+#                     the sweep's rows are not written into hawk
 #     --dry-run       print the plan with its minutes and every command, run nothing
 #
 # A step that fails or runs over its cap is reported and the next one runs (exit 1 at the end); a step that
@@ -25,7 +29,7 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=SCRIPTDIR/lib.sh
 . "$HERE/lib.sh"
 
-PLAN="" UPLOAD="" WORK=${REPRO_WORK:-} OUT="" SLUG="" GPU_ENV="" CPU_ENV="" DEADLINE_H=""
+PLAN="" UPLOAD="" WORK=${REPRO_WORK:-} OUT="" SLUG="" GPU_ENV="" CPU_ENV="" DEADLINE_H="" SMOKE=0
 while [[ $# -gt 0 ]]; do
   case $1 in
     --plan) PLAN=${2:-}; shift 2 ;;
@@ -36,8 +40,9 @@ while [[ $# -gt 0 ]]; do
     --gpu-env) GPU_ENV=${2:-}; shift 2 ;;
     --cpu-env) CPU_ENV=${2:-}; shift 2 ;;
     --deadline-h) DEADLINE_H=${2:-}; shift 2 ;;
+    --smoke) SMOKE=1; shift ;;
     --dry-run) REPRO_DRY_RUN=1; shift ;;
-    -h|--help) sed -n '5,22p' "$0"; exit 0 ;;
+    -h|--help) sed -n '5,25p' "$0"; exit 0 ;;
     *) die "unknown option $1 (see --help)" ;;
   esac
 done
@@ -69,6 +74,8 @@ case $PLAN in
   zen5|c4a) STEPS=(c1cpu:15:D c2cpu:8:D) ;                       KIND=CPU ;;
   *) die "--plan takes a100, l4, t4, p2000, zen5 or c4a" ;;
 esac
+# smoke: every step about 2 min (the card scripts' --smoke: N = 1e3, one round; the stages' --quick)
+if [[ $SMOKE == 1 ]]; then for i in "${!STEPS[@]}"; do STEPS[i]=${STEPS[i]%%:*}:2:D; done; fi
 
 TARGET=$(detect_target)
 WORK=${WORK:-$(default_work "$TARGET")}
@@ -76,6 +83,7 @@ GPU_ENV=${GPU_ENV:-$WORK/env-gpu.sh}
 CPU_ENV=${CPU_ENV:-$WORK/env-cpu.sh}
 ENVF=$GPU_ENV; [[ $KIND == CPU ]] && ENVF=$CPU_ENV
 SLUG=${SLUG:-$(machine_slug)}
+[[ $SMOKE == 1 ]] && SLUG=$SLUG-smoke
 OUT=${OUT:-$WORK/cards}
 RES=$OUT/$SLUG
 START=$(date +%s)
@@ -85,8 +93,23 @@ src=""
 [[ -f $ENVF ]] && src=$(sed -n 's/.*REPRO_SRC=\([^ ]*\).*/\1/p' "$ENVF" | head -1)
 if [[ -n $src && -d $src/eagle ]]; then EROOT=$src/eagle; else EROOT=$(cd "$HERE/../.." && pwd); fi
 
-# step_cmd NAME: the command of a step, one word per line, run from the eagle root in the env.
+# step_cmd NAME: the command of a step, one word per line, run from the eagle root in the env (smoke: smoke_cmd's edit).
 step_cmd() {
+  if [[ $SMOKE == 1 ]]; then full_cmd "$1" | smoke_cmd "$1"; else full_cmd "$1"; fi
+}
+# smoke_cmd NAME: a full command at its smallest: the card scripts' --smoke, the stages' --quick, the sweep --quick unwritten.
+smoke_cmd() {
+  local w
+  while IFS= read -r w; do
+    case $1:$w in p1:--write) continue ;; esac
+    printf '%s\n' "$w"
+  done
+  case $1 in
+    c1|c1cpu|c2|c2cpu) printf '%s\n' --smoke ;;
+    p1|p25|p4|p5) printf '%s\n' --quick ;;
+  esac
+}
+full_cmd() {
   case $1 in
     p0)    printf '%s\n' python benchmarks/reproduce/gpu_profile.py --stage sol_probe --out "$RES/profile" ;;
     p1)    printf '%s\n' python -m hawk.targets.cards.sweep --write --out "$RES/wide_sweep.json" --cache "$RES/sweep_cache" ;;
