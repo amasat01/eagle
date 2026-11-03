@@ -1629,20 +1629,30 @@ def _memory_probe(arm, n, bus_id):
     inp = _inputs(n)
     with contextlib.nullcontext() if not gpu else cc.DevicePeak(bus_id) as peak:
         a = _probe_arm(arm, n, compiled)
-        _, _, out = _timed(arm, a, inp)
+        _, run_s, out = _timed(arm, a, inp)
     assert (out["t"] == T_FINAL).all(), f"memory probe {arm}: unfinished samples"
     dev_after, _ = cc.process_device_bytes(bus_id) if gpu else (None, None)
     cc.probe_reply(reply_fd, {
         "device_baseline_bytes": dev_base, "device_after_bytes": dev_after,
         "device_peak_bytes": None if not gpu else max(0, max(peak.peak, dev_after) - dev_base),
-        "device_source": src,
+        "device_source": src, "run_seconds": run_s,
         "host_peak_bytes": max(0, cc.status_kib("VmHWM") - rss_base) * 1024})
 
 
-#: A memory probe runs the arm once at N; one that takes longer is reported as not measured.
+#: A memory probe runs the arm once at N; one that takes longer is reported as not measured. An arm whose timed run at a
+#: smaller N (warm, compile excluded), scaled linearly to N, already exceeds it is not started at N (it would only burn the cap).
 MEMORY_PROBE_TIMEOUT_S = 900
 #: How each library reports a device allocation it could not make.
 _OUT_OF_MEMORY = ("out of memory", "OutOfMemory", "RESOURCE_EXHAUSTED", "cudaErrorMemoryAllocation")
+
+
+def _memory_probe_predicted_over(rows, arm, n):
+    """True when this arm already timed out at a smaller N, or its timed run there, scaled linearly to ``n``, exceeds the cap."""
+    for r in rows:
+        if r["arm"] == arm and r["n"] < n:
+            if r.get("timed_out") or r.get("run_seconds", 0) * n / r["n"] > MEMORY_PROBE_TIMEOUT_S:
+                return True
+    return False
 
 
 def _run_memory_pass(ns, bus_id, names):
@@ -1659,8 +1669,11 @@ def _run_memory_pass(ns, bus_id, names):
                              "minimum_bytes": n * MIN_BYTES_PER_SAMPLE})
                 continue
             try:
-                r = cc.run_probe(__file__, ["--memory-probe", arm, str(n), bus_id],
-                                 timeout=MEMORY_PROBE_TIMEOUT_S, what=f"memory probe {arm} {n}")
+                if _memory_probe_predicted_over(rows, arm, n):
+                    r = {"timed_out": True, "predicted": True, "device_peak_bytes": None, "host_peak_bytes": None}
+                else:
+                    r = cc.run_probe(__file__, ["--memory-probe", arm, str(n), bus_id],
+                                     timeout=MEMORY_PROBE_TIMEOUT_S, what=f"memory probe {arm} {n}")
             except subprocess.TimeoutExpired:
                 r = {"timed_out": True, "device_peak_bytes": None, "host_peak_bytes": None}
             except RuntimeError as err:
@@ -1802,7 +1815,7 @@ def _dev_cell(m):
     if m is not None and m.get("out_of_memory"):
         return "out of memory"
     if m is not None and m.get("timed_out"):
-        return f"not measured (one run > {MEMORY_PROBE_TIMEOUT_S // 60} min)"
+        return f"not measured (one run {'predicted ' if m.get('predicted') else ''}> {MEMORY_PROBE_TIMEOUT_S // 60} min)"
     if m is None or m["device_peak_bytes"] is None:
         return "–"
     return (f"{_fmt_mib(m['device_peak_bytes'])} "

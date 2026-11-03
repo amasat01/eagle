@@ -118,3 +118,33 @@ def test_a_float32_device_arm_uploads_its_inputs_in_the_plane_dtype():
     arm.planes = {k: v.astype("float32") if v.dtype == "float64" else v for k, v in arm.planes.items()}
     arm.upload({name: np.ones(8) for name in module.STATE_NAMES})
     assert arm.planes["s"].dtype == cp.float32 and float(arm.planes["s"][0, 0]) == 1.0
+
+
+def test_a_memory_probe_predicted_over_its_cap_is_not_started(monkeypatch, tmp_path):
+    """An arm whose warm run at the smaller N, scaled to the larger N, exceeds the cap (or that already timed out) is
+    labelled without starting a probe; a fast arm still runs at both N.
+    RED: make ``_memory_probe_predicted_over`` return False and the slow arm's 10x probe is started."""
+    module = _rk78_script()
+    cc = module.cc
+    cap = module.MEMORY_PROBE_TIMEOUT_S
+    run_s = {"fast": 1.0, "slow": cap / 5}          # x10 N: 10 s (runs), 2 x cap (skipped)
+    started = []
+
+    def fake_probe(script, args, **kw):
+        arm, n = args[1], int(args[2])
+        started.append((arm, n))
+        if arm == "dead":
+            raise module.subprocess.TimeoutExpired("probe", cap)
+        return {"device_peak_bytes": n, "host_peak_bytes": 0, "run_seconds": run_s[arm]}
+
+    monkeypatch.setattr(cc, "run_probe", fake_probe)
+    monkeypatch.setattr(cc, "part_load", lambda *a, **k: None)
+    monkeypatch.setattr(cc, "part_save", lambda *a, **k: None)
+    monkeypatch.setattr(cc, "deadline_passed", lambda: False)
+    monkeypatch.setattr(module, "_ASSEMBLE", False)
+    rows = module._run_memory_pass([1000, 10000], "bus", ["fast", "slow", "dead"])
+    assert started == [("fast", 1000), ("slow", 1000), ("dead", 1000), ("fast", 10000)], started
+    big = {r["arm"]: r for r in rows if r["n"] == 10000}
+    assert big["fast"]["device_peak_bytes"] == 10000
+    for arm in ("slow", "dead"):
+        assert "predicted >" in module._dev_cell(big[arm]), big[arm]
