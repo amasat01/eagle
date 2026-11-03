@@ -15,6 +15,9 @@ Stages (``--stage``; ``profile.sh`` runs them in order); each writes plain text 
   issue, occupancy, registers, DRAM, stall classes, and the DP instructions executed per attempt (``ncu_ensemble.csv``);
 * **ncu_features**: the same capture of every arm of ours (eagle / hawk code, never a baseline library) of every
   feature-card row, case and dtype; the kernels of one run, up to :data:`LAUNCH_CAP` (``ncu_features.csv``);
+* **ncu_nvlibs**: counters only, never ``--set full``, never a source or SASS page (the CUDA EULA bars disassembling
+  NVIDIA's libraries): the NVIDIA library kernels behind the feature rows eagle loses (:data:`NVLIB_CELLS`), through
+  :data:`NVLIB_SECTIONS` and ``--import-source no`` (``ncu_nvlibs.csv``);
 * **chunk_residency**: the persist launch over chunk x threads per SM x {f32, f64} at N = 1e6 and 1e7, spread and
   spread-short: wall and slot fill (``chunk_residency.csv``); Nsight Compute on a tie (``chunk_residency_ncu.csv``);
 * **launch_shape**: launches and kernels per run for each card arm (Nsight Systems, one run per arm), and the fused
@@ -52,6 +55,15 @@ NCU_CAP_S = 150                               # one --quick capture
 NCU_FULL_CAP_S = 600                          # one --set full capture: ~40 replay passes of every kernel, built and run in it
 LAUNCH_CAP = 32                               # kernels captured of an arm that launches many (a run's first 32)
 TIE = 0.10                                    # within this fraction of the best is a tie
+#: the closed NVIDIA library kernels behind the feature rows eagle loses: (row, case, dtype, arm)
+NVLIB_CELLS = (("contraction", "all", "float64", "einsum"), ("contraction", "all", "float32", "einsum"),
+               ("linalg_team", "n512", "float64", "cupy"), ("linalg_team", "n512", "float64", "torch"),
+               *(("linalg_lane", "n32", d, a) for d in ("float64", "float32") for a in ("cupy", "torch")),
+               ("fft", "all", "float64", "cupy_fft"), ("sample_sum", "all", "float64", "cupy_sum"),
+               ("scatter", "all", "float64", "cupyx_scatter_add"))
+#: counters sections of those captures: none carries instruction text (no SourceCounters, no InstructionStats)
+NVLIB_SECTIONS = ("SpeedOfLight", "LaunchStats", "Occupancy", "ComputeWorkloadAnalysis", "MemoryWorkloadAnalysis",
+                  "WarpStateStats", "SchedulerStats")
 ENSEMBLE_ARMS = ("eagle_graph", "eagle_graph_compact", "eagle_graph_reorder", "eagle_graph_persist", "eagle_simulate")  # the card's eagle arms
 LAUNCH_ARMS = ("eagle_graph", "eagle_graph_persist", "eagle_simulate")
 KERNEL = "regex:rkf78"                        # the card's attempt kernel (every eagle arm's)
@@ -297,14 +309,17 @@ def kernel_summary(kernels, metrics):
             "top_kernel": top.get("name", "")[:120] or None, **{m: top.get(m) for m in metrics}}
 
 
-def ncu_run(args, rep, cmd_line, metrics, regex=None, count=1, ranged=True):
+def ncu_run(args, rep, cmd_line, metrics, regex=None, count=1, ranged=True, sections=()):
     """One capture of the first ``count`` launches (matching ``regex``, else any) of ``cmd_line``, inside the worker's
-    profiler range when ``ranged``: ([kernel dicts], its output). Full mode adds ``--set full`` to ``metrics``."""
-    full = not getattr(args, "quick", False)
+    profiler range when ``ranged``: ([kernel dicts], its output). Full mode adds ``--set full`` to ``metrics``;
+    ``sections`` (counters only: the nvlibs) replace it and keep the source out of the report (``--import-source no``)."""
+    full = not getattr(args, "quick", False) or bool(sections)
     cap = NCU_FULL_CAP_S if full else NCU_CAP_S
     cmd = [args.ncu, "--profile-from-start", "off" if ranged else "on", "--launch-skip", "0", "--launch-count", str(count),
            *(["--kernel-name", regex] if regex else []), "--target-processes", "all", "-f", "-o", str(rep),
-           *(["--set", "full"] if full else []), "--metrics", ",".join(metrics)] + cmd_line
+           *(["--set", "full"] if full and not sections else []),
+           *(a for sec in sections for a in ("--section", sec)), *(["--import-source", "no"] if sections else []),
+           "--metrics", ",".join(metrics)] + cmd_line
     if args.ncu_sudo:
         keep = [f"{k}={os.environ[k]}" for k in ("PATH", "LD_LIBRARY_PATH") if k in os.environ]   # sudo drops both
         cmd = ["sudo", "-n", "-E", "env", *keep] + cmd
@@ -478,29 +493,44 @@ def ncu_ensemble(args):
     ncu_stage_verdict(notes)
 
 
+def one_per_row(cells):
+    """The first cell of each feature-card row (the smoke of the feature stages)."""
+    return list({c[0]: c for c in reversed(cells)}.values())[::-1]
+
+
 def feature_cells(quick):
-    """(row, case, dtype, arm, N) of every arm of ours of every feature-card row, case and dtype (``quick``: two, smoke N)."""
+    """(row, case, dtype, arm, N) of every arm of ours of every feature-card row, case and dtype (``quick``: one per row,
+    at the smoke N)."""
     fc = load_card(FEATURE_PATH)
     cells = [(r, c, d, a, spec["cases"][c][1 if quick else 0]) for r, spec in fc.ROWS.items() for c in spec["cases"]
              for d in spec["dtypes"] for a in spec["arms"] if a in fc.OUR_ARMS]
-    return cells[:2] if quick else cells
+    return one_per_row(cells) if quick else cells
 
 
-def ncu_features(args):
-    """Each arm's timed call, alone inside a profiler range (feature_card's own runner, ``FEATURE_CARD_PROFILE`` set)."""
+def feature_capture(args, cells, name, sections=()):
+    """Each cell's timed call, alone inside a profiler range (feature_card's own runner, ``FEATURE_CARD_PROFILE`` set)."""
     require_ncu(args)
     notes = []
-    for row, case, dtype, arm, n in feature_cells(args.quick):
+    for row, case, dtype, arm, n in cells:
         cmd = ["env", "FEATURE_CARD_PROFILE=1", sys.executable, str(FEATURE_PATH), "--arm", row, case, dtype, arm,
                *(["--smoke"] if args.quick else [])]
-        got, _, note = capture_row(args, args.out / f"ncu_features_{row}_{case}_{dtype}_{arm}", cmd, ENSEMBLE_METRICS,
-                                   count=LAUNCH_CAP)
-        emit(args.out / "ncu_features.csv", {"row": row, "case": case, "dtype": dtype, "n": n, "arm": arm,
-                                             **{k: got[k] for k in ("kernels", "gpu_time_s", "top_kernel", *ENSEMBLE_METRICS)},
-                                             "note": note})
+        got, _, note = capture_row(args, args.out / f"{name}_{row}_{case}_{dtype}_{arm}", cmd, ENSEMBLE_METRICS,
+                                   count=LAUNCH_CAP, sections=sections)
+        emit(args.out / f"{name}.csv", {"row": row, "case": case, "dtype": dtype, "n": n, "arm": arm,
+                                        **{k: got[k] for k in ("kernels", "gpu_time_s", "top_kernel", *ENSEMBLE_METRICS)},
+                                        "note": note})
         say(f"ncu {row} {case} {dtype} {arm}: {got['kernels']} kernels")
         notes.append(note)
     ncu_stage_verdict(notes)
+
+
+def ncu_features(args):
+    feature_capture(args, feature_cells(args.quick), "ncu_features")
+
+
+def ncu_nvlibs(args):
+    cells = [(*c, load_card(FEATURE_PATH).ROWS[c[0]]["cases"][c[1]][1 if args.quick else 0]) for c in NVLIB_CELLS]
+    feature_capture(args, one_per_row(cells) if args.quick else cells, "ncu_nvlibs", NVLIB_SECTIONS)
 
 
 def chunk_cells(args):
@@ -583,7 +613,7 @@ def band(args):
 
 
 STAGES = {"sol_probe": sol_probe, "wide_sweep": wide_sweep, "ncu_corpus": ncu_corpus, "ncu_ensemble": ncu_ensemble,
-          "ncu_features": ncu_features,
+          "ncu_features": ncu_features, "ncu_nvlibs": ncu_nvlibs,
           "chunk_residency": chunk_residency, "launch_shape": launch_shape, "band": band}
 
 

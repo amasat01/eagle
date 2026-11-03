@@ -30,7 +30,7 @@ pytest.importorskip("hawk")
 REPRO = Path(__file__).resolve().parents[2] / "benchmarks" / "reproduce"
 PROFILE_PY = REPRO / "gpu_profile.py"
 PROFILE_SH = REPRO / "profile.sh"
-STAGES = ("sol_probe", "wide_sweep", "ncu_corpus", "ncu_ensemble", "ncu_features", "chunk_residency",
+STAGES = ("sol_probe", "wide_sweep", "ncu_corpus", "ncu_ensemble", "ncu_features", "ncu_nvlibs", "chunk_residency",
           "launch_shape")
 
 
@@ -179,7 +179,7 @@ def test_the_dry_run_prints_the_a100_estimate_the_p2000_plan_and_the_clock_polic
     assert rc == 0 and est and int(est[1]) <= int(est[2]) <= 120 and "SM clock: auto" in err
     assert "compute capability 7.0 (P2000): the ncu_* stages are skipped" in err
     rc, err = _plan("--quick")
-    assert rc == 0 and int(re.search(r"estimate on an A100: (\d+) min", err)[1]) < 8
+    assert rc == 0 and int(re.search(r"estimate on an A100: (\d+) min", err)[1]) <= 8
     rc, err = _plan("--lock-clock", "off")
     assert rc == 0 and "SM clock: off" in err
     rc, err = _plan("--lock-clock", "fast")
@@ -196,7 +196,7 @@ def test_only_selects_stages_by_name_or_prefix_and_refuses_an_unknown_one():
     rc, err = _plan("--only", "launch_shape,sol_probe")
     assert rc == 0 and _planned(err) == ["sol_probe", "launch_shape"]
     rc, err = _plan("--only", "ncu")
-    assert rc == 0 and _planned(err) == ["ncu_corpus", "ncu_ensemble", "ncu_features"]
+    assert rc == 0 and _planned(err) == ["ncu_corpus", "ncu_ensemble", "ncu_features", "ncu_nvlibs"]
     rc, err = _plan("--only", "chunk_res")
     assert rc != 0 and "matches no stage" in err
 
@@ -605,7 +605,7 @@ def test_ncu_features_enumerates_every_row_case_dtype_and_arm_of_ours_and_fails_
     want = {(r, c, d, a) for r, s in rows.items() for c in s["cases"] for d in s["dtypes"] for a in s["arms"]
             if a in mod.load_card(mod.FEATURE_PATH).OUR_ARMS}
     cells = mod.feature_cells(False)
-    assert {c[:4] for c in cells} == want and len(cells) == len(want) and len(mod.feature_cells(True)) == 2
+    assert {c[:4] for c in cells} == want and len(cells) == len(want) and len(mod.feature_cells(True)) == len(rows)
     monkeypatch.setattr(mod, "require_ncu", lambda args: None)
     args = types.SimpleNamespace(quick=False, out=tmp_path, ncu="/bin/false", ncu_sudo=False)
     with pytest.raises(RuntimeError, match="every ncu capture failed"):
@@ -616,14 +616,14 @@ def test_ncu_features_enumerates_every_row_case_dtype_and_arm_of_ours_and_fails_
 
 
 @pytest.mark.parametrize("plan", ["l4-prof", "a100"])
-def test_the_full_profile_plans_run_the_five_profile_steps_and_the_smoke_maps_them_to_quick(plan):
+def test_the_full_profile_plans_run_the_six_profile_steps_and_the_smoke_maps_them_to_quick(plan):
     rc, full = _run_cards("--plan", plan)
     rc_s, smoke = _run_cards("--plan", plan, "--smoke")
     assert rc == rc_s == 0
     steps = re.findall(r"\[repro\] step (\w+)", full)
-    assert steps[-5:] == ["corp", "ens", "feat", "p4", "p5"] and steps[:2] == ["p0", "p1"]
+    assert steps[-6:] == ["corp", "ens", "feat", "nvl", "p4", "p5"] and steps[:2] == ["p0", "p1"]
     assert ("c1" in steps) == (plan == "a100") and re.search(r"expected \d+ min; session deadline \d+ min", full)
-    for stage in ("ncu_corpus", "ncu_ensemble", "ncu_features", "chunk_residency", "launch_shape"):
+    for stage in ("ncu_corpus", "ncu_ensemble", "ncu_features", "ncu_nvlibs", "chunk_residency", "launch_shape"):
         assert any(stage in ln and "--quick" not in ln for ln in full.splitlines() if ln.startswith("+ ("))
         assert any(stage in ln and "--quick" in ln for ln in smoke.splitlines() if ln.startswith("+ ("))
 
@@ -633,3 +633,39 @@ def test_only_the_card_plans_bound_the_chunk_stage_to_its_old_900_s(plan, bounde
     _, out = _run_cards("--plan", plan)
     (cmd,) = [ln for ln in out.splitlines() if ln.startswith("+ (") and "--only chunk_residency" in ln]
     assert ("--deadline-min 15" in cmd) == bounded, cmd
+
+
+def test_the_nvlibs_capture_is_counters_only_never_full_never_source(monkeypatch):
+    mod = _kit_module()
+    seen = []
+    monkeypatch.setattr(mod.subprocess, "run", lambda cmd, **k: seen.append(cmd) or types.SimpleNamespace(
+        returncode=1, stdout="", stderr="boom"))
+    for quick in (False, True):
+        mod.ncu_run(types.SimpleNamespace(ncu="ncu", ncu_sudo=False, quick=quick), Path("/nonexistent/rep"), ["python"],
+                    ("m_a",), sections=mod.NVLIB_SECTIONS)
+    for cmd in seen:
+        asked = [cmd[i + 1] for i, a in enumerate(cmd) if a == "--section"]
+        assert asked == list(mod.NVLIB_SECTIONS) and cmd[cmd.index("--import-source") + 1] == "no"
+        assert "--set" not in cmd and not any(w in a.lower() for a in asked for w in ("source", "sass", "instruction"))
+    rows = mod.load_card(mod.FEATURE_PATH).ROWS
+    for row, case, dtype, arm in mod.NVLIB_CELLS:     # every cell is a real, external (library) arm of the card
+        assert case in rows[row]["cases"] and dtype in rows[row]["dtypes"] and arm in rows[row]["arms"]
+        assert arm in mod.load_card(mod.FEATURE_PATH).EXTERNAL_ARMS
+
+
+def test_the_smoke_of_the_feature_stages_takes_one_cell_per_row(tmp_path, monkeypatch):
+    mod = _kit_module()
+    rows = mod.load_card(mod.FEATURE_PATH).ROWS
+    assert [c[0] for c in mod.feature_cells(True)] == [r for r in rows if any(
+        a in mod.load_card(mod.FEATURE_PATH).OUR_ARMS for a in rows[r]["arms"])]
+    seen = []
+    monkeypatch.setattr(mod, "feature_capture", lambda args, cells, name, sections=(): seen.append((cells, sections)))
+    mod.ncu_nvlibs(types.SimpleNamespace(quick=True))
+    cells, sections = seen[0]
+    assert [c[0] for c in cells] == list(dict.fromkeys(c[0] for c in mod.NVLIB_CELLS)) and sections == mod.NVLIB_SECTIONS
+
+
+@pytest.mark.parametrize("plan,cached", [("l4-prof", True), ("a100", True), ("t4", True), ("zen5", False)])
+def test_the_gpu_plans_collect_the_open_source_compile_caches_under_compiled(plan, cached):
+    _, out = _run_cards("--plan", plan)
+    assert ("compile caches (warp, jax, torch, triton, cupy) under /nonexistent/work/cards/m/compiled/<lib>" in out) == cached

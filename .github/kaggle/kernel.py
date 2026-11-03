@@ -519,6 +519,10 @@ def run_cards(py, roots, out, result, work):
     env = dict(os.environ, HAWK_SRC=str(roots.get("hawk", "")), EAGLE_SRC=str(eagle))
     cards_out = out / "cards"
     cards_out.mkdir(parents=True, exist_ok=True)
+    compiled = cards_out / "compiled"    # the open-source libraries' compile caches, collected with the results (as run_cards.sh)
+    env.update(WARP_CACHE_PATH=f"{compiled}/warp", XLA_FLAGS=f"{env.get('XLA_FLAGS', '')} --xla_dump_to={compiled}/jax",
+               TORCHINDUCTOR_CACHE_DIR=f"{compiled}/torch", TRITON_CACHE_DIR=f"{compiled}/triton",
+               CUPY_CACHE_DIR=f"{compiled}/cupy", CUPY_CACHE_SAVE_CUDA_SOURCE="1")
     deadline = time.time() + DEADLINE_FACTOR * 60 * sum(m for _, _, m, _ in CARDS_PLAN)
     env["CARD_DEADLINE"] = str(deadline)
     result["cards"], result["skipped"] = [], []

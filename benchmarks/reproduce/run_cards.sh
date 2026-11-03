@@ -69,7 +69,7 @@ done
 #   sequence (about 35 min on a busy 4-core host) x 0.5 for the Zen5 session.
 # ncu = the quick Nsight Compute smoke of the L4. The full profile steps (USER 11-03: every counter, every workload; the card
 #   timings above stay unprofiled, these run after them in their own processes) are one profile.sh stage each, --set full:
-#   corp = ncu_corpus, ens = ncu_ensemble, feat = ncu_features, p4 = chunk_residency (timing grid + captures of its ties),
+#   corp = ncu_corpus, ens = ncu_ensemble, feat = ncu_features, nvl = ncu_nvlibs, p4 = chunk_residency (timing grid + captures of its ties),
 #   p5 = launch_shape (nsys). A full capture replays each kernel about 40 times: 30 s of process + (0.12 s + the kernel's own
 #   time) x 40 per kernel, the kernels of one run capped at 32 (the caps below are profile.sh's, ~1.5 x the L4 walls).
 #   Only our code is profiled (eagle / hawk kernels), never a baseline library: ens = the card's 5 eagle arms, feat = the 39
@@ -81,11 +81,13 @@ done
 #     corp = <= 12 cells x (30 s + 40 x 0.2 s) x ~ 1.2 = 12 min; A100 10.
 #     p4   = the chunk grid (64 cells, 17 min of runs + builds, 21 min) + <= 8 tie captures x 75 s = 32 min; A100: FP64 /20 -> 13.
 #     p5   = nsys, no counters, 3 arms: 5 (L4), 4 (A100).
+#     nvl  = ncu_nvlibs: 11 cells (closed NVIDIA library kernels of the rows eagle loses; counters only, 7 sections ~ 12 passes, never
+#            --set full or source) x (15 s + ~10 kernels x 12 x 0.15 s) = 6 min, cuSOLVER's longer kernels + 4 = 10 (L4); 8 (A100).
 #   NCU capture cap 600 s (persist's 40 passes x 2.3 s = 92 s + build; segmented's 150 s); stage caps ens 15 min, feat 65.
-#   l4-prof = p0, p1, then the five profile steps (107 min; deadline 1.5 x); a100 = today's card steps, then the same five (115).
+#   l4-prof = p0, p1, then the six profile steps (117 min; deadline 1.5 x); a100 = today's card steps, then the same six (123).
 case $PLAN in
-  a100)  STEPS=(p0:1:4 p1:4:11 c1:27:D c2:14:D corp:10:35 ens:6:25 feat:36:70 p4:13:55 p5:4:16) ; KIND=GPU ;;
-  l4-prof) STEPS=(p0:1:4 p1:4:11 corp:12:35 ens:10:25 feat:43:70 p4:32:55 p5:5:16) ; KIND=GPU ;;
+  a100)  STEPS=(p0:1:4 p1:4:11 c1:27:D c2:14:D corp:10:35 ens:6:25 feat:36:70 nvl:8:25 p4:13:55 p5:4:16) ; KIND=GPU ;;
+  l4-prof) STEPS=(p0:1:4 p1:4:11 corp:12:35 ens:10:25 feat:43:70 nvl:10:25 p4:32:55 p5:5:16) ; KIND=GPU ;;
   l4)    STEPS=(p0:1:4 p1:4:11 c1:26:D c2:12:D p4:8:16 ncu:2:6) ; KIND=GPU ;;
   t4)    STEPS=(p0:1:4 p1:4:11 c1:89:D c2:12:D p4:8:16) ;        KIND=GPU ;;
   p2000) STEPS=(p0:1:4 p1:4:11 c1:25:D c2:8:D p4:8:16 p5:3:11) ; KIND=GPU ;;
@@ -124,7 +126,7 @@ smoke_cmd() {
   done
   case $1 in
     c1|c1cpu|c2|c2cpu|pcpu) printf '%s\n' --smoke ;;
-    p1|corp|ens|feat|p4|p5) printf '%s\n' --quick ;;
+    p1|corp|ens|feat|nvl|p4|p5) printf '%s\n' --quick ;;
   esac
 }
 full_cmd() {
@@ -141,6 +143,7 @@ full_cmd() {
     c2|c2cpu) printf '%s\n' python benchmarks/perf_card/feature_card.py --parts "$RES/parts/c2" --out-dir "$RES/perf_card" ;;
     corp)  printf '%s\n' bash benchmarks/reproduce/profile.sh --env "$ENVF" --out "$RES/profile" --only ncu_corpus ;;
     ens)   printf '%s\n' bash benchmarks/reproduce/profile.sh --env "$ENVF" --out "$RES/profile" --only ncu_ensemble ;;
+    nvl)   printf '%s\n' bash benchmarks/reproduce/profile.sh --env "$ENVF" --out "$RES/profile" --only ncu_nvlibs ;;
     feat)  printf '%s\n' bash benchmarks/reproduce/profile.sh --env "$ENVF" --out "$RES/profile" --only ncu_features ;;
     p4)    # the card plans keep the 900 s chunk stage (--deadline-min 15 clips profile.sh's cap); the profile plans the full one
            printf '%s\n' bash benchmarks/reproduce/profile.sh --env "$ENVF" --out "$RES/profile" --only chunk_residency
@@ -161,6 +164,7 @@ DEADLINE_MIN=$(( (expected * 3 + 1) / 2 ))
 [[ -n $DEADLINE_H ]] && DEADLINE_MIN=$(awk -v h="$DEADLINE_H" 'BEGIN {printf "%d", h * 60}')
 DEADLINE_AT=$(( START + DEADLINE_MIN * 60 ))
 log "expected $expected min; session deadline $DEADLINE_MIN min (1.5 x); --max-run-duration = deadline + boot + upload + 15 = $((DEADLINE_MIN + 15)) min + boot"
+[[ $KIND == GPU ]] && log "compile caches (warp, jax, torch, triton, cupy) under $RES/compiled/<lib>; card timings unchanged"
 [[ $REPRO_DRY_RUN == 1 ]] && log "dry run: commands are printed, nothing is run"
 export CARD_DEADLINE=$DEADLINE_AT
 
@@ -173,9 +177,17 @@ push() {
 }
 
 # in_env CMD...: CMD in the plan's env from the eagle root (HAWK_SRC and EAGLE_SRC set; no GPU for a CPU plan).
+# compile_caches: the open-source libraries' compile caches under $RES/compiled/<lib>, uploaded with the results: files only, no
+# timed span changes (XLA's dump is written when a program compiles, which every card does before its timed rounds).
+compile_caches() {
+  printf '%s\n' "WARP_CACHE_PATH=$RES/compiled/warp" "XLA_FLAGS=${XLA_FLAGS:-} --xla_dump_to=$RES/compiled/jax" \
+    "TORCHINDUCTOR_CACHE_DIR=$RES/compiled/torch" "TRITON_CACHE_DIR=$RES/compiled/triton" \
+    "CUPY_CACHE_DIR=$RES/compiled/cupy" "CUPY_CACHE_SAVE_CUDA_SOURCE=1"
+}
 in_env() {
   ( # shellcheck disable=SC1090
     . "$ENVF"
+    if [[ $KIND == GPU ]]; then while IFS= read -r kv; do export "$kv"; done < <(compile_caches); fi
     [[ $KIND == CPU ]] && export CUDA_VISIBLE_DEVICES=""
     export HAWK_SRC=${RAPTOR_HAWK_ROOT:-${HAWK_SRC:-}} EAGLE_SRC=$EROOT CARD_DEADLINE
     cd "$EROOT" && "$@" )

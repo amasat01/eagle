@@ -4,7 +4,7 @@
 #
 # Profile eagle's kernels and launch shapes on this machine's GPU for the performance card's workload
 # (Nsight Systems and Nsight Compute), unattended, every counter on every workload (about 75 minutes on an A100, --quick under 8 minutes), ending with one tarball.
-# The stages: sol_probe, wide_sweep, ncu_corpus, ncu_ensemble, ncu_features, chunk_residency, launch_shape (see gpu_profile.py).
+# The stages: sol_probe, wide_sweep, ncu_corpus, ncu_ensemble, ncu_features, ncu_nvlibs, chunk_residency, launch_shape (see gpu_profile.py).
 # Nsight Compute stages capture with --set full (--quick: the metric list only).
 #
 #   profile.sh [options]
@@ -13,7 +13,7 @@
 #                       WORK/env-gpu-cuda13.sh by default and reports the CUDA 13 package names
 #     --out DIR         where results go (default WORK/profiles/<machine-slug>/)
 #     --work DIR        bootstrap's work directory (default per target)
-#     --quick           one small point of every stage: under 8 minutes
+#     --quick           one small point of every stage: about 8 minutes
 #     --fresh           ignore the markers of an earlier run and start over
 #     --deadline-min M  stop starting stages after M minutes (default 150)
 #     --only A[,B...]   run just these stages (a name, or a prefix such as ncu), keeping the order
@@ -73,10 +73,10 @@ TARBALL=$OUT/profile-$SLUG.tgz
 
 # stage NAME:CAP_SECONDS, in run order
 if [[ $QUICK == 1 ]]; then
-  PLAN=(sol_probe:120 wide_sweep:300 ncu_corpus:240 ncu_ensemble:300 ncu_features:300 chunk_residency:240 launch_shape:240)
+  PLAN=(sol_probe:120 wide_sweep:300 ncu_corpus:240 ncu_ensemble:300 ncu_features:300 ncu_nvlibs:300 chunk_residency:240 launch_shape:240)
 else
-  # full caps: ceilings of ~1.5 x the L4 walls (ncu_ensemble 10 min, ncu_features 43, ncu_corpus 12, chunk_residency 32 incl. ties)
-  PLAN=(sol_probe:180 wide_sweep:600 ncu_corpus:1800 ncu_ensemble:900 ncu_features:3900 chunk_residency:3000 launch_shape:600)
+  # full caps: ceilings of ~1.5 x the L4 walls (ncu_ensemble 10 min, ncu_features 43, ncu_nvlibs 10, ncu_corpus 12, chunk_residency 32 incl. ties)
+  PLAN=(sol_probe:180 wide_sweep:600 ncu_corpus:1800 ncu_ensemble:900 ncu_features:3900 ncu_nvlibs:1200 chunk_residency:3000 launch_shape:600)
 fi
 if [[ -n $ONLY ]]; then
   CHOSEN=()
@@ -99,9 +99,9 @@ if [[ -n $ONLY ]]; then
 fi
 
 # Expected seconds per stage on an A100 (the caps above are ceilings, not expectations; --quick: a minute each). The ncu
-# stages are ~40 replay passes (--set full) of each kernel: ncu_ensemble 10 captures, ncu_features 39 arms.
+# stages are ~40 replay passes (--set full) of each kernel: ncu_ensemble 10 captures, ncu_features 39 arms, ncu_nvlibs 11 library cells (counters only).
 BUDGET_MIN=90
-declare -A EST=([sol_probe]=30 [wide_sweep]=300 [ncu_corpus]=600 [ncu_ensemble]=360 [ncu_features]=2160 [chunk_residency]=800 [launch_shape]=240)
+declare -A EST=([sol_probe]=30 [wide_sweep]=300 [ncu_corpus]=600 [ncu_ensemble]=360 [ncu_features]=2160 [ncu_nvlibs]=480 [chunk_residency]=800 [launch_shape]=240)
 EST_S=0 EST_NO_NCU_S=0
 for s in "${PLAN[@]}"; do
   n=${s%%:*}
