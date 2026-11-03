@@ -339,4 +339,6 @@ for entry in "${PLAN[@]}"; do
 done
 write_status
 log "stages done in $((SECONDS - T0)) s; see $OUT/status.txt"
+# every stage ran; a failed one fails the run (a skipped one does not), so the step that called it is not done
+for st in "${STATUS[@]}"; do [[ $st == failed* ]] && exit 1; done
 exit 0

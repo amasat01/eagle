@@ -92,7 +92,7 @@ def kit(tmp_path):
 def test_a_failing_stage_does_not_stop_the_next(kit):
     rc, out = kit({"PROFILE_TEST_FAIL": "wide_sweep"}, "--only", "sol_probe,wide_sweep,launch_shape")
     status, names = kit.results()
-    assert rc == 0
+    assert rc == 1                                   # every stage ran; the failed one fails the run (run_cards' step)
     assert "sol_probe: ok" in status
     assert "wide_sweep: failed: exit 1" in status and "forced failure" in status
     assert "launch_shape: ok" in status
@@ -104,7 +104,7 @@ def test_a_failing_stage_does_not_stop_the_next(kit):
 def test_a_stage_over_its_cap_is_failed_and_the_tarball_still_lands(kit):
     rc, out = kit({"PROFILE_TEST_CAP_S": "1"}, "--only", "launch_shape")
     status, _ = kit.results()
-    assert rc == 0
+    assert rc == 1
     assert "launch_shape: failed: exceeded its 1 s time cap" in status
     assert out.strip().splitlines()[-1].startswith("[repro] results:")
 
@@ -468,7 +468,8 @@ def test_an_ncu_failure_note_keeps_ncus_own_lines_ahead_of_a_later_library_warni
     text = ("==PROF== Connected to process 1\n==ERROR== Profiling is not supported on this device\n"
             "worker {}\n" + "x.py:600: FutureWarning: The pynvml package is deprecated. " * 8 + "\n")
     note = mod.ncu_failure_note(text)
-    assert note == "==ERROR== Profiling is not supported on this device"
+    assert note.splitlines()[0] == "==ERROR== Profiling is not supported on this device"
+    assert "worker {}" in note                       # the profiled application's last lines follow ncu's own
     with pytest.raises(RuntimeError, match="not supported on this device"):
         mod.ncu_stage_verdict([note])
     assert mod.ncu_failure_note("plain output") == "plain output"          # nothing of ncu's own: the tail

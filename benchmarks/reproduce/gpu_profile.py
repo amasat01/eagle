@@ -275,7 +275,8 @@ def ncu_capture(args, rep, regex, cmd_line, metrics):
            "--launch-count", "1", "--kernel-name", regex, "--target-processes", "all", "-f", "-o", str(rep),
            "--metrics", ",".join(metrics)] + cmd_line
     if args.ncu_sudo:
-        cmd = ["sudo", "-n", "-E", "env", f"PATH={os.environ['PATH']}"] + cmd
+        keep = [f"{k}={os.environ[k]}" for k in ("PATH", "LD_LIBRARY_PATH") if k in os.environ]   # sudo drops both
+        cmd = ["sudo", "-n", "-E", "env", *keep] + cmd
     try:
         done = subprocess.run(cmd, capture_output=True, text=True, timeout=NCU_CAP_S)
     except subprocess.TimeoutExpired:
@@ -292,9 +293,12 @@ def ncu_capture(args, rep, regex, cmd_line, metrics):
 
 def ncu_failure_note(text):
     """ncu's own ==ERROR== / ==WARNING== lines when it printed any (a library warning printed later must not hide
-    them), else the output's last 300 characters."""
+    them) followed by the profiled application's last lines, else the output's last 300 characters."""
     own = [ln.strip() for ln in text.splitlines() if ln.lstrip().startswith(("==ERROR==", "==WARNING=="))]
-    return "\n".join(own[-5:]) if own else text[-300:]
+    if not own:
+        return text[-300:]
+    app = [ln for ln in text.splitlines() if ln.strip() and not ln.lstrip().startswith("==")]
+    return "\n".join(own[-5:] + ["-- the application's last lines:"] + app[-6:])   # why the profiled process failed
 
 
 def ncu_stage_verdict(notes):
