@@ -673,7 +673,8 @@ def test_the_gpu_plans_collect_the_open_source_compile_caches_under_compiled(pla
 
 def test_only_l4_prof_runs_the_smoke_compile_collection_into_a_throwaway_dir():
     _, out = _run_cards("--plan", "l4-prof")
-    (cmd,) = [ln for ln in out.splitlines() if ln.startswith("+ (") and "perf_card.py --smoke" in ln]
-    assert "feature_card.py --smoke" in cmd and "/cards/m/compile_smoke" in cmd and "/perf_card" not in cmd.split("--out-dir")[-1]
+    (cmd,) = [ln.replace("\\", "") for ln in out.splitlines() if ln.startswith("+ (") and "perf_card/perf_card.py" in ln]
+    assert "perf_card.py --smoke" in cmd and "feature_card.py --smoke" in cmd and cmd.endswith("/cards/m/compile_smoke)")
+    assert "--out-dir \"$1\"" in cmd and "/cards/m/perf_card" not in cmd
     assert out.index("step p1") < out.index("step cmp") < out.index("step corp")
     assert "step cmp" not in _run_cards("--plan", "a100")[1]

@@ -144,8 +144,7 @@ full_cmd() {
     c1cpu) printf '%s\n' python benchmarks/perf_card/cpu_card.py --parts "$RES/parts/c1cpu" --out-dir "$RES/perf_card" ;;
     pcpu)  printf '%s\n' python benchmarks/perf_card/pcpu.py --parts "$RES/parts/pcpu" --out-dir "$RES/pcpu" ;;
     c2|c2cpu) printf '%s\n' python benchmarks/perf_card/feature_card.py --parts "$RES/parts/c2" --out-dir "$RES/perf_card" ;;
-    cmp)   printf '%s\n' bash -c 'rc=0; python benchmarks/perf_card/perf_card.py --smoke --out-dir "$1" || rc=1
-                               python benchmarks/perf_card/feature_card.py --smoke --out-dir "$1" || rc=1; exit $rc' _ "$RES/compile_smoke" ;;
+    cmp)   printf '%s\n' bash -c 'rc=0; python benchmarks/perf_card/perf_card.py --smoke --out-dir "$1" || rc=1; python benchmarks/perf_card/feature_card.py --smoke --out-dir "$1" || rc=1; exit $rc' _ "$RES/compile_smoke" ;;
     corp)  printf '%s\n' bash benchmarks/reproduce/profile.sh --env "$ENVF" --out "$RES/profile" --only ncu_corpus ;;
     ens)   printf '%s\n' bash benchmarks/reproduce/profile.sh --env "$ENVF" --out "$RES/profile" --only ncu_ensemble ;;
     nvl)   printf '%s\n' bash benchmarks/reproduce/profile.sh --env "$ENVF" --out "$RES/profile" --only ncu_nvlibs ;;
