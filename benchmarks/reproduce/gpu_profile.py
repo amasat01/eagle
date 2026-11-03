@@ -11,16 +11,18 @@ Stages (``--stage``; ``profile.sh`` runs them in order); each writes plain text 
 * **wide_sweep**: hawk's wide-value sweep (``python -m hawk.targets.cards.sweep``) over the forms thread, team and
   staged: candidate rows for ``wide.json`` and ``thread_box.json`` in ``wide_sweep.json``;
 * **ncu_corpus**: Nsight Compute on the sweep's ties and on the team and staged kernels (``ncu_corpus.csv``);
-* **ncu_ensemble**: Nsight Compute on the card's persist, simulate and Warp arms at N = 1e6, spread and uniform: lane
-  efficiency, FP64 pipe, issue, occupancy, registers, DRAM, stall classes, and the DP instructions executed per attempt
-  (``ncu_ensemble.csv``);
+* **ncu_ensemble**: Nsight Compute on every GPU arm of the card (eagle, Warp, JAX, CuPy, PyTorch) at N = 1e6, spread and
+  uniform: lane efficiency, FP64 pipe, issue, occupancy, registers, DRAM, stall classes, and the DP instructions executed
+  per attempt (``ncu_ensemble.csv``); an arm of several kernels is every kernel of one run, up to :data:`LAUNCH_CAP`;
+* **ncu_features**: the same capture of every GPU arm of every feature-card row, case and dtype (``ncu_features.csv``);
 * **chunk_residency**: the persist launch over chunk x threads per SM x {f32, f64} at N = 1e6 and 1e7, spread and
   spread-short: wall and slot fill (``chunk_residency.csv``); Nsight Compute on a tie (``chunk_residency_ncu.csv``);
 * **launch_shape**: launches and kernels per run for each card arm (Nsight Systems, one run per arm), and the fused
   against persist wall over N = 1e3..1e6 (``launch_shape.csv``, ``crossover.csv``);
 * **band**: the compaction cadence of the compact arm (``band.csv``); run by hand, on starved cards.
 
-Nsight Compute needs compute capability 7.0 or newer and counter access. Run through ``profile.sh``, which sets up
+Nsight Compute captures use ``--set full`` (``--quick``: the listed metrics only); each ``.ncu-rep`` is kept. Nsight
+Compute needs compute capability 7.0 or newer and counter access. Run through ``profile.sh``, which sets up
 the environment and packs the tarball.
 """
 
@@ -44,11 +46,17 @@ import time
 
 HERE = pathlib.Path(__file__).resolve().parent
 CARD_PATH = HERE.parent / "perf_card" / "perf_card.py"
+FEATURE_PATH = HERE.parent / "perf_card" / "feature_card.py"
 NCU_MIN_CC = 7.0
-NCU_CAP_S = 150
+NCU_CAP_S = 150                               # one --quick capture
+NCU_FULL_CAP_S = 900                          # one --set full capture: ~40 replay passes of every kernel, built and run in it
+LAUNCH_CAP = 32                               # kernels captured of an arm that launches many (a run's first 32)
 TIE = 0.10                                    # within this fraction of the best is a tie
-CARD_ARMS = ("eagle_graph", "eagle_graph_compact", "eagle_graph_persist", "eagle_simulate", "warp_kernel")
-ENSEMBLE_ARMS = ("eagle_graph_persist", "eagle_simulate", "warp_kernel")
+ENSEMBLE_ARMS = ("eagle_graph", "eagle_graph_persist", "eagle_simulate", "warp_kernel",
+                 "jax_vmap", "cupy_masked", "torch_graphed", "torch_compiled")
+CARD_ARMS = ENSEMBLE_ARMS + ("eagle_graph_compact",)
+ATTEMPT_ARMS = ENSEMBLE_ARMS[:4]              # one kernel to capture: the attempt kernel (KERNEL); the others: every kernel
+FEATURE_HOST_ARMS = ("numpy_mask", "np_add_at")   # feature-card baselines that run on the CPU only
 LAUNCH_ARMS = ("eagle_graph", "eagle_graph_persist", "eagle_simulate", "warp_kernel")
 KERNEL = "regex:rkf78"                        # the card's attempt kernel (Warp's is rkf78 as well)
 
@@ -88,11 +96,11 @@ def say(msg):
     print(f"[profile] {msg}", flush=True)
 
 
-def load_card():
-    """The performance card's module: its kernel, inputs and arms."""
-    spec = importlib.util.spec_from_file_location("perf_card", CARD_PATH)
+def load_card(path=CARD_PATH):
+    """The performance card's module (``path``: the feature card's): its kernel, inputs and arms."""
+    spec = importlib.util.spec_from_file_location(path.stem, path)
     mod = importlib.util.module_from_spec(spec)
-    sys.modules["perf_card"] = mod
+    sys.modules[path.stem] = mod
     spec.loader.exec_module(mod)
     return mod
 
@@ -198,7 +206,7 @@ def run_cell(card, cell, reps=3, profile=False):
     fill, the threads per SM that launched and the attempts the run made."""
     import cupy as cp
 
-    sync = "warp_kernel" if cell["arm"] == "warp_kernel" else "eagle_graph"
+    sync = cell["arm"]
     with persist_threads(cell.get("tps")):
         arm, inp = build(card, cell)
         arm["state"].upload(inp)
@@ -256,39 +264,72 @@ def worker_sweep(form, width, fold, dtype, cache):
 # --------------------------------------------------------------------------- #
 # Nsight Compute and Nsight Systems
 # --------------------------------------------------------------------------- #
-def ncu_values(raw_csv):
-    """{metric: float} from ncu's raw page (header, a units row, then one row per kernel; the first is read)."""
+NCU_TIME = "gpu__time_duration.sum"
+_UNIT_S = {"nsecond": 1e-9, "usecond": 1e-6, "msecond": 1e-3, "second": 1.0}
+
+
+def ncu_kernels(raw_csv):
+    """One dict per kernel of ncu's raw page (header, a units row, then a row per kernel): every numeric column by name,
+    ``name`` and ``gpu_time_s`` (the duration in seconds, when the page has it)."""
     rows = list(csv.reader(raw_csv.splitlines()))
-    body = [r for r in rows[1:] if r and r[0].strip().isdigit()]
-    if len(rows) < 2 or not body:
-        return {}
-    out = {}
-    for name, value in zip(rows[0], body[0]):
-        with contextlib.suppress(ValueError):
-            out[name] = float(value.replace(",", ""))
+    if len(rows) < 2:
+        return []
+    out = []
+    for row in (r for r in rows[1:] if r and r[0].strip().isdigit()):
+        kernel = {}
+        for name, unit, value in zip(rows[0], rows[1], row):
+            if name == "Kernel Name":
+                kernel["name"] = value
+            with contextlib.suppress(ValueError):
+                kernel[name] = float(value.replace(",", ""))
+                if name == NCU_TIME:
+                    kernel["gpu_time_s"] = kernel[name] * _UNIT_S.get(unit, 1e-9)
+        out.append(kernel)
     return out
 
 
-def ncu_capture(args, rep, regex, cmd_line, metrics):
-    """One capture of the first launch matching ``regex`` of ``cmd_line``: ({metric: value}, its output)."""
-    cmd = [args.ncu, "--profile-from-start", "off" if "--worker" in cmd_line else "on", "--launch-skip", "0",
-           "--launch-count", "1", "--kernel-name", regex, "--target-processes", "all", "-f", "-o", str(rep),
-           "--metrics", ",".join(metrics)] + cmd_line
+def ncu_values(raw_csv):
+    """{metric: float} of the first kernel of ncu's raw page."""
+    kernels = ncu_kernels(raw_csv)
+    return {k: v for k, v in kernels[0].items() if isinstance(v, float)} if kernels else {}
+
+
+def kernel_summary(kernels, metrics):
+    """The row of an arm's captured kernels: how many, the summed GPU time, the top kernel by time and its ``metrics``."""
+    top = max(kernels, key=lambda k: k.get("gpu_time_s", 0.0), default={})
+    return {"kernels": len(kernels), "gpu_time_s": sum(k.get("gpu_time_s", 0.0) for k in kernels) if kernels else None,
+            "top_kernel": top.get("name", "")[:120] or None, **{m: top.get(m) for m in metrics}}
+
+
+def ncu_run(args, rep, cmd_line, metrics, regex=None, count=1, ranged=True):
+    """One capture of the first ``count`` launches (matching ``regex``, else any) of ``cmd_line``, inside the worker's
+    profiler range when ``ranged``: ([kernel dicts], its output). Full mode adds ``--set full`` to ``metrics``."""
+    full = not getattr(args, "quick", False)
+    cap = NCU_FULL_CAP_S if full else NCU_CAP_S
+    cmd = [args.ncu, "--profile-from-start", "off" if ranged else "on", "--launch-skip", "0", "--launch-count", str(count),
+           *(["--kernel-name", regex] if regex else []), "--target-processes", "all", "-f", "-o", str(rep),
+           *(["--set", "full"] if full else []), "--metrics", ",".join(metrics)] + cmd_line
     if args.ncu_sudo:
         keep = [f"{k}={os.environ[k]}" for k in ("PATH", "LD_LIBRARY_PATH") if k in os.environ]   # sudo drops both
         cmd = ["sudo", "-n", "-E", "env", *keep] + cmd
     try:
-        done = subprocess.run(cmd, capture_output=True, text=True, timeout=NCU_CAP_S)
+        done = subprocess.run(cmd, capture_output=True, text=True, timeout=cap)
     except subprocess.TimeoutExpired:
-        return {}, f"ncu exceeded {NCU_CAP_S} s"
+        return [], f"ncu exceeded {cap} s"
     report = pathlib.Path(str(rep) + ".ncu-rep")
     if args.ncu_sudo and report.exists():
         subprocess.run(["sudo", "-n", "chown", f"{os.getuid()}:{os.getgid()}", str(report)])
     if done.returncode != 0 or not report.exists():
-        return {}, ncu_failure_note(done.stdout + done.stderr)
+        return [], ncu_failure_note(done.stdout + done.stderr)
     raw = subprocess.run([args.ncu, "--import", str(report), "--csv", "--page", "raw"],
                          capture_output=True, text=True).stdout
-    return ncu_values(raw), done.stdout
+    return ncu_kernels(raw), done.stdout
+
+
+def ncu_capture(args, rep, regex, cmd_line, metrics, ranged=True):
+    """One capture of the first launch matching ``regex`` of ``cmd_line``: ({metric: value}, its output)."""
+    kernels, out = ncu_run(args, rep, cmd_line, metrics, regex, ranged=ranged)
+    return ({k: v for k, v in kernels[0].items() if isinstance(v, float)} if kernels else {}), out
 
 
 def ncu_failure_note(text):
@@ -398,8 +439,8 @@ def corpus_cells(sweep_json, quick):
 
 def ncu_corpus(args):
     require_ncu(args)
-    sweep_json = args.out / "wide_sweep.json"
-    if not sweep_json.exists():
+    sweep_json = next((p for p in (args.out / "wide_sweep.json", args.out.parent / "wide_sweep.json") if p.exists()), None)
+    if sweep_json is None:   # the stage's own, else the one run_cards.sh's sweep step wrote beside the data directory
         raise Skip("no wide_sweep.json: run wide_sweep first")
     me = str(pathlib.Path(__file__).resolve())
     notes = []
@@ -407,7 +448,8 @@ def ncu_corpus(args):
         label = f"{form}_{width}_{fold}_{dtype}"
         cmd = [sys.executable, me, "--worker-sweep", form, str(width), str(fold), dtype,
                str(args.out.parent / "sweep_cache" / "ncu")]
-        got, note = ncu_capture(args, args.out / f"ncu_corpus_{label}", f"regex:sweep_{width}_{fold}", cmd, CORPUS_METRICS)
+        got, note = ncu_capture(args, args.out / f"ncu_corpus_{label}", f"regex:sweep_{width}_{fold}", cmd, CORPUS_METRICS,
+                               ranged=False)
         emit(args.out / "ncu_corpus.csv", {"form": form, "width": width, "fold": fold, "dtype": dtype,
                                            **{m: got.get(m) for m in CORPUS_METRICS}, "note": "" if got else note})
         say(f"ncu {label}: {'ok' if got else 'failed'}")
@@ -415,22 +457,61 @@ def ncu_corpus(args):
     ncu_stage_verdict(notes)
 
 
+def capture_row(args, rep, cmd_line, metrics, **kw):
+    """(the row's kernels / gpu_time_s / top_kernel and ``metrics`` of the top kernel, the output, the note) of one capture."""
+    kernels, out = ncu_run(args, rep, cmd_line, metrics, **kw)
+    return kernel_summary(kernels, metrics), out, "" if kernels else out or "no output"
+
+
 def ncu_ensemble(args):
     require_ncu(args)
+    arms = ENSEMBLE_ARMS[:1] if args.quick else ENSEMBLE_ARMS
+    absent = load_card()._select_arms(arms)[1]
     notes = []
-    for arm in ENSEMBLE_ARMS[:1] if args.quick else ENSEMBLE_ARMS:
+    for arm in arms:
         for dist in ("spread", "uniform"):
             cell = {"arm": arm, "n": 10_000 if args.quick else POINT[0], "dist": dist}
-            got, out = ncu_capture(args, args.out / f"ncu_ensemble_{arm}_{dist}", KERNEL, worker_cmd(cell),
-                                   ENSEMBLE_METRICS + DP_METRICS)
+            if arm in absent:
+                row, out, note = kernel_summary([], ENSEMBLE_METRICS + DP_METRICS), "", absent[arm]
+            else:
+                one = arm in ATTEMPT_ARMS
+                row, out, note = capture_row(args, args.out / f"ncu_ensemble_{arm}_{dist}", worker_cmd(cell),
+                                             ENSEMBLE_METRICS + DP_METRICS, regex=KERNEL if one else None,
+                                             count=1 if one else LAUNCH_CAP)
+                notes.append(note)
             attempts = worker_row(out).get("sample_steps")
-            dp = sum(got.get(m, 0.0) for m in DP_METRICS)
+            dp = sum(row[m] or 0.0 for m in DP_METRICS)
             emit(args.out / "ncu_ensemble.csv", {
-                "arm": arm, "dist": dist, **{m: got.get(m) for m in ENSEMBLE_METRICS},
-                "lane_efficiency": got[ENSEMBLE_METRICS[0]] / 32 if ENSEMBLE_METRICS[0] in got else None,
-                "dp_inst_per_attempt": dp / attempts if got and attempts else None, "note": "" if got else out})
-            say(f"ncu {arm} {dist}: {'ok' if got else 'failed'}")
-            notes.append("" if got else out or "no output")
+                "arm": arm, "dist": dist, **{k: row[k] for k in ("kernels", "gpu_time_s", "top_kernel", *ENSEMBLE_METRICS)},
+                "lane_efficiency": row[ENSEMBLE_METRICS[0]] / 32 if row[ENSEMBLE_METRICS[0]] is not None else None,
+                "dp_inst_per_attempt": dp / attempts if row["kernels"] and attempts and arm in ATTEMPT_ARMS else None,
+                "note": note})
+            say(f"ncu {arm} {dist}: {'ok' if row['kernels'] else note.splitlines()[0][:60] if note else 'failed'}")
+    ncu_stage_verdict(notes)
+
+
+def feature_cells(quick):
+    """(row, case, dtype, arm, N) of every GPU arm of every feature-card row, case and dtype (``quick``: two, at the smoke N)."""
+    rows = load_card(FEATURE_PATH).ROWS
+    cells = [(r, c, d, a, spec["cases"][c][1 if quick else 0]) for r, spec in rows.items() for c in spec["cases"]
+             for d in spec["dtypes"] for a in spec["arms"] if a not in FEATURE_HOST_ARMS]
+    return cells[:2] if quick else cells
+
+
+def ncu_features(args):
+    """Each arm's timed call, alone inside a profiler range (feature_card's own runner, ``FEATURE_CARD_PROFILE`` set)."""
+    require_ncu(args)
+    notes = []
+    for row, case, dtype, arm, n in feature_cells(args.quick):
+        cmd = ["env", "FEATURE_CARD_PROFILE=1", sys.executable, str(FEATURE_PATH), "--arm", row, case, dtype, arm,
+               *(["--smoke"] if args.quick else [])]
+        got, _, note = capture_row(args, args.out / f"ncu_features_{row}_{case}_{dtype}_{arm}", cmd, ENSEMBLE_METRICS,
+                                   count=LAUNCH_CAP)
+        emit(args.out / "ncu_features.csv", {"row": row, "case": case, "dtype": dtype, "n": n, "arm": arm,
+                                             **{k: got[k] for k in ("kernels", "gpu_time_s", "top_kernel", *ENSEMBLE_METRICS)},
+                                             "note": note})
+        say(f"ncu {row} {case} {dtype} {arm}: {got['kernels']} kernels")
+        notes.append(note)
     ncu_stage_verdict(notes)
 
 
@@ -514,6 +595,7 @@ def band(args):
 
 
 STAGES = {"sol_probe": sol_probe, "wide_sweep": wide_sweep, "ncu_corpus": ncu_corpus, "ncu_ensemble": ncu_ensemble,
+          "ncu_features": ncu_features,
           "chunk_residency": chunk_residency, "launch_shape": launch_shape, "band": band}
 
 

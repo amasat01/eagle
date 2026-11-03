@@ -3,8 +3,9 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Profile eagle's kernels and launch shapes on this machine's GPU for the performance card's workload
-# (Nsight Systems and Nsight Compute), unattended, in under 25 minutes on an A100, ending with one tarball.
-# The stages: sol_probe, wide_sweep, ncu_corpus, ncu_ensemble, chunk_residency, launch_shape (see gpu_profile.py).
+# (Nsight Systems and Nsight Compute), unattended, every counter on every workload (about 2 hours on an A100, --quick under 8 minutes), ending with one tarball.
+# The stages: sol_probe, wide_sweep, ncu_corpus, ncu_ensemble, ncu_features, chunk_residency, launch_shape (see gpu_profile.py).
+# Nsight Compute stages capture with --set full (--quick: the metric list only).
 #
 #   profile.sh [options]
 #     --env FILE        the GPU environment script bootstrap.sh wrote (default WORK/env-gpu.sh)
@@ -14,7 +15,7 @@
 #     --work DIR        bootstrap's work directory (default per target)
 #     --quick           one small point of every stage: under 8 minutes
 #     --fresh           ignore the markers of an earlier run and start over
-#     --deadline-min M  stop starting stages after M minutes (default 30)
+#     --deadline-min M  stop starting stages after M minutes (default 150)
 #     --only A[,B...]   run just these stages (a name, or a prefix such as ncu), keeping the order
 #                       (the band cadence is a hand-run stage of gpu_profile.py: --stage band)
 #     --lock-clock M    SM clock for the whole run: a MHz value, "auto" (the device maximum; default) or "off".
@@ -40,7 +41,7 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 . "$HERE/lib.sh"
 
 CUDA=${REPRO_CUDA:-12}
-ENV_FILE="" OUT="" WORK=${REPRO_WORK:-} QUICK=0 FRESH=0 DEADLINE_MIN=30 ONLY='' LOCK_CLOCK=auto
+ENV_FILE="" OUT="" WORK=${REPRO_WORK:-} QUICK=0 FRESH=0 DEADLINE_MIN=150 ONLY='' LOCK_CLOCK=auto
 while [[ $# -gt 0 ]]; do
   case $1 in
     --env) ENV_FILE=${2:-}; shift 2 ;;
@@ -72,9 +73,10 @@ TARBALL=$OUT/profile-$SLUG.tgz
 
 # stage NAME:CAP_SECONDS, in run order
 if [[ $QUICK == 1 ]]; then
-  PLAN=(sol_probe:120 wide_sweep:300 ncu_corpus:240 ncu_ensemble:300 chunk_residency:240 launch_shape:240)
+  PLAN=(sol_probe:120 wide_sweep:300 ncu_corpus:240 ncu_ensemble:300 ncu_features:300 chunk_residency:240 launch_shape:240)
 else
-  PLAN=(sol_probe:180 wide_sweep:600 ncu_corpus:600 ncu_ensemble:900 chunk_residency:900 launch_shape:600)
+  # full caps: ceilings of ~1.5 x the L4 walls (ncu_ensemble 43 min, ncu_features 60, ncu_corpus 12, chunk_residency 32 incl. ties)
+  PLAN=(sol_probe:180 wide_sweep:600 ncu_corpus:1800 ncu_ensemble:4200 ncu_features:5400 chunk_residency:3000 launch_shape:600)
 fi
 if [[ -n $ONLY ]]; then
   CHOSEN=()
@@ -96,9 +98,10 @@ if [[ -n $ONLY ]]; then
   PLAN=("${CHOSEN[@]}")
 fi
 
-# Expected seconds per stage on an A100 (the caps above are ceilings, not expectations; --quick: a minute each).
-BUDGET_MIN=25
-declare -A EST=([sol_probe]=30 [wide_sweep]=300 [ncu_corpus]=180 [ncu_ensemble]=300 [chunk_residency]=360 [launch_shape]=240)
+# Expected seconds per stage on an A100 (the caps above are ceilings, not expectations; --quick: a minute each). The ncu
+# stages are ~40 replay passes (--set full) of each kernel: ncu_ensemble 16 captures, ncu_features about 60 arms.
+BUDGET_MIN=120
+declare -A EST=([sol_probe]=30 [wide_sweep]=300 [ncu_corpus]=600 [ncu_ensemble]=1620 [ncu_features]=3000 [chunk_residency]=800 [launch_shape]=300)
 EST_S=0 EST_NO_NCU_S=0
 for s in "${PLAN[@]}"; do
   n=${s%%:*}
@@ -308,7 +311,8 @@ run_stage() {  # NAME CAP_SECONDS
     local args=(--stage "$name" --out "$DATA")
     [[ $QUICK == 1 ]] && args+=(--quick)
     # the chunk sweep starts no cell it cannot finish inside its cap
-    [[ $name == chunk_residency ]] && args+=(--budget-s $((cap > 120 ? cap - 90 : cap / 2)))
+    # and leaves the tie captures (full Nsight Compute: 8 of them) their time
+    [[ $name == chunk_residency ]] && args+=(--budget-s $((cap > 1800 ? cap - 1500 : cap > 120 ? cap - 90 : cap / 2)))
     [[ -n $NSYS ]] && args+=(--nsys "$NSYS")
     [[ -n $NCU ]] && args+=(--ncu "$NCU")
     [[ $NCU_SUDO == 1 ]] && args+=(--ncu-sudo)

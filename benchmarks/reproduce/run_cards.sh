@@ -5,7 +5,7 @@
 # Run one device's session plan of eagle's cards in an environment made by bootstrap.sh.
 #
 #   run_cards.sh --plan NAME [options]
-#     --plan NAME     a100 | l4 | t4 | p2000 | zen5 | c4a: the steps of that device, in session order
+#     --plan NAME     a100 | l4 | l4-prof | t4 | p2000 | zen5 | c4a: the steps of that device, in session order
 #                     (P0 sol_probe, P1 wide_sweep with its rows written, C1, C2, then the profile stages)
 #     --upload URL    after each step, copy the results to URL/<slug> (gcloud storage rsync); a new machine given
 #                     the same URL pulls what is there first and skips the steps and the C1/C2 parts already done
@@ -64,17 +64,30 @@ done
 #   script), every card is assembled from its saved parts and the steps not started are listed. A step's timeout is a hang
 #   guard only: the time left to the deadline + 12 min (one arm in flight: build 120 s + warm-up 120 s + rounds 300 s + a round
 #   120 s); the stage steps keep their own caps (sol_probe 180 s, wide_sweep 600 s, chunk_residency 900 s, launch_shape 600 s,
-#   ncu_ensemble --quick 300 s, + 1 min; p25 stops starting stages after 20 min). A step cap "D" means that hang guard.
+#   ncu_ensemble --quick 300 s, + 1 min; the full profile stages' caps are profile.sh's, below). A step cap "D" means that hang guard.
 # pcpu = the CPU profile step (ISA A/B, thread sweep, perf stat/record, small-N baselines, memory phases): 18 min, the local
 #   sequence (about 35 min on a busy 4-core host) x 0.5 for the Zen5 session.
-# p25 = profile stages 2-5; ncu = the quick Nsight Compute smoke of the L4.
+# ncu = the quick Nsight Compute smoke of the L4. The full profile steps (USER 11-03: every counter, every workload; the card
+#   timings above stay unprofiled, these run after them in their own processes) are one profile.sh stage each, --set full:
+#   corp = ncu_corpus, ens = ncu_ensemble, feat = ncu_features, p4 = chunk_residency (timing grid + captures of its ties),
+#   p5 = launch_shape (nsys). A full capture replays each kernel about 40 times: 30 s of process + (0.12 s + the kernel's own
+#   time) x 40 per kernel, the kernels of one run capped at 32 (the caps below are profile.sh's, ~1.5 x the L4 walls).
+#   L4 (from the 073l4 card walls: persist/simulate 2.3 s spread, 2.0 uniform; warp 4.3 / 2.2; jax 7.2 / 3.4):
+#     ens  = 16 captures x 30 s + 40 x (persist, simulate, warp, jax kernel times 31 s) + 3 multi-kernel arms x 2 x 32 x
+#            5 s + their runs (cupy 78 s, torch_graphed 82 s) = 43 min;  A100: kernel times / 20 (FP64) = 27 min.
+#     feat = 59 arms x (15 s + ~6 kernels x 5 s) + the long kernels (segmented 3.7 s, ordered 0.8 s, x 40) = 60 min; A100 50.
+#     corp = <= 12 cells x (30 s + 40 x 0.2 s) x ~ 1.2 = 12 min; A100 10.
+#     p4   = the chunk grid (64 cells, 17 min of runs + builds, 21 min) + <= 8 tie captures x 75 s = 32 min; A100: FP64 /20 -> 13.
+#     p5   = nsys, no counters: 6 (L4), 5 (A100).
+#   l4-prof = p0, p1, then the five profile steps (158 min; deadline 1.5 x); a100 = today's card steps, then the same five (151).
 case $PLAN in
-  a100)  STEPS=(p0:1:4 p1:4:11 c1:27:D c2:14:D p25:18:35) ;      KIND=GPU ;;
+  a100)  STEPS=(p0:1:4 p1:4:11 c1:27:D c2:14:D corp:10:35 ens:27:80 feat:50:105 p4:13:55 p5:5:16) ; KIND=GPU ;;
+  l4-prof) STEPS=(p0:1:4 p1:4:11 corp:12:35 ens:43:80 feat:60:105 p4:32:55 p5:6:16) ; KIND=GPU ;;
   l4)    STEPS=(p0:1:4 p1:4:11 c1:26:D c2:12:D p4:8:16 ncu:2:6) ; KIND=GPU ;;
   t4)    STEPS=(p0:1:4 p1:4:11 c1:89:D c2:12:D p4:8:16) ;        KIND=GPU ;;
   p2000) STEPS=(p0:1:4 p1:4:11 c1:25:D c2:8:D p4:8:16 p5:3:11) ; KIND=GPU ;;
   zen5|c4a) STEPS=(c1cpu:15:D c2cpu:8:D pcpu:18:D) ;                       KIND=CPU ;;
-  *) die "--plan takes a100, l4, t4, p2000, zen5 or c4a" ;;
+  *) die "--plan takes a100, l4, l4-prof, t4, p2000, zen5 or c4a" ;;
 esac
 # smoke: every step about 2 min (the card scripts' --smoke: N = 1e3, one round; the stages' --quick)
 if [[ $SMOKE == 1 ]]; then for i in "${!STEPS[@]}"; do STEPS[i]=${STEPS[i]%%:*}:2:D; done; fi
@@ -108,13 +121,13 @@ smoke_cmd() {
   done
   case $1 in
     c1|c1cpu|c2|c2cpu|pcpu) printf '%s\n' --smoke ;;
-    p1|p25|p4|p5) printf '%s\n' --quick ;;
+    p1|corp|ens|feat|p4|p5) printf '%s\n' --quick ;;
   esac
 }
 full_cmd() {
   case $1 in
     p0)    printf '%s\n' python benchmarks/reproduce/gpu_profile.py --stage sol_probe --out "$RES/profile" ;;
-    p1)    printf '%s\n' python -m hawk.targets.cards.sweep --write --out "$RES/wide_sweep.json" --cache "$RES/sweep_cache" ;;
+    p1)    printf '%s\n' python -m hawk.targets.cards.sweep --write --out "$RES/profile/wide_sweep.json" --cache "$RES/profile/sweep_cache" ;;
     c1)    if [[ $PLAN == l4 || $PLAN == p2000 ]]; then   # timing to 1e6, memory to 1e7
              printf '%s\n' python benchmarks/perf_card/perf_card.py --ns 1000000 --memory-ns 1000000 10000000 --parts "$RES/parts/c1" --out-dir "$RES/perf_card"
            else
@@ -123,7 +136,9 @@ full_cmd() {
     c1cpu) printf '%s\n' python benchmarks/perf_card/cpu_card.py --parts "$RES/parts/c1cpu" --out-dir "$RES/perf_card" ;;
     pcpu)  printf '%s\n' python benchmarks/perf_card/pcpu.py --parts "$RES/parts/pcpu" --out-dir "$RES/pcpu" ;;
     c2|c2cpu) printf '%s\n' python benchmarks/perf_card/feature_card.py --parts "$RES/parts/c2" --out-dir "$RES/perf_card" ;;
-    p25)   printf '%s\n' bash benchmarks/reproduce/profile.sh --env "$ENVF" --out "$RES/profile" --deadline-min 20 --only ncu_corpus,ncu_ensemble,chunk_residency,launch_shape ;;
+    corp)  printf '%s\n' bash benchmarks/reproduce/profile.sh --env "$ENVF" --out "$RES/profile" --only ncu_corpus ;;
+    ens)   printf '%s\n' bash benchmarks/reproduce/profile.sh --env "$ENVF" --out "$RES/profile" --only ncu_ensemble ;;
+    feat)  printf '%s\n' bash benchmarks/reproduce/profile.sh --env "$ENVF" --out "$RES/profile" --only ncu_features ;;
     p4)    printf '%s\n' bash benchmarks/reproduce/profile.sh --env "$ENVF" --out "$RES/profile" --only chunk_residency ;;
     p5)    printf '%s\n' bash benchmarks/reproduce/profile.sh --env "$ENVF" --out "$RES/profile" --only launch_shape ;;
     ncu)   printf '%s\n' bash benchmarks/reproduce/profile.sh --env "$ENVF" --out "$RES/profile" --only ncu_ensemble --quick ;;
@@ -209,7 +224,7 @@ done
 finish_cards
 if [[ $REPRO_DRY_RUN == 0 ]]; then
   log "inventory of $RES"
-  ( cd "$RES" && find . -type f ! -path './sweep_cache/*' ! -path './.steps/*' -printf '%8s  %p\n' | sort -k2 | head -200 ) >&2
+  ( cd "$RES" && find . -type f ! -path './profile/sweep_cache/*' ! -path './.steps/*' -printf '%8s  %p\n' | sort -k2 | head -200 ) >&2
   md5sum "$RES"/perf_card/*.json >&2 2>/dev/null || true
 fi
 (( failed == 0 )) || exit 1

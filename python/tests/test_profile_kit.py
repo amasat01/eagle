@@ -30,7 +30,8 @@ pytest.importorskip("hawk")
 REPRO = Path(__file__).resolve().parents[2] / "benchmarks" / "reproduce"
 PROFILE_PY = REPRO / "gpu_profile.py"
 PROFILE_SH = REPRO / "profile.sh"
-STAGES = ("sol_probe", "wide_sweep", "ncu_corpus", "ncu_ensemble", "chunk_residency", "launch_shape")
+STAGES = ("sol_probe", "wide_sweep", "ncu_corpus", "ncu_ensemble", "ncu_features", "chunk_residency",
+          "launch_shape")
 
 
 def _kit_module():
@@ -165,17 +166,17 @@ def test_the_chunk_residency_and_launch_shape_stages_run_and_write_their_tables(
 
 
 # --- the plan, the cells and the parsers (no device) ---------------------------------------
-def test_the_full_and_the_quick_plan_are_the_six_stages():
+def test_the_full_and_the_quick_plan_are_the_seven_stages():
     for flags in ((), ("--quick",)):
         rc, err = _plan(*flags)
         assert rc == 0 and _planned(err) == list(STAGES), err[-800:]
-    assert "deadline=30 min" in _plan()[1]
+    assert "deadline=150 min" in _plan()[1]
 
 
 def test_the_dry_run_prints_the_a100_estimate_the_p2000_plan_and_the_clock_policy():
     rc, err = _plan()
     est = re.search(r"estimate on an A100: (\d+) min of the (\d+) min budget", err)
-    assert rc == 0 and est and int(est[1]) <= int(est[2]) <= 25 and "SM clock: auto" in err
+    assert rc == 0 and est and int(est[1]) <= int(est[2]) <= 120 and "SM clock: auto" in err
     assert "compute capability 7.0 (P2000): the ncu_* stages are skipped" in err
     rc, err = _plan("--quick")
     assert rc == 0 and int(re.search(r"estimate on an A100: (\d+) min", err)[1]) < 8
@@ -195,7 +196,7 @@ def test_only_selects_stages_by_name_or_prefix_and_refuses_an_unknown_one():
     rc, err = _plan("--only", "launch_shape,sol_probe")
     assert rc == 0 and _planned(err) == ["sol_probe", "launch_shape"]
     rc, err = _plan("--only", "ncu")
-    assert rc == 0 and _planned(err) == ["ncu_corpus", "ncu_ensemble"]
+    assert rc == 0 and _planned(err) == ["ncu_corpus", "ncu_ensemble", "ncu_features"]
     rc, err = _plan("--only", "chunk_res")
     assert rc != 0 and "matches no stage" in err
 
@@ -448,7 +449,7 @@ def test_an_ncu_stage_whose_every_capture_failed_is_failed_with_the_reason(tmp_p
     mod = _kit_module()
     denied = "==ERROR== ERR_NVGPUCTRPERM - The user does not have permission to access NVIDIA GPU Performance Counters"
     monkeypatch.setattr(mod, "require_ncu", lambda args: None)
-    monkeypatch.setattr(mod, "ncu_capture", lambda *a, **k: ({}, denied))
+    monkeypatch.setattr(mod, "ncu_run", lambda *a, **k: ([], denied))
     args = types.SimpleNamespace(quick=True, out=tmp_path)
     with pytest.raises(RuntimeError, match=r"every ncu capture failed \(2\): .*ERR_NVGPUCTRPERM"):
         mod.ncu_ensemble(args)
@@ -533,7 +534,7 @@ def test_a_smoke_session_runs_every_step_small_and_apart_from_the_full_one(plan)
             assert "--quick" in ln, ln
     if plan != "zen5":
         assert any("hawk.targets.cards.sweep" in ln and "--write" in ln for ln in full.splitlines())
-    assert int(re.search(r"session deadline (\d+) min", smoke)[1]) <= 18
+    assert int(re.search(r"session deadline (\d+) min", smoke)[1]) <= 3 * len(steps(full))
 
 
 def test_a_card_in_which_no_arm_ran_fails_its_step_and_one_ok_arm_passes_it(capsys):
@@ -547,3 +548,78 @@ def test_a_card_in_which_no_arm_ran_fails_its_step_and_one_ok_arm_passes_it(caps
     one_ok = {"rows": failed["rows"] + [{"arms": {"team": {"status": "ok"}}}]}
     assert not cc.no_arm_ran(one_ok) and cc.no_arm_ran_exit(one_ok) == 0
     assert cc.no_arm_ran({"results": []})                       # nothing measured is no card
+
+
+# --- the full profile: --set full, every arm, every feature row, the kernels of one run -------------
+def _ncu_commands(monkeypatch, mod, quick):
+    seen = []
+    monkeypatch.setattr(mod.subprocess, "run", lambda cmd, **k: seen.append(cmd) or types.SimpleNamespace(
+        returncode=1, stdout="", stderr="boom"))
+    args = types.SimpleNamespace(ncu="ncu", ncu_sudo=False, quick=quick)
+    mod.ncu_run(args, Path("/nonexistent/rep"), ["python", "w.py"], ("m_a", "m_b"), regex="regex:k", count=3)
+    return seen[0]
+
+
+def test_a_full_capture_carries_set_full_and_the_metric_list_and_a_quick_one_only_the_list(monkeypatch):
+    mod = _kit_module()
+    full, quick = _ncu_commands(monkeypatch, mod, False), _ncu_commands(monkeypatch, mod, True)
+    assert full[full.index("--set") + 1] == "full" and "--set" not in quick
+    for cmd in (full, quick):
+        assert cmd[cmd.index("--metrics") + 1] == "m_a,m_b" and cmd[cmd.index("--launch-count") + 1] == "3"
+        assert cmd[cmd.index("--kernel-name") + 1] == "regex:k" and cmd[-2:] == ["python", "w.py"]
+
+
+def test_several_kernels_of_a_raw_page_give_the_count_the_summed_time_and_the_top_kernel():
+    mod = _kit_module()
+    raw = ('"ID","Kernel Name","gpu__time_duration.sum","m_a"\n"","","usecond","%"\n'
+           '"0","small","500","1"\n"1","big","2","7"\n"2","tail","1,500","3"\n')
+    got = mod.kernel_summary(mod.ncu_kernels(raw), ("m_a",))
+    assert got["kernels"] == 3 and got["top_kernel"] == "tail" and got["m_a"] == 3.0
+    assert got["gpu_time_s"] == pytest.approx((500 + 2 + 1500) * 1e-6)
+    assert mod.kernel_summary([], ("m_a",)) == {"kernels": 0, "gpu_time_s": None, "top_kernel": None, "m_a": None}
+
+
+def test_the_ensemble_covers_every_card_gpu_arm_and_an_absent_library_is_a_row_with_its_reason(tmp_path, monkeypatch):
+    mod = _kit_module()
+    assert set(mod.ENSEMBLE_ARMS) == {"eagle_graph", "eagle_graph_persist", "eagle_simulate", "warp_kernel", "jax_vmap",
+                                      "cupy_masked", "torch_graphed", "torch_compiled"}
+    card = types.SimpleNamespace(_select_arms=lambda arms: (arms[:-1], {arms[-1]: "torch not installed in this profile"}))
+    monkeypatch.setattr(mod, "require_ncu", lambda args: None)
+    monkeypatch.setattr(mod, "load_card", lambda *a: card)
+    calls = []
+    monkeypatch.setattr(mod, "ncu_run", lambda *a, **k: calls.append(k) or ([{"name": "k", "gpu_time_s": 1.0}], ""))
+    mod.ncu_ensemble(types.SimpleNamespace(quick=False, out=tmp_path))
+    with (tmp_path / "ncu_ensemble.csv").open() as fh:
+        rows = list(csv.DictReader(fh))
+    assert len(rows) == 16 and len(calls) == 14
+    assert {r["note"] for r in rows if r["arm"] == "torch_compiled"} == {"torch not installed in this profile"}
+    assert [k["count"] for k in calls[:2]] == [1, 1] and calls[-1]["count"] == mod.LAUNCH_CAP and calls[-1]["regex"] is None
+
+
+def test_ncu_features_enumerates_every_row_case_dtype_and_gpu_arm_and_fails_when_every_capture_does(tmp_path, monkeypatch):
+    mod = _kit_module()
+    rows = mod.load_card(mod.FEATURE_PATH).ROWS
+    want = {(r, c, d, a) for r, s in rows.items() for c in s["cases"] for d in s["dtypes"] for a in s["arms"]
+            if a not in ("numpy_mask", "np_add_at")}
+    cells = mod.feature_cells(False)
+    assert {c[:4] for c in cells} == want and len(cells) == len(want) and len(mod.feature_cells(True)) == 2
+    monkeypatch.setattr(mod, "require_ncu", lambda args: None)
+    args = types.SimpleNamespace(quick=False, out=tmp_path, ncu="/bin/false", ncu_sudo=False)
+    with pytest.raises(RuntimeError, match="every ncu capture failed"):
+        mod.ncu_features(args)
+    with (tmp_path / "ncu_features.csv").open() as fh:
+        got = list(csv.DictReader(fh))
+    assert len(got) == len(want) and all(r["note"] for r in got) and {"kernels", "top_kernel", "gpu_time_s"} <= set(got[0])
+
+
+@pytest.mark.parametrize("plan", ["l4-prof", "a100"])
+def test_the_full_profile_plans_run_the_five_profile_steps_and_the_smoke_maps_them_to_quick(plan):
+    rc, full = _run_cards("--plan", plan)
+    rc_s, smoke = _run_cards("--plan", plan, "--smoke")
+    assert rc == rc_s == 0
+    steps = re.findall(r"\[repro\] step (\w+)", full)
+    assert steps[-5:] == ["corp", "ens", "feat", "p4", "p5"] and steps[:2] == ["p0", "p1"]
+    assert ("c1" in steps) == (plan == "a100") and re.search(r"expected \d+ min; session deadline \d+ min", full)
+    for stage in ("ncu_corpus", "ncu_ensemble", "ncu_features", "chunk_residency", "launch_shape"):
+        assert any(stage in ln and "--quick" not in ln for ln in full.splitlines() if ln.startswith("+ ("))
+        assert any(stage in ln and "--quick" in ln for ln in smoke.splitlines() if ln.startswith("+ ("))

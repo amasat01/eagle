@@ -58,6 +58,7 @@ CELL_CAP_S = 300.0       # timed rounds stop here (at least one runs)
 MIN_ROUNDS, MAX_ROUNDS, IQR_STOP = 3, 9, 0.05
 PROCESS_TIMEOUT_S = cc.BUILD_S + RUN_BUDGET_S + CELL_CAP_S + RUN_BUDGET_S   # setup, warm-up, rounds, a last round
 MARK = "FEATURE_ARM "
+PROFILE_ENV = "FEATURE_CARD_PROFILE"   # set by reproduce/gpu_profile.py: one timed call alone inside a profiler range
 F64, F32 = "float64", "float32"
 
 
@@ -781,6 +782,15 @@ def child(row, case, dtype, arm, smoke):
         run, check = spec["setup"](ctx)
         ok, what = check()
         cc.heartbeat()
+        if os.environ.get(PROFILE_ENV):
+            import cupy as cp
+
+            run()
+            cp.cuda.runtime.profilerStart()
+            run()
+            cp.cuda.runtime.profilerStop()
+            print(MARK + json.dumps({"status": "ok", "n": n, "rule": "profiled", "checks": {what: bool(ok)}}), flush=True)
+            return 0
         timed, rule = _time(run, smoke, on_gpu, os.environ.get("FEATURE_CARD_FORCE") == f"{arm}:slow")
         rec.update(checks={what: bool(ok)}, rule=rule, note=ctx.note)
         if timed is None:
