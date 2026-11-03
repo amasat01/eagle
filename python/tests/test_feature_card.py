@@ -61,7 +61,8 @@ def test_a_failed_arm_is_labelled_and_the_card_completes(card_module, monkeypatc
     monkeypatch.setenv("FEATURE_CARD_FORCE", force)
     monkeypatch.setitem(card_module.ROWS["scatter"], "arms", ("np_add_at",))
     monkeypatch.setitem(card_module.ROWS["scatter"], "ref", "np_add_at")
-    assert card_module.main(["--smoke", "--rows", "scatter", "--out-dir", str(tmp_path)]) == 0
+    # the card is written with the arm's label; its only arm did not run, so the step fails (exit 1)
+    assert card_module.main(["--smoke", "--rows", "scatter", "--out-dir", str(tmp_path)]) == 1
     (written,) = tmp_path.glob("feature_card_*.json")
     (row,) = json.loads(written.read_text())["rows"]
     assert row["arms"]["np_add_at"]["status"] == status
@@ -121,8 +122,8 @@ def test_an_arm_predicted_over_the_budget_is_not_warmed_up():
     assert pc._predicted_over_budget({}, 10_000_000) is None                          # nothing measured: the warm-up decides
 
 
-def _assemble(card_module, parts, rows, tmp_path):
-    assert card_module.main(["--smoke", "--assemble", "--rows", rows, "--parts", str(parts), "--out-dir", str(tmp_path / "out")]) == 0
+def _assemble(card_module, parts, rows, tmp_path, rc=0):
+    assert card_module.main(["--smoke", "--assemble", "--rows", rows, "--parts", str(parts), "--out-dir", str(tmp_path / "out")]) == rc
     return json.loads(next((tmp_path / "out").glob("feature_card_*.json")).read_text())["rows"]
 
 
@@ -137,6 +138,6 @@ def test_assemble_keeps_the_saved_mpi_arms(card_module, tmp_path):
 def test_assemble_keeps_a_failed_part_with_its_reason(card_module, tmp_path):
     parts = tmp_path / "parts"
     card_module.cc.part_save(parts, "mpi_partition_all_float64_two_ranks_smoke", {"status": "failed: rc 1: boom"})
-    (row,) = _assemble(card_module, parts, "mpi_partition", tmp_path)
+    (row,) = _assemble(card_module, parts, "mpi_partition", tmp_path, rc=1)   # no arm ran: the step fails
     assert row["arms"]["two_ranks"]["status"] == "failed: rc 1: boom"
     assert row["arms"]["one_rank"]["status"].startswith("not_run")

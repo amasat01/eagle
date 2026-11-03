@@ -300,6 +300,29 @@ def release_string():
     return f"eagle {eagle.__version__}, hawk {getattr(hawk, '__version__', None)}"
 
 
+def no_arm_ran(card):
+    """True when no arm anywhere in ``card`` has status ok: the card is still written (every row with its reason), but the
+    step that wrote it failed, so a smoke run stops before the full one and a full run reports it instead of finishing."""
+    def statuses(x):
+        if isinstance(x, dict):
+            if isinstance(x.get("status"), str):
+                yield x["status"]
+            for v in x.values():
+                yield from statuses(v)
+        elif isinstance(x, list):
+            for v in x:
+                yield from statuses(v)
+    return not any(s == "ok" for s in statuses(card))
+
+
+def no_arm_ran_exit(card):
+    """main()'s return code for a written card: 1 (with the reason on stderr) when no arm ran, else 0."""
+    if no_arm_ran(card):
+        print("no arm of this card ran (see each row's status): the step failed", file=sys.stderr, flush=True)
+        return 1
+    return 0
+
+
 def record_provenance(card_path):
     """Record the release, eagle and hawk commits of this run for ``card_path`` in
     ``benchmarks/card_provenance.json``."""

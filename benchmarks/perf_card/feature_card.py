@@ -985,7 +985,7 @@ def main(argv=None):
     print(f"wrote {path}")
     if not args.smoke and args.out_dir.resolve().is_relative_to(HERE.parent):
         cc.record_provenance(path)
-    return 0
+    return cc.no_arm_ran_exit(card)
 
 
 if __name__ == "__main__":
