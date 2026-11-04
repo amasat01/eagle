@@ -310,7 +310,7 @@ def team_grid(plugin, team: dict, n: int, planes: dict) -> int:
     scatter into the plane ``team["of"]``."""
     kind = team.get("grid", "lanes")
     if kind == "keys":
-        return key_count(plugin, team["keyed"], n)
+        return key_count(plugin, team["keyed"], n) * team.get("groups", 1)
     if kind == "chunks":
         return scatter_chunks(n, _cells_of(planes[team["of"]]))
     if kind == "targets":
