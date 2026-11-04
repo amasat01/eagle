@@ -87,12 +87,13 @@ def _chosen(k, n, backend):
 def test_auto_follows_the_measured_table_on_the_host():
     from hawk.ir import steps_class
 
-    assert steps_class._ROWS[steps_class._class_of(False)], "the host class has measured rows"
+    assert steps_class._ROWS["host"], "the host class has measured rows"
     assert _chosen(4, 8, "cpu") == "fused"           # inside the measured batch range
     assert _chosen(4, 4096, "cpu") == "per_step"     # beyond it
     assert _chosen(1, 8, "cpu") == "per_step"        # a single-step kernel has nothing to fuse
 
 
 @pytest.mark.gpu
-def test_auto_is_per_step_on_a_device_class_with_no_measured_row():
-    assert _chosen(4, 8, "gpu") == "per_step"
+def test_auto_on_a_device_reads_its_residency_and_follows_the_device_rows():
+    assert _chosen(8, 8, "gpu") == "per_step"        # below the measured regime (lanes per resident thread)
+    assert _chosen(8, 65536, "gpu") == "fused"       # the feature card's shape on the P2000, L4 and A100

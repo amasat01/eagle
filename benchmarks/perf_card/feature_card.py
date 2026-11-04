@@ -289,12 +289,9 @@ def setup_steps_fused(ctx):
         if arm.endswith("auto"):
             from hawk.ir import steps_class
 
-            arch = ""
-            if ctx.target == "cuda":
-                from hawk.compile import nvrtc
-
-                arch = nvrtc.current_device_arch()
-            choice = steps_class._choose(ctx.target == "cuda", 2, 8, n, arch)
+            props = importlib.import_module("eagle.launch")._device_props(-1) if ctx.target == "cuda" else {}
+            resident = int(props.get("multiProcessorCount", 0)) * int(props.get("maxThreadsPerMultiProcessor", 0))
+            choice = steps_class._choose(ctx.target == "cuda", 2, 8, n, resident)
             ctx.note = f"steps_reverse auto picks {choice}"
         outs = {"bar_x": ((wk.W, n), None), "bar_c": ((n,), None)}
         if choice == "fused":

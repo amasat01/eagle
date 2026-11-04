@@ -731,9 +731,14 @@ class Runner:
         if record and steps_reverse == "auto":      # the table's answer for this batch, K and device
             from hawk.ir.steps_class import _choose
 
+            from .launch import _device_props
+
+            props = _device_props(-1) if device else {}
+            resident = int(props.get("multiProcessorCount", 0)) * int(props.get("maxThreadsPerMultiProcessor", 0))
+
             fits = not auto and k > 1 and window in (None, k) and not refine
             width = sum(1 for role, _nm in specs[0] if role == "mutable")
-            steps_reverse = _choose(device, width, k, n) if fits else "per_step"
+            steps_reverse = _choose(device, width, k, n, resident) if fits else "per_step"
         elif steps_reverse == "auto":
             steps_reverse = "per_step"
         if steps_reverse == "fused":
