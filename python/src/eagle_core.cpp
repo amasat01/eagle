@@ -2498,7 +2498,20 @@ NB_MODULE(_core, m)
             }, nb::lock_self(),
             nb::arg("captured"),
             "Update this exec from a same-topology re-capture (not consumed). "
-            "False when the driver rejects it: the exec is unchanged, rebuild.");
+            "False when the driver rejects it: the exec is unchanged, rebuild.")
+        .def(
+            "clone_graph",
+            [](PyLauncher& l) {
+                std::uint64_t graph = 0;
+                ck(EBX(eagle_backend_launcher_clone_graph)(need(l.h, "Launcher"), &graph));
+                return graph;
+            }, nb::lock_self(),
+            "An owned cudaGraphClone of the source graph (its node patches kept in step with the exec), as an "
+            "int; destroy it with Launcher.destroy_graph. RuntimeError naming the node when CUDA refuses it.")
+        .def_static(
+            "destroy_graph",
+            [](std::uint64_t graph) { ck(EBX(eagle_backend_launcher_graph_destroy)(graph)); },
+            nb::arg("graph"), "Destroy a graph clone_graph returned (0 is ignored).");
 
     // -- Graph: parent container; folds in the capture, instantiates ---------
     nb::class_<PyGraph>(m, "Graph")

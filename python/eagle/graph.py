@@ -39,7 +39,7 @@ from ._active_set import _address
 from .interop import scoped_stream
 from .sidecar import refuse_derived
 
-__all__ = ["Edge", "Graph", "Node", "NodeKind", "SHARES_MEMORY_MAX_WORK",
+__all__ = ["CudaGraphHandle", "Edge", "Graph", "Node", "NodeKind", "SHARES_MEMORY_MAX_WORK",
            "child", "get_node_kind", "opaque", "register_node_kind"]
 
 _BACKENDS = ("gpu", "cpu", *GPU_KINDS)
@@ -415,6 +415,48 @@ def _writes_only_cells(bound) -> bool:
 
 def _array_backend(arr):
     return "cpu" if device_kind(arr) == "host" else "gpu"
+
+
+class CudaGraphHandle:
+    """An owned snapshot of a built GPU :class:`Graph`, for another runtime: ``handle`` is the integer value of a
+    ``cudaGraph_t``. Add it now with ``cudaGraphAddChildGraphNode`` (CUDA copies it, so ``close()`` right after is
+    safe); the consumer only reads it. The handle holds the Graph, and so every array the graph is bound to, alive;
+    ``close()`` (also ``with`` and garbage collection) destroys the clone. It is a snapshot: a later
+    :meth:`Graph.bind` or rebuild needs a new :meth:`Graph.cuda_graph`."""
+
+    def __init__(self, graph, handle):
+        self._graph, self._handle = graph, int(handle)
+
+    @property
+    def handle(self) -> int:
+        """The ``cudaGraph_t`` value of the clone."""
+        if self._handle == 0:
+            raise ValueError("eagle.CudaGraphHandle: the handle is closed")
+        return self._handle
+
+    def close(self) -> None:
+        """Destroy the clone (once); the Graph reference is dropped."""
+        handle, self._handle = self._handle, 0
+        if handle:
+            from . import _core
+
+            _core.Launcher.destroy_graph(handle)
+        self._graph = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:     # interpreter shutdown: the process owns the rest
+            pass
+
+    def __repr__(self):
+        return f"CudaGraphHandle(handle={self._handle:#x})" if self._handle else "CudaGraphHandle(closed)"
 
 
 class Graph:
@@ -1014,6 +1056,27 @@ class Graph:
         if getattr(self, "_host_version", None) is None:
             self._host_version = _core.HostVersion()
         return _HostTableHandle(self, _core.HostTable(self._host_version, stages))
+
+    def cuda_graph(self) -> CudaGraphHandle:
+        """An owned clone of the built GPU graph's CUDA graph, taken now, for a foreign runtime to add with
+        ``cudaGraphAddChildGraphNode`` (see :class:`CudaGraphHandle`); it carries every array :meth:`bind` swapped in.
+        Refused with ``RuntimeError`` naming the node and the reason: a CPU graph, a segmented graph (a node outside
+        the ``capture`` tier), any host-function node, and what the driver does not accept as a child graph
+        (conditional and memory-allocation nodes; the CUDA error and driver version are quoted)."""
+        with self._busy("cuda_graph"):
+            self._need_built("cuda_graph")
+            if self._backend != "gpu":
+                raise RuntimeError("eagle.Graph.cuda_graph: this graph was built for the CPU, which has no CUDA graph")
+            if self._segments is not None:
+                eager = [f"{n.kind!r} ({how})" for n, how in zip(self._nodes, self._schedule) if how != "capture"]
+                raise RuntimeError("eagle.Graph.cuda_graph: the graph is segmented (several graphs with work between "
+                                   f"them): node {', '.join(eager)} is outside the capture tier")
+            if self._host_nodes:
+                raise RuntimeError("eagle.Graph.cuda_graph: the graph holds a host-function node; "
+                                   "host-function nodes are never handed to another runtime")
+            with _on_device(self._device):
+                handle = self._pipe._launcher.clone_graph()
+            return CudaGraphHandle(self, handle)
 
     # -- run -- #
     def _need_built(self, method):

@@ -635,6 +635,18 @@ cudaError_t cudaGraphCreate(cudaGraph_t* graph, unsigned int flags)
     return fromDriver(create(graph, flags));
 }
 
+cudaError_t cudaGraphClone(cudaGraph_t* clone, cudaGraph_t original)
+{
+    using Clone = CUresult (*)(CUgraph*, CUgraph);
+    void* fn = nullptr;
+    cudaDriverEntryPointQueryResult found{};
+    if (cudaError_t e = entryPoint("cuGraphClone", &fn, 10000, 0, &found); e != cudaSuccess)
+        return e;
+    if (fn == nullptr)
+        return record(cudaErrorCallRequiresNewerDriver);
+    return fromDriver(reinterpret_cast<Clone>(fn)(reinterpret_cast<CUgraph*>(clone), reinterpret_cast<CUgraph>(original)));
+}
+
 cudaError_t cudaGraphDestroy(cudaGraph_t graph)
 {
     AETHER_DRV(destroy, cuGraphDestroy);
