@@ -5,6 +5,7 @@
    "arms": [
     "thread",
     "team",
+    "team_k8",
     "staged",
     "numpy_mask",
     "torch"
