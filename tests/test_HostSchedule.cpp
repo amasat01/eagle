@@ -7,6 +7,7 @@
 #include <gtest/gtest.h>
 
 #include "eagle/exec/HostSchedule.h"
+#include "eagle/exec/HostTable.h"
 #include "eagle/exec/HostTeam.h"
 
 #include <algorithm>
@@ -128,6 +129,72 @@ TEST(HostScheduleTest, NullEntryIsRefused)
 {
     std::vector<HostBranch> branches(2, HostBranch{ { nullptr, {}, { Partition::whole(4) } } });
     EXPECT_THROW(runHostBranches(branches), std::runtime_error);
+}
+
+// --- the host table: a graph's stages run from the caller's region ---
+
+namespace {
+
+// Two stages over Fork's planes: a -> b, then b -> a, several tiles wide.
+HostTable makeTable(Fork& f, int n, const HostVersion& version)
+{
+    std::vector<std::vector<HostBranch>> stages;
+    for (const HostBranch& branch : f.branches(1, n)) stages.push_back({ branch });
+    return HostTable(std::move(stages), version);
+}
+
+HostVersion newVersion() { return std::make_shared<std::atomic<std::int64_t>>(0); }
+
+}  // namespace
+
+TEST(HostTableTest, EveryThreadOfTheCallersRegionRunsItOnceBitwise)
+{
+    const int n = 50000;   // many tiles
+    Fork serial(1, n), shared(1, n);
+    for (const HostBranch& branch : serial.branches(1, n))
+        for (const HostBranchNode& node : branch)
+            HostTeam::run_serial(node.entry, node.params.data(), node.parts[0]);
+    HostVersion version = newVersion();
+    HostTable table = makeTable(shared, n, version);
+    int bad = 0;
+#ifdef _OPENMP
+#pragma omp parallel num_threads(4)
+#endif
+    {
+        const int status = eagle_host_table_run(&table.head);
+#ifdef _OPENMP
+#pragma omp atomic
+#endif
+        bad += status;
+    }
+    EXPECT_EQ(bad, 0);
+    EXPECT_EQ(serial.a[0], shared.a[0]);
+    EXPECT_EQ(serial.b[0], shared.b[0]);
+}
+
+TEST(HostTableTest, OutsideAnyRegionItOpensItsOwn)
+{
+    const int n = 50000;
+    Fork serial(1, n), alone(1, n);
+    for (const HostBranch& branch : serial.branches(1, n))
+        for (const HostBranchNode& node : branch)
+            HostTeam::run_serial(node.entry, node.params.data(), node.parts[0]);
+    HostVersion version = newVersion();
+    HostTable table = makeTable(alone, n, version);
+    EXPECT_EQ(eagle_host_table_run(&table.head), EAGLE_HOST_TABLE_OK);
+    EXPECT_EQ(serial.a[0], alone.a[0]);
+}
+
+TEST(HostTableTest, AStaleTableIsRefusedAndRunsNothing)
+{
+    Fork f(1, 64);
+    HostVersion version = newVersion();
+    HostTable table = makeTable(f, 64, version);
+    const std::vector<double> before = f.a[0];
+    version->fetch_add(1);   // a bind or rebuild
+    EXPECT_EQ(eagle_host_table_run(&table.head), EAGLE_HOST_TABLE_STALE);
+    EXPECT_STRNE(eagle_host_table_message(EAGLE_HOST_TABLE_STALE), "ok");
+    EXPECT_EQ(f.a[0], before);
 }
 
 }  // namespace HostScheduleTest
