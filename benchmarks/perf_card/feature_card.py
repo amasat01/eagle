@@ -15,7 +15,7 @@ features (``ROWS``), every arm on the kernel the feature is about:
 ``fft``            batched c2c (1e5 x 1024) against cuFFT
 ``lane_set``       10 % active lanes: dense, map, prefix
 ``scatter``        keyed, ordered and OR scatter against ``cupyx.scatter_add`` and ``np.add.at``
-``sample_sum``     a sum over samples: compensated, ordered, auto, against ``cupy.sum``
+``sample_sum``     a sum over samples, keyed and as a cell (``hawk.sum(x)``): compensated, ordered, auto, against ``cupy.sum``
 ``mpi_partition``  the C1 ensemble through ``RankPartition`` on 2 GPUs (N = 2e6) against one rank (N = 1e6)
 
 Every (row, case, dtype, arm) runs in a FRESH PROCESS on a clean device, so no arm inherits another library's context,
@@ -621,6 +621,15 @@ def setup_sample_sum(ctx):
     np, fk = _np(), _kernels()
     x = np.random.default_rng(9).uniform(-1.0, 1.0, ctx.n)
     exact, mag, eps = math.fsum(x), float(np.abs(x).sum()), float(np.finfo(np.float64).eps)
+    if ctx.arm.startswith("cell_"):       # the public cell form ``hawk.sum(x)``: its rows are folded by eagle
+        launch, planes = _launcher(fk.total_cell(ctx.arm[5:], ctx.n), {"x": x}, {"t": ((1,), None)}, ctx)
+        bound = (1.0 if ctx.arm == "cell_compensated" else 8.0) * eps * mag
+
+        def run():
+            planes["t"][...] = 0
+            launch()
+        return run, (lambda: (run() or abs(float(_get(planes["t"])[0]) - exact) <= bound,
+                              "the cell is within the policy's ULP bound of math.fsum"))
     if ctx.arm in ("compensated", "ordered", "auto"):
         outs = {"out": ((1,), None), **({"out_c": ((1,), None)} if ctx.arm == "compensated" else {})}
         launch, planes = _launcher(fk.total(ctx.arm, ctx.n), {"x": x}, outs, ctx, key=1)
@@ -702,7 +711,8 @@ ROWS = {
                     arms=("keyed", "ordered", "or", "cupyx_scatter_add", "np_add_at"), host=("keyed", "ordered", "or", "np_add_at"),
                     baseline="cupyx.scatter_add; np.add.at"),
     "sample_sum": dict(setup=setup_sample_sum, cases={"all": (1 << 24, 4096)}, dtypes=(F64,), ref="auto",
-                       arms=("compensated", "ordered", "auto", "cupy_sum"), host=("compensated", "ordered", "auto"), baseline="cupy.sum"),
+                       arms=("compensated", "ordered", "auto", "cell_compensated", "cell_auto", "cupy_sum"),
+                       host=("compensated", "ordered", "auto", "cell_compensated", "cell_auto"), baseline="cupy.sum"),
     "mpi_partition": dict(setup=setup_mpi_partition, cases={"all": (2_000_000, 8192)}, dtypes=(F64,), ref="one_rank",
                           arms=("two_ranks", "one_rank"), host=(), baseline="one rank (N = 1e6), the C1 persist arm"),
 }
@@ -712,7 +722,7 @@ EXTERNAL_ARMS = frozenset({"numpy_mask", "torch", "warp_loop", "torch_func", "cu
                            "np_add_at", "cupy_sum", "warp"})
 OUR_ARMS = frozenset({"thread", "team", "team_k8", "staged", "K1", "K8", "K32", "jvp_K8", "vjp_K8_fused", "vjp_K8_auto", "guard", "no_guard",
                       "jump", "segmented", "hawk", "box", "no_box", "gemm", "fft", "dense", "map", "prefix", "keyed", "ordered",
-                      "or", "compensated", "auto", "two_ranks", "one_rank"})
+                      "or", "compensated", "auto", "cell_compensated", "cell_auto", "two_ranks", "one_rank"})
 # an arm named for its baseline library runs the library branch of its row's setup
 _ALIAS = {"cupy_fft": "cupy", "cupyx_scatter_add": "cupyx", "cupy_sum": "cupy"}
 

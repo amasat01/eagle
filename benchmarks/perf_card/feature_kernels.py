@@ -77,6 +77,14 @@ def total(policy, samples):
     return kernel
 
 
+def total_cell(policy, samples):
+    """The cell form of the same sum: ``t = hawk.sum(x)`` into a ``Mutable[Scalar]`` (one row of 32 samples per warp, folded by eagle)."""
+    @hawk.kernel
+    def kernel(x: Scalar, t: Mutable[Scalar]):
+        t = hawk.sum(x, policy=policy)
+    return kernel
+
+
 # The contraction of the thread box: y[sample, unit] = sum over row of w[row, unit] * f[row, sample], 64 x 64 tables.
 ROWS, UNITS, SAMPLES = 64, 64, 1024        # 65536 lanes
 
