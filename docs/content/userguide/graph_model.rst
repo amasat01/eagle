@@ -602,6 +602,32 @@ your own ``omp parallel`` region it runs in place on the calling thread. In
 C++ the same rule is ``eagle::exec::resolve`` and the branch runner is
 ``eagle::exec::runHostBranches`` (see :doc:`../api/api_host`).
 
+Handing a graph to another runtime
+----------------------------------
+
+On the CPU, ``g.host_table()`` freezes a built graph into a table of its stages. Its
+``.handle`` is the address of a ``const eagle_host_table*`` (``eagle/plugin/graph_handoff.h``,
+plain C); a runtime that already has an OpenMP region runs the graph inside it::
+
+    #pragma omp parallel
+    {
+        int status = eagle_host_table_run(table);   /* 0 on success */
+    }
+
+The traps, each refused or documented rather than silent:
+
+- Every thread of the region must call ``eagle_host_table_run``. The nodes share their tiles
+  across the caller's threads with a barrier after each node, so a call from only some of the
+  threads deadlocks. Called outside any region it opens its own.
+- The table is a snapshot of the arrays bound when it was made. ``bind`` or a rebuild makes it
+  stale; ``eagle_host_table_run`` then returns a nonzero status
+  (``eagle_host_table_message`` has the words) and runs nothing. Ask the graph for a new table.
+- Keep the handle object, or the graph, alive while the table runs; the table holds the graph
+  and so its arrays.
+- A graph with a node of your own code (:func:`~eagle.graph.opaque`), or a plan that keeps run
+  state, has no table: ``host_table()`` raises and names the node.
+- The entry never takes the GIL. Per-sample nodes give the same bits as ``launch``.
+
 Using one graph from several threads
 ------------------------------------
 

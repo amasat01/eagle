@@ -107,6 +107,7 @@
 #include "eagle/events/Sensitivity.h"
 #include "eagle/exec/HostSchedule.h"
 #include "eagle/exec/HostTeam.h"
+#include "eagle/exec/HostTable.h"
 #include "eagle/exec/Partition.h"
 #include "eagle/exec/TimeLaunch.h"
 #include "eagle/exec/Transfer.h"
@@ -1849,6 +1850,39 @@ NB_MODULE(_core, m)
         "Run one stage's nodes in order, each over the whole host team, inside ONE OpenMP "
         "region (the GIL released). Same shape as run_host_branches; same values as a "
         "run_host per node.");
+
+    // -- The host table: a graph's CPU stages for another runtime's OpenMP region ----
+    nb::class_<eagle::exec::HostVersion>(m, "HostVersion")
+        .def("__init__", [](eagle::exec::HostVersion* self) {
+            new (self) eagle::exec::HostVersion(std::make_shared<std::atomic<std::int64_t>>(0));
+        })
+        .def("bump", [](eagle::exec::HostVersion& self) { self->fetch_add(1); },
+             "Mark every table made at the current value stale.");
+
+    nb::class_<eagle::exec::HostTable>(m, "HostTable")
+        .def("__init__",
+            [](eagle::exec::HostTable* self, const eagle::exec::HostVersion& version,
+               const std::vector<std::vector<std::vector<std::tuple<std::uintptr_t,
+                   std::vector<std::uintptr_t>, std::vector<Partition>>>>>& stages) {
+                std::vector<std::vector<eagle::exec::HostBranch>> out;
+                for (const auto& stage : stages) {
+                    auto& branches = out.emplace_back();
+                    for (const auto& branch : stage) {
+                        auto& b = branches.emplace_back();
+                        for (const auto& [entry, params, parts] : branch) {
+                            if (entry == 0) throw std::runtime_error("host table: null host entry");
+                            b.push_back({ reinterpret_cast<eagle::exec::HostEntryV2>(entry),
+                                          asParams(params), parts });
+                        }
+                    }
+                }
+                new (self) eagle::exec::HostTable(std::move(out), version);
+            },
+            nb::arg("version"), nb::arg("stages"))
+        .def_prop_ro("handle", [](eagle::exec::HostTable& self) {
+            return reinterpret_cast<std::uintptr_t>(&self.head);
+        }, "Address of the `eagle_host_table` (plugin/graph_handoff.h).")
+        .def("stale", &eagle::exec::HostTable::stale);
 
     m.def("host_tile_size", &HostTeam::tile_size, nb::arg("bytes_per_sample") = 0,
         "The team's tile size in samples -- `Host::launch`'s own rule "

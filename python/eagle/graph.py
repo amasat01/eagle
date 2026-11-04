@@ -864,6 +864,7 @@ class Graph:
             self._built = True
             self._built_with = dict(backend=backend, record=record, dispatch=dispatch, device=device)
             _counters.bump("graph_builds")
+            self._bump_host_version()
         return self
 
     def _rebind(self, mapping) -> Graph:
@@ -876,6 +877,7 @@ class Graph:
         code, a copy's destination, a plan of several kernels) rebuilds the
         graph, with one ``PerformanceWarning`` per graph."""
         self._need_built("_rebind")
+        self._bump_host_version()
         if self._recorder is not None:
             raise ValueError("eagle.Graph.bind: a record=True graph is bound by the builder again")
         patch = self._patch or self._patch_index()
@@ -977,6 +979,41 @@ class Graph:
         self._patch = None
         self._built, self._pipe, self._segments, self._tail_ev = False, None, None, None
         self.build(**keep)
+
+    # -- hand the CPU graph to another runtime's OpenMP region -- #
+    def _bump_host_version(self):
+        version = getattr(self, "_host_version", None)
+        if version is not None:
+            version.bump()
+
+    def host_table(self):
+        """The built CPU graph as a table another runtime runs from its own OpenMP region.
+
+        The result's ``.handle`` is a ``const eagle_host_table*`` (``plugin/graph_handoff.h``); the
+        result holds this graph, and so its bound arrays, alive. It is a snapshot: ``bind`` or a
+        rebuild makes it stale and ``eagle_host_table_run`` then refuses it. Refused here for a GPU
+        graph, a node of your own code, and a node that keeps run state."""
+        from . import _core
+        from ._host_schedule import _native_entry
+
+        self._need_built("host_table")
+        if self._backend == "gpu":
+            raise ValueError("eagle.Graph.host_table: a GPU graph has no host table; use cuda_graph()")
+        ctx = LowerCtx(self._backend)
+        stages = []
+        for node in self._nodes:
+            branches = node.payload if node.kind == "group" else [[node]]
+            stage = [[_native_entry(n, ctx) for n in branch] for branch in branches]
+            for branch, nodes in zip(stage, branches):
+                for entry, n in zip(branch, nodes):
+                    if entry is None:
+                        raise ValueError(
+                            f"eagle.Graph.host_table: node {n.label!r} ({n.kind}) has no native host entry "
+                            "(your own code, or a plan with run state)")
+            stages.append(stage)
+        if getattr(self, "_host_version", None) is None:
+            self._host_version = _core.HostVersion()
+        return _HostTableHandle(self, _core.HostTable(self._host_version, stages))
 
     # -- run -- #
     def _need_built(self, method):
@@ -1230,6 +1267,24 @@ class Graph:
         from ._builder import bind
 
         return bind(self, planes)
+
+
+class _HostTableHandle:
+    """A built CPU graph's stages as plain data: ``handle`` is the address of a
+    ``const eagle_host_table*`` (``plugin/graph_handoff.h``). Holds the graph alive."""
+
+    __slots__ = ("_graph", "_table")
+
+    def __init__(self, graph, table):
+        self._graph, self._table = graph, table
+
+    @property
+    def handle(self) -> int:
+        return self._table.handle
+
+    @property
+    def stale(self) -> bool:
+        return self._table.stale()
 
 
 def _live_checks(accesses):
