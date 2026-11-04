@@ -1077,7 +1077,7 @@ def test_an_active_set_kernel_runs_every_sample_and_differentiates(tmp_path, pla
         got = np.asarray(jax.jit(lambda w: K(w, 0.7, m))(jnp.asarray(w)))
         y, term = np.zeros(n), np.zeros(n, dtype=bool)
         eplan.auto(spring).bind(w=w, a=0.7, terminated=term, y=y, **ActiveSet(term).planes()).launch()
-        np.testing.assert_array_equal(got, y)
+        np.testing.assert_array_max_ulp(got, y, maxulp=1)   # host and device may fuse a*w*w + sqrt(w) differently: the ULP contract
         np.testing.assert_allclose(got, 0.7 * w * w + np.sqrt(w), rtol=1e-14)
         gw = jax.grad(lambda w, a: K(w, a, m).sum(), (0, 1))(jnp.asarray(w), 0.7)
         np.testing.assert_allclose(np.asarray(gw[0]), 1.4 * w + 0.5 / np.sqrt(w), rtol=1e-13)
