@@ -215,7 +215,8 @@ def setup_wide_forms(ctx):
         return _discard(run), (lambda: (all(_close(o.cpu().numpy(), want[nm], ctx.dtype) for o, nm in zip(run(), names)),
                                                     "fill_mask and matvec_in match the reference (masked_sum has no torch form)"))
     # the arm is a named form on a GPU (the host build has one form)
-    form, extra = {"thread": ("thread", {}), "team": ("team", {"TC": 1}), "staged": ("team", {})}[ctx.arm]
+    form, extra = {"thread": ("thread", {}), "team": ("team", {"TC": 1}), "team_k8": ("team", {"TC": 1, "WARPS": 8}),
+                  "staged": ("team", {})}[ctx.arm]
     if ctx.target != "cuda":
         form = None
     from hawk.targets.cards import wide_override
@@ -681,7 +682,7 @@ def setup_mpi_partition(ctx):
 # session (empty: GPU only); ``ref``: the arm the others are compared with.
 ROWS = {
     "wide_forms": dict(setup=setup_wide_forms, cases={"all": (65536, 256)}, dtypes=(F64, F32), ref="thread",
-                       arms=("thread", "team", "staged", "numpy_mask", "torch"), host=("thread", "numpy_mask", "torch"),
+                       arms=("thread", "team", "team_k8", "staged", "numpy_mask", "torch"), host=("thread", "numpy_mask", "torch"),
                        baseline="opaque NumPy mask; torch"),
     "steps_fused": dict(setup=setup_steps_fused, cases={"all": (65536, 256)}, dtypes=(F64,), ref="K8",
                         arms=("K1", "K8", "K32", "jvp_K8", "vjp_K8_fused", "vjp_K8_auto", "warp_loop", "torch_func"),
@@ -712,7 +713,7 @@ ROWS = {
 # a new arm must be added to exactly one set (tests/test_profile_kit.py fails otherwise).
 EXTERNAL_ARMS = frozenset({"numpy_mask", "torch", "warp_loop", "torch_func", "cupy", "einsum", "cupy_fft", "cupyx_scatter_add",
                            "np_add_at", "cupy_sum", "warp"})
-OUR_ARMS = frozenset({"thread", "team", "staged", "K1", "K8", "K32", "jvp_K8", "vjp_K8_fused", "vjp_K8_auto", "guard", "no_guard",
+OUR_ARMS = frozenset({"thread", "team", "team_k8", "staged", "K1", "K8", "K32", "jvp_K8", "vjp_K8_fused", "vjp_K8_auto", "guard", "no_guard",
                       "jump", "segmented", "hawk", "box", "no_box", "gemm", "fft", "dense", "map", "prefix", "keyed", "ordered",
                       "or", "compensated", "auto", "two_ranks", "one_rank"})
 # an arm named for its baseline library runs the library branch of its row's setup

@@ -371,7 +371,7 @@ def _one_launch(stage, has_planes: bool) -> bool:
     if stage.team is None:
         return has_planes
     lanes = stage.team.get("lanes", 1)          # a warp per lane, a block serving ``lanes`` of them
-    return set(stage.team) <= {"threads", "lanes"} and stage.team["threads"] == 32 * lanes
+    return set(stage.team) <= {"threads", "lanes", "warps"} and stage.team["threads"] == 32 * lanes
 
 
 def _placement_only(bound) -> bool:
@@ -515,7 +515,7 @@ class SplitBound:
             bound = bind_one(replace(p, plugin=st.plugin), own)
             if st.team is not None:
                 grid = _lane_bind.team_grid(p.plugin, st.team, n, planes)
-                bound.team_stage(st.team["threads"], grid, n)
+                bound.team_stage(st.team["threads"] * st.team.get("warps", 1), grid, n)
                 if st.team.get("grid") == "chunks":
                     self._chunks[st.team["of"]] = grid
                 if st.team.get("status"):
