@@ -185,6 +185,8 @@
     "compensated",
     "ordered",
     "auto",
+    "cell_compensated",
+    "cell_auto",
     "cupy_sum"
    ],
    "baseline": "cupy.sum",
@@ -197,7 +199,9 @@
    "host_arms": [
     "compensated",
     "ordered",
-    "auto"
+    "auto",
+    "cell_compensated",
+    "cell_auto"
    ]
   },
   "mpi_partition": {
