@@ -449,7 +449,9 @@ same bind and the same captured graph:
    bound.set_count(1000); bound.launch()        # 1000 lanes
    bound.set_count(8192); bound.launch()        # all of them
 
-A count above the capacity is refused by name; bind again with a larger capacity. Writing the count plane yourself,
+Inside a builder block, pass the count plane by name like any other plane, ``kernel(x=x, y=y, active_count=count)``
+(a one-cell ``uint32`` array; ``active_map`` the same way for ``IndexSet()``): the graph reads the count at each
+launch. A count above the capacity is refused by name; bind again with a larger capacity. Writing the count plane yourself,
 without ``set_count``, is your contract: nothing then checks the count.
 
 Large matrices and keyed sums

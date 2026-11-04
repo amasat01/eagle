@@ -176,6 +176,10 @@ class AutoPlan:
         call = self._call
         if call is None:
             call = self._call = self._signature()
+        lanes = self._lane_planes(kw)
+        if lanes:
+            kw = {k: v for k, v in kw.items() if k not in lanes}
+            return {**self.bind_args(args, kw), **lanes}
         kernel = self.kernel
         if kernel is not None and (len(args) > len(call[1]) or kw.keys() - call[4]):
             comps = _cell_rows.companions_of(self.plugin)
@@ -191,6 +195,16 @@ class AutoPlan:
                      if nm in order and nm not in call[4] or nm in comps}
             return {**self._bind_args((), given, call), **cells}
         return self._bind_args(args, kw, call)
+
+    def _lane_planes(self, kw) -> dict:
+        """The index-set planes (``active_map``/``active_count``) of a kernel built with ``lanes=IndexSet(...)``, as
+        given by name: they are the caller's, never positional, and bound as they come (``bind`` checks them)."""
+        from ._active_set import COUNT_PLANE, MAP_PLANE
+
+        if MAP_PLANE not in kw and COUNT_PLANE not in kw:
+            return {}
+        declared = {nm for role, nm in _split.arg_spec(self.plugin) if role == "lookup"}
+        return {nm: kw[nm] for nm in (MAP_PLANE, COUNT_PLANE) if nm in kw and nm in declared}
 
     def _bind_args(self, args, kw, call) -> dict:
         sig, required, prior, name, names, needed = call
