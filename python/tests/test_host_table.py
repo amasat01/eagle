@@ -79,5 +79,5 @@ def test_a_node_of_your_own_code_is_refused(tmp_path):
     chains, arrays, _ = host_fork(tmp_path, 1, 64, depth=1)
     x = arrays[0][0]
     g = eagle.Graph().add(chains[0][0]).add_node(opaque(lambda: None, reads=[x])).build(backend="cpu")
-    with pytest.raises(ValueError, match="native host entry"):
+    with pytest.raises(RuntimeError, match="native host entry"):
         g.host_table()

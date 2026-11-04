@@ -1040,7 +1040,7 @@ class Graph:
 
         self._need_built("host_table")
         if self._backend == "gpu":
-            raise ValueError("eagle.Graph.host_table: a GPU graph has no host table; use cuda_graph()")
+            raise RuntimeError("eagle.Graph.host_table: a GPU graph has no host table; use cuda_graph()")
         ctx = LowerCtx(self._backend)
         stages = []
         for node in self._nodes:
@@ -1049,7 +1049,7 @@ class Graph:
             for branch, nodes in zip(stage, branches):
                 for entry, n in zip(branch, nodes):
                     if entry is None:
-                        raise ValueError(
+                        raise RuntimeError(
                             f"eagle.Graph.host_table: node {n.label!r} ({n.kind}) has no native host entry "
                             "(your own code, or a plan with run state)")
             stages.append(stage)

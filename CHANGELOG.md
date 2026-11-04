@@ -14,6 +14,8 @@ This section covers what changes from 0.7.2. Names that left are in the table at
 
 **Fused K-step reverse on host and device.** `steps_reverse="fused"` (or `"auto"`) runs a window of `K` steps as one `vjp` launch. See the autodiff guide.
 
+**Hand a built graph to another runtime.** `Graph.cuda_graph()` returns a `CudaGraphHandle` holding an owned clone of the built GPU graph, to add as a child node of another CUDA graph; `bind` now updates the graph the clone is taken from too. `Graph.host_table()` gives a built CPU graph as a table that another runtime runs from its own OpenMP region through `eagle_host_table_run` (`eagle/plugin/graph_handoff.h`). Graphs that cannot be handed over are refused by name. See "Handing a graph to another runtime" in the graph guide.
+
 **`plane_meta`.** Notes that a kernel's author attached to a plane with `hawk.Meta` are read back by plane name from the loaded kernel.
 
 **Host threads and run-time information.** `exec.set_host_threads` sets the threads for host stages, which run in one OpenMP region per stage; broadcast `Param` values work in `run` and `bind`; a direct call returns NumPy arrays; and out-of-memory failures name their context.
