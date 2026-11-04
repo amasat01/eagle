@@ -714,3 +714,56 @@ def test_only_l4_prof_runs_the_smoke_compile_collection_into_a_throwaway_dir():
     assert "--out-dir \"$1\"" in cmd and "/cards/m/perf_card" not in cmd
     assert out.index("step p1") < out.index("step cmp") < out.index("step corp")
     assert "step cmp" not in _run_cards("--plan", "a100")[1]
+
+
+# --- ours-only reruns: our arms are timed, the baseline libraries' rows come from the device's earlier run -------------------
+def _reference_run(tmp_path, gpu="NVIDIA L4", slug="m--cpu"):
+    ref = tmp_path / "073x" / slug
+    (ref / "parts" / "c2").mkdir(parents=True)
+    (ref / "perf_card").mkdir()
+    (ref / "perf_card" / "card_m.json").write_text(json.dumps({"device": {"name": gpu}}))
+    return ref
+
+
+@pytest.mark.parametrize("plan", ["l4", "l4-prof", "a100"])
+def test_an_ours_only_plan_drops_the_cmp_and_nvl_steps_costs_less_and_hands_c1_c2_the_reference(plan, tmp_path):
+    ref = _reference_run(tmp_path)
+    rc, full = _run_cards("--plan", plan)
+    rc_o, ours = _run_cards("--plan", plan, "--ours-only", "--reference", str(ref))
+    assert rc == rc_o == 0
+    assert "step cmp" not in ours and "step nvl" not in ours and "compile caches" not in ours
+    assert int(re.search(r"expected (\d+) min", ours).group(1)) < int(re.search(r"expected (\d+) min", full).group(1))
+    cards = [ln for ln in ours.splitlines() if ln.startswith("+ (") and re.search(r"(perf|feature)_card\.py", ln)]
+    assert all(f"--reference {ref}" in ln for ln in cards) and len(cards) == (0 if plan == "l4-prof" else 4)   # the c1, c2 steps and their assembles
+    assert "--reference" not in full
+
+
+def test_ours_only_needs_a_reference_and_refuses_another_devices_run(tmp_path):
+    rc, out = _run_cards("--plan", "l4", "--ours-only")
+    assert rc != 0 and "--ours-only needs --reference" in out
+    rc, out = _run_cards("--plan", "l4", "--ours-only", "--reference", str(_reference_run(tmp_path, slug="other--cpu")))
+    assert rc != 0 and "another device's run" in out
+
+
+def test_a_full_ncu_capture_does_not_lock_the_clock_to_base_and_a_quick_one_is_unchanged(monkeypatch):
+    mod = _kit_module()
+    full, quick = _ncu_commands(monkeypatch, mod, False), _ncu_commands(monkeypatch, mod, True)
+    assert full[full.index("--clock-control") + 1] == "none" and "--clock-control" not in quick
+
+
+def test_the_reference_gives_the_external_rows_with_their_source_label_and_a_other_gpu_is_refused(tmp_path, monkeypatch):
+    fc = _kit_module().load_card(_kit_module().FEATURE_PATH)
+    cc, ref = fc.cc, _reference_run(tmp_path)
+    cc.part_save(ref / "parts" / "c2", "contraction_all_float64_einsum", {"status": "ok", "sm_mhz": 1590})
+    monkeypatch.setattr(cc, "REFERENCE", None)
+    with pytest.raises(SystemExit, match="refused"):
+        cc.set_reference(ref, tmp_path / "parts" / "c2", "NVIDIA A100")
+    cc.set_reference(ref, tmp_path / "parts" / "c2", "NVIDIA L4")
+    ran = []
+    monkeypatch.setattr(fc, "_run_arm_process", lambda *a: ran.append(a[-2]) or {"status": "ok"})
+    monkeypatch.setattr(fc, "_PARTS", None)
+    got = fc.run_arm("contraction", "all", "float64", "einsum", False)
+    assert got["status"] == "ok" and "073x/m--cpu" in got["reference"] and "SM 1590 MHz" in got["reference"] and not ran
+    assert fc.run_arm("contraction", "all", "float64", "gemm", False) == {"status": "ok"} and ran == ["gemm"]
+    assert fc.run_arm("contraction", "all", "float64", "cupy", False) == {"status": cc.NO_REFERENCE}
+    assert "taken from: 073x/m--cpu" in "\n".join(cc.reference_note([got]))

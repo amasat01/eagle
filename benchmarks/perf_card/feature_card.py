@@ -826,6 +826,8 @@ def run_arm(row, case, dtype, arm, smoke):
     """One arm in a fresh process: the record it printed, or the reason it did not. With ``--parts`` the record is saved,
     and an earlier one is reused."""
     key = f"{row}_{case}_{dtype}_{arm}" + ("_smoke" if smoke else "")
+    if cc.REFERENCE and arm in EXTERNAL_ARMS:   # ours-only: a baseline library's record is the reference run's
+        return cc.ref_part(key) or {"status": cc.NO_REFERENCE}
     saved = cc.part_load(_PARTS, key, keep_failed=_ASSEMBLE)
     if saved is not None:
         return saved
@@ -955,6 +957,7 @@ def render_markdown(card):
             wall = f"{cc.fmt_time(w['median'])} ({cc.fmt_time(w['iqr'])})" if w else "–"
             lines.append(f"| {r['row']} | {r['case']} | {r['dtype']} | {rec.get('n', r['n']):,} | {a} | {rec['status']} | {wall} | "
                          f"{w['rounds'] if w else '–'} | {rec.get('sm_mhz') or '–'} | {f'{ratio:.3g}x' if ratio else '–'} |")
+    lines += cc.reference_note([rec for r in card["rows"] for rec in r["arms"].values()])
     return "\n".join(lines) + "\n"
 
 
@@ -968,10 +971,15 @@ def main(argv=None):
                     help="run nothing: write the card from the saved parts (--parts), a missing arm reads not_run: step time limit")
     ap.add_argument("--parts", type=pathlib.Path,
                     help="save each finished arm here and reuse what is there: a cap or a preemption costs one arm")
+    ap.add_argument("--reference", type=pathlib.Path,
+                    help="ours-only: time only our arms (OUR_ARMS); the baseline libraries' records come from this earlier run "
+                         "(its results directory, same device) and carry its label")
     ap.add_argument("--smoke", action="store_true", help="smallest sizes, one round, card in a temporary directory")
     args = ap.parse_args(argv)
     global _PARTS, _ASSEMBLE
     _PARTS, _ASSEMBLE = args.parts, args.assemble
+    if args.reference and not (args.mpi_worker or args.arm):
+        cc.set_reference(args.reference, args.parts, cc.device_facts()[0]["name"])
     if args.mpi_worker:
         _mpi_worker(int(args.mpi_worker), args.smoke)
         return 0
