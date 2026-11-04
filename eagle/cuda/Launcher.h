@@ -216,6 +216,11 @@ public:
         p.extra        = nullptr;
         driverCheck_(set(reinterpret_cast<CUgraphExec>(instance_),
             reinterpret_cast<CUgraphNode>(node), &p), "patching a kernel node's arguments");
+        /* The template node too (same handle), so a clone of the template taken now carries the patch. */
+        static const auto setTemplate = detail::driver_entry<decltype(&::cuGraphKernelNodeSetParams)>(
+            "cuGraphKernelNodeSetParams");
+        driverCheck_(setTemplate(reinterpret_cast<CUgraphNode>(node), &p),
+            "patching a kernel node's arguments in the source graph");
     }
 
     /** @brief Re-point captured memcpy node @p node at source @p src, in this
@@ -243,6 +248,10 @@ public:
         driverCheck_(current(&ctx), "reading the current context");
         driverCheck_(set(reinterpret_cast<CUgraphExec>(instance_), reinterpret_cast<CUgraphNode>(node), &p, ctx),
             "re-pointing a memcpy node");
+        static const auto setTemplate = detail::driver_entry<decltype(&::cuGraphMemcpyNodeSetParams)>(
+            "cuGraphMemcpyNodeSetParams");
+        driverCheck_(setTemplate(reinterpret_cast<CUgraphNode>(node), &p),
+            "re-pointing a memcpy node in the source graph");
     }
 
     /** @brief Update this exec in place from @p sameTopology (a re-capture of
@@ -261,6 +270,17 @@ public:
             return false;
         driverCheck_(r, "updating the exec graph");
         return true;
+    }
+
+    /** @brief An owned clone of the source (template) graph, which every ``setKernelParams`` and
+     *  ``setMemcpySource`` has kept in step with the exec. The caller destroys it
+     *  (``cudaGraphDestroy``). Throws when CUDA refuses the clone (conditional, memory-allocation nodes). */
+    cudaGraph_t cloneGraph() const
+    {
+        EAGLE_ASSERT(storage_ && storage_->graph, "Launcher::cloneGraph requires a graph");
+        cudaGraph_t clone = nullptr;
+        EAGLE_CHECK_ALWAYS(cudaGraphClone(&clone, storage_->graph));
+        return clone;
     }
 
     /** @brief Number of registered kernel records (for tests / debug). */
@@ -305,6 +325,7 @@ private:
      *  with ``storage_``). */
     struct KernelSnapshot {
         CUDA_KERNEL_NODE_PARAMS params;
+        std::vector<std::vector<char>> values;    //!< the captured argument values, owned
         std::vector<void*> args;
     };
 
@@ -322,15 +343,21 @@ private:
                 "cuKernelGetFunction");
             driverCheck_(fromKernel(&f, snap.params.kern), "resolving a kernel node's function");
         }
-        const std::size_t count = paramCount_(f);
+        const std::vector<std::size_t> sizes = paramSizes_(f);
         auto** captured = static_cast<void**>(snap.params.kernelParams);
-        snap.args.assign(captured, captured + count);
+        snap.values.resize(sizes.size());
+        snap.args.resize(sizes.size());
+        for (std::size_t i = 0; i < sizes.size(); ++i) {     // own the values: a patch of the graph may free the originals
+            snap.values[i].assign(static_cast<const char*>(captured[i]),
+                static_cast<const char*>(captured[i]) + sizes[i]);
+            snap.args[i] = snap.values[i].data();
+        }
         return kernelSnapshots_.emplace(node, std::move(snap)).first->second;
     }
 
-    /** @brief Number of parameters @p f takes (``cuFuncGetParamInfo``, a
+    /** @brief Byte size of each parameter @p f takes (``cuFuncGetParamInfo``, a
      *  CUDA 12.4 driver entry, asked for at its own ABI). */
-    static std::size_t paramCount_(CUfunction f)
+    static std::vector<std::size_t> paramSizes_(CUfunction f)
     {
         using Info = CUresult (*)(CUfunction, std::size_t, std::size_t*, std::size_t*);
         static const Info info = [] {
@@ -347,10 +374,11 @@ private:
         if (info == nullptr)
             throw std::runtime_error("eagle: patching kernel arguments needs an NVIDIA driver "
                 ">= 12.4 and a CUDA >= 12.5 build (cuFuncGetParamInfo).");
-        std::size_t n = 0, offset = 0, size = 0;
-        while (info(f, n, &offset, &size) == CUDA_SUCCESS)
-            ++n;
-        return n;
+        std::vector<std::size_t> sizes;
+        std::size_t offset = 0, size = 0;
+        while (info(f, sizes.size(), &offset, &size) == CUDA_SUCCESS)
+            sizes.push_back(size);
+        return sizes;
     }
 
     static void driverCheck_(CUresult r, const char* what)

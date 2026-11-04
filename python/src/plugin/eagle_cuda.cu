@@ -1072,6 +1072,98 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_launcher_exec_update(eagle_
     });
 }
 
+namespace {
+
+/** The first node of @p g (looking into child graphs) that a handed-over graph may not hold or that CUDA may refuse
+ *  inside a child graph; empty when there is none. @p host is set for a host-function node (always refused). */
+std::string firstRefusedNode(cudaGraph_t g, bool& host, int depth = 0)
+{
+    std::size_t n = 0;
+    EAGLE_CHECK_ALWAYS(cudaGraphGetNodes(g, nullptr, &n));
+    std::vector<cudaGraphNode_t> nodes(n);
+    EAGLE_CHECK_ALWAYS(cudaGraphGetNodes(g, nodes.data(), &n));
+    std::string found;
+    for (std::size_t i = 0; i < n; ++i) {
+        cudaGraphNodeType type{};
+        EAGLE_CHECK_ALWAYS(cudaGraphNodeGetType(nodes[i], &type));
+        std::string what;
+        if (type == cudaGraphNodeTypeHost) {
+            host = true;
+            return "host-function node #" + std::to_string(i);
+        }
+        if (type == cudaGraphNodeTypeMemAlloc)
+            what = "memory-allocation node";
+        else if (type == cudaGraphNodeTypeMemFree)
+            what = "memory-free node";
+#if CUDART_VERSION >= 12030
+        else if (type == cudaGraphNodeTypeConditional)
+            what = "conditional node";
+#endif
+        else if (type == cudaGraphNodeTypeGraph && depth < 8) {
+            cudaGraph_t child = nullptr;
+            EAGLE_CHECK_ALWAYS(cudaGraphChildGraphNodeGetGraph(nodes[i], &child));
+            what = firstRefusedNode(child, host, depth + 1);
+            if (host)
+                return what;
+        }
+        if (!what.empty() && found.empty())
+            found = what.find("#") == std::string::npos ? what + " #" + std::to_string(i) : what;
+    }
+    return found;
+}
+
+std::string driverText()
+{
+    int v = 0;
+    (void)cudaDriverGetVersion(&v);
+    return "driver " + std::to_string(v / 1000) + "." + std::to_string((v % 1000) / 10);
+}
+
+} // namespace
+
+EAGLE_BACKEND_API eagle_backend_status eagle_backend_launcher_clone_graph(eagle_backend_launcher h,
+    std::uint64_t* graph)
+{
+    return guarded([&] {
+        if (graph == nullptr)
+            throw std::invalid_argument("eagle_backend_launcher_clone_graph: graph is null");
+        DeviceScope scope(live(h)->device);
+        bool host = false;
+        const std::string node = firstRefusedNode(h->launcher.graph(), host);
+        if (host)
+            throw std::runtime_error("eagle: Graph.cuda_graph(): the graph holds a " + node
+                + "; host-function nodes are never handed to another runtime");
+        cudaGraph_t clone = nullptr;
+        cudaError_t err = cudaGraphClone(&clone, h->launcher.graph());
+        if (err == cudaSuccess) {      // the add the consumer will make, on a scratch parent: the driver's own answer
+            cudaGraph_t scratch = nullptr;
+            cudaGraphNode_t added = nullptr;
+            err = cudaGraphCreate(&scratch, 0);
+            if (err == cudaSuccess) {
+                err = cudaGraphAddChildGraphNode(&added, scratch, nullptr, 0, clone);
+                (void)cudaGraphDestroy(scratch);
+            }
+            if (err != cudaSuccess) {
+                (void)cudaGraphDestroy(clone);
+                clone = nullptr;
+            }
+        }
+        if (err != cudaSuccess)
+            throw std::runtime_error("eagle: Graph.cuda_graph(): CUDA refuses this graph as a child graph"
+                + (node.empty() ? std::string() : " (it holds a " + node + ")") + ": "
+                + cudaGetErrorName(err) + ", " + cudaGetErrorString(err) + " (" + driverText() + ")");
+        *graph = reinterpret_cast<std::uint64_t>(clone);
+    });
+}
+
+EAGLE_BACKEND_API eagle_backend_status eagle_backend_launcher_graph_destroy(std::uint64_t graph)
+{
+    return guarded([&] {
+        if (graph != 0)
+            EAGLE_CHECK_ALWAYS(cudaGraphDestroy(reinterpret_cast<cudaGraph_t>(graph)));
+    });
+}
+
 EAGLE_BACKEND_API void eagle_backend_launcher_release(eagle_backend_launcher h)
 {
     release(h);
