@@ -323,6 +323,7 @@ def ncu_run(args, rep, cmd_line, metrics, regex=None, count=1, ranged=True, sect
     cap = NCU_FULL_CAP_S if full else NCU_CAP_S
     cmd = [args.ncu, "--profile-from-start", "off" if ranged else "on", "--launch-skip", "0", "--launch-count", str(count),
            *(["--kernel-name", regex] if regex else []), "--target-processes", "all", "-f", "-o", str(rep),
+           *(["--clock-control", "none"] if full else []),   # the kit locks the SM clock itself; ncu's base-clock replay read compute-bound kernels 2-2.5x the card walls
            *(["--set", "full"] if full and not sections else []),
            *(a for sec in sections for a in ("--section", sec)), *(["--import-source", "no"] if sections else []),
            "--metrics", ",".join(metrics)] + cmd_line

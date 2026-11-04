@@ -1438,11 +1438,23 @@ def _ordered_cells(cells):
 _PARTS = None   # --parts: every finished (arm, cell) is saved here and a re-run reuses it
 
 
+def _external(arm):
+    """A baseline library's arm (never ours): not re-timed under ``--reference``."""
+    return not arm.startswith("eagle")
+
+
 def _time_cell_arm(arm, n, distribution, bus_id, rounds_max, work):
     """Parent: one timing child. A failure is a row: ``out_of_memory`` or ``failed: <last error line>``.
     With ``--parts`` a finished result is saved, and an earlier one is reused."""
     key = f"timing_{arm}_{n}_{distribution}"
     out_path = work / f"counts_{arm}_{n}_{distribution}.npz"
+    if cc.REFERENCE and _external(arm):   # ours-only: a baseline library's part is the reference run's
+        saved = cc.ref_part(key)
+        if saved is None:
+            return _stub(arm, n, distribution, cc.NO_REFERENCE, work)
+        if (cc.REFERENCE[0] / f"{key}.npz").exists():
+            shutil.copy(cc.REFERENCE[0] / f"{key}.npz", out_path)
+        return {**saved, "counts_path": str(out_path)}
     saved = cc.part_load(_PARTS, key, keep_failed=_ASSEMBLE)
     if saved is not None:
         if (_PARTS / f"{key}.npz").exists():
@@ -1484,6 +1496,8 @@ def _predicted_over_budget(walls, n):
 def _row_of(r, fma_dev, ops_per_attempt, samples_per_lane):
     """One result row from a timing reply; a non-``ok`` reply is a row with its status and the rule that applied."""
     row = {"n": r["n"], "distribution": r["distribution"], "arm": r["arm"], "status": r["status"]}
+    if r.get("reference"):
+        row["reference"] = r["reference"]
     if r["status"] != "ok":
         budget = (f"> {ARM_RUN_BUDGET_S:g} s per run, predicted from {r['predicted_dist']} N={r['predicted_from']:,}"
                   if r.get("predicted_from") else
@@ -1689,6 +1703,11 @@ def _run_memory_pass(ns, bus_id, names):
     rows = []
     for n in ns:
         for arm in names:
+            if cc.REFERENCE and _external(arm):
+                rows.append(cc.ref_part(f"memory_{arm}_{n}") or {
+                    "n": n, "arm": arm, "status": cc.NO_REFERENCE, "device_peak_bytes": None, "host_peak_bytes": None,
+                    "minimum_bytes": n * MIN_BYTES_PER_SAMPLE})
+                continue
             saved = cc.part_load(_PARTS, f"memory_{arm}_{n}", keep_failed=_ASSEMBLE)
             if saved is not None:
                 rows.append(saved)
@@ -1953,6 +1972,7 @@ def render_markdown(card: dict) -> str:
         lines += ["### Memory method", "", card["memory"]["method"], ""]
     if card.get("torch_compile_note"):
         lines += [card["torch_compile_note"], ""]
+    lines += cc.reference_note(card["results"] + card["memory"]["rows"])
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -1980,6 +2000,9 @@ def main(argv=None):
                     help="run nothing: write the card from the saved parts (--parts), a missing arm reads not_run: step time limit")
     ap.add_argument("--parts", type=pathlib.Path,
                     help="save each finished (arm, cell) here and reuse what is there: a cap or a preemption costs one arm")
+    ap.add_argument("--reference", type=pathlib.Path,
+                    help="ours-only: time only the eagle arms; the baseline libraries' rows come from this earlier run "
+                         "(its results directory, same device) and carry its label")
     ap.add_argument("--memory-ns", type=int, nargs="+",
                     help="sizes of the memory pass (default: the cells' sizes); a size too long to time can still show what fits")
     ap.add_argument("--memory-probe", nargs=3, help=argparse.SUPPRESS)
@@ -2008,7 +2031,8 @@ def main(argv=None):
     else:
         cells = list(CELLS)
     ns = sorted({n for n, _ in cells})
-    names, arms_not_run = _select_arms(args.arms)
+    # under --reference a baseline arm is read from the reference run: its library need not be installed here
+    names, arms_not_run = (tuple(a for a in ARMS if a in args.arms), {}) if args.reference else _select_arms(args.arms)
     names = tuple(sorted(names, key=ARM_PRIORITY.index))
     cells = _ordered_cells(cells)
     for arm, why in arms_not_run.items():
@@ -2017,6 +2041,8 @@ def main(argv=None):
     t_start = time.perf_counter()
     work = pathlib.Path(tempfile.mkdtemp(prefix="perf_card_"))
     device, peak, slug, bus_id = _device_facts()
+    if args.reference:
+        cc.set_reference(args.reference, args.parts, device["name"])
     _check_kernel_bodies()
     sources = _kernel_sources(work)
 

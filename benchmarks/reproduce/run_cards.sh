@@ -19,6 +19,10 @@
 #                     plumbing check before a session: results and step markers go to <slug>-smoke (locally and in the
 #                     bucket), so a full run afterwards on the same machine skips nothing and reuses the environment;
 #                     the sweep's rows are not written into hawk
+#     --ours-only     measure our arms only (eagle / hawk / aether): C1 and C2 time just those arms, the baseline libraries'
+#                     rows come from --reference; the cmp (compile caches) and nvl (nvlibs counters) steps are dropped
+#     --reference DIR the results directory (<slug>/) of the device's earlier run, required by --ours-only; its external
+#                     rows are labelled in the card with their source; a different GPU is refused
 #     --dry-run       print the plan with its minutes and every command, run nothing
 #
 # A step that fails or runs over its cap is reported and the next one runs (exit 1 at the end); a step that
@@ -29,7 +33,7 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=SCRIPTDIR/lib.sh
 . "$HERE/lib.sh"
 
-PLAN="" UPLOAD="" WORK=${REPRO_WORK:-} OUT="" SLUG="" GPU_ENV="" CPU_ENV="" DEADLINE_H="" SMOKE=0
+PLAN="" UPLOAD="" WORK=${REPRO_WORK:-} OUT="" SLUG="" GPU_ENV="" CPU_ENV="" DEADLINE_H="" SMOKE=0 OURS_ONLY=0 REFERENCE=""
 while [[ $# -gt 0 ]]; do
   case $1 in
     --plan) PLAN=${2:-}; shift 2 ;;
@@ -41,6 +45,8 @@ while [[ $# -gt 0 ]]; do
     --cpu-env) CPU_ENV=${2:-}; shift 2 ;;
     --deadline-h) DEADLINE_H=${2:-}; shift 2 ;;
     --smoke) SMOKE=1; shift ;;
+    --ours-only) OURS_ONLY=1; shift ;;
+    --reference) REFERENCE=${2:-}; shift 2 ;;
     --dry-run) REPRO_DRY_RUN=1; shift ;;
     -h|--help) sed -n '5,25p' "$0"; exit 0 ;;
     *) die "unknown option $1 (see --help)" ;;
@@ -97,6 +103,19 @@ case $PLAN in
   zen5|c4a) STEPS=(c1cpu:15:D c2cpu:8:D pcpu:18:D) ;                       KIND=CPU ;;
   *) die "--plan takes a100, l4, l4-prof, t4, p2000, zen5 or c4a" ;;
 esac
+# ours-only: no baseline-library step (cmp, nvl); C1 and C2 time our arms only (the eagle arms are 5 of 11 C1 arms and ~6 % of the
+# T4 per-run walls, the fixed per-cell process costs stay: C1 estimated at 1/3, C2 at 1/2 of the full minutes)
+if [[ $OURS_ONLY == 1 ]]; then
+  [[ -n $REFERENCE && -d $REFERENCE/parts ]] || die "--ours-only needs --reference DIR, the results directory of this device's earlier run (with parts/)"
+  [[ $KIND == GPU ]] || die "--ours-only is for the GPU plans"
+  KEPT=()
+  for s in "${STEPS[@]}"; do
+    IFS=: read -r name exp cap <<<"$s"
+    case $name in cmp|nvl) continue ;; c1) exp=$(( (exp + 2) / 3 )) ;; c2) exp=$(( (exp + 1) / 2 )) ;; esac
+    KEPT+=("$name:$exp:$cap")
+  done
+  STEPS=("${KEPT[@]}")
+fi
 # smoke: every step about 2 min (the card scripts' --smoke: N = 1e3, one round; the stages' --quick)
 if [[ $SMOKE == 1 ]]; then for i in "${!STEPS[@]}"; do STEPS[i]=${STEPS[i]%%:*}:2:D; done; fi
 
@@ -106,6 +125,10 @@ GPU_ENV=${GPU_ENV:-$WORK/env-gpu.sh}
 CPU_ENV=${CPU_ENV:-$WORK/env-cpu.sh}
 ENVF=$GPU_ENV; [[ $KIND == CPU ]] && ENVF=$CPU_ENV
 SLUG=${SLUG:-$(machine_slug)}
+# another GPU's results are refused here (the slug is <gpu>--<cpu>); the card scripts check the device itself
+if [[ $OURS_ONLY == 1 && $(basename "$REFERENCE") != "${SLUG%%--*}"--* ]]; then
+  die "--reference $REFERENCE is another device's run (this one: ${SLUG%%--*}): refused"
+fi
 [[ $SMOKE == 1 ]] && SLUG=$SLUG-smoke
 OUT=${OUT:-$WORK/cards}
 RES=$OUT/$SLUG
@@ -119,6 +142,7 @@ if [[ -n $src && -d $src/eagle ]]; then EROOT=$src/eagle; else EROOT=$(cd "$HERE
 # step_cmd NAME: the command of a step, one word per line, run from the eagle root in the env (smoke: smoke_cmd's edit).
 step_cmd() {
   if [[ $SMOKE == 1 ]]; then full_cmd "$1" | smoke_cmd "$1"; else full_cmd "$1"; fi
+  if [[ $OURS_ONLY == 1 ]]; then case $1 in c1|c2) printf '%s\n' --reference "$REFERENCE" ;; esac; fi
 }
 # smoke_cmd NAME: a full command at its smallest: the card scripts' --smoke, the stages' --quick, the sweep --quick unwritten.
 smoke_cmd() {
@@ -168,7 +192,7 @@ DEADLINE_MIN=$(( (expected * 3 + 1) / 2 ))
 [[ -n $DEADLINE_H ]] && DEADLINE_MIN=$(awk -v h="$DEADLINE_H" 'BEGIN {printf "%d", h * 60}')
 DEADLINE_AT=$(( START + DEADLINE_MIN * 60 ))
 log "expected $expected min; session deadline $DEADLINE_MIN min (1.5 x); --max-run-duration = deadline + boot + upload + 15 = $((DEADLINE_MIN + 15)) min + boot"
-[[ $KIND == GPU ]] && log "compile caches (warp, jax, torch, triton, cupy) under $RES/compiled/<lib>; card timings unchanged"
+[[ $KIND == GPU && $OURS_ONLY == 0 ]] && log "compile caches (warp, jax, torch, triton, cupy) under $RES/compiled/<lib>; card timings unchanged"
 [[ $REPRO_DRY_RUN == 1 ]] && log "dry run: commands are printed, nothing is run"
 export CARD_DEADLINE=$DEADLINE_AT
 
@@ -191,7 +215,7 @@ compile_caches() {
 in_env() {
   ( # shellcheck disable=SC1090
     . "$ENVF"
-    if [[ $KIND == GPU ]]; then while IFS= read -r kv; do export "$kv"; done < <(compile_caches); fi
+    if [[ $KIND == GPU && $OURS_ONLY == 0 ]]; then while IFS= read -r kv; do export "$kv"; done < <(compile_caches); fi
     [[ $KIND == CPU ]] && export CUDA_VISIBLE_DEVICES=""
     export HAWK_SRC=${RAPTOR_HAWK_ROOT:-${HAWK_SRC:-}} EAGLE_SRC=$EROOT CARD_DEADLINE
     cd "$EROOT" && "$@" )

@@ -1219,6 +1219,39 @@ def part_save(parts, key, obj):
         tmp.replace(d / f"{key}.json")
 
 
+#: --reference (ours-only reruns): (the reference run's parts directory, its label) once `set_reference` accepted it.
+REFERENCE = None
+NO_REFERENCE = "not_run: not in the reference run"
+
+
+def set_reference(res_dir, parts, device_name):
+    """Take the external arms' parts from an earlier run of the same device: ``res_dir`` is its results directory
+    (``<slug>/``, holding ``parts/<step>`` and the card JSON); another GPU is refused."""
+    global REFERENCE
+    res = pathlib.Path(res_dir).resolve()
+    names = {json.loads(p.read_text()).get("device", {}).get("name") for p in res.glob("perf_card/*card_*.json")}
+    if device_name not in names:
+        raise SystemExit(f"--reference {res} is from {sorted(n for n in names if n) or 'an unknown device'}, "
+                         f"this device is {device_name}: refused")
+    REFERENCE = (res / "parts" / pathlib.Path(parts).name, f"{res.parent.name}/{res.name}")
+
+
+def ref_part(key):
+    """The reference run's part ``key`` with its source label in ``reference`` (run, date, SM clock when recorded), or None."""
+    obj = part_load(REFERENCE[0], key, keep_failed=True)
+    if obj is None:
+        return None
+    when = time.strftime("%Y-%m-%d", time.gmtime(obj["saved_unix"])) if obj.get("saved_unix") else "date not recorded"
+    clock = obj.get("sm_clock_mhz") or obj.get("sm_mhz")
+    return {**obj, "reference": f"{REFERENCE[1]}, {when}" + (f", SM {clock} MHz" if clock else "")}
+
+
+def reference_note(records):
+    """Markdown lines naming the source of every row taken from the reference run (empty without one)."""
+    labels = sorted({r["reference"] for r in records if isinstance(r, dict) and r.get("reference")})
+    return ["", "External rows (not re-timed) taken from: " + "; ".join(labels) + "."] if labels else []
+
+
 PENDING_EFF = "pending (reference count)"
 
 
