@@ -342,6 +342,8 @@ class Rec:
                 self.views[id(view)] = (view, out[nm])
         if getattr(kernel, "returns", None) is not None:
             return plan.returned(shaped if isinstance(shaped, dict) else {next(iter(out)): shaped})
+        if isinstance(shaped, dict) and len(shaped) == 1:     # one output: the array itself, as a direct call returns
+            return next(iter(shaped.values()))
         return shaped if out else None
 
     @staticmethod
