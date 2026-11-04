@@ -21,6 +21,8 @@
 #     --lock-clock M    SM clock for the whole run: a MHz value, "auto" (the device maximum; default) or "off".
 #                       Needs passwordless sudo for nvidia-smi; without it every row records its SM clock
 #                       instead, and facts.txt says which. Reset on every exit.
+#     --a100            the A100 session's trim: chunk_residency adds tps=2x at N=1e7 and takes no ncu tie captures;
+#                       ncu_ensemble skips the simulate rows (same kernel as persist)
 #     --dry-run         print the plan, run nothing
 #
 # Stages run independently, each under its own time cap; a failing stage never stops the
@@ -41,7 +43,7 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 . "$HERE/lib.sh"
 
 CUDA=${REPRO_CUDA:-12}
-ENV_FILE="" OUT="" WORK=${REPRO_WORK:-} QUICK=0 FRESH=0 DEADLINE_MIN=150 ONLY='' LOCK_CLOCK=auto
+ENV_FILE="" OUT="" WORK=${REPRO_WORK:-} QUICK=0 FRESH=0 DEADLINE_MIN=150 ONLY='' LOCK_CLOCK=auto A100=0
 while [[ $# -gt 0 ]]; do
   case $1 in
     --env) ENV_FILE=${2:-}; shift 2 ;;
@@ -53,8 +55,9 @@ while [[ $# -gt 0 ]]; do
     --deadline-min) DEADLINE_MIN=${2:-}; shift 2 ;;
     --only) ONLY=${2:-}; shift 2 ;;
     --lock-clock) LOCK_CLOCK=${2:-}; shift 2 ;;
+    --a100) A100=1; shift ;;
     --dry-run) REPRO_DRY_RUN=1; shift ;;
-    -h|--help) sed -n '5,23p' "$0"; exit 0 ;;
+    -h|--help) sed -n '5,25p' "$0"; exit 0 ;;
     *) die "unknown option $1 (see --help)" ;;
   esac
 done
@@ -75,8 +78,8 @@ TARBALL=$OUT/profile-$SLUG.tgz
 if [[ $QUICK == 1 ]]; then
   PLAN=(sol_probe:120 wide_sweep:300 ncu_corpus:240 ncu_ensemble:300 ncu_features:300 ncu_nvlibs:300 chunk_residency:240 launch_shape:240)
 else
-  # full caps: ceilings of ~1.5 x the L4 walls (ncu_ensemble 10 min, ncu_features 43, ncu_nvlibs 10, ncu_corpus 12, chunk_residency 32 incl. ties)
-  PLAN=(sol_probe:180 wide_sweep:600 ncu_corpus:1800 ncu_ensemble:900 ncu_features:3900 ncu_nvlibs:1200 chunk_residency:3000 launch_shape:600)
+  # full caps: ceilings of ~1.5 x the L4 walls (ncu_ensemble 10 min, ncu_features 46, ncu_nvlibs 10, ncu_corpus 12, chunk_residency 32 incl. ties)
+  PLAN=(sol_probe:180 wide_sweep:600 ncu_corpus:1800 ncu_ensemble:900 ncu_features:4140 ncu_nvlibs:1200 chunk_residency:3000 launch_shape:600)
 fi
 if [[ -n $ONLY ]]; then
   CHOSEN=()
@@ -101,7 +104,7 @@ fi
 # Expected seconds per stage on an A100 (the caps above are ceilings, not expectations; --quick: a minute each). The ncu
 # stages are ~40 replay passes (--set full) of each kernel: ncu_ensemble 10 captures, ncu_features 39 arms, ncu_nvlibs 11 library cells (counters only).
 BUDGET_MIN=90
-declare -A EST=([sol_probe]=30 [wide_sweep]=300 [ncu_corpus]=600 [ncu_ensemble]=360 [ncu_features]=2160 [ncu_nvlibs]=480 [chunk_residency]=800 [launch_shape]=240)
+declare -A EST=([sol_probe]=30 [wide_sweep]=300 [ncu_corpus]=600 [ncu_ensemble]=300 [ncu_features]=2340 [ncu_nvlibs]=480 [chunk_residency]=540 [launch_shape]=240)
 EST_S=0 EST_NO_NCU_S=0
 for s in "${PLAN[@]}"; do
   n=${s%%:*}
@@ -310,6 +313,7 @@ run_stage() {  # NAME CAP_SECONDS
   else
     local args=(--stage "$name" --out "$DATA")
     [[ $QUICK == 1 ]] && args+=(--quick)
+    [[ $A100 == 1 ]] && args+=(--a100)
     # the chunk sweep starts no cell it cannot finish inside its cap
     # and leaves the tie captures (full Nsight Compute: 8 of them) their time
     [[ $name == chunk_residency ]] && args+=(--budget-s $((cap > 1800 ? cap - 1500 : cap > 120 ? cap - 90 : cap / 2)))

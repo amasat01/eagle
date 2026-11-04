@@ -75,17 +75,22 @@ done
 #   sequence (about 35 min on a busy 4-core host) x 0.5 for the Zen5 session.
 # ncu = the quick Nsight Compute smoke of the L4. The full profile steps (USER 11-03: every counter, every workload; the card
 #   timings above stay unprofiled, these run after them in their own processes) are one profile.sh stage each, --set full:
-#   corp = ncu_corpus, ens = ncu_ensemble, feat = ncu_features, nvl = ncu_nvlibs, p4 = chunk_residency (timing grid + captures of its ties),
+#   corp = ncu_corpus (not in the a100 plan: the sweep answers team vs staged), ens = ncu_ensemble, feat = ncu_features, nvl = ncu_nvlibs, p4 = chunk_residency (timing grid + captures of its ties),
 #   p5 = launch_shape (nsys). A full capture replays each kernel about 40 times: 30 s of process + (0.12 s + the kernel's own
 #   time) x 40 per kernel, the kernels of one run capped at 32 (the caps below are profile.sh's, ~1.5 x the L4 walls).
 #   Only our code is profiled (eagle / hawk kernels), never a baseline library: ens = the card's 5 eagle arms, feat = the 39
 #   feature-card cells of ours (feature_card.OUR_ARMS), launch_shape drops Warp.
 #   L4 (from the 073l4 card walls: persist/simulate 2.3 s spread, 2.0 uniform):
 #     ens  = 10 captures (5 arms x spread, uniform; the attempt kernel, one launch) x 30 s + 40 x (persist and simulate kernel
-#            times 17 s) + 6 short captures x 40 x 0.12 s = 10 min;  A100: kernel times / 20 (FP64) = 6 min.
-#     feat = 39 cells x (15 s + ~6 kernels x 5 s) + the long kernels (segmented 3.7 s, ordered 0.8 s, x 40) = 43 min; A100 36.
+#            times 17 s) + 6 short captures x 40 x 0.12 s = 10 min;  A100: kernel times / 20 (FP64) = 6 min, minus the 2 simulate
+#            captures (a100 plan: --a100, same kernel as persist) x 30 s = 5.
+#     feat = 43 cells (the 0.7.3 items among them: ordered sum and scatter, wide_forms team_k8, steps jvp_K8 and vjp_K8_auto, linalg_lane
+#            n32 f32/f64, linalg_team n512, the sample_sum cell arms; their expectations ride in the row note) x (15 s + ~6 kernels x 5 s)
+#            + the long kernels (segmented 3.7 s, ordered 0.8 s, x 40) = 39 cells 43 min + 4 new x 0.75 = 46 min; A100 36 + 3 = 39.
 #     corp = <= 12 cells x (30 s + 40 x 0.2 s) x ~ 1.2 = 12 min; A100 10.
 #     p4   = the chunk grid (64 cells, 17 min of runs + builds, 21 min) + <= 8 tie captures x 75 s = 32 min; A100: FP64 /20 -> 13.
+#            L4 plans drop tps=2x at N=1e7 (16 cells = 10 x the 1e6 wall each: 7.7 min of runs + 1 min of builds): grid 12 + 10 = 22.
+#            a100 (--a100): all 64 cells, no tie captures: 13 x 21 / 32 = 9.
 #     p5   = nsys, no counters, 3 arms: 5 (L4), 4 (A100).
 #     cmp  = l4-prof only (it runs no card, so the compile caches would stay empty): perf_card.py and feature_card.py --smoke into
 #            $RES/compile_smoke (no card lands in perf_card/): every arm builds and compiles once. perf_card ~11 arms x 20 s +
@@ -93,10 +98,10 @@ done
 #     nvl  = ncu_nvlibs: 11 cells (closed NVIDIA library kernels of the rows eagle loses; counters only, 7 sections ~ 12 passes, never
 #            --set full or source) x (15 s + ~10 kernels x 12 x 0.15 s) = 6 min, cuSOLVER's longer kernels + 4 = 10 (L4); 8 (A100).
 #   NCU capture cap 600 s (persist's 40 passes x 2.3 s = 92 s + build; segmented's 150 s); stage caps ens 15 min, feat 65.
-#   l4-prof = p0, p1, then the six profile steps (137 min; deadline 1.5 x); a100 = today's card steps, then the same six (123).
+#   l4-prof = p0, p1, cmp, then the six profile steps (130 min; deadline 1.5 x); a100 = today's card steps, then the five without corp (111).
 case $PLAN in
-  a100)  STEPS=(p0:1:4 p1:4:11 c1:27:D c2:14:D corp:10:35 ens:6:25 feat:36:70 nvl:8:25 p4:13:55 p5:4:16) ; KIND=GPU ;;
-  l4-prof) STEPS=(p0:1:4 p1:4:11 cmp:20:40 corp:12:35 ens:10:25 feat:43:70 nvl:10:25 p4:32:55 p5:5:16) ; KIND=GPU ;;
+  a100)  STEPS=(p0:1:4 p1:4:11 c1:27:D c2:14:D ens:5:25 feat:39:70 nvl:8:25 p4:9:55 p5:4:16) ; KIND=GPU ;;
+  l4-prof) STEPS=(p0:1:4 p1:4:11 cmp:20:40 corp:12:35 ens:10:25 feat:46:70 nvl:10:25 p4:22:55 p5:5:16) ; KIND=GPU ;;
   l4)    STEPS=(p0:1:4 p1:4:11 c1:26:D c2:12:D p4:8:16 ncu:2:6) ; KIND=GPU ;;
   t4)    STEPS=(p0:1:4 p1:4:11 c1:89:D c2:12:D p4:8:16) ;        KIND=GPU ;;
   p2000) STEPS=(p0:1:4 p1:4:11 c1:25:D c2:8:D p4:8:16 p5:3:11) ; KIND=GPU ;;
@@ -170,12 +175,14 @@ full_cmd() {
     c2|c2cpu) printf '%s\n' python benchmarks/perf_card/feature_card.py --parts "$RES/parts/c2" --out-dir "$RES/perf_card" ;;
     cmp)   printf '%s\n' bash -c 'rc=0; python benchmarks/perf_card/perf_card.py --smoke --out-dir "$1" || rc=1; python benchmarks/perf_card/feature_card.py --smoke --out-dir "$1" || rc=1; exit $rc' _ "$RES/compile_smoke" ;;
     corp)  printf '%s\n' bash benchmarks/reproduce/profile.sh --env "$ENVF" --out "$RES/profile" --only ncu_corpus ;;
-    ens)   printf '%s\n' bash benchmarks/reproduce/profile.sh --env "$ENVF" --out "$RES/profile" --only ncu_ensemble ;;
+    ens)   printf '%s\n' bash benchmarks/reproduce/profile.sh --env "$ENVF" --out "$RES/profile" --only ncu_ensemble
+           [[ $PLAN != a100 ]] || printf '%s\n' --a100 ;;
     nvl)   printf '%s\n' bash benchmarks/reproduce/profile.sh --env "$ENVF" --out "$RES/profile" --only ncu_nvlibs ;;
     feat)  printf '%s\n' bash benchmarks/reproduce/profile.sh --env "$ENVF" --out "$RES/profile" --only ncu_features ;;
     p4)    # the card plans keep the 900 s chunk stage (--deadline-min 15 clips profile.sh's cap); the profile plans the full one
            printf '%s\n' bash benchmarks/reproduce/profile.sh --env "$ENVF" --out "$RES/profile" --only chunk_residency
-           [[ $PLAN == l4-prof || $PLAN == a100 ]] || printf '%s\n' --deadline-min 15 ;;
+           [[ $PLAN == l4-prof || $PLAN == a100 ]] || printf '%s\n' --deadline-min 15
+           [[ $PLAN != a100 ]] || printf '%s\n' --a100 ;;
     p5)    printf '%s\n' bash benchmarks/reproduce/profile.sh --env "$ENVF" --out "$RES/profile" --only launch_shape ;;
     ncu)   printf '%s\n' bash benchmarks/reproduce/profile.sh --env "$ENVF" --out "$RES/profile" --only ncu_ensemble --quick ;;
   esac

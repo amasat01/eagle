@@ -77,6 +77,22 @@ CHUNKS, TPS = (1, 4, 16, 32), (None, "2x")
 CHUNK_NS, CHUNK_DISTS, CHUNK_DTYPES = (1_000_000, 10_000_000), ("spread", "spread-short"), ("float32", "float64")
 CROSSOVER_NS = (1_000, 10_000, 100_000, 1_000_000)
 BAND_EVERY = (4, 8, 16, 32)
+#: what the landed 0.7.3 items are expected to show in their ncu_features row (the note column, after any failure note)
+FEATURE_EXPECT = {
+    ("sample_sum", "all", "float64", "ordered"): "policy=ordered: expect waves >= 1",
+    ("scatter", "all", "float64", "ordered"): "policy=ordered: expect waves >= 1",
+    ("wide_forms", "all", "float64", "team"): "k-warps A/B base: expect warps_active >= 70 %",
+    ("wide_forms", "all", "float64", "team_k8"): "k-warps A/B (8 warps): expect warps_active >= 70 %",
+    ("wide_forms", "all", "float32", "team"): "k-warps A/B base: expect warps_active >= 70 %",
+    ("wide_forms", "all", "float32", "team_k8"): "k-warps A/B (8 warps): expect warps_active >= 70 %",
+    ("steps_fused", "all", "float64", "vjp_K8_auto"): "expect the same kernels as vjp_K8_fused",
+    ("steps_fused", "all", "float64", "jvp_K8"): "the hoist: expect fewer DP instructions than K8",
+    ("linalg_lane", "n32", "float32", "hawk"): "warp form (auto)",
+    ("linalg_lane", "n32", "float64", "hawk"): "thread form",
+    ("linalg_team", "n512", "float64", "team"): "copy stage",
+    ("sample_sum", "all", "float64", "cell_auto"): "cell form",
+    ("sample_sum", "all", "float64", "cell_compensated"): "cell form",
+}
 POINT = (1_000_000, "spread")                 # the ensemble's N and distribution; also the band and launch point
 
 #: lane efficiency (threads per issued instruction), FP64 pipe, issue, occupancy, registers, DRAM and the stall classes
@@ -484,7 +500,8 @@ def capture_row(args, rep, cmd_line, metrics, **kw):
 def ncu_ensemble(args):
     require_ncu(args)
     notes = []
-    for arm in (ENSEMBLE_QUICK_ARM,) if args.quick else ENSEMBLE_ARMS:
+    arms = [a for a in ENSEMBLE_ARMS if not (getattr(args, "a100", False) and a == "eagle_simulate")]   # same kernel as persist
+    for arm in (ENSEMBLE_QUICK_ARM,) if args.quick else arms:
         for dist in ("spread", "uniform"):
             cell = {"arm": arm, "n": 10_000 if args.quick else POINT[0], "dist": dist}
             row, out, note = capture_row(args, args.out / f"ncu_ensemble_{arm}_{dist}", worker_cmd(cell),
@@ -528,7 +545,7 @@ def feature_capture(args, cells, name, sections=()):
                                    count=LAUNCH_CAP, sections=sections)
         emit(args.out / f"{name}.csv", {"row": row, "case": case, "dtype": dtype, "n": n, "arm": arm,
                                         **{k: got[k] for k in ("kernels", "gpu_time_s", "top_kernel", *ENSEMBLE_METRICS)},
-                                        "note": note})
+                                        "note": "; ".join(t for t in (note, FEATURE_EXPECT.get((row, case, dtype, arm), "")) if t)})
         say(f"ncu {row} {case} {dtype} {arm}: {got['kernels']} kernels")
         notes.append(note)
     ncu_stage_verdict(notes)
@@ -546,10 +563,11 @@ def ncu_nvlibs(args):
 def chunk_cells(args):
     ns = args.ns or ((100_000,) if args.quick else CHUNK_NS)
     chunks, tps = ((8, 32), (None,)) if args.quick else (CHUNKS, TPS)
+    a100 = getattr(args, "a100", False)
     dists = CHUNK_DISTS[:1] if args.quick else CHUNK_DISTS
     dtypes = CHUNK_DTYPES[1:] if args.quick else CHUNK_DTYPES
     return [{"arm": "persist", "n": n, "dist": d, "dtype": t, "chunk": c, "tps": p}
-            for n in ns for p in tps for t in dtypes for d in dists for c in chunks]
+            for n in ns for p in tps for t in dtypes for d in dists for c in chunks if a100 or p is None or n < 10_000_000]
 
 
 def chunk_ties(rows):
@@ -574,7 +592,7 @@ def chunk_residency(args):
         rows.append(row)
         say(f"chunk {cell['n']} {cell['dist']} {cell['dtype']} c={cell['chunk']} tps={cell['tps']}: "
             f"{row.get('wall_ms', row.get('error'))}")
-    if not args.ncu or (compute_capability() or 0) < NCU_MIN_CC:
+    if not args.ncu or getattr(args, "a100", False) or (compute_capability() or 0) < NCU_MIN_CC:
         return
     for pair in chunk_ties(rows)[:4]:
         for r in pair:
@@ -637,6 +655,8 @@ def main(argv=None):
     ap.add_argument("--ncu-sudo", action="store_true", help="run ncu under `sudo -n` (counters are admin-only)")
     ap.add_argument("--ns", type=lambda t: tuple(int(float(x)) for x in t.split(",") if x),
                     help="sample counts, comma separated (1e5,1e6): chunk_residency, launch_shape crossover, band")
+    ap.add_argument("--a100", action="store_true",
+                    help="the A100 session's trim: chunk_residency keeps tps=2x at 1e7 and skips its tie captures, ncu_ensemble skips simulate")
     ap.add_argument("--budget-s", type=float, help="chunk_residency: start no cell after this many seconds")
     ap.add_argument("--worker", metavar="CELL_JSON", help=argparse.SUPPRESS)
     ap.add_argument("--worker-sweep", nargs=5, metavar=("FORM", "W", "F", "DTYPE", "CACHE"), help=argparse.SUPPRESS)

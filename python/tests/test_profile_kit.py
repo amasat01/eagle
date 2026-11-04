@@ -210,7 +210,9 @@ def test_no_oscillator_is_left_in_the_kit():
 def test_the_chunk_grid_covers_chunk_threads_dtype_n_and_distribution():
     kit = _kit_module()
     cells = kit.chunk_cells(type("A", (), {"ns": None, "quick": False})())
-    assert len(cells) == 4 * 2 * 2 * 2 * 2 and all(c["arm"] == "persist" for c in cells)
+    assert len(cells) == 4 * 2 * 2 * 2 * 2 - 16 and all(c["arm"] == "persist" for c in cells)   # tps=2x at 1e7 is the A100's alone
+    assert not [c for c in cells if c["n"] == 10_000_000 and c["tps"]]
+    assert len(kit.chunk_cells(type("A", (), {"ns": None, "quick": False, "a100": True})())) == 64
     assert {c["n"] for c in cells} == {1_000_000, 10_000_000}
     assert {c["dist"] for c in cells} == {"spread", "spread-short"} and {c["dtype"] for c in cells} == {"float32", "float64"}
     assert {c["chunk"] for c in cells} == {1, 4, 16, 32} and {c["tps"] for c in cells} == {None, "2x"}
@@ -657,9 +659,12 @@ def test_the_full_profile_plans_run_the_six_profile_steps_and_the_smoke_maps_the
     rc_s, smoke = _run_cards("--plan", plan, "--smoke")
     assert rc == rc_s == 0
     steps = re.findall(r"\[repro\] step (\w+)", full)
-    assert steps[-6:] == ["corp", "ens", "feat", "nvl", "p4", "p5"] and steps[:2] == ["p0", "p1"]
+    tail = ["corp", "ens", "feat", "nvl", "p4", "p5"][(plan == "a100"):]
+    assert steps[-len(tail):] == tail and steps[:2] == ["p0", "p1"]
+    assert ("corp" in steps) == (plan == "l4-prof")   # the a100 sweep answers team vs staged: no corpus captures
+    assert sum("--a100" in ln for ln in full.splitlines() if ln.startswith("+ (")) == (2 if plan == "a100" else 0)
     assert ("c1" in steps) == (plan == "a100") and re.search(r"expected \d+ min; session deadline \d+ min", full)
-    for stage in ("ncu_corpus", "ncu_ensemble", "ncu_features", "ncu_nvlibs", "chunk_residency", "launch_shape"):
+    for stage in (("ncu_corpus",) if plan == "l4-prof" else ()) + ("ncu_ensemble", "ncu_features", "ncu_nvlibs", "chunk_residency", "launch_shape"):
         assert any(stage in ln and "--quick" not in ln for ln in full.splitlines() if ln.startswith("+ ("))
         assert any(stage in ln and "--quick" in ln for ln in smoke.splitlines() if ln.startswith("+ ("))
 
@@ -767,3 +772,21 @@ def test_the_reference_gives_the_external_rows_with_their_source_label_and_a_oth
     assert fc.run_arm("contraction", "all", "float64", "gemm", False) == {"status": "ok"} and ran == ["gemm"]
     assert fc.run_arm("contraction", "all", "float64", "cupy", False) == {"status": cc.NO_REFERENCE}
     assert "taken from: 073x/m--cpu" in "\n".join(cc.reference_note([got]))
+
+
+def test_the_a100_trim_skips_simulate_and_the_chunk_ties_and_the_features_carry_their_expectations(tmp_path, monkeypatch):
+    mod = _kit_module()
+    monkeypatch.setattr(mod, "require_ncu", lambda args: None)
+    calls = []
+    monkeypatch.setattr(mod, "ncu_run", lambda *a, **k: calls.append(k) or ([{"name": "k", "gpu_time_s": 1.0}], ""))
+    mod.ncu_ensemble(types.SimpleNamespace(quick=False, out=tmp_path, a100=True))
+    assert len(calls) == 2 * (len(mod.ENSEMBLE_ARMS) - 1)
+    with (tmp_path / "ncu_ensemble.csv").open() as fh:
+        assert "eagle_simulate" not in {r["arm"] for r in csv.DictReader(fh)}
+    ours = {c[:4] for c in mod.feature_cells(False)}
+    assert set(mod.FEATURE_EXPECT) <= ours and {k[3] for k in mod.FEATURE_EXPECT} >= {"team_k8", "vjp_K8_auto", "jvp_K8", "ordered"}
+    assert {k[:2] for k in mod.FEATURE_EXPECT if k[0] == "linalg_lane"} == {("linalg_lane", "n32")}
+    mod.feature_capture(types.SimpleNamespace(quick=False, out=tmp_path, ncu="n", ncu_sudo=False),
+                        [("sample_sum", "all", "float64", "ordered", 1)], "x")
+    with (tmp_path / "x.csv").open() as fh:
+        assert "waves >= 1" in next(csv.DictReader(fh))["note"]
