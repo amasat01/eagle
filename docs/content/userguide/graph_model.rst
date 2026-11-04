@@ -714,6 +714,36 @@ what the edge derivation sees), ``lower_gpu`` returns what the capture loop
 runs and ``lower_cpu`` the host arm. Registering the same kind twice is fine;
 registering a *different* kind under an existing name is refused.
 
+Handing a graph to another runtime
+----------------------------------
+
+A runtime that builds its own CUDA graph (a C++ propagator, say) can run a built eagle graph as one child node of
+it. ``g.cuda_graph()`` returns an owned clone of the built GPU graph as a ``CudaGraphHandle``; ``handle.handle`` is the
+integer value of a ``cudaGraph_t``:
+
+.. code-block:: python
+
+   with g.cuda_graph() as h:
+       # in the other runtime, now: cudaGraphAddChildGraphNode(&node, parent, deps, n, (cudaGraph_t)h.handle)
+       ...
+
+Things to know:
+
+- **Add it now.** ``cudaGraphAddChildGraphNode`` copies the graph, so closing the handle right after is safe; the
+  consumer only reads it. The clone is destroyed on ``close()``, on leaving the ``with`` and on garbage collection.
+- **It is a snapshot.** ``bind`` swaps arrays in the graph and in every clone taken *after* it; a clone taken before
+  keeps the old arrays. After a ``bind`` or a rebuild, take a new handle and add it again. A member switched off with
+  ``set_member_enabled`` is not part of the clone.
+- **Keep the handle, or the Graph, alive** for as long as the parent graph can run: the child reads the graph's bound
+  arrays, and the handle holds the Graph (and so the arrays) for you.
+- **What is refused**, with a ``RuntimeError`` that names the node: a CPU graph; a segmented graph (a node outside the
+  ``capture`` tier); any host-function node; and whatever the driver will not take as a child graph, which today means
+  conditional nodes (every ``steps=``, ``repeat_while`` and branch graph) and memory allocation nodes. That last rule
+  is the driver's, so the message quotes the CUDA error and the driver version, and a newer driver may accept
+  what an older one refuses.
+- **Streams do not cross.** Nothing captured on eagle's stream stays a dependency of the child: order it yourself
+  in the parent graph.
+
 Where next
 ----------
 
