@@ -295,7 +295,10 @@ def git_commit(module, short=False):
 def release_string():
     """``eagle X, hawk Y`` of the installed packages (written into every card by the run)."""
     import eagle
-    import hawk
+    try:
+        import hawk
+    except ImportError:     # assembling saved parts needs no hawk; a card run always has it
+        hawk = None
 
     return f"eagle {eagle.__version__}, hawk {getattr(hawk, '__version__', None)}"
 

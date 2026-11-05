@@ -14,29 +14,19 @@ every page in this section.
 
 How eagle compares with the other tools on the same committed cards is on the [family site](https://amasat01.github.io/compare.html).
 
-## RK4 oscillators: GPU
+## Adaptive RK7(8) orbits: GPU
 
 ```{include} /content/_generated/perf_card_gpu_overview.md
 ```
 
-## RK4 oscillators: CPU
+## Adaptive RK7(8) orbits: CPU
 
 ```{include} /content/_generated/perf_card_cpu_overview.md
 ```
 
-## Adaptive RK7(8): GPU
-
-```{include} /content/_generated/rk78_card_gpu_overview.md
-```
-
-## Adaptive RK7(8): CPU
-
-```{include} /content/_generated/rk78_card_cpu_overview.md
-```
-
 ## Where to go next
 
-- [Adaptive RK7(8)](performance/rk78.md): the same for an adaptive solver.
+- [Adaptive RK7(8)](performance/rk78.md): every arm and every N, and how to swap in another embedded pair.
 - [Which commits ran](https://github.com/amasat01/eagle/blob/main/benchmarks/card_provenance.json): the eagle and hawk
   commit behind every card file.
 - [Reading the numbers](performance/reading.md): where each approach wins, and why.

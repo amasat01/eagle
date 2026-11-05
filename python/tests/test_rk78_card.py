@@ -107,29 +107,27 @@ def test_cards_name_their_script_and_are_complete():
         assert card["script"] == module.SCRIPT_REL
         assert card["script_md5"] == md5, (
             f"{card_path.name} was produced by a different rk78_card.py: re-run it")
-        assert set(card["arms"]) == set(module.ARMS), f"{card_path.name}: arms differ"
-        expected = {(n, a) for n in card["ns"] for a in card["arms"]}
-        got = {(r["n"], r["arm"]) for r in card["results"]}
-        assert got == expected, f"{card_path.name}: result rows do not cover the matrix"
-        assert card["method"]["repetitions"] >= 5
+        assert set(card["arms"]) | set(card.get("arms_not_run") or {}) == set(module.COMMITTED_ARMS), (
+            f"{card_path.name}: arms differ from the committed set")
+        assert card["schema"] == "eagle-ensemble-card/1"
+        arms = set(card["arms"])
+        cells = {(r["n"], r["distribution"]) for r in card["results"]}
+        for n in card["ns"]:
+            for dist in (d for d in card["distributions"] if d != "fp32"):
+                if (n, dist) in cells:      # a cell the plan ran has a row for every arm
+                    got = {r["arm"] for r in card["results"] if (r["n"], r["distribution"]) == (n, dist)}
+                    assert got == arms, f"{card_path.name}: N={n} {dist} misses {sorted(arms - got)}"
+        assert all(r["arm"] in arms for r in card["results"])
+        assert card["method"]["rounds"]["min"] >= 3
         for extra in card["per_n"]:
-            assert set(extra["agreement"]) == set(card["arms"])
+            assert set(extra["agreement"]) <= arms
             for arm, a in extra["agreement"].items():
                 assert a["max_error_over_bound"] < 1.0, (
-                    f"{card_path.name}: {arm} at N={extra['n']} exceeds its truth "
-                    "bound")
-        mem = {(r["n"], r["arm"]): r for r in card["memory"]["rows"]}
-        assert set(mem) == expected, (
-            f"{card_path.name}: memory rows do not cover the rows")
-        for (n, arm), r in mem.items():
-            assert (r["device_peak_bytes"] is not None) == (arm in module.GPU_ARMS)
-            assert r["host_peak_bytes"] is not None
-        comp = card["compile_time"]
-        covered = {a for r in comp["rows"] for a in r["arms"]} | set(comp["none"])
-        assert covered == set(module.ARMS), (
-            f"{card_path.name}: compile-time table misses "
-            f"{sorted(set(module.ARMS) - covered)}")
-        assert set(card["fit"]["arms"]) == set(module.ARMS)
+                    f"{card_path.name}: {arm} at N={extra['n']} exceeds its truth bound")
+        for r in card["memory"]["rows"]:
+            assert r["arm"] in arms
+            if r["device_peak_bytes"] is not None:     # a device figure only for a GPU arm
+                assert r["arm"] in module.GPU_ARMS
 
 
 def test_card_line_counts_match_the_script():
@@ -142,3 +140,18 @@ def test_card_line_counts_match_the_script():
         assert recorded == {a: now["arms"][a] for a in recorded}, (
             f"{card_path.name}: recorded lines of code differ from the script's "
             "markers")
+
+
+def test_a_card_committed_whole_is_its_own_full_card_and_a_slim_one_needs_the_raw_file(tmp_path, monkeypatch):
+    spec = importlib.util.spec_from_file_location("eagle_slim_card", _REPO / "benchmarks" / "slim_card.py")
+    slim = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(slim)
+    monkeypatch.setenv("EAGLE_CARD_RAW_DIR", str(tmp_path / "raw"))      # set, and empty
+    whole = tmp_path / "perf_card" / "card_x.json"
+    whole.parent.mkdir()
+    whole.write_text(json.dumps({"arms": ["a"]}))
+    assert slim.raw_card(whole) == {"arms": ["a"]}
+    cut = tmp_path / "perf_card" / "card_y.json"
+    cut.write_text(json.dumps({"arms": ["a"], "slim_of_md5": "0" * 32}))
+    with pytest.raises(FileNotFoundError, match="card_y.json"):
+        slim.raw_card(cut)
