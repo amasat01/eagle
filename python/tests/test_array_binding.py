@@ -289,6 +289,46 @@ def test_dlpack_and_cai_round_trips_with_cupy_and_a_capture_inside_a_cupy_stream
     assert bool((z == 15.0).all())
 
 
+@pytest.mark.gpu
+@pytest.mark.parametrize("producer_stream", [None, "absent", 1])
+def test_a_cai_import_with_no_stream_exports_by_dlpack_inside_a_capture_without_a_wait(stream, producer_stream):
+    # CAI v3 "stream": None (or no key) means no synchronisation: the import records it and __dlpack__ inserts no wait,
+    # so cupy can view the array inside a capture; a producer that names a stream keeps its wait, which a capture refuses
+    cp = pytest.importorskip("cupy")
+    src = cp.arange(8, dtype=cp.float64)
+    cp.cuda.Device().synchronize()
+
+    class Cai:
+        def __init__(self, a):
+            face = dict(a.__cuda_array_interface__)
+            face.pop("stream", None)
+            if producer_stream != "absent":
+                face["stream"] = producer_stream
+            self._a, self.__cuda_array_interface__ = a, face
+
+    e = xp.asarray(Cai(src))
+    cs = cp.cuda.Stream(non_blocking=True)
+    err, g, view = None, None, None
+    with cs:
+        cs.begin_capture()
+        try:
+            view = cp.from_dlpack(e)
+            view *= 2.0
+        except Exception as exc:  # noqa: BLE001 -- the refused wait, checked below
+            err = exc
+        try:
+            g = cs.end_capture()
+        except Exception as exc:  # noqa: BLE001 -- an invalidated capture ends with an error of its own
+            err = err or exc
+    if producer_stream == 1:
+        assert err is not None
+        return
+    assert err is None and int(view.data.ptr) == e.ptr
+    g.launch(stream=cs)
+    cs.synchronize()
+    assert src.get().tolist() == [2.0 * k for k in range(8)]
+
+
 OPS_UNDER_CAPTURE = {
     "add": lambda o, a, b, i, sc, s: _core.array_binary(_core.CELL_ADD, o, a, b, s),
     "sub": lambda o, a, b, i, sc, s: _core.array_binary(_core.CELL_SUB, o, a, b, s),

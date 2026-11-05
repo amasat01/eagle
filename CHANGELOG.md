@@ -44,6 +44,7 @@ This section covers what changes from 0.7.2. Names that left are in the table at
 - A direct call takes a number or 0-d value for a per-lane `Scalar` beside a batch, as that value on every lane, and a `Param` given an array is refused by name instead of a `TypeError`.
 - A memset on the legacy stream runs on the array's device, not on whichever device another library left current.
 - The JAX bridge registers a kernel on the GPU a function is called under, and the plugin memo is per device.
+- An array imported through `__cuda_array_interface__` with no stream (`"stream": None` or no key) exports through DLPack without a stream wait, so `cupy.from_dlpack` works on it inside a CUDA graph capture.
 
 ### Removed
 
