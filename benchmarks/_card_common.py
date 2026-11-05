@@ -275,8 +275,19 @@ def cpu_display_name(card_path, model):
     return entry["name"] if isinstance(entry, dict) and entry.get("name") else model
 
 
+def _hawk_or_none():
+    """hawk when installed: a card run always has it; assembling saved parts needs none."""
+    try:
+        import hawk
+    except ImportError:
+        return None
+    return hawk
+
+
 def git_commit(module, short=False):
     """``<commit>[-dirty]`` of the repository holding ``module``, or None."""
+    if module is None:
+        return None
     root = pathlib.Path(module.__file__).resolve().parent
     try:
         rev = subprocess.run(["git", "-C", str(root), "rev-parse",
@@ -295,10 +306,7 @@ def git_commit(module, short=False):
 def release_string():
     """``eagle X, hawk Y`` of the installed packages (written into every card by the run)."""
     import eagle
-    try:
-        import hawk
-    except ImportError:     # assembling saved parts needs no hawk; a card run always has it
-        hawk = None
+    hawk = _hawk_or_none()
 
     return f"eagle {eagle.__version__}, hawk {getattr(hawk, '__version__', None)}"
 
@@ -330,7 +338,7 @@ def record_provenance(card_path):
     """Record the release, eagle and hawk commits of this run for ``card_path`` in
     ``benchmarks/card_provenance.json``."""
     import eagle
-    import hawk
+    hawk = _hawk_or_none()
 
     prov_path = pathlib.Path(__file__).resolve().with_name("card_provenance.json")
     prov = json.loads(prov_path.read_text()) if prov_path.exists() else {
@@ -346,7 +354,7 @@ def record_provenance(card_path):
 def software(modules=("numpy", "cupy", "torch", "jax", "jaxlib", "warp")):
     """Versions and commits of the GPU cards' software."""
     import eagle
-    import hawk
+    hawk = _hawk_or_none()
 
     return {"python": platform.python_version(),
             **{m: version_of(m) for m in modules},
