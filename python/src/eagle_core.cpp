@@ -107,6 +107,7 @@
 #include "eagle/events/Sensitivity.h"
 #include "eagle/exec/HostSchedule.h"
 #include "eagle/exec/HostTeam.h"
+#include "eagle/exec/HostTable.h"
 #include "eagle/exec/Partition.h"
 #include "eagle/exec/TimeLaunch.h"
 #include "eagle/exec/Transfer.h"
@@ -1351,7 +1352,7 @@ NB_MODULE(_core, m)
 
     m.def("time_launch",
         [](std::uintptr_t entry, const std::vector<std::uintptr_t>& params, const Partition& part,
-           int reps, bool device, std::uintptr_t stream, unsigned block) {
+           int reps, bool device, std::uintptr_t stream, unsigned block, int ordinal) {
             if (!device) {
                 const std::vector<void*> p = asParams(params);
                 return eagle::exec::timeHostLaunch(reinterpret_cast<eagle::exec::HostEntryV2>(entry),
@@ -1359,7 +1360,7 @@ NB_MODULE(_core, m)
             }
             if (reps < 1) throw std::invalid_argument("time_launch: reps must be at least 1");
             std::vector<std::uint64_t> p(params.begin(), params.end());
-            auto d = makeDesc<eagle_backend_launch_desc>(-1);
+            auto d = makeDesc<eagle_backend_launch_desc>(ordinal);
             d.block = block;
             d.function = entry;
             d.params = p.data();
@@ -1373,7 +1374,7 @@ NB_MODULE(_core, m)
             return seconds;
         },
         nb::arg("entry"), nb::arg("params"), nb::arg("partition"), nb::arg("reps"),
-        nb::arg("device") = false, nb::arg("stream") = 0, nb::arg("block") = 256,
+        nb::arg("device") = false, nb::arg("stream") = 0, nb::arg("block") = 256, nb::arg("ordinal") = -1,
         "Seconds of each of `reps` launches of one entry over one partition, every repetition "
         "kept: the host team run timed with steady_clock, or (device=True; `entry` a CUfunction) "
         "a CUDA event pair around each launch on `stream` (experimental at the seam: "
@@ -1432,7 +1433,19 @@ NB_MODULE(_core, m)
         "One call, one triple -- the SERIAL arm, and the correctness oracle the "
         "band rows are judged against (fork F-c).");
 
-    m.def("host_threads",
+    m.def("host_threads", [] { return eagle::exec::host_max_threads(); },
+        "The most threads a host launch uses right now: the process-wide setting, else the OpenMP "
+        "default (OMP_NUM_THREADS).");
+    m.def("set_host_threads",
+        [](int threads) {
+            if (threads < 0)
+                throw std::invalid_argument("set_host_threads: threads must be >= 0 (0 = the OpenMP default)");
+            eagle::exec::host_threads_setting().store(threads, std::memory_order_relaxed);
+        },
+        nb::arg("threads"),
+        "Cap the threads of every host launch of this process (all Python threads); 0 restores the "
+        "OpenMP default.");
+    m.def("omp_threads",
         [] {
 #ifdef _OPENMP
             return omp_get_max_threads();
@@ -1440,7 +1453,17 @@ NB_MODULE(_core, m)
             return 1;
 #endif
         },
-        "The size of the host team a launch would use right now.");
+        "omp_get_max_threads() of the OpenMP runtime this extension links (the calling thread's setting).");
+    m.def("omp_set_threads",
+        [](int threads) {
+#ifdef _OPENMP
+            omp_set_num_threads(threads);
+#else
+            (void)threads;
+#endif
+        },
+        nb::arg("threads"),
+        "omp_set_num_threads() on the OpenMP runtime this extension links.");
 
     m.attr("BRANCH_TASKS_MAX_SAMPLES") = eagle::exec::BRANCH_TASKS_MAX_SAMPLES;
 
@@ -1810,12 +1833,66 @@ NB_MODULE(_core, m)
         "released. `stage` is a list of branches; a branch is a list of "
         "(entry, params, partitions) host nodes run in order on one thread.");
 
+    m.def("run_host_stage",
+        [](const std::vector<std::vector<std::tuple<std::uintptr_t,
+               std::vector<std::uintptr_t>, std::vector<Partition>>>>& stage) {
+            std::vector<eagle::exec::HostBranch> branches;
+            for (const auto& branch : stage) {
+                auto& out = branches.emplace_back();
+                for (const auto& [entry, params, parts] : branch)
+                    out.push_back({ reinterpret_cast<eagle::exec::HostEntryV2>(entry),
+                                    asParams(params), parts });
+            }
+            nb::gil_scoped_release release;
+            eagle::exec::runHostStage(branches);
+        },
+        nb::arg("stage"),
+        "Run one stage's nodes in order, each over the whole host team, inside ONE OpenMP "
+        "region (the GIL released). Same shape as run_host_branches; same values as a "
+        "run_host per node.");
+
+    // -- The host table: a graph's CPU stages for another runtime's OpenMP region ----
+    nb::class_<eagle::exec::HostVersion>(m, "HostVersion")
+        .def("__init__", [](eagle::exec::HostVersion* self) {
+            new (self) eagle::exec::HostVersion(std::make_shared<std::atomic<std::int64_t>>(0));
+        })
+        .def("bump", [](eagle::exec::HostVersion& self) { self->fetch_add(1); },
+             "Mark every table made at the current value stale.");
+
+    nb::class_<eagle::exec::HostTable>(m, "HostTable")
+        .def("__init__",
+            [](eagle::exec::HostTable* self, const eagle::exec::HostVersion& version,
+               const std::vector<std::vector<std::vector<std::tuple<std::uintptr_t,
+                   std::vector<std::uintptr_t>, std::vector<Partition>>>>>& stages) {
+                std::vector<std::vector<eagle::exec::HostBranch>> out;
+                for (const auto& stage : stages) {
+                    auto& branches = out.emplace_back();
+                    for (const auto& branch : stage) {
+                        auto& b = branches.emplace_back();
+                        for (const auto& [entry, params, parts] : branch) {
+                            if (entry == 0) throw std::runtime_error("host table: null host entry");
+                            b.push_back({ reinterpret_cast<eagle::exec::HostEntryV2>(entry),
+                                          asParams(params), parts });
+                        }
+                    }
+                }
+                new (self) eagle::exec::HostTable(std::move(out), version);
+            },
+            nb::arg("version"), nb::arg("stages"))
+        .def_prop_ro("handle", [](eagle::exec::HostTable& self) {
+            return reinterpret_cast<std::uintptr_t>(&self.head);
+        }, "Address of the `eagle_host_table` (plugin/graph_handoff.h).")
+        .def("stale", &eagle::exec::HostTable::stale);
+
     m.def("host_tile_size", &HostTeam::tile_size, nb::arg("bytes_per_sample") = 0,
         "The team's tile size in samples -- `Host::launch`'s own rule "
         "(aether::optimalTileSize); 0 falls back to aether's DEFAULT_TILE_SIZE.");
     m.def("host_tile_count", &HostTeam::tile_count, nb::arg("partition"),
         nb::arg("bytes_per_sample") = 0,
         "How many tiles a partition would be cut into.");
+
+    m.def("host_op_team", &eagle::array::host::op_team, nb::arg("n"),
+        "How many threads a host array op over n elements uses (1 = in place, no OpenMP region).");
 
     m.def("fold",
         [](const std::string& op, const std::vector<double>& values) {
@@ -2421,7 +2498,20 @@ NB_MODULE(_core, m)
             }, nb::lock_self(),
             nb::arg("captured"),
             "Update this exec from a same-topology re-capture (not consumed). "
-            "False when the driver rejects it: the exec is unchanged, rebuild.");
+            "False when the driver rejects it: the exec is unchanged, rebuild.")
+        .def(
+            "clone_graph",
+            [](PyLauncher& l) {
+                std::uint64_t graph = 0;
+                ck(EBX(eagle_backend_launcher_clone_graph)(need(l.h, "Launcher"), &graph));
+                return graph;
+            }, nb::lock_self(),
+            "An owned cudaGraphClone of the source graph (its node patches kept in step with the exec), as an "
+            "int; destroy it with Launcher.destroy_graph. RuntimeError naming the node when CUDA refuses it.")
+        .def_static(
+            "destroy_graph",
+            [](std::uint64_t graph) { ck(EBX(eagle_backend_launcher_graph_destroy)(graph)); },
+            nb::arg("graph"), "Destroy a graph clone_graph returned (0 is ignored).");
 
     // -- Graph: parent container; folds in the capture, instantiates ---------
     nb::class_<PyGraph>(m, "Graph")
@@ -3019,7 +3109,9 @@ NB_MODULE(_core, m)
            std::uintptr_t recomputeWord, std::uintptr_t vjpEntry, const std::vector<std::vector<std::uintptr_t>>& vjpParams,
            const std::vector<Accum>& accums, std::uintptr_t stepPlane, std::int64_t stepBytes,
            const std::optional<std::function<void(std::int64_t)>>& hook,
-           const std::optional<std::function<void(std::int64_t, std::int64_t)>>& nodeVjp) {
+           const std::optional<std::function<void(std::int64_t, std::int64_t)>>& nodeVjp,
+           std::int64_t fusedK, std::uintptr_t fusedEntry,
+           const std::vector<std::vector<std::uintptr_t>>& fusedParams) {
             if (static_cast<std::int64_t>(vjpParams.size()) != 2 * window)
                 throw std::invalid_argument("diff_reverse_host: vjp_params holds 2 lists per tape row");
             const auto recompute = reinterpret_cast<eagle::exec::HostEntryV2>(recomputeEntry);
@@ -3028,8 +3120,30 @@ NB_MODULE(_core, m)
             const std::vector<void*> rp = asParams(recomputeParams);
             std::vector<std::vector<void*>> vp;
             for (const auto& v : vjpParams) vp.push_back(asParams(v));
+            std::vector<std::vector<void*>> fp;
+            for (const auto& v : fusedParams) fp.push_back(asParams(v));
+            const auto fusedVjp = reinterpret_cast<eagle::exec::HostEntryV2>(fusedEntry);
             const auto prefix = [n](std::int64_t count) { return Partition{ 0, count, n }; };
             const auto at = [&](std::int64_t j) { return live[static_cast<std::size_t>(j)]; };
+            const auto accumulate = [&](std::int64_t count) {
+                for (const auto& [acc, g, rows, dtype] : accums)
+                    for (std::int64_t r = 0; r < rows; ++r) {
+                        if (dtype == EAGLE_BACKEND_REDUCE_F64)
+                            eagle::diff::accumulatePrefix(reinterpret_cast<double*>(acc) + r * n,
+                                                          reinterpret_cast<const double*>(g) + r * n, count);
+                        else
+                            eagle::diff::accumulatePrefix(reinterpret_cast<float*>(acc) + r * n,
+                                                          reinterpret_cast<const float*>(g) + r * n, count);
+                    }
+            };
+            const auto fillStep = [&](std::int64_t j, std::int64_t count) {
+                if (stepBytes == 8)
+                    eagle::diff::fillPrefix(reinterpret_cast<std::int64_t*>(stepPlane), j, count);
+                else if (stepBytes == 4)
+                    eagle::diff::fillPrefix(reinterpret_cast<std::int32_t*>(stepPlane),
+                                            static_cast<std::int32_t>(j), count);
+            };
+            eagle::diff::AdjointChain chain(static_cast<std::int64_t>(live.size()), window, fusedK);
             nb::gil_scoped_release unlocked;
             eagle::diff::reverseWindows(
                 window, live,
@@ -3041,6 +3155,7 @@ NB_MODULE(_core, m)
                             count, rows, static_cast<std::size_t>(bytes));
                 },
                 [&](std::int64_t c, std::int64_t len) {
+                    if (chain.begin(c, len)) return;   // a fused window recomputes inside its vjp launch
                     if (word != nullptr && !hook) {   // one fused launch; each sample stops itself
                         *word = len;
                         HostTeam::run(recompute, rp.data(), prefix(at(c)));
@@ -3052,30 +3167,31 @@ NB_MODULE(_core, m)
                     }
                 },
                 [&](std::int64_t j, std::int64_t count) {
-                    if (stepBytes == 8)
-                        eagle::diff::fillPrefix(reinterpret_cast<std::int64_t*>(stepPlane), j, count);
-                    else if (stepBytes == 4)
-                        eagle::diff::fillPrefix(reinterpret_cast<std::int32_t*>(stepPlane),
-                                                static_cast<std::int32_t>(j), count);
-                    HostTeam::run(vjp, vp[static_cast<std::size_t>(2 * (j % window) + (j & 1))].data(), prefix(count));
+                    if (chain.fused()) {   // the window's one launch, over everything live at its start
+                        if (j != chain.top()) return;
+                        const std::int64_t whole = at(chain.start);
+                        fillStep(chain.start, whole);
+                        HostTeam::run(fusedVjp, fp.at(static_cast<std::size_t>(chain.cur)).data(), prefix(whole));
+                        accumulate(whole);
+                        chain.flip();
+                        return;
+                    }
+                    fillStep(j, count);
+                    HostTeam::run(vjp, vp[static_cast<std::size_t>(2 * (j % window) + chain.cur)].data(), prefix(count));
+                    chain.flip();
                     if (nodeVjp) { nb::gil_scoped_acquire locked; (*nodeVjp)(j, count); }
-                    for (const auto& [acc, g, rows, dtype] : accums)
-                        for (std::int64_t r = 0; r < rows; ++r) {
-                            if (dtype == EAGLE_BACKEND_REDUCE_F64)
-                                eagle::diff::accumulatePrefix(reinterpret_cast<double*>(acc) + r * n,
-                                                              reinterpret_cast<const double*>(g) + r * n, count);
-                            else
-                                eagle::diff::accumulatePrefix(reinterpret_cast<float*>(acc) + r * n,
-                                                              reinterpret_cast<const float*>(g) + r * n, count);
-                        }
+                    accumulate(count);
                 });
         },
         nb::arg("n"), nb::arg("src_n"), nb::arg("window"), nb::arg("live"), nb::arg("orders"),
         nb::arg("gathers"), nb::arg("recompute_entry"), nb::arg("recompute_params"),
         nb::arg("recompute_word"), nb::arg("vjp_entry"), nb::arg("vjp_params"), nb::arg("accums"),
         nb::arg("step_plane"), nb::arg("step_bytes"), nb::arg("hook").none() = nb::none(),
-        nb::arg("node_vjp").none() = nb::none(),
-        "The windowed reverse of one pass of a recorded host run, all in C++. Planes are n "
+        nb::arg("node_vjp").none() = nb::none(), nb::arg("fused_k") = 0, nb::arg("fused_entry") = 0,
+        nb::arg("fused_params") = std::vector<std::vector<std::uintptr_t>>{},
+        "The windowed reverse of one pass of a recorded host run, all in C++. fused_k > 0: each "
+        "window of exactly that many steps is ONE launch of fused_entry (fused_params[p] reads "
+        "adjoint plane p) that recomputes its steps itself; shorter windows run step by step. Planes are n "
         "samples wide, checkpoints src_n. gathers: (dst, checkpoint address per window, rows, "
         "element bytes), window k's columns read through orders[k] (int64 checkpoint column "
         "per reverse slot, the window's sample order composed with its checkpoint's slot order). The recompute entry replays a window as one fused launch (its int64 steps word "
@@ -3149,12 +3265,16 @@ NB_MODULE(_core, m)
            const std::vector<Accum>& accums, std::uintptr_t stepPlane, std::int64_t stepBytes,
            std::uintptr_t stream, std::int32_t device,
            const std::optional<std::function<void(std::int64_t)>>& hook,
-           const std::optional<std::function<void(std::int64_t, std::int64_t)>>& nodeVjp) {
+           const std::optional<std::function<void(std::int64_t, std::int64_t)>>& nodeVjp,
+           std::int64_t fusedK, std::uintptr_t fusedEntry, std::uint32_t fusedBlock,
+           const std::vector<std::vector<std::uintptr_t>>& fusedParams) {
             if (static_cast<std::int64_t>(vjpParams.size()) != 2 * window)
                 throw std::invalid_argument("diff_reverse_device: vjp_params holds 2 lists per tape row");
             const std::vector<void*> rp = asParams(recomputeParams);
             std::vector<std::vector<void*>> vp;
             for (const auto& v : vjpParams) vp.push_back(asParams(v));
+            std::vector<std::vector<void*>> fp;
+            for (const auto& v : fusedParams) fp.push_back(asParams(v));
             const auto columns = [&](std::uint32_t op, std::uint64_t dst, std::uint64_t src, std::int64_t dstLd,
                                      std::int64_t srcLd, std::int64_t count, std::int64_t rows,
                                      std::uint32_t bytes, std::int64_t value, std::uint64_t index) {
@@ -3174,6 +3294,12 @@ NB_MODULE(_core, m)
             };
             const auto prefix = [n](std::int64_t count) { return Partition{ 0, count, n }; };
             const auto at = [&](std::int64_t j) { return live[static_cast<std::size_t>(j)]; };
+            const auto accumulate = [&](std::int64_t count) {
+                for (const auto& [acc, g, rows, dtype] : accums)
+                    columns(EAGLE_BACKEND_DIFF_ACCUMULATE, acc, g, n, n, count, rows,
+                            dtype == EAGLE_BACKEND_REDUCE_F64 ? 8u : 4u, 0, 0);
+            };
+            eagle::diff::AdjointChain chain(static_cast<std::int64_t>(live.size()), window, fusedK);
             eagle::diff::reverseWindows(
                 window, live,
                 [&](std::int64_t k, std::int64_t count) {
@@ -3183,6 +3309,7 @@ NB_MODULE(_core, m)
                                 orders.at(static_cast<std::size_t>(k)));
                 },
                 [&](std::int64_t c, std::int64_t len) {
+                    if (chain.begin(c, len)) return;   // a fused window recomputes inside its vjp launch
                     if (recomputeWord != 0 && !hook) {   // one fused launch; each sample stops itself
                         columns(EAGLE_BACKEND_DIFF_FILL, recomputeWord, 0, 1, 0, 1, 1, 8, len, 0);
                         eagle_seam::DeviceKernel::run(recomputeEntry, rp, prefix(at(c)), stream, recomputeBlock);
@@ -3194,15 +3321,26 @@ NB_MODULE(_core, m)
                     }
                 },
                 [&](std::int64_t j, std::int64_t count) {
+                    if (chain.fused()) {   // the window's one launch, over everything live at its start
+                        if (j != chain.top()) return;
+                        const std::int64_t whole = at(chain.start);
+                        if (stepPlane != 0)
+                            columns(EAGLE_BACKEND_DIFF_FILL, stepPlane, 0, n, 0, whole, 1,
+                                    static_cast<std::uint32_t>(stepBytes), chain.start, 0);
+                        eagle_seam::DeviceKernel::run(fusedEntry, fp.at(static_cast<std::size_t>(chain.cur)),
+                                                      prefix(whole), stream, fusedBlock);
+                        accumulate(whole);
+                        chain.flip();
+                        return;
+                    }
                     if (stepPlane != 0)
                         columns(EAGLE_BACKEND_DIFF_FILL, stepPlane, 0, n, 0, count, 1,
                                 static_cast<std::uint32_t>(stepBytes), j, 0);
                     eagle_seam::DeviceKernel::run(
-                        vjpEntry, vp[static_cast<std::size_t>(2 * (j % window) + (j & 1))], prefix(count), stream, vjpBlock);
+                        vjpEntry, vp[static_cast<std::size_t>(2 * (j % window) + chain.cur)], prefix(count), stream, vjpBlock);
+                    chain.flip();
                     if (nodeVjp) (*nodeVjp)(j, count);
-                    for (const auto& [acc, g, rows, dtype] : accums)
-                        columns(EAGLE_BACKEND_DIFF_ACCUMULATE, acc, g, n, n, count, rows,
-                                dtype == EAGLE_BACKEND_REDUCE_F64 ? 8u : 4u, 0, 0);
+                    accumulate(count);
                 });
         },
         nb::arg("n"), nb::arg("src_n"), nb::arg("window"), nb::arg("live"), nb::arg("orders"),
@@ -3211,6 +3349,8 @@ NB_MODULE(_core, m)
         nb::arg("vjp_params"), nb::arg("vjp_block"), nb::arg("accums"), nb::arg("step_plane"),
         nb::arg("step_bytes"), nb::arg("stream") = 0, nb::arg("device") = -1,
         nb::arg("hook").none() = nb::none(), nb::arg("node_vjp").none() = nb::none(),
+        nb::arg("fused_k") = 0, nb::arg("fused_entry") = 0, nb::arg("fused_block") = 0,
+        nb::arg("fused_params") = std::vector<std::vector<std::uintptr_t>>{},
         "diff_reverse_host on the device: the same window driver, every operation enqueued on "
         "`stream` (launches through the backend's launcher, column ops through "
         "`eagle_backend_x_diff_columns`); `orders` are device int64 arrays. Enqueue only.");

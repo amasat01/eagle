@@ -1,5 +1,5 @@
-C5 — Print a graph
-==================
+C5 Print a graph
+================
 
     Turn any eagle graph into a picture: the same layout and renderers draw
     a C++ ``cpu::Graph`` and a Python ``eagle.Graph``.

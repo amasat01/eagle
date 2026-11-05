@@ -29,7 +29,7 @@ def br_gather(table: Table[Scalar], where: Index, x: Scalar, y: Mutable[Scalar])
 def _gather_graph(tmp_path):
     (p,) = eagle.plan.auto([br_gather], targets=("host",), cache_dir=str(tmp_path / "c"))
     table = np.linspace(0.5, 2.0, 5)
-    where = (np.arange(N) % 5).astype(np.int64)
+    where = (np.arange(N) % 5).astype(np.int32)
     x, y = np.linspace(-1, 1, N), np.zeros(N)
     g = eagle.Graph().add(p.bind(table=table, where=where, x=x, y=y), name="lookup")
     return g.build(record=True).launch(), table, where, x

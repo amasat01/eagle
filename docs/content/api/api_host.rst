@@ -1,5 +1,5 @@
-API reference — host
-====================
+host API
+========
 
 OpenMP + SIMD host dispatch: packet-batched launchers with masked and
 flag-aware variants for the pure-C++ path.

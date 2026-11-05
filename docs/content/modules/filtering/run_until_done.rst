@@ -1,5 +1,5 @@
-Running until every sample is done
-==================================
+Run until done
+==============
 
 
 A step kernel can finish its own samples: it assigns its ``terminated`` mask

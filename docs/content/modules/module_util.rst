@@ -1,5 +1,5 @@
-Module: util
-============
+util module
+===========
 
 The ``util`` module provides supporting infrastructure: global typedefs,
 logging, exception helpers, CUDA device-error tracking, observer-pattern

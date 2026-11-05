@@ -1,0 +1,222 @@
+{
+ "about": "The card scripts' rows and arms; A test asserts the feature card equals its section. The C1 cells and the profile stages are added by their own scripts' changes.",
+ "c2_feature_card": {
+  "wide_forms": {
+   "arms": [
+    "thread",
+    "team",
+    "team_k8",
+    "staged",
+    "numpy_mask",
+    "torch"
+   ],
+   "baseline": "opaque NumPy mask; torch",
+   "cases": {
+    "all": 65536
+   },
+   "dtypes": [
+    "float64",
+    "float32"
+   ],
+   "host_arms": [
+    "thread",
+    "numpy_mask",
+    "torch"
+   ]
+  },
+  "steps_fused": {
+   "arms": [
+    "K1",
+    "K8",
+    "K32",
+    "jvp_K8",
+    "vjp_K8_fused",
+    "vjp_K8_auto",
+    "warp_loop",
+    "torch_func"
+   ],
+   "baseline": "Warp loop (primal); torch.func over a loop (derivatives)",
+   "cases": {
+    "all": 65536
+   },
+   "dtypes": [
+    "float64"
+   ],
+   "host_arms": [
+    "K1",
+    "K8",
+    "K32",
+    "jvp_K8",
+    "vjp_K8_fused",
+    "vjp_K8_auto",
+    "torch_func"
+   ]
+  },
+  "control_flow": {
+   "arms": [
+    "guard",
+    "no_guard",
+    "jump",
+    "segmented",
+    "warp"
+   ],
+   "baseline": "Warp per-thread loop",
+   "cases": {
+    "all": 1000000
+   },
+   "dtypes": [
+    "float64"
+   ],
+   "host_arms": [
+    "guard",
+    "no_guard",
+    "jump"
+   ]
+  },
+  "linalg_lane": {
+   "arms": [
+    "hawk",
+    "cupy",
+    "torch"
+   ],
+   "baseline": "cuSOLVER batched (CuPy); torch.linalg",
+   "cases": {
+    "n8": 131072,
+    "n32": 8192
+   },
+   "dtypes": [
+    "float64",
+    "float32"
+   ],
+   "host_arms": [
+    "hawk",
+    "torch"
+   ]
+  },
+  "linalg_team": {
+   "arms": [
+    "team",
+    "cupy",
+    "torch"
+   ],
+   "baseline": "CuPy; torch.linalg",
+   "cases": {
+    "n512": 16
+   },
+   "dtypes": [
+    "float64"
+   ],
+   "host_arms": []
+  },
+  "contraction": {
+   "arms": [
+    "box",
+    "no_box",
+    "gemm",
+    "einsum"
+   ],
+   "baseline": "cupy.einsum",
+   "cases": {
+    "all": 65536
+   },
+   "dtypes": [
+    "float64",
+    "float32"
+   ],
+   "host_arms": [
+    "box",
+    "no_box",
+    "gemm"
+   ]
+  },
+  "fft": {
+   "arms": [
+    "fft",
+    "cupy_fft"
+   ],
+   "baseline": "cupy.fft (cuFFT)",
+   "cases": {
+    "all": 100000
+   },
+   "dtypes": [
+    "float64"
+   ],
+   "host_arms": []
+  },
+  "lane_set": {
+   "arms": [
+    "dense",
+    "map",
+    "prefix"
+   ],
+   "baseline": "none: ratio to dense",
+   "cases": {
+    "all": 4194304
+   },
+   "dtypes": [
+    "float64"
+   ],
+   "host_arms": []
+  },
+  "scatter": {
+   "arms": [
+    "keyed",
+    "ordered",
+    "or",
+    "cupyx_scatter_add",
+    "np_add_at"
+   ],
+   "baseline": "cupyx.scatter_add; np.add.at",
+   "cases": {
+    "all": 4194304
+   },
+   "dtypes": [
+    "float64"
+   ],
+   "host_arms": [
+    "keyed",
+    "ordered",
+    "or",
+    "np_add_at"
+   ]
+  },
+  "sample_sum": {
+   "arms": [
+    "compensated",
+    "ordered",
+    "auto",
+    "cell_compensated",
+    "cell_auto",
+    "cupy_sum"
+   ],
+   "baseline": "cupy.sum",
+   "cases": {
+    "all": 16777216
+   },
+   "dtypes": [
+    "float64"
+   ],
+   "host_arms": [
+    "compensated",
+    "ordered",
+    "auto",
+    "cell_compensated",
+    "cell_auto"
+   ]
+  },
+  "mpi_partition": {
+   "arms": [
+    "two_ranks",
+    "one_rank"
+   ],
+   "baseline": "one rank (N = 1e6), the C1 persist arm",
+   "cases": {
+    "all": 2000000
+   },
+   "dtypes": [
+    "float64"
+   ],
+   "host_arms": []
+  }
+ }
+}

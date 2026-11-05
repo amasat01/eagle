@@ -1,0 +1,57 @@
+# Copyright 2026 Alessandro Masat
+# SPDX-License-Identifier: Apache-2.0
+name: Remembered pass
+description: >-
+  Digest what this job's result depends on (ci_digest.sh) and look for a pass remembered under it. The job keeps its name and
+  reports; its later steps run when output `run` is 'true' and the memo-save action records the pass. A scheduled run never
+  trusts the memory, so the weekly run on main is uncached.
+inputs:
+  name:
+    description: Memo name (workflow and job).
+    required: true
+  args:
+    description: ci_digest.sh arguments (a shell word list).
+    required: true
+  extra:
+    description: One more value that enters the digest (a matrix, for instance).
+    required: false
+    default: ""
+outputs:
+  run:
+    description: "'true' when the job must run its steps."
+    value: ${{ steps.plan.outputs.run }}
+  digest:
+    description: The digest.
+    value: ${{ steps.d.outputs.digest }}
+runs:
+  using: composite
+  steps:
+    - id: d
+      shell: bash
+      env:
+        ARGS: ${{ inputs.args }}
+        EXTRA: ${{ inputs.extra }}
+      run: |
+        eval "set -- $ARGS"
+        digest=$("${{ github.action_path }}/../../ci_digest.sh" "$@" --str "$RUNNER_OS $RUNNER_ARCH ${ImageVersion:-}" --str "$EXTRA") || exit 1
+        [ -n "$digest" ] || { echo "::error::empty digest"; exit 1; }
+        echo "digest=$digest" >> "$GITHUB_OUTPUT"
+    - id: pass
+      uses: actions/cache/restore@v6
+      with:
+        path: ci-pass
+        key: ci-pass-v3-${{ inputs.name }}-${{ steps.d.outputs.digest }}
+        lookup-only: true
+    - id: plan
+      shell: bash
+      env:
+        HIT: ${{ steps.pass.outputs.cache-hit }}
+        EVENT: ${{ github.event_name }}
+        NAME: ${{ inputs.name }}
+        DIGEST: ${{ steps.d.outputs.digest }}
+      run: |
+        if [ "$HIT" = true ] && [ "$EVENT" != schedule ]; then
+          echo "$NAME: passed earlier on digest $DIGEST; its steps are skipped" | tee -a "$GITHUB_STEP_SUMMARY"
+        else
+          echo run=true >> "$GITHUB_OUTPUT"
+        fi

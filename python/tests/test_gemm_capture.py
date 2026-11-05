@@ -54,6 +54,8 @@ nothing checks for such a case. Recorded here rather than silently omitted.
 from __future__ import annotations
 
 import itertools
+import os
+import tempfile
 from pathlib import Path
 
 import sys
@@ -452,7 +454,8 @@ def test_a_captured_seam_gemm_is_one_kernel_node_and_replays():
             captured = cap.end()
         _core.device_synchronize()
         assert np.asarray(out.get()).max() == 0.0               # nothing ran at build
-        dot = captured.debug_dot("/local/scratch/amasat/tmp/w072/scratch/S1a/tmp/gemm_capture.dot", 0)
+        with tempfile.TemporaryDirectory() as d:
+            dot = captured.debug_dot(os.path.join(d, "gemm_capture.dot"), 0)
         assert dot.count('shape="octagon"') >= 1
         launcher = _core.Graph.from_captured(captured).launcher()
         launcher.stream(stream.ptr())

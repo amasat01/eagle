@@ -67,27 +67,19 @@ PROSE_FILES = (
     "README.md",
     "docs/content/performance/reading.md",
     "docs/content/performance/mechanism.md",
-    "docs/content/modules/filtering/reorder_and_grouping.rst",
-    "docs/content/userguide/tutorials/02_cuda_graphs_python.ipynb",
-    "docs/content/userguide/tutorials/05_steps_per_launch.ipynb",
-    "docs/content/userguide/tutorials/06_compaction_and_reorder.ipynb",
-    "docs/content/userguide/tutorials/08_profile_your_run.ipynb",
 )
-REFERENCE_CARD = _REPO / "benchmarks" / "perf_card" / "card_nvidia-h100-80gb-hbm3.json"
+REFERENCE_CARD = _REPO / "benchmarks" / "perf_card" / "card_nvidia-h100-nvl.json"
 _DOCS_BASE = "https://amasat01.github.io/eagle/content/performance.html"
+NO_CARD = "No committed ensemble card yet."
 
-#: The five arms and the N = 1,000,000 / max_steps = 1000 cell chosen
-#: for the headline table (the three graph arms, the masked CuPy arm, the CPU
-#: arm) -- kept in lockstep with
-#: ``python/tests/test_perf_card_table.py``'s ``_README_ROWS``.
-ARMS = ("eagle_graph", "eagle_graph_compact", "eagle_graph_reorder",
-        "cupy_masked", "cpu_openmp")
+#: The five GPU arms and the N = 1,000,000 cells chosen for the headline table.
+ARMS = ("eagle_graph", "eagle_graph_persist", "eagle_simulate", "cupy_masked", "warp_kernel")
 DISTRIBUTIONS = ("spread", "uniform")
-N, MAX_STEPS = 1_000_000, 1000
+N = 1_000_000
 
 _DIST_LABEL = {
-    "spread": f"Spread (log-uniform stop steps, up to {MAX_STEPS})",
-    "uniform": f"Uniform (every sample runs {MAX_STEPS} steps)",
+    "spread": "Spread (each sample stops at its own time)",
+    "uniform": "Uniform (every sample runs the same orbit)",
 }
 
 
@@ -98,58 +90,51 @@ def _wall_cell(w: dict) -> str:
     return f"{cc.fmt_time(w['median'])} ({cc.fmt_time(w['iqr'])})"
 
 
+def _row_cells(row):
+    """(wall, attempt-samples/s, efficiency) cells of one result row, or its label when it has no time."""
+    label = None if row is None else pcl.row_label(row)
+    if row is None or label:
+        return label or "not run", "–", "–"
+    return (_wall_cell(row["wall_s"]), cc.fmt_rate_si(row["attempt_samples_per_s"]),
+            row.get("eff_sol_note") or ("–" if row.get("eff_sol") is None else pcl.fmt_eff(row["eff_sol"])))
+
+
 def render_table(card: dict) -> str:
     labels = card["arms"]
-    by_key = {(r["distribution"], r["max_steps"], r["n"], r["arm"]): r
-              for r in card["results"]}
-    trimmed = "mean" in by_key[(DISTRIBUTIONS[0], MAX_STEPS, N, ARMS[0])]["wall_s"]
-    spread = "range" if trimmed else "IQR"
-    lines = [f"| Distribution (N = 1,000,000) | Arm | wall ({spread}) | sample·steps/s "
-             "| useful FLOP/s (% of peak) |",
+    by_key = {(r["distribution"], r["n"], r["arm"]): r for r in card["results"]}
+    lines = [f"| Distribution (N = {N:,}) | Arm | wall (IQR) | attempts·samples/s | % of the device's top FP64 rate |",
              "|---|---|---:|---:|---:|"]
     for dist in DISTRIBUTIONS:
         for arm in ARMS:
-            r = by_key[(dist, MAX_STEPS, N, arm)]
-            w = r["wall_s"]
-            lines.append(
-                f"| {_DIST_LABEL[dist]} | {labels[arm]} "
-                f"| {_wall_cell(w)} "
-                f"| {cc.fmt_rate(r['sample_steps_per_s'])} "
-                f"| {cc.fmt_rate(r['useful_flops_per_s'])} "
-                f"({cc.fmt_pct(r['fraction_of_peak_fp64'])}) |")
+            wall, rate, eff = _row_cells(by_key.get((dist, N, arm)))
+            lines.append(f"| {_DIST_LABEL[dist]} | {labels.get(arm, arm)} | {wall} | {rate} | {eff} |")
     return "\n".join(lines)
 
 
 #: The CPU block's arms: the same five tools the landing page charts (every
 #: other arm lives on the full card). Kept in lockstep with
 #: ``python/tests/test_perf_card_table.py``.
-CPU_ARMS = ("eagle_term8", "numba_prange", "jax_shard8", "torch_masked",
-            "numpy_masked")
-CPU_BASE_ARM = "eagle_term8"
+CPU_ARMS = ("eagle_cpu8", "eagle_cpu1", "numba_prange", "jax_vmap")
+CPU_BASE_ARM = "eagle_cpu8"
 CPU_SPEC_KEY = "perf_card_cpu"
 
 
 def render_cpu_table(card: dict) -> str:
-    n = max(card["ns"])
-    by_key = {(r["distribution"], r["max_steps"], r["n"], r["arm"]): r
-              for r in card["results"]}
-    labels = card["arm_labels"]
-    base = by_key[("spread", MAX_STEPS, n, CPU_BASE_ARM)]["wall_s"]
-    lines = [f"| Arm (N = {n:,}) | spread S={MAX_STEPS} wall | uniform S={MAX_STEPS} wall "
-             "| vs eagle 8 threads (spread) |",
+    by_key = {(r["distribution"], r["n"], r["arm"]): r for r in card["results"]}
+    labels = card["arms"]
+    lines = [f"| Arm (N = {N:,}) | spread wall | uniform wall | vs {labels.get(CPU_BASE_ARM, CPU_BASE_ARM)} (spread) |",
              "|---|---:|---:|---:|"]
+    base = by_key.get(("spread", N, CPU_BASE_ARM))
     for arm in CPU_ARMS:
-        sp = by_key[("spread", MAX_STEPS, n, arm)]["wall_s"]
-        un = by_key[("uniform", MAX_STEPS, n, arm)]["wall_s"]
-        ratio = pcl.fmt_ratio(cc.center(sp) / cc.center(base))
-        lines.append(f"| {labels[arm]} | {cc.fmt_time(cc.center(sp))} "
-                     f"| {cc.fmt_time(cc.center(un))} | {ratio} |")
+        sp, un = by_key.get(("spread", N, arm)), by_key.get(("uniform", N, arm))
+        ratio = "–" if not (sp and base and not pcl.row_label(sp) and not pcl.row_label(base)) else \
+            pcl.fmt_ratio(cc.center(sp["wall_s"]) / cc.center(base["wall_s"]))
+        lines.append(f"| {labels.get(arm, arm)} | {_row_cells(sp)[0]} | {_row_cells(un)[0]} | {ratio} |")
     return "\n".join(lines)
 
 
 def render_cpu_heading(card: dict, path: pathlib.Path) -> str:
-    cpu = card["cpu"]
-    return (f"**On a CPU alone: {cc.cpu_display_name(path, cpu['model'])}, {cpu['cores']} cores, "
+    return (f"**On a CPU alone: {cc.cpu_display_name(path, card['cpu'])}, {card['logical_cpus']} logical CPUs, "
             f"card of {card['generated_utc'][:10]}**")
 
 
@@ -158,7 +143,7 @@ def render_cpu_block(eagle_root: pathlib.Path) -> str:
     parts = []
     for e in gp.load_family(eagle_root, spec):
         parts.append(render_cpu_heading(e["card"], e["path"]) + "\n\n" + render_cpu_table(e["card"]))
-    return "\n\n".join(parts)
+    return "\n\n".join(parts) or NO_CARD
 
 
 def render_measured_on(eagle_root: pathlib.Path) -> str:
@@ -178,7 +163,11 @@ def render_measured_on(eagle_root: pathlib.Path) -> str:
 
 
 def render_block(eagle_root: pathlib.Path) -> str:
+    if not REFERENCE_CARD.is_file():
+        return NO_CARD
     card = json.loads(REFERENCE_CARD.read_text())
+    if card.get("device_fma_per_s"):
+        card = cc.rescore_card(card)       # eff_sol derived from the raw fields; a value over 1 reads pending
     lead = f"**{card['device']['name']}, card of {card['generated_utc'][:10]}**"
     return lead + "\n\n" + render_table(card) + "\n\n" + render_measured_on(eagle_root)
 

@@ -151,3 +151,28 @@ def test_capacity_is_for_a_prefix_kernel_only(tmp_path, cache):
     by = plugins(bundle)
     with pytest.raises(ValueError, match=r"capacity= is for a kernel built with IndexSet\(prefix=True\)"):
         eagle.plan.plan(by["plain"], structure=eexec.HostTeam).bind(capacity=4, x=np.zeros(4), y=np.zeros(4))
+
+
+@pytest.mark.parametrize("target", TARGETS)
+def test_a_builder_block_binds_the_count_plane_by_name(target):
+    """Inside ``@eagle.Graph.builder`` a prefix kernel takes ``active_count`` by name, like any plane; writing the
+    count in place between launches runs that many lanes of the same graph."""
+    xp = _xp(target)
+    sq = hawk.kernel(_square, kind=PRE)
+
+    @eagle.Graph.builder
+    def block(g: eagle.Graph, x, y, active_count):
+        sq(x=x, y=y, active_count=active_count)
+
+    x = xp.asarray(np.arange(N, dtype=np.float64))
+    y = xp.zeros(N)
+    count = xp.asarray(np.array([77], np.uint32))
+    graph = eagle.Graph()
+    block(graph, x, y, count)
+    graph.build()
+    for m in (77, 5, N):
+        count[...] = m
+        y[...] = 0.0
+        graph.launch()
+        want = np.where(np.arange(N) < m, np.arange(N, dtype=np.float64) ** 2 + 1.0, 0.0)
+        np.testing.assert_array_equal(_host(y), want)

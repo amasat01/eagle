@@ -33,9 +33,9 @@ from eagle.roles import (
     LAUNCH_CERTIFIED_PATTERNS,
     MANIFEST_FORMATS,
     MAX_SCHEMA_VERSION,
-    NEURAL_EXEC_REF_FIELDS,
-    NEURAL_FORBIDDEN_FIELDS,
-    NEURAL_REQUIRED_FIELDS,
+    BLOCK_EXEC_REF_FIELDS,
+    BLOCK_FORBIDDEN_FIELDS,
+    BLOCK_REQUIRED_FIELDS,
     RECOGNIZED_PATTERNS,
     ROLES,
     SCATTER_POLICIES,
@@ -88,7 +88,7 @@ def test_cpp_and_python_schema_version_identical():
 # closed a debt where the RECOGNIZED / LAUNCH-CERTIFIED pattern sets, and
 # BUFFER_KINDS, landed with zero cross-language parity test — meaning the exact
 # constants the atomicity clause's "one-line widening" will edit could drift
-# invisibly until the neural golden lands. MANIFEST_FORMATS landed alongside
+# invisibly until the graph_block golden lands. MANIFEST_FORMATS landed alongside
 # it and gets the same check from day one.
 # --------------------------------------------------------------------------- #
 @pytest.mark.repo_local
@@ -136,7 +136,7 @@ def test_cpp_and_python_manifest_formats_identical():
 
 
 # --------------------------------------------------------------------------- #
-# The `neural_block` descriptor vocabularies. Same single-sourcing
+# The `graph_block` descriptor vocabularies. Same single-sourcing
 # idiom as everything above: the constant pair IS the schema, so a one-sided edit is
 # a mechanical failure rather than an inspection finding.
 # --------------------------------------------------------------------------- #
@@ -159,33 +159,33 @@ def test_cpp_and_python_scatter_policies_identical():
 
 
 @pytest.mark.repo_local
-def test_cpp_and_python_neural_required_fields_identical():
-    assert _cpp_string_array("kNeuralRequiredFields") == set(NEURAL_REQUIRED_FIELDS), (
-        "plugin/roles.h::kNeuralRequiredFields and eagle.roles.NEURAL_REQUIRED_FIELDS "
+def test_cpp_and_python_graph_block_required_fields_identical():
+    assert _cpp_string_array("kBlockRequiredFields") == set(BLOCK_REQUIRED_FIELDS), (
+        "plugin/roles.h::kBlockRequiredFields and eagle.roles.BLOCK_REQUIRED_FIELDS "
         "have drifted; both validators ITERATE this list, so a one-sided edit makes "
         "one language require a field the other ignores"
     )
 
 
 @pytest.mark.repo_local
-def test_cpp_and_python_neural_forbidden_fields_identical():
-    assert _cpp_string_array("kNeuralForbiddenFields") == set(
-        NEURAL_FORBIDDEN_FIELDS
+def test_cpp_and_python_graph_block_forbidden_fields_identical():
+    assert _cpp_string_array("kBlockForbiddenFields") == set(
+        BLOCK_FORBIDDEN_FIELDS
     ), (
-        "plugin/roles.h::kNeuralForbiddenFields and "
-        "eagle.roles.NEURAL_FORBIDDEN_FIELDS have drifted; both validators ITERATE "
+        "plugin/roles.h::kBlockForbiddenFields and "
+        "eagle.roles.BLOCK_FORBIDDEN_FIELDS have drifted; both validators ITERATE "
         "this list, so a one-sided edit makes one language silently accept kernel "
         "machinery on a descriptor (the mis-read hazard)"
     )
 
 
 @pytest.mark.repo_local
-def test_cpp_and_python_neural_exec_ref_fields_identical():
+def test_cpp_and_python_graph_block_exec_ref_fields_identical():
     """The C++ parser BOUNDS these objects before scanning top-level keys, so a
     name present in one language and not the other is not merely a
     validation gap — it is an unmasked nested object and a mis-parsed `kernel`."""
-    assert _cpp_string_array("kNeuralExecRefFields") == set(NEURAL_EXEC_REF_FIELDS), (
-        "plugin/roles.h::kNeuralExecRefFields and eagle.roles.NEURAL_EXEC_REF_FIELDS "
+    assert _cpp_string_array("kBlockExecRefFields") == set(BLOCK_EXEC_REF_FIELDS), (
+        "plugin/roles.h::kBlockExecRefFields and eagle.roles.BLOCK_EXEC_REF_FIELDS "
         "have drifted; both are the single source of truth for which keys hold exec "
         "references and must match exactly"
     )
@@ -226,14 +226,14 @@ def test_scatter_policies_cardinality_pinned():
 
 
 @pytest.mark.repo_local
-def test_neural_block_is_recognized_but_never_launch_certified():
+def test_graph_block_is_recognized_but_never_launch_certified():
     """The atomicity clause, at its narrowest: a descriptor is structurally
-    validatable and never launchable. If `neural_block` ever enters the certified
+    validatable and never launchable. If `graph_block` ever enters the certified
     set, some loader will bind a descriptor as a bare kernel."""
-    assert "neural_block" in RECOGNIZED_PATTERNS
-    assert "neural_block" not in LAUNCH_CERTIFIED_PATTERNS
-    assert "neural_block" not in _cpp_string_array("kLaunchCertifiedPatterns")
-    assert "neural_block" not in _registry_loader_pattern_keys()
+    assert "graph_block" in RECOGNIZED_PATTERNS
+    assert "graph_block" not in LAUNCH_CERTIFIED_PATTERNS
+    assert "graph_block" not in _cpp_string_array("kLaunchCertifiedPatterns")
+    assert "graph_block" not in _registry_loader_pattern_keys()
 
 
 def _registry_loader_pattern_keys() -> set:

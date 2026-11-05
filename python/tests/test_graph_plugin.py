@@ -78,9 +78,8 @@ def test_loaded_acceleration_as_cuda_graph_node():
     pipe.launch(n=2)  # replay
     assert _max_rel(cp.asnumpy(out), _gravity_ref(P, MU)) < 1e-12  # correctness first
 
-    if pipe.introspection_available():  # bonus, cupy >= 14
-        assert pipe.num_nodes() == 1  # one KERNEL node (the memset is excluded)
-        assert "raptor_kernel" in pipe.node_labels()
+    assert pipe.num_nodes() == 1  # one KERNEL node (the memset is excluded)
+    assert "raptor_kernel" in pipe.node_labels()
 
 
 def test_loaded_pure_as_cuda_graph_node():
@@ -102,6 +101,5 @@ def test_loaded_pure_as_cuda_graph_node():
     pipe.launch(n=replays)
     assert np.allclose(cp.asnumpy(counter), counter0 + replays * rate)
 
-    if pipe.introspection_available():
-        assert pipe.num_nodes() == 1
-        assert "raptor_kernel" in pipe.node_labels()
+    assert pipe.num_nodes() == 1
+    assert "raptor_kernel" in pipe.node_labels()

@@ -30,7 +30,8 @@ from collections.abc import Callable
 
 #: The bounded per-process memo of loaded plugins, keyed by the CONTENT of the
 #: artifact + sidecar bytes (never a path or mtime, since republishing
-#: identical bytes elsewhere must not pay a fresh driver JIT). Every
+#: identical bytes elsewhere must not pay a fresh driver JIT) and by the device
+#: it was loaded on (a loaded module's functions belong to that device's context). Every
 #: :func:`load_manifest` call builds its own :class:`KernelRegistry` and
 #: re-runs the schema/ABI checks; nothing else is memoised.
 _PLUGIN_MEMO: dict = {}
@@ -44,7 +45,7 @@ _PLUGIN_MEMO_LIMIT = 128
 #: where Python entry-points never do.
 _PATTERN_LOADERS: dict[str, Callable] = {}
 
-#: The lazy-default map. Empty today (``neural_block``'s provider moved out of
+#: The lazy-default map. Empty today (``graph_block``'s provider moved out of
 #: tree); kept so an in-tree-but-optional pattern can populate it again
 #: without changing the resolution order (registered -> lazy-default ->
 #: entry-points -> fail-loud).
@@ -71,6 +72,8 @@ def _plugin_key(loader: Callable, entry: dict, artifact: pathlib.Path,
 
     Raises ``OSError`` if either file cannot be read; the caller falls back
     to loading it the long way."""
+    from .launch import _current_device_ordinal
+
     h = hashlib.sha256()
     h.update(b"eagle.registry.plugin/1\n")
     h.update(getattr(loader, "__name__", repr(loader)).encode())
@@ -80,6 +83,7 @@ def _plugin_key(loader: Callable, entry: dict, artifact: pathlib.Path,
     h.update(artifact.read_bytes())
     h.update(b"\0")
     h.update(sidecar.read_bytes())
+    h.update(b"\0device=%d" % _current_device_ordinal())   # the device the load puts its module on
     return h.hexdigest()
 
 
@@ -240,13 +244,13 @@ def load_manifest(path):
     * ``"vector"`` / ``"pure"`` -- each enabled entry's artifact is
       path-loaded into ``LoadedVector`` / ``LoadedPure`` and keyed by its
       manifest ``id`` into a :class:`KernelRegistry`.
-    * ``"neural_block"`` -- a neural deployment unit: the inline ``blocks[]``
+    * ``"graph_block"`` -- a graph-block deployment unit: the inline ``blocks[]``
       compose one ordered layer whose exec references resolve against the
-      ``plugins[]`` kernels, returned as a frozen neural-layer wrapper.
+      ``plugins[]`` kernels, returned as a frozen graph-block layer wrapper.
       Recognized but not launch-certified, so it never enters the by-name map.
 
     An unknown or absent ``pattern`` is a hard error. Returns
-    ``KernelRegistry | LoadedNeuralLayer``."""
+    ``KernelRegistry | LoadedBlockLayer``."""
     from .abi import check_aether_abi
     from .loaded import (
         LoadedPure,
@@ -270,9 +274,9 @@ def load_manifest(path):
 
     loaders = {"vector": LoadedVector, "pure": LoadedPure}
     if pattern not in loaders:
-        # A recognized-but-not-launch-certified pattern (only "neural_block"
+        # A recognized-but-not-launch-certified pattern (only "graph_block"
         # today) resolves through the registered-loader hook rather than a
-        # hardcoded import, so eagle core carries zero neural imports.
+        # hardcoded import, so eagle core carries zero graph-block imports.
         if pattern in RECOGNIZED_PATTERNS:
             return _resolve_pattern_loader(pattern)(manifest, path, directory)
         raise ValueError(
@@ -286,7 +290,7 @@ def load_manifest(path):
     if manifest.get("blocks"):
         raise ValueError(
             f"{path.name}: a manifest carrying blocks[] must declare pattern "
-            f"'neural_block'; got pattern {pattern!r} (block descriptors would be "
+            f"'graph_block'; got pattern {pattern!r} (block descriptors would be "
             "silently ignored by a kernel-manifest loader)"
         )
 
@@ -302,7 +306,7 @@ def load_manifest(path):
 
 
 def _preload_plugins_pass(manifest, path) -> None:
-    """The ``plugins[]`` pre-load pass, shared by the kernel and neural
+    """The ``plugins[]`` pre-load pass, shared by the kernel and graph-block
     branches: rejects a duplicate plugin id and an unrecognized artifact
     ``format``, before any entry is loaded (so neither needs a GPU to catch)."""
     from .roles import MANIFEST_FORMATS
@@ -329,6 +333,6 @@ def _preload_plugins_pass(manifest, path) -> None:
             )
 
 
-#: The ``neural_block`` loader body lives outside this module, reached only
+#: The ``graph_block`` loader body lives outside this module, reached only
 #: through :func:`_resolve_pattern_loader` -- which keeps this module's own
-#: import surface neural-free.
+#: import surface graph-block-free.

@@ -30,6 +30,7 @@ from .launch import (
 )
 from .sidecar import (
     read_launch,
+    read_plane_meta,
     read_params,
     read_terminated_readonly,
     validate_sidecar,
@@ -74,6 +75,8 @@ class LoadedKernel(LaunchMixin):
         #: with named axes, the ``Sorted`` inputs and the thread ``box``.
         (self.lane_space, self.block, self.plane_axes,
          self.sorted_inputs, self.box) = read_launch(self._meta, name=ptx_path.name)
+        #: The opaque notes on planes (``plane_meta``), by plane name.
+        self.plane_meta = read_plane_meta(self._meta, name=ptx_path.name)
         self.vector_inputs = tuple(self._meta["vector_inputs"])
         self.params = read_params(self._meta, name=ptx_path.name)
         #: The binding names of :attr:`params`.
@@ -108,6 +111,7 @@ class LoadedKernel(LaunchMixin):
             if module is None:
                 module = self._modules[device] = _core.module_load(self._image, device)
             fn = self._functions[(device, name)] = SeamFunction(_core.module_function(module, name))
+            fn.device = device
         return fn
 
     def _refuse_v2_door(self, door: str) -> None:

@@ -52,7 +52,7 @@ permissions:
 
 jobs:
   kaggle-gpu:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment: kaggle
     timeout-minutes: 210  # the notebooks kernel may run 180 minutes (drive.py LIMITS)
     strategy:
@@ -71,7 +71,7 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - run: python -m pip install --quiet kaggle
+      - run: python -m pip install --quiet kaggle six  # kaggle 2.2.5 imports six without declaring it
       - name: Run the kernel on Kaggle
         env:
           INPUT_EAGLE_REF: ${{ inputs.eagle_ref || github.ref_name }}

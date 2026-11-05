@@ -137,11 +137,11 @@ print(x_next[0].item(), k.grad[0].item())     # 0.5 -1.0
 [Install](#install) · [Performance](#performance) · [C++ API](#c-api)
 
 <!-- hero:begin -->
-| **613 µs** at N = 1,000,000, 199 µs at N = 100,000 | **2.5×–600× faster** at N = 1,000,000, 1.1×–1700× at N = 100,000 | **4.8×–6.0× less GPU memory** at N = 1,000,000, 5.5×–42× at N = 100,000 |
+| **48.9 ms** at N = 1,000,000, 477 ms at N = 10,000,000 | **2.3×–190× faster** at N = 1,000,000, 2.3×–150× at N = 10,000,000 | **9.1×–30× less GPU memory** at N = 1,000,000, 12×–16× at N = 10,000,000 |
 |:---:|:---:|:---:|
-| RK4 oscillators, each stopping at its own step, up to 1000 steps | than NVIDIA Warp (2.5×), JAX (76×), CuPy (600×), PyTorch with torch.compile (130×) at N = 1,000,000; Warp is level or ahead when every sample runs all its steps | than CuPy and PyTorch with torch.compile: 40 MiB for N = 1,000,000, 1.1× the bare minimum state |
+| RKF7(8) Kepler orbits, each stopping at its own time | than NVIDIA Warp (2.3×), JAX (25×), CuPy (190×), PyTorch with torch.compile (16×) at N = 1,000,000; Warp is level or ahead when every sample runs the same orbit | than CuPy and PyTorch with torch.compile: 102 MiB for N = 1,000,000, 1.4× the bare minimum state |
 
-<sub>NVIDIA H100 80GB HBM3 (card of 2026-10-13). NVIDIA Warp's per-thread kernel is the fastest GPU arm in 2 of 12 RK4 cells; on the dense batch (every sample running all 1000 steps) at N = 1,000,000 it takes 1.71 ms and `eagle.simulate` 1.75 ms. See [every number, every arm](#performance).</sub>
+<sub>NVIDIA H100 NVL (card of 2026-11-05). NVIDIA Warp's per-thread kernel is the fastest GPU arm in 0 of 6 cells; on the dense batch (every sample the same orbit) at N = 1,000,000 it takes 55.1 ms and `eagle.simulate` 40.8 ms. See [every number, every arm](#performance).</sub>
 <!-- hero:end -->
 
 ## What's new in 0.7.1
@@ -160,7 +160,7 @@ JAX (`grad`, `jit`, `vmap`, `jacfwd`, `jacrev`), PyTorch (`backward`, `torch.fun
 
 ## Threading
 
-Free-threaded CPython (3.13t/3.14t) is supported: the compiled modules declare GIL-free operation and the GIL stays disabled after import. Any number of threads may call module-level functions, build, compile, plan and cache concurrently. Distinct objects may be used from distinct threads without synchronisation. One stateful object (a stream, capture, launcher, graph, composer, plan, pipeline, active set, host kernel or arg block) shared by several threads is memory-safe — its calls serialise and a consumed object raises — but the ORDER of those calls is the caller's responsibility, exactly as for a NumPy array or a CuPy stream. CUDA adds two rules of its own: a stream capture is begun, filled and ended by one thread, and while any capture is open no thread may synchronise the whole device (stream-level synchronisation is fine). GPU routes are supported on free-threaded 3.14; on 3.13t the CPU route runs. CUDA graph capture is per thread: a nested capture on one thread raises, while two threads may capture concurrently.
+Free-threaded CPython (3.14t/3.15t) is supported: the compiled modules declare GIL-free operation and the GIL stays disabled after import. Any number of threads may call module-level functions, build, compile, plan and cache concurrently. Distinct objects may be used from distinct threads without synchronisation. One stateful object (a stream, capture, launcher, graph, composer, plan, pipeline, active set, host kernel or arg block) shared by several threads is memory-safe — its calls serialise and a consumed object raises — but the ORDER of those calls is the caller's responsibility, exactly as for a NumPy array or a CuPy stream. CUDA adds two rules of its own: a stream capture is begun, filled and ended by one thread, and while any capture is open no thread may synchronise the whole device (stream-level synchronisation is fine). GPU routes are supported on free-threaded 3.14; the CPU route runs elsewhere. CUDA graph capture is per thread: a nested capture on one thread raises, while two threads may capture concurrently.
 
 ## Install
 
@@ -280,156 +280,76 @@ by `EAGLE_CPP_MODE`. The C++ core depends only on `aether`; the Python package (
 
 ## Performance
 
-<!--ctx card=rk4 dev=h100 n=1e6 dist=spread steps=1000-->
-eagle's committed [performance card](https://github.com/amasat01/eagle/tree/main/benchmarks/perf_card) compares many
-ways of integrating a batch of damped harmonic oscillators (fixed-step RK4, float64, each sample stopping at its
-own step count) from 1,000 to 1,000,000 samples: `eagle.simulate` (the arm above), the CUDA-graph device loop
-alone, the same loop with active-set compaction, the same loop with compaction plus an occasional reorder, two
-K-fused-steps variants, the automatic-policy and persistent-launch arms, a plain eager launch loop, a CuPy array
-implementation, PyTorch masked, CUDA-graph and `torch.compile` implementations, a JAX `jit(vmap(while_loop))`
-implementation, an NVIDIA Warp per-thread kernel, and a CPU OpenMP arm (no device or transfers needed, and the
-correctness reference the rest are checked against). The tables below show the NVIDIA H100 card; the five-arm
-table is the headline cut (both distributions, N = 1,000,000), and the
-[full performance page](https://amasat01.github.io/eagle/content/performance.html) has every arm, every N.
+<!-- stale-prose-gate:
+benchmarks/perf_card/card_nvidia-h100-nvl.json: PENDING
+-->
 
-[Where the performance comes from](https://amasat01.github.io/eagle/content/performance/mechanism.html) explains why eagle is ahead where samples finish at different times and level where they do not.
+<!--ctx card=ensemble dev=h100 n=1e6 dist=spread-->
+The ensemble card integrates a batch of two-body Kepler orbits with an adaptive RKF7(8) in float64, each sample stopping at
+its own time, from 10^6 to 10^7 samples, on spread and uniform batches. Every arm is checked against the exact answer. The
+arms are `eagle.simulate` (the arm above), the CUDA-graph device loop, its persistent-launch form, a CuPy masked loop, PyTorch
+with CUDA graphs and with `torch.compile`, a JAX `jit(vmap(while_loop))`, and an NVIDIA Warp per-thread kernel. The CPU card
+runs the same workload on CPU threads. Each arm runs in its own process; an arm that runs out of memory or needs more than
+120 s per run is shown as such, not dropped. The feature card times one capability per row, at one batch size, against its
+natural baseline.
+
+[Where the performance comes from](https://amasat01.github.io/eagle/content/performance/mechanism.html) explains why eagle is
+ahead where samples finish at different times and level where they do not. [What the cards cover](https://amasat01.github.io/eagle/content/performance/coverage.html)
+lists every feature and the card row, profile stage or reason behind it.
 
 <p align="center"><a href="https://amasat01.github.io/eagle/content/performance.html"><picture><source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/amasat01/eagle/main/docs/_static/perf/readme_gpu-dark.svg"><img src="https://raw.githubusercontent.com/amasat01/eagle/main/docs/_static/perf/readme_gpu.svg" alt="Wall time per tool for a million RK4 oscillators on the default GPU: eagle.simulate, NVIDIA Warp, JAX, CuPy and PyTorch; the numbers are on the performance page." width="732"></picture></a></p>
 
-The chart shows the H100; [the performance page](https://amasat01.github.io/eagle/content/performance.html) has a tab for every device and CPU measured.
 
-<!-- stale-prose-gate:
-benchmarks/perf_card/card_nvidia-h100-80gb-hbm3.json: 86570d9dd9f301b54ae3e50a40ecdfc4
-benchmarks/perf_card/card_quadro-p2000.json: e1d57a6c7d57c7cd7efd7bd8e97fcdcf
-benchmarks/rk78_card/card_nvidia-h100-80gb-hbm3.json: 4a6847fb1f7815d64d95de8c8b48a527
-benchmarks/rk78_card/cpu_card_amd-epyc-9b45.json: 1ef4eda3e4f12f87d3a84585424f1c57
-benchmarks/perf_card/cpu_card_aarch64.json: 778ce3a02f2c8c80dd7d23d942630da0
-benchmarks/perf_card/cpu_card_amd-epyc-7b13.json: 9b3195ca87f82cf3966a32f30051a03f
-benchmarks/perf_card/cpu_card_amd-epyc-9b45.json: 440352ba86c3de47db28e0e9d25fbd6b
-benchmarks/perf_card/cpu_card_intel-xeon-platinum-8581c.json: f9c4d4d83d853181142e47e22a9cc994
--->
+The chart shows the reference device; [the performance page](https://amasat01.github.io/eagle/content/performance.html) has a tab for every device and CPU measured.
+
 
 <!-- cards:begin -->
-**NVIDIA H100 80GB HBM3, card of 2026-10-13**
+**NVIDIA H100 NVL, card of 2026-11-05**
 
-| Distribution (N = 1,000,000) | Arm | wall (range) | sample·steps/s | useful FLOP/s (% of peak) |
+| Distribution (N = 1,000,000) | Arm | wall (IQR) | attempts·samples/s | % of the device's top FP64 rate |
 |---|---|---:|---:|---:|
-| Spread (log-uniform stop steps, up to 1000) | eagle graph (device loop) | 2.13 ms (2.11 ms–2.14 ms) | 1.02e11 | 4.47e12 (13 %) |
-| Spread (log-uniform stop steps, up to 1000) | eagle graph + compaction | 16 ms (16 ms–16 ms) | 1.35e10 | 5.96e11 (1.8 %) |
-| Spread (log-uniform stop steps, up to 1000) | eagle graph + compaction + reorder | 10.7 ms (10.6 ms–10.7 ms) | 2.03e10 | 8.93e11 (2.7 %) |
-| Spread (log-uniform stop steps, up to 1000) | CuPy masked | 368 ms (367 ms–369 ms) | 5.88e8 | 2.59e10 (0.077 %) |
-| Spread (log-uniform stop steps, up to 1000) | CPU OpenMP | 199 ms (198 ms–200 ms) | 1.09e9 | 4.79e10 (–) |
-| Uniform (every sample runs 1000 steps) | eagle graph (device loop) | 2.32 ms (2.31 ms–2.33 ms) | 4.30e11 | 1.89e13 (57 %) |
-| Uniform (every sample runs 1000 steps) | eagle graph + compaction | 22.9 ms (22.9 ms–22.9 ms) | 4.37e10 | 1.92e12 (5.7 %) |
-| Uniform (every sample runs 1000 steps) | eagle graph + compaction + reorder | 23.3 ms (23.3 ms–23.3 ms) | 4.30e10 | 1.89e12 (5.7 %) |
-| Uniform (every sample runs 1000 steps) | CuPy masked | 365 ms (364 ms–366 ms) | 2.74e9 | 1.21e11 (0.36 %) |
-| Uniform (every sample runs 1000 steps) | CPU OpenMP | 170 ms (169 ms–170 ms) | 5.90e9 | 2.59e11 (–) |
+| Spread (each sample stops at its own time) | eagle graph | 105 ms (116 µs) | 4.74 G | 37% |
+| Spread (each sample stops at its own time) | hawk + eagle persistent | 49 ms (92 µs) | 10.2 G | 79% |
+| Spread (each sample stops at its own time) | eagle.simulate (eagle picks the launch mode) | 48.9 ms (110 µs) | 10.2 G | 80% |
+| Spread (each sample stops at its own time) | CuPy masked | 9.34 s (141 ms) | 53.4 M | <1% |
+| Spread (each sample stops at its own time) | Warp per-thread kernel | 113 ms (130 µs) | 4.42 G | 34% |
+| Uniform (every sample runs the same orbit) | eagle graph | 51.3 ms (83.6 µs) | 8.33 G | 65% |
+| Uniform (every sample runs the same orbit) | hawk + eagle persistent | 40.8 ms (101 µs) | 10.5 G | 82% |
+| Uniform (every sample runs the same orbit) | eagle.simulate (eagle picks the launch mode) | 40.8 ms (225 µs) | 10.5 G | 82% |
+| Uniform (every sample runs the same orbit) | CuPy masked | 4.87 s (54.3 ms) | 87.9 M | <1% |
+| Uniform (every sample runs the same orbit) | Warp per-thread kernel | 55.1 ms (67.9 µs) | 7.75 G | 60% |
 
 Measured on:
 
-- [NVIDIA H100 80GB HBM3](https://amasat01.github.io/eagle/content/performance.html#perf-card-gpu-nvidia-h100-80gb-hbm3)
+- [NVIDIA H100 NVL](https://amasat01.github.io/eagle/content/performance.html#perf-card-gpu-nvidia-h100-nvl)
 - [NVIDIA L4](https://amasat01.github.io/eagle/content/performance.html#perf-card-gpu-nvidia-l4)
-- [NVIDIA A100-SXM4-40GB](https://amasat01.github.io/eagle/content/performance.html#perf-card-gpu-nvidia-a100-sxm4-40gb)
-- [Tesla T4](https://amasat01.github.io/eagle/content/performance.html#perf-card-gpu-tesla-t4)
-- [Quadro P2000](https://amasat01.github.io/eagle/content/performance.html#perf-card-gpu-quadro-p2000)
-- [NVIDIA RTX PRO 6000 Blackwell Server Edition](https://amasat01.github.io/eagle/content/performance.html#perf-card-gpu-nvidia-rtx-pro-6000-blackwell-server-edition)
 - [AMD EPYC 9B45](https://amasat01.github.io/eagle/content/performance.html#perf-card-cpu-amd-epyc-9b45)
-- [AMD EPYC 7B13](https://amasat01.github.io/eagle/content/performance.html#perf-card-cpu-amd-epyc-7b13)
-- [Google Axion (Arm Neoverse-V2)](https://amasat01.github.io/eagle/content/performance.html#perf-card-cpu-aarch64)
-- [Intel Xeon Platinum 8581C](https://amasat01.github.io/eagle/content/performance.html#perf-card-cpu-intel-xeon-platinum-8581c)
 <!-- cards:end -->
 
 <!-- cpu-cards:begin -->
-**On a CPU alone: AMD EPYC 9B45, 8 cores, card of 2026-10-13**
+**On a CPU alone: AMD EPYC 9B45, 16 logical CPUs, card of 2026-11-04**
 
-| Arm (N = 1,000,000) | spread S=1000 wall | uniform S=1000 wall | vs eagle 8 threads (spread) |
+| Arm (N = 1,000,000) | spread wall | uniform wall | vs eagle CPU, 8 threads (spread) |
 |---|---:|---:|---:|
-| eagle host, termination loop, up to 8 threads | 142 ms | 187 ms | 1.0× |
-| Numba prange, 8 threads | 328 ms | 1.53 s | 2.3× |
-| JAX sharded over 8 CPU devices | 1.86 s | 1.94 s | 13× |
-| PyTorch masked, 8 threads | 10.2 s | 10.2 s | 72× |
-| NumPy masked | 15.3 s | 13.4 s | 100× |
-
-**On a CPU alone: AMD EPYC 7B13, 8 cores, card of 2026-10-13**
-
-| Arm (N = 1,000,000) | spread S=1000 wall | uniform S=1000 wall | vs eagle 8 threads (spread) |
-|---|---:|---:|---:|
-| eagle host, termination loop, up to 8 threads | 400 ms | 693 ms | 1.0× |
-| Numba prange, 8 threads | 398 ms | 1.85 s | 0.99× |
-| JAX sharded over 8 CPU devices | 2.15 s | 2.14 s | 5.3× |
-| PyTorch masked, 8 threads | 8.19 s | 8.37 s | 20× |
-| NumPy masked | 21.6 s | 19.6 s | 54× |
-
-**On a CPU alone: Google Axion (Arm Neoverse-V2), 16 cores, card of 2026-10-13**
-
-| Arm (N = 1,000,000) | spread S=1000 wall | uniform S=1000 wall | vs eagle 8 threads (spread) |
-|---|---:|---:|---:|
-| eagle host, termination loop, up to 8 threads | 330 ms | 648 ms | 1.0× |
-| Numba prange, 8 threads | 388 ms | 1.8 s | 1.1× |
-| JAX sharded over 8 CPU devices | 410 ms | 411 ms | 1.2× |
-| PyTorch masked, 8 threads | 3.02 s | 2.76 s | 9.1× |
-| NumPy masked | 16.4 s | 15.6 s | 49× |
-
-**On a CPU alone: Intel Xeon Platinum 8581C, 8 cores, card of 2026-10-13**
-
-| Arm (N = 1,000,000) | spread S=1000 wall | uniform S=1000 wall | vs eagle 8 threads (spread) |
-|---|---:|---:|---:|
-| eagle host, termination loop, up to 8 threads | 162 ms | 123 ms | 1.0× |
-| Numba prange, 8 threads | 335 ms | 1.59 s | 2.0× |
-| JAX sharded over 8 CPU devices | 1.03 s | 1.03 s | 6.3× |
-| PyTorch masked, 8 threads | 7.39 s | 7.24 s | 45× |
-| NumPy masked | 29.1 s | 28.4 s | 170× |
+| eagle CPU, 8 threads | 3.69 s (2.05 ms) | 2.08 s (2.12 ms) | 1.0× |
+| eagle CPU, 1 thread | 29.4 s (14.4 ms) | 16.5 s (2.75 ms) | 7.9× |
+| Numba prange | 20.9 s (396 ms) | 17.9 s (265 ms) | 5.6× |
+| JAX jit(vmap(while_loop)) | 60.4 s (7.88 ms) | 28.8 s (57.4 ms) | 16× |
 <!-- cpu-cards:end -->
 
-Figures are written by `tools/sync_readme_cards.py` from the card JSON (the
-same numbers `card_nvidia-h100-80gb-hbm3.md` renders): wall time and rates rounded to 3
-significant figures, percent-of-peak to 2; a dash means that arm has no
-FP64-peak baseline recorded (CPU). Re-run the script after a card is re-run or
-a new `perf_card` device is added; `python/tests/test_readme_cards.py` fails
-if the committed block has drifted from a fresh render.
+**Where each tool fits.** On a dense batch (uniform: every sample runs the same orbit) NVIDIA Warp's per-thread kernel is the
+fastest GPU arm when it ties: <!--c wall arm=warp_kernel dist=uniform-->55.1 ms<!--/c--> against `eagle.simulate`'s
+<!--c wall arm=eagle_simulate dist=uniform-->40.8 ms<!--/c--> at N = 1,000,000. On a spread batch, where samples finish at
+different times, `eagle.simulate` takes <!--c wall arm=eagle_simulate-->48.9 ms<!--/c--> against Warp's
+<!--c wall arm=warp_kernel-->113 ms<!--/c--> (<!--c x arm=warp_kernel den_arm=eagle_simulate-->2.3×<!--/c-->). A CuPy masked loop
+needs <!--c wall arm=cupy_masked-->9.34 s<!--/c--> there. See [where RAPTOR fits](https://amasat01.github.io/where_raptor_fits.html)
+for that comparison.
 
-**Where each tool fits.** On a dense batch, where every sample runs all 1000 steps, NVIDIA Warp's per-thread
-kernel is a few percent ahead of `eagle.simulate` from N = 100,000 up (<!--c wall arm=warp_kernel n=100000 dist=uniform-->245 µs<!--/c--> vs <!--c wall arm=eagle_simulate n=100000 dist=uniform-->260 µs<!--/c--> at N = 100,000, <!--c pctgap arm=eagle_simulate den_arm=warp_kernel n=100000 dist=uniform-->6%<!--/c-->;
-<!--c wall arm=warp_kernel dist=uniform-->1.71 ms<!--/c--> vs <!--c wall arm=eagle_simulate dist=uniform-->1.75 ms<!--/c--> at N = 1,000,000, <!--c pctgap arm=eagle_simulate den_arm=warp_kernel dist=uniform-->2.5%<!--/c-->), so it is the better fit for a batch of that shape. On a batch whose samples stop at different steps, `eagle.simulate` is faster
-than Warp's per-thread kernel at N = 1,000,000 (<!--c wall arm=eagle_simulate-->613 µs<!--/c--> against Warp's <!--c wall arm=warp_kernel-->1.54 ms<!--/c-->, <!--c x arm=warp_kernel den_arm=eagle_simulate-->2.5×<!--/c-->). JAX compiles cold faster than hawk + eagle
-(about <!--c comp key=jax:1000 which=cold-->242 ms<!--/c-->, against `eagle.simulate`'s <!--c comp key=eagle:eagle_simulate which=cold-->875 ms<!--/c-->; NVIDIA Warp's cold compile is <!--c comp key=warp which=cold-->574 ms<!--/c-->), and
-JAX's warm recompile (<!--c comp key=jax:1000 which=warm-->40 ms<!--/c-->) is shorter than hawk + eagle's own (<!--c comp key=eagle:eagle_simulate which=warm-->70 ms<!--/c-->). These are
-complementary tools: Warp and hawk + eagle both skip nothing, and the difference is who writes the per-thread loop and
-who decides when to compact. The CPU OpenMP arm needs no GPU, which makes it the tool to reach for on a machine
-without one; where a GPU is present, the GPU arms are far ahead on this card (<!--c wall arm=cpu_openmp-->199 ms<!--/c--> against
-`eagle.simulate`'s <!--c wall arm=eagle_simulate-->613 µs<!--/c--> on spread, <!--c wall arm=cpu_openmp dist=uniform-->170 ms<!--/c--> against <!--c wall arm=eagle_simulate dist=uniform-->1.75 ms<!--/c--> on uniform, at N = 1,000,000).
+**Hardware caveat:** the tables and text above are measured on a <!--c spec field=device.name-->NVIDIA H100 NVL<!--/c-->, a data-centre
+card (<!--c spec field=device.sm_count-->132<!--/c--> SMs). The method carries over unchanged to other GPUs; the absolute numbers,
+and the crossover points between arms, differ from device to device, and the performance page has a tab for each one measured.
 
-Compaction's advantage tracks how early the batch thins, and the device matters. On this H100 the plain graph runs the whole
-batch so quickly that active-set bookkeeping has little to recover: the plain graph is faster than the compaction arm in every
-cell of the card, <!--c wall arm=eagle_graph-->2.13 ms<!--/c--> against <!--c wall arm=eagle_graph_compact-->16 ms<!--/c--> on the spread distribution at N = 1,000,000 and <!--c wall arm=eagle_graph dist=uniform-->2.32 ms<!--/c--> against
-<!--c wall arm=eagle_graph_compact dist=uniform-->22.9 ms<!--/c--> on the uniform one, so plain `hawk + eagle graph` is the better fit here. The P2000 tab on the performance page
-shows a card where compaction pays on a thinning batch: <!--c wall dev=p2000 arm=eagle_graph-->586 ms<!--/c--> → <!--c wall dev=p2000 arm=eagle_graph_compact-->374 ms<!--/c--> at N = 1,000,000 on spread
-(<!--c x dev=p2000 arm=eagle_graph den_arm=eagle_graph_compact-->1.5×<!--/c-->). The eager launch loop takes <!--c x arm=eager_loop den_arm=eagle_graph-->15×<!--/c--> (spread) and <!--c x arm=eager_loop dist=uniform den_arm=eagle_graph-->16×<!--/c--> (uniform) the plain graph's
-time at this N (<!--c wall arm=eager_loop-->32.3 ms<!--/c--> / <!--c wall arm=eager_loop dist=uniform-->39.1 ms<!--/c--> vs <!--c wall arm=eagle_graph-->2.13 ms<!--/c--> / <!--c wall arm=eagle_graph dist=uniform-->2.32 ms<!--/c-->), which is what the CUDA graph is for: it keeps the step loop on the device.
-CuPy masked is the array-style option (<!--c wall arm=cupy_masked-->368 ms<!--/c--> on spread, <!--c pct field=fraction_of_peak_dram arm=cupy_masked dist=uniform-->74%<!--/c--> of peak memory bandwidth on uniform, recorded in the card).
-
-The reorder arm is compaction's index map plus an occasional physical reorder, opt-in through
-`eagle.ActiveSet(mask, reorder=theta)`. On the H100 it is faster than compaction alone in one cell of the card, N = 1,000,000 on
-the spread distribution (<!--c wall arm=eagle_graph_compact-->16 ms<!--/c--> → <!--c wall arm=eagle_graph_reorder-->10.7 ms<!--/c-->, <!--c x arm=eagle_graph_compact den_arm=eagle_graph_reorder-->1.4×<!--/c-->), and takes longer in the others, for example <!--c wall arm=eagle_graph_reorder dist=uniform-->23.3 ms<!--/c--> against
-<!--c wall arm=eagle_graph_compact dist=uniform-->22.9 ms<!--/c--> on uniform at N = 1,000,000.
-
-CPU, no GPU at all: the CPU block above shows each CPU card measured; on the AMD EPYC 9B45 the host
-termination loop on 8 threads takes <!--c wall card=rk4cpu dev=amd-epyc-9b45 arm=eagle_term8-->142 ms<!--/c--> (spread) / <!--c wall card=rk4cpu dev=amd-epyc-9b45 arm=eagle_term8 dist=uniform-->187 ms<!--/c--> (uniform) at N = 1,000,000, against Numba's
-<!--c wall card=rk4cpu dev=amd-epyc-9b45 arm=numba_prange-->328 ms<!--/c--> / <!--c wall card=rk4cpu dev=amd-epyc-9b45 arm=numba_prange dist=uniform-->1.53 s<!--/c-->. On the harder RK7(8) family (adaptive orbits, heavier per-step work) the GPU still leads clearly at
-N = 1,000,000: <!--c wall card=rk78 arm=eagle_simulate-->43.6 ms<!--/c--> for `eagle.simulate` on the H100, <!--c wall card=rk78cpu dev=amd-epyc-9b45 arm=eagle_cpu8-->3.76 s<!--/c--> for the eagle CPU path on 8 EPYC threads, and
-<!--c wall card=rk78 arm=eagle_cpu-->6.51 s<!--/c--> for it on the GPU card's own host. See
-[where RAPTOR fits](https://amasat01.github.io/where_raptor_fits.html) for that comparison.
-
-**Hardware caveat:** the tables and text above are measured on a <!--c spec field=device.name-->NVIDIA H100 80GB HBM3<!--/c-->, a data-centre card (<!--c spec field=device.sm_count-->132<!--/c--> SMs,
-<!--c spec field=peak.fp64_flops-->3.35e13<!--/c--> FLOP/s FP64 peak at its rated clock, from the card). The method
-carries over unchanged to other GPUs; the absolute numbers, and the crossover points between arms, differ from device to
-device, and the performance page has a tab for each one measured.
-
-Full write-up, method and the per-N tables: [the performance
-page](https://amasat01.github.io/eagle/content/performance.html). Raw
-numbers:
-[`card_nvidia-h100-80gb-hbm3.json`](https://github.com/amasat01/eagle/blob/main/benchmarks/perf_card/card_nvidia-h100-80gb-hbm3.json) /
-[`card_nvidia-h100-80gb-hbm3.md`](https://github.com/amasat01/eagle/blob/main/benchmarks/perf_card/card_nvidia-h100-80gb-hbm3.md).
+Full write-up, method and the per-N tables: [the performance page](https://amasat01.github.io/eagle/content/performance.html).
 
 ---
 <p align="center">

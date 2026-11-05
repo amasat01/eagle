@@ -4,7 +4,7 @@ Short, task-shaped pages: you know what you want to do, here is how. Grouped by 
 
 ## Build and control graphs
 
-Build a graph in code, in any of its forms. The ideas are in [Explanation](concepts); capped device loops with `if c: <assignments>; break` are shown in the graph builder page and in [Conditionals, budgets and events](tutorials/11_conditionals_budgets_events).
+Build a graph in code, in any of its forms. The ideas are in [Explanation](concepts); capped device loops with `if c: <assignments>; break` are shown in the graph builder page and in [Gradients through conditionals](tutorials/11_conditionals_budgets_events).
 
 ```{toctree}
 :maxdepth: 1
@@ -13,7 +13,7 @@ Build a graph in code, in any of its forms. The ideas are in [Explanation](conce
 graph_forms
 ```
 
-- [Build a graph programmatically](graph_forms): every form of `@eagle.Graph.builder`, one line each, executed.
+- [Build a graph in code](graph_forms): every form of `@eagle.Graph.builder`, one line each, executed.
 
 ## Run kernels
 
@@ -29,10 +29,54 @@ examples/zero_copy_interop
 examples
 ```
 
-- [Launch a kernel and use the registry](tutorials/01_launch_and_registry): load a compiled kernel by name, then call, stream or graph it.
+- [Load a compiled kernel](tutorials/01_launch_and_registry): load a compiled kernel by name, then call, stream or graph it.
 - [Early termination](examples/early_termination): a batch that finishes at different times, with a conditional graph node that skips the work once every sample is done.
 - [Zero-copy interop](examples/zero_copy_interop): one kernel fed from and handed back into NumPy, CuPy and PyTorch arrays with no copy.
 - [C++ examples](examples): complete, tested C++ programs and how their gate runs.
+
+## Transforms, products and streams
+
+Graph steps for Fourier transforms and matrix products, and how to put eagle's work on your own stream.
+
+```{toctree}
+:maxdepth: 1
+:hidden:
+
+howto_fft
+howto_gemm
+howto_streams
+```
+
+- [Fourier transforms in a graph](howto_fft): `eagle.fft` on the CPU and GPU, with derivatives, replayed in a captured graph.
+- [Matrix products in a graph](howto_gemm): `eagle.gemm` host products and a cuBLAS product recorded in a capture.
+- [Put eagle's work on your stream](howto_streams): `with eagle.stream(s):`, including inside your own capture.
+
+## Keep the state at every step
+
+`eagle.simulate(model, ..., max_steps=N, history=True)` keeps it: `res.history["x"]` has `N + 1` rows (the initial state, then after each step), and `history=k` keeps every k-th step (`N // k + 1` rows). A sample that finished repeats its final state. The final state is the same as without `history`. It runs one launch per step, so the kernel must advance one step per launch, and the rows take `rows * n * planes` of memory.
+
+## Direct calls and bound planes
+
+- A direct kernel call takes `returns="numpy"` (or `"cupy"`, `"torch"`, `"jax"`), as `run` does.
+- A number or 0-d value for a per-lane `Scalar` beside a batch is that value on every lane. A `Param` takes a number or 0-d array; an array for it is refused by name.
+- A kernel parameter declared `Param[Matrix[2, 2]]` (or `Vector`, `Table`) is one value shared by every lane. `run`, `bind` and a direct call take it in its own shape and refuse another by name.
+- An `Index` plane has the width the kernel declares (`int32` unless `Index[int64]`). `bind` and `rebind` refuse another width by name and say which to pass; `run` converts on each call.
+- Opaque notes a kernel's author put on a plane (`hawk.Meta`) are on the loaded kernel as `plane_meta`, by plane name.
+
+## Run on several GPUs
+
+```{toctree}
+:maxdepth: 1
+:hidden:
+
+howto_several_gpus
+```
+
+- [Run on several GPUs](howto_several_gpus): `RankPartition` over MPI ranks, the same answer as one rank.
+
+## Failures
+
+A device out-of-memory error says which kernel needed what: the largest local memory per thread among the graph's kernels, and the GPU's free and total memory at the moment of failure.
 
 ## Deploy
 
@@ -46,7 +90,7 @@ examples/01_device_properties
 cpp/c4_embed_a_kernel
 ```
 
-- [Device properties and a two-plugin manifest](examples/01_device_properties): read the device, then combine two compiled force plugins from one manifest.
+- [Device properties](examples/01_device_properties): read the device, then combine two compiled force plugins from one manifest.
 - [Run a deployed kernel on the CPU](cpp/c4_embed_a_kernel): load plugins (float64 or float32) from a manifest and run them from C++ with no CUDA toolchain.
 
 ## Use eagle with other frameworks
@@ -79,12 +123,12 @@ tutorials/jax_simulated_batches_for_training
 - [Use eagle with NumPy and CuPy](../interop/use_eagle_with_cupy_numpy): the same call on either, with streams and the memory pool.
 - [A hawk kernel inside your jitted JAX step](tutorials/jax_training_step): fit a drag coefficient with `jax.jit` and `grad`.
 - [Batches and Jacobians](tutorials/jax_vmap_and_jacobians): `vmap`, `jacfwd`, `hessian`, and which cost one launch.
-- [A stepping loop in `lax.scan`](tutorials/jax_simulation_loop): balls that land and stop, on the CPU and the GPU.
-- [Train a torch net inside your simulation loop](tutorials/torch_learned_correction_per_step): a net runs before every step; the gradient goes through the whole run.
-- [A Warp kernel in the middle of an eagle graph](tutorials/warp_kernel_in_a_graph): your kernel between two eagle steps, with its gradient.
-- [A JAX model between eagle launches](tutorials/jax_model_between_eagle_launches): your network writes the correction, eagle steps the batch.
-- [The eagle batch inside `jit`](tutorials/jax_eagle_batch_inside_jit): `while_loop` to run, `scan` to differentiate, no `where`.
-- [Simulated batches for a JAX training loop](tutorials/jax_simulated_batches_for_training): eagle makes fresh data every step, one process per GPU for a bigger set.
+- [A stepping loop with scan](tutorials/jax_simulation_loop): balls that land and stop, on the CPU and the GPU.
+- [Train a net in the loop](tutorials/torch_learned_correction_per_step): a net runs before every step; the gradient goes through the whole run.
+- [A Warp kernel in a graph](tutorials/warp_kernel_in_a_graph): your kernel between two eagle steps, with its gradient.
+- [A JAX model between launches](tutorials/jax_model_between_eagle_launches): your network writes the correction, eagle steps the batch.
+- [The batch inside jit](tutorials/jax_eagle_batch_inside_jit): `while_loop` to run, `scan` to differentiate, no `where`.
+- [Simulated training batches](tutorials/jax_simulated_batches_for_training): eagle makes fresh data every step, one process per GPU for a bigger set.
 
 ## Domain cases
 

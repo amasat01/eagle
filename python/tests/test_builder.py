@@ -10,6 +10,10 @@ from hawk import math as m
 import _builder_fixtures as bp
 
 kernel = bp.kernel
+
+# The loop fixtures here are uncapped on purpose (they pin the builder's lowering, not the cap advice); the warning
+# itself is pinned by test_c_uncapped_while_warns_and_record_refuses.
+pytestmark = pytest.mark.filterwarnings("ignore:uncapped device loop:UserWarning")
 U = np.uint32
 
 
@@ -589,6 +593,7 @@ def test_d_seed_adds_exactly_one_node_over_twin():
 
 
 # ============================================================================ (e) record-time cost
+@pytest.mark.wall_clock   # a measured time: it flips with machine load (parallel gate workers)
 def test_e_record_time_cost(doc, capsys):
     whole = doc["whole"]
     x = np.arange(8.0); times = []
@@ -877,3 +882,31 @@ def test_g_a_free_runtime_label_is_a_keyword_of_the_builder_call():
     np.testing.assert_array_equal(got, direct)
     with pytest.raises(ValueError, match="node"):
         plan(conn, b=np.zeros(5), e=2, node=4)
+
+
+@kernel
+def twice_into(x: Scalar, y: Mutable[Scalar]):
+    y = 2.0 * x
+
+
+@kernel
+def plus_one_into(y: Scalar, z: Mutable[Scalar]):
+    z = y + 1.0
+
+
+def test_a_block_call_that_omits_its_one_output_returns_the_array_like_a_direct_call():
+    """A kernel that writes one Mutable the call omits returns that array inside a block, as a direct call does, so
+    the next call can read it: two kernels chain by array flow."""
+    x = np.arange(8.0)
+    assert not isinstance(twice_into(x), dict)
+
+    @eagle.Graph.builder
+    def block(g: eagle.Graph, x):
+        y = twice_into(x)
+        assert not isinstance(y, dict)
+        g.result = plus_one_into(y)
+
+    graph = eagle.Graph()
+    block(graph, x)
+    graph.build()
+    np.testing.assert_array_equal(np.asarray(graph()), 2.0 * x + 1.0)

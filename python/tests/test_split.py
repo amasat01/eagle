@@ -442,3 +442,22 @@ def test_bridges_run_the_split_kernel_on_cuda(tmp_path, bridge):
         got = eagle_warp.function(over_total, cache_dir=tmp_path)(
             wp.array(x, dtype=wp.float64, device="cuda:0")).numpy()
     np.testing.assert_allclose(got, want, rtol=1e-12)
+
+
+def test_a_placement_only_stage_passes_the_stepping_doors_and_a_real_split_does_not():
+    # a kernel whose only cut is its wide-value scratch is one launch: the stepping doors run it
+    from types import SimpleNamespace
+
+    from eagle import _split
+
+    def plugin(stages, team_planes):
+        return SimpleNamespace(name="k", _stages=stages, _team_planes=team_planes)
+
+    placed = _split.Stage(plugin=None, cells_in=(), cells_out=())
+    _split.refuse(plugin((placed,), {"hwd0": {}}), "eagle.simulate")
+    for stages, planes in (((placed, placed), {"hwd0": {}}),
+                           ((_split.Stage(plugin=None, cells_in=("c",), cells_out=()),), {"hwd0": {}}),
+                           ((_split.Stage(plugin=None, cells_in=(), cells_out=(), team={"n": 32}),), {"hwd0": {}}),
+                           ((placed,), {})):
+        with pytest.raises(ValueError, match=r"eagle\.simulate: kernel 'k' is split in"):
+            _split.refuse(plugin(stages, planes), "eagle.simulate")

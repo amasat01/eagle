@@ -34,6 +34,7 @@ from ._graph_kinds import _cell, _copy, _wait
 from ._conditional import skippable
 from .graph import Graph, Node, get_node_kind
 from ._plan_planes import _declared_widths
+from . import _layout
 from ._layout import _view
 from . import arrays as _arrays
 
@@ -315,7 +316,8 @@ class Rec:
                     floats = [a.dtype for a in arrs if a.dtype.kind == "f"]
                     dt = _DTYPES[slot.ttype.dtype] if slot.ttype.dtype != "f64" or not floats else max((dtype_name(a) for a in floats), key=_FLOAT_BYTES.get)
                     out[nm] = _alloc.zeros(_view(samples).device,
-                        samples.shape[-1] if lanes is None else _lane_bind.output_shape(plan.plugin, nm, 1, lanes, extents), dtype=dt)
+                        _lane_bind.output_shape(plan.plugin, nm, _declared_widths(plan.plugin).get(nm, 1), samples.shape[-1], extents)
+                        if lanes is None else _lane_bind.output_shape(plan.plugin, nm, 1, lanes, extents), dtype=dt)
                     self.stats["allocs"] += 1
             if spec is not None:
                 key = label if len(omitted) == 1 else f"{label}.{nm}"
@@ -342,6 +344,8 @@ class Rec:
                 self.views[id(view)] = (view, out[nm])
         if getattr(kernel, "returns", None) is not None:
             return plan.returned(shaped if isinstance(shaped, dict) else {next(iter(out)): shaped})
+        if isinstance(shaped, dict) and len(shaped) == 1:     # one output: the array itself, as a direct call returns
+            return next(iter(shaped.values()))
         return shaped if out else None
 
     @staticmethod
@@ -894,15 +898,29 @@ def make_builder(fn):
     ret = sig.return_annotation
     if not block and ret is not inspect.Signature.empty and not _is_graph_ann(ret):
         raise TypeError(f"{fn.__name__}: a builder returns its Graph (-> eagle.Graph), not {ret}")
-    if any(p.name == "buffer" for p in params):
-        raise TypeError(f"{fn.__name__}: `buffer` is reserved")
+    for reserved in ("buffer", "layout"):
+        if any(p.name == reserved for p in params):
+            raise TypeError(f"{fn.__name__}: `{reserved}` is reserved")
     holder = {}
 
     @functools.wraps(fn)
-    def wrapper(*args, **kw):
+    def wrapper(*args, layout=None, **kw):
+        # layout= is the call's sample axis for every plane the body binds (eagle._layout); a per-array marker cannot
+        # cross into the block, where the kernels name their planes differently, so it is refused with the remedy
+        _layout.check_layout(layout)
+        for name, value in (*((f"argument {k}", v) for k, v in enumerate(args)), *kw.items()):
+            if _layout._mark_of(value) is not None:
+                raise _layout.LayoutError(
+                    f"{fn.__name__}: {name} is wrapped in eagle.samples_{_layout._mark_of(value)}(...); a builder call "
+                    f"takes layout='samples_first' or 'samples_last' for all its planes, or mark the array at the "
+                    f"kernel call inside the block")
         if "f" not in holder:
             t = time.perf_counter(); holder["f"] = rewrite_function(fn); wrapper.rewrite_ms = (time.perf_counter() - t) * 1e3
-        return (run_block if block else run_builder)(fn, holder["f"], sig, args, kw)
+        run = run_block if block else run_builder
+        if layout is None:
+            return run(fn, holder["f"], sig, args, kw)
+        with _layout.scope(layout, {}):
+            return run(fn, holder["f"], sig, args, kw)
 
     wrapper.rewrite_ms = None
     return wrapper

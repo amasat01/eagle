@@ -1,6 +1,6 @@
 {
   "row": 18,
-  "title": "a `neural_block` descriptor carrying a populated, otherwise-valid `derivative` block is rejected — forbidden means populated",
+  "title": "a `graph_block` descriptor carrying a populated, otherwise-valid `derivative` block is rejected — forbidden means populated",
   "level": "sidecar",
   "expect": "reject",
   "error_substring": "must not carry 'derivative'",
@@ -23,7 +23,7 @@
     "`derivative` is forbidden on the descriptor because it belongs on the",
     "kernel the descriptor's `vjp_exec` names (row01b), not on the descriptor",
     "that merely references it.",
-    "The neural-specific checks run before the general derivative-shape check,",
+    "The graph_block-specific checks run before the general derivative-shape check,",
     "in both languages: this fixture's well-formed derivative block is what",
     "proves that ordering, since a malformed block could not distinguish the",
     "two possible rejecting rules.",

@@ -257,6 +257,11 @@ per-sample plane (``Plan.run``, ``Plan.bind``/``BoundPlan.rebind``, the
   call's ``layout=``. hawk's ``hawk.samples_first`` / ``hawk.samples_last`` are
   accepted too: a marker is any object carrying ``__raptor_samples_axis__``
   (``"first"`` or ``"last"``) and the wrapped array as ``.array``.
+- A ``Graph.builder`` call (a builder or a block) takes ``layout=`` too: it
+  applies to every kernel call recorded in its body. A marker cannot be passed
+  to a builder call, because the kernels inside name their planes differently.
+  Mark the array at the kernel call inside the block, or use ``layout=`` on the
+  builder call.
 - A sample-major array whose transpose is C-contiguous (for example ``x.T`` of
   a contiguous ``(3, N)`` array) already holds the component-major bytes. It is
   bound as that view: no copy, no warning, input or output.
@@ -400,7 +405,9 @@ terms:
   that shape, and keeps its contents.
 - A launch that binds only ``Table`` planes has no lane count to read, since a table's length is
   never the lane count; it is refused, for every kernel. Pass a per-sample plane or the extent.
-- An ``Index`` plane of ``int32`` is accepted and widened once.
+- An ``Index`` plane has the width the kernel declares (``int32`` unless declared ``Index[int64]``). ``bind``
+  and ``rebind`` refuse another width by name and say which type to pass; ``run`` converts per call and
+  ``eagle.simulate`` once at entry, so nothing is copied at a launch.
 - ``Plan.rebind`` and ``eagle.until_done`` take lane-shaped planes the same way. A kernel
   with a ``group`` compacts with ``ActiveSet(mask, group=G)``: see
   :doc:`modules/filtering/scan_and_compaction`.

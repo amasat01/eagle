@@ -1,6 +1,6 @@
 {
   "row": 19,
-  "title": "a `neural_block` descriptor whose `output_width` exceeds its `state_width` is rejected",
+  "title": "a `graph_block` descriptor whose `output_width` exceeds its `state_width` is rejected",
   "level": "sidecar",
   "expect": "reject",
   "error_substring": "must not exceed state_width",

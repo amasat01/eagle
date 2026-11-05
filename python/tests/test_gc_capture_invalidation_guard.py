@@ -34,7 +34,7 @@ flight, not unswallowing its error.
 
 **Red-proof shape**: force the exact scenario -- build a throwaway engine,
 wrap it in a reference CYCLE (survives refcounting, reachable only via
-cyclic GC -- the same shape a dropped neural-layer object takes), start a
+cyclic GC -- the same shape a dropped graph-block layer object takes), start a
 SECOND, unrelated pipeline's capture, and call ``gc.collect()`` explicitly
 from INSIDE that active capture window. Assert, via
 ``eagle._core.capture_guard_depth`` / ``capture_guard_pending_count``
@@ -101,7 +101,7 @@ class _CapturedFd2:
 def _build_dead_cyclic_engine(cp):
     """Build a GraphPipeline+Launcher and wrap it in a reference cycle so it
     survives refcounting and is reachable ONLY via cyclic GC -- the shape a
-    dropped neural-layer object takes in real use (forward/backward/JVP
+    dropped graph-block layer object takes in real use (forward/backward/JVP
     ``GraphPipeline``s go out of scope together, often via a cycle through
     the owning Python wrapper)."""
     from eagle.pipeline import GraphPipeline
@@ -131,6 +131,7 @@ def test_gc_during_active_capture_defers_teardown_and_capture_survives():
     import cupy as cp
 
     from eagle import _core
+    from eagle.frameworks.cupy import wrap_external_stream
     from eagle.pipeline import GraphPipeline
 
     gc.disable()  # only this test's own gc.collect() call drives cyclic GC
@@ -155,7 +156,7 @@ def test_gc_during_active_capture_defers_teardown_and_capture_survives():
         pipe2 = GraphPipeline()
         capturer = _core.StreamCapturer(pipe2._sptr)
         fdcap = _CapturedFd2()
-        with cp.cuda.ExternalStream(pipe2._sptr):
+        with wrap_external_stream(pipe2._sptr):
             capturer.begin()
             assert _core.capture_guard_depth() >= 1, (
                 "depth must be >=1 once this capture is open"

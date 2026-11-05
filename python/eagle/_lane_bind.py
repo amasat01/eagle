@@ -310,12 +310,12 @@ def team_grid(plugin, team: dict, n: int, planes: dict) -> int:
     scatter into the plane ``team["of"]``."""
     kind = team.get("grid", "lanes")
     if kind == "keys":
-        return key_count(plugin, team["keyed"], n)
+        return key_count(plugin, team["keyed"], n) * team.get("groups", 1)
     if kind == "chunks":
         return scatter_chunks(n, _cells_of(planes[team["of"]]))
     if kind == "targets":
         return _cells_of(planes[team["of"]])
-    return n
+    return -(-n // (team.get("lanes", 1) * team.get("warps", 1)))      # a block serving ``lanes`` lanes, or ``warps`` warps of one lane each
 
 
 def team_units(plugin, spec: dict, n: int, planes: dict) -> int:

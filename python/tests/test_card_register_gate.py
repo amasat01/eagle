@@ -11,8 +11,7 @@ cap and without spilling. Compile-only (no GPU): each card kernel's CUDA unit
 is built as ``eagle.deploy`` builds it, for every arch below the toolkit
 supports, and ``ptxas -v`` plus the SASS are read back:
 
-* ``rkf78_attempt_persist`` and the oscillator's
-  ``oscillator_step_xauto_persist`` use at most their pinned per-arch counts
+* ``rkf78_attempt_persist`` uses at most their pinned per-arch counts
   (per CUDA release), each on or below its residency step;
 * the persist entry is warp-converged: its source holds ONE
   ``atomicAdd(hawk_next`` (the chunk head's warp-wide claim) and its
@@ -22,8 +21,6 @@ supports, and ``ptxas -v`` plus the SASS are read back:
   pinned count: the bookkeeping changes, the maths never does;
 * the fused RKF7(8) entries stay within 2 registers of their pinned counts
   (no cap reaches them spill-free, so they are left as they are);
-* the oscillator's persist entry stays within 1000 instructions (its step
-  loop is unrolled by 4, and growth there should be noticed).
 
 Skipped where ``nvcc``/``cuobjdump`` or hawk are absent.
 """
@@ -54,15 +51,12 @@ ARITH = ("DFMA", "DMUL", "DADD", "MUFU")
 PERSIST_REGS = {
     "12.6": {
         "rkf78_attempt_persist": {"sm_61": 162, "sm_80": 164, "sm_89": 164, "sm_90": 164},
-        "oscillator_step_xauto_persist": {"sm_61": 32, "sm_80": 30, "sm_89": 35, "sm_90": 32},
     },
     "12.9": {
         "rkf78_attempt_persist": {"sm_61": 166, "sm_80": 164, "sm_89": 164, "sm_90": 164},
-        "oscillator_step_xauto_persist": {"sm_61": 32, "sm_80": 30, "sm_89": 35, "sm_90": 32},
     },
     "13.4": {
         "rkf78_attempt_persist": {"sm_80": 164, "sm_89": 164, "sm_90": 164},
-        "oscillator_step_xauto_persist": {"sm_80": 30, "sm_89": 35, "sm_90": 32},
     },
 }
 
@@ -86,35 +80,23 @@ FUSED_REGS = {
 #: toolkits differ in how many DADDs the RKF7(8) entries carry.
 # The step and stop counters are uint32 planes, so their increments are integer
 # adds (no DADD); the range entry's loop unrolls six copies of the fused step.
-_OSC_ARITH = {
-    "oscillator_step_xauto": (32, 16, 6, 0),
-    "oscillator_step_xauto_range": (96, 32, 14, 0),
-    # four unrolled trips, no peeled one: the step's maths is the fused one
-    "oscillator_step_xauto_persist": (64, 20, 10, 0),
-}
 ARITH_COUNTS = {
     "12.6": {
-        **_OSC_ARITH,
         "rkf78_attempt": (1247, 400, 80, 69),
         "rkf78_attempt_range": (1247, 400, 80, 69),
         "rkf78_attempt_persist": (659, 210, 56, 37),
     },
     "12.9": {
-        **_OSC_ARITH,
         "rkf78_attempt": (1247, 400, 79, 69),
         "rkf78_attempt_range": (1247, 400, 79, 69),
         "rkf78_attempt_persist": (659, 210, 56, 37),
     },
     "13.4": {
-        **_OSC_ARITH,
         "rkf78_attempt": (1247, 400, 81, 69),
         "rkf78_attempt_range": (1247, 400, 81, 69),
         "rkf78_attempt_persist": (659, 210, 57, 37),
     },
 }
-
-OSC_PERSIST_MAX_INSTRUCTIONS = 1000
-
 
 def _load(name, rel):
     if str(_BENCH) not in sys.path:
@@ -130,10 +112,9 @@ def _units():
     from hawk.emit import render_source
     from hawk.targets import TARGETS
 
-    perf = _load("eagle_perf_card_gate", "perf_card/perf_card.py")
-    rk78 = _load("eagle_rk78_card_gate", "rk78_card/rk78_card.py")
+    rk78 = _load("eagle_rk78_card_gate", "perf_card/perf_card.py")
     out = {}
-    for label, k in (("osc", perf._define_persist_kernel()), ("rk78", rk78._define_kernel())):
+    for label, k in (("rk78", rk78._define_kernel()),):
         out[label] = render_source(k.name, k.sinks, k.walk, TARGETS["cuda"],
                                    kind=k.kind, one_step=k.one_step).text
     return out
@@ -211,7 +192,7 @@ def test_every_card_entry_was_compiled(compiled):
     assert set(compiled) == set(ARITH_COUNTS[_nvcc_release()])
 
 
-@pytest.mark.parametrize("entry", ["rkf78_attempt_persist", "oscillator_step_xauto_persist"])
+@pytest.mark.parametrize("entry", ["rkf78_attempt_persist"])
 def test_the_persist_entries_sit_on_their_residency_step(compiled, entry):
     pins = PERSIST_REGS[_nvcc_release()][entry]
     for arch, row in compiled[entry].items():
@@ -219,7 +200,7 @@ def test_the_persist_entries_sit_on_their_residency_step(compiled, entry):
             assert row["regs"] <= pins[arch], (entry, arch, row["regs"])
 
 
-@pytest.mark.parametrize("label", ["osc", "rk78"])
+@pytest.mark.parametrize("label", ["rk78"])
 def test_the_persist_entry_claims_once_per_chunk_head(label):
     pytest.importorskip("hawk")
     source = _units()[label]
@@ -251,8 +232,3 @@ def test_the_fused_rkf78_entries_keep_their_registers(compiled):
         for arch, row in compiled[entry].items():
             if arch in pinned:
                 assert abs(row["regs"] - pinned[arch]) <= 2, (entry, arch, row["regs"])
-
-
-def test_the_oscillator_persist_entry_stays_small(compiled):
-    for arch, row in compiled["oscillator_step_xauto_persist"].items():
-        assert row["n"] <= OSC_PERSIST_MAX_INSTRUCTIONS, (arch, row["n"])

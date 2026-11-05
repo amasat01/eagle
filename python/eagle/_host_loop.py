@@ -224,46 +224,34 @@ def host_team_size(n: int, max_steps: int, threads: int | None = None) -> int:
     return threads
 
 
-@functools.lru_cache(maxsize=1)
 def _omp_runtime():
     """``(omp_get_max_threads, omp_set_num_threads)`` of the OpenMP runtime
-    eagle's host code runs on (found among the loaded libraries), or
-    ``None`` where there is none to steer."""
-    from . import _core  # noqa: F401  (loads the runtime eagle links)
+    eagle's host code runs on -- the one ``eagle._core`` links, asked through
+    ``_core`` itself -- or ``None`` where eagle is built without OpenMP."""
+    from . import _core
 
-    try:
-        with open("/proc/self/maps") as f:
-            paths = {line.split()[-1] for line in f if line.rstrip().endswith(".so")
-                     or ".so." in line}
-    except OSError:
-        paths = set()
-    for path in sorted(paths):
-        name = os.path.basename(path)
-        if name.startswith(("libgomp", "libomp", "libiomp")):
-            try:
-                lib = ctypes.CDLL(path)
-                get, put = lib.omp_get_max_threads, lib.omp_set_num_threads
-            except (OSError, AttributeError):
-                continue
-            get.restype, get.argtypes = ctypes.c_int, []
-            put.restype, put.argtypes = None, [ctypes.c_int]
-            return get, put
-    return None
+    return (_core.omp_threads, _core.omp_set_threads) if _core.omp_threads() > 0 else None
 
 
 def _threads() -> int:
-    """The threads the host team runs with: ``$OMP_NUM_THREADS``, else the
+    """The threads the host team runs with: the process-wide host-thread
+    setting (:func:`set_host_threads`), else ``$OMP_NUM_THREADS``, else the
     CPUs this process may run on."""
-    try:
-        wanted = int(os.environ.get("OMP_NUM_THREADS", "").split(",")[0])
-    except ValueError:
-        wanted = 0
-    if wanted > 0:
-        return wanted
-    try:
-        return max(len(os.sched_getaffinity(0)), 1)
-    except (AttributeError, OSError):
-        return max(os.cpu_count() or 1, 1)
+    from . import _core
+
+    return _core.host_threads()
+
+
+def set_host_threads(threads: int | None) -> None:
+    """Set the most threads any host launch of this process uses (process-wide,
+    every Python thread); ``None`` restores the default (``$OMP_NUM_THREADS``,
+    else the OpenMP default). A launch uses ``min(its tiles, this)``; a launch
+    of one tile runs in place and uses none."""
+    from . import _core
+
+    if threads is not None and (isinstance(threads, bool) or not isinstance(threads, int) or threads < 1):
+        raise ValueError(f"eagle: set_host_threads needs a positive integer or None; got {threads!r}")
+    _core.set_host_threads(0 if threads is None else threads)
 
 
 @functools.lru_cache(maxsize=256)

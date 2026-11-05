@@ -26,6 +26,7 @@ pytest.importorskip("eagle._core")
 _NUMPY_VERSIONED_DLPACK = tuple(int(x) for x in np.__version__.split(".")[:2]) >= (2, 1)
 
 from eagle import _core  # noqa: E402
+from eagle.frameworks.cupy import wrap_external_stream  # noqa: E402
 from eagle.interop import (  # noqa: E402
     BufferRefused,
     BufferView,
@@ -404,7 +405,7 @@ def test_warp_stream_as_producer_orders_the_import(wp):
     w = wp.zeros(1, dtype=wp.float64, device="cuda:0")
     wp.synchronize()
     arr = cp.from_dlpack(w)
-    _slow_write(cp, arr, cp.cuda.ExternalStream(s.cuda_stream))
+    _slow_write(cp, arr, wrap_external_stream(s.cuda_stream))
     with wp.ScopedStream(s):
         v = import_buffer(w, stream=b_stream.ptr)  # warp orders its stream before B
     assert v.stream == b_stream.ptr
@@ -425,5 +426,5 @@ def test_warp_stream_as_consumer_is_fenced_by_the_export(wp):
     with wp.ScopedStream(s):
         w = wp.from_dlpack(v)  # __dlpack__(stream=s.cuda_stream): fence A -> s
     assert w.ptr == arr.data.ptr
-    assert _read_on(cp, arr, cp.cuda.ExternalStream(s.cuda_stream)) == 42.0
+    assert _read_on(cp, arr, wrap_external_stream(s.cuda_stream)) == 42.0
     a_stream.synchronize()

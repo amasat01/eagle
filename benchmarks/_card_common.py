@@ -3,9 +3,9 @@
 
 """Helpers the performance cards share.
 
-``perf_card/perf_card.py`` (RK4, GPU), ``perf_card/cpu_card.py`` (RK4, CPU),
-``rk78_card/rk78_card.py`` (RKF7(8), GPU) and ``rk78_card/cpu_rk78_card.py``
-(RKF7(8), CPU) each define a workload, its arms and the card they write; what
+``perf_card/perf_card.py`` (GPU; the RKF7(8) ensemble),
+``perf_card/cpu_card.py`` (its CPU twin) and ``perf_card/feature_card.py``
+each define a workload, its arms and the card they write; what
 they have in common lives here: number formatting, the median/IQR statistic,
 the ``# >>> code:NAME`` snippet markers, the device and software facts, the
 memory probes' process protocol, the cold/warm compile-time loop and the
@@ -28,6 +28,7 @@ import sqlite3
 import statistics
 import subprocess
 import sys
+import time
 import tempfile
 
 # --------------------------------------------------------------------------- #
@@ -128,7 +129,8 @@ def net_peak_bytes(row, card_kind):
 # --------------------------------------------------------------------------- #
 def median_iqr(values):
     """Median and interquartile range (inclusive quartiles), with the samples."""
-    q = statistics.quantiles(values, n=4, method="inclusive")
+    q = (statistics.quantiles(values, n=4, method="inclusive") if len(values) > 1
+         else [values[0]] * 3)  # a smoke run has one repetition
     return {"median": statistics.median(values), "iqr": q[2] - q[0],
             "q1": q[0], "q3": q[2], "samples": list(values)}
 
@@ -273,8 +275,19 @@ def cpu_display_name(card_path, model):
     return entry["name"] if isinstance(entry, dict) and entry.get("name") else model
 
 
+def _hawk_or_none():
+    """hawk when installed: a card run always has it; assembling saved parts needs none."""
+    try:
+        import hawk
+    except ImportError:
+        return None
+    return hawk
+
+
 def git_commit(module, short=False):
     """``<commit>[-dirty]`` of the repository holding ``module``, or None."""
+    if module is None:
+        return None
     root = pathlib.Path(module.__file__).resolve().parent
     try:
         rev = subprocess.run(["git", "-C", str(root), "rev-parse",
@@ -290,10 +303,58 @@ def git_commit(module, short=False):
     return None
 
 
+def release_string():
+    """``eagle X, hawk Y`` of the installed packages (written into every card by the run)."""
+    import eagle
+    hawk = _hawk_or_none()
+
+    return f"eagle {eagle.__version__}, hawk {getattr(hawk, '__version__', None)}"
+
+
+def no_arm_ran(card):
+    """True when no arm anywhere in ``card`` has status ok: the card is still written (every row with its reason), but the
+    step that wrote it failed, so a smoke run stops before the full one and a full run reports it instead of finishing."""
+    def statuses(x):
+        if isinstance(x, dict):
+            if isinstance(x.get("status"), str):
+                yield x["status"]
+            for v in x.values():
+                yield from statuses(v)
+        elif isinstance(x, list):
+            for v in x:
+                yield from statuses(v)
+    return not any(s == "ok" for s in statuses(card))
+
+
+def no_arm_ran_exit(card):
+    """main()'s return code for a written card: 1 (with the reason on stderr) when no arm ran, else 0."""
+    if no_arm_ran(card):
+        print("no arm of this card ran (see each row's status): the step failed", file=sys.stderr, flush=True)
+        return 1
+    return 0
+
+
+def record_provenance(card_path):
+    """Record the release, eagle and hawk commits of this run for ``card_path`` in
+    ``benchmarks/card_provenance.json``."""
+    import eagle
+    hawk = _hawk_or_none()
+
+    prov_path = pathlib.Path(__file__).resolve().with_name("card_provenance.json")
+    prov = json.loads(prov_path.read_text()) if prov_path.exists() else {
+        "schema": "eagle-card-provenance-1", "cards": {}}
+    prov["release"] = release_string()
+    rel = pathlib.Path(card_path).resolve().relative_to(prov_path.parent.parent)
+    prov["cards"][str(rel)] = {"eagle_version": eagle.__version__,
+                               "eagle": git_commit(eagle), "hawk": git_commit(hawk),
+                               "source": "written by the run"}
+    prov_path.write_text(json.dumps(prov, indent=1) + "\n")
+
+
 def software(modules=("numpy", "cupy", "torch", "jax", "jaxlib", "warp")):
     """Versions and commits of the GPU cards' software."""
     import eagle
-    import hawk
+    hawk = _hawk_or_none()
 
     return {"python": platform.python_version(),
             **{m: version_of(m) for m in modules},
@@ -388,6 +449,7 @@ def arm_code(blocks, arm_blocks, arms):
 # --------------------------------------------------------------------------- #
 def fastest_lines(rows, labels, fmt=fmt_time):
     """The "Fastest arm by median wall time" list of one table's rows."""
+    rows = [r for r in rows if "wall_s" in r]    # a row that did not run has no time
     trimmed_stat = any("mean" in r["wall_s"] for r in rows)
     lines = ["Fastest arm by mean wall time (middle 10 of 12 runs):" if trimmed_stat
              else "Fastest arm by median wall time:", ""]
@@ -477,6 +539,13 @@ def probe_sync():
         torch.cuda.synchronize()
 
 
+def _device_bytes(pynvml, h, pid):
+    for p in pynvml.nvmlDeviceGetComputeRunningProcesses(h):
+        if p.pid == pid and p.usedGpuMemory is not None:
+            return int(p.usedGpuMemory), "nvml per-process used memory"
+    return int(pynvml.nvmlDeviceGetMemoryInfo(h).used), "nvml device used memory"
+
+
 def process_device_bytes(bus_id):
     """(bytes, source): the device memory the driver accounts to THIS process
     on the timed GPU (NVML's per-process used memory), or, where the driver
@@ -485,14 +554,50 @@ def process_device_bytes(bus_id):
 
     pynvml.nvmlInit()
     try:
-        h = pynvml.nvmlDeviceGetHandleByPciBusId(bus_id)
-        pid = os.getpid()
-        for p in pynvml.nvmlDeviceGetComputeRunningProcesses(h):
-            if p.pid == pid and p.usedGpuMemory is not None:
-                return int(p.usedGpuMemory), "nvml per-process used memory"
-        return int(pynvml.nvmlDeviceGetMemoryInfo(h).used), "nvml device used memory"
+        return _device_bytes(pynvml, pynvml.nvmlDeviceGetHandleByPciBusId(bus_id), os.getpid())
     finally:
         pynvml.nvmlShutdown()
+
+
+class DevicePeak:
+    """The most :func:`process_device_bytes` reads while the ``with`` block
+    runs, sampled every ``period_s``: a reading after the run misses what a
+    library used and handed back before it (the masked arms return their
+    temporaries after each run), while the caching allocators hold their
+    working set through the run, where a sample sees it."""
+
+    def __init__(self, bus_id, period_s=0.002):
+        self.bus_id, self.period_s, self.peak, self._error = bus_id, period_s, 0, None
+
+    def __enter__(self):
+        import threading
+
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._sample, daemon=True)
+        self._thread.start()
+        return self
+
+    def _sample(self):
+        import pynvml
+
+        try:
+            pynvml.nvmlInit()
+            try:
+                h, pid = pynvml.nvmlDeviceGetHandleByPciBusId(self.bus_id), os.getpid()
+                while True:
+                    self.peak = max(self.peak, _device_bytes(pynvml, h, pid)[0])
+                    if self._stop.wait(self.period_s):
+                        break
+            finally:
+                pynvml.nvmlShutdown()
+        except Exception as err:  # noqa: BLE001 - handed to the caller in __exit__
+            self._error = err
+
+    def __exit__(self, exc_type, *exc):
+        self._stop.set()
+        self._thread.join()
+        if exc_type is None and self._error is not None:
+            raise RuntimeError(f"device peak sampler on {self.bus_id}: {self._error}") from self._error
 
 
 GPU_STATE_FIELDS = ("clocks.sm,clocks.mem,clocks.max.sm,temperature.gpu,"
@@ -553,6 +658,7 @@ class ClockPoller:
         self._bus_id = bus_id
         self._handle = _nvml_handle(bus_id)
         self._samples = []
+        self._label = None
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._poll, daemon=True)
         self._thread.start()
@@ -567,7 +673,7 @@ class ClockPoller:
                 temp = pynvml.nvmlDeviceGetTemperature(
                     self._handle, pynvml.NVML_TEMPERATURE_GPU)
                 self._samples.append({"clocks.sm": sm, "utilization.gpu": util,
-                                      "temperature.gpu": temp})
+                                      "temperature.gpu": temp, "label": self._label})
             except Exception:
                 pass
 
@@ -578,7 +684,12 @@ class ClockPoller:
         while not self._stop.wait(1.0):
             st = gpu_state(self._bus_id)
             if st is not None:
-                self._samples.append(st)
+                self._samples.append({**st, "label": self._label})
+
+    def mark(self, label):
+        """Tag the samples taken from now on with ``label`` (an arm's name), so
+        :meth:`stop` reports each label's own median clock."""
+        self._label = label
 
     def stop(self):
         self._stop.set()
@@ -599,7 +710,12 @@ class ClockPoller:
                    "nvidia-smi clocks.sm, sampled every 1 s (NVML unavailable)")
         if not sm:
             return {"samples": 0, "source": source}
+        by_label = {}
+        for st in self._samples:
+            if st.get("label") is not None and st.get("clocks.sm") is not None:
+                by_label.setdefault(st["label"], []).append(float(st["clocks.sm"]))
         return {"samples": len(sm), "sm_clock_mhz_min": min(sm),
+                "sm_clock_mhz_by_label": {k: statistics.median(v) for k, v in by_label.items()},
                 "sm_clock_mhz_median": statistics.median(sm),
                 "sm_clock_mhz_max": max(sm),
                 "temperature_c_max": max(temp) if temp else None,
@@ -725,12 +841,34 @@ def host_hot_loop_fp_simd_counts(binary_path, symbol_substr):
     if not blocks:
         return None
     body = "\n".join(line for block in blocks for line in block)
-    packed = len(re.findall(r"\b(?:v?(?:fmadd|fmsub|mul|add|sub)[a-z]*pd)\b", body))
-    scalar = len(re.findall(r"\b(?:v?(?:fmadd|fmsub|mul|add|sub)[a-z]*sd)\b", body))
-    return {"packed": packed, "scalar": scalar, "method": (
-        f"objdump -d --demangle; vfmadd*/vmul*/vadd*/vsub* with the pd "
-        "(packed double) vs sd (scalar double) suffix, counted only inside "
+    counts = fp_simd_counts(body)
+    return {**counts, "method": (
+        "objdump -d --demangle; x86: vfmadd*/vmul*/vadd*/vsub* with the pd (packed double) vs sd (scalar "
+        "double) suffix; aarch64: fmla/fmls/fmul/fadd/fsub/fmad/fmsb and fmadd/fmsub on .2d (NEON) or z.d "
+        "(SVE) registers are packed, on d registers scalar; counted only inside "
         f"the symbol(s) matching '{symbol_substr}'")}
+
+
+_A64_OPS = r"(?:fmla|fmls|fmul|fadd|fsub|fmad|fmsb|fnmla|fnmls|fmadd|fmsub|fnmadd|fnmsub)"
+
+
+def fp_simd_counts(asm):
+    """Packed vs scalar double-precision FP instruction counts in disassembly text: x86 (``pd`` against ``sd``
+    suffix) and aarch64 (``.2d`` NEON or ``z<n>.d`` SVE operands against ``d<n>`` scalar registers).
+    ``{"packed", "scalar", "sve"}``; ``sve`` counts the SVE share of ``packed``."""
+    packed = len(re.findall(r"\b(?:v?(?:fmadd|fmsub|mul|add|sub)[a-z0-9]*pd)\b", asm))
+    scalar = len(re.findall(r"\b(?:v?(?:fmadd|fmsub|mul|add|sub)[a-z0-9]*sd)\b", asm))
+    sve = 0
+    for m in re.finditer(r"(?m)\s" + _A64_OPS + r"\s+(.*)$", asm):
+        operands = m.group(1)
+        if re.search(r"\bz\d+\.d\b", operands):
+            packed += 1
+            sve += 1
+        elif re.search(r"\bv\d+\.2d\b", operands):
+            packed += 1
+        elif re.search(r"\bd\d+\b", operands):
+            scalar += 1
+    return {"packed": packed, "scalar": scalar, "sve": sve}
 
 
 #: 64-bit floating-point fused multiply-add results per clock per SM, by
@@ -845,10 +983,69 @@ def probe_reply(fd, obj):
     os.write(fd, (json.dumps(obj) + "\n").encode())
 
 
-def run_probe(script, args, *, env=None, timeout=600, what="probe"):
-    """Run ``script args`` in a fresh interpreter; its last stdout line, parsed."""
-    out = subprocess.run([sys.executable, str(pathlib.Path(script).resolve()), *args],
-                         capture_output=True, text=True, env=env, timeout=timeout)
+class Stalled(Exception):
+    """A child that made no progress for too long (see :func:`run_watched`); ``phase`` is the one it was in."""
+
+    def __init__(self, phase, message):
+        super().__init__(message)
+        self.phase = phase
+
+
+#: A child's build may take this long before its first progress; after it, no round may take longer than STALL_S. A
+#: library that compiles on its first call reports the "compile" phase, allowed COMPILE_S.
+BUILD_S, STALL_S, COMPILE_S = 120.0, 600.0, 600.0
+
+#: A row dropped because the session deadline passed (or the step ended early): the lowest-priority rows go first.
+SESSION_LIMIT = "not_run: session time limit"
+
+
+def deadline_passed():
+    """True once ``$CARD_DEADLINE`` (epoch seconds, set by run_cards.sh) has passed: no new arm starts."""
+    deadline = os.environ.get("CARD_DEADLINE")
+    return bool(deadline) and time.time() > float(deadline)
+
+
+def heartbeat(phase="run"):
+    """Tell the parent this child is alive (``$CARD_PROGRESS``: a file whose mtime and text the parent reads)."""
+    path = os.environ.get("CARD_PROGRESS")
+    if path:
+        pathlib.Path(path).write_text(phase)
+
+
+def run_watched(cmd, *, timeout, progress, env=None):
+    """``subprocess.run`` of ``cmd`` with a total ``timeout`` and a no-progress watchdog: the child touches ``progress`` (see
+    :func:`heartbeat`); more than :data:`BUILD_S` s without it while building, :data:`COMPILE_S` s while compiling, or
+    :data:`STALL_S` s once running, kills that child alone and raises :class:`Stalled`."""
+    progress = pathlib.Path(progress)
+    progress.parent.mkdir(parents=True, exist_ok=True)
+    progress.write_text("build")
+    env = {**(os.environ if env is None else env), "CARD_PROGRESS": str(progress)}
+    child = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+    start = time.monotonic()
+    while True:
+        try:
+            out, err = child.communicate(timeout=2)
+            return subprocess.CompletedProcess(cmd, child.returncode, out, err)
+        except subprocess.TimeoutExpired:
+            phase = progress.read_text()
+            limit = {"build": BUILD_S, "compile": COMPILE_S}.get(phase, STALL_S)
+            over = time.monotonic() - start > timeout
+            if over or time.time() - progress.stat().st_mtime > limit:
+                child.kill()
+                child.communicate()
+                if over:
+                    raise subprocess.TimeoutExpired(cmd, timeout) from None
+                raise Stalled(phase, f"no progress for {limit:.0f} s ({phase})") from None
+
+
+def run_probe(script, args, *, env=None, timeout=600, what="probe", progress=None):
+    """Run ``script args`` in a fresh interpreter; its last stdout line, parsed. With ``progress`` (a file), the child is
+    watched (:func:`run_watched`) and a stall raises :class:`Stalled`."""
+    cmd = [sys.executable, str(pathlib.Path(script).resolve()), *args]
+    if progress is not None:
+        out = run_watched(cmd, timeout=timeout, progress=progress, env=env)
+    else:
+        out = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=timeout)
     if out.returncode != 0:
         raise RuntimeError(f"{what}:\n{out.stderr[-4000:]}")
     return json.loads(out.stdout.strip().splitlines()[-1])
@@ -889,9 +1086,17 @@ class LineWorker:
                                    *args], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                   text=True, env=env)
 
-    def call(self, obj):
+    def call(self, obj, timeout=None):
+        """Send one command and read its reply; past ``timeout`` seconds the worker is killed and
+        ``TimeoutError`` raised (a stuck or over-budget command never holds the card)."""
+        import select
+
         self.p.stdin.write(json.dumps(obj) + "\n")
         self.p.stdin.flush()
+        if timeout is not None and not select.select([self.p.stdout], [], [], timeout)[0]:
+            self.p.kill()
+            self.p.wait()
+            raise TimeoutError(f"worker {self.name}: no reply to {obj.get('op')} within {timeout:.0f} s")
         line = self.p.stdout.readline()
         if not line:
             raise RuntimeError(f"worker {self.name} exited (rc={self.p.poll()}) on {obj}")
@@ -1002,3 +1207,83 @@ def published_peak_bytes(row, rows, card_kind):
     if not is_resolved(row, floor_estimate(rows, row["arm"])):
         return None
     return net_peak_bytes(row, card_kind)
+
+
+def part_load(parts, key, keep_failed=False):
+    """The result an earlier run saved under ``key`` in the ``parts`` directory (None: no directory or no part), unless it failed:
+    a resumed run tries a failed arm again, ``--assemble`` (``keep_failed``) keeps it with its reason."""
+    path = parts and pathlib.Path(parts) / f"{key}.json"
+    if path and path.exists():
+        obj = json.loads(path.read_text())
+        if keep_failed or not str(obj.get("status", "")).startswith("failed"):
+            return obj
+    return None
+
+
+def part_save(parts, key, obj):
+    """Save one finished result, so a cap or a preemption costs one part and never the card. ``saved_unix`` (when it was
+    saved): consecutive parts give each row's whole cost, process start-up included."""
+    if parts:
+        d = pathlib.Path(parts)
+        d.mkdir(parents=True, exist_ok=True)
+        tmp = d / f".{key}.tmp"
+        tmp.write_text(json.dumps({**obj, "saved_unix": round(time.time(), 1)}, default=str))
+        tmp.replace(d / f"{key}.json")
+
+
+#: --reference (ours-only reruns): (the reference run's parts directory, its label) once `set_reference` accepted it.
+REFERENCE = None
+NO_REFERENCE = "not_run: not in the reference run"
+
+
+def set_reference(res_dir, parts, device_name):
+    """Take the external arms' parts from an earlier run of the same device: ``res_dir`` is its results directory
+    (``<slug>/``, holding ``parts/<step>`` and the card JSON); another GPU is refused."""
+    global REFERENCE
+    res = pathlib.Path(res_dir).resolve()
+    names = {json.loads(p.read_text()).get("device", {}).get("name") for p in res.glob("perf_card/*card_*.json")}
+    if device_name not in names:
+        raise SystemExit(f"--reference {res} is from {sorted(n for n in names if n) or 'an unknown device'}, "
+                         f"this device is {device_name}: refused")
+    REFERENCE = (res / "parts" / pathlib.Path(parts).name, f"{res.parent.name}/{res.name}")
+
+
+def ref_part(key):
+    """The reference run's part ``key`` with its source label in ``reference`` (run, date, SM clock when recorded), or None."""
+    obj = part_load(REFERENCE[0], key, keep_failed=True)
+    if obj is None:
+        return None
+    when = time.strftime("%Y-%m-%d", time.gmtime(obj["saved_unix"])) if obj.get("saved_unix") else "date not recorded"
+    clock = obj.get("sm_clock_mhz") or obj.get("sm_mhz")
+    return {**obj, "reference": f"{REFERENCE[1]}, {when}" + (f", SM {clock} MHz" if clock else "")}
+
+
+def reference_note(records):
+    """Markdown lines naming the source of every row taken from the reference run (empty without one)."""
+    labels = sorted({r["reference"] for r in records if isinstance(r, dict) and r.get("reference")})
+    return ["", "External rows (not re-timed) taken from: " + "; ".join(labels) + "."] if labels else []
+
+
+PENDING_EFF = "pending (reference count)"
+
+
+def derive_eff_sol(rate, fma, ops):
+    """``{"eff_sol", "eff_sol_note"}`` from the raw inputs: attempts per second, the device's FMA per second and the
+    reference ``ops_per_attempt``. A value over 1 means the reference count overstates the executed ops: it is not a
+    number until the dynamic count replaces it (``eff_sol`` None, the note says why)."""
+    if not fma or not rate or not ops:
+        return {"eff_sol": None, "eff_sol_note": None}
+    eff = rate * ops / fma
+    return {"eff_sol": None, "eff_sol_note": PENDING_EFF} if eff > 1.0 else {"eff_sol": eff, "eff_sol_note": None}
+
+
+def rescore_card(card, ops=None):
+    """Every ensemble-card row's ``eff_sol`` derived again from the card's raw fields and ``ops`` (default: the reference
+    file's ``ops_per_attempt``): a better count re-scores every card without a re-run."""
+    if ops is None:
+        ops = json.loads((pathlib.Path(__file__).resolve().parent / "sol_reference.json").read_text())["ops_per_attempt"]
+    for row in card["results"]:
+        if row.get("status") == "ok" and not (row["arm"] == "eagle_cpu" and "device" in card):
+            fma = card.get("device_fma_per_s_float32" if row["distribution"] == "fp32" else "device_fma_per_s")
+            row.update(derive_eff_sol(row["attempt_samples_per_s"], fma, ops))
+    return card

@@ -172,7 +172,7 @@ def test_g_value_eager_vs_conditional_replay_bit_identical():
     conditional-guarded GraphPipeline replay must match an eager/host
     computation of the same operation, bit-identical, across an
     empty -> live -> empty transition of the guarded population
-    (``SkipGuard.nonempty_bucket``'s real fencepost shape). This is
+    (a fencepost guard, ``type_offsets[1] != type_offsets[0]``). This is
     correctness only -- see the module docstring for why a value assertion
     alone cannot prove a SKIP happened."""
     type_offsets = cp.asarray([0, 0], dtype=cp.uint32)  # bucket empty initially
@@ -184,7 +184,7 @@ def test_g_value_eager_vs_conditional_replay_bit_identical():
     kD(data, out)  # NVRTC warmup, outside capture
     cp.cuda.runtime.deviceSynchronize()
 
-    guard = SkipGuard.nonempty_bucket(type_offsets, 0)
+    guard = SkipGuard(type_offsets, 1, type_offsets, 0)
     step = skippable(lambda: kD(data, out), guard)
 
     pipe = GraphPipeline()

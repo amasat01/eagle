@@ -33,7 +33,7 @@
 // separately by NAMED CUDA-only `.cu` unit tests in `test_PluginRegistryManifest.cu`
 // (an outside-coverage claim must
 // name the test, not just the file): `pattern`
-// (`RejectsUnknownManifestPatternNeuralBlock`), `format`
+// (`RejectsUnknownManifestPatternGraphBlock`), `format`
 // (`RejectsUnknownManifestFormat`), and the manifest-level `schema_version` gate
 // (`RejectsNewerManifestSchemaVersion`) — the latter two added alongside this fix
 // after an audit found both device call sites, and this very claim,
@@ -74,7 +74,7 @@ namespace eagle_tests {
 namespace ConformanceCorpusTest {
 
 // The corpus rows landed so far. An early pass landed { 2, 4, 6, 7, 8, 11 };
-// step 1b's atomic widening added row 1 (the `neural_block` golden + its VJP companion)
+// step 1b's atomic widening added row 1 (the `graph_block` golden + its VJP companion)
 // and row 5 (the unknown `scatter_policy`); a later volume dispatch adds rows
 // { 3, 9, 10, 17, 18, 19, 20, 21 } (the flagged-call fixtures check) and repairs
 // the gap by adding { 13, 14, 15, 16 } — those four sat on disk, unnamed by this
@@ -90,9 +90,9 @@ namespace ConformanceCorpusTest {
 // PERMANENTLY non-contractual — no `error_substring` may ever span one.
 //
 // A later pass adds rows { 22, 23, 24 }: the exec-ref
-// closed-set hardening, the neural_block integer-field uint32 cap, and the
+// closed-set hardening, the graph_block integer-field uint32 cap, and the
 // `accumulate` scatter_policy acceptance golden.
-// A later pass adds row 25: neural-block MANIFEST carriage -- the wire
+// A later pass adds row 25: graph-block MANIFEST carriage -- the wire
 // dangling-exec-ref reject + the orphaned-blocks[] guard (row 12 stays retired).
 static const std::set<int> kRequiredRows = {
     1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25

@@ -37,6 +37,7 @@ def _paired(tmp_path, n, branches=8, depth=8):
     return g, _best_of(lambda: g.launch()), _best_of(work_share)
 
 
+@pytest.mark.wall_clock
 def test_branch_tasks_is_at_least_twice_as_fast_in_its_regime(tmp_path):
     if _core.host_threads() < 4:
         pytest.skip("needs a host team of at least 4 threads")

@@ -18,7 +18,7 @@ from .interop import _stream_handle as _handle_of
 from .interop import scoped_stream
 from . import exec as eexec
 from .abi import DEVICE_CPU, DEVICE_CUDA
-from .roles import INPUT_ROLES, OUTPUT_ROLES, PER_SAMPLE_ROLES
+from .roles import OUTPUT_ROLES, PER_SAMPLE_ROLES
 from .host_launch import ScalarHandle
 from ._plan_pack import (
     _data_ptr,
@@ -41,8 +41,6 @@ from ._plan_planes import (
     sample_spec,
     function_on,
     planes_device,
-    widen_index,
-    widen_indices,
 )
 from .interop import BufferRefused
 
@@ -92,6 +90,10 @@ def _bind_plan(p: Plan, planes: dict, device=None, capacity=None) -> BoundPlan:
     staged = _split.staged(p.plugin, planes)
     if staged is not p.plugin:
         p = replace(p, plugin=staged)
+    from .gemm import _route
+
+    if _route.routes(p):
+        return _route.bind(p, planes, device)
     if _split.stages_of(p.plugin):
         bound = _split.SplitBound(p, planes, _bind_one, device=device)
     else:
@@ -147,7 +149,6 @@ def _bind_one(p: Plan, planes: dict, device=None) -> BoundPlan:
         _index_set.check_bound(plugin, arg_spec, planes, n)
         _check_bound_names(arg_spec, planes)
         planes, adapted = _adapt_planes(plugin, arg_spec, planes, door="bind")
-        planes = widen_indices(plugin, arg_spec, planes)
         if n is None:
             n = _lane_bind.n_of(sample_spec(plugin, arg_spec), planes)
         parts = p.partitions_for(n)
@@ -535,9 +536,7 @@ class BoundPlan:
                 packed[:] = [self._gen, list(addrs)]
             params = packed[1]
             handle = _stream_handle(stream, self._device)
-            # the null stream is the current device's: make the planes' device current for it
-            with _stream.on_device(self._device if handle == 0 else None):
-                _core.launch_raw(ptr, (grid, 1, 1), (block, 1, 1), params, handle)
+            _core.launch_raw(ptr, (grid, 1, 1), (block, 1, 1), params, handle, device=_ordinal(self._device))
 
         return call
 
@@ -651,9 +650,7 @@ class BoundPlan:
                 packed[:] = [self._gen, list(addrs)]
             params = packed[1]
             handle = _stream_handle(stream, self._device)
-            # the null stream is the current device's: make the planes' device current for it
-            with _stream.on_device(self._device if handle == 0 else None):
-                _core.launch_raw(ptr, (grid, 1, 1), (resolved, 1, 1), params, handle)
+            _core.launch_raw(ptr, (grid, 1, 1), (resolved, 1, 1), params, handle, device=_ordinal(self._device))
 
         return call
 
@@ -728,9 +725,9 @@ class BoundPlan:
         addrs = self._addrs + [ctypes.addressof(box) for box in tail]
         if _split.COLLECT.names is not None:
             _split.COLLECT.names.append(self._kernel_name())
-        with _stream.on_device(self._device if handle == 0 else None):
-            self._named(_core.launch_raw, self._entry, (grid, 1, 1), (threads, 1, 1), addrs, handle)
-            _stream.check_launch(self._kernel_name(), -1 if self._device is None else self._device)
+        self._named(_core.launch_raw, self._entry, (grid, 1, 1), (threads, 1, 1), addrs, handle,
+                    device=_ordinal(self._device))
+        _stream.check_launch(self._kernel_name(), _ordinal(self._device))
         return None
 
     def launch(self, stream=None, *, grid=None, block=None) -> None:
@@ -802,7 +799,7 @@ class BoundPlan:
             )
         for entry, part in self._fold or ():
             self._named(eexec.DeviceKernel.run, entry, addrs, part, stream=handle, device=self._device)
-        _stream.check_launch(self._kernel_name(), -1 if self._device is None else self._device)
+        _stream.check_launch(self._kernel_name(), _ordinal(self._device))
         if self._copies:
             with _stream.on_device(self._device), scoped_stream(handle):
                 for a in self._copies.values():
@@ -900,9 +897,6 @@ class BoundPlan:
                                       writes=role in OUTPUT_ROLES)
                     if a is not None:
                         value = a.native
-                if role in INPUT_ROLES:
-                    value = widen_index(value, _declared_dtype(self.plan.plugin, name), name=name,
-                                       kernel=self._kernel_name())
                 _check_plane(role, name, value, n=self._n, dtype=self._dtype,
                              width=self._widths.get(name),
                              framework=self._framework,
@@ -992,6 +986,11 @@ def _set_count(bound, m, stream) -> None:
         return
     with _stream.on_device(bound._device):
         _index_set.write_count(bound._count, m, bound._capacity, _stream_handle(stream, bound._device))
+
+
+def _ordinal(device) -> int:
+    """The seam's device argument: the planes' CUDA ordinal, ``-1`` (the stream's or the memory's) for none."""
+    return -1 if device is None else device
 
 
 def _refuse_local_memory(plugin, n: int, device) -> None:

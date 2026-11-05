@@ -97,9 +97,11 @@ def test_hawk_built_device_bundle_finishes_with_no_caller_tables(tmp_path):
     if nvcc is None:
         pytest.skip("no nvcc")
     (tmp_path / "drv.cu").write_text(_DRIVER)
-    inc = os.environ.get("EAGLE_TEST_AETHER_INCLUDE", "/local/scratch/amasat/.conda/envs/cudaj_devel/include")
+    inc = os.environ.get("EAGLE_TEST_AETHER_INCLUDE")
+    if not inc:
+        pytest.skip("EAGLE_TEST_AETHER_INCLUDE (the directory holding aether/) is not set")
     proc = subprocess.run(
-        [nvcc, "-std=c++20", "-arch=sm_61", "-Wno-deprecated-gpu-targets", f"-I{ROOT}", f"-I{inc}",
+        [nvcc, "-std=c++20", "-arch=native", "-Wno-deprecated-gpu-targets", f"-I{ROOT}", f"-I{inc}",
          "-DAETHER_HAS_CUDA=1", "-DEAGLE_BLOCKSIZE=256", "-DNDEBUG", str(tmp_path / "drv.cu"),
          "-lcuda", "-o", str(tmp_path / "drv")], capture_output=True, text=True)
     if proc.returncode != 0:

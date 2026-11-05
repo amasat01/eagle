@@ -127,13 +127,14 @@ _PRELUDE = r"""
 import faulthandler, json, sys, threading
 import cupy as cp
 from eagle import _core
+from eagle.frameworks.cupy import wrap_external_stream
 
 faulthandler.enable()
 faulthandler.dump_traceback_later(90, exit=True)
 
 def capture_add(stream, a, value, times):
     cap = _core.StreamCapturer(stream.ptr())
-    with cp.cuda.ExternalStream(stream.ptr()):
+    with wrap_external_stream(stream.ptr()):
         cap.begin()
         for _ in range(times):
             a += value
@@ -299,7 +300,7 @@ for rep in range(REPS):
     def one(k):
         a, s = arrays[k], streams[k]
         cap = _core.StreamCapturer(s.ptr())
-        with cp.cuda.ExternalStream(s.ptr()):
+        with wrap_external_stream(s.ptr()):
             cap.begin()
             barrier.wait()                       # both captures are open at once
             for _ in range(20):
@@ -337,7 +338,7 @@ s2 = _core.Stream(non_blocking=True)
 c1 = _core.StreamCapturer(s1.ptr())
 c2 = _core.StreamCapturer(s2.ptr())
 raised = None
-with cp.cuda.ExternalStream(s1.ptr()):
+with wrap_external_stream(s1.ptr()):
     c1.begin()
     depth_open = _core.capture_guard_depth()
     try:
@@ -384,7 +385,7 @@ def churn():
         done.set()
 t = threading.Thread(target=churn); t.start()
 cap = _core.StreamCapturer(s.ptr())
-with cp.cuda.ExternalStream(s.ptr()):
+with wrap_external_stream(s.ptr()):
     cap.begin()
     opened.set()
     a += 1.0
@@ -420,6 +421,9 @@ _GIL_RELEASE_ALLOWED = {
         "host<->device copy, a host op or sum over raw pointers; the Array arguments are held by the "
         "calling binding for the whole call, and every device enqueue (a short call) keeps the GIL",
     "eagle_core.cpp:run_host_branches":
+        "its busy state is the eagle.Graph BusyGuard held across launch/enqueue; "
+        "it works on copies of entries, params and partitions taken before the release",
+    "eagle_core.cpp:run_host_stage":
         "its busy state is the eagle.Graph BusyGuard held across launch/enqueue; "
         "it works on copies of entries, params and partitions taken before the release",
     "eagle_core.cpp:diff_record_host":

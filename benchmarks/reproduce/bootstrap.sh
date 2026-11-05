@@ -37,7 +37,7 @@
 #                     raptor-eagle / raptor-hawk wheels (pins in locks/pypi-PROFILE.txt);
 #                     the card scripts come from the eagle checkout this script lives in
 #
-# Afterwards: . WORK/env-PROFILE.sh  (or run_cards.sh --env WORK/env-PROFILE.sh)
+# Afterwards: . WORK/env-PROFILE.sh  (or run_cards.sh --plan NAME)
 set -euo pipefail
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -183,7 +183,8 @@ install_source() {
     if [[ -d $SRC/$r ]]; then
       log "$r: using existing checkout $SRC/$r (left as it is)"
     else
-      run git clone -q --depth 1 --branch "${REF[$r]}" "$GIT_BASE/$r.git" "$SRC/$r" ||
+      # blobless, not shallow: the builds read their version from the nearest tag (git describe)
+      run git clone -q --filter=blob:none --branch "${REF[$r]}" "$GIT_BASE/$r.git" "$SRC/$r" ||
         die "clone of $r at ${REF[$r]} failed: pass --ref $r=<tag|branch> (or ${r^^}_REF)"
     fi
   done
@@ -365,4 +366,4 @@ if [[ $REPRO_DRY_RUN == 1 ]]; then
 else
   facts | tee "$WORK/machine_facts.txt"
 fi
-log "done. Next: $HERE/run_cards.sh --env $ENV_FILE --preset smoke"
+log "done. Next: $HERE/run_cards.sh --plan <a100|l4|t4|p2000|zen5|c4a> --dry-run"

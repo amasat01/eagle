@@ -85,17 +85,21 @@ def slim(card: dict, full_md5: str) -> dict:
 
 
 def raw_card(card_path: pathlib.Path) -> dict | None:
-    """The full card behind a committed one, from ``$EAGLE_CARD_RAW_DIR``; None when the
-    variable is unset. With it set, a file that is absent or whose md5 is not ``slim_of_md5``
-    raises, naming the file."""
+    """The full card behind a committed one. A card committed whole (no ``slim_of_md5``) is
+    its own full card. A slim one is read from ``$EAGLE_CARD_RAW_DIR``: None when the variable
+    is unset; with it set, a file that is absent or whose md5 is not ``slim_of_md5`` raises,
+    naming the file."""
+    committed = json.loads(card_path.read_text())
+    if "slim_of_md5" not in committed:
+        return committed
     root = os.environ.get("EAGLE_CARD_RAW_DIR")
     if not root:
         return None
     path = pathlib.Path(root) / card_path.parent.name / card_path.name
     if not path.is_file():
         raise FileNotFoundError(f"{path}: the full card is missing from $EAGLE_CARD_RAW_DIR")
-    want = json.loads(card_path.read_text()).get("slim_of_md5")
-    if want and hashlib.md5(path.read_bytes(), usedforsecurity=False).hexdigest() != want:
+    want = committed["slim_of_md5"]
+    if hashlib.md5(path.read_bytes(), usedforsecurity=False).hexdigest() != want:
         raise ValueError(f"{path}: not the full card this slim one was cut from")
     return json.loads(path.read_text())
 

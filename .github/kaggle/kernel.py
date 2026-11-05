@@ -13,11 +13,17 @@ import hashlib
 import json
 import os
 import pathlib
+import platform
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
+import urllib.error
+import urllib.request
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor
 
 # drive.py replaces the next line with the run settings.
 EMBEDDED_CONFIG = None
@@ -25,6 +31,21 @@ EMBEDDED_CONFIG = None
 ORG = "https://github.com/amasat01"
 SITE_REPO = "amasat01.github.io"
 FAMILY = ("raptor-eagle", "raptor-hawk", "jax", "jaxlib", "cupy-cuda12x", "cupy-cuda13x", "torch")
+
+
+def gpu_slots():
+    """The GPUs this run may use: the ``CUDA_VISIBLE_DEVICES`` it was given, else every GPU ``nvidia-smi -L`` lists."""
+    given = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if given is not None:
+        return [g for g in given.split(",") if g.strip()]
+    r = sh("nvidia-smi", "-L", capture=True)
+    return [str(i) for i, ln in enumerate(r.stdout.splitlines()) if ln.startswith("GPU ")] if r.returncode == 0 else []
+
+
+def slot_env(gpu, slots):
+    """One worker's share: its own GPU and an equal share of the CPU cores."""
+    cores = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else (os.cpu_count() or 1)
+    return {"CUDA_VISIBLE_DEVICES": gpu, "OMP_NUM_THREADS": str(max(1, cores // max(1, len(slots))))}
 
 
 def header(text):
@@ -40,11 +61,12 @@ def sh(*cmd, cwd=None, env=None, capture=False):
 
 def settings():
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--mode", default="tests", choices=("tests", "notebooks"), help="the interop test rows, or every docs notebook")
+    ap.add_argument("--mode", default="tests", choices=("tests", "notebooks", "cards"), help="the interop test rows, every docs notebook, or the benchmark cards")
     ap.add_argument("--nb-timeout", type=int, default=900, help="notebooks mode: seconds one notebook may run before it FAILs")
     ap.add_argument("--only", default="", help="notebooks mode: run only notebooks whose path contains this text")
     ap.add_argument("--hawk-src", help="local hawk checkout (notebooks mode)")
     ap.add_argument("--aether-src", help="local aether checkout (notebooks mode; its helper files)")
+    ap.add_argument("--print-plan", action="store_true", help="cards mode: print the plan and its minutes, run nothing")
     ap.add_argument("--local", action="store_true", help="use the current environment; no install, no Kaggle paths")
     ap.add_argument("--cuda", default="12", help="CUDA major of the extras: 12 or 13")
     ap.add_argument("--source", default="pypi", choices=("pypi", "git", "wheel"),
@@ -95,7 +117,9 @@ def pip(py, use_uv, *args):
     # uv takes a package from the first index that has it; best-match keeps PyPI's versions beside the torch index
     cmd = ([sys.executable, "-m", "uv", "pip", "install", "--python", py, "--index-strategy", "unsafe-best-match"]
            if use_uv else [py, "-m", "pip", "install"])
-    return sh(*cmd, *args)
+    rc = sh(*cmd, *args)
+    # pip hides the compiler's output on a failed build; run it once more verbose so the log shows the error
+    return sh(*cmd, "-v", *args) if rc else rc
 
 
 def torch_index(cfg):
@@ -122,10 +146,12 @@ def shipped_wheel(cfg, py):
     sums = (wheel.parent / "SHA256SUMS").read_bytes()
     if hashlib.sha256(sums).hexdigest() != cfg.wheel_sha256:
         raise SystemExit(f"shipped SHA256SUMS does not match the expected {cfg.wheel_sha256}")
-    got = hashlib.sha256(wheel.read_bytes()).hexdigest()
-    if f"{got}  {wheel.name}" not in sums.decode().splitlines():
-        raise SystemExit(f"{wheel.name}: sha256 {got} is not the one in the shipped SHA256SUMS")
     listed = {ln.split()[-1]: ln.split()[0] for ln in sums.decode().splitlines()}
+    # the dataset holds the wheel under its upload name; SHA256SUMS lists the real one (a dev version keeps its "+")
+    real = {upload_name(name): name for name in listed}.get(wheel.name)
+    got = hashlib.sha256(wheel.read_bytes()).hexdigest()
+    if real is None or listed[real] != got:
+        raise SystemExit(f"{wheel.name}: sha256 {got} is not the one in the shipped SHA256SUMS")
     # wheel.py uploads each file under upload_name() (Kaggle drops "+" and unpacks .tar.gz): each is matched to its
     # listed name, checked, and copied back under that name for pip; a listed file that never arrived fails here.
     by_upload = {upload_name(name): name for name in listed}
@@ -156,7 +182,52 @@ def install_args(cfg, py, cu, pre, pin, others):
             f"raptor-hawk[{cu}]" + (f"=={hawk}" if hawk else ""), *rest, *others]
 
 
+def pin_cuda12(cfg, work):
+    """CUDA 12 builds from source (headers, sdists, checkouts) use the pinned 12.9 toolchain, not the image's nvcc (13
+    since late 2026): the one pin list is eagle's cuda_redist.sh, taken from an eagle checkout whatever the source."""
+    if cfg.cuda != "12":
+        return
+    clone("eagle", cfg.eagle_ref, work / "src" / "eagle")
+    tool = work / "cuda12"
+    if sh("sh", work / "src" / "eagle" / ".github" / "cuda_redist.sh", "fetch", platform.machine(), tool, work / "cuda12_cache") != 0:
+        raise SystemExit("could not fetch the CUDA 12.9 toolchain")
+    os.environ.update(CUDA_PATH=str(tool), CUDA_HOME=str(tool), CUDACXX=str(tool / "bin" / "nvcc"),
+                      PATH=f"{tool / 'bin'}{os.pathsep}{os.environ['PATH']}")
+
+
+CUDA13_FINDER = """
+import importlib.metadata as md, json, re
+out = []
+for d in md.distributions():
+    name, ver = d.metadata["Name"] or "", d.version or ""
+    low = name.lower().replace("_", "-")
+    stack = (re.fullmatch(r"nvidia-.*-cu13", low) or "cuda13" in low or low.startswith("jax-cuda13")
+             or (low in ("torch", "torchvision", "torchaudio") and "+cu13" in ver)
+             or any(str(f).startswith("nvidia/cu13/") for f in (d.files or [])))   # the CUDA 13 wheels' shared include/lib root
+    if stack:
+        out.append(name)
+print(json.dumps(sorted(set(out))))
+"""
+
+
+def purge_cuda13(cfg, py, use_uv):
+    """Kaggle's image carries a CUDA 13 Python stack; a CUDA 12 run installs its own on top, and the leftovers win (NVRTC
+    reads nvidia/cu13/include, JAX loads the 13 plugin). Remove the image's CUDA 13 packages before installing anything."""
+    if cfg.cuda != "12":
+        return
+    found = sh(py, "-c", CUDA13_FINDER, capture=True)
+    names = json.loads(found.stdout or "[]") if found.returncode == 0 else []
+    print("CUDA 13 packages removed from the image:", ", ".join(names) or "none", flush=True)
+    if names:
+        cmd = ([sys.executable, "-m", "uv", "pip", "uninstall", "--python", py] if use_uv else [py, "-m", "pip", "uninstall", "-y"])
+        if sh(*cmd, *names) != 0:
+            raise SystemExit("could not remove the image's CUDA 13 packages")
+
+
 def install(cfg, py, use_uv, work):
+    (work / "src").mkdir(exist_ok=True)
+    purge_cuda13(cfg, py, use_uv)
+    pin_cuda12(cfg, work)
     cu = f"cuda{cfg.cuda}"
     pre = ["--pre"] if cfg.pre else []
     pin = f"=={cfg.version}" if cfg.version else ""
@@ -175,6 +246,12 @@ def install(cfg, py, use_uv, work):
         os.environ.update(AETHER_VERSION=ver, EAGLE_VERSION=ver, SETUPTOOLS_SCM_PRETEND_VERSION=ver)
         prefix = work / "install"
         arch = "-DCMAKE_CUDA_ARCHITECTURES=75"
+        # a sibling whose pinned version is on PyPI installs from there, whatever branch was cloned (the clone still
+        # supplies headers); the others are built from their checkout
+        pins = dict(p.split("==", 1) for p in (getattr(cfg, "sibling_pins", "") or "").split() if "==" in p)
+        released = {repo: f"{PACKAGE[repo]}=={pins[PACKAGE[repo]]}" for repo in PACKAGE
+                    if PACKAGE[repo] in pins and on_pypi(PACKAGE[repo], pins[PACKAGE[repo]])}
+        print("siblings from PyPI:", ", ".join(released.values()) or "none")
         for lib in ("aether", "eagle"):
             if sh("cmake", "-S", src / lib, "-B", work / f"build_{lib}", arch,
                   f"-DCMAKE_INSTALL_PREFIX={prefix}") != 0 or \
@@ -184,21 +261,45 @@ def install(cfg, py, use_uv, work):
         env = dict(os.environ, CMAKE_PREFIX_PATH=f"{prefix}:{os.environ.get('CMAKE_PREFIX_PATH', '')}",
                    SKBUILD_CMAKE_ARGS=f"{arch};-DCMAKE_CUDA_COMPILER={shutil.which('nvcc') or 'nvcc'}")
         os.environ.update(env)
-        rc = pip(py, use_uv, src / "raptor")
-        rc = rc or pip(py, use_uv, "--no-build-isolation", src / "aether" / "dsc")
+        rc = pip(py, use_uv, released.get("raptor", src / "raptor"))
+        if "aether" not in released:
+            # the release job seals the payload hawk compiles against before building aether-dsc; do the same, so every
+            # source gives hawk the aether headers as aether_dsc.payload()
+            rc = rc or pip(py, use_uv, "cuda-bindings", "nvidia-cuda-nvrtc-cu12", "nvidia-cuda-cccl-cu12", "pyyaml")
+            rc = rc or sh(py, "-m", "aether_dsc.seal", "--layout-header", src / "eagle" / "plugin" / "gref_layout.h",
+                          cwd=src / "aether" / "dsc")
+        rc = rc or pip(py, use_uv, *(["--no-build-isolation", src / "aether" / "dsc"] if "aether" not in released
+                                      else [released["aether"]]))
         rc = rc or pip(py, use_uv, "--no-build-isolation", src / "eagle" / "python")
-        rc = rc or pip(py, use_uv, "--no-build-isolation", src / "hawk")
+        rc = rc or pip(py, use_uv, *(["--no-build-isolation", src / "hawk"] if "hawk" not in released else [released["hawk"]]))
         rc = rc or pip(py, use_uv, *pre, *torch_index(cfg), f"jax[{cu}]", "torch", "warp-lang", "numpy", f"cupy-cuda{cfg.cuda}x",
                        "pytest", "nbclient", "ipykernel", "nbformat", "matplotlib")
     if rc != 0:
         raise SystemExit("install failed (see the pip output above)")
 
 
+PACKAGE = {"raptor": "raptor-core", "aether": "aether-dsc", "eagle": "raptor-eagle", "hawk": "raptor-hawk"}
+
+
+def on_pypi(package, version):
+    """Whether this exact release is on PyPI."""
+    try:
+        with urllib.request.urlopen(f"https://pypi.org/pypi/{package}/{version}/json", timeout=30):
+            return True
+    except urllib.error.URLError:
+        return False
+
+
 def clone(repo, ref, dest):
+    """A sibling checkout at ``ref``; a branch deleted since the plan was made (merged mid-run) falls back to main."""
     if dest.exists():
         return
-    if sh("git", "clone", "-q", "--depth", "1", "--branch", ref, f"{ORG}/{repo}.git", dest) != 0:
-        raise SystemExit(f"could not clone {repo} at {ref}")
+    for attempt in dict.fromkeys((ref, "main")):
+        if sh("git", "clone", "-q", "--depth", "1", "--branch", attempt, f"{ORG}/{repo}.git", dest) == 0:
+            break
+        print(f"{repo}: no ref {attempt}", "(trying main)" if attempt != "main" else "")
+    else:
+        raise SystemExit(f"could not clone {repo} at {ref} or main")
     print(repo, subprocess.run(["git", "-C", dest, "log", "--oneline", "-1"], capture_output=True, text=True).stdout.strip())
 
 
@@ -271,9 +372,11 @@ def run_tests(py, eagle_src, work):
     pydir.mkdir()
     shutil.copytree(eagle_src / "python" / "tests", pydir / "tests")
     shutil.copy2(eagle_src / "python" / "conftest.py", pydir)
+    # one process for the interop rows: their conformance row tallies, in-process, that every declared row ran
     runs = (("interop_matrix", ["tests", "-m", "interop_matrix and not repo_local"]),
-            ("jax", ["tests/test_interop_jax.py", "-m", "not repo_local"]),
-            ("warp", ["tests/test_frameworks_warp.py", "-m", "not repo_local"]))
+            ("jax", ["tests/test_interop_jax.py", "tests/test_frameworks_jax.py", "-m", "not repo_local and not gpu2"]),
+            ("warp", ["tests/test_frameworks_warp.py", "-m", "not repo_local"]),
+            ("gpu2", ["tests", "-m", "gpu2 and not repo_local"]))   # every GPU visible: these rows need two
     total = {"tests": 0, "failures": 0, "errors": 0, "skipped": 0, "failed": []}
     rcs = {}
     for name, sel in runs:
@@ -321,7 +424,9 @@ def table_of(rows):
 
 
 def run_notebooks(cfg, py, work, roots, result, out):
-    """Every notebook of the checkouts in ``roots`` (repo name -> path; 'site' = the site repository), one by one.
+    """Every notebook of the checkouts in ``roots`` (repo name -> path; 'site' = the site repository): the first alone
+    (its setup cell installs the GPU extras the rest reuse), then one per GPU at a time with an equal share of the CPU
+    cores, and last, alone with every GPU, those that place work on GPUs themselves (they set CUDA_VISIBLE_DEVICES).
     result.json is rewritten after each one, so a kernel that dies still shows what ran."""
     sys.path.insert(0, str(roots["site"]))  # raptor_docs, the family's docs tooling, lives in the site checkout
     from raptor_docs.nb import discover, hosted as nb_hosted, run_gate as nb_run_gate
@@ -341,14 +446,45 @@ def run_notebooks(cfg, py, work, roots, result, out):
         os.environ.setdefault("KAGGLE_KERNEL_RUN_TYPE", "Interactive")
     rows = []
     result.update(status="incomplete", reason="notebooks still running", discovered=len(todo), notebooks=rows)
-    for repo, path, rel in todo:
-        header(f"notebook: {repo}/{rel}")
-        status, msg, tail, secs = nb_hosted.run_notebook(py, work / "kernels", path, dict(os.environ), cfg.nb_timeout)
-        print(f"{status} {repo}/{rel} [{secs} s] {msg}", flush=True)
-        if tail:
-            print("\n".join(tail), flush=True)
-        rows.append({"name": f"{repo}/{rel}", "status": status, "seconds": secs, "reason": msg, "error": tail})
-        write_result(out, result, quiet=True)
+    lock = threading.Lock()
+
+    def one(item, extra):
+        repo, path, rel = item
+        status, msg, tail, secs = nb_hosted.run_notebook(py, work / "kernels", path, dict(os.environ, **extra),
+                                                         cfg.nb_timeout)
+        with lock:   # one notebook's report at a time, and result.json after each
+            header(f"notebook: {repo}/{rel}" + (f" (GPU {extra['CUDA_VISIBLE_DEVICES']})" if extra else ""))
+            print(f"{status} {repo}/{rel} [{secs} s] {msg}", flush=True)
+            if tail:
+                print("\n".join(tail), flush=True)
+            rows.append({"name": f"{repo}/{rel}", "status": status, "seconds": secs, "reason": msg, "error": tail})
+            write_result(out, result, quiet=True)
+
+    slots = gpu_slots()
+    whole = [t for t in todo if "CUDA_VISIBLE_DEVICES" in t[1].read_text(encoding="utf-8")]
+    shared = [t for t in todo if t not in whole]
+    for item in shared[:1]:
+        one(item, {})
+    if len(slots) > 1:
+        free = list(slots)
+        free_lock = threading.Lock()
+
+        def on_a_gpu(item):
+            with free_lock:
+                gpu = free.pop()
+            try:
+                one(item, slot_env(gpu, slots))
+            finally:
+                with free_lock:
+                    free.append(gpu)
+
+        with ThreadPoolExecutor(len(slots)) as pool:
+            list(pool.map(on_a_gpu, shared[1:]))
+    else:
+        for item in shared[1:]:
+            one(item, {})
+    for item in whole:
+        one(item, {})
     server.shutdown()
     counts = table_of(rows)
     ok = counts["FAIL"] == 0 and counts["PASS"] > 0 and len(rows) == len(todo)
@@ -356,6 +492,57 @@ def run_notebooks(cfg, py, work, roots, result, out):
     result.pop("reason", None)
     if not ok and not counts["FAIL"]:
         result["reason"] = "no notebook passed" if todo else "no notebooks found"
+    return ok
+
+
+#: The T4 row of the card plan (ruling section 4): (name, argv, expected minutes, cap in seconds; None: a hang guard of the time
+#: left to the session deadline + 12 min). Cost is bounded by the session deadline, 1.5 x the expected minutes counted from the start of
+#: the plan: no arm starts after it (the cards read it from $CARD_DEADLINE), the cards are assembled from their saved parts with the arms
+#: not run labelled ``not_run: session time limit``, and the steps not started are listed in result.json.
+CARDS_PLAN = (
+    ("p0_sol_probe", ["benchmarks/reproduce/gpu_profile.py", "--stage", "sol_probe", "--out", "{out}/profile"], 1, 4 * 60),
+    ("p1_wide_sweep", ["-m", "hawk.targets.cards.sweep", "--write", "--out", "{out}/profile/wide_sweep.json",
+                       "--cache", "{out}/profile/sweep_cache"], 4, 11 * 60),
+    ("c1_perf_card", ["benchmarks/perf_card/perf_card.py", "--parts", "{out}/parts/c1", "--out-dir", "{out}"], 89, None),
+    ("c2_feature_card", ["benchmarks/perf_card/feature_card.py", "--parts", "{out}/parts/c2", "--out-dir", "{out}"], 12, None),
+    ("p4_chunk_residency", ["benchmarks/reproduce/gpu_profile.py", "--stage", "chunk_residency", "--ns", "1000000", "--budget-s", "870",
+                            "--out", "{out}/profile"], 8, 16 * 60),
+)
+DEADLINE_FACTOR, INFLIGHT_S, ASSEMBLE_S = 1.5, 12 * 60, 20 * 60
+
+
+def run_cards(py, roots, out, result, work):
+    """The T4 plan: sol_probe, the wide sweep (rows written), the RKF7(8) ensemble card, the feature card (with
+    ``mpi_partition`` on the two T4s) and the chunk-residency profile, written under ``out/cards``;
+    ``result['cards']`` lists each step with its exit code."""
+    eagle = roots["eagle"]
+    env = dict(os.environ, HAWK_SRC=str(roots.get("hawk", "")), EAGLE_SRC=str(eagle))
+    cards_out = out / "cards"
+    cards_out.mkdir(parents=True, exist_ok=True)
+    compiled = cards_out / "compiled"    # the open-source libraries' compile caches, collected with the results (as run_cards.sh)
+    env.update(WARP_CACHE_PATH=f"{compiled}/warp", XLA_FLAGS=f"{env.get('XLA_FLAGS', '')} --xla_dump_to={compiled}/jax",
+               TORCHINDUCTOR_CACHE_DIR=f"{compiled}/torch", TRITON_CACHE_DIR=f"{compiled}/triton",
+               CUPY_CACHE_DIR=f"{compiled}/cupy", CUPY_CACHE_SAVE_CUDA_SOURCE="1")
+    deadline = time.time() + DEADLINE_FACTOR * 60 * sum(m for _, _, m, _ in CARDS_PLAN)
+    env["CARD_DEADLINE"] = str(deadline)
+    result["cards"], result["skipped"] = [], []
+    for name, argv, _, cap in CARDS_PLAN:
+        if time.time() > deadline:
+            result["skipped"].append(name)
+            continue
+        t0 = time.time()
+        cmd = [str(py), *[a.format(out=cards_out, work=work) for a in argv]]
+        try:
+            rc = subprocess.run(cmd, cwd=eagle, env=env, timeout=cap or deadline - time.time() + INFLIGHT_S).returncode
+        except subprocess.TimeoutExpired:
+            rc = 124
+        result["cards"].append({"name": name, "rc": rc, "seconds": round(time.time() - t0)})
+    for name, argv, _, _ in CARDS_PLAN:       # whatever ended early, the cards are written from their saved parts
+        if name[:2] in ("c1", "c2"):
+            subprocess.run([str(py), *[a.format(out=cards_out, work=work) for a in argv], "--assemble"], cwd=eagle, env=env,
+                           timeout=ASSEMBLE_S)
+    ok = all(c["rc"] == 0 for c in result["cards"])
+    result.update(status="pass" if ok else "fail")
     return ok
 
 
@@ -369,6 +556,12 @@ def write_result(out, result, quiet=False):
 
 def main():
     cfg = settings()
+    if cfg.print_plan:
+        for name, argv, minutes, _ in CARDS_PLAN:
+            print(f"{name:20s} expected {minutes:3d} min  python {' '.join(argv)}")
+        total = sum(m for _, _, m, _ in CARDS_PLAN)
+        print(f"expected {total} min, session deadline {DEADLINE_FACTOR * total:.0f} min")
+        return 0
     out = pathlib.Path(cfg.out or ("./out" if cfg.local else "/kaggle/working"))
     temp_root = "/kaggle/temp" if not cfg.local and pathlib.Path("/kaggle/temp").is_dir() else None
     work = pathlib.Path(tempfile.mkdtemp(prefix="eagle_gpu_", dir=temp_root))
@@ -415,6 +608,9 @@ def main():
         clone("eagle", cfg.eagle_ref, src / "eagle")
         clone("raptor", cfg.raptor_ref, src / "raptor")
         roots.update(eagle=src / "eagle", raptor=src / "raptor")
+        if cfg.mode == "cards":
+            clone("hawk", cfg.hawk_ref, src / "hawk")
+            roots["hawk"] = src / "hawk"
         if cfg.mode == "notebooks":
             clone(SITE_REPO, cfg.site_ref, src / SITE_REPO)
             clone("hawk", cfg.hawk_ref, src / "hawk")
@@ -428,6 +624,10 @@ def main():
     result["mode"] = cfg.mode
     if cfg.mode == "notebooks":
         ok = run_notebooks(cfg, py, work, roots, result, out)
+        write_result(out, result)
+        return 0 if ok else 1
+    if cfg.mode == "cards":
+        ok = run_cards(py, roots, out, result, work)
         write_result(out, result)
         return 0 if ok else 1
     tests = run_tests(py, roots["eagle"], work)

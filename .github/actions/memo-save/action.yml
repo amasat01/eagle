@@ -1,0 +1,22 @@
+# Copyright 2026 Alessandro Masat
+# SPDX-License-Identifier: Apache-2.0
+name: Remember a pass
+description: Record that the job passed on this digest (the memo action looks for it). Call it as the job's last step, on success.
+inputs:
+  name:
+    description: Memo name, as given to the memo action.
+    required: true
+  digest:
+    description: The memo action's digest output.
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        NAME: ${{ inputs.name }}
+      run: mkdir -p ci-pass && touch "ci-pass/$NAME"
+    - uses: actions/cache/save@v6
+      with:
+        path: ci-pass
+        key: ci-pass-v3-${{ inputs.name }}-${{ inputs.digest }}

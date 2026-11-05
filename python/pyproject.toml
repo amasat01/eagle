@@ -21,7 +21,7 @@ readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "Apache-2.0" }
 # Python versions match the cibuildwheel matrix release.yml actually builds
-# and the test-wheel job actually runs (cp39-cp315 plus the free-threaded cp313t/cp314t/cp315t; manylinux_2_28 x86_64 and aarch64, macOS arm64) —
+# and the test-wheel job actually runs (cp39-cp315 plus the free-threaded cp314t/cp315t; manylinux_2_28 x86_64 and aarch64, macOS arm64) —
 # never wider than what a real wheel ships.
 classifiers = [
     "License :: OSI Approved :: Apache Software License",
@@ -40,35 +40,33 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Mathematics",
 ]
 # raptor: the schema constants eagle.roles re-exports (SCHEMA_VERSION and the
-# neural-block vocabulary) are single-sourced there now. raptor-core is on PyPI.
+# graph-block vocabulary) are single-sourced there now. raptor-core is on PyPI.
 # DIST names carry the `raptor-` family
 # namespace, IMPORT names stay flat (`import eagle`, `import raptor`). Both bare
 # `eagle` and bare `raptor` are taken on PyPI by unrelated packages.
 # >=0.3.1 carries the JAX interop rows eagle declares. 0.3 shipped the free-threading conformance harness
 # (`raptor.conformance.freethreading`) eagle's free-threading tests import; it also keeps
-# `raptor.schema.blocks.validate_neural_block_descriptor` (first shipped in 0.2.0), which
+# `raptor.schema.blocks.validate_block_descriptor` (first shipped in 0.2.0), which
 # `eagle.sidecar` imports. The constraint is expressed where a resolver can act on it,
 # never as a runtime surprise.
 # aether-dsc: the `aether` arrays eagle allocates its planes with (CPU and GPU, no extra needed).
-dependencies = ["raptor-core>=0.7.0,<0.8", "aether-dsc>=0.7.2,<0.8"]
+dependencies = ["raptor-core>=0.7.3,<0.8", "aether-dsc>=0.7.3,<0.8"]
 
 # The "raptor.pattern_loaders" entry-point declaration for
-# "neural_block" moved to a separate package — eagle.neural was extracted there
+# "graph_block" moved to a separate package — the block code was extracted there
 # in full, so eagle itself has no pattern-loader entry point left to declare.
 
 [project.optional-dependencies]
 # numpy: the host-array bridge (eagle.frameworks.numpy) and the tests; eagle itself imports none.
 numpy = ["numpy>=1.26"]
 # cupy is env-provided on the deployment boxes (pinned against the local CUDA
-# toolkit); the extras are a convenience for a fresh environment. ``cuda`` is an
-# alias of ``cuda12`` so existing install lines keep working.
+# toolkit); the extras are a convenience for a fresh environment.
 # CuPy compiles its kernels at run time and needs the CUDA runtime headers and NVRTC:
 # cuda-toolkit[cudart,nvrtc] brings exactly those as pip wheels (no system toolkit),
 # without the math libraries CuPy's own [ctk] extra adds (cuBLAS, cuFFT, ...).
 # CuPy 14 dropped Python 3.9 (its last 3.9 release is 13.6), so the extras pick by
-# marker. CuPy 14 ships no cp313t wheel: on free-threaded 3.13 the GPU extras do not
-# resolve and eagle runs on the CPU route only. The same holds on aarch64, where CuPy's wheels
-# also stop at 3.14 (no 3.15 or 3.15t build either).
+# marker. CuPy's wheels stop at 3.14: on 3.15 and 3.15t, and on aarch64 above 3.14, the GPU extras do not
+# resolve and eagle runs on the CPU route only.
 cuda12 = [
     "cupy-cuda12x>=14; python_version>='3.10'",
     "cupy-cuda12x>=13.6,<14; python_version<'3.10'",
@@ -79,21 +77,26 @@ cuda13 = [
     "cupy-cuda13x>=13.6,<14; python_version<'3.10'",
     "cuda-toolkit[cudart,nvrtc]==13.*",
 ]
-cuda = [
-    "cupy-cuda12x>=14; python_version>='3.10'",
-    "cupy-cuda12x>=13.6,<14; python_version<'3.10'",
-    "cuda-toolkit[cudart,nvrtc]==12.*",
-]
 # eagle.frameworks.torch: the torch.autograd bridge. torch is imported only by
 # that submodule, so plain `import eagle` never needs it. The bridges compile
 # kernels with hawk; 0.5.1 is the first to derive nested derivatives.
-torch = ["torch>=2.2", "raptor-hawk>=0.7.2,<0.8"]
+torch = ["torch>=2.2", "raptor-hawk>=0.7.3,<0.8"]
 # eagle's JAX interop and eagle.frameworks.jax (see docs: interop contract).
 # JAX publishes wheels for Python 3.12 and newer, so this extra resolves there
 # and nowhere else; for GPU arrays install JAX's own CUDA extra (jax[cuda12] or
 # jax[cuda13]). The floor is the jaxlib whose XLA FFI headers libeagle_xla.so
 # vendors (an older runtime with newer headers is the unsupported direction).
-jax = ["jax>=0.11.2", "raptor-hawk>=0.7.2,<0.8"]
+jax = ["jax>=0.11.2", "raptor-hawk>=0.7.3,<0.8"]
+# What the test suite imports (the gate installs this, with ci/constraints.txt): pytest and numpy. Rows that need
+# torch, jax, warp or cupy sit behind their own extras and markers (interop_matrix, gpu, torch).
+test = ["pytest>=8", "pytest-xdist", "numpy", "ruff"]
+# What the docs build and notebook check import: the Sphinx stack docs/requirements.txt pins, and the notebooks' libraries.
+# raptor-docs (the shared tooling) is a checkout of the landing site, installed beside this (see the Makefile's SITE_SRC).
+docs = [
+    "Sphinx==8.2.3", "myst-nb==1.4.0", "sphinx-book-theme==1.2.0", "sphinx-design==0.7.0",
+    "sphinx-copybutton==0.5.2", "sphinx-autodoc-typehints==3.5.2", "breathe==4.36.0",
+    "nbformat", "nbclient", "ipykernel", "matplotlib", "scipy", "setuptools-scm", "sphinx-sitemap>=2.6",
+]
 # eagle.Graph.plot: the graph drawn with matplotlib (imported only by that
 # method; show()/to_mermaid()/to_dot() need nothing).
 plot = ["matplotlib>=3.7"]

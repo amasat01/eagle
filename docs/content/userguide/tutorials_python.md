@@ -20,17 +20,18 @@ extra/fork_join_graph
 - [What a graph is](tutorials/02_cuda_graphs_python): one launch replays a whole run.
 - [A multi-kernel step](tutorials/04_multi_kernel_workflow): propagate, diagnose and stop, declaratively.
 - [Build a step as a graph](tutorials/09_graph_model): `eagle.Graph`, built, inspected and run.
-- [Conditionals, budgets and events](tutorials/11_conditionals_budgets_events): reverse through a skipped step, a capped memory budget, and a stop between two steps.
+- [Gradients through conditionals](tutorials/11_conditionals_budgets_events): reverse through a skipped step, a capped memory budget, and a stop between two steps.
 - [A graph with parallel branches](extra/fork_join_graph): fork, join and reduce, optional reading.
 
 ## Run kernels
 
-Launch a batch, fuse steps, let finished samples leave, choose where it runs and see where the time went. The C++ track is the last entry.
+Build and call one kernel, launch a batch, fuse steps, let finished samples leave, choose where it runs and see where the time went. The C++ track is the last entry.
 
 ```{toctree}
 :maxdepth: 1
 :hidden:
 
+first_kernel
 tutorials/05_steps_per_launch
 tutorials/06_compaction_and_reorder
 tutorials/07_host_or_device
@@ -38,6 +39,7 @@ tutorials/08_profile_your_run
 tutorials
 ```
 
+- [Your first kernel](first_kernel): write a kernel, build it, call it; the other notebooks call kernels the same way.
 - [Steps per launch](tutorials/05_steps_per_launch): fuse steps to cut host-device chatter.
 - [Finished samples](tutorials/06_compaction_and_reorder): compaction, reorder, and when not to.
 - [Host or device?](tutorials/07_host_or_device): let the data decide where it runs.
@@ -57,6 +59,6 @@ tutorials/10_gradients_through_a_graph
 tutorials/train_through_a_branch
 ```
 
-- [Gradients through a physics kernel](tutorials/03_torch_training): a hawk kernel inside `loss.backward()`.
+- [Gradients through a kernel](tutorials/03_torch_training): a hawk kernel inside `loss.backward()`.
 - [Gradients through a graph](tutorials/10_gradients_through_a_graph): `eagle.diff`, checked against finite differences.
 - [Train through a branch](tutorials/train_through_a_branch): `jump=` gives a learnable threshold its gradient, and descent finds it.

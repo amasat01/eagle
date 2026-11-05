@@ -1,5 +1,5 @@
-Same bits, every time: reductions
-=================================
+Same bits, every time
+=====================
 
 .. contents:: On this page
    :local:

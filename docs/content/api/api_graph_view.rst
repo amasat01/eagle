@@ -1,5 +1,5 @@
-API reference — graph view
-==========================
+Graph view API
+==============
 
 The generic graph description, stride-aware edge derivation, the layered
 layout and the ASCII / Mermaid / DOT renderers, plus the adapters from eagle's

@@ -19,7 +19,7 @@ import threading
 import pytest
 
 torch = pytest.importorskip("torch",
-    reason="torch is not installed here (torch has free-threaded CPU wheels for 3.14t only (none for 3.13t))")
+    reason="torch is not installed here (torch has free-threaded CPU wheels for 3.14t only)")
 hawk = pytest.importorskip("hawk")
 
 from hawk import Mutable, Param, Scalar  # noqa: E402

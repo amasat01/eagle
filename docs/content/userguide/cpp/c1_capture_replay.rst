@@ -1,5 +1,5 @@
-C1 — Capture a launch once, replay it many times
-================================================
+C1 Capture and replay
+=====================
 
     Record a stream of kernel launches once, then replay the recorded graph
     as many times as you like -- with no per-launch API overhead.

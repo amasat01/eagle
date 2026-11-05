@@ -1,5 +1,5 @@
-Module: reduce
-==============
+reduce module
+=============
 
 The ``reduce`` module provides parallel reduction over aether scalar arrays,
 on both GPU (CUDA) via ``cuda::Reduction`` and CPU (OpenMP) via ``cpu::Reduction``.

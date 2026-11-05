@@ -19,7 +19,7 @@ concurrency:
 
 jobs:
   fetch:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       actions: read
@@ -37,7 +37,7 @@ jobs:
   deploy:
     if: github.ref == 'refs/heads/main'
     needs: fetch
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       pages: write
       id-token: write
@@ -52,7 +52,7 @@ jobs:
   # and serve a sitemap with lastmod. Pages can take a few minutes to publish, so it retries.
   current:
     needs: deploy
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       actions: read

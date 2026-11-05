@@ -1,0 +1,93 @@
+# Copyright 2026 Alessandro Masat
+# SPDX-License-Identifier: Apache-2.0
+#
+# Runs the GPU benchmark cards (the T4 plan: sol_probe, the wide sweep, the ensemble card, the feature card and the chunk-residency profile) on a free Kaggle T4,
+# where PyTorch, JAX, CuPy and Warp are installed, in one private kernel of at most 4 hours. Started by
+# hand (workflow_dispatch), or on a pull request by adding the label `cards`: then the packages are built
+# from that branch, each sibling at its same-named branch, else main. The card JSON and Markdown come back
+# as the artifact `kaggle-cards`; they are reviewed before anything is committed.
+
+name: Kaggle cards
+
+on:
+  pull_request:
+    types: [labeled]
+  workflow_dispatch:
+    inputs:
+      eagle_ref:
+        description: eagle ref (the card scripts and the build when source is git); empty = the branch you run from
+        default: ""
+      hawk_ref:
+        description: hawk ref (its examples, and the build when source is git)
+        default: main
+      raptor_ref:
+        description: raptor ref
+        default: main
+      source:
+        description: Where the packages come from
+        type: choice
+        options: [pypi, git]
+        default: pypi
+      pre:
+        description: Allow pre-release packages (pip --pre)
+        type: boolean
+        default: false
+      version:
+        description: Exact raptor-eagle version (pypi only, optional)
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  kaggle-cards:
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'cards'
+    runs-on: ubuntu-24.04
+    environment: kaggle
+    timeout-minutes: 270
+    env:
+      KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --quiet kaggle six  # kaggle 2.2.5 imports six without declaring it
+      - name: Run the cards kernel on Kaggle
+        env:
+          PR_REF: ${{ github.head_ref }}
+          INPUT_EAGLE_REF: ${{ inputs.eagle_ref || github.ref_name }}
+          INPUT_HAWK_REF: ${{ inputs.hawk_ref || 'main' }}
+          INPUT_RAPTOR_REF: ${{ inputs.raptor_ref || 'main' }}
+          INPUT_SOURCE: ${{ inputs.source }}
+          INPUT_PRE: ${{ inputs.pre && 'true' || 'false' }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [ -n "$PR_REF" ]; then
+            # a labelled pull request: build from its branch; each sibling at the same-named branch, else main
+            refs=(--eagle-ref "$PR_REF")
+            for pair in hawk=hawk raptor=raptor aether=aether; do
+              ref=main
+              git ls-remote --exit-code --heads "https://github.com/amasat01/${pair#*=}" "$PR_REF" >/dev/null 2>&1 && ref="$PR_REF"
+              refs+=("--${pair%%=*}-ref" "$ref")
+            done
+            INPUT_SOURCE=git
+            # shallow clones carry no tags and the sibling pins need a real version: the patch after the newest release
+            tag=$(git ls-remote --tags --refs https://github.com/amasat01/eagle 'v*' | sed 's#.*/v##' |
+                  grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+            INPUT_VERSION="${tag%.*}.$(( ${tag##*.} + 1 )).dev0"
+          else
+            refs=(--eagle-ref "$INPUT_EAGLE_REF" --hawk-ref "$INPUT_HAWK_REF" --raptor-ref "$INPUT_RAPTOR_REF")
+          fi
+          args=(--cuda 12 --mode cards --run-id "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "${refs[@]}"
+                --source "$INPUT_SOURCE" --out kaggle-out)
+          if [ "$INPUT_PRE" = true ]; then args+=(--pre); fi
+          if [ -n "$INPUT_VERSION" ]; then args+=(--version "$INPUT_VERSION"); fi
+          python .github/kaggle/drive.py "${args[@]}"
+      - name: Keep the cards, kernel log and result
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: kaggle-cards
+          path: kaggle-out
+          if-no-files-found: warn

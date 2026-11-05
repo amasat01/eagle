@@ -83,5 +83,7 @@
         "method": "register-only FP64 FMA chain probe in the card session (dp_sol_probe), best sustained rate at an implied 2426 MHz; 0.2% above the specification at the row clock, so the specification is the reference"
       }
     }
-  }
+  },
+  "ops_per_attempt": 1106,
+  "ops_per_attempt_note": "DP-pipe operations of one RKF7(8) attempt, hand-derived from the step (1099 in the scheme counted by running it on a counting number, 7 in the controller; an operation is one instruction, no fused multiply-add credit). Audit: cuobjdump of the ptxas -O3 SASS of the hawk-emitted PTX counts 2801 DFMA/DMUL/DADD/DSETP/MUFU on sm_61 and 2851 on sm_80 (+1.8 %); that static count includes the never-taken slow paths of sqrt and divide, so it bounds the executed count from above and is recorded per run, not used as the constant."
 }

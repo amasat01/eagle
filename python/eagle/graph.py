@@ -39,7 +39,7 @@ from ._active_set import _address
 from .interop import scoped_stream
 from .sidecar import refuse_derived
 
-__all__ = ["Edge", "Graph", "Node", "NodeKind", "SHARES_MEMORY_MAX_WORK",
+__all__ = ["CudaGraphHandle", "Edge", "Graph", "Node", "NodeKind", "SHARES_MEMORY_MAX_WORK",
            "child", "get_node_kind", "opaque", "register_node_kind"]
 
 _BACKENDS = ("gpu", "cpu", *GPU_KINDS)
@@ -415,6 +415,48 @@ def _writes_only_cells(bound) -> bool:
 
 def _array_backend(arr):
     return "cpu" if device_kind(arr) == "host" else "gpu"
+
+
+class CudaGraphHandle:
+    """An owned snapshot of a built GPU :class:`Graph`, for another runtime: ``handle`` is the integer value of a
+    ``cudaGraph_t``. Add it now with ``cudaGraphAddChildGraphNode`` (CUDA copies it, so ``close()`` right after is
+    safe); the consumer only reads it. The handle holds the Graph, and so every array the graph is bound to, alive;
+    ``close()`` (also ``with`` and garbage collection) destroys the clone. It is a snapshot: a later
+    :meth:`Graph.bind` or rebuild needs a new :meth:`Graph.cuda_graph`."""
+
+    def __init__(self, graph, handle):
+        self._graph, self._handle = graph, int(handle)
+
+    @property
+    def handle(self) -> int:
+        """The ``cudaGraph_t`` value of the clone."""
+        if self._handle == 0:
+            raise ValueError("eagle.CudaGraphHandle: the handle is closed")
+        return self._handle
+
+    def close(self) -> None:
+        """Destroy the clone (once); the Graph reference is dropped."""
+        handle, self._handle = self._handle, 0
+        if handle:
+            from . import _core
+
+            _core.Launcher.destroy_graph(handle)
+        self._graph = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:     # interpreter shutdown: the process owns the rest
+            pass
+
+    def __repr__(self):
+        return f"CudaGraphHandle(handle={self._handle:#x})" if self._handle else "CudaGraphHandle(closed)"
 
 
 class Graph:
@@ -864,6 +906,7 @@ class Graph:
             self._built = True
             self._built_with = dict(backend=backend, record=record, dispatch=dispatch, device=device)
             _counters.bump("graph_builds")
+            self._bump_host_version()
         return self
 
     def _rebind(self, mapping) -> Graph:
@@ -876,6 +919,7 @@ class Graph:
         code, a copy's destination, a plan of several kernels) rebuilds the
         graph, with one ``PerformanceWarning`` per graph."""
         self._need_built("_rebind")
+        self._bump_host_version()
         if self._recorder is not None:
             raise ValueError("eagle.Graph.bind: a record=True graph is bound by the builder again")
         patch = self._patch or self._patch_index()
@@ -950,7 +994,7 @@ class Graph:
             nodes, params = [], []
             for b in bounds:
                 step_nodes = steps[id(b)].nodes
-                if len(step_nodes) != 1:
+                if len(step_nodes) != 1 or getattr(b, "_gemm", None):     # a GEMM route is re-captured
                     raise LookupError
                 nodes.append(step_nodes[0])
                 params.append(b._addrs)
@@ -977,6 +1021,62 @@ class Graph:
         self._patch = None
         self._built, self._pipe, self._segments, self._tail_ev = False, None, None, None
         self.build(**keep)
+
+    # -- hand the CPU graph to another runtime's OpenMP region -- #
+    def _bump_host_version(self):
+        version = getattr(self, "_host_version", None)
+        if version is not None:
+            version.bump()
+
+    def host_table(self):
+        """The built CPU graph as a table another runtime runs from its own OpenMP region.
+
+        The result's ``.handle`` is a ``const eagle_host_table*`` (``plugin/graph_handoff.h``); the
+        result holds this graph, and so its bound arrays, alive. It is a snapshot: ``bind`` or a
+        rebuild makes it stale and ``eagle_host_table_run`` then refuses it. Refused here for a GPU
+        graph, a node of your own code, and a node that keeps run state."""
+        from . import _core
+        from ._host_schedule import _native_entry
+
+        self._need_built("host_table")
+        if self._backend == "gpu":
+            raise RuntimeError("eagle.Graph.host_table: a GPU graph has no host table; use cuda_graph()")
+        ctx = LowerCtx(self._backend)
+        stages = []
+        for node in self._nodes:
+            branches = node.payload if node.kind == "group" else [[node]]
+            stage = [[_native_entry(n, ctx) for n in branch] for branch in branches]
+            for branch, nodes in zip(stage, branches):
+                for entry, n in zip(branch, nodes):
+                    if entry is None:
+                        raise RuntimeError(
+                            f"eagle.Graph.host_table: node {n.label!r} ({n.kind}) has no native host entry "
+                            "(your own code, or a plan with run state)")
+            stages.append(stage)
+        if getattr(self, "_host_version", None) is None:
+            self._host_version = _core.HostVersion()
+        return _HostTableHandle(self, _core.HostTable(self._host_version, stages))
+
+    def cuda_graph(self) -> CudaGraphHandle:
+        """An owned clone of the built GPU graph's CUDA graph, taken now, for a foreign runtime to add with
+        ``cudaGraphAddChildGraphNode`` (see :class:`CudaGraphHandle`); it carries every array :meth:`bind` swapped in.
+        Refused with ``RuntimeError`` naming the node and the reason: a CPU graph, a segmented graph (a node outside
+        the ``capture`` tier), any host-function node, and what the driver does not accept as a child graph
+        (conditional and memory-allocation nodes; the CUDA error and driver version are quoted)."""
+        with self._busy("cuda_graph"):
+            self._need_built("cuda_graph")
+            if self._backend != "gpu":
+                raise RuntimeError("eagle.Graph.cuda_graph: this graph was built for the CPU, which has no CUDA graph")
+            if self._segments is not None:
+                eager = [f"{n.kind!r} ({how})" for n, how in zip(self._nodes, self._schedule) if how != "capture"]
+                raise RuntimeError("eagle.Graph.cuda_graph: the graph is segmented (several graphs with work between "
+                                   f"them): node {', '.join(eager)} is outside the capture tier")
+            if self._host_nodes:
+                raise RuntimeError("eagle.Graph.cuda_graph: the graph holds a host-function node; "
+                                   "host-function nodes are never handed to another runtime")
+            with _on_device(self._device):
+                handle = self._pipe._launcher.clone_graph()
+            return CudaGraphHandle(self, handle)
 
     # -- run -- #
     def _need_built(self, method):
@@ -1188,7 +1288,9 @@ class Graph:
         block that appends to the graph it is given; none makes a builder
         that makes, records into and returns its Graph (calling it on arrays
         builds that Graph; nothing runs). Control flow on 1-cell uint32 arrays
-        becomes device control flow."""
+        becomes device control flow. Either call takes ``layout=``
+        (``"samples_first"`` or ``"samples_last"``) for every plane its body
+        binds."""
         from ._builder import make_builder
 
         return make_builder(fn)
@@ -1230,6 +1332,24 @@ class Graph:
         from ._builder import bind
 
         return bind(self, planes)
+
+
+class _HostTableHandle:
+    """A built CPU graph's stages as plain data: ``handle`` is the address of a
+    ``const eagle_host_table*`` (``plugin/graph_handoff.h``). Holds the graph alive."""
+
+    __slots__ = ("_graph", "_table")
+
+    def __init__(self, graph, table):
+        self._graph, self._table = graph, table
+
+    @property
+    def handle(self) -> int:
+        return self._table.handle
+
+    @property
+    def stale(self) -> bool:
+        return self._table.stale()
 
 
 def _live_checks(accesses):

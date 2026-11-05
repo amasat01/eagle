@@ -4,7 +4,7 @@
 """``load_manifest`` loads byte-identical plugin CONTENT once per process.
 
 WHAT THE MEMO IS FOR. ``LoadedKernel.__init__`` ends in
-``cp.RawModule(path=...)``, and that call JITs the artifact's PTX through the
+``_core.module_load(...)``, and that call JITs the artifact's PTX through the
 driver. It is the dominant cost of loading a deployed unit, and it is paid per
 PATH: a producer that publishes the same kernel into a fresh deployment
 directory — which is what an AOT toolchain does every time it re-authors a
@@ -66,23 +66,23 @@ FIX = pathlib.Path(__file__).resolve().parent / "fixtures"
 
 
 class _Loads:
-    """A counter around ``cupy.RawModule`` — the driver load itself.
+    """A counter around ``eagle._core.module_load`` — the plugin's driver module load.
 
     Counting the DRIVER call rather than timing the load is the point: a memo
     that merely got faster would still be a memo that loads twice, and a wall
     time cannot tell those apart on a machine with other work on it."""
 
     def __init__(self, monkeypatch) -> None:
-        import cupy as cp
+        from eagle import _core
 
         self.n = 0
-        real = cp.RawModule
+        real = _core.module_load
 
         def counted(*args, **kwargs):
             self.n += 1
             return real(*args, **kwargs)
 
-        monkeypatch.setattr(cp, "RawModule", counted)
+        monkeypatch.setattr(_core, "module_load", counted)
 
 
 def _unit(root, name, *, stem="gravity", plugin_id="gravity", indent=2,

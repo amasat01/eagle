@@ -5,10 +5,10 @@
 
 Graph/binding-tier tests (mirrors ``test_graph_plugin.py`` / ``test_pipeline_
 parity.py``: function-style ``def test_<behavior>:``, module-level
-``pytestmark = pytest.mark.gpu``) rather than ``test_neural_*.py``, since
+``pytestmark = pytest.mark.gpu``) rather than ``test_graph_block_*.py``, since
 ``CaptureFork`` is a bound ``eagle::cuda`` primitive and ``add_concurrent`` is
 ``GraphPipeline``'s Python-surface fork/join sugar over it -- neither is
-neural-engine-specific.
+graph-block-engine-specific.
 
 ``test_capture_fork_round_trip_two_branches`` is PROMOTED from the working
 scratch round-trip (spec acceptance #3):
@@ -28,6 +28,7 @@ import numpy as np
 import pytest
 
 from eagle.pipeline import GraphPipeline, _concurrent_write_conflict_check, _debug_dot
+from eagle.frameworks.cupy import wrap_external_stream
 
 pytestmark = pytest.mark.gpu
 cp = pytest.importorskip("cupy")
@@ -78,7 +79,7 @@ def test_capture_fork_round_trip_two_branches():
     oracleB = cp.asnumpy(b) + 1.0
 
     st = _core.Stream(non_blocking=True)
-    ext = cp.cuda.ExternalStream(st.ptr())
+    ext = wrap_external_stream(st.ptr())
 
     # CaptureFork MUST be constructed before begin() -- it creates streams/events.
     fork = _core.CaptureFork(st.ptr(), 2)
@@ -87,8 +88,8 @@ def test_capture_fork_round_trip_two_branches():
     assert not fork.forked()
     assert fork.origin() == st.ptr()
 
-    br0 = cp.cuda.ExternalStream(fork.branch(0))
-    br1 = cp.cuda.ExternalStream(fork.branch(1))
+    br0 = wrap_external_stream(fork.branch(0))
+    br1 = wrap_external_stream(fork.branch(1))
 
     cap = _core.StreamCapturer(st.ptr())
     with ext:
@@ -135,7 +136,7 @@ def _on_eagle(kernel, *args):
     """Run a cupy kernel on the stream eagle is capturing (cupy does not follow eagle's stream)."""
     from eagle import _stream
 
-    with cp.cuda.ExternalStream(_stream.current()):
+    with wrap_external_stream(_stream.current()):
         kernel(*args)
 
 
@@ -156,7 +157,6 @@ def test_add_concurrent_fork_topology_no_sibling_edge():
     pipe.add_concurrent([lambda: _on_eagle(kA, a, outA), lambda: _on_eagle(kB, b, outB)])
     pipe.build()
 
-    assert pipe.introspection_available()
     assert pipe.num_nodes() == 2
     _assert_no_sibling_edge(pipe._dot(), "branchA", "branchB")
 

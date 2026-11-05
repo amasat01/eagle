@@ -130,8 +130,9 @@ def _tangents():
 
 
 def _row(planes, i, heads):
-    """Sample ``i`` of every batch plane, in its head shape."""
-    return {k: (v[..., i].reshape(heads[k]) if heads.get(k) != () else v[i])
+    """Sample ``i`` of every batch plane, in its head shape (a sample's column is strided in the batch: a
+    contiguous copy, as a caller passes one)."""
+    return {k: (np.ascontiguousarray(v[..., i].reshape(heads[k])) if heads.get(k) != () else v[i])
             for k, v in planes.items()}
 
 
@@ -383,3 +384,33 @@ def test_until_done_takes_an_auto_plan(osc):
     batch = _osc_run(ap.host, inp, np)
     one = _osc_run(ap, inp, np, 2)
     assert one["k"] == batch["k"][2] and one["x"] == batch["x"][2]
+
+
+# --------------------------------------------------------------------------- #
+# A number or 0-d value for a per-lane Scalar beside a batch is broadcast
+# --------------------------------------------------------------------------- #
+@hawk.kernel
+def ss_bcast(x: Scalar, a: Scalar, p: Param, y: Mutable[Scalar]):
+    y = x * a + p
+
+
+@pytest.fixture(scope="module")
+def bcast(tmp_path_factory):
+    return eagle.deploy(ss_bcast, targets=("host",), cache_dir=str(tmp_path_factory.mktemp("hawk")))
+
+
+@pytest.mark.parametrize("a", [2.0, np.array(2.0)])
+def test_a_number_or_0d_scalar_beside_a_batch_is_that_value_on_every_lane(bcast, a):
+    x = np.arange(64.0)
+    np.testing.assert_array_equal(np.asarray(bcast(x, a, 1.0)), x * 2.0 + 1.0)
+    np.testing.assert_array_equal(np.asarray(bcast(x=x, a=a, p=1.0)), np.asarray(bcast(x, np.full(64, 2.0), 1.0)))
+
+
+def test_all_single_scalars_stay_one_sample(bcast):
+    assert np.asarray(bcast(3.0, 2.0, 1.0)).shape == ()
+
+
+@pytest.mark.parametrize("p", [np.array([1.0]), np.ones(64)])
+def test_a_param_given_an_array_is_refused_by_name(bcast, p):
+    with pytest.raises(ValueError, match=r"'p' is a shared parameter \(one number for every lane\), got shape"):
+        bcast(np.arange(64.0), np.ones(64), p)

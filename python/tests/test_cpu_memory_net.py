@@ -84,6 +84,7 @@ def test_a_1e6_row_above_the_floor_is_resolved_and_netted():
     assert _cc.published_peak_bytes(rows[3], rows, "rk4_cpu") == 68 * mib  # raw: no harness copies
 
 
+@pytest.mark.skipif(not _CARD.is_file(), reason="the RK4 CPU card this reads is not committed")
 def test_rendered_cpu_table_cell_is_the_net_value_read_from_the_card():
     gen = _load("eagle_gen_perf_pages_net", _REPO / "docs" / "_tools" / "gen_perf_pages.py")
     spec = next(s for s in gen.FAMILIES if s["key"] == "perf_card_cpu")

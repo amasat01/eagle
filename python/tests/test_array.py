@@ -13,6 +13,7 @@ from __future__ import annotations
 import ctypes
 import os
 import subprocess
+import tempfile
 import sys
 
 import pytest
@@ -120,9 +121,15 @@ def _capture(stream, enqueue):
     return cap.end()
 
 
-def _kernel_nodes(captured, tmp="/local/scratch/amasat/tmp/w072/scratch/S1a/tmp/array_graph.dot") -> int:
+def _dump_dot(captured, name: str) -> str:
+    """The Graphviz dump of a captured graph, written to a throwaway directory."""
+    with tempfile.TemporaryDirectory() as d:
+        return captured.debug_dot(os.path.join(d, name), 0)
+
+
+def _kernel_nodes(captured) -> int:
     """Kernel nodes of a captured graph, read off its Graphviz dump (a memset or copy node is not one)."""
-    dot = captured.debug_dot(tmp, 0)
+    dot = _dump_dot(captured, "array_graph.dot")
     return dot.count('shape="octagon"')      # CUDA draws kernel nodes as octagons (memset / copy nodes are not)
 
 
@@ -267,7 +274,7 @@ def test_a_captured_zero_is_one_memset_node_and_no_kernel():
     a = arrays.full((1 << 12,), 7, arrays.int32, "cuda:0", s.ptr())
     s.synchronize()
     captured = _capture(s, lambda a=a: _alloc.zero("cuda:0", a, s.ptr()))
-    dot = captured.debug_dot("/local/scratch/amasat/tmp/w072/scratch/S1a/tmp/zero_graph.dot", 0)
+    dot = _dump_dot(captured, "zero_graph.dot")
     assert dot.count('shape="octagon"') == 0            # no kernel
     assert dot.count("MEMSET") + dot.count("Memset") + dot.count("memset") == 1
     _core.Graph.from_captured(captured).launcher().launch()

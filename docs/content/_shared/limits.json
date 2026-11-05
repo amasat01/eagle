@@ -260,14 +260,14 @@
  },
  {
   "id": "jax-ft-wheel",
-  "text": "JAX runs under free-threading on Python 3.14t only, because jaxlib publishes no 3.13t wheel (JAX's release choice): use 3.14t for free-threaded JAX, or a regular 3.13 build.",
+  "text": "JAX runs under free-threading on Python 3.14t only, because jaxlib publishes free-threaded wheels for that version only (JAX's release choice): use 3.14t for free-threaded JAX, or a regular 3.13 build.",
   "way_out": "3.14t, or a regular 3.13",
   "cause": "framework",
   "lifted_in": "none"
  },
  {
   "id": "torch-ft-wheel",
-  "text": "torch's CPU wheels cover free-threaded Python 3.14t only, none for 3.13t (torch's release choice): use 3.14t for free-threaded torch, or a regular 3.13 build.",
+  "text": "torch's CPU wheels cover free-threaded Python 3.14t only (torch's release choice): use 3.14t for free-threaded torch, or a regular 3.13 build.",
   "way_out": "3.14t, or a regular 3.13",
   "cause": "framework",
   "lifted_in": "none"

@@ -83,6 +83,30 @@ inline const char* driver_error_text(CUresult r) {
     return msg ? msg : "?";
 }
 
+/**
+ * @brief The context an out-of-memory failure needs, read at the moment of failure: the
+ *        local bytes per thread of @p fn (0: unknown) and the current device's free/total
+ *        memory, as text for the message. Never throws.
+ */
+inline std::string oom_context(CUfunction fn) {
+    std::string out;
+    try {
+        if (fn != nullptr) {
+            static const auto attr = driver_entry<decltype(&::cuFuncGetAttribute)>("cuFuncGetAttribute");
+            int local = 0;
+            if (attr(&local, CU_FUNC_ATTRIBUTE_LOCAL_SIZE_BYTES, fn) == CUDA_SUCCESS)
+                out += "kernel local memory " + std::to_string(local) + " bytes per thread; ";
+        }
+        static const auto info = driver_entry<decltype(&::cuMemGetInfo)>("cuMemGetInfo");
+        std::size_t freeBytes = 0, totalBytes = 0;
+        if (info(&freeBytes, &totalBytes) == CUDA_SUCCESS)
+            out += "GPU memory " + std::to_string(freeBytes >> 20) + " MiB free of "
+                + std::to_string(totalBytes >> 20) + " MiB total";
+    } catch (...) {
+    }
+    return out;
+}
+
 } // namespace detail
 } // namespace cuda
 } // namespace eagle

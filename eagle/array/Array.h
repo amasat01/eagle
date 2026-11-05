@@ -51,6 +51,7 @@ struct Storage {
     std::size_t bytes = 0;
     Placement place{};
     std::uint64_t stream = 0;   // allocation stream (device storage frees on it)
+    bool ordered = true;        // false: borrowed from a producer that asks for no synchronisation (CAI "stream": None)
     std::function<void()> release;
     Storage() = default;
     Storage(const Storage&) = delete;
@@ -97,7 +98,7 @@ public:
 
     /// Memory owned by someone else: ``keep`` (any object, may be empty) is held until the last view goes.
     static Array borrow(void* ptr, const std::vector<std::int64_t>& shape, const std::vector<std::int64_t>& strides,
-        DType dtype, Placement place, std::shared_ptr<void> keep = {})
+        DType dtype, Placement place, std::shared_ptr<void> keep = {}, bool ordered = true)
     {
         if (shape.size() != strides.size()) throw std::invalid_argument("eagle::array: shape and strides differ in rank");
         Array a;
@@ -107,6 +108,7 @@ public:
         auto s = std::make_shared<Storage>();
         s->base = ptr;
         s->place = place;
+        s->ordered = ordered;
         s->release = [keep] {};          // the shared_ptr copy lives in the closure: dropped with the storage
         a.st_ = std::move(s);
         a.data_ = static_cast<char*>(ptr);
@@ -119,6 +121,8 @@ public:
     DType dtype() const { return dtype_; }
     const Placement& placement() const { return st_->place; }
     std::uint64_t stream() const { return st_ ? st_->stream : 0; }
+    /// False when the memory came from a producer that needs no synchronisation: exports then insert no wait.
+    bool ordered() const { return !st_ || st_->ordered; }
     std::size_t rank() const { return rank_; }
     std::int64_t extent(std::size_t i) const { return shape_[i]; }
     std::int64_t stride(std::size_t i) const { return strides_[i]; }

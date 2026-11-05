@@ -177,6 +177,8 @@ def _vjp_from_auto(bound):
     once beside it (its own bundle, naming the primal's unit) and kept on the
     plugin. ``None`` for a plan built any other way."""
     plugin = bound.plan.plugin
+    if getattr(plugin, "_gemm", None) is not None and bound._device is not None:
+        return plugin._gemm.vjp         # contraction="gemm" on the device: the route's adjoint
     found = getattr(plugin, "_vjp", None)
     source = getattr(plugin, "_hawk_source", None)
     if found is not None or source is None:

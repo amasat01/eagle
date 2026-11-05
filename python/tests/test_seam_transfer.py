@@ -21,6 +21,7 @@ import numpy as np
 import pytest
 
 from eagle import _core
+from eagle.frameworks.cupy import wrap_external_stream
 
 
 def _host_array(ptr: int, n: int) -> np.ndarray:
@@ -79,7 +80,7 @@ def test_a_captured_copy_and_host_function_run_on_every_replay():
         fn = _core.HostFunc(host)
         s = _core.Stream(non_blocking=True)
         cap = _core.StreamCapturer(s.ptr())
-        with cp.cuda.ExternalStream(s.ptr()):
+        with wrap_external_stream(s.ptr()):
             cap.begin()
             _core.memcpy(d.data.ptr, ptr, n * 8, _core.COPY_H2D, s.ptr())
             inc(d)

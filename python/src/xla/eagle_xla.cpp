@@ -101,11 +101,16 @@ std::shared_ptr<const Recipe> find(std::string_view digest, std::int32_t ordinal
 {
     std::shared_lock<std::shared_mutex> lock(g_mutex);
     const std::string key(digest);
-    const auto it = g_table.lower_bound({ key, ordinal < 0 ? std::numeric_limits<std::int32_t>::min() : ordinal });
     other = -1;
+    if (ordinal >= 0) {
+        if (const auto hit = g_table.find({ key, ordinal }); hit != g_table.end())
+            return hit->second;
+    }
+    // the first registration of the digest, on any device: the answer for -1, the diagnosis otherwise
+    const auto it = g_table.lower_bound({ key, std::numeric_limits<std::int32_t>::min() });
     if (it == g_table.end() || it->first.first != key)
         return nullptr;
-    if (ordinal >= 0 && it->first.second != ordinal) {
+    if (ordinal >= 0) {
         other = it->first.second;
         return nullptr;
     }

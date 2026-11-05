@@ -1,0 +1,2064 @@
+{
+ "schema": "eagle-feature-card/2",
+ "script": "benchmarks/perf_card/feature_card.py",
+ "script_md5": "13447caaa815e985758d3889351e7554",
+ "common_md5": "3b7b33719b7f33652a1c4f3c0acc83d2",
+ "generated_utc": "2026-11-05T09:48:57Z",
+ "release": "eagle 0.7.3.dev191+g5ff969995, hawk 0.7.3.dev152+g336723a85",
+ "device_slug": "nvidia-h100-nvl",
+ "device": {
+  "name": "NVIDIA H100 NVL",
+  "compute_capability": "9.0",
+  "sm_count": 132,
+  "clock_rate_hz": 1785000000.0,
+  "memory_clock_hz": 2619000000.0,
+  "memory_bus_width_bits": 6144,
+  "total_memory_bytes": 99981918208,
+  "pci_bus_id": "00000000:26:00.0",
+  "driver_version": "560.35.03",
+  "cuda_driver_api": 12060,
+  "cuda_runtime": 12090,
+  "nvidia_smi": {
+   "name": "NVIDIA H100 NVL",
+   "driver_version": "560.35.03",
+   "clocks_max_sm": "1785 MHz",
+   "clocks_max_mem": "2619 MHz",
+   "memory_total": "95830 MiB",
+   "power_limit": "400.00 W"
+  }
+ },
+ "peak": {
+  "fp64_flops": 30159360000000.0,
+  "fp64_source": "SM count x FP64 FMA per clock per SM (CUDA C++ Programming Guide, Arithmetic Instructions throughput table, compute capability 9.0: 64) x 2 FLOP per FMA x the device's reported maximum clock (cudaDeviceProp::clockRate)",
+  "dram_bytes_per_s": 4022784000000.0,
+  "dram_source": "2 x memory clock (cudaDeviceProp::memoryClockRate) x bus width (cudaDeviceProp::memoryBusWidth) / 8"
+ },
+ "software": {
+  "python": "3.12.14",
+  "numpy": "2.5.3",
+  "cupy": "14.2.0",
+  "torch": "2.12.1+cu126",
+  "jax": "0.11.2",
+  "jaxlib": "0.11.2",
+  "warp": "1.17.0",
+  "hawk": "0.7.3.dev152+g336723a85",
+  "eagle_commit": "af0ce44f658cf2b682f89df97c1724b7901d7ab8",
+  "hawk_commit": "336723a85e9890656564a703b72e06f9f40744aa-dirty",
+  "platform": "Linux-6.12.0-106.55.4.2.el9uek.x86_64-x86_64-with-glibc2.34",
+  "cpu": "INTEL(R) XEON(R) GOLD 6526Y",
+  "omp_num_threads": null
+ },
+ "method": "One fresh process per arm; a warm-up, then 3 to 9 rounds until the IQR is under 5 % of the median (at most 300 s); a warm-up over 120 s is not_run: budget.",
+ "rows": [
+  {
+   "row": "wide_forms",
+   "case": "all",
+   "dtype": "float64",
+   "n": 65536,
+   "baseline": "opaque NumPy mask; torch",
+   "reference_arm": "thread",
+   "arms": {
+    "thread": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "every output equals the reference bit for bit": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.01824440062046051,
+      "iqr": 4.550814628601074e-05,
+      "q1": 0.018206080421805382,
+      "q3": 0.018251588568091393,
+      "samples": [
+       0.018258776515722275,
+       0.01824440062046051,
+       0.018167760223150253
+      ],
+      "rounds": 3,
+      "warm_s": 0.018277205526828766
+     },
+     "sm_mhz": 1785.0,
+     "host_rss_kib": 1698104,
+     "device_bytes": 4424990720
+    },
+    "team": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "every output equals the reference bit for bit": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.001771681010723114,
+      "iqr": 4.892982542514801e-05,
+      "q1": 0.0017269570380449295,
+      "q3": 0.0017758868634700775,
+      "samples": [
+       0.001780092716217041,
+       0.001771681010723114,
+       0.001682233065366745
+      ],
+      "rounds": 3,
+      "warm_s": 0.0018181391060352325
+     },
+     "sm_mhz": 1785.0,
+     "host_rss_kib": 1700584,
+     "device_bytes": 1298137088
+    },
+    "team_k8": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "every output equals the reference bit for bit": true
+     },
+     "rule": "max rounds",
+     "note": null,
+     "wall_s": {
+      "median": 0.0016939975321292877,
+      "iqr": 0.0026862509548664093,
+      "q1": 0.0016087666153907776,
+      "q3": 0.004295017570257187,
+      "samples": [
+       0.0016939975321292877,
+       0.0016928315162658691,
+       0.004612576216459274,
+       0.0016087666153907776,
+       0.004217304289340973,
+       0.001601673662662506,
+       0.004295017570257187,
+       0.001600462943315506,
+       0.004299778491258621
+      ],
+      "rounds": 9,
+      "warm_s": 0.0017704404890537262
+     },
+     "sm_mhz": 1785.0,
+     "host_rss_kib": 1699496,
+     "device_bytes": 1298137088
+    },
+    "staged": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "every output equals the reference bit for bit": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.0009794458746910095,
+      "iqr": 4.76296991109848e-05,
+      "q1": 0.0009335428476333618,
+      "q3": 0.0009811725467443466,
+      "samples": [
+       0.0009794458746910095,
+       0.0009828992187976837,
+       0.0008876398205757141
+      ],
+      "rounds": 3,
+      "warm_s": 0.0010457783937454224
+     },
+     "sm_mhz": 1785.0,
+     "host_rss_kib": 1699868,
+     "device_bytes": 1298137088
+    },
+    "numpy_mask": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "the NumPy reference": true
+     },
+     "rule": "max rounds",
+     "note": null,
+     "wall_s": {
+      "median": 0.37976620718836784,
+      "iqr": 0.30840759351849556,
+      "q1": 0.33306022733449936,
+      "q3": 0.6414678208529949,
+      "samples": [
+       0.27194518595933914,
+       0.3631778806447983,
+       0.33306022733449936,
+       0.3096679151058197,
+       0.37976620718836784,
+       0.4690489247441292,
+       0.6414678208529949,
+       0.7702142000198364,
+       0.7038951851427555
+      ],
+      "rounds": 9,
+      "warm_s": 0.2927403412759304
+     },
+     "sm_mhz": 345.0,
+     "host_rss_kib": 1584012,
+     "device_bytes": 616366080
+    },
+    "torch": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "fill_mask and matvec_in match the reference (masked_sum has no torch form)": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.00037825480103492737,
+      "iqr": 7.275491952896118e-06,
+      "q1": 0.0003756694495677948,
+      "q3": 0.0003829449415206909,
+      "samples": [
+       0.0004709772765636444,
+       0.0004447661340236664,
+       0.0003829449415206909,
+       0.0003786049783229828,
+       0.000375993549823761,
+       0.0003756694495677948,
+       0.0003740079700946808,
+       0.0003738515079021454,
+       0.00037825480103492737
+      ],
+      "rounds": 9,
+      "warm_s": 0.001012612134218216
+     },
+     "sm_mhz": 1785.0,
+     "host_rss_kib": 1915520,
+     "device_bytes": 1782579200
+    }
+   },
+   "ratio_to_reference": {
+    "thread": 1.0,
+    "team": 0.09710820583145004,
+    "team_k8": 0.09285027046761535,
+    "staged": 0.05368473840640138,
+    "numpy_mask": 20.815493755518183,
+    "torch": 0.02073265156273354
+   }
+  },
+  {
+   "row": "wide_forms",
+   "case": "all",
+   "dtype": "float32",
+   "n": 65536,
+   "baseline": "opaque NumPy mask; torch",
+   "reference_arm": "thread",
+   "arms": {
+    "thread": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "every output equals the reference bit for bit": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.012284528464078903,
+      "iqr": 7.563456892967224e-05,
+      "q1": 0.012250110507011414,
+      "q3": 0.012325745075941086,
+      "samples": [
+       0.012284528464078903,
+       0.012366961687803268,
+       0.012215692549943924
+      ],
+      "rounds": 3,
+      "warm_s": 0.012778449803590775
+     },
+     "sm_mhz": 1785.0,
+     "host_rss_kib": 1069512,
+     "device_bytes": 2166358016
+    },
+    "team": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "every output equals the reference bit for bit": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.0013670697808265686,
+      "iqr": 2.9454007744789124e-05,
+      "q1": 0.0013401992619037628,
+      "q3": 0.001369653269648552,
+      "samples": [
+       0.0013670697808265686,
+       0.0013722367584705353,
+       0.001313328742980957
+      ],
+      "rounds": 3,
+      "warm_s": 0.0014073029160499573
+     },
+     "sm_mhz": 1785.0,
+     "host_rss_kib": 1068836,
+     "device_bytes": 920649728
+    },
+    "team_k8": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "every output equals the reference bit for bit": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.0011558420956134796,
+      "iqr": 5.369260907173157e-05,
+      "q1": 0.001152224838733673,
+      "q3": 0.0012059174478054047,
+      "samples": [
+       0.0012360066175460815,
+       0.002013787627220154,
+       0.0011758282780647278,
+       0.0011558420956134796,
+       0.0011518597602844238,
+       0.0011460669338703156,
+       0.0011525899171829224
+      ],
+      "rounds": 7,
+      "warm_s": 0.0012755468487739563
+     },
+     "sm_mhz": 1785.0,
+     "host_rss_kib": 1070700,
+     "device_bytes": 920649728
+    },
+    "staged": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "every output equals the reference bit for bit": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.000806853175163269,
+      "iqr": 2.726539969444275e-05,
+      "q1": 0.0007819868624210358,
+      "q3": 0.0008092522621154785,
+      "samples": [
+       0.000811651349067688,
+       0.000806853175163269,
+       0.0007571205496788025
+      ],
+      "rounds": 3,
+      "warm_s": 0.0008644759654998779
+     },
+     "sm_mhz": 1785.0,
+     "host_rss_kib": 1069640,
+     "device_bytes": 920649728
+    },
+    "numpy_mask": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "the NumPy reference": true
+     },
+     "rule": "max rounds",
+     "note": null,
+     "wall_s": {
+      "median": 0.24615472182631493,
+      "iqr": 0.041058462113142014,
+      "q1": 0.22488287463784218,
+      "q3": 0.2659413367509842,
+      "samples": [
+       0.2907748706638813,
+       0.25690891593694687,
+       0.22488287463784218,
+       0.2659413367509842,
+       0.24615472182631493,
+       0.21958696097135544,
+       0.2215452529489994,
+       0.22965890169143677,
+       0.3380373753607273
+      ],
+      "rounds": 9,
+      "warm_s": 0.2178070843219757
+     },
+     "sm_mhz": 345.0,
+     "host_rss_kib": 981252,
+     "device_bytes": 616366080
+    },
+    "torch": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "fill_mask and matvec_in match the reference (masked_sum has no torch form)": true
+     },
+     "rule": "max rounds",
+     "note": null,
+     "wall_s": {
+      "median": 0.00030925124883651733,
+      "iqr": 3.104284405708313e-05,
+      "q1": 0.0002928338944911957,
+      "q3": 0.0003238767385482788,
+      "samples": [
+       0.0006459690630435944,
+       0.00039678066968917847,
+       0.0003238767385482788,
+       0.00031823664903640747,
+       0.00030925124883651733,
+       0.00030592456459999084,
+       0.0002907402813434601,
+       0.0002928338944911957,
+       0.0002911873161792755
+      ],
+      "rounds": 9,
+      "warm_s": 0.000650111585855484
+     },
+     "sm_mhz": 1785.0,
+     "host_rss_kib": 1535256,
+     "device_bytes": 1245708288
+    }
+   },
+   "ratio_to_reference": {
+    "thread": 1.0,
+    "team": 0.11128386285432176,
+    "team_k8": 0.09408925210220878,
+    "staged": 0.06568043515244254,
+    "numpy_mask": 20.03778350517027,
+    "torch": 0.02517404308523494
+   }
+  },
+  {
+   "row": "steps_fused",
+   "case": "all",
+   "dtype": "float64",
+   "n": 65536,
+   "baseline": "Warp loop (primal); torch.func over a loop (derivatives)",
+   "reference_arm": "K8",
+   "arms": {
+    "K1": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "y equals W x + c after 8 steps": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.004651553928852081,
+      "iqr": 3.349222242832184e-05,
+      "q1": 0.004625638946890831,
+      "q3": 0.004659131169319153,
+      "samples": [
+       0.004651553928852081,
+       0.004666708409786224,
+       0.004599723964929581
+      ],
+      "rounds": 3,
+      "warm_s": 0.004784427583217621
+     },
+     "sm_mhz": 1785.0,
+     "host_rss_kib": 1225008,
+     "device_bytes": 826277888
+    },
+    "K8": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "y equals W x + c after 8 steps": true
+     },
+     "rule": "max rounds",
+     "note": null,
+     "wall_s": {
+      "median": 0.0006159394979476929,
+      "iqr": 6.378442049026489e-05,
+      "q1": 0.0006132721900939941,
+      "q3": 0.000677056610584259,
+      "samples": [
+       0.0007430613040924072,
+       0.0007596500217914581,
+       0.000677056610584259,
+       0.0006536468863487244,
+       0.0006132721900939941,
+       0.0006156042218208313,
+       0.0006159394979476929,
+       0.0006053708493709564,
+       0.0006065666675567627
+      ],
+      "rounds": 9,
+      "warm_s": 0.0008203685283660889
+     },
+     "sm_mhz": 1785.0,
+     "host_rss_kib": 1200652,
+     "device_bytes": 826277888
+    },
+    "K32": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "y equals W x + c after 8 steps": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.0006327591836452484,
+      "iqr": 2.5644898414611816e-05,
+      "q1": 0.000627521425485611,
+      "q3": 0.0006531663239002228,
+      "samples": [
+       0.0008407309651374817,
+       0.0007750391960144043,
+       0.0006531663239002228,
+       0.0006327591836452484,
+       0.0006188787519931793,
+       0.0006335526704788208,
+       0.000627521425485611,
+       0.0006198994815349579,
+       0.0006319880485534668
+      ],
+      "rounds": 9,
+      "warm_s": 0.0009011626243591309
+     },
+     "sm_mhz": 1785.0,
+     "host_rss_kib": 1225392,
+     "device_bytes": 826277888
+    },
+    "jvp_K8": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "dot_y equals W dx + dW x + dc": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.0011038482189178467,
+      "iqr": 4.346482455730438e-05,
+      "q1": 0.001099742017686367,
+      "q3": 0.0011432068422436714,
+      "samples": [
+       0.001206822693347931,
+       0.0013465210795402527,
+       0.0011220015585422516,
+       0.0011067204177379608,
+       0.0011009760200977325,
+       0.0010977722704410553,
+       0.001100398600101471,
+       0.0010927803814411163
+      ],
+      "rounds": 8,
+      "warm_s": 0.0013473816215991974
+     },
+     "sm_mhz": 1785.0,
+     "host_rss_kib": 1489160,
+     "device_bytes": 1107296256
+    },
+    "vjp_K8_fused": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "bar_x equals W^T bar_y and bar_c equals bar_c_next + sum(bar_y)": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.004195809364318848,
+      "iqr": 9.164214134216309e-05,
+      "q1": 0.004157768562436104,
+      "q3": 0.004249410703778267,
+      "samples": [
+       0.004195809364318848,
+       0.004303012043237686,
+       0.00411972776055336
+      ],
+      "rounds": 3,
+      "warm_s": 0.004998501390218735
+     },
+     "sm_mhz": 1785.0,
+     "host_rss_kib": 1828964,
+     "device_bytes": 2092957696
+    },
+    "vjp_K8_auto": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "bar_x equals W^T bar_y and bar_c equals bar_c_next + sum(bar_y)": true
+     },
+     "rule": "iqr",
+     "note": "steps_reverse auto picks fused",
+     "wall_s": {
+      "median": 0.004231691360473633,
+      "iqr": 0.00011811032891273499,
+      "q1": 0.004151064902544022,
+      "q3": 0.004269175231456757,
+      "samples": [
+       0.00430665910243988,
+       0.004231691360473633,
+       0.00407043844461441
+      ],
+      "rounds": 3,
+      "warm_s": 0.004293590784072876
+     },
+     "sm_mhz": 1785.0,
+     "host_rss_kib": 1818104,
+     "device_bytes": 2092957696
+    },
+    "warp_loop": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "y equals W x + c after 8 steps": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.021450091153383255,
+      "iqr": 1.952052116394043e-05,
+      "q1": 0.021430574357509613,
+      "q3": 0.021450094878673553,
+      "samples": [
+       0.021450091153383255,
+       0.021450098603963852,
+       0.02141105756163597
+      ],
+      "rounds": 3,
+      "warm_s": 0.021515797823667526
+     },
+     "sm_mhz": 1785.0,
+     "host_rss_kib": 863952,
+     "device_bytes": 845152256
+    },
+    "torch_func": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "bar_x equals W^T bar_y": true
+     },
+     "rule": "max rounds",
+     "note": null,
+     "wall_s": {
+      "median": 0.0011290572583675385,
+      "iqr": 0.00033850595355033875,
+      "q1": 0.0011097267270088196,
+      "q3": 0.0014482326805591583,
+      "samples": [
+       0.0015715435147285461,
+       0.0014482326805591583,
+       0.0011349059641361237,
+       0.0011290572583675385,
+       0.0011214129626750946,
+       0.0011082030832767487,
+       0.0011097267270088196,
+       0.0011008940637111664,
+       0.13647381216287613
+      ],
+      "rounds": 9,
+      "warm_s": 0.0017701983451843262
+     },
+     "sm_mhz": 1785.0,
+     "host_rss_kib": 2029840,
+     "device_bytes": 1430257664
+    }
+   },
+   "ratio_to_reference": {
+    "K1": 7.551965646546511,
+    "K8": 1.0,
+    "K32": 1.027307366638442,
+    "jvp_K8": 1.7921374138139592,
+    "vjp_K8_fused": 6.812047901294303,
+    "vjp_K8_auto": 6.870303616789646,
+    "warp_loop": 34.82499697592839,
+    "torch_func": 1.833065198983912
+   }
+  },
+  {
+   "row": "control_flow",
+   "case": "all",
+   "dtype": "float64",
+   "n": 1000000,
+   "baseline": "Warp per-thread loop",
+   "reference_arm": "guard",
+   "arms": {
+    "guard": {
+     "status": "ok",
+     "n": 1000000,
+     "checks": {
+      "y equals the NumPy loop on the first 1024 lanes": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.010637909173965454,
+      "iqr": 3.676861524581909e-06,
+      "q1": 0.010637324303388596,
+      "q3": 0.010641001164913177,
+      "samples": [
+       0.010644093155860901,
+       0.010637909173965454,
+       0.010636739432811737
+      ],
+      "rounds": 3,
+      "warm_s": 0.010643072426319122
+     },
+     "sm_mhz": 1785.0,
+     "host_rss_kib": 342832,
+     "device_bytes": 568328192
+    },
+    "no_guard": {
+     "status": "ok",
+     "n": 1000000,
+     "checks": {
+      "y equals the NumPy loop on the first 1024 lanes": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.011776156723499298,
+      "iqr": 1.9783154129981995e-05,
+      "q1": 0.011758610606193542,
+      "q3": 0.011778393760323524,
+      "samples": [
+       0.01178063079714775,
+       0.011776156723499298,
+       0.011741064488887787
+      ],
+      "rounds": 3,
+      "warm_s": 0.011852215975522995
+     },
+     "sm_mhz": 1785.0,
+     "host_rss_kib": 343976,
+     "device_bytes": 568328192
+    },
+    "jump": {
+     "status": "ok",
+     "n": 1000000,
+     "checks": {
+      "y equals the NumPy loop on the first 1024 lanes": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.011632945388555527,
+      "iqr": 3.888271749019623e-05,
+      "q1": 0.011607116088271141,
+      "q3": 0.011645998805761337,
+      "samples": [
+       0.011659052222967148,
+       0.011632945388555527,
+       0.011581286787986755
+      ],
+      "rounds": 3,
+      "warm_s": 0.011655904352664948
+     },
+     "sm_mhz": 1785.0,
+     "host_rss_kib": 343568,
+     "device_bytes": 568328192
+    },
+    "segmented": {
+     "status": "ok",
+     "n": 1000000,
+     "checks": {
+      "y equals the NumPy loop on the first 1024 lanes": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.7720398418605328,
+      "iqr": 0.008020387962460518,
+      "q1": 0.7672673501074314,
+      "q3": 0.7752877380698919,
+      "samples": [
+       0.7624948583543301,
+       0.7785356342792511,
+       0.7720398418605328
+      ],
+      "rounds": 3,
+      "warm_s": 0.7676811777055264
+     },
+     "sm_mhz": 1785.0,
+     "host_rss_kib": 378232,
+     "device_bytes": 576716800
+    },
+    "warp": {
+     "status": "ok",
+     "n": 1000000,
+     "checks": {
+      "y equals the NumPy loop on the first 1024 lanes": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.009433023631572723,
+      "iqr": 6.127730011940002e-05,
+      "q1": 0.009372234344482422,
+      "q3": 0.009433511644601822,
+      "samples": [
+       0.009433023631572723,
+       0.00943399965763092,
+       0.00931144505739212
+      ],
+      "rounds": 3,
+      "warm_s": 0.009412936866283417
+     },
+     "sm_mhz": 1785.0,
+     "host_rss_kib": 458576,
+     "device_bytes": 576716800
+    }
+   },
+   "ratio_to_reference": {
+    "guard": 1.0,
+    "no_guard": 1.1069991791544451,
+    "jump": 1.093536821786866,
+    "segmented": 72.57439683260074,
+    "warp": 0.8867366206376821
+   }
+  },
+  {
+   "row": "linalg_lane",
+   "case": "n8",
+   "dtype": "float64",
+   "n": 131072,
+   "baseline": "cuSOLVER batched (CuPy); torch.linalg",
+   "reference_arm": "hawk",
+   "arms": {
+    "hawk": {
+     "status": "ok",
+     "n": 131072,
+     "checks": {
+      "x and eigenvalues match NumPy": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.0016562342643737793,
+      "iqr": 3.9964914321899414e-05,
+      "q1": 0.0016271751374006271,
+      "q3": 0.0016671400517225266,
+      "samples": [
+       0.0016780458390712738,
+       0.0016562342643737793,
+       0.001598116010427475
+      ],
+      "rounds": 3,
+      "warm_s": 0.001740880310535431
+     },
+     "sm_mhz": 1785.0,
+     "host_rss_kib": 499560,
+     "device_bytes": 666894336
+    },
+    "cupy": {
+     "status": "ok",
+     "n": 131072,
+     "checks": {
+      "x matches NumPy": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.006442556157708168,
+      "iqr": 0.00021843332797288895,
+      "q1": 0.006388298235833645,
+      "q3": 0.006606731563806534,
+      "samples": [
+       0.006296519190073013,
+       0.007028263062238693,
+       0.006466221064329147,
+       0.006418891251087189
+      ],
+      "rounds": 4,
+      "warm_s": 0.006568938493728638
+     },
+     "sm_mhz": 1785.0,
+     "host_rss_kib": 499140,
+     "device_bytes": 2241855488
+    },
+    "torch": {
+     "status": "failed: _LinAlgError: cusolver error: CUSOLVER_STATUS_INVALID_VALUE, when calling `cusolverDnXsyevBatched_bufferSize( handle, params, jobz, uplo, n, CUDA_R_64F, reinterpret_cast<cons"
+    }
+   },
+   "ratio_to_reference": {
+    "hawk": 1.0,
+    "cupy": 3.889882184114874
+   }
+  },
+  {
+   "row": "linalg_lane",
+   "case": "n8",
+   "dtype": "float32",
+   "n": 131072,
+   "baseline": "cuSOLVER batched (CuPy); torch.linalg",
+   "reference_arm": "hawk",
+   "arms": {
+    "hawk": {
+     "status": "ok",
+     "n": 131072,
+     "checks": {
+      "x and eigenvalues match NumPy": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.0006638411432504654,
+      "iqr": 3.219861537218094e-05,
+      "q1": 0.000659482553601265,
+      "q3": 0.0006916811689734459,
+      "samples": [
+       0.0007512159645557404,
+       0.0007481612265110016,
+       0.000672854483127594,
+       0.000665571540594101,
+       0.0006621107459068298,
+       0.0006578229367733002,
+       0.0006560534238815308,
+       0.0006600357592105865
+      ],
+      "rounds": 8,
+      "warm_s": 0.0010527744889259338
+     },
+     "sm_mhz": 1785.0,
+     "host_rss_kib": 440984,
+     "device_bytes": 591396864
+    },
+    "cupy": {
+     "status": "ok",
+     "n": 131072,
+     "checks": {
+      "x matches NumPy": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.004564780741930008,
+      "iqr": 0.0002142908051609993,
+      "q1": 0.004514053463935852,
+      "q3": 0.004728344269096851,
+      "samples": [
+       0.004433922469615936,
+       0.00514698401093483,
+       0.004588797688484192,
+       0.004540763795375824
+      ],
+      "rounds": 4,
+      "warm_s": 0.0045252107083797455
+     },
+     "sm_mhz": 1785.0,
+     "host_rss_kib": 437496,
+     "device_bytes": 1579155456
+    },
+    "torch": {
+     "status": "failed: _LinAlgError: cusolver error: CUSOLVER_STATUS_INVALID_VALUE, when calling `cusolverDnXsyevBatched_bufferSize( handle, params, jobz, uplo, n, CUDA_R_32F, reinterpret_cast<cons"
+    }
+   },
+   "ratio_to_reference": {
+    "hawk": 1.0,
+    "cupy": 6.876314896028867
+   }
+  },
+  {
+   "row": "linalg_lane",
+   "case": "n32",
+   "dtype": "float64",
+   "n": 8192,
+   "baseline": "cuSOLVER batched (CuPy); torch.linalg",
+   "reference_arm": "hawk",
+   "arms": {
+    "hawk": {
+     "status": "ok",
+     "n": 8192,
+     "checks": {
+      "x and eigenvalues match NumPy": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.010539516806602478,
+      "iqr": 6.896071135997772e-05,
+      "q1": 0.010493919253349304,
+      "q3": 0.010562879964709282,
+      "samples": [
+       0.010586243122816086,
+       0.010539516806602478,
+       0.01044832170009613
+      ],
+      "rounds": 3,
+      "warm_s": 0.01081404834985733
+     },
+     "sm_mhz": 1785.0,
+     "host_rss_kib": 489252,
+     "device_bytes": 2764046336
+    },
+    "cupy": {
+     "status": "ok",
+     "n": 8192,
+     "checks": {
+      "x matches NumPy": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.004539560526609421,
+      "iqr": 0.0002110954374074936,
+      "q1": 0.004528839141130447,
+      "q3": 0.004739934578537941,
+      "samples": [
+       0.004518117755651474,
+       0.004940308630466461,
+       0.004539560526609421
+      ],
+      "rounds": 3,
+      "warm_s": 0.004583951085805893
+     },
+     "sm_mhz": 1785.0,
+     "host_rss_kib": 488900,
+     "device_bytes": 1197473792
+    },
+    "torch": {
+     "status": "ok",
+     "n": 8192,
+     "checks": {
+      "x matches NumPy": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.008594702929258347,
+      "iqr": 0.00010475143790245056,
+      "q1": 0.008574213832616806,
+      "q3": 0.008678965270519257,
+      "samples": [
+       0.008553724735975266,
+       0.008763227611780167,
+       0.008594702929258347
+      ],
+      "rounds": 3,
+      "warm_s": 0.008500762283802032
+     },
+     "sm_mhz": 1785.0,
+     "host_rss_kib": 735932,
+     "device_bytes": 3894411264
+    }
+   },
+   "ratio_to_reference": {
+    "hawk": 1.0,
+    "cupy": 0.43071808792653704,
+    "torch": 0.8154740949674464
+   }
+  },
+  {
+   "row": "linalg_lane",
+   "case": "n32",
+   "dtype": "float32",
+   "n": 8192,
+   "baseline": "cuSOLVER batched (CuPy); torch.linalg",
+   "reference_arm": "hawk",
+   "arms": {
+    "hawk": {
+     "status": "ok",
+     "n": 8192,
+     "checks": {
+      "x and eigenvalues match NumPy": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.005388539284467697,
+      "iqr": 5.097128450870514e-05,
+      "q1": 0.00534902885556221,
+      "q3": 0.005400000140070915,
+      "samples": [
+       0.005411460995674133,
+       0.005388539284467697,
+       0.005309518426656723
+      ],
+      "rounds": 3,
+      "warm_s": 0.005476277321577072
+     },
+     "sm_mhz": 1785.0,
+     "host_rss_kib": 440308,
+     "device_bytes": 1551892480
+    },
+    "cupy": {
+     "status": "ok",
+     "n": 8192,
+     "checks": {
+      "x matches NumPy": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.0022133663296699524,
+      "iqr": 0.00010336097329854965,
+      "q1": 0.0021953312680125237,
+      "q3": 0.0022986922413110733,
+      "samples": [
+       0.0024568699300289154,
+       0.0026359520852565765,
+       0.0022459663450717926,
+       0.0022235549986362457,
+       0.0021993257105350494,
+       0.0021833479404449463,
+       0.002181142568588257,
+       0.002203177660703659
+      ],
+      "rounds": 8,
+      "warm_s": 0.002317916601896286
+     },
+     "sm_mhz": 1785.0,
+     "host_rss_kib": 424220,
+     "device_bytes": 1056964608
+    },
+    "torch": {
+     "status": "ok",
+     "n": 8192,
+     "checks": {
+      "x matches NumPy": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.004910863935947418,
+      "iqr": 2.4005770683288574e-05,
+      "q1": 0.004905885085463524,
+      "q3": 0.0049298908561468124,
+      "samples": [
+       0.004910863935947418,
+       0.004948917776346207,
+       0.0049009062349796295
+      ],
+      "rounds": 3,
+      "warm_s": 0.004863511770963669
+     },
+     "sm_mhz": 1785.0,
+     "host_rss_kib": 725468,
+     "device_bytes": 2464153600
+    }
+   },
+   "ratio_to_reference": {
+    "hawk": 1.0,
+    "cupy": 0.4107544202284865,
+    "torch": 0.9113534627283568
+   }
+  },
+  {
+   "row": "linalg_team",
+   "case": "n512",
+   "dtype": "float64",
+   "n": 16,
+   "baseline": "CuPy; torch.linalg",
+   "reference_arm": "team",
+   "arms": {
+    "team": {
+     "status": "ok",
+     "n": 16,
+     "checks": {
+      "x match NumPy": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.06551552191376686,
+      "iqr": 4.287809133529663e-06,
+      "q1": 0.0655136052519083,
+      "q3": 0.06551789306104183,
+      "samples": [
+       0.06551552191376686,
+       0.0655202642083168,
+       0.06551168859004974
+      ],
+      "rounds": 3,
+      "warm_s": 0.06553084030747414
+     },
+     "sm_mhz": 1785.0,
+     "host_rss_kib": 533424,
+     "device_bytes": 1476395008
+    },
+    "cupy": {
+     "status": "ok",
+     "n": 16,
+     "checks": {
+      "x matches NumPy": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.0198039673268795,
+      "iqr": 8.589029312133789e-05,
+      "q1": 0.019735336303710938,
+      "q3": 0.019821226596832275,
+      "samples": [
+       0.0198039673268795,
+       0.01983848586678505,
+       0.019666705280542374
+      ],
+      "rounds": 3,
+      "warm_s": 0.019761119037866592
+     },
+     "sm_mhz": 1785.0,
+     "host_rss_kib": 560424,
+     "device_bytes": 916455424
+    },
+    "torch": {
+     "status": "ok",
+     "n": 16,
+     "checks": {
+      "x matches NumPy": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.005968179553747177,
+      "iqr": 0.00010805390775203705,
+      "q1": 0.0058766137808561325,
+      "q3": 0.0059846676886081696,
+      "samples": [
+       0.005968179553747177,
+       0.006001155823469162,
+       0.005785048007965088
+      ],
+      "rounds": 3,
+      "warm_s": 0.0061655193567276
+     },
+     "sm_mhz": 1785.0,
+     "host_rss_kib": 911724,
+     "device_bytes": 809500672
+    }
+   },
+   "ratio_to_reference": {
+    "team": 1.0,
+    "cupy": 0.302279013406105,
+    "torch": 0.09109565763060914
+   }
+  },
+  {
+   "row": "contraction",
+   "case": "all",
+   "dtype": "float64",
+   "n": 65536,
+   "baseline": "cupy.einsum",
+   "reference_arm": "box",
+   "arms": {
+    "box": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "y equals the NumPy matrix product": true
+     },
+     "rule": "max rounds",
+     "note": null,
+     "wall_s": {
+      "median": 2.9064714908599854e-05,
+      "iqr": 1.0181218385696411e-05,
+      "q1": 2.872571349143982e-05,
+      "q3": 3.890693187713623e-05,
+      "samples": [
+       9.057670831680298e-05,
+       8.784234523773193e-05,
+       3.890693187713623e-05,
+       3.271549940109253e-05,
+       2.902001142501831e-05,
+       2.872571349143982e-05,
+       2.9064714908599854e-05,
+       2.648681402206421e-05,
+       2.7526170015335083e-05
+      ],
+      "rounds": 9,
+      "warm_s": 9.743869304656982e-05
+     },
+     "sm_mhz": 1785.0,
+     "host_rss_kib": 352632,
+     "device_bytes": 545259520
+    },
+    "no_box": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "y equals the NumPy matrix product": true
+     },
+     "rule": "max rounds",
+     "note": null,
+     "wall_s": {
+      "median": 2.8718262910842896e-05,
+      "iqr": 1.9535422325134277e-05,
+      "q1": 2.765655517578125e-05,
+      "q3": 4.719197750091553e-05,
+      "samples": [
+       7.21663236618042e-05,
+       8.45193862915039e-05,
+       4.719197750091553e-05,
+       3.395974636077881e-05,
+       2.8718262910842896e-05,
+       2.8681010007858276e-05,
+       2.765655517578125e-05,
+       2.615898847579956e-05,
+       2.633035182952881e-05
+      ],
+      "rounds": 9,
+      "warm_s": 0.00010752305388450623
+     },
+     "sm_mhz": 1785.0,
+     "host_rss_kib": 352272,
+     "device_bytes": 545259520
+    },
+    "gemm": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "y equals the NumPy matrix product": true
+     },
+     "rule": "max rounds",
+     "note": null,
+     "wall_s": {
+      "median": 5.1252543926239014e-05,
+      "iqr": 3.059208393096924e-05,
+      "q1": 4.692375659942627e-05,
+      "q3": 7.751584053039551e-05,
+      "samples": [
+       0.00016542896628379822,
+       0.0001655369997024536,
+       7.751584053039551e-05,
+       7.05420970916748e-05,
+       5.1252543926239014e-05,
+       4.749372601509094e-05,
+       4.692375659942627e-05,
+       4.641339182853699e-05,
+       4.3585896492004395e-05
+      ],
+      "rounds": 9,
+      "warm_s": 0.00020333752036094666
+     },
+     "sm_mhz": 1785.0,
+     "host_rss_kib": 410124,
+     "device_bytes": 612368384
+    },
+    "einsum": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "einsum equals the NumPy matrix product": true
+     },
+     "rule": "max rounds",
+     "note": null,
+     "wall_s": {
+      "median": 0.00016247481107711792,
+      "iqr": 4.152953624725342e-05,
+      "q1": 0.0001518838107585907,
+      "q3": 0.00019341334700584412,
+      "samples": [
+       0.00038592517375946045,
+       0.0003900565207004547,
+       0.00019341334700584412,
+       0.00016827881336212158,
+       0.00016247481107711792,
+       0.0001554340124130249,
+       0.00015096738934516907,
+       0.0001518838107585907,
+       0.00014316663146018982
+      ],
+      "rounds": 9,
+      "warm_s": 0.0007827021181583405
+     },
+     "sm_mhz": 1785.0,
+     "host_rss_kib": 420992,
+     "device_bytes": 614465536
+    }
+   },
+   "ratio_to_reference": {
+    "box": 1.0,
+    "no_box": 0.9880799794924379,
+    "gemm": 1.7633940015380671,
+    "einsum": 5.590105101256088
+   }
+  },
+  {
+   "row": "contraction",
+   "case": "all",
+   "dtype": "float32",
+   "n": 65536,
+   "baseline": "cupy.einsum",
+   "reference_arm": "box",
+   "arms": {
+    "box": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "y equals the NumPy matrix product": true
+     },
+     "rule": "max rounds",
+     "note": null,
+     "wall_s": {
+      "median": 2.8975307941436768e-05,
+      "iqr": 1.4137476682662964e-05,
+      "q1": 2.6322901248931885e-05,
+      "q3": 4.046037793159485e-05,
+      "samples": [
+       8.55475664138794e-05,
+       0.00011532381176948547,
+       4.046037793159485e-05,
+       3.232434391975403e-05,
+       2.8975307941436768e-05,
+       2.728775143623352e-05,
+       2.6322901248931885e-05,
+       2.4545937776565552e-05,
+       2.5115907192230225e-05
+      ],
+      "rounds": 9,
+      "warm_s": 0.00011252239346504211
+     },
+     "sm_mhz": 1785.0,
+     "host_rss_kib": 352344,
+     "device_bytes": 545259520
+    },
+    "no_box": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "y equals the NumPy matrix product": true
+     },
+     "rule": "max rounds",
+     "note": null,
+     "wall_s": {
+      "median": 2.8736889362335205e-05,
+      "iqr": 1.2598931789398193e-05,
+      "q1": 2.6267021894454956e-05,
+      "q3": 3.886595368385315e-05,
+      "samples": [
+       0.00010966137051582336,
+       0.00011612847447395325,
+       3.886595368385315e-05,
+       3.0104070901870728e-05,
+       2.872943878173828e-05,
+       2.8736889362335205e-05,
+       2.6267021894454956e-05,
+       2.5305896997451782e-05,
+       2.5540590286254883e-05
+      ],
+      "rounds": 9,
+      "warm_s": 0.00011881068348884583
+     },
+     "sm_mhz": 1785.0,
+     "host_rss_kib": 352728,
+     "device_bytes": 545259520
+    },
+    "gemm": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "y equals the NumPy matrix product": true
+     },
+     "rule": "max rounds",
+     "note": null,
+     "wall_s": {
+      "median": 4.1890889406204224e-05,
+      "iqr": 2.2862106561660767e-05,
+      "q1": 3.9711594581604004e-05,
+      "q3": 6.257370114326477e-05,
+      "samples": [
+       0.00014344602823257446,
+       0.00014515966176986694,
+       6.257370114326477e-05,
+       4.776567220687866e-05,
+       4.176422953605652e-05,
+       3.9711594581604004e-05,
+       3.754720091819763e-05,
+       4.1890889406204224e-05,
+       3.842264413833618e-05
+      ],
+      "rounds": 9,
+      "warm_s": 0.00016997754573822021
+     },
+     "sm_mhz": 1785.0,
+     "host_rss_kib": 462764,
+     "device_bytes": 612368384
+    },
+    "einsum": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "einsum equals the NumPy matrix product": true
+     },
+     "rule": "max rounds",
+     "note": null,
+     "wall_s": {
+      "median": 0.0001251809298992157,
+      "iqr": 0.00013589859008789062,
+      "q1": 0.00010861456394195557,
+      "q3": 0.0002445131540298462,
+      "samples": [
+       0.00034204497933387756,
+       0.0004469938576221466,
+       0.0002445131540298462,
+       0.00021599605679512024,
+       0.00012497231364250183,
+       0.0001251809298992157,
+       0.00010861456394195557,
+       0.0001012757420539856,
+       9.861961007118225e-05
+      ],
+      "rounds": 9,
+      "warm_s": 0.00041975080966949463
+     },
+     "sm_mhz": 1785.0,
+     "host_rss_kib": 473696,
+     "device_bytes": 612368384
+    }
+   },
+   "ratio_to_reference": {
+    "box": 1.0,
+    "no_box": 0.9917716636667524,
+    "gemm": 1.4457444073026484,
+    "einsum": 4.320262278220622
+   }
+  },
+  {
+   "row": "fft",
+   "case": "all",
+   "dtype": "float64",
+   "n": 100000,
+   "baseline": "cupy.fft (cuFFT)",
+   "reference_arm": "fft",
+   "arms": {
+    "fft": {
+     "status": "ok",
+     "n": 100000,
+     "checks": {
+      "eagle.fft equals numpy.fft on 8 rows": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.0010799821466207504,
+      "iqr": 4.208553582429886e-05,
+      "q1": 0.0010787472128868103,
+      "q3": 0.0011208327487111092,
+      "samples": [
+       0.0012512542307376862,
+       0.0012275651097297668,
+       0.0010852552950382233,
+       0.0010779090225696564,
+       0.001079026609659195,
+       0.0010799244046211243,
+       0.0010762400925159454,
+       0.0010800398886203766
+      ],
+      "rounds": 8,
+      "warm_s": 0.0012551099061965942
+     },
+     "sm_mhz": 1785.0,
+     "host_rss_kib": 1914244,
+     "device_bytes": 3839885312
+    },
+    "cupy_fft": {
+     "status": "ok",
+     "n": 100000,
+     "checks": {
+      "cupy.fft equals numpy.fft on 8 rows": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.0011404752731323242,
+      "iqr": 2.991221845149994e-05,
+      "q1": 0.0011151805520057678,
+      "q3": 0.0011450927704572678,
+      "samples": [
+       0.0011404752731323242,
+       0.0011497102677822113,
+       0.0010898858308792114
+      ],
+      "rounds": 3,
+      "warm_s": 0.0013805367052555084
+     },
+     "sm_mhz": 1785.0,
+     "host_rss_kib": 3975996,
+     "device_bytes": 5469372416
+    }
+   },
+   "ratio_to_reference": {
+    "fft": 1.0,
+    "cupy_fft": 1.0560130801243854
+   }
+  },
+  {
+   "row": "lane_set",
+   "case": "all",
+   "dtype": "float64",
+   "n": 4194304,
+   "baseline": "none: ratio to dense",
+   "reference_arm": "dense",
+   "arms": {
+    "dense": {
+     "status": "ok",
+     "n": 4194304,
+     "checks": {
+      "live lanes equal the NumPy body; the rest are untouched": true
+     },
+     "rule": "max rounds",
+     "note": null,
+     "wall_s": {
+      "median": 0.00016999617218971252,
+      "iqr": 1.5016645193099976e-05,
+      "q1": 0.00016773492097854614,
+      "q3": 0.00018275156617164612,
+      "samples": [
+       0.0002364926040172577,
+       0.0002274923026561737,
+       0.00018275156617164612,
+       0.00017586350440979004,
+       0.00016982108354568481,
+       0.00016999617218971252,
+       0.00016773492097854614,
+       0.00016731396317481995,
+       0.00016663596034049988
+      ],
+      "rounds": 9,
+      "warm_s": 0.0003078170120716095
+     },
+     "sm_mhz": 1785.0,
+     "host_rss_kib": 567628,
+     "device_bytes": 610271232
+    },
+    "map": {
+     "status": "ok",
+     "n": 4194304,
+     "checks": {
+      "live lanes equal the NumPy body; the rest are untouched": true
+     },
+     "rule": "max rounds",
+     "note": null,
+     "wall_s": {
+      "median": 5.349889397621155e-05,
+      "iqr": 2.656504511833191e-05,
+      "q1": 5.179271101951599e-05,
+      "q3": 7.83577561378479e-05,
+      "samples": [
+       0.00024549663066864014,
+       0.0002452582120895386,
+       7.83577561378479e-05,
+       5.696341395378113e-05,
+       5.349889397621155e-05,
+       5.3398311138153076e-05,
+       5.1021575927734375e-05,
+       5.179271101951599e-05,
+       5.023181438446045e-05
+      ],
+      "rounds": 9,
+      "warm_s": 0.00027904286980628967
+     },
+     "sm_mhz": 1785.0,
+     "host_rss_kib": 468600,
+     "device_bytes": 612368384
+    },
+    "prefix": {
+     "status": "ok",
+     "n": 4194304,
+     "checks": {
+      "live lanes equal the NumPy body; the rest are untouched": true
+     },
+     "rule": "max rounds",
+     "note": null,
+     "wall_s": {
+      "median": 4.964694380760193e-05,
+      "iqr": 1.257285475730896e-05,
+      "q1": 4.725903272628784e-05,
+      "q3": 5.98318874835968e-05,
+      "samples": [
+       0.00016846135258674622,
+       0.0001559816300868988,
+       5.98318874835968e-05,
+       5.0321221351623535e-05,
+       4.725903272628784e-05,
+       4.7538429498672485e-05,
+       4.4640153646469116e-05,
+       4.964694380760193e-05,
+       4.468485713005066e-05
+      ],
+      "rounds": 9,
+      "warm_s": 0.00023079290986061096
+     },
+     "sm_mhz": 1785.0,
+     "host_rss_kib": 433332,
+     "device_bytes": 612368384
+    }
+   },
+   "ratio_to_reference": {
+    "dense": 1.0,
+    "map": 0.3147064624285057,
+    "prefix": 0.2920474218219271
+   }
+  },
+  {
+   "row": "scatter",
+   "case": "all",
+   "dtype": "float64",
+   "n": 4194304,
+   "baseline": "cupyx.scatter_add; np.add.at",
+   "reference_arm": "keyed",
+   "arms": {
+    "keyed": {
+     "status": "ok",
+     "n": 4194304,
+     "checks": {
+      "keyed sums match np.add.at": true
+     },
+     "rule": "max rounds",
+     "note": null,
+     "wall_s": {
+      "median": 0.00039333850145339966,
+      "iqr": 2.1848827600479126e-05,
+      "q1": 0.0003890581429004669,
+      "q3": 0.00041090697050094604,
+      "samples": [
+       0.0004701167345046997,
+       0.0004738271236419678,
+       0.00041090697050094604,
+       0.00039683282375335693,
+       0.00039333850145339966,
+       0.0003890581429004669,
+       0.00038766488432884216,
+       0.0003929212689399719,
+       0.00038641318678855896
+      ],
+      "rounds": 9,
+      "warm_s": 0.00047025084495544434
+     },
+     "sm_mhz": 1785.0,
+     "host_rss_kib": 418316,
+     "device_bytes": 629145600
+    },
+    "ordered": {
+     "status": "ok",
+     "n": 4194304,
+     "checks": {
+      "keyed sums match np.add.at": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.0014603100717067719,
+      "iqr": 6.082281470298767e-05,
+      "q1": 0.0014428682625293732,
+      "q3": 0.0015036910772323608,
+      "samples": [
+       0.0017409063875675201,
+       0.0018338970839977264,
+       0.0014603100717067719,
+       0.001494038850069046,
+       0.0014509670436382294,
+       0.0015036910772323608,
+       0.0014428682625293732,
+       0.001430470496416092,
+       0.00144127756357193
+      ],
+      "rounds": 9,
+      "warm_s": 0.0016718171536922455
+     },
+     "sm_mhz": 1785.0,
+     "host_rss_kib": 418492,
+     "device_bytes": 662700032
+    },
+    "or": {
+     "status": "ok",
+     "n": 4194304,
+     "checks": {
+      "the OR mask equals np.bitwise_or.at": true
+     },
+     "rule": "max rounds",
+     "note": null,
+     "wall_s": {
+      "median": 0.0004669390618801117,
+      "iqr": 7.50608742237091e-05,
+      "q1": 0.0004343464970588684,
+      "q3": 0.0005094073712825775,
+      "samples": [
+       0.0005964078009128571,
+       0.0005846172571182251,
+       0.00047818198800086975,
+       0.0004343464970588684,
+       0.0004254579544067383,
+       0.00042500346899032593,
+       0.0005094073712825775,
+       0.00045621395111083984,
+       0.0004669390618801117
+      ],
+      "rounds": 9,
+      "warm_s": 0.0005624815821647644
+     },
+     "sm_mhz": 1785.0,
+     "host_rss_kib": 396408,
+     "device_bytes": 578813952
+    },
+    "cupyx_scatter_add": {
+     "status": "ok",
+     "n": 4194304,
+     "checks": {
+      "scatter_add matches np.add.at": true
+     },
+     "rule": "max rounds",
+     "note": null,
+     "wall_s": {
+      "median": 0.00033256784081459045,
+      "iqr": 0.0002235621213912964,
+      "q1": 0.00029856711626052856,
+      "q3": 0.000522129237651825,
+      "samples": [
+       0.00047388672828674316,
+       0.000522129237651825,
+       0.00033256784081459045,
+       0.00030650198459625244,
+       0.00029856711626052856,
+       0.00029359012842178345,
+       0.00029703229665756226,
+       0.003710661083459854,
+       0.0006846040487289429
+      ],
+      "rounds": 9,
+      "warm_s": 0.0004564523696899414
+     },
+     "sm_mhz": 1785.0,
+     "host_rss_kib": 406224,
+     "device_bytes": 595591168
+    },
+    "np_add_at": {
+     "status": "ok",
+     "n": 4194304,
+     "checks": {
+      "the NumPy reference": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.015102125704288483,
+      "iqr": 0.0003523547202348709,
+      "q1": 0.014920637011528015,
+      "q3": 0.015272991731762886,
+      "samples": [
+       0.015102125704288483,
+       0.01544385775923729,
+       0.014739148318767548
+      ],
+      "rounds": 3,
+      "warm_s": 0.015053387731313705
+     },
+     "sm_mhz": 1785.0,
+     "host_rss_kib": 252312,
+     "device_bytes": 616366080
+    }
+   },
+   "ratio_to_reference": {
+    "keyed": 1.0,
+    "ordered": 3.7126039437046576,
+    "or": 1.187117610289243,
+    "cupyx_scatter_add": 0.8455003504252457,
+    "np_add_at": 38.39473036197981
+   }
+  },
+  {
+   "row": "sample_sum",
+   "case": "all",
+   "dtype": "float64",
+   "n": 16777216,
+   "baseline": "cupy.sum",
+   "reference_arm": "auto",
+   "arms": {
+    "compensated": {
+     "status": "ok",
+     "n": 16777216,
+     "checks": {
+      "the sum is within the policy's ULP bound of math.fsum": true
+     },
+     "rule": "max rounds",
+     "note": null,
+     "wall_s": {
+      "median": 0.0002386234700679779,
+      "iqr": 1.7665326595306396e-05,
+      "q1": 0.00023073703050613403,
+      "q3": 0.00024840235710144043,
+      "samples": [
+       0.00038688257336616516,
+       0.0005120746791362762,
+       0.00024840235710144043,
+       0.0002386234700679779,
+       0.000232744961977005,
+       0.00023073703050613403,
+       0.00022844597697257996,
+       0.00024044513702392578,
+       0.00022831931710243225
+      ],
+      "rounds": 9,
+      "warm_s": 0.0003765970468521118
+     },
+     "sm_mhz": 1785.0,
+     "host_rss_kib": 678688,
+     "device_bytes": 679477248
+    },
+    "ordered": {
+     "status": "ok",
+     "n": 16777216,
+     "checks": {
+      "the sum is within the policy's ULP bound of math.fsum": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.0005661584436893463,
+      "iqr": 2.178177237510681e-05,
+      "q1": 0.0005634017288684845,
+      "q3": 0.0005851835012435913,
+      "samples": [
+       0.0006605982780456543,
+       0.0006820335984230042,
+       0.0005851835012435913,
+       0.0005732737481594086,
+       0.0005661584436893463,
+       0.0005620084702968597,
+       0.0005634017288684845,
+       0.0005658641457557678,
+       0.0005627796053886414
+      ],
+      "rounds": 9,
+      "warm_s": 0.0006482824683189392
+     },
+     "sm_mhz": 1785.0,
+     "host_rss_kib": 677580,
+     "device_bytes": 847249408
+    },
+    "auto": {
+     "status": "ok",
+     "n": 16777216,
+     "checks": {
+      "the sum is within the policy's ULP bound of math.fsum": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.0011278241872787476,
+      "iqr": 4.727765917778015e-05,
+      "q1": 0.0011181700974702835,
+      "q3": 0.0011654477566480637,
+      "samples": [
+       0.0011278241872787476,
+       0.0012030713260173798,
+       0.0011085160076618195
+      ],
+      "rounds": 3,
+      "warm_s": 0.0011771395802497864
+     },
+     "sm_mhz": 1785.0,
+     "host_rss_kib": 677580,
+     "device_bytes": 679477248
+    },
+    "cell_compensated": {
+     "status": "ok",
+     "n": 16777216,
+     "checks": {
+      "the cell is within the policy's ULP bound of math.fsum": true
+     },
+     "rule": "max rounds",
+     "note": null,
+     "wall_s": {
+      "median": 0.00018606334924697876,
+      "iqr": 3.452971577644348e-05,
+      "q1": 0.00018370896577835083,
+      "q3": 0.0002182386815547943,
+      "samples": [
+       0.00028603896498680115,
+       0.0005225948989391327,
+       0.0002182386815547943,
+       0.00019521266222000122,
+       0.00018606334924697876,
+       0.00018370896577835083,
+       0.00018497556447982788,
+       0.0001817159354686737,
+       0.0001788996160030365
+      ],
+      "rounds": 9,
+      "warm_s": 0.00029578059911727905
+     },
+     "sm_mhz": 1785.0,
+     "host_rss_kib": 677820,
+     "device_bytes": 713031680
+    },
+    "cell_auto": {
+     "status": "ok",
+     "n": 16777216,
+     "checks": {
+      "the cell is within the policy's ULP bound of math.fsum": true
+     },
+     "rule": "max rounds",
+     "note": null,
+     "wall_s": {
+      "median": 0.0001854933798313141,
+      "iqr": 2.4534761905670166e-05,
+      "q1": 0.00017845630645751953,
+      "q3": 0.0002029910683631897,
+      "samples": [
+       0.00027540698647499084,
+       0.00028142333030700684,
+       0.0002029910683631897,
+       0.0001893565058708191,
+       0.0001854933798313141,
+       0.0001822151243686676,
+       0.00017845630645751953,
+       0.00017718225717544556,
+       0.00017844140529632568
+      ],
+      "rounds": 9,
+      "warm_s": 0.0002612657845020294
+     },
+     "sm_mhz": 1785.0,
+     "host_rss_kib": 679124,
+     "device_bytes": 713031680
+    },
+    "cupy_sum": {
+     "status": "ok",
+     "n": 16777216,
+     "checks": {
+      "cupy.sum is within 8 ULP of math.fsum": true
+     },
+     "rule": "max rounds",
+     "note": null,
+     "wall_s": {
+      "median": 7.127225399017334e-05,
+      "iqr": 1.2725591659545898e-05,
+      "q1": 6.640329957008362e-05,
+      "q3": 7.912889122962952e-05,
+      "samples": [
+       0.00018867477774620056,
+       0.00021716207265853882,
+       7.912889122962952e-05,
+       6.963685154914856e-05,
+       6.640329957008362e-05,
+       6.520003080368042e-05,
+       6.446242332458496e-05,
+       7.127225399017334e-05,
+       7.356703281402588e-05
+      ],
+      "rounds": 9,
+      "warm_s": 0.00028849393129348755
+     },
+     "sm_mhz": 1785.0,
+     "host_rss_kib": 548692,
+     "device_bytes": 679477248
+    }
+   },
+   "ratio_to_reference": {
+    "compensated": 0.21157860662993644,
+    "ordered": 0.5019917555194419,
+    "auto": 1.0,
+    "cell_compensated": 0.1649754911675717,
+    "cell_auto": 0.16447012036413122,
+    "cupy_sum": 0.06319447197008733
+   }
+  },
+  {
+   "row": "mpi_partition",
+   "case": "all",
+   "dtype": "float64",
+   "n": 2000000,
+   "baseline": "one rank (N = 1e6), the C1 persist arm",
+   "reference_arm": "one_rank",
+   "arms": {
+    "two_ranks": {
+     "status": "not_run: needs 2 GPUs (this machine has 1); a Kaggle T4 x2 row"
+    },
+    "one_rank": {
+     "status": "not_run: needs 2 GPUs (this machine has 1); a Kaggle T4 x2 row"
+    }
+   },
+   "ratio_to_reference": {}
+  }
+ ],
+ "wall_s": 372.2379154674709
+}

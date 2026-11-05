@@ -15,6 +15,10 @@ def test_gc_free_of_an_alloc_array_mid_capture(mode):
     from eagle import _alloc, _stream
     if cp.cuda.runtime.getDeviceCount() < 1:
         pytest.skip("no device")
+    # the garbage earlier tests in this process left (other libraries' arrays, whose frees are not capture-safe) goes
+    # first: the collection inside the capture must find only this test's cycle
+    gc.collect()
+    cp.cuda.runtime.deviceSynchronize()
     own = cp.cuda.Stream(non_blocking=True)
     with _stream.scope(int(own.ptr) if mode == "stream" else _stream.LEGACY):
         a = _alloc.zeros("cuda:0", 1024)

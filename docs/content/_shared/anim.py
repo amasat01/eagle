@@ -8,12 +8,14 @@ Pillow comes with matplotlib. Frames are PIL images; the GIF uses a small palett
 Embed a GIF with ``{image}`` and ``:class: only-light`` / ``only-dark``. If the figure is square or tall (height / width >= 0.8)
 add ``narrow`` (``:class: only-light narrow``): the page then shows it at 60% of the column instead of full width.
 """
+import os
 import pathlib
 
 
 def static_anim_dir() -> pathlib.Path:
     """``docs/_static/anim``, created. A notebook runs from its own directory, three levels below ``docs``."""
-    out = pathlib.Path.cwd().parents[2] / "_static" / "anim"
+    # a gate run sets DOCS_ANIM_DIR to a folder of its own: running the docs never rewrites the committed animations
+    out = pathlib.Path(os.environ.get("DOCS_ANIM_DIR") or pathlib.Path.cwd().parents[2] / "_static" / "anim")
     out.mkdir(parents=True, exist_ok=True)
     return out
 

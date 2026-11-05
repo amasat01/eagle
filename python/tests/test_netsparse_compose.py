@@ -6,8 +6,8 @@
 migrated out of a downstream expert-composer module. Everything here is
 EAGLE-NATIVE: plain :class:`~eagle.pipeline.
 GraphPipeline` instances built from simple cupy ``ElementwiseKernel``s, no
-any neural-runtime import anywhere — proving the composer serves any ensemble of
-independently-captured launchables, not just neural experts (mirrors
+any graph-block runtime import anywhere — proving the composer serves any ensemble of
+independently-captured launchables, not just graph-block experts (mirrors
 ``test_pipeline_concurrent.py``/``test_netsparse_member_enable.py``'s own
 graph/binding-tier style: function-style ``def test_<behavior>:``,
 module-level ``pytestmark = pytest.mark.gpu``).

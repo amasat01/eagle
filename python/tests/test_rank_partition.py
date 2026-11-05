@@ -67,7 +67,6 @@ def test_rank_partition_is_an_implemented_structure():
     """``rank_partition`` resolves to a runnable structure, not to the shared
     "not implemented" placeholder it once was — and ``device_group``, which
     not yet implemented, still is one (NCCL last)."""
-    assert eexec._structure_from_name("rank_partition") is eexec.RankPartition
     assert eexec.RankPartition.name == "rank_partition"
     assert type(eexec.RankPartition) is not type(eexec.DeviceGroup)
     with pytest.raises(ValueError, match="NCCL not implemented"):

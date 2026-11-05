@@ -4,7 +4,7 @@
   "aether_abi": "aether-abi/1",
   "blocks": [
     {
-      "pattern": "neural_block",
+      "pattern": "graph_block",
       "scalar_type": "float64",
       "forward_exec": {"kind": "kernel", "kernel": "mlp_block_fwd"},
       "vjp_exec": {"kind": "kernel", "kernel": "mlp_block_vjp"},

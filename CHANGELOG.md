@@ -2,6 +2,63 @@
 
 Releases after 0.6.4 are on [GitHub](https://github.com/amasat01/eagle/releases): the notes are the pull request body.
 
+## 0.7.3 (2026-11-05)
+
+This section covers what changes from 0.7.2. Names that left are in the table at the end.
+
+### Added
+
+**Work runs on the GPU its arrays live on.** The CUDA backend decides the device for each call: an explicit device wins, then the device of the stream, then the device of the memory the call touches. Launch, memset, copy and graph calls no longer need the caller to select the GPU, whatever another library left current (JAX does this at start-up). A call whose device memory sits on two GPUs is refused by name, and a loaded device function launches only on the device it was loaded on, refusing a stream of another. A failed call now consumes the runtime error it reported, so the next launch is never blamed for it.
+
+**Warp-form kernels from hawk run as one launch.** A warp per lane (the form hawk chooses for wide per-sample values) is one launch of `ceil(lanes / serves)` blocks through `simulate`, `until_done` and the stepping doors; a kernel whose only cut is its wide-value scratch needs no sequencing.
+
+**Fused K-step reverse on host and device.** `steps_reverse="fused"` (or `"auto"`) runs a window of `K` steps as one `vjp` launch. See the autodiff guide.
+
+**Hand a built graph to another runtime.** `Graph.cuda_graph()` returns a `CudaGraphHandle` holding an owned clone of the built GPU graph, to add as a child node of another CUDA graph; `bind` now updates the graph the clone is taken from too. `Graph.host_table()` gives a built CPU graph as a table that another runtime runs from its own OpenMP region through `eagle_host_table_run` (`eagle/plugin/graph_handoff.h`). Graphs that cannot be handed over are refused by name. See "Handing a graph to another runtime" in the graph guide.
+
+**`plane_meta`.** Notes that a kernel's author attached to a plane with `hawk.Meta` are read back by plane name from the loaded kernel.
+
+**Host threads and run-time information.** `exec.set_host_threads` sets the threads for host stages, which run in one OpenMP region per stage; broadcast `Param` values work in `run` and `bind`; a direct call returns NumPy arrays; and out-of-memory failures name their context.
+
+**Opt-in matrix-multiply route for contraction kernels.** A hawk kernel built under `hawk.emit.policy.using(contraction="gemm")` that is one dense two-operand contraction runs as one GEMM on the GPU, forward and in `eagle.diff.reverse`, written straight into its lane plane; the host keeps the direct kernel. Values are within a few ulp of the kernel's loop; the default is unchanged. See the `eagle.gemm` how-to.
+
+**New how-to pages.** Running a kernel across several GPUs with `RankPartition`, `eagle.stream`, `eagle.gemm` and `eagle.fft`.
+
+**New benchmark cards.** One adaptive RKF7(8) ensemble card, its CPU twin, an 11-row feature card (wide values, lane and team linear algebra, rays, index sets, keyed sums, rank partitions, early termination, FFT, zero-copy and the gradient row against torch) and a 6-stage profile kit. Each arm times in its own process, and rows that do not fit are labelled out of memory or over budget. `--smoke` runs a quick pass. See the performance pages for results.
+
+### Changed
+
+- `simulate(..., history=True | k)` returns `res.history[name]`, the state before the first step and after every k-th. `record=` must now be `True` or `False`.
+- `returns=` hands back every result array as the asked type, including the planes you passed in (before, a CuPy state plane came back as your CuPy array under `returns="numpy"`).
+- The performance pages, README and prose claims read the new ensemble card, and the coverage page lists what each claim rests on.
+- Dispatch refuses a fused runner over sorted planes; index planes narrow once at entry, and `bind` refuses a wrong width. Grouped and segmented kernels are placed.
+- Scratch arenas only plan: each graph owns its scratch buffer.
+- macOS wheels need macOS 15 or newer. CPython 3.13t is dropped: nine wheels per platform, and the free-threading tests run on 3.14t.
+- The CUDA toolchain for CI and local gates is NVIDIA's pinned 12.9 redist archives. CI runs on `ubuntu-24.04`; `make gate`, `make gate-gpu` and `make gate-all` are what CI runs.
+- The `neural_block` pattern is now `graph_block`, and the `NEURAL_*` field constants are `BLOCK_*`. Schema version stays 1; the old pattern name is refused by name. The table at the end lists the names.
+- The "Reverse mode over a graph" page moved into the tutorial "Gradients through a graph"; the old address redirects there.
+- Host array ops (fill, copy, elementwise, `cumsum`, `count_nonzero`, `flatnonzero`) run in place up to one tile and use `min(tiles, host threads)` above it, so `exec.set_host_threads` reaches them. Values are unchanged.
+
+### Fixed
+
+- A direct call takes a number or 0-d value for a per-lane `Scalar` beside a batch, as that value on every lane, and a `Param` given an array is refused by name instead of a `TypeError`.
+- A memset on the legacy stream runs on the array's device, not on whichever device another library left current.
+- The JAX bridge registers a kernel on the GPU a function is called under, and the plugin memo is per device.
+- A builder allocates an omitted vector output (`Mutable[Vector[w]]`) as `(w, N)`, not a flat `(N,)` plane.
+- A `Graph.builder` call (a builder or a block) takes `layout="samples_first"` or `"samples_last"` for every kernel call it records, as the other doors do; a `samples_first`/`samples_last` marker passed to it is refused with that remedy.
+- An array imported through `__cuda_array_interface__` with no stream (`"stream": None` or no key) exports through DLPack without a stream wait, so `cupy.from_dlpack` works on it inside a CUDA graph capture.
+
+### Removed
+
+| Gone | Use instead |
+|---|---|
+| the RK4 and oscillator demo cards, the old committed cards, the compare card and the calibration kit | the RKF7(8) ensemble card, its CPU twin and the feature card |
+| the 16-stage profile kit | the 6-stage kit: `sol_probe`, `wide_sweep`, `ncu_corpus`, `ncu_ensemble`, `chunk_residency`, `launch_shape` |
+| the `cuda` install extra (a copy of `cuda12`) | `raptor-eagle[cuda12]` or `raptor-eagle[cuda13]` |
+| `Pipeline.introspection_available()` | nothing: introspection works as soon as `build()` has run; call `num_nodes()` / `node_labels()` |
+| `eagle.roles.NEURAL_REQUIRED_FIELDS`, `NEURAL_EXEC_REF_FIELDS`, `NEURAL_FORBIDDEN_FIELDS` | `BLOCK_REQUIRED_FIELDS`, `BLOCK_EXEC_REF_FIELDS`, `BLOCK_FORBIDDEN_FIELDS` |
+| the pattern value `"neural_block"` (sidecar, manifest, `raptor.pattern_loaders` key) and the C++ `kNeuralBlockPattern`, `kNeural*Fields` | `"graph_block"`, `kGraphBlockPattern`, `kBlock*Fields` |
+
 ## 0.7.2 (2026-10-29)
 
 This section covers what changes from 0.7.1; the notes for 0.7.0 and 0.7.1 are on the [GitHub releases page](https://github.com/amasat01/eagle/releases). Names that left are in the table at the end.

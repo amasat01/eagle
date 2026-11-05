@@ -75,6 +75,8 @@ def _planes(device):
 
 
 def _host(arr):
+    if isinstance(arr.device, str):  # an eagle.Array ("cuda:N"): view it through cupy
+        arr = cp.from_dlpack(arr)
     with cp.cuda.Device(arr.device.id):
         cp.cuda.Device().synchronize()
         return cp.asnumpy(arr)
@@ -88,7 +90,7 @@ def test_r1_plan_runs_on_the_planes_device_whatever_is_current(unit):
     plugin = _subject(unit, 1)
     x, _ = _planes(1)
     cp.cuda.Device(0).use()
-    out = _plan(plugin).run(x=x, a=2.0)
+    out = _plan(plugin).run(x=x, a=2.0, returns="cupy")
     assert out.device.id == 1
     np.testing.assert_array_equal(_host(out), 2.0 * _host(x))
 
@@ -97,7 +99,7 @@ def test_r2_a_kernel_loaded_on_one_device_runs_on_the_other(unit):
     plugin = _subject(unit, 0)
     x, _ = _planes(1)
     cp.cuda.Device(0).use()
-    out = _plan(plugin).run(x=x, a=2.0)
+    out = _plan(plugin).run(x=x, a=2.0, returns="cupy")
     assert out.device.id == 1
     np.testing.assert_array_equal(_host(out), 2.0 * _host(x))
 
@@ -213,7 +215,7 @@ def test_r13_a_device_keyword_matches_the_arrays_or_refuses(unit):
     x, y = _planes(1)
     cp.cuda.Device(0).use()
     p = _plan(plugin)
-    out = p.run(x=x, a=2.0, device=1)
+    out = p.run(x=x, a=2.0, device=1, returns="cupy")
     np.testing.assert_array_equal(_host(out), 2.0 * _host(x))
     with pytest.raises(BufferRefused, match=r"device=0 was asked, the arrays live on device 1"):
         p.run(x=x, y=y, a=2.0, device=0)
@@ -283,3 +285,104 @@ def test_r17_a_parameter_named_device_is_refused_at_plan_build(unit):
     clash = SimpleNamespace(**{**vars(plugin), "arg_spec": spec})
     with pytest.raises(ValueError, match=r"parameter named 'device' clashes with the device= keyword"):
         _plan(clash)
+
+
+def test_r18_a_simulation_resets_and_reruns_on_its_planes_device_whatever_is_current():
+    """JAX leaves another device current when it starts; a simulation's reset and rerun still use its planes'."""
+    from test_simulate import _osc_batch, sim_osc
+
+    with cp.cuda.Device(1):
+        a = _osc_batch(cp)
+        x0, v0 = a["x"].copy(), a["v"].copy()
+        sim = eagle.simulation(sim_osc, omega=a["omega"], t_end=a["t_end"], dt=1e-3,
+                               x=a["x"], v=a["v"], t=a["t"], max_steps=5000)
+        first = _host(sim.run()["x"])
+        a["x"][...], a["v"][...], a["t"][...] = x0, v0, 0.0
+    cp.cuda.Device(0).use()
+    sim.reset()
+    again = sim.run()
+    np.testing.assert_array_equal(_host(again["x"]), first)
+    assert int(_host(again.finished).sum()) == x0.size
+
+
+def test_r19_backend_entries_follow_their_memory_whatever_is_current(unit):
+    """Planes on GPU 0, GPU 1 current (as JAX leaves it), unscoped stream: each backend entry works on GPU 0."""
+    plugin = _subject(unit, 0)
+    x, y = _planes(0)
+    with cp.cuda.Device(0):
+        z = cp.ones(64, dtype=cp.float64)
+        dst = cp.zeros(64, dtype=cp.float64)
+        total = cp.zeros(1)
+    with cp.cuda.Device(1):
+        other = cp.zeros(64, dtype=cp.float64)
+    cp.cuda.Device(1).use()
+    _core.memcpy_device(dst.data.ptr, z.data.ptr, z.nbytes, 0)
+    _core.memcpy(dst.data.ptr, z.data.ptr, z.nbytes, _core.COPY_D2D, 0)
+    eagle.Graph().add_node(eagle.reduce(z, total)).build().launch()
+    bound = _plan(plugin).bind(x=x, y=y, a=2.0)
+    # a raw CUfunction does not say which GPU it belongs to: its caller names the device (eagle's own callers do)
+    assert _core.run_device(plugin.device_function, list(bound._addrs), bound.partitions[0], stream=0, device=0) == 1
+    _core.memset_device(dst.data.ptr, 8 * 32, 0)
+    cp.cuda.Device(0).synchronize()
+    np.testing.assert_array_equal(_host(dst), np.r_[np.zeros(32), np.ones(32)])
+    assert float(_host(total)[0]) == 64.0
+    np.testing.assert_array_equal(_host(y), 2.0 * _host(x))
+    with pytest.raises(Exception, match=r"(?s)devices 0 and 1|devices 1 and 0"):
+        _core.memcpy_device(dst.data.ptr, other.data.ptr, other.nbytes, 0)
+
+
+def test_r20_active_set_compact_reorder_restore_reset_follow_their_planes():
+    """Planes on GPU 0, GPU 1 current: compaction, reorder, restore and reset all act on GPU 0."""
+    n = 1000
+    rng = np.random.default_rng(3)
+    drop = rng.random(n) < 0.6
+    with cp.cuda.Device(0):
+        v = cp.arange(n, dtype=cp.float64)
+        mask = cp.zeros(n, dtype=bool)
+        a = eagle.ActiveSet(mask, reorder=0.5).own(v)
+        mask[...] = cp.asarray(drop)
+        a.fire[0] = 1
+    cp.cuda.Device(1).use()
+    a.reorder()
+    cp.cuda.Device(0).synchronize()
+    live = np.flatnonzero(~drop)
+    assert a.live == live.size
+    np.testing.assert_array_equal(_host(a.map)[: a.live], np.arange(live.size))
+    np.testing.assert_array_equal(np.sort(_host(v)[: a.live]), live.astype(float))
+    cp.cuda.Device(1).use()
+    a.restore()
+    np.testing.assert_array_equal(_host(v), np.arange(n, dtype=float))
+    a.reset()
+    np.testing.assert_array_equal(_host(a.perm), np.arange(n))
+
+
+def test_r21_a_simulation_runs_resets_and_reruns_on_gpu0_with_gpu1_current():
+    from test_simulate import _osc_batch, sim_osc
+
+    with cp.cuda.Device(0):
+        a = _osc_batch(cp)
+        x0, v0 = a["x"].copy(), a["v"].copy()
+        sim = eagle.simulation(sim_osc, omega=a["omega"], t_end=a["t_end"], dt=1e-3,
+                               x=a["x"], v=a["v"], t=a["t"], max_steps=5000)
+    cp.cuda.Device(1).use()
+    first = _host(sim.run()["x"])
+    with cp.cuda.Device(0):
+        a["x"][...], a["v"][...], a["t"][...] = x0, v0, 0.0
+    cp.cuda.Device(1).use()
+    sim.reset()
+    np.testing.assert_array_equal(_host(sim.run()["x"]), first)
+
+
+def test_r22_a_loaded_function_knows_its_device_and_refuses_another_devices_stream(unit):
+    from eagle import _stream
+
+    plugin = _subject(unit, 0)
+    x, y = _planes(0)
+    bound = _plan(plugin).bind(x=x, y=y, a=2.0)
+    fn = plugin._keepalive[-1].function(0)
+    assert fn.device == 0
+    cp.cuda.Device(1).use()
+    with cp.cuda.Device(1):
+        s1 = cp.cuda.Stream(non_blocking=True)
+    with _stream.stream(s1.ptr), pytest.raises(Exception, match=r"(?s)device 1.*device 0"):
+        fn((1,), (32,), list(bound._boxes))

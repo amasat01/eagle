@@ -172,7 +172,11 @@ def test_plugin_loads_only_the_driver(tmp_path):
             if pathlib.Path(name).name == plugin.name:
                 plugin_opened = True
     assert plugin_opened, "the loader log never shows libeagle_cuda.so being opened"
-    assert loaded_by_plugin == {"libcuda.so.1"}, sorted(loaded_by_plugin)
+    # the suites above include the GEMM rows, which make the plugin open cuBLAS (the one optional library, see
+    # ``test_plugin_names_no_library_but_the_driver``); anything else is a new dependency
+    assert "libcuda.so.1" in loaded_by_plugin, sorted(loaded_by_plugin)
+    extra = {n for n in loaded_by_plugin if not n.startswith(("libcuda.so", "libcublas.so"))}
+    assert not extra, sorted(loaded_by_plugin)
 
 
 @pytest.mark.gpu

@@ -16,6 +16,7 @@ from . import _cell_rows, _lane_bind, _layout, _recording, _split
 from . import exec as eexec
 from ._plan_binding import BoundPlan
 from ._plan_planes import _output_names, residency
+from .frameworks._bridge import route
 from .roles import OUTPUT_ROLES
 
 if TYPE_CHECKING:
@@ -175,6 +176,10 @@ class AutoPlan:
         call = self._call
         if call is None:
             call = self._call = self._signature()
+        lanes = self._lane_planes(kw)
+        if lanes:
+            kw = {k: v for k, v in kw.items() if k not in lanes}
+            return {**self.bind_args(args, kw), **lanes}
         kernel = self.kernel
         if kernel is not None and (len(args) > len(call[1]) or kw.keys() - call[4]):
             comps = _cell_rows.companions_of(self.plugin)
@@ -190,6 +195,16 @@ class AutoPlan:
                      if nm in order and nm not in call[4] or nm in comps}
             return {**self._bind_args((), given, call), **cells}
         return self._bind_args(args, kw, call)
+
+    def _lane_planes(self, kw) -> dict:
+        """The index-set planes (``active_map``/``active_count``) of a kernel built with ``lanes=IndexSet(...)``, as
+        given by name: they are the caller's, never positional, and bound as they come (``bind`` checks them)."""
+        from ._active_set import COUNT_PLANE, MAP_PLANE
+
+        if MAP_PLANE not in kw and COUNT_PLANE not in kw:
+            return {}
+        declared = {nm for role, nm in _split.arg_spec(self.plugin) if role == "lookup"}
+        return {nm: kw[nm] for nm in (MAP_PLANE, COUNT_PLANE) if nm in kw and nm in declared}
 
     def _bind_args(self, args, kw, call) -> dict:
         sig, required, prior, name, names, needed = call
@@ -232,17 +247,23 @@ class AutoPlan:
         recorder = _recording.current()
         if recorder is not None:
             return recorder.record_call(self, args, kw)
+        # ``returns=`` is the call's, as in :meth:`Plan.run`: not a plane of the kernel
+        returns = None if "returns" in self._plane_names() else kw.pop("returns", None)
         kw, lifted = _lane_bind.take_extent(self.plugin, kw)
         bound = self.bind_args(args, kw)
         bound.update(lifted)
         result = self.select(bound).run(**bound)
         if getattr(self.kernel, "returns", None) is None:
-            return result
+            return route(result, returns)
         if not isinstance(result, dict):
             tree = self.kernel.returns
             (out,) = (tree,) if isinstance(tree, str) else _output_names(_split.arg_spec(self.plugin))
             result = {out: result}
-        return self.returned(result)
+        return route(self.returned(result), returns)
+
+    def _plane_names(self) -> set:
+        """The names the kernel declares as planes (a plane named ``returns`` keeps its name)."""
+        return set(getattr(self.kernel, "planes", None) or ())
 
 
 def _fill(tree, planes):
@@ -351,18 +372,24 @@ class _HostSide:
     interpreter finishes the build before it exits. A forked child, which
     inherits no running thread, builds the host side itself."""
 
-    __slots__ = ("_args", "_plugins", "_error", "_thread", "_pid")
+    __slots__ = ("_args", "_ambient", "_plugins", "_error", "_thread", "_pid")
 
     def __init__(self, kernels, cache_dir, scalar_type):
-        self._args = (list(kernels), _targets_of(_HOST), cache_dir, scalar_type)
+        from hawk.emit import policy     # read here: the build thread does not see the caller's context
+
+        self._args = (list(kernels), _targets_of(_HOST), cache_dir, scalar_type, policy.contraction())
+        self._ambient = _ambient_policy()
         self._plugins = self._error = None
         self._pid = os.getpid()
         self._thread = threading.Thread(target=self._build, name="eagle-host-build")
         self._thread.start()
 
     def _build(self):
+        from hawk.emit import policy
+
         try:
-            self._plugins = _hawk_plugins(*self._args)
+            with policy.using(**self._ambient):
+                self._plugins = _hawk_plugins(*self._args)
         except BaseException as exc:  # handed to the first host plan
             self._error = exc
 
@@ -375,6 +402,14 @@ class _HostSide:
         if self._error is not None:
             raise self._error
         return self._plugins[index]
+
+
+def _ambient_policy() -> dict:
+    """The caller's ``hawk.emit.policy.using`` values: what a build reads, so what its bundle folder is keyed by."""
+    from hawk.emit import policy
+
+    return dict(form=policy.form(), linalg_form=policy.linalg_form(), wide_form=policy.wide_form(),
+                contraction=policy.contraction(), launch_bounds=policy.launch_bounds())
 
 
 def _is_hawk_kernel(obj) -> bool:
@@ -452,8 +487,15 @@ def _build_by_name(kernels, targets, cache_dir, scalar_type=None) -> tuple:
     return by_name, bundle
 
 
-def _hawk_plugins(kernels, targets, cache_dir, scalar_type=None) -> tuple:
-    """Build ``kernels`` into one bundle and return their plugins in order."""
+def _hawk_plugins(kernels, targets, cache_dir, scalar_type=None, contraction=None) -> tuple:
+    """Build ``kernels`` into one bundle and return their plugins in order.
+    ``contraction`` is hawk's policy for a dense contraction (``None``: the
+    caller's ``hawk.emit.policy.contraction()``); ``"gemm"`` routes each
+    kernel that has one through the matrix multiply (:mod:`eagle.gemm._route`)."""
+    if contraction is None:
+        from hawk.emit import policy
+
+        contraction = policy.contraction()
     by_name, bundle = _build_by_name(kernels, targets, cache_dir, scalar_type)
     missing = [k.name for k in kernels if k.name not in by_name]
     if missing:
@@ -464,6 +506,10 @@ def _hawk_plugins(kernels, targets, cache_dir, scalar_type=None) -> tuple:
             "hawk.artifact.plugins(bundle)")
     for k in kernels:  # what eagle.diff needs to build this kernel's vjp beside it
         by_name[k.name]._hawk_source = (k, bundle.digest, cache_dir)
+        if contraction == "gemm":
+            from .gemm import _route
+
+            _route.attach(by_name[k.name], k)
     return tuple(by_name[k.name] for k in kernels)
 
 
@@ -531,6 +577,9 @@ def _bundle_key(kernels, targets, defines=(), mode="float64") -> str:
                              repr(k.kind), tag]).encode())
     h.update(json.dumps(list(targets)).encode())
     h.update(json.dumps(list(defines)).encode())
+    ambient = _ambient_policy()
+    if ambient != dict(form="auto", linalg_form="auto", wide_form="auto", contraction="direct", launch_bounds=None):
+        h.update(json.dumps(ambient, sort_keys=True).encode())     # the default stays keyed as before
     if mode != "float64":  # float64 keys stay as before, so existing caches still hit
         h.update(mode.encode())
     # One folder per host profile, so two profiles of one kernel never

@@ -61,7 +61,8 @@ def build(src_dir, build_dir, exe_name, *, cuda: bool):
     if shutil.which("cmake") is None:
         pytest.skip("cmake not available")
     # Prefer nvcc on PATH (set by any CUDA container); fall back to CUDA_PATH.
-    nvcc = shutil.which("nvcc") or (_env()["CUDA_PATH"] + "/bin/nvcc")
+    # $CUDACXX / $CUDAHOSTCXX (the toolchain the gate pins) win over PATH.
+    nvcc = os.environ.get("CUDACXX") or shutil.which("nvcc") or (_env()["CUDA_PATH"] + "/bin/nvcc")
     cfg = [
         "cmake", "-S", str(src_dir), "-B", str(build_dir),
         "-DCMAKE_BUILD_TYPE=Release",
@@ -70,6 +71,8 @@ def build(src_dir, build_dir, exe_name, *, cuda: bool):
         if not pathlib.Path(nvcc).exists():
             pytest.skip("nvcc not available")
         cfg.append(f"-DCMAKE_CUDA_COMPILER={nvcc}")
+        if os.environ.get("CUDAHOSTCXX"):
+            cfg.append(f"-DCMAKE_CUDA_HOST_COMPILER={os.environ['CUDAHOSTCXX']}")
         # Pin CMAKE_CUDA_ARCHITECTURES to the ACTUAL device's real (SASS-only)
         # architecture on the command line. CMake's own project(... CUDA) step
         # already defaults this variable (observed: "52", nvcc/CMake's stock

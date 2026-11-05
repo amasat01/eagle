@@ -33,10 +33,7 @@ def _run(spec, replays):
     pipe.build()
     pipe.launch(n=replays)
     result = cp.asnumpy(state["read"]())
-    intro = None
-    if pipe.introspection_available():
-        intro = (pipe.num_nodes(), tuple(pipe.node_labels()))
-    return result, intro
+    return result, (pipe.num_nodes(), tuple(pipe.node_labels()))
 
 
 # ---- specs (zero-arg factories returning fresh arrays + capture steps) -------
@@ -117,7 +114,6 @@ def _spec_pure_bump():
 
 def _assert_behavior(spec, replays, want_nodes, want_labels):
     res, intro = _run(spec, replays)
-    assert intro is not None  # bound core always has introspection
     # node_labels includes non-kernel nodes (e.g. MEMSET); num_nodes counts only
     # the kernel octagons.
     assert intro[0] == want_nodes

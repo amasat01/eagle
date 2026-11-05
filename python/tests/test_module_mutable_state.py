@@ -53,7 +53,6 @@ ALLOWED = {
     ("_plan_planes.py", "_BIND_TARGETS"): TABLE,
     ("_simulate.py", "_FAMILY"): TABLE,
     ("_until_done.py", "_STRUCTURES"): TABLE,
-    ("exec.py", "_BY_NAME"): TABLE,
     ("gemm/capture.py", "CUBLAS_OP"): TABLE,
     ("gemm/plan.py", "_DTYPE_NAME_CACHE"): MEMO,
     ("gemm/plan.py", "_TERM_FORM_FOR_CLASS"): TABLE,

@@ -1,4 +1,4 @@
-# The workload and the ways of running it
+# Workloads
 
 
 A large class of scientific code integrates many independent problems at
@@ -26,8 +26,8 @@ The step is written once, as a hawk kernel, one sample at a time:
 
 ```{literalinclude} ../../../benchmarks/perf_card/perf_card.py
 :language: python
-:start-after: "# >>> code:hawk_step"
-:end-before: "# <<< code:hawk_step"
+:start-after: "# >>> code:hawk_kernel"
+:end-before: "# <<< code:hawk_kernel"
 :dedent: 4
 ```
 
@@ -52,9 +52,9 @@ anything until it is done.
 
 ```{literalinclude} ../../../benchmarks/perf_card/perf_card.py
 :language: python
-:start-after: "# >>> code:eagle_graph"
-:end-before: "# <<< code:eagle_graph"
-:dedent: 8
+:start-after: "# >>> code:hawk_launch"
+:end-before: "# <<< code:hawk_launch"
+:dedent: 12
 ```
 
 The plain `@hawk.kernel` decorator builds the automatic kernel. By default

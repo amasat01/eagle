@@ -4,13 +4,11 @@
 #pragma once
 
 #include "eagle/typedefs.h"
-#include "eagle/util/CaptureGuard.h" // eagle::util::CaptureGuardState (STOP-THE-LINE fix, free_() below)
-#include "eagle/util/DeviceError.h"  // EAGLE_CHECK_ALWAYS (+ transitively CUDA runtime)
 #include "eagle/util/throw.h"        // EAGLE_ASSERT
 
 #include <cstddef>
-#include <cstdlib>
 #include <set>
+#include <span>
 #include <vector>
 
 namespace eagle {
@@ -19,8 +17,7 @@ namespace eagle {
  * @brief Opaque handle to a reserved scratch region.
  *
  * Returned by ``ScratchArena::reserve`` in phase 1; ``ScratchArena::resolve``
- * turns it into a device (or host, in ``EAGLE_CPU_ONLY`` mode) pointer once the
- * arena is committed.
+ * turns it into a pointer into the arena's backing once the arena is committed.
  */
 struct ScratchHandle {
     idx_t slot        = 0;
@@ -41,9 +38,17 @@ struct ScratchHandle {
  * Two phases:
  *   - **reserve** (``beginNode`` / ``reserve`` / ``endNode``, driven by
  *     ``Graph::addNative``): assign every native node's working buffers to slots,
- *     growing the tracked peak. No device memory yet.
- *   - **commit + resolve** (``Graph::finalize``): allocate the single
- *     backing buffer once at the computed peak; ``resolve`` hands out pointers.
+ *     growing the tracked peak. No memory yet.
+ *   - **commit + attach + resolve** (``Graph::finalize``): ``commit`` fixes the
+ *     offsets and the peak; the graph allocates ONE buffer of that size, which it
+ *     owns (host memory for ``cpu::Graph``, device memory for ``cuda::Graph``),
+ *     and ``attach``es a view of it; ``resolve`` hands out pointers into it.
+ *
+ * The arena never allocates or frees. Its member functions are inline in every
+ * file that includes this header, so they must not depend on how that file is
+ * compiled: a body that switched on ``EAGLE_CPU_ONLY`` would differ between a
+ * host-compiled and a CUDA-compiled file of one program, the linker would keep
+ * one copy, and a buffer could reach the other allocator's free.
  *
  * The v1 policy is a greedy first-fit ancestor allocator: correct (never aliases
  * concurrent regions) and peak-not-sum for pipelines / chains / post-join, which
@@ -53,19 +58,11 @@ struct ScratchHandle {
  */
 class ScratchArena {
 public:
-    ScratchArena() = default;
+    ScratchArena()                               = default;
     ScratchArena(const ScratchArena&)            = delete;
     ScratchArena& operator=(const ScratchArena&) = delete;
-    ScratchArena(ScratchArena&& o) noexcept { moveFrom_(o); }
-    ScratchArena& operator=(ScratchArena&& o) noexcept
-    {
-        if (this != &o) {
-            free_();
-            moveFrom_(o);
-        }
-        return *this;
-    }
-    ~ScratchArena() { free_(); }
+    ScratchArena(ScratchArena&&) noexcept            = default;
+    ScratchArena& operator=(ScratchArena&&) noexcept = default;
 
     /** @brief Open a reserve context for the native node @p nodeId whose
      *  transitive dependency ancestors are @p ancestors. A slot may be reused by
@@ -109,31 +106,40 @@ public:
         return ScratchHandle{ s.index, bytes };
     }
 
-    /** @brief Allocate the single backing buffer, sized to the peak (the sum of
-     *  the reused slot sizes). Idempotent. Call once, after all reserves, before
-     *  any ``resolve``. */
-    void commit()
+    /** @brief Fix every slot's offset and return the peak: the bytes of the one
+     *  buffer the graph must ``attach`` (the sum of the reused slot sizes).
+     *  Idempotent. Call once, after all reserves. */
+    std::size_t commit()
     {
         if (committed_)
-            return;
+            return total_;
         offsets_.resize(slots_.size());
         std::size_t off = 0;
         for (std::size_t i = 0; i < slots_.size(); ++i) {
             offsets_[i] = off;
             off += align_(slots_[i].bytes);
         }
-        total_ = off;
-        if (total_ > 0)
-            alloc_();
+        total_     = off;
         committed_ = true;
+        return total_;
     }
 
-    /** @brief Resolve a handle to its backing pointer (device memory in CUDA
-     *  mode, host memory in ``EAGLE_CPU_ONLY``). Valid only after ``commit``. */
+    /** @brief Point the arena at the graph-owned buffer it resolves into. The
+     *  arena does not own @p memory; the graph keeps it alive as long as the
+     *  arena is used. */
+    void attach(std::span<std::byte> memory)
+    {
+        EAGLE_ASSERT(committed_, "ScratchArena: attach() before commit()");
+        EAGLE_ASSERT(memory.size() >= total_, "ScratchArena: the attached buffer is smaller than the peak");
+        memory_ = memory;
+    }
+
+    /** @brief Resolve a handle to its pointer in the attached buffer. Valid only after ``attach``. */
     void* resolve(const ScratchHandle& h) const
     {
-        EAGLE_ASSERT(committed_, "ScratchArena: resolve() before commit()");
-        return static_cast<char*>(base_) + offsets_[h.slot];
+        EAGLE_ASSERT(committed_ && memory_.size() >= total_ && (total_ == 0 || memory_.data() != nullptr),
+                     "ScratchArena: resolve() before attach()");
+        return memory_.data() + offsets_[h.slot];
     }
 
     /** @brief The committed peak size in bytes (0 before commit / no scratch). */
@@ -155,56 +161,11 @@ private:
         return (b + 255u) & ~std::size_t(255u);  // 256B alignment
     }
 
-    void alloc_()
-    {
-#ifndef EAGLE_CPU_ONLY
-        EAGLE_CHECK_ALWAYS(cudaMalloc(&base_, total_));
-#else
-        base_ = std::malloc(total_);
-#endif
-    }
-
-    /** @brief STOP-THE-LINE fix (CUDA branch only): ``arena_`` is a direct
-     *  member of ``eagle::cuda::Graph``, which is Python-bound and reachable
-     *  from ``GraphPipeline`` -- its destruction timing is GC-governed like
-     *  ``Stream``/``Launcher``/``Graph::Storage``, so the same
-     *  deferred-if-capturing release applies. The host (``EAGLE_CPU_ONLY``)
-     *  branch never touches CUDA and needs no deferral. */
-    void free_()
-    {
-        if (!base_)
-            return;
-#ifndef EAGLE_CPU_ONLY
-        {
-            void* const handle = base_;
-            eagle::util::CaptureGuardState::instance().destroyOrDefer(
-                [handle]() { cudaFree(handle); });
-        }
-#else
-        std::free(base_);
-#endif
-        base_ = nullptr;
-    }
-
-    void moveFrom_(ScratchArena& o)
-    {
-        slots_        = std::move(o.slots_);
-        offsets_      = std::move(o.offsets_);
-        curAncestors_ = std::move(o.curAncestors_);
-        curNode_      = o.curNode_;
-        base_         = o.base_;
-        total_        = o.total_;
-        committed_    = o.committed_;
-        o.base_       = nullptr;
-        o.total_      = 0;
-        o.committed_  = false;
-    }
-
     std::vector<Slot> slots_;
     std::vector<std::size_t> offsets_;
     std::set<idx_t> curAncestors_;
     idx_t curNode_        = 0;
-    void* base_           = nullptr;
+    std::span<std::byte> memory_;   // a view of the graph-owned buffer
     std::size_t total_    = 0;
     bool committed_       = false;
 };

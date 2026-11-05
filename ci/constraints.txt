@@ -1,0 +1,7 @@
+# Pins the gate installs under (pip install -c ci/constraints.txt). They are the pins the CI workflows carried
+# in YAML; the gate and CI read this one file.
+jax==0.11.2        # the floor: the jaxlib whose XLA FFI headers libeagle_xla.so vendors
+torch==2.14.1
+warp-lang==1.18.0
+ruff==0.15.18
+pytest-xdist==3.8.0

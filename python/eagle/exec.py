@@ -253,18 +253,6 @@ HostTeam = _HostTeam()
 RankPartition = _RankPartition()
 DeviceGroup = _Unimplemented("device_group")
 
-_BY_NAME = {s.name: s for s in (DeviceKernel, HostTeam, RankPartition, DeviceGroup)}
-
-
-def _structure_from_name(name: str) -> Structure:
-    """Resolve a wire-spelled structure name to its singleton :class:`Structure`."""
-    try:
-        return _BY_NAME[name]
-    except KeyError:
-        raise ValueError(
-            f"execution structure {name!r} is not one of {sorted(_BY_NAME)}"
-        ) from None
-
 
 def check_placement(access: str, structure, npartitions: int = 1) -> None:
     """Raise :class:`ValueError` naming the rule if running a body of
@@ -347,3 +335,18 @@ def check_layout_sizes(sizes) -> None:
                 "wrong-arch binding is earlier on the import path); rebuild "
                 "the plugin"
             )
+
+
+def host_threads() -> int:
+    """The most threads a host launch of this process uses right now (the host-thread
+    setting; default ``$OMP_NUM_THREADS``, else the CPUs this process may run on)."""
+    return _core.host_threads()
+
+
+def set_host_threads(threads: int | None) -> None:
+    """Set the most threads any host launch of this process uses (process-wide). A launch
+    uses ``min(its tiles, this)``; one tile runs in place on the calling thread; the setting reaches every host array op too. ``None``
+    restores the default."""
+    from ._host_loop import set_host_threads as _set
+
+    _set(threads)

@@ -625,7 +625,7 @@ inline nb::object export_dlpack(const Array& a, bool versioned, const nb::object
 {
     if (!a.placement().host() && !stream.is_none()) {
         const auto s = nb::cast<std::intptr_t>(stream);
-        if (s >= 0) eagle_interop_binding::fence_streams(a.stream() == 0 ? 1 : static_cast<std::intptr_t>(a.stream()), s, a.placement().device);
+        if (s >= 0 && a.ordered()) eagle_interop_binding::fence_streams(a.stream() == 0 ? 1 : static_cast<std::intptr_t>(a.stream()), s, a.placement().device);
     }
     auto* e = new Exported { a, a.shape(), {}, {}, {} };
     for (std::size_t k = 0; k < a.rank(); ++k) e->strides.push_back(a.stride(k));
@@ -706,7 +706,9 @@ inline Array array_from_cai(nb::object obj)
     }
     std::int32_t dev = 0;
     ck(EBX(eagle_backend_pointer_device)(reinterpret_cast<std::uintptr_t>(ptr), &dev));
-    return Array::borrow(ptr, shape, strides, d, { Placement::Kind::Cuda, dev < 0 ? 0 : dev }, keep_object(obj));
+    // CAI v3: "stream" None (or absent) means the producer needs no synchronisation, so later exports insert no wait
+    const bool ordered = cai.contains("stream") && !cai["stream"].is_none();
+    return Array::borrow(ptr, shape, strides, d, { Placement::Kind::Cuda, dev < 0 ? 0 : dev }, keep_object(obj), ordered);
 }
 
 inline DType dtype_of_format(const char* f)

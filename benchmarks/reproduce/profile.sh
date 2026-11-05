@@ -2,22 +2,27 @@
 # Copyright 2026 Alessandro Masat
 # SPDX-License-Identifier: Apache-2.0
 #
-# Profile eagle's launch decisions and kernels on this machine's GPU (Nsight Systems and
-# Nsight Compute), unattended, in under 45 minutes, ending with one tarball to copy off.
+# Profile eagle's kernels and launch shapes on this machine's GPU for the performance card's workload
+# (Nsight Systems and Nsight Compute), unattended, every counter on every workload (about 75 minutes on an A100, --quick under 8 minutes), ending with one tarball.
+# The stages: sol_probe, wide_sweep, ncu_corpus, ncu_ensemble, ncu_features, ncu_nvlibs, chunk_residency, launch_shape (see gpu_profile.py).
+# Nsight Compute stages capture with --set full (--quick: the metric list only).
 #
 #   profile.sh [options]
 #     --env FILE        the GPU environment script bootstrap.sh wrote (default WORK/env-gpu.sh)
-#     --cuda V          12 | 13 (default 12, or $REPRO_CUDA): the CUDA profile bootstrap.sh --cuda V made; 13 reads
-#                       WORK/env-gpu-cuda13.sh by default and reports the CUDA 13 package names
+#     --cuda V          12 | 12.6 | 13 (default 12, or $REPRO_CUDA): the CUDA profile bootstrap.sh --cuda V made; 12.6 reads
+#                       WORK/env-gpu-cuda126.sh by default, 13 reads WORK/env-gpu-cuda13.sh and reports the CUDA 13 package names
 #     --out DIR         where results go (default WORK/profiles/<machine-slug>/)
 #     --work DIR        bootstrap's work directory (default per target)
-#     --quick           the probe and one point of every stage: under 8 minutes
+#     --quick           one small point of every stage: about 8 minutes
 #     --fresh           ignore the markers of an earlier run and start over
-#     --deadline-min M  stop starting stages after M minutes (default 50)
+#     --deadline-min M  stop starting stages after M minutes (default 150)
 #     --only A[,B...]   run just these stages (a name, or a prefix such as ncu), keeping the order
+#                       (the band cadence is a hand-run stage of gpu_profile.py: --stage band)
 #     --lock-clock M    SM clock for the whole run: a MHz value, "auto" (the device maximum; default) or "off".
-#                       Needs passwordless sudo for nvidia-smi; without it the walls are normalised to the
-#                       device maximum clock instead, and every table says which. Reset on every exit.
+#                       Needs passwordless sudo for nvidia-smi; without it every row records its SM clock
+#                       instead, and facts.txt says which. Reset on every exit.
+#     --a100            the A100 session's trim: chunk_residency adds tps=2x at N=1e7 and takes no ncu tie captures;
+#                       ncu_ensemble skips the simulate rows (same kernel as persist)
 #     --dry-run         print the plan, run nothing
 #
 # Stages run independently, each under its own time cap; a failing stage never stops the
@@ -38,7 +43,7 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 . "$HERE/lib.sh"
 
 CUDA=${REPRO_CUDA:-12}
-ENV_FILE="" OUT="" WORK=${REPRO_WORK:-} QUICK=0 FRESH=0 DEADLINE_MIN=50 ONLY='' LOCK_CLOCK=auto
+ENV_FILE="" OUT="" WORK=${REPRO_WORK:-} QUICK=0 FRESH=0 DEADLINE_MIN=150 ONLY='' LOCK_CLOCK=auto A100=0
 while [[ $# -gt 0 ]]; do
   case $1 in
     --env) ENV_FILE=${2:-}; shift 2 ;;
@@ -50,18 +55,19 @@ while [[ $# -gt 0 ]]; do
     --deadline-min) DEADLINE_MIN=${2:-}; shift 2 ;;
     --only) ONLY=${2:-}; shift 2 ;;
     --lock-clock) LOCK_CLOCK=${2:-}; shift 2 ;;
+    --a100) A100=1; shift ;;
     --dry-run) REPRO_DRY_RUN=1; shift ;;
-    -h|--help) sed -n '5,33p' "$0"; exit 0 ;;
+    -h|--help) sed -n '5,25p' "$0"; exit 0 ;;
     *) die "unknown option $1 (see --help)" ;;
   esac
 done
-[[ $CUDA == 12 || $CUDA == 13 ]] || die "unknown CUDA version '$CUDA': --cuda (or REPRO_CUDA) takes 12 or 13"
+[[ $CUDA == 12 || $CUDA == 12.6 || $CUDA == 13 ]] || die "unknown CUDA version '$CUDA': --cuda (or REPRO_CUDA) takes 12, 12.6 or 13"
 [[ $DEADLINE_MIN =~ ^[0-9]+$ ]] || die "--deadline-min takes whole minutes"
 [[ $LOCK_CLOCK == auto || $LOCK_CLOCK == off || $LOCK_CLOCK =~ ^[0-9]+$ ]] || die "--lock-clock takes MHz, auto or off"
 
 TARGET=$(detect_target)
 WORK=${WORK:-$(default_work "$TARGET")}
-ENV_FILE=${ENV_FILE:-$WORK/env-gpu$([[ $CUDA == 13 ]] && echo -cuda13).sh}
+ENV_FILE=${ENV_FILE:-$WORK/env-gpu$([[ $CUDA == 13 ]] && echo -cuda13)$([[ $CUDA == 12.6 ]] && echo -cuda126).sh}
 SLUG=$(machine_slug)
 OUT=${OUT:-$WORK/profiles/$SLUG}
 DATA=$OUT/data LOGS=$OUT/logs MARK=$OUT/.stages
@@ -70,13 +76,10 @@ TARBALL=$OUT/profile-$SLUG.tgz
 
 # stage NAME:CAP_SECONDS, in run order
 if [[ $QUICK == 1 ]]; then
-  PLAN=(probe:180 nsys-quick:120 ncu-quick:180 compare-quick:300 crossover-quick:120 band-quick:150 chunk-sweep-quick:150
-        cadence-sweep-quick:90 ncu-ratio-quick:150 ncu-tsweep-quick:150 ncu-chunk-quick:150 ncu-rk78-small-quick:150
-        ncu-band-quick:180)
+  PLAN=(sol_probe:120 wide_sweep:300 ncu_corpus:240 ncu_ensemble:300 ncu_features:300 ncu_nvlibs:300 chunk_residency:240 launch_shape:240)
 else
-  PLAN=(probe:180 nsys-grid:720 nsys-width:150 ncu-spread-1e6:240 ncu-uniform-1e6:240 ncu-spread-1e4:240
-        compare:1500 crossover:300 band:420 chunk-sweep:480 cadence-sweep:300 ncu-ratio:420 ncu-tsweep:750
-        ncu-chunk:900 ncu-rk78-small:300 ncu-band:300)
+  # full caps: ceilings of ~1.5 x the L4 walls (ncu_ensemble 10 min, ncu_features 46, ncu_nvlibs 10, ncu_corpus 12, chunk_residency 32 incl. ties)
+  PLAN=(sol_probe:180 wide_sweep:600 ncu_corpus:1800 ncu_ensemble:900 ncu_features:4140 ncu_nvlibs:1200 chunk_residency:3000 launch_shape:600)
 fi
 if [[ -n $ONLY ]]; then
   CHOSEN=()
@@ -85,36 +88,35 @@ if [[ -n $ONLY ]]; then
     hit=0
     for s in "${PLAN[@]}"; do
       n=${s%%:*}
-      if [[ $n == "$w" || $n == "$w-quick" || $n == "$w"-* ]]; then hit=1; fi
+      if [[ $n == "$w" || $n == "$w"_* ]]; then hit=1; fi
     done
     [[ $hit == 1 ]] || die "--only $w matches no stage; the stages are: $(printf '%s ' "${PLAN[@]%%:*}")"
   done
   for s in "${PLAN[@]}"; do
     n=${s%%:*}
     for w in "${WANT[@]}"; do
-      if [[ $n == "$w" || $n == "$w-quick" || $n == "$w"-* ]]; then CHOSEN+=("$s"); break; fi
+      if [[ $n == "$w" || $n == "$w"_* ]]; then CHOSEN+=("$s"); break; fi
     done
   done
   PLAN=("${CHOSEN[@]}")
 fi
 
-# Expected seconds per stage on an A100 or H100 (the caps above are ceilings, not expectations). The twice-the-threads
-# arms of the chunk sweep are the first thing dropped when the plan is over the budget.
-BUDGET_MIN=35
-declare -A EST=([probe]=30 [nsys-grid]=375 [nsys-width]=60 [ncu-spread-1e6]=60 [ncu-uniform-1e6]=60 [ncu-spread-1e4]=60
-                [compare]=460 [crossover]=45 [band]=120 [chunk-sweep]=150 [cadence-sweep]=90 [ncu-ratio]=100
-                [ncu-tsweep]=200 [ncu-chunk]=210 [ncu-rk78-small]=60 [ncu-band]=60)
-EST_S=0 CHUNK_T2=1
+# Expected seconds per stage on an A100 (the caps above are ceilings, not expectations; --quick: a minute each). The ncu
+# stages are ~40 replay passes (--set full) of each kernel: ncu_ensemble 10 captures, ncu_features 39 arms, ncu_nvlibs 11 library cells (counters only).
+BUDGET_MIN=90
+declare -A EST=([sol_probe]=30 [wide_sweep]=300 [ncu_corpus]=600 [ncu_ensemble]=300 [ncu_features]=2340 [ncu_nvlibs]=480 [chunk_residency]=540 [launch_shape]=240)
+EST_S=0 EST_NO_NCU_S=0
 for s in "${PLAN[@]}"; do
   n=${s%%:*}
-  if [[ $n == *-quick ]]; then EST_S=$((EST_S + 60)); else EST_S=$((EST_S + ${EST[$n]:-60})); fi
+  e=$([[ $QUICK == 1 ]] && echo 60 || echo "${EST[$n]:-60}")
+  EST_S=$((EST_S + e))
+  [[ $n == ncu_* ]] || EST_NO_NCU_S=$((EST_NO_NCU_S + e))
 done
-if [[ $QUICK == 0 && $EST_S -gt $((BUDGET_MIN * 60)) ]]; then CHUNK_T2=0; EST_S=$((EST_S - 75)); fi
-export PROFILE_CHUNK_T2=$CHUNK_T2
 if [[ $REPRO_DRY_RUN == 1 ]]; then
   log "env=$ENV_FILE out=$OUT deadline=${DEADLINE_MIN} min"
   for s in "${PLAN[@]}"; do log "stage ${s%%:*} (cap ${s##*:} s)"; done
-  log "estimate on an A100/H100: $((EST_S / 60)) min of the ${BUDGET_MIN} min budget; chunk sweep at twice the threads: $([[ $CHUNK_T2 == 1 ]] && echo on || echo "dropped (over budget)"); SM clock: ${LOCK_CLOCK}"
+  log "estimate on an A100: $((EST_S / 60)) min of the ${BUDGET_MIN} min budget; SM clock: ${LOCK_CLOCK}"
+  log "plan on a GPU below compute capability 7.0 (P2000): the ncu_* stages are skipped, the rest run ($((EST_NO_NCU_S / 60)) min of A100 time; a starved card takes longer, the deadline ends the run)"
   exit 0
 fi
 
@@ -255,7 +257,7 @@ find_tool() {
   done
 }
 NSYS=$(find_tool nsys) NCU=$(find_tool ncu)
-log "nsys: ${NSYS:-not found (nsys stages will be skipped)} $([[ -n $NSYS ]] && "$NSYS" --version 2>/dev/null | head -1)"
+log "nsys: ${NSYS:-not found (launch_shape times without traces)} $([[ -n $NSYS ]] && "$NSYS" --version 2>/dev/null | head -1)"
 log "ncu:  ${NCU:-not found (ncu stages will be skipped)} $([[ -n $NCU ]] && "$NCU" --version 2>/dev/null | tail -1)"
 
 NCU_SUDO=0
@@ -281,7 +283,7 @@ if [[ $LOCK_CLOCK != off ]]; then
     CLOCK_LOCKED=1 CLOCK_MODE="locked:$LOCK_MHZ"
     log "SM clock locked at $LOCK_MHZ MHz for the run (released on exit)"
   else
-    log "SM clock not locked (no passwordless sudo for nvidia-smi, or no clock value): walls are normalised to the device maximum clock"
+    log "SM clock not locked (no passwordless sudo for nvidia-smi, or no clock value): every row records its SM clock"
   fi
 fi
 export PROFILE_CLOCK_MODE=$CLOCK_MODE
@@ -297,8 +299,7 @@ run_stage() {  # NAME CAP_SECONDS
   CURRENT=$name
   if [[ $FRESH == 0 && -f $MARK/$name.ok ]]; then STATUS[$name]="ok (finished in an earlier run)"; return; fi
   case $name in
-    nsys*|cadence-sweep*) [[ -n $NSYS ]] || { STATUS[$name]="skipped: nsys not found (install Nsight Systems)"; return; } ;;
-    ncu*)  if [[ $NCU_MODE == skip:* ]]; then STATUS[$name]="skipped: ${NCU_MODE#skip:}"; return; fi ;;
+    ncu_*)  if [[ $NCU_MODE == skip:* ]]; then STATUS[$name]="skipped: ${NCU_MODE#skip:}"; return; fi ;;
   esac
   remaining=$((DEADLINE_S - (SECONDS - T0)))
   if [[ $remaining -le 30 ]]; then STATUS[$name]="skipped: the ${DEADLINE_MIN}-minute deadline was reached"; return; fi
@@ -311,8 +312,11 @@ run_stage() {  # NAME CAP_SECONDS
     echo "forced failure (PROFILE_TEST_FAIL)" >"$log_file"; rc=1
   else
     local args=(--stage "$name" --out "$DATA")
-    # the comparison starts no cell it cannot finish inside its cap
-    [[ $name == compare* || $name == crossover* || $name == band* || $name == chunk-sweep* ]] && args+=(--budget-s $((cap > 120 ? cap - 90 : cap / 2)))
+    [[ $QUICK == 1 ]] && args+=(--quick)
+    [[ $A100 == 1 ]] && args+=(--a100)
+    # the chunk sweep starts no cell it cannot finish inside its cap
+    # and leaves the tie captures (full Nsight Compute: 8 of them) their time
+    [[ $name == chunk_residency ]] && args+=(--budget-s $((cap > 1800 ? cap - 1500 : cap > 120 ? cap - 90 : cap / 2)))
     [[ -n $NSYS ]] && args+=(--nsys "$NSYS")
     [[ -n $NCU ]] && args+=(--ncu "$NCU")
     [[ $NCU_SUDO == 1 ]] && args+=(--ncu-sudo)
@@ -343,4 +347,6 @@ for entry in "${PLAN[@]}"; do
 done
 write_status
 log "stages done in $((SECONDS - T0)) s; see $OUT/status.txt"
+# every stage ran; a failed one fails the run (a skipped one does not), so the step that called it is not done
+for st in "${STATUS[@]}"; do [[ $st == failed* ]] && exit 1; done
 exit 0

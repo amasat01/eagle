@@ -21,8 +21,11 @@ for pair in $siblings; do
     [ "$root" != / ] || { echo "no git checkout above $path" >&2; exit 1; }
     root=$(dirname "$root")
   done
-  # the version the sibling is (or will be): its exact tag, else what setuptools-scm gives the checkout
-  v=$(git -C "$root" describe --tags --match 'v*' --exact-match 2>/dev/null | sed 's/^v//' || true)
+  # the version the sibling is (or will be): the release tag this repo's companions file pins it to, else its exact
+  # tag, else what setuptools-scm gives the checkout. A pinned release is the one on PyPI, whatever branch is checked out
+  # (an untagged release-branch head would otherwise build a dev version that nothing asks for).
+  v=$(awk -v r="$(basename "$root")" '$1 == r && $2 ~ /^v[0-9]+[.][0-9]+[.][0-9]+$/ {print substr($2, 2)}' "$eagle_root/.github/companions" 2>/dev/null || true)
+  [ -n "$v" ] || v=$(git -C "$root" describe --tags --match 'v*' --exact-match 2>/dev/null | sed 's/^v//' || true)
   if [ -z "$v" ]; then
     python -m pip install --quiet setuptools-scm
     v=$(python -m setuptools_scm -r "$root")

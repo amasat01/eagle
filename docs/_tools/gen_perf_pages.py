@@ -4,9 +4,9 @@
 
 """Generate the performance page's per-family MyST includes from the committed cards.
 
-``benchmarks/{perf_card,rk78_card}/`` each hold a GPU card (``card_<slug>.json``)
+``benchmarks/perf_card/`` holds a GPU card (``card_<slug>.json``)
 and a CPU card (``cpu_card_<slug>.json``); a *family* here is one of those four
-(perf GPU, perf CPU, rk78 GPU, rk78 CPU). Dropping a new device's card next to
+(the ensemble card on a GPU and on a CPU). Dropping a new device's card next to
 the existing ones (same prefix, new slug) is enough for it to appear everywhere
 this script writes to, with no hand edit: this is what keeps
 ``docs/content/performance.md`` from drifting when a card is re-run (same
@@ -64,18 +64,12 @@ from raptor_docs.themed_svg import dark_path, write_pair  # noqa: E402
 #: pair this script reports a ratio between on every non-reference device;
 #: CPU cards run neither arm, so they stay unset.
 FAMILIES = [
-    {"key": "perf_card_gpu", "page": "rk4", "dir": "benchmarks/perf_card", "prefix": "card_",
-     "reference_slug": "nvidia-h100-80gb-hbm3", "heading": "GPU", "has_config": True,
-     "simulate": "eagle_simulate", "twin": "eagle_graph_auto"},
-    {"key": "perf_card_cpu", "page": "rk4", "dir": "benchmarks/perf_card", "prefix": "cpu_card_",
-     "reference_slug": "amd-epyc-9b45", "heading": "CPU", "has_config": True,
-     "simulate": None, "twin": None},
-    {"key": "rk78_card_gpu", "page": "rk78", "dir": "benchmarks/rk78_card", "prefix": "card_",
-     "reference_slug": "nvidia-h100-80gb-hbm3", "heading": "GPU", "has_config": False,
+    {"key": "perf_card_gpu", "page": "rk78", "dir": "benchmarks/perf_card", "prefix": "card_",
+     "reference_slug": "nvidia-a100-sxm4-40gb", "heading": "GPU", "has_config": False,
      "simulate": "eagle_simulate", "twin": "eagle_graph"},
-    {"key": "rk78_card_cpu", "page": "rk78", "dir": "benchmarks/rk78_card", "prefix": "cpu_card_",
-     "reference_slug": "amd-epyc-9b45", "heading": "CPU",
-     "has_config": False, "simulate": None, "twin": None},
+    {"key": "perf_card_cpu", "page": "rk78", "dir": "benchmarks/perf_card", "prefix": "cpu_card_",
+     "reference_slug": "amd-epyc-9b45", "heading": "CPU", "has_config": False,
+     "simulate": None, "twin": None},
 ]
 
 
@@ -259,6 +253,8 @@ def _configs(spec: dict, e: dict) -> list[dict | None]:
 
 def headline_config(spec: dict, e: dict) -> dict | None:
     """The workload the overview shows: the README's, else the card's first."""
+    if e["card"].get("distributions"):   # the ensemble cards: a distribution names the workload
+        return README_CONFIG
     configs = _configs(spec, e)
     return README_CONFIG if README_CONFIG in configs else configs[0]
 
@@ -455,7 +451,7 @@ def _table_fragment(spec: dict, e: dict, entries=()) -> str:
     borrowed = borrowed_readings(e, entries)
     used, withheld = {}, False
     out, fenced = [], False
-    net_kind = "rk4_cpu" if spec["key"] == "perf_card_cpu" else None
+    net_kind = None   # the RK4 net-memory reading belonged to the deleted oscillator cards
     by_config = _config_rows(e["card"]) if net_kind else []
     all_rows = e["card"]["memory"]["rows"] if net_kind else None
     section = -1  # the configuration section a row belongs to: the card's "###" headings in order
@@ -547,7 +543,20 @@ def _relpath(path: pathlib.Path, start: pathlib.Path) -> str:
 # Entry points
 # --------------------------------------------------------------------------- #
 #: The workload the README charts show: the landing page's own.
-README_CONFIG = {"distribution": "spread", "max_steps": 1000}
+README_CONFIG = {"distribution": "spread"}
+
+
+def headline_entry(entries: list[dict]) -> tuple[dict, int]:
+    """The card the README and the home page chart and the batch size: ``prose_claims.HEADLINE``'s device
+    (the first card when none matches) at its first N."""
+    import fnmatch
+
+    sys.path.insert(0, str(_TOOLS_DIR.parent.parent / "tools"))
+    import prose_claims as pcl
+
+    glob = pcl.DEVICES[pcl.HEADLINE["dev"]]
+    entry = next((e for e in entries if fnmatch.fnmatch(e["slug"], glob)), entries[0])
+    return entry, pcl.HEADLINE["ns"][0]
 
 
 def write_readme_svgs(eagle_root: pathlib.Path, entries_by_family: dict[str, list[dict]]) -> list[pathlib.Path]:
@@ -561,15 +570,16 @@ def write_readme_svgs(eagle_root: pathlib.Path, entries_by_family: dict[str, lis
         entries = entries_by_family.get(key) or []
         if not entries:
             continue
-        card = entries[0]["card"]
-        cfg = README_CONFIG if README_CONFIG in (card.get("configs") or []) else (card.get("configs") or [None])[0]
-        chart_bars, n = charts.bars(card, tools, cfg)
+        entry, n = headline_entry(entries)
+        card = entry["card"]
+        cfg = headline_config(next(f for f in FAMILIES if f["key"] == key), entry)
+        chart_bars, n = charts.bars(card, tools, cfg, n)
         if not chart_bars:
             continue
         out_dir.mkdir(parents=True, exist_ok=True)
-        title = f"RK4 oscillators, {n:,} samples" + (f", {_config_label(cfg)}" if cfg else "")
+        title = f"Kepler orbits, adaptive RKF7(8), {n:,} samples" + (f", {_config_label(cfg)}" if cfg else "")
         path = out_dir / f"readme_{kind}.svg"
-        write_pair(path, lambda palette: charts.chart_svg(chart_bars, title, entries[0]["name"], palette))
+        write_pair(path, lambda palette: charts.chart_svg(chart_bars, title, entry["name"], palette))
         written += [path, dark_path(path)]
     return written
 
@@ -582,9 +592,9 @@ def write_glimpse(out_dir: pathlib.Path, entries_by_family: dict[str, list[dict]
     target.unlink(missing_ok=True)
     if not entries:
         return
-    e = entries[0]
+    e, n = headline_entry(entries)
     cfg = headline_config(FAMILIES[0], e)
-    chart_bars, n = charts.bars(e["card"], charts.GPU_TOOLS, cfg)
+    chart_bars, n = charts.bars(e["card"], charts.GPU_TOOLS, cfg, n)
     if not chart_bars:
         return
     alt = html.escape(charts.alt_text(chart_bars, e["name"]), quote=True)
@@ -593,7 +603,7 @@ def write_glimpse(out_dir: pathlib.Path, entries_by_family: dict[str, list[dict]
         '<a href="content/performance.html">'
         f'<img class="only-light" src="_static/perf/readme_gpu.svg" alt="{alt}" style="max-width:100%;height:auto">'
         f'<img class="only-dark" src="_static/perf/readme_gpu-dark.svg" alt="{alt}" style="max-width:100%;height:auto"></a>\n'
-        f'<figcaption>{n:,} samples, each stopping at its own step, on {html.escape(e["name"])}: '
+        f'<figcaption>{n:,} samples, each stopping at its own time, on {html.escape(e["name"])}: '
         'wall time per tool, log scale. <a href="content/performance.html">Every device, workload '
         'and arm</a>.</figcaption>\n</figure>\n')
 

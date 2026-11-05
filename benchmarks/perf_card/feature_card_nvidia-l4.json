@@ -1,0 +1,1941 @@
+{
+ "schema": "eagle-feature-card/2",
+ "script": "benchmarks/perf_card/feature_card.py",
+ "script_md5": "13447caaa815e985758d3889351e7554",
+ "common_md5": "3b7b33719b7f33652a1c4f3c0acc83d2",
+ "generated_utc": "2026-11-04T14:05:42Z",
+ "release": "eagle 0.7.3.dev189+gd5f86048f, hawk 0.7.3.dev143+gbde134d1c",
+ "device_slug": "nvidia-l4",
+ "device": {
+  "name": "NVIDIA L4",
+  "compute_capability": "8.9",
+  "sm_count": 58,
+  "clock_rate_hz": 2040000000.0,
+  "memory_clock_hz": 6251000000.0,
+  "memory_bus_width_bits": 192,
+  "total_memory_bytes": 23659151360,
+  "pci_bus_id": "00000000:00:03.0",
+  "driver_version": "580.178.04",
+  "cuda_driver_api": 13000,
+  "cuda_runtime": 12090,
+  "nvidia_smi": {
+   "name": "NVIDIA L4",
+   "driver_version": "580.178.04",
+   "clocks_max_sm": "2040 MHz",
+   "clocks_max_mem": "6251 MHz",
+   "memory_total": "23034 MiB",
+   "power_limit": "72.00 W"
+  }
+ },
+ "peak": {
+  "fp64_flops": 473280000000.0,
+  "fp64_source": "SM count x FP64 FMA per clock per SM (CUDA C++ Programming Guide, Arithmetic Instructions throughput table, compute capability 8.9: 2) x 2 FLOP per FMA x the device's reported maximum clock (cudaDeviceProp::clockRate)",
+  "dram_bytes_per_s": 300048000000.0,
+  "dram_source": "2 x memory clock (cudaDeviceProp::memoryClockRate) x bus width (cudaDeviceProp::memoryBusWidth) / 8"
+ },
+ "software": {
+  "python": "3.12.14",
+  "numpy": "2.5.3",
+  "cupy": "14.2.0",
+  "torch": "2.12.1+cu129",
+  "jax": "0.11.2",
+  "jaxlib": "0.11.2",
+  "warp": "1.17.0",
+  "hawk": "0.7.3.dev143+gbde134d1c",
+  "eagle_commit": "d5f86048f27ff8e61bf50a51508f77803e4d28e8",
+  "hawk_commit": "bde134d1cd239c00b39b842656f20a3df5746ea7-dirty",
+  "platform": "Linux-7.0.0-1014-gcp-x86_64-with-glibc2.39",
+  "cpu": "Intel(R) Xeon(R) CPU @ 2.20GHz",
+  "omp_num_threads": null
+ },
+ "method": "One fresh process per arm; a warm-up, then 3 to 9 rounds until the IQR is under 5 % of the median (at most 300 s); a warm-up over 120 s is not_run: budget.",
+ "rows": [
+  {
+   "row": "wide_forms",
+   "case": "all",
+   "dtype": "float64",
+   "n": 65536,
+   "baseline": "opaque NumPy mask; torch",
+   "reference_arm": "thread",
+   "arms": {
+    "thread": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "every output equals the reference bit for bit": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.1383509239999512,
+      "iqr": 0.0004594105000705895,
+      "q1": 0.138321332999908,
+      "q3": 0.1387807434999786,
+      "samples": [
+       0.139210563000006,
+       0.13829174199986483,
+       0.1383509239999512
+      ],
+      "rounds": 3,
+      "warm_s": 0.13843569599998773
+     },
+     "sm_mhz": 2010.0,
+     "host_rss_kib": 1633504,
+     "device_bytes": 2113929216
+    },
+    "team": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "every output equals the reference bit for bit": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.009791087000166954,
+      "iqr": 8.641950012133748e-05,
+      "q1": 0.009755300000051648,
+      "q3": 0.009841719500172985,
+      "samples": [
+       0.009892352000179017,
+       0.009791087000166954,
+       0.009719512999936342
+      ],
+      "rounds": 3,
+      "warm_s": 0.009825565000028291
+     },
+     "sm_mhz": 2040.0,
+     "host_rss_kib": 1632632,
+     "device_bytes": 952107008
+    },
+    "team_k8": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "every output equals the reference bit for bit": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.009774658999958774,
+      "iqr": 2.1488000015779107e-05,
+      "q1": 0.009754396000062115,
+      "q3": 0.009775884000077895,
+      "samples": [
+       0.009774658999958774,
+       0.009777109000197015,
+       0.009734133000165457
+      ],
+      "rounds": 3,
+      "warm_s": 0.009845014999882551
+     },
+     "sm_mhz": 2040.0,
+     "host_rss_kib": 1632736,
+     "device_bytes": 952107008
+    },
+    "staged": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "every output equals the reference bit for bit": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.008056654000029084,
+      "iqr": 3.132449990062014e-05,
+      "q1": 0.008034159000089858,
+      "q3": 0.008065483499990478,
+      "samples": [
+       0.008056654000029084,
+       0.008074312999951871,
+       0.008011664000150631
+      ],
+      "rounds": 3,
+      "warm_s": 0.008116148999988582
+     },
+     "sm_mhz": 2040.0,
+     "host_rss_kib": 1632748,
+     "device_bytes": 952107008
+    },
+    "numpy_mask": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "the NumPy reference": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.39768032300071354,
+      "iqr": 0.0012086414999430417,
+      "q1": 0.397569437000584,
+      "q3": 0.39877807850052704,
+      "samples": [
+       0.39987583400034055,
+       0.39745855100045446,
+       0.39768032300071354
+      ],
+      "rounds": 3,
+      "warm_s": 0.398980013000255
+     },
+     "sm_mhz": 405.0,
+     "host_rss_kib": 1527476,
+     "device_bytes": 496762880,
+     "reference": "ref/nvidia-l4--intel-xeon, date not recorded, SM 405.0 MHz"
+    },
+    "torch": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "fill_mask and matvec_in match the reference (masked_sum has no torch form)": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.008662232999995467,
+      "iqr": 3.231150003557559e-05,
+      "q1": 0.008634734499992192,
+      "q3": 0.008667046000027767,
+      "samples": [
+       0.008671859000060067,
+       0.008662232999995467,
+       0.008607235999988916
+      ],
+      "rounds": 3,
+      "warm_s": 0.008740445000512409
+     },
+     "sm_mhz": 2040.0,
+     "host_rss_kib": 2090476,
+     "device_bytes": 1312817152,
+     "reference": "ref/nvidia-l4--intel-xeon, date not recorded, SM 2040.0 MHz"
+    }
+   },
+   "ratio_to_reference": {
+    "thread": 1.0,
+    "team": 0.07076994296164157,
+    "team_k8": 0.07065120143297506,
+    "staged": 0.05823346723750054,
+    "numpy_mask": 2.8744319987400577,
+    "torch": 0.06261059015405292
+   }
+  },
+  {
+   "row": "wide_forms",
+   "case": "all",
+   "dtype": "float32",
+   "n": 65536,
+   "baseline": "opaque NumPy mask; torch",
+   "reference_arm": "thread",
+   "arms": {
+    "thread": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "every output equals the reference bit for bit": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.02922887499994431,
+      "iqr": 0.00018193749997408304,
+      "q1": 0.029183694999915133,
+      "q3": 0.029365632499889216,
+      "samples": [
+       0.02922887499994431,
+       0.029502389999834122,
+       0.029138514999885956
+      ],
+      "rounds": 3,
+      "warm_s": 0.029399815000033414
+     },
+     "sm_mhz": 2040.0,
+     "host_rss_kib": 1003388,
+     "device_bytes": 962592768
+    },
+    "team": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "every output equals the reference bit for bit": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.0035160420000011072,
+      "iqr": 2.7706499963642273e-05,
+      "q1": 0.0034902774999636677,
+      "q3": 0.00351798399992731,
+      "samples": [
+       0.0035160420000011072,
+       0.0035199259998535126,
+       0.003464512999926228
+      ],
+      "rounds": 3,
+      "warm_s": 0.0035431740000149148
+     },
+     "sm_mhz": 2040.0,
+     "host_rss_kib": 1002756,
+     "device_bytes": 574619648
+    },
+    "team_k8": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "every output equals the reference bit for bit": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.0033951929999602726,
+      "iqr": 2.0750500084432133e-05,
+      "q1": 0.0033837504998928125,
+      "q3": 0.0034045009999772446,
+      "samples": [
+       0.0033951929999602726,
+       0.0034138089999942167,
+       0.0033723079998253525
+      ],
+      "rounds": 3,
+      "warm_s": 0.0034627310001269507
+     },
+     "sm_mhz": 2040.0,
+     "host_rss_kib": 1002936,
+     "device_bytes": 574619648
+    },
+    "staged": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "every output equals the reference bit for bit": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.002360619000000952,
+      "iqr": 3.841000000193162e-05,
+      "q1": 0.002337151000006088,
+      "q3": 0.0023755610000080196,
+      "samples": [
+       0.0023905030000150873,
+       0.002360619000000952,
+       0.002313683000011224
+      ],
+      "rounds": 3,
+      "warm_s": 0.0024165940001239505
+     },
+     "sm_mhz": 2040.0,
+     "host_rss_kib": 1002856,
+     "device_bytes": 574619648
+    },
+    "numpy_mask": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "the NumPy reference": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.2620931660003407,
+      "iqr": 0.0006093179999879794,
+      "q1": 0.26203609200001665,
+      "q3": 0.26264541000000463,
+      "samples": [
+       0.2620931660003407,
+       0.2619790179996926,
+       0.26319765399966855
+      ],
+      "rounds": 3,
+      "warm_s": 0.26463020899973344
+     },
+     "sm_mhz": 285.0,
+     "host_rss_kib": 922448,
+     "device_bytes": 496762880,
+     "reference": "ref/nvidia-l4--intel-xeon, date not recorded, SM 285.0 MHz"
+    },
+    "torch": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "fill_mask and matvec_in match the reference (masked_sum has no torch form)": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.002435917999719095,
+      "iqr": 3.180549992976012e-05,
+      "q1": 0.002417009000055259,
+      "q3": 0.002448814499985019,
+      "samples": [
+       0.0024617110002509435,
+       0.002435917999719095,
+       0.0023981000003914232
+      ],
+      "rounds": 3,
+      "warm_s": 0.002489462000085041
+     },
+     "sm_mhz": 2040.0,
+     "host_rss_kib": 1694100,
+     "device_bytes": 775946240,
+     "reference": "ref/nvidia-l4--intel-xeon, date not recorded, SM 2040.0 MHz"
+    }
+   },
+   "ratio_to_reference": {
+    "thread": 1.0,
+    "team": 0.12029344270033679,
+    "team_k8": 0.11615886687280101,
+    "staged": 0.08076325209250954,
+    "numpy_mask": 8.966926233077396,
+    "torch": 0.08333943744751504
+   }
+  },
+  {
+   "row": "steps_fused",
+   "case": "all",
+   "dtype": "float64",
+   "n": 65536,
+   "baseline": "Warp loop (primal); torch.func over a loop (derivatives)",
+   "reference_arm": "K8",
+   "arms": {
+    "K1": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "y equals W x + c after 8 steps": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.0435145819999434,
+      "iqr": 0.0017735635000235561,
+      "q1": 0.04337825749996682,
+      "q3": 0.04515182099999038,
+      "samples": [
+       0.04324193299999024,
+       0.0435145819999434,
+       0.04678906000003735
+      ],
+      "rounds": 3,
+      "warm_s": 0.0422095729998091
+     },
+     "sm_mhz": 1755.0,
+     "host_rss_kib": 1150560,
+     "device_bytes": 480247808
+    },
+    "K8": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "y equals W x + c after 8 steps": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.005519138000181556,
+      "iqr": 4.496100007145287e-05,
+      "q1": 0.005474324000033448,
+      "q3": 0.005519285000104901,
+      "samples": [
+       0.005519138000181556,
+       0.005519432000028246,
+       0.00542950999988534
+      ],
+      "rounds": 3,
+      "warm_s": 0.005520718000070701
+     },
+     "sm_mhz": 2040.0,
+     "host_rss_kib": 1150596,
+     "device_bytes": 480247808
+    },
+    "K32": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "y equals W x + c after 8 steps": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.005488748000061605,
+      "iqr": 3.934849996767298e-05,
+      "q1": 0.0054681560000062746,
+      "q3": 0.0055075044999739475,
+      "samples": [
+       0.005488748000061605,
+       0.00552626099988629,
+       0.005447563999950944
+      ],
+      "rounds": 3,
+      "warm_s": 0.0055354420001094695
+     },
+     "sm_mhz": 2040.0,
+     "host_rss_kib": 1151368,
+     "device_bytes": 480247808
+    },
+    "jvp_K8": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "dot_y equals W dx + dW x + dc": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.018441144000007625,
+      "iqr": 4.16005000261066e-05,
+      "q1": 0.018413195499988433,
+      "q3": 0.01845479600001454,
+      "samples": [
+       0.018468448000021453,
+       0.018441144000007625,
+       0.01838524699996924
+      ],
+      "rounds": 3,
+      "warm_s": 0.01851122299990493
+     },
+     "sm_mhz": 2040.0,
+     "host_rss_kib": 1416464,
+     "device_bytes": 761266176
+    },
+    "vjp_K8_fused": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "bar_x equals W^T bar_y and bar_c equals bar_c_next + sum(bar_y)": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.03243525200014119,
+      "iqr": 8.379700000205048e-05,
+      "q1": 0.032359072000076594,
+      "q3": 0.032442869000078645,
+      "samples": [
+       0.032282892000012,
+       0.0324504860000161,
+       0.03243525200014119
+      ],
+      "rounds": 3,
+      "warm_s": 0.032479100000045946
+     },
+     "sm_mhz": 2040.0,
+     "host_rss_kib": 1760280,
+     "device_bytes": 1268776960
+    },
+    "vjp_K8_auto": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "bar_x equals W^T bar_y and bar_c equals bar_c_next + sum(bar_y)": true
+     },
+     "rule": "iqr",
+     "note": "steps_reverse auto picks fused",
+     "wall_s": {
+      "median": 0.03238902299995061,
+      "iqr": 2.525500008232484e-05,
+      "q1": 0.03237266249993809,
+      "q3": 0.03239791750002041,
+      "samples": [
+       0.03235630199992556,
+       0.03238902299995061,
+       0.03240681200009021
+      ],
+      "rounds": 3,
+      "warm_s": 0.032408476999989944
+     },
+     "sm_mhz": 2040.0,
+     "host_rss_kib": 1756216,
+     "device_bytes": 1268776960
+    },
+    "warp_loop": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "y equals W x + c after 8 steps": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.19877369999994698,
+      "iqr": 0.00014053650011192076,
+      "q1": 0.1987173449997499,
+      "q3": 0.19885788149986183,
+      "samples": [
+       0.19894206299977668,
+       0.19877369999994698,
+       0.19866098999955284
+      ],
+      "rounds": 3,
+      "warm_s": 0.1986770350004008
+     },
+     "sm_mhz": 2010.0,
+     "host_rss_kib": 847824,
+     "device_bytes": 499122176,
+     "reference": "ref/nvidia-l4--intel-xeon, date not recorded, SM 2010.0 MHz"
+    },
+    "torch_func": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "bar_x equals W^T bar_y": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.04678569400039123,
+      "iqr": 4.3806000121549005e-05,
+      "q1": 0.04676332300005015,
+      "q3": 0.0468071290001717,
+      "samples": [
+       0.046828563999952166,
+       0.04678569400039123,
+       0.04674095199970907
+      ],
+      "rounds": 3,
+      "warm_s": 0.04694317600024078
+     },
+     "sm_mhz": 2040.0,
+     "host_rss_kib": 2251216,
+     "device_bytes": 855638016,
+     "reference": "ref/nvidia-l4--intel-xeon, date not recorded, SM 2040.0 MHz"
+    }
+   },
+   "ratio_to_reference": {
+    "K1": 7.884307657919037,
+    "K8": 1.0,
+    "K32": 0.9944937053360595,
+    "jvp_K8": 3.3413087332480162,
+    "vjp_K8_fused": 5.876869177591539,
+    "vjp_K8_auto": 5.868493050705591,
+    "warp_loop": 36.01535239622712,
+    "torch_func": 8.476992964997828
+   }
+  },
+  {
+   "row": "control_flow",
+   "case": "all",
+   "dtype": "float64",
+   "n": 1000000,
+   "baseline": "Warp per-thread loop",
+   "reference_arm": "guard",
+   "arms": {
+    "guard": {
+     "status": "ok",
+     "n": 1000000,
+     "checks": {
+      "y equals the NumPy loop on the first 1024 lanes": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.3824090499999784,
+      "iqr": 0.00018491600008019304,
+      "q1": 0.3822599564999791,
+      "q3": 0.3824448725000593,
+      "samples": [
+       0.3821108629999799,
+       0.38248069500014026,
+       0.3824090499999784
+      ],
+      "rounds": 3,
+      "warm_s": 0.382037328000024
+     },
+     "sm_mhz": 2040.0,
+     "host_rss_kib": 403720,
+     "device_bytes": 222298112
+    },
+    "no_guard": {
+     "status": "ok",
+     "n": 1000000,
+     "checks": {
+      "y equals the NumPy loop on the first 1024 lanes": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.3938344110001708,
+      "iqr": 1.4021499850969121e-05,
+      "q1": 0.39383320700017066,
+      "q3": 0.39384722850002163,
+      "samples": [
+       0.3938320030001705,
+       0.39386004599987245,
+       0.3938344110001708
+      ],
+      "rounds": 3,
+      "warm_s": 0.3938863579999179
+     },
+     "sm_mhz": 2040.0,
+     "host_rss_kib": 403748,
+     "device_bytes": 222298112
+    },
+    "jump": {
+     "status": "ok",
+     "n": 1000000,
+     "checks": {
+      "y equals the NumPy loop on the first 1024 lanes": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.42173033500012025,
+      "iqr": 0.0002641944998913459,
+      "q1": 0.42154472650008756,
+      "q3": 0.4218089209999789,
+      "samples": [
+       0.4213591180000549,
+       0.42173033500012025,
+       0.42188750699983757
+      ],
+      "rounds": 3,
+      "warm_s": 0.4215959919999932
+     },
+     "sm_mhz": 2040.0,
+     "host_rss_kib": 403780,
+     "device_bytes": 222298112
+    },
+    "segmented": {
+     "status": "ok",
+     "n": 1000000,
+     "checks": {
+      "y equals the NumPy loop on the first 1024 lanes": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 3.726229457000045,
+      "iqr": 0.0029114065000612754,
+      "q1": 3.725879331999977,
+      "q3": 3.728790738500038,
+      "samples": [
+       3.726229457000045,
+       3.731352020000031,
+       3.7255292069999086
+      ],
+      "rounds": 3,
+      "warm_s": 3.7282318640000085
+     },
+     "sm_mhz": 2040.0,
+     "host_rss_kib": 470980,
+     "device_bytes": 230686720
+    },
+    "warp": {
+     "status": "ok",
+     "n": 1000000,
+     "checks": {
+      "y equals the NumPy loop on the first 1024 lanes": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.404381000000285,
+      "iqr": 0.00010256149971610284,
+      "q1": 0.40431584800035125,
+      "q3": 0.40441840950006736,
+      "samples": [
+       0.4044558189998497,
+       0.4042506960004175,
+       0.404381000000285
+      ],
+      "rounds": 3,
+      "warm_s": 0.404385170999376
+     },
+     "sm_mhz": 2040.0,
+     "host_rss_kib": 590160,
+     "device_bytes": 230686720,
+     "reference": "ref/nvidia-l4--intel-xeon, date not recorded, SM 2040.0 MHz"
+    }
+   },
+   "ratio_to_reference": {
+    "guard": 1.0,
+    "no_guard": 1.029877329002002,
+    "jump": 1.102825194644698,
+    "segmented": 9.744093287018849,
+    "warp": 1.0574566684556965
+   }
+  },
+  {
+   "row": "linalg_lane",
+   "case": "n8",
+   "dtype": "float64",
+   "n": 131072,
+   "baseline": "cuSOLVER batched (CuPy); torch.linalg",
+   "reference_arm": "hawk",
+   "arms": {
+    "hawk": {
+     "status": "ok",
+     "n": 131072,
+     "checks": {
+      "x and eigenvalues match NumPy": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.010389620000069044,
+      "iqr": 1.459099996736768e-05,
+      "q1": 0.010382226000047012,
+      "q3": 0.01039681700001438,
+      "samples": [
+       0.010389620000069044,
+       0.010404013999959716,
+       0.01037483200002498
+      ],
+      "rounds": 3,
+      "warm_s": 0.010468491999972684
+     },
+     "sm_mhz": 2040.0,
+     "host_rss_kib": 553908,
+     "device_bytes": 304087040
+    },
+    "cupy": {
+     "status": "ok",
+     "n": 131072,
+     "checks": {
+      "x matches NumPy": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.11748379900018335,
+      "iqr": 0.00015369200036730035,
+      "q1": 0.11745888699988427,
+      "q3": 0.11761257900025157,
+      "samples": [
+       0.11748379900018335,
+       0.11774135900031979,
+       0.11743397499958519
+      ],
+      "rounds": 3,
+      "warm_s": 0.11748120200081758
+     },
+     "sm_mhz": 2040.0,
+     "host_rss_kib": 673672,
+     "device_bytes": 1570766848,
+     "reference": "ref/nvidia-l4--intel-xeon, date not recorded, SM 2040.0 MHz"
+    },
+    "torch": {
+     "status": "out_of_memory",
+     "reference": "ref/nvidia-l4--intel-xeon, date not recorded"
+    }
+   },
+   "ratio_to_reference": {
+    "hawk": 1.0,
+    "cupy": 11.307805193972698
+   }
+  },
+  {
+   "row": "linalg_lane",
+   "case": "n8",
+   "dtype": "float32",
+   "n": 131072,
+   "baseline": "cuSOLVER batched (CuPy); torch.linalg",
+   "reference_arm": "hawk",
+   "arms": {
+    "hawk": {
+     "status": "ok",
+     "n": 131072,
+     "checks": {
+      "x and eigenvalues match NumPy": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.002395345999957499,
+      "iqr": 1.8229000147584884e-05,
+      "q1": 0.0023894934998907047,
+      "q3": 0.0024077225000382896,
+      "samples": [
+       0.0023836409998239105,
+       0.0024200990001190803,
+       0.002395345999957499
+      ],
+      "rounds": 3,
+      "warm_s": 0.002416612999923018
+     },
+     "sm_mhz": 2040.0,
+     "host_rss_kib": 506368,
+     "device_bytes": 245366784
+    },
+    "cupy": {
+     "status": "ok",
+     "n": 131072,
+     "checks": {
+      "x matches NumPy": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.009431557999960205,
+      "iqr": 0.00016780049963927013,
+      "q1": 0.009415231000275526,
+      "q3": 0.009583031499914796,
+      "samples": [
+       0.009431557999960205,
+       0.009734504999869387,
+       0.009398904000590846
+      ],
+      "rounds": 3,
+      "warm_s": 0.00940958600040176
+     },
+     "sm_mhz": 2040.0,
+     "host_rss_kib": 632708,
+     "device_bytes": 908066816,
+     "reference": "ref/nvidia-l4--intel-xeon, date not recorded, SM 2040.0 MHz"
+    },
+    "torch": {
+     "status": "out_of_memory",
+     "reference": "ref/nvidia-l4--intel-xeon, date not recorded"
+    }
+   },
+   "ratio_to_reference": {
+    "hawk": 1.0,
+    "cupy": 3.9374512075197283
+   }
+  },
+  {
+   "row": "linalg_lane",
+   "case": "n32",
+   "dtype": "float64",
+   "n": 8192,
+   "baseline": "cuSOLVER batched (CuPy); torch.linalg",
+   "reference_arm": "hawk",
+   "arms": {
+    "hawk": {
+     "status": "ok",
+     "n": 8192,
+     "checks": {
+      "x and eigenvalues match NumPy": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.0743600719999904,
+      "iqr": 0.0024932369999532966,
+      "q1": 0.07399358650002341,
+      "q3": 0.07648682349997671,
+      "samples": [
+       0.0743600719999904,
+       0.07362710100005643,
+       0.07861357499996302
+      ],
+      "rounds": 3,
+      "warm_s": 0.07188209099990672
+     },
+     "sm_mhz": 1515.0,
+     "host_rss_kib": 541844,
+     "device_bytes": 1677721600
+    },
+    "cupy": {
+     "status": "ok",
+     "n": 8192,
+     "checks": {
+      "x matches NumPy": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.21239867299937032,
+      "iqr": 0.00015913249990262557,
+      "q1": 0.21235043699971357,
+      "q3": 0.2125095694996162,
+      "samples": [
+       0.21239867299937032,
+       0.21262046599986206,
+       0.2123022010000568
+      ],
+      "rounds": 3,
+      "warm_s": 0.21241579900015495
+     },
+     "sm_mhz": 2040.0,
+     "host_rss_kib": 654668,
+     "device_bytes": 526385152,
+     "reference": "ref/nvidia-l4--intel-xeon, date not recorded, SM 2040.0 MHz"
+    },
+    "torch": {
+     "status": "ok",
+     "n": 8192,
+     "checks": {
+      "x matches NumPy": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.10473683799955325,
+      "iqr": 1.8776499928208068e-05,
+      "q1": 0.10473418049969041,
+      "q3": 0.10475295699961862,
+      "samples": [
+       0.10473683799955325,
+       0.10473152299982758,
+       0.10476907599968399
+      ],
+      "rounds": 3,
+      "warm_s": 0.10475279599995702
+     },
+     "sm_mhz": 2040.0,
+     "host_rss_kib": 1088516,
+     "device_bytes": 6538919936,
+     "reference": "ref/nvidia-l4--intel-xeon, date not recorded, SM 2040.0 MHz"
+    }
+   },
+   "ratio_to_reference": {
+    "hawk": 1.0,
+    "cupy": 2.8563537835116373,
+    "torch": 1.408509098801932
+   }
+  },
+  {
+   "row": "linalg_lane",
+   "case": "n32",
+   "dtype": "float32",
+   "n": 8192,
+   "baseline": "cuSOLVER batched (CuPy); torch.linalg",
+   "reference_arm": "hawk",
+   "arms": {
+    "hawk": {
+     "status": "ok",
+     "n": 8192,
+     "checks": {
+      "x and eigenvalues match NumPy": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.011452232000010554,
+      "iqr": 1.553449999391887e-05,
+      "q1": 0.011447145000033743,
+      "q3": 0.011462679500027662,
+      "samples": [
+       0.011452232000010554,
+       0.011442058000056932,
+       0.01147312700004477
+      ],
+      "rounds": 3,
+      "warm_s": 0.011512481999943702
+     },
+     "sm_mhz": 2040.0,
+     "host_rss_kib": 506204,
+     "device_bytes": 601882624
+    },
+    "cupy": {
+     "status": "ok",
+     "n": 8192,
+     "checks": {
+      "x matches NumPy": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.008882074000212015,
+      "iqr": 0.00017479100006312365,
+      "q1": 0.00887529550027466,
+      "q3": 0.009050086500337784,
+      "samples": [
+       0.008882074000212015,
+       0.009218099000463553,
+       0.008868517000337306
+      ],
+      "rounds": 3,
+      "warm_s": 0.008811280999907467
+     },
+     "sm_mhz": 2040.0,
+     "host_rss_kib": 618848,
+     "device_bytes": 385875968,
+     "reference": "ref/nvidia-l4--intel-xeon, date not recorded, SM 2040.0 MHz"
+    },
+    "torch": {
+     "status": "ok",
+     "n": 8192,
+     "checks": {
+      "x matches NumPy": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.021489935999852605,
+      "iqr": 7.059500012474018e-05,
+      "q1": 0.021459713500007638,
+      "q3": 0.021530308500132378,
+      "samples": [
+       0.02157068100041215,
+       0.021489935999852605,
+       0.02142949100016267
+      ],
+      "rounds": 3,
+      "warm_s": 0.021994820999680087
+     },
+     "sm_mhz": 2040.0,
+     "host_rss_kib": 1087300,
+     "device_bytes": 3420454912,
+     "reference": "ref/nvidia-l4--intel-xeon, date not recorded, SM 2040.0 MHz"
+    }
+   },
+   "ratio_to_reference": {
+    "hawk": 1.0,
+    "cupy": 0.7755758004381879,
+    "torch": 1.8764845140958375
+   }
+  },
+  {
+   "row": "linalg_team",
+   "case": "n512",
+   "dtype": "float64",
+   "n": 16,
+   "baseline": "CuPy; torch.linalg",
+   "reference_arm": "team",
+   "arms": {
+    "team": {
+     "status": "ok",
+     "n": 16,
+     "checks": {
+      "x match NumPy": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.062047082000162845,
+      "iqr": 7.2524999268352985e-06,
+      "q1": 0.062045697500138886,
+      "q3": 0.06205295000006572,
+      "samples": [
+       0.062047082000162845,
+       0.062058817999968596,
+       0.062044313000114926
+      ],
+      "rounds": 3,
+      "warm_s": 0.06206176199998481
+     },
+     "sm_mhz": 2040.0,
+     "host_rss_kib": 467068,
+     "device_bytes": 574619648
+    },
+    "cupy": {
+     "status": "ok",
+     "n": 16,
+     "checks": {
+      "x matches NumPy": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.03934692900020309,
+      "iqr": 2.823649992933497e-05,
+      "q1": 0.03932504649992552,
+      "q3": 0.039353282999854855,
+      "samples": [
+       0.03934692900020309,
+       0.03935963699950662,
+       0.03930316399964795
+      ],
+      "rounds": 3,
+      "warm_s": 0.03935352200005582
+     },
+     "sm_mhz": 2040.0,
+     "host_rss_kib": 602932,
+     "device_bytes": 304087040,
+     "reference": "ref/nvidia-l4--intel-xeon, date not recorded, SM 2040.0 MHz"
+    },
+    "torch": {
+     "status": "ok",
+     "n": 16,
+     "checks": {
+      "x matches NumPy": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.0094907359998615,
+      "iqr": 0.00014175249998515937,
+      "q1": 0.009409593999862409,
+      "q3": 0.009551346499847568,
+      "samples": [
+       0.009611956999833637,
+       0.0094907359998615,
+       0.009328451999863319
+      ],
+      "rounds": 3,
+      "warm_s": 0.009528735999992932
+     },
+     "sm_mhz": 2025.0,
+     "host_rss_kib": 1133508,
+     "device_bytes": 327155712,
+     "reference": "ref/nvidia-l4--intel-xeon, date not recorded, SM 2025.0 MHz"
+    }
+   },
+   "ratio_to_reference": {
+    "team": 1.0,
+    "cupy": 0.634146324562045,
+    "torch": 0.15296023106834566
+   }
+  },
+  {
+   "row": "contraction",
+   "case": "all",
+   "dtype": "float64",
+   "n": 65536,
+   "baseline": "cupy.einsum",
+   "reference_arm": "box",
+   "arms": {
+    "box": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "y equals the NumPy matrix product": true
+     },
+     "rule": "max rounds",
+     "note": null,
+     "wall_s": {
+      "median": 7.448199994541937e-05,
+      "iqr": 1.7357999922751333e-05,
+      "q1": 6.882800016683177e-05,
+      "q3": 8.61860000895831e-05,
+      "samples": [
+       0.000125201999935598,
+       0.0001499130000865989,
+       8.61860000895831e-05,
+       8.286699994641822e-05,
+       7.448199994541937e-05,
+       7.148999998207728e-05,
+       6.882800016683177e-05,
+       6.460800000240852e-05,
+       6.473999997069768e-05
+      ],
+      "rounds": 9,
+      "warm_s": 0.00014133299987406645
+     },
+     "sm_mhz": 2040.0,
+     "host_rss_kib": 381476,
+     "device_bytes": 199229440
+    },
+    "no_box": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "y equals the NumPy matrix product": true
+     },
+     "rule": "max rounds",
+     "note": null,
+     "wall_s": {
+      "median": 9.225899998455134e-05,
+      "iqr": 3.430400010984158e-05,
+      "q1": 6.858699998701923e-05,
+      "q3": 0.00010289100009686081,
+      "samples": [
+       0.00010289100009686081,
+       0.00015614399990226957,
+       9.225899998455134e-05,
+       7.360099994002667e-05,
+       6.858699998701923e-05,
+       0.00014881299989610852,
+       6.538299999192532e-05,
+       9.728700001687685e-05,
+       6.655199990746041e-05
+      ],
+      "rounds": 9,
+      "warm_s": 0.00013660200011145207
+     },
+     "sm_mhz": 2040.0,
+     "host_rss_kib": 381528,
+     "device_bytes": 199229440
+    },
+    "gemm": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "y equals the NumPy matrix product": true
+     },
+     "rule": "max rounds",
+     "note": null,
+     "wall_s": {
+      "median": 0.00015007499996499973,
+      "iqr": 1.5001000292613753e-05,
+      "q1": 0.00014359199985847226,
+      "q3": 0.00015859300015108602,
+      "samples": [
+       0.00023985699999684584,
+       0.0002243910000743199,
+       0.00015859300015108602,
+       0.00015160400016611675,
+       0.00014635600018664263,
+       0.0001334969999788882,
+       0.00014359199985847226,
+       0.0001339389998520346,
+       0.00015007499996499973
+      ],
+      "rounds": 9,
+      "warm_s": 0.00027248000014878926
+     },
+     "sm_mhz": 2040.0,
+     "host_rss_kib": 435384,
+     "device_bytes": 207618048
+    },
+    "einsum": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "einsum equals the NumPy matrix product": true
+     },
+     "rule": "max rounds",
+     "note": null,
+     "wall_s": {
+      "median": 0.0002897949998441618,
+      "iqr": 4.3431999984022696e-05,
+      "q1": 0.0002562059999036137,
+      "q3": 0.0002996379998876364,
+      "samples": [
+       0.0003768599999602884,
+       0.0004978529996151337,
+       0.0002996379998876364,
+       0.0002562059999036137,
+       0.00029499300035240594,
+       0.00027023199982068036,
+       0.0002897949998441618,
+       0.0002487980000296375,
+       0.000244650999775331
+      ],
+      "rounds": 9,
+      "warm_s": 0.0006835449994468945
+     },
+     "sm_mhz": 2040.0,
+     "host_rss_kib": 501768,
+     "device_bytes": 209715200,
+     "reference": "ref/nvidia-l4--intel-xeon, date not recorded, SM 2040.0 MHz"
+    }
+   },
+   "ratio_to_reference": {
+    "box": 1.0,
+    "no_box": 1.2386751168357322,
+    "gemm": 2.014916356636169,
+    "einsum": 3.8908058330405253
+   }
+  },
+  {
+   "row": "contraction",
+   "case": "all",
+   "dtype": "float32",
+   "n": 65536,
+   "baseline": "cupy.einsum",
+   "reference_arm": "box",
+   "arms": {
+    "box": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "y equals the NumPy matrix product": true
+     },
+     "rule": "max rounds",
+     "note": null,
+     "wall_s": {
+      "median": 7.167700005084043e-05,
+      "iqr": 4.052999997838924e-05,
+      "q1": 6.38989999970363e-05,
+      "q3": 0.00010442899997542554,
+      "samples": [
+       0.00013563900006374752,
+       0.00014629600013904565,
+       0.00010442899997542554,
+       7.301499999812222e-05,
+       7.167700005084043e-05,
+       6.38989999970363e-05,
+       6.862700001875055e-05,
+       5.729899999096233e-05,
+       5.716000009670097e-05
+      ],
+      "rounds": 9,
+      "warm_s": 0.0001475930000651715
+     },
+     "sm_mhz": 2040.0,
+     "host_rss_kib": 381416,
+     "device_bytes": 199229440
+    },
+    "no_box": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "y equals the NumPy matrix product": true
+     },
+     "rule": "max rounds",
+     "note": null,
+     "wall_s": {
+      "median": 8.700400007910503e-05,
+      "iqr": 4.1138000142382225e-05,
+      "q1": 7.631299990862317e-05,
+      "q3": 0.0001174510000510054,
+      "samples": [
+       0.00014238700009627792,
+       0.00014397799986909376,
+       0.0001174510000510054,
+       9.151499989457079e-05,
+       8.700400007910503e-05,
+       7.791200005158316e-05,
+       7.631299990862317e-05,
+       7.056899994495325e-05,
+       6.802600000810344e-05
+      ],
+      "rounds": 9,
+      "warm_s": 0.0001419520001491037
+     },
+     "sm_mhz": 2040.0,
+     "host_rss_kib": 381188,
+     "device_bytes": 199229440
+    },
+    "gemm": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "y equals the NumPy matrix product": true
+     },
+     "rule": "max rounds",
+     "note": null,
+     "wall_s": {
+      "median": 0.00012068000000908796,
+      "iqr": 4.0969000110635534e-05,
+      "q1": 0.00010451100001773739,
+      "q3": 0.00014548000012837292,
+      "samples": [
+       0.00024293899991789658,
+       0.00022090900006332959,
+       0.00014548000012837292,
+       0.00012465999998312327,
+       0.00011202099994989112,
+       0.00010451100001773739,
+       0.00010286399992764927,
+       0.00010336799982724187,
+       0.00012068000000908796
+      ],
+      "rounds": 9,
+      "warm_s": 0.0002450150000186113
+     },
+     "sm_mhz": 2040.0,
+     "host_rss_kib": 471056,
+     "device_bytes": 207618048
+    },
+    "einsum": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "einsum equals the NumPy matrix product": true
+     },
+     "rule": "max rounds",
+     "note": null,
+     "wall_s": {
+      "median": 0.00026581699967209715,
+      "iqr": 3.942099920095643e-05,
+      "q1": 0.000249901000643149,
+      "q3": 0.00028932199984410545,
+      "samples": [
+       0.00040338100006920286,
+       0.0003776540006583673,
+       0.00028932199984410545,
+       0.00027075900015915977,
+       0.000249901000643149,
+       0.00026581699967209715,
+       0.00025638700026320294,
+       0.00024319699969055364,
+       0.00023030899956211215
+      ],
+      "rounds": 9,
+      "warm_s": 0.0005056680001871428
+     },
+     "sm_mhz": 2040.0,
+     "host_rss_kib": 537404,
+     "device_bytes": 207618048,
+     "reference": "ref/nvidia-l4--intel-xeon, date not recorded, SM 2040.0 MHz"
+    }
+   },
+   "ratio_to_reference": {
+    "box": 1.0,
+    "no_box": 1.2138342846016597,
+    "gemm": 1.6836642147898173,
+    "einsum": 3.7085396917219384
+   }
+  },
+  {
+   "row": "fft",
+   "case": "all",
+   "dtype": "float64",
+   "n": 100000,
+   "baseline": "cupy.fft (cuFFT)",
+   "reference_arm": "fft",
+   "arms": {
+    "fft": {
+     "status": "ok",
+     "n": 100000,
+     "checks": {
+      "eagle.fft equals numpy.fft on 8 rows": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.01963299699991694,
+      "iqr": 1.431749990388198e-05,
+      "q1": 0.019618877999960205,
+      "q3": 0.019633195499864087,
+      "samples": [
+       0.019633393999811233,
+       0.01963299699991694,
+       0.01960475900000347
+      ],
+      "rounds": 3,
+      "warm_s": 0.01972086599994327
+     },
+     "sm_mhz": 2040.0,
+     "host_rss_kib": 1975328,
+     "device_bytes": 3489660928
+    },
+    "cupy_fft": {
+     "status": "ok",
+     "n": 100000,
+     "checks": {
+      "cupy.fft equals numpy.fft on 8 rows": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.01979729100003169,
+      "iqr": 0.0001499324998803786,
+      "q1": 0.01968595149992325,
+      "q3": 0.019835883999803627,
+      "samples": [
+       0.019574611999814806,
+       0.01979729100003169,
+       0.019874476999575563
+      ],
+      "rounds": 3,
+      "warm_s": 0.01984965599967836
+     },
+     "sm_mhz": 2025.0,
+     "host_rss_kib": 4029384,
+     "device_bytes": 5121245184,
+     "reference": "ref/nvidia-l4--intel-xeon, date not recorded, SM 2025.0 MHz"
+    }
+   },
+   "ratio_to_reference": {
+    "fft": 1.0,
+    "cupy_fft": 1.0083682588101779
+   }
+  },
+  {
+   "row": "lane_set",
+   "case": "all",
+   "dtype": "float64",
+   "n": 4194304,
+   "baseline": "none: ratio to dense",
+   "reference_arm": "dense",
+   "arms": {
+    "dense": {
+     "status": "ok",
+     "n": 4194304,
+     "checks": {
+      "live lanes equal the NumPy body; the rest are untouched": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.0059901720001107606,
+      "iqr": 2.0079499904568365e-05,
+      "q1": 0.005978779000088252,
+      "q3": 0.005998858499992821,
+      "samples": [
+       0.0059901720001107606,
+       0.006007544999874881,
+       0.005967386000065744
+      ],
+      "rounds": 3,
+      "warm_s": 0.006047322999847893
+     },
+     "sm_mhz": 2040.0,
+     "host_rss_kib": 626300,
+     "device_bytes": 264241152
+    },
+    "map": {
+     "status": "ok",
+     "n": 4194304,
+     "checks": {
+      "live lanes equal the NumPy body; the rest are untouched": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.0007123030000002473,
+      "iqr": 2.2052499957680993e-05,
+      "q1": 0.0006963470000300731,
+      "q3": 0.0007183994999877541,
+      "samples": [
+       0.0007123030000002473,
+       0.0007244959999752609,
+       0.0006803910000598989
+      ],
+      "rounds": 3,
+      "warm_s": 0.0007781959998283128
+     },
+     "sm_mhz": 2040.0,
+     "host_rss_kib": 529156,
+     "device_bytes": 266338304
+    },
+    "prefix": {
+     "status": "ok",
+     "n": 4194304,
+     "checks": {
+      "live lanes equal the NumPy body; the rest are untouched": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.0007049719999940862,
+      "iqr": 1.846499992552708e-05,
+      "q1": 0.0006898930000716064,
+      "q3": 0.0007083579999971334,
+      "samples": [
+       0.0007049719999940862,
+       0.0007117440000001807,
+       0.0006748140001491265
+      ],
+      "rounds": 3,
+      "warm_s": 0.0007533240000157093
+     },
+     "sm_mhz": 2040.0,
+     "host_rss_kib": 493704,
+     "device_bytes": 266338304
+    }
+   },
+   "ratio_to_reference": {
+    "dense": 1.0,
+    "map": 0.11891194442948826,
+    "prefix": 0.11768810644853787
+   }
+  },
+  {
+   "row": "scatter",
+   "case": "all",
+   "dtype": "float64",
+   "n": 4194304,
+   "baseline": "cupyx.scatter_add; np.add.at",
+   "reference_arm": "keyed",
+   "arms": {
+    "keyed": {
+     "status": "ok",
+     "n": 4194304,
+     "checks": {
+      "keyed sums match np.add.at": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.0006018869999024901,
+      "iqr": 2.4453499918308808e-05,
+      "q1": 0.0005812240000295787,
+      "q3": 0.0006056774999478876,
+      "samples": [
+       0.0006018869999024901,
+       0.000609467999993285,
+       0.0005605610001566674
+      ],
+      "rounds": 3,
+      "warm_s": 0.0005895250001231034
+     },
+     "sm_mhz": 2040.0,
+     "host_rss_kib": 476472,
+     "device_bytes": 283115520
+    },
+    "ordered": {
+     "status": "ok",
+     "n": 4194304,
+     "checks": {
+      "keyed sums match np.add.at": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.0017518879999443016,
+      "iqr": 7.167600006141583e-05,
+      "q1": 0.001688688499939417,
+      "q3": 0.0017603645000008328,
+      "samples": [
+       0.0017518879999443016,
+       0.001768841000057364,
+       0.0016254889999345323
+      ],
+      "rounds": 3,
+      "warm_s": 0.0017176589999507996
+     },
+     "sm_mhz": 2040.0,
+     "host_rss_kib": 476628,
+     "device_bytes": 316669952
+    },
+    "or": {
+     "status": "ok",
+     "n": 4194304,
+     "checks": {
+      "the OR mask equals np.bitwise_or.at": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.0005755119998411828,
+      "iqr": 2.8637500008699135e-05,
+      "q1": 0.0005563149999261441,
+      "q3": 0.0005849524999348432,
+      "samples": [
+       0.0005755119998411828,
+       0.0005943930000285036,
+       0.0005371180000111053
+      ],
+      "rounds": 3,
+      "warm_s": 0.0006173909998778981
+     },
+     "sm_mhz": 2040.0,
+     "host_rss_kib": 456656,
+     "device_bytes": 232783872
+    },
+    "cupyx_scatter_add": {
+     "status": "ok",
+     "n": 4194304,
+     "checks": {
+      "scatter_add matches np.add.at": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.00037378299930423964,
+      "iqr": 1.8231999547424493e-05,
+      "q1": 0.0003599454998948204,
+      "q3": 0.0003781774994422449,
+      "samples": [
+       0.00037378299930423964,
+       0.0003825719995802501,
+       0.00034610800048540113
+      ],
+      "rounds": 3,
+      "warm_s": 0.0003950119998989976
+     },
+     "sm_mhz": 2040.0,
+     "host_rss_kib": 498392,
+     "device_bytes": 249561088,
+     "reference": "ref/nvidia-l4--intel-xeon, date not recorded, SM 2040.0 MHz"
+    },
+    "np_add_at": {
+     "status": "ok",
+     "n": 4194304,
+     "checks": {
+      "the NumPy reference": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.013175007999961963,
+      "iqr": 8.919999982026638e-05,
+      "q1": 0.013111042000218731,
+      "q3": 0.013200242000038998,
+      "samples": [
+       0.013225476000116032,
+       0.013175007999961963,
+       0.0130470760004755
+      ],
+      "rounds": 3,
+      "warm_s": 0.013118709000082163
+     },
+     "sm_mhz": 2040.0,
+     "host_rss_kib": 317768,
+     "device_bytes": 496762880,
+     "reference": "ref/nvidia-l4--intel-xeon, date not recorded, SM 2040.0 MHz"
+    }
+   },
+   "ratio_to_reference": {
+    "keyed": 1.0,
+    "ordered": 2.9106593101830076,
+    "or": 0.9561794820862053,
+    "cupyx_scatter_add": 0.6210185622297792,
+    "np_add_at": 21.889504179516102
+   }
+  },
+  {
+   "row": "sample_sum",
+   "case": "all",
+   "dtype": "float64",
+   "n": 16777216,
+   "baseline": "cupy.sum",
+   "reference_arm": "auto",
+   "arms": {
+    "compensated": {
+     "status": "ok",
+     "n": 16777216,
+     "checks": {
+      "the sum is within the policy's ULP bound of math.fsum": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.0008023870000215538,
+      "iqr": 3.644950004400016e-05,
+      "q1": 0.0007679725000571125,
+      "q3": 0.0008044220001011126,
+      "samples": [
+       0.0008064570001806715,
+       0.0008023870000215538,
+       0.0007335580000926711
+      ],
+      "rounds": 3,
+      "warm_s": 0.0007577530000162369
+     },
+     "sm_mhz": 2040.0,
+     "host_rss_kib": 732528,
+     "device_bytes": 333447168
+    },
+    "ordered": {
+     "status": "ok",
+     "n": 16777216,
+     "checks": {
+      "the sum is within the policy's ULP bound of math.fsum": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.0018164390000947606,
+      "iqr": 4.156600004989741e-05,
+      "q1": 0.0017829475000326056,
+      "q3": 0.001824513500082503,
+      "samples": [
+       0.0018164390000947606,
+       0.0018325880000702455,
+       0.0017494559999704506
+      ],
+      "rounds": 3,
+      "warm_s": 0.001782293999895046
+     },
+     "sm_mhz": 2040.0,
+     "host_rss_kib": 732504,
+     "device_bytes": 501219328
+    },
+    "auto": {
+     "status": "ok",
+     "n": 16777216,
+     "checks": {
+      "the sum is within the policy's ULP bound of math.fsum": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.0010354280000228755,
+      "iqr": 3.217849996417499e-05,
+      "q1": 0.0010226565000266419,
+      "q3": 0.0010548349999908169,
+      "samples": [
+       0.0010354280000228755,
+       0.0010742419999587582,
+       0.0010098850000304083
+      ],
+      "rounds": 3,
+      "warm_s": 0.0010265529999742284
+     },
+     "sm_mhz": 2040.0,
+     "host_rss_kib": 732576,
+     "device_bytes": 333447168
+    },
+    "cell_compensated": {
+     "status": "ok",
+     "n": 16777216,
+     "checks": {
+      "the cell is within the policy's ULP bound of math.fsum": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.0011359299999185168,
+      "iqr": 5.473199996686162e-05,
+      "q1": 0.0011020874999303487,
+      "q3": 0.0011568194998972103,
+      "samples": [
+       0.0011359299999185168,
+       0.0011777089998759038,
+       0.0010682449999421806
+      ],
+      "rounds": 3,
+      "warm_s": 0.001085734999833221
+     },
+     "sm_mhz": 2040.0,
+     "host_rss_kib": 732608,
+     "device_bytes": 367001600
+    },
+    "cell_auto": {
+     "status": "ok",
+     "n": 16777216,
+     "checks": {
+      "the cell is within the policy's ULP bound of math.fsum": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.0011223389999486244,
+      "iqr": 3.8636999875052425e-05,
+      "q1": 0.001093715000024531,
+      "q3": 0.0011323519998995835,
+      "samples": [
+       0.0011223389999486244,
+       0.0011423649998505425,
+       0.0010650910001004377
+      ],
+      "rounds": 3,
+      "warm_s": 0.0010967560001517995
+     },
+     "sm_mhz": 2040.0,
+     "host_rss_kib": 732708,
+     "device_bytes": 367001600
+    },
+    "cupy_sum": {
+     "status": "ok",
+     "n": 16777216,
+     "checks": {
+      "cupy.sum is within 8 ULP of math.fsum": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.0006465779997597565,
+      "iqr": 2.895699981309008e-05,
+      "q1": 0.0006240054999580025,
+      "q3": 0.0006529624997710926,
+      "samples": [
+       0.0006593469997824286,
+       0.0006465779997597565,
+       0.0006014330001562485
+      ],
+      "rounds": 3,
+      "warm_s": 0.0007045669999570237
+     },
+     "sm_mhz": 2040.0,
+     "host_rss_kib": 601472,
+     "device_bytes": 333447168,
+     "reference": "ref/nvidia-l4--intel-xeon, date not recorded, SM 2040.0 MHz"
+    }
+   },
+   "ratio_to_reference": {
+    "compensated": 0.7749326848451334,
+    "ordered": 1.7542880818894508,
+    "auto": 1.0,
+    "cell_compensated": 1.0970632433094536,
+    "cell_auto": 1.0839372703112422,
+    "cupy_sum": 0.6244548145747186
+   }
+  },
+  {
+   "row": "mpi_partition",
+   "case": "all",
+   "dtype": "float64",
+   "n": 2000000,
+   "baseline": "one rank (N = 1e6), the C1 persist arm",
+   "reference_arm": "one_rank",
+   "arms": {
+    "two_ranks": {
+     "status": "not_run: needs 2 GPUs (this machine has 1); a Kaggle T4 x2 row"
+    },
+    "one_rank": {
+     "status": "not_run: needs 2 GPUs (this machine has 1); a Kaggle T4 x2 row"
+    }
+   },
+   "ratio_to_reference": {}
+  }
+ ],
+ "wall_s": 202.62037424000005
+}

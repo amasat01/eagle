@@ -9,6 +9,7 @@ import pytest
 import eagle
 from eagle import _counters
 from eagle.graph import opaque
+from eagle.frameworks.cupy import wrap_external_stream
 
 pytestmark = pytest.mark.gpu
 cp = pytest.importorskip("cupy")
@@ -68,7 +69,7 @@ def _loop_graph(xp, backend, start, max_iters):
     flag = xp.full(1, start, dtype=xp.uint32)
 
     def body():
-        with cp.cuda.ExternalStream(eagle._stream.current()):    # cupy's work joins the capture
+        with wrap_external_stream(eagle._stream.current()):    # cupy's work joins the capture
             xp.subtract(flag, 1, out=flag)
 
     rw = repeat_while(opaque(body, writes=[flag]), SkipGuard.nonzero(flag), max_iters)

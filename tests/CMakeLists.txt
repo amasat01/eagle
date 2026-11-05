@@ -371,15 +371,26 @@ else()
     message(FATAL_ERROR "Could not locate nvcc (checked $PATH and $CUDA_PATH/bin) "
       "for the device_plugin_softdouble.cu PTX fixture")
   endif()
+  # The fixtures are device-code images the test hands to cuModuleLoadData (the artifacts keep their .ptx names). They
+  # are built as a FATBIN of SASS for the architectures this build targets, not as PTX text: PTX is JIT-compiled by the
+  # driver, which rejects the ISA of an nvcc newer than itself, while SASS loads on any driver that runs the GPU --
+  # the rule hawk's select_target follows (a cubin when the toolkit is newer than the driver).
+  set(_EAGLE_FIXTURE_GENCODE "")
+  foreach(_a IN LISTS CMAKE_CUDA_ARCHITECTURES)
+    string(REGEX REPLACE "[^0-9].*" "" _a "${_a}")
+    if(_a)
+      list(APPEND _EAGLE_FIXTURE_GENCODE -gencode arch=compute_${_a},code=sm_${_a})
+    endif()
+  endforeach()
   set(_SD_FIXTURE_PTX ${CMAKE_CURRENT_BINARY_DIR}/device_plugin_softdouble.ptx)
   add_custom_command(
     OUTPUT ${_SD_FIXTURE_PTX}
-    COMMAND ${_SD_FIXTURE_NVCC} --ptx
+    COMMAND ${_SD_FIXTURE_NVCC} --fatbin ${_EAGLE_FIXTURE_GENCODE}
             -I${CMAKE_CURRENT_SOURCE_DIR}/..
             ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/device_plugin_softdouble.cu
             -o ${_SD_FIXTURE_PTX}
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/device_plugin_softdouble.cu
-    COMMENT "Compiling device_plugin_softdouble.cu -> PTX (${_SD_FIXTURE_NVCC})")
+    COMMENT "Compiling device_plugin_softdouble.cu -> fatbin (${_SD_FIXTURE_NVCC})")
   add_custom_target(device_plugin_softdouble_ptx DEPENDS ${_SD_FIXTURE_PTX})
   add_dependencies(eagle_tests device_plugin_softdouble_ptx)
   target_compile_definitions(eagle_tests PRIVATE
@@ -394,12 +405,12 @@ else()
   set(_IU_FIXTURE_PTX ${CMAKE_CURRENT_BINARY_DIR}/device_plugin_intuniform.ptx)
   add_custom_command(
     OUTPUT ${_IU_FIXTURE_PTX}
-    COMMAND ${_SD_FIXTURE_NVCC} --ptx
+    COMMAND ${_SD_FIXTURE_NVCC} --fatbin ${_EAGLE_FIXTURE_GENCODE}
             -I${CMAKE_CURRENT_SOURCE_DIR}/..
             ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/device_plugin_intuniform.cu
             -o ${_IU_FIXTURE_PTX}
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/device_plugin_intuniform.cu
-    COMMENT "Compiling device_plugin_intuniform.cu -> PTX (${_SD_FIXTURE_NVCC})")
+    COMMENT "Compiling device_plugin_intuniform.cu -> fatbin (${_SD_FIXTURE_NVCC})")
   add_custom_target(device_plugin_intuniform_ptx DEPENDS ${_IU_FIXTURE_PTX})
   add_dependencies(eagle_tests device_plugin_intuniform_ptx)
   target_compile_definitions(eagle_tests PRIVATE
@@ -412,37 +423,18 @@ else()
   # reason as the two fixtures above (raw PTX TEXT that cuModuleLoadData JITs, so
   # the driver's max supported PTX ISA is the ceiling).
   #
-  # -arch=sm_60 (or the oldest the toolkit offers) is REQUIRED here and not above: the cross_sample_write body uses
-  # the float64 atomicAdd, which is a Pascal-and-later intrinsic. PTX emitted for
-  # sm_60 JITs forward onto every architecture this project targets.
-  # sm_60 where the toolkit still compiles it; a newer toolkit drops the oldest
-  # targets (CUDA 13 starts at sm_75), so take the oldest it lists, floored at 60.
-  set(_EC_FIXTURE_ARCH 60)
-  execute_process(COMMAND ${_SD_FIXTURE_NVCC} --list-gpu-arch
-                  OUTPUT_VARIABLE _ec_arch_list RESULT_VARIABLE _ec_arch_rc ERROR_QUIET)
-  if(_ec_arch_rc EQUAL 0)
-    string(REGEX MATCHALL "compute_[0-9]+" _ec_arch_found "${_ec_arch_list}")
-    set(_ec_arch_min "")
-    foreach(_c IN LISTS _ec_arch_found)
-      string(REPLACE "compute_" "" _c "${_c}")
-      if(_ec_arch_min STREQUAL "" OR _c LESS _ec_arch_min)
-        set(_ec_arch_min ${_c})
-      endif()
-    endforeach()
-    if(NOT _ec_arch_min STREQUAL "" AND _ec_arch_min GREATER 60)
-      set(_EC_FIXTURE_ARCH ${_ec_arch_min})
-    endif()
-  endif()
+  # (the cross_sample_write body uses the float64 atomicAdd, a Pascal-and-later intrinsic: every architecture this
+  # project builds for has it)
   foreach(_ec_fixture device_plugin_execv2 device_plugin_badlayout)
     set(_EC_PTX ${CMAKE_CURRENT_BINARY_DIR}/${_ec_fixture}.ptx)
     add_custom_command(
       OUTPUT ${_EC_PTX}
-      COMMAND ${_SD_FIXTURE_NVCC} --ptx -arch=sm_${_EC_FIXTURE_ARCH}
+      COMMAND ${_SD_FIXTURE_NVCC} --fatbin ${_EAGLE_FIXTURE_GENCODE}
               -I${CMAKE_CURRENT_SOURCE_DIR}/..
               ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/${_ec_fixture}.cu
               -o ${_EC_PTX}
       DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/${_ec_fixture}.cu
-      COMMENT "Compiling ${_ec_fixture}.cu -> PTX (${_SD_FIXTURE_NVCC})")
+      COMMENT "Compiling ${_ec_fixture}.cu -> fatbin (${_SD_FIXTURE_NVCC})")
     add_custom_target(${_ec_fixture}_ptx DEPENDS ${_EC_PTX})
     add_dependencies(eagle_tests ${_ec_fixture}_ptx)
   endforeach()

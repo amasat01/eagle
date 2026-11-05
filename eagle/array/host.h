@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "eagle/array/kernels.h"
+#include "eagle/exec/HostTeam.h"
 
 namespace eagle::array::host {
 
@@ -31,14 +32,33 @@ template <Op op, class T> inline constexpr bool simd_ok =
         ? false
         : (op == Op::Where || op == Op::Take || op == Op::Scatter) ? simd_wide<T> || simd_half<T> : simd_wide<T>;
 
+/// The team an op over ``n`` elements uses: the launch's own rule (``HostTeam::tile_size`` and ``host_max_threads``) -- one
+/// tile or fewer runs in place on the calling thread, no OpenMP region.
+inline int op_team(std::int64_t n)
+{
+    const std::int64_t tile = static_cast<std::int64_t>(exec::HostTeam::tile_size());
+    if (n <= tile) return 1;
+    return static_cast<int>(std::max<std::int64_t>(1, std::min<std::int64_t>(exec::host_max_threads(), (n + tile - 1) / tile)));
+}
+
 template <Op op, class T>
 inline void run(const Args& a)
 {
+    const int team = op_team(a.n);
     if constexpr (simd_ok<op, T>) {
-#pragma omp parallel for simd schedule(static)
+        if (team == 1) {
+#pragma omp simd
+            for (std::int64_t j = 0; j < a.n; ++j) body<op, T>(a, j);
+            return;
+        }
+#pragma omp parallel for simd schedule(static) num_threads(team)
         for (std::int64_t j = 0; j < a.n; ++j) body<op, T>(a, j);
     } else {
-#pragma omp parallel for schedule(static)
+        if (team == 1) {
+            for (std::int64_t j = 0; j < a.n; ++j) body<op, T>(a, j);
+            return;
+        }
+#pragma omp parallel for schedule(static) num_threads(team)
         for (std::int64_t j = 0; j < a.n; ++j) body<op, T>(a, j);
     }
 }
@@ -51,7 +71,12 @@ inline void cumsum(const Args& a)
     T* d = static_cast<T*>(a.p0);
     const std::int64_t n = a.n;
     if (n <= 0) return;
-    int threads = std::max(1, std::min<int>(omp_get_max_threads(), static_cast<int>((n + 4095) / 4096)));
+    const int threads = std::max(1, std::min<int>(exec::host_max_threads(), static_cast<int>((n + 4095) / 4096)));
+    if (threads == 1) {
+        T acc = T(0);
+        for (std::int64_t j = 0; j < n; ++j) { acc = static_cast<T>(acc + x[j]); d[j] = acc; }
+        return;
+    }
     std::vector<T> sums(static_cast<std::size_t>(threads) + 1, T(0));
 #pragma omp parallel num_threads(threads)
     {
@@ -74,11 +99,14 @@ inline void count_nonzero(const Args& a)
 {
     const T* x = static_cast<const T*>(a.p1);
     std::int64_t c = 0;
-    if constexpr (!simd_half<T>) {
-#pragma omp parallel for simd reduction(+ : c) schedule(static)
+    const int team = op_team(a.n);
+    if (team == 1) {
+        for (std::int64_t j = 0; j < a.n; ++j) c += nonzero(x[j]) ? 1 : 0;
+    } else if constexpr (!simd_half<T>) {
+#pragma omp parallel for simd reduction(+ : c) schedule(static) num_threads(team)
         for (std::int64_t j = 0; j < a.n; ++j) c += nonzero(x[j]) ? 1 : 0;
     } else {
-#pragma omp parallel for reduction(+ : c) schedule(static)
+#pragma omp parallel for reduction(+ : c) schedule(static) num_threads(team)
         for (std::int64_t j = 0; j < a.n; ++j) c += nonzero(x[j]) ? 1 : 0;
     }
     *static_cast<std::int64_t*>(a.p0) = c;
@@ -91,7 +119,14 @@ inline void flatnonzero(const Args& a)
     const T* x = static_cast<const T*>(a.p1);
     std::int32_t* out = static_cast<std::int32_t*>(a.p0);
     const std::int64_t n = a.n;
-    int threads = std::max(1, std::min<int>(omp_get_max_threads(), static_cast<int>((n + 4095) / 4096)));
+    const int threads = std::max(1, std::min<int>(exec::host_max_threads(), static_cast<int>((n + 4095) / 4096)));
+    if (threads == 1) {
+        std::int64_t at = 0;
+        for (std::int64_t j = 0; j < n; ++j)
+            if (nonzero(x[j])) out[at++] = static_cast<std::int32_t>(j);
+        *static_cast<std::int64_t*>(const_cast<void*>(a.p3)) = at;
+        return;
+    }
     std::vector<std::int64_t> start(static_cast<std::size_t>(threads) + 1, 0);
 #pragma omp parallel num_threads(threads)
     {
@@ -164,11 +199,14 @@ inline void cast(void* dst, int dst_dtype, const void* src, int src_dtype, std::
             const S* s = static_cast<const S*>(src);
             // simd where it vectorizes: a 32-bit-or-wider float / int32 / bool destination from anything but a 16-bit float,
             // or a 16-bit float copied as itself
-            if constexpr (((simd_wide<D> || std::is_same_v<D, bool>) && !simd_half<S>) || (simd_half<D> && std::is_same_v<D, S>)) {
-#pragma omp parallel for simd schedule(static)
+            const int team = op_team(n);
+            if (team == 1) {
+                for (std::int64_t j = 0; j < n; ++j) d[j] = static_cast<D>(s[j]);
+            } else if constexpr (((simd_wide<D> || std::is_same_v<D, bool>) && !simd_half<S>) || (simd_half<D> && std::is_same_v<D, S>)) {
+#pragma omp parallel for simd schedule(static) num_threads(team)
                 for (std::int64_t j = 0; j < n; ++j) d[j] = static_cast<D>(s[j]);
             } else {
-#pragma omp parallel for schedule(static)
+#pragma omp parallel for schedule(static) num_threads(team)
                 for (std::int64_t j = 0; j < n; ++j) d[j] = static_cast<D>(s[j]);
             }
         });

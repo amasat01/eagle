@@ -100,6 +100,19 @@ class _LaunchHandles(NamedTuple):
     launcher: object  #: the bound eagle._core Launcher (async.launch() /.synchronize())
 
 
+
+def _warm(step, stream) -> None:
+    """Before capture: a step whose launch needs per-stream state made outside
+    a capture region (a GEMM route's cuBLAS handle) makes it now, on ``stream``."""
+    from ._graph_kinds import _Late
+
+    if isinstance(step, _Late):         # a conditional's child, lowered at build
+        step = step.fn if step.fn is not None else step.child
+    owner = getattr(step, "key", None) or getattr(step, "__self__", None)     # a launch, or its bound method
+    warm = getattr(owner, "_warm_stream", None)
+    if warm is not None:
+        warm(stream)
+
 class _ConcurrentGroup:
     """Tagged record for a fork/join group registered via
     :meth:`GraphPipeline.add_concurrent`, distinguishable from the bare
@@ -312,8 +325,11 @@ class GraphPipeline:
                     self._weave(step._fork.branch(j), member)
                     for j, member in enumerate(step.members)
                 ]
+                for j, member in enumerate(step.members):
+                    _warm(member, step._fork.branch(j))
             else:
                 runs[i] = self._weave(self._sptr, step)
+                _warm(step, self._sptr)
 
         capturer = self._core.StreamCapturer(self._sptr)
         self._scatter = []              # the split binds this capture launches: a replay marks them pending
@@ -641,7 +657,10 @@ class GraphPipeline:
         launcher.set_kernel_params_many(nodes, [params] * len(nodes))
 
     def _weave_or_call(self, origin, item):
-        return self._weave(origin, item) or item
+        woven = self._weave(origin, item)
+        if woven is None:
+            _warm(item, origin)         # a leaf of a region: its body or branch stream
+        return woven or item
 
     def launch(self, n=1):
         """Replay the captured graph ``n`` times. ``launch(n)``
@@ -781,12 +800,6 @@ class GraphPipeline:
         return self._sptr
 
     # -- introspection (proves the JIT launch really is a graph node) --------
-    def introspection_available(self) -> bool:
-        """Whether node introspection works here: the bound core dots
-        the captured graph through ``cudaGraphDebugDotPrint`` (always
-        available), so this is ready as soon as :meth:`build` has run."""
-        return self._dot_str is not None
-
     def _dot(self) -> str:
         if self._dot_str is None:
             raise RuntimeError("call build() first")

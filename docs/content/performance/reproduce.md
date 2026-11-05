@@ -5,8 +5,8 @@ driver for the GPU cards (no CUDA toolkit or `nvcc`: hawk compiles kernels with 
 (optionally) Nsight Systems:
 
 ```bash
-python benchmarks/perf_card/perf_card.py       # RK4 oscillators, GPU
-python benchmarks/perf_card/cpu_card.py        # RK4 oscillators, CPU
+python benchmarks/perf_card/perf_card.py       # adaptive RK7(8) orbits, GPU
+python benchmarks/perf_card/cpu_card.py        # adaptive RK7(8) orbits, CPU
 python benchmarks/rk78_card/rk78_card.py       # RK7(8) Kepler orbits, GPU
 python benchmarks/rk78_card/cpu_rk78_card.py   # RK7(8) Kepler orbits, CPU
 ```

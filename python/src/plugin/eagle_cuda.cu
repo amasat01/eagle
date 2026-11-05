@@ -216,11 +216,17 @@ Fn driverEntry12(const char* symbol)
     return reinterpret_cast<Fn>(fn);
 }
 
+/** The unscoped streams: they belong to whichever device is current, so they say nothing about the work. */
+bool isDefaultStream(std::uint64_t stream)
+{
+    return stream == 0 || stream == reinterpret_cast<std::uint64_t>(cudaStreamLegacy)
+        || stream == reinterpret_cast<std::uint64_t>(cudaStreamPerThread);
+}
+
 /** The device @p stream belongs to; the current device for the default streams. */
 int streamDevice(std::uint64_t stream)
 {
-    if (stream == 0 || stream == reinterpret_cast<std::uint64_t>(cudaStreamLegacy)
-        || stream == reinterpret_cast<std::uint64_t>(cudaStreamPerThread))
+    if (isDefaultStream(stream))
         return currentDevice();
     // Pinned to the 12.0 ABI of each entry: asked for at this toolkit's version,
     // "cuStreamGetCtx" resolves to cuStreamGetCtx_v2 (12.5+, one more argument).
@@ -242,14 +248,41 @@ int streamDevice(std::uint64_t stream)
     return static_cast<int>(dev);
 }
 
-/** Resolve a desc's ``device`` (-1 = the stream's, or the current one). */
-int resolveDevice(int device, std::optional<std::uint64_t> stream)
+/** The device holding the device (or managed) memory at @p p, else -1 (null, host, unregistered). A managed
+ *  allocation reports attributes.device; its preferred location is ignored. */
+int pointerDevice(std::uint64_t p)
+{
+    if (p == 0)
+        return -1;
+    cudaPointerAttributes a{};
+    if (cudaPointerGetAttributes(&a, reinterpret_cast<const void*>(p)) != cudaSuccess) {
+        cudaGetLastError(); // not a pointer the runtime knows: clear the sticky error
+        return -1;
+    }
+    return a.type == cudaMemoryTypeDevice || a.type == cudaMemoryTypeManaged ? a.device : -1;
+}
+
+/** The device a call runs on: an explicit @p device >= 0; else a real @p stream's device; else the device of the
+ *  device memory in @p ptrs (two devices are refused by name); else, for a call touching none, the current one. */
+int resolveDevice(int device, std::optional<std::uint64_t> stream, std::initializer_list<std::uint64_t> ptrs = {})
 {
     if (device >= 0)
         return device;
     if (device != -1)
         throw std::invalid_argument("eagle: device must be >= 0 or -1, got " + std::to_string(device));
-    return stream ? streamDevice(*stream) : currentDevice();
+    if (stream && !isDefaultStream(*stream))
+        return streamDevice(*stream);
+    int found = -1;
+    for (const std::uint64_t p : ptrs) {
+        const int pd = pointerDevice(p);
+        if (pd < 0)
+            continue;
+        if (found >= 0 && pd != found)
+            throw std::invalid_argument("eagle: the call's device pointers sit on devices " + std::to_string(found)
+                + " and " + std::to_string(pd));
+        found = pd;
+    }
+    return found >= 0 ? found : currentDevice();
 }
 
 /** Makes @p device current for the scope (restores the previous one). */
@@ -289,7 +322,7 @@ void out(T* p, T v)
 
 /** Run @p body, mapping whatever it throws to a status + thread-local message. */
 template <class Body>
-eagle_backend_status guarded(Body&& body) noexcept
+eagle_backend_status guardedStatus(Body&& body) noexcept
 {
     try {
         body();
@@ -323,6 +356,18 @@ eagle_backend_status guarded(Body&& body) noexcept
         g_lastError = "eagle: unknown C++ exception in the CUDA backend";
         return EAGLE_BACKEND_ERROR;
     }
+}
+
+/** @ref guardedStatus, and a failure leaves nothing pending: a CUDA runtime call that failed inside @p body set the
+ *  thread's last error, which the returned status has now reported. Left there, the next launch's check
+ *  (``eagle_backend_launch_status``) would name an innocent kernel for it. */
+template <class Body>
+eagle_backend_status guarded(Body&& body) noexcept
+{
+    const eagle_backend_status status = guardedStatus(std::forward<Body>(body));
+    if (status != EAGLE_BACKEND_OK)
+        (void)cudaGetLastError();
+    return status;
 }
 
 /** Destroy @p h with its device current; never throws. */
@@ -724,7 +769,7 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_conditional_create(
     return guarded([&] {
         const auto d = readDesc(desc, 0);
         requireDevice();
-        const int device = resolveDevice(d.device, d.origin);
+        const int device = resolveDevice(d.device, d.origin, { d.count_ptr, d.baseline_ptr, d.counter_ptr });
         DeviceScope scope(device);
         if (h == nullptr)
             throw std::invalid_argument("eagle: null output pointer");
@@ -1027,6 +1072,98 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_launcher_exec_update(eagle_
     });
 }
 
+namespace {
+
+/** The first node of @p g (looking into child graphs) that a handed-over graph may not hold or that CUDA may refuse
+ *  inside a child graph; empty when there is none. @p host is set for a host-function node (always refused). */
+std::string firstRefusedNode(cudaGraph_t g, bool& host, int depth = 0)
+{
+    std::size_t n = 0;
+    EAGLE_CHECK_ALWAYS(cudaGraphGetNodes(g, nullptr, &n));
+    std::vector<cudaGraphNode_t> nodes(n);
+    EAGLE_CHECK_ALWAYS(cudaGraphGetNodes(g, nodes.data(), &n));
+    std::string found;
+    for (std::size_t i = 0; i < n; ++i) {
+        cudaGraphNodeType type{};
+        EAGLE_CHECK_ALWAYS(cudaGraphNodeGetType(nodes[i], &type));
+        std::string what;
+        if (type == cudaGraphNodeTypeHost) {
+            host = true;
+            return "host-function node #" + std::to_string(i);
+        }
+        if (type == cudaGraphNodeTypeMemAlloc)
+            what = "memory-allocation node";
+        else if (type == cudaGraphNodeTypeMemFree)
+            what = "memory-free node";
+#if CUDART_VERSION >= 12030
+        else if (type == cudaGraphNodeTypeConditional)
+            what = "conditional node";
+#endif
+        else if (type == cudaGraphNodeTypeGraph && depth < 8) {
+            cudaGraph_t child = nullptr;
+            EAGLE_CHECK_ALWAYS(cudaGraphChildGraphNodeGetGraph(nodes[i], &child));
+            what = firstRefusedNode(child, host, depth + 1);
+            if (host)
+                return what;
+        }
+        if (!what.empty() && found.empty())
+            found = what.find("#") == std::string::npos ? what + " #" + std::to_string(i) : what;
+    }
+    return found;
+}
+
+std::string driverText()
+{
+    int v = 0;
+    (void)cudaDriverGetVersion(&v);
+    return "driver " + std::to_string(v / 1000) + "." + std::to_string((v % 1000) / 10);
+}
+
+} // namespace
+
+EAGLE_BACKEND_API eagle_backend_status eagle_backend_launcher_clone_graph(eagle_backend_launcher h,
+    std::uint64_t* graph)
+{
+    return guarded([&] {
+        if (graph == nullptr)
+            throw std::invalid_argument("eagle_backend_launcher_clone_graph: graph is null");
+        DeviceScope scope(live(h)->device);
+        bool host = false;
+        const std::string node = firstRefusedNode(h->launcher.graph(), host);
+        if (host)
+            throw std::runtime_error("eagle: Graph.cuda_graph(): the graph holds a " + node
+                + "; host-function nodes are never handed to another runtime");
+        cudaGraph_t clone = nullptr;
+        cudaError_t err = cudaGraphClone(&clone, h->launcher.graph());
+        if (err == cudaSuccess) {      // the add the consumer will make, on a scratch parent: the driver's own answer
+            cudaGraph_t scratch = nullptr;
+            cudaGraphNode_t added = nullptr;
+            err = cudaGraphCreate(&scratch, 0);
+            if (err == cudaSuccess) {
+                err = cudaGraphAddChildGraphNode(&added, scratch, nullptr, 0, clone);
+                (void)cudaGraphDestroy(scratch);
+            }
+            if (err != cudaSuccess) {
+                (void)cudaGraphDestroy(clone);
+                clone = nullptr;
+            }
+        }
+        if (err != cudaSuccess)
+            throw std::runtime_error("eagle: Graph.cuda_graph(): CUDA refuses this graph as a child graph"
+                + (node.empty() ? std::string() : " (it holds a " + node + ")") + ": "
+                + cudaGetErrorName(err) + ", " + cudaGetErrorString(err) + " (" + driverText() + ")");
+        *graph = reinterpret_cast<std::uint64_t>(clone);
+    });
+}
+
+EAGLE_BACKEND_API eagle_backend_status eagle_backend_launcher_graph_destroy(std::uint64_t graph)
+{
+    return guarded([&] {
+        if (graph != 0)
+            EAGLE_CHECK_ALWAYS(cudaGraphDestroy(reinterpret_cast<cudaGraph_t>(graph)));
+    });
+}
+
 EAGLE_BACKEND_API void eagle_backend_launcher_release(eagle_backend_launcher h)
 {
     release(h);
@@ -1140,7 +1277,7 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_compact_device(struct eagle
                 reinterpret_cast<std::uint32_t*>(d.fire), d.theta };
         }
         requireDevice();
-        const int device = resolveDevice(d.device, d.stream);
+        const int device = resolveDevice(d.device, d.stream, { d.mask, d.index_map, d.count });
         DeviceScope scope(device);
         bracketed("eagle_backend_compact_device", "enqueue", [&] {
             eagle::filtering::compactDevice(reinterpret_cast<const std::uint8_t*>(d.mask), d.flags,
@@ -1217,7 +1354,7 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_reorder_device(struct eagle
             throw std::invalid_argument("eagle_backend_reorder_device: mask, perm, inv, index_map, count and span "
                                         "must be device addresses");
         requireDevice();
-        const int device = resolveDevice(d.device, d.stream);
+        const int device = resolveDevice(d.device, d.stream, { d.mask, d.perm, d.inv, d.index_map, d.count });
         DeviceScope scope(device);
         bracketed("eagle_backend_reorder_device", "enqueue", [&] {
             eagle::filtering::reorderDevice(planes.data(), static_cast<std::uint32_t>(planes.size()),
@@ -1244,7 +1381,7 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_reset_device(struct eagle_b
         if (d.count == 0 || d.span == 0 || (d.n > 0 && (d.perm == 0 || d.inv == 0)))
             throw std::invalid_argument(std::string(who) + ": perm, inv, count and span must be device addresses");
         requireDevice();
-        const int device = resolveDevice(d.device, d.stream);
+        const int device = resolveDevice(d.device, d.stream, { d.perm, d.inv, d.count });
         DeviceScope scope(device);
         bracketed(who, "enqueue", [&] {
             eagle::filtering::resetDevice(reinterpret_cast<std::int32_t*>(d.perm),
@@ -1263,7 +1400,7 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_pointer_residency(
         if (cls == nullptr)
             throw std::invalid_argument("eagle_backend_pointer_residency: null cls");
         requireDevice();
-        const int dev = resolveDevice(device, std::nullopt);
+        const int dev = resolveDevice(device, std::nullopt, { ptr });
         DeviceScope scope(dev);
         // The plugin links the driver only (no cudart): the classes of
         // eagle::filtering::classifyPointer, read through cuPointerGetAttribute.
@@ -1340,7 +1477,7 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_compact_classes_device(
         if (d.reserved2 != 0 || d.reserved3 != 0)
             throw std::invalid_argument(std::string(who) + ": reserved fields must be zero");
         requireDevice();
-        const int device = resolveDevice(d.device, d.stream);
+        const int device = resolveDevice(d.device, d.stream, { d.mask, d.index_map, d.count });
         DeviceScope scope(device);
         bracketed(who, "enqueue", [&] {
             eagle::filtering::ReorderTrigger trig{ reinterpret_cast<std::uint32_t*>(d.live32),
@@ -1388,7 +1525,7 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_reorder_classes_device(
             throw std::invalid_argument(std::string(who) + ": mask, perm, inv, index_map, count, span, class_plane, "
                                                            "offsets and class_sorts must be device addresses");
         requireDevice();
-        const int device = resolveDevice(d.device, d.stream);
+        const int device = resolveDevice(d.device, d.stream, { d.mask, d.perm, d.inv, d.index_map, d.count });
         DeviceScope scope(device);
         bracketed(who, "enqueue", [&] {
             eagle::filtering::reorderClassesDevice(planes.data(), static_cast<std::uint32_t>(planes.size()),
@@ -1415,7 +1552,7 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_x_restore_device(struct eag
         if (d.n > 0 && (d.perm == 0 || d.inv == 0))
             throw std::invalid_argument("eagle_backend_x_restore_device: perm and inv must be device addresses");
         requireDevice();
-        const int device = resolveDevice(d.device, d.stream);
+        const int device = resolveDevice(d.device, d.stream, { d.perm, d.inv });
         DeviceScope scope(device);
         bracketed("eagle_backend_x_restore_device", "enqueue", [&] {
             eagle::filtering::restoreDevice(planes.data(), static_cast<std::uint32_t>(planes.size()),
@@ -1490,7 +1627,7 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_x_reduce_canonical(struct e
         if (d.in == 0 || d.out == 0 || d.work_b == 0)
             throw std::invalid_argument(std::string(who) + ": in, out, work_a and work_b must be device addresses");
         requireDevice();
-        const int device = resolveDevice(d.device, d.stream);
+        const int device = resolveDevice(d.device, d.stream, { d.in, d.out, d.work_b });
         DeviceScope scope(device);
         bracketed(who, "enqueue", [&] {
             const auto stream = seamStream(d.stream);
@@ -1529,7 +1666,7 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_x_diff_columns(struct eagle
         if (d.count < 0 || d.rows < 0 || d.op > EAGLE_BACKEND_DIFF_READ)
             throw std::invalid_argument(std::string(who) + ": unknown op, or a negative count/rows");
         requireDevice();
-        const int device = resolveDevice(d.device, d.stream);
+        const int device = resolveDevice(d.device, d.stream, { d.dst, d.src, d.index });
         DeviceScope scope(device);
         bracketed(who, "enqueue", [&] {
             namespace dd = eagle::diff::device;
@@ -1614,7 +1751,7 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_x_event_columns(struct eagl
             || d.components > EAGLE_BACKEND_EVENT_COMPONENTS)
             throw std::invalid_argument(std::string(who) + ": unknown op, or n/guards/components out of range");
         requireDevice();
-        const int device = resolveDevice(d.device, d.stream);
+        const int device = resolveDevice(d.device, d.stream, { d.terminated, d.t0, d.h, d.a[0], d.g[0] });
         DeviceScope scope(device);
         bracketed(who, "enqueue", [&] {
             const auto stream = seamStream(d.stream);
@@ -1711,7 +1848,7 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_memset_device(std::uint64_t
         if (ptr == 0)
             throw std::invalid_argument("eagle_backend_memset_device: null address");
         requireDevice();
-        const int device = resolveDevice(-1, stream);
+        const int device = resolveDevice(-1, stream, { ptr });
         DeviceScope scope(device);
         EAGLE_CHECK_ALWAYS(cudaMemsetAsync(reinterpret_cast<void*>(ptr), 0, static_cast<std::size_t>(bytes),
             seamStream(stream)));
@@ -1727,7 +1864,7 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_memcpy_device(std::uint64_t
         if (dst == 0 || src == 0)
             throw std::invalid_argument("eagle_backend_memcpy_device: null address");
         requireDevice();
-        const int device = resolveDevice(-1, stream);
+        const int device = resolveDevice(-1, stream, { dst, src });
         DeviceScope scope(device);
         EAGLE_CHECK_ALWAYS(cudaMemcpyAsync(reinterpret_cast<void*>(dst), reinterpret_cast<const void*>(src),
             static_cast<std::size_t>(bytes), cudaMemcpyDeviceToDevice, seamStream(stream)));
@@ -1745,7 +1882,7 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_memcpy(std::uint64_t dst, s
         if (dst == 0 || src == 0)
             throw std::invalid_argument("eagle_backend_memcpy: null address");
         requireDevice();
-        const int device = resolveDevice(-1, stream);
+        const int device = resolveDevice(-1, stream, { dst, src });
         DeviceScope scope(device);
         eagle::exec::memcpyAsync(reinterpret_cast<void*>(dst), reinterpret_cast<const void*>(src),
             static_cast<std::size_t>(bytes), static_cast<eagle::exec::CopyKind>(kind), seamStream(stream));
@@ -2393,14 +2530,24 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_launch_raw(const struct eag
             if (d.grid[a] == 0 || d.block[a] == 0)
                 return; // an empty launch: nothing to enqueue
         requireDevice();
-        DeviceScope scope(resolveDevice(d.device, d.stream));
+        const int device = resolveDevice(d.device, d.stream);
+        if (d.stream != 0 && !isDefaultStream(d.stream)) {
+            const int streamOn = streamDevice(d.stream);
+            if (streamOn != device)
+                throw std::runtime_error("eagle: the stream belongs to device " + std::to_string(streamOn)
+                    + "; this launch runs on device " + std::to_string(device));
+        }
+        DeviceScope scope(device);
         ensureContext();
         static const auto launch = driverEntry12<CUresult (*)(CUfunction, unsigned, unsigned, unsigned, unsigned,
             unsigned, unsigned, unsigned, CUstream, void**, void**)>("cuLaunchKernel");
-        checkDriver(launch(reinterpret_cast<CUfunction>(d.function), d.grid[0], d.grid[1], d.grid[2], d.block[0],
-                        d.block[1], d.block[2], d.shared_bytes, reinterpret_cast<CUstream>(seamStream(d.stream)),
-                        reinterpret_cast<void**>(d.args), nullptr),
-            "cuLaunchKernel");
+        const CUresult launched = launch(reinterpret_cast<CUfunction>(d.function), d.grid[0], d.grid[1], d.grid[2],
+            d.block[0], d.block[1], d.block[2], d.shared_bytes, reinterpret_cast<CUstream>(seamStream(d.stream)),
+            reinterpret_cast<void**>(d.args), nullptr);
+        if (launched == CUDA_ERROR_OUT_OF_MEMORY)
+            throw std::runtime_error("eagle: cuLaunchKernel failed with CUresult 2 (out of memory): "
+                + eagle::cuda::detail::oom_context(reinterpret_cast<CUfunction>(d.function)));
+        checkDriver(launched, "cuLaunchKernel");
     });
 }
 
@@ -2409,7 +2556,7 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_cell_op(const struct eagle_
     return guarded([&] {
         const auto d = readDesc(desc, 0xFFFFFFFFu);
         requireDevice();
-        DeviceScope scope(resolveDevice(d.device, d.stream));
+        DeviceScope scope(resolveDevice(d.device, d.stream, { d.p[0], d.p[1], d.p[2], d.p[3], d.p[4], d.p[5] }));
         bracketed("eagle_backend_cell_op", "enqueue", [&] {
             cellop::run(d, seamStream(d.stream));
             return 0;
@@ -2432,7 +2579,7 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_memcpy_strided(std::uint64_
         if (dstPitch < widthBytes || srcPitch < widthBytes)
             throw std::invalid_argument("eagle_backend_memcpy_strided: a pitch is smaller than width_bytes");
         requireDevice();
-        DeviceScope scope(resolveDevice(-1, stream));
+        DeviceScope scope(resolveDevice(-1, stream, { dst, src }));
         ensureContext();
         // Unified addressing: the memory types are read from the addresses, so one
         // descriptor serves every direction.
@@ -2667,7 +2814,7 @@ EAGLE_BACKEND_API eagle_backend_status eagle_backend_gemm(const eagle_backend_ge
             throw std::invalid_argument("eagle_backend_gemm: bad shape, batch, op or dtype");
         const Cublas& b = cublas();
         requireDevice();
-        const int dev = d->device >= 0 ? d->device : streamDevice(d->stream);
+        const int dev = resolveDevice(d->device, d->stream, { d->a, d->b, d->c });
         DeviceScope scope(dev);
         ensureContext();
         void* handle = nullptr;

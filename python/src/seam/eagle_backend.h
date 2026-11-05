@@ -104,7 +104,7 @@ extern "C" {
 /** Seam major version: the core accepts exactly this major. */
 #define EAGLE_BACKEND_VERSION_MAJOR 1u
 /** Seam minor version this header describes (informational). */
-#define EAGLE_BACKEND_VERSION_MINOR 7u
+#define EAGLE_BACKEND_VERSION_MINOR 8u
 /** The packed version a backend built from this header reports. */
 #define EAGLE_BACKEND_VERSION ((EAGLE_BACKEND_VERSION_MAJOR << 16) | EAGLE_BACKEND_VERSION_MINOR)
 
@@ -374,6 +374,14 @@ eagle_backend_status eagle_backend_launcher_set_memcpy_source(eagle_backend_laun
  *  driver rejects it (the exec is unchanged). */
 eagle_backend_status eagle_backend_launcher_exec_update(eagle_backend_launcher h, eagle_backend_captured captured,
     int32_t* accepted);
+
+/** Take an owned clone of the launcher's source graph into ``*graph`` (a ``cudaGraph_t``), which every
+ *  kernel-argument and memcpy-source patch has kept in step with the exec. Refuses, naming the node and quoting
+ *  the CUDA error and the driver version, a graph holding a host-function node or one CUDA will not accept as a
+ *  child graph (conditional, memory allocation). Added in minor 8; bound per symbol. */
+eagle_backend_status eagle_backend_launcher_clone_graph(eagle_backend_launcher h, uint64_t* graph);
+/** Destroy a graph ``eagle_backend_launcher_clone_graph`` returned (0 is ignored). Minor 8; bound per symbol. */
+eagle_backend_status eagle_backend_launcher_graph_destroy(uint64_t graph);
 
 /* ---- exec (bit 9) ------------------------------------------------------------ */
 

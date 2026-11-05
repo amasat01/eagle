@@ -87,7 +87,8 @@ def _device(jax, platform):
 
 
 def _digest(K, platform):
-    return K.level.slots[("digest", platform, "float64")]
+    # the digest is the same on every GPU of an arch: the registration slot is keyed per device
+    return next(v for k, v in K.level.slots.items() if k[:3] == ("digest", platform, "float64"))
 
 
 def _ffi(jax, platform, digest, results, *args):
@@ -113,7 +114,7 @@ def _register_twin(K, platform, digest, *, zero=True, entry=None, device=None):
         eagle_jax._install(digest, fields, platform="cpu", entry=entry or keep.host_entry)
     else:
         seam = eagle_jax._seam()
-        keep = level.slots[("keep", "cuda", "float64")]
+        keep = level.slots[("keep", "cuda", "float64", device.local_hardware_id)]
         eagle_jax._install(digest, fields, platform="cuda", entry=entry or seam["run"],
                            ordinal=device.local_hardware_id, function=keep.device_function,
                            seam=seam)

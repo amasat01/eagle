@@ -3,7 +3,8 @@
 
 """Lower one :class:`eagle.Graph` stage for the host and say how it runs.
 
-``work_share`` runs a stage's nodes in order, each spread over the host team.
+``work_share`` runs a stage's nodes in order, each spread over the host team
+(a stage of native nodes in ONE OpenMP region, ``_core.run_host_stage``).
 ``branch_tasks`` runs a fork/join stage's independent branches at the same
 time inside ONE native call (``_core.run_host_branches``, GIL released): for
 small batches, where a team barrier per node costs more than the node. The
@@ -35,5 +36,7 @@ def lower_cpu_stage(node, ctx):
     schedule = _core.resolve_host_schedule(samples, len(stage), _core.host_threads(),
                                            native_only)
     if schedule == "work_share":
+        if native_only and len(entries) > 1:   # one team region for the whole stage, not one per node
+            return (lambda: _core.run_host_stage(stage)), schedule
         return step, schedule
     return (lambda: _core.run_host_branches(stage)), schedule

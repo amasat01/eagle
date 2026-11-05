@@ -42,7 +42,7 @@ import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 
 jax = pytest.importorskip("jax",
-    reason="jax is not installed here (jax's jaxlib ships free-threaded wheels for 3.14t only (none for 3.13t))")
+    reason="jax is not installed here (jax's jaxlib ships free-threaded wheels for 3.14t only)")
 hawk = pytest.importorskip("hawk")
 
 import jax.numpy as jnp  # noqa: E402
@@ -263,15 +263,20 @@ def test_mixed_float_dtypes_promote_and_others_are_refused(ops):
 
     with jax.default_device(_device("cpu")):
         x, _, e = _drag_make(4, np.float32, np.random.default_rng(0))
-        with pytest.warns(eagle.PerformanceWarning, match="promoted to float64"):
+        # a uniform follows the sample planes' float mode: cd is copied to float32
+        with pytest.warns(eagle.PerformanceWarning, match="'cd' is float64; promoted to float32"):
             ops["drag"](x, jnp.asarray([0.3], jnp.float64), e["t"])
+        # two sample planes: the wider float wins
+        with pytest.warns(eagle.PerformanceWarning, match="'v' is float32; promoted to float64"):
+            ops["vec_sum"](x, x.astype(jnp.float64))
         with pytest.raises(TypeError, match="float32 or float64"):
             ops["vec_sum"](x.astype(jnp.int32), x.astype(jnp.int32))
 
 
 def _digest(K, platform, mode):
     level = K.level
-    return level.slots[("digest", platform, mode)]
+    # the digest is the same on every GPU of an arch: the registration slot is keyed per device
+    return next(v for k, v in level.slots.items() if k[:3] == ("digest", platform, mode))
 
 
 @pytest.mark.parametrize("platform", PLATFORMS)
@@ -281,7 +286,7 @@ def test_lowering_carries_the_digest_and_no_address(ops, platform):
         text = jax.jit(lambda x, p: ops["drag"](x, p, e["t"])).lower(x, p).as_text()
     digest = _digest(ops["drag"], platform, "float64")
     assert digest in text
-    keep = ops["drag"].level.slots[("keep", platform, "float64")]
+    keep = next(v for k, v in ops["drag"].level.slots.items() if k[:3] == ("keep", platform, "float64"))
     address = getattr(keep, "host_entry", None) or keep.device_function
     assert str(address) not in text and hex(address) not in text
 
@@ -323,7 +328,7 @@ def test_a_call_on_another_gpu_is_refused_by_name(ops):
                           _digest(ops["drag"], "cuda", "float64").rsplit("cuda-", 1)[1])
         fields = eagle_jax._recipe_fields(level, level.artifact(unit), "float64")
         seam = eagle_jax._seam()
-        keep = level.slots[("keep", "cuda", "float64")]
+        keep = level.slots[("keep", "cuda", "float64", device.local_hardware_id)]
         eagle_jax._install("eagle-test/other-gpu", fields, platform="cuda", entry=seam["run"],
                            ordinal=device.local_hardware_id + 1,
                            function=keep.device_function, seam=seam)
@@ -1072,7 +1077,7 @@ def test_an_active_set_kernel_runs_every_sample_and_differentiates(tmp_path, pla
         got = np.asarray(jax.jit(lambda w: K(w, 0.7, m))(jnp.asarray(w)))
         y, term = np.zeros(n), np.zeros(n, dtype=bool)
         eplan.auto(spring).bind(w=w, a=0.7, terminated=term, y=y, **ActiveSet(term).planes()).launch()
-        np.testing.assert_array_equal(got, y)
+        np.testing.assert_array_max_ulp(got, y, maxulp=1)   # host and device may fuse a*w*w + sqrt(w) differently: the ULP contract
         np.testing.assert_allclose(got, 0.7 * w * w + np.sqrt(w), rtol=1e-14)
         gw = jax.grad(lambda w, a: K(w, a, m).sum(), (0, 1))(jnp.asarray(w), 0.7)
         np.testing.assert_allclose(np.asarray(gw[0]), 1.4 * w + 0.5 / np.sqrt(w), rtol=1e-13)
@@ -1102,5 +1107,5 @@ def test_a_jax_node_name_is_the_vjps_key():
     with pytest.raises(ValueError, match=r"node 'model' is opaque: pass vjps=\{'model'"):
         eagle.diff.reverse(g.record, {"model.y": np.ones(4)})
     grads = eagle.diff.reverse(g.record, {"model.y": np.ones(4)},
-                               vjps={"model": lambda primals, cts: {"w": 2.0 * cts["y"]}})
+                               vjps={"model": lambda primals, cts: {"w": 2.0 * np.from_dlpack(cts["y"])}})
     np.testing.assert_array_equal(grads["w"], np.full(4, 2.0))

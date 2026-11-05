@@ -50,7 +50,7 @@ pytestmark = pytest.mark.repo_local
 CORPUS = pathlib.Path(__file__).resolve().parent.parent.parent / "tests" / "conformance"
 
 # The corpus rows landed so far. Step 0 landed {2, 4, 6, 7, 8, 11}; a later atomic
-# widening added row 1 (the `neural_block` golden + its VJP companion) and row 5 (the
+# widening added row 1 (the `graph_block` golden + its VJP companion) and row 5 (the
 # unknown `scatter_policy` acceptance case); a later volume dispatch adds rows {3, 9,
 # 10, 17, 18, 19, 20, 21} (the flagged-call fixtures pin) and repairs the gap by adding
 # {13, 14, 15, 16} — those four sat on disk, unnamed by this floor, since step 0. A
@@ -65,12 +65,12 @@ CORPUS = pathlib.Path(__file__).resolve().parent.parent.parent / "tests" / "conf
 # PERMANENTLY non-contractual — no `error_substring` may ever span one.
 #
 # a later package adds rows {22, 23, 24}: the exec-ref closed-set
-# hardening, the neural_block integer-field uint32 cap, and the `accumulate`
+# hardening, the graph_block integer-field uint32 cap, and the `accumulate`
 # scatter_policy acceptance golden.
 #
 # a later phase mints row 25 (two stems, the
-# row02/row02b precedent): the neural-block MANIFEST carriage's wire dangling-ref
-# reject (`row25_neural_manifest_dangling_exec_ref`, a LOCKED cross-language
+# row02/row02b precedent): the graph-block MANIFEST carriage's wire dangling-ref
+# reject (`row25_graph_block_manifest_dangling_exec_ref`, a LOCKED cross-language
 # asymmetry — the C++ default vs. the Python override) and the orphaned-`blocks[]`
 # guard (`row25b_orphaned_blocks_on_pure_manifest`, message-parity, no override).
 REQUIRED_ROWS = frozenset(
@@ -214,10 +214,10 @@ def _run_loader(loader: str, level: str, fixture, name: str) -> None:
 
 def _provider_absent(manifest_path) -> bool:
     """True when the manifest's pattern is served only by a downstream provider
-    package (``neural_block``) and none is registered in this environment: the
+    package (``graph_block``) and none is registered in this environment: the
     Python loader then stops at pattern resolution, before the check the row pins."""
     pattern = json.loads(pathlib.Path(manifest_path).read_text()).get("pattern")
-    if pattern != "neural_block":
+    if pattern != "graph_block":
         return False
     from eagle.registry import UnknownPatternError, _resolve_pattern_loader
 
@@ -244,7 +244,7 @@ def test_conformance_case(case):
         if loader in _NOT_MINE:
             continue  # the C++ driver's exclusive loader class; not this driver's job
         if level == "manifest" and _provider_absent(fixture):
-            pytest.skip(f"{name}: needs a registered 'neural_block' loader "
+            pytest.skip(f"{name}: needs a registered 'graph_block' loader "
                         "(a downstream provider package); none is installed here")
         ran_any = True
         override = expectation.get("overrides", {}).get(loader, {})
