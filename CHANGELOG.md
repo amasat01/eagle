@@ -2,7 +2,7 @@
 
 Releases after 0.6.4 are on [GitHub](https://github.com/amasat01/eagle/releases): the notes are the pull request body.
 
-## 0.7.3 (unreleased)
+## 0.7.3 (2026-11-05)
 
 This section covers what changes from 0.7.2. Names that left are in the table at the end.
 
