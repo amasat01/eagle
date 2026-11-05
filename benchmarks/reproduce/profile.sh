@@ -9,8 +9,8 @@
 #
 #   profile.sh [options]
 #     --env FILE        the GPU environment script bootstrap.sh wrote (default WORK/env-gpu.sh)
-#     --cuda V          12 | 13 (default 12, or $REPRO_CUDA): the CUDA profile bootstrap.sh --cuda V made; 13 reads
-#                       WORK/env-gpu-cuda13.sh by default and reports the CUDA 13 package names
+#     --cuda V          12 | 12.6 | 13 (default 12, or $REPRO_CUDA): the CUDA profile bootstrap.sh --cuda V made; 12.6 reads
+#                       WORK/env-gpu-cuda126.sh by default, 13 reads WORK/env-gpu-cuda13.sh and reports the CUDA 13 package names
 #     --out DIR         where results go (default WORK/profiles/<machine-slug>/)
 #     --work DIR        bootstrap's work directory (default per target)
 #     --quick           one small point of every stage: about 8 minutes
@@ -61,13 +61,13 @@ while [[ $# -gt 0 ]]; do
     *) die "unknown option $1 (see --help)" ;;
   esac
 done
-[[ $CUDA == 12 || $CUDA == 13 ]] || die "unknown CUDA version '$CUDA': --cuda (or REPRO_CUDA) takes 12 or 13"
+[[ $CUDA == 12 || $CUDA == 12.6 || $CUDA == 13 ]] || die "unknown CUDA version '$CUDA': --cuda (or REPRO_CUDA) takes 12, 12.6 or 13"
 [[ $DEADLINE_MIN =~ ^[0-9]+$ ]] || die "--deadline-min takes whole minutes"
 [[ $LOCK_CLOCK == auto || $LOCK_CLOCK == off || $LOCK_CLOCK =~ ^[0-9]+$ ]] || die "--lock-clock takes MHz, auto or off"
 
 TARGET=$(detect_target)
 WORK=${WORK:-$(default_work "$TARGET")}
-ENV_FILE=${ENV_FILE:-$WORK/env-gpu$([[ $CUDA == 13 ]] && echo -cuda13).sh}
+ENV_FILE=${ENV_FILE:-$WORK/env-gpu$([[ $CUDA == 13 ]] && echo -cuda13)$([[ $CUDA == 12.6 ]] && echo -cuda126).sh}
 SLUG=$(machine_slug)
 OUT=${OUT:-$WORK/profiles/$SLUG}
 DATA=$OUT/data LOGS=$OUT/logs MARK=$OUT/.stages
