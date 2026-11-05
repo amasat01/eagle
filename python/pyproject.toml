@@ -50,7 +50,7 @@ classifiers = [
 # `eagle.sidecar` imports. The constraint is expressed where a resolver can act on it,
 # never as a runtime surprise.
 # aether-dsc: the `aether` arrays eagle allocates its planes with (CPU and GPU, no extra needed).
-dependencies = ["raptor-core>=0.7.0,<0.8", "aether-dsc>=0.7.2,<0.8"]
+dependencies = ["raptor-core>=0.7.3,<0.8", "aether-dsc>=0.7.3,<0.8"]
 
 # The "raptor.pattern_loaders" entry-point declaration for
 # "graph_block" moved to a separate package — the block code was extracted there
@@ -80,13 +80,13 @@ cuda13 = [
 # eagle.frameworks.torch: the torch.autograd bridge. torch is imported only by
 # that submodule, so plain `import eagle` never needs it. The bridges compile
 # kernels with hawk; 0.5.1 is the first to derive nested derivatives.
-torch = ["torch>=2.2", "raptor-hawk>=0.7.2,<0.8"]
+torch = ["torch>=2.2", "raptor-hawk>=0.7.3,<0.8"]
 # eagle's JAX interop and eagle.frameworks.jax (see docs: interop contract).
 # JAX publishes wheels for Python 3.12 and newer, so this extra resolves there
 # and nowhere else; for GPU arrays install JAX's own CUDA extra (jax[cuda12] or
 # jax[cuda13]). The floor is the jaxlib whose XLA FFI headers libeagle_xla.so
 # vendors (an older runtime with newer headers is the unsupported direction).
-jax = ["jax>=0.11.2", "raptor-hawk>=0.7.2,<0.8"]
+jax = ["jax>=0.11.2", "raptor-hawk>=0.7.3,<0.8"]
 # What the test suite imports (the gate installs this, with ci/constraints.txt): pytest and numpy. Rows that need
 # torch, jax, warp or cupy sit behind their own extras and markers (interop_matrix, gpu, torch).
 test = ["pytest>=8", "pytest-xdist", "numpy", "ruff"]
