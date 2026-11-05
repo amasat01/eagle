@@ -1288,7 +1288,9 @@ class Graph:
         block that appends to the graph it is given; none makes a builder
         that makes, records into and returns its Graph (calling it on arrays
         builds that Graph; nothing runs). Control flow on 1-cell uint32 arrays
-        becomes device control flow."""
+        becomes device control flow. Either call takes ``layout=``
+        (``"samples_first"`` or ``"samples_last"``) for every plane its body
+        binds."""
         from ._builder import make_builder
 
         return make_builder(fn)

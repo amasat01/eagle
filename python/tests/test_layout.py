@@ -592,3 +592,27 @@ def test_simulate_refuses_resolves_and_marks_with_a_hawk_kernel():
     y = np.zeros((W, 3))
     _simulate(hawk.samples_last(xn), hawk.samples_last(y), layout="samples_first")
     np.testing.assert_array_equal(y, 3.0 * sm4[:3].T)
+
+
+def test_a_builder_call_takes_layout_for_every_kernel_call_it_records(tmp_path):
+    k = eagle.deploy(e4_vec3_scale, targets=("host",), cache_dir=tmp_path)
+
+    @eagle.Graph.builder
+    def scaled(x, y):
+        g = eagle.Graph()
+        k(x=x, a=2.0, y=y)
+        g.result = y
+        return g
+
+    x, y = _x(3), np.zeros((W, 3))
+    with pytest.raises(ValueError, match='layout="samples_last"'):    # (3, 3): ambiguous without a layout
+        scaled(x, y)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        g = scaled(x, y, layout="samples_last")
+    g()
+    np.testing.assert_array_equal(y, 2.0 * x)
+    with pytest.raises(_layout.LayoutError, match="layout="):           # a marker cannot cross into the body
+        scaled(eagle.samples_last(x), y)
+    with pytest.raises(_layout.LayoutError, match="is not one of"):
+        scaled(x, y, layout="rows")
