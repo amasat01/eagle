@@ -253,6 +253,8 @@ def _configs(spec: dict, e: dict) -> list[dict | None]:
 
 def headline_config(spec: dict, e: dict) -> dict | None:
     """The workload the overview shows: the README's, else the card's first."""
+    if e["card"].get("distributions"):   # the ensemble cards: a distribution names the workload
+        return README_CONFIG
     configs = _configs(spec, e)
     return README_CONFIG if README_CONFIG in configs else configs[0]
 
@@ -541,7 +543,20 @@ def _relpath(path: pathlib.Path, start: pathlib.Path) -> str:
 # Entry points
 # --------------------------------------------------------------------------- #
 #: The workload the README charts show: the landing page's own.
-README_CONFIG = {"distribution": "spread", "max_steps": 1000}
+README_CONFIG = {"distribution": "spread"}
+
+
+def headline_entry(entries: list[dict]) -> tuple[dict, int]:
+    """The card the README and the home page chart and the batch size: ``prose_claims.HEADLINE``'s device
+    (the first card when none matches) at its first N."""
+    import fnmatch
+
+    sys.path.insert(0, str(_TOOLS_DIR.parent.parent / "tools"))
+    import prose_claims as pcl
+
+    glob = pcl.DEVICES[pcl.HEADLINE["dev"]]
+    entry = next((e for e in entries if fnmatch.fnmatch(e["slug"], glob)), entries[0])
+    return entry, pcl.HEADLINE["ns"][0]
 
 
 def write_readme_svgs(eagle_root: pathlib.Path, entries_by_family: dict[str, list[dict]]) -> list[pathlib.Path]:
@@ -555,15 +570,16 @@ def write_readme_svgs(eagle_root: pathlib.Path, entries_by_family: dict[str, lis
         entries = entries_by_family.get(key) or []
         if not entries:
             continue
-        card = entries[0]["card"]
-        cfg = README_CONFIG if README_CONFIG in (card.get("configs") or []) else (card.get("configs") or [None])[0]
-        chart_bars, n = charts.bars(card, tools, cfg)
+        entry, n = headline_entry(entries)
+        card = entry["card"]
+        cfg = headline_config(next(f for f in FAMILIES if f["key"] == key), entry)
+        chart_bars, n = charts.bars(card, tools, cfg, n)
         if not chart_bars:
             continue
         out_dir.mkdir(parents=True, exist_ok=True)
-        title = f"RK4 oscillators, {n:,} samples" + (f", {_config_label(cfg)}" if cfg else "")
+        title = f"Kepler orbits, adaptive RKF7(8), {n:,} samples" + (f", {_config_label(cfg)}" if cfg else "")
         path = out_dir / f"readme_{kind}.svg"
-        write_pair(path, lambda palette: charts.chart_svg(chart_bars, title, entries[0]["name"], palette))
+        write_pair(path, lambda palette: charts.chart_svg(chart_bars, title, entry["name"], palette))
         written += [path, dark_path(path)]
     return written
 
@@ -576,9 +592,9 @@ def write_glimpse(out_dir: pathlib.Path, entries_by_family: dict[str, list[dict]
     target.unlink(missing_ok=True)
     if not entries:
         return
-    e = entries[0]
+    e, n = headline_entry(entries)
     cfg = headline_config(FAMILIES[0], e)
-    chart_bars, n = charts.bars(e["card"], charts.GPU_TOOLS, cfg)
+    chart_bars, n = charts.bars(e["card"], charts.GPU_TOOLS, cfg, n)
     if not chart_bars:
         return
     alt = html.escape(charts.alt_text(chart_bars, e["name"]), quote=True)
@@ -587,7 +603,7 @@ def write_glimpse(out_dir: pathlib.Path, entries_by_family: dict[str, list[dict]
         '<a href="content/performance.html">'
         f'<img class="only-light" src="_static/perf/readme_gpu.svg" alt="{alt}" style="max-width:100%;height:auto">'
         f'<img class="only-dark" src="_static/perf/readme_gpu-dark.svg" alt="{alt}" style="max-width:100%;height:auto"></a>\n'
-        f'<figcaption>{n:,} samples, each stopping at its own step, on {html.escape(e["name"])}: '
+        f'<figcaption>{n:,} samples, each stopping at its own time, on {html.escape(e["name"])}: '
         'wall time per tool, log scale. <a href="content/performance.html">Every device, workload '
         'and arm</a>.</figcaption>\n</figure>\n')
 

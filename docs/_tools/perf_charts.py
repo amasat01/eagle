@@ -90,17 +90,17 @@ def _center(stat: dict) -> float:
     return stat["mean"] if "mean" in stat else stat["median"]
 
 
-def bars(card: dict, tools, config: dict | None = None):
+def bars(card: dict, tools, config: dict | None = None, n: int | None = None):
     """``(bars, n)``: ``[(label, colour var, wall_s, is_eagle), ...]`` fastest
-    first, for the tools the card ran at its largest N and ``config``
+    first, for the tools the card ran at ``n`` (default: its largest N) and ``config``
     (``{"distribution", "max_steps"}``; ``None`` for a card without configs)."""
     if not card.get("ns"):
         return [], None
-    n = max(card["ns"])
+    n = n or max(card["ns"])
     cfg = config or {}
     rows = {}
     for r in card.get("results", []):
-        if (r["n"] == n and r.get("distribution") == cfg.get("distribution")
+        if ("wall_s" in r and r["n"] == n and r.get("distribution") == cfg.get("distribution")
                 and r.get("max_steps") == cfg.get("max_steps")):
             rows[r["arm"]] = r
     out, seen = [], set()
