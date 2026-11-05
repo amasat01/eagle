@@ -722,7 +722,7 @@ Handing a graph to another runtime
 A built graph can run inside another runtime's own CUDA graph or OpenMP region.
 
 On the GPU
-~~~~~~~~~~
+^^^^^^^^^^
 
 A runtime that builds its own CUDA graph (a C++ propagator, say) can run a built eagle graph as one child node of
 it. ``g.cuda_graph()`` returns an owned clone of the built GPU graph as a ``CudaGraphHandle``; ``handle.handle`` is the
@@ -752,7 +752,7 @@ Things to know:
   in the parent graph.
 
 On the CPU
-~~~~~~~~~~
+^^^^^^^^^^
 
 ``g.host_table()`` freezes a built graph into a table of its stages. Its
 ``.handle`` is the address of a ``const eagle_host_table*`` (``eagle/plugin/graph_handoff.h``,
