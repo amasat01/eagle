@@ -438,6 +438,7 @@ def arm_code(blocks, arm_blocks, arms):
 # --------------------------------------------------------------------------- #
 def fastest_lines(rows, labels, fmt=fmt_time):
     """The "Fastest arm by median wall time" list of one table's rows."""
+    rows = [r for r in rows if "wall_s" in r]    # a row that did not run has no time
     trimmed_stat = any("mean" in r["wall_s"] for r in rows)
     lines = ["Fastest arm by mean wall time (middle 10 of 12 runs):" if trimmed_stat
              else "Fastest arm by median wall time:", ""]

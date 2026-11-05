@@ -35,9 +35,9 @@ def _charts():
 
 def test_gpu_default_tab_follows_the_preference_list():
     charts = _charts()
-    names = ["Zed GPU", "Quadro P2000", "Tesla T4", "NVIDIA H100 80GB", "Alpha GPU"]
+    names = ["Zed GPU", "Quadro P2000", "NVIDIA L4", "NVIDIA H100 80GB", "Alpha GPU"]
     got = [e["name"] for e in charts.in_tab_order([{"name": n} for n in names], charts.GPU_PREFERENCE)]
-    assert got == ["NVIDIA H100 80GB", "Tesla T4", "Quadro P2000", "Alpha GPU", "Zed GPU"]
+    assert got == ["NVIDIA H100 80GB", "NVIDIA L4", "Quadro P2000", "Alpha GPU", "Zed GPU"]
 
 
 def test_cpu_server_parts_precede_workstation_parts():
@@ -59,11 +59,11 @@ def test_dropping_a_card_adds_a_tab_with_no_code_change(tmp_path):
     out = root / "docs" / "content" / "_generated"
     gen.generate(root, out)
     before = (out / "perf_card_gpu.md").read_text().count(":::{tab-item}")
-    src = root / "benchmarks" / "perf_card" / "card_tesla-t4.json"
+    src = root / "benchmarks" / "perf_card" / "card_nvidia-l4.json"
     (root / "benchmarks" / "perf_card" / "card_extra-gpu.json").write_text(
-        src.read_text().replace("Tesla T4", "Extra GPU").replace("tesla-t4", "extra-gpu"))
+        src.read_text().replace("NVIDIA L4", "Extra GPU").replace("nvidia-l4", "extra-gpu"))
     (root / "benchmarks" / "perf_card" / "card_extra-gpu.md").write_text(
-        (root / "benchmarks" / "perf_card" / "card_tesla-t4.md").read_text())
+        (root / "benchmarks" / "perf_card" / "card_nvidia-l4.md").read_text())
     gen.generate(root, out)
     text = (out / "perf_card_gpu.md").read_text()
     assert text.count(":::{tab-item}") == before + 1

@@ -137,7 +137,11 @@ print(x_next[0].item(), k.grad[0].item())     # 0.5 -1.0
 [Install](#install) · [Performance](#performance) · [C++ API](#c-api)
 
 <!-- hero:begin -->
-The headline numbers appear here when the first ensemble card is committed.
+| **48.9 ms** at N = 1,000,000, 477 ms at N = 10,000,000 | **2.3×–190× faster** at N = 1,000,000, 2.3×–150× at N = 10,000,000 | **9.1×–30× less GPU memory** at N = 1,000,000, 12×–16× at N = 10,000,000 |
+|:---:|:---:|:---:|
+| RKF7(8) Kepler orbits, each stopping at its own time | than NVIDIA Warp (2.3×), JAX (25×), CuPy (190×), PyTorch with torch.compile (16×) at N = 1,000,000; Warp is level or ahead when every sample runs the same orbit | than CuPy and PyTorch with torch.compile: 102 MiB for N = 1,000,000, 1.4× the bare minimum state |
+
+<sub>NVIDIA H100 NVL (card of 2026-11-05). NVIDIA Warp's per-thread kernel is the fastest GPU arm in 0 of 6 cells; on the dense batch (every sample the same orbit) at N = 1,000,000 it takes 55.1 ms and `eagle.simulate` 40.8 ms. See [every number, every arm](#performance).</sub>
 <!-- hero:end -->
 
 ## What's new in 0.7.1
@@ -277,10 +281,10 @@ by `EAGLE_CPP_MODE`. The C++ core depends only on `aether`; the Python package (
 ## Performance
 
 <!-- stale-prose-gate:
-benchmarks/perf_card/card_nvidia-a100-sxm4-40gb.json: PENDING
+benchmarks/perf_card/card_nvidia-h100-nvl.json: PENDING
 -->
 
-<!--ctx card=ensemble dev=a100 n=1e6 dist=spread-->
+<!--ctx card=ensemble dev=h100 n=1e6 dist=spread-->
 The ensemble card integrates a batch of two-body Kepler orbits with an adaptive RKF7(8) in float64, each sample stopping at
 its own time, from 10^6 to 10^7 samples, on spread and uniform batches. Every arm is checked against the exact answer. The
 arms are `eagle.simulate` (the arm above), the CUDA-graph device loop, its persistent-launch form, a CuPy masked loop, PyTorch
@@ -300,23 +304,49 @@ The chart shows the reference device; [the performance page](https://amasat01.gi
 
 
 <!-- cards:begin -->
-No committed ensemble card yet.
+**NVIDIA H100 NVL, card of 2026-11-05**
+
+| Distribution (N = 1,000,000) | Arm | wall (IQR) | attempts·samples/s | % of the device's top FP64 rate |
+|---|---|---:|---:|---:|
+| Spread (each sample stops at its own time) | eagle graph | 105 ms (116 µs) | 4.74 G | 37% |
+| Spread (each sample stops at its own time) | hawk + eagle persistent | 49 ms (92 µs) | 10.2 G | 79% |
+| Spread (each sample stops at its own time) | eagle.simulate (eagle picks the launch mode) | 48.9 ms (110 µs) | 10.2 G | 80% |
+| Spread (each sample stops at its own time) | CuPy masked | 9.34 s (141 ms) | 53.4 M | <1% |
+| Spread (each sample stops at its own time) | Warp per-thread kernel | 113 ms (130 µs) | 4.42 G | 34% |
+| Uniform (every sample runs the same orbit) | eagle graph | 51.3 ms (83.6 µs) | 8.33 G | 65% |
+| Uniform (every sample runs the same orbit) | hawk + eagle persistent | 40.8 ms (101 µs) | 10.5 G | 82% |
+| Uniform (every sample runs the same orbit) | eagle.simulate (eagle picks the launch mode) | 40.8 ms (225 µs) | 10.5 G | 82% |
+| Uniform (every sample runs the same orbit) | CuPy masked | 4.87 s (54.3 ms) | 87.9 M | <1% |
+| Uniform (every sample runs the same orbit) | Warp per-thread kernel | 55.1 ms (67.9 µs) | 7.75 G | 60% |
+
+Measured on:
+
+- [NVIDIA H100 NVL](https://amasat01.github.io/eagle/content/performance.html#perf-card-gpu-nvidia-h100-nvl)
+- [NVIDIA L4](https://amasat01.github.io/eagle/content/performance.html#perf-card-gpu-nvidia-l4)
+- [AMD EPYC 9B45](https://amasat01.github.io/eagle/content/performance.html#perf-card-cpu-amd-epyc-9b45)
 <!-- cards:end -->
 
 <!-- cpu-cards:begin -->
-No committed ensemble card yet.
+**On a CPU alone: AMD EPYC 9B45, 16 logical CPUs, card of 2026-11-04**
+
+| Arm (N = 1,000,000) | spread wall | uniform wall | vs eagle CPU, 8 threads (spread) |
+|---|---:|---:|---:|
+| eagle CPU, 8 threads | 3.69 s (2.05 ms) | 2.08 s (2.12 ms) | 1.0× |
+| eagle CPU, 1 thread | 29.4 s (14.4 ms) | 16.5 s (2.75 ms) | 7.9× |
+| Numba prange | 20.9 s (396 ms) | 17.9 s (265 ms) | 5.6× |
+| JAX jit(vmap(while_loop)) | 60.4 s (7.88 ms) | 28.8 s (57.4 ms) | 16× |
 <!-- cpu-cards:end -->
 
 **Where each tool fits.** On a dense batch (uniform: every sample runs the same orbit) NVIDIA Warp's per-thread kernel is the
-fastest GPU arm when it ties: <!--c wall arm=warp_kernel dist=uniform-->0 ms<!--/c--> against `eagle.simulate`'s
-<!--c wall arm=eagle_simulate dist=uniform-->0 ms<!--/c--> at N = 1,000,000. On a spread batch, where samples finish at
-different times, `eagle.simulate` takes <!--c wall arm=eagle_simulate-->0 ms<!--/c--> against Warp's
-<!--c wall arm=warp_kernel-->0 ms<!--/c--> (<!--c x arm=warp_kernel den_arm=eagle_simulate-->0×<!--/c-->). A CuPy masked loop
-needs <!--c wall arm=cupy_masked-->0 ms<!--/c--> there. See [where RAPTOR fits](https://amasat01.github.io/where_raptor_fits.html)
+fastest GPU arm when it ties: <!--c wall arm=warp_kernel dist=uniform-->55.1 ms<!--/c--> against `eagle.simulate`'s
+<!--c wall arm=eagle_simulate dist=uniform-->40.8 ms<!--/c--> at N = 1,000,000. On a spread batch, where samples finish at
+different times, `eagle.simulate` takes <!--c wall arm=eagle_simulate-->48.9 ms<!--/c--> against Warp's
+<!--c wall arm=warp_kernel-->113 ms<!--/c--> (<!--c x arm=warp_kernel den_arm=eagle_simulate-->2.3×<!--/c-->). A CuPy masked loop
+needs <!--c wall arm=cupy_masked-->9.34 s<!--/c--> there. See [where RAPTOR fits](https://amasat01.github.io/where_raptor_fits.html)
 for that comparison.
 
-**Hardware caveat:** the tables and text above are measured on a <!--c spec field=device.name-->device<!--/c-->, a data-centre
-card (<!--c spec field=device.sm_count-->0<!--/c--> SMs). The method carries over unchanged to other GPUs; the absolute numbers,
+**Hardware caveat:** the tables and text above are measured on a <!--c spec field=device.name-->NVIDIA H100 NVL<!--/c-->, a data-centre
+card (<!--c spec field=device.sm_count-->132<!--/c--> SMs). The method carries over unchanged to other GPUs; the absolute numbers,
 and the crossover points between arms, differ from device to device, and the performance page has a tab for each one measured.
 
 Full write-up, method and the per-N tables: [the performance page](https://amasat01.github.io/eagle/content/performance.html).

@@ -1,0 +1,1637 @@
+{
+ "schema": "eagle-ensemble-card/1",
+ "toolchain": {
+  "env_file": null,
+  "python": "3.12.14",
+  "host_compiler": "x86_64-conda-linux-gnu-g++||x86_64-conda-linux-gnu-g++ (conda-forge gcc 14.4.0-7) 14.4.0||cbb2903f09fe9c7f",
+  "nvcc": "Build cuda_12.9.r12.9/compiler.36037853_0"
+ },
+ "device_slug": "nvidia-l4",
+ "script": "benchmarks/perf_card/perf_card.py",
+ "script_md5": "a69639ae0beba0b06b2be0c2466ed819",
+ "common_md5": "3b7b33719b7f33652a1c4f3c0acc83d2",
+ "generated_utc": "2026-11-04T14:02:15Z",
+ "release": "eagle 0.7.3.dev189+gd5f86048f, hawk 0.7.3.dev143+gbde134d1c",
+ "device": {
+  "name": "NVIDIA L4",
+  "compute_capability": "8.9",
+  "sm_count": 58,
+  "clock_rate_hz": 2040000000.0,
+  "memory_clock_hz": 6251000000.0,
+  "memory_bus_width_bits": 192,
+  "total_memory_bytes": 23659151360,
+  "pci_bus_id": "00000000:00:03.0",
+  "driver_version": "580.178.04",
+  "cuda_driver_api": 13000,
+  "cuda_runtime": 12090,
+  "nvidia_smi": {
+   "name": "NVIDIA L4",
+   "driver_version": "580.178.04",
+   "clocks_max_sm": "2040 MHz",
+   "clocks_max_mem": "6251 MHz",
+   "memory_total": "23034 MiB",
+   "power_limit": "72.00 W"
+  }
+ },
+ "peak": {
+  "fp64_flops": 473280000000.0,
+  "fp64_source": "SM count x FP64 FMA per clock per SM (CUDA C++ Programming Guide, Arithmetic Instructions throughput table, compute capability 8.9: 2) x 2 FLOP per FMA x the device's reported maximum clock (cudaDeviceProp::clockRate)",
+  "dram_bytes_per_s": 300048000000.0,
+  "dram_source": "2 x memory clock (cudaDeviceProp::memoryClockRate) x bus width (cudaDeviceProp::memoryBusWidth) / 8"
+ },
+ "software": {
+  "python": "3.12.14",
+  "numpy": "2.5.3",
+  "cupy": "14.2.0",
+  "torch": "2.12.1+cu129",
+  "jax": "0.11.2",
+  "jaxlib": "0.11.2",
+  "warp": "1.17.0",
+  "hawk": "0.7.3.dev143+gbde134d1c",
+  "eagle_commit": "d5f86048f27ff8e61bf50a51508f77803e4d28e8",
+  "hawk_commit": "bde134d1cd239c00b39b842656f20a3df5746ea7-dirty",
+  "platform": "Linux-7.0.0-1014-gcp-x86_64-with-glibc2.39",
+  "cpu": "Intel(R) Xeon(R) CPU @ 2.20GHz",
+  "omp_num_threads": "8"
+ },
+ "kernel_sources_md5": {
+  "rkf78_attempt.cpp": "02ec000c5f12882a675a1163885a730a",
+  "rkf78_attempt.cu": "007c6111ff40759d9babd610d60b8481",
+  "rkf78_attempt.ptx": "519809724da80512f7e31e0098221ddd",
+  "compact/rkf78_attempt.cpp": "500e3ec8282a40864cdd1e629bf3d556",
+  "compact/rkf78_attempt.cu": "753e9dc13cb7bc398eab8a08c8a2b6d7",
+  "compact/rkf78_attempt.ptx": "8315e4517d83588dce2bd55a03b3aa24"
+ },
+ "workload": {
+  "problem": "two-body Kepler orbits (mu = 1, float64) from periapsis, a = 1, e uniform in [0, 0.9] (uniform: e = 0.45), random orientation; adaptive RKF7(8) (Fehlberg's tableau, a mixed absolute/relative max-norm error control and a standard step-size controller).",
+  "scheme_source": "E. Fehlberg, NASA Technical Report R-287 (1968): the RKF7(8) pair",
+  "n_stages": 13,
+  "rtol": 1e-10,
+  "atol": 1e-10,
+  "t_final": 64.0,
+  "t_final_short": 4.0,
+  "h0": 1.0,
+  "safety": 0.9,
+  "min_scale": 0.2,
+  "max_scale": 5.0,
+  "exponents": {
+   "reject": -0.125,
+   "accept": -0.1111111111111111
+  },
+  "max_attempts": 4000,
+  "seed": 20261002,
+  "last_step": "clipped to land on the final time",
+  "flops_per_attempt": 1106,
+  "ops_per_attempt": 1106,
+  "ops_per_attempt_source": "hand count; A100 dynamic count pending",
+  "ops_per_attempt_audit": {
+   "sm_80": null,
+   "sm_89": null
+  },
+  "graph_block": 16
+ },
+ "cells": [
+  [
+   1000000,
+   "spread"
+  ],
+  [
+   1000000,
+   "uniform"
+  ]
+ ],
+ "ns": [
+  1000000
+ ],
+ "distributions": [
+  "fp32",
+  "spread",
+  "uniform"
+ ],
+ "arms": {
+  "eagle_graph_persist": "hawk + eagle persistent",
+  "eagle_simulate": "eagle.simulate (eagle picks the launch mode)",
+  "eagle_graph": "eagle graph",
+  "warp_kernel": "Warp per-thread kernel",
+  "jax_vmap": "JAX jit(vmap(while_loop))",
+  "torch_compiled": "PyTorch torch.compile (reduce-overhead)",
+  "cupy_masked": "CuPy masked",
+  "torch_graphed": "PyTorch + CUDA graph"
+ },
+ "arms_not_run": {},
+ "code_lines": {
+  "blocks": {
+   "shared_scheme": 25,
+   "hawk_kernel": 19,
+   "hawk_kernel_active": 20,
+   "eagle_simulate": 2,
+   "hawk_launch": 3,
+   "cupy_masked": 25,
+   "torch_masked": 27,
+   "torch_graphed": 26,
+   "torch_compiled": 19,
+   "jax_vmap": 25,
+   "warp_kernel": 72,
+   "warp_launch": 2,
+   "eagle_cpu": 2,
+   "eagle_cpu_deploy": 1
+  },
+  "arms": {
+   "eagle_graph": 22,
+   "eagle_graph_compact": 23,
+   "eagle_graph_reorder": 23,
+   "eagle_graph_persist": 22,
+   "eagle_simulate": 21,
+   "cupy_masked": 25,
+   "torch_masked": 27,
+   "torch_graphed": 53,
+   "torch_compiled": 46,
+   "jax_vmap": 25,
+   "warp_kernel": 74,
+   "eagle_cpu": 22
+  },
+  "arm_blocks": {
+   "eagle_graph": [
+    "hawk_kernel",
+    "hawk_launch"
+   ],
+   "eagle_graph_compact": [
+    "hawk_kernel_active",
+    "hawk_launch"
+   ],
+   "eagle_graph_reorder": [
+    "hawk_kernel_active",
+    "hawk_launch"
+   ],
+   "eagle_graph_persist": [
+    "hawk_kernel",
+    "hawk_launch"
+   ],
+   "eagle_simulate": [
+    "hawk_kernel",
+    "eagle_simulate"
+   ],
+   "cupy_masked": [
+    "cupy_masked"
+   ],
+   "torch_masked": [
+    "torch_masked"
+   ],
+   "torch_graphed": [
+    "torch_masked",
+    "torch_graphed"
+   ],
+   "torch_compiled": [
+    "torch_masked",
+    "torch_compiled"
+   ],
+   "jax_vmap": [
+    "jax_vmap"
+   ],
+   "warp_kernel": [
+    "warp_kernel",
+    "warp_launch"
+   ],
+   "eagle_cpu": [
+    "hawk_kernel",
+    "eagle_cpu_deploy",
+    "eagle_cpu"
+   ]
+  },
+  "shared_scheme_lines": 25,
+  "rule": "non-blank, non-comment lines between the `# >>> code:NAME` and `# <<< code:NAME` markers of the script; every arm but Warp also uses the shared scheme block (the RKF7(8) stages, the right-hand side, the error norm), counted once in shared_scheme_lines"
+ },
+ "tail_floor_ms": {
+  "spread": 13.049793000050158,
+  "uniform": 6.463816999939809
+ },
+ "tail_floor": {
+  "spread": {
+   "status": "ok",
+   "wall_s": {
+    "median": 0.013049793000050158,
+    "iqr": 4.350650004880663e-05,
+    "q1": 0.013042639999980565,
+    "q3": 0.013086146500029372,
+    "samples": [
+     0.013122500000008586,
+     0.013035486999910972,
+     0.013049793000050158
+    ]
+   },
+   "rounds": 3
+  },
+  "uniform": {
+   "status": "ok",
+   "wall_s": {
+    "median": 0.006463816999939809,
+    "iqr": 4.027700003916834e-05,
+    "q1": 0.006458061499927226,
+    "q3": 0.006498338499966394,
+    "samples": [
+     0.006532859999992979,
+     0.006463816999939809,
+     0.006452305999914643
+    ]
+   },
+   "rounds": 3
+  }
+ },
+ "fixed_overhead_n": 64,
+ "fixed_overhead": {
+  "eagle_graph_persist": {
+   "status": "ok",
+   "wall_s": {
+    "median": 0.012752142999943317,
+    "iqr": 1.4295500136540795e-05,
+    "q1": 0.012745913999879122,
+    "q3": 0.012760209500015662,
+    "samples": [
+     0.012752142999943317,
+     0.012768276000088008,
+     0.012739684999814926
+    ]
+   },
+   "rounds": 3
+  },
+  "eagle_simulate": {
+   "status": "ok",
+   "wall_s": {
+    "median": 0.012634455999886995,
+    "iqr": 1.4634500075771939e-05,
+    "q1": 0.01263278949988944,
+    "q3": 0.012647423999965213,
+    "samples": [
+     0.01266039200004343,
+     0.012634455999886995,
+     0.012631122999891886
+    ]
+   },
+   "rounds": 3
+  },
+  "eagle_graph": {
+   "status": "ok",
+   "wall_s": {
+    "median": 0.013079545999971742,
+    "iqr": 7.19140000455809e-05,
+    "q1": 0.013073437499997453,
+    "q3": 0.013145351500043034,
+    "samples": [
+     0.013211157000114326,
+     0.013067329000023165,
+     0.013079545999971742
+    ]
+   },
+   "rounds": 3
+  }
+ },
+ "fp32": {
+  "n": 1000000,
+  "arms": [
+   "eagle_graph_persist",
+   "eagle_simulate",
+   "eagle_graph",
+   "warp_kernel"
+  ],
+  "tolerance": 1e-06
+ },
+ "device_fma_per_s": 199106702609.1369,
+ "device_fma_per_s_float32": 12345948798113.246,
+ "samples_per_lane_threads_per_sm": 1536,
+ "eff_sol_over_one": [
+  [
+   "eagle_graph_persist",
+   1000000,
+   "spread"
+  ],
+  [
+   "eagle_simulate",
+   1000000,
+   "spread"
+  ],
+  [
+   "eagle_graph_persist",
+   1000000,
+   "uniform"
+  ],
+  [
+   "eagle_simulate",
+   1000000,
+   "uniform"
+  ],
+  [
+   "eagle_graph",
+   1000000,
+   "uniform"
+  ],
+  [
+   "warp_kernel",
+   1000000,
+   "uniform"
+  ]
+ ],
+ "method": {
+  "rounds": {
+   "min": 3,
+   "max": 9,
+   "stop": "IQR/median <= 2%"
+  },
+  "isolation": "every (arm, N, cell) times in its own fresh process on a clean device; arms run one after another, the SM clock of each row shows the drift between them; the memory pass runs first and an arm out of memory at N is not built at N or larger",
+  "budget": {
+   "per_run_s": 120.0,
+   "per_cell_s": 300.0,
+   "rule": "a warm-up run over the per-run budget makes the arm not_run: budget at that N and larger; timed rounds stop at the per-cell budget (at least one round)"
+  },
+  "statistic": "median, interquartile range (inclusive quartiles)",
+  "warm_up": "one run per arm, excluded; it is also the verification run",
+  "wall": "the integration alone, inputs already on the device, to the device synchronised",
+  "end_to_end": "inputs uploaded, integration, outputs downloaded",
+  "eff_sol": "attempts per second x ops_per_attempt / device_fma_per_s (the register-only DFMA probe run in this script after the arms); ops_per_attempt is the DP-pipe instruction count of one fused eagle attempt (sol_reference.json), audited against cuobjdump in workload.ops_per_attempt_audit",
+  "samples_per_lane": "N / (SMs x resident threads per SM)",
+  "verification": "Every arm, every sample: final time reached exactly; position error against the analytic Kepler state (Newton on Kepler's equation to machine precision) below the stated bound n_acc tol (1 + v_p)(1 + 6 pi n_orbits v_p), derived from the controller's per-step budget and the Kepler along-track amplification (see truth_bound; not fitted). The truth check runs in the arm's own process; the step counts it returns are compared with the reference arm (eagle graph) in the parent: any difference comes from a floating-point difference flipping one accept/reject decision.",
+  "counting_rule": "useful FLOPs = FLOPs per attempt x the attempts the samples actually make (accepted + rejected, summed over samples, as counted by the arm itself); 1106 FLOP per attempt: 1099 counted by running the scheme code (rkf78_stages, kepler_rhs, error_ratio) on a counting number (+, -, x, /, abs, max and sqrt one FLOP each; zero coefficients skipped, as every arm skips them) plus 7 in the controller (the clip, the power, the safety factor, the two-sided clamp, the new step, the new time). The same count for every arm: work a masked arm spends on finished samples, and a batched loop spends past a sample's end, is not useful.",
+  "cpu_threads": "8"
+ },
+ "results": [
+  {
+   "n": 1000000,
+   "distribution": "spread",
+   "arm": "eagle_graph_persist",
+   "status": "ok",
+   "wall_s": {
+    "median": 2.317625413999963,
+    "iqr": 0.00022855350005102082,
+    "q1": 2.317408306999937,
+    "q3": 2.317636860499988,
+    "samples": [
+     2.317191199999911,
+     2.317625413999963,
+     2.317648307000013
+    ]
+   },
+   "rounds": 3,
+   "rule": "iqr<=2%",
+   "sm_clock_mhz": 2040.0,
+   "end_to_end_s": {
+    "median": 2.3828345739999577,
+    "iqr": 0.010706385500043325,
+    "q1": 2.382100823499968,
+    "q3": 2.3928072090000114,
+    "samples": [
+     2.3813670729999785,
+     2.402779844000065,
+     2.3828345739999577
+    ]
+   },
+   "attempts": 498388275.0,
+   "attempt_samples_per_s": 215042634.5816762,
+   "useful_flops_per_s": 237837153847.33386,
+   "eff_sol": null,
+   "eff_sol_note": "pending (reference count)",
+   "samples_per_lane": 11.22485632183908,
+   "build_s": 0.0,
+   "compile_s": null,
+   "kernel_only_s": null,
+   "slot_fill": 0.9472072688936262,
+   "run_mode": "persist",
+   "fraction_of_peak_fp64": 0.5025294832812159
+  },
+  {
+   "n": 1000000,
+   "distribution": "spread",
+   "arm": "eagle_simulate",
+   "status": "ok",
+   "wall_s": {
+    "median": 2.3167289670000173,
+    "iqr": 0.0014719549999995252,
+    "q1": 2.3158478269999705,
+    "q3": 2.31731978199997,
+    "samples": [
+     2.3179105969999227,
+     2.3149666869999237,
+     2.3167289670000173
+    ]
+   },
+   "rounds": 3,
+   "rule": "iqr<=2%",
+   "sm_clock_mhz": 2040.0,
+   "end_to_end_s": {
+    "median": 2.381032637999965,
+    "iqr": 0.008811888000025192,
+    "q1": 2.3809866299999953,
+    "q3": 2.3897985180000205,
+    "samples": [
+     2.381032637999965,
+     2.398564398000076,
+     2.3809406220000255
+    ]
+   },
+   "attempts": 498388275.0,
+   "attempt_samples_per_s": 215125844.28267145,
+   "useful_flops_per_s": 237929183776.6346,
+   "eff_sol": null,
+   "eff_sol_note": "pending (reference count)",
+   "samples_per_lane": 11.22485632183908,
+   "build_s": 0.0,
+   "compile_s": null,
+   "kernel_only_s": null,
+   "slot_fill": null,
+   "run_mode": "persist",
+   "fraction_of_peak_fp64": 0.502723934619326
+  },
+  {
+   "n": 1000000,
+   "distribution": "spread",
+   "arm": "eagle_graph",
+   "status": "ok",
+   "wall_s": {
+    "median": 3.9055569649999597,
+    "iqr": 8.009549998178045e-05,
+    "q1": 3.9055221794999966,
+    "q3": 3.9056022749999784,
+    "samples": [
+     3.9055569649999597,
+     3.905647584999997,
+     3.9054873940000334
+    ]
+   },
+   "rounds": 3,
+   "rule": "iqr<=2%",
+   "sm_clock_mhz": 2040.0,
+   "end_to_end_s": {
+    "median": 3.9879413959999965,
+    "iqr": 0.012136216999977023,
+    "q1": 3.978286113500019,
+    "q3": 3.990422330499996,
+    "samples": [
+     3.9879413959999965,
+     3.9929032649999954,
+     3.9686308310000413
+    ]
+   },
+   "attempts": 498388275.0,
+   "attempt_samples_per_s": 127610038.58511257,
+   "useful_flops_per_s": 141136702675.1345,
+   "eff_sol": 0.708849580780802,
+   "eff_sol_note": null,
+   "samples_per_lane": 11.22485632183908,
+   "build_s": 0.002654806999998982,
+   "compile_s": null,
+   "kernel_only_s": null,
+   "slot_fill": null,
+   "run_mode": "band",
+   "fraction_of_peak_fp64": 0.2982097335089894
+  },
+  {
+   "n": 1000000,
+   "distribution": "spread",
+   "arm": "warp_kernel",
+   "status": "ok",
+   "reference": "ref/nvidia-l4--intel-xeon, date not recorded, SM 2040.0 MHz",
+   "wall_s": {
+    "median": 4.2640843990002395,
+    "iqr": 0.0001946775000760681,
+    "q1": 4.264015548500083,
+    "q3": 4.264210226000159,
+    "samples": [
+     4.2640843990002395,
+     4.264336053000079,
+     4.263946697999927
+    ]
+   },
+   "rounds": 3,
+   "rule": "iqr<=2%",
+   "sm_clock_mhz": 2040.0,
+   "end_to_end_s": {
+    "median": 4.312631408000016,
+    "iqr": 0.002058195999779855,
+    "q1": 4.312375091500144,
+    "q3": 4.314433287499924,
+    "samples": [
+     4.312631408000016,
+     4.316235166999832,
+     4.312118775000272
+    ]
+   },
+   "attempts": 498388277.0,
+   "attempt_samples_per_s": 116880490.71375147,
+   "useful_flops_per_s": 129269822729.40912,
+   "eff_sol": 0.649248975727234,
+   "eff_sol_note": null,
+   "samples_per_lane": 11.22485632183908,
+   "build_s": null,
+   "compile_s": null,
+   "kernel_only_s": null,
+   "slot_fill": null,
+   "run_mode": null,
+   "fraction_of_peak_fp64": 0.27313603517877183
+  },
+  {
+   "n": 1000000,
+   "distribution": "spread",
+   "arm": "jax_vmap",
+   "status": "ok",
+   "reference": "ref/nvidia-l4--intel-xeon, date not recorded, SM 2040.0 MHz",
+   "wall_s": {
+    "median": 7.235396154000227,
+    "iqr": 0.0038852504999340454,
+    "q1": 7.233895747000133,
+    "q3": 7.237780997500067,
+    "samples": [
+     7.240165840999907,
+     7.232395340000039,
+     7.235396154000227
+    ]
+   },
+   "rounds": 3,
+   "rule": "iqr<=2%",
+   "sm_clock_mhz": 2040.0,
+   "end_to_end_s": {
+    "median": 7.381469130999903,
+    "iqr": 0.019441480999830674,
+    "q1": 7.367199927999991,
+    "q3": 7.386641408999822,
+    "samples": [
+     7.39181368699974,
+     7.381469130999903,
+     7.352930725000078
+    ]
+   },
+   "attempts": 498388272.0,
+   "attempt_samples_per_s": 68881960.4887089,
+   "useful_flops_per_s": 76183448300.51204,
+   "eff_sol": 0.3826262365966982,
+   "eff_sol_note": null,
+   "samples_per_lane": 11.22485632183908,
+   "build_s": null,
+   "compile_s": 5.054532413999368,
+   "kernel_only_s": null,
+   "slot_fill": null,
+   "run_mode": null,
+   "fraction_of_peak_fp64": 0.16096908447538885
+  },
+  {
+   "n": 1000000,
+   "distribution": "spread",
+   "arm": "torch_compiled",
+   "status": "failed: no progress",
+   "reference": "ref/nvidia-l4--intel-xeon, date not recorded",
+   "rule": "failed: no progress"
+  },
+  {
+   "n": 1000000,
+   "distribution": "spread",
+   "arm": "cupy_masked",
+   "status": "ok",
+   "reference": "ref/nvidia-l4--intel-xeon, date not recorded, SM 1500.0 MHz",
+   "wall_s": {
+    "median": 52.81037126699994,
+    "iqr": 0.03955595200022799,
+    "q1": 52.79606155449983,
+    "q3": 52.83561750650006,
+    "samples": [
+     52.78175184199972,
+     52.81037126699994,
+     52.86086374600018
+    ]
+   },
+   "rounds": 3,
+   "rule": "iqr<=2%",
+   "sm_clock_mhz": 1500.0,
+   "end_to_end_s": {
+    "median": 52.85910478400001,
+    "iqr": 0.030622505500105035,
+    "q1": 52.8437253484999,
+    "q3": 52.87434785400001,
+    "samples": [
+     52.828345912999794,
+     52.85910478400001,
+     52.889590924000004
+    ]
+   },
+   "attempts": 498388272.0,
+   "attempt_samples_per_s": 9437318.088150464,
+   "useful_flops_per_s": 10437673805.494411,
+   "eff_sol": 0.052422513500132835,
+   "eff_sol_note": null,
+   "samples_per_lane": 11.22485632183908,
+   "build_s": null,
+   "compile_s": null,
+   "kernel_only_s": null,
+   "slot_fill": null,
+   "run_mode": null,
+   "fraction_of_peak_fp64": 0.022053908480169058
+  },
+  {
+   "n": 1000000,
+   "distribution": "spread",
+   "arm": "torch_graphed",
+   "status": "ok",
+   "reference": "ref/nvidia-l4--intel-xeon, date not recorded, SM 1530.0 MHz",
+   "wall_s": {
+    "median": 55.25505503899967,
+    "iqr": 0.0027067645000897755,
+    "q1": 55.25420411799951,
+    "q3": 55.2569108824996,
+    "samples": [
+     55.25505503899967,
+     55.25335319699934,
+     55.25876672599952
+    ]
+   },
+   "rounds": 3,
+   "rule": "iqr<=2%",
+   "sm_clock_mhz": 1530.0,
+   "end_to_end_s": {
+    "median": 55.31739645400012,
+    "iqr": 0.018521528500059503,
+    "q1": 55.30269617299973,
+    "q3": 55.32121770149979,
+    "samples": [
+     55.287995891999344,
+     55.32503894899946,
+     55.31739645400012
+    ]
+   },
+   "attempts": 498388277.0,
+   "attempt_samples_per_s": 9019777.043896375,
+   "useful_flops_per_s": 9975873410.54939,
+   "eff_sol": 0.050103152128097184,
+   "eff_sol_note": null,
+   "samples_per_lane": 11.22485632183908,
+   "build_s": 1.3770969359993614,
+   "compile_s": null,
+   "kernel_only_s": null,
+   "slot_fill": null,
+   "run_mode": null,
+   "fraction_of_peak_fp64": 0.02107816389990997
+  },
+  {
+   "n": 1000000,
+   "distribution": "uniform",
+   "arm": "eagle_graph_persist",
+   "status": "ok",
+   "wall_s": {
+    "median": 1.9733022399999527,
+    "iqr": 0.0002286289999346991,
+    "q1": 1.9732929355000124,
+    "q3": 1.973521564499947,
+    "samples": [
+     1.973283631000072,
+     1.9737408889999415,
+     1.9733022399999527
+    ]
+   },
+   "rounds": 3,
+   "rule": "iqr<=2%",
+   "sm_clock_mhz": 2040.0,
+   "end_to_end_s": {
+    "median": 2.037854564999975,
+    "iqr": 0.010341486500010433,
+    "q1": 2.0375183649999826,
+    "q3": 2.047859851499993,
+    "samples": [
+     2.03718216499999,
+     2.057865138000011,
+     2.037854564999975
+    ]
+   },
+   "attempts": 427620948.0,
+   "attempt_samples_per_s": 216703219.26964936,
+   "useful_flops_per_s": 239673760512.2322,
+   "eff_sol": null,
+   "eff_sol_note": "pending (reference count)",
+   "samples_per_lane": 11.22485632183908,
+   "build_s": 0.0,
+   "compile_s": null,
+   "kernel_only_s": null,
+   "slot_fill": 0.9529340748823661,
+   "run_mode": "persist",
+   "fraction_of_peak_fp64": 0.5064100754568801
+  },
+  {
+   "n": 1000000,
+   "distribution": "uniform",
+   "arm": "eagle_simulate",
+   "status": "ok",
+   "wall_s": {
+    "median": 1.9734070519999705,
+    "iqr": 0.00017607649999717978,
+    "q1": 1.9732839344999888,
+    "q3": 1.973460010999986,
+    "samples": [
+     1.9735129700000016,
+     1.9731608170000072,
+     1.9734070519999705
+    ]
+   },
+   "rounds": 3,
+   "rule": "iqr<=2%",
+   "sm_clock_mhz": 2040.0,
+   "end_to_end_s": {
+    "median": 2.037246105999998,
+    "iqr": 0.010320127499994669,
+    "q1": 2.0364360809999766,
+    "q3": 2.0467562084999713,
+    "samples": [
+     2.0356260559999555,
+     2.056266310999945,
+     2.037246105999998
+    ]
+   },
+   "attempts": 427620948.0,
+   "attempt_samples_per_s": 216691709.68382978,
+   "useful_flops_per_s": 239661030910.31573,
+   "eff_sol": null,
+   "eff_sol_note": "pending (reference count)",
+   "samples_per_lane": 11.22485632183908,
+   "build_s": 0.0,
+   "compile_s": null,
+   "kernel_only_s": null,
+   "slot_fill": null,
+   "run_mode": "persist",
+   "fraction_of_peak_fp64": 0.5063831789011066
+  },
+  {
+   "n": 1000000,
+   "distribution": "uniform",
+   "arm": "eagle_graph",
+   "status": "ok",
+   "wall_s": {
+    "median": 1.9722213359999614,
+    "iqr": 6.710700006351544e-05,
+    "q1": 1.9722074314999531,
+    "q3": 1.9722745385000167,
+    "samples": [
+     1.972327741000072,
+     1.9722213359999614,
+     1.9721935269999449
+    ]
+   },
+   "rounds": 3,
+   "rule": "iqr<=2%",
+   "sm_clock_mhz": 2040.0,
+   "end_to_end_s": {
+    "median": 2.055118834000041,
+    "iqr": 0.012178886500009867,
+    "q1": 2.0450566840000306,
+    "q3": 2.0572355705000405,
+    "samples": [
+     2.055118834000041,
+     2.05935230700004,
+     2.0349945340000204
+    ]
+   },
+   "attempts": 427620954.0,
+   "attempt_samples_per_s": 216821989.59843743,
+   "useful_flops_per_s": 239805120495.8718,
+   "eff_sol": null,
+   "eff_sol_note": "pending (reference count)",
+   "samples_per_lane": 11.22485632183908,
+   "build_s": 0.0027434260000518407,
+   "compile_s": null,
+   "kernel_only_s": null,
+   "slot_fill": null,
+   "run_mode": "band",
+   "fraction_of_peak_fp64": 0.5066876278225824
+  },
+  {
+   "n": 1000000,
+   "distribution": "uniform",
+   "arm": "warp_kernel",
+   "status": "ok",
+   "reference": "ref/nvidia-l4--intel-xeon, date not recorded, SM 2040.0 MHz",
+   "wall_s": {
+    "median": 2.1551686660004634,
+    "iqr": 0.0001047205000759277,
+    "q1": 2.155065606500102,
+    "q3": 2.155170327000178,
+    "samples": [
+     2.1551686660004634,
+     2.1551719879998927,
+     2.154962546999741
+    ]
+   },
+   "rounds": 3,
+   "rule": "iqr<=2%",
+   "sm_clock_mhz": 2040.0,
+   "end_to_end_s": {
+    "median": 2.2037513129998842,
+    "iqr": 0.0012877989997832628,
+    "q1": 2.2037454440001056,
+    "q3": 2.205033242999889,
+    "samples": [
+     2.203739575000327,
+     2.2063151729998935,
+     2.2037513129998842
+    ]
+   },
+   "attempts": 427620955.0,
+   "attempt_samples_per_s": 198416468.16143346,
+   "useful_flops_per_s": 219448613786.5454,
+   "eff_sol": null,
+   "eff_sol_note": "pending (reference count)",
+   "samples_per_lane": 11.22485632183908,
+   "build_s": null,
+   "compile_s": null,
+   "kernel_only_s": null,
+   "slot_fill": null,
+   "run_mode": null,
+   "fraction_of_peak_fp64": 0.46367607713519565
+  },
+  {
+   "n": 1000000,
+   "distribution": "uniform",
+   "arm": "jax_vmap",
+   "status": "ok",
+   "reference": "ref/nvidia-l4--intel-xeon, date not recorded, SM 2040.0 MHz",
+   "wall_s": {
+    "median": 3.3554208309997193,
+    "iqr": 0.0010495814995010733,
+    "q1": 3.3551130470000317,
+    "q3": 3.3561626284995327,
+    "samples": [
+     3.356904425999346,
+     3.354805263000344,
+     3.3554208309997193
+    ]
+   },
+   "rounds": 3,
+   "rule": "iqr<=2%",
+   "sm_clock_mhz": 2040.0,
+   "end_to_end_s": {
+    "median": 3.5028047670002707,
+    "iqr": 0.017454484500376566,
+    "q1": 3.488450346999798,
+    "q3": 3.5059048315001746,
+    "samples": [
+     3.5090048960000786,
+     3.5028047670002707,
+     3.4740959269993255
+    ]
+   },
+   "attempts": 427620955.0,
+   "attempt_samples_per_s": 127441825.1950215,
+   "useful_flops_per_s": 140950658665.6938,
+   "eff_sol": 0.7079151872772044,
+   "eff_sol_note": null,
+   "samples_per_lane": 11.22485632183908,
+   "build_s": null,
+   "compile_s": 5.035257323999758,
+   "kernel_only_s": null,
+   "slot_fill": null,
+   "run_mode": null,
+   "fraction_of_peak_fp64": 0.2978166384924226
+  },
+  {
+   "n": 1000000,
+   "distribution": "uniform",
+   "arm": "torch_compiled",
+   "status": "failed: no progress",
+   "reference": "ref/nvidia-l4--intel-xeon, date not recorded",
+   "rule": "failed: no progress"
+  },
+  {
+   "n": 1000000,
+   "distribution": "uniform",
+   "arm": "cupy_masked",
+   "status": "ok",
+   "reference": "ref/nvidia-l4--intel-xeon, date not recorded, SM 1485.0 MHz",
+   "wall_s": {
+    "median": 25.08398405799926,
+    "iqr": 0.03057310000031066,
+    "q1": 25.070680057999652,
+    "q3": 25.101253157999963,
+    "samples": [
+     25.118522258000667,
+     25.08398405799926,
+     25.057376058000045
+    ]
+   },
+   "rounds": 3,
+   "rule": "iqr<=2%",
+   "sm_clock_mhz": 1485.0,
+   "end_to_end_s": {
+    "median": 25.13385653000023,
+    "iqr": 0.03884524249997412,
+    "q1": 25.110127213500164,
+    "q3": 25.148972456000138,
+    "samples": [
+     25.164088382000045,
+     25.13385653000023,
+     25.086397897000097
+    ]
+   },
+   "attempts": 427620955.0,
+   "attempt_samples_per_s": 17047569.238253925,
+   "useful_flops_per_s": 18854611577.50884,
+   "eff_sol": 0.09469601640946272,
+   "eff_sol_note": null,
+   "samples_per_lane": 11.22485632183908,
+   "build_s": null,
+   "compile_s": null,
+   "kernel_only_s": null,
+   "slot_fill": null,
+   "run_mode": null,
+   "fraction_of_peak_fp64": 0.03983817523983443
+  },
+  {
+   "n": 1000000,
+   "distribution": "uniform",
+   "arm": "torch_graphed",
+   "status": "ok",
+   "reference": "ref/nvidia-l4--intel-xeon, date not recorded, SM 1515.0 MHz",
+   "wall_s": {
+    "median": 26.608198471999458,
+    "iqr": 0.007235144500100432,
+    "q1": 26.607007166999665,
+    "q3": 26.614242311499765,
+    "samples": [
+     26.620286151000073,
+     26.608198471999458,
+     26.605815861999872
+    ]
+   },
+   "rounds": 3,
+   "rule": "iqr<=2%",
+   "sm_clock_mhz": 1515.0,
+   "end_to_end_s": {
+    "median": 26.65860706100011,
+    "iqr": 0.015393467000194505,
+    "q1": 26.655764278999868,
+    "q3": 26.671157746000063,
+    "samples": [
+     26.652921496999625,
+     26.683708431000014,
+     26.65860706100011
+    ]
+   },
+   "attempts": 427620949.0,
+   "attempt_samples_per_s": 16071022.22459733,
+   "useful_flops_per_s": 17774550580.404648,
+   "eff_sol": 0.08927148281541067,
+   "eff_sol_note": null,
+   "samples_per_lane": 11.22485632183908,
+   "build_s": 1.372045834000346,
+   "compile_s": null,
+   "kernel_only_s": null,
+   "slot_fill": null,
+   "run_mode": null,
+   "fraction_of_peak_fp64": 0.03755609909652774
+  },
+  {
+   "n": 1000000,
+   "distribution": "fp32",
+   "arm": "eagle_graph_persist",
+   "status": "ok",
+   "wall_s": {
+    "median": 0.022496777000014845,
+    "iqr": 9.938049998936549e-05,
+    "q1": 0.022408844500034775,
+    "q3": 0.02250822500002414,
+    "samples": [
+     0.022496777000014845,
+     0.022519673000033436,
+     0.022320912000054705
+    ]
+   },
+   "rounds": 3,
+   "rule": "iqr<=2%",
+   "sm_clock_mhz": 2010.0,
+   "end_to_end_s": {
+    "median": 0.07252150900001197,
+    "iqr": 0.011675578999984282,
+    "q1": 0.07034629750000931,
+    "q3": 0.0820218764999936,
+    "samples": [
+     0.07252150900001197,
+     0.09152224399997522,
+     0.06817108600000665
+    ]
+   },
+   "attempts": 205073415.0,
+   "attempt_samples_per_s": 9115679770.478441,
+   "useful_flops_per_s": 10081941826149.156,
+   "eff_sol": 0.8166194426215275,
+   "eff_sol_note": null,
+   "samples_per_lane": 11.22485632183908,
+   "build_s": 0.0,
+   "compile_s": null,
+   "kernel_only_s": null,
+   "slot_fill": 0.8986345810808612,
+   "run_mode": "persist",
+   "fraction_of_peak_fp64": 21.302277354101495
+  },
+  {
+   "n": 1000000,
+   "distribution": "fp32",
+   "arm": "eagle_simulate",
+   "status": "ok",
+   "wall_s": {
+    "median": 0.022314982000011696,
+    "iqr": 2.301349996969293e-05,
+    "q1": 0.02229873550004413,
+    "q3": 0.022321749000013824,
+    "samples": [
+     0.022314982000011696,
+     0.022328516000015952,
+     0.022282489000076566
+    ]
+   },
+   "rounds": 3,
+   "rule": "iqr<=2%",
+   "sm_clock_mhz": 2040.0,
+   "end_to_end_s": {
+    "median": 0.07400757400000657,
+    "iqr": 0.011818619999985458,
+    "q1": 0.0711449190000053,
+    "q3": 0.08296353899999076,
+    "samples": [
+     0.07400757400000657,
+     0.09191950399997495,
+     0.06828226400000403
+    ]
+   },
+   "attempts": 205073415.0,
+   "attempt_samples_per_s": 9189943106.379944,
+   "useful_flops_per_s": 10164077075656.217,
+   "eff_sol": 0.8232722524500936,
+   "eff_sol_note": null,
+   "samples_per_lane": 11.22485632183908,
+   "build_s": 0.0,
+   "compile_s": null,
+   "kernel_only_s": null,
+   "slot_fill": null,
+   "run_mode": "persist",
+   "fraction_of_peak_fp64": 21.475822083452115
+  },
+  {
+   "n": 1000000,
+   "distribution": "fp32",
+   "arm": "eagle_graph",
+   "status": "ok",
+   "wall_s": {
+    "median": 0.03824769850007215,
+    "iqr": 0.0007213669999828198,
+    "q1": 0.037868026500063934,
+    "q3": 0.038589393500046754,
+    "samples": [
+     0.03725356500001453,
+     0.039089923999995335,
+     0.0380728470000804,
+     0.03842255000006389
+    ]
+   },
+   "rounds": 4,
+   "rule": "iqr<=2%",
+   "sm_clock_mhz": 1980.0,
+   "end_to_end_s": {
+    "median": 0.0979497265000191,
+    "iqr": 0.020909953999961317,
+    "q1": 0.08716473625003118,
+    "q3": 0.1080746902499925,
+    "samples": [
+     0.08827530400003525,
+     0.10942631399996117,
+     0.08383303300001899,
+     0.10762414900000294
+    ]
+   },
+   "attempts": 205074079.0,
+   "attempt_samples_per_s": 5361736445.386724,
+   "useful_flops_per_s": 5930080508597.718,
+   "eff_sol": 0.4803260248012671,
+   "eff_sol_note": null,
+   "samples_per_lane": 11.22485632183908,
+   "build_s": 0.002499897999996392,
+   "compile_s": null,
+   "kernel_only_s": null,
+   "slot_fill": null,
+   "run_mode": "band",
+   "fraction_of_peak_fp64": 12.529750905590175
+  },
+  {
+   "n": 1000000,
+   "distribution": "fp32",
+   "arm": "warp_kernel",
+   "status": "ok",
+   "reference": "ref/nvidia-l4--intel-xeon, date not recorded, SM 1777.5 MHz",
+   "wall_s": {
+    "median": 0.0406427910002094,
+    "iqr": 0.0013959430007162155,
+    "q1": 0.039927459999489656,
+    "q3": 0.04132340300020587,
+    "samples": [
+     0.03791513600026519,
+     0.03929539399996429,
+     0.04046842600018863,
+     0.040708656000788324,
+     0.039927459999489656,
+     0.04153645900078118,
+     0.0406427910002094,
+     0.04132340300020587,
+     0.04136843499964016
+    ]
+   },
+   "rounds": 9,
+   "rule": "rounds_max",
+   "sm_clock_mhz": 1777.5,
+   "end_to_end_s": {
+    "median": 0.07461921599951893,
+    "iqr": 0.012524569999186497,
+    "q1": 0.07069925900032104,
+    "q3": 0.08322382899950753,
+    "samples": [
+     0.07461921599951893,
+     0.08505750299991632,
+     0.07069925900032104,
+     0.08064832199943339,
+     0.06961100399985298,
+     0.08322382899950753,
+     0.07049137800004246,
+     0.08336607399996865,
+     0.07096784700024727
+    ]
+   },
+   "attempts": 205084850.0,
+   "attempt_samples_per_s": 5046032640.793379,
+   "useful_flops_per_s": 5580912100717.477,
+   "eff_sol": 0.4520440018000376,
+   "eff_sol_note": null,
+   "samples_per_lane": 11.22485632183908,
+   "build_s": null,
+   "compile_s": null,
+   "kernel_only_s": null,
+   "slot_fill": null,
+   "run_mode": null,
+   "fraction_of_peak_fp64": 11.791988042421984
+  }
+ ],
+ "per_n": [
+  {
+   "n": 1000000,
+   "distribution": "spread",
+   "reference_arm": "eagle_graph",
+   "agreement": {
+    "eagle_graph_persist": {
+     "max_position_error_vs_truth": 2.2588153508625974e-07,
+     "median_position_error_vs_truth": 6.233503030530761e-08,
+     "max_velocity_error_vs_truth": 1.8171343220867235e-07,
+     "max_error_over_bound": 0.006640134125511785,
+     "samples_with_step_counts_differing_from_reference": 0,
+     "max_abs_accepted_difference": 0,
+     "max_abs_rejected_difference": 0,
+     "max_position_difference_vs_reference_same_counts": 0.0,
+     "attempts_total": 498388275.0
+    },
+    "eagle_simulate": {
+     "max_position_error_vs_truth": 2.2588153508625974e-07,
+     "median_position_error_vs_truth": 6.233503030530761e-08,
+     "max_velocity_error_vs_truth": 1.8171343220867235e-07,
+     "max_error_over_bound": 0.006640134125511785,
+     "samples_with_step_counts_differing_from_reference": 0,
+     "max_abs_accepted_difference": 0,
+     "max_abs_rejected_difference": 0,
+     "max_position_difference_vs_reference_same_counts": 0.0,
+     "attempts_total": 498388275.0
+    },
+    "eagle_graph": {
+     "max_position_error_vs_truth": 2.258800645248211e-07,
+     "median_position_error_vs_truth": 6.233501706092596e-08,
+     "max_velocity_error_vs_truth": 1.8171224621029356e-07,
+     "max_error_over_bound": 0.006640145119410386,
+     "samples_with_step_counts_differing_from_reference": 0,
+     "max_abs_accepted_difference": 0,
+     "max_abs_rejected_difference": 0,
+     "max_position_difference_vs_reference_same_counts": 0.0,
+     "attempts_total": 498388275.0
+    },
+    "warp_kernel": {
+     "max_position_error_vs_truth": 2.2588223792298914e-07,
+     "median_position_error_vs_truth": 6.23349983594834e-08,
+     "max_velocity_error_vs_truth": 1.8171400360817314e-07,
+     "max_error_over_bound": 0.006640134083603818,
+     "samples_with_step_counts_differing_from_reference": 2,
+     "max_abs_accepted_difference": 1,
+     "max_abs_rejected_difference": 2,
+     "max_position_difference_vs_reference_same_counts": 0.0,
+     "attempts_total": 498388277.0
+    },
+    "jax_vmap": {
+     "max_position_error_vs_truth": 2.2588268953795758e-07,
+     "median_position_error_vs_truth": 6.23349202451044e-08,
+     "max_velocity_error_vs_truth": 1.8171436064089863e-07,
+     "max_error_over_bound": 0.006640134755748264,
+     "samples_with_step_counts_differing_from_reference": 4,
+     "max_abs_accepted_difference": 1,
+     "max_abs_rejected_difference": 2,
+     "max_position_difference_vs_reference_same_counts": 0.0,
+     "attempts_total": 498388272.0
+    },
+    "cupy_masked": {
+     "max_position_error_vs_truth": 2.2588268953795758e-07,
+     "median_position_error_vs_truth": 6.23349202451044e-08,
+     "max_velocity_error_vs_truth": 1.8171436064089863e-07,
+     "max_error_over_bound": 0.006640134755748264,
+     "samples_with_step_counts_differing_from_reference": 4,
+     "max_abs_accepted_difference": 1,
+     "max_abs_rejected_difference": 2,
+     "max_position_difference_vs_reference_same_counts": 0.0,
+     "attempts_total": 498388272.0
+    },
+    "torch_graphed": {
+     "max_position_error_vs_truth": 2.258813410656593e-07,
+     "median_position_error_vs_truth": 6.233500842779022e-08,
+     "max_velocity_error_vs_truth": 1.81713277886555e-07,
+     "max_error_over_bound": 0.00664014031511354,
+     "samples_with_step_counts_differing_from_reference": 2,
+     "max_abs_accepted_difference": 1,
+     "max_abs_rejected_difference": 2,
+     "max_position_difference_vs_reference_same_counts": 0.0,
+     "attempts_total": 498388277.0
+    }
+   },
+   "steps": {
+    "accepted": {
+     "min": 322.0,
+     "p50": 371.0,
+     "p90": 571.0,
+     "max": 693.0,
+     "mean": 411.909365,
+     "sum": 411909365.0
+    },
+    "rejected": {
+     "min": 1.0,
+     "p50": 59.0,
+     "p90": 201.0,
+     "max": 264.0,
+     "mean": 86.47891,
+     "sum": 86478910.0
+    }
+   }
+  },
+  {
+   "n": 1000000,
+   "distribution": "uniform",
+   "reference_arm": "eagle_graph",
+   "agreement": {
+    "eagle_graph_persist": {
+     "max_position_error_vs_truth": 7.37325479090534e-08,
+     "median_position_error_vs_truth": 3.792476071817615e-08,
+     "max_velocity_error_vs_truth": 7.132354080671895e-08,
+     "max_error_over_bound": 0.002475401395957483,
+     "samples_with_step_counts_differing_from_reference": 7,
+     "max_abs_accepted_difference": 0,
+     "max_abs_rejected_difference": 3,
+     "max_position_difference_vs_reference_same_counts": 0.0,
+     "attempts_total": 427620948.0
+    },
+    "eagle_simulate": {
+     "max_position_error_vs_truth": 7.37325479090534e-08,
+     "median_position_error_vs_truth": 3.792476071817615e-08,
+     "max_velocity_error_vs_truth": 7.132354080671895e-08,
+     "max_error_over_bound": 0.002475401395957483,
+     "samples_with_step_counts_differing_from_reference": 7,
+     "max_abs_accepted_difference": 0,
+     "max_abs_rejected_difference": 3,
+     "max_position_difference_vs_reference_same_counts": 0.0,
+     "attempts_total": 427620948.0
+    },
+    "eagle_graph": {
+     "max_position_error_vs_truth": 7.373235647566677e-08,
+     "median_position_error_vs_truth": 3.7924752581992133e-08,
+     "max_velocity_error_vs_truth": 7.132335300662776e-08,
+     "max_error_over_bound": 0.0024753949690200457,
+     "samples_with_step_counts_differing_from_reference": 0,
+     "max_abs_accepted_difference": 0,
+     "max_abs_rejected_difference": 0,
+     "max_position_difference_vs_reference_same_counts": 0.0,
+     "attempts_total": 427620954.0
+    },
+    "warp_kernel": {
+     "max_position_error_vs_truth": 7.373244502572246e-08,
+     "median_position_error_vs_truth": 3.7924690979751434e-08,
+     "max_velocity_error_vs_truth": 7.132343934938827e-08,
+     "max_error_over_bound": 0.0024753979418853226,
+     "samples_with_step_counts_differing_from_reference": 6,
+     "max_abs_accepted_difference": 1,
+     "max_abs_rejected_difference": 2,
+     "max_position_difference_vs_reference_same_counts": 0.0,
+     "attempts_total": 427620955.0
+    },
+    "jax_vmap": {
+     "max_position_error_vs_truth": 7.373251420975492e-08,
+     "median_position_error_vs_truth": 3.792470225778747e-08,
+     "max_velocity_error_vs_truth": 7.132350861013549e-08,
+     "max_error_over_bound": 0.002475400264580732,
+     "samples_with_step_counts_differing_from_reference": 5,
+     "max_abs_accepted_difference": 0,
+     "max_abs_rejected_difference": 2,
+     "max_position_difference_vs_reference_same_counts": 0.0,
+     "attempts_total": 427620955.0
+    },
+    "cupy_masked": {
+     "max_position_error_vs_truth": 7.373251420975492e-08,
+     "median_position_error_vs_truth": 3.792470225778747e-08,
+     "max_velocity_error_vs_truth": 7.132350861013549e-08,
+     "max_error_over_bound": 0.002475400264580732,
+     "samples_with_step_counts_differing_from_reference": 5,
+     "max_abs_accepted_difference": 0,
+     "max_abs_rejected_difference": 2,
+     "max_position_difference_vs_reference_same_counts": 0.0,
+     "attempts_total": 427620955.0
+    },
+    "torch_graphed": {
+     "max_position_error_vs_truth": 7.37325073837775e-08,
+     "median_position_error_vs_truth": 3.792481871962911e-08,
+     "max_velocity_error_vs_truth": 7.132350087448318e-08,
+     "max_error_over_bound": 0.0024754000354141764,
+     "samples_with_step_counts_differing_from_reference": 6,
+     "max_abs_accepted_difference": 1,
+     "max_abs_rejected_difference": 3,
+     "max_position_difference_vs_reference_same_counts": 0.0,
+     "attempts_total": 427620949.0
+    }
+   },
+   "steps": {
+    "accepted": {
+     "min": 361.0,
+     "p50": 370.0,
+     "p90": 374.0,
+     "max": 377.0,
+     "mean": 370.216517,
+     "sum": 370216517.0
+    },
+    "rejected": {
+     "min": 32.0,
+     "p50": 56.0,
+     "p90": 71.0,
+     "max": 82.0,
+     "mean": 57.404437,
+     "sum": 57404437.0
+    }
+   }
+  },
+  {
+   "n": 1000000,
+   "distribution": "fp32",
+   "reference_arm": "eagle_graph",
+   "agreement": {
+    "eagle_graph_persist": {
+     "max_position_error_vs_truth": 0.00671370105498203,
+     "median_position_error_vs_truth": 0.0014330941593163162,
+     "max_velocity_error_vs_truth": 0.00546237920507037,
+     "max_error_over_bound": 0.03763028098810008,
+     "samples_with_step_counts_differing_from_reference": 285433,
+     "max_abs_accepted_difference": 3,
+     "max_abs_rejected_difference": 11,
+     "max_position_difference_vs_reference_same_counts": 0.0,
+     "attempts_total": 205073415.0
+    },
+    "eagle_simulate": {
+     "max_position_error_vs_truth": 0.00671370105498203,
+     "median_position_error_vs_truth": 0.0014330941593163162,
+     "max_velocity_error_vs_truth": 0.00546237920507037,
+     "max_error_over_bound": 0.03763028098810008,
+     "samples_with_step_counts_differing_from_reference": 285433,
+     "max_abs_accepted_difference": 3,
+     "max_abs_rejected_difference": 11,
+     "max_position_difference_vs_reference_same_counts": 0.0,
+     "attempts_total": 205073415.0
+    },
+    "eagle_graph": {
+     "max_position_error_vs_truth": 0.006581112748548784,
+     "median_position_error_vs_truth": 0.0014332598088911581,
+     "max_velocity_error_vs_truth": 0.005359040813915259,
+     "max_error_over_bound": 0.03733728860253995,
+     "samples_with_step_counts_differing_from_reference": 0,
+     "max_abs_accepted_difference": 0,
+     "max_abs_rejected_difference": 0,
+     "max_position_difference_vs_reference_same_counts": 0.0,
+     "attempts_total": 205074079.0
+    },
+    "warp_kernel": {
+     "max_position_error_vs_truth": 0.00664529264824994,
+     "median_position_error_vs_truth": 0.0014298227499133797,
+     "max_velocity_error_vs_truth": 0.0054114328453459485,
+     "max_error_over_bound": 0.03920652295443505,
+     "samples_with_step_counts_differing_from_reference": 333555,
+     "max_abs_accepted_difference": 2,
+     "max_abs_rejected_difference": 11,
+     "max_position_difference_vs_reference_same_counts": 0.0,
+     "attempts_total": 205084850.0
+    }
+   },
+   "steps": {
+    "accepted": {
+     "min": 107.0,
+     "p50": 139.0,
+     "p90": 218.0,
+     "max": 268.0,
+     "mean": 151.925527,
+     "sum": 151925527.0
+    },
+    "rejected": {
+     "min": 1.0,
+     "p50": 54.0,
+     "p90": 92.0,
+     "max": 124.0,
+     "mean": 53.148552,
+     "sum": 53148552.0
+    }
+   }
+  }
+ ],
+ "memory": {
+  "method": "A separate pass after the timing pass. Each (arm, N) runs in a fresh process: imports, the CUDA context created by one tiny device operation, then the baseline read, before the arm builds or allocates anything; then the arm's kernels built and a warm-up run on a 64-sample batch (every compile happens here; JAX also compiles for shape N), so every library's pool reserved during the warm-up counts in the reading; CuPy's pools and PyTorch's cache trimmed after the warm-up; then the arm built for N (eagle's graph, PyTorch's captured graph) and one full run with upload and download, the device read every 2 ms throughout (the masked arms hand their temporaries back after each run, so a reading after it would miss them). Device: the most memory NVML accounted to the process on the timed GPU during the build and the run, minus the baseline. Caveats: each allocator's rounding and growth policy count (JAX's allocator grows in regions that can exceed the request; PyTorch rounds blocks up and a captured CUDA graph keeps a private pool; Warp's stream-ordered pool reserves in chunks of tens of MiB, its release threshold set to 0 after the warm-up); the driver accounts in pages of about 2 MiB, so small-N rows read 0 or one page. Host: the peak resident set (VmHWM, reset to the current RSS at the host baseline, taken after the warm-up) minus the baseline RSS. Minimum: the planes the workload needs, N x (8 float64 planes (state, time, step) x 8 bytes + 2 counters x 4 bytes) = N x 72 bytes.",
+  "rows": [
+   {
+    "device_baseline_bytes": 199229440,
+    "device_after_bytes": 306184192,
+    "device_peak_bytes": 106954752,
+    "device_source": "nvml per-process used memory",
+    "run_seconds": 2.415983202999996,
+    "host_peak_bytes": 240730112,
+    "n": 1000000,
+    "arm": "eagle_graph_persist",
+    "minimum_bytes": 72000000
+   },
+   {
+    "device_baseline_bytes": 199229440,
+    "device_after_bytes": 306184192,
+    "device_peak_bytes": 106954752,
+    "device_source": "nvml per-process used memory",
+    "run_seconds": 2.4159316829999398,
+    "host_peak_bytes": 241778688,
+    "n": 1000000,
+    "arm": "eagle_simulate",
+    "minimum_bytes": 72000000
+   },
+   {
+    "device_baseline_bytes": 199229440,
+    "device_after_bytes": 306184192,
+    "device_peak_bytes": 106954752,
+    "device_source": "nvml per-process used memory",
+    "run_seconds": 4.002609661999941,
+    "host_peak_bytes": 241647616,
+    "n": 1000000,
+    "arm": "eagle_graph",
+    "minimum_bytes": 72000000
+   },
+   {
+    "device_baseline_bytes": 199229440,
+    "device_after_bytes": 297795584,
+    "device_peak_bytes": 98566144,
+    "device_source": "nvml per-process used memory",
+    "host_peak_bytes": 192409600,
+    "n": 1000000,
+    "arm": "warp_kernel",
+    "minimum_bytes": 72000000,
+    "reference": "ref/nvidia-l4--intel-xeon, date not recorded"
+   },
+   {
+    "device_baseline_bytes": 199229440,
+    "device_after_bytes": 478150656,
+    "device_peak_bytes": 278921216,
+    "device_source": "nvml per-process used memory",
+    "host_peak_bytes": 322265088,
+    "n": 1000000,
+    "arm": "jax_vmap",
+    "minimum_bytes": 72000000,
+    "reference": "ref/nvidia-l4--intel-xeon, date not recorded"
+   },
+   {
+    "device_baseline_bytes": 199229440,
+    "device_after_bytes": 2151677952,
+    "device_peak_bytes": 1952448512,
+    "device_source": "nvml per-process used memory",
+    "host_peak_bytes": 1426685952,
+    "n": 1000000,
+    "arm": "torch_compiled",
+    "minimum_bytes": 72000000,
+    "reference": "ref/nvidia-l4--intel-xeon, date not recorded"
+   },
+   {
+    "device_baseline_bytes": 199229440,
+    "device_after_bytes": 281018368,
+    "device_peak_bytes": 981467136,
+    "device_source": "nvml per-process used memory",
+    "host_peak_bytes": 278417408,
+    "n": 1000000,
+    "arm": "cupy_masked",
+    "minimum_bytes": 72000000,
+    "reference": "ref/nvidia-l4--intel-xeon, date not recorded"
+   },
+   {
+    "device_baseline_bytes": 199229440,
+    "device_after_bytes": 1604321280,
+    "device_peak_bytes": 1405091840,
+    "device_source": "nvml per-process used memory",
+    "host_peak_bytes": 252350464,
+    "n": 1000000,
+    "arm": "torch_graphed",
+    "minimum_bytes": 72000000,
+    "reference": "ref/nvidia-l4--intel-xeon, date not recorded"
+   },
+   {
+    "device_baseline_bytes": 199229440,
+    "device_after_bytes": 968884224,
+    "device_peak_bytes": 769654784,
+    "device_source": "nvml per-process used memory",
+    "run_seconds": 23.68269877599994,
+    "host_peak_bytes": 2362036224,
+    "n": 10000000,
+    "arm": "eagle_graph_persist",
+    "minimum_bytes": 720000000
+   },
+   {
+    "device_baseline_bytes": 199229440,
+    "device_after_bytes": 968884224,
+    "device_peak_bytes": 769654784,
+    "device_source": "nvml per-process used memory",
+    "run_seconds": 23.681291701999953,
+    "host_peak_bytes": 2361802752,
+    "n": 10000000,
+    "arm": "eagle_simulate",
+    "minimum_bytes": 720000000
+   },
+   {
+    "device_baseline_bytes": 199229440,
+    "device_after_bytes": 968884224,
+    "device_peak_bytes": 769654784,
+    "device_source": "nvml per-process used memory",
+    "run_seconds": 39.68864651299998,
+    "host_peak_bytes": 2361896960,
+    "n": 10000000,
+    "arm": "eagle_graph",
+    "minimum_bytes": 720000000
+   },
+   {
+    "device_baseline_bytes": 199229440,
+    "device_after_bytes": 1002438656,
+    "device_peak_bytes": 803209216,
+    "device_source": "nvml per-process used memory",
+    "host_peak_bytes": 1920286720,
+    "n": 10000000,
+    "arm": "warp_kernel",
+    "minimum_bytes": 720000000,
+    "reference": "ref/nvidia-l4--intel-xeon, date not recorded"
+   },
+   {
+    "device_baseline_bytes": 199229440,
+    "device_after_bytes": 6652166144,
+    "device_peak_bytes": 6452936704,
+    "device_source": "nvml per-process used memory",
+    "host_peak_bytes": 3228356608,
+    "n": 10000000,
+    "arm": "jax_vmap",
+    "minimum_bytes": 720000000,
+    "reference": "ref/nvidia-l4--intel-xeon, date not recorded"
+   },
+   {
+    "device_baseline_bytes": 199229440,
+    "device_after_bytes": 11572084736,
+    "device_peak_bytes": 11372855296,
+    "device_source": "nvml per-process used memory",
+    "host_peak_bytes": 2560299008,
+    "n": 10000000,
+    "arm": "torch_compiled",
+    "minimum_bytes": 720000000,
+    "reference": "ref/nvidia-l4--intel-xeon, date not recorded"
+   },
+   {
+    "timed_out": true,
+    "device_peak_bytes": null,
+    "host_peak_bytes": null,
+    "n": 10000000,
+    "arm": "cupy_masked",
+    "minimum_bytes": 720000000,
+    "reference": "ref/nvidia-l4--intel-xeon, date not recorded"
+   },
+   {
+    "timed_out": true,
+    "device_peak_bytes": null,
+    "host_peak_bytes": null,
+    "n": 10000000,
+    "arm": "torch_graphed",
+    "minimum_bytes": 720000000,
+    "reference": "ref/nvidia-l4--intel-xeon, date not recorded"
+   }
+  ]
+ },
+ "torch_compile_note": null,
+ "fit": {
+  "intro": "Each tool here solves the same 13-stage adaptive problem to the same tolerance and agrees with the analytic orbit; they differ in how the per-sample control flow is written and run. Numbers below are at N = 1,000,000; the fastest arm there is eagle.simulate (eagle picks the launch mode) (2.32 s).",
+  "arms": {
+   "eagle_graph_persist": "the plain (not active-set) attempt kernel, forced through hawk's persist entry: one launch, no graph, no map, no policy kernel -- a grid of SMs blocks of 256 lanes steals the next unfinished sample off a counter when their own finishes: 2.32 s; the eagle graph takes 1.69\u00d7 as long.",
+   "eagle_simulate": "the same kernel through eagle.simulate, its state and parameters by name (21 lines with the kernel): 2.32 s; the eagle graph takes 1.69\u00d7 as long.",
+   "eagle_graph": "the attempt is per-sample scalar code (22 lines with its launch; the kernel finishes its own samples), one kernel per attempt looped on the device: 3.91 s.",
+   "warp_kernel": "an explicit per-thread loop in a Python-embedded kernel language (74 lines, its own stages): 4.26 s.",
+   "jax_vmap": "writes the per-sample loop directly (25 lines) and compiles the whole batch into one executable: 7.24 s.",
+   "torch_compiled": "compiles a block of 16 masked attempts with torch.compile (reduce-overhead): \u2013; eager PyTorch takes \u2013 as long.",
+   "cupy_masked": "array code in the NumPy style (25 lines), the control flow as masks over the batch: 52.8 s.",
+   "torch_graphed": "records 16 attempts as a CUDA graph and replays them, removing per-kernel launch cost: 55.3 s; eager PyTorch takes \u2013 as long."
+  }
+ },
+ "wall_s": 212.36292904200002
+}

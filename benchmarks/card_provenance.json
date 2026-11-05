@@ -1,6 +1,43 @@
 {
  "schema": "eagle-card-provenance-1",
- "release": "eagle 0.6.0, hawk 0.5.0",
+ "release": "eagle 0.7.3, hawk 0.7.3",
  "about": "For each committed card file, the eagle and hawk commit its session ran. Recorded from the session logs; a null would carry its reason.",
- "cards": {}
+ "cards": {
+  "benchmarks/perf_card/card_nvidia-h100-nvl.json": {
+   "eagle_version": "0.7.3.dev191+g5ff969995",
+   "eagle": "af0ce44f658cf2b682f89df97c1724b7901d7ab8",
+   "hawk": "336723a85e9890656564a703b72e06f9f40744aa-dirty",
+   "source": "cards073/073h100/session.log and the card's software block"
+  },
+  "benchmarks/perf_card/card_nvidia-l4.json": {
+   "eagle_version": "0.7.3.dev189+gd5f86048f",
+   "eagle": "d5f86048f27ff8e61bf50a51508f77803e4d28e8",
+   "hawk": "bde134d1cd239c00b39b842656f20a3df5746ea7-dirty",
+   "source": "cards073/073l4o/l4/session.log and the card's software block"
+  },
+  "benchmarks/perf_card/cpu_card_amd-epyc-9b45.json": {
+   "eagle_version": "0.7.3.dev191+g5ff969995",
+   "eagle": "5ff9699950a6133a55e2e3b3fafb2a03955f7bb5",
+   "hawk": "336723a85e9890656564a703b72e06f9f40744aa",
+   "source": "cards073/073z5c/zen5/session.log and the card's software block"
+  },
+  "benchmarks/perf_card/feature_card_cpu-amd-epyc-9b45.json": {
+   "eagle_version": "0.7.3.dev191+g5ff969995",
+   "eagle": "5ff9699950a6133a55e2e3b3fafb2a03955f7bb5",
+   "hawk": "336723a85e9890656564a703b72e06f9f40744aa",
+   "source": "cards073/073z5c/zen5/session.log and the card's software block"
+  },
+  "benchmarks/perf_card/feature_card_nvidia-h100-nvl.json": {
+   "eagle_version": "0.7.3.dev191+g5ff969995",
+   "eagle": "af0ce44f658cf2b682f89df97c1724b7901d7ab8",
+   "hawk": "336723a85e9890656564a703b72e06f9f40744aa-dirty",
+   "source": "cards073/073h100/session.log and the card's software block"
+  },
+  "benchmarks/perf_card/feature_card_nvidia-l4.json": {
+   "eagle_version": "0.7.3.dev189+gd5f86048f",
+   "eagle": "d5f86048f27ff8e61bf50a51508f77803e4d28e8",
+   "hawk": "bde134d1cd239c00b39b842656f20a3df5746ea7-dirty",
+   "source": "cards073/073l4o/l4/session.log and the card's software block"
+  }
+ }
 }

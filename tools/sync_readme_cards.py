@@ -68,7 +68,7 @@ PROSE_FILES = (
     "docs/content/performance/reading.md",
     "docs/content/performance/mechanism.md",
 )
-REFERENCE_CARD = _REPO / "benchmarks" / "perf_card" / "card_nvidia-a100-sxm4-40gb.json"
+REFERENCE_CARD = _REPO / "benchmarks" / "perf_card" / "card_nvidia-h100-nvl.json"
 _DOCS_BASE = "https://amasat01.github.io/eagle/content/performance.html"
 NO_CARD = "No committed ensemble card yet."
 
@@ -114,8 +114,8 @@ def render_table(card: dict) -> str:
 #: The CPU block's arms: the same five tools the landing page charts (every
 #: other arm lives on the full card). Kept in lockstep with
 #: ``python/tests/test_perf_card_table.py``.
-CPU_ARMS = ("eagle_cpu", "eagle_cpu1", "numba_prange", "jax_vmap")
-CPU_BASE_ARM = "eagle_cpu"
+CPU_ARMS = ("eagle_cpu8", "eagle_cpu1", "numba_prange", "jax_vmap")
+CPU_BASE_ARM = "eagle_cpu8"
 CPU_SPEC_KEY = "perf_card_cpu"
 
 
@@ -134,8 +134,7 @@ def render_cpu_table(card: dict) -> str:
 
 
 def render_cpu_heading(card: dict, path: pathlib.Path) -> str:
-    cpu = card["cpu"]
-    return (f"**On a CPU alone: {cc.cpu_display_name(path, cpu['model'])}, {cpu['cores']} cores, "
+    return (f"**On a CPU alone: {cc.cpu_display_name(path, card['cpu'])}, {card['logical_cpus']} logical CPUs, "
             f"card of {card['generated_utc'][:10]}**")
 
 

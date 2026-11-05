@@ -72,7 +72,7 @@ import _card_common as cc  # noqa: E402
 #: The README headline: ONE line to change the device / sizes it quotes.
 #: ``ns`` is (the headline N, the N shown beside it).
 HEADLINE = {
-    "dev": "a100",
+    "dev": "h100",
     "ns": (1_000_000, 10_000_000),
     "dist": "spread",
 }

@@ -1,0 +1,1294 @@
+{
+ "schema": "eagle-feature-card/2",
+ "script": "benchmarks/perf_card/feature_card.py",
+ "script_md5": "13447caaa815e985758d3889351e7554",
+ "common_md5": "3b7b33719b7f33652a1c4f3c0acc83d2",
+ "generated_utc": "2026-11-04T18:54:17Z",
+ "release": "eagle 0.7.3.dev191+g5ff969995, hawk 0.7.3.dev152+g336723a85",
+ "device_slug": "cpu-amd-epyc-9b45",
+ "device": null,
+ "peak": null,
+ "software": {
+  "python": "3.12.14",
+  "numpy": "2.4.2",
+  "cupy": null,
+  "torch": "2.12.1+cpu",
+  "jax": "0.11.2",
+  "jaxlib": "0.11.2",
+  "warp": null,
+  "hawk": "0.7.3.dev152+g336723a85",
+  "eagle_commit": "5ff9699950a6133a55e2e3b3fafb2a03955f7bb5",
+  "hawk_commit": "336723a85e9890656564a703b72e06f9f40744aa",
+  "platform": "Linux-7.0.0-1014-gcp-x86_64-with-glibc2.39",
+  "cpu": "AMD EPYC 9B45",
+  "omp_num_threads": null
+ },
+ "method": "One fresh process per arm; a warm-up, then 3 to 9 rounds until the IQR is under 5 % of the median (at most 300 s); a warm-up over 120 s is not_run: budget.",
+ "rows": [
+  {
+   "row": "wide_forms",
+   "case": "all",
+   "dtype": "float64",
+   "n": 65536,
+   "baseline": "opaque NumPy mask; torch",
+   "reference_arm": "thread",
+   "arms": {
+    "thread": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "every output equals the reference bit for bit": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.09053836400016735,
+      "iqr": 0.0009369394999794167,
+      "q1": 0.09044353200010846,
+      "q3": 0.09138047150008788,
+      "samples": [
+       0.09034870000004958,
+       0.09222257900000841,
+       0.09053836400016735
+      ],
+      "rounds": 3,
+      "warm_s": 0.0901003659998878
+     },
+     "sm_mhz": null,
+     "host_rss_kib": 1559960
+    },
+    "team": {
+     "status": "not_run: needs a GPU"
+    },
+    "team_k8": {
+     "status": "not_run: needs a GPU"
+    },
+    "staged": {
+     "status": "not_run: needs a GPU"
+    },
+    "numpy_mask": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "the NumPy reference": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.10493252900005245,
+      "iqr": 0.00027765650008859666,
+      "q1": 0.10481226349997996,
+      "q3": 0.10508992000006856,
+      "samples": [
+       0.10469199799990747,
+       0.10524731100008466,
+       0.10493252900005245
+      ],
+      "rounds": 3,
+      "warm_s": 0.10481794800011812
+     },
+     "sm_mhz": null,
+     "host_rss_kib": 1323876
+    },
+    "torch": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "fill_mask and matvec_in match the reference (masked_sum has no torch form)": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.04745260100003179,
+      "iqr": 0.0017747329998201167,
+      "q1": 0.047234353000021656,
+      "q3": 0.04900908599984177,
+      "samples": [
+       0.05220706099999006,
+       0.04900908599984177,
+       0.046977649000155,
+       0.04745260100003179,
+       0.047234353000021656
+      ],
+      "rounds": 5,
+      "warm_s": 0.04731602600008955
+     },
+     "sm_mhz": null,
+     "host_rss_kib": 1724108
+    }
+   },
+   "ratio_to_reference": {
+    "thread": 1.0,
+    "numpy_mask": 1.1589841517332753,
+    "torch": 0.524115953762364
+   }
+  },
+  {
+   "row": "wide_forms",
+   "case": "all",
+   "dtype": "float32",
+   "n": 65536,
+   "baseline": "opaque NumPy mask; torch",
+   "reference_arm": "thread",
+   "arms": {
+    "thread": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "every output equals the reference bit for bit": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.07414554000001772,
+      "iqr": 0.000540470500027368,
+      "q1": 0.07413973650000116,
+      "q3": 0.07468020700002853,
+      "samples": [
+       0.07521487400003934,
+       0.07413393299998461,
+       0.07414554000001772
+      ],
+      "rounds": 3,
+      "warm_s": 0.07544662200007224
+     },
+     "sm_mhz": null,
+     "host_rss_kib": 823892
+    },
+    "team": {
+     "status": "not_run: needs a GPU"
+    },
+    "team_k8": {
+     "status": "not_run: needs a GPU"
+    },
+    "staged": {
+     "status": "not_run: needs a GPU"
+    },
+    "numpy_mask": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "the NumPy reference": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.0712235389999023,
+      "iqr": 0.0003195240001332422,
+      "q1": 0.07116942299990114,
+      "q3": 0.07148894700003439,
+      "samples": [
+       0.0712235389999023,
+       0.07111530699989999,
+       0.07175435500016647
+      ],
+      "rounds": 3,
+      "warm_s": 0.07432639100011329
+     },
+     "sm_mhz": null,
+     "host_rss_kib": 717268
+    },
+    "torch": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "fill_mask and matvec_in match the reference (masked_sum has no torch form)": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.0346579039999142,
+      "iqr": 0.00046524200001840654,
+      "q1": 0.034202621499957786,
+      "q3": 0.03466786349997619,
+      "samples": [
+       0.0346579039999142,
+       0.03467782300003819,
+       0.033747339000001375
+      ],
+      "rounds": 3,
+      "warm_s": 0.031815682000114975
+     },
+     "sm_mhz": null,
+     "host_rss_kib": 1187812
+    }
+   },
+   "ratio_to_reference": {
+    "thread": 1.0,
+    "numpy_mask": 0.9605910078999396,
+    "torch": 0.4674307315032828
+   }
+  },
+  {
+   "row": "steps_fused",
+   "case": "all",
+   "dtype": "float64",
+   "n": 65536,
+   "baseline": "Warp loop (primal); torch.func over a loop (derivatives)",
+   "reference_arm": "K8",
+   "arms": {
+    "K1": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "y equals W x + c after 8 steps": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.39113342299992837,
+      "iqr": 0.0011836605000326017,
+      "q1": 0.39051261199995224,
+      "q3": 0.39169627249998484,
+      "samples": [
+       0.39113342299992837,
+       0.3922591220000413,
+       0.3898918009999761
+      ],
+      "rounds": 3,
+      "warm_s": 0.38997942300011346
+     },
+     "sm_mhz": null,
+     "host_rss_kib": 621792
+    },
+    "K8": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "y equals W x + c after 8 steps": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.2785944770000697,
+      "iqr": 0.003016383500153097,
+      "q1": 0.277620301499951,
+      "q3": 0.2806366850001041,
+      "samples": [
+       0.2785944770000697,
+       0.2826788930001385,
+       0.2766461259998323
+      ],
+      "rounds": 3,
+      "warm_s": 0.2860276649998923
+     },
+     "sm_mhz": null,
+     "host_rss_kib": 623132
+    },
+    "K32": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "y equals W x + c after 8 steps": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.2589652310000474,
+      "iqr": 0.011064667999903577,
+      "q1": 0.24922326150010576,
+      "q3": 0.26028792950000934,
+      "samples": [
+       0.2589652310000474,
+       0.26161062799997126,
+       0.2394812920001641
+      ],
+      "rounds": 3,
+      "warm_s": 0.2611120500000652
+     },
+     "sm_mhz": null,
+     "host_rss_kib": 623548
+    },
+    "jvp_K8": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "dot_y equals W dx + dW x + dc": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 1.1982109460000174,
+      "iqr": 0.024947116500129596,
+      "q1": 1.196013445999938,
+      "q3": 1.2209605625000677,
+      "samples": [
+       1.1982109460000174,
+       1.243710179000118,
+       1.1938159459998587
+      ],
+      "rounds": 3,
+      "warm_s": 1.2419268050000483
+     },
+     "sm_mhz": null,
+     "host_rss_kib": 1172928
+    },
+    "vjp_K8_fused": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "bar_x equals W^T bar_y and bar_c equals bar_c_next + sum(bar_y)": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.05241236899996693,
+      "iqr": 0.0013624829999798749,
+      "q1": 0.051299685499998304,
+      "q3": 0.05266216849997818,
+      "samples": [
+       0.05291196799998943,
+       0.05241236899996693,
+       0.05018700200002968
+      ],
+      "rounds": 3,
+      "warm_s": 0.05234888400013915
+     },
+     "sm_mhz": null,
+     "host_rss_kib": 1458992
+    },
+    "vjp_K8_auto": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "bar_x equals W^T bar_y and bar_c equals bar_c_next + sum(bar_y)": true
+     },
+     "rule": "iqr",
+     "note": "steps_reverse auto picks fused",
+     "wall_s": {
+      "median": 0.0515667110000777,
+      "iqr": 0.0005538350000051651,
+      "q1": 0.0514368965000358,
+      "q3": 0.051990731500040965,
+      "samples": [
+       0.0515667110000777,
+       0.05241475200000423,
+       0.0513070819999939
+      ],
+      "rounds": 3,
+      "warm_s": 0.052887291000160985
+     },
+     "sm_mhz": null,
+     "host_rss_kib": 1457724
+    },
+    "warp_loop": {
+     "status": "not_run: needs a GPU"
+    },
+    "torch_func": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "bar_x equals W^T bar_y": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.10115431400004127,
+      "iqr": 0.00027615449994300434,
+      "q1": 0.10093135900001471,
+      "q3": 0.10120751349995771,
+      "samples": [
+       0.10126071299987416,
+       0.10115431400004127,
+       0.10070840399998815
+      ],
+      "rounds": 3,
+      "warm_s": 0.10054877499987924
+     },
+     "sm_mhz": null,
+     "host_rss_kib": 1805864
+    }
+   },
+   "ratio_to_reference": {
+    "K1": 1.4039525377950353,
+    "K8": 1.0,
+    "K32": 0.9295418695611207,
+    "jvp_K8": 4.300914213743432,
+    "vjp_K8_fused": 0.18813140003473156,
+    "vjp_K8_auto": 0.18509595579694427,
+    "torch_func": 0.3630880090993906
+   }
+  },
+  {
+   "row": "control_flow",
+   "case": "all",
+   "dtype": "float64",
+   "n": 1000000,
+   "baseline": "Warp per-thread loop",
+   "reference_arm": "guard",
+   "arms": {
+    "guard": {
+     "status": "ok",
+     "n": 1000000,
+     "checks": {
+      "y equals the NumPy loop on the first 1024 lanes": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.6942735800000719,
+      "iqr": 0.000414490999901318,
+      "q1": 0.6940980820000959,
+      "q3": 0.6945125729999972,
+      "samples": [
+       0.6942735800000719,
+       0.69392258400012,
+       0.6947515659999226
+      ],
+      "rounds": 3,
+      "warm_s": 0.6943153120000716
+     },
+     "sm_mhz": null,
+     "host_rss_kib": 102536
+    },
+    "no_guard": {
+     "status": "ok",
+     "n": 1000000,
+     "checks": {
+      "y equals the NumPy loop on the first 1024 lanes": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.7833420990000377,
+      "iqr": 0.0004257235000295623,
+      "q1": 0.7832616984999277,
+      "q3": 0.7836874219999572,
+      "samples": [
+       0.7840327449998767,
+       0.7833420990000377,
+       0.7831812979998176
+      ],
+      "rounds": 3,
+      "warm_s": 0.7883443410000837
+     },
+     "sm_mhz": null,
+     "host_rss_kib": 102628
+    },
+    "jump": {
+     "status": "ok",
+     "n": 1000000,
+     "checks": {
+      "y equals the NumPy loop on the first 1024 lanes": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.7528913640001065,
+      "iqr": 0.00016691999996965023,
+      "q1": 0.7528832875000262,
+      "q3": 0.7530502074999958,
+      "samples": [
+       0.7532090509998852,
+       0.7528913640001065,
+       0.7528752109999459
+      ],
+      "rounds": 3,
+      "warm_s": 0.7527827609999349
+     },
+     "sm_mhz": null,
+     "host_rss_kib": 102484
+    },
+    "segmented": {
+     "status": "not_run: needs a GPU"
+    },
+    "warp": {
+     "status": "not_run: needs a GPU"
+    }
+   },
+   "ratio_to_reference": {
+    "guard": 1.0,
+    "no_guard": 1.128290232504536,
+    "jump": 1.084430382616646
+   }
+  },
+  {
+   "row": "linalg_lane",
+   "case": "n8",
+   "dtype": "float64",
+   "n": 131072,
+   "baseline": "cuSOLVER batched (CuPy); torch.linalg",
+   "reference_arm": "hawk",
+   "arms": {
+    "hawk": {
+     "status": "ok",
+     "n": 131072,
+     "checks": {
+      "x and eigenvalues match NumPy": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.04118625399996745,
+      "iqr": 0.00012019999996937258,
+      "q1": 0.041149128500023835,
+      "q3": 0.04126932849999321,
+      "samples": [
+       0.04135240300001897,
+       0.04118625399996745,
+       0.04111200300008022
+      ],
+      "rounds": 3,
+      "warm_s": 0.04136561299992536
+     },
+     "sm_mhz": null,
+     "host_rss_kib": 270016
+    },
+    "cupy": {
+     "status": "not_run: needs a GPU"
+    },
+    "torch": {
+     "status": "ok",
+     "n": 131072,
+     "checks": {
+      "x matches NumPy": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.2985745000000861,
+      "iqr": 0.0008468849999871964,
+      "q1": 0.29777604750006503,
+      "q3": 0.29862293250005223,
+      "samples": [
+       0.29697759500004395,
+       0.29867136500001834,
+       0.2985745000000861
+      ],
+      "rounds": 3,
+      "warm_s": 0.29711604300018735
+     },
+     "sm_mhz": null,
+     "host_rss_kib": 526572
+    }
+   },
+   "ratio_to_reference": {
+    "hawk": 1.0,
+    "torch": 7.249372569797732
+   }
+  },
+  {
+   "row": "linalg_lane",
+   "case": "n8",
+   "dtype": "float32",
+   "n": 131072,
+   "baseline": "cuSOLVER batched (CuPy); torch.linalg",
+   "reference_arm": "hawk",
+   "arms": {
+    "hawk": {
+     "status": "ok",
+     "n": 131072,
+     "checks": {
+      "x and eigenvalues match NumPy": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.028771186000085436,
+      "iqr": 0.0004402600000048551,
+      "q1": 0.028770409999992808,
+      "q3": 0.029210669999997663,
+      "samples": [
+       0.02965015399990989,
+       0.02876963399990018,
+       0.028771186000085436
+      ],
+      "rounds": 3,
+      "warm_s": 0.028973740000083126
+     },
+     "sm_mhz": null,
+     "host_rss_kib": 258392
+    },
+    "cupy": {
+     "status": "not_run: needs a GPU"
+    },
+    "torch": {
+     "status": "ok",
+     "n": 131072,
+     "checks": {
+      "x matches NumPy": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.23298078299990266,
+      "iqr": 0.00032393100013905496,
+      "q1": 0.2327639329998874,
+      "q3": 0.23308786400002646,
+      "samples": [
+       0.23254708299987215,
+       0.23319494500015026,
+       0.23298078299990266
+      ],
+      "rounds": 3,
+      "warm_s": 0.231517138000072
+     },
+     "sm_mhz": null,
+     "host_rss_kib": 448772
+    }
+   },
+   "ratio_to_reference": {
+    "hawk": 1.0,
+    "torch": 8.097712169363154
+   }
+  },
+  {
+   "row": "linalg_lane",
+   "case": "n32",
+   "dtype": "float64",
+   "n": 8192,
+   "baseline": "cuSOLVER batched (CuPy); torch.linalg",
+   "reference_arm": "hawk",
+   "arms": {
+    "hawk": {
+     "status": "ok",
+     "n": 8192,
+     "checks": {
+      "x and eigenvalues match NumPy": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.15215422400001444,
+      "iqr": 0.001332143000013275,
+      "q1": 0.15108073900000818,
+      "q3": 0.15241288200002145,
+      "samples": [
+       0.15215422400001444,
+       0.15000725400000192,
+       0.15267154000002847
+      ],
+      "rounds": 3,
+      "warm_s": 0.14888201700000536
+     },
+     "sm_mhz": null,
+     "host_rss_kib": 258364
+    },
+    "cupy": {
+     "status": "not_run: needs a GPU"
+    },
+    "torch": {
+     "status": "ok",
+     "n": 8192,
+     "checks": {
+      "x matches NumPy": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.21795510099991589,
+      "iqr": 0.0005516620000207695,
+      "q1": 0.21789791549997517,
+      "q3": 0.21844957749999594,
+      "samples": [
+       0.21795510099991589,
+       0.21784073000003445,
+       0.218944054000076
+      ],
+      "rounds": 3,
+      "warm_s": 0.21827850599993326
+     },
+     "sm_mhz": null,
+     "host_rss_kib": 484708
+    }
+   },
+   "ratio_to_reference": {
+    "hawk": 1.0,
+    "torch": 1.4324617172632368
+   }
+  },
+  {
+   "row": "linalg_lane",
+   "case": "n32",
+   "dtype": "float32",
+   "n": 8192,
+   "baseline": "cuSOLVER batched (CuPy); torch.linalg",
+   "reference_arm": "hawk",
+   "arms": {
+    "hawk": {
+     "status": "ok",
+     "n": 8192,
+     "checks": {
+      "x and eigenvalues match NumPy": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.12155244299992773,
+      "iqr": 0.00020197749995531922,
+      "q1": 0.12152866750000157,
+      "q3": 0.1217306449999569,
+      "samples": [
+       0.12150489200007542,
+       0.12155244299992773,
+       0.12190884699998605
+      ],
+      "rounds": 3,
+      "warm_s": 0.1239994029999707
+     },
+     "sm_mhz": null,
+     "host_rss_kib": 258592
+    },
+    "cupy": {
+     "status": "not_run: needs a GPU"
+    },
+    "torch": {
+     "status": "ok",
+     "n": 8192,
+     "checks": {
+      "x matches NumPy": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.17929634699999042,
+      "iqr": 0.0009374109999953362,
+      "q1": 0.17873405900002126,
+      "q3": 0.1796714700000166,
+      "samples": [
+       0.18004659300004278,
+       0.1781717710000521,
+       0.17929634699999042
+      ],
+      "rounds": 3,
+      "warm_s": 0.17290206799998487
+     },
+     "sm_mhz": null,
+     "host_rss_kib": 423016
+    }
+   },
+   "ratio_to_reference": {
+    "hawk": 1.0,
+    "torch": 1.475053422004007
+   }
+  },
+  {
+   "row": "linalg_team",
+   "case": "n512",
+   "dtype": "float64",
+   "n": 16,
+   "baseline": "CuPy; torch.linalg",
+   "reference_arm": "team",
+   "arms": {
+    "team": {
+     "status": "not_run: needs a GPU"
+    },
+    "cupy": {
+     "status": "not_run: needs a GPU"
+    },
+    "torch": {
+     "status": "not_run: needs a GPU"
+    }
+   },
+   "ratio_to_reference": {}
+  },
+  {
+   "row": "contraction",
+   "case": "all",
+   "dtype": "float64",
+   "n": 65536,
+   "baseline": "cupy.einsum",
+   "reference_arm": "box",
+   "arms": {
+    "box": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "y equals the NumPy matrix product": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 7.87779999882332e-05,
+      "iqr": 3.074999767704867e-06,
+      "q1": 7.863800010454725e-05,
+      "q3": 8.171299987225211e-05,
+      "samples": [
+       0.0001653679998980806,
+       8.171299987225211e-05,
+       7.87779999882332e-05,
+       7.863800010454725e-05,
+       7.830799995645066e-05
+      ],
+      "rounds": 5,
+      "warm_s": 0.0001818529999582097
+     },
+     "sm_mhz": null,
+     "host_rss_kib": 74800
+    },
+    "no_box": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "y equals the NumPy matrix product": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.0002458080000451446,
+      "iqr": 4.136499910600833e-06,
+      "q1": 0.0002454625000609667,
+      "q3": 0.00024959899997156754,
+      "samples": [
+       0.0002451170000767888,
+       0.0002458080000451446,
+       0.0002533899998979905
+      ],
+      "rounds": 3,
+      "warm_s": 0.0002620119998937298
+     },
+     "sm_mhz": null,
+     "host_rss_kib": 74816
+    },
+    "gemm": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "y equals the NumPy matrix product": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.0059614799999963,
+      "iqr": 3.0995999622973613e-05,
+      "q1": 0.0059361120001995005,
+      "q3": 0.005967107999822474,
+      "samples": [
+       0.004987308999943707,
+       0.0059361120001995005,
+       0.005904285000042364,
+       0.007945755000037025,
+       0.009954507999964335,
+       0.005958475999932489,
+       0.0059614799999963,
+       0.005967107999822474,
+       0.0059640639999543055
+      ],
+      "rounds": 9,
+      "warm_s": 0.006008450000081211
+     },
+     "sm_mhz": null,
+     "host_rss_kib": 74540
+    },
+    "einsum": {
+     "status": "not_run: needs a GPU"
+    }
+   },
+   "ratio_to_reference": {
+    "box": 1.0,
+    "no_box": 3.120262003120923,
+    "gemm": 75.67442688170232
+   }
+  },
+  {
+   "row": "contraction",
+   "case": "all",
+   "dtype": "float32",
+   "n": 65536,
+   "baseline": "cupy.einsum",
+   "reference_arm": "box",
+   "arms": {
+    "box": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "y equals the NumPy matrix product": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 9.143700003733102e-05,
+      "iqr": 1.267000016014208e-06,
+      "q1": 9.130199998708122e-05,
+      "q3": 9.256900000309543e-05,
+      "samples": [
+       9.116699993683142e-05,
+       9.370099996885983e-05,
+       9.143700003733102e-05
+      ],
+      "rounds": 3,
+      "warm_s": 0.00014456600001722109
+     },
+     "sm_mhz": null,
+     "host_rss_kib": 73512
+    },
+    "no_box": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "y equals the NumPy matrix product": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.00024292399984915392,
+      "iqr": 6.359998678817647e-07,
+      "q1": 0.00024279900003421062,
+      "q3": 0.00024343499990209239,
+      "samples": [
+       0.00024267400021926733,
+       0.00024394599995503086,
+       0.00024292399984915392
+      ],
+      "rounds": 3,
+      "warm_s": 0.00025811699993028014
+     },
+     "sm_mhz": null,
+     "host_rss_kib": 73528
+    },
+    "gemm": {
+     "status": "ok",
+     "n": 65536,
+     "checks": {
+      "y equals the NumPy matrix product": true
+     },
+     "rule": "max rounds",
+     "note": null,
+     "wall_s": {
+      "median": 0.005962470999975267,
+      "iqr": 0.0009487439999702474,
+      "q1": 0.00595984699998553,
+      "q3": 0.006908590999955777,
+      "samples": [
+       0.01101159299992105,
+       0.006908590999955777,
+       0.00596230199994352,
+       0.009952605000080439,
+       0.00595984699998553,
+       0.005966847999843594,
+       0.005962470999975267,
+       0.003980999999839696,
+       9.4381000053545e-05
+      ],
+      "rounds": 9,
+      "warm_s": 0.007006166999872221
+     },
+     "sm_mhz": null,
+     "host_rss_kib": 73396
+    },
+    "einsum": {
+     "status": "not_run: needs a GPU"
+    }
+   },
+   "ratio_to_reference": {
+    "box": 1.0,
+    "no_box": 2.656736329384989,
+    "gemm": 65.20851512561617
+   }
+  },
+  {
+   "row": "fft",
+   "case": "all",
+   "dtype": "float64",
+   "n": 100000,
+   "baseline": "cupy.fft (cuFFT)",
+   "reference_arm": "fft",
+   "arms": {
+    "fft": {
+     "status": "not_run: needs a GPU"
+    },
+    "cupy_fft": {
+     "status": "not_run: needs a GPU"
+    }
+   },
+   "ratio_to_reference": {}
+  },
+  {
+   "row": "lane_set",
+   "case": "all",
+   "dtype": "float64",
+   "n": 4194304,
+   "baseline": "none: ratio to dense",
+   "reference_arm": "dense",
+   "arms": {
+    "dense": {
+     "status": "not_run: needs a GPU"
+    },
+    "map": {
+     "status": "not_run: needs a GPU"
+    },
+    "prefix": {
+     "status": "not_run: needs a GPU"
+    }
+   },
+   "ratio_to_reference": {}
+  },
+  {
+   "row": "scatter",
+   "case": "all",
+   "dtype": "float64",
+   "n": 4194304,
+   "baseline": "cupyx.scatter_add; np.add.at",
+   "reference_arm": "keyed",
+   "arms": {
+    "keyed": {
+     "status": "ok",
+     "n": 4194304,
+     "checks": {
+      "keyed sums match np.add.at": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.015473794999934398,
+      "iqr": 6.059150007331482e-05,
+      "q1": 0.015465657499930785,
+      "q3": 0.0155262490000041,
+      "samples": [
+       0.015578703000073801,
+       0.015473794999934398,
+       0.015457519999927172
+      ],
+      "rounds": 3,
+      "warm_s": 0.015511030999959985
+     },
+     "sm_mhz": null,
+     "host_rss_kib": 151820
+    },
+    "ordered": {
+     "status": "ok",
+     "n": 4194304,
+     "checks": {
+      "keyed sums match np.add.at": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.027452589000176886,
+      "iqr": 0.00021538250007324677,
+      "q1": 0.02731026550009119,
+      "q3": 0.027525648000164438,
+      "samples": [
+       0.027167942000005496,
+       0.027452589000176886,
+       0.02759870700015199
+      ],
+      "rounds": 3,
+      "warm_s": 0.027502122999976564
+     },
+     "sm_mhz": null,
+     "host_rss_kib": 203140
+    },
+    "or": {
+     "status": "ok",
+     "n": 4194304,
+     "checks": {
+      "the OR mask equals np.bitwise_or.at": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.00979888500000925,
+      "iqr": 5.058599992935342e-05,
+      "q1": 0.009793376500056183,
+      "q3": 0.009843962499985537,
+      "samples": [
+       0.009889039999961824,
+       0.00979888500000925,
+       0.009787868000103117
+      ],
+      "rounds": 3,
+      "warm_s": 0.009821589000011954
+     },
+     "sm_mhz": null,
+     "host_rss_kib": 159916
+    },
+    "cupyx_scatter_add": {
+     "status": "not_run: needs a GPU"
+    },
+    "np_add_at": {
+     "status": "ok",
+     "n": 4194304,
+     "checks": {
+      "the NumPy reference": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.004363302999990992,
+      "iqr": 0.00020261350005057466,
+      "q1": 0.00433526149993213,
+      "q3": 0.004537874999982705,
+      "samples": [
+       0.004988912000044365,
+       0.0046445049999874755,
+       0.004431244999977935,
+       0.004363302999990992,
+       0.004332938000061404,
+       0.004294099999924583,
+       0.004337584999802857
+      ],
+      "rounds": 7,
+      "warm_s": 0.005215060999944399
+     },
+     "sm_mhz": null,
+     "host_rss_kib": 111280
+    }
+   },
+   "ratio_to_reference": {
+    "keyed": 1.0,
+    "ordered": 1.7741342056226848,
+    "or": 0.633256741481375,
+    "np_add_at": 0.2819801477277869
+   }
+  },
+  {
+   "row": "sample_sum",
+   "case": "all",
+   "dtype": "float64",
+   "n": 16777216,
+   "baseline": "cupy.sum",
+   "reference_arm": "auto",
+   "arms": {
+    "compensated": {
+     "status": "ok",
+     "n": 16777216,
+     "checks": {
+      "the sum is within the policy's ULP bound of math.fsum": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.0038480910000089352,
+      "iqr": 7.5965000405631145e-06,
+      "q1": 0.0038426625000056447,
+      "q3": 0.003850259000046208,
+      "samples": [
+       0.0038524270000834804,
+       0.0038480910000089352,
+       0.003837234000002354
+      ],
+      "rounds": 3,
+      "warm_s": 0.003896532999988267
+     },
+     "sm_mhz": null,
+     "host_rss_kib": 331408
+    },
+    "ordered": {
+     "status": "ok",
+     "n": 16777216,
+     "checks": {
+      "the sum is within the policy's ULP bound of math.fsum": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.012907476999998835,
+      "iqr": 7.999949991699395e-05,
+      "q1": 0.012840732000086064,
+      "q3": 0.012920731500003058,
+      "samples": [
+       0.01293398600000728,
+       0.012907476999998835,
+       0.012773987000173292
+      ],
+      "rounds": 3,
+      "warm_s": 0.01291464799987807
+     },
+     "sm_mhz": null,
+     "host_rss_kib": 462996
+    },
+    "auto": {
+     "status": "ok",
+     "n": 16777216,
+     "checks": {
+      "the sum is within the policy's ULP bound of math.fsum": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.0036322060000202328,
+      "iqr": 1.1126499998681538e-05,
+      "q1": 0.0036306690000174058,
+      "q3": 0.0036417955000160873,
+      "samples": [
+       0.0036322060000202328,
+       0.003651385000011942,
+       0.003629132000014579
+      ],
+      "rounds": 3,
+      "warm_s": 0.003652758000043832
+     },
+     "sm_mhz": null,
+     "host_rss_kib": 331308
+    },
+    "cell_compensated": {
+     "status": "ok",
+     "n": 16777216,
+     "checks": {
+      "the cell is within the policy's ULP bound of math.fsum": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.004714980000017022,
+      "iqr": 8.913500096241478e-06,
+      "q1": 0.004709997999952975,
+      "q3": 0.0047189115000492166,
+      "samples": [
+       0.004714980000017022,
+       0.0047050159998889285,
+       0.0047228430000814114
+      ],
+      "rounds": 3,
+      "warm_s": 0.0048653769999873475
+     },
+     "sm_mhz": null,
+     "host_rss_kib": 340096
+    },
+    "cell_auto": {
+     "status": "ok",
+     "n": 16777216,
+     "checks": {
+      "the cell is within the policy's ULP bound of math.fsum": true
+     },
+     "rule": "iqr",
+     "note": null,
+     "wall_s": {
+      "median": 0.0047125270000378805,
+      "iqr": 1.3930500017522718e-05,
+      "q1": 0.004708957000048031,
+      "q3": 0.0047228875000655535,
+      "samples": [
+       0.004705387000058181,
+       0.0047332480000932264,
+       0.0047125270000378805
+      ],
+      "rounds": 3,
+      "warm_s": 0.00474322300010499
+     },
+     "sm_mhz": null,
+     "host_rss_kib": 339628
+    },
+    "cupy_sum": {
+     "status": "not_run: needs a GPU"
+    }
+   },
+   "ratio_to_reference": {
+    "compensated": 1.059436331526213,
+    "ordered": 3.553619205498514,
+    "auto": 1.0,
+    "cell_compensated": 1.2981036868478157,
+    "cell_auto": 1.297428339695389
+   }
+  },
+  {
+   "row": "mpi_partition",
+   "case": "all",
+   "dtype": "float64",
+   "n": 2000000,
+   "baseline": "one rank (N = 1e6), the C1 persist arm",
+   "reference_arm": "one_rank",
+   "arms": {
+    "two_ranks": {
+     "status": "not_run: needs 2 GPUs (this machine has 0); a Kaggle T4 x2 row"
+    },
+    "one_rank": {
+     "status": "not_run: needs 2 GPUs (this machine has 0); a Kaggle T4 x2 row"
+    }
+   },
+   "ratio_to_reference": {}
+  }
+ ],
+ "wall_s": 90.46170028899996
+}
