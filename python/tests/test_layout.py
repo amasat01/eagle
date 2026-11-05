@@ -616,3 +616,19 @@ def test_a_builder_call_takes_layout_for_every_kernel_call_it_records(tmp_path):
         scaled(eagle.samples_last(x), y)
     with pytest.raises(_layout.LayoutError, match="is not one of"):
         scaled(x, y, layout="rows")
+
+
+def test_a_builder_allocates_an_omitted_vector_output_with_its_declared_width(tmp_path):
+    k = eagle.deploy(e4_vec3_scale, targets=("host",), cache_dir=tmp_path)
+
+    @eagle.Graph.builder
+    def scaled(x):
+        g = eagle.Graph()
+        g.result = k(x=x, a=2.0)
+        return g
+
+    x = _x(N)
+    g = scaled(x)
+    y = np.asarray(g())
+    assert y.shape == (W, N)
+    np.testing.assert_array_equal(y, 2.0 * x)

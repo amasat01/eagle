@@ -316,7 +316,8 @@ class Rec:
                     floats = [a.dtype for a in arrs if a.dtype.kind == "f"]
                     dt = _DTYPES[slot.ttype.dtype] if slot.ttype.dtype != "f64" or not floats else max((dtype_name(a) for a in floats), key=_FLOAT_BYTES.get)
                     out[nm] = _alloc.zeros(_view(samples).device,
-                        samples.shape[-1] if lanes is None else _lane_bind.output_shape(plan.plugin, nm, 1, lanes, extents), dtype=dt)
+                        _lane_bind.output_shape(plan.plugin, nm, _declared_widths(plan.plugin).get(nm, 1), samples.shape[-1], extents)
+                        if lanes is None else _lane_bind.output_shape(plan.plugin, nm, 1, lanes, extents), dtype=dt)
                     self.stats["allocs"] += 1
             if spec is not None:
                 key = label if len(omitted) == 1 else f"{label}.{nm}"
