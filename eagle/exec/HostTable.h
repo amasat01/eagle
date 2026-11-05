@@ -6,7 +6,7 @@
 #pragma once
 
 #include "eagle/exec/HostSchedule.h"
-#include "plugin/graph_handoff.h"
+#include "eagle/exec/HostTableAbi.h"
 
 #include <atomic>
 #include <cstdint>
