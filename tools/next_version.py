@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-"""Next version from the latest `vX.Y.Z[rcN]` tag reachable from a commit and a `release:*` label.
+"""The release version, and what a `release:*` label would make of it.
 
-usage: next_version.py "<labels>" [<commit>]   labels: the PR's label list, one `release:patch|minor|major|rc|none` among them
-(a bare `patch` works too), or an exact `release:X.Y.Z[rcN]` above the latest tag (to keep sibling packages in step);
-commit defaults to HEAD. Prints the version (no `v`), nothing for `none`.
+usage: next_version.py                        the version in the top CHANGELOG.md heading (`## X.Y.Z[rcN] (date)`), printed
+                                              (no `v`) when it is above the latest `vX.Y.Z[rcN]` tag reachable from HEAD;
+                                              nothing for `## Unreleased` (a dev build) or a heading already released.
+       next_version.py "<labels>" [<commit>]  the version the label gives from the latest tag reachable from commit (default
+                                              HEAD): one `release:patch|minor|major|rc|none` among the labels, or an exact
+                                              `release:X.Y.Z[rcN]` above the tag. Nothing for `none`. release_gate.sh and
+                                              tag.yml compare it with the heading: the label is only a check.
 Stdlib only; runs on every Python the packages support (3.9+).
 """
 import re
@@ -46,6 +50,14 @@ def bump(cur, label):
     sys.exit(f"next_version.py: unknown label {label!r} (patch | minor | major | rc | X.Y.Z[rcN])")
 
 
+def heading_version(cur):
+    """The version of CHANGELOG.md's first `## ` heading when it is above cur, else None."""
+    with open("CHANGELOG.md") as f:
+        top = next((line for line in f if line.startswith("## ")), "")
+    m = re.match(r"## (\d+)\.(\d+)\.(\d+)(?:rc(\d+))?(?:\s|$)", top)
+    return top[3:].split()[0] if m and order(m.groups()) > order(cur) else None
+
+
 def label_of(text):
     """The one release label in a whitespace-separated label list."""
     found = [t[len("release:"):] for t in text.split() if t.startswith("release:")] or ([text.strip()] if text.strip() in LABELS else [])
@@ -55,7 +67,10 @@ def label_of(text):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) not in (2, 3):
+    if len(sys.argv) == 1:
+        print(heading_version(latest("HEAD")) or "")
+        sys.exit(0)
+    if len(sys.argv) > 3:
         sys.exit(__doc__)
     label = label_of(sys.argv[1])
     if label != "none":
