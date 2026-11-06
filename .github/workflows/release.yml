@@ -631,7 +631,7 @@ jobs:
         with:
           name: release-test-wheel
           args: >-
-            --tree eagle --skip docs/ --skip CHANGELOG.md --skip .github/ --tree raptor --skip docs/ --skip tests/ --skip ci/ --skip tools/ --skip goldens/ --skip RELEASING.md --skip CHANGELOG.md --skip README.md --skip CONTRIBUTING.md --skip CITATION.cff --skip Makefile --skip .github/ --tree aether --skip docs/ --skip tests/ --skip ci/ --skip dsc/tests/ --skip CHANGELOG.md --skip README.md --skip CONTRIBUTING.md --skip CITATION.cff --skip Makefile --skip ruff.toml --skip .github/ --tree eagle --only .github/actions/ --only .github/ci_digest.sh --only .github/cuda_redist.sh --only .github/companions --tag eagle --file eagle/.github/workflows/release.yml
+            --tree eagle --skip docs/ --skip CHANGELOG.md --skip .github/ --tree raptor --skip docs/ --skip tests/ --skip ci/ --skip tools/ --skip goldens/ --skip RELEASING.md --skip CHANGELOG.md --skip README.md --skip CONTRIBUTING.md --skip CITATION.cff --skip Makefile --skip .github/ --tree aether --skip docs/ --skip tests/ --skip ci/ --skip dsc/tests/ --skip CHANGELOG.md --skip README.md --skip CONTRIBUTING.md --skip CITATION.cff --skip Makefile --skip ruff.toml --skip .github/ --tree eagle --only .github/actions/ --only .github/ci_digest.sh --only .github/cuda_redist.sh --only .github/companions --file eagle/.github/workflows/release.yml
           extra: ${{ toJSON(matrix) }}
       - uses: actions/download-artifact@v8
         with:
@@ -966,18 +966,21 @@ jobs:
     outputs:
       run: ${{ steps.plan.outputs.run }}
     steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - id: plan
         env:
           GH_TOKEN: ${{ github.token }}
-          LABELLED: ${{ contains(github.event.pull_request.labels.*.name, 'release') }}
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ' ') }}
           PR: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
           run=false
           if [ -z "$PR" ]; then
             echo "not a pull request (the weekly run): the Kaggle legs run on pull requests only"
-          elif [ "$LABELLED" = true ]; then
-            run=true; echo "label release"
+          elif grep -Eq 'release:(patch|minor|major|rc|[0-9])' <<< "$LABELS" || [ -n "$(python3 tools/next_version.py)" ]; then
+            run=true; echo "a release: a release label, or CHANGELOG.md headed with a new version"
           else
             # the files API, not `gh pr diff`: GitHub refuses a text diff over 20000 lines (a release pull request)
             files="$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/files" --jq '.[].filename')"
@@ -1140,7 +1143,8 @@ jobs:
             kaggle-out
           if-no-files-found: warn
 
-  # The one required GPU check: red when a leg ran and failed, or when a release PR has legs that did not run. Labels
+  # The one required GPU check (.github/kaggle/summary.py): red when a leg ran and failed, or when a release PR (a release label,
+  # or CHANGELOG.md headed with a new version) has legs that did not run; a warning on any other PR. Labels
   # the pull request `gpu-inconclusive` when any leg did not run on Kaggle (inconclusive, rejected, cancelled, timed
   # out); a run where every leg passed removes it.
   kaggle:
@@ -1161,25 +1165,16 @@ jobs:
       - env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
-          BASE: ${{ github.event.pull_request.base.sha }}
-          HEAD: ${{ github.event.pull_request.head.sha }}
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ' ') }}
         run: |
-          # a leg with no state file never started (deployment rejected, cancelled, timed out): not run, not failed
-          unrun=""
-          failed=""
-          for leg in cuda12-tests cuda13-tests cuda12-notebooks cuda13-notebooks; do
-            state=$(cat "kaggle-state/$leg" 2>/dev/null || echo unrun)
-            echo "$leg: $state" | tee -a "$GITHUB_STEP_SUMMARY"
-            [ "$state" != unrun ] || unrun="$unrun $leg"
-            [ "$state" != fail ] || failed="$failed $leg"
-          done
-          if [ -n "$unrun" ]; then
+          # a release PR: a release label other than none, or a CHANGELOG.md heading that names a new version
+          release=0
+          if grep -Eq 'release:(patch|minor|major|rc|[0-9])' <<< "$LABELS" || [ -n "$(python3 tools/next_version.py)" ]; then release=1; fi
+          rc=0
+          python3 .github/kaggle/summary.py kaggle-state "$release" | tee -a "$GITHUB_STEP_SUMMARY" || rc=$?
+          if [ "$(cat kaggle-state/.label)" = add ]; then
             gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --add-label gpu-inconclusive
           else
             gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --remove-label gpu-inconclusive || true
           fi
-          [ -z "$failed" ] || { echo "::error::GPU legs failed:$failed"; exit 1; }
-          # a release (new version) does not merge without its GPU run: tags and publishing follow the merge
-          if [ -n "$unrun" ] && bash tools/release_gate.sh "$BASE" "$HEAD" | grep -q '^new version'; then
-            echo "::error::release PR with GPU legs not run:$unrun"; exit 1
-          fi
+          exit "$rc"

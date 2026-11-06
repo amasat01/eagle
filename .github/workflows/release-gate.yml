@@ -32,3 +32,5 @@ jobs:
           PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ' ') }}
           PR_BODY: ${{ github.event.pull_request.body }}
         run: bash tools/release_gate.sh "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}"
+      # not remembered: the Kaggle summary and quota logic, and a registered limit expires against the version this checkout releases (CHANGELOG.md's heading), which a release commit changes
+      - run: python -m pip install --quiet pytest && python -m pytest -q --noconftest -p no:cacheprovider python/tests/test_doc_limits.py .github/kaggle/test_kaggle_ci.py

@@ -383,7 +383,7 @@ jobs:
         with:
           name: ci-test-python
           args: >-
-            --tree eagle --skip CHANGELOG.md --skip .github/ --tree aether --skip docs/ --skip tests/ --skip ci/ --skip dsc/tests/ --skip CHANGELOG.md --skip README.md --skip CONTRIBUTING.md --skip CITATION.cff --skip Makefile --skip ruff.toml --skip .github/ --tree raptor --skip docs/ --skip tests/ --skip ci/ --skip tools/ --skip goldens/ --skip RELEASING.md --skip CHANGELOG.md --skip README.md --skip CONTRIBUTING.md --skip CITATION.cff --skip Makefile --skip .github/ --tree site --skip tests/ --skip CONTRIBUTING.md --skip README.md --skip CHANGELOG.md --skip .github/ --tree eagle --only .github/actions/ --only .github/ci_digest.sh --only .github/cuda_redist.sh --only .github/companions --tag eagle --file eagle/.github/workflows/ci.yml
+            --tree eagle --skip CHANGELOG.md --skip .github/ --tree aether --skip docs/ --skip tests/ --skip ci/ --skip dsc/tests/ --skip CHANGELOG.md --skip README.md --skip CONTRIBUTING.md --skip CITATION.cff --skip Makefile --skip ruff.toml --skip .github/ --tree raptor --skip docs/ --skip tests/ --skip ci/ --skip tools/ --skip goldens/ --skip RELEASING.md --skip CHANGELOG.md --skip README.md --skip CONTRIBUTING.md --skip CITATION.cff --skip Makefile --skip .github/ --tree site --skip tests/ --skip CONTRIBUTING.md --skip README.md --skip CHANGELOG.md --skip .github/ --tree eagle --only .github/actions/ --only .github/ci_digest.sh --only .github/cuda_redist.sh --only .github/companions --file eagle/.github/workflows/ci.yml
 
       - uses: actions/setup-python@v7
         with:
@@ -489,7 +489,7 @@ jobs:
         with:
           name: ci-test-python-nodriver
           args: >-
-            --tree eagle --skip CHANGELOG.md --skip .github/ --tree aether --skip docs/ --skip tests/ --skip ci/ --skip dsc/tests/ --skip CHANGELOG.md --skip README.md --skip CONTRIBUTING.md --skip CITATION.cff --skip Makefile --skip ruff.toml --skip .github/ --tree raptor --skip docs/ --skip tests/ --skip ci/ --skip tools/ --skip goldens/ --skip RELEASING.md --skip CHANGELOG.md --skip README.md --skip CONTRIBUTING.md --skip CITATION.cff --skip Makefile --skip .github/ --tree eagle --only .github/actions/ --only .github/ci_digest.sh --only .github/cuda_redist.sh --only .github/companions --tag eagle --file eagle/.github/workflows/ci.yml
+            --tree eagle --skip CHANGELOG.md --skip .github/ --tree aether --skip docs/ --skip tests/ --skip ci/ --skip dsc/tests/ --skip CHANGELOG.md --skip README.md --skip CONTRIBUTING.md --skip CITATION.cff --skip Makefile --skip ruff.toml --skip .github/ --tree raptor --skip docs/ --skip tests/ --skip ci/ --skip tools/ --skip goldens/ --skip RELEASING.md --skip CHANGELOG.md --skip README.md --skip CONTRIBUTING.md --skip CITATION.cff --skip Makefile --skip .github/ --tree eagle --only .github/actions/ --only .github/ci_digest.sh --only .github/cuda_redist.sh --only .github/companions --file eagle/.github/workflows/ci.yml
 
       - uses: actions/setup-python@v7
         with:

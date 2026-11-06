@@ -48,8 +48,30 @@ def _stated():
     return found
 
 
+def _git(*args):
+    import subprocess
+
+    out = subprocess.run(["git", "-C", str(ROOT), *args], capture_output=True, text=True)
+    return out.stdout.strip() if out.returncode == 0 else ""
+
+
 def _version():
-    from importlib.metadata import version  # what eagle.__version__ reads; no binding import
+    """The version this checkout releases or will build as, read without an installed dist: the CHANGELOG heading when it
+    names a release (tools/next_version.py), else the exact tag at HEAD, else the next patch after the latest tag (what the
+    dev build is called), else the installed dist."""
+    import subprocess
+
+    heading = subprocess.run([sys.executable, str(ROOT / "tools/next_version.py")], cwd=ROOT, capture_output=True, text=True)
+    if heading.returncode == 0 and heading.stdout.strip():
+        return heading.stdout.strip()
+    exact = _git("describe", "--tags", "--match", "v*", "--exact-match")
+    if exact:
+        return exact[1:]
+    tags = [t[1:] for t in _git("tag", "--list", "v[0-9]*", "--merged", "HEAD").split() if re.fullmatch(r"v\d+\.\d+\.\d+", t)]
+    if tags:
+        major, minor, patch = max(tuple(int(x) for x in t.split(".")) for t in tags)
+        return f"{major}.{minor}.{patch + 1}"
+    from importlib.metadata import version
 
     return version("raptor-eagle")
 
