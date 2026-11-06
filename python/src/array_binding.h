@@ -900,8 +900,10 @@ inline void bind(nb::module_& m)
         };
     }, nb::arg("array"), nb::arg("obj"));
     m.def("array_promote", [](nb::handle a, nb::handle b) { try { return PyDType { ea::promote(parse_dtype(a), parse_dtype(b)) }; } catch (const std::invalid_argument& e) { throw nb::type_error(e.what()); } });
-    m.def("banded_pack", [](const Array& a) { return banded_convert(a, DType::F64, DType::Banded, "eagle.banded_pack"); }, nb::arg("array"));
-    m.def("banded_unpack", [](const Array& a) { return banded_convert(a, DType::Banded, DType::F64, "eagle.banded_unpack"); }, nb::arg("array"));
+    m.def("banded_pack", [](const Array& a) { return banded_convert(a, DType::F64, DType::Banded, "eagle.banded_pack"); }, nb::arg("array"),
+          "A float64 array packed into banded cells (dtype ``banded``), the storage of the device-only banded mode.");
+    m.def("banded_unpack", [](const Array& a) { return banded_convert(a, DType::Banded, DType::F64, "eagle.banded_unpack"); }, nb::arg("array"),
+          "A banded array unpacked to float64, the inverse of :func:`eagle.banded_pack`.");
     m.def("banded_pack_scalar", [](double x) { return banded_guard([&] { return aether::banded::BandedReal::fromDouble(x).toBits(); }); }, nb::arg("value"));
     m.def("array_dtype", [](int code) { return PyDType { ea::from_code(code) }; }, nb::arg("code"));
 

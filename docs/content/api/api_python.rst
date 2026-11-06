@@ -48,6 +48,17 @@ A graph may hold GPU nodes, host nodes and the copies between them
 .. autofunction:: eagle.opaque
    :no-index:
 
+Banded cells
+------------
+
+Banded mode stores float64 values in banded cells on GPUs with weak or no FP64.
+These two functions convert an array on either side; they convert data, they do
+not run anything.
+
+.. autofunction:: eagle.banded_pack
+
+.. autofunction:: eagle.banded_unpack
+
 K-class active sets
 -------------------
 
