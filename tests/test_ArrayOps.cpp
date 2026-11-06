@@ -162,6 +162,42 @@ TEST(ArrayOpsTest, DTypeCodesNamesSizesAndKindsAreOneTable)
     EXPECT_EQ(ea::promote(ea::DType::F32, ea::DType::F64), ea::DType::F64);
 }
 
+TEST(ArrayOpsTest, BandedIsDtypeCode13AnOpaqueEightByteCellThatRunsNoOp)
+{
+    const ea::DType b = ea::from_code(13);
+    EXPECT_EQ(b, ea::DType::Banded);
+    EXPECT_EQ(ea::kDTypeCount, 15);
+    EXPECT_EQ(ea::itemsize(b), 8u);
+    EXPECT_EQ(ea::kind(b), 'V');
+    EXPECT_FALSE(ea::is_float(b));
+    EXPECT_FALSE(ea::is_compute(b));
+    EXPECT_STREQ(ea::name(b), "banded");
+    EXPECT_STREQ(ea::kTypestr[13], "|V8");
+    EXPECT_EQ(ea::kFormat[13], 'Q');
+    EXPECT_EQ(ea::from_name("banded"), b);
+    auto f = tc::make(ea::Op::Fill, 2);
+    f.a.dtype = 13;
+    EXPECT_THROW(ea::host::run(ea::Op::Fill, f.a), std::invalid_argument);   // only the compute dtypes run ops
+    EXPECT_THROW(ea::promote(b, ea::DType::F64), std::invalid_argument);
+}
+
+TEST(ArrayOpsTest, BandPartialIsDtypeCode14ASixteenByteScratchElementThatRunsNoOp)
+{
+    const ea::DType b = ea::from_code(14);
+    EXPECT_EQ(b, ea::DType::BandPartial);
+    EXPECT_EQ(ea::itemsize(b), 16u);
+    EXPECT_EQ(ea::kind(b), 'V');
+    EXPECT_FALSE(ea::is_float(b));
+    EXPECT_FALSE(ea::is_compute(b));
+    EXPECT_STREQ(ea::name(b), "band_partial");
+    EXPECT_STREQ(ea::kTypestr[14], "|V16");
+    auto f = tc::make(ea::Op::Fill, 2);
+    f.a.dtype = 14;
+    EXPECT_THROW(ea::host::run(ea::Op::Fill, f.a), std::invalid_argument);   // only the compute dtypes run ops
+    EXPECT_THROW(ea::promote(b, ea::DType::F64), std::invalid_argument);
+    EXPECT_THROW(ea::from_code(15), std::invalid_argument);
+}
+
 TEST(ArrayOpsTest, HalfAndBfloat16ConvertToNearestEvenPromoteAndRefuseByNameBelowTheirHardware)
 {
     EXPECT_EQ(ea::Half(1.0).bits, 0x3C00);

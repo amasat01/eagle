@@ -8,7 +8,7 @@ from __future__ import annotations
 from . import _layout, _stream
 from .abi import DEVICE_CPU, DEVICE_CUDA
 from . import arrays
-from .dtypes import dtype_name, dtype_of
+from .dtypes import _SCRATCH, dtype_name, dtype_of, scratch_dtype
 from .interop import BufferRefused
 from .roles import INPUT_ROLES, OUTPUT_ROLES, PER_SAMPLE_ROLES
 from ._plan_pack import _data_ptr, _trailing_extent
@@ -25,6 +25,8 @@ def _dt(dtype):
     if isinstance(dtype, arrays.DType):
         return dtype
     name = {"bool_": "bool"}.get(dtype_name(dtype), dtype_name(dtype)) if dtype is not None else None
+    if name in _SCRATCH:            # a scratch element (hawk's team planes), never a user dtype
+        return scratch_dtype(name)
     found = getattr(arrays, "bool_" if name == "bool" else str(name), None)
     if not isinstance(found, arrays.DType):
         raise TypeError(f"no eagle dtype for {dtype!r}")
@@ -279,12 +281,31 @@ def widen_indices(plugin, arg_spec, planes: dict) -> dict:
     return out
 
 
+BANDED_ON_CPU = "banded runs on device execution paths; on a CPU use float64"
+
+
+def refuse_banded_on_cpu(door):
+    """The one refusal of banded execution on the CPU backend: a CPU has fast native float64, so banded is a device
+    feature. Data conversion (``eagle.banded_pack`` / ``banded_unpack``) is not execution and stays."""
+    raise ValueError(f"{door}: {BANDED_ON_CPU}")
+
+
+def _refuse_banded_cast(have, plan, name):
+    """A banded plane and a float one never convert implicitly: the codec is explicit and the caller's."""
+    if have != plan and "V" in (have.kind, plan.kind):
+        fix = ("eagle.banded_pack(float64 array)" if plan.kind == "V" else "eagle.banded_unpack(banded array)")
+        raise ValueError(
+            f"eagle.plan.run: plane {name!r} is {have} but this plan is {plan}; a banded cell array and a "
+            f"float64 array are never cast into each other, convert explicitly with {fix}")
+
+
 def _plan_float(arr, dtype, name):
     """``arr`` (an array the caller holds) as a C-contiguous plane of the
     plan's float ``dtype``. A narrower float is promoted and a strided plane
     copied, each with one :class:`~eagle.PerformanceWarning` per call site;
     a wider float is refused (never a silent downcast)."""
     plan, copied = _dt(dtype), False
+    _refuse_banded_cast(arr.dtype, plan, name)
     if arr.dtype != plan:
         if arr.dtype.kind == "f":
             if arr.dtype.itemsize > plan.itemsize:
@@ -316,6 +337,7 @@ def _host_plane(value, dtype, *, declared=None, name=None, role="input", kernel=
     if arr.dtype == dtype and arr.is_contiguous:
         return arr
     if not hasattr(value, "dtype"):          # a list or number: converted, not promoted
+        _refuse_banded_cast(arr.dtype, _dt(dtype), name)
         return arrays.ascontiguousarray(arr.astype(_dt(dtype)))
     return _plan_float(arr, dtype, name)
 
@@ -693,11 +715,12 @@ def _check_plane(role, name, value, *, n, dtype, width, framework,
         )
     bound_dtype = _dt(value.dtype)
     _refuse_dtype_mismatch("bind", role, name, declared, bound_dtype)
-    if bound_dtype.kind not in "iub" and bound_dtype != dtype:
+    if bound_dtype.kind not in "iub" and bound_dtype != dtype and not (declared is not None and bound_dtype == declared):   # a declared scratch element binds at its own dtype
         raise ValueError(
             f"eagle.plan.bind: {role} {name!r} has dtype {bound_dtype}, but this "
             f"artifact declares scalar_type {dtype} and its body reads and writes "
-            f"{dtype.itemsize}-byte elements; bind a {dtype} plane (an integer or "
+            f"{dtype.itemsize}-byte elements; bind a {dtype} plane"
+            f"{' (convert with eagle.banded_pack / eagle.banded_unpack)' if 'V' in (bound_dtype.kind, dtype.kind) else ''} (an integer or "
             "bool plane — an index vector, a terminated mask — is passed at its "
             "own dtype and is not this case)"
         )

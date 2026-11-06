@@ -271,15 +271,10 @@ public:
                     "'float32'. Launch it through eagle's Python/torch "
                     "device path (eagle.LoadedVector / eagle.LoadedPure), "
                     "which supports float32");
-            // softdouble: UNLIKE float32, SoftDouble is bit-identical IEEE
-            // float64 (SoftDouble static_asserts sizeof == 8; arrays,
-            // uniforms, and the GRef ABI all stay float64-shaped), so it
-            // loads and launches through this registry's double-typed
-            // binding surface with zero widening. Confirmed by a
-            // load-and-run probe (eagle/tests/test_PluginRegistryDtype.cu,
-            // PluginRegistryDtypeTest.SoftdoubleLoadsAndLaunches): a
-            // softdouble artifact loads via cuModuleLoadData, resolves its
-            // kernel symbol, and launches through inject() unmodified.
+            // banded: planes are 8-byte cells of eagle dtype code 13 (eagle::array::DType::Banded); the binding
+            // surface (double* of 8-byte words, by-value 8-byte uniforms) is byte-compatible, so a banded artifact
+            // loads and launches through it unmodified
+            // (tests/test_PluginRegistryDtype.cu, PluginRegistryDtypeTest.BandedLoadsAndLaunches).
             const std::string art = _slurp(m.dir + e.artifact);
             check_(cuModuleLoadData(&p.module, art.c_str()),
                    "cuModuleLoadData", p.id);

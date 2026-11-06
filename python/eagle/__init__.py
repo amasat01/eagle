@@ -60,6 +60,7 @@ from .abi import (
     make_handle,
 )
 from ._index_set import IndexSet, check_index_set
+from ._core import banded_pack, banded_unpack
 from .arrays import Array, DType
 from .compose import GraphComposer
 from .dtypes import SCALAR_TYPES
@@ -111,6 +112,8 @@ __all__ = [
     "IndexSet",
     "check_index_set",
     "DType",
+    "banded_pack",
+    "banded_unpack",
     "deploy",
     "detect",
     "device_props",

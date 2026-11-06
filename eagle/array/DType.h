@@ -8,8 +8,9 @@
  * @brief eagle's dtype truth: one enum whose codes ARE the seam's ``EAGLE_BACKEND_DTYPE_*``.
  *
  * Codes 0-9 are the dtypes the ops run on (append-only; 8 and 9 are float16 and bfloat16). Codes 10-12 are
- * named (interop tables); ``kName``, ``kItemsize``, ``kKind`` and ``kTypestr`` are the one place a name,
- * a size, a kind letter (``b u i f``) or an ``__array_interface__`` / CAI typestr is spelled.
+ * named (interop tables); code 13 is ``banded``, an opaque 8-byte cell (kind ``V``) packed and unpacked only by the
+ * explicit codec, never run by an op; ``kName``, ``kItemsize``, ``kKind`` and ``kTypestr`` are the one place a name,
+ * a size, a kind letter (``b u i f V``) or an ``__array_interface__`` / CAI typestr is spelled.
  * Dependency-free (no aether, no CUDA) so a host TU and a device TU share it.
  */
 
@@ -22,22 +23,23 @@ namespace eagle::array {
 
 enum class DType : std::uint8_t {
     Bool = 0, U8 = 1, I32 = 2, U32 = 3, I64 = 4, U64 = 5, F32 = 6, F64 = 7,
-    F16 = 8, BF16 = 9, I8 = 10, I16 = 11, U16 = 12,
+    F16 = 8, BF16 = 9, I8 = 10, I16 = 11, U16 = 12, Banded = 13,
+    BandPartial = 14,   ///< the 16-byte banded scratch element (hawk's partials plane): never a user dtype, zero = 16 zero bytes
 };
 
-inline constexpr int kDTypeCount = 13;
+inline constexpr int kDTypeCount = 15;
 /// Dtypes the ops run on: codes below this.
 inline constexpr int kComputeDTypes = 10;
 
-inline constexpr std::size_t kItemsize[kDTypeCount] = { 1, 1, 4, 4, 8, 8, 4, 8, 2, 2, 1, 2, 2 };
+inline constexpr std::size_t kItemsize[kDTypeCount] = { 1, 1, 4, 4, 8, 8, 4, 8, 2, 2, 1, 2, 2, 8, 16 };
 inline constexpr const char* kName[kDTypeCount] = { "bool", "uint8", "int32", "uint32", "int64", "uint64",
-    "float32", "float64", "float16", "bfloat16", "int8", "int16", "uint16" };
-inline constexpr char kKind[kDTypeCount] = { 'b', 'u', 'i', 'u', 'i', 'u', 'f', 'f', 'f', 'f', 'i', 'i', 'u' };
-/// CAI / ``__array_interface__`` typestr (bfloat16 has none in the standard: ``<V2``).
+    "float32", "float64", "float16", "bfloat16", "int8", "int16", "uint16", "banded", "band_partial" };
+inline constexpr char kKind[kDTypeCount] = { 'b', 'u', 'i', 'u', 'i', 'u', 'f', 'f', 'f', 'f', 'i', 'i', 'u', 'V', 'V' };
+/// CAI / ``__array_interface__`` typestr (bfloat16 has none in the standard: ``<V2``; banded is an opaque 8-byte cell: ``|V8``).
 inline constexpr const char* kTypestr[kDTypeCount] = { "|b1", "|u1", "<i4", "<u4", "<i8", "<u8", "<f4", "<f8",
-    "<f2", "<V2", "|i1", "<i2", "<u2" };
-/// Buffer-protocol format characters (``struct`` module spelling; bfloat16 has none: ``H``).
-inline constexpr char kFormat[kDTypeCount] = { '?', 'B', 'i', 'I', 'q', 'Q', 'f', 'd', 'e', 'H', 'b', 'h', 'H' };
+    "<f2", "<V2", "|i1", "<i2", "<u2", "|V8", "|V16" };
+/// Buffer-protocol format characters (``struct`` module spelling; bfloat16 has none: ``H``; banded shows its 8-byte cell word: ``Q``).
+inline constexpr char kFormat[kDTypeCount] = { '?', 'B', 'i', 'I', 'q', 'Q', 'f', 'd', 'e', 'H', 'b', 'h', 'H', 'Q', 'Q' };
 
 inline constexpr std::size_t itemsize(DType d) { return kItemsize[static_cast<int>(d)]; }
 inline constexpr const char* name(DType d) { return kName[static_cast<int>(d)]; }

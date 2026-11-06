@@ -96,7 +96,7 @@ static std::string writeTmp(const std::string& name, const std::string& body)
 // Stages a manifest + sidecar (both in TempDir()) around the CMake-built
 // device_plugin_intuniform.cu fixture (path baked in as DEVICE_PLUGIN_INTUNIFORM_PTX),
 // whose kernel takes `(ScalarHandle val, double gain, long long k, uint32 n)` — the
-// MIXED row set. Same staging recipe as test_PluginRegistryDtype.cu's softdouble check.
+// MIXED row set. Same staging recipe as test_PluginRegistryDtype.cu's banded check.
 static std::string writeIntUniformManifest()
 {
     const std::string ptxBytes = [] {

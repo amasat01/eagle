@@ -363,6 +363,9 @@ def plan(
         )
 
     check_policy(policy, "eagle.plan")
+    runs_on = (inner or eexec.HostTeam) if structure is eexec.RankPartition else structure
+    if getattr(plugin, "scalar_type", None) == "banded" and runs_on is eexec.HostTeam:
+        _planes.refuse_banded_on_cpu("eagle.plan")
     if structure is not eexec.RankPartition:
         if inner is not None:
             raise ValueError(

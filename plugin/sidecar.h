@@ -127,7 +127,7 @@ struct Sidecar {
     // stays absence-lenient (pre-freeze sidecars), value-strict otherwise.
     std::string pattern;
     int schema_version = 0;   // plugin-schema version (0 = absent -> treated as v1)
-    std::string scalar_type;  // "float64"|"float32"|"softdouble" ("" = pre-dtype
+    std::string scalar_type;  // "float64"|"float32"|"banded" ("" = pre-dtype
                               // sidecar, treated as float64)
     // Optional dlopen'd host entry-point symbol for the CPU plugin path (the
     // reserved ``launch`` capability, host face). Empty -> the HostPluginRegistry
@@ -584,7 +584,7 @@ inline void _validate_graph_block(const Sidecar& sc, const std::string& ctx) {
     // ABSENCE-STRICT, unlike the general lenient check above: the leniencies exist for
     // pre-freeze backward compatibility, and a family minted after the freeze has no
     // backward to be compatible with. ALLOWLIST form (never a rejected-value literal),
-    // which is what keeps the graph-block tree's SoftDouble grep meaningful.
+    // which is what keeps the graph-block tree's banded grep meaningful.
     if (sc.scalar_type != "float32" && sc.scalar_type != "float64")
         throw std::runtime_error(ctx + ": graph_block requires scalar_type in "
             "(float32, float64); got '" + sc.scalar_type + "' (a graph block's "
@@ -730,13 +730,13 @@ inline void validate_sidecar(const Sidecar& sc, const std::string& ctx) {
     // Forward-strict dtype (mirrors Python's enum check against
     // eagle.dtypes.SCALAR_TYPES in LoadedKernel.__init__): reject a
     // scalar_type this build does not recognize at all, rather than let it
-    // silently fall through the registries' float32/softdouble literal
+    // silently fall through the registries' float32/banded literal
     // compares and be treated as an ordinary float64 kernel. Empty ("" — a
     // pre-dtype sidecar that predates this field) stays backward-lenient.
     if (!sc.scalar_type.empty() && sc.scalar_type != "float64" &&
-        sc.scalar_type != "float32" && sc.scalar_type != "softdouble")
+        sc.scalar_type != "float32" && sc.scalar_type != "banded")
         throw std::runtime_error(ctx + ": unknown sidecar scalar_type '" +
-            sc.scalar_type + "' (supported: float64, float32, softdouble)");
+            sc.scalar_type + "' (supported: float64, float32, banded)");
     // Sidecar-level ``pattern`` ("the discriminant rule"): value-strict, like
     // the manifest-level gate in both registries' ``from_manifest``/``load`` — an
     // unrecognized value is rejected naming the supported set, telling the caller

@@ -334,3 +334,138 @@ def test_a_strided_host_side_copies_with_a_pitched_transfer_either_way():
     arrays.copyto(back[:, 2:5], dev)                          # contiguous device source, strided host target
     dev.synchronize()
     assert back[:, 2:5].tolist() == dev.get().tolist()
+
+
+# ---- banded: dtype code 13, the explicit codec, and the sites that refuse an implicit cast ---------------------
+
+import math
+import random
+import struct
+
+
+def test_banded_is_dtype_code_13_an_opaque_eight_byte_cell():
+    import eagle
+
+    d = eagle.arrays.banded
+    assert (d.code, d.itemsize, d.kind, d.name, d.typestr) == (13, 8, "V", "banded", "|V8")
+    assert eagle._core.array_dtype(13) == d and eagle.dtypes.dtype_of("banded") == d
+    assert eagle.dtypes.dtype_of("float64") == eagle.arrays.float64
+
+
+def test_band_partial_is_a_sixteen_byte_scratch_element_reached_only_as_an_object():
+    import pytest
+
+    import eagle
+
+    d = eagle.dtypes.scratch_dtype("band_partial")
+    assert (d.code, d.itemsize, d.kind, d.name, d.typestr) == (14, 16, "V", "band_partial", "|V16")
+    assert eagle._core.array_dtype(14) == d
+    for named in ("band_partial", eagle.dtypes.dtype_name(d)):
+        with pytest.raises(ValueError, match="scratch element"):
+            eagle.arrays.empty(4, dtype=named)
+    with pytest.raises(ValueError, match="not a scratch element"):
+        eagle.dtypes.scratch_dtype("float64")
+    plane = eagle.arrays.empty(5, dtype=d)
+    assert plane.dtype == d and plane.nbytes == 80
+    plane.fill(0)
+    assert plane.tolist() == [bytes(16)] * 5
+    with pytest.raises(TypeError, match="zero-filled"):
+        plane.fill(1)
+
+
+def test_banded_pack_unpack_round_trips_within_one_ulp_and_specials_bitwise():
+    import eagle
+
+    rng = random.Random(7)
+    vals = [rng.uniform(-1, 1) * 10.0 ** rng.randint(-20, 20) for _ in range(500)]
+    vals += [0.0, math.inf, -math.inf, math.nan, 1.0, -1.0]
+    packed = eagle.banded_pack(eagle.arrays.asarray(vals))
+    assert packed.dtype == eagle.arrays.banded
+    back = eagle.banded_unpack(packed).tolist()
+    for v, b in zip(vals, back):
+        if math.isnan(v):
+            assert math.isnan(b)
+        elif v == 0.0 or math.isinf(v):
+            assert struct.pack("<d", v) == struct.pack("<d", b)
+        else:
+            assert abs(b - v) <= abs(v) * 2.0 ** -52, (v, b)
+
+
+def test_banded_pack_out_of_window_values_refuse_with_the_labelled_error():
+    import eagle
+
+    for out in (2.0 ** 127, 1e-300):    # above the window [2^-94, 2^126), below it
+        with pytest.raises(ValueError, match="outside tier 1's exact window"):
+            eagle.banded_pack(eagle.arrays.asarray([out]))
+    # the codec's own outcomes for the zeros: -0 packs to the canonical +0 word, a denormal flushes to +0
+    assert eagle.banded_unpack(eagle.banded_pack(eagle.arrays.asarray([-0.0, 5e-324]))).tolist() == [0.0, 0.0]
+    assert math.copysign(1.0, eagle.banded_unpack(eagle.banded_pack(eagle.arrays.asarray([-0.0]))).tolist()[0]) == 1.0
+
+
+def test_banded_codec_refuses_the_wrong_dtype():
+    import eagle
+
+    with pytest.raises(TypeError, match="eagle.banded_pack: expected a float64"):
+        eagle.banded_pack(eagle.arrays.asarray([1], eagle.arrays.int64))
+    with pytest.raises(TypeError, match="eagle.banded_unpack: expected a banded"):
+        eagle.banded_unpack(eagle.arrays.asarray([1.0]))
+
+
+def test_banded_arrays_run_no_ops_and_export_no_dlpack_nor_python_values():
+    import eagle
+
+    a = eagle.banded_pack(eagle.arrays.asarray([1.0, 2.0]))
+    with pytest.raises((ValueError, TypeError), match="(?i)compute|banded"):
+        eagle.arrays.add(a, a)
+    with pytest.raises((ValueError, TypeError), match="(?i)compute|banded|cast"):
+        a.astype(eagle.arrays.float64)
+    with pytest.raises(TypeError, match="eagle.banded_unpack"):
+        a.__dlpack__()
+    with pytest.raises(TypeError, match="eagle.banded_pack"):
+        eagle.arrays.asarray([1.0], eagle.arrays.banded)
+
+
+def test_a_banded_plane_zero_fills_to_the_canonical_zero_cell_and_refuses_any_other_fill():
+    import eagle
+
+    a = eagle.banded_pack(eagle.arrays.asarray([1.0, -2.0, 3.0]))
+    a.fill(0)
+    assert eagle.banded_unpack(a).tolist() == [0.0, 0.0, 0.0]
+    assert a.tolist() == [0, 0, 0]
+    with pytest.raises(TypeError, match="zero-filled"):
+        a.fill(1)
+
+
+def test_banded_plane_sites_refuse_an_implicit_cast_by_name():
+    import eagle
+    from eagle import _plan_planes as pp
+    from eagle import marshal, plan
+
+    b, f = eagle.arrays.banded, eagle.arrays.float64
+    cells = eagle.banded_pack(eagle.arrays.asarray([1.0, 2.0]))
+    floats = eagle.arrays.asarray([1.0, 2.0])
+    with pytest.raises(ValueError, match="eagle.banded_pack"):
+        pp._plan_float(floats, b, "x")
+    with pytest.raises(ValueError, match="eagle.banded_unpack"):
+        pp._plan_float(cells, f, "x")
+    with pytest.raises(ValueError, match="eagle.banded_pack"):
+        pp._host_plane(floats, b, name="x")
+    with pytest.raises(ValueError, match="eagle.banded_pack"):
+        pp._host_plane([1.0, 2.0], b, name="x")
+    assert pp._host_plane(cells, b, name="x").dtype == b                    # same dtype passes
+    with pytest.raises(ValueError, match="eagle.banded_unpack"):
+        pp._host_plane(cells, f, name="x")                                  # 'V' is not an index pass-through
+    with pytest.raises(ValueError, match="not cast to banded"):
+        marshal._as_dtype(floats, "banded")
+    with pytest.raises(ValueError, match="not cast to float64"):
+        marshal._as_dtype(cells, "float64")
+    with pytest.raises(ValueError, match="banded_pack"):
+        pp._check_plane("input", "x", cells, n=2, dtype=f, width=1, framework="numpy")
+    with pytest.raises(ValueError, match="banded_unpack|banded_pack"):
+        pp._check_plane("input", "x", floats, n=2, dtype=b, width=1, framework="numpy")
+    with pytest.raises(ValueError, match="MPI_DOUBLE"):
+        plan._check_gatherable(cells)
+    from eagle._plan_pack import _uniform_box
+
+    box = _uniform_box(1.5, b)
+    assert box.value == eagle._core.banded_pack_scalar(1.5) == eagle.banded_pack(eagle.arrays.asarray([1.5])).tolist()[0]

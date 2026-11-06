@@ -118,7 +118,7 @@ struct Host {
      *  Templated on `DataT` like `packetLoad`/`packetStore`/`loadMask` --
      *  this was previously the one function in the file hard-typed to
      *  `Real` (double), so it could not accept a mask built over any other
-     *  `DataT` (e.g. SoftDouble). `DataT` is deduced from `mask` rather
+     *  `DataT` (e.g. banded). `DataT` is deduced from `mask` rather
      *  than listed before `W` so every existing call site
      *  (`applyTail<W>(...)` in `launchIfNot`/`launchIf`/
      *  `packetLaunchIfNot` below, and `eagle/util/Slice.h`'s

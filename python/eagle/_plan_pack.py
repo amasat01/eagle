@@ -8,7 +8,7 @@ from __future__ import annotations
 import ctypes
 
 
-from . import arrays
+from . import _core, arrays
 from .dtypes import dtype_name
 from .roles import OUTPUT_ROLES, classify_arg
 
@@ -73,11 +73,13 @@ def _gref_mirror_box(arr, n: int, device_type: int):
 
 def _uniform_box(value, dtype, *, integer: bool = False):
     """A ``uniform``'s by-value scalar at the artifact's declared width
-    (``c_float``/``c_double``). An integer uniform (``dtype: "int"``,
+    (``c_float``/``c_double``; banded: the ``BandedReal`` cell word as ``c_uint64``). An integer uniform (``dtype: "int"``,
     :func:`_integer_uniforms`) crosses as ``c_longlong`` instead — a double
     box would put its bit pattern in the integer argument."""
     if integer:
         return ctypes.c_longlong(int(value))
+    if dtype is not None and dtype_name(dtype) == "banded":
+        return ctypes.c_uint64(_core.banded_pack_scalar(float(value)))
     if dtype is not None and dtype_name(dtype) == "float32":
         return ctypes.c_float(float(value))
     return ctypes.c_double(float(value))

@@ -31,6 +31,7 @@
 
 #include "eagle/array/Array.h"
 #include "eagle/array/host.h"
+#include "aether/banded/BandedReal.h"
 #include "plugin/dlpack.h"
 
 namespace eagle_array_binding {
@@ -48,15 +49,23 @@ struct PyDType {
 
 // ---- dtype and placement parsing -----------------------------------------------------------------
 
+/// A dtype named by a user: the scratch element "band_partial" is refused by name (it is reached only as an eagle.DType
+/// object from eagle.dtypes.scratch_dtype).
+inline DType user_dtype_named(const std::string& s)
+{
+    if (s == ea::name(DType::BandPartial)) throw std::invalid_argument("eagle dtype 'band_partial' is a scratch element, not a user dtype");
+    return ea::from_name(s);
+}
+
 inline DType parse_dtype(nb::handle h)
 {
     if (nb::isinstance<PyDType>(h)) return nb::cast<PyDType>(h).d;
     try {
-        if (nb::isinstance<nb::str>(h)) return ea::from_name(nb::cast<std::string>(h));
+        if (nb::isinstance<nb::str>(h)) return user_dtype_named(nb::cast<std::string>(h));
         for (const char* attr : { "name", "__name__" })
             if (nb::hasattr(h, attr)) {
                 nb::object v = h.attr(attr);
-                if (nb::isinstance<nb::str>(v)) return ea::from_name(nb::cast<std::string>(v));
+                if (nb::isinstance<nb::str>(v)) return user_dtype_named(nb::cast<std::string>(v));
             }
     } catch (const std::invalid_argument& e) {
         throw nb::value_error(e.what());
@@ -349,7 +358,8 @@ inline nb::object read_item(const char* p, DType d)
     case DType::I32: return nb::int_(*reinterpret_cast<const std::int32_t*>(p));
     case DType::U32: return nb::int_(*reinterpret_cast<const std::uint32_t*>(p));
     case DType::I64: return nb::int_(*reinterpret_cast<const std::int64_t*>(p));
-    case DType::U64: return nb::int_(*reinterpret_cast<const std::uint64_t*>(p));
+    case DType::U64: case DType::Banded: return nb::int_(*reinterpret_cast<const std::uint64_t*>(p));   // a banded item is its cell word
+    case DType::BandPartial: return nb::bytes(p, 16);   // a partial is its 16 bytes
     case DType::F32: return nb::float_(*reinterpret_cast<const float*>(p));
     case DType::F64: return nb::float_(*reinterpret_cast<const double*>(p));
     case DType::F16: return nb::float_(static_cast<float>(*reinterpret_cast<const ea::Half*>(p)));
@@ -484,6 +494,8 @@ inline Array sum_array(const Array& a, std::uint64_t stream)
 
 inline void store_item(char* p, DType d, nb::handle v)
 {
+    if (d == DType::Banded) throw nb::type_error("eagle: a banded cell is not built from a Python value; pack float64 values with eagle.banded_pack");
+    if (d == DType::BandPartial) throw nb::type_error("eagle: a band_partial element is not built from a Python value; its plane is zeroed with fill(0)");
     if (ea::is_float(d)) {
         const double x = nb::cast<double>(v);
         switch (d) {
@@ -520,6 +532,15 @@ inline void shape_of_list(nb::handle h, std::vector<std::int64_t>& shape, std::s
 inline void fill_scalar(const Array& a, nb::handle value, std::uint64_t st)
 {
     Call c { Op::Fill };
+    if (a.dtype() == DType::BandPartial || a.dtype() == DType::Banded) {      // both zeros are all-zero bytes: filled as bytes
+        if (nb::cast<double>(value) != 0.0 || !a.contiguous()) throw nb::type_error("eagle: a banded or band_partial plane can only be zero-filled, and only when contiguous");
+        c.dtype = static_cast<int>(DType::U8);
+        c.i0 = 0;
+        c.n = a.size() * static_cast<std::int64_t>(ea::itemsize(a.dtype()));
+        c.p0 = a.data();
+        run_call(a.placement(), st, c);
+        return;
+    }
     c.dtype = static_cast<int>(a.dtype());
     if (ea::is_float(a.dtype())) c.f0 = nb::cast<double>(value);
     else { char buf[8]; store_item(buf, DType::I64, value); std::memcpy(&c.i0, buf, 8); if (a.dtype() == DType::Bool) c.i0 = c.i0 != 0; }
@@ -623,6 +644,8 @@ inline void fill_tensor(DLTensor& t, Exported& e)
 
 inline nb::object export_dlpack(const Array& a, bool versioned, const nb::object& stream)
 {
+    if (a.dtype() == DType::Banded) throw nb::type_error("DLPack has no banded dtype; unpack with eagle.banded_unpack and export the float64 array");
+    if (a.dtype() == DType::BandPartial) throw nb::type_error("DLPack has no band_partial dtype: it is a scratch element");
     if (!a.placement().host() && !stream.is_none()) {
         const auto s = nb::cast<std::intptr_t>(stream);
         if (s >= 0 && a.ordered()) eagle_interop_binding::fence_streams(a.stream() == 0 ? 1 : static_cast<std::intptr_t>(a.stream()), s, a.placement().device);
@@ -743,7 +766,7 @@ inline Array array_from_buffer(nb::object obj)
     return Array::borrow(view->buf, shape, strides, d, { Placement::Kind::Cpu, 0 }, keep);
 }
 
-inline constexpr const char* kFmtStr[ea::kDTypeCount] = { "?", "B", "i", "I", "q", "Q", "f", "d", "e", "H", "b", "h", "H" };
+inline constexpr const char* kFmtStr[ea::kDTypeCount] = { "?", "B", "i", "I", "q", "Q", "f", "d", "e", "H", "b", "h", "H", "Q", "16s" };
 
 inline int getbuffer(PyObject* self, Py_buffer* buf, int)
 {
@@ -800,6 +823,35 @@ inline Array getitem(const Array& a, nb::handle key)
 
 // ---- the binding ------------------------------------------------------------------------------------------
 
+// ---- the banded codec: host float64 <-> 8-byte cells, through aether::banded::BandedReal -----------------------
+
+template <class F> inline auto banded_guard(F&& f)
+{
+    try { return f(); } catch (const std::runtime_error& e) { throw nb::value_error(e.what()); }
+}
+
+inline Array banded_convert(const Array& a, DType from, DType to, const char* who)
+{
+    if (a.dtype() != from) throw nb::type_error((std::string(who) + ": expected a " + ea::name(from) + " array, got " + ea::name(a.dtype())).c_str());
+    if (!a.placement().host()) throw nb::type_error((std::string(who) + ": host arrays only; copy the array to the host first").c_str());
+    const Array src = dense(a, 0);
+    Array out = Array::empty(a.shape(), to, a.placement());
+    const std::int64_t n = a.size();
+    banded_guard([&] {
+        if (to == DType::Banded) {
+            const auto* x = static_cast<const double*>(src.data());
+            auto* w = static_cast<std::uint64_t*>(out.data());
+            for (std::int64_t i = 0; i < n; ++i) w[i] = aether::banded::BandedReal::fromDouble(x[i]).toBits();
+        } else {
+            const auto* w = static_cast<const std::uint64_t*>(src.data());
+            auto* x = static_cast<double*>(out.data());
+            for (std::int64_t i = 0; i < n; ++i) x[i] = aether::banded::BandedReal::fromBits(w[i]).toDouble();
+        }
+        return 0;
+    });
+    return out;
+}
+
 inline void install_allocator()
 {
     auto cpu = ea::allocator();
@@ -848,6 +900,9 @@ inline void bind(nb::module_& m)
         };
     }, nb::arg("array"), nb::arg("obj"));
     m.def("array_promote", [](nb::handle a, nb::handle b) { try { return PyDType { ea::promote(parse_dtype(a), parse_dtype(b)) }; } catch (const std::invalid_argument& e) { throw nb::type_error(e.what()); } });
+    m.def("banded_pack", [](const Array& a) { return banded_convert(a, DType::F64, DType::Banded, "eagle.banded_pack"); }, nb::arg("array"));
+    m.def("banded_unpack", [](const Array& a) { return banded_convert(a, DType::Banded, DType::F64, "eagle.banded_unpack"); }, nb::arg("array"));
+    m.def("banded_pack_scalar", [](double x) { return banded_guard([&] { return aether::banded::BandedReal::fromDouble(x).toBits(); }); }, nb::arg("value"));
     m.def("array_dtype", [](int code) { return PyDType { ea::from_code(code) }; }, nb::arg("code"));
 
     auto array_class = nb::class_<Array>(m, "Array", nb::type_slots(g_buffer_slots))

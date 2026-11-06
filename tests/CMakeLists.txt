@@ -329,8 +329,8 @@ else()
   target_link_libraries(eagle_tests ${EAGLE_TESTS_CUDA_DRIVER_LIB})
 
   # Device-plugin fixture for test_PluginRegistryDtype.cu's
-  # SoftdoubleLoadsAndLaunches: a hand-written, ABI-only .cu (no external
-  # code generator -- see fixtures/device_plugin_softdouble.cu) nvcc'd to PTX once at
+  # BandedLoadsAndLaunches: a hand-written, ABI-only .cu (no external
+  # code generator -- see fixtures/device_plugin_banded.cu) nvcc'd to PTX once at
   # build time, mirroring the CPU host_plugin_* fixtures' role for the device
   # path. The test reads the compiled PTX from this absolute path (baked in
   # via a compile definition) and stages it into its own manifest.
@@ -369,7 +369,7 @@ else()
   endif()
   if(NOT _SD_FIXTURE_NVCC)
     message(FATAL_ERROR "Could not locate nvcc (checked $PATH and $CUDA_PATH/bin) "
-      "for the device_plugin_softdouble.cu PTX fixture")
+      "for the device_plugin_banded.cu PTX fixture")
   endif()
   # The fixtures are device-code images the test hands to cuModuleLoadData (the artifacts keep their .ptx names). They
   # are built as a FATBIN of SASS for the architectures this build targets, not as PTX text: PTX is JIT-compiled by the
@@ -382,19 +382,19 @@ else()
       list(APPEND _EAGLE_FIXTURE_GENCODE -gencode arch=compute_${_a},code=sm_${_a})
     endif()
   endforeach()
-  set(_SD_FIXTURE_PTX ${CMAKE_CURRENT_BINARY_DIR}/device_plugin_softdouble.ptx)
+  set(_SD_FIXTURE_PTX ${CMAKE_CURRENT_BINARY_DIR}/device_plugin_banded.ptx)
   add_custom_command(
     OUTPUT ${_SD_FIXTURE_PTX}
     COMMAND ${_SD_FIXTURE_NVCC} --fatbin ${_EAGLE_FIXTURE_GENCODE}
             -I${CMAKE_CURRENT_SOURCE_DIR}/..
-            ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/device_plugin_softdouble.cu
+            ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/device_plugin_banded.cu
             -o ${_SD_FIXTURE_PTX}
-    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/device_plugin_softdouble.cu
-    COMMENT "Compiling device_plugin_softdouble.cu -> fatbin (${_SD_FIXTURE_NVCC})")
-  add_custom_target(device_plugin_softdouble_ptx DEPENDS ${_SD_FIXTURE_PTX})
-  add_dependencies(eagle_tests device_plugin_softdouble_ptx)
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/device_plugin_banded.cu
+    COMMENT "Compiling device_plugin_banded.cu -> fatbin (${_SD_FIXTURE_NVCC})")
+  add_custom_target(device_plugin_banded_ptx DEPENDS ${_SD_FIXTURE_PTX})
+  add_dependencies(eagle_tests device_plugin_banded_ptx)
   target_compile_definitions(eagle_tests PRIVATE
-    DEVICE_PLUGIN_SOFTDOUBLE_PTX="${_SD_FIXTURE_PTX}")
+    DEVICE_PLUGIN_BANDED_PTX="${_SD_FIXTURE_PTX}")
 
   # Int-uniform device parity: the second PTX fixture, compiled by the SAME
   # resolved nvcc and for the same reason (raw PTX TEXT that cuModuleLoadData JITs, so

@@ -17,8 +17,8 @@ from ._stream import current as _current_stream, scoped as _scoped_stream
 Array = _core.Array
 DType = _core.DType
 
-bool_, uint8, int32, uint32, int64, uint64, float32, float64, float16, bfloat16, int8, int16, uint16 = (
-    _core.array_dtype(c) for c in range(13))
+bool_, uint8, int32, uint32, int64, uint64, float32, float64, float16, bfloat16, int8, int16, uint16, banded = (
+    _core.array_dtype(c) for c in range(14))
 
 _ADD, _SUB, _MUL, _MAX, _EQ, _NE, _GT = (_core.CELL_ADD, _core.CELL_SUB, _core.CELL_MUL, _core.CELL_MAX,
                                          _core.CELL_EQ, _core.CELL_NE, _core.CELL_GT)

@@ -418,9 +418,9 @@ TEST(SchemaHardeningTest, FrozenField_ArgSpecRole_RejectsUnknown)
     }
 }
 
-// The item-4 fix: a scalar_type outside {float64, float32, softdouble} is
+// The item-4 fix: a scalar_type outside {float64, float32, banded} is
 // now rejected, instead of silently falling through the registries'
-// literal float32/softdouble compares as though it were an ordinary
+// literal float32/banded compares as though it were an ordinary
 // float64 kernel.
 TEST(SchemaHardeningTest, FrozenField_ScalarType_RejectsUnrecognizedValue)
 {
@@ -441,7 +441,7 @@ TEST(SchemaHardeningTest, FrozenField_ScalarType_RejectsUnrecognizedValue)
     }
 }
 
-// A recognized-but-unsupported-here value (e.g. "float32"/"softdouble") is
+// A recognized-but-unsupported-here value (e.g. "float32"/"banded") is
 // NOT what item 4 rejects — those stay valid schema-v1 values; a registry
 // may separately refuse to bind them for its own capability reasons (D-B).
 TEST(SchemaHardeningTest, ScalarTypeFloat32StillValidatesCleanly)

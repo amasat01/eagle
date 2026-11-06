@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "pattern": "pure",
-  "scalar_type": "softdouble",
+  "scalar_type": "banded",
   "forward_exec": {"kind": "kernel", "kernel": "mlp_block_fwd"},
   "vjp_exec": {"kind": "kernel", "kernel": "mlp_block_vjp"},
   "kernel": "mlp_block",
