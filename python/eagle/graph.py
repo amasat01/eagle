@@ -895,11 +895,16 @@ class Graph:
             else:
                 from ._host_schedule import lower_cpu_stage
 
-                lowered = [lower_cpu_stage(n, ctx) for n in self._nodes]
-                self._cpu_steps = [s for i, (step, _, _) in enumerate(lowered)
-                                   for s in (*before(i), step)]
-                self._schedule = tuple(how for _, how, _ in lowered)
-                self._host_stages = tuple(stage for _, _, stage in lowered)
+                def lower(ctx=ctx, before=before):
+                    # a HostStage holds its arrays' addresses: _rebind lowers again
+                    lowered = [lower_cpu_stage(n, ctx) for n in self._nodes]
+                    self._cpu_steps = [s for i, (step, _, _) in enumerate(lowered)
+                                       for s in (*before(i), step)]
+                    self._schedule = tuple(how for _, how, _ in lowered)
+                    self._host_stages = tuple(stage for _, _, stage in lowered)
+
+                lower()
+                self._lower_cpu = lower
             self._live = _live_checks(accesses)
             self._backend = be
             self._edges = edges
@@ -955,6 +960,8 @@ class Graph:
                     wrappers[id(name)] = name
         if self._backend == "gpu":
             self._patch_or_rebuild(bounds.values(), todo, wrappers.values(), rebuild)
+        elif any(stage is not None for stage in self._host_stages):
+            self._lower_cpu()
         return self
 
     def _patch_index(self):

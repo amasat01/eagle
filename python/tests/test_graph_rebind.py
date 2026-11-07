@@ -18,7 +18,7 @@ from eagle import SkipGuard, repeat_while
 from eagle._graph_kinds import _copy
 
 hawk = pytest.importorskip("hawk")
-from hawk import Mutable, Scalar  # noqa: E402
+from hawk import Mutable, Scalar, Table  # noqa: E402
 from hawk import math as m  # noqa: E402
 
 GPU = os.environ.get("EAGLE_TEST_GPU") == "1"
@@ -29,6 +29,11 @@ N = 64
 @hawk.kernel
 def rb_step(x: Scalar, y: Mutable[Scalar]):
     y = m.sin(x) + 0.5 * x
+
+
+@hawk.kernel
+def rb_look(x: Scalar, t: Table["k":8], y: Mutable[Scalar]):  # noqa: F821  (hawk axis names)
+    y = x + t.at(2.0)
 
 
 @hawk.kernel
@@ -99,6 +104,22 @@ def test_a_rebind_equals_a_fresh_build_and_leaves_the_old_arrays(xpn, plans):
     np.testing.assert_array_equal(host(x1), keep[0])
     np.testing.assert_array_equal(host(t1), keep[1])
     del captures
+
+
+@pytest.mark.parametrize("xpn", XPS)
+def test_a_one_node_graph_reads_the_rebound_table(xpn, tmp_path):
+    # a table's extent is its own element count, not the lane count: the swap packs a new handle
+    xp = xpmod(xpn)
+    x = xp.asarray(np.arange(N, dtype=np.float64))
+    t1, t2 = xp.asarray(np.full(8, 1.0)), xp.asarray(np.full(8, 5.0))
+    y = xp.zeros(N)
+    (look,) = eagle.plan.auto([rb_look], targets=(("cuda",) if xpn == "cupy" else ("host",)),
+                              cache_dir=str(tmp_path))
+    g = eagle.Graph().add(look.bind(x=x, t=t1, y=y)).build()
+    g.launch().synchronize()
+    g._rebind([(t1, t2)])
+    g.launch().synchronize()
+    np.testing.assert_array_equal(host(y), host(x) + 5.0)
 
 
 def test_a_changed_shape_is_refused_by_name(plans):
