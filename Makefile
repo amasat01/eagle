@@ -64,7 +64,7 @@ export HAWK_NVCC ?= $(NVCC)
 need_nvcc = @[ -n "$(NVCC)" ] && [ -x "$(NVCC)" ] || { echo "gate: no nvcc: set CUDACXX (or CUDA_PATH with bin/nvcc)" >&2; exit 2; }
 
 .PHONY: help gate gate-gpu gate-all gate-fresh gate-lint gate-names gate-cpp gate-py gate-docs gate-cpp-cuda gate-py-gpu \
-        gate-env-cpu gate-env-gpu gate-clean gate-doxygen sanitize-cpp tsan-ft ft-stress nodriver sdist-install release-gate
+        gate-env-cpu gate-env-gpu gate-clean gate-doxygen sanitize-cpp tsan-cpp tsan-ft ft-stress nodriver sdist-install release-gate
 
 help:
 	@sed -n '4,24p' Makefile
@@ -234,7 +234,7 @@ sanitize-cpp:
 	cmake -B "$(GD)/san" -DCMAKE_PREFIX_PATH="$(GD)/prefix_san" -DFETCHCONTENT_QUIET=ON -DEAGLE_BUILD_TESTS=ON \
 	      -DEAGLE_DEBUG_MODE=ON -DEAGLE_CPP_MODE=ON -DEAGLE_SANITIZERS=address,undefined .
 	cmake --build "$(GD)/san" -j$(GATE_JOBS)
-	{ nm -D "$(GD)/san/tests/eagle_tests"; nm "$(GD)/san/tests/eagle_tests"; } 2>/dev/null | grep -q __asan_init \
+	{ nm -D "$(GD)/san/tests/eagle_tests"; nm "$(GD)/san/tests/eagle_tests"; } 2>/dev/null | grep -c __asan_init >/dev/null \
 	  || { echo "RED: eagle_tests carries no __asan_init: this job is not sanitizing"; exit 1; }
 	fail=0; \
 	for pair in "heap-oob:AddressSanitizer: heap-buffer-overflow" "leak:LeakSanitizer: detected memory leaks" \
@@ -248,6 +248,25 @@ sanitize-cpp:
 	done; exit $$fail
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
 	  LSAN_OPTIONS="suppressions=$(CURDIR)/tests/sanitize/lsan.supp" tests/check_gate.sh cpp "$(GD)/san/tests/eagle_tests"
+
+# tsan-cpp: the host pool, schedule and concurrency rows under ThreadSanitizer; any report fails the row.
+# clang by default: its TSan runtime ships with it (gcc-toolset may lack libtsan). The OpenMP runtime is not
+# instrumented, so its own internals are not reported.
+TSAN_ROWS ?= HostPoolTest.*:HostScheduleTest.*:ConcurrencyHost.*
+TSAN_CXX  ?= $(or $(CLANGXX),$(CXX))
+tsan-cpp:
+	$(call need_aether)
+	mkdir -p "$(GD)"
+	cmake -DAETHER_CPP_MODE=ON -DCMAKE_INSTALL_PREFIX="$(GD)/prefix_cpp" -B "$(GD)/aether_cpp" -S "$(AETHER_SRC)"
+	cmake --install "$(GD)/aether_cpp"
+	cmake -B "$(GD)/tsan_cpp" -DCMAKE_CXX_COMPILER="$(TSAN_CXX)" -DCMAKE_PREFIX_PATH="$(GD)/prefix_cpp" -DFETCHCONTENT_QUIET=ON \
+	      -DEAGLE_BUILD_TESTS=ON -DEAGLE_CPP_MODE=ON -DEAGLE_SANITIZERS=thread .
+	cmake --build "$(GD)/tsan_cpp" -j$(GATE_JOBS) --target eagle_tests
+	{ nm -D "$(GD)/tsan_cpp/tests/eagle_tests"; nm "$(GD)/tsan_cpp/tests/eagle_tests"; } 2>/dev/null | grep -c __tsan_init >/dev/null \
+	  || { echo "RED: eagle_tests carries no __tsan_init: this job is not sanitizing"; exit 1; }
+	TSAN_OPTIONS=halt_on_error=1:die_after_fork=0:ignore_noninstrumented_modules=1 timeout 1800 "$(GD)/tsan_cpp/tests/eagle_tests" \
+	  --gtest_filter='$(TSAN_ROWS)' 2>&1 | tee "$(GD)/tsan_cpp.log"
+	! grep -q "ThreadSanitizer" "$(GD)/tsan_cpp.log" && grep -q "PASSED  \] [1-9]" "$(GD)/tsan_cpp.log"
 
 # tsan-ft: eagle._core under ThreadSanitizer on a free-threaded CPython built with it (TSAN_PY_VERSION, e.g. 3.14.8)
 tsan-ft:

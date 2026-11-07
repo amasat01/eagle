@@ -339,7 +339,8 @@ def check_layout_sizes(sizes) -> None:
 
 def host_threads() -> int:
     """The most threads a host launch of this process uses right now (the host-thread
-    setting; default ``$OMP_NUM_THREADS``, else the CPUs this process may run on)."""
+    setting; default ``$OMP_NUM_THREADS``, else the physical cores this process may run
+    on, capped by the cgroup CPU quota)."""
     return _core.host_threads()
 
 

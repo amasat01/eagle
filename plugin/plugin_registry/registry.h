@@ -271,15 +271,10 @@ public:
                     "'float32'. Launch it through eagle's Python/torch "
                     "device path (eagle.LoadedVector / eagle.LoadedPure), "
                     "which supports float32");
-            // softdouble: UNLIKE float32, SoftDouble is bit-identical IEEE
-            // float64 (SoftDouble static_asserts sizeof == 8; arrays,
-            // uniforms, and the GRef ABI all stay float64-shaped), so it
-            // loads and launches through this registry's double-typed
-            // binding surface with zero widening. Confirmed by a
-            // load-and-run probe (eagle/tests/test_PluginRegistryDtype.cu,
-            // PluginRegistryDtypeTest.SoftdoubleLoadsAndLaunches): a
-            // softdouble artifact loads via cuModuleLoadData, resolves its
-            // kernel symbol, and launches through inject() unmodified.
+            // banded: planes are 8-byte cells of eagle dtype code 13 (eagle::array::DType::Banded); the binding
+            // surface (double* of 8-byte words, by-value 8-byte uniforms) is byte-compatible, so a banded artifact
+            // loads and launches through it unmodified
+            // (tests/test_PluginRegistryDtype.cu, PluginRegistryDtypeTest.BandedLoadsAndLaunches).
             const std::string art = _slurp(m.dir + e.artifact);
             check_(cuModuleLoadData(&p.module, art.c_str()),
                    "cuModuleLoadData", p.id);
@@ -411,7 +406,7 @@ public:
             check_(mc, "cuMemcpyHtoD(table '" + name + "')", name);
         }
         if (it != tables_.end()) cuMemFree(it->second.dptr);  // release old AFTER success
-        tables_[name] = OwnedTable{d, bytes};
+        tables_[name] = OwnedTable{d, bytes, count};
     }
 
     // Optional ceiling (bytes) on total consolidated-table memory; 0 = unbounded.
@@ -667,8 +662,10 @@ private:
             } else if (a.role == "lookup") {
                 // A consolidated read-only table: a flat handle, same 32-byte
                 // ABI as a per-sample handle, read at a user-computed index.
+                // its handle carries the table's OWN element count: a read clamps its index to it
+                void* table = lookup_table_(p.id, a.name);     // names a missing table
                 handles.push_back(make_handle(
-                    lookup_table_(p.id, a.name), unsigned(n), kEagleAbiDeviceCUDA));
+                    table, unsigned(tables_.at(a.name).count), kEagleAbiDeviceCUDA));
                 params.push_back(&handles.back());
                 if (a.name == kFinishedCounter)
                     out.finished = tables_.at(kFinishedCounter).dptr;  // run() zeroes it
@@ -820,13 +817,13 @@ private:
                     check_(cuMemAlloc(&d, sizeof(std::uint32_t)),
                            "cuMemAlloc(finished_count)", p.id);
                     check_(cuMemsetD32(d, 0, 1), "cuMemsetD32(finished_count)", p.id);
-                    tables_[kFinishedCounter] = OwnedTable{d, sizeof(std::uint32_t)};
+                    tables_[kFinishedCounter] = OwnedTable{d, sizeof(std::uint32_t), 1};
                     return;
                 }
     }
 
     // A registry-OWNED device allocation for a consolidated lookup table.
-    struct OwnedTable { CUdeviceptr dptr = 0; std::size_t bytes = 0; };
+    struct OwnedTable { CUdeviceptr dptr = 0; std::size_t bytes = 0; std::size_t count = 0; };
 
     std::vector<Plugin> plugins_;
     std::map<std::string, VecBinding> vec_;

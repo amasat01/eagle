@@ -107,7 +107,7 @@ def _fast_path_ok(value, dt) -> bool:
 def _as_dtype(value, dt="float64"):
     """Import ``value`` as a contiguous ``dt`` device array (zero-copy DLPack
     where possible, else a cast/copy). ``dt`` is the resolved Real dtype
-    (float64 default; float32 in float32 mode -- SoftDouble stays float64).
+    (float64 default; float32 in float32 mode -- banded stays float64).
     An already-conforming array is returned as-is (see the FAST PATH
     note above)."""
     if _fast_path_ok(value, dt):
@@ -120,7 +120,13 @@ def _as_dtype(value, dt="float64"):
 
     from . import interop
 
-    return arrays.ascontiguousarray(arrays.asarray(interop.to_array(value), dt, device=_device()))
+    got = arrays.asarray(interop.to_array(value))
+    # dt: an eagle DType, a name ("float64"), a NumPy dtype, or a scalar type (np.float64).
+    want = dt if isinstance(dt, arrays.DType) else getattr(arrays, dt.__name__ if isinstance(dt, type) else str(dt))
+    if got.dtype != want and "V" in (got.dtype.kind, want.kind):
+        raise ValueError(f"eagle: a {got.dtype} array is not cast to {dt}; convert explicitly with "
+                         "eagle.banded_pack / eagle.banded_unpack")
+    return arrays.ascontiguousarray(arrays.asarray(got, dt, device=_device()))
 
 
 def coerce_vec_inputs(kw, names, n=None, widths=None, dt="float64"):

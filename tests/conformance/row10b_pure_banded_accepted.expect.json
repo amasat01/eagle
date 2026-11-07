@@ -1,6 +1,6 @@
 {
   "row": 10,
-  "title": "the same softdouble descriptor, re-labeled as an ordinary kernel, is accepted — the graph_block rejection only applies to the graph_block pattern",
+  "title": "the same banded descriptor, re-labeled as an ordinary kernel, is accepted — the graph_block rejection only applies to the graph_block pattern",
   "level": "sidecar",
   "expect": "accept",
   "error_substring": null,
@@ -10,10 +10,10 @@
   "overrides": {},
   "why": [
     "This is row10's fixture with `pattern` changed to an ordinary kernel",
-    "pattern and nothing else touched — same `softdouble` scalar_type, same",
+    "pattern and nothing else touched — same `banded` scalar_type, same",
     "leftover graph_block-only keys. The existing float64 wire representation",
-    "already serves SoftDouble bit-identically, so an ordinary sidecar's",
-    "`scalar_type: softdouble` is accepted by the shared validator's general",
+    "already serves the banded cell's 8 bytes, so an ordinary sidecar's",
+    "`scalar_type: banded` is accepted by the shared validator's general",
     "dtype check; only the graph_block-specific check (pinned by row10) narrows this,",
     "and that check never runs when the pattern is not `graph_block`.",
     "The leftover graph_block-only keys ride along as unrecognized-but-harmless",

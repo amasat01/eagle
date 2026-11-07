@@ -9,8 +9,8 @@ import numpy as np
 import pytest
 
 import eagle
+import eagle.exec as eexec
 from eagle import _core
-from eagle._host_loop import _omp_runtime
 from eagle.graph import opaque
 
 from _graph_fixtures import host_fork
@@ -21,13 +21,8 @@ MAX_N = _core.BRANCH_TASKS_MAX_SAMPLES
 @pytest.fixture
 def team():
     """``set(threads)`` resizes the host team for one test, then restores it."""
-    omp = _omp_runtime()
-    if omp is None:
-        pytest.skip("no OpenMP runtime to steer")
-    get, put = omp
-    original = get()
-    yield put
-    put(original)
+    yield eexec.set_host_threads
+    eexec.set_host_threads(None)
 
 
 def _need_team(minimum=2):
@@ -99,18 +94,33 @@ def test_both_schedules_equal_a_serial_run_bitwise(tmp_path):
         assert np.array_equal(s, t) and np.array_equal(s, w)
 
 
-def test_one_thread_equals_the_full_team_bitwise(tmp_path, team):
+@pytest.mark.parametrize("n", [1, 1024, 10_000])
+def test_one_thread_equals_the_full_team_bitwise(tmp_path, team, n):
     _need_team()
     results = {}
-    for threads in (1, _core.host_threads()):
+    for threads in (1, 2, _core.host_threads()):
         team(threads)
-        chains, arrays, _ = host_fork(tmp_path, branches=4, n=1024, depth=3)
+        chains, arrays, _ = host_fork(tmp_path, branches=4, n=n, depth=3)
         g = _stage(chains)
-        g.launch()
+        initial = [a.copy() for a, _b in arrays]
+        for _ in range(3):                                  # launch 1 in place, then sized
+            for (a, _b), a0 in zip(arrays, initial):
+                a[:] = a0
+            g.launch()
         results[threads] = ([a.copy() for a, _b in arrays], g.schedule)
-    (one, how_one), (many, how_many) = results.values()
-    assert how_one == ("work_share",) and how_many == ("branch_tasks",)
-    assert all(np.array_equal(x, y) for x, y in zip(one, many))
+    (one, how_one), *rest = results.values()
+    assert how_one == ("work_share",)
+    for many, _how in rest:
+        assert all(np.array_equal(x, y) for x, y in zip(one, many))
+
+
+def test_a_light_fork_stays_in_place_after_its_first_launch(tmp_path):
+    chains, _arrays, _ = host_fork(tmp_path, branches=4, n=1, depth=1)
+    g = _stage(chains)
+    assert g.schedule == ("branch_tasks",) or _core.host_threads() < 2
+    g.launch()
+    g.launch()
+    assert g.host_lanes == (1,)
 
 
 def test_a_stage_with_a_python_host_arm_work_shares(tmp_path):

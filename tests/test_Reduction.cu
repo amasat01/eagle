@@ -10,6 +10,9 @@
 
 #include <aether/banded/banded.h>
 
+#include <cmath>
+#include <vector>
+
 namespace eagle_tests {
 namespace ReductionTest {
 
@@ -258,11 +261,6 @@ TEST_F(ReductionTest, CUDA_AndWithBools)
 // tolerance-based (emulated adds are correctly rounded but can flip RNE ties
 // — never assert bit-exact arithmetic parity, the numerics contract's item 1).
 //
-// The TEST NAMES below still say "SoftDouble": they are pinned by the
-// committed name manifest (tests/expected_tests_cuda.txt) and a rename is a
-// re-mint, which is a build-maintenance call, not this port's. The CARRIER is
-// what moved.
-//
 // DEVIATION (aether rule): `Band`'s exponent range IS FP32's, and the storage
 // codec admits only tier 1's exact window [2^-94, 2^126)
 // (aether/banded/BandCell8.h — `BandedReal::fromDouble` THROWS outside it).
@@ -271,7 +269,7 @@ TEST_F(ReductionTest, CUDA_AndWithBools)
 // every filled value below (which live in [-1250, +1500]), so the assertion
 // this test makes is unchanged.
 
-TEST_F(ReductionTest, CUDA_SoftDoubleMax_MatchesDoubleReference)
+TEST_F(ReductionTest, CUDA_BandedMax_MatchesDoubleReference)
 {
     constexpr idx_t testSize = 100000;
     auto d = eagle::makeArray<double>(testSize);
@@ -299,7 +297,7 @@ TEST_F(ReductionTest, CUDA_SoftDoubleMax_MatchesDoubleReference)
     EXPECT_EQ(asDouble(sm), dm);
 }
 
-TEST_F(ReductionTest, CUDA_SoftDoubleSum_MatchesDoubleReference)
+TEST_F(ReductionTest, CUDA_BandedSum_MatchesDoubleReference)
 {
     constexpr idx_t testSize = 100000;
     auto d = eagle::makeArray<double>(testSize);
@@ -327,6 +325,99 @@ TEST_F(ReductionTest, CUDA_SoftDoubleSum_MatchesDoubleReference)
     // ~1.5e5 magnitude sum; 1e-9 abs tol = ~1e-14 relative, orders above
     // any tie-flip accumulation, orders below a transport/fold bug.
     EXPECT_NEAR(asDouble(ss), ds, 1e-9);
+}
+
+/* The banded accumulator through eagle's own warp reduce: each lane folds
+ * its terms into a `BandAccum` (the compensated fold), then
+ * `Core::warpShuffleReduce` merges the lanes with `BandAccum::combine`,
+ * transporting the carrier AND the error lane via `shflDown`. */
+struct BandAccumCombineOp {
+    AETHER_DEVICE() aether::banded::BandAccum operator()(aether::banded::BandAccum a, aether::banded::BandAccum b) const
+    {
+        a.combine(b);
+        return a;
+    }
+};
+
+constexpr int kAccumTermsPerLane = 8;
+
+AETHER_KERNEL() void bandAccumWarpReduceKernel(const float* limbs, float* out)
+{
+    aether::banded::BandAccum acc;
+    for (int k = 0; k < kAccumTermsPerLane; ++k) {
+        const int i = (threadIdx.x * kAccumTermsPerLane + k) * 3;
+        acc.addTerm(SdT(limbs[i], limbs[i + 1], limbs[i + 2]));
+    }
+    acc = eagle::reduce::detail::Core::warpShuffleReduce<aether::banded::BandAccum, BandAccumCombineOp>(acc);
+    if (threadIdx.x == 0) {
+        const SdT r = acc.normalized();
+        out[0]      = r.hi;
+        out[1]      = r.lo;
+        out[2]      = r.tail;
+    }
+}
+
+/** @brief Add `x` to the non-overlapping expansion `e` exactly (smallest component first). */
+static void growExpansion(std::vector<double>& e, double x)
+{
+    std::vector<double> h;
+    double              q = x;
+    for (double ei : e) {
+        const double sum = q + ei, bb = sum - q, err = (q - (sum - bb)) + (ei - bb);
+        if (err != 0.0)
+            h.push_back(err);
+        q = sum;
+    }
+    h.push_back(q);
+    e.swap(h);
+}
+
+static double expansionValue(const std::vector<double>& e)
+{
+    double v = 0.0;
+    for (double c : e)
+        v += c;
+    return v;
+}
+
+TEST_F(ReductionTest, CUDA_BandAccumWarpReduce_MatchesExactSumOnACancellingSeries)
+{
+    constexpr int lanes = 32, n = lanes * kAccumTermsPerLane;
+    // pairs `a`, `-(a - a * 2^-30 * u)` across magnitudes 2^-40..2^40: the sum cancels by ~2^30.
+    std::vector<double> v(n);
+    std::vector<double> exact;
+    std::vector<float>  limbs(3 * n);
+    unsigned            lcg = 12345u;
+    auto                next = [&]() { lcg = lcg * 1664525u + 1013904223u; return (lcg >> 8) / double(1 << 24); };
+    for (int i = 0; i < n; ++i) {
+        if (i % 2 == 0)
+            v[i] = std::ldexp(1.0 + next(), static_cast<int>(next() * 80.0) - 40);
+        else
+            v[i] = -(v[i - 1] - v[i - 1] * std::ldexp(next(), -30));
+        const SdT b = bandOf(v[i]);
+        limbs[3 * i] = b.hi; limbs[3 * i + 1] = b.lo; limbs[3 * i + 2] = b.tail;
+        growExpansion(exact, v[i]);
+    }
+    float *dIn = nullptr, *dOut = nullptr;
+    EAGLE_CHECK_ALWAYS(cudaMalloc(&dIn, sizeof(float) * 3 * n));
+    EAGLE_CHECK_ALWAYS(cudaMalloc(&dOut, sizeof(float) * 3));
+    EAGLE_CHECK_ALWAYS(cudaMemcpy(dIn, limbs.data(), sizeof(float) * 3 * n, cudaMemcpyHostToDevice));
+    bandAccumWarpReduceKernel<<<1, lanes>>>(dIn, dOut);
+    EAGLE_CHECK_ALWAYS(cudaDeviceSynchronize());
+    float r[3];
+    EAGLE_CHECK_ALWAYS(cudaMemcpy(r, dOut, sizeof(r), cudaMemcpyDeviceToHost));
+    EAGLE_CHECK_ALWAYS(cudaFree(dIn));
+    EAGLE_CHECK_ALWAYS(cudaFree(dOut));
+
+    std::vector<double> diff = exact;
+    for (float limb : r)
+        growExpansion(diff, -static_cast<double>(limb));
+    const double S = expansionValue(exact);
+    int          e = 0;
+    std::frexp(S, &e);
+    const double ulp53 = std::fabs(expansionValue(diff)) / std::ldexp(1.0, e - 53);
+    EXPECT_LE(ulp53, 0.01) << "exact sum " << S << ", device warp reduce " << double(r[0]) << " + " << double(r[1]) << " + "
+                           << double(r[2]);
 }
 
 } // namespace ReductionTest

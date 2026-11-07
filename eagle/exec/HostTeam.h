@@ -33,6 +33,7 @@
 // on `Host::launch` above.
 #pragma once
 
+#include "eagle/exec/HostPool.h"
 #include "eagle/exec/Partition.h"
 #include "eagle/typedefs.h"
 
@@ -45,35 +46,12 @@
 #include <string>
 #include <vector>
 
-#ifdef _OPENMP
-#include <omp.h>
-#endif
-
 namespace eagle {
 namespace exec {
 
-/** @brief The process-wide cap on host threads; 0 = unset (the OpenMP default,
- *  `OMP_NUM_THREADS`). One atomic for the whole process: it is read at every launch from
- *  any thread, so a launch on a Python worker thread honours it as the main thread does. */
-inline std::atomic<int>& host_threads_setting() {
-    static std::atomic<int> setting{0};
-    return setting;
-}
-
-/** @brief The most threads a host launch uses now: the setting, else the OpenMP default. */
-inline int host_max_threads() {
-    const int set = host_threads_setting().load(std::memory_order_relaxed);
-    if (set > 0) return set;
-#ifdef _OPENMP
-    return omp_get_max_threads();
-#else
-    return 1;
-#endif
-}
-
 /**
- * @brief The host execution structure: OpenMP over contiguous tiles of one
- *        partition, each tile driving the SAME body through its own triple.
+ * @brief The host execution structure: eagle's host pool over contiguous tiles
+ *        of one partition, each tile driving the SAME body through its own triple.
  */
 struct HostTeam {
 
@@ -113,24 +91,19 @@ struct HostTeam {
         const std::int64_t tile =
             static_cast<std::int64_t>(tile_size(bytesPerSample));
         const std::int64_t ntiles = (part.count + tile - 1) / tile;
-        const auto runTile = [&](std::int64_t t) {
-            const std::int64_t base  = part.base + t * tile;
-            const std::int64_t count =
-                (t + 1 == ntiles) ? (part.base + part.count - base) : tile;
-            fn(args, base, count, part.nSamples);
+        struct Tiles { HostEntryV2 fn; void* const* args; Partition part; std::int64_t tile, ntiles; };
+        const Tiles tiles{ fn, args, part, tile, ntiles };
+        const auto runTile = [](const void* ctx, std::uint32_t t) {
+            const auto& s = *static_cast<const Tiles*>(ctx);
+            const std::int64_t base = s.part.base + t * s.tile;
+            const std::int64_t count = (t + 1 == s.ntiles) ? (s.part.base + s.part.count - base) : s.tile;
+            s.fn(s.args, base, count, s.part.nSamples);
         };
-        // One tile, a one-thread team, or a caller's own parallel region: run in place --
-        // no team to wake (the wake-up is most of an N=1 launch), no nested team.
-#ifdef _OPENMP
-        const int team = static_cast<int>(
-            std::min<std::int64_t>(ntiles, host_max_threads()));
-        if (team > 1 && omp_get_level() == 0) {
-#pragma omp parallel for schedule(dynamic) num_threads(team)
-            for (std::int64_t t = 0; t < ntiles; ++t) runTile(t);
-            return static_cast<std::size_t>(ntiles);
-        }
-#endif
-        for (std::int64_t t = 0; t < ntiles; ++t) runTile(t);
+        // One tile or a one-thread team runs in place: no thread to wake (the wake-up is
+        // most of an N=1 launch). One phase: no gates.
+        const detail::HostPool::Job job{ static_cast<std::uint32_t>(ntiles), nullptr, runTile, &tiles };
+        if (ntiles == 1 || host_max_threads() <= 1) detail::HostPool::run_in_place(job);
+        else detail::HostPool::instance().run(job, host_max_threads());
         return static_cast<std::size_t>(ntiles);
     }
 

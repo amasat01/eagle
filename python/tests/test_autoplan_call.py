@@ -97,3 +97,28 @@ def test_autoplan_call_hands_off_to_the_recorder(plan):
 
 def test_autoplan_call_reads_a_layout_marker(plan):
     np.testing.assert_allclose(plan(eagle.samples_last(X), 2.0, 0.5), 2.0 * X + 0.5)
+
+
+BANDED_ON_CPU = "banded runs on device execution paths; on a CPU use float64"
+
+
+def test_banded_execution_on_the_cpu_is_refused_by_name_at_deploy(tmp_path):
+    with pytest.raises(ValueError, match=BANDED_ON_CPU):
+        eagle.plan.auto(scale, targets=("host",), cache_dir=str(tmp_path), scalar_type="banded")
+
+
+def test_a_banded_plugin_is_refused_a_host_team_plan():
+    plugin = types.SimpleNamespace(scalar_type="banded", arg_spec=[("input", "x")], exec_access="sample_local")
+    with pytest.raises(ValueError, match=BANDED_ON_CPU):
+        eagle.plan.plan(plugin, structure=eagle.exec.HostTeam)
+
+
+@pytest.mark.gpu
+def test_autoplan_builds_and_runs_a_banded_kernel_on_the_device(tmp_path):
+    from eagle import arrays
+
+    p = eagle.plan.auto(scale, cache_dir=str(tmp_path), scalar_type="banded")
+    x, y = (arrays.asarray(eagle.banded_pack(arrays.asarray(v)), device="cuda:0") for v in (X, np.zeros(8)))
+    p.run(x=x, a=2.0, b=0.5, y=y)
+    host = arrays.asarray(y, device="cpu")
+    np.testing.assert_allclose(eagle.banded_unpack(host).tolist(), 2.0 * X + 0.5, rtol=0, atol=1e-15)

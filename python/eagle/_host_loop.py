@@ -195,23 +195,13 @@ def host_run(entry):
 SMT_MIN_WORK = 10_000_000
 
 
-@functools.lru_cache(maxsize=1)
 def physical_cores() -> int:
     """The physical cores among the CPUs this process may run on: logical
     CPUs grouped by the sibling list the kernel publishes (Linux sysfs);
     elsewhere, or if that is unreadable, the logical CPU count."""
-    try:
-        cpus = sorted(os.sched_getaffinity(0))
-    except (AttributeError, OSError):
-        return max(os.cpu_count() or 1, 1)
-    cores = set()
-    for cpu in cpus:
-        try:
-            with open(f"/sys/devices/system/cpu/cpu{cpu}/topology/thread_siblings_list") as f:
-                cores.add(f.read().strip())
-        except OSError:
-            return len(cpus)
-    return max(len(cores), 1)
+    from . import _core
+
+    return _core.physical_cores()
 
 
 def host_team_size(n: int, max_steps: int, threads: int | None = None) -> int:
@@ -224,19 +214,10 @@ def host_team_size(n: int, max_steps: int, threads: int | None = None) -> int:
     return threads
 
 
-def _omp_runtime():
-    """``(omp_get_max_threads, omp_set_num_threads)`` of the OpenMP runtime
-    eagle's host code runs on -- the one ``eagle._core`` links, asked through
-    ``_core`` itself -- or ``None`` where eagle is built without OpenMP."""
-    from . import _core
-
-    return (_core.omp_threads, _core.omp_set_threads) if _core.omp_threads() > 0 else None
-
-
 def _threads() -> int:
     """The threads the host team runs with: the process-wide host-thread
     setting (:func:`set_host_threads`), else ``$OMP_NUM_THREADS``, else the
-    CPUs this process may run on."""
+    physical cores this process may run on."""
     from . import _core
 
     return _core.host_threads()
@@ -245,7 +226,7 @@ def _threads() -> int:
 def set_host_threads(threads: int | None) -> None:
     """Set the most threads any host launch of this process uses (process-wide,
     every Python thread); ``None`` restores the default (``$OMP_NUM_THREADS``,
-    else the OpenMP default). A launch uses ``min(its tiles, this)``; a launch
+    else the physical cores this process may run on). A launch uses ``min(its tiles, this)``; a launch
     of one tile runs in place and uses none."""
     from . import _core
 
@@ -301,19 +282,15 @@ def run_host(runner) -> None:
     """Run ``runner.loop`` on the host team until the guard fails or the
     cap is reached, writing the loop's ``[remaining, ran]`` cell. The team
     is :attr:`~eagle.Runner.host_threads` when set, else
-    :func:`host_team_size`; the caller's OpenMP setting is restored after."""
+    :func:`host_team_size`, set for the calling thread only and restored after."""
+    from . import _core
+
     team = _team(runner)
-    omp = _omp_runtime()
-    if omp is None:
-        _run_host_loop(runner, team)
-        return
-    get, put = omp
-    before = get()
-    put(team)
+    before = _core.set_thread_host_team(team)
     try:
         _run_host_loop(runner, team)
     finally:
-        put(before)
+        _core.set_thread_host_team(before)
 
 
 def _run_host_loop(runner, threads: int) -> None:

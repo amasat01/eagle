@@ -241,6 +241,24 @@ TEST(HostPluginTest, DlopenConsolidateRunLookup)
         ASSERT_DOUBLE_EQ(acc[i], tab[i % 16]);
 }
 
+// A lookup's handle carries the table's OWN element count, not the run's n: the fixture
+// reads its K off the handle, so a run of 40 lanes over a 16-entry table gathers tab[i % 16].
+TEST(HostPluginTest, LookupHandleCarriesTheTableCount)
+{
+    const std::int32_t n = 40;
+    std::vector<double> tab(16);
+    for (int k = 0; k < 16; ++k)
+        tab[k] = 1.0 + double(k);
+    std::vector<double> acc(n, -1.0);
+    eagle::cpu::PluginRegistry reg;
+    reg.add_plugin(makeLookupSidecar(), HOST_PLUGIN_LOOKUP_SO);
+    reg.bind_handle("acc", acc.data());
+    reg.consolidate("tab", tab.data(), 16);
+    ASSERT_EQ(reg.run(n), 1);
+    for (std::int32_t i = 0; i < n; ++i)
+        ASSERT_DOUBLE_EQ(acc[i], tab[i % 16]) << "the handle's samples must be the table's count (16), not n";
+}
+
 // A declared table that was never consolidated fails loudly at run, naming the table —
 // the host mirror of the device path's ``test_table_not_consolidated_is_a_clear_error``.
 TEST(HostPluginTest, LookupNotConsolidatedIsAClearError)

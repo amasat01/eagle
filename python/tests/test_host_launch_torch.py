@@ -132,12 +132,12 @@ def test_host_ptr_rejects_cuda_tensor():
         interop.host_ptr(t)
 
 
-def test_host_plugin_rejects_softdouble_scalar_type():
+def test_host_plugin_rejects_banded_scalar_type():
     """The Python loader mirrors the C++ ``eagle::cpu`` registries: the host runs
-    ``float64`` and ``float32`` plugins, so a ``softdouble`` sidecar is rejected up
+    ``float64`` and ``float32`` plugins, so a ``banded`` sidecar is rejected up
     front, before dlopen, with an error naming the type."""
-    sidecar = dict(_SIDECAR, scalar_type="softdouble")
-    with pytest.raises(ValueError, match=r"float64 and float32.*softdouble"):
+    sidecar = dict(_SIDECAR, scalar_type="banded")
+    with pytest.raises(ValueError, match=r"float64 and float32.*banded"):
         HostPluginLibrary("/no/such/plugin.so", sidecar)
 
 

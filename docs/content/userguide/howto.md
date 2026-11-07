@@ -24,12 +24,14 @@ Load a kernel by name, run it until every sample is done, and move arrays in and
 :hidden:
 
 tutorials/01_launch_and_registry
+best_practices
 examples/early_termination
 examples/zero_copy_interop
 examples
 ```
 
 - [Load a compiled kernel](tutorials/01_launch_and_registry): load a compiled kernel by name, then call, stream or graph it.
+- [Best practices](best_practices): build once then launch, threads for small and large batches, choose the device.
 - [Early termination](examples/early_termination): a batch that finishes at different times, with a conditional graph node that skips the work once every sample is done.
 - [Zero-copy interop](examples/zero_copy_interop): one kernel fed from and handed back into NumPy, CuPy and PyTorch arrays with no copy.
 - [C++ examples](examples): complete, tested C++ programs and how their gate runs.

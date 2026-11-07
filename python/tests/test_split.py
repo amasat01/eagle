@@ -461,3 +461,17 @@ def test_a_placement_only_stage_passes_the_stepping_doors_and_a_real_split_does_
                            ((placed,), {})):
         with pytest.raises(ValueError, match=r"eagle\.simulate: kernel 'k' is split in"):
             _split.refuse(plugin(stages, planes), "eagle.simulate")
+
+
+def test_a_plane_major_team_plane_is_made_in_the_shape_of_a_callers_plane():
+    # a value one stage of a fused sequence passes to the next: bound like a per-lane plane of its width
+    from types import SimpleNamespace
+
+    from eagle import _split
+
+    specs = {"wide": {"dtype": "real", "per_lane": 3, "layout": "plane_major"},
+             "one": {"dtype": "real", "per_lane": 1, "layout": "plane_major"},
+             "flat": {"dtype": "real", "per_lane": 3}}
+    plugin = SimpleNamespace(name="k", _stages=(), _team_planes=specs)
+    made = _split._team_scratch(plugin, (), 10, {}, "cpu", eagle.arrays.float64, None)
+    assert {nm: tuple(a.shape) for nm, a in made.items()} == {"wide": (3, 10), "one": (10,), "flat": (30,)}

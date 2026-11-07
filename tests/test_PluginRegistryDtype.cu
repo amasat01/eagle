@@ -26,17 +26,18 @@
 // cuModuleLoadData), so this is pure host-side JSON validation exercised
 // through the real class, not a device smoke test.
 //
-// softdouble: the load-and-run probe the comment above asked for. SoftDouble
-// is bit-identical IEEE float64 (a static_assert(sizeof(SoftDouble) == 8)
-// enforces it), so it loads and launches through
+// banded: the load-and-run probe the comment above asked for. banded
+// is an 8-byte cell (a static_assert(sizeof(BandedReal) == 8)
+// enforces it; values match float64 within aether's per-op ULP bound, not
+// bit-identically), so it loads and launches through
 // this registry's double-typed binding surface with zero widening — the
 // rejection this file used to check was not backed by the float32 kind of
 // "wrong buffer layout" reason and has been lifted in registry.h.
-// PluginRegistryDtypeTest.SoftdoubleLoadsAndLaunches (below) pins that: a
-// hand-written, ABI-only device fixture (fixtures/device_plugin_softdouble.cu
-// — SoftDouble IS `double` at the wire, so a raw-double kernel is a faithful
+// PluginRegistryDtypeTest.BandedLoadsAndLaunches (below) pins that: a
+// hand-written, ABI-only device fixture (fixtures/device_plugin_banded.cu
+// — banded is 8 bytes like `double` at the wire, so a raw-double kernel is a faithful
 // stand-in; the registry itself never inspects the kernel's own arithmetic,
-// only the sidecar's `scalar_type` tag) tagged `scalar_type=softdouble` loads
+// only the sidecar's `scalar_type` tag) tagged `scalar_type=banded` loads
 // via cuModuleLoadData, resolves its `raptor_kernel` symbol, and launches
 // through PluginRegistry::inject unmodified.
 using namespace eagle::plugin;
@@ -100,17 +101,17 @@ TEST(PluginRegistryDtypeTest, RejectsFloat32NamingRealReasonAndAlternative)
 }
 
 // Stages a manifest + sidecar (both in TempDir()) around the CMake-built
-// device_plugin_softdouble.cu fixture (path baked in as
-// DEVICE_PLUGIN_SOFTDOUBLE_PTX): copies its compiled PTX in beside a sidecar
-// declaring scalar_type=softdouble with the fixture's real arg_spec
+// device_plugin_banded.cu fixture (path baked in as
+// DEVICE_PLUGIN_BANDED_PTX): copies its compiled PTX in beside a sidecar
+// declaring scalar_type=banded with the fixture's real arg_spec
 // (`mutable val`, `terminated`, `uniform step`, `nsamples`) — unlike
 // writeManifestWithScalarType above, the artifact here is real, so
 // from_manifest runs all the way through cuModuleLoadData /
 // cuModuleGetFunction, not just the metadata reject.
-static std::string writeSoftdoubleManifest()
+static std::string writeBandedManifest()
 {
     const std::string ptxBytes = [] {
-        std::ifstream f(DEVICE_PLUGIN_SOFTDOUBLE_PTX, std::ios::binary);
+        std::ifstream f(DEVICE_PLUGIN_BANDED_PTX, std::ios::binary);
         std::ostringstream ss; ss << f.rdbuf();
         return ss.str();
     }();
@@ -120,7 +121,7 @@ static std::string writeSoftdoubleManifest()
   "kernel": "raptor_kernel",
   "aether_abi": "aether-abi/1",
   "schema_version": 1,
-  "scalar_type": "softdouble",
+  "scalar_type": "banded",
   "arg_spec": [["mutable", "val"], ["terminated", "terminated"],
                ["uniform", "step"], ["nsamples", "nsamples"]]
 })";
@@ -145,7 +146,7 @@ static void cuCheck(CUresult r, const char* what)
     }
 }
 
-TEST(PluginRegistryDtypeTest, SoftdoubleLoadsAndLaunches)
+TEST(PluginRegistryDtypeTest, BandedLoadsAndLaunches)
 {
     // Same primary-context bootstrap as pure_inject_demo.cu: the Runtime
     // creates the context, the Driver API (from_manifest / inject) shares it.
@@ -161,7 +162,7 @@ TEST(PluginRegistryDtypeTest, SoftdoubleLoadsAndLaunches)
         cuCheck(cuCtxSetCurrent(ctx), "cuCtxSetCurrent");
     }
 
-    const std::string manifestPath = writeSoftdoubleManifest();
+    const std::string manifestPath = writeBandedManifest();
 
     // The load itself: this is the guarded call — it used to throw here.
     eagle::cuda::PluginRegistry registry =
