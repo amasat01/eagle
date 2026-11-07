@@ -234,7 +234,7 @@ sanitize-cpp:
 	cmake -B "$(GD)/san" -DCMAKE_PREFIX_PATH="$(GD)/prefix_san" -DFETCHCONTENT_QUIET=ON -DEAGLE_BUILD_TESTS=ON \
 	      -DEAGLE_DEBUG_MODE=ON -DEAGLE_CPP_MODE=ON -DEAGLE_SANITIZERS=address,undefined .
 	cmake --build "$(GD)/san" -j$(GATE_JOBS)
-	{ nm -D "$(GD)/san/tests/eagle_tests"; nm "$(GD)/san/tests/eagle_tests"; } 2>/dev/null | grep -q __asan_init \
+	{ nm -D "$(GD)/san/tests/eagle_tests"; nm "$(GD)/san/tests/eagle_tests"; } 2>/dev/null | grep -c __asan_init >/dev/null \
 	  || { echo "RED: eagle_tests carries no __asan_init: this job is not sanitizing"; exit 1; }
 	fail=0; \
 	for pair in "heap-oob:AddressSanitizer: heap-buffer-overflow" "leak:LeakSanitizer: detected memory leaks" \
