@@ -215,7 +215,7 @@ _POOL_SCRIPT = textwrap.dedent("""
 
 def _pool_run(entry, mode, env=None, prefix=()):
     cmd = [*prefix, sys.executable, "-c", _POOL_SCRIPT, entry[2], mode]
-    run = subprocess.run(["timeout", "60", *cmd], capture_output=True, text=True,
+    run = subprocess.run(cmd, capture_output=True, text=True, timeout=60,
                          env={**os.environ, **(env or {})})
     assert run.returncode == 0, run.stderr[-2000:]
     return run.stdout.split()
@@ -235,8 +235,8 @@ def test_the_budget_is_the_setting_then_omp_num_threads_then_the_physical_cores(
     cpus = sorted(os.sched_getaffinity(0))
     mask = cpus[-min(len(cpus), 6):]
     prefix = ("taskset", "-c", ",".join(map(str, mask))) if shutil.which("taskset") else ()
-    run = subprocess.run(["timeout", "60", *prefix, sys.executable, "-c", _POOL_SCRIPT, entry[2], "budget"],
-                         capture_output=True, text=True, env=env)
+    run = subprocess.run([*prefix, sys.executable, "-c", _POOL_SCRIPT, entry[2], "budget"],
+                         capture_output=True, text=True, timeout=60, env=env)
     assert run.returncode == 0, run.stderr[-2000:]
     threads, cores = map(int, run.stdout.split())
     assert cores == _mask_cores(mask if prefix else cpus)
