@@ -148,11 +148,20 @@ inline int host_default_threads() {
     return budget;
 }
 
-/** @brief The most threads a host launch uses now: the setting, else `OMP_NUM_THREADS`
- *  (read by eagle when the process starts using it), else the default budget. */
+/** @brief This thread's own team for its host launches; 0 = unset. A run that sizes its
+ *  team itself (`eagle.until_done` on the host) sets it for its duration; the process-wide
+ *  setting still wins over it. */
+inline int& host_thread_team() {
+    static thread_local int team = 0;
+    return team;
+}
+
+/** @brief The most threads a host launch uses now: the process-wide setting, else this
+ *  thread's team, else `OMP_NUM_THREADS` (read by eagle once), else the default budget. */
 inline int host_max_threads() {
     const int set = host_threads_setting().load(std::memory_order_relaxed);
     if (set > 0) return set;
+    if (host_thread_team() > 0) return host_thread_team();
     static const int env = detail::omp_num_threads_env();
     return env > 0 ? env : host_default_threads();
 }

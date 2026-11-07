@@ -426,6 +426,9 @@ _GIL_RELEASE_ALLOWED = {
     "eagle_core.cpp:run_host_stage":
         "its busy state is the eagle.Graph BusyGuard held across launch/enqueue; "
         "it works on copies of entries, params and partitions taken before the release",
+    "eagle_core.cpp:run":
+        "HostStage.run: its busy state is the eagle.Graph BusyGuard held across launch/enqueue, and the "
+        "stage's own sizing state is atomic; it owns copies of its entries, params and partitions",
     "eagle_core.cpp:diff_record_host":
         "its busy state is the run's RecordSlot (begin() refuses a second recording while "
         "one is live or held); entry and params are copied before the release, and the "

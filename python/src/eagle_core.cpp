@@ -1434,28 +1434,47 @@ NB_MODULE(_core, m)
         "band rows are judged against (fork F-c).");
 
     m.def("host_threads", [] { return eagle::exec::host_max_threads(); },
-        "The most threads a host launch uses right now: the process-wide setting, else the OpenMP "
-        "default (OMP_NUM_THREADS).");
+        "The most threads a host launch uses right now: the process-wide setting, else this "
+        "thread's team, else OMP_NUM_THREADS, else the physical cores this process may run on "
+        "(capped by the cgroup CPU quota).");
     m.def("set_host_threads",
         [](int threads) {
             if (threads < 0)
-                throw std::invalid_argument("set_host_threads: threads must be >= 0 (0 = the OpenMP default)");
+                throw std::invalid_argument("set_host_threads: threads must be >= 0 (0 = the default)");
             eagle::exec::host_threads_setting().store(threads, std::memory_order_relaxed);
         },
         nb::arg("threads"),
         "Cap the threads of every host launch of this process (all Python threads); 0 restores the "
-        "OpenMP default.");
+        "default.");
+    m.def("set_thread_host_team",
+        [](int threads) {
+            const int before = eagle::exec::host_thread_team();
+            eagle::exec::host_thread_team() = std::max(threads, 0);
+            return before;
+        },
+        nb::arg("threads"),
+        "Set the CALLING thread's host team (0 = unset); returns the previous value. The "
+        "process-wide setting still wins.");
+    m.def("physical_cores", &eagle::exec::physical_cores,
+        "The physical cores among the CPUs this process may run on (sibling lists of the "
+        "affinity mask; the logical count where those are unreadable).");
     m.def("omp_threads",
         [] {
+            PyErr_WarnEx(PyExc_DeprecationWarning,
+                         "eagle._core.omp_threads is deprecated: eagle's host launches no longer use "
+                         "OpenMP threads; see eagle.exec.host_threads", 1);
 #ifdef _OPENMP
             return omp_get_max_threads();
 #else
             return 1;
 #endif
         },
-        "omp_get_max_threads() of the OpenMP runtime this extension links (the calling thread's setting).");
+        "Deprecated: omp_get_max_threads() of the OpenMP runtime this extension links.");
     m.def("omp_set_threads",
         [](int threads) {
+            PyErr_WarnEx(PyExc_DeprecationWarning,
+                         "eagle._core.omp_set_threads is deprecated: eagle's host launches no longer use "
+                         "OpenMP threads; see eagle.exec.set_host_threads", 1);
 #ifdef _OPENMP
             omp_set_num_threads(threads);
 #else
@@ -1463,7 +1482,7 @@ NB_MODULE(_core, m)
 #endif
         },
         nb::arg("threads"),
-        "omp_set_num_threads() on the OpenMP runtime this extension links.");
+        "Deprecated: omp_set_num_threads() on the OpenMP runtime this extension links.");
 
     m.attr("BRANCH_TASKS_MAX_SAMPLES") = eagle::exec::BRANCH_TASKS_MAX_SAMPLES;
 
@@ -1847,9 +1866,33 @@ NB_MODULE(_core, m)
             eagle::exec::runHostStage(branches);
         },
         nb::arg("stage"),
-        "Run one stage's nodes in order, each over the whole host team, inside ONE OpenMP "
-        "region (the GIL released). Same shape as run_host_branches; same values as a "
-        "run_host per node.");
+        "Run one stage's nodes in order, each over the whole host team, as ONE launch of "
+        "eagle's host pool (the GIL released). Same shape as run_host_branches; same values "
+        "as a run_host per node.");
+
+    nb::class_<eagle::exec::HostStage>(m, "HostStage")
+        .def("__init__",
+            [](eagle::exec::HostStage* self,
+               const std::vector<std::vector<std::tuple<std::uintptr_t,
+                   std::vector<std::uintptr_t>, std::vector<Partition>>>>& stage, bool tasks) {
+                std::vector<eagle::exec::HostBranch> branches;
+                for (const auto& branch : stage) {
+                    auto& out = branches.emplace_back();
+                    for (const auto& [entry, params, parts] : branch)
+                        out.push_back({ reinterpret_cast<eagle::exec::HostEntryV2>(entry),
+                                        asParams(params), parts });
+                }
+                new (self) eagle::exec::HostStage(std::move(branches), tasks);
+            },
+            nb::arg("stage"), nb::arg("tasks"))
+        .def("run", [](eagle::exec::HostStage& self) {
+                nb::gil_scoped_release release;
+                self.run();
+            },
+            "Run the stage (the GIL released). Launch 1 runs in place and is timed; later "
+            "launches use one thread per 40 us of that time, within the host budget.")
+        .def_prop_ro("lanes", &eagle::exec::HostStage::lanes,
+            "The threads the next launch uses; 1 = in place (also before launch 1).");
 
     // -- The host table: a graph's CPU stages for another runtime's OpenMP region ----
     nb::class_<eagle::exec::HostVersion>(m, "HostVersion")

@@ -209,6 +209,10 @@ jobs:
       - run: make sanitize-cpp AETHER_SRC="${GITHUB_WORKSPACE}/aether"
         working-directory: eagle
         if: steps.plan.outputs.run == 'true'
+      # the host pool and schedule rows under ThreadSanitizer
+      - run: make tsan-cpp AETHER_SRC="${GITHUB_WORKSPACE}/aether"
+        working-directory: eagle
+        if: steps.plan.outputs.run == 'true'
       - if: always() && steps.plan.outputs.run == 'true'
         run: ccache -s
       - if: steps.plan.outputs.run == 'true'

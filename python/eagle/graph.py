@@ -494,6 +494,7 @@ class Graph:
         self._tail_ev = None
         self._live = ()         # what must hold before each launch (child handles, bound weights)
         self._cpu_steps: list = []
+        self._host_stages: tuple = ()
         self._record_on = False
         self._recorder = None
         self._record = None
@@ -890,13 +891,15 @@ class Graph:
                         if isinstance(seg, list) else seg for seg in segments]
                     self._seeds = []
                 self._schedule = tuple(_TIERS[get_node_kind(n.kind).tier] for n in self._nodes)
+                self._host_stages = ()
             else:
                 from ._host_schedule import lower_cpu_stage
 
                 lowered = [lower_cpu_stage(n, ctx) for n in self._nodes]
-                self._cpu_steps = [s for i, (step, _) in enumerate(lowered)
+                self._cpu_steps = [s for i, (step, _, _) in enumerate(lowered)
                                    for s in (*before(i), step)]
-                self._schedule = tuple(how for _, how in lowered)
+                self._schedule = tuple(how for _, how, _ in lowered)
+                self._host_stages = tuple(stage for _, _, stage in lowered)
             self._live = _live_checks(accesses)
             self._backend = be
             self._edges = edges
@@ -1237,6 +1240,14 @@ class Graph:
         GPU ``"capture"`` | ``"eager_stream"`` | ``"eager_host"``; empty before
         :meth:`build`."""
         return self._schedule
+
+    @property
+    def host_lanes(self) -> tuple:
+        """Per stage on the CPU: the threads its next launch uses (``1`` = in
+        place on the calling thread). A stage's first launch runs in place and
+        is timed; later launches use one thread per 40 µs of that time, within
+        :func:`eagle.exec.host_threads`. Empty on the GPU and before :meth:`build`."""
+        return tuple(1 if s is None else s.lanes for s in self._host_stages)
 
     @property
     def backend(self):
