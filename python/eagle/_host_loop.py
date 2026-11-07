@@ -51,7 +51,6 @@ from __future__ import annotations
 import ctypes
 import ctypes.util
 import functools
-import os
 import threading
 import time
 

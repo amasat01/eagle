@@ -21,7 +21,6 @@ import pytest
 import eagle
 import eagle.exec as eexec
 from eagle import _core
-from eagle import _host_loop
 from eagle._host_schedule import lower_cpu_stage  # noqa: F401  (the stage lowering under test)
 
 from _graph_fixtures import host_fork
