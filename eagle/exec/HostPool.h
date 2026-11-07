@@ -1,7 +1,7 @@
 // Copyright 2026 Alessandro Masat
 // SPDX-License-Identifier: Apache-2.0
 
-// `eagle::exec::HostPool` -- the host threads eagle owns, and the process-wide
+// `eagle::exec::detail::HostPool` -- the host threads eagle owns, and the process-wide
 // thread budget they follow.
 //
 // One pool per process. Its workers are plain `std::thread`s that spin for at most
@@ -52,14 +52,14 @@
 namespace eagle {
 namespace exec {
 
+namespace detail {
+
 /** @brief Below this much serial work per lane (microseconds) a stage runs in place:
  *  waking a thread costs more than it saves. */
 inline constexpr double HOST_FLOOR_US = 40.0;
 
 /** @brief How long an idle worker or a waiting caller spins before it sleeps (microseconds). */
 inline constexpr double HOST_SPIN_US = 30.0;
-
-namespace detail {
 
 /** @brief The CPU cap of a cgroup v2 `cpu.max` line (`"<quota> <period>"`):
  *  `ceil(quota / period)`, or 0 when there is none (`"max ..."` or unreadable). */
@@ -103,8 +103,6 @@ inline void cpu_relax() {
 #endif
 }
 
-}  // namespace detail
-
 /**
  * @brief The physical cores among the CPUs this process may run on: the affinity
  *        mask's logical CPUs grouped by the sibling list the kernel publishes
@@ -130,6 +128,8 @@ inline int physical_cores() {
 #endif
 }
 
+}  // namespace detail
+
 /** @brief The process-wide cap on host threads; 0 = unset (the default budget). One
  *  atomic for the whole process: it is read at every launch from any thread, so a
  *  launch on a Python worker thread honours it as the main thread does. */
@@ -137,6 +137,8 @@ inline std::atomic<int>& host_threads_setting() {
     static std::atomic<int> setting{0};
     return setting;
 }
+
+namespace detail {
 
 /** @brief The default host budget: the physical cores of the affinity mask, capped by
  *  the cgroup CPU quota when there is one. Measured once per process. */
@@ -156,15 +158,19 @@ inline int& host_thread_team() {
     return team;
 }
 
+}  // namespace detail
+
 /** @brief The most threads a host launch uses now: the process-wide setting, else this
  *  thread's team, else `OMP_NUM_THREADS` (read by eagle once), else the default budget. */
 inline int host_max_threads() {
     const int set = host_threads_setting().load(std::memory_order_relaxed);
     if (set > 0) return set;
-    if (host_thread_team() > 0) return host_thread_team();
+    if (detail::host_thread_team() > 0) return detail::host_thread_team();
     static const int env = detail::omp_num_threads_env();
-    return env > 0 ? env : host_default_threads();
+    return env > 0 ? env : detail::host_default_threads();
 }
+
+namespace detail {
 
 class HostPool {
 public:
@@ -331,5 +337,6 @@ private:
     std::atomic<int> idle_sleepers_{ 0 }, sync_sleepers_{ 0 };
 };
 
+}  // namespace detail
 }  // namespace exec
 }  // namespace eagle

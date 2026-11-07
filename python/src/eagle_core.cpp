@@ -1448,14 +1448,14 @@ NB_MODULE(_core, m)
         "default.");
     m.def("set_thread_host_team",
         [](int threads) {
-            const int before = eagle::exec::host_thread_team();
-            eagle::exec::host_thread_team() = std::max(threads, 0);
+            const int before = eagle::exec::detail::host_thread_team();
+            eagle::exec::detail::host_thread_team() = std::max(threads, 0);
             return before;
         },
         nb::arg("threads"),
         "Set the CALLING thread's host team (0 = unset); returns the previous value. The "
         "process-wide setting still wins.");
-    m.def("physical_cores", &eagle::exec::physical_cores,
+    m.def("physical_cores", &eagle::exec::detail::physical_cores,
         "The physical cores among the CPUs this process may run on (sibling lists of the "
         "affinity mask; the logical count where those are unreadable).");
     m.def("omp_threads",
@@ -1870,9 +1870,9 @@ NB_MODULE(_core, m)
         "eagle's host pool (the GIL released). Same shape as run_host_branches; same values "
         "as a run_host per node.");
 
-    nb::class_<eagle::exec::HostStage>(m, "HostStage")
+    nb::class_<eagle::exec::detail::HostStage>(m, "HostStage")
         .def("__init__",
-            [](eagle::exec::HostStage* self,
+            [](eagle::exec::detail::HostStage* self,
                const std::vector<std::vector<std::tuple<std::uintptr_t,
                    std::vector<std::uintptr_t>, std::vector<Partition>>>>& stage, bool tasks) {
                 std::vector<eagle::exec::HostBranch> branches;
@@ -1882,16 +1882,16 @@ NB_MODULE(_core, m)
                         out.push_back({ reinterpret_cast<eagle::exec::HostEntryV2>(entry),
                                         asParams(params), parts });
                 }
-                new (self) eagle::exec::HostStage(std::move(branches), tasks);
+                new (self) eagle::exec::detail::HostStage(std::move(branches), tasks);
             },
             nb::arg("stage"), nb::arg("tasks"))
-        .def("run", [](eagle::exec::HostStage& self) {
+        .def("run", [](eagle::exec::detail::HostStage& self) {
                 nb::gil_scoped_release release;
                 self.run();
             },
             "Run the stage (the GIL released). Launch 1 runs in place and is timed; later "
             "launches use one thread per 40 us of that time, within the host budget.")
-        .def_prop_ro("lanes", &eagle::exec::HostStage::lanes,
+        .def_prop_ro("lanes", &eagle::exec::detail::HostStage::lanes,
             "The threads the next launch uses; 1 = in place (also before launch 1).");
 
     // -- The host table: a graph's CPU stages for another runtime's OpenMP region ----

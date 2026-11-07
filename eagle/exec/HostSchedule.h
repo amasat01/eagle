@@ -17,7 +17,7 @@
 // per-sample kernel, so how its samples are cut across threads changes nothing,
 // and a branch's nodes always run in order.
 //
-// `HostStage` adds the sizing: its first launch runs in place and is timed, and
+// `detail::HostStage` (internal) adds the sizing: its first launch runs in place and is timed, and
 // the stage then uses one thread per `HOST_FLOOR_US` of that serial time (at most
 // the budget, the branches or the packets). A stage below the floor keeps running
 // in place: no thread is woken for work smaller than the wake-up.
@@ -200,6 +200,8 @@ inline void runHostStage(const std::vector<HostBranch>& branches) {
  * One thread means in place. A new stage (a rebind) measures again. Safe to run
  * from several threads: a launch that finds the pool busy runs in place.
  */
+namespace detail {
+
 class HostStage {
 public:
     HostStage(std::vector<HostBranch> branches, bool tasks)
@@ -254,6 +256,8 @@ private:
     int cap_ = 1;              // written once before READY
     detail::HostPlan plan_;    // written once before READY
 };
+
+}  // namespace detail
 
 }  // namespace exec
 }  // namespace eagle

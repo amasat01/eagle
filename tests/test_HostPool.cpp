@@ -32,6 +32,7 @@ namespace eagle_tests {
 namespace HostPoolTest {
 
 using namespace eagle::exec;
+using namespace eagle::exec::detail;
 
 namespace {
 

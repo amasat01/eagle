@@ -101,9 +101,9 @@ struct HostTeam {
         };
         // One tile or a one-thread team runs in place: no thread to wake (the wake-up is
         // most of an N=1 launch). One phase: no gates.
-        const HostPool::Job job{ static_cast<std::uint32_t>(ntiles), nullptr, runTile, &tiles };
-        if (ntiles == 1 || host_max_threads() <= 1) HostPool::run_in_place(job);
-        else HostPool::instance().run(job, host_max_threads());
+        const detail::HostPool::Job job{ static_cast<std::uint32_t>(ntiles), nullptr, runTile, &tiles };
+        if (ntiles == 1 || host_max_threads() <= 1) detail::HostPool::run_in_place(job);
+        else detail::HostPool::instance().run(job, host_max_threads());
         return static_cast<std::size_t>(ntiles);
     }
 
