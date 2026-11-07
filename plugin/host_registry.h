@@ -579,9 +579,10 @@ private:
                     // A consolidated read-only table: a flat handle over the host
                     // buffer the caller supplied at consolidation (no upload — the
                     // data is already host-resident), read at a user-computed index.
+                    // Its handle carries the table's OWN element count: a read clamps its index to it.
+                    void* table = lookup_table_(p.sidecar.kernel, a.name);   // names a missing table
                     handles.push_back(
-                        make_handle(lookup_table_(p.sidecar.kernel, a.name),
-                            unsigned(n), kEagleAbiDeviceCPU));
+                        make_handle(table, unsigned(tables_.at(a.name).count), kEagleAbiDeviceCPU));
                     params.push_back(&handles.back());
                 } else if (a.role == "uniform") {
                     // Packed BY VALUE in one of two spellings — float64

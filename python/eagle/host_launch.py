@@ -361,15 +361,15 @@ class HostPluginLibrary:
                 box = GRefMirror(ptr, nn, nn, 1, DEVICE_CPU, 0)
             elif tag == "HANDLE":
                 if role == "lookup":
-                    # a consolidated read-only table, packed with the RUN's
-                    # sample count (not the table's own element count).
+                    # a consolidated read-only table, packed with ITS OWN
+                    # element count: a read clamps its index to that extent.
                     if name not in self._tables:
                         raise ValueError(
                             f"host plugin: lookup table '{name}' was not "
                             f"supplied at consolidation (call "
                             f".consolidate('{name}', ptr, count))"
                         )
-                    box = ScalarHandle(self._tables[name][0], n, 1, DEVICE_CPU, 0)
+                    box = ScalarHandle(self._tables[name][0], self._tables[name][1], 1, DEVICE_CPU, 0)
                 else:  # per_sample, terminated, scalar/int mutable
                     box = ScalarHandle(self._handle[name], n, 1, DEVICE_CPU, 0)
             elif tag in ("WIDE_IN", "WIDE_OUT"):

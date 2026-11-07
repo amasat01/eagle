@@ -475,7 +475,8 @@ def assemble_args(
                 source = terminated
             else:  # mutable, scalar/int
                 source = mutables[name]
-            args.append(_bind_handle(box, source, n))
+            # a lookup table carries its own element count: a read clamps its index to that extent
+            args.append(_bind_handle(box, source, int(source.size) if role == "lookup" else n))
         elif tag == "WIDE_IN":
             args.append(_bind_handle(box, wide_in[name], n))
         elif tag == "WIDE_OUT":

@@ -48,6 +48,17 @@ def _data_ptr(arr) -> int:
     return int(ptr) if ptr is not None else int(arrays.asarray(arr).ptr)
 
 
+def _element_count(arr) -> int:
+    """The flat element count of ``arr``, whatever its shape."""
+    shape = getattr(arr, "shape", None)
+    if shape is None:
+        shape = arrays.asarray(arr).shape
+    count = 1
+    for d in shape:
+        count *= int(d)
+    return count
+
+
 def _scalar_handle_box(addr: int, n: int, device_type: int):
     from .host_launch import ScalarHandle
 
@@ -181,7 +192,9 @@ def _pack_one(
         # a lookup/wide_in buffer's own length is not a sample count, and no
         # sidecar declares one (it's a runtime quantity), so the handle
         # carries the plane's own extent instead of packing n
-        extent = _trailing_extent(arr) if role in _BUFFER_SHAPED_ROLES else n
+        # a lookup table carries its own ELEMENT count (a read clamps its flat index to it), a wide_in its trailing extent
+        extent = (_element_count(arr) if role == "lookup"
+                  else _trailing_extent(arr) if role in _BUFFER_SHAPED_ROLES else n)
         return _scalar_handle_box(_data_ptr(arr), extent, device_type)
     if tag == "UNIFORM":
         shape = tuple(getattr(kw[name], "shape", ()))
