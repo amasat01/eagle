@@ -1,0 +1,326 @@
+// Copyright 2026 Alessandro Masat
+// SPDX-License-Identifier: Apache-2.0
+
+// `eagle::exec::HostPool` -- the host threads eagle owns, and the process-wide
+// thread budget they follow.
+//
+// One pool per process. Its workers are plain `std::thread`s that spin for at most
+// `HOST_SPIN_US` after a launch, then sleep in `std::atomic::wait`: back-to-back
+// launches find them awake, and on a shared machine an idle worker gives its core
+// back instead of holding it for an OS time slice.
+//
+// A JOB is a list of lanes in phases. Lanes of one phase run in any order, on any
+// thread, each lane as a whole on one thread; a phase starts when every lane of the
+// phases before it is done. The caller runs lanes too. Lanes are handed out by one
+// counter, so a late or descheduled worker simply takes fewer of them: the launch
+// waits only for the lanes and for the workers that actually joined it.
+//
+// Safety rules (each one is a hang or a corrupted counter otherwise):
+//  - the pool is created at the first team launch and never destroyed; its
+//    workers are detached, so process exit never joins a thread;
+//  - a launch in a forked child sees another pid and builds a fresh pool;
+//  - one launch at a time: a launch that cannot take the pool (another thread
+//    holds it, or it is issued from inside a lane, a worker, or an OpenMP region)
+//    runs in place on its own thread;
+//  - the launch waits on the count of FINISHED lanes and of workers that LEFT,
+//    never on the count of lanes handed out.
+#pragma once
+
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cmath>
+#include <cstdint>
+#include <cstdlib>
+#include <fstream>
+#include <set>
+#include <sstream>
+#include <string>
+#include <string_view>
+#include <thread>
+
+#if defined(__linux__)
+#include <sched.h>
+#endif
+#if defined(__unix__) || defined(__APPLE__)
+#include <unistd.h>
+#endif
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
+namespace eagle {
+namespace exec {
+
+/** @brief Below this much serial work per lane (microseconds) a stage runs in place:
+ *  waking a thread costs more than it saves. */
+inline constexpr double HOST_FLOOR_US = 40.0;
+
+/** @brief How long an idle worker or a waiting caller spins before it sleeps (microseconds). */
+inline constexpr double HOST_SPIN_US = 30.0;
+
+namespace detail {
+
+/** @brief The CPU cap of a cgroup v2 `cpu.max` line (`"<quota> <period>"`):
+ *  `ceil(quota / period)`, or 0 when there is none (`"max ..."` or unreadable). */
+inline int cgroup_cpu_cap(std::string_view cpuMax) {
+    std::istringstream in{ std::string(cpuMax) };
+    std::string quota;
+    double period = 0;
+    if (!(in >> quota >> period) || quota == "max" || period <= 0) return 0;
+    char* end = nullptr;
+    const double q = std::strtod(quota.c_str(), &end);
+    if (end == quota.c_str() || q <= 0) return 0;
+    return static_cast<int>(std::ceil(q / period));
+}
+
+/** @brief This process's cgroup v2 CPU cap (0 = none). */
+inline int cgroup_cpu_cap() {
+    std::ifstream self("/proc/self/cgroup");
+    std::string line, path;
+    while (std::getline(self, line))
+        if (line.rfind("0::", 0) == 0) path = line.substr(3);
+    if (path.empty()) return 0;
+    std::ifstream max("/sys/fs/cgroup" + path + "/cpu.max");
+    std::string text;
+    return std::getline(max, text) ? cgroup_cpu_cap(text) : 0;
+}
+
+/** @brief The first value of `OMP_NUM_THREADS` when it is a positive integer, else 0. */
+inline int omp_num_threads_env() {
+    const char* env = std::getenv("OMP_NUM_THREADS");
+    if (env == nullptr) return 0;
+    char* end = nullptr;
+    const long v = std::strtol(env, &end, 10);
+    return (end != env && v > 0 && v < (1 << 15)) ? static_cast<int>(v) : 0;
+}
+
+inline void cpu_relax() {
+#if defined(__x86_64__) || defined(__i386__)
+    __builtin_ia32_pause();
+#elif defined(__aarch64__)
+    asm volatile("yield");
+#endif
+}
+
+}  // namespace detail
+
+/**
+ * @brief The physical cores among the CPUs this process may run on: the affinity
+ *        mask's logical CPUs grouped by the sibling list the kernel publishes
+ *        (Linux sysfs). Elsewhere, or when that is unreadable, the logical CPU count.
+ */
+inline int physical_cores() {
+    const int logical = static_cast<int>(std::max(1u, std::thread::hardware_concurrency()));
+#if defined(__linux__)
+    cpu_set_t mask;
+    if (sched_getaffinity(0, sizeof(mask), &mask) != 0) return logical;
+    std::set<std::string> cores;
+    for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
+        if (!CPU_ISSET(cpu, &mask)) continue;
+        std::ifstream f("/sys/devices/system/cpu/cpu" + std::to_string(cpu) +
+                        "/topology/thread_siblings_list");
+        std::string siblings;
+        if (!std::getline(f, siblings)) return CPU_COUNT(&mask);
+        cores.insert(siblings);
+    }
+    return std::max<int>(1, static_cast<int>(cores.size()));
+#else
+    return logical;
+#endif
+}
+
+/** @brief The process-wide cap on host threads; 0 = unset (the default budget). One
+ *  atomic for the whole process: it is read at every launch from any thread, so a
+ *  launch on a Python worker thread honours it as the main thread does. */
+inline std::atomic<int>& host_threads_setting() {
+    static std::atomic<int> setting{0};
+    return setting;
+}
+
+/** @brief The default host budget: the physical cores of the affinity mask, capped by
+ *  the cgroup CPU quota when there is one. Measured once per process. */
+inline int host_default_threads() {
+    static const int budget = [] {
+        const int cores = physical_cores(), cap = detail::cgroup_cpu_cap();
+        return cap > 0 ? std::min(cores, cap) : cores;
+    }();
+    return budget;
+}
+
+/** @brief The most threads a host launch uses now: the setting, else `OMP_NUM_THREADS`
+ *  (read by eagle when the process starts using it), else the default budget. */
+inline int host_max_threads() {
+    const int set = host_threads_setting().load(std::memory_order_relaxed);
+    if (set > 0) return set;
+    static const int env = detail::omp_num_threads_env();
+    return env > 0 ? env : host_default_threads();
+}
+
+class HostPool {
+public:
+    /** @brief A job: `lanes` lanes; lane `i` may start once `gate[i]` lanes are done
+     *  (its phase's first index; no `gate` = one phase); `run(ctx, i)` runs lane `i`. */
+    struct Job {
+        std::uint32_t lanes = 0;
+        const std::uint32_t* gate = nullptr;
+        void (*run)(const void* ctx, std::uint32_t lane) = nullptr;
+        const void* ctx = nullptr;
+    };
+
+    /** @brief The pool of this process, created on first use (again in a forked child). */
+    static HostPool& instance() {
+        static std::atomic<HostPool*> current{ nullptr };
+        HostPool* pool = current.load(std::memory_order_acquire);
+        const long pid = self_pid();
+        while (pool == nullptr || pool->owner_ != pid) {
+            // A parent's pool in a forked child is leaked on purpose: its threads did not survive
+            // the fork, and its memory may be mid-launch. The new pool starts no thread until used.
+            auto* fresh = new HostPool(pid);
+            if (current.compare_exchange_strong(pool, fresh, std::memory_order_acq_rel)) return *fresh;
+            delete fresh;
+        }
+        return *pool;
+    }
+
+    /** @brief True on a pool worker thread. */
+    static bool& in_worker() {
+        static thread_local bool flag = false;
+        return flag;
+    }
+
+    /** @brief Run @p job on at most @p team threads, the caller included. In place, in
+     *  lane order, when the team is one, the pool is busy, or the caller is a worker,
+     *  inside a lane, or inside an OpenMP region. Lane bodies must not throw. */
+    void run(const Job& job, int team) {
+        team = static_cast<int>(std::min<std::int64_t>(team, job.lanes));
+        bool idle = false;
+        if (team <= 1 || in_worker() || omp_nested() ||
+            !busy_.compare_exchange_strong(idle, true, std::memory_order_acquire)) {
+            run_in_place(job);
+            return;
+        }
+        team = std::min(team, MAX_TEAM);
+        while (workers_ < team - 1) {
+            std::thread([this] { work(); }).detach();
+            ++workers_;
+        }
+        job_ = &job;
+        next_.store(0, std::memory_order_relaxed);
+        done_.store(0, std::memory_order_relaxed);
+        left_.store(0, std::memory_order_relaxed);
+        const std::uint32_t gen = start_.load(std::memory_order_relaxed) + 1;
+        door_.store((std::uint64_t{ gen } << 32) | OPEN |
+                    (static_cast<std::uint64_t>(team - 1) << CAP_SHIFT), std::memory_order_release);
+        start_.store(gen, std::memory_order_seq_cst);
+        if (idle_sleepers_.load(std::memory_order_seq_cst) > 0) start_.notify_all();
+
+        drain(job);
+        await(done_, job.lanes);
+        const std::uint64_t closed = door_.fetch_and(~OPEN, std::memory_order_acq_rel);
+        await(left_, static_cast<std::uint32_t>(closed & JOINED_MASK));
+        job_ = nullptr;
+        busy_.store(false, std::memory_order_release);
+    }
+
+    /** @brief Run every lane of @p job on the calling thread, in order. */
+    static void run_in_place(const Job& job) {
+        for (std::uint32_t i = 0; i < job.lanes; ++i) job.run(job.ctx, i);
+    }
+
+private:
+    static constexpr std::uint64_t OPEN = std::uint64_t{ 1 } << 31;
+    static constexpr int CAP_SHIFT = 15;
+    static constexpr std::uint64_t JOINED_MASK = (std::uint64_t{ 1 } << CAP_SHIFT) - 1;
+    static constexpr int MAX_TEAM = 1 << 14;
+
+    explicit HostPool(long pid) : owner_(pid) {}
+
+    static long self_pid() {
+#if defined(__unix__) || defined(__APPLE__)
+        return static_cast<long>(::getpid());
+#else
+        return 0;
+#endif
+    }
+
+    static bool omp_nested() {
+#ifdef _OPENMP
+        return omp_get_level() > 0;
+#else
+        return false;
+#endif
+    }
+
+    // Spin up to HOST_SPIN_US for `word` to satisfy `ok`, then sleep on it.
+    template <class Ok>
+    static void wait_for(std::atomic<std::uint32_t>& word, std::atomic<int>& sleepers, Ok ok) {
+        const auto t0 = std::chrono::steady_clock::now();
+        const auto spin = std::chrono::duration<double, std::micro>(HOST_SPIN_US);
+        for (unsigned k = 1;; ++k) {
+            std::uint32_t seen = word.load(std::memory_order_acquire);
+            if (ok(seen)) return;
+            detail::cpu_relax();
+            if ((k & 63) == 0 && std::chrono::steady_clock::now() - t0 > spin) {
+                sleepers.fetch_add(1, std::memory_order_seq_cst);
+                seen = word.load(std::memory_order_seq_cst);
+                if (!ok(seen)) word.wait(seen, std::memory_order_acquire);
+                sleepers.fetch_sub(1, std::memory_order_seq_cst);
+            }
+        }
+    }
+
+    void await(std::atomic<std::uint32_t>& count, std::uint32_t target) {
+        wait_for(count, sync_sleepers_, [target](std::uint32_t v) { return v >= target; });
+    }
+
+    void bump(std::atomic<std::uint32_t>& count) {
+        count.fetch_add(1, std::memory_order_seq_cst);
+        if (sync_sleepers_.load(std::memory_order_seq_cst) > 0) count.notify_all();
+    }
+
+    void drain(const Job& job) {
+        for (;;) {
+            const std::uint32_t lane = next_.fetch_add(1, std::memory_order_relaxed);
+            if (lane >= job.lanes) return;
+            if (job.gate != nullptr) await(done_, job.gate[lane]);   // the phases before this one are done
+            job.run(job.ctx, lane);
+            bump(done_);
+        }
+    }
+
+    bool join(std::uint32_t gen) {
+        std::uint64_t door = door_.load(std::memory_order_acquire);
+        for (;;) {
+            if ((door >> 32) != gen || !(door & OPEN) ||
+                (door & JOINED_MASK) >= ((door >> CAP_SHIFT) & JOINED_MASK))
+                return false;
+            if (door_.compare_exchange_weak(door, door + 1, std::memory_order_acq_rel,
+                                            std::memory_order_acquire))
+                return true;
+        }
+    }
+
+    void work() {
+        in_worker() = true;
+        std::uint32_t seen = 0;
+        for (;;) {
+            wait_for(start_, idle_sleepers_, [&seen](std::uint32_t v) { return v != seen; });
+            seen = start_.load(std::memory_order_acquire);
+            if (!join(seen)) continue;
+            drain(*job_);
+            bump(left_);
+        }
+    }
+
+    const long owner_;
+    std::atomic<bool> busy_{ false };
+    int workers_ = 0;                       // guarded by busy_
+    const Job* job_ = nullptr;              // published by door_, retired after left_
+    std::atomic<std::uint64_t> door_{ 0 };  // gen << 32 | OPEN | cap << 15 | joined
+    std::atomic<std::uint32_t> start_{ 0 }, next_{ 0 }, done_{ 0 }, left_{ 0 };
+    std::atomic<int> idle_sleepers_{ 0 }, sync_sleepers_{ 0 };
+};
+
+}  // namespace exec
+}  // namespace eagle

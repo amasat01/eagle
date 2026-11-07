@@ -193,6 +193,12 @@ list(REMOVE_DUPLICATES TEST_FILES)
 set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/test_HostSchedule.cpp
   PROPERTIES COMPILE_DEFINITIONS "EAGLE_CPU_ONLY=1")
 
+# The host pool and stage sizing: CUDA-free, the test_HostSchedule.cpp recipe.
+list(APPEND TEST_FILES ${CMAKE_CURRENT_SOURCE_DIR}/test_HostPool.cpp)
+list(REMOVE_DUPLICATES TEST_FILES)
+set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/test_HostPool.cpp
+  PROPERTIES COMPILE_DEFINITIONS "EAGLE_CPU_ONLY=1")
+
 # The splitting rule is plain arithmetic: compiled by CXX in BOTH build modes,
 # the test_HostSchedule.cpp recipe.
 list(APPEND TEST_FILES ${CMAKE_CURRENT_SOURCE_DIR}/test_DispatchPolicy.cpp)
