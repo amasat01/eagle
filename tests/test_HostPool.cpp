@@ -177,14 +177,15 @@ TEST(HostPoolTest, TheBudgetFollowsTheSettingTheEnvironmentAndTheCores)
 
 namespace {
 std::atomic<int> g_inner_runs{ 0 };
-Fork* g_inner = nullptr;
 
-// A lane that launches a whole stage itself: from a worker and from the launching thread.
+// A lane that launches a whole stage itself: from a worker and from the launching thread. A launch
+// from inside a lane runs in place, so planes per thread keep the lanes race-free.
 void launchInside(void* const*, std::int64_t, std::int64_t, std::int64_t)
 {
-    HostStage inner(g_inner->branches(1), true);
+    thread_local Fork planes(1, 64, 0);
+    HostStage inner(planes.branches(1), true);
     inner.run();
-    runHostBranches(g_inner->branches(1));
+    runHostBranches(planes.branches(1));
     g_inner_runs.fetch_add(1);
 }
 }  // namespace
@@ -193,8 +194,6 @@ TEST(HostPoolTest, ALaunchFromInsideALaneRunsInPlace)
 {
     Deadline deadline(60);
     Threads threads(4);
-    Fork inner(1, 64, 0);   // every lane writes the same values: idempotent, so the race-free check is the hang
-    g_inner = &inner;
     std::vector<HostBranch> outer(9, HostBranch{ { &launchInside, {}, { Partition::whole(1) } } });
     for (int i = 0; i < 1000; ++i) runHostBranches(outer);
     EXPECT_EQ(g_inner_runs.load(), 9000);
