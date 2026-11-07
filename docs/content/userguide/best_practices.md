@@ -22,18 +22,18 @@ for _ in range(steps):
 
 Change what is bound with `bound.rebind(x=new)` rather than binding again. See [graph model](graph_model) and [zero-copy interop](examples/zero_copy_interop).
 
-## Threads for small and large batches
+## Threads: leave the choice to eagle
 
-- For a small batch stepped many times (a per-step hook, say), run on one thread: set `OMP_NUM_THREADS=1` and do not open `g.parallel()`.
-- Use more host threads only for a big batch, where each tile has enough work to pay for the team.
-- Measure on a quiet machine; a loaded one hides the difference.
+- Do not tune threads per call. eagle sizes each stage's team from its measured cost: a stage too small to share runs on the calling thread, and a big batch spreads over the cores this process may use.
+- Keep independent branches as `g.parallel()`: they run side by side only when each has enough work.
+- To give eagle fewer cores (other work on the machine, one process per core group), cap the budget once:
 
 ```python
 import eagle
-eagle.exec.set_host_threads(1)        # same as OMP_NUM_THREADS=1, for this process
+eagle.exec.set_host_threads(4)        # or OMP_NUM_THREADS=4 before eagle starts
 ```
 
-A launch of one sample starts no team at all. See [threading](threading).
+`graph.host_lanes` reports how many threads each stage used. See [threading](threading).
 
 ## Choose the device explicitly
 
