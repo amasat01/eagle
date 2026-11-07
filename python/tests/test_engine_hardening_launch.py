@@ -59,11 +59,13 @@ launch_mod = importlib.import_module("eagle.launch")
 # Device-free stand-ins.
 # --------------------------------------------------------------------------- #
 class _FakeArr:
-    """A stand-in for a cupy array exposing only ``.data.ptr`` — all
-    :func:`eagle.abi.make_gref` / :func:`eagle.abi.make_handle` ever read."""
+    """A stand-in for a cupy array exposing only ``.data.ptr`` and ``.size`` — all
+    :func:`eagle.abi.make_gref` / :func:`eagle.abi.make_handle` ever read (a lookup
+    handle carries the table's own element count)."""
 
-    def __init__(self, ptr):
+    def __init__(self, ptr, size=1):
         self.data = types.SimpleNamespace(ptr=ptr)
+        self.size = size
 
 
 class _MDecl:
