@@ -27,7 +27,11 @@ work item, see :func:`team_grid`) is launched with exactly that grid, inside the
 launch order and so inside a captured graph. The scratch planes it works on
 (``team_planes`` of the first sidecar) are made once at bind, on the current stream,
 and held by the :class:`SplitBound`; a plane the sidecar gives a ``fill`` is made
-filled with it (the key log of an ordered scatter is -1 in every slot).
+filled with it (the key log of an ordered scatter is -1 in every slot). A plane is
+flat (``per_lane`` x units elements) unless its spec says ``"layout": "plane_major"``:
+then it is made ``(per_lane, lanes)`` (``(lanes,)`` for one element), the shape of a
+caller's plane of that width, so a stage binds it as an ordinary per-lane input or
+output (a value one stage of a fused sequence passes to a later one).
 """
 
 from __future__ import annotations
@@ -314,13 +318,19 @@ def _team_scratch(plugin, stages, n, planes, xp, dtype, device) -> dict:
                 f"eagle.plan.bind: kernel {plugin.name!r} needs {total:,} bytes of team scratch "
                 f"({', '.join(f'{nm} {b:,}' for nm, b in nbytes.items())}) at {n:,} lanes, but the device "
                 f"has {free:,} bytes free; stage {stage!r} alone needs {most:,}")
+    def shape(nm, spec):
+        if spec.get("layout") == "plane_major":     # a caller's plane of that width: (per_lane, lanes), (lanes,) for one
+            per = spec.get("per_lane", 1)
+            return (size[nm] // per,) if per == 1 else (per, size[nm] // per)
+        return (size[nm],)
+
     def make(nm, spec):
         if nm in wide:          # a wide value: every element is written before it is read, so nothing is filled
-            return _alloc.empty(xp, (size[nm],), dtype)
-        return _alloc.full(xp, (size[nm],), spec.get("fill", 0), elem[nm])
+            return _alloc.empty(xp, shape(nm, spec), dtype)
+        return _alloc.full(xp, shape(nm, spec), spec.get("fill", 0), elem[nm])
 
-    made = {nm: planes[nm] if nm in planes and planes[nm].shape[-1] >= size[nm] else make(nm, spec)      # lent by a door that runs
-            for nm, spec in specs.items()}                                                              # kernels one after another
+    made = {nm: planes[nm] if nm in planes and planes[nm].shape[-1] >= shape(nm, spec)[-1] else make(nm, spec)  # lent by a door
+            for nm, spec in specs.items()}                                                              # that runs kernels in turn
     if xp != "cpu":
         _alloc.synchronize()            # the fills are ordered before any stream a launch uses
     return made
