@@ -582,6 +582,9 @@ def _bundle_key(kernels, targets, defines=(), mode="float64") -> str:
         # sizes of one kernel would otherwise share, and race on, one folder.
         h.update(json.dumps([k.name, str(k.walk.digest), declaration_digest(k),
                              repr(k.kind), tag]).encode())
+        group = getattr(k, "group", 1)
+        if group != 1:      # the lane group sets how an active map is read; group 1 keys as before
+            h.update(f"group={group}".encode())
     h.update(json.dumps(list(targets)).encode())
     h.update(json.dumps(list(defines)).encode())
     ambient = _ambient_policy()
