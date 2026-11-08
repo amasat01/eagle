@@ -436,11 +436,12 @@ def test_a_banded_plane_zero_fills_to_the_canonical_zero_cell_and_refuses_any_ot
         a.fill(1)
 
 
-def test_the_slow_coercion_path_takes_every_target_dtype_form():
+def test_the_slow_coercion_path_takes_every_target_dtype_form(monkeypatch):
     np = pytest.importorskip("numpy")
     import eagle
     from eagle import marshal
 
+    monkeypatch.setattr(marshal, "_device", lambda: "cpu")   # the dtype lookup, on any host
     marshal._force_slow_coercion(True)
     try:
         flags, reals = eagle.arrays.asarray([True, False]), eagle.arrays.asarray([1.0, 2.0])
