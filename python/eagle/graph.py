@@ -332,16 +332,15 @@ class _Access:
         self.writes = tuple(k.writes(node))
 
 
-@contextlib.contextmanager
+_HOST = contextlib.nullcontext()   # stateless, so one instance serves every host-graph call
+
+
 def _on_device(device):
     """Make ``device`` (a CUDA ordinal, ``None`` for a host graph) the calling
     thread's current device and context, whatever a framework left current
-    there (thread-local, restored on exit)."""
-    if device is None:
-        yield
-        return
-    with _stream.on_device(device):
-        yield
+    there (thread-local, restored on exit). A host graph gets a shared no-op:
+    a launch pays nothing for a device it does not have."""
+    return _HOST if device is None else _stream.on_device(device)
 
 
 def _plane_device(accesses, device=None):
@@ -1123,7 +1122,8 @@ class Graph:
                 _transfer.raise_host_errors(self._host_nodes)
             if self._recorder is not None:
                 self._record = self._recorder.finish()
-            self._scatter_status(wait=True)
+            if self._segments is not None:   # only a segmented graph has status to scatter
+                self._scatter_status(wait=True)
         return self
 
     def enqueue(self, n: int = 1) -> Graph:
@@ -1149,7 +1149,8 @@ class Graph:
                 for _ in range(n):
                     for step in self._cpu_steps:
                         step()
-            self._scatter_status(wait=False)
+            if self._segments is not None:
+                self._scatter_status(wait=False)
         return self
 
     def _scatter_status(self, *, wait: bool) -> None:
