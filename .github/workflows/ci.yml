@@ -192,7 +192,7 @@ jobs:
             echo run=true >> "$GITHUB_OUTPUT"
           fi
 
-      - run: sudo apt-get update && sudo apt-get install -y g++-13 ccache
+      - run: sudo apt-get update && sudo apt-get install -y g++-13 ccache clang-18 libomp-18-dev
         if: steps.plan.outputs.run == 'true'
 
       - uses: actions/cache@v6
@@ -209,8 +209,9 @@ jobs:
       - run: make sanitize-cpp AETHER_SRC="${GITHUB_WORKSPACE}/aether"
         working-directory: eagle
         if: steps.plan.outputs.run == 'true'
-      # the host pool and schedule rows under ThreadSanitizer
-      - run: make tsan-cpp AETHER_SRC="${GITHUB_WORKSPACE}/aether"
+      # the host pool and schedule rows under ThreadSanitizer, with clang: gcc's OpenMP runtime hides its own
+      # hand-offs from the sanitizer, so every OpenMP region reads as a race
+      - run: make tsan-cpp AETHER_SRC="${GITHUB_WORKSPACE}/aether" CLANGXX=clang++-18
         working-directory: eagle
         if: steps.plan.outputs.run == 'true'
       - if: always() && steps.plan.outputs.run == 'true'
