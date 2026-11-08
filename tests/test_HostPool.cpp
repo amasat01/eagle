@@ -155,6 +155,38 @@ TEST(HostPoolTest, TheFloorKeepsLightStagesInPlace)
     EXPECT_LE(heavyStage.lanes(), 4);
 }
 
+namespace {
+std::atomic<std::int64_t> g_smallest_call{ 0 };
+
+// A heavy node that notes the smallest range it was handed.
+void noteRange(void* const* params, std::int64_t base, std::int64_t count, std::int64_t)
+{
+    auto* out = static_cast<double*>(params[0]);
+    for (std::int64_t i = base; i < base + count; ++i) {
+        double x = 1.0;
+        for (int k = 0; k < 2000; ++k) x = std::fma(x, 0.999999, 1e-7);   // ~1 us a sample: the stage sizes past
+        out[i] = x;                                                         // the 256-sample tile cap
+    }
+    std::int64_t seen = g_smallest_call.load();
+    while (count < seen && !g_smallest_call.compare_exchange_weak(seen, count)) {}
+}
+}  // namespace
+
+TEST(HostPoolTest, AHeavyNodeIsCutIntoTilesNotPackets)
+{
+    Deadline deadline(60);
+    Threads threads(4);
+    const std::int64_t n = 1 << 14;
+    std::vector<double> out(n);
+    HostStage stage({ HostBranch{ { &noteRange, { out.data() }, { Partition::whole(n) } } } }, false);
+    stage.run();   // launch 1: in place, measured
+    ASSERT_GT(stage.lanes(), 1);
+    g_smallest_call.store(n);
+    stage.run();
+    // sized for a lane per packet, the tiles would be one packet (8 samples) each
+    EXPECT_GE(g_smallest_call.load(), std::min<std::int64_t>(256, n / physical_cores()));
+}
+
 TEST(HostPoolTest, TheBudgetFollowsTheSettingTheEnvironmentAndTheCores)
 {
     EXPECT_EQ(detail::cgroup_cpu_cap("max 100000"), 0);

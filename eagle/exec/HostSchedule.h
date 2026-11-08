@@ -229,7 +229,11 @@ public:
             const double us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
             cap_ = static_cast<int>(std::clamp<std::int64_t>(static_cast<std::int64_t>(us / HOST_FLOOR_US), 1,
                                                              std::max<std::int64_t>(items_, 1)));
-            if (cap_ > 1) plan_ = tasks_ ? detail::lowerBranches(branches_) : detail::lowerTiles(branches_, cap_);
+            // tiles are cut for at most one lane per physical core: cut for cap_ (up to a packet per lane)
+            // they shrink to one packet, and a heavy node pays a call per 8 samples
+            if (cap_ > 1)
+                plan_ = tasks_ ? detail::lowerBranches(branches_)
+                               : detail::lowerTiles(branches_, std::min<std::int64_t>(cap_, physical_cores()));
             state_.store(READY, std::memory_order_release);
             return;
         }
