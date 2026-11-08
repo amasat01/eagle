@@ -18,9 +18,9 @@
 // and a branch's nodes always run in order.
 //
 // `detail::HostStage` (internal) adds the sizing: its first launch runs in place untimed (it is cold), its
-// second is timed, and the stage then uses one thread per `HOST_FLOOR_US` of that serial time (at most
-// the budget, the branches or the packets). A stage below the floor keeps running
-// in place: no thread is woken for work smaller than the wake-up.
+// second is timed, and the stage then takes its whole budget (at most the branches or the
+// packets) if that serial time is worth a pool wake (2 * `HOST_FLOOR_US`). A stage below
+// that keeps running in place: no thread is woken for work smaller than the wake-up.
 #pragma once
 
 #include "eagle/exec/HostPool.h"
@@ -196,7 +196,7 @@ inline void runHostStage(const std::vector<HostBranch>& branches) {
  * @brief One stage of a built graph, sized by its own second launch.
  *
  * Launch 1 runs in place untimed, launch 2 in place and timed; from then on the stage uses
- * `min(budget, items, serial time / HOST_FLOOR_US)` threads, where `items` is the
+ * `min(budget, items)` threads if the serial time is at least 2 * `HOST_FLOOR_US`, else one. `items` is the
  * branches (`branch_tasks`) or the packets of the widest node (`work_share`).
  * One thread means in place. A new stage (a rebind) measures again. Safe to run
  * from several threads: a launch that finds the pool busy runs in place.
@@ -233,8 +233,7 @@ public:
             const auto t0 = std::chrono::steady_clock::now();
             runInPlace();
             const double us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
-            cap_ = static_cast<int>(std::clamp<std::int64_t>(static_cast<std::int64_t>(us / HOST_FLOOR_US), 1,
-                                                             std::max<std::int64_t>(items_, 1)));
+            cap_ = us >= 2 * HOST_FLOOR_US ? static_cast<int>(std::max<std::int64_t>(items_, 1)) : 1;
             // tiles are cut for at most one lane per physical core: cut for cap_ (up to a packet per lane)
             // they shrink to one packet, and a heavy node pays a call per 8 samples
             if (cap_ > 1)

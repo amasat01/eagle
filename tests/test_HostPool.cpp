@@ -211,6 +211,26 @@ TEST(HostPoolTest, ASlowFirstCallDoesNotSetTheTeam)
     EXPECT_EQ(stage.lanes(), 1);   // launch 2 measured the steady cost, not the cold one
 }
 
+namespace {
+// A steady entry: nine of them make a ~120 us stage.
+void worthAWake(void* const*, std::int64_t, std::int64_t, std::int64_t)
+{
+    const auto end = std::chrono::steady_clock::now() + std::chrono::microseconds(13);
+    while (std::chrono::steady_clock::now() < end) {}
+}
+}  // namespace
+
+TEST(HostPoolTest, AStageWorthAWakeTakesItsWholeBudget)
+{
+    Deadline deadline(60);
+    Threads threads(4);
+    std::vector<HostBranch> branches;
+    for (int k = 0; k < 9; ++k) branches.push_back(HostBranch{ { &worthAWake, {}, { Partition::whole(1) } } });
+    HostStage stage(std::move(branches), true);
+    for (int launch = 0; launch < 3; ++launch) stage.run();
+    EXPECT_EQ(stage.lanes(), host_max_threads());   // 120 us is past 2 * HOST_FLOOR_US: not the 3 that us / floor gives
+}
+
 TEST(HostPoolTest, TheBudgetFollowsTheSettingTheEnvironmentAndTheCores)
 {
     EXPECT_EQ(detail::cgroup_cpu_cap("max 100000"), 0);
