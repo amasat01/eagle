@@ -436,6 +436,22 @@ def test_a_banded_plane_zero_fills_to_the_canonical_zero_cell_and_refuses_any_ot
         a.fill(1)
 
 
+def test_the_slow_coercion_path_takes_every_target_dtype_form():
+    np = pytest.importorskip("numpy")
+    import eagle
+    from eagle import marshal
+
+    marshal._force_slow_coercion(True)
+    try:
+        flags, reals = eagle.arrays.asarray([True, False]), eagle.arrays.asarray([1.0, 2.0])
+        for dt in ("bool", np.bool_, np.dtype(bool), eagle.arrays.bool_):
+            assert marshal._as_dtype(flags, dt).dtype == eagle.arrays.bool_, dt
+        for dt in ("float64", np.float64, np.dtype("float64"), eagle.arrays.float64):
+            assert marshal._as_dtype(reals, dt).dtype == eagle.arrays.float64, dt
+    finally:
+        marshal._force_slow_coercion(False)
+
+
 def test_banded_plane_sites_refuse_an_implicit_cast_by_name():
     import eagle
     from eagle import _plan_planes as pp

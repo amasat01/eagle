@@ -122,7 +122,8 @@ def _as_dtype(value, dt="float64"):
 
     got = arrays.asarray(interop.to_array(value))
     # dt: an eagle DType, a name ("float64"), a NumPy dtype, or a scalar type (np.float64).
-    want = dt if isinstance(dt, arrays.DType) else getattr(arrays, dt.__name__ if isinstance(dt, type) else str(dt))
+    name = dt.__name__ if isinstance(dt, type) else str(dt)
+    want = dt if isinstance(dt, arrays.DType) else getattr(arrays, "bool_" if name == "bool" else name)
     if got.dtype != want and "V" in (got.dtype.kind, want.kind):
         raise ValueError(f"eagle: a {got.dtype} array is not cast to {dt}; convert explicitly with "
                          "eagle.banded_pack / eagle.banded_unpack")
