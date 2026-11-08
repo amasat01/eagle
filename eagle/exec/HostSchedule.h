@@ -218,6 +218,7 @@ public:
     void run() {
         int state = state_.load(std::memory_order_acquire);
         if (state == READY) {
+            if (cap_ <= 1) { runInPlace(); return; }    // one lane: the team setting cannot matter
             const int team = std::min(cap_, host_max_threads());
             if (team > 1) detail::runPlan(plan_, team);
             else runInPlace();
