@@ -14,6 +14,8 @@ import shutil
 import subprocess
 import sys
 import textwrap
+import threading
+import time
 
 import numpy as np
 import pytest
@@ -23,9 +25,14 @@ import eagle.exec as eexec
 from eagle import _core
 from eagle._host_schedule import lower_cpu_stage  # noqa: F401  (the stage lowering under test)
 
-from _graph_fixtures import host_fork
+from _graph_fixtures import host_chain, host_fork
 
 _ENTRY = r"""
+#include <unistd.h>
+extern "C" void nap(void* const* a, long base, long count, long n) {
+    (void)a; (void)base; (void)count; (void)n;
+    usleep(50000);
+}
 extern "C" void rec(void* const* a, long base, long count, long n) {
     (void)n;
     int* meta = (int*)a[0];   // [0] threads that ran a call, [1] calls, [2] the run's stamp
@@ -254,3 +261,111 @@ def test_interpreter_exit_with_live_workers_exits_cleanly(entry):
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="no os.fork")
 def test_a_forked_child_launches_on_a_fresh_pool_while_the_parent_keeps_launching(entry):
     assert _pool_run(entry, "fork") == ["child", "0"]
+
+
+# -- one native call per host launch --------------------------------------------------
+
+def _stage(entry_ptr, n, fn=None):
+    meta = np.array([0, 0, 1], dtype=np.int32)
+    out = np.arange(n, dtype=np.float64)
+    part = eexec.Partition(0, n, n)
+    params = [meta.ctypes.data, out.ctypes.data]
+    stage = _core.HostStage([[(fn or entry_ptr, params, [part])]], False)
+    return stage, meta, out
+
+
+def test_a_native_graph_launch_is_one_native_call(tmp_path):
+    b1, b2, *_ = host_chain(tmp_path)
+    g = eagle.Graph().add(b1).add(b2).build()
+    assert g._native is not None
+    g.launch()
+    frames, native = [], []
+
+    def profile(frame, event, arg):          # nanobind calls raise no c_call: count the Python frames
+        if event == "call":
+            frames.append(frame.f_code.co_name)
+
+    sys.setprofile(profile)
+    try:
+        g.launch()
+    finally:
+        sys.setprofile(None)
+    assert frames == ["launch"], frames
+    if not hasattr(sys, "monitoring"):
+        return
+    mon, tool = sys.monitoring, sys.monitoring.PROFILER_ID
+
+    def on_call(code, offset, callable_, arg0):
+        if type(callable_).__module__ == "nanobind":
+            native.append(callable_)
+
+    mon.use_tool_id(tool, "eagle-t1")
+    mon.register_callback(tool, mon.events.CALL, on_call)
+    mon.set_events(tool, mon.events.CALL)
+    try:
+        g.launch()
+    finally:
+        mon.set_events(tool, 0)
+        mon.register_callback(tool, mon.events.CALL, None)
+        mon.free_tool_id(tool)
+    assert len(native) == 1, native
+
+
+def test_a_host_sequence_runs_every_stage_n_times_and_matches_per_node(entry):
+    n, reps = 100, 3
+    guard = eagle._busy.BusyGuard("eagle.Graph")
+    s1, meta, out = _stage(entry[0], n)
+    s2 = _core.HostStage([[(entry[0], [meta.ctypes.data, out.ctypes.data],
+                            [eexec.Partition(0, n, n)])]], False)
+    _core.HostSequence(guard._g, [s1, s2]).launch(reps)
+    ref = np.arange(n, dtype=np.float64)
+    for _ in range(2 * reps):
+        ref = ref * 2.0 + 1.0
+    assert meta[1] == 2 * reps and np.array_equal(out, ref)
+
+
+def test_a_record_or_python_node_graph_has_no_native_sequence(tmp_path):
+    b1, b2, *_ = host_chain(tmp_path)
+    g = eagle.Graph().add(b1).add_node(eagle.graph.opaque(lambda: None)).build()
+    assert g._native is None
+    g.launch()
+    b1, b2, *_ = host_chain(tmp_path)
+    assert eagle.Graph().add(b1).add(b2).build(record=True)._native is None
+
+
+def test_the_busy_guard_holds_across_the_gil_release_of_a_native_launch(entry):
+    guard = eagle._busy.BusyGuard("eagle.Graph")
+    stage, _meta, _out = _stage(entry[0], 8, fn=ctypes.cast(entry[1].nap, ctypes.c_void_p).value)
+    seq = _core.HostSequence(guard._g, [stage])
+    worker = threading.Thread(target=lambda: seq.launch(1))
+    worker.start()
+    time.sleep(0.01)
+    try:
+        with pytest.raises(eagle.Busy):
+            seq.launch(1)
+    finally:
+        worker.join()
+    seq.launch(1)
+
+
+@pytest.mark.wall_clock
+def test_the_glue_of_a_native_graph_launch_is_at_most_four_empty_native_calls(tmp_path):
+    b1, *_ = host_chain(tmp_path)
+    g = eagle.Graph().add(b1).build()
+    stage = g._host_stages[0]
+    empty = _core.HostStage([], False)
+
+    def best(fn, reps=200_000):
+        fn()
+        top = float("inf")
+        for _ in range(5):
+            t0 = time.perf_counter()
+            for _ in range(reps):
+                fn()
+            top = min(top, (time.perf_counter() - t0) / reps)
+        return top
+
+    glue = best(g.launch) - best(stage.run)
+    ratio = glue / best(empty.run)
+    print(f"\nlaunch glue = {ratio:.2f} empty native calls")
+    assert ratio <= 4.0

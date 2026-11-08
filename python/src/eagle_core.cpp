@@ -1894,6 +1894,22 @@ NB_MODULE(_core, m)
         .def_prop_ro("lanes", &eagle::exec::detail::HostStage::lanes,
             "The threads the next launch uses; 1 = in place (also before launch 1).");
 
+    nb::class_<eagle::exec::detail::HostSequence>(m, "HostSequence")
+        .def("__init__",
+            [](eagle::exec::detail::HostSequence* self, eagle::util::BusyGuard& guard,
+               const std::vector<eagle::exec::detail::HostStage*>& stages) {
+                new (self) eagle::exec::detail::HostSequence(&guard, stages);
+            },
+            nb::arg("guard"), nb::arg("stages"), nb::keep_alive<1, 2>(), nb::keep_alive<1, 3>())
+        .def("launch", [](eagle::exec::detail::HostSequence& self, std::int64_t n) {
+                auto scope = self.guard().scope("launch");   // taken with the GIL, held across its release
+                nb::gil_scoped_release release;
+                self.run(n);
+            },
+            nb::arg("n"),
+            "Run every stage n times under the graph's busy guard (eagle.Busy when another call "
+            "holds it), the GIL released.");
+
     // -- The host table: a graph's CPU stages for another runtime's OpenMP region ----
     nb::class_<eagle::exec::HostVersion>(m, "HostVersion")
         .def("__init__", [](eagle::exec::HostVersion* self) {

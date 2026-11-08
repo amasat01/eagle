@@ -26,6 +26,7 @@
 #include "eagle/exec/HostPool.h"
 #include "eagle/exec/HostTeam.h"
 #include "eagle/exec/Partition.h"
+#include "eagle/util/Busy.h"
 
 #include <algorithm>
 #include <atomic>
@@ -260,6 +261,25 @@ private:
     std::atomic<int> state_{ UNMEASURED };
     int cap_ = 1;              // written once before READY
     detail::HostPlan plan_;    // written once before READY
+};
+
+/** @brief A graph's host stages run back to back under its busy guard: the stages and the guard
+ *  are borrowed (the binding keeps their owners alive). */
+class HostSequence {
+public:
+    HostSequence(util::BusyGuard* guard, std::vector<HostStage*> stages)
+        : guard_(guard), stages_(std::move(stages)) {}
+
+    util::BusyGuard& guard() const { return *guard_; }
+
+    void run(std::int64_t n) {
+        for (std::int64_t i = 0; i < n; ++i)
+            for (HostStage* stage : stages_) stage->run();
+    }
+
+private:
+    util::BusyGuard* guard_;
+    std::vector<HostStage*> stages_;
 };
 
 }  // namespace detail

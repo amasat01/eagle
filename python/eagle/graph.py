@@ -494,6 +494,7 @@ class Graph:
         self._live = ()         # what must hold before each launch (child handles, bound weights)
         self._cpu_steps: list = []
         self._host_stages: tuple = ()
+        self._native = None     # a native-only CPU graph: its whole launch is one _core.HostSequence call
         self._record_on = False
         self._recorder = None
         self._record = None
@@ -891,7 +892,9 @@ class Graph:
                     self._seeds = []
                 self._schedule = tuple(_TIERS[get_node_kind(n.kind).tier] for n in self._nodes)
                 self._host_stages = ()
+                self._native = None
             else:
+                from . import _core
                 from ._host_schedule import lower_cpu_stage
 
                 def lower(ctx=ctx, before=before):
@@ -901,6 +904,9 @@ class Graph:
                                        for s in (*before(i), step)]
                     self._schedule = tuple(how for _, how, _ in lowered)
                     self._host_stages = tuple(stage for _, _, stage in lowered)
+                    self._native = None
+                    if recorder is None and all(stage is not None for stage in self._host_stages):
+                        self._native = _core.HostSequence(self._busy._g, self._host_stages)
 
                 lower()
                 self._lower_cpu = lower
@@ -1102,6 +1108,12 @@ class Graph:
         """Run the graph ``n`` times and wait (``enqueue(n)`` then
         :meth:`synchronize`). A ``record=True`` graph runs once per launch and
         keeps that run's ``Record`` in :attr:`record`."""
+        seq = self._native
+        if seq is not None:
+            if self._live:
+                self._check_live()
+            seq.launch(n)
+            return self
         with self._busy("launch"), _on_device(self._device):
             self._need_built("launch")
             if self._device is not None:
@@ -1132,6 +1144,12 @@ class Graph:
         the device); one with a host node waits as :meth:`launch` does. As for
         :class:`eagle.GraphPipeline`, write no plane of the graph between
         ``enqueue`` and :meth:`synchronize`."""
+        seq = self._native
+        if seq is not None:
+            if self._live:
+                self._check_live()
+            seq.launch(n)
+            return self
         with self._busy("enqueue"), _on_device(self._device):
             self._need_built("enqueue")
             if self._device is not None:
