@@ -128,7 +128,7 @@ TEST(HostPoolTest, EveryTeamEqualsASerialRunBitwise)
                 Fork want(9, n, 200), got(9, n, 200);
                 want.runSerial(2);
                 HostStage stage(got.branches(2), tasks);
-                for (int launch = 0; launch < 3; ++launch) {   // launch 1 in place, then sized
+                for (int launch = 0; launch < 3; ++launch) {   // launches 1-2 in place, then sized
                     got.reset();
                     stage.run();
                 }
@@ -146,6 +146,7 @@ TEST(HostPoolTest, TheFloorKeepsLightStagesInPlace)
               wideStage(wide.branches(1), false);
     for (HostStage* s : { &lightStage, &heavyStage, &wideStage }) {
         EXPECT_EQ(s->lanes(), 1);   // launch 1 runs in place
+        s->run();
         s->run();
         s->run();
     }
@@ -179,12 +180,35 @@ TEST(HostPoolTest, AHeavyNodeIsCutIntoTilesNotPackets)
     const std::int64_t n = 1 << 14;
     std::vector<double> out(n);
     HostStage stage({ HostBranch{ { &noteRange, { out.data() }, { Partition::whole(n) } } } }, false);
-    stage.run();   // launch 1: in place, measured
+    stage.run();   // launch 1: in place, cold
+    stage.run();   // launch 2: in place, measured
     ASSERT_GT(stage.lanes(), 1);
     g_smallest_call.store(n);
     stage.run();
     // sized for a lane per packet, the tiles would be one packet (8 samples) each
     EXPECT_GE(g_smallest_call.load(), std::min<std::int64_t>(256, n / physical_cores()));
+}
+
+namespace {
+std::atomic<int> g_calls{ 0 };
+
+// Its first call (the cold one) takes 200 us; later calls return at once.
+void slowFirst(void* const*, std::int64_t, std::int64_t, std::int64_t)
+{
+    if (g_calls.fetch_add(1) == 0) std::this_thread::sleep_for(std::chrono::microseconds(200));
+}
+}  // namespace
+
+TEST(HostPoolTest, ASlowFirstCallDoesNotSetTheTeam)
+{
+    Deadline deadline(60);
+    Threads threads(4);
+    g_calls.store(0);
+    std::vector<HostBranch> branches;
+    for (int k = 0; k < 9; ++k) branches.push_back(HostBranch{ { &slowFirst, {}, { Partition::whole(1) } } });
+    HostStage stage(std::move(branches), true);
+    for (int launch = 0; launch < 3; ++launch) stage.run();
+    EXPECT_EQ(stage.lanes(), 1);   // launch 2 measured the steady cost, not the cold one
 }
 
 TEST(HostPoolTest, TheBudgetFollowsTheSettingTheEnvironmentAndTheCores)

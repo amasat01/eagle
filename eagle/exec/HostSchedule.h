@@ -17,8 +17,8 @@
 // per-sample kernel, so how its samples are cut across threads changes nothing,
 // and a branch's nodes always run in order.
 //
-// `detail::HostStage` (internal) adds the sizing: its first launch runs in place and is timed, and
-// the stage then uses one thread per `HOST_FLOOR_US` of that serial time (at most
+// `detail::HostStage` (internal) adds the sizing: its first launch runs in place untimed (it is cold), its
+// second is timed, and the stage then uses one thread per `HOST_FLOOR_US` of that serial time (at most
 // the budget, the branches or the packets). A stage below the floor keeps running
 // in place: no thread is woken for work smaller than the wake-up.
 #pragma once
@@ -193,9 +193,9 @@ inline void runHostStage(const std::vector<HostBranch>& branches) {
 }
 
 /**
- * @brief One stage of a built graph, sized by its own first launch.
+ * @brief One stage of a built graph, sized by its own second launch.
  *
- * Launch 1 runs in place and is timed; from then on the stage uses
+ * Launch 1 runs in place untimed, launch 2 in place and timed; from then on the stage uses
  * `min(budget, items, serial time / HOST_FLOOR_US)` threads, where `items` is the
  * branches (`branch_tasks`) or the packets of the widest node (`work_share`).
  * One thread means in place. A new stage (a rebind) measures again. Safe to run
@@ -225,7 +225,11 @@ public:
             else runInPlace();
             return;
         }
-        if (state == UNMEASURED && state_.compare_exchange_strong(state, MEASURING, std::memory_order_acquire)) {
+        if (state == UNMEASURED && state_.compare_exchange_strong(state, WARMED, std::memory_order_acq_rel)) {
+            runInPlace();    // launch 1 is cold: not timed
+            return;
+        }
+        if (state == WARMED && state_.compare_exchange_strong(state, MEASURING, std::memory_order_acquire)) {
             const auto t0 = std::chrono::steady_clock::now();
             runInPlace();
             const double us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
@@ -242,14 +246,14 @@ public:
         runInPlace();
     }
 
-    /** @brief The threads the next launch uses; 1 = in place (also before launch 1). */
+    /** @brief The threads the next launch uses; 1 = in place (also before launch 2). */
     int lanes() const {
         if (state_.load(std::memory_order_acquire) != READY) return 1;
         return std::max(1, std::min(cap_, host_max_threads()));
     }
 
 private:
-    enum : int { UNMEASURED, MEASURING, READY };
+    enum : int { UNMEASURED, WARMED, MEASURING, READY };
 
     void runInPlace() const {
         for (const HostBranch& branch : branches_) detail::runBranch(branch);
