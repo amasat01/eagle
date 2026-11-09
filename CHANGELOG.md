@@ -4,9 +4,31 @@ Releases after 0.6.4 are on [GitHub](https://github.com/amasat01/eagle/releases)
 
 ## Unreleased
 
+This section covers what changes from 0.7.3. Host launches get their own thread pool, so small stages stop paying for threads they cannot use; banded arrays (double precision on GPUs with weak or no FP64) get pack and unpack calls.
+
 ### Changed
 
 **Host launches no longer ask the OpenMP runtime anything.** A launch issued from inside your own OpenMP parallel region is no longer run in place: the thread that takes the pool fans out and the others run in place; values are unchanged. Launching from a forked child no longer touches the OpenMP runtime.
+
+- **Host stages run on an eagle-owned thread pool.** Each stage is sized from its own first launch, one thread per 40 microseconds of serial time up to the budget, so a cheap stage stays on the calling thread and wakes nothing. Workers are pinned one per physical core, a launch wakes only the workers of its team, and a graph runs its host stages in one native call. `g.host_lanes` reports the threads per stage; rebinding measures again. The budget is still `eagle.exec.set_host_threads(N)`, else `OMP_NUM_THREADS`, else the physical cores the process may use.
+- `eagle._core.omp_threads` and `eagle._core.omp_set_threads` are deprecated and warn; eagle's host launches no longer use OpenMP. Migration: use `eagle.exec.set_host_threads` and `eagle.exec.host_threads`.
+- The sidecar `scalar_type` `softdouble` is now `banded` (dtype code 13). Migration: nothing in the family produced `softdouble`; write `banded` in a hand-made sidecar.
+- A banded deploy or host plan is refused up front, naming the float64 path: banded is a device feature.
+- CI runs the ThreadSanitizer rows with clang, and takes the release version from the top heading of `CHANGELOG.md`.
+
+### Added
+
+- **Banded arrays.** `eagle.banded_pack` and `eagle.banded_unpack` convert between float64 and 8-byte banded cells; the device path carries banded planes and warp shuffles, and `eagle.dtypes.scratch_dtype("band_partial")` names the 16-byte partial of a banded block reduction.
+- A team plane whose spec says `plane_major` is made `(per_lane, lanes)` and bound like a caller's plane, so a value can pass from one stage of a fused kernel sequence to the next.
+- A Best practices page: build once then launch, leave thread counts to eagle, choose the device explicitly.
+- The CPU performance card runs on macOS, naming the CPU from `sysctl` and counting cores without an affinity mask.
+
+### Fixed
+
+- A rebind on the CPU lowers the host stages again, so a swapped table or view is read.
+- A lookup table carries its own element count on every launch path, so a read clamps to the table and not to the run's sample count.
+- A deploy's cache folder is keyed by the kernel's lane group; two groups of one kernel no longer share a folder.
+- The slow coercion path reads the bool dtype by name and accepts a NumPy scalar type as the target dtype.
 
 ## 0.7.3 (2026-11-05)
 
