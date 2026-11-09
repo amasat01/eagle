@@ -237,13 +237,13 @@ def _stacks(pid):
 def _pool_run(entry, mode, env=None, prefix=()):
     cmd = [*prefix, sys.executable, "-c", _POOL_SCRIPT, entry[2], mode]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                            env={**os.environ, **(env or {})})
+                            env={**os.environ, **(env or {})}, start_new_session=True)
     try:
         out, err = proc.communicate(timeout=45)
     except subprocess.TimeoutExpired:
         stacks = _stacks(proc.pid)
-        proc.kill()
-        proc.communicate()
+        os.killpg(proc.pid, 9)       # the whole group: a forked child left alive would hold the pipes open
+        proc.wait()
         pytest.fail("pool script overran 45 s (%s)\n%s" % (mode, stacks), pytrace=False)
     assert proc.returncode == 0, err[-2000:]
     return out.split()
