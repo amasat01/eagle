@@ -242,7 +242,7 @@ public:
         team = std::min(team, MAX_TEAM);
         if (workers_ == 0) plan_pins();
         while (workers_ < team - 1) {
-            std::thread([this, k = workers_] { pin(k); work(); }).detach();
+            std::thread([this, k = workers_] { pin(k); work(k); }).detach();
             ++workers_;
         }
         job_ = &job;
@@ -349,11 +349,12 @@ private:
         }
     }
 
-    bool join(std::uint32_t gen) {
+    // Worker @p k joins only a job whose team has a place for it (k < team - 1): the pinned workers come first.
+    bool join(std::uint32_t gen, int k) {
         std::uint64_t door = door_.load(std::memory_order_acquire);
         for (;;) {
             if ((door >> 32) != gen || !(door & OPEN) ||
-                (door & JOINED_MASK) >= ((door >> CAP_SHIFT) & JOINED_MASK))
+                static_cast<std::uint64_t>(k) >= ((door >> CAP_SHIFT) & JOINED_MASK))
                 return false;
             if (door_.compare_exchange_weak(door, door + 1, std::memory_order_acq_rel,
                                             std::memory_order_acquire))
@@ -361,13 +362,13 @@ private:
         }
     }
 
-    void work() {
+    void work(int k) {
         in_worker() = true;
         std::uint32_t seen = 0;
         for (;;) {
             wait_for(start_, idle_sleepers_, [&seen](std::uint32_t v) { return v != seen; });
             seen = start_.load(std::memory_order_acquire);
-            if (!join(seen)) continue;
+            if (!join(seen, k)) continue;
             drain(*job_);
             bump(left_);
         }

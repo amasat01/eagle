@@ -375,6 +375,26 @@ TEST(HostPoolTest, AWorkerBeyondTheCoresKeepsTheWholeMask)
     const bool any = std::any_of(masks.begin(), masks.end(), [&](const auto& m) { return CPU_EQUAL(&whole, &m.second); });
     EXPECT_TRUE(any) << "no worker ran with the whole mask";
 }
+
+TEST(HostPoolTest, AfterABiggerTeamASmallerOneStillHasACorePerWorker)
+{
+    Deadline deadline(60);
+    const int cores = physical_cores();
+    if (cores < 3) GTEST_SKIP() << "needs three physical cores";
+    const std::vector<cpu_set_t> sets = core_masks();
+    workerMasks(2 * cores);   // the pool now holds more workers than the cores
+    const auto masks = workerMasks(cores);
+    ASSERT_GE(masks.size(), 2u);
+    for (auto a = masks.begin(); a != masks.end(); ++a) {
+        const bool isCore = std::any_of(sets.begin(), sets.end(), [&](const cpu_set_t& s) { return CPU_EQUAL(&s, &a->second); });
+        EXPECT_TRUE(isCore) << "a worker of the smaller team is not on one core's sibling set";
+        for (auto b = std::next(a); b != masks.end(); ++b) {
+            cpu_set_t both;
+            CPU_AND(&both, &a->second, &b->second);
+            EXPECT_EQ(CPU_COUNT(&both), 0) << "two workers share a physical core";
+        }
+    }
+}
 #endif
 
 TEST(HostPoolTest, TheBudgetFollowsTheSettingTheEnvironmentAndTheCores)
