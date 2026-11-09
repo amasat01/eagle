@@ -209,3 +209,11 @@ def test_the_cpu_card_counts_cores_without_an_affinity_mask(monkeypatch):
     card = _load("cpu_card", _BENCH / "perf_card" / "cpu_card.py")
     monkeypatch.delattr(card.os, "sched_getaffinity", raising=False)   # macOS has none
     assert card._cpu_cores() >= 1
+
+
+def test_host_memory_is_unreported_where_there_is_no_proc(cc, monkeypatch):
+    def no_proc(self, *a, **k):
+        raise FileNotFoundError(str(self))     # macOS has no /proc/self/status
+
+    monkeypatch.setattr(cc.pathlib.Path, "read_text", no_proc)
+    assert cc.status_kib("VmRSS") is None
