@@ -211,3 +211,31 @@ def probe(tmp_path_factory):
     lib = ctypes.CDLL(str(so))
     lib.probe_read.restype = ctypes.c_int32
     return lib
+
+
+# A hang on macOS leaves no log until the job's limit: a test that runs over HANG_S prints its name, every Python
+# thread's traceback and a native sample of this process, then ends the worker so the run reports it.
+HANG_S = 120
+
+
+@pytest.fixture(autouse=True)
+def _hang_report(request):
+    if sys.platform != "darwin":
+        yield
+        return
+    import faulthandler
+    import threading
+
+    def report():
+        os.write(2, ("\n== test over %d s: %s\n" % (HANG_S, request.node.nodeid)).encode())
+        faulthandler.dump_traceback(all_threads=True)
+        if shutil.which("sample"):
+            out = subprocess.run(["sample", str(os.getpid()), "2"], capture_output=True, text=True).stdout
+            os.write(2, out[out.find("Call graph:"):out.find("Total number in stack")].encode())
+        os._exit(70)
+
+    timer = threading.Timer(HANG_S, report)
+    timer.daemon = True
+    timer.start()
+    yield
+    timer.cancel()
