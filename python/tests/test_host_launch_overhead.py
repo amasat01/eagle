@@ -30,8 +30,10 @@ from _graph_fixtures import host_chain, host_fork
 _ENTRY = r"""
 #include <unistd.h>
 extern "C" void nap(void* const* a, long base, long count, long n) {
-    (void)a; (void)base; (void)count; (void)n;
-    usleep(50000);
+    (void)base; (void)count; (void)n;
+    volatile int* meta = (volatile int*)a[0];   // [0] set: the call has started; it returns once [1] is set (5 s at most)
+    meta[0] = 1;
+    for (int i = 0; i < 5000 && meta[1] == 0; ++i) usleep(1000);
 }
 extern "C" void rec(void* const* a, long base, long count, long n) {
     (void)n;
@@ -355,15 +357,19 @@ def test_a_record_or_python_node_graph_has_no_native_sequence(tmp_path):
 
 def test_the_busy_guard_holds_across_the_gil_release_of_a_native_launch(entry):
     guard = eagle._busy.BusyGuard("eagle.Graph")
-    stage, _meta, _out = _stage(entry[0], 8, fn=ctypes.cast(entry[1].nap, ctypes.c_void_p).value)
+    stage, meta, _out = _stage(entry[0], 8, fn=ctypes.cast(entry[1].nap, ctypes.c_void_p).value)
     seq = _core.HostSequence(guard._g, [stage])
     worker = threading.Thread(target=lambda: seq.launch(1))
     worker.start()
-    time.sleep(0.01)
+    t0 = time.monotonic()
+    while meta[0] == 0 and time.monotonic() - t0 < 5:   # the first launch is inside its native call
+        time.sleep(0.001)
     try:
+        assert meta[0] == 1
         with pytest.raises(eagle.Busy):
             seq.launch(1)
     finally:
+        meta[1] = 1                                       # let it return
         worker.join()
     seq.launch(1)
 
