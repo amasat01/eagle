@@ -321,7 +321,8 @@ def test_a_host_sequence_runs_every_stage_n_times_and_matches_per_node(entry):
     ref = np.arange(n, dtype=np.float64)
     for _ in range(2 * reps):
         ref = ref * 2.0 + 1.0
-    assert meta[1] == 2 * reps and np.array_equal(out, ref)
+    # launches 1-2 run the stage's plan, so a node may be cut into tiles
+    assert meta[1] >= 2 * reps and np.array_equal(out, ref)
 
 
 def test_a_record_or_python_node_graph_has_no_native_sequence(tmp_path):
