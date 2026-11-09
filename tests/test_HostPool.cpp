@@ -376,6 +376,23 @@ TEST(HostPoolTest, AWorkerBeyondTheCoresKeepsTheWholeMask)
     EXPECT_TRUE(any) << "no worker ran with the whole mask";
 }
 
+TEST(HostPoolTest, ALaunchWakesOnlyTheWorkersOfItsTeam)
+{
+    Deadline deadline(60);
+    constexpr int big = 6, small = 3;   // workers 0..1 are the small team's; 2..4 must sleep through its launches
+    HostPool& pool = HostPool::instance();
+    workerMasks(big);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));   // every worker asleep
+    std::uint64_t before[big];
+    for (int k = small - 1; k < big - 1; ++k) before[k] = pool.wakeups(k);
+    for (int i = 0; i < 20; ++i) {
+        workerMasks(small);
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    for (int k = small - 1; k < big - 1; ++k)
+        EXPECT_EQ(pool.wakeups(k), before[k]) << "worker " << k << " was woken by a team of " << small;
+}
+
 TEST(HostPoolTest, AfterABiggerTeamASmallerOneStillHasACorePerWorker)
 {
     Deadline deadline(60);

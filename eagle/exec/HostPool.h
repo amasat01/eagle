@@ -35,6 +35,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <deque>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -242,7 +243,8 @@ public:
         team = std::min(team, MAX_TEAM);
         if (workers_ == 0) plan_pins();
         while (workers_ < team - 1) {
-            std::thread([this, k = workers_] { pin(k); work(k); }).detach();
+            Slot& slot = slots_.emplace_back();
+            std::thread([this, &slot, k = workers_] { pin(k); work(k, slot); }).detach();
             ++workers_;
         }
         job_ = &job;
@@ -253,7 +255,8 @@ public:
         door_.store((std::uint64_t{ gen } << 32) | OPEN |
                     (static_cast<std::uint64_t>(team - 1) << CAP_SHIFT), std::memory_order_release);
         start_.store(gen, std::memory_order_seq_cst);
-        if (idle_sleepers_.load(std::memory_order_seq_cst) > 0) start_.notify_all();
+        for (int k = 0; k < team - 1; ++k)   // only the team's sleepers wake; the others stay asleep
+            slots_[k].wake();
 
         drain(job);
         await(done_, job.lanes);
@@ -263,12 +266,29 @@ public:
         busy_.store(false, std::memory_order_release);
     }
 
+    /** @brief How many times worker @p k woke from sleep (0 for a worker that does not exist). */
+    std::uint64_t wakeups(int k) const {
+        return static_cast<std::size_t>(k) < slots_.size() ? slots_[k].wakeups.load(std::memory_order_relaxed) : 0;
+    }
+
     /** @brief Run every lane of @p job on the calling thread, in order. */
     static void run_in_place(const Job& job) {
         for (std::uint32_t i = 0; i < job.lanes; ++i) job.run(job.ctx, i);
     }
 
 private:
+    /// One worker's private sleep word: the pool wakes exactly the sleepers a job has a place for.
+    struct Slot {
+        std::atomic<std::uint32_t> word{ 0 };
+        std::atomic<int> sleeping{ 0 };
+        std::atomic<std::uint64_t> wakeups{ 0 };
+        void wake() {
+            if (sleeping.load(std::memory_order_seq_cst) == 0) return;
+            word.fetch_add(1, std::memory_order_seq_cst);
+            word.notify_one();
+        }
+    };
+
     static constexpr std::uint64_t OPEN = std::uint64_t{ 1 } << 31;
     static constexpr int CAP_SHIFT = 15;
     static constexpr std::uint64_t JOINED_MASK = (std::uint64_t{ 1 } << CAP_SHIFT) - 1;
@@ -362,11 +382,24 @@ private:
         }
     }
 
-    void work(int k) {
+    void work(int k, Slot& slot) {
         in_worker() = true;
         std::uint32_t seen = 0;
+        const auto spin = std::chrono::duration<double, std::micro>(HOST_SPIN_US);
         for (;;) {
-            wait_for(start_, idle_sleepers_, [&seen](std::uint32_t v) { return v != seen; });
+            const auto t0 = std::chrono::steady_clock::now();
+            for (unsigned i = 1; start_.load(std::memory_order_acquire) == seen; ++i) {
+                detail::cpu_relax();
+                if ((i & 63) != 0 || std::chrono::steady_clock::now() - t0 <= spin) continue;
+                // sleep on this worker's own word: a launch wakes it only when the team reaches it
+                const std::uint32_t w = slot.word.load(std::memory_order_seq_cst);
+                slot.sleeping.store(1, std::memory_order_seq_cst);
+                if (start_.load(std::memory_order_seq_cst) == seen) {
+                    slot.word.wait(w, std::memory_order_acquire);
+                    slot.wakeups.fetch_add(1, std::memory_order_relaxed);
+                }
+                slot.sleeping.store(0, std::memory_order_seq_cst);
+            }
             seen = start_.load(std::memory_order_acquire);
             if (!join(seen, k)) continue;
             drain(*job_);
@@ -377,13 +410,14 @@ private:
     const long owner_;
     std::atomic<bool> busy_{ false };
     int workers_ = 0;                       // guarded by busy_
+    std::deque<Slot> slots_;                // one per worker, guarded by busy_ (a deque: addresses are stable)
 #if defined(__linux__)
     std::vector<cpu_set_t> pins_;           // set before the first worker starts, then read-only
 #endif
     const Job* job_ = nullptr;              // published by door_, retired after left_
     std::atomic<std::uint64_t> door_{ 0 };  // gen << 32 | OPEN | cap << 15 | joined
     std::atomic<std::uint32_t> start_{ 0 }, next_{ 0 }, done_{ 0 }, left_{ 0 };
-    std::atomic<int> idle_sleepers_{ 0 }, sync_sleepers_{ 0 };
+    std::atomic<int> sync_sleepers_{ 0 };
 };
 
 }  // namespace detail
