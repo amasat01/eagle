@@ -213,9 +213,11 @@ def probe(tmp_path_factory):
     return lib
 
 
-# A hang on macOS leaves no log until the job's limit: a test that runs over HANG_S prints its name, every Python
-# thread's traceback and a native sample of this process, then ends the worker so the run reports it.
+# A hang on macOS leaves no log until the job's limit: a test that runs over HANG_S writes its name, every Python
+# thread's traceback and a native sample of its process to a file, then ends its worker; the controller prints the
+# files when it sees the worker go down, and ends the run (a worker's own stderr does not reach the job log).
 HANG_S = 120
+HANG_DIR = pathlib.Path(os.environ.get("RUNNER_TEMP", "/tmp")) / "eagle-hang"
 
 
 @pytest.fixture(autouse=True)
@@ -227,11 +229,14 @@ def _hang_report(request):
     import threading
 
     def report():
-        os.write(2, ("\n== test over %d s: %s\n" % (HANG_S, request.node.nodeid)).encode())
-        faulthandler.dump_traceback(all_threads=True)
-        if shutil.which("sample"):
-            out = subprocess.run(["sample", str(os.getpid()), "2"], capture_output=True, text=True).stdout
-            os.write(2, out[out.find("Call graph:"):out.find("Total number in stack")].encode())
+        HANG_DIR.mkdir(exist_ok=True)
+        with open(HANG_DIR / ("%d.txt" % os.getpid()), "w") as f:
+            f.write("== test over %d s: %s\n" % (HANG_S, request.node.nodeid))
+            f.flush()
+            faulthandler.dump_traceback(file=f, all_threads=True)
+            if shutil.which("sample"):
+                out = subprocess.run(["sample", str(os.getpid()), "2"], capture_output=True, text=True).stdout
+                f.write(out[out.find("Call graph:"):out.find("Total number in stack")])
         os._exit(70)
 
     timer = threading.Timer(HANG_S, report)
@@ -239,3 +244,13 @@ def _hang_report(request):
     timer.start()
     yield
     timer.cancel()
+
+
+@pytest.hookimpl(optionalhook=True)
+def pytest_testnodedown(node, error):
+    if sys.platform != "darwin" or not HANG_DIR.is_dir():
+        return
+    for f in sorted(HANG_DIR.glob("*.txt")):
+        sys.stderr.write("\n" + f.read_text() + "\n")
+    sys.stderr.flush()
+    os._exit(3)
