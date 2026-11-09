@@ -17,6 +17,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
+#include <mutex>
+#include <set>
 #include <thread>
 #include <vector>
 
@@ -154,6 +156,68 @@ TEST(HostPoolTest, TheFloorKeepsLightStagesInPlace)
     EXPECT_GT(heavyStage.lanes(), 1);
     EXPECT_GT(wideStage.lanes(), 1);   // a compute-heavy node is cut by its cost, not by bytes alone
     EXPECT_LE(heavyStage.lanes(), 4);
+}
+
+namespace {
+std::mutex g_threads_mu;
+std::set<std::thread::id> g_threads;
+
+// Notes the calling thread, then spins for `params[0]` microseconds (none when it is null).
+void noteThread(void* const* params, std::int64_t, std::int64_t, std::int64_t)
+{
+    {
+        std::lock_guard<std::mutex> lock(g_threads_mu);
+        g_threads.insert(std::this_thread::get_id());
+    }
+    if (params == nullptr || params[0] == nullptr) return;
+    const auto end = std::chrono::steady_clock::now() + std::chrono::microseconds(200);
+    while (std::chrono::steady_clock::now() < end) {}
+}
+
+// A stage of 16 tiles (`work_share`) or 16 branches (`branch_tasks`) of `noteThread`, spinning when @p heavy.
+HostStage noteStage(bool tasks, bool heavy, void*& spin)
+{
+    std::vector<void*> params{ heavy ? &spin : nullptr };
+    std::vector<HostBranch> branches;
+    if (tasks)
+        for (int k = 0; k < 16; ++k) branches.push_back(HostBranch{ { &noteThread, params, { Partition::whole(1) } } });
+    else
+        branches.push_back(HostBranch{ { &noteThread, params, { Partition::whole(16 * 256) } } });
+    return HostStage(std::move(branches), tasks);
+}
+
+std::size_t threadsOfLaunch(HostStage& stage)
+{
+    g_threads.clear();
+    stage.run();
+    return g_threads.size();
+}
+}  // namespace
+
+TEST(HostPoolTest, AHeavyStageIsSharedFromItsFirstLaunch)
+{
+    Deadline deadline(60);
+    Threads threads(4);
+    void* spin = &spin;
+    for (const bool tasks : { false, true }) {
+        HostStage stage = noteStage(tasks, true, spin);
+        EXPECT_GT(threadsOfLaunch(stage), 1u) << "tasks=" << tasks << " launch 1";
+        EXPECT_GT(threadsOfLaunch(stage), 1u) << "tasks=" << tasks << " launch 2";
+        EXPECT_GT(stage.lanes(), 1) << "tasks=" << tasks;
+    }
+}
+
+TEST(HostPoolTest, ACheapStageNeverLeavesTheCaller)
+{
+    Deadline deadline(60);
+    Threads threads(4);
+    void* spin = nullptr;
+    for (const bool tasks : { false, true }) {
+        HostStage stage = noteStage(tasks, false, spin);
+        for (int launch = 1; launch <= 4; ++launch)
+            EXPECT_EQ(threadsOfLaunch(stage), 1u) << "tasks=" << tasks << " launch " << launch;
+        EXPECT_EQ(stage.lanes(), 1);
+    }
 }
 
 namespace {

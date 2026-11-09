@@ -17,10 +17,11 @@
 // per-sample kernel, so how its samples are cut across threads changes nothing,
 // and a branch's nodes always run in order.
 //
-// `detail::HostStage` (internal) adds the sizing: its first launch runs in place untimed (it is cold), its
-// second is timed, and the stage then takes its whole budget (at most the branches or the
-// packets) if that serial time is worth a pool wake (2 * `HOST_FLOOR_US`). A stage below
-// that keeps running in place: no thread is woken for work smaller than the wake-up.
+// `detail::HostStage` (internal) adds the sizing: its first two launches run lane by lane in place, timing as
+// they go, and hand the rest of the stage to the team once they have spent 2 * `HOST_FLOOR_US`, so a heavy stage
+// never pays a whole serial launch. The first (cold) launch decides nothing; the second does: the stage takes
+// its whole budget (at most the branches or the packets) if its serial time was worth a pool wake, else it keeps
+// running in place for good: no thread is woken for work smaller than the wake-up.
 #pragma once
 
 #include "eagle/exec/HostPool.h"
@@ -195,8 +196,9 @@ inline void runHostStage(const std::vector<HostBranch>& branches) {
 /**
  * @brief One stage of a built graph, sized by its own second launch.
  *
- * Launch 1 runs in place untimed, launch 2 in place and timed; from then on the stage uses
- * `min(budget, items)` threads if the serial time is at least 2 * `HOST_FLOOR_US`, else one. `items` is the
+ * Launches 1 and 2 run in place lane by lane and timed; once 2 * `HOST_FLOOR_US` is spent the rest of the stage
+ * runs on the team. Launch 1 (cold) decides nothing; from launch 3 on the stage uses
+ * `min(budget, items)` threads if launch 2's serial time reached that, else one. `items` is the
  * branches (`branch_tasks`) or the packets of the widest node (`work_share`).
  * One thread means in place. A new stage (a rebind) measures again. Safe to run
  * from several threads: a launch that finds the pool busy runs in place.
@@ -214,6 +216,11 @@ public:
                 for (const HostBranchNode& node : branch)
                     for (const Partition& p : node.parts)
                         items_ = std::max(items_, (p.count + detail::LANE_PACKET - 1) / detail::LANE_PACKET);
+        // tiles are cut for at most one lane per physical core: cut for items_ (up to a packet per lane)
+        // they shrink to one packet, and a heavy node pays a call per 8 samples
+        if (items_ > 1)
+            plan_ = tasks_ ? detail::lowerBranches(branches_)
+                           : detail::lowerTiles(branches_, std::min<std::int64_t>(items_, physical_cores()));
     }
 
     void run() {
@@ -226,19 +233,11 @@ public:
             return;
         }
         if (state == UNMEASURED && state_.compare_exchange_strong(state, WARMED, std::memory_order_acq_rel)) {
-            runInPlace();    // launch 1 is cold: not timed
+            runTimed();    // launch 1 is cold: it sizes nothing
             return;
         }
         if (state == WARMED && state_.compare_exchange_strong(state, MEASURING, std::memory_order_acquire)) {
-            const auto t0 = std::chrono::steady_clock::now();
-            runInPlace();
-            const double us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
-            cap_ = us >= 2 * HOST_FLOOR_US ? static_cast<int>(std::max<std::int64_t>(items_, 1)) : 1;
-            // tiles are cut for at most one lane per physical core: cut for cap_ (up to a packet per lane)
-            // they shrink to one packet, and a heavy node pays a call per 8 samples
-            if (cap_ > 1)
-                plan_ = tasks_ ? detail::lowerBranches(branches_)
-                               : detail::lowerTiles(branches_, std::min<std::int64_t>(cap_, physical_cores()));
+            cap_ = runTimed() ? static_cast<int>(std::max<std::int64_t>(items_, 1)) : 1;
             state_.store(READY, std::memory_order_release);
             return;
         }
@@ -256,6 +255,39 @@ private:
 
     void runInPlace() const {
         for (const HostBranch& branch : branches_) detail::runBranch(branch);
+    }
+
+    /// The plan's lanes from @p from on, as a job of their own: gates rebased to its first lane.
+    struct Tail { const detail::HostPlan* plan; std::uint32_t from; };
+    static void runTail(const void* ctx, std::uint32_t lane) {
+        const auto& tail = *static_cast<const Tail*>(ctx);
+        detail::HostPlan::runLane(tail.plan, tail.from + lane);
+    }
+
+    /// Run the plan lane by lane in place; once 2 * HOST_FLOOR_US is spent, the lanes left go to the team.
+    /// True when the serial time reached that. Same calls in the same per-lane order: the values do not change.
+    bool runTimed() const {
+        if (plan_.lanes() == 0) { runInPlace(); return false; }   // one item: nothing to hand over
+        const auto t0 = std::chrono::steady_clock::now();
+        auto spent = [&] { return std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count(); };
+        const std::uint32_t lanes = plan_.lanes();
+        for (std::uint32_t lane = 0; lane < lanes; ++lane) {
+            detail::HostPlan::runLane(&plan_, lane);
+            if (spent() < 2 * HOST_FLOOR_US) continue;
+            if (lane + 1 < lanes) runRest(lane + 1);
+            return true;
+        }
+        return false;
+    }
+
+    void runRest(std::uint32_t from) const {
+        const Tail tail{ &plan_, from };
+        std::vector<std::uint32_t> gate(plan_.lanes() - from);
+        for (std::size_t i = 0; i < gate.size(); ++i) gate[i] = plan_.gate[from + i] > from ? plan_.gate[from + i] - from : 0;
+        const detail::HostPool::Job job{ static_cast<std::uint32_t>(gate.size()), gate.data(), &runTail, &tail };
+        const int team = static_cast<int>(std::min<std::int64_t>(items_, host_max_threads()));
+        if (team > 1) detail::HostPool::instance().run(job, team);
+        else detail::HostPool::run_in_place(job);
     }
 
     std::vector<HostBranch> branches_;
