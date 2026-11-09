@@ -463,7 +463,7 @@ TEST(HostPoolTest, ALaunchFromInsideALaneRunsInPlace)
 #pragma omp parallel num_threads(2)
     {
 #pragma omp masked   // the main thread: its write and the check below are ordered without the runtime's barrier
-        runHostBranches(got.branches(1));   // inside a caller's region: in place, no second team
+        runHostBranches(got.branches(1));   // inside a caller's region: no second team is opened
     }
     for (std::size_t k = 0; k < 4; ++k) EXPECT_EQ(want.a[k], got.a[k]);
 #endif

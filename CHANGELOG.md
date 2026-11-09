@@ -2,6 +2,12 @@
 
 Releases after 0.6.4 are on [GitHub](https://github.com/amasat01/eagle/releases): the notes are the pull request body.
 
+## Unreleased
+
+### Changed
+
+**Host launches no longer ask the OpenMP runtime anything.** A launch issued from inside your own OpenMP parallel region is no longer run in place: the thread that takes the pool fans out and the others run in place; values are unchanged. Launching from a forked child no longer touches the OpenMP runtime.
+
 ## 0.7.3 (2026-11-05)
 
 This section covers what changes from 0.7.2. Names that left are in the table at the end.

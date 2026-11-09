@@ -52,9 +52,16 @@ stage (``1`` = the calling thread); rebinding a graph measures again.
 The budget is one number for the whole process: ``eagle.exec.set_host_threads(N)``,
 else ``OMP_NUM_THREADS``, else the physical cores this process may run on
 (capped by the container's CPU quota). ``eagle.exec.host_threads()`` reads it.
-A launch from inside another host launch, from your own OpenMP parallel region,
-or while another thread's launch holds the pool, runs on its own thread, so
-launches never nest and never wait for each other.
+A launch from inside another host launch, or while another thread's launch
+holds the pool, runs on its own thread, so launches never nest and never wait
+for each other. Inside your own OpenMP parallel region, launch from one thread
+(or hand the graph over as a host table, see :doc:`graph_model`); every thread
+that launches there would otherwise compete for the pool.
+
+``os.fork`` is supported: the child builds its own pool at its first launch, and
+eagle's launches make no OpenMP call. Forking while another thread makes its
+first call into an OpenMP runtime (an OpenMP-backed op, or your own parallel
+region) can hang the child under libomp: that is a limit of the runtime, not of eagle.
 
 Free-threaded CPython (3.14t and 3.15t) is supported and tested in CI. See
 :doc:`graph_model` for the graph guard in context and :doc:`installation` for

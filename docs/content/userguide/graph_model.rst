@@ -600,8 +600,8 @@ Both schedules give bit-identical results to a serial run, and so does any
 thread count: a node is a per-sample kernel, so how its samples are cut across
 threads changes nothing, and a branch's nodes always run in order. A stage is
 one launch of eagle's host thread pool, sized by the stage's own first launch
-(``g.host_lanes``, see :doc:`threading`), and launches never nest: called from
-inside your own ``omp parallel`` region it runs in place on the calling thread. In
+(``g.host_lanes``, see :doc:`threading`), and launches never nest: a launch from
+inside another launch runs on the calling thread. In
 C++ the same rule is ``eagle::exec::resolve`` and the branch runner is
 ``eagle::exec::runHostBranches`` (see :doc:`../api/api_host`).
 

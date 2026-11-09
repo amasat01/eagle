@@ -23,8 +23,8 @@
 //    workers are detached, so process exit never joins a thread;
 //  - a launch in a forked child sees another pid and builds a fresh pool;
 //  - one launch at a time: a launch that cannot take the pool (another thread
-//    holds it, or it is issued from inside a lane, a worker, or an OpenMP region)
-//    runs in place on its own thread;
+//    holds it, or it is issued from inside a lane or a worker) runs in place on its
+//    own thread;
 //  - the launch waits on the count of FINISHED lanes and of workers that LEFT,
 //    never on the count of lanes handed out.
 #pragma once
@@ -48,9 +48,6 @@
 #endif
 #if defined(__unix__) || defined(__APPLE__)
 #include <unistd.h>
-#endif
-#ifdef _OPENMP
-#include <omp.h>
 #endif
 
 namespace eagle {
@@ -231,11 +228,11 @@ public:
 
     /** @brief Run @p job on at most @p team threads, the caller included. In place, in
      *  lane order, when the team is one, the pool is busy, or the caller is a worker,
-     *  inside a lane, or inside an OpenMP region. Lane bodies must not throw. */
+     *  or inside a lane. Lane bodies must not throw. */
     void run(const Job& job, int team) {
         team = static_cast<int>(std::min<std::int64_t>(team, job.lanes));
         bool idle = false;
-        if (team <= 1 || in_worker() || omp_nested() ||
+        if (team <= 1 || in_worker() ||
             !busy_.compare_exchange_strong(idle, true, std::memory_order_acquire)) {
             run_in_place(job);
             return;
@@ -321,14 +318,6 @@ private:
         return static_cast<long>(::getpid());
 #else
         return 0;
-#endif
-    }
-
-    static bool omp_nested() {
-#ifdef _OPENMP
-        return omp_get_level() > 0;
-#else
-        return false;
 #endif
     }
 
