@@ -9,6 +9,9 @@
 // launches find them awake, and on a shared machine an idle worker gives its core
 // back instead of holding it for an OS time slice.
 //
+// On Linux each worker is pinned to the sibling set of one physical core (the caller's core is left alone),
+// so a team never doubles up on a core while another sits idle.
+//
 // A JOB is a list of lanes in phases. Lanes of one phase run in any order, on any
 // thread, each lane as a whole on one thread; a phase starts when every lane of the
 // phases before it is done. The caller runs lanes too. Lanes are handed out by one
@@ -33,11 +36,11 @@
 #include <cstdint>
 #include <cstdlib>
 #include <fstream>
-#include <set>
 #include <sstream>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <vector>
 
 #if defined(__linux__)
 #include <sched.h>
@@ -103,26 +106,47 @@ inline void cpu_relax() {
 #endif
 }
 
+#if defined(__linux__)
 /**
- * @brief The physical cores among the CPUs this process may run on: the affinity
- *        mask's logical CPUs grouped by the sibling list the kernel publishes
- *        (Linux sysfs). Elsewhere, or when that is unreadable, the logical CPU count.
+ * @brief The CPUs this process may run on, one set per physical core: the affinity mask grouped by the
+ *        sibling list the kernel publishes (sysfs), in order of each core's first CPU. Empty when that is
+ *        unreadable.
+ */
+inline std::vector<cpu_set_t> core_masks() {
+    cpu_set_t mask;
+    std::vector<cpu_set_t> cores;
+    if (sched_getaffinity(0, sizeof(mask), &mask) != 0) return cores;
+    std::vector<std::string> names;
+    for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
+        if (!CPU_ISSET(cpu, &mask)) continue;
+        std::ifstream f("/sys/devices/system/cpu/cpu" + std::to_string(cpu) +
+                        "/topology/thread_siblings_list");
+        std::string siblings;
+        if (!std::getline(f, siblings)) return {};
+        std::size_t k = 0;
+        while (k < names.size() && names[k] != siblings) ++k;
+        if (k == names.size()) {
+            names.push_back(siblings);
+            cores.emplace_back();
+            CPU_ZERO(&cores.back());
+        }
+        CPU_SET(cpu, &cores[k]);
+    }
+    return cores;
+}
+#endif
+
+/**
+ * @brief The physical cores among the CPUs this process may run on (`core_masks`). Elsewhere, or when
+ *        sysfs is unreadable, the logical CPU count.
  */
 inline int physical_cores() {
     const int logical = static_cast<int>(std::max(1u, std::thread::hardware_concurrency()));
 #if defined(__linux__)
     cpu_set_t mask;
     if (sched_getaffinity(0, sizeof(mask), &mask) != 0) return logical;
-    std::set<std::string> cores;
-    for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
-        if (!CPU_ISSET(cpu, &mask)) continue;
-        std::ifstream f("/sys/devices/system/cpu/cpu" + std::to_string(cpu) +
-                        "/topology/thread_siblings_list");
-        std::string siblings;
-        if (!std::getline(f, siblings)) return CPU_COUNT(&mask);
-        cores.insert(siblings);
-    }
-    return std::max<int>(1, static_cast<int>(cores.size()));
+    const std::size_t cores = core_masks().size();
+    return cores == 0 ? CPU_COUNT(&mask) : static_cast<int>(cores);
 #else
     return logical;
 #endif
@@ -216,8 +240,9 @@ public:
             return;
         }
         team = std::min(team, MAX_TEAM);
+        if (workers_ == 0) plan_pins();
         while (workers_ < team - 1) {
-            std::thread([this] { work(); }).detach();
+            std::thread([this, k = workers_] { pin(k); work(); }).detach();
             ++workers_;
         }
         job_ = &job;
@@ -250,6 +275,26 @@ private:
     static constexpr int MAX_TEAM = 1 << 14;
 
     explicit HostPool(long pid) : owner_(pid) {}
+
+    // One worker per physical core: lane 0 is the caller's core (never re-pinned), worker k takes the
+    // sibling set of the k-th other core, and workers past the cores keep the whole mask. Off Linux, or
+    // with fewer than two cores or no sysfs, nothing is pinned.
+    void plan_pins() {
+#if defined(__linux__)
+        pins_ = core_masks();
+        if (pins_.size() < 2) { pins_.clear(); return; }
+        const int here = sched_getcpu();
+        for (auto it = pins_.begin(); it != pins_.end(); ++it)
+            if (here >= 0 && CPU_ISSET(here, &*it)) { pins_.erase(it); break; }
+#endif
+    }
+
+    void pin([[maybe_unused]] int worker) const {
+#if defined(__linux__)
+        if (static_cast<std::size_t>(worker) < pins_.size())
+            sched_setaffinity(0, sizeof(cpu_set_t), &pins_[worker]);
+#endif
+    }
 
     static long self_pid() {
 #if defined(__unix__) || defined(__APPLE__)
@@ -331,6 +376,9 @@ private:
     const long owner_;
     std::atomic<bool> busy_{ false };
     int workers_ = 0;                       // guarded by busy_
+#if defined(__linux__)
+    std::vector<cpu_set_t> pins_;           // set before the first worker starts, then read-only
+#endif
     const Job* job_ = nullptr;              // published by door_, retired after left_
     std::atomic<std::uint64_t> door_{ 0 };  // gen << 32 | OPEN | cap << 15 | joined
     std::atomic<std::uint32_t> start_{ 0 }, next_{ 0 }, done_{ 0 }, left_{ 0 };

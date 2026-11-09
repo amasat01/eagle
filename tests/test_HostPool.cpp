@@ -11,16 +11,22 @@
 #include "eagle/exec/HostPool.h"
 #include "eagle/exec/HostSchedule.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <set>
 #include <thread>
 #include <vector>
+
+#if defined(__linux__)
+#include <sched.h>
+#endif
 
 #if defined(__unix__)
 #include <sys/wait.h>
@@ -294,6 +300,82 @@ TEST(HostPoolTest, AStageWorthAWakeTakesItsWholeBudget)
     for (int launch = 0; launch < 3; ++launch) stage.run();
     EXPECT_EQ(stage.lanes(), host_max_threads());   // 120 us is past 2 * HOST_FLOOR_US: not the 3 that us / floor gives
 }
+
+#if defined(__linux__)
+namespace {
+std::mutex g_masks_mu;
+std::map<std::thread::id, cpu_set_t> g_masks;
+std::atomic<int> g_started{ 0 };
+
+// Notes this thread's affinity, and holds the lane until every lane of the job has started (or a second passes),
+// so each lane runs on a thread of its own.
+void noteMask(const void* ctx, std::uint32_t)
+{
+    cpu_set_t mask;
+    sched_getaffinity(0, sizeof(mask), &mask);
+    {
+        std::lock_guard<std::mutex> lock(g_masks_mu);
+        g_masks[std::this_thread::get_id()] = mask;
+    }
+    const int all = *static_cast<const int*>(ctx);
+    g_started.fetch_add(1);
+    const auto end = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    while (g_started.load() < all && std::chrono::steady_clock::now() < end) {}
+}
+
+// The affinity masks of the workers (not the caller) that ran a job of @p lanes lanes on a team of @p lanes.
+std::map<std::thread::id, cpu_set_t> workerMasks(int lanes)
+{
+    g_masks.clear();
+    g_started.store(0);
+    HostPool::Job job;
+    job.lanes = static_cast<std::uint32_t>(lanes);
+    job.run = &noteMask;
+    job.ctx = &lanes;
+    HostPool::instance().run(job, lanes);
+    auto masks = g_masks;
+    masks.erase(std::this_thread::get_id());
+    return masks;
+}
+}  // namespace
+
+TEST(HostPoolTest, EachWorkerHasOnePhysicalCoreToItself)
+{
+    Deadline deadline(60);
+    const int cores = physical_cores();
+    if (cores < 3) GTEST_SKIP() << "needs three physical cores";
+    const std::vector<cpu_set_t> sets = core_masks();
+    ASSERT_EQ(static_cast<int>(sets.size()), cores);
+    cpu_set_t whole;
+    sched_getaffinity(0, sizeof(whole), &whole);
+    auto masks = workerMasks(cores);
+    // workers past the cores (made by other tests) keep the whole mask: the pinned ones are what this checks
+    for (auto it = masks.begin(); it != masks.end();)
+        it = CPU_EQUAL(&whole, &it->second) ? masks.erase(it) : std::next(it);
+    ASSERT_GE(masks.size(), 2u);
+    for (auto a = masks.begin(); a != masks.end(); ++a) {
+        const bool isCore = std::any_of(sets.begin(), sets.end(), [&](const cpu_set_t& s) { return CPU_EQUAL(&s, &a->second); });
+        EXPECT_TRUE(isCore) << "a worker's mask is not one core's sibling set";
+        for (auto b = std::next(a); b != masks.end(); ++b) {
+            cpu_set_t both;
+            CPU_AND(&both, &a->second, &b->second);
+            EXPECT_EQ(CPU_COUNT(&both), 0) << "two workers share a physical core";
+        }
+    }
+}
+
+TEST(HostPoolTest, AWorkerBeyondTheCoresKeepsTheWholeMask)
+{
+    Deadline deadline(60);
+    const int cores = physical_cores();
+    if (cores < 3) GTEST_SKIP() << "needs three physical cores";
+    cpu_set_t whole;
+    sched_getaffinity(0, sizeof(whole), &whole);
+    const auto masks = workerMasks(cores + 1);
+    const bool any = std::any_of(masks.begin(), masks.end(), [&](const auto& m) { return CPU_EQUAL(&whole, &m.second); });
+    EXPECT_TRUE(any) << "no worker ran with the whole mask";
+}
+#endif
 
 TEST(HostPoolTest, TheBudgetFollowsTheSettingTheEnvironmentAndTheCores)
 {
