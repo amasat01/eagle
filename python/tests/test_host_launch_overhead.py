@@ -220,12 +220,31 @@ _POOL_SCRIPT = textwrap.dedent("""
 """)
 
 
+def _stacks(pid):
+    """Where every thread of `pid` and its children waits (macOS `sample`), for an overrun's report."""
+    if sys.platform != "darwin" or not shutil.which("sample"):
+        return ""
+    kids = subprocess.run(["pgrep", "-P", str(pid)], capture_output=True, text=True).stdout.split()
+    out = []
+    for p in [str(pid), *kids]:
+        s = subprocess.run(["sample", p, "2"], capture_output=True, text=True, timeout=60).stdout
+        out.append("== pid %s\n%s" % (p, s[s.find("Call graph:"):s.find("Total number in stack")]))
+    return "\n".join(out)
+
+
 def _pool_run(entry, mode, env=None, prefix=()):
     cmd = [*prefix, sys.executable, "-c", _POOL_SCRIPT, entry[2], mode]
-    run = subprocess.run(cmd, capture_output=True, text=True, timeout=60,
-                         env={**os.environ, **(env or {})})
-    assert run.returncode == 0, run.stderr[-2000:]
-    return run.stdout.split()
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                            env={**os.environ, **(env or {})})
+    try:
+        out, err = proc.communicate(timeout=45)
+    except subprocess.TimeoutExpired:
+        stacks = _stacks(proc.pid)
+        proc.kill()
+        proc.communicate()
+        pytest.fail("pool script overran 45 s (%s)\n%s" % (mode, stacks), pytrace=False)
+    assert proc.returncode == 0, err[-2000:]
+    return out.split()
 
 
 def _mask_cores(cpus):
