@@ -453,6 +453,7 @@ TEST(HostPoolTest, ALaunchFromInsideALaneRunsInPlace)
 {
     Deadline deadline(60);
     Threads threads(4);
+    g_inner_runs.store(0);
     std::vector<HostBranch> outer(9, HostBranch{ { &launchInside, {}, { Partition::whole(1) } } });
     for (int i = 0; i < 1000; ++i) runHostBranches(outer);
     EXPECT_EQ(g_inner_runs.load(), 9000);
