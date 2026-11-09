@@ -395,3 +395,14 @@ def test_the_glue_of_a_native_graph_launch_is_at_most_four_empty_native_calls(tm
     ratio = glue / best(empty.run)
     print(f"\nlaunch glue = {ratio:.2f} empty native calls")
     assert ratio <= 4.0
+
+
+@pytest.mark.skipif(not hasattr(os, "sched_setaffinity"), reason="affinity masks are Linux")
+def test_the_physical_core_count_is_measured_once_per_process():
+    # it is read on launch paths (a small host run sizes its team from it): a sysfs walk per call cost a syscall per CPU
+    code = ("import os; from eagle import _core; first = _core.physical_cores(); "
+            "os.sched_setaffinity(0, {sorted(os.sched_getaffinity(0))[0]}); print(first, _core.physical_cores())")
+    run = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=60)
+    assert run.returncode == 0, run.stderr[-2000:]
+    first, again = map(int, run.stdout.split())
+    assert again == first

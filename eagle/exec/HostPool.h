@@ -136,18 +136,22 @@ inline std::vector<cpu_set_t> core_masks() {
 
 /**
  * @brief The physical cores among the CPUs this process may run on (`core_masks`). Elsewhere, or when
- *        sysfs is unreadable, the logical CPU count.
+ *        sysfs is unreadable, the logical CPU count. Measured once per process: it is read on launch
+ *        paths, and a sysfs walk there costs a syscall per CPU every time.
  */
 inline int physical_cores() {
-    const int logical = static_cast<int>(std::max(1u, std::thread::hardware_concurrency()));
+    static const int cores = [] {
+        const int logical = static_cast<int>(std::max(1u, std::thread::hardware_concurrency()));
 #if defined(__linux__)
-    cpu_set_t mask;
-    if (sched_getaffinity(0, sizeof(mask), &mask) != 0) return logical;
-    const std::size_t cores = core_masks().size();
-    return cores == 0 ? CPU_COUNT(&mask) : static_cast<int>(cores);
+        cpu_set_t mask;
+        if (sched_getaffinity(0, sizeof(mask), &mask) != 0) return logical;
+        const std::size_t n = core_masks().size();
+        return n == 0 ? CPU_COUNT(&mask) : static_cast<int>(n);
 #else
-    return logical;
+        return logical;
 #endif
+    }();
+    return cores;
 }
 
 }  // namespace detail
