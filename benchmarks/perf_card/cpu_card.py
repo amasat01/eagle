@@ -368,8 +368,12 @@ CPU_FMA_ITERS = 2_000_000
 
 
 def _cpu_cores():
-    """Physical cores this process may run on (logical CPUs over the SMT width)."""
-    logical = len(os.sched_getaffinity(0))
+    """Physical cores this process may run on: logical CPUs over the SMT width (Linux); ``hw.physicalcpu`` on macOS,
+    which has no affinity mask."""
+    if sys.platform == "darwin":
+        out = subprocess.run(["sysctl", "-n", "hw.physicalcpu"], capture_output=True, text=True, timeout=30).stdout.strip()
+        return int(out) if out.isdigit() else max(1, os.cpu_count() or 1)
+    logical = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else max(1, os.cpu_count() or 1)
     try:
         width = int(next(ln.split(":")[1] for ln in subprocess.run(["lscpu"], capture_output=True, text=True,
                                                                     timeout=30).stdout.splitlines()
