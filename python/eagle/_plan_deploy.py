@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 from . import _cell_rows, _lane_bind, _layout, _recording, _split
 from . import exec as eexec
 from ._plan_binding import BoundPlan
-from ._plan_planes import _output_names, residency
+from ._plan_planes import _output_names, refuse_banded_on_cpu, residency
 from .frameworks._bridge import route
 from .roles import OUTPUT_ROLES
 
@@ -304,8 +304,11 @@ def auto(plugin, *, targets=None, cache_dir=None, scalar_type=None,
     usable -- the call returns with the device built, the host still
     building beside it -- else the host alone), ``cache_dir`` and ``scalar_type`` are refused
     for an already-built plugin. ``scalar_type`` is the precision hawk builds
-    in: ``"float64"`` (``None``, the default) or ``"float32"``; the planes
-    passed at run time must match it.
+    in: ``"float64"`` (``None``, the default), ``"float32"`` or ``"banded"``;
+    the planes passed at run time must match it (banded planes are packed
+    with :func:`eagle.banded_pack`). Banded is a device feature for GPUs with
+    weak or no FP64; on a CPU use float64 (a banded deploy with no usable
+    device, or with a host target, is refused).
 
     ``plan_kw`` are :func:`plan`'s keywords but ``structure``
     (``inner``/``gather`` do not apply); a side the plugin lacks is refused
@@ -356,7 +359,12 @@ def _deploy_hawk(kernels, targets, cache_dir, scalar_type) -> list:
     a GPU run never waits for the host compiler."""
     _hawk_api()  # the refusal naming hawk comes first
     host = None
-    if targets is None:
+    if scalar_type == "banded":     # a device feature: only device rows are ever built for it
+        if targets is None:
+            targets = _targets_of(_DEVICE)
+        if not _has_entry(_default_targets(), _DEVICE) or _has_entry(targets, _HOST):
+            refuse_banded_on_cpu("eagle.plan.auto")
+    elif targets is None:
         targets = _eager_targets()
         if targets == _targets_of(_DEVICE):
             host = _HostSide(kernels, cache_dir, scalar_type)
@@ -436,9 +444,8 @@ def _wants_fast_entries(kernels, targets) -> bool:
     return any(getattr(k, "one_step", None) is not None for k in kernels)
 
 
-#: The precisions hawk builds (the third sidecar type, ``softdouble``, has
-#: no hawk build yet).
-_BUILT_SCALAR_TYPES = ("float64", "float32")
+#: The precisions hawk builds.
+_BUILT_SCALAR_TYPES = ("float64", "float32", "banded")
 
 
 def _hawk_api():
@@ -575,6 +582,9 @@ def _bundle_key(kernels, targets, defines=(), mode="float64") -> str:
         # sizes of one kernel would otherwise share, and race on, one folder.
         h.update(json.dumps([k.name, str(k.walk.digest), declaration_digest(k),
                              repr(k.kind), tag]).encode())
+        group = getattr(k, "group", 1)
+        if group != 1:      # the lane group sets how an active map is read; group 1 keys as before
+            h.update(f"group={group}".encode())
     h.update(json.dumps(list(targets)).encode())
     h.update(json.dumps(list(defines)).encode())
     ambient = _ambient_policy()

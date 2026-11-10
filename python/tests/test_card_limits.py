@@ -203,3 +203,17 @@ def test_a_worker_that_does_not_reply_in_time_is_stopped(tmp_path):
     with pytest.raises(TimeoutError, match="within 1 s"):
         worker.call({"op": "setup"}, timeout=1.0)
     assert time.perf_counter() - started < 10 and worker.p.poll() is not None
+
+
+def test_the_cpu_card_counts_cores_without_an_affinity_mask(monkeypatch):
+    card = _load("cpu_card", _BENCH / "perf_card" / "cpu_card.py")
+    monkeypatch.delattr(card.os, "sched_getaffinity", raising=False)   # macOS has none
+    assert card._cpu_cores() >= 1
+
+
+def test_host_memory_is_unreported_where_there_is_no_proc(cc, monkeypatch):
+    def no_proc(self, *a, **k):
+        raise FileNotFoundError(str(self))     # macOS has no /proc/self/status
+
+    monkeypatch.setattr(cc.pathlib.Path, "read_text", no_proc)
+    assert cc.status_kib("VmRSS") is None

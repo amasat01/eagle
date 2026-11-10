@@ -13,7 +13,7 @@
 // fixtures/device_plugin_execv2.cu (the v2 pair's device half — body for body the
 // twin of fixtures/host_plugin_execv2.cpp) and fixtures/device_plugin_badlayout.cu
 // (the wrong-sizes arm). The MISSING-symbol arm reuses the existing
-// fixtures/device_plugin_softdouble.cu PTX, which predates the self-check and
+// fixtures/device_plugin_banded.cu PTX, which predates the self-check and
 // therefore exports nothing.
 
 #include "eagle/exec/DeviceKernel.h"
@@ -165,8 +165,8 @@ TEST(ExecContractDeviceTest, DeviceV2PluginWithWrongLayoutIsRefusedNamingTheFiel
 TEST(ExecContractDeviceTest, DeviceV2PluginWithoutTheLayoutSymbolIsRefused)
 {
     ensureContext();
-    // The pre-self-check softdouble fixture, re-tagged v2: it exports nothing.
-    const std::string path = stage("dnolayout", DEVICE_PLUGIN_SOFTDOUBLE_PTX,
+    // The pre-self-check banded fixture, re-tagged v2: it exports nothing.
+    const std::string path = stage("dnolayout", DEVICE_PLUGIN_BANDED_PTX,
         "raptor_kernel",
         R"([["mutable","val"],["terminated","terminated"],["uniform","step"],["nsamples","nsamples"]])",
         "aether-abi/2", 2, kSampleLocalKeys);

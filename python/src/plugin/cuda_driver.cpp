@@ -344,16 +344,6 @@ cudaError_t cudaDriverGetVersion(int* version)
     return fromDriver(get(version));
 }
 
-cudaError_t cudaDeviceGetAttribute(int* value, cudaDeviceAttr attr, int device)
-{
-    AETHER_DRV(getAttribute, cuDeviceGetAttribute);
-    AETHER_DRV(get, cuDeviceGet);
-    CUdevice dev = 0;
-    if (get(&dev, device) != CUDA_SUCCESS)
-        return record(cudaErrorInvalidDevice);
-    return fromDriver(getAttribute(value, static_cast<CUdevice_attribute>(attr), dev));
-}
-
 cudaError_t cudaGetDeviceProperties_v2(cudaDeviceProp* prop, int device)
 {
     AETHER_DRV(getAttribute, cuDeviceGetAttribute);

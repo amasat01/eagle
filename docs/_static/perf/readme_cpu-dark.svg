@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="732" height="172" viewBox="0 0 732 172" role="img" aria-labelledby="t d" font-family="system-ui, -apple-system, Segoe UI, sans-serif">
 <title id="t">Kepler orbits, adaptive RKF7(8), 1,000,000 samples, spread</title>
-<desc id="d">Wall time on AMD EPYC 9B45: eagle, 8 threads 3.69 s, Numba 20.9 s, JAX 60.4 s.</desc>
+<desc id="d">Wall time on AMD EPYC 9B45: eagle, 8 threads 2.49 s, Numba 19.6 s, JAX 60.5 s.</desc>
 <style>.bg{fill:#1a1a19;stroke:#2c2c2a}.ink{fill:#f2f2ee}.sub{fill:#c3c2b7}.bar{fill:#7f7e78}.us{fill:#9c7df0}
 .c1{fill:#7fcdf0}
 .c2{fill:#36fcd8}
@@ -8,9 +8,9 @@
 <rect class="bg" x="0.5" y="0.5" width="731" height="171" rx="8"/>
 <g transform="translate(16,16)">
 <text class="ink" x="0" y="22" font-size="16" font-weight="600">Kepler orbits, adaptive RKF7(8), 1,000,000 samples, spread</text>
-<text class="sub" x="0" y="42" font-size="12.5">AMD EPYC 9B45. Log scale, 2.30 s to 96.6 s.</text>
-<circle class="c0" cx="5" cy="66" r="4.5"/><text class="ink" x="18" y="71" font-size="14">eagle, 8 threads</text><rect class="us" x="150" y="59" width="60.4" height="14" rx="3"/><text class="ink" x="218.4" y="71" font-size="13">3.69 s</text>
-<circle class="c1" cx="5" cy="96" r="4.5"/><text class="ink" x="18" y="101" font-size="14">Numba</text><rect class="bar" x="150" y="89" width="283.3" height="14" rx="3"/><text class="ink" x="441.3" y="101" font-size="13">20.9 s</text>
-<circle class="c2" cx="5" cy="126" r="4.5"/><text class="ink" x="18" y="131" font-size="14">JAX</text><rect class="bar" x="150" y="119" width="419.6" height="14" rx="3"/><text class="ink" x="577.6" y="131" font-size="13">60.4 s</text>
+<text class="sub" x="0" y="42" font-size="12.5">AMD EPYC 9B45. Log scale, 1.56 s to 96.8 s.</text>
+<circle class="c0" cx="5" cy="66" r="4.5"/><text class="ink" x="18" y="71" font-size="14">eagle, 8 threads</text><rect class="us" x="150" y="59" width="54.6" height="14" rx="3"/><text class="ink" x="212.6" y="71" font-size="13">2.49 s</text>
+<circle class="c1" cx="5" cy="96" r="4.5"/><text class="ink" x="18" y="101" font-size="14">Numba</text><rect class="bar" x="150" y="89" width="294.5" height="14" rx="3"/><text class="ink" x="452.5" y="101" font-size="13">19.6 s</text>
+<circle class="c2" cx="5" cy="126" r="4.5"/><text class="ink" x="18" y="131" font-size="14">JAX</text><rect class="bar" x="150" y="119" width="425.4" height="14" rx="3"/><text class="ink" x="583.4" y="131" font-size="13">60.5 s</text>
 </g>
 </svg>

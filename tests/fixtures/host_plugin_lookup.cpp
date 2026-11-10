@@ -24,7 +24,9 @@ extern "C" void lookup_host(void* const* params, std::int32_t n)
         static_cast<const ScalarHandle*>(params[0])->data);
     const double* tab = static_cast<const double*>(
         static_cast<const ScalarHandle*>(params[1])->data);
-    constexpr std::int32_t K = 16;  // the declared table length (Table[16])
+    // the table's own length, as the registry packs it into the handle (not the run's n)
+    const std::int32_t K = static_cast<std::int32_t>(
+        static_cast<const ScalarHandle*>(params[1])->samples);
 
 #pragma omp parallel for
     for (std::int32_t i = 0; i < n; ++i)

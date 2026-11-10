@@ -5,7 +5,7 @@
 // MixedFloatAndIntUniformsLoadAndLaunch check -- the PTX a generated deploy would emit for a
 // pure kernel taking BOTH a float64 and an int64 uniform.
 // Hand-written and ABI-only: no code generator dependency, exactly like
-// fixtures/device_plugin_softdouble.cu and fixtures/host_plugin_intuniform.cpp.
+// fixtures/device_plugin_banded.cu and fixtures/host_plugin_intuniform.cpp.
 //
 // THE PARAMETER TYPES ARE THE POINT. A generated kernel spells its integer quantity
 // `using Int = long long;` and emits a uniform as
@@ -14,7 +14,7 @@
 // (`double gain`), so the launch proves the registry packs each kind into its own
 // by-value slot in arg_spec order. `nsamples` is packed as `unsigned` by
 // PluginRegistry::inject (`counts.push_back(unsigned(n))`), so the last parameter is
-// `std::uint32_t`, matching the softdouble fixture.
+// `std::uint32_t`, matching the banded fixture.
 //
 // GRID_CONSTANT is deliberately NOT spelled here: it is an aether macro
 // (`const __grid_constant__` on sm_70+) and this fixture avoids it by construction,

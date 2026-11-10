@@ -298,12 +298,12 @@ def _worker_main(arm):
             w.setup(WARM_N)
             w.run()  # warm-up at WARM_N: every compile happens here
             w.setup(cmd["n"], base)
-            rss = cc.status_kib("VmRSS")
+            rss = cc.status_kib("VmRSS")   # None without /proc (macOS): host memory is then not reported
             cc.reset_host_peak()
             sec, out = w.run()  # the verification run
-            peak = max(0, cc.status_kib("VmHWM") - rss) * 1024
+            peak = None if rss is None else max(0, cc.status_kib("VmHWM") - rss) * 1024
             np.savez(cmd["out"], **out)
-            live = max(0, cc.status_kib("VmRSS") - rss) * 1024
+            live = None if rss is None else max(0, cc.status_kib("VmRSS") - rss) * 1024
             msg = {"warm_s": sec, "host_peak_bytes": peak, "host_live_bytes": live, "compile_s": w.compile_s}
         elif cmd["op"] == "run":
             sec, _ = w.run()
@@ -368,8 +368,12 @@ CPU_FMA_ITERS = 2_000_000
 
 
 def _cpu_cores():
-    """Physical cores this process may run on (logical CPUs over the SMT width)."""
-    logical = len(os.sched_getaffinity(0))
+    """Physical cores this process may run on: logical CPUs over the SMT width (Linux); ``hw.physicalcpu`` on macOS,
+    which has no affinity mask."""
+    if sys.platform == "darwin":
+        out = subprocess.run(["sysctl", "-n", "hw.physicalcpu"], capture_output=True, text=True, timeout=30).stdout.strip()
+        return int(out) if out.isdigit() else max(1, os.cpu_count() or 1)
+    logical = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else max(1, os.cpu_count() or 1)
     try:
         width = int(next(ln.split(":")[1] for ln in subprocess.run(["lscpu"], capture_output=True, text=True,
                                                                     timeout=30).stdout.splitlines()
@@ -510,7 +514,8 @@ def _run_cell(n, names, work, distribution, state):
     for r in rows:  # memory net of the NumPy control: the harness bytes every arm shares are not the arm's
         if r["status"] == "ok":
             r["host_peak_net_of_control_bytes"] = (
-                None if control is None or r is control else max(0, r["host_peak_bytes"] - control["host_peak_bytes"]))
+                None if control is None or r is control or None in (r["host_peak_bytes"], control["host_peak_bytes"])
+                else max(0, r["host_peak_bytes"] - control["host_peak_bytes"]))
     return rows, {"n": n, "distribution": distribution, "reference_arm": ref, "agreement": agreement, "steps": steps}
 
 

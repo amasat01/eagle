@@ -290,6 +290,23 @@ def test_the_bundle_key_folds_in_the_opt_level(monkeypatch):
         plan_deploy._bundle_key([ak_affine], ("host",))
 
 
+def _ak_grouped(group):
+    from hawk.ext import Guard, Kind
+
+    @hawk.kernel(kind=Kind("group_rows", guard=Guard(active_set=True)), group=group)
+    def ak_grouped(x: Scalar, terminated: Terminated, y: Mutable[Scalar]):
+        y = x * 2.0
+
+    return ak_grouped
+
+
+def test_the_bundle_key_folds_in_the_lane_group():
+    """The lane group decides how an active map is read (lanes or groups of
+    lanes): two groups of one kernel must never share a cache folder."""
+    keys = {g: plan_deploy._bundle_key([_ak_grouped(g)], ("host",)) for g in (1, 32)}
+    assert keys[1] != keys[32]
+
+
 # --------------------------------------------------------------------------- #
 # Derived kernels
 # --------------------------------------------------------------------------- #

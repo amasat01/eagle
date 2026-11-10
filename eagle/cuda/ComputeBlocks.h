@@ -32,7 +32,7 @@ inline int currentSMCount()
  *  ``cudaDevAttrSingleToDoublePrecisionPerfRatio`` — e.g. 2 on data-center
  *  parts (GV100/A100/H100), 32 on FP64-throttled workstation parts (sm_61
  *  Pascal, Turing), 64 on consumer Ampere/Ada. Consumers use it to select
- *  between native-FP64 and emulated (SoftDouble) kernel sets at graph
+ *  between native-FP64 and emulated (banded) kernel sets at graph
  *  construction time: emulation pays off when the ratio is large. */
 inline int currentFp64PerfRatio()
 {

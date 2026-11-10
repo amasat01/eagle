@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # A merge to main whose pull request carries a release label gets the annotated tag vX.Y.Z on the merged commit
-# (X.Y.Z from tools/next_version.py), then publish.yml is started on that tag. (A tag pushed with GITHUB_TOKEN
+# (X.Y.Z from the top heading of CHANGELOG.md, which the label must agree with), then publish.yml is started on that tag. (A tag pushed with GITHUB_TOKEN
 # starts no workflow, hence the dispatch.) release:none (docs-only) tags nothing.
 
 name: Tag
@@ -36,17 +36,21 @@ jobs:
         run: |
           set -euo pipefail
           labels=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls" --jq '.[0].labels[].name' | tr '\n' ' ')
-          grep -q 'release:' <<< "$labels" || { echo "no release: label on the merged pull request: nothing to tag"; exit 0; }
-          V=$(python tools/next_version.py "$labels" "$GITHUB_SHA")
-          [ -n "$V" ] || { echo "release:none: nothing to tag"; exit 0; }
+          V=$(python tools/next_version.py)
+          if [ -z "$V" ]; then
+            grep -qE 'release:(patch|minor|major|rc|[0-9])' <<< "$labels" && { echo "::error::a release label, but CHANGELOG.md is not headed with a new version"; exit 1; }
+            echo "no release heading: nothing to tag"; exit 0
+          fi
+          L=$(python tools/next_version.py "$labels")
+          [ "$L" = "$V" ] || { echo "::error::CHANGELOG.md is headed $V, the label gives '${L:-nothing}': not publishing"; exit 1; }
           if [ -n "$(git ls-remote --tags origin "refs/tags/v$V")" ]; then
             echo "::error::tag v$V already exists"
             exit 1
           fi
-          # The build ran under the label of that moment: a relabel afterwards would tag a version the artifact does not carry.
+          # The artifact must carry the version being tagged.
           bash tools/ci_fetch_artifact.sh dist "$(git rev-parse 'HEAD^{tree}')" dist
           built=$(basename dist/*.tar.gz .tar.gz); built=${built##*-}
-          [ "$built" = "$V" ] || { echo "::error::relabelled after the last build (built $built, label gives $V): push an empty commit"; exit 1; }
+          [ "$built" = "$V" ] || { echo "::error::the artifact is version $built, the heading gives $V"; exit 1; }
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag -a "v$V" -m "v$V" "$GITHUB_SHA"

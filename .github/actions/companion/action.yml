@@ -47,16 +47,15 @@ runs:
         path: ${{ inputs.path }}
         token: ${{ inputs.token }}
         fetch-depth: 0
-    # The companion's open pull request releases a version no tag has yet: tag the checkout with it, so floors on that version hold at PR time.
+    # The companion's open pull request heads its CHANGELOG.md with a version no tag has yet: tag the checkout with it, so floors on that version hold at PR time.
     - shell: bash
       env:
         COMPANION_REPO: ${{ inputs.repo }}
-        COMPANION_REF: ${{ steps.ref.outputs.ref }}
         COMPANION_PATH: ${{ inputs.path }}
-        GH_TOKEN: ${{ inputs.token }}
       run: |
         [ -f "$COMPANION_PATH/tools/next_version.py" ] || exit 0
-        labels=$(gh api "repos/amasat01/${COMPANION_REPO}/pulls?state=open&head=amasat01:${COMPANION_REF}" --jq '.[0].labels[].name' 2>/dev/null | tr '\n' ' ' || true)
-        grep -q 'release:' <<< "$labels" || exit 0
-        v=$(cd "$COMPANION_PATH" && python3 tools/next_version.py "$labels")
+        v=$(cd "$COMPANION_PATH" && python3 tools/next_version.py 2>/dev/null || true)
         [ -z "$v" ] || { git -C "$COMPANION_PATH" tag "v$v" && echo "companion ${COMPANION_REPO} tagged v$v"; }
+        # the same version as a pretend version for the companion's package, so a build that cannot see the tag (an sdist, an isolated copy) still gives X.Y.Z
+        case "$COMPANION_REPO" in raptor) dist=RAPTOR_CORE ;; aether) dist=AETHER_DSC ;; eagle) dist=RAPTOR_EAGLE ;; hawk) dist=RAPTOR_HAWK ;; *) dist= ;; esac
+        [ -z "$v" ] || [ -z "$dist" ] || echo "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_$dist=$v" >> "$GITHUB_ENV"

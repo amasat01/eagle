@@ -33,7 +33,7 @@ data is already where the kernel reads it.
 A role that a loader accepts is not automatically a role a *producer* can
 emit — a registry may happily bind and launch a matrix-shaped argument, say,
 while a producer does not emit that shape for host yet. Conversely, float32
-runs on the host (see the matrix); SoftDouble is the one scalar type that has no
+runs on the host (see the matrix); banded is the one scalar type that has no
 host target.
 
 ## How to read the matrix
@@ -41,8 +41,8 @@ host target.
 Rows are the input/output/precision **features** a plugin can carry; columns
 cross the two kernel patterns (**pure**, **vector** — [the schema's role vocabulary](https://amasat01.github.io/raptor/content/devguide/plugin_schema.html#role-vocab)'s
 8-role and 6-role subsets) with the two native scalar types the C++ host
-runner will even load (**f64**, **f32**; SoftDouble is never a host target —
-see the SoftDouble row). A cell is:
+runner will even load (**f64**, **f32**; banded is never a host target —
+see the banded row). A cell is:
 
 - **CLOSED** — a compiled host artifact round-trips through this consumer
   and matches the in-process GPU numerics (the code generator's own
@@ -52,13 +52,13 @@ see the SoftDouble row). A cell is:
   purely on a producer; others need consumer-side work too.
 - **N/A** — one of two things: the *pattern* has no such role (the vector
   pattern owns no `mutable` sink; see [the schema's role vocabulary](https://amasat01.github.io/raptor/content/devguide/plugin_schema.html#role-vocab)'s per-kind subsets),
-  or the *precision* has no host target (SoftDouble).
+  or the *precision* has no host target (banded).
 
 The host runs float32 plugins through `eagle::cpu::PluginRegistry32` (the same class as
 `PluginRegistry`, templated on the plugin scalar): the sidecar's `scalar_type` must match the
 registry's, else `add_plugin` throws naming the right registry, and a real uniform is narrowed
 once at bind. `HostPluginLibrary` does the same from Python (a 4-byte uniform for float32).
-SoftDouble has no host target.
+banded has no host target.
 
 ## The matrix
 
@@ -77,7 +77,7 @@ SoftDouble has no host target.
 | Derivative kernels — generated (VJP/JVP) | **CLOSED** | **OPEN** | **N/A** — pure-pattern only | **N/A** — pure-pattern only |
 | Derivative kernels — custom | **CLOSED** | **OPEN** | **N/A** — pure-pattern only | **N/A** — pure-pattern only |
 | numpy / torch CPU zero-copy | **CLOSED** | **CLOSED** | **CLOSED** | **OPEN** |
-| SoftDouble — explicit host rejection | **CLOSED** | **N/A** — softdouble is float64-only | **CLOSED** | **N/A** — softdouble is float64-only |
+| banded — explicit host rejection | **CLOSED** | **N/A** — banded is float64-only | **CLOSED** | **N/A** — banded is float64-only |
 
 Tally: 29 CLOSED / 13 OPEN / 14 N/A, over 56 cells (14 rows × 4 columns).
 
@@ -138,13 +138,13 @@ numpy leg is zero-copy by construction (`.ctypes.data`), and a deployed
 `.so` RMWs a caller's torch CPU tensor in place. The binding path is
 pattern-independent, so both Pure and Vector f64 close together.
 
-**SoftDouble.** The producer side rejects `scalar_type=softdouble` up front
-with a clear error that names SoftDouble and points at the float64 path, so
+**banded.** Banded is a device feature for GPUs with weak or no FP64; on a CPU use float64 (a deploy or a host plan for banded is refused: "banded runs on device execution paths; on a CPU use float64"). The producer side rejects `scalar_type=banded` up front
+with a clear error that names banded and points at the float64 path, so
 no artifact is ever built — and this consumer's Python `HostPluginLibrary`
 accepts only `float64` and `float32` in `scalar_type`, as the C++ registry does, so a
-SoftDouble sidecar is refused on *both* the C++ and Python host paths. The f32 columns are **N/A**: SoftDouble emulation runs
+banded sidecar is refused on *both* the C++ and Python host paths. The f32 columns are **N/A**: banded emulation runs
 over float64 arrays by construction (a float32 + emulation kernel is a
-compile-time `TypeError`), so there is no softdouble-f32 artifact to
+compile-time `TypeError`), so there is no banded-f32 artifact to
 reject.
 
 ## Keeping this page current

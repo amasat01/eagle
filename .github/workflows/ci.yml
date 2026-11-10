@@ -13,7 +13,7 @@ on:
   schedule:
     - cron: "23 4 * * 1"   # weekly on main: every remembered pass runs again
   pull_request:
-    types: [opened, synchronize, reopened, labeled, unlabeled]
+    types: [opened, synchronize, reopened]
   workflow_dispatch: {}
 
 concurrency:
@@ -21,29 +21,11 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  release-gate:
-    # The release label, the diff, the PR body and the tag it would create agree (tools/release_gate.sh). Skipped on other PRs.
-    if: github.event_name == 'pull_request' && github.base_ref == 'main'
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.12"
-      - env:
-          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ' ') }}
-          PR_BODY: ${{ github.event.pull_request.body }}
-        run: make release-gate BASE_SHA="${{ github.event.pull_request.base.sha }}" HEAD_SHA="${{ github.event.pull_request.head.sha }}"
   docs-fresh:
     # Freshness check, never a commit: the generator re-renders the pages and fails on any difference.
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.12"
       # companion site (amasat01.github.io): the ref pinned in .github/companions, else a same-named branch, else main
       - uses: ./.github/actions/companion
         with:
@@ -51,11 +33,6 @@ jobs:
           path: site
           token: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
           pins: .github/companions
-      - run: python -m pip install --quiet ./site
-      - name: documented numbers and the capability map match the committed cards
-        run: python -m raptor_docs.fresh --check --site site
-      - name: ruff (repo config), manifesto copy
-        run: make gate-lint
       # the public-name check is raptor's (raptor.conformance.public_names): this branch's raptor, else main
       - uses: ./.github/actions/companion
         with:
@@ -63,8 +40,36 @@ jobs:
           path: raptor
           token: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
           pins: .github/companions
+      - id: memo
+        uses: ./.github/actions/memo
+        with:
+          name: ci-docs-fresh
+          args: >-
+            --tree . --skip CHANGELOG.md --skip .github/ --tree site --skip tests/ --skip .github/ --tree raptor --skip docs/ --skip tests/ --skip ci/ --skip tools/ --skip goldens/ --skip RELEASING.md --skip CHANGELOG.md --skip README.md --skip CONTRIBUTING.md --skip CITATION.cff --skip Makefile --skip .github/ --tree . --only .github/actions/ --only .github/ci_digest.sh --only .github/companions --file .github/workflows/ci.yml
+          extra: ${{ github.event.pull_request.base.sha }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: ci/constraints.txt
+        if: steps.memo.outputs.run == 'true'
+      - run: python -m pip install --quiet ./site
+        if: steps.memo.outputs.run == 'true'
+      - name: documented numbers and the capability map match the committed cards
+        run: python -m raptor_docs.fresh --check --site site
+        if: steps.memo.outputs.run == 'true'
+      - name: ruff (repo config), manifesto copy
+        run: make gate-lint
+        if: steps.memo.outputs.run == 'true'
       - name: public-name coverage
         run: make gate-names RAPTOR_SRC=raptor COVERAGE_BASE="${{ github.event.pull_request.base.sha }}"
+        if: steps.memo.outputs.run == 'true'
+      - if: success() && steps.memo.outputs.run == 'true'
+        uses: ./.github/actions/memo-save
+        with:
+          name: ci-docs-fresh
+          digest: ${{ steps.memo.outputs.digest }}
+
   test-cpp:
     needs: docs-fresh
     runs-on: ubuntu-24.04
@@ -100,7 +105,7 @@ jobs:
         with:
           name: ci-test-cpp
           args: >-
-            --tree eagle --skip docs/ --skip README.md --skip CHANGELOG.md --skip CONTRIBUTING.md --skip CITATION.cff --skip .github/ --tree aether --skip docs/ --skip README.md --skip CHANGELOG.md --skip CONTRIBUTING.md --skip .github/ --tree eagle --only .github/actions/ --only .github/ci_digest.sh --only .github/cuda_redist.sh --only .github/companions --tag eagle --file eagle/.github/workflows/ci.yml
+            --tree eagle --skip docs/ --skip README.md --skip CHANGELOG.md --skip CONTRIBUTING.md --skip CITATION.cff --skip .github/ --tree aether --skip docs/ --skip tests/ --skip ci/ --skip dsc/tests/ --skip CHANGELOG.md --skip README.md --skip CONTRIBUTING.md --skip CITATION.cff --skip Makefile --skip ruff.toml --skip .github/ --tree eagle --only .github/actions/ --only .github/ci_digest.sh --only .github/cuda_redist.sh --only .github/companions --file eagle/.github/workflows/ci.yml
 
       - run: sudo apt-get update && sudo apt-get install -y g++-13 ccache clang-18 libomp-18-dev
         if: steps.memo.outputs.run == 'true'
@@ -166,7 +171,7 @@ jobs:
       # toolchain pins) and the runner image. On a hit the job succeeds without building.
       - id: memo
         run: |
-          digest=$(eagle/.github/ci_digest.sh --tree eagle --skip docs/ --skip .github/ --tree aether --skip docs/ --skip .github/ --tag eagle \
+          digest=$(eagle/.github/ci_digest.sh --tree eagle --skip docs/ --skip .github/ --tree aether --skip docs/ --skip tests/ --skip ci/ --skip dsc/tests/ --skip CHANGELOG.md --skip README.md --skip CONTRIBUTING.md --skip CITATION.cff --skip Makefile --skip ruff.toml --skip .github/ \
             --file eagle/.github/workflows/ci.yml --str "${ImageVersion:-}" --str "$(g++-13 --version 2>/dev/null | head -1 || true)") || exit 1
           [ -n "$digest" ] || { echo "::error::empty digest"; exit 1; }
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
@@ -187,7 +192,7 @@ jobs:
             echo run=true >> "$GITHUB_OUTPUT"
           fi
 
-      - run: sudo apt-get update && sudo apt-get install -y g++-13 ccache
+      - run: sudo apt-get update && sudo apt-get install -y g++-13 ccache clang-18 libomp-18-dev
         if: steps.plan.outputs.run == 'true'
 
       - uses: actions/cache@v6
@@ -202,6 +207,11 @@ jobs:
 
       # the build, the three non-vacuity checks and the manifest gate, from the Makefile
       - run: make sanitize-cpp AETHER_SRC="${GITHUB_WORKSPACE}/aether"
+        working-directory: eagle
+        if: steps.plan.outputs.run == 'true'
+      # the host pool and schedule rows under ThreadSanitizer, with clang: gcc's OpenMP runtime hides its own
+      # hand-offs from the sanitizer, so every OpenMP region reads as a race
+      - run: make tsan-cpp AETHER_SRC="${GITHUB_WORKSPACE}/aether" CLANGXX=clang++-18
         working-directory: eagle
         if: steps.plan.outputs.run == 'true'
       - if: always() && steps.plan.outputs.run == 'true'
@@ -260,7 +270,7 @@ jobs:
       # toolchain pins) and the runner image. On a hit the job succeeds without building.
       - id: memo
         run: |
-          digest=$(eagle/.github/ci_digest.sh --tree eagle --skip docs/ --skip .github/ --tree aether --skip docs/ --skip .github/ --tree raptor --skip docs/ --skip .github/ --tag eagle \
+          digest=$(eagle/.github/ci_digest.sh --tree eagle --skip docs/ --skip .github/ --tree aether --skip docs/ --skip tests/ --skip ci/ --skip dsc/tests/ --skip CHANGELOG.md --skip README.md --skip CONTRIBUTING.md --skip CITATION.cff --skip Makefile --skip ruff.toml --skip .github/ --tree raptor --skip docs/ --skip tests/ --skip ci/ --skip tools/ --skip goldens/ --skip RELEASING.md --skip CHANGELOG.md --skip README.md --skip CONTRIBUTING.md --skip CITATION.cff --skip Makefile --skip .github/ \
             --file eagle/.github/workflows/ci.yml --str "${ImageVersion:-}" --str "$TSAN_PY_VERSION") || exit 1
           [ -n "$digest" ] || { echo "::error::empty digest"; exit 1; }
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
@@ -378,7 +388,7 @@ jobs:
         with:
           name: ci-test-python
           args: >-
-            --tree eagle --skip CHANGELOG.md --skip .github/ --tree aether --skip docs/ --skip CHANGELOG.md --skip README.md --skip .github/ --tree raptor --skip docs/ --skip CHANGELOG.md --skip README.md --skip .github/ --tree site --skip docs/ --skip CHANGELOG.md --skip README.md --skip .github/ --tree eagle --only .github/actions/ --only .github/ci_digest.sh --only .github/cuda_redist.sh --only .github/companions --tag eagle --file eagle/.github/workflows/ci.yml
+            --tree eagle --skip CHANGELOG.md --skip .github/ --tree aether --skip docs/ --skip tests/ --skip ci/ --skip dsc/tests/ --skip CHANGELOG.md --skip README.md --skip CONTRIBUTING.md --skip CITATION.cff --skip Makefile --skip ruff.toml --skip .github/ --tree raptor --skip docs/ --skip tests/ --skip ci/ --skip tools/ --skip goldens/ --skip RELEASING.md --skip CHANGELOG.md --skip README.md --skip CONTRIBUTING.md --skip CITATION.cff --skip Makefile --skip .github/ --tree site --skip tests/ --skip CONTRIBUTING.md --skip README.md --skip CHANGELOG.md --skip .github/ --tree eagle --only .github/actions/ --only .github/ci_digest.sh --only .github/cuda_redist.sh --only .github/companions --file eagle/.github/workflows/ci.yml
 
       - uses: actions/setup-python@v7
         with:
@@ -484,7 +494,7 @@ jobs:
         with:
           name: ci-test-python-nodriver
           args: >-
-            --tree eagle --skip CHANGELOG.md --skip .github/ --tree aether --skip docs/ --skip CHANGELOG.md --skip README.md --skip .github/ --tree raptor --skip docs/ --skip CHANGELOG.md --skip README.md --skip .github/ --tree eagle --only .github/actions/ --only .github/ci_digest.sh --only .github/cuda_redist.sh --only .github/companions --tag eagle --file eagle/.github/workflows/ci.yml
+            --tree eagle --skip CHANGELOG.md --skip .github/ --tree aether --skip docs/ --skip tests/ --skip ci/ --skip dsc/tests/ --skip CHANGELOG.md --skip README.md --skip CONTRIBUTING.md --skip CITATION.cff --skip Makefile --skip ruff.toml --skip .github/ --tree raptor --skip docs/ --skip tests/ --skip ci/ --skip tools/ --skip goldens/ --skip RELEASING.md --skip CHANGELOG.md --skip README.md --skip CONTRIBUTING.md --skip CITATION.cff --skip Makefile --skip .github/ --tree eagle --only .github/actions/ --only .github/ci_digest.sh --only .github/cuda_redist.sh --only .github/companions --file eagle/.github/workflows/ci.yml
 
       - uses: actions/setup-python@v7
         with:
@@ -580,7 +590,7 @@ jobs:
         with:
           name: ci-ft-stress
           args: >-
-            --tree eagle --skip CHANGELOG.md --skip .github/ --tree aether --skip docs/ --skip CHANGELOG.md --skip README.md --skip .github/ --tree raptor --skip docs/ --skip CHANGELOG.md --skip README.md --skip .github/ --tree site --skip docs/ --skip CHANGELOG.md --skip README.md --skip .github/ --tree eagle --only .github/actions/ --only .github/ci_digest.sh --only .github/cuda_redist.sh --only .github/companions --tag eagle --file eagle/.github/workflows/ci.yml
+            --tree eagle --skip CHANGELOG.md --skip .github/ --tree aether --skip docs/ --skip tests/ --skip ci/ --skip dsc/tests/ --skip CHANGELOG.md --skip README.md --skip CONTRIBUTING.md --skip CITATION.cff --skip Makefile --skip ruff.toml --skip .github/ --tree raptor --skip docs/ --skip tests/ --skip ci/ --skip tools/ --skip goldens/ --skip RELEASING.md --skip CHANGELOG.md --skip README.md --skip CONTRIBUTING.md --skip CITATION.cff --skip Makefile --skip .github/ --tree site --skip tests/ --skip CONTRIBUTING.md --skip README.md --skip CHANGELOG.md --skip .github/ --tree eagle --only .github/actions/ --only .github/ci_digest.sh --only .github/cuda_redist.sh --only .github/companions --file eagle/.github/workflows/ci.yml
           extra: ${{ toJSON(matrix) }}
 
       - uses: actions/setup-python@v7
@@ -671,7 +681,7 @@ jobs:
         with:
           name: ci-sdist-install
           args: >-
-            --tree eagle --skip docs/ --skip CHANGELOG.md --skip .github/ --tree aether --skip docs/ --skip CHANGELOG.md --skip README.md --skip .github/ --tree raptor --skip docs/ --skip CHANGELOG.md --skip README.md --skip .github/ --tree eagle --only .github/actions/ --only .github/ci_digest.sh --only .github/cuda_redist.sh --only .github/companions --tag eagle --file eagle/.github/workflows/ci.yml
+            --tree eagle --skip docs/ --skip CHANGELOG.md --skip .github/ --tree aether --skip docs/ --skip tests/ --skip ci/ --skip dsc/tests/ --skip CHANGELOG.md --skip README.md --skip CONTRIBUTING.md --skip CITATION.cff --skip Makefile --skip ruff.toml --skip .github/ --tree raptor --skip docs/ --skip tests/ --skip ci/ --skip tools/ --skip goldens/ --skip RELEASING.md --skip CHANGELOG.md --skip README.md --skip CONTRIBUTING.md --skip CITATION.cff --skip Makefile --skip .github/ --tree eagle --only .github/actions/ --only .github/ci_digest.sh --only .github/cuda_redist.sh --only .github/companions --file eagle/.github/workflows/ci.yml
           extra: ${{ toJSON(matrix) }}
 
       - uses: actions/setup-python@v7

@@ -15,11 +15,29 @@
    "hawk": "bde134d1cd239c00b39b842656f20a3df5746ea7-dirty",
    "source": "cards073/073l4o/l4/session.log and the card's software block"
   },
+  "benchmarks/perf_card/cpu_card_aarch64.json": {
+   "eagle_version": "0.7.4.dev49+g142cf9703",
+   "eagle": "142cf9703b59fda93537131e579409b11b69041a",
+   "hawk": "07215596f36bb859239b39b9fd6f73eb014ee609",
+   "source": "cards075/075cards/arm-card2/session.log (Google Cloud c4a, Neoverse-V2) and the card's software block"
+  },
   "benchmarks/perf_card/cpu_card_amd-epyc-9b45.json": {
-   "eagle_version": "0.7.3.dev191+g5ff969995",
-   "eagle": "5ff9699950a6133a55e2e3b3fafb2a03955f7bb5",
-   "hawk": "336723a85e9890656564a703b72e06f9f40744aa",
-   "source": "cards073/073z5c/zen5/session.log and the card's software block"
+   "eagle_version": "0.7.4.dev49+g142cf9703",
+   "eagle": "142cf9703b59fda93537131e579409b11b69041a",
+   "hawk": "07215596f36bb859239b39b9fd6f73eb014ee609",
+   "source": "cards075/075cards/zen5-card2/session.log and the card's software block"
+  },
+  "benchmarks/perf_card/cpu_card_apple-m4-pro.json": {
+   "eagle_version": "0.7.4.dev49+g142cf9703",
+   "eagle": "142cf9703b59fda93537131e579409b11b69041a",
+   "hawk": "928ed015e737667d95dcece16833da05aa613a3a",
+   "source": "MacBook M4 Pro session and the card's software block; a working venv, not a lock file (numba 0.68.1, jax 0.12.0.1, Apple clang 21, Python 3.15.2); hawk 928ed01 differs from the release head only by a test"
+  },
+  "benchmarks/perf_card/cpu_card_intel-r-xeon-r-w-2125-cpu-4-00ghz.json": {
+   "eagle_version": "0.7.4.dev49+g142cf9703",
+   "eagle": "142cf9703b59fda93537131e579409b11b69041a",
+   "hawk": "07215596f36bb859239b39b9fd6f73eb014ee609",
+   "source": "local Xeon W-2125 session (bootstrap at the w075 heads) and the card's software block"
   },
   "benchmarks/perf_card/feature_card_cpu-amd-epyc-9b45.json": {
    "eagle_version": "0.7.3.dev191+g5ff969995",

@@ -44,12 +44,17 @@ class BusyGuard:
     another call is still running on this <Type>; give each thread its own
     <Type>, or wait for it``."""
 
-    __slots__ = ("_g",)
+    __slots__ = ("_g", "_held")
 
     def __init__(self, owner: str):
         from ._core import BusyGuard as _Native
 
         self._g = _Native(owner)
+        self._held = {}
 
     def __call__(self, method: str) -> _Held:
-        return _Held(self._g, method)
+        # a _Held carries no state of its own, so one per method serves every call
+        held = self._held.get(method)
+        if held is None:
+            held = self._held.setdefault(method, _Held(self._g, method))
+        return held

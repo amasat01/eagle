@@ -576,12 +576,12 @@ def test_e2_every_role_packs_at_its_pinned_mirror_shape():
 
 def test_e2_uniform_box_width_follows_the_declared_scalar_type():
     """The ``uniform`` role crosses at the artifact's declared width — 8 bytes
-    for ``float64``/``softdouble``, 4 for ``float32`` — not always a
+    for ``float64``/``banded``, 4 for ``float32`` — not always a
     ``ctypes.c_double``."""
     from eagle import plan as eplan
 
     spec = [("uniform", "a"), ("nsamples", "n")]
-    for scalar_type, want in (("float64", 8), ("softdouble", 8), ("float32", 4)):
+    for scalar_type, want in (("float64", 8), ("banded", 8), ("float32", 4)):
         dtype = eplan._plane_dtype(_E2Plugin(spec, scalar_type=scalar_type))
         boxes, _ = eplan._pack_args(spec, {}, {"a": 1.5}, 8, 1, dtype=dtype)
         assert ctypes.sizeof(boxes[0]) == want

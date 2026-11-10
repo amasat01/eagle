@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // A hand-written CUDA plugin fixture for test_PluginRegistryDtype.cu's
-// SoftdoubleLoadsAndLaunches check -- the PTX a generated deploy would emit for a
+// BandedLoadsAndLaunches check -- the PTX a generated deploy would emit for a
 // pure kernel `advance(step, val: Mutable[float])` (see
 // eagle/plugin/pure_inject/pure_inject_demo.cu's documented `advance`
 // kernel), but hand-written and ABI-only: no code generator dependency, exactly like
@@ -10,9 +10,9 @@
 // PluginRegistry (plugin/plugin_registry/registry.h) routes purely on the
 // sidecar's `scalar_type` TAG and the gref_layout.h PODs — it never inspects the
 // kernel's own arithmetic — so a raw-`double` kernel is a faithful stand-in
-// for a real SoftDouble artifact: SoftDouble is bit-identical `double` at
-// every buffer boundary (a static_assert(sizeof(SoftDouble) == 8) enforces
-// it), and registry.h is itself deliberately dependency-free.
+// for a real banded artifact: banded is an 8-byte cell at
+// every buffer boundary (a static_assert(sizeof(BandedReal) == 8) enforces
+// it; its values match `double` within aether's per-op ULP bound), and registry.h is itself deliberately dependency-free.
 #include "plugin/gref_layout.h"  // device TU, layout-only
 
 #include <cstdint>

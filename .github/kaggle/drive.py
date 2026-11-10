@@ -15,6 +15,8 @@ import sys
 import tempfile
 import time
 
+import quota
+
 HERE = pathlib.Path(__file__).resolve().parent
 POLL_SECONDS = 30
 START_SECONDS = 10 * 60  # a kernel still QUEUED after this is deleted and pushed again
@@ -205,6 +207,12 @@ def main():
         for c in commands(folder, outdir, limit):
             print("+ kaggle", " ".join(c))
         return 0
+    enough, note = quota.check(limit / 3600)  # the weekly GPU quota, before a kernel burns what is left on a partial run
+    print(note, flush=True)
+    if not enough:
+        print(f"::warning::INCONCLUSIVE: {note}")
+        summary([title(args), "", f"INCONCLUSIVE: {note}"])
+        return UNRUN
     outdir.mkdir(parents=True, exist_ok=True)
     kid = meta["id"]
     start(kid, commands(folder, outdir, limit)[0])

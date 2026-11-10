@@ -3,13 +3,12 @@
 
 """Lower one :class:`eagle.Graph` stage for the host and say how it runs.
 
-``work_share`` runs a stage's nodes in order, each spread over the host team
-(a stage of native nodes in ONE OpenMP region, ``_core.run_host_stage``).
+``work_share`` runs a stage's nodes in order, each spread over the host team.
 ``branch_tasks`` runs a fork/join stage's independent branches at the same
-time inside ONE native call (``_core.run_host_branches``, GIL released): for
-small batches, where a team barrier per node costs more than the node. The
-choice is the C++ rule ``_core.resolve_host_schedule``; this module only
-gathers its inputs.
+time, one per thread: for small batches, where a barrier per node costs more
+than the node. The choice is the C++ rule ``_core.resolve_host_schedule``.
+A stage of native nodes becomes one ``_core.HostStage``: one launch of eagle's
+host pool (GIL released), sized by its own first launch (``HostStage.lanes``).
 """
 
 from __future__ import annotations
@@ -24,19 +23,18 @@ def _native_entry(node, ctx):
 
 
 def lower_cpu_stage(node, ctx):
-    """``(step, schedule)`` for one top-level node: ``step`` runs the stage,
-    ``schedule`` is ``"work_share"`` or ``"branch_tasks"``."""
+    """``(step, schedule, stage)`` for one top-level node: ``step`` runs the stage,
+    ``schedule`` is ``"work_share"`` or ``"branch_tasks"``, ``stage`` is the
+    ``_core.HostStage`` behind ``step`` (``None`` for a Python step)."""
     step = ctx.lower(node)
-    if node.kind != "group":
-        return step, "work_share"
-    stage = [[_native_entry(n, ctx) for n in branch] for branch in node.payload]
+    branches = node.payload if node.kind == "group" else [[node]]
+    stage = [[_native_entry(n, ctx) for n in branch] for branch in branches]
     entries = [e for branch in stage for e in branch]
     native_only = None not in entries
     samples = max((p.n_samples for e in entries if e for p in e[2]), default=0)
-    schedule = _core.resolve_host_schedule(samples, len(stage), _core.host_threads(),
-                                           native_only)
-    if schedule == "work_share":
-        if native_only and len(entries) > 1:   # one team region for the whole stage, not one per node
-            return (lambda: _core.run_host_stage(stage)), schedule
-        return step, schedule
-    return (lambda: _core.run_host_branches(stage)), schedule
+    schedule = "work_share" if node.kind != "group" else _core.resolve_host_schedule(
+        samples, len(stage), _core.host_threads(), native_only)
+    if not native_only:
+        return step, schedule, None
+    host = _core.HostStage(stage, schedule == "branch_tasks")
+    return host.run, schedule, host

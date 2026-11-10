@@ -253,6 +253,13 @@ def demo_md(card, name, dry_note):
 
 
 def cpu_model():
+    if sys.platform == "darwin":
+        try:
+            out = subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"], capture_output=True, text=True,
+                                 timeout=30).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            out = ""
+        return out or platform.processor() or None
     try:
         for line in pathlib.Path("/proc/cpuinfo").read_text().splitlines():
             if line.startswith("model name"):
@@ -384,7 +391,12 @@ def verify_xvk(outs, ref_arm, nstop, atol):
 # Host memory (Linux /proc)
 # --------------------------------------------------------------------------- #
 def status_kib(field):
-    m = re.search(rf"^{field}:\s+(\d+)", pathlib.Path("/proc/self/status").read_text(), re.M)
+    """A ``/proc/self/status`` field in KiB; None where there is no /proc (macOS)."""
+    try:
+        text = pathlib.Path("/proc/self/status").read_text()
+    except OSError:
+        return None
+    m = re.search(rf"^{field}:\s+(\d+)", text, re.M)
     return int(m.group(1)) if m else 0
 
 

@@ -99,7 +99,7 @@ endif()
 
 # --- fixture PTX: raw PTX TEXT, loaded at run time via cuModuleLoadData (a
 # driver-side JIT capped at the installed driver's max supported PTX ISA) -- so,
-# like eagle/tests/CMakeLists.txt's device_plugin_softdouble fixture, this
+# like eagle/tests/CMakeLists.txt's device_plugin_banded fixture, this
 # resolves nvcc PATH-first (matching the plugin toolchain's own contract) rather than
 # trusting whichever nvcc CMake cached as CMAKE_CUDA_COMPILER for the
 # embedded-SASS demo executable below -- a newer nvcc than the installed driver

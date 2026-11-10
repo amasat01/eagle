@@ -23,7 +23,7 @@
 // was never run.
 //
 // Reuses the two device-plugin PTX fixtures already built for
-// test_PluginRegistryDtype.cu (DEVICE_PLUGIN_SOFTDOUBLE_PTX: `val[i] += step`) and
+// test_PluginRegistryDtype.cu (DEVICE_PLUGIN_BANDED_PTX: `val[i] += step`) and
 // test_PluginRegistryUniformInt.cu (DEVICE_PLUGIN_INTUNIFORM_PTX: `val[i] = val[i]*gain +
 // k`) — no new .cu fixture needed. Both kernels' `mutable val` binds to the SAME name
 // ("val"), so merging one of each into one registry and injecting them lets a single
@@ -76,22 +76,22 @@ static void ensurePrimaryContext()
     }
 }
 
-// Stages a copy of the softdouble fixture's PTX + a matching sidecar under
+// Stages a copy of the banded fixture's PTX + a matching sidecar under
 // `tag`-prefixed filenames (both in TempDir(), like every other fixture in this
 // binary), so several tests below can each use their OWN filenames and never collide
 // with test_PluginRegistryDtype.cu's hardcoded "sd.ptx" / "sd_sidecar.json", nor with
 // each other. Returns the two filenames (artifact, sidecar), relative to TempDir() —
 // exactly what a manifest entry needs.
-static std::pair<std::string, std::string> stageSoftdoubleFixture(const std::string& tag)
+static std::pair<std::string, std::string> stageBandedFixture(const std::string& tag)
 {
     const std::string artifact = tag + ".ptx";
     const std::string sidecar = tag + "_sidecar.json";
-    writeTmp(artifact, readFile(DEVICE_PLUGIN_SOFTDOUBLE_PTX));
+    writeTmp(artifact, readFile(DEVICE_PLUGIN_BANDED_PTX));
     const std::string sidecarJson = R"({
   "kernel": "raptor_kernel",
   "aether_abi": "aether-abi/1",
   "schema_version": 1,
-  "scalar_type": "softdouble",
+  "scalar_type": "banded",
   "arg_spec": [["mutable", "val"], ["terminated", "terminated"],
                ["uniform", "step"], ["nsamples", "nsamples"]]
 })";
@@ -156,7 +156,7 @@ TEST(PluginRegistryMergeTest, MergeAppendsInOrderAndComposesSequentially)
 {
     ensurePrimaryContext();
 
-    const auto sd = stageSoftdoubleFixture("merge_order_sd");
+    const auto sd = stageBandedFixture("merge_order_sd");
     const std::string manifestA = writeManifest("merge_order_a",
         {{"sd", sd.first, sd.second}});
 
@@ -223,7 +223,7 @@ TEST(PluginRegistryMergeTest, CrossManifestIdCollisionRefused)
 {
     ensurePrimaryContext();
 
-    const auto sd = stageSoftdoubleFixture("merge_dup_sd_first");
+    const auto sd = stageBandedFixture("merge_dup_sd_first");
     const std::string manifestA = writeManifest("merge_dup_a",
         {{"sd", sd.first, sd.second}});
     eagle::cuda::PluginRegistry registry =
@@ -259,7 +259,7 @@ TEST(PluginRegistryMergeTest, SetPluginEnabledTogglesExactlyOnePlugin)
 {
     ensurePrimaryContext();
 
-    const auto sd = stageSoftdoubleFixture("merge_toggle_sd");
+    const auto sd = stageBandedFixture("merge_toggle_sd");
     const std::string manifestA = writeManifest("merge_toggle_a",
         {{"sd", sd.first, sd.second}});
     eagle::cuda::PluginRegistry registry =
@@ -354,7 +354,7 @@ TEST(PluginRegistryMergeTest, FailingMergeLeavesRegistryUnchanged)
 {
     ensurePrimaryContext();
 
-    const auto sd = stageSoftdoubleFixture("merge_txn_sd");
+    const auto sd = stageBandedFixture("merge_txn_sd");
     const std::string manifestA = writeManifest("merge_txn_a",
         {{"sd", sd.first, sd.second}});
     eagle::cuda::PluginRegistry registry =

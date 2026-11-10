@@ -34,7 +34,7 @@
       "description": "Binary-ABI tag of the by-value GRef / HandleT POD mirrors the artifact was built against. Separate from and orthogonal to schema_version: the ABI-stable binary-layout contract. A loader rejects a mismatch before binding any by-value struct."
     },
     "scalar_type": {
-      "enum": ["float64", "float32", "softdouble"],
+      "enum": ["float64", "float32", "banded"],
       "description": "Real scalar type the kernel was compiled for."
     },
     "kernel": {

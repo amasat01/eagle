@@ -332,16 +332,15 @@ class _Access:
         self.writes = tuple(k.writes(node))
 
 
-@contextlib.contextmanager
+_HOST = contextlib.nullcontext()   # stateless, so one instance serves every host-graph call
+
+
 def _on_device(device):
     """Make ``device`` (a CUDA ordinal, ``None`` for a host graph) the calling
     thread's current device and context, whatever a framework left current
-    there (thread-local, restored on exit)."""
-    if device is None:
-        yield
-        return
-    with _stream.on_device(device):
-        yield
+    there (thread-local, restored on exit). A host graph gets a shared no-op:
+    a launch pays nothing for a device it does not have."""
+    return _HOST if device is None else _stream.on_device(device)
 
 
 def _plane_device(accesses, device=None):
@@ -494,6 +493,8 @@ class Graph:
         self._tail_ev = None
         self._live = ()         # what must hold before each launch (child handles, bound weights)
         self._cpu_steps: list = []
+        self._host_stages: tuple = ()
+        self._native = None     # a native-only CPU graph: its whole launch is one _core.HostSequence call
         self._record_on = False
         self._recorder = None
         self._record = None
@@ -890,13 +891,25 @@ class Graph:
                         if isinstance(seg, list) else seg for seg in segments]
                     self._seeds = []
                 self._schedule = tuple(_TIERS[get_node_kind(n.kind).tier] for n in self._nodes)
+                self._host_stages = ()
+                self._native = None
             else:
+                from . import _core
                 from ._host_schedule import lower_cpu_stage
 
-                lowered = [lower_cpu_stage(n, ctx) for n in self._nodes]
-                self._cpu_steps = [s for i, (step, _) in enumerate(lowered)
-                                   for s in (*before(i), step)]
-                self._schedule = tuple(how for _, how in lowered)
+                def lower(ctx=ctx, before=before):
+                    # a HostStage holds its arrays' addresses: _rebind lowers again
+                    lowered = [lower_cpu_stage(n, ctx) for n in self._nodes]
+                    self._cpu_steps = [s for i, (step, _, _) in enumerate(lowered)
+                                       for s in (*before(i), step)]
+                    self._schedule = tuple(how for _, how, _ in lowered)
+                    self._host_stages = tuple(stage for _, _, stage in lowered)
+                    self._native = None
+                    if recorder is None and all(stage is not None for stage in self._host_stages):
+                        self._native = _core.HostSequence(self._busy._g, self._host_stages)
+
+                lower()
+                self._lower_cpu = lower
             self._live = _live_checks(accesses)
             self._backend = be
             self._edges = edges
@@ -952,6 +965,8 @@ class Graph:
                     wrappers[id(name)] = name
         if self._backend == "gpu":
             self._patch_or_rebuild(bounds.values(), todo, wrappers.values(), rebuild)
+        elif any(stage is not None for stage in self._host_stages):
+            self._lower_cpu()
         return self
 
     def _patch_index(self):
@@ -1093,6 +1108,12 @@ class Graph:
         """Run the graph ``n`` times and wait (``enqueue(n)`` then
         :meth:`synchronize`). A ``record=True`` graph runs once per launch and
         keeps that run's ``Record`` in :attr:`record`."""
+        seq = self._native
+        if seq is not None:
+            if self._live:
+                self._check_live()
+            seq.launch(n)
+            return self
         with self._busy("launch"), _on_device(self._device):
             self._need_built("launch")
             if self._device is not None:
@@ -1113,7 +1134,8 @@ class Graph:
                 _transfer.raise_host_errors(self._host_nodes)
             if self._recorder is not None:
                 self._record = self._recorder.finish()
-            self._scatter_status(wait=True)
+            if self._segments is not None:   # only a segmented graph has status to scatter
+                self._scatter_status(wait=True)
         return self
 
     def enqueue(self, n: int = 1) -> Graph:
@@ -1122,6 +1144,12 @@ class Graph:
         the device); one with a host node waits as :meth:`launch` does. As for
         :class:`eagle.GraphPipeline`, write no plane of the graph between
         ``enqueue`` and :meth:`synchronize`."""
+        seq = self._native
+        if seq is not None:
+            if self._live:
+                self._check_live()
+            seq.launch(n)
+            return self
         with self._busy("enqueue"), _on_device(self._device):
             self._need_built("enqueue")
             if self._device is not None:
@@ -1139,7 +1167,8 @@ class Graph:
                 for _ in range(n):
                     for step in self._cpu_steps:
                         step()
-            self._scatter_status(wait=False)
+            if self._segments is not None:
+                self._scatter_status(wait=False)
         return self
 
     def _scatter_status(self, *, wait: bool) -> None:
@@ -1237,6 +1266,14 @@ class Graph:
         GPU ``"capture"`` | ``"eager_stream"`` | ``"eager_host"``; empty before
         :meth:`build`."""
         return self._schedule
+
+    @property
+    def host_lanes(self) -> tuple:
+        """Per stage on the CPU: the threads its next launch uses (``1`` = in
+        place on the calling thread). A stage's first launch runs in place and
+        is timed; later launches use one thread per 40 µs of that time, within
+        :func:`eagle.exec.host_threads`. Empty on the GPU and before :meth:`build`."""
+        return tuple(1 if s is None else s.lanes for s in self._host_stages)
 
     @property
     def backend(self):

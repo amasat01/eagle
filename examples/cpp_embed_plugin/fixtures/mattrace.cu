@@ -4,8 +4,8 @@
 // Hand-written CUDA plugin fixture -- device `bind_matrix` proof
 // kernel. The device twin of eagle/tests/fixtures/host_plugin_mattrace.cpp: a pure
 // kernel `mattrace(M: mat_in[3,3]) -> out = trace(M)`, ABI-only (gref_layout.h), no
-// exactly like fixtures/device_plugin_softdouble.cu is for the
-// SoftDouble dtype pin. A matrix binds through the SAME 40-byte GRefMirror as a
+// exactly like fixtures/device_plugin_banded.cu is for the
+// banded dtype pin. A matrix binds through the SAME 40-byte GRefMirror as a
 // vector (flat (R*C, N) SoA, dim = r*C + c, sample-fastest), so `M.data_` /
 // `M.compStride_` read exactly like a vector's -- proving
 // `eagle::cuda::PluginRegistry::bind_matrix`

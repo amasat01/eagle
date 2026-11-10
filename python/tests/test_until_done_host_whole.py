@@ -206,27 +206,29 @@ def test_host_team_size_follows_the_work(monkeypatch):
 
 
 def test_host_run_sets_the_team_and_restores_the_callers(auto, monkeypatch):
-    """A host run sets its team for the run's length only; ``host_threads``
-    forces it; the caller's OpenMP setting is back afterwards."""
-    omp = _host_loop._omp_runtime()
-    if omp is None:
-        pytest.skip("no OpenMP runtime to steer in this build")
-    get, put = omp
+    """A host run sets its team for the run's length only, on the calling thread;
+    ``host_threads`` forces it; the caller's own team is back afterwards."""
+    from eagle import _core
+
     seen = []
     real = _host_loop._run_host_loop
     monkeypatch.setattr(_host_loop, "_run_host_loop",
-                        lambda runner, threads: (seen.append((threads, get())),
+                        lambda runner, threads: (seen.append((threads, _core.host_threads())),
                                                  real(runner, threads)))
-    put(7)
-    g = _planes(_batch(64, "uniform"), np)
-    runner = eagle.until_done(auto[("plain", "host")], max_steps=_S, dt=_DT, **g)
-    runner.run()
-    runner.reset()
-    runner.host_threads = 3
-    runner.run()
-    want = _host_loop.host_team_size(64, _S, threads=_host_loop._threads())
-    assert seen == [(want, want), (3, 3)]
-    assert get() == 7
+    eexec.set_host_threads(None)
+    before = _core.set_thread_host_team(7)
+    try:
+        g = _planes(_batch(64, "uniform"), np)
+        runner = eagle.until_done(auto[("plain", "host")], max_steps=_S, dt=_DT, **g)
+        runner.run()
+        runner.reset()
+        runner.host_threads = 3
+        runner.run()
+        want = _host_loop.host_team_size(64, _S, threads=_host_loop._threads())
+        assert seen == [(want, want), (3, 3)]
+        assert _core.host_threads() == 7
+    finally:
+        _core.set_thread_host_team(before)
 
 
 def test_a_second_concurrent_host_run_of_one_artifact_is_refused(auto, monkeypatch):  # noqa: F811
