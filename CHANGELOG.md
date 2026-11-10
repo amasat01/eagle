@@ -2,7 +2,7 @@
 
 Releases after 0.6.4 are on [GitHub](https://github.com/amasat01/eagle/releases): the notes are the pull request body.
 
-## Unreleased
+## 0.7.5 (2026-11-10)
 
 This section covers what changes from 0.7.3. Host launches get their own thread pool, so small stages stop paying for threads they cannot use; banded arrays (double precision on GPUs with weak or no FP64) get pack and unpack calls.
 
