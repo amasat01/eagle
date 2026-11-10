@@ -41,6 +41,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <stdexcept>
 #include <string>
@@ -54,6 +55,18 @@ namespace exec {
  *        of one partition, each tile driving the SAME body through its own triple.
  */
 struct HostTeam {
+
+    /** @brief How long the caller runs the first tiles itself to learn what a tile costs (microseconds). */
+    static constexpr double HOST_PROBE_US = 2.0;
+    /** @brief The least work one claim of a team thread carries (microseconds). */
+    static constexpr double HOST_LANE_US = 5.0;
+
+    /// What one tile of an entry cost when this thread last probed it.
+    struct Cost { HostEntryV2 fn = nullptr; std::int64_t tile = 0; double perTileUs = 0.0; std::uint32_t launches = 0; };
+    static Cost& remembered(HostEntryV2 fn) {
+        static thread_local Cost table[16];
+        return table[(reinterpret_cast<std::uintptr_t>(fn) >> 4) & 15];
+    }
 
     /** @brief The tile size (in samples) this team would use for @p bytesPerSample
      *  — `Host::launch`'s own L2-derived rule (`aether::optimalTileSize<double>`),
@@ -91,19 +104,61 @@ struct HostTeam {
         const std::int64_t tile =
             static_cast<std::int64_t>(tile_size(bytesPerSample));
         const std::int64_t ntiles = (part.count + tile - 1) / tile;
-        struct Tiles { HostEntryV2 fn; void* const* args; Partition part; std::int64_t tile, ntiles; };
-        const Tiles tiles{ fn, args, part, tile, ntiles };
-        const auto runTile = [](const void* ctx, std::uint32_t t) {
-            const auto& s = *static_cast<const Tiles*>(ctx);
+        struct Tiles { HostEntryV2 fn; void* const* args; Partition part; std::int64_t tile, ntiles, first, grain; };
+        Tiles tiles{ fn, args, part, tile, ntiles, 0, 1 };
+        const auto oneTile = [](const Tiles& s, std::int64_t t) {
             const std::int64_t base = s.part.base + t * s.tile;
             const std::int64_t count = (t + 1 == s.ntiles) ? (s.part.base + s.part.count - base) : s.tile;
             s.fn(s.args, base, count, s.part.nSamples);
         };
-        // One tile or a one-thread team runs in place: no thread to wake (the wake-up is
-        // most of an N=1 launch). One phase: no gates.
-        const detail::HostPool::Job job{ static_cast<std::uint32_t>(ntiles), nullptr, runTile, &tiles };
-        if (ntiles == 1 || host_max_threads() <= 1) detail::HostPool::run_in_place(job);
-        else detail::HostPool::instance().run(job, host_max_threads());
+        if (ntiles == 1 || host_max_threads() <= 1) {   // no thread to wake
+            for (std::int64_t t = 0; t < ntiles; ++t) oneTile(tiles, t);
+            return static_cast<std::size_t>(ntiles);
+        }
+        // COST. What a tile costs is not known before it runs: a tile of a cheap kernel is tens of nanoseconds, of
+        // a heavy one tens of microseconds. The calling thread remembers it per entry; with none remembered (and
+        // again every 64th launch, since a kernel's cost can move with its data) it PROBES: it runs the first
+        // tiles itself, in order, 1 then 2 then 4 ..., until HOST_PROBE_US is spent. The tiles and their triples
+        // never change, only who runs them, so no result depends on any of this.
+        Cost& cost = remembered(fn);
+        std::int64_t done = 0;
+        if (cost.fn != fn || cost.tile != tile || (++cost.launches & 63) == 0) {
+            using clock = std::chrono::steady_clock;
+            const auto t0 = clock::now();
+            double spent = 0.0;
+            for (std::int64_t step = 1; done < ntiles && spent < HOST_PROBE_US; step *= 2) {
+                const std::int64_t stop = std::min(ntiles, done + step);
+                for (; done < stop; ++done) oneTile(tiles, done);
+                spent = std::chrono::duration<double, std::micro>(clock::now() - t0).count();
+            }
+            cost = Cost{ fn, tile, spent / static_cast<double>(done), 0 };
+        }
+        const std::int64_t rest = ntiles - done;
+        const double perTile = cost.perTileUs;
+        if (perTile * static_cast<double>(rest) < 2 * detail::HOST_FLOOR_US) {   // waking the team costs more than it saves
+            for (; done < ntiles; ++done) oneTile(tiles, done);
+            return static_cast<std::size_t>(ntiles);
+        }
+        // GRAIN. A thread takes `grain` consecutive tiles per claim, so the claim (two shared atomics) is paid
+        // once per HOST_LANE_US of work and not once per tile; never fewer than 4 claims per thread, so a
+        // long tile still cannot hold the team.
+        const std::int64_t team = host_max_threads();
+        tiles.first = done;
+        tiles.grain = std::clamp<std::int64_t>(static_cast<std::int64_t>(HOST_LANE_US / perTile) + 1, 1,
+                                               std::max<std::int64_t>(1, rest / (4 * team)));
+        const auto runLane = [](const void* ctx, std::uint32_t lane) {
+            const auto& s = *static_cast<const Tiles*>(ctx);
+            const std::int64_t from = s.first + lane * s.grain;
+            const std::int64_t to = std::min(s.ntiles, from + s.grain);
+            for (std::int64_t t = from; t < to; ++t) {
+                const std::int64_t base = s.part.base + t * s.tile;
+                const std::int64_t count = (t + 1 == s.ntiles) ? (s.part.base + s.part.count - base) : s.tile;
+                s.fn(s.args, base, count, s.part.nSamples);
+            }
+        };
+        const std::int64_t lanes = (rest + tiles.grain - 1) / tiles.grain;
+        const detail::HostPool::Job job{ static_cast<std::uint32_t>(lanes), nullptr, runLane, &tiles };
+        detail::HostPool::instance().run(job, static_cast<int>(team));
         return static_cast<std::size_t>(ntiles);
     }
 
