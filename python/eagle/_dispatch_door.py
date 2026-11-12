@@ -136,7 +136,7 @@ def resolve_kernels(kernels, groups, *, door, spec=None) -> tuple:
     :class:`PerformanceWarning`. ``spec`` is ``(kernel, group, forced)`` with
     the model's other groups already lowered in ``kernel``."""
     import hawk
-    from hawk.passes.cost import dispatch_costs as _costs
+    from hawk.emit.host_vector import dispatch_costs as _costs
 
     def dispatch_costs(walk, kernel, *args, **kwargs):
         return _costs(walk, host_spec(kernel, spec), *args, **kwargs)
@@ -276,7 +276,7 @@ def _split_parts(kernel, group: str, device: bool, spec=None) -> tuple:
 
     import hawk
     from hawk.compile.toolchain import host_profile
-    from hawk.passes.cost import dispatch_costs as _costs
+    from hawk.emit.host_vector import dispatch_costs as _costs
 
     def dispatch_costs(walk, *args, **kwargs):
         return _costs(walk, host_spec(kernel, spec), *args, **kwargs)
