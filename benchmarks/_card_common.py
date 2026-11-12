@@ -177,7 +177,7 @@ def which(name):
 
 def tool_name(path):
     """The bare executable name (``g++``), never the local absolute path a
-    discovery function (``which``, ``hawk.compile.host_compiler``) resolved
+    discovery function (``which``, ``osprey_cpu.toolchain.host_compiler``) resolved
     it to -- a committed card must not leak the build box's directory layout
     (conda env path, username) the way a raw discovery path does. Callers
     that record a tool's identity in a card dict call this instead of
@@ -755,9 +755,10 @@ def toolchain():
            "host_compiler": None, "nvcc": None}
     try:
         from hawk.compile import toolchain as tc
+        from osprey_cpu.toolchain import host_compiler
 
         # the identity is "path||version||digest": keep the bare name
-        path, sep, rest = tc.compiler_identity(tc.host_compiler()).partition("||")
+        path, sep, rest = tc.compiler_identity(host_compiler()).partition("||")
         out["host_compiler"] = tool_name(path) + sep + rest
     except Exception as exc:  # the card still runs; the gap is recorded
         out["host_compiler"] = f"unavailable ({type(exc).__name__})"
