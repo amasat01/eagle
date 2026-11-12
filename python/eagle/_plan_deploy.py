@@ -526,9 +526,9 @@ _HOST, _DEVICE = "host", "device"
 
 def _targets_of(entry: str) -> tuple:
     """The ids of hawk's target rows eagle enters as ``entry``."""
-    from hawk.targets import TARGETS
+    from hawk.targets import entry_ids
 
-    return tuple(t for t, row in TARGETS.items() if row.entry == entry)
+    return entry_ids(entry)
 
 
 def _has_entry(targets, entry: str) -> bool:
