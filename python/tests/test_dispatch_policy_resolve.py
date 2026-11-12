@@ -177,13 +177,14 @@ def test_a_real_hawk_cost_goes_through_the_rule():
     hawk = pytest.importorskip("hawk")
     import hawk.math as M
     from hawk.ir import canonical
-    from hawk.passes.cost import dispatch_costs
+    from hawk.emit.host_vector import dispatch_costs
+    from hawk.targets import build_spec
 
     @hawk.kernel
     def rare(k: hawk.Index, x: hawk.Scalar, y: hawk.Mutable[hawk.Scalar]):
         y = M.dispatch(k, [x + 1.0, M.exp(M.sin(x) * M.cos(x)), x], policy="auto")
 
-    cost = dispatch_costs(canonical(rare.sinks))["dispatch0"]
+    cost = dispatch_costs(canonical(rare.sinks), build_spec(("host",)))["dispatch0"]
     assert dp.static_selector(cost.selector_reads, {"y"})
     assert not cost.fused_vectorised  # the fused host loop renders the dispatch as a switch, which stays scalar
     big = 1 << 26  # the host's launch terms are noise at this size

@@ -293,7 +293,7 @@ def _exec_targets(plugin) -> tuple:
                  if getattr(plugin, attr, None) is not None)
 
 
-def auto(plugin, *, targets=None, cache_dir=None, scalar_type=None,
+def auto(plugin, *, targets=None, cache_dir=None, scalar_type=None, contraction=None,
          **plan_kw) -> AutoPlan | tuple[AutoPlan, ...]:
     """An :class:`AutoPlan` for ``plugin``: run it where its data lives.
     ``eagle.deploy`` is this same function.
@@ -310,6 +310,9 @@ def auto(plugin, *, targets=None, cache_dir=None, scalar_type=None,
     with :func:`eagle.banded_pack`). Banded is a device feature for GPUs with
     weak or no FP64; on a CPU use float64 (a banded deploy with no usable
     device, or with a host target, is refused).
+
+    ``contraction`` is hawk's policy for a dense contraction (``None``: ``"direct"``; ``"gemm"`` routes a recognised one through
+    a matrix product); it applies to a hawk kernel's build.
 
     ``plan_kw`` are :func:`plan`'s keywords but ``structure``
     (``inner``/``gather`` do not apply); a side the plugin lacks is refused
@@ -339,9 +342,9 @@ def auto(plugin, *, targets=None, cache_dir=None, scalar_type=None,
                     "eagle.plan.auto(plugin)")
         return tuple(AutoPlan(p, plan_kw, host, k, (targets, cache_dir, scalar_type))
                      for k, (p, host)
-                     in zip(kernels, _deploy_hawk(kernels, targets, cache_dir, scalar_type)))
+                     in zip(kernels, _deploy_hawk(kernels, targets, cache_dir, scalar_type, contraction)))
     if _is_hawk_kernel(plugin):
-        p, host = _deploy_hawk([plugin], targets, cache_dir, scalar_type)[0]
+        p, host = _deploy_hawk([plugin], targets, cache_dir, scalar_type, contraction)[0]
         return AutoPlan(p, plan_kw, host, plugin, (targets, cache_dir, scalar_type))
     for key, value in (("targets", targets), ("cache_dir", cache_dir),
                        ("scalar_type", scalar_type)):
@@ -352,7 +355,7 @@ def auto(plugin, *, targets=None, cache_dir=None, scalar_type=None,
     return AutoPlan(plugin, plan_kw)
 
 
-def _deploy_hawk(kernels, targets, cache_dir, scalar_type) -> list:
+def _deploy_hawk(kernels, targets, cache_dir, scalar_type, contraction=None) -> list:
     """``[(plugin, background host side or None)]`` for ``kernels``, in order.
 
     With ``targets=None`` and a usable GPU the call returns once the device
@@ -369,7 +372,7 @@ def _deploy_hawk(kernels, targets, cache_dir, scalar_type) -> list:
         targets = _eager_targets()
         if targets == _targets_of(_DEVICE):
             host = _HostSide(kernels, cache_dir, scalar_type)
-    built = _hawk_plugins(kernels, targets, cache_dir, scalar_type)
+    built = _hawk_plugins(kernels, targets, cache_dir, scalar_type, contraction)
     return [(p, None if host is None else (host, i)) for i, p in enumerate(built)]
 
 

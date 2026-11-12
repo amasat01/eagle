@@ -60,20 +60,14 @@ def test_validate_graph_block_defined_only_in_raptor():
     would be exactly the two-copies drift this move was meant to prevent."""
     offenders = []
     for repo, root in _FAMILY_PACKAGES.items():
-        if repo == "raptor":
-            continue
         for path in _iter_py_files(root):
             if _defines_validate_graph_block(path):
                 offenders.append(str(path))
     assert not offenders, (
-        f"_validate_graph_block is defined outside raptor: {offenders}"
+        f"_validate_graph_block is defined in Python again (raptor's validator is the Rust one since 8bebba6): {offenders}"
     )
-    # Sanity: raptor DOES define it — a vacuous pass elsewhere would certify
-    # nothing (the "instrument needs a known-answer case" lesson).
-    assert _defines_validate_graph_block(
-        _FAMILY_PACKAGES["raptor"] / "schema" / "blocks.py"
-    ), (
-        "sanity check failed: raptor.schema.blocks no longer defines "
-        "_validate_graph_block"
+    # Sanity: raptor still publishes the validator's entry (a vacuous pass would certify nothing); the clause itself runs in Rust.
+    assert "def validate_block_descriptor" in (_FAMILY_PACKAGES["raptor"] / "schema" / "blocks.py").read_text(), (
+        "sanity check failed: raptor.schema.blocks no longer defines validate_block_descriptor"
     )
 

@@ -21,7 +21,6 @@ from eagle import _split  # noqa: E402
 from hawk import Grid, Index, Kernel, Matrix, Mutable, Scalar, Terminated, Vector, kernel  # noqa: E402
 from hawk.artifact import build_bundle, plugins  # noqa: E402
 from hawk.diff import vjp  # noqa: E402
-from hawk.emit import policy  # noqa: E402
 
 TARGETS = ["host", pytest.param("cuda", marks=pytest.mark.gpu)]
 EPS = np.finfo(np.float64).eps
@@ -78,10 +77,9 @@ P, ROWS, KEYS = 71, 8, 3
 
 @pytest.mark.parametrize("target", TARGETS)
 def test_a_keyed_block_sum_is_launched_per_key_and_replays_bitwise(tmp_path, cache, target):
-    with policy.using(linalg_form="auto"):
-        @kernel
-        def gram(lane: Grid["key", "row":ROWS], j: Vector[P]) -> Matrix[P, P]:
-            return hawk.sum(m.outer(j, j), over="row")
+    @kernel
+    def gram(lane: Grid["key", "row":ROWS], j: Vector[P]) -> Matrix[P, P]:
+        return hawk.sum(m.outer(j, j), over="row")
 
     plan_, _ = _plan([gram], tmp_path, cache, target)
     stages = _split.stages_of(plan_.plugin)
@@ -379,10 +377,9 @@ def test_a_replay_reports_at_the_synchronise_and_the_next_replay_is_clean(tmp_pa
 
 @pytest.mark.parametrize("target", TARGETS)
 def test_a_launch_without_a_scatter_records_nothing(tmp_path, cache, target):
-    with policy.using(linalg_form="auto"):
-        @kernel
-        def gram(lane: Grid["key", "row":ROWS], j: Vector[P]) -> Matrix[P, P]:
-            return hawk.sum(m.outer(j, j), over="row")
+    @kernel
+    def gram(lane: Grid["key", "row":ROWS], j: Vector[P]) -> Matrix[P, P]:
+        return hawk.sum(m.outer(j, j), over="row")
 
     plan_, _ = _plan([gram], tmp_path, cache, target)
     xp = _xp(target)
@@ -451,10 +448,9 @@ def test_plan_run_of_a_team_kernel_equals_the_bind_path(tmp_path, cache, target)
 
 @pytest.mark.parametrize("target", TARGETS)
 def test_plan_run_of_a_keyed_team_kernel_equals_the_bind_path(tmp_path, cache, target):
-    with policy.using(linalg_form="auto"):
-        @kernel
-        def gram(lane: Grid["key", "row":ROWS], j: Vector[P]) -> Matrix[P, P]:
-            return hawk.sum(m.outer(j, j), over="row")
+    @kernel
+    def gram(lane: Grid["key", "row":ROWS], j: Vector[P]) -> Matrix[P, P]:
+        return hawk.sum(m.outer(j, j), over="row")
 
     plan_, _ = _plan([gram], tmp_path, cache, target)
     xp = _xp(target)

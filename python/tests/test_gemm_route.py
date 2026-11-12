@@ -1,7 +1,7 @@
 # Copyright 2026 Alessandro Masat
 # SPDX-License-Identifier: Apache-2.0
 
-"""The opt-in GEMM route (``hawk.emit.policy.using(contraction="gemm")``):
+"""The opt-in GEMM route (``contraction="gemm"``):
 forward within the ulp contract of the kernel's own loop, the reverse equal
 to hawk's vjp and to finite differences, a second consumer's gradient summed
 in, and the default untouched."""
@@ -16,7 +16,6 @@ import eagle.plan
 hawk = pytest.importorskip("hawk")
 import hawk.math as m  # noqa: E402
 from hawk import Mutable, Scalar, Table  # noqa: E402
-from hawk.emit import policy  # noqa: E402
 
 R, U, S = 8, 6, 5
 
@@ -55,8 +54,7 @@ def _np(a):
 
 def _plans(kernel, target, dtype, tmp_path):
     direct = eagle.plan.auto(kernel, targets=(target,), cache_dir=str(tmp_path), scalar_type=dtype)
-    with policy.using(contraction="gemm"):
-        routed = eagle.plan.auto(kernel, targets=(target,), cache_dir=str(tmp_path), scalar_type=dtype)
+    routed = eagle.plan.auto(kernel, targets=(target,), cache_dir=str(tmp_path), scalar_type=dtype, contraction="gemm")
     return direct, routed
 
 
@@ -168,8 +166,7 @@ def test_the_adjoint_adds_into_its_gradient_planes(tmp_path):
 
 
 def test_a_kernel_with_two_outputs_stays_the_loop(tmp_path):
-    with policy.using(contraction="gemm"):
-        p = eagle.plan.auto(contract_two, targets=("host",), cache_dir=str(tmp_path))
+    p = eagle.plan.auto(contract_two, targets=("host",), cache_dir=str(tmp_path), contraction="gemm")
     assert getattr(p.plugin, "_gemm", None) is None
 
 
@@ -181,8 +178,7 @@ def test_the_default_and_direct_leave_every_value_bit_identical(tmp_path):
         if form is None:
             p = eagle.plan.auto(contract, targets=("host",), cache_dir=str(tmp_path))
         else:
-            with policy.using(contraction=form):
-                p = eagle.plan.auto(contract, targets=("host",), cache_dir=str(tmp_path))
+            p = eagle.plan.auto(contract, targets=("host",), cache_dir=str(tmp_path), contraction=form)
         assert getattr(p.plugin, "_gemm", None) is None and getattr(p.plugin, "_vjp", None) is None
         p.run(w=w, f=f, y=y)
         ys.append(y)

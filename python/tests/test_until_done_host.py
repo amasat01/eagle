@@ -111,7 +111,7 @@ def finishing_host_plan(kern, work, *, cond, kind=None, finishing=True, count=Tr
             view["sidecar"] = sidecar
         return _load_host(where / f"{kern.name}.so", entry, view, kern.name), real
 
-    from hawk.compile.drivers import HOST, CompileOptions, compile_source
+    from hawk.compile.drivers import CompileOptions, compile_source
 
     arg_spec = tuple(tuple(p) for p in sidecar["arg_spec"])
     mask_slot = arg_spec.index(("terminated", _FINISH["mask"]))
@@ -120,7 +120,7 @@ def finishing_host_plan(kern, work, *, cond, kind=None, finishing=True, count=Tr
     import os
 
     res = compile_source(src, f"{kern.name}_finishing{'' if count else '_nocount'}",
-                         CompileOptions(backend=HOST,
+                         CompileOptions(target="host",
                                         cache_dir=os.environ.get("HAWK_CACHE_DIR")))
     view["arg_spec"] = arg_spec + (("lookup", _FINISH["counter"]),)
     view["sidecar"] = dict(sidecar, arg_spec=[list(p) for p in view["arg_spec"]],
