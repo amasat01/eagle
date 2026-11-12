@@ -381,24 +381,18 @@ class _HostSide:
     interpreter finishes the build before it exits. A forked child, which
     inherits no running thread, builds the host side itself."""
 
-    __slots__ = ("_args", "_ambient", "_plugins", "_error", "_thread", "_pid")
+    __slots__ = ("_args", "_plugins", "_error", "_thread", "_pid")
 
     def __init__(self, kernels, cache_dir, scalar_type):
-        from hawk.emit import policy     # read here: the build thread does not see the caller's context
-
-        self._args = (list(kernels), _targets_of(_HOST, loadable=True), cache_dir, scalar_type, policy.contraction())
-        self._ambient = _ambient_policy()
+        self._args = (list(kernels), _targets_of(_HOST, loadable=True), cache_dir, scalar_type)
         self._plugins = self._error = None
         self._pid = os.getpid()
         self._thread = threading.Thread(target=self._build, name="eagle-host-build")
         self._thread.start()
 
     def _build(self):
-        from hawk.emit import policy
-
         try:
-            with policy.using(**self._ambient):
-                self._plugins = _hawk_plugins(*self._args)
+            self._plugins = _hawk_plugins(*self._args)
         except BaseException as exc:  # handed to the first host plan
             self._error = exc
 
@@ -411,14 +405,6 @@ class _HostSide:
         if self._error is not None:
             raise self._error
         return self._plugins[index]
-
-
-def _ambient_policy() -> dict:
-    """The caller's ``hawk.emit.policy.using`` values: what a build reads, so what its bundle folder is keyed by."""
-    from hawk.emit import policy
-
-    return dict(form=policy.form(), linalg_form=policy.linalg_form(), wide_form=policy.wide_form(),
-                contraction=policy.contraction(), launch_bounds=policy.launch_bounds())
 
 
 def _is_hawk_kernel(obj) -> bool:
@@ -497,13 +483,10 @@ def _build_by_name(kernels, targets, cache_dir, scalar_type=None) -> tuple:
 
 def _hawk_plugins(kernels, targets, cache_dir, scalar_type=None, contraction=None) -> tuple:
     """Build ``kernels`` into one bundle and return their plugins in order.
-    ``contraction`` is hawk's policy for a dense contraction (``None``: the
-    caller's ``hawk.emit.policy.contraction()``); ``"gemm"`` routes each
+    ``contraction`` is the policy for a dense contraction (``None``: ``"direct"``); ``"gemm"`` routes each
     kernel that has one through the matrix multiply (:mod:`eagle.gemm._route`)."""
     if contraction is None:
-        from hawk.emit import policy
-
-        contraction = policy.contraction()
+        contraction = "direct"
     by_name, bundle = _build_by_name(kernels, targets, cache_dir, scalar_type)
     missing = [k.name for k in kernels if k.name not in by_name]
     if missing:
@@ -589,9 +572,6 @@ def _bundle_key(kernels, targets, defines=(), mode="float64") -> str:
             h.update(f"group={group}".encode())
     h.update(json.dumps(list(targets)).encode())
     h.update(json.dumps(list(defines)).encode())
-    ambient = _ambient_policy()
-    if ambient != dict(form="auto", linalg_form="auto", wide_form="auto", contraction="direct", launch_bounds=None):
-        h.update(json.dumps(ambient, sort_keys=True).encode())     # the default stays keyed as before
     if mode != "float64":  # float64 keys stay as before, so existing caches still hit
         h.update(mode.encode())
     # One folder per host profile, so two profiles of one kernel never

@@ -1,5 +1,5 @@
 """The opt-in matmul route of a contraction kernel: built under
-``hawk.emit.policy.using(contraction="gemm")``, a kernel hawk recognises as
+``contraction="gemm"``, a kernel hawk recognises as
 ONE dense two-operand contraction runs as the lowered GEMM
 (:func:`eagle.gemm.plan.lower_dense_gemm`'s plans), forward and adjoint. Its
 values are within a few ulp of the kernel's own loop (another summing
