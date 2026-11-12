@@ -110,13 +110,13 @@ def _load(name, rel):
 def _units():
     """``{label: CUDA source}`` of the two card kernels, as deployed."""
     from hawk.emit import render_source
-    from hawk.targets import TARGETS
+    from hawk.targets import TARGETS, build_spec
 
     rk78 = _load("eagle_rk78_card_gate", "perf_card/perf_card.py")
     out = {}
     for label, k in (("rk78", rk78._define_kernel()),):
         out[label] = render_source(k.name, k.sinks, k.walk, TARGETS["cuda"],
-                                   kind=k.kind, one_step=k.one_step).text
+                                   kind=k.kind, one_step=k.one_step, spec=build_spec(("cuda",))).text
     return out
 
 
