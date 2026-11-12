@@ -443,7 +443,7 @@ def _hawk_api():
     try:
         from hawk.artifact import build_bundle, plugins
         from hawk.compile import default_cache_dir
-        from hawk.emit import FAST_ENTRIES_MACRO
+        from aether.wings.base.wrapper import FAST_ENTRIES_MACRO
     except ImportError as exc:
         raise ImportError(
             "eagle.plan.auto: building a hawk kernel needs hawk, which does not "

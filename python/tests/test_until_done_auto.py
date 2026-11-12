@@ -102,7 +102,7 @@ def auto(tmp_path_factory):
     cache = tmp_path_factory.mktemp("cache")
     # the automatic kernels as eagle.deploy builds them: with hawk's fast
     # entries (the range entry, which reports exact steps)
-    from hawk.emit import FAST_ENTRIES_MACRO
+    from aether.wings.base.wrapper import FAST_ENTRIES_MACRO
 
     fast = (f"{FAST_ENTRIES_MACRO}=1",)
     for label, kern in kernels.items():

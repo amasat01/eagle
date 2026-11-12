@@ -109,7 +109,7 @@ def _load(name, rel):
 
 def _units():
     """``{label: CUDA source}`` of the two card kernels, as deployed."""
-    from hawk.emit import render_source
+    from aether.wings.base.wrapper import render_source
     from hawk.targets import TARGETS, build_spec
 
     rk78 = _load("eagle_rk78_card_gate", "perf_card/perf_card.py")
@@ -123,7 +123,7 @@ def _units():
 def _compile(source, arch, tmp):
     """``{entry: {regs, stack, spill, n, ops}}`` of one unit on one arch."""
     from hawk_cuda import toolchain as tc
-    from hawk.emit import FAST_ENTRIES_MACRO
+    from aether.wings.base.wrapper import FAST_ENTRIES_MACRO
 
     cu, cubin = tmp / f"unit_{arch}.cu", tmp / f"unit_{arch}.cubin"
     cu.write_text(source)

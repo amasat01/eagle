@@ -366,7 +366,7 @@ def test_a_kernel_without_the_count_runs_to_the_cap(plans, tmp_path, monkeypatch
     """Red case: the same kernel emitted with the epilogue's count dropped; the
     guard never fires and the loop runs to its cap."""
     _need(plans, ("fplain", target))
-    from hawk.emit import render
+    from aether.wings.base import render
 
     original = render._Renderer._emit
 
