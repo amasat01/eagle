@@ -520,8 +520,14 @@ class _Level:
         xp = "cpu"
         if device.type == "cuda":
             xp = f"cuda:{device.index if device.index is not None else torch.cuda.current_device()}"
+        row = None
+        if self.cells:      # the row width is the built kernel's own (its sidecar): the unit is built here, as the launch would
+            index = None if device.type != "cuda" else (device.index if device.index is not None else torch.cuda.current_device())
+            built = self._built_for(mode, index, (lambda: self._load_device(mode, index)) if index is not None
+                                    else (lambda: self._load_host(mode)))
+            row = _cell_rows.row_of(getattr(built, "plugin", built))
         return _cell_rows.scratch(self, n, xp, numpy.dtype(mode), self.owner.policy,
-                                  cells=self.cells)
+                                  cells=self.cells, row=row)
 
     def _table_cells(self, values):
         """The entries of a per-cell kernel's parameter tables (1 for any other kernel)."""
