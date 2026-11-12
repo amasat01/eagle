@@ -517,6 +517,7 @@ class SplitBound:
         self._capacity = self._count = None     # a prefix kernel's capacity= and count plane (see set_count)
         self._event = None          # recorded after the last stage of a launch with a pending status
         self._status = []           # (kernel, team record, status plane, target cells) of each ordered scatter
+        _cell_rows.one_row_width([st.plugin for st in stages])     # one run, one row width
         for st in stages:
             ops = getattr(st.plugin, "_stage_cells", {})
             rows = (_cell_rows.CellRows(ops, n, xp, self._dtype, policy, _cell_rows.row_of(st.plugin),
