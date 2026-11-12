@@ -169,7 +169,7 @@ class Level:
                 from hawk.diff import tape
                 from hawk.diff.event import as_plain_reads
                 from hawk.diff.tape import APPLIED_STEPS, NEXT_SUFFIX
-                from hawk.ir.nodes import Assign
+                from raptor.ir.nodes import Assign
                 from hawk.trace import Kernel
 
                 kernel = self.kernel
@@ -273,7 +273,7 @@ def plane_names(who, name, which, wrt, outputs, own, derived) -> dict:
     ``name`` (planes ``own``) does not hold. A plane with no counterpart (an
     integer output) is absent; a ``wrt`` input with none is refused."""
     from hawk.diff import ADJOINT_PREFIX, TANGENT_PREFIX
-    from hawk.ir.nodes import NAMESPACE_SEP
+    from raptor.ir.nodes import NAMESPACE_SEP
 
     prefix = TANGENT_PREFIX if which == "jvp" else ADJOINT_PREFIX
     fresh = set(derived) - set(own)

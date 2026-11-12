@@ -116,7 +116,7 @@ def _step_kernels(plugin, window, door, device, events="step", reverse="per_step
     from hawk import Kernel
     from hawk.diff import step_vjp, tape
     from hawk.diff.tape import taped_planes
-    from hawk.ir.nodes import element_count
+    from raptor.ir.nodes import element_count
 
     from .._plan_deploy import _hawk_plugins
 

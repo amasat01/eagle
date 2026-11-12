@@ -176,7 +176,7 @@ def test_the_state_is_safe_to_share_between_threads():
 def test_a_real_hawk_cost_goes_through_the_rule():
     hawk = pytest.importorskip("hawk")
     import hawk.math as M
-    from hawk.ir import canonical
+    from raptor.ir import canonical
     from hawk.emit.host_vector import dispatch_costs
     from hawk.targets import build_spec
 

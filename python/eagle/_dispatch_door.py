@@ -141,7 +141,7 @@ def resolve_kernels(kernels, groups, *, door, spec=None) -> tuple:
     def dispatch_costs(walk, kernel, *args, **kwargs):
         return _costs(walk, host_spec(kernel, spec), *args, **kwargs)
 
-    from hawk.ir.walk import written_names
+    from raptor.ir.walk import written_names
 
     written = set()
     for k in kernels:

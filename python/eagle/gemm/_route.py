@@ -24,7 +24,7 @@ def attach(plugin, kernel) -> None:
     """Route ``plugin`` (built from ``kernel``) through the GEMM when hawk
     recognises one dense two-operand contraction with one output whose lanes
     are its result in row-major order; anything else stays the kernel."""
-    from hawk.ir import recognize
+    from hawk.passes.contraction import recognize
 
     record = recognize(kernel)
     if record is None or record.operand_class != "gemm" or len(record.outputs) != 1:
@@ -46,8 +46,8 @@ def _major_operand(kernel, record):
     its minor half (``lane - (lane // m) * m``), or ``None``: the lanes are
     then the product in row-major order. Read off hawk's own walk of the
     fold (:mod:`hawk.ir.contraction`, whose fan-in reading gives ``m``)."""
-    from hawk.ir import contraction as hc
-    from hawk.ir.nodes import Op, SampleIndex
+    from hawk.passes import contraction as hc
+    from raptor.ir.nodes import Op, SampleIndex
 
     per = {}
     for sink in hc._sinks_of(kernel):
