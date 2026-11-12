@@ -386,7 +386,7 @@ class _HostSide:
     def __init__(self, kernels, cache_dir, scalar_type):
         from hawk.emit import policy     # read here: the build thread does not see the caller's context
 
-        self._args = (list(kernels), _targets_of(_HOST), cache_dir, scalar_type, policy.contraction())
+        self._args = (list(kernels), _targets_of(_HOST, loadable=True), cache_dir, scalar_type, policy.contraction())
         self._ambient = _ambient_policy()
         self._plugins = self._error = None
         self._pid = os.getpid()
@@ -525,11 +525,12 @@ def _hawk_plugins(kernels, targets, cache_dir, scalar_type=None, contraction=Non
 _HOST, _DEVICE = "host", "device"
 
 
-def _targets_of(entry: str) -> tuple:
-    """The ids of hawk's target rows eagle enters as ``entry``."""
+def _targets_of(entry: str, loadable: bool = False) -> tuple:
+    """The ids of hawk's target rows eagle enters as ``entry``, from their manifests (nothing is imported); ``loadable``: only the
+    rows whose backend imports, asked where the rows are about to be built."""
     from hawk.targets import entry_ids
 
-    return entry_ids(entry)
+    return entry_ids(entry, loadable)
 
 
 def _has_entry(targets, entry: str) -> bool:
@@ -539,7 +540,7 @@ def _has_entry(targets, entry: str) -> bool:
 
 def _default_targets() -> tuple:
     """Every host row, plus every device row with a usable device and compiler."""
-    host = _targets_of(_HOST)
+    host = _targets_of(_HOST, loadable=True)
     try:
         from . import _core
 
@@ -554,14 +555,14 @@ def _default_targets() -> tuple:
             nvrtc.nvrtc_version()
         except Exception:
             return host
-    return host + _targets_of(_DEVICE)
+    return host + _targets_of(_DEVICE, loadable=True)       # a device is present and about to be built for: the import is tested here
 
 
 def _eager_targets() -> tuple:
     """What a default deploy waits for: the device alone when a GPU is usable
     (the host builds in the background, :class:`_HostSide`), else the host."""
     device = _targets_of(_DEVICE)
-    return device if _has_entry(_default_targets(), _DEVICE) else _targets_of(_HOST)
+    return device if _has_entry(_default_targets(), _DEVICE) else _targets_of(_HOST, loadable=True)
 
 
 def _bundle_key(kernels, targets, defines=(), mode="float64") -> str:
