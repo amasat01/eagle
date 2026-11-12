@@ -27,6 +27,7 @@ from pathlib import Path
 
 import pytest
 
+import _gates as gates
 from raptor.conformance import freethreading as ft
 from raptor.conformance.freethreading import declare_ft_row, register_ft_row
 
@@ -94,13 +95,13 @@ def test_rows_declared_and_collected():
 
 @register_ft_row("FT-1-GIL-FREE-EAGLE-CORE")
 def test_core_is_gil_free():
-    ft.require_free_threaded()
+    gates.require_free_threaded()
     ft.assert_gil_free("eagle._core")
 
 
 @register_ft_row("FT-1-GIL-FREE-EAGLE-MPI")
 def test_mpi_is_gil_free():
-    ft.require_free_threaded()
+    gates.require_free_threaded()
     try:
         import eagle._mpi  # noqa: F401
     except ImportError:
@@ -111,10 +112,10 @@ def test_mpi_is_gil_free():
 
 @register_ft_row("FT-2-CANARY-EAGLE-CORE")
 def test_core_canary_loses_updates():
-    ft.require_free_threaded()
+    gates.require_free_threaded()
     from eagle import _core
 
-    res = ft.require_not_vacuous(
+    res = gates.require_not_vacuous(
         ft.measure_loss(_core._unsynchronised_bump, _core._unsynchronised_count)
     )
     print(f"eagle._core canary lost {res.lost_fraction:.1%} of {res.expected}")
@@ -197,7 +198,7 @@ print(json.dumps({"results": [r[0] for r in res], "errors": [r[1] for r in res i
 @register_ft_row("FT-5-EAGLE-LAUNCHER-SHARED")
 @pytest.mark.gpu
 def test_shared_launcher_replays_exactly():
-    ft.require_free_threaded()
+    gates.require_free_threaded()
     out = _run_child(_LAUNCHER_CHILD)
     assert out["errors"] == [], out["errors"]
     assert out["value"] == out["expected"] == 2000.0, out
@@ -230,7 +231,7 @@ print(json.dumps({"errors": [r[1] for r in res if r[0] == "err"], "steps": steps
 @register_ft_row("FT-5-EAGLE-COMPOSER-SHARED")
 @pytest.mark.gpu
 def test_shared_composer_fires_exactly():
-    ft.require_free_threaded()
+    gates.require_free_threaded()
     out = _run_child(_COMPOSER_CHILD)
     assert out["errors"] == [], out["errors"]
     assert out["members"] == 2
@@ -278,7 +279,7 @@ print(json.dumps({"bad": bad, "wins": wins, "errors": sorted(errs), "reps": REPS
 @register_ft_row("FT-5-EAGLE-CONSUME-TWICE")
 @pytest.mark.gpu
 def test_consume_twice_consumes_once():
-    ft.require_free_threaded()
+    gates.require_free_threaded()
     out = _run_child(_CONSUME_CHILD)
     assert out["bad"] == [], out["bad"]
     assert out["wins"] == {k: out["reps"] for k in out["wins"]}, out

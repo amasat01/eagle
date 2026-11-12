@@ -176,7 +176,8 @@ def test_the_state_is_safe_to_share_between_threads():
 def test_a_real_hawk_cost_goes_through_the_rule():
     hawk = pytest.importorskip("hawk")
     import hawk.math as M
-    from hawk.ir import canonical, dispatch_costs
+    from hawk.ir import canonical
+    from hawk.passes.cost import dispatch_costs
 
     @hawk.kernel
     def rare(k: hawk.Index, x: hawk.Scalar, y: hawk.Mutable[hawk.Scalar]):

@@ -43,7 +43,8 @@ import pathlib
 
 import numpy as np
 import pytest
-from raptor.conformance.interop import certified_framework, register_row
+from _gates import certified_framework
+from raptor.conformance.interop import register_row
 
 import eagle
 from eagle import GraphPipeline, LoadedVector, detect, to_array

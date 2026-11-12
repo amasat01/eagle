@@ -37,6 +37,7 @@ import numpy as np
 from eagle.frameworks import cupy as interop_cupy
 import pytest
 
+import _gates as gates
 from raptor.conformance import freethreading as ft
 from raptor.conformance.freethreading import declare_ft_row, register_ft_row
 
@@ -151,7 +152,7 @@ def test_cold_registry_has_one_winner(monkeypatch):
 # --------------------------------------------------------------------------- #
 @register_ft_row("FT-3-EAGLE-COUNTERS-EXACT")
 def test_counters_exact_under_threads(monkeypatch):
-    ft.require_free_threaded()
+    gates.require_free_threaded()
     import importlib
 
     from eagle import _counters, marshal

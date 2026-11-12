@@ -48,7 +48,8 @@ os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
 import numpy as np
 import pytest
-from raptor.conformance.interop import certified_framework, register_row
+from _gates import certified_framework
+from raptor.conformance.interop import register_row
 
 from eagle import LoadedPure, LoadedVector
 from eagle.frameworks.cupy import to_cupy

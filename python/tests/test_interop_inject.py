@@ -52,7 +52,8 @@ import pytest
 hawk = pytest.importorskip("hawk", reason="the inject rows trace their kernels with hawk")
 from hawk import Mutable, Param, Scalar, Table, Terminated  # noqa: E402
 from hawk.ext import Guard, Kind
-from raptor.conformance.interop import certified_framework, register_row
+from _gates import certified_framework
+from raptor.conformance.interop import register_row
 
 import eagle
 import eagle.diff
