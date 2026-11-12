@@ -534,7 +534,7 @@ class _Level:
         with LOCK:
             if "twin" not in self._children:
                 from hawk.diff import param_planes
-                from hawk.ir.nodes import HawkError
+                from raptor.errors import RaptorError
 
                 twin = None
                 try:
@@ -547,7 +547,7 @@ class _Level:
                                       state=self.state)
                         twin.fn
                         twin.wrt = tuple(n for n in self.wrt if n in twin.inputs)
-                except HawkError:
+                except RaptorError:
                     twin = None
                 self._children["twin"] = twin
             return self._children["twin"]

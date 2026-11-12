@@ -145,7 +145,7 @@ class Level:
         samples itself, or has a ``jump=`` plan) or this level has no source for one."""
         with LOCK:
             if "twin" not in self._derived:
-                from hawk.ir.nodes import HawkError
+                from raptor.errors import RaptorError
 
                 try:
                     if self.base is not None:
@@ -153,7 +153,7 @@ class Level:
                         twin = None if below is None else below.derived(self.kind)
                     else:
                         twin = None if self.cell_source is None else self.cell_source(self)
-                except HawkError:
+                except RaptorError:
                     twin = None
                 self._derived["twin"] = twin
             return self._derived["twin"]

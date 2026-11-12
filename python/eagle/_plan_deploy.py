@@ -106,10 +106,11 @@ class AutoPlan:
         if kernel is None or getattr(kernel, "broadcast", None) or not hasattr(kernel, "lane_space"):
             return self, args, kw      # no kernel, a variant, or a stand-in that declares no lanes
         from hawk import _broadcast
+        from raptor.errors import RaptorError
 
         try:
             run, args, kw = _broadcast.route(kernel, args, kw)
-        except _broadcast.HawkError as exc:     # eagle's own doors refuse with ValueError
+        except RaptorError as exc:     # eagle's own doors refuse with ValueError
             raise ValueError(str(exc)) from None
         if run is kernel:
             return self, args, kw
