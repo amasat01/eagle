@@ -275,7 +275,7 @@ def _split_parts(kernel, group: str, device: bool, spec=None) -> tuple:
     import dataclasses
 
     import hawk
-    from hawk.compile.toolchain import host_profile
+    from osprey_cpu.toolchain import host_profile
     from aether.wings.cpu.host_vector import dispatch_costs as _costs
 
     def dispatch_costs(walk, *args, **kwargs):
