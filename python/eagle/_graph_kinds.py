@@ -131,7 +131,7 @@ def _launch_transpose(node, incoming, ctx):
         elif name in rowset:
             # a parameter's gradient arrives as rows of 32-sample partial sums
             # (and their companions); the reverse finishes them into the cell
-            planes[name] = buf = _alloc.zeros(xp, -(-bound.n // _cell_rows.ROW), dtype=bound._dtype)
+            planes[name] = buf = _alloc.zeros(xp, -(-bound.n // _cell_rows.row_of(vjp)), dtype=bound._dtype)
             if name in cells:
                 out[src] = buf
             else:

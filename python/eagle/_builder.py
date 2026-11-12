@@ -350,7 +350,7 @@ class Rec:
 
     @staticmethod
     def _own_rows(plan, planes, n):
-        """A kernel that stores a reduction over samples writes one row per ``ROW`` samples (and a
+        """A kernel that stores a reduction over samples writes one row per ``cell_row`` samples (and a
         ``_comp`` row for a sum) into its plane, not the cell. The graph owns those rows, made here
         once and reused by every replay, and finishes them into the caller's cell with a reduce
         node right after the launch."""
@@ -359,7 +359,7 @@ class Rec:
             if name not in planes:          # a stage-internal cell, not a plane of the call
                 continue
             cell = planes[name]
-            cv, rows = _view(cell), -(-int(n) // _cell_rows.ROW)
+            cv, rows = _view(cell), -(-int(n) // _cell_rows.row_of(plan.plugin))
             xp = cv.device
             planes[name] = hi = _alloc.zeros(xp, rows, cv.dtype)
             if op in ("sum", "mean"):

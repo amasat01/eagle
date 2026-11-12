@@ -15,6 +15,8 @@ shown to see a violation; eight threads.
 CUDA rows carry the ``gpu`` marker and skip where no CUDA Warp device exists.
 """
 
+from hawk.variants import load as _variant
+_ROW = _variant("cpu")["cells"]["row"]      # samples per row of the host variant
 import threading
 import time
 import traceback
@@ -650,7 +652,7 @@ def test_policy_reaches_the_cell_finish(tmp_path, monkeypatch, policy):
     real = _cell_rows.reduce
     monkeypatch.setattr(_cell_rows, "reduce",
                         lambda *a, **k: seen.append(k.get("policy")) or real(*a, **k))
-    x = np.random.default_rng(0).uniform(-1, 1, 3 * _cell_rows.ROW + 5)
+    x = np.random.default_rng(0).uniform(-1, 1, 3 * _ROW + 5)
     fn = eagle_warp.function(cell_sum, cache_dir=tmp_path, policy=policy)
     got = fn(wp.array(x, dtype=wp.float64, device="cpu")).numpy()
     assert seen and set(seen) == {policy}

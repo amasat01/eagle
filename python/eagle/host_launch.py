@@ -103,6 +103,8 @@ class HostPluginLibrary:
          self.sorted_inputs, self.box) = read_launch(sidecar, name=label)
         #: The opaque notes on planes (``plane_meta``), by plane name.
         self.plane_meta = read_plane_meta(sidecar, name=label)
+        #: The sidecar the plugin was made from (a run reads its ``cell_row`` and ``scatter_chunks`` here).
+        self.sidecar = sidecar
         # The manifest-bypassing door (C++ ``add_plugin``'s mirror), so it
         # runs its own launch certification.
         check_launch_certified_pattern(

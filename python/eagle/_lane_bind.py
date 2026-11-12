@@ -289,19 +289,24 @@ def key_count(plugin, spec: dict, n: int) -> int:
     return keyed_size(plugin, spec, n) // spec["width"]
 
 
-#: The most lane chunks an ordered ``hawk.scatter`` adds in (a chunk is one thread's run of lanes).
-SCATTER_CHUNKS = 256
-
-
 def _cells_of(plane) -> int:
     """Elements of a bound plane (any array with a ``shape``)."""
     return prod(plane.shape)
 
 
-def scatter_chunks(n: int, targets: int) -> int:
+def chunk_cap(plugin) -> int:
+    """The most lane chunks an ordered ``hawk.scatter`` adds in (the unit's sidecar ``scatter_chunks``); refused by name when absent."""
+    meta = getattr(plugin, "_meta", None) or getattr(plugin, "sidecar", None) or {}
+    if "scatter_chunks" not in meta:
+        raise ValueError(f"eagle: kernel {getattr(plugin, 'kernel', '?')!r} states no scatter_chunks in its sidecar (a unit built before the "
+                         "chunk cap became a variant fact): rebuild it with the hawk that writes it")
+    return int(meta["scatter_chunks"])
+
+
+def scatter_chunks(n: int, targets: int, max_chunks: int) -> int:
     """The chunks an ordered scatter of ``n`` lanes into ``targets`` cells adds in:
-    ``clamp(n // targets, 1, 256)``, so the partial sums (``chunks * targets`` cells) stay O(n)."""
-    return min(SCATTER_CHUNKS, max(1, n // max(targets, 1)))
+    ``clamp(n // targets, 1, max_chunks)``, so the partial sums (``chunks * targets`` cells) stay O(n)."""
+    return min(max_chunks, max(1, n // max(targets, 1)))
 
 
 def team_grid(plugin, team: dict, n: int, planes: dict) -> int:
@@ -312,7 +317,7 @@ def team_grid(plugin, team: dict, n: int, planes: dict) -> int:
     if kind == "keys":
         return key_count(plugin, team["keyed"], n) * team.get("groups", 1)
     if kind == "chunks":
-        return scatter_chunks(n, _cells_of(planes[team["of"]]))
+        return scatter_chunks(n, _cells_of(planes[team["of"]]), chunk_cap(plugin))
     if kind == "targets":
         return _cells_of(planes[team["of"]])
     return -(-n // (team.get("lanes", 1) * team.get("warps", 1)))      # a block serving ``lanes`` lanes, or ``warps`` warps of one lane each
@@ -325,7 +330,7 @@ def team_units(plugin, spec: dict, n: int, planes: dict) -> int:
         return 1
     if "per_target" in spec:
         size = _cells_of(planes[spec["per_target"]])
-        return scatter_chunks(n, size) * size
+        return scatter_chunks(n, size, chunk_cap(plugin)) * size
     return n if "keys" not in spec else key_count(plugin, spec["keys"], n)
 
 

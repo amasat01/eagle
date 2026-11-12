@@ -233,7 +233,7 @@ def test_rank_cuts_of_a_cells_kernel_are_whole_rows_and_cover_every_sample():
     for n in (32, 33, 1000, 1024, 1 + 32 * 7):
         for size in (1, 2, 3, 5, 40):
             whole = eexec.Partition.whole(n)
-            cuts = [_cell_rows.rank_samples(whole, r, size) for r in range(size)]
+            cuts = [_cell_rows.rank_samples(whole, r, size, 32) for r in range(size)]
             covered = []
             for base, count, total in cuts:
                 assert total == n and base % 32 == 0
@@ -242,7 +242,7 @@ def test_rank_cuts_of_a_cells_kernel_are_whole_rows_and_cover_every_sample():
             assert covered == list(range(n)), (n, size)
     # an offset whole partition keeps its base and its end
     part = eexec.Partition(64, 200, 1000)
-    cuts = [_cell_rows.rank_samples(part, r, 2) for r in range(2)]
+    cuts = [_cell_rows.rank_samples(part, r, 2, 32) for r in range(2)]
     assert cuts == [(64, 128, 1000), (192, 72, 1000)]
     with pytest.raises(ValueError, match="multiple of 32"):
-        _cell_rows.rank_samples(eexec.Partition(40, 100, 1000), 0, 2)
+        _cell_rows.rank_samples(eexec.Partition(40, 100, 1000), 0, 2, 32)

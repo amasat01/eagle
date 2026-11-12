@@ -19,8 +19,6 @@ from . import _alloc
 from .dtypes import dtype_name
 from ._graph_reduce import _lower_cpu, _lower_gpu, check_policy, reduce
 
-#: samples per row, fixed by the kernel
-ROW = 32
 #: scratch sets made so far (one per kernel, sample count, policy, backend)
 made = 0
 _LOCK = threading.Lock()
@@ -50,6 +48,33 @@ def cells_of(plugin) -> dict:
     except AttributeError:
         pass
     return cells
+
+
+def sidecar_of(plugin) -> dict:
+    """The sidecar dict a plugin carries (``_meta`` of a loaded kernel, ``sidecar`` of a host plugin), ``{}`` when it keeps none."""
+    return getattr(plugin, "_meta", None) or getattr(plugin, "sidecar", None) or {}
+
+
+def row_of(plugin) -> int:
+    """The samples per row the kernel was built with (its sidecar's ``cell_row``); a unit whose sidecar states none is refused by name."""
+    meta = sidecar_of(plugin)
+    if "cell_row" not in meta:
+        raise ValueError(f"eagle: kernel {getattr(plugin, 'kernel', '?')!r} states no cell_row in its sidecar (a unit built before the row "
+                         "width became a variant fact): rebuild it with the hawk that writes it")
+    return int(meta["cell_row"])
+
+
+def one_row_width(plugins) -> int | None:
+    """The row width shared by ``plugins`` (those that reduce over samples); ``None`` for none. One run has one row width: kernels
+    stating different ones are refused by name, both widths in the message."""
+    found = {}
+    for plugin in plugins:
+        if cells_of(plugin):
+            found.setdefault(row_of(plugin), getattr(plugin, "kernel", "?"))
+    if len(found) > 1:
+        (w1, k1), (w2, k2) = list(found.items())[:2]
+        raise ValueError(f"eagle: one run has one row width, but kernel {k1!r} has {w1} and kernel {k2!r} has {w2}")
+    return next(iter(found), None)
 
 
 def companions_of(plugin) -> dict:
@@ -124,27 +149,27 @@ def hidden(plugin) -> frozenset:
     return row_planes(plugin) - frozenset(cells_of(plugin)) | frozenset(companions_of(plugin))
 
 
-def whole_rows(part) -> tuple:
+def whole_rows(part, row: int) -> tuple:
     """``(first row, rows, total rows)`` a whole partition covers. Its base must
-    sit on a row (a multiple of :data:`ROW`), or a row would start before it."""
-    if part.base % ROW:
+    sit on a row (a multiple of ``row``, the kernel's ``cell_row``), or a row would start before it."""
+    if part.base % row:
         raise ValueError(
             f"eagle.plan: a kernel that reduces over samples is cut across ranks "
-            f"in rows of {ROW} samples, so a partition must start on a multiple "
-            f"of {ROW}; got base {part.base}")
-    first = part.base // ROW
-    return first, -(-(part.base + part.count) // ROW) - first, -(-part.n_samples // ROW)
+            f"in rows of {row} samples, so a partition must start on a multiple "
+            f"of {row}; got base {part.base}")
+    first = part.base // row
+    return first, -(-(part.base + part.count) // row) - first, -(-part.n_samples // row)
 
 
-def rank_samples(part, rank: int, size: int) -> tuple:
+def rank_samples(part, rank: int, size: int, row: int) -> tuple:
     """``(base, count, n_samples)`` rank ``rank`` of ``size`` runs of a whole
     partition: the rows are split as eagle splits samples (the first
     ``rows % size`` ranks take one more), so no row has two writers and the
     rows are the single-rank run's, bit for bit."""
-    first, rows, _ = whole_rows(part)
+    first, rows, _ = whole_rows(part, row)
     q, rem = divmod(rows, size)
-    lo = (first + rank * q + min(rank, rem)) * ROW
-    hi = min(lo + (q + (rank < rem)) * ROW, part.base + part.count)
+    lo = (first + rank * q + min(rank, rem)) * row
+    hi = min(lo + (q + (rank < rem)) * row, part.base + part.count)
     return lo, max(hi - lo, 0), part.n_samples
 
 
@@ -158,8 +183,8 @@ class CellRows:
     ``outs`` (``{plane: (1,) array}``) names cells finished into the caller's
     own arrays instead of new ones."""
 
-    def __init__(self, cells, n, xp, dtype, policy, outs=None):
-        rows = -(-int(n) // ROW)
+    def __init__(self, cells, n, xp, dtype, policy, row, outs=None):
+        rows = -(-int(n) // int(row))
         self.rows = {}
         self.cell = {}
         lower = _lower_gpu if _on_device(xp) else _lower_cpu
@@ -212,10 +237,11 @@ def _key(n, policy, xp, dtype):
     return (int(n), policy, xp, dtype_name(dtype))
 
 
-def scratch(owner, n, xp, dtype, policy="compensated", cells=None):
+def scratch(owner, n, xp, dtype, policy="compensated", cells=None, row=None):
     """The :class:`CellRows` of ``owner`` (a plugin, or any object that keeps
     attributes) at ``n`` samples, made on first use and kept; ``None`` for a
-    kernel with no reduction over samples. ``cells`` defaults to the plugin's."""
+    kernel with no reduction over samples. ``cells`` defaults to the plugin's; ``row`` is the kernel's ``cell_row`` (read from the
+    owner's sidecar when not given)."""
     global made
     cells = cells_of(owner) if cells is None else cells
     if not cells:
@@ -225,7 +251,7 @@ def scratch(owner, n, xp, dtype, policy="compensated", cells=None):
     key = _key(n, policy, xp, dtype)
     with _LOCK:
         if key not in held:
-            held[key] = CellRows(cells, n, xp, dtype, policy)
+            held[key] = CellRows(cells, n, xp, dtype, policy, row_of(owner) if row is None else row)
             made += 1
         return held[key]
 

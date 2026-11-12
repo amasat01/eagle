@@ -33,6 +33,7 @@ they cannot disagree about how a role packs.
 
 from __future__ import annotations
 
+import functools
 from dataclasses import dataclass
 
 
@@ -381,7 +382,7 @@ def plan(
 
     if structure is eexec.RankPartition and _cell_rows.cells_of(plugin):
         for part in resolved or ():
-            _cell_rows.whole_rows(part)     # a base off a row is refused here
+            _cell_rows.whole_rows(part, _cell_rows.row_of(plugin))     # a base off a row is refused here
     eexec.check_placement(access, structure, npart)  # placement legality, at PLAN time
     if any(name == "device" for _role, name in getattr(plugin, "arg_spec", None) or ()):
         raise ValueError("eagle.plan: a parameter named 'device' clashes with the "
@@ -695,20 +696,20 @@ def _gather_plane(plane, n: int, parts) -> None:
             eexec.RankPartition.allgather_plane(addr + r * stride, part, 1)
 
 
-def _gather_aligned(plane, n: int, parts, rows: bool = False) -> None:
+def _gather_aligned(plane, n: int, parts, rows: bool = False, *, row: int) -> None:
     """The gather of a run whose ranks were cut at whole rows
     (see :func:`eagle._cell_rows.rank_samples`): ``rows`` is a cell's row plane, gathered
     one element per row; any other plane goes through a copy padded to whole
     rows, because the world's cut is over rows, not samples."""
     for part in parts:
-        whole = eexec.Partition(*_cell_rows.whole_rows(part))
+        whole = eexec.Partition(*_cell_rows.whole_rows(part, row))
         if rows:
             eexec.RankPartition.allgather_plane(plane.ptr, whole, 1)
             continue
         for comp in ([plane[i] for i in range(plane.shape[0])] if plane.ndim > 1 else [plane]):
-            padded = arrays.zeros(whole.n_samples * _cell_rows.ROW, dtype="float64")
+            padded = arrays.zeros(whole.n_samples * row, dtype="float64")
             arrays.copyto(padded[:n], comp)
-            eexec.RankPartition.allgather_plane(padded.ptr, whole, _cell_rows.ROW)
+            eexec.RankPartition.allgather_plane(padded.ptr, whole, row)
             arrays.copyto(comp, padded[:n])
 
 
@@ -728,6 +729,7 @@ def _run_rank_plan(p: Plan, plugin, arg_spec, kw, n: int, parts, policy="compens
         )
 
     aligned = bool(_cell_rows.cells_of(plugin))
+    row = _cell_rows.row_of(plugin) if aligned else None
     inner_launch = _launch_device if inner is eexec.DeviceKernel else _launch_host
 
     def launch(entry, addrs, part):
@@ -736,11 +738,11 @@ def _run_rank_plan(p: Plan, plugin, arg_spec, kw, n: int, parts, policy="compens
         # a cells kernel writes one row per 32 samples: cut at whole rows, so
         # no row has two writers
         rank, size = eexec.RankPartition.world()
-        mine = eexec.Partition(*_cell_rows.rank_samples(part, rank, size))
+        mine = eexec.Partition(*_cell_rows.rank_samples(part, rank, size, row))
         return inner_launch(entry, addrs, mine) if mine.count else 0
 
     runner = _run_device_plan if inner is eexec.DeviceKernel else _run_host_plan
-    gather = _gather_aligned if aligned else _gather_plane
+    gather = functools.partial(_gather_aligned, row=row) if aligned else _gather_plane
     return runner(plugin, arg_spec, kw, n, parts, launch=launch,
                   gather=gather if p.gather else None, policy=policy)
 

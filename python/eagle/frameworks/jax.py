@@ -670,6 +670,10 @@ def _result_shape(sig, name, n, work, cells=1):
     return (n,) if name in sig.rows else sig.shape(name, n, cells)
 
 
+#: Samples per row for the size of a CUDA work buffer. Variant fact not in reach here: W25 STOP site (``sig`` carries no sidecar).
+_ROW_NOT_IN_REACH = 32
+
+
 def _work_elems(sig, n, mode, policy):
     """Elements each CUDA reduction work result holds (0 with no cells)."""
     if not sig.cells:
@@ -677,7 +681,7 @@ def _work_elems(sig, n, mode, policy):
     from .. import _core
 
     dtype = 0 if sig.dtype(next(iter(sig.cells)), mode) == np.float32 else 1
-    return int(_core.reduce_canonical_device(0, -(-n // _cell_rows.ROW), dtype, 0, 0, 0, 0, 0, -1,
+    return int(_core.reduce_canonical_device(0, -(-n // _ROW_NOT_IN_REACH), dtype, 0, 0, 0, 0, 0, -1,
                                              policy, 1))
 
 
@@ -762,6 +766,8 @@ def _recipe_fields(level, artifact, mode, device=False):
     return {"nargs": len(ops), "nrets": len(rets), "dtype": dtype, "zero": zero,
             "slot_kind": slot_kind, "slot_buffer": slot_buffer, "slot_cell": slot_cell,
             "sample_buffer": sample,
+            #: samples per row of the unit's reductions over samples (its sidecar's cell_row); a unit with none has no cells
+            "cell_row": _cell_rows.row_of(artifact) if conv["cells"] else 0,
             #: buffer indices (operands, then results)
             "cells": [(len(ops) + r, -1 if c is None else len(ops) + c, len(ops) + o, _CELL_OP[op])
                       for r, c, o, op in conv["cells"]],
@@ -796,7 +802,7 @@ def _install(digest, fields, *, platform, entry, ordinal=0, block=256, function=
             for i, k in enumerate(("cell_rows", "cell_comp", "cell_out", "cell_op"))}
     # the host finishes float64 sums with the machine GPU's arithmetic (bitwise host == device)
     fixed = platform == "cpu" and fields["cells"] and _fixed_f64()
-    r.ncells, r.cell_row, r.policy = len(cells), _cell_rows.ROW, policy | (_FIXED_F64 if fixed else 0)
+    r.ncells, r.cell_row, r.policy = len(cells), fields["cell_row"] or 1, policy | (_FIXED_F64 if fixed else 0)
     r.cell_rows, r.cell_comp, r.cell_out, r.cell_op = (cols[k] for k in ("cell_rows", "cell_comp", "cell_out", "cell_op"))
     r.work_a, r.work_b = fields["work"] or (-1, -1)
     if seam is not None:

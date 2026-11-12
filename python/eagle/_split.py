@@ -519,7 +519,7 @@ class SplitBound:
         self._status = []           # (kernel, team record, status plane, target cells) of each ordered scatter
         for st in stages:
             ops = getattr(st.plugin, "_stage_cells", {})
-            rows = (_cell_rows.CellRows(ops, n, xp, self._dtype, policy,
+            rows = (_cell_rows.CellRows(ops, n, xp, self._dtype, policy, _cell_rows.row_of(st.plugin),
                                         outs={c: planes[c] for c in ops if c in planes})
                     if ops else None)
             if rows is not None:

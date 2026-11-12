@@ -25,6 +25,8 @@ at a barrier).
 
 from __future__ import annotations
 
+from hawk.variants import load as _variant
+_ROW = _variant("cpu")["cells"]["row"]      # samples per row of the host variant
 import json
 import ctypes
 import os
@@ -521,8 +523,8 @@ def test_float64_sum_cell_on_the_cpu_matches_eagle_reduce(tmp_path):
     big = rng.uniform(1, 2, 500) * 2.0 ** rng.integers(-80, 80, 500)
     v = np.concatenate([big, -big[::-1]])
     v[::3] *= 1 + 2.0 ** -30          # wide spread: the two arithmetics differ here
-    x = np.zeros(v.size * _cell_rows.ROW)
-    x[::_cell_rows.ROW] = v           # one term per row: the rows are v exactly
+    x = np.zeros(v.size * _ROW)
+    x[::_ROW] = v           # one term per row: the rows are v exactly
     want = np.zeros(1)
     eagle.Graph().add_node(eagle.reduce(v, want)).build().launch()
     with jax.default_device(_device("cpu")):
@@ -542,7 +544,7 @@ def test_policy_reaches_the_cell_recipe(tmp_path, policy):
     from eagle import _cell_rows
     from eagle._graph_reduce import POLICIES
 
-    x = np.random.default_rng(0).uniform(-1, 1, 3 * _cell_rows.ROW + 5)
+    x = np.random.default_rng(0).uniform(-1, 1, 3 * _ROW + 5)
     with jax.default_device(_device("cpu")):
         got = np.asarray(eagle_jax.function(cell_sum, wrt=(), cache_dir=tmp_path,
                                             policy=policy)(jnp.asarray(x)))
