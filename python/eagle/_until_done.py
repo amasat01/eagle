@@ -729,7 +729,7 @@ class Runner:
                 active.own(*owned)
 
         if record and steps_reverse == "auto":      # the table's answer for this batch, K and device
-            from hawk.ir.steps_class import _choose
+            from raptor.ir.steps_class import choose
 
             from .launch import _device_props
 
@@ -738,7 +738,15 @@ class Runner:
 
             fits = not auto and k > 1 and window in (None, k) and not refine
             width = sum(1 for role, _nm in specs[0] if role == "mutable")
-            steps_reverse = _choose(device, width, k, n, resident) if fits else "per_step"
+            steps_reverse = "per_step"
+            if fits:        # the kernel hands over its measured rows as plain data; none given, per_step
+                source = getattr(plans[0].plugin, "_hawk_source", None)
+                table = source[0].steps_reverse_table(bool(device)) if source is not None else {}
+                per_resident = table.get("regime") == "per_resident"
+                if per_resident and resident <= 0:
+                    raise ValueError("eagle.until_done: steps_reverse='auto' on a device needs the device's "
+                                     "SM count and resident threads per SM")
+                steps_reverse = choose(table.get("rows", ()), width, k, n / (resident if per_resident else 1))
         elif steps_reverse == "auto":
             steps_reverse = "per_step"
         if steps_reverse == "fused":

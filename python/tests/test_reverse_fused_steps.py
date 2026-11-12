@@ -85,9 +85,9 @@ def _chosen(k, n, backend):
 
 
 def test_auto_follows_the_measured_table_on_the_host():
-    from hawk.ir import steps_class
+    from hawk.targets.steps_reverse import table_for
 
-    assert steps_class._ROWS[False], "the host class has measured rows"
+    assert table_for(False)["rows"], "the host class has measured rows"
     assert _chosen(4, 8, "cpu") == "fused"           # inside the measured batch range
     assert _chosen(4, 4096, "cpu") == "per_step"     # beyond it
     assert _chosen(1, 8, "cpu") == "per_step"        # a single-step kernel has nothing to fuse

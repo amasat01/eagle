@@ -56,6 +56,16 @@ class PerformanceWarning(UserWarning):
 
 
 # --- the request --- #
+def host_spec(kernel, spec=None):
+    """The build spec the cost and stage functions read their variant from: ``spec`` as the caller gave it, else the one the
+    hawk ``kernel`` holds for the host rows. eagle builds none: with neither, it refuses by name."""
+    if spec is None:
+        spec = getattr(kernel, "host_spec", lambda: None)()
+    if spec is None:
+        raise ValueError("eagle: the build spec is missing: pass spec= (the build spec of the host rows), or a kernel that holds one")
+    return spec
+
+
 def auto_groups(kernel) -> list:
     """Names of the ``"auto"`` dispatch groups of ``kernel``'s single step."""
     step = kernel.step if kernel.step is not None else kernel
@@ -113,7 +123,7 @@ def request(kernels, dispatch) -> dict:
     return groups
 
 
-def resolve_kernels(kernels, groups, *, door) -> tuple:
+def resolve_kernels(kernels, groups, *, door, spec=None) -> tuple:
     """``(deploy, spec)``: ``kernels`` with every group lowered to a plain
     policy, ready to deploy, and ``spec``, the one group a
     :class:`DispatchRunner` takes over (or ``None``).
@@ -126,14 +136,18 @@ def resolve_kernels(kernels, groups, *, door) -> tuple:
     :class:`PerformanceWarning`. ``spec`` is ``(kernel, group, forced)`` with
     the model's other groups already lowered in ``kernel``."""
     import hawk
-    from hawk.ir import dispatch_costs
+    from hawk.passes.cost import dispatch_costs as _costs
+
+    def dispatch_costs(walk, kernel, *args, **kwargs):
+        return _costs(walk, host_spec(kernel, spec), *args, **kwargs)
+
     from hawk.ir.walk import written_names
 
     written = set()
     for k in kernels:
         written |= written_names(_step(k).walk.order)
     static = {(k.name, name): _policy.static_selector(cost.selector_reads, written)
-              for k in kernels for name, cost in dispatch_costs(_step(k).walk).items()}
+              for k in kernels for name, cost in dispatch_costs(_step(k).walk, k).items()}
     spec, slow, deploy = None, False, []
     for k in kernels:
         plain, mine = {}, None
@@ -252,7 +266,7 @@ _PARTS_LOCK = threading.Lock()
 _PARTS_MAX = 32
 
 
-def _split_parts(kernel, group: str, device: bool) -> tuple:
+def _split_parts(kernel, group: str, device: bool, spec=None) -> tuple:
     """``(cost, unit plugins, classify plugin or None, sweep plan or None)``
     of ``kernel``'s ``group``, built once per kernel, group and target (and,
     on the host, host profile: it decides whether library math vectorises, so
@@ -262,7 +276,11 @@ def _split_parts(kernel, group: str, device: bool) -> tuple:
 
     import hawk
     from hawk.compile.toolchain import host_profile
-    from hawk.ir import dispatch_costs
+    from hawk.passes.cost import dispatch_costs as _costs
+
+    def dispatch_costs(walk, *args, **kwargs):
+        return _costs(walk, host_spec(kernel, spec), *args, **kwargs)
+
     from hawk.trace.kernel import Kernel
 
     from ._plan_deploy import _build_by_name, auto
