@@ -138,7 +138,7 @@ class Signature:
                                 if self.role[n] == "terminated"), None)
         finish = getattr(kernel.walk, "finish", None)
         self.finishes = (self.terminated is not None and finish is not None
-                         and finish[0] == self.terminated)
+                         and finish == self.terminated)
         outs = [n for r, n in self.arg_spec
                 if (r in OUTPUT_ROLES or r in accum or n in self.cells)
                 and n not in self.rows - set(self.cells)]

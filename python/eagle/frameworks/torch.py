@@ -266,7 +266,7 @@ class _Level:
         self.finishes_terminated = (
             self.terminated is not None
             and self.finish is not None
-            and self.finish[0] == self.terminated
+            and self.finish == self.terminated
         )
         #: a reduction over samples: its rows are eagle's scratch, the cell is the output
         self.cells = _cell_rows.kernel_cells(kernel)
@@ -816,7 +816,7 @@ class KernelFunction:
             )
         order = [name for name in kernel.planes if name in role_of]
         if not any(role_of[n] in OUTPUT_ROLES for n in order) and not (
-            finish is not None and finish[0] in role_of
+            finish is not None and finish in role_of
         ):
             raise ValueError(
                 f"eagle.frameworks.torch: kernel {kernel.name!r} writes no output"

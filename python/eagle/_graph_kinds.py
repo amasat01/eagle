@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import contextvars
 
+from raptor.protocols.naming import SAMPLE_SUM_COMP
+
 from . import _alloc, arrays
 from ._conditional import RepeatWhile
 from .graph import ForkStage, LowerCtx, Node, get_node_kind, register_node_kind
@@ -135,7 +137,7 @@ def _launch_transpose(node, incoming, ctx):
             if name in cells:
                 out[src] = buf
             else:
-                ctx.comp[id(planes[name[:-len("_comp")]])] = buf
+                ctx.comp[id(planes[name[:-len(SAMPLE_SUM_COMP)]])] = buf
         elif src in role_of and role_of[src] not in OUTPUT_ROLES:
             # a parameter cell's gradient comes back per sample; the reverse sums it
             per_sample = role_of[src] == "lookup" and role == "mutable"

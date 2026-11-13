@@ -15,6 +15,8 @@ from __future__ import annotations
 import threading
 
 
+from raptor.protocols.naming import SAMPLE_SUM_COMP
+
 from . import _alloc
 from .dtypes import dtype_name
 from ._graph_reduce import _lower_cpu, _lower_gpu, check_policy, reduce
@@ -25,7 +27,7 @@ _LOCK = threading.Lock()
 
 
 def comp_name(name: str) -> str:
-    return f"{name}_comp"
+    return f"{name}{SAMPLE_SUM_COMP}"
 
 
 def cells_of(plugin) -> dict:
