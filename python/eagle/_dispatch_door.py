@@ -69,7 +69,7 @@ def host_spec(kernel, spec=None):
 def auto_groups(kernel) -> list:
     """Names of the ``"auto"`` dispatch groups of ``kernel``'s single step."""
     step = kernel.step if kernel.step is not None else kernel
-    return [d.name for d in step.walk.dispatches if d.policy == "auto"]
+    return [d.name for d in step.walk.dispatches if d.strategy == "auto"]
 
 
 def _step(kernel):
@@ -87,8 +87,8 @@ def request(kernels, dispatch) -> dict:
     for k in kernels:
         step = _step(k)
         for d in step.walk.dispatches:
-            declared.setdefault(d.name, set()).add(d.policy)
-            if d.policy == "auto":
+            declared.setdefault(d.name, set()).add(d.strategy)
+            if d.strategy == "auto":
                 groups[d.name] = None
     if dispatch is None:
         return groups
@@ -97,7 +97,7 @@ def request(kernels, dispatch) -> dict:
         if not wanted:
             raise ValueError(
                 "eagle: dispatch= picks the policy of an 'auto' dispatch group, and this "
-                "model has none; declare one with policy='auto' in the kernel, or drop "
+                "model has none; declare one with strategy='auto' in the kernel, or drop "
                 "dispatch=")
     elif isinstance(dispatch, dict):
         wanted = dict(dispatch)
@@ -117,7 +117,7 @@ def request(kernels, dispatch) -> dict:
         if group not in groups:
             raise ValueError(
                 f"eagle: dispatch= names {group!r}, which the kernel declared "
-                f"policy={sorted(declared[group])[0]!r}; only 'auto' groups can be "
+                f"strategy={sorted(declared[group])[0]!r}; only 'auto' groups can be "
                 "chosen here, the author's policy stays")
         groups[group] = None if policy in ("auto", None) else policy
     return groups
@@ -182,8 +182,8 @@ def resolve_kernels(kernels, groups, *, door, spec=None) -> tuple:
 # --- a graph's member plans --- #
 def relower_graph_nodes(nodes, dispatch, *, door):
     """``(nodes, decided)``: the launch nodes of a graph with every ``"auto"``
-    dispatch group of their hawk kernels lowered to a plain policy, and
-    ``{node label: {group: policy}}`` of what was chosen.
+    dispatch group of their hawk kernels lowered to a plain strategy, and
+    ``{node label: {group: strategy}}`` of what was chosen.
 
     A built graph is one fixed structure, so a group is never measured and
     never split here: ``dispatch=None`` lowers ``"auto"`` groups to

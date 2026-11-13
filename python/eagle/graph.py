@@ -504,7 +504,7 @@ class Graph:
 
     @property
     def dispatch(self) -> dict:
-        """``{node label: {group: policy}}`` the last :meth:`build` lowered
+        """``{node label: {group: strategy}}`` the last :meth:`build` lowered
         (empty when no node had an ``"auto"`` dispatch group)."""
         return dict(self._dispatch)
 
@@ -796,7 +796,7 @@ class Graph:
 
         The keywords of :class:`Graph` are the defaults of the same-named ones here.
 
-        ``dispatch`` lowers the ``policy="auto"`` dispatch groups of the
+        ``dispatch`` lowers the ``strategy="auto"`` dispatch groups of the
         graph's hawk kernels (``None`` or ``"switch"``: the fused kernel;
         ``"predicated"``; or ``{group: policy}``), rebuilding those plans over
         the planes they were bound with; a plan without an ``"auto"`` group is
@@ -828,7 +828,7 @@ class Graph:
                     raise ValueError(
                         "eagle.Graph.build: dispatch= picks the policy of an 'auto' dispatch "
                         "group, and no plan of this graph has one; declare one with "
-                        "policy='auto' in the kernel, or drop dispatch=")
+                        "strategy='auto' in the kernel, or drop dispatch=")
             if record and _RECORD_FACTORY is None:
                 from . import diff  # noqa: F401  (installs the recorder)
             recorder = _RECORD_FACTORY(self) if record else None

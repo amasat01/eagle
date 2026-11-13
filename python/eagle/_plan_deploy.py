@@ -311,7 +311,7 @@ def auto(plugin, *, targets=None, cache_dir=None, scalar_type=None, contraction=
     weak or no FP64; on a CPU use float64 (a banded deploy with no usable
     device, or with a host target, is refused).
 
-    ``contraction`` is hawk's policy for a dense contraction (``None``: ``"direct"``; ``"gemm"`` routes a recognised one through
+    ``contraction`` is hawk's setting for a dense contraction (``None``: ``"direct"``; ``"gemm"`` routes a recognised one through
     a matrix product); it applies to a hawk kernel's build.
 
     ``plan_kw`` are :func:`plan`'s keywords but ``structure``
