@@ -15,7 +15,7 @@ from __future__ import annotations
 import threading
 
 
-from raptor.protocols.naming import SAMPLE_SUM_COMP
+from lowering.cells import SAMPLE_SUM_COMP
 
 from . import _alloc
 from .dtypes import dtype_name

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import contextvars
 
-from raptor.protocols.naming import SAMPLE_SUM_COMP
+from lowering.cells import SAMPLE_SUM_COMP
 
 from . import _alloc, arrays
 from ._conditional import RepeatWhile
