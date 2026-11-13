@@ -143,14 +143,15 @@ def _sync(ctx):
         cupy.cuda.runtime.deviceSynchronize()
 
 
-def _plan(kernel, ctx, form=None):
+def _plan(kernel, ctx, form=None, contraction=None):
     import eagle.plan
 
     cache = os.environ.get("FEATURE_CARD_CACHE") or tempfile.mkdtemp(prefix="feature_cache_")
     if form is not None:
         from hawk.targets.cards import _probe_wide
         return _probe_wide._auto(kernel, ctx.dtype, cache, form)
-    return eagle.plan.auto(kernel, targets=(ctx.target,), scalar_type=ctx.dtype, cache_dir=cache)
+    return eagle.plan.auto(kernel, targets=(ctx.target,), scalar_type=ctx.dtype, cache_dir=cache,
+                          contraction=contraction)
 
 
 def _planes(ctx, ins, outs):
@@ -162,14 +163,14 @@ def _planes(ctx, ins, outs):
     return planes
 
 
-def _bound(kernel, planes, ctx, form=None, **extent):
-    return _plan(kernel, ctx, form).bind(**planes, **extent).launch
+def _bound(kernel, planes, ctx, form=None, contraction=None, **extent):
+    return _plan(kernel, ctx, form, contraction).bind(**planes, **extent).launch
 
 
-def _launcher(kernel, ins, outs, ctx, form=None, **extent):
+def _launcher(kernel, ins, outs, ctx, form=None, contraction=None, **extent):
     """``(run, planes)``: ``kernel`` built for the target and bound; ``run`` launches and waits."""
     planes = _planes(ctx, ins, outs)
-    launch = _bound(kernel, planes, ctx, form, **extent)
+    launch = _bound(kernel, planes, ctx, form, contraction, **extent)
 
     def run():
         launch()
@@ -287,11 +288,14 @@ def setup_steps_fused(ctx):
         want_x, want_c = w.astype(np.float64).T @ by, bc + by.sum(axis=0)
         choice = "fused"
         if arm.endswith("auto"):
-            from hawk.ir import steps_class
+            from hawk.targets.steps_reverse import table_for
 
             props = importlib.import_module("eagle.launch")._device_props(-1) if ctx.target == "cuda" else {}
             resident = int(props.get("multiProcessorCount", 0)) * int(props.get("maxThreadsPerMultiProcessor", 0))
-            choice = steps_class._choose(ctx.target == "cuda", 2, 8, n, resident)
+            table = table_for(ctx.target == "cuda")
+            per_resident = table.get("regime") == "per_resident"
+            choice = importlib.import_module("eagle._until_done")._steps_reverse_choice(
+                table.get("rows", ()), 2, 8, n / (resident if per_resident else 1))
             ctx.note = f"steps_reverse auto picks {choice}"
         outs = {"bar_x": ((wk.W, n), None), "bar_c": ((n,), None)}
         if choice == "fused":
@@ -501,10 +505,8 @@ def setup_contraction(ctx):
         run, planes = _launcher(fk.contract, planes_in, {"y": ((fk.ROWS * fk.SAMPLES,), None)}, ctx)
         return run, (lambda: (run() or _close(_get(planes["y"]), want, ctx.dtype), "y equals the NumPy matrix product"))
     if ctx.arm == "gemm":
-        from hawk.emit import policy
-
-        with policy.using(contraction="gemm"):      # the opt-in route: one GEMM into the lane plane
-            run, planes = _launcher(fk.contract, planes_in, {"y": ((fk.ROWS * fk.SAMPLES,), None)}, ctx)
+        # the opt-in route: one GEMM into the lane plane
+        run, planes = _launcher(fk.contract, planes_in, {"y": ((fk.ROWS * fk.SAMPLES,), None)}, ctx, contraction="gemm")
         return run, (lambda: (run() or _close(_get(planes["y"]), want, ctx.dtype), "y equals the NumPy matrix product"))
     if ctx.target != "cuda":
         raise NotRun("needs a GPU")

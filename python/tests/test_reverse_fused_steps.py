@@ -97,3 +97,20 @@ def test_auto_follows_the_measured_table_on_the_host():
 def test_auto_on_a_device_reads_its_residency_and_follows_the_device_rows():
     assert _chosen(8, 8, "gpu") == "per_step"        # below the measured regime (lanes per resident thread)
     assert _chosen(8, 65536, "gpu") == "fused"       # the feature card's shape on the P2000, L4 and A100
+
+
+def test_the_choice_rule_is_applied_to_the_measured_rows():
+    from eagle._until_done import _steps_reverse_choice as choose
+    from hawk.targets.steps_reverse import table_for
+
+    rows = table_for(False)["rows"]
+    assert choose(rows, 4, 4, 8 / 1) == "fused"      # inside the measured batch range
+    assert choose(rows, 4, 4, 4096) == "per_step"    # beyond it
+    assert choose(rows, 4, 8, 16) == "fused" and choose(rows, 2, 8, 65536) == "fused"
+    assert choose(rows, 3, 4, 64) == "fused"         # the nearest measured regime
+    assert choose((), 4, 4, 8) == "per_step"         # a target with no row
+    dev = table_for(True)
+    assert dev["regime"] == "per_resident"
+    for resident in (5 * 2048, 58 * 1536, 108 * 2048):      # SM count x resident threads: P2000, L4, A100
+        assert choose(dev["rows"], 2, 8, 65536 / resident) == "fused"
+        assert choose(dev["rows"], 2, 8, 64 / resident) == "per_step"     # below the measured regime
