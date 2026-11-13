@@ -195,7 +195,7 @@ What each policy promises
 -------------------------
 
 One table for every sum eagle and hawk finish: ``eagle.reduce``, a hawk ``hawk.sum`` stored to a cell, a keyed
-``hawk.sum(x, over=...)`` and a ``hawk.scatter``. ``policy=`` picks the row.
+``hawk.sum(x, over=...)`` and a ``hawk.scatter``. ``contract=`` picks the row.
 
 .. list-table::
    :header-rows: 1

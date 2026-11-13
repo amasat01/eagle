@@ -1,7 +1,7 @@
 # Copyright 2026 Alessandro Masat
 # SPDX-License-Identifier: Apache-2.0
 
-"""Fused or split? Picks how a ``dispatch(..., policy="auto")`` group runs.
+"""Fused or split? Picks how a ``dispatch(..., strategy="auto")`` group runs.
 
 hawk counts what each branch costs from the kernel's IR
 (:func:`hawk.ir.dispatch_costs`); a running simulation measures how many

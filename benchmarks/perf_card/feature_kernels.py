@@ -61,19 +61,19 @@ def keyed_sum(key: Index, v: Scalar, rs: Mutable["node"]):
 
 @hawk.kernel
 def or_mask(word: Index, bit: UInt32, mask: Mutable[UInt32]):
-    hawk.scatter(mask, policy="or")[word] |= bit
+    hawk.scatter(mask)[word] |= bit
 
 
 @hawk.kernel
 def ordered_sum(key: Index, v: Scalar, rs: Mutable["node"]):
-    hawk.scatter(rs, policy="ordered")[key] += v
+    hawk.scatter(rs, contract="ordered")[key] += v
 
 
 def total(policy, samples):
     """The sum of ``samples`` lanes under ``policy`` (auto, ordered or compensated), one key."""
     @hawk.kernel
     def kernel(lane: Grid["key", "sample":samples], x: Scalar) -> Scalar:
-        return hawk.sum(x, over="sample", policy=policy)
+        return hawk.sum(x, over="sample", contract=policy)
     return kernel
 
 
@@ -81,7 +81,7 @@ def total_cell(policy, samples):
     """The cell form of the same sum: ``t = hawk.sum(x)`` into a ``Mutable[Scalar]`` (one row of 32 samples per warp, folded by eagle)."""
     @hawk.kernel
     def kernel(x: Scalar, t: Mutable[Scalar]):
-        t = hawk.sum(x, policy=policy)
+        t = hawk.sum(x, contract=policy)
     return kernel
 
 
@@ -122,7 +122,7 @@ def _step(v, k):
 
 def _step_dispatched(v, k):
     """The same step with the bias chosen by a dispatch on ``k``: hawk splits it into one unit per branch."""
-    return m.sin(v) * 0.5 + v * 0.5 + 0.01 + m.dispatch(k, [0.0, 1.0, 2.0], policy="auto") * 1e-3
+    return m.sin(v) * 0.5 + v * 0.5 + 0.01 + m.dispatch(k, [0.0, 1.0, 2.0], strategy="auto") * 1e-3
 
 
 @hawk.kernel
