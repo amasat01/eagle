@@ -123,7 +123,7 @@ def _units():
 def _compile(source, arch, tmp):
     """``{entry: {regs, stack, spill, n, ops}}`` of one unit on one arch."""
     from hawk_cuda import toolchain as tc
-    from aether.wings.base.wrapper import FAST_ENTRIES_MACRO
+    from hawk_cuda.emit import FAST_ENTRIES_MACRO
 
     cu, cubin = tmp / f"unit_{arch}.cu", tmp / f"unit_{arch}.cubin"
     cu.write_text(source)

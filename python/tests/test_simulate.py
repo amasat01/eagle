@@ -485,7 +485,7 @@ def test_the_artifact_is_hawks_own(tmp_path):
 
 
     eagle.simulate(sim_osc, **_osc_kw())
-    from aether.wings.base.wrapper import FAST_ENTRIES_MACRO
+    from hawk_cuda.emit import FAST_ENTRIES_MACRO
 
     targets = plan_deploy._eager_targets()
     # the define eagle builds an automatic kernel with (its fast entries)

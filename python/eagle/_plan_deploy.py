@@ -443,12 +443,11 @@ def _hawk_api():
     try:
         from hawk.artifact import build_bundle, plugins
         from hawk.compile import default_cache_dir
-        from aether.wings.base.wrapper import FAST_ENTRIES_MACRO
     except ImportError as exc:
         raise ImportError(
             "eagle.plan.auto: building a hawk kernel needs hawk, which does not "
             f"import here ({exc}); install hawk, or pass a built plugin") from exc
-    return build_bundle, plugins, default_cache_dir, FAST_ENTRIES_MACRO
+    return build_bundle, plugins, default_cache_dir
 
 
 #: One lock per bundle folder this process builds (:func:`_hawk_plugins`).
@@ -466,11 +465,14 @@ os.register_at_fork(after_in_child=_after_fork_in_child)
 def _build_by_name(kernels, targets, cache_dir, scalar_type=None) -> tuple:
     """Build ``kernels`` into one bundle; ``({plugin name: plugin}, bundle)``
     (a segmented kernel appears as its units)."""
-    build_bundle, plugins, default_cache_dir, FAST_ENTRIES_MACRO = _hawk_api()
+    build_bundle, plugins, default_cache_dir = _hawk_api()
     from .registry import load_manifest
 
     targets = _default_targets() if targets is None else tuple(targets)
-    defines = (f"{FAST_ENTRIES_MACRO}=1",) if _wants_fast_entries(kernels, targets) else ()
+    defines = ()
+    if _wants_fast_entries(kernels, targets):       # a device build: the CUDA extension names its macro
+        from hawk_cuda.emit import FAST_ENTRIES_MACRO
+        defines = (f"{FAST_ENTRIES_MACRO}=1",)
     root = default_cache_dir() if cache_dir is None else Path(cache_dir)
     mode = scalar_type or "float64"
     where = root / "bundles" / _bundle_key(kernels, targets, defines, mode)
