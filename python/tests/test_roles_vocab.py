@@ -346,3 +346,16 @@ def test_schema_version_future_rejected():
         check_schema_version(
             {"schema_version": MAX_SCHEMA_VERSION + 1}, name="kern"
         )
+
+
+def test_the_runtime_states_the_team_vocabulary_raptor_checks_against():
+    from eagle._split import TEAM_VOCABULARY
+    from raptor.schema import validate_manifest
+
+    doc = {"schema_version": 1, "arg_spec": [], "launch": {"local_bytes": 8, "local_source": "ptxas", "local_limit": 16},
+           "stages": [{"team": {"threads": 32, "grid": "chunks", "of": "acc", "status": "flag"}}],
+           "team_planes": {"t": {"dtype": "real", "per_lane": 2}}}
+    validate_manifest(doc, TEAM_VOCABULARY)
+    doc["stages"][0]["team"]["grid"] = "rows"
+    with pytest.raises(ValueError, match="grid 'rows' is not one of"):
+        validate_manifest(doc, TEAM_VOCABULARY)

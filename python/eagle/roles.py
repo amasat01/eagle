@@ -152,9 +152,8 @@ BUFFER_KINDS = blocks.BUFFER_KINDS
 #: The manifest-entry ``format`` vocabulary (schema v1) — the artifact
 #: container a manifest entry names; an unrecognized value is refused
 #: rather than handed to a loader. Keep in sync with
-#: ``plugin/roles.h::kManifestFormats``; sourced from
-#: ``raptor.schema.manifest.MANIFEST_FORMATS``.
-MANIFEST_FORMATS = manifest.MANIFEST_FORMATS
+#: ``plugin/roles.h::kManifestFormats``. ``host`` is a host shared library; the others are device artifacts.
+MANIFEST_FORMATS = frozenset({"ptx", "cubin", "fatbin", "host"})
 
 
 def validate_roles(arg_spec, *, name: str) -> None:

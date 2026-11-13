@@ -21,8 +21,7 @@ package trees, never from a hand-passed file list (a scanner fed its own expecte
 answers finds nothing wrong by construction).
 
 Purely-eagle vocabulary (``LAUNCH_CERTIFIED_PATTERNS``, ``ROLES``) has no raptor
-counterpart; ``MANIFEST_FORMATS`` and ``RECOGNIZED_PATTERNS`` are raptor's own
-objects.
+counterpart; ``RECOGNIZED_PATTERNS`` is raptor's own object.
 
 ``EXEC_REF_KINDS`` was re-pointed too: eagle's copy had exactly one reader, its
 own ``graph_block`` clause, and that clause moved to ``raptor.schema.blocks``. A
@@ -160,10 +159,8 @@ def test_exec_ref_kinds_is_repointed_at_raptor():
 
 
 def test_purely_eagle_vocabulary_stays_un_repointed():
-    """The schema vocabulary raptor defines is raptor's object in eagle
-    (``MANIFEST_FORMATS``); LAUNCH_CERTIFIED_PATTERNS/ROLES have no raptor
-    counterpart at all."""
-    assert roles.MANIFEST_FORMATS is manifest.MANIFEST_FORMATS
+    """The schema vocabulary raptor defines is raptor's object in eagle; LAUNCH_CERTIFIED_PATTERNS/ROLES have no raptor
+    counterpart at all, and ``MANIFEST_FORMATS`` is eagle's own."""
     assert roles.RECOGNIZED_PATTERNS is blocks.ALL_PATTERNS
     assert not hasattr(blocks, "LAUNCH_CERTIFIED_PATTERNS")
     assert not hasattr(manifest, "ROLES")

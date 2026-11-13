@@ -51,6 +51,16 @@ from . import _stream
 from . import arrays
 from .roles import OUTPUT_ROLES
 
+#: The vocabulary of the launch and team fields this runtime implements: the team grids with their extra keys (a keyed
+#: ``record`` or a ``plane`` name), the grid of a team that names none, the team plane dtypes and the ``launch.local_source``
+#: words. It is what a caller hands raptor's ``validate_manifest`` to check a document against.
+TEAM_VOCABULARY = {
+    "team_grids": {"lanes": {}, "keys": {"keyed": "record"}, "chunks": {"of": "plane", "status": "plane"}, "targets": {"of": "plane"}},
+    "default_grid": "lanes",
+    "team_dtypes": ["int32", "real"],
+    "local_sources": ["ptxas", "ptx"],
+}
+
 
 @dataclass(frozen=True)
 class Stage:
