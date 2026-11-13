@@ -20,7 +20,7 @@ R, COL = 4, 64
 
 @hawk.kernel
 def share(lane: Grid["row", "col":COL], x: Scalar) -> Scalar:
-    return x / hawk.sum(x, over="col", policy="compensated")
+    return x / hawk.sum(x, over="col", contract="compensated")
 
 
 @hawk.kernel

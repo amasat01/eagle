@@ -131,7 +131,7 @@ def split_keyed_share(lane: hawk_trace.Grid["row", "col":8], x: hawk_trace.Scala
                       acc: hawk_trace.Mutable[hawk_trace.Scalar],
                       key: hawk_trace.Index) -> hawk_trace.Scalar:
     hawk.scatter(acc)[key] += x
-    return x / hawk.sum(x, over="col", policy="compensated")
+    return x / hawk.sum(x, over="col", contract="compensated")
 
 
 def _xp(framework):

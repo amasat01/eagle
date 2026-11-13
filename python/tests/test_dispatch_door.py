@@ -28,21 +28,21 @@ N = 2000
 
 @hawk.kernel
 def walker(k: Index, x: Mutable[Scalar], t: Mutable[Scalar], terminated: Terminated):
-    x = x + M.dispatch(k, [1.0, M.exp(x * 0.001), M.sin(x) * 2.0], policy="auto")
+    x = x + M.dispatch(k, [1.0, M.exp(x * 0.001), M.sin(x) * 2.0], strategy="auto")
     t = t + 1.0
     terminated = t >= 40.0
 
 
 @hawk.kernel
 def long_walker(k: Index, x: Mutable[Scalar], t: Mutable[Scalar], terminated: Terminated):
-    x = x + M.dispatch(k, [1.0, M.exp(x * 0.001), M.sin(x) * 2.0], policy="auto")
+    x = x + M.dispatch(k, [1.0, M.exp(x * 0.001), M.sin(x) * 2.0], strategy="auto")
     t = t + 1.0
     terminated = t >= 100.0
 
 
 @hawk.kernel
 def drifting(k: Mutable[Index], x: Mutable[Scalar], t: Mutable[Scalar], terminated: Terminated):
-    x = x + M.dispatch(k, [1.0, M.exp(x * 0.001), M.sin(x) * 2.0], policy="auto")
+    x = x + M.dispatch(k, [1.0, M.exp(x * 0.001), M.sin(x) * 2.0], strategy="auto")
     k = M.select(k > 1, k - 2, k + 1)
     t = t + 1.0
     terminated = t >= 12.0
@@ -50,7 +50,7 @@ def drifting(k: Mutable[Index], x: Mutable[Scalar], t: Mutable[Scalar], terminat
 
 @hawk.kernel
 def declared(k: Index, x: Mutable[Scalar], t: Mutable[Scalar], terminated: Terminated):
-    x = x + M.dispatch(k, [1.0, M.sin(x)], policy="switch")
+    x = x + M.dispatch(k, [1.0, M.sin(x)], strategy="switch")
     t = t + 1.0
     terminated = t >= 5.0
 
@@ -192,7 +192,7 @@ def test_static_selector_over_the_whole_step():
 
 # --- refusals --- #
 def test_naming_a_group_the_author_declared_is_refused():
-    with pytest.raises(ValueError, match=r"declared policy='switch'.*only 'auto' groups"):
+    with pytest.raises(ValueError, match=r"declared strategy='switch'.*only 'auto' groups"):
         eagle.simulate(declared, k=np.zeros(4, dtype=np.int64), x=np.zeros(4), t=np.zeros(4),
                        max_steps=9, dispatch={"dispatch0": "segmented"})
 

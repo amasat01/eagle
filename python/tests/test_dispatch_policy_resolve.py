@@ -182,7 +182,7 @@ def test_a_real_hawk_cost_goes_through_the_rule():
 
     @hawk.kernel
     def rare(k: hawk.Index, x: hawk.Scalar, y: hawk.Mutable[hawk.Scalar]):
-        y = M.dispatch(k, [x + 1.0, M.exp(M.sin(x) * M.cos(x)), x], policy="auto")
+        y = M.dispatch(k, [x + 1.0, M.exp(M.sin(x) * M.cos(x)), x], strategy="auto")
 
     cost = dispatch_costs(canonical(rare.sinks), build_spec(("host",)))["dispatch0"]
     assert dp.static_selector(cost.selector_reads, {"y"})

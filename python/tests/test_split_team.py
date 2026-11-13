@@ -162,7 +162,7 @@ def test_a_step_chain_in_one_graph_replays_three_times_equal_to_three_fresh_runs
 
 @kernel
 def add_term(key: Index, x: Scalar, terminated: Terminated, acc: Mutable[Scalar]):
-    hawk.scatter(acc, policy="ordered")[key] += x
+    hawk.scatter(acc, contract="ordered")[key] += x
 
 
 @pytest.mark.parametrize("target", TARGETS)
@@ -213,7 +213,7 @@ def _net_loss():
             b = W.at(net=lane.net, p=3 * h + 1)
             c = W.at(net=lane.net, p=3 * h + 2)
             pred = pred + mask.at(net=lane.net, h=h) * c * m.tanh(a * x + b)
-        return hawk.sum((pred - y) * (pred - y), over="sample", policy="ordered")
+        return hawk.sum((pred - y) * (pred - y), over="sample", contract="ordered")
     return Kernel("net_loss_ordered", net_loss.sinks, net_loss.planes)
 
 
@@ -310,7 +310,7 @@ def test_the_once_plane_is_one_copy_whatever_the_lane_count(tmp_path, cache, tar
     assert sizes == {(257,)}
 
 
-OUTSIDE = r"hawk.scatter\(acc, policy='ordered'\) got a key outside \[0, 9\)"
+OUTSIDE = r"hawk.scatter\(acc, contract='ordered'\) got a key outside \[0, 9\)"
 
 
 def _out_of_range_case(tmp_path, cache, target):
