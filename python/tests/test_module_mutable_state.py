@@ -65,6 +65,7 @@ ALLOWED = {
     ("graph.py", "_REGISTRY"): "guarded by _REGISTRY_LOCK",
     ("fft.py", "_SWAP"): TABLE,
     ("_split.py", "_PENDING"): "a WeakSet: add and discard are single atomic calls; the only iteration is run_pending, over a list copy, under a per-thread re-entry guard",
+    ("_split.py", "TEAM_VOCABULARY"): "read-only table, never mutated after import",
     ("_split.py", "_CHECKING"): "threading.local: per-thread re-entry flag",
     ("frameworks/cupy.py", "_external_stream_cache"): "guarded by _EXTERNAL_STREAM_LOCK",
     ("frameworks/cupy.py", "_EXTERNAL_STREAM_COUNTS"): "guarded by _EXTERNAL_STREAM_LOCK",
