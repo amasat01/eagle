@@ -213,7 +213,8 @@ def relower_graph_nodes(nodes, dispatch, *, door):
                     "eagle.simulate(..., dispatch='segmented'), or 'switch' here")
         chosen = {g: (wanted.get(g) or "switch") for g in groups}
         lowered = hawk.resolve_dispatch(kernel, chosen)
-        keep = {nm: v for nm, v in node.payload._planes.items() if not nm.endswith("_mix")}
+        mixes = {d["mix"] for d in (getattr(plan.plugin, "sidecar", None) or {}).get("dispatch", ()) if "mix" in d}
+        keep = {nm: v for nm, v in node.payload._planes.items() if nm not in mixes}
         rebound = auto(lowered).select(keep).bind(**keep)
         from .graph import Node
 
@@ -302,12 +303,18 @@ def _split_parts(kernel, group: str, device: bool, spec=None) -> tuple:
         guard = dataclasses.replace(twin.kind.guard, active_set=True)
         sweep = auto(Kernel(twin.name, twin.sinks, twin.planes,
                             kind=dataclasses.replace(twin.kind, guard=guard)))
-    parts = (cost, units, by_name.get(f"{seg.name}__cls"), sweep)
+    parts = (cost, units, by_name.get(_segment_entry(units[0], group).get("classify")), sweep)
     with _PARTS_LOCK:
         if len(_PARTS) >= _PARTS_MAX:
             _PARTS.pop(next(iter(_PARTS)))
         _PARTS[key] = (kernel, parts)
     return parts
+
+
+def _segment_entry(unit, group: str) -> dict:
+    """The sidecar's dispatch entry of ``group`` as a segmented unit ``unit`` records it: the names of the planes the split
+    adds (``class``, ``stale``, ``offsets``) and the classify unit (``classify``, a static selector only)."""
+    return next(d for d in unit.sidecar["dispatch"] if d["name"] == group and d["strategy"] == "segmented")
 
 
 class DispatchRunner:
@@ -400,10 +407,11 @@ class DispatchRunner:
         dev, n, k, g = self._dev, self.n, self._k, self._group
         self._cls = _alloc.zeros(dev, n, dtype=arrays.int64)
         self._offsets = _alloc.zeros(dev, k + 1, dtype=arrays.int64)
-        self._extra = {f"{g}_class": self._cls, f"{g}_offsets": self._offsets}
+        names = _segment_entry(self._unit_plugins[0], g)
+        self._extra = {names["class"]: self._cls, names["offsets"]: self._offsets}
         if not self._static:
             self._stale = _alloc.zeros(dev, n, dtype=arrays.bool_)
-            self._extra[f"{g}_stale"] = self._stale
+            self._extra[names["stale"]] = self._stale
         self._classify = (self._bind(AutoPlan(self._classify_plugin, {}), self._extra)
                           if self._classify_plugin is not None else None)
 
