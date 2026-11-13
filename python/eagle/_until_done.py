@@ -54,7 +54,7 @@ from ._compat import zip_strict
 from ._conditional import SkipGuard, Skippable, _host_scalar, repeat_while
 from .graph import LowerCtx, Node, get_node_kind
 from .roles import OUTPUT_ROLES, PER_SAMPLE_ROLES
-from .sidecar import FINISH_AUTO, FINISH_COUNTER, read_finish, refuse_derived
+from .sidecar import FINISH_AUTO, FINISH_COUNTER, STEPS_PLANE, check_reserved_planes, read_finish, refuse_derived
 
 #: The reserved ``lookup`` plane a finishing kernel counts newly finished
 #: samples into: one ``uint32`` cell, viewed as ``int32`` at bind.
@@ -62,7 +62,7 @@ FINISHED_PLANE = FINISH_COUNTER
 
 #: The reserved ``lookup`` plane an automatic kernel reads its steps per
 #: launch from: one ``int64`` cell, written by the runner's policy.
-FUSED_STEPS_PLANE = "fused_steps"
+FUSED_STEPS_PLANE = STEPS_PLANE
 
 #: The policy's constants: the fewest steps one launch takes (but the
 #: last, cut to the remainder of ``max_steps``), and the first launch's
@@ -343,6 +343,7 @@ def _finish_of(plugin, name: str):
     carries one, else its ``finish`` attribute, else ``None``."""
     meta = getattr(plugin, "sidecar", None)
     if isinstance(meta, Mapping):
+        check_reserved_planes(meta, name=name)
         return read_finish(dict(meta), name=name)
     finish = getattr(plugin, "finish", None)
     if finish is None:

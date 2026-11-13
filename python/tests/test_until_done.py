@@ -54,6 +54,29 @@ def test_read_finish_absent_is_none():
     assert read_finish({"arg_spec": []}, name="k") is None
 
 
+def test_the_reserved_plane_keys_are_checked_against_the_runtime_s_own_names():
+    from eagle.sidecar import check_reserved_planes
+
+    check_reserved_planes({"steps_plane": "fused_steps", "cell_plane": "param_cell"}, name="k")    # agrees
+    check_reserved_planes({"arg_spec": []}, name="k")                                               # absent: an older kernel
+    for key in ("steps_plane", "cell_plane"):
+        with pytest.raises(ValueError, match=f"k: sidecar '{key}' is 'other'"):
+            check_reserved_planes({key: "other"}, name="k")
+
+
+def test_a_summing_cell_without_its_companion_plane_is_refused_by_name():
+    from types import SimpleNamespace
+
+    from eagle._cell_rows import cells_of
+
+    cells = {"c": {"op": "sum", "columns": 1}}
+    good = SimpleNamespace(name="k", arg_spec=[("accum_out", "c"), ("accum_out", "c_comp")], _meta={"cells": cells})
+    assert cells_of(good) == {"c": "sum"}
+    bad = SimpleNamespace(name="k", arg_spec=[("accum_out", "c"), ("accum_out", "c_other")], _meta={"cells": cells})
+    with pytest.raises(ValueError, match=r"k: sidecar binds no \['c_comp'\]"):
+        cells_of(bad)
+
+
 def test_read_finish_returns_the_declaration():
     meta = {"finish": dict(_FINISH, steps=4), "terminated_readonly": False}
     assert read_finish(meta, name="k") == dict(_FINISH, steps=4)

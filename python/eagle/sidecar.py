@@ -79,12 +79,24 @@ def read_terminated_readonly(meta: dict, *, name: str) -> bool:
 FINISH_KEY = "finish"
 #: The one counter plane a finishing kernel counts into.
 FINISH_COUNTER = "finished_count"
+#: The reserved planes this runtime implements besides the counter: the one-cell word of a ``steps="auto"`` kernel and the
+#: per-sample plane naming each sample's parameter cell. A sidecar that states another name is refused by
+#: :func:`check_reserved_planes`; an absent key (an older kernel) is accepted.
+STEPS_PLANE = "fused_steps"
+CELL_PLANE = "param_cell"
 _FINISH_FIELDS = ("mask", "counter", "steps")
 #: The ``finish.steps`` value of a kernel whose steps per launch are a
 #: run-time word (``hawk.steps(kernel, "auto")``); such a kernel also
 #: stamps ``finish.steps_max``.
 FINISH_AUTO = "auto"
 _FINISH_OPTIONAL = ("steps_max",)
+
+
+def check_reserved_planes(meta: dict, *, name: str) -> None:
+    """Refuse by name a ``steps_plane`` or ``cell_plane`` key of ``meta`` that is not the plane this runtime implements."""
+    for key, mine in (("steps_plane", STEPS_PLANE), ("cell_plane", CELL_PLANE)):
+        if key in meta and meta[key] != mine:
+            raise ValueError(f"{name}: sidecar '{key}' is {meta[key]!r}, but this runtime implements {mine!r}")
 
 
 def read_finish(meta: dict, *, name: str) -> dict | None:

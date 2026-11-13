@@ -14,9 +14,6 @@ from __future__ import annotations
 
 import threading
 
-
-from lowering.cells import SAMPLE_SUM_COMP
-
 from . import _alloc
 from .dtypes import dtype_name
 from ._graph_reduce import _lower_cpu, _lower_gpu, check_policy, reduce
@@ -26,8 +23,21 @@ made = 0
 _LOCK = threading.Lock()
 
 
+#: The suffix of the companion plane a summing cell keeps beside its row plane: the name this runtime implements.
+SAMPLE_SUM_COMP = "_comp"
+
+
 def comp_name(name: str) -> str:
     return f"{name}{SAMPLE_SUM_COMP}"
+
+
+def _check_companions(cells: dict, arg_spec, *, name: str) -> None:
+    """A summing cell's companion plane is ``comp_name(cell)``: a sidecar that declares the cell but binds no such plane
+    names another suffix, and is refused by name."""
+    bound = {n for _role, n in arg_spec}
+    missing = sorted(comp_name(c) for c, op in cells.items() if op == "sum" and comp_name(c) not in bound)
+    if missing:
+        raise ValueError(f"{name}: sidecar binds no {missing} companion plane(s): this runtime's companion suffix is {SAMPLE_SUM_COMP!r}")
 
 
 def cells_of(plugin) -> dict:
@@ -42,6 +52,7 @@ def cells_of(plugin) -> dict:
         cells = kernel_cells(source[0])
     elif "cells" in meta:
         cells = _planes(meta["cells"])
+        _check_companions(cells, plugin.arg_spec, name=getattr(plugin, "name", "<kernel>"))
     else:       # a raw plugin: a row plane and its companion
         names = {n for r, n in plugin.arg_spec if r == "accum_out"}
         cells = {n: "sum" for n in names if comp_name(n) in names}
