@@ -485,16 +485,15 @@ def test_the_artifact_is_hawks_own(tmp_path):
 
 
     eagle.simulate(sim_osc, **_osc_kw())
-    from hawk_cuda.emit import FAST_ENTRIES_MACRO
+    from hawk.build_settings import BuildSettings
 
     targets = plan_deploy._eager_targets()
-    # the define eagle builds an automatic kernel with (its fast entries)
-    defines = ((f"{FAST_ENTRIES_MACRO}=1",)
-               if plan_deploy._wants_fast_entries([sim_osc], targets) else ())
-    used = default_cache_dir() / "bundles" / plan_deploy._bundle_key([sim_osc], targets,
-                                                                     defines)
+    # the setting eagle builds an automatic kernel with (its fast entries)
+    fast = plan_deploy._wants_fast_entries([sim_osc], targets)
+    used = default_cache_dir() / "bundles" / plan_deploy._bundle_key([sim_osc], targets, fast)
     ref = tmp_path / "ref"
-    build_bundle([sim_osc], ref, targets=targets, defines=defines)
+    build_bundle([sim_osc], ref, targets=targets,
+                 settings=BuildSettings(fast_entries=True) if fast else None)
     got, want = _artifact_digests(used), _artifact_digests(ref)
     assert want and got == want
 

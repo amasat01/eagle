@@ -442,12 +442,13 @@ def _hawk_api():
     """The hawk entry points a build uses, or the refusal naming hawk."""
     try:
         from hawk.artifact import build_bundle, plugins
+        from hawk.build_settings import BuildSettings
         from hawk.compile import default_cache_dir
     except ImportError as exc:
         raise ImportError(
             "eagle.plan.auto: building a hawk kernel needs hawk, which does not "
             f"import here ({exc}); install hawk, or pass a built plugin") from exc
-    return build_bundle, plugins, default_cache_dir
+    return build_bundle, plugins, default_cache_dir, BuildSettings
 
 
 #: One lock per bundle folder this process builds (:func:`_hawk_plugins`).
@@ -465,22 +466,19 @@ os.register_at_fork(after_in_child=_after_fork_in_child)
 def _build_by_name(kernels, targets, cache_dir, scalar_type=None) -> tuple:
     """Build ``kernels`` into one bundle; ``({plugin name: plugin}, bundle)``
     (a segmented kernel appears as its units)."""
-    build_bundle, plugins, default_cache_dir = _hawk_api()
+    build_bundle, plugins, default_cache_dir, build_settings = _hawk_api()
     from .registry import load_manifest
 
     targets = _default_targets() if targets is None else tuple(targets)
-    defines = ()
-    if _wants_fast_entries(kernels, targets):       # a device build: the CUDA extension names its macro
-        from hawk_cuda.emit import FAST_ENTRIES_MACRO
-        defines = (f"{FAST_ENTRIES_MACRO}=1",)
+    fast = _wants_fast_entries(kernels, targets)
     root = default_cache_dir() if cache_dir is None else Path(cache_dir)
     mode = scalar_type or "float64"
-    where = root / "bundles" / _bundle_key(kernels, targets, defines, mode)
+    where = root / "bundles" / _bundle_key(kernels, targets, fast, mode)
     # hawk writes a bundle folder in place: one build of it at a time here (a
     # background host build and a repeat deploy of the same kernels meet)
     with _BUNDLE_LOCKS.setdefault(str(where.resolve()), threading.Lock()):
         bundle = build_bundle(kernels, where, targets=targets, cache_dir=cache_dir,
-                              defines=defines, mode=mode)
+                              settings=build_settings(fast_entries=True) if fast else None, mode=mode)
     by_name = plugins(bundle, device_loader=load_manifest)
     _split.link(by_name, bundle)
     return by_name, bundle
@@ -553,10 +551,10 @@ def _eager_targets() -> tuple:
     return device if _has_entry(_default_targets(), _DEVICE) else _targets_of(_HOST, loadable=True)
 
 
-def _bundle_key(kernels, targets, defines=(), mode="float64") -> str:
+def _bundle_key(kernels, targets, fast_entries=False, mode="float64") -> str:
     """The cache directory name of one :func:`auto` request; hawk's own
     stamp still decides whether the bytes there are the unit's.
-    ``defines`` (e.g. the active-set fast-entries macro,
+    ``fast_entries`` (the active-set fast entries,
     :func:`_wants_fast_entries`) is eagle's own choice, not read off the
     kernel, so it is folded in here explicitly -- the same reason
     ``host_profile``/``opt_level``/the device arch are below: two requests
@@ -576,7 +574,7 @@ def _bundle_key(kernels, targets, defines=(), mode="float64") -> str:
         if group != 1:      # the lane group sets how an active map is read; group 1 keys as before
             h.update(f"group={group}".encode())
     h.update(json.dumps(list(targets)).encode())
-    h.update(json.dumps(list(defines)).encode())
+    h.update(json.dumps(fast_entries).encode())
     if mode != "float64":  # float64 keys stay as before, so existing caches still hit
         h.update(mode.encode())
     # One folder per host profile, so two profiles of one kernel never

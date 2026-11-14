@@ -123,11 +123,12 @@ def _units():
 def _compile(source, arch, tmp):
     """``{entry: {regs, stack, spill, n, ops}}`` of one unit on one arch."""
     from hawk_cuda import toolchain as tc
+    from hawk.compile import toolchain as hawk_tc
     from hawk_cuda.emit import FAST_ENTRIES_MACRO
 
     cu, cubin = tmp / f"unit_{arch}.cu", tmp / f"unit_{arch}.cubin"
     cu.write_text(source)
-    flags = tc.device_flags(arch=arch, target="cubin",
+    flags = tc.device_flags(level=hawk_tc.opt_level(), include=hawk_tc.include_flags(), arch=arch, target="cubin",
                             extra=(f"-D{FAST_ENTRIES_MACRO}=1", "-Xptxas", "-v"))
     run = subprocess.run(["nvcc", *flags, str(cu), "-o", str(cubin)],
                          capture_output=True, text=True)

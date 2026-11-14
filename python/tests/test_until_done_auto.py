@@ -102,12 +102,12 @@ def auto(tmp_path_factory):
     cache = tmp_path_factory.mktemp("cache")
     # the automatic kernels as eagle.deploy builds them: with hawk's fast
     # entries (the range entry, which reports exact steps)
-    from hawk_cuda.emit import FAST_ENTRIES_MACRO
+    from hawk.build_settings import BuildSettings
 
-    fast = (f"{FAST_ENTRIES_MACRO}=1",)
+    fast = BuildSettings(fast_entries=True)
     for label, kern in kernels.items():
         built = _build(kern, tmp_path_factory.mktemp(label), targets, cache_dir=cache,
-                       defines=fast if label == "plain" else ())
+                       settings=fast if label == "plain" else None)
         out.update({(label, t): p for t, p in built.items()})
     return out
 

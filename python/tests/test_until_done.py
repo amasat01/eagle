@@ -142,7 +142,7 @@ def _oscillator(kind, finishing, steps=1):
     return hawk.kernel(oscillator_step, kind=kind, steps=steps)
 
 
-def _build(kern, work, targets, cache_dir=None, defines=()):
+def _build(kern, work, targets, cache_dir=None, settings=None):
     import ctypes
 
     from hawk import _core as hcore
@@ -153,7 +153,7 @@ def _build(kern, work, targets, cache_dir=None, defines=()):
     from eagle.registry import load_manifest
 
     kw = {} if cache_dir is None else {"cache_dir": cache_dir}
-    bundle = build_bundle([kern], work, targets=targets, defines=tuple(defines), **kw)
+    bundle = build_bundle([kern], work, targets=targets, settings=settings, **kw)
     sidecar = next(a.sidecar for a in bundle.artifacts if a.name == kern.name)
     view = plan_view(sidecar)
     host_entry = view.pop("host_entry")
