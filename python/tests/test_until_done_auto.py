@@ -101,10 +101,11 @@ def auto(tmp_path_factory):
     # oracle is test_until_done's plain kernel) is then built here afresh
     cache = tmp_path_factory.mktemp("cache")
     # the automatic kernels as eagle.deploy builds them: with hawk's fast
-    # entries (the range entry, which reports exact steps)
+    # entries (the range entry, which reports exact steps), asked for only
+    # when the build has a device target: only a device backend declares them
     from hawk.build_settings import BuildSettings
 
-    fast = BuildSettings(fast_entries=True)
+    fast = BuildSettings(fast_entries=True) if "cuda" in targets else None
     for label, kern in kernels.items():
         built = _build(kern, tmp_path_factory.mktemp(label), targets, cache_dir=cache,
                        settings=fast if label == "plain" else None)
