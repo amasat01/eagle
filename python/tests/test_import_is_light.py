@@ -6,7 +6,7 @@
 import subprocess
 import sys
 
-_BLOCK = ("lowering", "hawk", "hawk_c", "hawk_cuda", "osprey_cpu", "simt", "aether.wings")
+_BLOCK = ("hawk", "ospreys", "raptor.wings", "aether.wings")
 
 _PROGRAM = """
 import importlib.abc, sys

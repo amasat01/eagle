@@ -25,8 +25,8 @@ at a barrier).
 
 from __future__ import annotations
 
-from hawk.variants import load as _variant
-_ROW = _variant("cpu")["cells"]["row"]      # samples per row of the host variant
+from hawk.facts import load as _facts
+_ROW = _facts("cpu")["cells"]["row"]      # samples per row of the host facts
 import json
 import ctypes
 import os

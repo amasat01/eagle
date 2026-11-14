@@ -670,7 +670,7 @@ def _result_shape(sig, name, n, work, cells=1):
     return (n,) if name in sig.rows else sig.shape(name, n, cells)
 
 
-#: Samples per row for the size of a CUDA work buffer. Variant fact not in reach here: W25 STOP site (``sig`` carries no sidecar).
+#: Samples per row for the size of a CUDA work buffer. The facts are not in reach here: W25 STOP site (``sig`` carries no sidecar).
 _ROW_NOT_IN_REACH = 32
 
 

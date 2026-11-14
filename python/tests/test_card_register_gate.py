@@ -122,9 +122,9 @@ def _units():
 
 def _compile(source, arch, tmp):
     """``{entry: {regs, stack, spill, n, ops}}`` of one unit on one arch."""
-    from hawk_cuda import toolchain as tc
+    from ospreys.cuda import toolchain as tc
     from hawk.compile import toolchain as hawk_tc
-    from hawk_cuda.emit import FAST_ENTRIES_MACRO
+    from ospreys.cuda.emit import FAST_ENTRIES_MACRO
 
     cu, cubin = tmp / f"unit_{arch}.cu", tmp / f"unit_{arch}.cubin"
     cu.write_text(source)
@@ -173,7 +173,7 @@ def compiled(tmp_path_factory):
     pytest.importorskip("hawk")
     if not (shutil.which("nvcc") and shutil.which("cuobjdump")):
         pytest.skip("no CUDA toolkit (nvcc, cuobjdump) on PATH")
-    from hawk_cuda import toolchain as tc
+    from ospreys.cuda import toolchain as tc
 
     toolkit = tc.toolkit_archs("nvcc")
     if _nvcc_release() not in PERSIST_REGS:

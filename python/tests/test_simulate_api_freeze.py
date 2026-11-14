@@ -24,7 +24,7 @@ import pytest
 
 hawk = pytest.importorskip("hawk")
 from hawk.compile import nvrtc as hnvrtc  # noqa: E402
-from hawk_cuda import toolchain as tc
+from ospreys.cuda import toolchain as tc
 
 
 @pytest.fixture(autouse=True)
@@ -45,7 +45,7 @@ def test_deploy_builds_for_the_running_device(monkeypatch, tmp_path):
     """``eagle.deploy(kernel, targets=("host", "cuda"))`` passes no
     ``device_arch=`` of its own (``_hawk_plugins`` -> ``build_bundle``), so
     with no ``$HAWK_CUDA_ARCH`` pin it must resolve through the SAME probe
-    hawk.artifact.arch uses -- spied at ``hawk_cuda.toolchain.device_flags``, the real
+    hawk.artifact.arch uses -- spied at ``ospreys.cuda.toolchain.device_flags``, the real
     function underneath the AOT nvcc device compile.
 
     Only the COMPILE step's arch resolution is under test here, not loading

@@ -73,7 +73,7 @@ def row_of(plugin) -> int:
     meta = sidecar_of(plugin)
     if "cell_row" not in meta:
         raise ValueError(f"eagle: kernel {getattr(plugin, 'kernel', '?')!r} states no cell_row in its sidecar (a unit built before the row "
-                         "width became a variant fact): rebuild it with the hawk that writes it")
+                         "width became a fact): rebuild it with the hawk that writes it")
     return int(meta["cell_row"])
 
 

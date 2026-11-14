@@ -57,7 +57,7 @@ class PerformanceWarning(UserWarning):
 
 # --- the request --- #
 def host_spec(kernel, spec=None):
-    """The build spec the cost and stage functions read their variant from: ``spec`` as the caller gave it, else the one the
+    """The build spec the cost and stage functions read their facts from: ``spec`` as the caller gave it, else the one the
     hawk ``kernel`` holds for the host rows. eagle builds none: with neither, it refuses by name."""
     if spec is None:
         spec = getattr(kernel, "host_spec", lambda: None)()
@@ -276,7 +276,7 @@ def _split_parts(kernel, group: str, device: bool, spec=None) -> tuple:
     import dataclasses
 
     import hawk
-    from osprey_cpu.toolchain import host_profile
+    from ospreys.cpu.toolchain import host_profile
     from aether.wings.cpu.host_vector import dispatch_costs as _costs
 
     def dispatch_costs(walk, *args, **kwargs):

@@ -580,7 +580,7 @@ def _bundle_key(kernels, targets, fast_entries=False, mode="float64") -> str:
     # One folder per host profile, so two profiles of one kernel never
     # rebuild over each other (hawk's stamp already keeps them apart).
     from hawk.compile.toolchain import opt_level
-    from osprey_cpu.toolchain import host_profile
+    from ospreys.cpu.toolchain import host_profile
 
     h.update(host_profile().encode())
     # Same reason, for the opt level: it changes the device (nvcc) build

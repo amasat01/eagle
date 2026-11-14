@@ -15,8 +15,8 @@ shown to see a violation; eight threads.
 CUDA rows carry the ``gpu`` marker and skip where no CUDA Warp device exists.
 """
 
-from hawk.variants import load as _variant
-_ROW = _variant("cpu")["cells"]["row"]      # samples per row of the host variant
+from hawk.facts import load as _facts
+_ROW = _facts("cpu")["cells"]["row"]      # samples per row of the host facts
 import threading
 import time
 import traceback

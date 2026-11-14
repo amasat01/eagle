@@ -299,7 +299,7 @@ def chunk_cap(plugin) -> int:
     meta = getattr(plugin, "_meta", None) or getattr(plugin, "sidecar", None) or {}
     if "scatter_chunks" not in meta:
         raise ValueError(f"eagle: kernel {getattr(plugin, 'kernel', '?')!r} states no scatter_chunks in its sidecar (a unit built before the "
-                         "chunk cap became a variant fact): rebuild it with the hawk that writes it")
+                         "chunk cap became a fact): rebuild it with the hawk that writes it")
     return int(meta["scatter_chunks"])
 
 

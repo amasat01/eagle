@@ -296,7 +296,7 @@ def test_jit_invariance_on_the_cpu(tmp_path, monkeypatch):
     import jax
     import jax.numpy as jnp
     from eagle.frameworks import jax as eagle_jax
-    from osprey_cpu.toolchain import EXACT_HOST_PROFILES, host_profile
+    from ospreys.cpu.toolchain import EXACT_HOST_PROFILES, host_profile
     from test_interop_jax import _jax
 
     _jax()

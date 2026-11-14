@@ -384,7 +384,7 @@ def kernels_of(kernel, spec=None) -> tuple:
     call per stage, the cells of a stage passed to the next as one-cell
     planes."""
     from hawk import Kernel
-    from lowering.split import stages
+    from raptor.wings.base.split import stages
 
     from ._dispatch_door import host_spec
 
