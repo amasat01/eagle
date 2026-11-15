@@ -15,6 +15,7 @@
 #include "plugin/dlpack.h"
 
 #include <pthread.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -65,7 +66,6 @@ static eg_ctx* make_ctx(void) {
     memset(&s, 0, sizeof(s));
     s.struct_size = sizeof(s);
     s.abi_major = EG_DOOR_VERSION_MAJOR;
-    s.device = -1;
     eg_ctx* ctx = NULL;
     return eg_ctx_new(&s, &ctx) == EG_OK ? ctx : NULL;
 }
@@ -195,12 +195,42 @@ static void check_error_protocol(eg_ctx* ctx) {
     free(buf);
 }
 
+/* Settings: zero-filled is host only; EG_CTX_DEVICE is not built; a device without the flag is refused. */
+static eg_status settings_status(uint32_t size, uint32_t flags, int32_t device) {
+    struct eg_ctx_settings s;
+    memset(&s, 0, sizeof(s));
+    s.struct_size = size;
+    s.abi_major = EG_DOOR_VERSION_MAJOR;
+    s.flags = flags;
+    s.device = device;
+    eg_ctx* c = NULL;
+    const eg_status st = eg_ctx_new(&s, &c);
+    struct eg_ctx_info info;
+    memset(&info, 0, sizeof(info));
+    info.struct_size = sizeof(info);
+    if (st == EG_OK && (eg_ctx_info(c, &info) != EG_OK || info.device != -1)) {
+        eg_ctx_free(c);
+        return EG_FAULT;
+    }
+    eg_ctx_free(c);
+    return st;
+}
+
+static void check_settings(void) {
+    const uint32_t short_size = (uint32_t)(offsetof(struct eg_ctx_settings, abi_major) + sizeof(uint32_t));
+    check(settings_status(short_size, 0, 0) == EG_OK,
+          "settings with struct_size + abi_major only: a host-only context (info.device -1)");
+    check(settings_status(sizeof(struct eg_ctx_settings), EG_CTX_DEVICE, 0) == EG_NOT_WRITTEN,
+          "EG_CTX_DEVICE refused NOT_WRITTEN (device group not built)");
+    check(settings_status(sizeof(struct eg_ctx_settings), 0, 1) == EG_BAD_REQUEST,
+          "device != 0 without EG_CTX_DEVICE refused BAD_REQUEST");
+}
+
 static void check_bad_input(eg_ctx* ctx, eg_unit* unit) {
     struct eg_ctx_settings s;
     memset(&s, 0, sizeof(s));
     s.struct_size = sizeof(s);
     s.abi_major = EG_DOOR_VERSION_MAJOR;
-    s.device = -1;
     s.flags = 1u << 7;
     eg_ctx* bad = NULL;
     const eg_status st = eg_ctx_new(&s, &bad);
@@ -381,6 +411,7 @@ int main(int argc, char** argv) {
     eg_host_threads(ctx, 1);
     oracle(ctx, unit, 100001, 50000, "n=100001 threads=1");
 
+    check_settings();
     check_error_protocol(ctx);
     check_bad_input(ctx, unit);
     check_foreign_handle(ctx, unit);

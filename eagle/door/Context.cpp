@@ -18,17 +18,23 @@ namespace {
 /** @brief Check the settings of a new context; refuses as eg_ctx_new states. */
 void check_settings(const eg_ctx_settings* in) {
     const eg_ctx_settings s = read_input(in, "eg_ctx_settings");
-    if (s.flags != 0)
-        refuse(EG_BAD_REQUEST, "eg_ctx_settings.flags: unknown bits " + std::to_string(s.flags));
+    if (s.flags & ~EG_CTX_DEVICE)
+        refuse(EG_BAD_REQUEST, "eg_ctx_settings.flags: unknown bits " +
+               std::to_string(s.flags & ~EG_CTX_DEVICE));
     if (s.abi_major != EG_DOOR_VERSION_MAJOR)
         refuse(EG_BAD_REQUEST, "eg_ctx_settings.abi_major " + std::to_string(s.abi_major) +
                ": this eagle speaks eagle-door/" + std::to_string(EG_DOOR_VERSION_MAJOR));
-    if (s.device >= 0)
-        refuse(EG_NOT_WRITTEN, "eg_ctx_settings.device " + std::to_string(s.device) +
-               ": the device group is not built (host only: device -1)");
-    if (s.device != -1)
+    if (!(s.flags & EG_CTX_DEVICE)) {
+        if (s.device != 0)
+            refuse(EG_BAD_REQUEST, "eg_ctx_settings.device " + std::to_string(s.device) +
+                   " without EG_CTX_DEVICE: a host-only context takes device 0");
+        return;
+    }
+    if (s.device < 0)
         refuse(EG_BAD_REQUEST, "eg_ctx_settings.device " + std::to_string(s.device) +
-               ": -1 (host only) or a device ordinal >= 0");
+               ": a device ordinal is >= 0");
+    refuse(EG_NOT_WRITTEN, "eg_ctx_settings EG_CTX_DEVICE (device " + std::to_string(s.device) +
+           "): the device group is not built");
 }
 
 }  // namespace

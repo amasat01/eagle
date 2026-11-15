@@ -28,13 +28,17 @@
  *    states its own thread count, which is passed per launch. A context and
  *    every handle made from it are used by ONE thread at a time; a second
  *    thread entering the same context while a call runs is refused
- *    (EG_BAD_REQUEST), never raced. Different contexts run concurrently.
+ *    (EG_BAD_REQUEST), never raced. That refusal carries NO reason: the
+ *    stored reason belongs to the thread inside and is left as it was, so
+ *    ``eg_error`` reports none for it. Different contexts run concurrently.
  *  - Fork: a context belongs to the process that made it. In a forked child
  *    every call on it is refused except ``eg_error`` and ``eg_ctx_free``
  *    (which then frees host memory only: no device call, no thread join).
  *  - Handles belong to the context that made them; a handle of another
  *    context is refused. Every ``*_free`` is NULL-safe and returns EG_OK.
  *  - Arrays cross by DLPack only (``DLManagedTensorVersioned``, DLPack >= 1.0).
+ *  - ``eg_ctx_info`` and ``eg_device_props`` are each both a struct tag and a
+ *    function name; C++ callers write ``struct eg_ctx_info`` for the struct.
  *
  * GROUPS. The HOST group is complete. The DEVICE group is declared with one
  * line each; its calls map onto the ``eagle-backend/1`` seam handles.
@@ -226,6 +230,11 @@ struct eg_library_meta {
 /** The exported symbol's type (eagle dlsyms EG_UNIT_LIBRARY_META_SYMBOL). */
 typedef const struct eg_library_meta* (*eg_unit_library_meta_fn)(void);
 
+/** The function every unit library defines (EG_UNIT_LIBRARY_META_SYMBOL);
+ *  declared here so a unit library including this header has its definition
+ *  checked. Eagle itself never links it: it reaches it by dlsym. */
+const struct eg_library_meta* eg_unit_library_meta(void);
+
 /* ---- structs ------------------------------------------------------------- */
 
 /** INPUT to ``eg_unit_load``. */
@@ -239,12 +248,15 @@ struct eg_unit_load_desc {
     int32_t reserved0;
 };
 
-/** INPUT to ``eg_ctx_new``. */
+/** Settings flags. */
+#define EG_CTX_DEVICE (1u << 0) /**< ``device`` is a device ordinal (device group); clear: host only */
+
+/** INPUT to ``eg_ctx_new``. Zero-filled with ``abi_major`` set, it is a host-only context. */
 struct eg_ctx_settings {
     uint32_t struct_size;
-    uint32_t flags;        /**< none defined: must be 0 */
+    uint32_t flags;        /**< EG_CTX_* */
     uint32_t abi_major;    /**< EG_DOOR_VERSION_MAJOR the caller was built for */
-    int32_t device;        /**< -1: host only; >= 0: that device ordinal (device group) */
+    int32_t device;        /**< with EG_CTX_DEVICE: the device ordinal, >= 0; else must be 0 */
 };
 
 /** OUTPUT of ``eg_ctx_info``. */
@@ -381,9 +393,10 @@ struct eg_device_props {
  * Replaces: module import of ``_core`` + the backend load in ``_backend.py``,
  * the module-level registries, caches and locks of the Python package.
  * Calls today: ``eagle::exec::detail::HostPool`` (lazily, at the first team
- * launch); with ``device >= 0`` the seam's ``probe`` / ``set_device``.
- * Status: OK; BAD_REQUEST (other ABI major, unknown flag, struct too small);
- * NOT_WRITTEN (device asked, no device backend built); FAULT (backend load).
+ * launch); with EG_CTX_DEVICE the seam's ``probe`` / ``set_device``.
+ * Status: OK; BAD_REQUEST (other ABI major, unknown flag, struct too small,
+ * ``device`` != 0 without EG_CTX_DEVICE, a negative ordinal); NOT_WRITTEN
+ * (EG_CTX_DEVICE, no device backend built); FAULT (backend load).
  */
 eg_status eg_ctx_new(const struct eg_ctx_settings* settings, eg_ctx** out);
 
@@ -395,7 +408,9 @@ eg_status eg_ctx_free(eg_ctx* ctx);
  * The reason of the last non-OK status on ``ctx``, UTF-8, two-call protocol:
  * ``*len`` gets the byte count without the terminator; with ``cap > len``
  * the text and a terminator are written. The reason stays until the next
- * non-OK call on ``ctx``. The ONE function that reads a reason.
+ * non-OK call on ``ctx``; a refusal of ``eg_error`` itself never overwrites
+ * it, and a busy-context refusal writes none. With no reason stored,
+ * ``*len`` is 0. The ONE function that reads a reason.
  * Replaces: Python exceptions raised in the package; the seam's thread-local
  * ``eagle_backend_last_error()`` (eagle copies it into the context at once).
  * Status: OK; BAD_REQUEST (ctx NULL, or 0 < cap <= len).

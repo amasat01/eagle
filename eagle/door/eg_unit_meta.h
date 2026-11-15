@@ -15,6 +15,9 @@
  *    that fit; a member past ``struct_size`` is absent and reads as its
  *    documented absent value (-1 for a slot or table index, 0 for a count,
  *    NULL for a pointer). Within major 1 members are appended at the end only.
+ *    The absent value serves version skew only (a meta older than eagle). A
+ *    generated meta writes every member, and a hand-written one must too: a C
+ *    initializer that omits a member leaves 0, which names slot 0, not -1.
  *  - Closed sets are ``int32_t`` with the values defined here. A value or a
  *    flag bit eagle does not know is refused by ``eg_unit_load`` with
  *    EG_NOT_WRITTEN naming the unit and the member; it is never ignored.

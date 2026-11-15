@@ -2,7 +2,8 @@
 
 /*
  * A hand-written unit library for the door test: three units and their meta
- * as constant data, reached through eg_unit_library_meta.
+ * as constant data, reached through eg_unit_library_meta (declared in
+ * eg_door.h, so this definition is checked against it).
  *
  *  - "axpb": y = a*x + b, sample-local, the serial v2 host entry eagle's
  *    HostTeam drives (params: y and x as 32-byte scalar handles, a and b by
@@ -13,6 +14,7 @@
  */
 #define _POSIX_C_SOURCE 200809L
 
+#include "eagle/door/eg_door.h"
 #include "eagle/door/eg_unit_meta.h"
 
 #include <stdint.h>
