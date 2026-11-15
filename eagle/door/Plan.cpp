@@ -92,6 +92,9 @@ void check_bind(const eg_ctx& ctx, const eg_plan_s& plan, const eg_bind_desc& d)
         if (slot == plan.unit->finish.counter_slot)
             refuse(EG_BAD_REQUEST, "slot " + std::to_string(slot) + " ('" + s.name +
                    "') is the finished counter: eagle makes it, do not pass it");
+        if (slot == plan.unit->finish.steps_slot)
+            refuse(EG_BAD_REQUEST, "slot " + std::to_string(slot) + " ('" + s.name +
+                   "') is the steps word: eagle makes it, do not pass it");
         if (slot == plan.unit->active_map_slot || slot == plan.unit->active_count_slot)
             refuse(EG_BAD_REQUEST, "slot " + std::to_string(slot) + " ('" + s.name +
                    "') is part of the active set: the runner makes it, do not pass it");
@@ -165,6 +168,8 @@ void plan_new(eg_ctx& ctx, const eg_plan_desc* desc, eg_plan** out) {
         plan->params.resize(d.unit->slots.size());
         if (d.unit->finish.present)    // the finished counter: one uint32 cell (its element count)
             bind_handle(*plan, d.unit->finish.counter_slot, &plan->finished, 1);
+        if (d.unit->finish.present && d.unit->finish.steps_slot >= 0)    // the steps word of an AUTO unit
+            bind_handle(*plan, d.unit->finish.steps_slot, &plan->steps_word, 1);
         ctx.plans.insert(plan);
     } catch (...) {
         delete plan;

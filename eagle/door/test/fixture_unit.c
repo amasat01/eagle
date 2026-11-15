@@ -14,6 +14,8 @@
  *  - "count1a", "count3a": the same finishing units reading an active set: the
  *    two LOOKUP slots after the counter hold the live sample slots (int32)
  *    and the live prefix length (uint32); thread t serves sample map[t].
+ *  - "countA", "countAa": finishing units with steps AUTO: each launch steps every live sample up to
+ *    the int64 word eagle sets in slot 4 (countAa also reads the active set, slots 5 and 6).
  *  - "count1", "count3": a finishing unit that steps k += 1 until k >= limit,
  *    then marks the sample and counts it into the finished counter; one or
  *    three steps per launch (slots: k, limit, mask, the counter).
@@ -47,6 +49,8 @@ EG_FIXTURE_EXPORT void count1_host(void* const* params, int64_t base, int64_t co
 EG_FIXTURE_EXPORT void count3_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void count1a_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void count3a_host(void* const* params, int64_t base, int64_t count, int64_t n);
+EG_FIXTURE_EXPORT void countA_host(void* const* params, int64_t base, int64_t count, int64_t n);
+EG_FIXTURE_EXPORT void countAa_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT const struct eg_library_meta* eg_unit_library_meta(void);
 
 void axpb_host(void* const* params, int64_t base, int64_t count, int64_t n) {
@@ -113,6 +117,17 @@ void count1a_host(void* const* params, int64_t base, int64_t count, int64_t n) {
 void count3a_host(void* const* params, int64_t base, int64_t count, int64_t n) {
     (void)n;
     count_steps(params, base, count, 3, (const int32_t*)((const struct fixture_handle*)params[4])->data);
+}
+
+void countA_host(void* const* params, int64_t base, int64_t count, int64_t n) {
+    (void)n;
+    count_steps(params, base, count, (int)*(const int64_t*)((const struct fixture_handle*)params[4])->data, NULL);
+}
+
+void countAa_host(void* const* params, int64_t base, int64_t count, int64_t n) {
+    (void)n;
+    count_steps(params, base, count, (int)*(const int64_t*)((const struct fixture_handle*)params[4])->data,
+                (const int32_t*)((const struct fixture_handle*)params[5])->data);
 }
 
 /* ---- the size block (plugin/gref_layout.h's field order) ------------------ */
@@ -283,14 +298,39 @@ static const struct eg_unit_launch launch_active = {
 ACTIVE_UNIT(unit_count1a, "count1a", 0xE1, "count1a_host", finish1);
 ACTIVE_UNIT(unit_count3a, "count3a", 0xE3, "count3a_host", finish3);
 
+/* steps AUTO: the int64 steps word is LOOKUP slot 4 (up to 64 steps a launch) */
+SLOT_OF(slot_steps, EG_ROLE_LOOKUP, EG_DTYPE_INT64, "steps");
+static const struct eg_unit_slot* const auto_slots[] = { &slot_k, &slot_limit, &slot_mask, &slot_finished, &slot_steps };
+static const struct eg_unit_slot* const auto_active_slots[] = { &slot_k, &slot_limit, &slot_mask, &slot_finished,
+                                                                &slot_steps, &slot_map, &slot_live };
+static const struct eg_unit_body auto_body = {
+    .struct_size = sizeof(struct eg_unit_body), .access = EG_ACCESS_SAMPLE_LOCAL, .n_slots = 5, .slots = auto_slots };
+static const struct eg_unit_body auto_active_body = {
+    .struct_size = sizeof(struct eg_unit_body), .access = EG_ACCESS_SAMPLE_LOCAL, .n_slots = 7, .slots = auto_active_slots };
+static const struct eg_unit_launch launch_auto_active = {
+    .struct_size = sizeof(struct eg_unit_launch), .n_lane_axes = 0, .block = 0, .active_map_slot = 5,
+    .active_count_slot = 6, .index_map_slot = -1, .index_count_slot = -1, .n_plane_axes = 0, .group = 1 };
+static const struct eg_unit_finish finish_auto = {
+    .struct_size = sizeof(struct eg_unit_finish), .flags = 0, .mask_slot = 2, .counter_slot = 3, .steps_slot = 4,
+    .steps = EG_STEPS_AUTO, .steps_max = 64, .step_ops = -1, .fp64_ops_ir = -1, .host_steps_reverse = NULL,
+    .device_steps_reverse = NULL };
+static const struct eg_unit_meta unit_countA = {
+    .struct_size = sizeof(struct eg_unit_meta), .name = "countA", .digest = DIGEST(0xF1), .pattern = EG_PATTERN_PURE,
+    .scalar_type = EG_SCALAR_FLOAT64, .host_entry = "countA_host", .device_image_format = EG_IMAGE_NONE,
+    .body = &auto_body, .launch = &launch, .finish = &finish_auto };
+static const struct eg_unit_meta unit_countAa = {
+    .struct_size = sizeof(struct eg_unit_meta), .name = "countAa", .digest = DIGEST(0xF2), .pattern = EG_PATTERN_PURE,
+    .scalar_type = EG_SCALAR_FLOAT64, .host_entry = "countAa_host", .device_image_format = EG_IMAGE_NONE,
+    .body = &auto_active_body, .launch = &launch_auto_active, .finish = &finish_auto };
+
 static const struct eg_unit_meta* const units[] = { &unit_axpb, &unit_wait, &unit_split, &unit_count1,
-                                                    &unit_count3, &unit_count1a, &unit_count3a };
+                                                    &unit_count3, &unit_count1a, &unit_count3a, &unit_countA, &unit_countAa };
 
 static const struct eg_library_meta library = {
     .struct_size = sizeof(struct eg_library_meta),
     .schema_major = EG_META_SCHEMA_MAJOR,
     .schema_minor = 0,
-    .n_units = 7,
+    .n_units = 9,
     .units = units,
 };
 

@@ -86,13 +86,18 @@ void read_finish(const eg_unit_meta& m, eg_unit_s& unit) {
         if (role_of(f.counter_slot) != EG_ROLE_LOOKUP || unit.slots[f.counter_slot].dtype != EG_DTYPE_UINT32)
             refuse(EG_BAD_REQUEST, what + "counter_slot " + std::to_string(f.counter_slot) +
                    " is not a uint32 LOOKUP slot");
-        if (f.steps == EG_STEPS_AUTO)
-            refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': finish steps AUTO is not written in this "
-                   "build of the door");
-        if (f.steps < 1) refuse(EG_BAD_REQUEST, what + "steps " + std::to_string(f.steps) + " (>= 1 or AUTO)");
-        if (f.steps_slot != -1)
-            refuse(EG_BAD_REQUEST, what + "steps_slot " + std::to_string(f.steps_slot) + " with fixed steps");
-        unit.finish = FinishFacts{ true, f.mask_slot, f.counter_slot, f.steps };
+        if (f.steps == EG_STEPS_AUTO) {
+            if (role_of(f.steps_slot) != EG_ROLE_LOOKUP || unit.slots[f.steps_slot].dtype != EG_DTYPE_INT64 ||
+                f.steps_slot == f.counter_slot)
+                refuse(EG_BAD_REQUEST, what + "steps_slot " + std::to_string(f.steps_slot) +
+                       " is not an int64 LOOKUP slot (steps AUTO)");
+            if (f.steps_max < 1) refuse(EG_BAD_REQUEST, what + "steps_max " + std::to_string(f.steps_max) + " (>= 1 with steps AUTO)");
+        } else {
+            if (f.steps < 1) refuse(EG_BAD_REQUEST, what + "steps " + std::to_string(f.steps) + " (>= 1 or AUTO)");
+            if (f.steps_slot != -1)
+                refuse(EG_BAD_REQUEST, what + "steps_slot " + std::to_string(f.steps_slot) + " with fixed steps");
+        }
+        unit.finish = FinishFacts{ true, f.mask_slot, f.counter_slot, f.steps, f.steps_slot, f.steps_max };
     }
 }
 
@@ -100,10 +105,10 @@ void read_finish(const eg_unit_meta& m, eg_unit_s& unit) {
 void check_lookups(const eg_unit_s& unit) {
     for (int i = 0; i < static_cast<int>(unit.slots.size()); ++i)
         if (unit.slots[i].role == EG_ROLE_LOOKUP && i != unit.finish.counter_slot &&
-            i != unit.active_map_slot && i != unit.active_count_slot)
+            i != unit.active_map_slot && i != unit.active_count_slot && i != unit.finish.steps_slot)
             refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "' slot " + std::to_string(i) + " ('" +
-                   unit.slots[i].name + "'): a LOOKUP slot other than the finished counter and the "
-                   "active set is not written yet");
+                   unit.slots[i].name + "'): a LOOKUP slot other than the finished counter, the steps word "
+                   "and the active set is not written yet");
 }
 
 /** @brief Check the body and launch records and copy the slot facts into @p unit. */

@@ -1331,6 +1331,156 @@ static void check_active_set(eg_ctx* ctx) {
     eg_host_threads(ctx, 1);
 }
 
+/* ---- steps AUTO ------------------------------------------------------------ */
+
+/* band_k as its doc states it: the power of two nearest sqrt(2R / h), h = newly / (live * k), in [lo, hi]. */
+static int64_t model_band_k(double rate, int64_t newly, int64_t live, int64_t k, int64_t hi, int64_t lo) {
+    if (newly <= 0) return hi;
+    const double e2 = 2.0 * rate * (double)live * (double)k / (double)newly;
+    int64_t p = 1;
+    while (p < (1LL << 30) && e2 >= 2.0 * (double)p * (double)p) p *= 2;
+    return p < lo ? lo : p > hi ? hi : p;
+}
+
+struct auto_out {
+    int64_t iters, steps, mapped, compactions, finished, last_word;
+};
+
+/* The old pacing (first launch 16 steps, then the band, the last cut to the steps left; with an active set a
+ * compaction after each launch in which the finished count moved) on the plain per-slot model. */
+static void model_auto(const double* limit, const unsigned char* mask0, int64_t max_steps, int active, struct auto_out* o) {
+    static int64_t left[RN];
+    static unsigned char done[RN];
+    static int32_t map[RN];
+    int64_t finished = 0, count = RN, at_last = 0, k = 16, fin_at, word = max_steps < 16 ? max_steps : 16, steps_done = 0;
+    for (int64_t i = 0; i < RN; ++i) {
+        done[i] = mask0[i];
+        left[i] = mask0[i] ? 0 : (int64_t)limit[i]; /* steps still needed */
+        finished += mask0[i];
+        map[i] = (int32_t)i;
+    }
+    fin_at = finished;
+    memset(o, 0, sizeof(*o));
+    int go = finished != RN && max_steps > 0;
+    const int64_t cap_iters = (max_steps + 7) / 8 + 1;
+    while (o->iters < cap_iters && go) {
+        const int64_t live = active ? (count < RN ? count : RN) : RN;
+        for (int64_t t = 0; t < live; ++t) {
+            const int64_t s = active ? map[t] : t;
+            for (int64_t w = 0; w < word && !done[s]; ++w)
+                if (--left[s] == 0) done[s] = 1, ++finished;
+        }
+        if (active && finished != at_last) {
+            int64_t c = 0;
+            for (int64_t i = 0; i < RN; ++i)
+                if (!done[i]) map[c++] = (int32_t)i;
+            count = c;
+            ++o->compactions;
+            at_last = finished;
+        }
+        steps_done += word;
+        o->mapped += RN - fin_at;
+        const int64_t next = model_band_k(8.0, finished - fin_at, RN - finished, k, 64, 8);
+        fin_at = finished;
+        k = next;
+        go = finished != RN && max_steps - steps_done > 0;
+        if (go) word = next < max_steps - steps_done ? next : max_steps - steps_done;
+        ++o->iters;
+    }
+    o->steps = steps_done;
+    o->finished = finished;
+    o->last_word = word;
+}
+
+static void run_auto_case(eg_ctx* ctx, eg_unit* unit, int active, eg_structure structure, int32_t threads, int64_t max_steps) {
+    static double k[RN], limit[RN], want_k[RN];
+    static unsigned char mask[RN], mask0[RN];
+    struct tensor t[3];
+    char what[200];
+    count_inputs(k, limit, mask);
+    memcpy(mask0, mask, RN);
+    struct auto_out m;
+    model_auto(limit, mask0, max_steps, active, &m);
+    for (int64_t i = 0; i < RN; ++i) {
+        const double ran = (double)m.steps; /* every live sample steps while it is live: k = min(limit, steps run) */
+        want_k[i] = mask0[i] ? 0.0 : (limit[i] < ran ? limit[i] : ran);
+    }
+    eg_host_threads(ctx, threads);
+    eg_plan* p = count_plan(ctx, unit, structure, k, limit, mask, t);
+    eg_runner* r = NULL;
+    const struct eg_runner_desc d = runner_desc(&p, 1, max_steps);
+    eg_status s = p ? eg_runner_new(ctx, &d, &r) : EG_FAULT;
+    if (s == EG_OK) s = eg_plan_free(ctx, p);
+    struct eg_run_report rep;
+    memset(&rep, 0, sizeof(rep));
+    rep.struct_size = sizeof(rep);
+    if (s == EG_OK) s = eg_run(ctx, r, &rep);
+    int planes_ok = 1;
+    for (int64_t i = 0; i < RN; ++i) planes_ok &= memcmp(&k[i], &want_k[i], sizeof(double)) == 0;
+    const uint32_t flags = (m.finished == RN ? EG_REPORT_DONE : 0u) |
+                           ((m.iters == 0 || m.finished != RN || m.last_word == 1) ? EG_REPORT_EXACT_STEPS : 0u);
+    snprintf(what, sizeof(what), "steps AUTO%s %s threads=%d max_steps=%lld: %lld launches, %lld steps, %lld compactions as the "
+             "model; k as the closed form", active ? " + active set" : "",
+             structure == EG_STRUCTURE_HOST_SERIAL ? "SERIAL" : "TEAM", threads, (long long)max_steps, (long long)m.iters,
+             (long long)m.steps, (long long)m.compactions);
+    check(s == EG_OK && planes_ok && rep.mode == EG_MODE_HOST && rep.finished == m.finished && rep.launches == m.iters &&
+              rep.steps == m.steps && rep.compactions == m.compactions && rep.flags == flags &&
+              rep.mapped == (active ? m.mapped : m.iters * RN),
+          what);
+    check(eg_runner_free(ctx, r) == EG_OK && t[0].deleted == 1, "AUTO runner freed");
+}
+
+static void check_auto(eg_ctx* ctx) {
+    eg_unit *ua = NULL, *uaa = NULL;
+    check(load(ctx, "countA", 0xF1, &ua) == EG_OK && load(ctx, "countAa", 0xF2, &uaa) == EG_OK,
+          "eg_unit_load countA and countAa (finish steps AUTO, steps_max 64, an eagle-made int64 steps word)");
+    if (ua == NULL || uaa == NULL) return;
+    const eg_structure structures[2] = { EG_STRUCTURE_HOST_SERIAL, EG_STRUCTURE_HOST_TEAM };
+    const int32_t threads[2] = { 1, 3 };
+    const int64_t caps[3] = { 1000, 40, 5 };
+    for (int si = 0; si < 2; ++si)
+        for (int ti = 0; ti < 2; ++ti)
+            for (int ci = 0; ci < 3; ++ci) {
+                run_auto_case(ctx, ua, 0, structures[si], threads[ti], caps[ci]);
+                run_auto_case(ctx, uaa, 1, structures[si], threads[ti], caps[ci]);
+            }
+    static double k[RN], limit[RN];
+    static unsigned char mask[RN];
+    struct tensor t[3], t2[3], t3[3];
+    count_inputs(k, limit, mask);
+    eg_plan* pa = count_plan(ctx, ua, EG_STRUCTURE_HOST_TEAM, k, limit, mask, t);
+    eg_plan* pb = count_plan(ctx, ua, EG_STRUCTURE_HOST_TEAM, k, limit, mask, t2);
+    eg_plan* two[2] = { pa, pb };
+    eg_runner* r = NULL;
+    struct eg_runner_desc d = runner_desc(two, 2, 100);
+    int ok = pa && pb;
+    check(ok && eg_runner_new(ctx, &d, &r) == EG_NOT_WRITTEN && reason_has(ctx, "steps AUTO in a several-plan step"),
+          "steps AUTO in a several-plan step refused NOT_WRITTEN");
+    eg_plan* pc2 = count_plan(ctx, uaa, EG_STRUCTURE_HOST_TEAM, k, limit, mask, t3);
+    d = runner_desc(&pc2, 1, 100);
+    d.every = 8;
+    check(pc2 && eg_runner_new(ctx, &d, &r) == EG_BAD_REQUEST && reason_has(ctx, "steps AUTO"),
+          "every with a steps AUTO unit refused BAD_REQUEST");
+    const int32_t steps_slot = 4;
+    eg_plane* pl = NULL;
+    struct tensor tl;
+    static double w[RN];
+    tensor_init(&tl, w, RN, 64);
+    eg_plane_wrap(ctx, &tl.managed, &pl);
+    struct eg_bind_desc bd;
+    memset(&bd, 0, sizeof(bd));
+    bd.struct_size = sizeof(bd);
+    bd.n_planes = 1;
+    bd.plane_slots = &steps_slot;
+    bd.planes = &pl;
+    check(eg_bind(ctx, pa, &bd) == EG_BAD_REQUEST && reason_has(ctx, "steps word"),
+          "binding the steps word refused BAD_REQUEST");
+    ok = eg_plan_free(ctx, pa) == EG_OK && eg_plan_free(ctx, pb) == EG_OK && eg_plan_free(ctx, pc2) == EG_OK && eg_plane_free(ctx, pl) == EG_OK &&
+         eg_unit_free(ctx, ua) == EG_OK && eg_unit_free(ctx, uaa) == EG_OK;
+    check(ok, "AUTO plans, plane and units freed");
+    eg_host_threads(ctx, 1);
+}
+
 int main(int argc, char** argv) {
     if (argc != 5) {
         fprintf(stderr, "usage: %s <fixture> <wrong size> <no size block> <v1 tag>\n", argv[0]);
@@ -1359,6 +1509,7 @@ int main(int argc, char** argv) {
     oracle(ctx, unit, 100001, 50000, "n=100001 threads=1");
     check_runner(ctx, unit);
     check_active_set(ctx);
+    check_auto(ctx);
 
     check_reduce(ctx);
     check_conditionals(ctx);

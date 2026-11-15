@@ -9,6 +9,7 @@
 #include "eagle/door/Context.h"
 #include "eagle/door/eg_unit_meta.h"
 #include "eagle/door/host/Team.h"
+#include "eagle/policy/Launch.h"
 
 #include <algorithm>
 #include <limits>
@@ -21,6 +22,9 @@ namespace {
 constexpr std::int64_t kMinEvery = 4;            ///< the fewest steps between two compactions
 constexpr std::int64_t kDefaultEvery = 16;       ///< the cadence when ``every`` is 0, rounded up to whole launches
 constexpr std::int64_t kMinReorderSpan = 4096;   ///< the fewest samples a reorder is built for and fires over
+constexpr std::int64_t kAutoKMin = 8;            ///< AUTO: the fewest steps of a launch but the last, and the compaction cadence
+constexpr std::int64_t kAutoK0 = 16;             ///< AUTO: the steps of the first launch
+constexpr double kAutoRate = 8.0;                ///< AUTO: a compaction's cost in full-live steps on the host
 constexpr double kThetaLow = 0.25, kThetaHigh = 0.75;
 
 /** @brief Refuse what this build of the runner does not run, by name. */
@@ -66,6 +70,9 @@ void check_plans(const eg_ctx& ctx, const eg_runner_desc& d) {
     if (first.n_samples > std::numeric_limits<std::uint32_t>::max())
         refuse(EG_BAD_REQUEST, "n_samples " + std::to_string(first.n_samples) + ": the finished counter "
                "is uint32");
+    if (d.n_plans > 1 && f.steps == EG_STEPS_AUTO)
+        refuse(EG_NOT_WRITTEN, "unit '" + first.unit->name + "': finish steps AUTO in a several-plan step is "
+               "not written in this build of the door");
     for (int i = 1; i < d.n_plans; ++i) {
         const eg_plan_s& p = *d.plans[i];
         if (p.n_samples != first.n_samples)
@@ -106,13 +113,19 @@ bool check_active(const eg_runner_desc& d) {
                    "runner");
     }
     const std::int64_t k = d.plans[0]->unit->finish.steps;
-    if (d.every < 0) refuse(EG_BAD_REQUEST, "every " + std::to_string(d.every) + " < 0");
-    if (d.every % k != 0)
-        refuse(EG_BAD_REQUEST, "every " + std::to_string(d.every) + " is not a whole number of launches of " +
-               std::to_string(k) + " step(s)");
-    if (d.every != 0 && d.every < kMinEvery)
-        refuse(EG_BAD_REQUEST, "every " + std::to_string(d.every) + " is below " + std::to_string(kMinEvery) +
-               " steps: a compaction scans every sample, so a shorter cadence costs more than it saves");
+    if (k == EG_STEPS_AUTO) {
+        if (d.every != 0)
+            refuse(EG_BAD_REQUEST, "every " + std::to_string(d.every) + ": a unit with steps AUTO compacts after "
+                   "every launch in which a sample finished; pass 0");
+    } else {
+        if (d.every < 0) refuse(EG_BAD_REQUEST, "every " + std::to_string(d.every) + " < 0");
+        if (d.every % k != 0)
+            refuse(EG_BAD_REQUEST, "every " + std::to_string(d.every) + " is not a whole number of launches of " +
+                   std::to_string(k) + " step(s)");
+        if (d.every != 0 && d.every < kMinEvery)
+            refuse(EG_BAD_REQUEST, "every " + std::to_string(d.every) + " is below " + std::to_string(kMinEvery) +
+                   " steps: a compaction scans every sample, so a shorter cadence costs more than it saves");
+    }
     if (d.flags & EG_RUN_REORDER)
         if (!(d.reorder_theta >= kThetaLow && d.reorder_theta <= kThetaHigh))
             refuse(EG_BAD_REQUEST, "reorder_theta " + std::to_string(d.reorder_theta) + " is outside [" +
@@ -242,6 +255,74 @@ void run_active(eg_runner_s& runner, int threads, std::int64_t& iterations, std:
     reorders = a.reorders - r0;
 }
 
+
+/** @brief What an AUTO run reports beyond the iteration count. */
+struct AutoOut {
+    std::int64_t steps = 0, mapped = 0, word = 0;
+};
+
+/** @brief The band pacing of a unit with steps AUTO (``_host_loop.py``'s non-measured branch and
+ *  ``_until_done._host_policy``): the first launch takes kAutoK0 steps, each next one the power-of-two
+ *  band of the finishing rate, the last cut to the steps left; with an active set each launch is
+ *  followed by its compaction (and reorder). The planes equal every other pacing's. */
+void run_auto(eg_runner_s& runner, int threads, std::int64_t& iterations, std::int64_t& compactions,
+              std::int64_t& reorders, AutoOut& out) {
+    eg_plan_s& first = *runner.plans[0];
+    const FinishFacts& f = first.unit->finish;
+    const std::int64_t n = first.n_samples, cap = runner.max_steps;
+    const std::int64_t cap_iterations = (cap + kAutoKMin - 1) / kAutoKMin + 1;
+    std::int64_t k = kAutoK0, fin_at = first.finished, done = 0;
+    std::int64_t& word = first.steps_word;
+    word = std::min(kAutoK0, cap);
+    bool go = static_cast<std::int64_t>(first.finished) != n && cap > 0;
+    ActiveState& a = runner.act;
+    std::vector<Owned> owned;
+    const unsigned char* mask = nullptr;
+    std::int64_t c0 = 0, r0 = 0;
+    if (runner.active) {
+        owned = owned_planes(runner);
+        mask = reinterpret_cast<const unsigned char*>(owned[0].data);
+        c0 = a.compactions;
+        r0 = a.reorders;
+    }
+    while (iterations < cap_iterations && go) {
+        for (std::size_t i = 0; i < runner.plans.size(); ++i) {
+            eg_plan_s& p = *runner.plans[i];
+            p.steps_word = word;
+            if (!runner.active) {
+                host::run_plan(p, threads);
+            } else if (const std::int64_t live = std::min<std::int64_t>(a.count, n); live > 0) {
+                host::run_prefix(p, threads, live);
+            }
+        }
+        if (runner.active) {
+            if (first.finished != a.done_at_last) {
+                compact(a, mask);
+                ++a.compactions;
+                a.done_at_last = first.finished;
+            }
+            if (a.reorder && a.fire) reorder(a, owned);
+        }
+        const std::int64_t fin = first.finished;
+        done += word;
+        out.mapped += n - fin_at;
+        const std::int64_t next = eagle::policy::bandK(kAutoRate, fin - fin_at, n - fin, k, f.steps_max, kAutoKMin);
+        fin_at = fin;
+        k = next;
+        const std::int64_t left = cap - done;
+        go = fin != n && left > 0;
+        if (go) word = std::min(next, left);
+        ++iterations;
+    }
+    if (runner.active && a.reorder && a.reorders != a.restored_at) restore(a, owned);
+    if (runner.active) {
+        compactions = a.compactions - c0;
+        reorders = a.reorders - r0;
+    }
+    out.steps = done;
+    out.word = word;
+}
+
 }  // namespace
 
 /** @brief eg_runner_new: check the request and keep a reference to each plan. */
@@ -260,8 +341,9 @@ void runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out) {
             const std::int64_t k = d.plans[0]->unit->finish.steps, n = d.plans[0]->n_samples;
             ActiveState& a = runner->act;
             a.n = n;
-            a.every_steps = d.every != 0 ? d.every : k * ((kDefaultEvery + k - 1) / k);
-            a.every_launches = a.every_steps / k;
+            a.every_steps = k == EG_STEPS_AUTO ? kAutoKMin
+                          : d.every != 0 ? d.every : k * ((kDefaultEvery + k - 1) / k);
+            a.every_launches = k == EG_STEPS_AUTO ? 1 : a.every_steps / k;
             a.map.resize(static_cast<std::size_t>(n));
             for (std::int64_t i = 0; i < n; ++i) a.map[static_cast<std::size_t>(i)] = static_cast<std::int32_t>(i);
             a.count = static_cast<std::uint32_t>(n);
@@ -330,8 +412,12 @@ void run_loop(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report) {
     first.finished = static_cast<std::uint32_t>(std::count_if(mask, mask + n, [](unsigned char m) { return m != 0; }));
     const int threads = host::team_threads(ctx);
     std::int64_t launches = 0, compactions = 0, reorders = 0;
-    const std::int64_t per_iteration = runner->active ? runner->act.every_steps : f.steps;
-    if (runner->active) {
+    const std::int64_t per_iteration = runner->active ? runner->act.every_steps : f.steps;   // not read with AUTO
+    AutoOut aut;
+    const bool automatic = f.steps == EG_STEPS_AUTO;
+    if (automatic) {
+        run_auto(*runner, threads, launches, compactions, reorders, aut);
+    } else if (runner->active) {
         run_active(*runner, threads, launches, compactions, reorders);
     } else {
         const std::int64_t cap = runner->max_steps / f.steps + (runner->max_steps % f.steps != 0);
@@ -343,15 +429,16 @@ void run_loop(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report) {
     if (report == nullptr) return;
     eg_run_report r{};
     r.flags = (static_cast<std::int64_t>(first.finished) == n ? EG_REPORT_DONE : 0u) |
-              (per_iteration == 1 ? EG_REPORT_EXACT_STEPS : 0u);
+              ((automatic ? launches == 0 || static_cast<std::int64_t>(first.finished) != n || aut.word == 1
+                          : per_iteration == 1) ? EG_REPORT_EXACT_STEPS : 0u);
     r.mode = EG_MODE_HOST;
     r.n = n;
     r.finished = first.finished;
     r.launches = launches;
-    r.steps = launches * per_iteration;
+    r.steps = automatic ? aut.steps : launches * per_iteration;
     r.compactions = compactions;
     r.reorders = reorders;
-    r.mapped = launches * n;
+    r.mapped = automatic && runner->active ? aut.mapped : launches * n;
     const std::uint32_t size = std::min<std::uint32_t>(report->struct_size, sizeof(r));
     r.struct_size = size;
     std::memcpy(static_cast<void*>(report), static_cast<const void*>(&r), size);

@@ -71,7 +71,9 @@ struct FinishFacts {
     bool present = false;
     std::int32_t mask_slot = -1;     ///< the TERMINATED slot it marks
     std::int32_t counter_slot = -1;  ///< the uint32 LOOKUP cell eagle makes
-    std::int64_t steps = 0;          ///< steps one launch takes, >= 1
+    std::int64_t steps = 0;          ///< steps one launch takes, >= 1; EG_STEPS_AUTO
+    std::int32_t steps_slot = -1;    ///< AUTO: the int64 LOOKUP word the runner sets per launch
+    std::int64_t steps_max = 0;      ///< AUTO: the most steps one launch takes
 };
 
 }  // namespace door
@@ -118,6 +120,7 @@ struct eg_plan_s {
     std::vector<Binding> bindings;            ///< one per slot; never resized after eg_plan_new
     std::vector<void*> params;                ///< the entry's argument list, into ``bindings``
     std::uint32_t finished = 0;               ///< the eagle-made finished counter of a finishing unit
+    std::int64_t steps_word = 0;              ///< the eagle-made steps word of an AUTO unit
     eg_runner_s* active_owner = nullptr;      ///< the runner whose active set the plan reads
     int refs = 1;                             ///< the caller's reference plus one per runner
     bool caller_ref = true;
