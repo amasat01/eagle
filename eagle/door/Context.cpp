@@ -53,13 +53,14 @@ eg_status ctx_new(const eg_ctx_settings* settings, eg_ctx** out) noexcept {
 }
 
 /**
- * @brief Free every handle still made from @p ctx: runners first (they hold
+ * @brief Free every handle still made from @p ctx: graphs and any open recording first, then runners (they hold
  * plan references), then plans (they hold plane and unit references), then
  * planes, then units. In a forked child no deleter runs and no library is
  * closed: only eagle's own memory is freed.
  */
 void ctx_free_all(eg_ctx& ctx) {
     const bool child = forked(ctx);
+    record_drop_all(ctx);
     for (eg_runner_s* runner : ctx.runners) delete runner;
     ctx.runners.clear();
     for (eg_plan_s* plan : std::vector<eg_plan_s*>(ctx.plans.begin(), ctx.plans.end())) {
@@ -90,7 +91,7 @@ void ctx_info(eg_ctx& ctx, struct eg_ctx_info* out) {
     info.abi_major = EG_DOOR_VERSION_MAJOR;
     info.abi_minor = EG_DOOR_VERSION_MINOR;
     info.device = -1;
-    info.capabilities = EG_CAP_HOST;
+    info.capabilities = EG_CAP_HOST | EG_CAP_COND_IF_ELSE | EG_CAP_COND_SWITCH;
     info.host_threads = host::team_threads(ctx);
     info.device_type = 0;
     info.stream = -1;

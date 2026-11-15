@@ -20,12 +20,6 @@ eg_status not_written(eg_ctx* ctx, const char* name) {
     });
 }
 
-/** @brief A ``*_free`` of a handle kind this build cannot make: NULL is OK. */
-eg_status not_written_free(eg_ctx* ctx, const void* handle, const char* name) {
-    if (handle == nullptr) return EG_OK;
-    return not_written(ctx, name);
-}
-
 }  // namespace
 
 // ---- context ---------------------------------------------------------------
@@ -110,6 +104,33 @@ EG_EXPORT eg_status eg_launch(eg_ctx* ctx, eg_plan* plan, uint64_t* tiles) {
     return door::call(ctx, [&](eg_ctx& c) { door::launch(c, plan, tiles); });
 }
 
+// ---- graph operations and recording ----------------------------------------
+
+EG_EXPORT eg_status eg_reduce(eg_ctx* ctx, const struct eg_reduce_desc* desc) {
+    return door::call(ctx, [&](eg_ctx& c) { door::reduce(c, desc); });
+}
+EG_EXPORT eg_status eg_copy(eg_ctx* ctx, eg_plane* src, eg_plane* dst) {
+    return door::call(ctx, [&](eg_ctx& c) { door::copy(c, src, dst); });
+}
+EG_EXPORT eg_status eg_record_begin(eg_ctx* ctx) {
+    return door::call(ctx, door::record_begin);
+}
+EG_EXPORT eg_status eg_record_cond_begin(eg_ctx* ctx, const struct eg_cond_desc* desc) {
+    return door::call(ctx, [desc](eg_ctx& c) { door::record_cond_begin(c, desc); });
+}
+EG_EXPORT eg_status eg_record_cond_arm(eg_ctx* ctx) { return door::call(ctx, door::record_cond_arm); }
+EG_EXPORT eg_status eg_record_cond_end(eg_ctx* ctx) { return door::call(ctx, door::record_cond_end); }
+EG_EXPORT eg_status eg_record_end(eg_ctx* ctx, eg_graph** out) {
+    return door::call(ctx, [out](eg_ctx& c) { door::record_end(c, out); });
+}
+EG_EXPORT eg_status eg_graph_launch(eg_ctx* ctx, eg_graph* graph) {
+    return door::call(ctx, [graph](eg_ctx& c) { door::graph_launch(c, graph); });
+}
+EG_EXPORT eg_status eg_graph_free(eg_ctx* ctx, eg_graph* graph) {
+    if (graph == nullptr) return EG_OK;
+    return door::call(ctx, [graph](eg_ctx& c) { door::graph_free(c, graph); });
+}
+
 // ---- runs ------------------------------------------------------------------
 
 EG_EXPORT eg_status eg_runner_new(eg_ctx* ctx, const struct eg_runner_desc* desc, eg_runner** out) {
@@ -120,7 +141,9 @@ EG_EXPORT eg_status eg_runner_free(eg_ctx* ctx, eg_runner* runner) {
     if (runner == nullptr) return EG_OK;
     return door::call(ctx, [runner](eg_ctx& c) {
         door::check_handle(c.runners, runner, "runner");
-        door::runner_free(c, runner);
+        if (!runner->caller_ref) door::refuse(EG_BAD_REQUEST, "runner: already freed by the caller");
+        runner->caller_ref = false;
+        door::runner_release(c, runner);
     });
 }
 
@@ -136,21 +159,6 @@ EG_EXPORT eg_status eg_run_event_times(eg_ctx* ctx, eg_runner*, eg_plane*) {
 EG_EXPORT eg_status eg_reverse(eg_ctx* ctx, eg_runner*, const struct eg_bind_desc*,
                                const struct eg_bind_desc*) {
     return not_written(ctx, "eg_reverse");
-}
-EG_EXPORT eg_status eg_reduce(eg_ctx* ctx, const struct eg_reduce_desc*) {
-    return not_written(ctx, "eg_reduce");
-}
-EG_EXPORT eg_status eg_copy(eg_ctx* ctx, eg_plane*, eg_plane*) { return not_written(ctx, "eg_copy"); }
-EG_EXPORT eg_status eg_record_begin(eg_ctx* ctx) { return not_written(ctx, "eg_record_begin"); }
-EG_EXPORT eg_status eg_record_cond_begin(eg_ctx* ctx, const struct eg_cond_desc*) {
-    return not_written(ctx, "eg_record_cond_begin");
-}
-EG_EXPORT eg_status eg_record_cond_arm(eg_ctx* ctx) { return not_written(ctx, "eg_record_cond_arm"); }
-EG_EXPORT eg_status eg_record_cond_end(eg_ctx* ctx) { return not_written(ctx, "eg_record_cond_end"); }
-EG_EXPORT eg_status eg_record_end(eg_ctx* ctx, eg_graph**) { return not_written(ctx, "eg_record_end"); }
-EG_EXPORT eg_status eg_graph_launch(eg_ctx* ctx, eg_graph*) { return not_written(ctx, "eg_graph_launch"); }
-EG_EXPORT eg_status eg_graph_free(eg_ctx* ctx, eg_graph* graph) {
-    return not_written_free(ctx, graph, "eg_graph_free");
 }
 EG_EXPORT eg_status eg_device_count(eg_ctx* ctx, int32_t*) { return not_written(ctx, "eg_device_count"); }
 EG_EXPORT eg_status eg_device_props(eg_ctx* ctx, int32_t, struct eg_device_props*) {

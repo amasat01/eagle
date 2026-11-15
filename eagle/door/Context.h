@@ -124,7 +124,12 @@ struct eg_plan_s {
 struct eg_runner_s {
     std::vector<eg_plan_s*> plans;            ///< one reference each
     std::int64_t max_steps = 0;
+    int refs = 1;                             ///< the caller's reference plus one per recorded graph
+    bool caller_ref = true;
 };
+
+struct eg_graph_s;      // a recorded list of door calls (host/Record.cpp)
+struct eg_recording_s;  // the recording in progress on a context (host/Record.cpp)
 
 /** @brief All door state of one caller. */
 struct eg_ctx_s {
@@ -138,6 +143,8 @@ struct eg_ctx_s {
     std::unordered_set<eg_plane_s*> planes;
     std::unordered_set<eg_plan_s*> plans;
     std::unordered_set<eg_runner_s*> runners;
+    std::unordered_set<eg_graph_s*> graphs;
+    eg_recording_s* rec = nullptr;            ///< between eg_record_begin and eg_record_end
 
     /** @brief Store @p text as the reason, never throwing. */
     void set_reason(const char* text) noexcept {
@@ -223,7 +230,21 @@ void bind(eg_ctx& ctx, eg_plan_s* plan, const eg_bind_desc* desc);
 void launch(eg_ctx& ctx, eg_plan_s* plan, std::uint64_t* tiles);
 void runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out);
 void runner_free(eg_ctx& ctx, eg_runner_s* runner);
+void runner_release(eg_ctx& ctx, eg_runner_s* runner);
 void run(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report);
+void run_loop(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report);
+void reduce(eg_ctx& ctx, const eg_reduce_desc* desc);
+void copy(eg_ctx& ctx, eg_plane_s* src, eg_plane_s* dst);
+bool record_launch(eg_ctx& ctx, eg_plan_s* plan);
+bool record_run(eg_ctx& ctx, eg_runner_s* runner);
+void record_begin(eg_ctx& ctx);
+void record_cond_begin(eg_ctx& ctx, const eg_cond_desc* desc);
+void record_cond_arm(eg_ctx& ctx);
+void record_cond_end(eg_ctx& ctx);
+void record_end(eg_ctx& ctx, eg_graph** out);
+void graph_launch(eg_ctx& ctx, eg_graph_s* graph);
+void graph_free(eg_ctx& ctx, eg_graph_s* graph);
+void record_drop_all(eg_ctx& ctx);
 
 }  // namespace door
 }  // namespace eagle

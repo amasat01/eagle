@@ -35,7 +35,7 @@ static void check(int ok, const char* what) {
 
 struct tensor {
     struct DLManagedTensorVersioned managed;
-    int64_t shape[1];
+    int64_t shape[2];
     int deleted; /* how many times the deleter ran */
 };
 
@@ -651,6 +651,480 @@ static void check_runner(eg_ctx* ctx, eg_unit* axpb) {
     eg_host_threads(ctx, 1);
 }
 
+/* ---- reduce, copy, recording --------------------------------------------- */
+
+static void tensor_as(struct tensor* t, uint8_t code, uint8_t bits) {
+    t->managed.dl_tensor.dtype.code = code;
+    t->managed.dl_tensor.dtype.bits = bits;
+}
+
+/* A 2-D (d0, d1) view over the same data (samples last). */
+static void tensor_2d(struct tensor* t, int64_t d0, int64_t d1) {
+    t->managed.dl_tensor.ndim = 2;
+    t->shape[0] = d0;
+    t->shape[1] = d1;
+}
+
+static eg_plane* wrap(eg_ctx* ctx, struct tensor* t, void* data, int64_t n, uint8_t code, uint8_t bits) {
+    eg_plane* p = NULL;
+    tensor_init(t, data, n, bits);
+    tensor_as(t, code, bits);
+    return eg_plane_wrap(ctx, &t->managed, &p) == EG_OK ? p : NULL;
+}
+
+static eg_status reduce_do(eg_ctx* ctx, eg_plane* in, eg_plane* out, eg_plane* comp, eg_reduce_op op,
+                           eg_reduce_policy policy, uint32_t flags) {
+    struct eg_reduce_desc d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    d.flags = flags;
+    d.in = in;
+    d.out = out;
+    d.comp = comp;
+    d.op = op;
+    d.policy = policy;
+    return eg_reduce(ctx, &d);
+}
+
+#define NAN_D (0.0 / 0.0)
+
+static void check_reduce(eg_ctx* ctx) {
+    enum { N = 100001, M = 20001, NCOL = 3, K = 1000 };
+    static double x[N], big[K + 1], zeros[K];
+    static float xf[M], bigf[K + 1];
+    static int64_t xi[M];
+    static int32_t xi32[M];
+    static double cols[NCOL * K];
+    struct tensor tx, to;
+    double out = NAN_D, want_sum = 0, want_max = -1e300, want_min = 1e300;
+    for (int i = 0; i < N; ++i) {
+        x[i] = (double)((i * 7919) % 1000) - 500.0;
+        want_sum += x[i]; /* integers: exact in any order */
+        if (x[i] > want_max) want_max = x[i];
+        if (x[i] < want_min) want_min = x[i];
+    }
+    eg_plane* in = wrap(ctx, &tx, x, N, kDLFloat, 64);
+    eg_plane* po = wrap(ctx, &to, &out, 1, kDLFloat, 64);
+    int ok = in && po;
+    ok = ok && reduce_do(ctx, in, po, NULL, EG_REDUCE_SUM, EG_REDUCE_COMPENSATED, 0) == EG_OK && out == want_sum;
+    out = NAN_D;
+    ok = ok && reduce_do(ctx, in, po, NULL, EG_REDUCE_SUM, EG_REDUCE_FIXED, 0) == EG_OK && out == want_sum;
+    out = NAN_D;
+    ok = ok && reduce_do(ctx, in, po, NULL, EG_REDUCE_MAX, EG_REDUCE_COMPENSATED, 0) == EG_OK && out == want_max;
+    out = NAN_D;
+    ok = ok && reduce_do(ctx, in, po, NULL, EG_REDUCE_MIN, EG_REDUCE_COMPENSATED, 0) == EG_OK && out == want_min;
+    check(ok, "eg_reduce float64 sum (both policies), max, min over 100001 samples equal the plain loop");
+
+    /* float32 */
+    float outf = 0.0f, fsum = 0, fmax = -1e30f, fmin = 1e30f;
+    for (int i = 0; i < M; ++i) {
+        xf[i] = (float)(i % 13) - 6.0f;
+        fsum += xf[i]; /* |partial sum| < 2^24: exact */
+        if (xf[i] > fmax) fmax = xf[i];
+        if (xf[i] < fmin) fmin = xf[i];
+    }
+    struct tensor tf, tof;
+    eg_plane* pf = wrap(ctx, &tf, xf, M, kDLFloat, 32);
+    eg_plane* pof = wrap(ctx, &tof, &outf, 1, kDLFloat, 32);
+    ok = pf && pof;
+    ok = ok && reduce_do(ctx, pf, pof, NULL, EG_REDUCE_SUM, EG_REDUCE_COMPENSATED, 0) == EG_OK && outf == fsum;
+    outf = 0.0f;
+    ok = ok && reduce_do(ctx, pf, pof, NULL, EG_REDUCE_MAX, EG_REDUCE_COMPENSATED, 0) == EG_OK && outf == fmax;
+    outf = 0.0f;
+    ok = ok && reduce_do(ctx, pf, pof, NULL, EG_REDUCE_MIN, EG_REDUCE_COMPENSATED, 0) == EG_OK && outf == fmin;
+    check(ok, "eg_reduce float32 sum, max, min equal the plain loop");
+
+    /* a (3, n) samples-last plane reduces column by column */
+    double colout[NCOL], wsum[NCOL], wmax[NCOL];
+    for (int j = 0; j < NCOL; ++j) {
+        wsum[j] = 0;
+        wmax[j] = -1e300;
+        for (int i = 0; i < K; ++i) {
+            cols[j * K + i] = (double)((i * (j + 3)) % 17) - 8.0;
+            wsum[j] += cols[j * K + i];
+            if (cols[j * K + i] > wmax[j]) wmax[j] = cols[j * K + i];
+        }
+    }
+    struct tensor tcols, tcout;
+    eg_plane* pcols = wrap(ctx, &tcols, cols, NCOL * K, kDLFloat, 64);
+    eg_plane* pcout = wrap(ctx, &tcout, colout, NCOL, kDLFloat, 64);
+    tensor_2d(&tcols, NCOL, K);
+    ok = pcols && pcout && reduce_do(ctx, pcols, pcout, NULL, EG_REDUCE_SUM, EG_REDUCE_COMPENSATED, 0) == EG_OK;
+    for (int j = 0; j < NCOL; ++j) ok = ok && colout[j] == wsum[j];
+    ok = ok && reduce_do(ctx, pcols, pcout, NULL, EG_REDUCE_MAX, EG_REDUCE_COMPENSATED, 0) == EG_OK;
+    for (int j = 0; j < NCOL; ++j) ok = ok && colout[j] == wmax[j];
+    check(ok, "eg_reduce of a (3, 1000) samples-last plane: each column's sum and max equal the plain loop");
+
+    /* compensated: 2^53 then 1000 ones. The exact sum 2^53 + 1000 is representable; a plain sum is not. */
+    big[0] = 9007199254740992.0;
+    for (int i = 1; i <= K; ++i) big[i] = 1.0;
+    struct tensor tb, thi, tcomp;
+    double hi = 0, lo = 0;
+    eg_plane* pb = wrap(ctx, &tb, big, K + 1, kDLFloat, 64);
+    eg_plane* phi = wrap(ctx, &thi, &hi, 1, kDLFloat, 64);
+    eg_plane* plo = wrap(ctx, &tcomp, &lo, 1, kDLFloat, 64);
+    ok = pb && phi && plo && reduce_do(ctx, pb, phi, NULL, EG_REDUCE_SUM, EG_REDUCE_COMPENSATED, 0) == EG_OK &&
+         hi == 9007199254741992.0;
+    hi = lo = NAN_D;
+    ok = ok && reduce_do(ctx, pb, phi, plo, EG_REDUCE_SUM, EG_REDUCE_COMPENSATED, EG_REDUCE_PAIR) == EG_OK &&
+         (long double)hi + (long double)lo == 9007199254741992.0L;
+    check(ok, "eg_reduce compensated sum is the exact 2^53 + 1000; the PAIR (hi, comp) sums to it exactly");
+    float bf = 0, lf = 0;
+    bigf[0] = 16777216.0f;
+    for (int i = 1; i <= K; ++i) bigf[i] = 1.0f;
+    struct tensor tbf, thf, tlf;
+    eg_plane* pbf = wrap(ctx, &tbf, bigf, K + 1, kDLFloat, 32);
+    eg_plane* phf = wrap(ctx, &thf, &bf, 1, kDLFloat, 32);
+    eg_plane* plf = wrap(ctx, &tlf, &lf, 1, kDLFloat, 32);
+    ok = pbf && phf && plf && reduce_do(ctx, pbf, phf, plf, EG_REDUCE_SUM, EG_REDUCE_COMPENSATED, EG_REDUCE_PAIR) == EG_OK &&
+         (double)bf + (double)lf == 16778216.0;
+    check(ok, "eg_reduce float32 PAIR (hi, comp) sums exactly to 2^24 + 1000");
+
+    /* a companion input: each term is x + comp */
+    for (int i = 0; i < K; ++i) zeros[i] = 0.25;
+    struct tensor tz, tk, tsk;
+    double sk = 0.0, want = 0.0;
+    for (int i = 0; i < K; ++i) want += (double)i + 0.25;
+    static double ramp[K];
+    for (int i = 0; i < K; ++i) ramp[i] = (double)i;
+    eg_plane* pr = wrap(ctx, &tk, ramp, K, kDLFloat, 64);
+    eg_plane* pz = wrap(ctx, &tz, zeros, K, kDLFloat, 64);
+    eg_plane* psk = wrap(ctx, &tsk, &sk, 1, kDLFloat, 64);
+    ok = pr && pz && psk && reduce_do(ctx, pr, psk, pz, EG_REDUCE_SUM, EG_REDUCE_COMPENSATED, 0) == EG_OK && sk == want;
+    check(ok, "eg_reduce with a companion input sums x + comp (499750)");
+
+    /* integers and ALL */
+    int64_t oi = 0, wi = 0, wimax = -1;
+    int32_t o32 = 0, w32max = -1000;
+    for (int i = 0; i < M; ++i) {
+        xi[i] = (int64_t)i * 3000000007LL % 1000003 - 400000;
+        wi += xi[i];
+        if (xi[i] > wimax) wimax = xi[i];
+        xi32[i] = (int32_t)(i % 101) - 50;
+        if (xi32[i] > w32max) w32max = xi32[i];
+    }
+    struct tensor ti, toi, t32, to32;
+    eg_plane* pi = wrap(ctx, &ti, xi, M, kDLInt, 64);
+    eg_plane* poi = wrap(ctx, &toi, &oi, 1, kDLInt, 64);
+    eg_plane* p32 = wrap(ctx, &t32, xi32, M, kDLInt, 32);
+    eg_plane* po32 = wrap(ctx, &to32, &o32, 1, kDLInt, 32);
+    ok = pi && poi && p32 && po32 && reduce_do(ctx, pi, poi, NULL, EG_REDUCE_SUM, EG_REDUCE_COMPENSATED, 0) == EG_OK && oi == wi;
+    ok = ok && reduce_do(ctx, pi, poi, NULL, EG_REDUCE_MAX, EG_REDUCE_COMPENSATED, 0) == EG_OK && oi == wimax;
+    ok = ok && reduce_do(ctx, p32, po32, NULL, EG_REDUCE_MAX, EG_REDUCE_COMPENSATED, 0) == EG_OK && o32 == w32max;
+    static unsigned char mask[M];
+    unsigned char mo = 7;
+    memset(mask, 1, sizeof(mask));
+    struct tensor tm, tmo;
+    eg_plane* pm = wrap(ctx, &tm, mask, M, kDLBool, 8);
+    eg_plane* pmo = wrap(ctx, &tmo, &mo, 1, kDLBool, 8);
+    ok = ok && pm && pmo && reduce_do(ctx, pm, pmo, NULL, EG_REDUCE_ALL, EG_REDUCE_COMPENSATED, 0) == EG_OK && mo == 1;
+    mask[M - 3] = 0;
+    ok = ok && reduce_do(ctx, pm, pmo, NULL, EG_REDUCE_ALL, EG_REDUCE_COMPENSATED, 0) == EG_OK && mo == 0;
+    check(ok, "eg_reduce int64 sum and max, int32 max, and ALL over a bool mask equal the plain loop");
+
+    /* refusals */
+    unsigned char dummy = 0;
+    uint32_t u32[4] = { 1, 2, 3, 4 }, u32o[1] = { 0 };
+    struct tensor tu, tuo, te, tbadout;
+    eg_plane* pu = wrap(ctx, &tu, u32, 4, kDLUInt, 32);
+    eg_plane* puo = wrap(ctx, &tuo, u32o, 1, kDLUInt, 32);
+    eg_plane* pe = wrap(ctx, &te, &dummy, 0, kDLFloat, 64);
+    eg_plane* pbad = wrap(ctx, &tbadout, &colout, 3, kDLFloat, 64);
+    int all = pu && puo && pe && pbad;
+    all = all && reduce_do(ctx, pm, pmo, NULL, EG_REDUCE_SUM, EG_REDUCE_COMPENSATED, 0) == EG_NOT_WRITTEN && reason_has(ctx, "bool plane takes op ALL");
+    all = all && reduce_do(ctx, in, po, NULL, EG_REDUCE_ALL, EG_REDUCE_COMPENSATED, 0) == EG_NOT_WRITTEN && reason_has(ctx, "ALL takes a bool plane");
+    all = all && reduce_do(ctx, pu, puo, NULL, EG_REDUCE_SUM, EG_REDUCE_COMPENSATED, 0) == EG_NOT_WRITTEN && reason_has(ctx, "dtype");
+    all = all && reduce_do(ctx, in, po, plo, EG_REDUCE_MAX, EG_REDUCE_COMPENSATED, 0) == EG_NOT_WRITTEN && reason_has(ctx, "comp takes");
+    all = all && reduce_do(ctx, pi, poi, poi, EG_REDUCE_SUM, EG_REDUCE_COMPENSATED, EG_REDUCE_PAIR) == EG_NOT_WRITTEN && reason_has(ctx, "comp takes");
+    all = all && reduce_do(ctx, pb, phi, plf, EG_REDUCE_SUM, EG_REDUCE_COMPENSATED, EG_REDUCE_PAIR) == EG_BAD_REQUEST && reason_has(ctx, "comp dtype");
+    all = all && reduce_do(ctx, pb, phi, plo, EG_REDUCE_SUM, EG_REDUCE_FIXED, EG_REDUCE_PAIR) == EG_NOT_WRITTEN && reason_has(ctx, "policy FIXED");
+    all = all && reduce_do(ctx, pb, phi, NULL, EG_REDUCE_SUM, EG_REDUCE_COMPENSATED, EG_REDUCE_PAIR) == EG_BAD_REQUEST && reason_has(ctx, "comp, which is NULL");
+    all = all && reduce_do(ctx, in, poi, NULL, EG_REDUCE_SUM, EG_REDUCE_COMPENSATED, 0) == EG_BAD_REQUEST && reason_has(ctx, "out dtype");
+    all = all && reduce_do(ctx, in, pbad, NULL, EG_REDUCE_SUM, EG_REDUCE_COMPENSATED, 0) == EG_BAD_REQUEST && reason_has(ctx, "out must have shape");
+    all = all && reduce_do(ctx, pe, po, NULL, EG_REDUCE_SUM, EG_REDUCE_COMPENSATED, 0) == EG_BAD_REQUEST && reason_has(ctx, "no samples");
+    all = all && reduce_do(ctx, in, in, NULL, EG_REDUCE_SUM, EG_REDUCE_COMPENSATED, 0) == EG_BAD_REQUEST;
+    all = all && reduce_do(ctx, in, po, NULL, (eg_reduce_op)9, EG_REDUCE_COMPENSATED, 0) == EG_BAD_REQUEST && reason_has(ctx, "unknown reduce op");
+    all = all && reduce_do(ctx, in, po, NULL, EG_REDUCE_SUM, (eg_reduce_policy)9, 0) == EG_BAD_REQUEST && reason_has(ctx, "unknown reduce policy");
+    all = all && reduce_do(ctx, in, po, NULL, EG_REDUCE_SUM, EG_REDUCE_COMPENSATED, 1u << 5) == EG_BAD_REQUEST && reason_has(ctx, "unknown bits");
+    all = all && reduce_do(ctx, NULL, po, NULL, EG_REDUCE_SUM, EG_REDUCE_COMPENSATED, 0) == EG_BAD_REQUEST;
+    check(all, "eg_reduce refuses each op/dtype/policy pair the host does not serve NOT_WRITTEN and each "
+               "shape, dtype, flag or handle fault BAD_REQUEST, by name");
+
+    /* copy */
+    static double src[K], dst[K];
+    static float dstf[K];
+    for (int i = 0; i < K; ++i) src[i] = (double)i * 0.1, dst[i] = -1.0;
+    struct tensor ts, td, tdf;
+    eg_plane* ps = wrap(ctx, &ts, src, K, kDLFloat, 64);
+    eg_plane* pd = wrap(ctx, &td, dst, K, kDLFloat, 64);
+    eg_plane* pdf = wrap(ctx, &tdf, dstf, K, kDLFloat, 32);
+    ok = ps && pd && pdf && eg_copy(ctx, ps, pd) == EG_OK && memcmp(src, dst, sizeof(src)) == 0;
+    ok = ok && eg_copy(ctx, ps, ps) == EG_OK;
+    check(ok, "eg_copy moves a float64 plane bitwise (and onto itself does nothing)");
+    td.managed.flags |= DLPACK_FLAG_BITMASK_READ_ONLY;
+    all = eg_copy(ctx, ps, pdf) == EG_BAD_REQUEST && reason_has(ctx, "one shape and dtype");
+    all = all && eg_copy(ctx, ps, pe) == EG_BAD_REQUEST;
+    all = all && eg_copy(ctx, ps, pd) == EG_BAD_REQUEST && reason_has(ctx, "read-only");
+    all = all && eg_copy(ctx, ps, NULL) == EG_BAD_REQUEST;
+    check(all, "eg_copy refuses a dtype or shape mismatch, a read-only dst and a NULL plane BAD_REQUEST");
+    eg_plane* planes[] = { in, po, pf, pof, pcols, pcout, pb, phi, plo, pbf, phf, plf, pr, pz, psk, pi, poi, p32, po32,
+                           pm, pmo, pu, puo, pe, pbad, ps, pd, pdf };
+    all = 1;
+    for (size_t i = 0; i < sizeof(planes) / sizeof(planes[0]); ++i) all &= eg_plane_free(ctx, planes[i]) == EG_OK;
+    check(all, "reduce and copy planes freed");
+}
+
+/* A cell plane over one int32 of the caller's. */
+static eg_plane* cell_at(eg_ctx* ctx, struct tensor* t, int32_t* p) { return wrap(ctx, t, p, 1, kDLInt, 32); }
+
+/* Record one conditional of `kind` whose arm i copies src[i] into out; returns the graph. */
+static eg_graph* record_copy_cond(eg_ctx* ctx, eg_cond_kind kind, int32_t n_arms, eg_plane* cell, eg_plane* const* src,
+                                  eg_plane* out) {
+    struct eg_cond_desc d;
+    eg_graph* g = NULL;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    d.kind = kind;
+    d.n_arms = n_arms;
+    d.cell = cell;
+    int32_t arms = kind == EG_COND_IF_ELSE ? 2 : kind == EG_COND_SWITCH ? n_arms : 1;
+    int ok = eg_record_begin(ctx) == EG_OK && eg_record_cond_begin(ctx, &d) == EG_OK;
+    for (int32_t i = 0; ok && i < arms; ++i) {
+        ok = eg_copy(ctx, src[i], out) == EG_OK;
+        if (ok && i + 1 < arms) ok = eg_record_cond_arm(ctx) == EG_OK;
+    }
+    ok = ok && eg_record_cond_end(ctx) == EG_OK && eg_record_end(ctx, &g) == EG_OK;
+    return ok ? g : NULL;
+}
+
+static void check_conditionals(eg_ctx* ctx) {
+    int32_t cell = 0;
+    double vals[3] = { 11.0, 22.0, 33.0 }, out = 0.0;
+    struct tensor tc, tv[3], to;
+    eg_plane* pc = cell_at(ctx, &tc, &cell);
+    eg_plane* src[3];
+    for (int i = 0; i < 3; ++i) src[i] = wrap(ctx, &tv[i], &vals[i], 1, kDLFloat, 64);
+    eg_plane* po = wrap(ctx, &to, &out, 1, kDLFloat, 64);
+    int ok = pc && po && src[0] && src[1] && src[2];
+    if (!ok) {
+        check(0, "conditional planes wrapped");
+        return;
+    }
+
+    eg_graph* g_if = record_copy_cond(ctx, EG_COND_IF, 0, pc, src, po);
+    eg_graph* g_ie = record_copy_cond(ctx, EG_COND_IF_ELSE, 0, pc, src, po);
+    eg_graph* g_sw = record_copy_cond(ctx, EG_COND_SWITCH, 3, pc, src, po);
+    ok = g_if && g_ie && g_sw && out == 0.0;
+    check(ok, "a recorded IF, IF_ELSE and SWITCH run nothing while recording");
+
+    const struct { int32_t cell; double if_out, ie_out, sw_out; } rows[] = {
+        { 1, 11.0, 11.0, 22.0 }, { 0, -5.0, 22.0, 11.0 }, { 7, 11.0, 11.0, -5.0 }, { 2, 11.0, 11.0, 33.0 },
+        { -1, 11.0, 11.0, -5.0 }, { 3, 11.0, 11.0, -5.0 },
+    };
+    ok = 1;
+    for (size_t i = 0; ok && i < sizeof(rows) / sizeof(rows[0]); ++i) {
+        cell = rows[i].cell;
+        out = -5.0;
+        ok = eg_graph_launch(ctx, g_if) == EG_OK && out == rows[i].if_out;
+        out = -5.0;
+        ok = ok && eg_graph_launch(ctx, g_ie) == EG_OK && out == rows[i].ie_out;
+        out = -5.0;
+        ok = ok && eg_graph_launch(ctx, g_sw) == EG_OK && out == rows[i].sw_out;
+        if (!ok) printf("      cell %d: if %g if_else %g switch %g\n", cell, rows[i].if_out, rows[i].ie_out, rows[i].sw_out);
+    }
+    check(ok, "IF takes its arm when the cell is nonzero; IF_ELSE arm 0 on nonzero, arm 1 on zero; SWITCH arm k "
+              "on k and nothing out of range (0, 1, 2, -1, 3, 7)");
+
+    /* WHILE: the cell is b[0] of a shift register {1,1,1,0,0}; the body shifts it left one place.
+     * The body runs while b[0] != 0: three times here. */
+    int32_t b[5];
+    struct tensor tb[5];
+    eg_plane* pb[5];
+    ok = 1;
+    for (int i = 0; i < 5; ++i) ok = ok && (pb[i] = cell_at(ctx, &tb[i], &b[i]));
+    eg_graph* g_wh = NULL;
+    if (ok) {
+        struct eg_cond_desc d;
+        memset(&d, 0, sizeof(d));
+        d.struct_size = sizeof(d);
+        d.kind = EG_COND_WHILE;
+        d.cell = pb[0];
+        ok = eg_record_begin(ctx) == EG_OK && eg_record_cond_begin(ctx, &d) == EG_OK;
+        for (int i = 0; ok && i < 4; ++i) ok = eg_copy(ctx, pb[i + 1], pb[i]) == EG_OK;
+        ok = ok && eg_record_cond_end(ctx) == EG_OK && eg_record_end(ctx, &g_wh) == EG_OK;
+    }
+    if (ok) {
+        const int32_t start[5] = { 1, 1, 1, 0, 0 };
+        memcpy(b, start, sizeof(b));
+        ok = eg_graph_launch(ctx, g_wh) == EG_OK;
+        int32_t want[5] = { 0, 0, 0, 0, 0 }; /* three shifts: the ones leave, zeros fill */
+        ok = ok && memcmp(b, want, sizeof(b)) == 0;
+        const int32_t start2[5] = { 0, 1, 1, 1, 1 };
+        memcpy(b, start2, sizeof(b));
+        ok = ok && eg_graph_launch(ctx, g_wh) == EG_OK && memcmp(b, start2, sizeof(b)) == 0; /* zero cell: no pass */
+        const int32_t start3[5] = { 1, 0, 1, 1, 1 };
+        memcpy(b, start3, sizeof(b));
+        const int32_t want3[5] = { 0, 1, 1, 1, 1 };
+        ok = ok && eg_graph_launch(ctx, g_wh) == EG_OK && memcmp(b, want3, sizeof(b)) == 0; /* one pass */
+    }
+    check(ok, "WHILE repeats its body while the cell is nonzero (three passes, none, one)");
+
+    /* a graph keeps its planes alive past the caller's references */
+    eg_plane_free(ctx, pc);
+    eg_plane_free(ctx, po);
+    for (int i = 0; i < 3; ++i) eg_plane_free(ctx, src[i]);
+    ok = tc.deleted == 0 && to.deleted == 0 && tv[0].deleted == 0;
+    cell = 1;
+    out = -5.0;
+    ok = ok && eg_graph_launch(ctx, g_ie) == EG_OK && out == 11.0;
+    check(ok, "a recorded graph keeps its planes alive after the caller frees them");
+    ok = eg_graph_free(ctx, g_if) == EG_OK && eg_graph_free(ctx, g_ie) == EG_OK && to.deleted == 0 &&
+         eg_graph_free(ctx, g_sw) == EG_OK && tc.deleted == 1 && to.deleted == 1 && tv[0].deleted == 1 &&
+         tv[2].deleted == 1 && eg_graph_free(ctx, NULL) == EG_OK;
+    check(ok, "eg_graph_free drops the last references: the planes' deleters run once");
+    check(eg_graph_free(ctx, g_if) == EG_BAD_REQUEST && reason_has(ctx, "graph") &&
+              eg_graph_launch(ctx, g_if) == EG_BAD_REQUEST,
+          "a freed graph is refused BAD_REQUEST by launch and by free");
+    ok = eg_graph_free(ctx, g_wh) == EG_OK;
+    for (int i = 0; i < 5; ++i) ok = ok && eg_plane_free(ctx, pb[i]) == EG_OK;
+    check(ok, "while graph and planes freed");
+}
+
+static void check_recording_states(eg_ctx* ctx) {
+    int32_t cell = 1;
+    double f = 0.0;
+    struct tensor tc, tf;
+    eg_plane* pc = cell_at(ctx, &tc, &cell);
+    eg_plane* pf = wrap(ctx, &tf, &f, 1, kDLFloat, 64);
+    eg_graph *g = NULL, *none = NULL;
+    struct eg_cond_desc d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    d.cell = pc;
+    int all = pc && pf;
+    all = all && eg_record_end(ctx, &g) == EG_BAD_REQUEST && reason_has(ctx, "not recording");
+    all = all && eg_record_cond_begin(ctx, &d) == EG_BAD_REQUEST && reason_has(ctx, "not recording");
+    all = all && eg_record_cond_arm(ctx) == EG_BAD_REQUEST && eg_record_cond_end(ctx) == EG_BAD_REQUEST;
+    all = all && eg_record_begin(ctx) == EG_OK && eg_record_begin(ctx) == EG_BAD_REQUEST && reason_has(ctx, "already recording");
+    all = all && eg_record_cond_arm(ctx) == EG_BAD_REQUEST && reason_has(ctx, "no conditional is open");
+    all = all && eg_record_cond_end(ctx) == EG_BAD_REQUEST && reason_has(ctx, "no conditional is open");
+    d.cell = pf;
+    all = all && eg_record_cond_begin(ctx, &d) == EG_BAD_REQUEST && reason_has(ctx, "int32");
+    d.cell = pc;
+    d.flags = 1;
+    all = all && eg_record_cond_begin(ctx, &d) == EG_BAD_REQUEST && reason_has(ctx, "unknown bits");
+    d.flags = 0;
+    d.kind = 9;
+    all = all && eg_record_cond_begin(ctx, &d) == EG_BAD_REQUEST && reason_has(ctx, "unknown conditional kind");
+    d.kind = EG_COND_IF;
+    d.n_arms = 2;
+    all = all && eg_record_cond_begin(ctx, &d) == EG_BAD_REQUEST && reason_has(ctx, "SWITCH only");
+    d.kind = EG_COND_SWITCH;
+    d.n_arms = 0;
+    all = all && eg_record_cond_begin(ctx, &d) == EG_BAD_REQUEST && reason_has(ctx, "n_arms");
+    d.kind = EG_COND_IF;
+    d.n_arms = 0;
+    all = all && eg_record_cond_begin(ctx, &d) == EG_OK;
+    all = all && eg_record_cond_arm(ctx) == EG_BAD_REQUEST && reason_has(ctx, "all are open");
+    all = all && eg_record_end(ctx, &g) == EG_BAD_REQUEST && reason_has(ctx, "still open") && g == NULL;
+    all = all && eg_record_cond_end(ctx) == EG_OK;
+    d.kind = EG_COND_IF_ELSE;
+    all = all && eg_record_cond_begin(ctx, &d) == EG_OK && eg_record_cond_end(ctx) == EG_BAD_REQUEST &&
+         reason_has(ctx, "1 arm(s) of the 2");
+    all = all && eg_record_cond_arm(ctx) == EG_OK && eg_record_cond_arm(ctx) == EG_BAD_REQUEST;
+    all = all && eg_record_cond_end(ctx) == EG_OK;
+    /* conditionals nest: an IF inside the second arm of an IF_ELSE */
+    d.kind = EG_COND_IF_ELSE;
+    all = all && eg_record_cond_begin(ctx, &d) == EG_OK && eg_record_cond_arm(ctx) == EG_OK;
+    d.kind = EG_COND_IF;
+    all = all && eg_record_cond_begin(ctx, &d) == EG_OK && eg_record_cond_end(ctx) == EG_OK &&
+         eg_record_cond_end(ctx) == EG_OK;
+    all = all && eg_record_end(ctx, &g) == EG_OK && g != NULL && eg_record_end(ctx, &none) == EG_BAD_REQUEST;
+    check(all, "recording states: not recording, already recording, no conditional open, arm misuse, bad cell, "
+               "flags, kind and n_arms, a conditional still open at end, nesting, each BAD_REQUEST by name");
+    all = eg_graph_launch(ctx, g) == EG_OK && eg_graph_free(ctx, g) == EG_OK && eg_plane_free(ctx, pc) == EG_OK &&
+          eg_plane_free(ctx, pf) == EG_OK;
+    check(all && tc.deleted == 1 && tf.deleted == 1,
+          "an empty-armed graph replays and frees its planes");
+}
+
+/* y = a*y + b in place over RN samples (axpb with x = y), then sum y into s, then copy s into t:
+ * recorded once and replayed N times must equal the same calls run directly N times, bitwise. */
+static void check_recorded_list(eg_ctx* ctx, eg_unit* axpb, eg_unit* count1) {
+    enum { N = 5, K = RN };
+    static double y_rec[K], y_dir[K], k[K], limit[K], want_k[K];
+    static unsigned char mask[K];
+    double s_rec = 0, s_dir = 0, t_rec = 0, t_dir = 0;
+    const double a = 0.5, b = 1.0;
+    struct tensor ty_r, ty_d, ts_r, ts_d, tt_r, tt_d, tcnt[3];
+    for (int i = 0; i < K; ++i) y_rec[i] = y_dir[i] = (double)(i % 29) * 0.37 - 3.0;
+    eg_plane *pyr = wrap(ctx, &ty_r, y_rec, K, kDLFloat, 64), *pyd = wrap(ctx, &ty_d, y_dir, K, kDLFloat, 64);
+    eg_plane *psr = wrap(ctx, &ts_r, &s_rec, 1, kDLFloat, 64), *psd = wrap(ctx, &ts_d, &s_dir, 1, kDLFloat, 64);
+    eg_plane *ptr = wrap(ctx, &tt_r, &t_rec, 1, kDLFloat, 64), *ptd = wrap(ctx, &tt_d, &t_dir, 1, kDLFloat, 64);
+    eg_plan *plr = NULL, *pld = NULL;
+    int ok = pyr && pyd && psr && psd && ptr && ptd &&
+             plan(ctx, axpb, EG_STRUCTURE_HOST_TEAM, K, 0, NULL, NULL, &plr) == EG_OK &&
+             plan(ctx, axpb, EG_STRUCTURE_HOST_SERIAL, K, 0, NULL, NULL, &pld) == EG_OK &&
+             bind(ctx, plr, pyr, pyr, &a, &b) == EG_OK && bind(ctx, pld, pyd, pyd, &a, &b) == EG_OK;
+    if (!ok) {
+        check(0, "recorded list: planes and plans made");
+        return;
+    }
+
+    /* the recorded list: launch, reduce into s, copy s into t, and a runner of the count unit */
+    count_inputs(k, limit, mask);
+    unsigned char mask0[K];
+    memcpy(mask0, mask, sizeof(mask));
+    int64_t want_launches = 0, want_finished = 0;
+    count_oracle(limit, mask0, 1, 1000, want_k, &want_launches, &want_finished);
+    eg_plan* cp = count_plan(ctx, count1, EG_STRUCTURE_HOST_TEAM, k, limit, mask, tcnt);
+    eg_runner* rn = NULL;
+    const struct eg_runner_desc rd = runner_desc(&cp, 1, 1000);
+    ok = cp && eg_runner_new(ctx, &rd, &rn) == EG_OK;
+    eg_graph* g = NULL;
+    uint64_t tiles = 99;
+    ok = ok && eg_record_begin(ctx) == EG_OK && eg_launch(ctx, plr, &tiles) == EG_OK && tiles == 0 &&
+         reduce_do(ctx, pyr, psr, NULL, EG_REDUCE_SUM, EG_REDUCE_COMPENSATED, 0) == EG_OK &&
+         eg_copy(ctx, psr, ptr) == EG_OK && eg_run(ctx, rn, NULL) == EG_OK && eg_record_end(ctx, &g) == EG_OK;
+    ok = ok && memcmp(y_rec, y_dir, sizeof(y_rec)) == 0 && s_rec == 0.0 && t_rec == 0.0 && k[1] == 0.0 &&
+         limit[1] == (double)(1 + 37 % 50);
+    check(ok, "while recording, eg_launch, eg_reduce, eg_copy and eg_run run nothing");
+    /* the caller's references go: the graph keeps plan, runner and planes */
+    ok = ok && eg_plan_free(ctx, plr) == EG_OK && eg_plan_free(ctx, cp) == EG_OK && eg_runner_free(ctx, rn) == EG_OK &&
+         eg_plane_free(ctx, pyr) == EG_OK && ty_r.deleted == 0;
+    for (int i = 0; ok && i < N; ++i) {
+        ok = eg_graph_launch(ctx, g) == EG_OK;
+        ok = ok && eg_launch(ctx, pld, NULL) == EG_OK &&
+             reduce_do(ctx, pyd, psd, NULL, EG_REDUCE_SUM, EG_REDUCE_COMPENSATED, 0) == EG_OK && eg_copy(ctx, psd, ptd) == EG_OK;
+        ok = ok && memcmp(y_rec, y_dir, sizeof(y_rec)) == 0 && memcmp(&s_rec, &s_dir, sizeof(double)) == 0 &&
+             memcmp(&t_rec, &t_dir, sizeof(double)) == 0;
+    }
+    check(ok, "a recorded launch + reduce + copy replayed 5 times equals the same calls run directly 5 times, bitwise");
+    int kok = 1;
+    for (int i = 0; i < K; ++i) kok &= k[i] == want_k[i];
+    check(kok, "the recorded eg_run reached the closed-form count (replayed 5 times: a finished batch launches nothing)");
+    ok = eg_graph_free(ctx, g) == EG_OK && ty_r.deleted == 1 && tcnt[0].deleted == 1 && tcnt[2].deleted == 1;
+    check(ok, "eg_graph_free drops its plan, runner and plane references: the deleters run once");
+    ok = eg_plan_free(ctx, pld) == EG_OK;
+    eg_plane* rest[] = { pyd, psr, psd, ptr, ptd };
+    for (int i = 0; i < 5; ++i) ok = ok && eg_plane_free(ctx, rest[i]) == EG_OK;
+    check(ok, "recorded list leftovers freed");
+}
+
+/* An open recording and a live graph at eg_ctx_free are freed with the context. */
+static void check_free_with_graph(void) {
+    eg_ctx* ctx = make_ctx();
+    double v = 1.0, w = 0.0;
+    struct tensor tv, tw;
+    eg_plane* pv = ctx ? wrap(ctx, &tv, &v, 1, kDLFloat, 64) : NULL;
+    eg_plane* pw = ctx ? wrap(ctx, &tw, &w, 1, kDLFloat, 64) : NULL;
+    eg_graph* g = NULL;
+    int ok = pv && pw && eg_record_begin(ctx) == EG_OK && eg_copy(ctx, pv, pw) == EG_OK && eg_record_end(ctx, &g) == EG_OK &&
+             eg_record_begin(ctx) == EG_OK && eg_copy(ctx, pw, pv) == EG_OK;
+    ok = ok && eg_ctx_free(ctx) == EG_OK && tv.deleted == 1 && tw.deleted == 1;
+    check(ok, "eg_ctx_free with a live graph and an open recording runs each plane's deleter once");
+}
+
 int main(int argc, char** argv) {
     if (argc != 5) {
         fprintf(stderr, "usage: %s <fixture> <wrong size> <no size block> <v1 tag>\n", argv[0]);
@@ -679,6 +1153,20 @@ int main(int argc, char** argv) {
     oracle(ctx, unit, 100001, 50000, "n=100001 threads=1");
     check_runner(ctx, unit);
 
+    check_reduce(ctx);
+    check_conditionals(ctx);
+    check_recording_states(ctx);
+    {
+        eg_unit *c1 = NULL;
+        check(load(ctx, "count1", 0xD1, &c1) == EG_OK, "eg_unit_load count1 for the recorded list");
+        if (c1 != NULL) {
+            eg_host_threads(ctx, 3);
+            check_recorded_list(ctx, unit, c1);
+            eg_host_threads(ctx, 1);
+            eg_unit_free(ctx, c1);
+        }
+    }
+    check_free_with_graph();
     check_settings();
     check_error_protocol(ctx);
     check_bad_input(ctx, unit);

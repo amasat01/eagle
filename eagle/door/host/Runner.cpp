@@ -109,15 +109,27 @@ void runner_free(eg_ctx& ctx, eg_runner_s* runner) {
     delete runner;
 }
 
-/** @brief eg_run: re-sync the counter to the mask, launch the step until done or the cap,
- *  and report (``_until_done.Runner._run`` and ``_host_loop._run_host_loop``, plain loop). */
+/** @brief Drop one reference to @p runner (the caller's or a graph's); the last frees it. */
+void runner_release(eg_ctx& ctx, eg_runner_s* runner) {
+    if (--runner->refs == 0) runner_free(ctx, runner);
+}
+
+/** @brief eg_run: check the report, then run the loop and fill it. */
 void run(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report) {
     check_handle(ctx.runners, runner, "runner");
-    if (report == nullptr) refuse(EG_BAD_REQUEST, "eg_run: report is NULL");
-    if (report->struct_size < sizeof(std::uint32_t))
-        refuse(EG_BAD_REQUEST, "eg_run_report.struct_size " + std::to_string(report->struct_size) +
-               " is too small");
+    if (ctx.rec == nullptr) {                   // a recorded run fills no report
+        if (report == nullptr) refuse(EG_BAD_REQUEST, "eg_run: report is NULL");
+        if (report->struct_size < sizeof(std::uint32_t))
+            refuse(EG_BAD_REQUEST, "eg_run_report.struct_size " + std::to_string(report->struct_size) +
+                   " is too small");
+    }
     for (const eg_plan_s* p : runner->plans) check_bound(*p);
+    if (!record_run(ctx, runner)) run_loop(ctx, runner, report);
+}
+
+/** @brief Re-sync the counter to the mask, launch the step until done or the cap, and fill
+ *  @p report when given (``_until_done.Runner._run`` and ``_host_loop._run_host_loop``, plain loop). */
+void run_loop(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report) {
     eg_plan_s& first = *runner->plans[0];
     const FinishFacts& f = first.unit->finish;
     const std::int64_t n = first.n_samples;
@@ -131,6 +143,7 @@ void run(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report) {
         for (const eg_plan_s* p : runner->plans) host::run_plan(*p, threads);
         ++launches;
     }
+    if (report == nullptr) return;
     eg_run_report r{};
     r.flags = (static_cast<std::int64_t>(first.finished) == n ? EG_REPORT_DONE : 0u) |
               (f.steps == 1 ? EG_REPORT_EXACT_STEPS : 0u);

@@ -39,11 +39,11 @@ PAIR_HOST_FLAGS ?= -O3 -ffp-contract=fast -fno-math-errno -march=native -mprefer
 ROOT := $(abspath $(CURDIR)/../..)
 WARN := -Wall -Wextra -pedantic -Werror
 CXXFLAGS_DOOR := -std=c++23 -O2 -fPIC -fvisibility=hidden -fvisibility-inlines-hidden \
-  -ffp-contract=off $(WARN) -DAETHER_CPP_MODE=1 -DEAGLE_CPU_ONLY=1 \
+  -ffp-contract=off $(WARN) -fopenmp -DAETHER_CPP_MODE=1 -DEAGLE_CPU_ONLY=1 \
   -include $(WING_FACTS) -I$(ROOT) -I$(AETHER_INCLUDE)
 CFLAGS_C := -std=c11 -O2 -ffp-contract=off $(WARN) -I$(ROOT)
 
-SRC := Context.cpp Unit.cpp Plane.cpp Plan.cpp abi.cpp host/Runner.cpp
+SRC := Context.cpp Unit.cpp Plane.cpp Plan.cpp abi.cpp host/Runner.cpp host/Ops.cpp host/Record.cpp
 OBJ := $(SRC:%.cpp=$(OUT)/%.o)
 LIB := $(OUT)/libeagle_door.so
 FIXTURE := $(OUT)/libfixture_unit.so
@@ -56,12 +56,12 @@ check-inputs:
 	@test -n "$(AETHER_INCLUDE)" || { echo "set AETHER_INCLUDE"; exit 1; }
 	@test -f "$(WING_FACTS)" || { echo "set WING_FACTS to the wing's raptor_facts.h"; exit 1; }
 
-$(OUT)/%.o: %.cpp Context.h eg_door.h eg_unit_meta.h host/Team.h | check-inputs
+$(OUT)/%.o: %.cpp Context.h eg_door.h eg_unit_meta.h host/Team.h host/Ops.h | check-inputs
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS_DOOR) -c $< -o $@
 
 $(LIB): $(OBJ) door.map
-	$(CXX) -shared -o $@ $(OBJ) -Wl,--version-script=$(CURDIR)/door.map -Wl,--no-undefined -pthread -ldl
+	$(CXX) -shared -o $@ $(OBJ) -Wl,--version-script=$(CURDIR)/door.map -Wl,--no-undefined -fopenmp -pthread -ldl
 
 lib: $(LIB)
 

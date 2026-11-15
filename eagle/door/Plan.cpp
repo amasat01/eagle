@@ -222,6 +222,10 @@ void bind(eg_ctx& ctx, eg_plan_s* plan, const eg_bind_desc* desc) {
 void launch(eg_ctx& ctx, eg_plan_s* plan, std::uint64_t* tiles) {
     check_handle(ctx.plans, plan, "plan");
     check_bound(*plan);
+    if (record_launch(ctx, plan)) {
+        if (tiles != nullptr) *tiles = 0;
+        return;
+    }
     const std::uint64_t run = host::run_plan(*plan, host::team_threads(ctx));
     if (tiles != nullptr) *tiles = run;
 }
