@@ -200,17 +200,19 @@ struct eg_unit_meta {
     const char* name;
     uint8_t digest[EG_DIGEST_BYTES];
     int32_t pattern;                    /**< enum of the typed-meta design */
-    int32_t scalar_type;                /**< 0 float64, 1 float32 */
+    int32_t scalar_type;                /**< 0 float64, 1 float32, 2 banded (refused on a host structure as not written) */
     const char* host_entry;             /**< symbol of the serial v2 entry, NULL: none */
     const char* device_image;           /**< symbol of the embedded device image, NULL: none */
     const char* device_function;        /**< kernel name inside that image */
-    uint64_t device_image_bytes;
+    uint64_t device_image_bytes;        /**< 0 when ``device_image_size`` names the size */
     int32_t device_image_format;        /**< 0 ptx, 1 cubin, 2 fatbin */
     int32_t n_stages;                   /**< 0: not a split unit */
     const struct eg_unit_stage* const* stages;
     const struct eg_unit_body* body;
     const struct eg_unit_launch* launch;
     const struct eg_unit_finish* finish; /**< NULL: no finish */
+    const char* device_image_size;      /**< symbol of a ``uint64_t`` holding the image's byte count
+                                             (written at compile time); NULL when ``device_image`` is NULL */
 };
 
 /** The top of the tree: what ``eg_unit_library_meta`` returns. */
