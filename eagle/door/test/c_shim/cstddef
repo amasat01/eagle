@@ -1,0 +1,3 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/* The vendored DLPack header spells <cstddef>; a C11 caller reads it through this name. */
+#include <stddef.h>

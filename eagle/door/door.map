@@ -1,0 +1,6 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/* libeagle_door.so exports the eg_* names of eg_door.h and nothing else. */
+{
+  global: eg_*;
+  local: *;
+};
