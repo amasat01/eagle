@@ -87,6 +87,8 @@ struct eg_unit_s {
     std::int32_t access = 0;
     std::vector<eagle::door::SlotFacts> slots;
     eagle::door::FinishFacts finish;
+    std::int32_t active_map_slot = -1;        ///< the int32 LOOKUP of live sample slots a runner makes, -1: none
+    std::int32_t active_count_slot = -1;      ///< the uint32 LOOKUP count of its live prefix
     int refs = 1;                             ///< the caller's reference plus one per plan
     bool caller_ref = true;
 };
@@ -116,9 +118,33 @@ struct eg_plan_s {
     std::vector<Binding> bindings;            ///< one per slot; never resized after eg_plan_new
     std::vector<void*> params;                ///< the entry's argument list, into ``bindings``
     std::uint32_t finished = 0;               ///< the eagle-made finished counter of a finishing unit
+    eg_runner_s* active_owner = nullptr;      ///< the runner whose active set the plan reads
     int refs = 1;                             ///< the caller's reference plus one per runner
     bool caller_ref = true;
 };
+
+namespace eagle {
+namespace door {
+
+/** @brief The active set of a runner whose units read one: the live-slot map and its count,
+ *  the compaction counters, and (EG_RUN_REORDER) the permutation of the bound planes. */
+struct ActiveState {
+    std::int64_t n = 0;
+    std::int64_t every_launches = 1;          ///< launches of the step between two compactions
+    std::int64_t every_steps = 1;             ///< steps between two compactions
+    std::vector<std::int32_t> map;            ///< ascending live slots; never resized (plans point into it)
+    std::uint32_t count = 0;                  ///< the live prefix launched
+    std::uint32_t done_at_last = 0;           ///< the finished count at the last compaction
+    bool reorder = false;                     ///< EG_RUN_REORDER over at least MIN_REORDER_SPAN samples
+    double theta = 0.0;
+    std::vector<std::int32_t> perm, inv;      ///< slot -> sample and sample -> slot, while reordered
+    std::int64_t span = 0;                    ///< slots a reorder may still move
+    bool fire = false;                        ///< the last compaction found a reorder worth running
+    std::int64_t compactions = 0, reorders = 0, restored_at = 0;
+};
+
+}  // namespace door
+}  // namespace eagle
 
 /** @brief A run-until-done loop over bound host plans (the first carries the finish). */
 struct eg_runner_s {
@@ -126,6 +152,8 @@ struct eg_runner_s {
     std::int64_t max_steps = 0;
     int refs = 1;                             ///< the caller's reference plus one per recorded graph
     bool caller_ref = true;
+    bool active = false;                      ///< the plans read an active set
+    eagle::door::ActiveState act;
 };
 
 struct eg_graph_s;      // a recorded list of door calls (host/Record.cpp)
@@ -227,6 +255,7 @@ void plan_free(eg_ctx& ctx, eg_plan_s* plan);
 void plan_release(eg_ctx& ctx, eg_plan_s* plan);
 void check_bound(const eg_plan_s& plan);
 void bind(eg_ctx& ctx, eg_plan_s* plan, const eg_bind_desc* desc);
+void bind_raw(eg_plan_s& plan, int slot, void* data, std::uint64_t count);
 void launch(eg_ctx& ctx, eg_plan_s* plan, std::uint64_t* tiles);
 void runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out);
 void runner_free(eg_ctx& ctx, eg_runner_s* runner);

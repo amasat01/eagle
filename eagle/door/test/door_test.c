@@ -585,7 +585,7 @@ static void check_runner(eg_ctx* ctx, eg_unit* axpb) {
     const struct { uint32_t flags; int32_t events, steps_reverse, n_derived; int64_t every, window, max_steps;
                    int graph; eg_status status; const char* reason; } bad[] = {
         { EG_RUN_RECORD, 0, 0, 0, 0, 0, 10, 0, EG_NOT_WRITTEN, "EG_RUN_RECORD" },
-        { EG_RUN_REORDER, 0, 0, 0, 0, 0, 10, 0, EG_NOT_WRITTEN, "EG_RUN_REORDER" },
+        { EG_RUN_REORDER, 0, 0, 0, 0, 0, 10, 0, EG_BAD_REQUEST, "no active set" },
         { 1u << 7, 0, 0, 0, 0, 0, 10, 0, EG_BAD_REQUEST, "unknown bits" },
         { 0, EG_EVENTS_REFINE, 0, 0, 0, 0, 10, 0, EG_NOT_WRITTEN, "events REFINE" },
         { 0, 0, EG_STEPS_REVERSE_FUSED, 0, 0, 0, 10, 0, EG_NOT_WRITTEN, "steps_reverse" },
@@ -1125,6 +1125,212 @@ static void check_free_with_graph(void) {
     check(ok, "eg_ctx_free with a live graph and an open recording runs each plane's deleter once");
 }
 
+/* ---- the active set: compaction and reorder ------------------------------- */
+
+struct sim_out {
+    int64_t iters, compactions, reorders, finished;
+};
+
+/* The old host rule on a plain model of the batch (a launch lowers `left` by one for a live slot; a
+ * sample is done when it reaches 0): `every` steps per iteration, a compaction when the finished count
+ * moved, the reorder when the last compaction found live < theta * 32 * live32 and live < span >= 4096. */
+static void sim_active(const double* limit, const unsigned char* mask0, int steps, int64_t every, double theta,
+                       int64_t max_steps, struct sim_out* o) {
+    static int64_t left[RN], left2[RN];
+    static unsigned char done[RN], done2[RN];
+    static int32_t map[RN];
+    int64_t finished = 0, count = RN, span = RN, at_last = 0;
+    int fire = 0;
+    const int64_t lpc = every / steps, cap = (max_steps + every - 1) / every;
+    for (int64_t i = 0; i < RN; ++i) {
+        done[i] = mask0[i];
+        left[i] = mask0[i] ? 0 : ((int64_t)limit[i] + steps - 1) / steps;
+        finished += mask0[i];
+        map[i] = (int32_t)i;
+    }
+    memset(o, 0, sizeof(*o));
+    while (o->iters < cap && finished != RN) {
+        for (int64_t l = 0; l < lpc && count > 0 && finished != RN; ++l)
+            for (int64_t t = 0; t < count; ++t) {
+                const int64_t s = map[t];
+                if (!done[s] && --left[s] == 0) done[s] = 1, ++finished;
+            }
+        if (finished != at_last) {
+            int64_t k = 0, live32 = 0;
+            for (int64_t i = 0; i < RN; ++i)
+                if (!done[i]) map[k++] = (int32_t)i;
+            for (int64_t g = 0; g < RN; g += 32) {
+                int any = 0;
+                for (int64_t i = g; i < g + 32 && i < RN; ++i) any |= !done[i];
+                live32 += any;
+            }
+            count = k;
+            ++o->compactions;
+            at_last = finished;
+            fire = theta > 0 && RN >= 4096 && (double)k < theta * 32.0 * (double)live32 && k < span && span >= 4096;
+        }
+        if (fire) { /* live slots of [0, span) to the front, stable */
+            int64_t live = 0, a = 0, b;
+            for (int64_t i = 0; i < span; ++i) live += !done[i];
+            b = live;
+            for (int64_t i = 0; i < span; ++i) {
+                const int64_t d = done[i] ? b++ : a++;
+                left2[d] = left[i];
+                done2[d] = done[i];
+            }
+            for (int64_t i = 0; i < span; ++i) left[i] = left2[i], done[i] = done2[i];
+            for (int64_t i = 0; i < live; ++i) map[i] = (int32_t)i;
+            count = span = live;
+            fire = 0;
+            ++o->reorders;
+        }
+        ++o->iters;
+    }
+    o->finished = finished;
+}
+
+static int64_t sim_reorders_seen = 0;
+
+/* One run of an active unit: planes, report and counters against the model; `every` 0 is the default. */
+static void run_active_case(eg_ctx* ctx, eg_unit* unit, int64_t steps, eg_structure structure, int32_t threads,
+                            int64_t every, double theta, int64_t max_steps) {
+    static double k[RN], limit[RN], limit0[RN], want_k[RN];
+    static unsigned char mask[RN], mask0[RN];
+    struct tensor t[3];
+    char what[200];
+    count_inputs(k, limit, mask);
+    memcpy(limit0, limit, sizeof(limit));
+    memcpy(mask0, mask, RN);
+    const int64_t eff = every ? every : steps * ((16 + steps - 1) / steps);
+    struct sim_out sim;
+    sim_active(limit, mask0, (int)steps, eff, theta, max_steps, &sim);
+    int64_t launches = 0, finished = 0;
+    count_oracle(limit, mask0, steps, sim.iters * eff, want_k, &launches, &finished);
+    eg_host_threads(ctx, threads);
+    eg_plan* p = count_plan(ctx, unit, structure, k, limit, mask, t);
+    eg_runner* r = NULL;
+    struct eg_runner_desc d = runner_desc(&p, 1, max_steps);
+    d.every = every;
+    if (theta > 0) d.flags = EG_RUN_REORDER, d.reorder_theta = theta;
+    eg_status s = p ? eg_runner_new(ctx, &d, &r) : EG_FAULT;
+    if (s == EG_OK) s = eg_plan_free(ctx, p);
+    struct eg_run_report rep;
+    memset(&rep, 0, sizeof(rep));
+    rep.struct_size = sizeof(rep);
+    if (s == EG_OK) s = eg_run(ctx, r, &rep);
+    int planes_ok = 1;
+    for (int64_t i = 0; i < RN; ++i)
+        planes_ok &= memcmp(&k[i], &want_k[i], sizeof(double)) == 0 && memcmp(&limit[i], &limit0[i], sizeof(double)) == 0 &&
+                     (mask[i] != 0) == (mask0[i] || want_k[i] >= limit[i]);
+    snprintf(what, sizeof(what), "active K=%lld %s threads=%d every=%lld theta=%.2f max_steps=%lld: %lld iterations, %lld "
+             "compactions, %lld reorders as the model; k, limit, mask in sample order", (long long)steps,
+             structure == EG_STRUCTURE_HOST_SERIAL ? "SERIAL" : "TEAM", threads, (long long)every, theta,
+             (long long)max_steps, (long long)sim.iters, (long long)sim.compactions, (long long)sim.reorders);
+    check(s == EG_OK && planes_ok && rep.mode == EG_MODE_HOST && rep.n == RN && rep.finished == sim.finished &&
+              rep.launches == sim.iters && rep.steps == sim.iters * eff && rep.mapped == sim.iters * RN &&
+              rep.compactions == sim.compactions && rep.reorders == sim.reorders &&
+              rep.flags == (sim.finished == RN ? EG_REPORT_DONE : 0u),
+          what);
+    sim_reorders_seen += sim.reorders;
+    if (s == EG_OK && sim.finished == RN) {
+        memset(&rep, 0, sizeof(rep));
+        rep.struct_size = sizeof(rep);
+        check(eg_run(ctx, r, &rep) == EG_OK && rep.launches == 0 && rep.compactions == 0 && rep.finished == RN,
+              "a second eg_run of a finished active batch launches nothing");
+    }
+    check(eg_runner_free(ctx, r) == EG_OK && t[0].deleted == 1, "active runner freed: the planes' deleters run once");
+}
+
+static void check_active_set(eg_ctx* ctx) {
+    eg_unit *a1 = NULL, *a3 = NULL, *c1 = NULL;
+    check(load(ctx, "count1a", 0xE1, &a1) == EG_OK && load(ctx, "count3a", 0xE3, &a3) == EG_OK &&
+              load(ctx, "count1", 0xD1, &c1) == EG_OK,
+          "eg_unit_load count1a and count3a (an active map and count, LOOKUP slots 4 and 5)");
+    if (a1 == NULL || a3 == NULL || c1 == NULL) return;
+    const eg_structure structures[2] = { EG_STRUCTURE_HOST_SERIAL, EG_STRUCTURE_HOST_TEAM };
+    const int32_t threads[2] = { 1, 3 };
+    const int64_t every1[3] = { 0, 4, 40 }, every3[3] = { 0, 6, 48 };
+    const double thetas[3] = { 0.0, 0.5, 0.75 };
+    for (int si = 0; si < 2; ++si)
+        for (int ti = 0; ti < 2; ++ti)
+            for (int ei = 0; ei < 3; ++ei)
+                for (int hi = 0; hi < 3; ++hi) {
+                    run_active_case(ctx, a1, 1, structures[si], threads[ti], every1[ei], thetas[hi], 1000);
+                    run_active_case(ctx, a3, 3, structures[si], threads[ti], every3[ei], thetas[hi], 1000);
+                }
+    run_active_case(ctx, a1, 1, EG_STRUCTURE_HOST_TEAM, 3, 4, 0.5, 20);
+    run_active_case(ctx, a3, 3, EG_STRUCTURE_HOST_SERIAL, 1, 6, 0.0, 20);
+    check(sim_reorders_seen > 0, "the reorder fired in the runs above (the model counted at least one)");
+
+    /* refusals */
+    static double k[RN], limit[RN], x[RN];
+    static unsigned char mask[RN];
+    struct tensor t[3], tx, t2[3];
+    count_inputs(k, limit, mask);
+    eg_plan* pa = count_plan(ctx, a1, EG_STRUCTURE_HOST_TEAM, k, limit, mask, t);
+    eg_plan* pa3 = count_plan(ctx, a3, EG_STRUCTURE_HOST_TEAM, k, limit, mask, t2);
+    eg_plan* pc = count_plan(ctx, c1, EG_STRUCTURE_HOST_TEAM, k, limit, mask, t2);
+    const struct { uint32_t flags; int64_t every; double theta; int use3; const char* reason; } bad[] = {
+        { 0, 3, 0, 0, "below 4 steps" },
+        { 0, -4, 0, 0, "< 0" },
+        { 0, 7, 0, 1, "whole number of launches" },
+        { EG_RUN_REORDER, 0, 0.1, 0, "is outside [" },
+        { EG_RUN_REORDER, 0, 0.9, 0, "is outside [" },
+    };
+    int all = pa && pa3 && pc;
+    for (size_t i = 0; all && i < sizeof(bad) / sizeof(bad[0]); ++i) {
+        eg_plan* use = bad[i].use3 ? pa3 : pa;
+        eg_runner* r = NULL;
+        struct eg_runner_desc d = runner_desc(&use, 1, 100);
+        d.every = bad[i].every;
+        d.flags = bad[i].flags;
+        d.reorder_theta = bad[i].theta;
+        const int ok1 = eg_runner_new(ctx, &d, &r) == EG_BAD_REQUEST && r == NULL && reason_has(ctx, bad[i].reason);
+        if (!ok1) printf("      refusal %zu ('%s') did not hold\n", i, bad[i].reason);
+        all &= ok1;
+    }
+    check(all, "eg_runner_new refuses every below 4 steps, negative or not a whole number of launches, and a "
+               "theta outside [0.25, 0.75], each BAD_REQUEST by name");
+    eg_unit* ax = NULL;
+    eg_plan* pax = NULL;
+    check(load(ctx, "axpb", 0xA1, &ax) == EG_OK && plan(ctx, ax, EG_STRUCTURE_HOST_TEAM, RN, 0, NULL, NULL, &pax) == EG_OK,
+          "an axpb plan for the mixed step");
+    eg_plan* mixed[2] = { pa, pax };
+    eg_runner *r1 = NULL, *r2 = NULL;
+    struct eg_runner_desc d = runner_desc(mixed, 2, 100);
+    check(eg_runner_new(ctx, &d, &r1) == EG_BAD_REQUEST && reason_has(ctx, "all read an active set or none"),
+          "plans that do and do not read an active set in one step refused BAD_REQUEST");
+    d = runner_desc(&pc, 1, 100);
+    d.flags = EG_RUN_REORDER;
+    d.reorder_theta = 0.5;
+    check(eg_runner_new(ctx, &d, &r1) == EG_BAD_REQUEST && reason_has(ctx, "active set"),
+          "EG_RUN_REORDER over a unit with no active set refused BAD_REQUEST");
+    d = runner_desc(&pa, 1, 100);
+    eg_status s1 = eg_runner_new(ctx, &d, &r1);
+    check(s1 == EG_OK && eg_runner_new(ctx, &d, &r2) == EG_BAD_REQUEST && reason_has(ctx, "another runner"),
+          "a plan already reading one runner's active set refused by a second runner BAD_REQUEST");
+    tensor_init(&tx, x, RN, 64);
+    eg_plane *px = NULL;
+    const int32_t map_slot = 4;
+    struct eg_bind_desc bd;
+    eg_plane_wrap(ctx, &tx.managed, &px);
+    memset(&bd, 0, sizeof(bd));
+    bd.struct_size = sizeof(bd);
+    bd.n_planes = 1;
+    bd.plane_slots = &map_slot;
+    bd.planes = &px;
+    check(eg_bind(ctx, pa, &bd) == EG_BAD_REQUEST && reason_has(ctx, "active set"),
+          "binding the active map refused BAD_REQUEST");
+    check(eg_launch(ctx, pa3, NULL) == EG_BAD_REQUEST && reason_has(ctx, "unbound"),
+          "launching a plan that reads an active set without a runner refused BAD_REQUEST (its map is unbound)");
+    all = eg_runner_free(ctx, r1) == EG_OK && eg_plan_free(ctx, pa) == EG_OK && eg_plan_free(ctx, pa3) == EG_OK &&
+          eg_plan_free(ctx, pc) == EG_OK && eg_plan_free(ctx, pax) == EG_OK && eg_unit_free(ctx, ax) == EG_OK &&
+          eg_plane_free(ctx, px) == EG_OK && eg_unit_free(ctx, a1) == EG_OK &&
+          eg_unit_free(ctx, a3) == EG_OK && eg_unit_free(ctx, c1) == EG_OK;
+    check(all, "active runner, plans, planes and units freed");
+    eg_host_threads(ctx, 1);
+}
+
 int main(int argc, char** argv) {
     if (argc != 5) {
         fprintf(stderr, "usage: %s <fixture> <wrong size> <no size block> <v1 tag>\n", argv[0]);
@@ -1152,6 +1358,7 @@ int main(int argc, char** argv) {
     eg_host_threads(ctx, 1);
     oracle(ctx, unit, 100001, 50000, "n=100001 threads=1");
     check_runner(ctx, unit);
+    check_active_set(ctx);
 
     check_reduce(ctx);
     check_conditionals(ctx);

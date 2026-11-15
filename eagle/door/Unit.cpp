@@ -94,10 +94,16 @@ void read_finish(const eg_unit_meta& m, eg_unit_s& unit) {
             refuse(EG_BAD_REQUEST, what + "steps_slot " + std::to_string(f.steps_slot) + " with fixed steps");
         unit.finish = FinishFacts{ true, f.mask_slot, f.counter_slot, f.steps };
     }
-    for (int i = 0; i < n_slots; ++i)
-        if (unit.slots[i].role == EG_ROLE_LOOKUP && i != unit.finish.counter_slot)
+}
+
+/** @brief Every LOOKUP slot must be one eagle makes: the finished counter or the active set. */
+void check_lookups(const eg_unit_s& unit) {
+    for (int i = 0; i < static_cast<int>(unit.slots.size()); ++i)
+        if (unit.slots[i].role == EG_ROLE_LOOKUP && i != unit.finish.counter_slot &&
+            i != unit.active_map_slot && i != unit.active_count_slot)
             refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "' slot " + std::to_string(i) + " ('" +
-                   unit.slots[i].name + "'): a LOOKUP slot other than the finished counter is not written yet");
+                   unit.slots[i].name + "'): a LOOKUP slot other than the finished counter and the "
+                   "active set is not written yet");
 }
 
 /** @brief Check the body and launch records and copy the slot facts into @p unit. */
@@ -116,14 +122,38 @@ void read_body(const eg_unit_meta& m, eg_unit_s& unit) {
                std::to_string(body.n_slots));
     for (int i = 0; i < body.n_slots; ++i) unit.slots.push_back(read_slot(body.slots[i], unit.name, i));
     read_finish(m, unit);
-    if (m.launch == nullptr) return;
+    if (m.launch == nullptr) {
+        check_lookups(unit);
+        return;
+    }
     eg_unit_launch absent{};
     absent.active_map_slot = absent.active_count_slot = -1;
     absent.index_map_slot = absent.index_count_slot = -1;
     const eg_unit_launch launch = read_record(m.launch, absent, "unit '" + unit.name + "' launch");
-    if (launch.active_map_slot != -1 || launch.active_count_slot != -1 ||
-        launch.index_map_slot != -1 || launch.index_count_slot != -1)
-        refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': active and index sets are not written yet");
+    if (launch.index_map_slot != -1 || launch.index_count_slot != -1)
+        refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': index sets are not written yet");
+    if ((launch.active_map_slot == -1) != (launch.active_count_slot == -1))
+        refuse(EG_BAD_REQUEST, "meta that contradicts itself: unit '" + unit.name +
+               "' names an active map without its count (or the count without the map)");
+    if (launch.active_map_slot != -1) {
+        const auto lookup = [&](std::int32_t slot, std::int32_t dtype, const char* what) {
+            if (slot < 0 || slot >= static_cast<std::int32_t>(unit.slots.size()) ||
+                unit.slots[slot].role != EG_ROLE_LOOKUP || unit.slots[slot].dtype != dtype)
+                refuse(EG_BAD_REQUEST, "meta that contradicts itself: unit '" + unit.name + "' " + what +
+                       " slot " + std::to_string(slot) + " is not a LOOKUP slot of its dtype");
+        };
+        lookup(launch.active_map_slot, EG_DTYPE_INT32, "active map");
+        lookup(launch.active_count_slot, EG_DTYPE_UINT32, "active count");
+        if (launch.active_map_slot == launch.active_count_slot || launch.active_map_slot == unit.finish.counter_slot ||
+            launch.active_count_slot == unit.finish.counter_slot)
+            refuse(EG_BAD_REQUEST, "meta that contradicts itself: unit '" + unit.name +
+                   "' gives one slot two of the finished counter, the active map and the active count");
+        if (launch.group > 1)
+            refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': an active set over groups of lanes is not written yet");
+        unit.active_map_slot = launch.active_map_slot;
+        unit.active_count_slot = launch.active_count_slot;
+    }
+    check_lookups(unit);
     refuse_count(launch.n_lane_axes > 1 ? 1 : 0, unit.name, "n_lane_axes above 1");
     refuse_count(launch.n_plane_axes, unit.name, "n_plane_axes");
     if (launch.host_box != nullptr)

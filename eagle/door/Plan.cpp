@@ -92,6 +92,9 @@ void check_bind(const eg_ctx& ctx, const eg_plan_s& plan, const eg_bind_desc& d)
         if (slot == plan.unit->finish.counter_slot)
             refuse(EG_BAD_REQUEST, "slot " + std::to_string(slot) + " ('" + s.name +
                    "') is the finished counter: eagle makes it, do not pass it");
+        if (slot == plan.unit->active_map_slot || slot == plan.unit->active_count_slot)
+            refuse(EG_BAD_REQUEST, "slot " + std::to_string(slot) + " ('" + s.name +
+                   "') is part of the active set: the runner makes it, do not pass it");
         if ((s.role == EG_ROLE_UNIFORM) == plane)
             refuse(EG_BAD_REQUEST, "slot " + std::to_string(slot) + " ('" + s.name + "') takes " +
                    (plane ? "a uniform, not a plane" : "a plane, not a uniform"));
@@ -217,6 +220,9 @@ void bind(eg_ctx& ctx, eg_plan_s* plan, const eg_bind_desc* desc) {
         plan->params[slot] = b.value;
     }
 }
+
+/** @brief Bind @p slot of @p plan to eagle's own memory (a runner's active set). */
+void bind_raw(eg_plan_s& plan, int slot, void* data, std::uint64_t count) { bind_handle(plan, slot, data, count); }
 
 /** @brief eg_launch: the host team (or the serial reference) over each partition. */
 void launch(eg_ctx& ctx, eg_plan_s* plan, std::uint64_t* tiles) {

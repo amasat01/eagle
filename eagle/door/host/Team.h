@@ -35,6 +35,15 @@ inline std::uint64_t run_plan(const eg_plan_s& plan, int threads) {
     return tiles;
 }
 
+/** @brief Run @p plan once over the prefix [0, @p live) of its samples (an active set's live slots). */
+inline void run_prefix(const eg_plan_s& plan, int threads, std::int64_t live) {
+    const exec::Partition part{ 0, live, plan.n_samples };
+    if (plan.structure == EG_STRUCTURE_HOST_SERIAL)
+        exec::HostTeam::run_serial(plan.unit->host_entry, plan.params.data(), part);
+    else
+        exec::HostTeam::run_team(plan.unit->host_entry, plan.params.data(), part, threads);
+}
+
 }  // namespace host
 }  // namespace door
 }  // namespace eagle
