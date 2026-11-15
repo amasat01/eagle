@@ -85,6 +85,13 @@ struct HostTeam {
      */
     static std::size_t run(HostEntryV2 fn, void* const* args, const Partition& part,
                            std::size_t bytesPerSample = 0) {
+        return run_team(fn, args, part, host_max_threads(), bytesPerSample);
+    }
+
+    /** @brief :func:`run` on at most @p threads threads of the process pool, whatever
+     *  the process-wide or thread-local setting (a caller that states its own count). */
+    static std::size_t run_team(HostEntryV2 fn, void* const* args, const Partition& part,
+                                int threads, std::size_t bytesPerSample = 0) {
         if (fn == nullptr)
             throw std::runtime_error("HostTeam::run: null host entry");
         if (part.count <= 0) return 0;
@@ -102,8 +109,8 @@ struct HostTeam {
         // One tile or a one-thread team runs in place: no thread to wake (the wake-up is
         // most of an N=1 launch). One phase: no gates.
         const detail::HostPool::Job job{ static_cast<std::uint32_t>(ntiles), nullptr, runTile, &tiles };
-        if (ntiles == 1 || host_max_threads() <= 1) detail::HostPool::run_in_place(job);
-        else detail::HostPool::instance().run(job, host_max_threads());
+        if (ntiles == 1 || threads <= 1) detail::HostPool::run_in_place(job);
+        else detail::HostPool::instance().run(job, threads);
         return static_cast<std::size_t>(ntiles);
     }
 

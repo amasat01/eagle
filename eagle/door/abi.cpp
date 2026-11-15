@@ -96,7 +96,9 @@ EG_EXPORT eg_status eg_plan_free(eg_ctx* ctx, eg_plan* plan) {
     if (plan == nullptr) return EG_OK;
     return door::call(ctx, [plan](eg_ctx& c) {
         door::check_handle(c.plans, plan, "plan");
-        door::plan_free(c, plan);
+        if (!plan->caller_ref) door::refuse(EG_BAD_REQUEST, "plan: already freed by the caller");
+        plan->caller_ref = false;
+        door::plan_release(c, plan);
     });
 }
 
@@ -108,17 +110,26 @@ EG_EXPORT eg_status eg_launch(eg_ctx* ctx, eg_plan* plan, uint64_t* tiles) {
     return door::call(ctx, [&](eg_ctx& c) { door::launch(c, plan, tiles); });
 }
 
+// ---- runs ------------------------------------------------------------------
+
+EG_EXPORT eg_status eg_runner_new(eg_ctx* ctx, const struct eg_runner_desc* desc, eg_runner** out) {
+    return door::call(ctx, [&](eg_ctx& c) { door::runner_new(c, desc, out); });
+}
+
+EG_EXPORT eg_status eg_runner_free(eg_ctx* ctx, eg_runner* runner) {
+    if (runner == nullptr) return EG_OK;
+    return door::call(ctx, [runner](eg_ctx& c) {
+        door::check_handle(c.runners, runner, "runner");
+        door::runner_free(c, runner);
+    });
+}
+
+EG_EXPORT eg_status eg_run(eg_ctx* ctx, eg_runner* runner, struct eg_run_report* report) {
+    return door::call(ctx, [&](eg_ctx& c) { door::run(c, runner, report); });
+}
+
 // ---- not written in this build ---------------------------------------------
 
-EG_EXPORT eg_status eg_runner_new(eg_ctx* ctx, const struct eg_runner_desc*, eg_runner**) {
-    return not_written(ctx, "eg_runner_new");
-}
-EG_EXPORT eg_status eg_runner_free(eg_ctx* ctx, eg_runner* runner) {
-    return not_written_free(ctx, runner, "eg_runner_free");
-}
-EG_EXPORT eg_status eg_run(eg_ctx* ctx, eg_runner*, struct eg_run_report*) {
-    return not_written(ctx, "eg_run");
-}
 EG_EXPORT eg_status eg_run_event_times(eg_ctx* ctx, eg_runner*, eg_plane*) {
     return not_written(ctx, "eg_run_event_times");
 }

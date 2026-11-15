@@ -55,16 +55,49 @@ SlotFacts read_slot(const eg_unit_slot* in, const std::string& unit, int index) 
                std::to_string(s.rank));
     const bool plane = s.role == EG_ROLE_MUTABLE || s.role == EG_ROLE_PER_SAMPLE ||
                        s.role == EG_ROLE_OUT;
-    if (!plane && s.role != EG_ROLE_UNIFORM)
+    if (!plane && s.role != EG_ROLE_UNIFORM && s.role != EG_ROLE_TERMINATED && s.role != EG_ROLE_LOOKUP)
         refuse(EG_NOT_WRITTEN, named + ": role " + std::to_string(s.role) + " is not written yet "
-               "(this build binds MUTABLE, PER_SAMPLE, OUT and UNIFORM)");
+               "(this build binds MUTABLE, PER_SAMPLE, OUT, UNIFORM, TERMINATED and the finished counter)");
     if (s.rank != 0)
         refuse(EG_NOT_WRITTEN, named + ": a slot of rank > 0 is not written yet");
     if (plane && s.dtype != EG_DTYPE_REAL)
         refuse(EG_NOT_WRITTEN, named + ": a plane of a non-REAL dtype is not written yet");
+    if (s.role == EG_ROLE_TERMINATED && s.dtype != EG_DTYPE_BOOL)
+        refuse(EG_NOT_WRITTEN, named + ": a TERMINATED mask of a non-BOOL dtype is not written yet");
     if (s.dtype == EG_DTYPE_BAND_PARTIAL)
         refuse(EG_NOT_WRITTEN, named + ": a BAND_PARTIAL uniform is not written");
     return SlotFacts{ s.role, s.dtype, s.name ? s.name : "" };
+}
+
+/** @brief Check the finish record against the slots and copy it into @p unit; every
+ *  LOOKUP slot must be the finished counter (the one LOOKUP eagle makes so far). */
+void read_finish(const eg_unit_meta& m, eg_unit_s& unit) {
+    const int n_slots = static_cast<int>(unit.slots.size());
+    const auto role_of = [&](std::int32_t slot) { return slot >= 0 && slot < n_slots ? unit.slots[slot].role : -1; };
+    if (m.finish != nullptr) {
+        eg_unit_finish absent{};
+        absent.mask_slot = absent.counter_slot = absent.steps_slot = -1;
+        const eg_unit_finish f = read_record(m.finish, absent, "unit '" + unit.name + "' finish");
+        const std::string what = "meta that contradicts itself: unit '" + unit.name + "' finish ";
+        if (f.flags & ~EG_FINISH_ENTRY_COUNTS)
+            refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "' finish: unknown flag bits " + std::to_string(f.flags));
+        if (role_of(f.mask_slot) != EG_ROLE_TERMINATED)
+            refuse(EG_BAD_REQUEST, what + "mask_slot " + std::to_string(f.mask_slot) + " is not a TERMINATED slot");
+        if (role_of(f.counter_slot) != EG_ROLE_LOOKUP || unit.slots[f.counter_slot].dtype != EG_DTYPE_UINT32)
+            refuse(EG_BAD_REQUEST, what + "counter_slot " + std::to_string(f.counter_slot) +
+                   " is not a uint32 LOOKUP slot");
+        if (f.steps == EG_STEPS_AUTO)
+            refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': finish steps AUTO is not written in this "
+                   "build of the door");
+        if (f.steps < 1) refuse(EG_BAD_REQUEST, what + "steps " + std::to_string(f.steps) + " (>= 1 or AUTO)");
+        if (f.steps_slot != -1)
+            refuse(EG_BAD_REQUEST, what + "steps_slot " + std::to_string(f.steps_slot) + " with fixed steps");
+        unit.finish = FinishFacts{ true, f.mask_slot, f.counter_slot, f.steps };
+    }
+    for (int i = 0; i < n_slots; ++i)
+        if (unit.slots[i].role == EG_ROLE_LOOKUP && i != unit.finish.counter_slot)
+            refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "' slot " + std::to_string(i) + " ('" +
+                   unit.slots[i].name + "'): a LOOKUP slot other than the finished counter is not written yet");
 }
 
 /** @brief Check the body and launch records and copy the slot facts into @p unit. */
@@ -82,6 +115,7 @@ void read_body(const eg_unit_meta& m, eg_unit_s& unit) {
         refuse(EG_BAD_REQUEST, "meta that contradicts itself: unit '" + unit.name + "' n_slots " +
                std::to_string(body.n_slots));
     for (int i = 0; i < body.n_slots; ++i) unit.slots.push_back(read_slot(body.slots[i], unit.name, i));
+    read_finish(m, unit);
     if (m.launch == nullptr) return;
     eg_unit_launch absent{};
     absent.active_map_slot = absent.active_count_slot = -1;

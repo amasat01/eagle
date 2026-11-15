@@ -5,7 +5,7 @@
 #include "eagle/door/Context.h"
 #include "eagle/door/eg_unit_meta.h"
 
-#include "eagle/exec/HostTeam.h"
+#include "eagle/door/host/Team.h"
 
 #include <algorithm>
 
@@ -56,16 +56,20 @@ void check_plane(const eg_plan_s& plan, int slot, const eg_plane_s& plane) {
     const SlotFacts& s = plan.unit->slots[slot];
     const DLTensor& t = plane.tensor->dl_tensor;
     const std::string what = "slot " + std::to_string(slot) + " ('" + s.name + "')";
-    const std::uint8_t bits = plan.unit->scalar_type == EG_SCALAR_FLOAT32 ? 32 : 64;
-    if (t.dtype.code != kDLFloat || t.dtype.bits != bits)
+    const bool mask = s.role == EG_ROLE_TERMINATED;
+    const std::uint8_t bits = mask ? 8 : plan.unit->scalar_type == EG_SCALAR_FLOAT32 ? 32 : 64;
+    const bool code_ok = mask ? (t.dtype.code == kDLBool || t.dtype.code == kDLUInt) : t.dtype.code == kDLFloat;
+    if (!code_ok || t.dtype.bits != bits)
         refuse(EG_BAD_REQUEST, what + ": dtype (code " + std::to_string(t.dtype.code) + ", bits " +
-               std::to_string(t.dtype.bits) + ") is not the unit's float" + std::to_string(bits));
+               std::to_string(t.dtype.bits) + ") is not " +
+               (mask ? std::string("a bool or uint8 mask") : "the unit's float" + std::to_string(bits)));
     if (t.ndim != 1 || t.shape[0] != plan.n_samples)
         refuse(EG_BAD_REQUEST, what + ": a plane of shape (" + std::to_string(plan.n_samples) +
                ",) is expected");
     if (t.strides != nullptr && t.shape[0] > 1 && t.strides[0] != 1)
         refuse(EG_BAD_REQUEST, what + ": the plane is not contiguous");
-    const bool written = s.role == EG_ROLE_MUTABLE || s.role == EG_ROLE_OUT;
+    const bool written = s.role == EG_ROLE_MUTABLE || s.role == EG_ROLE_OUT ||
+                         slot == plan.unit->finish.mask_slot;
     if (written && (plane.tensor->flags & DLPACK_FLAG_BITMASK_READ_ONLY))
         refuse(EG_BAD_REQUEST, what + ": a read-only plane in a written slot");
 }
@@ -85,6 +89,9 @@ void check_bind(const eg_ctx& ctx, const eg_plan_s& plan, const eg_bind_desc& d)
             refuse(EG_BAD_REQUEST, "unknown slot " + std::to_string(slot) + " (the unit has " +
                    std::to_string(n_slots) + ")");
         const SlotFacts& s = plan.unit->slots[slot];
+        if (slot == plan.unit->finish.counter_slot)
+            refuse(EG_BAD_REQUEST, "slot " + std::to_string(slot) + " ('" + s.name +
+                   "') is the finished counter: eagle makes it, do not pass it");
         if ((s.role == EG_ROLE_UNIFORM) == plane)
             refuse(EG_BAD_REQUEST, "slot " + std::to_string(slot) + " ('" + s.name + "') takes " +
                    (plane ? "a uniform, not a plane" : "a plane, not a uniform"));
@@ -103,16 +110,17 @@ void check_bind(const eg_ctx& ctx, const eg_plan_s& plan, const eg_bind_desc& d)
     }
 }
 
-/** @brief Set this thread's host team to @p threads for one launch (0: the default budget). */
-struct TeamScope {
-    int saved;
-    explicit TeamScope(int threads) : saved(exec::detail::host_thread_team()) {
-        exec::detail::host_thread_team() = threads;
-    }
-    ~TeamScope() { exec::detail::host_thread_team() = saved; }
-    TeamScope(const TeamScope&) = delete;
-    TeamScope& operator=(const TeamScope&) = delete;
-};
+/** @brief Bind slot @p slot of @p plan to a plain handle over @p data of @p count elements. */
+void bind_handle(eg_plan_s& plan, int slot, void* data, std::uint64_t count) {
+    eg_plan_s::Binding& b = plan.bindings[slot];
+    b.handle.data = data;
+    b.handle.samples = count;
+    b.handle.stride = 1;
+    b.handle.deviceType = plugin::kEagleAbiDeviceCPU;
+    b.handle.deviceId = 0;
+    b.bound = true;
+    plan.params[slot] = &b.handle;
+}
 
 }  // namespace
 
@@ -152,6 +160,8 @@ void plan_new(eg_ctx& ctx, const eg_plan_desc* desc, eg_plan** out) {
         plan->parts = std::move(parts);
         plan->bindings.resize(d.unit->slots.size());
         plan->params.resize(d.unit->slots.size());
+        if (d.unit->finish.present)    // the finished counter: one uint32 cell (its element count)
+            bind_handle(*plan, d.unit->finish.counter_slot, &plan->finished, 1);
         ctx.plans.insert(plan);
     } catch (...) {
         delete plan;
@@ -170,6 +180,19 @@ void plan_free(eg_ctx& ctx, eg_plan_s* plan) {
     delete plan;
 }
 
+/** @brief Drop one reference to @p plan (the caller's or a runner's); the last frees it. */
+void plan_release(eg_ctx& ctx, eg_plan_s* plan) {
+    if (--plan->refs == 0) plan_free(ctx, plan);
+}
+
+/** @brief Refuse @p plan while a slot is unbound. */
+void check_bound(const eg_plan_s& plan) {
+    for (std::size_t i = 0; i < plan.bindings.size(); ++i)
+        if (!plan.bindings[i].bound)
+            refuse(EG_BAD_REQUEST, "slot " + std::to_string(i) + " ('" + plan.unit->slots[i].name +
+                   "') is unbound");
+}
+
 /** @brief eg_bind: check every entry, then replace the named slots. */
 void bind(eg_ctx& ctx, eg_plan_s* plan, const eg_bind_desc* desc) {
     check_handle(ctx.plans, plan, "plan");
@@ -181,13 +204,8 @@ void bind(eg_ctx& ctx, eg_plan_s* plan, const eg_bind_desc* desc) {
         b.plane = d.planes[i];
         ++b.plane->refs;
         const DLTensor& t = b.plane->tensor->dl_tensor;
-        b.handle.data = static_cast<char*>(t.data) + t.byte_offset;
-        b.handle.samples = static_cast<std::uint64_t>(plan->n_samples);
-        b.handle.stride = 1;
-        b.handle.deviceType = plugin::kEagleAbiDeviceCPU;
-        b.handle.deviceId = 0;
-        b.bound = true;
-        plan->params[d.plane_slots[i]] = &b.handle;
+        bind_handle(*plan, d.plane_slots[i], static_cast<char*>(t.data) + t.byte_offset,
+                    static_cast<std::uint64_t>(plan->n_samples));
         if (old != nullptr) plane_release(ctx, old);
     }
     for (int i = 0; i < d.n_uniforms; ++i) {
@@ -203,20 +221,8 @@ void bind(eg_ctx& ctx, eg_plan_s* plan, const eg_bind_desc* desc) {
 /** @brief eg_launch: the host team (or the serial reference) over each partition. */
 void launch(eg_ctx& ctx, eg_plan_s* plan, std::uint64_t* tiles) {
     check_handle(ctx.plans, plan, "plan");
-    for (std::size_t i = 0; i < plan->bindings.size(); ++i)
-        if (!plan->bindings[i].bound)
-            refuse(EG_BAD_REQUEST, "slot " + std::to_string(i) + " ('" + plan->unit->slots[i].name +
-                   "') is unbound");
-    std::uint64_t run = 0;
-    const TeamScope team(ctx.host_threads);
-    for (const exec::Partition& part : plan->parts) {
-        if (plan->structure == EG_STRUCTURE_HOST_SERIAL) {
-            exec::HostTeam::run_serial(plan->unit->host_entry, plan->params.data(), part);
-            run += part.count > 0 ? 1 : 0;
-        } else {
-            run += exec::HostTeam::run(plan->unit->host_entry, plan->params.data(), part);
-        }
-    }
+    check_bound(*plan);
+    const std::uint64_t run = host::run_plan(*plan, host::team_threads(ctx));
     if (tiles != nullptr) *tiles = run;
 }
 

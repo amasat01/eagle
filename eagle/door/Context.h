@@ -66,6 +66,14 @@ struct SlotFacts {
     std::string name;
 };
 
+/** @brief A unit's finish record, as eg_runner_new and eg_run read it. */
+struct FinishFacts {
+    bool present = false;
+    std::int32_t mask_slot = -1;     ///< the TERMINATED slot it marks
+    std::int32_t counter_slot = -1;  ///< the uint32 LOOKUP cell eagle makes
+    std::int64_t steps = 0;          ///< steps one launch takes, >= 1
+};
+
 }  // namespace door
 }  // namespace eagle
 
@@ -78,6 +86,7 @@ struct eg_unit_s {
     std::int32_t scalar_type = 0;
     std::int32_t access = 0;
     std::vector<eagle::door::SlotFacts> slots;
+    eagle::door::FinishFacts finish;
     int refs = 1;                             ///< the caller's reference plus one per plan
     bool caller_ref = true;
 };
@@ -106,6 +115,15 @@ struct eg_plan_s {
     std::vector<eagle::exec::Partition> parts;
     std::vector<Binding> bindings;            ///< one per slot; never resized after eg_plan_new
     std::vector<void*> params;                ///< the entry's argument list, into ``bindings``
+    std::uint32_t finished = 0;               ///< the eagle-made finished counter of a finishing unit
+    int refs = 1;                             ///< the caller's reference plus one per runner
+    bool caller_ref = true;
+};
+
+/** @brief A run-until-done loop over bound host plans (the first carries the finish). */
+struct eg_runner_s {
+    std::vector<eg_plan_s*> plans;            ///< one reference each
+    std::int64_t max_steps = 0;
 };
 
 /** @brief All door state of one caller. */
@@ -119,6 +137,7 @@ struct eg_ctx_s {
     std::unordered_set<eg_unit_s*> units;
     std::unordered_set<eg_plane_s*> planes;
     std::unordered_set<eg_plan_s*> plans;
+    std::unordered_set<eg_runner_s*> runners;
 
     /** @brief Store @p text as the reason, never throwing. */
     void set_reason(const char* text) noexcept {
@@ -198,8 +217,13 @@ void plane_wrap(eg_ctx& ctx, DLManagedTensorVersioned* tensor, eg_plane** out);
 void plane_release(eg_ctx& ctx, eg_plane_s* plane);
 void plan_new(eg_ctx& ctx, const eg_plan_desc* desc, eg_plan** out);
 void plan_free(eg_ctx& ctx, eg_plan_s* plan);
+void plan_release(eg_ctx& ctx, eg_plan_s* plan);
+void check_bound(const eg_plan_s& plan);
 void bind(eg_ctx& ctx, eg_plan_s* plan, const eg_bind_desc* desc);
 void launch(eg_ctx& ctx, eg_plan_s* plan, std::uint64_t* tiles);
+void runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out);
+void runner_free(eg_ctx& ctx, eg_runner_s* runner);
+void run(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report);
 
 }  // namespace door
 }  // namespace eagle

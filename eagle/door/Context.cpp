@@ -4,7 +4,7 @@
 // every handle still made from it.
 #include "eagle/door/Context.h"
 
-#include "eagle/exec/HostPool.h"
+#include "eagle/door/host/Team.h"
 
 #include <algorithm>
 
@@ -53,12 +53,15 @@ eg_status ctx_new(const eg_ctx_settings* settings, eg_ctx** out) noexcept {
 }
 
 /**
- * @brief Free every handle still made from @p ctx: plans first (they hold
- * plane and unit references), then planes, then units. In a forked child no
- * deleter runs and no library is closed: only eagle's own memory is freed.
+ * @brief Free every handle still made from @p ctx: runners first (they hold
+ * plan references), then plans (they hold plane and unit references), then
+ * planes, then units. In a forked child no deleter runs and no library is
+ * closed: only eagle's own memory is freed.
  */
 void ctx_free_all(eg_ctx& ctx) {
     const bool child = forked(ctx);
+    for (eg_runner_s* runner : ctx.runners) delete runner;
+    ctx.runners.clear();
     for (eg_plan_s* plan : std::vector<eg_plan_s*>(ctx.plans.begin(), ctx.plans.end())) {
         if (child) delete plan;
         else plan_free(ctx, plan);
@@ -77,16 +80,6 @@ void ctx_free_all(eg_ctx& ctx) {
     ctx.units.clear();
 }
 
-/** @brief The host threads a launch of @p ctx uses now: the process-wide setting when an
- *  older surface set it, else the context's cap, else the default budget. */
-std::int32_t ctx_host_threads(const eg_ctx& ctx) {
-    const int set = exec::host_threads_setting().load(std::memory_order_relaxed);
-    if (set > 0) return set;
-    if (ctx.host_threads > 0) return ctx.host_threads;
-    const int env = exec::detail::omp_num_threads_env();
-    return env > 0 ? env : exec::detail::host_default_threads();
-}
-
 /** @brief Fill @p out per the OUTPUT struct rule (eg_ctx_info). */
 void ctx_info(eg_ctx& ctx, struct eg_ctx_info* out) {
     if (out == nullptr) refuse(EG_BAD_REQUEST, "eg_ctx_info: out is NULL");
@@ -98,7 +91,7 @@ void ctx_info(eg_ctx& ctx, struct eg_ctx_info* out) {
     info.abi_minor = EG_DOOR_VERSION_MINOR;
     info.device = -1;
     info.capabilities = EG_CAP_HOST;
-    info.host_threads = ctx_host_threads(ctx);
+    info.host_threads = host::team_threads(ctx);
     info.device_type = 0;
     info.stream = -1;
     const std::uint32_t n = std::min<std::uint32_t>(out->struct_size, sizeof(info));

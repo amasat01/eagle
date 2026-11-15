@@ -279,7 +279,7 @@ static void check_bad_input(eg_ctx* ctx, eg_unit* unit) {
           "split unit (n_stages > 0) refused NOT_WRITTEN");
     eg_unit* wrong = NULL;
     check(load(ctx, "axpb", 0xC3, &wrong) == EG_BAD_REQUEST, "right name, wrong digest refused BAD_REQUEST");
-    check(eg_run(ctx, NULL, NULL) == EG_NOT_WRITTEN, "eg_run refused NOT_WRITTEN");
+    check(eg_run(ctx, NULL, NULL) == EG_BAD_REQUEST, "eg_run of a NULL runner refused BAD_REQUEST");
     check(eg_host_threads(ctx, -1) == EG_BAD_REQUEST, "eg_host_threads(-1) refused BAD_REQUEST");
 }
 
@@ -409,6 +409,248 @@ static void check_fork(eg_ctx* ctx) {
           "forked child refused BAD_REQUEST (eg_error and eg_ctx_free still work)");
 }
 
+/* ---- runners: a finishing unit stepped until done, against a closed form -- */
+
+#define RN 4099
+
+static int reason_has(eg_ctx* ctx, const char* needle) {
+    char buf[512];
+    size_t len = 0;
+    return eg_error(ctx, buf, sizeof(buf), &len) == EG_OK && strstr(buf, needle) != NULL;
+}
+
+static struct eg_runner_desc runner_desc(eg_plan* const* plans, int32_t n_plans, int64_t max_steps) {
+    struct eg_runner_desc d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    d.n_plans = n_plans;
+    d.plans = plans;
+    d.max_steps = max_steps;
+    return d;
+}
+
+/* Bind k, limit and mask (slots 0, 1, 2) of a count plan. */
+static eg_status bind_count(eg_ctx* ctx, eg_plan* p, eg_plane* k, eg_plane* limit, eg_plane* mask) {
+    const int32_t slots[3] = { 0, 1, 2 };
+    eg_plane* const planes[3] = { k, limit, mask };
+    struct eg_bind_desc d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    d.n_planes = 3;
+    d.plane_slots = slots;
+    d.planes = planes;
+    return eg_bind(ctx, p, &d);
+}
+
+static void mask_init(struct tensor* t, unsigned char* data, int64_t n) {
+    tensor_init(t, data, n, 8);
+    t->managed.dl_tensor.dtype.code = kDLBool;
+}
+
+/* A count plan of `unit` over k, limit, mask; the caller's plane references are dropped. */
+static eg_plan* count_plan(eg_ctx* ctx, eg_unit* unit, eg_structure structure, double* k, double* limit,
+                           unsigned char* mask, struct tensor* t) {
+    eg_plane *pk = NULL, *pl = NULL, *pm = NULL;
+    eg_plan* p = NULL;
+    tensor_init(&t[0], k, RN, 64);
+    tensor_init(&t[1], limit, RN, 64);
+    mask_init(&t[2], mask, RN);
+    eg_status s = eg_plane_wrap(ctx, &t[0].managed, &pk);
+    if (s == EG_OK) s = eg_plane_wrap(ctx, &t[1].managed, &pl);
+    if (s == EG_OK) s = eg_plane_wrap(ctx, &t[2].managed, &pm);
+    if (s == EG_OK) s = plan(ctx, unit, structure, RN, 0, NULL, NULL, &p);
+    if (s == EG_OK) s = bind_count(ctx, p, pk, pl, pm);
+    eg_plane_free(ctx, pk);
+    eg_plane_free(ctx, pl);
+    eg_plane_free(ctx, pm);
+    return s == EG_OK ? p : NULL;
+}
+
+/* limit_i in 1..50; every 97th sample starts finished (its k stays 0). */
+static void count_inputs(double* k, double* limit, unsigned char* mask) {
+    for (int64_t i = 0; i < RN; ++i) {
+        k[i] = 0.0;
+        limit[i] = (double)(1 + (i * 37) % 50);
+        mask[i] = i % 97 == 0;
+    }
+}
+
+/* The closed form: a live sample needs ceil(L / K) launches; the loop runs the most of
+ * them, capped at ceil(max_steps / K); k_i = min(L, launches * K). */
+static void count_oracle(const double* limit, const unsigned char* mask0, int64_t steps, int64_t max_steps,
+                         double* k, int64_t* launches, int64_t* finished) {
+    const int64_t cap = (max_steps + steps - 1) / steps;
+    int64_t need = 0, done = 0;
+    for (int64_t i = 0; i < RN; ++i)
+        if (!mask0[i] && ((int64_t)limit[i] + steps - 1) / steps > need) need = ((int64_t)limit[i] + steps - 1) / steps;
+    *launches = need < cap ? need : cap;
+    for (int64_t i = 0; i < RN; ++i) {
+        const int64_t l = (int64_t)limit[i];
+        k[i] = mask0[i] ? 0.0 : (double)(l < *launches * steps ? l : *launches * steps);
+        done += mask0[i] || (l + steps - 1) / steps <= *launches;
+    }
+    *finished = done;
+}
+
+static void run_count(eg_ctx* ctx, eg_unit* unit, int64_t steps, eg_structure structure, int32_t threads,
+                      int64_t max_steps) {
+    static double k[RN], limit[RN], want_k[RN];
+    static unsigned char mask[RN], mask0[RN];
+    struct tensor t[3];
+    char what[160];
+    count_inputs(k, limit, mask);
+    memcpy(mask0, mask, RN);
+    int64_t want_launches = 0, want_finished = 0;
+    count_oracle(limit, mask0, steps, max_steps, want_k, &want_launches, &want_finished);
+    eg_host_threads(ctx, threads);
+    eg_plan* p = count_plan(ctx, unit, structure, k, limit, mask, t);
+    eg_runner* r = NULL;
+    const struct eg_runner_desc d = runner_desc(&p, 1, max_steps);
+    eg_status s = p ? eg_runner_new(ctx, &d, &r) : EG_FAULT;
+    if (s == EG_OK) s = eg_plan_free(ctx, p); /* the runner keeps the plan alive */
+    struct eg_run_report rep;
+    memset(&rep, 0, sizeof(rep));
+    rep.struct_size = sizeof(rep);
+    if (s == EG_OK) s = eg_run(ctx, r, &rep);
+    int planes_ok = 1;
+    for (int64_t i = 0; i < RN; ++i)
+        planes_ok &= memcmp(&k[i], &want_k[i], sizeof(double)) == 0 && (mask[i] != 0) == (want_k[i] >= limit[i] || mask0[i]);
+    const int done = want_finished == RN;
+    snprintf(what, sizeof(what), "eg_run K=%lld %s threads=%d max_steps=%lld: launches %lld finished %lld, "
+             "steps, mapped, flags and k as the closed form", (long long)steps,
+             structure == EG_STRUCTURE_HOST_SERIAL ? "HOST_SERIAL" : "HOST_TEAM", threads,
+             (long long)max_steps, (long long)want_launches, (long long)want_finished);
+    check(s == EG_OK && planes_ok && rep.struct_size == sizeof(rep) && rep.mode == EG_MODE_HOST &&
+              rep.n == RN && rep.finished == want_finished && rep.launches == want_launches &&
+              rep.steps == want_launches * steps && rep.mapped == want_launches * RN &&
+              rep.compactions == 0 && rep.reorders == 0 && rep.build_s == 0.0 &&
+              rep.flags == ((done ? EG_REPORT_DONE : 0u) | (steps == 1 ? EG_REPORT_EXACT_STEPS : 0u)),
+          what);
+    if (done && s == EG_OK) { /* a second run re-syncs the counter to the mask: nothing to launch */
+        memset(&rep, 0, sizeof(rep));
+        rep.struct_size = sizeof(rep);
+        check(eg_run(ctx, r, &rep) == EG_OK && rep.launches == 0 && rep.finished == RN,
+              "a second eg_run of a finished batch launches nothing");
+    }
+    check(eg_runner_free(ctx, r) == EG_OK && t[0].deleted == 1 && t[2].deleted == 1,
+          "eg_runner_free drops the last plan reference: the planes' deleters run once");
+}
+
+static void check_runner(eg_ctx* ctx, eg_unit* axpb) {
+    eg_unit *c1 = NULL, *c3 = NULL;
+    check(load(ctx, "count1", 0xD1, &c1) == EG_OK && load(ctx, "count3", 0xD3, &c3) == EG_OK,
+          "eg_unit_load count1 and count3 (TERMINATED mask, eagle-made counter, finish)");
+    if (c1 == NULL || c3 == NULL) return;
+    const eg_structure structures[2] = { EG_STRUCTURE_HOST_SERIAL, EG_STRUCTURE_HOST_TEAM };
+    const int32_t threads[2] = { 1, 3 };
+    for (int si = 0; si < 2; ++si)
+        for (int ti = 0; ti < 2; ++ti) {
+            run_count(ctx, c1, 1, structures[si], threads[ti], 1000);
+            run_count(ctx, c3, 3, structures[si], threads[ti], 1000);
+            run_count(ctx, c1, 1, structures[si], threads[ti], 20);
+            run_count(ctx, c3, 3, structures[si], threads[ti], 20);
+        }
+
+    /* a two-plan step: the finishing plan, then y = a*x + b */
+    static double k[RN], limit[RN], x[RN], y[RN], want_k[RN];
+    static unsigned char mask[RN];
+    struct tensor t[3], t3[3], tx, ty;
+    count_inputs(k, limit, mask);
+    int64_t want_launches = 0, want_finished = 0;
+    count_oracle(limit, mask, 1, 1000, want_k, &want_launches, &want_finished);
+    for (int64_t i = 0; i < RN; ++i) x[i] = (double)i, y[i] = 0.0;
+    const double a = 2.0, b = -1.5;
+    eg_plane *px = NULL, *py = NULL;
+    eg_plan* plans[2] = { count_plan(ctx, c1, EG_STRUCTURE_HOST_TEAM, k, limit, mask, t), NULL };
+    tensor_init(&tx, x, RN, 64);
+    tensor_init(&ty, y, RN, 64);
+    eg_status s = eg_plane_wrap(ctx, &tx.managed, &px);
+    if (s == EG_OK) s = eg_plane_wrap(ctx, &ty.managed, &py);
+    if (s == EG_OK) s = plan(ctx, axpb, EG_STRUCTURE_HOST_TEAM, RN, 0, NULL, NULL, &plans[1]);
+    if (s == EG_OK) s = bind(ctx, plans[1], py, px, &a, &b);
+    eg_runner* r = NULL;
+    struct eg_runner_desc d = runner_desc(plans, 2, 1000);
+    if (s == EG_OK) s = eg_runner_new(ctx, &d, &r);
+    struct eg_run_report rep;
+    memset(&rep, 0, sizeof(rep));
+    rep.struct_size = sizeof(rep);
+    if (s == EG_OK) s = eg_run(ctx, r, &rep);
+    int ok = s == EG_OK && rep.launches == want_launches && rep.finished == RN;
+    for (int64_t i = 0; i < RN; ++i) ok &= y[i] == a * x[i] + b && k[i] == want_k[i];
+    check(ok, "a two-plan step launches both plans, in order, until the first plan's finish");
+    eg_runner_free(ctx, r);
+    r = NULL;
+
+    /* refusals: each status and a reason naming the feature */
+    const struct { uint32_t flags; int32_t events, steps_reverse, n_derived; int64_t every, window, max_steps;
+                   int graph; eg_status status; const char* reason; } bad[] = {
+        { EG_RUN_RECORD, 0, 0, 0, 0, 0, 10, 0, EG_NOT_WRITTEN, "EG_RUN_RECORD" },
+        { EG_RUN_REORDER, 0, 0, 0, 0, 0, 10, 0, EG_NOT_WRITTEN, "EG_RUN_REORDER" },
+        { 1u << 7, 0, 0, 0, 0, 0, 10, 0, EG_BAD_REQUEST, "unknown bits" },
+        { 0, EG_EVENTS_REFINE, 0, 0, 0, 0, 10, 0, EG_NOT_WRITTEN, "events REFINE" },
+        { 0, 0, EG_STEPS_REVERSE_FUSED, 0, 0, 0, 10, 0, EG_NOT_WRITTEN, "steps_reverse" },
+        { 0, 0, EG_STEPS_REVERSE_AUTO, 0, 0, 0, 10, 0, EG_NOT_WRITTEN, "steps_reverse" },
+        { 0, 0, 0, 1, 0, 0, 10, 0, EG_NOT_WRITTEN, "derived units" },
+        { 0, 0, 0, 0, 0, 0, 10, 1, EG_BAD_REQUEST, "step_graph" },
+        { 0, 0, 0, 0, 5, 0, 10, 0, EG_BAD_REQUEST, "every" },
+        { 0, 0, 0, 0, 0, 4, 10, 0, EG_BAD_REQUEST, "window" },
+        { 0, 0, 0, 0, 0, 0, 0, 0, EG_BAD_REQUEST, "max_steps" },
+    };
+    int all = 1;
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); ++i) {
+        d = runner_desc(plans, 1, bad[i].max_steps);
+        d.flags = bad[i].flags;
+        d.events = bad[i].events;
+        d.steps_reverse = bad[i].steps_reverse;
+        d.n_derived = bad[i].n_derived;
+        d.every = bad[i].every;
+        d.window = bad[i].window;
+        d.step_graph = bad[i].graph ? (eg_graph*)&d : NULL;
+        const int ok1 = eg_runner_new(ctx, &d, &r) == bad[i].status && r == NULL && reason_has(ctx, bad[i].reason);
+        if (!ok1) printf("      refusal %zu ('%s') did not hold\n", i, bad[i].reason);
+        all &= ok1;
+    }
+    check(all, "eg_runner_new refuses RECORD, REORDER, unknown flags, events REFINE, steps_reverse FUSED/AUTO, "
+               "derived units, a step_graph, every, window and max_steps < 1, each by name");
+    eg_plan* swapped[2] = { plans[1], plans[0] };
+    d = runner_desc(swapped, 2, 10);
+    check(eg_runner_new(ctx, &d, &r) == EG_BAD_REQUEST && reason_has(ctx, "has no finish"),
+          "a first plan without a finish refused BAD_REQUEST");
+    eg_plan* twice[2] = { plans[0], plans[0] };
+    d = runner_desc(twice, 2, 10);
+    check(eg_runner_new(ctx, &d, &r) == EG_NOT_WRITTEN && reason_has(ctx, "second finishing plan"),
+          "a second finishing plan in one step refused NOT_WRITTEN");
+    eg_plan* p3 = count_plan(ctx, c3, EG_STRUCTURE_HOST_TEAM, k, limit, mask, t3);
+    eg_plan* k_step[2] = { p3, plans[1] };
+    d = runner_desc(k_step, 2, 10);
+    check(eg_runner_new(ctx, &d, &r) == EG_BAD_REQUEST && reason_has(ctx, "one step per launch"),
+          "a several-plan step over a K=3 unit refused BAD_REQUEST");
+    const int32_t counter_slot = 3;
+    struct eg_bind_desc bd;
+    memset(&bd, 0, sizeof(bd));
+    bd.struct_size = sizeof(bd);
+    bd.n_planes = 1;
+    bd.plane_slots = &counter_slot;
+    bd.planes = &px;
+    check(eg_bind(ctx, plans[0], &bd) == EG_BAD_REQUEST && reason_has(ctx, "finished counter"),
+          "binding the eagle-made finished counter refused BAD_REQUEST");
+    eg_plan* dev = NULL;
+    check(plan(ctx, c1, EG_STRUCTURE_DEVICE, RN, 0, NULL, NULL, &dev) == EG_NOT_WRITTEN &&
+              reason_has(ctx, "DEVICE"),
+          "a DEVICE plan of a finishing unit refused NOT_WRITTEN");
+    d = runner_desc(plans, 1, 10);
+    check(eg_runner_new(ctx, &d, &r) == EG_OK && eg_run_event_times(ctx, r, NULL) == EG_NOT_WRITTEN &&
+              reason_has(ctx, "eg_run_event_times") && eg_reverse(ctx, r, NULL, NULL) == EG_NOT_WRITTEN &&
+              reason_has(ctx, "eg_reverse"),
+          "eg_run_event_times and eg_reverse stay NOT_WRITTEN");
+    check(eg_runner_free(ctx, r) == EG_OK && eg_plan_free(ctx, plans[0]) == EG_OK &&
+              eg_plan_free(ctx, plans[1]) == EG_OK && eg_plan_free(ctx, p3) == EG_OK &&
+              eg_plane_free(ctx, px) == EG_OK && eg_plane_free(ctx, py) == EG_OK &&
+              eg_unit_free(ctx, c1) == EG_OK && eg_unit_free(ctx, c3) == EG_OK,
+          "runner, plans, planes and units freed");
+    eg_host_threads(ctx, 1);
+}
+
 int main(int argc, char** argv) {
     if (argc != 5) {
         fprintf(stderr, "usage: %s <fixture> <wrong size> <no size block> <v1 tag>\n", argv[0]);
@@ -435,6 +677,7 @@ int main(int argc, char** argv) {
     oracle(ctx, unit, 100001, 50000, "n=100001");
     eg_host_threads(ctx, 1);
     oracle(ctx, unit, 100001, 50000, "n=100001 threads=1");
+    check_runner(ctx, unit);
 
     check_settings();
     check_error_protocol(ctx);

@@ -43,7 +43,7 @@ CXXFLAGS_DOOR := -std=c++23 -O2 -fPIC -fvisibility=hidden -fvisibility-inlines-h
   -include $(WING_FACTS) -I$(ROOT) -I$(AETHER_INCLUDE)
 CFLAGS_C := -std=c11 -O2 -ffp-contract=off $(WARN) -I$(ROOT)
 
-SRC := Context.cpp Unit.cpp Plane.cpp Plan.cpp abi.cpp
+SRC := Context.cpp Unit.cpp Plane.cpp Plan.cpp abi.cpp host/Runner.cpp
 OBJ := $(SRC:%.cpp=$(OUT)/%.o)
 LIB := $(OUT)/libeagle_door.so
 FIXTURE := $(OUT)/libfixture_unit.so
@@ -56,8 +56,8 @@ check-inputs:
 	@test -n "$(AETHER_INCLUDE)" || { echo "set AETHER_INCLUDE"; exit 1; }
 	@test -f "$(WING_FACTS)" || { echo "set WING_FACTS to the wing's raptor_facts.h"; exit 1; }
 
-$(OUT)/%.o: %.cpp Context.h eg_door.h eg_unit_meta.h | check-inputs
-	@mkdir -p $(OUT)
+$(OUT)/%.o: %.cpp Context.h eg_door.h eg_unit_meta.h host/Team.h | check-inputs
+	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS_DOOR) -c $< -o $@
 
 $(LIB): $(OBJ) door.map
