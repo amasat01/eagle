@@ -53,20 +53,35 @@ SlotFacts read_slot(const eg_unit_slot* in, const std::string& unit, int index) 
     if (s.rank < 0 || s.rank > 2 || (s.rank > 0 && s.shape == nullptr))
         refuse(EG_BAD_REQUEST, "meta that contradicts itself: " + named + " rank " +
                std::to_string(s.rank));
-    const bool plane = s.role == EG_ROLE_MUTABLE || s.role == EG_ROLE_PER_SAMPLE ||
-                       s.role == EG_ROLE_OUT;
-    if (!plane && s.role != EG_ROLE_UNIFORM && s.role != EG_ROLE_TERMINATED && s.role != EG_ROLE_LOOKUP)
+    const bool plane = s.role == EG_ROLE_MUTABLE || s.role == EG_ROLE_PER_SAMPLE || s.role == EG_ROLE_OUT ||
+                       s.role == EG_ROLE_VEC_IN || s.role == EG_ROLE_MAT_IN;
+    if (!plane && s.role != EG_ROLE_UNIFORM && s.role != EG_ROLE_TERMINATED && s.role != EG_ROLE_LOOKUP &&
+        s.role != EG_ROLE_NSAMPLES)
         refuse(EG_NOT_WRITTEN, named + ": role " + std::to_string(s.role) + " is not written yet "
-               "(this build binds MUTABLE, PER_SAMPLE, OUT, UNIFORM, TERMINATED and the finished counter)");
-    if (s.rank != 0)
-        refuse(EG_NOT_WRITTEN, named + ": a slot of rank > 0 is not written yet");
-    if (plane && s.dtype != EG_DTYPE_REAL)
-        refuse(EG_NOT_WRITTEN, named + ": a plane of a non-REAL dtype is not written yet");
+               "(this build binds MUTABLE, PER_SAMPLE, VEC_IN, MAT_IN, OUT, LOOKUP, UNIFORM, NSAMPLES and TERMINATED)");
+    if (s.rank != 0 && !plane)
+        refuse(EG_NOT_WRITTEN, named + ": a slot of rank > 0 outside the plane roles is not written yet");
+    if (s.rank != 0 && s.role == EG_ROLE_PER_SAMPLE)
+        refuse(EG_BAD_REQUEST, "meta that contradicts itself: " + named + " is PER_SAMPLE of rank > 0");
+    if (s.role == EG_ROLE_NSAMPLES && s.dtype != EG_DTYPE_UINT32)
+        refuse(EG_NOT_WRITTEN, named + ": an NSAMPLES slot of a dtype other than UINT32 is not written");
     if (s.role == EG_ROLE_TERMINATED && s.dtype != EG_DTYPE_BOOL)
         refuse(EG_NOT_WRITTEN, named + ": a TERMINATED mask of a non-BOOL dtype is not written yet");
     if (s.dtype == EG_DTYPE_BAND_PARTIAL)
-        refuse(EG_NOT_WRITTEN, named + ": a BAND_PARTIAL uniform is not written");
-    return SlotFacts{ s.role, s.dtype, s.name ? s.name : "" };
+        refuse(EG_NOT_WRITTEN, named + ": a BAND_PARTIAL slot is not written");
+    SlotFacts facts;
+    facts.role = s.role;
+    facts.dtype = s.dtype;
+    facts.name = s.name ? s.name : "";
+    facts.rank = s.rank;
+    for (int i = 0; i < s.rank; ++i) {
+        if (s.shape[i] < 1)
+            refuse(EG_BAD_REQUEST, "meta that contradicts itself: " + named + " extent " + std::to_string(s.shape[i]));
+        facts.shape.push_back(s.shape[i]);
+    }
+    facts.mirror = s.role == EG_ROLE_OUT || s.role == EG_ROLE_VEC_IN || s.role == EG_ROLE_MAT_IN ||
+                   (s.role == EG_ROLE_MUTABLE && s.rank > 0);
+    return facts;
 }
 
 /** @brief Check the finish record against the slots and copy it into @p unit; every
@@ -101,16 +116,6 @@ void read_finish(const eg_unit_meta& m, eg_unit_s& unit) {
     }
 }
 
-/** @brief Every LOOKUP slot must be one eagle makes: the finished counter or the active set. */
-void check_lookups(const eg_unit_s& unit) {
-    for (int i = 0; i < static_cast<int>(unit.slots.size()); ++i)
-        if (unit.slots[i].role == EG_ROLE_LOOKUP && i != unit.finish.counter_slot &&
-            i != unit.active_map_slot && i != unit.active_count_slot && i != unit.finish.steps_slot)
-            refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "' slot " + std::to_string(i) + " ('" +
-                   unit.slots[i].name + "'): a LOOKUP slot other than the finished counter, the steps word "
-                   "and the active set is not written yet");
-}
-
 /** @brief Check the body and launch records and copy the slot facts into @p unit. */
 void read_body(const eg_unit_meta& m, eg_unit_s& unit) {
     const eg_unit_body body = read_record(m.body, eg_unit_body{}, "unit '" + unit.name + "' body");
@@ -127,10 +132,7 @@ void read_body(const eg_unit_meta& m, eg_unit_s& unit) {
                std::to_string(body.n_slots));
     for (int i = 0; i < body.n_slots; ++i) unit.slots.push_back(read_slot(body.slots[i], unit.name, i));
     read_finish(m, unit);
-    if (m.launch == nullptr) {
-        check_lookups(unit);
-        return;
-    }
+    if (m.launch == nullptr) return;
     eg_unit_launch absent{};
     absent.active_map_slot = absent.active_count_slot = -1;
     absent.index_map_slot = absent.index_count_slot = -1;
@@ -158,7 +160,6 @@ void read_body(const eg_unit_meta& m, eg_unit_s& unit) {
         unit.active_map_slot = launch.active_map_slot;
         unit.active_count_slot = launch.active_count_slot;
     }
-    check_lookups(unit);
     refuse_count(launch.n_lane_axes > 1 ? 1 : 0, unit.name, "n_lane_axes above 1");
     refuse_count(launch.n_plane_axes, unit.name, "n_plane_axes");
     if (launch.host_box != nullptr)

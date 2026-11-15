@@ -35,7 +35,7 @@ static void check(int ok, const char* what) {
 
 struct tensor {
     struct DLManagedTensorVersioned managed;
-    int64_t shape[2];
+    int64_t shape[3];
     int deleted; /* how many times the deleter ran */
 };
 
@@ -1481,6 +1481,115 @@ static void check_auto(eg_ctx* ctx) {
     eg_host_threads(ctx, 1);
 }
 
+/* ---- vector, matrix, table, int and count slots ---------------------------- */
+
+static eg_plane* wrap_nd(eg_ctx* ctx, struct tensor* t, void* data, uint8_t code, uint8_t bits, int ndim, int64_t d0,
+                         int64_t d1, int64_t d2) {
+    eg_plane* p = NULL;
+    tensor_init(t, data, 1, bits);
+    tensor_as(t, code, bits);
+    t->managed.dl_tensor.ndim = ndim;
+    t->shape[0] = d0;
+    t->shape[1] = d1;
+    t->shape[2] = d2;
+    return eg_plane_wrap(ctx, &t->managed, &p) == EG_OK ? p : NULL;
+}
+
+static void check_slot_kinds(eg_ctx* ctx) {
+    enum { M = 1000, TL = 7 };
+    static double v[3 * M], v0[3 * M], w[3 * M], mm[4 * M], o[M], table[TL];
+    static int32_t idx[M];
+    const double s = 0.75;
+    for (int i = 0; i < M; ++i) {
+        idx[i] = (i * 5) % 23 - 3 + 3; /* >= 0 */
+        for (int c = 0; c < 3; ++c) v[c * M + i] = v0[c * M + i] = (double)((i + c) % 9) * 0.5, w[c * M + i] = (double)(c + 1) * 0.25 + i * 1e-3;
+        for (int c = 0; c < 4; ++c) mm[c * M + i] = (double)(c + 1) * 0.5 - i * 1e-3;
+    }
+    for (int i = 0; i < TL; ++i) table[i] = 100.0 + i;
+    eg_unit* unit = NULL;
+    struct tensor tv, tw, tmm, ti, tt, to, tbad;
+    eg_plane *pv = wrap_nd(ctx, &tv, v, kDLFloat, 64, 2, 3, M, 0), *pw = wrap_nd(ctx, &tw, w, kDLFloat, 64, 2, 3, M, 0),
+             *pmm = wrap_nd(ctx, &tmm, mm, kDLFloat, 64, 3, 2, 2, M), *pi = wrap_nd(ctx, &ti, idx, kDLInt, 32, 1, M, 0, 0),
+             *pt = wrap_nd(ctx, &tt, table, kDLFloat, 64, 1, TL, 0, 0), *po = wrap_nd(ctx, &to, o, kDLFloat, 64, 1, M, 0, 0);
+    int ok = pv && pw && pmm && pi && pt && po && load(ctx, "vecs", 0x71, &unit) == EG_OK;
+    if (!ok) {
+        check(0, "vecs: unit and planes made");
+        return;
+    }
+    const int32_t slots[7] = { 0, 1, 2, 3, 4, 6, 0 };
+    eg_plane* planes[6] = { pv, pw, pmm, pi, pt, po };
+    const int32_t plane_slots[6] = { 0, 1, 2, 3, 4, 6 };
+    const int32_t uslot = 7;
+    const void* uvals[1] = { &s };
+    (void)slots;
+    struct eg_bind_desc bd;
+    memset(&bd, 0, sizeof(bd));
+    bd.struct_size = sizeof(bd);
+    bd.n_planes = 6;
+    bd.plane_slots = plane_slots;
+    bd.planes = planes;
+    bd.n_uniforms = 1;
+    bd.uniform_slots = &uslot;
+    bd.uniform_values = uvals;
+    const eg_structure structures[2] = { EG_STRUCTURE_HOST_SERIAL, EG_STRUCTURE_HOST_TEAM };
+    for (int si = 0; si < 2; ++si) {
+        for (int i = 0; i < 3 * M; ++i) v[i] = v0[i];
+        eg_plan* p = NULL;
+        ok = plan(ctx, unit, structures[si], M, 0, NULL, NULL, &p) == EG_OK && eg_bind(ctx, p, &bd) == EG_OK &&
+             eg_launch(ctx, p, NULL) == EG_OK && eg_launch(ctx, p, NULL) == EG_OK;
+        /* the plain loop, twice */
+        static double want_v[3 * M], want_o[M];
+        for (int i = 0; i < 3 * M; ++i) want_v[i] = v0[i];
+        for (int rep = 0; rep < 2; ++rep)
+            for (int i = 0; i < M; ++i) {
+                const double add = table[(uint32_t)idx[i] % TL];
+                for (int c = 0; c < 3; ++c) want_v[c * M + i] += w[c * M + i] * s + add;
+                double m = 0.0;
+                for (int c = 0; c < 4; ++c) m += mm[c * M + i];
+                want_o[i] = (want_v[i] + want_v[M + i] + want_v[2 * M + i]) + m + (double)M;
+            }
+        ok = ok && memcmp(v, want_v, sizeof(v)) == 0 && memcmp(o, want_o, sizeof(o)) == 0;
+        check(ok, "vecs: rank-1 MUTABLE and VEC_IN, rank-2 MAT_IN and rank-0 OUT as mirrors, an int32 PER_SAMPLE, a "
+                  "LOOKUP table read by element count and eagle's NSAMPLES equal the plain loop (bitwise, twice)");
+        eg_plan_free(ctx, p);
+    }
+
+    /* refusals */
+    eg_plan* p = NULL;
+    ok = plan(ctx, unit, EG_STRUCTURE_HOST_TEAM, M, 0, NULL, NULL, &p) == EG_OK;
+    int all = ok;
+    const int32_t one_slot[1] = { 0 };
+    struct eg_bind_desc b1;
+    memset(&b1, 0, sizeof(b1));
+    b1.struct_size = sizeof(b1);
+    b1.n_planes = 1;
+    b1.plane_slots = one_slot;
+    eg_plane* pbad = wrap_nd(ctx, &tbad, v, kDLFloat, 64, 1, M, 0, 0); /* v as (n,): rank 1 wants (3, n) */
+    b1.planes = &pbad;
+    all = all && pbad && eg_bind(ctx, p, &b1) == EG_BAD_REQUEST && reason_has(ctx, "a plane of shape (3, ");
+    eg_plane_free(ctx, pbad);
+    pbad = wrap_nd(ctx, &tbad, idx, kDLFloat, 64, 1, M, 0, 0);
+    const int32_t idx_slot[1] = { 3 };
+    b1.plane_slots = idx_slot;
+    b1.planes = &pbad;
+    all = all && pbad && eg_bind(ctx, p, &b1) == EG_BAD_REQUEST && reason_has(ctx, "is not the slot's");
+    eg_plane_free(ctx, pbad);
+    const int32_t nn_slot[1] = { 5 };
+    b1.plane_slots = nn_slot;
+    b1.planes = &pi;
+    all = all && eg_bind(ctx, p, &b1) == EG_BAD_REQUEST && reason_has(ctx, "eagle passes it");
+    const int32_t tab_slot[1] = { 4 };
+    b1.plane_slots = tab_slot;
+    b1.planes = &pi;
+    all = all && eg_bind(ctx, p, &b1) == EG_BAD_REQUEST && reason_has(ctx, "is not the slot's");
+    all = all && eg_launch(ctx, p, NULL) == EG_BAD_REQUEST && reason_has(ctx, "unbound");
+    check(all, "vecs refusals: a plane of the wrong rank or shape, a wrong dtype, binding the sample count, an unbound "
+               "slot, each BAD_REQUEST by name");
+    ok = eg_plan_free(ctx, p) == EG_OK && eg_unit_free(ctx, unit) == EG_OK;
+    for (int i = 0; i < 6; ++i) ok = ok && eg_plane_free(ctx, planes[i]) == EG_OK;
+    check(ok, "vecs plan, planes and unit freed");
+}
+
 int main(int argc, char** argv) {
     if (argc != 5) {
         fprintf(stderr, "usage: %s <fixture> <wrong size> <no size block> <v1 tag>\n", argv[0]);
@@ -1510,6 +1619,7 @@ int main(int argc, char** argv) {
     check_runner(ctx, unit);
     check_active_set(ctx);
     check_auto(ctx);
+    check_slot_kinds(ctx);
 
     check_reduce(ctx);
     check_conditionals(ctx);

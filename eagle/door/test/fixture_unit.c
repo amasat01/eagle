@@ -16,6 +16,8 @@
  *    and the live prefix length (uint32); thread t serves sample map[t].
  *  - "countA", "countAa": finishing units with steps AUTO: each launch steps every live sample up to
  *    the int64 word eagle sets in slot 4 (countAa also reads the active set, slots 5 and 6).
+ *  - "vecs": every plane role the door binds beyond the scalar ones: a rank-1 MUTABLE and VEC_IN, a rank-2
+ *    MAT_IN, an int32 PER_SAMPLE, a LOOKUP table, the NSAMPLES count, a rank-0 OUT and a uniform.
  *  - "count1", "count3": a finishing unit that steps k += 1 until k >= limit,
  *    then marks the sample and counts it into the finished counter; one or
  *    three steps per launch (slots: k, limit, mask, the counter).
@@ -51,6 +53,7 @@ EG_FIXTURE_EXPORT void count1a_host(void* const* params, int64_t base, int64_t c
 EG_FIXTURE_EXPORT void count3a_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void countA_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void countAa_host(void* const* params, int64_t base, int64_t count, int64_t n);
+EG_FIXTURE_EXPORT void vecs_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT const struct eg_library_meta* eg_unit_library_meta(void);
 
 void axpb_host(void* const* params, int64_t base, int64_t count, int64_t n) {
@@ -128,6 +131,35 @@ void countAa_host(void* const* params, int64_t base, int64_t count, int64_t n) {
     (void)n;
     count_steps(params, base, count, (int)*(const int64_t*)((const struct fixture_handle*)params[4])->data,
                 (const int32_t*)((const struct fixture_handle*)params[5])->data);
+}
+
+/* The 40-byte mirror of a (components, n) plane (plugin/gref_layout.h's GRefMirror). */
+struct fixture_mirror {
+    double* data;
+    uint64_t samples, comp_stride, sample_stride;
+    int32_t device_type, device_id;
+};
+
+/* v[c] += w[c]*s + table[idx % tlen] (c < 3); o = v0 + v1 + v2 + (mm0 + mm1 + mm2 + mm3) + n. */
+void vecs_host(void* const* params, int64_t base, int64_t count, int64_t n) {
+    const struct fixture_mirror* v = (const struct fixture_mirror*)params[0];
+    const struct fixture_mirror* w = (const struct fixture_mirror*)params[1];
+    const struct fixture_mirror* mm = (const struct fixture_mirror*)params[2];
+    const int32_t* idx = (const int32_t*)((const struct fixture_handle*)params[3])->data;
+    const struct fixture_handle* table = (const struct fixture_handle*)params[4];
+    const uint32_t nn = *(const uint32_t*)params[5];
+    const struct fixture_mirror* o = (const struct fixture_mirror*)params[6];
+    const double s = *(const double*)params[7];
+    (void)n;
+    for (int64_t i = base; i < base + count; ++i) {
+        const double add = ((const double*)table->data)[(uint64_t)idx[i] % table->samples];
+        for (int c = 0; c < 3; ++c)
+            v->data[c * v->comp_stride + i * v->sample_stride] += w->data[c * w->comp_stride + i * w->sample_stride] * s + add;
+        double m = 0.0;
+        for (int c = 0; c < 4; ++c) m += mm->data[c * mm->comp_stride + i * mm->sample_stride];
+        o->data[i * o->sample_stride] = (v->data[i * v->sample_stride] + v->data[v->comp_stride + i * v->sample_stride] +
+                                         v->data[2 * v->comp_stride + i * v->sample_stride]) + m + (double)nn;
+    }
 }
 
 /* ---- the size block (plugin/gref_layout.h's field order) ------------------ */
@@ -323,14 +355,38 @@ static const struct eg_unit_meta unit_countAa = {
     .scalar_type = EG_SCALAR_FLOAT64, .host_entry = "countAa_host", .device_image_format = EG_IMAGE_NONE,
     .body = &auto_active_body, .launch = &launch_auto_active, .finish = &finish_auto };
 
+/* "vecs": rank-1 and rank-2 slots */
+static const int64_t shape3[1] = { 3 };
+static const int64_t shape22[2] = { 2, 2 };
+#define SLOT_R(var, role_, dtype_, rank_, shape_, name_)                       \
+    static const struct eg_unit_slot var = {                                   \
+        .struct_size = sizeof(struct eg_unit_slot), .flags = 0, .role = role_, \
+        .dtype = dtype_, .rank = rank_, .like_slot = -1, .n_gather = 0,        \
+        .shape = shape_, .gather = NULL, .name = name_ }
+SLOT_R(slot_v, EG_ROLE_MUTABLE, EG_DTYPE_REAL, 1, shape3, "v");
+SLOT_R(slot_w, EG_ROLE_VEC_IN, EG_DTYPE_REAL, 1, shape3, "w");
+SLOT_R(slot_mm, EG_ROLE_MAT_IN, EG_DTYPE_REAL, 2, shape22, "mm");
+SLOT_R(slot_idx, EG_ROLE_PER_SAMPLE, EG_DTYPE_INT32, 0, NULL, "idx");
+SLOT_R(slot_table, EG_ROLE_LOOKUP, EG_DTYPE_REAL, 0, NULL, "table");
+SLOT_R(slot_nn, EG_ROLE_NSAMPLES, EG_DTYPE_UINT32, 0, NULL, "nn");
+SLOT_R(slot_o, EG_ROLE_OUT, EG_DTYPE_REAL, 0, NULL, "o");
+static const struct eg_unit_slot* const vecs_slots[] = { &slot_v, &slot_w, &slot_mm, &slot_idx, &slot_table,
+                                                         &slot_nn, &slot_o, &slot_a };
+static const struct eg_unit_body vecs_body = {
+    .struct_size = sizeof(struct eg_unit_body), .access = EG_ACCESS_SAMPLE_LOCAL, .n_slots = 8, .slots = vecs_slots };
+static const struct eg_unit_meta unit_vecs = {
+    .struct_size = sizeof(struct eg_unit_meta), .name = "vecs", .digest = DIGEST(0x71), .pattern = EG_PATTERN_PURE,
+    .scalar_type = EG_SCALAR_FLOAT64, .host_entry = "vecs_host", .device_image_format = EG_IMAGE_NONE,
+    .body = &vecs_body, .launch = &launch };
+
 static const struct eg_unit_meta* const units[] = { &unit_axpb, &unit_wait, &unit_split, &unit_count1,
-                                                    &unit_count3, &unit_count1a, &unit_count3a, &unit_countA, &unit_countAa };
+                                                    &unit_count3, &unit_count1a, &unit_count3a, &unit_countA, &unit_countAa, &unit_vecs };
 
 static const struct eg_library_meta library = {
     .struct_size = sizeof(struct eg_library_meta),
     .schema_major = EG_META_SCHEMA_MAJOR,
     .schema_minor = 0,
-    .n_units = 9,
+    .n_units = 10,
     .units = units,
 };
 

@@ -64,6 +64,9 @@ struct SlotFacts {
     std::int32_t role = 0;
     std::int32_t dtype = 0;
     std::string name;
+    std::int32_t rank = 0;
+    std::vector<std::int64_t> shape;          ///< ``rank`` extents; the plane is (*shape, n)
+    bool mirror = false;                      ///< passed as the 40-byte GRefMirror, else the 32-byte handle
 };
 
 /** @brief A unit's finish record, as eg_runner_new and eg_run read it. */
@@ -110,6 +113,7 @@ struct eg_plan_s {
         eg_plane_s* plane = nullptr;
         bool bound = false;
         eagle::plugin::ScalarHandle handle{};
+        eagle::plugin::GRefMirror mirror{};
         alignas(8) unsigned char value[16] = {};
     };
     eg_ctx* ctx = nullptr;

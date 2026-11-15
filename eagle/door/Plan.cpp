@@ -51,23 +51,50 @@ std::size_t uniform_bytes(std::int32_t dtype, std::int32_t scalar) {
     }
 }
 
+/** @brief True when @p t is one compact row-major range (no strides, or the compact ones). */
+bool compact(const DLTensor& t) {
+    if (t.strides == nullptr) return true;
+    std::int64_t expect = 1;
+    for (int i = t.ndim - 1; i >= 0; --i) {
+        if (t.shape[i] > 1 && t.strides[i] != expect) return false;
+        expect *= t.shape[i];
+    }
+    return true;
+}
+
+/** @brief True when @p t carries the element type slot @p s of a unit of @p scalar declares. */
+bool dtype_ok(const DLDataType& t, const SlotFacts& s, std::int32_t scalar) {
+    if (t.lanes != 1) return false;
+    if (s.role == EG_ROLE_TERMINATED) return (t.code == kDLBool || t.code == kDLUInt) && t.bits == 8;
+    switch (s.dtype) {
+        case EG_DTYPE_REAL: return t.code == kDLFloat && t.bits == (scalar == EG_SCALAR_FLOAT32 ? 32 : 64);
+        case EG_DTYPE_INT64: return t.code == kDLInt && t.bits == 64;
+        case EG_DTYPE_INT32: return t.code == kDLInt && t.bits == 32;
+        case EG_DTYPE_UINT32: return t.code == kDLUInt && t.bits == 32;
+        default: return (t.code == kDLBool || t.code == kDLUInt) && t.bits == 8;  // EG_DTYPE_BOOL
+    }
+}
+
 /** @brief Check @p plane against slot @p slot of @p plan (dtype, shape, device, write access). */
 void check_plane(const eg_plan_s& plan, int slot, const eg_plane_s& plane) {
     const SlotFacts& s = plan.unit->slots[slot];
     const DLTensor& t = plane.tensor->dl_tensor;
     const std::string what = "slot " + std::to_string(slot) + " ('" + s.name + "')";
-    const bool mask = s.role == EG_ROLE_TERMINATED;
-    const std::uint8_t bits = mask ? 8 : plan.unit->scalar_type == EG_SCALAR_FLOAT32 ? 32 : 64;
-    const bool code_ok = mask ? (t.dtype.code == kDLBool || t.dtype.code == kDLUInt) : t.dtype.code == kDLFloat;
-    if (!code_ok || t.dtype.bits != bits)
+    if (!dtype_ok(t.dtype, s, plan.unit->scalar_type))
         refuse(EG_BAD_REQUEST, what + ": dtype (code " + std::to_string(t.dtype.code) + ", bits " +
-               std::to_string(t.dtype.bits) + ") is not " +
-               (mask ? std::string("a bool or uint8 mask") : "the unit's float" + std::to_string(bits)));
-    if (t.ndim != 1 || t.shape[0] != plan.n_samples)
-        refuse(EG_BAD_REQUEST, what + ": a plane of shape (" + std::to_string(plan.n_samples) +
-               ",) is expected");
-    if (t.strides != nullptr && t.shape[0] > 1 && t.strides[0] != 1)
-        refuse(EG_BAD_REQUEST, what + ": the plane is not contiguous");
+               std::to_string(t.dtype.bits) + ") is not the slot's");
+    if (s.role == EG_ROLE_LOOKUP) {      // a table of the caller's: any compact shape, read by element count
+        if (t.ndim < 1) refuse(EG_BAD_REQUEST, what + ": a table needs at least one dimension");
+    } else {                             // (*shape, n): the slot's extents, then one value per sample
+        bool ok = t.ndim == s.rank + 1 && t.shape[s.rank] == plan.n_samples;
+        for (int i = 0; ok && i < s.rank; ++i) ok = t.shape[i] == s.shape[static_cast<std::size_t>(i)];
+        if (!ok) {
+            std::string want = "(";
+            for (std::int64_t e : s.shape) want += std::to_string(e) + ", ";
+            refuse(EG_BAD_REQUEST, what + ": a plane of shape " + want + std::to_string(plan.n_samples) + ") is expected");
+        }
+    }
+    if (!compact(t)) refuse(EG_BAD_REQUEST, what + ": the plane is not contiguous");
     const bool written = s.role == EG_ROLE_MUTABLE || s.role == EG_ROLE_OUT ||
                          slot == plan.unit->finish.mask_slot;
     if (written && (plane.tensor->flags & DLPACK_FLAG_BITMASK_READ_ONLY))
@@ -92,6 +119,9 @@ void check_bind(const eg_ctx& ctx, const eg_plan_s& plan, const eg_bind_desc& d)
         if (slot == plan.unit->finish.counter_slot)
             refuse(EG_BAD_REQUEST, "slot " + std::to_string(slot) + " ('" + s.name +
                    "') is the finished counter: eagle makes it, do not pass it");
+        if (s.role == EG_ROLE_NSAMPLES)
+            refuse(EG_BAD_REQUEST, "slot " + std::to_string(slot) + " ('" + s.name +
+                   "') is the sample count: eagle passes it, do not bind it");
         if (slot == plan.unit->finish.steps_slot)
             refuse(EG_BAD_REQUEST, "slot " + std::to_string(slot) + " ('" + s.name +
                    "') is the steps word: eagle makes it, do not pass it");
@@ -114,6 +144,20 @@ void check_bind(const eg_ctx& ctx, const eg_plan_s& plan, const eg_bind_desc& d)
         if (d.uniform_values[i] == nullptr)
             refuse(EG_BAD_REQUEST, "uniform for slot " + std::to_string(d.uniform_slots[i]) + " is NULL");
     }
+}
+
+/** @brief Bind slot @p slot of @p plan to the 40-byte mirror of a compact (components, n) plane: the
+ *  component pitch is n and the sample pitch 1 (``_plan_pack._gref_mirror_box`` of a compact plane). */
+void bind_mirror(eg_plan_s& plan, int slot, void* data, std::uint64_t n) {
+    eg_plan_s::Binding& b = plan.bindings[slot];
+    b.mirror.data_ = static_cast<double*>(data);
+    b.mirror.samples_ = n;
+    b.mirror.compStride_ = n;
+    b.mirror.sampleStride_ = 1;
+    b.mirror.deviceType_ = plugin::kEagleAbiDeviceCPU;
+    b.mirror.deviceId_ = 0;
+    b.bound = true;
+    plan.params[slot] = &b.mirror;
 }
 
 /** @brief Bind slot @p slot of @p plan to a plain handle over @p data of @p count elements. */
@@ -168,6 +212,14 @@ void plan_new(eg_ctx& ctx, const eg_plan_desc* desc, eg_plan** out) {
         plan->params.resize(d.unit->slots.size());
         if (d.unit->finish.present)    // the finished counter: one uint32 cell (its element count)
             bind_handle(*plan, d.unit->finish.counter_slot, &plan->finished, 1);
+        for (std::size_t i = 0; i < d.unit->slots.size(); ++i)    // eagle passes the sample count
+            if (d.unit->slots[i].role == EG_ROLE_NSAMPLES) {
+                eg_plan_s::Binding& b = plan->bindings[i];
+                const std::uint32_t n32 = static_cast<std::uint32_t>(d.n_samples);
+                std::memcpy(b.value, &n32, sizeof(n32));
+                b.bound = true;
+                plan->params[i] = b.value;
+            }
         if (d.unit->finish.present && d.unit->finish.steps_slot >= 0)    // the steps word of an AUTO unit
             bind_handle(*plan, d.unit->finish.steps_slot, &plan->steps_word, 1);
         ctx.plans.insert(plan);
@@ -212,8 +264,17 @@ void bind(eg_ctx& ctx, eg_plan_s* plan, const eg_bind_desc* desc) {
         b.plane = d.planes[i];
         ++b.plane->refs;
         const DLTensor& t = b.plane->tensor->dl_tensor;
-        bind_handle(*plan, d.plane_slots[i], static_cast<char*>(t.data) + t.byte_offset,
-                    static_cast<std::uint64_t>(plan->n_samples));
+        char* data = static_cast<char*>(t.data) + t.byte_offset;
+        const SlotFacts& sf = plan->unit->slots[d.plane_slots[i]];
+        if (sf.mirror) {
+            bind_mirror(*plan, d.plane_slots[i], data, static_cast<std::uint64_t>(plan->n_samples));
+        } else {
+            std::int64_t elements = 1;       // a table is read by its element count, the rest by n
+            for (int e = 0; e < t.ndim; ++e) elements *= t.shape[e];
+            bind_handle(*plan, d.plane_slots[i], data,
+                        sf.role == EG_ROLE_LOOKUP ? static_cast<std::uint64_t>(elements)
+                                                  : static_cast<std::uint64_t>(plan->n_samples));
+        }
         if (old != nullptr) plane_release(ctx, old);
     }
     for (int i = 0; i < d.n_uniforms; ++i) {

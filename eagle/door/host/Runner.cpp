@@ -167,7 +167,11 @@ std::vector<Owned> owned_planes(const eg_runner_s& runner) {
         char* data = static_cast<char*>(t.data) + t.byte_offset;
         for (const Owned& o : out)
             if (o.data == data) return;
-        out.push_back({ data, static_cast<std::size_t>(t.dtype.bits / 8) });
+        const std::size_t bytes = static_cast<std::size_t>(t.dtype.bits / 8);
+        std::int64_t rows = 1;               // a (components, n) plane moves one row of n samples at a time
+        for (int i = 0; i + 1 < t.ndim; ++i) rows *= t.shape[i];
+        for (std::int64_t r = 0; r < rows; ++r)
+            out.push_back({ data + static_cast<std::size_t>(r * t.shape[t.ndim - 1]) * bytes, bytes });
     };
     const eg_plan_s& first = *runner.plans[0];
     add(first.bindings[first.unit->finish.mask_slot].plane);
