@@ -169,9 +169,9 @@ typedef int32_t eg_cond_kind;
 /** Bytes of a unit digest. Hawk defines what it hashes; eagle only compares. */
 #define EG_DIGEST_BYTES 32
 
-struct eg_unit_body;   /**< the typed walk: slots, params, mutables, buffers, cells, ... */
+struct eg_unit_body;   /**< the typed walk (eg_unit_meta.h): slots, cells, keyed and team planes, ... */
 struct eg_unit_launch; /**< lane space, block, box, plane axes, wide placement */
-struct eg_unit_finish; /**< mask slot, steps (or auto), steps_max */
+struct eg_unit_finish; /**< mask slot, steps (or EG_STEPS_AUTO), steps_max */
 struct eg_unit_team;   /**< a stage's team record */
 
 /** A unit named file-independently: its name and digest, never a path. */
@@ -205,7 +205,7 @@ struct eg_unit_meta {
     const char* device_image;           /**< symbol of the embedded device image, NULL: none */
     const char* device_function;        /**< kernel name inside that image */
     uint64_t device_image_bytes;        /**< 0 when ``device_image_size`` names the size */
-    int32_t device_image_format;        /**< 0 ptx, 1 cubin, 2 fatbin */
+    int32_t device_image_format;        /**< EG_IMAGE_* of eg_unit_meta.h: 0 none, 1 ptx, 2 cubin, 3 fatbin */
     int32_t n_stages;                   /**< 0: not a split unit */
     const struct eg_unit_stage* const* stages;
     const struct eg_unit_body* body;

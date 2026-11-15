@@ -71,9 +71,10 @@ typedef int32_t eg_scalar_type;
 
 /** ``eg_unit_meta.device_image_format`` (the values eg_door.h states). */
 typedef int32_t eg_image_format;
-#define EG_IMAGE_PTX 0
-#define EG_IMAGE_CUBIN 1
-#define EG_IMAGE_FATBIN 2
+#define EG_IMAGE_NONE 0   /**< no device image (a unit naming ``device_image`` with NONE is refused, EG_BAD_REQUEST) */
+#define EG_IMAGE_PTX 1
+#define EG_IMAGE_CUBIN 2
+#define EG_IMAGE_FATBIN 3
 
 /** What a slot holds; decides how eagle binds it (contract Role, same order). */
 typedef int32_t eg_slot_role;
@@ -220,8 +221,10 @@ struct eg_unit_team_plane {
     int32_t target_slot;      /**< unit TARGET: the slot whose cells the slices stand for, else -1 */
     int32_t reserved0;
     int64_t per_lane;         /**< elements of one slice */
-    int64_t fill;             /**< value at the start of every run (0 unless promised); not read when ``wide`` is not NONE */
+    int64_t fill;             /**< value at the start of every run; read only when ``fill_promised`` is 1 and ``wide`` is NONE */
     const char* name;         /**< joins the stage slot of that name; reasons (the scratch byte refusal) */
+    int32_t target_stage;     /**< unit TARGET: index in the kernel's stages of the unit whose body holds ``target_slot``; -1: this unit */
+    int32_t fill_promised;    /**< 1: ``fill`` is promised at the start of every run; 0: no fill is promised and ``fill`` is not read */
 };
 
 /** One dispatch group of the unit, as the runner's entry choice reads it. */
@@ -308,6 +311,9 @@ struct eg_unit_steps_table {
     const double* hi;
 };
 
+/** ``eg_unit_finish.steps``: the runner picks the steps of each launch, up to ``steps_max``. */
+#define EG_STEPS_AUTO (-1)
+
 /** How a finishing unit stops a sample and steps (eg_runner_new, eg_run). */
 struct eg_unit_finish {
     uint32_t struct_size;
@@ -316,7 +322,7 @@ struct eg_unit_finish {
     int32_t counter_slot;     /**< the uint32 LOOKUP cell it counts newly finished samples into (eagle-made) */
     int32_t steps_slot;       /**< steps AUTO: the LOOKUP word the runner sets per launch (eagle-made), else -1 */
     int32_t reserved0;
-    int64_t steps;            /**< steps one launch takes, >= 1; 0: AUTO */
+    int64_t steps;            /**< steps one launch takes, >= 1; EG_STEPS_AUTO; 0 (absent) is refused, EG_BAD_REQUEST */
     int64_t steps_max;        /**< AUTO: the most steps one launch takes, >= 1; else 0 */
     int64_t step_ops;         /**< one step's operation count (cadence, chunk length), -1: not counted */
     int64_t fp64_ops_ir;      /**< one step's 64-bit float operations counted in the IR, -1: not counted */
@@ -324,8 +330,9 @@ struct eg_unit_finish {
     const struct eg_unit_steps_table* device_steps_reverse; /**< NULL: no rows, AUTO picks PER_STEP */
 };
 
-/** The team a stage runs on (eg_unit_stage.team). Indices are into the SOURCE
- *  unit's body (the unit whose meta lists the stage). */
+/** The team a stage runs on (eg_unit_stage.team). Slot indices are into the
+ *  SOURCE unit's body (the unit whose meta lists the stage) unless a ``*_stage``
+ *  member names a later stage's unit. */
 struct eg_unit_team {
     uint32_t struct_size;
     eg_team_grid grid;
@@ -336,6 +343,7 @@ struct eg_unit_team {
     int32_t keyed;            /**< KEYS: index in the keyed table, else -1 */
     int32_t of_slot;          /**< CHUNKS, TARGETS: the slot the scatter adds into, else -1 */
     int32_t status_plane;     /**< CHUNKS: index in team_planes of the out-of-range flags eagle checks after a run, else -1 */
+    int32_t of_stage;         /**< CHUNKS, TARGETS: index in the kernel's stages of the unit whose body holds ``of_slot``; -1: the source unit */
 };
 
 #ifdef __cplusplus
