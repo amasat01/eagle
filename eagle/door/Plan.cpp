@@ -65,13 +65,12 @@ bool compact(const DLTensor& t) {
 /** @brief True when @p t carries the element type slot @p s of a unit of @p scalar declares. */
 bool dtype_ok(const DLDataType& t, const SlotFacts& s, std::int32_t scalar) {
     if (t.lanes != 1) return false;
-    if (s.role == EG_ROLE_TERMINATED) return (t.code == kDLBool || t.code == kDLUInt) && t.bits == 8;
     switch (s.dtype) {
-        case EG_DTYPE_REAL: return t.code == kDLFloat && t.bits == (scalar == EG_SCALAR_FLOAT32 ? 32 : 64);
+        case EG_DTYPE_REAL: return s.role != EG_ROLE_TERMINATED && t.code == kDLFloat && t.bits == (scalar == EG_SCALAR_FLOAT32 ? 32 : 64);
         case EG_DTYPE_INT64: return t.code == kDLInt && t.bits == 64;
         case EG_DTYPE_INT32: return t.code == kDLInt && t.bits == 32;
         case EG_DTYPE_UINT32: return t.code == kDLUInt && t.bits == 32;
-        default: return (t.code == kDLBool || t.code == kDLUInt) && t.bits == 8;  // EG_DTYPE_BOOL
+        default: return (t.code == kDLBool || t.code == kDLUInt) && t.bits == 8;  // EG_DTYPE_BOOL (a mask too)
     }
 }
 
@@ -85,6 +84,10 @@ void check_plane(const eg_plan_s& plan, int slot, const eg_plane_s& plane) {
                std::to_string(t.dtype.bits) + ") is not the slot's");
     if (s.role == EG_ROLE_LOOKUP) {      // a table of the caller's: any compact shape, read by element count
         if (t.ndim < 1) refuse(EG_BAD_REQUEST, what + ": a table needs at least one dimension");
+        if (slot == plan.unit->index_map_slot && t.ndim != 1)
+            refuse(EG_BAD_REQUEST, what + ": the index map is one dimension");
+        if (slot == plan.unit->index_count_slot && (t.ndim != 1 || t.shape[0] != 1))
+            refuse(EG_BAD_REQUEST, what + ": the index count is one cell, shape (1,)");
     } else {                             // (*shape, n): the slot's extents, then one value per sample
         bool ok = t.ndim == s.rank + 1 && t.shape[s.rank] == plan.n_samples;
         for (int i = 0; ok && i < s.rank; ++i) ok = t.shape[i] == s.shape[static_cast<std::size_t>(i)];
@@ -99,6 +102,37 @@ void check_plane(const eg_plan_s& plan, int slot, const eg_plane_s& plane) {
                          slot == plan.unit->finish.mask_slot;
     if (written && (plane.tensor->flags & DLPACK_FLAG_BITMASK_READ_ONLY))
         refuse(EG_BAD_REQUEST, what + ": a read-only plane in a written slot");
+}
+
+/** @brief The planes an index set will have after @p d: refuse a count above the map, a lane outside
+ *  [0, n) and a lane listed twice (``_index_set.check_index_set``). */
+void check_index_set(const eg_plan_s& plan, const eg_bind_desc& d) {
+    const auto prospect = [&](int slot) -> const eg_plane_s* {
+        for (int i = 0; i < d.n_planes; ++i)
+            if (d.plane_slots[i] == slot) return d.planes[i];
+        return plan.bindings[slot].plane;
+    };
+    const eg_plane_s *m = prospect(plan.unit->index_map_slot), *c = prospect(plan.unit->index_count_slot);
+    if (m == nullptr || c == nullptr) return;
+    const DLTensor& mt = m->tensor->dl_tensor;
+    const std::uint64_t held = *reinterpret_cast<const std::uint32_t*>(static_cast<const char*>(c->tensor->dl_tensor.data) +
+                                                                        c->tensor->dl_tensor.byte_offset);
+    if (held > static_cast<std::uint64_t>(mt.shape[0]))
+        refuse(EG_BAD_REQUEST, "the index count is " + std::to_string(held) + ", but the index map holds " +
+               std::to_string(mt.shape[0]) + " entries");
+    const char* data = static_cast<const char*>(mt.data) + mt.byte_offset;
+    std::vector<bool> seen(static_cast<std::size_t>(plan.n_samples), false);
+    for (std::uint64_t i = 0; i < held; ++i) {
+        const std::int64_t lane = mt.dtype.bits == 64 ? reinterpret_cast<const std::int64_t*>(data)[i]
+                                                       : reinterpret_cast<const std::int32_t*>(data)[i];
+        if (lane < 0 || lane >= plan.n_samples)
+            refuse(EG_BAD_REQUEST, "the index set: map[" + std::to_string(i) + "] = " + std::to_string(lane) +
+                   " is outside the dense lanes [0, " + std::to_string(plan.n_samples) + ")");
+        if (seen[static_cast<std::size_t>(lane)])
+            refuse(EG_BAD_REQUEST, "the index set: map[" + std::to_string(i) + "] = " + std::to_string(lane) +
+                   " repeats an earlier entry; each lane may be listed once");
+        seen[static_cast<std::size_t>(lane)] = true;
+    }
 }
 
 /** @brief Check every entry of @p d before any binding changes (a bind is all or none). */
@@ -144,6 +178,7 @@ void check_bind(const eg_ctx& ctx, const eg_plan_s& plan, const eg_bind_desc& d)
         if (d.uniform_values[i] == nullptr)
             refuse(EG_BAD_REQUEST, "uniform for slot " + std::to_string(d.uniform_slots[i]) + " is NULL");
     }
+    if (plan.unit->index_map_slot >= 0) check_index_set(plan, d);
 }
 
 /** @brief Bind slot @p slot of @p plan to the 40-byte mirror of a compact (components, n) plane: the
@@ -193,6 +228,8 @@ void plan_new(eg_ctx& ctx, const eg_plan_desc* desc, eg_plan** out) {
     if (d.unit->host_entry == nullptr)
         refuse(EG_NOT_WRITTEN, "unit '" + d.unit->name + "' has no host entry");
     std::vector<exec::Partition> parts = read_partitions(d);
+    if (d.unit->index_count_slot >= 0 && (parts.size() != 1 || parts[0].base != 0 || parts[0].count != d.n_samples))
+        refuse(EG_BAD_REQUEST, "unit '" + d.unit->name + "' reads an index set: one whole partition");
     static constexpr exec::Access kAccess[] = { exec::Access::SampleLocal,
         exec::Access::CrossSampleRead, exec::Access::CrossSampleWrite };
     try {

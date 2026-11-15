@@ -1590,6 +1590,216 @@ static void check_slot_kinds(eg_ctx* ctx) {
     check(ok, "vecs plan, planes and unit freed");
 }
 
+/* ---- an int32 TERMINATED mask, and a finish flag the host reads and ignores ---------- */
+
+/* count1i / count1ia over an int32 mask: planes in sample order after the run (and after a reorder), the report
+ * as the closed form (plain) or the model of the old rule (active). */
+static void run_i32_mask_case(eg_ctx* ctx, eg_unit* unit, int active, eg_structure structure, int32_t threads,
+                              int64_t every, double theta) {
+    static double k[RN], limit[RN], limit0[RN], want_k[RN];
+    static unsigned char mask8[RN], mask0[RN];
+    static int32_t mask[RN];
+    struct tensor tk, tl, tm;
+    char what[200];
+    count_inputs(k, limit, mask8);
+    memcpy(limit0, limit, sizeof(limit));
+    memcpy(mask0, mask8, RN);
+    for (int64_t i = 0; i < RN; ++i) mask[i] = mask8[i];
+    struct sim_out sim;
+    int64_t launches = 0, finished = 0, eff = 1;
+    if (active) {
+        eff = every ? every : 16;
+        sim_active(limit, mask0, 1, eff, theta, 1000, &sim);
+        count_oracle(limit, mask0, 1, sim.iters * eff, want_k, &launches, &finished);
+    } else {
+        count_oracle(limit, mask0, 1, 1000, want_k, &launches, &finished);
+    }
+    eg_host_threads(ctx, threads);
+    eg_plane* pk = wrap(ctx, &tk, k, RN, kDLFloat, 64);
+    eg_plane* pl = wrap(ctx, &tl, limit, RN, kDLFloat, 64);
+    eg_plane* pm = wrap(ctx, &tm, mask, RN, kDLInt, 32);
+    eg_plan* p = NULL;
+    eg_runner* r = NULL;
+    eg_status s = pk && pl && pm ? plan(ctx, unit, structure, RN, 0, NULL, NULL, &p) : EG_FAULT;
+    if (s == EG_OK) s = bind_count(ctx, p, pk, pl, pm);
+    struct eg_runner_desc d = runner_desc(&p, 1, 1000);
+    d.every = every;
+    if (theta > 0) d.flags = EG_RUN_REORDER, d.reorder_theta = theta;
+    if (s == EG_OK) s = eg_runner_new(ctx, &d, &r);
+    eg_plan_free(ctx, p);
+    struct eg_run_report rep;
+    memset(&rep, 0, sizeof(rep));
+    rep.struct_size = sizeof(rep);
+    if (s == EG_OK) s = eg_run(ctx, r, &rep);
+    int ok = s == EG_OK;
+    for (int64_t i = 0; ok && i < RN; ++i)
+        ok = memcmp(&k[i], &want_k[i], sizeof(double)) == 0 && memcmp(&limit[i], &limit0[i], sizeof(double)) == 0 &&
+             (mask[i] != 0) == (mask0[i] || want_k[i] >= limit[i]);
+    if (active)
+        ok = ok && rep.launches == sim.iters && rep.compactions == sim.compactions && rep.reorders == sim.reorders &&
+             rep.finished == sim.finished;
+    else
+        ok = ok && rep.launches == launches && rep.finished == finished;
+    snprintf(what, sizeof(what), "int32 mask%s %s threads=%d every=%lld theta=%.2f: planes in sample order, report as "
+             "the model", active ? " + active set" : "", structure == EG_STRUCTURE_HOST_SERIAL ? "SERIAL" : "TEAM",
+             threads, (long long)every, theta);
+    check(ok, what);
+    if (active) sim_reorders_seen += sim.reorders;
+    eg_runner_free(ctx, r);
+    eg_plane_free(ctx, pk);
+    eg_plane_free(ctx, pl);
+    eg_plane_free(ctx, pm);
+}
+
+static void check_mask_dtypes(eg_ctx* ctx) {
+    eg_unit *ui = NULL, *uia = NULL, *ue = NULL;
+    check(load(ctx, "count1i", 0x81, &ui) == EG_OK && load(ctx, "count1ia", 0x82, &uia) == EG_OK &&
+              load(ctx, "count1e", 0x83, &ue) == EG_OK,
+          "eg_unit_load count1i and count1ia (an int32 TERMINATED mask) and count1e (finish flag ENTRY_COUNTS)");
+    if (ui == NULL || uia == NULL || ue == NULL) return;
+    const eg_structure structures[2] = { EG_STRUCTURE_HOST_SERIAL, EG_STRUCTURE_HOST_TEAM };
+    const int32_t threads[2] = { 1, 3 };
+    const int64_t before = sim_reorders_seen;
+    for (int si = 0; si < 2; ++si)
+        for (int ti = 0; ti < 2; ++ti) {
+            run_count(ctx, ue, 1, structures[si], threads[ti], 1000); /* the flag changes nothing on the host */
+            run_i32_mask_case(ctx, ui, 0, structures[si], threads[ti], 0, 0.0);
+            for (int ei = 0; ei < 2; ++ei)
+                for (int hi = 0; hi < 2; ++hi)
+                    run_i32_mask_case(ctx, uia, 1, structures[si], threads[ti], ei ? 4 : 0, hi ? 0.5 : 0.0);
+        }
+    check(sim_reorders_seen > before, "the reorder fired over the int32 mask (the model counted at least one)");
+    eg_host_threads(ctx, 1);
+    check(eg_unit_free(ctx, ui) == EG_OK && eg_unit_free(ctx, uia) == EG_OK && eg_unit_free(ctx, ue) == EG_OK,
+          "int32-mask and ENTRY_COUNTS units freed");
+}
+
+/* ---- index sets and prefix sets ------------------------------------------- */
+
+static eg_plane* wrap_1d(eg_ctx* ctx, struct tensor* t, void* data, int64_t n, uint8_t code, uint8_t bits) {
+    return wrap(ctx, t, data, n, code, bits);
+}
+
+static void check_index_sets(eg_ctx* ctx) {
+    enum { M = 1000, CAP = 400 };
+    static double x[M], y[M], want[M];
+    static int32_t map[CAP];
+    static int64_t map64[CAP];
+    uint32_t count = 0;
+    eg_unit *ul = NULL, *up = NULL;
+    check(load(ctx, "lanes", 0x91, &ul) == EG_OK && load(ctx, "prefix", 0x92, &up) == EG_OK,
+          "eg_unit_load lanes (an index map and count) and prefix (a count only)");
+    if (ul == NULL || up == NULL) return;
+    for (int i = 0; i < M; ++i) x[i] = (double)i * 0.25 - 7.0;
+    for (int i = 0; i < CAP; ++i) map[i] = (int32_t)((i * 7919 + 13) % M), map64[i] = map[i];
+    /* 7919 is prime to 1000: the first 400 lanes are distinct */
+    struct tensor ty, tx, tm, tc, tm64;
+    eg_plane *py = wrap_1d(ctx, &ty, y, M, kDLFloat, 64), *px = wrap_1d(ctx, &tx, x, M, kDLFloat, 64),
+             *pm = wrap_1d(ctx, &tm, map, CAP, kDLInt, 32), *pm64 = wrap_1d(ctx, &tm64, map64, CAP, kDLInt, 64),
+             *pc = wrap_1d(ctx, &tc, &count, 1, kDLUInt, 32);
+    int ok = py && px && pm && pm64 && pc;
+    if (!ok) {
+        check(0, "index set planes wrapped");
+        return;
+    }
+    const eg_structure structures[2] = { EG_STRUCTURE_HOST_SERIAL, EG_STRUCTURE_HOST_TEAM };
+    const int32_t threads[2] = { 1, 3 };
+    const uint32_t counts[4] = { 0, 1, 137, CAP };
+    int all = 1;
+    for (int si = 0; si < 2; ++si)
+        for (int ti = 0; ti < 2; ++ti) {
+            eg_host_threads(ctx, threads[ti]);
+            eg_plan* p = NULL;
+            const int32_t slots[4] = { 0, 1, 2, 3 };
+            eg_plane* planes[4] = { py, px, pm, pc };
+            struct eg_bind_desc bd;
+            memset(&bd, 0, sizeof(bd));
+            bd.struct_size = sizeof(bd);
+            bd.n_planes = 4;
+            bd.plane_slots = slots;
+            bd.planes = planes;
+            count = 0;
+            all &= plan(ctx, ul, structures[si], M, 0, NULL, NULL, &p) == EG_OK && eg_bind(ctx, p, &bd) == EG_OK;
+            for (int ci = 0; all && ci < 4; ++ci) {
+                count = counts[ci]; /* the count cell is read at every launch */
+                for (int i = 0; i < M; ++i) y[i] = want[i] = -1.0;
+                for (uint32_t t = 0; t < count; ++t) want[map[t]] = 2.0 * x[map[t]] + 1.0;
+                all &= eg_launch(ctx, p, NULL) == EG_OK && memcmp(y, want, sizeof(y)) == 0;
+            }
+            eg_plan_free(ctx, p);
+        }
+    check(all, "an index set runs exactly the lanes map[0..count) (count 0, 1, 137, 400; read at each launch) and leaves "
+               "every other lane alone, equal to the plain loop on SERIAL and TEAM, 1 and 3 threads");
+
+    /* a prefix set: lanes [0, count) */
+    all = 1;
+    for (int si = 0; si < 2; ++si) {
+        eg_plan* p = NULL;
+        const int32_t slots[3] = { 0, 1, 2 };
+        eg_plane* planes[3] = { py, px, pc };
+        struct eg_bind_desc bd;
+        memset(&bd, 0, sizeof(bd));
+        bd.struct_size = sizeof(bd);
+        bd.n_planes = 3;
+        bd.plane_slots = slots;
+        bd.planes = planes;
+        all &= plan(ctx, up, structures[si], M, 0, NULL, NULL, &p) == EG_OK && eg_bind(ctx, p, &bd) == EG_OK;
+        for (int ci = 0; all && ci < 4; ++ci) {
+            count = ci == 3 ? M : counts[ci];
+            for (int i = 0; i < M; ++i) y[i] = want[i] = -1.0;
+            for (uint32_t t = 0; t < count; ++t) want[t] = 2.0 * x[t] + 1.0;
+            all &= eg_launch(ctx, p, NULL) == EG_OK && memcmp(y, want, sizeof(y)) == 0;
+        }
+        count = M + 1;
+        all &= eg_launch(ctx, p, NULL) == EG_BAD_REQUEST && reason_has(ctx, "above the sample count's");
+        eg_plan_free(ctx, p);
+    }
+    check(all, "a prefix set runs lanes [0, count) equal to the plain loop, and a count above the sample count is "
+               "refused BAD_REQUEST at launch");
+
+    /* refusals at bind and launch */
+    eg_plan* p = NULL;
+    all = plan(ctx, ul, EG_STRUCTURE_HOST_TEAM, M, 0, NULL, NULL, &p) == EG_OK;
+    const int32_t map_slot[1] = { 2 }, count_slot[1] = { 3 }, y_slot[1] = { 0 }, x_slot[1] = { 1 };
+    struct eg_bind_desc b1;
+    memset(&b1, 0, sizeof(b1));
+    b1.struct_size = sizeof(b1);
+    b1.n_planes = 1;
+    eg_plane* one[1];
+    one[0] = py; b1.plane_slots = y_slot; b1.planes = one; all = all && eg_bind(ctx, p, &b1) == EG_OK;
+    one[0] = px; b1.plane_slots = x_slot; all = all && eg_bind(ctx, p, &b1) == EG_OK;
+    count = 3;
+    one[0] = pc; b1.plane_slots = count_slot; all = all && eg_bind(ctx, p, &b1) == EG_OK;
+    one[0] = pm64; b1.plane_slots = map_slot;
+    all = all && eg_bind(ctx, p, &b1) == EG_BAD_REQUEST && reason_has(ctx, "is not the slot's");
+    map[1] = map[0];
+    one[0] = pm;
+    all = all && eg_bind(ctx, p, &b1) == EG_BAD_REQUEST && reason_has(ctx, "repeats an earlier entry");
+    map[1] = M;
+    all = all && eg_bind(ctx, p, &b1) == EG_BAD_REQUEST && reason_has(ctx, "is outside the dense lanes");
+    map[1] = 5;
+    count = CAP + 1;
+    all = all && eg_bind(ctx, p, &b1) == EG_BAD_REQUEST && reason_has(ctx, "the index map holds");
+    count = 3;
+    all = all && eg_bind(ctx, p, &b1) == EG_OK;
+    count = CAP + 1; /* rewritten after the bind: refused at launch, nothing runs past the map */
+    all = all && eg_launch(ctx, p, NULL) == EG_BAD_REQUEST && reason_has(ctx, "above the map's");
+    one[0] = pm; b1.plane_slots = count_slot; /* a map where the count goes: dtype */
+    all = all && eg_bind(ctx, p, &b1) == EG_BAD_REQUEST;
+    const int64_t part_base[2] = { 0, 500 }, part_count[2] = { 500, 500 };
+    eg_plan* pp = NULL;
+    all = all && plan(ctx, ul, EG_STRUCTURE_HOST_TEAM, M, 2, part_base, part_count, &pp) == EG_BAD_REQUEST &&
+          reason_has(ctx, "one whole partition");
+    check(all, "index set refusals by name: a map of the wrong width, a repeated lane, a lane outside the dense lanes, a "
+               "count above the map (at bind and at launch), a wrong plane in the count slot, a partitioned plan");
+    eg_plan_free(ctx, p);
+    ok = eg_plane_free(ctx, py) == EG_OK && eg_plane_free(ctx, px) == EG_OK && eg_plane_free(ctx, pm) == EG_OK &&
+         eg_plane_free(ctx, pm64) == EG_OK && eg_plane_free(ctx, pc) == EG_OK && eg_unit_free(ctx, ul) == EG_OK &&
+         eg_unit_free(ctx, up) == EG_OK;
+    check(ok, "index set planes and units freed");
+    eg_host_threads(ctx, 1);
+}
+
 int main(int argc, char** argv) {
     if (argc != 5) {
         fprintf(stderr, "usage: %s <fixture> <wrong size> <no size block> <v1 tag>\n", argv[0]);
@@ -1620,6 +1830,8 @@ int main(int argc, char** argv) {
     check_active_set(ctx);
     check_auto(ctx);
     check_slot_kinds(ctx);
+    check_mask_dtypes(ctx);
+    check_index_sets(ctx);
 
     check_reduce(ctx);
     check_conditionals(ctx);

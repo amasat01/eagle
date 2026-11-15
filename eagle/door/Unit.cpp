@@ -65,8 +65,9 @@ SlotFacts read_slot(const eg_unit_slot* in, const std::string& unit, int index) 
         refuse(EG_BAD_REQUEST, "meta that contradicts itself: " + named + " is PER_SAMPLE of rank > 0");
     if (s.role == EG_ROLE_NSAMPLES && s.dtype != EG_DTYPE_UINT32)
         refuse(EG_NOT_WRITTEN, named + ": an NSAMPLES slot of a dtype other than UINT32 is not written");
-    if (s.role == EG_ROLE_TERMINATED && s.dtype != EG_DTYPE_BOOL)
-        refuse(EG_NOT_WRITTEN, named + ": a TERMINATED mask of a non-BOOL dtype is not written yet");
+    if (s.role == EG_ROLE_TERMINATED && (s.dtype == EG_DTYPE_REAL || s.dtype == EG_DTYPE_BAND_PARTIAL))
+        refuse(EG_NOT_WRITTEN, named + ": a TERMINATED mask of a floating dtype is not written (BOOL, INT32, UINT32 "
+               "and INT64 are)");
     if (s.dtype == EG_DTYPE_BAND_PARTIAL)
         refuse(EG_NOT_WRITTEN, named + ": a BAND_PARTIAL slot is not written");
     SlotFacts facts;
@@ -137,8 +138,25 @@ void read_body(const eg_unit_meta& m, eg_unit_s& unit) {
     absent.active_map_slot = absent.active_count_slot = -1;
     absent.index_map_slot = absent.index_count_slot = -1;
     const eg_unit_launch launch = read_record(m.launch, absent, "unit '" + unit.name + "' launch");
-    if (launch.index_map_slot != -1 || launch.index_count_slot != -1)
-        refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': index sets are not written yet");
+    if (launch.index_map_slot != -1 && launch.index_count_slot == -1)
+        refuse(EG_BAD_REQUEST, "meta that contradicts itself: unit '" + unit.name + "' names an index map without its count");
+    if (launch.index_count_slot != -1) {
+        const auto lookup = [&](std::int32_t slot, bool wide_ok, std::int32_t dtype, const char* what) {
+            if (slot < 0 || slot >= static_cast<std::int32_t>(unit.slots.size()) ||
+                unit.slots[slot].role != EG_ROLE_LOOKUP ||
+                !(unit.slots[slot].dtype == dtype || (wide_ok && unit.slots[slot].dtype == EG_DTYPE_INT64)))
+                refuse(EG_BAD_REQUEST, "meta that contradicts itself: unit '" + unit.name + "' " + what + " slot " +
+                       std::to_string(slot) + " is not a LOOKUP slot of its dtype");
+        };
+        lookup(launch.index_count_slot, false, EG_DTYPE_UINT32, "index count");
+        if (launch.index_map_slot != -1) lookup(launch.index_map_slot, true, EG_DTYPE_INT32, "index map");
+        if (launch.active_map_slot != -1)
+            refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': an index set and an active set in one unit is not written");
+        if (launch.group > 1)
+            refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': an index set over groups of lanes is not written yet");
+        unit.index_map_slot = launch.index_map_slot;
+        unit.index_count_slot = launch.index_count_slot;
+    }
     if ((launch.active_map_slot == -1) != (launch.active_count_slot == -1))
         refuse(EG_BAD_REQUEST, "meta that contradicts itself: unit '" + unit.name +
                "' names an active map without its count (or the count without the map)");

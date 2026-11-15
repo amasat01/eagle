@@ -53,6 +53,10 @@ EG_FIXTURE_EXPORT void count1a_host(void* const* params, int64_t base, int64_t c
 EG_FIXTURE_EXPORT void count3a_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void countA_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void countAa_host(void* const* params, int64_t base, int64_t count, int64_t n);
+EG_FIXTURE_EXPORT void count1i_host(void* const* params, int64_t base, int64_t count, int64_t n);
+EG_FIXTURE_EXPORT void count1ia_host(void* const* params, int64_t base, int64_t count, int64_t n);
+EG_FIXTURE_EXPORT void lanes_host(void* const* params, int64_t base, int64_t count, int64_t n);
+EG_FIXTURE_EXPORT void prefix_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void vecs_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT const struct eg_library_meta* eg_unit_library_meta(void);
 
@@ -85,21 +89,25 @@ void wait_host(void* const* params, int64_t base, int64_t count, int64_t n) {
 
 /* Up to `steps` steps of every live sample served by threads [base, base + count); `map` is the
  * sample of each thread, or NULL: thread t serves sample t. */
-static void count_steps(void* const* params, int64_t base, int64_t count, int steps, const int32_t* map) {
+static void count_steps_w(void* const* params, int64_t base, int64_t count, int steps, const int32_t* map, int mask_bytes) {
     double* k = (double*)((const struct fixture_handle*)params[0])->data;
     const double* limit = (const double*)((const struct fixture_handle*)params[1])->data;
-    unsigned char* mask = (unsigned char*)((const struct fixture_handle*)params[2])->data;
+    char* mask = (char*)((const struct fixture_handle*)params[2])->data;
     uint32_t* finished = (uint32_t*)((const struct fixture_handle*)params[3])->data;
     for (int64_t t = base; t < base + count; ++t) {
         const int64_t i = map ? map[t] : t;
-        for (int s = 0; s < steps && !mask[i]; ++s) {
+        for (int s = 0; s < steps && !(mask_bytes == 4 ? ((int32_t*)mask)[i] != 0 : mask[i] != 0); ++s) {
             k[i] += 1.0;
             if (k[i] >= limit[i]) {
-                mask[i] = 1;
+                if (mask_bytes == 4) ((int32_t*)mask)[i] = 1; else mask[i] = 1;
                 __atomic_fetch_add(finished, 1u, __ATOMIC_RELAXED);
             }
         }
     }
+}
+
+static void count_steps(void* const* params, int64_t base, int64_t count, int steps, const int32_t* map) {
+    count_steps_w(params, base, count, steps, map, 1);
 }
 
 void count1_host(void* const* params, int64_t base, int64_t count, int64_t n) {
@@ -131,6 +139,33 @@ void countAa_host(void* const* params, int64_t base, int64_t count, int64_t n) {
     (void)n;
     count_steps(params, base, count, (int)*(const int64_t*)((const struct fixture_handle*)params[4])->data,
                 (const int32_t*)((const struct fixture_handle*)params[5])->data);
+}
+
+/* The int32-mask variants of count1 and count1a. */
+void count1i_host(void* const* params, int64_t base, int64_t count, int64_t n) {
+    (void)n;
+    count_steps_w(params, base, count, 1, NULL, 4);
+}
+
+void count1ia_host(void* const* params, int64_t base, int64_t count, int64_t n) {
+    (void)n;
+    count_steps_w(params, base, count, 1, (const int32_t*)((const struct fixture_handle*)params[4])->data, 4);
+}
+
+/* Index sets: thread t serves lane map[t] (lanes) or lane t (prefix): y[lane] = 2 * x[lane] + 1. */
+void lanes_host(void* const* params, int64_t base, int64_t count, int64_t n) {
+    double* y = (double*)((const struct fixture_handle*)params[0])->data;
+    const double* x = (const double*)((const struct fixture_handle*)params[1])->data;
+    const int32_t* map = (const int32_t*)((const struct fixture_handle*)params[2])->data;
+    (void)n;
+    for (int64_t t = base; t < base + count; ++t) y[map[t]] = 2.0 * x[map[t]] + 1.0;
+}
+
+void prefix_host(void* const* params, int64_t base, int64_t count, int64_t n) {
+    double* y = (double*)((const struct fixture_handle*)params[0])->data;
+    const double* x = (const double*)((const struct fixture_handle*)params[1])->data;
+    (void)n;
+    for (int64_t t = base; t < base + count; ++t) y[t] = 2.0 * x[t] + 1.0;
 }
 
 /* The 40-byte mirror of a (components, n) plane (plugin/gref_layout.h's GRefMirror). */
@@ -379,14 +414,64 @@ static const struct eg_unit_meta unit_vecs = {
     .scalar_type = EG_SCALAR_FLOAT64, .host_entry = "vecs_host", .device_image_format = EG_IMAGE_NONE,
     .body = &vecs_body, .launch = &launch };
 
+/* count1 with an int32 mask (plain and with the active set), and count1 carrying EG_FINISH_ENTRY_COUNTS */
+SLOT_OF(slot_mask32, EG_ROLE_TERMINATED, EG_DTYPE_INT32, "mask");
+static const struct eg_unit_slot* const i_slots[] = { &slot_k, &slot_limit, &slot_mask32, &slot_finished };
+static const struct eg_unit_slot* const ia_slots[] = { &slot_k, &slot_limit, &slot_mask32, &slot_finished, &slot_map, &slot_live };
+static const struct eg_unit_body i_body = {
+    .struct_size = sizeof(struct eg_unit_body), .access = EG_ACCESS_SAMPLE_LOCAL, .n_slots = 4, .slots = i_slots };
+static const struct eg_unit_body ia_body = {
+    .struct_size = sizeof(struct eg_unit_body), .access = EG_ACCESS_SAMPLE_LOCAL, .n_slots = 6, .slots = ia_slots };
+static const struct eg_unit_meta unit_count1i = {
+    .struct_size = sizeof(struct eg_unit_meta), .name = "count1i", .digest = DIGEST(0x81), .pattern = EG_PATTERN_PURE,
+    .scalar_type = EG_SCALAR_FLOAT64, .host_entry = "count1i_host", .device_image_format = EG_IMAGE_NONE,
+    .body = &i_body, .launch = &launch, .finish = &finish1 };
+static const struct eg_unit_meta unit_count1ia = {
+    .struct_size = sizeof(struct eg_unit_meta), .name = "count1ia", .digest = DIGEST(0x82), .pattern = EG_PATTERN_PURE,
+    .scalar_type = EG_SCALAR_FLOAT64, .host_entry = "count1ia_host", .device_image_format = EG_IMAGE_NONE,
+    .body = &ia_body, .launch = &launch_active, .finish = &finish1 };
+static const struct eg_unit_finish finish1e = {
+    .struct_size = sizeof(struct eg_unit_finish), .flags = EG_FINISH_ENTRY_COUNTS, .mask_slot = 2, .counter_slot = 3,
+    .steps_slot = -1, .steps = 1, .steps_max = 0, .step_ops = -1, .fp64_ops_ir = -1, .host_steps_reverse = NULL,
+    .device_steps_reverse = NULL };
+static const struct eg_unit_meta unit_count1e = {
+    .struct_size = sizeof(struct eg_unit_meta), .name = "count1e", .digest = DIGEST(0x83), .pattern = EG_PATTERN_PURE,
+    .scalar_type = EG_SCALAR_FLOAT64, .host_entry = "count1_host", .device_image_format = EG_IMAGE_NONE,
+    .body = &count_body, .launch = &launch, .finish = &finish1e };
+
+/* an index set (slots y, x, map, count) and a prefix set (slots y, x, count) */
+SLOT_OF(slot_imap, EG_ROLE_LOOKUP, EG_DTYPE_INT32, "index_map");
+SLOT_OF(slot_icount, EG_ROLE_LOOKUP, EG_DTYPE_UINT32, "index_count");
+static const struct eg_unit_slot* const lane_slots[] = { &slot_y, &slot_x, &slot_imap, &slot_icount };
+static const struct eg_unit_slot* const prefix_slots[] = { &slot_y, &slot_x, &slot_icount };
+static const struct eg_unit_body lane_body = {
+    .struct_size = sizeof(struct eg_unit_body), .access = EG_ACCESS_SAMPLE_LOCAL, .n_slots = 4, .slots = lane_slots };
+static const struct eg_unit_body prefix_body = {
+    .struct_size = sizeof(struct eg_unit_body), .access = EG_ACCESS_SAMPLE_LOCAL, .n_slots = 3, .slots = prefix_slots };
+static const struct eg_unit_launch launch_lanes = {
+    .struct_size = sizeof(struct eg_unit_launch), .n_lane_axes = 0, .block = 0, .active_map_slot = -1,
+    .active_count_slot = -1, .index_map_slot = 2, .index_count_slot = 3, .n_plane_axes = 0, .group = 1 };
+static const struct eg_unit_launch launch_prefix = {
+    .struct_size = sizeof(struct eg_unit_launch), .n_lane_axes = 0, .block = 0, .active_map_slot = -1,
+    .active_count_slot = -1, .index_map_slot = -1, .index_count_slot = 2, .n_plane_axes = 0, .group = 1 };
+static const struct eg_unit_meta unit_lanes = {
+    .struct_size = sizeof(struct eg_unit_meta), .name = "lanes", .digest = DIGEST(0x91), .pattern = EG_PATTERN_PURE,
+    .scalar_type = EG_SCALAR_FLOAT64, .host_entry = "lanes_host", .device_image_format = EG_IMAGE_NONE,
+    .body = &lane_body, .launch = &launch_lanes };
+static const struct eg_unit_meta unit_prefix = {
+    .struct_size = sizeof(struct eg_unit_meta), .name = "prefix", .digest = DIGEST(0x92), .pattern = EG_PATTERN_PURE,
+    .scalar_type = EG_SCALAR_FLOAT64, .host_entry = "prefix_host", .device_image_format = EG_IMAGE_NONE,
+    .body = &prefix_body, .launch = &launch_prefix };
+
 static const struct eg_unit_meta* const units[] = { &unit_axpb, &unit_wait, &unit_split, &unit_count1,
-                                                    &unit_count3, &unit_count1a, &unit_count3a, &unit_countA, &unit_countAa, &unit_vecs };
+                                                    &unit_count3, &unit_count1a, &unit_count3a, &unit_countA, &unit_countAa, &unit_vecs, &unit_count1i,
+                                                    &unit_count1ia, &unit_count1e, &unit_lanes, &unit_prefix };
 
 static const struct eg_library_meta library = {
     .struct_size = sizeof(struct eg_library_meta),
     .schema_major = EG_META_SCHEMA_MAJOR,
     .schema_minor = 0,
-    .n_units = 10,
+    .n_units = 15,
     .units = units,
 };
 

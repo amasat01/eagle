@@ -94,6 +94,8 @@ struct eg_unit_s {
     eagle::door::FinishFacts finish;
     std::int32_t active_map_slot = -1;        ///< the int32 LOOKUP of live sample slots a runner makes, -1: none
     std::int32_t active_count_slot = -1;      ///< the uint32 LOOKUP count of its live prefix
+    std::int32_t index_map_slot = -1;         ///< the caller's int32/int64 LOOKUP of lanes to run (an index set), -1: none
+    std::int32_t index_count_slot = -1;       ///< the caller's uint32 LOOKUP count: lanes run (with no map: the prefix)
     int refs = 1;                             ///< the caller's reference plus one per plan
     bool caller_ref = true;
 };

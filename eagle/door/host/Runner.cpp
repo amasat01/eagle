@@ -134,19 +134,35 @@ bool check_active(const eg_runner_desc& d) {
 }
 
 
+/** @brief The mask plane: elements of any width, set when any byte is nonzero. */
+struct Mask {
+    const char* data;
+    std::size_t bytes;
+    bool set(std::int64_t i) const {
+        const char* e = data + static_cast<std::size_t>(i) * bytes;
+        for (std::size_t b = 0; b < bytes; ++b)
+            if (e[b] != 0) return true;
+        return false;
+    }
+};
+
 /** @brief Recompute the map and count from the mask; for a reordering set also the trigger:
  *  fire when the live count is below theta * 32 * (32-slot groups holding a live sample),
  *  below the span, and the span is at least the floor (the old host rule, bit for bit). */
-void compact(ActiveState& a, const unsigned char* mask) {
+void compact(ActiveState& a, const Mask& mask) {
     std::uint32_t live = 0;
     for (std::int64_t i = 0; i < a.n; ++i)
-        if (mask[i] == 0) a.map[live++] = static_cast<std::int32_t>(i);
+        if (!mask.set(i)) a.map[live++] = static_cast<std::int32_t>(i);
     a.count = live;
     if (!a.reorder) return;
     std::int64_t live32 = 0;
     for (std::int64_t g = 0; g < a.n; g += 32) {
         const std::int64_t end = std::min<std::int64_t>(g + 32, a.n);
-        live32 += std::any_of(mask + g, mask + end, [](unsigned char m) { return m == 0; });
+        for (std::int64_t i = g; i < end; ++i)
+            if (!mask.set(i)) {
+                ++live32;
+                break;
+            }
     }
     const double limit = static_cast<double>(static_cast<float>(a.theta)) * 32.0 * static_cast<double>(live32);
     a.fire = static_cast<double>(live) < limit && static_cast<std::int64_t>(live) < a.span &&
@@ -190,12 +206,12 @@ std::vector<Owned> owned_planes(const eg_runner_s& runner) {
  *  with them; the map becomes the identity over the live prefix. */
 void reorder(ActiveState& a, const std::vector<Owned>& owned) {
     const std::size_t sp = static_cast<std::size_t>(a.span);
-    const unsigned char* mask = reinterpret_cast<const unsigned char*>(owned[0].data);
+    const Mask mask{ owned[0].data, owned[0].bytes };
     std::vector<std::size_t> dst(sp);
     std::size_t live = 0;
-    for (std::size_t i = 0; i < sp; ++i) live += mask[i] == 0;
+    for (std::size_t i = 0; i < sp; ++i) live += !mask.set(static_cast<std::int64_t>(i));
     std::size_t kept = 0, dropped = 0;
-    for (std::size_t i = 0; i < sp; ++i) dst[i] = mask[i] == 0 ? kept++ : live + dropped++;
+    for (std::size_t i = 0; i < sp; ++i) dst[i] = !mask.set(static_cast<std::int64_t>(i)) ? kept++ : live + dropped++;
     std::vector<char> tmp;
     for (const Owned& o : owned) {
         tmp.assign(o.data, o.data + sp * o.bytes);
@@ -222,7 +238,7 @@ void restore(ActiveState& a, const std::vector<Owned>& owned) {
     }
     for (std::size_t i = 0; i < n; ++i) a.perm[i] = a.inv[i] = static_cast<std::int32_t>(i);
     a.span = a.n;
-    compact(a, reinterpret_cast<const unsigned char*>(owned[0].data));
+    compact(a, Mask{ owned[0].data, owned[0].bytes });
     a.fire = false;
     a.restored_at = a.reorders;
 }
@@ -237,7 +253,7 @@ void run_active(eg_runner_s& runner, int threads, std::int64_t& iterations, std:
     eg_plan_s& first = *runner.plans[0];
     const std::int64_t n = a.n;
     const std::vector<Owned> owned = owned_planes(runner);
-    const auto* mask = reinterpret_cast<const unsigned char*>(owned[0].data);
+    const Mask mask{ owned[0].data, owned[0].bytes };
     const std::int64_t cap = (runner.max_steps + a.every_steps - 1) / a.every_steps;
     const std::int64_t c0 = a.compactions, r0 = a.reorders;
     while (iterations < cap && static_cast<std::int64_t>(first.finished) != n) {
@@ -281,11 +297,11 @@ void run_auto(eg_runner_s& runner, int threads, std::int64_t& iterations, std::i
     bool go = static_cast<std::int64_t>(first.finished) != n && cap > 0;
     ActiveState& a = runner.act;
     std::vector<Owned> owned;
-    const unsigned char* mask = nullptr;
+    Mask mask{ nullptr, 1 };
     std::int64_t c0 = 0, r0 = 0;
     if (runner.active) {
         owned = owned_planes(runner);
-        mask = reinterpret_cast<const unsigned char*>(owned[0].data);
+        mask = Mask{ owned[0].data, owned[0].bytes };
         c0 = a.compactions;
         r0 = a.reorders;
     }
@@ -412,8 +428,10 @@ void run_loop(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report) {
     const FinishFacts& f = first.unit->finish;
     const std::int64_t n = first.n_samples;
     const DLTensor& t = first.bindings[f.mask_slot].plane->tensor->dl_tensor;
-    const auto* mask = static_cast<const unsigned char*>(t.data) + t.byte_offset;
-    first.finished = static_cast<std::uint32_t>(std::count_if(mask, mask + n, [](unsigned char m) { return m != 0; }));
+    const Mask mask{ static_cast<const char*>(t.data) + t.byte_offset, static_cast<std::size_t>(t.dtype.bits / 8) };
+    std::int64_t set = 0;
+    for (std::int64_t i = 0; i < n; ++i) set += mask.set(i);
+    first.finished = static_cast<std::uint32_t>(set);
     const int threads = host::team_threads(ctx);
     std::int64_t launches = 0, compactions = 0, reorders = 0;
     const std::int64_t per_iteration = runner->active ? runner->act.every_steps : f.steps;   // not read with AUTO
