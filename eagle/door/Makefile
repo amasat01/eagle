@@ -96,7 +96,7 @@ $(PAIR_LIB): $(PAIR_KERNEL) $(PAIR_META) eg_door.h eg_unit_meta.h | check-inputs
 	@mkdir -p $(OUT)
 	$(CXX) $(PAIR_HOST_FLAGS) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) \
 	  -c $(PAIR_KERNEL) -o $(OUT)/pair_kernel.o
-	$(CC) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$(CURDIR) \
+	$(CC) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$(ROOT) \
 	  -c $(PAIR_META) -o $(OUT)/pair_meta.o
 	$(CXX) -shared -o $@ $(OUT)/pair_kernel.o $(OUT)/pair_meta.o
 
