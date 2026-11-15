@@ -71,15 +71,20 @@ symbols: $(LIB)
 	if [ -n "$$extra" ]; then echo "FAIL  exports beyond eg_*:"; echo "$$extra"; exit 1; fi; \
 	echo "PASS  $(LIB) exports $$(nm -D --defined-only $(LIB) | grep -c ' eg_') eg_* names and nothing else"
 
-$(FIXTURE): test/fixture_unit.c eg_door.h eg_unit_meta.h
+# The fixture unit library and three variants of its size block (FIXTURE_BLOCK
+# in test/fixture_unit.c): a wrong sizeof(ScalarHandle), none exported, the v1 tag.
+FIXTURE_BAD := $(OUT)/libfixture_wrong_size.so $(OUT)/libfixture_no_block.so $(OUT)/libfixture_v1_tag.so
+block_of = $(if $(findstring wrong_size,$1),1,$(if $(findstring no_block,$1),2,$(if $(findstring v1_tag,$1),3,0)))
+
+$(FIXTURE) $(FIXTURE_BAD): test/fixture_unit.c eg_door.h eg_unit_meta.h
 	@mkdir -p $(OUT)
-	$(CC) $(CFLAGS_C) -fPIC -shared -fvisibility=hidden -o $@ $<
+	$(CC) $(CFLAGS_C) -DFIXTURE_BLOCK=$(call block_of,$@) -fPIC -shared -fvisibility=hidden -o $@ $<
 
 $(TEST): test/door_test.c eg_door.h $(LIB)
 	$(CC) $(CFLAGS_C) -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door -Wl,-rpath,$(OUT) -pthread
 
-test: symbols $(FIXTURE) $(TEST)
-	$(TEST) $(FIXTURE)
+test: symbols $(FIXTURE) $(FIXTURE_BAD) $(TEST)
+	$(TEST) $(FIXTURE) $(FIXTURE_BAD)
 
 PAIR_LIB := $(OUT)/libpair_unit.so
 PAIR_TEST := $(OUT)/pair_test

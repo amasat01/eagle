@@ -7,7 +7,7 @@
  * here and to each other; then the refusals. Prints PASS/FAIL per check and
  * exits non-zero on any failure.
  *
- * Usage: door_test <fixture unit library>
+ * Usage: door_test <fixture> <fixture: wrong size> <fixture: no size block> <fixture: v1 tag>
  */
 #define _POSIX_C_SOURCE 200809L
 
@@ -364,6 +364,31 @@ static void check_second_thread(eg_ctx* ctx) {
     eg_unit_free(ctx, wait);
 }
 
+/* Load "axpb" from @p path; BAD_REQUEST with a reason holding @p need1 and @p need2. */
+static int refused_with(eg_ctx* ctx, const char* path, const char* need1, const char* need2) {
+    const char* saved = library_path;
+    library_path = path;
+    eg_unit* u = NULL;
+    const eg_status st = load(ctx, "axpb", 0xA1, &u);
+    library_path = saved;
+    char buf[1024];
+    size_t len = 0;
+    const int read = eg_error(ctx, buf, sizeof(buf), &len) == EG_OK;
+    if (st != EG_BAD_REQUEST || !read) return 0;
+    printf("      reason: %s\n", buf);
+    return u == NULL && strstr(buf, need1) != NULL && strstr(buf, need2) != NULL;
+}
+
+/* The exported size block beside a host entry is checked at load. */
+static void check_size_block(eg_ctx* ctx, char** paths) {
+    check(refused_with(ctx, paths[0], "sizeof(ScalarHandle)", "48"),
+          "a wrong sizeof(ScalarHandle) in eagle_layout_sizes refused BAD_REQUEST, naming field and values");
+    check(refused_with(ctx, paths[1], "eagle_abi_tag", "does not export"),
+          "a library exporting no size block refused BAD_REQUEST, naming the symbol");
+    check(refused_with(ctx, paths[2], "aether-abi/1", "aether-abi/2"),
+          "a v1 eagle_abi_tag refused BAD_REQUEST, naming both tags");
+}
+
 /* A forked child is refused every call but eg_error and eg_ctx_free. */
 static void check_fork(eg_ctx* ctx) {
     fflush(stdout);
@@ -385,8 +410,8 @@ static void check_fork(eg_ctx* ctx) {
 }
 
 int main(int argc, char** argv) {
-    if (argc != 2) {
-        fprintf(stderr, "usage: %s <fixture unit library>\n", argv[0]);
+    if (argc != 5) {
+        fprintf(stderr, "usage: %s <fixture> <wrong size> <no size block> <v1 tag>\n", argv[0]);
         return 2;
     }
     library_path = argv[1];
@@ -416,6 +441,7 @@ int main(int argc, char** argv) {
     check_bad_input(ctx, unit);
     check_foreign_handle(ctx, unit);
     check_second_thread(ctx);
+    check_size_block(ctx, argv + 2);
     check_fork(ctx);
 
     check(eg_unit_free(ctx, unit) == EG_OK && eg_ctx_free(ctx) == EG_OK, "eg_unit_free and eg_ctx_free");

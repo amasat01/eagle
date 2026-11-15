@@ -11,6 +11,10 @@
  *  - "wait": the same slots; its entry marks y[1] = 1 on entry and returns
  *    once the test sets y[0] (or after a few seconds): it holds a context busy.
  *  - "axpb_split": the "axpb" body named as a one-stage split unit.
+ *
+ * The size block beside the host entries (``eagle_abi_tag``,
+ * ``eagle_layout_sizes``) follows FIXTURE_BLOCK: 0 (default) the real one,
+ * 1 a wrong sizeof(ScalarHandle), 2 none exported, 3 the v1 tag.
  */
 #define _POSIX_C_SOURCE 200809L
 
@@ -61,6 +65,25 @@ void wait_host(void* const* params, int64_t base, int64_t count, int64_t n) {
         if (t.tv_sec - t0.tv_sec > 10) return;
     }
 }
+
+/* ---- the size block (plugin/gref_layout.h's field order) ------------------ */
+
+#ifndef FIXTURE_BLOCK
+#define FIXTURE_BLOCK 0
+#endif
+
+#if FIXTURE_BLOCK != 2
+EG_FIXTURE_EXPORT extern const char eagle_abi_tag[];
+EG_FIXTURE_EXPORT extern const uint64_t eagle_layout_sizes[5];
+#if FIXTURE_BLOCK == 3
+const char eagle_abi_tag[] = "aether-abi/1";
+#else
+const char eagle_abi_tag[] = "aether-abi/2";
+#endif
+/* GRefMirror, ScalarHandle, IntHandle, the index type, the partition triple */
+const uint64_t eagle_layout_sizes[5] = {
+    40, FIXTURE_BLOCK == 1 ? 48 : sizeof(struct fixture_handle), 32, 4, 3 * sizeof(int64_t) };
+#endif
 
 /* ---- the meta ------------------------------------------------------------ */
 

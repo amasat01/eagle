@@ -5,6 +5,7 @@
 // struct_size reads as its documented absent value.
 #include "eagle/door/Context.h"
 #include "eagle/door/eg_unit_meta.h"
+#include "plugin/gref_abi.h"
 
 #include <dlfcn.h>
 
@@ -113,6 +114,31 @@ eg_unit_meta find_unit(const eg_library_meta* lib, const eg_unit_ref& ref) {
            "' with the given digest in the library");
 }
 
+/**
+ * @brief Check the size block the unit's library exports beside a host entry:
+ * ``eagle_abi_tag`` must be the v2 tag (the entry eg_launch calls is the v2
+ * serial range) and ``eagle_layout_sizes`` must equal eagle's own layout sizes,
+ * field by field (the check ``plugin/gref_abi.h`` states). A missing symbol or
+ * a mismatch is refused BAD_REQUEST, naming the symbol or the field and both values.
+ */
+void check_size_block(void* library, const std::string& unit) {
+    const auto* tag = static_cast<const char*>(::dlsym(library, "eagle_abi_tag"));
+    if (tag == nullptr)
+        refuse(EG_BAD_REQUEST, "unit '" + unit + "': the library does not export 'eagle_abi_tag'");
+    if (plugin::abi_version_of(tag) != 2)
+        refuse(EG_BAD_REQUEST, "unit '" + unit + "': eagle_abi_tag is '" + tag + "', this door runs '" +
+               EAGLE_AETHER_ABI_V2 + "'");
+    const auto* sizes = static_cast<const std::uint64_t*>(::dlsym(library, plugin::kEagleLayoutSymbol));
+    if (sizes == nullptr)
+        refuse(EG_BAD_REQUEST, "unit '" + unit + "': the library does not export '" +
+               plugin::kEagleLayoutSymbol + "'");
+    try {
+        plugin::check_layout_sizes(sizes, "unit '" + unit + "'");
+    } catch (const std::runtime_error& e) {
+        refuse(EG_BAD_REQUEST, e.what());
+    }
+}
+
 /** @brief Check the unit-level members and resolve the host entry. */
 void read_unit(const eg_unit_meta& m, void* library, eg_unit_s& unit) {
     if (m.flags != 0)
@@ -142,6 +168,7 @@ void read_unit(const eg_unit_meta& m, void* library, eg_unit_s& unit) {
             refuse(EG_FAULT, "unit '" + unit.name + "': the library lacks its host entry '" +
                    m.host_entry + "'");
         unit.host_entry = reinterpret_cast<exec::HostEntryV2>(sym);
+        check_size_block(library, unit.name);
     }
     read_body(m, unit);
 }
