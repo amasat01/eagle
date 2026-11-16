@@ -130,10 +130,10 @@ typedef int32_t eg_plane_layout;
 #define EG_LAYOUT_FLAT 0        /**< (per_lane * units,) */
 #define EG_LAYOUT_PLANE_MAJOR 1 /**< (per_lane, units), (units,) when per_lane is 1 */
 
-/** Whether a plane holds a placed wide value, and the UNIT COUNT that follows. */
+/** Whether a plane holds a placed wide value, and the UNIT COUNT that follows. Value 1 is retired (every scratch
+ *  plane a placement makes is tiled by warp) and refused. */
 typedef int32_t eg_wide_layout;
 #define EG_WIDE_NONE 0        /**< not a wide value: units from ``unit``; filled with ``fill`` */
-#define EG_WIDE_PLAIN 1       /**< a wide value: units from ``unit``; written before read, never filled */
 #define EG_WIDE_WARP_TILED 2  /**< a wide value tiled by warp: device units rounded up to whole warps of 32, host one unit; never filled */
 
 /** A dispatch group's strategy. */
