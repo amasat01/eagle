@@ -110,10 +110,10 @@ struct FinishFacts {
  *  against the runner's primal. */
 struct DerivedFacts {
     struct Taped { std::int32_t slot = -1, row0 = 0, rows = 0; };
-    struct Link { std::int32_t slot = -1, source = -1, of_slot = -1; std::uint32_t reduced = 0; };
+    struct Link { std::int32_t slot = -1, what = -1, of_slot = -1; std::uint32_t reduced = 0; std::int32_t form = -1; };
     bool present = false;
     std::int32_t role = -1, of_unit = -1, tape_slot = -1, tape_rows = 0, steps_slot = -1, tape_on_slot = -1;
-    std::int32_t time0_slot = -1, tau_slot = -1, fused_steps_slot = -1, n_refined = 0;
+    std::int32_t time0_slot = -1, fused_steps_slot = -1;
     std::vector<Taped> taped;
     std::vector<Link> links;
 };

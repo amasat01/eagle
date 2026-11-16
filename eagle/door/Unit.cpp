@@ -333,6 +333,32 @@ void check_size_block(void* library, const std::string& unit) {
     }
 }
 
+/** @brief The one table of valid (role, what, form) links: EG_LINK_RULES, expanded, never copied. */
+struct LinkRule { std::int32_t role, what, form; };
+constexpr LinkRule kLinkRules[] = {
+#define EG_LINK_ROW(role, what, form) { role, what, form },
+    EG_LINK_RULES(EG_LINK_ROW)
+#undef EG_LINK_ROW
+};
+
+/** @brief Refuse a link whose (role, what, form) is not a row of EG_LINK_RULES, or whose ``reduced`` is set off GRAD. */
+void check_link(const std::string& unit, std::int32_t role, std::int32_t index, const eg_unit_link& l) {
+    const std::string at = "unit '" + unit + "' links[" + std::to_string(index) + "]";
+    bool role_has_rows = false;
+    for (const LinkRule& r : kLinkRules) {
+        if (r.role != role) continue;
+        role_has_rows = true;
+        if (r.what == l.what && r.form == l.form) {
+            if (l.reduced != 0 && l.form != EG_FORM_GRAD)
+                refuse(EG_BAD_REQUEST, at + ".reduced " + std::to_string(l.reduced) + ": only a GRAD link is reduced");
+            return;
+        }
+    }
+    if (!role_has_rows) refuse(EG_NOT_WRITTEN, at + ": derived role " + std::to_string(role) + " takes no links in this build of the door");
+    refuse(EG_BAD_REQUEST, at + ": role " + std::to_string(role) + " takes no link of what " + std::to_string(l.what) +
+           " in form " + std::to_string(l.form) + " (not a row of EG_LINK_RULES)");
+}
+
 /** @brief Copy the derived record (eg_unit_derived); eg_runner_new checks it against the primal. */
 void read_derived(const eg_unit_meta& m, eg_unit_s& unit) {
     if (m.derived == nullptr) return;
@@ -341,7 +367,6 @@ void read_derived(const eg_unit_meta& m, eg_unit_s& unit) {
     const std::string what = "meta that contradicts itself: unit '" + unit.name + "' derived ";
     if (d.n_taped < 0 || (d.n_taped > 0 && d.taped == nullptr)) refuse(EG_BAD_REQUEST, what + "n_taped without taped");
     if (d.n_links < 0 || (d.n_links > 0 && d.links == nullptr)) refuse(EG_BAD_REQUEST, what + "n_links without links");
-    if (d.n_refined < 0 || (d.n_refined > 0 && d.refined == nullptr)) refuse(EG_BAD_REQUEST, what + "n_refined without refined");
     DerivedFacts& f = unit.derived;
     f.present = true;
     f.role = d.role;
@@ -351,16 +376,20 @@ void read_derived(const eg_unit_meta& m, eg_unit_s& unit) {
     f.steps_slot = d.steps_slot;
     f.tape_on_slot = d.tape_on_slot;
     f.time0_slot = d.time0_slot;
-    f.tau_slot = d.tau_slot;
     f.fused_steps_slot = d.fused_steps_slot;
-    f.n_refined = d.n_refined;
     for (std::int32_t i = 0; i < d.n_taped; ++i) {
         const eg_unit_taped t = read_record(d.taped[i], eg_unit_taped{}, what + "taped[" + std::to_string(i) + "]");
         f.taped.push_back({ t.slot, t.row0, t.rows });
     }
+    int time0_values = 0, time_steps = 0;
     for (std::int32_t i = 0; i < d.n_links; ++i) {
         const eg_unit_link l = read_record(d.links[i], eg_unit_link{}, what + "links[" + std::to_string(i) + "]");
-        f.links.push_back({ l.slot, l.source, l.of_slot, l.reduced });
+        check_link(unit.name, d.role, i, l);
+        if (l.what == EG_WHAT_TIME0 && l.form == EG_FORM_VALUE && ++time0_values > 1)
+            refuse(EG_BAD_REQUEST, "unit '" + unit.name + "' links[" + std::to_string(i) + "]: a second (TIME0, VALUE) link");
+        if (d.role == EG_DERIVED_REFINE_NEWTON && l.what == EG_WHAT_TIME_STEP && ++time_steps > 1)
+            refuse(EG_BAD_REQUEST, "unit '" + unit.name + "' links[" + std::to_string(i) + "]: a second (TIME_STEP, VALUE) link (a Newton unit takes exactly one)");
+        f.links.push_back({ l.slot, l.what, l.of_slot, l.reduced, l.form });
     }
 }
 

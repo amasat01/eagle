@@ -180,16 +180,17 @@ FINISH(lin_finish, 2, 3);
 FINISH(twin_finish, 6, 5);
 
 /* The twin's links: each ordinary slot to the primal slot of the same name. */
-#define LINK(var, slot_, source_, of_, reduced_) \
-    static const struct eg_unit_link var = { .struct_size = sizeof(struct eg_unit_link), .slot = slot_, .source = source_, .of_slot = of_, .reduced = reduced_ }
-LINK(tl_x, 1, EG_SRC_PRIMAL, 0, 0);
-LINK(tl_t, 2, EG_SRC_PRIMAL, 1, 0);
-LINK(tl_T, 4, EG_SRC_PRIMAL, 4, 0);
-LINK(tl_done, 6, EG_SRC_PRIMAL, 2, 0);
-LINK(tl_a, 7, EG_SRC_PRIMAL, 5, 0);
-LINK(tl_b, 8, EG_SRC_PRIMAL, 6, 0);
-LINK(tl_bad_slot, 12, EG_SRC_PRIMAL, 0, 0);
-LINK(tl_time0, 4, EG_SRC_TIME0, 1, 0);
+#define LINK(var, slot_, what_, form_, of_, reduced_) \
+    static const struct eg_unit_link var = { .struct_size = sizeof(struct eg_unit_link), .slot = slot_, .what = EG_WHAT_##what_, \
+                                             .of_slot = of_, .reduced = reduced_, .form = EG_FORM_##form_ }
+LINK(tl_x, 1, PRIMAL_SLOT, VALUE, 0, 0);
+LINK(tl_t, 2, PRIMAL_SLOT, VALUE, 1, 0);
+LINK(tl_T, 4, PRIMAL_SLOT, VALUE, 4, 0);
+LINK(tl_done, 6, PRIMAL_SLOT, VALUE, 2, 0);
+LINK(tl_a, 7, PRIMAL_SLOT, VALUE, 5, 0);
+LINK(tl_b, 8, PRIMAL_SLOT, VALUE, 6, 0);
+LINK(tl_bad_slot, 12, PRIMAL_SLOT, VALUE, 0, 0);
+LINK(tl_time0, 4, TIME0, VALUE, 1, 0);
 static const struct eg_unit_link* const twin_links[] = { &tl_x, &tl_t, &tl_T, &tl_done, &tl_a, &tl_b };
 static const struct eg_unit_link* const twin_links_bad_slot[] = { &tl_x, &tl_t, &tl_T, &tl_done, &tl_a, &tl_bad_slot };
 static const struct eg_unit_link* const twin_links_time0[] = { &tl_x, &tl_t, &tl_time0, &tl_done, &tl_a, &tl_b };
@@ -200,31 +201,36 @@ static const struct eg_unit_taped tp_x = { .struct_size = sizeof(struct eg_unit_
 static const struct eg_unit_taped* const taped[] = { &tp_t, &tp_x };
 
 /* The vjp's links. */
-LINK(vl_ga, 0, EG_SRC_PARAM_GRAD, 5, 1);
-LINK(vl_gb, 1, EG_SRC_PARAM_GRAD, 6, 1);
-LINK(vl_gx, 2, EG_SRC_STATE_ADJOINT_OUT, 0, 0);
-LINK(vl_gt, 3, EG_SRC_STATE_ADJOINT_OUT, 1, 0);
-LINK(vl_gxn, 4, EG_SRC_STATE_ADJOINT_IN, 0, 0);
-LINK(vl_gtn, 5, EG_SRC_STATE_ADJOINT_IN, 1, 0);
-LINK(vl_x, 6, EG_SRC_TAPED, 0, 0);
-LINK(vl_a, 7, EG_SRC_PRIMAL, 5, 0);
-LINK(vl_b, 8, EG_SRC_PRIMAL, 6, 0);
-LINK(vl_x_reduced, 6, EG_SRC_TAPED, 0, 1);
-LINK(vl_x_steps, 6, EG_SRC_STEPS, -1, 0);
-LINK(vl_ga_unreduced, 0, EG_SRC_PARAM_GRAD, 5, 0);
+LINK(vl_ga, 0, PRIMAL_SLOT, GRAD, 5, 1);
+LINK(vl_gb, 1, PRIMAL_SLOT, GRAD, 6, 1);
+LINK(vl_gx, 2, PRIMAL_SLOT, ADJOINT_OUT, 0, 0);
+LINK(vl_gt, 3, PRIMAL_SLOT, ADJOINT_OUT, 1, 0);
+LINK(vl_gxn, 4, PRIMAL_SLOT, ADJOINT_IN, 0, 0);
+LINK(vl_gtn, 5, PRIMAL_SLOT, ADJOINT_IN, 1, 0);
+LINK(vl_x, 6, TAPE_ROW, VALUE, 0, 0);
+LINK(vl_a, 7, PRIMAL_SLOT, VALUE, 5, 0);
+LINK(vl_b, 8, PRIMAL_SLOT, VALUE, 6, 0);
+LINK(vl_x_reduced, 6, TAPE_ROW, VALUE, 0, 1);
+LINK(vl_x_steps, 6, STEPS, VALUE, -1, 0);
+LINK(vl_ga_unreduced, 0, PRIMAL_SLOT, GRAD, 5, 0);
+LINK(vl_x_badform, 6, TAPE_ROW, GRAD, 0, 0);   /* (TAPE_ROW, GRAD) is not a row of EG_LINK_RULES */
+LINK(nl_h1, 7, TIME_STEP, VALUE, 5, 0);
+LINK(nl_h2, 8, TIME_STEP, VALUE, 6, 0);
 static const struct eg_unit_link* const vjp_links[] = { &vl_ga, &vl_gb, &vl_gx, &vl_gt, &vl_gxn, &vl_gtn, &vl_x, &vl_a, &vl_b };
 static const struct eg_unit_link* const vjp_links_missing[] = { &vl_ga, &vl_gb, &vl_gx, &vl_gt, &vl_gxn, &vl_gtn, &vl_x, &vl_a };
 static const struct eg_unit_link* const vjp_links_twice[] = { &vl_ga, &vl_gb, &vl_gx, &vl_gt, &vl_gxn, &vl_gtn, &vl_x, &vl_a, &vl_a };
 static const struct eg_unit_link* const vjp_links_reduced[] = { &vl_ga, &vl_gb, &vl_gx, &vl_gt, &vl_gxn, &vl_gtn, &vl_x_reduced, &vl_a, &vl_b };
 static const struct eg_unit_link* const vjp_links_steps[] = { &vl_ga, &vl_gb, &vl_gx, &vl_gt, &vl_gxn, &vl_gtn, &vl_x_steps, &vl_a, &vl_b };
+static const struct eg_unit_link* const vjp_links_badform[] = { &vl_ga, &vl_gb, &vl_gx, &vl_gt, &vl_gxn, &vl_gtn, &vl_x_badform, &vl_a, &vl_b };
+static const struct eg_unit_link* const newton_links_two_steps[] = { &nl_h1, &nl_h2 };
 static const struct eg_unit_link* const vjp_links_unreduced[] = { &vl_ga_unreduced, &vl_gb, &vl_gx, &vl_gt, &vl_gxn, &vl_gtn, &vl_x, &vl_a, &vl_b };
 
 #define TWIN_DERIVED(var, of_, rows_, links_)                                                                          \
     static const struct eg_unit_derived var = { .struct_size = sizeof(struct eg_unit_derived), .role = EG_DERIVED_TAPE, \
                                                 .of_unit = of_, .tape_slot = 3, .n_taped = 2, .tape_rows = rows_,     \
-                                                .steps_slot = 0, .tape_on_slot = 9, .time0_slot = -1, .tau_slot = -1, \
-                                                .fused_steps_slot = -1, .n_links = 6, .n_refined = 0, .taped = taped, \
-                                                .links = links_, .refined = NULL }
+                                                .steps_slot = 0, .tape_on_slot = 9, .time0_slot = -1, \
+                                                .fused_steps_slot = -1, .n_links = 6, .taped = taped, \
+                                                .links = links_ }
 TWIN_DERIVED(d_twin, 0, 2, twin_links);
 TWIN_DERIVED(d_twin_of, 4, 2, twin_links);
 TWIN_DERIVED(d_twin_rows, 0, 1, twin_links);
@@ -233,15 +239,22 @@ TWIN_DERIVED(d_twin_time0, 0, 2, twin_links_time0);
 #define VJP_DERIVED(var, n_, links_)                                                                                       \
     static const struct eg_unit_derived var = { .struct_size = sizeof(struct eg_unit_derived), .role = EG_DERIVED_STEP_VJP, \
                                                 .of_unit = 0, .tape_slot = -1, .n_taped = 0, .tape_rows = 0,              \
-                                                .steps_slot = -1, .tape_on_slot = -1, .time0_slot = -1, .tau_slot = -1,   \
-                                                .fused_steps_slot = -1, .n_links = n_, .n_refined = 0, .taped = NULL,     \
-                                                .links = links_, .refined = NULL }
+                                                .steps_slot = -1, .tape_on_slot = -1, .time0_slot = -1,   \
+                                                .fused_steps_slot = -1, .n_links = n_, .taped = NULL, \
+                                                .links = links_ }
 VJP_DERIVED(d_vjp, 9, vjp_links);
 VJP_DERIVED(d_vjp_missing, 8, vjp_links_missing);
 VJP_DERIVED(d_vjp_twice, 9, vjp_links_twice);
 VJP_DERIVED(d_vjp_reduced, 9, vjp_links_reduced);
 VJP_DERIVED(d_vjp_steps, 9, vjp_links_steps);
 VJP_DERIVED(d_vjp_unreduced, 9, vjp_links_unreduced);
+VJP_DERIVED(d_vjp_badform, 9, vjp_links_badform);
+/* A Newton record with two (TIME_STEP, VALUE) links: refused at load (the cardinality is exactly one). */
+static const struct eg_unit_derived d_newton_two_steps = { .struct_size = sizeof(struct eg_unit_derived), .role = EG_DERIVED_REFINE_NEWTON,
+                                                           .of_unit = 0, .tape_slot = -1, .n_taped = 0, .tape_rows = 0,
+                                                           .steps_slot = -1, .tape_on_slot = -1, .time0_slot = -1,
+                                                           .fused_steps_slot = -1, .n_links = 2, .taped = NULL,
+                                                           .links = newton_links_two_steps };
 
 #define DIGEST(c) { c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c }
 #define UNIT(var, name_, byte, entry, body_, launch_, finish_, derived_)                                              \
@@ -265,10 +278,12 @@ UNIT(u_vjp_twice, "lin_vjp", 0xF5, "lin_vjp_host", vjp_body, launch, NULL, &d_vj
 UNIT(u_vjp_reduced, "lin_vjp", 0xF6, "lin_vjp_host", vjp_body, launch, NULL, &d_vjp_reduced);
 UNIT(u_vjp_steps, "lin_vjp", 0xF7, "lin_vjp_host", vjp_body, launch, NULL, &d_vjp_steps);
 UNIT(u_vjp_unreduced, "lin_vjp", 0xF8, "lin_vjp_host", vjp_body, launch, NULL, &d_vjp_unreduced);
+UNIT(u_vjp_badform, "lin_vjp", 0xF9, "lin_vjp_host", vjp_body, launch, NULL, &d_vjp_badform);
+UNIT(u_newton_two_steps, "lin_newton", 0xFA, "lin_vjp_host", vjp_body, launch, NULL, &d_newton_two_steps);
 
 static const struct eg_unit_meta* const units[] = { &u_lin, &u_tw1, &u_tw3, &u_tw16, &u_vjp, &u_lina, &u_tw_of, &u_tw_rows,
                                                     &u_tw_slot, &u_tw_time0, &u_vjp_missing, &u_vjp_twice, &u_vjp_reduced,
-                                                    &u_vjp_steps, &u_vjp_unreduced };
+                                                    &u_vjp_steps, &u_vjp_unreduced, &u_vjp_badform, &u_newton_two_steps };
 static const struct eg_library_meta library = { .struct_size = sizeof(struct eg_library_meta), .schema_major = EG_META_SCHEMA_MAJOR,
-                                                .schema_minor = 0, .n_units = 15, .units = units };
+                                                .schema_minor = 0, .n_units = 17, .units = units };
 const struct eg_library_meta* eg_unit_library_meta(void) { return &library; }

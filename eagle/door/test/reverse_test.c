@@ -313,11 +313,10 @@ static void lin_rows(eg_ctx* ctx, const char* lib) {
         { 0xF0, 0xE4, EG_BAD_REQUEST, "of_unit", "a twin whose of_unit is not the runner's primal" },
         { 0xF1, 0xE4, EG_BAD_REQUEST, "tape_rows", "tape_rows other than the sum of the taped rows" },
         { 0xF2, 0xE4, EG_BAD_REQUEST, "links[5].slot", "a twin link to a slot out of range" },
-        { 0xF3, 0xE4, EG_BAD_REQUEST, "EG_SRC_TIME0", "a start-copy link on a slot that is not time0_slot (EG_SRC_TIME0)" },
+        { 0xF3, 0xE4, EG_BAD_REQUEST, "(TIME0, VALUE)", "a start-copy link on a slot that is not time0_slot (TIME0, VALUE)" },
         { 0xE3, 0xF4, EG_BAD_REQUEST, "has no link", "a vjp slot with no link" },
         { 0xE3, 0xF5, EG_BAD_REQUEST, "second link", "two links on one vjp slot" },
-        { 0xE3, 0xF6, EG_BAD_REQUEST, "reduced", "reduced on a TAPED link" },
-        { 0xE3, 0xF7, EG_BAD_REQUEST, "step plane", "a step-plane source on a real slot (EG_SRC_STEPS)" },
+        { 0xE3, 0xF7, EG_BAD_REQUEST, "step plane", "a step-plane link on a real slot (STEPS, VALUE)" },
         { 0xE3, 0xF8, EG_BAD_REQUEST, "reduced", "a parameter gradient not summed over samples" },
     };
     for (size_t i = 0; i < sizeof(broken) / sizeof(broken[0]); ++i) {
@@ -330,6 +329,18 @@ static void lin_rows(eg_ctx* ctx, const char* lib) {
         check(t && v && eg_runner_new(ctx, &d, &none) == broken[i].status && reason_has(ctx, broken[i].reason), what);
         eg_unit_free(ctx, t);
         eg_unit_free(ctx, v);
+    }
+    /* records refused at eg_unit_load: a triple off the table, reduced off GRAD, two time steps on a Newton */
+    const struct { const char* name; uint8_t byte; const char* reason, *what; } at_load[] = {
+        { "lin_vjp", 0xF9, "EG_LINK_RULES", "a (TAPE_ROW, GRAD) link, a triple not in the table" },
+        { "lin_vjp", 0xF6, "only a GRAD link is reduced", "reduced on a (TAPE_ROW, VALUE) link" },
+        { "lin_newton", 0xFA, "second (TIME_STEP, VALUE)", "two TIME_STEP links on a Newton" },
+    };
+    for (size_t i = 0; i < sizeof(at_load) / sizeof(at_load[0]); ++i) {
+        eg_unit* u = load_byte(ctx, lib, at_load[i].name, at_load[i].byte);
+        snprintf(what, sizeof(what), "%s refused at load naming '%s'", at_load[i].what, at_load[i].reason);
+        check(u == NULL && reason_has(ctx, at_load[i].reason), what);
+        if (u) eg_unit_free(ctx, u);
     }
     /* a record too large for its budget, and a runner that never recorded */
     eg_runner* r = NULL;

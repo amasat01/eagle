@@ -351,33 +351,102 @@ struct eg_unit_team {
 };
 
 /* ---- derived units ------------------------------------------------------- */
+/* Unreleased: until 0.8.0 pre these records change in place (no append rule yet). */
 
-/** Where a slot of a reverse unit comes from. ``of_slot`` is a PRIMAL slot index
- *  unless stated otherwise. */
-typedef int32_t eg_derived_source;
-#define EG_SRC_PRIMAL 0            /**< the primal's slot ``of_slot``, unchanged; a PER_SAMPLE slot linked to a primal UNIFORM
-                                        is a plane eagle makes and fills with that uniform's value */
-#define EG_SRC_STATE_ADJOINT_IN 1  /**< the adjoint of state ``of_slot``, read at this step's parity */
-#define EG_SRC_STATE_ADJOINT_OUT 2 /**< the next-step adjoint of ``of_slot``, written to the other parity */
-#define EG_SRC_PARAM_GRAD 3        /**< the accumulated gradient of parameter or uniform ``of_slot`` */
-#define EG_SRC_TAPED 4             /**< the tape rows of ``of_slot`` (the state itself when it is not taped) */
-#define EG_SRC_STEPS 5             /**< a step plane: ``of_slot`` = the taping twin's ``steps_slot``, or -1 for one eagle makes only because this unit reads it;
-                                        on REFINE_NEWTON it holds the stop step's index, max(applied steps - 1, 0) */
-#define EG_SRC_EVENT 6             /**< the seed or multiplier of event ``of_slot`` (its index in the unit's event list): on a
-                                        STATE_GUARD_VJP, eagle sets it to 1 for the event that stopped the sample, else 0 */
-#define EG_SRC_TIME0 7             /**< the start copy of time plane ``of_slot``: on a taping twin, ``time0_slot``, which eagle fills at run start;
-                                        on a reverse unit, the slot holding the start copy's gradient, which eagle adds into
-                                        ``of_slot``'s gradient; on a refine unit, a read of that copy */
-#define EG_SRC_GUARD 8             /**< a refine unit's value of event ``of_slot`` at the candidate time (zero at the crossing) */
-#define EG_SRC_GUARD_DOT 9         /**< that value's derivative in the candidate time */
-#define EG_SRC_REFINED 10          /**< state ``of_slot`` at the candidate time: written by REFINE_NEWTON, read by STATE_GUARD_VJP */
-#define EG_SRC_REFINED_DOT 11      /**< that state's derivative in the candidate time (REFINE_NEWTON) */
-#define EG_SRC_TAU_SEED 12         /**< a plane eagle fills with ones: the seed of the candidate-time derivative; ``of_slot`` -1 */
-#define EG_SRC_STATE_GRAD 13       /**< STATE_GUARD_VJP: the guard's gradient in state ``of_slot`` */
-#define EG_SRC_TIME_STEP 14        /**< REFINE_NEWTON, exactly one: the length h of the ACCEPTED step (never a proposed next
-                                        step), from primal slot ``of_slot`` (a UNIFORM, which eagle fills into the plane, or a
-                                        PER_SAMPLE plane); the bound plane is always per sample. ``tau_slot`` is the located time
-                                        inside that step, in [0, h]. A refine kernel with no step slot is refused at build time */
+/** What quantity a link refers to; ``of_slot`` per value. */
+typedef int32_t eg_link_what;
+#define EG_WHAT_PRIMAL_SLOT 0 /**< primal slot ``of_slot`` (element type: that slot's) */
+#define EG_WHAT_TIME0 1       /**< the start copy of the primal time plane ``of_slot`` (the time plane's real type) */
+#define EG_WHAT_STEPS 2       /**< a step plane: ``of_slot`` = the taping twin's ``steps_slot``, or -1 for one eagle makes;
+                                   on a refine unit, the stop step's index max(applied steps - 1, 0) (an integer type) */
+#define EG_WHAT_TAU 3         /**< the candidate or located time inside the stop step, in [0, h]; ``of_slot`` -1 (the time plane's real type) */
+#define EG_WHAT_TIME_STEP 4   /**< the length h of the ACCEPTED step, never a proposed next one, from primal slot ``of_slot`` (a UNIFORM,
+                                   which eagle fills into the plane, or a PER_SAMPLE plane); always bound per sample (the time plane's
+                                   real type). A refine kernel with no step slot is refused at build time */
+#define EG_WHAT_GUARD 5       /**< guard ``of_slot`` (its index in the unit's event list), zero at the crossing (the scalar type) */
+#define EG_WHAT_TAPE_ROW 6    /**< the tape rows of primal state ``of_slot``: the pre-step state, or the state itself when it is
+                                   not taped; the reverse unit reads the same slot either way (that slot's type) */
+#define EG_WHAT_REFINED 7     /**< primal state ``of_slot`` at the candidate time (that slot's type) */
+
+/** In which form the unit holds it. */
+typedef int32_t eg_link_form;
+#define EG_FORM_VALUE 0       /**< the quantity itself, read or (an output slot) written; a PER_SAMPLE slot of a primal
+                                   UNIFORM is a plane eagle fills with that value */
+#define EG_FORM_DOT 1         /**< its derivative in the candidate time */
+#define EG_FORM_ADJOINT_IN 2  /**< the cotangent arriving at it, filled by eagle (rules below) */
+#define EG_FORM_ADJOINT_OUT 3 /**< the unit's output cotangent of it */
+#define EG_FORM_GRAD 4        /**< an accumulated gradient; ``reduced`` 1: summed over samples (rules below) */
+#define EG_FORM_SEED 5        /**< a plane eagle fills with ones (a tangent seed) */
+#define EG_FORM_DISCARD 6     /**< written by the unit, read by nobody */
+
+/**
+ * The one table of valid (role, what, form) links: ``X(role, what, form)``, bare
+ * names, one row per line. A triple not listed is refused BAD_REQUEST by eagle
+ * and by the library alike; both read these rows. Fill and sum rules eagle owns:
+ *  - (GUARD, ADJOINT_IN): 1 for the event that stopped the sample, else 0, on
+ *    STATE_GUARD_VJP; -(xbar . refined DOT) / guard DOT for the stopping event,
+ *    else 0, on REFINE_VJP (xbar: the end-state cotangent).
+ *  - (REFINED, ADJOINT_IN) on REFINE_VJP: xbar for a located sample, else 0.
+ *  - (PRIMAL_SLOT, ADJOINT_OUT) on REFINE_VJP: the pre-stop cotangent of a
+ *    located sample; the step reverse then runs one step fewer for it.
+ *  - (TIME0, GRAD): added per sample into the time plane's gradient.
+ *  - (.., GRAD) with ``reduced`` 1: the compensated pair on STEP_VJP and
+ *    FUSED_VJP (eg_reverse); one canonical sum, added to the step reverse's
+ *    sum, on REFINE_VJP.
+ * Cardinality: exactly one TIME_STEP link on REFINE_NEWTON; at most one
+ * (TIME0, VALUE) per unit, on a twin only on ``time0_slot``; ``reduced`` is 0
+ * unless the form is GRAD; a slot the unit's own meta names as eagle's (the
+ * finish counter, the active map or count) takes no link.
+ */
+#define EG_LINK_RULES(X) \
+    X(EG_DERIVED_TAPE, EG_WHAT_PRIMAL_SLOT, EG_FORM_VALUE) \
+    X(EG_DERIVED_TAPE, EG_WHAT_TIME0, EG_FORM_VALUE) \
+    X(EG_DERIVED_TAPE_FUSED, EG_WHAT_PRIMAL_SLOT, EG_FORM_VALUE) \
+    X(EG_DERIVED_TAPE_FUSED, EG_WHAT_TIME0, EG_FORM_VALUE) \
+    X(EG_DERIVED_STEP_VJP, EG_WHAT_PRIMAL_SLOT, EG_FORM_VALUE) \
+    X(EG_DERIVED_STEP_VJP, EG_WHAT_PRIMAL_SLOT, EG_FORM_ADJOINT_IN) \
+    X(EG_DERIVED_STEP_VJP, EG_WHAT_PRIMAL_SLOT, EG_FORM_ADJOINT_OUT) \
+    X(EG_DERIVED_STEP_VJP, EG_WHAT_PRIMAL_SLOT, EG_FORM_GRAD) \
+    X(EG_DERIVED_STEP_VJP, EG_WHAT_TAPE_ROW, EG_FORM_VALUE) \
+    X(EG_DERIVED_STEP_VJP, EG_WHAT_STEPS, EG_FORM_VALUE) \
+    X(EG_DERIVED_STEP_VJP, EG_WHAT_TIME0, EG_FORM_GRAD) \
+    X(EG_DERIVED_FUSED_VJP, EG_WHAT_PRIMAL_SLOT, EG_FORM_VALUE) \
+    X(EG_DERIVED_FUSED_VJP, EG_WHAT_PRIMAL_SLOT, EG_FORM_ADJOINT_IN) \
+    X(EG_DERIVED_FUSED_VJP, EG_WHAT_PRIMAL_SLOT, EG_FORM_ADJOINT_OUT) \
+    X(EG_DERIVED_FUSED_VJP, EG_WHAT_PRIMAL_SLOT, EG_FORM_GRAD) \
+    X(EG_DERIVED_FUSED_VJP, EG_WHAT_TAPE_ROW, EG_FORM_VALUE) \
+    X(EG_DERIVED_FUSED_VJP, EG_WHAT_STEPS, EG_FORM_VALUE) \
+    X(EG_DERIVED_FUSED_VJP, EG_WHAT_TIME0, EG_FORM_GRAD) \
+    X(EG_DERIVED_REFINE_NEWTON, EG_WHAT_PRIMAL_SLOT, EG_FORM_VALUE) \
+    X(EG_DERIVED_REFINE_NEWTON, EG_WHAT_TAPE_ROW, EG_FORM_VALUE) \
+    X(EG_DERIVED_REFINE_NEWTON, EG_WHAT_STEPS, EG_FORM_VALUE) \
+    X(EG_DERIVED_REFINE_NEWTON, EG_WHAT_TIME0, EG_FORM_VALUE) \
+    X(EG_DERIVED_REFINE_NEWTON, EG_WHAT_TIME_STEP, EG_FORM_VALUE) \
+    X(EG_DERIVED_REFINE_NEWTON, EG_WHAT_TAU, EG_FORM_VALUE) \
+    X(EG_DERIVED_REFINE_NEWTON, EG_WHAT_TAU, EG_FORM_SEED) \
+    X(EG_DERIVED_REFINE_NEWTON, EG_WHAT_GUARD, EG_FORM_VALUE) \
+    X(EG_DERIVED_REFINE_NEWTON, EG_WHAT_GUARD, EG_FORM_DOT) \
+    X(EG_DERIVED_REFINE_NEWTON, EG_WHAT_REFINED, EG_FORM_VALUE) \
+    X(EG_DERIVED_REFINE_NEWTON, EG_WHAT_REFINED, EG_FORM_DOT) \
+    X(EG_DERIVED_STATE_GUARD_VJP, EG_WHAT_PRIMAL_SLOT, EG_FORM_VALUE) \
+    X(EG_DERIVED_STATE_GUARD_VJP, EG_WHAT_REFINED, EG_FORM_VALUE) \
+    X(EG_DERIVED_STATE_GUARD_VJP, EG_WHAT_GUARD, EG_FORM_ADJOINT_IN) \
+    X(EG_DERIVED_STATE_GUARD_VJP, EG_WHAT_REFINED, EG_FORM_ADJOINT_OUT) \
+    X(EG_DERIVED_STATE_GUARD_VJP, EG_WHAT_PRIMAL_SLOT, EG_FORM_GRAD) \
+    X(EG_DERIVED_STATE_GUARD_VJP, EG_WHAT_PRIMAL_SLOT, EG_FORM_DISCARD) \
+    X(EG_DERIVED_REFINE_VJP, EG_WHAT_PRIMAL_SLOT, EG_FORM_VALUE) \
+    X(EG_DERIVED_REFINE_VJP, EG_WHAT_TAPE_ROW, EG_FORM_VALUE) \
+    X(EG_DERIVED_REFINE_VJP, EG_WHAT_STEPS, EG_FORM_VALUE) \
+    X(EG_DERIVED_REFINE_VJP, EG_WHAT_TIME0, EG_FORM_VALUE) \
+    X(EG_DERIVED_REFINE_VJP, EG_WHAT_TIME0, EG_FORM_GRAD) \
+    X(EG_DERIVED_REFINE_VJP, EG_WHAT_TIME_STEP, EG_FORM_VALUE) \
+    X(EG_DERIVED_REFINE_VJP, EG_WHAT_TIME_STEP, EG_FORM_GRAD) \
+    X(EG_DERIVED_REFINE_VJP, EG_WHAT_TAU, EG_FORM_VALUE) \
+    X(EG_DERIVED_REFINE_VJP, EG_WHAT_TAU, EG_FORM_DISCARD) \
+    X(EG_DERIVED_REFINE_VJP, EG_WHAT_GUARD, EG_FORM_ADJOINT_IN) \
+    X(EG_DERIVED_REFINE_VJP, EG_WHAT_REFINED, EG_FORM_ADJOINT_IN) \
+    X(EG_DERIVED_REFINE_VJP, EG_WHAT_PRIMAL_SLOT, EG_FORM_ADJOINT_OUT) \
+    X(EG_DERIVED_REFINE_VJP, EG_WHAT_PRIMAL_SLOT, EG_FORM_GRAD)
 
 /** One taped plane: rows [row0, row0 + rows) of the tape hold primal slot ``slot``. */
 struct eg_unit_taped {
@@ -385,29 +454,23 @@ struct eg_unit_taped {
     int32_t slot, row0, rows;
 };
 
-/** One slot of a derived unit and its source. */
+/** One slot of a derived unit: what it refers to and in which form. */
 struct eg_unit_link {
     uint32_t struct_size;
     int32_t slot;             /**< in THIS unit */
-    eg_derived_source source;
-    int32_t of_slot;          /**< see eg_derived_source */
-    uint32_t reduced;         /**< PARAM_GRAD only: 1 when the per-sample term is summed over samples
-                                   (eg_reverse); 0 for a per-sample parameter's gradient */
-};
-
-/** Events refine: the refined plane of a primal state. */
-struct eg_unit_refined {
-    uint32_t struct_size;
-    int32_t state_slot;       /**< in the primal */
-    int32_t refined_slot;     /**< in THIS unit */
+    eg_link_what what;
+    int32_t of_slot;          /**< see eg_link_what */
+    uint32_t reduced;         /**< GRAD only: 1 when summed over samples (eg_reverse); 0 for a per-sample gradient */
+    eg_link_form form;
 };
 
 /** What a derived unit is to its primal (eg_unit_meta.derived). In 0.8.0 the
  *  caller states these facts and the library range-checks them; eagle checks
- *  the role against the runner's need, every index and ``of_unit``. Slots are
- *  in THIS unit unless stated; -1: absent. A taping twin builds its record
- *  window into its code: the tape slot's declared rows are window * tape_rows,
- *  and eg_runner_new refuses another ``window`` (0 included) BAD_REQUEST. */
+ *  the role against the runner's need, every index, ``of_unit`` and every link
+ *  against EG_LINK_RULES. Slots are in THIS unit unless stated; -1: absent. A
+ *  taping twin builds its record window into its code: the tape slot's declared
+ *  rows are window * tape_rows, and eg_runner_new refuses another ``window``
+ *  (0 included) BAD_REQUEST; a recorded refine run takes window 1 only. */
 struct eg_unit_derived {
     uint32_t struct_size;
     eg_derived_role role;     /**< EG_DERIVED_* (eg_door.h) */
@@ -418,15 +481,13 @@ struct eg_unit_derived {
     int32_t steps_slot;       /**< applied steps, int64 per sample */
     int32_t tape_on_slot;
     int32_t time0_slot;       /**< the time plane's start copy */
-    int32_t tau_slot;         /**< events refine: the candidate time inside the stop step, in [0, h] (EG_SRC_TIME_STEP) */
-    int32_t fused_steps_slot; /**< a fused unit: the int64 word of steps this launch fuses, set by the runner */
+    int32_t fused_steps_slot; /**< the int64 word of steps a fused launch fuses, set by the runner, on any derived unit
+                                   that reads one (the K-step twin; the K-step reverse unit if it reads one) */
     int32_t n_links;
-    int32_t n_refined;
     int32_t reserved0;
     const struct eg_unit_taped* const* taped;
-    const struct eg_unit_link* const* links;     /**< a reverse unit: one per slot. A taping twin: EG_SRC_PRIMAL for each
-                                                      ordinary slot, EG_SRC_TIME0 on ``time0_slot``, none on the other reserved slots */
-    const struct eg_unit_refined* const* refined; /**< unused: n_refined must be 0 (EG_SRC_REFINED links state it); removed at the next schema major */
+    const struct eg_unit_link* const* links;     /**< every slot of a reverse or refine unit; on a taping twin each ordinary
+                                                      slot, none on its other reserved slots */
 };
 
 #ifdef __cplusplus

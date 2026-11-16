@@ -589,7 +589,7 @@ eg_status eg_run_events(eg_ctx* ctx, eg_runner* runner, eg_plane* t_stop, eg_pla
  * ``grads`` binds the caller's gradient planes by slot (overwritten).
  * Both use the PRIMAL unit's slot indices: a seed on a state output, a grad on
  * a state input or a parameter. Eagle maps them to the derived units through
- * their links (eg_unit_derived). A PARAM_GRAD link with ``reduced`` 1 is
+ * their links (eg_unit_derived). A (PRIMAL_SLOT, GRAD) link with ``reduced`` 1 is
  * summed over samples in SAMPLE order (gathered back after a reordering run)
  * with the canonical ordered tree of leaf 4096, always as a compensated pair
  * (sum, compensation); the sum lands in the caller's plane of one value. When
