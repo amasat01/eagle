@@ -6,7 +6,11 @@
  * path's on the same inputs. Beside the oracle: a second record and reverse on the same runner repeats it, and what a
  * device record does not run yet is refused by name.
  *
- * usage: device_reverse_test <library> <oracle dir> <primal digest> <twin digest> <vjp digest> <primal name> <window>
+ * With an active set (<every> <n>, and <theta>: EG_RUN_REORDER over n >= 4096 samples) the same unit, with its mask in slot 7,
+ * compacts every <every> steps on the device (and reorders the planes it owns, eagle's applied-steps plane among them): the
+ * states, report and gradients, the reordered run's gathered back to sample order, equal the old device path's.
+ *
+ * usage: device_reverse_test <library> <oracle dir> <primal digest> <twin digest> <vjp digest> <primal name> <window> [<every> <n> [<theta>]]
  * oracle dir: x0, v0, tf, end_{x,v,t}, grad_{x,v,t,c,dt}, steps and run (steps, launches) .bin.
  */
 #define _POSIX_C_SOURCE 200809L
@@ -19,7 +23,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define N 64
+#define PMAX 4096
 #define STEPS 400
 
 /* Device planes made from host values; freed together. */
@@ -85,29 +89,32 @@ static struct eg_bind_desc binds(int32_t n_planes, const int32_t* slots, eg_plan
     return d;
 }
 
-static double x0[N], v0[N], tf[N], ex[N], ev[N], et[N], gx[N], gv[N], gt[N], gc, gdt;
+static double x0[PMAX], v0[PMAX], tf[PMAX], ex[PMAX], ev[PMAX], et[PMAX], gx[PMAX], gv[PMAX], gt[PMAX], gc, gdt;
 static int64_t run_ref[2];
+static int64_t N = 64;                                   /* the samples */
+static int32_t mask_slot = 5, c_slot = 6, dt_slot = 7;   /* the primal's slots: with an active set 7, 8 and 9 */
+static double theta = 0.0;                               /* EG_RUN_REORDER's threshold, 0: none */
 
 /* One record (states and report against the oracle) and its reverse (gradients against the oracle); @p seed_host: the
  * seeds are host planes, refused by name. */
 static void record_and_reverse(eg_ctx* ctx, eg_runner* r, const struct dplanes* s, const char* what0, int seed_host) {
-    static const double zeros[N];
-    static const uint8_t none[N];
+    static const double zeros[PMAX];
+    static const uint8_t none[PMAX];
     char what[320];
-    int ok = dput(s, 0, zeros, sizeof(zeros)) && dput(s, 1, v0, sizeof(v0)) && dput(s, 2, x0, sizeof(x0)) && dput(s, 4, none, sizeof(none));
+    int ok = dput(s, 0, zeros, (size_t)N * 8) && dput(s, 1, v0, (size_t)N * 8) && dput(s, 2, x0, (size_t)N * 8) && dput(s, 4, none, (size_t)N);
     struct eg_run_report rep;
     memset(&rep, 0, sizeof(rep));
     rep.struct_size = sizeof(rep);
     ok = ok && eg_run(ctx, r, &rep) == EG_OK;
-    static double x[N], v[N], t[N];
-    ok = ok && dget(s, 0, t, sizeof(t)) && dget(s, 1, v, sizeof(v)) && dget(s, 2, x, sizeof(x));
+    static double x[PMAX], v[PMAX], t[PMAX];
+    ok = ok && dget(s, 0, t, (size_t)N * 8) && dget(s, 1, v, (size_t)N * 8) && dget(s, 2, x, (size_t)N * 8);
     int s_ok = ok && rep.steps == run_ref[0] && rep.launches == run_ref[1] && rep.finished == N && (rep.flags & EG_REPORT_DONE) &&
-               rep.mode == EG_MODE_BAND;
+               rep.mode == EG_MODE_BAND && (theta == 0.0 || rep.reorders > 0);
     for (int i = 0; s_ok && i < N; ++i) s_ok = memcmp(&x[i], &ex[i], 8) == 0 && memcmp(&v[i], &ev[i], 8) == 0 && memcmp(&t[i], &et[i], 8) == 0;
     snprintf(what, sizeof(what), "%s: the recorded run's states equal the old device path's bitwise (%lld steps, %lld launches, "
              "%lld finished)", what0, (long long)rep.steps, (long long)rep.launches, (long long)rep.finished);
     check(s_ok, what);
-    static double sx[N], sv[N], ox[N], ov[N], ot[N];
+    static double sx[PMAX], sv[PMAX], ox[PMAX], ov[PMAX], ot[PMAX];
     double oc = 0.0, odt = 0.0;
     for (int i = 0; i < N; ++i) {
         sx[i] = 1.0;
@@ -129,7 +136,7 @@ static void record_and_reverse(eg_ctx* ctx, eg_runner* r, const struct dplanes* 
     }
     eg_plane* const gp[5] = { dplane(ctx, &g, ox, N, kDLFloat, 64), dplane(ctx, &g, ov, N, kDLFloat, 64), dplane(ctx, &g, ot, N, kDLFloat, 64),
                               dplane(ctx, &g, &oc, 1, kDLFloat, 64), dplane(ctx, &g, &odt, 1, kDLFloat, 64) };
-    const int32_t sslot[2] = { 2, 1 }, gslot[5] = { 2, 1, 0, 6, 7 };
+    const int32_t sslot[2] = { 2, 1 }, gslot[5] = { 2, 1, 0, c_slot, dt_slot };
     const struct eg_bind_desc sd = binds(2, sslot, sp, 0, NULL, NULL), gd = binds(5, gslot, gp, 0, NULL, NULL);
     const int base = seed_host ? 0 : 2;
     if (seed_host) {
@@ -140,8 +147,8 @@ static void record_and_reverse(eg_ctx* ctx, eg_runner* r, const struct dplanes* 
         dfree(ctx, &g);
         return;
     }
-    const int rok = ok && eg_reverse(ctx, r, &sd, &gd) == EG_OK && dget(&g, base, ox, sizeof(ox)) && dget(&g, base + 1, ov, sizeof(ov)) &&
-                    dget(&g, base + 2, ot, sizeof(ot)) && dget(&g, base + 3, &oc, sizeof(oc)) && dget(&g, base + 4, &odt, sizeof(odt));
+    const int rok = ok && eg_reverse(ctx, r, &sd, &gd) == EG_OK && dget(&g, base, ox, (size_t)N * 8) && dget(&g, base + 1, ov, (size_t)N * 8) &&
+                    dget(&g, base + 2, ot, (size_t)N * 8) && dget(&g, base + 3, &oc, sizeof(oc)) && dget(&g, base + 4, &odt, sizeof(odt));
     int g_ok = rok && memcmp(&oc, &gc, sizeof(gc)) == 0 && memcmp(&odt, &gdt, sizeof(gdt)) == 0;
     for (int i = 0; g_ok && i < N; ++i) g_ok = memcmp(&ox[i], &gx[i], 8) == 0 && memcmp(&ov[i], &gv[i], 8) == 0 && memcmp(&ot[i], &gt[i], 8) == 0;
     snprintf(what, sizeof(what), "%s: eg_reverse's gradients (x, v, t per sample; c, dt summed) equal the old device path's "
@@ -151,20 +158,27 @@ static void record_and_reverse(eg_ctx* ctx, eg_runner* r, const struct dplanes* 
 }
 
 int main(int argc, char** argv) {
-    if (argc != 8) {
-        fprintf(stderr, "usage: %s <library> <oracle dir> <primal digest> <twin digest> <vjp digest> <primal name> <window>\n", argv[0]);
+    if (argc != 8 && argc != 10 && argc != 11) {
+        fprintf(stderr, "usage: %s <library> <oracle dir> <primal digest> <twin digest> <vjp digest> <primal name> <window> [<every> <n> [<theta>]]\n", argv[0]);
         return 2;
     }
     const char *lib = argv[1], *dir = argv[2], *base = argv[6];
-    const long window = atol(argv[7]);
+    const long window = atol(argv[7]), every = argc >= 10 ? atol(argv[8]) : 0;
+    if (argc >= 10) {
+        N = atol(argv[9]);
+        mask_slot = 7;
+        c_slot = 8;
+        dt_slot = 9;
+    }
+    if (argc == 11) theta = atof(argv[10]);
     uint8_t dg[3][EG_DIGEST_BYTES];
-    int64_t steps[N];
+    static int64_t steps[PMAX];
     if (!parse_digest(argv[3], dg[0]) || !parse_digest(argv[4], dg[1]) || !parse_digest(argv[5], dg[2]) ||
-        !read_file(dir, "x0.bin", x0, sizeof(x0)) || !read_file(dir, "v0.bin", v0, sizeof(v0)) || !read_file(dir, "tf.bin", tf, sizeof(tf)) ||
-        !read_file(dir, "end_x.bin", ex, sizeof(ex)) || !read_file(dir, "end_v.bin", ev, sizeof(ev)) || !read_file(dir, "end_t.bin", et, sizeof(et)) ||
-        !read_file(dir, "grad_x.bin", gx, sizeof(gx)) || !read_file(dir, "grad_v.bin", gv, sizeof(gv)) || !read_file(dir, "grad_t.bin", gt, sizeof(gt)) ||
+        !read_file(dir, "x0.bin", x0, (size_t)N * 8) || !read_file(dir, "v0.bin", v0, (size_t)N * 8) || !read_file(dir, "tf.bin", tf, (size_t)N * 8) ||
+        !read_file(dir, "end_x.bin", ex, (size_t)N * 8) || !read_file(dir, "end_v.bin", ev, (size_t)N * 8) || !read_file(dir, "end_t.bin", et, (size_t)N * 8) ||
+        !read_file(dir, "grad_x.bin", gx, (size_t)N * 8) || !read_file(dir, "grad_v.bin", gv, (size_t)N * 8) || !read_file(dir, "grad_t.bin", gt, (size_t)N * 8) ||
         !read_file(dir, "grad_c.bin", &gc, sizeof(gc)) || !read_file(dir, "grad_dt.bin", &gdt, sizeof(gdt)) ||
-        !read_file(dir, "steps.bin", steps, sizeof(steps)) || !read_file(dir, "run.bin", run_ref, sizeof(run_ref))) {
+        !read_file(dir, "steps.bin", steps, (size_t)N * 8) || !read_file(dir, "run.bin", run_ref, sizeof(run_ref))) {
         fprintf(stderr, "digests or oracle files missing in %s\n", dir);
         return 2;
     }
@@ -184,13 +198,13 @@ int main(int argc, char** argv) {
     snprintf(what, sizeof(what), "%s: the primal, its taping twin and its step vjp load (PTX images) on the device context", base);
     check(p && units[0] && units[1], what);
     if (p && units[0] && units[1]) {
-        static const double zeros[N];
-        static const uint8_t none[N];
+        static const double zeros[PMAX];
+        static const uint8_t none[PMAX];
         struct dplanes s = { .k = 0 };
         eg_plane* const planes[5] = { dplane(ctx, &s, zeros, N, kDLFloat, 64), dplane(ctx, &s, v0, N, kDLFloat, 64),
                                       dplane(ctx, &s, x0, N, kDLFloat, 64), dplane(ctx, &s, tf, N, kDLFloat, 64),
                                       dplane(ctx, &s, none, N, kDLBool, 8) };
-        const int32_t slots[5] = { 0, 1, 2, 3, 5 }, us[2] = { 6, 7 };
+        const int32_t slots[5] = { 0, 1, 2, 3, mask_slot }, us[2] = { c_slot, dt_slot };
         const double c = 0.3, dt = 0.01;
         const void* const uv[2] = { &c, &dt };
         const struct eg_bind_desc bd = binds(5, slots, planes, 2, us, uv);
@@ -210,6 +224,11 @@ int main(int argc, char** argv) {
         d.derived_roles = roles;
         d.derived_units = derived;
         d.window = window;
+        d.every = every;
+        if (theta > 0.0) {
+            d.flags |= EG_RUN_REORDER;
+            d.reorder_theta = theta;
+        }
         eg_runner* r = NULL;
         const int ok = planes[4] && eg_plan_new(ctx, &pd, &plan) == EG_OK && eg_bind(ctx, plan, &bd) == EG_OK && eg_runner_new(ctx, &d, &r) == EG_OK;
         snprintf(what, sizeof(what), "%s: eg_runner_new with EG_RUN_RECORD over a DEVICE plan (window %ld)", base, window);
@@ -221,6 +240,8 @@ int main(int argc, char** argv) {
             }
             snprintf(what, sizeof(what), "%s device window %ld", base, window);
             record_and_reverse(ctx, r, &s, what, 1);
+            check(eg_runner_free(ctx, r) == EG_OK, "eg_runner_free of the recorded device runner (a record left live)");
+            /* a freed runner no longer holds the plan's active set: the refusals below are the request's own */
             eg_runner* none_r = NULL;
             struct eg_runner_desc bad = d;
             const eg_derived_role fused_roles[2] = { EG_DERIVED_TAPE_FUSED, EG_DERIVED_STEP_VJP };
@@ -232,7 +253,6 @@ int main(int argc, char** argv) {
             bad.n_derived = 3;
             check(eg_runner_new(ctx, &bad, &none_r) == EG_NOT_WRITTEN && reason_has(ctx, "steps_reverse FUSED on a device") && none_r == NULL,
                   "device record: steps_reverse FUSED refused NOT_WRITTEN by name");
-            check(eg_runner_free(ctx, r) == EG_OK, "eg_runner_free of the recorded device runner (a record left live)");
         }
         if (plan) eg_plan_free(ctx, plan);
         dfree(ctx, &s);

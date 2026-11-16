@@ -600,9 +600,7 @@ void record_new(eg_ctx& ctx, eg_runner_s& runner, const eg_runner_desc& d) {
     bool fused = false;
     for (std::int32_t i = 0; i < d.n_derived && d.derived_roles != nullptr; ++i) fused = fused || d.derived_roles[i] == EG_DERIVED_TAPE_FUSED;
     if (fused && ev) refuse(EG_NOT_WRITTEN, "events refine with the K-step twin is not written in this build of the door");
-    if (runner.dev.ctx != nullptr) {   // a DEVICE record: the plain one-step run; the rest by name
-        if (runner.active)
-            refuse(EG_NOT_WRITTEN, "EG_RUN_RECORD with an active set on a device is not written in this build of the door");
+    if (runner.dev.ctx != nullptr) {   // a DEVICE record: the one-step run, its active set included; the rest by name
         if (fused)
             refuse(EG_NOT_WRITTEN, "EG_RUN_RECORD with the K-step twin (EG_DERIVED_TAPE_FUSED) on a device is not written in "
                    "this build of the door");
@@ -1105,8 +1103,10 @@ void record_forward(eg_ctx& ctx, eg_runner_s& runner, eg_run_report* report) {
         else if (s == t.tape_slot) bind_raw(fwd, s, refine ? r.tape.data() : r.dummy.data(), static_cast<std::uint64_t>(n));
         else if (s == t.tape_on_slot) bind_int64(fwd, s, refine ? 1 : 0);
         else if (r.fused && s == t.fused_steps_slot) bind_raw(fwd, s, r.fword.data(), 1);
-        else if (s == r.twin_unit->active_map_slot) bind_raw(fwd, s, runner.act.map.data(), static_cast<std::uint64_t>(n));
-        else if (s == r.twin_unit->active_count_slot) bind_raw(fwd, s, &runner.act.count, 1);
+        else if (s == r.twin_unit->active_map_slot)
+            bind_raw(fwd, s, D != nullptr ? reinterpret_cast<void*>(runner.dev.map) : static_cast<void*>(runner.act.map.data()), static_cast<std::uint64_t>(n));
+        else if (s == r.twin_unit->active_count_slot)
+            bind_raw(fwd, s, D != nullptr ? reinterpret_cast<void*>(runner.dev.cells + 3 * sizeof(unsigned)) : static_cast<void*>(&runner.act.count), 1);
         else if (r.twin_unit->slots[i].role == EG_ROLE_NSAMPLES || (r.twin_unit->finish.present && s == r.twin_unit->finish.counter_slot)) continue;
         else if (const Carried* made = made_plane(r, s)) bind_raw(fwd, s, made->src, static_cast<std::uint64_t>(n));
         else {
@@ -1145,8 +1145,12 @@ void record_forward(eg_ctx& ctx, eg_runner_s& runner, eg_run_report* report) {
     ActiveState& act = runner.act;
     const std::int64_t compactions0 = act.compactions, reorders0 = act.reorders;
     if (runner.active) {   // the map follows the mask from the first launch (the plain loop's compaction)
-        active_compact(act, mask, mb);
-        act.done_at_last = set;
+        if (D != nullptr) {
+            device_active_compact(*D, runner, mask, owned, false);
+        } else {
+            active_compact(act, mask, mb);
+            act.done_at_last = set;
+        }
     }
     r.steps.zero();
     r.taken = 0;
@@ -1173,24 +1177,37 @@ void record_forward(eg_ctx& ctx, eg_runner_s& runner, eg_run_report* report) {
                            static_cast<std::size_t>(r.state[i].rows * n) * r.state[i].bytes);
             if (reordering) {
                 if (k == static_cast<std::int64_t>(r.epochs.size())) r.epochs.emplace_back();
-                r.epochs[static_cast<std::size_t>(k)] = runner.act.inv;
+                std::vector<std::int32_t>& inv = r.epochs[static_cast<std::size_t>(k)];
+                if (D != nullptr) {   // the device's sample -> slot map, read back at the checkpoint
+                    inv.resize(static_cast<std::size_t>(n));
+                    device_read(*D, reinterpret_cast<const void*>(runner.dev.inv), inv.data(), static_cast<std::size_t>(n) * sizeof(std::int32_t));
+                } else {
+                    inv = runner.act.inv;
+                }
             }
             r.taken = k + 1;
         },
         [&](std::int64_t j, std::int64_t k) {
-            const std::int64_t live = runner.active ? static_cast<std::int64_t>(act.count) : n;
+            const std::int64_t live = runner.active && D == nullptr ? static_cast<std::int64_t>(act.count) : n;   // a device launch covers all n: the kernel reads the count itself
             if (r.fused) std::memcpy(r.fword.data(), &k, sizeof(k));
             ++launches;
             if (live > 0) run_on(fwd, threads, live, n);
             at = j + k;
             if (runner.active && (j + k) % act.every_steps == 0) {
-                active_compact(act, mask, mb);
                 ++act.compactions;
-                act.done_at_last = fwd.finished;
-                if (reordering && act.fire) active_reorder(act, owned);
+                if (D != nullptr) {
+                    device_active_compact(*D, runner, mask, owned, reordering);
+                } else {
+                    active_compact(act, mask, mb);
+                    act.done_at_last = fwd.finished;
+                    if (reordering && act.fire) active_reorder(act, owned);
+                }
             }
         });
-    if (reordering && act.reorders != act.restored_at) active_restore(act, owned);   // the planes land in sample order
+    if (reordering && act.reorders != act.restored_at) {   // the planes land in sample order
+        if (D != nullptr) device_active_restore(*D, runner, mask, owned);
+        else active_restore(act, owned);
+    }
     if (D != nullptr) {   // the twin counted on the device: the primal's counter follows
         device_read(*D, reinterpret_cast<const void*>(fwd.device_counter), &fwd.finished, sizeof(fwd.finished));
         copy_bytes(D, reinterpret_cast<void*>(primal.device_counter), reinterpret_cast<const void*>(fwd.device_counter), sizeof(fwd.finished));
@@ -1463,9 +1480,15 @@ void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, con
     std::vector<std::int32_t> identity(static_cast<std::size_t>(std::max<std::int64_t>(m, 1)));
     for (std::size_t i = 0; i < identity.size(); ++i) identity[i] = static_cast<std::int32_t>(i);
     std::uint32_t rec_count = 0;
+    Buf dmap, dcount;   // a DEVICE reverse's identity map and live-count cell
     if (r.twin_unit->active_map_slot >= 0) {
-        bind_raw(rec, r.twin_unit->active_map_slot, identity.data(), static_cast<std::uint64_t>(m));
-        bind_raw(rec, r.twin_unit->active_count_slot, &rec_count, 1);
+        if (D != nullptr) {
+            dmap.resize(identity.size() * sizeof(std::int32_t), D);
+            device_write(*D, dmap.data(), identity.data(), identity.size() * sizeof(std::int32_t));
+            dcount.resize(sizeof(rec_count), D);
+        }
+        bind_raw(rec, r.twin_unit->active_map_slot, D != nullptr ? dmap.data() : reinterpret_cast<char*>(identity.data()), static_cast<std::uint64_t>(m));
+        bind_raw(rec, r.twin_unit->active_count_slot, D != nullptr ? dcount.data() : reinterpret_cast<char*>(&rec_count), 1);
     }
     for (const DerivedFacts::Link& l : t.links)
         if (r.twin_unit->slots[static_cast<std::size_t>(l.slot)].role == EG_ROLE_UNIFORM)
@@ -1528,7 +1551,7 @@ void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, con
     }
     const std::int64_t* all_steps = !extra.steps.empty() ? extra.steps.data() : D != nullptr ? device_steps.data()
                                                                                             : reinterpret_cast<const std::int64_t*>(r.steps.data());
-    Buf dcols, dorder;   // a DEVICE reverse's gather index and sample order
+    Buf dcols, dorder, dslots;   // a DEVICE reverse's gather index, sample order and per-checkpoint slots
     const int threads = host::team_threads(ctx);
     for (std::int64_t s0 = 0; s0 < n; s0 += m) {
         const std::int64_t cnt = std::min(m, n - s0);
@@ -1561,6 +1584,11 @@ void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, con
                         slots.resize(static_cast<std::size_t>(count));
                         for (std::int64_t i = 0; i < count; ++i) slots[static_cast<std::size_t>(i)] = inv[static_cast<std::size_t>(cols[static_cast<std::size_t>(i)])];
                         from = slots.data();
+                        if (D != nullptr) {   // the slots as a device gather index
+                            dslots.resize(static_cast<std::size_t>(std::max<std::int64_t>(count, 1)) * 8, D);
+                            device_write(*D, dslots.data(), slots.data(), static_cast<std::size_t>(count) * 8);
+                            from = reinterpret_cast<const std::int64_t*>(dslots.data());
+                        }
                     }
                     for (std::size_t i = 0; i < r.state.size(); ++i)
                         gather(D, r.state[i].buf.data(), m, r.pool[static_cast<std::size_t>(k)][i].data(), n, from, count,
@@ -1572,6 +1600,7 @@ void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, con
                         const std::int64_t k = r.fused ? std::min(r.max_k, c + len - j) : 1;   // the forward's launch shape, never across a window
                         if (r.fused) std::memcpy(rword.data(), &k, sizeof(k));
                         rec_count = static_cast<std::uint32_t>(live[static_cast<std::size_t>(j)]);
+                        if (D != nullptr && r.twin_unit->active_map_slot >= 0) device_write(*D, dcount.data(), &rec_count, sizeof(rec_count));
                         run_on(rec, threads, live[static_cast<std::size_t>(j)], m);
                         j += k;
                     }

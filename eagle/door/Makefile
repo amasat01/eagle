@@ -415,7 +415,7 @@ $(foreach u,$(PAIR_DEVICE_UNITS),$(eval $(call PAIR_DEVICE_RULES,$(u))))
 
 # pair-device-reverse: a recorded run and its reverse on the device, rr_pend and _timed: per unit one library of the old device
 # run's own images (PTX_<unit>, PTX_<unit>_tape, PTX_<unit>_step_vjp: the PTX it loaded) with the host meta (META_reverse,
-# META_timed) whose image fields name them; run $(OUT)/device_reverse_test <library> <oracle dir> <3 digests> <primal> <window>
+# META_timed) whose image fields name them (act: _pend_body, the active-set step: compacting every 4 and 16 steps, and reordering 4096 samples); run $(OUT)/device_reverse_test <library> <oracle dir> <3 digests> <primal> <window>
 # through the GPU pool against the old device run's states, report and gradients.
 cuda_meta = sed 's/M(host_entry, "\([A-Za-z0-9_]*\)_host"), M(device_image, NULL), M(device_function, NULL)\(.*\)EG_IMAGE_NONE\(.*\)M(device_image_size, NULL)/M(host_entry, NULL), M(device_image, "\1__image"), M(device_function, "\1")\2EG_IMAGE_PTX\3M(device_image_size, "\1__image_size")/' $(1) > $(2)
 define DEV_REV_RULES
@@ -432,7 +432,8 @@ $(OUT)/libpair_dev_rev_$(1).so: $$(PTX_$(1)) $$(PTX_$(1)_tape) $$(PTX_$(1)_step_
 endef
 $(eval $(call DEV_REV_RULES,rr_pend,reverse,rr_pend))
 $(eval $(call DEV_REV_RULES,timed,timed,_timed))
-pair-device-reverse: symbols $(OUT)/libpair_dev_rev_rr_pend.so $(OUT)/libpair_dev_rev_timed.so $(DEVICE_REVERSE_TEST)
+$(eval $(call DEV_REV_RULES,act,act,_pend_body))
+pair-device-reverse: symbols $(OUT)/libpair_dev_rev_rr_pend.so $(OUT)/libpair_dev_rev_timed.so $(OUT)/libpair_dev_rev_act.so $(DEVICE_REVERSE_TEST)
 
 # pair-refine-pend, pair-refine-reverse-pend: the pendulum (ev_pend, the old path's second event model, a 0.05, c 0.2) over its own
 # library (META_pend) with the same two tests; ORACLE_pend (plain refine run), ORACLE_pendrr (the reverse's gradients).

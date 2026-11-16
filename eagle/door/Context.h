@@ -247,6 +247,7 @@ struct DeviceRun {
     DeviceLoop* loop = nullptr;               ///< captured at the first eg_run
     std::uint64_t cells = 0;                  ///< device [remaining, ran, total, live count, finished at last compaction, compactions] (uint32)
     std::uint64_t perm = 0, inv = 0, rcells = 0, rscratch = 0;   ///< a reordering set's permutation, [live32, span, fire, reorders, zero] and scratch
+    std::size_t rscratch_bytes = 0;           ///< the bytes rscratch holds (a recorded run grows it for its own planes)
     std::uint64_t map = 0, scratch = 0;       ///< an active set's device live-slot map (int32) and its compaction scratch
     double build_s = 0.0;                     ///< the capture's wall
     int mode = EG_MODE_BAND;                  ///< steps AUTO: EG_MODE_FUSED_ONE or EG_MODE_PERSIST (no graph)
@@ -488,6 +489,12 @@ void device_launch_prefix(eg_plan_s& plan, std::int64_t count, std::int64_t of);
 void device_mask_count(eg_ctx& ctx, const void* mask, std::int64_t n, unsigned width, std::uint64_t counter);
 void device_pair_sum(eg_ctx& ctx, bool f64, const void* in, std::int64_t n, void* hi, void* comp);
 std::int64_t device_free_bytes(eg_ctx& ctx);
+/** @brief A recorded DEVICE run's active set (device/Device.cpp): queue the compaction of @p mask into the runner's device map and
+ *  count (the reorder trigger too, for a reordering set); with @p reorder and a fired trigger, the reorder of @p owned (the
+ *  mask first) and its count; returns whether it reordered. */
+bool device_active_compact(eg_ctx& ctx, eg_runner_s& runner, const void* mask, const std::vector<Owned>& owned, bool reorder);
+/** @brief Put every plane of @p owned back in sample order and recompute the map (the end of a reordered run). */
+void device_active_restore(eg_ctx& ctx, eg_runner_s& runner, const void* mask, const std::vector<Owned>& owned);
 void device_runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out);
 void device_run(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report);
 
