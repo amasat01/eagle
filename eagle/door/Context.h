@@ -167,6 +167,10 @@ struct StageFacts {
     std::vector<std::int32_t> row_of, comp_of, read_of;   ///< per stage slot: the split cell whose rows / compensation rows it is, or whose plane it reads
     std::int64_t cell_row = 0;                ///< samples per row of the stage's cells
     std::vector<std::string> cells_in, cells_out;
+    /** @brief A companion of the stage's unit, folded after the stage runs: its index in that unit's companions, and the plane it folds
+     *  into (its target's source slot, or its team plane). */
+    struct Fold { std::size_t companion = 0; std::int32_t source = -1, plane = -1; };
+    std::vector<Fold> folds;
 };
 
 /** @brief A unit reference of a dispatch record, resolved against deps by unit_load. */
