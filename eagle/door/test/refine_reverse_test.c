@@ -47,11 +47,19 @@ static struct eg_bind_desc binds(int n_planes, const int32_t* slots, eg_plane* c
 }
 
 int main(int argc, char** argv) {
-    if (argc != 9) {
+    if (argc != 9 && argc != 10) {   /* 10: the pendulum (ev_pend) instead of the oscillator */
         fprintf(stderr, "usage: %s <pair lib> <oracle dir> <primal> <twin> <newton> <guard> <step vjp> <refine vjp>\n", argv[0]);
         return 2;
     }
     const char *lib = argv[1], *dir = argv[2];
+    const int pend = argc == 10;
+    char n_p[16], n_t[64], n_s[64], n_n[64], n_g[64], n_r[64];
+    snprintf(n_p, sizeof(n_p), pend ? "ev_pend" : "ev_osc");
+    snprintf(n_t, sizeof(n_t), "%s_tape", n_p);
+    snprintf(n_s, sizeof(n_s), "%s_step_vjp", n_p);
+    snprintf(n_n, sizeof(n_n), "%s_newton", n_p);
+    snprintf(n_g, sizeof(n_g), "%s_state_guard_vjp", n_p);
+    snprintf(n_r, sizeof(n_r), "%s_refine_vjp", n_p);
     uint8_t dg[6][EG_DIGEST_BYTES];
     for (int i = 0; i < 6; ++i)
         if (!parse_digest(argv[3 + i], dg[i])) return 2;
@@ -63,9 +71,9 @@ int main(int argc, char** argv) {
     s.abi_major = EG_DOOR_VERSION_MAJOR;
     eg_ctx* ctx = NULL;
     check(eg_ctx_new(&s, &ctx) == EG_OK, "eg_ctx_new host context");
-    eg_unit* p = load(ctx, lib, "ev_osc", dg[0]);
-    eg_unit* units[5] = { load(ctx, lib, "ev_osc_tape", dg[1]), load(ctx, lib, "ev_osc_step_vjp", dg[4]), load(ctx, lib, "ev_osc_newton", dg[2]),
-                          load(ctx, lib, "ev_osc_state_guard_vjp", dg[3]), load(ctx, lib, "ev_osc_refine_vjp", dg[5]) };
+    eg_unit* p = load(ctx, lib, n_p, dg[0]);
+    eg_unit* units[5] = { load(ctx, lib, n_t, dg[1]), load(ctx, lib, n_s, dg[4]), load(ctx, lib, n_n, dg[2]),
+                          load(ctx, lib, n_g, dg[3]), load(ctx, lib, n_r, dg[5]) };
     const int loaded = p && units[0] && units[1] && units[2] && units[3] && units[4];
     check(loaded, "recorded refine: ev_osc, its twin, step vjp, Newton, state guard vjp and refine vjp load from one library");
     if (!loaded) {
@@ -76,11 +84,14 @@ int main(int argc, char** argv) {
                                        EG_DERIVED_REFINE_VJP };
     const eg_structure structures[2] = { EG_STRUCTURE_HOST_SERIAL, EG_STRUCTURE_HOST_TEAM };
     const int threads[2] = { 1, 3 };
-    const double a = 0.0, dt = 0.05, w = 2.0;
+    /* the uniforms by slot 5, 6, 7: the oscillator a, dt, w; the pendulum a, c, dt */
+    const double uvals[3] = { pend ? 0.05 : 0.0, pend ? 0.2 : 0.05, pend ? 0.05 : 2.0 };
     const char* seeds_of[3] = { "t", "v", "x" };
     const int32_t seed_slot[3] = { 0, 1, 2 };
-    const char* grads_of[6] = { "t", "v", "x", "dt", "w", "a" };
-    const int32_t grad_slot[6] = { 0, 1, 2, 6, 7, 5 };
+    const char* grads_osc[6] = { "t", "v", "x", "dt", "w", "a" }, *grads_pend[6] = { "t", "v", "x", "dt", "c", "a" };
+    const char* const* grads_of = pend ? grads_pend : grads_osc;
+    const int32_t grad_slot_osc[6] = { 0, 1, 2, 6, 7, 5 }, grad_slot_pend[6] = { 0, 1, 2, 7, 6, 5 };
+    const int32_t* grad_slot = pend ? grad_slot_pend : grad_slot_osc;
     char what[256];
     for (int si = 0; si < 2; ++si)
         for (int ti = 0; ti < 2; ++ti) {
@@ -91,7 +102,7 @@ int main(int argc, char** argv) {
             eg_plane* planes[4] = { host_plane(ctx, &tt, PN, t, kDLFloat, 64), host_plane(ctx, &tv, PN, v, kDLFloat, 64),
                                     host_plane(ctx, &tx, PN, x, kDLFloat, 64), host_plane(ctx, &tdn, PN, done, kDLBool, 8) };
             const int32_t slots[4] = { 0, 1, 2, 4 }, us[3] = { 5, 6, 7 };
-            const void* const uv[3] = { &a, &dt, &w };
+            const void* const uv[3] = { &uvals[0], &uvals[1], &uvals[2] };
             struct eg_bind_desc bd = binds(4, slots, planes);
             bd.n_uniforms = 3;
             bd.uniform_slots = us;

@@ -84,7 +84,7 @@ LIB := $(OUT)/libeagle_door.so
 FIXTURE := $(OUT)/libfixture_unit.so
 TEST := $(OUT)/door_test
 
-.PHONY: all lib symbols test check-inputs check-cuda pairs pair-reverse pair-reverse-active pair-reverse-timed pair-reverse-fused pair-reverse-kstep pair-reverse-reorder pair-reverse-t0 pair-reverse-counter pair-refine pair-refine-reverse device $(PAIR_UNITS:%=pair-%) $(PAIR_DEVICE_UNITS:%=pair-device-%)
+.PHONY: all lib symbols test check-inputs check-cuda pairs pair-reverse pair-reverse-active pair-reverse-timed pair-reverse-fused pair-reverse-kstep pair-reverse-reorder pair-reverse-t0 pair-reverse-counter pair-refine pair-refine-reverse pair-refine-pend pair-refine-reverse-pend device $(PAIR_UNITS:%=pair-%) $(PAIR_DEVICE_UNITS:%=pair-device-%)
 all: test
 
 check-inputs:
@@ -411,3 +411,32 @@ $(OUT)/libpair_dev_$(1).so: $$(KERNEL_CUDA_$(1)) $$(META_CUDA_$(1)) eg_door.h eg
 pair-device-$(1): symbols $(OUT)/libpair_dev_$(1).so $$(PAIR_DEVICE_TEST) $$(RUNNER_PAIR_TEST) $$(ACTIVE_PAIR_TEST) $$(FAST_PAIR_TEST) $$(GRAPH_PAIR_TEST) $$(FEATURES_TEST) $$(OPS_TEST) $$(BANDED_RUNNER_TEST)
 endef
 $(foreach u,$(PAIR_DEVICE_UNITS),$(eval $(call PAIR_DEVICE_RULES,$(u))))
+
+# pair-refine-pend, pair-refine-reverse-pend: the pendulum (ev_pend, the old path's second event model, a 0.05, c 0.2) over its own
+# library (META_pend) with the same two tests; ORACLE_pend (plain refine run), ORACLE_pendrr (the reverse's gradients).
+META_pend ?= test/derived/ev_pend_meta.c
+DIGEST_pend ?= 95c987555a3e3adbd7bd74fbda8a114054889e69547e12adfef3224f77a49eae
+DIGEST_pend_tape ?= f501f4c247a820fb7df44bbcb23acadc92c6e7afca6346a24a2a9fa6a126063e
+DIGEST_pend_step_vjp ?= a6e50ecab8d027681391468b32768ada530ca95a073a4ddf78d5ec6c2cc4d0a3
+DIGEST_pend_newton ?= 7fa4b726b43f41b19d9bebf8d812b371eb6e4f3a43426f4fe9ad3c69efbbbc25
+DIGEST_pend_guard ?= 012d7e9df31a4822327f8c88a45d0bfdbe5f8f3dfba0871c0edd02ff073028bc
+DIGEST_pend_refine_vjp ?= d6c8c1c8e308deccbe8f6e8207b0bcc08abbe26730dda782fb75442bfa197588
+$(OUT)/libpair_refine_pend.so: $(KERNEL_pend) $(KERNEL_pend_tape) $(KERNEL_pend_step_vjp) $(KERNEL_pend_newton) $(KERNEL_pend_guard) $(KERNEL_pend_refine_vjp) $(META_pend) eg_door.h eg_unit_meta.h | check-inputs
+	@test -f "$(KERNEL_pend)" -a -f "$(KERNEL_pend_tape)" -a -f "$(KERNEL_pend_step_vjp)" -a -f "$(KERNEL_pend_newton)" -a -f "$(KERNEL_pend_guard)" -a -f "$(KERNEL_pend_refine_vjp)" -a -f "$(META_pend)" -a \
+	  -d "$(PAIR_WING_DIR)" || { echo "set KERNEL_pend, _tape, _step_vjp, _newton, _guard, _refine_vjp, META_pend and PAIR_WING_DIR"; exit 1; }
+	@mkdir -p $(OUT)
+	$(CXX) $(PAIR_HOST_FLAGS) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) -c $(KERNEL_pend) -o $(OUT)/pend_primal.o
+	$(CXX) $(PAIR_HOST_FLAGS) $(call REV_RENAME,tape) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) -c $(KERNEL_pend_tape) -o $(OUT)/pend_tape.o
+	$(CXX) $(PAIR_HOST_FLAGS) $(call REV_RENAME,stepvjp) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) -c $(KERNEL_pend_step_vjp) -o $(OUT)/pend_stepvjp.o
+	$(CXX) $(PAIR_HOST_FLAGS) $(call REV_RENAME,newton) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) -c $(KERNEL_pend_newton) -o $(OUT)/pend_newton.o
+	$(CXX) $(PAIR_HOST_FLAGS) $(call REV_RENAME,guard) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) -c $(KERNEL_pend_guard) -o $(OUT)/pend_guard.o
+	$(CXX) $(PAIR_HOST_FLAGS) $(call REV_RENAME,refvjp) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) -c $(KERNEL_pend_refine_vjp) -o $(OUT)/pend_refvjp.o
+	$(CC) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$(ROOT) -c $(META_pend) -o $(OUT)/pend_meta.o
+	$(CXX) -shared -o $@ $(OUT)/pend_primal.o $(OUT)/pend_tape.o $(OUT)/pend_stepvjp.o $(OUT)/pend_newton.o $(OUT)/pend_guard.o $(OUT)/pend_refvjp.o $(OUT)/pend_meta.o
+
+pair-refine-pend: symbols $(OUT)/libpair_refine_pend.so $(REFINE_TEST)
+	$(REFINE_TEST) $(OUT)/libpair_refine_pend.so $(ORACLE_pend) $(DIGEST_pend) $(DIGEST_pend_tape) $(DIGEST_pend_newton) $(DIGEST_pend_guard) 400 0 1 pend
+
+pair-refine-reverse-pend: symbols $(OUT)/libpair_refine_pend.so $(REFINE_REVERSE_TEST)
+	$(REFINE_REVERSE_TEST) $(OUT)/libpair_refine_pend.so $(ORACLE_pendrr) $(DIGEST_pend) $(DIGEST_pend_tape) $(DIGEST_pend_newton) $(DIGEST_pend_guard) \
+	  $(DIGEST_pend_step_vjp) $(DIGEST_pend_refine_vjp) pend

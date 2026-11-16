@@ -38,13 +38,19 @@ static eg_unit* load(eg_ctx* ctx, const char* path, const char* name, const uint
 }
 
 int main(int argc, char** argv) {
-    if (argc != 10) {
+    if (argc != 10 && argc != 11) {   /* 11: the pendulum (ev_pend: a 0.05, c 0.2, dt 0.05) instead of the oscillator */
         fprintf(stderr, "usage: %s <pair lib> <oracle dir> <primal digest> <twin digest> <newton digest> <guard digest> <max_steps> <on_no_event> <compare>\n", argv[0]);
         return 2;
     }
     const char *lib = argv[1], *dir = argv[2];
     const int64_t max_steps = atol(argv[7]);
     const int zero = atoi(argv[8]), compare = atoi(argv[9]);
+    const int pend = argc == 11;
+    char n_p[16], n_t[64], n_n[64], n_g[64];
+    snprintf(n_p, sizeof(n_p), pend ? "ev_pend" : "ev_osc");
+    snprintf(n_t, sizeof(n_t), "%s_tape", n_p);
+    snprintf(n_n, sizeof(n_n), "%s_newton", n_p);
+    snprintf(n_g, sizeof(n_g), "%s_state_guard_vjp", n_p);
     uint8_t dg[4][EG_DIGEST_BYTES];
     static double x0[PN], ex[PN], ev[PN], et[PN], ts[PN];
     static int8_t st[PN];
@@ -59,9 +65,8 @@ int main(int argc, char** argv) {
     s.abi_major = EG_DOOR_VERSION_MAJOR;
     eg_ctx* ctx = NULL;
     check(eg_ctx_new(&s, &ctx) == EG_OK, "eg_ctx_new host context");
-    eg_unit* p = load(ctx, lib, "ev_osc", dg[0]);
-    eg_unit* units[3] = { load(ctx, lib, "ev_osc_tape", dg[1]), load(ctx, lib, "ev_osc_newton", dg[2]),
-                          load(ctx, lib, "ev_osc_state_guard_vjp", dg[3]) };
+    eg_unit* p = load(ctx, lib, n_p, dg[0]);
+    eg_unit* units[3] = { load(ctx, lib, n_t, dg[1]), load(ctx, lib, n_n, dg[2]), load(ctx, lib, n_g, dg[3]) };
     check(p && units[0] && units[1] && units[2], "refine: ev_osc, its twin, its Newton and its state guard vjp load from one library");
     if (!(p && units[0] && units[1] && units[2]) || !(have || !compare)) {
         check(have || !compare, "refine: the oracle files read");
@@ -71,7 +76,8 @@ int main(int argc, char** argv) {
     const eg_derived_role roles[3] = { EG_DERIVED_TAPE, EG_DERIVED_REFINE_NEWTON, EG_DERIVED_STATE_GUARD_VJP };
     const eg_structure structures[2] = { EG_STRUCTURE_HOST_SERIAL, EG_STRUCTURE_HOST_TEAM };
     const int threads[2] = { 1, 3 };
-    const double a = 0.0, dt = 0.05, w = 2.0;
+    /* the uniforms by slot 5, 6, 7: the oscillator a, dt, w; the pendulum a, c, dt */
+    const double uvals[3] = { pend ? 0.05 : 0.0, pend ? 0.2 : 0.05, pend ? 0.05 : 2.0 };
     char what[256];
     for (int si = 0; si < 2; ++si)
         for (int ti = 0; ti < 2; ++ti) {
@@ -87,7 +93,7 @@ int main(int argc, char** argv) {
             eg_plane* planes[4] = { host_plane(ctx, &tt, PN, t, kDLFloat, 64), host_plane(ctx, &tv, PN, v, kDLFloat, 64),
                                     host_plane(ctx, &tx, PN, x, kDLFloat, 64), host_plane(ctx, &tdn, PN, done, kDLBool, 8) };
             const int32_t slots[4] = { 0, 1, 2, 4 }, us[3] = { 5, 6, 7 };
-            const void* const uv[3] = { &a, &dt, &w };
+            const void* const uv[3] = { &uvals[0], &uvals[1], &uvals[2] };
             struct eg_bind_desc bd;
             memset(&bd, 0, sizeof(bd));
             bd.struct_size = sizeof(bd);
@@ -126,6 +132,7 @@ int main(int argc, char** argv) {
                 continue;
             }
             const int ok = bound && eg_runner_new(ctx, &d, &r) == EG_OK;
+            if (!ok) reason_has(ctx, "(the refine runner builds)");
             struct tensor a1, a2;
             eg_plane* tp = host_plane(ctx, &a1, PN, tstop, kDLFloat, 64);
             eg_plane* sp = host_plane(ctx, &a2, PN, status, kDLInt, 8);
