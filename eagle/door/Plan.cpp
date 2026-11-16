@@ -302,7 +302,8 @@ void plan_new(eg_ctx& ctx, const eg_plan_desc* desc, eg_plan** out) {
                    "': load it with the group's units in deps to plan the group");
     if (d.unit->seg.present) {
         const SegFacts& g = d.unit->seg;
-        if (device && g.dynamic) refuse(EG_NOT_WRITTEN, "unit '" + d.unit->name + "': a SEGMENTED dispatch group with a dynamic selector on DEVICE is not written");
+        if (g.dynamic && g.mask_slot >= 0)
+            refuse(EG_NOT_WRITTEN, "unit '" + d.unit->name + "': a dynamic segmented group with a terminated mask is not written (no mask: every sample is live)");
         if (device && d.unit->dev_box_t > 0) refuse(EG_NOT_WRITTEN, "unit '" + d.unit->name + "': a SEGMENTED dispatch group over a device thread box is not written");
         std::vector<const eg_unit_s*> units(g.branches.begin(), g.branches.end());
         units.push_back(g.dynamic ? g.sweep : g.classify);
@@ -442,7 +443,20 @@ void plan_new(eg_ctx& ctx, const eg_plan_desc* desc, eg_plan** out) {
                 bind_handle(*plan, g.class_slot, st.cls.data(), static_cast<std::uint64_t>(d.n_samples));
             }
             st.run_len.assign(static_cast<std::size_t>(g.k), 0);
-            if (g.dynamic) {
+            if (g.dynamic && device) {    // the stale mask, the sweep's active map and its count live in device memory
+                plan->segdev.push_back(make_plane(ctx, DLDataType{ kDLBool, 8, 1 }, { std::max<std::int64_t>(d.n_samples, 1) }, true));
+                plan->segdev.push_back(make_plane(ctx, DLDataType{ kDLInt, 32, 1 }, { std::max<std::int64_t>(d.n_samples, 1) }, true));
+                plan->segdev.push_back(make_plane(ctx, DLDataType{ kDLUInt, 32, 1 }, { 1 }, true));
+                bind_handle(*plan, g.stale_slot, plan->segdev[2]->tensor->dl_tensor.data, static_cast<std::uint64_t>(d.n_samples));
+                const auto handle = [](void* data, std::uint64_t count) {
+                    plugin::ScalarHandle h{};
+                    h.data = data, h.samples = count, h.stride = 1, h.deviceType = plugin::kEagleAbiDeviceCUDA, h.deviceId = 0;
+                    return h;
+                };
+                st.map_h = handle(plan->segdev[3]->tensor->dl_tensor.data, static_cast<std::uint64_t>(d.n_samples));
+                st.count_h = handle(plan->segdev[4]->tensor->dl_tensor.data, 1);
+                st.sortkey.assign(static_cast<std::size_t>(d.n_samples), 0);
+            } else if (g.dynamic) {
                 st.stale.assign(static_cast<std::size_t>(d.n_samples), 0);
                 st.map.assign(static_cast<std::size_t>(d.n_samples), 0);
                 bind_handle(*plan, g.stale_slot, st.stale.data(), static_cast<std::uint64_t>(d.n_samples));

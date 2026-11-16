@@ -429,8 +429,8 @@ void device_plan_check(const eg_ctx& ctx, const eg_unit_s& unit) {
     if (ctx.dev.ordinal < 0)
         refuse(EG_BAD_REQUEST, "structure DEVICE on a host-only context (made without EG_CTX_DEVICE)");
     const std::string who = "unit '" + unit.name + "' on DEVICE: ";
-    if (unit.seg.present && unit.seg.dynamic)
-        refuse(EG_NOT_WRITTEN, who + "the SEGMENTED dispatch group '" + unit.seg.name + "' has a dynamic selector, which is not written on the device");
+    if (unit.seg.present && unit.seg.dynamic && unit.seg.mask_slot >= 0)
+        refuse(EG_NOT_WRITTEN, who + "the SEGMENTED dispatch group '" + unit.seg.name + "' has a dynamic selector and a TERMINATED mask, which is not written on the device (no mask: every sample is live)");
     if (unit.stages.empty() && unit.function == 0) refuse(EG_NOT_WRITTEN, who + "the unit has no device image");
     for (const StageFacts& st : unit.stages)
         if (st.unit->function == 0) refuse(EG_NOT_WRITTEN, who + "the stage '" + st.ref_name + "' has no device image");
@@ -532,7 +532,7 @@ void launch_split(const eg_plan_s& plan) {
 
 namespace seg = host::seg;
 
-/** @brief One launch of a static-selector SEGMENTED plan on the device: the classify unit, eagle's stable K-class sort of copies of the owned planes
+/** @brief One launch of a SEGMENTED plan on the device (a dynamic selector adds the guarded run's stale compaction and the sweep): the classify unit, eagle's stable K-class sort of copies of the owned planes
  *  (``reorderClassesDevice``, as the old device runner's class sort), each branch over its run (the old runner's block choice), the written
  *  copies restored and copied back to the caller's planes. The classes and the run offsets are read back to the host (a stream sync). */
 void launch_segmented(const eg_plan_s& plan) {
@@ -547,19 +547,27 @@ void launch_segmented(const eg_plan_s& plan) {
     if (n == 0) return;
     const std::string at = "unit '" + plan.unit->name + "': dispatch group '" + g.name + "': ";
     std::uint32_t n32 = static_cast<std::uint32_t>(n);
-    {    // the classes of every sample, in sample order (the old runner launches it at block 256)
+    if (!g.dynamic) {    // the classes of every sample, in sample order (the old runner launches it at block 256)
         std::vector<seg::Owned> none;
         std::vector<void*> p = seg::params_of(plan, K, *g.classify, none, &n32);
         exec::DeviceKernel::run(reinterpret_cast<CUfunction>(g.classify->function), p, exec::Partition{ 0, n, n }, cs, 256);
     }
-    std::vector<seg::Owned> owned = seg::collect(plan, true, true);
+    std::vector<seg::Owned> owned = seg::collect(plan, !g.dynamic, true);
+    if (g.dynamic)    // the class and stale planes are slot-indexed scratch to the units: moved with the sort like the planes they sit beside, kept in sample order
+        for (std::int32_t slot : { g.class_slot, g.stale_slot }) {
+            seg::Owned o;
+            const DLTensor& t = plan.segdev[slot == g.class_slot ? 1 : 2]->tensor->dl_tensor;
+            o.slot = slot, o.data = static_cast<char*>(t.data) + t.byte_offset, o.elem = slot == g.class_slot ? 8 : 1, o.rows = 1, o.written = true;
+            o.bind = plan.bindings[static_cast<std::size_t>(slot)];
+            owned.push_back(std::move(o));
+        }
     seg::Owned* mask = nullptr;
     for (seg::Owned& o : owned)
         if (o.slot == g.mask_slot) mask = &o;
     if (mask != nullptr && mask->elem != 1)
         refuse(EG_NOT_WRITTEN, at + "a TERMINATED mask wider than one byte is not written on the device");
     const std::size_t un = static_cast<std::size_t>(n);
-    constexpr std::size_t kFixed = 8;    // perm, inv, map, cells, offsets, class bytes, zero mask, scratch
+    constexpr std::size_t kFixed = 9;    // perm, inv, map, cells, offsets, class bytes, zero mask, scratch, compaction scratch
     if (S.dev_bufs.size() != kFixed + owned.size()) {
         for (void* b : S.dev_bufs) device_free(ctx, b);
         S.dev_bufs.clear();
@@ -567,7 +575,7 @@ void launch_segmented(const eg_plan_s& plan) {
         for (const seg::Owned& o : owned)
             if (&o != mask) planes.push_back({ nullptr, static_cast<unsigned>(o.elem) });
         const std::size_t scratch = class_sort_scratch_bytes(n, planes, K);
-        for (std::size_t bytes : { un * 4, un * 4, un * 4, std::size_t{ 16 }, (static_cast<std::size_t>(K) + 1) * 4, un, un, scratch })
+        for (std::size_t bytes : { un * 4, un * 4, un * 4, std::size_t{ 16 }, (static_cast<std::size_t>(K) + 1) * 4, un, un, scratch, compact_scratch_bytes(n) })
             S.dev_bufs.push_back(device_alloc(ctx, bytes));
         for (const seg::Owned& o : owned) S.dev_bufs.push_back(device_alloc(ctx, o.rows * un * o.elem));
     }
@@ -579,7 +587,16 @@ void launch_segmented(const eg_plan_s& plan) {
     void* cls8 = S.dev_bufs[5];
     void* zero_mask = S.dev_bufs[6];
     void* scratch = S.dev_bufs[7];
-    {    // the class plane as bytes: read back, range-checked (the old class sort refuses a class outside [0, k)), written as uint8
+    if (g.dynamic) {    // the sort key: the classes the units wrote, taken again when the batch has gone stale (the first sort sees all zeros, as the old runner's)
+        if (!S.sorted || static_cast<double>(S.stale_now) > host::kStaleMax * static_cast<double>(std::max<std::int64_t>(n, 1))) {
+            std::vector<std::int64_t> cls(un);
+            const DLTensor& ct = plan.segdev[1]->tensor->dl_tensor;
+            device_read(ctx, static_cast<char*>(ct.data) + ct.byte_offset, cls.data(), un * sizeof(std::int64_t));
+            for (std::size_t i = 0; i < un; ++i) S.sortkey[i] = static_cast<std::uint8_t>(std::clamp<std::int64_t>(cls[i], 0, g.k - 1));
+            S.sorted = true;
+        }
+        device_write(ctx, cls8, S.sortkey.data(), un);
+    } else {    // the class plane as bytes: read back, range-checked (the old class sort refuses a class outside [0, k)), written as uint8
         std::vector<std::int64_t> cls(un);
         const DLTensor& ct = plan.segdev[1]->tensor->dl_tensor;
         device_read(ctx, static_cast<char*>(ct.data) + ct.byte_offset, cls.data(), un * sizeof(std::int64_t));
@@ -621,6 +638,18 @@ void launch_segmented(const eg_plan_s& plan) {
         const eg_unit_s& u = *g.branches[j];
         std::vector<void*> p = seg::params_of(plan, j, u, owned, &n32);
         exec::DeviceKernel::run(reinterpret_cast<CUfunction>(u.function), p, exec::Partition{ 0, run, n }, cs, resolved_block(d, u, run));
+    }
+    if (g.dynamic) {    // the samples whose branch moved (stale), compacted into the sweep's active map; the fused unit completes them
+        compact_keep_step(stream, S.dev_bufs[kFixed + static_cast<std::size_t>(owned.size()) - 1], n, static_cast<std::int32_t*>(plan.segdev[3]->tensor->dl_tensor.data),
+                          static_cast<unsigned*>(plan.segdev[4]->tensor->dl_tensor.data), S.dev_bufs[8]);
+        unsigned stale = 0;
+        device_read(ctx, plan.segdev[4]->tensor->dl_tensor.data, &stale, sizeof(stale));
+        S.stale_now = stale;
+        if (stale > 0) {
+            const eg_unit_s& u = *g.sweep;
+            std::vector<void*> p = seg::params_of(plan, K, u, owned, &n32);
+            exec::DeviceKernel::run(reinterpret_cast<CUfunction>(u.function), p, exec::Partition{ 0, static_cast<std::int64_t>(stale), n }, cs, resolved_block(d, u, stale));
+        }
     }
     std::vector<DevicePlane> written;    // back to sample order: the planes the units wrote
     for (std::size_t i = 0; i < owned.size(); ++i)

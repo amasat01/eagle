@@ -189,6 +189,11 @@ void class_sort_step(std::uint64_t stream, const std::vector<DevicePlane>& plane
                                     scratch, n, reinterpret_cast<cudaStream_t>(stream));
 }
 
+void compact_keep_step(std::uint64_t stream, const void* mask, std::int64_t n, std::int32_t* map, unsigned* count, void* scratch) {
+    filtering::compactDevice(static_cast<const std::uint8_t*>(mask), 0u, map, count, scratch, n, reinterpret_cast<cudaStream_t>(stream));
+    EAGLE_CHECK_ALWAYS(cudaGetLastError());
+}
+
 void reset_step(std::uint64_t stream, std::int32_t* perm, std::int32_t* inv, std::int32_t* map, unsigned* count, unsigned* span, std::int64_t n) {
     filtering::resetDevice(perm, inv, map, count, span, n, reinterpret_cast<cudaStream_t>(stream));
 }
