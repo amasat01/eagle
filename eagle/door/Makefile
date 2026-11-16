@@ -84,7 +84,7 @@ LIB := $(OUT)/libeagle_door.so
 FIXTURE := $(OUT)/libfixture_unit.so
 TEST := $(OUT)/door_test
 
-.PHONY: all lib symbols test check-inputs check-cuda pairs pair-reverse pair-reverse-active pair-reverse-timed pair-reverse-fused pair-reverse-kstep pair-reverse-kstep3 pair-reverse-kstep7 pair-reverse-kstep8 pair-reverse-reorder pair-reverse-t0 pair-reverse-counter pair-refine pair-refine-reverse pair-refine-pend pair-refine-reverse-pend pair-refine-reverse-grid pair-refine-reverse-grid-refused pair-status-grid pair-status-tangent pair-status-two device pair-device-reverse pair-device-refine pair-device-refine-reverse $(PAIR_UNITS:%=pair-%) $(PAIR_DEVICE_UNITS:%=pair-device-%)
+.PHONY: all lib symbols test check-inputs check-cuda pairs pair-reverse pair-reverse-active pair-reverse-timed pair-reverse-ps pair-reverse-fused pair-reverse-kstep pair-reverse-kstep3 pair-reverse-kstep7 pair-reverse-kstep8 pair-reverse-reorder pair-reverse-t0 pair-reverse-counter pair-refine pair-refine-reverse pair-refine-pend pair-refine-reverse-pend pair-refine-reverse-grid pair-refine-reverse-grid-refused pair-status-grid pair-status-tangent pair-status-two device pair-device-reverse pair-device-refine pair-device-refine-reverse $(PAIR_UNITS:%=pair-%) $(PAIR_DEVICE_UNITS:%=pair-device-%)
 all: test
 
 check-inputs:
@@ -198,6 +198,17 @@ DIGEST_timed_step_vjp ?= 7e96064e7bac22b669c0eb9fbcc145e7b9b9b55d45a4279688d213d
 pair-reverse-timed: symbols $(OUT)/libpair_reverse_timed.so $(REV_TEST)
 	$(REV_TEST) $(REV_FIXTURE) $(OUT)/libpair_reverse_timed.so $(ORACLE_timed) $(DIGEST_timed) $(DIGEST_timed_tape) \
 	  $(DIGEST_timed_step_vjp) 0 _timed
+
+# pair-reverse-ps: rr_pend with a per-sample c (a read plane the kernel never writes): the recorded run and its reverse, window 37;
+# states, steps and gradients (c's one value per sample, unsummed, dt's summed) equal the old path's bit for bit (ORACLE_ps).
+META_ps ?= test/derived/rr_pend_ps_meta.c
+DIGEST_rr_pend_ps ?= 69b4d1add96b83c8e607767945e07c9cd1875cd8023557ee8aca9ccd11fd243c
+DIGEST_rr_pend_ps_tape ?= 2ed30ee2a280c121caeb4526dde2c3d33e6c8c4e77577b255c08703630935602
+DIGEST_rr_pend_ps_step_vjp ?= 3bbc520c34971d186db3f4edaf1801a18b4601a8b16274eae326b68150ae1af3
+$(eval $(call REV_RULES,ps,reverse_ps,rr_pend_ps))
+pair-reverse-ps: symbols $(OUT)/libpair_reverse_ps.so $(REV_TEST)
+	$(REV_TEST) $(REV_FIXTURE) $(OUT)/libpair_reverse_ps.so $(ORACLE_ps) $(DIGEST_rr_pend_ps) $(DIGEST_rr_pend_ps_tape) \
+	  $(DIGEST_rr_pend_ps_step_vjp) 0 rr_pend_ps
 
 # pair-reverse-fused: rr_pend_auto (the old path's automatic kernel: a K-step taping twin, EG_DERIVED_TAPE_FUSED, replayed by the same
 # fused entry, at most 64 steps per launch and never across a window) over the one-step step vjp; window 400 (built in); states and
@@ -495,6 +506,7 @@ $(eval $(call DEV_REV_RULES,rr_pend,reverse,rr_pend))
 $(eval $(call DEV_REV_RULES,timed,timed,_timed))
 $(eval $(call DEV_REV_RULES,act,act,_pend_body))
 $(eval $(call DEV_REV_RULES,auto,auto,rr_pend_auto))
+$(eval $(call DEV_REV_RULES,ps,ps,rr_pend_ps))
 # kstep<K>: steps_reverse FUSED over the K-step primal rr_pend_x<K>: its twin and step vjp are rr_pend's, plus the K-step vjp.
 define DEV_KSTEP_RULES
 $(OUT)/libpair_dev_rev_$(1).so: $$(PTX_$(1)) $$(PTX_$(1)_tape) $$(PTX_$(1)_step_vjp) $$(PTX_$(1)_fused_vjp) $$(META_$(1)) eg_door.h eg_unit_meta.h | check-cuda
@@ -511,7 +523,7 @@ $(eval $(call DEV_KSTEP_RULES,kstep,rr_pend_x4))
 $(eval $(call DEV_KSTEP_RULES,kstep3,rr_pend_x3))
 $(eval $(call DEV_KSTEP_RULES,kstep7,rr_pend_x7))
 $(eval $(call DEV_KSTEP_RULES,kstep8,rr_pend_x8))
-pair-device-reverse: symbols $(OUT)/libpair_dev_rev_rr_pend.so $(OUT)/libpair_dev_rev_timed.so $(OUT)/libpair_dev_rev_act.so $(OUT)/libpair_dev_rev_auto.so $(OUT)/libpair_dev_rev_kstep.so $(OUT)/libpair_dev_rev_kstep3.so $(OUT)/libpair_dev_rev_kstep7.so $(OUT)/libpair_dev_rev_kstep8.so $(DEVICE_REVERSE_TEST)
+pair-device-reverse: symbols $(OUT)/libpair_dev_rev_rr_pend.so $(OUT)/libpair_dev_rev_ps.so $(OUT)/libpair_dev_rev_timed.so $(OUT)/libpair_dev_rev_act.so $(OUT)/libpair_dev_rev_auto.so $(OUT)/libpair_dev_rev_kstep.so $(OUT)/libpair_dev_rev_kstep3.so $(OUT)/libpair_dev_rev_kstep7.so $(OUT)/libpair_dev_rev_kstep8.so $(DEVICE_REVERSE_TEST)
 
 # pair-device-refine: events REFINE (a plain run) and eg_run_events on the device, per case one library of the old device run's own images
 # (PTX_ref_<case>, _tape, _newton, _guard) with the host meta; run $(OUT)/device_refine_test <library> <case> <oracle dir> <4 digests> <max_steps>

@@ -90,6 +90,8 @@ static struct eg_bind_desc binds(int32_t n_planes, const int32_t* slots, eg_plan
 }
 
 static double x0[PMAX], v0[PMAX], tf[PMAX], ex[PMAX], ev[PMAX], et[PMAX], gx[PMAX], gv[PMAX], gt[PMAX], gc, gdt;
+static double cps[PMAX], gcps[PMAX];   /* a per-sample c (rr_pend_ps): its values and its gradient, one per sample */
+static int ps;
 static int64_t run_ref[2];
 static int64_t N = 64;                                   /* the samples */
 static int32_t mask_slot = 5, c_slot = 6, dt_slot = 7;   /* the primal's slots: with an active set 7, 8 and 9 */
@@ -102,6 +104,7 @@ static void record_and_reverse(eg_ctx* ctx, eg_runner* r, const struct dplanes* 
     static const uint8_t none[PMAX];
     char what[320];
     int ok = dput(s, 0, zeros, (size_t)N * 8) && dput(s, 1, v0, (size_t)N * 8) && dput(s, 2, x0, (size_t)N * 8) && dput(s, 4, none, (size_t)N);
+    ok = ok && (!ps || dput(s, 5, cps, (size_t)N * 8));
     struct eg_run_report rep;
     memset(&rep, 0, sizeof(rep));
     rep.struct_size = sizeof(rep);
@@ -116,6 +119,7 @@ static void record_and_reverse(eg_ctx* ctx, eg_runner* r, const struct dplanes* 
     check(s_ok, what);
     static double sx[PMAX], sv[PMAX], ox[PMAX], ov[PMAX], ot[PMAX];
     double oc = 0.0, odt = 0.0;
+    static double ocps[PMAX];
     for (int i = 0; i < N; ++i) {
         sx[i] = 1.0;
         sv[i] = 0.5;
@@ -135,7 +139,7 @@ static void record_and_reverse(eg_ctx* ctx, eg_runner* r, const struct dplanes* 
         sp[1] = dplane(ctx, &g, sv, N, kDLFloat, 64);
     }
     eg_plane* const gp[5] = { dplane(ctx, &g, ox, N, kDLFloat, 64), dplane(ctx, &g, ov, N, kDLFloat, 64), dplane(ctx, &g, ot, N, kDLFloat, 64),
-                              dplane(ctx, &g, &oc, 1, kDLFloat, 64), dplane(ctx, &g, &odt, 1, kDLFloat, 64) };
+                              ps ? dplane(ctx, &g, ocps, N, kDLFloat, 64) : dplane(ctx, &g, &oc, 1, kDLFloat, 64), dplane(ctx, &g, &odt, 1, kDLFloat, 64) };
     const int32_t sslot[2] = { 2, 1 }, gslot[5] = { 2, 1, 0, c_slot, dt_slot };
     const struct eg_bind_desc sd = binds(2, sslot, sp, 0, NULL, NULL), gd = binds(5, gslot, gp, 0, NULL, NULL);
     const int base = seed_host ? 0 : 2;
@@ -148,10 +152,11 @@ static void record_and_reverse(eg_ctx* ctx, eg_runner* r, const struct dplanes* 
         return;
     }
     const int rok = ok && eg_reverse(ctx, r, &sd, &gd) == EG_OK && dget(&g, base, ox, (size_t)N * 8) && dget(&g, base + 1, ov, (size_t)N * 8) &&
-                    dget(&g, base + 2, ot, (size_t)N * 8) && dget(&g, base + 3, &oc, sizeof(oc)) && dget(&g, base + 4, &odt, sizeof(odt));
-    int g_ok = rok && memcmp(&oc, &gc, sizeof(gc)) == 0 && memcmp(&odt, &gdt, sizeof(gdt)) == 0;
-    for (int i = 0; g_ok && i < N; ++i) g_ok = memcmp(&ox[i], &gx[i], 8) == 0 && memcmp(&ov[i], &gv[i], 8) == 0 && memcmp(&ot[i], &gt[i], 8) == 0;
-    snprintf(what, sizeof(what), "%s: eg_reverse's gradients (x, v, t per sample; c, dt summed) equal the old device path's "
+                    dget(&g, base + 2, ot, (size_t)N * 8) && (ps ? dget(&g, base + 3, ocps, (size_t)N * 8) : dget(&g, base + 3, &oc, sizeof(oc))) && dget(&g, base + 4, &odt, sizeof(odt));
+    int g_ok = rok && (ps || memcmp(&oc, &gc, sizeof(gc)) == 0) && memcmp(&odt, &gdt, sizeof(gdt)) == 0;
+    for (int i = 0; g_ok && i < N; ++i)
+        g_ok = memcmp(&ox[i], &gx[i], 8) == 0 && memcmp(&ov[i], &gv[i], 8) == 0 && memcmp(&ot[i], &gt[i], 8) == 0 && (!ps || memcmp(&ocps[i], &gcps[i], 8) == 0);
+    snprintf(what, sizeof(what), "%s: eg_reverse's gradients (x, v, t per sample; c per sample when a read plane, else summed; dt summed) equal the old device path's "
              "bitwise (c %.17g, dt %.17g)", what0, oc, odt);
     check(g_ok, what);
     dfree(ctx, &g);
@@ -165,6 +170,12 @@ int main(int argc, char** argv) {
     const char *lib = argv[1], *dir = argv[2], *base = argv[6];
     /* "auto" (argc 9): the K-step twin of an automatic unit; "fused" and the K-step vjp's digest (argc 10): steps_reverse FUSED over a K-step primal */
     const int automode = argc == 9 && strcmp(argv[8], "auto") == 0, fusedmode = argc == 10 && strcmp(argv[8], "fused") == 0;
+    ps = strstr(base, "_ps") != NULL;
+    if (ps) {
+        mask_slot = 6;
+        c_slot = 3;
+        dt_slot = 7;
+    }
     const long window = atol(argv[7]), every = argc >= 10 && !fusedmode ? atol(argv[8]) : 0;
     if (argc >= 10 && !fusedmode) {
         N = atol(argv[9]);
@@ -181,7 +192,8 @@ int main(int argc, char** argv) {
         !read_file(dir, "x0.bin", x0, (size_t)N * 8) || !read_file(dir, "v0.bin", v0, (size_t)N * 8) || !read_file(dir, "tf.bin", tf, (size_t)N * 8) ||
         !read_file(dir, "end_x.bin", ex, (size_t)N * 8) || !read_file(dir, "end_v.bin", ev, (size_t)N * 8) || !read_file(dir, "end_t.bin", et, (size_t)N * 8) ||
         !read_file(dir, "grad_x.bin", gx, (size_t)N * 8) || !read_file(dir, "grad_v.bin", gv, (size_t)N * 8) || !read_file(dir, "grad_t.bin", gt, (size_t)N * 8) ||
-        !read_file(dir, "grad_c.bin", &gc, sizeof(gc)) || !read_file(dir, "grad_dt.bin", &gdt, sizeof(gdt)) ||
+        !(ps ? read_file(dir, "grad_c.bin", gcps, (size_t)N * 8) && read_file(dir, "c.bin", cps, (size_t)N * 8) : read_file(dir, "grad_c.bin", &gc, sizeof(gc))) ||
+        !read_file(dir, "grad_dt.bin", &gdt, sizeof(gdt)) ||
         !read_file(dir, "steps.bin", steps, (size_t)N * 8) || !read_file(dir, "run.bin", run_ref, sizeof(run_ref))) {
         fprintf(stderr, "digests or oracle files missing in %s\n", dir);
         return 2;
@@ -205,13 +217,13 @@ int main(int argc, char** argv) {
         static const double zeros[PMAX];
         static const uint8_t none[PMAX];
         struct dplanes s = { .k = 0 };
-        eg_plane* const planes[5] = { dplane(ctx, &s, zeros, N, kDLFloat, 64), dplane(ctx, &s, v0, N, kDLFloat, 64),
+        eg_plane* const planes[6] = { dplane(ctx, &s, zeros, N, kDLFloat, 64), dplane(ctx, &s, v0, N, kDLFloat, 64),
                                       dplane(ctx, &s, x0, N, kDLFloat, 64), dplane(ctx, &s, tf, N, kDLFloat, 64),
-                                      dplane(ctx, &s, none, N, kDLBool, 8) };
-        const int32_t slots[5] = { 0, 1, 2, 3, mask_slot }, us[2] = { c_slot, dt_slot };
+                                      dplane(ctx, &s, none, N, kDLBool, 8), ps ? dplane(ctx, &s, cps, N, kDLFloat, 64) : NULL };
+        const int32_t slots[6] = { 0, 1, 2, ps ? 4 : 3, mask_slot, c_slot }, us[2] = { c_slot, dt_slot };
         const double c = 0.3, dt = 0.01;
         const void* const uv[2] = { &c, &dt };
-        const struct eg_bind_desc bd = binds(5, slots, planes, 2, us, uv);
+        const struct eg_bind_desc bd = ps ? binds(6, slots, planes, 1, us + 1, uv + 1) : binds(5, slots, planes, 2, us, uv);
         struct eg_plan_desc pd;
         memset(&pd, 0, sizeof(pd));
         pd.struct_size = sizeof(pd);
