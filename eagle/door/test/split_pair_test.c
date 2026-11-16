@@ -10,7 +10,7 @@
  *
  * <oracle dir>/<row>.spec lists the source slots in order, one per line:
  *   n <lanes>
- *   in  <name> <f64|f32|i32> <ndim> <extents...>      (file <row>.<name>.in: the old path's input, extents without the lane axis)
+ *   in  <name> <f64|f32|i32|u32|b8> <ndim> <extents...>      (file <row>.<name>.in: the old path's input, extents without the lane axis)
  *   out <name> <f64|f32|i32> <ndim> <extents...>      (starts zeroed; file <row>.<name>.out: the old path's result)
  *   ink  <name> <f64|f32|i32> <count>                 (a plane of <count> elements with no lane axis: a table; file <row>.<name>.in)
  *   outk <name> <f64|f32|i32> <count>                 (the same, an output: a block sum's keys; file <row>.<name>.out)
@@ -46,6 +46,9 @@ struct pl {
     double uni;
 };
 
+/* the element types a plane may have: 0 f64, 1 i32, 2 u32, 3 b8 (a bool byte) */
+static int ty_of(const char* ty) { return strcmp(ty, "i32") == 0 ? 1 : strcmp(ty, "u32") == 0 ? 2 : strcmp(ty, "b8") == 0 ? 3 : 0; }
+static size_t esz(const struct pl* q) { return q->is_f32 ? 4 : q->is_int == 0 ? 8 : q->is_int == 3 ? 1 : 4; }
 static int is_out(const struct pl* q) { return strcmp(q->kind, "out") == 0 || strcmp(q->kind, "outk") == 0 || strcmp(q->kind, "cell") == 0; }
 static int is_flat(const struct pl* q) { return strcmp(q->kind, "ink") == 0 || strcmp(q->kind, "outk") == 0; }
 
@@ -86,15 +89,15 @@ static int read_spec(const char* dir, const char* row, int64_t* n, struct pl* p,
         if (strcmp(kind, "ink") == 0 || strcmp(kind, "outk") == 0) {
             long long v;
             if (fscanf(f, "%47s %7s %lld", q->name, ty, &v) != 3) return 0;
-            q->is_int = strcmp(ty, "i32") == 0;
+            q->is_int = ty_of(ty);
             q->is_f32 = strcmp(ty, "f32") == 0;
             q->ndim = 0;
             q->dims[0] = v;
             continue;
         }
         if (fscanf(f, "%47s %7s %d", q->name, ty, &q->ndim) != 3) return 0;
-        q->is_int = strcmp(ty, "i32") == 0;
-            q->is_f32 = strcmp(ty, "f32") == 0;
+        q->is_int = ty_of(ty);
+        q->is_f32 = strcmp(ty, "f32") == 0;
         for (int i = 0; i < q->ndim; ++i) {
             long long v;
             if (fscanf(f, "%lld", &v) != 1) return 0;
@@ -205,7 +208,7 @@ int main(int argc, char** argv) {
         q->count = strcmp(q->kind, "cell") == 0 ? 1 : is_flat(q) ? q->dims[0] : n;
         if (strcmp(q->kind, "cell") != 0 && !is_flat(q))
             for (int d = 0; d < q->ndim; ++d) q->count *= q->dims[d];
-        const size_t bytes = (size_t)q->count * (q->is_int || q->is_f32 ? 4 : 8);
+        const size_t bytes = (size_t)q->count * esz(q);
         q->buf = calloc(1, bytes);
         q->want = calloc(1, bytes);
         char file[160];
@@ -272,7 +275,7 @@ int main(int argc, char** argv) {
                 uslots[nuni++] = slot++;
                 continue;
             }
-            if (is_out(q)) memset(q->buf, 0, (size_t)q->count * (q->is_int || q->is_f32 ? 4 : 8));
+            if (is_out(q)) memset(q->buf, 0, (size_t)q->count * esz(q));
             memset(&t[i], 0, sizeof(t[i]));
             for (int d2 = 0; d2 < q->ndim; ++d2) t[i].shape[d2] = q->dims[d2];
             if (strcmp(q->kind, "cell") == 0) { t[i].shape[0] = 1; } else if (is_flat(q)) { t[i].shape[0] = q->dims[0]; } else t[i].shape[q->ndim] = n;
@@ -280,14 +283,14 @@ int main(int argc, char** argv) {
             t[i].managed.dl_tensor.data = q->buf;
             t[i].managed.dl_tensor.device.device_type = kDLCPU;
 #ifdef EG_PAIR_DEVICE
-            const size_t pbytes = (size_t)q->count * (q->is_int || q->is_f32 ? 4 : 8);
+            const size_t pbytes = (size_t)q->count * esz(q);
             if (cudaMalloc(&dev[i], pbytes) != cudaSuccess || cudaMemcpy(dev[i], q->buf, pbytes, cudaMemcpyHostToDevice) != cudaSuccess) s = EG_FAULT;
             t[i].managed.dl_tensor.data = dev[i];
             t[i].managed.dl_tensor.device.device_type = kDLCUDA;
 #endif
             t[i].managed.dl_tensor.ndim = strcmp(q->kind, "cell") == 0 || is_flat(q) ? 1 : q->ndim + 1;
-            t[i].managed.dl_tensor.dtype.code = q->is_int ? kDLInt : kDLFloat;
-            t[i].managed.dl_tensor.dtype.bits = q->is_int || q->is_f32 ? 32 : 64;
+            t[i].managed.dl_tensor.dtype.code = q->is_int == 0 ? kDLFloat : q->is_int == 1 ? kDLInt : q->is_int == 2 ? kDLUInt : kDLBool;
+            t[i].managed.dl_tensor.dtype.bits = (uint8_t)(esz(q) * 8);
             t[i].managed.dl_tensor.dtype.lanes = 1;
             t[i].managed.dl_tensor.shape = t[i].shape;
             if (s == EG_OK) s = eg_plane_wrap(ctx, &t[i].managed, &planes[nplanes]);
@@ -307,25 +310,31 @@ int main(int argc, char** argv) {
 #endif
         if (s == EG_OK) s = eg_bind(ctx, plan, &b);
         for (int rep = 0; rep < 2; ++rep) {
+#ifndef EG_PAIR_DEVICE
+            if (rep > 0)    /* a plane the caller binds as a counter accumulates over launches: every launch starts from the zeroed output */
+                for (int i = 0; i < np; ++i)
+                    if (is_out(&pls[i])) memset(pls[i].buf, 0, (size_t)pls[i].count * esz(&pls[i]));
+#endif
             if (s == EG_OK) s = eg_launch(ctx, plan, NULL);
 #ifdef EG_PAIR_DEVICE
             if (s == EG_OK) s = eg_sync(ctx);
             for (int i = 0; i < np && s == EG_OK; ++i)
                 if (is_out(&pls[i]) &&
-                    cudaMemcpy(pls[i].buf, dev[i], (size_t)pls[i].count * (pls[i].is_int || pls[i].is_f32 ? 4 : 8), cudaMemcpyDeviceToHost) != cudaSuccess) s = EG_FAULT;
+                    cudaMemcpy(pls[i].buf, dev[i], (size_t)pls[i].count * esz(&pls[i]), cudaMemcpyDeviceToHost) != cudaSuccess) s = EG_FAULT;
 #endif
             if (s != EG_OK) reason_has(ctx, "\001");
             int bad = 0;
             for (int i = 0; i < np; ++i) {
                 struct pl* q = &pls[i];
                 if (!is_out(q)) continue;
-                const size_t bytes = (size_t)q->count * (q->is_int || q->is_f32 ? 4 : 8);
+                const size_t bytes = (size_t)q->count * esz(q);
                 if (memcmp(q->buf, q->want, bytes) != 0) {
                     ++bad;
                     int64_t at = 0;
-                    const size_t w = q->is_int || q->is_f32 ? 4 : 8;
+                    const size_t w = esz(q);
                     while (memcmp((char*)q->buf + (size_t)at * w, (char*)q->want + (size_t)at * w, w) == 0) ++at;
-                    if (q->is_int) printf("      output '%s' differs from the old path at element %lld: %d, old path %d\n", q->name, (long long)at, ((int32_t*)q->buf)[at], ((int32_t*)q->want)[at]);
+                    if (q->is_int == 1) printf("      output '%s' differs from the old path at element %lld: %d, old path %d\n", q->name, (long long)at, ((int32_t*)q->buf)[at], ((int32_t*)q->want)[at]);
+                    else if (q->is_int) printf("      output '%s' differs from the old path at element %lld\n", q->name, (long long)at);
                     else if (q->is_f32) printf("      output '%s' differs from the old path at element %lld: %.9g, old path %.9g\n", q->name, (long long)at, (double)((float*)q->buf)[at], (double)((float*)q->want)[at]);
                     else printf("      output '%s' differs from the old path at element %lld: %.17g, old path %.17g\n", q->name, (long long)at, ((double*)q->buf)[at], ((double*)q->want)[at]);
                 }

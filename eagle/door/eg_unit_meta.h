@@ -231,23 +231,41 @@ struct eg_unit_team_plane {
     int32_t fill_promised;    /**< 1: ``fill`` is promised at the start of every run; 0: no fill is promised and ``fill`` is not read */
 };
 
-/** One dispatch group of the unit, as the runner's entry choice reads it. */
+/** One dispatch group of the unit, as the runner's entry choice reads it.
+ *
+ *  PREDICATED and SWITCH are plain kernels. AUTO runs fused: the kernel counts its branch mix into ``mix_slot`` (k uint32), which eagle makes
+ *  zeroed when the caller leaves the slot out.
+ *
+ *  SEGMENTED is carried by the group's units, each with its own record of the group (same ``name`` and ``k``; a load that finds the names or the
+ *  ks of the units disagree is refused BAD_REQUEST by name):
+ *    - each branch unit ``<name>__k<j>``: ``branches`` (the k refs in order), ``offsets_slot``; a dynamic selector also ``class_slot``,
+ *      ``stale_slot`` and ``sweep`` (classify NULL), a static one ``classify`` (class_slot and stale_slot -1, sweep NULL);
+ *    - the classify unit ``<name>__cls`` (static selector): ``class_slot`` is its class plane (a per-sample INT64 MUTABLE or OUT slot), every
+ *      other slot -1, ``classify``, ``branches`` and ``sweep`` NULL;
+ *    - the sweep unit (dynamic selector): an ordinary SWITCH record with ``k``; its launch has ``active_map_slot`` and ``active_count_slot``.
+ *  A group is planned from a branch unit loaded with the group's other units in deps (a branch may name itself). The plan's slots are that
+ *  unit's, then each other unit's slot no earlier slot names, in order (branches, then the classify or sweep unit): the group's caller slots
+ *  are joined by name, and the planes the records name are eagle's.
+ *  One launch of the plan is one step: the classify unit runs (static selector), the samples are sorted stably by (live, class) (live: the
+ *  TERMINATED slot of the branch unit reads zero; no such slot: every sample is live), branch j runs over the first run-length-of-class-j threads
+ *  and reads its run from the offsets, and a dynamic selector's sweep runs over the stale LIVE samples (the active set eagle fills each step); the
+ *  sort is redone when more stale samples than 5% of the live ones remain. The caller's planes are in sample order before and after the launch. */
 struct eg_unit_dispatch {
     uint32_t struct_size;
     eg_dispatch_strategy strategy;
-    int32_t mix_slot;         /**< AUTO: the uint32 branch-mix counters eagle makes and reads, else -1 */
-    int32_t class_slot;       /**< SEGMENTED: per-sample class plane eagle makes, else -1 */
+    int32_t mix_slot;         /**< AUTO: the uint32 branch-mix counters eagle makes (unless the caller binds some) and the kernel fills, else -1 */
+    int32_t class_slot;       /**< a classify unit: its per-sample class plane; a dynamic branch unit: the class plane eagle makes; else -1 */
     int32_t stale_slot;       /**< SEGMENTED with a dynamic selector: per-sample stale mask eagle makes, else -1 */
-    int32_t offsets_slot;     /**< SEGMENTED: the K+1 run offsets eagle makes, else -1 */
-    const struct eg_unit_ref* classify; /**< SEGMENTED, static selector: the classify unit (passed in deps), NULL: none */
+    int32_t offsets_slot;     /**< a branch unit: the K+1 run offsets eagle makes, else -1 */
+    const struct eg_unit_ref* classify; /**< a static-selector branch unit: the classify unit (passed in deps), NULL: none */
     const char* name;         /**< the group's name: hawk's resolve step and reasons */
     int32_t k;                /**< the group's branches: the mix is k uint32, the offsets k+1 int64 */
     int32_t reserved0;
-    const struct eg_unit_ref* const* branches; /**< SEGMENTED: k refs (passed in deps); branches[j] runs over the run of class j, the
+    const struct eg_unit_ref* const* branches; /**< a branch unit: k refs (passed in deps); branches[j] runs over the run of class j, the
                                                     selector value j; else NULL */
-    const struct eg_unit_ref* sweep; /**< SEGMENTED, dynamic selector: the fused unit over an index set of the stale samples (passed
-                                          in deps); else NULL. Static selector: stale_slot -1, classify set, sweep NULL; dynamic:
-                                          stale_slot and sweep set, classify NULL; any other mix is refused */
+    const struct eg_unit_ref* sweep; /**< a dynamic-selector branch unit: the fused unit run over an active set of the stale LIVE samples (passed
+                                          in deps; the set eagle fills each step); else NULL. A branch record is static (stale_slot -1,
+                                          classify set, sweep NULL) or dynamic (stale_slot and sweep set, classify NULL); any other mix is refused */
 };
 
 /** The typed walk of a unit: its slots and the planes eagle makes for it. */

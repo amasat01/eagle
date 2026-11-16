@@ -52,6 +52,9 @@ void check_desc(const eg_runner_desc& d, bool device) {
 /** @brief Check the step's plans: the first finishes, no other does, one sample count. */
 void check_plans(const eg_ctx& ctx, const eg_runner_desc& d) {
     for (int i = 0; i < d.n_plans; ++i) check_handle(ctx.plans, d.plans[i], "eg_runner_desc.plans[i]");
+    for (int i = 0; i < d.n_plans; ++i)
+        if (d.plans[i]->unit->seg.present)
+            refuse(EG_NOT_WRITTEN, "unit '" + d.plans[i]->unit->name + "': a SEGMENTED dispatch group in a runner is not written (launch the plan)");
     const eg_plan_s& first = *d.plans[0];
     const FinishFacts& f = first.unit->finish;
     if (!f.present)

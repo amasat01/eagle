@@ -8,6 +8,7 @@
 #include "eagle/door/Context.h"
 #include "eagle/door/eg_unit_meta.h"
 #include "eagle/door/host/Ops.h"
+#include "eagle/door/host/Segment.h"
 #include "eagle/exec/HostTeam.h"
 
 #include <algorithm>
@@ -133,6 +134,14 @@ inline std::uint64_t run_split(const eg_plan_s& plan, int threads) {
 /** @brief Run @p plan once over each of its partitions on at most @p threads threads
  *  (HOST_SERIAL: one serial call per partition); returns the tiles run. */
 inline std::uint64_t run_plan(const eg_plan_s& plan, int threads) {
+    std::size_t group = 0;
+    for (const DispatchFacts& f : plan.unit->dispatches) {    // an AUTO group's counters eagle made: zero at every launch (nothing reads them)
+        if (f.strategy != EG_DISPATCH_AUTO) continue;
+        const eg_plane_s* mix = plan.mix[group++];
+        if (plan.bindings[static_cast<std::size_t>(f.mix)].plane == nullptr)
+            std::memset(static_cast<char*>(mix->tensor->dl_tensor.data) + mix->tensor->dl_tensor.byte_offset, 0, static_cast<std::size_t>(f.k) * sizeof(std::uint32_t));
+    }
+    if (plan.unit->seg.present) return run_segmented(plan, threads);
     if (!plan.unit->stages.empty()) return run_split(plan, threads);
     std::uint64_t tiles = 0;
     if (plan.unit->index_count_slot >= 0) {    // an index set: lanes [0, count), read now; the entry maps them itself
