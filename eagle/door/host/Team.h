@@ -39,14 +39,7 @@ inline std::uint64_t run_plan(const eg_plan_s& plan, int threads) {
         const eg_plane_s& c = *plan.bindings[plan.unit->index_count_slot].plane;
         const std::uint64_t live = *reinterpret_cast<const std::uint32_t*>(static_cast<const char*>(c.tensor->dl_tensor.data) +
                                                                           c.tensor->dl_tensor.byte_offset);
-        std::uint64_t limit = static_cast<std::uint64_t>(plan.n_samples);   // a prefix set: up to the sample count
-        if (plan.unit->index_map_slot >= 0) {
-            const DLTensor& m = plan.bindings[plan.unit->index_map_slot].plane->tensor->dl_tensor;
-            limit = static_cast<std::uint64_t>(m.shape[0]);
-        }
-        if (live > limit)
-            refuse(EG_BAD_REQUEST, "the index count " + std::to_string(live) + " is above the " +
-                   (plan.unit->index_map_slot >= 0 ? "map's " : "sample count's ") + std::to_string(limit) + " entries");
+        check_index_live(plan, live);
         if (live > 0) run_prefix(plan, threads, static_cast<std::int64_t>(live));
         return live > 0 ? 1 : 0;
     }

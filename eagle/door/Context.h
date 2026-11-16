@@ -148,7 +148,7 @@ struct eg_unit_s {
     std::int32_t index_map_slot = -1;         ///< the caller's int32/int64 LOOKUP of lanes to run (an index set), -1: none
     std::int32_t index_count_slot = -1;       ///< the caller's uint32 LOOKUP count: lanes run (with no map: the prefix)
     std::int32_t block = 0;                   ///< device threads per block the meta states, 0: eagle's choice
-    bool device_box = false;                  ///< the meta states a device thread box
+    std::int64_t dev_box_t = 0, dev_box_stride = 1;   ///< a device thread box: each thread serves dev_box_t lanes dev_box_stride apart; 0: none
     std::uint64_t module = 0;                 ///< the loaded device image (a CUmodule), 0: none
     std::uint64_t function = 0;               ///< its device function (a CUfunction), 0: none
     int regs = 0, max_threads = 0;            ///< the device function's registers per thread and most threads per block
@@ -402,6 +402,8 @@ struct Owned {
 };
 /** @brief The per-sample planes a reorder of @p runner moves (the mask first, a (D, n) plane as D rows), each once. */
 std::vector<Owned> owned_planes(const eg_runner_s& runner);
+/** @brief Refuse an index set's live count @p live above the entries its plan holds: the map's, else the sample count's. */
+void check_index_live(const eg_plan_s& plan, std::uint64_t live);
 /** @brief The fewest samples a reorder is built for and fires over. */
 inline constexpr std::int64_t kMinReorderSpan = 4096;
 /** @brief Whether the plans of @p d read an active set (all or none must); refuses a request that does not fit one. */
@@ -424,6 +426,8 @@ void device_plan_free(eg_plan_s& plan) noexcept;
 void* device_alloc(eg_ctx& ctx, std::size_t bytes);
 void device_free(eg_ctx& ctx, void* data) noexcept;
 void device_cell_work(eg_plan_s& plan);
+/** @brief Read @p bytes (a multiple of 4) of device memory at @p device into @p host, ordered after the context's queued work. */
+void device_read(eg_ctx& ctx, const void* device, void* host, std::size_t bytes);
 void device_runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out);
 void device_run(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report);
 

@@ -170,6 +170,18 @@ std::vector<Owned> owned_planes(const eg_runner_s& runner) {
     return out;
 }
 
+/** @brief Refuse an index set's live count above the entries its plan holds: the map's, else the sample count's. */
+void check_index_live(const eg_plan_s& plan, std::uint64_t live) {
+    std::uint64_t limit = static_cast<std::uint64_t>(plan.n_samples);   // a prefix set: up to the sample count
+    if (plan.unit->index_map_slot >= 0) {
+        const DLTensor& m = plan.bindings[plan.unit->index_map_slot].plane->tensor->dl_tensor;
+        limit = static_cast<std::uint64_t>(m.shape[0]);
+    }
+    if (live > limit)
+        refuse(EG_BAD_REQUEST, "the index count " + std::to_string(live) + " is above the " +
+               (plan.unit->index_map_slot >= 0 ? "map's " : "sample count's ") + std::to_string(limit) + " entries");
+}
+
 /** @brief The steps between two compactions of a fixed-step active set: @p d's ``every``, else the smallest
  *  whole number of launches of at least kDefaultEvery steps. */
 std::int64_t active_every_steps(const eg_runner_desc& d) {

@@ -404,13 +404,14 @@ int main(int argc, char** argv) {
               eg_record_end(ctx, &g) == EG_OK && eg_graph_free(ctx, g) == EG_OK,
           "recording a DEVICE launch: NOT_WRITTEN");
 
-    /* DEVICE features not written, each by name. */
+    /* DEVICE units refused by name (no device image), and the features a DEVICE plan now takes: a thread box and a
+     * BANDED scalar type (their pairs run in device_features_test). */
     struct { const char* name; uint8_t byte; const char* reason; } rows[8] = {
-        { "boxdev", 0xC3, "a device thread box (team grid)" },
-        { "banded", 0xC4, "a BANDED scalar type" },
+        { "boxdev", 0xC3, NULL },
+        { "banded", 0xC4, NULL },
         { "count1", 0xD1, "the unit has no device image" },   /* a fixed-step finish runs on a device */
         { "count1a", 0xE1, "the unit has no device image" },
-        { "lanes", 0x91, "an index set" },
+        { "lanes", 0x91, "the unit has no device image" },
         { "keyed", 0x68, "the unit has no device image" },
         { "cells", 0x67, "the unit has no device image" },
         { "axpb", 0xA1, "the unit has no device image" },
@@ -420,9 +421,15 @@ int main(int argc, char** argv) {
         const char* path = r < 2 ? dev_lib : host_lib;
         s = load(ctx, path, rows[r].name, rows[r].byte, &unit);
         char what[160];
-        snprintf(what, sizeof(what), "DEVICE plan of %s refused NOT_WRITTEN: %s", rows[r].name, rows[r].reason);
-        check(s == EG_OK && refused(plan(ctx, unit, EG_STRUCTURE_DEVICE, 0, NULL, NULL, &hp), EG_NOT_WRITTEN, ctx, rows[r].reason),
-              what);
+        eg_plan* made = NULL;
+        if (rows[r].reason == NULL) {
+            snprintf(what, sizeof(what), "DEVICE plan of %s accepted", rows[r].name);
+            check(s == EG_OK && plan(ctx, unit, EG_STRUCTURE_DEVICE, 0, NULL, NULL, &made) == EG_OK && eg_plan_free(ctx, made) == EG_OK, what);
+        } else {
+            snprintf(what, sizeof(what), "DEVICE plan of %s refused NOT_WRITTEN: %s", rows[r].name, rows[r].reason);
+            check(s == EG_OK && refused(plan(ctx, unit, EG_STRUCTURE_DEVICE, 0, NULL, NULL, &hp), EG_NOT_WRITTEN, ctx, rows[r].reason),
+                  what);
+        }
         eg_unit_free(ctx, unit);
     }
 

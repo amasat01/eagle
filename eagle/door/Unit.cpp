@@ -201,7 +201,6 @@ void read_body(const eg_unit_meta& m, void* library, bool device_only, eg_unit_s
     if (launch.block < 0)
         refuse(EG_BAD_REQUEST, "meta that contradicts itself: unit '" + unit.name + "' block " + std::to_string(launch.block));
     unit.block = launch.block;
-    unit.device_box = launch.device_box != nullptr;
     if (launch.index_map_slot != -1 && launch.index_count_slot == -1)
         refuse(EG_BAD_REQUEST, "meta that contradicts itself: unit '" + unit.name + "' names an index map without its count");
     if (launch.index_count_slot != -1) {
@@ -273,16 +272,19 @@ void read_body(const eg_unit_meta& m, void* library, bool device_only, eg_unit_s
             f.axes.push_back(axis);
         }
     }
-    if (launch.host_box != nullptr) {
-        const eg_unit_box box = read_record(launch.host_box, eg_unit_box{}, "unit '" + unit.name + "' host_box");
+    for (const bool device : { false, true }) {    // the thread box of each side
+        const eg_unit_box* stated = device ? launch.device_box : launch.host_box;
+        if (stated == nullptr) continue;
+        const char* side = device ? "device" : "host";
+        const eg_unit_box box = read_record(stated, eg_unit_box{}, "unit '" + unit.name + "' " + side + "_box");
         if (box.axis < 0 || box.t < 2 || box.stride < 1)
-            refuse(EG_BAD_REQUEST, "meta that contradicts itself: unit '" + unit.name + "' host_box needs axis >= 0, t >= 2 "
+            refuse(EG_BAD_REQUEST, "meta that contradicts itself: unit '" + unit.name + "' " + side + "_box needs axis >= 0, t >= 2 "
                    "and stride >= 1, got " + std::to_string(box.axis) + ", " + std::to_string(box.t) + ", " +
                    std::to_string(box.stride));
         if (unit.active_map_slot != -1 || unit.index_count_slot != -1)
-            refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': a host thread box with an active set or an index set is not written");
-        unit.box_t = box.t;
-        unit.box_stride = box.stride;
+            refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': a " + side + " thread box with an active set or an index set is not written");
+        (device ? unit.dev_box_t : unit.box_t) = box.t;
+        (device ? unit.dev_box_stride : unit.box_stride) = box.stride;
     }
 }
 

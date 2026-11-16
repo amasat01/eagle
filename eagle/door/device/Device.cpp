@@ -44,6 +44,7 @@ void device_plan_free(eg_plan_s&) noexcept {}
 void* device_alloc(eg_ctx&, std::size_t) { return nullptr; }
 void device_free(eg_ctx&, void*) noexcept {}
 void device_cell_work(eg_plan_s&) {}
+void device_read(eg_ctx&, const void*, void*, std::size_t) {}
 void device_runner_new(eg_ctx&, const eg_runner_desc*, eg_runner**) {
     refuse(EG_NOT_WRITTEN, "structure DEVICE: the device group is not built");
 }
@@ -275,11 +276,6 @@ void device_plan_check(const eg_ctx& ctx, const eg_unit_s& unit) {
     if (ctx.dev.ordinal < 0)
         refuse(EG_BAD_REQUEST, "structure DEVICE on a host-only context (made without EG_CTX_DEVICE)");
     const std::string who = "unit '" + unit.name + "' on DEVICE: ";
-    const char* feature = unit.index_count_slot >= 0             ? "an index set"
-                          : unit.device_box                      ? "a device thread box (team grid)"
-                          : unit.scalar_type == EG_SCALAR_BANDED ? "a BANDED scalar type"
-                                                                 : nullptr;
-    if (feature != nullptr) refuse(EG_NOT_WRITTEN, who + feature + " is not written in this build of the door");
     if (unit.function == 0) refuse(EG_NOT_WRITTEN, who + "the unit has no device image");
     for (const CompanionFacts& c : unit.companions)
         if (c.device_fold == 0)
@@ -289,6 +285,12 @@ void device_plan_check(const eg_ctx& ctx, const eg_unit_s& unit) {
 /** @brief Queue the plan's launches (launch_on) on the context's stream. */
 void device_launch(eg_plan_s& plan) {
     Current current(plan.ctx->dev);
+    if (plan.unit->index_count_slot >= 0) {    // an index set: its live count is checked against the entries held (a device read), the kernel maps the lanes itself
+        const DLTensor& c = plan.bindings[static_cast<std::size_t>(plan.unit->index_count_slot)].plane->tensor->dl_tensor;
+        unsigned live = 0;
+        device_read(*plan.ctx, static_cast<char*>(c.data) + c.byte_offset, &live, sizeof(live));
+        check_index_live(plan, live);
+    }
     launch_on(plan, plan.ctx->dev.stream);
 }
 
@@ -322,6 +324,12 @@ void device_free(eg_ctx& ctx, void* data) noexcept {
         cells_free(reinterpret_cast<std::uint64_t>(data));
     } catch (...) {
     }
+}
+
+/** @brief Read @p bytes (a multiple of 4) of device memory at @p device into @p host, ordered after the context's queued work. */
+void device_read(eg_ctx& ctx, const void* device, void* host, std::size_t bytes) {
+    Current current(ctx.dev);
+    cells_read(ctx.dev.stream, reinterpret_cast<std::uint64_t>(device), static_cast<unsigned*>(host), static_cast<unsigned>(bytes / sizeof(unsigned)));
 }
 
 /** @brief The two reduction work buffers of each cell component of @p plan (made after its rows). */
@@ -497,9 +505,17 @@ void device_runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out)
     *out = nullptr;
     const eg_runner_desc d = read_input(desc, "eg_runner_desc");
     for (std::int32_t i = 0; i < d.n_plans; ++i)
-        if (ctx.plans.count(d.plans[i]) != 0 && (!d.plans[i]->unit->companions.empty() || !d.plans[i]->unit->cells.empty()))
-            refuse(EG_NOT_WRITTEN, "plans[" + std::to_string(i) + "]: companion or cell folding inside a device runner loop "
-                   "is not written in this build of the door");
+        if (ctx.plans.count(d.plans[i]) != 0) {
+            const eg_unit_s& u = *d.plans[i]->unit;
+            const char* inside = !u.companions.empty() || !u.cells.empty() ? "companion or cell folding"
+                                 : u.index_count_slot >= 0                  ? "an index set"
+                                 : u.dev_box_t > 0                          ? "a device thread box"
+                                 : u.scalar_type == EG_SCALAR_BANDED        ? "a BANDED scalar type"
+                                                                            : nullptr;
+            if (inside != nullptr)
+                refuse(EG_NOT_WRITTEN, "plans[" + std::to_string(i) + "]: " + inside + " inside a device runner loop "
+                       "is not written in this build of the door");
+        }
     check_runner(ctx, d, true);
     for (std::int32_t i = 0; i < d.n_plans; ++i)
         if (d.plans[i]->structure != EG_STRUCTURE_DEVICE)

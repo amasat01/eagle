@@ -19,12 +19,14 @@ namespace {
  *  inside [0, n) without overlap. */
 std::vector<exec::Partition> read_partitions(const eg_plan_desc& d) {
     const std::int64_t n = d.n_samples;
-    if (d.unit->box_t > 0 && d.structure != EG_STRUCTURE_DEVICE) {    // a host thread box: base and count count threads, ceil(n / (t * stride)) * stride of them
+    const bool device = d.structure == EG_STRUCTURE_DEVICE;
+    const std::int64_t box_t = device ? d.unit->dev_box_t : d.unit->box_t, box_stride = device ? d.unit->dev_box_stride : d.unit->box_stride;
+    if (box_t > 0) {    // a thread box: base and count count threads, ceil(n / (t * stride)) * stride of them
         if (d.n_partitions != 0)
-            refuse(EG_BAD_REQUEST, "unit '" + d.unit->name + "' computes " + std::to_string(d.unit->box_t) +
+            refuse(EG_BAD_REQUEST, "unit '" + d.unit->name + "' computes " + std::to_string(box_t) +
                    " lanes per thread (a thread box), so its partitions count threads, not lanes; pass none");
-        const std::int64_t span = d.unit->box_t * d.unit->box_stride;
-        return { exec::Partition{ 0, (n + span - 1) / span * d.unit->box_stride, n } };
+        const std::int64_t span = box_t * box_stride;
+        return { exec::Partition{ 0, (n + span - 1) / span * box_stride, n } };
     }
     if (d.n_partitions == 0) return { exec::Partition::whole(n) };
     if (d.n_partitions < 0 || d.part_base == nullptr || d.part_count == nullptr)
@@ -153,12 +155,21 @@ void check_index_set(const eg_plan_s& plan, const eg_bind_desc& d) {
     const eg_plane_s *m = prospect(plan.unit->index_map_slot), *c = prospect(plan.unit->index_count_slot);
     if (m == nullptr || c == nullptr) return;
     const DLTensor& mt = m->tensor->dl_tensor;
-    const std::uint64_t held = *reinterpret_cast<const std::uint32_t*>(static_cast<const char*>(c->tensor->dl_tensor.data) +
-                                                                        c->tensor->dl_tensor.byte_offset);
+    const bool device = plan.structure == EG_STRUCTURE_DEVICE;    // the caller's planes are device memory: read them back
+    const auto fetch = [&](const DLTensor& t, std::size_t bytes, void* out) {
+        const char* at = static_cast<const char*>(t.data) + t.byte_offset;
+        if (device) device_read(*plan.ctx, at, out, bytes);
+        else std::memcpy(out, at, bytes);
+    };
+    std::uint32_t count = 0;
+    fetch(c->tensor->dl_tensor, sizeof(count), &count);
+    const std::uint64_t held = count;
     if (held > static_cast<std::uint64_t>(mt.shape[0]))
         refuse(EG_BAD_REQUEST, "the index count is " + std::to_string(held) + ", but the index map holds " +
                std::to_string(mt.shape[0]) + " entries");
-    const char* data = static_cast<const char*>(mt.data) + mt.byte_offset;
+    std::vector<char> words(static_cast<std::size_t>((held * mt.dtype.bits / 8 + 3) / 4 * 4));    // the listed entries, whole words
+    if (!words.empty()) fetch(mt, words.size(), words.data());
+    const char* data = words.data();
     std::vector<bool> seen(static_cast<std::size_t>(plan.n_samples), false);
     for (std::uint64_t i = 0; i < held; ++i) {
         const std::int64_t lane = mt.dtype.bits == 64 ? reinterpret_cast<const std::int64_t*>(data)[i]
