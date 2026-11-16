@@ -111,6 +111,13 @@ unsigned resolved_block(const DeviceState& d, const eg_unit_s& u, std::int64_t n
 /** @brief The loop iterations that cover @p max_steps at @p every steps each. */
 std::int64_t loop_cap(std::int64_t max_steps, std::int64_t every) { return max_steps / every + (max_steps % every != 0); }
 
+/** @brief The planes a reorder of @p runner moves, as device addresses (the mask first). */
+std::vector<DevicePlane> reorder_table(const eg_runner_s& runner) {
+    std::vector<DevicePlane> out;
+    for (const Owned& o : owned_planes(runner)) out.push_back({ o.data, static_cast<unsigned>(o.bytes) });
+    return out;
+}
+
 }  // namespace
 
 /** @brief EG_CTX_DEVICE: retain the device's primary context, make the context's stream, read the launch facts. */
@@ -333,6 +340,10 @@ DeviceRun::~DeviceRun() {
     cells_free(cells);
     cells_free(map);
     cells_free(scratch);
+    cells_free(perm);
+    cells_free(inv);
+    cells_free(rcells);
+    cells_free(rscratch);
     cells_free(fast);
 }
 
@@ -494,11 +505,11 @@ void device_runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out)
         if (d.plans[i]->structure != EG_STRUCTURE_DEVICE)
             refuse(EG_BAD_REQUEST, "plans[" + std::to_string(i) + "] is a host plan in a runner over DEVICE plans: "
                    "one runner runs on one side");
-    if (d.flags & EG_RUN_REORDER)
-        refuse(EG_NOT_WRITTEN, "EG_RUN_REORDER (reordering the planes by the active set) on a device is not written "
-               "in this build of the door");
     const std::int64_t k = d.plans[0]->unit->finish.steps;
     if (k == EG_STEPS_AUTO) {    // the no-graph entries: no loop, no loop cells
+        if (d.flags & EG_RUN_REORDER)
+            refuse(EG_NOT_WRITTEN, "EG_RUN_REORDER (reordering the planes by the active set) with automatic steps on a "
+                   "device is not written in this build of the door");
         auto* runner = new eg_runner_s;
         try {
             runner->plans.assign(d.plans, d.plans + d.n_plans);
@@ -515,10 +526,12 @@ void device_runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out)
         *out = runner;
         return;
     }
-    const bool active = d.plans[0]->unit->active_map_slot >= 0 && check_active(d);
-    if (active && d.plans[0]->unit->group != 1)
-        refuse(EG_NOT_WRITTEN, "an active set over groups of " + std::to_string(d.plans[0]->unit->group) +
-               " lanes on a device is not written in this build of the door");
+    const bool active = (d.plans[0]->unit->active_map_slot >= 0 || (d.flags & EG_RUN_REORDER)) && check_active(d);
+    const std::int64_t group = d.plans[0]->unit->group;
+    if (active && group != 1)
+        refuse(EG_NOT_WRITTEN, "an active set over groups of " + std::to_string(group) + " lanes on a device is not "
+               "written in this build of the door (the old device runner cannot capture its compaction either)");
+    const bool reorder = active && (d.flags & EG_RUN_REORDER) && d.plans[0]->n_samples >= kMinReorderSpan;
     if (!active && d.every != 0 && d.every != k)
         refuse(EG_BAD_REQUEST, "every " + std::to_string(d.every) + ": a runner without an active set advances "
                "unit '" + d.plans[0]->unit->name + "''s " + std::to_string(k) + " steps per launch");
@@ -542,12 +555,24 @@ void device_runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out)
             a.n = n;
             a.every_steps = every;
             a.every_launches = every / k;
+            a.reorder = reorder;
+            a.theta = d.reorder_theta;
             runner->active = true;
             runner->dev.map = cells_new(static_cast<unsigned>(std::max<std::int64_t>(n, 1)));
             runner->dev.scratch = cells_new(static_cast<unsigned>((compact_scratch_bytes(n) + sizeof(unsigned) - 1) / sizeof(unsigned)));
             std::vector<unsigned> identity(static_cast<std::size_t>(n));
             for (std::int64_t i = 0; i < n; ++i) identity[static_cast<std::size_t>(i)] = static_cast<unsigned>(i);
             cells_write(ctx.dev.stream, runner->dev.map, identity.data(), static_cast<unsigned>(n));
+            if (reorder) {
+                DeviceRun& r = runner->dev;
+                r.perm = cells_new(static_cast<unsigned>(n));
+                r.inv = cells_new(static_cast<unsigned>(n));
+                r.rcells = cells_new(5);    // [live32, span, fire, reorders, zero]
+                cells_write(ctx.dev.stream, r.perm, identity.data(), static_cast<unsigned>(n));
+                cells_write(ctx.dev.stream, r.inv, identity.data(), static_cast<unsigned>(n));
+                cells_write(ctx.dev.stream, r.rcells + sizeof(unsigned), total, 1);    // span = n
+                r.rscratch = cells_new(static_cast<unsigned>((reorder_scratch_bytes(n, reorder_table(*runner)) + sizeof(unsigned) - 1) / sizeof(unsigned)));
+            }
         }
         ctx.runners.insert(runner);
     } catch (...) {
@@ -597,8 +622,9 @@ void device_run(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report) {
         r.loop = nullptr;
     }
     auto* counter = reinterpret_cast<unsigned*>(first.device_counter);
-    unsigned compactions0 = 0;
+    unsigned compactions0 = 0, reorders0 = 0;
     if (runner->active) cells_read(stream, r.cells + 5 * sizeof(unsigned), &compactions0, 1);
+    if (runner->act.reorder) cells_read(stream, r.rcells + 3 * sizeof(unsigned), &reorders0, 1);
     const DLTensor& t = first.bindings[static_cast<std::size_t>(f.mask_slot)].plane->tensor->dl_tensor;
     if (runner->active && t.dtype.bits != 8)
         refuse(EG_BAD_REQUEST, "the mask of an active set on a device is a bool or uint8 plane, got " + std::to_string(t.dtype.bits) + " bits");
@@ -611,13 +637,29 @@ void device_run(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report) {
             for (std::int64_t l = 0; l < (runner->active ? runner->act.every_launches : 1); ++l)
                 for (eg_plan_s* p : runner->plans) launch_on(*p, s);
         };
-        std::function<void(std::uint64_t)> compact;
-        if (runner->active)
-            compact = [&t, n, cells, &r, counter](std::uint64_t s) {
-                compact_step(s, static_cast<const char*>(t.data) + t.byte_offset, n, reinterpret_cast<std::int32_t*>(r.map),
-                             cells + 3, reinterpret_cast<void*>(r.scratch), counter, cells + 4, cells + 5);
-            };
-        r.loop = loop_capture(stream, counter, cells + 2, cells, cap, body, compact, cells + 4);
+        std::vector<LoopGate> gates;
+        if (runner->active) {
+            const ActiveState& a = runner->act;
+            gates.push_back({ [&t, n, cells, &r, counter, &a](std::uint64_t s) {
+                                  auto* rc = reinterpret_cast<unsigned*>(r.rcells);
+                                  compact_step(s, static_cast<const char*>(t.data) + t.byte_offset, n,
+                                               reinterpret_cast<std::int32_t*>(r.map), cells + 3, reinterpret_cast<void*>(r.scratch),
+                                               a.reorder ? rc : nullptr, a.reorder ? rc + 1 : nullptr,
+                                               a.reorder ? rc + 2 : nullptr, static_cast<float>(a.theta));
+                                  compact_mark(s, counter, cells + 4, cells + 5);
+                              },
+                              counter, cells + 4 });
+            if (a.reorder)
+                gates.push_back({ [runner, n, cells, &r, &t](std::uint64_t s) {
+                                      auto* rc = reinterpret_cast<unsigned*>(r.rcells);
+                                      reorder_step(s, reorder_table(*runner), static_cast<const char*>(t.data) + t.byte_offset,
+                                                   reinterpret_cast<std::int32_t*>(r.perm), reinterpret_cast<std::int32_t*>(r.inv),
+                                                   reinterpret_cast<std::int32_t*>(r.map), cells + 3, rc + 1, rc + 2,
+                                                   reinterpret_cast<void*>(r.rscratch), n, rc + 3);
+                                  },
+                                  reinterpret_cast<unsigned*>(r.rcells) + 2, reinterpret_cast<unsigned*>(r.rcells) + 4 });
+        }
+        r.loop = loop_capture(stream, counter, cells + 2, cells, cap, body, gates);
         stream_wait(stream);
         r.build_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
         r.bound = std::move(bound);
@@ -636,6 +678,24 @@ void device_run(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report) {
     out.launches = ran;
     out.steps = static_cast<std::int64_t>(ran) * every;
     out.compactions = compactions - compactions0;
+    if (runner->act.reorder) {    // the end-of-run exit: every plane back in sample order, the map recomputed from the restored mask
+        unsigned reorders = 0;
+        cells_read(stream, r.rcells + 3 * sizeof(unsigned), &reorders, 1);
+        out.reorders = reorders - reorders0;
+        if (reorders != runner->act.restored_at) {
+            auto* rc = reinterpret_cast<unsigned*>(r.rcells);
+            restore_step(stream, reorder_table(*runner), reinterpret_cast<std::int32_t*>(r.perm), reinterpret_cast<std::int32_t*>(r.inv),
+                         reinterpret_cast<void*>(r.rscratch), n);
+            const unsigned span_fire[2] = { static_cast<unsigned>(n), 0 };
+            cells_write(stream, r.rcells + sizeof(unsigned), span_fire, 2);
+            compact_step(stream, static_cast<const char*>(t.data) + t.byte_offset, n, reinterpret_cast<std::int32_t*>(r.map),
+                         reinterpret_cast<unsigned*>(r.cells) + 3, reinterpret_cast<void*>(r.scratch), rc, rc + 1, rc + 2,
+                         static_cast<float>(runner->act.theta));
+            const unsigned zero = 0;
+            cells_write(stream, r.rcells + 2 * sizeof(unsigned), &zero, 1);
+            runner->act.restored_at = reorders;
+        }
+    }
     out.mapped = static_cast<std::int64_t>(ran) * n;
     out.build_s = r.build_s;
     write_report(report, out);

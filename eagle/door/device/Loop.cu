@@ -13,7 +13,9 @@
 #include "eagle/filtering/Compact.h"
 #include "eagle/reduce/canonical.h"
 
-#include <optional>
+#include "eagle/filtering/Reorder.h"
+
+#include <memory>
 
 namespace eagle {
 namespace door {
@@ -24,21 +26,21 @@ struct DeviceLoop {
 };
 
 DeviceLoop* loop_capture(std::uint64_t stream, const unsigned* finished, const unsigned* total, unsigned* cells,
-                         unsigned cap, const std::function<void(std::uint64_t)>& body,
-                         const std::function<void(std::uint64_t)>& compact, const unsigned* done_at_last) {
+                         unsigned cap, const std::function<void(std::uint64_t)>& body, const std::vector<LoopGate>& gates) {
     const auto origin = reinterpret_cast<cudaStream_t>(stream);
     auto* loop = new DeviceLoop;
     try {
         cuda::CaptureConditional weave(origin, CountGuard{ finished, total }, cap, cells);
-        std::optional<cuda::CaptureConditional> moved;    // the compaction: an IF inside the loop body, made before the capture
-        if (compact) moved.emplace(weave.bodyStream(), CountGuard{ finished, done_at_last });
+        std::vector<std::unique_ptr<cuda::CaptureConditional>> ifs;    // the gates: IF nodes inside the loop body, made before the capture
+        for (const LoopGate& g : gates)
+            ifs.push_back(std::make_unique<cuda::CaptureConditional>(weave.bodyStream(), CountGuard{ g.count, g.base }));
         cuda::StreamCapturer capturer(origin);
         capturer.begin();
         try {
             body(reinterpret_cast<std::uint64_t>(weave.begin()));
-            if (moved) {
-                compact(reinterpret_cast<std::uint64_t>(moved->begin()));
-                moved->end();
+            for (std::size_t i = 0; i < gates.size(); ++i) {
+                gates[i].run(reinterpret_cast<std::uint64_t>(ifs[i]->begin()));
+                ifs[i]->end();
             }
             weave.end();
         } catch (...) {
@@ -60,6 +62,8 @@ __global__ void compactDoneKernel(const unsigned* finished, unsigned* done_at_la
     *done_at_last = *finished;
     ++*compactions;
 }
+
+__global__ void reorderCountKernel(const unsigned* fire, unsigned* reorders) { *reorders += *fire != 0 ? 1u : 0u; }
 
 __global__ void maskCountKernel(const unsigned char* mask, long long n, unsigned width, unsigned* counter) {
     for (long long i = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x; i < n;
@@ -109,12 +113,54 @@ void mask_count(std::uint64_t stream, const void* mask, std::int64_t n, unsigned
 
 std::size_t compact_scratch_bytes(std::int64_t n) { return filtering::compactScratchBytes(n); }
 
-void compact_step(std::uint64_t stream, const void* mask, std::int64_t n, std::int32_t* map, unsigned* count, void* scratch,
-                  const unsigned* finished, unsigned* done_at_last, unsigned* compactions) {
+void compact_step(std::uint64_t stream, const void* mask, std::int64_t n, std::int32_t* map, unsigned* count,
+                  void* scratch, unsigned* live32, const unsigned* span, unsigned* fire, float theta) {
     const auto s = reinterpret_cast<cudaStream_t>(stream);
-    filtering::compactDevice(static_cast<const std::uint8_t*>(mask), filtering::kCompactMaskIsDrop, map, count, scratch, n, s);
-    compactDoneKernel<<<1, 1, 0, s>>>(finished, done_at_last, compactions);
+    const auto* flags = static_cast<const std::uint8_t*>(mask);
+    if (live32 != nullptr) {
+        const filtering::ReorderTrigger trigger{ live32, span, fire, theta };
+        filtering::compactDevice(flags, filtering::kCompactMaskIsDrop, map, count, scratch, n, s, &trigger);
+    } else {
+        filtering::compactDevice(flags, filtering::kCompactMaskIsDrop, map, count, scratch, n, s);
+    }
     EAGLE_CHECK_ALWAYS(cudaGetLastError());
+}
+
+void compact_mark(std::uint64_t stream, const unsigned* finished, unsigned* done_at_last, unsigned* compactions) {
+    compactDoneKernel<<<1, 1, 0, reinterpret_cast<cudaStream_t>(stream)>>>(finished, done_at_last, compactions);
+    EAGLE_CHECK_ALWAYS(cudaGetLastError());
+}
+
+namespace {
+
+std::vector<filtering::ReorderPlane> table(const std::vector<DevicePlane>& planes) {
+    std::vector<filtering::ReorderPlane> out;
+    for (const DevicePlane& p : planes) out.push_back({ p.data, p.bytes });
+    return out;
+}
+
+}  // namespace
+
+std::size_t reorder_scratch_bytes(std::int64_t n, const std::vector<DevicePlane>& planes) {
+    const auto t = table(planes);
+    return filtering::reorderScratchBytes(n, t.data(), static_cast<std::uint32_t>(t.size()), 0);
+}
+
+void reorder_step(std::uint64_t stream, const std::vector<DevicePlane>& planes, const void* mask, std::int32_t* perm,
+                  std::int32_t* inv, std::int32_t* map, unsigned* count, unsigned* span, unsigned* fire, void* scratch,
+                  std::int64_t n, unsigned* reorders) {
+    const auto s = reinterpret_cast<cudaStream_t>(stream);
+    reorderCountKernel<<<1, 1, 0, s>>>(fire, reorders);
+    EAGLE_CHECK_ALWAYS(cudaGetLastError());
+    const auto t = table(planes);
+    filtering::reorderDevice(t.data(), static_cast<std::uint32_t>(t.size()), static_cast<const std::uint8_t*>(mask),
+                             filtering::kCompactMaskIsDrop, perm, inv, map, count, span, fire, scratch, n, s);
+}
+
+void restore_step(std::uint64_t stream, const std::vector<DevicePlane>& planes, std::int32_t* perm, std::int32_t* inv,
+                  void* scratch, std::int64_t n) {
+    const auto t = table(planes);
+    filtering::restoreDevice(t.data(), static_cast<std::uint32_t>(t.size()), perm, inv, scratch, n, reinterpret_cast<cudaStream_t>(stream));
 }
 
 std::int64_t cell_work_elems(std::int64_t rows) {

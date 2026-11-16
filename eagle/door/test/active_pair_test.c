@@ -8,6 +8,7 @@
  * sample's final time), a second run of a finished batch, and what a device active set refuses by name.
  *
  * usage: active_pair_test <_osc library> <_osc digest hex> <_osc_x4 library> <_osc_x4 digest hex> <oracle dir>
+ *                          <_gosc library> <_gosc digest hex>
  * oracle dir: in_{t_final,x,v}_<n>.f64 and <unit>_<case>_{x,v,t}.f64, _term.u8, _report.i64 (8 counts).
  */
 #define _POSIX_C_SOURCE 200809L
@@ -101,7 +102,7 @@ static eg_status bind(eg_ctx* ctx, eg_plan* plan, const struct run* s) {
     return eg_bind(ctx, plan, &b);
 }
 
-static struct eg_runner_desc runner_desc(eg_plan* const* plan, int64_t max_steps, int64_t every) {
+static struct eg_runner_desc runner_desc(eg_plan* const* plan, int64_t max_steps, int64_t every, double theta) {
     struct eg_runner_desc d;
     memset(&d, 0, sizeof(d));
     d.struct_size = sizeof(d);
@@ -109,6 +110,10 @@ static struct eg_runner_desc runner_desc(eg_plan* const* plan, int64_t max_steps
     d.plans = plan;
     d.max_steps = max_steps;
     d.every = every;
+    if (theta > 0.0) {
+        d.flags = EG_RUN_REORDER;
+        d.reorder_theta = theta;
+    }
     d.steps_reverse = EG_STEPS_REVERSE_PER_STEP;
     d.events = EG_EVENTS_STEP;
     d.on_no_event = EG_NO_EVENT_REFUSE;
@@ -138,7 +143,7 @@ static struct closed closed_form(const struct run* s, int64_t k, int64_t every, 
 }
 
 static void one_case(eg_ctx* ctx, eg_unit* unit, const char* name, int64_t k, const char* dir, const char* cname, int64_t n,
-                     int64_t max_steps, int64_t every, int first) {
+                     int64_t max_steps, int64_t every, double theta, int first) {
     char what[320], file[160];
     struct eg_plan_desc pd;
     memset(&pd, 0, sizeof(pd));
@@ -151,13 +156,14 @@ static void one_case(eg_ctx* ctx, eg_unit* unit, const char* name, int64_t k, co
     memset(&s, 0, sizeof(s));
     int ok = eg_plan_new(ctx, &pd, &plan) == EG_OK && run_new(ctx, &s, dir, n) && bind(ctx, plan, &s) == EG_OK;
     eg_runner* runner = NULL;
-    const struct eg_runner_desc rd = runner_desc(&plan, max_steps, every);
+    const struct eg_runner_desc rd = runner_desc(&plan, max_steps, every, theta);
     if (first && ok) {
         eg_runner* other = NULL;
         struct eg_runner_desc bad = rd;
         bad.flags = EG_RUN_REORDER;
-        check(eg_runner_new(ctx, &bad, &other) == EG_NOT_WRITTEN && reason_has(ctx, "EG_RUN_REORDER") && other == NULL,
-              "device active set: EG_RUN_REORDER refused NOT_WRITTEN by name");
+        bad.reorder_theta = 0.9;
+        check(eg_runner_new(ctx, &bad, &other) == EG_BAD_REQUEST && reason_has(ctx, "reorder_theta") && other == NULL,
+              "device active set: EG_RUN_REORDER with a theta outside [0.25, 0.75] refused BAD_REQUEST");
         bad = rd;
         bad.every = 2;
         check(eg_runner_new(ctx, &bad, &other) == EG_BAD_REQUEST && reason_has(ctx, "every 2"),
@@ -199,15 +205,18 @@ static void one_case(eg_ctx* ctx, eg_unit* unit, const char* name, int64_t k, co
     check(good, what);
     free(got);
     free(want);
-    int64_t rep[8];
+    int64_t rep[9];
     snprintf(file, sizeof(file), "%s_%s_report.i64", name, cname);
     good = read_file(dir, file, rep, sizeof(rep));
-    const int64_t have[8] = { r.n, r.finished, r.launches, r.steps, r.mapped, (r.flags & EG_REPORT_DONE) != 0,
-                              (r.flags & EG_REPORT_EXACT_STEPS) != 0, r.compactions };
+    const int64_t have[9] = { r.n, r.finished, r.launches, r.steps, r.mapped, (r.flags & EG_REPORT_DONE) != 0,
+                              (r.flags & EG_REPORT_EXACT_STEPS) != 0, r.compactions, r.reorders };
     snprintf(what, sizeof(what), "%s %s: report n %lld finished %lld launches %lld steps %lld mapped %lld done %lld exact %lld "
-             "compactions %lld equals the old device runner's, mode BAND", name, cname, (long long)have[0], (long long)have[1],
-             (long long)have[2], (long long)have[3], (long long)have[4], (long long)have[5], (long long)have[6], (long long)have[7]);
-    check(good && memcmp(rep, have, sizeof(rep)) == 0 && r.mode == EG_MODE_BAND && r.reorders == 0 && r.build_s > 0.0, what);
+             "compactions %lld reorders %lld equals the old device runner's, mode BAND", name, cname, (long long)have[0], (long long)have[1],
+             (long long)have[2], (long long)have[3], (long long)have[4], (long long)have[5], (long long)have[6], (long long)have[7], (long long)have[8]);
+    check(good && memcmp(rep, have, sizeof(rep)) == 0 && r.mode == EG_MODE_BAND && r.build_s > 0.0, what);
+    snprintf(what, sizeof(what), "%s %s: a reorder fires over at least 4096 samples and never below (reorders %lld, compactions %lld)", name, cname,
+             (long long)r.reorders, (long long)r.compactions);
+    check(theta > 0.0 && n >= 4096 ? r.reorders > 0 && r.reorders <= r.compactions : r.reorders == 0, what);
     /* the closed form: iterations, steps, mapped, finished, compactions and each sample's final time */
     const int64_t e = every != 0 ? every : k * ((16 + k - 1) / k);
     const struct closed c = closed_form(&s, k, e, max_steps);
@@ -254,17 +263,50 @@ static void run_unit(eg_ctx* ctx, const char* lib, const char* name, const char*
     if (ls != EG_OK) reason_has(ctx, "\x01");
     check(ls == EG_OK, what);
     if (unit == NULL) return;
-    one_case(ctx, unit, name, k, dir, "48_400_d", 48, 400, 0, 1);
-    one_case(ctx, unit, name, k, dir, "48_20_d", 48, 20, 0, 0);
-    one_case(ctx, unit, name, k, dir, "1000_400_d", 1000, 400, 0, 0);
-    one_case(ctx, unit, name, k, dir, "1000_400_e4", 1000, 400, 4, 0);
-    one_case(ctx, unit, name, k, dir, "1000_400_e32", 1000, 400, 32, 0);
+    one_case(ctx, unit, name, k, dir, "48_400_d", 48, 400, 0, 0.0, 1);
+    one_case(ctx, unit, name, k, dir, "48_20_d", 48, 20, 0, 0.0, 0);
+    one_case(ctx, unit, name, k, dir, "1000_400_d", 1000, 400, 0, 0.0, 0);
+    one_case(ctx, unit, name, k, dir, "1000_400_e4", 1000, 400, 4, 0.0, 0);
+    one_case(ctx, unit, name, k, dir, "1000_400_e32", 1000, 400, 32, 0.0, 0);
+    one_case(ctx, unit, name, k, dir, "1000_400_d_t50", 1000, 400, 0, 0.5, 0);
+    one_case(ctx, unit, name, k, dir, "20000_400_d_t50", 20000, 400, 0, 0.5, 0);
+    one_case(ctx, unit, name, k, dir, "20000_40_d_t50", 20000, 40, 0, 0.5, 0);
+    one_case(ctx, unit, name, k, dir, "5000_400_e4_t25", 5000, 400, 4, 0.25, 0);
+    one_case(ctx, unit, name, k, dir, "5000_400_e4_t75", 5000, 400, 4, 0.75, 0);
     eg_unit_free(ctx, unit);
 }
 
+/* A unit over groups of 32 lanes: a runner over its plan is refused by name. */
+static void group_refused(eg_ctx* ctx, const char* lib, const char* hex) {
+    struct eg_unit_ref ref;
+    memset(&ref, 0, sizeof(ref));
+    ref.struct_size = sizeof(ref);
+    ref.name = "_gosc";
+    struct eg_unit_load_desc ld;
+    memset(&ld, 0, sizeof(ld));
+    ld.struct_size = sizeof(ld);
+    ld.path = lib;
+    ld.unit = &ref;
+    eg_unit* unit = NULL;
+    struct eg_plan_desc pd;
+    memset(&pd, 0, sizeof(pd));
+    pd.struct_size = sizeof(pd);
+    pd.structure = EG_STRUCTURE_DEVICE;
+    pd.n_samples = 100;
+    eg_plan* plan = NULL;
+    const int ok = parse_digest(hex, ref.digest) && eg_unit_load(ctx, &ld, &unit) == EG_OK && (pd.unit = unit) != NULL &&
+                   eg_plan_new(ctx, &pd, &plan) == EG_OK;
+    const struct eg_runner_desc rd = runner_desc(&plan, 400, 0, 0.0);
+    eg_runner* runner = NULL;
+    check(ok && eg_runner_new(ctx, &rd, &runner) == EG_NOT_WRITTEN && reason_has(ctx, "groups of 32 lanes") && runner == NULL,
+          "device active set over groups of 32 lanes: refused NOT_WRITTEN by name");
+    if (plan != NULL) eg_plan_free(ctx, plan);
+    if (unit != NULL) eg_unit_free(ctx, unit);
+}
+
 int main(int argc, char** argv) {
-    if (argc != 6) {
-        fprintf(stderr, "usage: %s <_osc lib> <_osc digest> <_osc_x4 lib> <_osc_x4 digest> <oracle dir>\n", argv[0]);
+    if (argc != 8) {
+        fprintf(stderr, "usage: %s <_osc lib> <_osc digest> <_osc_x4 lib> <_osc_x4 digest> <oracle dir> <_gosc lib> <_gosc digest>\n", argv[0]);
         return 2;
     }
     struct eg_ctx_settings st;
@@ -277,6 +319,7 @@ int main(int argc, char** argv) {
     check(eg_ctx_new(&st, &ctx) == EG_OK, "eg_ctx_new device context (device 0)");
     run_unit(ctx, argv[1], "_osc", argv[2], 1, argv[5]);
     run_unit(ctx, argv[3], "_osc_x4", argv[4], 4, argv[5]);
+    group_refused(ctx, argv[6], argv[7]);
     check(eg_ctx_free(ctx) == EG_OK, "eg_ctx_free");
     printf("%s: %d failure(s)\n", failures ? "FAIL" : "OK", failures);
     return failures != 0;

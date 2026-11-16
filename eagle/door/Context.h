@@ -229,6 +229,7 @@ struct DeviceRun {
     eg_ctx* ctx = nullptr;                    ///< set: a DEVICE runner
     DeviceLoop* loop = nullptr;               ///< captured at the first eg_run
     std::uint64_t cells = 0;                  ///< device [remaining, ran, total, live count, finished at last compaction, compactions] (uint32)
+    std::uint64_t perm = 0, inv = 0, rcells = 0, rscratch = 0;   ///< a reordering set's permutation, [live32, span, fire, reorders, zero] and scratch
     std::uint64_t map = 0, scratch = 0;       ///< an active set's device live-slot map (int32) and its compaction scratch
     double build_s = 0.0;                     ///< the capture's wall
     int mode = EG_MODE_BAND;                  ///< steps AUTO: EG_MODE_FUSED_ONE or EG_MODE_PERSIST (no graph)
@@ -394,6 +395,15 @@ void record_drop_all(eg_ctx& ctx);
 void host_planes_only(const eg_ctx& ctx, const char* op, std::initializer_list<const eg_plane_s*> planes);
 bool device_plans(const eg_ctx& ctx, const eg_runner_desc* desc);
 void check_runner(const eg_ctx& ctx, const eg_runner_desc& d, bool device);
+/** @brief A plane the reorder moves: its first byte and element size. */
+struct Owned {
+    char* data;
+    std::size_t bytes;
+};
+/** @brief The per-sample planes a reorder of @p runner moves (the mask first, a (D, n) plane as D rows), each once. */
+std::vector<Owned> owned_planes(const eg_runner_s& runner);
+/** @brief The fewest samples a reorder is built for and fires over. */
+inline constexpr std::int64_t kMinReorderSpan = 4096;
 /** @brief Whether the plans of @p d read an active set (all or none must); refuses a request that does not fit one. */
 bool check_active(const eg_runner_desc& d);
 /** @brief The steps between two compactions of a fixed-step active set (``every``, else the default cadence). */

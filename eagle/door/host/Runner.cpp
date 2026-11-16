@@ -19,7 +19,6 @@ namespace door {
 
 namespace {
 
-constexpr std::int64_t kMinReorderSpan = 4096;   ///< the fewest samples a reorder is built for and fires over
 constexpr std::int64_t kAutoKMin = 8;            ///< AUTO: the fewest steps of a launch but the last, and the compaction cadence
 constexpr std::int64_t kAutoK0 = 16;             ///< AUTO: the steps of the first launch
 constexpr double kAutoRate = 8.0;                ///< AUTO: a compaction's cost in full-live steps on the host
@@ -70,40 +69,6 @@ void compact(ActiveState& a, const Mask& mask) {
     const double limit = static_cast<double>(static_cast<float>(a.theta)) * 32.0 * static_cast<double>(live32);
     a.fire = static_cast<double>(live) < limit && static_cast<std::int64_t>(live) < a.span &&
              a.span >= kMinReorderSpan;
-}
-
-/** @brief A plane the reorder moves: its first byte and element size. */
-struct Owned {
-    char* data;
-    std::size_t bytes;
-};
-
-/** @brief The per-sample planes bound to the runner's plans (the mask first), each once. */
-std::vector<Owned> owned_planes(const eg_runner_s& runner) {
-    std::vector<Owned> out;
-    const auto add = [&](const eg_plane_s* plane) {
-        const DLTensor& t = plane->tensor->dl_tensor;
-        char* data = static_cast<char*>(t.data) + t.byte_offset;
-        for (const Owned& o : out)
-            if (o.data == data) return;
-        const std::size_t bytes = static_cast<std::size_t>(t.dtype.bits / 8);
-        std::int64_t rows = 1;               // a (components, n) plane moves one row of n samples at a time
-        for (int i = 0; i + 1 < t.ndim; ++i) rows *= t.shape[i];
-        for (std::int64_t r = 0; r < rows; ++r)
-            out.push_back({ data + static_cast<std::size_t>(r * t.shape[t.ndim - 1]) * bytes, bytes });
-    };
-    const eg_plan_s& first = *runner.plans[0];
-    add(first.bindings[first.unit->finish.mask_slot].plane);
-    for (const eg_plan_s* p : runner.plans)
-        for (std::size_t s = 0; s < p->bindings.size(); ++s) {
-            const std::int32_t role = p->unit->slots[s].role;
-            if (p->bindings[s].plane != nullptr && !p->unit->slots[s].gathered &&    // a gathered matrix's columns are not lanes
-                (role == EG_ROLE_MUTABLE || role == EG_ROLE_PER_SAMPLE || role == EG_ROLE_VEC_IN ||
-                 role == EG_ROLE_MAT_IN || role == EG_ROLE_TERMINATED || role == EG_ROLE_OUT ||
-                 role == EG_ROLE_WIDE_IN || role == EG_ROLE_WIDE_OUT))
-                add(p->bindings[s].plane);
-        }
-    return out;
 }
 
 /** @brief Move the live slots of [0, span) to the front (stable), every owned plane and ``perm``

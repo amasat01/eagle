@@ -143,6 +143,33 @@ bool check_active(const eg_runner_desc& d) {
     return true;
 }
 
+std::vector<Owned> owned_planes(const eg_runner_s& runner) {
+    std::vector<Owned> out;
+    const auto add = [&](const eg_plane_s* plane) {
+        const DLTensor& t = plane->tensor->dl_tensor;
+        char* data = static_cast<char*>(t.data) + t.byte_offset;
+        for (const Owned& o : out)
+            if (o.data == data) return;
+        const std::size_t bytes = static_cast<std::size_t>(t.dtype.bits / 8);
+        std::int64_t rows = 1;               // a (components, n) plane moves one row of n samples at a time
+        for (int i = 0; i + 1 < t.ndim; ++i) rows *= t.shape[i];
+        for (std::int64_t r = 0; r < rows; ++r)
+            out.push_back({ data + static_cast<std::size_t>(r * t.shape[t.ndim - 1]) * bytes, bytes });
+    };
+    const eg_plan_s& first = *runner.plans[0];
+    add(first.bindings[first.unit->finish.mask_slot].plane);
+    for (const eg_plan_s* p : runner.plans)
+        for (std::size_t s = 0; s < p->bindings.size(); ++s) {
+            const std::int32_t role = p->unit->slots[s].role;
+            if (p->bindings[s].plane != nullptr && !p->unit->slots[s].gathered &&    // a gathered matrix's columns are not lanes
+                (role == EG_ROLE_MUTABLE || role == EG_ROLE_PER_SAMPLE || role == EG_ROLE_VEC_IN ||
+                 role == EG_ROLE_MAT_IN || role == EG_ROLE_TERMINATED || role == EG_ROLE_OUT ||
+                 role == EG_ROLE_WIDE_IN || role == EG_ROLE_WIDE_OUT))
+                add(p->bindings[s].plane);
+        }
+    return out;
+}
+
 /** @brief The steps between two compactions of a fixed-step active set: @p d's ``every``, else the smallest
  *  whole number of launches of at least kDefaultEvery steps. */
 std::int64_t active_every_steps(const eg_runner_desc& d) {
