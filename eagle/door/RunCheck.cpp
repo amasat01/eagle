@@ -17,8 +17,9 @@ namespace {
 void check_desc(const eg_runner_desc& d, bool device) {
     if (d.flags & ~(EG_RUN_RECORD | EG_RUN_REORDER))
         refuse(EG_BAD_REQUEST, "eg_runner_desc.flags: unknown bits " + std::to_string(d.flags));
-    if (d.flags & EG_RUN_RECORD)
-        refuse(EG_NOT_WRITTEN, "EG_RUN_RECORD (recording a run for eg_reverse) is not written in this "
+    const bool record = (d.flags & EG_RUN_RECORD) != 0;
+    if (record && device)
+        refuse(EG_NOT_WRITTEN, "EG_RUN_RECORD on a DEVICE runner (recording on the device) is not written in this "
                "build of the door");
     if (d.events == EG_EVENTS_REFINE)
         refuse(EG_NOT_WRITTEN, "events REFINE (locating each stop inside its step) is not written in "
@@ -32,16 +33,18 @@ void check_desc(const eg_runner_desc& d, bool device) {
     if (d.steps_reverse != EG_STEPS_REVERSE_PER_STEP)
         refuse(EG_BAD_REQUEST, "unknown steps_reverse " + std::to_string(d.steps_reverse));
     if (d.n_derived < 0) refuse(EG_BAD_REQUEST, "n_derived " + std::to_string(d.n_derived) + " < 0");
-    if (d.n_derived > 0)
-        refuse(EG_NOT_WRITTEN, "derived units (n_derived > 0, the record and refine roles) are not "
+    if (d.n_derived > 0 && !record)
+        refuse(EG_NOT_WRITTEN, "derived units without EG_RUN_RECORD (the refine roles) are not "
                "written in this build of the door");
+    if (record && (d.n_derived == 0 || d.derived_roles == nullptr || d.derived_units == nullptr))
+        refuse(EG_BAD_REQUEST, "EG_RUN_RECORD needs its derived units: n_derived, derived_roles and derived_units");
     if (d.step_graph != nullptr) {
         if (device)
             refuse(EG_NOT_WRITTEN, "step_graph (recorded device work run once per step) is not written in this build "
                    "of the door");
         refuse(EG_BAD_REQUEST, "step_graph: a host runner runs no recorded device work per step; pass NULL");
     }
-    if (d.window != 0 || d.memory_budget != 0)
+    if (!record && (d.window != 0 || d.memory_budget != 0))
         refuse(EG_BAD_REQUEST, "window and memory_budget set how a recorded run is reversed: without "
                "EG_RUN_RECORD both are 0");
     if (d.max_steps < 1) refuse(EG_BAD_REQUEST, "max_steps " + std::to_string(d.max_steps) + " < 1");

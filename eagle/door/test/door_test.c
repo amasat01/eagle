@@ -585,7 +585,7 @@ static void check_runner(eg_ctx* ctx, eg_unit* axpb) {
     /* refusals: each status and a reason naming the feature */
     const struct { uint32_t flags; int32_t events, steps_reverse, n_derived; int64_t every, window, max_steps;
                    int graph; eg_status status; const char* reason; } bad[] = {
-        { EG_RUN_RECORD, 0, 0, 0, 0, 0, 10, 0, EG_NOT_WRITTEN, "EG_RUN_RECORD" },
+        { EG_RUN_RECORD, 0, 0, 0, 0, 0, 10, 0, EG_BAD_REQUEST, "needs its derived units" },
         { EG_RUN_REORDER, 0, 0, 0, 0, 0, 10, 0, EG_BAD_REQUEST, "no active set" },
         { 1u << 7, 0, 0, 0, 0, 0, 10, 0, EG_BAD_REQUEST, "unknown bits" },
         { 0, EG_EVENTS_REFINE, 0, 0, 0, 0, 10, 0, EG_NOT_WRITTEN, "events REFINE" },
@@ -641,9 +641,9 @@ static void check_runner(eg_ctx* ctx, eg_unit* axpb) {
           "a DEVICE plan of a finishing unit refused NOT_WRITTEN");
     d = runner_desc(plans, 1, 10);
     check(eg_runner_new(ctx, &d, &r) == EG_OK && eg_run_event_times(ctx, r, NULL) == EG_NOT_WRITTEN &&
-              reason_has(ctx, "eg_run_event_times") && eg_reverse(ctx, r, NULL, NULL) == EG_NOT_WRITTEN &&
-              reason_has(ctx, "eg_reverse"),
-          "eg_run_event_times and eg_reverse stay NOT_WRITTEN");
+              reason_has(ctx, "eg_run_event_times") && eg_reverse(ctx, r, NULL, NULL) == EG_BAD_REQUEST &&
+              reason_has(ctx, "not recorded"),
+          "eg_run_event_times stays NOT_WRITTEN; eg_reverse of a runner without EG_RUN_RECORD is refused BAD_REQUEST");
     check(eg_runner_free(ctx, r) == EG_OK && eg_plan_free(ctx, plans[0]) == EG_OK &&
               eg_plan_free(ctx, plans[1]) == EG_OK && eg_plan_free(ctx, p3) == EG_OK &&
               eg_plane_free(ctx, px) == EG_OK && eg_plane_free(ctx, py) == EG_OK &&

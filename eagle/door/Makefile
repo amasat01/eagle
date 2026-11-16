@@ -78,13 +78,13 @@ comma := ,
 CXXFLAGS_DEVICE := $(filter-out -DEAGLE_CPU_ONLY=1,$(CXXFLAGS_DOOR)) -isystem $(CUDA)/include
 CUDART := $(if $(CUDA),-L$(CUDA)/lib64 -lcudart -Wl$(comma)-rpath$(comma)$(CUDA)/lib64)
 
-SRC := Context.cpp Unit.cpp Plane.cpp Plan.cpp RunCheck.cpp abi.cpp host/Runner.cpp host/Ops.cpp host/Record.cpp device/Device.cpp
+SRC := Context.cpp Unit.cpp Plane.cpp Plan.cpp RunCheck.cpp abi.cpp host/Runner.cpp host/Reverse.cpp host/Ops.cpp host/Record.cpp device/Device.cpp
 OBJ := $(SRC:%.cpp=$(OUT)/%.o) $(if $(CUDA),$(OUT)/device/Loop.o)
 LIB := $(OUT)/libeagle_door.so
 FIXTURE := $(OUT)/libfixture_unit.so
 TEST := $(OUT)/door_test
 
-.PHONY: all lib symbols test check-inputs check-cuda pairs device $(PAIR_UNITS:%=pair-%) $(PAIR_DEVICE_UNITS:%=pair-device-%)
+.PHONY: all lib symbols test check-inputs check-cuda pairs pair-reverse device $(PAIR_UNITS:%=pair-%) $(PAIR_DEVICE_UNITS:%=pair-device-%)
 all: test
 
 check-inputs:
@@ -129,8 +129,45 @@ $(FIXTURE) $(FIXTURE_BAD): test/fixture_unit.c eg_door.h eg_unit_meta.h
 $(TEST): test/door_test.c eg_door.h $(LIB)
 	$(CC) $(CFLAGS_C) -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door -Wl,-rpath,$(OUT) -pthread
 
-test: symbols $(FIXTURE) $(FIXTURE_BAD) $(TEST)
+# eg_reverse: the closed-form fixture library (test/fixture_reverse.c) and its test.
+REV_FIXTURE := $(OUT)/libfixture_reverse.so
+REV_TEST := $(OUT)/reverse_test
+
+$(REV_FIXTURE): test/fixture_reverse.c eg_door.h eg_unit_meta.h
+	@mkdir -p $(OUT)
+	$(CC) $(CFLAGS_C) -fPIC -shared -fvisibility=hidden -o $@ $<
+
+$(REV_TEST): test/reverse_test.c test/pair_util.h eg_door.h $(LIB)
+	$(CC) $(CFLAGS_C) -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door -Wl,-rpath,$(OUT) -lm -pthread
+
+test: symbols $(FIXTURE) $(FIXTURE_BAD) $(TEST) $(REV_FIXTURE) $(REV_TEST)
 	$(TEST) $(FIXTURE) $(FIXTURE_BAD)
+	$(REV_TEST) $(REV_FIXTURE)
+
+# pair-reverse: rr_pend, its one-step taping twin and its step vjp (the old path's kernel texts, KERNEL_rr_pend,
+# KERNEL_rr_pend_tape, KERNEL_rr_pend_step_vjp) in one library with META_reverse (their metas and the derived records),
+# run by reverse_test against ORACLE_reverse (the old path's states and gradients). The twin's and the vjp's size
+# blocks are renamed: the primal's is the library's.
+DIGEST_rr_pend ?= 3bc7bb7564e5b3bf766bbdca405dfce7a30b422d2439bb135f171868307c905a
+DIGEST_rr_pend_tape ?= a52f08cd753ec50120a28a2aae5a0ed87515d21f573a52a31d8ea34633895e78
+DIGEST_rr_pend_step_vjp ?= 59410b1d2c471e7f9f34e5a7e4e2d8bc2ade1a32faa942246555dd144193f0fa
+REV_RENAME = -Deagle_abi_tag=$(1)_abi_tag -Deagle_layout_sizes=$(1)_layout_sizes
+
+$(OUT)/libpair_reverse.so: $(KERNEL_rr_pend) $(KERNEL_rr_pend_tape) $(KERNEL_rr_pend_step_vjp) $(META_reverse) eg_door.h eg_unit_meta.h | check-inputs
+	@test -f "$(KERNEL_rr_pend)" -a -f "$(KERNEL_rr_pend_tape)" -a -f "$(KERNEL_rr_pend_step_vjp)" -a -f "$(META_reverse)" -a \
+	  -d "$(PAIR_WING_DIR)" || { echo "set KERNEL_rr_pend, KERNEL_rr_pend_tape, KERNEL_rr_pend_step_vjp, META_reverse and PAIR_WING_DIR"; exit 1; }
+	@mkdir -p $(OUT)
+	$(CXX) $(PAIR_HOST_FLAGS) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) -c $(KERNEL_rr_pend) -o $(OUT)/rev_primal.o
+	$(CXX) $(PAIR_HOST_FLAGS) $(call REV_RENAME,tape) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) \
+	  -c $(KERNEL_rr_pend_tape) -o $(OUT)/rev_tape.o
+	$(CXX) $(PAIR_HOST_FLAGS) $(call REV_RENAME,vjp) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) \
+	  -c $(KERNEL_rr_pend_step_vjp) -o $(OUT)/rev_vjp.o
+	$(CC) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$(ROOT) -c $(META_reverse) -o $(OUT)/rev_meta.o
+	$(CXX) -shared -o $@ $(OUT)/rev_primal.o $(OUT)/rev_tape.o $(OUT)/rev_vjp.o $(OUT)/rev_meta.o
+
+pair-reverse: symbols $(OUT)/libpair_reverse.so $(REV_TEST)
+	$(REV_TEST) $(REV_FIXTURE) $(OUT)/libpair_reverse.so $(ORACLE_reverse) $(DIGEST_rr_pend) $(DIGEST_rr_pend_tape) \
+	  $(DIGEST_rr_pend_step_vjp)
 
 PAIR_TEST := $(OUT)/pair_test
 

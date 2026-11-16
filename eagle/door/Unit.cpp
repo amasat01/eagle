@@ -289,7 +289,7 @@ void read_body(const eg_unit_meta& m, void* library, bool device_only, eg_unit_s
 }
 
 /** @brief Find the unit named by @p ref (name AND digest) in the library's tree. */
-eg_unit_meta find_unit(const eg_library_meta* lib, const eg_unit_ref& ref) {
+eg_unit_meta find_unit(const eg_library_meta* lib, const eg_unit_ref& ref, std::int32_t& index) {
     const eg_library_meta top = read_record(lib, eg_library_meta{}, "eg_library_meta");
     if (top.schema_major != EG_META_SCHEMA_MAJOR)
         refuse(EG_BAD_REQUEST, "unit meta of schema major " + std::to_string(top.schema_major) +
@@ -299,8 +299,10 @@ eg_unit_meta find_unit(const eg_library_meta* lib, const eg_unit_ref& ref) {
     for (std::uint32_t i = 0; i < top.n_units; ++i) {
         const eg_unit_meta m = read_record(top.units[i], eg_unit_meta{}, "unit " + std::to_string(i));
         if (m.name != nullptr && std::strcmp(m.name, ref.name) == 0 &&
-            std::memcmp(m.digest, ref.digest, EG_DIGEST_BYTES) == 0)
+            std::memcmp(m.digest, ref.digest, EG_DIGEST_BYTES) == 0) {
+            index = static_cast<std::int32_t>(i);
             return m;
+        }
     }
     refuse(EG_BAD_REQUEST, std::string("no unit named '") + ref.name +
            "' with the given digest in the library");
@@ -328,6 +330,37 @@ void check_size_block(void* library, const std::string& unit) {
         plugin::check_layout_sizes(sizes, "unit '" + unit + "'");
     } catch (const std::runtime_error& e) {
         refuse(EG_BAD_REQUEST, e.what());
+    }
+}
+
+/** @brief Copy the derived record (eg_unit_derived); eg_runner_new checks it against the primal. */
+void read_derived(const eg_unit_meta& m, eg_unit_s& unit) {
+    if (m.derived == nullptr) return;
+    eg_unit_derived absent{};
+    const eg_unit_derived d = read_record(m.derived, absent, "unit '" + unit.name + "' derived");
+    const std::string what = "meta that contradicts itself: unit '" + unit.name + "' derived ";
+    if (d.n_taped < 0 || (d.n_taped > 0 && d.taped == nullptr)) refuse(EG_BAD_REQUEST, what + "n_taped without taped");
+    if (d.n_links < 0 || (d.n_links > 0 && d.links == nullptr)) refuse(EG_BAD_REQUEST, what + "n_links without links");
+    if (d.n_refined < 0 || (d.n_refined > 0 && d.refined == nullptr)) refuse(EG_BAD_REQUEST, what + "n_refined without refined");
+    DerivedFacts& f = unit.derived;
+    f.present = true;
+    f.role = d.role;
+    f.of_unit = d.of_unit;
+    f.tape_slot = d.tape_slot;
+    f.tape_rows = d.tape_rows;
+    f.steps_slot = d.steps_slot;
+    f.tape_on_slot = d.tape_on_slot;
+    f.time0_slot = d.time0_slot;
+    f.tau_slot = d.tau_slot;
+    f.fused_steps_slot = d.fused_steps_slot;
+    f.n_refined = d.n_refined;
+    for (std::int32_t i = 0; i < d.n_taped; ++i) {
+        const eg_unit_taped t = read_record(d.taped[i], eg_unit_taped{}, what + "taped[" + std::to_string(i) + "]");
+        f.taped.push_back({ t.slot, t.row0, t.rows });
+    }
+    for (std::int32_t i = 0; i < d.n_links; ++i) {
+        const eg_unit_link l = read_record(d.links[i], eg_unit_link{}, what + "links[" + std::to_string(i) + "]");
+        f.links.push_back({ l.slot, l.source, l.of_slot, l.reduced });
     }
 }
 
@@ -366,6 +399,7 @@ void read_unit(const eg_unit_meta& m, void* library, eg_unit_s& unit) {
         if (sym != nullptr) check_size_block(library, unit.name);
     }
     read_body(m, library, device_only, unit);
+    read_derived(m, unit);
     if (unit.ctx->dev.ordinal >= 0 && m.device_image != nullptr) device_unit_load(unit, m, library);
 }
 
@@ -404,11 +438,13 @@ void unit_load(eg_ctx& ctx, const eg_unit_load_desc* desc, eg_unit** out) {
             refuse(EG_FAULT, std::string("the unit library '") + desc->path + "' lacks " +
                    EG_UNIT_LIBRARY_META_SYMBOL);
         const eg_library_meta* lib = reinterpret_cast<eg_unit_library_meta_fn>(sym)();
-        const eg_unit_meta m = find_unit(lib, ref);
+        std::int32_t index = -1;
+        const eg_unit_meta m = find_unit(lib, ref, index);
         auto* unit = new eg_unit_s;
         unit->ctx = &ctx;
         unit->library = library;
         unit->name = ref.name;
+        unit->index = index;
         try {
             read_unit(m, library, *unit);
             ctx.units.insert(unit);

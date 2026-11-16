@@ -5,7 +5,7 @@
 // the loop stops when the first plan's finished counter reaches the sample
 // count or after ceil(max_steps / K) iterations. Units that read an active set
 // compact it every ``every`` steps and may reorder the bound planes
-// (EG_RUN_REORDER). Recording, event refine and automatic steps are refused by name.
+// (EG_RUN_REORDER). An EG_RUN_RECORD runner runs host/Reverse.cpp's recording forward instead.
 #include "eagle/door/Context.h"
 #include "eagle/door/eg_unit_meta.h"
 #include "eagle/door/host/Team.h"
@@ -245,8 +245,10 @@ void runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out) {
             }
             runner->active = true;
         }
+        if (d.flags & EG_RUN_RECORD) record_new(ctx, *runner, d);
         ctx.runners.insert(runner);
     } catch (...) {
+        record_free(ctx, *runner);
         delete runner;
         throw;
     }
@@ -264,6 +266,7 @@ void runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out) {
 /** @brief eg_runner_free: drop the runner's plan references. */
 void runner_free(eg_ctx& ctx, eg_runner_s* runner) {
     ctx.runners.erase(runner);
+    record_free(ctx, *runner);
     for (eg_plan_s* p : runner->plans) {
         if (p->active_owner == runner) p->active_owner = nullptr;
         plan_release(ctx, p);
@@ -281,6 +284,12 @@ void run(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report) {
     check_handle(ctx.runners, runner, "runner");
     if (ctx.rec == nullptr) check_report(report);   // a recorded run fills no report
     for (const eg_plan_s* p : runner->plans) check_bound(*p);
+    if (runner->record != nullptr) {
+        if (ctx.rec != nullptr)
+            refuse(EG_NOT_WRITTEN, "eg_run of an EG_RUN_RECORD runner inside a recording is not written in this build of the door");
+        record_forward(ctx, *runner, report);
+        return;
+    }
     if (!record_run(ctx, runner)) run_loop(ctx, runner, report);
 }
 

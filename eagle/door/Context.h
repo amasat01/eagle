@@ -106,6 +106,17 @@ struct FinishFacts {
     std::int64_t ops = 0;            ///< one step's operation count the launch rules read (fp64_ops_ir, else step_ops), 0: none
 };
 
+/** @brief A derived unit's record (eg_unit_derived), copied at eg_unit_load; eg_runner_new checks it
+ *  against the runner's primal. */
+struct DerivedFacts {
+    struct Taped { std::int32_t slot = -1, row0 = 0, rows = 0; };
+    struct Link { std::int32_t slot = -1, source = -1, of_slot = -1; std::uint32_t reduced = 0; };
+    bool present = false;
+    std::int32_t role = -1, of_unit = -1, tape_slot = -1, tape_rows = 0, steps_slot = -1, tape_on_slot = -1;
+    std::int32_t time0_slot = -1, tau_slot = -1, fused_steps_slot = -1, n_refined = 0;
+    std::vector<Taped> taped;
+    std::vector<Link> links;
+};
 /** @brief The element count of @p t (the product of its shape). */
 inline std::int64_t elements(const DLTensor& t) {
     std::int64_t n = 1;
@@ -137,6 +148,8 @@ struct eg_unit_s {
     std::int32_t access = 0;
     std::vector<eagle::door::SlotFacts> slots;
     eagle::door::FinishFacts finish;
+    eagle::door::DerivedFacts derived;        ///< a derived unit (eg_unit_meta.derived), else not present
+    std::int32_t index = -1;                  ///< the unit index in its library table
     std::vector<eagle::door::CompanionFacts> companions;
     std::vector<eagle::door::CellFacts> cells;
     std::int64_t cell_row = 0;                ///< samples per row of a cell's rows, 0: no cells
@@ -224,6 +237,7 @@ namespace door {
 struct DeviceLoop;
 struct DeviceRecording;   ///< a capture in progress on the context's stream (device/Device.cpp)
 struct DeviceGraph;       ///< a recorded device graph: the instantiated capture and the plans it launched
+struct RunRecord;         ///< an EG_RUN_RECORD runner: its derived plans and last record (host/Reverse.cpp)
 
 /** @brief The device part of a DEVICE runner (device/Device.cpp): its captured loop and the device
  *  cells it reads; freed with the runner (no device call in a forked child). */
@@ -256,6 +270,7 @@ struct eg_runner_s {
     bool active = false;                      ///< the plans read an active set
     eagle::door::ActiveState act;
     eagle::door::DeviceRun dev;               ///< a DEVICE runner's loop and cells
+    eagle::door::RunRecord* record = nullptr; ///< EG_RUN_RECORD: the derived plans and the last record
 };
 
 namespace eagle {
@@ -382,6 +397,10 @@ void bind_raw(eg_plan_s& plan, int slot, void* data, std::uint64_t count);
 void launch(eg_ctx& ctx, eg_plan_s* plan, std::uint64_t* tiles);
 void runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out);
 void runner_free(eg_ctx& ctx, eg_runner_s* runner);
+void record_new(eg_ctx& ctx, eg_runner_s& runner, const eg_runner_desc& d);
+void record_free(eg_ctx& ctx, eg_runner_s& runner);
+void record_forward(eg_ctx& ctx, eg_runner_s& runner, eg_run_report* report);
+void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds, const eg_bind_desc* grads);
 void runner_release(eg_ctx& ctx, eg_runner_s* runner);
 void run(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report);
 void run_loop(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report);

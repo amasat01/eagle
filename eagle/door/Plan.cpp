@@ -432,8 +432,11 @@ bool device_plans(const eg_ctx& ctx, const eg_runner_desc* desc) {
     return false;
 }
 
-/** @brief Bind @p slot of @p plan to eagle's own memory (a runner's active set). */
-void bind_raw(eg_plan_s& plan, int slot, void* data, std::uint64_t count) { bind_handle(plan, slot, data, count); }
+/** @brief Bind @p slot of @p plan to eagle's own memory of @p count samples (a runner's active set, a derived plan). */
+void bind_raw(eg_plan_s& plan, int slot, void* data, std::uint64_t count) {
+    if (plan.unit->slots[static_cast<std::size_t>(slot)].mirror) bind_mirror(plan, slot, data, count);
+    else bind_handle(plan, slot, data, count);
+}
 
 /** @brief eg_launch: the host team (or the serial reference) over each partition; a DEVICE plan
  *  queues one kernel launch per partition on the context's stream (eg_sync waits for them). */

@@ -189,6 +189,14 @@ EG_EXPORT eg_status eg_run(eg_ctx* ctx, eg_runner* runner, struct eg_run_report*
     });
 }
 
+EG_EXPORT eg_status eg_reverse(eg_ctx* ctx, eg_runner* runner, const struct eg_bind_desc* seeds,
+                               const struct eg_bind_desc* grads) {
+    return door::call(ctx, [&](eg_ctx& c) {
+        door::device_quiet(c, "eg_reverse", EG_NOT_WRITTEN, door::kHostWorkInGraph);
+        door::reverse(c, runner, seeds, grads);
+    });
+}
+
 EG_EXPORT eg_status eg_sync(eg_ctx* ctx) {
     return door::call(ctx, [](eg_ctx& c) {
         door::device_quiet(c, "eg_sync", EG_BAD_REQUEST, "a capture cannot wait; call it after eg_record_end");
@@ -203,10 +211,6 @@ EG_EXPORT eg_status eg_stream_use(eg_ctx* ctx, uint64_t stream) {
 
 EG_EXPORT eg_status eg_run_event_times(eg_ctx* ctx, eg_runner*, eg_plane*) {
     return not_written(ctx, "eg_run_event_times");
-}
-EG_EXPORT eg_status eg_reverse(eg_ctx* ctx, eg_runner*, const struct eg_bind_desc*,
-                               const struct eg_bind_desc*) {
-    return not_written(ctx, "eg_reverse");
 }
 EG_EXPORT eg_status eg_device_count(eg_ctx* ctx, int32_t*) { return not_written(ctx, "eg_device_count"); }
 EG_EXPORT eg_status eg_device_props(eg_ctx* ctx, int32_t, struct eg_device_props*) {
