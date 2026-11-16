@@ -1122,6 +1122,10 @@ static void check_recorded_list(eg_ctx* ctx, eg_unit* axpb, eg_unit* count1) {
              memcmp(&t_rec, &t_dir, sizeof(double)) == 0;
     }
     check(ok, "a recorded launch + reduce + copy replayed 5 times equals the same calls run directly 5 times, bitwise");
+    eg_graph* gb = NULL;
+    check(eg_record_begin(ctx) == EG_OK && bind(ctx, pld, pyd, pyd, &a, &b) == EG_BAD_REQUEST && reason_has(ctx, "eg_bind while recording") &&
+              eg_record_end(ctx, &gb) == EG_OK && eg_graph_free(ctx, gb) == EG_OK && bind(ctx, pld, pyd, pyd, &a, &b) == EG_OK,
+          "eg_bind between eg_record_begin and eg_record_end is refused BAD_REQUEST by name; after the end it binds again");
     int kok = 1;
     for (int i = 0; i < K; ++i) kok &= k[i] == want_k[i];
     check(kok, "the recorded eg_run reached the closed-form count (replayed 5 times: a finished batch launches nothing)");

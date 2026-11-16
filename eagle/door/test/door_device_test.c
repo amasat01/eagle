@@ -411,6 +411,9 @@ int main(int argc, char** argv) {
     check(eg_record_begin(ctx) == EG_OK && eg_launch(ctx, p, NULL) == EG_OK && eg_record_end(ctx, &g) == EG_OK &&
               eg_graph_free(ctx, g) == EG_OK,
           "recording a DEVICE launch: captured, eg_record_end and eg_graph_free OK");
+    check(eg_record_begin(ctx) == EG_OK && refused(bind(ctx, p, py, px, pv, a), EG_BAD_REQUEST, ctx, "eg_bind while recording") &&
+              eg_record_end(ctx, &g) == EG_OK && eg_graph_free(ctx, g) == EG_OK,
+          "eg_bind inside a DEVICE recording is refused BAD_REQUEST by name; the recording still ends");
 
     /* DEVICE units refused by name (no device image), and the features a DEVICE plan now takes: a thread box and a
      * BANDED scalar type (their pairs run in device_features_test). */

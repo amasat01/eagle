@@ -590,6 +590,8 @@ void check_bound(const eg_plan_s& plan) {
 /** @brief eg_bind: check every entry, then replace the named slots. */
 void bind(eg_ctx& ctx, eg_plan_s* plan, const eg_bind_desc* desc) {
     check_handle(ctx.plans, plan, "plan");
+    if (ctx.rec != nullptr || ctx.dev_rec != nullptr)
+        refuse(EG_BAD_REQUEST, "eg_bind while recording (eg_record_begin .. eg_record_end): bind before recording, a recorded launch replays the planes it was recorded with");
     const eg_bind_desc d = read_input(desc, "eg_bind_desc");
     check_bind(ctx, *plan, d);
     for (int i = 0; i < d.n_planes; ++i) {
@@ -614,6 +616,18 @@ void bind(eg_ctx& ctx, eg_plan_s* plan, const eg_bind_desc* desc) {
         if (old != nullptr) plane_release(ctx, old);
         for (const CompanionFacts& c : plan->unit->companions) {     // a new target: its companion, zeroed, of its shape and dtype
             if (c.target != d.plane_slots[i]) continue;
+            eg_plane_s* held = plan->bindings[c.slot].plane;
+            if (held != nullptr) {    // the same shape and dtype as before: zero the companion in place (a rebind is the old clear: no new allocation)
+                const DLTensor& h = held->tensor->dl_tensor;
+                bool same = h.ndim == t.ndim && h.dtype.code == t.dtype.code && h.dtype.bits == t.dtype.bits;
+                for (int a = 0; same && a < t.ndim; ++a) same = h.shape[a] == t.shape[a];
+                if (same) {
+                    const std::size_t bytes = static_cast<std::size_t>(elements(h)) * (h.dtype.bits / 8);
+                    if (plan->structure == EG_STRUCTURE_DEVICE) device_zero(ctx, h.data, bytes);
+                    else std::memset(h.data, 0, bytes);
+                    continue;
+                }
+            }
             eg_plane_s* comp = make_plane(ctx, t.dtype, std::vector<std::int64_t>(t.shape, t.shape + t.ndim),
                                           plan->structure == EG_STRUCTURE_DEVICE);
             eg_plane_s* prev = plan->bindings[c.slot].plane;

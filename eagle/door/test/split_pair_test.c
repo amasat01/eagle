@@ -18,6 +18,9 @@
  *   uni <name> <value>                            (a float64 uniform)
  *   cell <name>                                   (a cell the caller receives: one float64, the fold of the stages' rows; file <row>.<name>.out)
  *   skip <name>                                   (a slot eagle makes: the stage's own scratch; takes a slot index)
+ *   clear <name>                                  (BoundPlan.clear: after launch 1 the caller zeroes the plane <name> in place and binds that slot alone again, then
+ *                                                  launches again; the later launch is compared with the old path's clear + relaunch. A second plan then zeroes it
+ *                                                  in place WITHOUT the bind: its later launch must DIFFER from the old path's, the companion's residue)
  *   rebind                                        (the caller binds its planes again before every later launch: the door's way to restart the residual
  *                                                  of a compensation plane eagle made beside a target the caller zeroed)
  *   failrun <text>                                (host: every launch is refused FAULT with a reason holding <text>; no outputs are compared)
@@ -62,6 +65,7 @@ struct pt {
     int64_t shape[MAXD + 1];
 };
 
+static char clear_name[48];    /* the spec's "clear <name>" */
 static int rebind;    /* the spec's "rebind": the caller binds its planes again before every later launch (the way to restart the residual of an eagle-made compensation plane when it zeroes the target) */
 static char run_fail[512];    /* the spec's "failrun <text>": the launch must be refused FAULT with a reason holding that text */
 
@@ -82,6 +86,10 @@ static int read_spec(const char* dir, const char* row, int64_t* n, struct pl* p,
             long long v;
             if (fscanf(f, "%lld", &v) != 1) return 0;
             *n = v;
+            continue;
+        }
+        if (strcmp(kind, "clear") == 0) {
+            if (fscanf(f, "%47s", clear_name) != 1) return 0;
             continue;
         }
         if (strcmp(kind, "rebind") == 0) {
@@ -269,7 +277,10 @@ int main(int argc, char** argv) {
     const char* names[2] = { "HOST_TEAM", "HOST_SERIAL" };
     const int nstruct = 2;
 #endif
-    for (int k = 0; k < nstruct; ++k) {
+    const int npass = clear_name[0] ? 2 : 1;    /* a clear row: pass 0 binds the slot again after zeroing it, pass 1 does not */
+    for (int kk = 0; kk < nstruct * npass; ++kk) {
+        const int k = kk % nstruct, pass = kk / nstruct;
+        int clear_at = -1;    /* the cleared plane's index in planes[] / slots[] */
         eg_plan* plan = NULL;
         struct eg_plan_desc d;
         memset(&d, 0, sizeof(d));
@@ -318,6 +329,7 @@ int main(int argc, char** argv) {
             t[i].managed.dl_tensor.dtype.lanes = 1;
             t[i].managed.dl_tensor.shape = t[i].shape;
             if (s == EG_OK) s = eg_plane_wrap(ctx, &t[i].managed, &planes[nplanes]);
+            if (strcmp(q->name, clear_name) == 0) clear_at = nplanes;
             slots[nplanes++] = slot++;
         }
         struct eg_bind_desc b;
@@ -336,7 +348,7 @@ int main(int argc, char** argv) {
         for (int rep = 0; rep < 2; ++rep) {
             if (rep > 0)    /* a plane the caller binds as a counter accumulates over launches: every launch starts from the zeroed output */
                 for (int i = 0; i < np; ++i)
-                    if (is_out(&pls[i])) {
+                    if (is_out(&pls[i]) && (clear_name[0] == 0 || strcmp(pls[i].name, clear_name) == 0)) {
 #ifdef EG_PAIR_DEVICE
                         if (s == EG_OK && cudaMemset(dev[i], 0, (size_t)pls[i].count * esz(&pls[i])) != cudaSuccess) s = EG_FAULT;
 #else
@@ -344,6 +356,15 @@ int main(int argc, char** argv) {
 #endif
                     }
             if (rep > 0 && rebind && s == EG_OK) s = eg_bind(ctx, plan, &b);
+            if (rep > 0 && clear_name[0] && pass == 0 && s == EG_OK) {    /* the clear: that slot alone is bound again; every other slot keeps its binding */
+                struct eg_bind_desc one;
+                memset(&one, 0, sizeof(one));
+                one.struct_size = sizeof(one);
+                one.n_planes = 1;
+                one.plane_slots = &slots[clear_at];
+                one.planes = &planes[clear_at];
+                s = eg_bind(ctx, plan, &one);
+            }
             for (int stp = 0; stp < steps && s == EG_OK; ++stp) s = eg_launch(ctx, plan, NULL);
 #ifndef EG_PAIR_DEVICE
             if (run_fail[0] != 0) {
@@ -365,6 +386,13 @@ int main(int argc, char** argv) {
                 struct pl* q = &pls[i];
                 if (!is_out(q)) continue;
                 const size_t bytes = (size_t)q->count * esz(q);
+                if (pass == 1 && rep == 1) {    /* no bind after the zeroing: the cleared plane must differ from the old path's */
+                    if (strcmp(q->name, clear_name) == 0 && memcmp(q->buf, q->want, bytes) == 0) {
+                        ++bad;
+                        printf("      output '%s' repeats the old path's cleared launch although the companion was not rebuilt\n", q->name);
+                    }
+                    continue;
+                }
                 if (memcmp(q->buf, q->want, bytes) != 0) {
                     ++bad;
                     int64_t at = 0;
@@ -377,7 +405,8 @@ int main(int argc, char** argv) {
                 }
             }
             char what[200];
-            snprintf(what, sizeof(what), "%s, launch %d: OK and %d output plane(s) bitwise == the old path", names[k], rep + 1, nplanes);
+            if (pass == 1 && rep == 1) snprintf(what, sizeof(what), "%s, launch 2 with '%s' zeroed in place and not bound again: OK and it DIFFERS from the old path's clear", names[k], clear_name);
+            else snprintf(what, sizeof(what), "%s, launch %d: OK and %d output plane(s) bitwise == the old path", names[k], rep + 1, nplanes);
             check(s == EG_OK && bad == 0, what);
         }
         eg_plan_free(ctx, plan);

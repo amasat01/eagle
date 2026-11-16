@@ -525,6 +525,16 @@ eg_status eg_plan_free(eg_ctx* ctx, eg_plan* plan);
  * Bind planes and uniforms by slot. Later binds replace earlier ones slot by
  * slot. Shapes, dtypes, devices and write access are checked against the
  * unit meta here, once, not at launch.
+ * Binding the target of a compensated sum zeroes its companion, eagle's own
+ * plane, whatever it held (in place when the target's shape and dtype are
+ * unchanged, else made again); the caller cannot bind a companion
+ * (BAD_REQUEST). So a caller that
+ * zeroes a target in place and binds that slot again restarts the residual too
+ * (the old ``BoundPlan.clear``). An ordered scatter's TARGET scratch plane is
+ * made again the same way, sized by the target. A bind touches only the slots
+ * it names: every other slot keeps its plane and its state between launches.
+ * Refused BAD_REQUEST while recording (between eg_record_begin and
+ * eg_record_end): bind before recording.
  * Replaces: ``Plan.bind``, ``_plan_binding.BoundPlan``, ``_plan_pack``,
  * ``marshal``, ``_lane_bind`` (team grids, chunk counts), ``_cell_rows``.
  * Calls today: nothing compiled (Python packs ``ctypes`` addresses).
