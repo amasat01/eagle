@@ -365,6 +365,31 @@ $(foreach u,$(PAIR_UNITS),$(eval $(call PAIR_RULES,$(u))))
 
 pairs: $(PAIR_UNITS:%=pair-%)
 
+# pair-split-<row>: a split kernel (stage units + source unit, host): the stage texts KERNELS_<row> in one library with the
+# library meta META_<row>; split_pair_test loads the stages, then the source with them as deps, and compares every output with
+# the old path's (ORACLE_<row>/<row>.spec); ORACLE_<row> = -refuse:<STATUS>:<text> instead: the source's load must be refused so. SPLIT_ARGS_<row> = <source name> <source digest> {<stage name> <stage digest>}.
+# The second and later texts carry renamed size blocks: the first one's is the library's.
+SPLIT_ROWS ?=
+SPLIT_TEST := $(OUT)/split_pair_test
+
+$(SPLIT_TEST): test/split_pair_test.c test/pair_util.h eg_door.h $(LIB)
+	$(CC) $(CFLAGS_C) -Itest/c_shim -Itest -o $@ $< -L$(OUT) -leagle_door -Wl,-rpath,$(OUT) -pthread
+
+define SPLIT_RULES
+$(OUT)/libpair_split_$(1).so: $$(KERNELS_$(1)) $$(META_$(1)) eg_door.h eg_unit_meta.h | check-inputs
+	@mkdir -p $(OUT)
+	$$(CXX) $$(PAIR_HOST_FLAGS) -I$$(AETHER_INCLUDE) -I$$(AETHER_INCLUDE)/eagle -I$$(PAIR_WING_DIR) -c $$(firstword $$(KERNELS_$(1))) -o $(OUT)/split_$(1)_first.o
+	@for k in $$(wordlist 2,99,$$(KERNELS_$(1))); do n=$$$$(basename $$$$k .cpp | tr . _); \
+	  $$(CXX) $$(PAIR_HOST_FLAGS) -Deagle_abi_tag=s_$$$${n}_abi_tag -Deagle_layout_sizes=s_$$$${n}_layout_sizes \
+	    -I$$(AETHER_INCLUDE) -I$$(AETHER_INCLUDE)/eagle -I$$(PAIR_WING_DIR) -c $$$$k -o $(OUT)/split_$(1)_$$$${n}.o || exit 1; done
+	$$(CC) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$$(ROOT) -c $$(META_$(1)) -o $(OUT)/split_$(1)_meta.o
+	$$(CXX) -shared -o $$@ $(OUT)/split_$(1)_*.o
+
+pair-split-$(1): symbols $(OUT)/libpair_split_$(1).so $$(SPLIT_TEST)
+	$$(SPLIT_TEST) $(OUT)/libpair_split_$(1).so "$$(ORACLE_$(1))" $(1) $$(SPLIT_ARGS_$(1))
+endef
+$(foreach r,$(SPLIT_ROWS),$(eval $(call SPLIT_RULES,$(r))))
+
 # pair-refuse-<case>: unit g's kernel with a dispatch group the door does not take, or one that contradicts itself
 # (META_g_<case>, KERNEL_g, DIGEST_g): the load is refused with the status and the reason text below.
 REFUSE_CASES := auto seg badmix badstrategy nullname badk badbranch segmix

@@ -71,6 +71,8 @@ static eg_ctx* make_ctx(void) {
     return eg_ctx_new(&s, &ctx) == EG_OK ? ctx : NULL;
 }
 
+static int reason_has(eg_ctx* ctx, const char* needle);
+
 static eg_status load(eg_ctx* ctx, const char* name, uint8_t digest_byte, eg_unit** out) {
     struct eg_unit_ref ref;
     memset(&ref, 0, sizeof(ref));
@@ -276,8 +278,27 @@ static void check_bad_input(eg_ctx* ctx, eg_unit* unit) {
     check(tx.deleted == 1 && ty.deleted == 1, "refused bind takes no reference: deleters ran once");
 
     eg_unit* split = NULL;
-    check(load(ctx, "axpb_split", 0xC3, &split) == EG_NOT_WRITTEN && split == NULL,
-          "split unit (n_stages > 0) refused NOT_WRITTEN");
+    check(load(ctx, "axpb_split", 0xC3, &split) == EG_BAD_REQUEST && split == NULL && reason_has(ctx, "is not in deps"),
+          "split unit with its stage missing from deps refused BAD_REQUEST naming it");
+    {
+        eg_unit* stage = NULL;
+        struct eg_unit_ref ref;
+        memset(&ref, 0, sizeof(ref));
+        ref.struct_size = sizeof(ref);
+        ref.name = "axpb_split";
+        memset(ref.digest, 0xC3, EG_DIGEST_BYTES);
+        struct eg_unit_load_desc d;
+        memset(&d, 0, sizeof(d));
+        d.struct_size = sizeof(d);
+        d.path = library_path;
+        d.unit = &ref;
+        d.deps = &stage;
+        d.n_deps = 1;
+        check(load(ctx, "axpb", 0xA1, &stage) == EG_OK && eg_unit_load(ctx, &d, &split) == EG_OK && split != NULL,
+              "split unit loaded with its stage in deps");
+        check(eg_unit_free(ctx, split) == EG_OK && eg_unit_free(ctx, stage) == EG_OK, "split unit and its stage freed");
+        split = NULL;
+    }
     eg_unit* wrong = NULL;
     check(load(ctx, "axpb", 0xC3, &wrong) == EG_BAD_REQUEST, "right name, wrong digest refused BAD_REQUEST");
     check(eg_run(ctx, NULL, NULL) == EG_BAD_REQUEST, "eg_run of a NULL runner refused BAD_REQUEST");

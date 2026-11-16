@@ -1,0 +1,261 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+
+/*
+ * The split-unit pair proof (host): a source unit with its stage units, loaded by name + digest (stages first, passed as
+ * deps), planned under HOST_TEAM and HOST_SERIAL, launched twice, every output plane compared BITWISE with the old path's.
+ *
+ *   split_pair_test <library> <oracle dir> <row> <source name> <source digest> [<stage name> <stage digest>]...
+ *   split_pair_test <library> -refuse:<NOT_WRITTEN|BAD_REQUEST>:<reason text> <row> <source name> <source digest> [<stage>...]
+ *     (the stages load, the source's load must be refused with that status and a reason holding that text)
+ *
+ * <oracle dir>/<row>.spec lists the source slots in order, one per line:
+ *   n <lanes>
+ *   in  <name> <f64|i32> <ndim> <extents...>      (file <row>.<name>.in: the old path's input, extents without the lane axis)
+ *   out <name> <f64|i32> <ndim> <extents...>      (starts zeroed; file <row>.<name>.out: the old path's result)
+ *   uni <name> <value>                            (a float64 uniform)
+ *   skip <name>                                   (a slot eagle makes: the stage's own scratch; takes a slot index)
+ * Every plane is (extents..., lanes).
+ */
+#define _POSIX_C_SOURCE 200809L
+
+#include "pair_util.h"
+
+#include <stdlib.h>
+
+#define MAXS 16
+#define MAXD 3
+
+struct pl {
+    char kind[8], name[48];
+    int is_int, ndim;
+    int64_t dims[MAXD + 1];
+    int64_t count;
+    void* buf;
+    void* want;
+    double uni;
+};
+
+struct pt {
+    struct DLManagedTensorVersioned managed;
+    int64_t shape[MAXD + 1];
+};
+
+static int read_spec(const char* dir, const char* row, int64_t* n, struct pl* p, int* np) {
+    char path[1024], kind[8];
+    snprintf(path, sizeof(path), "%s/%s.spec", dir, row);
+    FILE* f = fopen(path, "r");
+    if (f == NULL) return 0;
+    *np = 0;
+    while (fscanf(f, "%7s", kind) == 1) {
+        if (strcmp(kind, "n") == 0) {
+            long long v;
+            if (fscanf(f, "%lld", &v) != 1) return 0;
+            *n = v;
+            continue;
+        }
+        struct pl* q = &p[(*np)++];
+        char ty[8];
+        strcpy(q->kind, kind);
+        if (strcmp(kind, "skip") == 0) {
+            if (fscanf(f, "%47s", q->name) != 1) return 0;
+            continue;
+        }
+        if (strcmp(kind, "uni") == 0) {
+            if (fscanf(f, "%47s %lf", q->name, &q->uni) != 2) return 0;
+            continue;
+        }
+        if (fscanf(f, "%47s %7s %d", q->name, ty, &q->ndim) != 3) return 0;
+        q->is_int = strcmp(ty, "i32") == 0;
+        for (int i = 0; i < q->ndim; ++i) {
+            long long v;
+            if (fscanf(f, "%lld", &v) != 1) return 0;
+            q->dims[i] = v;
+        }
+    }
+    fclose(f);
+    return 1;
+}
+
+static void load(eg_ctx* ctx, const char* lib, const char* name, const char* hex, eg_unit* const* deps, int n_deps, eg_unit** out, const char* what) {
+    struct eg_unit_ref ref;
+    memset(&ref, 0, sizeof(ref));
+    ref.struct_size = sizeof(ref);
+    ref.name = name;
+    struct eg_unit_load_desc d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    d.path = lib;
+    d.unit = &ref;
+    d.deps = deps;
+    d.n_deps = n_deps;
+    const eg_status s = parse_digest(hex, ref.digest) ? eg_unit_load(ctx, &d, out) : EG_BAD_REQUEST;
+    check(s == EG_OK && *out != NULL, what);
+    if (s != EG_OK) reason_has(ctx, "");
+}
+
+static int refused(int argc, char** argv) {
+    const char* spec = argv[2] + 8;
+    const char* colon = strchr(spec, ':');
+    if (colon == NULL) return 2;
+    const eg_status want = strncmp(spec, "NOT_WRITTEN", (size_t)(colon - spec)) == 0 ? EG_NOT_WRITTEN : EG_BAD_REQUEST;
+    struct eg_ctx_settings st;
+    memset(&st, 0, sizeof(st));
+    st.struct_size = sizeof(st);
+    st.abi_major = EG_DOOR_VERSION_MAJOR;
+    eg_ctx* ctx = NULL;
+    check(eg_ctx_new(&st, &ctx) == EG_OK, "eg_ctx_new host context");
+    const int ns = (argc - 6) / 2;
+    eg_unit* deps[MAXS] = { NULL };
+    for (int i = 0; i < ns; ++i) load(ctx, argv[1], argv[6 + 2 * i], argv[7 + 2 * i], NULL, 0, &deps[i], "a stage unit loaded (name + digest)");
+    struct eg_unit_ref ref;
+    memset(&ref, 0, sizeof(ref));
+    ref.struct_size = sizeof(ref);
+    ref.name = argv[4];
+    struct eg_unit_load_desc d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    d.path = argv[1];
+    d.unit = &ref;
+    d.deps = deps;
+    d.n_deps = ns;
+    eg_unit* src = NULL;
+    const eg_status s = parse_digest(argv[5], ref.digest) ? eg_unit_load(ctx, &d, &src) : EG_FAULT;
+    char buf[1024];
+    size_t len = 0;
+    buf[0] = 0;
+    if (eg_error(ctx, buf, sizeof(buf), &len) != EG_OK) buf[0] = 0;
+    printf("      reason: %s\n", buf);
+    char what[300];
+    snprintf(what, sizeof(what), "the split unit's load refused (%.*s) with a reason holding '%s'", (int)(colon - spec), spec, colon + 1);
+    check(s == want && src == NULL && strstr(buf, colon + 1) != NULL, what);
+    for (int i = 0; i < ns; ++i) eg_unit_free(ctx, deps[i]);
+    check(eg_ctx_free(ctx) == EG_OK, "eg_ctx_free");
+    printf("%s: %d check(s) failed\n", failures ? "FAIL" : "PASS", failures);
+    return failures ? 1 : 0;
+}
+
+int main(int argc, char** argv) {
+    if (argc < 6 || (argc - 6) % 2 != 0) {
+        fprintf(stderr, "usage: %s <library> <oracle dir> <row> <source name> <source digest> [<stage name> <stage digest>]...\n", argv[0]);
+        return 2;
+    }
+    if (strncmp(argv[2], "-refuse:", 8) == 0) return refused(argc, argv);
+    int64_t n = 0;
+    static struct pl pls[MAXS];
+    int np = 0;
+    check(read_spec(argv[2], argv[3], &n, pls, &np), "the row's spec read");
+    if (failures) return 1;
+    for (int i = 0; i < np; ++i) {
+        struct pl* q = &pls[i];
+        if (strcmp(q->kind, "uni") == 0 || strcmp(q->kind, "skip") == 0) continue;
+        q->count = n;
+        for (int d = 0; d < q->ndim; ++d) q->count *= q->dims[d];
+        const size_t bytes = (size_t)q->count * (q->is_int ? 4 : 8);
+        q->buf = calloc(1, bytes);
+        q->want = calloc(1, bytes);
+        char file[160];
+        if (strcmp(q->kind, "in") == 0) {
+            snprintf(file, sizeof(file), "%s.%s.in", argv[3], q->name);
+            check(read_file(argv[2], file, q->buf, bytes), "an input read");
+        } else {
+            snprintf(file, sizeof(file), "%s.%s.out", argv[3], q->name);
+            check(read_file(argv[2], file, q->want, bytes), "an output read");
+        }
+    }
+    struct eg_ctx_settings st;
+    memset(&st, 0, sizeof(st));
+    st.struct_size = sizeof(st);
+    st.abi_major = EG_DOOR_VERSION_MAJOR;
+    eg_ctx* ctx = NULL;
+    check(eg_ctx_new(&st, &ctx) == EG_OK, "eg_ctx_new host context");
+    const int ns = (argc - 6) / 2;
+    eg_unit* deps[MAXS] = { NULL };
+    for (int i = 0; i < ns; ++i) load(ctx, argv[1], argv[6 + 2 * i], argv[7 + 2 * i], NULL, 0, &deps[i], "a stage unit loaded (name + digest)");
+    eg_unit* src = NULL;
+    load(ctx, argv[1], argv[4], argv[5], deps, ns, &src, "the split source unit loaded with its stages as deps");
+    if (src == NULL || failures) return 1;
+    eg_host_threads(ctx, 3);
+    const eg_structure structures[2] = { EG_STRUCTURE_HOST_TEAM, EG_STRUCTURE_HOST_SERIAL };
+    const char* names[2] = { "HOST_TEAM", "HOST_SERIAL" };
+    for (int k = 0; k < 2; ++k) {
+        eg_plan* plan = NULL;
+        struct eg_plan_desc d;
+        memset(&d, 0, sizeof(d));
+        d.struct_size = sizeof(d);
+        d.unit = src;
+        d.structure = structures[k];
+        d.n_samples = n;
+        eg_status s = eg_plan_new(ctx, &d, &plan);
+        struct pt t[MAXS];
+        eg_plane* planes[MAXS] = { NULL };
+        int32_t slots[MAXS], uslots[MAXS];
+        double uvals[MAXS];
+        const void* uptr[MAXS];
+        int nplanes = 0, nuni = 0, slot = 0;
+        for (int i = 0; i < np; ++i) {
+            struct pl* q = &pls[i];
+            if (strcmp(q->kind, "skip") == 0) {
+                ++slot;
+                continue;
+            }
+            if (strcmp(q->kind, "uni") == 0) {
+                uvals[nuni] = q->uni;
+                uptr[nuni] = &uvals[nuni];
+                uslots[nuni++] = slot++;
+                continue;
+            }
+            if (strcmp(q->kind, "out") == 0) memset(q->buf, 0, (size_t)q->count * (q->is_int ? 4 : 8));
+            memset(&t[i], 0, sizeof(t[i]));
+            for (int d2 = 0; d2 < q->ndim; ++d2) t[i].shape[d2] = q->dims[d2];
+            t[i].shape[q->ndim] = n;
+            t[i].managed.version.major = DLPACK_MAJOR_VERSION;
+            t[i].managed.dl_tensor.data = q->buf;
+            t[i].managed.dl_tensor.device.device_type = kDLCPU;
+            t[i].managed.dl_tensor.ndim = q->ndim + 1;
+            t[i].managed.dl_tensor.dtype.code = q->is_int ? kDLInt : kDLFloat;
+            t[i].managed.dl_tensor.dtype.bits = q->is_int ? 32 : 64;
+            t[i].managed.dl_tensor.dtype.lanes = 1;
+            t[i].managed.dl_tensor.shape = t[i].shape;
+            if (s == EG_OK) s = eg_plane_wrap(ctx, &t[i].managed, &planes[nplanes]);
+            slots[nplanes++] = slot++;
+        }
+        struct eg_bind_desc b;
+        memset(&b, 0, sizeof(b));
+        b.struct_size = sizeof(b);
+        b.n_planes = nplanes;
+        b.plane_slots = slots;
+        b.planes = planes;
+        b.n_uniforms = nuni;
+        b.uniform_slots = uslots;
+        b.uniform_values = uptr;
+        if (s == EG_OK) s = eg_bind(ctx, plan, &b);
+        for (int rep = 0; rep < 2; ++rep) {
+            if (s == EG_OK) s = eg_launch(ctx, plan, NULL);
+            if (s != EG_OK) reason_has(ctx, "");
+            int bad = 0;
+            for (int i = 0; i < np; ++i) {
+                struct pl* q = &pls[i];
+                if (strcmp(q->kind, "out") != 0) continue;
+                const size_t bytes = (size_t)q->count * (q->is_int ? 4 : 8);
+                if (memcmp(q->buf, q->want, bytes) != 0) {
+                    ++bad;
+                    int64_t at = 0;
+                    const size_t w = q->is_int ? 4 : 8;
+                    while (memcmp((char*)q->buf + (size_t)at * w, (char*)q->want + (size_t)at * w, w) == 0) ++at;
+                    if (q->is_int) printf("      output '%s' differs from the old path at element %lld: %d, old path %d\n", q->name, (long long)at, ((int32_t*)q->buf)[at], ((int32_t*)q->want)[at]);
+                    else printf("      output '%s' differs from the old path at element %lld: %.17g, old path %.17g\n", q->name, (long long)at, ((double*)q->buf)[at], ((double*)q->want)[at]);
+                }
+            }
+            char what[200];
+            snprintf(what, sizeof(what), "%s, launch %d: OK and %d output plane(s) bitwise == the old path", names[k], rep + 1, nplanes);
+            check(s == EG_OK && bad == 0, what);
+        }
+        eg_plan_free(ctx, plan);
+        for (int i = 0; i < nplanes; ++i) eg_plane_free(ctx, planes[i]);
+    }
+    check(eg_unit_free(ctx, src) == EG_OK, "eg_unit_free of the source");
+    for (int i = 0; i < ns; ++i) check(eg_unit_free(ctx, deps[i]) == EG_OK, "eg_unit_free of a stage");
+    check(eg_ctx_free(ctx) == EG_OK, "eg_ctx_free");
+    printf("%s: %d check(s) failed\n", failures ? "FAIL" : "PASS", failures);
+    return failures ? 1 : 0;
+}

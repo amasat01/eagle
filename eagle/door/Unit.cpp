@@ -218,6 +218,61 @@ void read_dispatch(const eg_unit_body& body, const eg_unit_s& unit) {
     }
 }
 
+/** @brief Copy and check the team planes of the body (a split unit's scratch). Only the planes a host plan makes are written. */
+void read_team_planes(const eg_unit_body& body, eg_unit_s& unit) {
+    const std::string who = "meta that contradicts itself: unit '" + unit.name + "' ";
+    if (body.n_team_planes < 0 || (body.n_team_planes > 0 && body.team_planes == nullptr))
+        refuse(EG_BAD_REQUEST, who + "n_team_planes " + std::to_string(body.n_team_planes));
+    for (int i = 0; i < body.n_team_planes; ++i) {
+        eg_unit_team_plane absent{};
+        absent.keyed = absent.target_slot = absent.target_stage = -1;
+        const eg_unit_team_plane t = read_record(body.team_planes[i], absent, "unit '" + unit.name + "' team plane");
+        if (t.name == nullptr) refuse(EG_BAD_REQUEST, who + "has a team plane without a name");
+        const std::string name = t.name;
+        const std::string at = "unit '" + unit.name + "': team plane '" + name + "'";
+        if (t.dtype == EG_DTYPE_BAND_PARTIAL) refuse(EG_NOT_WRITTEN, at + " holds BAND_PARTIAL elements, which are not written");
+        if (t.dtype != EG_DTYPE_REAL && t.dtype != EG_DTYPE_INT32) refuse(EG_BAD_REQUEST, who + "team plane '" + name + "' has dtype " + std::to_string(t.dtype));
+        if (t.unit < EG_UNIT_LANE || t.unit > EG_UNIT_ONCE || t.layout < EG_LAYOUT_FLAT || t.layout > EG_LAYOUT_PLANE_MAJOR)
+            refuse(EG_NOT_WRITTEN, at + " has an unknown unit or layout");
+        if (t.wide == 1) refuse(EG_BAD_REQUEST, who + "team plane '" + name + "' is wide value 1, which is retired (a placed wide value is WARP_TILED)");
+        if (t.wide != EG_WIDE_NONE && t.wide != EG_WIDE_WARP_TILED) refuse(EG_NOT_WRITTEN, at + " has an unknown wide layout " + std::to_string(t.wide));
+        if (t.per_lane < 1) refuse(EG_BAD_REQUEST, who + "team plane '" + name + "' per_lane " + std::to_string(t.per_lane));
+        if (t.wide == EG_WIDE_NONE && (t.unit == EG_UNIT_KEY || t.unit == EG_UNIT_TARGET))
+            refuse(EG_NOT_WRITTEN, at + " has " + (t.unit == EG_UNIT_KEY ? "KEY" : "TARGET") + " units: the keyed table and the ordered scatter's cells are not written on the host");
+        unit.team_planes.push_back({ t.dtype, t.unit, t.layout, t.wide, t.per_lane, t.fill, t.fill_promised != 0, name });
+    }
+}
+
+/** @brief Copy the stages of a split unit and check their records; the units are resolved against deps by unit_load. */
+void read_stages(const eg_unit_meta& m, eg_unit_s& unit) {
+    for (int i = 0; i < m.n_stages; ++i) {
+        const std::string at = "unit '" + unit.name + "' stage " + std::to_string(i);
+        eg_unit_stage absent{};
+        const eg_unit_stage st = read_record(m.stages[i], absent, at);
+        if (st.unit == nullptr || st.unit->name == nullptr) refuse(EG_BAD_REQUEST, "meta that contradicts itself: " + at + " names no unit");
+        if (st.n_cells_in != 0 || st.n_cells_out != 0)
+            refuse(EG_NOT_WRITTEN, at + ": a stage with cells is not written");
+        StageFacts f;
+        f.ref_name = st.unit->name;
+        std::memcpy(f.ref_digest.data(), st.unit->digest, EG_DIGEST_BYTES);
+        if (st.team != nullptr) {
+            eg_unit_team absent_team{};
+            absent_team.keyed = absent_team.of_slot = absent_team.status_plane = absent_team.of_stage = -1;
+            absent_team.warps = absent_team.lanes = absent_team.groups = 1;
+            const eg_unit_team t = read_record(st.team, absent_team, at + " team");
+            if (t.grid < EG_GRID_LANES || t.grid > EG_GRID_TARGETS) refuse(EG_NOT_WRITTEN, at + ": unknown team grid " + std::to_string(t.grid));
+            if (t.grid != EG_GRID_LANES)
+                refuse(EG_NOT_WRITTEN, at + ": a team of grid " + std::string(t.grid == EG_GRID_KEYS ? "KEYS" : t.grid == EG_GRID_CHUNKS ? "CHUNKS" : "TARGETS") +
+                       " is not written on the host");
+            if (t.threads < 1 || t.warps < 1 || t.lanes < 1 || t.groups < 1)
+                refuse(EG_BAD_REQUEST, "meta that contradicts itself: " + at + " team has threads/warps/lanes/groups below 1");
+            f.team = true;
+            f.grid = t.grid, f.threads = t.threads, f.warps = t.warps, f.lanes = t.lanes, f.groups = t.groups;
+        }
+        unit.stages.push_back(std::move(f));
+    }
+}
+
 /** @brief Check the body and launch records and copy the slot facts into @p unit. */
 void read_body(const eg_unit_meta& m, void* library, bool device_only, eg_unit_s& unit) {
     const eg_unit_body body = read_record(m.body, eg_unit_body{}, "unit '" + unit.name + "' body");
@@ -225,13 +280,13 @@ void read_body(const eg_unit_meta& m, void* library, bool device_only, eg_unit_s
         refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': unknown access " + std::to_string(body.access));
     unit.access = body.access;
     refuse_count(body.n_keyed, unit.name, "n_keyed");
-    refuse_count(body.n_team_planes, unit.name, "n_team_planes");
     if (body.n_slots < 0 || (body.n_slots > 0 && body.slots == nullptr))
         refuse(EG_BAD_REQUEST, "meta that contradicts itself: unit '" + unit.name + "' n_slots " +
                std::to_string(body.n_slots));
     for (int i = 0; i < body.n_slots; ++i) unit.slots.push_back(read_slot(body.slots[i], unit.name, i));
     read_made(body, library, device_only, unit);
     read_dispatch(body, unit);
+    read_team_planes(body, unit);
     read_finish(m, unit);
     if (m.launch == nullptr) return;
     eg_unit_launch absent{};
@@ -447,9 +502,7 @@ void read_unit(const eg_unit_meta& m, void* library, eg_unit_s& unit) {
     if (m.n_stages < 0 || (m.n_stages > 0 && m.stages == nullptr))
         refuse(EG_BAD_REQUEST, "meta that contradicts itself: unit '" + unit.name + "' n_stages " +
                std::to_string(m.n_stages));
-    if (m.n_stages > 0)
-        refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': a split unit (n_stages > 0) is not "
-               "written yet: the stage layout is not final");
+    read_stages(m, unit);
     if (m.device_image_format < EG_IMAGE_NONE || m.device_image_format > EG_IMAGE_FATBIN)
         refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': unknown device_image_format " +
                std::to_string(m.device_image_format));
@@ -468,6 +521,10 @@ void read_unit(const eg_unit_meta& m, void* library, eg_unit_s& unit) {
         if (sym != nullptr) check_size_block(library, unit.name);
     }
     read_body(m, library, device_only, unit);
+    if (unit.stages.empty() && !unit.team_planes.empty())
+        refuse(EG_BAD_REQUEST, "meta that contradicts itself: unit '" + unit.name + "' has team planes and no stages");
+    if (!unit.stages.empty() && (unit.finish.present || !unit.companions.empty() || !unit.cells.empty() || unit.derived.present))
+        refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': a split unit with a finish, companions, cells or a derived role is not written");
     read_derived(m, unit);
     if (unit.ctx->dev.ordinal >= 0 && m.device_image != nullptr) device_unit_load(unit, m, library);
 }
@@ -486,6 +543,72 @@ eg_unit_ref read_desc(const eg_unit_load_desc& d) {
     std::memcpy(static_cast<void*>(&ref), static_cast<const void*>(d.unit), n);
     if (ref.name == nullptr) refuse(EG_BAD_REQUEST, "eg_unit_load_desc.unit names no unit");
     return ref;
+}
+
+/** @brief Resolve the stages of the split unit @p unit against @p deps (or the unit itself) and join the slot names ONCE:
+ *  per stage slot the source slot or the team plane of that name; the sample count has neither. */
+void resolve_stages(eg_ctx& ctx, const eg_unit_load_desc& d, eg_unit_s& unit) {
+    const std::string who = "meta that contradicts itself: unit '" + unit.name + "' ";
+    try {
+        for (std::size_t i = 0; i < unit.stages.size(); ++i) {
+            StageFacts& st = unit.stages[i];
+            const std::string at = "unit '" + unit.name + "' stage " + std::to_string(i) + " ('" + st.ref_name + "')";
+            if (st.ref_name == unit.name && st.ref_digest == unit.digest) {
+                if (unit.host_entry == nullptr) refuse(EG_BAD_REQUEST, "meta that contradicts itself: " + at + " is the unit itself, which has no host entry");
+                st.unit = &unit;
+                st.self = true;
+            } else {
+                for (std::int32_t k = 0; k < d.n_deps; ++k) {
+                    check_handle(ctx.units, d.deps[k], "eg_unit_load_desc.deps[i]");
+                    if (d.deps[k]->name == st.ref_name && d.deps[k]->digest == st.ref_digest) st.unit = d.deps[k];
+                }
+                if (st.unit == nullptr) {
+                    std::string hex;
+                    for (std::uint8_t b : st.ref_digest) { static const char* h = "0123456789abcdef"; hex += h[b >> 4]; hex += h[b & 15]; }
+                    refuse(EG_BAD_REQUEST, at + " (digest " + hex + ") is not in deps");
+                }
+                eg_unit_s& su = *st.unit;
+                if (su.host_entry == nullptr) refuse(EG_BAD_REQUEST, at + " has no host entry");
+                if (!su.stages.empty() || su.finish.present || !su.companions.empty() || !su.cells.empty() || su.derived.present)
+                    refuse(EG_NOT_WRITTEN, at + ": a stage that is itself split, finishing, a companion owner or a cell owner is not written");
+                ++su.refs;
+                st.held = true;
+            }
+            const eg_unit_s& su = *st.unit;
+            st.source_of.assign(su.slots.size(), -1);
+            st.plane_of.assign(su.slots.size(), -1);
+            for (std::size_t j = 0; j < su.slots.size(); ++j) {
+                const std::string& nm = su.slots[j].name;
+                for (std::size_t k = 0; k < unit.slots.size(); ++k)
+                    if (unit.slots[k].name == nm) st.source_of[j] = static_cast<std::int32_t>(k);
+                for (std::size_t k = 0; k < unit.team_planes.size(); ++k)
+                    if (unit.team_planes[k].name == nm) st.plane_of[j] = static_cast<std::int32_t>(k);
+                if (st.source_of[j] >= 0 && st.plane_of[j] >= 0) {    // a stage that is the unit itself lists its scratch as a slot: eagle's, never the caller's
+                    unit.slots[static_cast<std::size_t>(st.source_of[j])].made = true;
+                    st.source_of[j] = -1;
+                }
+                if (st.source_of[j] < 0 && st.plane_of[j] < 0 && su.slots[j].role != EG_ROLE_NSAMPLES)
+                    refuse(EG_BAD_REQUEST, "meta that contradicts itself: " + at + " slot '" + nm + "' joins no source slot and no team plane");
+            }
+        }
+        for (std::size_t k = 0; k < unit.slots.size(); ++k) {
+            bool joined = false;
+            for (const StageFacts& st : unit.stages)
+                for (std::int32_t s : st.source_of) joined = joined || s == static_cast<std::int32_t>(k);
+            if (!joined && !unit.slots[k].made) refuse(EG_BAD_REQUEST, who + "slot '" + unit.slots[k].name + "' joins no stage slot");
+        }
+        for (std::size_t k = 0; k < unit.team_planes.size(); ++k) {
+            bool joined = false;
+            for (const StageFacts& st : unit.stages)
+                for (std::int32_t p : st.plane_of) joined = joined || p == static_cast<std::int32_t>(k);
+            if (!joined) refuse(EG_BAD_REQUEST, who + "team plane '" + unit.team_planes[k].name + "' joins no stage slot");
+        }
+    } catch (...) {
+        for (StageFacts& st : unit.stages)
+            if (st.held) --st.unit->refs;
+        unit.stages.clear();
+        throw;
+    }
 }
 
 }  // namespace
@@ -514,8 +637,10 @@ void unit_load(eg_ctx& ctx, const eg_unit_load_desc* desc, eg_unit** out) {
         unit->library = library;
         unit->name = ref.name;
         unit->index = index;
+        std::memcpy(unit->digest.data(), m.digest, EG_DIGEST_BYTES);
         try {
             read_unit(m, library, *unit);
+            if (!unit->stages.empty()) resolve_stages(ctx, read_input(desc, "eg_unit_load_desc"), *unit);
             ctx.units.insert(unit);
         } catch (...) {
             device_unit_free(*unit);
@@ -533,6 +658,8 @@ void unit_load(eg_ctx& ctx, const eg_unit_load_desc* desc, eg_unit** out) {
 void unit_release(eg_ctx& ctx, eg_unit_s* unit) {
     if (--unit->refs > 0) return;
     ctx.units.erase(unit);
+    for (StageFacts& st : unit->stages)
+        if (st.held) unit_release(ctx, st.unit);
     device_unit_free(*unit);
     ::dlclose(unit->library);
     delete unit;

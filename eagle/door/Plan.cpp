@@ -282,7 +282,9 @@ void plan_new(eg_ctx& ctx, const eg_plan_desc* desc, eg_plan** out) {
     if (d.n_samples < 0) refuse(EG_BAD_REQUEST, "n_samples " + std::to_string(d.n_samples) + " < 0");
     if (!device && d.unit->scalar_type == EG_SCALAR_BANDED)
         refuse(EG_NOT_WRITTEN, "unit '" + d.unit->name + "': a BANDED unit on a host structure");
-    if (!device && d.unit->host_entry == nullptr)
+    if (device && !d.unit->stages.empty())
+        refuse(EG_NOT_WRITTEN, "unit '" + d.unit->name + "': a split unit on the device is not written yet");
+    if (!device && d.unit->host_entry == nullptr && d.unit->stages.empty())
         refuse(EG_NOT_WRITTEN, "unit '" + d.unit->name + "' has no host entry");
     if (!device)
         for (const CompanionFacts& c : d.unit->companions)
@@ -341,8 +343,21 @@ void plan_new(eg_ctx& ctx, const eg_plan_desc* desc, eg_plan** out) {
             }
             if (device) device_cell_work(*plan);
         }
+        for (const TeamPlaneFacts& t : d.unit->team_planes) {    // the scratch the stages share: per_lane elements per unit (a placed wide value: one)
+            const std::int64_t units = t.wide == EG_WIDE_WARP_TILED || t.unit == EG_UNIT_ONCE ? 1 : d.n_samples;
+            const std::int64_t size = std::max<std::int64_t>(1, t.per_lane * units);
+            const DLDataType elem = t.dtype == EG_DTYPE_INT32 ? DLDataType{ kDLInt, 32, 1 }
+                                                              : DLDataType{ kDLFloat, static_cast<std::uint8_t>(d.unit->scalar_type == EG_SCALAR_FLOAT32 ? 32 : 64), 1 };
+            std::vector<std::int64_t> shape{ size };
+            if (t.layout == EG_LAYOUT_PLANE_MAJOR && t.per_lane != 1) shape = { t.per_lane, size / t.per_lane };
+            plan->team.push_back(make_plane(ctx, elem, shape, false));
+        }
+        for (std::size_t i = 0; i < d.unit->slots.size(); ++i)    // a source slot that is a team plane: eagle's, bound from the start
+            for (const TeamPlaneFacts& t : d.unit->team_planes)
+                if (d.unit->slots[i].made && d.unit->slots[i].name == t.name) plan->bindings[i].bound = true;
         ctx.plans.insert(plan);
     } catch (...) {
+        for (eg_plane_s* r : plan->team) plane_release(ctx, r);
         for (eg_plane_s* r : plan->work) plane_release(ctx, r);
         for (eg_plane_s* r : plan->rows) plane_release(ctx, r);
         for (eg_plan_s::Binding& b : plan->bindings)
@@ -362,6 +377,7 @@ void plan_free(eg_ctx& ctx, eg_plan_s* plan) {
         if (b.plane != nullptr) plane_release(ctx, b.plane);
     for (eg_plane_s* r : plan->work) plane_release(ctx, r);
     for (eg_plane_s* r : plan->rows) plane_release(ctx, r);
+    for (eg_plane_s* r : plan->team) plane_release(ctx, r);
     unit_release(ctx, plan->unit);
     device_plan_free(*plan);
     delete plan;

@@ -16,6 +16,7 @@
 
 struct eg_unit_meta;
 
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -118,6 +119,27 @@ struct DerivedFacts {
     std::vector<Taped> taped;
     std::vector<Link> links;
 };
+/** @brief A team plane of a split unit (eg_unit_team_plane), copied at eg_unit_load. */
+struct TeamPlaneFacts {
+    std::int32_t dtype = 0, unit = 0, layout = 0, wide = 0;
+    std::int64_t per_lane = 1, fill = 0;
+    bool fill_promised = false;
+    std::string name;
+};
+
+/** @brief One stage of a split unit: its unit, its team (LANES grid only on the host) and the join of its slots, made once at load. */
+struct StageFacts {
+    eg_unit_s* unit = nullptr;                ///< the stage's unit; a reference held unless ``self``
+    bool self = false;                        ///< the stage is the source unit itself
+    bool held = false;                        ///< a reference to ``unit`` is held (a dep)
+    std::string ref_name;                     ///< the stage reference, resolved against deps at load
+    std::array<std::uint8_t, EG_DIGEST_BYTES> ref_digest{};
+    bool team = false;
+    std::int32_t grid = 0, threads = 1, warps = 1, lanes = 1, groups = 1;
+    std::vector<std::int32_t> source_of;      ///< per stage slot: the source slot it joins, else -1
+    std::vector<std::int32_t> plane_of;       ///< per stage slot: the team plane it joins, else -1 (both -1: the sample count)
+};
+
 /** @brief The element count of @p t (the product of its shape). */
 inline std::int64_t elements(const DLTensor& t) {
     std::int64_t n = 1;
@@ -151,6 +173,9 @@ struct eg_unit_s {
     eagle::door::FinishFacts finish;
     eagle::door::DerivedFacts derived;        ///< a derived unit (eg_unit_meta.derived), else not present
     std::int32_t index = -1;                  ///< the unit index in its library table
+    std::array<std::uint8_t, EG_DIGEST_BYTES> digest{};
+    std::vector<eagle::door::TeamPlaneFacts> team_planes;
+    std::vector<eagle::door::StageFacts> stages;   ///< non-empty: a split unit, run stage by stage
     std::vector<eagle::door::CompanionFacts> companions;
     std::vector<eagle::door::CellFacts> cells;
     std::int64_t cell_row = 0;                ///< samples per row of a cell's rows, 0: no cells
@@ -198,6 +223,7 @@ struct eg_plan_s {
     std::vector<Binding> bindings;            ///< one per slot; never resized after eg_plan_new
     std::vector<void*> params;                ///< the entry's argument list, into ``bindings``
     std::vector<eg_plane_s*> rows;            ///< one eagle-made row plane per cell component (``unit->cells``), one reference each
+    std::vector<eg_plane_s*> team;            ///< one eagle-made scratch plane per team plane of a split unit, one reference each
     std::vector<eg_plane_s*> work;            ///< DEVICE: the two reduction work buffers of each cell component, one reference each
     std::uint32_t finished = 0;               ///< the eagle-made finished counter of a finishing unit
     std::int64_t steps_word = 0;              ///< the eagle-made steps word of an AUTO unit
