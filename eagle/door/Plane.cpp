@@ -114,11 +114,17 @@ eg_plane_s* make_plane(eg_ctx& ctx, const DLDataType& dtype, std::vector<std::in
     return plane;
 }
 
-/** @brief Refuse @p op over a device plane among @p planes (handles not of @p ctx are left to @p op's own checks). */
-void host_planes_only(const eg_ctx& ctx, const char* op, std::initializer_list<const eg_plane_s*> planes) {
+/** @brief Whether @p op runs on device planes: the planes of @p ctx among @p planes are all device planes (true) or
+ *  all host planes (false). A mix, or a device plane on a host-only context, is refused (handles not of @p ctx are
+ *  left to @p op's own checks). */
+bool device_planes(const eg_ctx& ctx, const char* op, std::initializer_list<const eg_plane_s*> planes) {
+    int device = 0, host = 0;
     for (const eg_plane_s* p : planes)
-        if (ctx.planes.count(const_cast<eg_plane_s*>(p)) != 0 && p->tensor->dl_tensor.device.device_type != kDLCPU)
-            refuse(EG_NOT_WRITTEN, std::string(op) + " of a device plane is not written in this build of the door");
+        if (ctx.planes.count(const_cast<eg_plane_s*>(p)) != 0) (p->tensor->dl_tensor.device.device_type == kDLCPU ? host : device) += 1;
+    if (device > 0 && host > 0) refuse(EG_BAD_REQUEST, std::string(op) + ": the planes are on both sides; one operation runs on one side");
+    if (device > 0 && ctx.dev.ordinal < 0)
+        refuse(EG_NOT_WRITTEN, std::string(op) + " of a device plane on a host-only context is not written in this build of the door");
+    return device > 0;
 }
 
 /** @brief Drop one reference to @p plane; the last one runs the tensor's deleter. */

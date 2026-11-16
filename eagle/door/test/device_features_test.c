@@ -226,7 +226,6 @@ static void banded(eg_ctx* ctx, const char* lib, const char* hex, const char* di
                    dplane_new(ctx, &px, CELLS, kDLFloat, 64, x) && dplane_new(ctx, &py, CELLS, kDLFloat, 64, y) &&
                    bind(ctx, plan, 3, slots, planes) == EG_OK && launch_read(ctx, plan, &out, got, CELLS * 8);
     check(ok && memcmp(got, want, CELLS * 8) == 0, "BANDED unit (4096 band cells): DEVICE launch OK, out cells bitwise vs the old device path");
-    if (plan) runner_refused(ctx, plan, "a BANDED scalar type", "BANDED unit: a runner over it refused NOT_WRITTEN by name");
     if (plan) eg_plan_free(ctx, plan);
     if (ok) for (int i = 0; i < 3; ++i) dplane_free(ctx, planes[i]);
     free(x); free(y); free(want); free(got);

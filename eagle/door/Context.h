@@ -397,7 +397,7 @@ void record_end(eg_ctx& ctx, eg_graph** out);
 void graph_launch(eg_ctx& ctx, eg_graph_s* graph);
 void graph_free(eg_ctx& ctx, eg_graph_s* graph);
 void record_drop_all(eg_ctx& ctx);
-void host_planes_only(const eg_ctx& ctx, const char* op, std::initializer_list<const eg_plane_s*> planes);
+bool device_planes(const eg_ctx& ctx, const char* op, std::initializer_list<const eg_plane_s*> planes);
 bool device_plans(const eg_ctx& ctx, const eg_runner_desc* desc);
 void check_runner(const eg_ctx& ctx, const eg_runner_desc& d, bool device);
 /** @brief A plane the reorder moves: its first byte and element size. */
@@ -442,6 +442,9 @@ void device_plan_free(eg_plan_s& plan) noexcept;
 void* device_alloc(eg_ctx& ctx, std::size_t bytes);
 void device_free(eg_ctx& ctx, void* data) noexcept;
 void device_cell_work(eg_plan_s& plan);
+/** @brief eg_reduce and eg_copy over device planes, on the context's stream (device/Device.cpp); checked as the host's. */
+void device_reduce(eg_ctx& ctx, const eg_reduce_desc& desc);
+void device_copy(eg_ctx& ctx, eg_plane_s* src, eg_plane_s* dst);
 /** @brief Read @p bytes (a multiple of 4) of device memory at @p device into @p host, ordered after the context's queued work. */
 void device_read(eg_ctx& ctx, const void* device, void* host, std::size_t bytes);
 void device_runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out);

@@ -59,7 +59,7 @@ CUDA ?=
 NVCC ?= $(CUDA)/bin/nvcc
 PAIR_CUDA_WING_DIR ?=
 CUDA_WING_FACTS ?= $(PAIR_CUDA_WING_DIR)/raptor_facts.h
-PAIR_DEVICE_UNITS := mv osc osc_x4 ksum_c fixed_count _osc _osc_x4 _gosc _plain kg_fwd kq oscillator
+PAIR_DEVICE_UNITS := mv osc osc_x4 ksum_c fixed_count _osc _osc_x4 _gosc _plain kg_fwd kq oscillator bosc
 # The old path's device recipe for a cuda unit (hawk's nvcc build) in the image format its meta records
 # (EG_IMAGE_PTX: -ptx, else -cubin). PAIR_NVCC/PAIR_CCBIN: the compiler the old run used (its cache's
 # validity record); PTX of a toolkit newer than the driver does not load.
@@ -191,9 +191,11 @@ ACTIVE_PAIR_TEST := $(OUT)/active_pair_test
 FEATURES_TEST := $(OUT)/device_features_test
 FAST_PAIR_TEST := $(OUT)/fast_pair_test
 GRAPH_PAIR_TEST := $(OUT)/graph_pair_test
+OPS_TEST := $(OUT)/device_ops_test
+BANDED_RUNNER_TEST := $(OUT)/banded_runner_test
 
 # The pair tests over test/pair_util.h: one rule, each binary built from the test/ source of its own name.
-$(RUNNER_PAIR_TEST) $(ACTIVE_PAIR_TEST) $(FEATURES_TEST) $(FAST_PAIR_TEST) $(GRAPH_PAIR_TEST): $(OUT)/%: test/%.c test/pair_util.h eg_door.h $(LIB) | check-cuda
+$(RUNNER_PAIR_TEST) $(ACTIVE_PAIR_TEST) $(FEATURES_TEST) $(OPS_TEST) $(BANDED_RUNNER_TEST) $(FAST_PAIR_TEST) $(GRAPH_PAIR_TEST): $(OUT)/%: test/%.c test/pair_util.h eg_door.h $(LIB) | check-cuda
 	$(CC) $(CFLAGS_C) -isystem $(CUDA)/include -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door \
 	  -Wl,-rpath,$(OUT) $(CUDART) -lm -pthread
 
@@ -215,6 +217,6 @@ $(OUT)/libpair_dev_$(1).so: $$(KERNEL_CUDA_$(1)) $$(META_CUDA_$(1)) eg_door.h eg
 	  -c $$(META_CUDA_$(1)) -o $(OUT)/pair_dev_$(1)_meta.o
 	$$(CC) -shared -o $$@ $(OUT)/pair_dev_$(1)_meta.o $(OUT)/pair_dev_$(1)_image.o
 
-pair-device-$(1): symbols $(OUT)/libpair_dev_$(1).so $$(PAIR_DEVICE_TEST) $$(RUNNER_PAIR_TEST) $$(ACTIVE_PAIR_TEST) $$(FAST_PAIR_TEST) $$(GRAPH_PAIR_TEST) $$(FEATURES_TEST)
+pair-device-$(1): symbols $(OUT)/libpair_dev_$(1).so $$(PAIR_DEVICE_TEST) $$(RUNNER_PAIR_TEST) $$(ACTIVE_PAIR_TEST) $$(FAST_PAIR_TEST) $$(GRAPH_PAIR_TEST) $$(FEATURES_TEST) $$(OPS_TEST) $$(BANDED_RUNNER_TEST)
 endef
 $(foreach u,$(PAIR_DEVICE_UNITS),$(eval $(call PAIR_DEVICE_RULES,$(u))))

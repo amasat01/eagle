@@ -8,6 +8,7 @@
 // structure DEVICE.
 #include "eagle/door/Context.h"
 #include "eagle/door/eg_unit_meta.h"
+#include "eagle/door/host/Ops.h"
 
 #ifndef EAGLE_CPU_ONLY
 #include "eagle/door/device/Loop.h"
@@ -45,6 +46,8 @@ void* device_alloc(eg_ctx&, std::size_t) { return nullptr; }
 void device_free(eg_ctx&, void*) noexcept {}
 void device_cell_work(eg_plan_s&) {}
 void device_read(eg_ctx&, const void*, void*, std::size_t) {}
+void device_reduce(eg_ctx&, const eg_reduce_desc&) {}
+void device_copy(eg_ctx&, eg_plane_s*, eg_plane_s*) {}
 void device_runner_new(eg_ctx&, const eg_runner_desc*, eg_runner**) {
     refuse(EG_NOT_WRITTEN, "structure DEVICE: the device group is not built");
 }
@@ -404,6 +407,31 @@ void device_read(eg_ctx& ctx, const void* device, void* host, std::size_t bytes)
     cells_read(ctx.dev.stream, reinterpret_cast<std::uint64_t>(device), static_cast<unsigned*>(host), static_cast<unsigned>(bytes / sizeof(unsigned)));
 }
 
+/** @brief eg_reduce over device planes: checked as the host's, then the canonical ordered tree on the context's
+ *  stream (the order the host runs); returns with the result in place. */
+void device_reduce(eg_ctx& ctx, const eg_reduce_desc& d) {
+    const host::ReduceOp r = host::reduce_check(ctx, d);
+    const auto at = [](const eg_plane_s* p) -> void* {
+        return p == nullptr ? nullptr : static_cast<char*>(p->tensor->dl_tensor.data) + p->tensor->dl_tensor.byte_offset;
+    };
+    Current current(ctx.dev);
+    reduce_step(ctx.dev.stream, r.code, r.op == EG_REDUCE_ALL ? 3 : r.op, at(r.in), r.n, r.cols, at(r.out), at(r.comp), r.pair);
+}
+
+/** @brief eg_copy over device planes: checked as the host's, then a device-to-device copy on the context's stream
+ *  (planes of one range of memory copy nothing; partly overlapping ones are refused). */
+void device_copy(eg_ctx& ctx, eg_plane_s* src, eg_plane_s* dst) {
+    host::copy_check(ctx, src, dst);
+    const DLTensor& s = src->tensor->dl_tensor;
+    const DLTensor& t = dst->tensor->dl_tensor;
+    const char *ps = static_cast<const char*>(s.data) + s.byte_offset, *pd = static_cast<const char*>(t.data) + t.byte_offset;
+    const std::size_t bytes = static_cast<std::size_t>(elements(s)) * (s.dtype.bits / 8);
+    if (bytes == 0 || ps == pd) return;
+    if (ps < pd + bytes && pd < ps + bytes) refuse(EG_BAD_REQUEST, "eg_copy: the device planes overlap");
+    Current current(ctx.dev);
+    copy_step(ctx.dev.stream, const_cast<char*>(pd), ps, bytes);
+}
+
 /** @brief The two reduction work buffers of each cell component of @p plan (made after its rows). */
 void device_cell_work(eg_plan_s& plan) {
     for (const eg_plane_s* r : plan.rows) {
@@ -580,7 +608,6 @@ void device_runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out)
             const char* inside = !u.companions.empty() || !u.cells.empty() ? "companion or cell folding"
                                  : u.index_count_slot >= 0                  ? "an index set"
                                  : u.dev_box_t > 0                          ? "a device thread box"
-                                 : u.scalar_type == EG_SCALAR_BANDED        ? "a BANDED scalar type"
                                                                             : nullptr;
             if (inside != nullptr)
                 refuse(EG_NOT_WRITTEN, "plans[" + std::to_string(i) + "]: " + inside + " inside a device runner loop "

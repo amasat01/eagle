@@ -89,6 +89,16 @@ void reorder_step(std::uint64_t stream, const std::vector<DevicePlane>& planes, 
 void restore_step(std::uint64_t stream, const std::vector<DevicePlane>& planes, std::int32_t* perm, std::int32_t* inv,
                   void* scratch, std::int64_t n);
 
+/** @brief Reduce each of the @p cols columns of the (cols, n) device plane @p in into @p out on @p stream by eagle's
+ *  canonical ordered tree (the order the host runs; ``code``: 0 f32, 1 f64, 2 i32, 3 i64, 4 u8 with op 3 ALL; ``op``: 0 SUM,
+ *  1 MAX, 2 MIN, 3 ALL). @p comp: a float sum's companion input, or with @p pair the output of the compensation beside
+ *  ``out``. Waits for the result (its work buffers are freed here). */
+void reduce_step(std::uint64_t stream, int code, int op, const void* in, std::int64_t n, std::int64_t cols, void* out, void* comp,
+                 bool pair);
+
+/** @brief Queue on @p stream a device-to-device copy of @p bytes. */
+void copy_step(std::uint64_t stream, void* dst, const void* src, std::size_t bytes);
+
 /** @brief Wait until @p stream is idle. */
 void stream_wait(std::uint64_t stream);
 

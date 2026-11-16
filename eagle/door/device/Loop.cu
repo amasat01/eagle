@@ -163,6 +163,80 @@ void restore_step(std::uint64_t stream, const std::vector<DevicePlane>& planes, 
     filtering::restoreDevice(t.data(), static_cast<std::uint32_t>(t.size()), perm, inv, scratch, n, reinterpret_cast<cudaStream_t>(stream));
 }
 
+namespace {
+
+/** @brief Sample ``k`` of the seam's (rows, cols) row-major walk, read from a (cols, n) samples-last plane. */
+template <class T>
+struct SamplesLast {
+    const T* p;
+    idx_t n, cols;
+    __host__ __device__ T operator()(idx_t k) const { return p[(k % cols) * n + k / cols]; }
+};
+
+template <class T, class OP>
+void reduce_as(cudaStream_t s, const void* in, std::int64_t n, std::int64_t cols, void* out, void* comp, bool pair, void* wa, void* wb) {
+    namespace canon = reduce::canonical;
+    const auto rows = static_cast<idx_t>(n), width = static_cast<idx_t>(cols);
+    const SamplesLast<T> x{ static_cast<const T*>(in), rows, width };
+    T* a = static_cast<T*>(wa);
+    T* b = static_cast<T*>(wb);
+    if (pair) {    // (hi, comp) land as 2 * cols values: split them into the two planes
+        T* both = nullptr;
+        EAGLE_CHECK_ALWAYS(cudaMalloc(&both, 2 * static_cast<std::size_t>(cols) * sizeof(T)));
+        canon::enqueueTo<T, OP>(x, canon::NoComp{}, rows, width, reduce::Policy::ordered, a, b, both, true, s);
+        EAGLE_CHECK_ALWAYS(cudaMemcpyAsync(out, both, static_cast<std::size_t>(cols) * sizeof(T), cudaMemcpyDeviceToDevice, s));
+        EAGLE_CHECK_ALWAYS(cudaMemcpyAsync(comp, both + cols, static_cast<std::size_t>(cols) * sizeof(T), cudaMemcpyDeviceToDevice, s));
+        EAGLE_CHECK_ALWAYS(cudaStreamSynchronize(s));
+        (void)cudaFree(both);
+    } else if (comp != nullptr) {
+        canon::enqueueTo<T, OP>(x, SamplesLast<T>{ static_cast<const T*>(comp), rows, width }, rows, width, reduce::Policy::ordered, a, b,
+                                static_cast<T*>(out), false, s);
+    } else {
+        canon::enqueueTo<T, OP>(x, canon::NoComp{}, rows, width, reduce::Policy::ordered, a, b, static_cast<T*>(out), false, s);
+    }
+}
+
+template <class T>
+void reduce_op(cudaStream_t s, int op, const void* in, std::int64_t n, std::int64_t cols, void* out, void* comp, bool pair, void* wa, void* wb) {
+    if (op == 0) reduce_as<T, aether::SumOp<T>>(s, in, n, cols, out, comp, pair, wa, wb);
+    else if (op == 1) reduce_as<T, aether::MaxOp<T>>(s, in, n, cols, out, comp, pair, wa, wb);
+    else reduce_as<T, reduce::canonical::MinOp<T>>(s, in, n, cols, out, comp, pair, wa, wb);
+}
+
+}  // namespace
+
+void reduce_step(std::uint64_t stream, int code, int op, const void* in, std::int64_t n, std::int64_t cols, void* out, void* comp,
+                 bool pair) {
+    const auto s = reinterpret_cast<cudaStream_t>(stream);
+    const std::size_t elems = static_cast<std::size_t>(reduce::canonical::deviceWorkElems(static_cast<idx_t>(n), static_cast<idx_t>(cols)));
+    void *wa = nullptr, *wb = nullptr;
+    const std::size_t bytes = elems * 8;    // room for the widest partial of any element type
+    EAGLE_CHECK_ALWAYS(cudaMalloc(&wa, bytes));
+    const cudaError_t second = cudaMalloc(&wb, bytes);
+    try {
+        EAGLE_CHECK_ALWAYS(second);
+        switch (code) {
+            case 0: reduce_op<float>(s, op, in, n, cols, out, comp, pair, wa, wb); break;
+            case 1: reduce_op<double>(s, op, in, n, cols, out, comp, pair, wa, wb); break;
+            case 2: reduce_op<std::int32_t>(s, op, in, n, cols, out, comp, pair, wa, wb); break;
+            case 3: reduce_op<std::int64_t>(s, op, in, n, cols, out, comp, pair, wa, wb); break;
+            default: reduce_as<std::uint8_t, aether::LogicalAndOp>(s, in, n, cols, out, nullptr, false, wa, wb);
+        }
+        EAGLE_CHECK_ALWAYS(cudaGetLastError());
+        EAGLE_CHECK_ALWAYS(cudaStreamSynchronize(s));
+    } catch (...) {
+        (void)cudaFree(wa);
+        (void)cudaFree(wb);
+        throw;
+    }
+    (void)cudaFree(wa);
+    (void)cudaFree(wb);
+}
+
+void copy_step(std::uint64_t stream, void* dst, const void* src, std::size_t bytes) {
+    EAGLE_CHECK_ALWAYS(cudaMemcpyAsync(dst, src, bytes, cudaMemcpyDeviceToDevice, reinterpret_cast<cudaStream_t>(stream)));
+}
+
 std::int64_t cell_work_elems(std::int64_t rows) {
     return static_cast<std::int64_t>(reduce::canonical::deviceWorkElems(static_cast<idx_t>(rows)));
 }

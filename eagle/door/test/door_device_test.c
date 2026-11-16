@@ -383,13 +383,13 @@ int main(int argc, char** argv) {
               refused(bind(ctx, hp, py, px, NULL, a), EG_BAD_REQUEST, ctx, "a device plane in a host plan"),
           "a device plane in a host plan refused BAD_REQUEST");
     eg_plan_free(ctx, hp);
-    check(refused(eg_copy(ctx, py, hy), EG_NOT_WRITTEN, ctx, "eg_copy of a device plane"), "eg_copy of a device plane: NOT_WRITTEN");
+    check(refused(eg_copy(ctx, py, hy), EG_BAD_REQUEST, ctx, "both sides"), "eg_copy of a device plane onto a host plane: BAD_REQUEST (one side per operation)");
     struct eg_reduce_desc rd;
     memset(&rd, 0, sizeof(rd));
     rd.struct_size = sizeof(rd);
     rd.in = py;
     rd.out = hy;
-    check(refused(eg_reduce(ctx, &rd), EG_NOT_WRITTEN, ctx, "eg_reduce of a device plane"), "eg_reduce of a device plane: NOT_WRITTEN");
+    check(refused(eg_reduce(ctx, &rd), EG_BAD_REQUEST, ctx, "both sides"), "eg_reduce of a device plane into a host plane: BAD_REQUEST (one side per operation)");
     struct eg_runner_desc rn;
     memset(&rn, 0, sizeof(rn));
     rn.struct_size = sizeof(rn);

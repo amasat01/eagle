@@ -113,15 +113,15 @@ EG_EXPORT eg_status eg_reduce(eg_ctx* ctx, const struct eg_reduce_desc* desc) {
     return door::call(ctx, [&](eg_ctx& c) {
         const eg_reduce_desc d = door::read_input(desc, "eg_reduce_desc");
         door::device_quiet(c, "eg_reduce", EG_NOT_WRITTEN, door::kHostWorkInGraph);
-        door::host_planes_only(c, "eg_reduce", { d.in, d.out, d.comp });
-        door::reduce(c, desc);
+        if (door::device_planes(c, "eg_reduce", { d.in, d.out, d.comp })) door::device_reduce(c, d);
+        else door::reduce(c, desc);
     });
 }
 EG_EXPORT eg_status eg_copy(eg_ctx* ctx, eg_plane* src, eg_plane* dst) {
     return door::call(ctx, [&](eg_ctx& c) {
         door::device_quiet(c, "eg_copy", EG_NOT_WRITTEN, door::kHostWorkInGraph);
-        door::host_planes_only(c, "eg_copy", { src, dst });
-        door::copy(c, src, dst);
+        if (door::device_planes(c, "eg_copy", { src, dst })) door::device_copy(c, src, dst);
+        else door::copy(c, src, dst);
     });
 }
 EG_EXPORT eg_status eg_record_begin(eg_ctx* ctx) {
