@@ -273,6 +273,11 @@ void plan_new(eg_ctx& ctx, const eg_plan_desc* desc, eg_plan** out) {
         refuse(EG_NOT_WRITTEN, "unit '" + d.unit->name + "': a BANDED unit on a host structure");
     if (!device && d.unit->host_entry == nullptr)
         refuse(EG_NOT_WRITTEN, "unit '" + d.unit->name + "' has no host entry");
+    if (!device)
+        for (const CompanionFacts& c : d.unit->companions)
+            if (c.fold == nullptr)
+                refuse(EG_NOT_WRITTEN, "unit '" + d.unit->name + "': the companion '" + d.unit->slots[c.slot].name +
+                       "' has no host fold entry");
     std::vector<exec::Partition> parts = read_partitions(d);
     for (const exec::Partition& p : parts)    // a row of a cell has one writer: a partition starts on a row
         if (d.unit->cell_row > 0 && p.base % d.unit->cell_row != 0)
@@ -317,13 +322,15 @@ void plan_new(eg_ctx& ctx, const eg_plan_desc* desc, eg_plan** out) {
             const DLDataType real{ kDLFloat, static_cast<std::uint8_t>(d.unit->scalar_type == EG_SCALAR_FLOAT32 ? 32 : 64), 1 };
             const std::int64_t rows = std::max<std::int64_t>(1, (d.n_samples + d.unit->cell_row - 1) / d.unit->cell_row);
             for (const CellFacts& c : d.unit->cells) {
-                plan->rows.push_back(make_plane(ctx, real, { rows }));
+                plan->rows.push_back(make_plane(ctx, real, { rows }, device));
                 bind_handle(*plan, c.slot, plan->rows.back()->tensor->dl_tensor.data, static_cast<std::uint64_t>(d.n_samples));
                 plan->bindings[c.slot].bound = false;    // bound when the caller binds the cell
             }
+            if (device) device_cell_work(*plan);
         }
         ctx.plans.insert(plan);
     } catch (...) {
+        for (eg_plane_s* r : plan->work) plane_release(ctx, r);
         for (eg_plane_s* r : plan->rows) plane_release(ctx, r);
         for (eg_plan_s::Binding& b : plan->bindings)
             if (b.plane != nullptr) plane_release(ctx, b.plane);
@@ -340,6 +347,7 @@ void plan_free(eg_ctx& ctx, eg_plan_s* plan) {
     ctx.plans.erase(plan);
     for (eg_plan_s::Binding& b : plan->bindings)
         if (b.plane != nullptr) plane_release(ctx, b.plane);
+    for (eg_plane_s* r : plan->work) plane_release(ctx, r);
     for (eg_plane_s* r : plan->rows) plane_release(ctx, r);
     unit_release(ctx, plan->unit);
     device_plan_free(*plan);
@@ -385,7 +393,8 @@ void bind(eg_ctx& ctx, eg_plan_s* plan, const eg_bind_desc* desc) {
         if (old != nullptr) plane_release(ctx, old);
         for (const CompanionFacts& c : plan->unit->companions) {     // a new target: its companion, zeroed, of its shape and dtype
             if (c.target != d.plane_slots[i]) continue;
-            eg_plane_s* comp = make_plane(ctx, t.dtype, std::vector<std::int64_t>(t.shape, t.shape + t.ndim));
+            eg_plane_s* comp = make_plane(ctx, t.dtype, std::vector<std::int64_t>(t.shape, t.shape + t.ndim),
+                                          plan->structure == EG_STRUCTURE_DEVICE);
             eg_plane_s* prev = plan->bindings[c.slot].plane;
             plan->bindings[c.slot].plane = comp;
             bind_handle(*plan, c.slot, comp->tensor->dl_tensor.data, static_cast<std::uint64_t>(plan->n_samples));

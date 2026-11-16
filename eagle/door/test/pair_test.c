@@ -27,7 +27,8 @@
  *
  * The device column (built as pair_device_test with EG_PAIR_DEVICE, run through the GPU pool): the unit's cuda
  * library on a device context, its planes copied to device memory, launched under DEVICE whole and over two
- * halves, y compared BITWISE with the old path's device output. Rows with ``device`` set only (mv).
+ * halves, y compared BITWISE with the old path's device output. Rows with ``device`` set only (mv, ksum_c,
+ * fixed_count: the last two make their companion on the device and fold it with the unit's device fold function).
  */
 #define _POSIX_C_SOURCE 200809L
 
@@ -296,13 +297,13 @@ static const struct unit_spec units[] = {
       .yinit = 0.0, .threads = 3,
       .want_file = { "y_out.f64" }, .nwant = 1, .read_msg = "old path input and output read (x 2 x 8192, out 2 float64)",
       .sanity = sanity_ksum,
-      .nshapes = 2, .shapes = two_shapes, .ncases = 1, .cases = { { "ksum_c: a compensated keyed sum", 0 } } },
+      .nshapes = 2, .shapes = two_shapes, .ncases = 1, .cases = { { "ksum_c: a compensated keyed sum", 0 } }, .device = 1 },
     { .name = "fixed_count", .n = 32, .nplanes = 2, .made = 1u << 1,
       .planes = { { F64, 1, { 4 }, NULL, NULL }, { F64, 1, { 8 }, "th_in.f64", NULL } },
       .yinit = 0.0, .threads = 3,
       .want_file = { "y_out.f64" }, .nwant = 1, .read_msg = "old path input and output read (th 8, acc 4 float64)",
       .sanity = sanity_fixed_count,
-      .nshapes = 2, .shapes = two_shapes, .ncases = 1, .cases = { { "fixed_count: a companion over a static axis", 0 } } },
+      .nshapes = 2, .shapes = two_shapes, .ncases = 1, .cases = { { "fixed_count: a companion over a static axis", 0 } }, .device = 1 },
 };
 
 static int64_t elems(const struct plane_spec* p) {
@@ -432,7 +433,7 @@ int main(int argc, char** argv) {
         return 2;
     }
     st.flags = EG_CTX_DEVICE;
-    nshapes = 2;
+    nshapes = u->made ? 1 : 2; /* a cross-sample write is not split across partitions */
     shapes = device_shapes;
 #endif
     eg_ctx* ctx = NULL;

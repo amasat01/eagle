@@ -10,6 +10,7 @@
 #include "eagle/cuda/CaptureConditional.h"
 #include "eagle/cuda/CapturedGraph.h"
 #include "eagle/cuda/StreamCapturer.h"
+#include "eagle/reduce/canonical.h"
 
 namespace eagle {
 namespace door {
@@ -88,6 +89,35 @@ void mask_count(std::uint64_t stream, const void* mask, std::int64_t n, unsigned
     const long long blocks = (n + 255) / 256 < 1024 ? (n + 255) / 256 : 1024;
     maskCountKernel<<<static_cast<unsigned>(blocks), 256, 0, s>>>(static_cast<const unsigned char*>(mask), n, width,
                                                                    counter);
+    EAGLE_CHECK_ALWAYS(cudaGetLastError());
+}
+
+std::int64_t cell_work_elems(std::int64_t rows) {
+    return static_cast<std::int64_t>(reduce::canonical::deviceWorkElems(static_cast<idx_t>(rows)));
+}
+
+namespace {
+
+template <class T, class OP>
+void fold_as(cudaStream_t stream, const void* in, std::int64_t rows, void* out, void* wa, void* wb) {
+    namespace canon = reduce::canonical;
+    canon::enqueueTo<T, OP>(canon::DevicePtr<T>{ static_cast<const T*>(in) }, canon::NoComp{}, static_cast<idx_t>(rows), 1,
+                            reduce::Policy::ordered, static_cast<T*>(wa), static_cast<T*>(wb), static_cast<T*>(out), false,
+                            stream);
+}
+
+}  // namespace
+
+void cell_fold(std::uint64_t stream, const void* in, std::int64_t rows, unsigned bits, bool max, void* out, void* wa,
+               void* wb) {
+    const auto s = reinterpret_cast<cudaStream_t>(stream);
+    if (bits == 32) {
+        if (max) fold_as<float, aether::MaxOp<float>>(s, in, rows, out, wa, wb);
+        else fold_as<float, reduce::canonical::MinOp<float>>(s, in, rows, out, wa, wb);
+    } else {
+        if (max) fold_as<double, aether::MaxOp<double>>(s, in, rows, out, wa, wb);
+        else fold_as<double, reduce::canonical::MinOp<double>>(s, in, rows, out, wa, wb);
+    }
     EAGLE_CHECK_ALWAYS(cudaGetLastError());
 }
 

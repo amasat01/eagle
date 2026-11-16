@@ -127,7 +127,7 @@ void read_finish(const eg_unit_meta& m, eg_unit_s& unit) {
 }
 
 /** @brief Read the companions and cells of @p body: the slots eagle makes, the fold entries and the rows' fold. */
-void read_made(const eg_unit_body& body, void* library, eg_unit_s& unit) {
+void read_made(const eg_unit_body& body, void* library, bool device_only, eg_unit_s& unit) {
     const std::string who = "meta that contradicts itself: unit '" + unit.name + "' ";
     const std::int32_t n = static_cast<std::int32_t>(unit.slots.size());
     const auto accum = [&](std::int32_t slot, const char* what) -> SlotFacts& {
@@ -144,13 +144,14 @@ void read_made(const eg_unit_body& body, void* library, eg_unit_s& unit) {
         accum(c.target_slot, "companion target");
         if (c.slot == c.target_slot || comp.made)
             refuse(EG_BAD_REQUEST, who + "companion slot " + std::to_string(c.slot) + " is its own target or listed twice");
-        if (c.host_fold_entry == nullptr)
-            refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': the companion '" + comp.name + "' has no host fold entry");
-        void* sym = ::dlsym(library, c.host_fold_entry);
-        if (sym == nullptr)
+        if (c.host_fold_entry == nullptr && c.device_fold_function == nullptr)
+            refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': the companion '" + comp.name + "' has no host fold entry and no device fold function");
+        void* sym = c.host_fold_entry != nullptr ? ::dlsym(library, c.host_fold_entry) : nullptr;
+        if (c.host_fold_entry != nullptr && sym == nullptr && !device_only)
             refuse(EG_FAULT, "unit '" + unit.name + "': the library lacks the fold entry '" + c.host_fold_entry + "'");
         comp.made = true;
-        unit.companions.push_back({ c.slot, c.target_slot, reinterpret_cast<exec::HostEntryV2>(sym) });
+        unit.companions.push_back({ c.slot, c.target_slot, reinterpret_cast<exec::HostEntryV2>(sym),
+                                    c.device_fold_function != nullptr ? c.device_fold_function : "", 0 });
     }
     if (body.n_cells > 0) {
         if (body.cell_row < 1) refuse(EG_BAD_REQUEST, who + "cell_row " + std::to_string(body.cell_row) + " with cells");
@@ -177,7 +178,7 @@ void read_made(const eg_unit_body& body, void* library, eg_unit_s& unit) {
 }
 
 /** @brief Check the body and launch records and copy the slot facts into @p unit. */
-void read_body(const eg_unit_meta& m, void* library, eg_unit_s& unit) {
+void read_body(const eg_unit_meta& m, void* library, bool device_only, eg_unit_s& unit) {
     const eg_unit_body body = read_record(m.body, eg_unit_body{}, "unit '" + unit.name + "' body");
     if (body.access < EG_ACCESS_SAMPLE_LOCAL || body.access > EG_ACCESS_CROSS_SAMPLE_WRITE)
         refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': unknown access " + std::to_string(body.access));
@@ -189,7 +190,7 @@ void read_body(const eg_unit_meta& m, void* library, eg_unit_s& unit) {
         refuse(EG_BAD_REQUEST, "meta that contradicts itself: unit '" + unit.name + "' n_slots " +
                std::to_string(body.n_slots));
     for (int i = 0; i < body.n_slots; ++i) unit.slots.push_back(read_slot(body.slots[i], unit.name, i));
-    read_made(body, library, unit);
+    read_made(body, library, device_only, unit);
     read_finish(m, unit);
     if (m.launch == nullptr) return;
     eg_unit_launch absent{};
@@ -361,7 +362,7 @@ void read_unit(const eg_unit_meta& m, void* library, eg_unit_s& unit) {
         unit.host_entry = reinterpret_cast<exec::HostEntryV2>(sym);
         if (sym != nullptr) check_size_block(library, unit.name);
     }
-    read_body(m, library, unit);
+    read_body(m, library, device_only, unit);
     if (unit.ctx->dev.ordinal >= 0 && m.device_image != nullptr) device_unit_load(unit, m, library);
 }
 

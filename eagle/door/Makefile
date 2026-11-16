@@ -32,7 +32,8 @@
 #   pair-device-<unit>  the unit's cuda kernel text (KERNEL_CUDA_<unit>, compiled by the old path's
 #                       device recipe, PAIR_DEVICE_FLAGS) and its meta (META_CUDA_<unit>) in one library, plus
 #                       pair_device_test; run $(OUT)/pair_device_test $(OUT)/libpair_dev_<unit>.so <oracle dir>
-#                       <unit> <digest>. Needs PAIR_CUDA_WING_DIR=<raptor cuda wing dir>. Units: mv.
+#                       <unit> <digest>. Needs PAIR_CUDA_WING_DIR=<raptor cuda wing dir>. Units: mv ksum_c fixed_count (osc, osc_x4: the
+#                       runner pair).
 
 CXX ?= g++
 CC ?= gcc
@@ -58,7 +59,7 @@ CUDA ?=
 NVCC ?= $(CUDA)/bin/nvcc
 PAIR_CUDA_WING_DIR ?=
 CUDA_WING_FACTS ?= $(PAIR_CUDA_WING_DIR)/raptor_facts.h
-PAIR_DEVICE_UNITS := mv osc osc_x4
+PAIR_DEVICE_UNITS := mv osc osc_x4 ksum_c fixed_count
 # The old path's device recipe for a cuda unit (hawk's nvcc build) in the image format its meta records
 # (EG_IMAGE_PTX: -ptx, else -cubin). PAIR_NVCC/PAIR_CCBIN: the compiler the old run used (its cache's
 # validity record); PTX of a toolkit newer than the driver does not load.
@@ -103,7 +104,7 @@ $(OUT)/device/Device.o: device/Device.cpp device/Loop.h Context.h eg_door.h eg_u
 $(OUT)/device/Loop.o: device/Loop.cu device/Loop.h | check-inputs check-cuda
 	@mkdir -p $(dir $@)
 	$(NVCC) -std=c++20 -O2 -arch=sm_61 -Wno-deprecated-gpu-targets -Werror all-warnings -ccbin $(CXX) \
-	  -Xcompiler -fPIC,-fvisibility=hidden,-Wall,-Wextra -include $(CUDA_WING_FACTS) -I$(ROOT) -I$(AETHER_INCLUDE) -c $< -o $@
+	  -Xcompiler -fPIC,-fvisibility=hidden,-Wall,-Wextra,-fopenmp -include $(CUDA_WING_FACTS) -I$(ROOT) -I$(AETHER_INCLUDE) -c $< -o $@
 
 $(LIB): $(OBJ) door.map
 	$(CXX) -shared -o $@ $(OBJ) -Wl,--version-script=$(CURDIR)/door.map -Wl,--no-undefined -fopenmp -pthread -ldl $(CUDART)

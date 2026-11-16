@@ -40,6 +40,9 @@ void device_launch(eg_plan_s&) {}
 void device_sync(eg_ctx&) {}
 void device_plan_cells(eg_plan_s&) {}
 void device_plan_free(eg_plan_s&) noexcept {}
+void* device_alloc(eg_ctx&, std::size_t) { return nullptr; }
+void device_free(eg_ctx&, void*) noexcept {}
+void device_cell_work(eg_plan_s&) {}
 void device_runner_new(eg_ctx&, const eg_runner_desc*, eg_runner**) {
     refuse(EG_NOT_WRITTEN, "structure DEVICE: the device group is not built");
 }
@@ -191,6 +194,15 @@ void device_unit_load(eg_unit_s& unit, const eg_unit_meta& m, void* library) {
     unit.function = reinterpret_cast<std::uint64_t>(fn);
     check(cuFuncGetAttribute_(&unit.regs, CU_FUNC_ATTRIBUTE_NUM_REGS, fn), who + ": cuFuncGetAttribute");
     check(cuFuncGetAttribute_(&unit.max_threads, CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK, fn), who + ": cuFuncGetAttribute");
+    for (CompanionFacts& c : unit.companions) {
+        if (c.device_fold_name.empty()) continue;
+        CUfunction fold = nullptr;
+        const CUresult f = cuModuleGetFunction_(&fold, module, c.device_fold_name.c_str());
+        if (f == CUDA_ERROR_NOT_FOUND)
+            refuse(EG_FAULT, who + ": the device image lacks the fold function '" + c.device_fold_name + "'");
+        check(f, who + ": cuModuleGetFunction (fold)");
+        c.device_fold = reinterpret_cast<std::uint64_t>(fold);
+    }
 }
 
 /** @brief Unload the unit's device module, if any. */
@@ -206,13 +218,28 @@ void device_unit_free(eg_unit_s& unit) noexcept {
 }
 
 /** @brief Queue one launch per partition of @p plan on @p stream: grid from the partition's count and the
- *  meta's block (else the resolved one), the bound views and uniforms by value, then the triple. */
+ *  meta's block (else the resolved one), the bound views and uniforms by value, then the triple; then each
+ *  companion's fold function over its target and each cell's rows folded into the cell the caller bound
+ *  (as the host's ``fold_plan``). */
 void launch_on(const eg_plan_s& plan, std::uint64_t stream) {
     const DeviceState& d = plan.ctx->dev;
     const eg_unit_s& u = *plan.unit;
+    const auto s = reinterpret_cast<CUstream>(stream);
     for (const exec::Partition& p : plan.parts)
-        exec::DeviceKernel::run(reinterpret_cast<CUfunction>(u.function), plan.params, p, reinterpret_cast<CUstream>(stream),
+        exec::DeviceKernel::run(reinterpret_cast<CUfunction>(u.function), plan.params, p, s,
                                 u.block > 0 ? static_cast<unsigned>(u.block) : resolved_block(d, u, p.count));
+    for (const CompanionFacts& c : u.companions) {
+        const std::int64_t size = elements(plan.bindings[c.target].plane->tensor->dl_tensor);
+        exec::DeviceKernel::run(reinterpret_cast<CUfunction>(c.device_fold), plan.params, exec::Partition{ 0, size, size }, s);
+    }
+    if (plan.n_samples == 0) return;
+    for (std::size_t i = 0; i < u.cells.size(); ++i) {
+        const DLTensor& rows = plan.rows[i]->tensor->dl_tensor;
+        const DLTensor& out = plan.bindings[u.cells[i].slot].plane->tensor->dl_tensor;
+        cell_fold(stream, rows.data, rows.shape[0], rows.dtype.bits, u.cells[i].op == EG_REDUCE_MAX,
+                  static_cast<char*>(out.data) + out.byte_offset, plan.work[2 * i]->tensor->dl_tensor.data,
+                  plan.work[2 * i + 1]->tensor->dl_tensor.data);
+    }
 }
 
 /** @brief Refuse a DEVICE plan of @p unit on @p ctx: a host-only context, a device feature this
@@ -224,14 +251,15 @@ void device_plan_check(const eg_ctx& ctx, const eg_unit_s& unit) {
     const char* feature = unit.active_map_slot >= 0              ? "an active set (compaction)"
                           : unit.finish.present && unit.finish.steps == EG_STEPS_AUTO
                               ? "an automatic step count (finish steps AUTO: the fused, persistent and wave entries)"
-                          : !unit.companions.empty()             ? "a companion plane"
-                          : !unit.cells.empty()                  ? "cells"
                           : unit.index_count_slot >= 0           ? "an index set"
                           : unit.device_box                      ? "a device thread box (team grid)"
                           : unit.scalar_type == EG_SCALAR_BANDED ? "a BANDED scalar type"
                                                                  : nullptr;
     if (feature != nullptr) refuse(EG_NOT_WRITTEN, who + feature + " is not written in this build of the door");
     if (unit.function == 0) refuse(EG_NOT_WRITTEN, who + "the unit has no device image");
+    for (const CompanionFacts& c : unit.companions)
+        if (c.device_fold == 0)
+            refuse(EG_NOT_WRITTEN, who + "the companion '" + unit.slots[c.slot].name + "' has no device fold function");
 }
 
 /** @brief Queue one launch per partition on the context's stream: grid from the partition's count and the
@@ -255,6 +283,30 @@ void device_plan_free(eg_plan_s& plan) noexcept {
     plan.device_counter = 0;
 }
 
+/** @brief A zeroed device allocation of @p bytes on the context's device. */
+void* device_alloc(eg_ctx& ctx, std::size_t bytes) {
+    Current current(ctx.dev);
+    return reinterpret_cast<void*>(cells_new(static_cast<unsigned>((bytes + sizeof(unsigned) - 1) / sizeof(unsigned))));
+}
+
+/** @brief Free a device_alloc allocation (a forked child makes no device call). */
+void device_free(eg_ctx& ctx, void* data) noexcept {
+    if (data == nullptr || forked(ctx)) return;
+    try {
+        Current current(ctx.dev);
+        cells_free(reinterpret_cast<std::uint64_t>(data));
+    } catch (...) {
+    }
+}
+
+/** @brief The two reduction work buffers of each cell component of @p plan (made after its rows). */
+void device_cell_work(eg_plan_s& plan) {
+    for (const eg_plane_s* r : plan.rows) {
+        const DLTensor& t = r->tensor->dl_tensor;
+        for (int k = 0; k < 2; ++k) plan.work.push_back(make_plane(*plan.ctx, t.dtype, { cell_work_elems(t.shape[0]) }, true));
+    }
+}
+
 /** @brief The loop and its cells go with the runner; a forked child makes no device call. */
 DeviceRun::~DeviceRun() {
     if (ctx == nullptr || forked(*ctx)) return;
@@ -269,6 +321,10 @@ void device_runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out)
     if (out == nullptr) refuse(EG_BAD_REQUEST, "eg_runner_new: out is NULL");
     *out = nullptr;
     const eg_runner_desc d = read_input(desc, "eg_runner_desc");
+    for (std::int32_t i = 0; i < d.n_plans; ++i)
+        if (ctx.plans.count(d.plans[i]) != 0 && (!d.plans[i]->unit->companions.empty() || !d.plans[i]->unit->cells.empty()))
+            refuse(EG_NOT_WRITTEN, "plans[" + std::to_string(i) + "]: companion or cell folding inside a device runner loop "
+                   "is not written in this build of the door");
     check_runner(ctx, d, true);
     for (std::int32_t i = 0; i < d.n_plans; ++i)
         if (d.plans[i]->structure != EG_STRUCTURE_DEVICE)

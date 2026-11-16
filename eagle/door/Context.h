@@ -83,7 +83,9 @@ struct SlotFacts {
 /** @brief A compensation companion eagle makes beside the target the caller binds, and the fold it runs after each launch. */
 struct CompanionFacts {
     std::int32_t slot = -1, target = -1;
-    eagle::exec::HostEntryV2 fold = nullptr;
+    eagle::exec::HostEntryV2 fold = nullptr;  ///< the host fold entry, nullptr: the unit's library has none
+    std::string device_fold_name;             ///< the fold function's name in the device image, empty: none
+    std::uint64_t device_fold = 0;            ///< that function (a CUfunction) once the image is loaded, 0: none
 };
 
 /** @brief One component of a cell: its row slot and the fold (SUM is refused: the meta states no compensation slot). */
@@ -178,6 +180,7 @@ struct eg_plan_s {
     std::vector<Binding> bindings;            ///< one per slot; never resized after eg_plan_new
     std::vector<void*> params;                ///< the entry's argument list, into ``bindings``
     std::vector<eg_plane_s*> rows;            ///< one eagle-made row plane per cell component (``unit->cells``), one reference each
+    std::vector<eg_plane_s*> work;            ///< DEVICE: the two reduction work buffers of each cell component, one reference each
     std::uint32_t finished = 0;               ///< the eagle-made finished counter of a finishing unit
     std::int64_t steps_word = 0;              ///< the eagle-made steps word of an AUTO unit
     std::uint64_t device_counter = 0;         ///< DEVICE with a finish: the device cell of the finished counter
@@ -353,7 +356,7 @@ void unit_load(eg_ctx& ctx, const eg_unit_load_desc* desc, eg_unit** out);
 void unit_release(eg_ctx& ctx, eg_unit_s* unit);
 void plane_wrap(eg_ctx& ctx, DLManagedTensorVersioned* tensor, eg_plane** out);
 void plane_release(eg_ctx& ctx, eg_plane_s* plane);
-eg_plane_s* make_plane(eg_ctx& ctx, const DLDataType& dtype, std::vector<std::int64_t> shape);
+eg_plane_s* make_plane(eg_ctx& ctx, const DLDataType& dtype, std::vector<std::int64_t> shape, bool device = false);
 void plan_new(eg_ctx& ctx, const eg_plan_desc* desc, eg_plan** out);
 void plan_free(eg_ctx& ctx, eg_plan_s* plan);
 void plan_release(eg_ctx& ctx, eg_plan_s* plan);
@@ -394,6 +397,9 @@ void device_launch(eg_plan_s& plan);
 void device_sync(eg_ctx& ctx);
 void device_plan_cells(eg_plan_s& plan);
 void device_plan_free(eg_plan_s& plan) noexcept;
+void* device_alloc(eg_ctx& ctx, std::size_t bytes);
+void device_free(eg_ctx& ctx, void* data) noexcept;
+void device_cell_work(eg_plan_s& plan);
 void device_runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out);
 void device_run(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report);
 

@@ -40,6 +40,14 @@ void cells_read(std::uint64_t stream, std::uint64_t cells, unsigned* values, uns
  *  is nonzero (the old path's mask count, re-syncing the finished counter to the mask). */
 void mask_count(std::uint64_t stream, const void* mask, std::int64_t n, unsigned width, unsigned* counter);
 
+/** @brief Elements of the cell's element type each of the two work buffers of a ``cell_fold`` over @p rows rows holds. */
+std::int64_t cell_work_elems(std::int64_t rows);
+
+/** @brief Queue on @p stream: ``*out`` = the max (@p max) or min of the @p rows float values at @p in
+ *  (@p bits wide, 32 or 64), by eagle's canonical reduction tree; @p wa and @p wb are the work buffers. */
+void cell_fold(std::uint64_t stream, const void* in, std::int64_t rows, unsigned bits, bool max, void* out, void* wa,
+               void* wb);
+
 /** @brief Wait until @p stream is idle. */
 void stream_wait(std::uint64_t stream);
 

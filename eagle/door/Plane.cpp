@@ -74,24 +74,37 @@ namespace {
 struct Made {
     DLManagedTensorVersioned managed{};
     std::vector<std::int64_t> shape;
-    std::vector<unsigned char> bytes;
+    std::vector<unsigned char> bytes;   ///< host planes
+    eg_ctx* device = nullptr;           ///< device planes: the context whose device holds ``managed.dl_tensor.data``
+    ~Made() {
+        if (device != nullptr) device_free(*device, managed.dl_tensor.data);
+    }
 };
 }  // namespace
 
-/** @brief A zeroed host plane of @p shape that eagle owns (one reference, the caller's to release). */
-eg_plane_s* make_plane(eg_ctx& ctx, const DLDataType& dtype, std::vector<std::int64_t> shape) {
+/** @brief A zeroed plane of @p shape that eagle owns, in host memory or (@p device) in the context's device memory
+ *  (one reference, the caller's to release). */
+eg_plane_s* make_plane(eg_ctx& ctx, const DLDataType& dtype, std::vector<std::int64_t> shape, bool device) {
     auto made = std::make_unique<Made>();
     std::int64_t n = 1;
     for (std::int64_t e : shape) n *= e;
     made->shape = std::move(shape);
-    made->bytes.assign(static_cast<std::size_t>(n) * (dtype.bits / 8), 0);
+    const std::size_t size = static_cast<std::size_t>(n) * (dtype.bits / 8);
     DLManagedTensorVersioned& m = made->managed;
+    if (device) {
+        m.dl_tensor.data = device_alloc(ctx, size);
+        made->device = &ctx;     // after the allocation: a failed one has nothing to free
+        m.dl_tensor.device.device_type = kDLCUDA;
+        m.dl_tensor.device.device_id = ctx.dev.ordinal;
+    } else {
+        made->bytes.assign(size, 0);
+        m.dl_tensor.data = made->bytes.data();
+        m.dl_tensor.device.device_type = kDLCPU;
+    }
     m.version.major = DLPACK_MAJOR_VERSION;
     m.version.minor = DLPACK_MINOR_VERSION;
     m.manager_ctx = made.get();
     m.deleter = [](DLManagedTensorVersioned* t) { delete static_cast<Made*>(t->manager_ctx); };
-    m.dl_tensor.data = made->bytes.data();
-    m.dl_tensor.device.device_type = kDLCPU;
     m.dl_tensor.ndim = static_cast<int>(made->shape.size());
     m.dl_tensor.dtype = dtype;
     m.dl_tensor.shape = made->shape.data();

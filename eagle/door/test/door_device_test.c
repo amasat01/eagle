@@ -90,19 +90,167 @@ static eg_status load(eg_ctx* ctx, const char* path, const char* name, uint8_t d
     return eg_unit_load(ctx, &d, out);
 }
 
-static eg_status plan(eg_ctx* ctx, eg_unit* unit, eg_structure s, int64_t parts, const int64_t* base,
-                      const int64_t* count, eg_plan** out) {
+static eg_status plan_n(eg_ctx* ctx, eg_unit* unit, eg_structure s, int64_t n, int64_t parts, const int64_t* base,
+                        const int64_t* count, eg_plan** out) {
     struct eg_plan_desc d;
     memset(&d, 0, sizeof(d));
     d.struct_size = sizeof(d);
     d.unit = unit;
     d.structure = s;
-    d.n_samples = N;
+    d.n_samples = n;
     d.n_partitions = parts;
     d.part_base = base;
     d.part_count = count;
     *out = NULL;
     return eg_plan_new(ctx, &d, out);
+}
+
+static eg_status plan(eg_ctx* ctx, eg_unit* unit, eg_structure s, int64_t parts, const int64_t* base,
+                      const int64_t* count, eg_plan** out) {
+    return plan_n(ctx, unit, s, N, parts, base, count, out);
+}
+
+/* A device buffer of @p count doubles holding @p values (NULL: zeros). */
+static double* dev_doubles(const double* values, int count) {
+    double* d = NULL;
+    if (cudaMalloc((void**)&d, (size_t)count * sizeof(double)) != cudaSuccess) return NULL;
+    if (values) cudaMemcpy(d, values, (size_t)count * sizeof(double), cudaMemcpyHostToDevice);
+    else cudaMemset(d, 0, (size_t)count * sizeof(double));
+    return d;
+}
+
+static eg_status bind_planes(eg_ctx* ctx, eg_plan* p, int n, const int32_t* slots, eg_plane* const* planes) {
+    struct eg_bind_desc b;
+    memset(&b, 0, sizeof(b));
+    b.struct_size = sizeof(b);
+    b.n_planes = n;
+    b.plane_slots = slots;
+    b.planes = (eg_plane**)planes;
+    return eg_bind(ctx, p, &b);
+}
+
+/* MIN and MAX cells over rows of 4 samples, and a companion folded after each of two launches, on the device,
+ * against plain-C oracles (bitwise); the refusals of the made planes' units. */
+static void made_planes(eg_ctx* ctx, const char* dev_lib) {
+    static const double xv[12] = { 3.5, -1.25, 7.0, 0.5, -9.75, 2.0, 2.0, 11.5, 0.125, -0.5, 6.25, 4.0 };
+    eg_unit *cells = NULL, *keyed = NULL, *bad = NULL;
+    check(load(ctx, dev_lib, "dcells", 0xD2, &cells) == EG_OK && load(ctx, dev_lib, "dkeyed", 0xD3, &keyed) == EG_OK,
+          "eg_unit_load dcells and dkeyed (cells, a companion and its device fold function)");
+    check(refused(load(ctx, dev_lib, "dkeyednf", 0xD4, &bad), EG_FAULT, ctx, "lacks the fold function 'absent__fold'"),
+          "a device fold function the image lacks: FAULT naming it");
+    eg_unit* host_fold = NULL;
+    check(load(ctx, dev_lib, "dkeyedh", 0xD5, &host_fold) == EG_OK, "eg_unit_load of a unit with a host fold entry and no device fold");
+    eg_plan* p = NULL;
+    check(refused(plan_n(ctx, host_fold, EG_STRUCTURE_DEVICE, 12, 0, NULL, NULL, &p), EG_NOT_WRITTEN, ctx, "no device fold function"),
+          "DEVICE plan of a companion with no device fold function refused NOT_WRITTEN by name");
+    if (cells == NULL || keyed == NULL) return;
+    double* dx = dev_doubles(xv, 12);
+    struct tensor tx, tx10, tt, tm, ta;
+    eg_plane* px = wrap(ctx, &tx, dx, 1, 12, 0, 1, 0);
+    eg_plane* px10 = wrap(ctx, &tx10, dx, 1, 10, 0, 1, 0);
+    /* cells over 10 samples (rows 4, 4, 2): whole, then two partitions that start on a row; x changes between runs */
+    double *dt = dev_doubles(NULL, 1), *dm = dev_doubles(NULL, 1);
+    eg_plane* pt = wrap(ctx, &tt, dt, 1, 1, 0, 1, 0);
+    eg_plane* pm = wrap(ctx, &tm, dm, 1, 1, 0, 1, 0);
+    const int64_t base[2] = { 0, 4 }, count[2] = { 4, 6 };
+    int ok = px && px10 && pt && pm;
+    for (int r = 0; r < 2 && ok; ++r) {
+        double lo = 1e300, hi = -1e300, got[2] = { 0, 0 };
+        for (int i = 0; i < 10; ++i) {
+            const double v = xv[(i + 5 * r) % 12];
+            lo = v < lo ? v : lo;
+            hi = v > hi ? v : hi;
+        }
+        double shifted[12];
+        for (int i = 0; i < 12; ++i) shifted[i] = xv[(i + 5 * r) % 12];
+        cudaMemcpy(dx, shifted, sizeof(shifted), cudaMemcpyHostToDevice);
+        const int32_t slots[3] = { 0, 1, 2 };
+        eg_plane* planes[3] = { pt, pm, px10 };
+        eg_status s = plan_n(ctx, cells, EG_STRUCTURE_DEVICE, 10, 2 * r, base, count, &p);
+        if (s == EG_OK) s = bind_planes(ctx, p, 3, slots, planes);
+        if (s == EG_OK) s = eg_launch(ctx, p, NULL);
+        if (s == EG_OK) s = eg_sync(ctx);
+        if (s != EG_OK) reason_has(ctx, "(the cells launch was refused)");
+        cudaMemcpy(&got[0], dt, sizeof(double), cudaMemcpyDeviceToHost);
+        cudaMemcpy(&got[1], dm, sizeof(double), cudaMemcpyDeviceToHost);
+        ok = s == EG_OK && memcmp(&got[0], &lo, sizeof(double)) == 0 && memcmp(&got[1], &hi, sizeof(double)) == 0;
+        if (!ok) printf("      run %d: min %.17g (want %.17g), max %.17g (want %.17g)\n", r, got[0], lo, got[1], hi);
+        if (p) eg_plan_free(ctx, p);
+    }
+    check(ok, "dcells: MIN and MAX of the rows folded into the caller's (1,) cells, whole and over two partitions, bitwise == the plain-C oracle");
+    /* a companion over 12 samples (3 keys): two launches, the fold after each; acc keeps its value between them */
+    double want[3] = { 0, 0, 0 }, comp[3] = { 0, 0, 0 };
+    for (int launch = 0; launch < 2; ++launch) {
+        for (int i = 0; i < 12; ++i) want[i / 4] += xv[i], comp[i / 4] += 0.5;
+        for (int k = 0; k < 3; ++k) want[k] += comp[k], comp[k] = 0.125;
+    }
+    double* da = dev_doubles(NULL, 3);
+    eg_plane* pa = wrap(ctx, &ta, da, 1, 3, 0, 1, 0);
+    cudaMemcpy(dx, xv, sizeof(xv), cudaMemcpyHostToDevice);
+    int match = pa != NULL;
+    {
+        const int32_t slots[2] = { 0, 2 };
+        eg_plane* planes[2] = { pa, px };
+        double got[3] = { -1, -1, -1 };
+        cudaMemset(da, 0, sizeof(got));
+        eg_status s = plan_n(ctx, keyed, EG_STRUCTURE_DEVICE, 12, 0, NULL, NULL, &p);
+        if (s == EG_OK) s = bind_planes(ctx, p, 2, slots, planes);
+        for (int launch = 0; launch < 2 && s == EG_OK; ++launch) s = eg_launch(ctx, p, NULL);
+        if (s == EG_OK) s = eg_sync(ctx);
+        if (s != EG_OK) reason_has(ctx, "(the companion launch was refused)");
+        cudaMemcpy(got, da, sizeof(got), cudaMemcpyDeviceToHost);
+        match = s == EG_OK && memcmp(got, want, sizeof(got)) == 0;
+        if (!match) printf("      acc: %.17g %.17g %.17g, want %.17g %.17g %.17g\n", got[0], got[1], got[2], want[0], want[1], want[2]);
+        if (p) eg_plan_free(ctx, p);
+    }
+    check(match, "dkeyed: the companion made zeroed at bind, folded into acc after each of two launches, bitwise == the plain-C oracle");
+    eg_plane* cell_bad = NULL;
+    struct tensor t2;
+    double* d2 = dev_doubles(NULL, 2);
+    cell_bad = wrap(ctx, &t2, d2, 1, 2, 0, 1, 0);
+    {
+        const int32_t slots[3] = { 0, 1, 2 };
+        eg_plane* planes[3] = { cell_bad, pm, px10 };
+        check(plan_n(ctx, cells, EG_STRUCTURE_DEVICE, 10, 0, NULL, NULL, &p) == EG_OK &&
+                  refused(bind_planes(ctx, p, 3, slots, planes), EG_BAD_REQUEST, ctx, "a cell is one element"),
+              "dcells: a cell of another shape than (1,) refused BAD_REQUEST by name");
+        if (p) eg_plan_free(ctx, p);
+    }
+    {   /* a runner over a plan with a companion, or with cells, is refused by name (the loop's folds have no old-path oracle) */
+        const int32_t kslots[2] = { 0, 2 };
+        eg_plane* kplanes[2] = { pa, px };
+        eg_plan *kp = NULL, *cp = NULL;
+        struct eg_runner_desc rn;
+        memset(&rn, 0, sizeof(rn));
+        rn.struct_size = sizeof(rn);
+        rn.n_plans = 1;
+        rn.max_steps = 1;
+        eg_runner* runner = NULL;
+        int rok = plan_n(ctx, keyed, EG_STRUCTURE_DEVICE, 12, 0, NULL, NULL, &kp) == EG_OK &&
+                  bind_planes(ctx, kp, 2, kslots, kplanes) == EG_OK;
+        rn.plans = &kp;
+        rok = rok && refused(eg_runner_new(ctx, &rn, &runner), EG_NOT_WRITTEN, ctx, "companion or cell folding inside a device runner loop");
+        rok = rok && plan_n(ctx, cells, EG_STRUCTURE_DEVICE, 10, 0, NULL, NULL, &cp) == EG_OK;
+        rn.plans = &cp;
+        rok = rok && refused(eg_runner_new(ctx, &rn, &runner), EG_NOT_WRITTEN, ctx, "companion or cell folding inside a device runner loop");
+        check(rok && runner == NULL, "eg_runner_new over a DEVICE plan with a companion, or with cells: NOT_WRITTEN by name");
+        if (kp) eg_plan_free(ctx, kp);
+        if (cp) eg_plan_free(ctx, cp);
+    }
+    eg_unit_free(ctx, cells);
+    eg_unit_free(ctx, keyed);
+    eg_unit_free(ctx, host_fold);
+    eg_plane_free(ctx, px);
+    eg_plane_free(ctx, px10);
+    eg_plane_free(ctx, pt);
+    eg_plane_free(ctx, pm);
+    eg_plane_free(ctx, pa);
+    eg_plane_free(ctx, cell_bad);
+    cudaFree(dx);
+    cudaFree(dt);
+    cudaFree(dm);
+    cudaFree(da);
+    cudaFree(d2);
 }
 
 /* Bind y, x, v (planes, slots 0-2) and a (slot 3). */
@@ -263,8 +411,8 @@ int main(int argc, char** argv) {
         { "count1", 0xD1, "the unit has no device image" },   /* a fixed-step finish runs on a device */
         { "count1a", 0xE1, "an active set (compaction)" },
         { "lanes", 0x91, "an index set" },
-        { "keyed", 0x68, "a companion plane" },
-        { "cells", 0x67, "cells" },
+        { "keyed", 0x68, "the unit has no device image" },
+        { "cells", 0x67, "the unit has no device image" },
         { "axpb", 0xA1, "the unit has no device image" },
     };
     for (int r = 0; r < 8; ++r) {
@@ -277,6 +425,8 @@ int main(int argc, char** argv) {
               what);
         eg_unit_free(ctx, unit);
     }
+
+    made_planes(ctx, dev_lib);
 
     /* The host still runs on a device context. */
     static double hx[N], hyv[N];
