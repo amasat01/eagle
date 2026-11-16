@@ -84,7 +84,7 @@ LIB := $(OUT)/libeagle_door.so
 FIXTURE := $(OUT)/libfixture_unit.so
 TEST := $(OUT)/door_test
 
-.PHONY: all lib symbols test check-inputs check-cuda pairs pair-reverse pair-reverse-active pair-reverse-timed pair-reverse-reorder pair-reverse-t0 pair-reverse-counter pair-refine device $(PAIR_UNITS:%=pair-%) $(PAIR_DEVICE_UNITS:%=pair-device-%)
+.PHONY: all lib symbols test check-inputs check-cuda pairs pair-reverse pair-reverse-active pair-reverse-timed pair-reverse-reorder pair-reverse-t0 pair-reverse-counter pair-refine pair-refine-reverse device $(PAIR_UNITS:%=pair-%) $(PAIR_DEVICE_UNITS:%=pair-device-%)
 all: test
 
 check-inputs:
@@ -227,14 +227,16 @@ DIGEST_ev ?= 9ec2e13d142fdf75dc88fcc3888af20de98d3389f874905220fcf72f524ccc9c
 DIGEST_ev_tape ?= d56d34e9962e31adbe26a0b8a27b9a7939355bd52d06e86db0710a5599a07970
 DIGEST_ev_newton ?= 414905492f406483a64e202fc6cab04ec2b2dccd4c2e21c6d510d47cb4c780c6
 DIGEST_ev_guard ?= 012d7e9df31a4822327f8c88a45d0bfdbe5f8f3dfba0871c0edd02ff073028bc
+DIGEST_ev_step_vjp ?= 2209bcec8684c21e2d0d232238b8e31f6b6d7082dc490e4cba1dd2b562099d0d
+DIGEST_ev_refine_vjp ?= d463a94a44d802220095aa54ea462f827e19aeb76a9a7bb226a51f98cec0247b
 REFINE_TEST := $(OUT)/refine_test
 
 $(REFINE_TEST): test/refine_test.c test/pair_util.h eg_door.h $(LIB)
 	$(CC) $(CFLAGS_C) -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door -Wl,-rpath,$(OUT) -lm -pthread
 
-$(OUT)/libpair_refine.so: $(KERNEL_ev) $(KERNEL_ev_tape) $(KERNEL_ev_newton) $(KERNEL_ev_guard) $(META_ev) eg_door.h eg_unit_meta.h | check-inputs
-	@test -f "$(KERNEL_ev)" -a -f "$(KERNEL_ev_tape)" -a -f "$(KERNEL_ev_newton)" -a -f "$(KERNEL_ev_guard)" -a -f "$(META_ev)" -a \
-	  -d "$(PAIR_WING_DIR)" || { echo "set KERNEL_ev, KERNEL_ev_tape, KERNEL_ev_newton, KERNEL_ev_guard, META_ev and PAIR_WING_DIR"; exit 1; }
+$(OUT)/libpair_refine.so: $(KERNEL_ev) $(KERNEL_ev_tape) $(KERNEL_ev_newton) $(KERNEL_ev_guard) $(KERNEL_ev_step_vjp) $(KERNEL_ev_refine_vjp) $(META_ev) eg_door.h eg_unit_meta.h | check-inputs
+	@test -f "$(KERNEL_ev)" -a -f "$(KERNEL_ev_tape)" -a -f "$(KERNEL_ev_newton)" -a -f "$(KERNEL_ev_guard)" -a -f "$(KERNEL_ev_step_vjp)" -a -f "$(KERNEL_ev_refine_vjp)" -a -f "$(META_ev)" -a \
+	  -d "$(PAIR_WING_DIR)" || { echo "set KERNEL_ev, KERNEL_ev_tape, KERNEL_ev_newton, KERNEL_ev_guard, KERNEL_ev_step_vjp, KERNEL_ev_refine_vjp, META_ev and PAIR_WING_DIR"; exit 1; }
 	@mkdir -p $(OUT)
 	$(CXX) $(PAIR_HOST_FLAGS) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) -c $(KERNEL_ev) -o $(OUT)/refine_primal.o
 	$(CXX) $(PAIR_HOST_FLAGS) $(call REV_RENAME,tape) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) \
@@ -243,13 +245,28 @@ $(OUT)/libpair_refine.so: $(KERNEL_ev) $(KERNEL_ev_tape) $(KERNEL_ev_newton) $(K
 	  -c $(KERNEL_ev_newton) -o $(OUT)/refine_newton.o
 	$(CXX) $(PAIR_HOST_FLAGS) $(call REV_RENAME,guard) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) \
 	  -c $(KERNEL_ev_guard) -o $(OUT)/refine_guard.o
+	$(CXX) $(PAIR_HOST_FLAGS) $(call REV_RENAME,stepvjp) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) \
+	  -c $(KERNEL_ev_step_vjp) -o $(OUT)/refine_step_vjp.o
+	$(CXX) $(PAIR_HOST_FLAGS) $(call REV_RENAME,refvjp) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) \
+	  -c $(KERNEL_ev_refine_vjp) -o $(OUT)/refine_refvjp.o
 	$(CC) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$(ROOT) -c $(META_ev) -o $(OUT)/refine_meta.o
-	$(CXX) -shared -o $@ $(OUT)/refine_primal.o $(OUT)/refine_tape.o $(OUT)/refine_newton.o $(OUT)/refine_guard.o $(OUT)/refine_meta.o
+	$(CXX) -shared -o $@ $(OUT)/refine_primal.o $(OUT)/refine_tape.o $(OUT)/refine_newton.o $(OUT)/refine_guard.o $(OUT)/refine_step_vjp.o $(OUT)/refine_refvjp.o $(OUT)/refine_meta.o
 
 pair-refine: symbols $(OUT)/libpair_refine.so $(REFINE_TEST)
 	$(REFINE_TEST) $(OUT)/libpair_refine.so $(ORACLE_ev) $(DIGEST_ev) $(DIGEST_ev_tape) $(DIGEST_ev_newton) $(DIGEST_ev_guard) 400 0 1
 	$(REFINE_TEST) $(OUT)/libpair_refine.so $(ORACLE_ev_zero) $(DIGEST_ev) $(DIGEST_ev_tape) $(DIGEST_ev_newton) $(DIGEST_ev_guard) 3 1 1
 	$(REFINE_TEST) $(OUT)/libpair_refine.so $(ORACLE_ev_zero) $(DIGEST_ev) $(DIGEST_ev_tape) $(DIGEST_ev_newton) $(DIGEST_ev_guard) 3 0 0
+
+REFINE_REVERSE_TEST := $(OUT)/refine_reverse_test
+
+$(REFINE_REVERSE_TEST): test/refine_reverse_test.c test/pair_util.h eg_door.h $(LIB)
+	$(CC) $(CFLAGS_C) -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door -Wl,-rpath,$(OUT) -lm -pthread
+
+# pair-refine-reverse: the recorded refine run and its reverse over the same library against ORACLE_evrr (the old path's
+# gradients for seeds t, v, x: test_events_sensitivity_fd's reverse on ev_osc, cpu).
+pair-refine-reverse: symbols $(OUT)/libpair_refine.so $(REFINE_REVERSE_TEST)
+	$(REFINE_REVERSE_TEST) $(OUT)/libpair_refine.so $(ORACLE_evrr) $(DIGEST_ev) $(DIGEST_ev_tape) $(DIGEST_ev_newton) $(DIGEST_ev_guard) \
+	  $(DIGEST_ev_step_vjp) $(DIGEST_ev_refine_vjp)
 
 PAIR_TEST := $(OUT)/pair_test
 

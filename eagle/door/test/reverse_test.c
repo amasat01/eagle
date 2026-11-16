@@ -297,8 +297,8 @@ static void lin_rows(eg_ctx* ctx, const char* lib) {
           "steps_reverse FUSED refused NOT_WRITTEN by name");
     d = recorded(&plan, LSTEPS, 3, 0, roles, good);
     d.events = EG_EVENTS_REFINE;
-    check(eg_runner_new(ctx, &d, &none) == EG_NOT_WRITTEN && reason_has(ctx, "events REFINE"),
-          "events refine under record refused NOT_WRITTEN by name");
+    check(eg_runner_new(ctx, &d, &none) == EG_BAD_REQUEST && reason_has(ctx, "Newton unit"),
+          "events refine under record without the Newton, state guard vjp and refine vjp refused BAD_REQUEST by name");
     d = recorded(&plan, LSTEPS, 4, 0, roles, good);
     check(eg_runner_new(ctx, &d, &none) == EG_BAD_REQUEST && reason_has(ctx, "window"),
           "a window other than the twin's built-in one refused BAD_REQUEST");

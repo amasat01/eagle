@@ -87,6 +87,7 @@ struct RBuf {
 /** @brief One refined state: the primal slot, its refined plane and derivative and the guard's gradient in it. */
 struct RState {
     int primal = -1, refined = -1, dot = -1, gx = -1;
+    int rbar = -1, share = -1;       ///< a recorded run: the refine vjp's end-state cotangent seed and its pre-stop cotangent
     std::int64_t rows = 1;
 };
 
@@ -100,6 +101,12 @@ struct RefineRun {
     std::vector<RBuf> bufs;
     std::vector<int> g, dg, seed;   ///< per event: the guard, its derivative and the one-hot seed
     std::vector<RState> states;
+    eg_unit_s* rvjp_unit = nullptr; ///< a recorded run: the vjp of the refine entry
+    eg_plan_s* rvjp = nullptr;
+    std::vector<RSlot> vslots;
+    std::vector<int> gbar;          ///< per event: the refine vjp's guard seed
+    std::vector<std::pair<int, int>> pgrads;   ///< (buffer, primal uniform): a per-sample share of a parameter's gradient
+    int t0grad = -1, t0of = -1;     ///< the start copy's per-sample gradient and the primal time plane it joins
     int tau = -1, h = -1;           ///< buffers: the candidate time; the step (-1: the primal plane h_primal)
     int h_primal = -1;
     Buf nsteps, status, which, lo, hi, tstop, zero;
@@ -120,6 +127,7 @@ struct RunRecord {
     std::vector<TapedState> taped;
     std::vector<Grad> grads;
     std::vector<VjpSlot> vjp_slots;
+    bool recorded = false;          ///< events refine with EG_RUN_RECORD: checkpoints kept, window 1, the refine vjp in rf
     std::size_t step_bytes = 0;     ///< the width of the vjp's step plane (EG_WHAT_STEPS), 0: none
     Buf steps;                      ///< applied steps, int64 per sample
     Buf dummy;                      ///< the forward's tape: one row of width * n, never written
@@ -191,9 +199,11 @@ eg_unit_s* derived_of(const eg_ctx& ctx, const eg_runner_desc& d, eg_derived_rol
         check_handle(ctx.units, d.derived_units[i], at.c_str());
         const eg_unit_s& u = *d.derived_units[i];
         const eg_derived_role r = d.derived_roles[i];
-        if (refine && r != EG_DERIVED_TAPE && r != EG_DERIVED_REFINE_NEWTON && r != EG_DERIVED_STATE_GUARD_VJP)
-            refuse(EG_BAD_REQUEST, "derived_roles[" + std::to_string(i) + "]: a plain refine run takes exactly the twin "
-                   "(EG_DERIVED_TAPE), EG_DERIVED_REFINE_NEWTON and EG_DERIVED_STATE_GUARD_VJP");
+        const bool rec = (d.flags & EG_RUN_RECORD) != 0;
+        if (refine && r != EG_DERIVED_TAPE && r != EG_DERIVED_REFINE_NEWTON && r != EG_DERIVED_STATE_GUARD_VJP &&
+            !(rec && (r == EG_DERIVED_STEP_VJP || r == EG_DERIVED_REFINE_VJP)))
+            refuse(EG_BAD_REQUEST, "derived_roles[" + std::to_string(i) + "]: a refine run takes the twin "
+                   "(EG_DERIVED_TAPE), EG_DERIVED_REFINE_NEWTON and EG_DERIVED_STATE_GUARD_VJP (recorded: and EG_DERIVED_STEP_VJP, EG_DERIVED_REFINE_VJP)");
         if (r == EG_DERIVED_TAPE_FUSED || r == EG_DERIVED_FUSED_VJP)
             refuse(EG_NOT_WRITTEN, "derived_roles[" + std::to_string(i) + "]: the K-step twin and vjp (steps_reverse "
                    "fused) are not written in this build of the door");
@@ -214,7 +224,8 @@ eg_unit_s* derived_of(const eg_ctx& ctx, const eg_runner_desc& d, eg_derived_rol
         refuse(EG_BAD_REQUEST, std::string(refine ? "events refine needs the " : "EG_RUN_RECORD needs the ") +
                (role == EG_DERIVED_TAPE ? "one-step taping twin (EG_DERIVED_TAPE)"
                 : role == EG_DERIVED_REFINE_NEWTON ? "Newton unit (EG_DERIVED_REFINE_NEWTON)"
-                : role == EG_DERIVED_STATE_GUARD_VJP ? "state guard vjp (EG_DERIVED_STATE_GUARD_VJP)" : "step vjp (EG_DERIVED_STEP_VJP)"));
+                : role == EG_DERIVED_STATE_GUARD_VJP ? "state guard vjp (EG_DERIVED_STATE_GUARD_VJP)"
+                : role == EG_DERIVED_REFINE_VJP ? "refine vjp (EG_DERIVED_REFINE_VJP)" : "step vjp (EG_DERIVED_STEP_VJP)"));
     return found;
 }
 
@@ -231,8 +242,8 @@ bool in_range(std::int32_t slot, std::size_t n) { return slot >= 0 && slot < sta
 
 
 /** @brief Bind a refine unit's slots: key (kind, a) planes dedupe across the Newton and the guard vjp. */
-void refine_setup(RunRecord& r, const eg_unit_s& pu, eg_unit_s* newton, eg_unit_s* guard, const std::vector<int>& taped_of,
-                  const eg_runner_desc& d) {
+void refine_setup(RunRecord& r, const eg_unit_s& pu, eg_unit_s* newton, eg_unit_s* guard, eg_unit_s* rvjp,
+                  const std::vector<int>& taped_of, const eg_runner_desc& d) {
     const DerivedFacts& t = r.twin_unit->derived;
     const char* tn = r.twin_unit->name.c_str();
     if (t.time0_slot == -1)
@@ -416,8 +427,8 @@ void refine_setup(RunRecord& r, const eg_unit_s& pu, eg_unit_s* newton, eg_unit_
             RState& s = f->states[static_cast<std::size_t>(found)];
             s.gx = buf(9, l.of_slot, s.rows, RBuf::NONE, -1);
             out = { RSlot::BUF, s.gx };
-        } else if (l.what == EG_WHAT_PRIMAL_SLOT && l.form == EG_FORM_GRAD) {   // the parameter's share is not read by a plain run: a scratch plane
-            if (sf.role != EG_ROLE_MUTABLE) refuse(EG_BAD_REQUEST, field(gn, at) + ": a parameter gradient is a MUTABLE slot");
+        } else if (l.what == EG_WHAT_PRIMAL_SLOT && (l.form == EG_FORM_GRAD || l.form == EG_FORM_DISCARD)) {   // written, never read: a scratch plane
+            if (sf.role != EG_ROLE_MUTABLE) refuse(EG_BAD_REQUEST, field(gn, at) + ": a gradient or discarded slot is a MUTABLE slot");
             out = { RSlot::BUF, buf(10, l.slot, 1, RBuf::NONE, -1) };
         } else {
             refuse(EG_NOT_WRITTEN, field(gn, at) + ": (what " + std::to_string(l.what) + ", form " + std::to_string(l.form) + ") on a state guard vjp is not written in this build of the door");
@@ -428,14 +439,100 @@ void refine_setup(RunRecord& r, const eg_unit_s& pu, eg_unit_s* newton, eg_unit_
             refuse(EG_BAD_REQUEST, field(gn, "links") + ": guard slot " + std::to_string(i) + " ('" + guard->slots[i].name + "') has no link");
     for (int j = 0; j < guards; ++j)
         if (f->seed[static_cast<std::size_t>(j)] < 0) refuse(EG_BAD_REQUEST, field(gn, "links") + ": event " + std::to_string(j) + " has no (GUARD, ADJOINT_IN) seed");
+    if (rvjp == nullptr) return;
+    // ---- the refine vjp (a recorded run)
+    const DerivedFacts& rv = rvjp->derived;
+    const char* rn = rvjp->name.c_str();
+    if (rvjp->finish.present) refuse(EG_BAD_REQUEST, "unit '" + rvjp->name + "': a refine vjp has no finish");
+    ++rvjp->refs;
+    f->rvjp_unit = rvjp;
+    f->vslots.assign(rvjp->slots.size(), RSlot{});
+    f->gbar.assign(static_cast<std::size_t>(guards), -1);
+    const auto state_found = [&](std::int32_t primal_slot) {
+        for (std::size_t k = 0; k < f->states.size(); ++k)
+            if (f->states[k].primal == primal_slot) return static_cast<int>(k);
+        return -1;
+    };
+    for (std::size_t i = 0; i < rv.links.size(); ++i) {
+        const DerivedFacts::Link& l = rv.links[i];
+        const std::string at = "links[" + std::to_string(i) + "]";
+        if (!in_range(l.slot, rvjp->slots.size())) refuse(EG_BAD_REQUEST, field(rn, at + ".slot") + " is out of range");
+        if (f->vslots[static_cast<std::size_t>(l.slot)].kind != RSlot::NONE)
+            refuse(EG_BAD_REQUEST, field(rn, at + ".slot") + " " + std::to_string(l.slot) + " has a second link");
+        const SlotFacts& sf = rvjp->slots[static_cast<std::size_t>(l.slot)];
+        RSlot& out = f->vslots[static_cast<std::size_t>(l.slot)];
+        if (common(*rvjp, l, at, out)) continue;
+        const bool per_sample_real = sf.role == EG_ROLE_PER_SAMPLE && sf.dtype == EG_DTYPE_REAL;
+        const bool mutable_real = sf.role == EG_ROLE_MUTABLE && sf.dtype == EG_DTYPE_REAL;
+        if (l.what == EG_WHAT_STEPS) {
+            if (sf.role != EG_ROLE_PER_SAMPLE || sf.dtype != EG_DTYPE_INT64) refuse(EG_BAD_REQUEST, field(rn, at) + ": a step plane is a per-sample int64 slot");
+            out = { RSlot::STEPS, -1 };
+        } else if (l.what == EG_WHAT_TIME0 && l.form == EG_FORM_VALUE) {
+            if (sf.role != EG_ROLE_PER_SAMPLE || l.of_slot != start_of)
+                refuse(EG_BAD_REQUEST, field(rn, at) + ": the start copy is a per-sample read of the twin's time plane");
+            out = { RSlot::TIME0, -1 };
+        } else if (l.what == EG_WHAT_TIME0) {   // (TIME0, GRAD): joins the time plane's gradient
+            if (!mutable_real || l.of_slot != start_of || f->t0grad >= 0)
+                refuse(EG_BAD_REQUEST, field(rn, at) + ": the start copy's gradient is one MUTABLE real slot of the twin's time plane");
+            f->t0grad = buf(15, l.slot, 1, RBuf::NONE, -1);
+            f->t0of = l.of_slot;
+            out = { RSlot::BUF, f->t0grad };
+        } else if (l.what == EG_WHAT_TIME_STEP && l.form == EG_FORM_VALUE) {
+            if (!per_sample_real || !in_range(l.of_slot, np)) refuse(EG_BAD_REQUEST, field(rn, at) + ": the time step is a per-sample real slot of a primal slot");
+            const std::int32_t prole = pu.slots[static_cast<std::size_t>(l.of_slot)].role;
+            if (prole == EG_ROLE_UNIFORM) out = { RSlot::BUF, buf(7, 0, 1, RBuf::UNIFORM_OF, l.of_slot) };
+            else if (prole == EG_ROLE_PER_SAMPLE) out = { RSlot::PLANE, l.of_slot };
+            else refuse(EG_BAD_REQUEST, field(rn, at + ".of_slot") + " is neither a parameter nor a per-sample plane");
+        } else if ((l.what == EG_WHAT_TIME_STEP || l.what == EG_WHAT_PRIMAL_SLOT) && l.form == EG_FORM_GRAD) {
+            if (!mutable_real || !in_range(l.of_slot, np) || pu.slots[static_cast<std::size_t>(l.of_slot)].role != EG_ROLE_UNIFORM || l.reduced != 1)
+                refuse(EG_NOT_WRITTEN, field(rn, at) + ": only a reduced gradient of a parameter (a MUTABLE real slot, reduced 1) is written");
+            const int b = buf(15, l.slot, 1, RBuf::NONE, -1);
+            f->pgrads.push_back({ b, l.of_slot });
+            out = { RSlot::BUF, b };
+        } else if (l.what == EG_WHAT_TAU && l.form == EG_FORM_VALUE) {
+            if (!per_sample_real) refuse(EG_BAD_REQUEST, field(rn, at) + ": the tau is a per-sample real slot");
+            out = { RSlot::BUF, f->tau };
+        } else if ((l.what == EG_WHAT_TAU || l.what == EG_WHAT_PRIMAL_SLOT) && l.form == EG_FORM_DISCARD) {
+            if (!mutable_real) refuse(EG_BAD_REQUEST, field(rn, at) + ": a discarded slot is a MUTABLE real slot");
+            out = { RSlot::BUF, buf(15, l.slot, 1, RBuf::NONE, -1) };
+        } else if (l.what == EG_WHAT_GUARD && l.form == EG_FORM_ADJOINT_IN) {
+            if (!per_sample_real || l.of_slot < 0 || l.of_slot >= guards)
+                refuse(EG_BAD_REQUEST, field(rn, at) + ": a guard seed is a per-sample real slot of an event of the Newton");
+            f->gbar[static_cast<std::size_t>(l.of_slot)] = buf(12, l.of_slot, 1, RBuf::NONE, -1);
+            out = { RSlot::BUF, f->gbar[static_cast<std::size_t>(l.of_slot)] };
+        } else if (l.what == EG_WHAT_REFINED && l.form == EG_FORM_ADJOINT_IN) {
+            const int k = state_found(l.of_slot);
+            if (k < 0 || !per_sample_real) refuse(EG_BAD_REQUEST, field(rn, at) + ": the end-state cotangent of primal state " + std::to_string(l.of_slot) + " is a per-sample real slot of a refined state");
+            RState& st = f->states[static_cast<std::size_t>(k)];
+            st.rbar = buf(13, l.of_slot, st.rows, RBuf::NONE, -1);
+            out = { RSlot::BUF, st.rbar };
+        } else if (l.what == EG_WHAT_PRIMAL_SLOT && l.form == EG_FORM_ADJOINT_OUT) {
+            const int k = state_found(l.of_slot);
+            if (k < 0 || !mutable_real) refuse(EG_BAD_REQUEST, field(rn, at) + ": the pre-stop cotangent of primal state " + std::to_string(l.of_slot) + " is a MUTABLE real slot of a refined state");
+            RState& st = f->states[static_cast<std::size_t>(k)];
+            st.share = buf(14, l.of_slot, st.rows, RBuf::NONE, -1);
+            out = { RSlot::BUF, st.share };
+        } else {
+            refuse(EG_NOT_WRITTEN, field(rn, at) + ": (what " + std::to_string(l.what) + ", form " + std::to_string(l.form) + ") on a refine vjp is not written in this build of the door");
+        }
+    }
+    for (int j = 0; j < guards; ++j)
+        if (f->gbar[static_cast<std::size_t>(j)] < 0) refuse(EG_BAD_REQUEST, field(rn, "links") + ": event " + std::to_string(j) + " has no (GUARD, ADJOINT_IN) seed");
+    for (const RState& st : f->states)
+        if (st.rbar < 0) refuse(EG_BAD_REQUEST, field(rn, "links") + ": primal state " + std::to_string(st.primal) + " has no (REFINED, ADJOINT_IN) link");
+    for (std::size_t i = 0; i < rvjp->slots.size(); ++i)
+        if (f->vslots[i].kind == RSlot::NONE && rvjp->slots[i].role != EG_ROLE_NSAMPLES)
+            refuse(EG_BAD_REQUEST, field(rn, "links") + ": refine vjp slot " + std::to_string(i) + " ('" + rvjp->slots[i].name + "') has no link");
 }
 
 }  // namespace
 
 /** @brief eg_runner_new with EG_RUN_RECORD: check the derived record against the primal and keep the twin and the vjp. */
 void record_new(eg_ctx& ctx, eg_runner_s& runner, const eg_runner_desc& d) {
-    const bool refine = (d.flags & EG_RUN_RECORD) == 0;   // events refine without a record
-    if (refine && runner.active)
+    const bool ev = d.events == EG_EVENTS_REFINE, rec = (d.flags & EG_RUN_RECORD) != 0;
+    const bool refine = ev && !rec;    // events refine without a record
+    const bool rrefine = ev && rec;    // events refine, recorded: the reverse of a refined run
+    if (ev && runner.active)
         refuse(EG_NOT_WRITTEN, "events REFINE with an active set: no old-path test in this build of the door");
     if (runner.active && runner.act.group != 1)
         refuse(EG_NOT_WRITTEN, "EG_RUN_RECORD with a grouped active set is not written in this build of the door");
@@ -443,12 +540,15 @@ void record_new(eg_ctx& ctx, eg_runner_s& runner, const eg_runner_desc& d) {
         refuse(EG_NOT_WRITTEN, "EG_RUN_RECORD of a several-plan step is not written in this build of the door");
     const eg_plan_s& primal = *d.plans[0];
     const eg_unit_s& pu = *primal.unit;
-    eg_unit_s* twin = derived_of(ctx, d, EG_DERIVED_TAPE, refine);
-    eg_unit_s* vjp = refine ? nullptr : derived_of(ctx, d, EG_DERIVED_STEP_VJP);
-    eg_unit_s* newton = refine ? derived_of(ctx, d, EG_DERIVED_REFINE_NEWTON, true) : nullptr;
-    eg_unit_s* guard = refine ? derived_of(ctx, d, EG_DERIVED_STATE_GUARD_VJP, true) : nullptr;
-    if (refine ? d.n_derived != 3 : d.n_derived != 2)
+    eg_unit_s* twin = derived_of(ctx, d, EG_DERIVED_TAPE, ev);
+    eg_unit_s* vjp = rec ? derived_of(ctx, d, EG_DERIVED_STEP_VJP, ev) : nullptr;
+    eg_unit_s* newton = ev ? derived_of(ctx, d, EG_DERIVED_REFINE_NEWTON, true) : nullptr;
+    eg_unit_s* guard = ev ? derived_of(ctx, d, EG_DERIVED_STATE_GUARD_VJP, true) : nullptr;
+    eg_unit_s* rvjp = rrefine ? derived_of(ctx, d, EG_DERIVED_REFINE_VJP, true) : nullptr;
+    const std::int32_t want = refine ? 3 : rrefine ? 5 : 2;
+    if (d.n_derived != want)
         refuse(EG_BAD_REQUEST, "n_derived " + std::to_string(d.n_derived) + (refine ? ": a refine run takes the twin, the Newton and the state guard vjp"
+                                                                                    : rrefine ? ": a recorded refine run takes the twin, the step vjp, the Newton, the state guard vjp and the refine vjp"
                                                                                     : ": a recorded run takes the twin and the vjp"));
     const std::size_t np = pu.slots.size();
     if (runner.active != (twin->active_map_slot >= 0) || (twin->active_map_slot >= 0) != (twin->active_count_slot >= 0))
@@ -458,8 +558,8 @@ void record_new(eg_ctx& ctx, eg_runner_s& runner, const eg_runner_desc& d) {
         refuse(EG_NOT_WRITTEN, "EG_RUN_RECORD with EG_RUN_REORDER with a start copy (time0_slot): no old-path oracle in this "
                "build of the door");
     if (vjp != nullptr && vjp->active_map_slot >= 0) refuse(EG_BAD_REQUEST, "unit '" + vjp->name + "': a step vjp reads no active set");
-    for (const eg_unit_s* u : { twin, refine ? newton : vjp, refine ? guard : vjp })
-        if (u->derived.of_unit != pu.index || u->library != pu.library)
+    for (const eg_unit_s* u : { twin, vjp, newton, guard, rvjp })
+        if (u != nullptr && (u->derived.of_unit != pu.index || u->library != pu.library))
             refuse(EG_BAD_REQUEST, field(u->name.c_str(), "of_unit") + " " + std::to_string(u->derived.of_unit) +
                    " is not the runner's primal (unit '" + pu.name + "', index " + std::to_string(pu.index) + ")");
     const DerivedFacts& t = twin->derived;
@@ -493,6 +593,8 @@ void record_new(eg_ctx& ctx, eg_runner_s& runner, const eg_runner_desc& d) {
                std::to_string(rows));
     const std::int64_t window = tape.shape[0] / t.tape_rows;
     const std::int64_t asked = refine ? 1 : d.window == -1 ? std::max<std::int64_t>(d.max_steps, 1) : d.window;
+    if (rrefine && asked != 1)
+        refuse(EG_BAD_REQUEST, "window " + std::to_string(d.window) + ": a recorded refine run takes window 1 only");
     if (asked != window)
         refuse(EG_BAD_REQUEST, "window " + std::to_string(d.window) + ": the taping twin '" + twin->name +
                "' records windows of " + std::to_string(window) + " steps (built in)");
@@ -590,10 +692,9 @@ void record_new(eg_ctx& ctx, eg_runner_s& runner, const eg_runner_desc& d) {
         taped_state_of_primal[static_cast<std::size_t>(x.slot)] = static_cast<int>(r->taped.size());
         r->taped.push_back(std::move(ts));
     }
-    if (refine) {
-        refine_setup(*r, pu, newton, guard, taped_state_of_primal, d);
-        return;
-    }
+    if (ev) refine_setup(*r, pu, newton, guard, rvjp, taped_state_of_primal, d);
+    if (refine) return;
+    r->recorded = rrefine;
     // The vjp: exactly one link per slot.
     const DerivedFacts& v = vjp->derived;
     const char* vn = vjp->name.c_str();
@@ -694,6 +795,8 @@ void record_free(eg_ctx& ctx, eg_runner_s& runner) {
     if (r->rf != nullptr) {
         inner_free(ctx, r->rf->newton);
         inner_free(ctx, r->rf->guard);
+        inner_free(ctx, r->rf->rvjp);
+        if (r->rf->rvjp_unit != nullptr) unit_release(ctx, r->rf->rvjp_unit);
         if (r->rf->newton_unit != nullptr) unit_release(ctx, r->rf->newton_unit);
         if (r->rf->guard_unit != nullptr) unit_release(ctx, r->rf->guard_unit);
         delete r->rf;
@@ -704,6 +807,29 @@ void record_free(eg_ctx& ctx, eg_runner_s& runner) {
     runner.record = nullptr;
 }
 
+
+/** @brief Bind the slots of a refine unit over the runner's planes and eagle's: @p slots as refine_setup stated them. */
+void bind_refine(eg_plan_s& plan, const std::vector<RSlot>& slots, const eg_plan_s& primal, RunRecord& r, RefineRun& f, std::int64_t n,
+                 std::size_t es, const char* start) {
+    for (std::size_t i = 0; i < slots.size(); ++i) {
+        const RSlot& s = slots[i];
+        const int slot = static_cast<int>(i);
+        switch (s.kind) {
+        case RSlot::UNIFORM: bind_value(plan, slot, primal.bindings[static_cast<std::size_t>(s.a)].value, sizeof(primal.bindings[0].value)); break;
+        case RSlot::PLANE:
+            bind_raw(plan, slot, plane_bytes(*primal.bindings[static_cast<std::size_t>(s.a)].plane), static_cast<std::uint64_t>(n));
+            break;
+        case RSlot::TAPED:
+            bind_raw(plan, slot, r.tape.data() + static_cast<std::size_t>(r.taped[static_cast<std::size_t>(s.a)].row0 * n) * es,
+                     static_cast<std::uint64_t>(n));
+            break;
+        case RSlot::STEPS: bind_raw(plan, slot, f.nsteps.data(), static_cast<std::uint64_t>(n)); break;
+        case RSlot::TIME0: bind_raw(plan, slot, const_cast<char*>(start), static_cast<std::uint64_t>(n)); break;
+        case RSlot::BUF: bind_raw(plan, slot, f.bufs[static_cast<std::size_t>(s.a)].buf.data(), static_cast<std::uint64_t>(n)); break;
+        case RSlot::NONE: break;
+        }
+    }
+}
 
 /** @brief events refine after the twin's forward (``RefinePass.run`` and ``events_refine_host``): locate each stop inside
  *  its stop step, run the guard vjp, test grazing, refuse by name, commit the refined states. */
@@ -742,28 +868,8 @@ void refine_pass(eg_ctx& ctx, eg_runner_s& runner, RunRecord& r, int threads) {
         if (c.kind == Carried::START) start = c.src;
     if (f.newton == nullptr) f.newton = inner_plan(ctx, f.newton_unit, primal.structure, n);
     if (f.guard == nullptr) f.guard = inner_plan(ctx, f.guard_unit, primal.structure, n);
-    const auto bind_all = [&](eg_plan_s& plan, const std::vector<RSlot>& slots) {
-        for (std::size_t i = 0; i < slots.size(); ++i) {
-            const RSlot& s = slots[i];
-            const int slot = static_cast<int>(i);
-            switch (s.kind) {
-            case RSlot::UNIFORM: bind_value(plan, slot, primal.bindings[static_cast<std::size_t>(s.a)].value, sizeof(primal.bindings[0].value)); break;
-            case RSlot::PLANE:
-                bind_raw(plan, slot, plane_bytes(*primal.bindings[static_cast<std::size_t>(s.a)].plane), static_cast<std::uint64_t>(n));
-                break;
-            case RSlot::TAPED:
-                bind_raw(plan, slot, r.tape.data() + static_cast<std::size_t>(r.taped[static_cast<std::size_t>(s.a)].row0 * n) * es,
-                         static_cast<std::uint64_t>(n));
-                break;
-            case RSlot::STEPS: bind_raw(plan, slot, f.nsteps.data(), static_cast<std::uint64_t>(n)); break;
-            case RSlot::TIME0: bind_raw(plan, slot, const_cast<char*>(start), static_cast<std::uint64_t>(n)); break;
-            case RSlot::BUF: bind_raw(plan, slot, f.bufs[static_cast<std::size_t>(s.a)].buf.data(), static_cast<std::uint64_t>(n)); break;
-            case RSlot::NONE: break;
-            }
-        }
-    };
-    bind_all(*f.newton, f.nslots);
-    bind_all(*f.guard, f.gslots);
+    bind_refine(*f.newton, f.nslots, primal, r, f, n, es, start);
+    bind_refine(*f.guard, f.gslots, primal, r, f, n, es, start);
     events::EventPlanes<T> p;
     p.n = n;
     p.guards = static_cast<int>(f.g.size());
@@ -932,9 +1038,9 @@ void record_forward(eg_ctx& ctx, eg_runner_s& runner, eg_run_report* report) {
     r.taken = 0;
     const int threads = host::team_threads(ctx);
     const std::int64_t ran = diff::recordForward(
-        runner.max_steps, refine ? runner.max_steps : r.window, 1, [&] { return static_cast<std::int64_t>(fwd.finished) >= n; },
+        runner.max_steps, refine && !r.recorded ? runner.max_steps : r.window, 1, [&] { return static_cast<std::int64_t>(fwd.finished) >= n; },
         [&](std::int64_t k) {
-            if (refine) return;   // a refine run keeps no checkpoints: the one-row tape holds each stop step's start
+            if (refine && !r.recorded) return;   // a plain refine run keeps no checkpoints: the one-row tape holds each stop step's start
             if (k == static_cast<std::int64_t>(r.pool.size())) {
                 r.pool.emplace_back(r.state.size());
                 for (std::size_t i = 0; i < r.state.size(); ++i)
@@ -964,9 +1070,8 @@ void record_forward(eg_ctx& ctx, eg_runner_s& runner, eg_run_report* report) {
     if (refine) {
         if (r.scalar == 8) refine_pass<double>(ctx, runner, r, threads);
         else refine_pass<float>(ctx, runner, r, threads);
-    } else {
-        r.live = true;
     }
+    if (!refine || r.recorded) r.live = true;
     if (report == nullptr) return;
     eg_run_report out{};
     out.flags = (static_cast<std::int64_t>(fwd.finished) == n ? EG_REPORT_DONE : 0u) | EG_REPORT_EXACT_STEPS;
@@ -1022,6 +1127,80 @@ reduce::canonical::Partial<T, aether::SumOp<T>> pair_sum(const T* x, std::int64_
     return reduce::canonical::partialRange<T, aether::SumOp<T>>(SampleColumn<T>{ x }, 0, count);
 }
 
+/** @brief What a recorded refine run's reverse adds to the step-by-step one (``RefineReverse.seeds`` and ``_add_refine``). */
+struct RefineExtra {
+    std::vector<Buf> pre;                          ///< per taped state: the cotangent the step reverse starts from
+    std::vector<std::int64_t> steps;               ///< the steps it runs per sample
+    std::vector<std::pair<int, double>> params;    ///< (primal slot, the refine vjp's one canonical sum of that parameter's gradient)
+    Buf t0;                                        ///< the start copy's per-sample gradient (empty: none)
+};
+
+/** @brief The refine vjp of a recorded refine run: seed it with the end-state cotangent and the implicit-function guard seed,
+ *  launch it once, and select the cotangent the step reverse starts from (events.py ``RefineReverse.seeds``). */
+template <class T>
+void refine_reverse(eg_ctx& ctx, eg_runner_s& runner, RunRecord& r, const std::vector<const char*>& seed, int threads, RefineExtra& out) {
+    RefineRun& f = *r.rf;
+    eg_plan_s& primal = *runner.plans[0];
+    const std::int64_t n = primal.n_samples;
+    const std::size_t es = sizeof(T);
+    const auto buf_of = [&](int b) { return f.bufs[static_cast<std::size_t>(b)].buf.data(); };
+    std::vector<Buf> xbar(r.taped.size());
+    out.pre.resize(r.taped.size());
+    for (std::size_t k = 0; k < r.taped.size(); ++k) {
+        const std::size_t bytes = static_cast<std::size_t>(r.taped[k].rows * n) * es;
+        xbar[k].resize(bytes);
+        if (seed[k] != nullptr) std::memcpy(xbar[k].data(), seed[k], bytes);
+        out.pre[k].resize(bytes);
+        std::memcpy(out.pre[k].data(), xbar[k].data(), bytes);
+    }
+    events::EventPlanes<T> q;
+    q.n = n;
+    q.guards = static_cast<int>(f.g.size());
+    for (std::size_t j = 0; j < f.g.size(); ++j) {
+        q.g[j] = q.dg[j] = reinterpret_cast<const T*>(buf_of(f.dg[j]));
+        q.gbar[j] = reinterpret_cast<T*>(buf_of(f.gbar[j]));
+    }
+    q.status = reinterpret_cast<std::int8_t*>(f.status.data());
+    q.which = reinterpret_cast<std::int8_t*>(f.which.data());
+    events::EventPlanes<T> sel = q;
+    int row = 0;
+    for (const RState& st : f.states) {
+        int tk = -1;
+        for (std::size_t k = 0; k < r.taped.size(); ++k)
+            if (r.taped[k].primal_slot == st.primal) tk = static_cast<int>(k);
+        if (tk < 0) refuse(EG_BAD_REQUEST, "eg_reverse: refined primal state " + std::to_string(st.primal) + " is not taped by the twin");
+        for (std::int64_t k = 0; k < st.rows; ++k, ++row) {
+            const std::size_t off = static_cast<std::size_t>(k * n) * es;
+            q.a[row] = reinterpret_cast<T*>(buf_of(st.rbar) + off);
+            q.b[row] = reinterpret_cast<const T*>(xbar[static_cast<std::size_t>(tk)].data() + off);
+            q.c[row] = reinterpret_cast<const T*>(buf_of(st.dot) + off);
+            sel.a[row] = reinterpret_cast<T*>(out.pre[static_cast<std::size_t>(tk)].data() + off);
+            sel.b[row] = q.b[row];
+            sel.c[row] = reinterpret_cast<const T*>((st.share >= 0 ? buf_of(st.share) : f.zero.data()) + off);
+        }
+    }
+    q.components = sel.components = row;
+    events::applyHost(q, events::kOpSeed);
+    if (f.rvjp == nullptr) f.rvjp = inner_plan(ctx, f.rvjp_unit, primal.structure, n);
+    const char* start = nullptr;
+    for (const Carried& c : r.reads)
+        if (c.kind == Carried::START) start = c.src;
+    bind_refine(*f.rvjp, f.vslots, primal, r, f, n, es, start);
+    host::run_prefix(*f.rvjp, threads, n);
+    events::applyHost(sel, events::kOpSelect);
+    out.steps.assign(reinterpret_cast<const std::int64_t*>(r.steps.data()), reinterpret_cast<const std::int64_t*>(r.steps.data()) + n);
+    events::reverseSteps(out.steps.data(), q.status, n);
+    for (const auto& [b, slot] : f.pgrads) {   // one canonical sum in sample order (pair 0)
+        std::vector<reduce::canonical::Partial<T, aether::SumOp<T>>> one;
+        one.push_back(pair_sum(reinterpret_cast<const T*>(buf_of(b)), n));
+        out.params.push_back({ slot, static_cast<double>(reduce::canonical::combine(std::move(one)).value()) });
+    }
+    if (f.t0grad >= 0) {
+        out.t0.resize(static_cast<std::size_t>(n) * es);
+        std::memcpy(out.t0.data(), buf_of(f.t0grad), static_cast<std::size_t>(n) * es);
+    }
+}
+
 }  // namespace
 
 /** @brief eg_reverse (``RunReverse.__call__`` / ``_run`` and ``diff_reverse_host``). */
@@ -1063,7 +1242,13 @@ void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, con
         seed[static_cast<std::size_t>(k)] = caller_plane(ctx, seeds.planes[i], primal.bindings[static_cast<std::size_t>(s)].plane->tensor->dl_tensor,
                                                          st.rows * n, "seeds.planes[" + std::to_string(i) + "]");
     }
-    struct Out { char* data; int taped, grad; };
+    struct Out { char* data; int taped, grad, slot; };
+    const auto refine_param = [&](std::int32_t s) {
+        if (r.rf != nullptr && r.recorded)
+            for (const auto& pg : r.rf->pgrads)
+                if (pg.second == s) return true;
+        return false;
+    };
     std::vector<Out> outs;
     for (int i = 0; i < grads.n_planes; ++i) {
         const std::int32_t s = grads.plane_slots[i];
@@ -1073,17 +1258,24 @@ void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, con
         int g = -1;
         for (std::size_t j = 0; j < r.grads.size(); ++j)
             if (r.grads[j].primal_slot == s) g = static_cast<int>(j);
-        if (k < 0 && g < 0)
+        if (k < 0 && g < 0 && !refine_param(s))
             refuse(EG_BAD_REQUEST, "grads.plane_slots[" + std::to_string(i) + "] " + std::to_string(s) + " ('" + pu.slots[static_cast<std::size_t>(s)].name +
                    "'): a slot with no link");
         if (k >= 0) {
             const Carried& st = r.state[static_cast<std::size_t>(r.taped[static_cast<std::size_t>(k)].state)];
-            outs.push_back({ caller_plane(ctx, grads.planes[i], primal.bindings[static_cast<std::size_t>(s)].plane->tensor->dl_tensor, st.rows * n, what), k, -1 });
+            outs.push_back({ caller_plane(ctx, grads.planes[i], primal.bindings[static_cast<std::size_t>(s)].plane->tensor->dl_tensor, st.rows * n, what), k, -1, s });
         } else {   // a parameter: the sum over samples, one value
             DLTensor like{};
             like.dtype = DLDataType{ kDLFloat, static_cast<std::uint8_t>(r.scalar * 8), 1 };
-            outs.push_back({ caller_plane(ctx, grads.planes[i], like, 1, what), -1, g });
+            outs.push_back({ caller_plane(ctx, grads.planes[i], like, 1, what), -1, g, s });
         }
+    }
+    RefineExtra extra;
+    const int refine_threads = host::team_threads(ctx);
+    if (r.rf != nullptr && r.recorded) {   // the refine vjp's seeds and share; the step reverse starts from the selected cotangent
+        if (r.scalar == 8) refine_reverse<double>(ctx, *runner, r, seed, refine_threads, extra);
+        else refine_reverse<float>(ctx, *runner, r, seed, refine_threads, extra);
+        for (std::size_t k = 0; k < r.taped.size(); ++k) seed[k] = extra.pre[k].data();
     }
     // Samples per pass under the budget (each pass a whole number of samples; leaf 1 under the compensated sums).
     std::int64_t per = 0;
@@ -1161,7 +1353,7 @@ void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, con
     std::vector<Buf> out_state(r.taped.size());
     for (std::size_t k = 0; k < r.taped.size(); ++k) out_state[k].resize(static_cast<std::size_t>(r.taped[k].rows * n) * r.scalar);
     std::vector<std::vector<std::pair<double, double>>> partials(r.grads.size());
-    const std::int64_t* all_steps = reinterpret_cast<const std::int64_t*>(r.steps.data());
+    const std::int64_t* all_steps = extra.steps.empty() ? reinterpret_cast<const std::int64_t*>(r.steps.data()) : extra.steps.data();
     const int threads = host::team_threads(ctx);
     for (std::int64_t s0 = 0; s0 < n; s0 += m) {
         const std::int64_t cnt = std::min(m, n - s0);
@@ -1241,21 +1433,35 @@ void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, con
         else
             for (std::int64_t i = 0; i < n; ++i) reinterpret_cast<float*>(dst.data())[i] += reinterpret_cast<const float*>(fold[g].data())[i];
     }
+    if (!extra.t0.words.empty()) {   // the refine vjp's start-copy gradient joins the time plane's
+        int tk = -1;
+        for (std::size_t k = 0; k < r.taped.size(); ++k)
+            if (r.taped[k].primal_slot == r.rf->t0of) tk = static_cast<int>(k);
+        if (tk >= 0 && r.scalar == 8)
+            for (std::int64_t i = 0; i < n; ++i) reinterpret_cast<double*>(out_state[static_cast<std::size_t>(tk)].data())[i] += reinterpret_cast<const double*>(extra.t0.data())[i];
+        else if (tk >= 0)
+            for (std::int64_t i = 0; i < n; ++i) reinterpret_cast<float*>(out_state[static_cast<std::size_t>(tk)].data())[i] += reinterpret_cast<const float*>(extra.t0.data())[i];
+    }
     for (const Out& o : outs) {
         if (o.taped >= 0) {
             std::memcpy(o.data, out_state[static_cast<std::size_t>(o.taped)].data(),
                         static_cast<std::size_t>(r.taped[static_cast<std::size_t>(o.taped)].rows * n) * r.scalar);
         } else {   // diff_combine_chunks: the passes' pairs combined in pass order
-            const auto& ps = partials[static_cast<std::size_t>(o.grad)];
+            const std::vector<std::pair<double, double>> none;
+            const auto& ps = o.grad >= 0 ? partials[static_cast<std::size_t>(o.grad)] : none;
             if (r.scalar == 8) {
                 std::vector<reduce::canonical::Partial<double, aether::SumOp<double>>> p;
                 for (const auto& [h, c] : ps) p.push_back({ h, c });
-                const double v = ps.empty() ? 0.0 : reduce::canonical::combine(std::move(p)).value();
+                double v = ps.empty() ? 0.0 : reduce::canonical::combine(std::move(p)).value();
+                for (const auto& [slot, x] : extra.params)
+                    if (slot == o.slot) v += x;
                 std::memcpy(o.data, &v, sizeof(v));
             } else {
                 std::vector<reduce::canonical::Partial<float, aether::SumOp<float>>> p;
                 for (const auto& [h, c] : ps) p.push_back({ static_cast<float>(h), static_cast<float>(c) });
-                const float v = ps.empty() ? 0.0f : reduce::canonical::combine(std::move(p)).value();
+                float v = ps.empty() ? 0.0f : reduce::canonical::combine(std::move(p)).value();
+                for (const auto& [slot, x] : extra.params)
+                    if (slot == o.slot) v += static_cast<float>(x);
                 std::memcpy(o.data, &v, sizeof(v));
             }
         }
