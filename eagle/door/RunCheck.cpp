@@ -35,11 +35,12 @@ void check_desc(const eg_runner_desc& d, bool device) {
     if (d.n_derived > 0)
         refuse(EG_NOT_WRITTEN, "derived units (n_derived > 0, the record and refine roles) are not "
                "written in this build of the door");
-    if (d.step_graph != nullptr && device)
-        refuse(EG_NOT_WRITTEN, "step_graph (recorded device work run once per step) is not written in this build "
-               "of the door");
-    if (d.step_graph != nullptr)
+    if (d.step_graph != nullptr) {
+        if (device)
+            refuse(EG_NOT_WRITTEN, "step_graph (recorded device work run once per step) is not written in this build "
+                   "of the door");
         refuse(EG_BAD_REQUEST, "step_graph: a host runner runs no recorded device work per step; pass NULL");
+    }
     if (d.window != 0 || d.memory_budget != 0)
         refuse(EG_BAD_REQUEST, "window and memory_budget set how a recorded run is reversed: without "
                "EG_RUN_RECORD both are 0");

@@ -107,6 +107,9 @@ unsigned resolved_block(const DeviceState& d, const eg_unit_s& u, std::int64_t n
     return fallback;
 }
 
+/** @brief The loop iterations that cover @p max_steps at @p every steps each. */
+std::int64_t loop_cap(std::int64_t max_steps, std::int64_t every) { return max_steps / every + (max_steps % every != 0); }
+
 }  // namespace
 
 /** @brief EG_CTX_DEVICE: retain the device's primary context, make the context's stream, read the launch facts. */
@@ -261,8 +264,7 @@ void device_plan_check(const eg_ctx& ctx, const eg_unit_s& unit) {
             refuse(EG_NOT_WRITTEN, who + "the companion '" + unit.slots[c.slot].name + "' has no device fold function");
 }
 
-/** @brief Queue one launch per partition on the context's stream: grid from the partition's count and the
- *  meta's block (else the resolved one), the bound views and uniforms by value, then the triple. */
+/** @brief Queue the plan's launches (launch_on) on the context's stream. */
 void device_launch(eg_plan_s& plan) {
     Current current(plan.ctx->dev);
     launch_on(plan, plan.ctx->dev.stream);
@@ -344,7 +346,7 @@ void device_runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out)
         refuse(EG_BAD_REQUEST, "every " + std::to_string(d.every) + ": a runner without an active set advances "
                "unit '" + d.plans[0]->unit->name + "''s " + std::to_string(k) + " steps per launch");
     const std::int64_t every = active ? active_every_steps(d) : k;
-    const std::int64_t cap = d.max_steps / every + (d.max_steps % every != 0);
+    const std::int64_t cap = loop_cap(d.max_steps, every);
     if (cap >= 0xFFFFFFFFll)
         refuse(EG_BAD_REQUEST, "max_steps " + std::to_string(d.max_steps) + ": the device loop counts launches in "
                "uint32");
@@ -426,16 +428,15 @@ void device_run(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report) {
     if (r.loop == nullptr) {
         const auto t0 = std::chrono::steady_clock::now();
         auto* cells = reinterpret_cast<unsigned*>(r.cells);
-        const auto cap = static_cast<unsigned>(runner->max_steps / every + (runner->max_steps % every != 0));
+        const auto cap = static_cast<unsigned>(loop_cap(runner->max_steps, every));
         const auto body = [runner](std::uint64_t s) {
             for (std::int64_t l = 0; l < (runner->active ? runner->act.every_launches : 1); ++l)
                 for (eg_plan_s* p : runner->plans) launch_on(*p, s);
         };
         std::function<void(std::uint64_t)> compact;
         if (runner->active)
-            compact = [&first, n, cells, &r, counter](std::uint64_t s) {
-                const DLTensor& m = first.bindings[static_cast<std::size_t>(first.unit->finish.mask_slot)].plane->tensor->dl_tensor;
-                compact_step(s, static_cast<const char*>(m.data) + m.byte_offset, n, reinterpret_cast<std::int32_t*>(r.map),
+            compact = [&t, n, cells, &r, counter](std::uint64_t s) {
+                compact_step(s, static_cast<const char*>(t.data) + t.byte_offset, n, reinterpret_cast<std::int32_t*>(r.map),
                              cells + 3, reinterpret_cast<void*>(r.scratch), counter, cells + 4, cells + 5);
             };
         r.loop = loop_capture(stream, counter, cells + 2, cells, cap, body, compact, cells + 4);

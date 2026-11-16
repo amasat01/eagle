@@ -189,11 +189,11 @@ PAIR_DEVICE_TEST := $(OUT)/pair_device_test
 RUNNER_PAIR_TEST := $(OUT)/runner_pair_test
 ACTIVE_PAIR_TEST := $(OUT)/active_pair_test
 
-$(RUNNER_PAIR_TEST): test/runner_pair_test.c eg_door.h $(LIB) | check-cuda
+$(RUNNER_PAIR_TEST): test/runner_pair_test.c test/pair_util.h eg_door.h $(LIB) | check-cuda
 	$(CC) $(CFLAGS_C) -isystem $(CUDA)/include -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door \
 	  -Wl,-rpath,$(OUT) $(CUDART) -lm -pthread
 
-$(ACTIVE_PAIR_TEST): test/active_pair_test.c eg_door.h $(LIB) | check-cuda
+$(ACTIVE_PAIR_TEST): test/active_pair_test.c test/pair_util.h eg_door.h $(LIB) | check-cuda
 	$(CC) $(CFLAGS_C) -isystem $(CUDA)/include -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door \
 	  -Wl,-rpath,$(OUT) $(CUDART) -lm -pthread
 
