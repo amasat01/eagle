@@ -20,6 +20,9 @@
  *    MAT_IN, an int32 PER_SAMPLE, a LOOKUP table, the NSAMPLES count, a rank-0 OUT and a uniform.
  *  - "count1g": count1 with an active set over groups of 5 lanes (the map holds group indices).
  *  - "widemul": a WIDE_OUT and a WIDE_IN plane of three rows each beside a MUTABLE plane.
+ *  - "cells": two cells of rows of 4 samples (a MIN and a MAX); "cellsum": a SUM cell, which the meta cannot complete; "keyed": a keyed
+ *    accumulate whose companion eagle makes and whose fold entry runs after each launch; "keyedbad": the same
+ *    with no fold entry.
  *  - "count1", "count3": a finishing unit that steps k += 1 until k >= limit,
  *    then marks the sample and counts it into the finished counter; one or
  *    three steps per launch (slots: k, limit, mask, the counter).
@@ -72,6 +75,9 @@ EG_FIXTURE_EXPORT void widemul_host(void* const* params, int64_t base, int64_t c
 EG_FIXTURE_EXPORT void gath_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void boxed_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void shr_host(void* const* params, int64_t base, int64_t count, int64_t n);
+EG_FIXTURE_EXPORT void cells_host(void* const* params, int64_t base, int64_t count, int64_t n);
+EG_FIXTURE_EXPORT void keyed_host(void* const* params, int64_t base, int64_t count, int64_t n);
+EG_FIXTURE_EXPORT void keyed__fold_acc_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT const struct eg_library_meta* eg_unit_library_meta(void);
 
 /* Lanes of a partial last group a count1g launch was handed (the entry skips them). */
@@ -243,6 +249,36 @@ void shr_host(void* const* params, int64_t base, int64_t count, int64_t n) {
 }
 
 /* Index sets: thread t serves lane map[t] (lanes) or lane t (prefix): y[lane] = 2 * x[lane] + 1. */
+/* rows of 4 samples: tot[r] = min of x, mx[r] = max of x; params tot, mx, x */
+void cells_host(void* const* params, int64_t base, int64_t count, int64_t n) {
+    double* tot = (double*)((const struct fixture_handle*)params[0])->data;
+    double* mx = (double*)((const struct fixture_handle*)params[1])->data;
+    const double* x = (const double*)((const struct fixture_handle*)params[2])->data;
+    (void)n;
+    for (int64_t i = base; i < base + count; ++i) {
+        const int64_t r = i / 4;
+        if (i % 4 == 0) tot[r] = 1e300, mx[r] = -1e300;
+        if (x[i] < tot[r]) tot[r] = x[i];
+        if (x[i] > mx[r]) mx[r] = x[i];
+    }
+}
+
+/* acc[i / 4] += x[i], acc_c[i / 4] += 0.5; the fold: acc += acc_c, acc_c = 0.125 over the target's slots; params acc, acc_c, x */
+void keyed_host(void* const* params, int64_t base, int64_t count, int64_t n) {
+    double* acc = (double*)((const struct fixture_handle*)params[0])->data;
+    double* comp = (double*)((const struct fixture_handle*)params[1])->data;
+    const double* x = (const double*)((const struct fixture_handle*)params[2])->data;
+    (void)n;
+    for (int64_t i = base; i < base + count; ++i) acc[i / 4] += x[i], comp[i / 4] += 0.5;
+}
+
+void keyed__fold_acc_host(void* const* params, int64_t base, int64_t count, int64_t n) {
+    double* acc = (double*)((const struct fixture_handle*)params[0])->data;
+    double* comp = (double*)((const struct fixture_handle*)params[1])->data;
+    (void)n;
+    for (int64_t i = base; i < base + count; ++i) acc[i] += comp[i], comp[i] = 0.125;
+}
+
 void lanes_host(void* const* params, int64_t base, int64_t count, int64_t n) {
     double* y = (double*)((const struct fixture_handle*)params[0])->data;
     const double* x = (const double*)((const struct fixture_handle*)params[1])->data;
@@ -625,16 +661,75 @@ static const struct eg_unit_meta unit_shr = {
     .scalar_type = EG_SCALAR_FLOAT64, .host_entry = "shr_host", .device_image_format = EG_IMAGE_NONE,
     .body = &shr_body, .launch = &launch };
 
+/* cells and companions: ACCUM_OUT slots, cell rows of 4 samples, a keyed accumulate over a lane-axis plane axis */
+SLOT_OF(slot_tot, EG_ROLE_ACCUM_OUT, EG_DTYPE_REAL, "tot");
+SLOT_OF(slot_tot_c, EG_ROLE_ACCUM_OUT, EG_DTYPE_REAL, "tot_comp");
+SLOT_OF(slot_mx, EG_ROLE_ACCUM_OUT, EG_DTYPE_REAL, "mx");
+SLOT_OF(slot_acc, EG_ROLE_ACCUM_OUT, EG_DTYPE_REAL, "acc");
+SLOT_OF(slot_acc_c, EG_ROLE_ACCUM_OUT, EG_DTYPE_REAL, "acc_c");
+static const int32_t cell_tot_slots[] = { 0 }, cell_mx_slots[] = { 1 };
+static const struct eg_unit_cell cell_tot = { .struct_size = sizeof(struct eg_unit_cell), .op = EG_REDUCE_MIN, .internal = 0,
+                                              .columns = 1, .slots = cell_tot_slots, .name = "tot" };
+static const struct eg_unit_cell cell_sum = { .struct_size = sizeof(struct eg_unit_cell), .op = EG_REDUCE_SUM, .internal = 0,
+                                              .columns = 1, .slots = cell_tot_slots, .name = "tot" };
+static const struct eg_unit_cell cell_mx = { .struct_size = sizeof(struct eg_unit_cell), .op = EG_REDUCE_MAX, .internal = 0,
+                                             .columns = 1, .slots = cell_mx_slots, .name = "mx" };
+static const struct eg_unit_cell* const cell_list[] = { &cell_tot, &cell_mx };
+static const struct eg_unit_cell* const cell_sum_list[] = { &cell_sum };
+static const struct eg_unit_slot* const cells_slots[] = { &slot_tot, &slot_mx, &slot_x };
+static const struct eg_unit_slot* const cellsum_slots[] = { &slot_tot, &slot_tot_c, &slot_mx, &slot_x };
+static const struct eg_unit_body cells_body = { .struct_size = sizeof(struct eg_unit_body), .access = EG_ACCESS_SAMPLE_LOCAL,
+    .n_slots = 3, .n_cells = 2, .cell_row = 4, .slots = cells_slots, .cells = cell_list };
+static const struct eg_unit_body cellsum_body = { .struct_size = sizeof(struct eg_unit_body), .access = EG_ACCESS_SAMPLE_LOCAL,
+    .n_slots = 4, .n_cells = 1, .cell_row = 4, .slots = cellsum_slots, .cells = cell_sum_list };
+static const struct eg_unit_meta unit_cells = {
+    .struct_size = sizeof(struct eg_unit_meta), .name = "cells", .digest = DIGEST(0x67), .pattern = EG_PATTERN_PURE,
+    .scalar_type = EG_SCALAR_FLOAT64, .host_entry = "cells_host", .device_image_format = EG_IMAGE_NONE,
+    .body = &cells_body, .launch = &launch };
+static const struct eg_unit_meta unit_cellsum = {
+    .struct_size = sizeof(struct eg_unit_meta), .name = "cellsum", .digest = DIGEST(0x6a), .pattern = EG_PATTERN_PURE,
+    .scalar_type = EG_SCALAR_FLOAT64, .host_entry = "cells_host", .device_image_format = EG_IMAGE_NONE,
+    .body = &cellsum_body, .launch = &launch };
+static const struct eg_unit_companion comp_acc = { .struct_size = sizeof(struct eg_unit_companion), .slot = 1, .target_slot = 0,
+                                                   .host_fold_entry = "keyed__fold_acc_host", .device_fold_function = NULL };
+static const struct eg_unit_companion comp_none = { .struct_size = sizeof(struct eg_unit_companion), .slot = 1, .target_slot = 0,
+                                                    .host_fold_entry = NULL, .device_fold_function = NULL };
+static const struct eg_unit_companion* const comp_list[] = { &comp_acc };
+static const struct eg_unit_companion* const comp_none_list[] = { &comp_none };
+static const struct eg_unit_slot* const keyed_slots[] = { &slot_acc, &slot_acc_c, &slot_x };
+#define KEYED_BODY(var, list_) static const struct eg_unit_body var = { .struct_size = sizeof(struct eg_unit_body),   \
+    .access = EG_ACCESS_CROSS_SAMPLE_WRITE, .n_slots = 3, .n_companions = 1, .slots = keyed_slots, .companions = list_ }
+KEYED_BODY(keyed_body, comp_list);
+KEYED_BODY(keyedbad_body, comp_none_list);
+static const char* const key_lane_labels[] = { "key", NULL };
+static const int64_t key_lane_extents[] = { -1, 4 };
+static const char* const key_axis_labels[] = { "key" };
+static const int64_t key_axis_extents[] = { -1 };
+static const struct eg_unit_plane_axes key_axes = { .struct_size = sizeof(struct eg_unit_plane_axes), .slot = 0, .n_axes = 1,
+                                                    .labels = key_axis_labels, .extents = key_axis_extents };
+static const struct eg_unit_plane_axes* const key_axes_list[] = { &key_axes };
+static const struct eg_unit_launch launch_keyed = {
+    .struct_size = sizeof(struct eg_unit_launch), .n_lane_axes = 2, .block = 0, .active_map_slot = -1, .active_count_slot = -1,
+    .index_map_slot = -1, .index_count_slot = -1, .n_plane_axes = 1, .group = 1, .lane_labels = key_lane_labels,
+    .lane_extents = key_lane_extents, .plane_axes = key_axes_list };
+#define KEYED_UNIT(var, name_, byte, body_) static const struct eg_unit_meta var = {                                \
+    .struct_size = sizeof(struct eg_unit_meta), .name = name_, .digest = DIGEST(byte), .pattern = EG_PATTERN_PURE,    \
+    .scalar_type = EG_SCALAR_FLOAT64, .host_entry = "keyed_host", .device_image_format = EG_IMAGE_NONE,             \
+    .body = &body_, .launch = &launch_keyed }
+KEYED_UNIT(unit_keyed, "keyed", 0x68, keyed_body);
+KEYED_UNIT(unit_keyedbad, "keyedbad", 0x69, keyedbad_body);
+
 static const struct eg_unit_meta* const units[] = { &unit_axpb, &unit_wait, &unit_split, &unit_count1,
                                                     &unit_count3, &unit_count1a, &unit_count3a, &unit_countA, &unit_countAa, &unit_vecs, &unit_count1i,
                                                     &unit_count1ia, &unit_count1e, &unit_lanes, &unit_prefix, &unit_count1g, &unit_widemul,
-                                                    &unit_gathb, &unit_gatha, &unit_gathn, &unit_boxed, &unit_boxbad, &unit_shr };
+                                                    &unit_gathb, &unit_gatha, &unit_gathn, &unit_boxed, &unit_boxbad, &unit_shr, &unit_cells, &unit_keyed,
+                                                    &unit_keyedbad, &unit_cellsum };
 
 static const struct eg_library_meta library = {
     .struct_size = sizeof(struct eg_library_meta),
     .schema_major = EG_META_SCHEMA_MAJOR,
     .schema_minor = 0,
-    .n_units = 23,
+    .n_units = 27,
     .units = units,
 };
 

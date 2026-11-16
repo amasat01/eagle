@@ -104,6 +104,24 @@ void check_plane(const eg_plan_s& plan, int slot, const eg_plane_s& plane) {
             refuse(EG_BAD_REQUEST, what + ": the index map is one dimension");
         if (slot == plan.unit->index_count_slot && (t.ndim != 1 || t.shape[0] != 1))
             refuse(EG_BAD_REQUEST, what + ": the index count is one cell, shape (1,)");
+    } else if (s.role == EG_ROLE_ACCUM_OUT) {   // a cell: the finished (1,); else the caller's length, along the named axes the meta states
+        if (s.cell) {
+            if (t.ndim != 1 || t.shape[0] != 1) refuse(EG_BAD_REQUEST, what + ": a cell is one element, shape (1,)");
+        } else {
+            if (t.ndim < 1 || (!s.axes.empty() && t.ndim != static_cast<int>(s.axes.size())))
+                refuse(EG_BAD_REQUEST, what + ": a plane of " + std::to_string(s.axes.empty() ? 1 : s.axes.size()) + " dimension(s) or more is expected");
+            std::int64_t fixed = 1;
+            for (std::int64_t e : plan.unit->lane_extents) fixed *= e > 0 ? e : 1;
+            for (std::size_t i = 0; i < s.axes.size(); ++i) {    // a lane axis's label shares that axis's extent
+                const SlotFacts::Axis& a = s.axes[i];
+                const std::int64_t want = a.lane < 0 ? a.extent
+                                          : plan.unit->lane_extents[static_cast<std::size_t>(a.lane)] > 0
+                                              ? plan.unit->lane_extents[static_cast<std::size_t>(a.lane)] : plan.n_samples / fixed;
+                if (want >= 0 && t.shape[i] != want)
+                    refuse(EG_BAD_REQUEST, what + ": axis " + std::to_string(i) + " has extent " + std::to_string(t.shape[i]) +
+                           ", the unit's named axis has " + std::to_string(want));
+            }
+        }
     } else {                             // (*shape, n): the slot's extents, then one value per sample
         bool ok = t.ndim == s.rank + 1 && t.shape[s.rank] == plan.n_samples;
         for (int i = 0; ok && i < s.rank; ++i) ok = t.shape[i] == s.shape[static_cast<std::size_t>(i)];
@@ -114,7 +132,7 @@ void check_plane(const eg_plan_s& plan, int slot, const eg_plane_s& plane) {
         }
     }
     if (!compact(t)) refuse(EG_BAD_REQUEST, what + ": the plane is not contiguous");
-    const bool written = s.role == EG_ROLE_MUTABLE || s.role == EG_ROLE_OUT || s.role == EG_ROLE_WIDE_OUT ||
+    const bool written = s.role == EG_ROLE_MUTABLE || s.role == EG_ROLE_OUT || s.role == EG_ROLE_WIDE_OUT || s.role == EG_ROLE_ACCUM_OUT ||
                          slot == plan.unit->finish.mask_slot;
     if (written && (plane.tensor->flags & DLPACK_FLAG_BITMASK_READ_ONLY))
         refuse(EG_BAD_REQUEST, what + ": a read-only plane in a written slot");
@@ -178,6 +196,9 @@ void check_bind(const eg_ctx& ctx, const eg_plan_s& plan, const eg_bind_desc& d)
         if (slot == plan.unit->active_map_slot || slot == plan.unit->active_count_slot)
             refuse(EG_BAD_REQUEST, "slot " + std::to_string(slot) + " ('" + s.name +
                    "') is part of the active set: the runner makes it, do not pass it");
+        if (s.made)
+            refuse(EG_BAD_REQUEST, "slot " + std::to_string(slot) + " ('" + s.name +
+                   "') is a companion or compensation plane: eagle makes it, do not pass it");
         if ((s.role == EG_ROLE_UNIFORM) == plane)
             refuse(EG_BAD_REQUEST, "slot " + std::to_string(slot) + " ('" + s.name + "') takes " +
                    (plane ? "a uniform, not a plane" : "a plane, not a uniform"));
@@ -244,6 +265,10 @@ void plan_new(eg_ctx& ctx, const eg_plan_desc* desc, eg_plan** out) {
     if (d.unit->host_entry == nullptr)
         refuse(EG_NOT_WRITTEN, "unit '" + d.unit->name + "' has no host entry");
     std::vector<exec::Partition> parts = read_partitions(d);
+    for (const exec::Partition& p : parts)    // a row of a cell has one writer: a partition starts on a row
+        if (d.unit->cell_row > 0 && p.base % d.unit->cell_row != 0)
+            refuse(EG_BAD_REQUEST, "unit '" + d.unit->name + "' reduces over samples in rows of " + std::to_string(d.unit->cell_row) +
+                   ": a partition starts on a multiple of it, got base " + std::to_string(p.base));
     if (d.unit->index_count_slot >= 0 && (parts.size() != 1 || parts[0].base != 0 || parts[0].count != d.n_samples))
         refuse(EG_BAD_REQUEST, "unit '" + d.unit->name + "' reads an index set: one whole partition");
     static constexpr exec::Access kAccess[] = { exec::Access::SampleLocal,
@@ -275,8 +300,20 @@ void plan_new(eg_ctx& ctx, const eg_plan_desc* desc, eg_plan** out) {
             }
         if (d.unit->finish.present && d.unit->finish.steps_slot >= 0)    // the steps word of an AUTO unit
             bind_handle(*plan, d.unit->finish.steps_slot, &plan->steps_word, 1);
+        if (!d.unit->cells.empty()) {    // the rows of every cell component, zeroed
+            const DLDataType real{ kDLFloat, static_cast<std::uint8_t>(d.unit->scalar_type == EG_SCALAR_FLOAT32 ? 32 : 64), 1 };
+            const std::int64_t rows = std::max<std::int64_t>(1, (d.n_samples + d.unit->cell_row - 1) / d.unit->cell_row);
+            for (const CellFacts& c : d.unit->cells) {
+                plan->rows.push_back(make_plane(ctx, real, { rows }));
+                bind_handle(*plan, c.slot, plan->rows.back()->tensor->dl_tensor.data, static_cast<std::uint64_t>(d.n_samples));
+                plan->bindings[c.slot].bound = false;    // bound when the caller binds the cell
+            }
+        }
         ctx.plans.insert(plan);
     } catch (...) {
+        for (eg_plane_s* r : plan->rows) plane_release(ctx, r);
+        for (eg_plan_s::Binding& b : plan->bindings)
+            if (b.plane != nullptr) plane_release(ctx, b.plane);
         delete plan;
         throw;
     }
@@ -289,6 +326,7 @@ void plan_free(eg_ctx& ctx, eg_plan_s* plan) {
     ctx.plans.erase(plan);
     for (eg_plan_s::Binding& b : plan->bindings)
         if (b.plane != nullptr) plane_release(ctx, b.plane);
+    for (eg_plane_s* r : plan->rows) plane_release(ctx, r);
     unit_release(ctx, plan->unit);
     delete plan;
 }
@@ -319,7 +357,9 @@ void bind(eg_ctx& ctx, eg_plan_s* plan, const eg_bind_desc* desc) {
         const DLTensor& t = b.plane->tensor->dl_tensor;
         char* data = static_cast<char*>(t.data) + t.byte_offset;
         const SlotFacts& sf = plan->unit->slots[d.plane_slots[i]];
-        if (sf.mirror) {
+        if (sf.cell) {
+            b.bound = true;          // the kernel reads eagle's rows (made at eg_plan_new); this plane receives the folded cell
+        } else if (sf.mirror) {
             bind_mirror(*plan, d.plane_slots[i], data,
                         static_cast<std::uint64_t>(sf.gathered ? t.shape[t.ndim - 1] : plan->n_samples));
         } else {
@@ -328,6 +368,14 @@ void bind(eg_ctx& ctx, eg_plan_s* plan, const eg_bind_desc* desc) {
                                                   : static_cast<std::uint64_t>(plan->n_samples));
         }
         if (old != nullptr) plane_release(ctx, old);
+        for (const CompanionFacts& c : plan->unit->companions) {     // a new target: its companion, zeroed, of its shape and dtype
+            if (c.target != d.plane_slots[i]) continue;
+            eg_plane_s* comp = make_plane(ctx, t.dtype, std::vector<std::int64_t>(t.shape, t.shape + t.ndim));
+            eg_plane_s* prev = plan->bindings[c.slot].plane;
+            plan->bindings[c.slot].plane = comp;
+            bind_handle(*plan, c.slot, comp->tensor->dl_tensor.data, static_cast<std::uint64_t>(plan->n_samples));
+            if (prev != nullptr) plane_release(ctx, prev);
+        }
     }
     for (int i = 0; i < d.n_uniforms; ++i) {
         const int slot = d.uniform_slots[i];

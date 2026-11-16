@@ -70,6 +70,23 @@ struct SlotFacts {
     bool gathered = false;                    ///< a compact (rows, cols, m) matrix read at lane indices: m is not the lane count
     std::vector<std::uint8_t> keep;           ///< gathered: 1 for each lane axis the matrix varies along (empty: m unchecked)
     bool shared = false;                      ///< a LOOKUP with no lane axis: one value for every lane, bound flat
+    /** @brief One named axis of an ACCUM_OUT plane: a static extent, or -1 and the lane axis whose extent it shares. */
+    struct Axis { std::int64_t extent = -1; int lane = -1; };
+    std::vector<Axis> axes;                   ///< ACCUM_OUT: the plane's named axes (empty: any compact plane)
+    bool made = false;                        ///< eagle's own plane (a companion): never bound by the caller
+    bool cell = false;                        ///< a cell's slot: the caller binds the finished (1,) cell, the kernel reads eagle's rows
+};
+
+/** @brief A compensation companion eagle makes beside the target the caller binds, and the fold it runs after each launch. */
+struct CompanionFacts {
+    std::int32_t slot = -1, target = -1;
+    eagle::exec::HostEntryV2 fold = nullptr;
+};
+
+/** @brief One component of a cell: its row slot and the fold (SUM is refused: the meta states no compensation slot). */
+struct CellFacts {
+    std::int32_t slot = -1;
+    eg_reduce_op op = EG_REDUCE_SUM;
 };
 
 /** @brief A unit's finish record, as eg_runner_new and eg_run read it. */
@@ -113,6 +130,9 @@ struct eg_unit_s {
     std::int32_t access = 0;
     std::vector<eagle::door::SlotFacts> slots;
     eagle::door::FinishFacts finish;
+    std::vector<eagle::door::CompanionFacts> companions;
+    std::vector<eagle::door::CellFacts> cells;
+    std::int64_t cell_row = 0;                ///< samples per row of a cell's rows, 0: no cells
     std::int32_t active_map_slot = -1;        ///< the int32 LOOKUP of live sample slots a runner makes, -1: none
     std::int32_t active_count_slot = -1;      ///< the uint32 LOOKUP count of its live prefix
     std::int64_t group = 1;                   ///< lanes per group of the active set: the map holds group indices
@@ -149,6 +169,7 @@ struct eg_plan_s {
     std::vector<eagle::exec::Partition> parts;
     std::vector<Binding> bindings;            ///< one per slot; never resized after eg_plan_new
     std::vector<void*> params;                ///< the entry's argument list, into ``bindings``
+    std::vector<eg_plane_s*> rows;            ///< one eagle-made row plane per cell component (``unit->cells``), one reference each
     std::uint32_t finished = 0;               ///< the eagle-made finished counter of a finishing unit
     std::int64_t steps_word = 0;              ///< the eagle-made steps word of an AUTO unit
     eg_runner_s* active_owner = nullptr;      ///< the runner whose active set the plan reads
@@ -284,6 +305,7 @@ void unit_load(eg_ctx& ctx, const eg_unit_load_desc* desc, eg_unit** out);
 void unit_release(eg_ctx& ctx, eg_unit_s* unit);
 void plane_wrap(eg_ctx& ctx, DLManagedTensorVersioned* tensor, eg_plane** out);
 void plane_release(eg_ctx& ctx, eg_plane_s* plane);
+eg_plane_s* make_plane(eg_ctx& ctx, const DLDataType& dtype, std::vector<std::int64_t> shape);
 void plan_new(eg_ctx& ctx, const eg_plan_desc* desc, eg_plan** out);
 void plan_free(eg_ctx& ctx, eg_plan_s* plan);
 void plan_release(eg_ctx& ctx, eg_plan_s* plan);

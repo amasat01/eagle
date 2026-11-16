@@ -7,6 +7,7 @@
 // shape and dtype.
 #include "eagle/door/host/Ops.h"
 
+#include "eagle/exec/HostTeam.h"
 #include "eagle/reduce/canonical.h"
 
 #include <omp.h>
@@ -174,6 +175,24 @@ void reduce_exec(const ReduceOp& r, int threads) {
         default: columns<std::uint8_t, aether::LogicalAndOp>(r);
     }
     omp_set_num_threads(previous);
+}
+
+/** @brief After one launch of @p plan: companions folded into their targets, then cell rows into cells. */
+void fold_plan(const eg_plan_s& plan, int threads) {
+    for (const CompanionFacts& c : plan.unit->companions) {
+        const std::int64_t size = elements(plan.bindings[c.target].plane->tensor->dl_tensor);
+        exec::HostTeam::run_serial(c.fold, plan.params.data(), exec::Partition{ 0, size, size });
+    }
+    if (plan.n_samples == 0) return;
+    for (std::size_t i = 0; i < plan.unit->cells.size(); ++i) {
+        const CellFacts& c = plan.unit->cells[i];
+        eg_reduce_desc d{};
+        d.struct_size = sizeof(d);
+        d.in = plan.rows[i];
+        d.out = plan.bindings[c.slot].plane;
+        d.op = c.op;
+        reduce_exec(reduce_check(*plan.ctx, d), threads);
+    }
 }
 
 /** @brief Check a copy request; refuses as eg_copy states. */

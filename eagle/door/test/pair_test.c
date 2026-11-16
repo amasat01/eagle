@@ -18,6 +18,9 @@
  *   rotate     y = A @ x with a SHARED parameter plane A (a LOOKUP slot, one 2 x 2 matrix for every lane).
  *   mv         out = sum(M @ v) with M a GATHER matrix compact over the lane axes a and c of Grid[a, b:4, c:6]
  *              (the unit's meta carries the gather pattern by hand).
+ *   ksum_c     out[key] = a compensated sum of x over 8192 samples: a keyed accumulate; eagle makes the companion
+ *              (slot 1, zeroed) and folds it into out after the launch.
+ *   fixed_count acc[a] += th[b] over Grid[a:4, b:8]: the same companion over a static plane axis, th a LOOKUP table.
  *
  * Usage: pair_test <unit library> <oracle dir> <unit name> <digest hex>
  *   <oracle dir> holds the files named in the unit's row (float64 and int32 raw arrays).
@@ -32,7 +35,7 @@
 #include <string.h>
 
 #define MAXP 4
-#define MAXV 2048 /* elements per plane buffer */
+#define MAXV 16384 /* elements per plane buffer */
 
 static int failures = 0;
 
@@ -121,7 +124,8 @@ struct data {
 struct unit_spec {
     const char* name;
     int64_t n;                  /* samples */
-    int nplanes;                /* planes bound at slots 0 .. nplanes-1; plane 0 is y (float64, yinit) */
+    int nplanes;                /* planes the caller binds, in slot order, skipping the slots of ``made``; plane 0 is y (float64, yinit) */
+    unsigned made;              /* bit s set: slot s is eagle's own (a companion, compensation rows) and is never bound */
     struct plane_spec planes[MAXP];
     double yinit;
     int has_uniform;            /* one float64 UNIFORM at slot nplanes, value 1.0 */
@@ -202,6 +206,26 @@ static int sanity_flat(const struct data* d, const char** msg) {
 #define F64 kDLFloat, 64
 #define I32 kDLInt, 32
 
+static int sanity_ksum(const struct data* d, const char** msg) {
+    int ok = 1;
+    for (int k = 0; k < 2; ++k) {
+        double e = 0.0;
+        for (int i = 0; i < 8192; ++i) e += d->in[1][k * 8192 + i];
+        ok &= d->want[0][k] - e <= 1e-9 && e - d->want[0][k] <= 1e-9;
+    }
+    *msg = "old path out[key] == the sum of x over the key's 8192 samples (plain loop, to 1e-9)";
+    return ok;
+}
+
+static int sanity_fixed_count(const struct data* d, const char** msg) {
+    double e = 0.0;
+    for (int i = 0; i < 8; ++i) e += d->in[1][i];
+    int ok = 1;
+    for (int a = 0; a < 4; ++a) ok &= d->want[0][a] - e <= 1e-12 && e - d->want[0][a] <= 1e-12;
+    *msg = "old path acc[a] == the sum of th for each of the 4 values of a (plain loop, to 1e-12)";
+    return ok;
+}
+
 static const struct unit_spec units[] = {
     { .name = "ss_bcast", .n = 64, .nplanes = 3,
       .planes = { { F64, 1, { 64 }, NULL, NULL },
@@ -252,6 +276,18 @@ static const struct unit_spec units[] = {
       .yinit = -1.0, .threads = 3,
       .want_file = { "y_out.f64" }, .nwant = 1, .read_msg = "old path inputs and output read",
       .nshapes = 2, .shapes = two_shapes, .ncases = 1, .cases = { { "mv with a gathered M", 0 } } },
+    { .name = "ksum_c", .n = 16384, .nplanes = 2, .made = 1u << 1,
+      .planes = { { F64, 1, { 2 }, NULL, NULL }, { F64, 1, { 16384 }, "x_in.f64", NULL } },
+      .yinit = 0.0, .threads = 3,
+      .want_file = { "y_out.f64" }, .nwant = 1, .read_msg = "old path input and output read (x 2 x 8192, out 2 float64)",
+      .sanity = sanity_ksum,
+      .nshapes = 2, .shapes = two_shapes, .ncases = 1, .cases = { { "ksum_c: a compensated keyed sum", 0 } } },
+    { .name = "fixed_count", .n = 32, .nplanes = 2, .made = 1u << 1,
+      .planes = { { F64, 1, { 4 }, NULL, NULL }, { F64, 1, { 8 }, "th_in.f64", NULL } },
+      .yinit = 0.0, .threads = 3,
+      .want_file = { "y_out.f64" }, .nwant = 1, .read_msg = "old path input and output read (th 8, acc 4 float64)",
+      .sanity = sanity_fixed_count,
+      .nshapes = 2, .shapes = two_shapes, .ncases = 1, .cases = { { "fixed_count: a companion over a static axis", 0 } } },
 };
 
 static int64_t elems(const struct plane_spec* p) {
@@ -269,6 +305,7 @@ static void run_case(eg_ctx* ctx, eg_unit* unit, const struct unit_spec* u, cons
     eg_plane* planes[MAXP] = { NULL };
     int32_t slots[MAXP];
     eg_status s = EG_OK;
+    int next = 0;
     for (int i = 0; i < u->nplanes; ++i) {
         const struct plane_spec* p = &u->planes[i];
         if (i == 0)
@@ -276,7 +313,8 @@ static void run_case(eg_ctx* ctx, eg_unit* unit, const struct unit_spec* u, cons
         else
             memcpy(buf[i], data->in[i], (size_t)elems(p) * p->bits / 8);
         tensor_init(&t[i], buf[i], p->ndim, p->dims, p->code, p->bits, u->unit_stride);
-        slots[i] = i;
+        while ((u->made >> next) & 1u) ++next;
+        slots[i] = next++;
         if (s == EG_OK) s = eg_plane_wrap(ctx, &t[i].managed, &planes[i]);
     }
     const int64_t base[2] = { 0, u->n / 2 }, count[2] = { u->n / 2, u->n / 2 };
@@ -291,7 +329,7 @@ static void run_case(eg_ctx* ctx, eg_unit* unit, const struct unit_spec* u, cons
     d.part_base = sh->parts ? base : NULL;
     d.part_count = sh->parts ? count : NULL;
     if (s == EG_OK) s = eg_plan_new(ctx, &d, &plan);
-    const int32_t uniform_slots[1] = { u->nplanes };
+    const int32_t uniform_slots[1] = { u->nplanes + __builtin_popcount(u->made) };
     const double p = 1.0;
     const void* const values[1] = { &p };
     struct eg_bind_desc b;

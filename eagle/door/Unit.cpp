@@ -61,9 +61,9 @@ SlotFacts read_slot(const eg_unit_slot* in, const std::string& unit, int index) 
     const bool plane = s.role == EG_ROLE_MUTABLE || s.role == EG_ROLE_PER_SAMPLE || s.role == EG_ROLE_OUT ||
                        s.role == EG_ROLE_VEC_IN || s.role == EG_ROLE_MAT_IN;
     if (!plane && s.role != EG_ROLE_UNIFORM && s.role != EG_ROLE_TERMINATED && s.role != EG_ROLE_LOOKUP &&
-        s.role != EG_ROLE_NSAMPLES && s.role != EG_ROLE_WIDE_IN && s.role != EG_ROLE_WIDE_OUT)
+        s.role != EG_ROLE_ACCUM_OUT && s.role != EG_ROLE_NSAMPLES && s.role != EG_ROLE_WIDE_IN && s.role != EG_ROLE_WIDE_OUT)
         refuse(EG_NOT_WRITTEN, named + ": role " + std::to_string(s.role) + " is not written yet (this build binds "
-               "MUTABLE, PER_SAMPLE, VEC_IN, MAT_IN, OUT, WIDE_IN, WIDE_OUT, LOOKUP, UNIFORM, NSAMPLES and TERMINATED)");
+               "MUTABLE, PER_SAMPLE, VEC_IN, MAT_IN, OUT, WIDE_IN, WIDE_OUT, ACCUM_OUT, LOOKUP, UNIFORM, NSAMPLES and TERMINATED)");
     if (s.rank != 0 && !plane && !(s.flags & EG_SLOT_SHARED))
         refuse(EG_NOT_WRITTEN, named + ": a slot of rank > 0 outside the plane roles is not written yet");
     if (s.rank != 0 && s.role == EG_ROLE_PER_SAMPLE)
@@ -125,14 +125,62 @@ void read_finish(const eg_unit_meta& m, eg_unit_s& unit) {
     }
 }
 
+/** @brief Read the companions and cells of @p body: the slots eagle makes, the fold entries and the rows' fold. */
+void read_made(const eg_unit_body& body, void* library, eg_unit_s& unit) {
+    const std::string who = "meta that contradicts itself: unit '" + unit.name + "' ";
+    const std::int32_t n = static_cast<std::int32_t>(unit.slots.size());
+    const auto accum = [&](std::int32_t slot, const char* what) -> SlotFacts& {
+        if (slot < 0 || slot >= n || unit.slots[slot].role != EG_ROLE_ACCUM_OUT || unit.slots[slot].dtype != EG_DTYPE_REAL)
+            refuse(EG_BAD_REQUEST, who + what + " slot " + std::to_string(slot) + " is not a float ACCUM_OUT slot");
+        return unit.slots[slot];
+    };
+    if (body.n_companions < 0 || (body.n_companions > 0 && body.companions == nullptr) || body.n_cells < 0 ||
+        (body.n_cells > 0 && body.cells == nullptr))
+        refuse(EG_BAD_REQUEST, who + "counts a companion or cell list it does not carry");
+    for (int i = 0; i < body.n_companions; ++i) {
+        const eg_unit_companion c = read_record(body.companions[i], eg_unit_companion{}, "unit '" + unit.name + "' companion");
+        SlotFacts& comp = accum(c.slot, "companion");
+        accum(c.target_slot, "companion target");
+        if (c.slot == c.target_slot || comp.made)
+            refuse(EG_BAD_REQUEST, who + "companion slot " + std::to_string(c.slot) + " is its own target or listed twice");
+        if (c.host_fold_entry == nullptr)
+            refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': the companion '" + comp.name + "' has no host fold entry");
+        void* sym = ::dlsym(library, c.host_fold_entry);
+        if (sym == nullptr)
+            refuse(EG_FAULT, "unit '" + unit.name + "': the library lacks the fold entry '" + c.host_fold_entry + "'");
+        comp.made = true;
+        unit.companions.push_back({ c.slot, c.target_slot, reinterpret_cast<exec::HostEntryV2>(sym) });
+    }
+    if (body.n_cells > 0) {
+        if (body.cell_row < 1) refuse(EG_BAD_REQUEST, who + "cell_row " + std::to_string(body.cell_row) + " with cells");
+        unit.cell_row = body.cell_row;
+    }
+    for (int i = 0; i < body.n_cells; ++i) {
+        const eg_unit_cell cell = read_record(body.cells[i], eg_unit_cell{}, "unit '" + unit.name + "' cell");
+        const std::string name = cell.name ? cell.name : "?";
+        if (cell.op != EG_REDUCE_SUM && cell.op != EG_REDUCE_MAX && cell.op != EG_REDUCE_MIN)
+            refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': cell '" + name + "' folds with op " + std::to_string(cell.op) +
+                   ", which is not written (SUM, MAX and MIN are)");
+        if (cell.columns < 1 || cell.slots == nullptr)
+            refuse(EG_BAD_REQUEST, who + "cell '" + name + "' has " + std::to_string(cell.columns) + " columns and no row slots");
+        for (int c = 0; c < cell.columns; ++c) {
+            SlotFacts& row = accum(cell.slots[c], "cell");
+            if (row.made || row.cell) refuse(EG_BAD_REQUEST, who + "cell slot " + std::to_string(cell.slots[c]) + " is listed twice");
+            if (cell.op == EG_REDUCE_SUM)
+                refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': the cell '" + name + "' sums, and the cell's compensation slot is not "
+                       "stated in the unit meta (eg_unit_cell has no member for it)");
+            row.cell = true;
+            unit.cells.push_back({ cell.slots[c], cell.op });
+        }
+    }
+}
+
 /** @brief Check the body and launch records and copy the slot facts into @p unit. */
-void read_body(const eg_unit_meta& m, eg_unit_s& unit) {
+void read_body(const eg_unit_meta& m, void* library, eg_unit_s& unit) {
     const eg_unit_body body = read_record(m.body, eg_unit_body{}, "unit '" + unit.name + "' body");
     if (body.access < EG_ACCESS_SAMPLE_LOCAL || body.access > EG_ACCESS_CROSS_SAMPLE_WRITE)
         refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': unknown access " + std::to_string(body.access));
     unit.access = body.access;
-    refuse_count(body.n_companions, unit.name, "n_companions");
-    refuse_count(body.n_cells, unit.name, "n_cells");
     refuse_count(body.n_keyed, unit.name, "n_keyed");
     refuse_count(body.n_team_planes, unit.name, "n_team_planes");
     refuse_count(body.n_dispatches, unit.name, "n_dispatches");
@@ -140,6 +188,7 @@ void read_body(const eg_unit_meta& m, eg_unit_s& unit) {
         refuse(EG_BAD_REQUEST, "meta that contradicts itself: unit '" + unit.name + "' n_slots " +
                std::to_string(body.n_slots));
     for (int i = 0; i < body.n_slots; ++i) unit.slots.push_back(read_slot(body.slots[i], unit.name, i));
+    read_made(body, library, unit);
     read_finish(m, unit);
     if (m.launch == nullptr) return;
     eg_unit_launch absent{};
@@ -197,7 +246,26 @@ void read_body(const eg_unit_meta& m, eg_unit_s& unit) {
             refuse(EG_BAD_REQUEST, "meta that contradicts itself: unit '" + unit.name + "' slot '" + f.name +
                    "' has a gather pattern of " + std::to_string(f.keep.size()) + " axes, the launch has " +
                    std::to_string(launch.n_lane_axes));
-    refuse_count(launch.n_plane_axes, unit.name, "n_plane_axes");
+    if (launch.n_plane_axes < 0 || (launch.n_plane_axes > 0 && launch.plane_axes == nullptr))
+        refuse(EG_BAD_REQUEST, "meta that contradicts itself: unit '" + unit.name + "' n_plane_axes " +
+               std::to_string(launch.n_plane_axes) + " without plane_axes");
+    for (int i = 0; i < launch.n_plane_axes; ++i) {
+        const eg_unit_plane_axes pa = read_record(launch.plane_axes[i], eg_unit_plane_axes{}, "unit '" + unit.name + "' plane axes");
+        if (pa.slot < 0 || pa.slot >= static_cast<std::int32_t>(unit.slots.size()) || pa.n_axes < 1 || pa.labels == nullptr ||
+            pa.extents == nullptr)
+            refuse(EG_BAD_REQUEST, "meta that contradicts itself: unit '" + unit.name + "' plane axes of slot " + std::to_string(pa.slot) +
+                   " (a slot of the unit, one axis or more, with labels and extents)");
+        SlotFacts& f = unit.slots[pa.slot];
+        if (f.role != EG_ROLE_ACCUM_OUT)
+            refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': named plane axes on slot '" + f.name + "' (not an ACCUM_OUT slot) are not written");
+        for (int a = 0; a < pa.n_axes; ++a) {
+            SlotFacts::Axis axis;
+            axis.extent = pa.extents[a];
+            for (int l = 0; pa.labels[a] != nullptr && launch.lane_labels != nullptr && l < launch.n_lane_axes; ++l)
+                if (launch.lane_labels[l] != nullptr && std::strcmp(launch.lane_labels[l], pa.labels[a]) == 0) axis.lane = l;
+            f.axes.push_back(axis);
+        }
+    }
     if (launch.host_box != nullptr) {
         const eg_unit_box box = read_record(launch.host_box, eg_unit_box{}, "unit '" + unit.name + "' host_box");
         if (box.axis < 0 || box.t < 2 || box.stride < 1)
@@ -285,7 +353,7 @@ void read_unit(const eg_unit_meta& m, void* library, eg_unit_s& unit) {
         unit.host_entry = reinterpret_cast<exec::HostEntryV2>(sym);
         check_size_block(library, unit.name);
     }
-    read_body(m, unit);
+    read_body(m, library, unit);
 }
 
 /** @brief Check the load description (flags, path, unit reference, deps). */

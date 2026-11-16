@@ -6,6 +6,7 @@
 #pragma once
 
 #include "eagle/door/Context.h"
+#include "eagle/door/host/Ops.h"
 #include "eagle/exec/HostTeam.h"
 
 namespace eagle {
@@ -27,6 +28,7 @@ inline void run_prefix(const eg_plan_s& plan, int threads, std::int64_t live) {
         exec::HostTeam::run_serial(plan.unit->host_entry, plan.params.data(), part);
     else
         exec::HostTeam::run_team(plan.unit->host_entry, plan.params.data(), part, threads);
+    fold_plan(plan, threads);
 }
 
 /** @brief Run @p plan once over each of its partitions on at most @p threads threads
@@ -56,6 +58,7 @@ inline std::uint64_t run_plan(const eg_plan_s& plan, int threads) {
             tiles += exec::HostTeam::run_team(plan.unit->host_entry, plan.params.data(), part, threads);
         }
     }
+    fold_plan(plan, threads);
     return tiles;
 }
 

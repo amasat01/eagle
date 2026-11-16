@@ -4,6 +4,8 @@
 // deleter runs exactly once, when the last reference drops.
 #include "eagle/door/Context.h"
 
+#include <memory>
+
 namespace eagle {
 namespace door {
 
@@ -59,6 +61,38 @@ void plane_wrap(eg_ctx& ctx, DLManagedTensorVersioned* tensor, eg_plane** out) {
         throw;
     }
     *out = plane;
+}
+
+namespace {
+/** @brief The memory of a plane eagle made: the tensor, its shape and its zeroed bytes. */
+struct Made {
+    DLManagedTensorVersioned managed{};
+    std::vector<std::int64_t> shape;
+    std::vector<unsigned char> bytes;
+};
+}  // namespace
+
+/** @brief A zeroed host plane of @p shape that eagle owns (one reference, the caller's to release). */
+eg_plane_s* make_plane(eg_ctx& ctx, const DLDataType& dtype, std::vector<std::int64_t> shape) {
+    auto made = std::make_unique<Made>();
+    std::int64_t n = 1;
+    for (std::int64_t e : shape) n *= e;
+    made->shape = std::move(shape);
+    made->bytes.assign(static_cast<std::size_t>(n) * (dtype.bits / 8), 0);
+    DLManagedTensorVersioned& m = made->managed;
+    m.version.major = DLPACK_MAJOR_VERSION;
+    m.version.minor = DLPACK_MINOR_VERSION;
+    m.manager_ctx = made.get();
+    m.deleter = [](DLManagedTensorVersioned* t) { delete static_cast<Made*>(t->manager_ctx); };
+    m.dl_tensor.data = made->bytes.data();
+    m.dl_tensor.device.device_type = kDLCPU;
+    m.dl_tensor.ndim = static_cast<int>(made->shape.size());
+    m.dl_tensor.dtype = dtype;
+    m.dl_tensor.shape = made->shape.data();
+    eg_plane* plane = nullptr;
+    plane_wrap(ctx, &m, &plane);
+    made.release();
+    return plane;
 }
 
 /** @brief Drop one reference to @p plane; the last one runs the tensor's deleter. */

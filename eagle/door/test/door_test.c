@@ -2127,6 +2127,125 @@ static void check_box(eg_ctx* ctx) {
     eg_unit_free(ctx, unit);
 }
 
+/* cell rows of 4 samples folded by their op, and a keyed accumulate with an eagle-made companion folded after each launch */
+static void check_made(eg_ctx* ctx) {
+    static double x[10], tot[1], mx[1], acc[4], xk[12];
+    eg_unit* cellsum = NULL;
+    struct tensor tx, tt, tm, ta, tk;
+    eg_unit *cells = NULL, *keyed = NULL, *bad = NULL;
+    check(load(ctx, "cells", 0x67, &cells) == EG_OK && load(ctx, "keyed", 0x68, &keyed) == EG_OK, "eg_unit_load cells and keyed");
+    check(load(ctx, "keyedbad", 0x69, &bad) == EG_NOT_WRITTEN && reason_has(ctx, "no host fold entry"),
+          "companion: a unit whose companion has no host fold entry refused NOT_WRITTEN by name");
+    check(load(ctx, "cellsum", 0x6a, &cellsum) == EG_NOT_WRITTEN && reason_has(ctx, "compensation slot is not stated"),
+          "cells: a SUM cell, whose compensation slot the meta does not state, refused NOT_WRITTEN by name");
+    if (cells == NULL || keyed == NULL) return;
+    const eg_structure structures[2] = { EG_STRUCTURE_HOST_TEAM, EG_STRUCTURE_HOST_SERIAL };
+    int all = 1;
+    for (int si = 0; si < 2; ++si) {
+        eg_plane *px = wrap_1d(ctx, &tx, x, 10, kDLFloat, 64), *pt = wrap_1d(ctx, &tt, tot, 1, kDLFloat, 64),
+                 *pm = wrap_1d(ctx, &tm, mx, 1, kDLFloat, 64);
+        const int32_t slots[3] = { 2, 0, 1 };
+        eg_plane* planes[3] = { px, pt, pm };
+        struct eg_bind_desc bd;
+        memset(&bd, 0, sizeof(bd));
+        bd.struct_size = sizeof(bd);
+        bd.n_planes = 3;
+        bd.plane_slots = slots;
+        bd.planes = planes;
+        eg_plan* p = NULL;
+        tot[0] = mx[0] = -1.0;
+        for (int i = 0; i < 10; ++i) x[i] = (double)(i + 1);
+        all &= px && pt && pm && plan(ctx, cells, structures[si], 10, 0, NULL, NULL, &p) == EG_OK && eg_bind(ctx, p, &bd) == EG_OK &&
+               eg_launch(ctx, p, NULL) == EG_OK;
+        all &= tot[0] == 1.0 && mx[0] == 10.0;          /* the min of the row minima 1, 5, 9; the max of the row maxima 4, 8, 10 */
+        for (int i = 0; i < 10; ++i) x[i] = (double)(2 * i + 2);
+        all &= eg_launch(ctx, p, NULL) == EG_OK && tot[0] == 2.0 && mx[0] == 20.0;    /* a second launch refolds the rows */
+        eg_plan_free(ctx, p);
+        eg_plane_free(ctx, px);
+        eg_plane_free(ctx, pt);
+        eg_plane_free(ctx, pm);
+    }
+    check(all, "cells: rows of 4 samples folded into the cells by their op after each launch (MIN 1, MAX 10; "
+               "again 2 and 20; SERIAL and TEAM)");
+    {
+        double two[2] = { 0.0, 0.0 };
+        eg_plane *px = wrap_1d(ctx, &tx, x, 10, kDLFloat, 64), *pt = wrap_1d(ctx, &tt, tot, 1, kDLFloat, 64),
+                 *p2 = wrap_1d(ctx, &tm, two, 2, kDLFloat, 64);
+        eg_plan* p = NULL;
+        const int64_t base[1] = { 2 }, count[1] = { 4 };
+        const int32_t s1[2] = { 2, 0 }, s_two[1] = { 0 };
+        eg_plane* both[2] = { px, pt };
+        eg_plane* one_two[1] = { p2 };
+        struct eg_bind_desc bd;
+        memset(&bd, 0, sizeof(bd));
+        bd.struct_size = sizeof(bd);
+        bd.n_planes = 2;
+        bd.plane_slots = s1;
+        bd.planes = both;
+        int ok = px && pt && p2 && plan(ctx, cells, EG_STRUCTURE_HOST_TEAM, 10, 0, NULL, NULL, &p) == EG_OK && eg_bind(ctx, p, &bd) == EG_OK;
+        ok = ok && eg_launch(ctx, p, NULL) == EG_BAD_REQUEST && reason_has(ctx, "'mx') is unbound");
+        check(ok, "cells: a cell the caller left unbound refused BAD_REQUEST by name at the launch");
+        bd.n_planes = 1;
+        bd.plane_slots = s_two;
+        bd.planes = one_two;
+        ok = eg_bind(ctx, p, &bd) == EG_BAD_REQUEST && reason_has(ctx, "shape (1,)");
+        check(ok, "cells: a cell of another shape than (1,) refused BAD_REQUEST by name");
+        eg_plan* q = NULL;
+        check(plan(ctx, cells, EG_STRUCTURE_HOST_TEAM, 10, 1, base, count, &q) == EG_BAD_REQUEST && reason_has(ctx, "rows of 4"),
+              "cells: a partition that starts inside a row refused BAD_REQUEST by name");
+        eg_plan_free(ctx, p);
+        eg_plane_free(ctx, px);
+        eg_plane_free(ctx, pt);
+        eg_plane_free(ctx, p2);
+    }
+    all = 1;
+    for (int si = 0; si < 2; ++si) {
+        eg_plane *px = wrap_1d(ctx, &tk, xk, 12, kDLFloat, 64), *pa = wrap_nd(ctx, &ta, acc, kDLFloat, 64, 1, 3, 0, 0);
+        const int32_t slots[2] = { 2, 0 };
+        eg_plane* planes[2] = { px, pa };
+        struct eg_bind_desc bd;
+        memset(&bd, 0, sizeof(bd));
+        bd.struct_size = sizeof(bd);
+        bd.n_planes = 2;
+        bd.plane_slots = slots;
+        bd.planes = planes;
+        eg_plan* p = NULL;
+        for (int i = 0; i < 12; ++i) xk[i] = (double)(i + 1);
+        acc[0] = acc[1] = acc[2] = 0.0, acc[3] = 99.0;
+        all &= px && pa && plan(ctx, keyed, structures[si], 12, 0, NULL, NULL, &p) == EG_OK && eg_bind(ctx, p, &bd) == EG_OK &&
+               eg_launch(ctx, p, NULL) == EG_OK;
+        for (int k = 0; k < 3; ++k) all &= acc[k] == (double)(16 * k + 10) + 2.0;    /* the fold added the companion's 4 x 0.5 */
+        all &= eg_launch(ctx, p, NULL) == EG_OK;
+        for (int k = 0; k < 3; ++k) all &= acc[k] == 2.0 * (double)(16 * k + 10) + 4.125;   /* + 4 x 0.5 on the residual 0.125 the fold left */
+        all &= acc[3] == 99.0;                                                          /* the fold stays inside the target */
+        eg_plan_free(ctx, p);
+        eg_plane_free(ctx, px);
+        eg_plane_free(ctx, pa);
+    }
+    check(all, "companion: eagle makes the zeroed companion with the target, runs the unit's fold entry over the target's 3 slots after each "
+               "launch (SERIAL and TEAM, two launches, the 4th element untouched)");
+    {
+        eg_plane *px = wrap_1d(ctx, &tk, xk, 12, kDLFloat, 64), *pa = wrap_1d(ctx, &ta, acc, 4, kDLFloat, 64);
+        const int32_t slots[2] = { 2, 0 };
+        eg_plane* planes[2] = { px, pa };
+        struct eg_bind_desc bd;
+        memset(&bd, 0, sizeof(bd));
+        bd.struct_size = sizeof(bd);
+        bd.n_planes = 2;
+        bd.plane_slots = slots;
+        bd.planes = planes;
+        eg_plan* p = NULL;
+        check(px && pa && plan(ctx, keyed, EG_STRUCTURE_HOST_TEAM, 12, 0, NULL, NULL, &p) == EG_OK && eg_bind(ctx, p, &bd) == EG_BAD_REQUEST &&
+                  reason_has(ctx, "the unit's named axis has 3"),
+              "companion: a plane whose key axis is not the lane axis's extent (4, not 12 / 4) refused BAD_REQUEST by name");
+        eg_plan_free(ctx, p);
+        eg_plane_free(ctx, px);
+        eg_plane_free(ctx, pa);
+    }
+    eg_unit_free(ctx, cells);
+    eg_unit_free(ctx, keyed);
+}
+
 int main(int argc, char** argv) {
     if (argc != 5) {
         fprintf(stderr, "usage: %s <fixture> <wrong size> <no size block> <v1 tag>\n", argv[0]);
@@ -2164,6 +2283,7 @@ int main(int argc, char** argv) {
     check_gather(ctx);
     check_shared(ctx);
     check_box(ctx);
+    check_made(ctx);
 
     check_reduce(ctx);
     check_conditionals(ctx);

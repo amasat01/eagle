@@ -25,6 +25,10 @@ struct ReduceOp {
 ReduceOp reduce_check(const eg_ctx& ctx, const eg_reduce_desc& desc);
 void reduce_exec(const ReduceOp& r, int threads);
 
+/** @brief After one launch of @p plan: run each companion's fold entry over its target, then fold each
+ *  cell's rows into the cell the caller bound (the cell's op). */
+void fold_plan(const eg_plan_s& plan, int threads);
+
 void copy_check(const eg_ctx& ctx, eg_plane_s* src, eg_plane_s* dst);
 void copy_exec(const eg_plane_s& src, const eg_plane_s& dst);
 

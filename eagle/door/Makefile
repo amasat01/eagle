@@ -13,7 +13,7 @@
 #
 # pair-<unit>: one generated unit (its kernel text and its generated meta source) built into one unit library and
 # run through the door (test/pair_test.c, one row per unit) against the outputs the old path wrote for the same
-# case. The units: ss_bcast mat_apply _wide_math _flat rotate mv. Per unit give
+# case. The units: ss_bcast mat_apply _wide_math _flat rotate mv ksum_c fixed_count. Per unit give
 #
 #   KERNEL_<unit>=<kernel .cpp>  META_<unit>=<meta .c>  ORACLE_<unit>=<dir with the old path's inputs and outputs>
 #
@@ -30,13 +30,15 @@ AETHER_INCLUDE ?=
 WING_FACTS ?=
 
 PAIR_WING_DIR ?=
-PAIR_UNITS := ss_bcast mat_apply _wide_math _flat rotate mv
+PAIR_UNITS := ss_bcast mat_apply _wide_math _flat rotate mv ksum_c fixed_count
 DIGEST_ss_bcast ?= 49a12f72dfd7520aa76ed07e9c4765ed5f4c5a6d4d2b29b5ad19eb91767befec
 DIGEST_mat_apply ?= ef89b7e1ef6118d2fe685199b8ae1a656b6aa98dd27b059dec549aea7feea46e
 DIGEST__wide_math ?= 5f25d984f02b738ba5b93ec9827d9996f7c6680101014b0db766c4dc9a1d6f09
 DIGEST__flat ?= 550e1eff1a17398db9bb909191c0824ef73b562e7d0e28ff773b380765ceb836
 DIGEST_rotate ?= be784a85b4cc7f27ccba6cb81a074fb0c7f97779afd26b4798ac71ff8a4ba1d1
 DIGEST_mv ?= 834d4da09683429d73c4bb5c92432945c892a1e7c3cd9dbe268d06acb5970cf5
+DIGEST_ksum_c ?= 710ca64f2483b5cc197150874c03265a8c10a06011b1b22028cb3e10035db33c
+DIGEST_fixed_count ?= 05d3a0e97314e339dbfd5954d37989dbae00c41573028aa809901dc65b49c686
 # The installed host unit recipe (the host compiler flags the old path builds a unit with).
 PAIR_HOST_FLAGS ?= -O3 -ffp-contract=fast -fno-math-errno -march=native -mprefer-vector-width=512 \
   -fno-trapping-math -DAETHER_HOST_VECTOR_MATH -DAETHER_HVM_MASKED=1 -std=c++23 -fPIC -DAETHER_CPP_MODE
