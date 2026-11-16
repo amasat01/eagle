@@ -115,6 +115,17 @@ typedef int32_t eg_events;
 #define EG_EVENTS_REFINE 1 /**< locate each stop inside its stop step; a plain run takes exactly the derived units
                               TAPE (window 1), REFINE_NEWTON and STATE_GUARD_VJP; a recorded run adds the reverse ones */
 
+/** Per-sample event status of a refine run (``eg_run_events``, int8). After an
+ *  eg_run that returned OK a caller sees only 1 and 2, and 3 with
+ *  EG_NO_EVENT_ZERO: a run where any sample has 4 or 5, or 3 under
+ *  EG_NO_EVENT_REFUSE, returns BAD_REQUEST naming the first such sample. */
+#define EG_EVENT_PENDING 0  /**< not evaluated */
+#define EG_EVENT_REFINED 1  /**< found inside the stop step */
+#define EG_EVENT_AT_STEP 2  /**< found at the step's end, within tolerance */
+#define EG_EVENT_NONE 3     /**< never stopped, stopped before any step, or no guard crossed */
+#define EG_EVENT_GRAZE 4    /**< a tangent crossing: the event time is not differentiable */
+#define EG_EVENT_TWO 5      /**< two guards cross inside the tolerance in one step */
+
 typedef int32_t eg_no_event;
 #define EG_NO_EVENT_REFUSE 0 /**< a sample with no crossing in its stop step is refused */
 #define EG_NO_EVENT_ZERO 1   /**< its stop stays the stepped one */
@@ -564,11 +575,14 @@ eg_status eg_runner_free(eg_ctx* ctx, eg_runner* runner);
 eg_status eg_run(eg_ctx* ctx, eg_runner* runner, struct eg_run_report* report);
 
 /**
- * Write each sample's event time of the last EG_EVENTS_REFINE run into
- * ``out`` (float, n samples). Replaces: ``Runner`` event-time read.
- * Status: OK; BAD_REQUEST (no refine run yet, wrong shape).
+ * Write the last EG_EVENTS_REFINE run's per-sample results, both from that
+ * same run: ``t_stop`` (n samples, the element type of the primal's time
+ * plane) and ``status`` (n samples, int8, EG_EVENT_*). Either may be NULL.
+ * Replaces: ``Runner.event_status`` and the event-time read.
+ * Status: OK; BAD_REQUEST with the reason "no refine run" (the runner has
+ * not run with EG_EVENTS_REFINE) or "plane shape or dtype" (a wrong plane).
  */
-eg_status eg_run_event_times(eg_ctx* ctx, eg_runner* runner, eg_plane* out);
+eg_status eg_run_events(eg_ctx* ctx, eg_runner* runner, eg_plane* t_stop, eg_plane* status);
 
 /**
  * Reverse the last recorded run: ``seeds`` binds cotangents by slot,

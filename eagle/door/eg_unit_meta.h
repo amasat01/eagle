@@ -374,6 +374,10 @@ typedef int32_t eg_derived_source;
 #define EG_SRC_REFINED_DOT 11      /**< that state's derivative in the candidate time (REFINE_NEWTON) */
 #define EG_SRC_TAU_SEED 12         /**< a plane eagle fills with ones: the seed of the candidate-time derivative; ``of_slot`` -1 */
 #define EG_SRC_STATE_GRAD 13       /**< STATE_GUARD_VJP: the guard's gradient in state ``of_slot`` */
+#define EG_SRC_TIME_STEP 14        /**< REFINE_NEWTON, exactly one: the length h of the ACCEPTED step (never a proposed next
+                                        step), from primal slot ``of_slot`` (a UNIFORM, which eagle fills into the plane, or a
+                                        PER_SAMPLE plane); the bound plane is always per sample. ``tau_slot`` is the located time
+                                        inside that step, in [0, h]. A refine kernel with no step slot is refused at build time */
 
 /** One taped plane: rows [row0, row0 + rows) of the tape hold primal slot ``slot``. */
 struct eg_unit_taped {
@@ -414,7 +418,7 @@ struct eg_unit_derived {
     int32_t steps_slot;       /**< applied steps, int64 per sample */
     int32_t tape_on_slot;
     int32_t time0_slot;       /**< the time plane's start copy */
-    int32_t tau_slot;         /**< events refine: the per-sample step */
+    int32_t tau_slot;         /**< events refine: the candidate time inside the stop step, in [0, h] (EG_SRC_TIME_STEP) */
     int32_t fused_steps_slot; /**< a fused unit: the int64 word of steps this launch fuses, set by the runner */
     int32_t n_links;
     int32_t n_refined;

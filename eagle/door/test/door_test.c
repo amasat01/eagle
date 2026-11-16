@@ -640,10 +640,10 @@ static void check_runner(eg_ctx* ctx, eg_unit* axpb) {
               reason_has(ctx, "DEVICE"),
           "a DEVICE plan of a finishing unit refused NOT_WRITTEN");
     d = runner_desc(plans, 1, 10);
-    check(eg_runner_new(ctx, &d, &r) == EG_OK && eg_run_event_times(ctx, r, NULL) == EG_NOT_WRITTEN &&
-              reason_has(ctx, "eg_run_event_times") && eg_reverse(ctx, r, NULL, NULL) == EG_BAD_REQUEST &&
+    check(eg_runner_new(ctx, &d, &r) == EG_OK && eg_run_events(ctx, r, NULL, NULL) == EG_NOT_WRITTEN &&
+              reason_has(ctx, "eg_run_events") && eg_reverse(ctx, r, NULL, NULL) == EG_BAD_REQUEST &&
               reason_has(ctx, "not recorded"),
-          "eg_run_event_times stays NOT_WRITTEN; eg_reverse of a runner without EG_RUN_RECORD is refused BAD_REQUEST");
+          "eg_run_events stays NOT_WRITTEN; eg_reverse of a runner without EG_RUN_RECORD is refused BAD_REQUEST");
     check(eg_runner_free(ctx, r) == EG_OK && eg_plan_free(ctx, plans[0]) == EG_OK &&
               eg_plan_free(ctx, plans[1]) == EG_OK && eg_plan_free(ctx, p3) == EG_OK &&
               eg_plane_free(ctx, px) == EG_OK && eg_plane_free(ctx, py) == EG_OK &&

@@ -209,8 +209,8 @@ EG_EXPORT eg_status eg_stream_use(eg_ctx* ctx, uint64_t stream) {
 
 // ---- not written in this build ---------------------------------------------
 
-EG_EXPORT eg_status eg_run_event_times(eg_ctx* ctx, eg_runner*, eg_plane*) {
-    return not_written(ctx, "eg_run_event_times");
+EG_EXPORT eg_status eg_run_events(eg_ctx* ctx, eg_runner*, eg_plane*, eg_plane*) {
+    return not_written(ctx, "eg_run_events");
 }
 EG_EXPORT eg_status eg_device_count(eg_ctx* ctx, int32_t*) { return not_written(ctx, "eg_device_count"); }
 EG_EXPORT eg_status eg_device_props(eg_ctx* ctx, int32_t, struct eg_device_props*) {
