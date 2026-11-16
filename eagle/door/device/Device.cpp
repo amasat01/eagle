@@ -670,25 +670,25 @@ void launch_segmented(const eg_plan_s& plan) {
             if (o.slot == slot) arg = plan.unit->slots[static_cast<std::size_t>(slot)].mirror ? static_cast<void*>(&o.bind.mirror) : static_cast<void*>(&o.bind.handle);
         args[j] = arg;
     };
-    const bool lent = !plan.unit->stages.empty();    // the branches are the planned unit's stages: they share its scratch planes
+    // A member that is one stage of itself runs that stage over its own slots (the member's argument list @p p) and its own scratch planes.
+    const auto stage_args = [&](const eg_unit_s& u, std::size_t mi, const std::vector<void*>& p, std::vector<plugin::ScalarHandle>& handles) {
+        const StageFacts& st = u.stages[0];
+        std::vector<void*> sp(u.slots.size());
+        handles.resize(u.slots.size());
+        for (std::size_t s = 0; s < u.slots.size(); ++s) {
+            if (st.source_of[s] >= 0) sp[s] = p[static_cast<std::size_t>(st.source_of[s])];
+            else if (st.plane_of[s] >= 0) plane_arg(-1, sp, s, plan.seg_team(u, mi)[static_cast<std::size_t>(st.plane_of[s])], u.slots[s].role, handles);
+            else sp[s] = &n32;
+        }
+        return sp;
+    };
     for (unsigned j = 0; j < K; ++j) {    // branch j over its run; the unit reads its own offset
         const std::int64_t run = static_cast<std::int64_t>(off[j + 1]) - static_cast<std::int64_t>(off[j]);
         if (run <= 0) continue;
         const eg_unit_s& u = *g.branches[j];
-        std::vector<void*> p;
+        std::vector<void*> p = seg::params_of(plan, j, u, owned, &n32);
         std::vector<plugin::ScalarHandle> handles;
-        if (lent) {
-            const StageFacts& st = plan.unit->stages[j];
-            p.resize(u.slots.size());
-            handles.resize(u.slots.size());
-            for (std::size_t s = 0; s < u.slots.size(); ++s) {
-                if (st.source_of[s] >= 0) plane_arg(st.source_of[s], p, s, nullptr, 0, handles);
-                else if (st.plane_of[s] >= 0) plane_arg(-1, p, s, plan.team[static_cast<std::size_t>(st.plane_of[s])], u.slots[s].role, handles);
-                else p[s] = &n32;
-            }
-        } else {
-            p = seg::params_of(plan, j, u, owned, &n32);
-        }
+        if (!u.stages.empty()) p = stage_args(u, j, p, handles);
         exec::DeviceKernel::run(reinterpret_cast<CUfunction>(u.function), p, exec::Partition{ 0, run, n }, cs, resolved_block(d, u, run));
     }
     if (g.dynamic && mask != nullptr)    // a stale sample that finished in this step is not swept: stale and live, as the old runner's
@@ -704,13 +704,8 @@ void launch_segmented(const eg_plan_s& plan) {
             std::vector<void*> p = seg::params_of(plan, K, u, owned, &n32);
             if (!u.stages.empty()) {    // a split sweep: its one stage over the stage's own slots (a team stage is a grid over the batch, the kernel reads the active count)
                 const StageFacts& st = u.stages[0];
-                std::vector<void*> sp(u.slots.size());
-                std::vector<plugin::ScalarHandle> handles(u.slots.size());
-                for (std::size_t s = 0; s < u.slots.size(); ++s) {
-                    if (st.source_of[s] >= 0) sp[s] = p[static_cast<std::size_t>(st.source_of[s])];
-                    else if (st.plane_of[s] >= 0) plane_arg(-1, sp, s, plan.segteam[K][static_cast<std::size_t>(st.plane_of[s])], u.slots[s].role, handles);
-                    else sp[s] = &n32;
-                }
+                std::vector<plugin::ScalarHandle> handles;
+                std::vector<void*> sp = stage_args(u, K, p, handles);
                 if (st.team) {
                     EG_DRIVER(cuLaunchKernel);
                     const std::int64_t per_block = static_cast<std::int64_t>(st.lanes) * st.warps;

@@ -343,10 +343,12 @@ struct eg_plan_s {
     std::vector<eg_plane_s*> outs;            ///< a split unit: the cell plane eagle makes for each internal cell column (nullptr: the caller's)
     std::vector<eg_plane_s*> team;            ///< one eagle-made scratch plane per team plane of a split unit, one reference each
     std::vector<eg_plane_s*> work;            ///< DEVICE: the two reduction work buffers of each cell component, one reference each
-    std::vector<std::vector<eg_plane_s*>> segteam;   ///< a SEGMENTED plan: the scratch planes of each member that is a split unit (by member index)
+    std::vector<std::vector<eg_plane_s*>> segteam;   ///< a SEGMENTED plan: the scratch planes of each member that is a split unit other than the planned unit (by member index)
     std::vector<eg_plane_s*> segdev;          ///< a DEVICE SEGMENTED plan: the offsets and class planes eagle makes in device memory
     std::vector<eg_plane_s*> mix;             ///< the eagle-made mix counters of each AUTO group (``unit->dispatches`` order), one reference each
     mutable eagle::door::SegState seg;        ///< a SEGMENTED plan: its planes and sort
+    /** @brief DEVICE: the scratch planes of SEGMENTED member @p mi, the unit @p m: the planned unit's are ``team``, another member's ``segteam``. */
+    const std::vector<eg_plane_s*>& seg_team(const eg_unit_s& m, std::size_t mi) const { return &m == unit ? team : segteam[mi]; }
     std::uint32_t finished = 0;               ///< the eagle-made finished counter of a finishing unit
     std::int64_t steps_word = 0;              ///< the eagle-made steps word of an AUTO unit
     std::uint64_t device_counter = 0;         ///< DEVICE with a finish: the device cell of the finished counter

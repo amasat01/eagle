@@ -340,8 +340,9 @@ void plan_new(eg_ctx& ctx, const eg_plan_desc* desc, eg_plan** out) {
                    "': load it with the group's units in deps to plan the group");
     if (d.unit->seg.present) {
         const SegFacts& g = d.unit->seg;
-        if (!device && !d.unit->stages.empty())
-            refuse(EG_NOT_WRITTEN, "unit '" + d.unit->name + "': a SEGMENTED dispatch group whose branches share the scratch planes of a split is not written on the host");
+        for (const eg_unit_s* m : g.branches)    // a branch's own scratch planes run on the device; the host runs the sweep's only
+            if (!device && !m->team_planes.empty())
+                refuse(EG_NOT_WRITTEN, "unit '" + d.unit->name + "': the branch '" + m->name + "' of dispatch group '" + g.name + "' has scratch planes: scratch planes of a segmented member on the host are not written");
         if (!device && g.sweep != nullptr && !g.sweep->stages.empty() && g.sweep->stages[0].team)
             refuse(EG_NOT_WRITTEN, "unit '" + d.unit->name + "': the sweep unit '" + g.sweep->name + "' of dispatch group '" + g.name + "' is a team stage, which is not written on the host");
         if (device && d.unit->dev_box_t > 0) refuse(EG_NOT_WRITTEN, "unit '" + d.unit->name + "': a SEGMENTED dispatch group over a device thread box is not written");

@@ -886,9 +886,10 @@ void resolve_segmented(eg_ctx& ctx, const eg_unit_load_desc& d, eg_unit_s& unit)
             if (!m->companions.empty() || !m->cells.empty() || m->derived.present || m->index_count_slot >= 0 || m->finish.steps_slot >= 0)
                 refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': the " + what + " '" + m->name + "' of dispatch group '" + group->name +
                        "' has cells, companions, a derived role, an index set or a steps word: not written in a SEGMENTED group");
-            if (!m->stages.empty() && m != &unit && (m->stages.size() != 1 || !m->stages[0].self))    // a member that is one stage of itself (the planned unit's stages are checked below)
+            if (!m->stages.empty() && (m->stages.size() != 1 || !m->stages[0].self))    // a member that is one stage of itself, over its own scratch planes
                 refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': the " + what + " '" + m->name + "' of dispatch group '" + group->name +
-                       "' is split in more than one stage: not written in a SEGMENTED group");
+                       "' is split in stages that are not itself alone (a group whose branches are stages of one unit sharing its scratch planes): "
+                       "each unit of a SEGMENTED group is one stage of itself with its own scratch planes");
             for (const TeamPlaneFacts& t : m->team_planes)
                 if (t.unit == EG_UNIT_KEY || t.fill_promised)
                     refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': the " + what + " '" + m->name + "' of dispatch group '" + group->name +
@@ -913,15 +914,11 @@ void resolve_segmented(eg_ctx& ctx, const eg_unit_load_desc& d, eg_unit_s& unit)
             if (r == nullptr || r->has_sweep != S.dynamic)
                 refuse(EG_BAD_REQUEST, who + "names branch '" + b->name + "', whose own record is not that group's (its name, k or selector kind differ)");
             member(b, "branch");
+            if (!b->stages.empty() && b->stages[0].team)
+                refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': the branch '" + b->name + "' of dispatch group '" + group->name + "' is a team stage, which is not written in a SEGMENTED group");
             S.branches.push_back(b);
             records.push_back(r);
             S.access = std::max(S.access, b->access);
-        }
-        if (!unit.stages.empty()) {    // the planned unit lends its scratch planes to the branches: its stages are the group's branches, in order
-            bool same = unit.stages.size() == S.branches.size();
-            for (std::size_t j = 0; same && j < S.branches.size(); ++j) same = unit.stages[j].unit == S.branches[j];
-            if (!same)
-                refuse(EG_NOT_WRITTEN, who + "is split in stages that are not its branches in order: not written in a SEGMENTED group");
         }
         eg_unit_s* other = nullptr;
         const DispatchFacts* other_rec = nullptr;
