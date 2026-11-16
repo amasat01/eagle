@@ -92,6 +92,18 @@ void restore_step(std::uint64_t stream, const std::vector<DevicePlane>& planes, 
 /** @brief Wait until @p stream is idle. */
 void stream_wait(std::uint64_t stream);
 
+struct DeviceCapture;  ///< a stream capture held open across door calls
+
+/** @brief Begin capturing @p stream (StreamCapturer, thread-local mode): work queued on it is recorded, not run. */
+DeviceCapture* capture_begin(std::uint64_t stream);
+
+/** @brief End @p capture and instantiate its graph (replayed by loop_launch, freed by loop_free); throws when the
+ *  capture failed. @p capture is freed either way. */
+DeviceLoop* capture_end(DeviceCapture* capture);
+
+/** @brief End @p capture and drop what it recorded (NULL-safe). */
+void capture_abort(DeviceCapture* capture) noexcept;
+
 /** @brief Destroy @p loop (NULL-safe). */
 void loop_free(DeviceLoop* loop) noexcept;
 

@@ -196,6 +196,33 @@ void stream_wait(std::uint64_t stream) {
     EAGLE_CHECK_ALWAYS(cudaStreamSynchronize(reinterpret_cast<cudaStream_t>(stream)));
 }
 
+struct DeviceCapture {
+    cuda::StreamCapturer capturer;
+};
+
+DeviceCapture* capture_begin(std::uint64_t stream) {
+    auto capture = std::make_unique<DeviceCapture>(DeviceCapture{ cuda::StreamCapturer(reinterpret_cast<cudaStream_t>(stream)) });
+    capture->capturer.begin();
+    return capture.release();
+}
+
+DeviceLoop* capture_end(DeviceCapture* capture) {
+    const std::unique_ptr<DeviceCapture> owned(capture);
+    auto loop = std::make_unique<DeviceLoop>();
+    loop->graph = cuda::CapturedGraph(owned->capturer.end());
+    EAGLE_CHECK_ALWAYS(cudaGraphInstantiate(&loop->exec, loop->graph.graph(), 0));
+    return loop.release();
+}
+
+void capture_abort(DeviceCapture* capture) noexcept {
+    if (capture == nullptr) return;
+    const std::unique_ptr<DeviceCapture> owned(capture);
+    try {
+        cuda::CapturedGraph dropped(owned->capturer.end());
+    } catch (...) {
+    }
+}
+
 void loop_launch(DeviceLoop* loop, std::uint64_t stream) {
     EAGLE_CHECK_ALWAYS(cudaGraphLaunch(loop->exec, reinterpret_cast<cudaStream_t>(stream)));
 }

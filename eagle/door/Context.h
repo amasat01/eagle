@@ -222,6 +222,8 @@ namespace eagle {
 namespace door {
 
 struct DeviceLoop;
+struct DeviceRecording;   ///< a capture in progress on the context's stream (device/Device.cpp)
+struct DeviceGraph;       ///< a recorded device graph: the instantiated capture and the plans it launched
 
 /** @brief The device part of a DEVICE runner (device/Device.cpp): its captured loop and the device
  *  cells it reads; freed with the runner (no device call in a forked child). */
@@ -264,7 +266,8 @@ struct DeviceState {
     std::int32_t ordinal = -1;                ///< -1: a host-only context
     int handle = 0;                           ///< the driver's device (a CUdevice)
     std::uint64_t context = 0;                ///< its primary context (a CUcontext), retained while the context lives
-    std::uint64_t stream = 0;                 ///< the context's own stream (a CUstream)
+    std::uint64_t stream = 0;                 ///< the stream in scope (a CUstream): eagle's own or the caller's (eg_stream_use)
+    std::uint64_t own_stream = 0;             ///< eagle's own stream, destroyed with the context
     int sms = 0, regs_per_sm = 0, smem_per_sm = 0, threads_per_sm = 0, cc_major = 0, cc_minor = 0;
     int fp64_ratio = 1;                       ///< FP32:FP64 throughput ratio (1 when not reported)
 };
@@ -290,6 +293,8 @@ struct eg_ctx_s {
     std::unordered_set<eg_graph_s*> graphs;
     eg_recording_s* rec = nullptr;            ///< between eg_record_begin and eg_record_end
     eagle::door::DeviceState dev;             ///< EG_CTX_DEVICE: the device and its stream
+    eagle::door::DeviceRecording* dev_rec = nullptr;              ///< a device context between eg_record_begin and eg_record_end
+    std::unordered_set<eagle::door::DeviceGraph*> dev_graphs;     ///< the device graphs eg_record_end made
 
     /** @brief Store @p text as the reason, never throwing. */
     void set_reason(const char* text) noexcept {
@@ -421,6 +426,15 @@ void device_unit_free(eg_unit_s& unit) noexcept;
 void device_plan_check(const eg_ctx& ctx, const eg_unit_s& unit);
 void device_launch(eg_plan_s& plan);
 void device_sync(eg_ctx& ctx);
+void device_record_begin(eg_ctx& ctx);
+void device_record_launch(eg_ctx& ctx, eg_plan_s& plan);
+void device_record_end(eg_ctx& ctx, eg_graph** out);
+bool device_graph(const eg_ctx& ctx, const eg_graph* graph);
+void device_graph_launch(eg_ctx& ctx, eg_graph* graph);
+void device_graph_free(eg_ctx& ctx, eg_graph* graph);
+void device_graphs_drop(eg_ctx& ctx) noexcept;
+void device_stream_use(eg_ctx& ctx, std::uint64_t stream);
+void device_quiet(const eg_ctx& ctx, const char* call, eg_status status, const char* why);
 void device_plan_cells(eg_plan_s& plan);
 void device_plan_free(eg_plan_s& plan) noexcept;
 void* device_alloc(eg_ctx& ctx, std::size_t bytes);

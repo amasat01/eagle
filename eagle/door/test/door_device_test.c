@@ -302,7 +302,7 @@ int main(int argc, char** argv) {
               info.device_type == kDLCUDA && info.stream != -1 && info.stream != 0,
           "eg_ctx_info: device 0, EG_CAP_DEVICE, kDLCUDA, the context's own stream");
     check(eg_sync(host) == EG_OK && eg_sync(ctx) == EG_OK, "eg_sync on a host and an idle device context");
-    check(refused(eg_stream_use(ctx, 0), EG_NOT_WRITTEN, ctx, "eg_stream_use"), "eg_stream_use stays NOT_WRITTEN by name");
+    check(eg_stream_use(ctx, 0) == EG_OK, "eg_stream_use 0 (eagle's own stream) on a device context");
 
     /* Units. */
     eg_unit *axpy = NULL, *axpy64 = NULL, *u = NULL;
@@ -400,9 +400,9 @@ int main(int argc, char** argv) {
     check(refused(eg_runner_new(ctx, &rn, &runner), EG_BAD_REQUEST, ctx, "has no finish") && runner == NULL,
           "eg_runner_new over a DEVICE plan without a finish: BAD_REQUEST (the device runner checks as the host one)");
     eg_graph* g = NULL;
-    check(eg_record_begin(ctx) == EG_OK && refused(eg_launch(ctx, p, NULL), EG_NOT_WRITTEN, ctx, "recording a DEVICE launch") &&
-              eg_record_end(ctx, &g) == EG_OK && eg_graph_free(ctx, g) == EG_OK,
-          "recording a DEVICE launch: NOT_WRITTEN");
+    check(eg_record_begin(ctx) == EG_OK && eg_launch(ctx, p, NULL) == EG_OK && eg_record_end(ctx, &g) == EG_OK &&
+              eg_graph_free(ctx, g) == EG_OK,
+          "recording a DEVICE launch: captured, eg_record_end and eg_graph_free OK");
 
     /* DEVICE units refused by name (no device image), and the features a DEVICE plan now takes: a thread box and a
      * BANDED scalar type (their pairs run in device_features_test). */

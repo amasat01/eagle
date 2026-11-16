@@ -50,6 +50,17 @@ void device_runner_new(eg_ctx&, const eg_runner_desc*, eg_runner**) {
 }
 void device_run(eg_ctx&, eg_runner_s*, eg_run_report*) {}
 DeviceRun::~DeviceRun() = default;
+void device_record_begin(eg_ctx&) {}
+void device_record_launch(eg_ctx&, eg_plan_s&) {}
+void device_record_end(eg_ctx&, eg_graph**) {}
+bool device_graph(const eg_ctx&, const eg_graph*) { return false; }
+void device_graph_launch(eg_ctx&, eg_graph*) {}
+void device_graph_free(eg_ctx&, eg_graph*) {}
+void device_graphs_drop(eg_ctx&) noexcept {}
+void device_stream_use(eg_ctx&, std::uint64_t) {
+    refuse(EG_BAD_REQUEST, "eg_stream_use on a host-only context (made without EG_CTX_DEVICE): it has no stream");
+}
+void device_quiet(const eg_ctx&, const char*, eg_status, const char*) {}
 
 #else
 
@@ -121,6 +132,62 @@ std::vector<DevicePlane> reorder_table(const eg_runner_s& runner) {
 
 }  // namespace
 
+/** @brief A capture in progress: the stream it is on, the plans it launched (one reference each) with their
+ *  argument bytes at that launch, and the device frees asked for meanwhile, run when it ends. */
+struct DeviceRecording {
+    DeviceCapture* capture = nullptr;
+    std::uint64_t stream = 0;
+    std::vector<eg_plan_s*> plans;
+    std::vector<std::vector<unsigned char>> bound;
+    std::vector<std::function<void()>> later;
+};
+
+/** @brief A recorded device graph: the instantiated capture and the plans whose bindings it holds by value. */
+struct DeviceGraph {
+    DeviceLoop* loop = nullptr;
+    std::vector<eg_plan_s*> plans;
+    std::vector<std::vector<unsigned char>> bound;
+};
+
+namespace {
+
+/** @brief Run @p free now, or once the capture in progress on @p ctx ends; a forked child makes no device call. */
+void now_or_after_capture(eg_ctx& ctx, std::function<void()> free) noexcept {
+    if (forked(ctx)) return;
+    try {
+        if (ctx.dev_rec != nullptr) ctx.dev_rec->later.push_back(std::move(free));
+        else free();
+    } catch (...) {
+    }
+}
+
+/** @brief The bytes of @p plan's bound arguments (views, mirrors, uniforms): what a capture holds by value. */
+std::vector<unsigned char> binding_bytes(const eg_plan_s& plan) {
+    std::vector<unsigned char> bytes;
+    for (const eg_plan_s::Binding& b : plan.bindings) {
+        const auto* h = reinterpret_cast<const unsigned char*>(&b.handle);
+        const auto* m = reinterpret_cast<const unsigned char*>(&b.mirror);
+        bytes.insert(bytes.end(), h, h + sizeof(b.handle));
+        bytes.insert(bytes.end(), m, m + sizeof(b.mirror));
+        bytes.insert(bytes.end(), b.value, b.value + sizeof(b.value));
+    }
+    return bytes;
+}
+
+/** @brief Run the frees a capture held back, under the context's device. */
+void run_later(eg_ctx& ctx, DeviceRecording& rec) noexcept {
+    for (std::function<void()>& f : rec.later) {
+        try {
+            f();
+        } catch (...) {
+        }
+    }
+    rec.later.clear();
+    (void)ctx;
+}
+
+}  // namespace
+
 /** @brief EG_CTX_DEVICE: retain the device's primary context, make the context's stream, read the launch facts. */
 void device_open(eg_ctx& ctx, std::int32_t device) {
     EG_DRIVER(cuInit);
@@ -145,7 +212,7 @@ void device_open(eg_ctx& ctx, std::int32_t device) {
     Current current(d);
     CUstream stream = nullptr;
     check(cuStreamCreate_(&stream, CU_STREAM_NON_BLOCKING), "cuStreamCreate");
-    d.stream = reinterpret_cast<std::uint64_t>(stream);
+    d.stream = d.own_stream = reinterpret_cast<std::uint64_t>(stream);
     d.sms = attribute(dev, CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT, "SMs");
     d.regs_per_sm = attribute(dev, CU_DEVICE_ATTRIBUTE_MAX_REGISTERS_PER_MULTIPROCESSOR, "registers per SM");
     d.smem_per_sm = attribute(dev, CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_MULTIPROCESSOR, "shared memory per SM");
@@ -160,10 +227,10 @@ void device_close(eg_ctx& ctx) noexcept {
     DeviceState& d = ctx.dev;
     if (d.context == 0) return;
     try {
-        if (d.stream != 0) {
+        if (d.own_stream != 0) {    // never the caller's stream
             EG_DRIVER(cuStreamDestroy);
             Current current(d);
-            cuStreamDestroy_(reinterpret_cast<CUstream>(d.stream));
+            cuStreamDestroy_(reinterpret_cast<CUstream>(d.own_stream));
         }
         EG_DRIVER(cuDevicePrimaryCtxRelease);
         cuDevicePrimaryCtxRelease_(d.handle);
@@ -236,13 +303,14 @@ void device_unit_load(eg_unit_s& unit, const eg_unit_meta& m, void* library) {
 /** @brief Unload the unit's device module, if any. */
 void device_unit_free(eg_unit_s& unit) noexcept {
     if (unit.module == 0) return;
-    try {
-        EG_DRIVER(cuModuleUnload);
-        Current current(unit.ctx->dev);
-        cuModuleUnload_(reinterpret_cast<CUmodule>(unit.module));
-    } catch (...) {
-    }
+    const std::uint64_t module = unit.module;
+    eg_ctx* ctx = unit.ctx;
     unit.module = unit.function = 0;
+    now_or_after_capture(*ctx, [ctx, module] {
+        EG_DRIVER(cuModuleUnload);
+        Current current(ctx->dev);
+        cuModuleUnload_(reinterpret_cast<CUmodule>(module));
+    });
 }
 
 /** @brief Queue one launch per partition of @p plan on @p stream: grid from the partition's count and the
@@ -304,10 +372,14 @@ void device_plan_cells(eg_plan_s& plan) {
 /** @brief Free what device_plan_cells made. */
 void device_plan_free(eg_plan_s& plan) noexcept {
     if (plan.device_counter == 0) return;
-    Current current(plan.ctx->dev);
-    cells_free(plan.device_counter);
-    cells_free(plan.device_steps);
+    eg_ctx* ctx = plan.ctx;
+    const std::uint64_t counter = plan.device_counter, steps = plan.device_steps;
     plan.device_counter = plan.device_steps = 0;
+    now_or_after_capture(*ctx, [ctx, counter, steps] {
+        Current current(ctx->dev);
+        cells_free(counter);
+        cells_free(steps);
+    });
 }
 
 /** @brief A zeroed device allocation of @p bytes on the context's device. */
@@ -319,11 +391,11 @@ void* device_alloc(eg_ctx& ctx, std::size_t bytes) {
 /** @brief Free a device_alloc allocation (a forked child makes no device call). */
 void device_free(eg_ctx& ctx, void* data) noexcept {
     if (data == nullptr || forked(ctx)) return;
-    try {
-        Current current(ctx.dev);
+    eg_ctx* c = &ctx;
+    now_or_after_capture(ctx, [c, data] {
+        Current current(c->dev);
         cells_free(reinterpret_cast<std::uint64_t>(data));
-    } catch (...) {
-    }
+    });
 }
 
 /** @brief Read @p bytes (a multiple of 4) of device memory at @p device into @p host, ordered after the context's queued work. */
@@ -343,16 +415,14 @@ void device_cell_work(eg_plan_s& plan) {
 /** @brief The loop and its cells go with the runner; a forked child makes no device call. */
 DeviceRun::~DeviceRun() {
     if (ctx == nullptr || forked(*ctx)) return;
-    Current current(ctx->dev);
-    loop_free(loop);
-    cells_free(cells);
-    cells_free(map);
-    cells_free(scratch);
-    cells_free(perm);
-    cells_free(inv);
-    cells_free(rcells);
-    cells_free(rscratch);
-    cells_free(fast);
+    eg_ctx* c = ctx;
+    DeviceLoop* l = loop;
+    const std::vector<std::uint64_t> all{ cells, map, scratch, perm, inv, rcells, rscratch, fast };
+    now_or_after_capture(*c, [c, l, all] {
+        Current current(c->dev);
+        loop_free(l);
+        for (std::uint64_t cell : all) cells_free(cell);
+    });
 }
 
 namespace {
@@ -611,7 +681,7 @@ void device_runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out)
  *  and the counter back, fill @p report as the old device path does. */
 void device_run(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report) {
     check_handle(ctx.runners, runner, "runner");
-    if (ctx.rec != nullptr)
+    if (ctx.rec != nullptr || ctx.dev_rec != nullptr)
         refuse(EG_NOT_WRITTEN, "recording a DEVICE run (eg_run while recording) is not written in this build of "
                "the door");
     check_report(report);
@@ -625,14 +695,10 @@ void device_run(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report) {
     const std::uint64_t stream = ctx.dev.stream;
     Current current(ctx.dev);
     std::vector<unsigned char> bound;
-    for (const eg_plan_s* p : runner->plans)
-        for (const eg_plan_s::Binding& b : p->bindings) {
-            const auto* h = reinterpret_cast<const unsigned char*>(&b.handle);
-            const auto* m = reinterpret_cast<const unsigned char*>(&b.mirror);
-            bound.insert(bound.end(), h, h + sizeof(b.handle));
-            bound.insert(bound.end(), m, m + sizeof(b.mirror));
-            bound.insert(bound.end(), b.value, b.value + sizeof(b.value));
-        }
+    for (const eg_plan_s* p : runner->plans) {
+        const std::vector<unsigned char> one = binding_bytes(*p);
+        bound.insert(bound.end(), one.begin(), one.end());
+    }
     if (r.loop != nullptr && bound != r.bound) {
         loop_free(r.loop);
         r.loop = nullptr;
@@ -715,6 +781,153 @@ void device_run(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report) {
     out.mapped = static_cast<std::int64_t>(ran) * n;
     out.build_s = r.build_s;
     write_report(report, out);
+}
+
+/** @brief Refuse @p call with @p status while @p ctx records by capture: @p why. */
+void device_quiet(const eg_ctx& ctx, const char* call, eg_status status, const char* why) {
+    if (ctx.dev_rec != nullptr)
+        refuse(status, std::string(call) + " while recording on a device context: " + why);
+}
+
+/** @brief eg_record_begin on a device context: capture the stream in scope (the old device graph's capture,
+ *  ``GraphPipeline.build`` over cuda/StreamCapturer.h); launches are recorded, not run, until eg_record_end. */
+void device_record_begin(eg_ctx& ctx) {
+    if (ctx.dev_rec != nullptr) refuse(EG_BAD_REQUEST, "eg_record_begin: already recording");
+    auto rec = std::make_unique<DeviceRecording>();
+    rec->stream = ctx.dev.stream;
+    Current current(ctx.dev);
+    rec->capture = capture_begin(rec->stream);
+    ctx.dev_rec = rec.release();
+}
+
+/** @brief eg_launch of a DEVICE plan while recording: its launches captured on the recording's stream. */
+void device_record_launch(eg_ctx& ctx, eg_plan_s& plan) {
+    const eg_unit_s& u = *plan.unit;
+    const std::string who = "recording a DEVICE launch of unit '" + u.name + "': ";
+    if (u.index_count_slot >= 0)
+        refuse(EG_NOT_WRITTEN, who + "an index set (its live count is read on the host at each launch) is not written in "
+               "this build of the door");
+    if (!u.companions.empty() || !u.cells.empty())
+        refuse(EG_NOT_WRITTEN, who + "companion and cell folds are not written in this build of the door");
+    DeviceRecording& rec = *ctx.dev_rec;
+    rec.bound.push_back(binding_bytes(plan));
+    rec.plans.push_back(&plan);
+    ++plan.refs;
+    Current current(ctx.dev);
+    launch_on(plan, rec.stream);
+}
+
+/** @brief eg_record_end on a device context: end the capture and instantiate it (FAULT when the capture failed). */
+void device_record_end(eg_ctx& ctx, eg_graph** out) {
+    if (out == nullptr) refuse(EG_BAD_REQUEST, "eg_record_end: out is NULL");
+    *out = nullptr;
+    const std::unique_ptr<DeviceRecording> rec(ctx.dev_rec);
+    ctx.dev_rec = nullptr;
+    Current current(ctx.dev);
+    DeviceLoop* loop = nullptr;
+    std::string failed;
+    try {
+        loop = capture_end(rec->capture);
+    } catch (const std::exception& e) {
+        failed = e.what();
+    } catch (...) {
+        failed = "unknown error";
+    }
+    rec->capture = nullptr;
+    run_later(ctx, *rec);
+    if (loop == nullptr) {
+        for (eg_plan_s* p : rec->plans) plan_release(ctx, p);
+        refuse(EG_FAULT, "eg_record_end: the device capture failed: " + failed);
+    }
+    auto graph = std::make_unique<DeviceGraph>();
+    graph->loop = loop;
+    graph->plans = std::move(rec->plans);
+    graph->bound = std::move(rec->bound);
+    ctx.dev_graphs.insert(graph.get());
+    *out = reinterpret_cast<eg_graph*>(graph.release());
+}
+
+/** @brief Whether @p graph is a device graph of @p ctx. */
+bool device_graph(const eg_ctx& ctx, const eg_graph* graph) {
+    return ctx.dev_graphs.count(reinterpret_cast<DeviceGraph*>(const_cast<eg_graph*>(graph))) != 0;
+}
+
+/** @brief eg_graph_launch of a device graph: replay it once on the stream in scope (``GraphPipeline.launch``); a plan
+ *  rebound since the recording is refused (the graph holds the bindings it captured). */
+void device_graph_launch(eg_ctx& ctx, eg_graph* handle) {
+    auto* graph = reinterpret_cast<DeviceGraph*>(handle);
+    device_quiet(ctx, "eg_graph_launch", EG_NOT_WRITTEN, "a graph inside a device graph is not written in this build of the door");
+    for (std::size_t i = 0; i < graph->plans.size(); ++i)
+        if (binding_bytes(*graph->plans[i]) != graph->bound[i])
+            refuse(EG_BAD_REQUEST, "eg_graph_launch: a plan of unit '" + graph->plans[i]->unit->name + "' was rebound since "
+                   "the recording; a device graph replays the bindings it captured: record it again");
+    Current current(ctx.dev);
+    loop_launch(graph->loop, ctx.dev.stream);
+}
+
+/** @brief eg_graph_free of a device graph: drop its plan references and its instantiated capture. */
+void device_graph_free(eg_ctx& ctx, eg_graph* handle) {
+    auto* graph = reinterpret_cast<DeviceGraph*>(handle);
+    ctx.dev_graphs.erase(graph);
+    const std::unique_ptr<DeviceGraph> owned(graph);
+    for (eg_plan_s* p : graph->plans) plan_release(ctx, p);
+    eg_ctx* c = &ctx;
+    DeviceLoop* loop = graph->loop;
+    now_or_after_capture(ctx, [c, loop] {
+        Current current(c->dev);
+        loop_free(loop);
+    });
+}
+
+/** @brief At context free: end a capture in progress (dropping it) and free every device graph, without releasing
+ *  their references (the context frees every plan itself right after); a forked child makes no device call. */
+void device_graphs_drop(eg_ctx& ctx) noexcept {
+    const bool child = forked(ctx);
+    if (ctx.dev_rec != nullptr) {
+        const std::unique_ptr<DeviceRecording> rec(ctx.dev_rec);
+        ctx.dev_rec = nullptr;
+        if (!child) {
+            try {
+                Current current(ctx.dev);
+                capture_abort(rec->capture);
+                run_later(ctx, *rec);
+            } catch (...) {
+            }
+        }
+    }
+    for (DeviceGraph* g : ctx.dev_graphs) {
+        if (!child) {
+            try {
+                Current current(ctx.dev);
+                loop_free(g->loop);
+            } catch (...) {
+            }
+        }
+        delete g;
+    }
+    ctx.dev_graphs.clear();
+}
+
+/** @brief eg_stream_use: make @p stream (a stream of the context's device; 0: eagle's own) the stream in scope; the
+ *  launches, runs and replays after it are ordered on it (the old path's ``stream_create`` over an external stream). */
+void device_stream_use(eg_ctx& ctx, std::uint64_t stream) {
+    if (ctx.dev.ordinal < 0)
+        refuse(EG_BAD_REQUEST, "eg_stream_use on a host-only context (made without EG_CTX_DEVICE): it has no stream");
+    if (ctx.dev_rec != nullptr)
+        refuse(EG_BAD_REQUEST, "eg_stream_use while recording: the capture is on the stream in scope; call it before "
+               "eg_record_begin or after eg_record_end");
+    if (stream == 0) {
+        ctx.dev.stream = ctx.dev.own_stream;
+        return;
+    }
+    EG_DRIVER(cuStreamGetCtx);
+    Current current(ctx.dev);
+    CUcontext owner = nullptr;
+    check(cuStreamGetCtx_(reinterpret_cast<CUstream>(stream), &owner), "eg_stream_use: cuStreamGetCtx");
+    if (owner != reinterpret_cast<CUcontext>(ctx.dev.context))
+        refuse(EG_BAD_REQUEST, "eg_stream_use: the stream belongs to another context than device " +
+               std::to_string(ctx.dev.ordinal) + "'s primary context");
+    ctx.dev.stream = stream;
 }
 
 /** @brief eg_sync: wait until the context's stream is idle (a host-only context has nothing queued). */

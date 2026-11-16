@@ -83,7 +83,10 @@ EG_EXPORT eg_status eg_plane_free(eg_ctx* ctx, eg_plane* plane) {
 }
 
 EG_EXPORT eg_status eg_plan_new(eg_ctx* ctx, const struct eg_plan_desc* desc, eg_plan** out) {
-    return door::call(ctx, [&](eg_ctx& c) { door::plan_new(c, desc, out); });
+    return door::call(ctx, [&](eg_ctx& c) {
+        door::device_quiet(c, "eg_plan_new", EG_BAD_REQUEST, "a plan's cells are made outside the capture; make it first");
+        door::plan_new(c, desc, out);
+    });
 }
 
 EG_EXPORT eg_status eg_plan_free(eg_ctx* ctx, eg_plan* plan) {
@@ -109,39 +112,57 @@ EG_EXPORT eg_status eg_launch(eg_ctx* ctx, eg_plan* plan, uint64_t* tiles) {
 EG_EXPORT eg_status eg_reduce(eg_ctx* ctx, const struct eg_reduce_desc* desc) {
     return door::call(ctx, [&](eg_ctx& c) {
         const eg_reduce_desc d = door::read_input(desc, "eg_reduce_desc");
+        door::device_quiet(c, "eg_reduce", EG_NOT_WRITTEN, "host work inside a device graph is not written in this build of the door");
         door::host_planes_only(c, "eg_reduce", { d.in, d.out, d.comp });
         door::reduce(c, desc);
     });
 }
 EG_EXPORT eg_status eg_copy(eg_ctx* ctx, eg_plane* src, eg_plane* dst) {
     return door::call(ctx, [&](eg_ctx& c) {
+        door::device_quiet(c, "eg_copy", EG_NOT_WRITTEN, "host work inside a device graph is not written in this build of the door");
         door::host_planes_only(c, "eg_copy", { src, dst });
         door::copy(c, src, dst);
     });
 }
 EG_EXPORT eg_status eg_record_begin(eg_ctx* ctx) {
-    return door::call(ctx, door::record_begin);
+    return door::call(ctx, [](eg_ctx& c) {
+        if (c.dev.ordinal >= 0) door::device_record_begin(c);    // a device context records by capture
+        else door::record_begin(c);
+    });
 }
 EG_EXPORT eg_status eg_record_cond_begin(eg_ctx* ctx, const struct eg_cond_desc* desc) {
-    return door::call(ctx, [desc](eg_ctx& c) { door::record_cond_begin(c, desc); });
+    return door::call(ctx, [desc](eg_ctx& c) {
+        door::device_quiet(c, "eg_record_cond_begin", EG_NOT_WRITTEN, "conditionals in a device recording are not written in this build of the door");
+        door::record_cond_begin(c, desc);
+    });
 }
 EG_EXPORT eg_status eg_record_cond_arm(eg_ctx* ctx) { return door::call(ctx, door::record_cond_arm); }
 EG_EXPORT eg_status eg_record_cond_end(eg_ctx* ctx) { return door::call(ctx, door::record_cond_end); }
 EG_EXPORT eg_status eg_record_end(eg_ctx* ctx, eg_graph** out) {
-    return door::call(ctx, [out](eg_ctx& c) { door::record_end(c, out); });
+    return door::call(ctx, [out](eg_ctx& c) {
+        if (c.dev_rec != nullptr) door::device_record_end(c, out);
+        else door::record_end(c, out);
+    });
 }
 EG_EXPORT eg_status eg_graph_launch(eg_ctx* ctx, eg_graph* graph) {
-    return door::call(ctx, [graph](eg_ctx& c) { door::graph_launch(c, graph); });
+    return door::call(ctx, [graph](eg_ctx& c) {
+        if (door::device_graph(c, graph)) door::device_graph_launch(c, graph);
+        else door::graph_launch(c, graph);
+    });
 }
 EG_EXPORT eg_status eg_graph_free(eg_ctx* ctx, eg_graph* graph) {
     if (graph == nullptr) return EG_OK;
-    return door::call(ctx, [graph](eg_ctx& c) { door::graph_free(c, graph); });
+    return door::call(ctx, [graph](eg_ctx& c) {
+        if (door::device_graph(c, graph)) door::device_graph_free(c, graph);
+        else door::graph_free(c, graph);
+    });
 }
 
 // ---- runs ------------------------------------------------------------------
 
 EG_EXPORT eg_status eg_runner_new(eg_ctx* ctx, const struct eg_runner_desc* desc, eg_runner** out) {
     return door::call(ctx, [&](eg_ctx& c) {
+        door::device_quiet(c, "eg_runner_new", EG_BAD_REQUEST, "a runner's cells are made outside the capture; make it first");
         if (door::device_plans(c, desc)) door::device_runner_new(c, desc, out);
         else door::runner_new(c, desc, out);
     });
@@ -161,11 +182,23 @@ EG_EXPORT eg_status eg_run(eg_ctx* ctx, eg_runner* runner, struct eg_run_report*
     return door::call(ctx, [&](eg_ctx& c) {
         door::check_handle(c.runners, runner, "runner");
         if (runner->dev.ctx != nullptr) door::device_run(c, runner, report);
-        else door::run(c, runner, report);
+        else {
+            door::device_quiet(c, "eg_run of a host runner", EG_NOT_WRITTEN,
+                               "host work inside a device graph is not written in this build of the door");
+            door::run(c, runner, report);
+        }
     });
 }
 
-EG_EXPORT eg_status eg_sync(eg_ctx* ctx) { return door::call(ctx, door::device_sync); }
+EG_EXPORT eg_status eg_sync(eg_ctx* ctx) {
+    return door::call(ctx, [](eg_ctx& c) {
+        door::device_quiet(c, "eg_sync", EG_BAD_REQUEST, "a capture cannot wait; call it after eg_record_end");
+        door::device_sync(c);
+    });
+}
+EG_EXPORT eg_status eg_stream_use(eg_ctx* ctx, uint64_t stream) {
+    return door::call(ctx, [stream](eg_ctx& c) { door::device_stream_use(c, stream); });
+}
 
 // ---- not written in this build ---------------------------------------------
 
@@ -180,5 +213,4 @@ EG_EXPORT eg_status eg_device_count(eg_ctx* ctx, int32_t*) { return not_written(
 EG_EXPORT eg_status eg_device_props(eg_ctx* ctx, int32_t, struct eg_device_props*) {
     return not_written(ctx, "eg_device_props");
 }
-EG_EXPORT eg_status eg_stream_use(eg_ctx* ctx, uint64_t) { return not_written(ctx, "eg_stream_use"); }
 EG_EXPORT eg_status eg_record_child(eg_ctx* ctx, uint64_t) { return not_written(ctx, "eg_record_child"); }

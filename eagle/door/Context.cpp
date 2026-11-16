@@ -60,6 +60,7 @@ eg_status ctx_new(const eg_ctx_settings* settings, eg_ctx** out) noexcept {
 void ctx_free_all(eg_ctx& ctx) {
     const bool child = forked(ctx);
     record_drop_all(ctx);
+    device_graphs_drop(ctx);
     for (eg_runner_s* runner : ctx.runners) delete runner;
     ctx.runners.clear();
     for (eg_plan_s* plan : std::vector<eg_plan_s*>(ctx.plans.begin(), ctx.plans.end())) {
