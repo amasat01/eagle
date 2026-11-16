@@ -380,12 +380,15 @@ static void lin_rows(eg_ctx* ctx, const char* lib) {
 #define PN 64
 #define PSTEPS 400
 
+#define PMAX 4096
 static void pair_rows(eg_ctx* ctx, int argc, char** argv) {
     const char *lib = argv[2], *dir = argv[3];
     /* with an active set (argc 9): the cadence in steps and the primal's name (_pend_body: the mask is slot 7, c and dt 8 and 9) */
-    const int named = argc == 9;
+    const int named = argc >= 9;
     const long every = named ? atol(argv[7]) : 0;
     const int act = every > 0;
+    const int64_t pn = argc >= 10 ? atol(argv[9]) : 64;
+    const int reorder = argc >= 10;
     const char* base = named ? argv[8] : "rr_pend";
     char tape_name[64], vjp_name[64];
     snprintf(tape_name, sizeof(tape_name), "%s_tape", base);
@@ -393,20 +396,20 @@ static void pair_rows(eg_ctx* ctx, int argc, char** argv) {
     const int32_t mask_slot = act ? 7 : 5, c_slot = act ? 8 : 6, dt_slot = act ? 9 : 7;
     int64_t smax = 0;
     uint8_t dg[3][EG_DIGEST_BYTES];
-    static double x0[PN], v0[PN], tf[PN], ex[PN], ev[PN], et[PN], gx[PN], gv[PN], gt[PN];
+    static double x0[PMAX], v0[PMAX], tf[PMAX], ex[PMAX], ev[PMAX], et[PMAX], gx[PMAX], gv[PMAX], gt[PMAX];
     double gc = 0.0, gdt = 0.0;
-    int64_t steps[PN];
+    int64_t steps[PMAX];
     if (!parse_digest(argv[4], dg[0]) || !parse_digest(argv[5], dg[1]) || !parse_digest(argv[6], dg[2]) ||
-        !read_file(dir, "x0.bin", x0, sizeof(x0)) || !read_file(dir, "v0.bin", v0, sizeof(v0)) ||
-        !read_file(dir, "tf.bin", tf, sizeof(tf)) || !read_file(dir, "end_x.bin", ex, sizeof(ex)) ||
-        !read_file(dir, "end_v.bin", ev, sizeof(ev)) || !read_file(dir, "end_t.bin", et, sizeof(et)) ||
-        !read_file(dir, "grad_x.bin", gx, sizeof(gx)) || !read_file(dir, "grad_v.bin", gv, sizeof(gv)) ||
-        !read_file(dir, "grad_t.bin", gt, sizeof(gt)) || !read_file(dir, "grad_c.bin", &gc, sizeof(gc)) ||
-        !read_file(dir, "grad_dt.bin", &gdt, sizeof(gdt)) || !read_file(dir, "steps.bin", steps, sizeof(steps))) {
+        !read_file(dir, "x0.bin", x0, (size_t)pn * sizeof(*x0)) || !read_file(dir, "v0.bin", v0, (size_t)pn * sizeof(*v0)) ||
+        !read_file(dir, "tf.bin", tf, (size_t)pn * sizeof(*tf)) || !read_file(dir, "end_x.bin", ex, (size_t)pn * sizeof(*ex)) ||
+        !read_file(dir, "end_v.bin", ev, (size_t)pn * sizeof(*ev)) || !read_file(dir, "end_t.bin", et, (size_t)pn * sizeof(*et)) ||
+        !read_file(dir, "grad_x.bin", gx, (size_t)pn * sizeof(*gx)) || !read_file(dir, "grad_v.bin", gv, (size_t)pn * sizeof(*gv)) ||
+        !read_file(dir, "grad_t.bin", gt, (size_t)pn * sizeof(*gt)) || !read_file(dir, "grad_c.bin", &gc, sizeof(gc)) ||
+        !read_file(dir, "grad_dt.bin", &gdt, sizeof(gdt)) || !read_file(dir, "steps.bin", steps, (size_t)pn * sizeof(*steps))) {
         check(0, "pair: the digests and the old path's oracle files read");
         return;
     }
-    for (int i = 0; i < PN; ++i) smax = steps[i] > smax ? steps[i] : smax;
+    for (int i = 0; i < pn; ++i) smax = steps[i] > smax ? steps[i] : smax;
     eg_unit* p = load(ctx, lib, base, dg[0]);
     eg_unit* units[2] = { load(ctx, lib, tape_name, dg[1]), load(ctx, lib, vjp_name, dg[2]) };
     check(p && units[0] && units[1], "pair: rr_pend, its taping twin and its step vjp load from one library");
@@ -419,55 +422,69 @@ static void pair_rows(eg_ctx* ctx, int argc, char** argv) {
     for (int si = 0; si < 2; ++si)
         for (int ti = 0; ti < 2; ++ti) {
             eg_host_threads(ctx, threads[ti]);
-            static double x[PN], v[PN], t[PN];
-            uint8_t done[PN];
-            double tfin[PN];
-            memcpy(x, x0, sizeof(x));
-            memcpy(v, v0, sizeof(v));
-            memcpy(tfin, tf, sizeof(tfin));
-            memset(t, 0, sizeof(t));
-            memset(done, 0, sizeof(done));
+            static double x[PMAX], v[PMAX], t[PMAX];
+            uint8_t done[PMAX];
+            double tfin[PMAX];
+            memcpy(x, x0, (size_t)pn * sizeof(*x));
+            memcpy(v, v0, (size_t)pn * sizeof(*v));
+            memcpy(tfin, tf, (size_t)pn * sizeof(*tfin));
+            memset(t, 0, (size_t)pn * sizeof(*t));
+            memset(done, 0, (size_t)pn * sizeof(*done));
             struct tensor tx, tv, tt, ttf, tdn;
-            eg_plane* planes[5] = { host_plane(ctx, &tt, PN, t, kDLFloat, 64), host_plane(ctx, &tv, PN, v, kDLFloat, 64),
-                                    host_plane(ctx, &tx, PN, x, kDLFloat, 64), host_plane(ctx, &ttf, PN, tfin, kDLFloat, 64),
-                                    host_plane(ctx, &tdn, PN, done, kDLBool, 8) };
+            eg_plane* planes[5] = { host_plane(ctx, &tt, pn, t, kDLFloat, 64), host_plane(ctx, &tv, pn, v, kDLFloat, 64),
+                                    host_plane(ctx, &tx, pn, x, kDLFloat, 64), host_plane(ctx, &ttf, pn, tfin, kDLFloat, 64),
+                                    host_plane(ctx, &tdn, pn, done, kDLBool, 8) };
             const int32_t slots[5] = { 0, 1, 2, 3, mask_slot }, us[2] = { c_slot, dt_slot };
             const void* const uv[2] = { &c, &dt };
             const struct eg_bind_desc bd = binds(5, slots, planes, 2, us, uv);
-            eg_plan* plan = plan_of(ctx, p, structures[si], PN);
+            eg_plan* plan = plan_of(ctx, p, structures[si], pn);
             eg_runner* r = NULL;
             struct eg_runner_desc d = recorded(&plan, PSTEPS, named ? 37 : si ? PSTEPS : -1, 0, roles, units);
             d.every = every;
+            if (reorder) {
+                d.flags |= EG_RUN_REORDER;
+                d.reorder_theta = 0.5;
+            }
             struct eg_run_report rep;
             memset(&rep, 0, sizeof(rep));
             rep.struct_size = sizeof(rep);
+            if (argc == 11) {   // EG_RUN_REORDER with a start copy: refused by name
+                snprintf(what, sizeof(what), "pair %s %s %d threads: EG_RUN_REORDER with a start copy refused NOT_WRITTEN by name", base,
+                         si ? "HOST_TEAM" : "HOST_SERIAL", threads[ti]);
+                check(plan && eg_bind(ctx, plan, &bd) == EG_OK && eg_runner_new(ctx, &d, &r) == EG_NOT_WRITTEN &&
+                          reason_has(ctx, "EG_RUN_REORDER with a start copy (time0_slot)") && reason_has(ctx, "no old-path oracle"),
+                      what);
+                for (int i = 0; i < 5; ++i) eg_plane_free(ctx, planes[i]);
+                eg_plan_free(ctx, plan);
+                continue;
+            }
             const int ok = plan && eg_bind(ctx, plan, &bd) == EG_OK && eg_runner_new(ctx, &d, &r) == EG_OK &&
                            eg_run(ctx, r, &rep) == EG_OK;
-            int s_ok = ok && rep.steps == smax && rep.finished == PN;
-            for (int i = 0; s_ok && i < PN; ++i) s_ok = x[i] == ex[i] && v[i] == ev[i] && t[i] == et[i];
+            int s_ok = ok && rep.steps == smax && rep.finished == pn && (!reorder || rep.reorders > 0);
+            for (int i = 0; s_ok && i < pn; ++i) s_ok = x[i] == ex[i] && v[i] == ev[i] && t[i] == et[i];
             snprintf(what, sizeof(what), "pair %s%s %s %d threads (window %s): the recorded run's states equal the old "
-                     "path's bitwise (%lld steps)", base, act ? " (active set)" : "", si ? "HOST_TEAM" : "HOST_SERIAL", threads[ti], named ? "37" : si ? "400" : "-1, full",
+                     "path's bitwise (%lld steps)", base, reorder ? " (reordering active set)" : act ? " (active set)" : "", si ? "HOST_TEAM" : "HOST_SERIAL", threads[ti], named ? "37" : si ? "400" : "-1, full",
                      (long long)rep.steps);
             check(s_ok, what);
-            static double sx[PN], sv[PN], ox[PN], ov[PN], ot[PN];
+            static double sx[PMAX], sv[PMAX], ox[PMAX], ov[PMAX], ot[PMAX];
             double oc = 0.0, odt = 0.0;
-            for (int i = 0; i < PN; ++i) {
+            for (int i = 0; i < pn; ++i) {
                 sx[i] = 1.0;
                 sv[i] = 0.5;
             }
             struct tensor a1, a2, b1, b2, b3, b4, b5;
-            eg_plane* const sp[2] = { host_plane(ctx, &a1, PN, sx, kDLFloat, 64), host_plane(ctx, &a2, PN, sv, kDLFloat, 64) };
-            eg_plane* const gp[5] = { host_plane(ctx, &b1, PN, ox, kDLFloat, 64), host_plane(ctx, &b2, PN, ov, kDLFloat, 64),
-                                      host_plane(ctx, &b3, PN, ot, kDLFloat, 64), host_plane(ctx, &b4, 1, &oc, kDLFloat, 64),
+            eg_plane* const sp[2] = { host_plane(ctx, &a1, pn, sx, kDLFloat, 64), host_plane(ctx, &a2, pn, sv, kDLFloat, 64) };
+            eg_plane* const gp[5] = { host_plane(ctx, &b1, pn, ox, kDLFloat, 64), host_plane(ctx, &b2, pn, ov, kDLFloat, 64),
+                                      host_plane(ctx, &b3, pn, ot, kDLFloat, 64), host_plane(ctx, &b4, 1, &oc, kDLFloat, 64),
                                       host_plane(ctx, &b5, 1, &odt, kDLFloat, 64) };
             const int32_t sslot[2] = { 2, 1 }, gslot[5] = { 2, 1, 0, c_slot, dt_slot };
             const struct eg_bind_desc sd = binds(2, sslot, sp, 0, NULL, NULL), gd = binds(5, gslot, gp, 0, NULL, NULL);
             const int rok = ok && eg_reverse(ctx, r, &sd, &gd) == EG_OK;
             int g_ok = rok && memcmp(&oc, &gc, sizeof(gc)) == 0 && memcmp(&odt, &gdt, sizeof(gdt)) == 0;
-            for (int i = 0; g_ok && i < PN; ++i)
+            for (int i = 0; g_ok && i < pn; ++i)
                 g_ok = memcmp(&ox[i], &gx[i], 8) == 0 && memcmp(&ov[i], &gv[i], 8) == 0 && memcmp(&ot[i], &gt[i], 8) == 0;
             snprintf(what, sizeof(what), "pair %s%s %s %d threads: eg_reverse's gradients (x, v, t per sample; c, dt summed) "
-                     "equal the old path's bitwise (c %.17g, dt %.17g)", base, act ? " (active set)" : "", si ? "HOST_TEAM" : "HOST_SERIAL", threads[ti], oc, odt);
+                     "equal the old path's bitwise (c %.17g, dt %.17g)", base, reorder ? " (reordering active set)" : act ? " (active set)" : "", si ? "HOST_TEAM" : "HOST_SERIAL", threads[ti], oc, odt);
             check(g_ok, what);
             for (int i = 0; i < 2; ++i) eg_plane_free(ctx, sp[i]);
             for (int i = 0; i < 5; ++i) eg_plane_free(ctx, gp[i]);
@@ -482,8 +499,8 @@ static void pair_rows(eg_ctx* ctx, int argc, char** argv) {
 }
 
 int main(int argc, char** argv) {
-    if (argc != 2 && argc != 7 && argc != 9) {
-        fprintf(stderr, "usage: %s <fixture_reverse lib> [<pair lib> <oracle dir> <primal digest> <twin digest> <vjp digest> [<every> <primal name>]]\n",
+    if (argc != 2 && argc != 7 && argc != 9 && argc != 10 && argc != 11) {
+        fprintf(stderr, "usage: %s <fixture_reverse lib> [<pair lib> <oracle dir> <primal digest> <twin digest> <vjp digest> [<every> <primal name> [<n>: reorder]]]\n",
                 argv[0]);
         return 2;
     }

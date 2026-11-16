@@ -84,7 +84,7 @@ LIB := $(OUT)/libeagle_door.so
 FIXTURE := $(OUT)/libfixture_unit.so
 TEST := $(OUT)/door_test
 
-.PHONY: all lib symbols test check-inputs check-cuda pairs pair-reverse pair-reverse-active pair-reverse-timed device $(PAIR_UNITS:%=pair-%) $(PAIR_DEVICE_UNITS:%=pair-device-%)
+.PHONY: all lib symbols test check-inputs check-cuda pairs pair-reverse pair-reverse-active pair-reverse-timed pair-reverse-reorder pair-reverse-t0 device $(PAIR_UNITS:%=pair-%) $(PAIR_DEVICE_UNITS:%=pair-device-%)
 all: test
 
 check-inputs:
@@ -157,6 +157,7 @@ REV_RENAME = -Deagle_abi_tag=$(1)_abi_tag -Deagle_layout_sizes=$(1)_layout_sizes
 # The derived records the door loaded, stated by hand until the library emits them.
 META_reverse ?= test/derived/rr_pend_meta.c
 META_act ?= test/derived/pend_body_meta.c
+META_act_t0 ?= test/derived/pend_body_time0_meta.c
 META_timed ?= test/derived/timed_meta.c
 define REV_RULES
 $(OUT)/libpair_$(2).so: $$(KERNEL_$(3)) $$(KERNEL_$(3)_tape) $$(KERNEL_$(3)_step_vjp) $$(META_$(1)) eg_door.h eg_unit_meta.h | check-inputs
@@ -174,6 +175,7 @@ endef
 $(eval $(call REV_RULES,reverse,reverse,rr_pend))
 $(eval $(call REV_RULES,act,reverse_active,pend_body))
 $(eval $(call REV_RULES,timed,reverse_timed,timed))
+$(eval $(call REV_RULES,act_t0,reverse_t0,pend_body))
 
 pair-reverse: symbols $(OUT)/libpair_reverse.so $(REV_TEST)
 	$(REV_TEST) $(REV_FIXTURE) $(OUT)/libpair_reverse.so $(ORACLE_reverse) $(DIGEST_rr_pend) $(DIGEST_rr_pend_tape) \
@@ -192,6 +194,16 @@ DIGEST_timed_step_vjp ?= 7e96064e7bac22b669c0eb9fbcc145e7b9b9b55d45a4279688d213d
 pair-reverse-timed: symbols $(OUT)/libpair_reverse_timed.so $(REV_TEST)
 	$(REV_TEST) $(REV_FIXTURE) $(OUT)/libpair_reverse_timed.so $(ORACLE_timed) $(DIGEST_timed) $(DIGEST_timed_tape) \
 	  $(DIGEST_timed_step_vjp) 0 _timed
+
+# pair-reverse-reorder: the same unit over 4096 samples with EG_RUN_REORDER (the old path's reordering run, every 4, theta 0.5).
+pair-reverse-reorder: symbols $(OUT)/libpair_reverse_active.so $(REV_TEST)
+	$(REV_TEST) $(REV_FIXTURE) $(OUT)/libpair_reverse_active.so $(ORACLE_reorder) $(DIGEST_pend_body) $(DIGEST_pend_body_tape) \
+	  $(DIGEST_pend_body_step_vjp) 4 _pend_body 4096
+
+# pair-reverse-t0: the reordering run of a twin that holds a start copy is refused by name (no old-path oracle).
+pair-reverse-t0: symbols $(OUT)/libpair_reverse_t0.so $(REV_TEST)
+	$(REV_TEST) $(REV_FIXTURE) $(OUT)/libpair_reverse_t0.so $(ORACLE_reorder) $(DIGEST_pend_body) $(DIGEST_pend_body_tape) \
+	  $(DIGEST_pend_body_step_vjp) 4 _pend_body 4096 refuse
 
 pair-reverse-active: symbols $(OUT)/libpair_reverse_active.so $(REV_TEST)
 	$(REV_TEST) $(REV_FIXTURE) $(OUT)/libpair_reverse_active.so $(ORACLE_act) $(DIGEST_pend_body) $(DIGEST_pend_body_tape) \

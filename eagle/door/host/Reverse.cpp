@@ -84,6 +84,7 @@ struct RunRecord {
     Buf steps;                      ///< applied steps, int64 per sample
     Buf dummy;                      ///< the forward's tape: one row of width * n, never written
     std::vector<std::vector<Buf>> pool;   ///< checkpoints: pool[k][state]
+    std::vector<std::vector<std::int32_t>> epochs;   ///< a reordering run: epochs[k][sample] = its slot at checkpoint k
     std::int64_t taken = 0;
     bool live = false;              ///< a record not reversed yet
 };
@@ -186,9 +187,6 @@ bool in_range(std::int32_t slot, std::size_t n) { return slot >= 0 && slot < sta
 
 /** @brief eg_runner_new with EG_RUN_RECORD: check the derived record against the primal and keep the twin and the vjp. */
 void record_new(eg_ctx& ctx, eg_runner_s& runner, const eg_runner_desc& d) {
-    if (runner.active && runner.act.reorder)
-        refuse(EG_NOT_WRITTEN, "EG_RUN_RECORD with EG_RUN_REORDER (an active set that reorders the planes under record) is "
-               "not written in this build of the door");
     if (runner.active && runner.act.group != 1)
         refuse(EG_NOT_WRITTEN, "EG_RUN_RECORD with a grouped active set is not written in this build of the door");
     if (d.n_plans != 1)
@@ -202,6 +200,9 @@ void record_new(eg_ctx& ctx, eg_runner_s& runner, const eg_runner_desc& d) {
     if (runner.active != (twin->active_map_slot >= 0) || (twin->active_map_slot >= 0) != (twin->active_count_slot >= 0))
         refuse(EG_BAD_REQUEST, "unit '" + twin->name + "': the taping twin reads an active set (map and count slots) exactly "
                "when the runner's plans do");
+    if (runner.active && runner.act.reorder && twin->derived.time0_slot != -1)
+        refuse(EG_NOT_WRITTEN, "EG_RUN_RECORD with EG_RUN_REORDER with a start copy (time0_slot): no old-path oracle in this "
+               "build of the door");
     if (vjp->active_map_slot >= 0) refuse(EG_BAD_REQUEST, "unit '" + vjp->name + "': a step vjp reads no active set");
     for (const eg_unit_s* u : { twin, vjp })
         if (u->derived.of_unit != pu.index || u->library != pu.library)
@@ -515,6 +516,16 @@ void record_forward(eg_ctx& ctx, eg_runner_s& runner, eg_run_report* report) {
             else bind_raw(fwd, s, plane_bytes(*b.plane), static_cast<std::uint64_t>(n));
         }
     }
+    // A reordering active set moves eagle's own per-slot planes (the steps, the start copy) with the runner's.
+    std::vector<Owned> owned;
+    const bool reordering = runner.active && runner.act.reorder;
+    if (reordering) {
+        owned = owned_planes(runner);
+        owned.push_back({ r.steps.data(), 8 });
+        for (Carried& c : r.reads)
+            if (c.kind == Carried::START) owned.push_back({ c.own.data(), c.bytes });
+    }
+    r.epochs.clear();
     // The finished count follows the mask (the plain loop's re-sync), counted by the twin from here.
     const FinishFacts& f = primal.unit->finish;
     const DLTensor& mt = primal.bindings[static_cast<std::size_t>(f.mask_slot)].plane->tensor->dl_tensor;
@@ -529,6 +540,7 @@ void record_forward(eg_ctx& ctx, eg_runner_s& runner, eg_run_report* report) {
             }
     fwd.finished = set;
     ActiveState& act = runner.act;
+    const std::int64_t compactions0 = act.compactions, reorders0 = act.reorders;
     if (runner.active) {   // the map follows the mask from the first launch (the plain loop's compaction)
         active_compact(act, mask, mb);
         act.done_at_last = set;
@@ -547,6 +559,10 @@ void record_forward(eg_ctx& ctx, eg_runner_s& runner, eg_run_report* report) {
             for (std::size_t i = 0; i < r.state.size(); ++i)
                 std::memcpy(r.pool[static_cast<std::size_t>(k)][i].data(), r.state[i].src,
                             static_cast<std::size_t>(r.state[i].rows * n) * r.state[i].bytes);
+            if (reordering) {
+                if (k == static_cast<std::int64_t>(r.epochs.size())) r.epochs.emplace_back();
+                r.epochs[static_cast<std::size_t>(k)] = runner.act.inv;
+            }
             r.taken = k + 1;
         },
         [&](std::int64_t j, std::int64_t k) {
@@ -556,8 +572,10 @@ void record_forward(eg_ctx& ctx, eg_runner_s& runner, eg_run_report* report) {
                 active_compact(act, mask, mb);
                 ++act.compactions;
                 act.done_at_last = fwd.finished;
+                if (reordering && act.fire) active_reorder(act, owned);
             }
         });
+    if (reordering && act.reorders != act.restored_at) active_restore(act, owned);   // the planes land in sample order
     primal.finished = fwd.finished;
     r.live = true;
     if (report == nullptr) return;
@@ -569,6 +587,8 @@ void record_forward(eg_ctx& ctx, eg_runner_s& runner, eg_run_report* report) {
     out.launches = ran;
     out.steps = ran;
     out.mapped = ran * n;
+    out.compactions = act.compactions - compactions0;
+    out.reorders = act.reorders - reorders0;
     write_report(report, out);
 }
 
@@ -772,8 +792,16 @@ void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, con
             diff::reverseWindows(
                 W, live,
                 [&](std::int64_t k, std::int64_t count) {
+                    const std::int64_t* from = cols.data();   // the sample's column in this checkpoint: its slot then
+                    std::vector<std::int64_t> slots;
+                    if (!r.epochs.empty()) {
+                        const std::vector<std::int32_t>& inv = r.epochs[static_cast<std::size_t>(k)];
+                        slots.resize(static_cast<std::size_t>(count));
+                        for (std::int64_t i = 0; i < count; ++i) slots[static_cast<std::size_t>(i)] = inv[static_cast<std::size_t>(cols[static_cast<std::size_t>(i)])];
+                        from = slots.data();
+                    }
                     for (std::size_t i = 0; i < r.state.size(); ++i)
-                        diff::gatherColumns(r.state[i].buf.data(), m, r.pool[static_cast<std::size_t>(k)][i].data(), n, cols.data(), count,
+                        diff::gatherColumns(r.state[i].buf.data(), m, r.pool[static_cast<std::size_t>(k)][i].data(), n, from, count,
                                             r.state[i].rows, r.state[i].bytes);
                 },
                 [&](std::int64_t c, std::int64_t len) {

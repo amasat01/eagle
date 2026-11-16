@@ -436,6 +436,10 @@ bool check_active(const eg_runner_desc& d);
 std::int64_t active_every_steps(const eg_runner_desc& d);
 /** @brief Recompute the active map and count of @p a from the mask plane (@p mask, elements of @p bytes): the plain loop's compaction. */
 void active_compact(ActiveState& a, const char* mask, std::size_t bytes);
+/** @brief Move the live slots of the span to the front, every plane of @p owned (the mask first) and ``perm`` with them. */
+void active_reorder(ActiveState& a, const std::vector<Owned>& owned);
+/** @brief Put every plane of @p owned back in sample order and ``perm`` / ``inv`` to the identity. */
+void active_restore(ActiveState& a, const std::vector<Owned>& owned);
 void check_report(const eg_run_report* report);
 void write_report(eg_run_report* report, eg_run_report r);
 
