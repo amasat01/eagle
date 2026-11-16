@@ -23,6 +23,7 @@
  *                                                  in place WITHOUT the bind: its later launch must DIFFER from the old path's, the companion's residue)
  *   rebind                                        (the caller binds its planes again before every later launch: the door's way to restart the residual
  *                                                  of a compensation plane eagle made beside a target the caller zeroed)
+ *   badbind <text>                               (every eg_bind is refused BAD_REQUEST with a reason holding <text>; nothing is launched)
  *   failrun <text>                                (host: every launch is refused FAULT with a reason holding <text>; no outputs are compared)
  * Every plane is (extents..., lanes).
  *
@@ -67,6 +68,7 @@ struct pt {
 
 static char clear_name[48];    /* the spec's "clear <name>" */
 static int rebind;    /* the spec's "rebind": the caller binds its planes again before every later launch (the way to restart the residual of an eagle-made compensation plane when it zeroes the target) */
+static char bind_bad[512];   /* the spec's "badbind <text>": the bind must be refused BAD_REQUEST with a reason holding that text */
 static char run_fail[512];    /* the spec's "failrun <text>": the launch must be refused FAULT with a reason holding that text */
 
 static int read_spec(const char* dir, const char* row, int64_t* n, struct pl* p, int* np, int* steps) {
@@ -94,6 +96,12 @@ static int read_spec(const char* dir, const char* row, int64_t* n, struct pl* p,
         }
         if (strcmp(kind, "rebind") == 0) {
             rebind = 1;
+            continue;
+        }
+        if (strcmp(kind, "badbind") == 0) {
+            if (fgets(bind_bad, sizeof(bind_bad), f) == NULL) return 0;
+            bind_bad[strcspn(bind_bad, "\n")] = 0;
+            memmove(bind_bad, bind_bad + (bind_bad[0] == ' '), strlen(bind_bad));
             continue;
         }
         if (strcmp(kind, "failrun") == 0) {
@@ -345,7 +353,12 @@ int main(int argc, char** argv) {
         if (cudaDeviceSynchronize() != cudaSuccess) s = EG_FAULT;   /* the copies land before the context's stream reads them */
 #endif
         if (s == EG_OK) s = eg_bind(ctx, plan, &b);
-        for (int rep = 0; rep < 2; ++rep) {
+        if (bind_bad[0] != 0) {
+            char fb[600];
+            snprintf(fb, sizeof(fb), "%s: the bind is refused BAD_REQUEST with a reason holding '%.200s'", names[k], bind_bad);
+            check(s == EG_BAD_REQUEST && reason_has(ctx, bind_bad), fb);
+        }
+        for (int rep = 0; rep < (bind_bad[0] != 0 ? 0 : 2); ++rep) {
             if (rep > 0)    /* a plane the caller binds as a counter accumulates over launches: every launch starts from the zeroed output */
                 for (int i = 0; i < np; ++i)
                     if (is_out(&pls[i]) && (clear_name[0] == 0 || strcmp(pls[i].name, clear_name) == 0)) {

@@ -168,7 +168,7 @@ struct eg_unit_slot {
     eg_slot_role role;        /**< read by eg_bind (what may be passed, written, made) and eg_launch (packing) */
     eg_wire_dtype dtype;      /**< read by eg_bind (dtype check; a uniform's value width) and eg_launch (Real vs Int handles) */
     int32_t rank;             /**< 0 scalar, 1 vector, 2 matrix: the per-sample component; eg_bind and eg_launch */
-    int32_t like_slot;        /**< an adjoint plane sized like this LOOKUP slot (eg_bind shape), -1: none */
+    int32_t like_slot;        /**< an adjoint plane sized like this LOOKUP slot (eg_bind shape: the planes bound to the two slots have the same ndim and extents), -1: none */
     int32_t n_gather;         /**< entries of ``gather``: 0, or the launch's n_lane_axes */
     int32_t reserved0;
     const int64_t* shape;     /**< ``rank`` extents, NULL when rank is 0; the plane is (*shape, lanes) unless the role has a runtime length */

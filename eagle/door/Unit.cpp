@@ -74,6 +74,7 @@ SlotFacts read_slot(const eg_unit_slot* in, const std::string& unit, int index) 
     facts.role = s.role;
     facts.dtype = s.dtype;
     facts.name = s.name ? s.name : "";
+    facts.like = s.like_slot;
     facts.rank = s.rank;
     for (int i = 0; i < s.rank; ++i) {
         if (s.shape[i] < 1)
@@ -385,6 +386,14 @@ void read_body(const eg_unit_meta& m, void* library, bool device_only, eg_unit_s
         refuse(EG_BAD_REQUEST, "meta that contradicts itself: unit '" + unit.name + "' n_slots " +
                std::to_string(body.n_slots));
     for (int i = 0; i < body.n_slots; ++i) unit.slots.push_back(read_slot(body.slots[i], unit.name, i));
+    for (int i = 0; i < body.n_slots; ++i) {    // a plane sized like another slot's: that slot is a LOOKUP of this unit
+        const SlotFacts& s = unit.slots[static_cast<std::size_t>(i)];
+        if (s.like == -1) continue;
+        const std::string at = "meta that contradicts itself: unit '" + unit.name + "' slot " + std::to_string(i) + " ('" + s.name + "') like_slot " + std::to_string(s.like);
+        if (s.like < 0 || s.like >= body.n_slots) refuse(EG_BAD_REQUEST, at + " names no slot (the unit has " + std::to_string(body.n_slots) + ")");
+        const SlotFacts& l = unit.slots[static_cast<std::size_t>(s.like)];
+        if (l.role != EG_ROLE_LOOKUP) refuse(EG_BAD_REQUEST, at + " names slot '" + l.name + "', role " + std::to_string(l.role) + ", which is not a LOOKUP");
+    }
     read_made(body, library, device_only, unit);
     read_dispatch(body, unit);
     read_team_planes(body, unit);
@@ -826,11 +835,12 @@ void resolve_stages(eg_ctx& ctx, const eg_unit_load_desc& d, eg_unit_s& unit) {
                 }
             }
         }
-        for (const StageFacts& st : unit.stages) {    // a block sum's output: the WIDE_OUT slot a KEYS stage writes holds that stage's keys
+        for (const StageFacts& st : unit.stages) {    // a block sum's output: the WIDE_OUT slot a KEYS stage writes holds that stage's keys (when the source slot is itself a WIDE_OUT)
             if (st.grid != EG_GRID_KEYS) continue;
             for (std::size_t j = 0; j < st.unit->slots.size(); ++j) {
                 if (st.source_of[j] < 0 || st.unit->slots[j].role != EG_ROLE_WIDE_OUT) continue;
                 SlotFacts& src = unit.slots[static_cast<std::size_t>(st.source_of[j])];
+                if (src.role != EG_ROLE_WIDE_OUT) continue;    // a block sum's output is a WIDE_OUT of the source too; an ACCUM_OUT the stage writes by index is not
                 if (src.keys_of >= 0 && src.keys_of != st.keyed)
                     refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': slot '" + src.name + "' is written by KEYS stages of two keyed records, which is not written");
                 src.keys_of = st.keyed;
@@ -883,6 +893,10 @@ void resolve_segmented(eg_ctx& ctx, const eg_unit_load_desc& d, eg_unit_s& unit)
                 ++m->refs;
                 S.held.push_back(m);
             }
+            for (const SlotFacts& sl : m->slots)
+                if (m != &unit && sl.like >= 0)
+                    refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': the " + what + " '" + m->name + "' of dispatch group '" + group->name +
+                           "' has the slot '" + sl.name + "' sized like another slot: not written in a SEGMENTED group");
             if (!m->companions.empty() || !m->cells.empty() || m->derived.present || m->index_count_slot >= 0 || m->finish.steps_slot >= 0)
                 refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': the " + what + " '" + m->name + "' of dispatch group '" + group->name +
                        "' has cells, companions, a derived role, an index set or a steps word: not written in a SEGMENTED group");

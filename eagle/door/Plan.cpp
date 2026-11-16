@@ -256,6 +256,28 @@ void check_bind(const eg_ctx& ctx, const eg_plan_s& plan, const eg_bind_desc& d)
             refuse(EG_BAD_REQUEST, "uniform for slot " + std::to_string(d.uniform_slots[i]) + " is NULL");
     }
     if (plan.unit->index_map_slot >= 0) check_index_set(plan, d);
+    const auto bound_plane = [&](int slot) -> const eg_plane_s* {    // this call's plane for the slot, else the one it holds
+        for (int i = 0; i < d.n_planes; ++i)
+            if (d.plane_slots[i] == slot) return d.planes[i];
+        return plan.bindings[static_cast<std::size_t>(slot)].plane;
+    };
+    for (int s = 0; s < n_slots; ++s) {    // a plane sized like a LOOKUP's: checked when both are known, so whichever of the two is bound last (or again) checks the pair
+        const std::int32_t like = plan.unit->slots[static_cast<std::size_t>(s)].like;
+        if (like < 0) continue;
+        const eg_plane_s *p = bound_plane(s), *l = bound_plane(like);
+        if (p == nullptr || l == nullptr || (!seen[s] && !seen[like])) continue;
+        const DLTensor &a = p->tensor->dl_tensor, &b = l->tensor->dl_tensor;
+        const auto shape_of = [](const DLTensor& t) {
+            std::string r = "(";
+            for (int i = 0; i < t.ndim; ++i) r += (i ? ", " : "") + std::to_string(t.shape[i]);
+            return r + ")";
+        };
+        bool same = a.ndim == b.ndim;
+        for (int i = 0; same && i < a.ndim; ++i) same = a.shape[i] == b.shape[i];
+        if (!same)
+            refuse(EG_BAD_REQUEST, "slot " + std::to_string(s) + " ('" + plan.unit->slots[static_cast<std::size_t>(s)].name + "') is sized like slot " + std::to_string(like) + " ('" +
+                   plan.unit->slots[static_cast<std::size_t>(like)].name + "'): its plane is " + shape_of(a) + ", that slot's is " + shape_of(b));
+    }
 }
 
 /** @brief The device tag a view of @p plan carries (the device id stays 0, as ``_plan_pack`` writes it). */

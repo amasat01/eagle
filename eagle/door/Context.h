@@ -81,6 +81,7 @@ struct SlotFacts {
     bool made = false;                        ///< eagle's own plane (a companion): never bound by the caller
     bool cell = false;                        ///< a cell's slot: the caller binds the finished (1,) cell, the kernel reads eagle's rows
     std::int32_t keys_of = -1;                ///< a WIDE_OUT slot a KEYS stage writes (a block sum's output): the keyed record whose keys it holds, else -1
+    std::int32_t like = -1;                   ///< a plane sized like the bound plane of this LOOKUP slot (its ndim and extents), else -1
     bool optional_made = false;               ///< eagle makes the plane unless the caller binds one (the AUTO mix counters)
     std::int64_t min_elements = 0;            ///< a caller's plane of an optional_made slot holds at least this many elements
 };
