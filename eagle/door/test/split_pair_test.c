@@ -14,6 +14,7 @@
  *   out <name> <f64|f32|i32> <ndim> <extents...>      (starts zeroed; file <row>.<name>.out: the old path's result)
  *   ink  <name> <f64|f32|i32> <count>                 (a plane of <count> elements with no lane axis: a table; file <row>.<name>.in)
  *   outk <name> <f64|f32|i32> <count>                 (the same, an output: a block sum's keys; file <row>.<name>.out)
+ *   outp <name> <f64|f32|i32> <ndim> <extents...>     (an output plane of exactly these extents, no lane axis added: a sink's (*payload, *named axes); file <row>.<name>.out)
  *   uni <name> <value>                            (a float64 uniform)
  *   cell <name>                                   (a cell the caller receives: one float64, the fold of the stages' rows; file <row>.<name>.out)
  *   skip <name>                                   (a slot eagle makes: the stage's own scratch; takes a slot index)
@@ -52,7 +53,8 @@ struct pl {
 /* the element types a plane may have: 0 f64, 1 i32, 2 u32, 3 b8 (a bool byte) */
 static int ty_of(const char* ty) { return strcmp(ty, "i32") == 0 ? 1 : strcmp(ty, "u32") == 0 ? 2 : strcmp(ty, "b8") == 0 ? 3 : strcmp(ty, "i64") == 0 ? 4 : 0; }
 static size_t esz(const struct pl* q) { return q->is_f32 ? 4 : q->is_int == 0 || q->is_int == 4 ? 8 : q->is_int == 3 ? 1 : 4; }
-static int is_out(const struct pl* q) { return strcmp(q->kind, "out") == 0 || strcmp(q->kind, "outk") == 0 || strcmp(q->kind, "cell") == 0; }
+static int is_out(const struct pl* q) { return strcmp(q->kind, "out") == 0 || strcmp(q->kind, "outk") == 0 || strcmp(q->kind, "outp") == 0 || strcmp(q->kind, "cell") == 0; }
+static int is_exact(const struct pl* q) { return strcmp(q->kind, "outp") == 0; }    /* the extents are the plane's, no lane axis follows */
 static int is_flat(const struct pl* q) { return strcmp(q->kind, "ink") == 0 || strcmp(q->kind, "outk") == 0; }
 
 struct pt {
@@ -227,7 +229,7 @@ int main(int argc, char** argv) {
     for (int i = 0; i < np; ++i) {
         struct pl* q = &pls[i];
         if (strcmp(q->kind, "uni") == 0 || strcmp(q->kind, "skip") == 0) continue;
-        q->count = strcmp(q->kind, "cell") == 0 ? 1 : is_flat(q) ? q->dims[0] : n;
+        q->count = strcmp(q->kind, "cell") == 0 ? 1 : is_flat(q) ? q->dims[0] : is_exact(q) ? 1 : n;
         if (strcmp(q->kind, "cell") != 0 && !is_flat(q))
             for (int d = 0; d < q->ndim; ++d) q->count *= q->dims[d];
         const size_t bytes = (size_t)q->count * esz(q);
@@ -300,7 +302,7 @@ int main(int argc, char** argv) {
             if (is_out(q)) memset(q->buf, 0, (size_t)q->count * esz(q));
             memset(&t[i], 0, sizeof(t[i]));
             for (int d2 = 0; d2 < q->ndim; ++d2) t[i].shape[d2] = q->dims[d2];
-            if (strcmp(q->kind, "cell") == 0) { t[i].shape[0] = 1; } else if (is_flat(q)) { t[i].shape[0] = q->dims[0]; } else t[i].shape[q->ndim] = n;
+            if (strcmp(q->kind, "cell") == 0) { t[i].shape[0] = 1; } else if (is_flat(q)) { t[i].shape[0] = q->dims[0]; } else if (!is_exact(q)) t[i].shape[q->ndim] = n;
             t[i].managed.version.major = DLPACK_MAJOR_VERSION;
             t[i].managed.dl_tensor.data = q->buf;
             t[i].managed.dl_tensor.device.device_type = kDLCPU;
@@ -310,7 +312,7 @@ int main(int argc, char** argv) {
             t[i].managed.dl_tensor.data = dev[i];
             t[i].managed.dl_tensor.device.device_type = kDLCUDA;
 #endif
-            t[i].managed.dl_tensor.ndim = strcmp(q->kind, "cell") == 0 || is_flat(q) ? 1 : q->ndim + 1;
+            t[i].managed.dl_tensor.ndim = strcmp(q->kind, "cell") == 0 || is_flat(q) ? 1 : is_exact(q) ? q->ndim : q->ndim + 1;
             t[i].managed.dl_tensor.dtype.code = q->is_int == 0 ? kDLFloat : q->is_int == 1 || q->is_int == 4 ? kDLInt : q->is_int == 2 ? kDLUInt : kDLBool;
             t[i].managed.dl_tensor.dtype.bits = (uint8_t)(esz(q) * 8);
             t[i].managed.dl_tensor.dtype.lanes = 1;

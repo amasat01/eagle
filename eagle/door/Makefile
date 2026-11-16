@@ -377,13 +377,13 @@ $(SPLIT_TEST): test/split_pair_test.c test/pair_util.h eg_door.h $(LIB)
 
 define SPLIT_RULES
 $(OUT)/libpair_split_$(1).so: $$(KERNELS_$(1)) $$(META_$(1)) eg_door.h eg_unit_meta.h | check-inputs
-	@mkdir -p $(OUT)
-	$$(CXX) $$(PAIR_HOST_FLAGS) -I$$(AETHER_INCLUDE) -I$$(AETHER_INCLUDE)/eagle -I$$(PAIR_WING_DIR) -c $$(firstword $$(KERNELS_$(1))) -o $(OUT)/split_$(1)_first.o
+	@mkdir -p $(OUT)/split_$(1)
+	$$(CXX) $$(PAIR_HOST_FLAGS) -I$$(AETHER_INCLUDE) -I$$(AETHER_INCLUDE)/eagle -I$$(PAIR_WING_DIR) -c $$(firstword $$(KERNELS_$(1))) -o $(OUT)/split_$(1)/first.o
 	@for k in $$(wordlist 2,99,$$(KERNELS_$(1))); do n=$$$$(basename $$$$k .cpp | tr . _); \
 	  $$(CXX) $$(PAIR_HOST_FLAGS) -Deagle_abi_tag=s_$$$${n}_abi_tag -Deagle_layout_sizes=s_$$$${n}_layout_sizes \
-	    -I$$(AETHER_INCLUDE) -I$$(AETHER_INCLUDE)/eagle -I$$(PAIR_WING_DIR) -c $$$$k -o $(OUT)/split_$(1)_$$$${n}.o || exit 1; done
-	$$(CC) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$$(ROOT) -c $$(META_$(1)) -o $(OUT)/split_$(1)_meta.o
-	$$(CXX) -shared -o $$@ $(OUT)/split_$(1)_*.o
+	    -I$$(AETHER_INCLUDE) -I$$(AETHER_INCLUDE)/eagle -I$$(PAIR_WING_DIR) -c $$$$k -o $(OUT)/split_$(1)/$$$${n}.o || exit 1; done
+	$$(CC) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$$(ROOT) -c $$(META_$(1)) -o $(OUT)/split_$(1)/meta.o
+	$$(CXX) -shared -o $$@ $(OUT)/split_$(1)/*.o
 
 pair-split-$(1): symbols $(OUT)/libpair_split_$(1).so $$(SPLIT_TEST)
 	$$(SPLIT_TEST) $(OUT)/libpair_split_$(1).so "$$(ORACLE_$(1))" $(1) $$(SPLIT_ARGS_$(1))
@@ -520,10 +520,10 @@ $(SPLIT_DEVICE_TEST): test/split_pair_test.c test/pair_util.h eg_door.h $(LIB) |
 
 define SPLIT_DEVICE_RULES
 $(OUT)/libpair_dev_split_$(1).so: $$(foreach p,$$(KERNELS_CUDA_$(1)),$$(word 2,$$(subst =, ,$$(p)))) $$(META_CUDA_$(1)) eg_door.h eg_unit_meta.h | check-inputs check-cuda
-	@mkdir -p $(OUT)
-	$$(foreach p,$$(KERNELS_CUDA_$(1)),$$(PAIR_NVCC) -cubin $$(PAIR_DEVICE_FLAGS) -ccbin $$(PAIR_CCBIN) -I $$(AETHER_INCLUDE) -I $$(AETHER_INCLUDE)/eagle -I$$(PAIR_CUDA_WING_DIR) $$(word 2,$$(subst =, ,$$(p))) -o $(OUT)/sd_$(1)_$$(word 1,$$(subst =, ,$$(p))).image && $$(call embed,$(OUT)/sd_$(1)_$$(word 1,$$(subst =, ,$$(p))).image,$$(word 1,$$(subst =, ,$$(p)))__image,$(OUT)/sd_$(1)_$$(word 1,$$(subst =, ,$$(p)))_image.o) ; )
-	$$(CC) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$$(ROOT) -c $$(META_CUDA_$(1)) -o $(OUT)/sd_$(1)_meta.o
-	$$(CC) -shared -o $$@ $(OUT)/sd_$(1)_*.o
+	@mkdir -p $(OUT)/sd_$(1)
+	$$(foreach p,$$(KERNELS_CUDA_$(1)),$$(PAIR_NVCC) -cubin $$(PAIR_DEVICE_FLAGS) -ccbin $$(PAIR_CCBIN) -I $$(AETHER_INCLUDE) -I $$(AETHER_INCLUDE)/eagle -I$$(PAIR_CUDA_WING_DIR) $$(word 2,$$(subst =, ,$$(p))) -o $(OUT)/sd_$(1)/$$(word 1,$$(subst =, ,$$(p))).image && $$(call embed,$(OUT)/sd_$(1)/$$(word 1,$$(subst =, ,$$(p))).image,$$(word 1,$$(subst =, ,$$(p)))__image,$(OUT)/sd_$(1)/$$(word 1,$$(subst =, ,$$(p)))_image.o) ; )
+	$$(CC) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$$(ROOT) -c $$(META_CUDA_$(1)) -o $(OUT)/sd_$(1)/meta.o
+	$$(CC) -shared -o $$@ $(OUT)/sd_$(1)/*.o
 
 pair-device-split-$(1): symbols $(OUT)/libpair_dev_split_$(1).so $$(SPLIT_DEVICE_TEST)
 endef

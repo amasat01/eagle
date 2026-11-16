@@ -76,6 +76,35 @@ bool dtype_ok(const DLDataType& t, const SlotFacts& s, std::int32_t scalar) {
     }
 }
 
+/** @brief Check the shape of a sink's plane (ACCUM_OUT, or a WIDE_OUT block sum's output): the slot's payload extents, then the named axes the meta states (a lane axis's label shares that axis's
+ *  extent, another is the caller's), so (*payload, *axes). A sink that states neither is any compact plane. */
+void check_sink_shape(const eg_plan_s& plan, const SlotFacts& s, const DLTensor& t, const std::string& what) {
+    const std::size_t payload = s.shape.size(), named = s.axes.size();
+    if (t.ndim < 1) refuse(EG_BAD_REQUEST, what + ": a plane of one dimension or more is expected");
+    if (payload + named == 0) return;
+    if (t.ndim != static_cast<int>(payload + named)) {
+        std::string want = "(";
+        for (std::int64_t e : s.shape) want += std::to_string(e) + ", ";
+        refuse(EG_BAD_REQUEST, what + ": a plane of " + std::to_string(payload + named) + " dimension(s), the slot's " + std::to_string(payload) +
+               " payload extent(s) " + want + "then its " + std::to_string(named) + " named axis(es)) is expected");
+    }
+    for (std::size_t i = 0; i < payload; ++i)
+        if (t.shape[i] != s.shape[i])
+            refuse(EG_BAD_REQUEST, what + ": axis " + std::to_string(i) + " has extent " + std::to_string(t.shape[i]) +
+                   ", the slot's payload has " + std::to_string(s.shape[i]));
+    std::int64_t fixed = 1;
+    for (std::int64_t e : plan.unit->lane_extents) fixed *= e > 0 ? e : 1;
+    for (std::size_t i = 0; i < named; ++i) {    // a lane axis's label shares that axis's extent
+        const SlotFacts::Axis& a = s.axes[i];
+        const std::int64_t want = a.lane < 0 ? a.extent
+                                  : plan.unit->lane_extents[static_cast<std::size_t>(a.lane)] > 0
+                                      ? plan.unit->lane_extents[static_cast<std::size_t>(a.lane)] : plan.n_samples / fixed;
+        if (want >= 0 && t.shape[payload + i] != want)
+            refuse(EG_BAD_REQUEST, what + ": axis " + std::to_string(payload + i) + " has extent " + std::to_string(t.shape[payload + i]) +
+                   ", the unit's named axis has " + std::to_string(want));
+    }
+}
+
 /** @brief Check @p plane against slot @p slot of @p plan (dtype, shape, device, write access). */
 void check_plane(const eg_plan_s& plan, int slot, const eg_plane_s& plane) {
     const SlotFacts& s = plan.unit->slots[slot];
@@ -101,6 +130,7 @@ void check_plane(const eg_plan_s& plan, int slot, const eg_plane_s& plane) {
         const std::int64_t want = k.width * key_count(*plan.unit, k, plan.n_samples);
         if (t.ndim < 1 || elements(t) != want)
             refuse(EG_BAD_REQUEST, what + ": a block sum's output of " + std::to_string(want) + " elements (" + std::to_string(k.width) + " per key) is expected");
+        check_sink_shape(plan, s, t, what);
     } else if (wide(s)) {                       // (rows, n): the rows are the caller's, one value per sample along the last axis
         if (t.ndim != 2 || t.shape[1] != plan.n_samples)
             refuse(EG_BAD_REQUEST, what + ": a plane of shape (rows, " + std::to_string(plan.n_samples) + ") is expected");
@@ -117,23 +147,11 @@ void check_plane(const eg_plan_s& plan, int slot, const eg_plane_s& plane) {
             refuse(EG_BAD_REQUEST, what + ": the index map is one dimension");
         if (slot == plan.unit->index_count_slot && (t.ndim != 1 || t.shape[0] != 1))
             refuse(EG_BAD_REQUEST, what + ": the index count is one cell, shape (1,)");
-    } else if (s.role == EG_ROLE_ACCUM_OUT) {   // a cell: the finished (1,); else the caller's length, along the named axes the meta states
+    } else if (s.role == EG_ROLE_ACCUM_OUT) {   // a cell: the finished (1,); else the caller's length, as (*payload, *named axes) the meta states
         if (s.cell) {
             if (t.ndim != 1 || t.shape[0] != 1) refuse(EG_BAD_REQUEST, what + ": a cell is one element, shape (1,)");
         } else {
-            if (t.ndim < 1 || (!s.axes.empty() && t.ndim != static_cast<int>(s.axes.size())))
-                refuse(EG_BAD_REQUEST, what + ": a plane of " + std::to_string(s.axes.empty() ? 1 : s.axes.size()) + " dimension(s) or more is expected");
-            std::int64_t fixed = 1;
-            for (std::int64_t e : plan.unit->lane_extents) fixed *= e > 0 ? e : 1;
-            for (std::size_t i = 0; i < s.axes.size(); ++i) {    // a lane axis's label shares that axis's extent
-                const SlotFacts::Axis& a = s.axes[i];
-                const std::int64_t want = a.lane < 0 ? a.extent
-                                          : plan.unit->lane_extents[static_cast<std::size_t>(a.lane)] > 0
-                                              ? plan.unit->lane_extents[static_cast<std::size_t>(a.lane)] : plan.n_samples / fixed;
-                if (want >= 0 && t.shape[i] != want)
-                    refuse(EG_BAD_REQUEST, what + ": axis " + std::to_string(i) + " has extent " + std::to_string(t.shape[i]) +
-                           ", the unit's named axis has " + std::to_string(want));
-            }
+            check_sink_shape(plan, s, t, what);
         }
     } else {                             // (*shape, n): the slot's extents, then one value per sample
         bool ok = t.ndim == s.rank + 1 && t.shape[s.rank] == plan.n_samples;

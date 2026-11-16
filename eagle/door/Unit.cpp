@@ -59,7 +59,7 @@ SlotFacts read_slot(const eg_unit_slot* in, const std::string& unit, int index) 
         s.role != EG_ROLE_ACCUM_OUT && s.role != EG_ROLE_NSAMPLES && s.role != EG_ROLE_WIDE_IN && s.role != EG_ROLE_WIDE_OUT)
         refuse(EG_NOT_WRITTEN, named + ": role " + std::to_string(s.role) + " is not written yet (this build binds "
                "MUTABLE, PER_SAMPLE, VEC_IN, MAT_IN, OUT, WIDE_IN, WIDE_OUT, ACCUM_OUT, LOOKUP, UNIFORM, NSAMPLES and TERMINATED)");
-    if (s.rank != 0 && !plane && !(s.flags & EG_SLOT_SHARED))
+    if (s.rank != 0 && !plane && !(s.flags & EG_SLOT_SHARED) && s.role != EG_ROLE_ACCUM_OUT && s.role != EG_ROLE_WIDE_OUT)
         refuse(EG_NOT_WRITTEN, named + ": a slot of rank > 0 outside the plane roles is not written yet");
     if (s.rank != 0 && s.role == EG_ROLE_PER_SAMPLE)
         refuse(EG_BAD_REQUEST, "meta that contradicts itself: " + named + " is PER_SAMPLE of rank > 0");
