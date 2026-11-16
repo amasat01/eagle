@@ -204,8 +204,8 @@ int main(int argc, char** argv) {
         bad.n_derived = 1;
         bad.derived_roles = tape_role;
         bad.derived_units = &unit;
-        check(eg_runner_new(ctx, &bad, &none) == EG_NOT_WRITTEN && reason_has(ctx, "EG_RUN_RECORD of an automatic unit on a device"),
-              "automatic unit: EG_RUN_RECORD refused NOT_WRITTEN by name");
+        check(eg_runner_new(ctx, &bad, &none) == EG_BAD_REQUEST && reason_has(ctx, "has no derived record"),
+              "automatic unit: EG_RUN_RECORD over a unit with no derived record refused BAD_REQUEST by name");
         struct run_planes two;
         eg_plan* halves = planes_new(ctx, &two, 1000, n) ? plan_bound(ctx, unit, 1000, 2, &two) : NULL;
         bad = runner_desc(&halves, max_steps);

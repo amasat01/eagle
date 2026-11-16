@@ -184,6 +184,12 @@ void gather(eg_ctx* dev, void* dst, std::int64_t dst_ld, const void* src, std::i
     else diff::gatherColumns(dst, dst_ld, src, src_ld, index, count, rows, bytes);
 }
 
+/** @brief The int64 steps word of a K-step launch: written on the host, or filled on @p dev's stream. */
+void set_word(eg_ctx* dev, Buf& word, std::int64_t k) {
+    if (dev != nullptr) device_columns(*dev, 2, word.data(), 1, nullptr, 0, nullptr, 1, 1, 8, k);
+    else std::memcpy(word.data(), &k, sizeof(k));
+}
+
 /** @brief Run @p plan over its first @p count samples: the host team, or one device launch with the block of @p of samples. */
 void run_on(eg_plan_s& plan, int threads, std::int64_t count, std::int64_t of) {
     if (plan.structure == EG_STRUCTURE_DEVICE) device_launch_prefix(plan, count, of);
@@ -601,11 +607,6 @@ void record_new(eg_ctx& ctx, eg_runner_s& runner, const eg_runner_desc& d) {
     for (std::int32_t i = 0; i < d.n_derived && d.derived_roles != nullptr; ++i) fused = fused || d.derived_roles[i] == EG_DERIVED_TAPE_FUSED;
     if (fused && ev) refuse(EG_NOT_WRITTEN, "events refine with the K-step twin is not written in this build of the door");
     if (runner.dev.ctx != nullptr) {   // a DEVICE record: the one-step run, its active set included; the rest by name
-        if (fused)
-            refuse(EG_NOT_WRITTEN, "EG_RUN_RECORD with the K-step twin (EG_DERIVED_TAPE_FUSED) on a device is not written in "
-                   "this build of the door");
-        if (d.steps_reverse == EG_STEPS_REVERSE_FUSED)
-            refuse(EG_NOT_WRITTEN, "steps_reverse FUSED on a device is not written in this build of the door");
     }
     eg_unit_s* twin = derived_of(ctx, d, fused ? EG_DERIVED_TAPE_FUSED : EG_DERIVED_TAPE, ev);
     eg_unit_s* vjp = rec ? derived_of(ctx, d, EG_DERIVED_STEP_VJP, ev) : nullptr;
@@ -616,7 +617,7 @@ void record_new(eg_ctx& ctx, eg_runner_s& runner, const eg_runner_desc& d) {
     if (fusedrev && ev) refuse(EG_NOT_WRITTEN, "steps_reverse FUSED with events refine is not written in this build of the door");
     eg_unit_s* fvjp = fusedrev ? derived_of(ctx, d, EG_DERIVED_FUSED_VJP, ev) : nullptr;
     if (runner.dev.ctx != nullptr)
-        for (const eg_unit_s* u : { twin, vjp, newton, guard })
+        for (const eg_unit_s* u : { twin, vjp, fvjp, newton, guard })
             if (u != nullptr && u->function == 0) refuse(EG_NOT_WRITTEN, "unit '" + u->name + "' on DEVICE: the unit has no device image");
     const std::int32_t want = refine ? 3 : rrefine ? 5 : fusedrev ? 3 : 2;
     if (d.n_derived != want)
@@ -1085,7 +1086,7 @@ void record_forward(eg_ctx& ctx, eg_runner_s& runner, eg_run_report* report) {
     eg_plan_s& fwd = *r.fwd;
     eg_ctx* D = primal.structure == EG_STRUCTURE_DEVICE ? &ctx : nullptr;   // a DEVICE record: eagle's planes on the device
     r.steps.resize(static_cast<std::size_t>(n) * 8, D);
-    r.fword.resize(8);
+    r.fword.resize(8, D);
     r.dummy.resize(static_cast<std::size_t>(r.width * std::max<std::int64_t>(n, 1)) * r.scalar, D);
     const bool refine = r.rf != nullptr;
     if (refine) r.tape.resize(static_cast<std::size_t>(r.width * std::max<std::int64_t>(n, 1)) * r.scalar, D);
@@ -1228,7 +1229,7 @@ void record_forward(eg_ctx& ctx, eg_runner_s& runner, eg_run_report* report) {
         },
         [&](std::int64_t j, std::int64_t k) {
             const std::int64_t live = runner.active && D == nullptr ? static_cast<std::int64_t>(act.count) : n;   // a device launch covers all n: the kernel reads the count itself
-            if (r.fused) std::memcpy(r.fword.data(), &k, sizeof(k));
+            if (r.fused) set_word(D, r.fword, k);
             ++launches;
             if (live > 0) run_on(fwd, threads, live, n);
             at = j + k;
@@ -1534,7 +1535,7 @@ void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, con
     for (Carried& c : r.state) bind_raw(rec, c.twin_slot, c.buf.data(), static_cast<std::uint64_t>(m));
     for (Carried& c : r.reads) bind_raw(rec, c.twin_slot, c.buf.data(), static_cast<std::uint64_t>(m));
     Buf rword;
-    rword.resize(8);
+    rword.resize(8, D);
     if (r.fused) bind_raw(rec, t.fused_steps_slot, rword.data(), 1);
     bind_raw(rec, t.tape_slot, tape.data(), static_cast<std::uint64_t>(m));
     bind_int64(rec, t.tape_on_slot, 1);
@@ -1565,7 +1566,7 @@ void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, con
         else if (vs.kind == VjpSlot::STEP) bind_raw(vjp, s, step_plane.data(), static_cast<std::uint64_t>(m));
     }
     Buf entry_flag;   // a K-step vjp's entry flag: no sample has stopped at its window's start
-    entry_flag.resize(static_cast<std::size_t>(std::max<std::int64_t>(m, 1)) * 8);
+    entry_flag.resize(static_cast<std::size_t>(std::max<std::int64_t>(m, 1)) * 8, D);
     if (r.fvjp != nullptr)
         for (std::size_t i = 0; i < r.fvjp_slots.size(); ++i) {
             const VjpSlot& vs = r.fvjp_slots[i];
@@ -1660,7 +1661,7 @@ void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, con
                     if (chain.begin(c, len)) return;   // a full window of a FUSED reverse recomputes inside its vjp launch
                     for (std::int64_t j = c; j < c + len;) {
                         const std::int64_t k = r.fused ? std::min(r.max_k, c + len - j) : 1;   // the forward's launch shape, never across a window
-                        if (r.fused) std::memcpy(rword.data(), &k, sizeof(k));
+                        if (r.fused) set_word(D, rword, k);
                         rec_count = static_cast<std::uint32_t>(live[static_cast<std::size_t>(j)]);
                         if (D != nullptr && r.twin_unit->active_map_slot >= 0) device_write(*D, dcount.data(), &rec_count, sizeof(rec_count));
                         run_on(rec, threads, live[static_cast<std::size_t>(j)], m);

@@ -746,9 +746,6 @@ void device_runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out)
     if (k == EG_STEPS_AUTO) {    // the no-graph entries: no loop, no loop cells
         if (d.events == EG_EVENTS_REFINE)
             refuse(EG_NOT_WRITTEN, "events REFINE of an automatic unit on a device is not written in this build of the door");
-        if (d.flags & EG_RUN_RECORD)
-            refuse(EG_NOT_WRITTEN, "EG_RUN_RECORD of an automatic unit on a device (the K-step twin) is not written in this "
-                   "build of the door");
         if (d.flags & EG_RUN_REORDER)
             refuse(EG_NOT_WRITTEN, "EG_RUN_REORDER (reordering the planes by the active set) with automatic steps on a "
                    "device is not written in this build of the door");
@@ -758,9 +755,12 @@ void device_runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out)
             runner->max_steps = d.max_steps;
             runner->dev.ctx = &ctx;
             Current current(ctx.dev);
-            fast_runner_setup(ctx, d, *runner);
+            // A recorded run of an automatic unit runs its K-step twin (host/Reverse.cpp): no entry of its own to pick.
+            if (d.flags & EG_RUN_RECORD) record_new(ctx, *runner, d);
+            else fast_runner_setup(ctx, d, *runner);
             ctx.runners.insert(runner);
         } catch (...) {
+            record_free(ctx, *runner);
             delete runner;
             throw;
         }

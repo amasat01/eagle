@@ -158,19 +158,23 @@ static void record_and_reverse(eg_ctx* ctx, eg_runner* r, const struct dplanes* 
 }
 
 int main(int argc, char** argv) {
-    if (argc != 8 && argc != 10 && argc != 11) {
+    if (argc != 8 && argc != 9 && argc != 10 && argc != 11) {
         fprintf(stderr, "usage: %s <library> <oracle dir> <primal digest> <twin digest> <vjp digest> <primal name> <window> [<every> <n> [<theta>]]\n", argv[0]);
         return 2;
     }
     const char *lib = argv[1], *dir = argv[2], *base = argv[6];
-    const long window = atol(argv[7]), every = argc >= 10 ? atol(argv[8]) : 0;
-    if (argc >= 10) {
+    /* "auto" (argc 9): the K-step twin of an automatic unit; "fused" and the K-step vjp's digest (argc 10): steps_reverse FUSED over a K-step primal */
+    const int automode = argc == 9 && strcmp(argv[8], "auto") == 0, fusedmode = argc == 10 && strcmp(argv[8], "fused") == 0;
+    const long window = atol(argv[7]), every = argc >= 10 && !fusedmode ? atol(argv[8]) : 0;
+    if (argc >= 10 && !fusedmode) {
         N = atol(argv[9]);
         mask_slot = 7;
         c_slot = 8;
         dt_slot = 9;
     }
     if (argc == 11) theta = atof(argv[10]);
+    uint8_t fdg[EG_DIGEST_BYTES];
+    if (fusedmode && !parse_digest(argv[9], fdg)) return 2;
     uint8_t dg[3][EG_DIGEST_BYTES];
     static int64_t steps[PMAX];
     if (!parse_digest(argv[3], dg[0]) || !parse_digest(argv[4], dg[1]) || !parse_digest(argv[5], dg[2]) ||
@@ -191,13 +195,13 @@ int main(int argc, char** argv) {
     eg_ctx* ctx = NULL;
     check(eg_ctx_new(&st, &ctx) == EG_OK, "eg_ctx_new device context (device 0)");
     char tn[64], vn[64], what[200];
-    snprintf(tn, sizeof(tn), "%s_tape", base);
-    snprintf(vn, sizeof(vn), "%s_step_vjp", base);
+    snprintf(tn, sizeof(tn), fusedmode ? "rr_pend_tape" : "%s_tape", base);
+    snprintf(vn, sizeof(vn), fusedmode ? "rr_pend_step_vjp" : "%s_step_vjp", base);
     eg_unit* p = load(ctx, lib, base, dg[0]);
-    eg_unit* units[2] = { load(ctx, lib, tn, dg[1]), load(ctx, lib, vn, dg[2]) };
+    eg_unit* units[3] = { load(ctx, lib, tn, dg[1]), load(ctx, lib, vn, dg[2]), fusedmode ? load(ctx, lib, "rr_pend_fused_vjp", fdg) : NULL };
     snprintf(what, sizeof(what), "%s: the primal, its taping twin and its step vjp load (PTX images) on the device context", base);
-    check(p && units[0] && units[1], what);
-    if (p && units[0] && units[1]) {
+    check(p && units[0] && units[1] && (!fusedmode || units[2]), what);
+    if (p && units[0] && units[1] && (!fusedmode || units[2])) {
         static const double zeros[PMAX];
         static const uint8_t none[PMAX];
         struct dplanes s = { .k = 0 };
@@ -216,11 +220,12 @@ int main(int argc, char** argv) {
         pd.policy = EG_REDUCE_COMPENSATED;
         pd.n_samples = N;
         eg_plan* plan = NULL;
-        const eg_derived_role roles[3] = { EG_DERIVED_TAPE, EG_DERIVED_STEP_VJP, EG_DERIVED_FUSED_VJP };
-        eg_unit* const derived[3] = { units[0], units[1], units[1] };
+        const eg_derived_role roles[3] = { automode || fusedmode ? EG_DERIVED_TAPE_FUSED : EG_DERIVED_TAPE, EG_DERIVED_STEP_VJP, EG_DERIVED_FUSED_VJP };
+        eg_unit* const derived[3] = { units[0], units[1], units[2] };
         struct eg_runner_desc d = runner_desc(&plan, STEPS);
         d.flags = EG_RUN_RECORD;
-        d.n_derived = 2;
+        d.n_derived = fusedmode ? 3 : 2;
+        if (fusedmode) d.steps_reverse = EG_STEPS_REVERSE_FUSED;
         d.derived_roles = roles;
         d.derived_units = derived;
         d.window = window;
@@ -244,20 +249,14 @@ int main(int argc, char** argv) {
             /* a freed runner no longer holds the plan's active set: the refusals below are the request's own */
             eg_runner* none_r = NULL;
             struct eg_runner_desc bad = d;
-            const eg_derived_role fused_roles[2] = { EG_DERIVED_TAPE_FUSED, EG_DERIVED_STEP_VJP };
-            bad.derived_roles = fused_roles;
-            check(eg_runner_new(ctx, &bad, &none_r) == EG_NOT_WRITTEN && reason_has(ctx, "K-step twin") && reason_has(ctx, "on a device") && none_r == NULL,
-                  "device record: the K-step twin (EG_DERIVED_TAPE_FUSED) refused NOT_WRITTEN by name");
-            bad = d;
-            bad.steps_reverse = EG_STEPS_REVERSE_FUSED;
-            bad.n_derived = 3;
-            check(eg_runner_new(ctx, &bad, &none_r) == EG_NOT_WRITTEN && reason_has(ctx, "steps_reverse FUSED on a device") && none_r == NULL,
-                  "device record: steps_reverse FUSED refused NOT_WRITTEN by name");
+            bad.steps_reverse = EG_STEPS_REVERSE_AUTO;
+            check(eg_runner_new(ctx, &bad, &none_r) == EG_NOT_WRITTEN && reason_has(ctx, "steps_reverse AUTO") && none_r == NULL,
+                  "device record: steps_reverse AUTO refused NOT_WRITTEN by name");
         }
         if (plan) eg_plan_free(ctx, plan);
         dfree(ctx, &s);
     }
-    for (int i = 0; i < 2; ++i)
+    for (int i = 0; i < 3; ++i)
         if (units[i]) eg_unit_free(ctx, units[i]);
     if (p) eg_unit_free(ctx, p);
     check(eg_ctx_free(ctx) == EG_OK, "eg_ctx_free");

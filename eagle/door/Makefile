@@ -415,7 +415,7 @@ $(foreach u,$(PAIR_DEVICE_UNITS),$(eval $(call PAIR_DEVICE_RULES,$(u))))
 
 # pair-device-reverse: a recorded run and its reverse on the device, rr_pend and _timed: per unit one library of the old device
 # run's own images (PTX_<unit>, PTX_<unit>_tape, PTX_<unit>_step_vjp: the PTX it loaded) with the host meta (META_reverse,
-# META_timed) whose image fields name them (act: _pend_body, the active-set step: compacting every 4 and 16 steps, and reordering 4096 samples); run $(OUT)/device_reverse_test <library> <oracle dir> <3 digests> <primal> <window>
+# META_timed) whose image fields name them (act: _pend_body, the active-set step: compacting every 4 and 16 steps, and reordering 4096 samples; auto: rr_pend_auto's K-step twin; kstep: steps_reverse FUSED); run $(OUT)/device_reverse_test <library> <oracle dir> <3 digests> <primal> <window>
 # through the GPU pool against the old device run's states, report and gradients.
 cuda_meta = sed 's/M(host_entry, "\([A-Za-z0-9_]*\)_host"), M(device_image, NULL), M(device_function, NULL)\(.*\)EG_IMAGE_NONE\(.*\)M(device_image_size, NULL)/M(host_entry, NULL), M(device_image, "\1__image"), M(device_function, "\1")\2EG_IMAGE_PTX\3M(device_image_size, "\1__image_size")/' $(1) > $(2)
 define DEV_REV_RULES
@@ -433,7 +433,18 @@ endef
 $(eval $(call DEV_REV_RULES,rr_pend,reverse,rr_pend))
 $(eval $(call DEV_REV_RULES,timed,timed,_timed))
 $(eval $(call DEV_REV_RULES,act,act,_pend_body))
-pair-device-reverse: symbols $(OUT)/libpair_dev_rev_rr_pend.so $(OUT)/libpair_dev_rev_timed.so $(OUT)/libpair_dev_rev_act.so $(DEVICE_REVERSE_TEST)
+$(eval $(call DEV_REV_RULES,auto,auto,rr_pend_auto))
+# kstep: steps_reverse FUSED over the K-step primal rr_pend_x4 (K = 4): its twin and step vjp are rr_pend's, plus the K-step vjp.
+$(OUT)/libpair_dev_rev_kstep.so: $(PTX_kstep) $(PTX_kstep_tape) $(PTX_kstep_step_vjp) $(PTX_kstep_fused_vjp) $(META_kstep) eg_door.h eg_unit_meta.h | check-cuda
+	@mkdir -p $(OUT)
+	$(call embed,$(PTX_kstep),rr_pend_x4__image,$(OUT)/dev_rev_kstep_p.o)
+	$(call embed,$(PTX_kstep_tape),rr_pend_tape__image,$(OUT)/dev_rev_kstep_t.o)
+	$(call embed,$(PTX_kstep_step_vjp),rr_pend_step_vjp__image,$(OUT)/dev_rev_kstep_v.o)
+	$(call embed,$(PTX_kstep_fused_vjp),rr_pend_fused_vjp__image,$(OUT)/dev_rev_kstep_f.o)
+	$(call cuda_meta,$(META_kstep),$(OUT)/dev_rev_kstep_meta.c)
+	$(CC) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$(ROOT) -c $(OUT)/dev_rev_kstep_meta.c -o $(OUT)/dev_rev_kstep_meta.o
+	$(CC) -shared -o $@ $(OUT)/dev_rev_kstep_meta.o $(OUT)/dev_rev_kstep_p.o $(OUT)/dev_rev_kstep_t.o $(OUT)/dev_rev_kstep_v.o $(OUT)/dev_rev_kstep_f.o
+pair-device-reverse: symbols $(OUT)/libpair_dev_rev_rr_pend.so $(OUT)/libpair_dev_rev_timed.so $(OUT)/libpair_dev_rev_act.so $(OUT)/libpair_dev_rev_auto.so $(OUT)/libpair_dev_rev_kstep.so $(DEVICE_REVERSE_TEST)
 
 # pair-device-refine: events REFINE (a plain run) and eg_run_events on the device, per case one library of the old device run's own images
 # (PTX_ref_<case>, _tape, _newton, _guard) with the host meta; run $(OUT)/device_refine_test <library> <case> <oracle dir> <4 digests> <max_steps>
