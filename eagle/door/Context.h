@@ -82,6 +82,24 @@ struct FinishFacts {
     std::int64_t steps_max = 0;      ///< AUTO: the most steps one launch takes
 };
 
+/** @brief The element count of @p t (the product of its shape). */
+inline std::int64_t elements(const DLTensor& t) {
+    std::int64_t n = 1;
+    for (int i = 0; i < t.ndim; ++i) n *= t.shape[i];
+    return n;
+}
+
+/** @brief True when @p t is one compact row-major range (no strides, or the compact ones). */
+inline bool compact(const DLTensor& t) {
+    if (t.strides == nullptr) return true;
+    std::int64_t expect = 1;
+    for (int i = t.ndim - 1; i >= 0; --i) {
+        if (t.shape[i] > 1 && t.strides[i] != expect) return false;
+        expect *= t.shape[i];
+    }
+    return true;
+}
+
 }  // namespace door
 }  // namespace eagle
 

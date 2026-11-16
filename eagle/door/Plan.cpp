@@ -58,17 +58,6 @@ std::size_t uniform_bytes(std::int32_t dtype, std::int32_t scalar) {
     }
 }
 
-/** @brief True when @p t is one compact row-major range (no strides, or the compact ones). */
-bool compact(const DLTensor& t) {
-    if (t.strides == nullptr) return true;
-    std::int64_t expect = 1;
-    for (int i = t.ndim - 1; i >= 0; --i) {
-        if (t.shape[i] > 1 && t.strides[i] != expect) return false;
-        expect *= t.shape[i];
-    }
-    return true;
-}
-
 /** @brief True for the roles whose plane has a runtime row count (the handle's extent is the trailing one). */
 bool wide(const SlotFacts& s) { return s.role == EG_ROLE_WIDE_IN || s.role == EG_ROLE_WIDE_OUT; }
 
@@ -334,10 +323,8 @@ void bind(eg_ctx& ctx, eg_plan_s* plan, const eg_bind_desc* desc) {
             bind_mirror(*plan, d.plane_slots[i], data,
                         static_cast<std::uint64_t>(sf.gathered ? t.shape[t.ndim - 1] : plan->n_samples));
         } else {
-            std::int64_t elements = 1;       // a table is read by its element count, the rest by n
-            for (int e = 0; e < t.ndim; ++e) elements *= t.shape[e];
             bind_handle(*plan, d.plane_slots[i], data,
-                        sf.role == EG_ROLE_LOOKUP ? static_cast<std::uint64_t>(elements)
+                        sf.role == EG_ROLE_LOOKUP ? static_cast<std::uint64_t>(elements(t))
                                                   : static_cast<std::uint64_t>(plan->n_samples));
         }
         if (old != nullptr) plane_release(ctx, old);

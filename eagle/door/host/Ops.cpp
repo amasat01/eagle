@@ -30,27 +30,10 @@ bool same_dtype(const DLDataType& a, const DLDataType& b) {
     return a.code == b.code && a.bits == b.bits && a.lanes == b.lanes;
 }
 
-std::int64_t elements(const DLTensor& t) {
-    std::int64_t n = 1;
-    for (int i = 0; i < t.ndim; ++i) n *= t.shape[i];
-    return n;
-}
-
 bool same_shape(const DLTensor& a, const DLTensor& b) {
     if (a.ndim != b.ndim) return false;
     for (int i = 0; i < a.ndim; ++i)
         if (a.shape[i] != b.shape[i]) return false;
-    return true;
-}
-
-/** @brief True when @p t is one compact row-major range (no strides, or the compact ones). */
-bool compact(const DLTensor& t) {
-    if (t.strides == nullptr) return true;
-    std::int64_t expect = 1;
-    for (int i = t.ndim - 1; i >= 0; --i) {
-        if (t.shape[i] > 1 && t.strides[i] != expect) return false;
-        expect *= t.shape[i];
-    }
     return true;
 }
 
