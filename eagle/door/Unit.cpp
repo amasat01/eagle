@@ -622,6 +622,26 @@ void resolve_stages(eg_ctx& ctx, const eg_unit_load_desc& d, eg_unit_s& unit) {
                 unit.split_cells.push_back(sc);
             }
         }
+        for (std::size_t k = 0; k < unit.keyed.size(); ++k) {    // a keyed record is eagle's plane iff its name is no slot of the unit and is a slot of a stage; else a key spec
+            const KeyedFacts& kf = unit.keyed[k];
+            bool of_unit = false, of_stage = false;
+            for (const SlotFacts& sl : unit.slots) of_unit = of_unit || sl.name == kf.name;
+            for (const StageFacts& st : unit.stages)
+                for (const SlotFacts& sl : st.unit->slots) {
+                    if (sl.name != kf.name) continue;
+                    of_stage = true;
+                    if (sl.dtype != EG_DTYPE_REAL)
+                        refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': the keyed plane '" + kf.name + "' that eagle makes is read or written as a slot that is not of the unit's scalar type");
+                }
+            if (of_unit || !of_stage) continue;
+            for (const TeamPlaneFacts& t : unit.team_planes)
+                if (t.name == kf.name) refuse(EG_BAD_REQUEST, who + "the keyed record '" + kf.name + "' and a team plane share that name");
+            // eagle's plane: width entries per key, zeroed at the start of every launch, bound by name to the stages that name it (a team plane of KEY units)
+            TeamPlaneFacts t;
+            t.dtype = EG_DTYPE_REAL, t.unit = EG_UNIT_KEY, t.layout = EG_LAYOUT_FLAT, t.wide = EG_WIDE_NONE;
+            t.per_lane = kf.width, t.fill = 0, t.fill_promised = true, t.name = kf.name, t.keyed = static_cast<std::int32_t>(k);
+            unit.team_planes.push_back(std::move(t));
+        }
         for (std::size_t i = 0; i < unit.stages.size(); ++i) {
             StageFacts& st = unit.stages[i];
             const std::string at = "unit '" + unit.name + "' stage " + std::to_string(i) + " ('" + st.ref_name + "')";
@@ -693,14 +713,6 @@ void resolve_stages(eg_ctx& ctx, const eg_unit_load_desc& d, eg_unit_s& unit) {
             for (const StageFacts& st : unit.stages)
                 for (std::int32_t p : st.plane_of) joined = joined || p == static_cast<std::int32_t>(k);
             if (!joined) refuse(EG_BAD_REQUEST, who + "team plane '" + unit.team_planes[k].name + "' joins no stage slot");
-        }
-        for (const KeyedFacts& k : unit.keyed) {    // a keyed record is eagle's plane iff its name is no slot of the unit and is a slot of a stage; else a key spec
-            bool of_unit = false, of_stage = false;
-            for (const SlotFacts& s : unit.slots) of_unit = of_unit || s.name == k.name;
-            for (const StageFacts& st : unit.stages)
-                for (const SlotFacts& s : st.unit->slots) of_stage = of_stage || s.name == k.name;
-            if (!of_unit && of_stage)
-                refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': the keyed plane '" + k.name + "' is made by eagle between the stages, which is not written");
         }
     } catch (...) {
         for (StageFacts& st : unit.stages)
