@@ -14,6 +14,7 @@
 #include "eagle/door/eg_door.h"
 #include "plugin/dlpack.h"
 
+#include <dlfcn.h>
 #include <pthread.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -1800,6 +1801,179 @@ static void check_index_sets(eg_ctx* ctx) {
     eg_host_threads(ctx, 1);
 }
 
+/* ---- an active set over groups of lanes, and the wide roles -------------------- */
+
+/* The old group rule on a plain model: a launch lowers `left` by one for each live lane of a live group; a
+ * compaction (when the finished count moved) keeps a group while any lane of it is live and launches
+ * groups * G lanes. */
+static void sim_groups(const double* limit, const unsigned char* mask0, int64_t group, int64_t every, int64_t max_steps,
+                       struct sim_out* o) {
+    static int64_t left[RN];
+    static unsigned char done[RN];
+    int64_t finished = 0, at_last = 0;
+    const int64_t ng = (RN + group - 1) / group, cap = (max_steps + every - 1) / every;
+    int64_t live_groups = ng;
+    for (int64_t i = 0; i < RN; ++i) {
+        done[i] = mask0[i];
+        left[i] = mask0[i] ? 0 : (int64_t)limit[i];
+        finished += mask0[i];
+    }
+    memset(o, 0, sizeof(*o));
+    while (o->iters < cap && finished != RN) {
+        for (int64_t l = 0; l < every && live_groups > 0 && finished != RN; ++l) {
+            for (int64_t i = 0; i < RN; ++i)
+                if (!done[i] && --left[i] == 0) done[i] = 1, ++finished;
+        }
+        if (finished != at_last) {
+            live_groups = 0;
+            for (int64_t g = 0; g < ng; ++g) {
+                int any = 0;
+                for (int64_t i = g * group; i < (g + 1) * group && i < RN; ++i) any |= !done[i];
+                live_groups += any;
+            }
+            ++o->compactions;
+            at_last = finished;
+        }
+        ++o->iters;
+    }
+    o->finished = finished;
+}
+
+static void check_groups(eg_ctx* ctx) {
+    eg_unit* unit = NULL;
+    check(load(ctx, "count1g", 0x84, &unit) == EG_OK, "eg_unit_load count1g (an active set over groups of 5 lanes)");
+    if (unit == NULL) return;
+    void* lib = dlopen(library_path, RTLD_LAZY | RTLD_NOLOAD);
+    int64_t* past = lib ? (int64_t*)dlsym(lib, "fixture_past_n") : NULL;
+    check(past != NULL, "the fixture's past-n counter is reachable");
+    if (past == NULL) return;
+    const eg_structure structures[2] = { EG_STRUCTURE_HOST_SERIAL, EG_STRUCTURE_HOST_TEAM };
+    const int32_t threads[2] = { 1, 3 };
+    const int64_t everys[3] = { 0, 4, 40 };
+    for (int si = 0; si < 2; ++si)
+        for (int ti = 0; ti < 2; ++ti)
+            for (int ei = 0; ei < 3; ++ei) {
+                static double k[RN], limit[RN], limit0[RN], want_k[RN];
+                static unsigned char mask[RN], mask0[RN];
+                struct tensor t[3];
+                char what[200];
+                count_inputs(k, limit, mask);
+                memcpy(limit0, limit, sizeof(limit));
+                memcpy(mask0, mask, RN);
+                const int64_t every = everys[ei], eff = every ? every : 16, max_steps = 1000;
+                struct sim_out sim;
+                int64_t launches = 0, finished = 0;
+                sim_groups(limit, mask0, 5, eff, max_steps, &sim);
+                count_oracle(limit, mask0, 1, sim.iters * eff, want_k, &launches, &finished);
+                eg_host_threads(ctx, threads[ti]);
+                *past = 0;
+                eg_plan* p = count_plan(ctx, unit, structures[si], k, limit, mask, t);
+                eg_runner* r = NULL;
+                struct eg_runner_desc d = runner_desc(&p, 1, max_steps);
+                d.every = every;
+                eg_status s = p ? eg_runner_new(ctx, &d, &r) : EG_FAULT;
+                if (s == EG_OK) s = eg_plan_free(ctx, p);
+                struct eg_run_report rep;
+                memset(&rep, 0, sizeof(rep));
+                rep.struct_size = sizeof(rep);
+                if (s == EG_OK) s = eg_run(ctx, r, &rep);
+                int planes_ok = 1;
+                for (int64_t i = 0; i < RN; ++i)
+                    planes_ok &= memcmp(&k[i], &want_k[i], sizeof(double)) == 0 && memcmp(&limit[i], &limit0[i], sizeof(double)) == 0 &&
+                                 (mask[i] != 0) == (mask0[i] || want_k[i] >= limit[i]);
+                /* every live group launches 5 lanes; the last group holds 4 samples, so its fifth lane is past n */
+                snprintf(what, sizeof(what), "groups of 5 %s threads=%d every=%lld: %lld iterations, %lld compactions as the model, "
+                         "planes as the closed form, lanes past n handed to the entry", structures[si] == EG_STRUCTURE_HOST_SERIAL ? "SERIAL" : "TEAM",
+                         threads[ti], (long long)every, (long long)sim.iters, (long long)sim.compactions);
+                check(s == EG_OK && planes_ok && rep.finished == sim.finished && rep.launches == sim.iters && rep.steps == sim.iters * eff &&
+                          rep.compactions == sim.compactions && rep.reorders == 0 && *past > 0 &&
+                          rep.flags == (sim.finished == RN ? EG_REPORT_DONE : 0u),
+                      what);
+                if (s == EG_OK) check(eg_runner_free(ctx, r) == EG_OK, "groups runner freed");
+            }
+    eg_host_threads(ctx, 1);
+    static double k[RN], limit[RN];
+    static unsigned char mask[RN];
+    struct tensor t[3];
+    count_inputs(k, limit, mask);
+    eg_plan* p = count_plan(ctx, unit, EG_STRUCTURE_HOST_TEAM, k, limit, mask, t);
+    eg_runner* r = NULL;
+    struct eg_runner_desc d = runner_desc(&p, 1, 100);
+    d.flags = EG_RUN_REORDER;
+    d.reorder_theta = 0.5;
+    check(p && eg_runner_new(ctx, &d, &r) == EG_BAD_REQUEST && r == NULL && reason_has(ctx, "compacts whole groups"),
+          "EG_RUN_REORDER over a unit with groups of lanes refused BAD_REQUEST by name");
+    check(eg_plan_free(ctx, p) == EG_OK && eg_unit_free(ctx, unit) == EG_OK, "groups plan and unit freed");
+}
+
+static void check_wide(eg_ctx* ctx) {
+    enum { M = 1000 };
+    static double wi[5 * M], wo[5 * M], want[5 * M], y[M], keep[5 * M];
+    for (int i = 0; i < 5 * M; ++i) wi[i] = (double)(i % 13) * 0.5 - 3.0, keep[i] = -7.0;
+    eg_unit* unit = NULL;
+    check(load(ctx, "widemul", 0x72, &unit) == EG_OK, "eg_unit_load widemul (WIDE_OUT, WIDE_IN)");
+    if (unit == NULL) return;
+    const eg_structure structures[2] = { EG_STRUCTURE_HOST_SERIAL, EG_STRUCTURE_HOST_TEAM };
+    const int64_t rows[2] = { 3, 5 };    /* the rows are the caller's: the entry reads three */
+    for (int si = 0; si < 2; ++si)
+        for (int ri = 0; ri < 2; ++ri) {
+            struct tensor two, twi, ty;
+            eg_plane *pwo = wrap_nd(ctx, &two, wo, kDLFloat, 64, 2, rows[ri], M, 0),
+                     *pwi = wrap_nd(ctx, &twi, wi, kDLFloat, 64, 2, rows[ri], M, 0), *py = wrap_1d(ctx, &ty, y, M, kDLFloat, 64);
+            memcpy(wo, keep, sizeof(wo));
+            memcpy(want, keep, sizeof(want));
+            for (int r = 0; r < 3; ++r)
+                for (int i = 0; i < M; ++i) want[r * M + i] = 2.0 * wi[r * M + i] + r;
+            const int32_t slots[3] = { 0, 1, 2 };
+            eg_plane* planes[3] = { pwo, pwi, py };
+            struct eg_bind_desc bd;
+            memset(&bd, 0, sizeof(bd));
+            bd.struct_size = sizeof(bd);
+            bd.n_planes = 3;
+            bd.plane_slots = slots;
+            bd.planes = planes;
+            eg_plan* p = NULL;
+            int ok = pwo && pwi && py && plan(ctx, unit, structures[si], M, 0, NULL, NULL, &p) == EG_OK &&
+                     eg_bind(ctx, p, &bd) == EG_OK && eg_launch(ctx, p, NULL) == EG_OK;
+            for (int i = 0; ok && i < M; ++i) ok = y[i] == (double)M + 1000.0 * (double)M;
+            check(ok && memcmp(wo, want, sizeof(wo)) == 0,
+                  "wide: WIDE_OUT = 2 * WIDE_IN + row over (rows, n) planes equal the plain loop (bitwise), both handles "
+                  "carry the trailing extent, rows past the entry's are untouched");
+            eg_plan_free(ctx, p);
+            eg_plane_free(ctx, pwo);
+            eg_plane_free(ctx, pwi);
+            eg_plane_free(ctx, py);
+        }
+    /* refusals */
+    struct tensor tb;
+    eg_plan* p = NULL;
+    int all = plan(ctx, unit, EG_STRUCTURE_HOST_TEAM, M, 0, NULL, NULL, &p) == EG_OK;
+    const int32_t one[1] = { 1 };
+    struct eg_bind_desc b1;
+    memset(&b1, 0, sizeof(b1));
+    b1.struct_size = sizeof(b1);
+    b1.n_planes = 1;
+    b1.plane_slots = one;
+    eg_plane* pbad = wrap_nd(ctx, &tb, wi, kDLFloat, 64, 1, M, 0, 0);    /* one dimension: rows are missing */
+    b1.planes = &pbad;
+    all = all && pbad && eg_bind(ctx, p, &b1) == EG_BAD_REQUEST && reason_has(ctx, "(rows, 1000)");
+    eg_plane_free(ctx, pbad);
+    pbad = wrap_nd(ctx, &tb, wi, kDLFloat, 64, 2, 3, M - 1, 0);          /* trailing extent is not n */
+    b1.planes = &pbad;
+    all = all && pbad && eg_bind(ctx, p, &b1) == EG_BAD_REQUEST && reason_has(ctx, "(rows, 1000)");
+    eg_plane_free(ctx, pbad);
+    pbad = wrap_nd(ctx, &tb, wo, kDLFloat, 64, 2, 3, M, 0);              /* WIDE_OUT is written */
+    tb.managed.flags |= DLPACK_FLAG_BITMASK_READ_ONLY;
+    const int32_t zero[1] = { 0 };
+    b1.plane_slots = zero;
+    b1.planes = &pbad;
+    all = all && pbad && eg_bind(ctx, p, &b1) == EG_BAD_REQUEST && reason_has(ctx, "read-only");
+    eg_plane_free(ctx, pbad);
+    check(all, "wide refusals: a plane without rows, a trailing extent other than n, a read-only WIDE_OUT, each "
+               "BAD_REQUEST by name");
+    check(eg_plan_free(ctx, p) == EG_OK && eg_unit_free(ctx, unit) == EG_OK, "wide plan and unit freed");
+}
+
 int main(int argc, char** argv) {
     if (argc != 5) {
         fprintf(stderr, "usage: %s <fixture> <wrong size> <no size block> <v1 tag>\n", argv[0]);
@@ -1832,6 +2006,8 @@ int main(int argc, char** argv) {
     check_slot_kinds(ctx);
     check_mask_dtypes(ctx);
     check_index_sets(ctx);
+    check_groups(ctx);
+    check_wide(ctx);
 
     check_reduce(ctx);
     check_conditionals(ctx);

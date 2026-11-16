@@ -112,6 +112,14 @@ bool check_active(const eg_runner_desc& d) {
             refuse(EG_BAD_REQUEST, "plans[" + std::to_string(i) + "] already reads the active set of another "
                    "runner");
     }
+    const std::int64_t group = d.plans[0]->unit->group;
+    for (int i = 1; i < d.n_plans; ++i)
+        if (d.plans[i]->unit->group != group)
+            refuse(EG_BAD_REQUEST, "plans[" + std::to_string(i) + "] compacts groups of " +
+                   std::to_string(d.plans[i]->unit->group) + " lanes, plans[0] groups of " + std::to_string(group));
+    if (group > 1 && (d.flags & EG_RUN_REORDER))
+        refuse(EG_BAD_REQUEST, "EG_RUN_REORDER: an active set over groups of " + std::to_string(group) +
+               " lanes compacts whole groups, which a reorder would split");
     const std::int64_t k = d.plans[0]->unit->finish.steps;
     if (k == EG_STEPS_AUTO) {
         if (d.every != 0)
@@ -150,6 +158,19 @@ struct Mask {
  *  fire when the live count is below theta * 32 * (32-slot groups holding a live sample),
  *  below the span, and the span is at least the floor (the old host rule, bit for bit). */
 void compact(ActiveState& a, const Mask& mask) {
+    if (a.group > 1) {      // a group stays live while any of its lanes is: the map holds group indices, the count the lanes launched
+        std::uint32_t groups = 0;
+        for (std::int64_t g = 0; g < a.n; g += a.group) {
+            const std::int64_t end = std::min<std::int64_t>(g + a.group, a.n);
+            for (std::int64_t i = g; i < end; ++i)
+                if (!mask.set(i)) {
+                    a.map[groups++] = static_cast<std::int32_t>(g / a.group);
+                    break;
+                }
+        }
+        a.count = static_cast<std::uint32_t>(groups * a.group);
+        return;
+    }
     std::uint32_t live = 0;
     for (std::int64_t i = 0; i < a.n; ++i)
         if (!mask.set(i)) a.map[live++] = static_cast<std::int32_t>(i);
@@ -196,7 +217,8 @@ std::vector<Owned> owned_planes(const eg_runner_s& runner) {
             const std::int32_t role = p->unit->slots[s].role;
             if (p->bindings[s].plane != nullptr &&
                 (role == EG_ROLE_MUTABLE || role == EG_ROLE_PER_SAMPLE || role == EG_ROLE_VEC_IN ||
-                 role == EG_ROLE_MAT_IN || role == EG_ROLE_TERMINATED || role == EG_ROLE_OUT))
+                 role == EG_ROLE_MAT_IN || role == EG_ROLE_TERMINATED || role == EG_ROLE_OUT ||
+                 role == EG_ROLE_WIDE_IN || role == EG_ROLE_WIDE_OUT))
                 add(p->bindings[s].plane);
         }
     return out;
@@ -258,7 +280,7 @@ void run_active(eg_runner_s& runner, int threads, std::int64_t& iterations, std:
     const std::int64_t c0 = a.compactions, r0 = a.reorders;
     while (iterations < cap && static_cast<std::int64_t>(first.finished) != n) {
         for (std::int64_t l = 0; l < a.every_launches; ++l) {
-            const std::int64_t live = std::min<std::int64_t>(a.count, n);
+            const std::int64_t live = a.count;
             if (live <= 0 || static_cast<std::int64_t>(first.finished) == n) break;
             for (const eg_plan_s* p : runner.plans) host::run_prefix(*p, threads, live);
         }
@@ -311,8 +333,8 @@ void run_auto(eg_runner_s& runner, int threads, std::int64_t& iterations, std::i
             p.steps_word = word;
             if (!runner.active) {
                 host::run_plan(p, threads);
-            } else if (const std::int64_t live = std::min<std::int64_t>(a.count, n); live > 0) {
-                host::run_prefix(p, threads, live);
+            } else if (a.count > 0) {
+                host::run_prefix(p, threads, a.count);
             }
         }
         if (runner.active) {
@@ -361,12 +383,13 @@ void runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out) {
             const std::int64_t k = d.plans[0]->unit->finish.steps, n = d.plans[0]->n_samples;
             ActiveState& a = runner->act;
             a.n = n;
+            a.group = d.plans[0]->unit->group;
             a.every_steps = k == EG_STEPS_AUTO ? kAutoKMin
                           : d.every != 0 ? d.every : k * ((kDefaultEvery + k - 1) / k);
             a.every_launches = k == EG_STEPS_AUTO ? 1 : a.every_steps / k;
             a.map.resize(static_cast<std::size_t>(n));
             for (std::int64_t i = 0; i < n; ++i) a.map[static_cast<std::size_t>(i)] = static_cast<std::int32_t>(i);
-            a.count = static_cast<std::uint32_t>(n);
+            a.count = static_cast<std::uint32_t>((n + a.group - 1) / a.group * a.group);
             a.reorder = (d.flags & EG_RUN_REORDER) != 0 && n >= kMinReorderSpan;
             a.theta = d.reorder_theta;
             if (a.reorder) {

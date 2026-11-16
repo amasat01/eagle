@@ -62,6 +62,9 @@ bool compact(const DLTensor& t) {
     return true;
 }
 
+/** @brief True for the roles whose plane has a runtime row count (the handle's extent is the trailing one). */
+bool wide(const SlotFacts& s) { return s.role == EG_ROLE_WIDE_IN || s.role == EG_ROLE_WIDE_OUT; }
+
 /** @brief True when @p t carries the element type slot @p s of a unit of @p scalar declares. */
 bool dtype_ok(const DLDataType& t, const SlotFacts& s, std::int32_t scalar) {
     if (t.lanes != 1) return false;
@@ -82,7 +85,10 @@ void check_plane(const eg_plan_s& plan, int slot, const eg_plane_s& plane) {
     if (!dtype_ok(t.dtype, s, plan.unit->scalar_type))
         refuse(EG_BAD_REQUEST, what + ": dtype (code " + std::to_string(t.dtype.code) + ", bits " +
                std::to_string(t.dtype.bits) + ") is not the slot's");
-    if (s.role == EG_ROLE_LOOKUP) {      // a table of the caller's: any compact shape, read by element count
+    if (wide(s)) {                       // (rows, n): the rows are the caller's, one value per sample along the last axis
+        if (t.ndim != 2 || t.shape[1] != plan.n_samples)
+            refuse(EG_BAD_REQUEST, what + ": a plane of shape (rows, " + std::to_string(plan.n_samples) + ") is expected");
+    } else if (s.role == EG_ROLE_LOOKUP) {      // a table of the caller's: any compact shape, read by element count
         if (t.ndim < 1) refuse(EG_BAD_REQUEST, what + ": a table needs at least one dimension");
         if (slot == plan.unit->index_map_slot && t.ndim != 1)
             refuse(EG_BAD_REQUEST, what + ": the index map is one dimension");
@@ -98,7 +104,7 @@ void check_plane(const eg_plan_s& plan, int slot, const eg_plane_s& plane) {
         }
     }
     if (!compact(t)) refuse(EG_BAD_REQUEST, what + ": the plane is not contiguous");
-    const bool written = s.role == EG_ROLE_MUTABLE || s.role == EG_ROLE_OUT ||
+    const bool written = s.role == EG_ROLE_MUTABLE || s.role == EG_ROLE_OUT || s.role == EG_ROLE_WIDE_OUT ||
                          slot == plan.unit->finish.mask_slot;
     if (written && (plane.tensor->flags & DLPACK_FLAG_BITMASK_READ_ONLY))
         refuse(EG_BAD_REQUEST, what + ": a read-only plane in a written slot");

@@ -18,6 +18,8 @@
  *    the int64 word eagle sets in slot 4 (countAa also reads the active set, slots 5 and 6).
  *  - "vecs": every plane role the door binds beyond the scalar ones: a rank-1 MUTABLE and VEC_IN, a rank-2
  *    MAT_IN, an int32 PER_SAMPLE, a LOOKUP table, the NSAMPLES count, a rank-0 OUT and a uniform.
+ *  - "count1g": count1 with an active set over groups of 5 lanes (the map holds group indices).
+ *  - "widemul": a WIDE_OUT and a WIDE_IN plane of three rows each beside a MUTABLE plane.
  *  - "count1", "count3": a finishing unit that steps k += 1 until k >= limit,
  *    then marks the sample and counts it into the finished counter; one or
  *    three steps per launch (slots: k, limit, mask, the counter).
@@ -58,7 +60,13 @@ EG_FIXTURE_EXPORT void count1ia_host(void* const* params, int64_t base, int64_t 
 EG_FIXTURE_EXPORT void lanes_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void prefix_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void vecs_host(void* const* params, int64_t base, int64_t count, int64_t n);
+EG_FIXTURE_EXPORT void count1g_host(void* const* params, int64_t base, int64_t count, int64_t n);
+EG_FIXTURE_EXPORT void widemul_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT const struct eg_library_meta* eg_unit_library_meta(void);
+
+/* Lanes of a partial last group a count1g launch was handed (the entry skips them). */
+EG_FIXTURE_EXPORT int64_t fixture_past_n;
+int64_t fixture_past_n;
 
 void axpb_host(void* const* params, int64_t base, int64_t count, int64_t n) {
     double* y = (double*)((const struct fixture_handle*)params[0])->data;
@@ -150,6 +158,42 @@ void count1i_host(void* const* params, int64_t base, int64_t count, int64_t n) {
 void count1ia_host(void* const* params, int64_t base, int64_t count, int64_t n) {
     (void)n;
     count_steps_w(params, base, count, 1, (const int32_t*)((const struct fixture_handle*)params[4])->data, 4);
+}
+
+/* An active set over groups of 5 lanes: thread t serves lane map[t / 5] * 5 + t % 5; a lane past n is skipped. */
+enum { GROUP = 5 };
+void count1g_host(void* const* params, int64_t base, int64_t count, int64_t n) {
+    double* k = (double*)((const struct fixture_handle*)params[0])->data;
+    const double* limit = (const double*)((const struct fixture_handle*)params[1])->data;
+    char* mask = (char*)((const struct fixture_handle*)params[2])->data;
+    uint32_t* finished = (uint32_t*)((const struct fixture_handle*)params[3])->data;
+    const int32_t* map = (const int32_t*)((const struct fixture_handle*)params[4])->data;
+    for (int64_t t = base; t < base + count; ++t) {
+        const int64_t i = (int64_t)map[t / GROUP] * GROUP + t % GROUP;
+        if (i >= n) {
+            __atomic_fetch_add(&fixture_past_n, 1, __ATOMIC_RELAXED);
+            continue;
+        }
+        if (mask[i] != 0) continue;
+        k[i] += 1.0;
+        if (k[i] >= limit[i]) {
+            mask[i] = 1;
+            __atomic_fetch_add(finished, 1u, __ATOMIC_RELAXED);
+        }
+    }
+}
+
+/* Wide planes of 3 rows: wo[r][i] = 2 * wi[r][i] + r; y[i] records both handles' extents. */
+void widemul_host(void* const* params, int64_t base, int64_t count, int64_t n) {
+    const struct fixture_handle* wo = (const struct fixture_handle*)params[0];
+    const struct fixture_handle* wi = (const struct fixture_handle*)params[1];
+    double* y = (double*)((const struct fixture_handle*)params[2])->data;
+    (void)n;
+    for (int64_t i = base; i < base + count; ++i) {
+        for (int r = 0; r < 3; ++r)
+            ((double*)wo->data)[r * wo->samples + i] = 2.0 * ((const double*)wi->data)[r * wi->samples + i] + r;
+        y[i] = (double)wi->samples + 1000.0 * (double)wo->samples;
+    }
 }
 
 /* Index sets: thread t serves lane map[t] (lanes) or lane t (prefix): y[lane] = 2 * x[lane] + 1. */
@@ -463,15 +507,35 @@ static const struct eg_unit_meta unit_prefix = {
     .scalar_type = EG_SCALAR_FLOAT64, .host_entry = "prefix_host", .device_image_format = EG_IMAGE_NONE,
     .body = &prefix_body, .launch = &launch_prefix };
 
+/* count1 over groups of 5 lanes with an active set (map and count: LOOKUP slots 4 and 5) */
+static const struct eg_unit_launch launch_group = {
+    .struct_size = sizeof(struct eg_unit_launch), .n_lane_axes = 0, .block = 0, .active_map_slot = 4,
+    .active_count_slot = 5, .index_map_slot = -1, .index_count_slot = -1, .n_plane_axes = 0, .group = GROUP };
+static const struct eg_unit_meta unit_count1g = {
+    .struct_size = sizeof(struct eg_unit_meta), .name = "count1g", .digest = DIGEST(0x84), .pattern = EG_PATTERN_PURE,
+    .scalar_type = EG_SCALAR_FLOAT64, .host_entry = "count1g_host", .device_image_format = EG_IMAGE_NONE,
+    .body = &active_body, .launch = &launch_group, .finish = &finish1 };
+
+/* wide roles: slots wo (WIDE_OUT), wi (WIDE_IN), y (MUTABLE) */
+SLOT(slot_wo, EG_ROLE_WIDE_OUT, "wo");
+SLOT(slot_wi, EG_ROLE_WIDE_IN, "wi");
+static const struct eg_unit_slot* const wide_slots[] = { &slot_wo, &slot_wi, &slot_y };
+static const struct eg_unit_body wide_body = {
+    .struct_size = sizeof(struct eg_unit_body), .access = EG_ACCESS_SAMPLE_LOCAL, .n_slots = 3, .slots = wide_slots };
+static const struct eg_unit_meta unit_widemul = {
+    .struct_size = sizeof(struct eg_unit_meta), .name = "widemul", .digest = DIGEST(0x72), .pattern = EG_PATTERN_PURE,
+    .scalar_type = EG_SCALAR_FLOAT64, .host_entry = "widemul_host", .device_image_format = EG_IMAGE_NONE,
+    .body = &wide_body, .launch = &launch };
+
 static const struct eg_unit_meta* const units[] = { &unit_axpb, &unit_wait, &unit_split, &unit_count1,
                                                     &unit_count3, &unit_count1a, &unit_count3a, &unit_countA, &unit_countAa, &unit_vecs, &unit_count1i,
-                                                    &unit_count1ia, &unit_count1e, &unit_lanes, &unit_prefix };
+                                                    &unit_count1ia, &unit_count1e, &unit_lanes, &unit_prefix, &unit_count1g, &unit_widemul };
 
 static const struct eg_library_meta library = {
     .struct_size = sizeof(struct eg_library_meta),
     .schema_major = EG_META_SCHEMA_MAJOR,
     .schema_minor = 0,
-    .n_units = 15,
+    .n_units = 17,
     .units = units,
 };
 

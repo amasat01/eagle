@@ -56,9 +56,9 @@ SlotFacts read_slot(const eg_unit_slot* in, const std::string& unit, int index) 
     const bool plane = s.role == EG_ROLE_MUTABLE || s.role == EG_ROLE_PER_SAMPLE || s.role == EG_ROLE_OUT ||
                        s.role == EG_ROLE_VEC_IN || s.role == EG_ROLE_MAT_IN;
     if (!plane && s.role != EG_ROLE_UNIFORM && s.role != EG_ROLE_TERMINATED && s.role != EG_ROLE_LOOKUP &&
-        s.role != EG_ROLE_NSAMPLES)
-        refuse(EG_NOT_WRITTEN, named + ": role " + std::to_string(s.role) + " is not written yet "
-               "(this build binds MUTABLE, PER_SAMPLE, VEC_IN, MAT_IN, OUT, LOOKUP, UNIFORM, NSAMPLES and TERMINATED)");
+        s.role != EG_ROLE_NSAMPLES && s.role != EG_ROLE_WIDE_IN && s.role != EG_ROLE_WIDE_OUT)
+        refuse(EG_NOT_WRITTEN, named + ": role " + std::to_string(s.role) + " is not written yet (this build binds "
+               "MUTABLE, PER_SAMPLE, VEC_IN, MAT_IN, OUT, WIDE_IN, WIDE_OUT, LOOKUP, UNIFORM, NSAMPLES and TERMINATED)");
     if (s.rank != 0 && !plane)
         refuse(EG_NOT_WRITTEN, named + ": a slot of rank > 0 outside the plane roles is not written yet");
     if (s.rank != 0 && s.role == EG_ROLE_PER_SAMPLE)
@@ -173,8 +173,9 @@ void read_body(const eg_unit_meta& m, eg_unit_s& unit) {
             launch.active_count_slot == unit.finish.counter_slot)
             refuse(EG_BAD_REQUEST, "meta that contradicts itself: unit '" + unit.name +
                    "' gives one slot two of the finished counter, the active map and the active count");
-        if (launch.group > 1)
-            refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': an active set over groups of lanes is not written yet");
+        if (launch.group < 1)
+            refuse(EG_BAD_REQUEST, "meta that contradicts itself: unit '" + unit.name + "' group " + std::to_string(launch.group));
+        unit.group = launch.group;
         unit.active_map_slot = launch.active_map_slot;
         unit.active_count_slot = launch.active_count_slot;
     }

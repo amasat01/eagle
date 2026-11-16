@@ -26,6 +26,12 @@
 # pair3: a unit with an int32 PER_SAMPLE index plane (_wide_math, y = real(idx * 3e9 // 3e9)): does the door bind
 # the plane at the element width the kernel text reads?
 #
+#   make ... PAIR4_KERNEL=<kernel .cpp> PAIR4_META=<meta .c> PAIR4_ORACLE=<dir with x_in.f64 map_in.i32 y_out.f64> \
+#            PAIR_WING_DIR=<raptor wing dir> pair4
+#
+# pair4: an index-set unit (_flat, y = x * 3 + lane.item over the lanes a caller-built map lists): same bits as the old
+# host path on HOST_TEAM and HOST_SERIAL.
+#
 # pair: one generated unit (its kernel text and its generated meta source)
 # built into one unit library and run through the door against the outputs the
 # old path wrote for the same case (y_scalar_a.f64, y_plane_a.f64).
@@ -52,6 +58,12 @@ PAIR3_ORACLE ?=
 PAIR3_UNIT ?= _wide_math
 PAIR3_DIGEST ?= 5f25d984f02b738ba5b93ec9827d9996f7c6680101014b0db766c4dc9a1d6f09
 PAIR3_ENTRY ?= _wide_math_host
+PAIR4_KERNEL ?=
+PAIR4_META ?=
+PAIR4_ORACLE ?=
+PAIR4_UNIT ?= _flat
+PAIR4_DIGEST ?= 550e1eff1a17398db9bb909191c0824ef73b562e7d0e28ff773b380765ceb836
+PAIR4_ENTRY ?= _flat_host
 # The unit the caller names (name + digest) and the host entry its meta names.
 PAIR_UNIT ?= ss_bcast
 PAIR_DIGEST ?= 49a12f72dfd7520aa76ed07e9c4765ed5f4c5a6d4d2b29b5ad19eb91767befec
@@ -73,7 +85,7 @@ LIB := $(OUT)/libeagle_door.so
 FIXTURE := $(OUT)/libfixture_unit.so
 TEST := $(OUT)/door_test
 
-.PHONY: all lib symbols test check-inputs pair pair2 pair3
+.PHONY: all lib symbols test check-inputs pair pair2 pair3 pair4
 all: test
 
 check-inputs:
@@ -179,3 +191,26 @@ pair3: symbols $(PAIR3_LIB) $(PAIR3_TEST)
 	    { echo "FAIL  $(PAIR3_LIB) does not export $$sym"; exit 1; }; \
 	  echo "PASS  $(PAIR3_LIB) exports $$sym"; done
 	$(PAIR3_TEST) $(PAIR3_LIB) $(PAIR3_ORACLE) $(PAIR3_UNIT) $(PAIR3_DIGEST)
+
+PAIR4_LIB := $(OUT)/libpair4_unit.so
+PAIR4_TEST := $(OUT)/pair4_test
+
+$(PAIR4_LIB): $(PAIR4_KERNEL) $(PAIR4_META) eg_door.h eg_unit_meta.h | check-inputs
+	@test -f "$(PAIR4_KERNEL)" -a -f "$(PAIR4_META)" -a -d "$(PAIR_WING_DIR)" || \
+	  { echo "set PAIR4_KERNEL, PAIR4_META and PAIR_WING_DIR"; exit 1; }
+	@mkdir -p $(OUT)
+	$(CXX) $(PAIR_HOST_FLAGS) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) \
+	  -c $(PAIR4_KERNEL) -o $(OUT)/pair4_kernel.o
+	$(CC) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$(ROOT) \
+	  -c $(PAIR4_META) -o $(OUT)/pair4_meta.o
+	$(CXX) -shared -o $@ $(OUT)/pair4_kernel.o $(OUT)/pair4_meta.o
+
+$(PAIR4_TEST): test/pair4_test.c eg_door.h $(LIB)
+	$(CC) $(CFLAGS_C) -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door -Wl,-rpath,$(OUT) -pthread
+
+pair4: symbols $(PAIR4_LIB) $(PAIR4_TEST)
+	@for sym in eg_unit_library_meta $(PAIR4_ENTRY); do \
+	  nm -D --defined-only $(PAIR4_LIB) | awk '{print $$3}' | grep -qx "$$sym" || \
+	    { echo "FAIL  $(PAIR4_LIB) does not export $$sym"; exit 1; }; \
+	  echo "PASS  $(PAIR4_LIB) exports $$sym"; done
+	$(PAIR4_TEST) $(PAIR4_LIB) $(PAIR4_ORACLE) $(PAIR4_UNIT) $(PAIR4_DIGEST)
