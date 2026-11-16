@@ -297,8 +297,12 @@ void plan_new(eg_ctx& ctx, const eg_plan_desc* desc, eg_plan** out) {
         plan->parts = std::move(parts);
         plan->bindings.resize(d.unit->slots.size());
         plan->params.resize(d.unit->slots.size());
-        if (d.unit->finish.present)    // the finished counter: one uint32 cell (its element count)
+        if (d.unit->finish.present && d.structure == EG_STRUCTURE_DEVICE) {    // the counter: one device cell
+            device_plan_cells(*plan);
+            bind_handle(*plan, d.unit->finish.counter_slot, reinterpret_cast<void*>(plan->device_counter), 1);
+        } else if (d.unit->finish.present) {    // the finished counter: one uint32 cell (its element count)
             bind_handle(*plan, d.unit->finish.counter_slot, &plan->finished, 1);
+        }
         for (std::size_t i = 0; i < d.unit->slots.size(); ++i)    // eagle passes the sample count
             if (d.unit->slots[i].role == EG_ROLE_NSAMPLES) {
                 eg_plan_s::Binding& b = plan->bindings[i];
@@ -323,6 +327,7 @@ void plan_new(eg_ctx& ctx, const eg_plan_desc* desc, eg_plan** out) {
         for (eg_plane_s* r : plan->rows) plane_release(ctx, r);
         for (eg_plan_s::Binding& b : plan->bindings)
             if (b.plane != nullptr) plane_release(ctx, b.plane);
+        device_plan_free(*plan);
         delete plan;
         throw;
     }
@@ -337,6 +342,7 @@ void plan_free(eg_ctx& ctx, eg_plan_s* plan) {
         if (b.plane != nullptr) plane_release(ctx, b.plane);
     for (eg_plane_s* r : plan->rows) plane_release(ctx, r);
     unit_release(ctx, plan->unit);
+    device_plan_free(*plan);
     delete plan;
 }
 
@@ -396,12 +402,12 @@ void bind(eg_ctx& ctx, eg_plan_s* plan, const eg_bind_desc* desc) {
     }
 }
 
-/** @brief Refuse a runner over a DEVICE plan (handles not of @p ctx are left to eg_runner_new's own checks). */
-void host_plans_only(const eg_ctx& ctx, const eg_runner_desc* desc) {
+/** @brief Whether @p desc names a DEVICE plan (the runner then runs on the device). */
+bool device_plans(const eg_ctx& ctx, const eg_runner_desc* desc) {
     const eg_runner_desc d = read_input(desc, "eg_runner_desc");
     for (std::int32_t i = 0; d.plans != nullptr && i < d.n_plans; ++i)
-        if (ctx.plans.count(d.plans[i]) != 0 && d.plans[i]->structure == EG_STRUCTURE_DEVICE)
-            refuse(EG_NOT_WRITTEN, "eg_runner_new over a DEVICE plan: runners on a device are not written in this build of the door");
+        if (ctx.plans.count(d.plans[i]) != 0 && d.plans[i]->structure == EG_STRUCTURE_DEVICE) return true;
+    return false;
 }
 
 /** @brief Bind @p slot of @p plan to eagle's own memory (a runner's active set). */

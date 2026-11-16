@@ -142,8 +142,8 @@ EG_EXPORT eg_status eg_graph_free(eg_ctx* ctx, eg_graph* graph) {
 
 EG_EXPORT eg_status eg_runner_new(eg_ctx* ctx, const struct eg_runner_desc* desc, eg_runner** out) {
     return door::call(ctx, [&](eg_ctx& c) {
-        door::host_plans_only(c, desc);
-        door::runner_new(c, desc, out);
+        if (door::device_plans(c, desc)) door::device_runner_new(c, desc, out);
+        else door::runner_new(c, desc, out);
     });
 }
 
@@ -158,7 +158,11 @@ EG_EXPORT eg_status eg_runner_free(eg_ctx* ctx, eg_runner* runner) {
 }
 
 EG_EXPORT eg_status eg_run(eg_ctx* ctx, eg_runner* runner, struct eg_run_report* report) {
-    return door::call(ctx, [&](eg_ctx& c) { door::run(c, runner, report); });
+    return door::call(ctx, [&](eg_ctx& c) {
+        door::check_handle(c.runners, runner, "runner");
+        if (runner->dev.ctx != nullptr) door::device_run(c, runner, report);
+        else door::run(c, runner, report);
+    });
 }
 
 EG_EXPORT eg_status eg_sync(eg_ctx* ctx) { return door::call(ctx, door::device_sync); }

@@ -350,13 +350,16 @@ void read_unit(const eg_unit_meta& m, void* library, eg_unit_s& unit) {
     if (m.device_image != nullptr && m.device_image_format == EG_IMAGE_NONE)
         refuse(EG_BAD_REQUEST, "meta that contradicts itself: unit '" + unit.name +
                "' names a device image of format NONE");
+    // A library built for the device alone (the device image, no host code) loads on a device context as the
+    // old device plugin does (it drops host_entry); a host plan of it is refused at eg_plan_new.
+    const bool device_only = unit.ctx->dev.ordinal >= 0 && m.device_image != nullptr;
     if (m.host_entry != nullptr) {
         void* sym = ::dlsym(library, m.host_entry);
-        if (sym == nullptr)
+        if (sym == nullptr && !device_only)
             refuse(EG_FAULT, "unit '" + unit.name + "': the library lacks its host entry '" +
                    m.host_entry + "'");
         unit.host_entry = reinterpret_cast<exec::HostEntryV2>(sym);
-        check_size_block(library, unit.name);
+        if (sym != nullptr) check_size_block(library, unit.name);
     }
     read_body(m, library, unit);
     if (unit.ctx->dev.ordinal >= 0 && m.device_image != nullptr) device_unit_load(unit, m, library);

@@ -249,7 +249,8 @@ int main(int argc, char** argv) {
     rn.plans = &p;
     rn.max_steps = 1;
     eg_runner* runner = NULL;
-    check(refused(eg_runner_new(ctx, &rn, &runner), EG_NOT_WRITTEN, ctx, "runners on a device"), "eg_runner_new over a DEVICE plan: NOT_WRITTEN");
+    check(refused(eg_runner_new(ctx, &rn, &runner), EG_BAD_REQUEST, ctx, "has no finish") && runner == NULL,
+          "eg_runner_new over a DEVICE plan without a finish: BAD_REQUEST (the device runner checks as the host one)");
     eg_graph* g = NULL;
     check(eg_record_begin(ctx) == EG_OK && refused(eg_launch(ctx, p, NULL), EG_NOT_WRITTEN, ctx, "recording a DEVICE launch") &&
               eg_record_end(ctx, &g) == EG_OK && eg_graph_free(ctx, g) == EG_OK,
@@ -259,7 +260,7 @@ int main(int argc, char** argv) {
     struct { const char* name; uint8_t byte; const char* reason; } rows[8] = {
         { "boxdev", 0xC3, "a device thread box (team grid)" },
         { "banded", 0xC4, "a BANDED scalar type" },
-        { "count1", 0xD1, "a finish record (runners on a device)" },
+        { "count1", 0xD1, "the unit has no device image" },   /* a fixed-step finish runs on a device */
         { "count1a", 0xE1, "an active set (compaction)" },
         { "lanes", 0x91, "an index set" },
         { "keyed", 0x68, "a companion plane" },

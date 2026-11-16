@@ -57,10 +57,14 @@ PAIR_HOST_FLAGS ?= -O3 -ffp-contract=fast -fno-math-errno -march=native -mprefer
 CUDA ?=
 NVCC ?= $(CUDA)/bin/nvcc
 PAIR_CUDA_WING_DIR ?=
-PAIR_DEVICE_UNITS := mv
-# The old path's device recipe for a cuda unit (hawk's nvcc build), as an sm_61 cubin: PTX of a toolkit newer
-# than the driver does not load, a cubin does (CUDA minor-version compatibility).
-PAIR_DEVICE_FLAGS ?= -cubin -std=c++20 -arch=sm_61 -O3 -Xptxas -O3 -Wno-deprecated-gpu-targets
+CUDA_WING_FACTS ?= $(PAIR_CUDA_WING_DIR)/raptor_facts.h
+PAIR_DEVICE_UNITS := mv osc osc_x4
+# The old path's device recipe for a cuda unit (hawk's nvcc build) in the image format its meta records
+# (EG_IMAGE_PTX: -ptx, else -cubin). PAIR_NVCC/PAIR_CCBIN: the compiler the old run used (its cache's
+# validity record); PTX of a toolkit newer than the driver does not load.
+PAIR_DEVICE_FLAGS ?= -std=c++20 -arch=sm_61 -O3 -Xptxas -O3 -Wno-deprecated-gpu-targets
+PAIR_NVCC ?= $(NVCC)
+PAIR_CCBIN ?= $(CXX)
 
 ROOT := $(abspath $(CURDIR)/../..)
 WARN := -Wall -Wextra -pedantic -Werror
@@ -73,8 +77,8 @@ comma := ,
 CXXFLAGS_DEVICE := $(filter-out -DEAGLE_CPU_ONLY=1,$(CXXFLAGS_DOOR)) -isystem $(CUDA)/include
 CUDART := $(if $(CUDA),-L$(CUDA)/lib64 -lcudart -Wl$(comma)-rpath$(comma)$(CUDA)/lib64)
 
-SRC := Context.cpp Unit.cpp Plane.cpp Plan.cpp abi.cpp host/Runner.cpp host/Ops.cpp host/Record.cpp device/Device.cpp
-OBJ := $(SRC:%.cpp=$(OUT)/%.o)
+SRC := Context.cpp Unit.cpp Plane.cpp Plan.cpp RunCheck.cpp abi.cpp host/Runner.cpp host/Ops.cpp host/Record.cpp device/Device.cpp
+OBJ := $(SRC:%.cpp=$(OUT)/%.o) $(if $(CUDA),$(OUT)/device/Loop.o)
 LIB := $(OUT)/libeagle_door.so
 FIXTURE := $(OUT)/libfixture_unit.so
 TEST := $(OUT)/door_test
@@ -91,9 +95,15 @@ $(OUT)/%.o: %.cpp Context.h eg_door.h eg_unit_meta.h host/Team.h host/Ops.h | ch
 	$(CXX) $(CXXFLAGS_DOOR) -c $< -o $@
 
 # The device group: built with the CUDA headers when CUDA is set, else its host-only refusals.
-$(OUT)/device/Device.o: device/Device.cpp Context.h eg_door.h eg_unit_meta.h | check-inputs
+$(OUT)/device/Device.o: device/Device.cpp device/Loop.h Context.h eg_door.h eg_unit_meta.h | check-inputs
 	@mkdir -p $(dir $@)
 	$(CXX) $(if $(CUDA),$(CXXFLAGS_DEVICE),$(CXXFLAGS_DOOR)) -c $< -o $@
+
+# A device runner's captured loop over eagle's capture seam (CUDA builds only).
+$(OUT)/device/Loop.o: device/Loop.cu device/Loop.h | check-inputs check-cuda
+	@mkdir -p $(dir $@)
+	$(NVCC) -std=c++20 -O2 -arch=sm_61 -Wno-deprecated-gpu-targets -Werror all-warnings -ccbin $(CXX) \
+	  -Xcompiler -fPIC,-fvisibility=hidden,-Wall,-Wextra -include $(CUDA_WING_FACTS) -I$(ROOT) -I$(AETHER_INCLUDE) -c $< -o $@
 
 $(LIB): $(OBJ) door.map
 	$(CXX) -shared -o $@ $(OBJ) -Wl,--version-script=$(CURDIR)/door.map -Wl,--no-undefined -fopenmp -pthread -ldl $(CUDART)
@@ -175,10 +185,15 @@ $(DEVICE_TEST): test/door_device_test.c eg_door.h $(LIB) | check-cuda
 device: check-cuda symbols $(FIXTURE) $(DEVICE_FIXTURE) $(DEVICE_TEST)
 
 PAIR_DEVICE_TEST := $(OUT)/pair_device_test
+RUNNER_PAIR_TEST := $(OUT)/runner_pair_test
+
+$(RUNNER_PAIR_TEST): test/runner_pair_test.c eg_door.h $(LIB) | check-cuda
+	$(CC) $(CFLAGS_C) -isystem $(CUDA)/include -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door \
+	  -Wl,-rpath,$(OUT) $(CUDART) -lm -pthread
 
 $(PAIR_DEVICE_TEST): test/pair_test.c eg_door.h $(LIB) | check-cuda
 	$(CC) $(CFLAGS_C) -DEG_PAIR_DEVICE -isystem $(CUDA)/include -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door \
-	  -Wl,-rpath,$(OUT) $(CUDART) -pthread
+	  -Wl,-rpath,$(OUT) $(CUDART) -lm -pthread
 
 # $(1) = unit. The kernel text compiled as the old path compiles it, embedded as <unit>__image.
 define PAIR_DEVICE_RULES
@@ -186,13 +201,14 @@ $(OUT)/libpair_dev_$(1).so: $$(KERNEL_CUDA_$(1)) $$(META_CUDA_$(1)) eg_door.h eg
 	@test -f "$$(KERNEL_CUDA_$(1))" -a -f "$$(META_CUDA_$(1))" -a -d "$$(PAIR_CUDA_WING_DIR)" || \
 	  { echo "set KERNEL_CUDA_$(1), META_CUDA_$(1) and PAIR_CUDA_WING_DIR"; exit 1; }
 	@mkdir -p $(OUT)
-	$$(NVCC) $$(PAIR_DEVICE_FLAGS) -ccbin $$(CXX) -I $$(AETHER_INCLUDE) -I $$(AETHER_INCLUDE)/eagle \
-	  -I$$(PAIR_CUDA_WING_DIR) $$(KERNEL_CUDA_$(1)) -o $(OUT)/pair_dev_$(1).cubin
-	$$(call embed,$(OUT)/pair_dev_$(1).cubin,$(1)__image,$(OUT)/pair_dev_$(1)_image.o)
+	$$(PAIR_NVCC) $$(if $$(shell grep -l EG_IMAGE_PTX $$(META_CUDA_$(1))),-ptx,-cubin) $$(PAIR_DEVICE_FLAGS) \
+	  -ccbin $$(PAIR_CCBIN) -I $$(AETHER_INCLUDE) -I $$(AETHER_INCLUDE)/eagle \
+	  -I$$(PAIR_CUDA_WING_DIR) $$(KERNEL_CUDA_$(1)) -o $(OUT)/pair_dev_$(1).image
+	$$(call embed,$(OUT)/pair_dev_$(1).image,$(1)__image,$(OUT)/pair_dev_$(1)_image.o)
 	$$(CC) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$$(ROOT) \
 	  -c $$(META_CUDA_$(1)) -o $(OUT)/pair_dev_$(1)_meta.o
 	$$(CC) -shared -o $$@ $(OUT)/pair_dev_$(1)_meta.o $(OUT)/pair_dev_$(1)_image.o
 
-pair-device-$(1): symbols $(OUT)/libpair_dev_$(1).so $$(PAIR_DEVICE_TEST)
+pair-device-$(1): symbols $(OUT)/libpair_dev_$(1).so $$(PAIR_DEVICE_TEST) $$(RUNNER_PAIR_TEST)
 endef
 $(foreach u,$(PAIR_DEVICE_UNITS),$(eval $(call PAIR_DEVICE_RULES,$(u))))

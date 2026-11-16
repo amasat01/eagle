@@ -10,10 +10,13 @@
 #include "eagle/door/eg_unit_meta.h"
 
 #ifndef EAGLE_CPU_ONLY
+#include "eagle/door/device/Loop.h"
 #include "eagle/exec/DeviceKernel.h"
 #include "eagle/policy/Residency.h"
 
 #include <algorithm>
+#include <chrono>
+#include <cstring>
 
 #include <dlfcn.h>
 #endif
@@ -35,6 +38,13 @@ void device_plan_check(const eg_ctx&, const eg_unit_s&) {
 }
 void device_launch(eg_plan_s&) {}
 void device_sync(eg_ctx&) {}
+void device_plan_cells(eg_plan_s&) {}
+void device_plan_free(eg_plan_s&) noexcept {}
+void device_runner_new(eg_ctx&, const eg_runner_desc*, eg_runner**) {
+    refuse(EG_NOT_WRITTEN, "structure DEVICE: the device group is not built");
+}
+void device_run(eg_ctx&, eg_runner_s*, eg_run_report*) {}
+DeviceRun::~DeviceRun() = default;
 
 #else
 
@@ -195,6 +205,16 @@ void device_unit_free(eg_unit_s& unit) noexcept {
     unit.module = unit.function = 0;
 }
 
+/** @brief Queue one launch per partition of @p plan on @p stream: grid from the partition's count and the
+ *  meta's block (else the resolved one), the bound views and uniforms by value, then the triple. */
+void launch_on(const eg_plan_s& plan, std::uint64_t stream) {
+    const DeviceState& d = plan.ctx->dev;
+    const eg_unit_s& u = *plan.unit;
+    for (const exec::Partition& p : plan.parts)
+        exec::DeviceKernel::run(reinterpret_cast<CUfunction>(u.function), plan.params, p, reinterpret_cast<CUstream>(stream),
+                                u.block > 0 ? static_cast<unsigned>(u.block) : resolved_block(d, u, p.count));
+}
+
 /** @brief Refuse a DEVICE plan of @p unit on @p ctx: a host-only context, a device feature this
  *  build does not run (each by name), a unit with no device function. */
 void device_plan_check(const eg_ctx& ctx, const eg_unit_s& unit) {
@@ -202,7 +222,8 @@ void device_plan_check(const eg_ctx& ctx, const eg_unit_s& unit) {
         refuse(EG_BAD_REQUEST, "structure DEVICE on a host-only context (made without EG_CTX_DEVICE)");
     const std::string who = "unit '" + unit.name + "' on DEVICE: ";
     const char* feature = unit.active_map_slot >= 0              ? "an active set (compaction)"
-                          : unit.finish.present                  ? "a finish record (runners on a device)"
+                          : unit.finish.present && unit.finish.steps == EG_STEPS_AUTO
+                              ? "an automatic step count (finish steps AUTO: the fused, persistent and wave entries)"
                           : !unit.companions.empty()             ? "a companion plane"
                           : !unit.cells.empty()                  ? "cells"
                           : unit.index_count_slot >= 0           ? "an index set"
@@ -216,12 +237,129 @@ void device_plan_check(const eg_ctx& ctx, const eg_unit_s& unit) {
 /** @brief Queue one launch per partition on the context's stream: grid from the partition's count and the
  *  meta's block (else the resolved one), the bound views and uniforms by value, then the triple. */
 void device_launch(eg_plan_s& plan) {
-    const DeviceState& d = plan.ctx->dev;
-    const eg_unit_s& u = *plan.unit;
-    Current current(d);
-    for (const exec::Partition& p : plan.parts)
-        exec::DeviceKernel::run(reinterpret_cast<CUfunction>(u.function), plan.params, p, reinterpret_cast<CUstream>(d.stream),
-                                u.block > 0 ? static_cast<unsigned>(u.block) : resolved_block(d, u, p.count));
+    Current current(plan.ctx->dev);
+    launch_on(plan, plan.ctx->dev.stream);
+}
+
+/** @brief A DEVICE plan's eagle-made finished counter: one zeroed device cell. */
+void device_plan_cells(eg_plan_s& plan) {
+    Current current(plan.ctx->dev);
+    plan.device_counter = cells_new(1);
+}
+
+/** @brief Free what device_plan_cells made. */
+void device_plan_free(eg_plan_s& plan) noexcept {
+    if (plan.device_counter == 0) return;
+    Current current(plan.ctx->dev);
+    cells_free(plan.device_counter);
+    plan.device_counter = 0;
+}
+
+/** @brief The loop and its cells go with the runner; a forked child makes no device call. */
+DeviceRun::~DeviceRun() {
+    if (ctx == nullptr || forked(*ctx)) return;
+    Current current(ctx->dev);
+    loop_free(loop);
+    cells_free(cells);
+}
+
+/** @brief eg_runner_new over DEVICE plans: the plain loop (``_until_done.Runner``, band, no active set) of a
+ *  fixed-step finishing unit; what else a device runner would run is refused by name. */
+void device_runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out) {
+    if (out == nullptr) refuse(EG_BAD_REQUEST, "eg_runner_new: out is NULL");
+    *out = nullptr;
+    const eg_runner_desc d = read_input(desc, "eg_runner_desc");
+    check_runner(ctx, d, true);
+    for (std::int32_t i = 0; i < d.n_plans; ++i)
+        if (d.plans[i]->structure != EG_STRUCTURE_DEVICE)
+            refuse(EG_BAD_REQUEST, "plans[" + std::to_string(i) + "] is a host plan in a runner over DEVICE plans: "
+                   "one runner runs on one side");
+    if (d.flags & EG_RUN_REORDER)
+        refuse(EG_NOT_WRITTEN, "EG_RUN_REORDER (compaction and reorder) on a device is not written in this build "
+               "of the door");
+    const std::int64_t k = d.plans[0]->unit->finish.steps;
+    if (d.every != 0 && d.every != k)
+        refuse(EG_BAD_REQUEST, "every " + std::to_string(d.every) + ": a runner without an active set advances "
+               "unit '" + d.plans[0]->unit->name + "''s " + std::to_string(k) + " steps per launch");
+    const std::int64_t cap = d.max_steps / k + (d.max_steps % k != 0);
+    if (cap >= 0xFFFFFFFFll)
+        refuse(EG_BAD_REQUEST, "max_steps " + std::to_string(d.max_steps) + ": the device loop counts launches in "
+               "uint32");
+    auto* runner = new eg_runner_s;
+    try {
+        runner->plans.assign(d.plans, d.plans + d.n_plans);
+        runner->max_steps = d.max_steps;
+        runner->dev.ctx = &ctx;
+        Current current(ctx.dev);
+        runner->dev.cells = cells_new(3);
+        const unsigned total[1] = { static_cast<unsigned>(d.plans[0]->n_samples) };
+        cells_write(ctx.dev.stream, runner->dev.cells + 2 * sizeof(unsigned), total, 1);
+        ctx.runners.insert(runner);
+    } catch (...) {
+        delete runner;
+        throw;
+    }
+    for (eg_plan_s* p : runner->plans) ++p->refs;
+    *out = runner;
+}
+
+/** @brief eg_run of a DEVICE runner (``_until_done.Runner._run``, band): re-sync the counter to the mask, capture
+ *  the WHILE loop at the first run (again when a plan's bindings changed), launch it, read the iterations
+ *  and the counter back, fill @p report as the old device path does. */
+void device_run(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report) {
+    check_handle(ctx.runners, runner, "runner");
+    if (ctx.rec != nullptr)
+        refuse(EG_NOT_WRITTEN, "recording a DEVICE run (eg_run while recording) is not written in this build of "
+               "the door");
+    check_report(report);
+    for (const eg_plan_s* p : runner->plans) check_bound(*p);
+    eg_plan_s& first = *runner->plans[0];
+    const FinishFacts& f = first.unit->finish;
+    const std::int64_t n = first.n_samples, k = f.steps;
+    DeviceRun& r = runner->dev;
+    const std::uint64_t stream = ctx.dev.stream;
+    Current current(ctx.dev);
+    std::vector<unsigned char> bound;
+    for (const eg_plan_s* p : runner->plans)
+        for (const eg_plan_s::Binding& b : p->bindings) {
+            const auto* h = reinterpret_cast<const unsigned char*>(&b.handle);
+            const auto* m = reinterpret_cast<const unsigned char*>(&b.mirror);
+            bound.insert(bound.end(), h, h + sizeof(b.handle));
+            bound.insert(bound.end(), m, m + sizeof(b.mirror));
+            bound.insert(bound.end(), b.value, b.value + sizeof(b.value));
+        }
+    if (r.loop != nullptr && bound != r.bound) {
+        loop_free(r.loop);
+        r.loop = nullptr;
+    }
+    auto* counter = reinterpret_cast<unsigned*>(first.device_counter);
+    const DLTensor& t = first.bindings[static_cast<std::size_t>(f.mask_slot)].plane->tensor->dl_tensor;
+    mask_count(stream, static_cast<const char*>(t.data) + t.byte_offset, n, t.dtype.bits / 8u, counter);
+    if (r.loop == nullptr) {
+        const auto t0 = std::chrono::steady_clock::now();
+        auto* cells = reinterpret_cast<unsigned*>(r.cells);
+        const auto cap = static_cast<unsigned>(runner->max_steps / k + (runner->max_steps % k != 0));
+        r.loop = loop_capture(stream, counter, cells + 2, cells, cap, [runner](std::uint64_t s) {
+            for (eg_plan_s* p : runner->plans) launch_on(*p, s);
+        });
+        stream_wait(stream);
+        r.build_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        r.bound = std::move(bound);
+    }
+    loop_launch(r.loop, stream);
+    unsigned ran = 0, finished = 0;
+    cells_read(stream, r.cells + sizeof(unsigned), &ran, 1);
+    cells_read(stream, first.device_counter, &finished, 1);
+    eg_run_report out{};
+    out.flags = (static_cast<std::int64_t>(finished) == n ? EG_REPORT_DONE : 0u) | (k == 1 ? EG_REPORT_EXACT_STEPS : 0u);
+    out.mode = EG_MODE_BAND;
+    out.n = n;
+    out.finished = finished;
+    out.launches = ran;
+    out.steps = static_cast<std::int64_t>(ran) * k;
+    out.mapped = static_cast<std::int64_t>(ran) * n;
+    out.build_s = r.build_s;
+    write_report(report, out);
 }
 
 /** @brief eg_sync: wait until the context's stream is idle (a host-only context has nothing queued). */

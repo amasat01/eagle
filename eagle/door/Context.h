@@ -180,6 +180,7 @@ struct eg_plan_s {
     std::vector<eg_plane_s*> rows;            ///< one eagle-made row plane per cell component (``unit->cells``), one reference each
     std::uint32_t finished = 0;               ///< the eagle-made finished counter of a finishing unit
     std::int64_t steps_word = 0;              ///< the eagle-made steps word of an AUTO unit
+    std::uint64_t device_counter = 0;         ///< DEVICE with a finish: the device cell of the finished counter
     eg_runner_s* active_owner = nullptr;      ///< the runner whose active set the plan reads
     int refs = 1;                             ///< the caller's reference plus one per runner
     bool caller_ref = true;
@@ -209,7 +210,29 @@ struct ActiveState {
 }  // namespace door
 }  // namespace eagle
 
-/** @brief A run-until-done loop over bound host plans (the first carries the finish). */
+namespace eagle {
+namespace door {
+
+struct DeviceLoop;
+
+/** @brief The device part of a DEVICE runner (device/Device.cpp): its captured loop and the device
+ *  cells it reads; freed with the runner (no device call in a forked child). */
+struct DeviceRun {
+    eg_ctx* ctx = nullptr;                    ///< set: a DEVICE runner
+    DeviceLoop* loop = nullptr;               ///< captured at the first eg_run
+    std::uint64_t cells = 0;                  ///< device [remaining, ran, total] (uint32)
+    double build_s = 0.0;                     ///< the capture's wall
+    std::vector<unsigned char> bound;         ///< the plans' argument bytes the loop was captured over
+    DeviceRun() = default;
+    DeviceRun(const DeviceRun&) = delete;
+    DeviceRun& operator=(const DeviceRun&) = delete;
+    ~DeviceRun();
+};
+
+}  // namespace door
+}  // namespace eagle
+
+/** @brief A run-until-done loop over bound plans (the first carries the finish). */
 struct eg_runner_s {
     std::vector<eg_plan_s*> plans;            ///< one reference each
     std::int64_t max_steps = 0;
@@ -217,6 +240,7 @@ struct eg_runner_s {
     bool caller_ref = true;
     bool active = false;                      ///< the plans read an active set
     eagle::door::ActiveState act;
+    eagle::door::DeviceRun dev;               ///< a DEVICE runner's loop and cells
 };
 
 namespace eagle {
@@ -355,7 +379,10 @@ void graph_launch(eg_ctx& ctx, eg_graph_s* graph);
 void graph_free(eg_ctx& ctx, eg_graph_s* graph);
 void record_drop_all(eg_ctx& ctx);
 void host_planes_only(const eg_ctx& ctx, const char* op, std::initializer_list<const eg_plane_s*> planes);
-void host_plans_only(const eg_ctx& ctx, const eg_runner_desc* desc);
+bool device_plans(const eg_ctx& ctx, const eg_runner_desc* desc);
+void check_runner(const eg_ctx& ctx, const eg_runner_desc& d, bool device);
+void check_report(const eg_run_report* report);
+void write_report(eg_run_report* report, eg_run_report r);
 
 // The device group (device/Device.cpp); the host-only build refuses EG_CTX_DEVICE and structure DEVICE.
 void device_open(eg_ctx& ctx, std::int32_t device);
@@ -365,6 +392,10 @@ void device_unit_free(eg_unit_s& unit) noexcept;
 void device_plan_check(const eg_ctx& ctx, const eg_unit_s& unit);
 void device_launch(eg_plan_s& plan);
 void device_sync(eg_ctx& ctx);
+void device_plan_cells(eg_plan_s& plan);
+void device_plan_free(eg_plan_s& plan) noexcept;
+void device_runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out);
+void device_run(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report);
 
 }  // namespace door
 }  // namespace eagle
