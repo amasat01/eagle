@@ -606,8 +606,6 @@ void record_new(eg_ctx& ctx, eg_runner_s& runner, const eg_runner_desc& d) {
                    "this build of the door");
         if (d.steps_reverse == EG_STEPS_REVERSE_FUSED)
             refuse(EG_NOT_WRITTEN, "steps_reverse FUSED on a device is not written in this build of the door");
-        if (rrefine)
-            refuse(EG_NOT_WRITTEN, "a recorded events refine run (and its reverse) on a device is not written in this build of the door");
     }
     eg_unit_s* twin = derived_of(ctx, d, fused ? EG_DERIVED_TAPE_FUSED : EG_DERIVED_TAPE, ev);
     eg_unit_s* vjp = rec ? derived_of(ctx, d, EG_DERIVED_STEP_VJP, ev) : nullptr;
@@ -934,6 +932,13 @@ void bind_refine(eg_plan_s& plan, const std::vector<RSlot>& slots, const eg_plan
     }
 }
 
+/** @brief One event operation over @p q: on the host, or queued on @p D's stream (the planes are device addresses). */
+template <class T>
+void apply_event(eg_ctx* D, const events::EventPlanes<T>& q, std::uint32_t op) {
+    if (D != nullptr) device_event_op(*D, static_cast<unsigned>(sizeof(T)), op, &q);
+    else events::applyHost(q, op);
+}
+
 /** @brief events refine after the twin's forward (``RefinePass.run`` and ``events_refine_host``): locate each stop inside
  *  its stop step, run the guard vjp, test grazing, refuse by name, commit the refined states. */
 template <class T>
@@ -1010,10 +1015,7 @@ void refine_pass(eg_ctx& ctx, eg_runner_s& runner, RunRecord& r, int threads) {
     p.lo = reinterpret_cast<T*>(f.lo.data());
     p.hi = reinterpret_cast<T*>(f.hi.data());
     p.tStop = reinterpret_cast<T*>(f.tstop.data());
-    const auto apply = [&](const events::EventPlanes<T>& q, std::uint32_t op) {
-        if (D != nullptr) device_event_op(*D, static_cast<unsigned>(es), op, &q);
-        else events::applyHost(q, op);
-    };
+    const auto apply = [&](const events::EventPlanes<T>& q, std::uint32_t op) { apply_event(D, q, op); };
     const auto evaluate = [&] { run_on(*f.newton, threads, n, n); };
     evaluate();
     apply(p, events::kOpClassify);
@@ -1192,7 +1194,10 @@ void record_forward(eg_ctx& ctx, eg_runner_s& runner, eg_run_report* report) {
     std::int64_t launches = 0, at = 0;
     const auto done = [&] {
         if (D == nullptr) return static_cast<std::int64_t>(fwd.finished) >= n;
-        if (at % (refine && !r.recorded ? runner.max_steps : r.window) != 0) return false;   // the old device record reads the counter back once per window (a plain refine run: its max_steps)
+        // The old device record reads the counter back once per window: a refine run's checkpoint window is 1, its read-back one the plain run's max_steps,
+        // or the recorded run's default window.
+        const std::int64_t every = refine ? (r.recorded ? diff::defaultWindow(runner.max_steps) : runner.max_steps) : r.window;
+        if (at % every != 0) return false;
         std::uint32_t finished = 0;
         device_read(*D, reinterpret_cast<const void*>(fwd.device_counter), &finished, sizeof(finished));
         return static_cast<std::int64_t>(finished) >= n;
@@ -1323,7 +1328,8 @@ struct RefineExtra {
     std::vector<Buf> pre;                          ///< per taped state: the cotangent the step reverse starts from
     std::vector<std::int64_t> steps;               ///< the steps it runs per sample
     std::vector<std::pair<int, double>> params;    ///< (primal slot, the refine vjp's one canonical sum of that parameter's gradient)
-    Buf t0;                                        ///< the start copy's per-sample gradient (empty: none)
+    Buf t0;                                        ///< the start copy's per-sample gradient
+    bool has_t0 = false;
 };
 
 /** @brief The refine vjp of a recorded refine run: seed it with the end-state cotangent and the implicit-function guard seed,
@@ -1334,15 +1340,16 @@ void refine_reverse(eg_ctx& ctx, eg_runner_s& runner, RunRecord& r, const std::v
     eg_plan_s& primal = *runner.plans[0];
     const std::int64_t n = primal.n_samples;
     const std::size_t es = sizeof(T);
+    eg_ctx* D = primal.structure == EG_STRUCTURE_DEVICE ? &ctx : nullptr;   // a DEVICE record: the refine vjp and its planes on the device
     const auto buf_of = [&](int b) { return f.bufs[static_cast<std::size_t>(b)].buf.data(); };
     std::vector<Buf> xbar(r.taped.size());
     out.pre.resize(r.taped.size());
     for (std::size_t k = 0; k < r.taped.size(); ++k) {
         const std::size_t bytes = static_cast<std::size_t>(r.taped[k].rows * n) * es;
-        xbar[k].resize(bytes);
-        if (seed[k] != nullptr) std::memcpy(xbar[k].data(), seed[k], bytes);
-        out.pre[k].resize(bytes);
-        std::memcpy(out.pre[k].data(), xbar[k].data(), bytes);
+        xbar[k].resize(bytes, D);
+        if (seed[k] != nullptr) copy_bytes(D, xbar[k].data(), seed[k], bytes);
+        out.pre[k].resize(bytes, D);
+        copy_bytes(D, out.pre[k].data(), xbar[k].data(), bytes);
     }
     events::EventPlanes<T> q;
     q.n = n;
@@ -1371,24 +1378,45 @@ void refine_reverse(eg_ctx& ctx, eg_runner_s& runner, RunRecord& r, const std::v
         }
     }
     q.components = sel.components = row;
-    events::applyHost(q, events::kOpSeed);
+    apply_event(D, q, events::kOpSeed);
     if (f.rvjp == nullptr) f.rvjp = inner_plan(ctx, f.rvjp_unit, primal.structure, n);
     const char* start = nullptr;
     for (const Carried& c : r.reads)
         if (c.kind == Carried::START) start = c.src;
     bind_refine(*f.rvjp, f.vslots, primal, r, f, n, es, start);
-    host::run_prefix(*f.rvjp, threads, n);
-    events::applyHost(sel, events::kOpSelect);
-    out.steps.assign(reinterpret_cast<const std::int64_t*>(r.steps.data()), reinterpret_cast<const std::int64_t*>(r.steps.data()) + n);
-    events::reverseSteps(out.steps.data(), q.status, n);
+    run_on(*f.rvjp, threads, n, n);
+    apply_event(D, sel, events::kOpSelect);
+    std::vector<char> steps_host, status_host;   // a device run: the steps and statuses read back for the stop order
+    const std::int64_t* steps_at = reinterpret_cast<const std::int64_t*>(r.steps.data());
+    const std::int8_t* status_at = q.status;
+    if (D != nullptr) {
+        steps_host.resize(static_cast<std::size_t>(std::max<std::int64_t>(n, 1)) * 8);
+        status_host.assign(static_cast<std::size_t>((n + 3) / 4 * 4), 0);
+        device_read(*D, r.steps.data(), steps_host.data(), static_cast<std::size_t>(n) * 8);
+        device_read(*D, f.status.data(), status_host.data(), status_host.size());
+        steps_at = reinterpret_cast<const std::int64_t*>(steps_host.data());
+        status_at = reinterpret_cast<const std::int8_t*>(status_host.data());
+    }
+    out.steps.assign(steps_at, steps_at + n);
+    events::reverseSteps(out.steps.data(), status_at, n);
     for (const auto& [b, slot] : f.pgrads) {   // one canonical sum in sample order (pair 0)
         std::vector<reduce::canonical::Partial<T, aether::SumOp<T>>> one;
-        one.push_back(pair_sum(reinterpret_cast<const T*>(buf_of(b)), n));
+        if (D != nullptr) {
+            Buf hc;
+            hc.resize(2 * es, D);
+            device_pair_sum(*D, es == 8, buf_of(b), n, hc.data(), hc.data() + es);
+            T hv[2] = { T(0), T(0) };
+            device_read(*D, hc.data(), hv, sizeof(hv));
+            one.push_back({ hv[0], hv[1] });
+        } else {
+            one.push_back(pair_sum(reinterpret_cast<const T*>(buf_of(b)), n));
+        }
         out.params.push_back({ slot, static_cast<double>(reduce::canonical::combine(std::move(one)).value()) });
     }
     if (f.t0grad >= 0) {
-        out.t0.resize(static_cast<std::size_t>(n) * es);
-        std::memcpy(out.t0.data(), buf_of(f.t0grad), static_cast<std::size_t>(n) * es);
+        out.t0.resize(static_cast<std::size_t>(n) * es, D);
+        copy_bytes(D, out.t0.data(), buf_of(f.t0grad), static_cast<std::size_t>(n) * es);
+        out.has_t0 = true;
     }
 }
 
@@ -1711,11 +1739,13 @@ void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, con
         else
             for (std::int64_t i = 0; i < n; ++i) reinterpret_cast<float*>(dst.data())[i] += reinterpret_cast<const float*>(fold[g].data())[i];
     }
-    if (!extra.t0.words.empty()) {   // the refine vjp's start-copy gradient joins the time plane's
+    if (extra.has_t0) {   // the refine vjp's start-copy gradient joins the time plane's
         int tk = -1;
         for (std::size_t k = 0; k < r.taped.size(); ++k)
             if (r.taped[k].primal_slot == r.rf->t0of) tk = static_cast<int>(k);
-        if (tk >= 0 && r.scalar == 8)
+        if (tk >= 0 && D != nullptr)
+            device_columns(*D, 1, out_state[static_cast<std::size_t>(tk)].data(), n, extra.t0.data(), n, nullptr, n, 1, static_cast<unsigned>(r.scalar), 0);
+        else if (tk >= 0 && r.scalar == 8)
             for (std::int64_t i = 0; i < n; ++i) reinterpret_cast<double*>(out_state[static_cast<std::size_t>(tk)].data())[i] += reinterpret_cast<const double*>(extra.t0.data())[i];
         else if (tk >= 0)
             for (std::int64_t i = 0; i < n; ++i) reinterpret_cast<float*>(out_state[static_cast<std::size_t>(tk)].data())[i] += reinterpret_cast<const float*>(extra.t0.data())[i];

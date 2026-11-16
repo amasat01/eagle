@@ -112,7 +112,7 @@ void zero_bytes(std::uint64_t stream, void* dst, std::size_t bytes);
 void diff_columns(std::uint64_t stream, int op, void* dst, std::int64_t dst_ld, const void* src, std::int64_t src_ld,
                   const std::int64_t* index, std::int64_t count, std::int64_t rows, unsigned bytes, std::int64_t value);
 
-/** @brief Queue on @p stream one forward event operation (the refine ops classify to commit) over the planes @p planes points
+/** @brief Queue on @p stream one event operation (classify to commit, seed, select) over the planes @p planes points
  *  to: an ``eagle::events::EventPlanes`` of @p bytes (4 or 8) wide reals, device addresses. */
 void event_op(std::uint64_t stream, unsigned bytes, unsigned op, const void* planes);
 

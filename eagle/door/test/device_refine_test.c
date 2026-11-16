@@ -161,14 +161,6 @@ int main(int argc, char** argv) {
         struct eg_run_report rep;
         memset(&rep, 0, sizeof(rep));
         rep.struct_size = sizeof(rep);
-        {   /* a recorded refine run on a device is not written yet */
-            struct eg_runner_desc rec = d;
-            rec.flags = EG_RUN_RECORD;
-            rec.window = 1;
-            eg_runner* none_r = NULL;
-            snprintf(msg, sizeof(msg), "%s: a recorded events refine run on a device refused NOT_WRITTEN by name", nm[0]);
-            check(bound && eg_runner_new(ctx, &rec, &none_r) == EG_NOT_WRITTEN && reason_has(ctx, "recorded events refine run") && none_r == NULL, msg);
-        }
         const int ok = bound && eg_runner_new(ctx, &d, &r) == EG_OK;
         if (!ok) reason_has(ctx, "(the refine runner builds)");
         snprintf(what, sizeof(what), "%s: eg_runner_new with events REFINE over a DEVICE plan", nm[0]);

@@ -15,7 +15,7 @@
 
 #include "eagle/filtering/Reorder.h"
 #include "eagle/diff/Reverse.h"
-#include "eagle/events/Refine.h"
+#include "eagle/events/Sensitivity.h"
 
 #include <memory>
 
@@ -116,8 +116,8 @@ void mask_count(std::uint64_t stream, const void* mask, std::int64_t n, unsigned
 
 void event_op(std::uint64_t stream, unsigned bytes, unsigned op, const void* planes) {
     const auto s = reinterpret_cast<cudaStream_t>(stream);
-    if (bytes == 8) events::device::refine(*static_cast<const events::EventPlanes<double>*>(planes), op, s);
-    else events::device::refine(*static_cast<const events::EventPlanes<float>*>(planes), op, s);
+    if (bytes == 8) events::device::apply(*static_cast<const events::EventPlanes<double>*>(planes), op, s);
+    else events::device::apply(*static_cast<const events::EventPlanes<float>*>(planes), op, s);
     EAGLE_CHECK_ALWAYS(cudaGetLastError());
 }
 
