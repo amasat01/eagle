@@ -57,6 +57,7 @@ void device_pair_sum(eg_ctx&, bool, const void*, std::int64_t, void*, void*) {}
 bool device_active_compact(eg_ctx&, eg_runner_s&, const void*, const std::vector<Owned>&, bool) { return false; }
 void device_active_restore(eg_ctx&, eg_runner_s&, const void*, const std::vector<Owned>&) {}
 std::int64_t device_free_bytes(eg_ctx&) { return 0; }
+void device_event_op(eg_ctx&, unsigned, unsigned, const void*) {}
 void device_reduce(eg_ctx&, const eg_reduce_desc&) {}
 void device_copy(eg_ctx&, eg_plane_s*, eg_plane_s*) {}
 void device_runner_new(eg_ctx&, const eg_runner_desc*, eg_runner**) {
@@ -520,6 +521,11 @@ void device_pair_sum(eg_ctx& ctx, bool f64, const void* in, std::int64_t n, void
     reduce_step(ctx.dev.stream, f64 ? 1 : 0, 0, in, n, 1, hi, comp, true);
 }
 
+void device_event_op(eg_ctx& ctx, unsigned bytes, unsigned op, const void* planes) {
+    Current current(ctx.dev);
+    event_op(ctx.dev.stream, bytes, op, planes);
+}
+
 std::int64_t device_free_bytes(eg_ctx& ctx) {
     Current current(ctx.dev);
     return free_bytes();
@@ -738,6 +744,8 @@ void device_runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out)
                    "one runner runs on one side");
     const std::int64_t k = d.plans[0]->unit->finish.steps;
     if (k == EG_STEPS_AUTO) {    // the no-graph entries: no loop, no loop cells
+        if (d.events == EG_EVENTS_REFINE)
+            refuse(EG_NOT_WRITTEN, "events REFINE of an automatic unit on a device is not written in this build of the door");
         if (d.flags & EG_RUN_RECORD)
             refuse(EG_NOT_WRITTEN, "EG_RUN_RECORD of an automatic unit on a device (the K-step twin) is not written in this "
                    "build of the door");
@@ -808,7 +816,7 @@ void device_runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out)
                 reorder_scratch(r, n, reorder_table(*runner));
             }
         }
-        if (d.flags & EG_RUN_RECORD) record_new(ctx, *runner, d);    // the host's record checks; the run is host/Reverse.cpp's on the device
+        if ((d.flags & EG_RUN_RECORD) || d.events == EG_EVENTS_REFINE) record_new(ctx, *runner, d);    // the host's record and refine checks; the run is host/Reverse.cpp's on the device
         ctx.runners.insert(runner);
     } catch (...) {
         record_free(ctx, *runner);

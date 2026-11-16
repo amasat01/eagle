@@ -19,8 +19,6 @@ void check_desc(const eg_runner_desc& d, bool device) {
         refuse(EG_BAD_REQUEST, "eg_runner_desc.flags: unknown bits " + std::to_string(d.flags));
     const bool record = (d.flags & EG_RUN_RECORD) != 0;
     const bool refine = d.events == EG_EVENTS_REFINE;
-    if (refine && device)
-        refuse(EG_NOT_WRITTEN, "events REFINE on a DEVICE runner is not written in this build of the door");
     if (d.events != EG_EVENTS_STEP && !refine) refuse(EG_BAD_REQUEST, "unknown events " + std::to_string(d.events));
     if (d.on_no_event != EG_NO_EVENT_REFUSE && d.on_no_event != EG_NO_EVENT_ZERO)
         refuse(EG_BAD_REQUEST, "unknown on_no_event " + std::to_string(d.on_no_event));

@@ -84,7 +84,7 @@ LIB := $(OUT)/libeagle_door.so
 FIXTURE := $(OUT)/libfixture_unit.so
 TEST := $(OUT)/door_test
 
-.PHONY: all lib symbols test check-inputs check-cuda pairs pair-reverse pair-reverse-active pair-reverse-timed pair-reverse-fused pair-reverse-kstep pair-reverse-reorder pair-reverse-t0 pair-reverse-counter pair-refine pair-refine-reverse pair-refine-pend pair-refine-reverse-pend pair-status-grid pair-status-tangent pair-status-two device pair-device-reverse $(PAIR_UNITS:%=pair-%) $(PAIR_DEVICE_UNITS:%=pair-device-%)
+.PHONY: all lib symbols test check-inputs check-cuda pairs pair-reverse pair-reverse-active pair-reverse-timed pair-reverse-fused pair-reverse-kstep pair-reverse-reorder pair-reverse-t0 pair-reverse-counter pair-refine pair-refine-reverse pair-refine-pend pair-refine-reverse-pend pair-status-grid pair-status-tangent pair-status-two device pair-device-reverse pair-device-refine $(PAIR_UNITS:%=pair-%) $(PAIR_DEVICE_UNITS:%=pair-device-%)
 all: test
 
 check-inputs:
@@ -434,6 +434,34 @@ $(eval $(call DEV_REV_RULES,rr_pend,reverse,rr_pend))
 $(eval $(call DEV_REV_RULES,timed,timed,_timed))
 $(eval $(call DEV_REV_RULES,act,act,_pend_body))
 pair-device-reverse: symbols $(OUT)/libpair_dev_rev_rr_pend.so $(OUT)/libpair_dev_rev_timed.so $(OUT)/libpair_dev_rev_act.so $(DEVICE_REVERSE_TEST)
+
+# pair-device-refine: events REFINE (a plain run) and eg_run_events on the device, per case one library of the old device run's own images
+# (PTX_ref_<case>, _tape, _newton, _guard) with the host meta; run $(OUT)/device_refine_test <library> <case> <oracle dir> <4 digests> <max_steps>
+# <on_no_event> <compare> through the GPU pool. Cases: osc, pend, grid (bitwise against the old device run), tangent, two (refused by name).
+META_ref_osc ?= $(META_ev)
+META_ref_pend ?= $(META_pend)
+META_ref_grid ?= test/derived/ev_grid_meta.c
+META_ref_tangent ?= test/derived/ev_tangent_meta.c
+META_ref_two ?= test/derived/ev_two_meta.c
+define DEV_REF_RULES
+$(OUT)/libpair_dev_ref_$(1).so: $$(PTX_ref_$(1)) $$(PTX_ref_$(1)_tape) $$(PTX_ref_$(1)_newton) $$(PTX_ref_$(1)_guard) $$(META_ref_$(1)) eg_door.h eg_unit_meta.h | check-cuda
+	@test -f "$$(PTX_ref_$(1))" -a -f "$$(PTX_ref_$(1)_tape)" -a -f "$$(PTX_ref_$(1)_newton)" -a -f "$$(PTX_ref_$(1)_guard)" || \
+	  { echo "set PTX_ref_$(1), _tape, _newton and _guard"; exit 1; }
+	@mkdir -p $(OUT)
+	$$(call embed,$$(PTX_ref_$(1)),ev_$(1)__image,$(OUT)/dev_ref_$(1)_p.o)
+	$$(call embed,$$(PTX_ref_$(1)_tape),ev_$(1)_tape__image,$(OUT)/dev_ref_$(1)_t.o)
+	$$(call embed,$$(PTX_ref_$(1)_newton),ev_$(1)_newton__image,$(OUT)/dev_ref_$(1)_n.o)
+	$$(call embed,$$(PTX_ref_$(1)_guard),ev_$(1)_state_guard_vjp__image,$(OUT)/dev_ref_$(1)_g.o)
+	$$(call cuda_meta,$$(META_ref_$(1)),$(OUT)/dev_ref_$(1)_meta.c)
+	$$(CC) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$$(ROOT) -c $(OUT)/dev_ref_$(1)_meta.c -o $(OUT)/dev_ref_$(1)_meta.o
+	$$(CC) -shared -o $$@ $(OUT)/dev_ref_$(1)_meta.o $(OUT)/dev_ref_$(1)_p.o $(OUT)/dev_ref_$(1)_t.o $(OUT)/dev_ref_$(1)_n.o $(OUT)/dev_ref_$(1)_g.o
+endef
+$(foreach c,osc pend grid tangent two,$(eval $(call DEV_REF_RULES,$(c))))
+DEVICE_REFINE_TEST := $(OUT)/device_refine_test
+$(DEVICE_REFINE_TEST): test/device_refine_test.c test/pair_util.h eg_door.h $(LIB) | check-cuda
+	$(CC) $(CFLAGS_C) -isystem $(CUDA)/include -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door \
+	  -Wl,-rpath,$(OUT) $(CUDART) -lm -pthread
+pair-device-refine: symbols $(foreach c,osc pend grid tangent two,$(OUT)/libpair_dev_ref_$(c).so) $(DEVICE_REFINE_TEST)
 
 # pair-refine-pend, pair-refine-reverse-pend: the pendulum (ev_pend, the old path's second event model, a 0.05, c 0.2) over its own
 # library (META_pend) with the same two tests; ORACLE_pend (plain refine run), ORACLE_pendrr (the reverse's gradients).

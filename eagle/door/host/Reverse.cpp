@@ -606,6 +606,8 @@ void record_new(eg_ctx& ctx, eg_runner_s& runner, const eg_runner_desc& d) {
                    "this build of the door");
         if (d.steps_reverse == EG_STEPS_REVERSE_FUSED)
             refuse(EG_NOT_WRITTEN, "steps_reverse FUSED on a device is not written in this build of the door");
+        if (rrefine)
+            refuse(EG_NOT_WRITTEN, "a recorded events refine run (and its reverse) on a device is not written in this build of the door");
     }
     eg_unit_s* twin = derived_of(ctx, d, fused ? EG_DERIVED_TAPE_FUSED : EG_DERIVED_TAPE, ev);
     eg_unit_s* vjp = rec ? derived_of(ctx, d, EG_DERIVED_STEP_VJP, ev) : nullptr;
@@ -616,8 +618,8 @@ void record_new(eg_ctx& ctx, eg_runner_s& runner, const eg_runner_desc& d) {
     if (fusedrev && ev) refuse(EG_NOT_WRITTEN, "steps_reverse FUSED with events refine is not written in this build of the door");
     eg_unit_s* fvjp = fusedrev ? derived_of(ctx, d, EG_DERIVED_FUSED_VJP, ev) : nullptr;
     if (runner.dev.ctx != nullptr)
-        for (const eg_unit_s* u : { twin, vjp })
-            if (u->function == 0) refuse(EG_NOT_WRITTEN, "unit '" + u->name + "' on DEVICE: the unit has no device image");
+        for (const eg_unit_s* u : { twin, vjp, newton, guard })
+            if (u != nullptr && u->function == 0) refuse(EG_NOT_WRITTEN, "unit '" + u->name + "' on DEVICE: the unit has no device image");
     const std::int32_t want = refine ? 3 : rrefine ? 5 : fusedrev ? 3 : 2;
     if (d.n_derived != want)
         refuse(EG_BAD_REQUEST, "n_derived " + std::to_string(d.n_derived) + (refine ? ": a refine run takes the twin, the Newton and the state guard vjp"
@@ -940,30 +942,49 @@ void refine_pass(eg_ctx& ctx, eg_runner_s& runner, RunRecord& r, int threads) {
     eg_plan_s& primal = *runner.plans[0];
     const std::int64_t n = primal.n_samples;
     const std::size_t es = sizeof(T);
+    eg_ctx* D = primal.structure == EG_STRUCTURE_DEVICE ? &ctx : nullptr;   // a DEVICE refine: eagle's planes and every round on the device
+    /// Host bytes of a device buffer (rounded up to whole words), or the buffer itself on the host.
+    const auto host_of = [&](Buf& b, std::size_t bytes, std::vector<char>& tmp) -> const char* {
+        if (D == nullptr) return b.data();
+        tmp.assign((bytes + 3) / 4 * 4, 0);
+        device_read(*D, b.data(), tmp.data(), tmp.size());
+        return tmp.data();
+    };
     std::int64_t max_rows = 1;
     for (RBuf& b : f.bufs) {
-        b.buf.resize(static_cast<std::size_t>(b.rows * n) * es);
-        T* p = reinterpret_cast<T*>(b.buf.data());
-        if (b.fill == RBuf::ONES) std::fill(p, p + n, T(1));
-        else if (b.fill == RBuf::UNIFORM_OF)
-            for (std::int64_t i = 0; i < n; ++i) std::memcpy(p + i, primal.bindings[static_cast<std::size_t>(b.of)].value, es);
+        b.buf.resize(static_cast<std::size_t>(b.rows * n) * es, D);
+        if (b.fill != RBuf::NONE) {
+            std::vector<T> fill(static_cast<std::size_t>(n));
+            for (std::int64_t i = 0; i < n; ++i) {
+                if (b.fill == RBuf::ONES) fill[static_cast<std::size_t>(i)] = T(1);
+                else std::memcpy(&fill[static_cast<std::size_t>(i)], primal.bindings[static_cast<std::size_t>(b.of)].value, es);
+            }
+            if (D != nullptr) device_write(*D, b.buf.data(), fill.data(), fill.size() * es);
+            else std::memcpy(b.buf.data(), fill.data(), fill.size() * es);
+        }
         max_rows = std::max(max_rows, b.rows);
     }
-    f.zero.resize(static_cast<std::size_t>(max_rows * n) * es);
-    f.nsteps.resize(static_cast<std::size_t>(n) * 8);
-    f.status.resize(static_cast<std::size_t>(n));
-    f.which.resize(static_cast<std::size_t>(n));
-    f.lo.resize(static_cast<std::size_t>(n) * es);
-    f.hi.resize(static_cast<std::size_t>(n) * es);
-    f.tstop.resize(static_cast<std::size_t>(n) * es);
+    f.zero.resize(static_cast<std::size_t>(max_rows * n) * es, D);
+    f.nsteps.resize(static_cast<std::size_t>(n) * 8, D);
+    f.status.resize(static_cast<std::size_t>(n), D);
+    f.which.resize(static_cast<std::size_t>(n), D);
+    f.lo.resize(static_cast<std::size_t>(n) * es, D);
+    f.hi.resize(static_cast<std::size_t>(n) * es, D);
+    f.tstop.resize(static_cast<std::size_t>(n) * es, D);
     f.done = false;
+    std::vector<char> tmp;
     const std::int64_t* applied = reinterpret_cast<const std::int64_t*>(r.steps.data());
-    std::int64_t* nsteps = reinterpret_cast<std::int64_t*>(f.nsteps.data());
-    for (std::int64_t i = 0; i < n; ++i) nsteps[i] = std::max<std::int64_t>(applied[i] - 1, 0);
+    {   // the steps before each sample's stop step
+        const std::int64_t* seen = reinterpret_cast<const std::int64_t*>(host_of(r.steps, static_cast<std::size_t>(n) * 8, tmp));
+        std::vector<std::int64_t> before(static_cast<std::size_t>(n));
+        for (std::int64_t i = 0; i < n; ++i) before[static_cast<std::size_t>(i)] = std::max<std::int64_t>(seen[i] - 1, 0);
+        if (D != nullptr) device_write(*D, f.nsteps.data(), before.data(), before.size() * 8);
+        else std::memcpy(f.nsteps.data(), before.data(), before.size() * 8);
+    }
     const T* h = f.h >= 0 ? reinterpret_cast<const T*>(f.bufs[static_cast<std::size_t>(f.h)].buf.data())
                           : reinterpret_cast<const T*>(plane_bytes(*primal.bindings[static_cast<std::size_t>(f.h_primal)].plane));
     T* tau = reinterpret_cast<T*>(f.bufs[static_cast<std::size_t>(f.tau)].buf.data());
-    std::memcpy(tau, h, static_cast<std::size_t>(n) * es);   // the first evaluation is the step's end
+    copy_bytes(D, tau, h, static_cast<std::size_t>(n) * es);   // the first evaluation is the step's end
     const char* start = nullptr;
     for (const Carried& c : r.reads)
         if (c.kind == Carried::START) start = c.src;
@@ -989,15 +1010,26 @@ void refine_pass(eg_ctx& ctx, eg_runner_s& runner, RunRecord& r, int threads) {
     p.lo = reinterpret_cast<T*>(f.lo.data());
     p.hi = reinterpret_cast<T*>(f.hi.data());
     p.tStop = reinterpret_cast<T*>(f.tstop.data());
-    const auto evaluate = [&] { host::run_prefix(*f.newton, threads, n); };
+    const auto apply = [&](const events::EventPlanes<T>& q, std::uint32_t op) {
+        if (D != nullptr) device_event_op(*D, static_cast<unsigned>(es), op, &q);
+        else events::applyHost(q, op);
+    };
+    const auto evaluate = [&] { run_on(*f.newton, threads, n, n); };
     evaluate();
-    events::applyHost(p, events::kOpClassify);
-    events::refineLoop(evaluate, [&](std::uint32_t op) { events::applyHost(p, op); }, [&] { return events::anyPending(p); });
-    for (std::size_t j = 0; j < f.seed.size(); ++j) {
-        T* seed = reinterpret_cast<T*>(f.bufs[static_cast<std::size_t>(f.seed[j])].buf.data());
-        for (std::int64_t i = 0; i < n; ++i) seed[i] = f.which.data()[i] == static_cast<char>(j) ? T(1) : T(0);
+    apply(p, events::kOpClassify);
+    // A device run enqueues every round (no read-back: a located sample's update is a no-op), as the old path's.
+    events::refineLoop(evaluate, [&](std::uint32_t op) { apply(p, op); }, [&] { return D != nullptr || events::anyPending(p); });
+    if (!f.seed.empty()) {
+        const char* which = host_of(f.which, static_cast<std::size_t>(n), tmp);
+        for (std::size_t j = 0; j < f.seed.size(); ++j) {
+            std::vector<T> seed(static_cast<std::size_t>(n));
+            for (std::int64_t i = 0; i < n; ++i) seed[static_cast<std::size_t>(i)] = which[i] == static_cast<char>(j) ? T(1) : T(0);
+            Buf& dst = f.bufs[static_cast<std::size_t>(f.seed[j])].buf;
+            if (D != nullptr) device_write(*D, dst.data(), seed.data(), seed.size() * es);
+            else std::memcpy(dst.data(), seed.data(), seed.size() * es);
+        }
     }
-    host::run_prefix(*f.guard, threads, n);
+    run_on(*f.guard, threads, n, n);
     // The rows of every refined state, in the order of f.states.
     events::EventPlanes<T> q = p, c = p;
     int row = 0;
@@ -1015,8 +1047,9 @@ void refine_pass(eg_ctx& ctx, eg_runner_s& runner, RunRecord& r, int threads) {
         }
     }
     q.components = c.components = row;
-    events::applyHost(q, events::kOpGraze);
-    const std::int8_t* status = reinterpret_cast<const std::int8_t*>(f.status.data());
+    apply(q, events::kOpGraze);
+    std::vector<char> status_tmp;
+    const std::int8_t* status = reinterpret_cast<const std::int8_t*>(host_of(f.status, static_cast<std::size_t>(n), status_tmp));
     const struct { std::int8_t code; const char* text; } order[] = {
         { events::kTwoRules, "two stop rules cross in the same step" },
         { events::kGraze, "samples graze the surface (|dg/dtau| below the graze tolerance); the event time is not differentiable" },
@@ -1032,7 +1065,8 @@ void refine_pass(eg_ctx& ctx, eg_runner_s& runner, RunRecord& r, int threads) {
         refuse(EG_BAD_REQUEST, std::string("events refine: ") + (o.code == events::kTwoRules ? "" : std::to_string(count) + " ") + o.text +
                " (first: sample " + std::to_string(first) + ")");
     }
-    events::applyHost(c, events::kOpCommit);
+    apply(c, events::kOpCommit);
+    if (D != nullptr) device_sync(*D);   // the committed states land before eg_run returns
     f.done = true;
 }
 
@@ -1052,7 +1086,7 @@ void record_forward(eg_ctx& ctx, eg_runner_s& runner, eg_run_report* report) {
     r.fword.resize(8);
     r.dummy.resize(static_cast<std::size_t>(r.width * std::max<std::int64_t>(n, 1)) * r.scalar, D);
     const bool refine = r.rf != nullptr;
-    if (refine) r.tape.resize(static_cast<std::size_t>(r.width * std::max<std::int64_t>(n, 1)) * r.scalar);
+    if (refine) r.tape.resize(static_cast<std::size_t>(r.width * std::max<std::int64_t>(n, 1)) * r.scalar, D);
     const auto take = [&](Carried& c) {
         if (c.kind == Carried::STEPS) {
             c.src = r.steps.data();
@@ -1158,7 +1192,7 @@ void record_forward(eg_ctx& ctx, eg_runner_s& runner, eg_run_report* report) {
     std::int64_t launches = 0, at = 0;
     const auto done = [&] {
         if (D == nullptr) return static_cast<std::int64_t>(fwd.finished) >= n;
-        if (at % r.window != 0) return false;   // the old device record reads the counter back once per window
+        if (at % (refine && !r.recorded ? runner.max_steps : r.window) != 0) return false;   // the old device record reads the counter back once per window (a plain refine run: its max_steps)
         std::uint32_t finished = 0;
         device_read(*D, reinterpret_cast<const void*>(fwd.device_counter), &finished, sizeof(finished));
         return static_cast<std::int64_t>(finished) >= n;
@@ -1724,19 +1758,21 @@ void run_events(eg_ctx& ctx, eg_runner_s* runner, eg_plane_s* t_stop, eg_plane_s
     RunRecord& r = *runner->record;
     RefineRun& f = *r.rf;
     const std::int64_t n = runner->plans[0]->n_samples;
+    eg_ctx* D = runner->plans[0]->structure == EG_STRUCTURE_DEVICE ? &ctx : nullptr;   // a device refine: device planes out
     const auto check = [&](eg_plane_s* p, std::uint8_t code, std::uint8_t bits, const char* what) -> char* {
         if (p == nullptr) return nullptr;
         check_handle(ctx.planes, p, what);
         const DLTensor& t = p->tensor->dl_tensor;
         if (t.dtype.code != code || t.dtype.bits != bits || t.dtype.lanes != 1 || elements(t) != n || !compact(t) ||
-            t.device.device_type != kDLCPU)
+            t.device.device_type != (D != nullptr ? kDLCUDA : kDLCPU))
             refuse(EG_BAD_REQUEST, std::string("eg_run_events: plane shape or dtype (") + what + ")");
         return static_cast<char*>(t.data) + t.byte_offset;
     };
     char* ts = check(t_stop, kDLFloat, static_cast<std::uint8_t>(r.scalar * 8), "t_stop");
     char* st = check(status, kDLInt, 8, "status");
-    if (ts != nullptr) std::memcpy(ts, f.tstop.data(), static_cast<std::size_t>(n) * r.scalar);
-    if (st != nullptr) std::memcpy(st, f.status.data(), static_cast<std::size_t>(n));
+    if (ts != nullptr) copy_bytes(D, ts, f.tstop.data(), static_cast<std::size_t>(n) * r.scalar);
+    if (st != nullptr) copy_bytes(D, st, f.status.data(), static_cast<std::size_t>(n));
+    if (D != nullptr) device_sync(*D);
 }
 
 }  // namespace door

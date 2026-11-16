@@ -489,6 +489,8 @@ void device_launch_prefix(eg_plan_s& plan, std::int64_t count, std::int64_t of);
 void device_mask_count(eg_ctx& ctx, const void* mask, std::int64_t n, unsigned width, std::uint64_t counter);
 void device_pair_sum(eg_ctx& ctx, bool f64, const void* in, std::int64_t n, void* hi, void* comp);
 std::int64_t device_free_bytes(eg_ctx& ctx);
+/** @brief Queue on the context's stream one forward event operation over the device planes @p planes (an EventPlanes of @p bytes wide reals). */
+void device_event_op(eg_ctx& ctx, unsigned bytes, unsigned op, const void* planes);
 /** @brief A recorded DEVICE run's active set (device/Device.cpp): queue the compaction of @p mask into the runner's device map and
  *  count (the reorder trigger too, for a reordering set); with @p reorder and a fired trigger, the reorder of @p owned (the
  *  mask first) and its count; returns whether it reordered. */
