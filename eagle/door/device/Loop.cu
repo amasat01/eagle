@@ -66,6 +66,11 @@ __global__ void compactDoneKernel(const unsigned* finished, unsigned* done_at_la
     ++*compactions;
 }
 
+__global__ void staleLiveKernel(unsigned char* stale, const unsigned char* dead, std::int64_t n) {
+    const std::int64_t i = static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i < n && dead[i] != 0) stale[i] = 0;
+}
+
 __global__ void reorderCountKernel(const unsigned* fire, unsigned* reorders) { *reorders += *fire != 0 ? 1u : 0u; }
 
 __global__ void maskCountKernel(const unsigned char* mask, long long n, unsigned width, unsigned* counter) {
@@ -191,6 +196,13 @@ void class_sort_step(std::uint64_t stream, const std::vector<DevicePlane>& plane
 
 void compact_keep_step(std::uint64_t stream, const void* mask, std::int64_t n, std::int32_t* map, unsigned* count, void* scratch) {
     filtering::compactDevice(static_cast<const std::uint8_t*>(mask), 0u, map, count, scratch, n, reinterpret_cast<cudaStream_t>(stream));
+    EAGLE_CHECK_ALWAYS(cudaGetLastError());
+}
+
+void stale_live_step(std::uint64_t stream, void* stale, const void* dead, std::int64_t n) {
+    if (n <= 0) return;
+    staleLiveKernel<<<static_cast<unsigned>((n + 255) / 256), 256, 0, reinterpret_cast<cudaStream_t>(stream)>>>(
+        static_cast<unsigned char*>(stale), static_cast<const unsigned char*>(dead), n);
     EAGLE_CHECK_ALWAYS(cudaGetLastError());
 }
 

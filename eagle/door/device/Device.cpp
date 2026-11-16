@@ -429,8 +429,6 @@ void device_plan_check(const eg_ctx& ctx, const eg_unit_s& unit) {
     if (ctx.dev.ordinal < 0)
         refuse(EG_BAD_REQUEST, "structure DEVICE on a host-only context (made without EG_CTX_DEVICE)");
     const std::string who = "unit '" + unit.name + "' on DEVICE: ";
-    if (unit.seg.present && unit.seg.dynamic && unit.seg.mask_slot >= 0)
-        refuse(EG_NOT_WRITTEN, who + "the SEGMENTED dispatch group '" + unit.seg.name + "' has a dynamic selector and a TERMINATED mask, which is not written on the device (no mask: every sample is live)");
     if (unit.stages.empty() && unit.function == 0) refuse(EG_NOT_WRITTEN, who + "the unit has no device image");
     for (const StageFacts& st : unit.stages)
         if (st.grid == EG_GRID_CHUNKS || st.grid == EG_GRID_TARGETS)
@@ -593,7 +591,14 @@ void launch_segmented(const eg_plan_s& plan) {
     void* zero_mask = S.dev_bufs[6];
     void* scratch = S.dev_bufs[7];
     if (g.dynamic) {    // the sort key: the classes the units wrote, taken again when the batch has gone stale (the first sort sees all zeros, as the old runner's)
-        if (!S.sorted || static_cast<double>(S.stale_now) > host::kStaleMax * static_cast<double>(std::max<std::int64_t>(n, 1))) {
+        std::int64_t live = n;    // the live samples: every one without a mask, else the zero bytes of the caller's mask
+        if (mask != nullptr) {
+            mask_count(stream, mask->data, n, 1, cells + 3);
+            unsigned dead = 0;
+            cells_read(stream, reinterpret_cast<std::uint64_t>(cells + 3), &dead, 1);
+            live = n - dead;
+        }
+        if (!S.sorted || static_cast<double>(S.stale_now) > host::kStaleMax * static_cast<double>(std::max<std::int64_t>(live, 1))) {
             std::vector<std::int64_t> cls(un);
             const DLTensor& ct = plan.segdev[1]->tensor->dl_tensor;
             device_read(ctx, static_cast<char*>(ct.data) + ct.byte_offset, cls.data(), un * sizeof(std::int64_t));
@@ -637,13 +642,48 @@ void launch_segmented(const eg_plan_s& plan) {
     cells_read(stream, reinterpret_cast<std::uint64_t>(off32), off.data(), K + 1);
     std::vector<std::int64_t> off64(off.begin(), off.end());
     device_write(ctx, static_cast<char*>(plan.segdev[0]->tensor->dl_tensor.data) + plan.segdev[0]->tensor->dl_tensor.byte_offset, off64.data(), off64.size() * sizeof(std::int64_t));
+    // The argument list of a stage unit: each stage slot joined at load to a slot of the planned unit (the caller's plane, or the sorted copy of it) or to a
+    // scratch plane eagle made. @p slots maps a stage slot to the planned unit's slot (-1: none).
+    const auto plane_arg = [&](std::int32_t slot, std::vector<void*>& args, std::size_t j, const eg_plane_s* scratch, int role, std::vector<plugin::ScalarHandle>& handles) {
+        if (scratch != nullptr) {
+            const DLTensor& t = scratch->tensor->dl_tensor;
+            plugin::ScalarHandle& h = handles[j];
+            h.data = static_cast<char*>(t.data) + t.byte_offset;
+            h.samples = static_cast<std::uint64_t>(role == EG_ROLE_LOOKUP ? elements(t) : role == EG_ROLE_WIDE_IN || role == EG_ROLE_WIDE_OUT ? t.shape[t.ndim - 1] : n);
+            h.stride = 1;
+            h.deviceType = plugin::kEagleAbiDeviceCUDA;
+            h.deviceId = 0;
+            args[j] = &h;
+            return;
+        }
+        void* arg = plan.params[static_cast<std::size_t>(slot)];
+        for (seg::Owned& o : owned)
+            if (o.slot == slot) arg = plan.unit->slots[static_cast<std::size_t>(slot)].mirror ? static_cast<void*>(&o.bind.mirror) : static_cast<void*>(&o.bind.handle);
+        args[j] = arg;
+    };
+    const bool lent = !plan.unit->stages.empty();    // the branches are the planned unit's stages: they share its scratch planes
     for (unsigned j = 0; j < K; ++j) {    // branch j over its run; the unit reads its own offset
         const std::int64_t run = static_cast<std::int64_t>(off[j + 1]) - static_cast<std::int64_t>(off[j]);
         if (run <= 0) continue;
         const eg_unit_s& u = *g.branches[j];
-        std::vector<void*> p = seg::params_of(plan, j, u, owned, &n32);
+        std::vector<void*> p;
+        std::vector<plugin::ScalarHandle> handles;
+        if (lent) {
+            const StageFacts& st = plan.unit->stages[j];
+            p.resize(u.slots.size());
+            handles.resize(u.slots.size());
+            for (std::size_t s = 0; s < u.slots.size(); ++s) {
+                if (st.source_of[s] >= 0) plane_arg(st.source_of[s], p, s, nullptr, 0, handles);
+                else if (st.plane_of[s] >= 0) plane_arg(-1, p, s, plan.team[static_cast<std::size_t>(st.plane_of[s])], u.slots[s].role, handles);
+                else p[s] = &n32;
+            }
+        } else {
+            p = seg::params_of(plan, j, u, owned, &n32);
+        }
         exec::DeviceKernel::run(reinterpret_cast<CUfunction>(u.function), p, exec::Partition{ 0, run, n }, cs, resolved_block(d, u, run));
     }
+    if (g.dynamic && mask != nullptr)    // a stale sample that finished in this step is not swept: stale and live, as the old runner's
+        stale_live_step(stream, S.dev_bufs[kFixed + static_cast<std::size_t>(owned.size()) - 1], mask_copy, n);
     if (g.dynamic) {    // the samples whose branch moved (stale), compacted into the sweep's active map; the fused unit completes them
         compact_keep_step(stream, S.dev_bufs[kFixed + static_cast<std::size_t>(owned.size()) - 1], n, static_cast<std::int32_t*>(plan.segdev[3]->tensor->dl_tensor.data),
                           static_cast<unsigned*>(plan.segdev[4]->tensor->dl_tensor.data), S.dev_bufs[8]);
@@ -653,7 +693,31 @@ void launch_segmented(const eg_plan_s& plan) {
         if (stale > 0) {
             const eg_unit_s& u = *g.sweep;
             std::vector<void*> p = seg::params_of(plan, K, u, owned, &n32);
-            exec::DeviceKernel::run(reinterpret_cast<CUfunction>(u.function), p, exec::Partition{ 0, static_cast<std::int64_t>(stale), n }, cs, resolved_block(d, u, stale));
+            if (!u.stages.empty()) {    // a split sweep: its one stage over the stage's own slots (a team stage is a grid over the batch, the kernel reads the active count)
+                const StageFacts& st = u.stages[0];
+                std::vector<void*> sp(u.slots.size());
+                std::vector<plugin::ScalarHandle> handles(u.slots.size());
+                for (std::size_t s = 0; s < u.slots.size(); ++s) {
+                    if (st.source_of[s] >= 0) sp[s] = p[static_cast<std::size_t>(st.source_of[s])];
+                    else if (st.plane_of[s] >= 0) plane_arg(-1, sp, s, plan.segteam[K][static_cast<std::size_t>(st.plane_of[s])], u.slots[s].role, handles);
+                    else sp[s] = &n32;
+                }
+                if (st.team) {
+                    EG_DRIVER(cuLaunchKernel);
+                    const std::int64_t per_block = static_cast<std::int64_t>(st.lanes) * st.warps;
+                    const std::int64_t blocks = (n + per_block - 1) / per_block;
+                    std::int64_t base = 0, count = blocks, total = n;
+                    sp.push_back(&base);
+                    sp.push_back(&count);
+                    sp.push_back(&total);
+                    check(cuLaunchKernel_(reinterpret_cast<CUfunction>(u.function), static_cast<unsigned>(blocks), 1, 1, static_cast<unsigned>(st.threads * st.warps), 1, 1, 0, cs, sp.data(), nullptr),
+                          "unit '" + u.name + "': the sweep's team stage launch");
+                } else {
+                    exec::DeviceKernel::run(reinterpret_cast<CUfunction>(u.function), sp, exec::Partition{ 0, static_cast<std::int64_t>(stale), n }, cs, resolved_block(d, u, stale));
+                }
+            } else {
+                exec::DeviceKernel::run(reinterpret_cast<CUfunction>(u.function), p, exec::Partition{ 0, static_cast<std::int64_t>(stale), n }, cs, resolved_block(d, u, stale));
+            }
         }
     }
     std::vector<DevicePlane> written;    // back to sample order: the planes the units wrote

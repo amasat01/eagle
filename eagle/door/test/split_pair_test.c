@@ -60,13 +60,19 @@ struct pt {
 
 static char run_fail[512];    /* the spec's "failrun <text>": the launch must be refused FAULT with a reason holding that text */
 
-static int read_spec(const char* dir, const char* row, int64_t* n, struct pl* p, int* np) {
+static int read_spec(const char* dir, const char* row, int64_t* n, struct pl* p, int* np, int* steps) {
     char path[1024], kind[8];
     snprintf(path, sizeof(path), "%s/%s.spec", dir, row);
     FILE* f = fopen(path, "r");
     if (f == NULL) return 0;
     *np = 0;
     while (fscanf(f, "%7s", kind) == 1) {
+        if (strcmp(kind, "steps") == 0) {    /* a stepping row: the plan launches this many times, compared after the last */
+            long long v;
+            if (fscanf(f, "%lld", &v) != 1) return 0;
+            *steps = (int)v;
+            continue;
+        }
         if (strcmp(kind, "n") == 0) {
             long long v;
             if (fscanf(f, "%lld", &v) != 1) return 0;
@@ -208,8 +214,8 @@ int main(int argc, char** argv) {
     if (strncmp(argv[2], "-refuse:", 8) == 0) return refused(argc, argv);
     int64_t n = 0;
     static struct pl pls[MAXS];
-    int np = 0;
-    check(read_spec(argv[2], argv[3], &n, pls, &np), "the row's spec read");
+    int np = 0, steps = 1;
+    check(read_spec(argv[2], argv[3], &n, pls, &np, &steps), "the row's spec read");
     if (failures) return 1;
     for (int i = 0; i < np; ++i) {
         struct pl* q = &pls[i];
@@ -328,7 +334,7 @@ int main(int argc, char** argv) {
                         memset(pls[i].buf, 0, (size_t)pls[i].count * esz(&pls[i]));
 #endif
                     }
-            if (s == EG_OK) s = eg_launch(ctx, plan, NULL);
+            for (int stp = 0; stp < steps && s == EG_OK; ++stp) s = eg_launch(ctx, plan, NULL);
 #ifndef EG_PAIR_DEVICE
             if (run_fail[0] != 0) {
                 char fr[600];

@@ -103,6 +103,9 @@ void class_sort_step(std::uint64_t stream, const std::vector<DevicePlane>& plane
  *  @p map and its @p count; @p scratch is ``compact_scratch_bytes(n)``. */
 void compact_keep_step(std::uint64_t stream, const void* mask, std::int64_t n, std::int32_t* map, unsigned* count, void* scratch);
 
+/** @brief Queue on @p stream: clear every byte of the @p n-byte stale mask whose sample is dead (a set byte of @p dead): ``stale &= live``. */
+void stale_live_step(std::uint64_t stream, void* stale, const void* dead, std::int64_t n);
+
 /** @brief Queue on @p stream ``perm``/``inv``/@p map the identity over @p n samples, ``*count`` = ``*span`` = @p n. */
 void reset_step(std::uint64_t stream, std::int32_t* perm, std::int32_t* inv, std::int32_t* map, unsigned* count, unsigned* span, std::int64_t n);
 

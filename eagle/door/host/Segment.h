@@ -123,15 +123,43 @@ inline std::vector<void*> params_of(const eg_plan_s& plan, std::size_t mi, const
     return params;
 }
 
-/** @brief Run unit @p m over the first @p count threads. */
-inline std::uint64_t run_unit(const eg_plan_s& plan, const eg_unit_s& m, std::vector<void*>& params, std::int64_t count, int threads) {
+/** @brief Run unit @p m (member @p mi) over the first @p count threads. A member that is one plain stage of itself runs that stage over its own
+ *  scratch planes: the stage slots joined at load to the member's source slots (@p params) and to the planes the plan made for the member. */
+inline std::uint64_t run_unit(const eg_plan_s& plan, std::size_t mi, const eg_unit_s& m, std::vector<void*>& params, std::int64_t count, int threads) {
     if (count <= 0) return 0;
     const exec::Partition part{ 0, count, plan.n_samples };
+    std::vector<void*> stage_params;
+    std::vector<plugin::ScalarHandle> handles;
+    std::uint32_t n32 = static_cast<std::uint32_t>(plan.n_samples);
+    if (!m.stages.empty()) {
+        const StageFacts& st = m.stages[0];
+        const std::size_t n_slots = st.unit->slots.size();
+        stage_params.resize(n_slots);
+        handles.resize(n_slots);
+        for (std::size_t j = 0; j < n_slots; ++j) {
+            if (st.source_of[j] >= 0) {
+                stage_params[j] = params[static_cast<std::size_t>(st.source_of[j])];
+            } else if (st.plane_of[j] >= 0) {
+                const DLTensor& d = plan.segteam[mi][static_cast<std::size_t>(st.plane_of[j])]->tensor->dl_tensor;
+                const int role = st.unit->slots[j].role;
+                plugin::ScalarHandle& h = handles[j];
+                h.data = static_cast<char*>(d.data) + d.byte_offset;
+                h.samples = static_cast<std::uint64_t>(role == EG_ROLE_LOOKUP ? elements(d) : role == EG_ROLE_WIDE_IN || role == EG_ROLE_WIDE_OUT ? d.shape[d.ndim - 1] : plan.n_samples);
+                h.stride = 1;
+                h.deviceType = plugin::kEagleAbiDeviceCPU;
+                h.deviceId = 0;
+                stage_params[j] = &h;
+            } else {
+                stage_params[j] = &n32;
+            }
+        }
+    }
+    void** args = m.stages.empty() ? params.data() : stage_params.data();
     if (plan.structure == EG_STRUCTURE_HOST_SERIAL) {
-        exec::HostTeam::run_serial(m.host_entry, params.data(), part);
+        exec::HostTeam::run_serial(m.host_entry, args, part);
         return 1;
     }
-    return exec::HostTeam::run_team(m.host_entry, params.data(), part, threads);
+    return exec::HostTeam::run_team(m.host_entry, args, part, threads);
 }
 
 }  // namespace seg
@@ -148,7 +176,7 @@ inline std::uint64_t run_segmented(const eg_plan_s& plan, int threads) {
     if (!g.dynamic) {    // the classes of every sample, in sample order, from the classify unit
         std::vector<seg::Owned> none;
         std::vector<void*> p = seg::params_of(plan, k, *g.classify, none, &n32);
-        tiles += seg::run_unit(plan, *g.classify, p, plan.n_samples, threads);
+        tiles += seg::run_unit(plan, k, *g.classify, p, plan.n_samples, threads);
         for (std::size_t i = 0; i < n; ++i)
             if (S.cls[i] < 0 || S.cls[i] >= g.k)
                 refuse(EG_BAD_REQUEST, at + "the classify unit wrote class " + std::to_string(S.cls[i]) + " for sample " + std::to_string(i) + ", outside [0, " + std::to_string(g.k) + ")");
@@ -184,7 +212,7 @@ inline std::uint64_t run_segmented(const eg_plan_s& plan, int threads) {
     }
     for (std::size_t j = 0; j < k; ++j) {
         std::vector<void*> p = seg::params_of(plan, j, *g.branches[j], owned, &n32);
-        tiles += seg::run_unit(plan, *g.branches[j], p, S.run_len[j], threads);
+        tiles += seg::run_unit(plan, j, *g.branches[j], p, S.run_len[j], threads);
     }
     if (g.dynamic) {    // the samples whose branch moved: the fused unit completes them (a live sample the guarded unit kept, not committed)
         std::size_t stale = 0;
@@ -194,7 +222,7 @@ inline std::uint64_t run_segmented(const eg_plan_s& plan, int threads) {
         if (stale > 0) {
             S.count = static_cast<std::uint32_t>(stale);
             std::vector<void*> p = seg::params_of(plan, k, *g.sweep, owned, &n32);
-            tiles += seg::run_unit(plan, *g.sweep, p, static_cast<std::int64_t>(stale), threads);
+            tiles += seg::run_unit(plan, k, *g.sweep, p, static_cast<std::int64_t>(stale), threads);
         }
     }
     for (const seg::Owned& o : owned) {    // back to sample order, the planes the units wrote

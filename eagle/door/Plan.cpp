@@ -316,8 +316,10 @@ void plan_new(eg_ctx& ctx, const eg_plan_desc* desc, eg_plan** out) {
                    "': load it with the group's units in deps to plan the group");
     if (d.unit->seg.present) {
         const SegFacts& g = d.unit->seg;
-        if (g.dynamic && g.mask_slot >= 0)
-            refuse(EG_NOT_WRITTEN, "unit '" + d.unit->name + "': a dynamic segmented group with a terminated mask is not written (no mask: every sample is live)");
+        if (!device && !d.unit->stages.empty())
+            refuse(EG_NOT_WRITTEN, "unit '" + d.unit->name + "': a SEGMENTED dispatch group whose branches share the scratch planes of a split is not written on the host");
+        if (!device && g.sweep != nullptr && !g.sweep->stages.empty() && g.sweep->stages[0].team)
+            refuse(EG_NOT_WRITTEN, "unit '" + d.unit->name + "': the sweep unit '" + g.sweep->name + "' of dispatch group '" + g.name + "' is a team stage, which is not written on the host");
         if (device && d.unit->dev_box_t > 0) refuse(EG_NOT_WRITTEN, "unit '" + d.unit->name + "': a SEGMENTED dispatch group over a device thread box is not written");
         std::vector<const eg_unit_s*> units(g.branches.begin(), g.branches.end());
         units.push_back(g.dynamic ? g.sweep : g.classify);
@@ -453,6 +455,22 @@ void plan_new(eg_ctx& ctx, const eg_plan_desc* desc, eg_plan** out) {
                 bind_handle(*plan, g.class_slot, st.cls.data(), static_cast<std::uint64_t>(d.n_samples));
             }
             st.run_len.assign(static_cast<std::size_t>(g.k), 0);
+            std::vector<const eg_unit_s*> members(g.branches.begin(), g.branches.end());
+            members.push_back(g.dynamic ? g.sweep : g.classify);
+            for (const eg_unit_s* m : members) {    // a member that is a split unit: its scratch planes, made here (a placed wide value: one unit on the host, whole warps of 32 on the device)
+                plan->segteam.emplace_back();
+                if (m == d.unit) continue;    // the planned unit's own scratch is plan->team
+                for (const TeamPlaneFacts& t : m->team_planes) {
+                    const std::int64_t count = t.unit == EG_UNIT_ONCE ? 1 : d.n_samples;
+                    const std::int64_t units = t.wide != EG_WIDE_WARP_TILED ? count : device ? (count + 31) / 32 * 32 : 1;
+                    const std::int64_t size = std::max<std::int64_t>(1, t.per_lane * units);
+                    std::vector<std::int64_t> shape{ size };
+                    if (t.layout == EG_LAYOUT_PLANE_MAJOR && t.per_lane != 1) shape = { t.per_lane, size / t.per_lane };
+                    const DLDataType elem = t.dtype == EG_DTYPE_INT32 ? DLDataType{ kDLInt, 32, 1 }
+                                                                      : DLDataType{ kDLFloat, static_cast<std::uint8_t>(d.unit->scalar_type == EG_SCALAR_FLOAT32 ? 32 : 64), 1 };
+                    plan->segteam.back().push_back(make_plane(ctx, elem, shape, device));
+                }
+            }
             if (g.dynamic && device) {    // the stale mask, the sweep's active map and its count live in device memory
                 plan->segdev.push_back(make_plane(ctx, DLDataType{ kDLBool, 8, 1 }, { std::max<std::int64_t>(d.n_samples, 1) }, true));
                 plan->segdev.push_back(make_plane(ctx, DLDataType{ kDLInt, 32, 1 }, { std::max<std::int64_t>(d.n_samples, 1) }, true));
@@ -496,6 +514,7 @@ void plan_new(eg_ctx& ctx, const eg_plan_desc* desc, eg_plan** out) {
     } catch (...) {
         for (eg_plane_s* r : plan->mix) plane_release(ctx, r);
         for (eg_plane_s* r : plan->segdev) plane_release(ctx, r);
+        for (auto& v : plan->segteam) for (eg_plane_s* r : v) plane_release(ctx, r);
         for (void* b : plan->seg.dev_bufs) device_free(ctx, b);
         for (eg_plane_s* r : plan->team) if (r != nullptr) plane_release(ctx, r);
         for (eg_plane_s* r : plan->comps) if (r != nullptr) plane_release(ctx, r);
@@ -522,6 +541,7 @@ void plan_free(eg_ctx& ctx, eg_plan_s* plan) {
     for (eg_plane_s* r : plan->team) if (r != nullptr) plane_release(ctx, r);
     for (eg_plane_s* r : plan->mix) plane_release(ctx, r);
     for (eg_plane_s* r : plan->segdev) plane_release(ctx, r);
+    for (auto& v : plan->segteam) for (eg_plane_s* r : v) plane_release(ctx, r);
     for (void* b : plan->seg.dev_bufs) device_free(ctx, b);
     for (eg_plane_s* r : plan->comps) if (r != nullptr) plane_release(ctx, r);
     for (eg_plane_s* r : plan->outs) if (r != nullptr) plane_release(ctx, r);

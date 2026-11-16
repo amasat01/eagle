@@ -639,8 +639,8 @@ void read_unit(const eg_unit_meta& m, void* library, eg_unit_s& unit) {
     }
     if (unit.stages.empty() && !unit.team_planes.empty())
         refuse(EG_BAD_REQUEST, "meta that contradicts itself: unit '" + unit.name + "' has team planes and no stages");
-    if (!unit.stages.empty() && (unit.finish.present || !unit.companions.empty() || !unit.cells.empty() || unit.derived.present))
-        refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': a split unit with a finish, companions, cell rows of its own or a derived role is not written");
+    if (!unit.stages.empty() && (!unit.companions.empty() || !unit.cells.empty() || unit.derived.present))
+        refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': a split unit with companions, cell rows of its own or a derived role is not written");
     read_derived(m, unit);
     if (unit.ctx->dev.ordinal >= 0 && m.device_image != nullptr) device_unit_load(unit, m, library);
 }
@@ -685,8 +685,14 @@ void resolve_stages(eg_ctx& ctx, const eg_unit_load_desc& d, eg_unit_s& unit) {
                 }
                 eg_unit_s& su = *st.unit;
                 if (su.host_entry == nullptr && su.function == 0) refuse(EG_BAD_REQUEST, at + " has no entry to run (no host entry, no device function)");
-                if (!su.stages.empty() || su.finish.present || !su.companions.empty() || su.derived.present)
-                    refuse(EG_NOT_WRITTEN, at + ": a stage that is itself split, finishing or a companion owner is not written");
+                if (!su.stages.empty() || !su.companions.empty() || su.derived.present)
+                    refuse(EG_NOT_WRITTEN, at + ": a stage that is itself split or a companion owner is not written");
+                if (su.finish.present) {    // the source's finish is the unit's: a stage's own record must name the same mask and counter slots (joined by name below), and is not read again
+                    const auto slot_name = [](const eg_unit_s& x, std::int32_t i) { return i >= 0 ? x.slots[static_cast<std::size_t>(i)].name : std::string(); };
+                    if (!unit.finish.present || slot_name(su, su.finish.mask_slot) != slot_name(unit, unit.finish.mask_slot) ||
+                        slot_name(su, su.finish.counter_slot) != slot_name(unit, unit.finish.counter_slot) || su.finish.steps != unit.finish.steps)
+                        refuse(EG_NOT_WRITTEN, at + ": a finishing stage whose finish (mask slot, counter slot, steps) is not the source unit's is not written");
+                }
                 ++su.refs;
                 st.held = true;
             }
@@ -836,10 +842,16 @@ void resolve_segmented(eg_ctx& ctx, const eg_unit_load_desc& d, eg_unit_s& unit)
                 ++m->refs;
                 S.held.push_back(m);
             }
-            if (!m->stages.empty() || !m->companions.empty() || !m->cells.empty() || m->derived.present || m->index_count_slot >= 0 || m->finish.steps_slot >= 0 ||
-                !m->team_planes.empty())
+            if (!m->companions.empty() || !m->cells.empty() || m->derived.present || m->index_count_slot >= 0 || m->finish.steps_slot >= 0)
                 refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': the " + what + " '" + m->name + "' of dispatch group '" + group->name +
-                       "' is split, has cells, companions, a derived role, an index set or a steps word: not written in a SEGMENTED group");
+                       "' has cells, companions, a derived role, an index set or a steps word: not written in a SEGMENTED group");
+            if (!m->stages.empty() && m != &unit && (m->stages.size() != 1 || !m->stages[0].self))    // a member that is one stage of itself (the planned unit's stages are checked below)
+                refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': the " + what + " '" + m->name + "' of dispatch group '" + group->name +
+                       "' is split in more than one stage: not written in a SEGMENTED group");
+            for (const TeamPlaneFacts& t : m->team_planes)
+                if (t.unit == EG_UNIT_KEY || t.fill_promised)
+                    refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': the " + what + " '" + m->name + "' of dispatch group '" + group->name +
+                           "' has the keyed or refilled scratch plane '" + t.name + "': not written in a SEGMENTED group");
         };
         const auto record_of = [&](const eg_unit_s& m, bool branch, bool classify, std::int32_t strategy) -> const DispatchFacts* {
             for (const DispatchFacts& f : m.dispatches)
@@ -863,6 +875,12 @@ void resolve_segmented(eg_ctx& ctx, const eg_unit_load_desc& d, eg_unit_s& unit)
             S.branches.push_back(b);
             records.push_back(r);
             S.access = std::max(S.access, b->access);
+        }
+        if (!unit.stages.empty()) {    // the planned unit lends its scratch planes to the branches: its stages are the group's branches, in order
+            bool same = unit.stages.size() == S.branches.size();
+            for (std::size_t j = 0; same && j < S.branches.size(); ++j) same = unit.stages[j].unit == S.branches[j];
+            if (!same)
+                refuse(EG_NOT_WRITTEN, who + "is split in stages that are not its branches in order: not written in a SEGMENTED group");
         }
         eg_unit_s* other = nullptr;
         const DispatchFacts* other_rec = nullptr;
@@ -917,6 +935,7 @@ void resolve_segmented(eg_ctx& ctx, const eg_unit_load_desc& d, eg_unit_s& unit)
                     continue;
                 }
                 const SlotFacts& sl = m.slots[j];
+                if (sl.made && &m != &unit) continue;    // the member's own plane (the scratch of its split): eagle makes it per member, no caller slot
                 for (std::size_t u = 0; u < unit.slots.size() && join[j] < 0; ++u)
                     if (unit.slots[u].name == sl.name && !(sl.role == EG_ROLE_NSAMPLES && unit.slots[u].role != EG_ROLE_NSAMPLES)) {
                         compatible(unit.slots[u], sl, m);
