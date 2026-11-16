@@ -4,6 +4,7 @@
 cmake_minimum_required(VERSION 3.20)
 
 option(EAGLE_BUILD_TESTS "Whether to build tests" OFF)
+option(EAGLE_BUILD_DOOR "Build and install libeagle_door.so (eagle::door); see cmake/EagleDoor.cmake" OFF)
 option(EAGLE_DEBUG_MODE "Whether to compile with debug features" OFF)
 option(EAGLE_WARN_AS_ERR "Whether to promote compilation warnings to errors" OFF)
 option(EAGLE_CPP_MODE "Whether to install eagle as a pure C++ Package. Default is CUDA/C++" OFF)
@@ -269,6 +270,12 @@ target_link_libraries(eagle_demo ${EAGLE_LIB})
 # (CUDA TUs without -fPIC produce R_X86_64_32 relocations that the PIE
 # linker rejects).
 set_target_properties(eagle_demo PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+###########################
+
+if (EAGLE_BUILD_DOOR)
+  include(cmake/EagleDoor.cmake)
+endif()
 
 ###########################
 
