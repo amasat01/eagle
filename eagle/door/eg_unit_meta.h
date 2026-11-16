@@ -332,6 +332,9 @@ struct eg_unit_finish {
     int64_t fp64_ops_ir;      /**< one step's 64-bit float operations counted in the IR, -1: not counted */
     const struct eg_unit_steps_table* host_steps_reverse;   /**< NULL: no rows, AUTO picks PER_STEP */
     const struct eg_unit_steps_table* device_steps_reverse; /**< NULL: no rows, AUTO picks PER_STEP */
+    int32_t n_events;         /**< the comparisons of the stop rule (its `or` leaves, in operand order), counted by the
+                                   library; 0: none. Event i of a GUARD link is the i-th of them */
+    int32_t reserved1;
 };
 
 /** The team a stage runs on (eg_unit_stage.team). Slot indices are into the
@@ -363,15 +366,18 @@ typedef int32_t eg_link_what;
 #define EG_WHAT_TIME_STEP 4   /**< the length h of the ACCEPTED step, never a proposed next one, from primal slot ``of_slot`` (a UNIFORM,
                                    which eagle fills into the plane, or a PER_SAMPLE plane); always bound per sample (the time plane's
                                    real type). A refine kernel with no step slot is refused at build time */
-#define EG_WHAT_GUARD 5       /**< guard ``of_slot`` (its index in the unit's event list), zero at the crossing (the scalar type) */
+#define EG_WHAT_GUARD 5       /**< guard ``of_slot``: the of_slot-th comparison of the primal's stop rule in operand order,
+                                   below the primal's finish.n_events; zero at the crossing (the scalar type) */
 #define EG_WHAT_TAPE_ROW 6    /**< the tape rows of primal state ``of_slot``: the pre-step state, or the state itself when it is
-                                   not taped; the reverse unit reads the same slot either way (that slot's type) */
+                                   not taped; the reverse unit reads the same slot either way; on FUSED_VJP, the state at the
+                                   window's start (that slot's type) */
 #define EG_WHAT_REFINED 7     /**< primal state ``of_slot`` at the candidate time (that slot's type) */
 
 /** In which form the unit holds it. */
 typedef int32_t eg_link_form;
 #define EG_FORM_VALUE 0       /**< the quantity itself, read or (an output slot) written; a PER_SAMPLE slot of a primal
-                                   UNIFORM is a plane eagle fills with that value */
+                                   UNIFORM is a plane eagle fills with that value; on FUSED_VJP, the primal's TERMINATED
+                                   slot is the window's entry flag, a plane eagle makes all zero */
 #define EG_FORM_DOT 1         /**< its derivative in the candidate time */
 #define EG_FORM_ADJOINT_IN 2  /**< the cotangent arriving at it, filled by eagle (rules below) */
 #define EG_FORM_ADJOINT_OUT 3 /**< the unit's output cotangent of it */
@@ -482,7 +488,10 @@ struct eg_unit_derived {
     int32_t tape_on_slot;
     int32_t time0_slot;       /**< the time plane's start copy */
     int32_t fused_steps_slot; /**< the int64 word of steps a fused launch fuses, set by the runner, on any derived unit
-                                   that reads one (the K-step twin; the K-step reverse unit if it reads one) */
+                                   that reads one (the K-step twin; the K-step reverse unit if it reads one); a LOOKUP
+                                   int64 with no link. A launch takes at most the twin's finish.steps_max when its
+                                   finish.steps is AUTO, else finish.steps. A FUSED_VJP compiles K in: steps_reverse
+                                   FUSED needs the primal's finish.steps equal to the record window (K) */
     int32_t n_links;
     int32_t reserved0;
     const struct eg_unit_taped* const* taped;

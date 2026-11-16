@@ -289,11 +289,14 @@ $(OUT)/libpair_refine.so: $(KERNEL_ev) $(KERNEL_ev_tape) $(KERNEL_ev_newton) $(K
 	  -c $(KERNEL_ev_refine_vjp) -o $(OUT)/refine_refvjp.o
 	$(CC) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$(ROOT) -c $(META_ev) -o $(OUT)/refine_meta.o
 	$(CXX) -shared -o $@ $(OUT)/refine_primal.o $(OUT)/refine_tape.o $(OUT)/refine_newton.o $(OUT)/refine_guard.o $(OUT)/refine_step_vjp.o $(OUT)/refine_refvjp.o $(OUT)/refine_meta.o
+	$(CC) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$(ROOT) -DEV_OSC_N_EVENTS=2 -c $(META_ev) -o $(OUT)/refine_meta_n2.o
+	$(CXX) -shared -o $(OUT)/libpair_refine_n2.so $(OUT)/refine_primal.o $(OUT)/refine_tape.o $(OUT)/refine_newton.o $(OUT)/refine_guard.o $(OUT)/refine_step_vjp.o $(OUT)/refine_refvjp.o $(OUT)/refine_meta_n2.o
 
 pair-refine: symbols $(OUT)/libpair_refine.so $(REFINE_TEST)
 	$(REFINE_TEST) $(OUT)/libpair_refine.so $(ORACLE_ev) $(DIGEST_ev) $(DIGEST_ev_tape) $(DIGEST_ev_newton) $(DIGEST_ev_guard) 400 0 1
 	$(REFINE_TEST) $(OUT)/libpair_refine.so $(ORACLE_ev_zero) $(DIGEST_ev) $(DIGEST_ev_tape) $(DIGEST_ev_newton) $(DIGEST_ev_guard) 3 1 1
 	$(REFINE_TEST) $(OUT)/libpair_refine.so $(ORACLE_ev_zero) $(DIGEST_ev) $(DIGEST_ev_tape) $(DIGEST_ev_newton) $(DIGEST_ev_guard) 3 0 0
+	$(REFINE_TEST) $(OUT)/libpair_refine_n2.so $(ORACLE_ev_zero) $(DIGEST_ev) $(DIGEST_ev_tape) $(DIGEST_ev_newton) $(DIGEST_ev_guard) 3 9 0
 
 REFINE_REVERSE_TEST := $(OUT)/refine_reverse_test
 

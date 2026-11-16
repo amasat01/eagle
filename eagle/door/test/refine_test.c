@@ -116,7 +116,16 @@ int main(int argc, char** argv) {
             struct eg_run_report rep;
             memset(&rep, 0, sizeof(rep));
             rep.struct_size = sizeof(rep);
-            const int ok = planned && eg_bind(ctx, plan, &bd) == EG_OK && eg_runner_new(ctx, &d, &r) == EG_OK;
+            const int bound = planned && eg_bind(ctx, plan, &bd) == EG_OK;
+            if (zero == 9) {    /* the library states n_events 2 for one guard */
+                check(bound && eg_runner_new(ctx, &d, &r) == EG_BAD_REQUEST && reason_has(ctx, "n_events"),
+                      "refine: guards that do not cover the primal's finish.n_events refused BAD_REQUEST naming n_events");
+                for (int i = 0; i < 4; ++i) eg_plane_free(ctx, planes[i]);
+                if (plan) eg_plan_free(ctx, plan);
+                si = ti = 2;
+                continue;
+            }
+            const int ok = bound && eg_runner_new(ctx, &d, &r) == EG_OK;
             struct tensor a1, a2;
             eg_plane* tp = host_plane(ctx, &a1, PN, tstop, kDLFloat, 64);
             eg_plane* sp = host_plane(ctx, &a2, PN, status, kDLInt, 8);

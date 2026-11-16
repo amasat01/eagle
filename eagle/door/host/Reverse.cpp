@@ -385,6 +385,9 @@ void refine_setup(RunRecord& r, const eg_unit_s& pu, eg_unit_s* newton, eg_unit_
     if (tau_links != 1) refuse(EG_BAD_REQUEST, field(nn, "links") + ": a Newton unit takes exactly one (TAU, VALUE) link");
     if (step_links != 1) refuse(EG_BAD_REQUEST, field(nn, "links") + ": a Newton unit takes exactly one (TIME_STEP, VALUE) link");
     if (guards < 1) refuse(EG_BAD_REQUEST, field(nn, "links") + ": a Newton unit takes at least one (GUARD, VALUE) link");
+    if (guards != pu.finish.n_events)
+        refuse(EG_BAD_REQUEST, field(nn, "links") + ": guards for events 0.." + std::to_string(guards - 1) +
+               ", the primal's finish.n_events is " + std::to_string(pu.finish.n_events));
     for (int j = 0; j < guards; ++j) {
         if (gb[static_cast<std::size_t>(j)] < 0 || dgb[static_cast<std::size_t>(j)] < 0)
             refuse(EG_BAD_REQUEST, field(nn, "links") + ": event " + std::to_string(j) + " needs its (GUARD, VALUE) and (GUARD, DOT) links");

@@ -104,6 +104,7 @@ struct FinishFacts {
     std::int64_t steps_max = 0;      ///< AUTO: the most steps one launch takes
     std::uint32_t flags = 0;         ///< EG_FINISH_*
     std::int64_t ops = 0;            ///< one step's operation count the launch rules read (fp64_ops_ir, else step_ops), 0: none
+    std::int32_t n_events = 0;       ///< the stop rule's comparisons (a GUARD link's event is below it)
 };
 
 /** @brief A derived unit's record (eg_unit_derived), copied at eg_unit_load; eg_runner_new checks it

@@ -122,8 +122,9 @@ void read_finish(const eg_unit_meta& m, eg_unit_s& unit) {
             if (f.steps_slot != -1)
                 refuse(EG_BAD_REQUEST, what + "steps_slot " + std::to_string(f.steps_slot) + " with fixed steps");
         }
+        if (f.n_events < 0) refuse(EG_BAD_REQUEST, what + "n_events " + std::to_string(f.n_events) + " (>= 0)");
         unit.finish = FinishFacts{ true, f.mask_slot, f.counter_slot, f.steps, f.steps_slot, f.steps_max, f.flags,
-                                   f.fp64_ops_ir > 0 ? f.fp64_ops_ir : f.step_ops > 0 ? f.step_ops : 0 };
+                                   f.fp64_ops_ir > 0 ? f.fp64_ops_ir : f.step_ops > 0 ? f.step_ops : 0, f.n_events };
     }
 }
 
