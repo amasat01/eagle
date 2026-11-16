@@ -84,7 +84,7 @@ LIB := $(OUT)/libeagle_door.so
 FIXTURE := $(OUT)/libfixture_unit.so
 TEST := $(OUT)/door_test
 
-.PHONY: all lib symbols test check-inputs check-cuda pairs pair-reverse pair-reverse-active pair-reverse-timed pair-reverse-fused pair-reverse-kstep pair-reverse-reorder pair-reverse-t0 pair-reverse-counter pair-refine pair-refine-reverse pair-refine-pend pair-refine-reverse-pend pair-status-grid pair-status-tangent pair-status-two device pair-device-reverse pair-device-refine pair-device-refine-reverse $(PAIR_UNITS:%=pair-%) $(PAIR_DEVICE_UNITS:%=pair-device-%)
+.PHONY: all lib symbols test check-inputs check-cuda pairs pair-reverse pair-reverse-active pair-reverse-timed pair-reverse-fused pair-reverse-kstep pair-reverse-kstep3 pair-reverse-kstep7 pair-reverse-kstep8 pair-reverse-reorder pair-reverse-t0 pair-reverse-counter pair-refine pair-refine-reverse pair-refine-pend pair-refine-reverse-pend pair-status-grid pair-status-tangent pair-status-two device pair-device-reverse pair-device-refine pair-device-refine-reverse $(PAIR_UNITS:%=pair-%) $(PAIR_DEVICE_UNITS:%=pair-device-%)
 all: test
 
 check-inputs:
@@ -209,31 +209,48 @@ pair-reverse-fused: symbols $(OUT)/libpair_reverse_auto.so $(REV_TEST)
 	$(REV_TEST) $(REV_FIXTURE) $(OUT)/libpair_reverse_auto.so $(ORACLE_auto) $(DIGEST_rr_pend_auto) $(DIGEST_rr_pend_auto_tape) \
 	  $(DIGEST_rr_pend_auto_step_vjp) 0 rr_pend_auto
 
-# pair-reverse-kstep: steps_reverse FUSED: hawk.steps(rr_pend, 4) (the K-step primal rr_pend_x4, window 4), its K-step taping twin, step
-# vjp (short windows) and K-step vjp (every full window one launch that recomputes its steps); states, gradients, steps and launches equal
-# the old path's fused run bit for bit (ORACLE_kstep).
-KSTEP_UNITS = x4 tape step_vjp fused_vjp
+# pair-reverse-kstep<K>: steps_reverse FUSED: hawk.steps(rr_pend, K) (the K-step primal rr_pend_x<K>, window K), its K-step taping twin,
+# step vjp (short windows) and K-step vjp (every full window one launch that recomputes its steps); states, gradients, steps and
+# launches equal the old path's fused run bit for bit (ORACLE_kstep<K>). K = 4 is "kstep", K = 3, 7 and 8 "kstep3", "kstep7", "kstep8".
 DIGEST_kstep ?= 5e1b2ec104ef5491afe94742b85cf99ddb210ec91beb36b1a3101aaf6bbeead3
 DIGEST_kstep_tape ?= 6dbf7f16cb41315bf79470f5180a0c4e478da08885360dc87f07c4e6025e8c49
 DIGEST_kstep_fused_vjp ?= 569995a5df16dd112d0c91fd9ff75ea85f48be532ba88cbe32b4568b3e8273f9
 META_kstep ?= test/derived/rr_pend_fused_meta.c
-$(OUT)/libpair_kstep.so: $(KERNEL_kstep) $(KERNEL_kstep_tape) $(KERNEL_kstep_step_vjp) $(KERNEL_kstep_fused_vjp) $(META_kstep) eg_door.h eg_unit_meta.h | check-inputs
-	@test -f "$(KERNEL_kstep)" -a -f "$(KERNEL_kstep_tape)" -a -f "$(KERNEL_kstep_step_vjp)" -a -f "$(KERNEL_kstep_fused_vjp)" -a -f "$(META_kstep)" -a \
-	  -d "$(PAIR_WING_DIR)" || { echo "set KERNEL_kstep, _tape, _step_vjp, _fused_vjp, META_kstep and PAIR_WING_DIR"; exit 1; }
+DIGEST_kstep3 ?= f5ee5386c498b3659c5a145b2bb9d07250c00917ef5a89aaf2817d2bf34727ec
+DIGEST_kstep3_tape ?= 3d4973d066cf7f2fe1e868b46a408e2f0d2a66507b0ef623eac5f387e3f7d3e1
+DIGEST_kstep3_fused_vjp ?= 486e06a4ac6b16252c8db348692ac5ddc1ac596d4833884981a19923fb756197
+META_kstep3 ?= test/derived/rr_pend_fused3_meta.c
+DIGEST_kstep7 ?= 12393cfab3ed5feb30843f52f2acf75e4064d61db5ee3d8e1d1d73122f926ee8
+DIGEST_kstep7_tape ?= 47605e0703515043c53991d8fd4cc94cb9cd81b27cda6ae952d51e1a925948f2
+DIGEST_kstep7_fused_vjp ?= f93873fc2595ffe731dfa2513f032611803e0aec02357a752e7301194b18d1f6
+META_kstep7 ?= test/derived/rr_pend_fused7_meta.c
+DIGEST_kstep8 ?= a56d3b44588a7389ba9f49da7ba55bd9d62af80a2e6550ce478dbace8faded3f
+DIGEST_kstep8_tape ?= 2d20ffd3c860e37349593dba91964bece85bf2bd2b20a2bf73a9a79fb17a2c62
+DIGEST_kstep8_fused_vjp ?= 811557ca36771b0d1f3f4727f91fe0c5c49cffc8620afd24cb44c626406e5568
+META_kstep8 ?= test/derived/rr_pend_fused8_meta.c
+define KSTEP_RULES
+$(OUT)/libpair_$(1).so: $$(KERNEL_$(1)) $$(KERNEL_$(1)_tape) $$(KERNEL_$(1)_step_vjp) $$(KERNEL_$(1)_fused_vjp) $$(META_$(1)) eg_door.h eg_unit_meta.h | check-inputs
+	@test -f "$$(KERNEL_$(1))" -a -f "$$(KERNEL_$(1)_tape)" -a -f "$$(KERNEL_$(1)_step_vjp)" -a -f "$$(KERNEL_$(1)_fused_vjp)" -a -f "$$(META_$(1))" -a \
+	  -d "$$(PAIR_WING_DIR)" || { echo "set KERNEL_$(1), _tape, _step_vjp, _fused_vjp, META_$(1) and PAIR_WING_DIR"; exit 1; }
 	@mkdir -p $(OUT)
-	$(CXX) $(PAIR_HOST_FLAGS) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) -c $(KERNEL_kstep) -o $(OUT)/kstep_primal.o
-	$(CXX) $(PAIR_HOST_FLAGS) $(call REV_RENAME,tape) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) \
-	  -c $(KERNEL_kstep_tape) -o $(OUT)/kstep_tape.o
-	$(CXX) $(PAIR_HOST_FLAGS) $(call REV_RENAME,vjp) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) \
-	  -c $(KERNEL_kstep_step_vjp) -o $(OUT)/kstep_vjp.o
-	$(CXX) $(PAIR_HOST_FLAGS) $(call REV_RENAME,fvjp) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) \
-	  -c $(KERNEL_kstep_fused_vjp) -o $(OUT)/kstep_fvjp.o
-	$(CC) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$(ROOT) -c $(META_kstep) -o $(OUT)/kstep_meta.o
-	$(CXX) -shared -o $@ $(OUT)/kstep_primal.o $(OUT)/kstep_tape.o $(OUT)/kstep_vjp.o $(OUT)/kstep_fvjp.o $(OUT)/kstep_meta.o
+	$$(CXX) $$(PAIR_HOST_FLAGS) -I$$(AETHER_INCLUDE) -I$$(AETHER_INCLUDE)/eagle -I$$(PAIR_WING_DIR) -c $$(KERNEL_$(1)) -o $(OUT)/$(1)_primal.o
+	$$(CXX) $$(PAIR_HOST_FLAGS) $$(call REV_RENAME,tape) -I$$(AETHER_INCLUDE) -I$$(AETHER_INCLUDE)/eagle -I$$(PAIR_WING_DIR) \
+	  -c $$(KERNEL_$(1)_tape) -o $(OUT)/$(1)_tape.o
+	$$(CXX) $$(PAIR_HOST_FLAGS) $$(call REV_RENAME,vjp) -I$$(AETHER_INCLUDE) -I$$(AETHER_INCLUDE)/eagle -I$$(PAIR_WING_DIR) \
+	  -c $$(KERNEL_$(1)_step_vjp) -o $(OUT)/$(1)_vjp.o
+	$$(CXX) $$(PAIR_HOST_FLAGS) $$(call REV_RENAME,fvjp) -I$$(AETHER_INCLUDE) -I$$(AETHER_INCLUDE)/eagle -I$$(PAIR_WING_DIR) \
+	  -c $$(KERNEL_$(1)_fused_vjp) -o $(OUT)/$(1)_fvjp.o
+	$$(CC) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$$(ROOT) -c $$(META_$(1)) -o $(OUT)/$(1)_meta.o
+	$$(CXX) -shared -o $$@ $(OUT)/$(1)_primal.o $(OUT)/$(1)_tape.o $(OUT)/$(1)_vjp.o $(OUT)/$(1)_fvjp.o $(OUT)/$(1)_meta.o
 
-pair-reverse-kstep: symbols $(OUT)/libpair_kstep.so $(REV_TEST)
-	$(REV_TEST) $(REV_FIXTURE) $(OUT)/libpair_kstep.so $(ORACLE_kstep) $(DIGEST_kstep) $(DIGEST_kstep_tape) \
-	  $(DIGEST_rr_pend_step_vjp) 0 rr_pend_x4 64 fused $(DIGEST_kstep_fused_vjp)
+pair-reverse-$(1): symbols $(OUT)/libpair_$(1).so $$(REV_TEST)
+	$$(REV_TEST) $$(REV_FIXTURE) $(OUT)/libpair_$(1).so $$(ORACLE_$(1)) $$(DIGEST_$(1)) $$(DIGEST_$(1)_tape) \
+	  $$(DIGEST_rr_pend_step_vjp) 0 $(2) 64 fused $$(DIGEST_$(1)_fused_vjp)
+endef
+$(eval $(call KSTEP_RULES,kstep,rr_pend_x4))
+$(eval $(call KSTEP_RULES,kstep3,rr_pend_x3))
+$(eval $(call KSTEP_RULES,kstep7,rr_pend_x7))
+$(eval $(call KSTEP_RULES,kstep8,rr_pend_x8))
 
 # pair-reverse-reorder: the same unit over 4096 samples with EG_RUN_REORDER (the old path's reordering run, every 4, theta 0.5).
 pair-reverse-reorder: symbols $(OUT)/libpair_reverse_active.so $(REV_TEST)
@@ -434,17 +451,23 @@ $(eval $(call DEV_REV_RULES,rr_pend,reverse,rr_pend))
 $(eval $(call DEV_REV_RULES,timed,timed,_timed))
 $(eval $(call DEV_REV_RULES,act,act,_pend_body))
 $(eval $(call DEV_REV_RULES,auto,auto,rr_pend_auto))
-# kstep: steps_reverse FUSED over the K-step primal rr_pend_x4 (K = 4): its twin and step vjp are rr_pend's, plus the K-step vjp.
-$(OUT)/libpair_dev_rev_kstep.so: $(PTX_kstep) $(PTX_kstep_tape) $(PTX_kstep_step_vjp) $(PTX_kstep_fused_vjp) $(META_kstep) eg_door.h eg_unit_meta.h | check-cuda
+# kstep<K>: steps_reverse FUSED over the K-step primal rr_pend_x<K>: its twin and step vjp are rr_pend's, plus the K-step vjp.
+define DEV_KSTEP_RULES
+$(OUT)/libpair_dev_rev_$(1).so: $$(PTX_$(1)) $$(PTX_$(1)_tape) $$(PTX_$(1)_step_vjp) $$(PTX_$(1)_fused_vjp) $$(META_$(1)) eg_door.h eg_unit_meta.h | check-cuda
 	@mkdir -p $(OUT)
-	$(call embed,$(PTX_kstep),rr_pend_x4__image,$(OUT)/dev_rev_kstep_p.o)
-	$(call embed,$(PTX_kstep_tape),rr_pend_tape__image,$(OUT)/dev_rev_kstep_t.o)
-	$(call embed,$(PTX_kstep_step_vjp),rr_pend_step_vjp__image,$(OUT)/dev_rev_kstep_v.o)
-	$(call embed,$(PTX_kstep_fused_vjp),rr_pend_fused_vjp__image,$(OUT)/dev_rev_kstep_f.o)
-	$(call cuda_meta,$(META_kstep),$(OUT)/dev_rev_kstep_meta.c)
-	$(CC) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$(ROOT) -c $(OUT)/dev_rev_kstep_meta.c -o $(OUT)/dev_rev_kstep_meta.o
-	$(CC) -shared -o $@ $(OUT)/dev_rev_kstep_meta.o $(OUT)/dev_rev_kstep_p.o $(OUT)/dev_rev_kstep_t.o $(OUT)/dev_rev_kstep_v.o $(OUT)/dev_rev_kstep_f.o
-pair-device-reverse: symbols $(OUT)/libpair_dev_rev_rr_pend.so $(OUT)/libpair_dev_rev_timed.so $(OUT)/libpair_dev_rev_act.so $(OUT)/libpair_dev_rev_auto.so $(OUT)/libpair_dev_rev_kstep.so $(DEVICE_REVERSE_TEST)
+	$$(call embed,$$(PTX_$(1)),$(2)__image,$(OUT)/dev_rev_$(1)_p.o)
+	$$(call embed,$$(PTX_$(1)_tape),rr_pend_tape__image,$(OUT)/dev_rev_$(1)_t.o)
+	$$(call embed,$$(PTX_$(1)_step_vjp),rr_pend_step_vjp__image,$(OUT)/dev_rev_$(1)_v.o)
+	$$(call embed,$$(PTX_$(1)_fused_vjp),rr_pend_fused_vjp__image,$(OUT)/dev_rev_$(1)_f.o)
+	$$(call cuda_meta,$$(META_$(1)),$(OUT)/dev_rev_$(1)_meta.c)
+	$$(CC) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$$(ROOT) -c $(OUT)/dev_rev_$(1)_meta.c -o $(OUT)/dev_rev_$(1)_meta.o
+	$$(CC) -shared -o $$@ $(OUT)/dev_rev_$(1)_meta.o $(OUT)/dev_rev_$(1)_p.o $(OUT)/dev_rev_$(1)_t.o $(OUT)/dev_rev_$(1)_v.o $(OUT)/dev_rev_$(1)_f.o
+endef
+$(eval $(call DEV_KSTEP_RULES,kstep,rr_pend_x4))
+$(eval $(call DEV_KSTEP_RULES,kstep3,rr_pend_x3))
+$(eval $(call DEV_KSTEP_RULES,kstep7,rr_pend_x7))
+$(eval $(call DEV_KSTEP_RULES,kstep8,rr_pend_x8))
+pair-device-reverse: symbols $(OUT)/libpair_dev_rev_rr_pend.so $(OUT)/libpair_dev_rev_timed.so $(OUT)/libpair_dev_rev_act.so $(OUT)/libpair_dev_rev_auto.so $(OUT)/libpair_dev_rev_kstep.so $(OUT)/libpair_dev_rev_kstep3.so $(OUT)/libpair_dev_rev_kstep7.so $(OUT)/libpair_dev_rev_kstep8.so $(DEVICE_REVERSE_TEST)
 
 # pair-device-refine: events REFINE (a plain run) and eg_run_events on the device, per case one library of the old device run's own images
 # (PTX_ref_<case>, _tape, _newton, _guard) with the host meta; run $(OUT)/device_refine_test <library> <case> <oracle dir> <4 digests> <max_steps>

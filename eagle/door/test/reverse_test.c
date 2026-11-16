@@ -407,7 +407,8 @@ static void pair_rows(eg_ctx* ctx, int argc, char** argv) {
     const long every = named ? atol(argv[7]) : 0;
     const int act = every > 0;
     const int64_t pn = argc >= 10 ? atol(argv[9]) : 64;
-    const int fvj = argc == 12;   /* steps_reverse FUSED: base is the K-step primal, argv[11] the K-step vjp's digest */
+    const int fvj = argc == 12;   /* steps_reverse FUSED: base is the K-step primal (rr_pend_x<K>), argv[11] the K-step vjp's digest */
+    const long kfused = fvj && strstr(argv[8], "_x") ? atol(strstr(argv[8], "_x") + 2) : 0;   /* its K: the window */
     const int reorder = argc == 10 || argc == 11;
     const char* base = named ? argv[8] : "rr_pend";
     const int fused = strstr(base, "_auto") != NULL;   /* the K-step twin: its window is built in (PSTEPS) */
@@ -462,7 +463,7 @@ static void pair_rows(eg_ctx* ctx, int argc, char** argv) {
             const struct eg_bind_desc bd = binds(5, slots, planes, 2, us, uv);
             eg_plan* plan = plan_of(ctx, p, structures[si], pn);
             eg_runner* r = NULL;
-            struct eg_runner_desc d = recorded(&plan, PSTEPS, fvj ? 4 : fused ? PSTEPS : named ? 37 : si ? PSTEPS : -1, 0, roles, units);
+            struct eg_runner_desc d = recorded(&plan, PSTEPS, fvj ? kfused : fused ? PSTEPS : named ? 37 : si ? PSTEPS : -1, 0, roles, units);
             d.every = every;
             if (fvj) {
                 d.steps_reverse = EG_STEPS_REVERSE_FUSED;
@@ -494,7 +495,7 @@ static void pair_rows(eg_ctx* ctx, int argc, char** argv) {
             int s_ok = ok && (have_run ? rep.steps == run_ref[0] && rep.launches == run_ref[1] : rep.steps == smax) && rep.finished == pn && (!reorder || rep.reorders > 0);
             for (int i = 0; s_ok && i < pn; ++i) s_ok = x[i] == ex[i] && v[i] == ev[i] && t[i] == et[i];
             snprintf(what, sizeof(what), "pair %s%s %s %d threads (window %s, launches %lld): the recorded run's states equal the old "
-                     "path's bitwise (%lld steps)", base, reorder ? " (reordering active set)" : act ? " (active set)" : "", si ? "HOST_TEAM" : "HOST_SERIAL", threads[ti], fvj ? "4 = K" : fused ? "400 built in" : named ? "37" : si ? "400" : "-1, full",
+                     "path's bitwise (%lld steps)", base, reorder ? " (reordering active set)" : act ? " (active set)" : "", si ? "HOST_TEAM" : "HOST_SERIAL", threads[ti], fvj ? "K" : fused ? "400 built in" : named ? "37" : si ? "400" : "-1, full",
                      (long long)rep.launches, (long long)rep.steps);
             check(s_ok, what);
             static double sx[PMAX], sv[PMAX], ox[PMAX], ov[PMAX], ot[PMAX];
