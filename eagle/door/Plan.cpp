@@ -353,10 +353,6 @@ void plan_new(eg_ctx& ctx, const eg_plan_desc* desc, eg_plan** out) {
             }
             if (device) device_cell_work(*plan);
         }
-        if (device) {
-            for (const KeyedFacts& k : d.unit->keyed)
-                refuse(EG_NOT_WRITTEN, "unit '" + d.unit->name + "': the keyed table ('" + k.name + "') is not written on the device");
-        }
         std::vector<std::int64_t> sizes;    // the scratch the stages share: per_lane elements per unit; a placed wide value is one unit on the host, whole warps of 32 on the device
         for (const TeamPlaneFacts& t : d.unit->team_planes) {
             const std::int64_t count = t.unit == EG_UNIT_ONCE ? 1 : t.unit == EG_UNIT_KEY ? key_count(*d.unit, d.unit->keyed[static_cast<std::size_t>(t.keyed)], d.n_samples) : d.n_samples;
