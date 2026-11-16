@@ -409,7 +409,7 @@ int main(int argc, char** argv) {
         { "boxdev", 0xC3, "a device thread box (team grid)" },
         { "banded", 0xC4, "a BANDED scalar type" },
         { "count1", 0xD1, "the unit has no device image" },   /* a fixed-step finish runs on a device */
-        { "count1a", 0xE1, "an active set (compaction)" },
+        { "count1a", 0xE1, "the unit has no device image" },
         { "lanes", 0x91, "an index set" },
         { "keyed", 0x68, "the unit has no device image" },
         { "cells", 0x67, "the unit has no device image" },

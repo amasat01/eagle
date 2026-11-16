@@ -5,6 +5,7 @@
 // reaches the files that include this one.
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 
@@ -16,10 +17,13 @@ struct DeviceLoop;  ///< an instantiated graph: one WHILE node over the step
 /**
  * @brief Capture on @p stream one WHILE node that runs @p body (it queues the step on the stream it is
  * given) while ``*finished != *total``, at most @p cap times per launch; @p cells is the device
- * ``[remaining, ran]`` pair the node keeps (``ran``: the iterations of the last launch). Instantiated.
+ * ``[remaining, ran]`` pair the node keeps (``ran``: the iterations of the last launch). When @p compact is set, an IF
+ * node follows the body in each iteration and runs it (on the stream it is given) only when ``*finished`` differs from
+ * ``*done_at_last``. Instantiated.
  */
 DeviceLoop* loop_capture(std::uint64_t stream, const unsigned* finished, const unsigned* total, unsigned* cells,
-                         unsigned cap, const std::function<void(std::uint64_t)>& body);
+                         unsigned cap, const std::function<void(std::uint64_t)>& body,
+                         const std::function<void(std::uint64_t)>& compact = {}, const unsigned* done_at_last = nullptr);
 
 /** @brief Queue one launch of @p loop on @p stream. */
 void loop_launch(DeviceLoop* loop, std::uint64_t stream);
@@ -47,6 +51,14 @@ std::int64_t cell_work_elems(std::int64_t rows);
  *  (@p bits wide, 32 or 64), by eagle's canonical reduction tree; @p wa and @p wb are the work buffers. */
 void cell_fold(std::uint64_t stream, const void* in, std::int64_t rows, unsigned bits, bool max, void* out, void* wa,
                void* wb);
+
+/** @brief Bytes of scratch the compaction of @p n samples needs. */
+std::size_t compact_scratch_bytes(std::int64_t n);
+
+/** @brief Queue on @p stream the compaction of the @p n-sample mask (a set byte = finished) into the ascending live
+ *  index @p map and its @p count, then ``*done_at_last = *finished`` and ``++*compactions``. */
+void compact_step(std::uint64_t stream, const void* mask, std::int64_t n, std::int32_t* map, unsigned* count, void* scratch,
+                  const unsigned* finished, unsigned* done_at_last, unsigned* compactions);
 
 /** @brief Wait until @p stream is idle. */
 void stream_wait(std::uint64_t stream);

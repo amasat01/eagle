@@ -33,7 +33,7 @@
 #                       device recipe, PAIR_DEVICE_FLAGS) and its meta (META_CUDA_<unit>) in one library, plus
 #                       pair_device_test; run $(OUT)/pair_device_test $(OUT)/libpair_dev_<unit>.so <oracle dir>
 #                       <unit> <digest>. Needs PAIR_CUDA_WING_DIR=<raptor cuda wing dir>. Units: mv ksum_c fixed_count (osc, osc_x4: the
-#                       runner pair).
+#                       runner pair; _osc, _osc_x4: the active-set runner pair).
 
 CXX ?= g++
 CC ?= gcc
@@ -59,7 +59,7 @@ CUDA ?=
 NVCC ?= $(CUDA)/bin/nvcc
 PAIR_CUDA_WING_DIR ?=
 CUDA_WING_FACTS ?= $(PAIR_CUDA_WING_DIR)/raptor_facts.h
-PAIR_DEVICE_UNITS := mv osc osc_x4 ksum_c fixed_count
+PAIR_DEVICE_UNITS := mv osc osc_x4 ksum_c fixed_count _osc _osc_x4
 # The old path's device recipe for a cuda unit (hawk's nvcc build) in the image format its meta records
 # (EG_IMAGE_PTX: -ptx, else -cubin). PAIR_NVCC/PAIR_CCBIN: the compiler the old run used (its cache's
 # validity record); PTX of a toolkit newer than the driver does not load.
@@ -104,7 +104,7 @@ $(OUT)/device/Device.o: device/Device.cpp device/Loop.h Context.h eg_door.h eg_u
 $(OUT)/device/Loop.o: device/Loop.cu device/Loop.h | check-inputs check-cuda
 	@mkdir -p $(dir $@)
 	$(NVCC) -std=c++20 -O2 -arch=sm_61 -Wno-deprecated-gpu-targets -Werror all-warnings -ccbin $(CXX) \
-	  -Xcompiler -fPIC,-fvisibility=hidden,-Wall,-Wextra,-fopenmp -include $(CUDA_WING_FACTS) -I$(ROOT) -I$(AETHER_INCLUDE) -c $< -o $@
+	  -Xcompiler -fPIC,-fvisibility=hidden,-Wall,-Wextra,-fopenmp -DAETHER_HAS_CUDA -include $(CUDA_WING_FACTS) -I$(ROOT) -I$(AETHER_INCLUDE) -c $< -o $@
 
 $(LIB): $(OBJ) door.map
 	$(CXX) -shared -o $@ $(OBJ) -Wl,--version-script=$(CURDIR)/door.map -Wl,--no-undefined -fopenmp -pthread -ldl $(CUDART)
@@ -187,8 +187,13 @@ device: check-cuda symbols $(FIXTURE) $(DEVICE_FIXTURE) $(DEVICE_TEST)
 
 PAIR_DEVICE_TEST := $(OUT)/pair_device_test
 RUNNER_PAIR_TEST := $(OUT)/runner_pair_test
+ACTIVE_PAIR_TEST := $(OUT)/active_pair_test
 
 $(RUNNER_PAIR_TEST): test/runner_pair_test.c eg_door.h $(LIB) | check-cuda
+	$(CC) $(CFLAGS_C) -isystem $(CUDA)/include -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door \
+	  -Wl,-rpath,$(OUT) $(CUDART) -lm -pthread
+
+$(ACTIVE_PAIR_TEST): test/active_pair_test.c eg_door.h $(LIB) | check-cuda
 	$(CC) $(CFLAGS_C) -isystem $(CUDA)/include -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door \
 	  -Wl,-rpath,$(OUT) $(CUDART) -lm -pthread
 
@@ -210,6 +215,6 @@ $(OUT)/libpair_dev_$(1).so: $$(KERNEL_CUDA_$(1)) $$(META_CUDA_$(1)) eg_door.h eg
 	  -c $$(META_CUDA_$(1)) -o $(OUT)/pair_dev_$(1)_meta.o
 	$$(CC) -shared -o $$@ $(OUT)/pair_dev_$(1)_meta.o $(OUT)/pair_dev_$(1)_image.o
 
-pair-device-$(1): symbols $(OUT)/libpair_dev_$(1).so $$(PAIR_DEVICE_TEST) $$(RUNNER_PAIR_TEST)
+pair-device-$(1): symbols $(OUT)/libpair_dev_$(1).so $$(PAIR_DEVICE_TEST) $$(RUNNER_PAIR_TEST) $$(ACTIVE_PAIR_TEST)
 endef
 $(foreach u,$(PAIR_DEVICE_UNITS),$(eval $(call PAIR_DEVICE_RULES,$(u))))

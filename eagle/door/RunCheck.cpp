@@ -76,12 +76,77 @@ void check_plans(const eg_ctx& ctx, const eg_runner_desc& d) {
                " steps per launch, but each plan of a several-plan step takes one step per launch");
 }
 
+constexpr std::int64_t kMinEvery = 4;            ///< the fewest steps between two compactions
+constexpr std::int64_t kDefaultEvery = 16;       ///< the cadence when ``every`` is 0, rounded up to whole launches
+constexpr double kThetaLow = 0.25, kThetaHigh = 0.75;
+
 }  // namespace
 
 /** @brief eg_runner_new's checks of @p d both runners share (@p device: a DEVICE runner). */
 void check_runner(const eg_ctx& ctx, const eg_runner_desc& d, bool device) {
     check_desc(d, device);
     check_plans(ctx, d);
+}
+
+/** @brief The active set the plans read, or none: all of them or none must read one. */
+bool check_active(const eg_runner_desc& d) {
+    int reading = 0;
+    for (int i = 0; i < d.n_plans; ++i) reading += d.plans[i]->unit->active_map_slot >= 0;
+    if (reading == 0) {
+        if (d.every != 0)
+            refuse(EG_BAD_REQUEST, "every " + std::to_string(d.every) + ": the plans read no active set, so "
+                   "compaction does not apply; pass 0");
+        if (d.flags & EG_RUN_REORDER)
+            refuse(EG_BAD_REQUEST, "EG_RUN_REORDER: the plans read no active set, so there is nothing to "
+                   "reorder; build the unit with one");
+        return false;
+    }
+    if (reading != d.n_plans)
+        refuse(EG_BAD_REQUEST, "the plans of one step must all read an active set or none: " +
+               std::to_string(reading) + " of " + std::to_string(d.n_plans) + " do");
+    for (int i = 0; i < d.n_plans; ++i) {
+        const eg_plan_s& p = *d.plans[i];
+        if (p.parts.size() != 1 || p.parts[0].base != 0 || p.parts[0].count != p.n_samples)
+            refuse(EG_BAD_REQUEST, "plans[" + std::to_string(i) + "]: a plan that reads an active set runs "
+                   "one whole partition");
+        if (p.active_owner != nullptr)
+            refuse(EG_BAD_REQUEST, "plans[" + std::to_string(i) + "] already reads the active set of another "
+                   "runner");
+    }
+    const std::int64_t group = d.plans[0]->unit->group;
+    for (int i = 1; i < d.n_plans; ++i)
+        if (d.plans[i]->unit->group != group)
+            refuse(EG_BAD_REQUEST, "plans[" + std::to_string(i) + "] compacts groups of " +
+                   std::to_string(d.plans[i]->unit->group) + " lanes, plans[0] groups of " + std::to_string(group));
+    if (group > 1 && (d.flags & EG_RUN_REORDER))
+        refuse(EG_BAD_REQUEST, "EG_RUN_REORDER: an active set over groups of " + std::to_string(group) +
+               " lanes compacts whole groups, which a reorder would split");
+    const std::int64_t k = d.plans[0]->unit->finish.steps;
+    if (k == EG_STEPS_AUTO) {
+        if (d.every != 0)
+            refuse(EG_BAD_REQUEST, "every " + std::to_string(d.every) + ": a unit with steps AUTO compacts after "
+                   "every launch in which a sample finished; pass 0");
+    } else {
+        if (d.every < 0) refuse(EG_BAD_REQUEST, "every " + std::to_string(d.every) + " < 0");
+        if (d.every % k != 0)
+            refuse(EG_BAD_REQUEST, "every " + std::to_string(d.every) + " is not a whole number of launches of " +
+                   std::to_string(k) + " step(s)");
+        if (d.every != 0 && d.every < kMinEvery)
+            refuse(EG_BAD_REQUEST, "every " + std::to_string(d.every) + " is below " + std::to_string(kMinEvery) +
+                   " steps: a compaction scans every sample, so a shorter cadence costs more than it saves");
+    }
+    if (d.flags & EG_RUN_REORDER)
+        if (!(d.reorder_theta >= kThetaLow && d.reorder_theta <= kThetaHigh))
+            refuse(EG_BAD_REQUEST, "reorder_theta " + std::to_string(d.reorder_theta) + " is outside [" +
+                   std::to_string(kThetaLow) + ", " + std::to_string(kThetaHigh) + "]");
+    return true;
+}
+
+/** @brief The steps between two compactions of a fixed-step active set: @p d's ``every``, else the smallest
+ *  whole number of launches of at least kDefaultEvery steps. */
+std::int64_t active_every_steps(const eg_runner_desc& d) {
+    const std::int64_t k = d.plans[0]->unit->finish.steps;
+    return d.every != 0 ? d.every : k * ((kDefaultEvery + k - 1) / k);
 }
 
 /** @brief Refuse a NULL report or one too small to hold its struct_size. */

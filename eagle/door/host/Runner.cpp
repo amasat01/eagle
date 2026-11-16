@@ -19,68 +19,10 @@ namespace door {
 
 namespace {
 
-constexpr std::int64_t kMinEvery = 4;            ///< the fewest steps between two compactions
-constexpr std::int64_t kDefaultEvery = 16;       ///< the cadence when ``every`` is 0, rounded up to whole launches
 constexpr std::int64_t kMinReorderSpan = 4096;   ///< the fewest samples a reorder is built for and fires over
 constexpr std::int64_t kAutoKMin = 8;            ///< AUTO: the fewest steps of a launch but the last, and the compaction cadence
 constexpr std::int64_t kAutoK0 = 16;             ///< AUTO: the steps of the first launch
 constexpr double kAutoRate = 8.0;                ///< AUTO: a compaction's cost in full-live steps on the host
-constexpr double kThetaLow = 0.25, kThetaHigh = 0.75;
-
-/** @brief The active set the plans read, or none: all of them or none must read one. */
-bool check_active(const eg_runner_desc& d) {
-    int reading = 0;
-    for (int i = 0; i < d.n_plans; ++i) reading += d.plans[i]->unit->active_map_slot >= 0;
-    if (reading == 0) {
-        if (d.every != 0)
-            refuse(EG_BAD_REQUEST, "every " + std::to_string(d.every) + ": the plans read no active set, so "
-                   "compaction does not apply; pass 0");
-        if (d.flags & EG_RUN_REORDER)
-            refuse(EG_BAD_REQUEST, "EG_RUN_REORDER: the plans read no active set, so there is nothing to "
-                   "reorder; build the unit with one");
-        return false;
-    }
-    if (reading != d.n_plans)
-        refuse(EG_BAD_REQUEST, "the plans of one step must all read an active set or none: " +
-               std::to_string(reading) + " of " + std::to_string(d.n_plans) + " do");
-    for (int i = 0; i < d.n_plans; ++i) {
-        const eg_plan_s& p = *d.plans[i];
-        if (p.parts.size() != 1 || p.parts[0].base != 0 || p.parts[0].count != p.n_samples)
-            refuse(EG_BAD_REQUEST, "plans[" + std::to_string(i) + "]: a plan that reads an active set runs "
-                   "one whole partition");
-        if (p.active_owner != nullptr)
-            refuse(EG_BAD_REQUEST, "plans[" + std::to_string(i) + "] already reads the active set of another "
-                   "runner");
-    }
-    const std::int64_t group = d.plans[0]->unit->group;
-    for (int i = 1; i < d.n_plans; ++i)
-        if (d.plans[i]->unit->group != group)
-            refuse(EG_BAD_REQUEST, "plans[" + std::to_string(i) + "] compacts groups of " +
-                   std::to_string(d.plans[i]->unit->group) + " lanes, plans[0] groups of " + std::to_string(group));
-    if (group > 1 && (d.flags & EG_RUN_REORDER))
-        refuse(EG_BAD_REQUEST, "EG_RUN_REORDER: an active set over groups of " + std::to_string(group) +
-               " lanes compacts whole groups, which a reorder would split");
-    const std::int64_t k = d.plans[0]->unit->finish.steps;
-    if (k == EG_STEPS_AUTO) {
-        if (d.every != 0)
-            refuse(EG_BAD_REQUEST, "every " + std::to_string(d.every) + ": a unit with steps AUTO compacts after "
-                   "every launch in which a sample finished; pass 0");
-    } else {
-        if (d.every < 0) refuse(EG_BAD_REQUEST, "every " + std::to_string(d.every) + " < 0");
-        if (d.every % k != 0)
-            refuse(EG_BAD_REQUEST, "every " + std::to_string(d.every) + " is not a whole number of launches of " +
-                   std::to_string(k) + " step(s)");
-        if (d.every != 0 && d.every < kMinEvery)
-            refuse(EG_BAD_REQUEST, "every " + std::to_string(d.every) + " is below " + std::to_string(kMinEvery) +
-                   " steps: a compaction scans every sample, so a shorter cadence costs more than it saves");
-    }
-    if (d.flags & EG_RUN_REORDER)
-        if (!(d.reorder_theta >= kThetaLow && d.reorder_theta <= kThetaHigh))
-            refuse(EG_BAD_REQUEST, "reorder_theta " + std::to_string(d.reorder_theta) + " is outside [" +
-                   std::to_string(kThetaLow) + ", " + std::to_string(kThetaHigh) + "]");
-    return true;
-}
-
 
 /** @brief The mask plane: elements of any width, set when any byte is nonzero. */
 struct Mask {
@@ -323,8 +265,7 @@ void runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out) {
             ActiveState& a = runner->act;
             a.n = n;
             a.group = d.plans[0]->unit->group;
-            a.every_steps = k == EG_STEPS_AUTO ? kAutoKMin
-                          : d.every != 0 ? d.every : k * ((kDefaultEvery + k - 1) / k);
+            a.every_steps = k == EG_STEPS_AUTO ? kAutoKMin : active_every_steps(d);
             a.every_launches = k == EG_STEPS_AUTO ? 1 : a.every_steps / k;
             a.map.resize(static_cast<std::size_t>(n));
             for (std::int64_t i = 0; i < n; ++i) a.map[static_cast<std::size_t>(i)] = static_cast<std::int32_t>(i);

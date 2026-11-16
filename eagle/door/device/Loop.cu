@@ -10,7 +10,10 @@
 #include "eagle/cuda/CaptureConditional.h"
 #include "eagle/cuda/CapturedGraph.h"
 #include "eagle/cuda/StreamCapturer.h"
+#include "eagle/filtering/Compact.h"
 #include "eagle/reduce/canonical.h"
+
+#include <optional>
 
 namespace eagle {
 namespace door {
@@ -21,15 +24,22 @@ struct DeviceLoop {
 };
 
 DeviceLoop* loop_capture(std::uint64_t stream, const unsigned* finished, const unsigned* total, unsigned* cells,
-                         unsigned cap, const std::function<void(std::uint64_t)>& body) {
+                         unsigned cap, const std::function<void(std::uint64_t)>& body,
+                         const std::function<void(std::uint64_t)>& compact, const unsigned* done_at_last) {
     const auto origin = reinterpret_cast<cudaStream_t>(stream);
     auto* loop = new DeviceLoop;
     try {
         cuda::CaptureConditional weave(origin, CountGuard{ finished, total }, cap, cells);
+        std::optional<cuda::CaptureConditional> moved;    // the compaction: an IF inside the loop body, made before the capture
+        if (compact) moved.emplace(weave.bodyStream(), CountGuard{ finished, done_at_last });
         cuda::StreamCapturer capturer(origin);
         capturer.begin();
         try {
             body(reinterpret_cast<std::uint64_t>(weave.begin()));
+            if (moved) {
+                compact(reinterpret_cast<std::uint64_t>(moved->begin()));
+                moved->end();
+            }
             weave.end();
         } catch (...) {
             (void)capturer.end();
@@ -45,6 +55,11 @@ DeviceLoop* loop_capture(std::uint64_t stream, const unsigned* finished, const u
 }
 
 namespace {
+
+__global__ void compactDoneKernel(const unsigned* finished, unsigned* done_at_last, unsigned* compactions) {
+    *done_at_last = *finished;
+    ++*compactions;
+}
 
 __global__ void maskCountKernel(const unsigned char* mask, long long n, unsigned width, unsigned* counter) {
     for (long long i = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x; i < n;
@@ -89,6 +104,16 @@ void mask_count(std::uint64_t stream, const void* mask, std::int64_t n, unsigned
     const long long blocks = (n + 255) / 256 < 1024 ? (n + 255) / 256 : 1024;
     maskCountKernel<<<static_cast<unsigned>(blocks), 256, 0, s>>>(static_cast<const unsigned char*>(mask), n, width,
                                                                    counter);
+    EAGLE_CHECK_ALWAYS(cudaGetLastError());
+}
+
+std::size_t compact_scratch_bytes(std::int64_t n) { return filtering::compactScratchBytes(n); }
+
+void compact_step(std::uint64_t stream, const void* mask, std::int64_t n, std::int32_t* map, unsigned* count, void* scratch,
+                  const unsigned* finished, unsigned* done_at_last, unsigned* compactions) {
+    const auto s = reinterpret_cast<cudaStream_t>(stream);
+    filtering::compactDevice(static_cast<const std::uint8_t*>(mask), filtering::kCompactMaskIsDrop, map, count, scratch, n, s);
+    compactDoneKernel<<<1, 1, 0, s>>>(finished, done_at_last, compactions);
     EAGLE_CHECK_ALWAYS(cudaGetLastError());
 }
 

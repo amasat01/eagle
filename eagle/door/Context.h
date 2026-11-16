@@ -223,7 +223,8 @@ struct DeviceLoop;
 struct DeviceRun {
     eg_ctx* ctx = nullptr;                    ///< set: a DEVICE runner
     DeviceLoop* loop = nullptr;               ///< captured at the first eg_run
-    std::uint64_t cells = 0;                  ///< device [remaining, ran, total] (uint32)
+    std::uint64_t cells = 0;                  ///< device [remaining, ran, total, live count, finished at last compaction, compactions] (uint32)
+    std::uint64_t map = 0, scratch = 0;       ///< an active set's device live-slot map (int32) and its compaction scratch
     double build_s = 0.0;                     ///< the capture's wall
     std::vector<unsigned char> bound;         ///< the plans' argument bytes the loop was captured over
     DeviceRun() = default;
@@ -384,6 +385,10 @@ void record_drop_all(eg_ctx& ctx);
 void host_planes_only(const eg_ctx& ctx, const char* op, std::initializer_list<const eg_plane_s*> planes);
 bool device_plans(const eg_ctx& ctx, const eg_runner_desc* desc);
 void check_runner(const eg_ctx& ctx, const eg_runner_desc& d, bool device);
+/** @brief Whether the plans of @p d read an active set (all or none must); refuses a request that does not fit one. */
+bool check_active(const eg_runner_desc& d);
+/** @brief The steps between two compactions of a fixed-step active set (``every``, else the default cadence). */
+std::int64_t active_every_steps(const eg_runner_desc& d);
 void check_report(const eg_run_report* report);
 void write_report(eg_run_report* report, eg_run_report r);
 
