@@ -84,7 +84,7 @@ LIB := $(OUT)/libeagle_door.so
 FIXTURE := $(OUT)/libfixture_unit.so
 TEST := $(OUT)/door_test
 
-.PHONY: all lib symbols test check-inputs check-cuda pairs pair-reverse pair-reverse-active pair-reverse-timed pair-reverse-fused pair-reverse-kstep pair-reverse-kstep3 pair-reverse-kstep7 pair-reverse-kstep8 pair-reverse-reorder pair-reverse-t0 pair-reverse-counter pair-refine pair-refine-reverse pair-refine-pend pair-refine-reverse-pend pair-status-grid pair-status-tangent pair-status-two device pair-device-reverse pair-device-refine pair-device-refine-reverse $(PAIR_UNITS:%=pair-%) $(PAIR_DEVICE_UNITS:%=pair-device-%)
+.PHONY: all lib symbols test check-inputs check-cuda pairs pair-reverse pair-reverse-active pair-reverse-timed pair-reverse-fused pair-reverse-kstep pair-reverse-kstep3 pair-reverse-kstep7 pair-reverse-kstep8 pair-reverse-reorder pair-reverse-t0 pair-reverse-counter pair-refine pair-refine-reverse pair-refine-pend pair-refine-reverse-pend pair-refine-reverse-grid pair-refine-reverse-grid-refused pair-status-grid pair-status-tangent pair-status-two device pair-device-reverse pair-device-refine pair-device-refine-reverse $(PAIR_UNITS:%=pair-%) $(PAIR_DEVICE_UNITS:%=pair-device-%)
 all: test
 
 check-inputs:
@@ -548,6 +548,59 @@ pair-refine-pend: symbols $(OUT)/libpair_refine_pend.so $(REFINE_TEST)
 pair-refine-reverse-pend: symbols $(OUT)/libpair_refine_pend.so $(REFINE_REVERSE_TEST)
 	$(REFINE_REVERSE_TEST) $(OUT)/libpair_refine_pend.so $(ORACLE_pendrr) $(DIGEST_pend) $(DIGEST_pend_tape) $(DIGEST_pend_newton) $(DIGEST_pend_guard) \
 	  $(DIGEST_pend_step_vjp) $(DIGEST_pend_refine_vjp) pend
+
+# pair-refine-reverse-grid: ev_grid (a horizon on the step grid, per-sample dt and big_t, every sample stops AT_STEP) recorded with its taping
+# twin, step vjp, Newton, state guard vjp and refine vjp (library META_rgrid; kernels KERNEL_rgrid, _tape, _step_vjp, _newton, _guard,
+# _refine_vjp); the end states, stop times, statuses and the gradients under seeds t and x equal the old path's (ORACLE_rgrid).
+META_rgrid ?= test/derived/ev_grid_rr_meta.c
+DIGEST_rgrid ?= 015887e341d24a67e9b6cdbb426a7c5e6f2236a89272b671b4c9441f57694875
+DIGEST_rgrid_tape ?= b944fc501b4889d02b1defee7fbbd294dce5ca35587fbba179c47a098b36a5e0
+DIGEST_rgrid_step_vjp ?= 4d865ef658bbac28398db5811d9247a02ef5ea5facbbd7d314af131452c158ea
+DIGEST_rgrid_newton ?= 6eb1179bb45cf34803a9a0a8f89776af246577ab76769a1efc4cae1ee72cc8dc
+DIGEST_rgrid_guard ?= 8e5d6669ba092c5009dafaa13dd2fc3fb8a11d4259d6f83d85594550d9ad34f7
+DIGEST_rgrid_refine_vjp ?= 04e2e466da275c57c6e96d7995430406e0cfc9f315a2cd31d2b3a5c51866be57
+$(OUT)/libpair_refine_grid.so: $(KERNEL_rgrid) $(KERNEL_rgrid_tape) $(KERNEL_rgrid_step_vjp) $(KERNEL_rgrid_newton) $(KERNEL_rgrid_guard) $(KERNEL_rgrid_refine_vjp) $(META_rgrid) eg_door.h eg_unit_meta.h | check-inputs
+	@test -f "$(KERNEL_rgrid)" -a -f "$(KERNEL_rgrid_tape)" -a -f "$(KERNEL_rgrid_step_vjp)" -a -f "$(KERNEL_rgrid_newton)" -a -f "$(KERNEL_rgrid_guard)" -a -f "$(KERNEL_rgrid_refine_vjp)" -a -f "$(META_rgrid)" -a \
+	  -d "$(PAIR_WING_DIR)" || { echo "set KERNEL_rgrid, _tape, _step_vjp, _newton, _guard, _refine_vjp, META_rgrid and PAIR_WING_DIR"; exit 1; }
+	@mkdir -p $(OUT)
+	$(CXX) $(PAIR_HOST_FLAGS) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) -c $(KERNEL_rgrid) -o $(OUT)/rgrid_primal.o
+	$(CXX) $(PAIR_HOST_FLAGS) $(call REV_RENAME,tape) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) -c $(KERNEL_rgrid_tape) -o $(OUT)/rgrid_tape.o
+	$(CXX) $(PAIR_HOST_FLAGS) $(call REV_RENAME,stepvjp) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) -c $(KERNEL_rgrid_step_vjp) -o $(OUT)/rgrid_stepvjp.o
+	$(CXX) $(PAIR_HOST_FLAGS) $(call REV_RENAME,newton) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) -c $(KERNEL_rgrid_newton) -o $(OUT)/rgrid_newton.o
+	$(CXX) $(PAIR_HOST_FLAGS) $(call REV_RENAME,guard) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) -c $(KERNEL_rgrid_guard) -o $(OUT)/rgrid_guard.o
+	$(CXX) $(PAIR_HOST_FLAGS) $(call REV_RENAME,refvjp) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) -c $(KERNEL_rgrid_refine_vjp) -o $(OUT)/rgrid_refvjp.o
+	$(CC) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$(ROOT) -c $(META_rgrid) -o $(OUT)/rgrid_meta.o
+	$(CXX) -shared -o $@ $(OUT)/rgrid_primal.o $(OUT)/rgrid_tape.o $(OUT)/rgrid_stepvjp.o $(OUT)/rgrid_newton.o $(OUT)/rgrid_guard.o $(OUT)/rgrid_refvjp.o $(OUT)/rgrid_meta.o
+
+pair-refine-reverse-grid: symbols $(OUT)/libpair_refine_grid.so $(REFINE_REVERSE_TEST)
+	$(REFINE_REVERSE_TEST) $(OUT)/libpair_refine_grid.so $(ORACLE_rgrid) $(DIGEST_rgrid) $(DIGEST_rgrid_tape) $(DIGEST_rgrid_newton) $(DIGEST_rgrid_guard) \
+	  $(DIGEST_rgrid_step_vjp) $(DIGEST_rgrid_refine_vjp) grid
+
+
+# pair-refine-reverse-grid-refused: the same units with a per-sample read's gradient declared reduced 1 (on the step vjp, META_rgrid_bad_step;
+# on the refine vjp, META_rgrid_bad_refine): the runner is refused BAD_REQUEST naming "reduced".
+META_rgrid_bad_step ?= test/derived/ev_grid_rr_bad_step_meta.c
+META_rgrid_bad_refine ?= test/derived/ev_grid_rr_bad_refine_meta.c
+define GRID_BAD_RULES
+$(OUT)/libpair_refine_grid_bad_$(1).so: $$(KERNEL_rgrid) $$(KERNEL_rgrid_tape) $$(KERNEL_rgrid_step_vjp) $$(KERNEL_rgrid_newton) $$(KERNEL_rgrid_guard) $$(KERNEL_rgrid_refine_vjp) $$(META_rgrid_bad_$(1)) eg_door.h eg_unit_meta.h | check-inputs
+	@mkdir -p $(OUT)
+	$$(CXX) $$(PAIR_HOST_FLAGS) -I$$(AETHER_INCLUDE) -I$$(AETHER_INCLUDE)/eagle -I$$(PAIR_WING_DIR) -c $$(KERNEL_rgrid) -o $(OUT)/rgb_$(1)_primal.o
+	$$(CXX) $$(PAIR_HOST_FLAGS) $$(call REV_RENAME,tape) -I$$(AETHER_INCLUDE) -I$$(AETHER_INCLUDE)/eagle -I$$(PAIR_WING_DIR) -c $$(KERNEL_rgrid_tape) -o $(OUT)/rgb_$(1)_tape.o
+	$$(CXX) $$(PAIR_HOST_FLAGS) $$(call REV_RENAME,stepvjp) -I$$(AETHER_INCLUDE) -I$$(AETHER_INCLUDE)/eagle -I$$(PAIR_WING_DIR) -c $$(KERNEL_rgrid_step_vjp) -o $(OUT)/rgb_$(1)_stepvjp.o
+	$$(CXX) $$(PAIR_HOST_FLAGS) $$(call REV_RENAME,newton) -I$$(AETHER_INCLUDE) -I$$(AETHER_INCLUDE)/eagle -I$$(PAIR_WING_DIR) -c $$(KERNEL_rgrid_newton) -o $(OUT)/rgb_$(1)_newton.o
+	$$(CXX) $$(PAIR_HOST_FLAGS) $$(call REV_RENAME,guard) -I$$(AETHER_INCLUDE) -I$$(AETHER_INCLUDE)/eagle -I$$(PAIR_WING_DIR) -c $$(KERNEL_rgrid_guard) -o $(OUT)/rgb_$(1)_guard.o
+	$$(CXX) $$(PAIR_HOST_FLAGS) $$(call REV_RENAME,refvjp) -I$$(AETHER_INCLUDE) -I$$(AETHER_INCLUDE)/eagle -I$$(PAIR_WING_DIR) -c $$(KERNEL_rgrid_refine_vjp) -o $(OUT)/rgb_$(1)_refvjp.o
+	$$(CC) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$$(ROOT) -c $$(META_rgrid_bad_$(1)) -o $(OUT)/rgb_$(1)_meta.o
+	$$(CXX) -shared -o $$@ $(OUT)/rgb_$(1)_primal.o $(OUT)/rgb_$(1)_tape.o $(OUT)/rgb_$(1)_stepvjp.o $(OUT)/rgb_$(1)_newton.o $(OUT)/rgb_$(1)_guard.o $(OUT)/rgb_$(1)_refvjp.o $(OUT)/rgb_$(1)_meta.o
+endef
+$(eval $(call GRID_BAD_RULES,step))
+$(eval $(call GRID_BAD_RULES,refine))
+
+pair-refine-reverse-grid-refused: symbols $(OUT)/libpair_refine_grid_bad_step.so $(OUT)/libpair_refine_grid_bad_refine.so $(REFINE_REVERSE_TEST)
+	$(REFINE_REVERSE_TEST) $(OUT)/libpair_refine_grid_bad_step.so $(ORACLE_rgrid) $(DIGEST_rgrid) $(DIGEST_rgrid_tape) $(DIGEST_rgrid_newton) $(DIGEST_rgrid_guard) \
+	  $(DIGEST_rgrid_step_vjp) $(DIGEST_rgrid_refine_vjp) grid-refused
+	$(REFINE_REVERSE_TEST) $(OUT)/libpair_refine_grid_bad_refine.so $(ORACLE_rgrid) $(DIGEST_rgrid) $(DIGEST_rgrid_tape) $(DIGEST_rgrid_newton) $(DIGEST_rgrid_guard) \
+	  $(DIGEST_rgrid_step_vjp) $(DIGEST_rgrid_refine_vjp) grid-refused
 
 # pair-status-<case>: the refine statuses beyond REFINED over one library per case (META test/derived/ev_<case>_meta.c, kernels
 # KERNEL_s<case>, _tape, _newton, _guard): ev_grid AT_STEP (bitwise against ORACLE_sgrid), ev_tangent GRAZE and ev_two TWO_RULES (refused by name).

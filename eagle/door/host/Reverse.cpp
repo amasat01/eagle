@@ -80,6 +80,7 @@ struct Grad {
     int primal_slot = -1;
     std::int64_t rows = 1;
     int fold = -1;                  ///< a per-sample gradient of the time start copy: the taped state it is added into
+    bool plane = false;             ///< the gradient of a per-sample read (reduced 0): one value per sample, in sample order, unsummed
     Buf grad, acc;
 };
 
@@ -125,6 +126,7 @@ struct RefineRun {
     std::vector<RSlot> vslots;
     std::vector<int> gbar;          ///< per event: the refine vjp's guard seed
     std::vector<std::pair<int, int>> pgrads;   ///< (buffer, primal uniform): a per-sample share of a parameter's gradient
+    std::vector<std::pair<int, int>> sgrads;   ///< (buffer, primal per-sample slot): the refine vjp's per-sample gradient of a read
     int t0grad = -1, t0of = -1;     ///< the start copy's per-sample gradient and the primal time plane it joins
     int tau = -1, h = -1;           ///< buffers: the candidate time; the step (-1: the primal plane h_primal)
     int h_primal = -1;
@@ -547,10 +549,16 @@ void refine_setup(RunRecord& r, const eg_unit_s& pu, eg_unit_s* newton, eg_unit_
             else if (prole == EG_ROLE_PER_SAMPLE) out = { RSlot::PLANE, l.of_slot };
             else refuse(EG_BAD_REQUEST, field(rn, at + ".of_slot") + " is neither a parameter nor a per-sample plane");
         } else if ((l.what == EG_WHAT_TIME_STEP || l.what == EG_WHAT_PRIMAL_SLOT) && l.form == EG_FORM_GRAD) {
-            if (!mutable_real || !in_range(l.of_slot, np) || pu.slots[static_cast<std::size_t>(l.of_slot)].role != EG_ROLE_UNIFORM || l.reduced != 1)
-                refuse(EG_NOT_WRITTEN, field(rn, at) + ": only a reduced gradient of a parameter (a MUTABLE real slot, reduced 1) is written");
+            if (!mutable_real || !in_range(l.of_slot, np))
+                refuse(EG_BAD_REQUEST, field(rn, at) + ": a gradient is a MUTABLE real slot of a primal slot");
+            const std::int32_t grole = pu.slots[static_cast<std::size_t>(l.of_slot)].role;
+            if (grole != EG_ROLE_UNIFORM && grole != EG_ROLE_PER_SAMPLE)
+                refuse(EG_NOT_WRITTEN, field(rn, at) + ": the gradient of a slot that is neither a parameter nor a per-sample plane is not written");
+            if ((grole == EG_ROLE_UNIFORM) != (l.reduced == 1))
+                refuse(EG_BAD_REQUEST, field(rn, at + ".reduced") + " " + std::to_string(l.reduced) +
+                       (grole == EG_ROLE_UNIFORM ? ": a parameter's gradient is summed over samples (1)" : ": a per-sample read's gradient is not summed (0)"));
             const int b = buf(15, l.slot, 1, RBuf::NONE, -1);
-            f->pgrads.push_back({ b, l.of_slot });
+            (grole == EG_ROLE_UNIFORM ? f->pgrads : f->sgrads).push_back({ b, l.of_slot });
             out = { RSlot::BUF, b };
         } else if (l.what == EG_WHAT_TAU && l.form == EG_FORM_VALUE) {
             if (!per_sample_real) refuse(EG_BAD_REQUEST, field(rn, at) + ": the tau is a per-sample real slot");
@@ -853,9 +861,6 @@ void record_new(eg_ctx& ctx, eg_runner_s& runner, const eg_runner_desc& d) {
             if (uniform == (l.reduced == 0))
                 refuse(EG_BAD_REQUEST, field(vn, at + ".reduced") + " " + std::to_string(l.reduced) +
                        (uniform ? ": a parameter's gradient is summed over samples (1)" : ": a per-sample read's gradient is not summed (0)"));
-            if (!uniform)
-                refuse(EG_NOT_WRITTEN, field(vn, at) + ": a per-sample read's gradient has no old-path oracle in this build "
-                       "of the door");
             int g = -1;
             for (std::size_t k = 0; k < r->grads.size(); ++k)
                 if (r->grads[k].primal_slot == l.of_slot) g = static_cast<int>(k);
@@ -866,6 +871,7 @@ void record_new(eg_ctx& ctx, eg_runner_s& runner, const eg_runner_desc& d) {
             }
             Grad gr;
             gr.primal_slot = l.of_slot;
+            gr.plane = !uniform;
             vs = { VjpSlot::GRAD, static_cast<int>(r->grads.size()) };
             r->grads.push_back(std::move(gr));
         }
@@ -1329,6 +1335,7 @@ struct RefineExtra {
     std::vector<Buf> pre;                          ///< per taped state: the cotangent the step reverse starts from
     std::vector<std::int64_t> steps;               ///< the steps it runs per sample
     std::vector<std::pair<int, double>> params;    ///< (primal slot, the refine vjp's one canonical sum of that parameter's gradient)
+    std::vector<std::pair<int, Buf>> planes;       ///< (primal per-sample slot, the refine vjp's per-sample gradient of that read, in sample order)
     Buf t0;                                        ///< the start copy's per-sample gradient
     bool has_t0 = false;
 };
@@ -1414,6 +1421,12 @@ void refine_reverse(eg_ctx& ctx, eg_runner_s& runner, RunRecord& r, const std::v
         }
         out.params.push_back({ slot, static_cast<double>(reduce::canonical::combine(std::move(one)).value()) });
     }
+    for (const auto& [b, slot] : f.sgrads) {   // a per-sample read's gradient: the refine vjp's plane, joined to the step reverse's
+        Buf share;
+        share.resize(static_cast<std::size_t>(n) * es, D);
+        copy_bytes(D, share.data(), buf_of(b), static_cast<std::size_t>(n) * es);
+        out.planes.push_back({ slot, std::move(share) });
+    }
     if (f.t0grad >= 0) {
         out.t0.resize(static_cast<std::size_t>(n) * es, D);
         copy_bytes(D, out.t0.data(), buf_of(f.t0grad), static_cast<std::size_t>(n) * es);
@@ -1464,10 +1477,16 @@ void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, con
         seed[static_cast<std::size_t>(k)] = caller_plane(ctx, on_dev, seeds.planes[i], primal.bindings[static_cast<std::size_t>(s)].plane->tensor->dl_tensor,
                                                          st.rows * n, "seeds.planes[" + std::to_string(i) + "]");
     }
-    struct Out { char* data; int taped, grad, slot; };
+    struct Out { char* data; int taped, grad, slot; bool plane; };
     const auto refine_param = [&](std::int32_t s) {
         if (r.rf != nullptr && r.recorded)
             for (const auto& pg : r.rf->pgrads)
+                if (pg.second == s) return true;
+        return false;
+    };
+    const auto refine_plane = [&](std::int32_t s) {
+        if (r.rf != nullptr && r.recorded)
+            for (const auto& pg : r.rf->sgrads)
                 if (pg.second == s) return true;
         return false;
     };
@@ -1480,16 +1499,19 @@ void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, con
         int g = -1;
         for (std::size_t j = 0; j < r.grads.size(); ++j)
             if (r.grads[j].primal_slot == s) g = static_cast<int>(j);
-        if (k < 0 && g < 0 && !refine_param(s))
+        const bool plane = (g >= 0 && r.grads[static_cast<std::size_t>(g)].plane) || (g < 0 && refine_plane(s));
+        if (k < 0 && g < 0 && !refine_param(s) && !plane)
             refuse(EG_BAD_REQUEST, "grads.plane_slots[" + std::to_string(i) + "] " + std::to_string(s) + " ('" + pu.slots[static_cast<std::size_t>(s)].name +
                    "'): a slot with no link");
         if (k >= 0) {
             const Carried& st = r.state[static_cast<std::size_t>(r.taped[static_cast<std::size_t>(k)].state)];
-            outs.push_back({ caller_plane(ctx, on_dev, grads.planes[i], primal.bindings[static_cast<std::size_t>(s)].plane->tensor->dl_tensor, st.rows * n, what), k, -1, s });
+            outs.push_back({ caller_plane(ctx, on_dev, grads.planes[i], primal.bindings[static_cast<std::size_t>(s)].plane->tensor->dl_tensor, st.rows * n, what), k, -1, s, false });
+        } else if (plane) {   // a per-sample read: one gradient per sample, unsummed
+            outs.push_back({ caller_plane(ctx, on_dev, grads.planes[i], primal.bindings[static_cast<std::size_t>(s)].plane->tensor->dl_tensor, n, what), -1, g, s, true });
         } else {   // a parameter: the sum over samples, one value
             DLTensor like{};
             like.dtype = DLDataType{ kDLFloat, static_cast<std::uint8_t>(r.scalar * 8), 1 };
-            outs.push_back({ caller_plane(ctx, on_dev, grads.planes[i], like, 1, what), -1, g, s });
+            outs.push_back({ caller_plane(ctx, on_dev, grads.planes[i], like, 1, what), -1, g, s, false });
         }
     }
     RefineExtra extra;
@@ -1603,7 +1625,7 @@ void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, con
     // Outputs in sample order: the taped states' adjoints, per-sample gradients and the passes' pairs.
     std::vector<Buf> fold(r.grads.size());   // a start copy's per-sample gradient, in sample order
     for (std::size_t g = 0; g < r.grads.size(); ++g)
-        if (r.grads[g].fold >= 0) fold[g].resize(static_cast<std::size_t>(n) * r.scalar, D);
+        if (r.grads[g].fold >= 0 || r.grads[g].plane) fold[g].resize(static_cast<std::size_t>(n) * r.scalar, D);
     std::vector<Buf> out_state(r.taped.size());
     for (std::size_t k = 0; k < r.taped.size(); ++k) out_state[k].resize(static_cast<std::size_t>(r.taped[k].rows * n) * r.scalar, D);
     std::vector<std::vector<std::pair<double, double>>> partials(r.grads.size());
@@ -1698,7 +1720,7 @@ void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, con
             put(D, out_state[k].data(), n, r.taped[k].adj[1].data(), m, at, cnt, r.taped[k].rows, r.scalar);
         for (std::size_t g = 0; g < r.grads.size(); ++g) {
             Grad& gr = r.grads[g];
-            if (gr.fold >= 0) {
+            if (gr.fold >= 0 || gr.plane) {
                 put(D, fold[g].data(), n, gr.acc.data(), m, at, cnt, 1, r.scalar);
                 continue;
             }
@@ -1752,7 +1774,23 @@ void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, con
             for (std::int64_t i = 0; i < n; ++i) reinterpret_cast<float*>(out_state[static_cast<std::size_t>(tk)].data())[i] += reinterpret_cast<const float*>(extra.t0.data())[i];
     }
     for (const Out& o : outs) {
-        if (o.taped >= 0) {
+        if (o.plane) {   // the step reverse's per-sample gradient (accumulated over steps), then the refine vjp's share added
+            const std::size_t bytes = static_cast<std::size_t>(n) * r.scalar;
+            Buf sum;
+            sum.resize(bytes, D);
+            if (o.grad >= 0) copy_bytes(D, sum.data(), fold[static_cast<std::size_t>(o.grad)].data(), bytes);
+            else sum.zero();
+            for (auto& [slot, share] : extra.planes) {
+                if (slot != o.slot) continue;
+                if (o.grad < 0) copy_bytes(D, sum.data(), share.data(), bytes);
+                else if (D != nullptr) device_columns(*D, 1, sum.data(), n, share.data(), n, nullptr, n, 1, static_cast<unsigned>(r.scalar), 0);
+                else if (r.scalar == 8)
+                    for (std::int64_t i = 0; i < n; ++i) reinterpret_cast<double*>(sum.data())[i] += reinterpret_cast<const double*>(share.data())[i];
+                else
+                    for (std::int64_t i = 0; i < n; ++i) reinterpret_cast<float*>(sum.data())[i] += reinterpret_cast<const float*>(share.data())[i];
+            }
+            copy_bytes(D, o.data, sum.data(), bytes);
+        } else if (o.taped >= 0) {
             copy_bytes(D, o.data, out_state[static_cast<std::size_t>(o.taped)].data(),
                        static_cast<std::size_t>(r.taped[static_cast<std::size_t>(o.taped)].rows * n) * r.scalar);
         } else {   // diff_combine_chunks: the passes' pairs combined in pass order
