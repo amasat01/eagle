@@ -44,8 +44,13 @@ SlotFacts read_slot(const eg_unit_slot* in, const std::string& unit, int index) 
     const std::string named = what + " ('" + (s.name ? s.name : "?") + "')";
     if (s.flags & ~(EG_SLOT_PRIOR | EG_SLOT_PARAM_PLANE | EG_SLOT_GATHER | EG_SLOT_SHARED))
         refuse(EG_NOT_WRITTEN, named + ": unknown flag bits " + std::to_string(s.flags));
-    if (s.flags & (EG_SLOT_GATHER | EG_SLOT_SHARED))
-        refuse(EG_NOT_WRITTEN, named + ": GATHER and SHARED slots are not written yet");
+    if ((s.flags & EG_SLOT_GATHER) && (s.role != EG_ROLE_MAT_IN || s.rank != 2))
+        refuse(EG_BAD_REQUEST, "meta that contradicts itself: " + named + " is GATHER but not a rank-2 MAT_IN");
+    if ((s.flags & EG_SLOT_SHARED) && s.role != EG_ROLE_LOOKUP)
+        refuse(EG_BAD_REQUEST, "meta that contradicts itself: " + named + " is SHARED but not a LOOKUP");
+    if (s.n_gather < 0 || (s.n_gather > 0 && (s.gather == nullptr || !(s.flags & EG_SLOT_GATHER))))
+        refuse(EG_BAD_REQUEST, "meta that contradicts itself: " + named + " n_gather " + std::to_string(s.n_gather) +
+               " without a gather pattern on a GATHER slot");
     if (s.role < EG_ROLE_MUTABLE || s.role > EG_ROLE_OUT)
         refuse(EG_NOT_WRITTEN, named + ": unknown role " + std::to_string(s.role));
     if (s.dtype < EG_DTYPE_REAL || s.dtype > EG_DTYPE_BAND_PARTIAL)
@@ -59,7 +64,7 @@ SlotFacts read_slot(const eg_unit_slot* in, const std::string& unit, int index) 
         s.role != EG_ROLE_NSAMPLES && s.role != EG_ROLE_WIDE_IN && s.role != EG_ROLE_WIDE_OUT)
         refuse(EG_NOT_WRITTEN, named + ": role " + std::to_string(s.role) + " is not written yet (this build binds "
                "MUTABLE, PER_SAMPLE, VEC_IN, MAT_IN, OUT, WIDE_IN, WIDE_OUT, LOOKUP, UNIFORM, NSAMPLES and TERMINATED)");
-    if (s.rank != 0 && !plane)
+    if (s.rank != 0 && !plane && !(s.flags & EG_SLOT_SHARED))
         refuse(EG_NOT_WRITTEN, named + ": a slot of rank > 0 outside the plane roles is not written yet");
     if (s.rank != 0 && s.role == EG_ROLE_PER_SAMPLE)
         refuse(EG_BAD_REQUEST, "meta that contradicts itself: " + named + " is PER_SAMPLE of rank > 0");
@@ -82,6 +87,9 @@ SlotFacts read_slot(const eg_unit_slot* in, const std::string& unit, int index) 
     }
     facts.mirror = s.role == EG_ROLE_OUT || s.role == EG_ROLE_VEC_IN || s.role == EG_ROLE_MAT_IN ||
                    (s.role == EG_ROLE_MUTABLE && s.rank > 0);
+    facts.gathered = (s.flags & EG_SLOT_GATHER) != 0;
+    facts.shared = (s.flags & EG_SLOT_SHARED) != 0;
+    if (facts.gathered) facts.keep.assign(s.gather, s.gather + s.n_gather);
     return facts;
 }
 
@@ -179,10 +187,28 @@ void read_body(const eg_unit_meta& m, eg_unit_s& unit) {
         unit.active_map_slot = launch.active_map_slot;
         unit.active_count_slot = launch.active_count_slot;
     }
-    refuse_count(launch.n_lane_axes > 1 ? 1 : 0, unit.name, "n_lane_axes above 1");
+    if (launch.n_lane_axes < 0 || (launch.n_lane_axes > 0 && launch.lane_extents == nullptr))
+        refuse(EG_BAD_REQUEST, "meta that contradicts itself: unit '" + unit.name + "' n_lane_axes " +
+               std::to_string(launch.n_lane_axes) + " without lane_extents");
+    for (int i = 0; i < launch.n_lane_axes; ++i)
+        unit.lane_extents.push_back(launch.lane_extents[i]);
+    for (const SlotFacts& f : unit.slots)
+        if (f.gathered && !f.keep.empty() && static_cast<std::int32_t>(f.keep.size()) != launch.n_lane_axes)
+            refuse(EG_BAD_REQUEST, "meta that contradicts itself: unit '" + unit.name + "' slot '" + f.name +
+                   "' has a gather pattern of " + std::to_string(f.keep.size()) + " axes, the launch has " +
+                   std::to_string(launch.n_lane_axes));
     refuse_count(launch.n_plane_axes, unit.name, "n_plane_axes");
-    if (launch.host_box != nullptr)
-        refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': a host thread box is not written yet");
+    if (launch.host_box != nullptr) {
+        const eg_unit_box box = read_record(launch.host_box, eg_unit_box{}, "unit '" + unit.name + "' host_box");
+        if (box.axis < 0 || box.t < 2 || box.stride < 1)
+            refuse(EG_BAD_REQUEST, "meta that contradicts itself: unit '" + unit.name + "' host_box needs axis >= 0, t >= 2 "
+                   "and stride >= 1, got " + std::to_string(box.axis) + ", " + std::to_string(box.t) + ", " +
+                   std::to_string(box.stride));
+        if (unit.active_map_slot != -1 || unit.index_count_slot != -1)
+            refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': a host thread box with an active set or an index set is not written");
+        unit.box_t = box.t;
+        unit.box_stride = box.stride;
+    }
 }
 
 /** @brief Find the unit named by @p ref (name AND digest) in the library's tree. */

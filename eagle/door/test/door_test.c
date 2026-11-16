@@ -1974,6 +1974,159 @@ static void check_wide(eg_ctx* ctx) {
     check(eg_plan_free(ctx, p) == EG_OK && eg_unit_free(ctx, unit) == EG_OK, "wide plan and unit freed");
 }
 
+/* ---- GATHER and SHARED slots, and a host thread box ---------------------------- */
+
+static void check_gather(eg_ctx* ctx) {
+    enum { N = 40, MAXM = 12 };
+    static double y[N], m[4 * MAXM], want[N];
+    static const struct { const char* name; uint8_t byte; int64_t cols; } units[3] = {
+        { "gathb", 0x61, 4 }, { "gatha", 0x62, 10 }, { "gathn", 0x63, 7 } };   /* m: b (4), a (n / 4), any */
+    for (int ui = 0; ui < 3; ++ui) {
+        eg_unit* unit = NULL;
+        const int64_t cols = units[ui].cols;
+        struct tensor ty, tm, tbad;
+        for (int i = 0; i < 4 * MAXM; ++i) m[i] = (double)(i % 17) * 0.25 - 1.0;
+        for (int i = 0; i < N; ++i) {
+            double v = 0.0, w = 1.0;
+            for (int c = 0; c < 4; ++c, w *= 10.0) v += w * m[c * cols + i % cols];
+            want[i] = v;
+            y[i] = 0.0;
+        }
+        eg_plane *py = wrap_1d(ctx, &ty, y, N, kDLFloat, 64), *pm = wrap_nd(ctx, &tm, m, kDLFloat, 64, 3, 2, 2, cols);
+        const int32_t slots[2] = { 0, 1 };
+        eg_plane* planes[2] = { py, pm };
+        struct eg_bind_desc bd;
+        memset(&bd, 0, sizeof(bd));
+        bd.struct_size = sizeof(bd);
+        bd.n_planes = 2;
+        bd.plane_slots = slots;
+        bd.planes = planes;
+        eg_plan* p = NULL;
+        int ok = py && pm && load(ctx, units[ui].name, units[ui].byte, &unit) == EG_OK &&
+                 plan(ctx, unit, EG_STRUCTURE_HOST_TEAM, N, 0, NULL, NULL, &p) == EG_OK && eg_bind(ctx, p, &bd) == EG_OK &&
+                 eg_launch(ctx, p, NULL) == EG_OK && memcmp(y, want, sizeof(y)) == 0;
+        check(ok, "gather: a compact (2, 2, m) matrix is read at column lane % m, m the columns of the lane axes it varies along "
+                  "(static axis, runtime axis, or any m without a pattern), equal the plain loop (bitwise)");
+        if (ui < 2) {   /* a column count other than the pattern's */
+            eg_plane* pbad = wrap_nd(ctx, &tbad, m, kDLFloat, 64, 3, 2, 2, cols + 1);
+            const int32_t one[1] = { 1 };
+            eg_plane* bad[1] = { pbad };
+            bd.n_planes = 1;
+            bd.plane_slots = one;
+            bd.planes = bad;
+            check(pbad && eg_bind(ctx, p, &bd) == EG_BAD_REQUEST && reason_has(ctx, "is expected (m: the columns"),
+                  "gather: a column count other than the lane axes' product refused BAD_REQUEST by name");
+            eg_plane_free(ctx, pbad);
+        }
+        eg_plan_free(ctx, p);
+        eg_plane_free(ctx, py);
+        eg_plane_free(ctx, pm);
+        eg_unit_free(ctx, unit);
+    }
+}
+
+static void check_shared(eg_ctx* ctx) {
+    enum { N = 100 };
+    static double y[N], x[N], a[6];
+    struct tensor ty, tx, ta;
+    for (int i = 0; i < N; ++i) x[i] = (double)i * 0.5 - 3.0;
+    for (int i = 0; i < 6; ++i) a[i] = 1.5 + i;
+    eg_unit* unit = NULL;
+    eg_plane *py = wrap_1d(ctx, &ty, y, N, kDLFloat, 64), *px = wrap_1d(ctx, &tx, x, N, kDLFloat, 64),
+             *pa = wrap_nd(ctx, &ta, a, kDLFloat, 64, 2, 2, 2, 0);
+    const int32_t slots[3] = { 0, 1, 2 };
+    eg_plane* planes[3] = { py, px, pa };
+    struct eg_bind_desc bd;
+    memset(&bd, 0, sizeof(bd));
+    bd.struct_size = sizeof(bd);
+    bd.n_planes = 3;
+    bd.plane_slots = slots;
+    bd.planes = planes;
+    eg_plan* p = NULL;
+    int ok = py && px && pa && load(ctx, "shr", 0x66, &unit) == EG_OK &&
+             plan(ctx, unit, EG_STRUCTURE_HOST_TEAM, N, 0, NULL, NULL, &p) == EG_OK && eg_bind(ctx, p, &bd) == EG_OK &&
+             eg_launch(ctx, p, NULL) == EG_OK;
+    for (int i = 0; ok && i < N; ++i) ok = y[i] == x[i] * a[0] + a[3];
+    check(ok, "shared: a (2, 2) parameter plane with no lane axis is read flat by every lane (bitwise, N != its extent)");
+    struct tensor tb;
+    const int32_t two[1] = { 2 };
+    int all = 1;
+    const int64_t shapes[2][2] = { { 4, 0 }, { 2, 3 } };   /* flat (4,), and (2, 3) */
+    for (int k = 0; k < 2; ++k) {
+        eg_plane* pb = wrap_nd(ctx, &tb, a, kDLFloat, 64, k == 0 ? 1 : 2, shapes[k][0], shapes[k][1], 0);
+        eg_plane* one[1] = { pb };
+        struct eg_bind_desc b1 = bd;
+        b1.n_planes = 1;
+        b1.plane_slots = two;
+        b1.planes = one;
+        all = all && pb && eg_bind(ctx, p, &b1) == EG_BAD_REQUEST && reason_has(ctx, "shared parameter of its declared shape");
+        eg_plane_free(ctx, pb);
+    }
+    check(all, "shared: a plane of another shape than the declared one refused BAD_REQUEST by name");
+    eg_plan_free(ctx, p);
+    eg_plane_free(ctx, py);
+    eg_plane_free(ctx, px);
+    eg_plane_free(ctx, pa);
+    eg_unit_free(ctx, unit);
+}
+
+static void check_box(eg_ctx* ctx) {
+    void* lib = dlopen(library_path, RTLD_LAZY | RTLD_NOLOAD);
+    int64_t* threads_run = lib ? (int64_t*)dlsym(lib, "fixture_box_threads") : NULL;
+    eg_unit* unit = NULL;
+    check(threads_run != NULL && load(ctx, "boxed", 0x64, &unit) == EG_OK, "eg_unit_load boxed (a thread box of 4 lanes 3 apart)");
+    if (threads_run == NULL || unit == NULL) return;
+    const eg_structure structures[2] = { EG_STRUCTURE_HOST_SERIAL, EG_STRUCTURE_HOST_TEAM };
+    const int64_t sizes[4] = { 1, 12, 1000, 1001 };
+    int all = 1;
+    for (int si = 0; si < 2; ++si)
+        for (int zi = 0; zi < 4; ++zi) {
+            enum { MAXN = 1001 };
+            static double x[MAXN], y[MAXN];
+            const int64_t n = sizes[zi];
+            struct tensor ty, tx;
+            for (int64_t i = 0; i < n; ++i) x[i] = (double)i * 0.25 - 9.0, y[i] = -5.0;
+            eg_plane *py = wrap_1d(ctx, &ty, y, n, kDLFloat, 64), *px = wrap_1d(ctx, &tx, x, n, kDLFloat, 64);
+            const int32_t slots[2] = { 0, 1 };
+            eg_plane* planes[2] = { py, px };
+            struct eg_bind_desc bd;
+            memset(&bd, 0, sizeof(bd));
+            bd.struct_size = sizeof(bd);
+            bd.n_planes = 2;
+            bd.plane_slots = slots;
+            bd.planes = planes;
+            eg_plan* p = NULL;
+            eg_host_threads(ctx, 3);
+            *threads_run = 0;
+            all &= py && px && plan(ctx, unit, structures[si], n, 0, NULL, NULL, &p) == EG_OK && eg_bind(ctx, p, &bd) == EG_OK &&
+                   eg_launch(ctx, p, NULL) == EG_OK;
+            all &= *threads_run == (n + 11) / 12 * 3;          /* ceil(n / (4 * 3)) * 3 threads */
+            for (int64_t i = 0; i < n; ++i) all &= y[i] == 2.0 * x[i] + 1.0;
+            eg_plan_free(ctx, p);
+            eg_plane_free(ctx, py);
+            eg_plane_free(ctx, px);
+        }
+    check(all, "box: ceil(n / (T * stride)) * stride threads run, and every lane is served once (y = 2x + 1 for n = 1, 12, 1000, 1001, "
+               "SERIAL and TEAM)");
+    eg_plan* p = NULL;
+    const int64_t base[1] = { 0 }, count[1] = { 4 };
+    struct eg_plan_desc d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    d.unit = unit;
+    d.structure = EG_STRUCTURE_HOST_TEAM;
+    d.n_samples = 100;
+    d.n_partitions = 1;
+    d.part_base = base;
+    d.part_count = count;
+    check(eg_plan_new(ctx, &d, &p) == EG_BAD_REQUEST && reason_has(ctx, "count threads, not lanes"),
+          "box: explicit partitions refused BAD_REQUEST by name");
+    eg_unit* bad = NULL;
+    check(load(ctx, "boxbad", 0x65, &bad) == EG_BAD_REQUEST && reason_has(ctx, "host_box needs"),
+          "box: a thread box of fewer than 2 lanes refused BAD_REQUEST by name");
+    eg_unit_free(ctx, unit);
+}
+
 int main(int argc, char** argv) {
     if (argc != 5) {
         fprintf(stderr, "usage: %s <fixture> <wrong size> <no size block> <v1 tag>\n", argv[0]);
@@ -2008,6 +2161,9 @@ int main(int argc, char** argv) {
     check_index_sets(ctx);
     check_groups(ctx);
     check_wide(ctx);
+    check_gather(ctx);
+    check_shared(ctx);
+    check_box(ctx);
 
     check_reduce(ctx);
     check_conditionals(ctx);

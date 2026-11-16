@@ -67,6 +67,9 @@ struct SlotFacts {
     std::int32_t rank = 0;
     std::vector<std::int64_t> shape;          ///< ``rank`` extents; the plane is (*shape, n)
     bool mirror = false;                      ///< passed as the 40-byte GRefMirror, else the 32-byte handle
+    bool gathered = false;                    ///< a compact (rows, cols, m) matrix read at lane indices: m is not the lane count
+    std::vector<std::uint8_t> keep;           ///< gathered: 1 for each lane axis the matrix varies along (empty: m unchecked)
+    bool shared = false;                      ///< a LOOKUP with no lane axis: one value for every lane, bound flat
 };
 
 /** @brief A unit's finish record, as eg_runner_new and eg_run read it. */
@@ -95,6 +98,8 @@ struct eg_unit_s {
     std::int32_t active_map_slot = -1;        ///< the int32 LOOKUP of live sample slots a runner makes, -1: none
     std::int32_t active_count_slot = -1;      ///< the uint32 LOOKUP count of its live prefix
     std::int64_t group = 1;                   ///< lanes per group of the active set: the map holds group indices
+    std::vector<std::int64_t> lane_extents;   ///< one per lane axis, -1: runtime (the launch's n over the static ones)
+    std::int64_t box_t = 0, box_stride = 1;   ///< a host thread box: each thread serves box_t lanes box_stride apart; 0: none
     std::int32_t index_map_slot = -1;         ///< the caller's int32/int64 LOOKUP of lanes to run (an index set), -1: none
     std::int32_t index_count_slot = -1;       ///< the caller's uint32 LOOKUP count: lanes run (with no map: the prefix)
     int refs = 1;                             ///< the caller's reference plus one per plan

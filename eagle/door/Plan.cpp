@@ -18,6 +18,13 @@ namespace {
  *  inside [0, n) without overlap. */
 std::vector<exec::Partition> read_partitions(const eg_plan_desc& d) {
     const std::int64_t n = d.n_samples;
+    if (d.unit->box_t > 0) {    // a thread box: base and count count threads, ceil(n / (t * stride)) * stride of them
+        if (d.n_partitions != 0)
+            refuse(EG_BAD_REQUEST, "unit '" + d.unit->name + "' computes " + std::to_string(d.unit->box_t) +
+                   " lanes per thread (a thread box), so its partitions count threads, not lanes; pass none");
+        const std::int64_t span = d.unit->box_t * d.unit->box_stride;
+        return { exec::Partition{ 0, (n + span - 1) / span * d.unit->box_stride, n } };
+    }
     if (d.n_partitions == 0) return { exec::Partition::whole(n) };
     if (d.n_partitions < 0 || d.part_base == nullptr || d.part_count == nullptr)
         refuse(EG_BAD_REQUEST, "eg_plan_desc: n_partitions " + std::to_string(d.n_partitions) +
@@ -85,11 +92,25 @@ void check_plane(const eg_plan_s& plan, int slot, const eg_plane_s& plane) {
     if (!dtype_ok(t.dtype, s, plan.unit->scalar_type))
         refuse(EG_BAD_REQUEST, what + ": dtype (code " + std::to_string(t.dtype.code) + ", bits " +
                std::to_string(t.dtype.bits) + ") is not the slot's");
-    if (wide(s)) {                       // (rows, n): the rows are the caller's, one value per sample along the last axis
+    if (s.gathered) {                    // (rows, cols, m): m the caller's column count, checked against the lane axes it varies along
+        const std::int64_t m = t.ndim == 3 ? t.shape[2] : -1;
+        std::int64_t want = 1, fixed = 1;
+        for (std::int64_t e : plan.unit->lane_extents) fixed *= e > 0 ? e : 1;
+        for (std::size_t i = 0; i < s.keep.size(); ++i)
+            if (s.keep[i]) want *= plan.unit->lane_extents[i] > 0 ? plan.unit->lane_extents[i] : plan.n_samples / fixed;
+        if (t.ndim != 3 || t.shape[0] != s.shape[0] || t.shape[1] != s.shape[1] || m < 1 || (!s.keep.empty() && m != want))
+            refuse(EG_BAD_REQUEST, what + ": a plane of shape (" + std::to_string(s.shape[0]) + ", " + std::to_string(s.shape[1]) +
+                   ", " + (s.keep.empty() ? std::string("m") : std::to_string(want)) + ") is expected (m: the columns of the lane axes it varies along)");
+    } else if (wide(s)) {                       // (rows, n): the rows are the caller's, one value per sample along the last axis
         if (t.ndim != 2 || t.shape[1] != plan.n_samples)
             refuse(EG_BAD_REQUEST, what + ": a plane of shape (rows, " + std::to_string(plan.n_samples) + ") is expected");
     } else if (s.role == EG_ROLE_LOOKUP) {      // a table of the caller's: any compact shape, read by element count
         if (t.ndim < 1) refuse(EG_BAD_REQUEST, what + ": a table needs at least one dimension");
+        if (s.shared && s.rank > 0) {    // a shared parameter has its natural shape, bound flat
+            bool same = t.ndim == s.rank;
+            for (int i = 0; same && i < s.rank; ++i) same = t.shape[i] == s.shape[static_cast<std::size_t>(i)];
+            if (!same) refuse(EG_BAD_REQUEST, what + ": a shared parameter of its declared shape is expected");
+        }
         if (slot == plan.unit->index_map_slot && t.ndim != 1)
             refuse(EG_BAD_REQUEST, what + ": the index map is one dimension");
         if (slot == plan.unit->index_count_slot && (t.ndim != 1 || t.shape[0] != 1))
@@ -310,7 +331,8 @@ void bind(eg_ctx& ctx, eg_plan_s* plan, const eg_bind_desc* desc) {
         char* data = static_cast<char*>(t.data) + t.byte_offset;
         const SlotFacts& sf = plan->unit->slots[d.plane_slots[i]];
         if (sf.mirror) {
-            bind_mirror(*plan, d.plane_slots[i], data, static_cast<std::uint64_t>(plan->n_samples));
+            bind_mirror(*plan, d.plane_slots[i], data,
+                        static_cast<std::uint64_t>(sf.gathered ? t.shape[t.ndim - 1] : plan->n_samples));
         } else {
             std::int64_t elements = 1;       // a table is read by its element count, the rest by n
             for (int e = 0; e < t.ndim; ++e) elements *= t.shape[e];

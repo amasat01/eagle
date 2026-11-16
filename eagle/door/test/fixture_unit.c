@@ -47,6 +47,13 @@ struct fixture_handle {
     int32_t device_id;
 };
 
+/* The 40-byte mirror of a (components, n) plane (plugin/gref_layout.h's GRefMirror). */
+struct fixture_mirror {
+    double* data;
+    uint64_t samples, comp_stride, sample_stride;
+    int32_t device_type, device_id;
+};
+
 EG_FIXTURE_EXPORT void axpb_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void wait_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void count1_host(void* const* params, int64_t base, int64_t count, int64_t n);
@@ -62,10 +69,14 @@ EG_FIXTURE_EXPORT void prefix_host(void* const* params, int64_t base, int64_t co
 EG_FIXTURE_EXPORT void vecs_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void count1g_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void widemul_host(void* const* params, int64_t base, int64_t count, int64_t n);
+EG_FIXTURE_EXPORT void gath_host(void* const* params, int64_t base, int64_t count, int64_t n);
+EG_FIXTURE_EXPORT void boxed_host(void* const* params, int64_t base, int64_t count, int64_t n);
+EG_FIXTURE_EXPORT void shr_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT const struct eg_library_meta* eg_unit_library_meta(void);
 
 /* Lanes of a partial last group a count1g launch was handed (the entry skips them). */
 EG_FIXTURE_EXPORT int64_t fixture_past_n;
+EG_FIXTURE_EXPORT int64_t fixture_box_threads;
 int64_t fixture_past_n;
 
 void axpb_host(void* const* params, int64_t base, int64_t count, int64_t n) {
@@ -196,6 +207,41 @@ void widemul_host(void* const* params, int64_t base, int64_t count, int64_t n) {
     }
 }
 
+/* A gathered 2x2 matrix of m columns: y[i] = M00 + 10 M01 + 100 M10 + 1000 M11 at column i % m. */
+void gath_host(void* const* params, int64_t base, int64_t count, int64_t n) {
+    double* y = (double*)((const struct fixture_handle*)params[0])->data;
+    const struct fixture_mirror* m = (const struct fixture_mirror*)params[1];
+    (void)n;
+    for (int64_t i = base; i < base + count; ++i) {
+        const uint64_t col = (uint64_t)i % m->samples;
+        double v = 0.0, w = 1.0;
+        for (int c = 0; c < 4; ++c, w *= 10.0) v += w * m->data[c * m->comp_stride + col * m->sample_stride];
+        y[i] = v;
+    }
+}
+
+/* A thread box (4 lanes 3 apart): thread th serves lanes (th / 3) * 12 + th % 3 + 3 j, j < 4, below n: y = 2x + 1. */
+int64_t fixture_box_threads;
+void boxed_host(void* const* params, int64_t base, int64_t count, int64_t n) {
+    double* y = (double*)((const struct fixture_handle*)params[0])->data;
+    const double* x = (const double*)((const struct fixture_handle*)params[1])->data;
+    __atomic_fetch_add(&fixture_box_threads, count, __ATOMIC_RELAXED);
+    for (int64_t th = base; th < base + count; ++th)
+        for (int64_t j = 0; j < 4; ++j) {
+            const int64_t lane = (th / 3) * 12 + th % 3 + 3 * j;
+            if (lane < n) y[lane] = 2.0 * x[lane] + 1.0;
+        }
+}
+
+/* A shared parameter plane read flat: y = x * A[0] + A[3]. */
+void shr_host(void* const* params, int64_t base, int64_t count, int64_t n) {
+    double* y = (double*)((const struct fixture_handle*)params[0])->data;
+    const double* x = (const double*)((const struct fixture_handle*)params[1])->data;
+    const double* a = (const double*)((const struct fixture_handle*)params[2])->data;
+    (void)n;
+    for (int64_t i = base; i < base + count; ++i) y[i] = x[i] * a[0] + a[3];
+}
+
 /* Index sets: thread t serves lane map[t] (lanes) or lane t (prefix): y[lane] = 2 * x[lane] + 1. */
 void lanes_host(void* const* params, int64_t base, int64_t count, int64_t n) {
     double* y = (double*)((const struct fixture_handle*)params[0])->data;
@@ -211,13 +257,6 @@ void prefix_host(void* const* params, int64_t base, int64_t count, int64_t n) {
     (void)n;
     for (int64_t t = base; t < base + count; ++t) y[t] = 2.0 * x[t] + 1.0;
 }
-
-/* The 40-byte mirror of a (components, n) plane (plugin/gref_layout.h's GRefMirror). */
-struct fixture_mirror {
-    double* data;
-    uint64_t samples, comp_stride, sample_stride;
-    int32_t device_type, device_id;
-};
 
 /* v[c] += w[c]*s + table[idx % tlen] (c < 3); o = v0 + v1 + v2 + (mm0 + mm1 + mm2 + mm3) + n. */
 void vecs_host(void* const* params, int64_t base, int64_t count, int64_t n) {
@@ -527,15 +566,75 @@ static const struct eg_unit_meta unit_widemul = {
     .scalar_type = EG_SCALAR_FLOAT64, .host_entry = "widemul_host", .device_image_format = EG_IMAGE_NONE,
     .body = &wide_body, .launch = &launch };
 
+/* gather: y (MUTABLE) and a GATHER 2x2 MAT_IN over a two-axis launch (runtime a, static b = 4) */
+static const uint8_t keep_b[2] = { 0, 1 }, keep_a[2] = { 1, 0 };
+static const int64_t gath_shape[2] = { 2, 2 }, gath_extents[2] = { -1, 4 };
+#define GATH_SLOT(var, flags_, n_, pattern_)                                                                 \
+    static const struct eg_unit_slot var = {                                                                 \
+        .struct_size = sizeof(struct eg_unit_slot), .flags = flags_, .role = EG_ROLE_MAT_IN,                 \
+        .dtype = EG_DTYPE_REAL, .rank = 2, .like_slot = -1, .n_gather = n_, .shape = gath_shape,            \
+        .gather = pattern_, .name = "M" }
+GATH_SLOT(slot_gb, EG_SLOT_GATHER, 2, keep_b);
+GATH_SLOT(slot_ga, EG_SLOT_GATHER, 2, keep_a);
+GATH_SLOT(slot_gn, EG_SLOT_GATHER, 0, NULL);
+static const struct eg_unit_slot* const gb_slots[] = { &slot_y, &slot_gb };
+static const struct eg_unit_slot* const ga_slots[] = { &slot_y, &slot_ga };
+static const struct eg_unit_slot* const gn_slots[] = { &slot_y, &slot_gn };
+#define GATH_BODY(var, slots_) static const struct eg_unit_body var = { .struct_size = sizeof(struct eg_unit_body), \
+    .access = EG_ACCESS_SAMPLE_LOCAL, .n_slots = 2, .slots = slots_ }
+GATH_BODY(gb_body, gb_slots);
+GATH_BODY(ga_body, ga_slots);
+GATH_BODY(gn_body, gn_slots);
+static const struct eg_unit_launch launch_two_axes = {
+    .struct_size = sizeof(struct eg_unit_launch), .n_lane_axes = 2, .block = 0, .active_map_slot = -1,
+    .active_count_slot = -1, .index_map_slot = -1, .index_count_slot = -1, .n_plane_axes = 0, .group = 1,
+    .lane_extents = gath_extents };
+#define GATH_UNIT(var, name_, byte, body_) static const struct eg_unit_meta var = {                            \
+    .struct_size = sizeof(struct eg_unit_meta), .name = name_, .digest = DIGEST(byte), .pattern = EG_PATTERN_PURE, \
+    .scalar_type = EG_SCALAR_FLOAT64, .host_entry = "gath_host", .device_image_format = EG_IMAGE_NONE,         \
+    .body = &body_, .launch = &launch_two_axes }
+GATH_UNIT(unit_gathb, "gathb", 0x61, gb_body);
+GATH_UNIT(unit_gatha, "gatha", 0x62, ga_body);
+GATH_UNIT(unit_gathn, "gathn", 0x63, gn_body);
+
+/* a thread box and a shared parameter */
+static const struct eg_unit_box box_4_3 = { .struct_size = sizeof(struct eg_unit_box), .axis = 0, .t = 4, .stride = 3 };
+static const struct eg_unit_box box_bad = { .struct_size = sizeof(struct eg_unit_box), .axis = 0, .t = 1, .stride = 3 };
+static const struct eg_unit_slot* const xy_slots[] = { &slot_y, &slot_x };
+static const struct eg_unit_body xy_body = {
+    .struct_size = sizeof(struct eg_unit_body), .access = EG_ACCESS_SAMPLE_LOCAL, .n_slots = 2, .slots = xy_slots };
+#define BOX_LAUNCH(var, box_) static const struct eg_unit_launch var = { .struct_size = sizeof(struct eg_unit_launch),   \
+    .n_lane_axes = 0, .block = 0, .active_map_slot = -1, .active_count_slot = -1, .index_map_slot = -1,                \
+    .index_count_slot = -1, .n_plane_axes = 0, .group = 1, .host_box = box_ }
+BOX_LAUNCH(launch_box, &box_4_3);
+BOX_LAUNCH(launch_box_bad, &box_bad);
+#define BOX_UNIT(var, name_, byte, launch_) static const struct eg_unit_meta var = {                         \
+    .struct_size = sizeof(struct eg_unit_meta), .name = name_, .digest = DIGEST(byte), .pattern = EG_PATTERN_PURE, \
+    .scalar_type = EG_SCALAR_FLOAT64, .host_entry = "boxed_host", .device_image_format = EG_IMAGE_NONE,     \
+    .body = &xy_body, .launch = &launch_ }
+BOX_UNIT(unit_boxed, "boxed", 0x64, launch_box);
+BOX_UNIT(unit_boxbad, "boxbad", 0x65, launch_box_bad);
+static const struct eg_unit_slot slot_shared = {
+    .struct_size = sizeof(struct eg_unit_slot), .flags = EG_SLOT_SHARED, .role = EG_ROLE_LOOKUP, .dtype = EG_DTYPE_REAL,
+    .rank = 2, .like_slot = -1, .n_gather = 0, .shape = gath_shape, .gather = NULL, .name = "A" };
+static const struct eg_unit_slot* const shr_slots[] = { &slot_y, &slot_x, &slot_shared };
+static const struct eg_unit_body shr_body = {
+    .struct_size = sizeof(struct eg_unit_body), .access = EG_ACCESS_SAMPLE_LOCAL, .n_slots = 3, .slots = shr_slots };
+static const struct eg_unit_meta unit_shr = {
+    .struct_size = sizeof(struct eg_unit_meta), .name = "shr", .digest = DIGEST(0x66), .pattern = EG_PATTERN_PURE,
+    .scalar_type = EG_SCALAR_FLOAT64, .host_entry = "shr_host", .device_image_format = EG_IMAGE_NONE,
+    .body = &shr_body, .launch = &launch };
+
 static const struct eg_unit_meta* const units[] = { &unit_axpb, &unit_wait, &unit_split, &unit_count1,
                                                     &unit_count3, &unit_count1a, &unit_count3a, &unit_countA, &unit_countAa, &unit_vecs, &unit_count1i,
-                                                    &unit_count1ia, &unit_count1e, &unit_lanes, &unit_prefix, &unit_count1g, &unit_widemul };
+                                                    &unit_count1ia, &unit_count1e, &unit_lanes, &unit_prefix, &unit_count1g, &unit_widemul,
+                                                    &unit_gathb, &unit_gatha, &unit_gathn, &unit_boxed, &unit_boxbad, &unit_shr };
 
 static const struct eg_library_meta library = {
     .struct_size = sizeof(struct eg_library_meta),
     .schema_major = EG_META_SCHEMA_MAJOR,
     .schema_minor = 0,
-    .n_units = 17,
+    .n_units = 23,
     .units = units,
 };
 
