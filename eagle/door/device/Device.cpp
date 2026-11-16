@@ -421,6 +421,10 @@ void device_plan_check(const eg_ctx& ctx, const eg_unit_s& unit) {
     if (ctx.dev.ordinal < 0)
         refuse(EG_BAD_REQUEST, "structure DEVICE on a host-only context (made without EG_CTX_DEVICE)");
     const std::string who = "unit '" + unit.name + "' on DEVICE: ";
+    for (const DispatchFacts& f : unit.dispatches)
+        if (f.strategy == EG_DISPATCH_AUTO || f.branch_record || f.classify_record)
+            refuse(EG_NOT_WRITTEN, who + "the dispatch group '" + f.name + "' is " + (f.strategy == EG_DISPATCH_AUTO ? "AUTO" : "SEGMENTED") +
+                   ", which is not written on the device");
     if (unit.stages.empty() && unit.function == 0) refuse(EG_NOT_WRITTEN, who + "the unit has no device image");
     for (const StageFacts& st : unit.stages)
         if (st.unit->function == 0) refuse(EG_NOT_WRITTEN, who + "the stage '" + st.ref_name + "' has no device image");

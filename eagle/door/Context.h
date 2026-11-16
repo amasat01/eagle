@@ -81,6 +81,8 @@ struct SlotFacts {
     bool made = false;                        ///< eagle's own plane (a companion): never bound by the caller
     bool cell = false;                        ///< a cell's slot: the caller binds the finished (1,) cell, the kernel reads eagle's rows
     std::int32_t keys_of = -1;                ///< a WIDE_OUT slot a KEYS stage writes (a block sum's output): the keyed record whose keys it holds, else -1
+    bool optional_made = false;               ///< eagle makes the plane unless the caller binds one (the AUTO mix counters)
+    std::int64_t min_elements = 0;            ///< a caller's plane of an optional_made slot holds at least this many elements
 };
 
 /** @brief A compensation companion eagle makes beside the target the caller binds, and the fold it runs after each launch. */
@@ -164,6 +166,39 @@ struct StageFacts {
     std::vector<std::string> cells_in, cells_out;
 };
 
+/** @brief A unit reference of a dispatch record, resolved against deps by unit_load. */
+struct RefFacts {
+    std::string name;
+    std::array<std::uint8_t, EG_DIGEST_BYTES> digest{};
+};
+
+/** @brief A dispatch group of a unit (eg_unit_dispatch), copied at eg_unit_load. */
+struct DispatchFacts {
+    std::int32_t strategy = 0, k = 2, mix = -1, cls = -1, stale = -1, offsets = -1;
+    std::string name;
+    bool classify_record = false;             ///< SEGMENTED: a classify unit's own record (``cls`` is its class slot)
+    bool branch_record = false;               ///< SEGMENTED: a branch unit's record (it names the group's units)
+    std::vector<RefFacts> branches;
+    RefFacts classify, sweep;
+    bool has_classify = false, has_sweep = false;
+};
+
+/** @brief The segmented group a branch unit loaded with its group's units in deps runs: the units, and per unit the join of its
+ *  slots to the plan's (the branch unit's slots, then the slots of the other units no earlier slot names). */
+struct SegFacts {
+    static constexpr std::int32_t kMap = -2, kCount = -3;   ///< a sweep's active map and count: eagle's own, joined to no plan slot
+    bool present = false;
+    bool dynamic = false;                     ///< a stale slot and a sweep, no classify unit
+    std::int32_t k = 0, class_slot = -1, stale_slot = -1, offsets_slot = -1, mask_slot = -1;   ///< plan slots; mask: the TERMINATED slot, -1: every sample is live
+    std::string name;
+    std::vector<eg_unit_s*> branches;         ///< k units in class order; a reference may be the unit itself
+    eg_unit_s* classify = nullptr;
+    eg_unit_s* sweep = nullptr;
+    std::vector<eg_unit_s*> held;             ///< the units a reference is held on (deps)
+    std::vector<std::vector<std::int32_t>> join;   ///< per member (branches, then classify or sweep), per its slot: the plan slot, or kMap / kCount
+    std::int32_t access = 0;                  ///< the strictest access of the units launched over the same partitions
+};
+
 /** @brief The element count of @p t (the product of its shape). */
 inline std::int64_t elements(const DLTensor& t) {
     std::int64_t n = 1;
@@ -203,6 +238,8 @@ struct eg_unit_s {
     std::vector<std::string> source_cells;    ///< a split unit's cells (no row slots: the stages own the rows)
     std::vector<eagle::door::SplitCell> split_cells;
     std::vector<eagle::door::StageFacts> stages;   ///< non-empty: a split unit, run stage by stage
+    std::vector<eagle::door::DispatchFacts> dispatches;   ///< the unit's dispatch groups
+    eagle::door::SegFacts seg;                ///< a branch unit loaded with its group's units in deps
     std::vector<eagle::door::CompanionFacts> companions;
     std::vector<eagle::door::CellFacts> cells;
     std::int64_t cell_row = 0;                ///< samples per row of a cell's rows, 0: no cells
@@ -249,6 +286,26 @@ struct eg_plane_s {
     bool caller_ref = true;
 };
 
+namespace eagle {
+namespace door {
+
+/** @brief What a SEGMENTED plan keeps between launches: the planes eagle makes for the group and the sort of the last launch. */
+struct SegState {
+    std::vector<std::int64_t> offsets;        ///< the k+1 run offsets of the live samples
+    std::vector<std::int64_t> cls;            ///< the class of the sample at each slot of the arrangement
+    std::vector<std::uint8_t> stale;          ///< dynamic: the samples whose branch moved, by slot of the arrangement
+    std::vector<std::int32_t> perm;           ///< slot -> sample of the kept sort (empty: the identity)
+    std::vector<std::int32_t> map;            ///< dynamic: the stale live slots the sweep runs over
+    std::vector<std::int64_t> run_len;        ///< per class: its run in the sort
+    std::uint32_t count = 0;                  ///< the live prefix of ``map``
+    std::int64_t stale_now = 0;               ///< stale live samples after the last launch
+    bool sorted = false;
+    plugin::ScalarHandle map_h{}, count_h{};
+};
+
+}  // namespace door
+}  // namespace eagle
+
 /** @brief A unit under one structure over fixed partitions, plus its bindings. */
 struct eg_plan_s {
     /** @brief One slot's binding: a plane (by handle) or a uniform (by value). */
@@ -271,6 +328,8 @@ struct eg_plan_s {
     std::vector<eg_plane_s*> outs;            ///< a split unit: the cell plane eagle makes for each internal cell column (nullptr: the caller's)
     std::vector<eg_plane_s*> team;            ///< one eagle-made scratch plane per team plane of a split unit, one reference each
     std::vector<eg_plane_s*> work;            ///< DEVICE: the two reduction work buffers of each cell component, one reference each
+    std::vector<eg_plane_s*> mix;             ///< the eagle-made mix counters of each AUTO group (``unit->dispatches`` order), one reference each
+    mutable eagle::door::SegState seg;        ///< a SEGMENTED plan: its planes and sort
     std::uint32_t finished = 0;               ///< the eagle-made finished counter of a finishing unit
     std::int64_t steps_word = 0;              ///< the eagle-made steps word of an AUTO unit
     std::uint64_t device_counter = 0;         ///< DEVICE with a finish: the device cell of the finished counter

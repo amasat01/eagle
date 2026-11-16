@@ -10,6 +10,8 @@
 
 #include <dlfcn.h>
 
+#include <numeric>
+
 namespace eagle {
 namespace door {
 
@@ -183,11 +185,25 @@ void read_made(const eg_unit_body& body, void* library, bool device_only, eg_uni
     }
 }
 
-/** @brief Check the dispatch groups of the unit. PREDICATED and SWITCH run as plain kernels: the record is checked and nothing more is kept. */
-void read_dispatch(const eg_unit_body& body, const eg_unit_s& unit) {
+/** @brief Check the dispatch groups of the unit and keep them. PREDICATED and SWITCH run as plain kernels; AUTO runs fused over mix counters eagle makes
+ *  unless the caller binds some; a SEGMENTED group is a branch unit's record (it names the group's units, resolved against deps by
+ *  resolve_segmented) or a classify unit's record (its class slot). */
+void read_dispatch(const eg_unit_body& body, eg_unit_s& unit) {
     const std::string who = "meta that contradicts itself: unit '" + unit.name + "' ";
     if (body.n_dispatches < 0 || (body.n_dispatches > 0 && body.dispatches == nullptr))
         refuse(EG_BAD_REQUEST, who + "n_dispatches " + std::to_string(body.n_dispatches));
+    const auto slot_is = [&](std::int32_t slot, bool written, std::int32_t dtype) {
+        if (slot < 0 || slot >= static_cast<std::int32_t>(unit.slots.size())) return false;
+        const SlotFacts& s = unit.slots[static_cast<std::size_t>(slot)];
+        const bool role = written ? (s.role == EG_ROLE_MUTABLE || s.role == EG_ROLE_OUT) : s.role == EG_ROLE_LOOKUP;
+        return role && s.dtype == dtype && s.rank == 0;
+    };
+    const auto ref_of = [](const eg_unit_ref* r) {
+        RefFacts f;
+        f.name = r->name != nullptr ? r->name : "";
+        std::memcpy(f.digest.data(), r->digest, EG_DIGEST_BYTES);
+        return f;
+    };
     for (int i = 0; i < body.n_dispatches; ++i) {
         eg_unit_dispatch absent{};
         absent.mix_slot = absent.class_slot = absent.stale_slot = absent.offsets_slot = -1;
@@ -195,31 +211,74 @@ void read_dispatch(const eg_unit_body& body, const eg_unit_s& unit) {
         const eg_unit_dispatch d = read_record(body.dispatches[i], absent, "unit '" + unit.name + "' dispatch");
         if (d.name == nullptr) refuse(EG_BAD_REQUEST, who + "has a dispatch group without a name");
         const std::string group = d.name;
+        const std::string at = who + "dispatch group '" + group + "' ";
         const bool plain = d.strategy == EG_DISPATCH_PREDICATED || d.strategy == EG_DISPATCH_SWITCH;
         if (!plain && d.strategy != EG_DISPATCH_SEGMENTED && d.strategy != EG_DISPATCH_AUTO)
             refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': dispatch group '" + group + "' has strategy " + std::to_string(d.strategy) +
                    ", which is not written");
         const bool seg = d.strategy == EG_DISPATCH_SEGMENTED;
-        if (d.k < 2) refuse(EG_BAD_REQUEST, who + "dispatch group '" + group + "' has k " + std::to_string(d.k) + ", a group has at least 2 branches");
+        if (d.k < 2) refuse(EG_BAD_REQUEST, at + "has k " + std::to_string(d.k) + ", a group has at least 2 branches");
         if (!seg && (d.branches != nullptr || d.sweep != nullptr))
-            refuse(EG_BAD_REQUEST, who + "dispatch group '" + group + "' names branches or a sweep and is not SEGMENTED");
-        if (seg && !((d.stale_slot == -1 && d.classify != nullptr && d.sweep == nullptr) ||
-                     (d.stale_slot != -1 && d.classify == nullptr && d.sweep != nullptr)))
-            refuse(EG_BAD_REQUEST, who + "dispatch group '" + group + "' is SEGMENTED with neither a static selector (no stale slot, a classify "
+            refuse(EG_BAD_REQUEST, at + "names branches or a sweep and is not SEGMENTED");
+        const bool cls_record = seg && d.branches == nullptr && d.classify == nullptr && d.sweep == nullptr && d.stale_slot == -1 &&
+                                d.offsets_slot == -1 && d.class_slot != -1;
+        if (seg && !cls_record && !((d.stale_slot == -1 && d.classify != nullptr && d.sweep == nullptr) ||
+                                    (d.stale_slot != -1 && d.classify == nullptr && d.sweep != nullptr)))
+            refuse(EG_BAD_REQUEST, at + "is SEGMENTED with neither a static selector (no stale slot, a classify "
                    "unit, no sweep) nor a dynamic one (a stale slot and a sweep, no classify unit)");
         if ((d.mix_slot != -1) != (d.strategy == EG_DISPATCH_AUTO))
-            refuse(EG_BAD_REQUEST, who + "dispatch group '" + group + "' has a mix slot unless it is AUTO, and AUTO has one");
+            refuse(EG_BAD_REQUEST, at + "has a mix slot unless it is AUTO, and AUTO has one");
         if (!seg && (d.class_slot != -1 || d.stale_slot != -1 || d.offsets_slot != -1 || d.classify != nullptr))
-            refuse(EG_BAD_REQUEST, who + "dispatch group '" + group + "' names SEGMENTED members and is not SEGMENTED");
-        if (d.mix_slot != -1 && (d.mix_slot < 0 || d.mix_slot >= static_cast<std::int32_t>(unit.slots.size()) ||
-                                 unit.slots[d.mix_slot].role != EG_ROLE_LOOKUP || unit.slots[d.mix_slot].dtype != EG_DTYPE_UINT32))
-            refuse(EG_BAD_REQUEST, who + "dispatch group '" + group + "' mix slot " + std::to_string(d.mix_slot) + " is not a uint32 LOOKUP slot");
-        if (d.strategy == EG_DISPATCH_AUTO)
-            refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': dispatch group '" + group + "' is AUTO: its mix counters and decision are not written");
-        if (seg)
-            refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': dispatch group '" + group +
-                   "' is SEGMENTED: its branch units, class sort and sweep are not in the meta");
+            refuse(EG_BAD_REQUEST, at + "names SEGMENTED members and is not SEGMENTED");
+        if (d.mix_slot != -1 && !slot_is(d.mix_slot, false, EG_DTYPE_UINT32))
+            refuse(EG_BAD_REQUEST, at + "mix slot " + std::to_string(d.mix_slot) + " is not a uint32 LOOKUP slot");
+        DispatchFacts f;
+        f.strategy = d.strategy, f.k = d.k, f.mix = d.mix_slot, f.name = group;
+        if (d.strategy == EG_DISPATCH_AUTO) {    // fused; the counters are eagle's unless the caller binds some
+            SlotFacts& m = unit.slots[static_cast<std::size_t>(d.mix_slot)];
+            m.optional_made = true;
+            m.min_elements = d.k;
+        }
+        if (cls_record) {
+            if (!slot_is(d.class_slot, true, EG_DTYPE_INT64))
+                refuse(EG_BAD_REQUEST, at + "classify record: class slot " + std::to_string(d.class_slot) + " is not a per-sample int64 MUTABLE or OUT slot");
+            unit.slots[static_cast<std::size_t>(d.class_slot)].made = true;
+            f.classify_record = true;
+            f.cls = d.class_slot;
+        } else if (seg) {
+            if (d.branches == nullptr) refuse(EG_BAD_REQUEST, at + "is SEGMENTED and names no branches (k refs)");
+            for (std::int32_t j = 0; j < d.k; ++j) {
+                if (d.branches[j] == nullptr || d.branches[j]->name == nullptr) refuse(EG_BAD_REQUEST, at + "names a branch " + std::to_string(j) + " without a unit");
+                f.branches.push_back(ref_of(d.branches[j]));
+            }
+            if (!slot_is(d.offsets_slot, false, EG_DTYPE_INT64))
+                refuse(EG_BAD_REQUEST, at + "offsets slot " + std::to_string(d.offsets_slot) + " is not an int64 LOOKUP slot");
+            const bool dynamic = d.stale_slot != -1;
+            if (dynamic) {
+                if (!slot_is(d.class_slot, true, EG_DTYPE_INT64))
+                    refuse(EG_BAD_REQUEST, at + "class slot " + std::to_string(d.class_slot) + " is not a per-sample int64 MUTABLE or OUT slot");
+                if (!slot_is(d.stale_slot, true, EG_DTYPE_BOOL))
+                    refuse(EG_BAD_REQUEST, at + "stale slot " + std::to_string(d.stale_slot) + " is not a per-sample bool MUTABLE or OUT slot");
+                if (d.class_slot == d.stale_slot || d.class_slot == d.offsets_slot)
+                    refuse(EG_BAD_REQUEST, at + "gives one slot two of its class, stale and offsets planes");
+                unit.slots[static_cast<std::size_t>(d.class_slot)].made = true;
+                unit.slots[static_cast<std::size_t>(d.stale_slot)].made = true;
+                f.has_sweep = true;
+                f.sweep = ref_of(d.sweep);
+            } else {
+                if (d.class_slot != -1) refuse(EG_BAD_REQUEST, at + "has a static selector and a class slot (the classify unit owns it)");
+                f.has_classify = true;
+                f.classify = ref_of(d.classify);
+            }
+            unit.slots[static_cast<std::size_t>(d.offsets_slot)].made = true;
+            f.branch_record = true;
+            f.cls = d.class_slot, f.stale = d.stale_slot, f.offsets = d.offsets_slot;
+        }
+        unit.dispatches.push_back(std::move(f));
     }
+    for (const DispatchFacts& f : unit.dispatches)
+        if ((f.branch_record || f.classify_record) && unit.dispatches.size() > 1)
+            refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': a SEGMENTED dispatch group beside a second dispatch group is not written");
 }
 
 /** @brief Copy and check the keyed table of the body: the keys a block sum or a KEY team plane runs over. A record names no plane of its own here:
@@ -723,6 +782,138 @@ void resolve_stages(eg_ctx& ctx, const eg_unit_load_desc& d, eg_unit_s& unit) {
     }
 }
 
+/** @brief A branch unit loaded with its group's units in deps: resolve the references (a branch may be the unit itself), check every unit's own
+ *  record against the group's (name and k), and join the units' slots to the plan's: the branch unit's slots, then each other unit's slot that no
+ *  earlier slot names, in unit order (branches, then the classify unit or the sweep). Eagle's own planes (offsets, class, stale, the sweep's map
+ *  and count) join no caller slot. A branch loaded with no deps stays a plain unit (it is one of another unit's deps); planning it is refused. */
+void resolve_segmented(eg_ctx& ctx, const eg_unit_load_desc& d, eg_unit_s& unit) {
+    const DispatchFacts* group = nullptr;
+    for (const DispatchFacts& f : unit.dispatches)
+        if (f.branch_record) group = &f;
+    if (group == nullptr || d.n_deps == 0) return;
+    const std::string who = "meta that contradicts itself: unit '" + unit.name + "' dispatch group '" + group->name + "' ";
+    SegFacts& S = unit.seg;
+    try {
+        const auto find = [&](const RefFacts& r, const char* what) -> eg_unit_s* {
+            if (r.name == unit.name && r.digest == unit.digest) return &unit;
+            for (std::int32_t k = 0; k < d.n_deps; ++k) {
+                check_handle(ctx.units, d.deps[k], "eg_unit_load_desc.deps[i]");
+                if (d.deps[k]->name == r.name && d.deps[k]->digest == r.digest) return d.deps[k];
+            }
+            refuse(EG_BAD_REQUEST, "unit '" + unit.name + "': the " + what + " '" + r.name + "' of dispatch group '" + group->name + "' is not in deps");
+        };
+        const auto member = [&](eg_unit_s* m, const char* what) {
+            if (m != &unit) {
+                ++m->refs;
+                S.held.push_back(m);
+            }
+            if (!m->stages.empty() || !m->companions.empty() || !m->cells.empty() || m->derived.present || m->index_count_slot >= 0 || m->finish.steps_slot >= 0 ||
+                !m->team_planes.empty())
+                refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': the " + what + " '" + m->name + "' of dispatch group '" + group->name +
+                       "' is split, has cells, companions, a derived role, an index set or a steps word: not written in a SEGMENTED group");
+        };
+        const auto record_of = [&](const eg_unit_s& m, bool branch, bool classify, std::int32_t strategy) -> const DispatchFacts* {
+            for (const DispatchFacts& f : m.dispatches)
+                if (f.name == group->name && f.k == group->k && f.strategy == strategy && f.branch_record == branch && f.classify_record == classify) return &f;
+            return nullptr;
+        };
+        S.name = group->name;
+        S.k = group->k;
+        S.dynamic = group->has_sweep;
+        S.offsets_slot = group->offsets;
+        S.class_slot = group->cls;
+        S.stale_slot = group->stale;
+        S.access = unit.access;
+        std::vector<const DispatchFacts*> records;
+        for (std::int32_t j = 0; j < group->k; ++j) {
+            eg_unit_s* b = find(group->branches[static_cast<std::size_t>(j)], "branch");
+            const DispatchFacts* r = record_of(*b, true, false, EG_DISPATCH_SEGMENTED);
+            if (r == nullptr || r->has_sweep != S.dynamic)
+                refuse(EG_BAD_REQUEST, who + "names branch '" + b->name + "', whose own record is not that group's (its name, k or selector kind differ)");
+            member(b, "branch");
+            S.branches.push_back(b);
+            records.push_back(r);
+            S.access = std::max(S.access, b->access);
+        }
+        eg_unit_s* other = nullptr;
+        const DispatchFacts* other_rec = nullptr;
+        if (S.dynamic) {
+            other = S.sweep = find(group->sweep, "sweep unit");
+            other_rec = record_of(*other, false, false, EG_DISPATCH_SWITCH);
+            if (other_rec == nullptr)
+                refuse(EG_BAD_REQUEST, who + "names sweep unit '" + other->name + "', which carries no SWITCH record of that name and k");
+            if (other->active_map_slot < 0)
+                refuse(EG_BAD_REQUEST, who + "names sweep unit '" + other->name + "', which has no active set (it runs over the stale samples)");
+        } else {
+            other = S.classify = find(group->classify, "classify unit");
+            other_rec = record_of(*other, false, true, EG_DISPATCH_SEGMENTED);
+            if (other_rec == nullptr)
+                refuse(EG_BAD_REQUEST, who + "names classify unit '" + other->name + "', which carries no classify record of that name and k");
+        }
+        member(other, S.dynamic ? "sweep unit" : "classify unit");
+        S.access = std::max(S.access, other->access);
+        std::int32_t mask = -1;
+        for (std::size_t i = 0; i < unit.slots.size() && mask < 0; ++i)
+            if (unit.slots[i].role == EG_ROLE_TERMINATED) mask = static_cast<std::int32_t>(i);
+        S.mask_slot = mask;
+        const auto compatible = [&](const SlotFacts& a, const SlotFacts& b, const eg_unit_s& m) {
+            if (a.role != b.role || a.dtype != b.dtype || a.rank != b.rank || a.shape != b.shape)
+                refuse(EG_BAD_REQUEST, who + "slot '" + b.name + "' of '" + m.name + "' is not the slot of that name in '" + unit.name + "' (role, dtype or shape differ)");
+        };
+        std::vector<eg_unit_s*> members = S.branches;
+        members.push_back(other);
+        for (std::size_t mi = 0; mi < members.size(); ++mi) {
+            const eg_unit_s& m = *members[mi];
+            const DispatchFacts* rec = mi < records.size() ? records[mi] : other_rec;
+            std::vector<std::int32_t> join(m.slots.size(), -1);
+            for (std::size_t j = 0; j < m.slots.size(); ++j) {
+                const std::int32_t js = static_cast<std::int32_t>(j);
+                if (&m == &unit) {
+                    join[j] = js;
+                    continue;
+                }
+                if (mi >= records.size() && S.dynamic && js == m.active_map_slot) { join[j] = SegFacts::kMap; continue; }
+                if (mi >= records.size() && S.dynamic && js == m.active_count_slot) { join[j] = SegFacts::kCount; continue; }
+                if (mi < records.size() && js == rec->offsets) { join[j] = S.offsets_slot; continue; }
+                if (mi < records.size() && S.dynamic && js == rec->cls) { join[j] = S.class_slot; continue; }
+                if (mi < records.size() && S.dynamic && js == rec->stale) { join[j] = S.stale_slot; continue; }
+                if (mi >= records.size() && !S.dynamic && js == rec->cls) {    // the classify unit's class plane: one for the group, eagle's
+                    if (S.class_slot < 0) {
+                        SlotFacts cs = m.slots[j];
+                        cs.made = true;
+                        unit.slots.push_back(std::move(cs));
+                        S.class_slot = static_cast<std::int32_t>(unit.slots.size()) - 1;
+                    }
+                    join[j] = S.class_slot;
+                    continue;
+                }
+                const SlotFacts& sl = m.slots[j];
+                for (std::size_t u = 0; u < unit.slots.size() && join[j] < 0; ++u)
+                    if (unit.slots[u].name == sl.name && !(sl.role == EG_ROLE_NSAMPLES && unit.slots[u].role != EG_ROLE_NSAMPLES)) {
+                        compatible(unit.slots[u], sl, m);
+                        join[j] = static_cast<std::int32_t>(u);
+                    }
+                if (join[j] < 0) {    // a slot only this unit has: the group's too, after the branch unit's own
+                    unit.slots.push_back(sl);
+                    unit.slots.back().made = false;
+                    join[j] = static_cast<std::int32_t>(unit.slots.size()) - 1;
+                }
+            }
+            S.join.push_back(std::move(join));
+        }
+        for (std::size_t mi = 0; mi < members.size(); ++mi)    // the unit itself: its slots now include the group's extra ones
+            if (members[mi] == &unit) {
+                S.join[mi].resize(unit.slots.size());
+                std::iota(S.join[mi].begin(), S.join[mi].end(), 0);
+            }
+        S.present = true;
+    } catch (...) {
+        for (eg_unit_s* h : S.held) --h->refs;
+        S = SegFacts{};
+        throw;
+    }
+}
+
 }  // namespace
 
 /** @brief eg_unit_load: open, find, check, resolve; the library stays open while referenced. */
@@ -756,6 +947,7 @@ void unit_load(eg_ctx& ctx, const eg_unit_load_desc* desc, eg_unit** out) {
             for (const SlotFacts& s : unit->slots)
                 if (s.role == EG_ROLE_WIDE_OUT && !s.axes.empty() && s.keys_of < 0)
                     refuse(EG_NOT_WRITTEN, "unit '" + unit->name + "': named plane axes on slot '" + s.name + "', which no KEYS stage writes, are not written");
+            resolve_segmented(ctx, read_input(desc, "eg_unit_load_desc"), *unit);
             ctx.units.insert(unit);
         } catch (...) {
             device_unit_free(*unit);
@@ -775,6 +967,7 @@ void unit_release(eg_ctx& ctx, eg_unit_s* unit) {
     ctx.units.erase(unit);
     for (StageFacts& st : unit->stages)
         if (st.held) unit_release(ctx, st.unit);
+    for (eg_unit_s* h : unit->seg.held) unit_release(ctx, h);
     device_unit_free(*unit);
     ::dlclose(unit->library);
     delete unit;

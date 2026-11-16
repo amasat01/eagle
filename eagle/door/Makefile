@@ -91,7 +91,7 @@ check-inputs:
 	@test -n "$(AETHER_INCLUDE)" || { echo "set AETHER_INCLUDE"; exit 1; }
 	@test -f "$(WING_FACTS)" || { echo "set WING_FACTS to the wing's raptor_facts.h"; exit 1; }
 
-$(OUT)/%.o: %.cpp Context.h eg_door.h eg_unit_meta.h host/Team.h host/Ops.h | check-inputs
+$(OUT)/%.o: %.cpp Context.h eg_door.h eg_unit_meta.h host/Team.h host/Ops.h host/Segment.h | check-inputs
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS_DOOR) -c $< -o $@
 
@@ -392,11 +392,9 @@ $(foreach r,$(SPLIT_ROWS),$(eval $(call SPLIT_RULES,$(r))))
 
 # pair-refuse-<case>: unit g's kernel with a dispatch group the door does not take, or one that contradicts itself
 # (META_g_<case>, KERNEL_g, DIGEST_g): the load is refused with the status and the reason text below.
-REFUSE_CASES := auto seg badmix badstrategy nullname badk badbranch segmix
-REFUSE_STATUS_auto = NOT_WRITTEN
-REFUSE_TEXT_auto = is AUTO
-REFUSE_STATUS_seg = NOT_WRITTEN
-REFUSE_TEXT_seg = is SEGMENTED: its branch units, class sort and sweep are not in the meta
+REFUSE_CASES := seg badmix badstrategy nullname badk badbranch segmix
+REFUSE_STATUS_seg = BAD_REQUEST
+REFUSE_TEXT_seg = names no branches
 REFUSE_STATUS_badmix = BAD_REQUEST
 REFUSE_TEXT_badmix = has a mix slot unless it is AUTO
 REFUSE_STATUS_badstrategy = NOT_WRITTEN
@@ -496,7 +494,7 @@ pair-device-$(1): symbols $(OUT)/libpair_dev_$(1).so $$(PAIR_DEVICE_TEST) $$(RUN
 endef
 $(foreach u,$(PAIR_DEVICE_UNITS),$(eval $(call PAIR_DEVICE_RULES,$(u))))
 
-# pair-device-refuse-<case> (auto, seg): the same refusals through a device context, unit g's cuda text (KERNEL_CUDA_g, META_CUDA_g_<case>).
+# pair-device-refuse-<case> (seg): the same refusal through a device context, unit g's cuda text (KERNEL_CUDA_g, META_CUDA_g_<case>).
 define REFUSE_DEVICE_RULES
 $(OUT)/libpair_dev_refuse_$(1).so: $$(KERNEL_CUDA_g) $$(META_CUDA_g_$(1)) eg_door.h eg_unit_meta.h | check-inputs check-cuda
 	@mkdir -p $(OUT)
@@ -508,7 +506,7 @@ $(OUT)/libpair_dev_refuse_$(1).so: $$(KERNEL_CUDA_g) $$(META_CUDA_g_$(1)) eg_doo
 pair-device-refuse-$(1): symbols $(OUT)/libpair_dev_refuse_$(1).so $$(PAIR_DEVICE_TEST)
 	$$(PAIR_DEVICE_TEST) $(OUT)/libpair_dev_refuse_$(1).so . g $$(DIGEST_g) $$(REFUSE_STATUS_$(1)) "$$(REFUSE_TEXT_$(1))"
 endef
-$(foreach c,auto seg,$(eval $(call REFUSE_DEVICE_RULES,$(c))))
+$(foreach c,seg,$(eval $(call REFUSE_DEVICE_RULES,$(c))))
 
 # pair-device-split-<row>: a split kernel on the device. KERNELS_CUDA_<row> = <unit>=<cuda text> ..., one cubin per stage unit
 # (the old path's device recipe), each embedded as <unit>__image, in one library with META_CUDA_<row>; run like pair-split-<row>
