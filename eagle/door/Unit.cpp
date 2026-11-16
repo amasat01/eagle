@@ -639,8 +639,8 @@ void read_unit(const eg_unit_meta& m, void* library, eg_unit_s& unit) {
     }
     if (unit.stages.empty() && !unit.team_planes.empty())
         refuse(EG_BAD_REQUEST, "meta that contradicts itself: unit '" + unit.name + "' has team planes and no stages");
-    if (!unit.stages.empty() && (unit.finish.present || !unit.companions.empty() || !unit.cells.empty() || unit.derived.present))
-        refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': a split unit with a finish, companions, cell rows of its own or a derived role is not written");
+    if (!unit.stages.empty() && (unit.finish.present || !unit.cells.empty() || unit.derived.present))
+        refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': a split unit with a finish, cell rows of its own or a derived role is not written");
     read_derived(m, unit);
     if (unit.ctx->dev.ordinal >= 0 && m.device_image != nullptr) device_unit_load(unit, m, library);
 }
@@ -685,8 +685,8 @@ void resolve_stages(eg_ctx& ctx, const eg_unit_load_desc& d, eg_unit_s& unit) {
                 }
                 eg_unit_s& su = *st.unit;
                 if (su.host_entry == nullptr && su.function == 0) refuse(EG_BAD_REQUEST, at + " has no entry to run (no host entry, no device function)");
-                if (!su.stages.empty() || su.finish.present || !su.companions.empty() || su.derived.present)
-                    refuse(EG_NOT_WRITTEN, at + ": a stage that is itself split, finishing or a companion owner is not written");
+                if (!su.stages.empty() || su.finish.present || su.derived.present)
+                    refuse(EG_NOT_WRITTEN, at + ": a stage that is itself split, finishing or a derived unit is not written");
                 ++su.refs;
                 st.held = true;
             }
@@ -728,7 +728,17 @@ void resolve_stages(eg_ctx& ctx, const eg_unit_load_desc& d, eg_unit_s& unit) {
             TeamPlaneFacts t;
             t.dtype = EG_DTYPE_REAL, t.unit = EG_UNIT_KEY, t.layout = EG_LAYOUT_FLAT, t.wide = EG_WIDE_NONE;
             t.per_lane = kf.width, t.fill = 0, t.fill_promised = true, t.name = kf.name, t.keyed = static_cast<std::int32_t>(k);
-            unit.team_planes.push_back(std::move(t));
+            unit.team_planes.push_back(t);
+            for (const StageFacts& st : unit.stages)    // the compensation companion of that plane (a stage's companion whose target it is): eagle's too, of the same shape, zeroed with it
+                for (const CompanionFacts& c : st.unit->companions) {
+                    const std::string& cn = st.unit->slots[static_cast<std::size_t>(c.slot)].name;
+                    bool named = false;
+                    for (const SlotFacts& sl : unit.slots) named = named || sl.name == cn;
+                    for (const TeamPlaneFacts& tp : unit.team_planes) named = named || tp.name == cn;
+                    if (st.unit->slots[static_cast<std::size_t>(c.target)].name != kf.name || named) continue;
+                    t.name = cn;
+                    unit.team_planes.push_back(t);
+                }
         }
         for (std::size_t i = 0; i < unit.stages.size(); ++i) {
             StageFacts& st = unit.stages[i];
@@ -777,6 +787,37 @@ void resolve_stages(eg_ctx& ctx, const eg_unit_load_desc& d, eg_unit_s& unit) {
                 bool found = false;
                 for (const std::string& s : unit.source_cells) found = found || s == in;
                 if (!found) refuse(EG_BAD_REQUEST, "meta that contradicts itself: " + at + " reads the cell '" + in + "', which the unit does not declare");
+            }
+        }
+        bool self = false;
+        for (const StageFacts& st : unit.stages) self = self || st.self;
+        if (!unit.companions.empty() && !self)
+            refuse(EG_BAD_REQUEST, who + "lists companions, and none of its stages is the unit itself that would fold them");
+        for (std::size_t i = 0; i < unit.stages.size(); ++i) {    // the companions of a stage's unit: each is folded into its target after the stage runs
+            StageFacts& st = unit.stages[i];
+            const eg_unit_s& su = *st.unit;
+            for (std::size_t ci = 0; ci < su.companions.size(); ++ci) {
+                const CompanionFacts& c = su.companions[ci];
+                const std::string of = "the companion '" + su.slots[static_cast<std::size_t>(c.slot)].name + "' of '" + su.slots[static_cast<std::size_t>(c.target)].name + "'";
+                const std::string at = "unit '" + unit.name + "' stage " + std::to_string(i) + " ('" + st.ref_name + "'): " + of;
+                if (st.team) refuse(EG_NOT_WRITTEN, at + " is on a team stage, which is not written");
+                const std::int32_t cs = st.source_of[static_cast<std::size_t>(c.slot)], ts = st.source_of[static_cast<std::size_t>(c.target)];
+                const std::int32_t cp = st.plane_of[static_cast<std::size_t>(c.slot)], tp = st.plane_of[static_cast<std::size_t>(c.target)];
+                if (cs >= 0 && ts >= 0) {    // the caller's plane and the slot eagle makes beside it at eg_bind: the unit's own companion, as a plain unit's
+                    unit.slots[static_cast<std::size_t>(cs)].made = true;
+                    if (!st.self) unit.companions.push_back({ cs, ts, c.fold, c.device_fold_name, c.device_fold });
+                    st.folds.push_back({ ci, ts, -1 });
+                } else if (cp >= 0 && tp >= 0) {    // a keyed plane eagle makes and the plane beside it, both zeroed at the start of every launch
+                    const TeamPlaneFacts& cpf = unit.team_planes[static_cast<std::size_t>(cp)];
+                    const TeamPlaneFacts& tpf = unit.team_planes[static_cast<std::size_t>(tp)];
+                    if (tpf.unit != EG_UNIT_KEY || cpf.unit != EG_UNIT_KEY || tpf.keyed != cpf.keyed || tpf.per_lane != cpf.per_lane)
+                        refuse(EG_BAD_REQUEST, who + of + " and its target are team planes that do not hold the same keys");
+                    if (!tpf.fill_promised || tpf.fill != 0 || !cpf.fill_promised || cpf.fill != 0 || tpf.dtype != EG_DTYPE_REAL || cpf.dtype != EG_DTYPE_REAL)
+                        refuse(EG_NOT_WRITTEN, at + " is beside a team plane that is not a float plane zeroed at every launch");
+                    st.folds.push_back({ ci, -1, tp });
+                } else {
+                    refuse(EG_NOT_WRITTEN, at + ": its target and it are not both slots of the unit, nor both planes eagle makes for a keyed record");
+                }
             }
         }
         for (const StageFacts& st : unit.stages) {    // a block sum's output: the WIDE_OUT slot a KEYS stage writes holds that stage's keys

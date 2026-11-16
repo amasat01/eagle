@@ -305,11 +305,17 @@ void plan_new(eg_ctx& ctx, const eg_plan_desc* desc, eg_plan** out) {
         refuse(EG_NOT_WRITTEN, "unit '" + d.unit->name + "': a BANDED unit on a host structure");
     if (!device && d.unit->host_entry == nullptr && d.unit->stages.empty())
         refuse(EG_NOT_WRITTEN, "unit '" + d.unit->name + "' has no host entry");
-    if (!device)
+    if (!device) {
         for (const CompanionFacts& c : d.unit->companions)
             if (c.fold == nullptr)
                 refuse(EG_NOT_WRITTEN, "unit '" + d.unit->name + "': the companion '" + d.unit->slots[c.slot].name +
                        "' has no host fold entry");
+        for (const StageFacts& st : d.unit->stages)
+            for (const CompanionFacts& c : st.unit->companions)
+                if (c.fold == nullptr)
+                    refuse(EG_NOT_WRITTEN, "unit '" + d.unit->name + "' stage '" + st.ref_name + "': the companion '" + st.unit->slots[c.slot].name +
+                           "' has no host fold entry");
+    }
     for (const DispatchFacts& f : d.unit->dispatches)    // a branch unit is planned with its group's units in deps
         if (f.branch_record && !d.unit->seg.present)
             refuse(EG_BAD_REQUEST, "unit '" + d.unit->name + "' is one branch of the SEGMENTED dispatch group '" + f.name +

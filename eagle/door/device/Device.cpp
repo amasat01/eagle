@@ -442,6 +442,10 @@ void device_plan_check(const eg_ctx& ctx, const eg_unit_s& unit) {
     for (const CompanionFacts& c : unit.companions)
         if (c.device_fold == 0)
             refuse(EG_NOT_WRITTEN, who + "the companion '" + unit.slots[c.slot].name + "' has no device fold function");
+    for (const StageFacts& st : unit.stages)
+        for (const CompanionFacts& c : st.unit->companions)
+            if (c.device_fold == 0)
+                refuse(EG_NOT_WRITTEN, who + "the companion '" + st.unit->slots[c.slot].name + "' of the stage '" + st.ref_name + "' has no device fold function");
 }
 
 /** @brief A split unit on the device: the stages in order on the context's stream, each with its argument list (the source slot or team
@@ -525,6 +529,11 @@ void launch_split(const eg_plan_s& plan) {
         }
         for (const exec::Partition& p : plan.parts)
             exec::DeviceKernel::run(fn, params, p, s, su.block > 0 ? static_cast<unsigned>(su.block) : resolved_block(d, su, p.count));
+        for (const StageFacts::Fold& f : st.folds) {    // the stage's companions folded into their targets, with the stage's own arguments
+            const DLTensor& target = (f.source >= 0 ? plan.bindings[static_cast<std::size_t>(f.source)].plane : plan.team[static_cast<std::size_t>(f.plane)])->tensor->dl_tensor;
+            const std::int64_t size = elements(target);
+            exec::DeviceKernel::run(reinterpret_cast<CUfunction>(su.companions[f.companion].device_fold), params, exec::Partition{ 0, size, size }, s);
+        }
         if (plan.n_samples == 0) continue;
         for (std::size_t c = 0; c < u.split_cells.size(); ++c) {    // this stage's cell rows folded into their cells before the next stage reads them
             const SplitCell& sc = u.split_cells[c];

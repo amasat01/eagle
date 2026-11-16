@@ -17,6 +17,8 @@
  *   uni <name> <value>                            (a float64 uniform)
  *   cell <name>                                   (a cell the caller receives: one float64, the fold of the stages' rows; file <row>.<name>.out)
  *   skip <name>                                   (a slot eagle makes: the stage's own scratch; takes a slot index)
+ *   rebind                                        (the caller binds its planes again before every later launch: the door's way to restart the residual
+ *                                                  of a compensation plane eagle made beside a target the caller zeroed)
  *   failrun <text>                                (host: every launch is refused FAULT with a reason holding <text>; no outputs are compared)
  * Every plane is (extents..., lanes).
  *
@@ -58,6 +60,7 @@ struct pt {
     int64_t shape[MAXD + 1];
 };
 
+static int rebind;    /* the spec's "rebind": the caller binds its planes again before every later launch (the way to restart the residual of an eagle-made compensation plane when it zeroes the target) */
 static char run_fail[512];    /* the spec's "failrun <text>": the launch must be refused FAULT with a reason holding that text */
 
 static int read_spec(const char* dir, const char* row, int64_t* n, struct pl* p, int* np) {
@@ -71,6 +74,10 @@ static int read_spec(const char* dir, const char* row, int64_t* n, struct pl* p,
             long long v;
             if (fscanf(f, "%lld", &v) != 1) return 0;
             *n = v;
+            continue;
+        }
+        if (strcmp(kind, "rebind") == 0) {
+            rebind = 1;
             continue;
         }
         if (strcmp(kind, "failrun") == 0) {
@@ -328,6 +335,7 @@ int main(int argc, char** argv) {
                         memset(pls[i].buf, 0, (size_t)pls[i].count * esz(&pls[i]));
 #endif
                     }
+            if (rep > 0 && rebind && s == EG_OK) s = eg_bind(ctx, plan, &b);
             if (s == EG_OK) s = eg_launch(ctx, plan, NULL);
 #ifndef EG_PAIR_DEVICE
             if (run_fail[0] != 0) {

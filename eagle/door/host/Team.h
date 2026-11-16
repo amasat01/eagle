@@ -138,6 +138,11 @@ inline std::uint64_t run_split(const eg_plan_s& plan, int threads) {
                 tiles += exec::HostTeam::run_team(st.unit->host_entry, params.data(), part, threads);
             }
         }
+        for (const StageFacts::Fold& f : st.folds) {    // the stage's companions folded into their targets, with the stage's own arguments
+            const DLTensor& target = (f.source >= 0 ? plan.bindings[static_cast<std::size_t>(f.source)].plane : plan.team[static_cast<std::size_t>(f.plane)])->tensor->dl_tensor;
+            const std::int64_t size = elements(target);
+            exec::HostTeam::run_serial(st.unit->companions[f.companion].fold, params.data(), exec::Partition{ 0, size, size });
+        }
         if (plan.n_samples == 0) continue;
         for (std::size_t c = 0; c < plan.unit->split_cells.size(); ++c) {    // this stage's cell rows folded into their cells before the next stage reads them
             const SplitCell& sc = plan.unit->split_cells[c];
