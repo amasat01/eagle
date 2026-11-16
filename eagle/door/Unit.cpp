@@ -155,7 +155,7 @@ void read_made(const eg_unit_body& body, void* library, bool device_only, eg_uni
         unit.companions.push_back({ c.slot, c.target_slot, reinterpret_cast<exec::HostEntryV2>(sym),
                                     c.device_fold_function != nullptr ? c.device_fold_function : "", 0 });
     }
-    if (body.n_cells > 0) {
+    if (body.n_cells > 0 && (unit.stages.empty() || body.cell_row != 0)) {    // a split unit's cells have no rows of its own: its stages state theirs
         if (body.cell_row < 1) refuse(EG_BAD_REQUEST, who + "cell_row " + std::to_string(body.cell_row) + " with cells");
         unit.cell_row = body.cell_row;
     }
@@ -165,16 +165,28 @@ void read_made(const eg_unit_body& body, void* library, bool device_only, eg_uni
         if (cell.op != EG_REDUCE_SUM && cell.op != EG_REDUCE_MAX && cell.op != EG_REDUCE_MIN)
             refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': cell '" + name + "' folds with op " + std::to_string(cell.op) +
                    ", which is not written (SUM, MAX and MIN are)");
+        if (cell.slots == nullptr && !unit.stages.empty() && cell.columns >= 1) {    // a split unit's cell: its stages own the rows
+            unit.source_cells.push_back(name);
+            continue;
+        }
         if (cell.columns < 1 || cell.slots == nullptr)
             refuse(EG_BAD_REQUEST, who + "cell '" + name + "' has " + std::to_string(cell.columns) + " columns and no row slots");
+        if (cell.op == EG_REDUCE_SUM && cell.comp_slots == nullptr)
+            refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': the cell '" + name + "' sums, and the cell's compensation slot is not stated in the unit meta (comp_slots is NULL)");
+        if (cell.op != EG_REDUCE_SUM && cell.comp_slots != nullptr)
+            refuse(EG_BAD_REQUEST, who + "cell '" + name + "' folds with MAX or MIN and names compensation slots");
         for (int c = 0; c < cell.columns; ++c) {
             SlotFacts& row = accum(cell.slots[c], "cell");
             if (row.made || row.cell) refuse(EG_BAD_REQUEST, who + "cell slot " + std::to_string(cell.slots[c]) + " is listed twice");
-            if (cell.op == EG_REDUCE_SUM)
-                refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': the cell '" + name + "' sums, and the cell's compensation slot is not "
-                       "stated in the unit meta (eg_unit_cell has no member for it)");
+            std::int32_t comp = -1;
+            if (cell.comp_slots != nullptr) {
+                comp = cell.comp_slots[c];
+                SlotFacts& cs = accum(comp, "cell compensation");
+                if (cs.made || cs.cell || comp == cell.slots[c]) refuse(EG_BAD_REQUEST, who + "cell compensation slot " + std::to_string(comp) + " is listed twice");
+                cs.made = true;
+            }
             row.cell = true;
-            unit.cells.push_back({ cell.slots[c], cell.op });
+            unit.cells.push_back({ cell.slots[c], cell.op, comp, name });
         }
     }
 }
@@ -250,9 +262,11 @@ void read_stages(const eg_unit_meta& m, eg_unit_s& unit) {
         eg_unit_stage absent{};
         const eg_unit_stage st = read_record(m.stages[i], absent, at);
         if (st.unit == nullptr || st.unit->name == nullptr) refuse(EG_BAD_REQUEST, "meta that contradicts itself: " + at + " names no unit");
-        if (st.n_cells_in != 0 || st.n_cells_out != 0)
-            refuse(EG_NOT_WRITTEN, at + ": a stage with cells is not written");
+        if (st.n_cells_in < 0 || st.n_cells_out < 0 || (st.n_cells_in > 0 && st.cells_in == nullptr) || (st.n_cells_out > 0 && st.cells_out == nullptr))
+            refuse(EG_BAD_REQUEST, "meta that contradicts itself: " + at + " counts cells it does not carry");
         StageFacts f;
+        for (int k = 0; k < st.n_cells_in; ++k) f.cells_in.push_back(st.cells_in[k] ? st.cells_in[k] : "?");
+        for (int k = 0; k < st.n_cells_out; ++k) f.cells_out.push_back(st.cells_out[k] ? st.cells_out[k] : "?");
         f.ref_name = st.unit->name;
         std::memcpy(f.ref_digest.data(), st.unit->digest, EG_DIGEST_BYTES);
         if (st.team != nullptr) {
@@ -524,7 +538,7 @@ void read_unit(const eg_unit_meta& m, void* library, eg_unit_s& unit) {
     if (unit.stages.empty() && !unit.team_planes.empty())
         refuse(EG_BAD_REQUEST, "meta that contradicts itself: unit '" + unit.name + "' has team planes and no stages");
     if (!unit.stages.empty() && (unit.finish.present || !unit.companions.empty() || !unit.cells.empty() || unit.derived.present))
-        refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': a split unit with a finish, companions, cells or a derived role is not written");
+        refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': a split unit with a finish, companions, cell rows of its own or a derived role is not written");
     read_derived(m, unit);
     if (unit.ctx->dev.ordinal >= 0 && m.device_image != nullptr) device_unit_load(unit, m, library);
 }
@@ -545,8 +559,8 @@ eg_unit_ref read_desc(const eg_unit_load_desc& d) {
     return ref;
 }
 
-/** @brief Resolve the stages of the split unit @p unit against @p deps (or the unit itself) and join the slot names ONCE:
- *  per stage slot the source slot or the team plane of that name; the sample count has neither. */
+/** @brief Resolve the stages of the split unit @p unit against @p deps (or the unit itself) and join the slot names ONCE: per stage slot the
+ *  source slot, the team plane, the cell rows (or their compensation) it is, or the cell it reads; the sample count has none. */
 void resolve_stages(eg_ctx& ctx, const eg_unit_load_desc& d, eg_unit_s& unit) {
     const std::string who = "meta that contradicts itself: unit '" + unit.name + "' ";
     try {
@@ -569,16 +583,52 @@ void resolve_stages(eg_ctx& ctx, const eg_unit_load_desc& d, eg_unit_s& unit) {
                 }
                 eg_unit_s& su = *st.unit;
                 if (su.host_entry == nullptr && su.function == 0) refuse(EG_BAD_REQUEST, at + " has no entry to run (no host entry, no device function)");
-                if (!su.stages.empty() || su.finish.present || !su.companions.empty() || !su.cells.empty() || su.derived.present)
-                    refuse(EG_NOT_WRITTEN, at + ": a stage that is itself split, finishing, a companion owner or a cell owner is not written");
+                if (!su.stages.empty() || su.finish.present || !su.companions.empty() || su.derived.present)
+                    refuse(EG_NOT_WRITTEN, at + ": a stage that is itself split, finishing or a companion owner is not written");
                 ++su.refs;
                 st.held = true;
             }
             const eg_unit_s& su = *st.unit;
-            st.source_of.assign(su.slots.size(), -1);
-            st.plane_of.assign(su.slots.size(), -1);
-            for (std::size_t j = 0; j < su.slots.size(); ++j) {
+            st.cell_row = su.cell_row;
+            for (const CellFacts& c : su.cells) {    // the cell columns this stage writes: where each folds is joined below
+                SplitCell sc;
+                sc.stage = static_cast<std::int32_t>(i);
+                sc.row_slot = c.slot;
+                sc.comp_slot = c.comp;
+                sc.op = c.op;
+                sc.name = su.slots[static_cast<std::size_t>(c.slot)].name;
+                for (std::size_t k = 0; k < unit.slots.size(); ++k)
+                    if (unit.slots[k].name == sc.name) sc.source = static_cast<std::int32_t>(k);
+                unit.split_cells.push_back(sc);
+            }
+        }
+        for (std::size_t i = 0; i < unit.stages.size(); ++i) {
+            StageFacts& st = unit.stages[i];
+            const std::string at = "unit '" + unit.name + "' stage " + std::to_string(i) + " ('" + st.ref_name + "')";
+            const eg_unit_s& su = *st.unit;
+            const std::size_t n_slots = su.slots.size();
+            st.source_of.assign(n_slots, -1);
+            st.plane_of.assign(n_slots, -1);
+            st.row_of.assign(n_slots, -1);
+            st.comp_of.assign(n_slots, -1);
+            st.read_of.assign(n_slots, -1);
+            for (std::size_t c = 0; c < unit.split_cells.size(); ++c) {
+                const SplitCell& sc = unit.split_cells[c];
+                if (sc.stage != static_cast<std::int32_t>(i)) continue;
+                st.row_of[static_cast<std::size_t>(sc.row_slot)] = static_cast<std::int32_t>(c);
+                if (sc.comp_slot >= 0) st.comp_of[static_cast<std::size_t>(sc.comp_slot)] = static_cast<std::int32_t>(c);
+            }
+            for (std::size_t j = 0; j < n_slots; ++j) {
                 const std::string& nm = su.slots[j].name;
+                if (st.row_of[j] >= 0) continue;
+                if (st.comp_of[j] >= 0) {    // a compensation row: eagle's; a source slot of that name is hidden from the caller
+                    for (std::size_t k = 0; k < unit.slots.size(); ++k)
+                        if (unit.slots[k].name == nm) unit.slots[k].made = true;
+                    continue;
+                }
+                for (std::size_t c = 0; c < unit.split_cells.size(); ++c)    // a slot that reads a cell an earlier stage folds
+                    if (unit.split_cells[c].name == nm && unit.split_cells[c].stage < static_cast<std::int32_t>(i)) st.read_of[j] = static_cast<std::int32_t>(c);
+                if (st.read_of[j] >= 0) continue;
                 for (std::size_t k = 0; k < unit.slots.size(); ++k)
                     if (unit.slots[k].name == nm) st.source_of[j] = static_cast<std::int32_t>(k);
                 for (std::size_t k = 0; k < unit.team_planes.size(); ++k)
@@ -588,14 +638,25 @@ void resolve_stages(eg_ctx& ctx, const eg_unit_load_desc& d, eg_unit_s& unit) {
                     st.source_of[j] = -1;
                 }
                 if (st.source_of[j] < 0 && st.plane_of[j] < 0 && su.slots[j].role != EG_ROLE_NSAMPLES)
-                    refuse(EG_BAD_REQUEST, "meta that contradicts itself: " + at + " slot '" + nm + "' joins no source slot and no team plane");
+                    refuse(EG_BAD_REQUEST, "meta that contradicts itself: " + at + " slot '" + nm + "' joins no source slot, no team plane and no cell");
+            }
+            for (const std::string& out : st.cells_out) {    // the cells the stage says it folds are cells its unit has
+                bool found = false;
+                for (const CellFacts& c : su.cells) found = found || c.name == out;
+                if (!found) refuse(EG_BAD_REQUEST, "meta that contradicts itself: " + at + " folds the cell '" + out + "', which its unit does not have");
+            }
+            for (const std::string& in : st.cells_in) {    // the cells it reads are source cells an earlier stage folds
+                bool found = false;
+                for (const std::string& s : unit.source_cells) found = found || s == in;
+                if (!found) refuse(EG_BAD_REQUEST, "meta that contradicts itself: " + at + " reads the cell '" + in + "', which the unit does not declare");
             }
         }
         for (std::size_t k = 0; k < unit.slots.size(); ++k) {
-            bool joined = false;
+            bool joined = unit.slots[k].made;
             for (const StageFacts& st : unit.stages)
                 for (std::int32_t s : st.source_of) joined = joined || s == static_cast<std::int32_t>(k);
-            if (!joined && !unit.slots[k].made) refuse(EG_BAD_REQUEST, who + "slot '" + unit.slots[k].name + "' joins no stage slot");
+            for (const SplitCell& c : unit.split_cells) joined = joined || c.source == static_cast<std::int32_t>(k);
+            if (!joined) refuse(EG_BAD_REQUEST, who + "slot '" + unit.slots[k].name + "' joins no stage slot");
         }
         for (std::size_t k = 0; k < unit.team_planes.size(); ++k) {
             bool joined = false;
@@ -607,6 +668,7 @@ void resolve_stages(eg_ctx& ctx, const eg_unit_load_desc& d, eg_unit_s& unit) {
         for (StageFacts& st : unit.stages)
             if (st.held) --st.unit->refs;
         unit.stages.clear();
+        unit.split_cells.clear();
         throw;
     }
 }

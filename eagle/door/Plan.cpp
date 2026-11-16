@@ -294,6 +294,11 @@ void plan_new(eg_ctx& ctx, const eg_plan_desc* desc, eg_plan** out) {
         if (d.unit->cell_row > 0 && p.base % d.unit->cell_row != 0)
             refuse(EG_BAD_REQUEST, "unit '" + d.unit->name + "' reduces over samples in rows of " + std::to_string(d.unit->cell_row) +
                    ": a partition starts on a multiple of it, got base " + std::to_string(p.base));
+    for (const StageFacts& st : d.unit->stages)    // a row of a stage's cell has one writer too
+        for (const exec::Partition& p : parts)
+            if (st.cell_row > 0 && !st.unit->cells.empty() && p.base % st.cell_row != 0)
+                refuse(EG_BAD_REQUEST, "unit '" + d.unit->name + "' stage '" + st.ref_name + "' reduces over samples in rows of " + std::to_string(st.cell_row) +
+                       ": a partition starts on a multiple of it, got base " + std::to_string(p.base));
     if (d.unit->index_count_slot >= 0 && (parts.size() != 1 || parts[0].base != 0 || parts[0].count != d.n_samples))
         refuse(EG_BAD_REQUEST, "unit '" + d.unit->name + "' reads an index set: one whole partition");
     static constexpr exec::Access kAccess[] = { exec::Access::SampleLocal,
@@ -336,8 +341,10 @@ void plan_new(eg_ctx& ctx, const eg_plan_desc* desc, eg_plan** out) {
             const std::int64_t rows = std::max<std::int64_t>(1, (d.n_samples + d.unit->cell_row - 1) / d.unit->cell_row);
             for (const CellFacts& c : d.unit->cells) {
                 plan->rows.push_back(make_plane(ctx, real, { rows }, device));
+                plan->comps.push_back(c.comp >= 0 ? make_plane(ctx, real, { rows }, device) : nullptr);
                 bind_handle(*plan, c.slot, plan->rows.back()->tensor->dl_tensor.data, static_cast<std::uint64_t>(d.n_samples));
                 plan->bindings[c.slot].bound = false;    // bound when the caller binds the cell
+                if (c.comp >= 0) bind_handle(*plan, c.comp, plan->comps.back()->tensor->dl_tensor.data, static_cast<std::uint64_t>(d.n_samples));
             }
             if (device) device_cell_work(*plan);
         }
@@ -389,12 +396,23 @@ void plan_new(eg_ctx& ctx, const eg_plan_desc* desc, eg_plan** out) {
             if (t.layout == EG_LAYOUT_PLANE_MAJOR && t.per_lane != 1) shape = { t.per_lane, size / t.per_lane };
             plan->team.push_back(make_plane(ctx, elem, shape, device));
         }
-        for (std::size_t i = 0; i < d.unit->slots.size(); ++i)    // a source slot that is a team plane: eagle's, bound from the start
-            for (const TeamPlaneFacts& t : d.unit->team_planes)
-                if (d.unit->slots[i].made && d.unit->slots[i].name == t.name) plan->bindings[i].bound = true;
+        for (std::size_t i = 0; i < d.unit->slots.size(); ++i)    // a source slot of a split unit that eagle makes (scratch, a compensation row): bound from the start
+            if (!d.unit->stages.empty() && d.unit->slots[i].made) plan->bindings[i].bound = true;
+        if (!d.unit->split_cells.empty()) {    // the rows of each stage's cell columns, their compensation rows, and the cell planes eagle folds into
+            const DLDataType real{ kDLFloat, static_cast<std::uint8_t>(d.unit->scalar_type == EG_SCALAR_FLOAT32 ? 32 : 64), 1 };
+            for (const SplitCell& sc : d.unit->split_cells) {
+                const StageFacts& st = d.unit->stages[static_cast<std::size_t>(sc.stage)];
+                const std::int64_t rows = std::max<std::int64_t>(1, (d.n_samples + st.cell_row - 1) / st.cell_row);
+                plan->rows.push_back(make_plane(ctx, real, { rows }, false));
+                plan->comps.push_back(sc.comp_slot >= 0 ? make_plane(ctx, real, { rows }, false) : nullptr);
+                plan->outs.push_back(sc.source < 0 ? make_plane(ctx, real, { 1 }, false) : nullptr);
+            }
+        }
         ctx.plans.insert(plan);
     } catch (...) {
         for (eg_plane_s* r : plan->team) plane_release(ctx, r);
+        for (eg_plane_s* r : plan->comps) if (r != nullptr) plane_release(ctx, r);
+        for (eg_plane_s* r : plan->outs) if (r != nullptr) plane_release(ctx, r);
         for (eg_plane_s* r : plan->work) plane_release(ctx, r);
         for (eg_plane_s* r : plan->rows) plane_release(ctx, r);
         for (eg_plan_s::Binding& b : plan->bindings)
@@ -415,6 +433,8 @@ void plan_free(eg_ctx& ctx, eg_plan_s* plan) {
     for (eg_plane_s* r : plan->work) plane_release(ctx, r);
     for (eg_plane_s* r : plan->rows) plane_release(ctx, r);
     for (eg_plane_s* r : plan->team) plane_release(ctx, r);
+    for (eg_plane_s* r : plan->comps) if (r != nullptr) plane_release(ctx, r);
+    for (eg_plane_s* r : plan->outs) if (r != nullptr) plane_release(ctx, r);
     unit_release(ctx, plan->unit);
     device_plan_free(*plan);
     delete plan;

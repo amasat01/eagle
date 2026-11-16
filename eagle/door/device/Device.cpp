@@ -419,6 +419,9 @@ void device_plan_check(const eg_ctx& ctx, const eg_unit_s& unit) {
     if (unit.stages.empty() && unit.function == 0) refuse(EG_NOT_WRITTEN, who + "the unit has no device image");
     for (const StageFacts& st : unit.stages)
         if (st.unit->function == 0) refuse(EG_NOT_WRITTEN, who + "the stage '" + st.ref_name + "' has no device image");
+    for (const CellFacts& c : unit.cells)
+        if (c.op == EG_REDUCE_SUM) refuse(EG_NOT_WRITTEN, who + "the cell '" + c.name + "' sums with a compensation row, which the device does not fold yet");
+    if (!unit.split_cells.empty()) refuse(EG_NOT_WRITTEN, who + "cells on a split unit are not written on the device");
     for (const CompanionFacts& c : unit.companions)
         if (c.device_fold == 0)
             refuse(EG_NOT_WRITTEN, who + "the companion '" + unit.slots[c.slot].name + "' has no device fold function");

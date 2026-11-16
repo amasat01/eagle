@@ -57,7 +57,28 @@ inline std::uint64_t run_split(const eg_plan_s& plan, int threads) {
         std::vector<plugin::ScalarHandle> handles(n_slots);
         std::uint32_t n32 = static_cast<std::uint32_t>(plan.n_samples);
         for (std::size_t j = 0; j < n_slots; ++j) {
-            if (st.source_of[j] >= 0) {
+            if (st.row_of[j] >= 0 || st.comp_of[j] >= 0) {    // the rows this stage writes into a cell: eagle's
+                const std::size_t c = static_cast<std::size_t>(st.row_of[j] >= 0 ? st.row_of[j] : st.comp_of[j]);
+                const DLTensor& d = (st.row_of[j] >= 0 ? plan.rows[c] : plan.comps[c])->tensor->dl_tensor;
+                plugin::ScalarHandle& h = handles[j];
+                h.data = static_cast<char*>(d.data) + d.byte_offset;
+                h.samples = static_cast<std::uint64_t>(plan.n_samples);
+                h.stride = 1;
+                h.deviceType = plugin::kEagleAbiDeviceCPU;
+                h.deviceId = 0;
+                params[j] = &h;
+            } else if (st.read_of[j] >= 0) {    // a cell an earlier stage folded: the caller's plane or eagle's, read as a table
+                const std::size_t c = static_cast<std::size_t>(st.read_of[j]);
+                const eg_plane_s* p = plan.unit->split_cells[c].source >= 0 ? plan.bindings[static_cast<std::size_t>(plan.unit->split_cells[c].source)].plane : plan.outs[c];
+                const DLTensor& d = p->tensor->dl_tensor;
+                plugin::ScalarHandle& h = handles[j];
+                h.data = static_cast<char*>(d.data) + d.byte_offset;
+                h.samples = static_cast<std::uint64_t>(elements(d));
+                h.stride = 1;
+                h.deviceType = plugin::kEagleAbiDeviceCPU;
+                h.deviceId = 0;
+                params[j] = &h;
+            } else if (st.source_of[j] >= 0) {
                 params[j] = plan.params[static_cast<std::size_t>(st.source_of[j])];
             } else if (st.plane_of[j] >= 0) {
                 const DLTensor& d = plan.team[static_cast<std::size_t>(st.plane_of[j])]->tensor->dl_tensor;
@@ -90,6 +111,18 @@ inline std::uint64_t run_split(const eg_plan_s& plan, int threads) {
             } else {
                 tiles += exec::HostTeam::run_team(st.unit->host_entry, params.data(), part, threads);
             }
+        }
+        if (plan.n_samples == 0) continue;
+        for (std::size_t c = 0; c < plan.unit->split_cells.size(); ++c) {    // this stage's cell rows folded into their cells before the next stage reads them
+            const SplitCell& sc = plan.unit->split_cells[c];
+            if (sc.stage != static_cast<std::int32_t>(&st - plan.unit->stages.data())) continue;
+            eg_reduce_desc rd{};
+            rd.struct_size = sizeof(rd);
+            rd.in = plan.rows[c];
+            rd.out = sc.source >= 0 ? plan.bindings[static_cast<std::size_t>(sc.source)].plane : plan.outs[c];
+            rd.comp = plan.comps[c];
+            rd.op = sc.op;
+            reduce_exec(reduce_check(*plan.ctx, rd), threads);
         }
     }
     return tiles;

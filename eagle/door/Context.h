@@ -93,6 +93,16 @@ struct CompanionFacts {
 struct CellFacts {
     std::int32_t slot = -1;
     eg_reduce_op op = EG_REDUCE_SUM;
+    std::int32_t comp = -1;                   ///< SUM: the row slot of its compensation, else -1
+    std::string name;                         ///< the cell's name (a column's slot is named <cell>_<k> when the cell has several)
+};
+
+/** @brief One cell column of a split unit's stages: the rows its stage writes and where they fold (a source slot of the caller's, or a
+ *  cell plane eagle makes and later stages read by this name). */
+struct SplitCell {
+    std::int32_t stage = 0, row_slot = -1, comp_slot = -1, source = -1;
+    eg_reduce_op op = EG_REDUCE_SUM;
+    std::string name;
 };
 
 /** @brief A unit's finish record, as eg_runner_new and eg_run read it. */
@@ -138,6 +148,9 @@ struct StageFacts {
     std::int32_t grid = 0, threads = 1, warps = 1, lanes = 1, groups = 1;
     std::vector<std::int32_t> source_of;      ///< per stage slot: the source slot it joins, else -1
     std::vector<std::int32_t> plane_of;       ///< per stage slot: the team plane it joins, else -1 (both -1: the sample count)
+    std::vector<std::int32_t> row_of, comp_of, read_of;   ///< per stage slot: the split cell whose rows / compensation rows it is, or whose plane it reads
+    std::int64_t cell_row = 0;                ///< samples per row of the stage's cells
+    std::vector<std::string> cells_in, cells_out;
 };
 
 /** @brief The element count of @p t (the product of its shape). */
@@ -175,6 +188,8 @@ struct eg_unit_s {
     std::int32_t index = -1;                  ///< the unit index in its library table
     std::array<std::uint8_t, EG_DIGEST_BYTES> digest{};
     std::vector<eagle::door::TeamPlaneFacts> team_planes;
+    std::vector<std::string> source_cells;    ///< a split unit's cells (no row slots: the stages own the rows)
+    std::vector<eagle::door::SplitCell> split_cells;
     std::vector<eagle::door::StageFacts> stages;   ///< non-empty: a split unit, run stage by stage
     std::vector<eagle::door::CompanionFacts> companions;
     std::vector<eagle::door::CellFacts> cells;
@@ -223,6 +238,8 @@ struct eg_plan_s {
     std::vector<Binding> bindings;            ///< one per slot; never resized after eg_plan_new
     std::vector<void*> params;                ///< the entry's argument list, into ``bindings``
     std::vector<eg_plane_s*> rows;            ///< one eagle-made row plane per cell component (``unit->cells``), one reference each
+    std::vector<eg_plane_s*> comps;           ///< the compensation rows of each cell column (nullptr: none), parallel to ``rows``
+    std::vector<eg_plane_s*> outs;            ///< a split unit: the cell plane eagle makes for each internal cell column (nullptr: the caller's)
     std::vector<eg_plane_s*> team;            ///< one eagle-made scratch plane per team plane of a split unit, one reference each
     std::vector<eg_plane_s*> work;            ///< DEVICE: the two reduction work buffers of each cell component, one reference each
     std::uint32_t finished = 0;               ///< the eagle-made finished counter of a finishing unit

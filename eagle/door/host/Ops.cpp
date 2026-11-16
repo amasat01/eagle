@@ -189,6 +189,7 @@ void fold_plan(const eg_plan_s& plan, int threads) {
         eg_reduce_desc d{};
         d.struct_size = sizeof(d);
         d.in = plan.rows[i];
+        d.comp = plan.comps[i];
         d.out = plan.bindings[c.slot].plane;
         d.op = c.op;
         reduce_exec(reduce_check(*plan.ctx, d), threads);

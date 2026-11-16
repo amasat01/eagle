@@ -13,6 +13,7 @@
  *   in  <name> <f64|i32> <ndim> <extents...>      (file <row>.<name>.in: the old path's input, extents without the lane axis)
  *   out <name> <f64|i32> <ndim> <extents...>      (starts zeroed; file <row>.<name>.out: the old path's result)
  *   uni <name> <value>                            (a float64 uniform)
+ *   cell <name>                                   (a cell the caller receives: one float64, the fold of the stages' rows; file <row>.<name>.out)
  *   skip <name>                                   (a slot eagle makes: the stage's own scratch; takes a slot index)
  * Every plane is (extents..., lanes).
  *
@@ -43,6 +44,8 @@ struct pl {
     double uni;
 };
 
+static int is_out(const struct pl* q) { return strcmp(q->kind, "out") == 0 || strcmp(q->kind, "cell") == 0; }
+
 struct pt {
     struct DLManagedTensorVersioned managed;
     int64_t shape[MAXD + 1];
@@ -66,6 +69,11 @@ static int read_spec(const char* dir, const char* row, int64_t* n, struct pl* p,
         strcpy(q->kind, kind);
         if (strcmp(kind, "skip") == 0) {
             if (fscanf(f, "%47s", q->name) != 1) return 0;
+            continue;
+        }
+        if (strcmp(kind, "cell") == 0) {
+            if (fscanf(f, "%47s", q->name) != 1) return 0;
+            q->ndim = 0;
             continue;
         }
         if (strcmp(kind, "uni") == 0) {
@@ -98,7 +106,7 @@ static void load(eg_ctx* ctx, const char* lib, const char* name, const char* hex
     d.n_deps = n_deps;
     const eg_status s = parse_digest(hex, ref.digest) ? eg_unit_load(ctx, &d, out) : EG_BAD_REQUEST;
     check(s == EG_OK && *out != NULL, what);
-    if (s != EG_OK) reason_has(ctx, "");
+    if (s != EG_OK) reason_has(ctx, "\001");
 }
 
 static int refused(int argc, char** argv) {
@@ -181,8 +189,9 @@ int main(int argc, char** argv) {
     for (int i = 0; i < np; ++i) {
         struct pl* q = &pls[i];
         if (strcmp(q->kind, "uni") == 0 || strcmp(q->kind, "skip") == 0) continue;
-        q->count = n;
-        for (int d = 0; d < q->ndim; ++d) q->count *= q->dims[d];
+        q->count = strcmp(q->kind, "cell") == 0 ? 1 : n;
+        if (strcmp(q->kind, "cell") != 0)
+            for (int d = 0; d < q->ndim; ++d) q->count *= q->dims[d];
         const size_t bytes = (size_t)q->count * (q->is_int ? 4 : 8);
         q->buf = calloc(1, bytes);
         q->want = calloc(1, bytes);
@@ -250,10 +259,10 @@ int main(int argc, char** argv) {
                 uslots[nuni++] = slot++;
                 continue;
             }
-            if (strcmp(q->kind, "out") == 0) memset(q->buf, 0, (size_t)q->count * (q->is_int ? 4 : 8));
+            if (is_out(q)) memset(q->buf, 0, (size_t)q->count * (q->is_int ? 4 : 8));
             memset(&t[i], 0, sizeof(t[i]));
             for (int d2 = 0; d2 < q->ndim; ++d2) t[i].shape[d2] = q->dims[d2];
-            t[i].shape[q->ndim] = n;
+            if (strcmp(q->kind, "cell") == 0) { t[i].shape[0] = 1; } else t[i].shape[q->ndim] = n;
             t[i].managed.version.major = DLPACK_MAJOR_VERSION;
             t[i].managed.dl_tensor.data = q->buf;
             t[i].managed.dl_tensor.device.device_type = kDLCPU;
@@ -263,7 +272,7 @@ int main(int argc, char** argv) {
             t[i].managed.dl_tensor.data = dev[i];
             t[i].managed.dl_tensor.device.device_type = kDLCUDA;
 #endif
-            t[i].managed.dl_tensor.ndim = q->ndim + 1;
+            t[i].managed.dl_tensor.ndim = strcmp(q->kind, "cell") == 0 ? 1 : q->ndim + 1;
             t[i].managed.dl_tensor.dtype.code = q->is_int ? kDLInt : kDLFloat;
             t[i].managed.dl_tensor.dtype.bits = q->is_int ? 32 : 64;
             t[i].managed.dl_tensor.dtype.lanes = 1;
@@ -289,14 +298,14 @@ int main(int argc, char** argv) {
 #ifdef EG_PAIR_DEVICE
             if (s == EG_OK) s = eg_sync(ctx);
             for (int i = 0; i < np && s == EG_OK; ++i)
-                if (strcmp(pls[i].kind, "out") == 0 &&
+                if (is_out(&pls[i]) &&
                     cudaMemcpy(pls[i].buf, dev[i], (size_t)pls[i].count * (pls[i].is_int ? 4 : 8), cudaMemcpyDeviceToHost) != cudaSuccess) s = EG_FAULT;
 #endif
-            if (s != EG_OK) reason_has(ctx, "");
+            if (s != EG_OK) reason_has(ctx, "\001");
             int bad = 0;
             for (int i = 0; i < np; ++i) {
                 struct pl* q = &pls[i];
-                if (strcmp(q->kind, "out") != 0) continue;
+                if (!is_out(q)) continue;
                 const size_t bytes = (size_t)q->count * (q->is_int ? 4 : 8);
                 if (memcmp(q->buf, q->want, bytes) != 0) {
                     ++bad;
