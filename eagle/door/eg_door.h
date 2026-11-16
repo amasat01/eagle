@@ -576,9 +576,11 @@ eg_status eg_run_event_times(eg_ctx* ctx, eg_runner* runner, eg_plane* out);
  * a state input or a parameter. Eagle maps them to the derived units through
  * their links (eg_unit_derived). A PARAM_GRAD link with ``reduced`` 1 is
  * summed over samples in SAMPLE order (gathered back after a reordering run)
- * with the canonical ordered tree of leaf 4096, as a compensated pair when the
- * primal's cell states ``comp_slots``; the sum lands in the caller's plane of
- * one value. Eagle owns the run-time bindings no caller sees: the forward
+ * with the canonical ordered tree of leaf 4096, always as a compensated pair
+ * (sum, compensation); the sum lands in the caller's plane of one value. When
+ * ``memory_budget`` splits the reverse into passes, each pass sums its steps
+ * that way and the passes' pairs combine in pass order: bitwise the unsplit
+ * sum only with one pass. Eagle owns the run-time bindings no caller sees: the forward
  * binds the tape as a one-row dummy with ``tape_on_slot`` 0 and the recompute
  * binds the real tape with 1; state adjoints alternate between two buffers
  * eagle makes, by step parity; the twin's lookup planes (finished count, map)

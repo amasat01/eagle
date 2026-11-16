@@ -362,6 +362,8 @@ typedef int32_t eg_derived_source;
 #define EG_SRC_TAPED 4             /**< the tape rows of ``of_slot`` (the state itself when it is not taped) */
 #define EG_SRC_STEPS 5             /**< a step plane: ``of_slot`` = the taping twin's ``steps_slot``, or -1 for one eagle makes only because this unit reads it */
 #define EG_SRC_EVENT 6             /**< an event multiplier of a refine run: ``of_slot`` = the event's index in the unit's event list */
+#define EG_SRC_TIME0 7             /**< the start copy of time plane ``of_slot``: on a taping twin, ``time0_slot``, which eagle fills at run start;
+                                        on a reverse unit, a read of that copy whose gradient eagle adds into ``of_slot``'s gradient */
 
 /** One taped plane: rows [row0, row0 + rows) of the tape hold primal slot ``slot``. */
 struct eg_unit_taped {
@@ -369,7 +371,7 @@ struct eg_unit_taped {
     int32_t slot, row0, rows;
 };
 
-/** One slot of a reverse unit and its source. */
+/** One slot of a derived unit and its source. */
 struct eg_unit_link {
     uint32_t struct_size;
     int32_t slot;             /**< in THIS unit */
@@ -389,7 +391,9 @@ struct eg_unit_refined {
 /** What a derived unit is to its primal (eg_unit_meta.derived). In 0.8.0 the
  *  caller states these facts and the library range-checks them; eagle checks
  *  the role against the runner's need, every index and ``of_unit``. Slots are
- *  in THIS unit unless stated; -1: absent. */
+ *  in THIS unit unless stated; -1: absent. A taping twin builds its record
+ *  window into its code: the tape slot's declared rows are window * tape_rows,
+ *  and eg_runner_new refuses another ``window`` (0 included) BAD_REQUEST. */
 struct eg_unit_derived {
     uint32_t struct_size;
     eg_derived_role role;     /**< EG_DERIVED_* (eg_door.h) */
@@ -406,7 +410,8 @@ struct eg_unit_derived {
     int32_t n_refined;
     int32_t reserved0;
     const struct eg_unit_taped* const* taped;
-    const struct eg_unit_link* const* links;     /**< one per slot of a reverse unit; NULL on a taping twin */
+    const struct eg_unit_link* const* links;     /**< a reverse unit: one per slot. A taping twin: EG_SRC_PRIMAL for each
+                                                      ordinary slot, EG_SRC_TIME0 on ``time0_slot``, none on the other reserved slots */
     const struct eg_unit_refined* const* refined;
 };
 
