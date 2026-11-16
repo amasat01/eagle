@@ -84,7 +84,7 @@ LIB := $(OUT)/libeagle_door.so
 FIXTURE := $(OUT)/libfixture_unit.so
 TEST := $(OUT)/door_test
 
-.PHONY: all lib symbols test check-inputs check-cuda pairs pair-reverse pair-reverse-active pair-reverse-timed pair-reverse-fused pair-reverse-kstep pair-reverse-reorder pair-reverse-t0 pair-reverse-counter pair-refine pair-refine-reverse pair-refine-pend pair-refine-reverse-pend device $(PAIR_UNITS:%=pair-%) $(PAIR_DEVICE_UNITS:%=pair-device-%)
+.PHONY: all lib symbols test check-inputs check-cuda pairs pair-reverse pair-reverse-active pair-reverse-timed pair-reverse-fused pair-reverse-kstep pair-reverse-reorder pair-reverse-t0 pair-reverse-counter pair-refine pair-refine-reverse pair-refine-pend pair-refine-reverse-pend pair-status-grid pair-status-tangent pair-status-two device $(PAIR_UNITS:%=pair-%) $(PAIR_DEVICE_UNITS:%=pair-device-%)
 all: test
 
 check-inputs:
@@ -440,3 +440,24 @@ pair-refine-pend: symbols $(OUT)/libpair_refine_pend.so $(REFINE_TEST)
 pair-refine-reverse-pend: symbols $(OUT)/libpair_refine_pend.so $(REFINE_REVERSE_TEST)
 	$(REFINE_REVERSE_TEST) $(OUT)/libpair_refine_pend.so $(ORACLE_pendrr) $(DIGEST_pend) $(DIGEST_pend_tape) $(DIGEST_pend_newton) $(DIGEST_pend_guard) \
 	  $(DIGEST_pend_step_vjp) $(DIGEST_pend_refine_vjp) pend
+
+# pair-status-<case>: the refine statuses beyond REFINED over one library per case (META test/derived/ev_<case>_meta.c, kernels
+# KERNEL_s<case>, _tape, _newton, _guard): ev_grid AT_STEP (bitwise against ORACLE_sgrid), ev_tangent GRAZE and ev_two TWO_RULES (refused by name).
+STATUS_TEST := $(OUT)/refine_status_test
+$(STATUS_TEST): test/refine_status_test.c test/pair_util.h eg_door.h $(LIB)
+	$(CC) $(CFLAGS_C) -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door -Wl,-rpath,$(OUT) -lm -pthread
+define STATUS_RULES
+$(OUT)/libpair_status_$(1).so: $$(KERNEL_s$(1)) $$(KERNEL_s$(1)_tape) $$(KERNEL_s$(1)_newton) $$(KERNEL_s$(1)_guard) test/derived/ev_$(1)_meta.c eg_door.h eg_unit_meta.h | check-inputs
+	@mkdir -p $$(OUT)
+	$$(CXX) $$(PAIR_HOST_FLAGS) -I$$(AETHER_INCLUDE) -I$$(AETHER_INCLUDE)/eagle -I$$(PAIR_WING_DIR) -c $$(KERNEL_s$(1)) -o $$(OUT)/st_$(1)_primal.o
+	$$(CXX) $$(PAIR_HOST_FLAGS) $$(call REV_RENAME,tape) -I$$(AETHER_INCLUDE) -I$$(AETHER_INCLUDE)/eagle -I$$(PAIR_WING_DIR) -c $$(KERNEL_s$(1)_tape) -o $$(OUT)/st_$(1)_tape.o
+	$$(CXX) $$(PAIR_HOST_FLAGS) $$(call REV_RENAME,newton) -I$$(AETHER_INCLUDE) -I$$(AETHER_INCLUDE)/eagle -I$$(PAIR_WING_DIR) -c $$(KERNEL_s$(1)_newton) -o $$(OUT)/st_$(1)_newton.o
+	$$(CXX) $$(PAIR_HOST_FLAGS) $$(call REV_RENAME,guard) -I$$(AETHER_INCLUDE) -I$$(AETHER_INCLUDE)/eagle -I$$(PAIR_WING_DIR) -c $$(KERNEL_s$(1)_guard) -o $$(OUT)/st_$(1)_guard.o
+	$$(CC) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$$(ROOT) -c test/derived/ev_$(1)_meta.c -o $$(OUT)/st_$(1)_meta.o
+	$$(CXX) -shared -o $$@ $$(OUT)/st_$(1)_primal.o $$(OUT)/st_$(1)_tape.o $$(OUT)/st_$(1)_newton.o $$(OUT)/st_$(1)_guard.o $$(OUT)/st_$(1)_meta.o
+pair-status-$(1): symbols $(OUT)/libpair_status_$(1).so $(STATUS_TEST)
+	$(STATUS_TEST) $(OUT)/libpair_status_$(1).so $(1) $(or $(ORACLE_s$(1)),-) $(DIGEST_s$(1)) $(DIGEST_s$(1)_tape) $(DIGEST_s$(1)_newton) $(DIGEST_s$(1)_guard)
+endef
+$(eval $(call STATUS_RULES,grid))
+$(eval $(call STATUS_RULES,tangent))
+$(eval $(call STATUS_RULES,two))
