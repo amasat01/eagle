@@ -16,6 +16,7 @@
 
 struct eg_unit_meta;
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstddef>
@@ -79,6 +80,7 @@ struct SlotFacts {
     std::vector<Axis> axes;                   ///< ACCUM_OUT: the plane's named axes (empty: any compact plane)
     bool made = false;                        ///< eagle's own plane (a companion): never bound by the caller
     bool cell = false;                        ///< a cell's slot: the caller binds the finished (1,) cell, the kernel reads eagle's rows
+    std::int32_t keys_of = -1;                ///< a WIDE_OUT slot a KEYS stage writes (a block sum's output): the keyed record whose keys it holds, else -1
 };
 
 /** @brief A compensation companion eagle makes beside the target the caller binds, and the fold it runs after each launch. */
@@ -135,6 +137,14 @@ struct TeamPlaneFacts {
     std::int64_t per_lane = 1, fill = 0;
     bool fill_promised = false;
     std::string name;
+    std::int32_t keyed = -1;                  ///< unit KEY: the record in the unit's keyed table, else -1
+};
+
+/** @brief A record of the keyed table (eg_unit_keyed): ``width`` payload entries over the kept lane axes. */
+struct KeyedFacts {
+    std::int64_t width = 1;
+    std::vector<std::int64_t> extents;        ///< per kept axis, -1: runtime
+    std::string name;
 };
 
 /** @brief One stage of a split unit: its unit, its team (LANES grid only on the host) and the join of its slots, made once at load. */
@@ -146,6 +156,7 @@ struct StageFacts {
     std::array<std::uint8_t, EG_DIGEST_BYTES> ref_digest{};
     bool team = false;
     std::int32_t grid = 0, threads = 1, warps = 1, lanes = 1, groups = 1;
+    std::int32_t keyed = -1;                  ///< grid KEYS: the record in the source unit's keyed table, else -1
     std::vector<std::int32_t> source_of;      ///< per stage slot: the source slot it joins, else -1
     std::vector<std::int32_t> plane_of;       ///< per stage slot: the team plane it joins, else -1 (both -1: the sample count)
     std::vector<std::int32_t> row_of, comp_of, read_of;   ///< per stage slot: the split cell whose rows / compensation rows it is, or whose plane it reads
@@ -188,6 +199,7 @@ struct eg_unit_s {
     std::int32_t index = -1;                  ///< the unit index in its library table
     std::array<std::uint8_t, EG_DIGEST_BYTES> digest{};
     std::vector<eagle::door::TeamPlaneFacts> team_planes;
+    std::vector<eagle::door::KeyedFacts> keyed;    ///< the keyed table of a split unit's body
     std::vector<std::string> source_cells;    ///< a split unit's cells (no row slots: the stages own the rows)
     std::vector<eagle::door::SplitCell> split_cells;
     std::vector<eagle::door::StageFacts> stages;   ///< non-empty: a split unit, run stage by stage
@@ -211,6 +223,23 @@ struct eg_unit_s {
     int refs = 1;                             ///< the caller's reference plus one per plan
     bool caller_ref = true;
 };
+
+namespace eagle {
+namespace door {
+
+/** @brief The keys of keyed record @p k over @p n lanes: the product of the kept axes' extents, a runtime axis as long as the first lane
+ *  axis (``n`` over the static extents of the other lane axes). */
+inline std::int64_t key_count(const eg_unit_s& unit, const KeyedFacts& k, std::int64_t n) {
+    std::int64_t rest = 1;
+    for (std::size_t i = 1; i < unit.lane_extents.size(); ++i) rest *= std::max<std::int64_t>(1, unit.lane_extents[i]);
+    const std::int64_t runtime = n / rest;
+    std::int64_t keys = 1;
+    for (std::int64_t e : k.extents) keys *= e < 0 ? runtime : e;
+    return keys;
+}
+
+}  // namespace door
+}  // namespace eagle
 
 /** @brief One DLPack tensor taken by eagle: reference-counted, deleter called once. */
 struct eg_plane_s {

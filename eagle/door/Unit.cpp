@@ -28,14 +28,6 @@ T read_record(const T* in, const T& absent, const std::string& what) {
     return out;
 }
 
-/** @brief A count of the meta that this slice of the door does not take yet. */
-void refuse_count(std::int64_t n, const std::string& unit, const char* member) {
-    if (n < 0) refuse(EG_BAD_REQUEST, "meta that contradicts itself: unit '" + unit + "' " +
-                      member + " is " + std::to_string(n));
-    if (n > 0) refuse(EG_NOT_WRITTEN, "unit '" + unit + "': " + member + " > 0 is not written "
-                      "in this build of the door");
-}
-
 /** @brief Check one slot and copy its facts (the roles and dtypes this slice runs). */
 SlotFacts read_slot(const eg_unit_slot* in, const std::string& unit, int index) {
     eg_unit_slot absent{};
@@ -230,6 +222,28 @@ void read_dispatch(const eg_unit_body& body, const eg_unit_s& unit) {
     }
 }
 
+/** @brief Copy and check the keyed table of the body: the keys a block sum or a KEY team plane runs over. A record names no plane of its own here:
+ *  whether eagle makes one is decided where the stages are joined. */
+void read_keyed(const eg_unit_body& body, eg_unit_s& unit) {
+    const std::string who = "meta that contradicts itself: unit '" + unit.name + "' ";
+    if (body.n_keyed < 0 || (body.n_keyed > 0 && body.keyed == nullptr)) refuse(EG_BAD_REQUEST, who + "n_keyed " + std::to_string(body.n_keyed));
+    for (int i = 0; i < body.n_keyed; ++i) {
+        const eg_unit_keyed k = read_record(body.keyed[i], eg_unit_keyed{}, "unit '" + unit.name + "' keyed");
+        const std::string at = who + "keyed record " + std::to_string(i);
+        if (k.name == nullptr) refuse(EG_BAD_REQUEST, at + " has no name");
+        if (k.n_axes < 0 || (k.n_axes > 0 && k.axis_extents == nullptr)) refuse(EG_BAD_REQUEST, at + " n_axes " + std::to_string(k.n_axes));
+        if (k.width < 1) refuse(EG_BAD_REQUEST, at + " width " + std::to_string(k.width));
+        KeyedFacts f;
+        f.width = k.width;
+        f.name = k.name;
+        for (int a = 0; a < k.n_axes; ++a) {
+            if (k.axis_extents[a] < 1 && k.axis_extents[a] != -1) refuse(EG_BAD_REQUEST, at + " extent " + std::to_string(k.axis_extents[a]));
+            f.extents.push_back(k.axis_extents[a]);
+        }
+        unit.keyed.push_back(std::move(f));
+    }
+}
+
 /** @brief Copy and check the team planes of the body (a split unit's scratch). Only the planes a host plan makes are written. */
 void read_team_planes(const eg_unit_body& body, eg_unit_s& unit) {
     const std::string who = "meta that contradicts itself: unit '" + unit.name + "' ";
@@ -249,9 +263,11 @@ void read_team_planes(const eg_unit_body& body, eg_unit_s& unit) {
         if (t.wide == 1) refuse(EG_BAD_REQUEST, who + "team plane '" + name + "' is wide value 1, which is retired (a placed wide value is WARP_TILED)");
         if (t.wide != EG_WIDE_NONE && t.wide != EG_WIDE_WARP_TILED) refuse(EG_NOT_WRITTEN, at + " has an unknown wide layout " + std::to_string(t.wide));
         if (t.per_lane < 1) refuse(EG_BAD_REQUEST, who + "team plane '" + name + "' per_lane " + std::to_string(t.per_lane));
-        if (t.wide == EG_WIDE_NONE && (t.unit == EG_UNIT_KEY || t.unit == EG_UNIT_TARGET))
-            refuse(EG_NOT_WRITTEN, at + " has " + (t.unit == EG_UNIT_KEY ? "KEY" : "TARGET") + " units: the keyed table and the ordered scatter's cells are not written on the host");
-        unit.team_planes.push_back({ t.dtype, t.unit, t.layout, t.wide, t.per_lane, t.fill, t.fill_promised != 0, name });
+        if (t.unit == EG_UNIT_TARGET) refuse(EG_NOT_WRITTEN, at + " has TARGET units: the ordered scatter's cells are not written");
+        if (t.unit == EG_UNIT_KEY && (t.keyed < 0 || t.keyed >= static_cast<std::int32_t>(unit.keyed.size())))
+            refuse(EG_BAD_REQUEST, who + "team plane '" + name + "' has KEY units and keyed " + std::to_string(t.keyed) + ", outside the keyed table of " +
+                   std::to_string(unit.keyed.size()));
+        unit.team_planes.push_back({ t.dtype, t.unit, t.layout, t.wide, t.per_lane, t.fill, t.fill_promised != 0, name, t.unit == EG_UNIT_KEY ? t.keyed : -1 });
     }
 }
 
@@ -275,13 +291,13 @@ void read_stages(const eg_unit_meta& m, eg_unit_s& unit) {
             absent_team.warps = absent_team.lanes = absent_team.groups = 1;
             const eg_unit_team t = read_record(st.team, absent_team, at + " team");
             if (t.grid < EG_GRID_LANES || t.grid > EG_GRID_TARGETS) refuse(EG_NOT_WRITTEN, at + ": unknown team grid " + std::to_string(t.grid));
-            if (t.grid != EG_GRID_LANES)
-                refuse(EG_NOT_WRITTEN, at + ": a team of grid " + std::string(t.grid == EG_GRID_KEYS ? "KEYS" : t.grid == EG_GRID_CHUNKS ? "CHUNKS" : "TARGETS") +
-                       " is not written on the host");
+            if (t.grid == EG_GRID_CHUNKS || t.grid == EG_GRID_TARGETS)
+                refuse(EG_NOT_WRITTEN, at + ": a team of grid " + std::string(t.grid == EG_GRID_CHUNKS ? "CHUNKS" : "TARGETS") + " is not written");
             if (t.threads < 1 || t.warps < 1 || t.lanes < 1 || t.groups < 1)
                 refuse(EG_BAD_REQUEST, "meta that contradicts itself: " + at + " team has threads/warps/lanes/groups below 1");
             f.team = true;
             f.grid = t.grid, f.threads = t.threads, f.warps = t.warps, f.lanes = t.lanes, f.groups = t.groups;
+            if (t.grid == EG_GRID_KEYS) f.keyed = t.keyed;    // checked against the keyed table once the body is read
         }
         unit.stages.push_back(std::move(f));
     }
@@ -293,7 +309,7 @@ void read_body(const eg_unit_meta& m, void* library, bool device_only, eg_unit_s
     if (body.access < EG_ACCESS_SAMPLE_LOCAL || body.access > EG_ACCESS_CROSS_SAMPLE_WRITE)
         refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': unknown access " + std::to_string(body.access));
     unit.access = body.access;
-    refuse_count(body.n_keyed, unit.name, "n_keyed");
+    read_keyed(body, unit);
     if (body.n_slots < 0 || (body.n_slots > 0 && body.slots == nullptr))
         refuse(EG_BAD_REQUEST, "meta that contradicts itself: unit '" + unit.name + "' n_slots " +
                std::to_string(body.n_slots));
@@ -371,8 +387,8 @@ void read_body(const eg_unit_meta& m, void* library, bool device_only, eg_unit_s
             refuse(EG_BAD_REQUEST, "meta that contradicts itself: unit '" + unit.name + "' plane axes of slot " + std::to_string(pa.slot) +
                    " (a slot of the unit, one axis or more, with labels and extents)");
         SlotFacts& f = unit.slots[pa.slot];
-        if (f.role != EG_ROLE_ACCUM_OUT)
-            refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': named plane axes on slot '" + f.name + "' (not an ACCUM_OUT slot) are not written");
+        if (f.role != EG_ROLE_ACCUM_OUT && f.role != EG_ROLE_WIDE_OUT)
+            refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': named plane axes on slot '" + f.name + "' (not an ACCUM_OUT or WIDE_OUT slot) are not written");
         for (int a = 0; a < pa.n_axes; ++a) {
             SlotFacts::Axis axis;
             axis.extent = pa.extents[a];
@@ -535,6 +551,10 @@ void read_unit(const eg_unit_meta& m, void* library, eg_unit_s& unit) {
         if (sym != nullptr) check_size_block(library, unit.name);
     }
     read_body(m, library, device_only, unit);
+    for (std::size_t i = 0; i < unit.stages.size(); ++i)
+        if (unit.stages[i].grid == EG_GRID_KEYS && (unit.stages[i].keyed < 0 || unit.stages[i].keyed >= static_cast<std::int32_t>(unit.keyed.size())))
+            refuse(EG_BAD_REQUEST, "meta that contradicts itself: unit '" + unit.name + "' stage " + std::to_string(i) + " team has grid KEYS and keyed " +
+                   std::to_string(unit.stages[i].keyed) + ", outside the keyed table of " + std::to_string(unit.keyed.size()));
     if (unit.stages.empty() && !unit.team_planes.empty())
         refuse(EG_BAD_REQUEST, "meta that contradicts itself: unit '" + unit.name + "' has team planes and no stages");
     if (!unit.stages.empty() && (unit.finish.present || !unit.companions.empty() || !unit.cells.empty() || unit.derived.present))
@@ -651,8 +671,18 @@ void resolve_stages(eg_ctx& ctx, const eg_unit_load_desc& d, eg_unit_s& unit) {
                 if (!found) refuse(EG_BAD_REQUEST, "meta that contradicts itself: " + at + " reads the cell '" + in + "', which the unit does not declare");
             }
         }
+        for (const StageFacts& st : unit.stages) {    // a block sum's output: the WIDE_OUT slot a KEYS stage writes holds that stage's keys
+            if (st.grid != EG_GRID_KEYS) continue;
+            for (std::size_t j = 0; j < st.unit->slots.size(); ++j) {
+                if (st.source_of[j] < 0 || st.unit->slots[j].role != EG_ROLE_WIDE_OUT) continue;
+                SlotFacts& src = unit.slots[static_cast<std::size_t>(st.source_of[j])];
+                if (src.keys_of >= 0 && src.keys_of != st.keyed)
+                    refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': slot '" + src.name + "' is written by KEYS stages of two keyed records, which is not written");
+                src.keys_of = st.keyed;
+            }
+        }
         for (std::size_t k = 0; k < unit.slots.size(); ++k) {
-            bool joined = unit.slots[k].made;
+            bool joined = unit.slots[k].made || unit.slots[k].role == EG_ROLE_NSAMPLES;    // the sample count joins no stage slot of its own
             for (const StageFacts& st : unit.stages)
                 for (std::int32_t s : st.source_of) joined = joined || s == static_cast<std::int32_t>(k);
             for (const SplitCell& c : unit.split_cells) joined = joined || c.source == static_cast<std::int32_t>(k);
@@ -663,6 +693,14 @@ void resolve_stages(eg_ctx& ctx, const eg_unit_load_desc& d, eg_unit_s& unit) {
             for (const StageFacts& st : unit.stages)
                 for (std::int32_t p : st.plane_of) joined = joined || p == static_cast<std::int32_t>(k);
             if (!joined) refuse(EG_BAD_REQUEST, who + "team plane '" + unit.team_planes[k].name + "' joins no stage slot");
+        }
+        for (const KeyedFacts& k : unit.keyed) {    // a keyed record is eagle's plane iff its name is no slot of the unit and is a slot of a stage; else a key spec
+            bool of_unit = false, of_stage = false;
+            for (const SlotFacts& s : unit.slots) of_unit = of_unit || s.name == k.name;
+            for (const StageFacts& st : unit.stages)
+                for (const SlotFacts& s : st.unit->slots) of_stage = of_stage || s.name == k.name;
+            if (!of_unit && of_stage)
+                refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': the keyed plane '" + k.name + "' is made by eagle between the stages, which is not written");
         }
     } catch (...) {
         for (StageFacts& st : unit.stages)
@@ -703,6 +741,9 @@ void unit_load(eg_ctx& ctx, const eg_unit_load_desc* desc, eg_unit** out) {
         try {
             read_unit(m, library, *unit);
             if (!unit->stages.empty()) resolve_stages(ctx, read_input(desc, "eg_unit_load_desc"), *unit);
+            for (const SlotFacts& s : unit->slots)
+                if (s.role == EG_ROLE_WIDE_OUT && !s.axes.empty() && s.keys_of < 0)
+                    refuse(EG_NOT_WRITTEN, "unit '" + unit->name + "': named plane axes on slot '" + s.name + "', which no KEYS stage writes, are not written");
             ctx.units.insert(unit);
         } catch (...) {
             device_unit_free(*unit);

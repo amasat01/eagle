@@ -12,6 +12,8 @@
  *   n <lanes>
  *   in  <name> <f64|i32> <ndim> <extents...>      (file <row>.<name>.in: the old path's input, extents without the lane axis)
  *   out <name> <f64|i32> <ndim> <extents...>      (starts zeroed; file <row>.<name>.out: the old path's result)
+ *   ink  <name> <f64|i32> <count>                 (a plane of <count> elements with no lane axis: a table; file <row>.<name>.in)
+ *   outk <name> <f64|i32> <count>                 (the same, an output: a block sum's keys; file <row>.<name>.out)
  *   uni <name> <value>                            (a float64 uniform)
  *   cell <name>                                   (a cell the caller receives: one float64, the fold of the stages' rows; file <row>.<name>.out)
  *   skip <name>                                   (a slot eagle makes: the stage's own scratch; takes a slot index)
@@ -44,7 +46,8 @@ struct pl {
     double uni;
 };
 
-static int is_out(const struct pl* q) { return strcmp(q->kind, "out") == 0 || strcmp(q->kind, "cell") == 0; }
+static int is_out(const struct pl* q) { return strcmp(q->kind, "out") == 0 || strcmp(q->kind, "outk") == 0 || strcmp(q->kind, "cell") == 0; }
+static int is_flat(const struct pl* q) { return strcmp(q->kind, "ink") == 0 || strcmp(q->kind, "outk") == 0; }
 
 struct pt {
     struct DLManagedTensorVersioned managed;
@@ -78,6 +81,14 @@ static int read_spec(const char* dir, const char* row, int64_t* n, struct pl* p,
         }
         if (strcmp(kind, "uni") == 0) {
             if (fscanf(f, "%47s %lf", q->name, &q->uni) != 2) return 0;
+            continue;
+        }
+        if (strcmp(kind, "ink") == 0 || strcmp(kind, "outk") == 0) {
+            long long v;
+            if (fscanf(f, "%47s %7s %lld", q->name, ty, &v) != 3) return 0;
+            q->is_int = strcmp(ty, "i32") == 0;
+            q->ndim = 0;
+            q->dims[0] = v;
             continue;
         }
         if (fscanf(f, "%47s %7s %d", q->name, ty, &q->ndim) != 3) return 0;
@@ -189,14 +200,14 @@ int main(int argc, char** argv) {
     for (int i = 0; i < np; ++i) {
         struct pl* q = &pls[i];
         if (strcmp(q->kind, "uni") == 0 || strcmp(q->kind, "skip") == 0) continue;
-        q->count = strcmp(q->kind, "cell") == 0 ? 1 : n;
-        if (strcmp(q->kind, "cell") != 0)
+        q->count = strcmp(q->kind, "cell") == 0 ? 1 : is_flat(q) ? q->dims[0] : n;
+        if (strcmp(q->kind, "cell") != 0 && !is_flat(q))
             for (int d = 0; d < q->ndim; ++d) q->count *= q->dims[d];
         const size_t bytes = (size_t)q->count * (q->is_int ? 4 : 8);
         q->buf = calloc(1, bytes);
         q->want = calloc(1, bytes);
         char file[160];
-        if (strcmp(q->kind, "in") == 0) {
+        if (strcmp(q->kind, "in") == 0 || strcmp(q->kind, "ink") == 0) {
             snprintf(file, sizeof(file), "%s.%s.in", argv[3], q->name);
             check(read_file(argv[2], file, q->buf, bytes), "an input read");
         } else {
@@ -262,7 +273,7 @@ int main(int argc, char** argv) {
             if (is_out(q)) memset(q->buf, 0, (size_t)q->count * (q->is_int ? 4 : 8));
             memset(&t[i], 0, sizeof(t[i]));
             for (int d2 = 0; d2 < q->ndim; ++d2) t[i].shape[d2] = q->dims[d2];
-            if (strcmp(q->kind, "cell") == 0) { t[i].shape[0] = 1; } else t[i].shape[q->ndim] = n;
+            if (strcmp(q->kind, "cell") == 0) { t[i].shape[0] = 1; } else if (is_flat(q)) { t[i].shape[0] = q->dims[0]; } else t[i].shape[q->ndim] = n;
             t[i].managed.version.major = DLPACK_MAJOR_VERSION;
             t[i].managed.dl_tensor.data = q->buf;
             t[i].managed.dl_tensor.device.device_type = kDLCPU;
@@ -272,7 +283,7 @@ int main(int argc, char** argv) {
             t[i].managed.dl_tensor.data = dev[i];
             t[i].managed.dl_tensor.device.device_type = kDLCUDA;
 #endif
-            t[i].managed.dl_tensor.ndim = strcmp(q->kind, "cell") == 0 ? 1 : q->ndim + 1;
+            t[i].managed.dl_tensor.ndim = strcmp(q->kind, "cell") == 0 || is_flat(q) ? 1 : q->ndim + 1;
             t[i].managed.dl_tensor.dtype.code = q->is_int ? kDLInt : kDLFloat;
             t[i].managed.dl_tensor.dtype.bits = q->is_int ? 32 : 64;
             t[i].managed.dl_tensor.dtype.lanes = 1;

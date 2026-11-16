@@ -97,7 +97,9 @@ inline std::uint64_t run_split(const eg_plan_s& plan, int threads) {
         }
         if (st.team) {
             const std::int64_t per_block = static_cast<std::int64_t>(st.lanes) * st.warps;
-            const std::int64_t blocks = (plan.n_samples + per_block - 1) / per_block;
+            const std::int64_t blocks = st.grid == EG_GRID_KEYS
+                ? key_count(*plan.unit, plan.unit->keyed[static_cast<std::size_t>(st.keyed)], plan.n_samples) * st.groups
+                : (plan.n_samples + per_block - 1) / per_block;
             if (blocks > 0) {
                 exec::HostTeam::run_serial(st.unit->host_entry, params.data(), exec::Partition{ 0, blocks, plan.n_samples });
                 ++tiles;

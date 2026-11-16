@@ -96,6 +96,11 @@ void check_plane(const eg_plan_s& plan, int slot, const eg_plane_s& plane) {
         if (t.ndim != 3 || t.shape[0] != s.shape[0] || t.shape[1] != s.shape[1] || m < 1 || (!s.keep.empty() && m != want))
             refuse(EG_BAD_REQUEST, what + ": a plane of shape (" + std::to_string(s.shape[0]) + ", " + std::to_string(s.shape[1]) +
                    ", " + (s.keep.empty() ? std::string("m") : std::to_string(want)) + ") is expected (m: the columns of the lane axes it varies along)");
+    } else if (s.keys_of >= 0) {                // a block sum's output: width entries per key, the keys' count along the last axis
+        const KeyedFacts& k = plan.unit->keyed[static_cast<std::size_t>(s.keys_of)];
+        const std::int64_t want = k.width * key_count(*plan.unit, k, plan.n_samples);
+        if (t.ndim < 1 || elements(t) != want)
+            refuse(EG_BAD_REQUEST, what + ": a block sum's output of " + std::to_string(want) + " elements (" + std::to_string(k.width) + " per key) is expected");
     } else if (wide(s)) {                       // (rows, n): the rows are the caller's, one value per sample along the last axis
         if (t.ndim != 2 || t.shape[1] != plan.n_samples)
             refuse(EG_BAD_REQUEST, what + ": a plane of shape (rows, " + std::to_string(plan.n_samples) + ") is expected");
@@ -348,9 +353,13 @@ void plan_new(eg_ctx& ctx, const eg_plan_desc* desc, eg_plan** out) {
             }
             if (device) device_cell_work(*plan);
         }
+        if (device) {
+            for (const KeyedFacts& k : d.unit->keyed)
+                refuse(EG_NOT_WRITTEN, "unit '" + d.unit->name + "': the keyed table ('" + k.name + "') is not written on the device");
+        }
         std::vector<std::int64_t> sizes;    // the scratch the stages share: per_lane elements per unit; a placed wide value is one unit on the host, whole warps of 32 on the device
         for (const TeamPlaneFacts& t : d.unit->team_planes) {
-            const std::int64_t count = t.unit == EG_UNIT_ONCE ? 1 : d.n_samples;
+            const std::int64_t count = t.unit == EG_UNIT_ONCE ? 1 : t.unit == EG_UNIT_KEY ? key_count(*d.unit, d.unit->keyed[static_cast<std::size_t>(t.keyed)], d.n_samples) : d.n_samples;
             const std::int64_t units = t.wide != EG_WIDE_WARP_TILED ? count : device ? (count + 31) / 32 * 32 : 1;
             sizes.push_back(std::max<std::int64_t>(1, t.per_lane * units));
             if (device && t.fill_promised && t.wide == EG_WIDE_NONE && t.dtype == EG_DTYPE_REAL && d.unit->scalar_type != EG_SCALAR_FLOAT32 && t.fill != 0)
@@ -474,7 +483,8 @@ void bind(eg_ctx& ctx, eg_plan_s* plan, const eg_bind_desc* desc) {
         } else {
             bind_handle(*plan, d.plane_slots[i], data,
                         sf.role == EG_ROLE_LOOKUP ? static_cast<std::uint64_t>(elements(t))
-                                                  : static_cast<std::uint64_t>(plan->n_samples));
+                        : sf.keys_of >= 0 ? static_cast<std::uint64_t>(key_count(*plan->unit, plan->unit->keyed[static_cast<std::size_t>(sf.keys_of)], plan->n_samples))
+                                          : static_cast<std::uint64_t>(plan->n_samples));
         }
         if (old != nullptr) plane_release(ctx, old);
         for (const CompanionFacts& c : plan->unit->companions) {     // a new target: its companion, zeroed, of its shape and dtype
