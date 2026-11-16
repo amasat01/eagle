@@ -99,6 +99,10 @@ void class_sort_step(std::uint64_t stream, const std::vector<DevicePlane>& plane
                      std::int32_t* perm, std::int32_t* inv, std::int32_t* map, unsigned* count, unsigned* span, unsigned* offsets, unsigned* sorts,
                      void* scratch, std::int64_t n);
 
+/** @brief Queue on @p stream the compaction of the @p n-sample mask whose SET bytes are kept (a stale mask) into the ascending index
+ *  @p map and its @p count; @p scratch is ``compact_scratch_bytes(n)``. */
+void compact_keep_step(std::uint64_t stream, const void* mask, std::int64_t n, std::int32_t* map, unsigned* count, void* scratch);
+
 /** @brief Queue on @p stream ``perm``/``inv``/@p map the identity over @p n samples, ``*count`` = ``*span`` = @p n. */
 void reset_step(std::uint64_t stream, std::int32_t* perm, std::int32_t* inv, std::int32_t* map, unsigned* count, unsigned* span, std::int64_t n);
 

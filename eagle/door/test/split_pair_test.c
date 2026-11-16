@@ -48,8 +48,8 @@ struct pl {
 };
 
 /* the element types a plane may have: 0 f64, 1 i32, 2 u32, 3 b8 (a bool byte) */
-static int ty_of(const char* ty) { return strcmp(ty, "i32") == 0 ? 1 : strcmp(ty, "u32") == 0 ? 2 : strcmp(ty, "b8") == 0 ? 3 : 0; }
-static size_t esz(const struct pl* q) { return q->is_f32 ? 4 : q->is_int == 0 ? 8 : q->is_int == 3 ? 1 : 4; }
+static int ty_of(const char* ty) { return strcmp(ty, "i32") == 0 ? 1 : strcmp(ty, "u32") == 0 ? 2 : strcmp(ty, "b8") == 0 ? 3 : strcmp(ty, "i64") == 0 ? 4 : 0; }
+static size_t esz(const struct pl* q) { return q->is_f32 ? 4 : q->is_int == 0 || q->is_int == 4 ? 8 : q->is_int == 3 ? 1 : 4; }
 static int is_out(const struct pl* q) { return strcmp(q->kind, "out") == 0 || strcmp(q->kind, "outk") == 0 || strcmp(q->kind, "cell") == 0; }
 static int is_flat(const struct pl* q) { return strcmp(q->kind, "ink") == 0 || strcmp(q->kind, "outk") == 0; }
 
@@ -298,7 +298,7 @@ int main(int argc, char** argv) {
             t[i].managed.dl_tensor.device.device_type = kDLCUDA;
 #endif
             t[i].managed.dl_tensor.ndim = strcmp(q->kind, "cell") == 0 || is_flat(q) ? 1 : q->ndim + 1;
-            t[i].managed.dl_tensor.dtype.code = q->is_int == 0 ? kDLFloat : q->is_int == 1 ? kDLInt : q->is_int == 2 ? kDLUInt : kDLBool;
+            t[i].managed.dl_tensor.dtype.code = q->is_int == 0 ? kDLFloat : q->is_int == 1 || q->is_int == 4 ? kDLInt : q->is_int == 2 ? kDLUInt : kDLBool;
             t[i].managed.dl_tensor.dtype.bits = (uint8_t)(esz(q) * 8);
             t[i].managed.dl_tensor.dtype.lanes = 1;
             t[i].managed.dl_tensor.shape = t[i].shape;

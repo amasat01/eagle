@@ -310,6 +310,7 @@ struct SegState {
     std::int64_t stale_now = 0;               ///< stale live samples after the last launch
     bool sorted = false;
     plugin::ScalarHandle map_h{}, count_h{};
+    std::vector<std::uint8_t> sortkey;        ///< DEVICE dynamic: the class of each sample (sample order) at the last sort
     std::vector<void*> dev_bufs;              ///< DEVICE: the device memory of the sort and the sorted copies, made at the first launch, freed with the plan
 };
 
