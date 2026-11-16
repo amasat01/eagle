@@ -196,6 +196,7 @@ struct eg_unit_cell {
     int32_t columns;          /**< components of the cell, >= 1 */
     const int32_t* slots;     /**< ``columns`` row-plane slots in THIS unit, NULL: this unit binds none (a source unit's internal cell) */
     const char* name;         /**< joins eg_unit_stage cells_in / cells_out; reasons */
+    const int32_t* comp_slots; /**< ``columns`` row-plane slots of a SUM cell's compensation in THIS unit, NULL: none (refused on MAX / MIN) */
 };
 
 /** A plane keyed by kept lane axes, owned by eagle between stages (eg_bind sizes
@@ -347,6 +348,66 @@ struct eg_unit_team {
     int32_t of_slot;          /**< CHUNKS, TARGETS: the slot the scatter adds into, else -1 */
     int32_t status_plane;     /**< CHUNKS: index in team_planes of the out-of-range flags eagle checks after a run, else -1 */
     int32_t of_stage;         /**< CHUNKS, TARGETS: index in the kernel's stages of the unit whose body holds ``of_slot``; -1: the source unit */
+};
+
+/* ---- derived units ------------------------------------------------------- */
+
+/** Where a slot of a reverse unit comes from. ``of_slot`` is a PRIMAL slot index
+ *  unless stated otherwise. */
+typedef int32_t eg_derived_source;
+#define EG_SRC_PRIMAL 0            /**< the primal's slot ``of_slot``, unchanged */
+#define EG_SRC_STATE_ADJOINT_IN 1  /**< the adjoint of state ``of_slot``, read at this step's parity */
+#define EG_SRC_STATE_ADJOINT_OUT 2 /**< the next-step adjoint of ``of_slot``, written to the other parity */
+#define EG_SRC_PARAM_GRAD 3        /**< the accumulated gradient of parameter or uniform ``of_slot`` */
+#define EG_SRC_TAPED 4             /**< the tape rows of ``of_slot`` (the state itself when it is not taped) */
+#define EG_SRC_STEPS 5             /**< a step plane: ``of_slot`` = the taping twin's ``steps_slot``, or -1 for one eagle makes only because this unit reads it */
+#define EG_SRC_EVENT 6             /**< an event multiplier of a refine run: ``of_slot`` = the event's index in the unit's event list */
+
+/** One taped plane: rows [row0, row0 + rows) of the tape hold primal slot ``slot``. */
+struct eg_unit_taped {
+    uint32_t struct_size;
+    int32_t slot, row0, rows;
+};
+
+/** One slot of a reverse unit and its source. */
+struct eg_unit_link {
+    uint32_t struct_size;
+    int32_t slot;             /**< in THIS unit */
+    eg_derived_source source;
+    int32_t of_slot;          /**< see eg_derived_source */
+    uint32_t reduced;         /**< PARAM_GRAD only: 1 when the per-sample term is summed over samples
+                                   (eg_reverse); 0 for a per-sample parameter's gradient */
+};
+
+/** Events refine: the refined plane of a primal state. */
+struct eg_unit_refined {
+    uint32_t struct_size;
+    int32_t state_slot;       /**< in the primal */
+    int32_t refined_slot;     /**< in THIS unit */
+};
+
+/** What a derived unit is to its primal (eg_unit_meta.derived). In 0.8.0 the
+ *  caller states these facts and the library range-checks them; eagle checks
+ *  the role against the runner's need, every index and ``of_unit``. Slots are
+ *  in THIS unit unless stated; -1: absent. */
+struct eg_unit_derived {
+    uint32_t struct_size;
+    eg_derived_role role;     /**< EG_DERIVED_* (eg_door.h) */
+    int32_t of_unit;          /**< the primal's index in the library table (a taping twin shares its name) */
+    int32_t tape_slot;
+    int32_t n_taped;
+    int32_t tape_rows;        /**< rows per recorded step: the sum of the taped rows */
+    int32_t steps_slot;       /**< applied steps, int64 per sample */
+    int32_t tape_on_slot;
+    int32_t time0_slot;       /**< the time plane's start copy */
+    int32_t tau_slot;         /**< events refine: the per-sample step */
+    int32_t fused_steps_slot; /**< a fused unit: the int64 word of steps this launch fuses, set by the runner */
+    int32_t n_links;
+    int32_t n_refined;
+    int32_t reserved0;
+    const struct eg_unit_taped* const* taped;
+    const struct eg_unit_link* const* links;     /**< one per slot of a reverse unit; NULL on a taping twin */
+    const struct eg_unit_refined* const* refined;
 };
 
 #ifdef __cplusplus

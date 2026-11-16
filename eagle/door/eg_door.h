@@ -177,6 +177,7 @@ struct eg_unit_body;   /**< the typed walk (eg_unit_meta.h): slots, cells, keyed
 struct eg_unit_launch; /**< lane space, block, box, plane axes, wide placement */
 struct eg_unit_finish; /**< mask slot, steps (or EG_STEPS_AUTO), steps_max */
 struct eg_unit_team;   /**< a stage's team record */
+struct eg_unit_derived; /**< what a derived unit is to its primal: tape, reserved slots, slot sources */
 
 /** A unit named file-independently: its name and digest, never a path. */
 struct eg_unit_ref {
@@ -217,6 +218,13 @@ struct eg_unit_meta {
     const struct eg_unit_finish* finish; /**< NULL: no finish */
     const char* device_image_size;      /**< symbol of a ``uint64_t`` holding the image's byte count
                                              (written at compile time); NULL when ``device_image`` is NULL */
+    const struct eg_unit_derived* derived; /**< NULL: a primal unit (eg_unit_meta.h) */
+    const char* device_compiler;        /**< the compiler that made the image, e.g. "nvcc 12.6"; NULL: no image */
+    const char* device_flags;           /**< its flags, as given; NULL: no image */
+    int32_t device_ptx_isa;             /**< PTX ISA of the image's PTX, major * 10 + minor (85 = 8.5); 0: no PTX.
+                                             eg_unit_load refuses an image with no machine code for the device
+                                             whose PTX is newer than the driver takes */
+    int32_t reserved1;
 };
 
 /** The top of the tree: what ``eg_unit_library_meta`` returns. */
@@ -564,10 +572,22 @@ eg_status eg_run_event_times(eg_ctx* ctx, eg_runner* runner, eg_plane* out);
 /**
  * Reverse the last recorded run: ``seeds`` binds cotangents by slot,
  * ``grads`` binds the caller's gradient planes by slot (overwritten).
+ * Both use the PRIMAL unit's slot indices: a seed on a state output, a grad on
+ * a state input or a parameter. Eagle maps them to the derived units through
+ * their links (eg_unit_derived). A PARAM_GRAD link with ``reduced`` 1 is
+ * summed over samples in SAMPLE order (gathered back after a reordering run)
+ * with the canonical ordered tree of leaf 4096, as a compensated pair when the
+ * primal's cell states ``comp_slots``; the sum lands in the caller's plane of
+ * one value. Eagle owns the run-time bindings no caller sees: the forward
+ * binds the tape as a one-row dummy with ``tape_on_slot`` 0 and the recompute
+ * binds the real tape with 1; state adjoints alternate between two buffers
+ * eagle makes, by step parity; the twin's lookup planes (finished count, map)
+ * are zeroed or identity-filled; a refine run tapes one row per sample.
  * Replaces: ``diff.reverse(runner.record, ...)`` (``diff/_reverse.py``,
  * ``diff/_run.py``). Calls today: ``diff::recordForward`` replay,
  * ``diff_reverse_host`` (eagle_core.cpp). Status: OK; BAD_REQUEST (runner
- * not recorded, unknown slot); FAULT.
+ * not recorded, unknown slot, a slot with no link, a dtype mismatch);
+ * NOT_WRITTEN (a role with no old-path oracle yet); FAULT.
  */
 eg_status eg_reverse(eg_ctx* ctx, eg_runner* runner, const struct eg_bind_desc* seeds,
                      const struct eg_bind_desc* grads);
