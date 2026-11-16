@@ -385,6 +385,13 @@ void device_unit_free(eg_unit_s& unit) noexcept {
     });
 }
 
+/** @brief Queue on @p stream the fold of cell @p i of @p plan: its rows (and the compensation rows of a sum) into @p out, by the canonical tree. */
+void fold_cell(const eg_plan_s& plan, std::size_t i, const DLTensor& rows, const eg_plane_s* comp, std::int32_t op, void* out, std::uint64_t stream) {
+    cell_fold(stream, rows.data, comp != nullptr ? comp->tensor->dl_tensor.data : nullptr, rows.shape[0], rows.dtype.bits,
+              op == EG_REDUCE_SUM ? 0 : op == EG_REDUCE_MAX ? 1 : 2, out, plan.work[2 * i]->tensor->dl_tensor.data,
+              plan.work[2 * i + 1]->tensor->dl_tensor.data);
+}
+
 /** @brief Queue one launch per partition of @p plan on @p stream: grid from the partition's count and the
  *  meta's block (else the resolved one), the bound views and uniforms by value, then the triple; then each
  *  companion's fold function over its target and each cell's rows folded into the cell the caller bound
@@ -404,9 +411,7 @@ void launch_on(const eg_plan_s& plan, std::uint64_t stream) {
     for (std::size_t i = 0; i < u.cells.size(); ++i) {
         const DLTensor& rows = plan.rows[i]->tensor->dl_tensor;
         const DLTensor& out = plan.bindings[u.cells[i].slot].plane->tensor->dl_tensor;
-        cell_fold(stream, rows.data, rows.shape[0], rows.dtype.bits, u.cells[i].op == EG_REDUCE_MAX,
-                  static_cast<char*>(out.data) + out.byte_offset, plan.work[2 * i]->tensor->dl_tensor.data,
-                  plan.work[2 * i + 1]->tensor->dl_tensor.data);
+        fold_cell(plan, i, rows, plan.comps[i], u.cells[i].op, static_cast<char*>(out.data) + out.byte_offset, stream);
     }
 }
 
@@ -419,9 +424,6 @@ void device_plan_check(const eg_ctx& ctx, const eg_unit_s& unit) {
     if (unit.stages.empty() && unit.function == 0) refuse(EG_NOT_WRITTEN, who + "the unit has no device image");
     for (const StageFacts& st : unit.stages)
         if (st.unit->function == 0) refuse(EG_NOT_WRITTEN, who + "the stage '" + st.ref_name + "' has no device image");
-    for (const CellFacts& c : unit.cells)
-        if (c.op == EG_REDUCE_SUM) refuse(EG_NOT_WRITTEN, who + "the cell '" + c.name + "' sums with a compensation row, which the device does not fold yet");
-    if (!unit.split_cells.empty()) refuse(EG_NOT_WRITTEN, who + "cells on a split unit are not written on the device");
     for (const CompanionFacts& c : unit.companions)
         if (c.device_fold == 0)
             refuse(EG_NOT_WRITTEN, who + "the companion '" + unit.slots[c.slot].name + "' has no device fold function");
@@ -453,7 +455,28 @@ void launch_split(const eg_plan_s& plan) {
         std::vector<plugin::ScalarHandle> handles(n_slots);
         std::uint32_t n32 = static_cast<std::uint32_t>(plan.n_samples);
         for (std::size_t j = 0; j < n_slots; ++j) {
-            if (st.source_of[j] >= 0) {
+            if (st.row_of[j] >= 0 || st.comp_of[j] >= 0) {    // the rows this stage writes into a cell: eagle's
+                const std::size_t c = static_cast<std::size_t>(st.row_of[j] >= 0 ? st.row_of[j] : st.comp_of[j]);
+                const DLTensor& t = (st.row_of[j] >= 0 ? plan.rows[c] : plan.comps[c])->tensor->dl_tensor;
+                plugin::ScalarHandle& h = handles[j];
+                h.data = static_cast<char*>(t.data) + t.byte_offset;
+                h.samples = static_cast<std::uint64_t>(plan.n_samples);
+                h.stride = 1;
+                h.deviceType = plugin::kEagleAbiDeviceCUDA;
+                h.deviceId = 0;
+                params[j] = &h;
+            } else if (st.read_of[j] >= 0) {    // a cell an earlier stage folded: the caller's plane or eagle's, read as a table
+                const std::size_t c = static_cast<std::size_t>(st.read_of[j]);
+                const eg_plane_s* p = u.split_cells[c].source >= 0 ? plan.bindings[static_cast<std::size_t>(u.split_cells[c].source)].plane : plan.outs[c];
+                const DLTensor& t = p->tensor->dl_tensor;
+                plugin::ScalarHandle& h = handles[j];
+                h.data = static_cast<char*>(t.data) + t.byte_offset;
+                h.samples = static_cast<std::uint64_t>(elements(t));
+                h.stride = 1;
+                h.deviceType = plugin::kEagleAbiDeviceCUDA;
+                h.deviceId = 0;
+                params[j] = &h;
+            } else if (st.source_of[j] >= 0) {
                 params[j] = plan.params[static_cast<std::size_t>(st.source_of[j])];
             } else if (st.plane_of[j] >= 0) {
                 const DLTensor& t = plan.team[static_cast<std::size_t>(st.plane_of[j])]->tensor->dl_tensor;
@@ -487,6 +510,13 @@ void launch_split(const eg_plan_s& plan) {
         }
         for (const exec::Partition& p : plan.parts)
             exec::DeviceKernel::run(fn, params, p, s, su.block > 0 ? static_cast<unsigned>(su.block) : resolved_block(d, su, p.count));
+        if (plan.n_samples == 0) continue;
+        for (std::size_t c = 0; c < u.split_cells.size(); ++c) {    // this stage's cell rows folded into their cells before the next stage reads them
+            const SplitCell& sc = u.split_cells[c];
+            if (sc.stage != static_cast<std::int32_t>(&st - u.stages.data())) continue;
+            const eg_plane_s* o = sc.source >= 0 ? plan.bindings[static_cast<std::size_t>(sc.source)].plane : plan.outs[c];
+            fold_cell(plan, c, plan.rows[c]->tensor->dl_tensor, plan.comps[c], sc.op, static_cast<char*>(o->tensor->dl_tensor.data) + o->tensor->dl_tensor.byte_offset, d.stream);
+        }
     }
 }
 

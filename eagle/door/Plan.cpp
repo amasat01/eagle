@@ -408,10 +408,11 @@ void plan_new(eg_ctx& ctx, const eg_plan_desc* desc, eg_plan** out) {
             for (const SplitCell& sc : d.unit->split_cells) {
                 const StageFacts& st = d.unit->stages[static_cast<std::size_t>(sc.stage)];
                 const std::int64_t rows = std::max<std::int64_t>(1, (d.n_samples + st.cell_row - 1) / st.cell_row);
-                plan->rows.push_back(make_plane(ctx, real, { rows }, false));
-                plan->comps.push_back(sc.comp_slot >= 0 ? make_plane(ctx, real, { rows }, false) : nullptr);
-                plan->outs.push_back(sc.source < 0 ? make_plane(ctx, real, { 1 }, false) : nullptr);
+                plan->rows.push_back(make_plane(ctx, real, { rows }, device));
+                plan->comps.push_back(sc.comp_slot >= 0 ? make_plane(ctx, real, { rows }, device) : nullptr);
+                plan->outs.push_back(sc.source < 0 ? make_plane(ctx, real, { 1 }, device) : nullptr);
             }
+            if (device) device_cell_work(*plan);
         }
         ctx.plans.insert(plan);
     } catch (...) {

@@ -308,24 +308,31 @@ std::int64_t cell_work_elems(std::int64_t rows) {
 namespace {
 
 template <class T, class OP>
-void fold_as(cudaStream_t stream, const void* in, std::int64_t rows, void* out, void* wa, void* wb) {
+void fold_as(cudaStream_t stream, const void* in, const void* comp, std::int64_t rows, void* out, void* wa, void* wb) {
     namespace canon = reduce::canonical;
-    canon::enqueueTo<T, OP>(canon::DevicePtr<T>{ static_cast<const T*>(in) }, canon::NoComp{}, static_cast<idx_t>(rows), 1,
-                            reduce::Policy::ordered, static_cast<T*>(wa), static_cast<T*>(wb), static_cast<T*>(out), false,
-                            stream);
+    if (comp != nullptr)    // a compensated sum: the rows' residuals ride as the input companion
+        canon::enqueueTo<T, OP>(canon::DevicePtr<T>{ static_cast<const T*>(in) }, canon::DevicePtr<T>{ static_cast<const T*>(comp) },
+                                static_cast<idx_t>(rows), 1, reduce::Policy::ordered, static_cast<T*>(wa), static_cast<T*>(wb),
+                                static_cast<T*>(out), false, stream);
+    else
+        canon::enqueueTo<T, OP>(canon::DevicePtr<T>{ static_cast<const T*>(in) }, canon::NoComp{}, static_cast<idx_t>(rows), 1,
+                                reduce::Policy::ordered, static_cast<T*>(wa), static_cast<T*>(wb), static_cast<T*>(out), false,
+                                stream);
 }
 
 }  // namespace
 
-void cell_fold(std::uint64_t stream, const void* in, std::int64_t rows, unsigned bits, bool max, void* out, void* wa,
+void cell_fold(std::uint64_t stream, const void* in, const void* comp, std::int64_t rows, unsigned bits, int op, void* out, void* wa,
                void* wb) {
     const auto s = reinterpret_cast<cudaStream_t>(stream);
     if (bits == 32) {
-        if (max) fold_as<float, aether::MaxOp<float>>(s, in, rows, out, wa, wb);
-        else fold_as<float, reduce::canonical::MinOp<float>>(s, in, rows, out, wa, wb);
+        if (op == 0) fold_as<float, aether::SumOp<float>>(s, in, comp, rows, out, wa, wb);
+        else if (op == 1) fold_as<float, aether::MaxOp<float>>(s, in, nullptr, rows, out, wa, wb);
+        else fold_as<float, reduce::canonical::MinOp<float>>(s, in, nullptr, rows, out, wa, wb);
     } else {
-        if (max) fold_as<double, aether::MaxOp<double>>(s, in, rows, out, wa, wb);
-        else fold_as<double, reduce::canonical::MinOp<double>>(s, in, rows, out, wa, wb);
+        if (op == 0) fold_as<double, aether::SumOp<double>>(s, in, comp, rows, out, wa, wb);
+        else if (op == 1) fold_as<double, aether::MaxOp<double>>(s, in, nullptr, rows, out, wa, wb);
+        else fold_as<double, reduce::canonical::MinOp<double>>(s, in, nullptr, rows, out, wa, wb);
     }
     EAGLE_CHECK_ALWAYS(cudaGetLastError());
 }

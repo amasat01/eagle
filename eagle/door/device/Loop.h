@@ -59,9 +59,9 @@ void mask_count(std::uint64_t stream, const void* mask, std::int64_t n, unsigned
 /** @brief Elements of the cell's element type each of the two work buffers of a ``cell_fold`` over @p rows rows holds. */
 std::int64_t cell_work_elems(std::int64_t rows);
 
-/** @brief Queue on @p stream: ``*out`` = the max (@p max) or min of the @p rows float values at @p in
- *  (@p bits wide, 32 or 64), by eagle's canonical reduction tree; @p wa and @p wb are the work buffers. */
-void cell_fold(std::uint64_t stream, const void* in, std::int64_t rows, unsigned bits, bool max, void* out, void* wa,
+/** @brief Queue on @p stream: ``*out`` = the sum (@p op 0, with the compensation rows @p comp, or none when null), max (1) or min (2)
+ *  of the @p rows float values at @p in (@p bits wide, 32 or 64), by eagle's canonical reduction tree; @p wa and @p wb are the work buffers. */
+void cell_fold(std::uint64_t stream, const void* in, const void* comp, std::int64_t rows, unsigned bits, int op, void* out, void* wa,
                void* wb);
 
 /** @brief Bytes of scratch the compaction of @p n samples needs. */
