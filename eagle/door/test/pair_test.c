@@ -24,6 +24,10 @@
  *
  * Usage: pair_test <unit library> <oracle dir> <unit name> <digest hex>
  *   <oracle dir> holds the files named in the unit's row (float64 and int32 raw arrays).
+ *
+ * The device column (built as pair_device_test with EG_PAIR_DEVICE, run through the GPU pool): the unit's cuda
+ * library on a device context, its planes copied to device memory, launched under DEVICE whole and over two
+ * halves, y compared BITWISE with the old path's device output. Rows with ``device`` set only (mv).
  */
 #define _POSIX_C_SOURCE 200809L
 
@@ -33,6 +37,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#ifdef EG_PAIR_DEVICE
+#include <cuda_runtime_api.h>
+#endif
 
 #define MAXP 4
 #define MAXV 16384 /* elements per plane buffer */
@@ -139,6 +147,7 @@ struct unit_spec {
     const struct shape_spec* shapes;
     int ncases;
     struct case_spec cases[2];
+    int device;                 /* the row has a device column */
 };
 
 static const struct shape_spec three_shapes[3] = {
@@ -150,6 +159,12 @@ static const struct shape_spec two_shapes[2] = {
     { EG_STRUCTURE_HOST_TEAM, 0, "HOST_TEAM" },
     { EG_STRUCTURE_HOST_SERIAL, 0, "HOST_SERIAL" },
 };
+#ifdef EG_PAIR_DEVICE
+static const struct shape_spec device_shapes[2] = {
+    { EG_STRUCTURE_DEVICE, 0, "DEVICE whole" },
+    { EG_STRUCTURE_DEVICE, 2, "DEVICE over two halves" },
+};
+#endif
 
 static void gen_two(void* buf) {
     for (int i = 0; i < 64; ++i) ((double*)buf)[i] = 2.0;
@@ -275,7 +290,7 @@ static const struct unit_spec units[] = {
                   { F64, 3, { 8, 8, 18 }, "m_in.f64", NULL } },
       .yinit = -1.0, .threads = 3,
       .want_file = { "y_out.f64" }, .nwant = 1, .read_msg = "old path inputs and output read",
-      .nshapes = 2, .shapes = two_shapes, .ncases = 1, .cases = { { "mv with a gathered M", 0 } } },
+      .nshapes = 2, .shapes = two_shapes, .ncases = 1, .cases = { { "mv with a gathered M", 0 } }, .device = 1 },
     { .name = "ksum_c", .n = 16384, .nplanes = 2, .made = 1u << 1,
       .planes = { { F64, 1, { 2 }, NULL, NULL }, { F64, 1, { 16384 }, "x_in.f64", NULL } },
       .yinit = 0.0, .threads = 3,
@@ -306,6 +321,9 @@ static void run_case(eg_ctx* ctx, eg_unit* unit, const struct unit_spec* u, cons
     int32_t slots[MAXP];
     eg_status s = EG_OK;
     int next = 0;
+#ifdef EG_PAIR_DEVICE
+    void* dev[MAXP] = { NULL };
+#endif
     for (int i = 0; i < u->nplanes; ++i) {
         const struct plane_spec* p = &u->planes[i];
         if (i == 0)
@@ -313,10 +331,20 @@ static void run_case(eg_ctx* ctx, eg_unit* unit, const struct unit_spec* u, cons
         else
             memcpy(buf[i], data->in[i], (size_t)elems(p) * p->bits / 8);
         tensor_init(&t[i], buf[i], p->ndim, p->dims, p->code, p->bits, u->unit_stride);
+#ifdef EG_PAIR_DEVICE
+        const size_t bytes = (size_t)elems(p) * p->bits / 8;
+        if (cudaMalloc(&dev[i], bytes) != cudaSuccess || cudaMemcpy(dev[i], buf[i], bytes, cudaMemcpyHostToDevice) != cudaSuccess)
+            s = EG_FAULT;
+        t[i].managed.dl_tensor.data = dev[i];
+        t[i].managed.dl_tensor.device.device_type = kDLCUDA;
+#endif
         while ((u->made >> next) & 1u) ++next;
         slots[i] = next++;
         if (s == EG_OK) s = eg_plane_wrap(ctx, &t[i].managed, &planes[i]);
     }
+#ifdef EG_PAIR_DEVICE
+    if (cudaDeviceSynchronize() != cudaSuccess) s = EG_FAULT; /* the copies land before the context's stream reads them */
+#endif
     const int64_t base[2] = { 0, u->n / 2 }, count[2] = { u->n / 2, u->n / 2 };
     eg_plan* plan = NULL;
     struct eg_plan_desc d;
@@ -343,9 +371,16 @@ static void run_case(eg_ctx* ctx, eg_unit* unit, const struct unit_spec* u, cons
     b.uniform_values = u->has_uniform ? values : NULL;
     if (s == EG_OK) s = eg_bind(ctx, plan, &b);
     if (s == EG_OK) s = eg_launch(ctx, plan, NULL);
+#ifdef EG_PAIR_DEVICE
+    if (s == EG_OK) s = eg_sync(ctx);
+    if (s == EG_OK && cudaMemcpy(buf[0], dev[0], (size_t)ny * sizeof(double), cudaMemcpyDeviceToHost) != cudaSuccess) s = EG_FAULT;
+#endif
     if (s != EG_OK) print_reason(ctx);
     eg_plan_free(ctx, plan);
     for (int i = 0; i < u->nplanes; ++i) eg_plane_free(ctx, planes[i]);
+#ifdef EG_PAIR_DEVICE
+    for (int i = 0; i < u->nplanes; ++i) cudaFree(dev[i]);
+#endif
     int64_t first = -1;
     for (int64_t i = 0; i < ny && first < 0; ++i)
         if (memcmp(&buf[0][i], &want[i], sizeof(double)) != 0) first = i;
@@ -385,12 +420,23 @@ int main(int argc, char** argv) {
         check(ok, msg);
     }
 
+    int nshapes = u->nshapes;
+    const struct shape_spec* shapes = u->shapes;
     struct eg_ctx_settings st;
     memset(&st, 0, sizeof(st));
     st.struct_size = sizeof(st);
     st.abi_major = EG_DOOR_VERSION_MAJOR;
+#ifdef EG_PAIR_DEVICE
+    if (!u->device) {
+        fprintf(stderr, "no device column for unit %s\n", argv[3]);
+        return 2;
+    }
+    st.flags = EG_CTX_DEVICE;
+    nshapes = 2;
+    shapes = device_shapes;
+#endif
     eg_ctx* ctx = NULL;
-    check(eg_ctx_new(&st, &ctx) == EG_OK, "eg_ctx_new host context");
+    check(eg_ctx_new(&st, &ctx) == EG_OK, st.flags ? "eg_ctx_new device context (device 0)" : "eg_ctx_new host context");
     struct eg_unit_ref ref;
     memset(&ref, 0, sizeof(ref));
     ref.struct_size = sizeof(ref);
@@ -410,8 +456,8 @@ int main(int argc, char** argv) {
     }
     if (u->threads) eg_host_threads(ctx, u->threads);
     for (int c = 0; c < u->ncases; ++c)
-        for (int k = 0; k < u->nshapes; ++k)
-            run_case(ctx, unit, u, &u->shapes[k], u->cases[c].label, &data, data.want[u->cases[c].want]);
+        for (int k = 0; k < nshapes; ++k)
+            run_case(ctx, unit, u, &shapes[k], u->cases[c].label, &data, data.want[u->cases[c].want]);
     check(eg_unit_free(ctx, unit) == EG_OK && eg_ctx_free(ctx) == EG_OK, "eg_unit_free and eg_ctx_free");
     printf("%s: %d check(s) failed\n", failures ? "FAIL" : "PASS", failures);
     return failures ? 1 : 0;

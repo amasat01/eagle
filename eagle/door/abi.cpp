@@ -107,10 +107,17 @@ EG_EXPORT eg_status eg_launch(eg_ctx* ctx, eg_plan* plan, uint64_t* tiles) {
 // ---- graph operations and recording ----------------------------------------
 
 EG_EXPORT eg_status eg_reduce(eg_ctx* ctx, const struct eg_reduce_desc* desc) {
-    return door::call(ctx, [&](eg_ctx& c) { door::reduce(c, desc); });
+    return door::call(ctx, [&](eg_ctx& c) {
+        const eg_reduce_desc d = door::read_input(desc, "eg_reduce_desc");
+        door::host_planes_only(c, "eg_reduce", { d.in, d.out, d.comp });
+        door::reduce(c, desc);
+    });
 }
 EG_EXPORT eg_status eg_copy(eg_ctx* ctx, eg_plane* src, eg_plane* dst) {
-    return door::call(ctx, [&](eg_ctx& c) { door::copy(c, src, dst); });
+    return door::call(ctx, [&](eg_ctx& c) {
+        door::host_planes_only(c, "eg_copy", { src, dst });
+        door::copy(c, src, dst);
+    });
 }
 EG_EXPORT eg_status eg_record_begin(eg_ctx* ctx) {
     return door::call(ctx, door::record_begin);
@@ -134,7 +141,10 @@ EG_EXPORT eg_status eg_graph_free(eg_ctx* ctx, eg_graph* graph) {
 // ---- runs ------------------------------------------------------------------
 
 EG_EXPORT eg_status eg_runner_new(eg_ctx* ctx, const struct eg_runner_desc* desc, eg_runner** out) {
-    return door::call(ctx, [&](eg_ctx& c) { door::runner_new(c, desc, out); });
+    return door::call(ctx, [&](eg_ctx& c) {
+        door::host_plans_only(c, desc);
+        door::runner_new(c, desc, out);
+    });
 }
 
 EG_EXPORT eg_status eg_runner_free(eg_ctx* ctx, eg_runner* runner) {
@@ -151,6 +161,8 @@ EG_EXPORT eg_status eg_run(eg_ctx* ctx, eg_runner* runner, struct eg_run_report*
     return door::call(ctx, [&](eg_ctx& c) { door::run(c, runner, report); });
 }
 
+EG_EXPORT eg_status eg_sync(eg_ctx* ctx) { return door::call(ctx, door::device_sync); }
+
 // ---- not written in this build ---------------------------------------------
 
 EG_EXPORT eg_status eg_run_event_times(eg_ctx* ctx, eg_runner*, eg_plane*) {
@@ -165,5 +177,4 @@ EG_EXPORT eg_status eg_device_props(eg_ctx* ctx, int32_t, struct eg_device_props
     return not_written(ctx, "eg_device_props");
 }
 EG_EXPORT eg_status eg_stream_use(eg_ctx* ctx, uint64_t) { return not_written(ctx, "eg_stream_use"); }
-EG_EXPORT eg_status eg_sync(eg_ctx* ctx) { return not_written(ctx, "eg_sync"); }
 EG_EXPORT eg_status eg_record_child(eg_ctx* ctx, uint64_t) { return not_written(ctx, "eg_record_child"); }

@@ -22,6 +22,17 @@
 #   make ... PAIR_WING_DIR=<dir> KERNEL_mv=<.cpp> META_mv=<.c> ORACLE_mv=<dir> pair-mv
 #
 # The unit's digest is DIGEST_<unit> (defaults below); its host entry is <unit>_host.
+#
+# CUDA=<toolkit root> builds the device group into the library (device/Device.cpp without EAGLE_CPU_ONLY,
+# linked to the CUDA runtime, which finds the driver at run time); empty: host only. Give the device build its
+# own OUT. Device targets build and never run (run their binaries through the GPU pool):
+#
+#   device              the library, the device fixture unit and door_device_test; run
+#                       $(OUT)/door_device_test $(OUT)/libfixture_device.so $(OUT)/libfixture_unit.so
+#   pair-device-<unit>  the unit's cuda kernel text (KERNEL_CUDA_<unit>, compiled by the old path's
+#                       device recipe, PAIR_DEVICE_FLAGS) and its meta (META_CUDA_<unit>) in one library, plus
+#                       pair_device_test; run $(OUT)/pair_device_test $(OUT)/libpair_dev_<unit>.so <oracle dir>
+#                       <unit> <digest>. Needs PAIR_CUDA_WING_DIR=<raptor cuda wing dir>. Units: mv.
 
 CXX ?= g++
 CC ?= gcc
@@ -43,6 +54,14 @@ DIGEST_fixed_count ?= 05d3a0e97314e339dbfd5954d37989dbae00c41573028aa809901dc65b
 PAIR_HOST_FLAGS ?= -O3 -ffp-contract=fast -fno-math-errno -march=native -mprefer-vector-width=512 \
   -fno-trapping-math -DAETHER_HOST_VECTOR_MATH -DAETHER_HVM_MASKED=1 -std=c++23 -fPIC -DAETHER_CPP_MODE
 
+CUDA ?=
+NVCC ?= $(CUDA)/bin/nvcc
+PAIR_CUDA_WING_DIR ?=
+PAIR_DEVICE_UNITS := mv
+# The old path's device recipe for a cuda unit (hawk's nvcc build), as an sm_61 cubin: PTX of a toolkit newer
+# than the driver does not load, a cubin does (CUDA minor-version compatibility).
+PAIR_DEVICE_FLAGS ?= -cubin -std=c++20 -arch=sm_61 -O3 -Xptxas -O3 -Wno-deprecated-gpu-targets
+
 ROOT := $(abspath $(CURDIR)/../..)
 WARN := -Wall -Wextra -pedantic -Werror
 CXXFLAGS_DOOR := -std=c++23 -O2 -fPIC -fvisibility=hidden -fvisibility-inlines-hidden \
@@ -50,13 +69,17 @@ CXXFLAGS_DOOR := -std=c++23 -O2 -fPIC -fvisibility=hidden -fvisibility-inlines-h
   -include $(WING_FACTS) -I$(ROOT) -I$(AETHER_INCLUDE)
 CFLAGS_C := -std=c11 -O2 -ffp-contract=off $(WARN) -I$(ROOT)
 
-SRC := Context.cpp Unit.cpp Plane.cpp Plan.cpp abi.cpp host/Runner.cpp host/Ops.cpp host/Record.cpp
+comma := ,
+CXXFLAGS_DEVICE := $(filter-out -DEAGLE_CPU_ONLY=1,$(CXXFLAGS_DOOR)) -isystem $(CUDA)/include
+CUDART := $(if $(CUDA),-L$(CUDA)/lib64 -lcudart -Wl$(comma)-rpath$(comma)$(CUDA)/lib64)
+
+SRC := Context.cpp Unit.cpp Plane.cpp Plan.cpp abi.cpp host/Runner.cpp host/Ops.cpp host/Record.cpp device/Device.cpp
 OBJ := $(SRC:%.cpp=$(OUT)/%.o)
 LIB := $(OUT)/libeagle_door.so
 FIXTURE := $(OUT)/libfixture_unit.so
 TEST := $(OUT)/door_test
 
-.PHONY: all lib symbols test check-inputs pairs $(PAIR_UNITS:%=pair-%)
+.PHONY: all lib symbols test check-inputs check-cuda pairs device $(PAIR_UNITS:%=pair-%) $(PAIR_DEVICE_UNITS:%=pair-device-%)
 all: test
 
 check-inputs:
@@ -67,8 +90,13 @@ $(OUT)/%.o: %.cpp Context.h eg_door.h eg_unit_meta.h host/Team.h host/Ops.h | ch
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS_DOOR) -c $< -o $@
 
+# The device group: built with the CUDA headers when CUDA is set, else its host-only refusals.
+$(OUT)/device/Device.o: device/Device.cpp Context.h eg_door.h eg_unit_meta.h | check-inputs
+	@mkdir -p $(dir $@)
+	$(CXX) $(if $(CUDA),$(CXXFLAGS_DEVICE),$(CXXFLAGS_DOOR)) -c $< -o $@
+
 $(LIB): $(OBJ) door.map
-	$(CXX) -shared -o $@ $(OBJ) -Wl,--version-script=$(CURDIR)/door.map -Wl,--no-undefined -fopenmp -pthread -ldl
+	$(CXX) -shared -o $@ $(OBJ) -Wl,--version-script=$(CURDIR)/door.map -Wl,--no-undefined -fopenmp -pthread -ldl $(CUDART)
 
 lib: $(LIB)
 
@@ -120,3 +148,51 @@ endef
 $(foreach u,$(PAIR_UNITS),$(eval $(call PAIR_RULES,$(u))))
 
 pairs: $(PAIR_UNITS:%=pair-%)
+
+# ---- device targets (CUDA set) ----
+
+check-cuda:
+	@test -n "$(CUDA)" -a -x "$(NVCC)" || { echo "set CUDA to a CUDA toolkit root"; exit 1; }
+
+# $(1) the image file, $(2) the symbol, $(3) the object: it exports the image's bytes as $(2) and their count as
+# the uint64_t $(2)_size (the two symbols a meta names in device_image and device_image_size).
+embed = printf '.section .rodata\n.balign 16\n.globl $(2)\n.type $(2),@object\n$(2):\n.incbin "%s"\n$(2)_end:\n.balign 8\n.globl $(2)_size\n.type $(2)_size,@object\n$(2)_size:\n.quad $(2)_end - $(2)\n.section .note.GNU-stack,"",@progbits\n' $(1) > $(3:.o=.S) && $(CC) -c $(3:.o=.S) -o $(3)
+
+DEVICE_FIXTURE := $(OUT)/libfixture_device.so
+DEVICE_TEST := $(OUT)/door_device_test
+
+$(OUT)/fixture_device.fatbin: test/fixture_device.cu | check-cuda
+	@mkdir -p $(OUT)
+	$(NVCC) -fatbin -arch=sm_61 -Wno-deprecated-gpu-targets -std=c++20 -ccbin $(CXX) -I$(ROOT) $< -o $@
+
+$(DEVICE_FIXTURE): test/fixture_device.c $(OUT)/fixture_device.fatbin eg_door.h eg_unit_meta.h
+	$(call embed,$(OUT)/fixture_device.fatbin,fixture__image,$(OUT)/fixture_device_image.o)
+	$(CC) $(CFLAGS_C) -fPIC -shared -fvisibility=hidden -o $@ $< $(OUT)/fixture_device_image.o
+
+$(DEVICE_TEST): test/door_device_test.c eg_door.h $(LIB) | check-cuda
+	$(CC) $(CFLAGS_C) -isystem $(CUDA)/include -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door -Wl,-rpath,$(OUT) $(CUDART) -lm -pthread
+
+device: check-cuda symbols $(FIXTURE) $(DEVICE_FIXTURE) $(DEVICE_TEST)
+
+PAIR_DEVICE_TEST := $(OUT)/pair_device_test
+
+$(PAIR_DEVICE_TEST): test/pair_test.c eg_door.h $(LIB) | check-cuda
+	$(CC) $(CFLAGS_C) -DEG_PAIR_DEVICE -isystem $(CUDA)/include -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door \
+	  -Wl,-rpath,$(OUT) $(CUDART) -pthread
+
+# $(1) = unit. The kernel text compiled as the old path compiles it, embedded as <unit>__image.
+define PAIR_DEVICE_RULES
+$(OUT)/libpair_dev_$(1).so: $$(KERNEL_CUDA_$(1)) $$(META_CUDA_$(1)) eg_door.h eg_unit_meta.h | check-inputs check-cuda
+	@test -f "$$(KERNEL_CUDA_$(1))" -a -f "$$(META_CUDA_$(1))" -a -d "$$(PAIR_CUDA_WING_DIR)" || \
+	  { echo "set KERNEL_CUDA_$(1), META_CUDA_$(1) and PAIR_CUDA_WING_DIR"; exit 1; }
+	@mkdir -p $(OUT)
+	$$(NVCC) $$(PAIR_DEVICE_FLAGS) -ccbin $$(CXX) -I $$(AETHER_INCLUDE) -I $$(AETHER_INCLUDE)/eagle \
+	  -I$$(PAIR_CUDA_WING_DIR) $$(KERNEL_CUDA_$(1)) -o $(OUT)/pair_dev_$(1).cubin
+	$$(call embed,$(OUT)/pair_dev_$(1).cubin,$(1)__image,$(OUT)/pair_dev_$(1)_image.o)
+	$$(CC) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$$(ROOT) \
+	  -c $$(META_CUDA_$(1)) -o $(OUT)/pair_dev_$(1)_meta.o
+	$$(CC) -shared -o $$@ $(OUT)/pair_dev_$(1)_meta.o $(OUT)/pair_dev_$(1)_image.o
+
+pair-device-$(1): symbols $(OUT)/libpair_dev_$(1).so $$(PAIR_DEVICE_TEST)
+endef
+$(foreach u,$(PAIR_DEVICE_UNITS),$(eval $(call PAIR_DEVICE_RULES,$(u))))

@@ -15,8 +15,8 @@ namespace door {
 
 namespace {
 
-/** @brief Check the settings of a new context; refuses as eg_ctx_new states. */
-void check_settings(const eg_ctx_settings* in) {
+/** @brief Check the settings of a new context and open its device; refuses as eg_ctx_new states. */
+void check_settings(eg_ctx& ctx, const eg_ctx_settings* in) {
     const eg_ctx_settings s = read_input(in, "eg_ctx_settings");
     if (s.flags & ~EG_CTX_DEVICE)
         refuse(EG_BAD_REQUEST, "eg_ctx_settings.flags: unknown bits " +
@@ -33,8 +33,7 @@ void check_settings(const eg_ctx_settings* in) {
     if (s.device < 0)
         refuse(EG_BAD_REQUEST, "eg_ctx_settings.device " + std::to_string(s.device) +
                ": a device ordinal is >= 0");
-    refuse(EG_NOT_WRITTEN, "eg_ctx_settings EG_CTX_DEVICE (device " + std::to_string(s.device) +
-           "): the device group is not built");
+    device_open(ctx, s.device);
 }
 
 }  // namespace
@@ -46,7 +45,7 @@ eg_status ctx_new(const eg_ctx_settings* settings, eg_ctx** out) noexcept {
     eg_ctx* ctx = new (std::nothrow) eg_ctx;
     if (ctx == nullptr) return EG_FAULT;
     ctx->pid = static_cast<long>(::getpid());
-    const eg_status status = call(ctx, [&](eg_ctx&) { check_settings(settings); });
+    const eg_status status = call(ctx, [&](eg_ctx& c) { check_settings(c, settings); });
     ctx->refused = status;
     *out = ctx;
     return status;
@@ -55,8 +54,8 @@ eg_status ctx_new(const eg_ctx_settings* settings, eg_ctx** out) noexcept {
 /**
  * @brief Free every handle still made from @p ctx: graphs and any open recording first, then runners (they hold
  * plan references), then plans (they hold plane and unit references), then
- * planes, then units. In a forked child no deleter runs and no library is
- * closed: only eagle's own memory is freed.
+ * planes, then units, then the device. In a forked child no deleter runs, no
+ * library is closed and no device call is made: only eagle's own memory is freed.
  */
 void ctx_free_all(eg_ctx& ctx) {
     const bool child = forked(ctx);
@@ -75,10 +74,12 @@ void ctx_free_all(eg_ctx& ctx) {
     }
     ctx.planes.clear();
     for (eg_unit_s* unit : ctx.units) {
+        if (!child) device_unit_free(*unit);
         if (!child && unit->library != nullptr) ::dlclose(unit->library);
         delete unit;
     }
     ctx.units.clear();
+    if (!child) device_close(ctx);
 }
 
 /** @brief Fill @p out per the OUTPUT struct rule (eg_ctx_info). */
@@ -90,11 +91,12 @@ void ctx_info(eg_ctx& ctx, struct eg_ctx_info* out) {
     struct eg_ctx_info info{};
     info.abi_major = EG_DOOR_VERSION_MAJOR;
     info.abi_minor = EG_DOOR_VERSION_MINOR;
-    info.device = -1;
-    info.capabilities = EG_CAP_HOST | EG_CAP_COND_IF_ELSE | EG_CAP_COND_SWITCH;
+    const bool device = ctx.dev.ordinal >= 0;
+    info.device = ctx.dev.ordinal;
+    info.capabilities = EG_CAP_HOST | EG_CAP_COND_IF_ELSE | EG_CAP_COND_SWITCH | (device ? EG_CAP_DEVICE : 0);
     info.host_threads = host::team_threads(ctx);
-    info.device_type = 0;
-    info.stream = -1;
+    info.device_type = device ? kDLCUDA : 0;
+    info.stream = device ? static_cast<std::int64_t>(ctx.dev.stream) : -1;
     const std::uint32_t n = std::min<std::uint32_t>(out->struct_size, sizeof(info));
     info.struct_size = n;
     std::memcpy(static_cast<void*>(out), static_cast<const void*>(&info), n);

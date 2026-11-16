@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // eg_unit_load: open the unit library, read its constant meta, check it, and
-// keep the facts eg_bind and eg_launch need. Every member past a record's
+// keep the facts eg_bind and eg_launch need (on a device context the device
+// image is loaded too, device/Device.cpp). Every member past a record's
 // struct_size reads as its documented absent value.
 #include "eagle/door/Context.h"
 #include "eagle/door/eg_unit_meta.h"
@@ -195,6 +196,10 @@ void read_body(const eg_unit_meta& m, void* library, eg_unit_s& unit) {
     absent.active_map_slot = absent.active_count_slot = -1;
     absent.index_map_slot = absent.index_count_slot = -1;
     const eg_unit_launch launch = read_record(m.launch, absent, "unit '" + unit.name + "' launch");
+    if (launch.block < 0)
+        refuse(EG_BAD_REQUEST, "meta that contradicts itself: unit '" + unit.name + "' block " + std::to_string(launch.block));
+    unit.block = launch.block;
+    unit.device_box = launch.device_box != nullptr;
     if (launch.index_map_slot != -1 && launch.index_count_slot == -1)
         refuse(EG_BAD_REQUEST, "meta that contradicts itself: unit '" + unit.name + "' names an index map without its count");
     if (launch.index_count_slot != -1) {
@@ -354,6 +359,7 @@ void read_unit(const eg_unit_meta& m, void* library, eg_unit_s& unit) {
         check_size_block(library, unit.name);
     }
     read_body(m, library, unit);
+    if (unit.ctx->dev.ordinal >= 0 && m.device_image != nullptr) device_unit_load(unit, m, library);
 }
 
 /** @brief Check the load description (flags, path, unit reference, deps). */
@@ -400,6 +406,7 @@ void unit_load(eg_ctx& ctx, const eg_unit_load_desc* desc, eg_unit** out) {
             read_unit(m, library, *unit);
             ctx.units.insert(unit);
         } catch (...) {
+            device_unit_free(*unit);
             delete unit;
             throw;
         }
@@ -414,6 +421,7 @@ void unit_load(eg_ctx& ctx, const eg_unit_load_desc* desc, eg_unit** out) {
 void unit_release(eg_ctx& ctx, eg_unit_s* unit) {
     if (--unit->refs > 0) return;
     ctx.units.erase(unit);
+    device_unit_free(*unit);
     ::dlclose(unit->library);
     delete unit;
 }

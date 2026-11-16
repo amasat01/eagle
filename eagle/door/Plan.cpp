@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// Plans: a unit under one host structure over fixed partitions; bindings by
-// slot, checked once at eg_bind; eg_launch runs eagle's host team over them.
+// Plans: a unit under one structure over fixed partitions; bindings by slot,
+// checked once at eg_bind; eg_launch runs eagle's host team over them, or one
+// device launch per partition (device/Device.cpp).
 #include "eagle/door/Context.h"
 #include "eagle/door/eg_unit_meta.h"
 
@@ -18,7 +19,7 @@ namespace {
  *  inside [0, n) without overlap. */
 std::vector<exec::Partition> read_partitions(const eg_plan_desc& d) {
     const std::int64_t n = d.n_samples;
-    if (d.unit->box_t > 0) {    // a thread box: base and count count threads, ceil(n / (t * stride)) * stride of them
+    if (d.unit->box_t > 0 && d.structure != EG_STRUCTURE_DEVICE) {    // a host thread box: base and count count threads, ceil(n / (t * stride)) * stride of them
         if (d.n_partitions != 0)
             refuse(EG_BAD_REQUEST, "unit '" + d.unit->name + "' computes " + std::to_string(d.unit->box_t) +
                    " lanes per thread (a thread box), so its partitions count threads, not lanes; pass none");
@@ -78,6 +79,9 @@ void check_plane(const eg_plan_s& plan, int slot, const eg_plane_s& plane) {
     const SlotFacts& s = plan.unit->slots[slot];
     const DLTensor& t = plane.tensor->dl_tensor;
     const std::string what = "slot " + std::to_string(slot) + " ('" + s.name + "')";
+    if ((t.device.device_type == kDLCUDA) != (plan.structure == EG_STRUCTURE_DEVICE))
+        refuse(EG_BAD_REQUEST, what + (t.device.device_type == kDLCUDA ? ": a device plane in a host plan"
+                                                                       : ": a host plane in a DEVICE plan"));
     if (!dtype_ok(t.dtype, s, plan.unit->scalar_type))
         refuse(EG_BAD_REQUEST, what + ": dtype (code " + std::to_string(t.dtype.code) + ", bits " +
                std::to_string(t.dtype.bits) + ") is not the slot's");
@@ -218,6 +222,11 @@ void check_bind(const eg_ctx& ctx, const eg_plan_s& plan, const eg_bind_desc& d)
     if (plan.unit->index_map_slot >= 0) check_index_set(plan, d);
 }
 
+/** @brief The device tag a view of @p plan carries (the device id stays 0, as ``_plan_pack`` writes it). */
+std::int32_t abi_device(const eg_plan_s& plan) {
+    return plan.structure == EG_STRUCTURE_DEVICE ? plugin::kEagleAbiDeviceCUDA : plugin::kEagleAbiDeviceCPU;
+}
+
 /** @brief Bind slot @p slot of @p plan to the 40-byte mirror of a compact (components, n) plane: the
  *  component pitch is n and the sample pitch 1 (``_plan_pack._gref_mirror_box`` of a compact plane). */
 void bind_mirror(eg_plan_s& plan, int slot, void* data, std::uint64_t n) {
@@ -226,7 +235,7 @@ void bind_mirror(eg_plan_s& plan, int slot, void* data, std::uint64_t n) {
     b.mirror.samples_ = n;
     b.mirror.compStride_ = n;
     b.mirror.sampleStride_ = 1;
-    b.mirror.deviceType_ = plugin::kEagleAbiDeviceCPU;
+    b.mirror.deviceType_ = abi_device(plan);
     b.mirror.deviceId_ = 0;
     b.bound = true;
     plan.params[slot] = &b.mirror;
@@ -238,7 +247,7 @@ void bind_handle(eg_plan_s& plan, int slot, void* data, std::uint64_t count) {
     b.handle.data = data;
     b.handle.samples = count;
     b.handle.stride = 1;
-    b.handle.deviceType = plugin::kEagleAbiDeviceCPU;
+    b.handle.deviceType = abi_device(plan);
     b.handle.deviceId = 0;
     b.bound = true;
     plan.params[slot] = &b.handle;
@@ -246,23 +255,23 @@ void bind_handle(eg_plan_s& plan, int slot, void* data, std::uint64_t count) {
 
 }  // namespace
 
-/** @brief eg_plan_new: a host plan of the unit over checked partitions. */
+/** @brief eg_plan_new: a host or DEVICE plan of the unit over checked partitions. */
 void plan_new(eg_ctx& ctx, const eg_plan_desc* desc, eg_plan** out) {
     if (out == nullptr) refuse(EG_BAD_REQUEST, "eg_plan_new: out is NULL");
     *out = nullptr;
     const eg_plan_desc d = read_input(desc, "eg_plan_desc");
     if (d.flags != 0) refuse(EG_BAD_REQUEST, "eg_plan_desc.flags: unknown bits " + std::to_string(d.flags));
     check_handle(ctx.units, d.unit, "eg_plan_desc.unit");
-    if (d.structure == EG_STRUCTURE_DEVICE)
-        refuse(EG_NOT_WRITTEN, "structure DEVICE: the device group is not built");
-    if (d.structure != EG_STRUCTURE_HOST_TEAM && d.structure != EG_STRUCTURE_HOST_SERIAL)
+    const bool device = d.structure == EG_STRUCTURE_DEVICE;
+    if (device) device_plan_check(ctx, *d.unit);
+    else if (d.structure != EG_STRUCTURE_HOST_TEAM && d.structure != EG_STRUCTURE_HOST_SERIAL)
         refuse(EG_BAD_REQUEST, "unknown structure " + std::to_string(d.structure));
     if (d.policy != EG_REDUCE_COMPENSATED && d.policy != EG_REDUCE_FIXED)
         refuse(EG_BAD_REQUEST, "unknown reduce policy " + std::to_string(d.policy));
     if (d.n_samples < 0) refuse(EG_BAD_REQUEST, "n_samples " + std::to_string(d.n_samples) + " < 0");
-    if (d.unit->scalar_type == EG_SCALAR_BANDED)
+    if (!device && d.unit->scalar_type == EG_SCALAR_BANDED)
         refuse(EG_NOT_WRITTEN, "unit '" + d.unit->name + "': a BANDED unit on a host structure");
-    if (d.unit->host_entry == nullptr)
+    if (!device && d.unit->host_entry == nullptr)
         refuse(EG_NOT_WRITTEN, "unit '" + d.unit->name + "' has no host entry");
     std::vector<exec::Partition> parts = read_partitions(d);
     for (const exec::Partition& p : parts)    // a row of a cell has one writer: a partition starts on a row
@@ -274,7 +283,7 @@ void plan_new(eg_ctx& ctx, const eg_plan_desc* desc, eg_plan** out) {
     static constexpr exec::Access kAccess[] = { exec::Access::SampleLocal,
         exec::Access::CrossSampleRead, exec::Access::CrossSampleWrite };
     try {
-        exec::check_placement(kAccess[d.unit->access], exec::Structure::HostTeam,
+        exec::check_placement(kAccess[d.unit->access], device ? exec::Structure::DeviceKernel : exec::Structure::HostTeam,
                               static_cast<int>(parts.size()));
     } catch (const std::runtime_error& e) {
         refuse(EG_BAD_REQUEST, e.what());
@@ -387,13 +396,29 @@ void bind(eg_ctx& ctx, eg_plan_s* plan, const eg_bind_desc* desc) {
     }
 }
 
+/** @brief Refuse a runner over a DEVICE plan (handles not of @p ctx are left to eg_runner_new's own checks). */
+void host_plans_only(const eg_ctx& ctx, const eg_runner_desc* desc) {
+    const eg_runner_desc d = read_input(desc, "eg_runner_desc");
+    for (std::int32_t i = 0; d.plans != nullptr && i < d.n_plans; ++i)
+        if (ctx.plans.count(d.plans[i]) != 0 && d.plans[i]->structure == EG_STRUCTURE_DEVICE)
+            refuse(EG_NOT_WRITTEN, "eg_runner_new over a DEVICE plan: runners on a device are not written in this build of the door");
+}
+
 /** @brief Bind @p slot of @p plan to eagle's own memory (a runner's active set). */
 void bind_raw(eg_plan_s& plan, int slot, void* data, std::uint64_t count) { bind_handle(plan, slot, data, count); }
 
-/** @brief eg_launch: the host team (or the serial reference) over each partition. */
+/** @brief eg_launch: the host team (or the serial reference) over each partition; a DEVICE plan
+ *  queues one kernel launch per partition on the context's stream (eg_sync waits for them). */
 void launch(eg_ctx& ctx, eg_plan_s* plan, std::uint64_t* tiles) {
     check_handle(ctx.plans, plan, "plan");
     check_bound(*plan);
+    if (plan->structure == EG_STRUCTURE_DEVICE) {
+        if (ctx.rec != nullptr)
+            refuse(EG_NOT_WRITTEN, "recording a DEVICE launch is not written in this build of the door");
+        device_launch(*plan);
+        if (tiles != nullptr) *tiles = 0;
+        return;
+    }
     if (record_launch(ctx, plan)) {
         if (tiles != nullptr) *tiles = 0;
         return;

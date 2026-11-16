@@ -14,11 +14,14 @@
 #include "plugin/dlpack.h"
 #include "plugin/gref_layout.h"
 
+struct eg_unit_meta;
+
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <exception>
+#include <initializer_list>
 #include <new>
 #include <stdexcept>
 #include <string>
@@ -140,6 +143,11 @@ struct eg_unit_s {
     std::int64_t box_t = 0, box_stride = 1;   ///< a host thread box: each thread serves box_t lanes box_stride apart; 0: none
     std::int32_t index_map_slot = -1;         ///< the caller's int32/int64 LOOKUP of lanes to run (an index set), -1: none
     std::int32_t index_count_slot = -1;       ///< the caller's uint32 LOOKUP count: lanes run (with no map: the prefix)
+    std::int32_t block = 0;                   ///< device threads per block the meta states, 0: eagle's choice
+    bool device_box = false;                  ///< the meta states a device thread box
+    std::uint64_t module = 0;                 ///< the loaded device image (a CUmodule), 0: none
+    std::uint64_t function = 0;               ///< its device function (a CUfunction), 0: none
+    int regs = 0, max_threads = 0;            ///< the device function's registers per thread and most threads per block
     int refs = 1;                             ///< the caller's reference plus one per plan
     bool caller_ref = true;
 };
@@ -211,6 +219,21 @@ struct eg_runner_s {
     eagle::door::ActiveState act;
 };
 
+namespace eagle {
+namespace door {
+
+/** @brief The device of a device context and the facts a launch reads (device/Device.cpp). */
+struct DeviceState {
+    std::int32_t ordinal = -1;                ///< -1: a host-only context
+    int handle = 0;                           ///< the driver's device (a CUdevice)
+    std::uint64_t context = 0;                ///< its primary context (a CUcontext), retained while the context lives
+    std::uint64_t stream = 0;                 ///< the context's own stream (a CUstream)
+    int sms = 0, regs_per_sm = 0, smem_per_sm = 0, threads_per_sm = 0, cc_major = 0, cc_minor = 0;
+};
+
+}  // namespace door
+}  // namespace eagle
+
 struct eg_graph_s;      // a recorded list of door calls (host/Record.cpp)
 struct eg_recording_s;  // the recording in progress on a context (host/Record.cpp)
 
@@ -228,6 +251,7 @@ struct eg_ctx_s {
     std::unordered_set<eg_runner_s*> runners;
     std::unordered_set<eg_graph_s*> graphs;
     eg_recording_s* rec = nullptr;            ///< between eg_record_begin and eg_record_end
+    eagle::door::DeviceState dev;             ///< EG_CTX_DEVICE: the device and its stream
 
     /** @brief Store @p text as the reason, never throwing. */
     void set_reason(const char* text) noexcept {
@@ -330,6 +354,17 @@ void record_end(eg_ctx& ctx, eg_graph** out);
 void graph_launch(eg_ctx& ctx, eg_graph_s* graph);
 void graph_free(eg_ctx& ctx, eg_graph_s* graph);
 void record_drop_all(eg_ctx& ctx);
+void host_planes_only(const eg_ctx& ctx, const char* op, std::initializer_list<const eg_plane_s*> planes);
+void host_plans_only(const eg_ctx& ctx, const eg_runner_desc* desc);
+
+// The device group (device/Device.cpp); the host-only build refuses EG_CTX_DEVICE and structure DEVICE.
+void device_open(eg_ctx& ctx, std::int32_t device);
+void device_close(eg_ctx& ctx) noexcept;
+void device_unit_load(eg_unit_s& unit, const eg_unit_meta& meta, void* library);
+void device_unit_free(eg_unit_s& unit) noexcept;
+void device_plan_check(const eg_ctx& ctx, const eg_unit_s& unit);
+void device_launch(eg_plan_s& plan);
+void device_sync(eg_ctx& ctx);
 
 }  // namespace door
 }  // namespace eagle

@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Planes: DLPack tensors taken by eagle, reference-counted; the producer's
-// deleter runs exactly once, when the last reference drops.
+// deleter runs exactly once, when the last reference drops. A device context
+// also takes kDLCUDA tensors of its own device.
 #include "eagle/door/Context.h"
 
 #include <memory>
@@ -34,9 +35,14 @@ void plane_wrap(eg_ctx& ctx, DLManagedTensorVersioned* tensor, eg_plane** out) {
         refuse(EG_NOT_WRITTEN, "eg_plane_wrap: DLPack major " + std::to_string(tensor->version.major) +
                " (this eagle reads major " + std::to_string(DLPACK_MAJOR_VERSION) + ")");
     const DLTensor& t = tensor->dl_tensor;
-    if (t.device.device_type != kDLCPU)
+    if (t.device.device_type == kDLCUDA && ctx.dev.ordinal >= 0) {
+        if (t.device.device_id != ctx.dev.ordinal)
+            refuse(EG_BAD_REQUEST, "eg_plane_wrap: a kDLCUDA plane of device " + std::to_string(t.device.device_id) +
+                   " on the context of device " + std::to_string(ctx.dev.ordinal));
+    } else if (t.device.device_type != kDLCPU) {
         refuse(EG_NOT_WRITTEN, "eg_plane_wrap: device type " + std::to_string(t.device.device_type) +
-               " on a host-only context (host planes are kDLCPU)");
+               (ctx.dev.ordinal >= 0 ? " (planes are kDLCPU or kDLCUDA)" : " on a host-only context (host planes are kDLCPU)"));
+    }
     if (!known_dtype(t.dtype))
         refuse(EG_NOT_WRITTEN, "eg_plane_wrap: dtype (code " + std::to_string(t.dtype.code) +
                ", bits " + std::to_string(t.dtype.bits) + ", lanes " +
@@ -93,6 +99,13 @@ eg_plane_s* make_plane(eg_ctx& ctx, const DLDataType& dtype, std::vector<std::in
     plane_wrap(ctx, &m, &plane);
     made.release();
     return plane;
+}
+
+/** @brief Refuse @p op over a device plane among @p planes (handles not of @p ctx are left to @p op's own checks). */
+void host_planes_only(const eg_ctx& ctx, const char* op, std::initializer_list<const eg_plane_s*> planes) {
+    for (const eg_plane_s* p : planes)
+        if (ctx.planes.count(const_cast<eg_plane_s*>(p)) != 0 && p->tensor->dl_tensor.device.device_type != kDLCPU)
+            refuse(EG_NOT_WRITTEN, std::string(op) + " of a device plane is not written in this build of the door");
 }
 
 /** @brief Drop one reference to @p plane; the last one runs the tensor's deleter. */
