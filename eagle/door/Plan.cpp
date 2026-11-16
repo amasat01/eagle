@@ -317,7 +317,9 @@ void plan_new(eg_ctx& ctx, const eg_plan_desc* desc, eg_plan** out) {
                 plan->params[i] = b.value;
             }
         if (d.unit->finish.present && d.unit->finish.steps_slot >= 0)    // the steps word of an AUTO unit
-            bind_handle(*plan, d.unit->finish.steps_slot, &plan->steps_word, 1);
+            bind_handle(*plan, d.unit->finish.steps_slot,
+                        d.structure == EG_STRUCTURE_DEVICE ? reinterpret_cast<void*>(plan->device_steps)
+                                                           : static_cast<void*>(&plan->steps_word), 1);
         if (!d.unit->cells.empty()) {    // the rows of every cell component, zeroed
             const DLDataType real{ kDLFloat, static_cast<std::uint8_t>(d.unit->scalar_type == EG_SCALAR_FLOAT32 ? 32 : 64), 1 };
             const std::int64_t rows = std::max<std::int64_t>(1, (d.n_samples + d.unit->cell_row - 1) / d.unit->cell_row);

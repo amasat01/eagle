@@ -59,7 +59,7 @@ CUDA ?=
 NVCC ?= $(CUDA)/bin/nvcc
 PAIR_CUDA_WING_DIR ?=
 CUDA_WING_FACTS ?= $(PAIR_CUDA_WING_DIR)/raptor_facts.h
-PAIR_DEVICE_UNITS := mv osc osc_x4 ksum_c fixed_count _osc _osc_x4
+PAIR_DEVICE_UNITS := mv osc osc_x4 ksum_c fixed_count _osc _osc_x4 oscillator
 # The old path's device recipe for a cuda unit (hawk's nvcc build) in the image format its meta records
 # (EG_IMAGE_PTX: -ptx, else -cubin). PAIR_NVCC/PAIR_CCBIN: the compiler the old run used (its cache's
 # validity record); PTX of a toolkit newer than the driver does not load.
@@ -188,6 +188,11 @@ device: check-cuda symbols $(FIXTURE) $(DEVICE_FIXTURE) $(DEVICE_TEST)
 PAIR_DEVICE_TEST := $(OUT)/pair_device_test
 RUNNER_PAIR_TEST := $(OUT)/runner_pair_test
 ACTIVE_PAIR_TEST := $(OUT)/active_pair_test
+FAST_PAIR_TEST := $(OUT)/fast_pair_test
+
+$(FAST_PAIR_TEST): test/fast_pair_test.c test/pair_util.h eg_door.h $(LIB) | check-cuda
+	$(CC) $(CFLAGS_C) -isystem $(CUDA)/include -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door \
+	  -Wl,-rpath,$(OUT) $(CUDART) -lm -pthread
 
 $(RUNNER_PAIR_TEST): test/runner_pair_test.c test/pair_util.h eg_door.h $(LIB) | check-cuda
 	$(CC) $(CFLAGS_C) -isystem $(CUDA)/include -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door \
@@ -215,6 +220,6 @@ $(OUT)/libpair_dev_$(1).so: $$(KERNEL_CUDA_$(1)) $$(META_CUDA_$(1)) eg_door.h eg
 	  -c $$(META_CUDA_$(1)) -o $(OUT)/pair_dev_$(1)_meta.o
 	$$(CC) -shared -o $$@ $(OUT)/pair_dev_$(1)_meta.o $(OUT)/pair_dev_$(1)_image.o
 
-pair-device-$(1): symbols $(OUT)/libpair_dev_$(1).so $$(PAIR_DEVICE_TEST) $$(RUNNER_PAIR_TEST) $$(ACTIVE_PAIR_TEST)
+pair-device-$(1): symbols $(OUT)/libpair_dev_$(1).so $$(PAIR_DEVICE_TEST) $$(RUNNER_PAIR_TEST) $$(ACTIVE_PAIR_TEST) $$(FAST_PAIR_TEST)
 endef
 $(foreach u,$(PAIR_DEVICE_UNITS),$(eval $(call PAIR_DEVICE_RULES,$(u))))

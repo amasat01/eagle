@@ -102,6 +102,8 @@ struct FinishFacts {
     std::int64_t steps = 0;          ///< steps one launch takes, >= 1; EG_STEPS_AUTO
     std::int32_t steps_slot = -1;    ///< AUTO: the int64 LOOKUP word the runner sets per launch
     std::int64_t steps_max = 0;      ///< AUTO: the most steps one launch takes
+    std::uint32_t flags = 0;         ///< EG_FINISH_*
+    std::int64_t ops = 0;            ///< one step's operation count the launch rules read (fp64_ops_ir, else step_ops), 0: none
 };
 
 /** @brief The element count of @p t (the product of its shape). */
@@ -150,6 +152,8 @@ struct eg_unit_s {
     std::uint64_t module = 0;                 ///< the loaded device image (a CUmodule), 0: none
     std::uint64_t function = 0;               ///< its device function (a CUfunction), 0: none
     int regs = 0, max_threads = 0;            ///< the device function's registers per thread and most threads per block
+    std::uint64_t persist_fn = 0, range_fn = 0;   ///< AUTO: the image's ``<function>_persist`` / ``_range`` entries, 0: absent
+    int persist_regs = 0, persist_max_threads = 0;
     int refs = 1;                             ///< the caller's reference plus one per plan
     bool caller_ref = true;
 };
@@ -184,6 +188,7 @@ struct eg_plan_s {
     std::uint32_t finished = 0;               ///< the eagle-made finished counter of a finishing unit
     std::int64_t steps_word = 0;              ///< the eagle-made steps word of an AUTO unit
     std::uint64_t device_counter = 0;         ///< DEVICE with a finish: the device cell of the finished counter
+    std::uint64_t device_steps = 0;           ///< DEVICE with steps AUTO: the device int64 steps word
     eg_runner_s* active_owner = nullptr;      ///< the runner whose active set the plan reads
     int refs = 1;                             ///< the caller's reference plus one per runner
     bool caller_ref = true;
@@ -226,6 +231,9 @@ struct DeviceRun {
     std::uint64_t cells = 0;                  ///< device [remaining, ran, total, live count, finished at last compaction, compactions] (uint32)
     std::uint64_t map = 0, scratch = 0;       ///< an active set's device live-slot map (int32) and its compaction scratch
     double build_s = 0.0;                     ///< the capture's wall
+    int mode = EG_MODE_BAND;                  ///< steps AUTO: EG_MODE_FUSED_ONE or EG_MODE_PERSIST (no graph)
+    unsigned block = 0, grid = 0, chunk = 0;  ///< the persist launch
+    std::uint64_t fast = 0;                   ///< the persist entry's device [next, steps] (uint32)
     std::vector<unsigned char> bound;         ///< the plans' argument bytes the loop was captured over
     DeviceRun() = default;
     DeviceRun(const DeviceRun&) = delete;
@@ -257,6 +265,7 @@ struct DeviceState {
     std::uint64_t context = 0;                ///< its primary context (a CUcontext), retained while the context lives
     std::uint64_t stream = 0;                 ///< the context's own stream (a CUstream)
     int sms = 0, regs_per_sm = 0, smem_per_sm = 0, threads_per_sm = 0, cc_major = 0, cc_minor = 0;
+    int fp64_ratio = 1;                       ///< FP32:FP64 throughput ratio (1 when not reported)
 };
 
 }  // namespace door

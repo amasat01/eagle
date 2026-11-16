@@ -12,6 +12,7 @@
 #ifndef EAGLE_CPU_ONLY
 #include "eagle/door/device/Loop.h"
 #include "eagle/exec/DeviceKernel.h"
+#include "eagle/policy/Launch.h"
 #include "eagle/policy/Residency.h"
 
 #include <algorithm>
@@ -141,6 +142,7 @@ void device_open(eg_ctx& ctx, std::int32_t device) {
     d.regs_per_sm = attribute(dev, CU_DEVICE_ATTRIBUTE_MAX_REGISTERS_PER_MULTIPROCESSOR, "registers per SM");
     d.smem_per_sm = attribute(dev, CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_MULTIPROCESSOR, "shared memory per SM");
     d.threads_per_sm = attribute(dev, CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_MULTIPROCESSOR, "threads per SM");
+    d.fp64_ratio = std::max(1, attribute(dev, CU_DEVICE_ATTRIBUTE_SINGLE_TO_DOUBLE_PRECISION_PERF_RATIO, "FP64 ratio"));
     d.cc_major = attribute(dev, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, "compute capability");
     d.cc_minor = attribute(dev, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, "compute capability");
 }
@@ -197,6 +199,21 @@ void device_unit_load(eg_unit_s& unit, const eg_unit_meta& m, void* library) {
     unit.function = reinterpret_cast<std::uint64_t>(fn);
     check(cuFuncGetAttribute_(&unit.regs, CU_FUNC_ATTRIBUTE_NUM_REGS, fn), who + ": cuFuncGetAttribute");
     check(cuFuncGetAttribute_(&unit.max_threads, CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK, fn), who + ": cuFuncGetAttribute");
+    if (unit.finish.present && unit.finish.steps == EG_STEPS_AUTO) {    // the fast entries of an automatic unit
+        const std::string base = m.device_function;
+        for (const char* suffix : { "_persist", "_range" }) {
+            CUfunction e = nullptr;
+            const CUresult er = cuModuleGetFunction_(&e, module, (base + suffix).c_str());
+            if (er == CUDA_ERROR_NOT_FOUND) continue;
+            check(er, who + ": cuModuleGetFunction (" + base + suffix + ")");
+            (suffix[1] == 'p' ? unit.persist_fn : unit.range_fn) = reinterpret_cast<std::uint64_t>(e);
+            if (suffix[1] == 'p') {
+                check(cuFuncGetAttribute_(&unit.persist_regs, CU_FUNC_ATTRIBUTE_NUM_REGS, e), who + ": cuFuncGetAttribute");
+                check(cuFuncGetAttribute_(&unit.persist_max_threads, CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK, e),
+                      who + ": cuFuncGetAttribute");
+            }
+        }
+    }
     for (CompanionFacts& c : unit.companions) {
         if (c.device_fold_name.empty()) continue;
         CUfunction fold = nullptr;
@@ -251,9 +268,7 @@ void device_plan_check(const eg_ctx& ctx, const eg_unit_s& unit) {
     if (ctx.dev.ordinal < 0)
         refuse(EG_BAD_REQUEST, "structure DEVICE on a host-only context (made without EG_CTX_DEVICE)");
     const std::string who = "unit '" + unit.name + "' on DEVICE: ";
-    const char* feature = unit.finish.present && unit.finish.steps == EG_STEPS_AUTO
-                              ? "an automatic step count (finish steps AUTO: the fused, persistent and wave entries)"
-                          : unit.index_count_slot >= 0           ? "an index set"
+    const char* feature = unit.index_count_slot >= 0             ? "an index set"
                           : unit.device_box                      ? "a device thread box (team grid)"
                           : unit.scalar_type == EG_SCALAR_BANDED ? "a BANDED scalar type"
                                                                  : nullptr;
@@ -274,6 +289,7 @@ void device_launch(eg_plan_s& plan) {
 void device_plan_cells(eg_plan_s& plan) {
     Current current(plan.ctx->dev);
     plan.device_counter = cells_new(1);
+    if (plan.unit->finish.steps == EG_STEPS_AUTO) plan.device_steps = cells_new(2);    // the int64 steps word, 0
 }
 
 /** @brief Free what device_plan_cells made. */
@@ -281,7 +297,8 @@ void device_plan_free(eg_plan_s& plan) noexcept {
     if (plan.device_counter == 0) return;
     Current current(plan.ctx->dev);
     cells_free(plan.device_counter);
-    plan.device_counter = 0;
+    cells_free(plan.device_steps);
+    plan.device_counter = plan.device_steps = 0;
 }
 
 /** @brief A zeroed device allocation of @p bytes on the context's device. */
@@ -316,7 +333,150 @@ DeviceRun::~DeviceRun() {
     cells_free(cells);
     cells_free(map);
     cells_free(scratch);
+    cells_free(fast);
 }
+
+namespace {
+
+/** @brief The old path's entry-pick constants (``_until_done``): PICK_FUSED_DIVISOR, PICK_PERSIST_MULTIPLE,
+ *  ``_launch_policy.W_KNEE_DEFAULT`` and AUTO_STEP_OPS. */
+constexpr std::int64_t kPickFusedDivisor = 4, kPickPersistMultiple = 8, kWKnee = 8, kAutoStepOps = 33;
+
+policy::ResidencyDevice residency(const DeviceState& d) { return { d.cc_major, d.cc_minor, d.regs_per_sm, d.threads_per_sm }; }
+
+policy::LaunchDevice launch_device(const DeviceState& d) {
+    policy::LaunchDevice l;
+    l.residency = residency(d);
+    l.sms = d.sms;
+    l.fp64Ratio = std::max(1, d.fp64_ratio);
+    return l;
+}
+
+/** @brief ``_launch_policy.capacity``: SMs times the threads one SM keeps resident at @p regs, 0: unknown. */
+std::int64_t capacity(const DeviceState& d, int regs) {
+    const std::int64_t threads = d.regs_per_sm > 0 && regs > 0 ? policy::residentWarps(residency(d), regs) * 32LL : 0;
+    return d.sms <= 0 || threads <= 0 ? 0 : d.sms * threads;
+}
+
+/** @brief ``_launch_policy.persistent_geometry``: grid SMs * @p blocks, the block narrowed from @p ideal to the
+ *  largest warp multiple of which @p blocks fit one SM at the persist entry's registers. */
+void persist_geometry(const DeviceState& d, const eg_unit_s& u, int blocks, int ideal, DeviceRun& r) {
+    r.block = static_cast<unsigned>(ideal);
+    r.grid = d.sms <= 0 ? 0u : static_cast<unsigned>(d.sms * blocks);
+    if (d.sms <= 0 || d.regs_per_sm <= 0 || u.persist_max_threads <= 0 || u.persist_regs <= 0) return;
+    for (int bs = std::min(ideal, u.persist_max_threads / 32 * 32); bs >= 32; bs -= 32)
+        if (policy::residentBlocks(residency(d), u.persist_regs, bs) >= blocks) {
+            r.block = static_cast<unsigned>(bs);
+            return;
+        }
+}
+
+/** @brief The no-graph entry of a runner over an automatic unit (``Runner._build_auto`` / ``_build_fast``, its
+ *  first-run size rule, ``_fast_mode_for`` with ``_entry_regime``), the steps word set to the budget once and the
+ *  persist launch sized at the first step fill; what needs the policy band loop, a priced entry pick or an
+ *  entry this build does not launch is refused by name. */
+void fast_runner_setup(eg_ctx& ctx, const eg_runner_desc& d, eg_runner_s& runner) {
+    const eg_plan_s& plan = *d.plans[0];
+    const eg_unit_s& u = *plan.unit;
+    const DeviceState& dev = ctx.dev;
+    const std::string who = "unit '" + u.name + "' (finish steps AUTO): ";
+    if (d.every != 0)
+        refuse(EG_BAD_REQUEST, "every " + std::to_string(d.every) + ": " + who + "the runner picks the steps of each launch");
+    if (u.active_map_slot >= 0)
+        refuse(EG_NOT_WRITTEN, who + "an active set with an automatic step count on a device is not written in this build "
+               "of the door");
+    if (plan.parts.size() != 1)
+        refuse(EG_NOT_WRITTEN, who + "a plan of " + std::to_string(plan.parts.size()) + " partitions runs the automatic "
+               "band loop (the per-launch step policy), which is not written in this build of the door");
+    if (u.range_fn != 0)
+        refuse(EG_NOT_WRITTEN, who + "the range entry '_range' (a unit built with the fast entries) is not written in this "
+               "build of the door");
+    const std::int64_t n = plan.n_samples;
+    const std::int64_t wave = std::min(capacity(dev, u.regs), dev.sms * 32 * kWKnee);
+    const std::int64_t persist_cap = u.persist_fn != 0 ? capacity(dev, u.persist_regs) : 0;
+    int mode = 0;
+    if (wave > 0 && n <= wave) mode = EG_MODE_FUSED_ONE;
+    else if (wave > 0 && u.persist_fn != 0) mode = EG_MODE_PERSIST;
+    if (persist_cap > 0 && n >= kPickPersistMultiple * persist_cap) {
+        if (u.persist_fn != 0) mode = EG_MODE_PERSIST;
+    } else if (wave > 0 && n * kPickFusedDivisor <= wave) {
+        mode = EG_MODE_FUSED_ONE;
+    }
+    if (mode == 0)
+        refuse(EG_NOT_WRITTEN, who + "a batch of " + std::to_string(n) + " samples that neither entry takes runs the automatic "
+               "band loop (the per-launch step policy), which is not written in this build of the door");
+    runner.dev.mode = mode;
+    const unsigned word[2] = { static_cast<unsigned>(static_cast<std::uint64_t>(d.max_steps) & 0xFFFFFFFFu),
+                               static_cast<unsigned>(static_cast<std::uint64_t>(d.max_steps) >> 32) };
+    cells_write(dev.stream, plan.device_steps, word, 2);
+    if (mode != EG_MODE_PERSIST) return;
+    runner.dev.fast = cells_new(2);
+    const bool fp64 = u.scalar_type != EG_SCALAR_FLOAT32;
+    const double ops = static_cast<double>(u.finish.ops > 0 ? u.finish.ops : kAutoStepOps);
+    const policy::LaunchDevice l = launch_device(dev);
+    runner.dev.chunk = static_cast<unsigned>(policy::persistChunk(l, fp64, ops, 1e9));
+    const int threads = policy::persistThreads(l, fp64, u.persist_regs, n, policy::PERSIST_FIRST_FILL,
+                                               static_cast<int>(runner.dev.chunk), ops);
+    int blocks = 1;
+    while (threads > 0 && threads / blocks > 512) blocks *= 2;
+    persist_geometry(dev, u, threads > 0 ? blocks : 1, threads > 0 ? threads / blocks / 32 * 32 : 256, runner.dev);
+}
+
+/** @brief One no-graph run (``Runner._run_fast``): re-sync or zero the counter as the entry counts, one launch of
+ *  the fused entry (word = the budget) or the persist entry, one readback; the report as the old fast path. */
+void fast_run(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report) {
+    EG_DRIVER(cuLaunchKernel);
+    eg_plan_s& first = *runner->plans[0];
+    const FinishFacts& f = first.unit->finish;
+    const std::int64_t n = first.n_samples;
+    DeviceRun& r = runner->dev;
+    const std::uint64_t stream = ctx.dev.stream;
+    Current current(ctx.dev);
+    const bool persist = r.mode == EG_MODE_PERSIST;    // the one exact entry here: it maxes each sample's steps
+    const bool counts = (f.flags & EG_FINISH_ENTRY_COUNTS) != 0 && persist;
+    if (persist) {
+        const unsigned zero[2] = { 0, 0 };
+        cells_write(stream, r.fast, zero, 2);
+        cells_write(stream, first.device_counter, zero, 1);
+    }
+    const DLTensor& t = first.bindings[static_cast<std::size_t>(f.mask_slot)].plane->tensor->dl_tensor;
+    if (!counts)
+        mask_count(stream, static_cast<const char*>(t.data) + t.byte_offset, n, t.dtype.bits / 8u,
+                   reinterpret_cast<unsigned*>(first.device_counter));
+    if (persist) {
+        long long base = 0, count = n, samples = n;
+        void* next = reinterpret_cast<void*>(r.fast);
+        void* util = nullptr;
+        void* steps = reinterpret_cast<void*>(r.fast + sizeof(unsigned));
+        void* stepsum = nullptr;
+        unsigned chunk = r.chunk;
+        std::vector<void*> args(first.params.begin(), first.params.end());
+        for (void* a : { static_cast<void*>(&base), static_cast<void*>(&count), static_cast<void*>(&samples),
+                         static_cast<void*>(&next), static_cast<void*>(&util), static_cast<void*>(&steps),
+                         static_cast<void*>(&stepsum), static_cast<void*>(&chunk) })
+            args.push_back(a);
+        check(cuLaunchKernel_(reinterpret_cast<CUfunction>(first.unit->persist_fn), r.grid, 1, 1, r.block, 1, 1, 0,
+                              reinterpret_cast<CUstream>(stream), args.data(), nullptr),
+              "unit '" + first.unit->name + "': the persist launch (cuLaunchKernel)");
+    } else {
+        launch_on(first, stream);
+    }
+    unsigned steps_read = 0, finished = 0;
+    if (persist) cells_read(stream, r.fast + sizeof(unsigned), &steps_read, 1);
+    cells_read(stream, first.device_counter, &finished, 1);
+    const bool done = static_cast<std::int64_t>(finished) == n;
+    eg_run_report out{};
+    out.flags = (done ? EG_REPORT_DONE : 0u) | (persist || !done ? EG_REPORT_EXACT_STEPS : 0u);
+    out.mode = r.mode;
+    out.n = n;
+    out.finished = finished;
+    out.launches = 1;
+    out.steps = persist ? static_cast<std::int64_t>(steps_read) : runner->max_steps;
+    out.mapped = n;
+    write_report(report, out);
+}
+
+}  // namespace
 
 /** @brief eg_runner_new over DEVICE plans: the band loop (``_until_done.Runner``) of a fixed-step finishing unit,
  *  with an active set when its units read one (launches over the map's live prefix, compaction every ``every``
@@ -338,6 +498,23 @@ void device_runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out)
         refuse(EG_NOT_WRITTEN, "EG_RUN_REORDER (reordering the planes by the active set) on a device is not written "
                "in this build of the door");
     const std::int64_t k = d.plans[0]->unit->finish.steps;
+    if (k == EG_STEPS_AUTO) {    // the no-graph entries: no loop, no loop cells
+        auto* runner = new eg_runner_s;
+        try {
+            runner->plans.assign(d.plans, d.plans + d.n_plans);
+            runner->max_steps = d.max_steps;
+            runner->dev.ctx = &ctx;
+            Current current(ctx.dev);
+            fast_runner_setup(ctx, d, *runner);
+            ctx.runners.insert(runner);
+        } catch (...) {
+            delete runner;
+            throw;
+        }
+        for (eg_plan_s* p : runner->plans) ++p->refs;
+        *out = runner;
+        return;
+    }
     const bool active = d.plans[0]->unit->active_map_slot >= 0 && check_active(d);
     if (active && d.plans[0]->unit->group != 1)
         refuse(EG_NOT_WRITTEN, "an active set over groups of " + std::to_string(d.plans[0]->unit->group) +
@@ -398,6 +575,7 @@ void device_run(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report) {
                "the door");
     check_report(report);
     for (const eg_plan_s* p : runner->plans) check_bound(*p);
+    if (runner->dev.mode != EG_MODE_BAND) return fast_run(ctx, runner, report);
     eg_plan_s& first = *runner->plans[0];
     const FinishFacts& f = first.unit->finish;
     const std::int64_t n = first.n_samples, k = f.steps;
