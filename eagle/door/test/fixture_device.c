@@ -109,16 +109,28 @@ static const struct eg_unit_launch launch_keyed = {
         .pattern = EG_PATTERN_PURE, .scalar_type = EG_SCALAR_FLOAT64, .device_image = "fixture__image",    \
         .device_function = function_, .device_image_format = EG_IMAGE_FATBIN, .body = &body_, .launch = &launch_, \
         .device_image_size = "fixture__image_size" }
+/* The images of nvcc 12.9 (the R4 rows): a fatbin (sm_61 code and compute_61 PTX) that loads, PTX only (the 12.6 driver refuses
+ * it: PTX 8.8), and a cubin for sm_70 alone (no machine code for an sm_61 device). Same kernel, function "axpy". */
+#define IMAGE_UNIT(var, name_, byte, sym, format_, isa_)                                                    \
+    static const struct eg_unit_meta var = {                                                                \
+        .struct_size = sizeof(struct eg_unit_meta), .name = name_, .digest = DIGEST(byte),                 \
+        .pattern = EG_PATTERN_PURE, .scalar_type = EG_SCALAR_FLOAT64, .device_image = sym "__image",         \
+        .device_function = "axpy", .device_image_format = format_, .body = &body, .launch = &launch_any,     \
+        .device_image_size = sym "__image_size", .device_compiler = "nvcc 12.9", .device_ptx_isa = isa_ }
+IMAGE_UNIT(unit_fat129, "fat129", 0xE1, "fat129", EG_IMAGE_FATBIN, 88);
+IMAGE_UNIT(unit_ptx129, "ptx129", 0xE2, "ptx129", EG_IMAGE_PTX, 88);
+IMAGE_UNIT(unit_sass70, "sass70", 0xE3, "sass70", EG_IMAGE_FATBIN, 0);
+
 MADE_UNIT(unit_dcells, "dcells", 0xD2, "dcells", cells_body, launch_any);
 MADE_UNIT(unit_dkeyed, "dkeyed", 0xD3, "dkeyed", keyed_ok_body, launch_keyed);
 MADE_UNIT(unit_dkeyednf, "dkeyednf", 0xD4, "dkeyed", keyed_nofn_body, launch_keyed);
 MADE_UNIT(unit_dkeyedh, "dkeyedh", 0xD5, "dkeyed", keyed_host_body, launch_keyed);
 
 static const struct eg_unit_meta* const units[] = { &unit_axpy, &unit_axpy64, &unit_boxdev, &unit_banded, &unit_nofn,
-                                                    &unit_noimg, &unit_dcells, &unit_dkeyed, &unit_dkeyednf, &unit_dkeyedh };
+                                                    &unit_noimg, &unit_dcells, &unit_dkeyed, &unit_dkeyednf, &unit_dkeyedh, &unit_fat129, &unit_ptx129, &unit_sass70 };
 
 static const struct eg_library_meta library = {
-    .struct_size = sizeof(struct eg_library_meta), .schema_major = EG_META_SCHEMA_MAJOR, .n_units = 10, .units = units,
+    .struct_size = sizeof(struct eg_library_meta), .schema_major = EG_META_SCHEMA_MAJOR, .n_units = 13, .units = units,
 };
 
 __attribute__((visibility("default"))) const struct eg_library_meta* eg_unit_library_meta(void) { return &library; }

@@ -353,9 +353,23 @@ $(OUT)/fixture_device.fatbin: test/fixture_device.cu | check-cuda
 	@mkdir -p $(OUT)
 	$(NVCC) -fatbin -arch=sm_61 -Wno-deprecated-gpu-targets -std=c++20 -ccbin $(CXX) -I$(ROOT) $< -o $@
 
-$(DEVICE_FIXTURE): test/fixture_device.c $(OUT)/fixture_device.fatbin eg_door.h eg_unit_meta.h
+# The same kernel as nvcc 12.9 images (test/fixture_device.cu): a fatbin with sm_61 code and compute_61 PTX, PTX only, and an sm_70 cubin.
+$(OUT)/fat129.fatbin: test/fixture_device.cu | check-cuda
+	@mkdir -p $(OUT)
+	$(NVCC) -fatbin -gencode arch=compute_61,code=[sm_61,compute_61] -Wno-deprecated-gpu-targets -std=c++20 -ccbin $(CXX) -I$(ROOT) $< -o $@
+$(OUT)/ptx129.ptx: test/fixture_device.cu | check-cuda
+	@mkdir -p $(OUT)
+	$(NVCC) -ptx -arch=compute_61 -Wno-deprecated-gpu-targets -std=c++20 -ccbin $(CXX) -I$(ROOT) $< -o $@
+$(OUT)/sass70.fatbin: test/fixture_device.cu | check-cuda
+	@mkdir -p $(OUT)
+	$(NVCC) -fatbin -gencode arch=compute_70,code=sm_70 -Wno-deprecated-gpu-targets -std=c++20 -ccbin $(CXX) -I$(ROOT) $< -o $@
+
+$(DEVICE_FIXTURE): test/fixture_device.c $(OUT)/fixture_device.fatbin $(OUT)/fat129.fatbin $(OUT)/ptx129.ptx $(OUT)/sass70.fatbin eg_door.h eg_unit_meta.h
 	$(call embed,$(OUT)/fixture_device.fatbin,fixture__image,$(OUT)/fixture_device_image.o)
-	$(CC) $(CFLAGS_C) -fPIC -shared -fvisibility=hidden -o $@ $< $(OUT)/fixture_device_image.o
+	$(call embed,$(OUT)/fat129.fatbin,fat129__image,$(OUT)/fat129_image.o)
+	$(call embed,$(OUT)/ptx129.ptx,ptx129__image,$(OUT)/ptx129_image.o)
+	$(call embed,$(OUT)/sass70.fatbin,sass70__image,$(OUT)/sass70_image.o)
+	$(CC) $(CFLAGS_C) -fPIC -shared -fvisibility=hidden -o $@ $< $(OUT)/fixture_device_image.o $(OUT)/fat129_image.o $(OUT)/ptx129_image.o $(OUT)/sass70_image.o
 
 $(DEVICE_TEST): test/door_device_test.c eg_door.h $(LIB) | check-cuda
 	$(CC) $(CFLAGS_C) -isystem $(CUDA)/include -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door -Wl,-rpath,$(OUT) $(CUDART) -lm -pthread

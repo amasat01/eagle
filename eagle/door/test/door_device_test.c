@@ -305,13 +305,20 @@ int main(int argc, char** argv) {
     check(eg_stream_use(ctx, 0) == EG_OK, "eg_stream_use 0 (eagle's own stream) on a device context");
 
     /* Units. */
-    eg_unit *axpy = NULL, *axpy64 = NULL, *u = NULL;
+    eg_unit *axpy = NULL, *axpy64 = NULL, *u = NULL, *fat129 = NULL;
     check(load(ctx, dev_lib, "axpy", 0xC1, &axpy) == EG_OK && load(ctx, dev_lib, "axpy64", 0xC2, &axpy64) == EG_OK,
           "eg_unit_load axpy and axpy64 (fatbin image, module and function per unit)");
     check(refused(load(ctx, dev_lib, "nofn", 0xC5, &u), EG_FAULT, ctx, "lacks the function 'missing'"),
           "a device function the image lacks: FAULT naming it");
     check(refused(load(ctx, dev_lib, "noimg", 0xC6, &u), EG_FAULT, ctx, "lacks its device image 'absent__image'"),
           "a device image symbol the library lacks: FAULT naming it");
+    /* R4: the driver's own answer to the image, mapped. The images are nvcc 12.9's; this driver may be older. */
+    check(refused(load(ctx, dev_lib, "ptx129", 0xE2, &u), EG_BAD_REQUEST, ctx, "newer driver") && reason_has(ctx, "PTX 8.8") &&
+              reason_has(ctx, "nvcc 12.9"),
+          "a PTX-only image newer than the driver: BAD_REQUEST naming 'newer driver', 'PTX 8.8' and the compiler");
+    check(refused(load(ctx, dev_lib, "sass70", 0xE3, &u), EG_BAD_REQUEST, ctx, "no machine code"),
+          "a fatbin with sm_70 code only and no PTX on this device: BAD_REQUEST naming 'no machine code'");
+    check(load(ctx, dev_lib, "fat129", 0xE1, &fat129) == EG_OK, "eg_unit_load fat129 (nvcc 12.9 fatbin, sm_61 code and compute_61 PTX)");
     eg_unit* on_host = NULL;
     check(load(host, dev_lib, "axpy", 0xC1, &on_host) == EG_OK, "eg_unit_load axpy on a host context (no image loaded)");
     eg_plan* p = NULL;
@@ -348,12 +355,13 @@ int main(int argc, char** argv) {
 
     /* Launches against the plain-C oracle. */
     const int64_t base[2] = { 0, 300 }, count[2] = { 300, N - 300 };
-    struct { eg_unit* unit; int64_t parts; const char* what; } runs[3] = {
+    struct { eg_unit* unit; int64_t parts; const char* what; } runs[4] = {
         { axpy, 0, "axpy, DEVICE whole, eagle's block" },
         { axpy, 2, "axpy, DEVICE (0,300),(300,700)" },
+        { fat129, 0, "fat129 (nvcc 12.9 fatbin), DEVICE whole" },
         { axpy64, 0, "axpy64, DEVICE whole, the meta's block 64" },
     };
-    for (int r = 0; r < 3; ++r) {
+    for (int r = 0; r < 4; ++r) {
         memset(y, 0, sizeof(y));
         cudaMemset(dy, 0, sizeof(y));
         cudaDeviceSynchronize();
@@ -368,7 +376,7 @@ int main(int argc, char** argv) {
         char what[160];
         snprintf(what, sizeof(what), "%s: launch, eg_sync, tiles 0, y bitwise == the plain-C oracle", runs[r].what);
         check(s == EG_OK && tiles == 0 && memcmp(y, want, sizeof(y)) == 0, what);
-        if (r < 2) eg_plan_free(ctx, p);
+        if (r < 3) eg_plan_free(ctx, p);
     }
 
     /* Binding and operation refusals (p: the axpy64 DEVICE plan, bound). */

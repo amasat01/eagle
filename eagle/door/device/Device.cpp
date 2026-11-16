@@ -267,7 +267,19 @@ void device_unit_load(eg_unit_s& unit, const eg_unit_meta& m, void* library) {
     EG_DRIVER(cuFuncGetAttribute);
     Current current(unit.ctx->dev);
     CUmodule module = nullptr;
-    check(cuModuleLoadData_(&module, copy.c_str()), who + ": loading the device image (cuModuleLoadData)");
+    const CUresult loaded = cuModuleLoadData_(&module, copy.c_str());
+    if (loaded == CUDA_ERROR_UNSUPPORTED_PTX_VERSION) {   // the driver's own answer: its JIT is older than the image's PTX
+        EG_DRIVER(cuDriverGetVersion);
+        int version = 0;
+        cuDriverGetVersion_(&version);
+        refuse(EG_BAD_REQUEST, who + ": image needs a newer driver (PTX " +
+               (m.device_ptx_isa > 0 ? std::to_string(m.device_ptx_isa / 10) + "." + std::to_string(m.device_ptx_isa % 10) : std::string("unstated")) +
+               ", compiler " + (m.device_compiler != nullptr ? m.device_compiler : "unstated") + ", driver " +
+               std::to_string(version / 1000) + "." + std::to_string(version % 1000 / 10) + ")");
+    }
+    if (loaded == CUDA_ERROR_NO_BINARY_FOR_GPU)
+        refuse(EG_BAD_REQUEST, who + ": no machine code for this device and no loadable PTX");
+    check(loaded, who + ": loading the device image (cuModuleLoadData)");
     unit.module = reinterpret_cast<std::uint64_t>(module);
     CUfunction fn = nullptr;
     const CUresult r = cuModuleGetFunction_(&fn, module, m.device_function);
