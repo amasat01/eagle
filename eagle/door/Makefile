@@ -84,7 +84,7 @@ LIB := $(OUT)/libeagle_door.so
 FIXTURE := $(OUT)/libfixture_unit.so
 TEST := $(OUT)/door_test
 
-.PHONY: all lib symbols test check-inputs check-cuda pairs pair-reverse pair-reverse-active pair-reverse-timed pair-reverse-reorder pair-reverse-t0 pair-reverse-counter pair-refine pair-refine-reverse device $(PAIR_UNITS:%=pair-%) $(PAIR_DEVICE_UNITS:%=pair-device-%)
+.PHONY: all lib symbols test check-inputs check-cuda pairs pair-reverse pair-reverse-active pair-reverse-timed pair-reverse-fused pair-reverse-kstep pair-reverse-reorder pair-reverse-t0 pair-reverse-counter pair-refine pair-refine-reverse device $(PAIR_UNITS:%=pair-%) $(PAIR_DEVICE_UNITS:%=pair-device-%)
 all: test
 
 check-inputs:
@@ -160,6 +160,7 @@ META_act ?= test/derived/pend_body_meta.c
 META_act_t0 ?= test/derived/pend_body_time0_meta.c
 META_act_counter ?= test/derived/pend_body_counter_meta.c
 META_timed ?= test/derived/timed_meta.c
+META_auto ?= test/derived/rr_pend_auto_meta.c
 define REV_RULES
 $(OUT)/libpair_$(2).so: $$(KERNEL_$(3)) $$(KERNEL_$(3)_tape) $$(KERNEL_$(3)_step_vjp) $$(META_$(1)) eg_door.h eg_unit_meta.h | check-inputs
 	@test -f "$$(KERNEL_$(3))" -a -f "$$(KERNEL_$(3)_tape)" -a -f "$$(KERNEL_$(3)_step_vjp)" -a -f "$$(META_$(1))" -a \
@@ -176,6 +177,7 @@ endef
 $(eval $(call REV_RULES,reverse,reverse,rr_pend))
 $(eval $(call REV_RULES,act,reverse_active,pend_body))
 $(eval $(call REV_RULES,timed,reverse_timed,timed))
+$(eval $(call REV_RULES,auto,reverse_auto,rr_pend_auto))
 $(eval $(call REV_RULES,act_t0,reverse_t0,pend_body))
 $(eval $(call REV_RULES,act_counter,reverse_counter,pend_body))
 
@@ -196,6 +198,42 @@ DIGEST_timed_step_vjp ?= 7e96064e7bac22b669c0eb9fbcc145e7b9b9b55d45a4279688d213d
 pair-reverse-timed: symbols $(OUT)/libpair_reverse_timed.so $(REV_TEST)
 	$(REV_TEST) $(REV_FIXTURE) $(OUT)/libpair_reverse_timed.so $(ORACLE_timed) $(DIGEST_timed) $(DIGEST_timed_tape) \
 	  $(DIGEST_timed_step_vjp) 0 _timed
+
+# pair-reverse-fused: rr_pend_auto (the old path's automatic kernel: a K-step taping twin, EG_DERIVED_TAPE_FUSED, replayed by the same
+# fused entry, at most 64 steps per launch and never across a window) over the one-step step vjp; window 400 (built in); states and
+# gradients equal the old path's bit for bit (ORACLE_auto).
+DIGEST_rr_pend_auto ?= 3bc7bb7564e5b3bf766bbdca405dfce7a30b422d2439bb135f171868307c905a
+DIGEST_rr_pend_auto_tape ?= 9a51d0e7bc48d0c09cb3d6b62cd520d58d64b221d707d6ea431584627f1cd8ef
+DIGEST_rr_pend_auto_step_vjp ?= 59410b1d2c471e7f9f34e5a7e4e2d8bc2ade1a32faa942246555dd144193f0fa
+pair-reverse-fused: symbols $(OUT)/libpair_reverse_auto.so $(REV_TEST)
+	$(REV_TEST) $(REV_FIXTURE) $(OUT)/libpair_reverse_auto.so $(ORACLE_auto) $(DIGEST_rr_pend_auto) $(DIGEST_rr_pend_auto_tape) \
+	  $(DIGEST_rr_pend_auto_step_vjp) 0 rr_pend_auto
+
+# pair-reverse-kstep: steps_reverse FUSED: hawk.steps(rr_pend, 4) (the K-step primal rr_pend_x4, window 4), its K-step taping twin, step
+# vjp (short windows) and K-step vjp (every full window one launch that recomputes its steps); states, gradients, steps and launches equal
+# the old path's fused run bit for bit (ORACLE_kstep).
+KSTEP_UNITS = x4 tape step_vjp fused_vjp
+DIGEST_kstep ?= 5e1b2ec104ef5491afe94742b85cf99ddb210ec91beb36b1a3101aaf6bbeead3
+DIGEST_kstep_tape ?= 6dbf7f16cb41315bf79470f5180a0c4e478da08885360dc87f07c4e6025e8c49
+DIGEST_kstep_fused_vjp ?= 569995a5df16dd112d0c91fd9ff75ea85f48be532ba88cbe32b4568b3e8273f9
+META_kstep ?= test/derived/rr_pend_fused_meta.c
+$(OUT)/libpair_kstep.so: $(KERNEL_kstep) $(KERNEL_kstep_tape) $(KERNEL_kstep_step_vjp) $(KERNEL_kstep_fused_vjp) $(META_kstep) eg_door.h eg_unit_meta.h | check-inputs
+	@test -f "$(KERNEL_kstep)" -a -f "$(KERNEL_kstep_tape)" -a -f "$(KERNEL_kstep_step_vjp)" -a -f "$(KERNEL_kstep_fused_vjp)" -a -f "$(META_kstep)" -a \
+	  -d "$(PAIR_WING_DIR)" || { echo "set KERNEL_kstep, _tape, _step_vjp, _fused_vjp, META_kstep and PAIR_WING_DIR"; exit 1; }
+	@mkdir -p $(OUT)
+	$(CXX) $(PAIR_HOST_FLAGS) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) -c $(KERNEL_kstep) -o $(OUT)/kstep_primal.o
+	$(CXX) $(PAIR_HOST_FLAGS) $(call REV_RENAME,tape) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) \
+	  -c $(KERNEL_kstep_tape) -o $(OUT)/kstep_tape.o
+	$(CXX) $(PAIR_HOST_FLAGS) $(call REV_RENAME,vjp) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) \
+	  -c $(KERNEL_kstep_step_vjp) -o $(OUT)/kstep_vjp.o
+	$(CXX) $(PAIR_HOST_FLAGS) $(call REV_RENAME,fvjp) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) \
+	  -c $(KERNEL_kstep_fused_vjp) -o $(OUT)/kstep_fvjp.o
+	$(CC) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$(ROOT) -c $(META_kstep) -o $(OUT)/kstep_meta.o
+	$(CXX) -shared -o $@ $(OUT)/kstep_primal.o $(OUT)/kstep_tape.o $(OUT)/kstep_vjp.o $(OUT)/kstep_fvjp.o $(OUT)/kstep_meta.o
+
+pair-reverse-kstep: symbols $(OUT)/libpair_kstep.so $(REV_TEST)
+	$(REV_TEST) $(REV_FIXTURE) $(OUT)/libpair_kstep.so $(ORACLE_kstep) $(DIGEST_kstep) $(DIGEST_kstep_tape) \
+	  $(DIGEST_rr_pend_step_vjp) 0 rr_pend_x4 64 fused $(DIGEST_kstep_fused_vjp)
 
 # pair-reverse-reorder: the same unit over 4096 samples with EG_RUN_REORDER (the old path's reordering run, every 4, theta 0.5).
 pair-reverse-reorder: symbols $(OUT)/libpair_reverse_active.so $(REV_TEST)

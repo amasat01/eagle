@@ -281,20 +281,24 @@ static void lin_rows(eg_ctx* ctx, const char* lib) {
           "a role that is not the unit's derived.role refused BAD_REQUEST");
     const eg_derived_role fused[2] = { EG_DERIVED_TAPE_FUSED, EG_DERIVED_STEP_VJP };
     d = recorded(&plan, LSTEPS, 3, 0, fused, good);
-    check(eg_runner_new(ctx, &d, &none) == EG_NOT_WRITTEN && reason_has(ctx, "steps_reverse fused"),
-          "the K-step taping twin refused NOT_WRITTEN by name");
-    const eg_derived_role fvjp[2] = { EG_DERIVED_TAPE, EG_DERIVED_FUSED_VJP };
-    d = recorded(&plan, LSTEPS, 3, 0, fvjp, good);
-    check(eg_runner_new(ctx, &d, &none) == EG_NOT_WRITTEN && reason_has(ctx, "steps_reverse fused"),
-          "the K-step vjp refused NOT_WRITTEN by name");
+    check(eg_runner_new(ctx, &d, &none) == EG_BAD_REQUEST && reason_has(ctx, "derived.role"),
+          "the K-step role over a one-step twin refused BAD_REQUEST (derived.role)");
+    const eg_derived_role fused_vjp[2] = { EG_DERIVED_TAPE, EG_DERIVED_FUSED_VJP };
+    d = recorded(&plan, LSTEPS, 3, 0, fused_vjp, good);
+    check(eg_runner_new(ctx, &d, &none) == EG_BAD_REQUEST && reason_has(ctx, "steps_reverse FUSED"),
+          "the K-step vjp without steps_reverse FUSED refused BAD_REQUEST by name");
     const eg_derived_role refine[2] = { EG_DERIVED_TAPE, EG_DERIVED_REFINE_VJP };
     d = recorded(&plan, LSTEPS, 3, 0, refine, good);
     check(eg_runner_new(ctx, &d, &none) == EG_NOT_WRITTEN && reason_has(ctx, "events refine"),
           "a refine role under record refused NOT_WRITTEN by name");
     d = recorded(&plan, LSTEPS, 3, 0, roles, good);
     d.steps_reverse = EG_STEPS_REVERSE_FUSED;
-    check(eg_runner_new(ctx, &d, &none) == EG_NOT_WRITTEN && reason_has(ctx, "steps_reverse"),
-          "steps_reverse FUSED refused NOT_WRITTEN by name");
+    check(eg_runner_new(ctx, &d, &none) == EG_BAD_REQUEST && reason_has(ctx, "K-step vjp"),
+          "steps_reverse FUSED without the K-step vjp refused BAD_REQUEST by name");
+    d = recorded(&plan, LSTEPS, 3, 0, roles, good);
+    d.steps_reverse = EG_STEPS_REVERSE_AUTO;
+    check(eg_runner_new(ctx, &d, &none) == EG_NOT_WRITTEN && reason_has(ctx, "steps_reverse AUTO"),
+          "steps_reverse AUTO refused NOT_WRITTEN by name");
     d = recorded(&plan, LSTEPS, 3, 0, roles, good);
     d.events = EG_EVENTS_REFINE;
     check(eg_runner_new(ctx, &d, &none) == EG_BAD_REQUEST && reason_has(ctx, "Newton unit"),
@@ -403,17 +407,19 @@ static void pair_rows(eg_ctx* ctx, int argc, char** argv) {
     const long every = named ? atol(argv[7]) : 0;
     const int act = every > 0;
     const int64_t pn = argc >= 10 ? atol(argv[9]) : 64;
-    const int reorder = argc >= 10;
+    const int fvj = argc == 12;   /* steps_reverse FUSED: base is the K-step primal, argv[11] the K-step vjp's digest */
+    const int reorder = argc == 10 || argc == 11;
     const char* base = named ? argv[8] : "rr_pend";
+    const int fused = strstr(base, "_auto") != NULL;   /* the K-step twin: its window is built in (PSTEPS) */
     char tape_name[64], vjp_name[64];
-    snprintf(tape_name, sizeof(tape_name), "%s_tape", base);
-    snprintf(vjp_name, sizeof(vjp_name), "%s_step_vjp", base);
+    snprintf(tape_name, sizeof(tape_name), fvj ? "rr_pend_tape" : "%s_tape", base);
+    snprintf(vjp_name, sizeof(vjp_name), fvj ? "rr_pend_step_vjp" : "%s_step_vjp", base);
     const int32_t mask_slot = act ? 7 : 5, c_slot = act ? 8 : 6, dt_slot = act ? 9 : 7;
     int64_t smax = 0;
-    uint8_t dg[3][EG_DIGEST_BYTES];
+    uint8_t dg[4][EG_DIGEST_BYTES];
     static double x0[PMAX], v0[PMAX], tf[PMAX], ex[PMAX], ev[PMAX], et[PMAX], gx[PMAX], gv[PMAX], gt[PMAX];
     double gc = 0.0, gdt = 0.0;
-    int64_t steps[PMAX];
+    int64_t steps[PMAX], run_ref[2] = { -1, -1 };
     if (!parse_digest(argv[4], dg[0]) || !parse_digest(argv[5], dg[1]) || !parse_digest(argv[6], dg[2]) ||
         !read_file(dir, "x0.bin", x0, (size_t)pn * sizeof(*x0)) || !read_file(dir, "v0.bin", v0, (size_t)pn * sizeof(*v0)) ||
         !read_file(dir, "tf.bin", tf, (size_t)pn * sizeof(*tf)) || !read_file(dir, "end_x.bin", ex, (size_t)pn * sizeof(*ex)) ||
@@ -425,11 +431,13 @@ static void pair_rows(eg_ctx* ctx, int argc, char** argv) {
         return;
     }
     for (int i = 0; i < pn; ++i) smax = steps[i] > smax ? steps[i] : smax;
+    const int have_run = read_file(dir, "run.bin", run_ref, sizeof(run_ref));   /* the old run's reported steps and launches */
+    if (fvj && !parse_digest(argv[11], dg[3])) return;
     eg_unit* p = load(ctx, lib, base, dg[0]);
-    eg_unit* units[2] = { load(ctx, lib, tape_name, dg[1]), load(ctx, lib, vjp_name, dg[2]) };
-    check(p && units[0] && units[1], "pair: rr_pend, its taping twin and its step vjp load from one library");
-    if (!(p && units[0] && units[1])) return;
-    const eg_derived_role roles[2] = { EG_DERIVED_TAPE, EG_DERIVED_STEP_VJP };
+    eg_unit* units[3] = { load(ctx, lib, tape_name, dg[1]), load(ctx, lib, vjp_name, dg[2]), fvj ? load(ctx, lib, "rr_pend_fused_vjp", dg[3]) : NULL };
+    check(p && units[0] && units[1] && (!fvj || units[2]), "pair: rr_pend, its taping twin and its step vjp (and K-step vjp) load from one library");
+    if (!(p && units[0] && units[1] && (!fvj || units[2]))) return;
+    const eg_derived_role roles[3] = { fused || fvj ? EG_DERIVED_TAPE_FUSED : EG_DERIVED_TAPE, EG_DERIVED_STEP_VJP, EG_DERIVED_FUSED_VJP };
     const eg_structure structures[2] = { EG_STRUCTURE_HOST_SERIAL, EG_STRUCTURE_HOST_TEAM };
     const int threads[2] = { 1, 3 };
     const double c = 0.3, dt = 0.01;
@@ -454,8 +462,12 @@ static void pair_rows(eg_ctx* ctx, int argc, char** argv) {
             const struct eg_bind_desc bd = binds(5, slots, planes, 2, us, uv);
             eg_plan* plan = plan_of(ctx, p, structures[si], pn);
             eg_runner* r = NULL;
-            struct eg_runner_desc d = recorded(&plan, PSTEPS, named ? 37 : si ? PSTEPS : -1, 0, roles, units);
+            struct eg_runner_desc d = recorded(&plan, PSTEPS, fvj ? 4 : fused ? PSTEPS : named ? 37 : si ? PSTEPS : -1, 0, roles, units);
             d.every = every;
+            if (fvj) {
+                d.steps_reverse = EG_STEPS_REVERSE_FUSED;
+                d.n_derived = 3;
+            }
             if (reorder) {
                 d.flags |= EG_RUN_REORDER;
                 d.reorder_theta = 0.5;
@@ -479,11 +491,11 @@ static void pair_rows(eg_ctx* ctx, int argc, char** argv) {
             }
             const int ok = plan && eg_bind(ctx, plan, &bd) == EG_OK && eg_runner_new(ctx, &d, &r) == EG_OK &&
                            eg_run(ctx, r, &rep) == EG_OK;
-            int s_ok = ok && rep.steps == smax && rep.finished == pn && (!reorder || rep.reorders > 0);
+            int s_ok = ok && (have_run ? rep.steps == run_ref[0] && rep.launches == run_ref[1] : rep.steps == smax) && rep.finished == pn && (!reorder || rep.reorders > 0);
             for (int i = 0; s_ok && i < pn; ++i) s_ok = x[i] == ex[i] && v[i] == ev[i] && t[i] == et[i];
-            snprintf(what, sizeof(what), "pair %s%s %s %d threads (window %s): the recorded run's states equal the old "
-                     "path's bitwise (%lld steps)", base, reorder ? " (reordering active set)" : act ? " (active set)" : "", si ? "HOST_TEAM" : "HOST_SERIAL", threads[ti], named ? "37" : si ? "400" : "-1, full",
-                     (long long)rep.steps);
+            snprintf(what, sizeof(what), "pair %s%s %s %d threads (window %s, launches %lld): the recorded run's states equal the old "
+                     "path's bitwise (%lld steps)", base, reorder ? " (reordering active set)" : act ? " (active set)" : "", si ? "HOST_TEAM" : "HOST_SERIAL", threads[ti], fvj ? "4 = K" : fused ? "400 built in" : named ? "37" : si ? "400" : "-1, full",
+                     (long long)rep.launches, (long long)rep.steps);
             check(s_ok, what);
             static double sx[PMAX], sv[PMAX], ox[PMAX], ov[PMAX], ot[PMAX];
             double oc = 0.0, odt = 0.0;
@@ -515,10 +527,11 @@ static void pair_rows(eg_ctx* ctx, int argc, char** argv) {
     eg_unit_free(ctx, p);
     eg_unit_free(ctx, units[0]);
     eg_unit_free(ctx, units[1]);
+    if (units[2]) eg_unit_free(ctx, units[2]);
 }
 
 int main(int argc, char** argv) {
-    if (argc != 2 && argc != 7 && argc != 9 && argc != 10 && argc != 11) {
+    if (argc != 2 && argc != 7 && argc != 9 && argc != 10 && argc != 11 && argc != 12) {
         fprintf(stderr, "usage: %s <fixture_reverse lib> [<pair lib> <oracle dir> <primal digest> <twin digest> <vjp digest> [<every> <primal name> [<n>: reorder]]]\n",
                 argv[0]);
         return 2;

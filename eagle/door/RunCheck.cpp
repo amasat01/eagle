@@ -27,10 +27,12 @@ void check_desc(const eg_runner_desc& d, bool device) {
     if (d.events != EG_EVENTS_STEP && !refine) refuse(EG_BAD_REQUEST, "unknown events " + std::to_string(d.events));
     if (d.on_no_event != EG_NO_EVENT_REFUSE && d.on_no_event != EG_NO_EVENT_ZERO)
         refuse(EG_BAD_REQUEST, "unknown on_no_event " + std::to_string(d.on_no_event));
-    if (d.steps_reverse == EG_STEPS_REVERSE_FUSED || d.steps_reverse == EG_STEPS_REVERSE_AUTO)
-        refuse(EG_NOT_WRITTEN, "steps_reverse FUSED and AUTO (the reverse of a recorded run) are not "
+    if (d.steps_reverse == EG_STEPS_REVERSE_AUTO)
+        refuse(EG_NOT_WRITTEN, "steps_reverse AUTO (the old path's measured-table choice between PER_STEP and FUSED) is not "
                "written in this build of the door");
-    if (d.steps_reverse != EG_STEPS_REVERSE_PER_STEP)
+    if (d.steps_reverse == EG_STEPS_REVERSE_FUSED && !record)
+        refuse(EG_BAD_REQUEST, "steps_reverse FUSED needs EG_RUN_RECORD");
+    if (d.steps_reverse != EG_STEPS_REVERSE_PER_STEP && d.steps_reverse != EG_STEPS_REVERSE_FUSED)
         refuse(EG_BAD_REQUEST, "unknown steps_reverse " + std::to_string(d.steps_reverse));
     if (d.n_derived < 0) refuse(EG_BAD_REQUEST, "n_derived " + std::to_string(d.n_derived) + " < 0");
     if (d.n_derived > 0 && !record && !refine)

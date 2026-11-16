@@ -589,7 +589,7 @@ static void check_runner(eg_ctx* ctx, eg_unit* axpb) {
         { EG_RUN_REORDER, 0, 0, 0, 0, 0, 10, 0, EG_BAD_REQUEST, "no active set" },
         { 1u << 7, 0, 0, 0, 0, 0, 10, 0, EG_BAD_REQUEST, "unknown bits" },
         { 0, EG_EVENTS_REFINE, 0, 0, 0, 0, 10, 0, EG_BAD_REQUEST, "events refine needs the" },
-        { 0, 0, EG_STEPS_REVERSE_FUSED, 0, 0, 0, 10, 0, EG_NOT_WRITTEN, "steps_reverse" },
+        { 0, 0, EG_STEPS_REVERSE_FUSED, 0, 0, 0, 10, 0, EG_BAD_REQUEST, "steps_reverse FUSED needs EG_RUN_RECORD" },
         { 0, 0, EG_STEPS_REVERSE_AUTO, 0, 0, 0, 10, 0, EG_NOT_WRITTEN, "steps_reverse" },
         { 0, 0, 0, 1, 0, 0, 10, 0, EG_NOT_WRITTEN, "derived units" },
         { 0, 0, 0, 0, 0, 0, 10, 1, EG_BAD_REQUEST, "step_graph" },
