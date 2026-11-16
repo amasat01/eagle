@@ -29,16 +29,7 @@ static int dplane_new(eg_ctx* ctx, struct dplane* s, int64_t n, uint8_t code, ui
     s->p = NULL;
     if (cudaMalloc(&s->d, bytes ? bytes : 1) != cudaSuccess) return 0;
     if (init != NULL ? cudaMemcpy(s->d, init, bytes, cudaMemcpyHostToDevice) != cudaSuccess : cudaMemset(s->d, 0, bytes) != cudaSuccess) return 0;
-    memset(&s->t, 0, sizeof(s->t));
-    s->t.shape[0] = n;
-    s->t.managed.version.major = DLPACK_MAJOR_VERSION;
-    s->t.managed.dl_tensor.data = s->d;
-    s->t.managed.dl_tensor.device.device_type = kDLCUDA;
-    s->t.managed.dl_tensor.ndim = 1;
-    s->t.managed.dl_tensor.dtype.code = code;
-    s->t.managed.dl_tensor.dtype.bits = bits;
-    s->t.managed.dl_tensor.dtype.lanes = 1;
-    s->t.managed.dl_tensor.shape = s->t.shape;
+    tensor_fill(&s->t, n, s->d, code, bits);
     return eg_plane_wrap(ctx, &s->t.managed, &s->p) == EG_OK;
 }
 

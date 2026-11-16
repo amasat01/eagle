@@ -24,21 +24,6 @@
 #define DT 0.0625
 enum { S_T, S_V, S_X, S_TFINAL, S_COUNTER, S_TERM, S_DT };
 
-static eg_plane* wrap(eg_ctx* ctx, struct tensor* t, void* data, uint8_t code, uint8_t bits) {
-    memset(t, 0, sizeof(*t));
-    t->shape[0] = N;
-    t->managed.version.major = DLPACK_MAJOR_VERSION;
-    t->managed.dl_tensor.data = data;
-    t->managed.dl_tensor.device.device_type = kDLCUDA;
-    t->managed.dl_tensor.ndim = 1;
-    t->managed.dl_tensor.dtype.code = code;
-    t->managed.dl_tensor.dtype.bits = bits;
-    t->managed.dl_tensor.dtype.lanes = 1;
-    t->managed.dl_tensor.shape = t->shape;
-    eg_plane* p = NULL;
-    return eg_plane_wrap(ctx, &t->managed, &p) == EG_OK ? p : NULL;
-}
-
 static double t_final[N], x_in[N], v_in[N];
 
 /* Device planes t, v, x, t_final (f64) and the mask (bool), at the recorded inputs. */
@@ -56,7 +41,7 @@ static int planes_new(eg_ctx* ctx, struct planes* s) {
     for (int i = 0; i < 5; ++i) {
         const size_t bytes = i < 4 ? N * sizeof(double) : N;
         ok &= cudaMalloc(&s->d[i], bytes) == cudaSuccess && cudaMemcpy(s->d[i], init[i], bytes, cudaMemcpyHostToDevice) == cudaSuccess;
-        s->p[i] = ok ? wrap(ctx, &s->t[i], s->d[i], i < 4 ? kDLFloat : kDLBool, i < 4 ? 64 : 8) : NULL;
+        s->p[i] = ok ? wrap(ctx, &s->t[i], N, s->d[i], i < 4 ? kDLFloat : kDLBool, i < 4 ? 64 : 8) : NULL;
         ok &= s->p[i] != NULL;
     }
     return ok;
@@ -83,19 +68,6 @@ static eg_status bind(eg_ctx* ctx, eg_plan* plan, const struct planes* s) {
     b.uniform_slots = uslot;
     b.uniform_values = values;
     return eg_bind(ctx, plan, &b);
-}
-
-static struct eg_runner_desc runner_desc(eg_plan* const* plan, int64_t max_steps) {
-    struct eg_runner_desc d;
-    memset(&d, 0, sizeof(d));
-    d.struct_size = sizeof(d);
-    d.n_plans = 1;
-    d.plans = plan;
-    d.max_steps = max_steps;
-    d.steps_reverse = EG_STEPS_REVERSE_PER_STEP;
-    d.events = EG_EVENTS_STEP;
-    d.on_no_event = EG_NO_EVENT_REFUSE;
-    return d;
 }
 
 /* The planes and report of one run against the old runner's files <unit>_<cap>_*. */

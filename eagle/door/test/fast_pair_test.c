@@ -63,16 +63,7 @@ static int planes_new(eg_ctx* ctx, struct run_planes* r, int64_t n, int64_t n_fi
         free(host);
         if (!ok) return 0;
         struct tensor* t = &r->t[i];
-        memset(t, 0, sizeof(*t));
-        t->shape[0] = n;
-        t->managed.version.major = DLPACK_MAJOR_VERSION;
-        t->managed.dl_tensor.data = r->d[i];
-        t->managed.dl_tensor.device.device_type = kDLCUDA;
-        t->managed.dl_tensor.ndim = 1;
-        t->managed.dl_tensor.dtype.code = (uint8_t)specs[i].code;
-        t->managed.dl_tensor.dtype.bits = (uint8_t)specs[i].bits;
-        t->managed.dl_tensor.dtype.lanes = 1;
-        t->managed.dl_tensor.shape = t->shape;
+        tensor_fill(t, n, r->d[i], (uint8_t)specs[i].code, (uint8_t)specs[i].bits);
         r->p[i] = NULL;
         if (eg_plane_wrap(ctx, &t->managed, &r->p[i]) != EG_OK) return 0;
     }
@@ -117,19 +108,6 @@ static eg_plan* plan_bound(eg_ctx* ctx, eg_unit* unit, int64_t n, int64_t parts,
         return NULL;
     }
     return plan;
-}
-
-static struct eg_runner_desc runner_desc(eg_plan* const* plan, int64_t max_steps) {
-    struct eg_runner_desc d;
-    memset(&d, 0, sizeof(d));
-    d.struct_size = sizeof(d);
-    d.n_plans = 1;
-    d.plans = plan;
-    d.max_steps = max_steps;
-    d.steps_reverse = EG_STEPS_REVERSE_PER_STEP;
-    d.events = EG_EVENTS_STEP;
-    d.on_no_event = EG_NO_EVENT_REFUSE;
-    return d;
 }
 
 static int run(eg_ctx* ctx, eg_runner* runner, struct eg_run_report* r) {

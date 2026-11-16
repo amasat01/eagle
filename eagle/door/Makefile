@@ -192,23 +192,8 @@ FEATURES_TEST := $(OUT)/device_features_test
 FAST_PAIR_TEST := $(OUT)/fast_pair_test
 GRAPH_PAIR_TEST := $(OUT)/graph_pair_test
 
-$(GRAPH_PAIR_TEST): test/graph_pair_test.c test/pair_util.h eg_door.h $(LIB) | check-cuda
-	$(CC) $(CFLAGS_C) -isystem $(CUDA)/include -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door \
-	  -Wl,-rpath,$(OUT) $(CUDART) -lm -pthread
-
-$(FAST_PAIR_TEST): test/fast_pair_test.c test/pair_util.h eg_door.h $(LIB) | check-cuda
-	$(CC) $(CFLAGS_C) -isystem $(CUDA)/include -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door \
-	  -Wl,-rpath,$(OUT) $(CUDART) -lm -pthread
-
-$(RUNNER_PAIR_TEST): test/runner_pair_test.c test/pair_util.h eg_door.h $(LIB) | check-cuda
-	$(CC) $(CFLAGS_C) -isystem $(CUDA)/include -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door \
-	  -Wl,-rpath,$(OUT) $(CUDART) -lm -pthread
-
-$(ACTIVE_PAIR_TEST): test/active_pair_test.c test/pair_util.h eg_door.h $(LIB) | check-cuda
-	$(CC) $(CFLAGS_C) -isystem $(CUDA)/include -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door \
-	  -Wl,-rpath,$(OUT) $(CUDART) -lm -pthread
-
-$(FEATURES_TEST): test/device_features_test.c test/pair_util.h eg_door.h $(LIB) | check-cuda
+# The pair tests over test/pair_util.h: one rule, each binary built from the test/ source of its own name.
+$(RUNNER_PAIR_TEST) $(ACTIVE_PAIR_TEST) $(FEATURES_TEST) $(FAST_PAIR_TEST) $(GRAPH_PAIR_TEST): $(OUT)/%: test/%.c test/pair_util.h eg_door.h $(LIB) | check-cuda
 	$(CC) $(CFLAGS_C) -isystem $(CUDA)/include -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door \
 	  -Wl,-rpath,$(OUT) $(CUDART) -lm -pthread
 

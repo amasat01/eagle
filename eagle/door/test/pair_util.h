@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// What the two device pair tests (runner_pair_test.c, active_pair_test.c) share: the PASS/FAIL tally, the
-// error-reason probe, the oracle-file reader and the digest parser.
+// What the device pair tests share: the PASS/FAIL tally, the error-reason probe, the oracle-file reader, the digest
+// parser and the device-tensor wrapper.
 #pragma once
 #include "eagle/door/eg_door.h"
 #include "plugin/dlpack.h"
@@ -50,3 +50,37 @@ struct tensor {
     struct DLManagedTensorVersioned managed;
     int64_t shape[1];
 };
+
+/* A one-dimensional device tensor over @p data: n elements of the DLPack type (code, bits). */
+static inline void tensor_fill(struct tensor* t, int64_t n, void* data, uint8_t code, uint8_t bits) {
+    memset(t, 0, sizeof(*t));
+    t->shape[0] = n;
+    t->managed.version.major = DLPACK_MAJOR_VERSION;
+    t->managed.dl_tensor.data = data;
+    t->managed.dl_tensor.device.device_type = kDLCUDA;
+    t->managed.dl_tensor.ndim = 1;
+    t->managed.dl_tensor.dtype.code = code;
+    t->managed.dl_tensor.dtype.bits = bits;
+    t->managed.dl_tensor.dtype.lanes = 1;
+    t->managed.dl_tensor.shape = t->shape;
+}
+
+static inline eg_plane* wrap(eg_ctx* ctx, struct tensor* t, int64_t n, void* data, uint8_t code, uint8_t bits) {
+    tensor_fill(t, n, data, code, bits);
+    eg_plane* p = NULL;
+    return eg_plane_wrap(ctx, &t->managed, &p) == EG_OK ? p : NULL;
+}
+
+/* A runner over one plan: per-step reverse, step events, a stop with no event refused. */
+static inline struct eg_runner_desc runner_desc(eg_plan* const* plan, int64_t max_steps) {
+    struct eg_runner_desc d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    d.n_plans = 1;
+    d.plans = plan;
+    d.max_steps = max_steps;
+    d.steps_reverse = EG_STEPS_REVERSE_PER_STEP;
+    d.events = EG_EVENTS_STEP;
+    d.on_no_event = EG_NO_EVENT_REFUSE;
+    return d;
+}

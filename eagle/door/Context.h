@@ -435,6 +435,8 @@ void device_graph_free(eg_ctx& ctx, eg_graph* graph);
 void device_graphs_drop(eg_ctx& ctx) noexcept;
 void device_stream_use(eg_ctx& ctx, std::uint64_t stream);
 void device_quiet(const eg_ctx& ctx, const char* call, eg_status status, const char* why);
+/** @brief The refusal reason shared by every host-side call made while a device recording is in scope. */
+inline constexpr const char* kHostWorkInGraph = "host work inside a device graph is not written in this build of the door";
 void device_plan_cells(eg_plan_s& plan);
 void device_plan_free(eg_plan_s& plan) noexcept;
 void* device_alloc(eg_ctx& ctx, std::size_t bytes);

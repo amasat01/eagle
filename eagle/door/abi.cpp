@@ -112,14 +112,14 @@ EG_EXPORT eg_status eg_launch(eg_ctx* ctx, eg_plan* plan, uint64_t* tiles) {
 EG_EXPORT eg_status eg_reduce(eg_ctx* ctx, const struct eg_reduce_desc* desc) {
     return door::call(ctx, [&](eg_ctx& c) {
         const eg_reduce_desc d = door::read_input(desc, "eg_reduce_desc");
-        door::device_quiet(c, "eg_reduce", EG_NOT_WRITTEN, "host work inside a device graph is not written in this build of the door");
+        door::device_quiet(c, "eg_reduce", EG_NOT_WRITTEN, door::kHostWorkInGraph);
         door::host_planes_only(c, "eg_reduce", { d.in, d.out, d.comp });
         door::reduce(c, desc);
     });
 }
 EG_EXPORT eg_status eg_copy(eg_ctx* ctx, eg_plane* src, eg_plane* dst) {
     return door::call(ctx, [&](eg_ctx& c) {
-        door::device_quiet(c, "eg_copy", EG_NOT_WRITTEN, "host work inside a device graph is not written in this build of the door");
+        door::device_quiet(c, "eg_copy", EG_NOT_WRITTEN, door::kHostWorkInGraph);
         door::host_planes_only(c, "eg_copy", { src, dst });
         door::copy(c, src, dst);
     });
@@ -183,8 +183,7 @@ EG_EXPORT eg_status eg_run(eg_ctx* ctx, eg_runner* runner, struct eg_run_report*
         door::check_handle(c.runners, runner, "runner");
         if (runner->dev.ctx != nullptr) door::device_run(c, runner, report);
         else {
-            door::device_quiet(c, "eg_run of a host runner", EG_NOT_WRITTEN,
-                               "host work inside a device graph is not written in this build of the door");
+            door::device_quiet(c, "eg_run of a host runner", EG_NOT_WRITTEN, door::kHostWorkInGraph);
             door::run(c, runner, report);
         }
     });

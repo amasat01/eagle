@@ -67,16 +67,7 @@ static int set_new(eg_ctx* ctx, eg_unit* unit, struct set* s, cudaStream_t strea
         ok &= (stream ? cudaMemcpyAsync(s->d[i], init_of(i), bytes_of(i), cudaMemcpyHostToDevice, stream)
                       : cudaMemcpy(s->d[i], init_of(i), bytes_of(i), cudaMemcpyHostToDevice)) == cudaSuccess;
         struct tensor* t = &s->t[i];
-        memset(t, 0, sizeof(*t));
-        t->shape[0] = N;
-        t->managed.version.major = DLPACK_MAJOR_VERSION;
-        t->managed.dl_tensor.data = s->d[i];
-        t->managed.dl_tensor.device.device_type = kDLCUDA;
-        t->managed.dl_tensor.ndim = 1;
-        t->managed.dl_tensor.dtype.code = i < 4 ? kDLFloat : kDLBool;
-        t->managed.dl_tensor.dtype.bits = i < 4 ? 64 : 8;
-        t->managed.dl_tensor.dtype.lanes = 1;
-        t->managed.dl_tensor.shape = t->shape;
+        tensor_fill(t, N, s->d[i], i < 4 ? kDLFloat : kDLBool, i < 4 ? 64 : 8);
         s->p[i] = NULL;
         ok = ok && eg_plane_wrap(ctx, &t->managed, &s->p[i]) == EG_OK;
     }

@@ -25,21 +25,6 @@
 #define DT 0.0625
 enum { S_T, S_V, S_X, S_TFINAL, S_COUNT, S_MAP, S_COUNTER, S_TERM, S_DT };
 
-static eg_plane* wrap(eg_ctx* ctx, struct tensor* t, int64_t n, void* data, uint8_t code, uint8_t bits) {
-    memset(t, 0, sizeof(*t));
-    t->shape[0] = n;
-    t->managed.version.major = DLPACK_MAJOR_VERSION;
-    t->managed.dl_tensor.data = data;
-    t->managed.dl_tensor.device.device_type = kDLCUDA;
-    t->managed.dl_tensor.ndim = 1;
-    t->managed.dl_tensor.dtype.code = code;
-    t->managed.dl_tensor.dtype.bits = bits;
-    t->managed.dl_tensor.dtype.lanes = 1;
-    t->managed.dl_tensor.shape = t->shape;
-    eg_plane* p = NULL;
-    return eg_plane_wrap(ctx, &t->managed, &p) == EG_OK ? p : NULL;
-}
-
 /* One case: its input arrays (host) and the device planes t, v, x, t_final (f64) and the mask (bool). */
 struct run {
     int64_t n;
@@ -102,21 +87,13 @@ static eg_status bind(eg_ctx* ctx, eg_plan* plan, const struct run* s) {
     return eg_bind(ctx, plan, &b);
 }
 
-static struct eg_runner_desc runner_desc(eg_plan* const* plan, int64_t max_steps, int64_t every, double theta) {
-    struct eg_runner_desc d;
-    memset(&d, 0, sizeof(d));
-    d.struct_size = sizeof(d);
-    d.n_plans = 1;
-    d.plans = plan;
-    d.max_steps = max_steps;
+static struct eg_runner_desc runner_desc_ex(eg_plan* const* plan, int64_t max_steps, int64_t every, double theta) {
+    struct eg_runner_desc d = runner_desc(plan, max_steps);
     d.every = every;
     if (theta > 0.0) {
         d.flags = EG_RUN_REORDER;
         d.reorder_theta = theta;
     }
-    d.steps_reverse = EG_STEPS_REVERSE_PER_STEP;
-    d.events = EG_EVENTS_STEP;
-    d.on_no_event = EG_NO_EVENT_REFUSE;
     return d;
 }
 
@@ -156,7 +133,7 @@ static void one_case(eg_ctx* ctx, eg_unit* unit, const char* name, int64_t k, co
     memset(&s, 0, sizeof(s));
     int ok = eg_plan_new(ctx, &pd, &plan) == EG_OK && run_new(ctx, &s, dir, n) && bind(ctx, plan, &s) == EG_OK;
     eg_runner* runner = NULL;
-    const struct eg_runner_desc rd = runner_desc(&plan, max_steps, every, theta);
+    const struct eg_runner_desc rd = runner_desc_ex(&plan, max_steps, every, theta);
     if (first && ok) {
         eg_runner* other = NULL;
         struct eg_runner_desc bad = rd;
@@ -296,7 +273,7 @@ static void group_refused(eg_ctx* ctx, const char* lib, const char* hex) {
     eg_plan* plan = NULL;
     const int ok = parse_digest(hex, ref.digest) && eg_unit_load(ctx, &ld, &unit) == EG_OK && (pd.unit = unit) != NULL &&
                    eg_plan_new(ctx, &pd, &plan) == EG_OK;
-    const struct eg_runner_desc rd = runner_desc(&plan, 400, 0, 0.0);
+    const struct eg_runner_desc rd = runner_desc_ex(&plan, 400, 0, 0.0);
     eg_runner* runner = NULL;
     check(ok && eg_runner_new(ctx, &rd, &runner) == EG_NOT_WRITTEN && reason_has(ctx, "groups of 32 lanes") && runner == NULL,
           "device active set over groups of 32 lanes: refused NOT_WRITTEN by name");
