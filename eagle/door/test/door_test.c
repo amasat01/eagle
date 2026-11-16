@@ -588,7 +588,7 @@ static void check_runner(eg_ctx* ctx, eg_unit* axpb) {
         { EG_RUN_RECORD, 0, 0, 0, 0, 0, 10, 0, EG_BAD_REQUEST, "needs its derived units" },
         { EG_RUN_REORDER, 0, 0, 0, 0, 0, 10, 0, EG_BAD_REQUEST, "no active set" },
         { 1u << 7, 0, 0, 0, 0, 0, 10, 0, EG_BAD_REQUEST, "unknown bits" },
-        { 0, EG_EVENTS_REFINE, 0, 0, 0, 0, 10, 0, EG_NOT_WRITTEN, "events REFINE" },
+        { 0, EG_EVENTS_REFINE, 0, 0, 0, 0, 10, 0, EG_BAD_REQUEST, "events refine needs the" },
         { 0, 0, EG_STEPS_REVERSE_FUSED, 0, 0, 0, 10, 0, EG_NOT_WRITTEN, "steps_reverse" },
         { 0, 0, EG_STEPS_REVERSE_AUTO, 0, 0, 0, 10, 0, EG_NOT_WRITTEN, "steps_reverse" },
         { 0, 0, 0, 1, 0, 0, 10, 0, EG_NOT_WRITTEN, "derived units" },
@@ -640,10 +640,10 @@ static void check_runner(eg_ctx* ctx, eg_unit* axpb) {
               reason_has(ctx, "DEVICE"),
           "a DEVICE plan of a finishing unit refused NOT_WRITTEN");
     d = runner_desc(plans, 1, 10);
-    check(eg_runner_new(ctx, &d, &r) == EG_OK && eg_run_events(ctx, r, NULL, NULL) == EG_NOT_WRITTEN &&
-              reason_has(ctx, "eg_run_events") && eg_reverse(ctx, r, NULL, NULL) == EG_BAD_REQUEST &&
+    check(eg_runner_new(ctx, &d, &r) == EG_OK && eg_run_events(ctx, r, NULL, NULL) == EG_BAD_REQUEST &&
+              reason_has(ctx, "no refine run") && eg_reverse(ctx, r, NULL, NULL) == EG_BAD_REQUEST &&
               reason_has(ctx, "not recorded"),
-          "eg_run_events stays NOT_WRITTEN; eg_reverse of a runner without EG_RUN_RECORD is refused BAD_REQUEST");
+          "eg_run_events of a runner that never refined is refused BAD_REQUEST; eg_reverse of a runner without EG_RUN_RECORD is refused BAD_REQUEST");
     check(eg_runner_free(ctx, r) == EG_OK && eg_plan_free(ctx, plans[0]) == EG_OK &&
               eg_plan_free(ctx, plans[1]) == EG_OK && eg_plan_free(ctx, p3) == EG_OK &&
               eg_plane_free(ctx, px) == EG_OK && eg_plane_free(ctx, py) == EG_OK &&

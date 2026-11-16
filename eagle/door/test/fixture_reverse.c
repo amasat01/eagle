@@ -185,15 +185,14 @@ FINISH(twin_finish, 6, 5);
 LINK(tl_x, 1, EG_SRC_PRIMAL, 0, 0);
 LINK(tl_t, 2, EG_SRC_PRIMAL, 1, 0);
 LINK(tl_T, 4, EG_SRC_PRIMAL, 4, 0);
-LINK(tl_fin, 5, EG_SRC_PRIMAL, 3, 0);
 LINK(tl_done, 6, EG_SRC_PRIMAL, 2, 0);
 LINK(tl_a, 7, EG_SRC_PRIMAL, 5, 0);
 LINK(tl_b, 8, EG_SRC_PRIMAL, 6, 0);
 LINK(tl_bad_slot, 12, EG_SRC_PRIMAL, 0, 0);
 LINK(tl_time0, 4, EG_SRC_TIME0, 1, 0);
-static const struct eg_unit_link* const twin_links[] = { &tl_x, &tl_t, &tl_T, &tl_fin, &tl_done, &tl_a, &tl_b };
-static const struct eg_unit_link* const twin_links_bad_slot[] = { &tl_x, &tl_t, &tl_T, &tl_fin, &tl_done, &tl_a, &tl_bad_slot };
-static const struct eg_unit_link* const twin_links_time0[] = { &tl_x, &tl_t, &tl_time0, &tl_fin, &tl_done, &tl_a, &tl_b };
+static const struct eg_unit_link* const twin_links[] = { &tl_x, &tl_t, &tl_T, &tl_done, &tl_a, &tl_b };
+static const struct eg_unit_link* const twin_links_bad_slot[] = { &tl_x, &tl_t, &tl_T, &tl_done, &tl_a, &tl_bad_slot };
+static const struct eg_unit_link* const twin_links_time0[] = { &tl_x, &tl_t, &tl_time0, &tl_done, &tl_a, &tl_b };
 
 /* The tape rows of one step: t in row 0, x in row 1. */
 static const struct eg_unit_taped tp_t = { .struct_size = sizeof(struct eg_unit_taped), .slot = 1, .row0 = 0, .rows = 1 };
@@ -224,7 +223,7 @@ static const struct eg_unit_link* const vjp_links_unreduced[] = { &vl_ga_unreduc
     static const struct eg_unit_derived var = { .struct_size = sizeof(struct eg_unit_derived), .role = EG_DERIVED_TAPE, \
                                                 .of_unit = of_, .tape_slot = 3, .n_taped = 2, .tape_rows = rows_,     \
                                                 .steps_slot = 0, .tape_on_slot = 9, .time0_slot = -1, .tau_slot = -1, \
-                                                .fused_steps_slot = -1, .n_links = 7, .n_refined = 0, .taped = taped, \
+                                                .fused_steps_slot = -1, .n_links = 6, .n_refined = 0, .taped = taped, \
                                                 .links = links_, .refined = NULL }
 TWIN_DERIVED(d_twin, 0, 2, twin_links);
 TWIN_DERIVED(d_twin_of, 4, 2, twin_links);

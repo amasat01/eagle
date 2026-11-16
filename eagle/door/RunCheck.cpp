@@ -21,10 +21,13 @@ void check_desc(const eg_runner_desc& d, bool device) {
     if (record && device)
         refuse(EG_NOT_WRITTEN, "EG_RUN_RECORD on a DEVICE runner (recording on the device) is not written in this "
                "build of the door");
-    if (d.events == EG_EVENTS_REFINE)
-        refuse(EG_NOT_WRITTEN, "events REFINE (locating each stop inside its step) is not written in "
-               "this build of the door");
-    if (d.events != EG_EVENTS_STEP) refuse(EG_BAD_REQUEST, "unknown events " + std::to_string(d.events));
+    const bool refine = d.events == EG_EVENTS_REFINE;
+    if (refine && device)
+        refuse(EG_NOT_WRITTEN, "events REFINE on a DEVICE runner is not written in this build of the door");
+    if (refine && record)
+        refuse(EG_NOT_WRITTEN, "events REFINE with EG_RUN_RECORD (the reverse of a refined run) is not written in this "
+               "build of the door");
+    if (d.events != EG_EVENTS_STEP && !refine) refuse(EG_BAD_REQUEST, "unknown events " + std::to_string(d.events));
     if (d.on_no_event != EG_NO_EVENT_REFUSE && d.on_no_event != EG_NO_EVENT_ZERO)
         refuse(EG_BAD_REQUEST, "unknown on_no_event " + std::to_string(d.on_no_event));
     if (d.steps_reverse == EG_STEPS_REVERSE_FUSED || d.steps_reverse == EG_STEPS_REVERSE_AUTO)
@@ -33,7 +36,7 @@ void check_desc(const eg_runner_desc& d, bool device) {
     if (d.steps_reverse != EG_STEPS_REVERSE_PER_STEP)
         refuse(EG_BAD_REQUEST, "unknown steps_reverse " + std::to_string(d.steps_reverse));
     if (d.n_derived < 0) refuse(EG_BAD_REQUEST, "n_derived " + std::to_string(d.n_derived) + " < 0");
-    if (d.n_derived > 0 && !record)
+    if (d.n_derived > 0 && !record && !refine)
         refuse(EG_NOT_WRITTEN, "derived units without EG_RUN_RECORD (the refine roles) are not "
                "written in this build of the door");
     if (record && (d.n_derived == 0 || d.derived_roles == nullptr || d.derived_units == nullptr))

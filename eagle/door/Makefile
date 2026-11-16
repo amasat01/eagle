@@ -84,7 +84,7 @@ LIB := $(OUT)/libeagle_door.so
 FIXTURE := $(OUT)/libfixture_unit.so
 TEST := $(OUT)/door_test
 
-.PHONY: all lib symbols test check-inputs check-cuda pairs pair-reverse pair-reverse-active pair-reverse-timed pair-reverse-reorder pair-reverse-t0 device $(PAIR_UNITS:%=pair-%) $(PAIR_DEVICE_UNITS:%=pair-device-%)
+.PHONY: all lib symbols test check-inputs check-cuda pairs pair-reverse pair-reverse-active pair-reverse-timed pair-reverse-reorder pair-reverse-t0 pair-reverse-counter pair-refine device $(PAIR_UNITS:%=pair-%) $(PAIR_DEVICE_UNITS:%=pair-device-%)
 all: test
 
 check-inputs:
@@ -158,6 +158,7 @@ REV_RENAME = -Deagle_abi_tag=$(1)_abi_tag -Deagle_layout_sizes=$(1)_layout_sizes
 META_reverse ?= test/derived/rr_pend_meta.c
 META_act ?= test/derived/pend_body_meta.c
 META_act_t0 ?= test/derived/pend_body_time0_meta.c
+META_act_counter ?= test/derived/pend_body_counter_meta.c
 META_timed ?= test/derived/timed_meta.c
 define REV_RULES
 $(OUT)/libpair_$(2).so: $$(KERNEL_$(3)) $$(KERNEL_$(3)_tape) $$(KERNEL_$(3)_step_vjp) $$(META_$(1)) eg_door.h eg_unit_meta.h | check-inputs
@@ -176,6 +177,7 @@ $(eval $(call REV_RULES,reverse,reverse,rr_pend))
 $(eval $(call REV_RULES,act,reverse_active,pend_body))
 $(eval $(call REV_RULES,timed,reverse_timed,timed))
 $(eval $(call REV_RULES,act_t0,reverse_t0,pend_body))
+$(eval $(call REV_RULES,act_counter,reverse_counter,pend_body))
 
 pair-reverse: symbols $(OUT)/libpair_reverse.so $(REV_TEST)
 	$(REV_TEST) $(REV_FIXTURE) $(OUT)/libpair_reverse.so $(ORACLE_reverse) $(DIGEST_rr_pend) $(DIGEST_rr_pend_tape) \
@@ -205,11 +207,49 @@ pair-reverse-t0: symbols $(OUT)/libpair_reverse_t0.so $(REV_TEST)
 	$(REV_TEST) $(REV_FIXTURE) $(OUT)/libpair_reverse_t0.so $(ORACLE_reorder) $(DIGEST_pend_body) $(DIGEST_pend_body_tape) \
 	  $(DIGEST_pend_body_step_vjp) 4 _pend_body 4096 refuse
 
+# pair-reverse-counter: a link on the twin's finish counter (eagle's own slot) is refused by name.
+pair-reverse-counter: symbols $(OUT)/libpair_reverse_counter.so $(REV_TEST)
+	$(REV_TEST) $(REV_FIXTURE) $(OUT)/libpair_reverse_counter.so $(ORACLE_reorder) $(DIGEST_pend_body) $(DIGEST_pend_body_tape) \
+	  $(DIGEST_pend_body_step_vjp) 4 _pend_body 4096 counter
+
 pair-reverse-active: symbols $(OUT)/libpair_reverse_active.so $(REV_TEST)
 	$(REV_TEST) $(REV_FIXTURE) $(OUT)/libpair_reverse_active.so $(ORACLE_act) $(DIGEST_pend_body) $(DIGEST_pend_body_tape) \
 	  $(DIGEST_pend_body_step_vjp) 4 _pend_body
 	$(REV_TEST) $(REV_FIXTURE) $(OUT)/libpair_reverse_active.so $(ORACLE_act16) $(DIGEST_pend_body) $(DIGEST_pend_body_tape) \
 	  $(DIGEST_pend_body_step_vjp) 16 _pend_body
+
+# pair-refine: ev_osc (the old path's oscillator with a stop rule), its one-step taping twin, its Newton and its state guard
+# vjp (KERNEL_ev, KERNEL_ev_tape, KERNEL_ev_newton, KERNEL_ev_guard) in one library with META_ev, run by refine_test with
+# events REFINE against ORACLE_ev (the old path's end states, stop times and statuses; ORACLE_ev_zero: max_steps 3 with
+# on_no_event zero). The twin's, Newton's and guard's size blocks are renamed: the primal's is the library's.
+META_ev ?= test/derived/ev_osc_meta.c
+DIGEST_ev ?= 9ec2e13d142fdf75dc88fcc3888af20de98d3389f874905220fcf72f524ccc9c
+DIGEST_ev_tape ?= d56d34e9962e31adbe26a0b8a27b9a7939355bd52d06e86db0710a5599a07970
+DIGEST_ev_newton ?= 414905492f406483a64e202fc6cab04ec2b2dccd4c2e21c6d510d47cb4c780c6
+DIGEST_ev_guard ?= 012d7e9df31a4822327f8c88a45d0bfdbe5f8f3dfba0871c0edd02ff073028bc
+REFINE_TEST := $(OUT)/refine_test
+
+$(REFINE_TEST): test/refine_test.c test/pair_util.h eg_door.h $(LIB)
+	$(CC) $(CFLAGS_C) -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door -Wl,-rpath,$(OUT) -lm -pthread
+
+$(OUT)/libpair_refine.so: $(KERNEL_ev) $(KERNEL_ev_tape) $(KERNEL_ev_newton) $(KERNEL_ev_guard) $(META_ev) eg_door.h eg_unit_meta.h | check-inputs
+	@test -f "$(KERNEL_ev)" -a -f "$(KERNEL_ev_tape)" -a -f "$(KERNEL_ev_newton)" -a -f "$(KERNEL_ev_guard)" -a -f "$(META_ev)" -a \
+	  -d "$(PAIR_WING_DIR)" || { echo "set KERNEL_ev, KERNEL_ev_tape, KERNEL_ev_newton, KERNEL_ev_guard, META_ev and PAIR_WING_DIR"; exit 1; }
+	@mkdir -p $(OUT)
+	$(CXX) $(PAIR_HOST_FLAGS) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) -c $(KERNEL_ev) -o $(OUT)/refine_primal.o
+	$(CXX) $(PAIR_HOST_FLAGS) $(call REV_RENAME,tape) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) \
+	  -c $(KERNEL_ev_tape) -o $(OUT)/refine_tape.o
+	$(CXX) $(PAIR_HOST_FLAGS) $(call REV_RENAME,newton) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) \
+	  -c $(KERNEL_ev_newton) -o $(OUT)/refine_newton.o
+	$(CXX) $(PAIR_HOST_FLAGS) $(call REV_RENAME,guard) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) \
+	  -c $(KERNEL_ev_guard) -o $(OUT)/refine_guard.o
+	$(CC) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$(ROOT) -c $(META_ev) -o $(OUT)/refine_meta.o
+	$(CXX) -shared -o $@ $(OUT)/refine_primal.o $(OUT)/refine_tape.o $(OUT)/refine_newton.o $(OUT)/refine_guard.o $(OUT)/refine_meta.o
+
+pair-refine: symbols $(OUT)/libpair_refine.so $(REFINE_TEST)
+	$(REFINE_TEST) $(OUT)/libpair_refine.so $(ORACLE_ev) $(DIGEST_ev) $(DIGEST_ev_tape) $(DIGEST_ev_newton) $(DIGEST_ev_guard) 400 0 1
+	$(REFINE_TEST) $(OUT)/libpair_refine.so $(ORACLE_ev_zero) $(DIGEST_ev) $(DIGEST_ev_tape) $(DIGEST_ev_newton) $(DIGEST_ev_guard) 3 1 1
+	$(REFINE_TEST) $(OUT)/libpair_refine.so $(ORACLE_ev_zero) $(DIGEST_ev) $(DIGEST_ev_tape) $(DIGEST_ev_newton) $(DIGEST_ev_guard) 3 0 0
 
 PAIR_TEST := $(OUT)/pair_test
 

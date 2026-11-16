@@ -312,7 +312,7 @@ static void lin_rows(eg_ctx* ctx, const char* lib) {
     const struct { uint8_t twin, vjp; eg_status status; const char* reason, *what; } broken[] = {
         { 0xF0, 0xE4, EG_BAD_REQUEST, "of_unit", "a twin whose of_unit is not the runner's primal" },
         { 0xF1, 0xE4, EG_BAD_REQUEST, "tape_rows", "tape_rows other than the sum of the taped rows" },
-        { 0xF2, 0xE4, EG_BAD_REQUEST, "links[6].slot", "a twin link to a slot out of range" },
+        { 0xF2, 0xE4, EG_BAD_REQUEST, "links[5].slot", "a twin link to a slot out of range" },
         { 0xF3, 0xE4, EG_BAD_REQUEST, "EG_SRC_TIME0", "a start-copy link on a slot that is not time0_slot (EG_SRC_TIME0)" },
         { 0xE3, 0xF4, EG_BAD_REQUEST, "has no link", "a vjp slot with no link" },
         { 0xE3, 0xF5, EG_BAD_REQUEST, "second link", "two links on one vjp slot" },
@@ -365,6 +365,10 @@ static void lin_rows(eg_ctx* ctx, const char* lib) {
     d = recorded(&aplan, LSTEPS, 3, 0, roles, good);
     check(aplan && eg_runner_new(ctx, &d, &none) == EG_BAD_REQUEST && reason_has(ctx, "reads an active set"),
           "EG_RUN_RECORD of an active-set step whose twin reads no active set refused BAD_REQUEST by name");
+    d = runner_desc(&aplan, LSTEPS);
+    d.events = EG_EVENTS_REFINE;
+    check(aplan && eg_runner_new(ctx, &d, &none) == EG_NOT_WRITTEN && reason_has(ctx, "events REFINE with an active set"),
+          "events REFINE over an active-set step refused NOT_WRITTEN by name");
     if (aplan) {
         eg_plan_free(ctx, aplan);
         lin_free(ctx, &sa);
@@ -449,10 +453,14 @@ static void pair_rows(eg_ctx* ctx, int argc, char** argv) {
             memset(&rep, 0, sizeof(rep));
             rep.struct_size = sizeof(rep);
             if (argc == 11) {   // EG_RUN_REORDER with a start copy: refused by name
-                snprintf(what, sizeof(what), "pair %s %s %d threads: EG_RUN_REORDER with a start copy refused NOT_WRITTEN by name", base,
-                         si ? "HOST_TEAM" : "HOST_SERIAL", threads[ti]);
-                check(plan && eg_bind(ctx, plan, &bd) == EG_OK && eg_runner_new(ctx, &d, &r) == EG_NOT_WRITTEN &&
-                          reason_has(ctx, "EG_RUN_REORDER with a start copy (time0_slot)") && reason_has(ctx, "no old-path oracle"),
+                const int counter = strcmp(argv[10], "counter") == 0;
+                snprintf(what, sizeof(what), counter ? "pair %s %s %d threads: a link on the twin's finish counter refused BAD_REQUEST naming eagle's own"
+                                                     : "pair %s %s %d threads: EG_RUN_REORDER with a start copy refused NOT_WRITTEN by name",
+                         base, si ? "HOST_TEAM" : "HOST_SERIAL", threads[ti]);
+                check(plan && eg_bind(ctx, plan, &bd) == EG_OK &&
+                          (counter ? eg_runner_new(ctx, &d, &r) == EG_BAD_REQUEST && reason_has(ctx, "links[7].slot 8 is eagle's own")
+                                   : eg_runner_new(ctx, &d, &r) == EG_NOT_WRITTEN &&
+                                         reason_has(ctx, "EG_RUN_REORDER with a start copy (time0_slot)") && reason_has(ctx, "no old-path oracle")),
                       what);
                 for (int i = 0; i < 5; ++i) eg_plane_free(ctx, planes[i]);
                 eg_plan_free(ctx, plan);

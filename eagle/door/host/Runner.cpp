@@ -249,7 +249,7 @@ void runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out) {
             }
             runner->active = true;
         }
-        if (d.flags & EG_RUN_RECORD) record_new(ctx, *runner, d);
+        if ((d.flags & EG_RUN_RECORD) || d.events == EG_EVENTS_REFINE) record_new(ctx, *runner, d);
         ctx.runners.insert(runner);
     } catch (...) {
         record_free(ctx, *runner);

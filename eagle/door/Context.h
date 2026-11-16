@@ -400,6 +400,8 @@ void runner_free(eg_ctx& ctx, eg_runner_s* runner);
 void record_new(eg_ctx& ctx, eg_runner_s& runner, const eg_runner_desc& d);
 void record_free(eg_ctx& ctx, eg_runner_s& runner);
 void record_forward(eg_ctx& ctx, eg_runner_s& runner, eg_run_report* report);
+/** @brief eg_run_events (host/Reverse.cpp). */
+void run_events(eg_ctx& ctx, eg_runner_s* runner, eg_plane_s* t_stop, eg_plane_s* status);
 void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds, const eg_bind_desc* grads);
 void runner_release(eg_ctx& ctx, eg_runner_s* runner);
 void run(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report);
