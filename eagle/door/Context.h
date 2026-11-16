@@ -140,6 +140,7 @@ struct TeamPlaneFacts {
     bool fill_promised = false;
     std::string name;
     std::int32_t keyed = -1;                  ///< unit KEY: the record in the unit's keyed table, else -1
+    std::int32_t target = -1;                 ///< unit TARGET: the source slot whose cells the slices stand for, else -1
 };
 
 /** @brief A record of the keyed table (eg_unit_keyed): ``width`` payload entries over the kept lane axes. */
@@ -159,6 +160,8 @@ struct StageFacts {
     bool team = false;
     std::int32_t grid = 0, threads = 1, warps = 1, lanes = 1, groups = 1;
     std::int32_t keyed = -1;                  ///< grid KEYS: the record in the source unit's keyed table, else -1
+    std::int32_t of_slot = -1;                ///< grids CHUNKS, TARGETS: the source slot the ordered scatter adds into, else -1
+    std::int32_t status_plane = -1;           ///< grid CHUNKS: the team plane of out-of-range flags checked after a launch, else -1
     std::vector<std::int32_t> source_of;      ///< per stage slot: the source slot it joins, else -1
     std::vector<std::int32_t> plane_of;       ///< per stage slot: the team plane it joins, else -1 (both -1: the sample count)
     std::vector<std::int32_t> row_of, comp_of, read_of;   ///< per stage slot: the split cell whose rows / compensation rows it is, or whose plane it reads
@@ -234,6 +237,7 @@ struct eg_unit_s {
     std::int32_t index = -1;                  ///< the unit index in its library table
     std::array<std::uint8_t, EG_DIGEST_BYTES> digest{};
     std::vector<eagle::door::TeamPlaneFacts> team_planes;
+    std::int64_t scatter_chunks = 0;          ///< the most chunks of an ordered scatter (body.scatter_chunks), 0: none
     std::vector<eagle::door::KeyedFacts> keyed;    ///< the keyed table of a split unit's body
     std::vector<std::string> source_cells;    ///< a split unit's cells (no row slots: the stages own the rows)
     std::vector<eagle::door::SplitCell> split_cells;
@@ -273,6 +277,11 @@ inline std::int64_t key_count(const eg_unit_s& unit, const KeyedFacts& k, std::i
     std::int64_t keys = 1;
     for (std::int64_t e : k.extents) keys *= e < 0 ? runtime : e;
     return keys;
+}
+
+/** @brief The chunks an ordered scatter of @p n lanes into @p cells cells adds in: ``clamp(n / cells, 1, cap)``. */
+inline std::int64_t chunks_of(std::int64_t n, std::int64_t cells, std::int64_t cap) {
+    return std::min(cap, std::max<std::int64_t>(1, n / std::max<std::int64_t>(cells, 1)));
 }
 
 }  // namespace door

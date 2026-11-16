@@ -273,6 +273,20 @@ void bind_handle(eg_plan_s& plan, int slot, void* data, std::uint64_t count) {
 
 }  // namespace
 
+/** @brief The scratch plane of team plane @p t: per_lane elements per unit, the units counted by the plane's unit (a TARGET plane's from @p cells, the
+ *  cells of the caller's target plane); a placed wide value is one unit on the host, whole warps of 32 on the device. Full of its fill, made once. */
+static eg_plane_s* make_team_plane(eg_ctx& ctx, const eg_unit_s& unit, const TeamPlaneFacts& t, std::int64_t n, bool device, std::int64_t cells) {
+    const std::int64_t count = t.unit == EG_UNIT_ONCE ? 1 : t.unit == EG_UNIT_KEY ? key_count(unit, unit.keyed[static_cast<std::size_t>(t.keyed)], n)
+                             : t.unit == EG_UNIT_TARGET ? chunks_of(n, cells, unit.scatter_chunks) * cells : n;
+    const std::int64_t units = t.wide != EG_WIDE_WARP_TILED ? count : device ? (count + 31) / 32 * 32 : 1;
+    const std::int64_t size = std::max<std::int64_t>(1, t.per_lane * units);
+    const DLDataType elem = t.dtype == EG_DTYPE_INT32 ? DLDataType{ kDLInt, 32, 1 }
+                                                      : DLDataType{ kDLFloat, static_cast<std::uint8_t>(unit.scalar_type == EG_SCALAR_FLOAT32 ? 32 : 64), 1 };
+    std::vector<std::int64_t> shape{ size };
+    if (t.layout == EG_LAYOUT_PLANE_MAJOR && t.per_lane != 1) shape = { t.per_lane, size / t.per_lane };
+    return make_plane(ctx, elem, shape, device);
+}
+
 /** @brief eg_plan_new: a host or DEVICE plan of the unit over checked partitions. */
 void plan_new(eg_ctx& ctx, const eg_plan_desc* desc, eg_plan** out) {
     if (out == nullptr) refuse(EG_BAD_REQUEST, "eg_plan_new: out is NULL");
@@ -377,7 +391,7 @@ void plan_new(eg_ctx& ctx, const eg_plan_desc* desc, eg_plan** out) {
         for (const TeamPlaneFacts& t : d.unit->team_planes) {
             const std::int64_t count = t.unit == EG_UNIT_ONCE ? 1 : t.unit == EG_UNIT_KEY ? key_count(*d.unit, d.unit->keyed[static_cast<std::size_t>(t.keyed)], d.n_samples) : d.n_samples;
             const std::int64_t units = t.wide != EG_WIDE_WARP_TILED ? count : device ? (count + 31) / 32 * 32 : 1;
-            sizes.push_back(std::max<std::int64_t>(1, t.per_lane * units));
+            sizes.push_back(t.unit == EG_UNIT_TARGET ? 0 : std::max<std::int64_t>(1, t.per_lane * units));    // a TARGET plane is made when its target is bound
             if (device && t.fill_promised && t.wide == EG_WIDE_NONE && t.dtype == EG_DTYPE_REAL && d.unit->scalar_type != EG_SCALAR_FLOAT32 && t.fill != 0)
                 refuse(EG_NOT_WRITTEN, "unit '" + d.unit->name + "': team plane '" + t.name + "' is refilled with a nonzero double on the device, which is not written");
         }
@@ -415,11 +429,7 @@ void plan_new(eg_ctx& ctx, const eg_plan_desc* desc, eg_plan** out) {
         }
         for (std::size_t k = 0; k < d.unit->team_planes.size(); ++k) {
             const TeamPlaneFacts& t = d.unit->team_planes[k];
-            const std::int64_t size = sizes[k];
-            const DLDataType elem = elem_of(t);
-            std::vector<std::int64_t> shape{ size };
-            if (t.layout == EG_LAYOUT_PLANE_MAJOR && t.per_lane != 1) shape = { t.per_lane, size / t.per_lane };
-            plan->team.push_back(make_plane(ctx, elem, shape, device));
+            plan->team.push_back(t.unit == EG_UNIT_TARGET ? nullptr : make_team_plane(ctx, *d.unit, t, d.n_samples, device, 0));
         }
         for (const DispatchFacts& f : d.unit->dispatches) {    // an AUTO group's mix counters: eagle's, zeroed, unless the caller binds some
             if (f.strategy != EG_DISPATCH_AUTO) continue;
@@ -473,7 +483,7 @@ void plan_new(eg_ctx& ctx, const eg_plan_desc* desc, eg_plan** out) {
         for (eg_plane_s* r : plan->mix) plane_release(ctx, r);
         for (eg_plane_s* r : plan->segdev) plane_release(ctx, r);
         for (void* b : plan->seg.dev_bufs) device_free(ctx, b);
-        for (eg_plane_s* r : plan->team) plane_release(ctx, r);
+        for (eg_plane_s* r : plan->team) if (r != nullptr) plane_release(ctx, r);
         for (eg_plane_s* r : plan->comps) if (r != nullptr) plane_release(ctx, r);
         for (eg_plane_s* r : plan->outs) if (r != nullptr) plane_release(ctx, r);
         for (eg_plane_s* r : plan->work) plane_release(ctx, r);
@@ -495,7 +505,7 @@ void plan_free(eg_ctx& ctx, eg_plan_s* plan) {
         if (b.plane != nullptr) plane_release(ctx, b.plane);
     for (eg_plane_s* r : plan->work) plane_release(ctx, r);
     for (eg_plane_s* r : plan->rows) plane_release(ctx, r);
-    for (eg_plane_s* r : plan->team) plane_release(ctx, r);
+    for (eg_plane_s* r : plan->team) if (r != nullptr) plane_release(ctx, r);
     for (eg_plane_s* r : plan->mix) plane_release(ctx, r);
     for (eg_plane_s* r : plan->segdev) plane_release(ctx, r);
     for (void* b : plan->seg.dev_bufs) device_free(ctx, b);
@@ -551,6 +561,14 @@ void bind(eg_ctx& ctx, eg_plan_s* plan, const eg_bind_desc* desc) {
             eg_plane_s* prev = plan->bindings[c.slot].plane;
             plan->bindings[c.slot].plane = comp;
             bind_handle(*plan, c.slot, comp->tensor->dl_tensor.data, static_cast<std::uint64_t>(plan->n_samples));
+            if (prev != nullptr) plane_release(ctx, prev);
+        }
+        for (std::size_t k = 0; k < plan->unit->team_planes.size(); ++k) {    // an ordered scatter's partial sums: sized by the cells of the target just bound
+            const TeamPlaneFacts& tp = plan->unit->team_planes[k];
+            if (tp.unit != EG_UNIT_TARGET || tp.target != d.plane_slots[i]) continue;
+            eg_plane_s* fresh = make_team_plane(ctx, *plan->unit, tp, plan->n_samples, plan->structure == EG_STRUCTURE_DEVICE, elements(t));
+            eg_plane_s* prev = plan->team[k];
+            plan->team[k] = fresh;
             if (prev != nullptr) plane_release(ctx, prev);
         }
     }

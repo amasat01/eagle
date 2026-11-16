@@ -17,6 +17,7 @@
  *   uni <name> <value>                            (a float64 uniform)
  *   cell <name>                                   (a cell the caller receives: one float64, the fold of the stages' rows; file <row>.<name>.out)
  *   skip <name>                                   (a slot eagle makes: the stage's own scratch; takes a slot index)
+ *   failrun <text>                                (host: every launch is refused FAULT with a reason holding <text>; no outputs are compared)
  * Every plane is (extents..., lanes).
  *
  * Built with -DEG_PAIR_DEVICE (split_device_test, run under the GPU pool) the units are device units on a device context: the planes are
@@ -57,6 +58,8 @@ struct pt {
     int64_t shape[MAXD + 1];
 };
 
+static char run_fail[512];    /* the spec's "failrun <text>": the launch must be refused FAULT with a reason holding that text */
+
 static int read_spec(const char* dir, const char* row, int64_t* n, struct pl* p, int* np) {
     char path[1024], kind[8];
     snprintf(path, sizeof(path), "%s/%s.spec", dir, row);
@@ -68,6 +71,12 @@ static int read_spec(const char* dir, const char* row, int64_t* n, struct pl* p,
             long long v;
             if (fscanf(f, "%lld", &v) != 1) return 0;
             *n = v;
+            continue;
+        }
+        if (strcmp(kind, "failrun") == 0) {
+            if (fgets(run_fail, sizeof(run_fail), f) == NULL) return 0;
+            run_fail[strcspn(run_fail, "\n")] = 0;
+            memmove(run_fail, run_fail + (run_fail[0] == ' '), strlen(run_fail));
             continue;
         }
         struct pl* q = &p[(*np)++];
@@ -320,6 +329,14 @@ int main(int argc, char** argv) {
 #endif
                     }
             if (s == EG_OK) s = eg_launch(ctx, plan, NULL);
+#ifndef EG_PAIR_DEVICE
+            if (run_fail[0] != 0) {
+                char fr[600];
+                snprintf(fr, sizeof(fr), "%s, launch %d: refused FAULT with a reason holding '%.200s'", names[k], rep + 1, run_fail);
+                check(s == EG_FAULT && reason_has(ctx, run_fail), fr);
+                continue;
+            }
+#endif
 #ifdef EG_PAIR_DEVICE
             if (s == EG_OK) s = eg_sync(ctx);
             for (int i = 0; i < np && s == EG_OK; ++i)

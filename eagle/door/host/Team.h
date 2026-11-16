@@ -35,6 +35,27 @@ inline void run_prefix(const eg_plan_s& plan, int threads, std::int64_t live) {
     fold_plan(plan, threads);
 }
 
+/** @brief The cells of the plane an ordered scatter stage @p st adds into: the elements of the caller's plane bound to its target slot. */
+inline std::int64_t scatter_cells(const eg_plan_s& plan, const StageFacts& st) {
+    return elements(plan.bindings[static_cast<std::size_t>(st.of_slot)].plane->tensor->dl_tensor);
+}
+
+/** @brief After a launch: an ordered scatter whose status plane holds a flag past element 0 met a key outside its cells that was not the skip key
+ *  -1: the adds were dropped, the rest are in the target. Refused by name (the flags are the stage's own, the cells the target's). */
+inline void check_scatter_status(const eg_plan_s& plan) {
+    for (const StageFacts& st : plan.unit->stages) {
+        if (st.grid != EG_GRID_CHUNKS || st.status_plane < 0) continue;
+        const DLTensor& d = plan.team[static_cast<std::size_t>(st.status_plane)]->tensor->dl_tensor;
+        const std::int32_t* flags = static_cast<const std::int32_t*>(d.data);
+        bool outside = false;
+        for (std::int64_t i = 1; i < elements(d); ++i) outside = outside || flags[i] != 0;
+        if (!outside) continue;
+        const std::string& of = plan.unit->slots[static_cast<std::size_t>(st.of_slot)].name;
+        refuse(EG_FAULT, plan.unit->name + ": hawk.scatter(" + of + ", contract='ordered') got a key outside [0, " + std::to_string(scatter_cells(plan, st)) +
+                         ") that is not the skip key -1; those adds were dropped, the rest are in " + of);
+    }
+}
+
 /** @brief A split unit: its stages in order over the plan's bindings, each with its own argument list (the source slot or
  *  the team plane each stage slot joined at load). A team stage runs ONE serial call over (0, blocks, n), never tiled;
  *  a plain stage runs as the unit would over the plan's partitions. Planes with a promised fill are refilled first. */
@@ -100,6 +121,8 @@ inline std::uint64_t run_split(const eg_plan_s& plan, int threads) {
             const std::int64_t per_block = static_cast<std::int64_t>(st.lanes) * st.warps;
             const std::int64_t blocks = st.grid == EG_GRID_KEYS
                 ? key_count(*plan.unit, plan.unit->keyed[static_cast<std::size_t>(st.keyed)], plan.n_samples) * st.groups
+                : st.grid == EG_GRID_TARGETS ? scatter_cells(plan, st)
+                : st.grid == EG_GRID_CHUNKS ? chunks_of(plan.n_samples, scatter_cells(plan, st), plan.unit->scatter_chunks)
                 : (plan.n_samples + per_block - 1) / per_block;
             if (blocks > 0) {
                 exec::HostTeam::run_serial(st.unit->host_entry, params.data(), exec::Partition{ 0, blocks, plan.n_samples });
@@ -128,6 +151,7 @@ inline std::uint64_t run_split(const eg_plan_s& plan, int threads) {
             reduce_exec(reduce_check(*plan.ctx, rd), threads);
         }
     }
+    check_scatter_status(plan);
     return tiles;
 }
 

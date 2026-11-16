@@ -308,6 +308,7 @@ void read_team_planes(const eg_unit_body& body, eg_unit_s& unit) {
     const std::string who = "meta that contradicts itself: unit '" + unit.name + "' ";
     if (body.n_team_planes < 0 || (body.n_team_planes > 0 && body.team_planes == nullptr))
         refuse(EG_BAD_REQUEST, who + "n_team_planes " + std::to_string(body.n_team_planes));
+    unit.scatter_chunks = std::max<std::int64_t>(0, body.scatter_chunks);
     for (int i = 0; i < body.n_team_planes; ++i) {
         eg_unit_team_plane absent{};
         absent.keyed = absent.target_slot = absent.target_stage = -1;
@@ -322,11 +323,18 @@ void read_team_planes(const eg_unit_body& body, eg_unit_s& unit) {
         if (t.wide == 1) refuse(EG_BAD_REQUEST, who + "team plane '" + name + "' is wide value 1, which is retired (a placed wide value is WARP_TILED)");
         if (t.wide != EG_WIDE_NONE && t.wide != EG_WIDE_WARP_TILED) refuse(EG_NOT_WRITTEN, at + " has an unknown wide layout " + std::to_string(t.wide));
         if (t.per_lane < 1) refuse(EG_BAD_REQUEST, who + "team plane '" + name + "' per_lane " + std::to_string(t.per_lane));
-        if (t.unit == EG_UNIT_TARGET) refuse(EG_NOT_WRITTEN, at + " has TARGET units: the ordered scatter's cells are not written");
+        if (t.unit == EG_UNIT_TARGET) {
+            if (t.target_slot < 0 || t.target_slot >= static_cast<std::int32_t>(unit.slots.size()))
+                refuse(EG_BAD_REQUEST, who + "team plane '" + name + "' has TARGET units and target_slot " + std::to_string(t.target_slot) + ", outside the " +
+                       std::to_string(unit.slots.size()) + " slots of the unit");
+            if (t.target_stage != -1) refuse(EG_NOT_WRITTEN, at + " has TARGET units whose target is a slot of the unit of stage " + std::to_string(t.target_stage) + ", which is not written");
+            if (body.scatter_chunks < 1) refuse(EG_BAD_REQUEST, who + "has TARGET units and no chunk cap (scatter_chunks " + std::to_string(body.scatter_chunks) + ")");
+        }
         if (t.unit == EG_UNIT_KEY && (t.keyed < 0 || t.keyed >= static_cast<std::int32_t>(unit.keyed.size())))
             refuse(EG_BAD_REQUEST, who + "team plane '" + name + "' has KEY units and keyed " + std::to_string(t.keyed) + ", outside the keyed table of " +
                    std::to_string(unit.keyed.size()));
-        unit.team_planes.push_back({ t.dtype, t.unit, t.layout, t.wide, t.per_lane, t.fill, t.fill_promised != 0, name, t.unit == EG_UNIT_KEY ? t.keyed : -1 });
+        unit.team_planes.push_back({ t.dtype, t.unit, t.layout, t.wide, t.per_lane, t.fill, t.fill_promised != 0, name, t.unit == EG_UNIT_KEY ? t.keyed : -1,
+                                     t.unit == EG_UNIT_TARGET ? t.target_slot : -1 });
     }
 }
 
@@ -350,13 +358,17 @@ void read_stages(const eg_unit_meta& m, eg_unit_s& unit) {
             absent_team.warps = absent_team.lanes = absent_team.groups = 1;
             const eg_unit_team t = read_record(st.team, absent_team, at + " team");
             if (t.grid < EG_GRID_LANES || t.grid > EG_GRID_TARGETS) refuse(EG_NOT_WRITTEN, at + ": unknown team grid " + std::to_string(t.grid));
-            if (t.grid == EG_GRID_CHUNKS || t.grid == EG_GRID_TARGETS)
-                refuse(EG_NOT_WRITTEN, at + ": a team of grid " + std::string(t.grid == EG_GRID_CHUNKS ? "CHUNKS" : "TARGETS") + " is not written");
             if (t.threads < 1 || t.warps < 1 || t.lanes < 1 || t.groups < 1)
                 refuse(EG_BAD_REQUEST, "meta that contradicts itself: " + at + " team has threads/warps/lanes/groups below 1");
             f.team = true;
             f.grid = t.grid, f.threads = t.threads, f.warps = t.warps, f.lanes = t.lanes, f.groups = t.groups;
             if (t.grid == EG_GRID_KEYS) f.keyed = t.keyed;    // checked against the keyed table once the body is read
+            if (t.grid == EG_GRID_CHUNKS || t.grid == EG_GRID_TARGETS) {    // checked against the slots and the team planes once the body is read
+                if (t.of_stage != -1) refuse(EG_NOT_WRITTEN, at + ": a team of grid " + std::string(t.grid == EG_GRID_CHUNKS ? "CHUNKS" : "TARGETS") +
+                                                                " into a slot of the unit of stage " + std::to_string(t.of_stage) + " is not written");
+                f.of_slot = t.of_slot;
+                if (t.grid == EG_GRID_CHUNKS) f.status_plane = t.status_plane;
+            }
         }
         unit.stages.push_back(std::move(f));
     }
@@ -614,6 +626,17 @@ void read_unit(const eg_unit_meta& m, void* library, eg_unit_s& unit) {
         if (unit.stages[i].grid == EG_GRID_KEYS && (unit.stages[i].keyed < 0 || unit.stages[i].keyed >= static_cast<std::int32_t>(unit.keyed.size())))
             refuse(EG_BAD_REQUEST, "meta that contradicts itself: unit '" + unit.name + "' stage " + std::to_string(i) + " team has grid KEYS and keyed " +
                    std::to_string(unit.stages[i].keyed) + ", outside the keyed table of " + std::to_string(unit.keyed.size()));
+    for (std::size_t i = 0; i < unit.stages.size(); ++i) {
+        const StageFacts& st = unit.stages[i];
+        if (st.grid != EG_GRID_CHUNKS && st.grid != EG_GRID_TARGETS) continue;
+        const std::string at = "meta that contradicts itself: unit '" + unit.name + "' stage " + std::to_string(i) + " team has grid " + (st.grid == EG_GRID_CHUNKS ? "CHUNKS" : "TARGETS");
+        if (st.of_slot < 0 || st.of_slot >= static_cast<std::int32_t>(unit.slots.size()))
+            refuse(EG_BAD_REQUEST, at + " and of_slot " + std::to_string(st.of_slot) + ", outside the " + std::to_string(unit.slots.size()) + " slots of the unit");
+        if (st.grid != EG_GRID_CHUNKS) continue;
+        if (unit.scatter_chunks < 1) refuse(EG_BAD_REQUEST, at + " and no chunk cap (scatter_chunks " + std::to_string(unit.scatter_chunks) + ")");
+        if (st.status_plane < 0 || st.status_plane >= static_cast<std::int32_t>(unit.team_planes.size()) || unit.team_planes[static_cast<std::size_t>(st.status_plane)].dtype != EG_DTYPE_INT32)
+            refuse(EG_BAD_REQUEST, at + " and status_plane " + std::to_string(st.status_plane) + ", which is not an INT32 team plane");
+    }
     if (unit.stages.empty() && !unit.team_planes.empty())
         refuse(EG_BAD_REQUEST, "meta that contradicts itself: unit '" + unit.name + "' has team planes and no stages");
     if (!unit.stages.empty() && (unit.finish.present || !unit.companions.empty() || !unit.cells.empty() || unit.derived.present))

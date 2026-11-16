@@ -433,6 +433,11 @@ void device_plan_check(const eg_ctx& ctx, const eg_unit_s& unit) {
         refuse(EG_NOT_WRITTEN, who + "the SEGMENTED dispatch group '" + unit.seg.name + "' has a dynamic selector, which is not written on the device");
     if (unit.stages.empty() && unit.function == 0) refuse(EG_NOT_WRITTEN, who + "the unit has no device image");
     for (const StageFacts& st : unit.stages)
+        if (st.grid == EG_GRID_CHUNKS || st.grid == EG_GRID_TARGETS)
+            refuse(EG_NOT_WRITTEN, who + "the stage '" + st.ref_name + "' is an ordered scatter (team grid " + (st.grid == EG_GRID_CHUNKS ? "CHUNKS" : "TARGETS") + "), which is not written on the device");
+    for (const TeamPlaneFacts& t : unit.team_planes)
+        if (t.unit == EG_UNIT_TARGET) refuse(EG_NOT_WRITTEN, who + "the team plane '" + t.name + "' has TARGET units (an ordered scatter's partial sums), which are not written on the device");
+    for (const StageFacts& st : unit.stages)
         if (st.unit->function == 0) refuse(EG_NOT_WRITTEN, who + "the stage '" + st.ref_name + "' has no device image");
     for (const CompanionFacts& c : unit.companions)
         if (c.device_fold == 0)
