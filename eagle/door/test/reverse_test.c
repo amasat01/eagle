@@ -313,11 +313,11 @@ static void lin_rows(eg_ctx* ctx, const char* lib) {
         { 0xF0, 0xE4, EG_BAD_REQUEST, "of_unit", "a twin whose of_unit is not the runner's primal" },
         { 0xF1, 0xE4, EG_BAD_REQUEST, "tape_rows", "tape_rows other than the sum of the taped rows" },
         { 0xF2, 0xE4, EG_BAD_REQUEST, "links[6].slot", "a twin link to a slot out of range" },
-        { 0xF3, 0xE4, EG_NOT_WRITTEN, "EG_SRC_TIME0", "the time start copy (EG_SRC_TIME0)" },
+        { 0xF3, 0xE4, EG_BAD_REQUEST, "EG_SRC_TIME0", "a start-copy link on a slot that is not time0_slot (EG_SRC_TIME0)" },
         { 0xE3, 0xF4, EG_BAD_REQUEST, "has no link", "a vjp slot with no link" },
         { 0xE3, 0xF5, EG_BAD_REQUEST, "second link", "two links on one vjp slot" },
         { 0xE3, 0xF6, EG_BAD_REQUEST, "reduced", "reduced on a TAPED link" },
-        { 0xE3, 0xF7, EG_NOT_WRITTEN, "step plane", "a step-plane source (EG_SRC_STEPS)" },
+        { 0xE3, 0xF7, EG_BAD_REQUEST, "step plane", "a step-plane source on a real slot (EG_SRC_STEPS)" },
         { 0xE3, 0xF8, EG_BAD_REQUEST, "reduced", "a parameter gradient not summed over samples" },
     };
     for (size_t i = 0; i < sizeof(broken) / sizeof(broken[0]); ++i) {
@@ -383,13 +383,15 @@ static void lin_rows(eg_ctx* ctx, const char* lib) {
 static void pair_rows(eg_ctx* ctx, int argc, char** argv) {
     const char *lib = argv[2], *dir = argv[3];
     /* with an active set (argc 9): the cadence in steps and the primal's name (_pend_body: the mask is slot 7, c and dt 8 and 9) */
-    const int act = argc == 9;
-    const long every = act ? atol(argv[7]) : 0;
-    const char* base = act ? argv[8] : "rr_pend";
+    const int named = argc == 9;
+    const long every = named ? atol(argv[7]) : 0;
+    const int act = every > 0;
+    const char* base = named ? argv[8] : "rr_pend";
     char tape_name[64], vjp_name[64];
     snprintf(tape_name, sizeof(tape_name), "%s_tape", base);
     snprintf(vjp_name, sizeof(vjp_name), "%s_step_vjp", base);
     const int32_t mask_slot = act ? 7 : 5, c_slot = act ? 8 : 6, dt_slot = act ? 9 : 7;
+    int64_t smax = 0;
     uint8_t dg[3][EG_DIGEST_BYTES];
     static double x0[PN], v0[PN], tf[PN], ex[PN], ev[PN], et[PN], gx[PN], gv[PN], gt[PN];
     double gc = 0.0, gdt = 0.0;
@@ -404,6 +406,7 @@ static void pair_rows(eg_ctx* ctx, int argc, char** argv) {
         check(0, "pair: the digests and the old path's oracle files read");
         return;
     }
+    for (int i = 0; i < PN; ++i) smax = steps[i] > smax ? steps[i] : smax;
     eg_unit* p = load(ctx, lib, base, dg[0]);
     eg_unit* units[2] = { load(ctx, lib, tape_name, dg[1]), load(ctx, lib, vjp_name, dg[2]) };
     check(p && units[0] && units[1], "pair: rr_pend, its taping twin and its step vjp load from one library");
@@ -433,17 +436,17 @@ static void pair_rows(eg_ctx* ctx, int argc, char** argv) {
             const struct eg_bind_desc bd = binds(5, slots, planes, 2, us, uv);
             eg_plan* plan = plan_of(ctx, p, structures[si], PN);
             eg_runner* r = NULL;
-            struct eg_runner_desc d = recorded(&plan, PSTEPS, act ? 37 : si ? PSTEPS : -1, 0, roles, units);
+            struct eg_runner_desc d = recorded(&plan, PSTEPS, named ? 37 : si ? PSTEPS : -1, 0, roles, units);
             d.every = every;
             struct eg_run_report rep;
             memset(&rep, 0, sizeof(rep));
             rep.struct_size = sizeof(rep);
             const int ok = plan && eg_bind(ctx, plan, &bd) == EG_OK && eg_runner_new(ctx, &d, &r) == EG_OK &&
                            eg_run(ctx, r, &rep) == EG_OK;
-            int s_ok = ok && rep.steps == 301 && rep.finished == PN;
+            int s_ok = ok && rep.steps == smax && rep.finished == PN;
             for (int i = 0; s_ok && i < PN; ++i) s_ok = x[i] == ex[i] && v[i] == ev[i] && t[i] == et[i];
             snprintf(what, sizeof(what), "pair %s%s %s %d threads (window %s): the recorded run's states equal the old "
-                     "path's bitwise (%lld steps)", base, act ? " (active set)" : "", si ? "HOST_TEAM" : "HOST_SERIAL", threads[ti], act ? "37" : si ? "400" : "-1, full",
+                     "path's bitwise (%lld steps)", base, act ? " (active set)" : "", si ? "HOST_TEAM" : "HOST_SERIAL", threads[ti], named ? "37" : si ? "400" : "-1, full",
                      (long long)rep.steps);
             check(s_ok, what);
             static double sx[PN], sv[PN], ox[PN], ov[PN], ot[PN];

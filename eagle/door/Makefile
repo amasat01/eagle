@@ -84,7 +84,7 @@ LIB := $(OUT)/libeagle_door.so
 FIXTURE := $(OUT)/libfixture_unit.so
 TEST := $(OUT)/door_test
 
-.PHONY: all lib symbols test check-inputs check-cuda pairs pair-reverse pair-reverse-active device $(PAIR_UNITS:%=pair-%) $(PAIR_DEVICE_UNITS:%=pair-device-%)
+.PHONY: all lib symbols test check-inputs check-cuda pairs pair-reverse pair-reverse-active pair-reverse-timed device $(PAIR_UNITS:%=pair-%) $(PAIR_DEVICE_UNITS:%=pair-device-%)
 all: test
 
 check-inputs:
@@ -157,6 +157,7 @@ REV_RENAME = -Deagle_abi_tag=$(1)_abi_tag -Deagle_layout_sizes=$(1)_layout_sizes
 # The derived records the door loaded, stated by hand until the library emits them.
 META_reverse ?= test/derived/rr_pend_meta.c
 META_act ?= test/derived/pend_body_meta.c
+META_timed ?= test/derived/timed_meta.c
 define REV_RULES
 $(OUT)/libpair_$(2).so: $$(KERNEL_$(3)) $$(KERNEL_$(3)_tape) $$(KERNEL_$(3)_step_vjp) $$(META_$(1)) eg_door.h eg_unit_meta.h | check-inputs
 	@test -f "$$(KERNEL_$(3))" -a -f "$$(KERNEL_$(3)_tape)" -a -f "$$(KERNEL_$(3)_step_vjp)" -a -f "$$(META_$(1))" -a \
@@ -172,6 +173,7 @@ $(OUT)/libpair_$(2).so: $$(KERNEL_$(3)) $$(KERNEL_$(3)_tape) $$(KERNEL_$(3)_step
 endef
 $(eval $(call REV_RULES,reverse,reverse,rr_pend))
 $(eval $(call REV_RULES,act,reverse_active,pend_body))
+$(eval $(call REV_RULES,timed,reverse_timed,timed))
 
 pair-reverse: symbols $(OUT)/libpair_reverse.so $(REV_TEST)
 	$(REV_TEST) $(REV_FIXTURE) $(OUT)/libpair_reverse.so $(ORACLE_reverse) $(DIGEST_rr_pend) $(DIGEST_rr_pend_tape) \
@@ -182,6 +184,15 @@ pair-reverse: symbols $(OUT)/libpair_reverse.so $(REV_TEST)
 DIGEST_pend_body ?= a1929a54693dcbd5c69c818d24a4a3240cb635d10ca63bbaaa2216ca3d86914e
 DIGEST_pend_body_tape ?= 884913ccc546f5b55fb48a9854818c62f07596a9b79e9ca1c4d2820041b26cc2
 DIGEST_pend_body_step_vjp ?= 59410b1d2c471e7f9f34e5a7e4e2d8bc2ade1a32faa942246555dd144193f0fa
+# pair-reverse-timed: _timed (the old path's rr_timed: the time plane in index form, a start copy t_0, dt read as a plane eagle
+# fills, the step index as a plane eagle fills), window 37; states and gradients equal the old path's bit for bit (ORACLE_timed).
+DIGEST_timed ?= c65e6c2482a9fa9db1d3e63db3422cebd995cefda7ebde5b29924f4a8ff1ddc5
+DIGEST_timed_tape ?= a7f940e9d26d43728ae07ff682ddda4fa1a5c77df1ca49c795e65a67e611087e
+DIGEST_timed_step_vjp ?= 7e96064e7bac22b669c0eb9fbcc145e7b9b9b55d45a4279688d213d12ef1e752
+pair-reverse-timed: symbols $(OUT)/libpair_reverse_timed.so $(REV_TEST)
+	$(REV_TEST) $(REV_FIXTURE) $(OUT)/libpair_reverse_timed.so $(ORACLE_timed) $(DIGEST_timed) $(DIGEST_timed_tape) \
+	  $(DIGEST_timed_step_vjp) 0 _timed
+
 pair-reverse-active: symbols $(OUT)/libpair_reverse_active.so $(REV_TEST)
 	$(REV_TEST) $(REV_FIXTURE) $(OUT)/libpair_reverse_active.so $(ORACLE_act) $(DIGEST_pend_body) $(DIGEST_pend_body_tape) \
 	  $(DIGEST_pend_body_step_vjp) 4 _pend_body
