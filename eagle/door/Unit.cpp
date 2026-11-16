@@ -179,6 +179,45 @@ void read_made(const eg_unit_body& body, void* library, bool device_only, eg_uni
     }
 }
 
+/** @brief Check the dispatch groups of the unit. PREDICATED and SWITCH run as plain kernels: the record is checked and nothing more is kept. */
+void read_dispatch(const eg_unit_body& body, const eg_unit_s& unit) {
+    const std::string who = "meta that contradicts itself: unit '" + unit.name + "' ";
+    if (body.n_dispatches < 0 || (body.n_dispatches > 0 && body.dispatches == nullptr))
+        refuse(EG_BAD_REQUEST, who + "n_dispatches " + std::to_string(body.n_dispatches));
+    for (int i = 0; i < body.n_dispatches; ++i) {
+        eg_unit_dispatch absent{};
+        absent.mix_slot = absent.class_slot = absent.stale_slot = absent.offsets_slot = -1;
+        absent.k = 2; /* a record written before k existed: the least a group has */
+        const eg_unit_dispatch d = read_record(body.dispatches[i], absent, "unit '" + unit.name + "' dispatch");
+        if (d.name == nullptr) refuse(EG_BAD_REQUEST, who + "has a dispatch group without a name");
+        const std::string group = d.name;
+        const bool plain = d.strategy == EG_DISPATCH_PREDICATED || d.strategy == EG_DISPATCH_SWITCH;
+        if (!plain && d.strategy != EG_DISPATCH_SEGMENTED && d.strategy != EG_DISPATCH_AUTO)
+            refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': dispatch group '" + group + "' has strategy " + std::to_string(d.strategy) +
+                   ", which is not written");
+        const bool seg = d.strategy == EG_DISPATCH_SEGMENTED;
+        if (d.k < 2) refuse(EG_BAD_REQUEST, who + "dispatch group '" + group + "' has k " + std::to_string(d.k) + ", a group has at least 2 branches");
+        if (!seg && (d.branches != nullptr || d.sweep != nullptr))
+            refuse(EG_BAD_REQUEST, who + "dispatch group '" + group + "' names branches or a sweep and is not SEGMENTED");
+        if (seg && !((d.stale_slot == -1 && d.classify != nullptr && d.sweep == nullptr) ||
+                     (d.stale_slot != -1 && d.classify == nullptr && d.sweep != nullptr)))
+            refuse(EG_BAD_REQUEST, who + "dispatch group '" + group + "' is SEGMENTED with neither a static selector (no stale slot, a classify "
+                   "unit, no sweep) nor a dynamic one (a stale slot and a sweep, no classify unit)");
+        if ((d.mix_slot != -1) != (d.strategy == EG_DISPATCH_AUTO))
+            refuse(EG_BAD_REQUEST, who + "dispatch group '" + group + "' has a mix slot unless it is AUTO, and AUTO has one");
+        if (!seg && (d.class_slot != -1 || d.stale_slot != -1 || d.offsets_slot != -1 || d.classify != nullptr))
+            refuse(EG_BAD_REQUEST, who + "dispatch group '" + group + "' names SEGMENTED members and is not SEGMENTED");
+        if (d.mix_slot != -1 && (d.mix_slot < 0 || d.mix_slot >= static_cast<std::int32_t>(unit.slots.size()) ||
+                                 unit.slots[d.mix_slot].role != EG_ROLE_LOOKUP || unit.slots[d.mix_slot].dtype != EG_DTYPE_UINT32))
+            refuse(EG_BAD_REQUEST, who + "dispatch group '" + group + "' mix slot " + std::to_string(d.mix_slot) + " is not a uint32 LOOKUP slot");
+        if (d.strategy == EG_DISPATCH_AUTO)
+            refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': dispatch group '" + group + "' is AUTO: its mix counters and decision are not written");
+        if (seg)
+            refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': dispatch group '" + group +
+                   "' is SEGMENTED: its branch units, class sort and sweep are not in the meta");
+    }
+}
+
 /** @brief Check the body and launch records and copy the slot facts into @p unit. */
 void read_body(const eg_unit_meta& m, void* library, bool device_only, eg_unit_s& unit) {
     const eg_unit_body body = read_record(m.body, eg_unit_body{}, "unit '" + unit.name + "' body");
@@ -187,12 +226,12 @@ void read_body(const eg_unit_meta& m, void* library, bool device_only, eg_unit_s
     unit.access = body.access;
     refuse_count(body.n_keyed, unit.name, "n_keyed");
     refuse_count(body.n_team_planes, unit.name, "n_team_planes");
-    refuse_count(body.n_dispatches, unit.name, "n_dispatches");
     if (body.n_slots < 0 || (body.n_slots > 0 && body.slots == nullptr))
         refuse(EG_BAD_REQUEST, "meta that contradicts itself: unit '" + unit.name + "' n_slots " +
                std::to_string(body.n_slots));
     for (int i = 0; i < body.n_slots; ++i) unit.slots.push_back(read_slot(body.slots[i], unit.name, i));
     read_made(body, library, device_only, unit);
+    read_dispatch(body, unit);
     read_finish(m, unit);
     if (m.launch == nullptr) return;
     eg_unit_launch absent{};

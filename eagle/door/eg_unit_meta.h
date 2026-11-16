@@ -241,6 +241,13 @@ struct eg_unit_dispatch {
     int32_t offsets_slot;     /**< SEGMENTED: the K+1 run offsets eagle makes, else -1 */
     const struct eg_unit_ref* classify; /**< SEGMENTED, static selector: the classify unit (passed in deps), NULL: none */
     const char* name;         /**< the group's name: hawk's resolve step and reasons */
+    int32_t k;                /**< the group's branches: the mix is k uint32, the offsets k+1 int64 */
+    int32_t reserved0;
+    const struct eg_unit_ref* const* branches; /**< SEGMENTED: k refs (passed in deps); branches[j] runs over the run of class j, the
+                                                    selector value j; else NULL */
+    const struct eg_unit_ref* sweep; /**< SEGMENTED, dynamic selector: the fused unit over an index set of the stale samples (passed
+                                          in deps); else NULL. Static selector: stale_slot -1, classify set, sweep NULL; dynamic:
+                                          stale_slot and sweep set, classify NULL; any other mix is refused */
 };
 
 /** The typed walk of a unit: its slots and the planes eagle makes for it. */

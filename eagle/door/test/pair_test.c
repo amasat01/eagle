@@ -137,7 +137,8 @@ struct unit_spec {
     unsigned made;              /* bit s set: slot s is eagle's own (a companion, compensation rows) and is never bound */
     struct plane_spec planes[MAXP];
     double yinit;
-    int has_uniform;            /* one float64 UNIFORM at slot nplanes, value 1.0 */
+    int has_uniform;            /* float64 UNIFORMs from slot nplanes on: this many, valued by ``uni`` (1.0 when it is 0) */
+    double uni[3];
     int unit_stride;            /* the planes carry an explicit stride of 1 (1-d only) */
     int threads;                /* eg_host_threads, 0 = leave */
     const char* want_file[2];
@@ -304,6 +305,41 @@ static const struct unit_spec units[] = {
       .want_file = { "y_out.f64" }, .nwant = 1, .read_msg = "old path input and output read (th 8, acc 4 float64)",
       .sanity = sanity_fixed_count,
       .nshapes = 2, .shapes = two_shapes, .ncases = 1, .cases = { { "fixed_count: a companion over a static axis", 0 } }, .device = 1 },
+    { .name = "g", .n = 4096, .nplanes = 3,
+      .planes = { { F64, 1, { 4096 }, NULL, NULL }, { F64, 1, { 4096 }, "g_bar_y.bin", NULL }, { F64, 1, { 4096 }, "g_x.bin", NULL } },
+      .yinit = 0.0, .has_uniform = 3, .uni = { -0.5, 0.8, 0.4 }, .threads = 3,
+      .want_file = { "g_out.bin" }, .nwant = 1, .read_msg = "old path inputs and output read (bar_y, x, bar_t 4096 float64)",
+      .nshapes = 2, .shapes = two_shapes, .ncases = 1, .cases = { { "g: a SWITCH group", 0 } }, .device = 1 },
+    { .name = "disp_r0_k2_pred", .n = 40, .nplanes = 3,
+      .planes = { { F64, 1, { 40 }, NULL, NULL }, { F64, 2, { 2, 40 }, "disp_r0_k2_pred_bs.bin", NULL }, { I32, 1, { 40 }, "disp_r0_k2_pred_k.bin", NULL } },
+      .yinit = 0.0, .threads = 3,
+      .want_file = { "disp_r0_k2_pred_out.bin" }, .nwant = 1, .read_msg = "old path inputs and output read (bs 2 x 40, k 40 x int32, y 40 float64)",
+      .nshapes = 2, .shapes = two_shapes, .ncases = 1, .cases = { { "disp_r0_k2_pred: a PREDICATED group", 0 } }, .device = 1 },
+    { .name = "disp_r0_k2_switch", .n = 40, .nplanes = 3,
+      .planes = { { F64, 1, { 40 }, NULL, NULL }, { F64, 2, { 2, 40 }, "disp_r0_k2_switch_bs.bin", NULL }, { I32, 1, { 40 }, "disp_r0_k2_switch_k.bin", NULL } },
+      .yinit = 0.0, .threads = 3,
+      .want_file = { "disp_r0_k2_switch_out.bin" }, .nwant = 1, .read_msg = "old path inputs and output read (bs 2 x 40, k 40 x int32, y 40 float64)",
+      .nshapes = 2, .shapes = two_shapes, .ncases = 1, .cases = { { "disp_r0_k2_switch: a SWITCH group", 0 } }, .device = 1 },
+    { .name = "disp_r0_k5_pred", .n = 40, .nplanes = 3,
+      .planes = { { F64, 1, { 40 }, NULL, NULL }, { F64, 2, { 5, 40 }, "disp_r0_k5_pred_bs.bin", NULL }, { I32, 1, { 40 }, "disp_r0_k5_pred_k.bin", NULL } },
+      .yinit = 0.0, .threads = 3,
+      .want_file = { "disp_r0_k5_pred_out.bin" }, .nwant = 1, .read_msg = "old path inputs and output read (bs 5 x 40, k 40 x int32, y 40 float64)",
+      .nshapes = 2, .shapes = two_shapes, .ncases = 1, .cases = { { "disp_r0_k5_pred: a PREDICATED group", 0 } }, .device = 1 },
+    { .name = "disp_r0_k5_switch", .n = 40, .nplanes = 3,
+      .planes = { { F64, 1, { 40 }, NULL, NULL }, { F64, 2, { 5, 40 }, "disp_r0_k5_switch_bs.bin", NULL }, { I32, 1, { 40 }, "disp_r0_k5_switch_k.bin", NULL } },
+      .yinit = 0.0, .threads = 3,
+      .want_file = { "disp_r0_k5_switch_out.bin" }, .nwant = 1, .read_msg = "old path inputs and output read (bs 5 x 40, k 40 x int32, y 40 float64)",
+      .nshapes = 2, .shapes = two_shapes, .ncases = 1, .cases = { { "disp_r0_k5_switch: a SWITCH group", 0 } }, .device = 1 },
+    { .name = "disp_r0_k16_pred", .n = 40, .nplanes = 3,
+      .planes = { { F64, 1, { 40 }, NULL, NULL }, { F64, 2, { 16, 40 }, "disp_r0_k16_pred_bs.bin", NULL }, { I32, 1, { 40 }, "disp_r0_k16_pred_k.bin", NULL } },
+      .yinit = 0.0, .threads = 3,
+      .want_file = { "disp_r0_k16_pred_out.bin" }, .nwant = 1, .read_msg = "old path inputs and output read (bs 16 x 40, k 40 x int32, y 40 float64)",
+      .nshapes = 2, .shapes = two_shapes, .ncases = 1, .cases = { { "disp_r0_k16_pred: a PREDICATED group", 0 } }, .device = 1 },
+    { .name = "disp_r0_k16_switch", .n = 40, .nplanes = 3,
+      .planes = { { F64, 1, { 40 }, NULL, NULL }, { F64, 2, { 16, 40 }, "disp_r0_k16_switch_bs.bin", NULL }, { I32, 1, { 40 }, "disp_r0_k16_switch_k.bin", NULL } },
+      .yinit = 0.0, .threads = 3,
+      .want_file = { "disp_r0_k16_switch_out.bin" }, .nwant = 1, .read_msg = "old path inputs and output read (bs 16 x 40, k 40 x int32, y 40 float64)",
+      .nshapes = 2, .shapes = two_shapes, .ncases = 1, .cases = { { "disp_r0_k16_switch: a SWITCH group", 0 } }, .device = 1 },
 };
 
 static int64_t elems(const struct plane_spec* p) {
@@ -358,9 +394,10 @@ static void run_case(eg_ctx* ctx, eg_unit* unit, const struct unit_spec* u, cons
     d.part_base = sh->parts ? base : NULL;
     d.part_count = sh->parts ? count : NULL;
     if (s == EG_OK) s = eg_plan_new(ctx, &d, &plan);
-    const int32_t uniform_slots[1] = { u->nplanes + __builtin_popcount(u->made) };
-    const double p = 1.0;
-    const void* const values[1] = { &p };
+    const int32_t first_uniform = u->nplanes + __builtin_popcount(u->made);
+    const int32_t uniform_slots[3] = { first_uniform, first_uniform + 1, first_uniform + 2 };
+    const double one = 1.0;
+    const void* const values[3] = { u->uni[0] != 0.0 ? &u->uni[0] : &one, &u->uni[1], &u->uni[2] };
     struct eg_bind_desc b;
     memset(&b, 0, sizeof(b));
     b.struct_size = sizeof(b);
@@ -393,11 +430,48 @@ static void run_case(eg_ctx* ctx, eg_unit* unit, const struct unit_spec* u, cons
     check(s == EG_OK && first < 0, what);
 }
 
+/* The refusal column: the library's meta must be refused at load, with the status and the reason text on the command line. */
+static int refused_load(char** argv) {
+    struct eg_ctx_settings st;
+    memset(&st, 0, sizeof(st));
+    st.struct_size = sizeof(st);
+    st.abi_major = EG_DOOR_VERSION_MAJOR;
+#ifdef EG_PAIR_DEVICE
+    st.flags = EG_CTX_DEVICE;
+#endif
+    eg_ctx* ctx = NULL;
+    check(eg_ctx_new(&st, &ctx) == EG_OK, "eg_ctx_new");
+    struct eg_unit_ref ref;
+    memset(&ref, 0, sizeof(ref));
+    ref.struct_size = sizeof(ref);
+    ref.name = argv[3];
+    struct eg_unit_load_desc d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    d.path = argv[1];
+    d.unit = &ref;
+    eg_unit* unit = NULL;
+    const eg_status want = strcmp(argv[5], "NOT_WRITTEN") == 0 ? EG_NOT_WRITTEN : EG_BAD_REQUEST;
+    const eg_status ls = parse_digest(argv[4], ref.digest) ? eg_unit_load(ctx, &d, &unit) : EG_FAULT;
+    char buf[1024];
+    size_t len = 0;
+    buf[0] = 0;
+    if (eg_error(ctx, buf, sizeof(buf), &len) != EG_OK) buf[0] = 0;
+    printf("      reason: %s\n", buf);
+    char what[256];
+    snprintf(what, sizeof(what), "eg_unit_load refused %s with a reason holding '%s'", argv[5], argv[6]);
+    check(ls == want && unit == NULL && strstr(buf, argv[6]) != NULL, what);
+    check(eg_ctx_free(ctx) == EG_OK, "eg_ctx_free");
+    printf("%s: %d check(s) failed\n", failures ? "FAIL" : "PASS", failures);
+    return failures ? 1 : 0;
+}
+
 int main(int argc, char** argv) {
-    if (argc != 5) {
-        fprintf(stderr, "usage: %s <unit library> <oracle dir> <unit name> <digest hex>\n", argv[0]);
+    if (argc != 5 && argc != 7) {
+        fprintf(stderr, "usage: %s <unit library> <oracle dir> <unit name> <digest hex> [<status> <reason text>]\n", argv[0]);
         return 2;
     }
+    if (argc == 7) return refused_load(argv); /* the load must be refused with that status and a reason holding that text */
     const struct unit_spec* u = NULL;
     for (size_t k = 0; k < sizeof(units) / sizeof(units[0]); ++k)
         if (strcmp(units[k].name, argv[3]) == 0) u = &units[k];

@@ -42,7 +42,7 @@ AETHER_INCLUDE ?=
 WING_FACTS ?=
 
 PAIR_WING_DIR ?=
-PAIR_UNITS := ss_bcast mat_apply _wide_math _flat rotate mv ksum_c fixed_count
+PAIR_UNITS := ss_bcast mat_apply _wide_math _flat rotate mv ksum_c fixed_count g disp_r0_k2_pred disp_r0_k2_switch disp_r0_k5_pred disp_r0_k5_switch disp_r0_k16_pred disp_r0_k16_switch
 DIGEST_ss_bcast ?= 49a12f72dfd7520aa76ed07e9c4765ed5f4c5a6d4d2b29b5ad19eb91767befec
 DIGEST_mat_apply ?= ef89b7e1ef6118d2fe685199b8ae1a656b6aa98dd27b059dec549aea7feea46e
 DIGEST__wide_math ?= 5f25d984f02b738ba5b93ec9827d9996f7c6680101014b0db766c4dc9a1d6f09
@@ -59,7 +59,7 @@ CUDA ?=
 NVCC ?= $(CUDA)/bin/nvcc
 PAIR_CUDA_WING_DIR ?=
 CUDA_WING_FACTS ?= $(PAIR_CUDA_WING_DIR)/raptor_facts.h
-PAIR_DEVICE_UNITS := mv osc osc_x4 ksum_c fixed_count _osc _osc_x4 _gosc _plain kg_fwd kq oscillator bosc
+PAIR_DEVICE_UNITS := mv osc osc_x4 ksum_c fixed_count _osc _osc_x4 _gosc _plain kg_fwd kq oscillator bosc g disp_r0_k2_pred disp_r0_k2_switch disp_r0_k5_pred disp_r0_k5_switch disp_r0_k16_pred disp_r0_k16_switch
 # The old path's device recipe for a cuda unit (hawk's nvcc build) in the image format its meta records
 # (EG_IMAGE_PTX: -ptx, else -cubin). PAIR_NVCC/PAIR_CCBIN: the compiler the old run used (its cache's
 # validity record); PTX of a toolkit newer than the driver does not load.
@@ -354,6 +354,36 @@ $(foreach u,$(PAIR_UNITS),$(eval $(call PAIR_RULES,$(u))))
 
 pairs: $(PAIR_UNITS:%=pair-%)
 
+# pair-refuse-<case>: unit g's kernel with a dispatch group the door does not take, or one that contradicts itself
+# (META_g_<case>, KERNEL_g, DIGEST_g): the load is refused with the status and the reason text below.
+REFUSE_CASES := auto seg badmix badstrategy nullname badk badbranch segmix
+REFUSE_STATUS_auto = NOT_WRITTEN
+REFUSE_TEXT_auto = is AUTO
+REFUSE_STATUS_seg = NOT_WRITTEN
+REFUSE_TEXT_seg = is SEGMENTED: its branch units, class sort and sweep are not in the meta
+REFUSE_STATUS_badmix = BAD_REQUEST
+REFUSE_TEXT_badmix = has a mix slot unless it is AUTO
+REFUSE_STATUS_badstrategy = NOT_WRITTEN
+REFUSE_TEXT_badstrategy = has strategy 9
+REFUSE_STATUS_nullname = BAD_REQUEST
+REFUSE_TEXT_nullname = without a name
+REFUSE_STATUS_badk = BAD_REQUEST
+REFUSE_TEXT_badk = a group has at least 2 branches
+REFUSE_STATUS_badbranch = BAD_REQUEST
+REFUSE_TEXT_badbranch = names branches or a sweep and is not SEGMENTED
+REFUSE_STATUS_segmix = BAD_REQUEST
+REFUSE_TEXT_segmix = is SEGMENTED with neither a static selector
+define REFUSE_RULES
+$(OUT)/libpair_refuse_$(1).so: $$(KERNEL_g) $$(META_g_$(1)) eg_door.h eg_unit_meta.h | check-inputs
+	@mkdir -p $(OUT)
+	$$(CXX) $$(PAIR_HOST_FLAGS) -I$$(AETHER_INCLUDE) -I$$(AETHER_INCLUDE)/eagle -I$$(PAIR_WING_DIR) -c $$(KERNEL_g) -o $(OUT)/refuse_$(1)_kernel.o
+	$$(CC) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$$(ROOT) -c $$(META_g_$(1)) -o $(OUT)/refuse_$(1)_meta.o
+	$$(CXX) -shared -o $$@ $(OUT)/refuse_$(1)_kernel.o $(OUT)/refuse_$(1)_meta.o
+pair-refuse-$(1): symbols $(OUT)/libpair_refuse_$(1).so $$(PAIR_TEST)
+	$$(PAIR_TEST) $(OUT)/libpair_refuse_$(1).so . g $$(DIGEST_g) $$(REFUSE_STATUS_$(1)) "$$(REFUSE_TEXT_$(1))"
+endef
+$(foreach c,$(REFUSE_CASES),$(eval $(call REFUSE_RULES,$(c))))
+
 # ---- device targets (CUDA set) ----
 
 check-cuda:
@@ -429,6 +459,20 @@ $(OUT)/libpair_dev_$(1).so: $$(KERNEL_CUDA_$(1)) $$(META_CUDA_$(1)) eg_door.h eg
 pair-device-$(1): symbols $(OUT)/libpair_dev_$(1).so $$(PAIR_DEVICE_TEST) $$(RUNNER_PAIR_TEST) $$(ACTIVE_PAIR_TEST) $$(FAST_PAIR_TEST) $$(GRAPH_PAIR_TEST) $$(FEATURES_TEST) $$(OPS_TEST) $$(BANDED_RUNNER_TEST)
 endef
 $(foreach u,$(PAIR_DEVICE_UNITS),$(eval $(call PAIR_DEVICE_RULES,$(u))))
+
+# pair-device-refuse-<case> (auto, seg): the same refusals through a device context, unit g's cuda text (KERNEL_CUDA_g, META_CUDA_g_<case>).
+define REFUSE_DEVICE_RULES
+$(OUT)/libpair_dev_refuse_$(1).so: $$(KERNEL_CUDA_g) $$(META_CUDA_g_$(1)) eg_door.h eg_unit_meta.h | check-inputs check-cuda
+	@mkdir -p $(OUT)
+	$$(PAIR_NVCC) -ptx $$(PAIR_DEVICE_FLAGS) -ccbin $$(PAIR_CCBIN) -I $$(AETHER_INCLUDE) -I $$(AETHER_INCLUDE)/eagle \
+	  -I$$(PAIR_CUDA_WING_DIR) $$(KERNEL_CUDA_g) -o $(OUT)/refuse_dev_$(1).image
+	$$(call embed,$(OUT)/refuse_dev_$(1).image,g__image,$(OUT)/refuse_dev_$(1)_image.o)
+	$$(CC) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$$(ROOT) -c $$(META_CUDA_g_$(1)) -o $(OUT)/refuse_dev_$(1)_meta.o
+	$$(CC) -shared -o $$@ $(OUT)/refuse_dev_$(1)_meta.o $(OUT)/refuse_dev_$(1)_image.o
+pair-device-refuse-$(1): symbols $(OUT)/libpair_dev_refuse_$(1).so $$(PAIR_DEVICE_TEST)
+	$$(PAIR_DEVICE_TEST) $(OUT)/libpair_dev_refuse_$(1).so . g $$(DIGEST_g) $$(REFUSE_STATUS_$(1)) "$$(REFUSE_TEXT_$(1))"
+endef
+$(foreach c,auto seg,$(eval $(call REFUSE_DEVICE_RULES,$(c))))
 
 # pair-device-reverse: a recorded run and its reverse on the device, rr_pend and _timed: per unit one library of the old device
 # run's own images (PTX_<unit>, PTX_<unit>_tape, PTX_<unit>_step_vjp: the PTX it loaded) with the host meta (META_reverse,
