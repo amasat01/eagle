@@ -51,7 +51,7 @@ inline void reorder(Owned& o, const std::vector<std::int32_t>& order, std::size_
 
 /** @brief The planes the units read in sorted order: every per-sample plane of the branch and classify units of the group (the class and stale planes
  *  and the sweep's own are slot-indexed scratch, not moved), and the mask. The binding of each is a copy repointed at its sorted rows. */
-inline std::vector<Owned> collect(const eg_plan_s& plan, bool with_classify) {
+inline std::vector<Owned> collect(const eg_plan_s& plan, bool with_classify, bool device = false) {
     const SegFacts& g = plan.unit->seg;
     const std::size_t n = static_cast<std::size_t>(plan.n_samples);
     std::vector<Owned> owned;
@@ -69,7 +69,7 @@ inline std::vector<Owned> collect(const eg_plan_s& plan, bool with_classify) {
         o.elem = t.dtype.bits / 8;
         o.rows = n == 0 ? 0 : static_cast<std::size_t>(elements(t)) / n;
         o.written = written;
-        o.buf.resize(o.rows * n * o.elem);
+        if (!device) o.buf.resize(o.rows * n * o.elem);    // a device plan's copies are the caller's to make (device memory)
         o.bind = plan.bindings[static_cast<std::size_t>(s)];
         owned.push_back(std::move(o));
     };
@@ -87,6 +87,7 @@ inline std::vector<Owned> collect(const eg_plan_s& plan, bool with_classify) {
         }
     }
     for (Owned& o : owned) {    // the sorted copies exist before any pointer into them is taken
+        if (device) break;
         const SlotFacts& sf = plan.unit->slots[static_cast<std::size_t>(o.slot)];
         if (sf.mirror) o.bind.mirror.data_ = reinterpret_cast<double*>(o.buf.data());
         else o.bind.handle.data = o.buf.data();

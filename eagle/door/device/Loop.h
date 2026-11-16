@@ -89,6 +89,19 @@ void reorder_step(std::uint64_t stream, const std::vector<DevicePlane>& planes, 
 void restore_step(std::uint64_t stream, const std::vector<DevicePlane>& planes, std::int32_t* perm, std::int32_t* inv,
                   void* scratch, std::int64_t n);
 
+/** @brief Bytes of scratch a K-class sort of @p n samples over @p planes needs (``classes`` classes). */
+std::size_t class_sort_scratch_bytes(std::int64_t n, const std::vector<DevicePlane>& planes, unsigned classes);
+
+/** @brief Queue on @p stream eagle's stable K-class sort: the slots of the @p n samples by ``(live, class)`` (a set mask byte = dead, last), every
+ *  plane of @p planes moving with them (the mask and the uint8 class plane @p class_plane among them); ``perm``/``inv`` follow, ``offsets``
+ *  (``classes + 1`` uint32) holds the first slot of each class's live run, ``*count`` and ``*span`` become the live count, ``*sorts`` is incremented. */
+void class_sort_step(std::uint64_t stream, const std::vector<DevicePlane>& planes, const void* mask, unsigned classes, const void* class_plane,
+                     std::int32_t* perm, std::int32_t* inv, std::int32_t* map, unsigned* count, unsigned* span, unsigned* offsets, unsigned* sorts,
+                     void* scratch, std::int64_t n);
+
+/** @brief Queue on @p stream ``perm``/``inv``/@p map the identity over @p n samples, ``*count`` = ``*span`` = @p n. */
+void reset_step(std::uint64_t stream, std::int32_t* perm, std::int32_t* inv, std::int32_t* map, unsigned* count, unsigned* span, std::int64_t n);
+
 /** @brief Reduce each of the @p cols columns of the (cols, n) device plane @p in into @p out on @p stream by eagle's
  *  canonical ordered tree (the order the host runs; ``code``: 0 f32, 1 f64, 2 i32, 3 i64, 4 u8 with op 3 ALL; ``op``: 0 SUM,
  *  1 MAX, 2 MIN, 3 ALL). @p comp: a float sum's companion input, or with @p pair the output of the compensation beside

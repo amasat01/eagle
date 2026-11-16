@@ -301,6 +301,7 @@ struct SegState {
     std::int64_t stale_now = 0;               ///< stale live samples after the last launch
     bool sorted = false;
     plugin::ScalarHandle map_h{}, count_h{};
+    std::vector<void*> dev_bufs;              ///< DEVICE: the device memory of the sort and the sorted copies, made at the first launch, freed with the plan
 };
 
 }  // namespace door
@@ -328,6 +329,7 @@ struct eg_plan_s {
     std::vector<eg_plane_s*> outs;            ///< a split unit: the cell plane eagle makes for each internal cell column (nullptr: the caller's)
     std::vector<eg_plane_s*> team;            ///< one eagle-made scratch plane per team plane of a split unit, one reference each
     std::vector<eg_plane_s*> work;            ///< DEVICE: the two reduction work buffers of each cell component, one reference each
+    std::vector<eg_plane_s*> segdev;          ///< a DEVICE SEGMENTED plan: the offsets and class planes eagle makes in device memory
     std::vector<eg_plane_s*> mix;             ///< the eagle-made mix counters of each AUTO group (``unit->dispatches`` order), one reference each
     mutable eagle::door::SegState seg;        ///< a SEGMENTED plan: its planes and sort
     std::uint32_t finished = 0;               ///< the eagle-made finished counter of a finishing unit

@@ -14,6 +14,7 @@
 #include "eagle/reduce/canonical.h"
 
 #include "eagle/filtering/Reorder.h"
+#include "eagle/filtering/ReorderClasses.h"
 #include "eagle/diff/Reverse.h"
 #include "eagle/events/Sensitivity.h"
 
@@ -171,6 +172,25 @@ void restore_step(std::uint64_t stream, const std::vector<DevicePlane>& planes, 
                   void* scratch, std::int64_t n) {
     const auto t = table(planes);
     filtering::restoreDevice(t.data(), static_cast<std::uint32_t>(t.size()), perm, inv, scratch, n, reinterpret_cast<cudaStream_t>(stream));
+}
+
+std::size_t class_sort_scratch_bytes(std::int64_t n, const std::vector<DevicePlane>& planes, unsigned classes) {
+    std::uint32_t widest = 4u;
+    for (const DevicePlane& p : planes) widest = std::max(widest, p.bytes);
+    return filtering::classSortScratchBytes(n, widest, classes);
+}
+
+void class_sort_step(std::uint64_t stream, const std::vector<DevicePlane>& planes, const void* mask, unsigned classes, const void* class_plane,
+                     std::int32_t* perm, std::int32_t* inv, std::int32_t* map, unsigned* count, unsigned* span, unsigned* offsets, unsigned* sorts,
+                     void* scratch, std::int64_t n) {
+    const auto t = table(planes);
+    filtering::reorderClassesDevice(t.data(), static_cast<std::uint32_t>(t.size()), static_cast<const std::uint8_t*>(mask), filtering::kCompactMaskIsDrop,
+                                    classes, static_cast<const std::uint8_t*>(class_plane), perm, inv, map, count, span, nullptr, offsets, sorts,
+                                    scratch, n, reinterpret_cast<cudaStream_t>(stream));
+}
+
+void reset_step(std::uint64_t stream, std::int32_t* perm, std::int32_t* inv, std::int32_t* map, unsigned* count, unsigned* span, std::int64_t n) {
+    filtering::resetDevice(perm, inv, map, count, span, n, reinterpret_cast<cudaStream_t>(stream));
 }
 
 namespace {

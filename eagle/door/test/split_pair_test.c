@@ -310,11 +310,15 @@ int main(int argc, char** argv) {
 #endif
         if (s == EG_OK) s = eg_bind(ctx, plan, &b);
         for (int rep = 0; rep < 2; ++rep) {
-#ifndef EG_PAIR_DEVICE
             if (rep > 0)    /* a plane the caller binds as a counter accumulates over launches: every launch starts from the zeroed output */
                 for (int i = 0; i < np; ++i)
-                    if (is_out(&pls[i])) memset(pls[i].buf, 0, (size_t)pls[i].count * esz(&pls[i]));
+                    if (is_out(&pls[i])) {
+#ifdef EG_PAIR_DEVICE
+                        if (s == EG_OK && cudaMemset(dev[i], 0, (size_t)pls[i].count * esz(&pls[i])) != cudaSuccess) s = EG_FAULT;
+#else
+                        memset(pls[i].buf, 0, (size_t)pls[i].count * esz(&pls[i]));
 #endif
+                    }
             if (s == EG_OK) s = eg_launch(ctx, plan, NULL);
 #ifdef EG_PAIR_DEVICE
             if (s == EG_OK) s = eg_sync(ctx);

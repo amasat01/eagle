@@ -301,20 +301,19 @@ void plan_new(eg_ctx& ctx, const eg_plan_desc* desc, eg_plan** out) {
             refuse(EG_BAD_REQUEST, "unit '" + d.unit->name + "' is one branch of the SEGMENTED dispatch group '" + f.name +
                    "': load it with the group's units in deps to plan the group");
     if (d.unit->seg.present) {
-        if (device) refuse(EG_NOT_WRITTEN, "unit '" + d.unit->name + "': a SEGMENTED dispatch group on DEVICE is not written");
         const SegFacts& g = d.unit->seg;
+        if (device && g.dynamic) refuse(EG_NOT_WRITTEN, "unit '" + d.unit->name + "': a SEGMENTED dispatch group with a dynamic selector on DEVICE is not written");
+        if (device && d.unit->dev_box_t > 0) refuse(EG_NOT_WRITTEN, "unit '" + d.unit->name + "': a SEGMENTED dispatch group over a device thread box is not written");
         std::vector<const eg_unit_s*> units(g.branches.begin(), g.branches.end());
         units.push_back(g.dynamic ? g.sweep : g.classify);
         for (const eg_unit_s* m : units)
-            if (m->host_entry == nullptr)
-                refuse(EG_NOT_WRITTEN, "unit '" + d.unit->name + "': the unit '" + m->name + "' of dispatch group '" + g.name + "' has no host entry");
+            if (device ? m->function == 0 : m->host_entry == nullptr)
+                refuse(EG_NOT_WRITTEN, "unit '" + d.unit->name + "': the unit '" + m->name + "' of dispatch group '" + g.name + "' has no " + (device ? "device function" : "host entry"));
         if (d.unit->box_t > 0 || d.unit->index_count_slot >= 0 || d.unit->active_map_slot >= 0)
             refuse(EG_NOT_WRITTEN, "unit '" + d.unit->name + "': a SEGMENTED dispatch group over a thread box, an index set or an active set is not written");
         if (d.n_partitions != 0 && !(d.n_partitions == 1 && d.part_base != nullptr && d.part_count != nullptr && d.part_base[0] == 0 && d.part_count[0] == d.n_samples))
             refuse(EG_BAD_REQUEST, "unit '" + d.unit->name + "' runs a SEGMENTED dispatch group over the sorted samples: one whole partition");
     }
-    for (const DispatchFacts& f : d.unit->dispatches)
-        if (f.strategy == EG_DISPATCH_AUTO && device) refuse(EG_NOT_WRITTEN, "unit '" + d.unit->name + "': the AUTO dispatch group '" + f.name + "' on DEVICE is not written");
     std::vector<exec::Partition> parts = read_partitions(d);
     for (const exec::Partition& p : parts)    // a row of a cell has one writer: a partition starts on a row
         if (d.unit->cell_row > 0 && p.base % d.unit->cell_row != 0)
@@ -424,16 +423,24 @@ void plan_new(eg_ctx& ctx, const eg_plan_desc* desc, eg_plan** out) {
         }
         for (const DispatchFacts& f : d.unit->dispatches) {    // an AUTO group's mix counters: eagle's, zeroed, unless the caller binds some
             if (f.strategy != EG_DISPATCH_AUTO) continue;
-            plan->mix.push_back(make_plane(ctx, DLDataType{ kDLUInt, 32, 1 }, { f.k }, false));
+            plan->mix.push_back(make_plane(ctx, DLDataType{ kDLUInt, 32, 1 }, { f.k }, device));
             bind_handle(*plan, f.mix, plan->mix.back()->tensor->dl_tensor.data, static_cast<std::uint64_t>(f.k));
         }
         if (d.unit->seg.present) {    // a SEGMENTED group: the planes eagle makes for it
             const SegFacts& g = d.unit->seg;
             SegState& st = plan->seg;
-            st.offsets.assign(static_cast<std::size_t>(g.k) + 1, 0);
-            st.cls.assign(static_cast<std::size_t>(d.n_samples), 0);
-            bind_handle(*plan, g.offsets_slot, st.offsets.data(), static_cast<std::uint64_t>(g.k) + 1);
-            bind_handle(*plan, g.class_slot, st.cls.data(), static_cast<std::uint64_t>(d.n_samples));
+            const DLDataType i64{ kDLInt, 64, 1 };
+            if (device) {    // the offsets and class planes live in device memory; the sort's own buffers are made at the first launch
+                plan->segdev.push_back(make_plane(ctx, i64, { g.k + 1 }, true));
+                plan->segdev.push_back(make_plane(ctx, i64, { std::max<std::int64_t>(d.n_samples, 1) }, true));
+                bind_handle(*plan, g.offsets_slot, plan->segdev[0]->tensor->dl_tensor.data, static_cast<std::uint64_t>(g.k) + 1);
+                bind_handle(*plan, g.class_slot, plan->segdev[1]->tensor->dl_tensor.data, static_cast<std::uint64_t>(d.n_samples));
+            } else {
+                st.offsets.assign(static_cast<std::size_t>(g.k) + 1, 0);
+                st.cls.assign(static_cast<std::size_t>(d.n_samples), 0);
+                bind_handle(*plan, g.offsets_slot, st.offsets.data(), static_cast<std::uint64_t>(g.k) + 1);
+                bind_handle(*plan, g.class_slot, st.cls.data(), static_cast<std::uint64_t>(d.n_samples));
+            }
             st.run_len.assign(static_cast<std::size_t>(g.k), 0);
             if (g.dynamic) {
                 st.stale.assign(static_cast<std::size_t>(d.n_samples), 0);
@@ -464,6 +471,8 @@ void plan_new(eg_ctx& ctx, const eg_plan_desc* desc, eg_plan** out) {
         ctx.plans.insert(plan);
     } catch (...) {
         for (eg_plane_s* r : plan->mix) plane_release(ctx, r);
+        for (eg_plane_s* r : plan->segdev) plane_release(ctx, r);
+        for (void* b : plan->seg.dev_bufs) device_free(ctx, b);
         for (eg_plane_s* r : plan->team) plane_release(ctx, r);
         for (eg_plane_s* r : plan->comps) if (r != nullptr) plane_release(ctx, r);
         for (eg_plane_s* r : plan->outs) if (r != nullptr) plane_release(ctx, r);
@@ -488,6 +497,8 @@ void plan_free(eg_ctx& ctx, eg_plan_s* plan) {
     for (eg_plane_s* r : plan->rows) plane_release(ctx, r);
     for (eg_plane_s* r : plan->team) plane_release(ctx, r);
     for (eg_plane_s* r : plan->mix) plane_release(ctx, r);
+    for (eg_plane_s* r : plan->segdev) plane_release(ctx, r);
+    for (void* b : plan->seg.dev_bufs) device_free(ctx, b);
     for (eg_plane_s* r : plan->comps) if (r != nullptr) plane_release(ctx, r);
     for (eg_plane_s* r : plan->outs) if (r != nullptr) plane_release(ctx, r);
     unit_release(ctx, plan->unit);
