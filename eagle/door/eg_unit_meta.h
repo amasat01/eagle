@@ -355,7 +355,8 @@ struct eg_unit_team {
 /** Where a slot of a reverse unit comes from. ``of_slot`` is a PRIMAL slot index
  *  unless stated otherwise. */
 typedef int32_t eg_derived_source;
-#define EG_SRC_PRIMAL 0            /**< the primal's slot ``of_slot``, unchanged */
+#define EG_SRC_PRIMAL 0            /**< the primal's slot ``of_slot``, unchanged; a PER_SAMPLE slot linked to a primal UNIFORM
+                                        is a plane eagle makes and fills with that uniform's value */
 #define EG_SRC_STATE_ADJOINT_IN 1  /**< the adjoint of state ``of_slot``, read at this step's parity */
 #define EG_SRC_STATE_ADJOINT_OUT 2 /**< the next-step adjoint of ``of_slot``, written to the other parity */
 #define EG_SRC_PARAM_GRAD 3        /**< the accumulated gradient of parameter or uniform ``of_slot`` */
@@ -363,7 +364,8 @@ typedef int32_t eg_derived_source;
 #define EG_SRC_STEPS 5             /**< a step plane: ``of_slot`` = the taping twin's ``steps_slot``, or -1 for one eagle makes only because this unit reads it */
 #define EG_SRC_EVENT 6             /**< an event multiplier of a refine run: ``of_slot`` = the event's index in the unit's event list */
 #define EG_SRC_TIME0 7             /**< the start copy of time plane ``of_slot``: on a taping twin, ``time0_slot``, which eagle fills at run start;
-                                        on a reverse unit, a read of that copy whose gradient eagle adds into ``of_slot``'s gradient */
+                                        on a reverse unit, the slot holding the start copy's gradient, which eagle adds into
+                                        ``of_slot``'s gradient */
 
 /** One taped plane: rows [row0, row0 + rows) of the tape hold primal slot ``slot``. */
 struct eg_unit_taped {
