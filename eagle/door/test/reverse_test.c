@@ -363,8 +363,8 @@ static void lin_rows(eg_ctx* ctx, const char* lib) {
     struct lin sa;
     if (aplan) lin_bind(ctx, aplan, &sa);
     d = recorded(&aplan, LSTEPS, 3, 0, roles, good);
-    check(aplan && eg_runner_new(ctx, &d, &none) == EG_NOT_WRITTEN && reason_has(ctx, "active set"),
-          "EG_RUN_RECORD of a step reading an active set refused NOT_WRITTEN by name");
+    check(aplan && eg_runner_new(ctx, &d, &none) == EG_BAD_REQUEST && reason_has(ctx, "reads an active set"),
+          "EG_RUN_RECORD of an active-set step whose twin reads no active set refused BAD_REQUEST by name");
     if (aplan) {
         eg_plan_free(ctx, aplan);
         lin_free(ctx, &sa);
@@ -380,8 +380,16 @@ static void lin_rows(eg_ctx* ctx, const char* lib) {
 #define PN 64
 #define PSTEPS 400
 
-static void pair_rows(eg_ctx* ctx, char** argv) {
+static void pair_rows(eg_ctx* ctx, int argc, char** argv) {
     const char *lib = argv[2], *dir = argv[3];
+    /* with an active set (argc 9): the cadence in steps and the primal's name (_pend_body: the mask is slot 7, c and dt 8 and 9) */
+    const int act = argc == 9;
+    const long every = act ? atol(argv[7]) : 0;
+    const char* base = act ? argv[8] : "rr_pend";
+    char tape_name[64], vjp_name[64];
+    snprintf(tape_name, sizeof(tape_name), "%s_tape", base);
+    snprintf(vjp_name, sizeof(vjp_name), "%s_step_vjp", base);
+    const int32_t mask_slot = act ? 7 : 5, c_slot = act ? 8 : 6, dt_slot = act ? 9 : 7;
     uint8_t dg[3][EG_DIGEST_BYTES];
     static double x0[PN], v0[PN], tf[PN], ex[PN], ev[PN], et[PN], gx[PN], gv[PN], gt[PN];
     double gc = 0.0, gdt = 0.0;
@@ -396,8 +404,8 @@ static void pair_rows(eg_ctx* ctx, char** argv) {
         check(0, "pair: the digests and the old path's oracle files read");
         return;
     }
-    eg_unit* p = load(ctx, lib, "rr_pend", dg[0]);
-    eg_unit* units[2] = { load(ctx, lib, "rr_pend_tape", dg[1]), load(ctx, lib, "rr_pend_step_vjp", dg[2]) };
+    eg_unit* p = load(ctx, lib, base, dg[0]);
+    eg_unit* units[2] = { load(ctx, lib, tape_name, dg[1]), load(ctx, lib, vjp_name, dg[2]) };
     check(p && units[0] && units[1], "pair: rr_pend, its taping twin and its step vjp load from one library");
     if (!(p && units[0] && units[1])) return;
     const eg_derived_role roles[2] = { EG_DERIVED_TAPE, EG_DERIVED_STEP_VJP };
@@ -420,12 +428,13 @@ static void pair_rows(eg_ctx* ctx, char** argv) {
             eg_plane* planes[5] = { host_plane(ctx, &tt, PN, t, kDLFloat, 64), host_plane(ctx, &tv, PN, v, kDLFloat, 64),
                                     host_plane(ctx, &tx, PN, x, kDLFloat, 64), host_plane(ctx, &ttf, PN, tfin, kDLFloat, 64),
                                     host_plane(ctx, &tdn, PN, done, kDLBool, 8) };
-            const int32_t slots[5] = { 0, 1, 2, 3, 5 }, us[2] = { 6, 7 };
+            const int32_t slots[5] = { 0, 1, 2, 3, mask_slot }, us[2] = { c_slot, dt_slot };
             const void* const uv[2] = { &c, &dt };
             const struct eg_bind_desc bd = binds(5, slots, planes, 2, us, uv);
             eg_plan* plan = plan_of(ctx, p, structures[si], PN);
             eg_runner* r = NULL;
-            const struct eg_runner_desc d = recorded(&plan, PSTEPS, si ? PSTEPS : -1, 0, roles, units);
+            struct eg_runner_desc d = recorded(&plan, PSTEPS, act ? 37 : si ? PSTEPS : -1, 0, roles, units);
+            d.every = every;
             struct eg_run_report rep;
             memset(&rep, 0, sizeof(rep));
             rep.struct_size = sizeof(rep);
@@ -433,8 +442,8 @@ static void pair_rows(eg_ctx* ctx, char** argv) {
                            eg_run(ctx, r, &rep) == EG_OK;
             int s_ok = ok && rep.steps == 301 && rep.finished == PN;
             for (int i = 0; s_ok && i < PN; ++i) s_ok = x[i] == ex[i] && v[i] == ev[i] && t[i] == et[i];
-            snprintf(what, sizeof(what), "pair rr_pend %s %d threads (window %s): the recorded run's states equal the old "
-                     "path's bitwise (%lld steps)", si ? "HOST_TEAM" : "HOST_SERIAL", threads[ti], si ? "400" : "-1, full",
+            snprintf(what, sizeof(what), "pair %s%s %s %d threads (window %s): the recorded run's states equal the old "
+                     "path's bitwise (%lld steps)", base, act ? " (active set)" : "", si ? "HOST_TEAM" : "HOST_SERIAL", threads[ti], act ? "37" : si ? "400" : "-1, full",
                      (long long)rep.steps);
             check(s_ok, what);
             static double sx[PN], sv[PN], ox[PN], ov[PN], ot[PN];
@@ -448,14 +457,14 @@ static void pair_rows(eg_ctx* ctx, char** argv) {
             eg_plane* const gp[5] = { host_plane(ctx, &b1, PN, ox, kDLFloat, 64), host_plane(ctx, &b2, PN, ov, kDLFloat, 64),
                                       host_plane(ctx, &b3, PN, ot, kDLFloat, 64), host_plane(ctx, &b4, 1, &oc, kDLFloat, 64),
                                       host_plane(ctx, &b5, 1, &odt, kDLFloat, 64) };
-            const int32_t sslot[2] = { 2, 1 }, gslot[5] = { 2, 1, 0, 6, 7 };
+            const int32_t sslot[2] = { 2, 1 }, gslot[5] = { 2, 1, 0, c_slot, dt_slot };
             const struct eg_bind_desc sd = binds(2, sslot, sp, 0, NULL, NULL), gd = binds(5, gslot, gp, 0, NULL, NULL);
             const int rok = ok && eg_reverse(ctx, r, &sd, &gd) == EG_OK;
             int g_ok = rok && memcmp(&oc, &gc, sizeof(gc)) == 0 && memcmp(&odt, &gdt, sizeof(gdt)) == 0;
             for (int i = 0; g_ok && i < PN; ++i)
                 g_ok = memcmp(&ox[i], &gx[i], 8) == 0 && memcmp(&ov[i], &gv[i], 8) == 0 && memcmp(&ot[i], &gt[i], 8) == 0;
-            snprintf(what, sizeof(what), "pair rr_pend %s %d threads: eg_reverse's gradients (x, v, t per sample; c, dt summed) "
-                     "equal the old path's bitwise (c %.17g, dt %.17g)", si ? "HOST_TEAM" : "HOST_SERIAL", threads[ti], oc, odt);
+            snprintf(what, sizeof(what), "pair %s%s %s %d threads: eg_reverse's gradients (x, v, t per sample; c, dt summed) "
+                     "equal the old path's bitwise (c %.17g, dt %.17g)", base, act ? " (active set)" : "", si ? "HOST_TEAM" : "HOST_SERIAL", threads[ti], oc, odt);
             check(g_ok, what);
             for (int i = 0; i < 2; ++i) eg_plane_free(ctx, sp[i]);
             for (int i = 0; i < 5; ++i) eg_plane_free(ctx, gp[i]);
@@ -470,8 +479,8 @@ static void pair_rows(eg_ctx* ctx, char** argv) {
 }
 
 int main(int argc, char** argv) {
-    if (argc != 2 && argc != 7) {
-        fprintf(stderr, "usage: %s <fixture_reverse lib> [<pair lib> <oracle dir> <primal digest> <twin digest> <vjp digest>]\n",
+    if (argc != 2 && argc != 7 && argc != 9) {
+        fprintf(stderr, "usage: %s <fixture_reverse lib> [<pair lib> <oracle dir> <primal digest> <twin digest> <vjp digest> [<every> <primal name>]]\n",
                 argv[0]);
         return 2;
     }
@@ -482,7 +491,7 @@ int main(int argc, char** argv) {
     eg_ctx* ctx = NULL;
     check(eg_ctx_new(&st, &ctx) == EG_OK, "eg_ctx_new host context");
     if (argc == 2) lin_rows(ctx, argv[1]);
-    else pair_rows(ctx, argv);
+    else pair_rows(ctx, argc, argv);
     eg_ctx_free(ctx);
     printf("%s: %d failure(s)\n", argv[0], failures);
     return failures == 0 ? 0 : 1;

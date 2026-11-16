@@ -434,6 +434,8 @@ inline constexpr std::int64_t kMinReorderSpan = 4096;
 bool check_active(const eg_runner_desc& d);
 /** @brief The steps between two compactions of a fixed-step active set (``every``, else the default cadence). */
 std::int64_t active_every_steps(const eg_runner_desc& d);
+/** @brief Recompute the active map and count of @p a from the mask plane (@p mask, elements of @p bytes): the plain loop's compaction. */
+void active_compact(ActiveState& a, const char* mask, std::size_t bytes);
 void check_report(const eg_run_report* report);
 void write_report(eg_run_report* report, eg_run_report r);
 

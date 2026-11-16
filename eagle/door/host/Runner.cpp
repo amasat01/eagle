@@ -214,6 +214,8 @@ void run_auto(eg_runner_s& runner, int threads, std::int64_t& iterations, std::i
 
 }  // namespace
 
+void active_compact(ActiveState& a, const char* mask, std::size_t bytes) { compact(a, Mask{ mask, bytes }); }
+
 /** @brief eg_runner_new: check the request and keep a reference to each plan. */
 void runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out) {
     if (out == nullptr) refuse(EG_BAD_REQUEST, "eg_runner_new: out is NULL");

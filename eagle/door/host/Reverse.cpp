@@ -174,9 +174,11 @@ bool in_range(std::int32_t slot, std::size_t n) { return slot >= 0 && slot < sta
 
 /** @brief eg_runner_new with EG_RUN_RECORD: check the derived record against the primal and keep the twin and the vjp. */
 void record_new(eg_ctx& ctx, eg_runner_s& runner, const eg_runner_desc& d) {
-    if (runner.active)
-        refuse(EG_NOT_WRITTEN, "EG_RUN_RECORD with an active set (compaction under record) is not written in this build "
-               "of the door");
+    if (runner.active && runner.act.reorder)
+        refuse(EG_NOT_WRITTEN, "EG_RUN_RECORD with EG_RUN_REORDER (an active set that reorders the planes under record) is "
+               "not written in this build of the door");
+    if (runner.active && runner.act.group != 1)
+        refuse(EG_NOT_WRITTEN, "EG_RUN_RECORD with a grouped active set is not written in this build of the door");
     if (d.n_plans != 1)
         refuse(EG_NOT_WRITTEN, "EG_RUN_RECORD of a several-plan step is not written in this build of the door");
     const eg_plan_s& primal = *d.plans[0];
@@ -185,6 +187,10 @@ void record_new(eg_ctx& ctx, eg_runner_s& runner, const eg_runner_desc& d) {
     eg_unit_s* vjp = derived_of(ctx, d, EG_DERIVED_STEP_VJP);
     if (d.n_derived != 2) refuse(EG_BAD_REQUEST, "n_derived " + std::to_string(d.n_derived) + ": a recorded run takes the twin and the vjp");
     const std::size_t np = pu.slots.size();
+    if (runner.active != (twin->active_map_slot >= 0) || (twin->active_map_slot >= 0) != (twin->active_count_slot >= 0))
+        refuse(EG_BAD_REQUEST, "unit '" + twin->name + "': the taping twin reads an active set (map and count slots) exactly "
+               "when the runner's plans do");
+    if (vjp->active_map_slot >= 0) refuse(EG_BAD_REQUEST, "unit '" + vjp->name + "': a step vjp reads no active set");
     for (const eg_unit_s* u : { twin, vjp })
         if (u->derived.of_unit != pu.index || u->library != pu.library)
             refuse(EG_BAD_REQUEST, field(u->name.c_str(), "of_unit") + " " + std::to_string(u->derived.of_unit) +
@@ -234,7 +240,8 @@ void record_new(eg_ctx& ctx, eg_runner_s& runner, const eg_runner_desc& d) {
         if (l.source == EG_SRC_TIME0) refuse(EG_NOT_WRITTEN, field(tn, at) + ": EG_SRC_TIME0 is not written in this build of the door");
         if (l.source != EG_SRC_PRIMAL) refuse(EG_BAD_REQUEST, field(tn, at + ".source") + ": a taping twin links EG_SRC_PRIMAL");
         if (l.reduced != 0) refuse(EG_BAD_REQUEST, field(tn, at + ".reduced") + ": only a PARAM_GRAD link is reduced");
-        if (l.slot == t.tape_slot || l.slot == t.steps_slot || l.slot == t.tape_on_slot)
+        if (l.slot == t.tape_slot || l.slot == t.steps_slot || l.slot == t.tape_on_slot || l.slot == twin->active_map_slot ||
+            l.slot == twin->active_count_slot)
             refuse(EG_BAD_REQUEST, field(tn, at + ".slot") + " " + std::to_string(l.slot) + " is a reserved slot");
         if (twin_of[static_cast<std::size_t>(l.slot)] != -1)
             refuse(EG_BAD_REQUEST, field(tn, at + ".slot") + " " + std::to_string(l.slot) + " has a second link");
@@ -250,6 +257,7 @@ void record_new(eg_ctx& ctx, eg_runner_s& runner, const eg_runner_desc& d) {
         const int s = static_cast<int>(i);
         const std::int32_t role = twin->slots[i].role;
         if (s == t.tape_slot || s == t.steps_slot || s == t.tape_on_slot || role == EG_ROLE_NSAMPLES) continue;
+        if (s == twin->active_map_slot || s == twin->active_count_slot) continue;   // eagle's own: the runner's map
         if (twin->finish.present && s == twin->finish.counter_slot) continue;
         if (twin_of[i] == -1)
             refuse(EG_BAD_REQUEST, field(tn, "links") + ": twin slot " + std::to_string(i) + " ('" + twin->slots[i].name + "') has no link");
@@ -272,6 +280,7 @@ void record_new(eg_ctx& ctx, eg_runner_s& runner, const eg_runner_desc& d) {
         const int s = static_cast<int>(i);
         const std::int32_t role = twin->slots[i].role;
         if (s == t.tape_slot || s == t.tape_on_slot || role == EG_ROLE_NSAMPLES || role == EG_ROLE_UNIFORM) continue;
+        if (s == twin->active_map_slot || s == twin->active_count_slot) continue;
         if (twin->finish.present && s == twin->finish.counter_slot) continue;
         Carried c;
         c.twin_slot = s;
@@ -391,6 +400,8 @@ void record_forward(eg_ctx& ctx, eg_runner_s& runner, eg_run_report* report) {
         if (s == t.steps_slot) bind_raw(fwd, s, r.steps.data(), static_cast<std::uint64_t>(n));
         else if (s == t.tape_slot) bind_raw(fwd, s, r.dummy.data(), static_cast<std::uint64_t>(n));
         else if (s == t.tape_on_slot) bind_int64(fwd, s, 0);
+        else if (s == r.twin_unit->active_map_slot) bind_raw(fwd, s, runner.act.map.data(), static_cast<std::uint64_t>(n));
+        else if (s == r.twin_unit->active_count_slot) bind_raw(fwd, s, &runner.act.count, 1);
         else if (r.twin_unit->slots[i].role == EG_ROLE_NSAMPLES || (r.twin_unit->finish.present && s == r.twin_unit->finish.counter_slot)) continue;
         else {
             int of = -1;
@@ -433,6 +444,11 @@ void record_forward(eg_ctx& ctx, eg_runner_s& runner, eg_run_report* report) {
                 break;
             }
     fwd.finished = set;
+    ActiveState& act = runner.act;
+    if (runner.active) {   // the map follows the mask from the first launch (the plain loop's compaction)
+        active_compact(act, mask, mb);
+        act.done_at_last = set;
+    }
     r.steps.zero();
     r.taken = 0;
     const int threads = host::team_threads(ctx);
@@ -449,7 +465,15 @@ void record_forward(eg_ctx& ctx, eg_runner_s& runner, eg_run_report* report) {
                             static_cast<std::size_t>(r.state[i].rows * n) * r.state[i].bytes);
             r.taken = k + 1;
         },
-        [&](std::int64_t, std::int64_t) { host::run_prefix(fwd, threads, n); });
+        [&](std::int64_t j, std::int64_t k) {
+            const std::int64_t live = runner.active ? static_cast<std::int64_t>(act.count) : n;
+            if (live > 0) host::run_prefix(fwd, threads, live);
+            if (runner.active && (j + k) % act.every_steps == 0) {
+                active_compact(act, mask, mb);
+                ++act.compactions;
+                act.done_at_last = fwd.finished;
+            }
+        });
     primal.finished = fwd.finished;
     r.live = true;
     if (report == nullptr) return;
@@ -601,6 +625,14 @@ void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, con
     for (Carried& c : r.reads) bind_raw(rec, c.twin_slot, c.buf.data(), static_cast<std::uint64_t>(m));
     bind_raw(rec, t.tape_slot, tape.data(), static_cast<std::uint64_t>(m));
     bind_int64(rec, t.tape_on_slot, 1);
+    // An active-set twin reads the identity map over its pass's slots (the pass's samples are in stop order), counted per launch.
+    std::vector<std::int32_t> identity(static_cast<std::size_t>(std::max<std::int64_t>(m, 1)));
+    for (std::size_t i = 0; i < identity.size(); ++i) identity[i] = static_cast<std::int32_t>(i);
+    std::uint32_t rec_count = 0;
+    if (r.twin_unit->active_map_slot >= 0) {
+        bind_raw(rec, r.twin_unit->active_map_slot, identity.data(), static_cast<std::uint64_t>(m));
+        bind_raw(rec, r.twin_unit->active_count_slot, &rec_count, 1);
+    }
     for (const DerivedFacts::Link& l : t.links)
         if (r.twin_unit->slots[static_cast<std::size_t>(l.slot)].role == EG_ROLE_UNIFORM)
             bind_value(rec, l.slot, primal.bindings[static_cast<std::size_t>(l.of_slot)].value, sizeof(primal.bindings[0].value));
@@ -654,7 +686,10 @@ void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, con
                                             r.state[i].rows, r.state[i].bytes);
                 },
                 [&](std::int64_t c, std::int64_t len) {
-                    for (std::int64_t j = c; j < c + len; ++j) host::run_prefix(rec, threads, live[static_cast<std::size_t>(j)]);
+                    for (std::int64_t j = c; j < c + len; ++j) {
+                        rec_count = static_cast<std::uint32_t>(live[static_cast<std::size_t>(j)]);
+                        host::run_prefix(rec, threads, live[static_cast<std::size_t>(j)]);
+                    }
                 },
                 [&](std::int64_t j, std::int64_t count) {
                     bind_step(j % W, chain.cur);
