@@ -634,8 +634,14 @@ void resolve_stages(eg_ctx& ctx, const eg_unit_load_desc& d, eg_unit_s& unit) {
                         refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': the keyed plane '" + kf.name + "' that eagle makes is read or written as a slot that is not of the unit's scalar type");
                 }
             if (of_unit || !of_stage) continue;
-            for (const TeamPlaneFacts& t : unit.team_planes)
-                if (t.name == kf.name) refuse(EG_BAD_REQUEST, who + "the keyed record '" + kf.name + "' and a team plane share that name");
+            bool as_plane = false;    // the record names its own KEY team plane: that plane is the one (made once, zeroed or filled as it says)
+            for (const TeamPlaneFacts& t : unit.team_planes) {
+                if (t.name != kf.name) continue;
+                if (t.unit != EG_UNIT_KEY || t.keyed != static_cast<std::int32_t>(k))
+                    refuse(EG_BAD_REQUEST, who + "the keyed record '" + kf.name + "' names a team plane that is not its KEY plane");
+                as_plane = true;
+            }
+            if (as_plane) continue;
             // eagle's plane: width entries per key, zeroed at the start of every launch, bound by name to the stages that name it (a team plane of KEY units)
             TeamPlaneFacts t;
             t.dtype = EG_DTYPE_REAL, t.unit = EG_UNIT_KEY, t.layout = EG_LAYOUT_FLAT, t.wide = EG_WIDE_NONE;
