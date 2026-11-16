@@ -361,11 +361,19 @@ typedef int32_t eg_derived_source;
 #define EG_SRC_STATE_ADJOINT_OUT 2 /**< the next-step adjoint of ``of_slot``, written to the other parity */
 #define EG_SRC_PARAM_GRAD 3        /**< the accumulated gradient of parameter or uniform ``of_slot`` */
 #define EG_SRC_TAPED 4             /**< the tape rows of ``of_slot`` (the state itself when it is not taped) */
-#define EG_SRC_STEPS 5             /**< a step plane: ``of_slot`` = the taping twin's ``steps_slot``, or -1 for one eagle makes only because this unit reads it */
-#define EG_SRC_EVENT 6             /**< an event multiplier of a refine run: ``of_slot`` = the event's index in the unit's event list */
+#define EG_SRC_STEPS 5             /**< a step plane: ``of_slot`` = the taping twin's ``steps_slot``, or -1 for one eagle makes only because this unit reads it;
+                                        on REFINE_NEWTON it holds the stop step's index, max(applied steps - 1, 0) */
+#define EG_SRC_EVENT 6             /**< the seed or multiplier of event ``of_slot`` (its index in the unit's event list): on a
+                                        STATE_GUARD_VJP, eagle sets it to 1 for the event that stopped the sample, else 0 */
 #define EG_SRC_TIME0 7             /**< the start copy of time plane ``of_slot``: on a taping twin, ``time0_slot``, which eagle fills at run start;
                                         on a reverse unit, the slot holding the start copy's gradient, which eagle adds into
-                                        ``of_slot``'s gradient */
+                                        ``of_slot``'s gradient; on a refine unit, a read of that copy */
+#define EG_SRC_GUARD 8             /**< a refine unit's value of event ``of_slot`` at the candidate time (zero at the crossing) */
+#define EG_SRC_GUARD_DOT 9         /**< that value's derivative in the candidate time */
+#define EG_SRC_REFINED 10          /**< state ``of_slot`` at the candidate time: written by REFINE_NEWTON, read by STATE_GUARD_VJP */
+#define EG_SRC_REFINED_DOT 11      /**< that state's derivative in the candidate time (REFINE_NEWTON) */
+#define EG_SRC_TAU_SEED 12         /**< a plane eagle fills with ones: the seed of the candidate-time derivative; ``of_slot`` -1 */
+#define EG_SRC_STATE_GRAD 13       /**< STATE_GUARD_VJP: the guard's gradient in state ``of_slot`` */
 
 /** One taped plane: rows [row0, row0 + rows) of the tape hold primal slot ``slot``. */
 struct eg_unit_taped {
@@ -414,7 +422,7 @@ struct eg_unit_derived {
     const struct eg_unit_taped* const* taped;
     const struct eg_unit_link* const* links;     /**< a reverse unit: one per slot. A taping twin: EG_SRC_PRIMAL for each
                                                       ordinary slot, EG_SRC_TIME0 on ``time0_slot``, none on the other reserved slots */
-    const struct eg_unit_refined* const* refined;
+    const struct eg_unit_refined* const* refined; /**< unused: n_refined must be 0 (EG_SRC_REFINED links state it); removed at the next schema major */
 };
 
 #ifdef __cplusplus

@@ -112,7 +112,8 @@ typedef int32_t eg_steps_reverse;
 
 typedef int32_t eg_events;
 #define EG_EVENTS_STEP 0   /**< a sample stops at the step its mask was set */
-#define EG_EVENTS_REFINE 1 /**< locate each stop inside its stop step */
+#define EG_EVENTS_REFINE 1 /**< locate each stop inside its stop step; a plain run takes exactly the derived units
+                              TAPE (window 1), REFINE_NEWTON and STATE_GUARD_VJP; a recorded run adds the reverse ones */
 
 typedef int32_t eg_no_event;
 #define EG_NO_EVENT_REFUSE 0 /**< a sample with no crossing in its stop step is refused */
