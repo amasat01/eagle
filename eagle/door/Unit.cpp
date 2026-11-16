@@ -554,7 +554,7 @@ void resolve_stages(eg_ctx& ctx, const eg_unit_load_desc& d, eg_unit_s& unit) {
             StageFacts& st = unit.stages[i];
             const std::string at = "unit '" + unit.name + "' stage " + std::to_string(i) + " ('" + st.ref_name + "')";
             if (st.ref_name == unit.name && st.ref_digest == unit.digest) {
-                if (unit.host_entry == nullptr) refuse(EG_BAD_REQUEST, "meta that contradicts itself: " + at + " is the unit itself, which has no host entry");
+                if (unit.host_entry == nullptr && unit.function == 0) refuse(EG_BAD_REQUEST, "meta that contradicts itself: " + at + " is the unit itself, which has no entry to run");
                 st.unit = &unit;
                 st.self = true;
             } else {
@@ -568,7 +568,7 @@ void resolve_stages(eg_ctx& ctx, const eg_unit_load_desc& d, eg_unit_s& unit) {
                     refuse(EG_BAD_REQUEST, at + " (digest " + hex + ") is not in deps");
                 }
                 eg_unit_s& su = *st.unit;
-                if (su.host_entry == nullptr) refuse(EG_BAD_REQUEST, at + " has no host entry");
+                if (su.host_entry == nullptr && su.function == 0) refuse(EG_BAD_REQUEST, at + " has no entry to run (no host entry, no device function)");
                 if (!su.stages.empty() || su.finish.present || !su.companions.empty() || !su.cells.empty() || su.derived.present)
                     refuse(EG_NOT_WRITTEN, at + ": a stage that is itself split, finishing, a companion owner or a cell owner is not written");
                 ++su.refs;

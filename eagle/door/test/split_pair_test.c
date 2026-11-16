@@ -15,12 +15,20 @@
  *   uni <name> <value>                            (a float64 uniform)
  *   skip <name>                                   (a slot eagle makes: the stage's own scratch; takes a slot index)
  * Every plane is (extents..., lanes).
+ *
+ * Built with -DEG_PAIR_DEVICE (split_device_test, run under the GPU pool) the units are device units on a device context: the planes are
+ * copied to the device, the plan is DEVICE, and the outputs are copied back. -refuse:<STATUS>:<text>|<N> then also plans N lanes and
+ * expects that refusal (the scratch byte sum).
  */
 #define _POSIX_C_SOURCE 200809L
 
 #include "pair_util.h"
 
 #include <stdlib.h>
+
+#ifdef EG_PAIR_DEVICE
+#include <cuda_runtime_api.h>
+#endif
 
 #define MAXS 16
 #define MAXD 3
@@ -98,10 +106,14 @@ static int refused(int argc, char** argv) {
     const char* colon = strchr(spec, ':');
     if (colon == NULL) return 2;
     const eg_status want = strncmp(spec, "NOT_WRITTEN", (size_t)(colon - spec)) == 0 ? EG_NOT_WRITTEN : EG_BAD_REQUEST;
+    const char* bar = strchr(colon, '|');   /* text|N: the source loads and the PLAN of N lanes is refused */
     struct eg_ctx_settings st;
     memset(&st, 0, sizeof(st));
     st.struct_size = sizeof(st);
     st.abi_major = EG_DOOR_VERSION_MAJOR;
+#ifdef EG_PAIR_DEVICE
+    st.flags = EG_CTX_DEVICE;
+#endif
     eg_ctx* ctx = NULL;
     check(eg_ctx_new(&st, &ctx) == EG_OK, "eg_ctx_new host context");
     const int ns = (argc - 6) / 2;
@@ -119,15 +131,36 @@ static int refused(int argc, char** argv) {
     d.deps = deps;
     d.n_deps = ns;
     eg_unit* src = NULL;
-    const eg_status s = parse_digest(argv[5], ref.digest) ? eg_unit_load(ctx, &d, &src) : EG_FAULT;
+    eg_status s = parse_digest(argv[5], ref.digest) ? eg_unit_load(ctx, &d, &src) : EG_FAULT;
+    if (bar != NULL) {
+        check(s == EG_OK && src != NULL, "the split source unit loaded");
+        eg_plan* plan = NULL;
+        struct eg_plan_desc pd;
+        memset(&pd, 0, sizeof(pd));
+        pd.struct_size = sizeof(pd);
+        pd.unit = src;
+#ifdef EG_PAIR_DEVICE
+        pd.structure = EG_STRUCTURE_DEVICE;
+#else
+        pd.structure = EG_STRUCTURE_HOST_TEAM;
+#endif
+        pd.n_samples = atoll(bar + 1);
+        s = eg_plan_new(ctx, &pd, &plan);
+        if (s == EG_OK) eg_plan_free(ctx, plan);
+        eg_unit_free(ctx, src);
+        src = NULL;
+    }
     char buf[1024];
     size_t len = 0;
     buf[0] = 0;
     if (eg_error(ctx, buf, sizeof(buf), &len) != EG_OK) buf[0] = 0;
+    const char* text_end = bar != NULL ? bar : colon + strlen(colon);
+    char need[256];
+    snprintf(need, sizeof(need), "%.*s", (int)(text_end - (colon + 1)), colon + 1);
     printf("      reason: %s\n", buf);
-    char what[300];
-    snprintf(what, sizeof(what), "the split unit's load refused (%.*s) with a reason holding '%s'", (int)(colon - spec), spec, colon + 1);
-    check(s == want && src == NULL && strstr(buf, colon + 1) != NULL, what);
+    char what[420];
+    snprintf(what, sizeof(what), "the split unit's %s refused (%.*s) with a reason holding '%s'", bar != NULL ? "plan" : "load", (int)(colon - spec), spec, need);
+    check(s == want && src == NULL && strstr(buf, need) != NULL, what);
     for (int i = 0; i < ns; ++i) eg_unit_free(ctx, deps[i]);
     check(eg_ctx_free(ctx) == EG_OK, "eg_ctx_free");
     printf("%s: %d check(s) failed\n", failures ? "FAIL" : "PASS", failures);
@@ -166,8 +199,11 @@ int main(int argc, char** argv) {
     memset(&st, 0, sizeof(st));
     st.struct_size = sizeof(st);
     st.abi_major = EG_DOOR_VERSION_MAJOR;
+#ifdef EG_PAIR_DEVICE
+    st.flags = EG_CTX_DEVICE;
+#endif
     eg_ctx* ctx = NULL;
-    check(eg_ctx_new(&st, &ctx) == EG_OK, "eg_ctx_new host context");
+    check(eg_ctx_new(&st, &ctx) == EG_OK, "eg_ctx_new context");
     const int ns = (argc - 6) / 2;
     eg_unit* deps[MAXS] = { NULL };
     for (int i = 0; i < ns; ++i) load(ctx, argv[1], argv[6 + 2 * i], argv[7 + 2 * i], NULL, 0, &deps[i], "a stage unit loaded (name + digest)");
@@ -175,9 +211,16 @@ int main(int argc, char** argv) {
     load(ctx, argv[1], argv[4], argv[5], deps, ns, &src, "the split source unit loaded with its stages as deps");
     if (src == NULL || failures) return 1;
     eg_host_threads(ctx, 3);
+#ifdef EG_PAIR_DEVICE
+    const eg_structure structures[1] = { EG_STRUCTURE_DEVICE };
+    const char* names[1] = { "DEVICE" };
+    const int nstruct = 1;
+#else
     const eg_structure structures[2] = { EG_STRUCTURE_HOST_TEAM, EG_STRUCTURE_HOST_SERIAL };
     const char* names[2] = { "HOST_TEAM", "HOST_SERIAL" };
-    for (int k = 0; k < 2; ++k) {
+    const int nstruct = 2;
+#endif
+    for (int k = 0; k < nstruct; ++k) {
         eg_plan* plan = NULL;
         struct eg_plan_desc d;
         memset(&d, 0, sizeof(d));
@@ -192,6 +235,9 @@ int main(int argc, char** argv) {
         double uvals[MAXS];
         const void* uptr[MAXS];
         int nplanes = 0, nuni = 0, slot = 0;
+#ifdef EG_PAIR_DEVICE
+        void* dev[MAXS] = { NULL };
+#endif
         for (int i = 0; i < np; ++i) {
             struct pl* q = &pls[i];
             if (strcmp(q->kind, "skip") == 0) {
@@ -211,6 +257,12 @@ int main(int argc, char** argv) {
             t[i].managed.version.major = DLPACK_MAJOR_VERSION;
             t[i].managed.dl_tensor.data = q->buf;
             t[i].managed.dl_tensor.device.device_type = kDLCPU;
+#ifdef EG_PAIR_DEVICE
+            const size_t pbytes = (size_t)q->count * (q->is_int ? 4 : 8);
+            if (cudaMalloc(&dev[i], pbytes) != cudaSuccess || cudaMemcpy(dev[i], q->buf, pbytes, cudaMemcpyHostToDevice) != cudaSuccess) s = EG_FAULT;
+            t[i].managed.dl_tensor.data = dev[i];
+            t[i].managed.dl_tensor.device.device_type = kDLCUDA;
+#endif
             t[i].managed.dl_tensor.ndim = q->ndim + 1;
             t[i].managed.dl_tensor.dtype.code = q->is_int ? kDLInt : kDLFloat;
             t[i].managed.dl_tensor.dtype.bits = q->is_int ? 32 : 64;
@@ -228,9 +280,18 @@ int main(int argc, char** argv) {
         b.n_uniforms = nuni;
         b.uniform_slots = uslots;
         b.uniform_values = uptr;
+#ifdef EG_PAIR_DEVICE
+        if (cudaDeviceSynchronize() != cudaSuccess) s = EG_FAULT;   /* the copies land before the context's stream reads them */
+#endif
         if (s == EG_OK) s = eg_bind(ctx, plan, &b);
         for (int rep = 0; rep < 2; ++rep) {
             if (s == EG_OK) s = eg_launch(ctx, plan, NULL);
+#ifdef EG_PAIR_DEVICE
+            if (s == EG_OK) s = eg_sync(ctx);
+            for (int i = 0; i < np && s == EG_OK; ++i)
+                if (strcmp(pls[i].kind, "out") == 0 &&
+                    cudaMemcpy(pls[i].buf, dev[i], (size_t)pls[i].count * (pls[i].is_int ? 4 : 8), cudaMemcpyDeviceToHost) != cudaSuccess) s = EG_FAULT;
+#endif
             if (s != EG_OK) reason_has(ctx, "");
             int bad = 0;
             for (int i = 0; i < np; ++i) {
@@ -252,6 +313,9 @@ int main(int argc, char** argv) {
         }
         eg_plan_free(ctx, plan);
         for (int i = 0; i < nplanes; ++i) eg_plane_free(ctx, planes[i]);
+#ifdef EG_PAIR_DEVICE
+        for (int i = 0; i < np; ++i) cudaFree(dev[i]);
+#endif
     }
     check(eg_unit_free(ctx, src) == EG_OK, "eg_unit_free of the source");
     for (int i = 0; i < ns; ++i) check(eg_unit_free(ctx, deps[i]) == EG_OK, "eg_unit_free of a stage");

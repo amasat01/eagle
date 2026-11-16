@@ -282,8 +282,6 @@ void plan_new(eg_ctx& ctx, const eg_plan_desc* desc, eg_plan** out) {
     if (d.n_samples < 0) refuse(EG_BAD_REQUEST, "n_samples " + std::to_string(d.n_samples) + " < 0");
     if (!device && d.unit->scalar_type == EG_SCALAR_BANDED)
         refuse(EG_NOT_WRITTEN, "unit '" + d.unit->name + "': a BANDED unit on a host structure");
-    if (device && !d.unit->stages.empty())
-        refuse(EG_NOT_WRITTEN, "unit '" + d.unit->name + "': a split unit on the device is not written yet");
     if (!device && d.unit->host_entry == nullptr && d.unit->stages.empty())
         refuse(EG_NOT_WRITTEN, "unit '" + d.unit->name + "' has no host entry");
     if (!device)
@@ -343,14 +341,53 @@ void plan_new(eg_ctx& ctx, const eg_plan_desc* desc, eg_plan** out) {
             }
             if (device) device_cell_work(*plan);
         }
-        for (const TeamPlaneFacts& t : d.unit->team_planes) {    // the scratch the stages share: per_lane elements per unit (a placed wide value: one)
-            const std::int64_t units = t.wide == EG_WIDE_WARP_TILED || t.unit == EG_UNIT_ONCE ? 1 : d.n_samples;
-            const std::int64_t size = std::max<std::int64_t>(1, t.per_lane * units);
-            const DLDataType elem = t.dtype == EG_DTYPE_INT32 ? DLDataType{ kDLInt, 32, 1 }
-                                                              : DLDataType{ kDLFloat, static_cast<std::uint8_t>(d.unit->scalar_type == EG_SCALAR_FLOAT32 ? 32 : 64), 1 };
+        std::vector<std::int64_t> sizes;    // the scratch the stages share: per_lane elements per unit; a placed wide value is one unit on the host, whole warps of 32 on the device
+        for (const TeamPlaneFacts& t : d.unit->team_planes) {
+            const std::int64_t count = t.unit == EG_UNIT_ONCE ? 1 : d.n_samples;
+            const std::int64_t units = t.wide != EG_WIDE_WARP_TILED ? count : device ? (count + 31) / 32 * 32 : 1;
+            sizes.push_back(std::max<std::int64_t>(1, t.per_lane * units));
+            if (device && t.fill_promised && t.wide == EG_WIDE_NONE && t.dtype == EG_DTYPE_REAL && d.unit->scalar_type != EG_SCALAR_FLOAT32 && t.fill != 0)
+                refuse(EG_NOT_WRITTEN, "unit '" + d.unit->name + "': team plane '" + t.name + "' is refilled with a nonzero double on the device, which is not written");
+        }
+        const auto elem_of = [&](const TeamPlaneFacts& t) {
+            return t.dtype == EG_DTYPE_INT32 ? DLDataType{ kDLInt, 32, 1 }
+                                             : DLDataType{ kDLFloat, static_cast<std::uint8_t>(d.unit->scalar_type == EG_SCALAR_FLOAT32 ? 32 : 64), 1 };
+        };
+        if (device && !sizes.empty()) {    // the planes together must fit the device (the old bind's refusal, naming the stage that needs most)
+            std::vector<std::int64_t> bytes;
+            std::int64_t total = 0;
+            for (std::size_t k = 0; k < sizes.size(); ++k) {
+                bytes.push_back(sizes[k] * elem_of(d.unit->team_planes[k]).bits / 8);
+                total += bytes.back();
+            }
+            const std::int64_t free_bytes = device_free_bytes(ctx);
+            if (total > free_bytes) {
+                const auto group = [](std::int64_t v) {
+                    std::string s = std::to_string(v);
+                    for (int i = static_cast<int>(s.size()) - 3; i > 0; i -= 3) s.insert(static_cast<std::size_t>(i), ",");
+                    return s;
+                };
+                std::string list, stage;
+                std::int64_t most = -1;
+                for (std::size_t k = 0; k < bytes.size(); ++k) list += (k ? ", " : "") + d.unit->team_planes[k].name + " " + group(bytes[k]);
+                for (const StageFacts& st : d.unit->stages) {
+                    if (!st.team) continue;
+                    std::int64_t need = 0;
+                    for (std::int32_t p : st.plane_of) need += p >= 0 ? bytes[static_cast<std::size_t>(p)] : 0;
+                    if (need > most) { most = need; stage = st.ref_name; }
+                }
+                refuse(EG_BAD_REQUEST, "unit '" + d.unit->name + "' needs " + group(total) + " bytes of team scratch (" + list + ") at " +
+                       group(d.n_samples) + " lanes, but the device has " + group(free_bytes) + " bytes free; stage '" + stage +
+                       "' alone needs " + group(most));
+            }
+        }
+        for (std::size_t k = 0; k < d.unit->team_planes.size(); ++k) {
+            const TeamPlaneFacts& t = d.unit->team_planes[k];
+            const std::int64_t size = sizes[k];
+            const DLDataType elem = elem_of(t);
             std::vector<std::int64_t> shape{ size };
             if (t.layout == EG_LAYOUT_PLANE_MAJOR && t.per_lane != 1) shape = { t.per_lane, size / t.per_lane };
-            plan->team.push_back(make_plane(ctx, elem, shape, false));
+            plan->team.push_back(make_plane(ctx, elem, shape, device));
         }
         for (std::size_t i = 0; i < d.unit->slots.size(); ++i)    // a source slot that is a team plane: eagle's, bound from the start
             for (const TeamPlaneFacts& t : d.unit->team_planes)

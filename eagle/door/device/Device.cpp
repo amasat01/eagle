@@ -416,15 +416,79 @@ void device_plan_check(const eg_ctx& ctx, const eg_unit_s& unit) {
     if (ctx.dev.ordinal < 0)
         refuse(EG_BAD_REQUEST, "structure DEVICE on a host-only context (made without EG_CTX_DEVICE)");
     const std::string who = "unit '" + unit.name + "' on DEVICE: ";
-    if (unit.function == 0) refuse(EG_NOT_WRITTEN, who + "the unit has no device image");
+    if (unit.stages.empty() && unit.function == 0) refuse(EG_NOT_WRITTEN, who + "the unit has no device image");
+    for (const StageFacts& st : unit.stages)
+        if (st.unit->function == 0) refuse(EG_NOT_WRITTEN, who + "the stage '" + st.ref_name + "' has no device image");
     for (const CompanionFacts& c : unit.companions)
         if (c.device_fold == 0)
             refuse(EG_NOT_WRITTEN, who + "the companion '" + unit.slots[c.slot].name + "' has no device fold function");
 }
 
+/** @brief A split unit on the device: the stages in order on the context's stream, each with its argument list (the source slot or team
+ *  plane each stage slot joined at load). A team stage is `grid` blocks of `threads * warps` threads with the tail (0, grid, n); a plain
+ *  stage launches like the unit would. Planes with a promised fill are refilled first, on the stream. */
+void launch_split(const eg_plan_s& plan) {
+    const DeviceState& d = plan.ctx->dev;
+    const eg_unit_s& u = *plan.unit;
+    const auto s = reinterpret_cast<CUstream>(d.stream);
+    EG_DRIVER(cuMemsetD32Async);
+    EG_DRIVER(cuLaunchKernel);
+    for (std::size_t k = 0; k < u.team_planes.size(); ++k) {
+        const TeamPlaneFacts& t = u.team_planes[k];
+        if (!t.fill_promised || t.wide != EG_WIDE_NONE) continue;
+        const DLTensor& tensor = plan.team[k]->tensor->dl_tensor;
+        std::uint32_t word = 0;
+        if (t.dtype == EG_DTYPE_INT32) word = static_cast<std::uint32_t>(static_cast<std::int32_t>(t.fill));
+        else if (u.scalar_type == EG_SCALAR_FLOAT32) { const float f = static_cast<float>(t.fill); std::memcpy(&word, &f, sizeof(word)); }
+        check(cuMemsetD32Async_(reinterpret_cast<CUdeviceptr>(tensor.data), word, static_cast<std::size_t>(elements(tensor)) * tensor.dtype.bits / 32, s),
+              "unit '" + u.name + "': refilling team plane '" + t.name + "'");
+    }
+    for (const StageFacts& st : u.stages) {
+        const eg_unit_s& su = *st.unit;
+        const std::size_t n_slots = su.slots.size();
+        std::vector<void*> params(n_slots);
+        std::vector<plugin::ScalarHandle> handles(n_slots);
+        std::uint32_t n32 = static_cast<std::uint32_t>(plan.n_samples);
+        for (std::size_t j = 0; j < n_slots; ++j) {
+            if (st.source_of[j] >= 0) {
+                params[j] = plan.params[static_cast<std::size_t>(st.source_of[j])];
+            } else if (st.plane_of[j] >= 0) {
+                const DLTensor& t = plan.team[static_cast<std::size_t>(st.plane_of[j])]->tensor->dl_tensor;
+                const int role = su.slots[j].role;
+                plugin::ScalarHandle& h = handles[j];
+                h.data = static_cast<char*>(t.data) + t.byte_offset;
+                h.samples = static_cast<std::uint64_t>(role == EG_ROLE_LOOKUP ? elements(t)
+                                                       : role == EG_ROLE_WIDE_IN || role == EG_ROLE_WIDE_OUT ? t.shape[t.ndim - 1] : plan.n_samples);
+                h.stride = 1;
+                h.deviceType = plugin::kEagleAbiDeviceCUDA;
+                h.deviceId = 0;
+                params[j] = &h;
+            } else {
+                params[j] = &n32;
+            }
+        }
+        const auto fn = reinterpret_cast<CUfunction>(su.function);
+        if (st.team) {
+            const std::int64_t per_block = static_cast<std::int64_t>(st.lanes) * st.warps;
+            const std::int64_t blocks = (plan.n_samples + per_block - 1) / per_block;
+            if (blocks <= 0) continue;
+            std::int64_t base = 0, count = blocks, n = plan.n_samples;
+            params.push_back(&base);
+            params.push_back(&count);
+            params.push_back(&n);
+            check(cuLaunchKernel_(fn, static_cast<unsigned>(blocks), 1, 1, static_cast<unsigned>(st.threads * st.warps), 1, 1, 0, s, params.data(), nullptr),
+                  "unit '" + su.name + "': the team stage launch");
+            continue;
+        }
+        for (const exec::Partition& p : plan.parts)
+            exec::DeviceKernel::run(fn, params, p, s, su.block > 0 ? static_cast<unsigned>(su.block) : resolved_block(d, su, p.count));
+    }
+}
+
 /** @brief Queue the plan's launches (launch_on) on the context's stream. */
 void device_launch(eg_plan_s& plan) {
     Current current(plan.ctx->dev);
+    if (!plan.unit->stages.empty()) { launch_split(plan); return; }
     if (plan.unit->index_count_slot >= 0) {    // an index set: its live count is checked against the entries held (a device read), the kernel maps the lanes itself
         const DLTensor& c = plan.bindings[static_cast<std::size_t>(plan.unit->index_count_slot)].plane->tensor->dl_tensor;
         unsigned live = 0;
@@ -975,6 +1039,7 @@ void device_record_begin(eg_ctx& ctx) {
 void device_record_launch(eg_ctx& ctx, eg_plan_s& plan) {
     const eg_unit_s& u = *plan.unit;
     const std::string who = "recording a DEVICE launch of unit '" + u.name + "': ";
+    if (!u.stages.empty()) refuse(EG_NOT_WRITTEN, who + "a split unit is not recorded");
     if (u.index_count_slot >= 0)
         refuse(EG_NOT_WRITTEN, who + "an index set (its live count is read on the host at each launch) is not written in "
                "this build of the door");

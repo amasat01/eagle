@@ -510,6 +510,27 @@ pair-device-refuse-$(1): symbols $(OUT)/libpair_dev_refuse_$(1).so $$(PAIR_DEVIC
 endef
 $(foreach c,auto seg,$(eval $(call REFUSE_DEVICE_RULES,$(c))))
 
+# pair-device-split-<row>: a split kernel on the device. KERNELS_CUDA_<row> = <unit>=<cuda text> ..., one cubin per stage unit
+# (the old path's device recipe), each embedded as <unit>__image, in one library with META_CUDA_<row>; run like pair-split-<row>
+# (ORACLE_<row>, SPLIT_ARGS_<row>) through split_device_test, which the pool runs: split_device_test <library> <oracle> <row> <args>.
+SPLIT_DEVICE_ROWS ?=
+SPLIT_DEVICE_TEST := $(OUT)/split_device_test
+
+$(SPLIT_DEVICE_TEST): test/split_pair_test.c test/pair_util.h eg_door.h $(LIB) | check-cuda
+	$(CC) $(CFLAGS_C) -DEG_PAIR_DEVICE -isystem $(CUDA)/include -Itest/c_shim -Itest -o $@ $< -L$(OUT) -leagle_door \
+	  -Wl,-rpath,$(OUT) $(CUDART) -lm -pthread
+
+define SPLIT_DEVICE_RULES
+$(OUT)/libpair_dev_split_$(1).so: $$(foreach p,$$(KERNELS_CUDA_$(1)),$$(word 2,$$(subst =, ,$$(p)))) $$(META_CUDA_$(1)) eg_door.h eg_unit_meta.h | check-inputs check-cuda
+	@mkdir -p $(OUT)
+	$$(foreach p,$$(KERNELS_CUDA_$(1)),$$(PAIR_NVCC) -cubin $$(PAIR_DEVICE_FLAGS) -ccbin $$(PAIR_CCBIN) -I $$(AETHER_INCLUDE) -I $$(AETHER_INCLUDE)/eagle -I$$(PAIR_CUDA_WING_DIR) $$(word 2,$$(subst =, ,$$(p))) -o $(OUT)/sd_$(1)_$$(word 1,$$(subst =, ,$$(p))).image && $$(call embed,$(OUT)/sd_$(1)_$$(word 1,$$(subst =, ,$$(p))).image,$$(word 1,$$(subst =, ,$$(p)))__image,$(OUT)/sd_$(1)_$$(word 1,$$(subst =, ,$$(p)))_image.o) ; )
+	$$(CC) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$$(ROOT) -c $$(META_CUDA_$(1)) -o $(OUT)/sd_$(1)_meta.o
+	$$(CC) -shared -o $$@ $(OUT)/sd_$(1)_*.o
+
+pair-device-split-$(1): symbols $(OUT)/libpair_dev_split_$(1).so $$(SPLIT_DEVICE_TEST)
+endef
+$(foreach r,$(SPLIT_DEVICE_ROWS),$(eval $(call SPLIT_DEVICE_RULES,$(r))))
+
 # pair-device-reverse: a recorded run and its reverse on the device, rr_pend and _timed: per unit one library of the old device
 # run's own images (PTX_<unit>, PTX_<unit>_tape, PTX_<unit>_step_vjp: the PTX it loaded) with the host meta (META_reverse,
 # META_timed) whose image fields name them (act: _pend_body, the active-set step: compacting every 4 and 16 steps, and reordering 4096 samples; auto: rr_pend_auto's K-step twin; kstep: steps_reverse FUSED); run $(OUT)/device_reverse_test <library> <oracle dir> <3 digests> <primal> <window>
