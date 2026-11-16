@@ -475,6 +475,19 @@ void device_reduce(eg_ctx& ctx, const eg_reduce_desc& desc);
 void device_copy(eg_ctx& ctx, eg_plane_s* src, eg_plane_s* dst);
 /** @brief Read @p bytes (a multiple of 4) of device memory at @p device into @p host, ordered after the context's queued work. */
 void device_read(eg_ctx& ctx, const void* device, void* host, std::size_t bytes);
+/** @brief The device ops of a recorded DEVICE run and its reverse (device/Device.cpp), on the context's stream:
+ *  a host-to-device write (waits), a device copy, a zeroing, one column op (``diff_columns``: 0 gather, 1 accumulate,
+ *  2 fill, 3 scatter), one launch of @p plan over its first @p count samples with the block resolved at @p of samples,
+ *  the mask count into a device counter, the canonical compensated pair of @p n values (waits), the free bytes. */
+void device_write(eg_ctx& ctx, void* device, const void* host, std::size_t bytes);
+void device_copy_bytes(eg_ctx& ctx, void* dst, const void* src, std::size_t bytes);
+void device_zero(eg_ctx& ctx, void* data, std::size_t bytes);
+void device_columns(eg_ctx& ctx, int op, void* dst, std::int64_t dst_ld, const void* src, std::int64_t src_ld,
+                    const std::int64_t* index, std::int64_t count, std::int64_t rows, unsigned bytes, std::int64_t value);
+void device_launch_prefix(eg_plan_s& plan, std::int64_t count, std::int64_t of);
+void device_mask_count(eg_ctx& ctx, const void* mask, std::int64_t n, unsigned width, std::uint64_t counter);
+void device_pair_sum(eg_ctx& ctx, bool f64, const void* in, std::int64_t n, void* hi, void* comp);
+std::int64_t device_free_bytes(eg_ctx& ctx);
 void device_runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out);
 void device_run(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report);
 

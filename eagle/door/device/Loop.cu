@@ -14,6 +14,7 @@
 #include "eagle/reduce/canonical.h"
 
 #include "eagle/filtering/Reorder.h"
+#include "eagle/diff/Reverse.h"
 
 #include <memory>
 
@@ -79,7 +80,8 @@ __global__ void maskCountKernel(const unsigned char* mask, long long n, unsigned
 std::uint64_t cells_new(unsigned count) {
     void* p = nullptr;
     EAGLE_CHECK_ALWAYS(cudaMalloc(&p, count * sizeof(unsigned)));
-    const cudaError_t z = cudaMemset(p, 0, count * sizeof(unsigned));
+    cudaError_t z = cudaMemset(p, 0, count * sizeof(unsigned));
+    if (z == cudaSuccess) z = cudaStreamSynchronize(0);   // the memset is async to the host and unordered with eagle's non-blocking stream
     if (z != cudaSuccess) (void)cudaFree(p);
     EAGLE_CHECK_ALWAYS(z);
     return reinterpret_cast<std::uint64_t>(p);
@@ -235,6 +237,60 @@ void reduce_step(std::uint64_t stream, int code, int op, const void* in, std::in
 
 void copy_step(std::uint64_t stream, void* dst, const void* src, std::size_t bytes) {
     EAGLE_CHECK_ALWAYS(cudaMemcpyAsync(dst, src, bytes, cudaMemcpyDeviceToDevice, reinterpret_cast<cudaStream_t>(stream)));
+}
+
+void write_bytes(std::uint64_t stream, void* dst, const void* src, std::size_t bytes) {
+    EAGLE_CHECK_ALWAYS(cudaMemcpyAsync(dst, src, bytes, cudaMemcpyHostToDevice, reinterpret_cast<cudaStream_t>(stream)));
+    stream_wait(stream);
+}
+
+void zero_bytes(std::uint64_t stream, void* dst, std::size_t bytes) {
+    EAGLE_CHECK_ALWAYS(cudaMemsetAsync(dst, 0, bytes, reinterpret_cast<cudaStream_t>(stream)));
+}
+
+namespace {
+
+template <class T>
+__global__ void scatterColumnsKernel(T* dst, std::int64_t dstLd, const T* src, std::int64_t srcLd, const std::int64_t* index,
+                                     std::int64_t count, std::int64_t rows) {
+    for (std::int64_t i = static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x; i < count * rows;
+         i += static_cast<std::int64_t>(gridDim.x) * blockDim.x)
+        dst[(i / count) * dstLd + index[i % count]] = src[(i / count) * srcLd + i % count];
+}
+
+template <class T>
+void columns_as(cudaStream_t s, int op, void* dst, std::int64_t dst_ld, const void* src, std::int64_t src_ld,
+                const std::int64_t* index, std::int64_t count, std::int64_t rows) {
+    if (op == 0) {
+        diff::device::gatherColumns<T>(dst, dst_ld, src, src_ld, index, count, rows, s);
+        return;
+    }
+    const std::int64_t blocks = (count * rows + 255) / 256 < 1024 ? (count * rows + 255) / 256 : 1024;
+    scatterColumnsKernel<T><<<static_cast<unsigned>(blocks), 256, 0, s>>>(static_cast<T*>(dst), dst_ld, static_cast<const T*>(src),
+                                                                         src_ld, index, count, rows);
+}
+
+}  // namespace
+
+void diff_columns(std::uint64_t stream, int op, void* dst, std::int64_t dst_ld, const void* src, std::int64_t src_ld,
+                  const std::int64_t* index, std::int64_t count, std::int64_t rows, unsigned bytes, std::int64_t value) {
+    const auto s = reinterpret_cast<cudaStream_t>(stream);
+    if (count <= 0 || rows <= 0) return;
+    if (op == 1 && bytes == 8) diff::device::accumulatePrefix(static_cast<double*>(dst), static_cast<const double*>(src), dst_ld, count, rows, s);
+    else if (op == 1) diff::device::accumulatePrefix(static_cast<float*>(dst), static_cast<const float*>(src), dst_ld, count, rows, s);
+    else if (op == 2 && bytes == 8) diff::device::fillPrefix(static_cast<std::int64_t*>(dst), static_cast<std::int64_t>(value), count, s);
+    else if (op == 2) diff::device::fillPrefix(static_cast<std::int32_t*>(dst), static_cast<std::int32_t>(value), count, s);
+    else if (bytes == 1) columns_as<std::uint8_t>(s, op, dst, dst_ld, src, src_ld, index, count, rows);
+    else if (bytes == 2) columns_as<std::uint16_t>(s, op, dst, dst_ld, src, src_ld, index, count, rows);
+    else if (bytes == 4) columns_as<std::uint32_t>(s, op, dst, dst_ld, src, src_ld, index, count, rows);
+    else columns_as<std::uint64_t>(s, op, dst, dst_ld, src, src_ld, index, count, rows);
+    EAGLE_CHECK_ALWAYS(cudaGetLastError());
+}
+
+std::int64_t free_bytes() {
+    std::size_t free = 0, total = 0;
+    EAGLE_CHECK_ALWAYS(cudaMemGetInfo(&free, &total));
+    return static_cast<std::int64_t>(free);
 }
 
 std::int64_t cell_work_elems(std::int64_t rows) {

@@ -200,7 +200,11 @@ int main(int argc, char** argv) {
               "automatic unit: EG_RUN_REORDER refused NOT_WRITTEN by name");
         bad = rd;
         bad.flags = EG_RUN_RECORD;
-        check(eg_runner_new(ctx, &bad, &none) == EG_NOT_WRITTEN && reason_has(ctx, "EG_RUN_RECORD"),
+        const eg_derived_role tape_role[1] = { EG_DERIVED_TAPE };
+        bad.n_derived = 1;
+        bad.derived_roles = tape_role;
+        bad.derived_units = &unit;
+        check(eg_runner_new(ctx, &bad, &none) == EG_NOT_WRITTEN && reason_has(ctx, "EG_RUN_RECORD of an automatic unit on a device"),
               "automatic unit: EG_RUN_RECORD refused NOT_WRITTEN by name");
         struct run_planes two;
         eg_plan* halves = planes_new(ctx, &two, 1000, n) ? plan_bound(ctx, unit, 1000, 2, &two) : NULL;

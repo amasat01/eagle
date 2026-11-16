@@ -99,6 +99,22 @@ void reduce_step(std::uint64_t stream, int code, int op, const void* in, std::in
 /** @brief Queue on @p stream a device-to-device copy of @p bytes. */
 void copy_step(std::uint64_t stream, void* dst, const void* src, std::size_t bytes);
 
+/** @brief Queue on @p stream a host-to-device copy of @p bytes and wait for it (the host bytes are the caller's). */
+void write_bytes(std::uint64_t stream, void* dst, const void* src, std::size_t bytes);
+
+/** @brief Queue on @p stream the zeroing of @p bytes at @p dst. */
+void zero_bytes(std::uint64_t stream, void* dst, std::size_t bytes);
+
+/** @brief Queue on @p stream one column op over sample-last planes (the old path's ``eagle_backend_x_diff_columns``), for
+ *  c < @p count and r < @p rows: @p op 0 gathers ``dst[r*dst_ld + c] = src[r*src_ld + index[c]]``, 1 accumulates
+ *  ``dst[r*dst_ld + c] += src[r*dst_ld + c]`` (@p bytes 4: f32, 8: f64), 2 fills ``dst[c] = value`` (4: int32, 8: int64),
+ *  3 scatters ``dst[r*dst_ld + index[c]] = src[r*src_ld + c]``. */
+void diff_columns(std::uint64_t stream, int op, void* dst, std::int64_t dst_ld, const void* src, std::int64_t src_ld,
+                  const std::int64_t* index, std::int64_t count, std::int64_t rows, unsigned bytes, std::int64_t value);
+
+/** @brief The free bytes of the current device. */
+std::int64_t free_bytes();
+
 /** @brief Wait until @p stream is idle. */
 void stream_wait(std::uint64_t stream);
 

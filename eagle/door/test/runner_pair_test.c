@@ -173,8 +173,8 @@ static void run_unit(eg_ctx* ctx, const char* lib, const char* name, const char*
             check(eg_runner_new(ctx, &bad, &none) == EG_BAD_REQUEST && reason_has(ctx, "EG_RUN_REORDER") && none == NULL,
                   "device runner: EG_RUN_REORDER refused BAD_REQUEST (no active set)");
             bad.flags = EG_RUN_RECORD;
-            check(eg_runner_new(ctx, &bad, &none) == EG_NOT_WRITTEN && reason_has(ctx, "EG_RUN_RECORD"),
-                  "device runner: EG_RUN_RECORD refused NOT_WRITTEN by name");
+            check(eg_runner_new(ctx, &bad, &none) == EG_BAD_REQUEST && reason_has(ctx, "EG_RUN_RECORD needs its derived units"),
+                  "device runner: EG_RUN_RECORD without its derived units refused BAD_REQUEST by name");
             bad = rd;
             bad.events = EG_EVENTS_REFINE;
             check(eg_runner_new(ctx, &bad, &none) == EG_NOT_WRITTEN && reason_has(ctx, "events REFINE"),

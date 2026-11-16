@@ -84,7 +84,7 @@ LIB := $(OUT)/libeagle_door.so
 FIXTURE := $(OUT)/libfixture_unit.so
 TEST := $(OUT)/door_test
 
-.PHONY: all lib symbols test check-inputs check-cuda pairs pair-reverse pair-reverse-active pair-reverse-timed pair-reverse-fused pair-reverse-kstep pair-reverse-reorder pair-reverse-t0 pair-reverse-counter pair-refine pair-refine-reverse pair-refine-pend pair-refine-reverse-pend pair-status-grid pair-status-tangent pair-status-two device $(PAIR_UNITS:%=pair-%) $(PAIR_DEVICE_UNITS:%=pair-device-%)
+.PHONY: all lib symbols test check-inputs check-cuda pairs pair-reverse pair-reverse-active pair-reverse-timed pair-reverse-fused pair-reverse-kstep pair-reverse-reorder pair-reverse-t0 pair-reverse-counter pair-refine pair-refine-reverse pair-refine-pend pair-refine-reverse-pend pair-status-grid pair-status-tangent pair-status-two device pair-device-reverse $(PAIR_UNITS:%=pair-%) $(PAIR_DEVICE_UNITS:%=pair-device-%)
 all: test
 
 check-inputs:
@@ -384,9 +384,10 @@ FAST_PAIR_TEST := $(OUT)/fast_pair_test
 GRAPH_PAIR_TEST := $(OUT)/graph_pair_test
 OPS_TEST := $(OUT)/device_ops_test
 BANDED_RUNNER_TEST := $(OUT)/banded_runner_test
+DEVICE_REVERSE_TEST := $(OUT)/device_reverse_test
 
 # The pair tests over test/pair_util.h: one rule, each binary built from the test/ source of its own name.
-$(RUNNER_PAIR_TEST) $(ACTIVE_PAIR_TEST) $(FEATURES_TEST) $(OPS_TEST) $(BANDED_RUNNER_TEST) $(FAST_PAIR_TEST) $(GRAPH_PAIR_TEST): $(OUT)/%: test/%.c test/pair_util.h eg_door.h $(LIB) | check-cuda
+$(RUNNER_PAIR_TEST) $(ACTIVE_PAIR_TEST) $(FEATURES_TEST) $(OPS_TEST) $(BANDED_RUNNER_TEST) $(FAST_PAIR_TEST) $(GRAPH_PAIR_TEST) $(DEVICE_REVERSE_TEST): $(OUT)/%: test/%.c test/pair_util.h eg_door.h $(LIB) | check-cuda
 	$(CC) $(CFLAGS_C) -isystem $(CUDA)/include -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door \
 	  -Wl,-rpath,$(OUT) $(CUDART) -lm -pthread
 
@@ -411,6 +412,27 @@ $(OUT)/libpair_dev_$(1).so: $$(KERNEL_CUDA_$(1)) $$(META_CUDA_$(1)) eg_door.h eg
 pair-device-$(1): symbols $(OUT)/libpair_dev_$(1).so $$(PAIR_DEVICE_TEST) $$(RUNNER_PAIR_TEST) $$(ACTIVE_PAIR_TEST) $$(FAST_PAIR_TEST) $$(GRAPH_PAIR_TEST) $$(FEATURES_TEST) $$(OPS_TEST) $$(BANDED_RUNNER_TEST)
 endef
 $(foreach u,$(PAIR_DEVICE_UNITS),$(eval $(call PAIR_DEVICE_RULES,$(u))))
+
+# pair-device-reverse: a recorded run and its reverse on the device, rr_pend and _timed: per unit one library of the old device
+# run's own images (PTX_<unit>, PTX_<unit>_tape, PTX_<unit>_step_vjp: the PTX it loaded) with the host meta (META_reverse,
+# META_timed) whose image fields name them; run $(OUT)/device_reverse_test <library> <oracle dir> <3 digests> <primal> <window>
+# through the GPU pool against the old device run's states, report and gradients.
+cuda_meta = sed 's/M(host_entry, "\([A-Za-z0-9_]*\)_host"), M(device_image, NULL), M(device_function, NULL)\(.*\)EG_IMAGE_NONE\(.*\)M(device_image_size, NULL)/M(host_entry, NULL), M(device_image, "\1__image"), M(device_function, "\1")\2EG_IMAGE_PTX\3M(device_image_size, "\1__image_size")/' $(1) > $(2)
+define DEV_REV_RULES
+$(OUT)/libpair_dev_rev_$(1).so: $$(PTX_$(1)) $$(PTX_$(1)_tape) $$(PTX_$(1)_step_vjp) $$(META_$(2)) eg_door.h eg_unit_meta.h | check-cuda
+	@test -f "$$(PTX_$(1))" -a -f "$$(PTX_$(1)_tape)" -a -f "$$(PTX_$(1)_step_vjp)" || \
+	  { echo "set PTX_$(1), PTX_$(1)_tape and PTX_$(1)_step_vjp"; exit 1; }
+	@mkdir -p $(OUT)
+	$$(call embed,$$(PTX_$(1)),$(3)__image,$(OUT)/dev_rev_$(1)_p.o)
+	$$(call embed,$$(PTX_$(1)_tape),$(3)_tape__image,$(OUT)/dev_rev_$(1)_t.o)
+	$$(call embed,$$(PTX_$(1)_step_vjp),$(3)_step_vjp__image,$(OUT)/dev_rev_$(1)_v.o)
+	$$(call cuda_meta,$$(META_$(2)),$(OUT)/dev_rev_$(1)_meta.c)
+	$$(CC) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$$(ROOT) -c $(OUT)/dev_rev_$(1)_meta.c -o $(OUT)/dev_rev_$(1)_meta.o
+	$$(CC) -shared -o $$@ $(OUT)/dev_rev_$(1)_meta.o $(OUT)/dev_rev_$(1)_p.o $(OUT)/dev_rev_$(1)_t.o $(OUT)/dev_rev_$(1)_v.o
+endef
+$(eval $(call DEV_REV_RULES,rr_pend,reverse,rr_pend))
+$(eval $(call DEV_REV_RULES,timed,timed,_timed))
+pair-device-reverse: symbols $(OUT)/libpair_dev_rev_rr_pend.so $(OUT)/libpair_dev_rev_timed.so $(DEVICE_REVERSE_TEST)
 
 # pair-refine-pend, pair-refine-reverse-pend: the pendulum (ev_pend, the old path's second event model, a 0.05, c 0.2) over its own
 # library (META_pend) with the same two tests; ORACLE_pend (plain refine run), ORACLE_pendrr (the reverse's gradients).

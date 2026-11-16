@@ -10,7 +10,11 @@
 // tape on over each step's live prefix, then runs the step vjp backward with
 // the state adjoints alternating between two buffers by step parity. Gradients
 // of parameters summed over samples are gathered back to sample order, summed
-// as a canonical compensated pair per pass and combined in pass order.
+// as a canonical compensated pair per pass and combined in pass order. A DEVICE
+// runner's record runs the same driver over device memory (the old device
+// path's diff_record_device / diff_reverse_device): eagle's planes on the device,
+// every copy, gather and launch queued on the context's stream, the finished
+// counter read back once per window.
 #include "eagle/door/Context.h"
 #include "eagle/door/eg_unit_meta.h"
 #include "eagle/door/host/Team.h"
@@ -21,18 +25,33 @@
 #include "eagle/reduce/canonical.h"
 #include <algorithm>
 #include <map>
+#include <memory>
 #include <string>
 #include <unistd.h>
 
 namespace eagle {
 namespace door {
 
-/** @brief Bytes eagle owns, 8-byte aligned. */
+/** @brief Bytes eagle owns, 8-byte aligned: on the host, or (resized with a device context) on that device. */
 struct Buf {
     std::vector<std::uint64_t> words;
-    void resize(std::size_t bytes) { words.assign((bytes + 7) / 8, 0); }
-    char* data() { return reinterpret_cast<char*>(words.data()); }
-    void zero() { std::fill(words.begin(), words.end(), 0); }
+    std::shared_ptr<char> dev;      ///< a DEVICE record's bytes
+    eg_ctx* ctx = nullptr;
+    std::size_t bytes = 0;
+    void resize(std::size_t n, eg_ctx* on = nullptr) {
+        if (on == nullptr) {
+            words.assign((n + 7) / 8, 0);
+            return;
+        }
+        ctx = on;
+        bytes = n;
+        dev.reset(static_cast<char*>(device_alloc(*on, std::max<std::size_t>(n, 8))), [on](char* p) { device_free(*on, p); });
+    }
+    char* data() { return dev ? dev.get() : reinterpret_cast<char*>(words.data()); }
+    void zero() {
+        if (dev) device_zero(*ctx, dev.get(), bytes);
+        else std::fill(words.begin(), words.end(), 0);
+    }
 };
 
 /** @brief One plane the twin reads or carries: a state (checkpointed) or a read (gathered per pass). */
@@ -152,6 +171,25 @@ char* plane_bytes(const eg_plane_s& p) {
 }
 std::size_t elem_bytes(const DLTensor& t) { return static_cast<std::size_t>(t.dtype.bits / 8) * t.dtype.lanes; }
 
+/** @brief Copy @p bytes on one side: host memory, or device to device on @p dev. */
+void copy_bytes(eg_ctx* dev, void* dst, const void* src, std::size_t bytes) {
+    if (dev != nullptr) device_copy_bytes(*dev, dst, src, bytes);
+    else std::memcpy(dst, src, bytes);
+}
+
+/** @brief diff::gatherColumns on the host, or queued on @p dev's stream (@p index on the device). */
+void gather(eg_ctx* dev, void* dst, std::int64_t dst_ld, const void* src, std::int64_t src_ld, const std::int64_t* index,
+            std::int64_t count, std::int64_t rows, std::size_t bytes) {
+    if (dev != nullptr) device_columns(*dev, 0, dst, dst_ld, src, src_ld, index, count, rows, static_cast<unsigned>(bytes), 0);
+    else diff::gatherColumns(dst, dst_ld, src, src_ld, index, count, rows, bytes);
+}
+
+/** @brief Run @p plan over its first @p count samples: the host team, or one device launch with the block of @p of samples. */
+void run_on(eg_plan_s& plan, int threads, std::int64_t count, std::int64_t of) {
+    if (plan.structure == EG_STRUCTURE_DEVICE) device_launch_prefix(plan, count, of);
+    else host::run_prefix(plan, threads, count);
+}
+
 /** @brief A plan of a derived unit over eagle's memory: one whole partition of @p n samples. */
 eg_plan_s* inner_plan(eg_ctx& ctx, eg_unit_s* unit, eg_structure structure, std::int64_t n) {
     auto* p = new eg_plan_s;
@@ -163,7 +201,12 @@ eg_plan_s* inner_plan(eg_ctx& ctx, eg_unit_s* unit, eg_structure structure, std:
     p->bindings.resize(unit->slots.size());
     p->params.resize(unit->slots.size());
     p->caller_ref = false;
-    if (unit->finish.present) bind_raw(*p, unit->finish.counter_slot, &p->finished, 1);
+    if (unit->finish.present && structure == EG_STRUCTURE_DEVICE) {   // the finished counter: a device cell
+        device_plan_cells(*p);
+        bind_raw(*p, unit->finish.counter_slot, reinterpret_cast<void*>(p->device_counter), 1);
+    } else if (unit->finish.present) {
+        bind_raw(*p, unit->finish.counter_slot, &p->finished, 1);
+    }
     for (std::size_t i = 0; i < unit->slots.size(); ++i)
         if (unit->slots[i].role == EG_ROLE_NSAMPLES) {
             const std::uint32_t n32 = static_cast<std::uint32_t>(n);
@@ -177,6 +220,7 @@ eg_plan_s* inner_plan(eg_ctx& ctx, eg_unit_s* unit, eg_structure structure, std:
 void inner_free(eg_ctx& ctx, eg_plan_s*& p) {
     if (p == nullptr) return;
     unit_release(ctx, p->unit);
+    device_plan_free(*p);
     delete p;
     p = nullptr;
 }
@@ -556,6 +600,15 @@ void record_new(eg_ctx& ctx, eg_runner_s& runner, const eg_runner_desc& d) {
     bool fused = false;
     for (std::int32_t i = 0; i < d.n_derived && d.derived_roles != nullptr; ++i) fused = fused || d.derived_roles[i] == EG_DERIVED_TAPE_FUSED;
     if (fused && ev) refuse(EG_NOT_WRITTEN, "events refine with the K-step twin is not written in this build of the door");
+    if (runner.dev.ctx != nullptr) {   // a DEVICE record: the plain one-step run; the rest by name
+        if (runner.active)
+            refuse(EG_NOT_WRITTEN, "EG_RUN_RECORD with an active set on a device is not written in this build of the door");
+        if (fused)
+            refuse(EG_NOT_WRITTEN, "EG_RUN_RECORD with the K-step twin (EG_DERIVED_TAPE_FUSED) on a device is not written in "
+                   "this build of the door");
+        if (d.steps_reverse == EG_STEPS_REVERSE_FUSED)
+            refuse(EG_NOT_WRITTEN, "steps_reverse FUSED on a device is not written in this build of the door");
+    }
     eg_unit_s* twin = derived_of(ctx, d, fused ? EG_DERIVED_TAPE_FUSED : EG_DERIVED_TAPE, ev);
     eg_unit_s* vjp = rec ? derived_of(ctx, d, EG_DERIVED_STEP_VJP, ev) : nullptr;
     eg_unit_s* newton = ev ? derived_of(ctx, d, EG_DERIVED_REFINE_NEWTON, true) : nullptr;
@@ -564,6 +617,9 @@ void record_new(eg_ctx& ctx, eg_runner_s& runner, const eg_runner_desc& d) {
     const bool fusedrev = d.steps_reverse == EG_STEPS_REVERSE_FUSED;
     if (fusedrev && ev) refuse(EG_NOT_WRITTEN, "steps_reverse FUSED with events refine is not written in this build of the door");
     eg_unit_s* fvjp = fusedrev ? derived_of(ctx, d, EG_DERIVED_FUSED_VJP, ev) : nullptr;
+    if (runner.dev.ctx != nullptr)
+        for (const eg_unit_s* u : { twin, vjp })
+            if (u->function == 0) refuse(EG_NOT_WRITTEN, "unit '" + u->name + "' on DEVICE: the unit has no device image");
     const std::int32_t want = refine ? 3 : rrefine ? 5 : fusedrev ? 3 : 2;
     if (d.n_derived != want)
         refuse(EG_BAD_REQUEST, "n_derived " + std::to_string(d.n_derived) + (refine ? ": a refine run takes the twin, the Newton and the state guard vjp"
@@ -993,9 +1049,10 @@ void record_forward(eg_ctx& ctx, eg_runner_s& runner, eg_run_report* report) {
     const DerivedFacts& t = r.twin_unit->derived;
     if (r.fwd == nullptr) r.fwd = inner_plan(ctx, r.twin_unit, primal.structure, n);
     eg_plan_s& fwd = *r.fwd;
-    r.steps.resize(static_cast<std::size_t>(n) * 8);
+    eg_ctx* D = primal.structure == EG_STRUCTURE_DEVICE ? &ctx : nullptr;   // a DEVICE record: eagle's planes on the device
+    r.steps.resize(static_cast<std::size_t>(n) * 8, D);
     r.fword.resize(8);
-    r.dummy.resize(static_cast<std::size_t>(r.width * std::max<std::int64_t>(n, 1)) * r.scalar);
+    r.dummy.resize(static_cast<std::size_t>(r.width * std::max<std::int64_t>(n, 1)) * r.scalar, D);
     const bool refine = r.rf != nullptr;
     if (refine) r.tape.resize(static_cast<std::size_t>(r.width * std::max<std::int64_t>(n, 1)) * r.scalar);
     const auto take = [&](Carried& c) {
@@ -1008,9 +1065,16 @@ void record_forward(eg_ctx& ctx, eg_runner_s& runner, eg_run_report* report) {
         if (c.kind == Carried::FILL) {   // a parameter's value as a plane: eagle makes and fills it
             c.bytes = r.scalar;
             c.rows = 1;
-            c.own.resize(static_cast<std::size_t>(n) * c.bytes);
+            Buf fill;
+            fill.resize(static_cast<std::size_t>(n) * c.bytes);
             for (std::int64_t i = 0; i < n; ++i)
-                std::memcpy(c.own.data() + static_cast<std::size_t>(i) * c.bytes, primal.bindings[static_cast<std::size_t>(c.primal_slot)].value, c.bytes);
+                std::memcpy(fill.data() + static_cast<std::size_t>(i) * c.bytes, primal.bindings[static_cast<std::size_t>(c.primal_slot)].value, c.bytes);
+            if (D != nullptr) {
+                c.own.resize(static_cast<std::size_t>(n) * c.bytes, D);
+                device_write(*D, c.own.data(), fill.data(), static_cast<std::size_t>(n) * c.bytes);
+            } else {
+                c.own = std::move(fill);
+            }
             c.src = c.own.data();
             return;
         }
@@ -1018,8 +1082,8 @@ void record_forward(eg_ctx& ctx, eg_runner_s& runner, eg_run_report* report) {
             const eg_plane_s& p = *primal.bindings[static_cast<std::size_t>(c.of)].plane;
             c.bytes = elem_bytes(p.tensor->dl_tensor);
             c.rows = 1;
-            c.own.resize(static_cast<std::size_t>(n) * c.bytes);
-            std::memcpy(c.own.data(), plane_bytes(p), static_cast<std::size_t>(n) * c.bytes);
+            c.own.resize(static_cast<std::size_t>(n) * c.bytes, D);
+            copy_bytes(D, c.own.data(), plane_bytes(p), static_cast<std::size_t>(n) * c.bytes);
             c.src = c.own.data();
             return;
         }
@@ -1070,7 +1134,8 @@ void record_forward(eg_ctx& ctx, eg_runner_s& runner, eg_run_report* report) {
     const char* mask = static_cast<const char*>(mt.data) + mt.byte_offset;
     const std::size_t mb = elem_bytes(mt);
     std::uint32_t set = 0;
-    for (std::int64_t i = 0; i < n; ++i)
+    if (D != nullptr) device_mask_count(*D, mask, n, static_cast<unsigned>(mb), fwd.device_counter);
+    for (std::int64_t i = 0; D == nullptr && i < n; ++i)
         for (std::size_t b = 0; b < mb; ++b)
             if (mask[static_cast<std::size_t>(i) * mb + b] != 0) {
                 ++set;
@@ -1086,19 +1151,26 @@ void record_forward(eg_ctx& ctx, eg_runner_s& runner, eg_run_report* report) {
     r.steps.zero();
     r.taken = 0;
     const int threads = host::team_threads(ctx);
-    std::int64_t launches = 0;
+    std::int64_t launches = 0, at = 0;
+    const auto done = [&] {
+        if (D == nullptr) return static_cast<std::int64_t>(fwd.finished) >= n;
+        if (at % r.window != 0) return false;   // the old device record reads the counter back once per window
+        std::uint32_t finished = 0;
+        device_read(*D, reinterpret_cast<const void*>(fwd.device_counter), &finished, sizeof(finished));
+        return static_cast<std::int64_t>(finished) >= n;
+    };
     const std::int64_t ran = diff::recordForward(
-        runner.max_steps, refine && !r.recorded ? runner.max_steps : r.window, r.max_k, [&] { return static_cast<std::int64_t>(fwd.finished) >= n; },
+        runner.max_steps, refine && !r.recorded ? runner.max_steps : r.window, r.max_k, done,
         [&](std::int64_t k) {
             if (refine && !r.recorded) return;   // a plain refine run keeps no checkpoints: the one-row tape holds each stop step's start
             if (k == static_cast<std::int64_t>(r.pool.size())) {
                 r.pool.emplace_back(r.state.size());
                 for (std::size_t i = 0; i < r.state.size(); ++i)
-                    r.pool.back()[i].resize(static_cast<std::size_t>(r.state[i].rows * n) * r.state[i].bytes);
+                    r.pool.back()[i].resize(static_cast<std::size_t>(r.state[i].rows * n) * r.state[i].bytes, D);
             }
             for (std::size_t i = 0; i < r.state.size(); ++i)
-                std::memcpy(r.pool[static_cast<std::size_t>(k)][i].data(), r.state[i].src,
-                            static_cast<std::size_t>(r.state[i].rows * n) * r.state[i].bytes);
+                copy_bytes(D, r.pool[static_cast<std::size_t>(k)][i].data(), r.state[i].src,
+                           static_cast<std::size_t>(r.state[i].rows * n) * r.state[i].bytes);
             if (reordering) {
                 if (k == static_cast<std::int64_t>(r.epochs.size())) r.epochs.emplace_back();
                 r.epochs[static_cast<std::size_t>(k)] = runner.act.inv;
@@ -1109,7 +1181,8 @@ void record_forward(eg_ctx& ctx, eg_runner_s& runner, eg_run_report* report) {
             const std::int64_t live = runner.active ? static_cast<std::int64_t>(act.count) : n;
             if (r.fused) std::memcpy(r.fword.data(), &k, sizeof(k));
             ++launches;
-            if (live > 0) host::run_prefix(fwd, threads, live);
+            if (live > 0) run_on(fwd, threads, live, n);
+            at = j + k;
             if (runner.active && (j + k) % act.every_steps == 0) {
                 active_compact(act, mask, mb);
                 ++act.compactions;
@@ -1118,6 +1191,10 @@ void record_forward(eg_ctx& ctx, eg_runner_s& runner, eg_run_report* report) {
             }
         });
     if (reordering && act.reorders != act.restored_at) active_restore(act, owned);   // the planes land in sample order
+    if (D != nullptr) {   // the twin counted on the device: the primal's counter follows
+        device_read(*D, reinterpret_cast<const void*>(fwd.device_counter), &fwd.finished, sizeof(fwd.finished));
+        copy_bytes(D, reinterpret_cast<void*>(primal.device_counter), reinterpret_cast<const void*>(fwd.device_counter), sizeof(fwd.finished));
+    }
     primal.finished = fwd.finished;
     if (refine) {
         if (r.scalar == 8) refine_pass<double>(ctx, runner, r, threads);
@@ -1127,7 +1204,7 @@ void record_forward(eg_ctx& ctx, eg_runner_s& runner, eg_run_report* report) {
     if (report == nullptr) return;
     eg_run_report out{};
     out.flags = (static_cast<std::int64_t>(fwd.finished) == n ? EG_REPORT_DONE : 0u) | EG_REPORT_EXACT_STEPS;
-    out.mode = EG_MODE_HOST;
+    out.mode = D != nullptr ? EG_MODE_BAND : EG_MODE_HOST;
     out.n = n;
     out.finished = fwd.finished;
     out.launches = launches;
@@ -1141,7 +1218,7 @@ void record_forward(eg_ctx& ctx, eg_runner_s& runner, eg_run_report* report) {
 namespace {
 
 /** @brief One bound caller plane of a reverse, checked against what it binds. */
-char* caller_plane(const eg_ctx& ctx, eg_plane_s* p, const DLTensor& like, std::int64_t elements_, const std::string& what) {
+char* caller_plane(const eg_ctx& ctx, bool dev, eg_plane_s* p, const DLTensor& like, std::int64_t elements_, const std::string& what) {
     check_handle(ctx.planes, p, what.c_str());
     const DLTensor& t = p->tensor->dl_tensor;
     if (t.dtype.code != like.dtype.code || t.dtype.bits != like.dtype.bits || t.dtype.lanes != like.dtype.lanes)
@@ -1149,11 +1226,12 @@ char* caller_plane(const eg_ctx& ctx, eg_plane_s* p, const DLTensor& like, std::
     if (elements(t) != elements_ || !compact(t))
         refuse(EG_BAD_REQUEST, what + ": holds " + std::to_string(elements(t)) + " elements, compact " +
                std::to_string(elements_) + " expected");
-    if (t.device.device_type != kDLCPU) refuse(EG_BAD_REQUEST, what + ": a host reverse takes host planes");
+    if (t.device.device_type != (dev ? kDLCUDA : kDLCPU))
+        refuse(EG_BAD_REQUEST, what + (dev ? ": a device reverse takes device planes" : ": a host reverse takes host planes"));
     return static_cast<char*>(t.data) + t.byte_offset;
 }
 
-/** @brief dst[r*n + cols[s]] = src[r*m + s] for s < count. */
+/** @brief dst[r*n + cols[s]] = src[r*m + s] for s < count (put: on the host, or queued on @p dev with @p cols on the device). */
 void put_columns(char* dst, std::int64_t n, const char* src, std::int64_t m, const std::int64_t* cols, std::int64_t count,
                  std::int64_t rows, std::size_t bytes) {
     for (std::int64_t r = 0; r < rows; ++r)
@@ -1161,8 +1239,18 @@ void put_columns(char* dst, std::int64_t n, const char* src, std::int64_t m, con
             std::memcpy(dst + static_cast<std::size_t>(r * n + cols[s]) * bytes, src + static_cast<std::size_t>(r * m + s) * bytes, bytes);
 }
 
+void put(eg_ctx* dev, char* dst, std::int64_t n, const char* src, std::int64_t m, const std::int64_t* cols, std::int64_t count,
+         std::int64_t rows, std::size_t bytes) {
+    if (dev != nullptr) device_columns(*dev, 3, dst, n, src, m, cols, count, rows, static_cast<unsigned>(bytes), 0);
+    else put_columns(dst, n, src, m, cols, count, rows, bytes);
+}
+
 template <class T>
 void accumulate(Grad& g, std::int64_t m, std::int64_t count) {
+    if (g.acc.dev) {   // a DEVICE record: one queued accumulate over the rows
+        device_columns(*g.acc.ctx, 1, g.acc.data(), m, g.grad.data(), m, nullptr, count, g.rows, sizeof(T), 0);
+        return;
+    }
     for (std::int64_t r = 0; r < g.rows; ++r)
         diff::accumulatePrefix(reinterpret_cast<T*>(g.acc.data()) + r * m, reinterpret_cast<const T*>(g.grad.data()) + r * m, count);
 }
@@ -1268,6 +1356,8 @@ void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, con
     const eg_unit_s& pu = *primal.unit;
     const std::int64_t n = primal.n_samples, W = r.window;
     const std::size_t np = pu.slots.size();
+    eg_ctx* D = primal.structure == EG_STRUCTURE_DEVICE ? &ctx : nullptr;   // a DEVICE record: its planes on the device
+    const bool on_dev = D != nullptr;
     const auto slot_ok = [&](std::int32_t s, const char* what, int i) {
         if (!in_range(s, np))
             refuse(EG_BAD_REQUEST, std::string(what) + ".plane_slots[" + std::to_string(i) + "] " + std::to_string(s) + " is an unknown slot");
@@ -1291,7 +1381,7 @@ void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, con
             refuse(EG_BAD_REQUEST, "seeds.plane_slots[" + std::to_string(i) + "] " + std::to_string(s) + " ('" + pu.slots[static_cast<std::size_t>(s)].name +
                    "') is not a taped state of the recorded run: a slot with no link");
         const Carried& st = r.state[static_cast<std::size_t>(r.taped[static_cast<std::size_t>(k)].state)];
-        seed[static_cast<std::size_t>(k)] = caller_plane(ctx, seeds.planes[i], primal.bindings[static_cast<std::size_t>(s)].plane->tensor->dl_tensor,
+        seed[static_cast<std::size_t>(k)] = caller_plane(ctx, on_dev, seeds.planes[i], primal.bindings[static_cast<std::size_t>(s)].plane->tensor->dl_tensor,
                                                          st.rows * n, "seeds.planes[" + std::to_string(i) + "]");
     }
     struct Out { char* data; int taped, grad, slot; };
@@ -1315,11 +1405,11 @@ void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, con
                    "'): a slot with no link");
         if (k >= 0) {
             const Carried& st = r.state[static_cast<std::size_t>(r.taped[static_cast<std::size_t>(k)].state)];
-            outs.push_back({ caller_plane(ctx, grads.planes[i], primal.bindings[static_cast<std::size_t>(s)].plane->tensor->dl_tensor, st.rows * n, what), k, -1, s });
+            outs.push_back({ caller_plane(ctx, on_dev, grads.planes[i], primal.bindings[static_cast<std::size_t>(s)].plane->tensor->dl_tensor, st.rows * n, what), k, -1, s });
         } else {   // a parameter: the sum over samples, one value
             DLTensor like{};
             like.dtype = DLDataType{ kDLFloat, static_cast<std::uint8_t>(r.scalar * 8), 1 };
-            outs.push_back({ caller_plane(ctx, grads.planes[i], like, 1, what), -1, g, s });
+            outs.push_back({ caller_plane(ctx, on_dev, grads.planes[i], like, 1, what), -1, g, s });
         }
     }
     RefineExtra extra;
@@ -1335,23 +1425,23 @@ void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, con
     const std::int64_t windows = (runner->max_steps + W - 1) / W;
     per = windows * per + W * r.width * static_cast<std::int64_t>(r.scalar);
     std::int64_t budget = r.budget;
-    if (budget == 0) budget = static_cast<std::int64_t>(::sysconf(_SC_AVPHYS_PAGES) * ::sysconf(_SC_PAGE_SIZE)) / 2;
+    if (budget == 0) budget = D != nullptr ? device_free_bytes(*D) / 2 : static_cast<std::int64_t>(::sysconf(_SC_AVPHYS_PAGES) * ::sysconf(_SC_PAGE_SIZE)) / 2;
     const std::int64_t m = n > 0 ? diff::chunkSamples(budget, per, n, 1) : 0;
     if (n > 0 && m == 0)
         refuse(EG_BAD_REQUEST, "memory_budget " + std::to_string(budget) + ": one sample alone needs " + std::to_string(per) +
                " bytes (its checkpoints and a " + std::to_string(W) + "-step tape)");
-    for (Carried& c : r.state) c.buf.resize(static_cast<std::size_t>(c.rows * m) * c.bytes);
-    for (Carried& c : r.reads) c.buf.resize(static_cast<std::size_t>(c.rows * m) * c.bytes);
+    for (Carried& c : r.state) c.buf.resize(static_cast<std::size_t>(c.rows * m) * c.bytes, D);
+    for (Carried& c : r.reads) c.buf.resize(static_cast<std::size_t>(c.rows * m) * c.bytes, D);
     for (TapedState& x : r.taped)
-        for (Buf& a : x.adj) a.resize(static_cast<std::size_t>(x.rows * m) * r.scalar);
+        for (Buf& a : x.adj) a.resize(static_cast<std::size_t>(x.rows * m) * r.scalar, D);
     for (Grad& g : r.grads) {
-        g.grad.resize(static_cast<std::size_t>(g.rows * m) * r.scalar);
-        g.acc.resize(static_cast<std::size_t>(g.rows * m) * r.scalar);
+        g.grad.resize(static_cast<std::size_t>(g.rows * m) * r.scalar, D);
+        g.acc.resize(static_cast<std::size_t>(g.rows * m) * r.scalar, D);
     }
     Buf step_plane;
-    step_plane.resize(static_cast<std::size_t>(m) * r.step_bytes);
+    step_plane.resize(static_cast<std::size_t>(m) * r.step_bytes, D);
     Buf tape, lookup;
-    tape.resize(static_cast<std::size_t>(W * r.width * std::max<std::int64_t>(m, 1)) * r.scalar);
+    tape.resize(static_cast<std::size_t>(W * r.width * std::max<std::int64_t>(m, 1)) * r.scalar, D);
     // The recompute twin (tape on) and the vjp over the pass's planes.
     inner_free(ctx, r.rec);
     inner_free(ctx, r.vjp);
@@ -1427,11 +1517,18 @@ void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, con
     // Outputs in sample order: the taped states' adjoints, per-sample gradients and the passes' pairs.
     std::vector<Buf> fold(r.grads.size());   // a start copy's per-sample gradient, in sample order
     for (std::size_t g = 0; g < r.grads.size(); ++g)
-        if (r.grads[g].fold >= 0) fold[g].resize(static_cast<std::size_t>(n) * r.scalar);
+        if (r.grads[g].fold >= 0) fold[g].resize(static_cast<std::size_t>(n) * r.scalar, D);
     std::vector<Buf> out_state(r.taped.size());
-    for (std::size_t k = 0; k < r.taped.size(); ++k) out_state[k].resize(static_cast<std::size_t>(r.taped[k].rows * n) * r.scalar);
+    for (std::size_t k = 0; k < r.taped.size(); ++k) out_state[k].resize(static_cast<std::size_t>(r.taped[k].rows * n) * r.scalar, D);
     std::vector<std::vector<std::pair<double, double>>> partials(r.grads.size());
-    const std::int64_t* all_steps = extra.steps.empty() ? reinterpret_cast<const std::int64_t*>(r.steps.data()) : extra.steps.data();
+    std::vector<std::int64_t> device_steps;   // a DEVICE record's applied steps, read back for the stop order
+    if (D != nullptr && n > 0) {
+        device_steps.resize(static_cast<std::size_t>(n));
+        device_read(*D, r.steps.data(), device_steps.data(), static_cast<std::size_t>(n) * 8);
+    }
+    const std::int64_t* all_steps = !extra.steps.empty() ? extra.steps.data() : D != nullptr ? device_steps.data()
+                                                                                            : reinterpret_cast<const std::int64_t*>(r.steps.data());
+    Buf dcols, dorder;   // a DEVICE reverse's gather index and sample order
     const int threads = host::team_threads(ctx);
     for (std::int64_t s0 = 0; s0 < n; s0 += m) {
         const std::int64_t cnt = std::min(m, n - s0);
@@ -1439,11 +1536,17 @@ void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, con
         const std::vector<diff::idx_t> live = diff::liveCounts(all_steps + s0, cnt);
         std::vector<std::int64_t> cols(static_cast<std::size_t>(cnt));
         for (std::int64_t i = 0; i < cnt; ++i) cols[static_cast<std::size_t>(i)] = order[static_cast<std::size_t>(i)] + s0;
-        for (Carried& c : r.reads) diff::gatherColumns(c.buf.data(), m, c.src, n, cols.data(), cnt, c.rows, c.bytes);
+        const std::int64_t* at = cols.data();   // the gather index on the record's side
+        if (D != nullptr) {
+            dcols.resize(static_cast<std::size_t>(std::max<std::int64_t>(cnt, 1)) * 8, D);
+            device_write(*D, dcols.data(), cols.data(), static_cast<std::size_t>(cnt) * 8);
+            at = reinterpret_cast<const std::int64_t*>(dcols.data());
+        }
+        for (Carried& c : r.reads) gather(D, c.buf.data(), m, c.src, n, at, cnt, c.rows, c.bytes);
         for (std::size_t k = 0; k < r.taped.size(); ++k)
             for (Buf& a : r.taped[k].adj) {
                 a.zero();
-                if (seed[k] != nullptr) diff::gatherColumns(a.data(), m, seed[k], n, cols.data(), cnt, r.taped[k].rows, r.scalar);
+                if (seed[k] != nullptr) gather(D, a.data(), m, seed[k], n, at, cnt, r.taped[k].rows, r.scalar);
             }
         for (Grad& g : r.grads) g.acc.zero();
         if (!live.empty()) {
@@ -1451,7 +1554,7 @@ void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, con
             diff::reverseWindows(
                 W, live,
                 [&](std::int64_t k, std::int64_t count) {
-                    const std::int64_t* from = cols.data();   // the sample's column in this checkpoint: its slot then
+                    const std::int64_t* from = at;   // the sample's column in this checkpoint: its slot then
                     std::vector<std::int64_t> slots;
                     if (!r.epochs.empty()) {
                         const std::vector<std::int32_t>& inv = r.epochs[static_cast<std::size_t>(k)];
@@ -1460,8 +1563,8 @@ void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, con
                         from = slots.data();
                     }
                     for (std::size_t i = 0; i < r.state.size(); ++i)
-                        diff::gatherColumns(r.state[i].buf.data(), m, r.pool[static_cast<std::size_t>(k)][i].data(), n, from, count,
-                                            r.state[i].rows, r.state[i].bytes);
+                        gather(D, r.state[i].buf.data(), m, r.pool[static_cast<std::size_t>(k)][i].data(), n, from, count,
+                               r.state[i].rows, r.state[i].bytes);
                 },
                 [&](std::int64_t c, std::int64_t len) {
                     if (chain.begin(c, len)) return;   // a full window of a FUSED reverse recomputes inside its vjp launch
@@ -1469,7 +1572,7 @@ void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, con
                         const std::int64_t k = r.fused ? std::min(r.max_k, c + len - j) : 1;   // the forward's launch shape, never across a window
                         if (r.fused) std::memcpy(rword.data(), &k, sizeof(k));
                         rec_count = static_cast<std::uint32_t>(live[static_cast<std::size_t>(j)]);
-                        host::run_prefix(rec, threads, live[static_cast<std::size_t>(j)]);
+                        run_on(rec, threads, live[static_cast<std::size_t>(j)], m);
                         j += k;
                     }
                 },
@@ -1478,7 +1581,7 @@ void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, con
                         if (j != chain.top()) return;
                         const std::int64_t whole = live[static_cast<std::size_t>(chain.start)];
                         bind_fused(chain.cur);
-                        host::run_prefix(*r.fvjp, threads, whole);
+                        run_on(*r.fvjp, threads, whole, m);
                         chain.flip();
                         for (Grad& g : r.grads) {
                             if (r.scalar == 8) accumulate<double>(g, m, whole);
@@ -1487,9 +1590,11 @@ void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, con
                         return;
                     }
                     bind_step(j % W, chain.cur);
-                    if (r.step_bytes == 8) diff::fillPrefix(reinterpret_cast<std::int64_t*>(step_plane.data()), j, count);
+                    if (D != nullptr && r.step_bytes != 0)
+                        device_columns(*D, 2, step_plane.data(), m, nullptr, 0, nullptr, count, 1, static_cast<unsigned>(r.step_bytes), j);
+                    else if (r.step_bytes == 8) diff::fillPrefix(reinterpret_cast<std::int64_t*>(step_plane.data()), j, count);
                     else if (r.step_bytes == 4) diff::fillPrefix(reinterpret_cast<std::int32_t*>(step_plane.data()), static_cast<std::int32_t>(j), count);
-                    host::run_prefix(vjp, threads, count);
+                    run_on(vjp, threads, count, m);
                     chain.flip();
                     for (Grad& g : r.grads) {
                         if (r.scalar == 8) accumulate<double>(g, m, count);
@@ -1498,11 +1603,26 @@ void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, con
                 });
         }
         for (std::size_t k = 0; k < r.taped.size(); ++k)
-            put_columns(out_state[k].data(), n, r.taped[k].adj[1].data(), m, cols.data(), cnt, r.taped[k].rows, r.scalar);
+            put(D, out_state[k].data(), n, r.taped[k].adj[1].data(), m, at, cnt, r.taped[k].rows, r.scalar);
         for (std::size_t g = 0; g < r.grads.size(); ++g) {
             Grad& gr = r.grads[g];
             if (gr.fold >= 0) {
-                put_columns(fold[g].data(), n, gr.acc.data(), m, cols.data(), cnt, 1, r.scalar);
+                put(D, fold[g].data(), n, gr.acc.data(), m, at, cnt, 1, r.scalar);
+                continue;
+            }
+            if (D != nullptr) {   // the old device reverse: scattered to sample order, the canonical pair on the device
+                Buf sample, hc;
+                sample.resize(static_cast<std::size_t>(std::max<std::int64_t>(cnt, 1)) * r.scalar, D);
+                hc.resize(2 * r.scalar, D);
+                dorder.resize(static_cast<std::size_t>(std::max<std::int64_t>(cnt, 1)) * 8, D);
+                device_write(*D, dorder.data(), order.data(), static_cast<std::size_t>(cnt) * 8);
+                put(D, sample.data(), cnt, gr.acc.data(), m, reinterpret_cast<const std::int64_t*>(dorder.data()), cnt, 1, r.scalar);
+                device_pair_sum(*D, r.scalar == 8, sample.data(), cnt, hc.data(), hc.data() + r.scalar);
+                double hd[2] = { 0.0, 0.0 };
+                float hf[2] = { 0.0f, 0.0f };
+                device_read(*D, hc.data(), r.scalar == 8 ? static_cast<void*>(hd) : static_cast<void*>(hf), 2 * r.scalar);
+                partials[g].push_back(r.scalar == 8 ? std::pair<double, double>{ hd[0], hd[1] }
+                                                    : std::pair<double, double>{ static_cast<double>(hf[0]), static_cast<double>(hf[1]) });
                 continue;
             }
             Buf sample;
@@ -1522,7 +1642,8 @@ void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, con
     for (std::size_t g = 0; g < r.grads.size(); ++g) {   // the start copy's gradient joins the time plane's
         if (r.grads[g].fold < 0) continue;
         Buf& dst = out_state[static_cast<std::size_t>(r.grads[g].fold)];
-        if (r.scalar == 8)
+        if (D != nullptr) device_columns(*D, 1, dst.data(), n, fold[g].data(), n, nullptr, n, 1, static_cast<unsigned>(r.scalar), 0);
+        else if (r.scalar == 8)
             for (std::int64_t i = 0; i < n; ++i) reinterpret_cast<double*>(dst.data())[i] += reinterpret_cast<const double*>(fold[g].data())[i];
         else
             for (std::int64_t i = 0; i < n; ++i) reinterpret_cast<float*>(dst.data())[i] += reinterpret_cast<const float*>(fold[g].data())[i];
@@ -1538,8 +1659,8 @@ void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, con
     }
     for (const Out& o : outs) {
         if (o.taped >= 0) {
-            std::memcpy(o.data, out_state[static_cast<std::size_t>(o.taped)].data(),
-                        static_cast<std::size_t>(r.taped[static_cast<std::size_t>(o.taped)].rows * n) * r.scalar);
+            copy_bytes(D, o.data, out_state[static_cast<std::size_t>(o.taped)].data(),
+                       static_cast<std::size_t>(r.taped[static_cast<std::size_t>(o.taped)].rows * n) * r.scalar);
         } else {   // diff_combine_chunks: the passes' pairs combined in pass order
             const std::vector<std::pair<double, double>> none;
             const auto& ps = o.grad >= 0 ? partials[static_cast<std::size_t>(o.grad)] : none;
@@ -1549,17 +1670,20 @@ void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, con
                 double v = ps.empty() ? 0.0 : reduce::canonical::combine(std::move(p)).value();
                 for (const auto& [slot, x] : extra.params)
                     if (slot == o.slot) v += x;
-                std::memcpy(o.data, &v, sizeof(v));
+                if (D != nullptr) device_write(*D, o.data, &v, sizeof(v));
+                else std::memcpy(o.data, &v, sizeof(v));
             } else {
                 std::vector<reduce::canonical::Partial<float, aether::SumOp<float>>> p;
                 for (const auto& [h, c] : ps) p.push_back({ static_cast<float>(h), static_cast<float>(c) });
                 float v = ps.empty() ? 0.0f : reduce::canonical::combine(std::move(p)).value();
                 for (const auto& [slot, x] : extra.params)
                     if (slot == o.slot) v += static_cast<float>(x);
-                std::memcpy(o.data, &v, sizeof(v));
+                if (D != nullptr) device_write(*D, o.data, &v, sizeof(v));
+                else std::memcpy(o.data, &v, sizeof(v));
             }
         }
     }
+    if (D != nullptr) device_sync(*D);   // the gradients land before eg_reverse returns
     r.live = false;
 }
 

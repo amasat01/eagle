@@ -18,9 +18,6 @@ void check_desc(const eg_runner_desc& d, bool device) {
     if (d.flags & ~(EG_RUN_RECORD | EG_RUN_REORDER))
         refuse(EG_BAD_REQUEST, "eg_runner_desc.flags: unknown bits " + std::to_string(d.flags));
     const bool record = (d.flags & EG_RUN_RECORD) != 0;
-    if (record && device)
-        refuse(EG_NOT_WRITTEN, "EG_RUN_RECORD on a DEVICE runner (recording on the device) is not written in this "
-               "build of the door");
     const bool refine = d.events == EG_EVENTS_REFINE;
     if (refine && device)
         refuse(EG_NOT_WRITTEN, "events REFINE on a DEVICE runner is not written in this build of the door");

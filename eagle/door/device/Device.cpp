@@ -46,6 +46,15 @@ void* device_alloc(eg_ctx&, std::size_t) { return nullptr; }
 void device_free(eg_ctx&, void*) noexcept {}
 void device_cell_work(eg_plan_s&) {}
 void device_read(eg_ctx&, const void*, void*, std::size_t) {}
+void device_write(eg_ctx&, void*, const void*, std::size_t) {}
+void device_copy_bytes(eg_ctx&, void*, const void*, std::size_t) {}
+void device_zero(eg_ctx&, void*, std::size_t) {}
+void device_columns(eg_ctx&, int, void*, std::int64_t, const void*, std::int64_t, const std::int64_t*, std::int64_t, std::int64_t,
+                    unsigned, std::int64_t) {}
+void device_launch_prefix(eg_plan_s&, std::int64_t, std::int64_t) {}
+void device_mask_count(eg_ctx&, const void*, std::int64_t, unsigned, std::uint64_t) {}
+void device_pair_sum(eg_ctx&, bool, const void*, std::int64_t, void*, void*) {}
+std::int64_t device_free_bytes(eg_ctx&) { return 0; }
 void device_reduce(eg_ctx&, const eg_reduce_desc&) {}
 void device_copy(eg_ctx&, eg_plane_s*, eg_plane_s*) {}
 void device_runner_new(eg_ctx&, const eg_runner_desc*, eg_runner**) {
@@ -419,6 +428,56 @@ void device_read(eg_ctx& ctx, const void* device, void* host, std::size_t bytes)
     cells_read(ctx.dev.stream, reinterpret_cast<std::uint64_t>(device), static_cast<unsigned*>(host), static_cast<unsigned>(bytes / sizeof(unsigned)));
 }
 
+void device_write(eg_ctx& ctx, void* device, const void* host, std::size_t bytes) {
+    if (bytes == 0) return;
+    Current current(ctx.dev);
+    write_bytes(ctx.dev.stream, device, host, bytes);
+}
+
+void device_copy_bytes(eg_ctx& ctx, void* dst, const void* src, std::size_t bytes) {
+    if (bytes == 0 || dst == src) return;
+    Current current(ctx.dev);
+    copy_step(ctx.dev.stream, dst, src, bytes);
+}
+
+void device_zero(eg_ctx& ctx, void* data, std::size_t bytes) {
+    if (bytes == 0) return;
+    Current current(ctx.dev);
+    zero_bytes(ctx.dev.stream, data, bytes);
+}
+
+void device_columns(eg_ctx& ctx, int op, void* dst, std::int64_t dst_ld, const void* src, std::int64_t src_ld,
+                    const std::int64_t* index, std::int64_t count, std::int64_t rows, unsigned bytes, std::int64_t value) {
+    Current current(ctx.dev);
+    diff_columns(ctx.dev.stream, op, dst, dst_ld, src, src_ld, index, count, rows, bytes, value);
+}
+
+/** @brief One launch of @p plan over its first @p count samples (``Partition{0, count, of}``), the block the meta states or the
+ *  one resolved at @p of samples (the old path's ``_resolved_block`` of the plan's width). */
+void device_launch_prefix(eg_plan_s& plan, std::int64_t count, std::int64_t of) {
+    if (count <= 0) return;
+    const DeviceState& d = plan.ctx->dev;
+    const eg_unit_s& u = *plan.unit;
+    Current current(d);
+    exec::DeviceKernel::run(reinterpret_cast<CUfunction>(u.function), plan.params, exec::Partition{ 0, count, of },
+                            reinterpret_cast<CUstream>(d.stream), u.block > 0 ? static_cast<unsigned>(u.block) : resolved_block(d, u, of));
+}
+
+void device_mask_count(eg_ctx& ctx, const void* mask, std::int64_t n, unsigned width, std::uint64_t counter) {
+    Current current(ctx.dev);
+    mask_count(ctx.dev.stream, mask, n, width, reinterpret_cast<unsigned*>(counter));
+}
+
+void device_pair_sum(eg_ctx& ctx, bool f64, const void* in, std::int64_t n, void* hi, void* comp) {
+    Current current(ctx.dev);
+    reduce_step(ctx.dev.stream, f64 ? 1 : 0, 0, in, n, 1, hi, comp, true);
+}
+
+std::int64_t device_free_bytes(eg_ctx& ctx) {
+    Current current(ctx.dev);
+    return free_bytes();
+}
+
 /** @brief eg_reduce over device planes: checked as the host's, then the canonical ordered tree on the context's
  *  stream (the order the host runs); returns with the result in place. */
 void device_reduce(eg_ctx& ctx, const eg_reduce_desc& d) {
@@ -632,6 +691,9 @@ void device_runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out)
                    "one runner runs on one side");
     const std::int64_t k = d.plans[0]->unit->finish.steps;
     if (k == EG_STEPS_AUTO) {    // the no-graph entries: no loop, no loop cells
+        if (d.flags & EG_RUN_RECORD)
+            refuse(EG_NOT_WRITTEN, "EG_RUN_RECORD of an automatic unit on a device (the K-step twin) is not written in this "
+                   "build of the door");
         if (d.flags & EG_RUN_REORDER)
             refuse(EG_NOT_WRITTEN, "EG_RUN_REORDER (reordering the planes by the active set) with automatic steps on a "
                    "device is not written in this build of the door");
@@ -699,8 +761,10 @@ void device_runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out)
                 r.rscratch = cells_new(static_cast<unsigned>((reorder_scratch_bytes(n, reorder_table(*runner)) + sizeof(unsigned) - 1) / sizeof(unsigned)));
             }
         }
+        if (d.flags & EG_RUN_RECORD) record_new(ctx, *runner, d);    // the host's record checks; the run is host/Reverse.cpp's on the device
         ctx.runners.insert(runner);
     } catch (...) {
+        record_free(ctx, *runner);
         delete runner;
         throw;
     }
@@ -725,6 +789,10 @@ void device_run(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report) {
                "the door");
     check_report(report);
     for (const eg_plan_s* p : runner->plans) check_bound(*p);
+    if (runner->record != nullptr) {    // EG_RUN_RECORD: the recording forward (host/Reverse.cpp) over device planes
+        record_forward(ctx, *runner, report);
+        return;
+    }
     if (runner->dev.mode != EG_MODE_BAND) return fast_run(ctx, runner, report);
     eg_plan_s& first = *runner->plans[0];
     const FinishFacts& f = first.unit->finish;
