@@ -89,6 +89,7 @@ struct SlotFacts {
     bool gathered = false;                    ///< a compact (rows, cols, m) matrix read at lane indices: m is not the lane count
     std::vector<std::uint8_t> keep;           ///< gathered: 1 for each lane axis the matrix varies along (empty: m unchecked)
     bool shared = false;                      ///< a LOOKUP with no lane axis: one value for every lane, bound flat
+    bool param_plane = false;                 ///< a LOOKUP read at index 0 only (a parameter in a one-cell plane); validated, not acted on
     /** @brief One named axis of an ACCUM_OUT plane: a static extent, or -1 and the lane axis whose extent it shares. */
     struct Axis { std::int64_t extent = -1; int lane = -1; };
     std::vector<Axis> axes;                   ///< ACCUM_OUT: the plane's named axes (empty: any compact plane)

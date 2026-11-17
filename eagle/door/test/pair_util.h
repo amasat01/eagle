@@ -26,7 +26,7 @@ static int reason_has(eg_ctx* ctx, const char* part) {
     return 0;
 }
 
-static int read_file(const char* dir, const char* file, void* out, size_t size) {
+static inline int read_file(const char* dir, const char* file, void* out, size_t size) {
     char path[1024];
     snprintf(path, sizeof(path), "%s/%s", dir, file);
     FILE* f = fopen(path, "rb");

@@ -649,6 +649,10 @@ void record_new(eg_ctx& ctx, eg_runner_s& runner, const eg_runner_desc& d) {
         if (u != nullptr && (u->derived.of_unit != pu.index || u->library != pu.library))
             refuse(EG_BAD_REQUEST, field(u->name.c_str(), "of_unit") + " " + std::to_string(u->derived.of_unit) +
                    " is not the runner's primal (unit '" + pu.name + "', index " + std::to_string(pu.index) + ")");
+    for (const eg_unit_s* u : { twin, vjp })
+        if (u != nullptr && u->cell_row > 0 && u->active_count_slot < 0)
+            refuse(EG_BAD_REQUEST, "unit '" + u->name + "': owns cell rows and is launched over the live prefix by the "
+                   "reverse: it must be emitted in the active-set form");
     const DerivedFacts& t = twin->derived;
     const char* tn = twin->name.c_str();
     if (t.time0_slot != -1) check_slot(*twin, t.time0_slot, "time0_slot", EG_ROLE_PER_SAMPLE, -1);

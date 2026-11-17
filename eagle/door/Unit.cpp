@@ -44,6 +44,8 @@ SlotFacts read_slot(const eg_unit_slot* in, const std::string& unit, int index) 
         refuse(EG_BAD_REQUEST, "meta that contradicts itself: " + named + " is GATHER but not a rank-2 MAT_IN");
     if ((s.flags & EG_SLOT_SHARED) && s.role != EG_ROLE_LOOKUP)
         refuse(EG_BAD_REQUEST, "meta that contradicts itself: " + named + " is SHARED but not a LOOKUP");
+    if ((s.flags & EG_SLOT_PARAM_PLANE) && s.role != EG_ROLE_LOOKUP)
+        refuse(EG_BAD_REQUEST, "meta that contradicts itself: " + named + " is PARAM_PLANE but not a LOOKUP");
     if (s.n_gather < 0 || (s.n_gather > 0 && (s.gather == nullptr || !(s.flags & EG_SLOT_GATHER))))
         refuse(EG_BAD_REQUEST, "meta that contradicts itself: " + named + " n_gather " + std::to_string(s.n_gather) +
                " without a gather pattern on a GATHER slot");
@@ -86,6 +88,7 @@ SlotFacts read_slot(const eg_unit_slot* in, const std::string& unit, int index) 
                    (s.role == EG_ROLE_MUTABLE && s.rank > 0);
     facts.gathered = (s.flags & EG_SLOT_GATHER) != 0;
     facts.shared = (s.flags & EG_SLOT_SHARED) != 0;
+    facts.param_plane = (s.flags & EG_SLOT_PARAM_PLANE) != 0;
     if (facts.gathered) facts.keep.assign(s.gather, s.gather + s.n_gather);
     return facts;
 }
