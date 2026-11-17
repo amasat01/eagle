@@ -2886,6 +2886,248 @@ static void check_fft_threads(void) {
     eg_ctx_free(three);
 }
 
+/* ---- SEGMENTED groups under a runner ---------------------------------------- */
+
+#define SGN 200
+
+static eg_status load_with(eg_ctx* ctx, const char* name, uint8_t digest_byte, eg_unit* const* deps, int32_t n_deps, eg_unit** out) {
+    struct eg_unit_ref ref;
+    memset(&ref, 0, sizeof(ref));
+    ref.struct_size = sizeof(ref);
+    ref.name = name;
+    memset(ref.digest, digest_byte, EG_DIGEST_BYTES);
+    struct eg_unit_load_desc d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    d.path = library_path;
+    d.unit = &ref;
+    d.deps = deps;
+    d.n_deps = n_deps;
+    return eg_unit_load(ctx, &d, out);
+}
+
+/* One run's planes: k, limit, mask, pos over SGN samples, wrapped and bound to slots 0, 1, 2 (and 7 when @p with_pos). */
+struct seg_set {
+    double k[SGN], limit[SGN], pos[SGN];
+    unsigned char mask[SGN];
+    struct tensor t[4];
+    eg_plan* plan;
+};
+
+static void seg_inputs(struct seg_set* q, int dynamic) {
+    for (int i = 0; i < SGN; ++i) {
+        q->k[i] = dynamic ? 0.02 * i : 0.0;    /* dynamic: the samples cross the class edge k = 4 one after another */
+        q->limit[i] = dynamic ? 7.0 : (double)(2 + i % 9);
+        q->pos[i] = -1.0;
+        q->mask[i] = 0;
+    }
+}
+
+static int seg_plan(eg_ctx* ctx, eg_unit* unit, struct seg_set* q, int with_pos) {
+    eg_plane* pl[4] = { NULL, NULL, NULL, NULL };
+    tensor_init(&q->t[0], q->k, SGN, 64);
+    tensor_init(&q->t[1], q->limit, SGN, 64);
+    mask_init(&q->t[2], q->mask, SGN);
+    tensor_init(&q->t[3], q->pos, SGN, 64);
+    eg_status s = plan(ctx, unit, EG_STRUCTURE_HOST_TEAM, SGN, 0, NULL, NULL, &q->plan);
+    for (int i = 0; i < 3 + (with_pos ? 1 : 0) && s == EG_OK; ++i) s = eg_plane_wrap(ctx, &q->t[i].managed, &pl[i]);
+    const int32_t slots[4] = { 0, 1, 2, 7 };
+    struct eg_bind_desc d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    d.n_planes = 3 + (with_pos ? 1 : 0);
+    d.plane_slots = slots;
+    d.planes = pl;
+    if (s == EG_OK) s = eg_bind(ctx, q->plan, &d);
+    for (int i = 0; i < 4; ++i)
+        if (pl[i] != NULL) eg_plane_free(ctx, pl[i]);
+    return s == EG_OK;
+}
+
+static int seg_same(const struct seg_set* a, const struct seg_set* b, int with_pos) {
+    return memcmp(a->k, b->k, sizeof(a->k)) == 0 && memcmp(a->mask, b->mask, sizeof(a->mask)) == 0 &&
+           (!with_pos || memcmp(a->pos, b->pos, sizeof(a->pos)) == 0);
+}
+
+static int64_t seg_finished(const struct seg_set* q) {
+    int64_t done = 0;
+    for (int i = 0; i < SGN; ++i) done += q->mask[i] != 0;
+    return done;
+}
+
+/* The group's plan launched one step at a time by the caller, with the runner's finish rule (until every sample finished or max_steps launches). */
+static int64_t seg_launch_loop(eg_ctx* ctx, struct seg_set* q, int64_t max_steps) {
+    int64_t launches = 0;
+    uint64_t tiles = 0;
+    while (launches < max_steps && seg_finished(q) != SGN && eg_launch(ctx, q->plan, &tiles) == EG_OK) ++launches;
+    return launches;
+}
+
+static eg_status seg_run(eg_ctx* ctx, struct seg_set* q, int64_t max_steps, eg_runner** out, struct eg_run_report* rep) {
+    struct eg_runner_desc d = runner_desc(&q->plan, 1, max_steps);
+    memset(rep, 0, sizeof(*rep));
+    rep->struct_size = sizeof(*rep);
+    eg_status s = eg_runner_new(ctx, &d, out);
+    return s == EG_OK ? eg_run(ctx, *out, rep) : s;
+}
+
+/* The dynamic group's arrangement and sort schedule as the door states them: a stable sort of the slots by (live, class of the slot at
+ * the last launch) when none was made or when more live samples than 5% of the live ones were left stale, the branches over their runs,
+ * then the stale live slots stepped by their class. Returns the launches that sorted in @p sorts (up to 16). */
+static int64_t dg_model(struct seg_set* q, int64_t max_steps, int64_t* sorts, int* n_sorts) {
+    static int order[SGN], cls[SGN], stale[SGN];
+    int64_t launches = 0, stale_now = 0;
+    int sorted = 0, end[2] = { 0, 0 };
+    *n_sorts = 0;
+    for (int i = 0; i < SGN; ++i) order[i] = i, cls[i] = 0, stale[i] = 0;
+    while (launches < max_steps && seg_finished(q) != SGN) {
+        int64_t live = 0;
+        for (int s = 0; s < SGN; ++s) live += !q->mask[order[s]];
+        if (!sorted || (double)stale_now > 0.05 * (double)(live > 1 ? live : 1)) {
+            int next[SGN], at = 0;
+            for (int c = 0; c < 3; ++c) {
+                for (int s = 0; s < SGN; ++s)
+                    if ((q->mask[order[s]] ? 2 : cls[s]) == c) next[at++] = order[s];
+                if (c < 2) end[c] = at;    /* the runs of the sort: slots [0, end[0]) are class 0, [end[0], end[1]) class 1 */
+            }
+            memcpy(order, next, sizeof(order));
+            sorted = 1;
+            if (*n_sorts < 16) sorts[(*n_sorts)++] = launches + 1;
+        }
+        for (int s = 0; s < SGN; ++s) {    /* the slots of the runs the sort just made (a kept sort's runs are the same slots) */
+            const int j = s < end[0] ? 0 : s < end[1] ? 1 : -1;
+            const int i = order[s];
+            if (j < 0 || q->mask[i]) continue;
+            const int c = q->k[i] >= 4.0;
+            cls[s] = c;
+            stale[s] = c != j;
+            q->pos[i] = (double)s;
+            if (c == j) {
+                q->k[i] += 0.125 * (j + 1);
+                if (q->k[i] >= q->limit[i]) q->mask[i] = 1;
+            }
+        }
+        stale_now = 0;
+        for (int s = 0; s < SGN; ++s)
+            if (stale[s] && !q->mask[order[s]] && s < end[1]) {
+                const int i = order[s];
+                q->k[i] += 0.125 * ((q->k[i] >= 4.0) + 1);
+                if (q->k[i] >= q->limit[i]) q->mask[i] = 1;
+                ++stale_now;
+            }
+        ++launches;
+    }
+    return launches;
+}
+
+static void check_segmented_runner(eg_ctx* ctx) {
+    eg_unit *cls = NULL, *k1 = NULL, *k0 = NULL, *fused = NULL;
+    check(load(ctx, "sg__cls", 0xE1, &cls) == EG_OK && load(ctx, "sg__k1", 0xE3, &k1) == EG_OK && load(ctx, "sgf", 0xE4, &fused) == EG_OK,
+          "eg_unit_load of the static group's classify and second branch unit, and its fused unit");
+    eg_unit* deps[2] = { k1, cls };
+    check(cls && k1 && load_with(ctx, "sg__k0", 0xE2, deps, 2, &k0) == EG_OK, "eg_unit_load of the first branch unit with the group's units in deps");
+    if (k0 == NULL || fused == NULL) return;
+    static struct seg_set ref, run, fus, again;
+    struct eg_run_report rep, rep2;
+    eg_runner *r = NULL, *rf = NULL;
+    seg_inputs(&ref, 0), seg_inputs(&run, 0), seg_inputs(&fus, 0), seg_inputs(&again, 0);
+    check(seg_plan(ctx, k0, &ref, 0) && seg_plan(ctx, k0, &run, 0) && seg_plan(ctx, fused, &fus, 0), "the group's plans and the fused unit's plan");
+    const int64_t want = seg_launch_loop(ctx, &ref, 1000);
+    check(want == 5 && seg_finished(&ref) == SGN, "the group launched by hand until done: 5 launches (limit 10 at 2 per step)");
+    check(seg_run(ctx, &run, 1000, &r, &rep) == EG_OK && seg_same(&run, &ref, 0) && rep.launches == want && rep.steps == want &&
+              rep.finished == SGN && rep.mapped == want * SGN && rep.mode == EG_MODE_HOST &&
+              rep.flags == (EG_REPORT_DONE | EG_REPORT_EXACT_STEPS),
+          "a runner over a SEGMENTED group: its planes and report equal the plan launched step by step");
+    check(seg_run(ctx, &fus, 1000, &rf, &rep2) == EG_OK && seg_same(&fus, &ref, 0) && rep2.launches == want,
+          "the same run of the fused unit (the same per-sample steps) equals it bitwise");
+    memset(run.k, 0, sizeof(run.k));
+    memset(run.mask, 0, sizeof(run.mask));
+    memset(&rep, 0, sizeof(rep));
+    rep.struct_size = sizeof(rep);
+    check(eg_runner_reset(ctx, r) == EG_OK && eg_run(ctx, r, &rep) == EG_OK && seg_same(&run, &ref, 0) && rep.launches == want && rep.finished == SGN,
+          "eg_runner_reset then a second run equals the first run, report included");
+    check(eg_runner_free(ctx, r) == EG_OK && eg_runner_free(ctx, rf) == EG_OK, "the group's runners freed");
+    {   /* a run cut short by max_steps: the same cut as the hand-launched loop */
+        static struct seg_set cut_ref, cut;
+        seg_inputs(&cut_ref, 0), seg_inputs(&cut, 0);
+        seg_plan(ctx, k0, &cut_ref, 0), seg_plan(ctx, k0, &cut, 0);
+        const int64_t part = seg_launch_loop(ctx, &cut_ref, 3);
+        eg_runner* rc = NULL;
+        check(seg_run(ctx, &cut, 3, &rc, &rep) == EG_OK && seg_same(&cut, &cut_ref, 0) && rep.launches == part && rep.finished < SGN &&
+                  rep.flags == EG_REPORT_EXACT_STEPS,
+              "max_steps 3 stops a SEGMENTED run after 3 launches, not done, as the hand-launched loop");
+        eg_runner_free(ctx, rc);
+        eg_plan_free(ctx, cut_ref.plan);
+    }
+    /* the refusals, by status and reason */
+    {
+        eg_unit* axpb = NULL;
+        eg_plan* two[2] = { run.plan, NULL };
+        struct eg_runner_desc d = runner_desc(two, 2, 10);
+        eg_runner* rr = NULL;
+        check(load(ctx, "axpb", 0xA1, &axpb) == EG_OK && plan(ctx, axpb, EG_STRUCTURE_HOST_TEAM, SGN, 0, NULL, NULL, &two[1]) == EG_OK &&
+                  eg_runner_new(ctx, &d, &rr) == EG_NOT_WRITTEN && reason_has(ctx, "the whole step of its runner"),
+              "a SEGMENTED group beside another plan: NOT_WRITTEN, it is the whole step");
+        d = runner_desc(&run.plan, 1, 10);
+        d.flags = EG_RUN_REORDER;
+        check(eg_runner_new(ctx, &d, &rr) == EG_BAD_REQUEST && reason_has(ctx, "nothing to reorder"), "EG_RUN_REORDER over a SEGMENTED group: BAD_REQUEST");
+        d.flags = 0, d.every = 4;
+        check(eg_runner_new(ctx, &d, &rr) == EG_BAD_REQUEST && reason_has(ctx, "compaction does not apply"), "every over a SEGMENTED group: BAD_REQUEST");
+        d.every = 0, d.events = EG_EVENTS_REFINE;
+        check(eg_runner_new(ctx, &d, &rr) != EG_OK && rr == NULL, "events REFINE over a SEGMENTED group is refused");
+        eg_plan_free(ctx, two[1]);
+        eg_unit_free(ctx, axpb);
+    }
+    eg_plan_free(ctx, ref.plan), eg_plan_free(ctx, run.plan), eg_plan_free(ctx, fus.plan), eg_plan_free(ctx, again.plan);
+    eg_unit_free(ctx, fused);
+
+    /* the dynamic selector: re-sorts at the model's launches and not before; the fused unit's run equals it bitwise */
+    eg_unit *dk1 = NULL, *dsw = NULL, *dk0 = NULL, *dgf = NULL;
+    check(load(ctx, "dg__k1", 0xE6, &dk1) == EG_OK && load(ctx, "dg__sweep", 0xE7, &dsw) == EG_OK && load(ctx, "dgf", 0xE8, &dgf) == EG_OK,
+          "eg_unit_load of the dynamic group's second branch, sweep and fused units");
+    eg_unit* ddeps[2] = { dk1, dsw };
+    check(dk1 && dsw && load_with(ctx, "dg__k0", 0xE5, ddeps, 2, &dk0) == EG_OK, "eg_unit_load of the dynamic group's first branch unit");
+    if (dk0 == NULL || dgf == NULL) return;
+    static struct seg_set model, a, b, f;
+    int64_t sorts[16];
+    int n_sorts = 0;
+    seg_inputs(&model, 1);
+    const int64_t total = dg_model(&model, 1000, sorts, &n_sorts);
+    /* Launch L steps the samples of run 0 whose k (0.02 i + 0.125 (L - 1) while in run 0) is still below 4 and marks the rest stale: 6 samples
+     * (i >= 194) in launch 2, 12 (i >= 188) in launch 3. The sort is kept while the stale are at most 5% of the 200 live (10), so launch 3 keeps
+     * it (6 stale) and launch 4 sorts again (12 stale): the sorts are at launches 1 and 4. */
+    check(n_sorts >= 2 && sorts[0] == 1 && sorts[1] == 4, "the model sorts at launch 1 and next at launch 4 (12 stale of 200 live), not at launch 2 or 3");
+    for (int64_t cut = sorts[1] - 1; cut <= sorts[1] + 1; ++cut) {
+        seg_inputs(&model, 1), seg_inputs(&a, 1);
+        int64_t m_sorts[16];
+        int m_n = 0;
+        dg_model(&model, cut, m_sorts, &m_n);
+        eg_runner* rd = NULL;
+        char what[160];
+        snprintf(what, sizeof(what), "dynamic group, run of %lld launches (the second sort at launch %lld): planes, positions and report as the model",
+                 (long long)cut, (long long)sorts[1]);
+        check(seg_plan(ctx, dk0, &a, 1) && seg_run(ctx, &a, cut, &rd, &rep) == EG_OK && seg_same(&a, &model, 1) && rep.launches == cut, what);
+        eg_runner_free(ctx, rd);
+        eg_plan_free(ctx, a.plan);
+    }
+    seg_inputs(&model, 1), seg_inputs(&b, 1), seg_inputs(&f, 1);
+    dg_model(&model, 1000, sorts, &n_sorts);
+    eg_runner *rb = NULL, *rfu = NULL;
+    check(seg_plan(ctx, dk0, &b, 1) && seg_plan(ctx, dgf, &f, 0) && seg_run(ctx, &b, 1000, &rb, &rep) == EG_OK && seg_run(ctx, &f, 1000, &rfu, &rep2) == EG_OK &&
+              seg_same(&b, &model, 1) && memcmp(b.k, f.k, sizeof(b.k)) == 0 && rep.launches == total && rep2.launches == total,
+          "the dynamic group to completion equals the model and the fused unit bitwise");
+    memset(b.k, 0, sizeof(b.k));
+    for (int i = 0; i < SGN; ++i) b.k[i] = 0.02 * i, b.pos[i] = -1.0;
+    memset(b.mask, 0, sizeof(b.mask));
+    memset(&rep, 0, sizeof(rep));
+    rep.struct_size = sizeof(rep);
+    check(eg_runner_reset(ctx, rb) == EG_OK && eg_run(ctx, rb, &rep) == EG_OK && seg_same(&b, &model, 1) && rep.launches == total,
+          "eg_runner_reset of a dynamic group, then a second run equals the first (the sort starts over)");
+    eg_runner_free(ctx, rb), eg_runner_free(ctx, rfu);
+    eg_plan_free(ctx, b.plan), eg_plan_free(ctx, f.plan);
+    eg_unit_free(ctx, k0), eg_unit_free(ctx, k1), eg_unit_free(ctx, cls), eg_unit_free(ctx, dk0), eg_unit_free(ctx, dk1), eg_unit_free(ctx, dsw), eg_unit_free(ctx, dgf);
+}
+
 int main(int argc, char** argv) {
     if (argc != 5) {
         fprintf(stderr, "usage: %s <fixture> <wrong size> <no size block> <v1 tag>\n", argv[0]);
@@ -2913,6 +3155,7 @@ int main(int argc, char** argv) {
     eg_host_threads(ctx, 1);
     oracle(ctx, unit, 100001, 50000, "n=100001 threads=1");
     check_runner(ctx, unit);
+    check_segmented_runner(ctx);
     check_active_set(ctx);
     check_auto(ctx);
     check_slot_kinds(ctx);

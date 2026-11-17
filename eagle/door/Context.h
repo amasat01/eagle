@@ -451,6 +451,7 @@ struct DeviceRun {
     std::uint64_t map = 0, scratch = 0;       ///< an active set's device live-slot map (int32) and its compaction scratch
     double build_s = 0.0;                     ///< the capture's wall
     int mode = EG_MODE_BAND;                  ///< steps AUTO: EG_MODE_FUSED_ONE or EG_MODE_PERSIST (no graph)
+    bool stepped = false;                     ///< a SEGMENTED group: no captured loop, one host-driven launch of the group per step
     unsigned block = 0, grid = 0, chunk = 0;  ///< the persist launch
     std::uint64_t fast = 0;                   ///< the persist entry's device [next, steps] (uint32)
     std::vector<unsigned char> bound;         ///< the plans' argument bytes the loop was captured over
