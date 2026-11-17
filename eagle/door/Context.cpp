@@ -3,6 +3,7 @@
 // The context: creation, the reason text, what it is, and freeing it with
 // every handle still made from it.
 #include "eagle/door/Context.h"
+#include "eagle/door/device/Seam.h"
 
 #include "eagle/door/host/Team.h"
 

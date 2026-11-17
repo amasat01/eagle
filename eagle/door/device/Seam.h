@@ -1,0 +1,75 @@
+// SPDX-License-Identifier: Apache-2.0
+
+// The door's device seam: the functions the device group (device/Device.cpp) provides to the core. The core
+// reaches the device group only through these declarations. A build without the group provides the
+// NOT_WRITTEN stubs for them, so the core, the host group and the library load the same either way.
+#pragma once
+
+#include "eagle/door/Context.h"
+
+namespace eagle {
+namespace door {
+
+// The device group (device/Device.cpp); the host-only build refuses EG_CTX_DEVICE and structure DEVICE.
+void device_open(eg_ctx& ctx, std::int32_t device);
+void device_close(eg_ctx& ctx) noexcept;
+void device_unit_load(eg_unit_s& unit, const eg_unit_meta& meta, void* library);
+void device_unit_free(eg_unit_s& unit) noexcept;
+void device_plan_check(const eg_ctx& ctx, const eg_unit_s& unit);
+void device_launch(eg_plan_s& plan);
+void device_sync(eg_ctx& ctx);
+void device_record_begin(eg_ctx& ctx);
+void device_record_launch(eg_ctx& ctx, eg_plan_s& plan);
+void device_record_end(eg_ctx& ctx, eg_graph** out);
+bool device_graph(const eg_ctx& ctx, const eg_graph* graph);
+void device_graph_launch(eg_ctx& ctx, eg_graph* graph);
+void device_graph_free(eg_ctx& ctx, eg_graph* graph);
+void device_graphs_drop(eg_ctx& ctx) noexcept;
+void device_stream_use(eg_ctx& ctx, std::uint64_t stream);
+void device_quiet(const eg_ctx& ctx, const char* call, eg_status status, const char* why);
+/** @brief The refusal reason shared by every host-side call made while a device recording is in scope. */
+inline constexpr const char* kHostWorkInGraph = "host work inside a device graph is not written in this build of the door";
+void device_plan_cells(eg_plan_s& plan);
+void device_plan_free(eg_plan_s& plan) noexcept;
+/** @brief Device memory of @p bytes on the context's device, zeroed when @p zero (device/Device.cpp). */
+void* device_alloc(eg_ctx& ctx, std::size_t bytes, bool zero = true);
+void device_free(eg_ctx& ctx, void* data) noexcept;
+/** @brief Page-locked host memory of @p bytes, zeroed when @p zero; freed by pinned_free (a forked child makes no driver call). */
+void* pinned_alloc(eg_ctx& ctx, std::size_t bytes, bool zero);
+void pinned_free(eg_ctx& ctx, void* data) noexcept;
+void device_cell_work(eg_plan_s& plan);
+/** @brief eg_reduce and eg_copy over device planes, on the context's stream (device/Device.cpp); checked as the host's. */
+void device_reduce(eg_ctx& ctx, const eg_reduce_desc& desc);
+void device_copy(eg_ctx& ctx, eg_plane_s* src, eg_plane_s* dst);
+/** @brief Read @p bytes (a multiple of 4) of device memory at @p device into @p host, ordered after the context's queued work. */
+void device_read(eg_ctx& ctx, const void* device, void* host, std::size_t bytes);
+/** @brief The device ops of a recorded DEVICE run and its reverse (device/Device.cpp), on the context's stream:
+ *  a host-to-device write (waits), a device copy, a zeroing, one column op (``diff_columns``: 0 gather, 1 accumulate,
+ *  2 fill, 3 scatter), one launch of @p plan over its first @p count samples with the block resolved at @p of samples,
+ *  the mask count into a device counter, the canonical compensated pair of @p n values (waits), the free bytes. */
+void device_write(eg_ctx& ctx, void* device, const void* host, std::size_t bytes);
+void device_copy_bytes(eg_ctx& ctx, void* dst, const void* src, std::size_t bytes);
+void device_zero(eg_ctx& ctx, void* data, std::size_t bytes);
+void device_columns(eg_ctx& ctx, int op, void* dst, std::int64_t dst_ld, const void* src, std::int64_t src_ld,
+                    const std::int64_t* index, std::int64_t count, std::int64_t rows, unsigned bytes, std::int64_t value);
+void device_launch_prefix(eg_plan_s& plan, std::int64_t count, std::int64_t of);
+void device_mask_count(eg_ctx& ctx, const void* mask, std::int64_t n, unsigned width, std::uint64_t counter);
+void device_pair_sum(eg_ctx& ctx, bool f64, const void* in, std::int64_t n, void* hi, void* comp);
+std::int64_t device_free_bytes(eg_ctx& ctx);
+/** @brief Queue on the context's stream one forward event operation over the device planes @p planes (an EventPlanes of @p bytes wide reals). */
+void device_event_op(eg_ctx& ctx, unsigned bytes, unsigned op, const void* planes);
+/** @brief A recorded DEVICE run's active set (device/Device.cpp): queue the compaction of @p mask into the runner's device map and
+ *  count (the reorder trigger too, for a reordering set); with @p reorder and a fired trigger, the reorder of @p owned (the
+ *  mask first) and its count; returns whether it reordered. */
+bool device_active_compact(eg_ctx& ctx, eg_runner_s& runner, const void* mask, const std::vector<Owned>& owned, bool reorder);
+/** @brief Put every plane of @p owned back in sample order and recompute the map (the end of a reordered run). */
+void device_active_restore(eg_ctx& ctx, eg_runner_s& runner, const void* mask, const std::vector<Owned>& owned);
+void device_runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out);
+/** @brief A DEVICE runner's cells, live-slot map and reordering state written as eg_runner_new leaves them (stream order). */
+void device_runner_initial(eg_ctx& ctx, eg_runner_s& runner);
+void device_run(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report);
+/** @brief Refuse NOT_WRITTEN "the device group is not built" for the device-group call @p call, in a door built without it. */
+void device_group_check(const char* call);
+
+}  // namespace door
+}  // namespace eagle

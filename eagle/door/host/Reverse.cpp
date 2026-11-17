@@ -16,6 +16,7 @@
 // every copy, gather and launch queued on the context's stream, the finished
 // counter read back once per window.
 #include "eagle/door/Context.h"
+#include "eagle/door/device/Seam.h"
 #include "eagle/door/eg_unit_meta.h"
 #include "eagle/door/host/Team.h"
 #include "eagle/diff/Record.h"

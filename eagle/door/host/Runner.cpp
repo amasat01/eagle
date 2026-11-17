@@ -7,6 +7,7 @@
 // compact it every ``every`` steps and may reorder the bound planes
 // (EG_RUN_REORDER). An EG_RUN_RECORD runner runs host/Reverse.cpp's recording forward instead.
 #include "eagle/door/Context.h"
+#include "eagle/door/device/Seam.h"
 #include "eagle/door/eg_unit_meta.h"
 #include "eagle/door/host/Team.h"
 #include "eagle/policy/Launch.h"

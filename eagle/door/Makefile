@@ -8,7 +8,7 @@
 # WING_FACTS:     the cpu wing's generated raptor_facts.h (aether's linalg needs it first).
 # OUT:            the build directory (default: build/ here, git-ignored).
 #
-# Targets: lib (the library), symbols (it exports eg_* names only), test (build
+# Targets: lib (the library), symbols (it exports eg_* names only), confined (core and host reach no CUDA), test (build
 # and run the C test), all (= test), pair-<unit> (see below), pairs (all of them).
 #
 # pair-<unit>: one generated unit (its kernel text and its generated meta source) built into one unit library and
@@ -100,19 +100,19 @@ LIB := $(OUT)/libeagle_door.$(SOEXT)
 FIXTURE := $(OUT)/libfixture_unit.so
 TEST := $(OUT)/door_test
 
-.PHONY: all lib symbols test check-inputs check-cuda pairs pair-reverse pair-reverse-active pair-reverse-timed pair-reverse-ps pair-reverse-fused pair-reverse-kstep pair-reverse-kstep3 pair-reverse-kstep7 pair-reverse-kstep8 pair-reverse-reorder pair-reverse-t0 pair-reverse-counter pair-refine pair-refine-reverse pair-refine-pend pair-refine-reverse-pend pair-refine-reverse-grid pair-refine-reverse-grid-refused pair-status-grid pair-status-tangent pair-status-two device pair-device-reverse pair-device-refine pair-device-refine-reverse $(PAIR_UNITS:%=pair-%) $(PAIR_DEVICE_UNITS:%=pair-device-%)
+.PHONY: all lib symbols confined testcheck-inputs check-cuda pairs pair-reverse pair-reverse-active pair-reverse-timed pair-reverse-ps pair-reverse-fused pair-reverse-kstep pair-reverse-kstep3 pair-reverse-kstep7 pair-reverse-kstep8 pair-reverse-reorder pair-reverse-t0 pair-reverse-counter pair-refine pair-refine-reverse pair-refine-pend pair-refine-reverse-pend pair-refine-reverse-grid pair-refine-reverse-grid-refused pair-status-grid pair-status-tangent pair-status-two device pair-device-reverse pair-device-refine pair-device-refine-reverse $(PAIR_UNITS:%=pair-%) $(PAIR_DEVICE_UNITS:%=pair-device-%)
 all: test
 
 check-inputs:
 	@test -n "$(AETHER_INCLUDE)" || { echo "set AETHER_INCLUDE"; exit 1; }
 	@test -f "$(WING_FACTS)" || { echo "set WING_FACTS to the wing's raptor_facts.h"; exit 1; }
 
-$(OUT)/%.o: %.cpp Context.h eg_door.h eg_unit_meta.h host/Team.h host/Ops.h host/Segment.h | check-inputs
+$(OUT)/%.o: %.cpp Context.h device/Seam.h eg_door.h eg_unit_meta.h host/Team.h host/Ops.h host/Segment.h | check-inputs
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS_DOOR) -c $< -o $@
 
 # The device group: built with the CUDA headers when CUDA is set, else its host-only refusals.
-$(OUT)/device/Device.o: device/Device.cpp device/Loop.h Context.h eg_door.h eg_unit_meta.h | check-inputs
+$(OUT)/device/Device.o: device/Device.cpp device/Loop.h Context.h device/Seam.h eg_door.h eg_unit_meta.h | check-inputs
 	@mkdir -p $(dir $@)
 	$(CXX) $(if $(CUDA),$(CXXFLAGS_DEVICE),$(CXXFLAGS_DOOR)) -c $< -o $@
 
@@ -138,6 +138,25 @@ symbols: $(LIB)
 	if [ -n "$$extra" ]; then echo "FAIL  exports beyond eg_*:"; echo "$$extra"; exit 1; fi; \
 	echo "PASS  $(LIB) exports $$($(NM_DEFINED) $(LIB) | grep -c ' $(SYM_PREFIX)eg_') eg_* names and nothing else"
 
+# Confinement: every object and translation unit outside device/ is free of CUDA, and reaches the device group only
+# through device/Seam.h. A header counts as CUDA by its file name (cuda*, cufft*, cublas*, nvrtc*) or by sitting in a
+# toolkit include directory: a directory named cuda in a path, like aether's host-readable backend/cuda, does not.
+# A failure names the object and the symbol, or the translation unit and the header.
+CORE_SRC := $(filter-out device/%,$(SRC))
+CORE_OBJ := $(CORE_SRC:%.cpp=$(OUT)/%.o)
+confined: $(CORE_OBJ)
+	@fail=0; \
+	for o in $(CORE_OBJ); do \
+	  bad=$$(nm -u $$o | awk '{print $$NF}' | grep -E '^_?_?(cu|cuda|nvrtc|cufft|cublas)' || true); \
+	  if [ -n "$$bad" ]; then echo "FAIL  $$o: undefined CUDA symbol: $$bad"; fail=1; fi; \
+	done; \
+	for s in $(CORE_SRC); do \
+	  bad=$$($(CXX) $(CXXFLAGS_DOOR) -M $$s | tr ' ' '\n' | grep -iE '/(cuda|cufft|cublas|nvrtc)[^/]*$$|/cuda[-0-9.]*/include/|/door/device/' | grep -v '/door/device/Seam\.h$$' || true); \
+	  if [ -n "$$bad" ]; then echo "FAIL  $$s: includes: $$bad"; fail=1; fi; \
+	done; \
+	if [ $$fail -ne 0 ]; then exit 1; fi; \
+	echo "PASS  $(words $(CORE_OBJ)) core and host objects: no CUDA symbol or header; the device group only through device/Seam.h"
+
 # The fixture unit library and three variants of its size block (FIXTURE_BLOCK
 # in test/fixture_unit.c): a wrong sizeof(ScalarHandle), none exported, the v1 tag.
 FIXTURE_BAD := $(OUT)/libfixture_wrong_size.so $(OUT)/libfixture_no_block.so $(OUT)/libfixture_v1_tag.so
@@ -161,7 +180,7 @@ $(REV_FIXTURE): test/fixture_reverse.c eg_door.h eg_unit_meta.h
 $(REV_TEST): test/reverse_test.c test/pair_util.h eg_door.h $(LIB)
 	$(CC) $(CFLAGS_C) -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door -Wl,-rpath,$(OUT) -lm -pthread
 
-test: symbols $(FIXTURE) $(FIXTURE_BAD) $(TEST) $(REV_FIXTURE) $(REV_TEST)
+test: symbols confined $(FIXTURE) $(FIXTURE_BAD) $(TEST) $(REV_FIXTURE) $(REV_TEST)
 	$(TEST) $(FIXTURE) $(FIXTURE_BAD)
 	$(REV_TEST) $(REV_FIXTURE)
 
