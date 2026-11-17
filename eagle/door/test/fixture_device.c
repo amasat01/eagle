@@ -200,11 +200,20 @@ static const struct eg_unit_finish auto_finish = {
 AUTO_UNIT(unit_dauto, "dauto", 0xDB, "dauto");
 AUTO_UNIT(unit_dautorange, "dautorange", 0xDC, "dautorange");
 
+SLOT(slot_imap, EG_ROLE_LOOKUP, EG_DTYPE_INT32, 0, NULL, "index_map");
+static const struct eg_unit_slot* const lookup_slots[] = { &slot_y, &slot_x, &slot_imap, &slot_icount };
+static const struct eg_unit_body lookup_body = {
+    .struct_size = sizeof(struct eg_unit_body), .access = EG_ACCESS_SAMPLE_LOCAL, .n_slots = 4, .slots = lookup_slots };
+static const struct eg_unit_launch launch_lookup = {
+    .struct_size = sizeof(struct eg_unit_launch), .active_map_slot = -1, .active_count_slot = -1, .index_map_slot = 2,
+    .index_count_slot = 3, .group = 1 };
+MADE_UNIT(unit_dlookup, "dlookup", 0xDD, "dlookup", lookup_body, launch_lookup);
+
 static const struct eg_unit_meta* const units[] = { &unit_axpy, &unit_axpy64, &unit_boxdev, &unit_banded, &unit_nofn,
-                                                    &unit_noimg, &unit_dcells, &unit_dkeyed, &unit_dkeyednf, &unit_dkeyedh, &unit_fat129, &unit_ptx129, &unit_sass70, &unit_dprefix, &unit_dcount, &unit_dcount1, &unit_dcount1a, &unit_dauto, &unit_dautorange };
+                                                    &unit_noimg, &unit_dcells, &unit_dkeyed, &unit_dkeyednf, &unit_dkeyedh, &unit_fat129, &unit_ptx129, &unit_sass70, &unit_dprefix, &unit_dcount, &unit_dcount1, &unit_dcount1a, &unit_dauto, &unit_dautorange, &unit_dlookup };
 
 static const struct eg_library_meta library = {
-    .struct_size = sizeof(struct eg_library_meta), .schema_major = EG_META_SCHEMA_MAJOR, .n_units = 19, .units = units,
+    .struct_size = sizeof(struct eg_library_meta), .schema_major = EG_META_SCHEMA_MAJOR, .n_units = 20, .units = units,
 };
 
 __attribute__((visibility("default"))) const struct eg_library_meta* eg_unit_library_meta(void) { return &library; }

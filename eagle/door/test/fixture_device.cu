@@ -181,3 +181,15 @@ extern "C" __global__ void dauto_persist(DAUTO_SLOTS, long long base, long long 
     }
     atomicMax(steps, 1u);
 }
+
+// dlookup: the first *cnt lanes (a uint32 cell the caller owns) write y at the sample map[lane]: y[s] = 2 x[s] + 1.
+extern "C" __global__ void dlookup(ScalarHandle y, ScalarHandle x, ScalarHandle map, ScalarHandle cnt, long long base,
+                                   long long count, long long nSamples) {
+    const long long flat = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (flat >= count) return;
+    const long long i = base + flat;
+    (void)nSamples;
+    if (i >= static_cast<long long>(*static_cast<const unsigned*>(cnt.data))) return;
+    const int s = static_cast<const int*>(map.data)[i];
+    static_cast<double*>(y.data)[s] = 2.0 * static_cast<const double*>(x.data)[s] + 1.0;
+}

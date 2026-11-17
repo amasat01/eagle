@@ -998,6 +998,90 @@ static void fast_entries(eg_ctx* ctx, const char* dev_lib) {
     eg_unit_free(ctx, ranged);
 }
 
+/* A device plane of @p n 32-bit words of dtype @p code (kDLInt or kDLUInt). */
+static eg_plane* wrap_word(eg_ctx* ctx, struct tensor* t, void* data, int64_t n, uint8_t code) {
+    memset(t, 0, sizeof(*t));
+    t->shape[0] = n;
+    t->managed.version.major = DLPACK_MAJOR_VERSION;
+    t->managed.dl_tensor.data = data;
+    t->managed.dl_tensor.device.device_type = kDLCUDA;
+    t->managed.dl_tensor.ndim = 1;
+    t->managed.dl_tensor.dtype.code = code;
+    t->managed.dl_tensor.dtype.bits = 32;
+    t->managed.dl_tensor.dtype.lanes = 1;
+    t->managed.dl_tensor.shape = t->shape;
+    eg_plane* p = NULL;
+    return eg_plane_wrap(ctx, &t->managed, &p) == EG_OK ? p : NULL;
+}
+
+/* A lookup set on the DEVICE: lane i < *count writes the sample map[i]. A plain launch writes exactly the mapped samples (plain-C
+ * oracle over the map); a recorded graph replays with a smaller count the caller writes into its own plane (no re-record);
+ * eg_set_count is refused (the count is the caller's plane) and a count above the map's entries is refused at launch. */
+static void lookup_device(eg_ctx* ctx, const char* dev_lib) {
+    enum { SM = 64, ENTRIES = 16 };
+    double x[SM], y0[SM], want[SM], got[SM];
+    int32_t map[ENTRIES];
+    eg_unit* unit = NULL;
+    check(load(ctx, dev_lib, "dlookup", 0xDD, &unit) == EG_OK, "eg_unit_load dlookup (a lookup set on the device)");
+    if (unit == NULL) return;
+    for (int i = 0; i < SM; ++i) x[i] = (double)i * 0.5 - 3.0, y0[i] = -1.0;
+    for (int i = 0; i < ENTRIES; ++i) map[i] = (i * 5 + 3) % SM;
+    double *dy = dev_doubles(y0, SM), *dx = dev_doubles(x, SM);
+    int32_t* dm = NULL;
+    uint32_t* dc = NULL;
+    cudaMalloc((void**)&dm, sizeof(map));
+    cudaMalloc((void**)&dc, sizeof(uint32_t));
+    cudaMemcpy(dm, map, sizeof(map), cudaMemcpyHostToDevice);
+    struct tensor ty, tx, tm, tc;
+    eg_plane *py = wrap(ctx, &ty, dy, 1, SM, 0, 1, 0), *px = wrap(ctx, &tx, dx, 1, SM, 0, 1, 0);
+    eg_plane *pm = wrap_word(ctx, &tm, dm, ENTRIES, kDLInt), *pc = wrap_word(ctx, &tc, dc, 1, kDLUInt);
+    int ok = py && px && pm && pc;
+    eg_plan* p = NULL;
+    const int32_t slots[4] = { 0, 1, 2, 3 };
+    eg_plane* planes[4] = { py, px, pm, pc };
+    ok = ok && plan_n(ctx, unit, EG_STRUCTURE_DEVICE, SM, 0, NULL, NULL, &p) == EG_OK && bind_planes(ctx, p, 4, slots, planes) == EG_OK;
+    uint32_t count = ENTRIES;
+    cudaMemcpy(dc, &count, sizeof(count), cudaMemcpyHostToDevice);
+    ok = ok && eg_launch(ctx, p, NULL) == EG_OK && eg_sync(ctx) == EG_OK;
+    cudaMemcpy(got, dy, sizeof(got), cudaMemcpyDeviceToHost);
+    for (int i = 0; i < SM; ++i) want[i] = y0[i];
+    for (int i = 0; i < ENTRIES; ++i) want[map[i]] = 2.0 * x[map[i]] + 1.0;
+    ok = ok && memcmp(got, want, sizeof(got)) == 0;
+    check(ok, "a DEVICE lookup set: a plain launch writes exactly the mapped samples, the others stay untouched (bitwise)");
+    for (int i = 0; i < SM; ++i) x[i] = -x[i] - 7.0, y0[i] = -1.0;
+    cudaMemcpy(dx, x, sizeof(x), cudaMemcpyHostToDevice);
+    cudaMemcpy(dy, y0, sizeof(y0), cudaMemcpyHostToDevice);
+    eg_graph* g = NULL;
+    ok = eg_record_begin(ctx) == EG_OK && eg_launch(ctx, p, NULL) == EG_OK && eg_record_end(ctx, &g) == EG_OK;
+    ok = ok && eg_graph_launch(ctx, g) == EG_OK && eg_sync(ctx) == EG_OK;
+    cudaMemcpy(got, dy, sizeof(got), cudaMemcpyDeviceToHost);
+    for (int i = 0; i < SM; ++i) want[i] = y0[i];
+    for (int i = 0; i < ENTRIES; ++i) want[map[i]] = 2.0 * x[map[i]] + 1.0;
+    ok = ok && memcmp(got, want, sizeof(got)) == 0;
+    for (int i = 0; i < SM; ++i) x[i] += 100.0;
+    cudaMemcpy(dx, x, sizeof(x), cudaMemcpyHostToDevice);
+    count = 6;
+    cudaMemcpy(dc, &count, sizeof(count), cudaMemcpyHostToDevice);
+    ok = ok && eg_graph_launch(ctx, g) == EG_OK && eg_sync(ctx) == EG_OK;
+    cudaMemcpy(got, dy, sizeof(got), cudaMemcpyDeviceToHost);
+    for (int i = 0; i < (int)count; ++i) want[map[i]] = 2.0 * x[map[i]] + 1.0;
+    ok = ok && memcmp(got, want, sizeof(got)) == 0;
+    if (!ok) printf("      sample %d: %.17g (want %.17g)\n", map[0], got[map[0]], want[map[0]]);
+    check(ok, "a DEVICE lookup set recorded once: after the caller writes a smaller count into its plane, the replay refreshes the first entries' samples and the rest keep theirs (bitwise)");
+    ok = refused(eg_set_count(ctx, p, 1), EG_BAD_REQUEST, ctx, "is a lookup set: its count is the caller's plane, bind it again");
+    count = ENTRIES + 1;
+    cudaMemcpy(dc, &count, sizeof(count), cudaMemcpyHostToDevice);
+    ok = ok && refused(eg_launch(ctx, p, NULL), EG_BAD_REQUEST, ctx, "above the map's 16 entries");
+    check(ok, "a DEVICE lookup set: eg_set_count refused BAD_REQUEST (the count is the caller's plane), a count above the map's entries refused at launch by reason");
+    if (g) eg_graph_free(ctx, g);
+    if (p) eg_plan_free(ctx, p);
+    eg_plane_free(ctx, py);
+    eg_plane_free(ctx, px);
+    eg_plane_free(ctx, pm);
+    eg_plane_free(ctx, pc);
+    eg_unit_free(ctx, unit);
+}
+
 int main(int argc, char** argv) {
     if (argc != 3) {
         fprintf(stderr, "usage: %s <libfixture_device.so> <libfixture_unit.so>\n", argv[0]);
@@ -1182,6 +1266,7 @@ int main(int argc, char** argv) {
 
     made_planes(ctx, dev_lib);
     set_count_device(ctx, dev_lib);
+    lookup_device(ctx, dev_lib);
     figures_device(ctx, dev_lib);
     reset_device(ctx, dev_lib);
     fast_entries(ctx, dev_lib);
