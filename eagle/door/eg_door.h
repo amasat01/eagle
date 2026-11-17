@@ -561,6 +561,21 @@ eg_status eg_bind(eg_ctx* ctx, eg_plan* plan, const struct eg_bind_desc* desc);
 eg_status eg_clear(eg_ctx* ctx, eg_plan* plan, int32_t n_slots, const int32_t* slots);
 
 /**
+ * Write ``m`` into the bound index count plane of a PREFIX set (an index
+ * count slot with no map slot), in the context's stream order with no host
+ * wait: on a DEVICE plan the write is queued behind the work already issued,
+ * on a host plan it is done before return. ``m == 0`` is legal and runs
+ * nothing; the capacity is the sample count. A lookup set's count is the
+ * caller's own plane: BAD_REQUEST, bind it again. A call that fails changes
+ * nothing. Call it between launches or replays, not while recording.
+ * Replaces: ``_set_count``, ``_index_set.write_count``.
+ * Calls today: nothing compiled (Python writes the plane).
+ * Status: OK; BAD_REQUEST (a unit with no index count slot, a lookup set, the
+ * count slot unbound, ``m`` above the sample count, a call while recording).
+ */
+eg_status eg_set_count(eg_ctx* ctx, eg_plan* plan, uint32_t m);
+
+/**
  * Launch the bound plan once over each of its partitions. ``*tiles`` gets the
  * host tiles run (0 for DEVICE).
  * Replaces: ``BoundPlan.launch`` / ``Plan.run`` / ``exec.HostTeam.run``.

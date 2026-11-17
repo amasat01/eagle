@@ -2340,6 +2340,98 @@ static void check_clear(eg_ctx* ctx, eg_unit* axpb) {
     eg_unit_free(ctx, keyed);
 }
 
+/* eg_set_count: a prefix set and a lookup set; the lanes below the count take the new values, the others keep theirs. */
+static void check_set_count(eg_ctx* ctx, eg_unit* axpb) {
+    enum { SM = 64, SCAP = 16 };
+    static double y[SM], x[SM], want[SM];
+    static int32_t map[SCAP];
+    static uint32_t count;
+    struct tensor ty, tx, tm, tc;
+    eg_unit *up = NULL, *ul = NULL;
+    check(load(ctx, "prefix", 0x92, &up) == EG_OK && load(ctx, "lanes", 0x91, &ul) == EG_OK, "eg_unit_load prefix and lanes for eg_set_count");
+    if (up == NULL || ul == NULL) return;
+    for (int i = 0; i < SM; ++i) x[i] = (double)i * 0.5 - 3.0;
+    for (int i = 0; i < SCAP; ++i) map[i] = (i * 5 + 3) % SM;
+    eg_plane *py = wrap_1d(ctx, &ty, y, SM, kDLFloat, 64), *px = wrap_1d(ctx, &tx, x, SM, kDLFloat, 64),
+             *pm = wrap_1d(ctx, &tm, map, SCAP, kDLInt, 32), *pc = wrap_1d(ctx, &tc, &count, 1, kDLUInt, 32);
+    if (!(py && px && pm && pc)) {
+        check(0, "eg_set_count planes wrapped");
+        return;
+    }
+    const eg_structure structures[2] = { EG_STRUCTURE_HOST_SERIAL, EG_STRUCTURE_HOST_TEAM };
+    int all = 1;
+    for (int si = 0; si < 2; ++si) {
+        eg_plan* p = NULL;
+        const int32_t slots[3] = { 0, 1, 2 };
+        eg_plane* planes[3] = { py, px, pc };
+        struct eg_bind_desc bd;
+        memset(&bd, 0, sizeof(bd));
+        bd.struct_size = sizeof(bd);
+        bd.n_planes = 3;
+        bd.plane_slots = slots;
+        bd.planes = planes;
+        all &= plan(ctx, up, structures[si], SM, 0, NULL, NULL, &p) == EG_OK && eg_bind(ctx, p, &bd) == EG_OK;
+        for (int i = 0; i < SM; ++i) y[i] = -1.0;
+        all &= eg_set_count(ctx, p, SM) == EG_OK && count == SM && eg_launch(ctx, p, NULL) == EG_OK;
+        for (int i = 0; i < SM; ++i) want[i] = 2.0 * x[i] + 1.0;
+        all &= memcmp(y, want, sizeof(y)) == 0;
+        for (int i = 0; i < SM; ++i) x[i] = -x[i] - 7.0;
+        all &= eg_set_count(ctx, p, 21) == EG_OK && count == 21 && eg_launch(ctx, p, NULL) == EG_OK;
+        for (int i = 0; i < 21; ++i) want[i] = 2.0 * x[i] + 1.0;    /* the lanes from 21 keep the first launch's values */
+        all &= memcmp(y, want, sizeof(y)) == 0;
+        for (int i = 0; i < SM; ++i) x[i] += 100.0;
+        all &= eg_set_count(ctx, p, 0) == EG_OK && count == 0 && eg_launch(ctx, p, NULL) == EG_OK && memcmp(y, want, sizeof(y)) == 0;
+        all &= eg_set_count(ctx, p, SM + 1) == EG_BAD_REQUEST && reason_has(ctx, "above the sample count's") && count == 0;
+        eg_plan_free(ctx, p);
+        for (int i = 0; i < SM; ++i) x[i] = (double)i * 0.5 - 3.0;
+    }
+    check(all, "eg_set_count on a prefix set: lanes below the count take the new values, the others keep theirs bitwise, 0 runs nothing, "
+               "a count above the sample count is refused BAD_REQUEST and leaves the cell (SERIAL and TEAM)");
+    {
+        eg_plan *p = NULL, *q = NULL, *r = NULL, *l = NULL;
+        const int32_t s_part[3] = { 0, 1, 3 }, s_lane[4] = { 0, 1, 2, 3 };
+        eg_plane* part[3] = { py, px, pc };
+        eg_plane* lane[4] = { py, px, pm, pc };
+        struct eg_bind_desc bd;
+        memset(&bd, 0, sizeof(bd));
+        bd.struct_size = sizeof(bd);
+        bd.n_planes = 3;
+        bd.plane_slots = s_part;
+        bd.planes = part;
+        count = 5;
+        int ok = plan(ctx, ul, EG_STRUCTURE_HOST_TEAM, SM, 0, NULL, NULL, &q) == EG_OK;
+        ok = ok && eg_set_count(ctx, q, 1) == EG_BAD_REQUEST && reason_has(ctx, "is a lookup set");
+        bd.n_planes = 4;
+        bd.plane_slots = s_lane;
+        bd.planes = lane;
+        ok = ok && plan(ctx, ul, EG_STRUCTURE_HOST_TEAM, SM, 0, NULL, NULL, &l) == EG_OK && eg_bind(ctx, l, &bd) == EG_OK;
+        ok = ok && eg_set_count(ctx, l, 1) == EG_BAD_REQUEST && reason_has(ctx, "is a lookup set: its count is the caller's plane, bind it again") && count == 5;
+        const int32_t s_p[3] = { 0, 1, 2 };
+        bd.n_planes = 3;
+        bd.plane_slots = s_p;
+        bd.planes = part;
+        ok = ok && plan(ctx, up, EG_STRUCTURE_HOST_SERIAL, SM, 0, NULL, NULL, &p) == EG_OK;
+        ok = ok && eg_set_count(ctx, p, 1) == EG_BAD_REQUEST && reason_has(ctx, "('index_count') is unbound");
+        ok = ok && plan(ctx, axpb, EG_STRUCTURE_HOST_SERIAL, SM, 0, NULL, NULL, &r) == EG_OK;
+        ok = ok && eg_set_count(ctx, r, 1) == EG_BAD_REQUEST && reason_has(ctx, "has no index count slot");
+        ok = ok && eg_bind(ctx, p, &bd) == EG_OK && eg_record_begin(ctx) == EG_OK && eg_set_count(ctx, p, 1) == EG_BAD_REQUEST && reason_has(ctx, "eg_set_count while recording");
+        eg_graph* g = NULL;
+        ok = ok && eg_record_end(ctx, &g) == EG_OK && eg_graph_free(ctx, g) == EG_OK;
+        check(ok, "eg_set_count: a lookup set (bound or not), a unit with no index count slot, an unbound count slot and a call while "
+                  "recording each refused BAD_REQUEST by reason");
+        eg_plan_free(ctx, p);
+        eg_plan_free(ctx, q);
+        eg_plan_free(ctx, r);
+        eg_plan_free(ctx, l);
+    }
+    eg_plane_free(ctx, py);
+    eg_plane_free(ctx, px);
+    eg_plane_free(ctx, pm);
+    eg_plane_free(ctx, pc);
+    eg_unit_free(ctx, up);
+    eg_unit_free(ctx, ul);
+}
+
 int main(int argc, char** argv) {
     if (argc != 5) {
         fprintf(stderr, "usage: %s <fixture> <wrong size> <no size block> <v1 tag>\n", argv[0]);
@@ -2379,6 +2471,7 @@ int main(int argc, char** argv) {
     check_box(ctx);
     check_made(ctx);
     check_clear(ctx, unit);
+    check_set_count(ctx, unit);
 
     check_reduce(ctx);
     check_conditionals(ctx);

@@ -107,6 +107,10 @@ EG_EXPORT eg_status eg_clear(eg_ctx* ctx, eg_plan* plan, int32_t n_slots, const 
     return door::call(ctx, [&](eg_ctx& c) { door::clear(c, plan, n_slots, slots); });
 }
 
+EG_EXPORT eg_status eg_set_count(eg_ctx* ctx, eg_plan* plan, uint32_t m) {
+    return door::call(ctx, [&](eg_ctx& c) { door::set_count(c, plan, m); });
+}
+
 EG_EXPORT eg_status eg_launch(eg_ctx* ctx, eg_plan* plan, uint64_t* tiles) {
     return door::call(ctx, [&](eg_ctx& c) { door::launch(c, plan, tiles); });
 }

@@ -64,3 +64,14 @@ extern "C" __global__ void dkeyed__fold_acc(ScalarHandle acc, ScalarHandle comp,
     static_cast<double*>(acc.data)[i] += static_cast<double*>(comp.data)[i];
     static_cast<double*>(comp.data)[i] = 0.125;
 }
+
+// dprefix: the first *cnt lanes (the live prefix count, a uint32 cell) hold y = 2 x + 1.
+extern "C" __global__ void dprefix(ScalarHandle y, ScalarHandle x, ScalarHandle cnt, long long base, long long count,
+                                   long long nSamples) {
+    const long long flat = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (flat >= count) return;
+    const long long i = base + flat;
+    (void)nSamples;
+    if (i >= static_cast<long long>(*static_cast<const unsigned*>(cnt.data))) return;
+    static_cast<double*>(y.data)[i] = 2.0 * static_cast<const double*>(x.data)[i] + 1.0;
+}

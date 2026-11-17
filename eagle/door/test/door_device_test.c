@@ -295,6 +295,65 @@ static eg_status bind(eg_ctx* ctx, eg_plan* p, eg_plane* y, eg_plane* x, eg_plan
     return eg_bind(ctx, p, &b);
 }
 
+/* eg_set_count on a DEVICE prefix set: the write is queued on the stream (no sync between it and the launches); the lanes below
+ * the count take the new values and the rest keep theirs, against the plain-C values bitwise. */
+static void set_count_device(eg_ctx* ctx, const char* dev_lib) {
+    enum { SM = 64 };
+    double x[SM], y0[SM], want[SM], got[SM];
+    eg_unit* unit = NULL;
+    check(load(ctx, dev_lib, "dprefix", 0xD6, &unit) == EG_OK, "eg_unit_load dprefix (a prefix set on the device)");
+    if (unit == NULL) return;
+    for (int i = 0; i < SM; ++i) x[i] = (double)i * 0.5 - 3.0, y0[i] = -1.0;
+    double *dy = dev_doubles(y0, SM), *dx = dev_doubles(x, SM);
+    uint32_t* dc = NULL;
+    cudaMalloc((void**)&dc, sizeof(uint32_t));
+    struct tensor ty, tx, tc;
+    eg_plane *py = wrap(ctx, &ty, dy, 1, SM, 0, 1, 0), *px = wrap(ctx, &tx, dx, 1, SM, 0, 1, 0);
+    memset(&tc, 0, sizeof(tc));
+    tc.shape[0] = 1;
+    tc.managed.version.major = DLPACK_MAJOR_VERSION;
+    tc.managed.dl_tensor.data = dc;
+    tc.managed.dl_tensor.device.device_type = kDLCUDA;
+    tc.managed.dl_tensor.ndim = 1;
+    tc.managed.dl_tensor.dtype.code = kDLUInt;
+    tc.managed.dl_tensor.dtype.bits = 32;
+    tc.managed.dl_tensor.dtype.lanes = 1;
+    tc.managed.dl_tensor.shape = tc.shape;
+    eg_plane* pc = NULL;
+    int ok = py && px && eg_plane_wrap(ctx, &tc.managed, &pc) == EG_OK;
+    eg_plan* p = NULL;
+    const int32_t slots[3] = { 0, 1, 2 };
+    eg_plane* planes[3] = { py, px, pc };
+    ok = ok && plan_n(ctx, unit, EG_STRUCTURE_DEVICE, SM, 0, NULL, NULL, &p) == EG_OK && bind_planes(ctx, p, 3, slots, planes) == EG_OK;
+    uint32_t cell = 99;
+    ok = ok && eg_set_count(ctx, p, SM) == EG_OK && eg_launch(ctx, p, NULL) == EG_OK && eg_sync(ctx) == EG_OK;
+    cudaMemcpy(got, dy, sizeof(got), cudaMemcpyDeviceToHost);
+    for (int i = 0; i < SM; ++i) want[i] = 2.0 * x[i] + 1.0;
+    ok = ok && memcmp(got, want, sizeof(got)) == 0;
+    for (int i = 0; i < SM; ++i) x[i] = -x[i] - 7.0;
+    cudaMemcpy(dx, x, sizeof(x), cudaMemcpyHostToDevice);
+    ok = ok && eg_set_count(ctx, p, 21) == EG_OK && eg_launch(ctx, p, NULL) == EG_OK && eg_sync(ctx) == EG_OK;
+    cudaMemcpy(got, dy, sizeof(got), cudaMemcpyDeviceToHost);
+    cudaMemcpy(&cell, dc, sizeof(cell), cudaMemcpyDeviceToHost);
+    for (int i = 0; i < 21; ++i) want[i] = 2.0 * x[i] + 1.0;
+    ok = ok && cell == 21 && memcmp(got, want, sizeof(got)) == 0;
+    for (int i = 0; i < SM; ++i) x[i] += 100.0;
+    cudaMemcpy(dx, x, sizeof(x), cudaMemcpyHostToDevice);
+    ok = ok && eg_set_count(ctx, p, 0) == EG_OK && eg_launch(ctx, p, NULL) == EG_OK && eg_sync(ctx) == EG_OK;
+    cudaMemcpy(got, dy, sizeof(got), cudaMemcpyDeviceToHost);
+    ok = ok && memcmp(got, want, sizeof(got)) == 0;
+    if (!ok) printf("      lane 0 %.17g (want %.17g), lane 40 %.17g (want %.17g)\n", got[0], want[0], got[40], want[40]);
+    check(ok, "eg_set_count on a DEVICE prefix set: lanes below the count take the new values, the others keep theirs bitwise, 0 runs nothing");
+    ok = refused(eg_set_count(ctx, p, SM + 1), EG_BAD_REQUEST, ctx, "above the sample count's 64 entries");
+    cudaMemcpy(&cell, dc, sizeof(cell), cudaMemcpyDeviceToHost);
+    check(ok && cell == 0, "eg_set_count above the capacity on a DEVICE plan: refused BAD_REQUEST, the cell unchanged");
+    if (p) eg_plan_free(ctx, p);
+    eg_plane_free(ctx, py);
+    eg_plane_free(ctx, px);
+    eg_plane_free(ctx, pc);
+    eg_unit_free(ctx, unit);
+}
+
 int main(int argc, char** argv) {
     if (argc != 3) {
         fprintf(stderr, "usage: %s <libfixture_device.so> <libfixture_unit.so>\n", argv[0]);
@@ -470,6 +529,7 @@ int main(int argc, char** argv) {
     }
 
     made_planes(ctx, dev_lib);
+    set_count_device(ctx, dev_lib);
 
     /* The host still runs on a device context. */
     static double hx[N], hyv[N];

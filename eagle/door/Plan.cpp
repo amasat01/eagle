@@ -198,7 +198,7 @@ void check_index_set(const eg_plan_s& plan, const eg_bind_desc& d) {
     std::vector<bool> seen(static_cast<std::size_t>(plan.n_samples), false);
     for (std::uint64_t i = 0; i < held; ++i) {
         const std::int64_t lane = mt.dtype.bits == 64 ? reinterpret_cast<const std::int64_t*>(data)[i]
-                                                       : reinterpret_cast<const std::int32_t*>(data)[i];
+                                             : reinterpret_cast<const std::int32_t*>(data)[i];
         if (lane < 0 || lane >= plan.n_samples)
             refuse(EG_BAD_REQUEST, "the index set: map[" + std::to_string(i) + "] = " + std::to_string(lane) +
                    " is outside the dense lanes [0, " + std::to_string(plan.n_samples) + ")");
@@ -674,6 +674,27 @@ void clear(eg_ctx& ctx, eg_plan_s* plan, std::int32_t n_slots, const std::int32_
         else std::memset(data, 0, bytes);
         renew_owned(ctx, *plan, slots[i], t);
     }
+}
+
+/** @brief eg_set_count: write @p m into the bound index count plane, in the stream order of @p ctx. */
+void set_count(eg_ctx& ctx, eg_plan_s* plan, std::uint32_t m) {
+    check_handle(ctx.plans, plan, "plan");
+    if (ctx.rec != nullptr || ctx.dev_rec != nullptr)
+        refuse(EG_BAD_REQUEST, "eg_set_count while recording (eg_record_begin .. eg_record_end): set the count between replays");
+    const eg_unit_s& u = *plan->unit;
+    if (u.index_count_slot < 0) refuse(EG_BAD_REQUEST, "unit '" + u.name + "' has no index count slot");
+    if (u.index_map_slot >= 0)
+        refuse(EG_BAD_REQUEST, "unit '" + u.name + "' is a lookup set: its count is the caller's plane, bind it again");
+    const eg_plane_s* count = plan->bindings[static_cast<std::size_t>(u.index_count_slot)].plane;
+    if (count == nullptr) refuse(EG_BAD_REQUEST, "the index count slot ('" + u.slots[static_cast<std::size_t>(u.index_count_slot)].name + "') is unbound");
+    const std::uint64_t capacity = static_cast<std::uint64_t>(plan->n_samples);
+    if (m > capacity)
+        refuse(EG_BAD_REQUEST, "the index count " + std::to_string(m) + " is above the sample count's " + std::to_string(capacity) + " entries");
+    const bool device = plan->structure == EG_STRUCTURE_DEVICE;
+    const DLTensor& c = count->tensor->dl_tensor;
+    void* at = static_cast<char*>(c.data) + c.byte_offset;
+    if (device) device_write(ctx, at, &m, sizeof(m));
+    else std::memcpy(at, &m, sizeof(m));
 }
 
 /** @brief eg_bind: check every entry, then replace the named slots. */
