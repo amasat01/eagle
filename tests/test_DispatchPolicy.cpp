@@ -135,6 +135,30 @@ TEST(DispatchPolicy, DecisionTable)
     }
 }
 
+TEST(DispatchPolicy, WeightRowsAreFoundByClassAndAnUnknownClassTakesTheBuiltInRow)
+{
+    EXPECT_EQ(weightRowIndex(Target::Host, 1, 6, 85), 1) << "the Xeon W-2125 class has its own row";
+    EXPECT_EQ(weightRowIndex(Target::Host, 1, 6, 86), -1) << "a class with no row takes the built-in row, not the nearest";
+    EXPECT_EQ(weightRowIndex(Target::Host, 2, 6, 85), -1) << "the vendor is part of the class";
+    EXPECT_EQ(weightRowIndex(Target::Device, 6, 1, 0), -1);
+    EXPECT_EQ(weightRowIndex(Target::Host, 0, 0, 0), -1) << "the built-in row is not looked up by its zero class";
+    for (const Target t : { Target::Host, Target::Device }) {
+        const WeightRow& b = builtinWeightRow(t);
+        EXPECT_EQ(b.vendor + b.family + b.model, 0);
+    }
+}
+
+TEST(DispatchPolicy, TheRowsScaleTheHostRatesByThePhysicalCores)
+{
+    const WeightRow& row = WEIGHT_ROWS[weightRowIndex(Target::Host, 1, 6, 85)];
+    const Weights four = weightsOfRow(row, Machine{ 4, 12.7e6 }), eight = weightsOfRow(row, Machine{ 8, 12.7e6 });
+    EXPECT_DOUBLE_EQ(four.laneRate, 24.5e9) << "4 cores of the fitted machine reproduce its all-core rate";
+    EXPECT_DOUBLE_EQ(four.chainSeconds, 0.23e-9);
+    EXPECT_DOUBLE_EQ(eight.laneRate, 2 * four.laneRate);
+    EXPECT_DOUBLE_EQ(eight.chainSeconds, four.chainSeconds / 2);
+    EXPECT_DOUBLE_EQ(eight.cacheBytes, 12.7e6) << "the cache is the machine's, not the row's";
+}
+
 TEST(DispatchPolicy, VectorisedFusedHostCostIsMixIndependent)
 {
     const Weights w = defaultWeights(Target::Host);

@@ -10,7 +10,9 @@
 #pragma once
 
 #include "eagle/door/eg_door.h"
+#include "eagle/cpu/DeviceProps.h"
 #include "eagle/exec/Partition.h"
+#include "eagle/policy/Dispatch.h"
 #include "plugin/dlpack.h"
 #include "plugin/gref_layout.h"
 
@@ -489,6 +491,7 @@ struct DeviceState {
     std::uint64_t stream = 0;                 ///< the stream in scope (a CUstream): eagle's own or the caller's (eg_stream_use)
     std::uint64_t own_stream = 0;             ///< eagle's own stream, destroyed with the context
     int sms = 0, regs_per_sm = 0, smem_per_sm = 0, threads_per_sm = 0, cc_major = 0, cc_minor = 0;
+    int clock_khz = 0, memory_clock_khz = 0, bus_bits = 0, l2_bytes = 0;   ///< the device's clocks, memory bus and L2: what its peak rates are derived from
     int fp64_ratio = 1;                       ///< FP32:FP64 throughput ratio (1 when not reported)
     std::unordered_map<void*, std::uint64_t> alloc_stream;   ///< each live device_alloc block -> the stream it was allocated on
     std::unordered_map<std::uint64_t, std::uint64_t> gemm_handles;   ///< stream -> its cuBLAS handle, made when a gemm unit is planned (device/Gemm.cpp)
@@ -552,6 +555,9 @@ struct eg_ctx_s {
     eagle::door::DeviceState dev;             ///< EG_CTX_DEVICE: the device and its stream
     eagle::door::DeviceRecording* dev_rec = nullptr;              ///< a device context between eg_record_begin and eg_record_end
     std::unordered_set<eagle::door::DeviceGraph*> dev_graphs;     ///< the device graphs eg_record_end made
+    eagle::policy::Weights weights;           ///< the dispatch rule's weights: the row of this machine's class (-1: built-in) on its live facts
+    eagle::DeviceProps props;                 ///< the properties the rule reads: the host's documented ones, or the device's from the driver
+    std::int32_t weight_vendor = 0, weight_family = 0, weight_model = 0, weight_row = -1;   ///< the class key read and the row index taken
 
     /** @brief Store @p text as the reason, never throwing. */
     void set_reason(const char* text) noexcept {

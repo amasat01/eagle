@@ -316,6 +316,10 @@ void device_open(eg_ctx& ctx, std::int32_t device) {
     d.fp64_ratio = std::max(1, attribute(dev, CU_DEVICE_ATTRIBUTE_SINGLE_TO_DOUBLE_PRECISION_PERF_RATIO, "FP64 ratio"));
     d.cc_major = attribute(dev, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, "compute capability");
     d.cc_minor = attribute(dev, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, "compute capability");
+    d.clock_khz = attribute(dev, CU_DEVICE_ATTRIBUTE_CLOCK_RATE, "clock rate");
+    d.memory_clock_khz = attribute(dev, CU_DEVICE_ATTRIBUTE_MEMORY_CLOCK_RATE, "memory clock rate");
+    d.bus_bits = attribute(dev, CU_DEVICE_ATTRIBUTE_GLOBAL_MEMORY_BUS_WIDTH, "memory bus width");
+    d.l2_bytes = attribute(dev, CU_DEVICE_ATTRIBUTE_L2_CACHE_SIZE, "L2 cache size");
 }
 
 /** @brief Destroy the context's stream (queued work still finishes) and release the primary context. */

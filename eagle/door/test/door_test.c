@@ -2966,6 +2966,23 @@ static eg_status seg_run(eg_ctx* ctx, struct seg_set* q, int64_t max_steps, eg_r
     return s == EG_OK ? eg_run(ctx, *out, rep) : s;
 }
 
+/* The dispatch weights row is looked up once, by the class of this machine: the Intel family 6 model 85 row (index 1 of EG_WEIGHT_ROWS) on that class,
+ * the built-in row (-1) on any other; an older caller's smaller struct is filled as far as it goes. */
+static void check_weight_row(eg_ctx* ctx) {
+    struct eg_ctx_info info;
+    memset(&info, 0, sizeof(info));
+    info.struct_size = sizeof(info);
+    const int w2125 = eg_ctx_info(ctx, &info) == EG_OK && info.weight_vendor == 1 && info.weight_family == 6 && info.weight_model == 85;
+    check(info.struct_size == sizeof(info) && info.weight_row == (w2125 ? 1 : -1),
+          "eg_ctx_info: the weights row is Intel 6/85's on that class and the built-in row (-1) on any other");
+    struct eg_ctx_info old;
+    memset(&old, 0, sizeof(old));
+    old.struct_size = (uint32_t)offsetof(struct eg_ctx_info, weight_vendor);
+    old.weight_row = 77;
+    check(eg_ctx_info(ctx, &old) == EG_OK && old.struct_size == offsetof(struct eg_ctx_info, weight_vendor) && old.weight_row == 77,
+          "eg_ctx_info of a caller that predates the weights members fills none of them");
+}
+
 static void check_segmented_runner(eg_ctx* ctx) {
     eg_unit *cls = NULL, *k1 = NULL, *k0 = NULL, *fused = NULL;
     check(load(ctx, "sg__cls", 0xE1, &cls) == EG_OK && load(ctx, "sg__k1", 0xE3, &k1) == EG_OK && load(ctx, "sgf", 0xE4, &fused) == EG_OK,
@@ -3101,6 +3118,7 @@ int main(int argc, char** argv) {
     eg_host_threads(ctx, 1);
     oracle(ctx, unit, 100001, 50000, "n=100001 threads=1");
     check_runner(ctx, unit);
+    check_weight_row(ctx);
     check_segmented_runner(ctx);
     check_active_set(ctx);
     check_auto(ctx);
