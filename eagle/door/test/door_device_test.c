@@ -800,6 +800,37 @@ static void reset_device(eg_ctx* ctx, const char* dev_lib) {
         cudaFree(big_b);
         cudaStreamDestroy(own);
     }
+    {   /* a runner made on stream A, run there and freed with stream B in scope: B reusing the bytes cannot corrupt A's results */
+        cudaStream_t sa = NULL, sb = NULL;
+        void *big_a = NULL, *big_b = NULL, *reuse = NULL;
+        const size_t big = (size_t)256 << 20;
+        static struct dcount fresh, r;
+        struct eg_run_report rf, rr;
+        int ok = cudaStreamCreateWithFlags(&sa, cudaStreamNonBlocking) == cudaSuccess &&
+                 cudaStreamCreateWithFlags(&sb, cudaStreamNonBlocking) == cudaSuccess && cudaMalloc(&big_a, big) == cudaSuccess &&
+                 cudaMalloc(&big_b, big) == cudaSuccess && dcount_new(ctx, active, 4, 0.5, &fresh) == EG_OK;
+        if (ok) dcount_inputs(&fresh), ok = dcount_run(ctx, &fresh, &rf) == EG_OK;
+        ok = ok && eg_stream_use(ctx, (uint64_t)(uintptr_t)sa) == EG_OK && dcount_new(ctx, active, 4, 0.5, &r) == EG_OK;
+        if (ok) dcount_inputs(&r);
+        for (int k = 0; ok && k < 100; ++k) ok = cudaMemcpyAsync(big_b, big_a, big, cudaMemcpyDeviceToDevice, sa) == cudaSuccess;
+        ok = ok && eg_run(ctx, r.runner, &rr) == EG_OK;    /* on A after the copies: the loop reads and writes the runner's cells */
+        ok = ok && eg_stream_use(ctx, (uint64_t)(uintptr_t)sb) == EG_OK && eg_runner_free(ctx, r.runner) == EG_OK;
+        r.runner = NULL;
+        ok = ok && cudaMallocAsync(&reuse, 4096, sb) == cudaSuccess && cudaMemsetAsync(reuse, 0xFF, 4096, sb) == cudaSuccess;
+        ok = ok && cudaStreamSynchronize(sa) == cudaSuccess && cudaStreamSynchronize(sb) == cudaSuccess && eg_stream_use(ctx, 0) == EG_OK;
+        cudaMemcpy(r.k, r.dk, sizeof(r.k), cudaMemcpyDeviceToHost);
+        cudaMemcpy(r.mask, r.dm, sizeof(r.mask), cudaMemcpyDeviceToHost);
+        check(ok && memcmp(r.k, fresh.k, sizeof(r.k)) == 0 && memcmp(r.mask, fresh.mask, sizeof(r.mask)) == 0,
+              "a runner made on stream A, run there and freed with stream B in scope: A's results equal a fresh runner's (B reusing the bytes cannot corrupt them)");
+        if (reuse) cudaFreeAsync(reuse, sb);
+        cudaStreamSynchronize(sb);
+        dcount_free(ctx, &r);
+        dcount_free(ctx, &fresh);
+        cudaFree(big_a);
+        cudaFree(big_b);
+        cudaStreamDestroy(sa);
+        cudaStreamDestroy(sb);
+    }
     eg_unit_free(ctx, plain);
     eg_unit_free(ctx, active);
 }

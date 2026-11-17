@@ -40,17 +40,11 @@ DeviceLoop* loop_capture(std::uint64_t stream, const unsigned* finished, const u
 /** @brief Queue one launch of @p loop on @p stream. */
 void loop_launch(DeviceLoop* loop, std::uint64_t stream);
 
-/** @brief A zeroed device array of @p count uint32 cells (its address), stream-ordered on @p stream. */
-std::uint64_t cells_new(std::uint64_t stream, unsigned count);
-
 /** @brief Page-locked host memory of @p bytes; freed by host_pinned_free. */
 void* host_pinned_new(std::size_t bytes);
 
 /** @brief Free host_pinned_new memory (NULL-safe). */
 void host_pinned_free(void* data) noexcept;
-
-/** @brief Free cells made by cells_new on @p stream, ordered after the work queued there (0-safe). */
-void cells_free(std::uint64_t stream, std::uint64_t cells) noexcept;
 
 /** @brief A device allocation of @p bytes from the stream-ordered pool, zeroed when @p zero, ready for work queued on
  *  @p stream; no call waits on the device. */

@@ -197,12 +197,20 @@ void queue_restore(const eg_runner_s& runner, std::uint64_t s, const void* mask,
     cells_write(s, r.rcells + 2 * sizeof(unsigned), &zero, 1);
 }
 
+/** @brief A zeroed device array of @p count uint32 cells (its address) from device_alloc. */
+std::uint64_t cells_new(eg_ctx& ctx, unsigned count) {
+    return reinterpret_cast<std::uint64_t>(device_alloc(ctx, count * sizeof(unsigned), true));
+}
+
+/** @brief Free cells made by cells_new, on the stream they were made on (0-safe). */
+void cells_free(eg_ctx& ctx, std::uint64_t cells) noexcept { device_free(ctx, reinterpret_cast<void*>(cells)); }
+
 /** @brief The runner's reorder scratch, grown to stage @p planes (a recorded run moves eagle's own planes too). */
 void* reorder_scratch(DeviceRun& r, std::int64_t n, const std::vector<DevicePlane>& planes) {
     const std::size_t need = reorder_scratch_bytes(n, planes);
     if (need > r.rscratch_bytes) {
-        cells_free(r.ctx->dev.stream, r.rscratch);
-        r.rscratch = cells_new(r.ctx->dev.stream, static_cast<unsigned>((need + sizeof(unsigned) - 1) / sizeof(unsigned)));
+        cells_free(*r.ctx, r.rscratch);
+        r.rscratch = cells_new(*r.ctx, static_cast<unsigned>((need + sizeof(unsigned) - 1) / sizeof(unsigned)));
         r.rscratch_bytes = need;
     }
     return reinterpret_cast<void*>(r.rscratch);
@@ -768,8 +776,8 @@ void device_launch(eg_plan_s& plan) {
 /** @brief A DEVICE plan's eagle-made finished counter: one zeroed device cell. */
 void device_plan_cells(eg_plan_s& plan) {
     Current current(plan.ctx->dev);
-    plan.device_counter = cells_new(plan.ctx->dev.stream, 1);
-    if (plan.unit->finish.steps == EG_STEPS_AUTO) plan.device_steps = cells_new(plan.ctx->dev.stream, 2);    // the int64 steps word, 0
+    plan.device_counter = cells_new(*plan.ctx, 1);
+    if (plan.unit->finish.steps == EG_STEPS_AUTO) plan.device_steps = cells_new(*plan.ctx, 2);    // the int64 steps word, 0
 }
 
 /** @brief Free what device_plan_cells made. */
@@ -778,11 +786,8 @@ void device_plan_free(eg_plan_s& plan) noexcept {
     eg_ctx* ctx = plan.ctx;
     const std::uint64_t counter = plan.device_counter, steps = plan.device_steps;
     plan.device_counter = plan.device_steps = 0;
-    now_or_after_capture(*ctx, [ctx, counter, steps] {
-        Current current(ctx->dev);
-        cells_free(ctx->dev.stream, counter);
-        cells_free(ctx->dev.stream, steps);
-    });
+    cells_free(*ctx, counter);
+    cells_free(*ctx, steps);
 }
 
 /** @brief A device allocation of @p bytes on the context's device, zeroed when @p zero, stream-ordered on the context's
@@ -928,8 +933,8 @@ DeviceRun::~DeviceRun() {
     now_or_after_capture(*c, [c, l, all] {
         Current current(c->dev);
         loop_free(l);
-        for (std::uint64_t cell : all) cells_free(c->dev.stream, cell);
     });
+    for (std::uint64_t cell : all) cells_free(*c, cell);
 }
 
 namespace {
@@ -1006,7 +1011,7 @@ void fast_runner_setup(eg_ctx& ctx, const eg_runner_desc& d, eg_runner_s& runner
                                static_cast<unsigned>(static_cast<std::uint64_t>(d.max_steps) >> 32) };
     cells_write(dev.stream, plan.device_steps, word, 2);
     if (mode != EG_MODE_PERSIST) return;
-    runner.dev.fast = cells_new(dev.stream, 2);
+    runner.dev.fast = cells_new(ctx, 2);
     const bool fp64 = u.scalar_type != EG_SCALAR_FLOAT32;
     const double ops = static_cast<double>(u.finish.ops > 0 ? u.finish.ops : kAutoStepOps);
     const policy::LaunchDevice l = launch_device(dev);
@@ -1149,7 +1154,7 @@ void device_runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out)
         runner->max_steps = d.max_steps;
         runner->dev.ctx = &ctx;
         Current current(ctx.dev);
-        runner->dev.cells = cells_new(ctx.dev.stream, 6);    // [remaining, ran, total, live count, finished at the last compaction, compactions]
+        runner->dev.cells = cells_new(ctx, 6);    // [remaining, ran, total, live count, finished at the last compaction, compactions]
         const std::int64_t n = d.plans[0]->n_samples;
         if (active) {
             ActiveState& a = runner->act;
@@ -1159,13 +1164,13 @@ void device_runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out)
             a.reorder = reorder;
             a.theta = d.reorder_theta;
             runner->active = true;
-            runner->dev.map = cells_new(ctx.dev.stream, static_cast<unsigned>(std::max<std::int64_t>(n, 1)));
-            runner->dev.scratch = cells_new(ctx.dev.stream, static_cast<unsigned>((compact_scratch_bytes(n) + sizeof(unsigned) - 1) / sizeof(unsigned)));
+            runner->dev.map = cells_new(ctx, static_cast<unsigned>(std::max<std::int64_t>(n, 1)));
+            runner->dev.scratch = cells_new(ctx, static_cast<unsigned>((compact_scratch_bytes(n) + sizeof(unsigned) - 1) / sizeof(unsigned)));
             if (reorder) {
                 DeviceRun& r = runner->dev;
-                r.perm = cells_new(ctx.dev.stream, static_cast<unsigned>(n));
-                r.inv = cells_new(ctx.dev.stream, static_cast<unsigned>(n));
-                r.rcells = cells_new(ctx.dev.stream, 5);    // [live32, span, fire, reorders, zero]
+                r.perm = cells_new(ctx, static_cast<unsigned>(n));
+                r.inv = cells_new(ctx, static_cast<unsigned>(n));
+                r.rcells = cells_new(ctx, 5);    // [live32, span, fire, reorders, zero]
                 reorder_scratch(r, n, reorder_table(*runner));
             }
         }

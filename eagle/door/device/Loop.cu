@@ -84,10 +84,6 @@ __global__ void maskCountKernel(const unsigned char* mask, long long n, unsigned
 
 }  // namespace
 
-std::uint64_t cells_new(std::uint64_t stream, unsigned count) {
-    return reinterpret_cast<std::uint64_t>(alloc_async(stream, count * sizeof(unsigned), true));
-}
-
 void* host_pinned_new(std::size_t bytes) {
     void* p = nullptr;
     EAGLE_CHECK_ALWAYS(cudaHostAlloc(&p, bytes, cudaHostAllocDefault));
@@ -97,8 +93,6 @@ void* host_pinned_new(std::size_t bytes) {
 void host_pinned_free(void* data) noexcept {
     if (data != nullptr) (void)cudaFreeHost(data);
 }
-
-void cells_free(std::uint64_t stream, std::uint64_t cells) noexcept { free_async(stream, stream, reinterpret_cast<void*>(cells)); }
 
 void* alloc_async(std::uint64_t stream, std::size_t bytes, bool zero) {
     const auto s = reinterpret_cast<cudaStream_t>(stream);
