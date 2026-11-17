@@ -505,6 +505,59 @@ eg_status eg_plane_wrap(eg_ctx* ctx, struct DLManagedTensorVersioned* tensor, eg
 /** Drop the caller's reference to a plane. NULL-safe. */
 eg_status eg_plane_free(eg_ctx* ctx, eg_plane* plane);
 
+/** Where a plane eagle makes lives (``eg_plane_desc.kind``). */
+typedef int32_t eg_mem;
+#define EG_MEM_HOST 0   /**< ordinary host memory (DLPack kDLCPU) */
+#define EG_MEM_PINNED 1 /**< page-locked host memory the device reads by DMA (kDLCUDAHost); device contexts only */
+#define EG_MEM_DEVICE 2 /**< device memory of the context's device (kDLCUDA); device contexts only */
+
+/** ``eg_plane_desc.flags``. */
+#define EG_PLANE_ZERO (1u << 0) /**< the bytes start at zero; without it they are unspecified */
+
+/** INPUT to ``eg_plane_new``. The dtype is the DLPack code and bit width a
+ *  plane may carry (as ``eg_plane_wrap`` accepts): float 64/32, int 64/32/8,
+ *  uint 32, bool 8, one lane. */
+struct eg_plane_desc {
+    uint32_t struct_size;
+    uint32_t flags;          /**< EG_PLANE_* */
+    eg_mem kind;
+    int32_t ndim;
+    uint32_t dtype_code;     /**< DLDataTypeCode: kDLInt 0, kDLUInt 1, kDLFloat 2, kDLBool 6 */
+    uint32_t dtype_bits;
+    const int64_t* shape;    /**< ndim extents, each >= 0 (ndim 0: one element) */
+};
+
+/**
+ * Make a plane eagle owns, in host, pinned or device memory, through the one
+ * allocator eagle uses for its own planes. ``*out`` is the caller's reference,
+ * dropped by eg_plane_free like any plane's; the memory is freed when the last
+ * reference drops (device and pinned memory after the work queued on the
+ * context's device). Allocation is not a recorded node: a device context
+ * refuses it between eg_record_begin and eg_record_end.
+ * Replaces: the binding's ``install_allocator`` (array_binding.h).
+ * Calls today: ``eagle_backend_mem_alloc`` / ``_release`` (eagle_cuda.cu).
+ * Status: OK; BAD_REQUEST (unknown ``kind`` or flag bit, ``ndim`` < 0 or
+ * ``shape`` NULL with ``ndim`` > 0, a negative extent, a size that overflows,
+ * a call inside a device recording); NOT_WRITTEN (a dtype eagle does not run,
+ * PINNED or DEVICE on a host-only context); FAULT (the allocation failed).
+ */
+eg_status eg_plane_new(eg_ctx* ctx, const struct eg_plane_desc* desc, eg_plane** out);
+
+/**
+ * Export a plane as a DLPack tensor, the inverse of eg_plane_wrap: ``*out``
+ * views the plane's memory (kDLCPU, kDLCUDAHost for a pinned plane, kDLCUDA)
+ * and holds a reference to it, so eg_plane_free may follow at once. The
+ * consumer calls ``*out``'s deleter once when done; it may run on any thread
+ * (it waits for a call in progress on the context) and the memory is freed
+ * when the last reference drops. A context cannot be freed while an export is
+ * unreleased: eg_ctx_free then returns BAD_REQUEST and frees nothing.
+ * Replaces: ``export_dlpack`` (array_binding.h) over eagle's own allocations.
+ * Calls today: ``export_dlpack`` (array_binding.h).
+ * Status: OK; BAD_REQUEST (``out`` NULL, a plane not of this context or already
+ * freed by the caller).
+ */
+eg_status eg_plane_dlpack(eg_ctx* ctx, eg_plane* plane, struct DLManagedTensorVersioned** out);
+
 /* ---- plans --------------------------------------------------------------- */
 
 /**

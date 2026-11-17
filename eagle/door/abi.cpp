@@ -82,6 +82,14 @@ EG_EXPORT eg_status eg_plane_free(eg_ctx* ctx, eg_plane* plane) {
     });
 }
 
+EG_EXPORT eg_status eg_plane_new(eg_ctx* ctx, const struct eg_plane_desc* desc, eg_plane** out) {
+    return door::call(ctx, [&](eg_ctx& c) { door::plane_new(c, desc, out); });
+}
+
+EG_EXPORT eg_status eg_plane_dlpack(eg_ctx* ctx, eg_plane* plane, struct DLManagedTensorVersioned** out) {
+    return door::call(ctx, [&](eg_ctx& c) { door::plane_dlpack(c, plane, out); });
+}
+
 EG_EXPORT eg_status eg_plan_new(eg_ctx* ctx, const struct eg_plan_desc* desc, eg_plan** out) {
     return door::call(ctx, [&](eg_ctx& c) {
         door::device_quiet(c, "eg_plan_new", EG_BAD_REQUEST, "a plan's cells are made outside the capture; make it first");

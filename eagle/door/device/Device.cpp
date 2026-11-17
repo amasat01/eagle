@@ -43,8 +43,10 @@ void device_launch(eg_plan_s&) {}
 void device_sync(eg_ctx&) {}
 void device_plan_cells(eg_plan_s&) {}
 void device_plan_free(eg_plan_s&) noexcept {}
-void* device_alloc(eg_ctx&, std::size_t) { return nullptr; }
+void* device_alloc(eg_ctx&, std::size_t, bool) { return nullptr; }
 void device_free(eg_ctx&, void*) noexcept {}
+void* pinned_alloc(eg_ctx&, std::size_t, bool) { return nullptr; }
+void pinned_free(eg_ctx&, void*) noexcept {}
 void device_cell_work(eg_plan_s&) {}
 void device_read(eg_ctx&, const void*, void*, std::size_t) {}
 void device_write(eg_ctx&, void*, const void*, std::size_t) {}
@@ -766,10 +768,10 @@ void device_plan_free(eg_plan_s& plan) noexcept {
     });
 }
 
-/** @brief A zeroed device allocation of @p bytes on the context's device. */
-void* device_alloc(eg_ctx& ctx, std::size_t bytes) {
+/** @brief A device allocation of @p bytes on the context's device, zeroed when @p zero. */
+void* device_alloc(eg_ctx& ctx, std::size_t bytes, bool zero) {
     Current current(ctx.dev);
-    return reinterpret_cast<void*>(cells_new(static_cast<unsigned>((bytes + sizeof(unsigned) - 1) / sizeof(unsigned))));
+    return reinterpret_cast<void*>(cells_new(static_cast<unsigned>((bytes + sizeof(unsigned) - 1) / sizeof(unsigned)), zero));
 }
 
 /** @brief Free a device_alloc allocation (a forked child makes no device call). */
@@ -779,6 +781,24 @@ void device_free(eg_ctx& ctx, void* data) noexcept {
     now_or_after_capture(ctx, [c, data] {
         Current current(c->dev);
         cells_free(reinterpret_cast<std::uint64_t>(data));
+    });
+}
+
+/** @brief A page-locked host allocation of @p bytes, zeroed when @p zero. */
+void* pinned_alloc(eg_ctx& ctx, std::size_t bytes, bool zero) {
+    Current current(ctx.dev);
+    void* data = host_pinned_new(bytes);
+    if (zero) std::memset(data, 0, bytes);
+    return data;
+}
+
+/** @brief Free a pinned_alloc allocation (a forked child makes no driver call). */
+void pinned_free(eg_ctx& ctx, void* data) noexcept {
+    if (data == nullptr || forked(ctx)) return;
+    eg_ctx* c = &ctx;
+    now_or_after_capture(ctx, [c, data] {
+        Current current(c->dev);
+        host_pinned_free(data);
     });
 }
 

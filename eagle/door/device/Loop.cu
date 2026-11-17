@@ -84,14 +84,24 @@ __global__ void maskCountKernel(const unsigned char* mask, long long n, unsigned
 
 }  // namespace
 
-std::uint64_t cells_new(unsigned count) {
+std::uint64_t cells_new(unsigned count, bool zero) {
     void* p = nullptr;
     EAGLE_CHECK_ALWAYS(cudaMalloc(&p, count * sizeof(unsigned)));
-    cudaError_t z = cudaMemset(p, 0, count * sizeof(unsigned));
-    if (z == cudaSuccess) z = cudaStreamSynchronize(0);   // the memset is async to the host and unordered with eagle's non-blocking stream
+    cudaError_t z = zero ? cudaMemset(p, 0, count * sizeof(unsigned)) : cudaSuccess;
+    if (zero && z == cudaSuccess) z = cudaStreamSynchronize(0);   // the memset is async to the host and unordered with eagle's non-blocking stream
     if (z != cudaSuccess) (void)cudaFree(p);
     EAGLE_CHECK_ALWAYS(z);
     return reinterpret_cast<std::uint64_t>(p);
+}
+
+void* host_pinned_new(std::size_t bytes) {
+    void* p = nullptr;
+    EAGLE_CHECK_ALWAYS(cudaHostAlloc(&p, bytes, cudaHostAllocDefault));
+    return p;
+}
+
+void host_pinned_free(void* data) noexcept {
+    if (data != nullptr) (void)cudaFreeHost(data);
 }
 
 void cells_free(std::uint64_t cells) noexcept {

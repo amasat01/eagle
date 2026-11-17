@@ -296,8 +296,10 @@ inline std::int64_t chunks_of(std::int64_t n, std::int64_t cells, std::int64_t c
 struct eg_plane_s {
     eg_ctx* ctx = nullptr;
     DLManagedTensorVersioned* tensor = nullptr;
-    int refs = 1;                             ///< the caller's reference plus one per binding
+    int refs = 1;                             ///< the caller's reference plus one per binding and one per unreleased export
+    int exports = 0;                          ///< the DLPack exports (eg_plane_dlpack) not yet released by their consumers
     bool caller_ref = true;
+    bool pinned = false;                      ///< eagle-made page-locked host memory: the tensor says kDLCPU, an export kDLCUDAHost
 };
 
 namespace eagle {
@@ -540,7 +542,10 @@ void unit_load(eg_ctx& ctx, const eg_unit_load_desc* desc, eg_unit** out);
 void unit_release(eg_ctx& ctx, eg_unit_s* unit);
 void plane_wrap(eg_ctx& ctx, DLManagedTensorVersioned* tensor, eg_plane** out);
 void plane_release(eg_ctx& ctx, eg_plane_s* plane);
-eg_plane_s* make_plane(eg_ctx& ctx, const DLDataType& dtype, std::vector<std::int64_t> shape, bool device = false);
+eg_plane_s* make_plane(eg_ctx& ctx, const DLDataType& dtype, std::vector<std::int64_t> shape, bool device = false,
+                       bool pinned = false, bool zero = true);
+void plane_new(eg_ctx& ctx, const eg_plane_desc* desc, eg_plane** out);
+void plane_dlpack(eg_ctx& ctx, eg_plane_s* plane, DLManagedTensorVersioned** out);
 void plan_new(eg_ctx& ctx, const eg_plan_desc* desc, eg_plan** out);
 void plan_free(eg_ctx& ctx, eg_plan_s* plan);
 void plan_release(eg_ctx& ctx, eg_plan_s* plan);
@@ -624,8 +629,12 @@ void device_quiet(const eg_ctx& ctx, const char* call, eg_status status, const c
 inline constexpr const char* kHostWorkInGraph = "host work inside a device graph is not written in this build of the door";
 void device_plan_cells(eg_plan_s& plan);
 void device_plan_free(eg_plan_s& plan) noexcept;
-void* device_alloc(eg_ctx& ctx, std::size_t bytes);
+/** @brief Device memory of @p bytes on the context's device, zeroed when @p zero (device/Device.cpp). */
+void* device_alloc(eg_ctx& ctx, std::size_t bytes, bool zero = true);
 void device_free(eg_ctx& ctx, void* data) noexcept;
+/** @brief Page-locked host memory of @p bytes, zeroed when @p zero; freed by pinned_free (a forked child makes no driver call). */
+void* pinned_alloc(eg_ctx& ctx, std::size_t bytes, bool zero);
+void pinned_free(eg_ctx& ctx, void* data) noexcept;
 void device_cell_work(eg_plan_s& plan);
 /** @brief eg_reduce and eg_copy over device planes, on the context's stream (device/Device.cpp); checked as the host's. */
 void device_reduce(eg_ctx& ctx, const eg_reduce_desc& desc);

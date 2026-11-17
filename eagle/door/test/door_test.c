@@ -2473,6 +2473,146 @@ static void check_banded(eg_ctx* ctx) {
           "eg_banded_*: NULL with n > 0 is BAD_REQUEST by reason");
 }
 
+/* eg_plane_new / eg_plane_dlpack: the made plane's export fields, its release, a launch on made planes against caller planes, every refusal by reason. */
+static void check_alloc(eg_ctx* ctx, eg_unit* axpb) {
+    enum { N = 8 };
+    static double xc[N], yc[N];
+    struct tensor txc, tyc;
+    const int64_t shape[2] = { 2, 3 };
+    struct eg_plane_desc d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    d.kind = EG_MEM_HOST;
+    d.ndim = 2;
+    d.dtype_code = kDLFloat;
+    d.dtype_bits = 64;
+    d.shape = shape;
+    d.flags = EG_PLANE_ZERO;
+    eg_plane* p = NULL;
+    struct DLManagedTensorVersioned* m = NULL;
+    int ok = eg_plane_new(ctx, &d, &p) == EG_OK && p != NULL && eg_plane_dlpack(ctx, p, &m) == EG_OK && m != NULL;
+    if (ok) {
+        const DLTensor* t = &m->dl_tensor;
+        const double* v = (const double*)t->data;
+        ok = m->version.major == DLPACK_MAJOR_VERSION && t->data != NULL && t->ndim == 2 && t->shape[0] == 2 && t->shape[1] == 3 &&
+             t->dtype.code == kDLFloat && t->dtype.bits == 64 && t->dtype.lanes == 1 && t->device.device_type == kDLCPU &&
+             (t->strides == NULL || (t->strides[0] == 3 && t->strides[1] == 1));
+        for (int i = 0; i < 6; ++i) ok = ok && v[i] == 0.0;
+    }
+    check(ok, "eg_plane_new HOST with EG_PLANE_ZERO: the export has its data, shape (2, 3), float64, kDLCPU, dense strides and zeroed bytes");
+    struct DLManagedTensorVersioned* again = NULL;
+    ok = ok && eg_plane_dlpack(ctx, p, &again) == EG_OK && again != NULL && again->dl_tensor.data == m->dl_tensor.data;
+    if (m != NULL) m->deleter(m);
+    if (again != NULL) again->deleter(again);
+    check(ok && eg_plane_free(ctx, p) == EG_OK, "eg_plane_dlpack twice gives one memory; both exports released, then the plane freed");
+
+    const struct { uint8_t code, bits; } dtypes[7] = { { kDLFloat, 64 }, { kDLFloat, 32 }, { kDLInt, 64 }, { kDLInt, 32 },
+                                                       { kDLInt, 8 },    { kDLUInt, 32 },  { kDLBool, 8 } };
+    ok = 1;
+    for (int i = 0; i < 7; ++i) {
+        eg_plane* q = NULL;
+        struct DLManagedTensorVersioned* e = NULL;
+        d.dtype_code = dtypes[i].code;
+        d.dtype_bits = dtypes[i].bits;
+        ok = ok && eg_plane_new(ctx, &d, &q) == EG_OK && eg_plane_dlpack(ctx, q, &e) == EG_OK && e->dl_tensor.dtype.code == dtypes[i].code &&
+             e->dl_tensor.dtype.bits == dtypes[i].bits;
+        if (e != NULL) e->deleter(e);
+        eg_plane_free(ctx, q);
+    }
+    d.dtype_code = kDLFloat;
+    d.dtype_bits = 64;
+    check(ok, "eg_plane_new takes each dtype eg_plane_wrap takes (float64/32, int64/32/8, uint32, bool)");
+
+    {   /* the memory outlives eg_plane_free while an export is held, and the context cannot be freed meanwhile */
+        eg_ctx* other = make_ctx();
+        eg_plane* q = NULL;
+        struct DLManagedTensorVersioned* e = NULL;
+        ok = other != NULL && eg_plane_new(other, &d, &q) == EG_OK && eg_plane_dlpack(other, q, &e) == EG_OK && eg_plane_free(other, q) == EG_OK;
+        if (ok) ((double*)e->dl_tensor.data)[5] = 42.5;
+        ok = ok && eg_ctx_free(other) == EG_BAD_REQUEST && reason_has(other, "not yet released by its consumer") && ((double*)e->dl_tensor.data)[5] == 42.5;
+        if (e != NULL) e->deleter(e);
+        ok = ok && eg_ctx_free(other) == EG_OK;
+        check(ok, "a plane freed while exported keeps its memory; eg_ctx_free is refused BAD_REQUEST by reason until the export is released");
+    }
+
+    {   /* a launch on made planes == the same launch on caller planes, bitwise */
+        eg_plane *pxc = wrap_1d(ctx, &txc, xc, N, kDLFloat, 64), *pyc = wrap_1d(ctx, &tyc, yc, N, kDLFloat, 64);
+        eg_plane *pxm = NULL, *pym = NULL;
+        struct DLManagedTensorVersioned *exm = NULL, *eym = NULL;
+        const int64_t one[1] = { N };
+        d.ndim = 1;
+        d.shape = one;
+        const double a = 1.25, b = -0.5;
+        ok = pxc && pyc && eg_plane_new(ctx, &d, &pxm) == EG_OK && eg_plane_new(ctx, &d, &pym) == EG_OK && eg_plane_dlpack(ctx, pxm, &exm) == EG_OK &&
+             eg_plane_dlpack(ctx, pym, &eym) == EG_OK;
+        for (int i = 0; ok && i < N; ++i) xc[i] = ((double*)exm->dl_tensor.data)[i] = 0.1 * (i + 1);
+        const eg_structure structures[2] = { EG_STRUCTURE_HOST_SERIAL, EG_STRUCTURE_HOST_TEAM };
+        for (int si = 0; ok && si < 2; ++si) {
+            eg_plan *pc = NULL, *pm = NULL;
+            ok = plan(ctx, axpb, structures[si], N, 0, NULL, NULL, &pc) == EG_OK && bind(ctx, pc, pyc, pxc, &a, &b) == EG_OK &&
+                 eg_launch(ctx, pc, NULL) == EG_OK && plan(ctx, axpb, structures[si], N, 0, NULL, NULL, &pm) == EG_OK &&
+                 bind(ctx, pm, pym, pxm, &a, &b) == EG_OK && eg_launch(ctx, pm, NULL) == EG_OK &&
+                 memcmp(yc, eym->dl_tensor.data, sizeof(yc)) == 0 && yc[N - 1] != 0.0;
+            eg_plan_free(ctx, pc);
+            eg_plan_free(ctx, pm);
+        }
+        check(ok, "a plan bound to eg_plane_new planes and launched (SERIAL and TEAM) writes the bytes a plan on caller planes writes");
+        if (exm != NULL) exm->deleter(exm);
+        if (eym != NULL) eym->deleter(eym);
+        eg_plane_free(ctx, pxc);
+        eg_plane_free(ctx, pyc);
+        eg_plane_free(ctx, pxm);
+        eg_plane_free(ctx, pym);
+    }
+
+    {   /* every refusal, by status and reason */
+        eg_plane* q = NULL;
+        const int64_t neg[2] = { 4, -1 }, big[2] = { INT64_MAX / 2, 4 }, good[1] = { 4 };
+        struct eg_plane_desc r = d;
+        r.ndim = 1;
+        r.shape = good;
+        ok = eg_plane_new(ctx, &r, NULL) == EG_BAD_REQUEST && reason_has(ctx, "out is NULL");
+        r.kind = 9;
+        ok = ok && eg_plane_new(ctx, &r, &q) == EG_BAD_REQUEST && reason_has(ctx, "unknown kind 9") && q == NULL;
+        r.kind = EG_MEM_HOST;
+        r.flags = 2;
+        ok = ok && eg_plane_new(ctx, &r, &q) == EG_BAD_REQUEST && reason_has(ctx, "unknown flag bits 2");
+        r.flags = 0;
+        r.ndim = -1;
+        ok = ok && eg_plane_new(ctx, &r, &q) == EG_BAD_REQUEST && reason_has(ctx, "ndim -1 without a shape");
+        r.ndim = 1;
+        r.shape = NULL;
+        ok = ok && eg_plane_new(ctx, &r, &q) == EG_BAD_REQUEST && reason_has(ctx, "ndim 1 without a shape");
+        r.ndim = 2;
+        r.shape = neg;
+        ok = ok && eg_plane_new(ctx, &r, &q) == EG_BAD_REQUEST && reason_has(ctx, "shape[1] is negative");
+        r.shape = big;
+        ok = ok && eg_plane_new(ctx, &r, &q) == EG_BAD_REQUEST && reason_has(ctx, "the size overflows");
+        r.ndim = 1;
+        r.shape = good;
+        r.dtype_bits = 16;
+        ok = ok && eg_plane_new(ctx, &r, &q) == EG_NOT_WRITTEN && reason_has(ctx, "dtype (code 2, bits 16) is not one eagle runs");
+        r.dtype_bits = 64;
+        r.kind = EG_MEM_DEVICE;
+        ok = ok && eg_plane_new(ctx, &r, &q) == EG_NOT_WRITTEN && reason_has(ctx, "DEVICE memory on a host-only context");
+        r.kind = EG_MEM_PINNED;
+        ok = ok && eg_plane_new(ctx, &r, &q) == EG_NOT_WRITTEN && reason_has(ctx, "PINNED memory on a host-only context");
+        ok = ok && eg_plane_new(ctx, NULL, &q) == EG_BAD_REQUEST && q == NULL;
+        check(ok, "eg_plane_new: a NULL out, a bad kind, an unknown flag bit, a bad ndim or shape, a negative extent, an overflow, an unknown dtype, and "
+                  "PINNED or DEVICE on a host-only context each refused by status and reason");
+    }
+    {
+        eg_plane* q = NULL;
+        struct DLManagedTensorVersioned* e = NULL;
+        d.ndim = 1;
+        d.shape = shape;
+        ok = eg_plane_new(ctx, &d, &q) == EG_OK && eg_plane_dlpack(ctx, q, NULL) == EG_BAD_REQUEST && reason_has(ctx, "out is NULL");
+        ok = ok && eg_plane_dlpack(ctx, NULL, &e) == EG_BAD_REQUEST && e == NULL && reason_has(ctx, "plane is NULL");
+        ok = ok && eg_plane_free(ctx, q) == EG_OK && eg_plane_dlpack(ctx, q, &e) == EG_BAD_REQUEST && e == NULL;
+        check(ok, "eg_plane_dlpack: a NULL out, a NULL plane and a freed plane each refused BAD_REQUEST by reason");
+    }
+}
+
 int main(int argc, char** argv) {
     if (argc != 5) {
         fprintf(stderr, "usage: %s <fixture> <wrong size> <no size block> <v1 tag>\n", argv[0]);
@@ -2511,6 +2651,7 @@ int main(int argc, char** argv) {
     check_shared(ctx);
     check_box(ctx);
     check_made(ctx);
+    check_alloc(ctx, unit);
     check_clear(ctx, unit);
     check_set_count(ctx, unit);
     check_unit_flags(ctx);

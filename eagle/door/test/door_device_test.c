@@ -354,6 +354,91 @@ static void set_count_device(eg_ctx* ctx, const char* dev_lib) {
     eg_unit_free(ctx, unit);
 }
 
+/* eg_plane_new / eg_plane_dlpack on a device context: a DEVICE plane (kDLCUDA) and a PINNED plane (kDLCUDAHost) by their export fields and
+ * the driver's own reading of the pointers; a DEVICE launch on made planes against the plain-C oracle (bitwise); the refusals of the
+ * device kinds. */
+static void alloc_planes(eg_ctx* ctx, eg_ctx* host, eg_unit* axpy, const double* x, const double* v, const double* want, double a) {
+    const int64_t shape1[1] = { N }, shape2[2] = { 2, N }, shapep[2] = { 4, 5 };
+    struct eg_plane_desc d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    d.flags = EG_PLANE_ZERO;
+    d.dtype_code = kDLFloat;
+    d.dtype_bits = 64;
+    d.kind = EG_MEM_DEVICE;
+    d.ndim = 1;
+    d.shape = shape1;
+    eg_plane *pdev = NULL, *ppin = NULL;
+    struct DLManagedTensorVersioned *edev = NULL, *epin = NULL;
+    double back[N];
+    memset(back, 0x5a, sizeof(back));
+    int ok = eg_plane_new(ctx, &d, &pdev) == EG_OK && eg_plane_dlpack(ctx, pdev, &edev) == EG_OK && edev->dl_tensor.data != NULL &&
+             edev->dl_tensor.device.device_type == kDLCUDA && edev->dl_tensor.device.device_id == 0 && edev->dl_tensor.ndim == 1 &&
+             edev->dl_tensor.shape[0] == N && edev->dl_tensor.dtype.code == kDLFloat && edev->dl_tensor.dtype.bits == 64 &&
+             cudaMemcpy(back, edev->dl_tensor.data, sizeof(back), cudaMemcpyDeviceToHost) == cudaSuccess;
+    for (int i = 0; i < N; ++i) ok = ok && back[i] == 0.0;
+    check(ok, "eg_plane_new DEVICE with EG_PLANE_ZERO: the export is kDLCUDA of device 0 with shape (1000), float64, and the driver reads zeros back");
+
+    d.kind = EG_MEM_PINNED;
+    d.ndim = 2;
+    d.shape = shapep;
+    struct cudaPointerAttributes attr;
+    ok = eg_plane_new(ctx, &d, &ppin) == EG_OK && eg_plane_dlpack(ctx, ppin, &epin) == EG_OK && epin->dl_tensor.data != NULL &&
+         epin->dl_tensor.device.device_type == kDLCUDAHost && epin->dl_tensor.ndim == 2 && epin->dl_tensor.shape[0] == 4 &&
+         epin->dl_tensor.shape[1] == 5 && epin->dl_tensor.dtype.code == kDLFloat && epin->dl_tensor.dtype.bits == 64 &&
+         (epin->dl_tensor.strides == NULL || (epin->dl_tensor.strides[0] == 5 && epin->dl_tensor.strides[1] == 1)) &&
+         cudaPointerGetAttributes(&attr, epin->dl_tensor.data) == cudaSuccess && attr.type == cudaMemoryTypeHost;
+    for (int i = 0; ok && i < 20; ++i) ok = ((const double*)epin->dl_tensor.data)[i] == 0.0;
+    check(ok, "eg_plane_new PINNED with EG_PLANE_ZERO: the export is kDLCUDAHost with shape (4, 5), float64, zeroed, and the driver reports page-locked host memory");
+
+    eg_plane *pm_y = NULL, *pm_x = NULL, *pm_v = NULL;
+    struct DLManagedTensorVersioned *ey = NULL, *ex = NULL, *ev = NULL;
+    d.kind = EG_MEM_DEVICE;
+    d.ndim = 1;
+    d.shape = shape1;
+    ok = eg_plane_new(ctx, &d, &pm_y) == EG_OK && eg_plane_new(ctx, &d, &pm_x) == EG_OK && eg_plane_dlpack(ctx, pm_y, &ey) == EG_OK &&
+         eg_plane_dlpack(ctx, pm_x, &ex) == EG_OK;
+    d.ndim = 2;
+    d.shape = shape2;
+    ok = ok && eg_plane_new(ctx, &d, &pm_v) == EG_OK && eg_plane_dlpack(ctx, pm_v, &ev) == EG_OK;
+    ok = ok && cudaMemcpy(ex->dl_tensor.data, x, N * sizeof(double), cudaMemcpyHostToDevice) == cudaSuccess &&
+         cudaMemcpy(ev->dl_tensor.data, v, 2 * N * sizeof(double), cudaMemcpyHostToDevice) == cudaSuccess;
+    eg_plan* p = NULL;
+    uint64_t tiles = 7;
+    if (ok) ok = plan(ctx, axpy, EG_STRUCTURE_DEVICE, 0, NULL, NULL, &p) == EG_OK && bind(ctx, p, pm_y, pm_x, pm_v, a) == EG_OK &&
+                 eg_launch(ctx, p, &tiles) == EG_OK && eg_sync(ctx) == EG_OK;
+    memset(back, 0, sizeof(back));
+    ok = ok && tiles == 0 && cudaMemcpy(back, ey->dl_tensor.data, sizeof(back), cudaMemcpyDeviceToHost) == cudaSuccess &&
+         memcmp(back, want, sizeof(back)) == 0;
+    check(ok, "axpy DEVICE on eg_plane_new planes: launch, eg_sync, y bitwise == the plain-C oracle (the value the caller-plane run gives)");
+    eg_plan_free(ctx, p);
+
+    eg_graph* g = NULL;
+    d.ndim = 1;
+    d.shape = shape1;
+    eg_plane* q = NULL;
+    ok = eg_record_begin(ctx) == EG_OK && refused(eg_plane_new(ctx, &d, &q), EG_BAD_REQUEST, ctx, "outside the capture") && q == NULL &&
+         eg_record_end(ctx, &g) == EG_OK && eg_graph_free(ctx, g) == EG_OK;
+    check(ok, "eg_plane_new inside a DEVICE recording refused BAD_REQUEST by reason; the recording still ends");
+    d.kind = EG_MEM_PINNED;
+    ok = refused(eg_plane_new(host, &d, &q), EG_NOT_WRITTEN, host, "PINNED memory on a host-only context");
+    d.kind = EG_MEM_DEVICE;
+    ok = ok && refused(eg_plane_new(host, &d, &q), EG_NOT_WRITTEN, host, "DEVICE memory on a host-only context");
+    check(ok, "eg_plane_new PINNED and DEVICE on a host-only context of a CUDA build refused NOT_WRITTEN by reason");
+
+    /* The memory survives eg_plane_free while the export is held, and goes with the last release. */
+    ok = eg_plane_free(ctx, pdev) == EG_OK && eg_plane_free(ctx, ppin) == EG_OK && cudaMemcpy(back, edev->dl_tensor.data, sizeof(back), cudaMemcpyDeviceToHost) == cudaSuccess &&
+         ((double*)epin->dl_tensor.data)[19] == 0.0;
+    edev->deleter(edev);
+    epin->deleter(epin);
+    ey->deleter(ey);
+    ex->deleter(ex);
+    ev->deleter(ev);
+    ok = ok && eg_plane_free(ctx, pm_y) == EG_OK && eg_plane_free(ctx, pm_x) == EG_OK && eg_plane_free(ctx, pm_v) == EG_OK && eg_sync(ctx) == EG_OK &&
+         cudaGetLastError() == cudaSuccess;
+    check(ok, "exports of device and pinned planes are readable after eg_plane_free; their release and the planes' frees leave the driver clean");
+}
+
 int main(int argc, char** argv) {
     if (argc != 3) {
         fprintf(stderr, "usage: %s <libfixture_device.so> <libfixture_unit.so>\n", argv[0]);
@@ -556,6 +641,8 @@ int main(int argc, char** argv) {
     int same = 1;
     for (int i = 0; i < N; ++i) same &= hyv[i] == a * hx[i] + b;
     check(s == EG_OK && same, "axpb HOST_TEAM with host planes on the device context: y == a * x + b");
+
+    alloc_planes(ctx, host, axpy, x, v, want, a);
 
     /* Freeing with live handles: modules unloaded, stream destroyed, the primary context released. */
     check(eg_unit_free(ctx, axpy) == EG_OK && eg_unit_free(ctx, axpy64) == EG_OK && eg_unit_free(ctx, axpb) == EG_OK &&

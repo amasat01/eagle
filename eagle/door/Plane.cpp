@@ -8,7 +8,10 @@
 #include <aether/aether.h>
 #include <aether/banded/banded.h>
 
+#include <cstring>
+#include <limits>
 #include <memory>
+#include <thread>
 
 namespace eagle {
 namespace door {
@@ -82,21 +85,25 @@ void plane_wrap(eg_ctx& ctx, DLManagedTensorVersioned* tensor, eg_plane** out) {
 }
 
 namespace {
-/** @brief The memory of a plane eagle made: the tensor, its shape and its zeroed bytes. */
+/** @brief The memory of a plane eagle made: the tensor, its shape and its bytes. */
 struct Made {
     DLManagedTensorVersioned managed{};
     std::vector<std::int64_t> shape;
-    std::vector<unsigned char> bytes;   ///< host planes
-    eg_ctx* device = nullptr;           ///< device planes: the context whose device holds ``managed.dl_tensor.data``
+    std::unique_ptr<unsigned char[]> bytes;   ///< host planes
+    eg_ctx* device = nullptr;                 ///< device and pinned planes: the context that allocated ``managed.dl_tensor.data``
+    bool pinned = false;
     ~Made() {
-        if (device != nullptr) device_free(*device, managed.dl_tensor.data);
+        if (device == nullptr) return;
+        if (pinned) pinned_free(*device, managed.dl_tensor.data);
+        else device_free(*device, managed.dl_tensor.data);
     }
 };
 }  // namespace
 
-/** @brief A zeroed plane of @p shape that eagle owns, in host memory or (@p device) in the context's device memory
+/** @brief A plane of @p shape that eagle owns, zeroed when @p zero: in host memory, in page-locked host memory (@p pinned,
+ *  which a plane reports as kDLCPU and an export as kDLCUDAHost) or (@p device) in the context's device memory
  *  (one reference, the caller's to release). */
-eg_plane_s* make_plane(eg_ctx& ctx, const DLDataType& dtype, std::vector<std::int64_t> shape, bool device) {
+eg_plane_s* make_plane(eg_ctx& ctx, const DLDataType& dtype, std::vector<std::int64_t> shape, bool device, bool pinned, bool zero) {
     auto made = std::make_unique<Made>();
     std::int64_t n = 1;
     for (std::int64_t e : shape) n *= e;
@@ -104,13 +111,19 @@ eg_plane_s* make_plane(eg_ctx& ctx, const DLDataType& dtype, std::vector<std::in
     const std::size_t size = static_cast<std::size_t>(n) * (dtype.bits / 8);
     DLManagedTensorVersioned& m = made->managed;
     if (device) {
-        m.dl_tensor.data = device_alloc(ctx, size);
+        m.dl_tensor.data = size != 0 ? device_alloc(ctx, size, zero) : nullptr;
         made->device = &ctx;     // after the allocation: a failed one has nothing to free
         m.dl_tensor.device.device_type = kDLCUDA;
         m.dl_tensor.device.device_id = ctx.dev.ordinal;
+    } else if (pinned) {
+        m.dl_tensor.data = size != 0 ? pinned_alloc(ctx, size, zero) : nullptr;
+        made->device = &ctx;
+        made->pinned = true;
+        m.dl_tensor.device.device_type = kDLCPU;
     } else {
-        made->bytes.assign(size, 0);
-        m.dl_tensor.data = made->bytes.data();
+        made->bytes = std::make_unique_for_overwrite<unsigned char[]>(size);
+        if (zero) std::memset(made->bytes.get(), 0, size);
+        m.dl_tensor.data = made->bytes.get();
         m.dl_tensor.device.device_type = kDLCPU;
     }
     m.version.major = DLPACK_MAJOR_VERSION;
@@ -123,7 +136,87 @@ eg_plane_s* make_plane(eg_ctx& ctx, const DLDataType& dtype, std::vector<std::in
     eg_plane* plane = nullptr;
     plane_wrap(ctx, &m, &plane);
     made.release();
+    plane->pinned = pinned;
     return plane;
+}
+
+/** @brief eg_plane_new: check the request, then make the plane through make_plane (the allocator eagle's own planes use). */
+void plane_new(eg_ctx& ctx, const eg_plane_desc* desc, eg_plane** out) {
+    if (out == nullptr) refuse(EG_BAD_REQUEST, "eg_plane_new: out is NULL");
+    *out = nullptr;
+    const eg_plane_desc d = read_input(desc, "eg_plane_desc");
+    if ((d.flags & ~EG_PLANE_ZERO) != 0)
+        refuse(EG_BAD_REQUEST, "eg_plane_new: unknown flag bits " + std::to_string(d.flags & ~EG_PLANE_ZERO));
+    if (d.kind != EG_MEM_HOST && d.kind != EG_MEM_PINNED && d.kind != EG_MEM_DEVICE)
+        refuse(EG_BAD_REQUEST, "eg_plane_new: unknown kind " + std::to_string(d.kind));
+    if (d.kind != EG_MEM_HOST && ctx.dev.ordinal < 0)
+        refuse(EG_NOT_WRITTEN, std::string("eg_plane_new: ") + (d.kind == EG_MEM_PINNED ? "PINNED" : "DEVICE") +
+               " memory on a host-only context (make the context with EG_CTX_DEVICE)");
+    const DLDataType dtype{ static_cast<std::uint8_t>(d.dtype_code), static_cast<std::uint8_t>(d.dtype_bits), 1 };
+    if (d.dtype_code > 255 || d.dtype_bits > 255 || !known_dtype(dtype))
+        refuse(EG_NOT_WRITTEN, "eg_plane_new: dtype (code " + std::to_string(d.dtype_code) + ", bits " + std::to_string(d.dtype_bits) +
+               ") is not one eagle runs");
+    if (d.ndim < 0 || (d.ndim > 0 && d.shape == nullptr))
+        refuse(EG_BAD_REQUEST, "eg_plane_new: ndim " + std::to_string(d.ndim) + " without a shape");
+    std::vector<std::int64_t> shape(d.shape, d.shape + d.ndim);
+    std::uint64_t bytes = dtype.bits / 8;
+    for (int i = 0; i < d.ndim; ++i) {
+        if (shape[i] < 0) refuse(EG_BAD_REQUEST, "eg_plane_new: shape[" + std::to_string(i) + "] is negative");
+        if (shape[i] != 0 && bytes > std::numeric_limits<std::int64_t>::max() / static_cast<std::uint64_t>(shape[i]))
+            refuse(EG_BAD_REQUEST, "eg_plane_new: the size overflows");
+        bytes *= static_cast<std::uint64_t>(shape[i]);
+    }
+    device_quiet(ctx, "eg_plane_new", EG_BAD_REQUEST, "a plane's memory is allocated outside the capture; make it first");
+    *out = make_plane(ctx, dtype, std::move(shape), d.kind == EG_MEM_DEVICE, d.kind == EG_MEM_PINNED, (d.flags & EG_PLANE_ZERO) != 0);
+}
+
+namespace {
+/** @brief An exported plane: the DLPack tensor handed to the consumer and the reference it keeps on the plane. */
+struct Export {
+    DLManagedTensorVersioned managed{};
+    eg_ctx* ctx = nullptr;
+    eg_plane_s* plane = nullptr;
+};
+
+/** @brief The consumer's release: wait for a call in progress on the context, drop the plane's reference, free the export.
+ *  The last access to the context is the store that ends the wait for others, so a context freed right after is not touched. */
+void export_release(DLManagedTensorVersioned* tensor) {
+    auto* e = static_cast<Export*>(tensor->manager_ctx);
+    eg_ctx& ctx = *e->ctx;
+    bool idle = false;
+    while (!ctx.busy.compare_exchange_weak(idle, true, std::memory_order_acquire)) {
+        idle = false;
+        std::this_thread::yield();
+    }
+    --e->plane->exports;
+    try {
+        plane_release(ctx, e->plane);
+    } catch (...) {
+    }
+    ctx.busy.store(false, std::memory_order_release);
+    delete e;
+}
+}  // namespace
+
+/** @brief eg_plane_dlpack: a DLPack tensor over the plane's memory that keeps the plane alive until the consumer releases it. */
+void plane_dlpack(eg_ctx& ctx, eg_plane_s* plane, DLManagedTensorVersioned** out) {
+    if (out == nullptr) refuse(EG_BAD_REQUEST, "eg_plane_dlpack: out is NULL");
+    *out = nullptr;
+    check_handle(ctx.planes, plane, "plane");
+    if (!plane->caller_ref) refuse(EG_BAD_REQUEST, "plane: already freed by the caller");
+    auto e = std::make_unique<Export>();
+    e->ctx = &ctx;
+    e->plane = plane;
+    e->managed = *plane->tensor;
+    e->managed.manager_ctx = e.get();
+    e->managed.deleter = export_release;
+    if (plane->pinned) {
+        e->managed.dl_tensor.device.device_type = kDLCUDAHost;
+        e->managed.dl_tensor.device.device_id = 0;
+    }
+    ++plane->refs;
+    ++plane->exports;
+    *out = &e.release()->managed;
 }
 
 /** @brief Whether @p op runs on device planes: the planes of @p ctx among @p planes are all device planes (true) or
