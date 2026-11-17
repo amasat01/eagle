@@ -1763,10 +1763,6 @@ static void check_mask_dtypes(eg_ctx* ctx) {
 
 /* ---- index sets and prefix sets ------------------------------------------- */
 
-static eg_plane* wrap_1d(eg_ctx* ctx, struct tensor* t, void* data, int64_t n, uint8_t code, uint8_t bits) {
-    return wrap(ctx, t, data, n, code, bits);
-}
-
 static void check_index_sets(eg_ctx* ctx) {
     enum { M = 1000, CAP = 400 };
     static double x[M], y[M], want[M];
@@ -1781,9 +1777,9 @@ static void check_index_sets(eg_ctx* ctx) {
     for (int i = 0; i < CAP; ++i) map[i] = (int32_t)((i * 7919 + 13) % M), map64[i] = map[i];
     /* 7919 is prime to 1000: the first 400 lanes are distinct */
     struct tensor ty, tx, tm, tc, tm64;
-    eg_plane *py = wrap_1d(ctx, &ty, y, M, kDLFloat, 64), *px = wrap_1d(ctx, &tx, x, M, kDLFloat, 64),
-             *pm = wrap_1d(ctx, &tm, map, CAP, kDLInt, 32), *pm64 = wrap_1d(ctx, &tm64, map64, CAP, kDLInt, 64),
-             *pc = wrap_1d(ctx, &tc, &count, 1, kDLUInt, 32);
+    eg_plane *py = wrap(ctx, &ty, y, M, kDLFloat, 64), *px = wrap(ctx, &tx, x, M, kDLFloat, 64),
+             *pm = wrap(ctx, &tm, map, CAP, kDLInt, 32), *pm64 = wrap(ctx, &tm64, map64, CAP, kDLInt, 64),
+             *pc = wrap(ctx, &tc, &count, 1, kDLUInt, 32);
     int ok = py && px && pm && pm64 && pc;
     if (!ok) {
         check(0, "index set planes wrapped");
@@ -2005,7 +2001,7 @@ static void check_wide(eg_ctx* ctx) {
         for (int ri = 0; ri < 2; ++ri) {
             struct tensor two, twi, ty;
             eg_plane *pwo = wrap_nd(ctx, &two, wo, kDLFloat, 64, 2, rows[ri], M, 0),
-                     *pwi = wrap_nd(ctx, &twi, wi, kDLFloat, 64, 2, rows[ri], M, 0), *py = wrap_1d(ctx, &ty, y, M, kDLFloat, 64);
+                     *pwi = wrap_nd(ctx, &twi, wi, kDLFloat, 64, 2, rows[ri], M, 0), *py = wrap(ctx, &ty, y, M, kDLFloat, 64);
             memcpy(wo, keep, sizeof(wo));
             memcpy(want, keep, sizeof(want));
             for (int r = 0; r < 3; ++r)
@@ -2078,7 +2074,7 @@ static void check_gather(eg_ctx* ctx) {
             want[i] = v;
             y[i] = 0.0;
         }
-        eg_plane *py = wrap_1d(ctx, &ty, y, N, kDLFloat, 64), *pm = wrap_nd(ctx, &tm, m, kDLFloat, 64, 3, 2, 2, cols);
+        eg_plane *py = wrap(ctx, &ty, y, N, kDLFloat, 64), *pm = wrap_nd(ctx, &tm, m, kDLFloat, 64, 3, 2, 2, cols);
         const int32_t slots[2] = { 0, 1 };
         eg_plane* planes[2] = { py, pm };
         struct eg_bind_desc bd;
@@ -2118,7 +2114,7 @@ static void check_shared(eg_ctx* ctx) {
     for (int i = 0; i < N; ++i) x[i] = (double)i * 0.5 - 3.0;
     for (int i = 0; i < 6; ++i) a[i] = 1.5 + i;
     eg_unit* unit = NULL;
-    eg_plane *py = wrap_1d(ctx, &ty, y, N, kDLFloat, 64), *px = wrap_1d(ctx, &tx, x, N, kDLFloat, 64),
+    eg_plane *py = wrap(ctx, &ty, y, N, kDLFloat, 64), *px = wrap(ctx, &tx, x, N, kDLFloat, 64),
              *pa = wrap_nd(ctx, &ta, a, kDLFloat, 64, 2, 2, 2, 0);
     const int32_t slots[3] = { 0, 1, 2 };
     eg_plane* planes[3] = { py, px, pa };
@@ -2172,7 +2168,7 @@ static void check_box(eg_ctx* ctx) {
             const int64_t n = sizes[zi];
             struct tensor ty, tx;
             for (int64_t i = 0; i < n; ++i) x[i] = (double)i * 0.25 - 9.0, y[i] = -5.0;
-            eg_plane *py = wrap_1d(ctx, &ty, y, n, kDLFloat, 64), *px = wrap_1d(ctx, &tx, x, n, kDLFloat, 64);
+            eg_plane *py = wrap(ctx, &ty, y, n, kDLFloat, 64), *px = wrap(ctx, &tx, x, n, kDLFloat, 64);
             const int32_t slots[2] = { 0, 1 };
             eg_plane* planes[2] = { py, px };
             struct eg_bind_desc bd;
@@ -2228,8 +2224,8 @@ static void check_made(eg_ctx* ctx) {
     const eg_structure structures[2] = { EG_STRUCTURE_HOST_TEAM, EG_STRUCTURE_HOST_SERIAL };
     int all = 1;
     for (int si = 0; si < 2; ++si) {
-        eg_plane *px = wrap_1d(ctx, &tx, x, 10, kDLFloat, 64), *pt = wrap_1d(ctx, &tt, tot, 1, kDLFloat, 64),
-                 *pm = wrap_1d(ctx, &tm, mx, 1, kDLFloat, 64);
+        eg_plane *px = wrap(ctx, &tx, x, 10, kDLFloat, 64), *pt = wrap(ctx, &tt, tot, 1, kDLFloat, 64),
+                 *pm = wrap(ctx, &tm, mx, 1, kDLFloat, 64);
         const int32_t slots[3] = { 2, 0, 1 };
         eg_plane* planes[3] = { px, pt, pm };
         struct eg_bind_desc bd;
@@ -2255,8 +2251,8 @@ static void check_made(eg_ctx* ctx) {
                "again 2 and 20; SERIAL and TEAM)");
     {
         double two[2] = { 0.0, 0.0 };
-        eg_plane *px = wrap_1d(ctx, &tx, x, 10, kDLFloat, 64), *pt = wrap_1d(ctx, &tt, tot, 1, kDLFloat, 64),
-                 *p2 = wrap_1d(ctx, &tm, two, 2, kDLFloat, 64);
+        eg_plane *px = wrap(ctx, &tx, x, 10, kDLFloat, 64), *pt = wrap(ctx, &tt, tot, 1, kDLFloat, 64),
+                 *p2 = wrap(ctx, &tm, two, 2, kDLFloat, 64);
         eg_plan* p = NULL;
         const int64_t base[1] = { 2 }, count[1] = { 4 };
         const int32_t s1[2] = { 2, 0 }, s_two[1] = { 0 };
@@ -2286,7 +2282,7 @@ static void check_made(eg_ctx* ctx) {
     }
     all = 1;
     for (int si = 0; si < 2; ++si) {
-        eg_plane *px = wrap_1d(ctx, &tk, xk, 12, kDLFloat, 64), *pa = wrap_nd(ctx, &ta, acc, kDLFloat, 64, 1, 3, 0, 0);
+        eg_plane *px = wrap(ctx, &tk, xk, 12, kDLFloat, 64), *pa = wrap_nd(ctx, &ta, acc, kDLFloat, 64, 1, 3, 0, 0);
         const int32_t slots[2] = { 2, 0 };
         eg_plane* planes[2] = { px, pa };
         struct eg_bind_desc bd;
@@ -2311,7 +2307,7 @@ static void check_made(eg_ctx* ctx) {
     check(all, "companion: eagle makes the zeroed companion with the target, runs the unit's fold entry over the target's 3 slots after each "
                "launch (SERIAL and TEAM, two launches, the 4th element untouched)");
     {
-        eg_plane *px = wrap_1d(ctx, &tk, xk, 12, kDLFloat, 64), *pa = wrap_1d(ctx, &ta, acc, 4, kDLFloat, 64);
+        eg_plane *px = wrap(ctx, &tk, xk, 12, kDLFloat, 64), *pa = wrap(ctx, &ta, acc, 4, kDLFloat, 64);
         const int32_t slots[2] = { 2, 0 };
         eg_plane* planes[2] = { px, pa };
         struct eg_bind_desc bd;
@@ -2342,7 +2338,7 @@ static void check_clear(eg_ctx* ctx, eg_unit* axpb) {
     const eg_structure structures[2] = { EG_STRUCTURE_HOST_SERIAL, EG_STRUCTURE_HOST_TEAM };
     int all = 1;
     for (int si = 0; si < 2; ++si) {
-        eg_plane *px = wrap_1d(ctx, &tx, x, 12, kDLFloat, 64), *pa = wrap_nd(ctx, &ta, acc, kDLFloat, 64, 1, 3, 0, 0);
+        eg_plane *px = wrap(ctx, &tx, x, 12, kDLFloat, 64), *pa = wrap_nd(ctx, &ta, acc, kDLFloat, 64, 1, 3, 0, 0);
         const int32_t slots[2] = { 2, 0 }, out[1] = { 0 };
         eg_plane* planes[2] = { px, pa };
         struct eg_bind_desc bd;
@@ -2370,7 +2366,7 @@ static void check_clear(eg_ctx* ctx, eg_unit* axpb) {
     check(all, "eg_clear: zeroes the output in place and restarts its companion (SERIAL and TEAM: a launch after the clear == the first launch of a fresh plan); "
                "n_slots 0 is a no-op");
     {
-        eg_plane *px = wrap_1d(ctx, &txs, xs, 8, kDLFloat, 64), *py = wrap_1d(ctx, &ty, y, 8, kDLFloat, 64);
+        eg_plane *px = wrap(ctx, &txs, xs, 8, kDLFloat, 64), *py = wrap(ctx, &ty, y, 8, kDLFloat, 64);
         const double a = 1.0, b = 0.0;
         eg_plan* p = NULL;
         eg_plan* kp = NULL;
@@ -2413,8 +2409,8 @@ static void check_set_count(eg_ctx* ctx, eg_unit* axpb) {
     if (up == NULL || ul == NULL) return;
     for (int i = 0; i < SM; ++i) x[i] = (double)i * 0.5 - 3.0;
     for (int i = 0; i < SCAP; ++i) map[i] = (i * 5 + 3) % SM;
-    eg_plane *py = wrap_1d(ctx, &ty, y, SM, kDLFloat, 64), *px = wrap_1d(ctx, &tx, x, SM, kDLFloat, 64),
-             *pm = wrap_1d(ctx, &tm, map, SCAP, kDLInt, 32), *pc = wrap_1d(ctx, &tc, &count, 1, kDLUInt, 32);
+    eg_plane *py = wrap(ctx, &ty, y, SM, kDLFloat, 64), *px = wrap(ctx, &tx, x, SM, kDLFloat, 64),
+             *pm = wrap(ctx, &tm, map, SCAP, kDLInt, 32), *pc = wrap(ctx, &tc, &count, 1, kDLUInt, 32);
     if (!(py && px && pm && pc)) {
         check(0, "eg_set_count planes wrapped");
         return;
@@ -2623,7 +2619,7 @@ static void check_alloc(eg_ctx* ctx, eg_unit* axpb) {
     }
 
     {   /* a launch on made planes == the same launch on caller planes, bitwise */
-        eg_plane *pxc = wrap_1d(ctx, &txc, xc, N, kDLFloat, 64), *pyc = wrap_1d(ctx, &tyc, yc, N, kDLFloat, 64);
+        eg_plane *pxc = wrap(ctx, &txc, xc, N, kDLFloat, 64), *pyc = wrap(ctx, &tyc, yc, N, kDLFloat, 64);
         eg_plane *pxm = NULL, *pym = NULL;
         struct DLManagedTensorVersioned *exm = NULL, *eym = NULL;
         const int64_t one[1] = { N };

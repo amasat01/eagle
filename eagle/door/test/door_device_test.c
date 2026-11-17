@@ -1026,22 +1026,6 @@ static void fast_entries(eg_ctx* ctx, const char* dev_lib) {
     eg_unit_free(ctx, ranged);
 }
 
-/* A device plane of @p n 32-bit words of dtype @p code (kDLInt or kDLUInt). */
-static eg_plane* wrap_word(eg_ctx* ctx, struct tensor* t, void* data, int64_t n, uint8_t code) {
-    memset(t, 0, sizeof(*t));
-    t->shape[0] = n;
-    t->managed.version.major = DLPACK_MAJOR_VERSION;
-    t->managed.dl_tensor.data = data;
-    t->managed.dl_tensor.device.device_type = kDLCUDA;
-    t->managed.dl_tensor.ndim = 1;
-    t->managed.dl_tensor.dtype.code = code;
-    t->managed.dl_tensor.dtype.bits = 32;
-    t->managed.dl_tensor.dtype.lanes = 1;
-    t->managed.dl_tensor.shape = t->shape;
-    eg_plane* p = NULL;
-    return eg_plane_wrap(ctx, &t->managed, &p) == EG_OK ? p : NULL;
-}
-
 /* A lookup set on the DEVICE: lane i < *count writes the sample map[i]. A plain launch writes exactly the mapped samples (plain-C
  * oracle over the map); a recorded graph replays with a smaller count the caller writes into its own plane (no re-record);
  * eg_set_count is refused (the count is the caller's plane) and a count above the map's entries is refused at launch. */
@@ -1062,7 +1046,7 @@ static void lookup_device(eg_ctx* ctx, const char* dev_lib) {
     cudaMemcpy(dm, map, sizeof(map), cudaMemcpyHostToDevice);
     struct tensor ty, tx, tm, tc;
     eg_plane *py = wrap(ctx, &ty, dy, 1, SM, 0, 1, 0), *px = wrap(ctx, &tx, dx, 1, SM, 0, 1, 0);
-    eg_plane *pm = wrap_word(ctx, &tm, dm, ENTRIES, kDLInt), *pc = wrap_word(ctx, &tc, dc, 1, kDLUInt);
+    eg_plane *pm = wrap_device_typed(ctx, &tm, dm, ENTRIES, kDLInt, 32), *pc = wrap_device_typed(ctx, &tc, dc, 1, kDLUInt, 32);
     int ok = py && px && pm && pc;
     eg_plan* p = NULL;
     const int32_t slots[4] = { 0, 1, 2, 3 };
