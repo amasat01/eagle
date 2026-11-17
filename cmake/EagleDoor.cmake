@@ -7,6 +7,8 @@
 #                                            needs it first); required, no default
 #   EAGLE_DOOR_CUDA_WING_FACTS=<raptor_facts.h>
 #                                            the cuda wing's; required when eagle is in CUDA mode
+#   EAGLE_DOOR_ROWS=<eagle_door_rows.h>      the door's row tables (weights, gemm routes), force-included into
+#                                            Context.cpp only; default the hand-written header in the source tree
 #
 # Host group always. In CUDA mode the device group is built in (device/Device.cpp without
 # EAGLE_CPU_ONLY, device/Loop.cu, linked to the CUDA runtime); in C++ mode Device.cpp compiles
@@ -15,6 +17,12 @@
 set(EAGLE_DOOR_WING_FACTS "" CACHE FILEPATH "The cpu wing's raptor_facts.h, included first by the door's host sources")
 set(EAGLE_DOOR_CUDA_WING_FACTS "" CACHE FILEPATH "The cuda wing's raptor_facts.h, included first by the door's device loop (CUDA mode)")
 
+set(EAGLE_DOOR_ROWS "${CMAKE_CURRENT_SOURCE_DIR}/eagle/door/eagle_door_rows.h" CACHE FILEPATH
+    "The door's row header (EG_WEIGHT_ROWS, EG_GEMM_ROUTE_ROWS), included into Context.cpp")
+
+if(NOT EAGLE_DOOR_ROWS OR NOT EXISTS "${EAGLE_DOOR_ROWS}")
+  message(FATAL_ERROR "EAGLE_BUILD_DOOR: set EAGLE_DOOR_ROWS to the door's row header (eagle_door_rows.h)")
+endif()
 if(NOT EAGLE_DOOR_WING_FACTS OR NOT EXISTS "${EAGLE_DOOR_WING_FACTS}")
   message(FATAL_ERROR "EAGLE_BUILD_DOOR: set EAGLE_DOOR_WING_FACTS to the cpu wing's raptor_facts.h")
 endif()
@@ -35,6 +43,7 @@ set_target_properties(eagle_door PROPERTIES
   CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF
   POSITION_INDEPENDENT_CODE ON
   CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)
+set_source_files_properties("${_door}/Context.cpp" PROPERTIES COMPILE_OPTIONS "-include;${EAGLE_DOOR_ROWS}" OBJECT_DEPENDS "${EAGLE_DOOR_ROWS}")
 set(_door_warn -Wall -Wextra -pedantic -Werror)
 # aether contributes its headers only: its package's mode defines are not the door's.
 target_include_directories(eagle_door

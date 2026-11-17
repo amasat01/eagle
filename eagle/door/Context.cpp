@@ -4,7 +4,6 @@
 // every handle still made from it.
 #include "eagle/door/Context.h"
 #include "eagle/door/device/Seam.h"
-#include <eagle/door/eagle_door_rows.h>   // by the include path: a build gives its own row header (the generated one) ahead of this directory's
 
 #include "eagle/door/Machine.h"
 #include "eagle/door/host/Team.h"
@@ -39,6 +38,10 @@ void check_settings(eg_ctx& ctx, const eg_ctx_settings* in) {
     device_open(ctx, s.device);
 }
 
+// The row tables come from the header the build force-includes (DOOR_ROWS in the Makefile, EAGLE_DOOR_ROWS in CMake).
+#ifndef EG_WEIGHT_ROWS
+#error "the door's row header is not included: set DOOR_ROWS (Makefile) or EAGLE_DOOR_ROWS (CMake)"
+#endif
 #define EG_WEIGHT_ROW_INIT(...) { __VA_ARGS__ },
 const eagle::policy::WeightRow kWeightRows[] = { EG_WEIGHT_ROWS(EG_WEIGHT_ROW_INIT) };
 #undef EG_WEIGHT_ROW_INIT
