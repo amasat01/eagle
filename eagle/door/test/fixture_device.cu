@@ -65,6 +65,28 @@ extern "C" __global__ void dkeyed__fold_acc(ScalarHandle acc, ScalarHandle comp,
     static_cast<double*>(comp.data)[i] = 0.125;
 }
 
+// dcount: a finishing unit stepping k += 1 until k >= limit, then marking the sample and counting it; the first thread
+// states the launch it runs in (geom[0] = threads per block, geom[1] = blocks).
+extern "C" __global__ void dcount(ScalarHandle k, ScalarHandle limit, ScalarHandle mask, ScalarHandle finished,
+                                  ScalarHandle geom, long long base, long long count, long long nSamples) {
+    const long long flat = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    (void)nSamples;
+    if (flat == 0) {
+        static_cast<double*>(geom.data)[0] = blockDim.x;
+        static_cast<double*>(geom.data)[1] = gridDim.x;
+    }
+    if (flat >= count) return;
+    const long long i = base + flat;
+    char* done = static_cast<char*>(mask.data);
+    if (done[i] != 0) return;
+    double* ks = static_cast<double*>(k.data);
+    ks[i] += 1.0;
+    if (ks[i] >= static_cast<const double*>(limit.data)[i]) {
+        done[i] = 1;
+        atomicAdd(static_cast<unsigned*>(finished.data), 1u);
+    }
+}
+
 // dprefix: the first *cnt lanes (the live prefix count, a uint32 cell) hold y = 2 x + 1.
 extern "C" __global__ void dprefix(ScalarHandle y, ScalarHandle x, ScalarHandle cnt, long long base, long long count,
                                    long long nSamples) {

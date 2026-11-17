@@ -297,6 +297,17 @@ void run(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report) {
     if (!record_run(ctx, runner)) run_loop(ctx, runner, report);
 }
 
+void runner_figures(eg_ctx& ctx, const eg_runner_s* runner, struct eg_runner_figures* out) {
+    check_handle(ctx.runners, runner, "runner");
+    const DeviceRun& r = runner->dev;
+    struct eg_runner_figures f{};
+    f.mode = r.ctx != nullptr ? r.mode : EG_MODE_HOST;
+    f.block = r.block > 0 ? static_cast<std::int32_t>(r.block) : -1;
+    f.grid = r.block > 0 ? static_cast<std::int64_t>(r.grid) : -1;
+    f.chunk = f.mode == EG_MODE_PERSIST ? static_cast<std::int32_t>(r.chunk) : -1;
+    write_output(out, f, "eg_runner_figures");
+}
+
 /** @brief Re-sync the counter to the mask, launch the step until done or the cap, and fill
  *  @p report when given (``_until_done.Runner._run`` and ``_host_loop._run_host_loop``, plain loop). */
 void run_loop(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report) {

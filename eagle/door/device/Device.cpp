@@ -138,6 +138,19 @@ unsigned resolved_block(const DeviceState& d, const eg_unit_s& u, std::int64_t n
     return fallback;
 }
 
+/** @brief The block of a launch of @p u over @p n samples: the meta's, else the one resolved for @p n. */
+unsigned launch_block(const DeviceState& d, const eg_unit_s& u, std::int64_t n) {
+    return u.block > 0 ? static_cast<unsigned>(u.block) : resolved_block(d, u, n);
+}
+
+/** @brief Keep the geometry of the launch @p plan's first partition gets, the figures eg_runner_figures reads. */
+void note_launch(const DeviceState& d, const eg_plan_s& plan, DeviceRun& r) {
+    if (plan.unit->function == 0 || plan.parts.empty()) return;    // a split unit launches per stage
+    const std::int64_t count = plan.parts[0].count;
+    r.block = launch_block(d, *plan.unit, count);
+    r.grid = exec::DeviceKernel::grid(count, r.block);
+}
+
 /** @brief The loop iterations that cover @p max_steps at @p every steps each. */
 std::int64_t loop_cap(std::int64_t max_steps, std::int64_t every) { return max_steps / every + (max_steps % every != 0); }
 
@@ -349,6 +362,9 @@ void device_unit_load(eg_unit_s& unit, const eg_unit_meta& m, void* library) {
     unit.function = reinterpret_cast<std::uint64_t>(fn);
     check(cuFuncGetAttribute_(&unit.regs, CU_FUNC_ATTRIBUTE_NUM_REGS, fn), who + ": cuFuncGetAttribute");
     check(cuFuncGetAttribute_(&unit.max_threads, CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK, fn), who + ": cuFuncGetAttribute");
+    check(cuFuncGetAttribute_(&unit.local_bytes, CU_FUNC_ATTRIBUTE_LOCAL_SIZE_BYTES, fn), who + ": cuFuncGetAttribute");
+    check(cuFuncGetAttribute_(&unit.shared_bytes, CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES, fn), who + ": cuFuncGetAttribute");
+    check(cuFuncGetAttribute_(&unit.const_bytes, CU_FUNC_ATTRIBUTE_CONST_SIZE_BYTES, fn), who + ": cuFuncGetAttribute");
     if (unit.finish.present && unit.finish.steps == EG_STEPS_AUTO) {    // the fast entries of an automatic unit
         const std::string base = m.device_function;
         for (const char* suffix : { "_persist", "_range" }) {
@@ -411,8 +427,7 @@ void launch_on(const eg_plan_s& plan, std::uint64_t stream) {
             zero_bytes(stream, static_cast<char*>(mix->tensor->dl_tensor.data) + mix->tensor->dl_tensor.byte_offset, static_cast<std::size_t>(f.k) * sizeof(std::uint32_t));
     }
     for (const exec::Partition& p : plan.parts)
-        exec::DeviceKernel::run(reinterpret_cast<CUfunction>(u.function), plan.params, p, s,
-                                u.block > 0 ? static_cast<unsigned>(u.block) : resolved_block(d, u, p.count));
+        exec::DeviceKernel::run(reinterpret_cast<CUfunction>(u.function), plan.params, p, s, launch_block(d, u, p.count));
     for (const CompanionFacts& c : u.companions) {
         const std::int64_t size = elements(plan.bindings[c.target].plane->tensor->dl_tensor);
         exec::DeviceKernel::run(reinterpret_cast<CUfunction>(c.device_fold), plan.params, exec::Partition{ 0, size, size }, s);
@@ -1204,6 +1219,7 @@ void device_run(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report) {
         record_forward(ctx, *runner, report);
         return;
     }
+    if (runner->dev.mode != EG_MODE_PERSIST) note_launch(ctx.dev, *runner->plans[0], runner->dev);    // the persist geometry is set at construction
     if (runner->dev.mode != EG_MODE_BAND) return fast_run(ctx, runner, report);
     eg_plan_s& first = *runner->plans[0];
     const FinishFacts& f = first.unit->finish;

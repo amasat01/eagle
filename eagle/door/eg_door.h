@@ -367,6 +367,39 @@ struct eg_run_report {
     double slot_fill;        /**< with EG_REPORT_SLOT_FILL only */
 };
 
+/** OUTPUT of ``eg_runner_figures``. ``block``, ``chunk`` and ``grid`` are -1 where the runner has no such launch. */
+struct eg_runner_figures {
+    uint32_t struct_size;
+    uint32_t flags;          /**< none defined */
+    eg_run_mode mode;        /**< EG_MODE_HOST for a host runner; a device runner's mode as in ``eg_run_report`` */
+    int32_t block;           /**< threads per block of the launch the runner's unit made */
+    int32_t chunk;           /**< PERSIST only: steps one persistent thread takes per sample claim */
+    int32_t reserved0;
+    int64_t grid;            /**< blocks of that launch */
+};
+
+/** Entry flags. */
+#define EG_ENTRY_DEVICE (1u << 0)  /**< the plan has a device function: its figures are set */
+#define EG_ENTRY_PERSIST (1u << 1) /**< the image has a persist entry: ``persist_*`` are set */
+
+/**
+ * OUTPUT of ``eg_plan_entry_figures``: what the driver reports for the plan's
+ * device function when its unit is loaded. Fields of an entry the plan does
+ * not have are 0 and their flag is clear. The text size of an entry is not
+ * reported: the driver does not state it.
+ */
+struct eg_entry_figures {
+    uint32_t struct_size;
+    uint32_t flags;          /**< EG_ENTRY_* */
+    int32_t regs;            /**< registers per thread of the device function */
+    int32_t max_threads;     /**< most threads per block of the device function */
+    int32_t persist_regs, persist_max_threads;   /**< the same for the persist entry */
+    int32_t local_bytes;     /**< local memory per thread of the device function (spills and stack) */
+    int32_t shared_bytes;    /**< static shared memory per block of the device function */
+    int32_t const_bytes;     /**< constant memory of the device function */
+    int32_t reserved0;
+};
+
 /** Reduce flags. */
 #define EG_REDUCE_PAIR (1u << 0) /**< write the (sum, compensation) pair */
 
@@ -669,6 +702,17 @@ eg_status eg_banded_pack_scalar(eg_ctx* ctx, double x, uint64_t* out);
  */
 eg_status eg_launch(eg_ctx* ctx, eg_plan* plan, uint64_t* tiles);
 
+/**
+ * Read the device entries of a plan's unit as the driver reported them at
+ * load. A host plan, or a unit without a device function (a split unit), has
+ * no device entry: EG_ENTRY_DEVICE is clear and every figure is 0.
+ * Replaces: ``BoundPlan.entry_reports`` (registers, local memory, demand).
+ * Calls today: nothing compiled (Python reads the driver itself).
+ * Status: OK; BAD_REQUEST (``out`` NULL or its ``struct_size`` too small, a
+ * handle of another context).
+ */
+eg_status eg_plan_entry_figures(eg_ctx* ctx, const eg_plan* plan, struct eg_entry_figures* out);
+
 /* ---- runs ---------------------------------------------------------------- */
 
 /**
@@ -699,6 +743,23 @@ eg_status eg_runner_free(eg_ctx* ctx, eg_runner* runner);
  * FAULT.
  */
 eg_status eg_run(eg_ctx* ctx, eg_runner* runner, struct eg_run_report* report);
+
+/**
+ * The mode and the resolved launch of the runner's last ``eg_run``. A host
+ * runner has mode EG_MODE_HOST and no launch: ``block``, ``chunk`` and ``grid``
+ * are -1. A device runner reports the launch of its first plan's unit
+ * (``block`` and ``grid``; for PERSIST the persistent entry's, with its
+ * ``chunk``): -1 before the launch is resolved (a BAND or FUSED_ONE runner at
+ * its first ``eg_run``, a PERSIST runner at ``eg_runner_new``) and for a unit
+ * with no device function of its own (a split unit launches per stage).
+ * ``chunk`` is -1 outside PERSIST. No fill, rate or step count is reported: the
+ * door does not hold them.
+ * Replaces: ``Runner.launch_policy``.
+ * Calls today: ``_launch_policy`` (Python).
+ * Status: OK; BAD_REQUEST (``out`` NULL or its ``struct_size`` too small, a
+ * handle of another context).
+ */
+eg_status eg_runner_figures(eg_ctx* ctx, const eg_runner* runner, struct eg_runner_figures* out);
 
 /**
  * Write the last EG_EVENTS_REFINE run's per-sample results, both from that

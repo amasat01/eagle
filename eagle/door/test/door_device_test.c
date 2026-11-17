@@ -14,6 +14,7 @@
 
 #include <cuda_runtime_api.h>
 
+#include <dlfcn.h>
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -439,6 +440,123 @@ static void alloc_planes(eg_ctx* ctx, eg_ctx* host, eg_unit* axpy, const double*
     check(ok, "exports of device and pinned planes are readable after eg_plane_free; their release and the planes' frees leave the driver clean");
 }
 
+/* One attribute of the device function @p name of the fixture's image, read through the driver API on its own: the oracle
+ * of the figures the door reports (-1: the image or the driver could not be read). */
+static int driver_attribute(const char* dev_lib, const char* name, int attribute) {
+    void* lib = dlopen(dev_lib, RTLD_NOW);
+    void* driver = dlopen("libcuda.so.1", RTLD_NOW);
+    int value = -1;
+    if (lib != NULL && driver != NULL) {
+        typedef int (*load_fn)(void**, const void*);
+        typedef int (*find_fn)(void**, void*, const char*);
+        typedef int (*attr_fn)(int*, int, void*);
+        const void* image = dlsym(lib, "fixture__image");
+        load_fn load_data;
+        find_fn find;
+        attr_fn get;
+        *(void**)&load_data = dlsym(driver, "cuModuleLoadData");
+        *(void**)&find = dlsym(driver, "cuModuleGetFunction");
+        *(void**)&get = dlsym(driver, "cuFuncGetAttribute");
+        void *module = NULL, *function = NULL;
+        int got = 0;
+        if (image != NULL && load_data(&module, image) == 0 && find(&function, module, name) == 0 && get(&got, attribute, function) == 0)
+            value = got;
+    }
+    return value;
+}
+
+/* The CUfunction_attribute values of cuda.h, named here as this test links the runtime only. */
+enum { ATTR_MAX_THREADS = 0, ATTR_SHARED_BYTES = 1, ATTR_CONST_BYTES = 2, ATTR_LOCAL_BYTES = 3, ATTR_REGS = 4 };
+
+/* eg_plan_entry_figures against the driver's own reads of the same functions, and eg_runner_figures of a finishing unit
+ * against the launch its kernel saw (dcount writes its blockDim and gridDim into geom). */
+static void figures_device(eg_ctx* ctx, const char* dev_lib) {
+    enum { FN = 1000 };
+    eg_unit *axpy = NULL, *count = NULL;
+    check(load(ctx, dev_lib, "axpy", 0xC1, &axpy) == EG_OK && load(ctx, dev_lib, "dcount", 0xD7, &count) == EG_OK,
+          "eg_unit_load axpy and dcount (a finishing device unit) for the figures");
+    if (axpy == NULL || count == NULL) return;
+    const char* names[2] = { "axpy", "dcount" };
+    eg_unit* units[2] = { axpy, count };
+    int ok = 1;
+    for (int u = 0; u < 2; ++u) {
+        eg_plan* p = NULL;
+        struct eg_entry_figures f;
+        memset(&f, 0, sizeof(f));
+        f.struct_size = sizeof(f);
+        ok = ok && plan_n(ctx, units[u], EG_STRUCTURE_DEVICE, FN, 0, NULL, NULL, &p) == EG_OK && eg_plan_entry_figures(ctx, p, &f) == EG_OK;
+        ok = ok && f.struct_size == sizeof(f) && f.flags == EG_ENTRY_DEVICE && f.persist_regs == 0 && f.persist_max_threads == 0;
+        ok = ok && f.regs > 0 && f.regs == driver_attribute(dev_lib, names[u], ATTR_REGS) &&
+             f.max_threads == driver_attribute(dev_lib, names[u], ATTR_MAX_THREADS) &&
+             f.local_bytes == driver_attribute(dev_lib, names[u], ATTR_LOCAL_BYTES) &&
+             f.shared_bytes == driver_attribute(dev_lib, names[u], ATTR_SHARED_BYTES) &&
+             f.const_bytes == driver_attribute(dev_lib, names[u], ATTR_CONST_BYTES);
+        if (p) eg_plan_free(ctx, p);
+    }
+    check(ok, "eg_plan_entry_figures on DEVICE plans: EG_ENTRY_DEVICE, registers, max threads, local, shared and constant bytes == the driver's own reads");
+
+    static double limit[FN];
+    for (int i = 0; i < FN; ++i) limit[i] = 1.0 + i % 3;
+    double *dk = dev_doubles(NULL, FN), *dl = dev_doubles(limit, FN), *dg = dev_doubles(NULL, 2);
+    unsigned char* dm = NULL;
+    cudaMalloc((void**)&dm, FN);
+    cudaMemset(dm, 0, FN);
+    struct tensor tk, tl, tg, tm;
+    eg_plane *pk = wrap(ctx, &tk, dk, 1, FN, 0, 1, 0), *pl = wrap(ctx, &tl, dl, 1, FN, 0, 1, 0), *pg = wrap(ctx, &tg, dg, 1, 2, 0, 1, 0);
+    memset(&tm, 0, sizeof(tm));
+    tm.shape[0] = FN;
+    tm.managed.version.major = DLPACK_MAJOR_VERSION;
+    tm.managed.dl_tensor.data = dm;
+    tm.managed.dl_tensor.device.device_type = kDLCUDA;
+    tm.managed.dl_tensor.ndim = 1;
+    tm.managed.dl_tensor.dtype.code = kDLBool;
+    tm.managed.dl_tensor.dtype.bits = 8;
+    tm.managed.dl_tensor.dtype.lanes = 1;
+    tm.managed.dl_tensor.shape = tm.shape;
+    eg_plane* pm = NULL;
+    eg_plan* p = NULL;
+    eg_runner* r = NULL;
+    const int32_t slots[4] = { 0, 1, 2, 4 };
+    eg_plane* planes[4] = { pk, pl, NULL, pg };
+    ok = pk && pl && pg && eg_plane_wrap(ctx, &tm.managed, &pm) == EG_OK;
+    planes[2] = pm;
+    struct eg_runner_desc rn;
+    memset(&rn, 0, sizeof(rn));
+    rn.struct_size = sizeof(rn);
+    rn.n_plans = 1;
+    rn.plans = &p;
+    rn.max_steps = 10;
+    ok = ok && plan_n(ctx, count, EG_STRUCTURE_DEVICE, FN, 0, NULL, NULL, &p) == EG_OK && bind_planes(ctx, p, 4, slots, planes) == EG_OK &&
+         eg_runner_new(ctx, &rn, &r) == EG_OK;
+    struct eg_runner_figures f;
+    memset(&f, 0, sizeof(f));
+    f.struct_size = sizeof(f);
+    ok = ok && eg_runner_figures(ctx, r, &f) == EG_OK && f.mode == EG_MODE_BAND && f.block == -1 && f.grid == -1 && f.chunk == -1;
+    check(ok, "eg_runner_figures on a DEVICE runner before its first run: mode BAND, block, grid and chunk -1");
+    struct eg_run_report rep;
+    memset(&rep, 0, sizeof(rep));
+    rep.struct_size = sizeof(rep);
+    double geom[2] = { 0, 0 };
+    ok = ok && eg_run(ctx, r, &rep) == EG_OK && eg_sync(ctx) == EG_OK && eg_runner_figures(ctx, r, &f) == EG_OK;
+    cudaMemcpy(geom, dg, sizeof(geom), cudaMemcpyDeviceToHost);
+    ok = ok && rep.finished == FN && f.mode == EG_MODE_BAND && f.chunk == -1 && f.block > 0 && f.block % 32 == 0 && (double)f.block == geom[0] &&
+         (double)f.grid == geom[1] && f.grid == (FN + f.block - 1) / f.block;
+    if (!ok) printf("      block %d grid %lld, the kernel saw %g x %g\n", f.block, (long long)f.grid, geom[0], geom[1]);
+    check(ok, "eg_runner_figures after eg_run: block and grid == the launch the kernel saw (blockDim, gridDim), grid covers the samples");
+    if (r) eg_runner_free(ctx, r);
+    if (p) eg_plan_free(ctx, p);
+    eg_plane_free(ctx, pk);
+    eg_plane_free(ctx, pl);
+    eg_plane_free(ctx, pm);
+    eg_plane_free(ctx, pg);
+    eg_unit_free(ctx, axpy);
+    eg_unit_free(ctx, count);
+    cudaFree(dk);
+    cudaFree(dl);
+    cudaFree(dg);
+    cudaFree(dm);
+}
+
 int main(int argc, char** argv) {
     if (argc != 3) {
         fprintf(stderr, "usage: %s <libfixture_device.so> <libfixture_unit.so>\n", argv[0]);
@@ -615,6 +733,7 @@ int main(int argc, char** argv) {
 
     made_planes(ctx, dev_lib);
     set_count_device(ctx, dev_lib);
+    figures_device(ctx, dev_lib);
 
     /* The host still runs on a device context. */
     static double hx[N], hyv[N];

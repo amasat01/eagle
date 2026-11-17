@@ -15,6 +15,8 @@
  *   dkeyed   a keyed accumulate with a companion and its device fold function (slots acc, acc_c, x).
  *   dkeyednf the same naming a fold function the image does not have (eg_unit_load: FAULT).
  *   dkeyedh  the same with a host fold entry and no device fold function (a DEVICE plan: NOT_WRITTEN).
+ *   dcount   a finishing unit, one step per launch (slots k, limit, mask, finished, geom); geom holds the launch's
+ *            threads per block and blocks as the kernel saw them.
  */
 #include "eagle/door/eg_door.h"
 #include "eagle/door/eg_unit_meta.h"
@@ -135,11 +137,28 @@ static const struct eg_unit_launch launch_prefix = {
     .index_count_slot = 2, .group = 1 };
 MADE_UNIT(unit_dprefix, "dprefix", 0xD6, "dprefix", prefix_body, launch_prefix);
 
+SLOT(slot_k, EG_ROLE_MUTABLE, EG_DTYPE_REAL, 0, NULL, "k");
+SLOT(slot_limit, EG_ROLE_PER_SAMPLE, EG_DTYPE_REAL, 0, NULL, "limit");
+SLOT(slot_mask, EG_ROLE_TERMINATED, EG_DTYPE_BOOL, 0, NULL, "mask");
+SLOT(slot_finished, EG_ROLE_LOOKUP, EG_DTYPE_UINT32, 0, NULL, "finished");
+SLOT(slot_geom, EG_ROLE_LOOKUP, EG_DTYPE_REAL, 0, NULL, "geom");
+static const struct eg_unit_slot* const count_slots[] = { &slot_k, &slot_limit, &slot_mask, &slot_finished, &slot_geom };
+static const struct eg_unit_body count_body = {
+    .struct_size = sizeof(struct eg_unit_body), .access = EG_ACCESS_SAMPLE_LOCAL, .n_slots = 5, .slots = count_slots };
+static const struct eg_unit_finish count_finish = {
+    .struct_size = sizeof(struct eg_unit_finish), .flags = 0, .mask_slot = 2, .counter_slot = 3, .steps_slot = -1,
+    .steps = 1, .steps_max = 0, .step_ops = -1, .fp64_ops_ir = -1, .host_steps_reverse = NULL, .device_steps_reverse = NULL };
+static const struct eg_unit_meta unit_dcount = {
+    .struct_size = sizeof(struct eg_unit_meta), .name = "dcount", .digest = DIGEST(0xD7), .pattern = EG_PATTERN_PURE,
+    .scalar_type = EG_SCALAR_FLOAT64, .device_image = "fixture__image", .device_function = "dcount",
+    .device_image_format = EG_IMAGE_FATBIN, .body = &count_body, .launch = &launch_any, .finish = &count_finish,
+    .device_image_size = "fixture__image_size" };
+
 static const struct eg_unit_meta* const units[] = { &unit_axpy, &unit_axpy64, &unit_boxdev, &unit_banded, &unit_nofn,
-                                                    &unit_noimg, &unit_dcells, &unit_dkeyed, &unit_dkeyednf, &unit_dkeyedh, &unit_fat129, &unit_ptx129, &unit_sass70, &unit_dprefix };
+                                                    &unit_noimg, &unit_dcells, &unit_dkeyed, &unit_dkeyednf, &unit_dkeyedh, &unit_fat129, &unit_ptx129, &unit_sass70, &unit_dprefix, &unit_dcount };
 
 static const struct eg_library_meta library = {
-    .struct_size = sizeof(struct eg_library_meta), .schema_major = EG_META_SCHEMA_MAJOR, .n_units = 14, .units = units,
+    .struct_size = sizeof(struct eg_library_meta), .schema_major = EG_META_SCHEMA_MAJOR, .n_units = 15, .units = units,
 };
 
 __attribute__((visibility("default"))) const struct eg_library_meta* eg_unit_library_meta(void) { return &library; }

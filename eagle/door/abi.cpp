@@ -131,6 +131,10 @@ EG_EXPORT eg_status eg_banded_pack_scalar(eg_ctx* ctx, double x, uint64_t* out) 
     return door::call(ctx, [&](eg_ctx& c) { door::banded_pack_scalar(c, x, out); });
 }
 
+EG_EXPORT eg_status eg_plan_entry_figures(eg_ctx* ctx, const eg_plan* plan, struct eg_entry_figures* out) {
+    return door::call(ctx, [&](eg_ctx& c) { door::plan_entry_figures(c, plan, out); });
+}
+
 EG_EXPORT eg_status eg_launch(eg_ctx* ctx, eg_plan* plan, uint64_t* tiles) {
     return door::call(ctx, [&](eg_ctx& c) { door::launch(c, plan, tiles); });
 }
@@ -215,6 +219,10 @@ EG_EXPORT eg_status eg_run(eg_ctx* ctx, eg_runner* runner, struct eg_run_report*
             door::run(c, runner, report);
         }
     });
+}
+
+EG_EXPORT eg_status eg_runner_figures(eg_ctx* ctx, const eg_runner* runner, struct eg_runner_figures* out) {
+    return door::call(ctx, [&](eg_ctx& c) { door::runner_figures(c, runner, out); });
 }
 
 EG_EXPORT eg_status eg_reverse(eg_ctx* ctx, eg_runner* runner, const struct eg_bind_desc* seeds,

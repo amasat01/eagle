@@ -697,6 +697,25 @@ void set_count(eg_ctx& ctx, eg_plan_s* plan, std::uint32_t m) {
     else std::memcpy(at, &m, sizeof(m));
 }
 
+/** @brief eg_plan_entry_figures: the device entries of the plan's unit as read at load; a host plan or a unit with no
+ *  device function of its own has none. */
+void plan_entry_figures(eg_ctx& ctx, const eg_plan_s* plan, eg_entry_figures* out) {
+    check_handle(ctx.plans, plan, "plan");
+    const eg_unit_s& u = *plan->unit;
+    eg_entry_figures f{};
+    if (plan->structure == EG_STRUCTURE_DEVICE && u.function != 0) {
+        f.flags = EG_ENTRY_DEVICE | (u.persist_fn != 0 ? EG_ENTRY_PERSIST : 0u);
+        f.regs = u.regs;
+        f.max_threads = u.max_threads;
+        f.persist_regs = u.persist_regs;
+        f.persist_max_threads = u.persist_max_threads;
+        f.local_bytes = u.local_bytes;
+        f.shared_bytes = u.shared_bytes;
+        f.const_bytes = u.const_bytes;
+    }
+    write_output(out, f, "eg_entry_figures");
+}
+
 /** @brief eg_bind: check every entry, then replace the named slots. */
 void bind(eg_ctx& ctx, eg_plan_s* plan, const eg_bind_desc* desc) {
     check_handle(ctx.plans, plan, "plan");

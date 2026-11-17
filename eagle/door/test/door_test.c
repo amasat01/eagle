@@ -2613,6 +2613,57 @@ static void check_alloc(eg_ctx* ctx, eg_unit* axpb) {
     }
 }
 
+/* eg_runner_figures and eg_plan_entry_figures on the host: no launch figures and no device entry, by a flag and -1, not by
+ * zeros; the OUTPUT struct rule and the refusals by status and reason. */
+static void check_figures(eg_ctx* ctx) {
+    static double k[RN], limit[RN];
+    static unsigned char mask[RN];
+    struct tensor t[3];
+    count_inputs(k, limit, mask);
+    eg_unit* c1 = NULL;
+    check(load(ctx, "count1", 0xD1, &c1) == EG_OK, "eg_unit_load count1 for the figures");
+    if (c1 == NULL) return;
+    eg_plan* p = count_plan(ctx, c1, EG_STRUCTURE_HOST_TEAM, k, limit, mask, t);
+    eg_runner* r = NULL;
+    const struct eg_runner_desc d = runner_desc(&p, 1, 1000);
+    int ok = p != NULL && eg_runner_new(ctx, &d, &r) == EG_OK;
+    struct eg_runner_figures f;
+    struct eg_entry_figures e;
+    memset(&f, 0x55, sizeof(f));
+    f.struct_size = sizeof(f);
+    memset(&e, 0x55, sizeof(e));
+    e.struct_size = sizeof(e);
+    struct eg_run_report rep;
+    memset(&rep, 0, sizeof(rep));
+    rep.struct_size = sizeof(rep);
+    for (int pass = 0; pass < 2; ++pass) { /* before and after a run: a host runner has no launch either way */
+        ok = ok && eg_runner_figures(ctx, r, &f) == EG_OK && f.struct_size == sizeof(f) && f.mode == EG_MODE_HOST &&
+             f.block == -1 && f.chunk == -1 && f.grid == -1;
+        if (pass == 0) ok = ok && eg_run(ctx, r, &rep) == EG_OK;
+    }
+    check(ok, "eg_runner_figures on a host runner, before and after eg_run: mode HOST, block, chunk and grid -1");
+    ok = eg_plan_entry_figures(ctx, p, &e) == EG_OK && e.struct_size == sizeof(e) && e.flags == 0 && e.regs == 0 &&
+         e.max_threads == 0 && e.persist_regs == 0 && e.persist_max_threads == 0 && e.local_bytes == 0 &&
+         e.shared_bytes == 0 && e.const_bytes == 0;
+    check(ok, "eg_plan_entry_figures on a host plan: EG_ENTRY_DEVICE clear, every figure 0");
+    struct eg_runner_figures shorter;
+    memset(&shorter, 0x55, sizeof(shorter));
+    shorter.struct_size = 2 * sizeof(uint32_t);
+    ok = eg_runner_figures(ctx, r, &shorter) == EG_OK && shorter.struct_size == 2 * sizeof(uint32_t) &&
+         shorter.mode == (eg_run_mode)0x55555555;
+    check(ok, "eg_runner_figures writes min(caller, eagle) bytes: the fields past a short struct_size are untouched");
+    struct eg_runner_figures zero;
+    memset(&zero, 0, sizeof(zero));
+    ok = eg_runner_figures(ctx, r, NULL) == EG_BAD_REQUEST && reason_has(ctx, "eg_runner_figures is NULL");
+    ok = ok && eg_runner_figures(ctx, r, &zero) == EG_BAD_REQUEST && reason_has(ctx, "struct_size 0 is too small");
+    ok = ok && eg_runner_figures(ctx, NULL, &f) == EG_BAD_REQUEST && reason_has(ctx, "runner is NULL");
+    ok = ok && eg_plan_entry_figures(ctx, p, NULL) == EG_BAD_REQUEST && reason_has(ctx, "eg_entry_figures is NULL");
+    ok = ok && eg_plan_entry_figures(ctx, NULL, &e) == EG_BAD_REQUEST && reason_has(ctx, "plan is NULL");
+    check(ok, "eg_runner_figures and eg_plan_entry_figures: a NULL out, a zero struct_size and a NULL handle refused BAD_REQUEST by reason");
+    check(eg_runner_free(ctx, r) == EG_OK && eg_plan_free(ctx, p) == EG_OK && eg_unit_free(ctx, c1) == EG_OK,
+          "eg_runner_free, eg_plan_free and eg_unit_free after the figures");
+}
+
 int main(int argc, char** argv) {
     if (argc != 5) {
         fprintf(stderr, "usage: %s <fixture> <wrong size> <no size block> <v1 tag>\n", argv[0]);
@@ -2656,6 +2707,7 @@ int main(int argc, char** argv) {
     check_set_count(ctx, unit);
     check_unit_flags(ctx);
     check_banded(ctx);
+    check_figures(ctx);
 
     check_reduce(ctx);
     check_conditionals(ctx);

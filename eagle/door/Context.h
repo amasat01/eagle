@@ -64,6 +64,19 @@ T read_input(const T* in, const char* what) {
     return out;
 }
 
+/**
+ * @brief Write @p value into the OUTPUT struct @p out: the bytes its ``struct_size`` covers, that size written back.
+ */
+template <class T>
+void write_output(T* out, T value, const char* what) {
+    if (out == nullptr) refuse(EG_BAD_REQUEST, std::string(what) + " is NULL");
+    if (out->struct_size < sizeof(std::uint32_t))
+        refuse(EG_BAD_REQUEST, std::string(what) + ": struct_size " + std::to_string(out->struct_size) + " is too small");
+    const std::uint32_t n = std::min<std::uint32_t>(out->struct_size, sizeof(T));
+    value.struct_size = n;
+    std::memcpy(static_cast<void*>(out), static_cast<const void*>(&value), n);
+}
+
 /** @brief One argument slot of a loaded unit, as eg_bind and eg_launch read it. */
 struct SlotFacts {
     std::int32_t role = 0;
@@ -266,6 +279,7 @@ struct eg_unit_s {
     int regs = 0, max_threads = 0;            ///< the device function's registers per thread and most threads per block
     std::uint64_t persist_fn = 0, range_fn = 0;   ///< AUTO: the image's ``<function>_persist`` / ``_range`` entries, 0: absent
     int persist_regs = 0, persist_max_threads = 0;
+    int local_bytes = 0, shared_bytes = 0, const_bytes = 0;   ///< the device function's local (per thread), static shared and constant memory
     int refs = 1;                             ///< the caller's reference plus one per plan
     bool caller_ref = true;
 };
@@ -526,9 +540,9 @@ eg_status call(eg_ctx* ctx, F&& body, bool in_child = false, bool in_refused = f
 
 /** @brief Refuse @p handle unless @p set (a context's registry) holds it. */
 template <class H>
-void check_handle(const std::unordered_set<H*>& set, H* handle, const char* what) {
+void check_handle(const std::unordered_set<H*>& set, const H* handle, const char* what) {
     if (handle == nullptr) refuse(EG_BAD_REQUEST, std::string(what) + " is NULL");
-    if (set.count(handle) == 0)
+    if (set.count(const_cast<H*>(handle)) == 0)
         refuse(EG_BAD_REQUEST, std::string(what) +
                " is not a live handle of this context (freed, or made by another context)");
 }
@@ -664,6 +678,10 @@ bool device_active_compact(eg_ctx& ctx, eg_runner_s& runner, const void* mask, c
 void device_active_restore(eg_ctx& ctx, eg_runner_s& runner, const void* mask, const std::vector<Owned>& owned);
 void device_runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out);
 void device_run(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report);
+/** @brief eg_runner_figures: fill @p out with the mode and the resolved launch of @p runner. */
+void runner_figures(eg_ctx& ctx, const eg_runner_s* runner, struct eg_runner_figures* out);
+/** @brief eg_plan_entry_figures: fill @p out with the device entries of the unit of @p plan. */
+void plan_entry_figures(eg_ctx& ctx, const eg_plan_s* plan, eg_entry_figures* out);
 
 }  // namespace door
 }  // namespace eagle
