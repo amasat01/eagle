@@ -1,0 +1,21 @@
+# The door's sources, one list for the Makefile and for cmake/EagleDoor.cmake. A path alone is built in every mode; "cuda <path>" only
+# when the device group is built in (CUDA mode).
+Context.cpp
+Unit.cpp
+Plane.cpp
+Plan.cpp
+Fft.cpp
+Gemm.cpp
+RunCheck.cpp
+Look.cpp
+abi.cpp
+host/Runner.cpp
+host/Reverse.cpp
+host/Ops.cpp
+host/Fft.cpp
+host/Gemm.cpp
+host/Record.cpp
+device/Device.cpp
+device/Gemm.cpp
+cuda device/Fft.cpp
+cuda device/Loop.cu

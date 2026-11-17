@@ -87,8 +87,10 @@ comma := ,
 CXXFLAGS_DEVICE := $(filter-out -DEAGLE_CPU_ONLY=1,$(CXXFLAGS_DOOR)) -isystem $(CUDA)/include
 CUDART := $(if $(CUDA),-L$(CUDA)/lib64 -lcudart -Wl$(comma)-rpath$(comma)$(CUDA)/lib64)
 
-SRC := Context.cpp Unit.cpp Plane.cpp Plan.cpp Fft.cpp Gemm.cpp RunCheck.cpp Look.cpp abi.cpp host/Runner.cpp host/Reverse.cpp host/Ops.cpp host/Fft.cpp host/Gemm.cpp host/Record.cpp device/Device.cpp device/Gemm.cpp
-OBJ := $(SRC:%.cpp=$(OUT)/%.o) $(if $(CUDA),$(OUT)/device/Loop.o $(OUT)/device/Fft.o)
+# The sources are listed once, in sources.txt, which cmake/EagleDoor.cmake reads too.
+SRC := $(shell sed -n '/^[^\# ][^ ]*$$/p' sources.txt)
+CUDA_SRC := $(shell sed -n 's/^cuda //p' sources.txt)
+OBJ := $(SRC:%.cpp=$(OUT)/%.o) $(if $(CUDA),$(patsubst %.cu,$(OUT)/%.o,$(CUDA_SRC:%.cpp=$(OUT)/%.o)))
 # The shared-library link differs by system; door.map stays the one list of exported names (Darwin's list is made from it).
 ifeq ($(shell uname -s),Darwin)
 SOEXT := dylib
