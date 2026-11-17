@@ -267,14 +267,17 @@ struct eg_unit_dispatch {
                                           in deps; the set eagle fills each step); else NULL. A branch record is static (stale_slot -1,
                                           classify set, sweep NULL) or dynamic (stale_slot and sweep set, classify NULL); any other mix is refused */
     const struct eg_branch_cost* const* branch_costs; /**< AUTO: k entries, branches[j]'s cost; NULL: not stated (AUTO runs as built) */
-    uint32_t cost_flags;      /**< EG_DISPATCH_FUSED_VECTORISED, EG_DISPATCH_STATIC_SELECTOR; 0: none stated */
-    uint32_t reserved1;
+    uint32_t cost_flags;      /**< EG_DISPATCH_FUSED_VECTORISED, EG_DISPATCH_VECTOR_STATED; 0: none stated */
+    int32_t n_selector_slots; /**< the entries of selector_slots, 0: not stated */
+    const int32_t* selector_slots; /**< the slots whose planes the group's selector reads; the selector is static over a run
+                                        that writes none of them. NULL: not stated */
 };
 
 #define EG_BRANCH_VECTORISED (1u << 0)   /**< eg_branch_cost.flags: this branch's host loop vectorises */
 #define EG_BRANCH_HAS_STORES (1u << 1)   /**< eg_branch_cost.flags: ``stores`` is stated */
+#define EG_BRANCH_VECTOR_STATED (1u << 2) /**< eg_branch_cost.flags: EG_BRANCH_VECTORISED is a verdict, not unknown */
 #define EG_DISPATCH_FUSED_VECTORISED (1u << 0) /**< eg_unit_dispatch.cost_flags: the fused host loop vectorises */
-#define EG_DISPATCH_STATIC_SELECTOR (1u << 1)  /**< eg_unit_dispatch.cost_flags: the selector is static */
+#define EG_DISPATCH_VECTOR_STATED (1u << 1)    /**< eg_unit_dispatch.cost_flags: EG_DISPATCH_FUSED_VECTORISED is a verdict, not unknown */
 
 /** One branch's operation counts per sample, as the library counts them: the inputs of the run-time dispatch
  *  decision. The counts are per step of the branch; the weights that price them are not kernel facts and are not here. */
@@ -287,7 +290,6 @@ struct eg_branch_cost {
     double chain32, chain64;  /**< the longest dependent arithmetic chain at 32 and 64 bits */
     double chain_special32, chain_special64; /**< the special functions on that chain */
     double stores;            /**< plane writes; read only with EG_BRANCH_HAS_STORES */
-    double selector_reads;    /**< reads of the selector's inputs, as the library counts them */
 };
 
 /** The typed walk of a unit: its slots and the planes eagle makes for it. */
