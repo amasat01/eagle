@@ -80,7 +80,7 @@ comma := ,
 CXXFLAGS_DEVICE := $(filter-out -DEAGLE_CPU_ONLY=1,$(CXXFLAGS_DOOR)) -isystem $(CUDA)/include
 CUDART := $(if $(CUDA),-L$(CUDA)/lib64 -lcudart -Wl$(comma)-rpath$(comma)$(CUDA)/lib64)
 
-SRC := Context.cpp Unit.cpp Plane.cpp Plan.cpp Fft.cpp RunCheck.cpp abi.cpp host/Runner.cpp host/Reverse.cpp host/Ops.cpp host/Fft.cpp host/Record.cpp device/Device.cpp device/Gemm.cpp
+SRC := Context.cpp Unit.cpp Plane.cpp Plan.cpp Fft.cpp Gemm.cpp RunCheck.cpp abi.cpp host/Runner.cpp host/Reverse.cpp host/Ops.cpp host/Fft.cpp host/Gemm.cpp host/Record.cpp device/Device.cpp device/Gemm.cpp
 OBJ := $(SRC:%.cpp=$(OUT)/%.o) $(if $(CUDA),$(OUT)/device/Loop.o $(OUT)/device/Fft.o)
 # The shared-library link differs by system; door.map stays the one list of exported names (Darwin's list is made from it).
 ifeq ($(shell uname -s),Darwin)
@@ -194,9 +194,16 @@ GEMM_TEST := $(OUT)/gemm_test
 GEMM_DEVICE_TEST := $(OUT)/gemm_device_test
 NO_CUBLAS := $(OUT)/libno_cublas.so
 
-$(GEMM_FIXTURE): test/fixture_gemm.c eg_door.h eg_unit_meta.h
+# With CUDA the fixture carries the device functions of test/fixture_gemm.cu (sm_61 fatbin), so a DEVICE plan the door
+# cannot route to cuBLAS has a kernel.
+$(OUT)/fixture_gemm.fatbin: test/fixture_gemm.cu | check-cuda
 	@mkdir -p $(OUT)
-	$(CC) $(CFLAGS_C) -fPIC -shared -fvisibility=hidden -o $@ $<
+	$(NVCC) -fatbin -arch=sm_61 -Wno-deprecated-gpu-targets -std=c++20 -ccbin $(CXX) -I$(ROOT) $< -o $@
+
+$(GEMM_FIXTURE): test/fixture_gemm.c eg_door.h eg_unit_meta.h $(if $(CUDA),$(OUT)/fixture_gemm.fatbin)
+	@mkdir -p $(OUT)
+	$(if $(CUDA),$(call embed,$(OUT)/fixture_gemm.fatbin,gemm__image,$(OUT)/fixture_gemm_image.o))
+	$(CC) $(CFLAGS_C) $(if $(CUDA),-DEG_GEMM_IMAGE) -fPIC -shared -fvisibility=hidden -o $@ $< $(if $(CUDA),$(OUT)/fixture_gemm_image.o)
 
 $(GEMM_TEST): test/gemm_test.c eg_door.h eg_unit_meta.h $(LIB)
 	$(CC) $(CFLAGS_C) -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door -Wl,-rpath,$(OUT) -ldl -lm -pthread

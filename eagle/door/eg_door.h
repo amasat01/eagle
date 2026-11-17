@@ -82,6 +82,7 @@ typedef struct eg_plane_s eg_plane;   /**< one array taken from DLPack; referenc
 typedef struct eg_plan_s eg_plan;     /**< a unit under one structure over fixed partitions, plus its bindings */
 typedef struct eg_runner_s eg_runner; /**< a run-until-done loop over bound plans; keeps its record */
 typedef struct eg_graph_s eg_graph;   /**< a recorded sequence of door calls, replayed as one */
+typedef struct eg_gemm_s eg_gemm;     /**< a matrix product: stored shapes, flags and width, and on a device the stream's cuBLAS handle */
 typedef struct eg_fft_s eg_fft;       /**< a transform plan: kind, norm, shape and axes, and on a device its cuFFT plans */
 
 /** DLPack >= 1.0 managed tensor (dlpack.h). Only a pointer crosses. */
@@ -395,6 +396,11 @@ struct eg_runner_figures {
 /** Entry flags. */
 #define EG_ENTRY_DEVICE (1u << 0)  /**< the plan has a device function: its figures are set */
 #define EG_ENTRY_PERSIST (1u << 1) /**< the image has a persist entry: ``persist_*`` are set */
+#define EG_ENTRY_GEMM (1u << 2)    /**< a gemm unit the door routes: ``eg_launch`` queues its cuBLAS products, not the
+                                        device function (EG_ENTRY_DEVICE is clear and every figure 0). Set only for
+                                        a DEVICE plan of one partition with no index or active set, cells or
+                                        companions (eg_unit_meta.h, gemm units); any other DEVICE plan of a gemm unit
+                                        launches its own kernel. */
 
 /**
  * OUTPUT of ``eg_plan_entry_figures``: what the driver reports for the plan's
@@ -731,7 +737,7 @@ eg_status eg_launch(eg_ctx* ctx, eg_plan* plan, uint64_t* tiles);
 /**
  * Read the device entries of a plan's unit as the driver reported them at
  * load. A host plan, or a unit without a device function (a split unit), has
- * no device entry: EG_ENTRY_DEVICE is clear and every figure is 0.
+ * no device entry: EG_ENTRY_DEVICE is clear and every figure is 0. A routed gemm unit sets EG_ENTRY_GEMM instead.
  * Replaces: ``BoundPlan.entry_reports`` (registers, local memory, demand).
  * Calls today: nothing compiled (Python reads the driver itself).
  * Status: OK; BAD_REQUEST (``out`` NULL or its ``struct_size`` too small, a
@@ -943,9 +949,60 @@ eg_status eg_fft_run(eg_ctx* ctx, eg_fft* plan, eg_plane* in, eg_plane* out);
 /** Drop the caller's reference to a plan; a recording that runs it keeps it. NULL-safe. */
 eg_status eg_fft_free(eg_ctx* ctx, eg_fft* plan);
 
+/* ---- matrix products ----------------------------------------------------- */
+
+/** ``eg_gemm_desc.flags`` (also ``eg_unit_gemm_call.flags``). */
+#define EG_GEMM_TRANS_A (1u << 0)    /**< op(A) = A^T: A is stored (k, m) */
+#define EG_GEMM_TRANS_B (1u << 1)    /**< op(B) = B^T: B is stored (n, k) */
+#define EG_GEMM_TRANS_C (1u << 2)    /**< C is stored through a transposed view: (n, m) */
+#define EG_GEMM_ACCUMULATE (1u << 3) /**< C += product (beta 1); without: C = product (beta 0) */
+
+/**
+ * INPUT to ``eg_gemm_new``: the product ``C = op(A) op(B)`` (``C += `` with EG_GEMM_ACCUMULATE) of three row-major
+ * matrices, stated as STORED shapes: op(A) is (m, k) and A is stored (k, m) under EG_GEMM_TRANS_A, op(B) is (k, n) and
+ * B is stored (n, k) under EG_GEMM_TRANS_B, C is stored (m, n), or (n, m) under EG_GEMM_TRANS_C.
+ */
+struct eg_gemm_desc {
+    uint32_t struct_size;
+    uint32_t flags;                /**< EG_GEMM_* */
+    uint32_t dtype_bits;           /**< 32 or 64: the float width of the three planes */
+    int32_t reserved0;
+    int64_t a_rows, a_cols, b_rows, b_cols, c_rows, c_cols; /**< the stored shapes, each in 1 .. 2^31 - 1 */
+};
+
+/**
+ * Make a matrix product for the context's target: a host context runs a plain ordered triple loop (reference speed,
+ * deterministic, the same bits at any thread count), a device context cuBLAS (opened at the first device product or
+ * gemm plan, libcublas.so.13 then .12, never linked) on the context's stream, with the handle made here as
+ * ``eg_plan_new`` makes a gemm plan's. A reduce against ones is a product with ``b_cols`` 1 whose ones plane the
+ * caller owns. Allocates (the handle), so it is not recordable: refused between eg_record_begin and eg_record_end.
+ * Replaces: ``eagle.gemm.plan.lower_dense_gemm`` caller-built plans and the old host twin.
+ * Calls today: ``cublasSgemm`` / ``cublasDgemm`` through ``gemm_launch`` (device/Gemm.cpp); the host loop is new.
+ * Status: OK; BAD_REQUEST (``out`` or ``desc`` NULL, ``struct_size`` too small, unknown flag bits, ``dtype_bits`` not
+ * 32 or 64, an extent below 1 or above 2^31 - 1, contracted extents that disagree, a C stored other than the product's,
+ * a call while recording); FAULT (cuBLAS not loadable, naming the files tried; a cuBLAS or CUDA error).
+ */
+eg_status eg_gemm_new(eg_ctx* ctx, const struct eg_gemm_desc* desc, eg_gemm** out);
+
+/**
+ * Run the product once over the planes ``a``, ``b``, ``c`` (the plan's stored shapes). Device: queued on the context's
+ * stream with no allocation and no wait, so legal inside a recording; host: run before return, or kept and replayed
+ * while recording. Each plane is 2-D, on the product's target, float of its width, writable for ``c``, with ``rows``
+ * rows as stated and a row stride (its second extent) of at least the stated columns, so a wider plane serves a column
+ * slice. ``c`` must not overlap ``a`` or ``b``. A recording keeps the handle's shape, not the handle: ``eg_gemm_free``
+ * before the graph runs is safe; the planes stay the caller's, alive until the graph has run.
+ * Replaces: ``eagle.gemm`` run steps. Calls today: ``gemm_launch`` (device/Gemm.cpp).
+ * Status: OK; BAD_REQUEST (a NULL or foreign handle, a plane of the wrong rank, rows, row stride, width, target or
+ * access, ``c`` overlapping an input); FAULT (a cuBLAS or CUDA error).
+ */
+eg_status eg_gemm_run(eg_ctx* ctx, eg_gemm* gemm, eg_plane* a, eg_plane* b, eg_plane* c);
+
+/** Drop the caller's reference to a product; a host recording that runs it keeps it. NULL-safe. */
+eg_status eg_gemm_free(eg_ctx* ctx, eg_gemm* gemm);
+
 /**
  * Start recording: until ``eg_record_end``, ``eg_launch``, ``eg_run``,
- * ``eg_reduce``, ``eg_copy``, ``eg_fft_run`` and the conditional calls are recorded, not
+ * ``eg_reduce``, ``eg_copy``, ``eg_fft_run``, ``eg_gemm_run`` and the conditional calls are recorded, not
  * run. Host: an ordered list replayed in C. Device: a capture on the
  * context's stream (so device work the caller issues on that stream between
  * begin and end is captured too).

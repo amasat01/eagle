@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// The recordable host operations that are not launches: reduce, copy and fft. Each
+// The recordable host operations that are not launches: reduce, copy, fft and gemm. Each
 // is checked once (`*_check`, which refuses as eg_door.h states) and then run
 // any number of times (`*_exec`): a recording keeps the checked form.
 #pragma once
@@ -41,6 +41,9 @@ void copy_exec(const eg_plane_s& src, const eg_plane_s& dst);
 /** @brief Run the checked transform @p plan once, @p in -> @p out, on at most @p threads threads (host/Fft.cpp):
  *  pocketfft, then the plan's Hermitian weight. The result is bitwise the same for any thread count. */
 void fft_exec(const eg_fft_s& plan, const eg_plane_s& in, const eg_plane_s& out, int threads);
+
+/** @brief Run the checked product @p gemm once, C (+)= op(@p a) op(@p b) into @p c (host/Gemm.cpp): an ordered triple loop. */
+void gemm_exec(const eg_gemm_s& gemm, const eg_plane_s& a, const eg_plane_s& b, const eg_plane_s& c);
 
 }  // namespace host
 }  // namespace door

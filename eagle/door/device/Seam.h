@@ -16,7 +16,7 @@ void device_close(eg_ctx& ctx) noexcept;
 void device_unit_load(eg_unit_s& unit, const eg_unit_meta& meta, void* library);
 void device_unit_free(eg_unit_s& unit) noexcept;
 void device_plan_check(const eg_ctx& ctx, const eg_unit_s& unit);
-/** @brief eg_plan_new of a DEVICE plan of a gemm unit: open cuBLAS (EG_FAULT naming the libraries tried) and make the handle of the stream in scope. */
+/** @brief eg_plan_new of a routable DEVICE plan of a gemm unit, and eg_gemm_new of a device product: open cuBLAS (EG_FAULT naming the libraries tried) and make the handle of the stream in scope. */
 void device_gemm_ready(eg_ctx& ctx);
 void device_launch(eg_plan_s& plan);
 void device_sync(eg_ctx& ctx);
@@ -46,6 +46,8 @@ void device_copy(eg_ctx& ctx, eg_plane_s* src, eg_plane_s* dst);
 /** @brief The device half of a transform plan (device/Fft.cpp): build @p plan's cuFFT plans and the input copy of a C2R
  *  (FAULT when cuFFT cannot be opened); run it on the context's stream, kept alive by the capture in progress; free it. */
 void device_fft_new(eg_ctx& ctx, eg_fft_s& plan);
+/** @brief eg_gemm_run of a device product: queued on the context's stream (never makes a handle), legal in a capture. */
+void device_gemm_run(eg_ctx& ctx, const eg_gemm_s& gemm, eg_plane_s* a, eg_plane_s* b, eg_plane_s* c);
 void device_fft_run(eg_ctx& ctx, eg_fft_s& plan, eg_plane_s* in, eg_plane_s* out);
 void device_fft_free(eg_ctx& ctx, eg_fft_s& plan) noexcept;
 /** @brief Read @p bytes (a multiple of 4) of device memory at @p device into @p host, ordered after the context's queued work. */

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// The device group's gemm unit (device/Gemm.h): the row-major products of a gemm record mapped onto column-major
-// cuBLAS calls. The few cuBLAS entry points are declared here and resolved at run time, as the driver's are, so the
+// The device group's matrix products (device/Gemm.h): the row-major products of a gemm record, or of eg_gemm_run, mapped
+// onto column-major cuBLAS calls. The few cuBLAS entry points are declared here and resolved at run time, as the driver's are, so the
 // library links no cuBLAS and a machine without it still runs every other unit.
 #include "eagle/door/device/Gemm.h"
 #include "eagle/door/eg_unit_meta.h"
@@ -62,7 +62,7 @@ Cublas open_cublas() {
 const Cublas& cublas() {
     static const Cublas c = open_cublas();
     if (c.create == nullptr)
-        refuse(EG_FAULT, "a DEVICE plan of a gemm unit needs cuBLAS and it cannot be opened (tried " + c.why + ")");
+        refuse(EG_FAULT, "a device matrix product needs cuBLAS and it cannot be opened (tried " + c.why + ")");
     return c;
 }
 
@@ -111,30 +111,33 @@ void gemm_handles_free(eg_ctx& ctx) noexcept {
     ctx.dev.gemm_handles.clear();
 }
 
-void gemm_launch(const eg_plan_s& plan, std::uint64_t stream) {
-    const Cublas& b = cublas();
-    const auto at = plan.ctx->dev.gemm_handles.find(stream);
-    if (at == plan.ctx->dev.gemm_handles.end())
-        refuse(EG_FAULT, "unit '" + plan.unit->name + "': no cuBLAS handle was made for the stream in scope");
+void gemm_product(const eg_ctx& ctx, std::uint64_t stream, const GemmCall& c, bool f32, const void* a, int ld_a, const void* b, int ld_b, void* out, int ld_c) {
+    const Cublas& cb = cublas();
+    const auto at = ctx.dev.gemm_handles.find(stream);
+    if (at == ctx.dev.gemm_handles.end()) refuse(EG_FAULT, "no cuBLAS handle was made for the stream in scope");
     void* handle = reinterpret_cast<void*>(at->second);
+    const Mapped m = map_call(c, ld_a, ld_b);
+    const void* x = m.swapped ? b : a;
+    const void* y = m.swapped ? a : b;
+    const bool accumulate = c.flags & EG_GEMM_ACCUMULATE;
+    if (f32) {
+        const float alpha = 1.0f, beta = accumulate ? 1.0f : 0.0f;
+        check(cb.sgemm(handle, m.op_x, m.op_y, m.m, m.n, m.k, &alpha, static_cast<const float*>(x), m.ldx, static_cast<const float*>(y), m.ldy,
+                       &beta, static_cast<float*>(out), ld_c), "cublasSgemm");
+    } else {
+        const double alpha = 1.0, beta = accumulate ? 1.0 : 0.0;
+        check(cb.dgemm(handle, m.op_x, m.op_y, m.m, m.n, m.k, &alpha, static_cast<const double*>(x), m.ldx, static_cast<const double*>(y), m.ldy,
+                       &beta, static_cast<double*>(out), ld_c), "cublasDgemm");
+    }
+}
+
+void gemm_launch(const eg_plan_s& plan, std::uint64_t stream) {
     const bool f32 = plan.unit->scalar_type == EG_SCALAR_FLOAT32;
     for (const GemmCall& c : plan.gemm) {
         const auto [a, ld_a] = view(plan, c.a, c.a_rows);
         const auto [bp, ld_b] = view(plan, c.b, c.b_rows);
         const auto [cp, ld_c] = view(plan, c.c, c.c_rows);
-        const Mapped m = map_call(c, ld_a, ld_b);
-        const char* x = m.swapped ? bp : a;
-        const char* y = m.swapped ? a : bp;
-        const bool accumulate = c.flags & EG_GEMM_ACCUMULATE;
-        if (f32) {
-            const float alpha = 1.0f, beta = accumulate ? 1.0f : 0.0f;
-            check(b.sgemm(handle, m.op_x, m.op_y, m.m, m.n, m.k, &alpha, reinterpret_cast<const float*>(x), m.ldx, reinterpret_cast<const float*>(y), m.ldy,
-                          &beta, reinterpret_cast<float*>(cp), ld_c), "cublasSgemm");
-        } else {
-            const double alpha = 1.0, beta = accumulate ? 1.0 : 0.0;
-            check(b.dgemm(handle, m.op_x, m.op_y, m.m, m.n, m.k, &alpha, reinterpret_cast<const double*>(x), m.ldx, reinterpret_cast<const double*>(y), m.ldy,
-                          &beta, reinterpret_cast<double*>(cp), ld_c), "cublasDgemm");
-        }
+        gemm_product(*plan.ctx, stream, c, f32, a, ld_a, bp, ld_b, cp, ld_c);
     }
 }
 

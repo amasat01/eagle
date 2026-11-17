@@ -222,9 +222,6 @@ void check_index_set(const eg_plan_s& plan, const eg_bind_desc& d) {
     }
 }
 
-/** @brief The largest extent or row stride cuBLAS takes (a C int). */
-constexpr std::int64_t kGemmMaxExtent = 2147483647;
-
 /** @brief The unit's gemm calls with the extents of a plan over @p n_samples lanes resolved and m, n, k set; refuses a record the
  *  shapes contradict (the contracted extents, C's stored shape, an extent that is empty or too large for cuBLAS). */
 std::vector<GemmCall> resolve_gemm(const eg_unit_s& unit, std::int64_t n_samples) {
@@ -243,50 +240,16 @@ std::vector<GemmCall> resolve_gemm(const eg_unit_s& unit, std::int64_t n_samples
                 refuse(EG_BAD_REQUEST, at + ": the extent " + std::to_string(*e) + " (n_samples " + std::to_string(n_samples) + ") is outside 1 .. " +
                        std::to_string(kGemmMaxExtent));
         }
-        const bool ta = c.flags & EG_GEMM_TRANS_A, tb = c.flags & EG_GEMM_TRANS_B, tc = c.flags & EG_GEMM_TRANS_C;
-        const std::int64_t k_a = ta ? c.a_rows : c.a_cols, k_b = tb ? c.b_cols : c.b_rows;
-        c.m = ta ? c.a_cols : c.a_rows;
-        c.n = tb ? c.b_rows : c.b_cols;
-        c.k = k_a;
-        if (k_a != k_b)
-            refuse(EG_BAD_REQUEST, at + ": the contracted extents disagree: A stored (" + std::to_string(c.a_rows) + ", " + std::to_string(c.a_cols) +
-                   ") gives " + std::to_string(k_a) + ", B stored (" + std::to_string(c.b_rows) + ", " + std::to_string(c.b_cols) + ") gives " + std::to_string(k_b));
-        const std::int64_t want_rows = tc ? c.n : c.m, want_cols = tc ? c.m : c.n;
-        if (c.c_rows != want_rows || c.c_cols != want_cols)
-            refuse(EG_BAD_REQUEST, at + ": C is stored (" + std::to_string(c.c_rows) + ", " + std::to_string(c.c_cols) + ") but the product of (" + std::to_string(c.m) +
-                   ", " + std::to_string(c.k) + ") and (" + std::to_string(c.k) + ", " + std::to_string(c.n) + ") is stored (" + std::to_string(want_rows) + ", " +
-                   std::to_string(want_cols) + ")");
+        gemm_shape(c, at);
     }
     return calls;
 }
 
-/** @brief Refuse a DEVICE plan of a gemm unit that is more than one product per launch: several partitions, or a unit the one
- *  gemm per call would skip the work of. */
-void check_gemm_device(const eg_unit_s& unit, std::size_t n_parts) {
-    const char* inside = n_parts != 1                                       ? "several partitions"
-                         : !unit.stages.empty()                             ? "a split unit"
-                         : unit.seg.present                                 ? "a SEGMENTED dispatch group"
-                         : !unit.cells.empty() || !unit.companions.empty()  ? "cells or companions"
-                         : unit.index_map_slot >= 0 || unit.index_count_slot >= 0 ? "an index set"
-                         : unit.active_map_slot >= 0                        ? "an active set"
-                                                                            : nullptr;
-    if (inside != nullptr)
-        refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "' on DEVICE: a gemm unit is one product per launch; " + inside + " is not written");
-}
-
-/** @brief Refuse a plane @p t bound to slot @p slot of gemm call @p call that is not a (rows, elements / rows) view whose row stride covers the
- *  stated @p cols and that cuBLAS takes. */
-void check_gemm_plane(const eg_plan_s& plan, std::size_t call, std::int32_t slot, std::int64_t rows, std::int64_t cols, const DLTensor& t) {
-    const std::string at = "unit '" + plan.unit->name + "' gemm calls[" + std::to_string(call) + "] slot " + std::to_string(slot) + " ('" +
-                           plan.unit->slots[static_cast<std::size_t>(slot)].name + "')";
-    const std::int64_t count = elements(t);
-    if (count % rows != 0)
-        refuse(EG_BAD_REQUEST, at + ": a plane of " + std::to_string(count) + " elements is not a whole number of rows of its " + std::to_string(rows) + " stated rows");
-    const std::int64_t stride = count / rows;
-    if (stride < cols)
-        refuse(EG_BAD_REQUEST, at + ": the row stride " + std::to_string(stride) + " is smaller than the " + std::to_string(cols) + " stated columns");
-    if (stride > kGemmMaxExtent)
-        refuse(EG_BAD_REQUEST, at + ": the row stride " + std::to_string(stride) + " is beyond " + std::to_string(kGemmMaxExtent));
+/** @brief Whether a DEVICE plan of the gemm unit @p unit over @p n_parts partitions can be the cuBLAS products: one product per
+ *  launch, so not several partitions, a split or segmented unit, cells or companions, an index set or an active set. */
+bool gemm_routable(const eg_unit_s& unit, std::size_t n_parts) {
+    return n_parts == 1 && unit.stages.empty() && !unit.seg.present && unit.cells.empty() && unit.companions.empty() &&
+           unit.index_map_slot < 0 && unit.index_count_slot < 0 && unit.active_map_slot < 0;
 }
 
 /** @brief Check every entry of @p d before any binding changes (a bind is all or none). */
@@ -364,7 +327,9 @@ void check_bind(const eg_ctx& ctx, const eg_plan_s& plan, const eg_bind_desc& d)
         const std::int64_t rows[3] = { c.a_rows, c.b_rows, c.c_rows }, cols[3] = { c.a_cols, c.b_cols, c.c_cols };
         for (int j = 0; j < 3; ++j)
             if (seen[static_cast<std::size_t>(slots[j])])
-                check_gemm_plane(plan, i, slots[j], rows[j], cols[j], bound_plane(slots[j])->tensor->dl_tensor);
+                check_gemm_plane("unit '" + plan.unit->name + "' gemm calls[" + std::to_string(i) + "] slot " + std::to_string(slots[j]) + " ('" +
+                                     plan.unit->slots[static_cast<std::size_t>(slots[j])].name + "')",
+                                 rows[j], cols[j], bound_plane(slots[j])->tensor->dl_tensor);
     }
 }
 
@@ -489,10 +454,7 @@ void plan_new(eg_ctx& ctx, const eg_plan_desc* desc, eg_plan** out) {
     std::vector<GemmCall> gemm;
     if (d.unit->gemm.present) {
         gemm = resolve_gemm(*d.unit, d.n_samples);
-        if (device) {
-            check_gemm_device(*d.unit, parts.size());
-            device_gemm_ready(ctx);
-        }
+        if (device && gemm_routable(*d.unit, parts.size())) device_gemm_ready(ctx);
     }
     auto* plan = new eg_plan_s;
     plan->ctx = &ctx;
@@ -794,13 +756,19 @@ void set_count(eg_ctx& ctx, eg_plan_s* plan, std::uint32_t m) {
     else std::memcpy(at, &m, sizeof(m));
 }
 
-/** @brief eg_plan_entry_figures: the device entries of the plan's unit as read at load; a host plan or a unit with no
- *  device function of its own has none. */
+bool gemm_routed(const eg_plan_s& plan) {
+    return plan.structure == EG_STRUCTURE_DEVICE && plan.unit->gemm.present && gemm_routable(*plan.unit, plan.parts.size());
+}
+
+/** @brief eg_plan_entry_figures: the device entries of the plan's unit as read at load; a host plan, a routed gemm unit or a
+ *  unit with no device function of its own has none (a routed gemm unit sets EG_ENTRY_GEMM). */
 void plan_entry_figures(eg_ctx& ctx, const eg_plan_s* plan, eg_entry_figures* out) {
     check_handle(ctx.plans, plan, "plan");
     const eg_unit_s& u = *plan->unit;
     eg_entry_figures f{};
-    if (plan->structure == EG_STRUCTURE_DEVICE && u.function != 0) {
+    if (gemm_routed(*plan)) {
+        f.flags = EG_ENTRY_GEMM;
+    } else if (plan->structure == EG_STRUCTURE_DEVICE && u.function != 0) {
         f.flags = EG_ENTRY_DEVICE | (u.persist_fn != 0 ? EG_ENTRY_PERSIST : 0u);
         f.regs = u.regs;
         f.max_threads = u.max_threads;

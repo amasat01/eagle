@@ -43,6 +43,7 @@ void device_plan_check(const eg_ctx&, const eg_unit_s&) {
     refuse(EG_NOT_WRITTEN, "structure DEVICE: the device group is not built");
 }
 void device_gemm_ready(eg_ctx&) {}
+void device_gemm_run(eg_ctx&, const eg_gemm_s&, eg_plane_s*, eg_plane_s*, eg_plane_s*) {}
 void device_launch(eg_plan_s&) {}
 void device_sync(eg_ctx&) {}
 void device_plan_cells(eg_plan_s&) {}
@@ -437,11 +438,12 @@ void fold_cell(const eg_plan_s& plan, std::size_t i, const DLTensor& rows, const
 /** @brief Queue one launch per partition of @p plan on @p stream: grid from the partition's count and the
  *  meta's block (else the resolved one), the bound views and uniforms by value, then the triple; then each
  *  companion's fold function over its target and each cell's rows folded into the cell the caller bound
- *  (as the host's ``fold_plan``). */
-void launch_on(const eg_plan_s& plan, std::uint64_t stream) {
+ *  (as the host's ``fold_plan``). A gemm unit the door routes queues its cuBLAS products instead, unless @p products is false
+ *  (a runner's loop launches the kernel). */
+void launch_on(const eg_plan_s& plan, std::uint64_t stream, bool products = true) {
     const DeviceState& d = plan.ctx->dev;
     const eg_unit_s& u = *plan.unit;
-    if (u.gemm.present) {    // the stated products instead of a kernel
+    if (products && gemm_routed(plan)) {    // the stated products instead of the kernel
         gemm_launch(plan, stream);
         return;
     }
@@ -473,7 +475,7 @@ void device_plan_check(const eg_ctx& ctx, const eg_unit_s& unit) {
     if (ctx.dev.ordinal < 0)
         refuse(EG_BAD_REQUEST, "structure DEVICE on a host-only context (made without EG_CTX_DEVICE)");
     const std::string who = "unit '" + unit.name + "' on DEVICE: ";
-    if (unit.stages.empty() && unit.function == 0 && !unit.gemm.present) refuse(EG_NOT_WRITTEN, who + "the unit has no device image");
+    if (unit.stages.empty() && unit.function == 0) refuse(EG_NOT_WRITTEN, who + "the unit has no device image");
     for (const StageFacts& st : unit.stages)
         if (st.grid == EG_GRID_CHUNKS || st.grid == EG_GRID_TARGETS)
             refuse(EG_NOT_WRITTEN, who + "the stage '" + st.ref_name + "' is an ordered scatter (team grid " + (st.grid == EG_GRID_CHUNKS ? "CHUNKS" : "TARGETS") + "), which is not written on the device");
@@ -494,6 +496,14 @@ void device_plan_check(const eg_ctx& ctx, const eg_unit_s& unit) {
 void device_gemm_ready(eg_ctx& ctx) {
     Current current(ctx.dev);
     gemm_handle_make(ctx, ctx.dev.stream);
+}
+
+/** @brief eg_gemm_run of a device product: queued on the context's stream, in a capture or not. */
+void device_gemm_run(eg_ctx& ctx, const eg_gemm_s& gemm, eg_plane_s* a, eg_plane_s* b, eg_plane_s* c) {
+    const auto at = [](const eg_plane_s* p) { return static_cast<char*>(p->tensor->dl_tensor.data) + p->tensor->dl_tensor.byte_offset; };
+    const auto stride = [](const eg_plane_s* p) { return static_cast<int>(p->tensor->dl_tensor.shape[1]); };
+    Current current(ctx.dev);
+    gemm_product(ctx, ctx.dev.stream, gemm.call, gemm.f32, at(a), stride(a), at(b), stride(b), at(c), stride(c));
 }
 
 /** @brief A split unit on the device: the stages in order on the context's stream, each with its argument list (the source slot or team
@@ -1125,7 +1135,7 @@ void fast_run(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report) {
                               reinterpret_cast<CUstream>(stream), args.data(), nullptr),
               "unit '" + first.unit->name + "': the persist launch (cuLaunchKernel)");
     } else {
-        launch_on(first, stream);
+        launch_on(first, stream, false);
     }
     unsigned steps_read = 0, finished = 0;
     if (persist) cells_read(stream, r.fast + sizeof(unsigned), &steps_read, 1);
@@ -1154,8 +1164,7 @@ void device_runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out)
     for (std::int32_t i = 0; i < d.n_plans; ++i)
         if (ctx.plans.count(d.plans[i]) != 0) {
             const eg_unit_s& u = *d.plans[i]->unit;
-            const char* inside = u.gemm.present                                 ? "a gemm unit"
-                                 : !u.companions.empty() || !u.cells.empty() ? "companion or cell folding"
+            const char* inside = !u.companions.empty() || !u.cells.empty() ? "companion or cell folding"
                                  : u.index_count_slot >= 0                  ? "an index set"
                                  : u.dev_box_t > 0                          ? "a device thread box"
                                                                             : nullptr;
@@ -1343,7 +1352,7 @@ void device_run(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report) {
         const auto cap = static_cast<unsigned>(loop_cap(runner->max_steps, every));
         const auto body = [runner](std::uint64_t s) {
             for (std::int64_t l = 0; l < (runner->active ? runner->act.every_launches : 1); ++l)
-                for (eg_plan_s* p : runner->plans) launch_on(*p, s);
+                for (eg_plan_s* p : runner->plans) launch_on(*p, s, false);
         };
         std::vector<LoopGate> gates;
         if (runner->active) {

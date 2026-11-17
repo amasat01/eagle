@@ -10,7 +10,10 @@
  *    tc, all (the three transposes), lane (columns are n_samples / 3), wide (planes 2 columns wider than stated).
  *  - "<w>_vjp": the adjoint of a forward unit, two calls: dW = dY X^T, then dX += W^T dY (ACCUMULATE).
  *  - "bad_*": records the door refuses, one defect each (the test names the status and the reason).
- *  - "gemm_index", "gemm_finish": a gemm unit with an index set / a finishing loop.
+ *  - "gemm_index", "gemm_finish": a gemm unit with an index set / a finishing loop (the f64 rect product).
+ *
+ * Built with -DEG_GEMM_IMAGE (device targets) every unit names its device function "<unit>_dev" in the fatbin of
+ * fixture_gemm.cu, which does the same products as the host loop: a DEVICE plan the door cannot route to cuBLAS runs it.
  */
 #include "eagle/door/eg_door.h"
 #include "eagle/door/eg_unit_meta.h"
@@ -63,6 +66,13 @@ void noop_host(void* const* params, int64_t base, int64_t count, int64_t n) {
     }
 REFERENCE(double, reference_f64)
 REFERENCE(float, reference_f32)
+
+#ifdef EG_GEMM_IMAGE
+#define IMAGE(function) .device_image = "gemm__image", .device_image_size = "gemm__image_size", .device_function = function, \
+    .device_image_format = EG_IMAGE_FATBIN
+#else
+#define IMAGE(function) .device_image_format = EG_IMAGE_NONE
+#endif
 
 #define ENTRY(tag, reference, slack)                                                                           \
     EG_FIXTURE_EXPORT void tag##_host(void* const* params, int64_t base, int64_t count, int64_t n);            \
@@ -130,8 +140,7 @@ static const struct eg_unit_finish finish_one = {
         .lane_fanin = fanin, .calls = calls_##tag };                                                           \
     static const struct eg_unit_meta unit_##tag = { .struct_size = sizeof(struct eg_unit_meta), .name = #tag, \
         .digest = DIGEST(byte), .pattern = EG_PATTERN_PURE, .scalar_type = scalar, .host_entry = entry,       \
-        .device_image_format = EG_IMAGE_NONE, .body = &body_, .launch = &launch_, .finish = finish_,           \
-        .gemm = &gemm_##tag }
+        IMAGE(#tag "_dev"), .body = &body_, .launch = &launch_, .finish = finish_, .gemm = &gemm_##tag }
 
 #define TA EG_GEMM_TRANS_A
 #define TB EG_GEMM_TRANS_B
@@ -163,7 +172,7 @@ FORWARD(f32, 0x40, EG_SCALAR_FLOAT32, reference_f32)
         .calls = calls_##W##_vjp };                                                                            \
     static const struct eg_unit_meta unit_##W##_vjp = { .struct_size = sizeof(struct eg_unit_meta), .name = #W "_vjp", \
         .digest = DIGEST(byte), .pattern = EG_PATTERN_PURE, .scalar_type = scalar, .host_entry = #W "_vjp_host", \
-        .device_image_format = EG_IMAGE_NONE, .body = &body_vjp, .launch = &launch_plain, .gemm = &gemm_##W##_vjp }; \
+        IMAGE(#W "_vjp_dev"), .body = &body_vjp, .launch = &launch_plain, .gemm = &gemm_##W##_vjp }; \
     ENTRY(W##_vjp, reference, 0)
 ADJOINT(f64, 0x50, EG_SCALAR_FLOAT64, reference_f64)
 ADJOINT(f32, 0x51, EG_SCALAR_FLOAT32, reference_f32)
@@ -181,8 +190,10 @@ BAD(bad_flag, 6, EG_SCALAR_FLOAT64, body_abc, 1u << 7, 0, 1, 2, 1, 0, 3, 5, 5, 4
 BAD(bad_banded, 7, EG_SCALAR_BANDED, body_abc, 0, 0, 1, 2, 1, 0, 3, 5, 5, 4, 3, 4);
 BAD(bad_k, 8, EG_SCALAR_FLOAT64, body_abc, 0, 0, 1, 2, 1, 0, 3, 5, 4, 4, 3, 4);
 BAD(bad_c, 9, EG_SCALAR_FLOAT64, body_abc, 0, 0, 1, 2, 1, 0, 3, 5, 5, 4, 3, 3);
-UNIT(gemm_index, 0x70, EG_SCALAR_FLOAT64, "noop_host", body_index, launch_index, NULL, 1, 0, 0, 0, 1, 2, 3, 5, 5, 4, 3, 4);
-UNIT(gemm_finish, 0x71, EG_SCALAR_FLOAT64, "noop_host", body_finish, launch_plain, &finish_one, 1, 0, 0, 4, 5, 6, 3, 5, 5, 4, 3, 4);
+UNIT(gemm_index, 0x70, EG_SCALAR_FLOAT64, "gemm_index_host", body_index, launch_index, NULL, 1, 0, 0, 0, 1, 2, 3, 5, 5, 4, 3, 4);
+UNIT(gemm_finish, 0x71, EG_SCALAR_FLOAT64, "gemm_finish_host", body_finish, launch_plain, &finish_one, 1, 0, 0, 4, 5, 6, 3, 5, 5, 4, 3, 4);
+ENTRY(gemm_index, reference_f64, 0)
+ENTRY(gemm_finish, reference_f64, 0)
 
 #define LISTED(X)                                                                                              \
     X(f64_sq) X(f64_rect) X(f64_ta) X(f64_tb) X(f64_tc) X(f64_all) X(f64_lane) X(f64_wide) X(f64_vjp)         \
