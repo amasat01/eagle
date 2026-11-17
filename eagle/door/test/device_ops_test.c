@@ -3,8 +3,8 @@
  * the host runs, whatever the policy): each case is compared BITWISE with the old device reduction (the seam's
  * reduce_canonical_device, policy ordered) on the same planes, and with a plain loop for the exact ops and a long-double
  * sum for the float ones. Order rows (order_rows) pin the sum at sizes around the leaf and warp boundaries to committed bits
- * of that old reduction. Copy is checked against the source's bytes. Refusals by name: planes on both sides, overlapping
- * device planes, a shape mismatch, either call while recording on a device context.
+ * of that old reduction. Copy is checked against the source's bytes, device to device and device to host. Refusals by
+ * name: overlapping device planes, a shape mismatch, a host<->device copy and a reduce while recording on a device context.
  *
  * usage: device_ops_test <oracle dir>   (in_<case>.bin, comp_<case>.bin, out_<case>.bin)
  */
@@ -212,8 +212,8 @@ static void copy_rows(eg_ctx* ctx, const char* dir) {
     tensor_fill(&ht, N, host_x, kDLFloat, 64);
     ht.managed.dl_tensor.device.device_type = kDLCPU;
     eg_plane* hp = NULL;
-    check(ok && eg_plane_wrap(ctx, &ht.managed, &hp) == EG_OK && eg_copy(ctx, a.p, hp) == EG_BAD_REQUEST && reason_has(ctx, "both sides"),
-          "eg_copy: one device plane and one host plane refused BAD_REQUEST (one side per operation)");
+    check(ok && eg_plane_wrap(ctx, &ht.managed, &hp) == EG_OK && eg_copy(ctx, a.p, hp) == EG_OK && memcmp(host_x, x, N * sizeof(double)) == 0,
+          "eg_copy: a device plane into a host plane of the context copies the source's bytes");
     struct dplane o1 = { 0 }, o2 = { 0 };    /* two planes over one allocation, 8 bytes apart: partly overlapping */
     int ov = ok && dplane_new(ctx, &o1, 1, N - 1, 1, kDLFloat, 64, x) && dplane_new(ctx, &o2, 1, N - 1, 1, kDLFloat, 64, NULL);
     if (ov) {
@@ -232,9 +232,9 @@ static void copy_rows(eg_ctx* ctx, const char* dir) {
     d.in = a.p;
     d.out = b.p;
     eg_graph* g = NULL;
-    check(ok && eg_record_begin(ctx) == EG_OK && eg_copy(ctx, a.p, b.p) == EG_NOT_WRITTEN && reason_has(ctx, "while recording") &&
+    check(ok && hp && eg_record_begin(ctx) == EG_OK && eg_copy(ctx, a.p, hp) == EG_NOT_WRITTEN && reason_has(ctx, "not recordable") &&
               eg_reduce(ctx, &d) == EG_NOT_WRITTEN && reason_has(ctx, "while recording") && eg_record_end(ctx, &g) == EG_OK && eg_graph_free(ctx, g) == EG_OK,
-          "eg_copy and eg_reduce while recording on a device context: NOT_WRITTEN by name");
+          "a host<->device eg_copy and eg_reduce while recording on a device context: NOT_WRITTEN by name");
     if (hp) eg_plane_free(ctx, hp);
     if (ov) {
         eg_plane_free(ctx, o2.p);
