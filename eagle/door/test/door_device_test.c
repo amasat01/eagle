@@ -898,6 +898,18 @@ static void fast_entries(eg_ctx* ctx, const char* dev_lib) {
             check(fit && geo[1] <= 512 && geo[1] <= fa.maxThreadsPerBlock && geo[1] * fa.numRegs <= prop.regsPerBlock &&
                       geo[0] >= 1 && geo[0] <= (int64_t)prop.multiProcessorCount * per_sm,
                   "the persist grid never exceeds the blocks that fit resident, the block is at most 512 threads within the registers");
+            struct eg_runner_figures rf;
+            memset(&rf, 0, sizeof(rf));
+            rf.struct_size = sizeof(rf);
+            check(eg_runner_figures(ctx, r.runner, &rf) == EG_OK && rf.mode == EG_MODE_PERSIST && rf.grid == geo[0] &&
+                      rf.block == geo[1] && rf.chunk == geo[2],
+                  "eg_runner_figures of a persist run: mode PERSIST, grid, block and chunk == the launch the kernel saw");
+            struct eg_entry_figures ef;
+            memset(&ef, 0, sizeof(ef));
+            ef.struct_size = sizeof(ef);
+            check(fit && eg_plan_entry_figures(ctx, r.plan, &ef) == EG_OK && (ef.flags & EG_ENTRY_PERSIST) != 0 &&
+                      ef.persist_regs == fa.numRegs && ef.persist_max_threads == fa.maxThreadsPerBlock,
+                  "eg_plan_entry_figures of an automatic unit: EG_ENTRY_PERSIST, persist registers and max threads == the driver's own reads");
         }
         free(hits);
         auto_run_free(ctx, &r);
