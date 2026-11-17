@@ -174,7 +174,7 @@ $(FIXTURE) $(FIXTURE_BAD): test/fixture_unit.c eg_door.h eg_unit_meta.h
 	$(CC) $(CFLAGS_C) -DFIXTURE_BLOCK=$(call block_of,$@) -fPIC -shared -fvisibility=hidden -o $@ $<
 
 $(TEST): test/door_test.c test/fft_cases.h test/seg_model.h eg_door.h $(LIB)
-	$(CC) $(CFLAGS_C) -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door -Wl,-rpath,$(OUT) -lm -pthread
+	$(CC) $(CFLAGS_C) -DEG_TEST_DIR='"$(CURDIR)/test"' -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door -Wl,-rpath,$(OUT) -lm -pthread
 
 # eg_reverse: the closed-form fixture library (test/fixture_reverse.c) and its test.
 REV_FIXTURE := $(OUT)/libfixture_reverse.so
@@ -575,7 +575,7 @@ $(DEVICE_FIXTURE): test/fixture_device.c $(OUT)/fixture_device.fatbin $(OUT)/fat
 	$(CC) $(CFLAGS_C) -fPIC -shared -fvisibility=hidden -o $@ $< $(OUT)/fixture_device_image.o $(OUT)/fat129_image.o $(OUT)/ptx129_image.o $(OUT)/sass70_image.o
 
 $(DEVICE_TEST): test/door_device_test.c test/fft_cases.h test/seg_model.h eg_door.h $(LIB) | check-cuda
-	$(CC) $(CFLAGS_C) -isystem $(CUDA)/include -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door -Wl,-rpath,$(OUT) $(CUDART) -lm -pthread
+	$(CC) $(CFLAGS_C) -DEG_TEST_DIR='"$(CURDIR)/test"' -isystem $(CUDA)/include -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door -Wl,-rpath,$(OUT) $(CUDART) -lm -pthread
 
 device: check-cuda symbols $(FIXTURE) $(DEVICE_FIXTURE) $(DEVICE_TEST) $(GEMM_FIXTURE) $(GEMM_DEVICE_TEST) $(NO_CUBLAS)
 

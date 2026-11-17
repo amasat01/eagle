@@ -15,6 +15,10 @@
 #include "plugin/dlpack.h"
 #include "seg_model.h"
 
+#ifndef EG_TEST_DIR
+#define EG_TEST_DIR "test" /* the directory of the recorded decisions; the Makefile gives its absolute path */
+#endif
+
 #include <dlfcn.h>
 #include <pthread.h>
 #include <sched.h>
@@ -3031,7 +3035,7 @@ static void check_auto_look(eg_ctx* ctx) {
 
     /* the decisions of the old stack (test/auto_record.py): the segmented steps and the total steps of each run, and so the path of each step in how */
     char path[512];
-    snprintf(path, sizeof(path), "%.*s/auto_decisions.txt", (int)(strrchr(__FILE__, '/') - __FILE__), __FILE__);
+    snprintf(path, sizeof(path), "%s/auto_decisions.txt", EG_TEST_DIR);
     FILE* f = fopen(path, "r");
     check(f != NULL, "the recorded decisions of the old stack are present");
     char line[256];
