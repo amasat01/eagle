@@ -1433,7 +1433,7 @@ static void lookup_device(eg_ctx* ctx, const char* dev_lib) {
 
 static void fft_move(void* dst, const void* src, size_t bytes) { cudaMemcpy(dst, src, bytes, cudaMemcpyDefault); }
 
-#include "fft_cases.h"
+#include "fft_cases.inc"
 
 /* A device plan equals the host plan within the width's tolerance: every kind and adjoint, norm and shape. */
 static void fft_cross(eg_ctx* dev, eg_ctx* host) {

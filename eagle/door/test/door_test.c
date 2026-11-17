@@ -2860,7 +2860,7 @@ static void check_no_device_group(eg_ctx* ctx) {
 
 static void fft_move(void* dst, const void* src, size_t bytes) { memcpy(dst, src, bytes); }
 
-#include "fft_cases.h"
+#include "fft_cases.inc"
 
 /* A context of 1 thread and one of 3 give bitwise identical outputs, for every kind, adjoints included, at both widths. */
 static void check_fft_threads(void) {

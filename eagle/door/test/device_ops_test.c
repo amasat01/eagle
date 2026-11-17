@@ -17,7 +17,7 @@
 #include <math.h>
 #include <stdlib.h>
 
-#include "reduce_order_expected.h"
+#include "reduce_order_expected.inc"
 
 struct tensor2 {
     struct DLManagedTensorVersioned managed;

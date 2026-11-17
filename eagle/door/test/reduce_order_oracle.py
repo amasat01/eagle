@@ -1,7 +1,7 @@
-"""Writes reduce_order_expected.h: the old device reduction (eagle seam ``reduce_canonical_device``, policy ordered) over the
+"""Writes reduce_order_expected.inc: the old device reduction (eagle seam ``reduce_canonical_device``, policy ordered) over the
 order-exposing inputs of device_ops_test.c, as the raw bits of each column's sum.
 
-usage: python reduce_order_oracle.py > reduce_order_expected.h   (a GPU, cupy and the eagle binding)
+usage: python reduce_order_oracle.py > reduce_order_expected.inc   (a GPU, cupy and the eagle binding)
 The inputs must match ``order_input`` in device_ops_test.c: a splitmix64 hash of the flat index picks sign and a 24-bit
 mantissa; even samples are scaled by 1e8, odd ones by 1.
 """
