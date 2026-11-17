@@ -207,6 +207,35 @@ TEST(DispatchPolicy, WeightRowsAreFoundByClassAndAnUnknownClassTakesTheBuiltInRo
     }
 }
 
+TEST(DispatchPolicy, GemmRoutesAreFoundByClassAndWidthAndAnUnknownClassTakesTheBuiltInRow)
+{
+    // a synthetic table: the two built-in rows, a direct row of class 6.1 at 32 bits and a gemm row of class 7.5 at 64 bits over a direct built-in
+    const GemmRouteRow table[] = { { 1, 0, 0, 32, 1 }, { 1, 0, 0, 64, 0 }, { 1, 6, 1, 32, 0 }, { 1, 7, 5, 64, 1 } };
+    const int n = static_cast<int>(sizeof(table) / sizeof(table[0]));
+    ASSERT_EQ(gemmRouteRowsFault(table, n), nullptr);
+    EXPECT_EQ(gemmRoute(table, n, 6, 1, 32), 0) << "a matching class gets its row";
+    EXPECT_EQ(gemmRoute(table, n, 7, 5, 64), 1);
+    EXPECT_EQ(gemmRoute(table, n, 6, 1, 64), 0) << "the width is part of the key: the 32-bit row does not answer 64 bits";
+    EXPECT_EQ(gemmRoute(table, n, 7, 5, 32), 1) << "the width is part of the key: the 64-bit row does not answer 32 bits";
+    EXPECT_EQ(gemmRoute(table, n, 6, 2, 32), 1) << "an unknown class takes the built-in row of its width, not the nearest";
+    EXPECT_EQ(gemmRoute(table, n, 8, 1, 64), 0);
+    EXPECT_EQ(gemmRoute(table, n, 0, 0, 32), 1) << "the zero class reads the built-in row; it is not looked up as a class";
+    EXPECT_EQ(gemmRoute(GEMM_ROUTE_ROWS, GEMM_ROUTE_ROW_COUNT, 6, 1, 64), 1) << "the built-in rows route to gemm";
+    EXPECT_EQ(gemmRouteRowsFault(GEMM_ROUTE_ROWS, GEMM_ROUTE_ROW_COUNT), nullptr);
+}
+
+TEST(DispatchPolicy, AGemmRouteTableThatCannotRouteIsNamedAndRefused)
+{
+    const GemmRouteRow no64[] = { { 1, 0, 0, 32, 1 } };
+    EXPECT_STREQ(gemmRouteRowsFault(no64, 1), "EG_GEMM_ROUTE_ROWS: a float width has no built-in row (family 0, model 0)");
+    const GemmRouteRow twice[] = { { 1, 0, 0, 32, 1 }, { 1, 0, 0, 64, 1 }, { 1, 6, 1, 32, 0 }, { 1, 6, 1, 32, 1 } };
+    EXPECT_STREQ(gemmRouteRowsFault(twice, 4), "EG_GEMM_ROUTE_ROWS: two rows have one class and width");
+    const GemmRouteRow odd[] = { { 1, 0, 0, 32, 1 }, { 1, 0, 0, 64, 1 }, { 1, 6, 1, 16, 0 } };
+    EXPECT_STREQ(gemmRouteRowsFault(odd, 3), "EG_GEMM_ROUTE_ROWS: a row is not device (target 1), 32 or 64 bits, route 0 or 1");
+    const GemmRouteRow host[] = { { 0, 0, 0, 32, 1 }, { 1, 0, 0, 32, 1 }, { 1, 0, 0, 64, 1 } };
+    EXPECT_NE(gemmRouteRowsFault(host, 3), nullptr) << "a host row is not a gemm route";
+}
+
 TEST(DispatchPolicy, TheRowsScaleTheHostRatesByThePhysicalCores)
 {
     const WeightRow& row = builtinWeightRow(Target::Host);

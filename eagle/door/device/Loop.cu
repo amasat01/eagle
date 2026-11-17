@@ -309,6 +309,11 @@ void write_bytes(std::uint64_t stream, void* dst, const void* src, std::size_t b
     stream_wait(stream);
 }
 
+void read_bytes(std::uint64_t stream, void* dst, const void* src, std::size_t bytes) {
+    EAGLE_CHECK_ALWAYS(cudaMemcpyAsync(dst, src, bytes, cudaMemcpyDeviceToHost, reinterpret_cast<cudaStream_t>(stream)));
+    stream_wait(stream);
+}
+
 void zero_bytes(std::uint64_t stream, void* dst, std::size_t bytes) {
     EAGLE_CHECK_ALWAYS(cudaMemsetAsync(dst, 0, bytes, reinterpret_cast<cudaStream_t>(stream)));
 }

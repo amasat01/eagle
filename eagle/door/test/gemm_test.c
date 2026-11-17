@@ -22,6 +22,7 @@
 #endif
 
 #include <dlfcn.h>
+#include <float.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -746,6 +747,115 @@ static void device_rows(eg_ctx* host, eg_ctx* dev, const char* path) {
     }
 }
 
+#ifdef EG_GEMM_ROUTE
+
+/* ---- ROUTE rows: which path a routable device plan takes, by the context's route table ----------------------------- */
+
+/* The test seam (test/gemm_route_seam.cpp): rows of (target, family, model, dtype_bits, route) read into a fresh device context. */
+eg_status gemm_route_rows_set(eg_ctx* ctx, int (*rows)[5], int count);
+
+enum { ROUTE_M = 3, ROUTE_K = 5, ROUTE_N = 4 };   /* the shapes of the "rect" units: C (3, 4) = A (3, 5) B (5, 4) */
+
+/* Run @p name (a rect unit, one DEVICE plan) on a fresh device context whose route table is @p rows; ``*entry`` gets the plan's EG_ENTRY_* flags, ``got`` the
+ * C plane and ``scale`` the sum over k of |a b| of each element of C. Returns 0, or a nonzero status. */
+static int route_run(const char* path, const char* name, int (*rows)[5], int count, uint32_t* entry, double* got, double* scale) {
+    eg_ctx* ctx = context(1);
+    if (ctx == NULL) return 1;
+    struct variant v = { 0 };
+    struct matrix m[8];
+    int n_planes = 0;
+    shapes_of(unit_meta(name), 7, 0, m, &n_planes);
+    for (int i = 0; i < n_planes; ++i) fill(&m[i], 11u + (unsigned)i);
+    const int bits = m[0].bits;
+    eg_unit* unit = NULL;
+    eg_plan* plan = NULL;
+    int bad = gemm_route_rows_set(ctx, rows, count) != EG_OK || load(ctx, path, name, &unit) != EG_OK ||
+              run(ctx, unit, EG_STRUCTURE_DEVICE, m, n_planes, 7, &v, &plan) != EG_OK;
+    void* back[8];
+    if (!bad) read_back(m, n_planes, back);
+    for (int r = 0; !bad && r < ROUTE_M; ++r)
+        for (int c = 0; c < ROUTE_N; ++c) {
+            double sum = 0.0;
+            for (int p = 0; p < ROUTE_K; ++p) {
+                const double a = bits == 32 ? ((float*)m[0].host)[r * ROUTE_K + p] : ((double*)m[0].host)[r * ROUTE_K + p];
+                const double b = bits == 32 ? ((float*)m[1].host)[p * ROUTE_N + c] : ((double*)m[1].host)[p * ROUTE_N + c];
+                sum += fabs(a * b);
+            }
+            scale[r * ROUTE_N + c] = sum;
+            got[r * ROUTE_N + c] = bits == 32 ? ((float*)back[2])[r * ROUTE_N + c] : ((double*)back[2])[r * ROUTE_N + c];
+        }
+    for (int i = 0; !bad && i < n_planes; ++i) free(back[i]);
+    if (!bad) *entry = v.entry;
+    release(ctx, plan, m, n_planes);
+    if (unit != NULL) eg_unit_free(ctx, unit);
+    eg_ctx_free(ctx);
+    return bad;
+}
+
+/* The device class of this machine, as the context states the key it looked its rows up by. */
+static void route_class(int* family, int* model) {
+    eg_ctx* ctx = context(1);
+    struct eg_ctx_info info;
+    memset(&info, 0, sizeof(info));
+    info.struct_size = sizeof(info);
+    *family = *model = -1;
+    if (ctx != NULL && eg_ctx_info(ctx, &info) == EG_OK) *family = info.weight_family, *model = info.weight_model;
+    if (ctx != NULL) eg_ctx_free(ctx);
+}
+
+static void route_rows(const char* path) {
+    int fam, mod;
+    route_class(&fam, &mod);
+    check(fam > 0, "the device context states its class key (the compute capability) for the route rows");
+    static const char* const names[2] = { "f32_rect", "f64_rect" };
+    /* Rows: each case sets, for the width under test, one class row over built-in rows of the case's route; the other width keeps the built-in route. */
+    struct { const char* what; int builtin; int class_route; int class_family, class_model; int expect_gemm; } cases[] = {
+        { "a direct row of this device's class runs the unit's own kernel", 1, 0, fam, mod, 0 },
+        { "a gemm row of this device's class over direct built-in rows routes to cuBLAS", 0, 1, fam, mod, 1 },
+        { "a direct row of another family takes the built-in gemm route", 1, 0, fam + 1, mod, 1 },
+        { "a direct row of another model takes the built-in gemm route", 1, 0, fam, mod + 1, 1 } };
+    for (int w = 0; w < 2; ++w) {
+        const int bits = w ? 64 : 32;
+        const double eps = w ? DBL_EPSILON : FLT_EPSILON;
+        double want[ROUTE_M * ROUTE_N], scale[ROUTE_M * ROUTE_N];
+        uint32_t entry = 0;
+        int base[2][5] = { { 1, 0, 0, 32, 1 }, { 1, 0, 0, 64, 1 } };
+        check(route_run(path, names[w], base, 2, &entry, want, scale) == 0 && (entry & EG_ENTRY_GEMM) != 0, "the built-in rows route a rect unit to cuBLAS (reference result)");
+        for (size_t c = 0; c < sizeof(cases) / sizeof(cases[0]); ++c) {
+            int rows[3][5] = { { 1, 0, 0, 32, cases[c].builtin }, { 1, 0, 0, 64, cases[c].builtin }, { 1, cases[c].class_family, cases[c].class_model, bits, cases[c].class_route } };
+            double got[ROUTE_M * ROUTE_N], other[ROUTE_M * ROUTE_N], other_scale[ROUTE_M * ROUTE_N];
+            uint32_t other_entry = 0;
+            entry = 0;
+            /* dtype separation: the other width's unit sees only the built-in row, whatever this width's class row says */
+            const int other_route = route_run(path, names[1 - w], rows, 3, &other_entry, other, other_scale) == 0 && ((other_entry & EG_ENTRY_GEMM) != 0) == (cases[c].builtin == 1);
+            int ok = route_run(path, names[w], rows, 3, &entry, got, scale) == 0 && other_route && ((entry & EG_ENTRY_GEMM) != 0) == cases[c].expect_gemm &&
+                     ((entry & EG_ENTRY_DEVICE) != 0) == !cases[c].expect_gemm;
+            /* two different computations (cuBLAS and the unit's kernel): within (k - 1) eps sum |a b| per element, not bitwise */
+            double worst = 0.0;
+            for (int i = 0; ok && i < ROUTE_M * ROUTE_N; ++i) {
+                const double bound = (ROUTE_K - 1) * eps * scale[i];
+                const double ratio = bound > 0 ? fabs(got[i] - want[i]) / bound : 0.0;
+                worst = ratio > worst ? ratio : worst;
+                ok = fabs(got[i] - want[i]) <= bound;
+            }
+            char what[256];
+            snprintf(what, sizeof(what), "float%d: %s (EG_ENTRY %s, the other width unmoved, result within (k-1) eps sum|ab| of the cuBLAS one, worst %.3f of the bound)", bits,
+                     cases[c].what, cases[c].expect_gemm ? "GEMM" : "DEVICE", worst);
+            check(ok, what);
+        }
+    }
+    eg_ctx* ctx = context(1);
+    int no32[1][5] = { { 1, 0, 0, 64, 1 } };
+    int twice[4][5] = { { 1, 0, 0, 32, 1 }, { 1, 0, 0, 64, 1 }, { 1, 7, 5, 32, 0 }, { 1, 7, 5, 32, 1 } };
+    check(ctx != NULL && refused(gemm_route_rows_set(ctx, no32, 1), EG_FAULT, ctx, "a float width has no built-in row (family 0, model 0)"),
+          "a route table with no built-in row for a width is refused EG_FAULT naming it, never routed silently");
+    check(ctx != NULL && refused(gemm_route_rows_set(ctx, twice, 4), EG_FAULT, ctx, "two rows have one class and width"),
+          "a route table with two rows of one class and width is refused EG_FAULT naming it");
+    if (ctx != NULL) eg_ctx_free(ctx);
+}
+
+#endif /* EG_GEMM_ROUTE */
+
 /* A host plane handed to a device product is refused by name. */
 static void direct_device_refusal(eg_ctx* dev) {
     struct eg_gemm_desc d = { sizeof(d), 0, 64, 0, 3, 5, 5, 4, 3, 4 };
@@ -812,6 +922,9 @@ int main(int argc, char** argv) {
     device_rows(host, dev, argv[1]);
     direct_rows(host, dev);
     direct_device_refusal(dev);
+#ifdef EG_GEMM_ROUTE
+    route_rows(argv[1]);
+#endif
     eg_ctx_free(dev);
 #endif
     eg_ctx_free(host);

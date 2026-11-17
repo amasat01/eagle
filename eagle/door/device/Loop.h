@@ -136,6 +136,9 @@ void fft_weigh(std::uint64_t stream, unsigned bits, void* data, std::int64_t cou
 /** @brief Queue on @p stream a host-to-device copy of @p bytes and wait for it (the host bytes are the caller's). */
 void write_bytes(std::uint64_t stream, void* dst, const void* src, std::size_t bytes);
 
+/** @brief Queue on @p stream a device-to-host copy of @p bytes and wait for it (the host bytes are the caller's, possibly pageable). */
+void read_bytes(std::uint64_t stream, void* dst, const void* src, std::size_t bytes);
+
 /** @brief Queue on @p stream the zeroing of @p bytes at @p dst. */
 void zero_bytes(std::uint64_t stream, void* dst, std::size_t bytes);
 

@@ -1344,9 +1344,9 @@ static void lookup_device(eg_ctx* ctx, const char* dev_lib) {
     eg_plan* p = NULL;
     const int32_t slots[4] = { 0, 1, 2, 3 };
     eg_plane* planes[4] = { py, px, pm, pc };
-    ok = ok && plan_n(ctx, unit, EG_STRUCTURE_DEVICE, SM, 0, NULL, NULL, &p) == EG_OK && bind_planes(ctx, p, 4, slots, planes) == EG_OK;
     uint32_t count = ENTRIES;
-    cudaMemcpy(dc, &count, sizeof(count), cudaMemcpyHostToDevice);
+    cudaMemcpy(dc, &count, sizeof(count), cudaMemcpyHostToDevice); /* binding reads the count: it is written first */
+    ok = ok && plan_n(ctx, unit, EG_STRUCTURE_DEVICE, SM, 0, NULL, NULL, &p) == EG_OK && bind_planes(ctx, p, 4, slots, planes) == EG_OK;
     ok = ok && eg_launch(ctx, p, NULL) == EG_OK && eg_sync(ctx) == EG_OK;
     cudaMemcpy(got, dy, sizeof(got), cudaMemcpyDeviceToHost);
     for (int i = 0; i < SM; ++i) want[i] = y0[i];
@@ -1424,6 +1424,82 @@ static void fft_cross(eg_ctx* dev, eg_ctx* host) {
         char what[128];
         snprintf(what, sizeof(what), "eg_fft_run float%u: the device plan equals the host plan within 8*eps*(n+4)*(1+max), every kind, adjoint, norm and shape", bits);
         check(ok, what);
+    }
+}
+
+/* A plane of @p n elements of @p code / @p bits over @p data, on the device (@p cuda) or the host. */
+static eg_plane* wrap_as(eg_ctx* ctx, struct tensor* t, void* data, int64_t n, int cuda, uint8_t code, uint8_t bits) {
+    memset(t, 0, sizeof(*t));
+    t->shape[0] = n;
+    t->managed.version.major = DLPACK_MAJOR_VERSION;
+    t->managed.dl_tensor.data = data;
+    t->managed.dl_tensor.device.device_type = cuda ? kDLCUDA : kDLCPU;
+    t->managed.dl_tensor.ndim = 1;
+    t->managed.dl_tensor.dtype.code = code;
+    t->managed.dl_tensor.dtype.bits = bits;
+    t->managed.dl_tensor.dtype.lanes = 1;
+    t->managed.dl_tensor.shape = t->shape;
+    eg_plane* p = NULL;
+    return eg_plane_wrap(ctx, &t->managed, &p) == EG_OK ? p : NULL;
+}
+
+/* eg_copy across the host and the device: host -> device -> device -> host returns the input bitwise for each dtype
+ * (same data, so the oracle is the input bytes); a shape or dtype mismatch and a copy inside a recording are refused by
+ * status and sentence; a same-side device copy still records. */
+static void copy_across(eg_ctx* ctx) {
+    enum { COUNT = 1000 };
+    static const struct { uint8_t code, bits; const char* name; } kinds[5] = {
+        { kDLFloat, 64, "f64" }, { kDLFloat, 32, "f32" }, { kDLInt, 64, "i64" }, { kDLInt, 32, "i32" }, { kDLInt, 8, "i8" },
+    };
+    for (int k = 0; k < 5; ++k) {
+        const size_t bytes = (size_t)COUNT * (kinds[k].bits / 8);
+        unsigned char *in = malloc(bytes), *out = calloc(bytes, 1), *dev_a = NULL, *dev_b = NULL;
+        unsigned state = 12345u + (unsigned)k;
+        for (size_t i = 0; in && i < bytes; ++i) in[i] = (unsigned char)((state = state * 1664525u + 1013904223u) >> 24);
+        cudaMalloc((void**)&dev_a, bytes);
+        cudaMalloc((void**)&dev_b, bytes);
+        struct tensor th_in, th_out, td_a, td_b;
+        eg_plane* h_in = wrap_as(ctx, &th_in, in, COUNT, 0, kinds[k].code, kinds[k].bits);
+        eg_plane* h_out = wrap_as(ctx, &th_out, out, COUNT, 0, kinds[k].code, kinds[k].bits);
+        eg_plane* d_a = wrap_as(ctx, &td_a, dev_a, COUNT, 1, kinds[k].code, kinds[k].bits);
+        eg_plane* d_b = wrap_as(ctx, &td_b, dev_b, COUNT, 1, kinds[k].code, kinds[k].bits);
+        char what[160];
+        snprintf(what, sizeof(what), "eg_copy host -> device -> device -> host returns the input bitwise (%s)", kinds[k].name);
+        int ok = in && out && h_in && h_out && d_a && d_b && eg_copy(ctx, h_in, d_a) == EG_OK && eg_copy(ctx, d_a, d_b) == EG_OK &&
+                 eg_copy(ctx, d_b, h_out) == EG_OK && memcmp(in, out, bytes) == 0;
+        check(ok, what);
+        if (k == 0) {
+            eg_plane* shorter = NULL;
+            struct tensor ts;
+            shorter = wrap_as(ctx, &ts, dev_b, COUNT - 1, 1, kinds[0].code, 64);
+            check(shorter && refused(eg_copy(ctx, h_in, shorter), EG_BAD_REQUEST, ctx, "one shape and dtype"),
+                  "eg_copy host -> device of another shape: BAD_REQUEST, one shape and dtype");
+            eg_plane_free(ctx, shorter);
+            shorter = wrap_as(ctx, &ts, dev_b, COUNT, 1, kDLInt, 64);
+            check(shorter && refused(eg_copy(ctx, shorter, h_in), EG_BAD_REQUEST, ctx, "one shape and dtype"),
+                  "eg_copy device -> host of another dtype of the same width: BAD_REQUEST, one shape and dtype");
+            eg_plane_free(ctx, shorter);
+            eg_graph* g = NULL;
+            cudaMemset(dev_b, 0, bytes);
+            ok = eg_record_begin(ctx) == EG_OK &&
+                 refused(eg_copy(ctx, h_in, d_a), EG_NOT_WRITTEN, ctx, "a host<->device copy is not recordable; copy before or after the recording") &&
+                 refused(eg_copy(ctx, d_a, h_out), EG_NOT_WRITTEN, ctx, "not recordable") && eg_copy(ctx, d_a, d_b) == EG_OK &&
+                 eg_record_end(ctx, &g) == EG_OK;
+            ok = ok && eg_graph_launch(ctx, g) == EG_OK && eg_sync(ctx) == EG_OK;
+            unsigned char* back = calloc(bytes, 1);
+            ok = ok && back && cudaMemcpy(back, dev_b, bytes, cudaMemcpyDeviceToHost) == cudaSuccess && memcmp(back, in, bytes) == 0;
+            check(ok, "inside a recording a host<->device eg_copy is refused NOT_WRITTEN by name and a device -> device one records and replays");
+            free(back);
+            if (g) eg_graph_free(ctx, g);
+        }
+        eg_plane_free(ctx, h_in);
+        eg_plane_free(ctx, h_out);
+        eg_plane_free(ctx, d_a);
+        eg_plane_free(ctx, d_b);
+        cudaFree(dev_a);
+        cudaFree(dev_b);
+        free(in);
+        free(out);
     }
 }
 
@@ -1555,7 +1631,7 @@ int main(int argc, char** argv) {
               refused(bind(ctx, hp, py, px, NULL, a), EG_BAD_REQUEST, ctx, "a device plane in a host plan"),
           "a device plane in a host plan refused BAD_REQUEST");
     eg_plan_free(ctx, hp);
-    check(refused(eg_copy(ctx, py, hy), EG_BAD_REQUEST, ctx, "both sides"), "eg_copy of a device plane onto a host plane: BAD_REQUEST (one side per operation)");
+    copy_across(ctx);
     struct eg_reduce_desc rd;
     memset(&rd, 0, sizeof(rd));
     rd.struct_size = sizeof(rd);

@@ -294,9 +294,9 @@ struct eg_ctx_info {
     int32_t device_type;     /**< DLPack device type of ``device`` (0 when host only) */
     int64_t stream;          /**< the DLPack stream code a producer must order against
                                   (``__dlpack__(stream=)``); -1 when host only */
-    int32_t weight_vendor;   /**< the class key the dispatch weights were looked up by: host, 1 Intel / 2 AMD / 0 other (CPUID vendor); device, 0 */
-    int32_t weight_family;   /**< host: the CPUID display family; device: the compute capability major */
-    int32_t weight_model;    /**< host: the CPUID display model; device: the compute capability minor */
+    int32_t weight_vendor;   /**< the class key the dispatch weights were looked up by: host, 1 Intel / 2 AMD / 0 other (CPUID vendor), 0 also when the host has no CPUID class (not x86, or CPUID unreadable); device, 0 */
+    int32_t weight_family;   /**< host: the CPUID display family (read for any x86 vendor), 0 with no CPUID class; device: the compute capability major */
+    int32_t weight_model;    /**< host: the CPUID display model, 0 with no CPUID class (vendor, family and model all 0: no class key, the built-in row); device: the compute capability minor */
     int32_t weight_row;      /**< the index of the EG_WEIGHT_ROWS row taken, -1 for the built-in row of the target (no row of that class) */
 };
 
@@ -863,9 +863,16 @@ eg_status eg_reverse(eg_ctx* ctx, eg_runner* runner, const struct eg_bind_desc* 
 eg_status eg_reduce(eg_ctx* ctx, const struct eg_reduce_desc* desc);
 
 /**
- * Copy ``src`` into ``dst`` (same shape and dtype; any device pair the
- * context reaches). Recordable. Replaces: ``_transfer`` copy nodes.
- * Status: OK; BAD_REQUEST.
+ * Copy ``src`` into ``dst`` (same shape and dtype). Two planes on one side
+ * copy on that side; one host plane and one device plane of the context's
+ * device copy across, either way, on the context's stream, and the call
+ * returns once the copy has finished: the host plane may be pageable or
+ * pinned and is the caller's again on return. ``eg_sync`` orders it like any
+ * op. A same-side copy is recordable; a host<->device copy is not: inside a
+ * recording it is refused NOT_WRITTEN, so copy before or after the recording.
+ * Replaces: ``_transfer`` copy nodes.
+ * Status: OK; BAD_REQUEST (shape, dtype, access); NOT_WRITTEN (a host<->device
+ * copy while recording).
  */
 eg_status eg_copy(eg_ctx* ctx, eg_plane* src, eg_plane* dst);
 

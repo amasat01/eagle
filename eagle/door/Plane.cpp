@@ -240,6 +240,12 @@ bool device_planes(const eg_ctx& ctx, const char* op, std::initializer_list<cons
     return device > 0;
 }
 
+bool planes_cross_sides(const eg_ctx& ctx, const eg_plane_s* src, const eg_plane_s* dst) {
+    const auto on_host = [&](const eg_plane_s* p) { return p->tensor->dl_tensor.device.device_type == kDLCPU; };
+    if (ctx.planes.count(const_cast<eg_plane_s*>(src)) == 0 || ctx.planes.count(const_cast<eg_plane_s*>(dst)) == 0) return false;
+    return on_host(src) != on_host(dst);
+}
+
 /** @brief Drop one reference to @p plane; the last one runs the tensor's deleter. */
 void plane_release(eg_ctx& ctx, eg_plane_s* plane) {
     if (--plane->refs > 0) return;

@@ -154,9 +154,15 @@ EG_EXPORT eg_status eg_reduce(eg_ctx* ctx, const struct eg_reduce_desc* desc) {
 }
 EG_EXPORT eg_status eg_copy(eg_ctx* ctx, eg_plane* src, eg_plane* dst) {
     return door::call(ctx, [&](eg_ctx& c) {
-        door::device_quiet(c, "eg_copy", EG_NOT_WRITTEN, door::kHostWorkInGraph);
-        if (door::device_planes(c, "eg_copy", { src, dst })) door::device_copy(c, src, dst);
-        else door::copy(c, src, dst);
+        if (door::planes_cross_sides(c, src, dst)) {
+            door::device_quiet(c, "eg_copy", EG_NOT_WRITTEN, "a host<->device copy is not recordable; copy before or after the recording");
+            door::device_copy(c, src, dst);
+        } else if (door::device_planes(c, "eg_copy", { src, dst })) {
+            door::device_copy(c, src, dst);
+        } else {
+            door::device_quiet(c, "eg_copy", EG_NOT_WRITTEN, door::kHostWorkInGraph);
+            door::copy(c, src, dst);
+        }
     });
 }
 EG_EXPORT eg_status eg_fft_new(eg_ctx* ctx, const struct eg_fft_desc* desc, eg_fft** out) {
