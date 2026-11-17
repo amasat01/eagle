@@ -82,6 +82,7 @@ CUDART := $(if $(CUDA),-L$(CUDA)/lib64 -lcudart -Wl$(comma)-rpath$(comma)$(CUDA)
 
 SRC := Context.cpp Unit.cpp Plane.cpp Plan.cpp Fft.cpp Gemm.cpp RunCheck.cpp Look.cpp abi.cpp host/Runner.cpp host/Reverse.cpp host/Ops.cpp host/Fft.cpp host/Gemm.cpp host/Record.cpp device/Device.cpp device/Gemm.cpp
 OBJ := $(SRC:%.cpp=$(OUT)/%.o) $(if $(CUDA),$(OUT)/device/Loop.o $(OUT)/device/Fft.o)
+-include $(OBJ:.o=.d)
 # The shared-library link differs by system; door.map stays the one list of exported names (Darwin's list is made from it).
 ifeq ($(shell uname -s),Darwin)
 SOEXT := dylib
@@ -109,25 +110,22 @@ check-inputs:
 	@test -n "$(AETHER_INCLUDE)" || { echo "set AETHER_INCLUDE"; exit 1; }
 	@test -f "$(WING_FACTS)" || { echo "set WING_FACTS to the wing's raptor_facts.h"; exit 1; }
 
-$(OUT)/%.o: %.cpp Context.h device/Seam.h eg_door.h eg_unit_meta.h host/Team.h host/Ops.h host/Segment.h | check-inputs
+# Each object lists the headers it includes in a dependency file the compiler writes beside it (-MMD -MP), so an edit
+# to any included header rebuilds exactly the objects that read it.
+$(OUT)/%.o: %.cpp | check-inputs
 	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS_DOOR) -c $< -o $@
+	$(CXX) $(CXXFLAGS_DOOR) -MMD -MP -c $< -o $@
 
 # The device group: built with the CUDA headers when CUDA is set, else its host-only refusals.
-$(OUT)/device/Device.o: device/Device.cpp device/Fft.h device/Gemm.h device/Loop.h Context.h device/Seam.h eg_door.h eg_unit_meta.h | check-inputs
+$(OUT)/device/Device.o: device/Device.cpp | check-inputs
 	@mkdir -p $(dir $@)
-	$(CXX) $(if $(CUDA),$(CXXFLAGS_DEVICE),$(CXXFLAGS_DOOR)) -c $< -o $@
-
-$(OUT)/device/Gemm.o: device/Gemm.h
-
-# A device transform's cuFFT plans (CUDA builds only; cuFFT is opened at run time, never linked).
-$(OUT)/device/Fft.o: device/Fft.h device/Loop.h
+	$(CXX) $(if $(CUDA),$(CXXFLAGS_DEVICE),$(CXXFLAGS_DOOR)) -MMD -MP -c $< -o $@
 
 # A device runner's captured loop over eagle's capture seam (CUDA builds only).
-$(OUT)/device/Loop.o: device/Loop.cu device/Loop.h | check-inputs check-cuda
+$(OUT)/device/Loop.o: device/Loop.cu | check-inputs check-cuda
 	@mkdir -p $(dir $@)
 	$(NVCC) -std=c++20 -O2 -arch=sm_61 -Wno-deprecated-gpu-targets -Werror all-warnings -ccbin $(CXX) \
-	  -Xcompiler -fPIC,-fvisibility=hidden,-Wall,-Wextra,-fopenmp -DAETHER_HAS_CUDA -diag-suppress=20050 -include $(CUDA_WING_FACTS) -I$(ROOT) -I$(AETHER_INCLUDE) -c $< -o $@
+	  -Xcompiler -fPIC,-fvisibility=hidden,-Wall,-Wextra,-fopenmp -DAETHER_HAS_CUDA -diag-suppress=20050 -include $(CUDA_WING_FACTS) -I$(ROOT) -I$(AETHER_INCLUDE) -MMD -MP -c $< -o $@
 
 # Darwin: the exported-symbols list is door.map's global pattern with the C symbol underscore.
 $(OUT)/door.exp: door.map
