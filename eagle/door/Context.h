@@ -161,6 +161,22 @@ struct DerivedFacts {
     std::vector<Taped> taped;
     std::vector<Link> links;
 };
+/** @brief One matrix product of a unit's gemm record (eg_unit_gemm_call), copied at eg_unit_load. A plan holds its own copy
+ *  with the extents resolved and ``m``, ``n``, ``k`` set (op(A) is (m, k), op(B) is (k, n)). */
+struct GemmCall {
+    std::uint32_t flags = 0;
+    std::int32_t a = -1, b = -1, c = -1;      ///< slots of the unit
+    std::int64_t a_rows = 0, a_cols = 0, b_rows = 0, b_cols = 0, c_rows = 0, c_cols = 0;   ///< stored shapes; -1 until a plan resolves it
+    std::int64_t m = 0, n = 0, k = 0;
+};
+
+/** @brief A unit's gemm record (eg_unit_meta.gemm): the products a DEVICE plan runs instead of a kernel. */
+struct GemmFacts {
+    bool present = false;
+    std::int64_t lane_fanin = 0;
+    std::vector<GemmCall> calls;
+};
+
 /** @brief A team plane of a split unit (eg_unit_team_plane), copied at eg_unit_load. */
 struct TeamPlaneFacts {
     std::int32_t dtype = 0, unit = 0, layout = 0, wide = 0;
@@ -266,6 +282,7 @@ struct eg_unit_s {
     std::vector<eagle::door::SlotFacts> slots;
     eagle::door::FinishFacts finish;
     eagle::door::DerivedFacts derived;        ///< a derived unit (eg_unit_meta.derived), else not present
+    eagle::door::GemmFacts gemm;              ///< a dense-contraction unit (eg_unit_meta.gemm), else not present
     std::int32_t index = -1;                  ///< the unit index in its library table
     std::array<std::uint8_t, EG_DIGEST_BYTES> digest{};
     std::vector<eagle::door::TeamPlaneFacts> team_planes;
@@ -366,6 +383,7 @@ struct eg_plan_s {
     eg_structure structure = EG_STRUCTURE_HOST_TEAM;
     std::int64_t n_samples = 0;
     std::vector<eagle::exec::Partition> parts;
+    std::vector<eagle::door::GemmCall> gemm;  ///< the unit's gemm calls with this plan's extents (empty: not a gemm unit)
     std::vector<Binding> bindings;            ///< one per slot; never resized after eg_plan_new
     std::vector<void*> params;                ///< the entry's argument list, into ``bindings``
     std::vector<eg_plane_s*> rows;            ///< one eagle-made row plane per cell component (``unit->cells``), one reference each
@@ -469,6 +487,7 @@ struct DeviceState {
     int sms = 0, regs_per_sm = 0, smem_per_sm = 0, threads_per_sm = 0, cc_major = 0, cc_minor = 0;
     int fp64_ratio = 1;                       ///< FP32:FP64 throughput ratio (1 when not reported)
     std::unordered_map<void*, std::uint64_t> alloc_stream;   ///< each live device_alloc block -> the stream it was allocated on
+    std::unordered_map<std::uint64_t, std::uint64_t> gemm_handles;   ///< stream -> its cuBLAS handle, made when a gemm unit is planned (device/Gemm.cpp)
 };
 
 }  // namespace door

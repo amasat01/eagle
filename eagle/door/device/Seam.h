@@ -16,6 +16,8 @@ void device_close(eg_ctx& ctx) noexcept;
 void device_unit_load(eg_unit_s& unit, const eg_unit_meta& meta, void* library);
 void device_unit_free(eg_unit_s& unit) noexcept;
 void device_plan_check(const eg_ctx& ctx, const eg_unit_s& unit);
+/** @brief eg_plan_new of a DEVICE plan of a gemm unit: open cuBLAS (EG_FAULT naming the libraries tried) and make the handle of the stream in scope. */
+void device_gemm_ready(eg_ctx& ctx);
 void device_launch(eg_plan_s& plan);
 void device_sync(eg_ctx& ctx);
 void device_record_begin(eg_ctx& ctx);
