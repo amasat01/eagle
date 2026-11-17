@@ -348,6 +348,24 @@ static void set_count_device(eg_ctx* ctx, const char* dev_lib) {
     ok = refused(eg_set_count(ctx, p, SM + 1), EG_BAD_REQUEST, ctx, "above the sample count's 64 entries");
     cudaMemcpy(&cell, dc, sizeof(cell), cudaMemcpyDeviceToHost);
     check(ok && cell == 0, "eg_set_count above the capacity on a DEVICE plan: refused BAD_REQUEST, the cell unchanged");
+    {   /* a graph recorded at one count replays at each later count: the kernel reads the count plane, nothing is baked in */
+        const uint32_t counts[4] = { 40, 10, 0, SM };
+        eg_graph* g = NULL;
+        for (int i = 0; i < SM; ++i) x[i] = 0.25 * i + 1.0;
+        cudaMemcpy(dx, x, sizeof(x), cudaMemcpyHostToDevice);
+        ok = eg_set_count(ctx, p, counts[0]) == EG_OK && eg_record_begin(ctx) == EG_OK && eg_launch(ctx, p, NULL) == EG_OK &&
+             eg_record_end(ctx, &g) == EG_OK;
+        for (int k = 0; ok && k < 4; ++k) {
+            ok = (k == 0 || eg_set_count(ctx, p, counts[k]) == EG_OK) && cudaMemcpy(dy, y0, sizeof(y0), cudaMemcpyHostToDevice) == cudaSuccess &&
+                 eg_graph_launch(ctx, g) == EG_OK && eg_sync(ctx) == EG_OK;
+            cudaMemcpy(got, dy, sizeof(got), cudaMemcpyDeviceToHost);
+            for (int i = 0; i < SM; ++i) want[i] = (uint32_t)i < counts[k] ? 2.0 * x[i] + 1.0 : y0[i];
+            ok = ok && memcmp(got, want, sizeof(got)) == 0;
+        }
+        check(ok, "a DEVICE graph of a prefix set recorded at count 40 replays at 40, 10, 0 and the capacity 64 (eg_set_count between replays, no new recording): "
+                  "lanes below the count new, the others old, bitwise == the plain-C values");
+        eg_graph_free(ctx, g);
+    }
     if (p) eg_plan_free(ctx, p);
     eg_plane_free(ctx, py);
     eg_plane_free(ctx, px);

@@ -653,7 +653,13 @@ eg_status eg_clear(eg_ctx* ctx, eg_plan* plan, int32_t n_slots, const int32_t* s
  * on a host plan it is done before return. ``m == 0`` is legal and runs
  * nothing; the capacity is the sample count. A lookup set's count is the
  * caller's own plane: BAD_REQUEST, bind it again. A call that fails changes
- * nothing. Call it between launches or replays, not while recording.
+ * nothing. Call it between launches or replays, not while recording. A
+ * recorded launch of an index set (host or DEVICE) reads the count plane at
+ * every replay, never a copy taken at record time: the grid is the capacity,
+ * the unit's own guard skips the lanes at or above the count, so a replay runs
+ * at the count last written, with no new recording. A replay does not check the
+ * count (a plain DEVICE launch reads it back and does); a lookup set's count
+ * is the caller's plane to keep within its map's entries.
  * Replaces: ``_set_count``, ``_index_set.write_count``.
  * Calls today: nothing compiled (Python writes the plane).
  * Status: OK; BAD_REQUEST (a unit with no index count slot, a lookup set, the

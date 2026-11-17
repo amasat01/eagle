@@ -1332,15 +1332,14 @@ void device_record_begin(eg_ctx& ctx) {
     ctx.dev_rec = rec.release();
 }
 
-/** @brief eg_launch of a DEVICE plan while recording: its launches captured on the recording's stream. */
+/** @brief eg_launch of a DEVICE plan while recording: its launches captured on the recording's stream. An index set's grid is
+ *  its partition (the capacity) and its kernel reads the count plane at each replay, so a replay runs at the count last
+ *  written; the plain launch's host read of the count (check_index_live) cannot be made inside a capture. */
 void device_record_launch(eg_ctx& ctx, eg_plan_s& plan) {
     const eg_unit_s& u = *plan.unit;
     const std::string who = "recording a DEVICE launch of unit '" + u.name + "': ";
     if (!u.stages.empty()) refuse(EG_NOT_WRITTEN, who + "a split unit is not recorded");
     if (u.seg.present) refuse(EG_NOT_WRITTEN, who + "a SEGMENTED group reads its classes back to the host at each launch and is not recorded");
-    if (u.index_count_slot >= 0)
-        refuse(EG_NOT_WRITTEN, who + "an index set (its live count is read on the host at each launch) is not written in "
-               "this build of the door");
     if (!u.companions.empty() || !u.cells.empty())
         refuse(EG_NOT_WRITTEN, who + "companion and cell folds are not written in this build of the door");
     DeviceRecording& rec = *ctx.dev_rec;

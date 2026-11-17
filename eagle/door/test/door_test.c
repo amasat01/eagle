@@ -2387,6 +2387,33 @@ static void check_set_count(eg_ctx* ctx, eg_unit* axpb) {
     }
     check(all, "eg_set_count on a prefix set: lanes below the count take the new values, the others keep theirs bitwise, 0 runs nothing, "
                "a count above the sample count is refused BAD_REQUEST and leaves the cell (SERIAL and TEAM)");
+    all = 1;
+    for (int si = 0; si < 2; ++si) {    /* a list recorded at one count replays at each later count: the kernel reads the count plane at replay */
+        eg_plan* p = NULL;
+        eg_graph* g = NULL;
+        const uint32_t counts[4] = { 40, 10, 0, SM };
+        const int32_t slots[3] = { 0, 1, 2 };
+        eg_plane* planes[3] = { py, px, pc };
+        struct eg_bind_desc bd;
+        memset(&bd, 0, sizeof(bd));
+        bd.struct_size = sizeof(bd);
+        bd.n_planes = 3;
+        bd.plane_slots = slots;
+        bd.planes = planes;
+        all &= plan(ctx, up, structures[si], SM, 0, NULL, NULL, &p) == EG_OK && eg_bind(ctx, p, &bd) == EG_OK && eg_set_count(ctx, p, counts[0]) == EG_OK &&
+               eg_record_begin(ctx) == EG_OK && eg_launch(ctx, p, NULL) == EG_OK && eg_record_end(ctx, &g) == EG_OK;
+        for (int k = 0; k < 4 && all; ++k) {
+            all &= k == 0 || eg_set_count(ctx, p, counts[k]) == EG_OK;
+            for (int i = 0; i < SM; ++i) y[i] = -1.0;
+            all &= eg_graph_launch(ctx, g) == EG_OK;
+            for (int i = 0; i < SM; ++i) want[i] = (uint32_t)i < counts[k] ? 2.0 * x[i] + 1.0 : -1.0;
+            all &= memcmp(y, want, sizeof(y)) == 0;
+        }
+        eg_graph_free(ctx, g);
+        eg_plan_free(ctx, p);
+    }
+    check(all, "eg_set_count on a prefix set recorded at count 40: the replays at 40, 10, 0 and the capacity 64 run at the count last written "
+               "with no new recording, bitwise == the plain-C values (SERIAL and TEAM)");
     {
         eg_plan *p = NULL, *q = NULL, *r = NULL, *l = NULL;
         const int32_t s_part[3] = { 0, 1, 3 }, s_lane[4] = { 0, 1, 2, 3 };
