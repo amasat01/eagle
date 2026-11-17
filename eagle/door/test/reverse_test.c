@@ -364,6 +364,8 @@ static void lin_rows(eg_ctx* ctx, const char* lib) {
     rep.struct_size = sizeof(rep);
     check(eg_run(ctx, r, &rep) == EG_OK && eg_reverse(ctx, r, &sd, &gd) == EG_BAD_REQUEST && reason_has(ctx, "memory_budget"),
           "a memory_budget below one sample's checkpoints and tape refused BAD_REQUEST");
+    check(eg_runner_reset(ctx, r) == EG_OK && eg_reverse(ctx, r, &sd, &gd) == EG_BAD_REQUEST && reason_has(ctx, "no recorded run to reverse"),
+          "eg_runner_reset drops the last recorded run: eg_reverse refuses \"no recorded run to reverse\" by name");
     eg_runner_free(ctx, r);
     eg_plane_free(ctx, ps);
     d = runner_desc(&plan, LSTEPS);

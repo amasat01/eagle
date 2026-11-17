@@ -1819,6 +1819,13 @@ void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, con
     r.live = false;
 }
 
+/** @brief Drop what the last run left to read: its record (eg_reverse then refuses) and its refine results. */
+void record_reset(eg_runner_s& runner) {
+    if (runner.record == nullptr) return;
+    runner.record->live = false;
+    if (runner.record->rf != nullptr) runner.record->rf->done = false;
+}
+
 /** @brief eg_run_events: the last refine run's stop times and statuses. */
 void run_events(eg_ctx& ctx, eg_runner_s* runner, eg_plane_s* t_stop, eg_plane_s* status) {
     check_handle(ctx.runners, runner, "runner");

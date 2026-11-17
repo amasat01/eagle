@@ -2664,6 +2664,94 @@ static void check_figures(eg_ctx* ctx) {
           "eg_runner_free, eg_plan_free and eg_unit_free after the figures");
 }
 
+/* One run of `unit` on fresh planes, the oracle of the reset rows: its report and planes. */
+static eg_status reset_fresh_run(eg_ctx* ctx, eg_unit* unit, eg_structure structure, int64_t every, double theta,
+                                 int64_t max_steps, double* k, double* limit, unsigned char* mask, struct eg_run_report* rep) {
+    struct tensor t[3];
+    count_inputs(k, limit, mask);
+    eg_plan* p = count_plan(ctx, unit, structure, k, limit, mask, t);
+    eg_runner* r = NULL;
+    struct eg_runner_desc d = runner_desc(&p, 1, max_steps);
+    d.every = every;
+    if (theta > 0) d.flags = EG_RUN_REORDER, d.reorder_theta = theta;
+    eg_status s = p ? eg_runner_new(ctx, &d, &r) : EG_FAULT;
+    if (s == EG_OK) s = eg_plan_free(ctx, p);
+    memset(rep, 0, sizeof(*rep));
+    rep->struct_size = sizeof(*rep);
+    if (s == EG_OK) s = eg_run(ctx, r, rep);
+    return s == EG_OK ? eg_runner_free(ctx, r) : s;
+}
+
+/* Run to completion, eg_runner_reset, write the inputs again, run again: planes and report bitwise those of a fresh runner. */
+static void reset_case(eg_ctx* ctx, eg_unit* unit, eg_structure structure, int64_t every, double theta, int64_t max_steps,
+                       const char* what) {
+    static double k[RN], limit[RN], kf[RN], limitf[RN];
+    static unsigned char mask[RN], maskf[RN];
+    struct tensor t[3];
+    struct eg_run_report fresh, again, first;
+    eg_status s = reset_fresh_run(ctx, unit, structure, every, theta, max_steps, kf, limitf, maskf, &fresh);
+    count_inputs(k, limit, mask);
+    eg_plan* p = count_plan(ctx, unit, structure, k, limit, mask, t);
+    eg_runner* r = NULL;
+    struct eg_runner_desc d = runner_desc(&p, 1, max_steps);
+    d.every = every;
+    if (theta > 0) d.flags = EG_RUN_REORDER, d.reorder_theta = theta;
+    if (s == EG_OK) s = p ? eg_runner_new(ctx, &d, &r) : EG_FAULT;
+    if (s == EG_OK) s = eg_plan_free(ctx, p);
+    memset(&first, 0, sizeof(first));
+    first.struct_size = sizeof(first);
+    again = first;
+    if (s == EG_OK) s = eg_run(ctx, r, &first);
+    if (s == EG_OK) s = eg_runner_reset(ctx, r);
+    int cleared = 1;
+    for (int64_t i = 0; i < RN; ++i) cleared &= mask[i] == 0;    /* every sample live again, read back from the caller's plane */
+    count_inputs(k, limit, mask);
+    if (s == EG_OK) s = eg_run(ctx, r, &again);
+    int same = memcmp(k, kf, sizeof(k)) == 0 && memcmp(limit, limitf, sizeof(limit)) == 0 && memcmp(mask, maskf, sizeof(mask)) == 0;
+    same = same && again.mode == fresh.mode && again.n == fresh.n && again.finished == fresh.finished && again.launches == fresh.launches &&
+           again.steps == fresh.steps && again.mapped == fresh.mapped && again.compactions == fresh.compactions &&
+           again.reorders == fresh.reorders && again.flags == fresh.flags;
+    check(s == EG_OK && cleared && same, what);
+    eg_runner_free(ctx, r);
+}
+
+/* eg_runner_reset: plain, active-set, reordering-set and steps-AUTO runners start over; the refusals. */
+static void check_reset(eg_ctx* ctx) {
+    eg_unit *c1 = NULL, *a1 = NULL, *ua = NULL, *uaa = NULL;
+    check(load(ctx, "count1", 0xD1, &c1) == EG_OK && load(ctx, "count1a", 0xE1, &a1) == EG_OK && load(ctx, "countA", 0xF1, &ua) == EG_OK &&
+              load(ctx, "countAa", 0xF2, &uaa) == EG_OK,
+          "eg_unit_load count1, count1a, countA and countAa for eg_runner_reset");
+    if (c1 == NULL || a1 == NULL || ua == NULL || uaa == NULL) return;
+    const eg_structure structures[2] = { EG_STRUCTURE_HOST_SERIAL, EG_STRUCTURE_HOST_TEAM };
+    for (int si = 0; si < 2; ++si) {
+        eg_host_threads(ctx, si == 0 ? 1 : 3);
+        reset_case(ctx, c1, structures[si], 0, 0.0, 1000, "eg_runner_reset: a plain runner run again equals a fresh runner (bitwise planes, same report)");
+        reset_case(ctx, a1, structures[si], 4, 0.0, 1000, "eg_runner_reset: an active-set runner run again equals a fresh runner");
+        reset_case(ctx, a1, structures[si], 4, 0.5, 1000, "eg_runner_reset: a reordering active-set runner run again equals a fresh runner");
+        reset_case(ctx, ua, structures[si], 0, 0.0, 1000, "eg_runner_reset: a steps AUTO runner run again equals a fresh runner");
+        reset_case(ctx, uaa, structures[si], 0, 0.0, 1000, "eg_runner_reset: a steps AUTO runner with an active set run again equals a fresh runner");
+    }
+    static double k[RN], limit[RN];
+    static unsigned char mask[RN];
+    struct tensor t[3];
+    count_inputs(k, limit, mask);
+    eg_plan* p = count_plan(ctx, c1, EG_STRUCTURE_HOST_SERIAL, k, limit, mask, t);
+    eg_runner* r = NULL;
+    const struct eg_runner_desc d = runner_desc(&p, 1, 100);
+    int ok = p != NULL && eg_runner_new(ctx, &d, &r) == EG_OK;
+    ok = ok && eg_runner_reset(ctx, NULL) == EG_BAD_REQUEST && reason_has(ctx, "runner");
+    ok = ok && eg_record_begin(ctx) == EG_OK && eg_runner_reset(ctx, r) == EG_BAD_REQUEST && reason_has(ctx, "eg_runner_reset while recording");
+    eg_graph* g = NULL;
+    ok = ok && eg_record_end(ctx, &g) == EG_OK && eg_graph_free(ctx, g) == EG_OK;
+    check(ok, "eg_runner_reset: a NULL runner and a call while recording refused BAD_REQUEST by reason");
+    eg_runner_free(ctx, r);
+    eg_plan_free(ctx, p);
+    eg_unit_free(ctx, c1);
+    eg_unit_free(ctx, a1);
+    eg_unit_free(ctx, ua);
+    eg_unit_free(ctx, uaa);
+}
+
 int main(int argc, char** argv) {
     if (argc != 5) {
         fprintf(stderr, "usage: %s <fixture> <wrong size> <no size block> <v1 tag>\n", argv[0]);
@@ -2708,6 +2796,7 @@ int main(int argc, char** argv) {
     check_unit_flags(ctx);
     check_banded(ctx);
     check_figures(ctx);
+    check_reset(ctx);
 
     check_reduce(ctx);
     check_conditionals(ctx);

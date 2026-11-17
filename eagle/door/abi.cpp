@@ -210,6 +210,10 @@ EG_EXPORT eg_status eg_runner_free(eg_ctx* ctx, eg_runner* runner) {
     });
 }
 
+EG_EXPORT eg_status eg_runner_reset(eg_ctx* ctx, eg_runner* runner) {
+    return door::call(ctx, [&](eg_ctx& c) { door::runner_reset(c, runner); });
+}
+
 EG_EXPORT eg_status eg_run(eg_ctx* ctx, eg_runner* runner, struct eg_run_report* report) {
     return door::call(ctx, [&](eg_ctx& c) {
         door::check_handle(c.runners, runner, "runner");

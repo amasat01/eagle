@@ -97,3 +97,40 @@ extern "C" __global__ void dprefix(ScalarHandle y, ScalarHandle x, ScalarHandle 
     if (i >= static_cast<long long>(*static_cast<const unsigned*>(cnt.data))) return;
     static_cast<double*>(y.data)[i] = 2.0 * static_cast<const double*>(x.data)[i] + 1.0;
 }
+
+// dcount1 / dcount1a: one step k += 1 of every live sample until k >= limit, which sets the mask and counts it in
+// `finished`; the active variant serves the sample map[t] of each thread t below the live count.
+extern "C" __global__ void dcount1(ScalarHandle k, ScalarHandle limit, ScalarHandle mask, ScalarHandle finished,
+                                   long long base, long long count, long long nSamples) {
+    const long long flat = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (flat >= count) return;
+    const long long i = base + flat;
+    (void)nSamples;
+    unsigned char* m = static_cast<unsigned char*>(mask.data);
+    if (m[i]) return;
+    double* kk = static_cast<double*>(k.data);
+    kk[i] += 1.0;
+    if (kk[i] >= static_cast<const double*>(limit.data)[i]) {
+        m[i] = 1;
+        atomicAdd(static_cast<unsigned*>(finished.data), 1u);
+    }
+}
+
+extern "C" __global__ void dcount1a(ScalarHandle k, ScalarHandle limit, ScalarHandle mask, ScalarHandle finished,
+                                    ScalarHandle map, ScalarHandle live, long long base, long long count,
+                                    long long nSamples) {
+    const long long flat = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (flat >= count) return;
+    const long long t = base + flat;
+    (void)nSamples;
+    if (t >= static_cast<long long>(*static_cast<const unsigned*>(live.data))) return;
+    const long long i = static_cast<const int*>(map.data)[t];
+    unsigned char* m = static_cast<unsigned char*>(mask.data);
+    if (m[i]) return;
+    double* kk = static_cast<double*>(k.data);
+    kk[i] += 1.0;
+    if (kk[i] >= static_cast<const double*>(limit.data)[i]) {
+        m[i] = 1;
+        atomicAdd(static_cast<unsigned*>(finished.data), 1u);
+    }
+}

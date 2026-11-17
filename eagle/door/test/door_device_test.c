@@ -557,6 +557,128 @@ static void figures_device(eg_ctx* ctx, const char* dev_lib) {
     cudaFree(dm);
 }
 
+/* ---- eg_runner_reset on the device ---- */
+
+#define DN 5000
+
+struct dcount {
+    eg_plan* plan;
+    eg_runner* runner;
+    double *dk, *dl;
+    unsigned char* dm;
+    double k[DN], limit[DN];
+    unsigned char mask[DN];
+    struct tensor tk, tl, tm;
+    eg_plane *pk, *pl, *pm;
+};
+
+/* A plane of @p n elements of @p code / @p bits over device memory @p data. */
+static eg_plane* wrap_device_typed(eg_ctx* ctx, struct tensor* t, void* data, int64_t n, uint8_t code, uint8_t bits) {
+    eg_plane* p = wrap(ctx, t, data, 1, n, 0, 1, 0);
+    if (p == NULL) return NULL;
+    eg_plane_free(ctx, p);
+    t->managed.dl_tensor.dtype.code = code;
+    t->managed.dl_tensor.dtype.bits = bits;
+    p = NULL;
+    return eg_plane_wrap(ctx, &t->managed, &p) == EG_OK ? p : NULL;
+}
+
+/* limit_i in 1..50; every 97th sample starts finished. */
+static void dcount_inputs(struct dcount* c) {
+    for (int i = 0; i < DN; ++i) c->k[i] = 0.0, c->limit[i] = (double)(1 + (i * 37) % 50), c->mask[i] = i % 97 == 0;
+    cudaMemcpy(c->dk, c->k, sizeof(c->k), cudaMemcpyHostToDevice);
+    cudaMemcpy(c->dl, c->limit, sizeof(c->limit), cudaMemcpyHostToDevice);
+    cudaMemcpy(c->dm, c->mask, sizeof(c->mask), cudaMemcpyHostToDevice);
+}
+
+static eg_status dcount_new(eg_ctx* ctx, eg_unit* unit, int64_t every, double theta, struct dcount* c) {
+    memset(c, 0, sizeof(*c));
+    cudaMalloc((void**)&c->dk, sizeof(c->k));
+    cudaMalloc((void**)&c->dl, sizeof(c->limit));
+    cudaMalloc((void**)&c->dm, sizeof(c->mask));
+    c->pk = wrap(ctx, &c->tk, c->dk, 1, DN, 0, 1, 0);
+    c->pl = wrap(ctx, &c->tl, c->dl, 1, DN, 0, 1, 0);
+    c->pm = wrap_device_typed(ctx, &c->tm, c->dm, DN, kDLBool, 8);
+    if (!(c->pk && c->pl && c->pm)) return EG_FAULT;
+    const int32_t slots[3] = { 0, 1, 2 };
+    eg_plane* planes[3] = { c->pk, c->pl, c->pm };
+    eg_status s = plan_n(ctx, unit, EG_STRUCTURE_DEVICE, DN, 0, NULL, NULL, &c->plan);
+    if (s == EG_OK) s = bind_planes(ctx, c->plan, 3, slots, planes);
+    struct eg_runner_desc d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    d.n_plans = 1;
+    d.plans = &c->plan;
+    d.max_steps = 1000;
+    d.every = every;
+    if (theta > 0) d.flags = EG_RUN_REORDER, d.reorder_theta = theta;
+    if (s == EG_OK) s = eg_runner_new(ctx, &d, &c->runner);
+    return s;
+}
+
+static eg_status dcount_run(eg_ctx* ctx, struct dcount* c, struct eg_run_report* rep) {
+    memset(rep, 0, sizeof(*rep));
+    rep->struct_size = sizeof(*rep);
+    eg_status s = eg_run(ctx, c->runner, rep);
+    if (s == EG_OK) s = eg_sync(ctx);
+    cudaMemcpy(c->k, c->dk, sizeof(c->k), cudaMemcpyDeviceToHost);
+    cudaMemcpy(c->mask, c->dm, sizeof(c->mask), cudaMemcpyDeviceToHost);
+    return s;
+}
+
+static void dcount_free(eg_ctx* ctx, struct dcount* c) {
+    eg_runner_free(ctx, c->runner);
+    eg_plan_free(ctx, c->plan);
+    eg_plane_free(ctx, c->pk);
+    eg_plane_free(ctx, c->pl);
+    eg_plane_free(ctx, c->pm);
+    cudaFree(c->dk);
+    cudaFree(c->dl);
+    cudaFree(c->dm);
+}
+
+/* Run, eg_runner_reset, write the inputs again, run again: planes and report bitwise those of a fresh runner's run. */
+static void reset_device_case(eg_ctx* ctx, eg_unit* unit, int64_t every, double theta, const char* what) {
+    static struct dcount fresh, reused;
+    struct eg_run_report rf, r1, r2;
+    eg_status s = dcount_new(ctx, unit, every, theta, &fresh);
+    if (s == EG_OK) dcount_inputs(&fresh), s = dcount_run(ctx, &fresh, &rf);
+    if (s == EG_OK) s = dcount_new(ctx, unit, every, theta, &reused);
+    if (s == EG_OK) dcount_inputs(&reused), s = dcount_run(ctx, &reused, &r1);
+    if (s == EG_OK) s = eg_runner_reset(ctx, reused.runner);
+    if (s == EG_OK) s = eg_sync(ctx);
+    cudaMemcpy(reused.mask, reused.dm, sizeof(reused.mask), cudaMemcpyDeviceToHost);
+    int cleared = 1;
+    for (int i = 0; i < DN; ++i) cleared &= reused.mask[i] == 0;
+    if (s == EG_OK) dcount_inputs(&reused), s = dcount_run(ctx, &reused, &r2);
+    int same = memcmp(reused.k, fresh.k, sizeof(fresh.k)) == 0 && memcmp(reused.mask, fresh.mask, sizeof(fresh.mask)) == 0 &&
+               r2.n == rf.n && r2.finished == rf.finished && r2.launches == rf.launches && r2.steps == rf.steps &&
+               r2.mapped == rf.mapped && r2.compactions == rf.compactions && r2.reorders == rf.reorders && r2.flags == rf.flags;
+    if (!same) printf("      fresh: %lld finished %lld launches %lld compactions %lld reorders; again: %lld %lld %lld %lld\n", (long long)rf.finished,
+                      (long long)rf.launches, (long long)rf.compactions, (long long)rf.reorders, (long long)r2.finished,
+                      (long long)r2.launches, (long long)r2.compactions, (long long)r2.reorders);
+    check(s == EG_OK && cleared && same, what);
+    dcount_free(ctx, &fresh);
+    dcount_free(ctx, &reused);
+}
+
+static void reset_device(eg_ctx* ctx, const char* dev_lib) {
+    eg_unit *plain = NULL, *active = NULL;
+    check(load(ctx, dev_lib, "dcount1", 0xD9, &plain) == EG_OK && load(ctx, dev_lib, "dcount1a", 0xDA, &active) == EG_OK,
+          "eg_unit_load dcount1 and dcount1a (a finishing unit on the device, plain and over an active set)");
+    if (plain == NULL || active == NULL) return;
+    reset_device_case(ctx, plain, 0, 0.0, "eg_runner_reset on a DEVICE plain runner: run again == a fresh runner (bitwise planes, same report)");
+    reset_device_case(ctx, active, 4, 0.0, "eg_runner_reset on a DEVICE active-set runner: run again == a fresh runner");
+    reset_device_case(ctx, active, 4, 0.5, "eg_runner_reset on a DEVICE reordering active-set runner: run again == a fresh runner");
+    struct dcount c;
+    int ok = dcount_new(ctx, plain, 0, 0.0, &c) == EG_OK;
+    ok = ok && refused(eg_runner_reset(ctx, NULL), EG_BAD_REQUEST, ctx, "runner");
+    check(ok, "eg_runner_reset of a NULL runner refused BAD_REQUEST on a device context");
+    dcount_free(ctx, &c);
+    eg_unit_free(ctx, plain);
+    eg_unit_free(ctx, active);
+}
+
 int main(int argc, char** argv) {
     if (argc != 3) {
         fprintf(stderr, "usage: %s <libfixture_device.so> <libfixture_unit.so>\n", argv[0]);
@@ -734,6 +856,7 @@ int main(int argc, char** argv) {
     made_planes(ctx, dev_lib);
     set_count_device(ctx, dev_lib);
     figures_device(ctx, dev_lib);
+    reset_device(ctx, dev_lib);
 
     /* The host still runs on a device context. */
     static double hx[N], hyv[N];

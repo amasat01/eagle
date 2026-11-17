@@ -735,6 +735,26 @@ eg_status eg_runner_new(eg_ctx* ctx, const struct eg_runner_desc* desc, eg_runne
 eg_status eg_runner_free(eg_ctx* ctx, eg_runner* runner);
 
 /**
+ * Put the runner back as eg_runner_new left it, so the next eg_run starts the
+ * batch over: the planes a reordering run left permuted return to sample
+ * order, then the done mask (the first plan's finish mask plane, the caller's,
+ * zeroed in place) and the finished and step counters are cleared, an active
+ * set returns to the identity (every sample live, a reordering set's
+ * permutation the identity and its counters zero), and an automatic group's
+ * mix counters and a segmented group's sort state are cleared. The last
+ * recorded run and the last refine results are dropped: eg_reverse then
+ * refuses "no recorded run to reverse" and eg_run_events "no refine run". The
+ * caller rebinds or rewrites the state planes it wants run again. On a DEVICE
+ * runner the writes are queued on the context's stream with no host wait; on a
+ * host runner they are done before return.
+ * Replaces: ``Runner.reset``, ``ActiveSet.reset``, the dispatch runner's reset.
+ * Calls today: nothing compiled (Python clears each piece).
+ * Status: OK; BAD_REQUEST (a plan of the runner with a slot unbound, a call
+ * while recording).
+ */
+eg_status eg_runner_reset(eg_ctx* ctx, eg_runner* runner);
+
+/**
  * Run until every sample is done or ``max_steps``; fill ``report``.
  * Replaces: ``Runner.run`` and the host loop of ``_host_loop.run_host``.
  * Calls today: ``HostTeam::run`` per launch; ``diff::recordForward`` and

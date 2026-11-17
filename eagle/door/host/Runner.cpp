@@ -218,6 +218,35 @@ void active_compact(ActiveState& a, const char* mask, std::size_t bytes) { compa
 void active_reorder(ActiveState& a, const std::vector<Owned>& owned) { reorder(a, owned); }
 void active_restore(ActiveState& a, const std::vector<Owned>& owned) { restore(a, owned); }
 
+/** @brief The counters of an active set back to a runner that has not run. */
+void active_counters(ActiveState& a) {
+    a.done_at_last = 0;
+    a.compactions = a.reorders = a.restored_at = 0;
+    a.fire = false;
+}
+
+/** @brief The host active set of ``a.n`` samples as a new runner holds it: every sample live, the map and (reordering) the
+ *  permutation the identity, the counters zero. */
+void active_identity(ActiveState& a) {
+    const std::size_t n = static_cast<std::size_t>(a.n);
+    a.map.resize(n);
+    for (std::size_t i = 0; i < n; ++i) a.map[i] = static_cast<std::int32_t>(i);
+    a.count = static_cast<std::uint32_t>((a.n + a.group - 1) / a.group * a.group);
+    if (a.reorder) {
+        a.perm.resize(n);
+        a.inv.resize(n);
+        for (std::size_t i = 0; i < n; ++i) a.perm[i] = a.inv[i] = static_cast<std::int32_t>(i);
+        a.span = a.n;
+    }
+    active_counters(a);
+}
+
+/** @brief Zero @p bytes at @p data, on the context's stream for device memory. */
+void zero_memory(eg_ctx& ctx, bool device, void* data, std::size_t bytes) {
+    if (device) device_zero(ctx, data, bytes);
+    else std::memset(data, 0, bytes);
+}
+
 /** @brief eg_runner_new: check the request and keep a reference to each plan. */
 void runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out) {
     if (out == nullptr) refuse(EG_BAD_REQUEST, "eg_runner_new: out is NULL");
@@ -236,17 +265,9 @@ void runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out) {
             a.group = d.plans[0]->unit->group;
             a.every_steps = k == EG_STEPS_AUTO ? kAutoKMin : active_every_steps(d);
             a.every_launches = k == EG_STEPS_AUTO ? 1 : a.every_steps / k;
-            a.map.resize(static_cast<std::size_t>(n));
-            for (std::int64_t i = 0; i < n; ++i) a.map[static_cast<std::size_t>(i)] = static_cast<std::int32_t>(i);
-            a.count = static_cast<std::uint32_t>((n + a.group - 1) / a.group * a.group);
             a.reorder = (d.flags & EG_RUN_REORDER) != 0 && n >= kMinReorderSpan;
             a.theta = d.reorder_theta;
-            if (a.reorder) {
-                a.perm.resize(static_cast<std::size_t>(n));
-                a.inv.resize(static_cast<std::size_t>(n));
-                for (std::int64_t i = 0; i < n; ++i) a.perm[static_cast<std::size_t>(i)] = a.inv[static_cast<std::size_t>(i)] = static_cast<std::int32_t>(i);
-                a.span = n;
-            }
+            active_identity(a);
             runner->active = true;
         }
         if ((d.flags & EG_RUN_RECORD) || d.events == EG_EVENTS_REFINE) record_new(ctx, *runner, d);
@@ -265,6 +286,43 @@ void runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out) {
         }
     }
     *out = runner;
+}
+
+/** @brief eg_runner_reset: the state eg_runner_new left, so the next eg_run starts the batch over. */
+void runner_reset(eg_ctx& ctx, eg_runner_s* runner) {
+    check_handle(ctx.runners, runner, "runner");
+    if (ctx.rec != nullptr || ctx.dev_rec != nullptr)
+        refuse(EG_BAD_REQUEST, "eg_runner_reset while recording (eg_record_begin .. eg_record_end): reset between runs");
+    for (const eg_plan_s* p : runner->plans) check_bound(*p);
+    eg_plan_s& first = *runner->plans[0];
+    const bool device = first.structure == EG_STRUCTURE_DEVICE;
+    ActiveState& a = runner->act;
+    const DLTensor& t = first.bindings[static_cast<std::size_t>(first.unit->finish.mask_slot)].plane->tensor->dl_tensor;
+    if (runner->active && a.reorder && a.reorders != a.restored_at) {    // planes of a run that left them permuted: sample order first
+        const std::vector<Owned> owned = owned_planes(*runner);
+        if (runner->dev.ctx != nullptr) device_active_restore(ctx, *runner, owned[0].data, owned);
+        else restore(a, owned);
+    }
+    zero_memory(ctx, device, static_cast<char*>(t.data) + t.byte_offset, static_cast<std::size_t>(elements(t)) * (t.dtype.bits / 8));
+    for (eg_plan_s* p : runner->plans) {
+        p->finished = 0;
+        p->steps_word = 0;
+        if (p->device_counter != 0) device_zero(ctx, reinterpret_cast<void*>(p->device_counter), sizeof(unsigned));
+        if (p->device_steps != 0) device_zero(ctx, reinterpret_cast<void*>(p->device_steps), sizeof(std::int64_t));
+        for (const eg_plane_s* m : p->mix) {    // an AUTO group's mix counters
+            const DLTensor& mt = m->tensor->dl_tensor;
+            zero_memory(ctx, device, static_cast<char*>(mt.data) + mt.byte_offset, static_cast<std::size_t>(elements(mt)) * (mt.dtype.bits / 8));
+        }
+        p->seg.sorted = false;    // a SEGMENTED group sorts again at its first launch
+        p->seg.stale_now = 0;
+        std::fill(p->seg.run_len.begin(), p->seg.run_len.end(), 0);
+    }
+    if (runner->active) {
+        if (runner->dev.ctx != nullptr) active_counters(a);
+        else active_identity(a);
+    }
+    if (runner->dev.ctx != nullptr) device_runner_initial(ctx, *runner);
+    record_reset(*runner);
 }
 
 /** @brief eg_runner_free: drop the runner's plan references. */

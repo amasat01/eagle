@@ -52,6 +52,7 @@ void device_read(eg_ctx&, const void*, void*, std::size_t) {}
 void device_write(eg_ctx&, void*, const void*, std::size_t) {}
 void device_copy_bytes(eg_ctx&, void*, const void*, std::size_t) {}
 void device_zero(eg_ctx&, void*, std::size_t) {}
+void device_runner_initial(eg_ctx&, eg_runner_s&) {}
 void device_columns(eg_ctx&, int, void*, std::int64_t, const void*, std::int64_t, const std::int64_t*, std::int64_t, std::int64_t,
                     unsigned, std::int64_t) {}
 void device_launch_prefix(eg_plan_s&, std::int64_t, std::int64_t) {}
@@ -1137,8 +1138,6 @@ void device_runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out)
         Current current(ctx.dev);
         runner->dev.cells = cells_new(6);    // [remaining, ran, total, live count, finished at the last compaction, compactions]
         const std::int64_t n = d.plans[0]->n_samples;
-        const unsigned total[2] = { static_cast<unsigned>(n), static_cast<unsigned>(n) };
-        cells_write(ctx.dev.stream, runner->dev.cells + 2 * sizeof(unsigned), total, 2);    // every sample live
         if (active) {
             ActiveState& a = runner->act;
             a.n = n;
@@ -1149,20 +1148,15 @@ void device_runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out)
             runner->active = true;
             runner->dev.map = cells_new(static_cast<unsigned>(std::max<std::int64_t>(n, 1)));
             runner->dev.scratch = cells_new(static_cast<unsigned>((compact_scratch_bytes(n) + sizeof(unsigned) - 1) / sizeof(unsigned)));
-            std::vector<unsigned> identity(static_cast<std::size_t>(n));
-            for (std::int64_t i = 0; i < n; ++i) identity[static_cast<std::size_t>(i)] = static_cast<unsigned>(i);
-            cells_write(ctx.dev.stream, runner->dev.map, identity.data(), static_cast<unsigned>(n));
             if (reorder) {
                 DeviceRun& r = runner->dev;
                 r.perm = cells_new(static_cast<unsigned>(n));
                 r.inv = cells_new(static_cast<unsigned>(n));
                 r.rcells = cells_new(5);    // [live32, span, fire, reorders, zero]
-                cells_write(ctx.dev.stream, r.perm, identity.data(), static_cast<unsigned>(n));
-                cells_write(ctx.dev.stream, r.inv, identity.data(), static_cast<unsigned>(n));
-                cells_write(ctx.dev.stream, r.rcells + sizeof(unsigned), total, 1);    // span = n
                 reorder_scratch(r, n, reorder_table(*runner));
             }
         }
+        device_runner_initial(ctx, *runner);
         if ((d.flags & EG_RUN_RECORD) || d.events == EG_EVENTS_REFINE) record_new(ctx, *runner, d);    // the host's record and refine checks; the run is host/Reverse.cpp's on the device
         ctx.runners.insert(runner);
     } catch (...) {
@@ -1179,6 +1173,25 @@ void device_runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out)
         }
     }
     *out = runner;
+}
+
+void device_runner_initial(eg_ctx& ctx, eg_runner_s& runner) {
+    DeviceRun& r = runner.dev;
+    if (r.cells == 0) return;    // a fast (steps AUTO) runner writes its cells at each run
+    Current current(ctx.dev);
+    const std::uint64_t stream = ctx.dev.stream;
+    const std::int64_t n = runner.plans[0]->n_samples;
+    const unsigned cells[6] = { 0, 0, static_cast<unsigned>(n), static_cast<unsigned>(n), 0, 0 };    // every sample live
+    cells_write(stream, r.cells, cells, 6);
+    if (!runner.active) return;
+    std::vector<unsigned> identity(static_cast<std::size_t>(n));
+    for (std::int64_t i = 0; i < n; ++i) identity[static_cast<std::size_t>(i)] = static_cast<unsigned>(i);
+    cells_write(stream, r.map, identity.data(), static_cast<unsigned>(n));
+    if (!runner.act.reorder) return;
+    const unsigned rcells[5] = { 0, static_cast<unsigned>(n), 0, 0, 0 };    // span = n
+    cells_write(stream, r.perm, identity.data(), static_cast<unsigned>(n));
+    cells_write(stream, r.inv, identity.data(), static_cast<unsigned>(n));
+    cells_write(stream, r.rcells, rcells, 5);
 }
 
 bool device_active_compact(eg_ctx& ctx, eg_runner_s& runner, const void* mask, const std::vector<Owned>& owned, bool reorder) {

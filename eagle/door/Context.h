@@ -576,6 +576,10 @@ void runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out);
 void runner_free(eg_ctx& ctx, eg_runner_s* runner);
 void record_new(eg_ctx& ctx, eg_runner_s& runner, const eg_runner_desc& d);
 void record_free(eg_ctx& ctx, eg_runner_s& runner);
+void record_reset(eg_runner_s& runner);
+void runner_reset(eg_ctx& ctx, eg_runner_s* runner);
+void active_counters(ActiveState& a);
+void active_identity(ActiveState& a);
 void record_forward(eg_ctx& ctx, eg_runner_s& runner, eg_run_report* report);
 /** @brief eg_run_events (host/Reverse.cpp). */
 void run_events(eg_ctx& ctx, eg_runner_s* runner, eg_plane_s* t_stop, eg_plane_s* status);
@@ -677,6 +681,8 @@ bool device_active_compact(eg_ctx& ctx, eg_runner_s& runner, const void* mask, c
 /** @brief Put every plane of @p owned back in sample order and recompute the map (the end of a reordered run). */
 void device_active_restore(eg_ctx& ctx, eg_runner_s& runner, const void* mask, const std::vector<Owned>& owned);
 void device_runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out);
+/** @brief A DEVICE runner's cells, live-slot map and reordering state written as eg_runner_new leaves them (stream order). */
+void device_runner_initial(eg_ctx& ctx, eg_runner_s& runner);
 void device_run(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report);
 /** @brief eg_runner_figures: fill @p out with the mode and the resolved launch of @p runner. */
 void runner_figures(eg_ctx& ctx, const eg_runner_s* runner, struct eg_runner_figures* out);

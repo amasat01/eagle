@@ -154,11 +154,34 @@ static const struct eg_unit_meta unit_dcount = {
     .device_image_format = EG_IMAGE_FATBIN, .body = &count_body, .launch = &launch_any, .finish = &count_finish,
     .device_image_size = "fixture__image_size" };
 
+SLOT(slot_map, EG_ROLE_LOOKUP, EG_DTYPE_INT32, 0, NULL, "active_map");
+SLOT(slot_live, EG_ROLE_LOOKUP, EG_DTYPE_UINT32, 0, NULL, "active_count");
+static const struct eg_unit_slot* const count1_slots[] = { &slot_k, &slot_limit, &slot_mask, &slot_finished };
+static const struct eg_unit_slot* const count1_active_slots[] = { &slot_k, &slot_limit, &slot_mask, &slot_finished, &slot_map, &slot_live };
+static const struct eg_unit_body count1_body = {
+    .struct_size = sizeof(struct eg_unit_body), .access = EG_ACCESS_SAMPLE_LOCAL, .n_slots = 4, .slots = count1_slots };
+static const struct eg_unit_body count_active_body = {
+    .struct_size = sizeof(struct eg_unit_body), .access = EG_ACCESS_SAMPLE_LOCAL, .n_slots = 6, .slots = count1_active_slots };
+static const struct eg_unit_launch launch_count_active = {
+    .struct_size = sizeof(struct eg_unit_launch), .active_map_slot = 4, .active_count_slot = 5, .index_map_slot = -1,
+    .index_count_slot = -1, .group = 1 };
+static const struct eg_unit_finish finish_one = {
+    .struct_size = sizeof(struct eg_unit_finish), .mask_slot = 2, .counter_slot = 3, .steps_slot = -1, .steps = 1,
+    .step_ops = -1, .fp64_ops_ir = -1 };
+#define COUNT_UNIT(var, name_, byte, function_, body_, launch_)                                             \
+    static const struct eg_unit_meta var = {                                                                \
+        .struct_size = sizeof(struct eg_unit_meta), .name = name_, .digest = DIGEST(byte),                 \
+        .pattern = EG_PATTERN_PURE, .scalar_type = EG_SCALAR_FLOAT64, .device_image = "fixture__image",    \
+        .device_function = function_, .device_image_format = EG_IMAGE_FATBIN, .body = &body_, .launch = &launch_, \
+        .finish = &finish_one, .device_image_size = "fixture__image_size" }
+COUNT_UNIT(unit_dcount1, "dcount1", 0xD9, "dcount1", count1_body, launch_any);
+COUNT_UNIT(unit_dcount1a, "dcount1a", 0xDA, "dcount1a", count_active_body, launch_count_active);
+
 static const struct eg_unit_meta* const units[] = { &unit_axpy, &unit_axpy64, &unit_boxdev, &unit_banded, &unit_nofn,
-                                                    &unit_noimg, &unit_dcells, &unit_dkeyed, &unit_dkeyednf, &unit_dkeyedh, &unit_fat129, &unit_ptx129, &unit_sass70, &unit_dprefix, &unit_dcount };
+                                                    &unit_noimg, &unit_dcells, &unit_dkeyed, &unit_dkeyednf, &unit_dkeyedh, &unit_fat129, &unit_ptx129, &unit_sass70, &unit_dprefix, &unit_dcount, &unit_dcount1, &unit_dcount1a };
 
 static const struct eg_library_meta library = {
-    .struct_size = sizeof(struct eg_library_meta), .schema_major = EG_META_SCHEMA_MAJOR, .n_units = 15, .units = units,
+    .struct_size = sizeof(struct eg_library_meta), .schema_major = EG_META_SCHEMA_MAJOR, .n_units = 17, .units = units,
 };
 
 __attribute__((visibility("default"))) const struct eg_library_meta* eg_unit_library_meta(void) { return &library; }
