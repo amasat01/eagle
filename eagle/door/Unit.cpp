@@ -5,6 +5,7 @@
 // image is loaded too, device/Device.cpp). Every member past a record's
 // struct_size reads as its documented absent value.
 #include "eagle/door/Context.h"
+#include "eagle/door/device/Seam.h"
 #include "eagle/door/eg_unit_meta.h"
 #include "plugin/gref_abi.h"
 

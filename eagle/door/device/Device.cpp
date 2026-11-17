@@ -7,6 +7,7 @@
 // current for the call only. The host-only build refuses EG_CTX_DEVICE and
 // structure DEVICE.
 #include "eagle/door/Context.h"
+#include "eagle/door/device/Seam.h"
 #include "eagle/door/eg_unit_meta.h"
 #include "eagle/door/host/Ops.h"
 #include "eagle/door/host/Segment.h"

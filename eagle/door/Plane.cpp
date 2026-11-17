@@ -4,6 +4,7 @@
 // deleter runs exactly once, when the last reference drops. A device context
 // also takes kDLCUDA tensors of its own device.
 #include "eagle/door/Context.h"
+#include "eagle/door/device/Seam.h"
 
 #include <aether/aether.h>
 #include <aether/banded/banded.h>

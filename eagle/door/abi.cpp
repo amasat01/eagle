@@ -6,6 +6,7 @@
 // too, refusing EG_NOT_WRITTEN with a reason naming them, so the library
 // links whole.
 #include "eagle/door/Context.h"
+#include "eagle/door/device/Seam.h"
 
 #define EG_EXPORT extern "C" __attribute__((visibility("default")))
 

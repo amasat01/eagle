@@ -107,12 +107,12 @@ check-inputs:
 	@test -n "$(AETHER_INCLUDE)" || { echo "set AETHER_INCLUDE"; exit 1; }
 	@test -f "$(WING_FACTS)" || { echo "set WING_FACTS to the wing's raptor_facts.h"; exit 1; }
 
-$(OUT)/%.o: %.cpp Context.h eg_door.h eg_unit_meta.h host/Team.h host/Ops.h host/Segment.h | check-inputs
+$(OUT)/%.o: %.cpp Context.h device/Seam.h eg_door.h eg_unit_meta.h host/Team.h host/Ops.h host/Segment.h | check-inputs
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS_DOOR) -c $< -o $@
 
 # The device group: built with the CUDA headers when CUDA is set, else its host-only refusals.
-$(OUT)/device/Device.o: device/Device.cpp device/Loop.h Context.h eg_door.h eg_unit_meta.h | check-inputs
+$(OUT)/device/Device.o: device/Device.cpp device/Loop.h Context.h device/Seam.h eg_door.h eg_unit_meta.h | check-inputs
 	@mkdir -p $(dir $@)
 	$(CXX) $(if $(CUDA),$(CXXFLAGS_DEVICE),$(CXXFLAGS_DOOR)) -c $< -o $@
 

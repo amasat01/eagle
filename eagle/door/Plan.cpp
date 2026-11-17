@@ -4,6 +4,7 @@
 // checked once at eg_bind; eg_launch runs eagle's host team over them, or one
 // device launch per partition (device/Device.cpp).
 #include "eagle/door/Context.h"
+#include "eagle/door/device/Seam.h"
 #include "eagle/door/eg_unit_meta.h"
 
 #include "eagle/door/host/Team.h"
