@@ -3033,7 +3033,9 @@ static void check_auto_look(eg_ctx* ctx) {
         check(load_with(ctx, names[u], (uint8_t)(0xC4 + u), adeps, 3, &auto_unit[u]) == EG_OK, "eg_unit_load of an AUTO unit naming its segmented set");
     if (k0 == NULL || auto_unit[3] == NULL) return;
 
-    /* the decisions of the old stack (test/auto_record.py): the segmented steps and the total steps of each run, and so the path of each step in how */
+    /* The runs of test/auto_decisions.txt are the ones the old stack (test/auto_record.py) decides the same way on every machine of a grid of core counts and
+     * cache sizes, so no machine's weights enter the expectation: the segmented steps and the total steps of each run, and so the path of each step in how.
+     * The old stack's decision on any weights is proved equal to Dispatch.h's by tests/test_DispatchPolicy.cpp. */
     char path[512];
     snprintf(path, sizeof(path), "%s/auto_decisions.txt", EG_TEST_DIR);
     FILE* f = fopen(path, "r");
@@ -3098,7 +3100,28 @@ static void check_auto_look(eg_ctx* ctx) {
     char what[400];
     snprintf(what, sizeof(what), "the AUTO runner takes the old stack's decision in all %d recorded runs (%d fused from the start, %d segmented to the end, %d switched to fused at a look), "
              "its values equal the plain fused unit's bitwise", rows, fused_from_start, segmented_to_end, switched);
-    check(rows == 72 && agree == rows && fused_from_start > 0 && segmented_to_end > 0 && switched > 0, what);
+    check(rows == 36 && agree == rows && fused_from_start > 0 && segmented_to_end > 0 && switched > 0, what);
+    /* the refusals of a runner over an AUTO group with a segmented set */
+    {
+        eg_unit *steps_auto = NULL, *k3 = NULL;
+        eg_runner* rr = NULL;
+        eg_plan *ps = NULL, *pk = NULL, *pp = NULL;
+        const int64_t base[2] = { 0, SGN / 2 }, count[2] = { SGN / 2, SGN / 2 };
+        check(load_with(ctx, "auto_steps", 0xB6, adeps, 3, &steps_auto) == EG_OK && load_with(ctx, "auto_k3", 0xB7, adeps, 3, &k3) == EG_OK,
+              "eg_unit_load of the AUTO units with steps AUTO and with 3 steps a launch");
+        struct eg_runner_desc d;
+        check(steps_auto && plan(ctx, steps_auto, EG_STRUCTURE_HOST_TEAM, SGN, 0, NULL, NULL, &ps) == EG_OK && (d = runner_desc(&ps, 1, 10), 1) &&
+                  eg_runner_new(ctx, &d, &rr) == EG_NOT_WRITTEN && reason_has(ctx, "needs a fixed step count per launch"),
+              "a runner over an AUTO group with a segmented set and steps AUTO: NOT_WRITTEN");
+        check(k3 && plan(ctx, k3, EG_STRUCTURE_HOST_TEAM, SGN, 0, NULL, NULL, &pk) == EG_OK && (d = runner_desc(&pk, 1, 10), 1) &&
+                  eg_runner_new(ctx, &d, &rr) == EG_NOT_WRITTEN && reason_has(ctx, "needs a fixed step count per launch"),
+              "a runner over an AUTO group whose steps per launch differ from its segmented set's: NOT_WRITTEN");
+        check(plan(ctx, auto_unit[0], EG_STRUCTURE_HOST_TEAM, SGN, 2, base, count, &pp) == EG_OK && (d = runner_desc(&pp, 1, 10), 1) &&
+                  eg_runner_new(ctx, &d, &rr) == EG_NOT_WRITTEN && reason_has(ctx, "runs one whole partition"),
+              "a runner over an AUTO group with a segmented set and two partitions: NOT_WRITTEN");
+        eg_plan_free(ctx, ps), eg_plan_free(ctx, pk), eg_plan_free(ctx, pp);
+        eg_unit_free(ctx, steps_auto), eg_unit_free(ctx, k3);
+    }
     /* the refusals of an AUTO record, by status and reason */
     {
         struct { const char* name; uint8_t byte; const char* reason; } bad[5] = {

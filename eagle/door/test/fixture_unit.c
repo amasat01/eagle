@@ -1007,6 +1007,22 @@ BAD_AUTO(auto_sweep, "auto_sweep", 0xB3, "sga", &ref_sga_cls, sga_branches, cost
 BAD_AUTO(auto_nocost, "auto_nocost", 0xB4, "sga", &ref_sga_cls, sga_branches, NULL, NULL);
 BAD_AUTO(auto_group, "auto_group", 0xB5, "sga", &ref_sg_cls_a, sg_branches_a, costs_rare, NULL);
 
+
+/* AUTO units the runner refuses: one with steps AUTO, one that steps 3 a launch where its segmented set steps 1 (both name the set of "sga"). */
+static const struct eg_unit_slot* const sga_steps_slots[] = { &slot_k, &slot_limit, &slot_mask, &slot_finished, &slot_steps, &slot_sga_mix, &slot_how };
+#define OTHER_AUTO(var, name_, byte, slots_, n_, mix_, finish_)                                                           \
+    static const struct eg_unit_dispatch disp_##var = { .struct_size = sizeof(struct eg_unit_dispatch),                \
+        .strategy = EG_DISPATCH_AUTO, .mix_slot = mix_, .class_slot = -1, .stale_slot = -1, .offsets_slot = -1,         \
+        .classify = &ref_sga_cls, .name = "sga", .k = 2, .branches = sga_branches, .branch_costs = costs_rare,           \
+        .cost_flags = AUTO_FLAGS_rare };                                                                                 \
+    static const struct eg_unit_dispatch* const var##_list[] = { &disp_##var };                                           \
+    SEG_BODY(var##_body, slots_, n_, var##_list);                                                                         \
+    SEG_UNIT(unit_##var, name_, byte, "sga_host", var##_body, launch_auto_active_none, &finish_)
+static const struct eg_unit_launch launch_auto_active_none = { .struct_size = sizeof(struct eg_unit_launch), .group = 1, .active_map_slot = -1,
+    .active_count_slot = -1, .index_map_slot = -1, .index_count_slot = -1 };
+OTHER_AUTO(auto_steps, "auto_steps", 0xB6, sga_steps_slots, 7, 5, finish_auto);
+OTHER_AUTO(auto_k3, "auto_k3", 0xB7, sga_auto_slots, 6, 4, finish3);
+
 static const struct eg_unit_meta* const units[] = { &unit_axpb, &unit_wait, &unit_split, &unit_count1,
                                                     &unit_count3, &unit_count1a, &unit_count3a, &unit_countA, &unit_countAa, &unit_vecs, &unit_count1i,
                                                     &unit_count1ia, &unit_count1e, &unit_lanes, &unit_prefix, &unit_count1g, &unit_widemul,
@@ -1014,13 +1030,13 @@ static const struct eg_unit_meta* const units[] = { &unit_axpb, &unit_wait, &uni
                                                     &unit_keyedbad, &unit_cellsum, &unit_axpb_cards, &unit_axpb_badflag,
                                                     &unit_sg_cls, &unit_sg_k0, &unit_sg_k1, &unit_sgf, &unit_dg_k0, &unit_dg_k1, &unit_dg_sweep, &unit_dgf,
                                                     &unit_sga_cls, &unit_sga_k0, &unit_sga_k1, &unit_sga_rare, &unit_sga_even, &unit_sga_scalar, &unit_sga_heavy,
-                                                    &unit_auto_nocls, &unit_auto_nobr, &unit_auto_sweep, &unit_auto_nocost, &unit_auto_group };
+                                                    &unit_auto_nocls, &unit_auto_nobr, &unit_auto_sweep, &unit_auto_nocost, &unit_auto_group, &unit_auto_steps, &unit_auto_k3 };
 
 static const struct eg_library_meta library = {
     .struct_size = sizeof(struct eg_library_meta),
     .schema_major = EG_META_SCHEMA_MAJOR,
     .schema_minor = 0,
-    .n_units = 49,
+    .n_units = 51,
     .units = units,
 };
 

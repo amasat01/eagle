@@ -1,4 +1,4 @@
-# device
+# device: runs decided the same on every machine of the grid (auto_record.py); unit n1 l1 max_steps seg_steps total_steps
 rare 2 20 4 0 4
 rare 2 20 64 0 10
 rare 2 20 400 0 10

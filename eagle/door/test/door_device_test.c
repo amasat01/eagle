@@ -1023,6 +1023,8 @@ static void check_auto_device(eg_ctx* ctx, const char* dev_lib) {
         check(eg_unit_load(ctx, &d, &auto_unit[u]) == EG_OK, "eg_unit_load of a device AUTO unit naming its segmented set");
     }
     if (k0 == NULL || fused == NULL || auto_unit[3] == NULL) return;
+    /* The recorded runs are the ones the old stack decides the same way on five GPUs from a P2000 to an H100 (test/auto_record.py), so the expectation does
+     * not depend on this one; its decision on any weights is proved equal to Dispatch.h's by tests/test_DispatchPolicy.cpp. */
     char path[512];
     snprintf(path, sizeof(path), "%s/auto_decisions_device.txt", EG_TEST_DIR);
     FILE* f = fopen(path, "r");
@@ -1056,6 +1058,17 @@ static void check_auto_device(eg_ctx* ctx, const char* dev_lib) {
     snprintf(what, sizeof(what), "the DEVICE AUTO runner takes the old stack's decision in all %d recorded runs (%d fused from the start, %d segmented to the end, %d switched to "
              "the captured loop at a look), its values equal the plain fused unit's bitwise", rows, fused_from_start, segmented_to_end, switched);
     check(rows == 72 && agree == rows && fused_from_start > 0 && segmented_to_end > 0 && switched > 0, what);
+    {   /* the same run forced segmented (the branch unit's own runner) gives the AUTO run's values */
+        static struct dset a, b;
+        eg_runner *ra = NULL, *rb = NULL;
+        struct eg_run_report rep_a, rep_b;
+        int ok = dauto_new(ctx, auto_unit[3], 20, 100, 1, &a) && dauto_new(ctx, k0, 20, 100, 1, &b);
+        ok = ok && dset_run(ctx, &a, 400, &ra, &rep_a) == EG_OK && dset_run(ctx, &b, 400, &rb, &rep_b) == EG_OK;
+        ok = ok && memcmp(a.k, b.k, sizeof(a.k)) == 0 && memcmp(a.mask, b.mask, sizeof(a.mask)) == 0 && rep_a.launches == rep_b.launches && rep_a.finished == SGN;
+        check(ok, "a DEVICE AUTO run equals the same group forced segmented (the branch unit's runner): planes bitwise, same launches");
+        eg_runner_free(ctx, ra), eg_runner_free(ctx, rb);
+        dset_free(ctx, &a), dset_free(ctx, &b);
+    }
     {   /* a run that switched leaves no stale captured loop: run it again at the full budget and again */
         static struct dset q;
         eg_runner* r = NULL;

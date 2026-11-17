@@ -6,14 +6,14 @@
  * with EG_BRANCH_* flags; each unit's dispatch cost_flags are AUTO_FLAGS_<name>. "rare" prices a cheap branch beside a heavy one, "even" two equal
  * heavy branches under a vectorised fused loop, "heavy" a cheap branch beside one so costly that compute dominates a launch even on a device, "scalar" two cheap branches under a scalar fused loop (splitting never pays). */
 #define AUTO_FLAGS_rare 3u
-#define AUTO_COST_rare_0 5u, 0, 4, 0, 0, 2, 0, 0, 0, 0, 0, 2
-#define AUTO_COST_rare_1 5u, 0, 40, 0, 20, 2, 0, 0, 0, 0, 0, 2
+#define AUTO_COST_rare_0 7u, 0, 4, 0, 0, 2, 0, 0, 0, 0, 0, 2
+#define AUTO_COST_rare_1 7u, 0, 40, 0, 20, 2, 0, 0, 0, 0, 0, 2
 #define AUTO_FLAGS_even 3u
-#define AUTO_COST_even_0 5u, 0, 40, 0, 20, 2, 0, 0, 0, 0, 0, 2
-#define AUTO_COST_even_1 5u, 0, 40, 0, 20, 2, 0, 0, 0, 0, 0, 2
+#define AUTO_COST_even_0 7u, 0, 40, 0, 20, 2, 0, 0, 0, 0, 0, 2
+#define AUTO_COST_even_1 7u, 0, 40, 0, 20, 2, 0, 0, 0, 0, 0, 2
 #define AUTO_FLAGS_scalar 2u
-#define AUTO_COST_scalar_0 4u, 0, 4, 0, 0, 2, 0, 0, 0, 0, 0, 2
-#define AUTO_COST_scalar_1 4u, 0, 4, 0, 0, 2, 0, 0, 0, 0, 0, 2
+#define AUTO_COST_scalar_0 6u, 0, 4, 0, 0, 2, 0, 0, 0, 0, 0, 2
+#define AUTO_COST_scalar_1 6u, 0, 4, 0, 0, 2, 0, 0, 0, 0, 0, 2
 #define AUTO_FLAGS_heavy 3u
-#define AUTO_COST_heavy_0 5u, 0, 4, 0, 0, 2, 0, 0, 0, 0, 0, 2
-#define AUTO_COST_heavy_1 5u, 0, 40, 0, 300000, 2, 0, 0, 0, 0, 0, 2
+#define AUTO_COST_heavy_0 7u, 0, 4, 0, 0, 2, 0, 0, 0, 0, 0, 2
+#define AUTO_COST_heavy_1 7u, 0, 40, 0, 300000, 2, 0, 0, 0, 0, 0, 2
