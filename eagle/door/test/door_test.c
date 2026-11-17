@@ -2983,6 +2983,139 @@ static void check_weight_row(eg_ctx* ctx) {
           "eg_ctx_info of a caller that predates the weights members fills none of them");
 }
 
+/* ---- an AUTO group that names its segmented set ---------------------------- */
+
+/* The planes of one run of the "sga" group: k, limit, mask and how (the path each step took: 1 segmented, 1000 fused) over SGN samples, wrapped and bound to
+ * slots 0, 1, 2 and 5 (both the AUTO units and the branch units hold them there). */
+struct auto_set {
+    double k[SGN], limit[SGN], how[SGN];
+    unsigned char mask[SGN];
+    struct tensor t[4];
+    eg_plan* plan;
+};
+
+/* n1 samples of class 1 (limit l1: two steps a launch) after SGN - n1 of class 0 (limit 2 + i % 4: one step a launch). */
+static void auto_inputs(struct auto_set* q, int n1, int l1) {
+    for (int i = 0; i < SGN; ++i) {
+        q->k[i] = 0.0;
+        q->how[i] = 0.0;
+        q->mask[i] = 0;
+        q->limit[i] = i < SGN - n1 ? (double)(2 + i % 4) : (double)l1;
+    }
+}
+
+static int auto_plan(eg_ctx* ctx, eg_unit* unit, struct auto_set* q, int with_how) {
+    eg_plane* pl[4] = { NULL, NULL, NULL, NULL };
+    tensor_init(&q->t[0], q->k, SGN, 64);
+    tensor_init(&q->t[1], q->limit, SGN, 64);
+    mask_init(&q->t[2], q->mask, SGN);
+    tensor_init(&q->t[3], q->how, SGN, 64);
+    eg_status s = plan(ctx, unit, EG_STRUCTURE_HOST_TEAM, SGN, 0, NULL, NULL, &q->plan);
+    for (int i = 0; i < 3 + with_how && s == EG_OK; ++i) s = eg_plane_wrap(ctx, &q->t[i].managed, &pl[i]);
+    const int32_t slots[4] = { 0, 1, 2, 5 };
+    struct eg_bind_desc d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    d.n_planes = 3 + with_how;
+    d.plane_slots = slots;
+    d.planes = pl;
+    if (s == EG_OK) s = eg_bind(ctx, q->plan, &d);
+    for (int i = 0; i < 4; ++i)
+        if (pl[i] != NULL) eg_plane_free(ctx, pl[i]);
+    return s == EG_OK;
+}
+
+/* What a run of @p seg segmented steps then fused ones to step @p total leaves in how: the step a sample finishes at is its limit (class 0) or half of it (class 1). */
+static double auto_how(const struct auto_set* q, int i, int n1, int seg, int total) {
+    const int steps = i < SGN - n1 ? (int)q->limit[i] : ((int)q->limit[i] + 1) / 2;
+    const int ran = steps < total ? steps : total, in_seg = ran < seg ? ran : seg;
+    return in_seg + 1000.0 * (ran - in_seg);
+}
+
+static void check_auto_look(eg_ctx* ctx) {
+    eg_unit *cls = NULL, *k1 = NULL, *k0 = NULL, *auto_unit[3] = { NULL, NULL, NULL }, *fused = NULL;
+    const char* names[3] = { "sga_rare", "sga_even", "sga_scalar" };
+    check(load(ctx, "sga__cls", 0xC1, &cls) == EG_OK && load(ctx, "sga__k1", 0xC3, &k1) == EG_OK && load(ctx, "sgf", 0xE4, &fused) == EG_OK,
+          "eg_unit_load of the AUTO group's classify and second branch units");
+    eg_unit* sdeps[2] = { k1, cls };
+    check(cls && k1 && load_with(ctx, "sga__k0", 0xC2, sdeps, 2, &k0) == EG_OK, "eg_unit_load of its first branch unit with the group's units in deps");
+    eg_unit* adeps[3] = { k0, k1, cls };
+    for (int u = 0; u < 3 && k0 != NULL; ++u)
+        check(load_with(ctx, names[u], (uint8_t)(0xC4 + u), adeps, 3, &auto_unit[u]) == EG_OK, "eg_unit_load of an AUTO unit naming its segmented set");
+    if (k0 == NULL || auto_unit[2] == NULL) return;
+
+    /* the decisions of the old stack (test/auto_record.py): the segmented steps and the total steps of each run, and so the path of each step in how */
+    char path[512];
+    snprintf(path, sizeof(path), "%.*s/auto_decisions.txt", (int)(strrchr(__FILE__, '/') - __FILE__), __FILE__);
+    FILE* f = fopen(path, "r");
+    check(f != NULL, "the recorded decisions of the old stack are present");
+    char line[256];
+    int rows = 0, agree = 0, switched = 0, fused_from_start = 0, segmented_to_end = 0;
+    while (f != NULL && fgets(line, sizeof(line), f) != NULL) {
+        char name[32];
+        int n1, l1, max_steps, want_seg, want_total;
+        if (line[0] == '#' || sscanf(line, "%31s %d %d %d %d %d", name, &n1, &l1, &max_steps, &want_seg, &want_total) != 6) continue;
+        const int u = strcmp(name, "rare") == 0 ? 0 : strcmp(name, "even") == 0 ? 1 : 2;
+        static struct auto_set q, ref;
+        auto_inputs(&q, n1, l1);
+        auto_inputs(&ref, n1, l1);
+        eg_runner *r = NULL, *rf = NULL;
+        struct eg_run_report rep, rep_ref;
+        memset(&rep_ref, 0, sizeof(rep_ref));
+        rep_ref.struct_size = sizeof(rep_ref);
+        int ok = auto_plan(ctx, auto_unit[u], &q, 1) && auto_plan(ctx, fused, &ref, 0);
+        struct eg_runner_desc d = runner_desc(&q.plan, 1, max_steps);
+        memset(&rep, 0, sizeof(rep));
+        rep.struct_size = sizeof(rep);
+        ok = ok && eg_runner_new(ctx, &d, &r) == EG_OK && eg_run(ctx, r, &rep) == EG_OK;
+        struct eg_runner_desc dr = runner_desc(&ref.plan, 1, max_steps);
+        ok = ok && eg_runner_new(ctx, &dr, &rf) == EG_OK && eg_run(ctx, rf, &rep_ref) == EG_OK;
+        for (int i = 0; ok && i < SGN; ++i)    /* the path of every sample's steps is the old stack's decision, its values the plain fused unit's */
+            ok = q.how[i] == auto_how(&q, i, n1, want_seg, want_total) && q.k[i] == ref.k[i] && q.mask[i] == ref.mask[i];
+        ok = ok && rep.launches == want_total && rep.steps == want_total && rep.mode == EG_MODE_HOST && rep.launches == rep_ref.launches;
+        ++rows;
+        agree += ok;
+        switched += want_seg > 0 && want_seg < want_total;
+        fused_from_start += want_seg == 0;
+        segmented_to_end += want_seg > 0 && want_seg == want_total;
+        if (!ok) printf("      case %s n1 %d l1 %d max_steps %d: old stack segmented %d of %d steps\n", name, n1, l1, max_steps, want_seg, want_total);
+        eg_runner_free(ctx, r);
+        eg_runner_free(ctx, rf);
+        eg_plan_free(ctx, q.plan);
+        eg_plan_free(ctx, ref.plan);
+    }
+    if (f != NULL) fclose(f);
+    char what[400];
+    snprintf(what, sizeof(what), "the AUTO runner takes the old stack's decision in all %d recorded runs (%d fused from the start, %d segmented to the end, %d switched to fused at a look), "
+             "its values equal the plain fused unit's bitwise", rows, fused_from_start, segmented_to_end, switched);
+    check(rows == 54 && agree == rows && fused_from_start > 0 && segmented_to_end > 0 && switched > 0, what);
+    /* the refusals of an AUTO record, by status and reason */
+    {
+        struct { const char* name; uint8_t byte; const char* reason; } bad[5] = {
+            { "auto_nocls", 0xB1, "is AUTO and names branches without a classify unit" },
+            { "auto_nobr", 0xB2, "is AUTO and names a classify unit without branches" },
+            { "auto_sweep", 0xB3, "is AUTO with a sweep: a dynamic selector runs fused" },
+            { "auto_nocost", 0xB4, "names its segmented set but states no branch costs: the choice cannot be priced" },
+            { "auto_group", 0xB5, "branch 0's record is group 'sg' k 2, the AUTO record says 'sga' k 2" } };
+        eg_unit *sg_cls = NULL, *sg_k1 = NULL, *sg_k0 = NULL;
+        load(ctx, "sg__cls", 0xE1, &sg_cls), load(ctx, "sg__k1", 0xE3, &sg_k1);
+        eg_unit* gdeps[2] = { sg_k1, sg_cls };
+        load_with(ctx, "sg__k0", 0xE2, gdeps, 2, &sg_k0);
+        eg_unit* bdeps[3] = { sg_k0, sg_k1, sg_cls };
+        for (int b = 0; b < 5; ++b) {
+            eg_unit* out = NULL;
+            char what[200];
+            snprintf(what, sizeof(what), "eg_unit_load of '%s' refused BAD_REQUEST: %s", bad[b].name, bad[b].reason);
+            check(load_with(ctx, bad[b].name, bad[b].byte, b == 4 ? bdeps : adeps, 3, &out) == EG_BAD_REQUEST &&
+                      out == NULL && reason_has(ctx, bad[b].reason),
+                  what);
+        }
+        eg_unit_free(ctx, sg_k0), eg_unit_free(ctx, sg_k1), eg_unit_free(ctx, sg_cls);
+    }
+    for (int u = 0; u < 3; ++u) eg_unit_free(ctx, auto_unit[u]);
+    eg_unit_free(ctx, k0), eg_unit_free(ctx, k1), eg_unit_free(ctx, cls), eg_unit_free(ctx, fused);
+}
+
 static void check_segmented_runner(eg_ctx* ctx) {
     eg_unit *cls = NULL, *k1 = NULL, *k0 = NULL, *fused = NULL;
     check(load(ctx, "sg__cls", 0xE1, &cls) == EG_OK && load(ctx, "sg__k1", 0xE3, &k1) == EG_OK && load(ctx, "sgf", 0xE4, &fused) == EG_OK,
@@ -3119,6 +3252,7 @@ int main(int argc, char** argv) {
     oracle(ctx, unit, 100001, 50000, "n=100001 threads=1");
     check_runner(ctx, unit);
     check_weight_row(ctx);
+    check_auto_look(ctx);
     check_segmented_runner(ctx);
     check_active_set(ctx);
     check_auto(ctx);

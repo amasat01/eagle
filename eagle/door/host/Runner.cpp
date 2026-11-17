@@ -290,6 +290,22 @@ void runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out) {
     *out = runner;
 }
 
+/** @brief A plan's SEGMENTED state back to a new plan's: sorts again at its next launch, from zero classes and stale marks, with no kept arrangement. */
+void seg_reset(eg_ctx& ctx, eg_plan_s& p) {
+    p.finished = 0;
+    p.seg.sorted = false;
+    p.seg.stale_now = 0;
+    std::fill(p.seg.run_len.begin(), p.seg.run_len.end(), 0);
+    p.seg.perm.clear();    // the planes are in sample order between launches: the arrangement starts as the identity
+    std::fill(p.seg.cls.begin(), p.seg.cls.end(), 0);    // the classes and stale marks a first sort reads are zero, as in a new plan
+    std::fill(p.seg.stale.begin(), p.seg.stale.end(), 0);
+    std::fill(p.seg.sortkey.begin(), p.seg.sortkey.end(), 0);
+    for (std::size_t i = 1; i < p.segdev.size() && i <= 2; ++i) {    // DEVICE: the class plane and, for a dynamic selector, the stale mask
+        const DLTensor& st = p.segdev[i]->tensor->dl_tensor;
+        zero_memory(ctx, true, static_cast<char*>(st.data) + st.byte_offset, static_cast<std::size_t>(elements(st)) * (st.dtype.bits / 8));
+    }
+}
+
 /** @brief eg_runner_reset: the state eg_runner_new left, so the next eg_run starts the batch over. */
 void runner_reset(eg_ctx& ctx, eg_runner_s* runner) {
     check_handle(ctx.runners, runner, "runner");
@@ -315,17 +331,7 @@ void runner_reset(eg_ctx& ctx, eg_runner_s* runner) {
             const DLTensor& mt = m->tensor->dl_tensor;
             zero_memory(ctx, device, static_cast<char*>(mt.data) + mt.byte_offset, static_cast<std::size_t>(elements(mt)) * (mt.dtype.bits / 8));
         }
-        p->seg.sorted = false;    // a SEGMENTED group sorts again at its first launch
-        p->seg.stale_now = 0;
-        std::fill(p->seg.run_len.begin(), p->seg.run_len.end(), 0);
-        p->seg.perm.clear();    // the planes are in sample order between launches: the arrangement starts as the identity
-        std::fill(p->seg.cls.begin(), p->seg.cls.end(), 0);    // the classes and stale marks a first sort reads are zero, as in a new plan
-        std::fill(p->seg.stale.begin(), p->seg.stale.end(), 0);
-        std::fill(p->seg.sortkey.begin(), p->seg.sortkey.end(), 0);
-        for (std::size_t i = 1; i < p->segdev.size() && i <= 2; ++i) {    // DEVICE: the class plane and, for a dynamic selector, the stale mask
-            const DLTensor& st = p->segdev[i]->tensor->dl_tensor;
-            zero_memory(ctx, true, static_cast<char*>(st.data) + st.byte_offset, static_cast<std::size_t>(elements(st)) * (st.dtype.bits / 8));
-        }
+        seg_reset(ctx, *p);
     }
     if (runner->active) {
         if (runner->dev.ctx != nullptr) active_counters(a);
@@ -338,6 +344,7 @@ void runner_reset(eg_ctx& ctx, eg_runner_s* runner) {
 /** @brief eg_runner_free: drop the runner's plan references. */
 void runner_free(eg_ctx& ctx, eg_runner_s* runner) {
     ctx.runners.erase(runner);
+    look_free(ctx, *runner);
     record_free(ctx, *runner);
     for (eg_plan_s* p : runner->plans) {
         if (p->active_owner == runner) p->active_owner = nullptr;

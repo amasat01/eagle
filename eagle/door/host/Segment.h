@@ -165,6 +165,25 @@ inline std::uint64_t run_unit(const eg_plan_s& plan, std::size_t mi, const eg_un
 
 }  // namespace seg
 
+/** @brief Run the classify unit of a static selector over every sample: the classes land in the plan's class plane, in sample order, and the sort is
+ *  dropped (the arrangement is taken again from the new classes). Returns the tiles run. */
+inline std::uint64_t classify_host(const eg_plan_s& plan, int threads) {
+    const SegFacts& g = plan.unit->seg;
+    SegState& S = plan.seg;
+    const std::size_t n = static_cast<std::size_t>(plan.n_samples), k = static_cast<std::size_t>(g.k);
+    std::uint32_t n32 = static_cast<std::uint32_t>(plan.n_samples);
+    const std::string at = "unit '" + plan.unit->name + "': dispatch group '" + g.name + "': ";
+    std::vector<seg::Owned> none;
+    std::vector<void*> p = seg::params_of(plan, k, *g.classify, none, &n32);
+    const std::uint64_t tiles = seg::run_unit(plan, k, *g.classify, p, plan.n_samples, threads);
+    for (std::size_t i = 0; i < n; ++i)
+        if (S.cls[i] < 0 || S.cls[i] >= g.k)
+            refuse(EG_BAD_REQUEST, at + "the classify unit wrote class " + std::to_string(S.cls[i]) + " for sample " + std::to_string(i) + ", outside [0, " + std::to_string(g.k) + ")");
+    S.perm.clear();
+    S.sorted = false;
+    return tiles;
+}
+
 /** @brief One launch of a SEGMENTED plan (see the header of this file). Returns the tiles run. */
 inline std::uint64_t run_segmented(const eg_plan_s& plan, int threads) {
     const SegFacts& g = plan.unit->seg;
@@ -174,16 +193,7 @@ inline std::uint64_t run_segmented(const eg_plan_s& plan, int threads) {
     if (n == 0) return 0;
     std::uint32_t n32 = static_cast<std::uint32_t>(plan.n_samples);
     const std::string at = "unit '" + plan.unit->name + "': dispatch group '" + g.name + "': ";
-    if (!g.dynamic) {    // the classes of every sample, in sample order, from the classify unit
-        std::vector<seg::Owned> none;
-        std::vector<void*> p = seg::params_of(plan, k, *g.classify, none, &n32);
-        tiles += seg::run_unit(plan, k, *g.classify, p, plan.n_samples, threads);
-        for (std::size_t i = 0; i < n; ++i)
-            if (S.cls[i] < 0 || S.cls[i] >= g.k)
-                refuse(EG_BAD_REQUEST, at + "the classify unit wrote class " + std::to_string(S.cls[i]) + " for sample " + std::to_string(i) + ", outside [0, " + std::to_string(g.k) + ")");
-        S.perm.clear();
-        S.sorted = false;
-    }
+    if (!g.dynamic) tiles += classify_host(plan, threads);    // the classes of every sample, in sample order, from the classify unit
     std::vector<seg::Owned> owned = seg::collect(plan, !g.dynamic);
     for (seg::Owned& o : owned) seg::gather(o, S.perm, n);    // the arrangement of the last sort (the identity before a sort)
     const seg::Owned* mask = nullptr;

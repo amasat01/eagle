@@ -45,6 +45,8 @@ void device_plan_check(const eg_ctx&, const eg_unit_s&) {
 void device_gemm_ready(eg_ctx&) {}
 void device_gemm_run(eg_ctx&, const eg_gemm_s&, eg_plane_s*, eg_plane_s*, eg_plane_s*) {}
 void device_launch(eg_plan_s&) {}
+void device_classify(eg_plan_s&) {}
+void device_loop_drop(eg_runner_s&) {}
 void device_sync(eg_ctx&) {}
 void device_plan_cells(eg_plan_s&) {}
 void device_plan_free(eg_plan_s&) noexcept {}
@@ -608,6 +610,16 @@ void launch_split(const eg_plan_s& plan) {
 
 namespace seg = host::seg;
 
+/** @brief Queue the classify unit of a static selector over every sample (the old runner launches it at block 256). */
+void classify_on_device(const eg_plan_s& plan) {
+    const SegFacts& g = plan.unit->seg;
+    const std::int64_t n = plan.n_samples;
+    std::uint32_t n32 = static_cast<std::uint32_t>(n);
+    std::vector<seg::Owned> none;
+    std::vector<void*> p = seg::params_of(plan, static_cast<std::size_t>(g.k), *g.classify, none, &n32);
+    exec::DeviceKernel::run(reinterpret_cast<CUfunction>(g.classify->function), p, exec::Partition{ 0, n, n }, reinterpret_cast<CUstream>(plan.ctx->dev.stream), 256);
+}
+
 /** @brief One launch of a SEGMENTED plan on the device (a dynamic selector adds the guarded run's stale compaction and the sweep): the classify unit, eagle's stable K-class sort of copies of the owned planes
  *  (``reorderClassesDevice``, as the old device runner's class sort), each branch over its run (the old runner's block choice), the written
  *  copies restored and copied back to the caller's planes. The classes and the run offsets are read back to the host (a stream sync). */
@@ -623,11 +635,7 @@ void launch_segmented(const eg_plan_s& plan) {
     if (n == 0) return;
     const std::string at = "unit '" + plan.unit->name + "': dispatch group '" + g.name + "': ";
     std::uint32_t n32 = static_cast<std::uint32_t>(n);
-    if (!g.dynamic) {    // the classes of every sample, in sample order (the old runner launches it at block 256)
-        std::vector<seg::Owned> none;
-        std::vector<void*> p = seg::params_of(plan, K, *g.classify, none, &n32);
-        exec::DeviceKernel::run(reinterpret_cast<CUfunction>(g.classify->function), p, exec::Partition{ 0, n, n }, cs, 256);
-    }
+    if (!g.dynamic) classify_on_device(plan);    // the classes of every sample, in sample order
     std::vector<seg::Owned> owned = seg::collect(plan, !g.dynamic, true);
     if (g.dynamic)    // the class and stale planes are slot-indexed scratch to the units: moved with the sort like the planes they sit beside, kept in sample order
         for (std::int32_t slot : { g.class_slot, g.stale_slot }) {
@@ -808,6 +816,19 @@ void device_launch(eg_plan_s& plan) {
         check_index_live(plan, live);
     }
     launch_on(plan, plan.ctx->dev.stream);
+}
+
+/** @brief Queue the classify unit of the static SEGMENTED plan @p plan over every sample (a runner's look at the start of a run). */
+void device_classify(eg_plan_s& plan) {
+    Current current(plan.ctx->dev);
+    classify_on_device(plan);
+}
+
+/** @brief Forget the captured loop of @p runner: it holds the launch cap it was captured with, which a run of fewer steps must not leave behind. */
+void device_loop_drop(eg_runner_s& runner) {
+    if (runner.dev.loop == nullptr) return;
+    loop_free(runner.dev.loop);
+    runner.dev.loop = nullptr;
 }
 
 /** @brief A DEVICE plan's eagle-made finished counter: one zeroed device cell. */
