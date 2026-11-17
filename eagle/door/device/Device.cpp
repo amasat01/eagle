@@ -1010,6 +1010,12 @@ void fast_runner_setup(eg_ctx& ctx, const eg_runner_desc& d, eg_runner_s& runner
     int blocks = 1;
     while (threads > 0 && threads / blocks > 512) blocks *= 2;
     persist_geometry(dev, u, threads > 0 ? blocks : 1, threads > 0 ? threads / blocks / 32 * 32 : 256, runner.dev);
+    // the persist entry's fetch counter is a uint32 the lanes keep fetching from until they pass n: n plus one
+    // overshooting fetch per lane must not wrap it, or the launch never ends
+    const std::int64_t lanes = static_cast<std::int64_t>(runner.dev.grid) * runner.dev.block;
+    if (n + lanes > (std::int64_t{ 1 } << 32))
+        refuse(EG_BAD_REQUEST, who + "the persist entry runs fewer than 2^32 samples per launch (" + std::to_string(n) +
+               " samples plus " + std::to_string(lanes) + " lanes); split the batch");
 }
 
 /** @brief One no-graph run (``Runner._run_fast``): re-sync or zero the counter as the entry counts, one launch of

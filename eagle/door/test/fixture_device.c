@@ -14,6 +14,7 @@
  *   dcells   MIN and MAX cells over rows of 4 samples (slots tot, mx, x).
  *   dkeyed   a keyed accumulate with a companion and its device fold function (slots acc, acc_c, x).
  *   dkeyednf the same naming a fold function the image does not have (eg_unit_load: FAULT).
+ *   dauto    an automatic unit with a persist entry; dautorange the same with a range entry .
  *   dkeyedh  the same with a host fold entry and no device fold function (a DEVICE plan: NOT_WRITTEN).
  *   dcount   a finishing unit, one step per launch (slots k, limit, mask, finished, geom); geom holds the launch's
  *            threads per block and blocks as the kernel saw them.
@@ -177,11 +178,33 @@ static const struct eg_unit_finish finish_one = {
 COUNT_UNIT(unit_dcount1, "dcount1", 0xD9, "dcount1", count1_body, launch_any);
 COUNT_UNIT(unit_dcount1a, "dcount1a", 0xDA, "dcount1a", count_active_body, launch_count_active);
 
+/* dauto / dautorange: an automatic unit (finish steps AUTO) with a persist entry (dauto), and with a range entry (dautorange).
+ * Slots: hits (uint32 per sample), geo (int64 per sample: the persist launch's grid, block, chunk), done (the mask), the
+ * finished counter and the steps word (eagle-made). */
+SLOT(slot_hits, EG_ROLE_MUTABLE, EG_DTYPE_UINT32, 0, NULL, "hits");
+SLOT(slot_geo, EG_ROLE_MUTABLE, EG_DTYPE_INT64, 0, NULL, "geo");
+SLOT(slot_done, EG_ROLE_TERMINATED, EG_DTYPE_BOOL, 0, NULL, "done");
+SLOT(slot_stepword, EG_ROLE_LOOKUP, EG_DTYPE_INT64, 0, NULL, "step_word");
+static const struct eg_unit_slot* const auto_slots[] = { &slot_hits, &slot_geo, &slot_done, &slot_finished, &slot_stepword };
+static const struct eg_unit_body auto_body = {
+    .struct_size = sizeof(struct eg_unit_body), .access = EG_ACCESS_SAMPLE_LOCAL, .n_slots = 5, .slots = auto_slots };
+static const struct eg_unit_finish auto_finish = {
+    .struct_size = sizeof(struct eg_unit_finish), .flags = EG_FINISH_ENTRY_COUNTS, .mask_slot = 2, .counter_slot = 3,
+    .steps_slot = 4, .steps = EG_STEPS_AUTO, .steps_max = 1, .step_ops = -1, .fp64_ops_ir = -1 };
+#define AUTO_UNIT(var, name_, byte, function_)                                                              \
+    static const struct eg_unit_meta var = {                                                                \
+        .struct_size = sizeof(struct eg_unit_meta), .name = name_, .digest = DIGEST(byte),                 \
+        .pattern = EG_PATTERN_PURE, .scalar_type = EG_SCALAR_FLOAT64, .device_image = "fixture__image",    \
+        .device_function = function_, .device_image_format = EG_IMAGE_FATBIN, .body = &auto_body,           \
+        .launch = &launch_any, .finish = &auto_finish, .device_image_size = "fixture__image_size" }
+AUTO_UNIT(unit_dauto, "dauto", 0xDB, "dauto");
+AUTO_UNIT(unit_dautorange, "dautorange", 0xDC, "dautorange");
+
 static const struct eg_unit_meta* const units[] = { &unit_axpy, &unit_axpy64, &unit_boxdev, &unit_banded, &unit_nofn,
-                                                    &unit_noimg, &unit_dcells, &unit_dkeyed, &unit_dkeyednf, &unit_dkeyedh, &unit_fat129, &unit_ptx129, &unit_sass70, &unit_dprefix, &unit_dcount, &unit_dcount1, &unit_dcount1a };
+                                                    &unit_noimg, &unit_dcells, &unit_dkeyed, &unit_dkeyednf, &unit_dkeyedh, &unit_fat129, &unit_ptx129, &unit_sass70, &unit_dprefix, &unit_dcount, &unit_dcount1, &unit_dcount1a, &unit_dauto, &unit_dautorange };
 
 static const struct eg_library_meta library = {
-    .struct_size = sizeof(struct eg_library_meta), .schema_major = EG_META_SCHEMA_MAJOR, .n_units = 17, .units = units,
+    .struct_size = sizeof(struct eg_library_meta), .schema_major = EG_META_SCHEMA_MAJOR, .n_units = 19, .units = units,
 };
 
 __attribute__((visibility("default"))) const struct eg_library_meta* eg_unit_library_meta(void) { return &library; }

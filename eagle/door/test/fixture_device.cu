@@ -134,3 +134,50 @@ extern "C" __global__ void dcount1a(ScalarHandle k, ScalarHandle limit, ScalarHa
         atomicAdd(static_cast<unsigned*>(finished.data), 1u);
     }
 }
+
+// dauto: an automatic unit (finish steps AUTO) with the fast entries. A launch visits each sample once: hits[i] += 1,
+// done[i] = 1, count += 1 for a sample not yet done. The persist entry claims chunks of `chunk` samples from the
+// uint32 cell `next` (one fetch per chunk) and writes its geometry into geo[0..2] = grid, block, chunk.
+__device__ void dautoVisit(unsigned* hits, unsigned char* done, unsigned* finished, long long i) {
+    atomicAdd(&hits[i], 1u);
+    if (done[i] == 0) {
+        done[i] = 1;
+        atomicAdd(finished, 1u);
+    }
+}
+
+#define DAUTO_SLOTS ScalarHandle hits, ScalarHandle geo, ScalarHandle done, ScalarHandle finished, ScalarHandle stepWord
+
+#define DAUTO_FUSED(name)                                                                                        \
+    extern "C" __global__ void name(DAUTO_SLOTS, long long base, long long count, long long nSamples) {          \
+        const long long flat = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;                    \
+        (void)geo; (void)stepWord; (void)nSamples;                                                               \
+        if (flat >= count) return;                                                                               \
+        dautoVisit(static_cast<unsigned*>(hits.data), static_cast<unsigned char*>(done.data),                    \
+                   static_cast<unsigned*>(finished.data), base + flat);                                          \
+    }
+
+DAUTO_FUSED(dauto)
+DAUTO_FUSED(dautorange)
+DAUTO_FUSED(dautorange_range)
+
+extern "C" __global__ void dauto_persist(DAUTO_SLOTS, long long base, long long count, long long nSamples,
+                                         unsigned* next, unsigned* util, unsigned* steps, unsigned* stepsum,
+                                         unsigned chunk) {
+    (void)stepWord; (void)util; (void)stepsum;
+    if (blockIdx.x == 0 && threadIdx.x == 0 && nSamples >= 3) {
+        long long* g = static_cast<long long*>(geo.data);
+        g[0] = gridDim.x;
+        g[1] = blockDim.x;
+        g[2] = chunk;
+    }
+    for (;;) {
+        const unsigned long long head = static_cast<unsigned long long>(atomicAdd(next, 1u)) * chunk;
+        if (head >= static_cast<unsigned long long>(count)) break;
+        const long long end = static_cast<long long>(head + chunk < static_cast<unsigned long long>(count) ? head + chunk : count);
+        for (long long i = static_cast<long long>(head); i < end; ++i)
+            dautoVisit(static_cast<unsigned*>(hits.data), static_cast<unsigned char*>(done.data),
+                       static_cast<unsigned*>(finished.data), base + i);
+    }
+    atomicMax(steps, 1u);
+}

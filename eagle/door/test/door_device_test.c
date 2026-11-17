@@ -17,6 +17,7 @@
 #include <dlfcn.h>
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define N 1000
@@ -697,6 +698,157 @@ static void reset_device(eg_ctx* ctx, const char* dev_lib) {
     eg_unit_free(ctx, active);
 }
 
+/* A device plane of @p n elements of the given DLPack type, wrapped; @p real_n of them are allocated and zeroed (a refusal
+ * row never reads the plane, so it may name a length it does not own). */
+static eg_plane* zero_plane(eg_ctx* ctx, struct tensor* t, int64_t n, size_t real_n, int code, int bits, void** dev) {
+    cudaMalloc(dev, real_n * (size_t)(bits / 8));
+    cudaMemset(*dev, 0, real_n * (size_t)(bits / 8));
+    memset(t, 0, sizeof(*t));
+    t->shape[0] = n;
+    t->managed.version.major = DLPACK_MAJOR_VERSION;
+    t->managed.dl_tensor.data = *dev;
+    t->managed.dl_tensor.device.device_type = kDLCUDA;
+    t->managed.dl_tensor.ndim = 1;
+    t->managed.dl_tensor.dtype.code = (uint8_t)code;
+    t->managed.dl_tensor.dtype.bits = (uint8_t)bits;
+    t->managed.dl_tensor.dtype.lanes = 1;
+    t->managed.dl_tensor.shape = t->shape;
+    eg_plane* plane = NULL;
+    return eg_plane_wrap(ctx, &t->managed, &plane) == EG_OK ? plane : NULL;
+}
+
+/* One automatic unit's plan over n samples (hits, geo, done bound) and a runner over it, on the DEVICE. */
+struct auto_run {
+    struct tensor t[3];
+    void* d[3];
+    eg_plane* pl[3];
+    eg_plan* plan;
+    eg_runner* runner;
+    eg_status plan_status, runner_status;
+};
+
+static void auto_run_new(eg_ctx* ctx, eg_unit* unit, int64_t n, size_t real_n, int64_t parts, const int64_t* base,
+                         const int64_t* count, struct auto_run* r) {
+    memset(r, 0, sizeof(*r));
+    r->pl[0] = zero_plane(ctx, &r->t[0], n, real_n, kDLUInt, 32, &r->d[0]);
+    r->pl[1] = zero_plane(ctx, &r->t[1], n, real_n, kDLInt, 64, &r->d[1]);
+    r->pl[2] = zero_plane(ctx, &r->t[2], n, real_n, kDLBool, 8, &r->d[2]);
+    const int32_t slots[3] = { 0, 1, 2 };
+    r->plan_status = plan_n(ctx, unit, EG_STRUCTURE_DEVICE, n, parts, base, count, &r->plan);
+    if (r->plan_status == EG_OK) r->plan_status = bind_planes(ctx, r->plan, 3, slots, r->pl);
+    if (r->plan_status != EG_OK) return;
+    struct eg_runner_desc d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    d.n_plans = 1;
+    d.plans = &r->plan;
+    d.max_steps = 1;
+    r->runner_status = eg_runner_new(ctx, &d, &r->runner);
+}
+
+static void auto_run_free(eg_ctx* ctx, struct auto_run* r) {
+    if (r->runner) eg_runner_free(ctx, r->runner);
+    if (r->plan) eg_plan_free(ctx, r->plan);
+    for (int i = 0; i < 3; ++i) {
+        eg_plane_free(ctx, r->pl[i]);
+        cudaFree(r->d[i]);
+    }
+}
+
+/* The fast (persist) entry of an automatic unit: every sample visited exactly once at several batch sizes, the chunk and
+ * block the door chose obey the rule, the grid fits the device, a count that would wrap the fetch counter is refused, and
+ * what the door does not run (a range entry, several partitions) is refused by name. The kernel's own count of visits
+ * (hits, uint32 atomics) and its counter are the oracles; the entry's registers and residency come from the CUDA runtime
+ * loading the fixture's own image. */
+static void fast_entries(eg_ctx* ctx, const char* dev_lib) {
+    eg_unit *unit = NULL, *ranged = NULL;
+    check(load(ctx, dev_lib, "dauto", 0xDB, &unit) == EG_OK && load(ctx, dev_lib, "dautorange", 0xDC, &ranged) == EG_OK,
+          "eg_unit_load dauto and dautorange (automatic units with a persist and a range entry)");
+    if (unit == NULL || ranged == NULL) return;
+    struct cudaDeviceProp prop;
+    cudaGetDeviceProperties(&prop, 0);
+    const int64_t sizes[3] = { 100003, 600011, 4099 };
+    for (int s = 0; s < 3; ++s) {
+        const int64_t n = sizes[s];
+        struct auto_run r;
+        auto_run_new(ctx, unit, n, (size_t)n, 0, NULL, NULL, &r);
+        struct eg_run_report rep;
+        memset(&rep, 0, sizeof(rep));
+        rep.struct_size = sizeof(rep);
+        unsigned* hits = (unsigned*)malloc((size_t)n * sizeof(unsigned));
+        int64_t geo[3] = { 0, 0, 0 };
+        int ok = r.runner_status == EG_OK && eg_run(ctx, r.runner, &rep) == EG_OK && eg_sync(ctx) == EG_OK && hits != NULL;
+        if (ok) {
+            cudaMemcpy(hits, r.d[0], (size_t)n * sizeof(unsigned), cudaMemcpyDeviceToHost);
+            cudaMemcpy(geo, r.d[1], sizeof(geo), cudaMemcpyDeviceToHost);
+            int64_t wrong = 0;
+            for (int64_t i = 0; i < n; ++i) wrong += hits[i] != 1;
+            ok = wrong == 0 && rep.mode == EG_MODE_PERSIST && rep.finished == n && (rep.flags & EG_REPORT_DONE) != 0;
+            if (!ok)
+                printf("      mode %d finished %lld of %lld, %lld samples not visited exactly once\n", (int)rep.mode,
+                       (long long)rep.finished, (long long)n, (long long)wrong);
+        } else {
+            printf("      runner %d, plan %d\n", (int)r.runner_status, (int)r.plan_status);
+            reason_has(ctx, "");
+        }
+        char what[200];
+        snprintf(what, sizeof(what), "persist run of %lld samples (grid %lld, block %lld, chunk %lld): every sample visited exactly once, counter == n",
+                 (long long)n, (long long)geo[0], (long long)geo[1], (long long)geo[2]);
+        check(ok, what);
+        if (ok && s == 0) {
+            const int64_t chunk = geo[2];
+            void* handle = dlopen(dev_lib, RTLD_NOW);
+            const void* image = handle ? dlsym(handle, "fixture__image") : NULL;
+            cudaLibrary_t lib;
+            cudaKernel_t kernel;
+            struct cudaFuncAttributes fa;
+            int per_sm = 0;
+            const int fit = image != NULL && cudaLibraryLoadData(&lib, image, NULL, NULL, 0, NULL, NULL, 0) == cudaSuccess &&
+                            cudaLibraryGetKernel(&kernel, lib, "dauto_persist") == cudaSuccess &&
+                            cudaFuncGetAttributes(&fa, (const void*)kernel) == cudaSuccess &&
+                            cudaOccupancyMaxActiveBlocksPerMultiprocessor(&per_sm, (const void*)kernel, (int)geo[1], 0) == cudaSuccess;
+            check(chunk >= 1 && chunk <= (1 << 20) && (chunk & (chunk - 1)) == 0 && geo[1] >= 32 && geo[1] % 32 == 0,
+                  "the persist chunk is a power of two in [1, 2^20] and the block is whole warps");
+            check(fit && geo[1] <= 512 && geo[1] <= fa.maxThreadsPerBlock && geo[1] * fa.numRegs <= prop.regsPerBlock &&
+                      geo[0] >= 1 && geo[0] <= (int64_t)prop.multiProcessorCount * per_sm,
+                  "the persist grid never exceeds the blocks that fit resident, the block is at most 512 threads within the registers");
+        }
+        free(hits);
+        auto_run_free(ctx, &r);
+    }
+    /* a count that would wrap the uint32 fetch counter: n plus one overshooting fetch per lane must stay below 2^32 (2^32
+     * itself is already refused by the runner, whose finished counter is a uint32) */
+    struct auto_run big;
+    auto_run_new(ctx, unit, (int64_t)1 << 32, 1024, 0, NULL, NULL, &big);
+    check(big.plan_status == EG_OK && refused(big.runner_status, EG_BAD_REQUEST, ctx, "the finished counter is uint32"), "a runner over 2^32 samples is refused BAD_REQUEST (the finished counter is uint32)");
+    auto_run_free(ctx, &big);
+    const int64_t huge[2] = { ((int64_t)1 << 32) - 1, ((int64_t)1 << 32) - ((int64_t)1 << 21) };
+    for (int i = 0; i < 2; ++i) {
+        struct auto_run r;
+        auto_run_new(ctx, unit, huge[i], 1024, 0, NULL, NULL, &r);
+        char what[120];
+        snprintf(what, sizeof(what), "a persist runner over %lld samples is %s", (long long)huge[i],
+                 i == 0 ? "refused BAD_REQUEST (the fetch counter would wrap)" : "made");
+        check(r.plan_status == EG_OK && (i == 0 ? refused(r.runner_status, EG_BAD_REQUEST, ctx, "fewer than 2^32 samples per launch")
+                                                : r.runner_status == EG_OK),
+              what);
+        auto_run_free(ctx, &r);
+    }
+    /* the range entry and several partitions are not run by the door: refused by name, no silent fallback */
+    struct auto_run r;
+    auto_run_new(ctx, ranged, 5000, 5000, 0, NULL, NULL, &r);
+    check(r.plan_status == EG_OK && refused(r.runner_status, EG_NOT_WRITTEN, ctx, "the range entry '_range'"),
+          "an automatic unit with a range entry: eg_runner_new refused NOT_WRITTEN by name");
+    auto_run_free(ctx, &r);
+    const int64_t base[2] = { 0, 2500 }, count[2] = { 2500, 2500 };
+    auto_run_new(ctx, unit, 5000, 5000, 2, base, count, &r);
+    check(r.plan_status == EG_OK && refused(r.runner_status, EG_NOT_WRITTEN, ctx, "2 partitions"),
+          "an automatic unit over two partitions: eg_runner_new refused NOT_WRITTEN by name");
+    auto_run_free(ctx, &r);
+    eg_unit_free(ctx, unit);
+    eg_unit_free(ctx, ranged);
+}
+
 int main(int argc, char** argv) {
     if (argc != 3) {
         fprintf(stderr, "usage: %s <libfixture_device.so> <libfixture_unit.so>\n", argv[0]);
@@ -882,6 +1034,7 @@ int main(int argc, char** argv) {
     set_count_device(ctx, dev_lib);
     figures_device(ctx, dev_lib);
     reset_device(ctx, dev_lib);
+    fast_entries(ctx, dev_lib);
 
     /* The host still runs on a device context. */
     static double hx[N], hyv[N];
