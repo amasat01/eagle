@@ -8,6 +8,10 @@
 
 #define SGN 200
 
+/* The start of sample i of the dynamic group: the multiples of 0.02 below 4 in a scattered order (37 is coprime to 200), so the samples that
+ * cross the class edge k = 4 together sit apart in sample order and a re-sort visibly moves them. */
+#define DG_K0(i) (0.02 * (((i) * 37) % SGN))
+
 static inline int64_t seg_done(const unsigned char* mask) {
     int64_t done = 0;
     for (int i = 0; i < SGN; ++i) done += mask[i] != 0;
@@ -63,3 +67,52 @@ static inline int64_t dg_model(double* k, const double* limit, unsigned char* ma
     return launches;
 }
 
+
+/* The same group as the DEVICE runs it. The host carries the arrangement between launches and sorts that; the device sorts the planes in
+ * sample order again at every launch, by a key it keeps frozen: the class of each sample at the last refresh, taken from the class plane
+ * (sample order) at the first launch and whenever more live samples than 5% of the live ones were left stale. Both leave the caller's planes in
+ * sample order, so the two arrangements differ only in the slot a sample held: pos[i] is the slot of sample i in the last launch that ran it,
+ * and with a frozen key it changes only at a refresh. Returns the launches run; @p refreshes holds the launches that refreshed the key. */
+static inline int64_t dg_model_device(double* k, const double* limit, unsigned char* mask, double* pos, int64_t max_steps, int64_t* refreshes,
+                                      int* n_refreshes) {
+    int key[SGN], cls[SGN], stale[SGN], sorted = 0;
+    int64_t launches = 0, stale_now = 0;
+    *n_refreshes = 0;
+    for (int i = 0; i < SGN; ++i) key[i] = cls[i] = stale[i] = 0;
+    while (launches < max_steps && seg_done(mask) != SGN) {
+        int64_t live = 0;
+        for (int i = 0; i < SGN; ++i) live += !mask[i];
+        if (!sorted || (double)stale_now > 0.05 * (double)(live > 1 ? live : 1)) {
+            memcpy(key, cls, sizeof(key));
+            sorted = 1;
+            if (*n_refreshes < 16) refreshes[(*n_refreshes)++] = launches + 1;
+        }
+        int order[SGN], at = 0, end[2] = { 0, 0 };
+        for (int c = 0; c < 3; ++c) {
+            for (int i = 0; i < SGN; ++i)
+                if ((mask[i] ? 2 : key[i]) == c) order[at++] = i;
+            if (c < 2) end[c] = at;
+        }
+        for (int s = 0; s < end[1]; ++s) {    /* the live samples, by run */
+            const int i = order[s], j = s < end[0] ? 0 : 1, c = k[i] >= 4.0;
+            cls[i] = c;
+            stale[i] = c != j;
+            pos[i] = (double)s;
+            if (c == j) {
+                k[i] += 0.125 * (j + 1);
+                if (k[i] >= limit[i]) mask[i] = 1;
+            }
+        }
+        stale_now = 0;
+        for (int s = 0; s < end[1]; ++s) {    /* the stale samples that are still live, stepped by their class */
+            const int i = order[s];
+            if (stale[i] && !mask[i]) {
+                k[i] += 0.125 * ((k[i] >= 4.0) + 1);
+                if (k[i] >= limit[i]) mask[i] = 1;
+                ++stale_now;
+            }
+        }
+        ++launches;
+    }
+    return launches;
+}

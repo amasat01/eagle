@@ -810,7 +810,7 @@ struct dset {
 
 static void dset_upload(struct dset* q, int dynamic) {
     for (int i = 0; i < SGN; ++i) {
-        q->k[i] = dynamic ? 0.02 * i : 0.0;
+        q->k[i] = dynamic ? DG_K0(i) : 0.0;
         q->limit[i] = dynamic ? 7.0 : (double)(2 + i % 9);
         q->pos[i] = -1.0;
         q->mask[i] = 0;
@@ -946,6 +946,30 @@ static void check_segmented_device(eg_ctx* ctx, const char* dev_lib) {
     check(eg_runner_reset(ctx, rb) == EG_OK && eg_run(ctx, rb, &rep) == EG_OK && (dset_read(ctx, &b), dset_same(&b, &a, 1)) && rep.launches == total,
           "eg_runner_reset of a dynamic DEVICE group, then a second run equals the first (the sort starts over)");
     eg_runner_free(ctx, rb), eg_runner_free(ctx, rfu);
+    {   /* the key refresh schedule, through the position plane: a refresh at launch 1 and at launch 4, none at 2 or 3 */
+        static struct dset c;
+        double mk[SGN], ml[SGN], mp[SGN], runpos[4][SGN];
+        unsigned char mm[SGN];
+        int64_t refreshes[16];
+        int n_ref = 0;
+        for (int i = 0; i < SGN; ++i) mk[i] = DG_K0(i), ml[i] = 7.0, mp[i] = -1.0, mm[i] = 0;
+        dg_model_device(mk, ml, mm, mp, 1000, refreshes, &n_ref);
+        check(n_ref >= 2 && refreshes[0] == 1 && refreshes[1] == 4, "the device model refreshes its sort key at launch 1 and next at launch 4 (12 stale of 200 live)");
+        int agree = 1;
+        for (int cut = 2; cut <= 5; ++cut) {
+            for (int i = 0; i < SGN; ++i) mk[i] = DG_K0(i), mp[i] = -1.0, mm[i] = 0;
+            dg_model_device(mk, ml, mm, mp, cut, refreshes, &n_ref);
+            eg_runner* rc = NULL;
+            agree &= dset_new(ctx, dk0, 1, 1, &c) && dset_run(ctx, &c, cut, &rc, &rep) == EG_OK && memcmp(c.k, mk, sizeof(mk)) == 0 &&
+                     memcmp(c.mask, mm, sizeof(mm)) == 0 && memcmp(c.pos, mp, sizeof(mp)) == 0 && rep.launches == cut;
+            if (cut <= 5 && cut >= 2) memcpy(runpos[cut - 2 < 4 ? cut - 2 : 3], c.pos, sizeof(c.pos));
+            eg_runner_free(ctx, rc);
+            dset_free(ctx, &c);
+        }
+        check(agree, "the dynamic DEVICE group under a runner for 2 to 5 launches: planes and positions as the device model");
+        check(memcmp(runpos[0], runpos[1], sizeof(runpos[0])) == 0 && memcmp(runpos[1], runpos[2], sizeof(runpos[0])) != 0,
+              "the positions are the same after 2 and 3 launches and differ after 4: the key is refreshed at launch 4 and not before");
+    }
     dset_free(ctx, &a), dset_free(ctx, &b), dset_free(ctx, &f);
     eg_unit_free(ctx, k0), eg_unit_free(ctx, k1), eg_unit_free(ctx, cls), eg_unit_free(ctx, fused), eg_unit_free(ctx, dk0), eg_unit_free(ctx, dk1),
         eg_unit_free(ctx, dsw), eg_unit_free(ctx, dgf);

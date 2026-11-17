@@ -2915,7 +2915,7 @@ struct seg_set {
 
 static void seg_inputs(struct seg_set* q, int dynamic) {
     for (int i = 0; i < SGN; ++i) {
-        q->k[i] = dynamic ? 0.02 * i : 0.0;    /* dynamic: the samples cross the class edge k = 4 one after another */
+        q->k[i] = dynamic ? DG_K0(i) : 0.0;    /* dynamic: the samples cross the class edge k = 4 one after another */
         q->limit[i] = dynamic ? 7.0 : (double)(2 + i % 9);
         q->pos[i] = -1.0;
         q->mask[i] = 0;
@@ -3039,8 +3039,8 @@ static void check_segmented_runner(eg_ctx* ctx) {
     int n_sorts = 0;
     seg_inputs(&model, 1);
     const int64_t total = dg_model(model.k, model.limit, model.mask, model.pos, 1000, sorts, &n_sorts);
-    /* Launch L steps the samples of run 0 whose k (0.02 i + 0.125 (L - 1) while in run 0) is still below 4 and marks the rest stale: 6 samples
-     * (i >= 194) in launch 2, 12 (i >= 188) in launch 3. The sort is kept while the stale are at most 5% of the 200 live (10), so launch 3 keeps
+    /* Launch L steps the samples of run 0 whose k (k0 + 0.125 (L - 1) while in run 0) is still below 4 and marks the rest stale: 6 samples
+     * (0.02 * ((37 i) mod 200) >= 3.875) in launch 2, 12 in launch 3. The sort is kept while the stale are at most 5% of the 200 live (10), so launch 3 keeps
      * it (6 stale) and launch 4 sorts again (12 stale): the sorts are at launches 1 and 4. */
     check(n_sorts >= 2 && sorts[0] == 1 && sorts[1] == 4, "the model sorts at launch 1 and next at launch 4 (12 stale of 200 live), not at launch 2 or 3");
     for (int64_t cut = sorts[1] - 1; cut <= sorts[1] + 1; ++cut) {
@@ -3063,7 +3063,7 @@ static void check_segmented_runner(eg_ctx* ctx) {
               seg_same(&b, &model, 1) && memcmp(b.k, f.k, sizeof(b.k)) == 0 && rep.launches == total && rep2.launches == total,
           "the dynamic group to completion equals the model and the fused unit bitwise");
     memset(b.k, 0, sizeof(b.k));
-    for (int i = 0; i < SGN; ++i) b.k[i] = 0.02 * i, b.pos[i] = -1.0;
+    for (int i = 0; i < SGN; ++i) b.k[i] = DG_K0(i), b.pos[i] = -1.0;
     memset(b.mask, 0, sizeof(b.mask));
     memset(&rep, 0, sizeof(rep));
     rep.struct_size = sizeof(rep);
