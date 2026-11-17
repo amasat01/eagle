@@ -19,6 +19,7 @@
 
 #include "eagle/DeviceProps.h"
 #include "eagle/policy/Residency.h"
+#include "eagle/policy/WeightRows.h"
 
 #include <algorithm>
 #include <array>
@@ -48,22 +49,9 @@ inline constexpr int WARP_LANES = 32;
 // `vectorWidth` times faster and hides the chain across its lanes, so it pays none;
 // one it leaves scalar pays the chain in full.
 //
-// Host defaults, fitted by benchmarks/reproduce/fit_profile.py to the calibration
-// of a 4-core Xeon W-2125 (relative RMS 0.19 over the isolated groups). The device
-// defaults are conservative priors until a device calibration fits within 0.20.
-inline constexpr double HOST_LANE_RATE = 24.5e9;        ///< plain 64-bit ops per second, all cores
-inline constexpr double HOST_MEMORY_RATE = 52.1e9;      ///< bytes per second a streaming loop reaches
-inline constexpr double HOST_CACHE_BYTES = 12.7e6;      ///< last-level plus per-core caches
-inline constexpr double HOST_CACHE_RATIO = 5.09;         ///< a cached gather's speed over memory
-inline constexpr double HOST_ARITH32 = 1.495;            ///< a 32-bit op, in 64-bit ops
-inline constexpr double HOST_SPECIAL32 = 25.2;        ///< a 32-bit transcendental or library call, in 64-bit ops
-inline constexpr double HOST_SPECIAL64 = 122.0;        ///< a 64-bit transcendental or library call, in 64-bit ops
-inline constexpr double HOST_CHAIN_SECONDS = 0.23e-9;  ///< one dependent op, across all cores: 4 cycles / 4.3 GHz / 4 cores, a default the host calibration refits per machine
-inline constexpr double HOST_VECTOR_WIDTH = 8;          ///< speed-up of a vectorised loop over a scalar one: the 8 fp64 lanes of AVX-512, as an effective width
-inline constexpr double HOST_SPLIT_SECONDS = 0.35e-9;   ///< one split step's bookkeeping, per sample
-inline constexpr double HOST_SORT_SECONDS = 13.2e-9;    ///< one class sort, per sample
-inline constexpr double DEVICE_SPLIT_SECONDS = 0.05e-9;  ///< one split step's bookkeeping, per sample; a prior
-inline constexpr double DEVICE_SORT_SECONDS = 10e-9;     ///< one class sort, per sample; a prior
+// The weights are rows of WeightRows.h, picked by the machine class (see weightRowIndex); the host rows were fitted by
+// benchmarks/reproduce/fit_profile.py to the calibration of a 4-core Xeon W-2125 (relative RMS 0.19 over the isolated groups). The device
+// built-in row is a conservative prior until a device calibration fits within 0.20.
 /// Warps per SM above which the issue pipe stays busy: a kernel resident in fewer runs the lanes slower.
 /// 8 is the knee measured on a P2000 (1:32 FP64 rate).
 inline constexpr int ISSUE_KNEE_WARPS = 8;
@@ -141,31 +129,66 @@ struct HysteresisState {
     int sinceDecision = 0;
 };
 
+/** @brief One row of EG_WEIGHT_ROWS. */
+struct WeightRow {
+    int target, vendor, family, model;
+    double arith32, special32, special64, launchSeconds, splitSeconds, sortSeconds, laneRatePerCore, memoryRate, cacheRatio,
+        chainSecondsPerCore, vectorWidth;
+};
+
+#define EG_WEIGHT_ROW_INIT(...) { __VA_ARGS__ },
+inline constexpr WeightRow WEIGHT_ROWS[] = { EG_WEIGHT_ROWS(EG_WEIGHT_ROW_INIT) };
+#undef EG_WEIGHT_ROW_INIT
+inline constexpr int WEIGHT_ROW_COUNT = static_cast<int>(sizeof(WEIGHT_ROWS) / sizeof(WEIGHT_ROWS[0]));
+
+/** @brief The row of the class (@p vendor, @p family, @p model) of @p target, or -1 for the built-in row: an unknown class takes it, nothing nearer. */
+inline int weightRowIndex(Target target, int vendor, int family, int model) {
+    for (int i = 0; i < WEIGHT_ROW_COUNT; ++i) {
+        const WeightRow& r = WEIGHT_ROWS[i];
+        if (r.target == static_cast<int>(target) && (r.vendor || r.family || r.model) && r.vendor == vendor && r.family == family && r.model == model)
+            return i;
+    }
+    return -1;
+}
+
+/** @brief The built-in row of @p target (the row whose class is all zero). */
+inline const WeightRow& builtinWeightRow(Target target) {
+    for (const WeightRow& r : WEIGHT_ROWS)
+        if (r.target == static_cast<int>(target) && !r.vendor && !r.family && !r.model) return r;
+    throw std::logic_error("WeightRows.h: a target has no built-in row");
+}
+
+/** @brief The facts of the live machine a row does not hold: physical cores (host; 1 on a device) and the bytes of cache a gathered plane may sit in. */
+struct Machine {
+    double physicalCores = 1;
+    double cacheBytes = 0;
+};
+
+/** @brief The weights of @p row on @p machine: the per-core rates scaled by the physical cores. */
+inline Weights weightsOfRow(const WeightRow& row, const Machine& machine) {
+    Weights w;
+    w.target = static_cast<Target>(row.target);
+    w.arith32 = row.arith32;
+    w.special32 = row.special32;
+    w.special64 = row.special64;
+    w.launchSeconds = row.launchSeconds;
+    w.splitSeconds = row.splitSeconds;
+    w.sortSeconds = row.sortSeconds;
+    w.laneRate = row.laneRatePerCore * machine.physicalCores;
+    w.memoryRate = row.memoryRate;
+    w.cacheBytes = machine.cacheBytes;
+    w.cacheRatio = row.cacheRatio;
+    w.chainSeconds = row.chainSecondsPerCore / machine.physicalCores;
+    w.vectorWidth = row.vectorWidth;
+    return w;
+}
+
 /**
- * @brief Weights for @p target, measured on a 4-core Xeon W-2125 host and a
- *        Quadro P2000 (N = 2^21, fp64, warmed), until a fitted profile replaces them.
+ * @brief The built-in weights of @p target on the machine the rows were fitted on (a 4-core Xeon W-2125 with 12.7e6 bytes of cache; a
+ *        Quadro P2000 for the device, whose cache is the live L2), until a fitted profile replaces them.
  */
 inline Weights defaultWeights(Target target) {
-    Weights w;
-    w.target = target;
-    if (target == Target::Host) {
-        w.launchSeconds = 1.4e-6;
-        w.laneRate = HOST_LANE_RATE;
-        w.memoryRate = HOST_MEMORY_RATE;
-        w.cacheBytes = HOST_CACHE_BYTES;
-        w.cacheRatio = HOST_CACHE_RATIO;
-        w.chainSeconds = HOST_CHAIN_SECONDS;
-        w.vectorWidth = HOST_VECTOR_WIDTH;
-        w.arith32 = HOST_ARITH32;
-        w.special32 = HOST_SPECIAL32;
-        w.special64 = HOST_SPECIAL64;
-        w.splitSeconds = HOST_SPLIT_SECONDS;
-        w.sortSeconds = HOST_SORT_SECONDS;
-    } else {
-        w.splitSeconds = DEVICE_SPLIT_SECONDS;
-        w.sortSeconds = DEVICE_SORT_SECONDS;
-    }
-    return w;
+    return weightsOfRow(builtinWeightRow(target), target == Target::Host ? Machine{ 4, 12.7e6 } : Machine{ 1, 0 });
 }
 
 namespace detail {

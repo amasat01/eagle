@@ -21,6 +21,7 @@
  */
 #include "eagle/door/eg_door.h"
 #include "eagle/door/eg_unit_meta.h"
+#include "auto_costs.h"
 
 #define SLOT(var, role_, dtype_, rank_, shape_, name_)                                                      \
     static const struct eg_unit_slot var = { .struct_size = sizeof(struct eg_unit_slot), .role = role_,    \
@@ -264,12 +265,52 @@ SEG_UNIT(unit_dg_k1, "ddg__k1", 0xF6, "dgK1", dg_branch_body, launch_any, &finis
 SEG_UNIT(unit_dg_sweep, "ddg__sweep", 0xF7, "dgSweep", dg_sweep_body, launch_count_active, &finish_one);
 COUNT_UNIT(unit_dgf, "ddgf", 0xF8, "dgf", count1_body, launch_any);
 
+
+/* The AUTO group "dsga": the host fixture's "sga" on the device (see test/fixture_unit.c). */
+SLOT(slot_sga_offsets, EG_ROLE_LOOKUP, EG_DTYPE_INT64, 0, NULL, "sga_offsets");
+SLOT(slot_sga_class, EG_ROLE_MUTABLE, EG_DTYPE_INT64, 0, NULL, "sga_class");
+SLOT(slot_sga_mix, EG_ROLE_LOOKUP, EG_DTYPE_UINT32, 0, NULL, "sga_mix");
+SLOT(slot_how, EG_ROLE_MUTABLE, EG_DTYPE_REAL, 0, NULL, "how");
+static const struct eg_unit_slot* const sga_k_slots[] = { &slot_k, &slot_limit, &slot_mask, &slot_finished, &slot_sga_offsets, &slot_how };
+static const struct eg_unit_slot* const sga_cls_slots[] = { &slot_limit, &slot_sga_class };
+static const struct eg_unit_slot* const sga_auto_slots[] = { &slot_k, &slot_limit, &slot_mask, &slot_finished, &slot_sga_mix, &slot_how };
+SEG_REF(ref_sga_cls, "dsga__cls", 0x91);
+SEG_REF(ref_sga_k0, "dsga__k0", 0x92);
+SEG_REF(ref_sga_k1, "dsga__k1", 0x93);
+static const struct eg_unit_ref* const sga_branches[] = { &ref_sga_k0, &ref_sga_k1 };
+DISPATCH(disp_sga_cls, EG_DISPATCH_SEGMENTED, 1, -1, -1, NULL, "dsga", NULL, NULL);
+DISPATCH(disp_sga_branch, EG_DISPATCH_SEGMENTED, -1, -1, 4, &ref_sga_cls, "dsga", sga_branches, NULL);
+static const struct eg_unit_dispatch* const sga_cls_list[] = { &disp_sga_cls };
+static const struct eg_unit_dispatch* const sga_branch_list[] = { &disp_sga_branch };
+SEG_BODY(sga_cls_body, sga_cls_slots, 2, sga_cls_list);
+SEG_BODY(sga_branch_body, sga_k_slots, 6, sga_branch_list);
+SEG_UNIT(unit_sga_cls, "dsga__cls", 0x91, "sgCls", sga_cls_body, launch_any, NULL);
+SEG_UNIT(unit_sga_k0, "dsga__k0", 0x92, "sgaK0", sga_branch_body, launch_any, &finish_one);
+SEG_UNIT(unit_sga_k1, "dsga__k1", 0x93, "sgaK1", sga_branch_body, launch_any, &finish_one);
+#define COST(var, ...) static const struct eg_branch_cost var = { sizeof(struct eg_branch_cost), __VA_ARGS__ }
+#define AUTO_SET(name_, byte)                                                                                            \
+    COST(cost_##name_##_0, AUTO_COST_##name_##_0);                                                                       \
+    COST(cost_##name_##_1, AUTO_COST_##name_##_1);                                                                       \
+    static const struct eg_branch_cost* const costs_##name_[] = { &cost_##name_##_0, &cost_##name_##_1 };                 \
+    static const struct eg_unit_dispatch disp_sga_##name_ = { .struct_size = sizeof(struct eg_unit_dispatch),           \
+        .strategy = EG_DISPATCH_AUTO, .mix_slot = 4, .class_slot = -1, .stale_slot = -1, .offsets_slot = -1,           \
+        .classify = &ref_sga_cls, .name = "dsga", .k = 2, .branches = sga_branches, .branch_costs = costs_##name_,      \
+        .cost_flags = AUTO_FLAGS_##name_ };                                                                              \
+    static const struct eg_unit_dispatch* const sga_##name_##_list[] = { &disp_sga_##name_ };                            \
+    SEG_BODY(sga_##name_##_body, sga_auto_slots, 6, sga_##name_##_list);                                                 \
+    SEG_UNIT(unit_sga_##name_, "dsga_" #name_, byte, "sga", sga_##name_##_body, launch_any, &finish_one)
+AUTO_SET(rare, 0x94);
+AUTO_SET(even, 0x95);
+AUTO_SET(scalar, 0x96);
+AUTO_SET(heavy, 0x97);
+
 static const struct eg_unit_meta* const units[] = { &unit_axpy, &unit_axpy64, &unit_boxdev, &unit_banded, &unit_nofn,
                                                     &unit_noimg, &unit_dcells, &unit_dkeyed, &unit_dkeyednf, &unit_dkeyedh, &unit_fat129, &unit_ptx129, &unit_sass70, &unit_dprefix, &unit_dcount, &unit_dcount1, &unit_dcount1a, &unit_dauto, &unit_dautorange, &unit_dlookup,
-                                                    &unit_sg_cls, &unit_sg_k0, &unit_sg_k1, &unit_sgf, &unit_dg_k0, &unit_dg_k1, &unit_dg_sweep, &unit_dgf };
+                                                    &unit_sg_cls, &unit_sg_k0, &unit_sg_k1, &unit_sgf, &unit_dg_k0, &unit_dg_k1, &unit_dg_sweep, &unit_dgf,
+                                                    &unit_sga_cls, &unit_sga_k0, &unit_sga_k1, &unit_sga_rare, &unit_sga_even, &unit_sga_scalar, &unit_sga_heavy };
 
 static const struct eg_library_meta library = {
-    .struct_size = sizeof(struct eg_library_meta), .schema_major = EG_META_SCHEMA_MAJOR, .n_units = 28, .units = units,
+    .struct_size = sizeof(struct eg_library_meta), .schema_major = EG_META_SCHEMA_MAJOR, .n_units = 35, .units = units,
 };
 
 __attribute__((visibility("default"))) const struct eg_library_meta* eg_unit_library_meta(void) { return &library; }

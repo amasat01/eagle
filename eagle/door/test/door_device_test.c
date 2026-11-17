@@ -13,6 +13,10 @@
 #include "plugin/dlpack.h"
 #include "seg_model.h"
 
+#ifndef EG_TEST_DIR
+#define EG_TEST_DIR "test" /* the directory of the recorded decisions; the Makefile gives its absolute path */
+#endif
+
 #include <cuda_runtime_api.h>
 
 #include <dlfcn.h>
@@ -975,6 +979,115 @@ static void check_segmented_device(eg_ctx* ctx, const char* dev_lib) {
         eg_unit_free(ctx, dsw), eg_unit_free(ctx, dgf);
 }
 
+/* ---- an AUTO group that names its segmented set, on the device ---- */
+
+/* One run's planes on the device: k, limit, how and mask of the "dsga" group (struct dset's pos plane is how: slot 5 here), the units' own slot order. */
+static int dauto_new(eg_ctx* ctx, eg_unit* unit, int n1, int l1, int with_how, struct dset* q) {
+    memset(q, 0, sizeof(*q));
+    cudaMalloc((void**)&q->dk, sizeof(q->k));
+    cudaMalloc((void**)&q->dl, sizeof(q->limit));
+    cudaMalloc((void**)&q->dp, sizeof(q->pos));
+    cudaMalloc((void**)&q->dm, sizeof(q->mask));
+    auto_fill(q->k, q->limit, q->pos, q->mask, n1, l1);
+    cudaMemcpy(q->dk, q->k, sizeof(q->k), cudaMemcpyHostToDevice);
+    cudaMemcpy(q->dl, q->limit, sizeof(q->limit), cudaMemcpyHostToDevice);
+    cudaMemcpy(q->dp, q->pos, sizeof(q->pos), cudaMemcpyHostToDevice);
+    cudaMemcpy(q->dm, q->mask, sizeof(q->mask), cudaMemcpyHostToDevice);
+    q->pl[0] = wrap(ctx, &q->t[0], q->dk, 1, SGN, 0, 1, 0);
+    q->pl[1] = wrap(ctx, &q->t[1], q->dl, 1, SGN, 0, 1, 0);
+    q->pl[2] = wrap_device_typed(ctx, &q->t[2], q->dm, SGN, kDLBool, 8);
+    q->pl[3] = with_how ? wrap(ctx, &q->t[3], q->dp, 1, SGN, 0, 1, 0) : NULL;
+    const int32_t slots[4] = { 0, 1, 2, 5 };
+    eg_status s = q->pl[0] && q->pl[1] && q->pl[2] && (q->pl[3] || !with_how) ? plan_n(ctx, unit, EG_STRUCTURE_DEVICE, SGN, 0, NULL, NULL, &q->plan) : EG_FAULT;
+    if (s == EG_OK) s = bind_planes(ctx, q->plan, with_how ? 4 : 3, slots, q->pl);
+    return s == EG_OK;
+}
+
+static void check_auto_device(eg_ctx* ctx, const char* dev_lib) {
+    eg_unit *cls = NULL, *k1 = NULL, *k0 = NULL, *fused = NULL, *auto_unit[4] = { NULL, NULL, NULL, NULL };
+    const char* names[4] = { "dsga_rare", "dsga_even", "dsga_scalar", "dsga_heavy" };
+    check(load(ctx, dev_lib, "dsga__cls", 0x91, &cls) == EG_OK && load(ctx, dev_lib, "dsga__k1", 0x93, &k1) == EG_OK && load(ctx, dev_lib, "dsgf", 0xF4, &fused) == EG_OK,
+          "eg_unit_load of the device AUTO group's classify and second branch units");
+    eg_unit* sdeps[2] = { k1, cls };
+    {
+        struct eg_unit_ref r0 = { .struct_size = sizeof(r0), .name = "dsga__k0" };
+        memset(r0.digest, 0x92, EG_DIGEST_BYTES);
+        struct eg_unit_load_desc d = { .struct_size = sizeof(d), .path = dev_lib, .unit = &r0, .deps = sdeps, .n_deps = 2 };
+        check(cls && k1 && eg_unit_load(ctx, &d, &k0) == EG_OK, "eg_unit_load of the device AUTO group's first branch unit with the group's units in deps");
+    }
+    eg_unit* adeps[3] = { k0, k1, cls };
+    for (int u = 0; u < 4 && k0 != NULL; ++u) {
+        struct eg_unit_ref r = { .struct_size = sizeof(r), .name = names[u] };
+        memset(r.digest, 0x94 + u, EG_DIGEST_BYTES);
+        struct eg_unit_load_desc d = { .struct_size = sizeof(d), .path = dev_lib, .unit = &r, .deps = adeps, .n_deps = 3 };
+        check(eg_unit_load(ctx, &d, &auto_unit[u]) == EG_OK, "eg_unit_load of a device AUTO unit naming its segmented set");
+    }
+    if (k0 == NULL || fused == NULL || auto_unit[3] == NULL) return;
+    /* The recorded runs are the ones the old stack decides the same way on five GPUs from a P2000 to an H100 (test/auto_record.py), so the expectation does
+     * not depend on this one; its decision on any weights is proved equal to Dispatch.h's by tests/test_DispatchPolicy.cpp. */
+    char path[512];
+    snprintf(path, sizeof(path), "%s/auto_decisions_device.txt", EG_TEST_DIR);
+    FILE* f = fopen(path, "r");
+    check(f != NULL, "the recorded device decisions of the old stack are present");
+    char line[256];
+    int rows = 0, agree = 0, switched = 0, fused_from_start = 0, segmented_to_end = 0;
+    while (f != NULL && fgets(line, sizeof(line), f) != NULL) {
+        char name[32];
+        int n1, l1, max_steps, want_seg, want_total;
+        if (line[0] == '#' || sscanf(line, "%31s %d %d %d %d %d", name, &n1, &l1, &max_steps, &want_seg, &want_total) != 6) continue;
+        const int u = strcmp(name, "rare") == 0 ? 0 : strcmp(name, "even") == 0 ? 1 : strcmp(name, "scalar") == 0 ? 2 : 3;
+        static struct dset q, ref;
+        eg_runner *r = NULL, *rf = NULL;
+        struct eg_run_report rep, rep_ref;
+        int ok = dauto_new(ctx, auto_unit[u], n1, l1, 1, &q) && dauto_new(ctx, fused, n1, l1, 0, &ref);
+        ok = ok && dset_run(ctx, &q, max_steps, &r, &rep) == EG_OK && dset_run(ctx, &ref, max_steps, &rf, &rep_ref) == EG_OK;
+        for (int i = 0; ok && i < SGN; ++i)
+            ok = q.pos[i] == auto_how(q.limit, i, n1, want_seg, want_total) && q.k[i] == ref.k[i] && q.mask[i] == ref.mask[i];
+        ok = ok && rep.launches == want_total && rep.steps == want_total && rep.mode == EG_MODE_BAND && rep.launches == rep_ref.launches;
+        ++rows;
+        agree += ok;
+        switched += want_seg > 0 && want_seg < want_total;
+        fused_from_start += want_seg == 0;
+        segmented_to_end += want_seg > 0 && want_seg == want_total;
+        if (!ok) printf("      case %s n1 %d l1 %d max_steps %d: old stack segmented %d of %d steps\n", name, n1, l1, max_steps, want_seg, want_total);
+        eg_runner_free(ctx, r), eg_runner_free(ctx, rf);
+        dset_free(ctx, &q), dset_free(ctx, &ref);
+    }
+    if (f != NULL) fclose(f);
+    char what[400];
+    snprintf(what, sizeof(what), "the DEVICE AUTO runner takes the old stack's decision in all %d recorded runs (%d fused from the start, %d segmented to the end, %d switched to "
+             "the captured loop at a look), its values equal the plain fused unit's bitwise", rows, fused_from_start, segmented_to_end, switched);
+    check(rows == 72 && agree == rows && fused_from_start > 0 && segmented_to_end > 0 && switched > 0, what);
+    {   /* the same run forced segmented (the branch unit's own runner) gives the AUTO run's values */
+        static struct dset a, b;
+        eg_runner *ra = NULL, *rb = NULL;
+        struct eg_run_report rep_a, rep_b;
+        int ok = dauto_new(ctx, auto_unit[3], 20, 100, 1, &a) && dauto_new(ctx, k0, 20, 100, 1, &b);
+        ok = ok && dset_run(ctx, &a, 400, &ra, &rep_a) == EG_OK && dset_run(ctx, &b, 400, &rb, &rep_b) == EG_OK;
+        ok = ok && memcmp(a.k, b.k, sizeof(a.k)) == 0 && memcmp(a.mask, b.mask, sizeof(a.mask)) == 0 && rep_a.launches == rep_b.launches && rep_a.finished == SGN;
+        check(ok, "a DEVICE AUTO run equals the same group forced segmented (the branch unit's runner): planes bitwise, same launches");
+        eg_runner_free(ctx, ra), eg_runner_free(ctx, rb);
+        dset_free(ctx, &a), dset_free(ctx, &b);
+    }
+    {   /* a run that switched leaves no stale captured loop: run it again at the full budget and again */
+        static struct dset q;
+        eg_runner* r = NULL;
+        struct eg_run_report rep, rep2;
+        int ok = dauto_new(ctx, auto_unit[3], 2, 100, 1, &q) && dset_run(ctx, &q, 400, &r, &rep) == EG_OK;
+        auto_fill(q.k, q.limit, q.pos, q.mask, 2, 100);
+        cudaMemcpy(q.dk, q.k, sizeof(q.k), cudaMemcpyHostToDevice), cudaMemcpy(q.dp, q.pos, sizeof(q.pos), cudaMemcpyHostToDevice);
+        memset(&rep2, 0, sizeof(rep2));
+        rep2.struct_size = sizeof(rep2);
+        ok = ok && eg_runner_reset(ctx, r) == EG_OK && eg_run(ctx, r, &rep2) == EG_OK && (dset_read(ctx, &q), 1) && rep2.launches == rep.launches &&
+             rep2.finished == SGN && rep2.steps == rep.steps;
+        check(ok, "eg_runner_reset of a DEVICE AUTO runner then a second run equals the first (launches, steps, done)");
+        eg_runner_free(ctx, r);
+        dset_free(ctx, &q);
+    }
+    for (int u = 0; u < 4; ++u) eg_unit_free(ctx, auto_unit[u]);
+    eg_unit_free(ctx, k0), eg_unit_free(ctx, k1), eg_unit_free(ctx, cls), eg_unit_free(ctx, fused);
+}
+
 static void reset_device(eg_ctx* ctx, const char* dev_lib) {
     eg_unit *plain = NULL, *active = NULL;
     check(load(ctx, dev_lib, "dcount1", 0xD9, &plain) == EG_OK && load(ctx, dev_lib, "dcount1a", 0xDA, &active) == EG_OK,
@@ -1502,6 +1615,7 @@ int main(int argc, char** argv) {
     figures_device(ctx, dev_lib);
     reset_device(ctx, dev_lib);
     check_segmented_device(ctx, dev_lib);
+    check_auto_device(ctx, dev_lib);
     fast_entries(ctx, dev_lib);
 
     /* The host still runs on a device context. */

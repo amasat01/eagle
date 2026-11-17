@@ -281,3 +281,32 @@ extern "C" __global__ void dgf(ScalarHandle k, ScalarHandle limit, ScalarHandle 
     if (static_cast<char*>(mask.data)[i] != 0) return;
     segStep(k, limit, mask, finished, i, 0.125 * ((static_cast<const double*>(k.data)[i] >= 4.0 ? 1 : 0) + 1));
 }
+
+// The AUTO group "dsga" (test/fixture_unit.c's "sga"): slots k, limit, mask, finished, then offsets or mix (4) and how (5); a step adds 1 to how
+// in a branch unit and 1000 in the fused unit. Its classify unit is sgCls.
+__device__ static void sgaBranch(int j, ScalarHandle k, ScalarHandle limit, ScalarHandle mask, ScalarHandle finished, ScalarHandle offsets,
+                                 ScalarHandle how, long long count) {
+    const long long* off = static_cast<const long long*>(offsets.data);
+    const long long flat = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (flat >= count) return;
+    const long long i = off[j] + flat;
+    if (i >= off[j + 1] || static_cast<char*>(mask.data)[i] != 0) return;
+    static_cast<double*>(how.data)[i] += 1.0;
+    segStep(k, limit, mask, finished, i, j + 1.0);
+}
+
+extern "C" __global__ void sgaK0(ScalarHandle k, ScalarHandle limit, ScalarHandle mask, ScalarHandle finished, ScalarHandle offsets,
+                                 ScalarHandle how, long long base, long long count, long long nSamples) { (void)base; (void)nSamples; sgaBranch(0, k, limit, mask, finished, offsets, how, count); }
+extern "C" __global__ void sgaK1(ScalarHandle k, ScalarHandle limit, ScalarHandle mask, ScalarHandle finished, ScalarHandle offsets,
+                                 ScalarHandle how, long long base, long long count, long long nSamples) { (void)base; (void)nSamples; sgaBranch(1, k, limit, mask, finished, offsets, how, count); }
+
+extern "C" __global__ void sga(ScalarHandle k, ScalarHandle limit, ScalarHandle mask, ScalarHandle finished, ScalarHandle mix, ScalarHandle how,
+                               long long base, long long count, long long nSamples) {
+    SEG_HEAD(base + flat)
+    (void)nSamples;
+    if (static_cast<char*>(mask.data)[i] != 0) return;
+    const double l = static_cast<const double*>(limit.data)[i];
+    atomicAdd(static_cast<unsigned*>(mix.data) + (l >= 6.0 ? 1 : 0), 1u);
+    static_cast<double*>(how.data)[i] += 1000.0;
+    segStep(k, limit, mask, finished, i, l >= 6.0 ? 2.0 : 1.0);
+}

@@ -10,7 +10,10 @@
 #pragma once
 
 #include "eagle/door/eg_door.h"
+#include "eagle/door/eg_unit_meta.h"
+#include "eagle/cpu/DeviceProps.h"
 #include "eagle/exec/Partition.h"
+#include "eagle/policy/Dispatch.h"
 #include "plugin/dlpack.h"
 #include "plugin/gref_layout.h"
 
@@ -233,6 +236,9 @@ struct DispatchFacts {
     std::vector<RefFacts> branches;
     RefFacts classify, sweep;
     bool has_classify = false, has_sweep = false;
+    std::vector<eg_branch_cost> costs;        ///< AUTO: the cost of each branch (k entries), or empty: not stated
+    std::uint32_t cost_flags = 0;             ///< AUTO: EG_DISPATCH_FUSED_VECTORISED, EG_DISPATCH_VECTOR_STATED
+    bool names_set = false;                   ///< AUTO: the record names its segmented set (``branches`` and ``classify``)
 };
 
 /** @brief The segmented group a branch unit loaded with its group's units in deps runs: the units, and per unit the join of its
@@ -295,6 +301,7 @@ struct eg_unit_s {
     std::vector<eagle::door::StageFacts> stages;   ///< non-empty: a split unit, run stage by stage
     std::vector<eagle::door::DispatchFacts> dispatches;   ///< the unit's dispatch groups
     eagle::door::SegFacts seg;                ///< a branch unit loaded with its group's units in deps
+    eg_unit_s* auto_seg = nullptr;            ///< an AUTO group that names its segmented set: the branch-0 unit loaded with the set in deps (a reference held)
     std::vector<eagle::door::CompanionFacts> companions;
     std::vector<eagle::door::CellFacts> cells;
     std::int64_t cell_row = 0;                ///< samples per row of a cell's rows, 0: no cells
@@ -462,6 +469,17 @@ struct DeviceRun {
     ~DeviceRun();
 };
 
+/** @brief What a runner over an AUTO group that names its segmented set keeps (the look): the plan of the segmented set, stepped while the group
+ *  runs segmented, and the band's state. */
+struct AutoLook {
+    eg_plan_s* seg = nullptr;                 ///< the segmented set's plan over the runner's planes, one reference
+    const DispatchFacts* group = nullptr;     ///< the AUTO record
+    eagle::policy::CostVector cost;           ///< its branch costs as the rule reads them
+    eagle::policy::HysteresisState state;     ///< the policy in force; fused again after a look that leaves the band
+    double gain = 1.0;                        ///< the gain of the last look
+    std::int64_t looks = 0;                   ///< looks made in the last run
+};
+
 }  // namespace door
 }  // namespace eagle
 
@@ -476,6 +494,7 @@ struct eg_runner_s {
     eagle::door::ActiveState act;
     eagle::door::DeviceRun dev;               ///< a DEVICE runner's loop and cells
     eagle::door::RunRecord* record = nullptr; ///< EG_RUN_RECORD: the derived plans and the last record
+    eagle::door::AutoLook* look = nullptr;    ///< a runner over an AUTO group that names its segmented set: the look that decides each run
 };
 
 namespace eagle {
@@ -489,6 +508,7 @@ struct DeviceState {
     std::uint64_t stream = 0;                 ///< the stream in scope (a CUstream): eagle's own or the caller's (eg_stream_use)
     std::uint64_t own_stream = 0;             ///< eagle's own stream, destroyed with the context
     int sms = 0, regs_per_sm = 0, smem_per_sm = 0, threads_per_sm = 0, cc_major = 0, cc_minor = 0;
+    int clock_khz = 0, memory_clock_khz = 0, bus_bits = 0, l2_bytes = 0;   ///< the device's clocks, memory bus and L2: what its peak rates are derived from
     int fp64_ratio = 1;                       ///< FP32:FP64 throughput ratio (1 when not reported)
     std::unordered_map<void*, std::uint64_t> alloc_stream;   ///< each live device_alloc block -> the stream it was allocated on
     std::unordered_map<std::uint64_t, std::uint64_t> gemm_handles;   ///< stream -> its cuBLAS handle, made when a gemm unit is planned (device/Gemm.cpp)
@@ -552,6 +572,9 @@ struct eg_ctx_s {
     eagle::door::DeviceState dev;             ///< EG_CTX_DEVICE: the device and its stream
     eagle::door::DeviceRecording* dev_rec = nullptr;              ///< a device context between eg_record_begin and eg_record_end
     std::unordered_set<eagle::door::DeviceGraph*> dev_graphs;     ///< the device graphs eg_record_end made
+    eagle::policy::Weights weights;           ///< the dispatch rule's weights: the row of this machine's class (-1: built-in) on its live facts
+    eagle::DeviceProps props;                 ///< the properties the rule reads: the host's documented ones, or the device's from the driver
+    std::int32_t weight_vendor = 0, weight_family = 0, weight_model = 0, weight_row = -1;   ///< the class key read and the row index taken
 
     /** @brief Store @p text as the reason, never throwing. */
     void set_reason(const char* text) noexcept {
@@ -664,6 +687,13 @@ void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds, const 
 void runner_release(eg_ctx& ctx, eg_runner_s* runner);
 void run(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report);
 void run_loop(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report);
+/** @brief The look of a runner over an AUTO group with a segmented set (Look.cpp): check the request, attach the look to a new runner, run, reset, free. */
+void look_check(const eg_ctx& ctx, const eg_runner_desc& desc);
+void look_attach(eg_ctx& ctx, eg_runner_s& runner);
+void look_run(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report);
+void look_reset(eg_ctx& ctx, eg_runner_s& runner);
+void look_free(eg_ctx& ctx, eg_runner_s& runner);
+void seg_reset(eg_ctx& ctx, eg_plan_s& plan);
 void reduce(eg_ctx& ctx, const eg_reduce_desc* desc);
 void copy(eg_ctx& ctx, eg_plane_s* src, eg_plane_s* dst);
 void fft_new(eg_ctx& ctx, const eg_fft_desc* desc, eg_fft** out);

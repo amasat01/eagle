@@ -243,8 +243,17 @@ void read_dispatch(const eg_unit_body& body, eg_unit_s& unit) {
                    ", which is not written");
         const bool seg = d.strategy == EG_DISPATCH_SEGMENTED;
         if (d.k < 2) refuse(EG_BAD_REQUEST, at + "has k " + std::to_string(d.k) + ", a group has at least 2 branches");
-        if (!seg && (d.branches != nullptr || d.sweep != nullptr))
+        const bool automatic = d.strategy == EG_DISPATCH_AUTO;
+        if (automatic) {    // an AUTO group may name the segmented set it can run as: its branch units and its classify unit, both or neither
+            if (d.sweep != nullptr) refuse(EG_BAD_REQUEST, at + "is AUTO with a sweep: a dynamic selector runs fused");
+            if ((d.branches != nullptr) != (d.classify != nullptr))
+                refuse(EG_BAD_REQUEST, at + "is AUTO and names " + (d.branches != nullptr ? "branches" : "a classify unit") + " without " +
+                       (d.branches != nullptr ? "a classify unit" : "branches"));
+            if (d.branches != nullptr && d.branch_costs == nullptr)
+                refuse(EG_BAD_REQUEST, at + "names its segmented set but states no branch costs: the choice cannot be priced");
+        } else if (!seg && (d.branches != nullptr || d.sweep != nullptr)) {
             refuse(EG_BAD_REQUEST, at + "names branches or a sweep and is not SEGMENTED");
+        }
         const bool cls_record = seg && d.branches == nullptr && d.classify == nullptr && d.sweep == nullptr && d.stale_slot == -1 &&
                                 d.offsets_slot == -1 && d.class_slot != -1;
         if (seg && !cls_record && !((d.stale_slot == -1 && d.classify != nullptr && d.sweep == nullptr) ||
@@ -253,12 +262,24 @@ void read_dispatch(const eg_unit_body& body, eg_unit_s& unit) {
                    "unit, no sweep) nor a dynamic one (a stale slot and a sweep, no classify unit)");
         if ((d.mix_slot != -1) != (d.strategy == EG_DISPATCH_AUTO))
             refuse(EG_BAD_REQUEST, at + "has a mix slot unless it is AUTO, and AUTO has one");
-        if (!seg && (d.class_slot != -1 || d.stale_slot != -1 || d.offsets_slot != -1 || d.classify != nullptr))
+        if (!seg && (d.class_slot != -1 || d.stale_slot != -1 || d.offsets_slot != -1 || (d.classify != nullptr && !automatic)))
             refuse(EG_BAD_REQUEST, at + "names SEGMENTED members and is not SEGMENTED");
         if (d.mix_slot != -1 && !slot_is(d.mix_slot, false, EG_DTYPE_UINT32))
             refuse(EG_BAD_REQUEST, at + "mix slot " + std::to_string(d.mix_slot) + " is not a uint32 LOOKUP slot");
         DispatchFacts f;
         f.strategy = d.strategy, f.k = d.k, f.mix = d.mix_slot, f.name = group;
+        if (automatic && d.branches != nullptr) {
+            for (std::int32_t j = 0; j < d.k; ++j) {
+                if (d.branches[j] == nullptr || d.branches[j]->name == nullptr || d.branch_costs[j] == nullptr)
+                    refuse(EG_BAD_REQUEST, at + "names a branch " + std::to_string(j) + " without a unit or a cost");
+                f.branches.push_back(ref_of(d.branches[j]));
+                f.costs.push_back(read_record(d.branch_costs[j], eg_branch_cost{}, "unit '" + unit.name + "' branch cost"));
+            }
+            f.classify = ref_of(d.classify);
+            f.has_classify = true;
+            f.names_set = true;
+            f.cost_flags = d.cost_flags;
+        }
         if (d.strategy == EG_DISPATCH_AUTO) {    // fused; the counters are eagle's unless the caller binds some
             SlotFacts& m = unit.slots[static_cast<std::size_t>(d.mix_slot)];
             m.optional_made = true;
@@ -939,6 +960,48 @@ void resolve_stages(eg_ctx& ctx, const eg_unit_load_desc& d, eg_unit_s& unit) {
     }
 }
 
+/** @brief An AUTO group that names its segmented set: the first branch unit must be in deps with the group's units resolved (it is the plan the
+ *  runner steps while the group runs segmented), every branch unit's own record must be that group's (name and k), and the set must be the one
+ *  that unit resolved: the same branch units in order and the same classify unit, a static selector. One AUTO group per unit may name a set. */
+void resolve_auto(eg_ctx& ctx, const eg_unit_load_desc& d, eg_unit_s& unit) {
+    const DispatchFacts* group = nullptr;
+    for (const DispatchFacts& f : unit.dispatches)
+        if (f.strategy == EG_DISPATCH_AUTO && f.names_set) {
+            if (group != nullptr)
+                refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': several AUTO dispatch groups name a segmented set, which is not written (one group is decided per run)");
+            group = &f;
+        }
+    if (group == nullptr) return;
+    const std::string who = "meta that contradicts itself: unit '" + unit.name + "' dispatch group '" + group->name + "' ";
+    const auto find = [&](const RefFacts& r, const char* what) -> eg_unit_s* {
+        for (std::int32_t k = 0; k < d.n_deps; ++k) {
+            check_handle(ctx.units, d.deps[k], "eg_unit_load_desc.deps[i]");
+            if (d.deps[k]->name == r.name && d.deps[k]->digest == r.digest) return d.deps[k];
+        }
+        refuse(EG_BAD_REQUEST, who + "names the " + what + " '" + r.name + "', which is not in deps");
+    };
+    std::vector<eg_unit_s*> branches;
+    for (std::size_t j = 0; j < group->branches.size(); ++j) {
+        eg_unit_s* b = find(group->branches[j], "branch unit");
+        const DispatchFacts* rec = nullptr;
+        for (const DispatchFacts& f : b->dispatches)
+            if (f.branch_record) rec = &f;
+        if (rec == nullptr || rec->name != group->name || rec->k != group->k)
+            refuse(EG_BAD_REQUEST, "branch " + std::to_string(j) + "'s record is group '" + (rec != nullptr ? rec->name : std::string("(none)")) + "' k " +
+                   std::to_string(rec != nullptr ? rec->k : 0) + ", the AUTO record says '" + group->name + "' k " + std::to_string(group->k));
+        branches.push_back(b);
+    }
+    eg_unit_s* classify = find(group->classify, "classify unit");
+    eg_unit_s* planned = branches[0];
+    const SegFacts& S = planned->seg;
+    if (!S.present)
+        refuse(EG_BAD_REQUEST, who + "names the branch unit '" + planned->name + "' first: load it with the group's units in deps to plan the group");
+    if (S.dynamic || S.classify != classify || S.branches != branches)
+        refuse(EG_BAD_REQUEST, who + "names a segmented set that '" + planned->name + "' does not run: a static selector over the same classify unit and branch units in order");
+    ++planned->refs;
+    unit.auto_seg = planned;
+}
+
 /** @brief A branch unit loaded with its group's units in deps: resolve the references (a branch may be the unit itself), check every unit's own
  *  record against the group's (name and k), and join the units' slots to the plan's: the branch unit's slots, then each other unit's slot that no
  *  earlier slot names, in unit order (branches, then the classify unit or the sweep). Eagle's own planes (offsets, class, stale, the sweep's map
@@ -1120,6 +1183,7 @@ void unit_load(eg_ctx& ctx, const eg_unit_load_desc* desc, eg_unit** out) {
                 if (s.role == EG_ROLE_WIDE_OUT && !s.axes.empty() && s.keys_of < 0)
                     refuse(EG_NOT_WRITTEN, "unit '" + unit->name + "': named plane axes on slot '" + s.name + "', which no KEYS stage writes, are not written");
             resolve_segmented(ctx, read_input(desc, "eg_unit_load_desc"), *unit);
+            resolve_auto(ctx, read_input(desc, "eg_unit_load_desc"), *unit);
             ctx.units.insert(unit);
         } catch (...) {
             device_unit_free(*unit);
@@ -1140,6 +1204,7 @@ void unit_release(eg_ctx& ctx, eg_unit_s* unit) {
     for (StageFacts& st : unit->stages)
         if (st.held) unit_release(ctx, st.unit);
     for (eg_unit_s* h : unit->seg.held) unit_release(ctx, h);
+    if (unit->auto_seg != nullptr) unit_release(ctx, unit->auto_seg);
     device_unit_free(*unit);
     ::dlclose(unit->library);
     delete unit;

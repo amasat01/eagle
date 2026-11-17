@@ -29,6 +29,9 @@
  *
  *  - "sg": a SEGMENTED group of two branches with a static selector (the classify unit "sg__cls" reads only limit; branch j of
  *    "sg__k0" / "sg__k1" steps k by j + 1 until k >= limit) and "sgf", the fused unit computing the same steps per sample.
+ *  - "sga_rare", "sga_even", "sga_scalar": AUTO units over "sg"'s static selector (the fused kernel counts its mix into sga_mix), each naming the
+ *    segmented set "sga__cls", "sga__k0", "sga__k1" and stating the branch costs of test/auto_costs.h. Every step also adds to the plane "how": 1 in a
+ *    branch unit, 1000 in the fused unit, so a run's path shows in it.
  *  - "dg": the same with a dynamic selector: the class is k >= 4, a state the step writes, so a branch unit marks the samples
  *    of its run whose class is not its own, the sweep unit "dg__sweep" steps those by their class, and "dgf" is the fused unit.
  *    Branch j steps k by 0.125 * (j + 1); a branch also writes the slot of its sample into the plane "pos".
@@ -41,6 +44,7 @@
 
 #include "eagle/door/eg_door.h"
 #include "eagle/door/eg_unit_meta.h"
+#include "auto_costs.h"
 
 #include <stdint.h>
 #include <time.h>
@@ -92,6 +96,10 @@ EG_FIXTURE_EXPORT void dg_k0_host(void* const* params, int64_t base, int64_t cou
 EG_FIXTURE_EXPORT void dg_k1_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void dg_sweep_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void dgf_host(void* const* params, int64_t base, int64_t count, int64_t n);
+EG_FIXTURE_EXPORT void sga_cls_host(void* const* params, int64_t base, int64_t count, int64_t n);
+EG_FIXTURE_EXPORT void sga_k0_host(void* const* params, int64_t base, int64_t count, int64_t n);
+EG_FIXTURE_EXPORT void sga_k1_host(void* const* params, int64_t base, int64_t count, int64_t n);
+EG_FIXTURE_EXPORT void sga_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT const struct eg_library_meta* eg_unit_library_meta(void);
 
 /* Lanes of a partial last group a count1g launch was handed (the entry skips them). */
@@ -374,6 +382,38 @@ void sgf_host(void* const* params, int64_t base, int64_t count, int64_t n) {
     (void)n;
     for (int64_t i = base; i < base + count; ++i)
         if (!is_dead(params, i)) seg_step(params, 0, i, sg_step_of(limit, i));
+}
+
+
+/* sga: slots k, limit, mask, finished, then sga_offsets / sga_mix (4) and how (5); a step adds `path` to how */
+static void sga_step(void* const* params, int64_t i, double step, double path) {
+    ((double*)((const struct fixture_handle*)params[5])->data)[i] += path;
+    seg_step(params, 0, i, step);
+}
+
+void sga_cls_host(void* const* params, int64_t base, int64_t count, int64_t n) { sg_cls_host(params, base, count, n); }
+
+static void sga_branch(void* const* params, int j, int64_t base, int64_t count) {
+    const int64_t* offsets = (const int64_t*)((const struct fixture_handle*)params[4])->data;
+    for (int64_t t = base; t < base + count; ++t) {
+        const int64_t i = offsets[j] + t;
+        if (i >= offsets[j + 1]) break;
+        if (!is_dead(params, i)) sga_step(params, i, j + 1.0, 1.0);
+    }
+}
+
+void sga_k0_host(void* const* params, int64_t base, int64_t count, int64_t n) { (void)n; sga_branch(params, 0, base, count); }
+void sga_k1_host(void* const* params, int64_t base, int64_t count, int64_t n) { (void)n; sga_branch(params, 1, base, count); }
+
+void sga_host(void* const* params, int64_t base, int64_t count, int64_t n) {
+    const double* limit = (const double*)((const struct fixture_handle*)params[1])->data;
+    uint32_t* mix = (uint32_t*)((const struct fixture_handle*)params[4])->data;
+    (void)n;
+    for (int64_t i = base; i < base + count; ++i)
+        if (!is_dead(params, i)) {
+            __atomic_fetch_add(&mix[limit[i] >= 6.0 ? 1 : 0], 1u, __ATOMIC_RELAXED);
+            sga_step(params, i, sg_step_of(limit, i), 1000.0);
+        }
 }
 
 /* dg: slots k, limit, mask, finished, offsets (4), class (5), stale (6), pos (7); the class of a sample is k >= 4 */
@@ -907,18 +947,96 @@ SEG_UNIT(unit_dg_k1, "dg__k1", 0xE6, "dg_k1_host", dg_branch_body, launch, &fini
 SEG_UNIT(unit_dg_sweep, "dg__sweep", 0xE7, "dg_sweep_host", dg_sweep_body, launch_sweep, &finish1);
 COUNT_UNIT(unit_dgf, "dgf", 0xE8, "dgf_host", finish1);
 
+
+/* ---- the AUTO group "sga" ---- */
+SLOT_OF(slot_sga_offsets, EG_ROLE_LOOKUP, EG_DTYPE_INT64, "sga_offsets");
+SLOT_OF(slot_sga_class, EG_ROLE_MUTABLE, EG_DTYPE_INT64, "sga_class");
+SLOT_OF(slot_sga_mix, EG_ROLE_LOOKUP, EG_DTYPE_UINT32, "sga_mix");
+SLOT(slot_how, EG_ROLE_MUTABLE, "how");
+static const struct eg_unit_slot* const sga_k_slots[] = { &slot_k, &slot_limit, &slot_mask, &slot_finished, &slot_sga_offsets, &slot_how };
+static const struct eg_unit_slot* const sga_cls_slots[] = { &slot_limit, &slot_sga_class };
+static const struct eg_unit_slot* const sga_auto_slots[] = { &slot_k, &slot_limit, &slot_mask, &slot_finished, &slot_sga_mix, &slot_how };
+SEG_REF(ref_sga_cls, "sga__cls", 0xC1);
+SEG_REF(ref_sga_k0, "sga__k0", 0xC2);
+SEG_REF(ref_sga_k1, "sga__k1", 0xC3);
+static const struct eg_unit_ref* const sga_branches[] = { &ref_sga_k0, &ref_sga_k1 };
+DISPATCH(disp_sga_cls, EG_DISPATCH_SEGMENTED, 1, -1, -1, NULL, "sga", NULL, NULL);
+DISPATCH(disp_sga_branch, EG_DISPATCH_SEGMENTED, -1, -1, 4, &ref_sga_cls, "sga", sga_branches, NULL);
+static const struct eg_unit_dispatch* const sga_cls_list[] = { &disp_sga_cls };
+static const struct eg_unit_dispatch* const sga_branch_list[] = { &disp_sga_branch };
+SEG_BODY(sga_cls_body, sga_cls_slots, 2, sga_cls_list);
+SEG_BODY(sga_branch_body, sga_k_slots, 6, sga_branch_list);
+SEG_UNIT(unit_sga_cls, "sga__cls", 0xC1, "sga_cls_host", sga_cls_body, launch, NULL);
+SEG_UNIT(unit_sga_k0, "sga__k0", 0xC2, "sga_k0_host", sga_branch_body, launch, &finish1);
+SEG_UNIT(unit_sga_k1, "sga__k1", 0xC3, "sga_k1_host", sga_branch_body, launch, &finish1);
+
+#define COST(var, ...) static const struct eg_branch_cost var = { sizeof(struct eg_branch_cost), __VA_ARGS__ }
+#define AUTO_SET(name_, byte)                                                                                            \
+    COST(cost_##name_##_0, AUTO_COST_##name_##_0);                                                                       \
+    COST(cost_##name_##_1, AUTO_COST_##name_##_1);                                                                       \
+    static const struct eg_branch_cost* const costs_##name_[] = { &cost_##name_##_0, &cost_##name_##_1 };                 \
+    static const struct eg_unit_dispatch disp_sga_##name_ = { .struct_size = sizeof(struct eg_unit_dispatch),           \
+        .strategy = EG_DISPATCH_AUTO, .mix_slot = 4, .class_slot = -1, .stale_slot = -1, .offsets_slot = -1,           \
+        .classify = &ref_sga_cls, .name = "sga", .k = 2, .branches = sga_branches, .branch_costs = costs_##name_,       \
+        .cost_flags = AUTO_FLAGS_##name_ };                                                                              \
+    static const struct eg_unit_dispatch* const sga_##name_##_list[] = { &disp_sga_##name_ };                            \
+    SEG_BODY(sga_##name_##_body, sga_auto_slots, 6, sga_##name_##_list);                                                 \
+    SEG_UNIT(unit_sga_##name_, "sga_" #name_, byte, "sga_host", sga_##name_##_body, launch, &finish1)
+AUTO_SET(rare, 0xC4);
+AUTO_SET(even, 0xC5);
+AUTO_SET(scalar, 0xC6);
+AUTO_SET(heavy, 0xC7);
+
+
+/* AUTO records that contradict themselves (eg_unit_load refuses each by name): branches without a classify unit, a classify unit without branches, a sweep,
+ * branches without costs, and a segmented set of another group. */
+#define BAD_AUTO(var, name_, byte, group_, classify_, branches_, costs_, sweep_)                                          \
+    static const struct eg_unit_dispatch disp_##var = { .struct_size = sizeof(struct eg_unit_dispatch),                \
+        .strategy = EG_DISPATCH_AUTO, .mix_slot = 4, .class_slot = -1, .stale_slot = -1, .offsets_slot = -1,           \
+        .classify = classify_, .name = group_, .k = 2, .branches = branches_, .sweep = sweep_, .branch_costs = costs_ }; \
+    static const struct eg_unit_dispatch* const var##_list[] = { &disp_##var };                                           \
+    SEG_BODY(var##_body, sga_auto_slots, 6, var##_list);                                                                  \
+    SEG_UNIT(unit_##var, name_, byte, "sga_host", var##_body, launch, &finish1)
+SEG_REF(ref_sg_cls_a, "sg__cls", 0xE1);
+SEG_REF(ref_sg_k0_a, "sg__k0", 0xE2);
+SEG_REF(ref_sg_k1_a, "sg__k1", 0xE3);
+static const struct eg_unit_ref* const sg_branches_a[] = { &ref_sg_k0_a, &ref_sg_k1_a };
+BAD_AUTO(auto_nocls, "auto_nocls", 0xB1, "sga", NULL, sga_branches, costs_rare, NULL);
+BAD_AUTO(auto_nobr, "auto_nobr", 0xB2, "sga", &ref_sga_cls, NULL, NULL, NULL);
+BAD_AUTO(auto_sweep, "auto_sweep", 0xB3, "sga", &ref_sga_cls, sga_branches, costs_rare, &ref_dg_sweep);
+BAD_AUTO(auto_nocost, "auto_nocost", 0xB4, "sga", &ref_sga_cls, sga_branches, NULL, NULL);
+BAD_AUTO(auto_group, "auto_group", 0xB5, "sga", &ref_sg_cls_a, sg_branches_a, costs_rare, NULL);
+
+
+/* AUTO units the runner refuses: one with steps AUTO, one that steps 3 a launch where its segmented set steps 1 (both name the set of "sga"). */
+static const struct eg_unit_slot* const sga_steps_slots[] = { &slot_k, &slot_limit, &slot_mask, &slot_finished, &slot_steps, &slot_sga_mix, &slot_how };
+#define OTHER_AUTO(var, name_, byte, slots_, n_, mix_, finish_)                                                           \
+    static const struct eg_unit_dispatch disp_##var = { .struct_size = sizeof(struct eg_unit_dispatch),                \
+        .strategy = EG_DISPATCH_AUTO, .mix_slot = mix_, .class_slot = -1, .stale_slot = -1, .offsets_slot = -1,         \
+        .classify = &ref_sga_cls, .name = "sga", .k = 2, .branches = sga_branches, .branch_costs = costs_rare,           \
+        .cost_flags = AUTO_FLAGS_rare };                                                                                 \
+    static const struct eg_unit_dispatch* const var##_list[] = { &disp_##var };                                           \
+    SEG_BODY(var##_body, slots_, n_, var##_list);                                                                         \
+    SEG_UNIT(unit_##var, name_, byte, "sga_host", var##_body, launch_auto_active_none, &finish_)
+static const struct eg_unit_launch launch_auto_active_none = { .struct_size = sizeof(struct eg_unit_launch), .group = 1, .active_map_slot = -1,
+    .active_count_slot = -1, .index_map_slot = -1, .index_count_slot = -1 };
+OTHER_AUTO(auto_steps, "auto_steps", 0xB6, sga_steps_slots, 7, 5, finish_auto);
+OTHER_AUTO(auto_k3, "auto_k3", 0xB7, sga_auto_slots, 6, 4, finish3);
+
 static const struct eg_unit_meta* const units[] = { &unit_axpb, &unit_wait, &unit_split, &unit_count1,
                                                     &unit_count3, &unit_count1a, &unit_count3a, &unit_countA, &unit_countAa, &unit_vecs, &unit_count1i,
                                                     &unit_count1ia, &unit_count1e, &unit_lanes, &unit_prefix, &unit_count1g, &unit_widemul,
                                                     &unit_gathb, &unit_gatha, &unit_gathn, &unit_boxed, &unit_boxbad, &unit_shr, &unit_cells, &unit_keyed,
                                                     &unit_keyedbad, &unit_cellsum, &unit_axpb_cards, &unit_axpb_badflag,
-                                                    &unit_sg_cls, &unit_sg_k0, &unit_sg_k1, &unit_sgf, &unit_dg_k0, &unit_dg_k1, &unit_dg_sweep, &unit_dgf };
+                                                    &unit_sg_cls, &unit_sg_k0, &unit_sg_k1, &unit_sgf, &unit_dg_k0, &unit_dg_k1, &unit_dg_sweep, &unit_dgf,
+                                                    &unit_sga_cls, &unit_sga_k0, &unit_sga_k1, &unit_sga_rare, &unit_sga_even, &unit_sga_scalar, &unit_sga_heavy,
+                                                    &unit_auto_nocls, &unit_auto_nobr, &unit_auto_sweep, &unit_auto_nocost, &unit_auto_group, &unit_auto_steps, &unit_auto_k3 };
 
 static const struct eg_library_meta library = {
     .struct_size = sizeof(struct eg_library_meta),
     .schema_major = EG_META_SCHEMA_MAJOR,
     .schema_minor = 0,
-    .n_units = 37,
+    .n_units = 51,
     .units = units,
 };
 

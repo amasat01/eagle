@@ -5,6 +5,7 @@
 #include "eagle/door/Context.h"
 #include "eagle/door/device/Seam.h"
 
+#include "eagle/door/Machine.h"
 #include "eagle/door/host/Team.h"
 
 #include <algorithm>
@@ -37,6 +38,36 @@ void check_settings(eg_ctx& ctx, const eg_ctx_settings* in) {
     device_open(ctx, s.device);
 }
 
+/** @brief Look the dispatch weights up once, by the class of the machine this context runs on (a host context: the host's CPUID class; a device
+ *  context: the device's compute capability). */
+void resolve_weights(eg_ctx& ctx) {
+    namespace pol = eagle::policy;
+    const bool device = ctx.dev.ordinal >= 0;
+    const HostClass host = device ? HostClass{} : host_class();
+    ctx.weight_vendor = device ? 0 : host.vendor;
+    ctx.weight_family = device ? ctx.dev.cc_major : host.family;
+    ctx.weight_model = device ? ctx.dev.cc_minor : host.model;
+    const pol::Target target = device ? pol::Target::Device : pol::Target::Host;
+    ctx.weight_row = pol::weightRowIndex(target, ctx.weight_vendor, ctx.weight_family, ctx.weight_model);
+    const pol::WeightRow& row = ctx.weight_row >= 0 ? pol::WEIGHT_ROWS[ctx.weight_row] : pol::builtinWeightRow(target);
+    if (device) {
+        ctx.props.cc_major = ctx.dev.cc_major;
+        ctx.props.cc_minor = ctx.dev.cc_minor;
+        ctx.props.sm_count = ctx.dev.sms;
+        ctx.props.clock_rate_khz = ctx.dev.clock_khz;
+        ctx.props.memory_clock_rate_khz = ctx.dev.memory_clock_khz;
+        ctx.props.memory_bus_width_bits = ctx.dev.bus_bits;
+        ctx.props.regs_per_sm = ctx.dev.regs_per_sm;
+        ctx.props.warp_size = 32;
+        ctx.props = eagle::deriveFields(ctx.props);
+        ctx.weights = pol::weightsOfRow(row, pol::Machine{ 1, static_cast<double>(ctx.dev.l2_bytes) });
+    } else {
+        const int cores = physical_cores();
+        ctx.props = eagle::cpu::deviceProps();
+        ctx.weights = pol::weightsOfRow(row, pol::Machine{ static_cast<double>(cores), host_cache_bytes(cores) });
+    }
+}
+
 }  // namespace
 
 /** @brief Make a context; a refused one keeps its status and reason (eg_ctx_new). */
@@ -46,7 +77,7 @@ eg_status ctx_new(const eg_ctx_settings* settings, eg_ctx** out) noexcept {
     eg_ctx* ctx = new (std::nothrow) eg_ctx;
     if (ctx == nullptr) return EG_FAULT;
     ctx->pid = static_cast<long>(::getpid());
-    const eg_status status = call(ctx, [&](eg_ctx& c) { check_settings(c, settings); });
+    const eg_status status = call(ctx, [&](eg_ctx& c) { check_settings(c, settings); resolve_weights(c); });
     ctx->refused = status;
     *out = ctx;
     return status;
@@ -113,6 +144,10 @@ void ctx_info(eg_ctx& ctx, struct eg_ctx_info* out) {
     info.host_threads = host::team_threads(ctx);
     info.device_type = device ? kDLCUDA : 0;
     info.stream = device ? static_cast<std::int64_t>(ctx.dev.stream) : -1;
+    info.weight_vendor = ctx.weight_vendor;
+    info.weight_family = ctx.weight_family;
+    info.weight_model = ctx.weight_model;
+    info.weight_row = ctx.weight_row;
     const std::uint32_t n = std::min<std::uint32_t>(out->struct_size, sizeof(info));
     info.struct_size = n;
     std::memcpy(static_cast<void*>(out), static_cast<const void*>(&info), n);

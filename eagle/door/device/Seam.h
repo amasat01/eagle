@@ -19,6 +19,8 @@ void device_plan_check(const eg_ctx& ctx, const eg_unit_s& unit);
 /** @brief eg_plan_new of a routable DEVICE plan of a gemm unit, and eg_gemm_new of a device product: open cuBLAS (EG_FAULT naming the libraries tried) and make the handle of the stream in scope. */
 void device_gemm_ready(eg_ctx& ctx);
 void device_launch(eg_plan_s& plan);
+void device_classify(eg_plan_s& plan);
+void device_loop_drop(eg_runner_s& runner);
 void device_sync(eg_ctx& ctx);
 void device_record_begin(eg_ctx& ctx);
 void device_record_launch(eg_ctx& ctx, eg_plan_s& plan);

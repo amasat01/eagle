@@ -228,8 +228,16 @@ EG_EXPORT eg_status eg_graph_free(eg_ctx* ctx, eg_graph* graph) {
 EG_EXPORT eg_status eg_runner_new(eg_ctx* ctx, const struct eg_runner_desc* desc, eg_runner** out) {
     return door::call(ctx, [&](eg_ctx& c) {
         door::device_quiet(c, "eg_runner_new", EG_BAD_REQUEST, "a runner's cells are made outside the capture; make it first");
+        door::look_check(c, door::read_input(desc, "eg_runner_desc"));
         if (door::device_plans(c, desc)) door::device_runner_new(c, desc, out);
         else door::runner_new(c, desc, out);
+        try {
+            door::look_attach(c, **out);
+        } catch (...) {
+            door::runner_release(c, *out);
+            *out = nullptr;
+            throw;
+        }
     });
 }
 
@@ -244,13 +252,17 @@ EG_EXPORT eg_status eg_runner_free(eg_ctx* ctx, eg_runner* runner) {
 }
 
 EG_EXPORT eg_status eg_runner_reset(eg_ctx* ctx, eg_runner* runner) {
-    return door::call(ctx, [&](eg_ctx& c) { door::runner_reset(c, runner); });
+    return door::call(ctx, [&](eg_ctx& c) {
+        door::runner_reset(c, runner);
+        if (runner->look != nullptr) door::look_reset(c, *runner);
+    });
 }
 
 EG_EXPORT eg_status eg_run(eg_ctx* ctx, eg_runner* runner, struct eg_run_report* report) {
     return door::call(ctx, [&](eg_ctx& c) {
         door::check_handle(c.runners, runner, "runner");
-        if (runner->dev.ctx != nullptr) door::device_run(c, runner, report);
+        if (runner->look != nullptr) door::look_run(c, runner, report);
+        else if (runner->dev.ctx != nullptr) door::device_run(c, runner, report);
         else {
             door::device_quiet(c, "eg_run of a host runner", EG_NOT_WRITTEN, door::kHostWorkInGraph);
             door::run(c, runner, report);
