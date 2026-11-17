@@ -688,6 +688,8 @@ void device_run(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report);
 void runner_figures(eg_ctx& ctx, const eg_runner_s* runner, struct eg_runner_figures* out);
 /** @brief eg_plan_entry_figures: fill @p out with the device entries of the unit of @p plan. */
 void plan_entry_figures(eg_ctx& ctx, const eg_plan_s* plan, eg_entry_figures* out);
+/** @brief Refuse NOT_WRITTEN "the device group is not built" for the device-group call @p call, in a door built without it. */
+void device_group_check(const char* call);
 
 }  // namespace door
 }  // namespace eagle

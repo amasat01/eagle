@@ -28,6 +28,9 @@
 #include <memory>
 #include <string>
 #include <unistd.h>
+#ifdef __APPLE__
+#include <mach/mach.h>
+#endif
 
 namespace eagle {
 namespace door {
@@ -1434,6 +1437,22 @@ void refine_reverse(eg_ctx& ctx, eg_runner_s& runner, RunRecord& r, const std::v
     }
 }
 
+
+/** @brief The host memory a pass may use by default: what the system reports available (Linux: free pages; macOS: free and
+ *  inactive pages); a system with no such query refuses by name, the caller states ``memory_budget``. */
+std::int64_t host_available_bytes() {
+#if defined(__linux__)
+    return static_cast<std::int64_t>(::sysconf(_SC_AVPHYS_PAGES) * ::sysconf(_SC_PAGE_SIZE));
+#elif defined(__APPLE__)
+    vm_statistics64_data_t vm;
+    mach_msg_type_number_t count = HOST_VM_INFO64_COUNT;
+    if (host_statistics64(mach_host_self(), HOST_VM_INFO64, reinterpret_cast<host_info64_t>(&vm), &count) != KERN_SUCCESS)
+        refuse(EG_FAULT, "memory_budget 0: host_statistics64 failed; state memory_budget");
+    return static_cast<std::int64_t>(vm.free_count + vm.inactive_count) * ::sysconf(_SC_PAGE_SIZE);
+#else
+    refuse(EG_BAD_REQUEST, "memory_budget 0: this system has no available-memory query; state memory_budget");
+#endif
+}
 }  // namespace
 
 /** @brief eg_reverse (``RunReverse.__call__`` / ``_run`` and ``diff_reverse_host``). */
@@ -1527,7 +1546,7 @@ void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, con
     const std::int64_t windows = (runner->max_steps + W - 1) / W;
     per = windows * per + W * r.width * static_cast<std::int64_t>(r.scalar);
     std::int64_t budget = r.budget;
-    if (budget == 0) budget = D != nullptr ? device_free_bytes(*D) / 2 : static_cast<std::int64_t>(::sysconf(_SC_AVPHYS_PAGES) * ::sysconf(_SC_PAGE_SIZE)) / 2;
+    if (budget == 0) budget = D != nullptr ? device_free_bytes(*D) / 2 : host_available_bytes() / 2;
     const std::int64_t m = n > 0 ? diff::chunkSamples(budget, per, n, 1) : 0;
     if (n > 0 && m == 0)
         refuse(EG_BAD_REQUEST, "memory_budget " + std::to_string(budget) + ": one sample alone needs " + std::to_string(per) +

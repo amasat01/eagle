@@ -13,9 +13,10 @@ namespace door = eagle::door;
 
 namespace {
 
-/** @brief The body of a function not written in this build. */
+/** @brief The body of a device-group function not written in this build: a door without the device group says so first. */
 eg_status not_written(eg_ctx* ctx, const char* name) {
     return door::call(ctx, [name](eg_ctx&) {
+        door::device_group_check(name);
         door::refuse(EG_NOT_WRITTEN, std::string(name) + " is not written in this build of the door");
     });
 }

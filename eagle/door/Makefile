@@ -80,7 +80,23 @@ CUDART := $(if $(CUDA),-L$(CUDA)/lib64 -lcudart -Wl$(comma)-rpath$(comma)$(CUDA)
 
 SRC := Context.cpp Unit.cpp Plane.cpp Plan.cpp RunCheck.cpp abi.cpp host/Runner.cpp host/Reverse.cpp host/Ops.cpp host/Record.cpp device/Device.cpp
 OBJ := $(SRC:%.cpp=$(OUT)/%.o) $(if $(CUDA),$(OUT)/device/Loop.o)
-LIB := $(OUT)/libeagle_door.so
+# The shared-library link differs by system; door.map stays the one list of exported names (Darwin's list is made from it).
+ifeq ($(shell uname -s),Darwin)
+SOEXT := dylib
+LIB_SHARED := -dynamiclib
+LIB_EXPORT := -Wl$(comma)-exported_symbols_list$(comma)$(OUT)/door.exp -Wl$(comma)-install_name$(comma)@rpath/libeagle_door.$(SOEXT) -Wl$(comma)-undefined$(comma)error
+LIB_EXPORT_LIST := $(OUT)/door.exp
+SYM_PREFIX := _
+NM_DEFINED := nm -gU
+else
+SOEXT := so
+LIB_SHARED := -shared
+LIB_EXPORT := -Wl$(comma)--version-script=$(CURDIR)/door.map -Wl$(comma)--no-undefined
+LIB_EXPORT_LIST :=
+SYM_PREFIX :=
+NM_DEFINED := nm -D --defined-only
+endif
+LIB := $(OUT)/libeagle_door.$(SOEXT)
 FIXTURE := $(OUT)/libfixture_unit.so
 TEST := $(OUT)/door_test
 
@@ -106,16 +122,21 @@ $(OUT)/device/Loop.o: device/Loop.cu device/Loop.h | check-inputs check-cuda
 	$(NVCC) -std=c++20 -O2 -arch=sm_61 -Wno-deprecated-gpu-targets -Werror all-warnings -ccbin $(CXX) \
 	  -Xcompiler -fPIC,-fvisibility=hidden,-Wall,-Wextra,-fopenmp -DAETHER_HAS_CUDA -diag-suppress=20050 -include $(CUDA_WING_FACTS) -I$(ROOT) -I$(AETHER_INCLUDE) -c $< -o $@
 
-$(LIB): $(OBJ) door.map
-	$(CXX) -shared -o $@ $(OBJ) -Wl,--version-script=$(CURDIR)/door.map -Wl,--no-undefined -fopenmp -pthread -ldl $(CUDART)
+# Darwin: the exported-symbols list is door.map's global pattern with the C symbol underscore.
+$(OUT)/door.exp: door.map
+	@mkdir -p $(OUT)
+	sed -n 's/.*global: *\([^;]*\);.*/_\1/p' door.map > $@
+
+$(LIB): $(OBJ) door.map $(LIB_EXPORT_LIST)
+	$(CXX) $(LIB_SHARED) -o $@ $(OBJ) $(LIB_EXPORT) -fopenmp -pthread -ldl $(CUDART)
 
 lib: $(LIB)
 
 # The library exports eg_* names only.
 symbols: $(LIB)
-	@extra=$$(nm -D --defined-only $(LIB) | awk '{print $$3}' | grep -v '^eg_' || true); \
+	@extra=$$($(NM_DEFINED) $(LIB) | awk '{print $$3}' | grep -v '^$(SYM_PREFIX)eg_' || true); \
 	if [ -n "$$extra" ]; then echo "FAIL  exports beyond eg_*:"; echo "$$extra"; exit 1; fi; \
-	echo "PASS  $(LIB) exports $$(nm -D --defined-only $(LIB) | grep -c ' eg_') eg_* names and nothing else"
+	echo "PASS  $(LIB) exports $$($(NM_DEFINED) $(LIB) | grep -c ' $(SYM_PREFIX)eg_') eg_* names and nothing else"
 
 # The fixture unit library and three variants of its size block (FIXTURE_BLOCK
 # in test/fixture_unit.c): a wrong sizeof(ScalarHandle), none exported, the v1 tag.

@@ -76,8 +76,9 @@ bool device_graph(const eg_ctx&, const eg_graph*) { return false; }
 void device_graph_launch(eg_ctx&, eg_graph*) {}
 void device_graph_free(eg_ctx&, eg_graph*) {}
 void device_graphs_drop(eg_ctx&) noexcept {}
-void device_stream_use(eg_ctx&, std::uint64_t) {
-    refuse(EG_BAD_REQUEST, "eg_stream_use on a host-only context (made without EG_CTX_DEVICE): it has no stream");
+void device_stream_use(eg_ctx&, std::uint64_t) { device_group_check("eg_stream_use"); }
+void device_group_check(const char* call) {
+    refuse(EG_NOT_WRITTEN, std::string(call) + ": the device group is not built");
 }
 void device_quiet(const eg_ctx&, const char*, eg_status, const char*) {}
 
@@ -1443,6 +1444,8 @@ void device_graphs_drop(eg_ctx& ctx) noexcept {
 
 /** @brief eg_stream_use: make @p stream (a stream of the context's device; 0: eagle's own) the stream in scope; the
  *  launches, runs and replays after it are ordered on it (the old path's ``stream_create`` over an external stream). */
+void device_group_check(const char*) {}
+
 void device_stream_use(eg_ctx& ctx, std::uint64_t stream) {
     if (ctx.dev.ordinal < 0)
         refuse(EG_BAD_REQUEST, "eg_stream_use on a host-only context (made without EG_CTX_DEVICE): it has no stream");

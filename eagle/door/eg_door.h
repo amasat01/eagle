@@ -314,7 +314,8 @@ struct eg_bind_desc {
     const int32_t* plane_slots;         /**< n_planes slot indices */
     eg_plane* const* planes;            /**< n_planes planes (eagle takes a reference) */
     const int32_t* uniform_slots;       /**< n_uniforms slot indices */
-    const void* const* uniform_values;  /**< each read at the slot's declared dtype */
+    const void* const* uniform_values;  /**< each read at the slot's wire size (at most 8 bytes: bool 1, int32/uint32 4,
+                                             int64 8, a real 4 or 8 by the unit's scalar); bytes beyond it are ignored */
 };
 
 /** Runner flags. */
@@ -855,7 +856,10 @@ eg_status eg_record_begin(eg_ctx* ctx);
  *  NOT_WRITTEN (IF_ELSE / SWITCH without the capability bit). */
 eg_status eg_record_cond_begin(eg_ctx* ctx, const struct eg_cond_desc* desc);
 
-/** Close the current arm and start the next. Status: OK; BAD_REQUEST. */
+/** Close the current arm and start the next: IF and WHILE have one arm, so a
+ *  second is BAD_REQUEST ("all are open"); IF_ELSE takes its second arm here and
+ *  a third is refused; SWITCH moves to the next case and is refused past its
+ *  ``n_arms``-th. With no conditional open: BAD_REQUEST. Status: OK; BAD_REQUEST. */
 eg_status eg_record_cond_arm(eg_ctx* ctx);
 
 /** Close the innermost conditional. Status: OK; BAD_REQUEST. */
@@ -875,6 +879,17 @@ eg_status eg_graph_free(eg_ctx* ctx, eg_graph* graph);
 /* ======================================================================== */
 /* DEVICE GROUP (declarations; behaviour mapped onto eagle-backend/1)       */
 /* ======================================================================== */
+
+/*
+ * Device-group calls without a device. In a door built WITHOUT the device
+ * group every call below returns EG_NOT_WRITTEN ("the device group is not
+ * built"), except ``eg_sync``, which is EG_OK (nothing to wait for). In a door
+ * built WITH it, on a host context (made without EG_CTX_DEVICE): ``eg_sync`` is
+ * EG_OK, ``eg_stream_use`` is EG_BAD_REQUEST ("host-only context": it has no
+ * stream), and ``eg_device_count``, ``eg_device_props`` and ``eg_record_child``
+ * are EG_NOT_WRITTEN, as on a device context: they are not written in either
+ * build yet.
+ */
 
 /** Number of devices the backend sees (seam ``device_count``). */
 eg_status eg_device_count(eg_ctx* ctx, int32_t* count);

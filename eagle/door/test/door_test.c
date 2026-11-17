@@ -1055,6 +1055,12 @@ static void check_recording_states(eg_ctx* ctx) {
          reason_has(ctx, "1 arm(s) of the 2");
     all = all && eg_record_cond_arm(ctx) == EG_OK && eg_record_cond_arm(ctx) == EG_BAD_REQUEST;
     all = all && eg_record_cond_end(ctx) == EG_OK;
+    d.kind = EG_COND_SWITCH;
+    d.n_arms = 3;
+    all = all && eg_record_cond_begin(ctx, &d) == EG_OK && eg_record_cond_arm(ctx) == EG_OK && eg_record_cond_arm(ctx) == EG_OK &&
+         eg_record_cond_arm(ctx) == EG_BAD_REQUEST && reason_has(ctx, "takes 3 arm(s)");
+    all = all && eg_record_cond_end(ctx) == EG_OK;
+    d.n_arms = 0;
     /* conditionals nest: an IF inside the second arm of an IF_ELSE */
     d.kind = EG_COND_IF_ELSE;
     all = all && eg_record_cond_begin(ctx, &d) == EG_OK && eg_record_cond_arm(ctx) == EG_OK;
@@ -2779,6 +2785,22 @@ static void check_reset(eg_ctx* ctx) {
     eg_unit_free(ctx, uaa);
 }
 
+/* A door built without the device group: every device-group call is NOT_WRITTEN by the same reason, but eg_sync, which is OK. */
+static void check_no_device_group(eg_ctx* ctx) {
+    int32_t count = 0;
+    struct eg_device_props props;
+    memset(&props, 0, sizeof(props));
+    props.struct_size = sizeof(props);
+    const char* none = "the device group is not built";
+    int ok = eg_device_count(ctx, &count) == EG_NOT_WRITTEN && reason_has(ctx, none);
+    ok = ok && eg_device_props(ctx, 0, &props) == EG_NOT_WRITTEN && reason_has(ctx, none);
+    ok = ok && eg_stream_use(ctx, 0) == EG_NOT_WRITTEN && reason_has(ctx, "eg_stream_use: the device group is not built");
+    ok = ok && eg_record_child(ctx, 0) == EG_NOT_WRITTEN && reason_has(ctx, none);
+    ok = ok && eg_sync(ctx) == EG_OK;
+    check(ok, "a door without the device group: eg_device_count, eg_device_props, eg_stream_use and eg_record_child NOT_WRITTEN "
+              "(\"the device group is not built\"), eg_sync OK");
+}
+
 int main(int argc, char** argv) {
     if (argc != 5) {
         fprintf(stderr, "usage: %s <fixture> <wrong size> <no size block> <v1 tag>\n", argv[0]);
@@ -2824,6 +2846,7 @@ int main(int argc, char** argv) {
     check_banded(ctx);
     check_figures(ctx);
     check_reset(ctx);
+    check_no_device_group(ctx);
 
     check_reduce(ctx);
     check_conditionals(ctx);

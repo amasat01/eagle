@@ -730,6 +730,13 @@ int main(int argc, char** argv) {
           "eg_ctx_info: device 0, EG_CAP_DEVICE, kDLCUDA, the context's own stream");
     check(eg_sync(host) == EG_OK && eg_sync(ctx) == EG_OK, "eg_sync on a host and an idle device context");
     check(eg_stream_use(ctx, 0) == EG_OK, "eg_stream_use 0 (eagle's own stream) on a device context");
+    {   /* the device group on a host context of a door built with it */
+        int32_t count = 0;
+        check(eg_sync(host) == EG_OK && refused(eg_stream_use(host, 0), EG_BAD_REQUEST, host, "host-only context") &&
+                  refused(eg_device_count(host, &count), EG_NOT_WRITTEN, host, "not written in this build"),
+              "a host context of a door with the device group: eg_sync OK, eg_stream_use BAD_REQUEST (host-only context), "
+              "eg_device_count NOT_WRITTEN (not written in either build)");
+    }
 
     /* Units. */
     eg_unit *axpy = NULL, *axpy64 = NULL, *u = NULL, *fat129 = NULL;
