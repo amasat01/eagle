@@ -102,7 +102,7 @@ LIB := $(OUT)/libeagle_door.$(SOEXT)
 FIXTURE := $(OUT)/libfixture_unit.so
 TEST := $(OUT)/door_test
 
-.PHONY: all lib symbols confined test check-inputs check-cuda pairs pair-reverse pair-reverse-active pair-reverse-timed pair-reverse-ps pair-reverse-fused pair-reverse-kstep pair-reverse-kstep-auto pair-reverse-kstep3 pair-reverse-kstep7 pair-reverse-kstep8 pair-reverse-reorder pair-reverse-t0 pair-reverse-counter pair-refine pair-refine-reverse pair-refine-pend pair-refine-reverse-pend pair-refine-reverse-grid pair-refine-reverse-grid-refused pair-status-grid pair-status-tangent pair-status-two device pair-device-reverse pair-device-refine pair-device-refine-reverse $(PAIR_UNITS:%=pair-%) $(PAIR_DEVICE_UNITS:%=pair-device-%)
+.PHONY: all lib symbols confined test check-inputs check-cuda pairs pair-reverse pair-reverse-active pair-reverse-timed pair-reverse-ps pair-reverse-fused pair-reverse-kstep pair-reverse-kstep-auto pair-reverse-param pair-device-reverse-param pair-reverse-kstep3 pair-reverse-kstep7 pair-reverse-kstep8 pair-reverse-reorder pair-reverse-t0 pair-reverse-counter pair-refine pair-refine-reverse pair-refine-pend pair-refine-reverse-pend pair-refine-reverse-grid pair-refine-reverse-grid-refused pair-status-grid pair-status-tangent pair-status-two device pair-device-reverse pair-device-refine pair-device-refine-reverse $(PAIR_UNITS:%=pair-%) $(PAIR_DEVICE_UNITS:%=pair-device-%)
 all: test
 
 check-inputs:
@@ -332,6 +332,46 @@ $(eval $(call KSTEP_RULES,kstep,rr_pend_x4))
 $(eval $(call KSTEP_RULES,kstep3,rr_pend_x3))
 $(eval $(call KSTEP_RULES,kstep7,rr_pend_x7))
 $(eval $(call KSTEP_RULES,kstep8,rr_pend_x8))
+DIGEST_param_rr_pend_c ?= 3bc7bb7564e5b3bf766bbdca405dfce7a30b422d2439bb135f171868307c905a
+DIGEST_param_rr_pend_c_tape ?= d3c2886c66cf33ea9350efdec0013f047682701077be9760bbe1f04c52b58ade
+DIGEST_param_rr_pend_c_step_vjp ?= 59410b1d2c471e7f9f34e5a7e4e2d8bc2ade1a32faa942246555dd144193f0fa
+DIGEST_param_rr_pend_c_params ?= 027baae827d796d9f5a193e9664c0daf396468d8768598fbcac547b69b0acb1b
+DIGEST_param_rr_pend_c_params_tape ?= 74fffdd448a4512f39187d2e7e0fd423ad706f4718a81ecfba07609474cd4be4
+DIGEST_param_rr_pend_c_params_step_vjp ?= 9c8a9e363b3d77184016bd8018fad95dffabade7edb6748fa6a1e65218a838ac
+# pair-reverse-param: rr_pend with its damping c by value (the plain trio: KERNEL_param_<unit>, the six texts in the order of
+# META_param's units) over samples that stop at different steps: the reversed gradient of c equals the finite difference of two
+# forward runs, in one pass and in several. The promoted trio (c in a one-cell plane, whose vjp owns cell rows) is there to be
+# refused at eg_runner_new. pair-device-reverse-param is the same on the device (PTX_param_<unit>), and the device gradient
+# equals the host's (the host library is built by pair-reverse-param; PARAM_HOST_LIB names one built elsewhere).
+META_param ?= test/derived/rr_pend_param_meta.c
+PARAM_UNITS := rr_pend_c rr_pend_c_tape rr_pend_c_step_vjp rr_pend_c_params rr_pend_c_params_tape rr_pend_c_params_step_vjp
+PARAM_TEST := $(OUT)/param_reverse_test
+PARAM_DEVICE_TEST := $(OUT)/param_reverse_device_test
+PARAM_DIGESTS = $(foreach u,$(PARAM_UNITS),$(DIGEST_param_$(u)))
+$(PARAM_TEST): test/param_reverse_test.c test/pair_util.h eg_door.h $(LIB)
+	$(CC) $(CFLAGS_C) -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door -Wl,-rpath,$(OUT) -lm -pthread
+$(PARAM_DEVICE_TEST): test/param_reverse_test.c test/pair_util.h eg_door.h $(LIB) | check-cuda
+	$(CC) $(CFLAGS_C) -DEG_PARAM_DEVICE -isystem $(CUDA)/include -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door \
+	  -Wl,-rpath,$(OUT) $(CUDART) -lm -pthread
+$(OUT)/libpair_param.so: $(foreach u,$(PARAM_UNITS),$(KERNEL_param_$(u))) $(META_param) eg_door.h eg_unit_meta.h | check-inputs
+	@test -d "$(PAIR_WING_DIR)" $(foreach u,$(PARAM_UNITS),-a -f "$(KERNEL_param_$(u))") || { echo "set KERNEL_param_<unit> for $(PARAM_UNITS) and PAIR_WING_DIR"; exit 1; }
+	@mkdir -p $(OUT)/param
+	$(foreach u,$(PARAM_UNITS),$(CXX) $(PAIR_HOST_FLAGS) $(if $(filter $(u),rr_pend_c),,$(call REV_RENAME,$(u))) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle \
+	  -I$(PAIR_WING_DIR) -c $(KERNEL_param_$(u)) -o $(OUT)/param/$(u).o &&) true
+	$(CC) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$(ROOT) -c $(META_param) -o $(OUT)/param/meta.o
+	$(CXX) -shared -o $@ $(foreach u,$(PARAM_UNITS),$(OUT)/param/$(u).o) $(OUT)/param/meta.o
+$(OUT)/libpair_dev_param.so: $(foreach u,$(PARAM_UNITS),$(PTX_param_$(u))) $(META_param) eg_door.h eg_unit_meta.h | check-cuda
+	@mkdir -p $(OUT)/param_dev
+	$(foreach u,$(PARAM_UNITS),$(call embed,$(PTX_param_$(u)),$(u)__image,$(OUT)/param_dev/$(u).o) &&) true
+	$(call cuda_meta,$(META_param),$(OUT)/param_dev/meta.c)
+	$(CC) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$(ROOT) -c $(OUT)/param_dev/meta.c -o $(OUT)/param_dev/meta.o
+	$(CC) -shared -o $@ $(OUT)/param_dev/meta.o $(foreach u,$(PARAM_UNITS),$(OUT)/param_dev/$(u).o)
+pair-reverse-param: symbols $(OUT)/libpair_param.so $(PARAM_TEST)
+	$(PARAM_TEST) $(OUT)/libpair_param.so $(PARAM_DIGESTS)
+PARAM_HOST_LIB ?= $(OUT)/libpair_param.so
+pair-device-reverse-param: symbols $(PARAM_HOST_LIB) $(OUT)/libpair_dev_param.so $(PARAM_DEVICE_TEST)
+	$(PARAM_DEVICE_TEST) $(PARAM_HOST_LIB) $(PARAM_DIGESTS) $(OUT)/libpair_dev_param.so
+
 # pair-reverse-kstep-auto: the same artifact under steps_reverse AUTO: 64 samples lie inside the nearest table row (FUSED, reported, and
 # the run equals ORACLE_kstep bit for bit); 128 lie past it (PER_STEP, equal to the explicit PER_STEP run).
 pair-reverse-kstep-auto: symbols $(OUT)/libpair_kstep.so $(REV_TEST)
