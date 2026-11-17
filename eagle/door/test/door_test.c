@@ -13,6 +13,7 @@
 
 #include "eagle/door/eg_door.h"
 #include "plugin/dlpack.h"
+#include "seg_model.h"
 
 #include <dlfcn.h>
 #include <pthread.h>
@@ -2888,8 +2889,6 @@ static void check_fft_threads(void) {
 
 /* ---- SEGMENTED groups under a runner ---------------------------------------- */
 
-#define SGN 200
-
 static eg_status load_with(eg_ctx* ctx, const char* name, uint8_t digest_byte, eg_unit* const* deps, int32_t n_deps, eg_unit** out) {
     struct eg_unit_ref ref;
     memset(&ref, 0, sizeof(ref));
@@ -2949,11 +2948,7 @@ static int seg_same(const struct seg_set* a, const struct seg_set* b, int with_p
            (!with_pos || memcmp(a->pos, b->pos, sizeof(a->pos)) == 0);
 }
 
-static int64_t seg_finished(const struct seg_set* q) {
-    int64_t done = 0;
-    for (int i = 0; i < SGN; ++i) done += q->mask[i] != 0;
-    return done;
-}
+static int64_t seg_finished(const struct seg_set* q) { return seg_done(q->mask); }
 
 /* The group's plan launched one step at a time by the caller, with the runner's finish rule (until every sample finished or max_steps launches). */
 static int64_t seg_launch_loop(eg_ctx* ctx, struct seg_set* q, int64_t max_steps) {
@@ -2969,55 +2964,6 @@ static eg_status seg_run(eg_ctx* ctx, struct seg_set* q, int64_t max_steps, eg_r
     rep->struct_size = sizeof(*rep);
     eg_status s = eg_runner_new(ctx, &d, out);
     return s == EG_OK ? eg_run(ctx, *out, rep) : s;
-}
-
-/* The dynamic group's arrangement and sort schedule as the door states them: a stable sort of the slots by (live, class of the slot at
- * the last launch) when none was made or when more live samples than 5% of the live ones were left stale, the branches over their runs,
- * then the stale live slots stepped by their class. Returns the launches that sorted in @p sorts (up to 16). */
-static int64_t dg_model(struct seg_set* q, int64_t max_steps, int64_t* sorts, int* n_sorts) {
-    static int order[SGN], cls[SGN], stale[SGN];
-    int64_t launches = 0, stale_now = 0;
-    int sorted = 0, end[2] = { 0, 0 };
-    *n_sorts = 0;
-    for (int i = 0; i < SGN; ++i) order[i] = i, cls[i] = 0, stale[i] = 0;
-    while (launches < max_steps && seg_finished(q) != SGN) {
-        int64_t live = 0;
-        for (int s = 0; s < SGN; ++s) live += !q->mask[order[s]];
-        if (!sorted || (double)stale_now > 0.05 * (double)(live > 1 ? live : 1)) {
-            int next[SGN], at = 0;
-            for (int c = 0; c < 3; ++c) {
-                for (int s = 0; s < SGN; ++s)
-                    if ((q->mask[order[s]] ? 2 : cls[s]) == c) next[at++] = order[s];
-                if (c < 2) end[c] = at;    /* the runs of the sort: slots [0, end[0]) are class 0, [end[0], end[1]) class 1 */
-            }
-            memcpy(order, next, sizeof(order));
-            sorted = 1;
-            if (*n_sorts < 16) sorts[(*n_sorts)++] = launches + 1;
-        }
-        for (int s = 0; s < SGN; ++s) {    /* the slots of the runs the sort just made (a kept sort's runs are the same slots) */
-            const int j = s < end[0] ? 0 : s < end[1] ? 1 : -1;
-            const int i = order[s];
-            if (j < 0 || q->mask[i]) continue;
-            const int c = q->k[i] >= 4.0;
-            cls[s] = c;
-            stale[s] = c != j;
-            q->pos[i] = (double)s;
-            if (c == j) {
-                q->k[i] += 0.125 * (j + 1);
-                if (q->k[i] >= q->limit[i]) q->mask[i] = 1;
-            }
-        }
-        stale_now = 0;
-        for (int s = 0; s < SGN; ++s)
-            if (stale[s] && !q->mask[order[s]] && s < end[1]) {
-                const int i = order[s];
-                q->k[i] += 0.125 * ((q->k[i] >= 4.0) + 1);
-                if (q->k[i] >= q->limit[i]) q->mask[i] = 1;
-                ++stale_now;
-            }
-        ++launches;
-    }
-    return launches;
 }
 
 static void check_segmented_runner(eg_ctx* ctx) {
@@ -3092,7 +3038,7 @@ static void check_segmented_runner(eg_ctx* ctx) {
     int64_t sorts[16];
     int n_sorts = 0;
     seg_inputs(&model, 1);
-    const int64_t total = dg_model(&model, 1000, sorts, &n_sorts);
+    const int64_t total = dg_model(model.k, model.limit, model.mask, model.pos, 1000, sorts, &n_sorts);
     /* Launch L steps the samples of run 0 whose k (0.02 i + 0.125 (L - 1) while in run 0) is still below 4 and marks the rest stale: 6 samples
      * (i >= 194) in launch 2, 12 (i >= 188) in launch 3. The sort is kept while the stale are at most 5% of the 200 live (10), so launch 3 keeps
      * it (6 stale) and launch 4 sorts again (12 stale): the sorts are at launches 1 and 4. */
@@ -3101,7 +3047,7 @@ static void check_segmented_runner(eg_ctx* ctx) {
         seg_inputs(&model, 1), seg_inputs(&a, 1);
         int64_t m_sorts[16];
         int m_n = 0;
-        dg_model(&model, cut, m_sorts, &m_n);
+        dg_model(model.k, model.limit, model.mask, model.pos, cut, m_sorts, &m_n);
         eg_runner* rd = NULL;
         char what[160];
         snprintf(what, sizeof(what), "dynamic group, run of %lld launches (the second sort at launch %lld): planes, positions and report as the model",
@@ -3111,7 +3057,7 @@ static void check_segmented_runner(eg_ctx* ctx) {
         eg_plan_free(ctx, a.plan);
     }
     seg_inputs(&model, 1), seg_inputs(&b, 1), seg_inputs(&f, 1);
-    dg_model(&model, 1000, sorts, &n_sorts);
+    dg_model(model.k, model.limit, model.mask, model.pos, 1000, sorts, &n_sorts);
     eg_runner *rb = NULL, *rfu = NULL;
     check(seg_plan(ctx, dk0, &b, 1) && seg_plan(ctx, dgf, &f, 0) && seg_run(ctx, &b, 1000, &rb, &rep) == EG_OK && seg_run(ctx, &f, 1000, &rfu, &rep2) == EG_OK &&
               seg_same(&b, &model, 1) && memcmp(b.k, f.k, sizeof(b.k)) == 0 && rep.launches == total && rep2.launches == total,

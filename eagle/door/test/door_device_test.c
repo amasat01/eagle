@@ -11,6 +11,7 @@
 
 #include "eagle/door/eg_door.h"
 #include "plugin/dlpack.h"
+#include "seg_model.h"
 
 #include <cuda_runtime_api.h>
 
@@ -795,6 +796,161 @@ static void reset_device_case(eg_ctx* ctx, eg_unit* unit, int64_t every, double 
     dcount_free(ctx, &reused);
 }
 
+/* ---- SEGMENTED groups under a runner on the device (host-stepped) ---- */
+
+struct dset {
+    double *dk, *dl, *dp;
+    unsigned char* dm;
+    double k[SGN], limit[SGN], pos[SGN];
+    unsigned char mask[SGN];
+    struct tensor t[4];
+    eg_plane* pl[4];
+    eg_plan* plan;
+};
+
+static void dset_upload(struct dset* q, int dynamic) {
+    for (int i = 0; i < SGN; ++i) {
+        q->k[i] = dynamic ? 0.02 * i : 0.0;
+        q->limit[i] = dynamic ? 7.0 : (double)(2 + i % 9);
+        q->pos[i] = -1.0;
+        q->mask[i] = 0;
+    }
+    cudaMemcpy(q->dk, q->k, sizeof(q->k), cudaMemcpyHostToDevice);
+    cudaMemcpy(q->dl, q->limit, sizeof(q->limit), cudaMemcpyHostToDevice);
+    cudaMemcpy(q->dp, q->pos, sizeof(q->pos), cudaMemcpyHostToDevice);
+    cudaMemcpy(q->dm, q->mask, sizeof(q->mask), cudaMemcpyHostToDevice);
+}
+
+static int dset_new(eg_ctx* ctx, eg_unit* unit, int dynamic, int with_pos, struct dset* q) {
+    memset(q, 0, sizeof(*q));
+    cudaMalloc((void**)&q->dk, sizeof(q->k));
+    cudaMalloc((void**)&q->dl, sizeof(q->limit));
+    cudaMalloc((void**)&q->dp, sizeof(q->pos));
+    cudaMalloc((void**)&q->dm, sizeof(q->mask));
+    dset_upload(q, dynamic);
+    q->pl[0] = wrap(ctx, &q->t[0], q->dk, 1, SGN, 0, 1, 0);
+    q->pl[1] = wrap(ctx, &q->t[1], q->dl, 1, SGN, 0, 1, 0);
+    q->pl[2] = wrap_device_typed(ctx, &q->t[2], q->dm, SGN, kDLBool, 8);
+    q->pl[3] = with_pos ? wrap(ctx, &q->t[3], q->dp, 1, SGN, 0, 1, 0) : NULL;
+    const int32_t slots[4] = { 0, 1, 2, 7 };
+    const int n = with_pos ? 4 : 3;
+    eg_status s = q->pl[0] && q->pl[1] && q->pl[2] && (q->pl[3] || !with_pos) ? plan_n(ctx, unit, EG_STRUCTURE_DEVICE, SGN, 0, NULL, NULL, &q->plan) : EG_FAULT;
+    if (s == EG_OK) s = bind_planes(ctx, q->plan, n, slots, q->pl);
+    return s == EG_OK;
+}
+
+static void dset_read(eg_ctx* ctx, struct dset* q) {
+    eg_sync(ctx);
+    cudaMemcpy(q->k, q->dk, sizeof(q->k), cudaMemcpyDeviceToHost);
+    cudaMemcpy(q->pos, q->dp, sizeof(q->pos), cudaMemcpyDeviceToHost);
+    cudaMemcpy(q->mask, q->dm, sizeof(q->mask), cudaMemcpyDeviceToHost);
+}
+
+static void dset_free(eg_ctx* ctx, struct dset* q) {
+    eg_plan_free(ctx, q->plan);
+    for (int i = 0; i < 4; ++i)
+        if (q->pl[i] != NULL) eg_plane_free(ctx, q->pl[i]);
+    cudaFree(q->dk), cudaFree(q->dl), cudaFree(q->dp), cudaFree(q->dm);
+}
+
+static int dset_same(const struct dset* a, const struct dset* b, int with_pos) {
+    return memcmp(a->k, b->k, sizeof(a->k)) == 0 && memcmp(a->mask, b->mask, sizeof(a->mask)) == 0 &&
+           (!with_pos || memcmp(a->pos, b->pos, sizeof(a->pos)) == 0);
+}
+
+/* The group's plan launched one step at a time by the caller, with the runner's finish rule. */
+static int64_t dset_launch_loop(eg_ctx* ctx, struct dset* q, int64_t max_steps) {
+    int64_t launches = 0;
+    uint64_t tiles = 0;
+    dset_read(ctx, q);
+    while (launches < max_steps && seg_done(q->mask) != SGN && eg_launch(ctx, q->plan, &tiles) == EG_OK) ++launches, dset_read(ctx, q);
+    return launches;
+}
+
+static eg_status dset_run(eg_ctx* ctx, struct dset* q, int64_t max_steps, eg_runner** r, struct eg_run_report* rep) {
+    struct eg_runner_desc d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    d.n_plans = 1;
+    d.plans = &q->plan;
+    d.max_steps = max_steps;
+    memset(rep, 0, sizeof(*rep));
+    rep->struct_size = sizeof(*rep);
+    eg_status s = eg_runner_new(ctx, &d, r);
+    if (s == EG_OK) s = eg_run(ctx, *r, rep);
+    dset_read(ctx, q);
+    return s;
+}
+
+static void check_segmented_device(eg_ctx* ctx, const char* dev_lib) {
+    eg_unit *cls = NULL, *k1 = NULL, *k0 = NULL, *fused = NULL, *dk1 = NULL, *dsw = NULL, *dk0 = NULL, *dgf = NULL;
+    check(load(ctx, dev_lib, "dsg__cls", 0xF1, &cls) == EG_OK && load(ctx, dev_lib, "dsg__k1", 0xF3, &k1) == EG_OK &&
+              load(ctx, dev_lib, "dsgf", 0xF4, &fused) == EG_OK && load(ctx, dev_lib, "ddg__k1", 0xF6, &dk1) == EG_OK &&
+              load(ctx, dev_lib, "ddg__sweep", 0xF7, &dsw) == EG_OK && load(ctx, dev_lib, "ddgf", 0xF8, &dgf) == EG_OK,
+          "eg_unit_load of the device SEGMENTED groups' member units and fused units");
+    eg_unit* sdeps[2] = { k1, cls };
+    eg_unit* ddeps[2] = { dk1, dsw };
+    {
+        struct eg_unit_ref r0 = { .struct_size = sizeof(r0), .name = "dsg__k0" }, r1 = { .struct_size = sizeof(r1), .name = "ddg__k0" };
+        memset(r0.digest, 0xF2, EG_DIGEST_BYTES), memset(r1.digest, 0xF5, EG_DIGEST_BYTES);
+        struct eg_unit_load_desc d = { .struct_size = sizeof(d), .path = dev_lib, .unit = &r0, .deps = sdeps, .n_deps = 2 };
+        eg_status a = eg_unit_load(ctx, &d, &k0);
+        d.unit = &r1, d.deps = ddeps;
+        check(a == EG_OK && eg_unit_load(ctx, &d, &dk0) == EG_OK, "eg_unit_load of both groups' first branch units with the group's units in deps");
+    }
+    if (k0 == NULL || dk0 == NULL || fused == NULL || dgf == NULL) return;
+    static struct dset ref, run, fus;
+    struct eg_run_report rep, rep2;
+    eg_runner *r = NULL, *rf = NULL;
+    check(dset_new(ctx, k0, 0, 0, &ref) && dset_new(ctx, k0, 0, 0, &run) && dset_new(ctx, fused, 0, 0, &fus), "the static group's plans and the fused unit's plan on the device");
+    const int64_t want = dset_launch_loop(ctx, &ref, 1000);
+    check(want == 5 && seg_done(ref.mask) == SGN, "the device group launched by hand until done: 5 launches");
+    check(dset_run(ctx, &run, 1000, &r, &rep) == EG_OK && dset_same(&run, &ref, 0) && rep.launches == want && rep.steps == want && rep.finished == SGN &&
+              rep.mapped == want * SGN && rep.mode == EG_MODE_BAND && rep.flags == (EG_REPORT_DONE | EG_REPORT_EXACT_STEPS),
+          "a DEVICE runner over a SEGMENTED group (host-stepped): planes and report equal the plan launched step by step");
+    check(dset_run(ctx, &fus, 1000, &rf, &rep2) == EG_OK && dset_same(&fus, &ref, 0) && rep2.launches == want && rep2.mode == EG_MODE_BAND,
+          "the same run of the fused unit (the captured loop) equals it bitwise");
+    dset_upload(&run, 0);
+    memset(&rep, 0, sizeof(rep));
+    rep.struct_size = sizeof(rep);
+    check(eg_runner_reset(ctx, r) == EG_OK && eg_run(ctx, r, &rep) == EG_OK && (dset_read(ctx, &run), dset_same(&run, &ref, 0)) && rep.launches == want &&
+              rep.finished == SGN,
+          "eg_runner_reset then a second run of the SEGMENTED runner equals the first, report included");
+    eg_runner_free(ctx, r), eg_runner_free(ctx, rf);
+    {
+        struct eg_runner_desc d;
+        memset(&d, 0, sizeof(d));
+        d.struct_size = sizeof(d), d.n_plans = 1, d.plans = &run.plan, d.max_steps = 10;
+        eg_runner* rr = NULL;
+        d.flags = EG_RUN_REORDER;
+        check(refused(eg_runner_new(ctx, &d, &rr), EG_BAD_REQUEST, ctx, "nothing to reorder"), "EG_RUN_REORDER over a DEVICE SEGMENTED group: BAD_REQUEST");
+        d.flags = 0, d.every = 4;
+        check(refused(eg_runner_new(ctx, &d, &rr), EG_BAD_REQUEST, ctx, "steps per launch"), "every over a DEVICE SEGMENTED group: BAD_REQUEST");
+        d.every = 0, d.flags = EG_RUN_RECORD;
+        check(eg_runner_new(ctx, &d, &rr) != EG_OK && rr == NULL, "EG_RUN_RECORD over a DEVICE SEGMENTED group is refused");
+    }
+    dset_free(ctx, &ref), dset_free(ctx, &run), dset_free(ctx, &fus);
+
+    /* the dynamic selector: the runner, the hand-launched plan and the fused unit agree bitwise; the sort schedule is the host test's */
+    static struct dset a, b, f;
+    check(dset_new(ctx, dk0, 1, 1, &a) && dset_new(ctx, dk0, 1, 1, &b) && dset_new(ctx, dgf, 1, 0, &f), "the dynamic group's plans on the device");
+    const int64_t total = dset_launch_loop(ctx, &a, 1000);
+    eg_runner *rb = NULL, *rfu = NULL;
+    check(dset_run(ctx, &b, 1000, &rb, &rep) == EG_OK && dset_same(&b, &a, 1) && rep.launches == total && rep.finished == SGN,
+          "the dynamic DEVICE group under a runner equals the plan launched step by step (planes, positions, launches)");
+    check(dset_run(ctx, &f, 1000, &rfu, &rep2) == EG_OK && memcmp(f.k, a.k, sizeof(a.k)) == 0 && rep2.launches == total,
+          "the dynamic group equals the fused unit's run bitwise");
+    dset_upload(&b, 1);
+    memset(&rep, 0, sizeof(rep));
+    rep.struct_size = sizeof(rep);
+    check(eg_runner_reset(ctx, rb) == EG_OK && eg_run(ctx, rb, &rep) == EG_OK && (dset_read(ctx, &b), dset_same(&b, &a, 1)) && rep.launches == total,
+          "eg_runner_reset of a dynamic DEVICE group, then a second run equals the first (the sort starts over)");
+    eg_runner_free(ctx, rb), eg_runner_free(ctx, rfu);
+    dset_free(ctx, &a), dset_free(ctx, &b), dset_free(ctx, &f);
+    eg_unit_free(ctx, k0), eg_unit_free(ctx, k1), eg_unit_free(ctx, cls), eg_unit_free(ctx, fused), eg_unit_free(ctx, dk0), eg_unit_free(ctx, dk1),
+        eg_unit_free(ctx, dsw), eg_unit_free(ctx, dgf);
+}
+
 static void reset_device(eg_ctx* ctx, const char* dev_lib) {
     eg_unit *plain = NULL, *active = NULL;
     check(load(ctx, dev_lib, "dcount1", 0xD9, &plain) == EG_OK && load(ctx, dev_lib, "dcount1a", 0xDA, &active) == EG_OK,
@@ -1321,6 +1477,7 @@ int main(int argc, char** argv) {
     lookup_device(ctx, dev_lib);
     figures_device(ctx, dev_lib);
     reset_device(ctx, dev_lib);
+    check_segmented_device(ctx, dev_lib);
     fast_entries(ctx, dev_lib);
 
     /* The host still runs on a device context. */
