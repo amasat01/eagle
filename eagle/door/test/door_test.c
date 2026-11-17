@@ -2970,15 +2970,14 @@ static eg_status seg_run(eg_ctx* ctx, struct seg_set* q, int64_t max_steps, eg_r
     return s == EG_OK ? eg_run(ctx, *out, rep) : s;
 }
 
-/* The dispatch weights row is looked up once, by the class of this machine: the Intel family 6 model 85 row (index 1 of EG_WEIGHT_ROWS) on that class,
- * the built-in row (-1) on any other; an older caller's smaller struct is filled as far as it goes. */
+/* The dispatch weights row is looked up once, by the class of this machine, and shown with the class key. No class row is written (a row equal to the
+ * built-in one states nothing), so every machine takes the built-in row, -1; an older caller's smaller struct is filled as far as it goes. */
 static void check_weight_row(eg_ctx* ctx) {
     struct eg_ctx_info info;
     memset(&info, 0, sizeof(info));
     info.struct_size = sizeof(info);
-    const int w2125 = eg_ctx_info(ctx, &info) == EG_OK && info.weight_vendor == 1 && info.weight_family == 6 && info.weight_model == 85;
-    check(info.struct_size == sizeof(info) && info.weight_row == (w2125 ? 1 : -1),
-          "eg_ctx_info: the weights row is Intel 6/85's on that class and the built-in row (-1) on any other");
+    check(eg_ctx_info(ctx, &info) == EG_OK && info.struct_size == sizeof(info) && info.weight_vendor >= 0 && info.weight_row == -1,
+          "eg_ctx_info: this machine takes the built-in weights row (-1) and states the class key it looked up");
     struct eg_ctx_info old;
     memset(&old, 0, sizeof(old));
     old.struct_size = (uint32_t)offsetof(struct eg_ctx_info, weight_vendor);
