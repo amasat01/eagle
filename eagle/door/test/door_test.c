@@ -2851,6 +2851,41 @@ static void check_no_device_group(eg_ctx* ctx) {
               "(\"the device group is not built\"), eg_sync OK");
 }
 
+/* ---- transforms ---------------------------------------------------------- */
+
+static void fft_move(void* dst, const void* src, size_t bytes) { memcpy(dst, src, bytes); }
+
+#include "fft_cases.h"
+
+/* A context of 1 thread and one of 3 give bitwise identical outputs, for every kind, adjoints included, at both widths. */
+static void check_fft_threads(void) {
+    static const struct { eg_fft_kind kind; uint32_t flags; } kinds[] = {
+        { EG_FFT_C2C, 0 }, { EG_FFT_C2C, EG_FFT_INVERSE | EG_FFT_ADJOINT }, { EG_FFT_R2C, 0 }, { EG_FFT_C2R, 0 },
+        { EG_FFT_R2C, EG_FFT_ADJOINT }, { EG_FFT_C2R, EG_FFT_ADJOINT } };
+    static const struct fft_geom geoms[] = { { 2, { 96, 40 }, 2, { 0, 1 } }, { 2, { 96, 40 }, 2, { 1, 0 } }, { 2, { 48, 36 }, 1, { 0 } } };
+    eg_ctx* one = make_ctx();
+    eg_ctx* three = make_ctx();
+    int ok = one != NULL && three != NULL && eg_host_threads(one, 1) == EG_OK && eg_host_threads(three, 3) == EG_OK;
+    for (int k = 0; ok && k < 6; ++k)
+        for (int g = 0; ok && g < 3; ++g)
+            for (int w = 0; ok && w < 2; ++w) {
+                const struct fft_case c = fft_case_of(&geoms[g], kinds[k].kind, kinds[k].flags, EG_FFT_NORM_ORTHO, w == 0 ? 32 : 64);
+                int64_t is[4], os[4];
+                const size_t n_in = fft_floats(is, fft_plane(&c, 1, is)), n_out = fft_floats(os, fft_plane(&c, 0, os));
+                double* in = malloc(n_in * sizeof(double));
+                double* a = malloc(n_out * sizeof(double));
+                double* b = malloc(n_out * sizeof(double));
+                fft_fill(in, n_in, c.bits);
+                ok = fft_apply(one, 0, &c, in, a) == EG_OK && fft_apply(three, 0, &c, in, b) == EG_OK && memcmp(a, b, n_out * sizeof(double)) == 0;
+                free(in);
+                free(a);
+                free(b);
+            }
+    check(ok, "eg_fft_run on a context of 1 thread and one of 3 gives bitwise identical outputs (every kind and adjoint, float32 and float64)");
+    eg_ctx_free(one);
+    eg_ctx_free(three);
+}
+
 int main(int argc, char** argv) {
     if (argc != 5) {
         fprintf(stderr, "usage: %s <fixture> <wrong size> <no size block> <v1 tag>\n", argv[0]);
@@ -2899,6 +2934,12 @@ int main(int argc, char** argv) {
     check_no_device_group(ctx);
 
     check_reduce(ctx);
+    fft_values(ctx, 0);
+    fft_adjoint(ctx, 0);
+    fft_in_place(ctx, 0);
+    fft_recorded(ctx, 0);
+    fft_refusals(ctx, 0);
+    check_fft_threads();
     check_conditionals(ctx);
     check_recording_states(ctx);
     {

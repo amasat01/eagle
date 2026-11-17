@@ -69,6 +69,7 @@ void ctx_free_all(eg_ctx& ctx) {
         else plan_free(ctx, plan);
     }
     ctx.plans.clear();
+    fft_free_all(ctx);
     for (eg_plane_s* plane : ctx.planes) {
         if (!child && plane->tensor != nullptr && plane->tensor->deleter != nullptr)
             plane->tensor->deleter(plane->tensor);

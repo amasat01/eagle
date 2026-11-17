@@ -13,6 +13,7 @@
 #include "eagle/door/host/Segment.h"
 
 #ifndef EAGLE_CPU_ONLY
+#include "eagle/door/device/Fft.h"
 #include "eagle/door/device/Gemm.h"
 #include "eagle/door/device/Loop.h"
 #include "eagle/exec/DeviceKernel.h"
@@ -67,6 +68,9 @@ std::int64_t device_free_bytes(eg_ctx&) { return 0; }
 void device_event_op(eg_ctx&, unsigned, unsigned, const void*) {}
 void device_reduce(eg_ctx&, const eg_reduce_desc&) {}
 void device_copy(eg_ctx&, eg_plane_s*, eg_plane_s*) {}
+void device_fft_new(eg_ctx&, eg_fft_s&) {}
+void device_fft_run(eg_ctx&, eg_fft_s&, eg_plane_s*, eg_plane_s*) {}
+void device_fft_free(eg_ctx&, eg_fft_s&) noexcept {}
 void device_runner_new(eg_ctx&, const eg_runner_desc*, eg_runner**) {
     refuse(EG_NOT_WRITTEN, "structure DEVICE: the device group is not built");
 }
@@ -227,6 +231,7 @@ struct DeviceRecording {
     DeviceCapture* capture = nullptr;
     std::uint64_t stream = 0;
     std::vector<eg_plan_s*> plans;
+    std::vector<eg_fft_s*> ffts;    ///< the transform plans run while capturing, one reference each
     std::vector<std::vector<unsigned char>> bound;
     std::vector<std::function<void()>> later;
 };
@@ -235,6 +240,7 @@ struct DeviceRecording {
 struct DeviceGraph {
     DeviceLoop* loop = nullptr;
     std::vector<eg_plan_s*> plans;
+    std::vector<eg_fft_s*> ffts;    ///< the transform plans it runs, one reference each
     std::vector<std::vector<unsigned char>> bound;
 };
 
@@ -933,6 +939,42 @@ void device_copy(eg_ctx& ctx, eg_plane_s* src, eg_plane_s* dst) {
     copy_step(ctx.dev.stream, const_cast<char*>(pd), ps, bytes);
 }
 
+/** @brief eg_fft_new on a device context: the cuFFT plans, and a C2R's copy of its input. */
+void device_fft_new(eg_ctx& ctx, eg_fft_s& plan) {
+    Current current(ctx.dev);
+    plan.dev = fft_build(plan);
+    const std::size_t bytes = fft_work_bytes(plan);
+    if (bytes == 0) return;
+    try {
+        plan.work = device_alloc(ctx, bytes, false);
+    } catch (...) {
+        fft_drop(plan.dev);
+        plan.dev = nullptr;
+        throw;
+    }
+}
+
+/** @brief eg_fft_run of a device plan: queued on the context's stream; a capture in progress keeps the plan until its graph is freed. */
+void device_fft_run(eg_ctx& ctx, eg_fft_s& plan, eg_plane_s* in, eg_plane_s* out) {
+    const auto at = [](const eg_plane_s* p) -> void* { return static_cast<char*>(p->tensor->dl_tensor.data) + p->tensor->dl_tensor.byte_offset; };
+    Current current(ctx.dev);
+    fft_enqueue(*plan.dev, plan, at(in), at(out), plan.work, ctx.dev.stream);
+    if (ctx.dev_rec == nullptr) return;
+    ctx.dev_rec->ffts.push_back(&plan);
+    ++plan.refs;
+}
+
+/** @brief Free a device plan's cuFFT plans (after the capture in progress, if any) and its input copy. */
+void device_fft_free(eg_ctx& ctx, eg_fft_s& plan) noexcept {
+    eg_ctx* c = &ctx;
+    DeviceFft* dev = plan.dev;
+    now_or_after_capture(ctx, [c, dev] {
+        Current current(c->dev);
+        fft_drop(dev);
+    });
+    device_free(ctx, plan.work);
+}
+
 /** @brief The two reduction work buffers of each cell component of @p plan (made after its rows). */
 void device_cell_work(eg_plan_s& plan) {
     for (const eg_plane_s* r : plan.rows) {
@@ -1407,11 +1449,13 @@ void device_record_end(eg_ctx& ctx, eg_graph** out) {
     run_later(ctx, *rec);
     if (loop == nullptr) {
         for (eg_plan_s* p : rec->plans) plan_release(ctx, p);
+        for (eg_fft_s* f : rec->ffts) fft_release(ctx, f);
         refuse(EG_FAULT, "eg_record_end: the device capture failed: " + failed);
     }
     auto graph = std::make_unique<DeviceGraph>();
     graph->loop = loop;
     graph->plans = std::move(rec->plans);
+    graph->ffts = std::move(rec->ffts);
     graph->bound = std::move(rec->bound);
     ctx.dev_graphs.insert(graph.get());
     *out = reinterpret_cast<eg_graph*>(graph.release());
@@ -1441,6 +1485,7 @@ void device_graph_free(eg_ctx& ctx, eg_graph* handle) {
     ctx.dev_graphs.erase(graph);
     const std::unique_ptr<DeviceGraph> owned(graph);
     for (eg_plan_s* p : graph->plans) plan_release(ctx, p);
+    for (eg_fft_s* f : graph->ffts) fft_release(ctx, f);
     eg_ctx* c = &ctx;
     DeviceLoop* loop = graph->loop;
     now_or_after_capture(ctx, [c, loop] {

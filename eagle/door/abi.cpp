@@ -159,6 +159,21 @@ EG_EXPORT eg_status eg_copy(eg_ctx* ctx, eg_plane* src, eg_plane* dst) {
         else door::copy(c, src, dst);
     });
 }
+EG_EXPORT eg_status eg_fft_new(eg_ctx* ctx, const struct eg_fft_desc* desc, eg_fft** out) {
+    return door::call(ctx, [&](eg_ctx& c) { door::fft_new(c, desc, out); });
+}
+EG_EXPORT eg_status eg_fft_run(eg_ctx* ctx, eg_fft* plan, eg_plane* in, eg_plane* out) {
+    return door::call(ctx, [&](eg_ctx& c) { door::fft_run(c, plan, in, out); });
+}
+EG_EXPORT eg_status eg_fft_free(eg_ctx* ctx, eg_fft* plan) {
+    if (plan == nullptr) return EG_OK;
+    return door::call(ctx, [plan](eg_ctx& c) {
+        door::check_handle(c.ffts, plan, "plan");
+        if (!plan->caller_ref) door::refuse(EG_BAD_REQUEST, "plan: already freed by the caller");
+        plan->caller_ref = false;
+        door::fft_release(c, plan);
+    });
+}
 EG_EXPORT eg_status eg_record_begin(eg_ctx* ctx) {
     return door::call(ctx, [](eg_ctx& c) {
         if (c.dev.ordinal >= 0) door::device_record_begin(c);    // a device context records by capture

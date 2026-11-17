@@ -41,6 +41,9 @@ bool same_shape(const DLTensor& a, const DLTensor& b) {
 const char* bytes_of(const DLTensor& t) { return static_cast<const char*>(t.data) + t.byte_offset; }
 std::size_t size_of(const DLTensor& t) { return static_cast<std::size_t>(elements(t)) * (t.dtype.bits / 8); }
 
+}  // namespace
+
+/** @brief Whether the memory of @p a and @p b overlaps. */
 bool overlaps(const DLTensor& a, const DLTensor& b) {
     const char *pa = bytes_of(a), *pb = bytes_of(b);
     return pa < pb + size_of(b) && pb < pa + size_of(a);
@@ -53,6 +56,8 @@ void check_access(const eg_plane_s& plane, bool write, const char* what) {
     if (write && (plane.tensor->flags & DLPACK_FLAG_BITMASK_READ_ONLY))
         refuse(EG_BAD_REQUEST, std::string(what) + ": a read-only plane is written");
 }
+
+namespace {
 
 /** @brief One column of a samples-last plane as ``in(i)``. */
 template <class T>

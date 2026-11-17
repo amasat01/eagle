@@ -43,6 +43,11 @@ void device_cell_work(eg_plan_s& plan);
 /** @brief eg_reduce and eg_copy over device planes, on the context's stream (device/Device.cpp); checked as the host's. */
 void device_reduce(eg_ctx& ctx, const eg_reduce_desc& desc);
 void device_copy(eg_ctx& ctx, eg_plane_s* src, eg_plane_s* dst);
+/** @brief The device half of a transform plan (device/Fft.cpp): build @p plan's cuFFT plans and the input copy of a C2R
+ *  (FAULT when cuFFT cannot be opened); run it on the context's stream, kept alive by the capture in progress; free it. */
+void device_fft_new(eg_ctx& ctx, eg_fft_s& plan);
+void device_fft_run(eg_ctx& ctx, eg_fft_s& plan, eg_plane_s* in, eg_plane_s* out);
+void device_fft_free(eg_ctx& ctx, eg_fft_s& plan) noexcept;
 /** @brief Read @p bytes (a multiple of 4) of device memory at @p device into @p host, ordered after the context's queued work. */
 void device_read(eg_ctx& ctx, const void* device, void* host, std::size_t bytes);
 /** @brief The device ops of a recorded DEVICE run and its reverse (device/Device.cpp), on the context's stream:
