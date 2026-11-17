@@ -6,7 +6,9 @@
 #include "eagle/door/eg_unit_meta.h"
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
+#include <tuple>
 
 namespace eagle {
 namespace door {
@@ -22,12 +24,10 @@ void check_desc(const eg_runner_desc& d, bool device) {
     if (d.events != EG_EVENTS_STEP && !refine) refuse(EG_BAD_REQUEST, "unknown events " + std::to_string(d.events));
     if (d.on_no_event != EG_NO_EVENT_REFUSE && d.on_no_event != EG_NO_EVENT_ZERO)
         refuse(EG_BAD_REQUEST, "unknown on_no_event " + std::to_string(d.on_no_event));
-    if (d.steps_reverse == EG_STEPS_REVERSE_AUTO)
-        refuse(EG_NOT_WRITTEN, "steps_reverse AUTO (the old path's measured-table choice between PER_STEP and FUSED) is not "
-               "written in this build of the door");
     if (d.steps_reverse == EG_STEPS_REVERSE_FUSED && !record)
         refuse(EG_BAD_REQUEST, "steps_reverse FUSED needs EG_RUN_RECORD");
-    if (d.steps_reverse != EG_STEPS_REVERSE_PER_STEP && d.steps_reverse != EG_STEPS_REVERSE_FUSED)
+    if (d.steps_reverse != EG_STEPS_REVERSE_PER_STEP && d.steps_reverse != EG_STEPS_REVERSE_FUSED &&
+        d.steps_reverse != EG_STEPS_REVERSE_AUTO)
         refuse(EG_BAD_REQUEST, "unknown steps_reverse " + std::to_string(d.steps_reverse));
     if (d.n_derived < 0) refuse(EG_BAD_REQUEST, "n_derived " + std::to_string(d.n_derived) + " < 0");
     if (d.n_derived > 0 && !record && !refine)
@@ -80,16 +80,68 @@ void check_plans(const eg_ctx& ctx, const eg_runner_desc& d) {
                " steps per launch, but each plan of a several-plan step takes one step per launch");
 }
 
+/** @brief Whether FUSED won in the row of @p table nearest (@p width, @p k) by log2 distance, at @p regime; ties go to the
+ *  smaller (width, k, lo, hi) as the old path's min over row tuples did. */
+bool fused_wins(const StepsTable& table, std::int64_t width, std::int64_t k, double regime) {
+    const auto key = [&](const StepsRow& r) {
+        const double distance = std::fabs(std::log2(static_cast<double>(width) / static_cast<double>(r.width))) +
+                                std::fabs(std::log2(static_cast<double>(k) / static_cast<double>(r.k)));
+        return std::make_tuple(distance, r.width, r.k, r.lo, r.hi);
+    };
+    const StepsRow& row = *std::min_element(table.rows.begin(), table.rows.end(),
+                                            [&](const StepsRow& a, const StepsRow& b) { return key(a) < key(b); });
+    return row.lo <= regime && regime <= row.hi;
+}
+
+/** @brief Resolve steps_reverse AUTO in @p d to PER_STEP or FUSED (see eg_runner_desc); a FUSED choice makes the window K,
+ *  a PER_STEP one drops the K-step vjp from the derived units into @p kept. */
+void resolve_steps_reverse(const eg_ctx& ctx, eg_runner_desc& d, bool device, KeptDerived& kept) {
+    if (d.steps_reverse != EG_STEPS_REVERSE_AUTO) return;
+    const eg_unit_s& unit = *d.plans[0]->unit;
+    const std::int64_t k = unit.finish.steps;
+    const StepsTable& table = device ? unit.finish.device_reverse : unit.finish.host_reverse;
+    const bool fits = (d.flags & EG_RUN_RECORD) && k > 1 && (d.window == 0 || d.window == k) &&
+                      d.events != EG_EVENTS_REFINE && !table.rows.empty();
+    bool fused = false;
+    if (fits) {
+        const std::int64_t resident = device ? static_cast<std::int64_t>(ctx.dev.sms) * ctx.dev.threads_per_sm : 0;
+        const bool per_resident = table.per_resident;
+        if (per_resident && resident <= 0)
+            refuse(EG_BAD_REQUEST, "steps_reverse AUTO: unit '" + unit.name + "' states a per-resident table, but this runner's "
+                   "device states no SM count or resident threads per SM");
+        const std::int64_t width = std::count_if(unit.slots.begin(), unit.slots.end(),
+                                                 [](const SlotFacts& s) { return s.role == EG_ROLE_MUTABLE; });
+        fused = fused_wins(table, width, k, static_cast<double>(d.plans[0]->n_samples) / (per_resident ? resident : 1));
+    }
+    if (fused) {
+        d.steps_reverse = EG_STEPS_REVERSE_FUSED;
+        d.window = k;
+        return;
+    }
+    d.steps_reverse = EG_STEPS_REVERSE_PER_STEP;
+    for (std::int32_t i = 0; i < d.n_derived; ++i)
+        if (d.derived_roles[i] != EG_DERIVED_FUSED_VJP) {
+            kept.roles.push_back(d.derived_roles[i]);
+            kept.units.push_back(d.derived_units[i]);
+        }
+    if (static_cast<std::int32_t>(kept.roles.size()) == d.n_derived) return;
+    d.n_derived = static_cast<std::int32_t>(kept.roles.size());
+    d.derived_roles = kept.roles.data();
+    d.derived_units = kept.units.data();
+}
+
 constexpr std::int64_t kMinEvery = 4;            ///< the fewest steps between two compactions
 constexpr std::int64_t kDefaultEvery = 16;       ///< the cadence when ``every`` is 0, rounded up to whole launches
 constexpr double kThetaLow = 0.25, kThetaHigh = 0.75;
 
 }  // namespace
 
-/** @brief eg_runner_new's checks of @p d both runners share (@p device: a DEVICE runner). */
-void check_runner(const eg_ctx& ctx, const eg_runner_desc& d, bool device) {
+/** @brief eg_runner_new's checks of @p d both runners share (@p device: a DEVICE runner); steps_reverse AUTO is
+ *  resolved in @p d (@p kept holds a derived set it had to shorten). */
+void check_runner(const eg_ctx& ctx, eg_runner_desc& d, bool device, KeptDerived& kept) {
     check_desc(d, device);
     check_plans(ctx, d);
+    resolve_steps_reverse(ctx, d, device, kept);
 }
 
 /** @brief The active set the plans read, or none: all of them or none must read one. */

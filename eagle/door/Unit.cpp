@@ -89,6 +89,24 @@ SlotFacts read_slot(const eg_unit_slot* in, const std::string& unit, int index) 
     return facts;
 }
 
+/** @brief Copy a measured table of steps_reverse AUTO (NULL: none); every row's width and K are >= 1. */
+StepsTable read_steps_table(const eg_unit_steps_table* in, const std::string& what) {
+    StepsTable out;
+    if (in == nullptr) return out;
+    const eg_unit_steps_table t = read_record(in, eg_unit_steps_table{}, what);
+    if (t.regime != EG_REGIME_LANES && t.regime != EG_REGIME_PER_RESIDENT)
+        refuse(EG_BAD_REQUEST, "meta that contradicts itself: " + what + " regime " + std::to_string(t.regime));
+    if (t.n_rows < 0 || (t.n_rows > 0 && (t.widths == nullptr || t.ks == nullptr || t.lo == nullptr || t.hi == nullptr)))
+        refuse(EG_BAD_REQUEST, "meta that contradicts itself: " + what + " n_rows " + std::to_string(t.n_rows) + " without its columns");
+    out.per_resident = t.regime == EG_REGIME_PER_RESIDENT;
+    for (std::int32_t i = 0; i < t.n_rows; ++i) {
+        if (t.widths[i] < 1 || t.ks[i] < 1)
+            refuse(EG_BAD_REQUEST, "meta that contradicts itself: " + what + " row " + std::to_string(i) + " has a width or K below 1");
+        out.rows.push_back({ t.widths[i], t.ks[i], t.lo[i], t.hi[i] });
+    }
+    return out;
+}
+
 /** @brief Check the finish record against the slots and copy it into @p unit; every
  *  LOOKUP slot must be the finished counter (the one LOOKUP eagle makes so far). */
 void read_finish(const eg_unit_meta& m, eg_unit_s& unit) {
@@ -119,7 +137,9 @@ void read_finish(const eg_unit_meta& m, eg_unit_s& unit) {
         }
         if (f.n_events < 0) refuse(EG_BAD_REQUEST, what + "n_events " + std::to_string(f.n_events) + " (>= 0)");
         unit.finish = FinishFacts{ true, f.mask_slot, f.counter_slot, f.steps, f.steps_slot, f.steps_max, f.flags,
-                                   f.fp64_ops_ir > 0 ? f.fp64_ops_ir : f.step_ops > 0 ? f.step_ops : 0, f.n_events };
+                                   f.fp64_ops_ir > 0 ? f.fp64_ops_ir : f.step_ops > 0 ? f.step_ops : 0, f.n_events,
+                                   read_steps_table(f.host_steps_reverse, "unit '" + unit.name + "' finish host_steps_reverse"),
+                                   read_steps_table(f.device_steps_reverse, "unit '" + unit.name + "' finish device_steps_reverse") };
     }
 }
 

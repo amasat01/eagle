@@ -34,6 +34,7 @@ struct mirror {
 #define U(i, type) (*(const type*)params[i])
 
 EXPORT void lin_host(void* const* params, int64_t base, int64_t count, int64_t n);
+EXPORT void lin3_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EXPORT void lin_tape1_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EXPORT void lin_tape3_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EXPORT void lin_tape16_host(void* const* params, int64_t base, int64_t count, int64_t n);
@@ -58,6 +59,11 @@ void lin_host(void* const* params, int64_t base, int64_t count, int64_t n) {
             __atomic_fetch_add(finished, 1u, __ATOMIC_RELAXED);
         }
     }
+}
+
+/* The primal of the K = 3 units: three steps of lin a launch. */
+void lin3_host(void* const* params, int64_t base, int64_t count, int64_t n) {
+    for (int step = 0; step < 3; ++step) lin_host(params, base, count, n);
 }
 
 /* slots: applied_steps, x, t, tape (window * 2 rows: t, x), T, finished_count, terminated, a, b, tape_on */
@@ -256,7 +262,49 @@ static const struct eg_unit_derived d_newton_two_steps = { .struct_size = sizeof
                                                            .fused_steps_slot = -1, .n_links = 2, .taped = NULL,
                                                            .links = newton_links_two_steps };
 
+/* Measured tables of steps_reverse AUTO (the K = 3 primals below have state width 2): the nearest row to (2, 3) is the first of
+ * each pair. The near row of "in" holds regime 37 and its far row does not; the near row of "out" does not and its far row does. */
+static const int64_t row_widths[] = { 2, 2 }, row_ks[] = { 3, 12 };
+static const double in_lo[] = { 0.0, 1000.0 }, in_hi[] = { 100.0, 2000.0 };
+static const double out_lo[] = { 1000.0, 0.0 }, out_hi[] = { 2000.0, 100.0 };
+static const double res_lo[] = { 0.0 }, res_hi[] = { 1.0 };
+#define STEPS_TABLE(var, regime_, n_, lo_, hi_)                                                                     \
+    static const struct eg_unit_steps_table var = { .struct_size = sizeof(struct eg_unit_steps_table), .regime = regime_, \
+                                                    .n_rows = n_, .widths = row_widths, .ks = row_ks, .lo = lo_, .hi = hi_ }
+STEPS_TABLE(table_in, EG_REGIME_LANES, 2, in_lo, in_hi);
+STEPS_TABLE(table_out, EG_REGIME_LANES, 2, out_lo, out_hi);
+STEPS_TABLE(table_res, EG_REGIME_PER_RESIDENT, 1, res_lo, res_hi);
+#define FINISH3(var, table_)                                                                                    \
+    static const struct eg_unit_finish var = { .struct_size = sizeof(struct eg_unit_finish), .flags = 0,        \
+                                               .mask_slot = 2, .counter_slot = 3, .steps_slot = -1,             \
+                                               .steps = 3, .steps_max = 0, .step_ops = -1, .fp64_ops_ir = -1,   \
+                                               .host_steps_reverse = table_, .device_steps_reverse = NULL }
+FINISH3(finish3_in, &table_in);
+FINISH3(finish3_out, &table_out);
+FINISH3(finish3_res, &table_res);
+FINISH3(finish3_none, NULL);
+
 #define DIGEST(c) { c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c }
+/* The K = 3 primals (library indices 17, 20, 23, 26), each with the twin and the step vjp that state it as their primal. */
+#define VJP_OF(var, of_)                                                                                               \
+    static const struct eg_unit_derived var = { .struct_size = sizeof(struct eg_unit_derived), .role = EG_DERIVED_STEP_VJP, \
+                                                .of_unit = of_, .tape_slot = -1, .n_taped = 0, .tape_rows = 0,            \
+                                                .steps_slot = -1, .tape_on_slot = -1, .time0_slot = -1,                  \
+                                                .fused_steps_slot = -1, .n_links = 9, .taped = NULL, .links = vjp_links }
+TWIN_DERIVED(d_twin_17, 17, 2, twin_links);
+TWIN_DERIVED(d_twin_20, 20, 2, twin_links);
+TWIN_DERIVED(d_twin_23, 23, 2, twin_links);
+TWIN_DERIVED(d_twin_26, 26, 2, twin_links);
+VJP_OF(d_vjp_17, 17);
+VJP_OF(d_vjp_20, 20);
+VJP_OF(d_vjp_23, 23);
+VJP_OF(d_vjp_26, 26);
+/* A K-step vjp that no link describes: steps_reverse AUTO drops it unread when it chooses PER_STEP. */
+static const struct eg_unit_derived d_fused_vjp = { .struct_size = sizeof(struct eg_unit_derived), .role = EG_DERIVED_FUSED_VJP,
+                                                    .of_unit = 17, .tape_slot = -1, .n_taped = 0, .tape_rows = 0,
+                                                    .steps_slot = -1, .tape_on_slot = -1, .time0_slot = -1,
+                                                    .fused_steps_slot = -1, .n_links = 0, .taped = NULL, .links = NULL };
+
 #define UNIT(var, name_, byte, entry, body_, launch_, finish_, derived_)                                              \
     static const struct eg_unit_meta var = { .struct_size = sizeof(struct eg_unit_meta), .name = name_,             \
                                              .digest = DIGEST(byte), .pattern = EG_PATTERN_PURE,                    \
@@ -280,10 +328,25 @@ UNIT(u_vjp_steps, "lin_vjp", 0xF7, "lin_vjp_host", vjp_body, launch, NULL, &d_vj
 UNIT(u_vjp_unreduced, "lin_vjp", 0xF8, "lin_vjp_host", vjp_body, launch, NULL, &d_vjp_unreduced);
 UNIT(u_vjp_badform, "lin_vjp", 0xF9, "lin_vjp_host", vjp_body, launch, NULL, &d_vjp_badform);
 UNIT(u_newton_two_steps, "lin_newton", 0xFA, "lin_vjp_host", vjp_body, launch, NULL, &d_newton_two_steps);
+UNIT(u_lin3_in, "lin3_in", 0xA0, "lin3_host", lin_body, launch, &finish3_in, NULL);
+UNIT(u_tw_in, "lin3_in", 0xA1, "lin_tape3_host", tw3_body, launch, &twin_finish, &d_twin_17);
+UNIT(u_vjp_in, "lin3_in_vjp", 0xA2, "lin_vjp_host", vjp_body, launch, NULL, &d_vjp_17);
+UNIT(u_lin3_out, "lin3_out", 0xA3, "lin3_host", lin_body, launch, &finish3_out, NULL);
+UNIT(u_tw_out, "lin3_out", 0xA4, "lin_tape3_host", tw3_body, launch, &twin_finish, &d_twin_20);
+UNIT(u_vjp_out, "lin3_out_vjp", 0xA5, "lin_vjp_host", vjp_body, launch, NULL, &d_vjp_20);
+UNIT(u_lin3_res, "lin3_res", 0xA6, "lin3_host", lin_body, launch, &finish3_res, NULL);
+UNIT(u_tw_res, "lin3_res", 0xA7, "lin_tape3_host", tw3_body, launch, &twin_finish, &d_twin_23);
+UNIT(u_vjp_res, "lin3_res_vjp", 0xA8, "lin_vjp_host", vjp_body, launch, NULL, &d_vjp_23);
+UNIT(u_lin3_none, "lin3_none", 0xA9, "lin3_host", lin_body, launch, &finish3_none, NULL);
+UNIT(u_tw_none, "lin3_none", 0xAA, "lin_tape3_host", tw3_body, launch, &twin_finish, &d_twin_26);
+UNIT(u_vjp_none, "lin3_none_vjp", 0xAB, "lin_vjp_host", vjp_body, launch, NULL, &d_vjp_26);
+UNIT(u_fused_vjp, "lin3_fused_vjp", 0xAC, "lin_vjp_host", vjp_body, launch, NULL, &d_fused_vjp);
 
 static const struct eg_unit_meta* const units[] = { &u_lin, &u_tw1, &u_tw3, &u_tw16, &u_vjp, &u_lina, &u_tw_of, &u_tw_rows,
                                                     &u_tw_slot, &u_tw_time0, &u_vjp_missing, &u_vjp_twice, &u_vjp_reduced,
-                                                    &u_vjp_steps, &u_vjp_unreduced, &u_vjp_badform, &u_newton_two_steps };
+                                                    &u_vjp_steps, &u_vjp_unreduced, &u_vjp_badform, &u_newton_two_steps,
+                                                    &u_lin3_in, &u_tw_in, &u_vjp_in, &u_lin3_out, &u_tw_out, &u_vjp_out, &u_lin3_res,
+                                                    &u_tw_res, &u_vjp_res, &u_lin3_none, &u_tw_none, &u_vjp_none, &u_fused_vjp };
 static const struct eg_library_meta library = { .struct_size = sizeof(struct eg_library_meta), .schema_major = EG_META_SCHEMA_MAJOR,
-                                                .schema_minor = 0, .n_units = 17, .units = units };
+                                                .schema_minor = 0, .n_units = 30, .units = units };
 const struct eg_library_meta* eg_unit_library_meta(void) { return &library; }

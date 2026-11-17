@@ -791,6 +791,7 @@ void record_new(eg_ctx& ctx, eg_runner_s& runner, const eg_runner_desc& d) {
     if (refine) return;
     r->recorded = rrefine;
     r->fused = fused;
+    runner.steps_reverse = d.steps_reverse;
     if (fused) r->max_k = std::max<std::int64_t>(twin->finish.steps == EG_STEPS_AUTO ? twin->finish.steps_max : twin->finish.steps, 1);
     // The vjp (and the K-step vjp): exactly one link per slot.
     const auto link_vjp = [&](eg_unit_s* vjp, std::vector<VjpSlot>& out_slots, bool fz) {

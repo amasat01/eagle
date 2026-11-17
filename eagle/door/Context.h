@@ -124,6 +124,18 @@ struct SplitCell {
     std::string name;
 };
 
+/** @brief One measured row of steps_reverse AUTO: the narrowest and widest regime where FUSED won at (width, k). */
+struct StepsRow {
+    std::int64_t width = 0, k = 0;
+    double lo = 0.0, hi = 0.0;
+};
+
+/** @brief A target's measured rows of steps_reverse AUTO, copied from eg_unit_steps_table; no rows: AUTO picks PER_STEP. */
+struct StepsTable {
+    bool per_resident = false;       ///< the regime is n / (SMs * resident threads per SM), else the sample count n
+    std::vector<StepsRow> rows;
+};
+
 /** @brief A unit's finish record, as eg_runner_new and eg_run read it. */
 struct FinishFacts {
     bool present = false;
@@ -135,6 +147,7 @@ struct FinishFacts {
     std::uint32_t flags = 0;         ///< EG_FINISH_*
     std::int64_t ops = 0;            ///< one step's operation count the launch rules read (fp64_ops_ir, else step_ops), 0: none
     std::int32_t n_events = 0;       ///< the stop rule's comparisons (a GUARD link's event is below it)
+    StepsTable host_reverse, device_reverse;   ///< the measured rows of steps_reverse AUTO, per target
 };
 
 /** @brief A derived unit's record (eg_unit_derived), copied at eg_unit_load; eg_runner_new checks it
@@ -438,6 +451,7 @@ struct eg_runner_s {
     int refs = 1;                             ///< the caller's reference plus one per recorded graph
     bool caller_ref = true;
     bool active = false;                      ///< the plans read an active set
+    eg_steps_reverse steps_reverse = EG_STEPS_REVERSE_PER_STEP;   ///< a recorded runner's reverse mode, AUTO resolved
     eagle::door::ActiveState act;
     eagle::door::DeviceRun dev;               ///< a DEVICE runner's loop and cells
     eagle::door::RunRecord* record = nullptr; ///< EG_RUN_RECORD: the derived plans and the last record
@@ -603,7 +617,12 @@ void graph_free(eg_ctx& ctx, eg_graph_s* graph);
 void record_drop_all(eg_ctx& ctx);
 bool device_planes(const eg_ctx& ctx, const char* op, std::initializer_list<const eg_plane_s*> planes);
 bool device_plans(const eg_ctx& ctx, const eg_runner_desc* desc);
-void check_runner(const eg_ctx& ctx, const eg_runner_desc& d, bool device);
+/** @brief The derived units of an AUTO runner that chose PER_STEP: the caller's set without the K-step vjp. */
+struct KeptDerived {
+    std::vector<eg_derived_role> roles;
+    std::vector<eg_unit*> units;
+};
+void check_runner(const eg_ctx& ctx, eg_runner_desc& d, bool device, KeptDerived& kept);
 /** @brief A plane the reorder moves: its first byte and element size. */
 struct Owned {
     char* data;

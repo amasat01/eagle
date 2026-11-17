@@ -108,7 +108,8 @@ typedef int32_t eg_reduce_op;
 typedef int32_t eg_steps_reverse;
 #define EG_STEPS_REVERSE_PER_STEP 0
 #define EG_STEPS_REVERSE_FUSED 1
-#define EG_STEPS_REVERSE_AUTO 2 /**< chosen from the unit meta's measured table */
+#define EG_STEPS_REVERSE_AUTO 2 /**< FUSED or PER_STEP, chosen at eg_runner_new from the unit's measured table; the choice is
+                                     reported by eg_runner_figures */
 
 typedef int32_t eg_events;
 #define EG_EVENTS_STEP 0   /**< a sample stops at the step its mask was set */
@@ -336,7 +337,17 @@ struct eg_runner_desc {
     int64_t window;                     /**< record window; 0: clamp(ceil(sqrt(max_steps)), 16, 1024); -1: every step */
     uint64_t memory_budget;             /**< bytes for the record; 0: half the free memory */
     double reorder_theta;               /**< read only with EG_RUN_REORDER */
-    eg_steps_reverse steps_reverse;
+    eg_steps_reverse steps_reverse;     /**< PER_STEP, FUSED (needs EG_RUN_RECORD, the K-step vjp and window K) or AUTO:
+                                             a record of a K-step unit (finish.steps K > 1, window 0 or K, events STEP)
+                                             takes the row of the unit's table for this target (host_steps_reverse for a
+                                             host runner, device_steps_reverse for a device one) nearest (state width,
+                                             K) by log2 distance, ties to the smaller (width, K, lo, hi); FUSED when
+                                             the run's regime (n, or n / (SMs * resident threads per SM) for a
+                                             per-resident table) lies in the row, and the window becomes K. Any other
+                                             AUTO, and a unit with no table or no rows, is PER_STEP. A table that is
+                                             per-resident on a runner whose device cannot state its SM count and
+                                             resident threads is BAD_REQUEST. AUTO takes the derived units of FUSED; the
+                                             K-step vjp is left unused when PER_STEP is chosen */
     eg_events events;
     eg_no_event on_no_event;
     int32_t reserved0;
@@ -375,7 +386,8 @@ struct eg_runner_figures {
     eg_run_mode mode;        /**< EG_MODE_HOST for a host runner; a device runner's mode as in ``eg_run_report`` */
     int32_t block;           /**< threads per block of the launch the runner's unit made */
     int32_t chunk;           /**< PERSIST only: steps one persistent thread takes per sample claim */
-    int32_t reserved0;
+    eg_steps_reverse steps_reverse; /**< PER_STEP or FUSED: the reverse mode of a recorded runner (steps_reverse AUTO resolved
+                                         at eg_runner_new); PER_STEP for a runner without EG_RUN_RECORD */
     int64_t grid;            /**< blocks of that launch */
 };
 

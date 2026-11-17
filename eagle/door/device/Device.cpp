@@ -1091,7 +1091,7 @@ void fast_run(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report) {
 void device_runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out) {
     if (out == nullptr) refuse(EG_BAD_REQUEST, "eg_runner_new: out is NULL");
     *out = nullptr;
-    const eg_runner_desc d = read_input(desc, "eg_runner_desc");
+    eg_runner_desc d = read_input(desc, "eg_runner_desc");
     for (std::int32_t i = 0; i < d.n_plans; ++i)
         if (ctx.plans.count(d.plans[i]) != 0) {
             const eg_unit_s& u = *d.plans[i]->unit;
@@ -1103,7 +1103,8 @@ void device_runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out)
                 refuse(EG_NOT_WRITTEN, "plans[" + std::to_string(i) + "]: " + inside + " inside a device runner loop "
                        "is not written in this build of the door");
         }
-    check_runner(ctx, d, true);
+    KeptDerived kept;
+    check_runner(ctx, d, true, kept);
     for (std::int32_t i = 0; i < d.n_plans; ++i)
         if (d.plans[i]->structure != EG_STRUCTURE_DEVICE)
             refuse(EG_BAD_REQUEST, "plans[" + std::to_string(i) + "] is a host plan in a runner over DEVICE plans: "

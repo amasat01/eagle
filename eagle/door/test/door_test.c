@@ -611,7 +611,6 @@ static void check_runner(eg_ctx* ctx, eg_unit* axpb) {
         { 1u << 7, 0, 0, 0, 0, 0, 10, 0, EG_BAD_REQUEST, "unknown bits" },
         { 0, EG_EVENTS_REFINE, 0, 0, 0, 0, 10, 0, EG_BAD_REQUEST, "events refine needs the" },
         { 0, 0, EG_STEPS_REVERSE_FUSED, 0, 0, 0, 10, 0, EG_BAD_REQUEST, "steps_reverse FUSED needs EG_RUN_RECORD" },
-        { 0, 0, EG_STEPS_REVERSE_AUTO, 0, 0, 0, 10, 0, EG_NOT_WRITTEN, "steps_reverse" },
         { 0, 0, 0, 1, 0, 0, 10, 0, EG_NOT_WRITTEN, "derived units" },
         { 0, 0, 0, 0, 0, 0, 10, 1, EG_BAD_REQUEST, "step_graph" },
         { 0, 0, 0, 0, 5, 0, 10, 0, EG_BAD_REQUEST, "every" },
@@ -632,7 +631,7 @@ static void check_runner(eg_ctx* ctx, eg_unit* axpb) {
         if (!ok1) printf("      refusal %zu ('%s') did not hold\n", i, bad[i].reason);
         all &= ok1;
     }
-    check(all, "eg_runner_new refuses RECORD, REORDER, unknown flags, events REFINE, steps_reverse FUSED/AUTO, "
+    check(all, "eg_runner_new refuses RECORD, REORDER, unknown flags, events REFINE, steps_reverse FUSED, "
                "derived units, a step_graph, every, window and max_steps < 1, each by name");
     eg_plan* swapped[2] = { plans[1], plans[0] };
     d = runner_desc(swapped, 2, 10);
@@ -2671,7 +2670,7 @@ static void check_figures(eg_ctx* ctx) {
     rep.struct_size = sizeof(rep);
     for (int pass = 0; pass < 2; ++pass) { /* before and after a run: a host runner has no launch either way */
         ok = ok && eg_runner_figures(ctx, r, &f) == EG_OK && f.struct_size == sizeof(f) && f.mode == EG_MODE_HOST &&
-             f.block == -1 && f.chunk == -1 && f.grid == -1;
+             f.block == -1 && f.chunk == -1 && f.grid == -1 && f.steps_reverse == EG_STEPS_REVERSE_PER_STEP;
         if (pass == 0) ok = ok && eg_run(ctx, r, &rep) == EG_OK;
     }
     check(ok, "eg_runner_figures on a host runner, before and after eg_run: mode HOST, block, chunk and grid -1");

@@ -296,10 +296,6 @@ static void lin_rows(eg_ctx* ctx, const char* lib) {
     check(eg_runner_new(ctx, &d, &none) == EG_BAD_REQUEST && reason_has(ctx, "K-step vjp"),
           "steps_reverse FUSED without the K-step vjp refused BAD_REQUEST by name");
     d = recorded(&plan, LSTEPS, 3, 0, roles, good);
-    d.steps_reverse = EG_STEPS_REVERSE_AUTO;
-    check(eg_runner_new(ctx, &d, &none) == EG_NOT_WRITTEN && reason_has(ctx, "steps_reverse AUTO"),
-          "steps_reverse AUTO refused NOT_WRITTEN by name");
-    d = recorded(&plan, LSTEPS, 3, 0, roles, good);
     d.events = EG_EVENTS_REFINE;
     check(eg_runner_new(ctx, &d, &none) == EG_BAD_REQUEST && reason_has(ctx, "Newton unit"),
           "events refine under record without the Newton, state guard vjp and refine vjp refused BAD_REQUEST by name");
@@ -394,6 +390,93 @@ static void lin_rows(eg_ctx* ctx, const char* lib) {
     eg_unit_free(ctx, lin);
     for (int w = 0; w < 3; ++w) eg_unit_free(ctx, twins[w]);
     eg_unit_free(ctx, vjp);
+}
+
+/* ---- steps_reverse AUTO over the K = 3 primals, each stating its own measured table ---- */
+
+struct auto_out {
+    eg_status made;
+    int no_fused_vjp, per_resident;   /* eg_runner_new's refusal names the K-step vjp, or the per-resident table */
+    eg_steps_reverse reverse;
+    double gx[LN], ga, gb;
+};
+
+/* One run of the K = 3 primal @p name (unit bytes @p byte, +1 its twin, +2 its step vjp) over LN samples under @p mode; recorded
+ * and reversed when @p record, stating the K-step vjp too when @p fvjp. */
+static void auto_case(eg_ctx* ctx, const char* lib, const char* name, uint8_t byte, int record, int fvjp, eg_steps_reverse mode,
+                      struct auto_out* o) {
+    char vname[32];
+    snprintf(vname, sizeof(vname), "%s_vjp", name);
+    eg_unit* p = load_byte(ctx, lib, name, byte);
+    eg_unit* us[3] = { load_byte(ctx, lib, name, byte + 1), load_byte(ctx, lib, vname, byte + 2), load_byte(ctx, lib, "lin3_fused_vjp", 0xAC) };
+    const eg_derived_role roles[3] = { EG_DERIVED_TAPE, EG_DERIVED_STEP_VJP, EG_DERIVED_FUSED_VJP };
+    eg_plan* plan = plan_of(ctx, p, EG_STRUCTURE_HOST_SERIAL, LN);
+    struct lin s;
+    memset(o, 0, sizeof(*o));
+    o->made = EG_FAULT;
+    eg_runner* r = NULL;
+    struct eg_runner_desc d = record ? recorded(&plan, LSTEPS, 3, 0, roles, us) : runner_desc(&plan, LSTEPS);
+    d.n_derived = record ? (fvjp ? 3 : 2) : 0;
+    d.steps_reverse = mode;
+    if (p && us[0] && us[1] && us[2] && plan && lin_bind(ctx, plan, &s)) {
+        o->made = eg_runner_new(ctx, &d, &r);
+        o->no_fused_vjp = o->made != EG_OK && reason_has(ctx, "K-step vjp");
+        o->per_resident = o->made != EG_OK && reason_has(ctx, "per-resident");
+        struct eg_run_report rep;
+        memset(&rep, 0, sizeof(rep));
+        rep.struct_size = sizeof(rep);
+        struct eg_runner_figures f;
+        memset(&f, 0, sizeof(f));
+        f.struct_size = sizeof(f);
+        if (o->made == EG_OK && eg_run(ctx, r, &rep) == EG_OK && eg_runner_figures(ctx, r, &f) == EG_OK) o->reverse = f.steps_reverse;
+        else o->made = o->made == EG_OK ? EG_FAULT : o->made;
+        if (o->made == EG_OK && record) {
+            double seed[LN];
+            for (int i = 0; i < LN; ++i) seed[i] = 1.0;
+            struct tensor ts, tgx, tgt, tga, tgb;
+            double gt[LN];
+            eg_plane* ps = host_plane(ctx, &ts, LN, seed, kDLFloat, 64);
+            eg_plane* pgx = host_plane(ctx, &tgx, LN, o->gx, kDLFloat, 64);
+            eg_plane* pgt = host_plane(ctx, &tgt, LN, gt, kDLFloat, 64);
+            eg_plane* pga = host_plane(ctx, &tga, 1, &o->ga, kDLFloat, 64);
+            eg_plane* pgb = host_plane(ctx, &tgb, 1, &o->gb, kDLFloat, 64);
+            const int32_t sslot[] = { 0 }, gslot[] = { 0, 1, 5, 6 };
+            eg_plane* const sp[] = { ps };
+            eg_plane* const gp[] = { pgx, pgt, pga, pgb };
+            const struct eg_bind_desc sd = binds(1, sslot, sp, 0, NULL, NULL), gd = binds(4, gslot, gp, 0, NULL, NULL);
+            if (eg_reverse(ctx, r, &sd, &gd) != EG_OK) o->made = EG_FAULT;
+            eg_plane_free(ctx, ps);
+            eg_plane_free(ctx, pgx);
+            eg_plane_free(ctx, pgt);
+            eg_plane_free(ctx, pga);
+            eg_plane_free(ctx, pgb);
+        }
+    }
+    if (r) eg_runner_free(ctx, r);
+    if (plan) eg_plan_free(ctx, plan);
+    lin_free(ctx, &s);
+    for (int i = 0; i < 3; ++i)
+        if (us[i]) eg_unit_free(ctx, us[i]);
+    if (p) eg_unit_free(ctx, p);
+}
+
+static void auto_rows(eg_ctx* ctx, const char* lib) {
+    struct auto_out a, b;
+    auto_case(ctx, lib, "lin3_in", 0xA0, 1, 0, EG_STEPS_REVERSE_AUTO, &a);
+    check(a.made == EG_BAD_REQUEST && a.no_fused_vjp,
+          "AUTO: 37 samples inside the nearest row's regime chooses FUSED (without a K-step vjp: BAD_REQUEST naming it)");
+    auto_case(ctx, lib, "lin3_out", 0xA3, 1, 1, EG_STEPS_REVERSE_AUTO, &a);
+    auto_case(ctx, lib, "lin3_out", 0xA3, 1, 0, EG_STEPS_REVERSE_PER_STEP, &b);
+    check(a.made == EG_OK && a.reverse == EG_STEPS_REVERSE_PER_STEP && b.made == EG_OK && b.reverse == EG_STEPS_REVERSE_PER_STEP &&
+              memcmp(a.gx, b.gx, sizeof(a.gx)) == 0 && memcmp(&a.ga, &b.ga, sizeof(a.ga)) == 0 && memcmp(&a.gb, &b.gb, sizeof(a.gb)) == 0,
+          "AUTO: outside the nearest row (its far row would win) chooses PER_STEP, reported, gradients bitwise the explicit PER_STEP's");
+    auto_case(ctx, lib, "lin3_none", 0xA9, 1, 0, EG_STEPS_REVERSE_AUTO, &a);
+    check(a.made == EG_OK && a.reverse == EG_STEPS_REVERSE_PER_STEP, "AUTO: a unit with no table chooses PER_STEP");
+    auto_case(ctx, lib, "lin3_in", 0xA0, 0, 0, EG_STEPS_REVERSE_AUTO, &a);
+    check(a.made == EG_OK && a.reverse == EG_STEPS_REVERSE_PER_STEP, "AUTO: without EG_RUN_RECORD chooses PER_STEP");
+    auto_case(ctx, lib, "lin3_res", 0xA6, 1, 0, EG_STEPS_REVERSE_AUTO, &a);
+    check(a.made == EG_BAD_REQUEST && a.per_resident,
+          "AUTO: a per-resident table on a host runner (no SM count or resident threads) refused BAD_REQUEST by name");
 }
 
 /* ---- the old-path pair: rr_pend ---- */
@@ -554,7 +637,10 @@ int main(int argc, char** argv) {
     st.abi_major = EG_DOOR_VERSION_MAJOR;
     eg_ctx* ctx = NULL;
     check(eg_ctx_new(&st, &ctx) == EG_OK, "eg_ctx_new host context");
-    if (argc == 2) lin_rows(ctx, argv[1]);
+    if (argc == 2) {
+        lin_rows(ctx, argv[1]);
+        auto_rows(ctx, argv[1]);
+    }
     else pair_rows(ctx, argc, argv);
     eg_ctx_free(ctx);
     printf("%s: %d failure(s)\n", argv[0], failures);

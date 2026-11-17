@@ -251,8 +251,9 @@ void zero_memory(eg_ctx& ctx, bool device, void* data, std::size_t bytes) {
 void runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out) {
     if (out == nullptr) refuse(EG_BAD_REQUEST, "eg_runner_new: out is NULL");
     *out = nullptr;
-    const eg_runner_desc d = read_input(desc, "eg_runner_desc");
-    check_runner(ctx, d, false);
+    eg_runner_desc d = read_input(desc, "eg_runner_desc");
+    KeptDerived kept;
+    check_runner(ctx, d, false, kept);
     const bool active = check_active(d);
     auto* runner = new eg_runner_s;
     try {
@@ -360,6 +361,7 @@ void runner_figures(eg_ctx& ctx, const eg_runner_s* runner, struct eg_runner_fig
     const DeviceRun& r = runner->dev;
     struct eg_runner_figures f{};
     f.mode = r.ctx != nullptr ? r.mode : EG_MODE_HOST;
+    f.steps_reverse = runner->steps_reverse;
     f.block = r.block > 0 ? static_cast<std::int32_t>(r.block) : -1;
     f.grid = r.block > 0 ? static_cast<std::int64_t>(r.grid) : -1;
     f.chunk = f.mode == EG_MODE_PERSIST ? static_cast<std::int32_t>(r.chunk) : -1;

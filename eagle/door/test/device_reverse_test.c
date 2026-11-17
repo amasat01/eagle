@@ -262,8 +262,13 @@ int main(int argc, char** argv) {
             eg_runner* none_r = NULL;
             struct eg_runner_desc bad = d;
             bad.steps_reverse = EG_STEPS_REVERSE_AUTO;
-            check(eg_runner_new(ctx, &bad, &none_r) == EG_NOT_WRITTEN && reason_has(ctx, "steps_reverse AUTO") && none_r == NULL,
-                  "device record: steps_reverse AUTO refused NOT_WRITTEN by name");
+            struct eg_runner_figures fig;
+            memset(&fig, 0, sizeof(fig));
+            fig.struct_size = sizeof(fig);
+            check(eg_runner_new(ctx, &bad, &none_r) == EG_OK && eg_runner_figures(ctx, none_r, &fig) == EG_OK &&
+                      (fig.steps_reverse == EG_STEPS_REVERSE_PER_STEP || fig.steps_reverse == EG_STEPS_REVERSE_FUSED),
+                  "device record: steps_reverse AUTO is resolved to PER_STEP or FUSED, read back from eg_runner_figures");
+            eg_runner_free(ctx, none_r);
         }
         if (plan) eg_plan_free(ctx, plan);
         dfree(ctx, &s);
