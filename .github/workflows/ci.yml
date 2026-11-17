@@ -100,12 +100,20 @@ jobs:
           path: aether
           token: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
           pins: eagle/.github/companions
+
+      # companion raptor: the ref pinned in .github/companions, else a same-named branch, else main
+      - uses: ./eagle/.github/actions/companion
+        with:
+          repo: raptor
+          path: raptor
+          token: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
+          pins: eagle/.github/companions
       - id: memo
         uses: ./eagle/.github/actions/memo
         with:
           name: ci-test-cpp
           args: >-
-            --tree eagle --skip docs/ --skip README.md --skip CHANGELOG.md --skip CONTRIBUTING.md --skip CITATION.cff --skip .github/ --tree aether --skip docs/ --skip tests/ --skip ci/ --skip dsc/tests/ --skip CHANGELOG.md --skip README.md --skip CONTRIBUTING.md --skip CITATION.cff --skip Makefile --skip ruff.toml --skip .github/ --tree eagle --only .github/actions/ --only .github/ci_digest.sh --only .github/cuda_redist.sh --only .github/companions --file eagle/.github/workflows/ci.yml
+            --tree eagle --skip docs/ --skip README.md --skip CHANGELOG.md --skip CONTRIBUTING.md --skip CITATION.cff --skip .github/ --tree aether --skip docs/ --skip tests/ --skip ci/ --skip dsc/tests/ --skip CHANGELOG.md --skip README.md --skip CONTRIBUTING.md --skip CITATION.cff --skip Makefile --skip ruff.toml --skip .github/ --tree raptor --skip docs/ --skip tests/ --skip ci/ --skip tools/ --skip goldens/ --skip RELEASING.md --skip CHANGELOG.md --skip README.md --skip CONTRIBUTING.md --skip CITATION.cff --skip Makefile --skip .github/ --tree eagle --only .github/actions/ --only .github/ci_digest.sh --only .github/cuda_redist.sh --only .github/companions --file eagle/.github/workflows/ci.yml
 
       - run: sudo apt-get update && sudo apt-get install -y g++-13 ccache clang-18 libomp-18-dev
         if: steps.memo.outputs.run == 'true'
@@ -123,7 +131,7 @@ jobs:
 
       # the host C++ gate: aether's headers installed, eagle built with -Werror, the manifest-backed integrity gate,
       # and every header on its own with both compilers (the commands live in the Makefile)
-      - run: make gate-cpp AETHER_SRC="${GITHUB_WORKSPACE}/aether" CLANGXX=clang++-18
+      - run: make gate-cpp AETHER_SRC="${GITHUB_WORKSPACE}/aether" RAPTOR_SRC="${GITHUB_WORKSPACE}/raptor" CLANGXX=clang++-18
         working-directory: eagle
         if: steps.memo.outputs.run == 'true'
       - if: always() && steps.memo.outputs.run == 'true'
@@ -167,11 +175,19 @@ jobs:
           token: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
           pins: eagle/.github/companions
 
+      # companion raptor: the ref pinned in .github/companions, else a same-named branch, else main
+      - uses: ./eagle/.github/actions/companion
+        with:
+          repo: raptor
+          path: raptor
+          token: ${{ secrets.SIBLING_READ_TOKEN || github.token }}
+          pins: eagle/.github/companions
+
       # A pass is remembered under a digest of every input this job reads: the trees, this workflow (which names the
       # toolchain pins) and the runner image. On a hit the job succeeds without building.
       - id: memo
         run: |
-          digest=$(eagle/.github/ci_digest.sh --tree eagle --skip docs/ --skip .github/ --tree aether --skip docs/ --skip tests/ --skip ci/ --skip dsc/tests/ --skip CHANGELOG.md --skip README.md --skip CONTRIBUTING.md --skip CITATION.cff --skip Makefile --skip ruff.toml --skip .github/ \
+          digest=$(eagle/.github/ci_digest.sh --tree eagle --skip docs/ --skip .github/ --tree aether --skip docs/ --skip tests/ --skip ci/ --skip dsc/tests/ --skip CHANGELOG.md --skip README.md --skip CONTRIBUTING.md --skip CITATION.cff --skip Makefile --skip ruff.toml --skip .github/ --tree raptor --skip docs/ --skip tests/ --skip ci/ --skip tools/ --skip goldens/ --skip RELEASING.md --skip CHANGELOG.md --skip README.md --skip CONTRIBUTING.md --skip CITATION.cff --skip Makefile --skip .github/ \
             --file eagle/.github/workflows/ci.yml --str "${ImageVersion:-}" --str "$(g++-13 --version 2>/dev/null | head -1 || true)") || exit 1
           [ -n "$digest" ] || { echo "::error::empty digest"; exit 1; }
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
@@ -206,12 +222,12 @@ jobs:
         if: steps.plan.outputs.run == 'true'
 
       # the build, the three non-vacuity checks and the manifest gate, from the Makefile
-      - run: make sanitize-cpp AETHER_SRC="${GITHUB_WORKSPACE}/aether"
+      - run: make sanitize-cpp AETHER_SRC="${GITHUB_WORKSPACE}/aether" RAPTOR_SRC="${GITHUB_WORKSPACE}/raptor"
         working-directory: eagle
         if: steps.plan.outputs.run == 'true'
       # the host pool and schedule rows under ThreadSanitizer, with clang: gcc's OpenMP runtime hides its own
       # hand-offs from the sanitizer, so every OpenMP region reads as a race
-      - run: make tsan-cpp AETHER_SRC="${GITHUB_WORKSPACE}/aether" CLANGXX=clang++-18
+      - run: make tsan-cpp AETHER_SRC="${GITHUB_WORKSPACE}/aether" RAPTOR_SRC="${GITHUB_WORKSPACE}/raptor" CLANGXX=clang++-18
         working-directory: eagle
         if: steps.plan.outputs.run == 'true'
       - if: always() && steps.plan.outputs.run == 'true'
