@@ -108,6 +108,31 @@ void cells_free(std::uint64_t cells) noexcept {
     if (cells != 0) (void)cudaFree(reinterpret_cast<void*>(cells));
 }
 
+void* alloc_async(std::uint64_t stream, std::size_t bytes, bool zero) {
+    const auto s = reinterpret_cast<cudaStream_t>(stream);
+    void* p = nullptr;
+    EAGLE_CHECK_ALWAYS(cudaMallocAsync(&p, bytes, s));
+    if (!zero) return p;
+    const cudaError_t z = cudaMemsetAsync(p, 0, bytes, s);
+    if (z != cudaSuccess) (void)cudaFreeAsync(p, s);
+    EAGLE_CHECK_ALWAYS(z);
+    return p;
+}
+
+void free_async(std::uint64_t alloc_stream, std::uint64_t current, void* data) noexcept {
+    if (data == nullptr) return;
+    const auto freed_on = reinterpret_cast<cudaStream_t>(alloc_stream);
+    if (current != alloc_stream) {    // the block may still be read by work queued on the stream now in scope
+        cudaEvent_t done = nullptr;
+        if (cudaEventCreateWithFlags(&done, cudaEventDisableTiming) == cudaSuccess) {
+            (void)cudaEventRecord(done, reinterpret_cast<cudaStream_t>(current));
+            (void)cudaStreamWaitEvent(freed_on, done, 0);
+            (void)cudaEventDestroy(done);
+        }
+    }
+    (void)cudaFreeAsync(data, freed_on);
+}
+
 void cells_write(std::uint64_t stream, std::uint64_t cells, const unsigned* values, unsigned count) {
     EAGLE_CHECK_ALWAYS(cudaMemcpyAsync(reinterpret_cast<void*>(cells), values, count * sizeof(unsigned),
                                        cudaMemcpyHostToDevice, reinterpret_cast<cudaStream_t>(stream)));

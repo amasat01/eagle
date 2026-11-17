@@ -27,6 +27,7 @@ struct eg_unit_meta;
 #include <new>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -454,6 +455,7 @@ struct DeviceState {
     std::uint64_t own_stream = 0;             ///< eagle's own stream, destroyed with the context
     int sms = 0, regs_per_sm = 0, smem_per_sm = 0, threads_per_sm = 0, cc_major = 0, cc_minor = 0;
     int fp64_ratio = 1;                       ///< FP32:FP64 throughput ratio (1 when not reported)
+    std::unordered_map<void*, std::uint64_t> alloc_stream;   ///< each live device_alloc block -> the stream it was allocated on
 };
 
 }  // namespace door

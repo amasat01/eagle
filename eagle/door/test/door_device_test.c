@@ -231,6 +231,55 @@ static void made_planes(eg_ctx* ctx, const char* dev_lib) {
                   "n_slots 0 a no-op, a companion or an input slot refused BAD_REQUEST by reason");
         if (p) eg_plan_free(ctx, p);
     }
+    {   /* the free of an eagle-made plane is stream-ordered: it returns while work queued before it still runs */
+        cudaStream_t own = NULL;
+        void *big_a = NULL, *big_b = NULL;
+        const size_t big = (size_t)256 << 20;
+        int ok = cudaStreamCreateWithFlags(&own, cudaStreamNonBlocking) == cudaSuccess && cudaMalloc(&big_a, big) == cudaSuccess &&
+                 cudaMalloc(&big_b, big) == cudaSuccess && eg_stream_use(ctx, (uint64_t)(uintptr_t)own) == EG_OK;
+        const int32_t slots[2] = { 0, 2 };
+        eg_plane* planes[2] = { pa, px };
+        ok = ok && plan_n(ctx, keyed, EG_STRUCTURE_DEVICE, 12, 0, NULL, NULL, &p) == EG_OK && bind_planes(ctx, p, 2, slots, planes) == EG_OK;
+        for (int k = 0; ok && k < 100; ++k) ok = cudaMemcpyAsync(big_b, big_a, big, cudaMemcpyDeviceToDevice, own) == cudaSuccess;
+        ok = ok && cudaStreamQuery(own) == cudaErrorNotReady;   /* the queued copies are still running before the free */
+        ok = ok && eg_plan_free(ctx, p) == EG_OK;
+        p = NULL;
+        const int returned_early = ok && cudaStreamQuery(own) == cudaErrorNotReady;
+        ok = ok && cudaStreamSynchronize(own) == cudaSuccess && eg_stream_use(ctx, 0) == EG_OK;
+        check(ok && returned_early, "freeing a plan's eagle-made companion plane returns while the stream's queued work still runs (stream-ordered free)");
+        cudaFree(big_a);
+        cudaFree(big_b);
+        cudaStreamDestroy(own);
+    }
+    {   /* a plane allocated on stream A and used there is freed after A's work although stream B is in scope: B reuses its bytes */
+        cudaStream_t sa = NULL, sb = NULL;
+        void *big_a = NULL, *big_b = NULL, *reuse = NULL;
+        const size_t big = (size_t)256 << 20;
+        double first[3], got[3] = { -1, -1, -1 };
+        for (int k = 0; k < 3; ++k) first[k] = xv[4 * k] + xv[4 * k + 1] + xv[4 * k + 2] + xv[4 * k + 3] + 2.0;
+        int ok = cudaStreamCreateWithFlags(&sa, cudaStreamNonBlocking) == cudaSuccess &&
+                 cudaStreamCreateWithFlags(&sb, cudaStreamNonBlocking) == cudaSuccess && cudaMalloc(&big_a, big) == cudaSuccess &&
+                 cudaMalloc(&big_b, big) == cudaSuccess && eg_stream_use(ctx, (uint64_t)(uintptr_t)sa) == EG_OK;
+        const int32_t slots[2] = { 0, 2 };
+        eg_plane* planes[2] = { pa, px };
+        cudaMemset(da, 0, sizeof(got));
+        ok = ok && plan_n(ctx, keyed, EG_STRUCTURE_DEVICE, 12, 0, NULL, NULL, &p) == EG_OK && bind_planes(ctx, p, 2, slots, planes) == EG_OK;
+        for (int k = 0; ok && k < 100; ++k) ok = cudaMemcpyAsync(big_b, big_a, big, cudaMemcpyDeviceToDevice, sa) == cudaSuccess;
+        ok = ok && eg_launch(ctx, p, NULL) == EG_OK;    /* on A after the copies: reads and folds the companion plane */
+        ok = ok && eg_stream_use(ctx, (uint64_t)(uintptr_t)sb) == EG_OK && eg_plan_free(ctx, p) == EG_OK;
+        p = NULL;
+        ok = ok && cudaMallocAsync(&reuse, 24, sb) == cudaSuccess && cudaMemsetAsync(reuse, 0xFF, 24, sb) == cudaSuccess;
+        ok = ok && cudaStreamSynchronize(sa) == cudaSuccess && cudaStreamSynchronize(sb) == cudaSuccess && eg_stream_use(ctx, 0) == EG_OK;
+        cudaMemcpy(got, da, sizeof(got), cudaMemcpyDeviceToHost);
+        check(ok && memcmp(got, first, sizeof(got)) == 0,
+              "a plane made on stream A, used there and freed with stream B in scope: A's work completes with the right values (B reusing the bytes cannot corrupt them)");
+        if (reuse) cudaFreeAsync(reuse, sb);
+        cudaStreamSynchronize(sb);
+        cudaFree(big_a);
+        cudaFree(big_b);
+        cudaStreamDestroy(sa);
+        cudaStreamDestroy(sb);
+    }
     eg_plane* cell_bad = NULL;
     struct tensor t2;
     double* d2 = dev_doubles(NULL, 2);
@@ -278,6 +327,43 @@ static void made_planes(eg_ctx* ctx, const char* dev_lib) {
     cudaFree(dm);
     cudaFree(da);
     cudaFree(d2);
+}
+
+/* A free asked while a launch of @p keep is recorded waits for eg_record_end: the capture is not invalidated by it. The freed
+ * plan holds an eagle-made companion plane, so its free reaches the device allocator. */
+static void free_while_recording(eg_ctx* ctx, const char* dev_lib, eg_plan* keep) {
+    static const double xv[12] = { 3.5, -1.25, 7.0, 0.5, -9.75, 2.0, 2.0, 11.5, 0.125, -0.5, 6.25, 4.0 };
+    eg_unit* keyed = NULL;
+    eg_plan* drop = NULL;
+    eg_graph* g = NULL;
+    struct tensor tx, ta;
+    double *dx = dev_doubles(xv, 12), *da = dev_doubles(NULL, 3);
+    eg_plane* px = wrap(ctx, &tx, dx, 1, 12, 0, 1, 0);
+    eg_plane* pa = wrap(ctx, &ta, da, 1, 3, 0, 1, 0);
+    const int32_t slots[2] = { 0, 2 };
+    eg_plane* planes[2] = { pa, px };
+    eg_status s = load(ctx, dev_lib, "dkeyed", 0xD3, &keyed);
+    if (s == EG_OK) s = plan_n(ctx, keyed, EG_STRUCTURE_DEVICE, 12, 0, NULL, NULL, &drop);
+    if (s == EG_OK) s = bind_planes(ctx, drop, 2, slots, planes);
+    if (s == EG_OK) s = eg_record_begin(ctx);
+    if (s == EG_OK) {
+        s = eg_launch(ctx, keep, NULL);
+        if (s == EG_OK) s = eg_plan_free(ctx, drop);
+        if (s == EG_OK) drop = NULL;
+        const eg_status ended = eg_record_end(ctx, &g);
+        if (s == EG_OK) s = ended;
+    }
+    if (s == EG_OK) s = eg_graph_launch(ctx, g);
+    if (s == EG_OK) s = eg_sync(ctx);
+    if (s == EG_OK) s = eg_graph_free(ctx, g);
+    if (s != EG_OK) reason_has(ctx, "(the recording row was refused)");
+    check(s == EG_OK, "a plan with a companion freed while another launch is recorded: the free waits for eg_record_end, the graph is recorded, launched and freed OK");
+    if (drop) eg_plan_free(ctx, drop);
+    eg_unit_free(ctx, keyed);
+    eg_plane_free(ctx, px);
+    eg_plane_free(ctx, pa);
+    cudaFree(dx);
+    cudaFree(da);
 }
 
 /* Bind y, x, v (planes, slots 0-2) and a (slot 3). */
@@ -1000,6 +1086,7 @@ int main(int argc, char** argv) {
     check(eg_record_begin(ctx) == EG_OK && refused(bind(ctx, p, py, px, pv, a), EG_BAD_REQUEST, ctx, "eg_bind while recording") &&
               eg_record_end(ctx, &g) == EG_OK && eg_graph_free(ctx, g) == EG_OK,
           "eg_bind inside a DEVICE recording is refused BAD_REQUEST by name; the recording still ends");
+    free_while_recording(ctx, dev_lib, p);
 
     /* DEVICE units refused by name (no device image), and the features a DEVICE plan now takes: a thread box and a
      * BANDED scalar type (their pairs run in device_features_test). */

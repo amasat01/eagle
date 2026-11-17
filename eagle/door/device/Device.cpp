@@ -785,19 +785,25 @@ void device_plan_free(eg_plan_s& plan) noexcept {
     });
 }
 
-/** @brief A device allocation of @p bytes on the context's device, zeroed when @p zero. */
+/** @brief A device allocation of @p bytes on the context's device, zeroed when @p zero, stream-ordered on the context's
+ *  stream; the block remembers that stream so its free is ordered after the work queued there. */
 void* device_alloc(eg_ctx& ctx, std::size_t bytes, bool zero) {
     Current current(ctx.dev);
-    return reinterpret_cast<void*>(cells_new(static_cast<unsigned>((bytes + sizeof(unsigned) - 1) / sizeof(unsigned)), zero));
+    void* data = alloc_async(ctx.dev.stream, bytes, zero);
+    if (data != nullptr) ctx.dev.alloc_stream[data] = ctx.dev.stream;
+    return data;
 }
 
-/** @brief Free a device_alloc allocation (a forked child makes no device call). */
+/** @brief Free a device_alloc allocation on the stream it was allocated on, ordered after the work queued on that stream and
+ *  on the stream now in scope (a forked child makes no device call; a free while recording waits for eg_record_end). */
 void device_free(eg_ctx& ctx, void* data) noexcept {
     if (data == nullptr || forked(ctx)) return;
     eg_ctx* c = &ctx;
     now_or_after_capture(ctx, [c, data] {
         Current current(c->dev);
-        cells_free(reinterpret_cast<std::uint64_t>(data));
+        const auto at = c->dev.alloc_stream.find(data);
+        free_async(at->second, c->dev.stream, data);
+        c->dev.alloc_stream.erase(at);
     });
 }
 

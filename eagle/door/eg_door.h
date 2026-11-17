@@ -898,7 +898,10 @@ eg_status eg_device_count(eg_ctx* ctx, int32_t* count);
 eg_status eg_device_props(eg_ctx* ctx, int32_t device, struct eg_device_props* out);
 
 /** Make ``stream`` (a raw stream of the context's device, 0: eagle's own) the
- *  context's stream scope (seam ``stream_create`` over an external stream). */
+ *  context's stream scope (seam ``stream_create`` over an external stream).
+ *  Device memory eagle makes while a stream is in scope is released on that
+ *  stream, after the work queued there: the caller keeps a stream it passed
+ *  alive until every plane and plan made while it was in scope is freed. */
 eg_status eg_stream_use(eg_ctx* ctx, uint64_t stream);
 
 /** Block until the context's stream is idle (seam ``stream_synchronize``). */

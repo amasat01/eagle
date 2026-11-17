@@ -52,6 +52,14 @@ void host_pinned_free(void* data) noexcept;
 /** @brief Free cells made by cells_new (0-safe). */
 void cells_free(std::uint64_t cells) noexcept;
 
+/** @brief A device allocation of @p bytes from the stream-ordered pool, zeroed when @p zero, ready for work queued on
+ *  @p stream; no call waits on the device. */
+void* alloc_async(std::uint64_t stream, std::size_t bytes, bool zero);
+
+/** @brief Release an alloc_async allocation made on @p alloc_stream once the work queued on @p alloc_stream and on
+ *  @p current before this call has run (0-safe); no host wait. */
+void free_async(std::uint64_t alloc_stream, std::uint64_t current, void* data) noexcept;
+
 /** @brief Write @p count host values into device @p cells, stream-ordered on @p stream. */
 void cells_write(std::uint64_t stream, std::uint64_t cells, const unsigned* values, unsigned count);
 
