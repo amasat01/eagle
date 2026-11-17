@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Record what the old stack (eagle 0.7.5, run from its own environment) decides for an AUTO dispatch group, to test/auto_decisions.txt.
 
-    python test/auto_record.py <cost header> <output file>
+    python test/auto_record.py <cost header> <output file> [device]
 
 Each case is a run of the static two-branch group of the fixture libraries (test/fixture_unit.c, "sga_*"): N samples, n1 of them class 1
 (limit L1, two steps a launch) and the rest class 0 (limits 2..5, one step a launch), looked at as 0.7.5's DispatchRunner looks: at the start, then every
@@ -72,7 +72,14 @@ def finish_step(limit, klass):
     return int(limit) if klass == 0 else -(-int(limit) // 2)
 
 
-def run_case(cost, n1, l1, max_steps, w):
+def device_target():
+    """The device the old stack would price on: its properties; its weights are its defaults with its own L2 added."""
+    from eagle._device_props import device_props
+
+    return device_props(0)
+
+
+def run_case(cost, n1, l1, max_steps, w, target="host", props=None):
     finish = [finish_step(2 + i % 4, 0) for i in range(N - n1)] + [finish_step(l1, 1)] * n1
     classes = [0] * (N - n1) + [1] * n1
 
@@ -82,27 +89,28 @@ def run_case(cost, n1, l1, max_steps, w):
 
     state = pol.DispatchState("switch")
     c = counts(0)
-    state.apply(pol.predicted_gain(cost, c, target="host", fused_steps=1, remaining_steps=max_steps, weights=w))
+    state.apply(pol.predicted_gain(cost, c, target=target, props=props, fused_steps=1, remaining_steps=max_steps, weights=w))
     seg = 0
     while state.policy == "segmented" and seg < max_steps and sum(counts(seg)) > 0:
         seg += 1
         if state.due() and sum(counts(seg)) > 0 and seg < max_steps:
-            state.apply(pol.predicted_gain(cost, counts(seg), target="host", fused_steps=1, remaining_steps=max_steps - seg, weights=w))
+            state.apply(pol.predicted_gain(cost, counts(seg), target=target, props=props, fused_steps=1, remaining_steps=max_steps - seg, weights=w))
     total = min(max_steps, max(finish))
     return seg, total
 
 
-def main(header, out):
-    costs, w = read_costs(header), weights()
-    lines = [f"# machine: {machine()}"]
+def main(header, out, target="host"):
+    costs = read_costs(header)
+    w, props = (weights(), None) if target == "host" else (None, device_target())
+    lines = [f"# {target}"]
     for name in costs:
         for n1 in (2, 20, 100):
             for l1 in (20, 100):
                 for max_steps in (4, 64, 400):
-                    seg, total = run_case(costs[name], n1, l1, max_steps, w)
+                    seg, total = run_case(costs[name], n1, l1, max_steps, w, target, props)
                     lines.append(f"{name} {n1} {l1} {max_steps} {seg} {total}")
     open(out, "w").write("\n".join(lines) + "\n")
 
 
 if __name__ == "__main__":
-    main(sys.argv[1], sys.argv[2])
+    main(*sys.argv[1:4])

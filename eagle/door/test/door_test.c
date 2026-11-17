@@ -2994,15 +2994,7 @@ struct auto_set {
     eg_plan* plan;
 };
 
-/* n1 samples of class 1 (limit l1: two steps a launch) after SGN - n1 of class 0 (limit 2 + i % 4: one step a launch). */
-static void auto_inputs(struct auto_set* q, int n1, int l1) {
-    for (int i = 0; i < SGN; ++i) {
-        q->k[i] = 0.0;
-        q->how[i] = 0.0;
-        q->mask[i] = 0;
-        q->limit[i] = i < SGN - n1 ? (double)(2 + i % 4) : (double)l1;
-    }
-}
+static void auto_inputs(struct auto_set* q, int n1, int l1) { auto_fill(q->k, q->limit, q->how, q->mask, n1, l1); }
 
 static int auto_plan(eg_ctx* ctx, eg_unit* unit, struct auto_set* q, int with_how) {
     eg_plane* pl[4] = { NULL, NULL, NULL, NULL };
@@ -3025,24 +3017,17 @@ static int auto_plan(eg_ctx* ctx, eg_unit* unit, struct auto_set* q, int with_ho
     return s == EG_OK;
 }
 
-/* What a run of @p seg segmented steps then fused ones to step @p total leaves in how: the step a sample finishes at is its limit (class 0) or half of it (class 1). */
-static double auto_how(const struct auto_set* q, int i, int n1, int seg, int total) {
-    const int steps = i < SGN - n1 ? (int)q->limit[i] : ((int)q->limit[i] + 1) / 2;
-    const int ran = steps < total ? steps : total, in_seg = ran < seg ? ran : seg;
-    return in_seg + 1000.0 * (ran - in_seg);
-}
-
 static void check_auto_look(eg_ctx* ctx) {
-    eg_unit *cls = NULL, *k1 = NULL, *k0 = NULL, *auto_unit[3] = { NULL, NULL, NULL }, *fused = NULL;
-    const char* names[3] = { "sga_rare", "sga_even", "sga_scalar" };
+    eg_unit *cls = NULL, *k1 = NULL, *k0 = NULL, *auto_unit[4] = { NULL, NULL, NULL, NULL }, *fused = NULL;
+    const char* names[4] = { "sga_rare", "sga_even", "sga_scalar", "sga_heavy" };
     check(load(ctx, "sga__cls", 0xC1, &cls) == EG_OK && load(ctx, "sga__k1", 0xC3, &k1) == EG_OK && load(ctx, "sgf", 0xE4, &fused) == EG_OK,
           "eg_unit_load of the AUTO group's classify and second branch units");
     eg_unit* sdeps[2] = { k1, cls };
     check(cls && k1 && load_with(ctx, "sga__k0", 0xC2, sdeps, 2, &k0) == EG_OK, "eg_unit_load of its first branch unit with the group's units in deps");
     eg_unit* adeps[3] = { k0, k1, cls };
-    for (int u = 0; u < 3 && k0 != NULL; ++u)
+    for (int u = 0; u < 4 && k0 != NULL; ++u)
         check(load_with(ctx, names[u], (uint8_t)(0xC4 + u), adeps, 3, &auto_unit[u]) == EG_OK, "eg_unit_load of an AUTO unit naming its segmented set");
-    if (k0 == NULL || auto_unit[2] == NULL) return;
+    if (k0 == NULL || auto_unit[3] == NULL) return;
 
     /* the decisions of the old stack (test/auto_record.py): the segmented steps and the total steps of each run, and so the path of each step in how */
     char path[512];
@@ -3055,7 +3040,7 @@ static void check_auto_look(eg_ctx* ctx) {
         char name[32];
         int n1, l1, max_steps, want_seg, want_total;
         if (line[0] == '#' || sscanf(line, "%31s %d %d %d %d %d", name, &n1, &l1, &max_steps, &want_seg, &want_total) != 6) continue;
-        const int u = strcmp(name, "rare") == 0 ? 0 : strcmp(name, "even") == 0 ? 1 : 2;
+        const int u = strcmp(name, "rare") == 0 ? 0 : strcmp(name, "even") == 0 ? 1 : strcmp(name, "scalar") == 0 ? 2 : 3;
         static struct auto_set q, ref;
         auto_inputs(&q, n1, l1);
         auto_inputs(&ref, n1, l1);
@@ -3071,7 +3056,7 @@ static void check_auto_look(eg_ctx* ctx) {
         struct eg_runner_desc dr = runner_desc(&ref.plan, 1, max_steps);
         ok = ok && eg_runner_new(ctx, &dr, &rf) == EG_OK && eg_run(ctx, rf, &rep_ref) == EG_OK;
         for (int i = 0; ok && i < SGN; ++i)    /* the path of every sample's steps is the old stack's decision, its values the plain fused unit's */
-            ok = q.how[i] == auto_how(&q, i, n1, want_seg, want_total) && q.k[i] == ref.k[i] && q.mask[i] == ref.mask[i];
+            ok = q.how[i] == auto_how(q.limit, i, n1, want_seg, want_total) && q.k[i] == ref.k[i] && q.mask[i] == ref.mask[i];
         ok = ok && rep.launches == want_total && rep.steps == want_total && rep.mode == EG_MODE_HOST && rep.launches == rep_ref.launches;
         ++rows;
         agree += ok;
@@ -3085,10 +3070,31 @@ static void check_auto_look(eg_ctx* ctx) {
         eg_plan_free(ctx, ref.plan);
     }
     if (f != NULL) fclose(f);
+    {   /* the same run forced segmented (the branch unit's own runner) gives the AUTO run's values; reset then a second run equals the first */
+        static struct auto_set a, b, first;
+        auto_inputs(&a, 20, 100), auto_inputs(&b, 20, 100);
+        eg_runner *ra = NULL, *rb = NULL;
+        struct eg_run_report rep_a, rep_b, rep2;
+        memset(&rep_a, 0, sizeof(rep_a)), memset(&rep_b, 0, sizeof(rep_b)), memset(&rep2, 0, sizeof(rep2));
+        rep_a.struct_size = rep_b.struct_size = rep2.struct_size = sizeof(rep_a);
+        struct eg_runner_desc da, db;
+        int ok = auto_plan(ctx, auto_unit[0], &a, 1) && auto_plan(ctx, k0, &b, 1);
+        da = runner_desc(&a.plan, 1, 400), db = runner_desc(&b.plan, 1, 400);
+        ok = ok && eg_runner_new(ctx, &da, &ra) == EG_OK && eg_run(ctx, ra, &rep_a) == EG_OK && eg_runner_new(ctx, &db, &rb) == EG_OK && eg_run(ctx, rb, &rep_b) == EG_OK;
+        ok = ok && memcmp(a.k, b.k, sizeof(a.k)) == 0 && memcmp(a.mask, b.mask, sizeof(a.mask)) == 0 && rep_a.launches == rep_b.launches && rep_a.finished == SGN;
+        check(ok, "an AUTO run equals the same group forced segmented (the branch unit's runner): planes bitwise, same launches");
+        memcpy(&first, &a, sizeof(a));
+        auto_inputs(&a, 20, 100);
+        ok = eg_runner_reset(ctx, ra) == EG_OK && eg_run(ctx, ra, &rep2) == EG_OK && memcmp(a.k, first.k, sizeof(a.k)) == 0 &&
+             memcmp(a.how, first.how, sizeof(a.how)) == 0 && rep2.launches == rep_a.launches && rep2.steps == rep_a.steps && rep2.flags == rep_a.flags;
+        check(ok, "eg_runner_reset of an AUTO runner then a second run equals the first, how included");
+        eg_runner_free(ctx, ra), eg_runner_free(ctx, rb);
+        eg_plan_free(ctx, a.plan), eg_plan_free(ctx, b.plan);
+    }
     char what[400];
     snprintf(what, sizeof(what), "the AUTO runner takes the old stack's decision in all %d recorded runs (%d fused from the start, %d segmented to the end, %d switched to fused at a look), "
              "its values equal the plain fused unit's bitwise", rows, fused_from_start, segmented_to_end, switched);
-    check(rows == 54 && agree == rows && fused_from_start > 0 && segmented_to_end > 0 && switched > 0, what);
+    check(rows == 72 && agree == rows && fused_from_start > 0 && segmented_to_end > 0 && switched > 0, what);
     /* the refusals of an AUTO record, by status and reason */
     {
         struct { const char* name; uint8_t byte; const char* reason; } bad[5] = {
@@ -3112,7 +3118,7 @@ static void check_auto_look(eg_ctx* ctx) {
         }
         eg_unit_free(ctx, sg_k0), eg_unit_free(ctx, sg_k1), eg_unit_free(ctx, sg_cls);
     }
-    for (int u = 0; u < 3; ++u) eg_unit_free(ctx, auto_unit[u]);
+    for (int u = 0; u < 4; ++u) eg_unit_free(ctx, auto_unit[u]);
     eg_unit_free(ctx, k0), eg_unit_free(ctx, k1), eg_unit_free(ctx, cls), eg_unit_free(ctx, fused);
 }
 

@@ -1,4 +1,4 @@
-# machine: (4, 12976128.0)
+# host
 rare 2 20 4 0 4
 rare 2 20 64 10 10
 rare 2 20 400 10 10
@@ -53,3 +53,21 @@ scalar 100 20 400 0 10
 scalar 100 100 4 0 4
 scalar 100 100 64 0 50
 scalar 100 100 400 0 50
+heavy 2 20 4 4 4
+heavy 2 20 64 10 10
+heavy 2 20 400 10 10
+heavy 2 100 4 4 4
+heavy 2 100 64 16 50
+heavy 2 100 400 16 50
+heavy 20 20 4 4 4
+heavy 20 20 64 10 10
+heavy 20 20 400 10 10
+heavy 20 100 4 4 4
+heavy 20 100 64 16 50
+heavy 20 100 400 16 50
+heavy 100 20 4 4 4
+heavy 100 20 64 10 10
+heavy 100 20 400 10 10
+heavy 100 100 4 4 4
+heavy 100 100 64 16 50
+heavy 100 100 400 16 50

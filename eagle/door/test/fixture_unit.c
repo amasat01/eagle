@@ -985,6 +985,7 @@ SEG_UNIT(unit_sga_k1, "sga__k1", 0xC3, "sga_k1_host", sga_branch_body, launch, &
 AUTO_SET(rare, 0xC4);
 AUTO_SET(even, 0xC5);
 AUTO_SET(scalar, 0xC6);
+AUTO_SET(heavy, 0xC7);
 
 
 /* AUTO records that contradict themselves (eg_unit_load refuses each by name): branches without a classify unit, a classify unit without branches, a sweep,
@@ -1012,14 +1013,14 @@ static const struct eg_unit_meta* const units[] = { &unit_axpb, &unit_wait, &uni
                                                     &unit_gathb, &unit_gatha, &unit_gathn, &unit_boxed, &unit_boxbad, &unit_shr, &unit_cells, &unit_keyed,
                                                     &unit_keyedbad, &unit_cellsum, &unit_axpb_cards, &unit_axpb_badflag,
                                                     &unit_sg_cls, &unit_sg_k0, &unit_sg_k1, &unit_sgf, &unit_dg_k0, &unit_dg_k1, &unit_dg_sweep, &unit_dgf,
-                                                    &unit_sga_cls, &unit_sga_k0, &unit_sga_k1, &unit_sga_rare, &unit_sga_even, &unit_sga_scalar,
+                                                    &unit_sga_cls, &unit_sga_k0, &unit_sga_k1, &unit_sga_rare, &unit_sga_even, &unit_sga_scalar, &unit_sga_heavy,
                                                     &unit_auto_nocls, &unit_auto_nobr, &unit_auto_sweep, &unit_auto_nocost, &unit_auto_group };
 
 static const struct eg_library_meta library = {
     .struct_size = sizeof(struct eg_library_meta),
     .schema_major = EG_META_SCHEMA_MAJOR,
     .schema_minor = 0,
-    .n_units = 48,
+    .n_units = 49,
     .units = units,
 };
 

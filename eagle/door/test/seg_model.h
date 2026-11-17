@@ -116,3 +116,21 @@ static inline int64_t dg_model_device(double* k, const double* limit, unsigned c
     }
     return launches;
 }
+
+/* The AUTO group "sga" / "dsga": n1 samples of class 1 (limit l1: two steps a launch) after SGN - n1 of class 0 (limit 2 + i % 4: one step a launch). */
+static inline void auto_fill(double* k, double* limit, double* how, unsigned char* mask, int n1, int l1) {
+    for (int i = 0; i < SGN; ++i) {
+        k[i] = 0.0;
+        how[i] = 0.0;
+        mask[i] = 0;
+        limit[i] = i < SGN - n1 ? (double)(2 + i % 4) : (double)l1;
+    }
+}
+
+/* What a run of @p seg segmented steps, then fused ones to step @p total, leaves in how[i]: the units add 1 per segmented step and 1000 per fused step, and
+ * sample i finishes at its limit (class 0) or half of it (class 1). */
+static inline double auto_how(const double* limit, int i, int n1, int seg, int total) {
+    const int steps = i < SGN - n1 ? (int)limit[i] : ((int)limit[i] + 1) / 2;
+    const int ran = steps < total ? steps : total, in_seg = ran < seg ? ran : seg;
+    return in_seg + 1000.0 * (ran - in_seg);
+}
