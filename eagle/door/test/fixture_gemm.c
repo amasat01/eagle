@@ -91,8 +91,11 @@ SLOT_OF(slot_k, EG_ROLE_MUTABLE, EG_DTYPE_REAL, "k");
 SLOT_OF(slot_limit, EG_ROLE_PER_SAMPLE, EG_DTYPE_REAL, "limit");
 SLOT_OF(slot_mask, EG_ROLE_TERMINATED, EG_DTYPE_BOOL, "mask");
 SLOT_OF(slot_finished, EG_ROLE_LOOKUP, EG_DTYPE_UINT32, "finished");
+static const struct eg_unit_slot slot_c_param_plane = { .struct_size = sizeof(struct eg_unit_slot), .role = EG_ROLE_ACCUM_OUT,
+    .dtype = EG_DTYPE_REAL, .like_slot = -1, .flags = EG_SLOT_PARAM_PLANE, .name = "c" };
 
 static const struct eg_unit_slot* const slots_abc[] = { &slot_a, &slot_b, &slot_c };
+static const struct eg_unit_slot* const slots_param_plane[] = { &slot_a, &slot_b, &slot_c_param_plane };
 static const struct eg_unit_slot* const slots_abci[] = { &slot_a, &slot_b, &slot_ci };
 static const struct eg_unit_slot* const slots_vjp[] = { &slot_w, &slot_x, &slot_dy, &slot_dw, &slot_dx };
 static const struct eg_unit_slot* const slots_index[] = { &slot_a, &slot_b, &slot_c, &slot_count };
@@ -103,6 +106,7 @@ static const struct eg_unit_slot* const slots_finish[] = { &slot_k, &slot_limit,
                                              .n_slots = count_, .slots = slots_ }
 BODY(body_abc, slots_abc, 3);
 BODY(body_abci, slots_abci, 3);
+BODY(body_param_plane, slots_param_plane, 3);
 BODY(body_vjp, slots_vjp, 5);
 BODY(body_index, slots_index, 4);
 BODY(body_finish, slots_finish, 7);
@@ -181,6 +185,7 @@ BAD(bad_flag, 6, EG_SCALAR_FLOAT64, body_abc, 1u << 7, 0, 1, 2, 1, 0, 3, 5, 5, 4
 BAD(bad_banded, 7, EG_SCALAR_BANDED, body_abc, 0, 0, 1, 2, 1, 0, 3, 5, 5, 4, 3, 4);
 BAD(bad_k, 8, EG_SCALAR_FLOAT64, body_abc, 0, 0, 1, 2, 1, 0, 3, 5, 4, 4, 3, 4);
 BAD(bad_c, 9, EG_SCALAR_FLOAT64, body_abc, 0, 0, 1, 2, 1, 0, 3, 5, 5, 4, 3, 3);
+BAD(bad_param_plane, 10, EG_SCALAR_FLOAT64, body_param_plane, 0, 0, 1, 2, 1, 0, 3, 5, 5, 4, 3, 4);
 UNIT(gemm_index, 0x70, EG_SCALAR_FLOAT64, "noop_host", body_index, launch_index, NULL, 1, 0, 0, 0, 1, 2, 3, 5, 5, 4, 3, 4);
 UNIT(gemm_finish, 0x71, EG_SCALAR_FLOAT64, "noop_host", body_finish, launch_plain, &finish_one, 1, 0, 0, 4, 5, 6, 3, 5, 5, 4, 3, 4);
 
@@ -188,7 +193,7 @@ UNIT(gemm_finish, 0x71, EG_SCALAR_FLOAT64, "noop_host", body_finish, launch_plai
     X(f64_sq) X(f64_rect) X(f64_ta) X(f64_tb) X(f64_tc) X(f64_all) X(f64_lane) X(f64_wide) X(f64_vjp)         \
     X(f32_sq) X(f32_rect) X(f32_ta) X(f32_tb) X(f32_tc) X(f32_all) X(f32_lane) X(f32_wide) X(f32_vjp)         \
     X(bad_slot) X(bad_role) X(bad_dtype) X(bad_ncalls) X(bad_extent) X(bad_lane) X(bad_flag) X(bad_banded)    \
-    X(bad_k) X(bad_c) X(gemm_index) X(gemm_finish)
+    X(bad_k) X(bad_c) X(bad_param_plane) X(gemm_index) X(gemm_finish)
 #define POINTER(tag) &unit_##tag,
 static const struct eg_unit_meta* const units[] = { LISTED(POINTER) };
 

@@ -291,7 +291,8 @@ static void refusal_rows(eg_ctx* ctx, const char* path) {
         { "bad_extent", EG_BAD_REQUEST, "has the extent 0" },
         { "bad_lane", EG_BAD_REQUEST, "an EG_GEMM_PER_LANE extent and lane_fanin 0" },
         { "bad_flag", EG_NOT_WRITTEN, "unknown flag bits 128" },
-        { "bad_banded", EG_NOT_WRITTEN, "a banded unit with a gemm record" } };
+        { "bad_banded", EG_NOT_WRITTEN, "a banded unit with a gemm record" },
+        { "bad_param_plane", EG_BAD_REQUEST, "is PARAM_PLANE but not a LOOKUP" } };
     for (size_t i = 0; i < sizeof(loads) / sizeof(loads[0]); ++i) {
         eg_unit* unit = NULL;
         char what[96];
