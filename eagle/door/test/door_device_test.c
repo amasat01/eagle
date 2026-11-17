@@ -954,8 +954,11 @@ static void segmented_group_rows(eg_ctx* ctx, const char* name, int dynamic, eg_
     check(refused(eg_runner_new(ctx, &d, &x), EG_NOT_WRITTEN, ctx, "is the whole step of its runner, not one plan of several") && x == NULL, "a second plan beside a SEGMENTED group: NOT_WRITTEN");
     d.n_plans = 1, d.plans = &run.plan, d.events = EG_EVENTS_REFINE;
     check(refused(eg_runner_new(ctx, &d, &x), EG_NOT_WRITTEN, ctx, "is not recorded or refined") && x == NULL, "EG_EVENTS_REFINE over a SEGMENTED group: NOT_WRITTEN");
-    d.events = 0, d.flags = EG_RUN_RECORD;
-    check(refused(eg_runner_new(ctx, &d, &x), EG_BAD_REQUEST, ctx, "EG_RUN_RECORD needs its derived units") && x == NULL, "EG_RUN_RECORD over a SEGMENTED group: BAD_REQUEST (the group has no derived units to record)");
+    const eg_derived_role tape_role = EG_DERIVED_TAPE;
+    eg_unit* const tape_unit = segmented;   /* a well-formed derived set: the group's own rule refuses before the units are read */
+    d.events = 0, d.flags = EG_RUN_RECORD, d.n_derived = 1, d.derived_roles = &tape_role, d.derived_units = &tape_unit;
+    check(refused(eg_runner_new(ctx, &d, &x), EG_NOT_WRITTEN, ctx, "is not recorded or refined") && x == NULL, "EG_RUN_RECORD over a SEGMENTED group: NOT_WRITTEN");
+    d.n_derived = 0, d.derived_roles = NULL, d.derived_units = NULL;
     d.flags = EG_RUN_REORDER;
     check(refused(eg_runner_new(ctx, &d, &x), EG_BAD_REQUEST, ctx, "nothing to reorder") && x == NULL, "EG_RUN_REORDER over a SEGMENTED group: BAD_REQUEST");
     d.flags = 0, d.every = 4;
