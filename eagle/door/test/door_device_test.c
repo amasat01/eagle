@@ -545,6 +545,34 @@ static void alloc_planes(eg_ctx* ctx, eg_ctx* host, eg_unit* axpy, const double*
     check(ok, "exports of device and pinned planes are readable after eg_plane_free; their release and the planes' frees leave the driver clean");
 }
 
+/* A DEVICE plane exported, the context freed: the memory is still readable, and its release then frees it on the stream it was made on. */
+static void check_close_with_device_export(void) {
+    eg_status s = EG_OK;
+    eg_ctx* ctx = context(EG_CTX_DEVICE, 0, &s);
+    const int64_t shape1[1] = { N };
+    struct eg_plane_desc d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    d.flags = EG_PLANE_ZERO;
+    d.dtype_code = kDLFloat;
+    d.dtype_bits = 64;
+    d.kind = EG_MEM_DEVICE;
+    d.ndim = 1;
+    d.shape = shape1;
+    eg_plane* p = NULL;
+    struct DLManagedTensorVersioned* e = NULL;
+    double fill[N], back[N];
+    for (int i = 0; i < N; ++i) fill[i] = 0.5 * i;
+    memset(back, 0, sizeof(back));
+    int ok = s == EG_OK && eg_plane_new(ctx, &d, &p) == EG_OK && eg_plane_dlpack(ctx, p, &e) == EG_OK &&
+             cudaMemcpy(e->dl_tensor.data, fill, sizeof(fill), cudaMemcpyHostToDevice) == cudaSuccess && eg_plane_free(ctx, p) == EG_OK &&
+             eg_ctx_free(ctx) == EG_OK && eg_sync(ctx) == EG_BAD_REQUEST && reason_has(ctx, "the context is closed") &&
+             cudaMemcpy(back, e->dl_tensor.data, sizeof(back), cudaMemcpyDeviceToHost) == cudaSuccess && memcmp(back, fill, sizeof(back)) == 0;
+    if (e != NULL) e->deleter(e);
+    ok = ok && cudaDeviceSynchronize() == cudaSuccess && cudaGetLastError() == cudaSuccess;
+    check(ok, "a DEVICE export outlives eg_ctx_free (closed, readable); its release frees the memory and the driver stays clean");
+}
+
 /* One attribute of the device function @p name of the fixture's image, read through the driver API on its own: the oracle
  * of the figures the door reports (-1: the image or the driver could not be read). */
 static int driver_attribute(const char* dev_lib, const char* name, int attribute) {
@@ -1298,6 +1326,7 @@ int main(int argc, char** argv) {
     check(s == EG_OK && same, "axpb HOST_TEAM with host planes on the device context: y == a * x + b");
 
     alloc_planes(ctx, host, axpy, x, v, want, a);
+    check_close_with_device_export();
 
     /* Freeing with live handles: modules unloaded, stream destroyed, the primary context released. */
     check(eg_unit_free(ctx, axpy) == EG_OK && eg_unit_free(ctx, axpy64) == EG_OK && eg_unit_free(ctx, axpb) == EG_OK &&

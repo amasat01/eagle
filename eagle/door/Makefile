@@ -84,7 +84,7 @@ OBJ := $(SRC:%.cpp=$(OUT)/%.o) $(if $(CUDA),$(OUT)/device/Loop.o)
 ifeq ($(shell uname -s),Darwin)
 SOEXT := dylib
 LIB_SHARED := -dynamiclib
-LIB_EXPORT := -Wl$(comma)-exported_symbols_list$(comma)$(OUT)/door.exp -Wl$(comma)-install_name$(comma)@rpath/libeagle_door.$(SOEXT) -Wl$(comma)-undefined$(comma)error
+LIB_EXPORT := -Wl$(comma)-exported_symbols_list$(comma)$(OUT)/door.exp -Wl$(comma)-install_name$(comma)@rpath/libeagle_door.$(SOEXT)
 LIB_EXPORT_LIST := $(OUT)/door.exp
 SYM_PREFIX := _
 NM_DEFINED := nm -gU

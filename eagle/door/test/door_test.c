@@ -16,6 +16,7 @@
 
 #include <dlfcn.h>
 #include <pthread.h>
+#include <sched.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1143,6 +1144,61 @@ static void check_recorded_list(eg_ctx* ctx, eg_unit* axpb, eg_unit* count1) {
 }
 
 /* An open recording and a live graph at eg_ctx_free are freed with the context. */
+/* Two exports released together from two threads: the one that drops the count to zero frees the context. */
+struct export_release {
+    struct DLManagedTensorVersioned* export;
+    volatile int* go;
+};
+
+static void* release_export(void* arg) {
+    struct export_release* r = arg;
+    while (!*r->go) sched_yield();
+    r->export->deleter(r->export);
+    return NULL;
+}
+
+/* eg_ctx_free with exports outstanding closes the context; the last export's release frees it. The oracle of "freed" is the
+ * wrapped tensors' own deleter, which runs only in the context's teardown, and valgrind's leak check over this whole test. */
+static void check_free_with_exports(void) {
+    double a = 1.0, b = 2.0;
+    struct tensor ta, tb;
+    struct DLManagedTensorVersioned *ea = NULL, *eb = NULL;
+    eg_ctx* ctx = make_ctx();
+    eg_plane* pa = ctx ? wrap(ctx, &ta, &a, 1, kDLFloat, 64) : NULL;
+    int ok = pa != NULL && eg_plane_dlpack(ctx, pa, &ea) == EG_OK && eg_plane_free(ctx, pa) == EG_OK && eg_ctx_free(ctx) == EG_OK;
+    struct eg_plane_desc d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    eg_plane* q = NULL;
+    ok = ok && eg_plane_new(ctx, &d, &q) == EG_BAD_REQUEST && q == NULL && reason_has(ctx, "the context is closed") &&
+         eg_ctx_free(ctx) == EG_BAD_REQUEST && ta.deleted == 0 && ((double*)ea->dl_tensor.data)[0] == 1.0;
+    if (ea != NULL) ea->deleter(ea);
+    check(ok && ta.deleted == 1, "eg_ctx_free with an export outstanding returns OK, a later call is refused by reason (closed), and the consumer's release frees the context");
+
+    ctx = make_ctx();
+    eg_plane* pa2 = ctx ? wrap(ctx, &ta, &a, 1, kDLFloat, 64) : NULL;
+    eg_plane* pb = ctx ? wrap(ctx, &tb, &b, 1, kDLFloat, 64) : NULL;
+    ok = pa2 != NULL && pb != NULL && eg_plane_dlpack(ctx, pa2, &ea) == EG_OK && eg_plane_dlpack(ctx, pb, &eb) == EG_OK &&
+         eg_ctx_free(ctx) == EG_OK;
+    volatile int go = 0;
+    struct export_release ra = { ea, &go }, rb = { eb, &go };
+    pthread_t ths[2];
+    ok = ok && pthread_create(&ths[0], NULL, release_export, &ra) == 0 && pthread_create(&ths[1], NULL, release_export, &rb) == 0;
+    go = 1;
+    if (ok) {
+        pthread_join(ths[0], NULL);
+        pthread_join(ths[1], NULL);
+    }
+    check(ok && ta.deleted == 1 && tb.deleted == 1, "two exports released on two threads after eg_ctx_free: one teardown, every tensor released once");
+
+    ctx = make_ctx();
+    pa = ctx ? wrap(ctx, &ta, &a, 1, kDLFloat, 64) : NULL;
+    ok = pa != NULL && eg_plane_dlpack(ctx, pa, &ea) == EG_OK;
+    if (ok) ea->deleter(ea);
+    ok = ok && eg_ctx_free(ctx) == EG_OK && ta.deleted == 1;
+    check(ok, "eg_ctx_free with every export already released frees at once, as without exports");
+}
+
 static void check_free_with_graph(void) {
     eg_ctx* ctx = make_ctx();
     double v = 1.0, w = 0.0;
@@ -2555,16 +2611,15 @@ static void check_alloc(eg_ctx* ctx, eg_unit* axpb) {
     d.dtype_bits = 64;
     check(ok, "eg_plane_new takes each dtype eg_plane_wrap takes (float64/32, int64/32/8, uint32, bool)");
 
-    {   /* the memory outlives eg_plane_free while an export is held, and the context cannot be freed meanwhile */
+    {   /* the memory outlives eg_plane_free and eg_ctx_free while an export is held */
         eg_ctx* other = make_ctx();
         eg_plane* q = NULL;
         struct DLManagedTensorVersioned* e = NULL;
         ok = other != NULL && eg_plane_new(other, &d, &q) == EG_OK && eg_plane_dlpack(other, q, &e) == EG_OK && eg_plane_free(other, q) == EG_OK;
         if (ok) ((double*)e->dl_tensor.data)[5] = 42.5;
-        ok = ok && eg_ctx_free(other) == EG_BAD_REQUEST && reason_has(other, "not yet released by its consumer") && ((double*)e->dl_tensor.data)[5] == 42.5;
+        ok = ok && eg_ctx_free(other) == EG_OK && ((double*)e->dl_tensor.data)[5] == 42.5;
         if (e != NULL) e->deleter(e);
-        ok = ok && eg_ctx_free(other) == EG_OK;
-        check(ok, "a plane freed while exported keeps its memory; eg_ctx_free is refused BAD_REQUEST by reason until the export is released");
+        check(ok, "a plane freed while exported keeps its memory, also across eg_ctx_free, until the export is released");
     }
 
     {   /* a launch on made planes == the same launch on caller planes, bitwise */
@@ -2861,6 +2916,7 @@ int main(int argc, char** argv) {
         }
     }
     check_free_with_graph();
+    check_free_with_exports();
     check_settings();
     check_error_protocol(ctx);
     check_bad_input(ctx, unit);

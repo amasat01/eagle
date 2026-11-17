@@ -325,7 +325,6 @@ struct eg_plane_s {
     eg_ctx* ctx = nullptr;
     DLManagedTensorVersioned* tensor = nullptr;
     int refs = 1;                             ///< the caller's reference plus one per binding and one per unreleased export
-    int exports = 0;                          ///< the DLPack exports (eg_plane_dlpack) not yet released by their consumers
     bool caller_ref = true;
     bool pinned = false;                      ///< eagle-made page-locked host memory: the tensor says kDLCPU, an export kDLCUDAHost
 };
@@ -491,6 +490,8 @@ struct eg_ctx_s {
     std::unordered_set<eg_plan_s*> plans;
     std::unordered_set<eg_runner_s*> runners;
     std::unordered_set<eg_graph_s*> graphs;
+    int exports = 0;                          ///< the DLPack exports (eg_plane_dlpack) not yet released by their consumers; changed under `busy`
+    bool closed = false;                      ///< eg_ctx_free ran with exports outstanding: the last export's release frees the context
     eg_recording_s* rec = nullptr;            ///< between eg_record_begin and eg_record_end
     eagle::door::DeviceState dev;             ///< EG_CTX_DEVICE: the device and its stream
     eagle::door::DeviceRecording* dev_rec = nullptr;              ///< a device context between eg_record_begin and eg_record_end
@@ -533,6 +534,9 @@ eg_status call(eg_ctx* ctx, F&& body, bool in_child = false, bool in_refused = f
                         "eg_error and eg_ctx_free");
     } else if (!in_refused && ctx->refused != EG_OK) {
         status = ctx->refused;
+    } else if (ctx->closed) {
+        status = EG_BAD_REQUEST;
+        ctx->set_reason("the context is closed: eg_ctx_free ran while an export was outstanding");
     } else {
         try {
             body(*ctx);
@@ -567,6 +571,7 @@ void check_handle(const std::unordered_set<H*>& set, const H* handle, const char
 eg_status ctx_new(const eg_ctx_settings* settings, eg_ctx** out) noexcept;
 eg_status error_read(eg_ctx* ctx, char* buf, std::size_t cap, std::size_t* len) noexcept;
 void ctx_free_all(eg_ctx& ctx);
+bool ctx_close(eg_ctx& ctx);
 void ctx_info(eg_ctx& ctx, struct eg_ctx_info* out);
 void unit_load(eg_ctx& ctx, const eg_unit_load_desc* desc, eg_unit** out);
 void unit_release(eg_ctx& ctx, eg_unit_s* unit);

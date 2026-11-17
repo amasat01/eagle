@@ -59,10 +59,6 @@ eg_status ctx_new(const eg_ctx_settings* settings, eg_ctx** out) noexcept {
  */
 void ctx_free_all(eg_ctx& ctx) {
     const bool child = forked(ctx);
-    if (!child)
-        for (const eg_plane_s* plane : ctx.planes)
-            if (plane->exports > 0)
-                refuse(EG_BAD_REQUEST, "eg_ctx_free: a plane exported by eg_plane_dlpack is not yet released by its consumer");
     record_drop_all(ctx);
     device_graphs_drop(ctx);
     for (eg_runner_s* runner : ctx.runners) delete runner;
@@ -85,6 +81,17 @@ void ctx_free_all(eg_ctx& ctx) {
     }
     ctx.units.clear();
     if (!child) device_close(ctx);
+}
+
+/** @brief eg_ctx_free's body: with exports outstanding mark @p ctx closed and return true (the last export's release
+ *  frees it); otherwise free everything now and return false. */
+bool ctx_close(eg_ctx& ctx) {
+    if (!forked(ctx) && ctx.exports > 0) {
+        ctx.closed = true;
+        return true;
+    }
+    ctx_free_all(ctx);
+    return false;
 }
 
 /** @brief Fill @p out per the OUTPUT struct rule (eg_ctx_info). */

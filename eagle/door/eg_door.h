@@ -467,7 +467,11 @@ struct eg_device_props {
 eg_status eg_ctx_new(const struct eg_ctx_settings* settings, eg_ctx** out);
 
 /** Free a context and every handle still made from it. NULL-safe. In a
- *  forked child frees host memory only. Status: OK. */
+ *  forked child frees host memory only. With DLPack exports outstanding
+ *  (eg_plane_dlpack) the context is only CLOSED: every later call on it except
+ *  ``eg_error`` is refused BAD_REQUEST "the context is closed", and everything
+ *  is freed when the last export's deleter runs, on the thread that runs it.
+ *  The context pointer is not used again after eg_ctx_free. Status: OK. */
 eg_status eg_ctx_free(eg_ctx* ctx);
 
 /**
@@ -595,8 +599,9 @@ eg_status eg_plane_new(eg_ctx* ctx, const struct eg_plane_desc* desc, eg_plane**
  * and holds a reference to it, so eg_plane_free may follow at once. The
  * consumer calls ``*out``'s deleter once when done; it may run on any thread
  * (it waits for a call in progress on the context) and the memory is freed
- * when the last reference drops. A context cannot be freed while an export is
- * unreleased: eg_ctx_free then returns BAD_REQUEST and frees nothing.
+ * when the last reference drops. eg_ctx_free with an export unreleased closes
+ * the context (see eg_ctx_free); the last export's release frees it, and the
+ * exported memory stays valid until then.
  * Replaces: ``export_dlpack`` (array_binding.h) over eagle's own allocations.
  * Calls today: ``export_dlpack`` (array_binding.h).
  * Status: OK; BAD_REQUEST (``out`` NULL, a plane not of this context or already

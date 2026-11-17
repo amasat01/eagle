@@ -31,9 +31,10 @@ EG_EXPORT eg_status eg_ctx_new(const struct eg_ctx_settings* settings, eg_ctx** 
 
 EG_EXPORT eg_status eg_ctx_free(eg_ctx* ctx) {
     if (ctx == nullptr) return EG_OK;
-    const eg_status status = door::call(ctx, door::ctx_free_all, true, true);
+    bool deferred = false;
+    const eg_status status = door::call(ctx, [&deferred](eg_ctx& c) { deferred = door::ctx_close(c); }, true, true);
     if (status != EG_OK && !door::forked(*ctx)) return status;
-    delete ctx;
+    if (!deferred) delete ctx;
     return EG_OK;
 }
 

@@ -188,13 +188,20 @@ void export_release(DLManagedTensorVersioned* tensor) {
         idle = false;
         std::this_thread::yield();
     }
-    --e->plane->exports;
+    --ctx.exports;
     try {
         plane_release(ctx, e->plane);
     } catch (...) {
     }
+    const bool last = ctx.closed && ctx.exports == 0;
     ctx.busy.store(false, std::memory_order_release);
     delete e;
+    if (!last) return;
+    try {
+        ctx_free_all(ctx);
+    } catch (...) {
+    }
+    delete &ctx;
 }
 }  // namespace
 
@@ -215,7 +222,7 @@ void plane_dlpack(eg_ctx& ctx, eg_plane_s* plane, DLManagedTensorVersioned** out
         e->managed.dl_tensor.device.device_id = 0;
     }
     ++plane->refs;
-    ++plane->exports;
+    ++ctx.exports;
     *out = &e.release()->managed;
 }
 
