@@ -2,7 +2,8 @@
  * eg_reduce and eg_copy over DEVICE planes, run on the context's stream. Reduce is eagle's canonical ordered tree (the order
  * the host runs, whatever the policy): each case is compared BITWISE with the old device reduction (the seam's
  * reduce_canonical_device, policy ordered) on the same planes, and with a plain loop for the exact ops and a long-double
- * sum for the float ones. Copy is checked against the source's bytes. Refusals by name: planes on both sides, overlapping
+ * sum for the float ones. Order rows (order_rows) pin the sum at sizes around the leaf and warp boundaries to committed bits
+ * of that old reduction. Copy is checked against the source's bytes. Refusals by name: planes on both sides, overlapping
  * device planes, a shape mismatch, either call while recording on a device context.
  *
  * usage: device_ops_test <oracle dir>   (in_<case>.bin, comp_<case>.bin, out_<case>.bin)
@@ -15,6 +16,8 @@
 
 #include <math.h>
 #include <stdlib.h>
+
+#include "reduce_order_expected.h"
 
 struct tensor2 {
     struct DLManagedTensorVersioned managed;
@@ -139,6 +142,59 @@ static void reduce_case(eg_ctx* ctx, const char* dir, const struct rcase* c, eg_
     free(in); free(comp); free(want); free(got);
 }
 
+/* Sample i of column j of the order-exposing input (reduce_order_oracle.py makes the same values): a splitmix64 hash of the flat
+ * index picks sign and a 24-bit mantissa, even samples are scaled by 1e8 and odd ones by 1, so any change of summation order shows. */
+static double order_input(int64_t n, int64_t j, int64_t i) {
+    uint64_t z = (uint64_t)(j * n + i) * 0x9E3779B97F4A7C15ULL + 0x9E3779B97F4A7C15ULL;
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+    z ^= z >> 31;
+    const double v = (1.0 + (double)(z >> 40) / 16777216.0) * (i % 2 == 0 ? 1e8 : 1.0);
+    return (z >> 39) & 1 ? -v : v;
+}
+
+/* eg_reduce SUM of two columns at each size, float32 and float64, under both policies: bitwise the committed bits of the old
+ * device reduction. */
+static void order_rows(eg_ctx* ctx) {
+    enum { COLS = 2 };
+    for (size_t r = 0; r < sizeof(ORDER_ROWS) / sizeof(ORDER_ROWS[0]); ++r) {
+        const struct order_row* row = &ORDER_ROWS[r];
+        const size_t item = (size_t)row->bits / 8;
+        char what[160];
+        for (eg_reduce_policy policy = EG_REDUCE_COMPENSATED; policy <= EG_REDUCE_FIXED; ++policy) {
+            void* in = malloc((size_t)(COLS * row->n) * item);
+            uint64_t got[COLS] = { 0 };
+            int ok = in != NULL;
+            for (int64_t k = 0; ok && k < COLS * row->n; ++k) {
+                const double v = order_input(row->n, k / row->n, k % row->n);
+                if (row->bits == 32) ((float*)in)[k] = (float)v;
+                else ((double*)in)[k] = v;
+            }
+            const uint8_t code = kDLFloat;
+            struct dplane pin = { 0 }, pout = { 0 };
+            ok = ok && dplane_new(ctx, &pin, 2, COLS, row->n, code, (uint8_t)row->bits, in) &&
+                 dplane_new(ctx, &pout, 1, COLS, 1, code, (uint8_t)row->bits, NULL);
+            struct eg_reduce_desc d;
+            memset(&d, 0, sizeof(d));
+            d.struct_size = sizeof(d);
+            d.in = pin.p;
+            d.out = pout.p;
+            d.op = EG_REDUCE_SUM;
+            d.policy = policy;
+            ok = ok && eg_reduce(ctx, &d) == EG_OK && eg_sync(ctx) == EG_OK;
+            for (int j = 0; ok && j < COLS; ++j) {    /* the sum's bits, zero-extended to 64 */
+                ok = cudaMemcpy(&got[j], (char*)pout.d + (size_t)j * item, item, cudaMemcpyDeviceToHost) == cudaSuccess;
+            }
+            snprintf(what, sizeof(what), "eg_reduce SUM f%d n=%lld policy %d: bitwise the old device reduction (order proof)", row->bits,
+                     (long long)row->n, policy);
+            check(ok && got[0] == row->sum[0] && got[1] == row->sum[1], what);
+            if (pin.p != NULL) dplane_free(ctx, &pin);
+            if (pout.p != NULL) dplane_free(ctx, &pout);
+            free(in);
+        }
+    }
+}
+
 static void copy_rows(eg_ctx* ctx, const char* dir) {
     enum { N = 10000 };
     double* x = malloc(N * sizeof(double));
@@ -209,6 +265,7 @@ int main(int argc, char** argv) {
     check(eg_ctx_new(&st, &ctx) == EG_OK, "eg_ctx_new device context (device 0)");
     for (size_t i = 0; i < sizeof(CASES) / sizeof(CASES[0]); ++i) reduce_case(ctx, argv[1], &CASES[i], EG_REDUCE_COMPENSATED);
     reduce_case(ctx, argv[1], &CASES[1], EG_REDUCE_FIXED);
+    order_rows(ctx);
     copy_rows(ctx, argv[1]);
     check(eg_ctx_free(ctx) == EG_OK, "eg_ctx_free");
     printf("%s: %d failure(s)\n", failures ? "FAIL" : "OK", failures);

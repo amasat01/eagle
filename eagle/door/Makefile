@@ -516,6 +516,7 @@ DEVICE_REVERSE_TEST := $(OUT)/device_reverse_test
 $(RUNNER_PAIR_TEST) $(ACTIVE_PAIR_TEST) $(FEATURES_TEST) $(OPS_TEST) $(BANDED_RUNNER_TEST) $(FAST_PAIR_TEST) $(GRAPH_PAIR_TEST) $(DEVICE_REVERSE_TEST): $(OUT)/%: test/%.c test/pair_util.h eg_door.h $(LIB) | check-cuda
 	$(CC) $(CFLAGS_C) -isystem $(CUDA)/include -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door \
 	  -Wl,-rpath,$(OUT) $(CUDART) -lm -pthread
+$(OPS_TEST): test/reduce_order_expected.h
 
 $(PAIR_DEVICE_TEST): test/pair_test.c eg_door.h $(LIB) | check-cuda
 	$(CC) $(CFLAGS_C) -DEG_PAIR_DEVICE -isystem $(CUDA)/include -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door \
