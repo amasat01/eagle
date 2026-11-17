@@ -519,6 +519,16 @@ struct eg_fft_s {
     bool caller_ref = true;
 };
 
+/** @brief A direct matrix product (eg_gemm_new): one GemmCall with its extents resolved, the width and the target. */
+struct eg_gemm_s {
+    eg_ctx* ctx = nullptr;
+    bool device = false;                      ///< the context's target: cuBLAS, else the reference loop
+    bool f32 = false;                         ///< the float width of the three planes
+    eagle::door::GemmCall call;               ///< the stored shapes, flags and m, n, k; its slots are unused
+    int refs = 1;                             ///< the caller's reference plus one per recording that runs it
+    bool caller_ref = true;
+};
+
 /** @brief All door state of one caller. */
 struct eg_ctx_s {
     long pid = 0;                             ///< the process that made the context
@@ -533,6 +543,7 @@ struct eg_ctx_s {
     std::unordered_set<eg_runner_s*> runners;
     std::unordered_set<eg_graph_s*> graphs;
     std::unordered_set<eg_fft_s*> ffts;
+    std::unordered_set<eg_gemm_s*> gemms;
     int exports = 0;                          ///< the DLPack exports (eg_plane_dlpack) not yet released by their consumers; changed under `busy`
     bool closed = false;                      ///< eg_ctx_free ran with exports outstanding: the last export's release frees the context
     eg_recording_s* rec = nullptr;            ///< between eg_record_begin and eg_record_end
@@ -660,6 +671,20 @@ void fft_release(eg_ctx& ctx, eg_fft_s* plan);
 void fft_free_all(eg_ctx& ctx);
 /** @brief eg_fft_run while recording: keep the run, false when the context is not recording. */
 bool record_fft(eg_ctx& ctx, eg_fft_s* plan, eg_plane_s* in, eg_plane_s* out);
+
+/** @brief The largest extent or row stride cuBLAS takes (a C int). */
+constexpr std::int64_t kGemmMaxExtent = 2147483647;
+/** @brief Set @p c's m, n, k from its stored shapes and flags; refuse (BAD_REQUEST, naming @p at) shapes whose contracted extents disagree or whose C is stored differently. */
+void gemm_shape(GemmCall& c, const std::string& at);
+/** @brief Refuse (BAD_REQUEST, naming @p at) a plane @p t that is not a view of @p rows rows whose row stride (its elements / @p rows) covers @p cols and that cuBLAS takes. */
+void check_gemm_plane(const std::string& at, std::int64_t rows, std::int64_t cols, const DLTensor& t);
+/** @brief Whether a DEVICE plan of @p plan's unit queues the cuBLAS products (a gemm unit the door can route, see eg_door.h). */
+bool gemm_routed(const eg_plan_s& plan);
+void gemm_new(eg_ctx& ctx, const eg_gemm_desc* desc, eg_gemm** out);
+void gemm_run(eg_ctx& ctx, eg_gemm_s* gemm, eg_plane_s* a, eg_plane_s* b, eg_plane_s* c);
+void gemm_release(eg_ctx& ctx, eg_gemm_s* gemm);
+/** @brief eg_gemm_run while recording on the host: keep the checked run, false when the context is not recording. */
+bool record_gemm(eg_ctx& ctx, eg_gemm_s* gemm, eg_plane_s* a, eg_plane_s* b, eg_plane_s* c);
 bool record_launch(eg_ctx& ctx, eg_plan_s* plan);
 bool record_run(eg_ctx& ctx, eg_runner_s* runner);
 void record_begin(eg_ctx& ctx);

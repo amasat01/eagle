@@ -4,8 +4,9 @@
  * The gemm unit record through the door. HOST rows (always): every load, plan and bind refusal of the record by status
  * and reason, and a host plan of each gemm unit running its own loop (the oracle) without cuBLAS ever being opened.
  * DEVICE rows (-DEG_GEMM_DEVICE, run through the GPU pool): each unit's DEVICE launch against that loop within the
- * width's tolerance, the replay of a recorded launch against the eager one bit for bit, a launch on a stream the
- * caller gave, and the DEVICE-only refusals. With "--no-cublas" (run with libno_cublas.so preloaded) only the missing
+ * width's tolerance (routed to cuBLAS), the replay of a recorded launch against the eager one bit for bit, a launch on a
+ * stream the caller gave, and each shape the door cannot route (two partitions, an index set, a runner's loop) launching
+ * the unit's own kernel to the host plan's values. With "--no-cublas" (run with libno_cublas.so preloaded) only the missing
  * cuBLAS row runs.
  *
  * Usage: gemm_test <libfixture_gemm.so> [--no-cublas]
@@ -104,6 +105,8 @@ struct tensor {
 
 struct matrix {
     int slot, bits, device;
+    uint32_t cell;  /* the value of a uint32 slot: the index count, every lane */
+    int kind;       /* 0: a product plane (2-D float of ``bits``); else a slot no product names, 1-D, zero-filled, never compared: 1 uint32, 2 bool, 3 float64 */
     int64_t rows, cols, elements;
     void* host;     /* the test's own copy */
     void* data;     /* where the plane lives */
@@ -118,8 +121,8 @@ static eg_plane* wrap(eg_ctx* ctx, struct matrix* m, int64_t rows, int64_t cols)
     m->tensor.managed.version.major = DLPACK_MAJOR_VERSION;
     m->tensor.managed.dl_tensor.data = m->data;
     m->tensor.managed.dl_tensor.device.device_type = m->device ? kDLCUDA : kDLCPU;
-    m->tensor.managed.dl_tensor.ndim = 2;
-    m->tensor.managed.dl_tensor.dtype.code = kDLFloat;
+    m->tensor.managed.dl_tensor.ndim = m->kind == 0 ? 2 : 1;
+    m->tensor.managed.dl_tensor.dtype.code = m->kind == 1 ? kDLUInt : m->kind == 2 ? kDLBool : kDLFloat;
     m->tensor.managed.dl_tensor.dtype.bits = (uint8_t)m->bits;
     m->tensor.managed.dl_tensor.dtype.lanes = 1;
     m->tensor.managed.dl_tensor.shape = m->tensor.shape;
@@ -152,11 +155,27 @@ static void shapes_of(const struct eg_unit_meta* u, int64_t n, int slack, struct
             m->elements = m->rows * m->cols;
         }
     }
+    for (int32_t i = 0; u->body != NULL && i < u->body->n_slots; ++i) {   /* the unit's other slots: one-element planes, but the door's own counter */
+        int known = u->finish != NULL && u->finish->counter_slot == i;
+        for (int q = 0; q < *count; ++q) known = known || out[q].slot == i;
+        if (known) continue;
+        const int32_t dtype = u->body->slots[i]->dtype;
+        struct matrix* m = &out[(*count)++];
+        memset(m, 0, sizeof(*m));
+        m->slot = i, m->rows = m->cols = m->elements = u->body->slots[i]->role == EG_ROLE_LOOKUP ? 1 : n;   /* the index count is one cell, the rest per-sample */
+        m->kind = dtype == EG_DTYPE_UINT32 ? 1 : dtype == EG_DTYPE_BOOL ? 2 : 3;
+        m->bits = m->kind == 3 ? 64 : m->kind == 1 ? 32 : 8;
+        m->cell = (uint32_t)n;
+    }
 }
 
 static void fill(struct matrix* m, unsigned seed) {
     unsigned state = seed;
-    m->host = malloc((size_t)m->elements * (size_t)m->bits / 8);
+    m->host = calloc((size_t)m->elements, (size_t)m->bits / 8);
+    if (m->kind != 0) {
+        if (m->kind == 1) *(uint32_t*)m->host = m->cell;
+        return;
+    }
     for (int64_t i = 0; i < m->elements; ++i) {
         const double v = sample(&state);
         if (m->bits == 32) ((float*)m->host)[i] = (float)v;
@@ -164,9 +183,18 @@ static void fill(struct matrix* m, unsigned seed) {
     }
 }
 
+/* How a unit is launched: recorded and replayed, as the loop of a runner, over @p parts partitions (base/count). ``entry``
+ * receives the plan's EG_ENTRY_* flags. */
+struct variant {
+    int record, runner;
+    int64_t parts;
+    const int64_t *base, *count;
+    uint32_t entry;
+};
+
 /* Run @p u over @p n lanes on a context: host planes of the test's own data, or device copies of them. Returns the
  * planes (outputs hold the result after eg_sync and a read back); @p matrices hold the initial data in ``host``. */
-static eg_status run(eg_ctx* ctx, eg_unit* unit, eg_structure s, struct matrix* matrices, int count, int64_t n, int record,
+static eg_status run(eg_ctx* ctx, eg_unit* unit, eg_structure s, struct matrix* matrices, int count, int64_t n, struct variant* v,
                      eg_plan** plan_out) {
     int32_t slots[8];
     eg_plane* planes[8];
@@ -185,7 +213,7 @@ static eg_status run(eg_ctx* ctx, eg_unit* unit, eg_structure s, struct matrix* 
         planes[i] = wrap(ctx, m, m->rows, m->cols);
         if (planes[i] == NULL) return EG_BAD_REQUEST;
     }
-    eg_status st = plan_new(ctx, unit, s, n, 0, NULL, NULL, plan_out);
+    eg_status st = plan_new(ctx, unit, s, n, v->parts, v->base, v->count, plan_out);
     struct eg_bind_desc b;
     memset(&b, 0, sizeof(b));
     b.struct_size = sizeof(b);
@@ -193,11 +221,32 @@ static eg_status run(eg_ctx* ctx, eg_unit* unit, eg_structure s, struct matrix* 
     b.plane_slots = slots;
     b.planes = planes;
     if (st == EG_OK) st = eg_bind(ctx, *plan_out, &b);
+    struct eg_entry_figures figures;
+    memset(&figures, 0, sizeof(figures));
+    figures.struct_size = sizeof(figures);
+    if (st == EG_OK) st = eg_plan_entry_figures(ctx, *plan_out, &figures);
+    v->entry = figures.flags;
     eg_graph* graph = NULL;
-    if (st == EG_OK && record) st = eg_record_begin(ctx);
-    if (st == EG_OK) st = eg_launch(ctx, *plan_out, NULL);
-    if (st == EG_OK && record) st = eg_record_end(ctx, &graph);
-    if (st == EG_OK && record) st = eg_graph_launch(ctx, graph);
+    if (st == EG_OK && v->runner) {
+        struct eg_runner_desc r;
+        eg_runner* runner = NULL;
+        struct eg_run_report report;
+        memset(&r, 0, sizeof(r));
+        memset(&report, 0, sizeof(report));
+        report.struct_size = sizeof(report);
+        r.struct_size = sizeof(r);
+        r.n_plans = 1;
+        r.plans = plan_out;
+        r.max_steps = 1;
+        st = eg_runner_new(ctx, &r, &runner);
+        if (st == EG_OK) st = eg_run(ctx, runner, &report);
+        if (runner != NULL) eg_runner_free(ctx, runner);
+    } else {
+        if (st == EG_OK && v->record) st = eg_record_begin(ctx);
+        if (st == EG_OK) st = eg_launch(ctx, *plan_out, NULL);
+        if (st == EG_OK && v->record) st = eg_record_end(ctx, &graph);
+        if (st == EG_OK && v->record) st = eg_graph_launch(ctx, graph);
+    }
     if (st == EG_OK) st = eg_sync(ctx);
     if (graph != NULL) eg_graph_free(ctx, graph);
     return st;
@@ -230,7 +279,7 @@ static void release(eg_ctx* ctx, eg_plan* plan, struct matrix* matrices, int cou
 static double worst_difference(struct matrix* matrices, int count, void* const* got, void* const* want) {
     double worst = 0.0;
     for (int i = 0; i < count; ++i)
-        for (int64_t j = 0; j < matrices[i].elements; ++j) {
+        for (int64_t j = 0; matrices[i].kind == 0 && j < matrices[i].elements; ++j) {
             const double g = matrices[i].bits == 32 ? ((float*)got[i])[j] : ((double*)got[i])[j];
             const double w = matrices[i].bits == 32 ? ((float*)want[i])[j] : ((double*)want[i])[j];
             if (isnan(g) || isnan(w)) return -1.0;
@@ -248,9 +297,259 @@ static int process_loaded(const char* needle) {
     return found;
 }
 
+
+/* ---- direct products (eg_gemm_new / eg_gemm_run / eg_gemm_free) -------------------------------------------------- */
+
+struct direct {
+    int bits;
+    uint32_t flags;
+    int64_t m, n, k;
+    int slack;      /* columns of slack on every plane: a column slice */
+};
+
+/* The stored (rows, cols) of A, B, C of a case, from its flags. */
+static void direct_shapes(const struct direct* d, int64_t shape[3][2]) {
+    const int ta = (d->flags & EG_GEMM_TRANS_A) != 0, tb = (d->flags & EG_GEMM_TRANS_B) != 0, tc = (d->flags & EG_GEMM_TRANS_C) != 0;
+    const int64_t a[2] = { ta ? d->k : d->m, ta ? d->m : d->k }, b[2] = { tb ? d->n : d->k, tb ? d->k : d->n }, c[2] = { tc ? d->n : d->m, tc ? d->m : d->n };
+    memcpy(shape[0], a, sizeof(a)), memcpy(shape[1], b, sizeof(b)), memcpy(shape[2], c, sizeof(c));
+}
+
+static eg_status direct_desc(eg_ctx* ctx, const struct direct* d, eg_gemm** out) {
+    int64_t shape[3][2];
+    direct_shapes(d, shape);
+    struct eg_gemm_desc desc;
+    memset(&desc, 0, sizeof(desc));
+    desc.struct_size = sizeof(desc);
+    desc.flags = d->flags;
+    desc.dtype_bits = (uint32_t)d->bits;
+    desc.a_rows = shape[0][0], desc.a_cols = shape[0][1], desc.b_rows = shape[1][0], desc.b_cols = shape[1][1];
+    desc.c_rows = shape[2][0], desc.c_cols = shape[2][1];
+    return eg_gemm_new(ctx, &desc, out);
+}
+
+/* Run a case on @p ctx (host or device planes) from the data of @p seed: C is returned (m*n-stored elements incl. slack) in
+ * @p c_out. @p record: through eg_record_begin/end and a replay; @p free_first: eg_gemm_free before the replay. */
+static eg_status direct_run(eg_ctx* ctx, int device, const struct direct* d, int record, int free_first, void** c_out) {
+    int64_t shape[3][2];
+    direct_shapes(d, shape);
+    struct matrix mat[3];
+    eg_plane* plane[3];
+    for (int i = 0; i < 3; ++i) {
+        memset(&mat[i], 0, sizeof(mat[i]));
+        mat[i].bits = d->bits, mat[i].device = device, mat[i].rows = shape[i][0], mat[i].cols = shape[i][1] + d->slack;
+        mat[i].elements = mat[i].rows * mat[i].cols;
+        fill(&mat[i], 21u + (unsigned)i);
+        mat[i].data = mat[i].host;
+#ifdef EG_GEMM_DEVICE
+        if (device) {
+            const size_t bytes = (size_t)mat[i].elements * (size_t)d->bits / 8;
+            if (cudaMalloc(&mat[i].data, bytes) != cudaSuccess) return EG_FAULT;
+            cudaMemcpy(mat[i].data, mat[i].host, bytes, cudaMemcpyHostToDevice);
+        }
+#endif
+        plane[i] = wrap(ctx, &mat[i], mat[i].rows, mat[i].cols);
+    }
+    eg_gemm* gemm = NULL;
+    eg_graph* graph = NULL;
+    eg_status st = direct_desc(ctx, d, &gemm);
+    if (st == EG_OK && record) st = eg_record_begin(ctx);
+    if (st == EG_OK) st = eg_gemm_run(ctx, gemm, plane[0], plane[1], plane[2]);
+    if (st == EG_OK && record) st = eg_record_end(ctx, &graph);
+    if (st == EG_OK && record && free_first) st = eg_gemm_free(ctx, gemm), gemm = NULL;
+    if (st == EG_OK && record) st = eg_graph_launch(ctx, graph);
+    if (st == EG_OK) st = eg_sync(ctx);
+    read_back(&mat[2], 1, c_out);
+    if (graph != NULL) eg_graph_free(ctx, graph);
+    if (gemm != NULL) eg_gemm_free(ctx, gemm);
+    for (int i = 0; i < 3; ++i) {
+        eg_plane_free(ctx, plane[i]);
+#ifdef EG_GEMM_DEVICE
+        if (device) cudaFree(mat[i].data);
+#endif
+        free(mat[i].host);
+    }
+    return st;
+}
+
+/* The independent oracle: the same inputs as direct_run, the product and the accumulate in long double, in plain C
+ * with its own index arithmetic. @p want gets C, @p scale the per-element sum |a||b| + |c0| that the rounding bound scales. */
+static void direct_oracle(const struct direct* d, long double* want, long double* scale) {
+    int64_t shape[3][2];
+    direct_shapes(d, shape);
+    struct matrix mat[3];
+    for (int i = 0; i < 3; ++i) {
+        memset(&mat[i], 0, sizeof(mat[i]));
+        mat[i].bits = d->bits, mat[i].elements = shape[i][0] * (shape[i][1] + d->slack);
+        fill(&mat[i], 21u + (unsigned)i);
+    }
+    const int64_t lda = shape[0][1] + d->slack, ldb = shape[1][1] + d->slack, ldc = shape[2][1] + d->slack;
+#define AT(i, r, c, ld) (d->bits == 32 ? (long double)((float*)mat[i].host)[(r) * (ld) + (c)] : (long double)((double*)mat[i].host)[(r) * (ld) + (c)])
+    for (int64_t i = 0; i < d->m; ++i)
+        for (int64_t j = 0; j < d->n; ++j) {
+            long double sum = 0.0L, mag = 0.0L;
+            for (int64_t p = 0; p < d->k; ++p) {
+                const long double x = (d->flags & EG_GEMM_TRANS_A) ? AT(0, p, i, lda) : AT(0, i, p, lda);
+                const long double y = (d->flags & EG_GEMM_TRANS_B) ? AT(1, j, p, ldb) : AT(1, p, j, ldb);
+                sum += x * y;
+                mag += fabsl(x * y);
+            }
+            const long double before = (d->flags & EG_GEMM_TRANS_C) ? AT(2, j, i, ldc) : AT(2, i, j, ldc);
+            const int64_t at = (d->flags & EG_GEMM_TRANS_C) ? j * ldc + i : i * ldc + j;
+            want[at] = (d->flags & EG_GEMM_ACCUMULATE) ? before + sum : sum;
+            scale[at] = mag + fabsl(before);
+        }
+#undef AT
+    for (int i = 0; i < 3; ++i) free(mat[i].host);
+}
+
+/* Whether @p got is within @p factor * (k + 2) * u * scale of the oracle everywhere C is written (u: the width's unit round-off).
+ * Slack columns are never written: they must equal the initial data, which the oracle holds as ``want`` = 0 there, so they are skipped. */
+static int within(const struct direct* d, const void* got, const long double* want, const long double* scale, double factor, double* worst_ratio) {
+    int64_t shape[3][2];
+    direct_shapes(d, shape);
+    const int64_t ldc = shape[2][1] + d->slack;
+    const long double u = d->bits == 32 ? 5.9604644775390625e-8L : 1.1102230246251565e-16L;
+    int ok = 1;
+    *worst_ratio = 0.0;
+    for (int64_t r = 0; r < shape[2][0]; ++r)
+        for (int64_t q = 0; q < shape[2][1]; ++q) {
+            const long double g = d->bits == 32 ? ((const float*)got)[r * ldc + q] : ((const double*)got)[r * ldc + q];
+            const long double bound = factor * (long double)(d->k + 2) * u * scale[r * ldc + q];
+            const long double err = fabsl(g - want[r * ldc + q]);
+            if (!(err <= bound)) ok = 0;
+            if (bound > 0 && (double)(err / bound) > *worst_ratio) *worst_ratio = (double)(err / bound);
+        }
+    return ok;
+}
+
+static void direct_cases(struct direct* out, int* n) {
+    *n = 0;
+    for (int bits = 32; bits <= 64; bits += 32)
+        for (uint32_t t = 0; t < 8; ++t)   /* every TRANS_A / TRANS_B / TRANS_C combination; odd t accumulates, t divisible by 3 slices columns */
+            out[(*n)++] = (struct direct){ bits, t | ((t & 1u) ? EG_GEMM_ACCUMULATE : 0u), 5, 4, 3, t % 3 == 0 ? 2 : 0 };
+    out[(*n)++] = (struct direct){ 64, 0, 6, 1, 7, 0 };   /* a reduce against a ones plane: n = 1 */
+    out[(*n)++] = (struct direct){ 32, EG_GEMM_TRANS_A, 6, 1, 7, 0 };
+}
+
+static void direct_rows(eg_ctx* host, eg_ctx* dev) {
+    struct direct cases[24];
+    int count = 0;
+    direct_cases(cases, &count);
+    int host_ok = 1, rec_ok = 1;
+    double worst_host = 0.0;
+#ifdef EG_GEMM_DEVICE
+    int dev_ok = 1;
+    double worst_dev = 0.0;
+#endif
+    for (int i = 0; i < count; ++i) {
+        const struct direct* d = &cases[i];
+        long double want[64], scale[64];
+        direct_oracle(d, want, scale);
+        void* h[1];
+        double ratio = 0.0;
+        const eg_status st = direct_run(host, 0, d, 0, 0, h);
+        /* the host loop sums in the plane's own width in order: within (k + 2) u of exact per element (the standard bound of a recursive sum of k products and one add) */
+        host_ok = host_ok && st == EG_OK && within(d, h[0], want, scale, 1.0, &ratio);
+        worst_host = ratio > worst_host ? ratio : worst_host;
+        int64_t shape[3][2];
+        direct_shapes(d, shape);
+        const size_t bytes = (size_t)(shape[2][0] * (shape[2][1] + d->slack)) * (size_t)d->bits / 8;
+        for (int free_first = 0; free_first < 2; ++free_first) {   /* the loop is deterministic: a recorded replay gives the eager run's bits */
+            void* again[1];
+            rec_ok = rec_ok && direct_run(host, 0, d, 1, free_first, again) == EG_OK && memcmp(h[0], again[0], bytes) == 0;
+            free(again[0]);
+        }
+#ifdef EG_GEMM_DEVICE
+        void* g[1];
+        /* device == host: each is within (k + 2) u of exact, so they differ by at most 2 (k + 2) u of the scale */
+        const eg_status sd = direct_run(dev, 1, d, 0, 0, g);
+        dev_ok = dev_ok && sd == EG_OK && within(d, g[0], want, scale, 1.0, &ratio);
+        worst_dev = ratio > worst_dev ? ratio : worst_dev;
+        long double device_vs_host[64];   /* the device result against the host loop's, 2 (k + 2) u of the scale apart at most */
+        for (size_t e = 0; e < bytes / (size_t)(d->bits / 8); ++e) device_vs_host[e] = d->bits == 32 ? ((float*)h[0])[e] : ((double*)h[0])[e];
+        dev_ok = dev_ok && within(d, g[0], device_vs_host, scale, 2.0, &ratio);
+        void* rg[1];
+        void* fg[1];
+        const int replay = direct_run(dev, 1, d, 1, 0, rg) == EG_OK && direct_run(dev, 1, d, 1, 1, fg) == EG_OK;
+        rec_ok = rec_ok && replay && memcmp(g[0], rg[0], bytes) == 0 && memcmp(g[0], fg[0], bytes) == 0;
+        free(g[0]), free(rg[0]), free(fg[0]);
+#endif
+        free(h[0]);
+    }
+    (void)dev;
+    char what[200];
+    snprintf(what, sizeof(what), "eg_gemm_run on the host: %d cases (all 8 TRANS combinations at f32 and f64, ACCUMULATE, a column slice, a reduce with n = 1) match a long-double C loop within (k + 2) u (worst %.3g of the bound)", count, worst_host);
+    check(host_ok, what);
+#ifdef EG_GEMM_DEVICE
+    snprintf(what, sizeof(what), "eg_gemm_run on the device: the same cases match the long-double loop within (k + 2) u, so device and host differ by at most 2 (k + 2) u (worst %.3g of one bound)", worst_dev);
+    check(dev_ok, what);
+#endif
+    check(rec_ok, "a recorded eg_gemm_run replays to the bits of the eager run (host and device), and eg_gemm_free before the replay is safe");
+}
+
+
+/* One refused descriptor: the status and the text. */
+static void desc_row(eg_ctx* ctx, const char* what, uint32_t flags, uint32_t bits, int64_t ar, int64_t ac, int64_t br, int64_t bc, int64_t cr, int64_t cc,
+                     const char* reason) {
+    struct eg_gemm_desc d = { sizeof(d), flags, bits, 0, ar, ac, br, bc, cr, cc };
+    eg_gemm* g = NULL;
+    char text[160];
+    snprintf(text, sizeof(text), "eg_gemm_new refuses %s: BAD_REQUEST naming it", what);
+    check(refused(eg_gemm_new(ctx, &d, &g), EG_BAD_REQUEST, ctx, reason) && g == NULL, text);
+}
+
+static struct matrix* plain(eg_ctx* ctx, struct matrix* m, int bits, int device, int64_t rows, int64_t cols) {
+    memset(m, 0, sizeof(*m));
+    m->bits = bits, m->device = device, m->rows = rows, m->cols = cols, m->elements = rows * cols;
+    m->data = m->host = calloc((size_t)m->elements, (size_t)bits / 8);
+    return wrap(ctx, m, rows, cols) == NULL ? NULL : m;
+}
+
+static void direct_refusals(eg_ctx* ctx) {
+    desc_row(ctx, "an unknown flag bit", 1u << 7, 64, 3, 5, 5, 4, 3, 4, "eg_gemm_desc.flags: unknown bits 128");
+    desc_row(ctx, "a float width of 16", 0, 16, 3, 5, 5, 4, 3, 4, "eg_gemm_desc.dtype_bits 16 is not a float width (32 or 64)");
+    desc_row(ctx, "an empty extent", 0, 64, 0, 5, 5, 4, 3, 4, "eg_gemm_desc.a_rows 0 is outside 1 .. 2147483647");
+    desc_row(ctx, "an extent past 2^31 - 1", 0, 64, 3, 5, 5, 2147483648LL, 3, 4, "eg_gemm_desc.b_cols 2147483648 is outside 1 .. 2147483647");
+    desc_row(ctx, "contracted extents that disagree", 0, 64, 3, 5, 4, 4, 3, 4, "eg_gemm_desc: the contracted extents disagree: A stored (3, 5) gives 5, B stored (4, 4) gives 4");
+    desc_row(ctx, "a C stored other than the product's", 0, 64, 3, 5, 5, 4, 3, 3, "eg_gemm_desc: C is stored (3, 3) but the product of (3, 5) and (5, 4) is stored (3, 4)");
+    struct eg_gemm_desc ok = { sizeof(ok), 0, 64, 0, 3, 5, 5, 4, 3, 4 };
+    eg_gemm* g = NULL;
+    check(refused(eg_gemm_new(ctx, &ok, NULL), EG_BAD_REQUEST, ctx, "eg_gemm_new: out is NULL") &&
+              refused(eg_gemm_new(ctx, NULL, &g), EG_BAD_REQUEST, ctx, "eg_gemm_desc is NULL"),
+          "eg_gemm_new refuses a NULL out and a NULL descriptor: BAD_REQUEST naming it");
+    check(eg_record_begin(ctx) == EG_OK && refused(eg_gemm_new(ctx, &ok, &g), EG_BAD_REQUEST, ctx, "eg_gemm_new while recording") && eg_record_end(ctx, (eg_graph**)&g) == EG_OK,
+          "eg_gemm_new while recording: BAD_REQUEST naming it, and the recording still ends");
+    eg_graph_free(ctx, (eg_graph*)g);
+    g = NULL;
+    struct matrix a, b, c, wrong_width, too_few_rows, narrow, overlap;
+    eg_plane *pa = plain(ctx, &a, 64, 0, 3, 5) ? a.plane : NULL, *pb = plain(ctx, &b, 64, 0, 5, 4) ? b.plane : NULL, *pc = plain(ctx, &c, 64, 0, 3, 4) ? c.plane : NULL;
+    eg_plane *p32 = plain(ctx, &wrong_width, 32, 0, 3, 5) ? wrong_width.plane : NULL, *p4 = plain(ctx, &too_few_rows, 64, 0, 4, 5) ? too_few_rows.plane : NULL;
+    eg_plane *pn = plain(ctx, &narrow, 64, 0, 3, 4) ? narrow.plane : NULL;
+    memset(&overlap, 0, sizeof(overlap));
+    overlap.bits = 64, overlap.data = a.data;   /* C over A's memory */
+    eg_plane* po = wrap(ctx, &overlap, 3, 4);
+    check(eg_gemm_new(ctx, &ok, &g) == EG_OK && pa != NULL && pb != NULL && pc != NULL && p32 != NULL && p4 != NULL && pn != NULL && po != NULL, "a product and planes to refuse runs of");
+    struct { eg_plane *a, *b, *c; const char* reason; } runs[] = {
+        { p32, pb, pc, "eg_gemm_run a: the plane must be float64 (the product's width)" },
+        { p4, pb, pc, "eg_gemm_run a: the plane must be 2-D with 3 rows" },
+        { pn, pb, pc, "eg_gemm_run a: the row stride 4 is smaller than the 5 stated columns" },
+        { pa, pb, po, "eg_gemm_run: c overlaps a or b" },
+        { NULL, pb, pc, "a is NULL" } };
+    for (size_t i = 0; g != NULL && i < sizeof(runs) / sizeof(runs[0]); ++i)
+        check(refused(eg_gemm_run(ctx, g, runs[i].a, runs[i].b, runs[i].c), EG_BAD_REQUEST, ctx, runs[i].reason), runs[i].reason);
+    check(refused(eg_gemm_run(ctx, NULL, pa, pb, pc), EG_BAD_REQUEST, ctx, "gemm is NULL"), "eg_gemm_run of a NULL handle: BAD_REQUEST naming it");
+    check(g != NULL && eg_gemm_free(ctx, g) == EG_OK && refused(eg_gemm_run(ctx, g, pa, pb, pc), EG_BAD_REQUEST, ctx, "gemm is not a live handle") &&
+              refused(eg_gemm_free(ctx, g), EG_BAD_REQUEST, ctx, "gemm is not a live handle") && eg_gemm_free(ctx, NULL) == EG_OK,
+          "eg_gemm_run and a second eg_gemm_free of a freed handle: BAD_REQUEST; eg_gemm_free(NULL) is OK");
+    struct matrix* all[] = { &a, &b, &c, &wrong_width, &too_few_rows, &narrow };
+    for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); ++i) eg_plane_free(ctx, all[i]->plane), free(all[i]->host);
+    eg_plane_free(ctx, po);
+}
+
 /* ---- HOST rows ------------------------------------------------------------------------------------------------- */
 
 static void host_loop_rows(eg_ctx* ctx, const char* path) {
+    struct variant eager = { 0 };
     static const char* const names[] = { "f64_sq", "f64_rect", "f64_ta", "f64_tb", "f64_tc", "f64_all", "f64_lane", "f64_wide", "f64_vjp",
                                          "f32_sq", "f32_rect", "f32_ta", "f32_tb", "f32_tc", "f32_all", "f32_lane", "f32_wide", "f32_vjp" };
     int ok = 1;
@@ -268,7 +567,7 @@ static void host_loop_rows(eg_ctx* ctx, const char* path) {
             memcpy(before[i], matrices[i].host, (size_t)matrices[i].elements * (size_t)matrices[i].bits / 8);
         }
         eg_plan* plan = NULL;
-        const eg_status st = load(ctx, path, names[u], &unit) == EG_OK ? run(ctx, unit, EG_STRUCTURE_HOST_TEAM, matrices, count, n, 0, &plan) : EG_FAULT;
+        const eg_status st = load(ctx, path, names[u], &unit) == EG_OK ? run(ctx, unit, EG_STRUCTURE_HOST_TEAM, matrices, count, n, &eager, &plan) : EG_FAULT;
         void* after[8];
         read_back(matrices, count, after);
         const int changed = worst_difference(matrices, count, after, before) > 1e-3;   /* the loop wrote an output */
@@ -348,8 +647,9 @@ static void refusal_rows(eg_ctx* ctx, const char* path) {
 /* ---- DEVICE rows ----------------------------------------------------------------------------------------------- */
 
 /* Run @p name on the host (the oracle) and on the device from the same data; the worst difference, or -1 on failure. */
-static double device_against_host(eg_ctx* host, eg_ctx* dev, const char* path, const char* name, int64_t n, int slack, int record,
+static double device_against_host(eg_ctx* host, eg_ctx* dev, const char* path, const char* name, int64_t n, int slack, struct variant* v,
                                   void** device_bits, int* count_out) {
+    struct variant eager = { 0 };
     struct matrix hm[8], dm[8];
     int count = 0;
     const struct eg_unit_meta* meta = unit_meta(name);
@@ -364,8 +664,8 @@ static double device_against_host(eg_ctx* host, eg_ctx* dev, const char* path, c
     eg_plan *hp = NULL, *dp = NULL;
     double worst = -1.0;
     if (load(host, path, name, &hu) == EG_OK && load(dev, path, name, &du) == EG_OK &&
-        run(host, hu, EG_STRUCTURE_HOST_TEAM, hm, count, n, 0, &hp) == EG_OK &&
-        run(dev, du, EG_STRUCTURE_DEVICE, dm, count, n, record, &dp) == EG_OK) {
+        run(host, hu, EG_STRUCTURE_HOST_TEAM, hm, count, n, &eager, &hp) == EG_OK &&
+        run(dev, du, EG_STRUCTURE_DEVICE, dm, count, n, v, &dp) == EG_OK) {
         void *want[8], *got[8];
         read_back(hm, count, want);
         read_back(dm, count, got);
@@ -374,7 +674,7 @@ static double device_against_host(eg_ctx* host, eg_ctx* dev, const char* path, c
         else for (int i = 0; i < count; ++i) free(got[i]);
         for (int i = 0; i < count; ++i) free(want[i]);
     } else {
-        reason_has(dev, "(device run failed)");
+        reason_has(dev, "(device run failed)"), reason_has(host, "(host run failed)");
     }
     release(host, hp, hm, count);
     release(dev, dp, dm, count);
@@ -388,16 +688,18 @@ static void device_rows(eg_ctx* host, eg_ctx* dev, const char* path) {
     for (int w = 0; w < 2; ++w) {
         int ok = 1;
         double worst = 0.0;
+        struct variant routed = { 0 };
         for (size_t s = 0; s < sizeof(shapes) / sizeof(shapes[0]); ++s) {
             char name[16];
             snprintf(name, sizeof(name), "%s_%s", w ? "f32" : "f64", shapes[s]);
-            const double d = device_against_host(host, dev, path, name, strcmp(shapes[s], "lane") == 0 ? 12 : 7, strcmp(shapes[s], "wide") == 0 ? 2 : 0, 0, NULL, NULL);
+            const double d = device_against_host(host, dev, path, name, strcmp(shapes[s], "lane") == 0 ? 12 : 7, strcmp(shapes[s], "wide") == 0 ? 2 : 0, &routed, NULL, NULL);
+            ok = ok && (routed.entry & EG_ENTRY_GEMM) != 0;
             if (d < 0 || d > (w ? 1e-5 : 1e-12)) printf("      %s: worst difference %g\n", name, d);
             ok = ok && d >= 0 && d <= (w ? 1e-5 : 1e-12);
             worst = d > worst ? d : worst;
         }
         char what[256];
-        snprintf(what, sizeof(what), "%s: every gemm unit (square, non-square, TRANS_A/B/C, PER_LANE, column slice, 2-call vjp with ACCUMULATE) on the device == the host loop (worst %g)",
+        snprintf(what, sizeof(what), "%s: every gemm unit (square, non-square, TRANS_A/B/C, PER_LANE, column slice, 2-call vjp with ACCUMULATE) on the device == the host loop (worst %g), each routed to cuBLAS (EG_ENTRY_GEMM set)",
                  w ? "float32" : "float64", worst);
         check(ok, what);
     }
@@ -406,8 +708,9 @@ static void device_rows(eg_ctx* host, eg_ctx* dev, const char* path) {
         const char* name = v ? "f64_vjp" : "f32_all";
         void *eager[8], *replay[8];
         int ce = 0, cr = 0;
-        const double a = device_against_host(host, dev, path, name, 7, 0, 0, eager, &ce);
-        const double b = device_against_host(host, dev, path, name, 7, 0, 1, replay, &cr);
+        struct variant once = { 0 }, recorded = { .record = 1 };
+        const double a = device_against_host(host, dev, path, name, 7, 0, &once, eager, &ce);
+        const double b = device_against_host(host, dev, path, name, 7, 0, &recorded, replay, &cr);
         int same = a >= 0 && b >= 0 && ce == cr;
         struct matrix m[8];
         int count = 0;
@@ -422,34 +725,38 @@ static void device_rows(eg_ctx* host, eg_ctx* dev, const char* path) {
     /* a stream the caller gave: the handle is made at eg_stream_use, the launch runs on it */
     cudaStream_t stream;
     check(cudaStreamCreate(&stream) == cudaSuccess && eg_stream_use(dev, (uint64_t)(uintptr_t)stream) == EG_OK, "eg_stream_use of a caller's stream after a gemm plan");
-    const double on_stream = device_against_host(host, dev, path, "f32_rect", 7, 0, 0, NULL, NULL);
+    struct variant once = { 0 };
+    const double on_stream = device_against_host(host, dev, path, "f32_rect", 7, 0, &once, NULL, NULL);
     check(on_stream >= 0 && on_stream <= 1e-5, "a gemm launch on the caller's stream == the host loop");
     eg_stream_use(dev, 0);
     cudaStreamDestroy(stream);
-    /* DEVICE-only refusals */
-    eg_unit *unit = NULL, *idx = NULL, *fin = NULL;
-    eg_plan* plan = NULL;
+    /* a DEVICE plan the door cannot route launches the unit's own kernel: EG_ENTRY_GEMM clear, the host plan's values */
     const int64_t base[2] = { 0, 4 }, count[2] = { 4, 3 };
-    check(load(dev, path, "f64_rect", &unit) == EG_OK &&
-              refused(plan_new(dev, unit, EG_STRUCTURE_DEVICE, 7, 2, base, count, &plan), EG_NOT_WRITTEN, dev, "a gemm unit is one product per launch; several partitions is not written"),
-          "a DEVICE plan of a gemm unit over two partitions refused NOT_WRITTEN by name");
-    check(load(dev, path, "gemm_index", &idx) == EG_OK &&
-              refused(plan_new(dev, idx, EG_STRUCTURE_DEVICE, 7, 0, NULL, NULL, &plan), EG_NOT_WRITTEN, dev, "an index set is not written"),
-          "a DEVICE plan of a gemm unit with an index set refused NOT_WRITTEN by name");
-    struct eg_runner_desc r;
-    eg_runner* runner = NULL;
-    memset(&r, 0, sizeof(r));
-    check(load(dev, path, "gemm_finish", &fin) == EG_OK && plan_new(dev, fin, EG_STRUCTURE_DEVICE, 7, 0, NULL, NULL, &plan) == EG_OK, "a DEVICE plan of a gemm unit with a finish loop");
-    r.struct_size = sizeof(r);
-    r.n_plans = 1;
-    r.plans = &plan;
-    r.max_steps = 1;
-    check(plan != NULL && refused(eg_runner_new(dev, &r, &runner), EG_NOT_WRITTEN, dev, "plans[0]: a gemm unit inside a device runner loop"),
-          "eg_runner_new over a gemm unit refused NOT_WRITTEN by name");
-    if (plan != NULL) eg_plan_free(dev, plan);
-    eg_unit_free(dev, unit);
-    eg_unit_free(dev, idx);
-    eg_unit_free(dev, fin);
+    struct { const char* what; const char* unit; struct variant v; } kernels[] = {
+        { "two partitions", "f64_rect", { 0, 0, 2, base, count, 0 } },
+        { "an index set", "gemm_index", { 0, 0, 0, NULL, NULL, 0 } },
+        { "a device runner's loop (a finishing unit)", "gemm_finish", { 0, 1, 0, NULL, NULL, 0 } } };
+    for (size_t i = 0; i < sizeof(kernels) / sizeof(kernels[0]); ++i) {
+        const double d = device_against_host(host, dev, path, kernels[i].unit, 7, 0, &kernels[i].v, NULL, NULL);
+        const int routed_entry = (kernels[i].v.entry & EG_ENTRY_GEMM) != 0;
+        char what[160];
+        snprintf(what, sizeof(what), "%s on %s runs the unit's kernel == the host plan (worst %g)%s", kernels[i].unit, kernels[i].what, d,
+                 kernels[i].v.runner ? "" : ", EG_ENTRY_GEMM clear");
+        check(d >= 0 && d <= 1e-12 && (kernels[i].v.runner || !routed_entry), what);
+    }
+}
+
+/* A host plane handed to a device product is refused by name. */
+static void direct_device_refusal(eg_ctx* dev) {
+    struct eg_gemm_desc d = { sizeof(d), 0, 64, 0, 3, 5, 5, 4, 3, 4 };
+    eg_gemm* g = NULL;
+    struct matrix a, b, c;
+    eg_plane *pa = plain(dev, &a, 64, 0, 3, 5) ? a.plane : NULL, *pb = plain(dev, &b, 64, 0, 5, 4) ? b.plane : NULL, *pc = plain(dev, &c, 64, 0, 3, 4) ? c.plane : NULL;
+    check(eg_gemm_new(dev, &d, &g) == EG_OK && refused(eg_gemm_run(dev, g, pa, pb, pc), EG_BAD_REQUEST, dev, "eg_gemm_run a: the product runs on the device and this plane is on the host"),
+          "eg_gemm_run of a device product over a host plane: BAD_REQUEST naming the target");
+    eg_gemm_free(dev, g);
+    eg_plane_free(dev, pa), eg_plane_free(dev, pb), eg_plane_free(dev, pc);
+    free(a.host), free(b.host), free(c.host);
 }
 
 #endif /* EG_GEMM_DEVICE */
@@ -482,6 +789,13 @@ int main(int argc, char** argv) {
                   refused(plan_new(dev, unit, EG_STRUCTURE_DEVICE, 7, 0, NULL, NULL, &plan), EG_FAULT, dev, "tried libcublas.so.13: does not load; libcublas.so.12: does not load"),
               "a DEVICE plan of a gemm unit with no cuBLAS is EG_FAULT naming both libraries tried");
         eg_unit_free(dev, unit);
+        struct eg_gemm_desc d = { sizeof(d), 0, 64, 0, 3, 5, 5, 4, 3, 4 };
+        eg_gemm* g = NULL;
+        check(refused(eg_gemm_new(dev, &d, &g), EG_FAULT, dev, "tried libcublas.so.13: does not load; libcublas.so.12: does not load") && g == NULL,
+              "eg_gemm_new with no cuBLAS is EG_FAULT naming both libraries tried");
+        const int64_t base[2] = { 0, 4 }, count[2] = { 4, 3 };
+        struct variant two = { 0, 0, 2, base, count, 0 };
+        check(device_against_host(host, dev, argv[1], "f64_rect", 7, 0, &two, NULL, NULL) >= 0, "a DEVICE plan the door cannot route runs its kernel with no cuBLAS");
         eg_ctx_free(dev);
         eg_ctx_free(host);
         printf("%s: %d failure(s)\n", failures ? "FAIL" : "PASS", failures);
@@ -490,8 +804,14 @@ int main(int argc, char** argv) {
 #endif
     host_loop_rows(host, argv[1]);
     refusal_rows(host, argv[1]);
+    direct_refusals(host);
+#ifndef EG_GEMM_DEVICE
+    direct_rows(host, NULL);
+#endif
 #ifdef EG_GEMM_DEVICE
     device_rows(host, dev, argv[1]);
+    direct_rows(host, dev);
+    direct_device_refusal(dev);
     eg_ctx_free(dev);
 #endif
     eg_ctx_free(host);

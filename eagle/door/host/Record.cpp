@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Host recording: between eg_record_begin and eg_record_end the recordable
-// calls (eg_launch, eg_run, eg_reduce, eg_copy, eg_fft_run) and conditionals are kept as
+// calls (eg_launch, eg_run, eg_reduce, eg_copy, eg_fft_run, eg_gemm_run) and conditionals are kept as
 // an ordered tree of nodes instead of running; eg_graph_launch replays it in
 // C. A node holds a reference to each plan, runner and plane it names (the
 // plan, runner, transform plan and plane counts of slice 1), so a recorded graph outlives the
@@ -19,11 +19,13 @@ namespace {
 
 /** @brief One recorded call, or one conditional with an arm list per arm. */
 struct Node {
-    enum Kind { Launch, Run, Reduce, Copy, Fft, Cond } kind = Launch;
+    enum Kind { Launch, Run, Reduce, Copy, Fft, Gemm, Cond } kind = Launch;
     eg_plan_s* plan = nullptr;
     eg_runner_s* runner = nullptr;
     host::ReduceOp reduce;
     eg_fft_s* fft = nullptr;
+    eg_gemm_s* gemm = nullptr;
+    eg_plane_s* rhs = nullptr;                  ///< a product's B (its A is ``src``, its C ``dst``)
     eg_plane_s* src = nullptr;                  ///< a copy's source, a transform's input
     eg_plane_s* dst = nullptr;                  ///< a copy's target, a transform's output
     eg_cond_kind cond = EG_COND_IF;
@@ -38,6 +40,7 @@ std::vector<eg_plane_s*> planes_of(const Node& n) {
         case Node::Reduce: return { n.reduce.in, n.reduce.out, n.reduce.comp };
         case Node::Copy:
         case Node::Fft: return { n.src, n.dst };
+        case Node::Gemm: return { n.src, n.rhs, n.dst };
         case Node::Cond: return { n.cell };
         default: return {};
     }
@@ -47,6 +50,7 @@ void retain(const Node& n) {
     if (n.plan != nullptr) ++n.plan->refs;
     if (n.runner != nullptr) ++n.runner->refs;
     if (n.fft != nullptr) ++n.fft->refs;
+    if (n.gemm != nullptr) ++n.gemm->refs;
     for (eg_plane_s* p : planes_of(n))
         if (p != nullptr) ++p->refs;
 }
@@ -56,6 +60,7 @@ void release(eg_ctx& ctx, const std::vector<Node>& nodes) {
         if (n.plan != nullptr) plan_release(ctx, n.plan);
         if (n.runner != nullptr) runner_release(ctx, n.runner);
         if (n.fft != nullptr) fft_release(ctx, n.fft);
+        if (n.gemm != nullptr) gemm_release(ctx, n.gemm);
         for (eg_plane_s* p : planes_of(n))
             if (p != nullptr) plane_release(ctx, p);
         for (const std::vector<Node>& arm : n.arms) release(ctx, arm);
@@ -104,6 +109,7 @@ void replay(eg_ctx& ctx, const std::vector<Node>& nodes) {
             case Node::Reduce: host::reduce_exec(n.reduce, host::team_threads(ctx)); break;
             case Node::Copy: host::copy_exec(*n.src, *n.dst); break;
             case Node::Fft: host::fft_exec(*n.fft, *n.src, *n.dst, host::team_threads(ctx)); break;
+            case Node::Gemm: host::gemm_exec(*n.gemm, *n.src, *n.rhs, *n.dst); break;
             case Node::Cond: {
                 const DLTensor& t = n.cell->tensor->dl_tensor;
                 const auto* cell = reinterpret_cast<const std::int32_t*>(static_cast<const char*>(t.data) + t.byte_offset);
@@ -171,6 +177,17 @@ bool record_fft(eg_ctx& ctx, eg_fft_s* plan, eg_plane_s* in, eg_plane_s* out) {
     n.fft = plan;
     n.src = in;
     n.dst = out;
+    return record(ctx, std::move(n));
+}
+
+/** @brief eg_gemm_run while recording: keep the checked run. */
+bool record_gemm(eg_ctx& ctx, eg_gemm_s* gemm, eg_plane_s* a, eg_plane_s* b, eg_plane_s* c) {
+    Node n;
+    n.kind = Node::Gemm;
+    n.gemm = gemm;
+    n.src = a;
+    n.rhs = b;
+    n.dst = c;
     return record(ctx, std::move(n));
 }
 

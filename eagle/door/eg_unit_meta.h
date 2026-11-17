@@ -557,11 +557,13 @@ struct eg_unit_derived {
 /**
  * A unit that is one dense contraction states ``eg_unit_meta.gemm``: the matrix products the library lowered it to.
  * The library states them; eagle lowers nothing. A unit with the member still carries its full kernel
- * (``host_entry``), because a HOST plan of it runs that kernel's own loop, bit for bit as without the member. A DEVICE
- * plan of it runs the stated products through cuBLAS on the context's stream INSTEAD of a kernel (no device image is
- * needed), in a recording or not. cuBLAS is opened at run time (libcublas.so.13, then .12), never linked; a DEVICE
- * plan of a gemm unit whose cuBLAS cannot be opened is EG_FAULT naming the files tried, never a silent fall back to
- * the kernel. Both widths run (``scalar_type`` float32: S, float64: D); a banded unit (EG_SCALAR_BANDED) with the
+ * (``host_entry``) and its device function, because a HOST plan of it runs that kernel's own loop, bit for bit as
+ * without the member, and so does a DEVICE plan the door cannot route. A DEVICE plan the door can route (one
+ * partition; not split, segmented, with cells, companions, an index set or an active set) runs the stated products
+ * through cuBLAS on the context's stream INSTEAD of the kernel, in a recording or not, and sets EG_ENTRY_GEMM in
+ * ``eg_plan_entry_figures``; a DEVICE runner launches the kernel. cuBLAS is opened at run time (libcublas.so.13, then
+ * .12), never linked; a routable DEVICE plan whose cuBLAS cannot be opened is EG_FAULT naming the files tried, never
+ * a silent fall back to the kernel. Both widths run (``scalar_type`` float32: S, float64: D); a banded unit (EG_SCALAR_BANDED) with the
  * member is refused EG_NOT_WRITTEN at ``eg_unit_load``, and the library never states one.
  *
  * Every plane is one dense row-major matrix view of its slot: rows as stated, row stride = the plane's elements / rows
@@ -573,10 +575,9 @@ struct eg_unit_derived {
  * ``n_calls`` < 1, an extent < 1 that is not EG_GEMM_PER_LANE, EG_GEMM_PER_LANE with ``lane_fanin`` 0 (EG_BAD_REQUEST).
  * ``eg_plan_new``: the contracted extents disagree, C's stored shape is not the product's (or its transpose), an
  * extent that does not resolve to 1 or more or ``n_samples`` not divisible by ``lane_fanin``, an extent or stride
- * beyond 2^31 - 1 (EG_BAD_REQUEST); a DEVICE plan with several partitions, or of a unit that is split, segmented, has
- * cells, companions, an index set or an active set (EG_NOT_WRITTEN: one gemm per launch); cuBLAS missing (EG_FAULT).
+ * beyond 2^31 - 1 (EG_BAD_REQUEST); cuBLAS missing on a routable DEVICE plan (EG_FAULT).
  * ``eg_bind``: a plane whose element count is not a multiple of the rows, or whose row stride is smaller than the
- * stated columns, or beyond 2^31 - 1 (EG_BAD_REQUEST). ``eg_runner_new``: a gemm unit in a DEVICE runner (EG_NOT_WRITTEN).
+ * stated columns, or beyond 2^31 - 1 (EG_BAD_REQUEST).
  *
  * The cuBLAS handle of the context's stream is made at ``eg_plan_new`` of the first DEVICE plan of a gemm unit and
  * again at ``eg_stream_use``; ``eg_launch`` never makes one, so a gemm is legal in a recording.
@@ -585,10 +586,6 @@ struct eg_unit_derived {
 /** An extent that is ``n_samples / eg_unit_gemm.lane_fanin``, resolved at ``eg_plan_new``. */
 #define EG_GEMM_PER_LANE (-1)
 
-#define EG_GEMM_TRANS_A (1u << 0)    /**< op(A) = A^T: A is stored (k, m) */
-#define EG_GEMM_TRANS_B (1u << 1)    /**< op(B) = B^T: B is stored (n, k) */
-#define EG_GEMM_TRANS_C (1u << 2)    /**< C is stored through a transposed view: (n, m) */
-#define EG_GEMM_ACCUMULATE (1u << 3) /**< C += product (beta 1); without: C = product (beta 0) */
 
 /** One matrix product ``C = op(A) * op(B)`` over three slots of the unit; op(A) is (m, k), op(B) is (k, n). */
 struct eg_unit_gemm_call {
