@@ -204,6 +204,31 @@ static void made_planes(eg_ctx* ctx, const char* dev_lib) {
         if (p) eg_plan_free(ctx, p);
     }
     check(match, "dkeyed: the companion made zeroed at bind, folded into acc after each of two launches, bitwise == the plain-C oracle");
+    {   /* eg_clear on the device: acc and its companion restart in stream order; a launch after the clear == the first launch of a fresh plan */
+        double first[3], got[3] = { -1, -1, -1 };
+        for (int k = 0; k < 3; ++k) first[k] = xv[4 * k] + xv[4 * k + 1] + xv[4 * k + 2] + xv[4 * k + 3] + 2.0;
+        const int32_t slots[2] = { 0, 2 }, out[1] = { 0 }, comp_slot[1] = { 1 };
+        eg_plane* planes[2] = { pa, px };
+        double zeroed[3] = { -1, -1, -1 };
+        cudaMemset(da, 0, sizeof(got));
+        eg_status s = plan_n(ctx, keyed, EG_STRUCTURE_DEVICE, 12, 0, NULL, NULL, &p);
+        if (s == EG_OK) s = bind_planes(ctx, p, 2, slots, planes);
+        for (int launch = 0; launch < 2 && s == EG_OK; ++launch) s = eg_launch(ctx, p, NULL);
+        if (s == EG_OK) s = eg_clear(ctx, p, 1, out);
+        if (s == EG_OK) s = eg_sync(ctx);
+        cudaMemcpy(zeroed, da, sizeof(zeroed), cudaMemcpyDeviceToHost);
+        if (s == EG_OK) s = eg_launch(ctx, p, NULL);
+        if (s == EG_OK) s = eg_sync(ctx);
+        cudaMemcpy(got, da, sizeof(got), cudaMemcpyDeviceToHost);
+        int ok = s == EG_OK && zeroed[0] == 0.0 && zeroed[1] == 0.0 && zeroed[2] == 0.0 && memcmp(got, first, sizeof(got)) == 0;
+        ok = ok && eg_clear(ctx, p, 0, NULL) == EG_OK;
+        ok = ok && refused(eg_clear(ctx, p, 1, comp_slot), EG_BAD_REQUEST, ctx, "'acc_c') is a companion or compensation plane");
+        ok = ok && refused(eg_clear(ctx, p, 1, slots + 1), EG_BAD_REQUEST, ctx, "is not an output plane");
+        if (!ok) printf("      cleared: %.17g %.17g %.17g, after relaunch %.17g %.17g %.17g\n", zeroed[0], zeroed[1], zeroed[2], got[0], got[1], got[2]);
+        check(ok, "eg_clear on a DEVICE plan: the output zero and the companion restarted in stream order (a launch after == a fresh plan, bitwise), "
+                  "n_slots 0 a no-op, a companion or an input slot refused BAD_REQUEST by reason");
+        if (p) eg_plan_free(ctx, p);
+    }
     eg_plane* cell_bad = NULL;
     struct tensor t2;
     double* d2 = dev_doubles(NULL, 2);

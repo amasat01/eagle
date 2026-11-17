@@ -546,6 +546,7 @@ void plan_free(eg_ctx& ctx, eg_plan_s* plan);
 void plan_release(eg_ctx& ctx, eg_plan_s* plan);
 void check_bound(const eg_plan_s& plan);
 void bind(eg_ctx& ctx, eg_plan_s* plan, const eg_bind_desc* desc);
+void clear(eg_ctx& ctx, eg_plan_s* plan, std::int32_t n_slots, const std::int32_t* slots);
 void bind_raw(eg_plan_s& plan, int slot, void* data, std::uint64_t count);
 void launch(eg_ctx& ctx, eg_plan_s* plan, std::uint64_t* tiles);
 void runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out);

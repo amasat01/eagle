@@ -610,6 +610,72 @@ void check_bound(const eg_plan_s& plan) {
                    "') is unbound");
 }
 
+/** @brief Restart what eagle owns beside the target in @p slot, whose plane is @p t: its compensation companion,
+ *  zeroed (in place when the target's shape and dtype are those it was made for, else made again), and an
+ *  ordered scatter's target scratch, made again sized by the target. */
+void renew_owned(eg_ctx& ctx, eg_plan_s& plan, int slot, const DLTensor& t) {
+    for (const CompanionFacts& c : plan.unit->companions) {     // a new target: its companion, zeroed, of its shape and dtype
+        if (c.target != slot) continue;
+        eg_plane_s* held = plan.bindings[c.slot].plane;
+        if (held != nullptr) {    // the same shape and dtype as before: zero the companion in place (a rebind is the old clear: no new allocation)
+            const DLTensor& h = held->tensor->dl_tensor;
+            bool same = h.ndim == t.ndim && h.dtype.code == t.dtype.code && h.dtype.bits == t.dtype.bits;
+            for (int a = 0; same && a < t.ndim; ++a) same = h.shape[a] == t.shape[a];
+            if (same) {
+                const std::size_t bytes = static_cast<std::size_t>(elements(h)) * (h.dtype.bits / 8);
+                if (plan.structure == EG_STRUCTURE_DEVICE) device_zero(ctx, h.data, bytes);
+                else std::memset(h.data, 0, bytes);
+                continue;
+            }
+        }
+        eg_plane_s* comp = make_plane(ctx, t.dtype, std::vector<std::int64_t>(t.shape, t.shape + t.ndim),
+                                      plan.structure == EG_STRUCTURE_DEVICE);
+        eg_plane_s* prev = plan.bindings[c.slot].plane;
+        plan.bindings[c.slot].plane = comp;
+        bind_handle(plan, c.slot, comp->tensor->dl_tensor.data, static_cast<std::uint64_t>(plan.n_samples));
+        if (prev != nullptr) plane_release(ctx, prev);
+    }
+    for (std::size_t k = 0; k < plan.unit->team_planes.size(); ++k) {    // an ordered scatter's partial sums: sized by the cells of the target just bound
+        const TeamPlaneFacts& tp = plan.unit->team_planes[k];
+        if (tp.unit != EG_UNIT_TARGET || tp.target != slot) continue;
+        eg_plane_s* fresh = make_team_plane(ctx, *plan.unit, tp, plan.n_samples, plan.structure == EG_STRUCTURE_DEVICE, elements(t));
+        eg_plane_s* prev = plan.team[k];
+        plan.team[k] = fresh;
+        if (prev != nullptr) plane_release(ctx, prev);
+    }
+}
+
+/** @brief eg_clear: zero each named output plane and what eagle owns beside it, in the stream order of @p ctx. */
+void clear(eg_ctx& ctx, eg_plan_s* plan, std::int32_t n_slots, const std::int32_t* slots) {
+    check_handle(ctx.plans, plan, "plan");
+    if (ctx.rec != nullptr || ctx.dev_rec != nullptr)
+        refuse(EG_BAD_REQUEST, "eg_clear while recording (eg_record_begin .. eg_record_end): clear between launches, outside the recording");
+    if (n_slots < 0 || (n_slots > 0 && slots == nullptr)) refuse(EG_BAD_REQUEST, "eg_clear: n_slots without its array");
+    const int n_all = static_cast<int>(plan->bindings.size());
+    std::vector<bool> seen(n_all, false);
+    for (std::int32_t i = 0; i < n_slots; ++i) {
+        const int slot = slots[i];
+        if (slot < 0 || slot >= n_all)
+            refuse(EG_BAD_REQUEST, "unknown slot " + std::to_string(slot) + " (the unit has " + std::to_string(n_all) + ")");
+        const SlotFacts& s = plan->unit->slots[slot];
+        const std::string name = "slot " + std::to_string(slot) + " ('" + s.name + "')";
+        if (s.made) refuse(EG_BAD_REQUEST, name + " is a companion or compensation plane: eagle clears it with its target, do not pass it");
+        if (s.role != EG_ROLE_MUTABLE && s.role != EG_ROLE_OUT && s.role != EG_ROLE_WIDE_OUT && s.role != EG_ROLE_ACCUM_OUT)
+            refuse(EG_BAD_REQUEST, name + " is not an output plane");
+        if (plan->bindings[static_cast<std::size_t>(slot)].plane == nullptr) refuse(EG_BAD_REQUEST, name + " is unbound");
+        if (seen[slot]) refuse(EG_BAD_REQUEST, name + " cleared twice in one call");
+        seen[slot] = true;
+    }
+    for (std::int32_t i = 0; i < n_slots; ++i) {
+        const DLTensor& t = plan->bindings[static_cast<std::size_t>(slots[i])].plane->tensor->dl_tensor;
+        void* data = static_cast<char*>(t.data) + t.byte_offset;
+        const std::size_t bytes = static_cast<std::size_t>(elements(t)) * (t.dtype.bits / 8);
+        if (plan->structure == EG_STRUCTURE_DEVICE) device_zero(ctx, data, bytes);
+        else std::memset(data, 0, bytes);
+        renew_owned(ctx, *plan, slots[i], t);
+    }
+}
+
 /** @brief eg_bind: check every entry, then replace the named slots. */
 void bind(eg_ctx& ctx, eg_plan_s* plan, const eg_bind_desc* desc) {
     check_handle(ctx.plans, plan, "plan");
@@ -637,35 +703,7 @@ void bind(eg_ctx& ctx, eg_plan_s* plan, const eg_bind_desc* desc) {
                                           : static_cast<std::uint64_t>(plan->n_samples));
         }
         if (old != nullptr) plane_release(ctx, old);
-        for (const CompanionFacts& c : plan->unit->companions) {     // a new target: its companion, zeroed, of its shape and dtype
-            if (c.target != d.plane_slots[i]) continue;
-            eg_plane_s* held = plan->bindings[c.slot].plane;
-            if (held != nullptr) {    // the same shape and dtype as before: zero the companion in place (a rebind is the old clear: no new allocation)
-                const DLTensor& h = held->tensor->dl_tensor;
-                bool same = h.ndim == t.ndim && h.dtype.code == t.dtype.code && h.dtype.bits == t.dtype.bits;
-                for (int a = 0; same && a < t.ndim; ++a) same = h.shape[a] == t.shape[a];
-                if (same) {
-                    const std::size_t bytes = static_cast<std::size_t>(elements(h)) * (h.dtype.bits / 8);
-                    if (plan->structure == EG_STRUCTURE_DEVICE) device_zero(ctx, h.data, bytes);
-                    else std::memset(h.data, 0, bytes);
-                    continue;
-                }
-            }
-            eg_plane_s* comp = make_plane(ctx, t.dtype, std::vector<std::int64_t>(t.shape, t.shape + t.ndim),
-                                          plan->structure == EG_STRUCTURE_DEVICE);
-            eg_plane_s* prev = plan->bindings[c.slot].plane;
-            plan->bindings[c.slot].plane = comp;
-            bind_handle(*plan, c.slot, comp->tensor->dl_tensor.data, static_cast<std::uint64_t>(plan->n_samples));
-            if (prev != nullptr) plane_release(ctx, prev);
-        }
-        for (std::size_t k = 0; k < plan->unit->team_planes.size(); ++k) {    // an ordered scatter's partial sums: sized by the cells of the target just bound
-            const TeamPlaneFacts& tp = plan->unit->team_planes[k];
-            if (tp.unit != EG_UNIT_TARGET || tp.target != d.plane_slots[i]) continue;
-            eg_plane_s* fresh = make_team_plane(ctx, *plan->unit, tp, plan->n_samples, plan->structure == EG_STRUCTURE_DEVICE, elements(t));
-            eg_plane_s* prev = plan->team[k];
-            plan->team[k] = fresh;
-            if (prev != nullptr) plane_release(ctx, prev);
-        }
+        renew_owned(ctx, *plan, d.plane_slots[i], t);
     }
     for (int i = 0; i < d.n_uniforms; ++i) {
         const int slot = d.uniform_slots[i];

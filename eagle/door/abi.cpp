@@ -103,6 +103,10 @@ EG_EXPORT eg_status eg_bind(eg_ctx* ctx, eg_plan* plan, const struct eg_bind_des
     return door::call(ctx, [&](eg_ctx& c) { door::bind(c, plan, desc); });
 }
 
+EG_EXPORT eg_status eg_clear(eg_ctx* ctx, eg_plan* plan, int32_t n_slots, const int32_t* slots) {
+    return door::call(ctx, [&](eg_ctx& c) { door::clear(c, plan, n_slots, slots); });
+}
+
 EG_EXPORT eg_status eg_launch(eg_ctx* ctx, eg_plan* plan, uint64_t* tiles) {
     return door::call(ctx, [&](eg_ctx& c) { door::launch(c, plan, tiles); });
 }

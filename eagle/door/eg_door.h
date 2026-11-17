@@ -544,6 +544,23 @@ eg_status eg_plan_free(eg_ctx* ctx, eg_plan* plan);
 eg_status eg_bind(eg_ctx* ctx, eg_plan* plan, const struct eg_bind_desc* desc);
 
 /**
+ * Zero the named OUTPUT slots' bound planes in place, and what eagle owns for
+ * each: its compensation companion (zeroed) and an ordered scatter's target
+ * scratch plane (made again, as eg_bind does for a rebound target). On a
+ * DEVICE plan the zeroing is queued on the context's stream, on a host plan it
+ * is done before return. A call that fails changes nothing. ``n_slots == 0``
+ * is OK and does nothing. Companions are always eagle's (a caller cannot bind
+ * one), so every companion of a named target is cleared with it. Call it
+ * between launches; it is not a node of a recording.
+ * Replaces: ``BoundPlan.clear``.
+ * Calls today: nothing compiled (Python fills each plane).
+ * Status: OK; BAD_REQUEST (``n_slots`` < 0, ``slots`` NULL with ``n_slots`` > 0,
+ * a slot out of range, not an output, an eagle-made plane, unbound or named
+ * twice, a call while recording).
+ */
+eg_status eg_clear(eg_ctx* ctx, eg_plan* plan, int32_t n_slots, const int32_t* slots);
+
+/**
  * Launch the bound plan once over each of its partitions. ``*tiles`` gets the
  * host tiles run (0 for DEVICE).
  * Replaces: ``BoundPlan.launch`` / ``Plan.run`` / ``exec.HostTeam.run``.

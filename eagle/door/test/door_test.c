@@ -2271,6 +2271,75 @@ static void check_made(eg_ctx* ctx) {
     eg_unit_free(ctx, keyed);
 }
 
+/* eg_clear: an output and its eagle-made companion restart together; every refusal by status and reason. */
+static void check_clear(eg_ctx* ctx, eg_unit* axpb) {
+    static double x[12], acc[4], y[8], xs[8];
+    struct tensor tx, ta, ty, txs;
+    eg_unit* keyed = NULL;
+    check(load(ctx, "keyed", 0x68, &keyed) == EG_OK, "eg_unit_load keyed for eg_clear");
+    if (keyed == NULL) return;
+    const eg_structure structures[2] = { EG_STRUCTURE_HOST_SERIAL, EG_STRUCTURE_HOST_TEAM };
+    int all = 1;
+    for (int si = 0; si < 2; ++si) {
+        eg_plane *px = wrap_1d(ctx, &tx, x, 12, kDLFloat, 64), *pa = wrap_nd(ctx, &ta, acc, kDLFloat, 64, 1, 3, 0, 0);
+        const int32_t slots[2] = { 2, 0 }, out[1] = { 0 };
+        eg_plane* planes[2] = { px, pa };
+        struct eg_bind_desc bd;
+        memset(&bd, 0, sizeof(bd));
+        bd.struct_size = sizeof(bd);
+        bd.n_planes = 2;
+        bd.plane_slots = slots;
+        bd.planes = planes;
+        eg_plan* p = NULL;
+        for (int i = 0; i < 12; ++i) x[i] = (double)(i + 1);
+        acc[0] = acc[1] = acc[2] = 0.0, acc[3] = 99.0;
+        all &= px && pa && plan(ctx, keyed, structures[si], 12, 0, NULL, NULL, &p) == EG_OK && eg_bind(ctx, p, &bd) == EG_OK &&
+               eg_launch(ctx, p, NULL) == EG_OK && eg_launch(ctx, p, NULL) == EG_OK;
+        all &= eg_clear(ctx, p, 1, out) == EG_OK;
+        for (int k = 0; k < 3; ++k) all &= acc[k] == 0.0;
+        all &= acc[3] == 99.0;    /* the plane ends at its third element */
+        all &= eg_launch(ctx, p, NULL) == EG_OK;
+        /* the values of the first launch of a fresh plan (a companion left at 0.125 would add 0.125 x 3 elements' worth) */
+        for (int k = 0; k < 3; ++k) all &= acc[k] == (double)(16 * k + 10) + 2.0;
+        all &= eg_clear(ctx, p, 0, NULL) == EG_OK && acc[0] == (double)10 + 2.0;    /* n_slots == 0 changes nothing */
+        eg_plan_free(ctx, p);
+        eg_plane_free(ctx, px);
+        eg_plane_free(ctx, pa);
+    }
+    check(all, "eg_clear: zeroes the output in place and restarts its companion (SERIAL and TEAM: a launch after the clear == the first launch of a fresh plan); "
+               "n_slots 0 is a no-op");
+    {
+        eg_plane *px = wrap_1d(ctx, &txs, xs, 8, kDLFloat, 64), *py = wrap_1d(ctx, &ty, y, 8, kDLFloat, 64);
+        const double a = 1.0, b = 0.0;
+        eg_plan* p = NULL;
+        eg_plan* kp = NULL;
+        int ok = px && py && plan(ctx, axpb, EG_STRUCTURE_HOST_SERIAL, 8, 0, NULL, NULL, &p) == EG_OK &&
+                 bind(ctx, p, py, px, &a, &b) == EG_OK;
+        const int32_t s_in[1] = { 1 }, s_unif[1] = { 2 }, s_none[1] = { 99 }, s_neg[1] = { -1 }, s_twice[2] = { 0, 0 };
+        ok = ok && eg_clear(ctx, p, -1, s_in) == EG_BAD_REQUEST && reason_has(ctx, "n_slots without its array");
+        ok = ok && eg_clear(ctx, p, 1, NULL) == EG_BAD_REQUEST && reason_has(ctx, "n_slots without its array");
+        ok = ok && eg_clear(ctx, p, 1, s_none) == EG_BAD_REQUEST && reason_has(ctx, "unknown slot 99");
+        ok = ok && eg_clear(ctx, p, 1, s_neg) == EG_BAD_REQUEST && reason_has(ctx, "unknown slot -1");
+        ok = ok && eg_clear(ctx, p, 1, s_in) == EG_BAD_REQUEST && reason_has(ctx, "'x') is not an output plane");
+        ok = ok && eg_clear(ctx, p, 1, s_unif) == EG_BAD_REQUEST && reason_has(ctx, "'a') is not an output plane");
+        ok = ok && eg_clear(ctx, p, 2, s_twice) == EG_BAD_REQUEST && reason_has(ctx, "'y') cleared twice");
+        ok = ok && plan(ctx, keyed, EG_STRUCTURE_HOST_SERIAL, 12, 0, NULL, NULL, &kp) == EG_OK;
+        const int32_t s_comp[1] = { 1 }, s_acc[1] = { 0 };
+        ok = ok && eg_clear(ctx, kp, 1, s_comp) == EG_BAD_REQUEST && reason_has(ctx, "'acc_c') is a companion or compensation plane");
+        ok = ok && eg_clear(ctx, kp, 1, s_acc) == EG_BAD_REQUEST && reason_has(ctx, "'acc') is unbound");
+        ok = ok && eg_record_begin(ctx) == EG_OK && eg_clear(ctx, p, 0, NULL) == EG_BAD_REQUEST && reason_has(ctx, "eg_clear while recording");
+        eg_graph* g = NULL;
+        ok = ok && eg_record_end(ctx, &g) == EG_OK && eg_graph_free(ctx, g) == EG_OK;
+        check(ok, "eg_clear: n_slots < 0, slots NULL, a slot out of range, an input, a uniform, a companion, an unbound slot, the same slot twice "
+                  "and a call while recording each refused BAD_REQUEST by reason");
+        eg_plan_free(ctx, p);
+        eg_plan_free(ctx, kp);
+        eg_plane_free(ctx, px);
+        eg_plane_free(ctx, py);
+    }
+    eg_unit_free(ctx, keyed);
+}
+
 int main(int argc, char** argv) {
     if (argc != 5) {
         fprintf(stderr, "usage: %s <fixture> <wrong size> <no size block> <v1 tag>\n", argv[0]);
@@ -2309,6 +2378,7 @@ int main(int argc, char** argv) {
     check_shared(ctx);
     check_box(ctx);
     check_made(ctx);
+    check_clear(ctx, unit);
 
     check_reduce(ctx);
     check_conditionals(ctx);
