@@ -152,8 +152,11 @@ typedef int32_t eg_steps_regime;
 #define EG_UNIT_CALLER_CARDS (1u << 0) /**< eg_unit_meta.flags: lowered under card documents the caller stated, not the shipped
                                           cards; eagle loads such a unit as any other and only carries the bit */
 
-#define EG_SLOT_PRIOR (1u << 0)       /**< the body reads the launch-start value: eagle keeps it between launches and records it */
-#define EG_SLOT_PARAM_PLANE (1u << 1) /**< a parameter read at index 0 only: eg_reverse reduces its gradient over samples */
+#define EG_SLOT_PRIOR (1u << 0)       /**< the body reads the slot before writing it: a caller must give it an initial value;
+                                          eagle validates the bit and does not act on it */
+#define EG_SLOT_PARAM_PLANE (1u << 1) /**< a LOOKUP slot that is a parameter read at index 0 only: its gradient is the sum over
+                                          samples into that one cell; eg_reverse of such a slot is not written in this build and is
+                                          refused by name */
 #define EG_SLOT_GATHER (1u << 2)      /**< a matrix read only at lane indices: its column count is not the lane count */
 #define EG_SLOT_SHARED (1u << 3)      /**< a parameter plane with NO lane axis: one value for every lane, bound flat (eg_bind sizes it by its shape, not by lanes) */
 
@@ -270,9 +273,6 @@ struct eg_unit_dispatch {
                                           classify set, sweep NULL) or dynamic (stale_slot and sweep set, classify NULL); any other mix is refused */
     const struct eg_branch_cost* const* branch_costs; /**< AUTO: k entries, branches[j]'s cost; NULL: not stated (AUTO runs as built) */
     uint32_t cost_flags;      /**< EG_DISPATCH_FUSED_VECTORISED, EG_DISPATCH_VECTOR_STATED; 0: none stated */
-    int32_t n_selector_slots; /**< the entries of selector_slots, 0: not stated */
-    const int32_t* selector_slots; /**< the slots whose planes the group's selector reads; the selector is static over a run
-                                        that writes none of them. NULL: not stated */
 };
 
 #define EG_BRANCH_VECTORISED (1u << 0)   /**< eg_branch_cost.flags: this branch's host loop vectorises */
