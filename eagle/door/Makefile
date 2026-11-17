@@ -100,7 +100,7 @@ LIB := $(OUT)/libeagle_door.$(SOEXT)
 FIXTURE := $(OUT)/libfixture_unit.so
 TEST := $(OUT)/door_test
 
-.PHONY: all lib symbols test check-inputs check-cuda pairs pair-reverse pair-reverse-active pair-reverse-timed pair-reverse-ps pair-reverse-fused pair-reverse-kstep pair-reverse-kstep3 pair-reverse-kstep7 pair-reverse-kstep8 pair-reverse-reorder pair-reverse-t0 pair-reverse-counter pair-refine pair-refine-reverse pair-refine-pend pair-refine-reverse-pend pair-refine-reverse-grid pair-refine-reverse-grid-refused pair-status-grid pair-status-tangent pair-status-two device pair-device-reverse pair-device-refine pair-device-refine-reverse $(PAIR_UNITS:%=pair-%) $(PAIR_DEVICE_UNITS:%=pair-device-%)
+.PHONY: all lib symbols test check-inputs check-cuda pairs pair-reverse pair-reverse-active pair-reverse-timed pair-reverse-ps pair-reverse-fused pair-reverse-kstep pair-reverse-kstep-auto pair-reverse-kstep3 pair-reverse-kstep7 pair-reverse-kstep8 pair-reverse-reorder pair-reverse-t0 pair-reverse-counter pair-refine pair-refine-reverse pair-refine-pend pair-refine-reverse-pend pair-refine-reverse-grid pair-refine-reverse-grid-refused pair-status-grid pair-status-tangent pair-status-two device pair-device-reverse pair-device-refine pair-device-refine-reverse $(PAIR_UNITS:%=pair-%) $(PAIR_DEVICE_UNITS:%=pair-device-%)
 all: test
 
 check-inputs:
@@ -283,6 +283,11 @@ $(eval $(call KSTEP_RULES,kstep,rr_pend_x4))
 $(eval $(call KSTEP_RULES,kstep3,rr_pend_x3))
 $(eval $(call KSTEP_RULES,kstep7,rr_pend_x7))
 $(eval $(call KSTEP_RULES,kstep8,rr_pend_x8))
+# pair-reverse-kstep-auto: the same artifact under steps_reverse AUTO: 64 samples lie inside the nearest table row (FUSED, reported, and
+# the run equals ORACLE_kstep bit for bit); 128 lie past it (PER_STEP, equal to the explicit PER_STEP run).
+pair-reverse-kstep-auto: symbols $(OUT)/libpair_kstep.so $(REV_TEST)
+	$(REV_TEST) $(REV_FIXTURE) $(OUT)/libpair_kstep.so $(ORACLE_kstep) $(DIGEST_kstep) $(DIGEST_kstep_tape) \
+	  $(DIGEST_rr_pend_step_vjp) 0 rr_pend_x4 64 fused $(DIGEST_kstep_fused_vjp) auto
 
 # pair-reverse-reorder: the same unit over 4096 samples with EG_RUN_REORDER (the old path's reordering run, every 4, theta 0.5).
 pair-reverse-reorder: symbols $(OUT)/libpair_reverse_active.so $(REV_TEST)

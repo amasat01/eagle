@@ -485,6 +485,84 @@ static void auto_rows(eg_ctx* ctx, const char* lib) {
 #define PSTEPS 400
 
 #define PMAX 4096
+/* One recorded and reversed run of the K-step primal @p p over @p n samples under @p mode, serial: its states, gradients and the
+ * way eagle reports it reversed (the seeds are 1 for x and 0.5 for v). */
+struct outside_out {
+    double x[PMAX], v[PMAX], t[PMAX], gx[PMAX], gv[PMAX], gt[PMAX], gc, gdt;
+    eg_steps_reverse reverse;
+    int ok;
+};
+
+static void outside_run(eg_ctx* ctx, eg_unit* p, eg_unit* const* units, const eg_derived_role* roles, int64_t k, eg_steps_reverse mode,
+                        int64_t n, const double* x0, const double* v0, const double* tf, struct outside_out* o) {
+    static double sx[PMAX], sv[PMAX];
+    uint8_t done[PMAX];
+    const double c = 0.3, dt = 0.01;
+    memset(o, 0, sizeof(*o));
+    memcpy(o->x, x0, (size_t)n * sizeof(*x0));
+    memcpy(o->v, v0, (size_t)n * sizeof(*v0));
+    memset(done, 0, sizeof(done));
+    for (int64_t i = 0; i < n; ++i) {
+        sx[i] = 1.0;
+        sv[i] = 0.5;
+    }
+    struct tensor tx, tv, tt, ttf, tdn, s1, s2, g1, g2, g3, g4, g5;
+    double tfin[PMAX];
+    memcpy(tfin, tf, (size_t)n * sizeof(*tf));
+    eg_plane* planes[5] = { host_plane(ctx, &tt, n, o->t, kDLFloat, 64), host_plane(ctx, &tv, n, o->v, kDLFloat, 64),
+                            host_plane(ctx, &tx, n, o->x, kDLFloat, 64), host_plane(ctx, &ttf, n, tfin, kDLFloat, 64),
+                            host_plane(ctx, &tdn, n, done, kDLBool, 8) };
+    const int32_t slots[5] = { 0, 1, 2, 3, 5 }, us[2] = { 6, 7 };
+    const void* const uv[2] = { &c, &dt };
+    const struct eg_bind_desc bd = binds(5, slots, planes, 2, us, uv);
+    eg_plane* const sp[2] = { host_plane(ctx, &s1, n, sx, kDLFloat, 64), host_plane(ctx, &s2, n, sv, kDLFloat, 64) };
+    eg_plane* const gp[5] = { host_plane(ctx, &g1, n, o->gx, kDLFloat, 64), host_plane(ctx, &g2, n, o->gv, kDLFloat, 64),
+                              host_plane(ctx, &g3, n, o->gt, kDLFloat, 64), host_plane(ctx, &g4, 1, &o->gc, kDLFloat, 64),
+                              host_plane(ctx, &g5, 1, &o->gdt, kDLFloat, 64) };
+    const int32_t sslot[2] = { 2, 1 }, gslot[5] = { 2, 1, 0, 6, 7 };
+    const struct eg_bind_desc sd = binds(2, sslot, sp, 0, NULL, NULL), gd = binds(5, gslot, gp, 0, NULL, NULL);
+    eg_plan* plan = plan_of(ctx, p, EG_STRUCTURE_HOST_SERIAL, n);
+    eg_runner* r = NULL;
+    struct eg_runner_desc d = recorded(&plan, PSTEPS, k, 0, roles, units);
+    d.n_derived = mode == EG_STEPS_REVERSE_AUTO ? 3 : 2;   /* an explicit PER_STEP states no K-step vjp */
+    d.steps_reverse = mode;
+    struct eg_run_report rep;
+    memset(&rep, 0, sizeof(rep));
+    rep.struct_size = sizeof(rep);
+    struct eg_runner_figures f;
+    memset(&f, 0, sizeof(f));
+    f.struct_size = sizeof(f);
+    o->ok = plan && eg_bind(ctx, plan, &bd) == EG_OK && eg_runner_new(ctx, &d, &r) == EG_OK && eg_run(ctx, r, &rep) == EG_OK &&
+            eg_runner_figures(ctx, r, &f) == EG_OK && eg_reverse(ctx, r, &sd, &gd) == EG_OK;
+    o->reverse = f.steps_reverse;
+    for (int i = 0; i < 5; ++i) eg_plane_free(ctx, planes[i]);
+    for (int i = 0; i < 2; ++i) eg_plane_free(ctx, sp[i]);
+    for (int i = 0; i < 5; ++i) eg_plane_free(ctx, gp[i]);
+    if (r) eg_runner_free(ctx, r);
+    if (plan) eg_plan_free(ctx, plan);
+}
+
+/* A batch of twice the oracle's samples (the oracle's inputs tiled) lies past the nearest table row: AUTO picks PER_STEP, and its
+ * states and gradients equal the explicit PER_STEP run of the same artifact bit for bit. */
+static void outside_row(eg_ctx* ctx, eg_unit* p, eg_unit* const* units, const eg_derived_role* roles, int64_t k, int64_t pn,
+                        const double* x0, const double* v0, const double* tf) {
+    static double tx0[PMAX], tv0[PMAX], ttf[PMAX];
+    static struct outside_out a, b;
+    for (int64_t i = 0; i < 2 * pn; ++i) {
+        tx0[i] = x0[i % pn];
+        tv0[i] = v0[i % pn];
+        ttf[i] = tf[i % pn];
+    }
+    outside_run(ctx, p, units, roles, k, EG_STEPS_REVERSE_AUTO, 2 * pn, tx0, tv0, ttf, &a);
+    outside_run(ctx, p, units, roles, k, EG_STEPS_REVERSE_PER_STEP, 2 * pn, tx0, tv0, ttf, &b);
+    check(a.ok && b.ok && a.reverse == EG_STEPS_REVERSE_PER_STEP && b.reverse == EG_STEPS_REVERSE_PER_STEP &&
+              memcmp(a.x, b.x, (size_t)(2 * pn) * sizeof(*a.x)) == 0 && memcmp(a.v, b.v, (size_t)(2 * pn) * sizeof(*a.v)) == 0 &&
+              memcmp(a.t, b.t, (size_t)(2 * pn) * sizeof(*a.t)) == 0 && memcmp(a.gx, b.gx, (size_t)(2 * pn) * sizeof(*a.gx)) == 0 &&
+              memcmp(a.gv, b.gv, (size_t)(2 * pn) * sizeof(*a.gv)) == 0 && memcmp(a.gt, b.gt, (size_t)(2 * pn) * sizeof(*a.gt)) == 0 &&
+              memcmp(&a.gc, &b.gc, sizeof(a.gc)) == 0 && memcmp(&a.gdt, &b.gdt, sizeof(a.gdt)) == 0,
+          "pair AUTO: a batch past the nearest row chooses PER_STEP, reported, states and gradients bitwise the explicit PER_STEP's");
+}
+
 static void pair_rows(eg_ctx* ctx, int argc, char** argv) {
     const char *lib = argv[2], *dir = argv[3];
     /* with an active set (argc 9): the cadence in steps and the primal's name (_pend_body: the mask is slot 7, c and dt 8 and 9) */
@@ -492,7 +570,8 @@ static void pair_rows(eg_ctx* ctx, int argc, char** argv) {
     const long every = named ? atol(argv[7]) : 0;
     const int act = every > 0;
     const int64_t pn = argc >= 10 ? atol(argv[9]) : 64;
-    const int fvj = argc == 12;   /* steps_reverse FUSED: base is the K-step primal (rr_pend_x<K>), argv[11] the K-step vjp's digest */
+    const int autoed = argc == 13;   /* steps_reverse AUTO over the same artifact: FUSED expected (steps_reverse FUSED otherwise) */
+    const int fvj = argc == 12 || autoed;   /* base is the K-step primal (rr_pend_x<K>), argv[11] the K-step vjp's digest */
     const long kfused = fvj && strstr(argv[8], "_x") ? atol(strstr(argv[8], "_x") + 2) : 0;   /* its K: the window */
     const int reorder = argc == 10 || argc == 11;
     const char* base = named ? argv[8] : "rr_pend";
@@ -556,7 +635,7 @@ static void pair_rows(eg_ctx* ctx, int argc, char** argv) {
             struct eg_runner_desc d = recorded(&plan, PSTEPS, fvj ? kfused : fused ? PSTEPS : named ? 37 : si ? PSTEPS : -1, 0, roles, units);
             d.every = every;
             if (fvj) {
-                d.steps_reverse = EG_STEPS_REVERSE_FUSED;
+                d.steps_reverse = autoed ? EG_STEPS_REVERSE_AUTO : EG_STEPS_REVERSE_FUSED;
                 d.n_derived = 3;
             }
             if (reorder) {
@@ -583,7 +662,11 @@ static void pair_rows(eg_ctx* ctx, int argc, char** argv) {
             }
             const int ok = plan && eg_bind(ctx, plan, &bd) == EG_OK && eg_runner_new(ctx, &d, &r) == EG_OK &&
                            eg_run(ctx, r, &rep) == EG_OK;
-            int s_ok = ok && (have_run ? rep.steps == run_ref[0] && rep.launches == run_ref[1] : rep.steps == smax) && rep.finished == pn && (!reorder || rep.reorders > 0);
+            struct eg_runner_figures fig;
+            memset(&fig, 0, sizeof(fig));
+            fig.struct_size = sizeof(fig);
+            int s_ok = ok && (!autoed || (eg_runner_figures(ctx, r, &fig) == EG_OK && fig.steps_reverse == EG_STEPS_REVERSE_FUSED)) &&
+                       (have_run ? rep.steps == run_ref[0] && rep.launches == run_ref[1] : rep.steps == smax) && rep.finished == pn && (!reorder || rep.reorders > 0);
             for (int i = 0; s_ok && i < pn; ++i) s_ok = x[i] == ex[i] && v[i] == ev[i] && t[i] == et[i];
             snprintf(what, sizeof(what), "pair %s%s %s %d threads (window %s, launches %lld): the recorded run's states equal the old "
                      "path's bitwise (%lld steps)", base, reorder ? " (reordering active set)" : act ? " (active set)" : "", si ? "HOST_TEAM" : "HOST_SERIAL", threads[ti], fvj ? "K" : fused ? "400 built in" : named ? "37" : si ? "400" : "-1, full",
@@ -619,6 +702,7 @@ static void pair_rows(eg_ctx* ctx, int argc, char** argv) {
             eg_plan_free(ctx, plan);
         }
     eg_host_threads(ctx, 0);
+    if (autoed) outside_row(ctx, p, units, roles, kfused, pn, x0, v0, tf);
     eg_unit_free(ctx, p);
     eg_unit_free(ctx, units[0]);
     eg_unit_free(ctx, units[1]);
@@ -626,8 +710,8 @@ static void pair_rows(eg_ctx* ctx, int argc, char** argv) {
 }
 
 int main(int argc, char** argv) {
-    if (argc != 2 && argc != 7 && argc != 9 && argc != 10 && argc != 11 && argc != 12) {
-        fprintf(stderr, "usage: %s <fixture_reverse lib> [<pair lib> <oracle dir> <primal digest> <twin digest> <vjp digest> [<every> <primal name> [<n>: reorder]]]\n",
+    if (argc != 2 && argc != 7 && argc != 9 && argc != 10 && argc != 11 && argc != 12 && argc != 13) {
+        fprintf(stderr, "usage: %s <fixture_reverse lib> [<pair lib> <oracle dir> <primal digest> <twin digest> <vjp digest> [<every> <primal name> [<n>: reorder | <n> fused <K-step vjp digest> [auto]]]]\n",
                 argv[0]);
         return 2;
     }
