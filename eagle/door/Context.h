@@ -241,6 +241,7 @@ struct SegFacts {
     static constexpr std::int32_t kMap = -2, kCount = -3;   ///< a sweep's active map and count: eagle's own, joined to no plan slot
     bool present = false;
     bool dynamic = false;                     ///< a stale slot and a sweep, no classify unit
+    std::size_t own_slots = 0;                ///< the planned unit's own slot count: its kernel takes that many arguments, not the group's extra slots
     std::int32_t k = 0, class_slot = -1, stale_slot = -1, offsets_slot = -1, mask_slot = -1;   ///< plan slots; mask: the TERMINATED slot, -1: every sample is live
     std::string name;
     std::vector<eg_unit_s*> branches;         ///< k units in class order; a reference may be the unit itself

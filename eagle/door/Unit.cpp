@@ -992,6 +992,7 @@ void resolve_segmented(eg_ctx& ctx, const eg_unit_load_desc& d, eg_unit_s& unit)
         S.class_slot = group->cls;
         S.stale_slot = group->stale;
         S.access = unit.access;
+        S.own_slots = unit.slots.size();
         std::vector<const DispatchFacts*> records;
         for (std::int32_t j = 0; j < group->k; ++j) {
             eg_unit_s* b = find(group->branches[static_cast<std::size_t>(j)], "branch");

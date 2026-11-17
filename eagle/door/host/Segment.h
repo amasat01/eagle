@@ -107,8 +107,9 @@ inline void gather(Owned& o, const std::vector<std::int32_t>& perm, std::size_t 
 /** @brief The argument list of unit @p m (member @p mi): its slots joined to the plan's, a sorted copy where the plane is owned. */
 inline std::vector<void*> params_of(const eg_plan_s& plan, std::size_t mi, const eg_unit_s& m, std::vector<Owned>& owned, std::uint32_t* n32) {
     const SegFacts& g = plan.unit->seg;
-    std::vector<void*> params(m.slots.size());
-    for (std::size_t j = 0; j < m.slots.size(); ++j) {
+    const std::size_t arity = &m == plan.unit ? g.own_slots : m.slots.size();    // the planned unit has grown the group's extra slots after its own
+    std::vector<void*> params(arity);
+    for (std::size_t j = 0; j < arity; ++j) {
         const std::int32_t s = g.join[mi][j];
         void* arg = n32;
         if (s == SegFacts::kMap) arg = &plan.seg.map_h;
