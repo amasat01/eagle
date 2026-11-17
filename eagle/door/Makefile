@@ -75,6 +75,9 @@ CXXFLAGS_DOOR := -std=c++23 -O2 -fPIC -fvisibility=hidden -fvisibility-inlines-h
   -ffp-contract=off $(WARN) -fopenmp -DAETHER_CPP_MODE=1 -DEAGLE_CPU_ONLY=1 \
   -include $(WING_FACTS) -I$(ROOT) -I$(AETHER_INCLUDE)
 CFLAGS_C := -std=c11 -O2 -ffp-contract=off $(WARN) -I$(ROOT)
+# The compiler writes the headers a target reads into a .d file beside the output (named after the -o file), keyed to
+# the target the rule builds, so an edit to any header rebuilds it; the one include of the .d files is below.
+DEPFLAGS = -MMD -MP -MT $@
 
 comma := ,
 CXXFLAGS_DEVICE := $(filter-out -DEAGLE_CPU_ONLY=1,$(CXXFLAGS_DOOR)) -isystem $(CUDA)/include
@@ -82,7 +85,6 @@ CUDART := $(if $(CUDA),-L$(CUDA)/lib64 -lcudart -Wl$(comma)-rpath$(comma)$(CUDA)
 
 SRC := Context.cpp Unit.cpp Plane.cpp Plan.cpp Fft.cpp Gemm.cpp RunCheck.cpp Look.cpp abi.cpp host/Runner.cpp host/Reverse.cpp host/Ops.cpp host/Fft.cpp host/Gemm.cpp host/Record.cpp device/Device.cpp device/Gemm.cpp
 OBJ := $(SRC:%.cpp=$(OUT)/%.o) $(if $(CUDA),$(OUT)/device/Loop.o $(OUT)/device/Fft.o)
--include $(OBJ:.o=.d)
 # The shared-library link differs by system; door.map stays the one list of exported names (Darwin's list is made from it).
 ifeq ($(shell uname -s),Darwin)
 SOEXT := dylib
@@ -167,23 +169,23 @@ confined: $(CORE_OBJ)
 FIXTURE_BAD := $(OUT)/libfixture_wrong_size.so $(OUT)/libfixture_no_block.so $(OUT)/libfixture_v1_tag.so
 block_of = $(if $(findstring wrong_size,$1),1,$(if $(findstring no_block,$1),2,$(if $(findstring v1_tag,$1),3,0)))
 
-$(FIXTURE) $(FIXTURE_BAD): test/fixture_unit.c eg_door.h eg_unit_meta.h
+$(FIXTURE) $(FIXTURE_BAD): test/fixture_unit.c
 	@mkdir -p $(OUT)
-	$(CC) $(CFLAGS_C) -DFIXTURE_BLOCK=$(call block_of,$@) -fPIC -shared -fvisibility=hidden -o $@ $<
+	$(CC) $(DEPFLAGS) $(CFLAGS_C) -DFIXTURE_BLOCK=$(call block_of,$@) -fPIC -shared -fvisibility=hidden -o $@ $<
 
-$(TEST): test/door_test.c test/fft_cases.h test/seg_model.h eg_door.h $(LIB)
-	$(CC) $(CFLAGS_C) -DEG_TEST_DIR='"$(CURDIR)/test"' -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door -Wl,-rpath,$(OUT) -lm -pthread
+$(TEST): test/door_test.c $(LIB)
+	$(CC) $(DEPFLAGS) $(CFLAGS_C) -DEG_TEST_DIR='"$(CURDIR)/test"' -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door -Wl,-rpath,$(OUT) -lm -pthread
 
 # eg_reverse: the closed-form fixture library (test/fixture_reverse.c) and its test.
 REV_FIXTURE := $(OUT)/libfixture_reverse.so
 REV_TEST := $(OUT)/reverse_test
 
-$(REV_FIXTURE): test/fixture_reverse.c eg_door.h eg_unit_meta.h
+$(REV_FIXTURE): test/fixture_reverse.c
 	@mkdir -p $(OUT)
-	$(CC) $(CFLAGS_C) -fPIC -shared -fvisibility=hidden -o $@ $<
+	$(CC) $(DEPFLAGS) $(CFLAGS_C) -fPIC -shared -fvisibility=hidden -o $@ $<
 
-$(REV_TEST): test/reverse_test.c test/pair_util.h eg_door.h $(LIB)
-	$(CC) $(CFLAGS_C) -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door -Wl,-rpath,$(OUT) -lm -pthread
+$(REV_TEST): test/reverse_test.c $(LIB)
+	$(CC) $(DEPFLAGS) $(CFLAGS_C) -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door -Wl,-rpath,$(OUT) -lm -pthread
 
 # The gemm unit record: its fixture library (test/fixture_gemm.c), the host rows, and the device rows with the
 # missing-cuBLAS shim (device targets only).
@@ -196,23 +198,23 @@ NO_CUBLAS := $(OUT)/libno_cublas.so
 # cannot route to cuBLAS has a kernel.
 $(OUT)/fixture_gemm.fatbin: test/fixture_gemm.cu | check-cuda
 	@mkdir -p $(OUT)
-	$(NVCC) -fatbin -arch=sm_61 -Wno-deprecated-gpu-targets -std=c++20 -ccbin $(CXX) -I$(ROOT) $< -o $@
+	$(NVCC) $(DEPFLAGS) -fatbin -arch=sm_61 -Wno-deprecated-gpu-targets -std=c++20 -ccbin $(CXX) -I$(ROOT) $< -o $@
 
-$(GEMM_FIXTURE): test/fixture_gemm.c eg_door.h eg_unit_meta.h $(if $(CUDA),$(OUT)/fixture_gemm.fatbin)
+$(GEMM_FIXTURE): test/fixture_gemm.c $(if $(CUDA),$(OUT)/fixture_gemm.fatbin)
 	@mkdir -p $(OUT)
 	$(if $(CUDA),$(call embed,$(OUT)/fixture_gemm.fatbin,gemm__image,$(OUT)/fixture_gemm_image.o))
-	$(CC) $(CFLAGS_C) $(if $(CUDA),-DEG_GEMM_IMAGE) -fPIC -shared -fvisibility=hidden -o $@ $< $(if $(CUDA),$(OUT)/fixture_gemm_image.o)
+	$(CC) $(DEPFLAGS) $(CFLAGS_C) $(if $(CUDA),-DEG_GEMM_IMAGE) -fPIC -shared -fvisibility=hidden -o $@ $< $(if $(CUDA),$(OUT)/fixture_gemm_image.o)
 
-$(GEMM_TEST): test/gemm_test.c eg_door.h eg_unit_meta.h $(LIB)
-	$(CC) $(CFLAGS_C) -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door -Wl,-rpath,$(OUT) -ldl -lm -pthread
+$(GEMM_TEST): test/gemm_test.c $(LIB)
+	$(CC) $(DEPFLAGS) $(CFLAGS_C) -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door -Wl,-rpath,$(OUT) -ldl -lm -pthread
 
-$(GEMM_DEVICE_TEST): test/gemm_test.c eg_door.h eg_unit_meta.h $(LIB) | check-cuda
-	$(CC) $(CFLAGS_C) -DEG_GEMM_DEVICE -isystem $(CUDA)/include -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door -Wl,-rpath,$(OUT) \
+$(GEMM_DEVICE_TEST): test/gemm_test.c $(LIB) | check-cuda
+	$(CC) $(DEPFLAGS) $(CFLAGS_C) -DEG_GEMM_DEVICE -isystem $(CUDA)/include -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door -Wl,-rpath,$(OUT) \
 	  $(CUDART) -ldl -lm -pthread
 
 $(NO_CUBLAS): test/no_cublas.c
 	@mkdir -p $(OUT)
-	$(CC) -std=c11 -O2 -Wall -Wextra -Werror -fPIC -shared -o $@ $< -ldl
+	$(CC) $(DEPFLAGS) -std=c11 -O2 -Wall -Wextra -Werror -fPIC -shared -o $@ $< -ldl
 
 test: symbols confined $(FIXTURE) $(FIXTURE_BAD) $(TEST) $(REV_FIXTURE) $(REV_TEST) $(GEMM_FIXTURE) $(GEMM_TEST)
 	$(TEST) $(FIXTURE) $(FIXTURE_BAD)
@@ -237,16 +239,16 @@ META_act_counter ?= test/derived/pend_body_counter_meta.c
 META_timed ?= test/derived/timed_meta.c
 META_auto ?= test/derived/rr_pend_auto_meta.c
 define REV_RULES
-$(OUT)/libpair_$(2).so: $$(KERNEL_$(3)) $$(KERNEL_$(3)_tape) $$(KERNEL_$(3)_step_vjp) $$(META_$(1)) eg_door.h eg_unit_meta.h | check-inputs
+$(OUT)/libpair_$(2).so: $$(KERNEL_$(3)) $$(KERNEL_$(3)_tape) $$(KERNEL_$(3)_step_vjp) $$(META_$(1)) | check-inputs
 	@test -f "$$(KERNEL_$(3))" -a -f "$$(KERNEL_$(3)_tape)" -a -f "$$(KERNEL_$(3)_step_vjp)" -a -f "$$(META_$(1))" -a \
 	  -d "$$(PAIR_WING_DIR)" || { echo "set KERNEL_$(3), KERNEL_$(3)_tape, KERNEL_$(3)_step_vjp, META_$(1) and PAIR_WING_DIR"; exit 1; }
 	@mkdir -p $$(OUT)
-	$$(CXX) $$(PAIR_HOST_FLAGS) -I$$(AETHER_INCLUDE) -I$$(AETHER_INCLUDE)/eagle -I$$(PAIR_WING_DIR) -c $$(KERNEL_$(3)) -o $$(OUT)/$(2)_primal.o
-	$$(CXX) $$(PAIR_HOST_FLAGS) $$(call REV_RENAME,tape) -I$$(AETHER_INCLUDE) -I$$(AETHER_INCLUDE)/eagle -I$$(PAIR_WING_DIR) \
+	$$(CXX) $$(DEPFLAGS) $$(PAIR_HOST_FLAGS) -I$$(AETHER_INCLUDE) -I$$(AETHER_INCLUDE)/eagle -I$$(PAIR_WING_DIR) -c $$(KERNEL_$(3)) -o $$(OUT)/$(2)_primal.o
+	$$(CXX) $$(DEPFLAGS) $$(PAIR_HOST_FLAGS) $$(call REV_RENAME,tape) -I$$(AETHER_INCLUDE) -I$$(AETHER_INCLUDE)/eagle -I$$(PAIR_WING_DIR) \
 	  -c $$(KERNEL_$(3)_tape) -o $$(OUT)/$(2)_tape.o
-	$$(CXX) $$(PAIR_HOST_FLAGS) $$(call REV_RENAME,vjp) -I$$(AETHER_INCLUDE) -I$$(AETHER_INCLUDE)/eagle -I$$(PAIR_WING_DIR) \
+	$$(CXX) $$(DEPFLAGS) $$(PAIR_HOST_FLAGS) $$(call REV_RENAME,vjp) -I$$(AETHER_INCLUDE) -I$$(AETHER_INCLUDE)/eagle -I$$(PAIR_WING_DIR) \
 	  -c $$(KERNEL_$(3)_step_vjp) -o $$(OUT)/$(2)_vjp.o
-	$$(CC) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$$(ROOT) -c $$(META_$(1)) -o $$(OUT)/$(2)_meta.o
+	$$(CC) $$(DEPFLAGS) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$$(ROOT) -c $$(META_$(1)) -o $$(OUT)/$(2)_meta.o
 	$$(CXX) -shared -o $$@ $$(OUT)/$(2)_primal.o $$(OUT)/$(2)_tape.o $$(OUT)/$(2)_vjp.o $$(OUT)/$(2)_meta.o
 endef
 $(eval $(call REV_RULES,reverse,reverse,rr_pend))
@@ -315,18 +317,18 @@ DIGEST_kstep8_tape ?= 2d20ffd3c860e37349593dba91964bece85bf2bd2b20a2bf73a9a79fb1
 DIGEST_kstep8_fused_vjp ?= 811557ca36771b0d1f3f4727f91fe0c5c49cffc8620afd24cb44c626406e5568
 META_kstep8 ?= test/derived/rr_pend_fused8_meta.c
 define KSTEP_RULES
-$(OUT)/libpair_$(1).so: $$(KERNEL_$(1)) $$(KERNEL_$(1)_tape) $$(KERNEL_$(1)_step_vjp) $$(KERNEL_$(1)_fused_vjp) $$(META_$(1)) eg_door.h eg_unit_meta.h | check-inputs
+$(OUT)/libpair_$(1).so: $$(KERNEL_$(1)) $$(KERNEL_$(1)_tape) $$(KERNEL_$(1)_step_vjp) $$(KERNEL_$(1)_fused_vjp) $$(META_$(1)) | check-inputs
 	@test -f "$$(KERNEL_$(1))" -a -f "$$(KERNEL_$(1)_tape)" -a -f "$$(KERNEL_$(1)_step_vjp)" -a -f "$$(KERNEL_$(1)_fused_vjp)" -a -f "$$(META_$(1))" -a \
 	  -d "$$(PAIR_WING_DIR)" || { echo "set KERNEL_$(1), _tape, _step_vjp, _fused_vjp, META_$(1) and PAIR_WING_DIR"; exit 1; }
 	@mkdir -p $(OUT)
-	$$(CXX) $$(PAIR_HOST_FLAGS) -I$$(AETHER_INCLUDE) -I$$(AETHER_INCLUDE)/eagle -I$$(PAIR_WING_DIR) -c $$(KERNEL_$(1)) -o $(OUT)/$(1)_primal.o
-	$$(CXX) $$(PAIR_HOST_FLAGS) $$(call REV_RENAME,tape) -I$$(AETHER_INCLUDE) -I$$(AETHER_INCLUDE)/eagle -I$$(PAIR_WING_DIR) \
+	$$(CXX) $$(DEPFLAGS) $$(PAIR_HOST_FLAGS) -I$$(AETHER_INCLUDE) -I$$(AETHER_INCLUDE)/eagle -I$$(PAIR_WING_DIR) -c $$(KERNEL_$(1)) -o $(OUT)/$(1)_primal.o
+	$$(CXX) $$(DEPFLAGS) $$(PAIR_HOST_FLAGS) $$(call REV_RENAME,tape) -I$$(AETHER_INCLUDE) -I$$(AETHER_INCLUDE)/eagle -I$$(PAIR_WING_DIR) \
 	  -c $$(KERNEL_$(1)_tape) -o $(OUT)/$(1)_tape.o
-	$$(CXX) $$(PAIR_HOST_FLAGS) $$(call REV_RENAME,vjp) -I$$(AETHER_INCLUDE) -I$$(AETHER_INCLUDE)/eagle -I$$(PAIR_WING_DIR) \
+	$$(CXX) $$(DEPFLAGS) $$(PAIR_HOST_FLAGS) $$(call REV_RENAME,vjp) -I$$(AETHER_INCLUDE) -I$$(AETHER_INCLUDE)/eagle -I$$(PAIR_WING_DIR) \
 	  -c $$(KERNEL_$(1)_step_vjp) -o $(OUT)/$(1)_vjp.o
-	$$(CXX) $$(PAIR_HOST_FLAGS) $$(call REV_RENAME,fvjp) -I$$(AETHER_INCLUDE) -I$$(AETHER_INCLUDE)/eagle -I$$(PAIR_WING_DIR) \
+	$$(CXX) $$(DEPFLAGS) $$(PAIR_HOST_FLAGS) $$(call REV_RENAME,fvjp) -I$$(AETHER_INCLUDE) -I$$(AETHER_INCLUDE)/eagle -I$$(PAIR_WING_DIR) \
 	  -c $$(KERNEL_$(1)_fused_vjp) -o $(OUT)/$(1)_fvjp.o
-	$$(CC) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$$(ROOT) -c $$(META_$(1)) -o $(OUT)/$(1)_meta.o
+	$$(CC) $$(DEPFLAGS) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$$(ROOT) -c $$(META_$(1)) -o $(OUT)/$(1)_meta.o
 	$$(CXX) -shared -o $$@ $(OUT)/$(1)_primal.o $(OUT)/$(1)_tape.o $(OUT)/$(1)_vjp.o $(OUT)/$(1)_fvjp.o $(OUT)/$(1)_meta.o
 
 pair-reverse-$(1): symbols $(OUT)/libpair_$(1).so $$(REV_TEST)
@@ -353,23 +355,23 @@ PARAM_UNITS := rr_pend_c rr_pend_c_tape rr_pend_c_step_vjp rr_pend_c_params rr_p
 PARAM_TEST := $(OUT)/param_reverse_test
 PARAM_DEVICE_TEST := $(OUT)/param_reverse_device_test
 PARAM_DIGESTS = $(foreach u,$(PARAM_UNITS),$(DIGEST_param_$(u)))
-$(PARAM_TEST): test/param_reverse_test.c test/pair_util.h eg_door.h $(LIB)
-	$(CC) $(CFLAGS_C) -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door -Wl,-rpath,$(OUT) -lm -pthread
-$(PARAM_DEVICE_TEST): test/param_reverse_test.c test/pair_util.h eg_door.h $(LIB) | check-cuda
-	$(CC) $(CFLAGS_C) -DEG_PARAM_DEVICE -isystem $(CUDA)/include -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door \
+$(PARAM_TEST): test/param_reverse_test.c $(LIB)
+	$(CC) $(DEPFLAGS) $(CFLAGS_C) -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door -Wl,-rpath,$(OUT) -lm -pthread
+$(PARAM_DEVICE_TEST): test/param_reverse_test.c $(LIB) | check-cuda
+	$(CC) $(DEPFLAGS) $(CFLAGS_C) -DEG_PARAM_DEVICE -isystem $(CUDA)/include -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door \
 	  -Wl,-rpath,$(OUT) $(CUDART) -lm -pthread
-$(OUT)/libpair_param.so: $(foreach u,$(PARAM_UNITS),$(KERNEL_param_$(u))) $(META_param) eg_door.h eg_unit_meta.h | check-inputs
+$(OUT)/libpair_param.so: $(foreach u,$(PARAM_UNITS),$(KERNEL_param_$(u))) $(META_param) | check-inputs
 	@test -d "$(PAIR_WING_DIR)" $(foreach u,$(PARAM_UNITS),-a -f "$(KERNEL_param_$(u))") || { echo "set KERNEL_param_<unit> for $(PARAM_UNITS) and PAIR_WING_DIR"; exit 1; }
 	@mkdir -p $(OUT)/param
-	$(foreach u,$(PARAM_UNITS),$(CXX) $(PAIR_HOST_FLAGS) $(if $(filter $(u),rr_pend_c),,$(call REV_RENAME,$(u))) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle \
+	$(foreach u,$(PARAM_UNITS),$(CXX) $(DEPFLAGS) $(PAIR_HOST_FLAGS) $(if $(filter $(u),rr_pend_c),,$(call REV_RENAME,$(u))) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle \
 	  -I$(PAIR_WING_DIR) -c $(KERNEL_param_$(u)) -o $(OUT)/param/$(u).o &&) true
-	$(CC) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$(ROOT) -c $(META_param) -o $(OUT)/param/meta.o
+	$(CC) $(DEPFLAGS) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$(ROOT) -c $(META_param) -o $(OUT)/param/meta.o
 	$(CXX) -shared -o $@ $(foreach u,$(PARAM_UNITS),$(OUT)/param/$(u).o) $(OUT)/param/meta.o
-$(OUT)/libpair_dev_param.so: $(foreach u,$(PARAM_UNITS),$(PTX_param_$(u))) $(META_param) eg_door.h eg_unit_meta.h | check-cuda
+$(OUT)/libpair_dev_param.so: $(foreach u,$(PARAM_UNITS),$(PTX_param_$(u))) $(META_param) | check-cuda
 	@mkdir -p $(OUT)/param_dev
 	$(foreach u,$(PARAM_UNITS),$(call embed,$(PTX_param_$(u)),$(u)__image,$(OUT)/param_dev/$(u).o) &&) true
 	$(call cuda_meta,$(META_param),$(OUT)/param_dev/meta.c)
-	$(CC) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$(ROOT) -c $(OUT)/param_dev/meta.c -o $(OUT)/param_dev/meta.o
+	$(CC) $(DEPFLAGS) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$(ROOT) -c $(OUT)/param_dev/meta.c -o $(OUT)/param_dev/meta.o
 	$(CC) -shared -o $@ $(OUT)/param_dev/meta.o $(foreach u,$(PARAM_UNITS),$(OUT)/param_dev/$(u).o)
 pair-reverse-param: symbols $(OUT)/libpair_param.so $(PARAM_TEST)
 	$(PARAM_TEST) $(OUT)/libpair_param.so $(PARAM_DIGESTS)
@@ -417,27 +419,27 @@ DIGEST_ev_step_vjp ?= 2209bcec8684c21e2d0d232238b8e31f6b6d7082dc490e4cba1dd2b562
 DIGEST_ev_refine_vjp ?= d463a94a44d802220095aa54ea462f827e19aeb76a9a7bb226a51f98cec0247b
 REFINE_TEST := $(OUT)/refine_test
 
-$(REFINE_TEST): test/refine_test.c test/pair_util.h eg_door.h $(LIB)
-	$(CC) $(CFLAGS_C) -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door -Wl,-rpath,$(OUT) -lm -pthread
+$(REFINE_TEST): test/refine_test.c $(LIB)
+	$(CC) $(DEPFLAGS) $(CFLAGS_C) -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door -Wl,-rpath,$(OUT) -lm -pthread
 
-$(OUT)/libpair_refine.so: $(KERNEL_ev) $(KERNEL_ev_tape) $(KERNEL_ev_newton) $(KERNEL_ev_guard) $(KERNEL_ev_step_vjp) $(KERNEL_ev_refine_vjp) $(META_ev) eg_door.h eg_unit_meta.h | check-inputs
+$(OUT)/libpair_refine.so: $(KERNEL_ev) $(KERNEL_ev_tape) $(KERNEL_ev_newton) $(KERNEL_ev_guard) $(KERNEL_ev_step_vjp) $(KERNEL_ev_refine_vjp) $(META_ev) | check-inputs
 	@test -f "$(KERNEL_ev)" -a -f "$(KERNEL_ev_tape)" -a -f "$(KERNEL_ev_newton)" -a -f "$(KERNEL_ev_guard)" -a -f "$(KERNEL_ev_step_vjp)" -a -f "$(KERNEL_ev_refine_vjp)" -a -f "$(META_ev)" -a \
 	  -d "$(PAIR_WING_DIR)" || { echo "set KERNEL_ev, KERNEL_ev_tape, KERNEL_ev_newton, KERNEL_ev_guard, KERNEL_ev_step_vjp, KERNEL_ev_refine_vjp, META_ev and PAIR_WING_DIR"; exit 1; }
 	@mkdir -p $(OUT)
-	$(CXX) $(PAIR_HOST_FLAGS) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) -c $(KERNEL_ev) -o $(OUT)/refine_primal.o
-	$(CXX) $(PAIR_HOST_FLAGS) $(call REV_RENAME,tape) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) \
+	$(CXX) $(DEPFLAGS) $(PAIR_HOST_FLAGS) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) -c $(KERNEL_ev) -o $(OUT)/refine_primal.o
+	$(CXX) $(DEPFLAGS) $(PAIR_HOST_FLAGS) $(call REV_RENAME,tape) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) \
 	  -c $(KERNEL_ev_tape) -o $(OUT)/refine_tape.o
-	$(CXX) $(PAIR_HOST_FLAGS) $(call REV_RENAME,newton) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) \
+	$(CXX) $(DEPFLAGS) $(PAIR_HOST_FLAGS) $(call REV_RENAME,newton) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) \
 	  -c $(KERNEL_ev_newton) -o $(OUT)/refine_newton.o
-	$(CXX) $(PAIR_HOST_FLAGS) $(call REV_RENAME,guard) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) \
+	$(CXX) $(DEPFLAGS) $(PAIR_HOST_FLAGS) $(call REV_RENAME,guard) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) \
 	  -c $(KERNEL_ev_guard) -o $(OUT)/refine_guard.o
-	$(CXX) $(PAIR_HOST_FLAGS) $(call REV_RENAME,stepvjp) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) \
+	$(CXX) $(DEPFLAGS) $(PAIR_HOST_FLAGS) $(call REV_RENAME,stepvjp) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) \
 	  -c $(KERNEL_ev_step_vjp) -o $(OUT)/refine_step_vjp.o
-	$(CXX) $(PAIR_HOST_FLAGS) $(call REV_RENAME,refvjp) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) \
+	$(CXX) $(DEPFLAGS) $(PAIR_HOST_FLAGS) $(call REV_RENAME,refvjp) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) \
 	  -c $(KERNEL_ev_refine_vjp) -o $(OUT)/refine_refvjp.o
-	$(CC) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$(ROOT) -c $(META_ev) -o $(OUT)/refine_meta.o
+	$(CC) $(DEPFLAGS) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$(ROOT) -c $(META_ev) -o $(OUT)/refine_meta.o
 	$(CXX) -shared -o $@ $(OUT)/refine_primal.o $(OUT)/refine_tape.o $(OUT)/refine_newton.o $(OUT)/refine_guard.o $(OUT)/refine_step_vjp.o $(OUT)/refine_refvjp.o $(OUT)/refine_meta.o
-	$(CC) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$(ROOT) -DEV_OSC_N_EVENTS=2 -c $(META_ev) -o $(OUT)/refine_meta_n2.o
+	$(CC) $(DEPFLAGS) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$(ROOT) -DEV_OSC_N_EVENTS=2 -c $(META_ev) -o $(OUT)/refine_meta_n2.o
 	$(CXX) -shared -o $(OUT)/libpair_refine_n2.so $(OUT)/refine_primal.o $(OUT)/refine_tape.o $(OUT)/refine_newton.o $(OUT)/refine_guard.o $(OUT)/refine_step_vjp.o $(OUT)/refine_refvjp.o $(OUT)/refine_meta_n2.o
 
 pair-refine: symbols $(OUT)/libpair_refine.so $(REFINE_TEST)
@@ -448,8 +450,8 @@ pair-refine: symbols $(OUT)/libpair_refine.so $(REFINE_TEST)
 
 REFINE_REVERSE_TEST := $(OUT)/refine_reverse_test
 
-$(REFINE_REVERSE_TEST): test/refine_reverse_test.c test/pair_util.h eg_door.h $(LIB)
-	$(CC) $(CFLAGS_C) -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door -Wl,-rpath,$(OUT) -lm -pthread
+$(REFINE_REVERSE_TEST): test/refine_reverse_test.c $(LIB)
+	$(CC) $(DEPFLAGS) $(CFLAGS_C) -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door -Wl,-rpath,$(OUT) -lm -pthread
 
 # pair-refine-reverse: the recorded refine run and its reverse over the same library against ORACLE_evrr (the old path's
 # gradients for seeds t, v, x: test_events_sensitivity_fd's reverse on ev_osc, cpu).
@@ -459,18 +461,18 @@ pair-refine-reverse: symbols $(OUT)/libpair_refine.so $(REFINE_REVERSE_TEST)
 
 PAIR_TEST := $(OUT)/pair_test
 
-$(PAIR_TEST): test/pair_test.c eg_door.h $(LIB)
-	$(CC) $(CFLAGS_C) -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door -Wl,-rpath,$(OUT) -pthread
+$(PAIR_TEST): test/pair_test.c $(LIB)
+	$(CC) $(DEPFLAGS) $(CFLAGS_C) -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door -Wl,-rpath,$(OUT) -pthread
 
 # $(1) = unit. The kernel text as the old path compiles it; the meta as C11, pedantic and warning-free.
 define PAIR_RULES
-$(OUT)/libpair_$(1).so: $$(KERNEL_$(1)) $$(META_$(1)) eg_door.h eg_unit_meta.h | check-inputs
+$(OUT)/libpair_$(1).so: $$(KERNEL_$(1)) $$(META_$(1)) | check-inputs
 	@test -f "$$(KERNEL_$(1))" -a -f "$$(META_$(1))" -a -d "$$(PAIR_WING_DIR)" || \
 	  { echo "set KERNEL_$(1), META_$(1) and PAIR_WING_DIR"; exit 1; }
 	@mkdir -p $(OUT)
-	$$(CXX) $$(PAIR_HOST_FLAGS) -I$$(AETHER_INCLUDE) -I$$(AETHER_INCLUDE)/eagle -I$$(PAIR_WING_DIR) \
+	$$(CXX) $$(DEPFLAGS) $$(PAIR_HOST_FLAGS) -I$$(AETHER_INCLUDE) -I$$(AETHER_INCLUDE)/eagle -I$$(PAIR_WING_DIR) \
 	  -c $$(KERNEL_$(1)) -o $(OUT)/pair_$(1)_kernel.o
-	$$(CC) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$$(ROOT) \
+	$$(CC) $$(DEPFLAGS) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$$(ROOT) \
 	  -c $$(META_$(1)) -o $(OUT)/pair_$(1)_meta.o
 	$$(CXX) -shared -o $$@ $(OUT)/pair_$(1)_kernel.o $(OUT)/pair_$(1)_meta.o
 
@@ -492,17 +494,17 @@ pairs: $(PAIR_UNITS:%=pair-%)
 SPLIT_ROWS ?=
 SPLIT_TEST := $(OUT)/split_pair_test
 
-$(SPLIT_TEST): test/split_pair_test.c test/pair_util.h eg_door.h $(LIB)
-	$(CC) $(CFLAGS_C) -Itest/c_shim -Itest -o $@ $< -L$(OUT) -leagle_door -Wl,-rpath,$(OUT) -pthread
+$(SPLIT_TEST): test/split_pair_test.c $(LIB)
+	$(CC) $(DEPFLAGS) $(CFLAGS_C) -Itest/c_shim -Itest -o $@ $< -L$(OUT) -leagle_door -Wl,-rpath,$(OUT) -pthread
 
 define SPLIT_RULES
-$(OUT)/libpair_split_$(1).so: $$(KERNELS_$(1)) $$(META_$(1)) eg_door.h eg_unit_meta.h | check-inputs
+$(OUT)/libpair_split_$(1).so: $$(KERNELS_$(1)) $$(META_$(1)) | check-inputs
 	@mkdir -p $(OUT)/split_$(1)
-	$$(CXX) $$(PAIR_HOST_FLAGS) -I$$(AETHER_INCLUDE) -I$$(AETHER_INCLUDE)/eagle -I$$(PAIR_WING_DIR) -c $$(firstword $$(KERNELS_$(1))) -o $(OUT)/split_$(1)/first.o
+	$$(CXX) $$(DEPFLAGS) $$(PAIR_HOST_FLAGS) -I$$(AETHER_INCLUDE) -I$$(AETHER_INCLUDE)/eagle -I$$(PAIR_WING_DIR) -c $$(firstword $$(KERNELS_$(1))) -o $(OUT)/split_$(1)/first.o
 	@for k in $$(wordlist 2,99,$$(KERNELS_$(1))); do n=$$$$(basename $$$$k .cpp | tr . _); \
-	  $$(CXX) $$(PAIR_HOST_FLAGS) -Deagle_abi_tag=s_$$$${n}_abi_tag -Deagle_layout_sizes=s_$$$${n}_layout_sizes \
+	  $$(CXX) $$(DEPFLAGS) $$(PAIR_HOST_FLAGS) -Deagle_abi_tag=s_$$$${n}_abi_tag -Deagle_layout_sizes=s_$$$${n}_layout_sizes \
 	    -I$$(AETHER_INCLUDE) -I$$(AETHER_INCLUDE)/eagle -I$$(PAIR_WING_DIR) -c $$$$k -o $(OUT)/split_$(1)/$$$${n}.o || exit 1; done
-	$$(CC) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$$(ROOT) -c $$(META_$(1)) -o $(OUT)/split_$(1)/meta.o
+	$$(CC) $$(DEPFLAGS) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$$(ROOT) -c $$(META_$(1)) -o $(OUT)/split_$(1)/meta.o
 	$$(CXX) -shared -o $$@ $(OUT)/split_$(1)/*.o
 
 pair-split-$(1): symbols $(OUT)/libpair_split_$(1).so $$(SPLIT_TEST)
@@ -528,10 +530,10 @@ REFUSE_TEXT_badbranch = names branches or a sweep and is not SEGMENTED
 REFUSE_STATUS_segmix = BAD_REQUEST
 REFUSE_TEXT_segmix = is SEGMENTED with neither a static selector
 define REFUSE_RULES
-$(OUT)/libpair_refuse_$(1).so: $$(KERNEL_g) $$(META_g_$(1)) eg_door.h eg_unit_meta.h | check-inputs
+$(OUT)/libpair_refuse_$(1).so: $$(KERNEL_g) $$(META_g_$(1)) | check-inputs
 	@mkdir -p $(OUT)
-	$$(CXX) $$(PAIR_HOST_FLAGS) -I$$(AETHER_INCLUDE) -I$$(AETHER_INCLUDE)/eagle -I$$(PAIR_WING_DIR) -c $$(KERNEL_g) -o $(OUT)/refuse_$(1)_kernel.o
-	$$(CC) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$$(ROOT) -c $$(META_g_$(1)) -o $(OUT)/refuse_$(1)_meta.o
+	$$(CXX) $$(DEPFLAGS) $$(PAIR_HOST_FLAGS) -I$$(AETHER_INCLUDE) -I$$(AETHER_INCLUDE)/eagle -I$$(PAIR_WING_DIR) -c $$(KERNEL_g) -o $(OUT)/refuse_$(1)_kernel.o
+	$$(CC) $$(DEPFLAGS) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$$(ROOT) -c $$(META_g_$(1)) -o $(OUT)/refuse_$(1)_meta.o
 	$$(CXX) -shared -o $$@ $(OUT)/refuse_$(1)_kernel.o $(OUT)/refuse_$(1)_meta.o
 pair-refuse-$(1): symbols $(OUT)/libpair_refuse_$(1).so $$(PAIR_TEST)
 	$$(PAIR_TEST) $(OUT)/libpair_refuse_$(1).so . g $$(DIGEST_g) $$(REFUSE_STATUS_$(1)) "$$(REFUSE_TEXT_$(1))"
@@ -552,28 +554,28 @@ DEVICE_TEST := $(OUT)/door_device_test
 
 $(OUT)/fixture_device.fatbin: test/fixture_device.cu | check-cuda
 	@mkdir -p $(OUT)
-	$(NVCC) -fatbin -arch=sm_61 -Wno-deprecated-gpu-targets -std=c++20 -ccbin $(CXX) -I$(ROOT) $< -o $@
+	$(NVCC) $(DEPFLAGS) -fatbin -arch=sm_61 -Wno-deprecated-gpu-targets -std=c++20 -ccbin $(CXX) -I$(ROOT) $< -o $@
 
 # The same kernel as nvcc 12.9 images (test/fixture_device.cu): a fatbin with sm_61 code and compute_61 PTX, PTX only, and an sm_70 cubin.
 $(OUT)/fat129.fatbin: test/fixture_device.cu | check-cuda
 	@mkdir -p $(OUT)
-	$(NVCC) -fatbin -gencode arch=compute_61,code=[sm_61,compute_61] -Wno-deprecated-gpu-targets -std=c++20 -ccbin $(CXX) -I$(ROOT) $< -o $@
+	$(NVCC) $(DEPFLAGS) -fatbin -gencode arch=compute_61,code=[sm_61,compute_61] -Wno-deprecated-gpu-targets -std=c++20 -ccbin $(CXX) -I$(ROOT) $< -o $@
 $(OUT)/ptx129.ptx: test/fixture_device.cu | check-cuda
 	@mkdir -p $(OUT)
-	$(NVCC) -ptx -arch=compute_61 -Wno-deprecated-gpu-targets -std=c++20 -ccbin $(CXX) -I$(ROOT) $< -o $@
+	$(NVCC) $(DEPFLAGS) -ptx -arch=compute_61 -Wno-deprecated-gpu-targets -std=c++20 -ccbin $(CXX) -I$(ROOT) $< -o $@
 $(OUT)/sass70.fatbin: test/fixture_device.cu | check-cuda
 	@mkdir -p $(OUT)
-	$(NVCC) -fatbin -gencode arch=compute_70,code=sm_70 -Wno-deprecated-gpu-targets -std=c++20 -ccbin $(CXX) -I$(ROOT) $< -o $@
+	$(NVCC) $(DEPFLAGS) -fatbin -gencode arch=compute_70,code=sm_70 -Wno-deprecated-gpu-targets -std=c++20 -ccbin $(CXX) -I$(ROOT) $< -o $@
 
-$(DEVICE_FIXTURE): test/fixture_device.c $(OUT)/fixture_device.fatbin $(OUT)/fat129.fatbin $(OUT)/ptx129.ptx $(OUT)/sass70.fatbin eg_door.h eg_unit_meta.h
+$(DEVICE_FIXTURE): test/fixture_device.c $(OUT)/fixture_device.fatbin $(OUT)/fat129.fatbin $(OUT)/ptx129.ptx $(OUT)/sass70.fatbin
 	$(call embed,$(OUT)/fixture_device.fatbin,fixture__image,$(OUT)/fixture_device_image.o)
 	$(call embed,$(OUT)/fat129.fatbin,fat129__image,$(OUT)/fat129_image.o)
 	$(call embed,$(OUT)/ptx129.ptx,ptx129__image,$(OUT)/ptx129_image.o)
 	$(call embed,$(OUT)/sass70.fatbin,sass70__image,$(OUT)/sass70_image.o)
-	$(CC) $(CFLAGS_C) -fPIC -shared -fvisibility=hidden -o $@ $< $(OUT)/fixture_device_image.o $(OUT)/fat129_image.o $(OUT)/ptx129_image.o $(OUT)/sass70_image.o
+	$(CC) $(DEPFLAGS) $(CFLAGS_C) -fPIC -shared -fvisibility=hidden -o $@ $< $(OUT)/fixture_device_image.o $(OUT)/fat129_image.o $(OUT)/ptx129_image.o $(OUT)/sass70_image.o
 
-$(DEVICE_TEST): test/door_device_test.c test/fft_cases.h test/seg_model.h eg_door.h $(LIB) | check-cuda
-	$(CC) $(CFLAGS_C) -DEG_TEST_DIR='"$(CURDIR)/test"' -isystem $(CUDA)/include -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door -Wl,-rpath,$(OUT) $(CUDART) -lm -pthread
+$(DEVICE_TEST): test/door_device_test.c $(LIB) | check-cuda
+	$(CC) $(DEPFLAGS) $(CFLAGS_C) -DEG_TEST_DIR='"$(CURDIR)/test"' -isystem $(CUDA)/include -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door -Wl,-rpath,$(OUT) $(CUDART) -lm -pthread
 
 device: check-cuda symbols $(FIXTURE) $(DEVICE_FIXTURE) $(DEVICE_TEST) $(GEMM_FIXTURE) $(GEMM_DEVICE_TEST) $(NO_CUBLAS)
 
@@ -588,26 +590,25 @@ BANDED_RUNNER_TEST := $(OUT)/banded_runner_test
 DEVICE_REVERSE_TEST := $(OUT)/device_reverse_test
 
 # The pair tests over test/pair_util.h: one rule, each binary built from the test/ source of its own name.
-$(RUNNER_PAIR_TEST) $(ACTIVE_PAIR_TEST) $(FEATURES_TEST) $(OPS_TEST) $(BANDED_RUNNER_TEST) $(FAST_PAIR_TEST) $(GRAPH_PAIR_TEST) $(DEVICE_REVERSE_TEST): $(OUT)/%: test/%.c test/pair_util.h eg_door.h $(LIB) | check-cuda
-	$(CC) $(CFLAGS_C) -isystem $(CUDA)/include -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door \
+$(RUNNER_PAIR_TEST) $(ACTIVE_PAIR_TEST) $(FEATURES_TEST) $(OPS_TEST) $(BANDED_RUNNER_TEST) $(FAST_PAIR_TEST) $(GRAPH_PAIR_TEST) $(DEVICE_REVERSE_TEST): $(OUT)/%: test/%.c $(LIB) | check-cuda
+	$(CC) $(DEPFLAGS) $(CFLAGS_C) -isystem $(CUDA)/include -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door \
 	  -Wl,-rpath,$(OUT) $(CUDART) -lm -pthread
-$(OPS_TEST): test/reduce_order_expected.h
 
-$(PAIR_DEVICE_TEST): test/pair_test.c eg_door.h $(LIB) | check-cuda
-	$(CC) $(CFLAGS_C) -DEG_PAIR_DEVICE -isystem $(CUDA)/include -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door \
+$(PAIR_DEVICE_TEST): test/pair_test.c $(LIB) | check-cuda
+	$(CC) $(DEPFLAGS) $(CFLAGS_C) -DEG_PAIR_DEVICE -isystem $(CUDA)/include -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door \
 	  -Wl,-rpath,$(OUT) $(CUDART) -lm -pthread
 
 # $(1) = unit. The kernel text compiled as the old path compiles it, embedded as <unit>__image.
 define PAIR_DEVICE_RULES
-$(OUT)/libpair_dev_$(1).so: $$(KERNEL_CUDA_$(1)) $$(META_CUDA_$(1)) eg_door.h eg_unit_meta.h | check-inputs check-cuda
+$(OUT)/libpair_dev_$(1).so: $$(KERNEL_CUDA_$(1)) $$(META_CUDA_$(1)) | check-inputs check-cuda
 	@test -f "$$(KERNEL_CUDA_$(1))" -a -f "$$(META_CUDA_$(1))" -a -d "$$(PAIR_CUDA_WING_DIR)" || \
 	  { echo "set KERNEL_CUDA_$(1), META_CUDA_$(1) and PAIR_CUDA_WING_DIR"; exit 1; }
 	@mkdir -p $(OUT)
-	$$(PAIR_NVCC) $$(if $$(shell grep -l EG_IMAGE_PTX $$(META_CUDA_$(1))),-ptx,-cubin) $$(PAIR_DEVICE_FLAGS) \
+	$$(PAIR_NVCC) $$(DEPFLAGS) $$(if $$(shell grep -l EG_IMAGE_PTX $$(META_CUDA_$(1))),-ptx,-cubin) $$(PAIR_DEVICE_FLAGS) \
 	  -ccbin $$(PAIR_CCBIN) -I $$(AETHER_INCLUDE) -I $$(AETHER_INCLUDE)/eagle \
 	  -I$$(PAIR_CUDA_WING_DIR) $$(KERNEL_CUDA_$(1)) -o $(OUT)/pair_dev_$(1).image
 	$$(call embed,$(OUT)/pair_dev_$(1).image,$(1)__image,$(OUT)/pair_dev_$(1)_image.o)
-	$$(CC) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$$(ROOT) \
+	$$(CC) $$(DEPFLAGS) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$$(ROOT) \
 	  -c $$(META_CUDA_$(1)) -o $(OUT)/pair_dev_$(1)_meta.o
 	$$(CC) -shared -o $$@ $(OUT)/pair_dev_$(1)_meta.o $(OUT)/pair_dev_$(1)_image.o
 
@@ -617,12 +618,12 @@ $(foreach u,$(PAIR_DEVICE_UNITS),$(eval $(call PAIR_DEVICE_RULES,$(u))))
 
 # pair-device-refuse-<case> (seg): the same refusal through a device context, unit g's cuda text (KERNEL_CUDA_g, META_CUDA_g_<case>).
 define REFUSE_DEVICE_RULES
-$(OUT)/libpair_dev_refuse_$(1).so: $$(KERNEL_CUDA_g) $$(META_CUDA_g_$(1)) eg_door.h eg_unit_meta.h | check-inputs check-cuda
+$(OUT)/libpair_dev_refuse_$(1).so: $$(KERNEL_CUDA_g) $$(META_CUDA_g_$(1)) | check-inputs check-cuda
 	@mkdir -p $(OUT)
-	$$(PAIR_NVCC) -ptx $$(PAIR_DEVICE_FLAGS) -ccbin $$(PAIR_CCBIN) -I $$(AETHER_INCLUDE) -I $$(AETHER_INCLUDE)/eagle \
+	$$(PAIR_NVCC) $$(DEPFLAGS) -ptx $$(PAIR_DEVICE_FLAGS) -ccbin $$(PAIR_CCBIN) -I $$(AETHER_INCLUDE) -I $$(AETHER_INCLUDE)/eagle \
 	  -I$$(PAIR_CUDA_WING_DIR) $$(KERNEL_CUDA_g) -o $(OUT)/refuse_dev_$(1).image
 	$$(call embed,$(OUT)/refuse_dev_$(1).image,g__image,$(OUT)/refuse_dev_$(1)_image.o)
-	$$(CC) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$$(ROOT) -c $$(META_CUDA_g_$(1)) -o $(OUT)/refuse_dev_$(1)_meta.o
+	$$(CC) $$(DEPFLAGS) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$$(ROOT) -c $$(META_CUDA_g_$(1)) -o $(OUT)/refuse_dev_$(1)_meta.o
 	$$(CC) -shared -o $$@ $(OUT)/refuse_dev_$(1)_meta.o $(OUT)/refuse_dev_$(1)_image.o
 pair-device-refuse-$(1): symbols $(OUT)/libpair_dev_refuse_$(1).so $$(PAIR_DEVICE_TEST)
 	$$(PAIR_DEVICE_TEST) $(OUT)/libpair_dev_refuse_$(1).so . g $$(DIGEST_g) $$(REFUSE_STATUS_$(1)) "$$(REFUSE_TEXT_$(1))"
@@ -635,15 +636,15 @@ $(foreach c,seg,$(eval $(call REFUSE_DEVICE_RULES,$(c))))
 SPLIT_DEVICE_ROWS ?=
 SPLIT_DEVICE_TEST := $(OUT)/split_device_test
 
-$(SPLIT_DEVICE_TEST): test/split_pair_test.c test/pair_util.h eg_door.h $(LIB) | check-cuda
-	$(CC) $(CFLAGS_C) -DEG_PAIR_DEVICE -isystem $(CUDA)/include -Itest/c_shim -Itest -o $@ $< -L$(OUT) -leagle_door \
+$(SPLIT_DEVICE_TEST): test/split_pair_test.c $(LIB) | check-cuda
+	$(CC) $(DEPFLAGS) $(CFLAGS_C) -DEG_PAIR_DEVICE -isystem $(CUDA)/include -Itest/c_shim -Itest -o $@ $< -L$(OUT) -leagle_door \
 	  -Wl,-rpath,$(OUT) $(CUDART) -lm -pthread
 
 define SPLIT_DEVICE_RULES
-$(OUT)/libpair_dev_split_$(1).so: $$(foreach p,$$(KERNELS_CUDA_$(1)),$$(word 2,$$(subst =, ,$$(p)))) $$(META_CUDA_$(1)) eg_door.h eg_unit_meta.h | check-inputs check-cuda
+$(OUT)/libpair_dev_split_$(1).so: $$(foreach p,$$(KERNELS_CUDA_$(1)),$$(word 2,$$(subst =, ,$$(p)))) $$(META_CUDA_$(1)) | check-inputs check-cuda
 	@mkdir -p $(OUT)/sd_$(1)
-	$$(foreach p,$$(KERNELS_CUDA_$(1)),$$(PAIR_NVCC) -cubin $$(PAIR_DEVICE_FLAGS) -ccbin $$(PAIR_CCBIN) -I $$(AETHER_INCLUDE) -I $$(AETHER_INCLUDE)/eagle -I$$(PAIR_CUDA_WING_DIR) $$(word 2,$$(subst =, ,$$(p))) -o $(OUT)/sd_$(1)/$$(word 1,$$(subst =, ,$$(p))).image && $$(call embed,$(OUT)/sd_$(1)/$$(word 1,$$(subst =, ,$$(p))).image,$$(word 1,$$(subst =, ,$$(p)))__image,$(OUT)/sd_$(1)/$$(word 1,$$(subst =, ,$$(p)))_image.o) ; )
-	$$(CC) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$$(ROOT) -c $$(META_CUDA_$(1)) -o $(OUT)/sd_$(1)/meta.o
+	$$(foreach p,$$(KERNELS_CUDA_$(1)),$$(PAIR_NVCC) $$(DEPFLAGS) -cubin $$(PAIR_DEVICE_FLAGS) -ccbin $$(PAIR_CCBIN) -I $$(AETHER_INCLUDE) -I $$(AETHER_INCLUDE)/eagle -I$$(PAIR_CUDA_WING_DIR) $$(word 2,$$(subst =, ,$$(p))) -o $(OUT)/sd_$(1)/$$(word 1,$$(subst =, ,$$(p))).image && $$(call embed,$(OUT)/sd_$(1)/$$(word 1,$$(subst =, ,$$(p))).image,$$(word 1,$$(subst =, ,$$(p)))__image,$(OUT)/sd_$(1)/$$(word 1,$$(subst =, ,$$(p)))_image.o) ; )
+	$$(CC) $$(DEPFLAGS) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$$(ROOT) -c $$(META_CUDA_$(1)) -o $(OUT)/sd_$(1)/meta.o
 	$$(CC) -shared -o $$@ $(OUT)/sd_$(1)/*.o
 
 pair-device-split-$(1): symbols $(OUT)/libpair_dev_split_$(1).so $$(SPLIT_DEVICE_TEST)
@@ -656,7 +657,7 @@ $(foreach r,$(SPLIT_DEVICE_ROWS),$(eval $(call SPLIT_DEVICE_RULES,$(r))))
 # through the GPU pool against the old device run's states, report and gradients.
 cuda_meta = sed 's/M(host_entry, "\([A-Za-z0-9_]*\)_host"), M(device_image, NULL), M(device_function, NULL)\(.*\)EG_IMAGE_NONE\(.*\)M(device_image_size, NULL)/M(host_entry, NULL), M(device_image, "\1__image"), M(device_function, "\1")\2EG_IMAGE_PTX\3M(device_image_size, "\1__image_size")/' $(1) > $(2)
 define DEV_REV_RULES
-$(OUT)/libpair_dev_rev_$(1).so: $$(PTX_$(1)) $$(PTX_$(1)_tape) $$(PTX_$(1)_step_vjp) $$(META_$(2)) eg_door.h eg_unit_meta.h | check-cuda
+$(OUT)/libpair_dev_rev_$(1).so: $$(PTX_$(1)) $$(PTX_$(1)_tape) $$(PTX_$(1)_step_vjp) $$(META_$(2)) | check-cuda
 	@test -f "$$(PTX_$(1))" -a -f "$$(PTX_$(1)_tape)" -a -f "$$(PTX_$(1)_step_vjp)" || \
 	  { echo "set PTX_$(1), PTX_$(1)_tape and PTX_$(1)_step_vjp"; exit 1; }
 	@mkdir -p $(OUT)
@@ -664,7 +665,7 @@ $(OUT)/libpair_dev_rev_$(1).so: $$(PTX_$(1)) $$(PTX_$(1)_tape) $$(PTX_$(1)_step_
 	$$(call embed,$$(PTX_$(1)_tape),$(3)_tape__image,$(OUT)/dev_rev_$(1)_t.o)
 	$$(call embed,$$(PTX_$(1)_step_vjp),$(3)_step_vjp__image,$(OUT)/dev_rev_$(1)_v.o)
 	$$(call cuda_meta,$$(META_$(2)),$(OUT)/dev_rev_$(1)_meta.c)
-	$$(CC) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$$(ROOT) -c $(OUT)/dev_rev_$(1)_meta.c -o $(OUT)/dev_rev_$(1)_meta.o
+	$$(CC) $$(DEPFLAGS) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$$(ROOT) -c $(OUT)/dev_rev_$(1)_meta.c -o $(OUT)/dev_rev_$(1)_meta.o
 	$$(CC) -shared -o $$@ $(OUT)/dev_rev_$(1)_meta.o $(OUT)/dev_rev_$(1)_p.o $(OUT)/dev_rev_$(1)_t.o $(OUT)/dev_rev_$(1)_v.o
 endef
 $(eval $(call DEV_REV_RULES,rr_pend,reverse,rr_pend))
@@ -674,14 +675,14 @@ $(eval $(call DEV_REV_RULES,auto,auto,rr_pend_auto))
 $(eval $(call DEV_REV_RULES,ps,ps,rr_pend_ps))
 # kstep<K>: steps_reverse FUSED over the K-step primal rr_pend_x<K>: its twin and step vjp are rr_pend's, plus the K-step vjp.
 define DEV_KSTEP_RULES
-$(OUT)/libpair_dev_rev_$(1).so: $$(PTX_$(1)) $$(PTX_$(1)_tape) $$(PTX_$(1)_step_vjp) $$(PTX_$(1)_fused_vjp) $$(META_$(1)) eg_door.h eg_unit_meta.h | check-cuda
+$(OUT)/libpair_dev_rev_$(1).so: $$(PTX_$(1)) $$(PTX_$(1)_tape) $$(PTX_$(1)_step_vjp) $$(PTX_$(1)_fused_vjp) $$(META_$(1)) | check-cuda
 	@mkdir -p $(OUT)
 	$$(call embed,$$(PTX_$(1)),$(2)__image,$(OUT)/dev_rev_$(1)_p.o)
 	$$(call embed,$$(PTX_$(1)_tape),rr_pend_tape__image,$(OUT)/dev_rev_$(1)_t.o)
 	$$(call embed,$$(PTX_$(1)_step_vjp),rr_pend_step_vjp__image,$(OUT)/dev_rev_$(1)_v.o)
 	$$(call embed,$$(PTX_$(1)_fused_vjp),rr_pend_fused_vjp__image,$(OUT)/dev_rev_$(1)_f.o)
 	$$(call cuda_meta,$$(META_$(1)),$(OUT)/dev_rev_$(1)_meta.c)
-	$$(CC) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$$(ROOT) -c $(OUT)/dev_rev_$(1)_meta.c -o $(OUT)/dev_rev_$(1)_meta.o
+	$$(CC) $$(DEPFLAGS) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$$(ROOT) -c $(OUT)/dev_rev_$(1)_meta.c -o $(OUT)/dev_rev_$(1)_meta.o
 	$$(CC) -shared -o $$@ $(OUT)/dev_rev_$(1)_meta.o $(OUT)/dev_rev_$(1)_p.o $(OUT)/dev_rev_$(1)_t.o $(OUT)/dev_rev_$(1)_v.o $(OUT)/dev_rev_$(1)_f.o
 endef
 $(eval $(call DEV_KSTEP_RULES,kstep,rr_pend_x4))
@@ -699,7 +700,7 @@ META_ref_grid ?= test/derived/ev_grid_meta.c
 META_ref_tangent ?= test/derived/ev_tangent_meta.c
 META_ref_two ?= test/derived/ev_two_meta.c
 define DEV_REF_RULES
-$(OUT)/libpair_dev_ref_$(1).so: $$(PTX_ref_$(1)) $$(PTX_ref_$(1)_tape) $$(PTX_ref_$(1)_newton) $$(PTX_ref_$(1)_guard) $$(META_ref_$(1)) eg_door.h eg_unit_meta.h | check-cuda
+$(OUT)/libpair_dev_ref_$(1).so: $$(PTX_ref_$(1)) $$(PTX_ref_$(1)_tape) $$(PTX_ref_$(1)_newton) $$(PTX_ref_$(1)_guard) $$(META_ref_$(1)) | check-cuda
 	@test -f "$$(PTX_ref_$(1))" -a -f "$$(PTX_ref_$(1)_tape)" -a -f "$$(PTX_ref_$(1)_newton)" -a -f "$$(PTX_ref_$(1)_guard)" || \
 	  { echo "set PTX_ref_$(1), _tape, _newton and _guard"; exit 1; }
 	@mkdir -p $(OUT)
@@ -708,13 +709,13 @@ $(OUT)/libpair_dev_ref_$(1).so: $$(PTX_ref_$(1)) $$(PTX_ref_$(1)_tape) $$(PTX_re
 	$$(call embed,$$(PTX_ref_$(1)_newton),ev_$(1)_newton__image,$(OUT)/dev_ref_$(1)_n.o)
 	$$(call embed,$$(PTX_ref_$(1)_guard),ev_$(1)_state_guard_vjp__image,$(OUT)/dev_ref_$(1)_g.o)
 	$$(call cuda_meta,$$(META_ref_$(1)),$(OUT)/dev_ref_$(1)_meta.c)
-	$$(CC) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$$(ROOT) -c $(OUT)/dev_ref_$(1)_meta.c -o $(OUT)/dev_ref_$(1)_meta.o
+	$$(CC) $$(DEPFLAGS) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$$(ROOT) -c $(OUT)/dev_ref_$(1)_meta.c -o $(OUT)/dev_ref_$(1)_meta.o
 	$$(CC) -shared -o $$@ $(OUT)/dev_ref_$(1)_meta.o $(OUT)/dev_ref_$(1)_p.o $(OUT)/dev_ref_$(1)_t.o $(OUT)/dev_ref_$(1)_n.o $(OUT)/dev_ref_$(1)_g.o
 endef
 $(foreach c,osc pend grid tangent two,$(eval $(call DEV_REF_RULES,$(c))))
 DEVICE_REFINE_TEST := $(OUT)/device_refine_test
-$(DEVICE_REFINE_TEST): test/device_refine_test.c test/pair_util.h eg_door.h $(LIB) | check-cuda
-	$(CC) $(CFLAGS_C) -isystem $(CUDA)/include -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door \
+$(DEVICE_REFINE_TEST): test/device_refine_test.c $(LIB) | check-cuda
+	$(CC) $(DEPFLAGS) $(CFLAGS_C) -isystem $(CUDA)/include -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door \
 	  -Wl,-rpath,$(OUT) $(CUDART) -lm -pthread
 pair-device-refine: symbols $(foreach c,osc pend grid tangent two,$(OUT)/libpair_dev_ref_$(c).so) $(DEVICE_REFINE_TEST)
 
@@ -722,7 +723,7 @@ pair-device-refine: symbols $(foreach c,osc pend grid tangent two,$(OUT)/libpair
 # old device run's own images (PTX_rrf_<model>, _tape, _step_vjp, _newton, _guard, _refine_vjp) with the host meta; run
 # $(OUT)/device_refine_reverse_test <library> <oracle dir> <6 digests: primal, twin, Newton, guard, step vjp, refine vjp> [pend] through the GPU pool.
 define DEV_RRF_RULES
-$(OUT)/libpair_dev_rrf_$(1).so: $$(PTX_rrf_$(1)) $$(PTX_rrf_$(1)_tape) $$(PTX_rrf_$(1)_step_vjp) $$(PTX_rrf_$(1)_newton) $$(PTX_rrf_$(1)_guard) $$(PTX_rrf_$(1)_refine_vjp) $$(META_rrf_$(1)) eg_door.h eg_unit_meta.h | check-cuda
+$(OUT)/libpair_dev_rrf_$(1).so: $$(PTX_rrf_$(1)) $$(PTX_rrf_$(1)_tape) $$(PTX_rrf_$(1)_step_vjp) $$(PTX_rrf_$(1)_newton) $$(PTX_rrf_$(1)_guard) $$(PTX_rrf_$(1)_refine_vjp) $$(META_rrf_$(1)) | check-cuda
 	@mkdir -p $(OUT)
 	$$(call embed,$$(PTX_rrf_$(1)),ev_$(1)__image,$(OUT)/dev_rrf_$(1)_p.o)
 	$$(call embed,$$(PTX_rrf_$(1)_tape),ev_$(1)_tape__image,$(OUT)/dev_rrf_$(1)_t.o)
@@ -731,7 +732,7 @@ $(OUT)/libpair_dev_rrf_$(1).so: $$(PTX_rrf_$(1)) $$(PTX_rrf_$(1)_tape) $$(PTX_rr
 	$$(call embed,$$(PTX_rrf_$(1)_guard),ev_$(1)_state_guard_vjp__image,$(OUT)/dev_rrf_$(1)_g.o)
 	$$(call embed,$$(PTX_rrf_$(1)_refine_vjp),ev_$(1)_refine_vjp__image,$(OUT)/dev_rrf_$(1)_r.o)
 	$$(call cuda_meta,$$(META_rrf_$(1)),$(OUT)/dev_rrf_$(1)_meta.c)
-	$$(CC) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$$(ROOT) -c $(OUT)/dev_rrf_$(1)_meta.c -o $(OUT)/dev_rrf_$(1)_meta.o
+	$$(CC) $$(DEPFLAGS) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$$(ROOT) -c $(OUT)/dev_rrf_$(1)_meta.c -o $(OUT)/dev_rrf_$(1)_meta.o
 	$$(CC) -shared -o $$@ $(OUT)/dev_rrf_$(1)_meta.o $(OUT)/dev_rrf_$(1)_p.o $(OUT)/dev_rrf_$(1)_t.o $(OUT)/dev_rrf_$(1)_s.o $(OUT)/dev_rrf_$(1)_n.o $(OUT)/dev_rrf_$(1)_g.o $(OUT)/dev_rrf_$(1)_r.o
 endef
 META_rrf_osc ?= $(META_ref_osc)
@@ -739,8 +740,8 @@ META_rrf_pend ?= $(META_ref_pend)
 META_rrf_grid ?= test/derived/ev_grid_rr_meta.c
 $(foreach c,osc pend grid,$(eval $(call DEV_RRF_RULES,$(c))))
 DEVICE_RRF_TEST := $(OUT)/device_refine_reverse_test
-$(DEVICE_RRF_TEST): test/device_refine_reverse_test.c test/pair_util.h eg_door.h $(LIB) | check-cuda
-	$(CC) $(CFLAGS_C) -isystem $(CUDA)/include -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door \
+$(DEVICE_RRF_TEST): test/device_refine_reverse_test.c $(LIB) | check-cuda
+	$(CC) $(DEPFLAGS) $(CFLAGS_C) -isystem $(CUDA)/include -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door \
 	  -Wl,-rpath,$(OUT) $(CUDART) -lm -pthread
 pair-device-refine-reverse: symbols $(foreach c,osc pend grid,$(OUT)/libpair_dev_rrf_$(c).so) $(DEVICE_RRF_TEST)
 
@@ -753,17 +754,17 @@ DIGEST_pend_step_vjp ?= a6e50ecab8d027681391468b32768ada530ca95a073a4ddf78d5ec6c
 DIGEST_pend_newton ?= 7fa4b726b43f41b19d9bebf8d812b371eb6e4f3a43426f4fe9ad3c69efbbbc25
 DIGEST_pend_guard ?= 012d7e9df31a4822327f8c88a45d0bfdbe5f8f3dfba0871c0edd02ff073028bc
 DIGEST_pend_refine_vjp ?= d6c8c1c8e308deccbe8f6e8207b0bcc08abbe26730dda782fb75442bfa197588
-$(OUT)/libpair_refine_pend.so: $(KERNEL_pend) $(KERNEL_pend_tape) $(KERNEL_pend_step_vjp) $(KERNEL_pend_newton) $(KERNEL_pend_guard) $(KERNEL_pend_refine_vjp) $(META_pend) eg_door.h eg_unit_meta.h | check-inputs
+$(OUT)/libpair_refine_pend.so: $(KERNEL_pend) $(KERNEL_pend_tape) $(KERNEL_pend_step_vjp) $(KERNEL_pend_newton) $(KERNEL_pend_guard) $(KERNEL_pend_refine_vjp) $(META_pend) | check-inputs
 	@test -f "$(KERNEL_pend)" -a -f "$(KERNEL_pend_tape)" -a -f "$(KERNEL_pend_step_vjp)" -a -f "$(KERNEL_pend_newton)" -a -f "$(KERNEL_pend_guard)" -a -f "$(KERNEL_pend_refine_vjp)" -a -f "$(META_pend)" -a \
 	  -d "$(PAIR_WING_DIR)" || { echo "set KERNEL_pend, _tape, _step_vjp, _newton, _guard, _refine_vjp, META_pend and PAIR_WING_DIR"; exit 1; }
 	@mkdir -p $(OUT)
-	$(CXX) $(PAIR_HOST_FLAGS) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) -c $(KERNEL_pend) -o $(OUT)/pend_primal.o
-	$(CXX) $(PAIR_HOST_FLAGS) $(call REV_RENAME,tape) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) -c $(KERNEL_pend_tape) -o $(OUT)/pend_tape.o
-	$(CXX) $(PAIR_HOST_FLAGS) $(call REV_RENAME,stepvjp) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) -c $(KERNEL_pend_step_vjp) -o $(OUT)/pend_stepvjp.o
-	$(CXX) $(PAIR_HOST_FLAGS) $(call REV_RENAME,newton) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) -c $(KERNEL_pend_newton) -o $(OUT)/pend_newton.o
-	$(CXX) $(PAIR_HOST_FLAGS) $(call REV_RENAME,guard) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) -c $(KERNEL_pend_guard) -o $(OUT)/pend_guard.o
-	$(CXX) $(PAIR_HOST_FLAGS) $(call REV_RENAME,refvjp) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) -c $(KERNEL_pend_refine_vjp) -o $(OUT)/pend_refvjp.o
-	$(CC) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$(ROOT) -c $(META_pend) -o $(OUT)/pend_meta.o
+	$(CXX) $(DEPFLAGS) $(PAIR_HOST_FLAGS) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) -c $(KERNEL_pend) -o $(OUT)/pend_primal.o
+	$(CXX) $(DEPFLAGS) $(PAIR_HOST_FLAGS) $(call REV_RENAME,tape) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) -c $(KERNEL_pend_tape) -o $(OUT)/pend_tape.o
+	$(CXX) $(DEPFLAGS) $(PAIR_HOST_FLAGS) $(call REV_RENAME,stepvjp) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) -c $(KERNEL_pend_step_vjp) -o $(OUT)/pend_stepvjp.o
+	$(CXX) $(DEPFLAGS) $(PAIR_HOST_FLAGS) $(call REV_RENAME,newton) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) -c $(KERNEL_pend_newton) -o $(OUT)/pend_newton.o
+	$(CXX) $(DEPFLAGS) $(PAIR_HOST_FLAGS) $(call REV_RENAME,guard) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) -c $(KERNEL_pend_guard) -o $(OUT)/pend_guard.o
+	$(CXX) $(DEPFLAGS) $(PAIR_HOST_FLAGS) $(call REV_RENAME,refvjp) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) -c $(KERNEL_pend_refine_vjp) -o $(OUT)/pend_refvjp.o
+	$(CC) $(DEPFLAGS) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$(ROOT) -c $(META_pend) -o $(OUT)/pend_meta.o
 	$(CXX) -shared -o $@ $(OUT)/pend_primal.o $(OUT)/pend_tape.o $(OUT)/pend_stepvjp.o $(OUT)/pend_newton.o $(OUT)/pend_guard.o $(OUT)/pend_refvjp.o $(OUT)/pend_meta.o
 
 pair-refine-pend: symbols $(OUT)/libpair_refine_pend.so $(REFINE_TEST)
@@ -783,17 +784,17 @@ DIGEST_rgrid_step_vjp ?= 4d865ef658bbac28398db5811d9247a02ef5ea5facbbd7d314af131
 DIGEST_rgrid_newton ?= 6eb1179bb45cf34803a9a0a8f89776af246577ab76769a1efc4cae1ee72cc8dc
 DIGEST_rgrid_guard ?= 8e5d6669ba092c5009dafaa13dd2fc3fb8a11d4259d6f83d85594550d9ad34f7
 DIGEST_rgrid_refine_vjp ?= 04e2e466da275c57c6e96d7995430406e0cfc9f315a2cd31d2b3a5c51866be57
-$(OUT)/libpair_refine_grid.so: $(KERNEL_rgrid) $(KERNEL_rgrid_tape) $(KERNEL_rgrid_step_vjp) $(KERNEL_rgrid_newton) $(KERNEL_rgrid_guard) $(KERNEL_rgrid_refine_vjp) $(META_rgrid) eg_door.h eg_unit_meta.h | check-inputs
+$(OUT)/libpair_refine_grid.so: $(KERNEL_rgrid) $(KERNEL_rgrid_tape) $(KERNEL_rgrid_step_vjp) $(KERNEL_rgrid_newton) $(KERNEL_rgrid_guard) $(KERNEL_rgrid_refine_vjp) $(META_rgrid) | check-inputs
 	@test -f "$(KERNEL_rgrid)" -a -f "$(KERNEL_rgrid_tape)" -a -f "$(KERNEL_rgrid_step_vjp)" -a -f "$(KERNEL_rgrid_newton)" -a -f "$(KERNEL_rgrid_guard)" -a -f "$(KERNEL_rgrid_refine_vjp)" -a -f "$(META_rgrid)" -a \
 	  -d "$(PAIR_WING_DIR)" || { echo "set KERNEL_rgrid, _tape, _step_vjp, _newton, _guard, _refine_vjp, META_rgrid and PAIR_WING_DIR"; exit 1; }
 	@mkdir -p $(OUT)
-	$(CXX) $(PAIR_HOST_FLAGS) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) -c $(KERNEL_rgrid) -o $(OUT)/rgrid_primal.o
-	$(CXX) $(PAIR_HOST_FLAGS) $(call REV_RENAME,tape) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) -c $(KERNEL_rgrid_tape) -o $(OUT)/rgrid_tape.o
-	$(CXX) $(PAIR_HOST_FLAGS) $(call REV_RENAME,stepvjp) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) -c $(KERNEL_rgrid_step_vjp) -o $(OUT)/rgrid_stepvjp.o
-	$(CXX) $(PAIR_HOST_FLAGS) $(call REV_RENAME,newton) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) -c $(KERNEL_rgrid_newton) -o $(OUT)/rgrid_newton.o
-	$(CXX) $(PAIR_HOST_FLAGS) $(call REV_RENAME,guard) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) -c $(KERNEL_rgrid_guard) -o $(OUT)/rgrid_guard.o
-	$(CXX) $(PAIR_HOST_FLAGS) $(call REV_RENAME,refvjp) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) -c $(KERNEL_rgrid_refine_vjp) -o $(OUT)/rgrid_refvjp.o
-	$(CC) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$(ROOT) -c $(META_rgrid) -o $(OUT)/rgrid_meta.o
+	$(CXX) $(DEPFLAGS) $(PAIR_HOST_FLAGS) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) -c $(KERNEL_rgrid) -o $(OUT)/rgrid_primal.o
+	$(CXX) $(DEPFLAGS) $(PAIR_HOST_FLAGS) $(call REV_RENAME,tape) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) -c $(KERNEL_rgrid_tape) -o $(OUT)/rgrid_tape.o
+	$(CXX) $(DEPFLAGS) $(PAIR_HOST_FLAGS) $(call REV_RENAME,stepvjp) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) -c $(KERNEL_rgrid_step_vjp) -o $(OUT)/rgrid_stepvjp.o
+	$(CXX) $(DEPFLAGS) $(PAIR_HOST_FLAGS) $(call REV_RENAME,newton) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) -c $(KERNEL_rgrid_newton) -o $(OUT)/rgrid_newton.o
+	$(CXX) $(DEPFLAGS) $(PAIR_HOST_FLAGS) $(call REV_RENAME,guard) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) -c $(KERNEL_rgrid_guard) -o $(OUT)/rgrid_guard.o
+	$(CXX) $(DEPFLAGS) $(PAIR_HOST_FLAGS) $(call REV_RENAME,refvjp) -I$(AETHER_INCLUDE) -I$(AETHER_INCLUDE)/eagle -I$(PAIR_WING_DIR) -c $(KERNEL_rgrid_refine_vjp) -o $(OUT)/rgrid_refvjp.o
+	$(CC) $(DEPFLAGS) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$(ROOT) -c $(META_rgrid) -o $(OUT)/rgrid_meta.o
 	$(CXX) -shared -o $@ $(OUT)/rgrid_primal.o $(OUT)/rgrid_tape.o $(OUT)/rgrid_stepvjp.o $(OUT)/rgrid_newton.o $(OUT)/rgrid_guard.o $(OUT)/rgrid_refvjp.o $(OUT)/rgrid_meta.o
 
 pair-refine-reverse-grid: symbols $(OUT)/libpair_refine_grid.so $(REFINE_REVERSE_TEST)
@@ -806,15 +807,15 @@ pair-refine-reverse-grid: symbols $(OUT)/libpair_refine_grid.so $(REFINE_REVERSE
 META_rgrid_bad_step ?= test/derived/ev_grid_rr_bad_step_meta.c
 META_rgrid_bad_refine ?= test/derived/ev_grid_rr_bad_refine_meta.c
 define GRID_BAD_RULES
-$(OUT)/libpair_refine_grid_bad_$(1).so: $$(KERNEL_rgrid) $$(KERNEL_rgrid_tape) $$(KERNEL_rgrid_step_vjp) $$(KERNEL_rgrid_newton) $$(KERNEL_rgrid_guard) $$(KERNEL_rgrid_refine_vjp) $$(META_rgrid_bad_$(1)) eg_door.h eg_unit_meta.h | check-inputs
+$(OUT)/libpair_refine_grid_bad_$(1).so: $$(KERNEL_rgrid) $$(KERNEL_rgrid_tape) $$(KERNEL_rgrid_step_vjp) $$(KERNEL_rgrid_newton) $$(KERNEL_rgrid_guard) $$(KERNEL_rgrid_refine_vjp) $$(META_rgrid_bad_$(1)) | check-inputs
 	@mkdir -p $(OUT)
-	$$(CXX) $$(PAIR_HOST_FLAGS) -I$$(AETHER_INCLUDE) -I$$(AETHER_INCLUDE)/eagle -I$$(PAIR_WING_DIR) -c $$(KERNEL_rgrid) -o $(OUT)/rgb_$(1)_primal.o
-	$$(CXX) $$(PAIR_HOST_FLAGS) $$(call REV_RENAME,tape) -I$$(AETHER_INCLUDE) -I$$(AETHER_INCLUDE)/eagle -I$$(PAIR_WING_DIR) -c $$(KERNEL_rgrid_tape) -o $(OUT)/rgb_$(1)_tape.o
-	$$(CXX) $$(PAIR_HOST_FLAGS) $$(call REV_RENAME,stepvjp) -I$$(AETHER_INCLUDE) -I$$(AETHER_INCLUDE)/eagle -I$$(PAIR_WING_DIR) -c $$(KERNEL_rgrid_step_vjp) -o $(OUT)/rgb_$(1)_stepvjp.o
-	$$(CXX) $$(PAIR_HOST_FLAGS) $$(call REV_RENAME,newton) -I$$(AETHER_INCLUDE) -I$$(AETHER_INCLUDE)/eagle -I$$(PAIR_WING_DIR) -c $$(KERNEL_rgrid_newton) -o $(OUT)/rgb_$(1)_newton.o
-	$$(CXX) $$(PAIR_HOST_FLAGS) $$(call REV_RENAME,guard) -I$$(AETHER_INCLUDE) -I$$(AETHER_INCLUDE)/eagle -I$$(PAIR_WING_DIR) -c $$(KERNEL_rgrid_guard) -o $(OUT)/rgb_$(1)_guard.o
-	$$(CXX) $$(PAIR_HOST_FLAGS) $$(call REV_RENAME,refvjp) -I$$(AETHER_INCLUDE) -I$$(AETHER_INCLUDE)/eagle -I$$(PAIR_WING_DIR) -c $$(KERNEL_rgrid_refine_vjp) -o $(OUT)/rgb_$(1)_refvjp.o
-	$$(CC) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$$(ROOT) -c $$(META_rgrid_bad_$(1)) -o $(OUT)/rgb_$(1)_meta.o
+	$$(CXX) $$(DEPFLAGS) $$(PAIR_HOST_FLAGS) -I$$(AETHER_INCLUDE) -I$$(AETHER_INCLUDE)/eagle -I$$(PAIR_WING_DIR) -c $$(KERNEL_rgrid) -o $(OUT)/rgb_$(1)_primal.o
+	$$(CXX) $$(DEPFLAGS) $$(PAIR_HOST_FLAGS) $$(call REV_RENAME,tape) -I$$(AETHER_INCLUDE) -I$$(AETHER_INCLUDE)/eagle -I$$(PAIR_WING_DIR) -c $$(KERNEL_rgrid_tape) -o $(OUT)/rgb_$(1)_tape.o
+	$$(CXX) $$(DEPFLAGS) $$(PAIR_HOST_FLAGS) $$(call REV_RENAME,stepvjp) -I$$(AETHER_INCLUDE) -I$$(AETHER_INCLUDE)/eagle -I$$(PAIR_WING_DIR) -c $$(KERNEL_rgrid_step_vjp) -o $(OUT)/rgb_$(1)_stepvjp.o
+	$$(CXX) $$(DEPFLAGS) $$(PAIR_HOST_FLAGS) $$(call REV_RENAME,newton) -I$$(AETHER_INCLUDE) -I$$(AETHER_INCLUDE)/eagle -I$$(PAIR_WING_DIR) -c $$(KERNEL_rgrid_newton) -o $(OUT)/rgb_$(1)_newton.o
+	$$(CXX) $$(DEPFLAGS) $$(PAIR_HOST_FLAGS) $$(call REV_RENAME,guard) -I$$(AETHER_INCLUDE) -I$$(AETHER_INCLUDE)/eagle -I$$(PAIR_WING_DIR) -c $$(KERNEL_rgrid_guard) -o $(OUT)/rgb_$(1)_guard.o
+	$$(CXX) $$(DEPFLAGS) $$(PAIR_HOST_FLAGS) $$(call REV_RENAME,refvjp) -I$$(AETHER_INCLUDE) -I$$(AETHER_INCLUDE)/eagle -I$$(PAIR_WING_DIR) -c $$(KERNEL_rgrid_refine_vjp) -o $(OUT)/rgb_$(1)_refvjp.o
+	$$(CC) $$(DEPFLAGS) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$$(ROOT) -c $$(META_rgrid_bad_$(1)) -o $(OUT)/rgb_$(1)_meta.o
 	$$(CXX) -shared -o $$@ $(OUT)/rgb_$(1)_primal.o $(OUT)/rgb_$(1)_tape.o $(OUT)/rgb_$(1)_stepvjp.o $(OUT)/rgb_$(1)_newton.o $(OUT)/rgb_$(1)_guard.o $(OUT)/rgb_$(1)_refvjp.o $(OUT)/rgb_$(1)_meta.o
 endef
 $(eval $(call GRID_BAD_RULES,step))
@@ -829,16 +830,16 @@ pair-refine-reverse-grid-refused: symbols $(OUT)/libpair_refine_grid_bad_step.so
 # pair-status-<case>: the refine statuses beyond REFINED over one library per case (META test/derived/ev_<case>_meta.c, kernels
 # KERNEL_s<case>, _tape, _newton, _guard): ev_grid AT_STEP (bitwise against ORACLE_sgrid), ev_tangent GRAZE and ev_two TWO_RULES (refused by name).
 STATUS_TEST := $(OUT)/refine_status_test
-$(STATUS_TEST): test/refine_status_test.c test/pair_util.h eg_door.h $(LIB)
-	$(CC) $(CFLAGS_C) -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door -Wl,-rpath,$(OUT) -lm -pthread
+$(STATUS_TEST): test/refine_status_test.c $(LIB)
+	$(CC) $(DEPFLAGS) $(CFLAGS_C) -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door -Wl,-rpath,$(OUT) -lm -pthread
 define STATUS_RULES
-$(OUT)/libpair_status_$(1).so: $$(KERNEL_s$(1)) $$(KERNEL_s$(1)_tape) $$(KERNEL_s$(1)_newton) $$(KERNEL_s$(1)_guard) test/derived/ev_$(1)_meta.c eg_door.h eg_unit_meta.h | check-inputs
+$(OUT)/libpair_status_$(1).so: $$(KERNEL_s$(1)) $$(KERNEL_s$(1)_tape) $$(KERNEL_s$(1)_newton) $$(KERNEL_s$(1)_guard) test/derived/ev_$(1)_meta.c | check-inputs
 	@mkdir -p $$(OUT)
-	$$(CXX) $$(PAIR_HOST_FLAGS) -I$$(AETHER_INCLUDE) -I$$(AETHER_INCLUDE)/eagle -I$$(PAIR_WING_DIR) -c $$(KERNEL_s$(1)) -o $$(OUT)/st_$(1)_primal.o
-	$$(CXX) $$(PAIR_HOST_FLAGS) $$(call REV_RENAME,tape) -I$$(AETHER_INCLUDE) -I$$(AETHER_INCLUDE)/eagle -I$$(PAIR_WING_DIR) -c $$(KERNEL_s$(1)_tape) -o $$(OUT)/st_$(1)_tape.o
-	$$(CXX) $$(PAIR_HOST_FLAGS) $$(call REV_RENAME,newton) -I$$(AETHER_INCLUDE) -I$$(AETHER_INCLUDE)/eagle -I$$(PAIR_WING_DIR) -c $$(KERNEL_s$(1)_newton) -o $$(OUT)/st_$(1)_newton.o
-	$$(CXX) $$(PAIR_HOST_FLAGS) $$(call REV_RENAME,guard) -I$$(AETHER_INCLUDE) -I$$(AETHER_INCLUDE)/eagle -I$$(PAIR_WING_DIR) -c $$(KERNEL_s$(1)_guard) -o $$(OUT)/st_$(1)_guard.o
-	$$(CC) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$$(ROOT) -c test/derived/ev_$(1)_meta.c -o $$(OUT)/st_$(1)_meta.o
+	$$(CXX) $$(DEPFLAGS) $$(PAIR_HOST_FLAGS) -I$$(AETHER_INCLUDE) -I$$(AETHER_INCLUDE)/eagle -I$$(PAIR_WING_DIR) -c $$(KERNEL_s$(1)) -o $$(OUT)/st_$(1)_primal.o
+	$$(CXX) $$(DEPFLAGS) $$(PAIR_HOST_FLAGS) $$(call REV_RENAME,tape) -I$$(AETHER_INCLUDE) -I$$(AETHER_INCLUDE)/eagle -I$$(PAIR_WING_DIR) -c $$(KERNEL_s$(1)_tape) -o $$(OUT)/st_$(1)_tape.o
+	$$(CXX) $$(DEPFLAGS) $$(PAIR_HOST_FLAGS) $$(call REV_RENAME,newton) -I$$(AETHER_INCLUDE) -I$$(AETHER_INCLUDE)/eagle -I$$(PAIR_WING_DIR) -c $$(KERNEL_s$(1)_newton) -o $$(OUT)/st_$(1)_newton.o
+	$$(CXX) $$(DEPFLAGS) $$(PAIR_HOST_FLAGS) $$(call REV_RENAME,guard) -I$$(AETHER_INCLUDE) -I$$(AETHER_INCLUDE)/eagle -I$$(PAIR_WING_DIR) -c $$(KERNEL_s$(1)_guard) -o $$(OUT)/st_$(1)_guard.o
+	$$(CC) $$(DEPFLAGS) -std=c11 -Wall -Wextra -pedantic -Werror -fPIC -fvisibility=hidden -I$$(ROOT) -c test/derived/ev_$(1)_meta.c -o $$(OUT)/st_$(1)_meta.o
 	$$(CXX) -shared -o $$@ $$(OUT)/st_$(1)_primal.o $$(OUT)/st_$(1)_tape.o $$(OUT)/st_$(1)_newton.o $$(OUT)/st_$(1)_guard.o $$(OUT)/st_$(1)_meta.o
 pair-status-$(1): symbols $(OUT)/libpair_status_$(1).so $(STATUS_TEST)
 	$(STATUS_TEST) $(OUT)/libpair_status_$(1).so $(1) $(or $(ORACLE_s$(1)),-) $(DIGEST_s$(1)) $(DIGEST_s$(1)_tape) $(DIGEST_s$(1)_newton) $(DIGEST_s$(1)_guard)
@@ -846,3 +847,6 @@ endef
 $(eval $(call STATUS_RULES,grid))
 $(eval $(call STATUS_RULES,tangent))
 $(eval $(call STATUS_RULES,two))
+
+# The dependency files every rule above wrote; last, so that no target they name becomes the default goal.
+-include $(wildcard $(OUT)/*.d $(OUT)/*/*.d)
