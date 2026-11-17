@@ -17,3 +17,4 @@ runs:
         sudo sh "${{ github.action_path }}/../../cuda_redist.sh" fetch "$(uname -m)" /usr/local/cuda-12.9 "$RUNNER_TEMP/cuda-redist"
         echo /usr/local/cuda-12.9/bin >> "$GITHUB_PATH"
         echo CUDA_HOME=/usr/local/cuda-12.9 >> "$GITHUB_ENV"
+        echo CUDA_PATH=/usr/local/cuda-12.9 >> "$GITHUB_ENV"

@@ -317,6 +317,7 @@ def plan(
     A plugin declaring ``.abi_tag == eagle.exec.ABI_TAG_V1`` (a legacy v1
     ``LoadedVector``/``LoadedPure``) carries no partition triple, so a
     partition count above 1 is refused naming "legacy"."""
+    plugin = _split.linked(plugin, "eagle.plan")
     # test seams: a placement check without a v2 plugin body, and the rank
     # structure's pre-gather arm
     access = (

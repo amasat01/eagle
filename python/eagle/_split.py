@@ -11,7 +11,8 @@ like the cell. Every eagle door that runs such a kernel goes through this
 module: :func:`run` for :meth:`Plan.run`, :class:`SplitBound` for
 :meth:`Plan.bind` (and through it every door that binds: a Graph, the
 reverse, the device bridges). A door that cannot sequence the stages calls
-:func:`refuse`.
+:func:`refuse`. A prebuilt plugin (one ``hawk.artifact.plugins`` made) gets
+its stages at the plan door (:func:`linked`), as a deploy's own build does.
 
 The caller sees the kernel's own planes (:func:`arg_spec`): the rows of every
 cell and the cells a later stage reads are eagle's. A cell the sidecar marks
@@ -39,6 +40,7 @@ from __future__ import annotations
 import threading
 import warnings
 import weakref
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from math import prod
 
@@ -66,7 +68,35 @@ def link(by_name: dict, bundle) -> None:
     """Attach the stages of every split kernel of ``bundle`` to its first
     plugin (``by_name`` is ``{name: plugin}``). Idempotent; a kernel
     without ``stages`` is left as it is."""
-    arts = {a.name: a.sidecar for a in bundle.artifacts}
+    _link(by_name, {a.name: a.sidecar for a in bundle.artifacts})
+
+
+_LINKING = threading.Lock()
+
+
+def linked(plugin, door: str):
+    """``plugin``, its stages attached when it is a prebuilt split kernel: one
+    ``hawk.artifact.plugins`` made, which carries its kernel's ``sidecar`` and the
+    plugins of its bundle (``bundle_plugins``). A plugin whose sidecar lists stages
+    but that does not carry the plugin of each is refused by name: run alone, its
+    first stage would compute wrong values."""
+    side = getattr(plugin, "sidecar", None)
+    if not isinstance(side, Mapping) or not side.get("stages") or getattr(plugin, "_stages", None) is not None:
+        return plugin
+    by_name = getattr(plugin, "bundle_plugins", None) or {}
+    missing = [e["kernel"] for e in side["stages"] if e["kernel"] not in by_name]
+    if missing:
+        raise ValueError(
+            f"{door}: {side.get('kernel', getattr(plugin, 'name', '?'))!r} runs in stages "
+            f"{[e['kernel'] for e in side['stages']]}, but this plugin does not carry the plugin of "
+            f"{missing}; take the plugins of the bundle from hawk.artifact.plugins(bundle)")
+    with _LINKING:
+        _link(by_name, {nm: p.sidecar for nm, p in by_name.items()})
+    return plugin
+
+
+def _link(by_name: dict, arts: dict) -> None:
+    """:func:`link` from the bundle's sidecars, ``{name: sidecar}``."""
     cells = {}
     for side in arts.values():
         cells.update(side.get("cells", {}))

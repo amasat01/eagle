@@ -344,7 +344,7 @@ TEST(HostPoolTest, EachWorkerHasOnePhysicalCoreToItself)
     Deadline deadline(60);
     const int cores = physical_cores();
     if (cores < 3) GTEST_SKIP() << "needs three physical cores";
-    const std::vector<cpu_set_t> sets = core_masks();
+    const std::vector<CoreMask> sets = core_masks();
     ASSERT_EQ(static_cast<int>(sets.size()), cores);
     cpu_set_t whole;
     sched_getaffinity(0, sizeof(whole), &whole);
@@ -354,7 +354,7 @@ TEST(HostPoolTest, EachWorkerHasOnePhysicalCoreToItself)
         it = CPU_EQUAL(&whole, &it->second) ? masks.erase(it) : std::next(it);
     ASSERT_GE(masks.size(), 2u);
     for (auto a = masks.begin(); a != masks.end(); ++a) {
-        const bool isCore = std::any_of(sets.begin(), sets.end(), [&](const cpu_set_t& s) { return CPU_EQUAL(&s, &a->second); });
+        const bool isCore = std::any_of(sets.begin(), sets.end(), [&](const CoreMask& s) { return CPU_EQUAL(&s.cpus, &a->second); });
         EXPECT_TRUE(isCore) << "a worker's mask is not one core's sibling set";
         for (auto b = std::next(a); b != masks.end(); ++b) {
             cpu_set_t both;
@@ -398,12 +398,12 @@ TEST(HostPoolTest, AfterABiggerTeamASmallerOneStillHasACorePerWorker)
     Deadline deadline(60);
     const int cores = physical_cores();
     if (cores < 3) GTEST_SKIP() << "needs three physical cores";
-    const std::vector<cpu_set_t> sets = core_masks();
+    const std::vector<CoreMask> sets = core_masks();
     workerMasks(2 * cores);   // the pool now holds more workers than the cores
     const auto masks = workerMasks(cores);
     ASSERT_GE(masks.size(), 2u);
     for (auto a = masks.begin(); a != masks.end(); ++a) {
-        const bool isCore = std::any_of(sets.begin(), sets.end(), [&](const cpu_set_t& s) { return CPU_EQUAL(&s, &a->second); });
+        const bool isCore = std::any_of(sets.begin(), sets.end(), [&](const CoreMask& s) { return CPU_EQUAL(&s.cpus, &a->second); });
         EXPECT_TRUE(isCore) << "a worker of the smaller team is not on one core's sibling set";
         for (auto b = std::next(a); b != masks.end(); ++b) {
             cpu_set_t both;
