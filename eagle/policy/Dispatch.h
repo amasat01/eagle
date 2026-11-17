@@ -141,14 +141,20 @@ inline constexpr WeightRow WEIGHT_ROWS[] = { EG_WEIGHT_ROWS(EG_WEIGHT_ROW_INIT) 
 #undef EG_WEIGHT_ROW_INIT
 inline constexpr int WEIGHT_ROW_COUNT = static_cast<int>(sizeof(WEIGHT_ROWS) / sizeof(WEIGHT_ROWS[0]));
 
-/** @brief The row of the class (@p vendor, @p family, @p model) of @p target, or -1 for the built-in row: an unknown class takes it, nothing nearer. */
-inline int weightRowIndex(Target target, int vendor, int family, int model) {
-    for (int i = 0; i < WEIGHT_ROW_COUNT; ++i) {
-        const WeightRow& r = WEIGHT_ROWS[i];
+/** @brief The row of the class (@p vendor, @p family, @p model) of @p target among @p rows, or -1 for the built-in row: an unknown class takes it, nothing
+ *         nearer, and a row of the other target never answers. The table is an argument so a test can pass its own. */
+inline int weightRowIndex(const WeightRow* rows, int count, Target target, int vendor, int family, int model) {
+    for (int i = 0; i < count; ++i) {
+        const WeightRow& r = rows[i];
         if (r.target == static_cast<int>(target) && (r.vendor || r.family || r.model) && r.vendor == vendor && r.family == family && r.model == model)
             return i;
     }
     return -1;
+}
+
+/** @brief weightRowIndex over the rows of WeightRows.h. */
+inline int weightRowIndex(Target target, int vendor, int family, int model) {
+    return weightRowIndex(WEIGHT_ROWS, WEIGHT_ROW_COUNT, target, vendor, family, model);
 }
 
 /** @brief The built-in row of @p target (the row whose class is all zero). */

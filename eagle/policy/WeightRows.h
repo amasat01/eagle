@@ -10,7 +10,8 @@
 //   (device 0); vector_width: the effective speed-up of a vectorised host loop (device 1). The cache size is never a row: it is read live.
 #pragma once
 
+// The built-in host row is the fit to a 4-core Xeon W-2125 (relative RMS 0.19, benchmarks/reproduce/fit_profile.py); the built-in device row is a conservative
+// prior. A class row is written only when its values differ from its target's built-in row: none does yet.
 #define EG_WEIGHT_ROWS(X)                                                                                                   \
     X(0, 0, 0, 0, 1.495, 25.2, 122.0, 1.4e-6, 0.35e-9, 13.2e-9, 24.5e9 / 4, 52.1e9, 5.09, 0.23e-9 * 4, 8)                    \
-    X(0, 1, 6, 85, 1.495, 25.2, 122.0, 1.4e-6, 0.35e-9, 13.2e-9, 24.5e9 / 4, 52.1e9, 5.09, 0.23e-9 * 4, 8)                   \
     X(1, 0, 0, 0, 1, 20, 20, 5e-6, 0.05e-9, 10e-9, 0, 0, 4, 0, 1)

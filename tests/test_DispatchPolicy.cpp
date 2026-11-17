@@ -188,11 +188,19 @@ TEST(DispatchPolicy, EveryLookRecordedFromTheOldStackGivesTheSameGainAndPolicy)
 
 TEST(DispatchPolicy, WeightRowsAreFoundByClassAndAnUnknownClassTakesTheBuiltInRow)
 {
-    EXPECT_EQ(weightRowIndex(Target::Host, 1, 6, 85), 1) << "the Xeon W-2125 class has its own row";
-    EXPECT_EQ(weightRowIndex(Target::Host, 1, 6, 86), -1) << "a class with no row takes the built-in row, not the nearest";
-    EXPECT_EQ(weightRowIndex(Target::Host, 2, 6, 85), -1) << "the vendor is part of the class";
-    EXPECT_EQ(weightRowIndex(Target::Device, 6, 1, 0), -1);
-    EXPECT_EQ(weightRowIndex(Target::Host, 0, 0, 0), -1) << "the built-in row is not looked up by its zero class";
+    // a synthetic table: the two built-in rows, a host class row and a device class row
+    const WeightRow table[] = { builtinWeightRow(Target::Host), builtinWeightRow(Target::Device),
+                                { 0, 1, 6, 85, 1, 1, 1, 1e-6, 1e-9, 1e-8, 1e9, 1e10, 2, 1e-9, 4 },
+                                { 1, 0, 8, 6, 1, 1, 1, 1e-6, 1e-9, 1e-8, 0, 0, 2, 0, 1 } };
+    const int n = static_cast<int>(sizeof(table) / sizeof(table[0]));
+    EXPECT_EQ(weightRowIndex(table, n, Target::Host, 1, 6, 85), 2) << "a matching class gets its row";
+    EXPECT_EQ(weightRowIndex(table, n, Target::Device, 0, 8, 6), 3);
+    EXPECT_EQ(weightRowIndex(table, n, Target::Host, 1, 6, 86), -1) << "an unknown class takes the built-in row, not the nearest";
+    EXPECT_EQ(weightRowIndex(table, n, Target::Host, 2, 6, 85), -1) << "the vendor is part of the class";
+    EXPECT_EQ(weightRowIndex(table, n, Target::Device, 1, 6, 85), -1) << "a host row never answers a device key";
+    EXPECT_EQ(weightRowIndex(table, n, Target::Host, 0, 8, 6), -1) << "a device row never answers a host key";
+    EXPECT_EQ(weightRowIndex(table, n, Target::Host, 0, 0, 0), -1) << "the built-in row is not looked up by its zero class";
+    EXPECT_EQ(weightRowIndex(Target::Host, 1, 6, 85), -1) << "no class row is written yet: every class takes the built-in row";
     for (const Target t : { Target::Host, Target::Device }) {
         const WeightRow& b = builtinWeightRow(t);
         EXPECT_EQ(b.vendor + b.family + b.model, 0);
@@ -201,7 +209,7 @@ TEST(DispatchPolicy, WeightRowsAreFoundByClassAndAnUnknownClassTakesTheBuiltInRo
 
 TEST(DispatchPolicy, TheRowsScaleTheHostRatesByThePhysicalCores)
 {
-    const WeightRow& row = WEIGHT_ROWS[weightRowIndex(Target::Host, 1, 6, 85)];
+    const WeightRow& row = builtinWeightRow(Target::Host);
     const Weights four = weightsOfRow(row, Machine{ 4, 12.7e6 }), eight = weightsOfRow(row, Machine{ 8, 12.7e6 });
     EXPECT_DOUBLE_EQ(four.laneRate, 24.5e9) << "4 cores of the fitted machine reproduce its all-core rate";
     EXPECT_DOUBLE_EQ(four.chainSeconds, 0.23e-9);
