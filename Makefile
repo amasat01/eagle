@@ -10,6 +10,7 @@
 #   make gate-all   both
 #
 # Stages, for the inner loop and for CI jobs that run one leg: gate-lint gate-names gate-cpp gate-py gate-docs gate-cpp-cuda gate-py-gpu
+# gate-cpp-cuda-build is the build half of gate-cpp-cuda, for a machine with nvcc and no GPU (CI: CUDA_TEST_ARCHS=70).
 #
 # THE ENVIRONMENT. Each run builds its venv under $(GATE_DIR) (default build/gate, git-ignored), fresh, with
 # `pip install -e python[test] -c ci/constraints.txt`. GATE_REUSE=1 keeps it (inner loop only).
@@ -43,6 +44,8 @@ SITE_SRC    ?=
 GPU_RUN     ?=
 # The CPU legs compile device code for one architecture and never execute it (CI: sm_70).
 CPU_CUDA_ARCH ?= 70
+# The architectures the cuda-mode C++ suite is built for: the device's own by default, one stated arch on a machine without one.
+CUDA_TEST_ARCHS ?= native
 TORCH_INDEX ?= https://download.pytorch.org/whl/cpu
 
 comma := ,
@@ -63,11 +66,11 @@ NVCC = $(or $(CUDACXX),$(if $(CUDA_PATH),$(CUDA_PATH)/bin/nvcc))
 export HAWK_NVCC ?= $(NVCC)
 need_nvcc = @[ -n "$(NVCC)" ] && [ -x "$(NVCC)" ] || { echo "gate: no nvcc: set CUDACXX (or CUDA_PATH with bin/nvcc)" >&2; exit 2; }
 
-.PHONY: help gate gate-gpu gate-all gate-fresh gate-lint gate-names gate-cpp gate-py gate-docs gate-cpp-cuda gate-py-gpu \
+.PHONY: help gate gate-gpu gate-all gate-fresh gate-lint gate-names gate-cpp gate-py gate-docs gate-cpp-cuda gate-cpp-cuda-build gate-py-gpu \
         gate-env-cpu gate-env-gpu gate-clean gate-doxygen sanitize-cpp tsan-cpp tsan-ft ft-stress nodriver sdist-install release-gate
 
 help:
-	@sed -n '4,24p' Makefile
+	@sed -n '4,26p' Makefile
 
 # -- a fresh start ------------------------------------------------------------------------------------------------
 gate-clean:
@@ -202,7 +205,10 @@ gate-docs: gate-doxygen
 	python -m raptor_docs.fresh --check --site "$(SITE_SRC)"
 
 # -- the GPU legs -------------------------------------------------------------------------------------------------
-gate-cpp-cuda:
+gate-cpp-cuda: gate-cpp-cuda-build
+	$(GPU_RUN) tests/check_gate.sh cuda "$(GD)/cuda/tests/eagle_tests"
+
+gate-cpp-cuda-build:
 	$(call need_aether)
 	$(call need_nvcc)
 	$(call need_cxx)
@@ -210,9 +216,8 @@ gate-cpp-cuda:
 	cmake -DAETHER_CPP_MODE=OFF -DCMAKE_CUDA_COMPILER="$(NVCC)" -DCMAKE_CUDA_HOST_COMPILER="$(CXX)" -DCMAKE_INSTALL_PREFIX="$(GD)/prefix_cuda" -B "$(GD)/aether_cuda" -S "$(AETHER_SRC)"
 	cmake --install "$(GD)/aether_cuda"
 	cmake -B "$(GD)/cuda" -DCMAKE_PREFIX_PATH="$(GD)/prefix_cuda" -DCMAKE_CUDA_COMPILER="$(NVCC)" -DCMAKE_CUDA_HOST_COMPILER="$(CXX)" -DFETCHCONTENT_QUIET=ON \
-	      -DEAGLE_BUILD_TESTS=ON -DEAGLE_TEST_REPORT=ON -DEAGLE_DEBUG_MODE=ON -DEAGLE_WARN_AS_ERR=ON -DEAGLE_CUDA_ARCHS=native .
+	      -DEAGLE_BUILD_TESTS=ON -DEAGLE_TEST_REPORT=ON -DEAGLE_DEBUG_MODE=ON -DEAGLE_WARN_AS_ERR=ON -DEAGLE_CUDA_ARCHS=$(CUDA_TEST_ARCHS) .
 	cmake --build "$(GD)/cuda" -j$(GATE_JOBS)
-	$(GPU_RUN) tests/check_gate.sh cuda "$(GD)/cuda/tests/eagle_tests"
 
 # interop_matrix stays deselected as in gate-py: its rows need the frameworks, installed by the Kaggle leg
 gate-py-gpu: gate-env-gpu
