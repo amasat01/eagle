@@ -127,6 +127,12 @@ void reduce_step(std::uint64_t stream, int code, int op, const void* in, std::in
 /** @brief Queue on @p stream a device-to-device copy of @p bytes. */
 void copy_step(std::uint64_t stream, void* dst, const void* src, std::size_t bytes);
 
+/** @brief Queue on @p stream the norm and Hermitian weight of a transform's @p count floats (@p bits wide, 32 or 64): every
+ *  float is scaled by @p scale, and by @p scale * @p weight when its bin is interior, that is 0 < bin < @p edge with
+ *  ``bin = i / run % bins`` (@p run floats per bin, @p bins bins along the halved axis). */
+void fft_weigh(std::uint64_t stream, unsigned bits, void* data, std::int64_t count, std::int64_t run, std::int64_t bins,
+               std::int64_t edge, double scale, double weight);
+
 /** @brief Queue on @p stream a host-to-device copy of @p bytes and wait for it (the host bytes are the caller's). */
 void write_bytes(std::uint64_t stream, void* dst, const void* src, std::size_t bytes);
 

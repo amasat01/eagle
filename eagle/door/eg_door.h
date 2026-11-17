@@ -82,6 +82,7 @@ typedef struct eg_plane_s eg_plane;   /**< one array taken from DLPack; referenc
 typedef struct eg_plan_s eg_plan;     /**< a unit under one structure over fixed partitions, plus its bindings */
 typedef struct eg_runner_s eg_runner; /**< a run-until-done loop over bound plans; keeps its record */
 typedef struct eg_graph_s eg_graph;   /**< a recorded sequence of door calls, replayed as one */
+typedef struct eg_fft_s eg_fft;       /**< a transform plan: kind, norm, shape and axes, and on a device its cuFFT plans */
 
 /** DLPack >= 1.0 managed tensor (dlpack.h). Only a pointer crosses. */
 struct DLManagedTensorVersioned;
@@ -855,9 +856,93 @@ eg_status eg_reduce(eg_ctx* ctx, const struct eg_reduce_desc* desc);
  */
 eg_status eg_copy(eg_ctx* ctx, eg_plane* src, eg_plane* dst);
 
+/* ---- transforms ---------------------------------------------------------- */
+
+typedef int32_t eg_fft_kind;
+#define EG_FFT_C2C 0 /**< complex to complex; forward unless EG_FFT_INVERSE */
+#define EG_FFT_R2C 1 /**< real to complex, forward */
+#define EG_FFT_C2R 2 /**< complex to real, inverse; the input is left unchanged */
+
+/** numpy's ``norm``, with n the product of the transformed lengths (the REAL side for R2C and C2R). */
+typedef int32_t eg_fft_norm;
+#define EG_FFT_NORM_BACKWARD 0 /**< forward unscaled, inverse scaled by 1/n */
+#define EG_FFT_NORM_FORWARD 1  /**< forward scaled by 1/n, inverse unscaled */
+#define EG_FFT_NORM_ORTHO 2    /**< both scaled by 1/sqrt(n) */
+
+/** ``eg_fft_desc.flags``. */
+#define EG_FFT_INVERSE (1u << 0) /**< C2C only: the inverse direction */
+#define EG_FFT_ADJOINT (1u << 1) /**< the plan is the adjoint of the transform described: its ``in`` has that
+                                      transform's output shape and its ``out`` that transform's input shape */
+
+/**
+ * INPUT to ``eg_fft_new``. Complex data is a float plane whose last axis has
+ * extent 2 (real part, imaginary part); ``shape`` counts complex elements, or
+ * for R2C and C2R the elements of the REAL side, and never the trailing 2. A
+ * real transform halves the last of ``axes``: its complex side has
+ * ``shape[axis] / 2 + 1`` bins there (n even: bins 0 and n/2 are real).
+ */
+struct eg_fft_desc {
+    uint32_t struct_size;
+    uint32_t flags;          /**< EG_FFT_* */
+    eg_fft_kind kind;
+    eg_fft_norm norm;
+    uint32_t dtype_bits;     /**< 32 or 64: the float width of both planes */
+    int32_t ndim;            /**< data axes, >= 1 */
+    const int64_t* shape;    /**< ndim extents; a transformed axis needs one >= 1 */
+    int32_t n_axes;          /**< >= 1 */
+    const int32_t* axes;     /**< n_axes distinct axes in [0, ndim) */
+};
+
+/**
+ * Make a transform plan for the context's target: a host context runs
+ * pocketfft, a device context cuFFT on the context's stream. cuFFT is opened
+ * at the first device plan (libcufft.so.12, then .11) and is not linked, so
+ * the door loads without it. With EG_FFT_ADJOINT the plan is the adjoint
+ * T^H of the transform T the descriptor names, as the real inner product
+ * over the float data: C2C runs the other direction with norm BACKWARD and
+ * FORWARD swapped (ORTHO stays); R2C^H is C2R and C2R^H is R2C, norm swapped,
+ * and the door applies the Hermitian weight, which for the bins k of the
+ * halved axis with 0 < k < last (last = m - 1 for even n, m for odd n, with
+ * m = n / 2 + 1) halves the input of R2C^H before it runs and doubles the
+ * output of C2R^H after. So the jvp of a transform is a run of its own plan
+ * and its vjp a run of its adjoint plan; no elementwise multiply is the
+ * caller's. Allocates (device: cuFFT work area and the C2R input copy), so it
+ * is not recordable: refused between eg_record_begin and eg_record_end.
+ * Replaces: ``aether.fft.plan`` through ``eagle.fft`` and its Hermitian
+ * weight steps. Calls today: ``aether::fft::c2c`` / ``r2c`` / ``c2r``,
+ * and cuFFT through ``FftPlan`` (cufft_plan.h).
+ * Status: OK; BAD_REQUEST (unknown flag, kind or norm; ``dtype_bits`` not a
+ * float width; ``ndim`` < 1, ``shape`` NULL, a negative extent or a
+ * transformed axis of length 0; no axes, a repeated or out-of-range axis;
+ * INVERSE on R2C or C2R; a call while recording); NOT_WRITTEN (float width 16
+ * or 128, a size past the 32-bit counts cuFFT takes); FAULT (cuFFT not
+ * loadable, naming the files tried; a cuFFT or CUDA error).
+ */
+eg_status eg_fft_new(eg_ctx* ctx, const struct eg_fft_desc* desc, eg_fft** out);
+
+/**
+ * Run the plan once, ``in`` -> ``out``. Device: queued on the context's
+ * stream with no allocation and no wait, so legal inside a recording (the
+ * graph keeps the plan alive); host: run before return, or kept and replayed
+ * while recording. ``in`` == ``out`` is allowed for C2C only. The planes are
+ * on the plan's target (host or device), compact, ``out`` writable, float of
+ * the plan's width, with the shapes the descriptor implies: C2C (shape, 2)
+ * both; R2C (shape) in, (shape with the halved axis n/2+1, 2) out; C2R the
+ * reverse; an ADJOINT plan the shapes of the transform it runs.
+ * Replaces: ``eagle.fft._lower`` (``plan.execute`` and the weight multiplies).
+ * Calls today: ``aether::fft::c2c`` / ``r2c`` / ``c2r``, ``FftPlan::execute``.
+ * Status: OK; BAD_REQUEST (a plane of the wrong width, shape, target or
+ * access, R2C or C2R with ``in`` overlapping ``out``, a C2C overlap that is
+ * not exact); FAULT (a cuFFT or CUDA error).
+ */
+eg_status eg_fft_run(eg_ctx* ctx, eg_fft* plan, eg_plane* in, eg_plane* out);
+
+/** Drop the caller's reference to a plan; a recording that runs it keeps it. NULL-safe. */
+eg_status eg_fft_free(eg_ctx* ctx, eg_fft* plan);
+
 /**
  * Start recording: until ``eg_record_end``, ``eg_launch``, ``eg_run``,
- * ``eg_reduce``, ``eg_copy`` and the conditional calls are recorded, not
+ * ``eg_reduce``, ``eg_copy``, ``eg_fft_run`` and the conditional calls are recorded, not
  * run. Host: an ordered list replayed in C. Device: a capture on the
  * context's stream (so device work the caller issues on that stream between
  * begin and end is captured too).

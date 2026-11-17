@@ -1094,6 +1094,46 @@ static void lookup_device(eg_ctx* ctx, const char* dev_lib) {
     eg_unit_free(ctx, unit);
 }
 
+/* ---- transforms ---------------------------------------------------------- */
+
+static void fft_move(void* dst, const void* src, size_t bytes) { cudaMemcpy(dst, src, bytes, cudaMemcpyDefault); }
+
+#include "fft_cases.h"
+
+/* A device plan equals the host plan within the width's tolerance: every kind and adjoint, norm and shape. */
+static void fft_cross(eg_ctx* dev, eg_ctx* host) {
+    static const struct { eg_fft_kind kind; uint32_t flags; } kinds[] = {
+        { EG_FFT_C2C, 0 }, { EG_FFT_C2C, EG_FFT_INVERSE }, { EG_FFT_R2C, 0 }, { EG_FFT_C2R, 0 },
+        { EG_FFT_C2C, EG_FFT_ADJOINT }, { EG_FFT_R2C, EG_FFT_ADJOINT }, { EG_FFT_C2R, EG_FFT_ADJOINT } };
+    for (int w = 0; w < 2; ++w) {
+        const uint32_t bits = w == 0 ? 32 : 64;
+        int ok = 1;
+        for (int k = 0; k < 7; ++k)
+            for (int g = 0; g < FFT_GEOMS && ok; ++g)
+                for (int norm = EG_FFT_NORM_BACKWARD; norm <= EG_FFT_NORM_ORTHO && ok; ++norm) {
+                    const struct fft_case c = fft_case_of(&fft_geoms[g], kinds[k].kind, kinds[k].flags, norm, bits);
+                    int64_t is[4], os[4];
+                    const size_t n_in = fft_floats(is, fft_plane(&c, 1, is)), n_out = fft_floats(os, fft_plane(&c, 0, os));
+                    double* in = malloc(n_in * sizeof(double));
+                    double* on_dev = malloc(n_out * sizeof(double));
+                    double* on_host = malloc(n_out * sizeof(double));
+                    fft_fill(in, n_in, bits);
+                    ok = fft_apply(dev, 1, &c, in, on_dev) == EG_OK && fft_apply(host, 0, &c, in, on_host) == EG_OK;
+                    double top = 0;
+                    for (size_t i = 0; ok && i < n_out; ++i) top = fabs(on_host[i]) > top ? fabs(on_host[i]) : top;
+                    const double tol = 8 * fft_eps(bits) * ((double)fft_points(&c) + 4) * (1 + top);
+                    for (size_t i = 0; ok && i < n_out; ++i) ok = fabs(on_dev[i] - on_host[i]) <= tol;
+                    if (!ok) printf("      kind %d flags %u geometry %d norm %d: tolerance %g\n", kinds[k].kind, kinds[k].flags, g, norm, tol);
+                    free(in);
+                    free(on_dev);
+                    free(on_host);
+                }
+        char what[128];
+        snprintf(what, sizeof(what), "eg_fft_run float%u: the device plan equals the host plan within 8*eps*(n+4)*(1+max), every kind, adjoint, norm and shape", bits);
+        check(ok, what);
+    }
+}
+
 int main(int argc, char** argv) {
     if (argc != 3) {
         fprintf(stderr, "usage: %s <libfixture_device.so> <libfixture_unit.so>\n", argv[0]);
@@ -1311,6 +1351,13 @@ int main(int argc, char** argv) {
 
     alloc_planes(ctx, host, axpy, x, v, want, a);
     check_close_with_device_export();
+
+    fft_values(ctx, 1);
+    fft_adjoint(ctx, 1);
+    fft_in_place(ctx, 1);
+    fft_recorded(ctx, 1);
+    fft_refusals(ctx, 1);
+    fft_cross(ctx, host);
 
     /* Freeing with live handles: modules unloaded, stream destroyed, the primary context released. */
     check(eg_unit_free(ctx, axpy) == EG_OK && eg_unit_free(ctx, axpy64) == EG_OK && eg_unit_free(ctx, axpb) == EG_OK &&

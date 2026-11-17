@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// The recordable host operations that are not launches: reduce and copy. Each
+// The recordable host operations that are not launches: reduce, copy and fft. Each
 // is checked once (`*_check`, which refuses as eg_door.h states) and then run
 // any number of times (`*_exec`): a recording keeps the checked form.
 #pragma once
@@ -29,8 +29,18 @@ void reduce_exec(const ReduceOp& r, int threads);
  *  cell's rows into the cell the caller bound (the cell's op). */
 void fold_plan(const eg_plan_s& plan, int threads);
 
+/** @brief Whether the memory of @p a and @p b overlaps. */
+bool overlaps(const DLTensor& a, const DLTensor& b);
+
+/** @brief Refuse @p plane unless it is compact and (when @p write) writable; @p what names it in the reason. */
+void check_access(const eg_plane_s& plane, bool write, const char* what);
+
 void copy_check(const eg_ctx& ctx, eg_plane_s* src, eg_plane_s* dst);
 void copy_exec(const eg_plane_s& src, const eg_plane_s& dst);
+
+/** @brief Run the checked transform @p plan once, @p in -> @p out, on at most @p threads threads (host/Fft.cpp):
+ *  pocketfft, then the plan's Hermitian weight. The result is bitwise the same for any thread count. */
+void fft_exec(const eg_fft_s& plan, const eg_plane_s& in, const eg_plane_s& out, int threads);
 
 }  // namespace host
 }  // namespace door

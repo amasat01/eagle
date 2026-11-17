@@ -18,6 +18,7 @@
 #include "eagle/diff/Reverse.h"
 #include "eagle/events/Sensitivity.h"
 
+#include <algorithm>
 #include <memory>
 
 namespace eagle {
@@ -310,6 +311,36 @@ void write_bytes(std::uint64_t stream, void* dst, const void* src, std::size_t b
 
 void zero_bytes(std::uint64_t stream, void* dst, std::size_t bytes) {
     EAGLE_CHECK_ALWAYS(cudaMemsetAsync(dst, 0, bytes, reinterpret_cast<cudaStream_t>(stream)));
+}
+
+namespace {
+
+template <class T>
+__global__ void weighKernel(T* data, std::int64_t count, std::int64_t run, std::int64_t bins, std::int64_t edge, T scale, T interior) {
+    for (std::int64_t i = static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x; i < count;
+         i += static_cast<std::int64_t>(gridDim.x) * blockDim.x) {
+        const std::int64_t bin = i / run % bins;
+        data[i] *= bin > 0 && bin < edge ? interior : scale;
+    }
+}
+
+template <class T>
+void weigh_as(cudaStream_t s, void* data, std::int64_t count, std::int64_t run, std::int64_t bins, std::int64_t edge, double scale,
+              double weight) {
+    const std::int64_t blocks = std::min<std::int64_t>((count + 255) / 256, 4096);
+    weighKernel<T><<<static_cast<unsigned>(blocks), 256, 0, s>>>(static_cast<T*>(data), count, run, bins, edge, static_cast<T>(scale),
+                                                               static_cast<T>(scale * weight));
+}
+
+}  // namespace
+
+void fft_weigh(std::uint64_t stream, unsigned bits, void* data, std::int64_t count, std::int64_t run, std::int64_t bins,
+               std::int64_t edge, double scale, double weight) {
+    const auto s = reinterpret_cast<cudaStream_t>(stream);
+    if (count <= 0) return;
+    if (bits == 64) weigh_as<double>(s, data, count, run, bins, edge, scale, weight);
+    else weigh_as<float>(s, data, count, run, bins, edge, scale, weight);
+    EAGLE_CHECK_ALWAYS(cudaGetLastError());
 }
 
 namespace {

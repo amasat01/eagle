@@ -416,6 +416,7 @@ namespace eagle {
 namespace door {
 
 struct DeviceLoop;
+struct DeviceFft;         ///< the cuFFT plans of a device transform (device/Fft.cpp)
 struct DeviceRecording;   ///< a capture in progress on the context's stream (device/Device.cpp)
 struct DeviceGraph;       ///< a recorded device graph: the instantiated capture and the plans it launched
 struct RunRecord;         ///< an EG_RUN_RECORD runner: its derived plans and last record (host/Reverse.cpp)
@@ -477,6 +478,27 @@ struct DeviceState {
 struct eg_graph_s;      // a recorded list of door calls (host/Record.cpp)
 struct eg_recording_s;  // the recording in progress on a context (host/Record.cpp)
 
+/**
+ * @brief A transform plan as it RUNS: an EG_FFT_ADJOINT descriptor is resolved at eg_fft_new into the kind, direction and
+ * norm of the transform that computes it, plus the Hermitian weight of the bins along the halved axis.
+ */
+struct eg_fft_s {
+    eg_ctx* ctx = nullptr;
+    bool device = false;                      ///< the context's target: cuFFT, else pocketfft
+    eg_fft_kind kind = EG_FFT_C2C;            ///< as run: R2C^H runs C2R and C2R^H runs R2C
+    bool forward = true;                      ///< the c2c direction (R2C is forward, C2R inverse)
+    eg_fft_norm norm = EG_FFT_NORM_BACKWARD;  ///< as run
+    std::uint32_t bits = 64;                  ///< the float width of both planes
+    std::vector<std::int64_t> shape;          ///< complex for C2C, the real side's for R2C and C2R
+    std::vector<std::int32_t> axes;           ///< the last is the halved axis of a real transform
+    std::int64_t bins = 0, edge = 0, run = 0; ///< real kinds: m = n/2+1, last (bins 0 < k < last are interior), floats of one bin
+    double weight = 1.0;                      ///< factor on the interior bins: C2R scales its input by it, R2C its output
+    eagle::door::DeviceFft* dev = nullptr;    ///< a device plan's cuFFT plans
+    void* work = nullptr;                     ///< a device C2R's copy of its input (cuFFT's c2r destroys it)
+    int refs = 1;                             ///< the caller's reference plus one per recording that runs it
+    bool caller_ref = true;
+};
+
 /** @brief All door state of one caller. */
 struct eg_ctx_s {
     long pid = 0;                             ///< the process that made the context
@@ -490,6 +512,7 @@ struct eg_ctx_s {
     std::unordered_set<eg_plan_s*> plans;
     std::unordered_set<eg_runner_s*> runners;
     std::unordered_set<eg_graph_s*> graphs;
+    std::unordered_set<eg_fft_s*> ffts;
     int exports = 0;                          ///< the DLPack exports (eg_plane_dlpack) not yet released by their consumers; changed under `busy`
     bool closed = false;                      ///< eg_ctx_free ran with exports outstanding: the last export's release frees the context
     eg_recording_s* rec = nullptr;            ///< between eg_record_begin and eg_record_end
@@ -610,6 +633,13 @@ void run(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report);
 void run_loop(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report);
 void reduce(eg_ctx& ctx, const eg_reduce_desc* desc);
 void copy(eg_ctx& ctx, eg_plane_s* src, eg_plane_s* dst);
+void fft_new(eg_ctx& ctx, const eg_fft_desc* desc, eg_fft** out);
+void fft_run(eg_ctx& ctx, eg_fft_s* plan, eg_plane_s* in, eg_plane_s* out);
+void fft_release(eg_ctx& ctx, eg_fft_s* plan);
+/** @brief Free every transform plan of @p ctx (the context is closing). */
+void fft_free_all(eg_ctx& ctx);
+/** @brief eg_fft_run while recording: keep the run, false when the context is not recording. */
+bool record_fft(eg_ctx& ctx, eg_fft_s* plan, eg_plane_s* in, eg_plane_s* out);
 bool record_launch(eg_ctx& ctx, eg_plan_s* plan);
 bool record_run(eg_ctx& ctx, eg_runner_s* runner);
 void record_begin(eg_ctx& ctx);
