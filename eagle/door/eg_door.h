@@ -863,9 +863,16 @@ eg_status eg_reverse(eg_ctx* ctx, eg_runner* runner, const struct eg_bind_desc* 
 eg_status eg_reduce(eg_ctx* ctx, const struct eg_reduce_desc* desc);
 
 /**
- * Copy ``src`` into ``dst`` (same shape and dtype; any device pair the
- * context reaches). Recordable. Replaces: ``_transfer`` copy nodes.
- * Status: OK; BAD_REQUEST.
+ * Copy ``src`` into ``dst`` (same shape and dtype). Two planes on one side
+ * copy on that side; one host plane and one device plane of the context's
+ * device copy across, either way, on the context's stream, and the call
+ * returns once the copy has finished: the host plane may be pageable or
+ * pinned and is the caller's again on return. ``eg_sync`` orders it like any
+ * op. A same-side copy is recordable; a host<->device copy is not: inside a
+ * recording it is refused NOT_WRITTEN, so copy before or after the recording.
+ * Replaces: ``_transfer`` copy nodes.
+ * Status: OK; BAD_REQUEST (shape, dtype, access); NOT_WRITTEN (a host<->device
+ * copy while recording).
  */
 eg_status eg_copy(eg_ctx* ctx, eg_plane* src, eg_plane* dst);
 

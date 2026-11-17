@@ -960,18 +960,29 @@ void device_reduce(eg_ctx& ctx, const eg_reduce_desc& d) {
     reduce_step(ctx.dev.stream, r.code, r.op == EG_REDUCE_ALL ? 3 : r.op, at(r.in), r.n, r.cols, at(r.out), at(r.comp), r.pair);
 }
 
-/** @brief eg_copy over device planes: checked as the host's, then a device-to-device copy on the context's stream
- *  (planes of one range of memory copy nothing; partly overlapping ones are refused). */
+/** @brief eg_copy with at least one device plane: checked as the host's, then a copy on the context's stream. Two device
+ *  planes copy device to device (planes of one range of memory copy nothing; partly overlapping ones are refused). One
+ *  host plane, pageable or pinned, copies across and waits, so the host bytes are safe to reuse on return. */
 void device_copy(eg_ctx& ctx, eg_plane_s* src, eg_plane_s* dst) {
     host::copy_check(ctx, src, dst);
     const DLTensor& s = src->tensor->dl_tensor;
     const DLTensor& t = dst->tensor->dl_tensor;
-    const char *ps = static_cast<const char*>(s.data) + s.byte_offset, *pd = static_cast<const char*>(t.data) + t.byte_offset;
+    char *ps = static_cast<char*>(s.data) + s.byte_offset, *pd = static_cast<char*>(t.data) + t.byte_offset;
     const std::size_t bytes = static_cast<std::size_t>(elements(s)) * (s.dtype.bits / 8);
     if (bytes == 0 || ps == pd) return;
+    if (s.device.device_type == kDLCPU) {
+        Current current(ctx.dev);
+        write_bytes(ctx.dev.stream, pd, ps, bytes);
+        return;
+    }
+    if (t.device.device_type == kDLCPU) {
+        Current current(ctx.dev);
+        read_bytes(ctx.dev.stream, pd, ps, bytes);
+        return;
+    }
     if (ps < pd + bytes && pd < ps + bytes) refuse(EG_BAD_REQUEST, "eg_copy: the device planes overlap");
     Current current(ctx.dev);
-    copy_step(ctx.dev.stream, const_cast<char*>(pd), ps, bytes);
+    copy_step(ctx.dev.stream, pd, ps, bytes);
 }
 
 /** @brief eg_fft_new on a device context: the cuFFT plans, and a C2R's copy of its input. */
