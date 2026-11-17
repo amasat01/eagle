@@ -358,8 +358,6 @@ struct eg_runner_desc {
 /** Report flags. */
 #define EG_REPORT_DONE (1u << 0)        /**< finished == n */
 #define EG_REPORT_EXACT_STEPS (1u << 1) /**< ``steps`` is exact */
-#define EG_REPORT_PROBE (1u << 2)       /**< a run taken to time the entry not in use */
-#define EG_REPORT_TIMED (1u << 3)       /**< the run carried the timing pair */
 #define EG_REPORT_SLOT_FILL (1u << 4)   /**< ``slot_fill`` is set */
 
 /** OUTPUT of ``eg_run``. */
