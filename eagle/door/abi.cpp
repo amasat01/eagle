@@ -111,6 +111,18 @@ EG_EXPORT eg_status eg_set_count(eg_ctx* ctx, eg_plan* plan, uint32_t m) {
     return door::call(ctx, [&](eg_ctx& c) { door::set_count(c, plan, m); });
 }
 
+EG_EXPORT eg_status eg_banded_pack(eg_ctx* ctx, const double* in, uint64_t* out, uint64_t n) {
+    return door::call(ctx, [&](eg_ctx& c) { door::banded_pack(c, in, out, n); });
+}
+
+EG_EXPORT eg_status eg_banded_unpack(eg_ctx* ctx, const uint64_t* in, double* out, uint64_t n) {
+    return door::call(ctx, [&](eg_ctx& c) { door::banded_unpack(c, in, out, n); });
+}
+
+EG_EXPORT eg_status eg_banded_pack_scalar(eg_ctx* ctx, double x, uint64_t* out) {
+    return door::call(ctx, [&](eg_ctx& c) { door::banded_pack_scalar(c, x, out); });
+}
+
 EG_EXPORT eg_status eg_launch(eg_ctx* ctx, eg_plan* plan, uint64_t* tiles) {
     return door::call(ctx, [&](eg_ctx& c) { door::launch(c, plan, tiles); });
 }

@@ -2442,6 +2442,37 @@ static void check_unit_flags(eg_ctx* ctx) {
     eg_unit_free(ctx, cards);
 }
 
+/* eg_banded_*: the cells of known values are aether's own words (0, 1, -1, 0.5, 3 and 2^99 + a fraction); the band is [2^-94, 2^126). */
+static void check_banded(eg_ctx* ctx) {
+    const double in[5] = {0.0, 1.0, -1.0, 0.5, 3.0};
+    const uint64_t want[5] = {0x0000000000000000ull, 0x3f80000000000000ull, 0xbf80000000000000ull, 0x3f00000000000000ull, 0x4040000000000000ull};
+    uint64_t cells[5], one = 7, sentinel = 0x1234;
+    double back[5];
+    int ok = eg_banded_pack(ctx, in, cells, 5) == EG_OK && memcmp(cells, want, sizeof(want)) == 0;
+    ok = ok && eg_banded_unpack(ctx, want, back, 5) == EG_OK && memcmp(back, in, sizeof(in)) == 0;
+    ok = ok && eg_banded_pack_scalar(ctx, -1.0, &one) == EG_OK && one == want[2];
+    check(ok, "eg_banded_pack / unpack / pack_scalar: known cells bitwise and the round trip");
+    const double wide = 0x1.93e5939a08ceap+99;
+    uint64_t wide_cell = 0;
+    check(eg_banded_pack(ctx, &wide, &wide_cell, 1) == EG_OK && wide_cell == 0x7149f2c9cd046750ull &&
+              eg_banded_unpack(ctx, &wide_cell, back, 1) == EG_OK && back[0] == wide,
+          "eg_banded_pack: a value near the top of the band keeps its cell and its value");
+    const double bad[3] = {1.0, 1e-30, 1e40};
+    cells[1] = sentinel;
+    check(eg_banded_pack(ctx, bad, cells, 3) == EG_BAD_REQUEST && reason_has(ctx, "element 1") && reason_has(ctx, "outside tier 1's exact window"),
+          "eg_banded_pack refuses the first value outside the band by element and reason");
+    one = sentinel;
+    check(eg_banded_pack_scalar(ctx, 1e40, &one) == EG_BAD_REQUEST && reason_has(ctx, "outside tier 1's exact window") && one == sentinel,
+          "eg_banded_pack_scalar refuses a value outside the band and leaves out as it was");
+    check(eg_banded_pack(ctx, NULL, NULL, 0) == EG_OK && eg_banded_unpack(ctx, NULL, NULL, 0) == EG_OK, "eg_banded_pack / unpack with n == 0 are OK");
+    check(eg_banded_pack(ctx, NULL, cells, 1) == EG_BAD_REQUEST && reason_has(ctx, "in is NULL") &&
+              eg_banded_pack(ctx, in, NULL, 1) == EG_BAD_REQUEST && reason_has(ctx, "out is NULL") &&
+              eg_banded_unpack(ctx, NULL, back, 1) == EG_BAD_REQUEST && reason_has(ctx, "in is NULL") &&
+              eg_banded_unpack(ctx, want, NULL, 1) == EG_BAD_REQUEST && reason_has(ctx, "out is NULL") &&
+              eg_banded_pack_scalar(ctx, 1.0, NULL) == EG_BAD_REQUEST && reason_has(ctx, "out is NULL"),
+          "eg_banded_*: NULL with n > 0 is BAD_REQUEST by reason");
+}
+
 int main(int argc, char** argv) {
     if (argc != 5) {
         fprintf(stderr, "usage: %s <fixture> <wrong size> <no size block> <v1 tag>\n", argv[0]);
@@ -2483,6 +2514,7 @@ int main(int argc, char** argv) {
     check_clear(ctx, unit);
     check_set_count(ctx, unit);
     check_unit_flags(ctx);
+    check_banded(ctx);
 
     check_reduce(ctx);
     check_conditionals(ctx);

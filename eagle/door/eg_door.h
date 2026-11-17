@@ -576,6 +576,37 @@ eg_status eg_clear(eg_ctx* ctx, eg_plan* plan, int32_t n_slots, const int32_t* s
 eg_status eg_set_count(eg_ctx* ctx, eg_plan* plan, uint32_t m);
 
 /**
+ * Host float64 to 8-byte banded cells: ``out[i]`` is the cell of ``in[i]``,
+ * for ``n`` values, on the host, before return. Stops at the first value
+ * outside the band (its reason names the element and carries the band's own
+ * text); ``out`` is then undefined. ``n == 0`` is OK and touches nothing.
+ * Replaces: the float64 to banded conversion of the Python array binding.
+ * Calls today: ``aether::banded::BandedReal::fromDouble(x).toBits()``.
+ * Status: OK; BAD_REQUEST (``in`` or ``out`` NULL with ``n`` > 0, a value
+ * outside the band).
+ */
+eg_status eg_banded_pack(eg_ctx* ctx, const double* in, uint64_t* out, uint64_t n);
+
+/**
+ * Banded cells to host float64: ``out[i]`` is the value of ``in[i]``, for
+ * ``n`` cells, on the host, before return. Every cell decodes. ``n == 0`` is
+ * OK and touches nothing.
+ * Replaces: the banded to float64 conversion of the Python array binding.
+ * Calls today: ``aether::banded::BandedReal::fromBits(w).toDouble()``.
+ * Status: OK; BAD_REQUEST (``in`` or ``out`` NULL with ``n`` > 0).
+ */
+eg_status eg_banded_unpack(eg_ctx* ctx, const uint64_t* in, double* out, uint64_t n);
+
+/**
+ * One float64 to one banded cell, as ``eg_banded_pack`` with ``n == 1``;
+ * ``*out`` is untouched on a refusal.
+ * Replaces: the scalar float64 to banded conversion of the Python binding.
+ * Calls today: ``aether::banded::BandedReal::fromDouble(x).toBits()``.
+ * Status: OK; BAD_REQUEST (``out`` NULL, ``x`` outside the band).
+ */
+eg_status eg_banded_pack_scalar(eg_ctx* ctx, double x, uint64_t* out);
+
+/**
  * Launch the bound plan once over each of its partitions. ``*tiles`` gets the
  * host tiles run (0 for DEVICE).
  * Replaces: ``BoundPlan.launch`` / ``Plan.run`` / ``exec.HostTeam.run``.

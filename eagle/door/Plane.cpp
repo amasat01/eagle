@@ -5,6 +5,9 @@
 // also takes kDLCUDA tensors of its own device.
 #include "eagle/door/Context.h"
 
+#include <aether/aether.h>
+#include <aether/banded/banded.h>
+
 #include <memory>
 
 namespace eagle {
@@ -21,6 +24,15 @@ bool known_dtype(const DLDataType& t) {
         case kDLUInt: return t.bits == 32;
         case kDLBool: return t.bits == 8;
         default: return false;
+    }
+}
+
+/** @brief The cell of @p x; a value outside the band is refused with aether's reason, naming @p what. */
+std::uint64_t banded_cell(double x, const std::string& what) {
+    try {
+        return aether::banded::BandedReal::fromDouble(x).toBits();
+    } catch (const aether::Error& e) {
+        refuse(EG_BAD_REQUEST, what + ": " + e.what());
     }
 }
 
@@ -134,6 +146,26 @@ void plane_release(eg_ctx& ctx, eg_plane_s* plane) {
     DLManagedTensorVersioned* tensor = plane->tensor;
     delete plane;
     if (tensor->deleter != nullptr) tensor->deleter(tensor);
+}
+
+/** @brief eg_banded_pack: stops at the first value outside the band; @p out is then undefined. */
+void banded_pack(eg_ctx&, const double* in, std::uint64_t* out, std::uint64_t n) {
+    if (n > 0 && (in == nullptr || out == nullptr))
+        refuse(EG_BAD_REQUEST, std::string("eg_banded_pack: ") + (in == nullptr ? "in" : "out") + " is NULL with n > 0");
+    for (std::uint64_t i = 0; i < n; ++i) out[i] = banded_cell(in[i], "eg_banded_pack: element " + std::to_string(i));
+}
+
+/** @brief eg_banded_unpack: every cell decodes, so only NULL is refused. */
+void banded_unpack(eg_ctx&, const std::uint64_t* in, double* out, std::uint64_t n) {
+    if (n > 0 && (in == nullptr || out == nullptr))
+        refuse(EG_BAD_REQUEST, std::string("eg_banded_unpack: ") + (in == nullptr ? "in" : "out") + " is NULL with n > 0");
+    for (std::uint64_t i = 0; i < n; ++i) out[i] = aether::banded::BandedReal::fromBits(in[i]).toDouble();
+}
+
+/** @brief eg_banded_pack_scalar: one value; @p out is untouched on a refusal. */
+void banded_pack_scalar(eg_ctx&, double x, std::uint64_t* out) {
+    if (out == nullptr) refuse(EG_BAD_REQUEST, "eg_banded_pack_scalar: out is NULL");
+    *out = banded_cell(x, "eg_banded_pack_scalar");
 }
 
 }  // namespace door
