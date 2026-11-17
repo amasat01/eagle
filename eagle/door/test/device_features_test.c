@@ -222,10 +222,17 @@ static void banded(eg_ctx* ctx, const char* lib, const char* hex, const char* di
     eg_plan* plan = plan_of(ctx, unit, CELLS);
     const int32_t slots[3] = { 0, 1, 2 };
     struct dplane* planes[3] = { &out, &px, &py };
-    const int ok = x && y && want && got && plan && dplane_new(ctx, &out, CELLS, kDLFloat, 64, NULL) &&
-                   dplane_new(ctx, &px, CELLS, kDLFloat, 64, x) && dplane_new(ctx, &py, CELLS, kDLFloat, 64, y) &&
+    const int ok = x && y && want && got && plan && dplane_new(ctx, &out, CELLS, kDLUInt, 64, NULL) &&
+                   dplane_new(ctx, &px, CELLS, kDLUInt, 64, x) && dplane_new(ctx, &py, CELLS, kDLUInt, 64, y) &&
                    bind(ctx, plan, 3, slots, planes) == EG_OK && launch_read(ctx, plan, &out, got, CELLS * 8);
     check(ok && memcmp(got, want, CELLS * 8) == 0, "BANDED unit (4096 band cells): DEVICE launch OK, out cells bitwise vs the old device path");
+    struct dplane pf;
+    struct dplane* const wrong[1] = { &pf };
+    const int32_t real_slot[1] = { 1 };
+    const int made = plan && dplane_new(ctx, &pf, CELLS, kDLFloat, 64, x);
+    check(made && bind(ctx, plan, 1, real_slot, wrong) == EG_BAD_REQUEST && reason_has(ctx, "a banded cell is not a double; pack it with eg_banded_pack"),
+          "BANDED unit: a float64 plane on a real slot is refused BAD_REQUEST by name");
+    if (made) dplane_free(ctx, &pf);
     if (plan) eg_plan_free(ctx, plan);
     if (ok) for (int i = 0; i < 3; ++i) dplane_free(ctx, planes[i]);
     free(x); free(y); free(want); free(got);

@@ -35,7 +35,7 @@ static void one_cap(eg_ctx* ctx, eg_unit* unit, const char* dir, int64_t cap) {
     for (int i = 0; ok && i < 5; ++i) {
         const size_t bytes = i < 4 ? sizeof(zeros) : sizeof(none);
         ok = cudaMalloc(&d[i], bytes) == cudaSuccess && cudaMemcpy(d[i], init[i], bytes, cudaMemcpyHostToDevice) == cudaSuccess &&
-             (p[i] = wrap(ctx, &t[i], N, d[i], i < 4 ? kDLFloat : kDLBool, i < 4 ? 64 : 8)) != NULL;
+             (p[i] = wrap(ctx, &t[i], N, d[i], i < 4 ? kDLUInt : kDLBool, i < 4 ? 64 : 8)) != NULL;
     }
     struct eg_plan_desc pd;
     memset(&pd, 0, sizeof(pd));

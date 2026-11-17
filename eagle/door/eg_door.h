@@ -220,7 +220,7 @@ struct eg_unit_meta {
     const char* name;
     uint8_t digest[EG_DIGEST_BYTES];
     int32_t pattern;                    /**< enum of the typed-meta design */
-    int32_t scalar_type;                /**< 0 float64, 1 float32, 2 banded (refused on a host structure as not written) */
+    int32_t scalar_type;                /**< 0 float64, 1 float32, 2 banded: a REAL slot is an 8-byte cell crossing as unsigned 64-bit, made with eg_banded_pack (refused on a host structure as not written) */
     const char* host_entry;             /**< symbol of the serial v2 entry, NULL: none */
     const char* device_image;           /**< symbol of the embedded device image, NULL: none */
     const char* device_function;        /**< kernel name inside that image */

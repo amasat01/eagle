@@ -62,6 +62,13 @@ std::size_t uniform_bytes(std::int32_t dtype, std::int32_t scalar) {
     }
 }
 
+/** @brief The wire element type of a REAL slot of a unit of @p scalar: float32, float64, or for a banded unit
+ *  the 8-byte cell as unsigned 64-bit. */
+DLDataType real_dtype(std::int32_t scalar) {
+    if (scalar == EG_SCALAR_BANDED) return DLDataType{ kDLUInt, 64, 1 };
+    return DLDataType{ kDLFloat, static_cast<std::uint8_t>(scalar == EG_SCALAR_FLOAT32 ? 32 : 64), 1 };
+}
+
 /** @brief True for the roles whose plane has a runtime row count (the handle's extent is the trailing one). */
 bool wide(const SlotFacts& s) { return s.role == EG_ROLE_WIDE_IN || s.role == EG_ROLE_WIDE_OUT; }
 
@@ -69,7 +76,10 @@ bool wide(const SlotFacts& s) { return s.role == EG_ROLE_WIDE_IN || s.role == EG
 bool dtype_ok(const DLDataType& t, const SlotFacts& s, std::int32_t scalar) {
     if (t.lanes != 1) return false;
     switch (s.dtype) {
-        case EG_DTYPE_REAL: return s.role != EG_ROLE_TERMINATED && t.code == kDLFloat && t.bits == (scalar == EG_SCALAR_FLOAT32 ? 32 : 64);
+        case EG_DTYPE_REAL: {
+            const DLDataType real = real_dtype(scalar);
+            return s.role != EG_ROLE_TERMINATED && t.code == real.code && t.bits == real.bits;
+        }
         case EG_DTYPE_INT64: return t.code == kDLInt && t.bits == 64;
         case EG_DTYPE_INT32: return t.code == kDLInt && t.bits == 32;
         case EG_DTYPE_UINT32: return t.code == kDLUInt && t.bits == 32;
@@ -114,6 +124,8 @@ void check_plane(const eg_plan_s& plan, int slot, const eg_plane_s& plane) {
     if ((t.device.device_type == kDLCUDA) != (plan.structure == EG_STRUCTURE_DEVICE))
         refuse(EG_BAD_REQUEST, what + (t.device.device_type == kDLCUDA ? ": a device plane in a host plan"
                                                                        : ": a host plane in a DEVICE plan"));
+    if (plan.unit->scalar_type == EG_SCALAR_BANDED && s.dtype == EG_DTYPE_REAL && s.role != EG_ROLE_TERMINATED && t.dtype.code == kDLFloat)
+        refuse(EG_BAD_REQUEST, what + ": a banded cell is not a double; pack it with eg_banded_pack");
     if (!dtype_ok(t.dtype, s, plan.unit->scalar_type))
         refuse(EG_BAD_REQUEST, what + ": dtype (code " + std::to_string(t.dtype.code) + ", bits " +
                std::to_string(t.dtype.bits) + ") is not the slot's");
@@ -397,7 +409,7 @@ static eg_plane_s* make_team_plane(eg_ctx& ctx, const eg_unit_s& unit, const Tea
     const std::int64_t units = t.wide != EG_WIDE_WARP_TILED ? count : device ? (count + 31) / 32 * 32 : 1;
     const std::int64_t size = std::max<std::int64_t>(1, t.per_lane * units);
     const DLDataType elem = t.dtype == EG_DTYPE_INT32 ? DLDataType{ kDLInt, 32, 1 }
-                                                      : DLDataType{ kDLFloat, static_cast<std::uint8_t>(unit.scalar_type == EG_SCALAR_FLOAT32 ? 32 : 64), 1 };
+                                                      : real_dtype(unit.scalar_type);
     std::vector<std::int64_t> shape{ size };
     if (t.layout == EG_LAYOUT_PLANE_MAJOR && t.per_lane != 1) shape = { t.per_lane, size / t.per_lane };
     return make_plane(ctx, elem, shape, device);
@@ -511,7 +523,7 @@ void plan_new(eg_ctx& ctx, const eg_plan_desc* desc, eg_plan** out) {
                         d.structure == EG_STRUCTURE_DEVICE ? reinterpret_cast<void*>(plan->device_steps)
                                                            : static_cast<void*>(&plan->steps_word), 1);
         if (!d.unit->cells.empty()) {    // the rows of every cell component, zeroed
-            const DLDataType real{ kDLFloat, static_cast<std::uint8_t>(d.unit->scalar_type == EG_SCALAR_FLOAT32 ? 32 : 64), 1 };
+            const DLDataType real = real_dtype(d.unit->scalar_type);
             const std::int64_t rows = std::max<std::int64_t>(1, (d.n_samples + d.unit->cell_row - 1) / d.unit->cell_row);
             for (const CellFacts& c : d.unit->cells) {
                 plan->rows.push_back(make_plane(ctx, real, { rows }, device));
@@ -532,7 +544,7 @@ void plan_new(eg_ctx& ctx, const eg_plan_desc* desc, eg_plan** out) {
         }
         const auto elem_of = [&](const TeamPlaneFacts& t) {
             return t.dtype == EG_DTYPE_INT32 ? DLDataType{ kDLInt, 32, 1 }
-                                             : DLDataType{ kDLFloat, static_cast<std::uint8_t>(d.unit->scalar_type == EG_SCALAR_FLOAT32 ? 32 : 64), 1 };
+                                             : real_dtype(d.unit->scalar_type);
         };
         if (device && !sizes.empty()) {    // the planes together must fit the device (the old bind's refusal, naming the stage that needs most)
             std::vector<std::int64_t> bytes;
@@ -599,7 +611,7 @@ void plan_new(eg_ctx& ctx, const eg_plan_desc* desc, eg_plan** out) {
                     std::vector<std::int64_t> shape{ size };
                     if (t.layout == EG_LAYOUT_PLANE_MAJOR && t.per_lane != 1) shape = { t.per_lane, size / t.per_lane };
                     const DLDataType elem = t.dtype == EG_DTYPE_INT32 ? DLDataType{ kDLInt, 32, 1 }
-                                                                      : DLDataType{ kDLFloat, static_cast<std::uint8_t>(d.unit->scalar_type == EG_SCALAR_FLOAT32 ? 32 : 64), 1 };
+                                                                      : real_dtype(d.unit->scalar_type);
                     plan->segteam.back().push_back(make_plane(ctx, elem, shape, device));
                 }
             }
@@ -632,7 +644,7 @@ void plan_new(eg_ctx& ctx, const eg_plan_desc* desc, eg_plan** out) {
         for (std::size_t i = 0; i < d.unit->slots.size(); ++i)    // a source slot of a split unit that eagle makes (scratch, a compensation row): bound from the start
             if (!d.unit->stages.empty() && d.unit->slots[i].made) plan->bindings[i].bound = true;
         if (!d.unit->split_cells.empty()) {    // the rows of each stage's cell columns, their compensation rows, and the cell planes eagle folds into
-            const DLDataType real{ kDLFloat, static_cast<std::uint8_t>(d.unit->scalar_type == EG_SCALAR_FLOAT32 ? 32 : 64), 1 };
+            const DLDataType real = real_dtype(d.unit->scalar_type);
             for (const SplitCell& sc : d.unit->split_cells) {
                 const StageFacts& st = d.unit->stages[static_cast<std::size_t>(sc.stage)];
                 const std::int64_t rows = std::max<std::int64_t>(1, (d.n_samples + st.cell_row - 1) / st.cell_row);

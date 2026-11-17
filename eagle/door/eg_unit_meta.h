@@ -70,7 +70,7 @@ typedef int32_t eg_unit_pattern;
 typedef int32_t eg_scalar_type;
 #define EG_SCALAR_FLOAT64 0
 #define EG_SCALAR_FLOAT32 1
-#define EG_SCALAR_BANDED 2 /**< banded accumulators; a host structure refuses it as EG_NOT_WRITTEN */
+#define EG_SCALAR_BANDED 2 /**< banded accumulators: every REAL slot is an 8-byte cell crossing as unsigned 64-bit, made with eg_banded_pack; a host structure refuses it as EG_NOT_WRITTEN */
 
 /** ``eg_unit_meta.device_image_format`` (the values eg_door.h states). */
 typedef int32_t eg_image_format;
@@ -98,7 +98,7 @@ typedef int32_t eg_slot_role;
  *  binds, not the IR leaf's (what eg_bind checks a plane's dtype against; a
  *  uniform's value is read at it; an index-set map is 32 or 64 bits by it). */
 typedef int32_t eg_wire_dtype;
-#define EG_DTYPE_REAL 0         /**< the unit's scalar_type (an f64 or f32 leaf) */
+#define EG_DTYPE_REAL 0         /**< the unit's scalar_type: f64, f32, or in a banded unit an 8-byte cell crossing as unsigned 64-bit (eg_banded_pack) */
 #define EG_DTYPE_INT64 1        /**< signed 64-bit, and nothing else */
 #define EG_DTYPE_INT32 2        /**< signed 32-bit, and nothing else */
 #define EG_DTYPE_UINT32 3       /**< unsigned 32-bit (the finished counter, a mix counter) */
