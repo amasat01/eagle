@@ -2432,6 +2432,16 @@ static void check_set_count(eg_ctx* ctx, eg_unit* axpb) {
     eg_unit_free(ctx, ul);
 }
 
+/* EG_UNIT_CALLER_CARDS: a unit lowered under caller-stated cards loads as any other; an unknown unit flag is refused by name. */
+static void check_unit_flags(eg_ctx* ctx) {
+    eg_unit* cards = NULL;
+    eg_unit* bad = NULL;
+    check(load(ctx, "axpb_cards", 0xD4, &cards) == EG_OK && cards != NULL, "a unit with EG_UNIT_CALLER_CARDS loads");
+    check(load(ctx, "axpb_badflag", 0xD5, &bad) == EG_NOT_WRITTEN && bad == NULL && reason_has(ctx, "unknown flag bits 2"),
+          "a unit flag bit eagle does not know is refused NOT_WRITTEN, naming the bits");
+    eg_unit_free(ctx, cards);
+}
+
 int main(int argc, char** argv) {
     if (argc != 5) {
         fprintf(stderr, "usage: %s <fixture> <wrong size> <no size block> <v1 tag>\n", argv[0]);
@@ -2472,6 +2482,7 @@ int main(int argc, char** argv) {
     check_made(ctx);
     check_clear(ctx, unit);
     check_set_count(ctx, unit);
+    check_unit_flags(ctx);
 
     check_reduce(ctx);
     check_conditionals(ctx);

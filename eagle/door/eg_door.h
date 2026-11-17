@@ -213,7 +213,7 @@ struct eg_unit_stage {
 /** One unit of the library. */
 struct eg_unit_meta {
     uint32_t struct_size;
-    uint32_t flags;                     /**< none defined yet */
+    uint32_t flags;                     /**< EG_UNIT_CALLER_CARDS (eg_unit_meta.h); other bits are refused */
     const char* name;
     uint8_t digest[EG_DIGEST_BYTES];
     int32_t pattern;                    /**< enum of the typed-meta design */

@@ -600,8 +600,8 @@ void read_derived(const eg_unit_meta& m, eg_unit_s& unit) {
 
 /** @brief Check the unit-level members and resolve the host entry. */
 void read_unit(const eg_unit_meta& m, void* library, eg_unit_s& unit) {
-    if (m.flags != 0)
-        refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': unknown flag bits " + std::to_string(m.flags));
+    if ((m.flags & ~EG_UNIT_CALLER_CARDS) != 0)
+        refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': unknown flag bits " + std::to_string(m.flags & ~EG_UNIT_CALLER_CARDS));
     if (m.pattern != EG_PATTERN_PURE)
         refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': pattern " + std::to_string(m.pattern) +
                " is not written");

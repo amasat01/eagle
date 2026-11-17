@@ -149,6 +149,8 @@ typedef int32_t eg_steps_regime;
 #define EG_REGIME_PER_RESIDENT 1 /**< n / (SMs * resident threads per SM) (device rows) */
 
 /* ---- flags --------------------------------------------------------------- */
+#define EG_UNIT_CALLER_CARDS (1u << 0) /**< eg_unit_meta.flags: lowered under card documents the caller stated, not the shipped
+                                          cards; eagle loads such a unit as any other and only carries the bit */
 
 #define EG_SLOT_PRIOR (1u << 0)       /**< the body reads the launch-start value: eagle keeps it between launches and records it */
 #define EG_SLOT_PARAM_PLANE (1u << 1) /**< a parameter read at index 0 only: eg_reverse reduces its gradient over samples */

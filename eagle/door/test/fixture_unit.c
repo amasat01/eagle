@@ -387,6 +387,33 @@ static const struct eg_unit_meta unit_axpb = {
     .launch = &launch,
 };
 
+/* axpb lowered under caller-stated cards (loads as axpb does), and axpb with a flag bit eagle does not know (refused). */
+static const struct eg_unit_meta unit_axpb_cards = {
+    .struct_size = sizeof(struct eg_unit_meta),
+    .flags = EG_UNIT_CALLER_CARDS,
+    .name = "axpb_cards",
+    .digest = DIGEST(0xD4),
+    .pattern = EG_PATTERN_PURE,
+    .scalar_type = EG_SCALAR_FLOAT64,
+    .host_entry = "axpb_host",
+    .device_image_format = EG_IMAGE_NONE,
+    .body = &body,
+    .launch = &launch,
+};
+
+static const struct eg_unit_meta unit_axpb_badflag = {
+    .struct_size = sizeof(struct eg_unit_meta),
+    .flags = 1u << 1,
+    .name = "axpb_badflag",
+    .digest = DIGEST(0xD5),
+    .pattern = EG_PATTERN_PURE,
+    .scalar_type = EG_SCALAR_FLOAT64,
+    .host_entry = "axpb_host",
+    .device_image_format = EG_IMAGE_NONE,
+    .body = &body,
+    .launch = &launch,
+};
+
 static const struct eg_unit_meta unit_wait = {
     .struct_size = sizeof(struct eg_unit_meta),
     .name = "wait",
@@ -723,13 +750,13 @@ static const struct eg_unit_meta* const units[] = { &unit_axpb, &unit_wait, &uni
                                                     &unit_count3, &unit_count1a, &unit_count3a, &unit_countA, &unit_countAa, &unit_vecs, &unit_count1i,
                                                     &unit_count1ia, &unit_count1e, &unit_lanes, &unit_prefix, &unit_count1g, &unit_widemul,
                                                     &unit_gathb, &unit_gatha, &unit_gathn, &unit_boxed, &unit_boxbad, &unit_shr, &unit_cells, &unit_keyed,
-                                                    &unit_keyedbad, &unit_cellsum };
+                                                    &unit_keyedbad, &unit_cellsum, &unit_axpb_cards, &unit_axpb_badflag };
 
 static const struct eg_library_meta library = {
     .struct_size = sizeof(struct eg_library_meta),
     .schema_major = EG_META_SCHEMA_MAJOR,
     .schema_minor = 0,
-    .n_units = 27,
+    .n_units = 29,
     .units = units,
 };
 
