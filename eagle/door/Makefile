@@ -29,6 +29,8 @@
 #
 #   device              the library, the device fixture unit and door_device_test; run
 #                       $(OUT)/door_device_test $(OUT)/libfixture_device.so $(OUT)/libfixture_unit.so
+#                       and the gemm rows: $(OUT)/gemm_device_test $(OUT)/libfixture_gemm.so, then the same with
+#                       LD_PRELOAD=$(OUT)/libno_cublas.so and the argument --no-cublas as a third
 #   pair-device-<unit>  the unit's cuda kernel text (KERNEL_CUDA_<unit>, compiled by the old path's
 #                       device recipe, PAIR_DEVICE_FLAGS) and its meta (META_CUDA_<unit>) in one library, plus
 #                       pair_device_test; run $(OUT)/pair_device_test $(OUT)/libpair_dev_<unit>.so <oracle dir>
@@ -78,7 +80,7 @@ comma := ,
 CXXFLAGS_DEVICE := $(filter-out -DEAGLE_CPU_ONLY=1,$(CXXFLAGS_DOOR)) -isystem $(CUDA)/include
 CUDART := $(if $(CUDA),-L$(CUDA)/lib64 -lcudart -Wl$(comma)-rpath$(comma)$(CUDA)/lib64)
 
-SRC := Context.cpp Unit.cpp Plane.cpp Plan.cpp RunCheck.cpp abi.cpp host/Runner.cpp host/Reverse.cpp host/Ops.cpp host/Record.cpp device/Device.cpp
+SRC := Context.cpp Unit.cpp Plane.cpp Plan.cpp RunCheck.cpp abi.cpp host/Runner.cpp host/Reverse.cpp host/Ops.cpp host/Record.cpp device/Device.cpp device/Gemm.cpp
 OBJ := $(SRC:%.cpp=$(OUT)/%.o) $(if $(CUDA),$(OUT)/device/Loop.o)
 # The shared-library link differs by system; door.map stays the one list of exported names (Darwin's list is made from it).
 ifeq ($(shell uname -s),Darwin)
@@ -112,9 +114,11 @@ $(OUT)/%.o: %.cpp Context.h device/Seam.h eg_door.h eg_unit_meta.h host/Team.h h
 	$(CXX) $(CXXFLAGS_DOOR) -c $< -o $@
 
 # The device group: built with the CUDA headers when CUDA is set, else its host-only refusals.
-$(OUT)/device/Device.o: device/Device.cpp device/Loop.h Context.h device/Seam.h eg_door.h eg_unit_meta.h | check-inputs
+$(OUT)/device/Device.o: device/Device.cpp device/Gemm.h device/Loop.h Context.h device/Seam.h eg_door.h eg_unit_meta.h | check-inputs
 	@mkdir -p $(dir $@)
 	$(CXX) $(if $(CUDA),$(CXXFLAGS_DEVICE),$(CXXFLAGS_DOOR)) -c $< -o $@
+
+$(OUT)/device/Gemm.o: device/Gemm.h
 
 # A device runner's captured loop over eagle's capture seam (CUDA builds only).
 $(OUT)/device/Loop.o: device/Loop.cu device/Loop.h | check-inputs check-cuda
@@ -180,9 +184,32 @@ $(REV_FIXTURE): test/fixture_reverse.c eg_door.h eg_unit_meta.h
 $(REV_TEST): test/reverse_test.c test/pair_util.h eg_door.h $(LIB)
 	$(CC) $(CFLAGS_C) -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door -Wl,-rpath,$(OUT) -lm -pthread
 
-test: symbols confined $(FIXTURE) $(FIXTURE_BAD) $(TEST) $(REV_FIXTURE) $(REV_TEST)
+# The gemm unit record: its fixture library (test/fixture_gemm.c), the host rows, and the device rows with the
+# missing-cuBLAS shim (device targets only).
+GEMM_FIXTURE := $(OUT)/libfixture_gemm.so
+GEMM_TEST := $(OUT)/gemm_test
+GEMM_DEVICE_TEST := $(OUT)/gemm_device_test
+NO_CUBLAS := $(OUT)/libno_cublas.so
+
+$(GEMM_FIXTURE): test/fixture_gemm.c eg_door.h eg_unit_meta.h
+	@mkdir -p $(OUT)
+	$(CC) $(CFLAGS_C) -fPIC -shared -fvisibility=hidden -o $@ $<
+
+$(GEMM_TEST): test/gemm_test.c eg_door.h eg_unit_meta.h $(LIB)
+	$(CC) $(CFLAGS_C) -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door -Wl,-rpath,$(OUT) -ldl -lm -pthread
+
+$(GEMM_DEVICE_TEST): test/gemm_test.c eg_door.h eg_unit_meta.h $(LIB) | check-cuda
+	$(CC) $(CFLAGS_C) -DEG_GEMM_DEVICE -isystem $(CUDA)/include -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door -Wl,-rpath,$(OUT) \
+	  $(CUDART) -ldl -lm -pthread
+
+$(NO_CUBLAS): test/no_cublas.c
+	@mkdir -p $(OUT)
+	$(CC) -std=c11 -O2 -Wall -Wextra -Werror -fPIC -shared -o $@ $< -ldl
+
+test: symbols confined $(FIXTURE) $(FIXTURE_BAD) $(TEST) $(REV_FIXTURE) $(REV_TEST) $(GEMM_FIXTURE) $(GEMM_TEST)
 	$(TEST) $(FIXTURE) $(FIXTURE_BAD)
 	$(REV_TEST) $(REV_FIXTURE)
+	$(GEMM_TEST) $(GEMM_FIXTURE)
 
 # pair-reverse: rr_pend, its one-step taping twin and its step vjp (the old path's kernel texts, KERNEL_rr_pend,
 # KERNEL_rr_pend_tape, KERNEL_rr_pend_step_vjp) in one library with META_reverse (their metas and the derived records),
@@ -500,7 +527,7 @@ $(DEVICE_FIXTURE): test/fixture_device.c $(OUT)/fixture_device.fatbin $(OUT)/fat
 $(DEVICE_TEST): test/door_device_test.c eg_door.h $(LIB) | check-cuda
 	$(CC) $(CFLAGS_C) -isystem $(CUDA)/include -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door -Wl,-rpath,$(OUT) $(CUDART) -lm -pthread
 
-device: check-cuda symbols $(FIXTURE) $(DEVICE_FIXTURE) $(DEVICE_TEST)
+device: check-cuda symbols $(FIXTURE) $(DEVICE_FIXTURE) $(DEVICE_TEST) $(GEMM_FIXTURE) $(GEMM_DEVICE_TEST) $(NO_CUBLAS)
 
 PAIR_DEVICE_TEST := $(OUT)/pair_device_test
 RUNNER_PAIR_TEST := $(OUT)/runner_pair_test

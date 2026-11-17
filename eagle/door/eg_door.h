@@ -191,6 +191,7 @@ struct eg_unit_launch; /**< lane space, block, box, plane axes, wide placement *
 struct eg_unit_finish; /**< mask slot, steps (or EG_STEPS_AUTO), steps_max */
 struct eg_unit_team;   /**< a stage's team record */
 struct eg_unit_derived; /**< what a derived unit is to its primal: tape, reserved slots, slot sources */
+struct eg_unit_gemm;    /**< the matrix products of a dense-contraction unit (eg_unit_meta.h) */
 
 /** A unit named file-independently: its name and digest, never a path. */
 struct eg_unit_ref {
@@ -238,6 +239,7 @@ struct eg_unit_meta {
                                              eg_unit_load refuses an image with no machine code for the device
                                              whose PTX is newer than the driver takes */
     int32_t reserved1;
+    const struct eg_unit_gemm* gemm;    /**< NULL: none; the matrix products a DEVICE plan runs instead of a kernel (eg_unit_meta.h) */
 };
 
 /** The top of the tree: what ``eg_unit_library_meta`` returns. */
@@ -716,7 +718,8 @@ eg_status eg_banded_pack_scalar(eg_ctx* ctx, double x, uint64_t* out);
 
 /**
  * Launch the bound plan once over each of its partitions. ``*tiles`` gets the
- * host tiles run (0 for DEVICE).
+ * host tiles run (0 for DEVICE). A DEVICE plan of a unit with a gemm record
+ * (eg_unit_meta.h) queues its cuBLAS products instead of a kernel.
  * Replaces: ``BoundPlan.launch`` / ``Plan.run`` / ``exec.HostTeam.run``.
  * Calls today: ``eagle::exec::HostTeam::run`` (HostTeam.h) via
  * ``_core.run_host`` (eagle_core.cpp); ``run_serial`` for HOST_SERIAL.

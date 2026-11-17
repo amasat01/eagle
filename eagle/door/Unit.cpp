@@ -619,6 +619,52 @@ void read_derived(const eg_unit_meta& m, eg_unit_s& unit) {
     }
 }
 
+/** @brief Copy the gemm record (eg_unit_gemm) and check it against the unit's slots; eg_plan_new checks it against the shapes. */
+void read_gemm(const eg_unit_meta& m, eg_unit_s& unit) {
+    if (m.gemm == nullptr) return;
+    const std::string who = "unit '" + unit.name + "' gemm";
+    const std::string bad = "meta that contradicts itself: " + who + " ";
+    if (unit.scalar_type == EG_SCALAR_BANDED)
+        refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': a banded unit with a gemm record is not written (the library never states one)");
+    const eg_unit_gemm g = read_record(m.gemm, eg_unit_gemm{}, who);
+    if (g.n_calls < 1 || g.calls == nullptr) refuse(EG_BAD_REQUEST, bad + "n_calls " + std::to_string(g.n_calls) + " without calls");
+    if (g.lane_fanin < 0) refuse(EG_BAD_REQUEST, bad + "lane_fanin " + std::to_string(g.lane_fanin));
+    GemmFacts& f = unit.gemm;
+    f.lane_fanin = g.lane_fanin;
+    for (std::int32_t i = 0; i < g.n_calls; ++i) {
+        const std::string at = who + " calls[" + std::to_string(i) + "]";
+        const eg_unit_gemm_call c = read_record(g.calls[i], eg_unit_gemm_call{}, at);
+        const std::uint32_t known = EG_GEMM_TRANS_A | EG_GEMM_TRANS_B | EG_GEMM_TRANS_C | EG_GEMM_ACCUMULATE;
+        if (c.flags & ~known) refuse(EG_NOT_WRITTEN, at + ": unknown flag bits " + std::to_string(c.flags & ~known));
+        const auto plane_slot = [&](std::int32_t slot, const char* which) -> const SlotFacts& {
+            if (slot < 0 || slot >= static_cast<std::int32_t>(unit.slots.size()))
+                refuse(EG_BAD_REQUEST, "meta that contradicts itself: " + at + " " + which + "_slot " + std::to_string(slot) + " is outside the " +
+                       std::to_string(unit.slots.size()) + " slots of the unit");
+            const SlotFacts& s = unit.slots[static_cast<std::size_t>(slot)];
+            if (s.role == EG_ROLE_UNIFORM || s.role == EG_ROLE_NSAMPLES || s.made)
+                refuse(EG_BAD_REQUEST, "meta that contradicts itself: " + at + " " + which + "_slot " + std::to_string(slot) + " ('" + s.name + "') takes no plane");
+            if (s.dtype != EG_DTYPE_REAL)
+                refuse(EG_BAD_REQUEST, "meta that contradicts itself: " + at + " " + which + "_slot " + std::to_string(slot) + " ('" + s.name +
+                       "') is not of the unit's scalar_type");
+            return s;
+        };
+        plane_slot(c.a_slot, "a");
+        plane_slot(c.b_slot, "b");
+        const SlotFacts& out = plane_slot(c.c_slot, "c");
+        if (out.role != EG_ROLE_MUTABLE && out.role != EG_ROLE_OUT && out.role != EG_ROLE_WIDE_OUT && out.role != EG_ROLE_ACCUM_OUT)
+            refuse(EG_BAD_REQUEST, "meta that contradicts itself: " + at + " c_slot " + std::to_string(c.c_slot) + " ('" + out.name + "') is not a written role");
+        const std::int64_t extents[6] = { c.a_rows, c.a_cols, c.b_rows, c.b_cols, c.c_rows, c.c_cols };
+        for (std::int64_t e : extents) {
+            if (e < 1 && e != EG_GEMM_PER_LANE)
+                refuse(EG_BAD_REQUEST, "meta that contradicts itself: " + at + " has the extent " + std::to_string(e) + " (each is 1 or more, or EG_GEMM_PER_LANE)");
+            if (e == EG_GEMM_PER_LANE && g.lane_fanin == 0)
+                refuse(EG_BAD_REQUEST, "meta that contradicts itself: " + at + " has an EG_GEMM_PER_LANE extent and lane_fanin 0");
+        }
+        f.calls.push_back({ c.flags, c.a_slot, c.b_slot, c.c_slot, c.a_rows, c.a_cols, c.b_rows, c.b_cols, c.c_rows, c.c_cols, 0, 0, 0 });
+    }
+    f.present = true;
+}
+
 /** @brief Check the unit-level members and resolve the host entry. */
 void read_unit(const eg_unit_meta& m, void* library, eg_unit_s& unit) {
     if ((m.flags & ~EG_UNIT_CALLER_CARDS) != 0)
@@ -672,6 +718,7 @@ void read_unit(const eg_unit_meta& m, void* library, eg_unit_s& unit) {
     if (!unit.stages.empty() && (!unit.cells.empty() || unit.derived.present))
         refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': a split unit with cell rows of its own or a derived role is not written");
     read_derived(m, unit);
+    read_gemm(m, unit);
     if (unit.ctx->dev.ordinal >= 0 && m.device_image != nullptr) device_unit_load(unit, m, library);
 }
 

@@ -13,6 +13,7 @@
 #include "eagle/door/host/Segment.h"
 
 #ifndef EAGLE_CPU_ONLY
+#include "eagle/door/device/Gemm.h"
 #include "eagle/door/device/Loop.h"
 #include "eagle/exec/DeviceKernel.h"
 #include "eagle/policy/Launch.h"
@@ -40,6 +41,7 @@ void device_unit_free(eg_unit_s&) noexcept {}
 void device_plan_check(const eg_ctx&, const eg_unit_s&) {
     refuse(EG_NOT_WRITTEN, "structure DEVICE: the device group is not built");
 }
+void device_gemm_ready(eg_ctx&) {}
 void device_launch(eg_plan_s&) {}
 void device_sync(eg_ctx&) {}
 void device_plan_cells(eg_plan_s&) {}
@@ -314,6 +316,10 @@ void device_close(eg_ctx& ctx) noexcept {
     DeviceState& d = ctx.dev;
     if (d.context == 0) return;
     try {
+        if (!d.gemm_handles.empty()) {
+            Current current(d);
+            gemm_handles_free(ctx);
+        }
         if (d.own_stream != 0) {    // never the caller's stream
             EG_DRIVER(cuStreamDestroy);
             Current current(d);
@@ -429,6 +435,10 @@ void fold_cell(const eg_plan_s& plan, std::size_t i, const DLTensor& rows, const
 void launch_on(const eg_plan_s& plan, std::uint64_t stream) {
     const DeviceState& d = plan.ctx->dev;
     const eg_unit_s& u = *plan.unit;
+    if (u.gemm.present) {    // the stated products instead of a kernel
+        gemm_launch(plan, stream);
+        return;
+    }
     const auto s = reinterpret_cast<CUstream>(stream);
     std::size_t group = 0;
     for (const DispatchFacts& f : u.dispatches) {    // an AUTO group's counters eagle made: zeroed in the stream at every launch (nothing reads them)
@@ -457,7 +467,7 @@ void device_plan_check(const eg_ctx& ctx, const eg_unit_s& unit) {
     if (ctx.dev.ordinal < 0)
         refuse(EG_BAD_REQUEST, "structure DEVICE on a host-only context (made without EG_CTX_DEVICE)");
     const std::string who = "unit '" + unit.name + "' on DEVICE: ";
-    if (unit.stages.empty() && unit.function == 0) refuse(EG_NOT_WRITTEN, who + "the unit has no device image");
+    if (unit.stages.empty() && unit.function == 0 && !unit.gemm.present) refuse(EG_NOT_WRITTEN, who + "the unit has no device image");
     for (const StageFacts& st : unit.stages)
         if (st.grid == EG_GRID_CHUNKS || st.grid == EG_GRID_TARGETS)
             refuse(EG_NOT_WRITTEN, who + "the stage '" + st.ref_name + "' is an ordered scatter (team grid " + (st.grid == EG_GRID_CHUNKS ? "CHUNKS" : "TARGETS") + "), which is not written on the device");
@@ -472,6 +482,12 @@ void device_plan_check(const eg_ctx& ctx, const eg_unit_s& unit) {
         for (const CompanionFacts& c : st.unit->companions)
             if (c.device_fold == 0)
                 refuse(EG_NOT_WRITTEN, who + "the companion '" + st.unit->slots[c.slot].name + "' of the stage '" + st.ref_name + "' has no device fold function");
+}
+
+/** @brief Make the cuBLAS handle of the stream in scope (see Seam.h). */
+void device_gemm_ready(eg_ctx& ctx) {
+    Current current(ctx.dev);
+    gemm_handle_make(ctx, ctx.dev.stream);
 }
 
 /** @brief A split unit on the device: the stages in order on the context's stream, each with its argument list (the source slot or team
@@ -1096,7 +1112,8 @@ void device_runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out)
     for (std::int32_t i = 0; i < d.n_plans; ++i)
         if (ctx.plans.count(d.plans[i]) != 0) {
             const eg_unit_s& u = *d.plans[i]->unit;
-            const char* inside = !u.companions.empty() || !u.cells.empty() ? "companion or cell folding"
+            const char* inside = u.gemm.present                                 ? "a gemm unit"
+                                 : !u.companions.empty() || !u.cells.empty() ? "companion or cell folding"
                                  : u.index_count_slot >= 0                  ? "an index set"
                                  : u.dev_box_t > 0                          ? "a device thread box"
                                                                             : nullptr;
@@ -1471,18 +1488,21 @@ void device_stream_use(eg_ctx& ctx, std::uint64_t stream) {
     if (ctx.dev_rec != nullptr)
         refuse(EG_BAD_REQUEST, "eg_stream_use while recording: the capture is on the stream in scope; call it before "
                "eg_record_begin or after eg_record_end");
-    if (stream == 0) {
-        ctx.dev.stream = ctx.dev.own_stream;
-        return;
+    if (stream != 0) {
+        EG_DRIVER(cuStreamGetCtx);
+        Current current(ctx.dev);
+        CUcontext owner = nullptr;
+        check(cuStreamGetCtx_(reinterpret_cast<CUstream>(stream), &owner), "eg_stream_use: cuStreamGetCtx");
+        if (owner != reinterpret_cast<CUcontext>(ctx.dev.context))
+            refuse(EG_BAD_REQUEST, "eg_stream_use: the stream belongs to another context than device " +
+                   std::to_string(ctx.dev.ordinal) + "'s primary context");
     }
-    EG_DRIVER(cuStreamGetCtx);
-    Current current(ctx.dev);
-    CUcontext owner = nullptr;
-    check(cuStreamGetCtx_(reinterpret_cast<CUstream>(stream), &owner), "eg_stream_use: cuStreamGetCtx");
-    if (owner != reinterpret_cast<CUcontext>(ctx.dev.context))
-        refuse(EG_BAD_REQUEST, "eg_stream_use: the stream belongs to another context than device " +
-               std::to_string(ctx.dev.ordinal) + "'s primary context");
-    ctx.dev.stream = stream;
+    const std::uint64_t scope = stream != 0 ? stream : ctx.dev.own_stream;
+    if (!ctx.dev.gemm_handles.empty()) {    // a gemm unit was planned: the stream gets its handle now, outside any capture
+        Current current(ctx.dev);
+        gemm_handle_make(ctx, scope);
+    }
+    ctx.dev.stream = scope;
 }
 
 /** @brief eg_sync: wait until the context's stream is idle (a host-only context has nothing queued). */

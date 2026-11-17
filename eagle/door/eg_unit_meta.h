@@ -552,6 +552,61 @@ struct eg_unit_derived {
                                                       slot, none on its other reserved slots */
 };
 
+/* ---- gemm units ---------------------------------------------------------- */
+
+/**
+ * A unit that is one dense contraction states ``eg_unit_meta.gemm``: the matrix products the library lowered it to.
+ * The library states them; eagle lowers nothing. A unit with the member still carries its full kernel
+ * (``host_entry``), because a HOST plan of it runs that kernel's own loop, bit for bit as without the member. A DEVICE
+ * plan of it runs the stated products through cuBLAS on the context's stream INSTEAD of a kernel (no device image is
+ * needed), in a recording or not. cuBLAS is opened at run time (libcublas.so.13, then .12), never linked; a DEVICE
+ * plan of a gemm unit whose cuBLAS cannot be opened is EG_FAULT naming the files tried, never a silent fall back to
+ * the kernel. Both widths run (``scalar_type`` float32: S, float64: D); a banded unit (EG_SCALAR_BANDED) with the
+ * member is refused EG_NOT_WRITTEN at ``eg_unit_load``, and the library never states one.
+ *
+ * Every plane is one dense row-major matrix view of its slot: rows as stated, row stride = the plane's elements / rows
+ * (so a plane wider than the stated columns serves a column slice), columns as stated. alpha is 1, beta 0 (``C =
+ * product``) or 1 (EG_GEMM_ACCUMULATE: ``C += product``), batch 1.
+ *
+ * Refusals, all by reason text. ``eg_unit_load``: a slot out of range or of a role that takes no plane, ``c_slot`` not
+ * a written role, a slot whose dtype is not the unit's scalar (EG_BAD_REQUEST); an unknown flag bit (EG_NOT_WRITTEN);
+ * ``n_calls`` < 1, an extent < 1 that is not EG_GEMM_PER_LANE, EG_GEMM_PER_LANE with ``lane_fanin`` 0 (EG_BAD_REQUEST).
+ * ``eg_plan_new``: the contracted extents disagree, C's stored shape is not the product's (or its transpose), an
+ * extent that does not resolve to 1 or more or ``n_samples`` not divisible by ``lane_fanin``, an extent or stride
+ * beyond 2^31 - 1 (EG_BAD_REQUEST); a DEVICE plan with several partitions, or of a unit that is split, segmented, has
+ * cells, companions, an index set or an active set (EG_NOT_WRITTEN: one gemm per launch); cuBLAS missing (EG_FAULT).
+ * ``eg_bind``: a plane whose element count is not a multiple of the rows, or whose row stride is smaller than the
+ * stated columns, or beyond 2^31 - 1 (EG_BAD_REQUEST). ``eg_runner_new``: a gemm unit in a DEVICE runner (EG_NOT_WRITTEN).
+ *
+ * The cuBLAS handle of the context's stream is made at ``eg_plan_new`` of the first DEVICE plan of a gemm unit and
+ * again at ``eg_stream_use``; ``eg_launch`` never makes one, so a gemm is legal in a recording.
+ */
+
+/** An extent that is ``n_samples / eg_unit_gemm.lane_fanin``, resolved at ``eg_plan_new``. */
+#define EG_GEMM_PER_LANE (-1)
+
+#define EG_GEMM_TRANS_A (1u << 0)    /**< op(A) = A^T: A is stored (k, m) */
+#define EG_GEMM_TRANS_B (1u << 1)    /**< op(B) = B^T: B is stored (n, k) */
+#define EG_GEMM_TRANS_C (1u << 2)    /**< C is stored through a transposed view: (n, m) */
+#define EG_GEMM_ACCUMULATE (1u << 3) /**< C += product (beta 1); without: C = product (beta 0) */
+
+/** One matrix product ``C = op(A) * op(B)`` over three slots of the unit; op(A) is (m, k), op(B) is (k, n). */
+struct eg_unit_gemm_call {
+    uint32_t struct_size;
+    uint32_t flags;                /**< EG_GEMM_*; other bits are refused */
+    int32_t a_slot, b_slot, c_slot; /**< slots of ``eg_unit_body.slots``; ``c_slot`` is a written role */
+    int32_t reserved0;
+    int64_t a_rows, a_cols, b_rows, b_cols, c_rows, c_cols; /**< the STORED shapes: each >= 1 or EG_GEMM_PER_LANE */
+};
+
+/** The record of ``eg_unit_meta.gemm`` (NULL there: none): a forward unit states 1 call, an adjoint unit 2. */
+struct eg_unit_gemm {
+    uint32_t struct_size;
+    int32_t n_calls;                              /**< >= 1 */
+    int64_t lane_fanin;                           /**< the other operand's free extent: a PER_LANE extent is n_samples / it; 0: none */
+    const struct eg_unit_gemm_call* const* calls; /**< n_calls records, run in order */
+};
+
 #ifdef __cplusplus
 }
 #endif
