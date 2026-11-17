@@ -1178,6 +1178,22 @@ void device_runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out)
         if (d.plans[i]->structure != EG_STRUCTURE_DEVICE)
             refuse(EG_BAD_REQUEST, "plans[" + std::to_string(i) + "] is a host plan in a runner over DEVICE plans: "
                    "one runner runs on one side");
+    if (d.plans[0]->unit->seg.present) {    // a SEGMENTED group reads its classes back at each launch: no captured loop, the runner steps it
+        if (d.every != 0 && d.every != d.plans[0]->unit->finish.steps)
+            refuse(EG_BAD_REQUEST, "every " + std::to_string(d.every) + ": a runner over a SEGMENTED group advances "
+                   "unit '" + d.plans[0]->unit->name + "''s " + std::to_string(d.plans[0]->unit->finish.steps) + " steps per launch");
+        if (d.flags & EG_RUN_REORDER)
+            refuse(EG_BAD_REQUEST, "EG_RUN_REORDER: a SEGMENTED group reads no active set, so there is nothing to reorder");
+        auto* runner = new eg_runner_s;
+        runner->plans.assign(d.plans, d.plans + d.n_plans);
+        runner->max_steps = d.max_steps;
+        runner->dev.ctx = &ctx;
+        runner->dev.stepped = true;
+        ctx.runners.insert(runner);
+        for (eg_plan_s* p : runner->plans) ++p->refs;
+        *out = runner;
+        return;
+    }
     const std::int64_t k = d.plans[0]->unit->finish.steps;
     if (k == EG_STEPS_AUTO) {    // the no-graph entries: no loop, no loop cells
         if (d.events == EG_EVENTS_REFINE)
@@ -1306,6 +1322,40 @@ void device_active_restore(eg_ctx& ctx, eg_runner_s& runner, const void* mask, c
     runner.act.restored_at = runner.act.reorders;
 }
 
+namespace {
+
+/** @brief eg_run of a runner over a SEGMENTED group (``DispatchRunner._run``): re-sync the counter to the mask, then launch the
+ *  group once per step (it syncs itself) and read the counter, until every sample finished or the steps are spent. */
+void stepped_run(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report) {
+    eg_plan_s& first = *runner->plans[0];
+    const FinishFacts& f = first.unit->finish;
+    const std::int64_t n = first.n_samples;
+    const std::uint64_t stream = ctx.dev.stream;
+    Current current(ctx.dev);
+    const DLTensor& t = first.bindings[static_cast<std::size_t>(f.mask_slot)].plane->tensor->dl_tensor;
+    mask_count(stream, static_cast<const char*>(t.data) + t.byte_offset, n, t.dtype.bits / 8u, reinterpret_cast<unsigned*>(first.device_counter));
+    const std::int64_t cap = loop_cap(runner->max_steps, f.steps);
+    unsigned finished = 0;
+    std::int64_t launches = 0;
+    cells_read(stream, first.device_counter, &finished, 1);
+    while (launches < cap && static_cast<std::int64_t>(finished) != n) {
+        device_launch(first);
+        cells_read(stream, first.device_counter, &finished, 1);
+        ++launches;
+    }
+    eg_run_report out{};
+    out.flags = (static_cast<std::int64_t>(finished) == n ? EG_REPORT_DONE : 0u) | (f.steps == 1 ? EG_REPORT_EXACT_STEPS : 0u);
+    out.mode = EG_MODE_BAND;
+    out.n = n;
+    out.finished = finished;
+    out.launches = launches;
+    out.steps = launches * f.steps;
+    out.mapped = launches * n;
+    write_report(report, out);
+}
+
+}  // namespace
+
 /** @brief eg_run of a DEVICE runner (``_until_done.Runner._run``, band): re-sync the counter to the mask, capture
  *  the WHILE loop at the first run (again when a plan's bindings changed), launch it, read the iterations
  *  and the counter back, fill @p report as the old device path does. */
@@ -1320,6 +1370,7 @@ void device_run(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report) {
         record_forward(ctx, *runner, report);
         return;
     }
+    if (runner->dev.stepped) return stepped_run(ctx, runner, report);
     if (runner->dev.mode != EG_MODE_PERSIST) note_launch(ctx.dev, *runner->plans[0], runner->dev);    // the persist geometry is set at construction
     if (runner->dev.mode != EG_MODE_BAND) return fast_run(ctx, runner, report);
     eg_plan_s& first = *runner->plans[0];

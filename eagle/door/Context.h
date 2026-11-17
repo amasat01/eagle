@@ -241,6 +241,7 @@ struct SegFacts {
     static constexpr std::int32_t kMap = -2, kCount = -3;   ///< a sweep's active map and count: eagle's own, joined to no plan slot
     bool present = false;
     bool dynamic = false;                     ///< a stale slot and a sweep, no classify unit
+    std::size_t own_slots = 0;                ///< the planned unit's own slot count: its kernel takes that many arguments, not the group's extra slots
     std::int32_t k = 0, class_slot = -1, stale_slot = -1, offsets_slot = -1, mask_slot = -1;   ///< plan slots; mask: the TERMINATED slot, -1: every sample is live
     std::string name;
     std::vector<eg_unit_s*> branches;         ///< k units in class order; a reference may be the unit itself
@@ -451,6 +452,7 @@ struct DeviceRun {
     std::uint64_t map = 0, scratch = 0;       ///< an active set's device live-slot map (int32) and its compaction scratch
     double build_s = 0.0;                     ///< the capture's wall
     int mode = EG_MODE_BAND;                  ///< steps AUTO: EG_MODE_FUSED_ONE or EG_MODE_PERSIST (no graph)
+    bool stepped = false;                     ///< a SEGMENTED group: no captured loop, one host-driven launch of the group per step
     unsigned block = 0, grid = 0, chunk = 0;  ///< the persist launch
     std::uint64_t fast = 0;                   ///< the persist entry's device [next, steps] (uint32)
     std::vector<unsigned char> bound;         ///< the plans' argument bytes the loop was captured over

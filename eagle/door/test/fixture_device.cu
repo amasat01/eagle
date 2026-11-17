@@ -193,3 +193,91 @@ extern "C" __global__ void dlookup(ScalarHandle y, ScalarHandle x, ScalarHandle 
     const int s = static_cast<const int*>(map.data)[i];
     static_cast<double*>(y.data)[s] = 2.0 * static_cast<const double*>(x.data)[s] + 1.0;
 }
+
+// SEGMENTED groups (the host fixture's "sg" and "dg", test/fixture_unit.c): slots k, limit, mask, finished, then the group's own;
+// thread t of branch j serves the slot offsets[j] + t. The sweep reads the live prefix of its active map.
+#define SEG_HEAD(first)                                                                                      \
+    const long long flat = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;                    \
+    if (flat >= count) return;                                                                               \
+    const long long i = first;
+__device__ static void segStep(ScalarHandle k, ScalarHandle limit, ScalarHandle mask, ScalarHandle finished, long long i, double step) {
+    double* ks = static_cast<double*>(k.data);
+    ks[i] += step;
+    if (ks[i] >= static_cast<const double*>(limit.data)[i]) {
+        static_cast<char*>(mask.data)[i] = 1;
+        atomicAdd(static_cast<unsigned*>(finished.data), 1u);
+    }
+}
+
+extern "C" __global__ void sgCls(ScalarHandle limit, ScalarHandle cls, long long base, long long count, long long nSamples) {
+    SEG_HEAD(base + flat)
+    (void)nSamples;
+    static_cast<long long*>(cls.data)[i] = static_cast<const double*>(limit.data)[i] >= 6.0 ? 1 : 0;
+}
+
+__device__ static void sgBranch(int j, ScalarHandle k, ScalarHandle limit, ScalarHandle mask, ScalarHandle finished, ScalarHandle offsets,
+                                long long count) {
+    const long long* off = static_cast<const long long*>(offsets.data);
+    const long long flat = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (flat >= count) return;
+    const long long i = off[j] + flat;
+    if (i >= off[j + 1] || static_cast<char*>(mask.data)[i] != 0) return;
+    segStep(k, limit, mask, finished, i, j + 1.0);
+}
+
+extern "C" __global__ void sgK0(ScalarHandle k, ScalarHandle limit, ScalarHandle mask, ScalarHandle finished, ScalarHandle offsets,
+                                long long base, long long count, long long nSamples) { (void)base; (void)nSamples; sgBranch(0, k, limit, mask, finished, offsets, count); }
+extern "C" __global__ void sgK1(ScalarHandle k, ScalarHandle limit, ScalarHandle mask, ScalarHandle finished, ScalarHandle offsets,
+                                long long base, long long count, long long nSamples) { (void)base; (void)nSamples; sgBranch(1, k, limit, mask, finished, offsets, count); }
+
+extern "C" __global__ void sgf(ScalarHandle k, ScalarHandle limit, ScalarHandle mask, ScalarHandle finished, long long base,
+                               long long count, long long nSamples) {
+    SEG_HEAD(base + flat)
+    (void)nSamples;
+    if (static_cast<char*>(mask.data)[i] != 0) return;
+    segStep(k, limit, mask, finished, i, static_cast<const double*>(limit.data)[i] >= 6.0 ? 2.0 : 1.0);
+}
+
+// dg: slots k, limit, mask, finished, offsets (4), class (5), stale (6), pos (7); the class of a sample is k >= 4.
+__device__ static void dgBranch(int j, ScalarHandle k, ScalarHandle limit, ScalarHandle mask, ScalarHandle finished, ScalarHandle offsets,
+                                ScalarHandle cls, ScalarHandle stale, ScalarHandle pos, long long count) {
+    const long long* off = static_cast<const long long*>(offsets.data);
+    const long long flat = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (flat >= count) return;
+    const long long i = off[j] + flat;
+    if (i >= off[j + 1] || static_cast<char*>(mask.data)[i] != 0) return;
+    const int c = static_cast<const double*>(k.data)[i] >= 4.0 ? 1 : 0;
+    static_cast<long long*>(cls.data)[i] = c;
+    static_cast<char*>(stale.data)[i] = c != j;
+    static_cast<double*>(pos.data)[i] = static_cast<double>(i);
+    if (c == j) segStep(k, limit, mask, finished, i, 0.125 * (j + 1));
+}
+
+extern "C" __global__ void dgK0(ScalarHandle k, ScalarHandle limit, ScalarHandle mask, ScalarHandle finished, ScalarHandle offsets,
+                                ScalarHandle cls, ScalarHandle stale, ScalarHandle pos, long long base, long long count, long long nSamples) {
+    (void)base; (void)nSamples;
+    dgBranch(0, k, limit, mask, finished, offsets, cls, stale, pos, count);
+}
+extern "C" __global__ void dgK1(ScalarHandle k, ScalarHandle limit, ScalarHandle mask, ScalarHandle finished, ScalarHandle offsets,
+                                ScalarHandle cls, ScalarHandle stale, ScalarHandle pos, long long base, long long count, long long nSamples) {
+    (void)base; (void)nSamples;
+    dgBranch(1, k, limit, mask, finished, offsets, cls, stale, pos, count);
+}
+
+extern "C" __global__ void dgSweep(ScalarHandle k, ScalarHandle limit, ScalarHandle mask, ScalarHandle finished, ScalarHandle map,
+                                   ScalarHandle live, long long base, long long count, long long nSamples) {
+    SEG_HEAD(base + flat)
+    (void)nSamples;
+    if (i >= static_cast<long long>(static_cast<const unsigned*>(live.data)[0])) return;
+    const long long s = static_cast<const int*>(map.data)[i];
+    if (static_cast<char*>(mask.data)[s] != 0) return;
+    segStep(k, limit, mask, finished, s, 0.125 * ((static_cast<const double*>(k.data)[s] >= 4.0 ? 1 : 0) + 1));
+}
+
+extern "C" __global__ void dgf(ScalarHandle k, ScalarHandle limit, ScalarHandle mask, ScalarHandle finished, long long base,
+                               long long count, long long nSamples) {
+    SEG_HEAD(base + flat)
+    (void)nSamples;
+    if (static_cast<char*>(mask.data)[i] != 0) return;
+    segStep(k, limit, mask, finished, i, 0.125 * ((static_cast<const double*>(k.data)[i] >= 4.0 ? 1 : 0) + 1));
+}

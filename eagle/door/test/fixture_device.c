@@ -209,11 +209,67 @@ static const struct eg_unit_launch launch_lookup = {
     .index_count_slot = 3, .group = 1 };
 MADE_UNIT(unit_dlookup, "dlookup", 0xDD, "dlookup", lookup_body, launch_lookup);
 
+
+/* SEGMENTED groups, as the host fixture's "sg" (static selector) and "dg" (dynamic selector, class = k >= 4): see test/fixture_unit.c. */
+SLOT(slot_sg_offsets, EG_ROLE_LOOKUP, EG_DTYPE_INT64, 0, NULL, "sg_offsets");
+SLOT(slot_sg_class, EG_ROLE_MUTABLE, EG_DTYPE_INT64, 0, NULL, "sg_class");
+SLOT(slot_dg_offsets, EG_ROLE_LOOKUP, EG_DTYPE_INT64, 0, NULL, "dg_offsets");
+SLOT(slot_dg_class, EG_ROLE_MUTABLE, EG_DTYPE_INT64, 0, NULL, "dg_class");
+SLOT(slot_dg_stale, EG_ROLE_MUTABLE, EG_DTYPE_BOOL, 0, NULL, "dg_stale");
+SLOT(slot_pos, EG_ROLE_MUTABLE, EG_DTYPE_REAL, 0, NULL, "pos");
+static const struct eg_unit_slot* const sg_k_slots[] = { &slot_k, &slot_limit, &slot_mask, &slot_finished, &slot_sg_offsets };
+static const struct eg_unit_slot* const sg_cls_slots[] = { &slot_limit, &slot_sg_class };
+static const struct eg_unit_slot* const dg_k_slots[] = { &slot_k, &slot_limit, &slot_mask, &slot_finished, &slot_dg_offsets,
+                                                         &slot_dg_class, &slot_dg_stale, &slot_pos };
+static const struct eg_unit_slot* const dg_sweep_slots[] = { &slot_k, &slot_limit, &slot_mask, &slot_finished, &slot_map, &slot_live };
+#define SEG_REF(var, name_, byte) static const struct eg_unit_ref var = { .struct_size = sizeof(struct eg_unit_ref), .name = name_, .digest = DIGEST(byte) }
+SEG_REF(ref_sg_cls, "dsg__cls", 0xF1);
+SEG_REF(ref_sg_k0, "dsg__k0", 0xF2);
+SEG_REF(ref_sg_k1, "dsg__k1", 0xF3);
+SEG_REF(ref_dg_k0, "ddg__k0", 0xF5);
+SEG_REF(ref_dg_k1, "ddg__k1", 0xF6);
+SEG_REF(ref_dg_sweep, "ddg__sweep", 0xF7);
+static const struct eg_unit_ref* const sg_branches[] = { &ref_sg_k0, &ref_sg_k1 };
+static const struct eg_unit_ref* const dg_branches[] = { &ref_dg_k0, &ref_dg_k1 };
+#define DISPATCH(var, strategy_, class_, stale_, offsets_, classify_, name_, branches_, sweep_)                     \
+    static const struct eg_unit_dispatch var = { .struct_size = sizeof(struct eg_unit_dispatch), .strategy = strategy_, \
+        .mix_slot = -1, .class_slot = class_, .stale_slot = stale_, .offsets_slot = offsets_, .classify = classify_,   \
+        .name = name_, .k = 2, .branches = branches_, .sweep = sweep_ }
+DISPATCH(disp_sg_cls, EG_DISPATCH_SEGMENTED, 1, -1, -1, NULL, "dsg", NULL, NULL);
+DISPATCH(disp_sg_branch, EG_DISPATCH_SEGMENTED, -1, -1, 4, &ref_sg_cls, "dsg", sg_branches, NULL);
+DISPATCH(disp_dg_branch, EG_DISPATCH_SEGMENTED, 5, 6, 4, NULL, "ddg", dg_branches, &ref_dg_sweep);
+DISPATCH(disp_dg_sweep, EG_DISPATCH_SWITCH, -1, -1, -1, NULL, "ddg", NULL, NULL);
+static const struct eg_unit_dispatch* const sg_cls_list[] = { &disp_sg_cls };
+static const struct eg_unit_dispatch* const sg_branch_list[] = { &disp_sg_branch };
+static const struct eg_unit_dispatch* const dg_branch_list[] = { &disp_dg_branch };
+static const struct eg_unit_dispatch* const dg_sweep_list[] = { &disp_dg_sweep };
+#define SEG_BODY(var, slots_, n_, list_) static const struct eg_unit_body var = { .struct_size = sizeof(struct eg_unit_body), \
+    .access = EG_ACCESS_SAMPLE_LOCAL, .n_slots = n_, .slots = slots_, .n_dispatches = 1, .dispatches = list_ }
+SEG_BODY(sg_cls_body, sg_cls_slots, 2, sg_cls_list);
+SEG_BODY(sg_branch_body, sg_k_slots, 5, sg_branch_list);
+SEG_BODY(dg_branch_body, dg_k_slots, 8, dg_branch_list);
+SEG_BODY(dg_sweep_body, dg_sweep_slots, 6, dg_sweep_list);
+#define SEG_UNIT(var, name_, byte, function_, body_, launch_, finish_)                                              \
+    static const struct eg_unit_meta var = {                                                                       \
+        .struct_size = sizeof(struct eg_unit_meta), .name = name_, .digest = DIGEST(byte),                        \
+        .pattern = EG_PATTERN_PURE, .scalar_type = EG_SCALAR_FLOAT64, .device_image = "fixture__image",           \
+        .device_function = function_, .device_image_format = EG_IMAGE_FATBIN, .body = &body_, .launch = &launch_, \
+        .finish = finish_, .device_image_size = "fixture__image_size" }
+SEG_UNIT(unit_sg_cls, "dsg__cls", 0xF1, "sgCls", sg_cls_body, launch_any, NULL);
+SEG_UNIT(unit_sg_k0, "dsg__k0", 0xF2, "sgK0", sg_branch_body, launch_any, &finish_one);
+SEG_UNIT(unit_sg_k1, "dsg__k1", 0xF3, "sgK1", sg_branch_body, launch_any, &finish_one);
+COUNT_UNIT(unit_sgf, "dsgf", 0xF4, "sgf", count1_body, launch_any);
+SEG_UNIT(unit_dg_k0, "ddg__k0", 0xF5, "dgK0", dg_branch_body, launch_any, &finish_one);
+SEG_UNIT(unit_dg_k1, "ddg__k1", 0xF6, "dgK1", dg_branch_body, launch_any, &finish_one);
+SEG_UNIT(unit_dg_sweep, "ddg__sweep", 0xF7, "dgSweep", dg_sweep_body, launch_count_active, &finish_one);
+COUNT_UNIT(unit_dgf, "ddgf", 0xF8, "dgf", count1_body, launch_any);
+
 static const struct eg_unit_meta* const units[] = { &unit_axpy, &unit_axpy64, &unit_boxdev, &unit_banded, &unit_nofn,
-                                                    &unit_noimg, &unit_dcells, &unit_dkeyed, &unit_dkeyednf, &unit_dkeyedh, &unit_fat129, &unit_ptx129, &unit_sass70, &unit_dprefix, &unit_dcount, &unit_dcount1, &unit_dcount1a, &unit_dauto, &unit_dautorange, &unit_dlookup };
+                                                    &unit_noimg, &unit_dcells, &unit_dkeyed, &unit_dkeyednf, &unit_dkeyedh, &unit_fat129, &unit_ptx129, &unit_sass70, &unit_dprefix, &unit_dcount, &unit_dcount1, &unit_dcount1a, &unit_dauto, &unit_dautorange, &unit_dlookup,
+                                                    &unit_sg_cls, &unit_sg_k0, &unit_sg_k1, &unit_sgf, &unit_dg_k0, &unit_dg_k1, &unit_dg_sweep, &unit_dgf };
 
 static const struct eg_library_meta library = {
-    .struct_size = sizeof(struct eg_library_meta), .schema_major = EG_META_SCHEMA_MAJOR, .n_units = 20, .units = units,
+    .struct_size = sizeof(struct eg_library_meta), .schema_major = EG_META_SCHEMA_MAJOR, .n_units = 28, .units = units,
 };
 
 __attribute__((visibility("default"))) const struct eg_library_meta* eg_unit_library_meta(void) { return &library; }

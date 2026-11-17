@@ -318,6 +318,14 @@ void runner_reset(eg_ctx& ctx, eg_runner_s* runner) {
         p->seg.sorted = false;    // a SEGMENTED group sorts again at its first launch
         p->seg.stale_now = 0;
         std::fill(p->seg.run_len.begin(), p->seg.run_len.end(), 0);
+        p->seg.perm.clear();    // the planes are in sample order between launches: the arrangement starts as the identity
+        std::fill(p->seg.cls.begin(), p->seg.cls.end(), 0);    // the classes and stale marks a first sort reads are zero, as in a new plan
+        std::fill(p->seg.stale.begin(), p->seg.stale.end(), 0);
+        std::fill(p->seg.sortkey.begin(), p->seg.sortkey.end(), 0);
+        for (std::size_t i = 1; i < p->segdev.size() && i <= 2; ++i) {    // DEVICE: the class plane and, for a dynamic selector, the stale mask
+            const DLTensor& st = p->segdev[i]->tensor->dl_tensor;
+            zero_memory(ctx, true, static_cast<char*>(st.data) + st.byte_offset, static_cast<std::size_t>(elements(st)) * (st.dtype.bits / 8));
+        }
     }
     if (runner->active) {
         if (runner->dev.ctx != nullptr) active_counters(a);

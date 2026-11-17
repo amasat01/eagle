@@ -27,6 +27,12 @@
  *    then marks the sample and counts it into the finished counter; one or
  *    three steps per launch (slots: k, limit, mask, the counter).
  *
+ *  - "sg": a SEGMENTED group of two branches with a static selector (the classify unit "sg__cls" reads only limit; branch j of
+ *    "sg__k0" / "sg__k1" steps k by j + 1 until k >= limit) and "sgf", the fused unit computing the same steps per sample.
+ *  - "dg": the same with a dynamic selector: the class is k >= 4, a state the step writes, so a branch unit marks the samples
+ *    of its run whose class is not its own, the sweep unit "dg__sweep" steps those by their class, and "dgf" is the fused unit.
+ *    Branch j steps k by 0.125 * (j + 1); a branch also writes the slot of its sample into the plane "pos".
+ *
  * The size block beside the host entries (``eagle_abi_tag``,
  * ``eagle_layout_sizes``) follows FIXTURE_BLOCK: 0 (default) the real one,
  * 1 a wrong sizeof(ScalarHandle), 2 none exported, 3 the v1 tag.
@@ -78,6 +84,14 @@ EG_FIXTURE_EXPORT void shr_host(void* const* params, int64_t base, int64_t count
 EG_FIXTURE_EXPORT void cells_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void keyed_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void keyed__fold_acc_host(void* const* params, int64_t base, int64_t count, int64_t n);
+EG_FIXTURE_EXPORT void sg_cls_host(void* const* params, int64_t base, int64_t count, int64_t n);
+EG_FIXTURE_EXPORT void sg_k0_host(void* const* params, int64_t base, int64_t count, int64_t n);
+EG_FIXTURE_EXPORT void sg_k1_host(void* const* params, int64_t base, int64_t count, int64_t n);
+EG_FIXTURE_EXPORT void sgf_host(void* const* params, int64_t base, int64_t count, int64_t n);
+EG_FIXTURE_EXPORT void dg_k0_host(void* const* params, int64_t base, int64_t count, int64_t n);
+EG_FIXTURE_EXPORT void dg_k1_host(void* const* params, int64_t base, int64_t count, int64_t n);
+EG_FIXTURE_EXPORT void dg_sweep_host(void* const* params, int64_t base, int64_t count, int64_t n);
+EG_FIXTURE_EXPORT void dgf_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT const struct eg_library_meta* eg_unit_library_meta(void);
 
 /* Lanes of a partial last group a count1g launch was handed (the entry skips them). */
@@ -317,6 +331,94 @@ void vecs_host(void* const* params, int64_t base, int64_t count, int64_t n) {
 }
 
 /* ---- the size block (plugin/gref_layout.h's field order) ------------------ */
+
+/* ---- SEGMENTED groups: slots k, limit, mask, finished, then the group's own; thread t of branch j serves the slot offsets[j] + t ---- */
+static void seg_step(void* const* params, int j, int64_t i, double step) {
+    double* k = (double*)((const struct fixture_handle*)params[0])->data;
+    const double* limit = (const double*)((const struct fixture_handle*)params[1])->data;
+    char* mask = (char*)((const struct fixture_handle*)params[2])->data;
+    uint32_t* finished = (uint32_t*)((const struct fixture_handle*)params[3])->data;
+    (void)j;
+    k[i] += step;
+    if (k[i] >= limit[i]) {
+        mask[i] = 1;
+        __atomic_fetch_add(finished, 1u, __ATOMIC_RELAXED);
+    }
+}
+
+static int is_dead(void* const* params, int64_t i) { return ((const char*)((const struct fixture_handle*)params[2])->data)[i] != 0; }
+
+static double sg_step_of(const double* limit, int64_t i) { return limit[i] >= 6.0 ? 2.0 : 1.0; }
+
+void sg_cls_host(void* const* params, int64_t base, int64_t count, int64_t n) {
+    const double* limit = (const double*)((const struct fixture_handle*)params[0])->data;
+    int64_t* cls = (int64_t*)((const struct fixture_handle*)params[1])->data;
+    (void)n;
+    for (int64_t i = base; i < base + count; ++i) cls[i] = limit[i] >= 6.0 ? 1 : 0;
+}
+
+static void sg_branch(void* const* params, int j, int64_t base, int64_t count) {
+    const int64_t* offsets = (const int64_t*)((const struct fixture_handle*)params[4])->data;
+    for (int64_t t = base; t < base + count; ++t) {
+        const int64_t i = offsets[j] + t;
+        if (i >= offsets[j + 1]) break;
+        if (!is_dead(params, i)) seg_step(params, j, i, j + 1.0);
+    }
+}
+
+void sg_k0_host(void* const* params, int64_t base, int64_t count, int64_t n) { (void)n; sg_branch(params, 0, base, count); }
+void sg_k1_host(void* const* params, int64_t base, int64_t count, int64_t n) { (void)n; sg_branch(params, 1, base, count); }
+
+void sgf_host(void* const* params, int64_t base, int64_t count, int64_t n) {
+    const double* limit = (const double*)((const struct fixture_handle*)params[1])->data;
+    (void)n;
+    for (int64_t i = base; i < base + count; ++i)
+        if (!is_dead(params, i)) seg_step(params, 0, i, sg_step_of(limit, i));
+}
+
+/* dg: slots k, limit, mask, finished, offsets (4), class (5), stale (6), pos (7); the class of a sample is k >= 4 */
+static int dg_class(const double* k, int64_t i) { return k[i] >= 4.0 ? 1 : 0; }
+
+static void dg_branch(void* const* params, int j, int64_t base, int64_t count) {
+    const double* k = (const double*)((const struct fixture_handle*)params[0])->data;
+    const int64_t* offsets = (const int64_t*)((const struct fixture_handle*)params[4])->data;
+    int64_t* cls = (int64_t*)((const struct fixture_handle*)params[5])->data;
+    char* stale = (char*)((const struct fixture_handle*)params[6])->data;
+    double* pos = (double*)((const struct fixture_handle*)params[7])->data;
+    for (int64_t t = base; t < base + count; ++t) {
+        const int64_t i = offsets[j] + t;
+        if (i >= offsets[j + 1]) break;
+        if (is_dead(params, i)) continue;
+        const int c = dg_class(k, i);
+        cls[i] = c;
+        stale[i] = c != j;
+        pos[i] = (double)i;
+        if (c == j) seg_step(params, j, i, 0.125 * (j + 1));
+    }
+}
+
+void dg_k0_host(void* const* params, int64_t base, int64_t count, int64_t n) { (void)n; dg_branch(params, 0, base, count); }
+void dg_k1_host(void* const* params, int64_t base, int64_t count, int64_t n) { (void)n; dg_branch(params, 1, base, count); }
+
+/* the sweep: slots k, limit, mask, finished, active map (4), active count (5); it steps each stale slot by its class */
+void dg_sweep_host(void* const* params, int64_t base, int64_t count, int64_t n) {
+    const double* k = (const double*)((const struct fixture_handle*)params[0])->data;
+    const int32_t* map = (const int32_t*)((const struct fixture_handle*)params[4])->data;
+    const int64_t live = ((const uint32_t*)((const struct fixture_handle*)params[5])->data)[0];
+    const int64_t stop = base + count < live ? base + count : live;
+    (void)n;
+    for (int64_t t = base; t < stop; ++t) {
+        const int64_t i = map[t];
+        if (!is_dead(params, i)) seg_step(params, 0, i, 0.125 * (dg_class(k, i) + 1));
+    }
+}
+
+void dgf_host(void* const* params, int64_t base, int64_t count, int64_t n) {
+    const double* k = (const double*)((const struct fixture_handle*)params[0])->data;
+    (void)n;
+    for (int64_t i = base; i < base + count; ++i)
+        if (!is_dead(params, i)) seg_step(params, 0, i, 0.125 * (dg_class(k, i) + 1));
+}
 
 #ifndef FIXTURE_BLOCK
 #define FIXTURE_BLOCK 0
@@ -746,17 +848,77 @@ static const struct eg_unit_launch launch_keyed = {
 KEYED_UNIT(unit_keyed, "keyed", 0x68, keyed_body);
 KEYED_UNIT(unit_keyedbad, "keyedbad", 0x69, keyedbad_body);
 
+/* ---- SEGMENTED group units ---- */
+SLOT_OF(slot_sg_offsets, EG_ROLE_LOOKUP, EG_DTYPE_INT64, "sg_offsets");
+SLOT_OF(slot_sg_class, EG_ROLE_MUTABLE, EG_DTYPE_INT64, "sg_class");
+SLOT_OF(slot_dg_offsets, EG_ROLE_LOOKUP, EG_DTYPE_INT64, "dg_offsets");
+SLOT_OF(slot_dg_class, EG_ROLE_MUTABLE, EG_DTYPE_INT64, "dg_class");
+SLOT_OF(slot_dg_stale, EG_ROLE_MUTABLE, EG_DTYPE_BOOL, "dg_stale");
+SLOT(slot_pos, EG_ROLE_MUTABLE, "pos");
+static const struct eg_unit_slot* const sg_k_slots[] = { &slot_k, &slot_limit, &slot_mask, &slot_finished, &slot_sg_offsets };
+static const struct eg_unit_slot* const sg_cls_slots[] = { &slot_limit, &slot_sg_class };
+static const struct eg_unit_slot* const dg_k_slots[] = { &slot_k, &slot_limit, &slot_mask, &slot_finished, &slot_dg_offsets,
+                                                         &slot_dg_class, &slot_dg_stale, &slot_pos };
+static const struct eg_unit_slot* const dg_sweep_slots[] = { &slot_k, &slot_limit, &slot_mask, &slot_finished, &slot_map, &slot_live };
+
+#define SEG_REF(var, name_, byte) static const struct eg_unit_ref var = { .struct_size = sizeof(struct eg_unit_ref), .name = name_, .digest = DIGEST(byte) }
+SEG_REF(ref_sg_cls, "sg__cls", 0xE1);
+SEG_REF(ref_sg_k0, "sg__k0", 0xE2);
+SEG_REF(ref_sg_k1, "sg__k1", 0xE3);
+SEG_REF(ref_dg_k0, "dg__k0", 0xE5);
+SEG_REF(ref_dg_k1, "dg__k1", 0xE6);
+SEG_REF(ref_dg_sweep, "dg__sweep", 0xE7);
+static const struct eg_unit_ref* const sg_branches[] = { &ref_sg_k0, &ref_sg_k1 };
+static const struct eg_unit_ref* const dg_branches[] = { &ref_dg_k0, &ref_dg_k1 };
+
+#define DISPATCH(var, strategy_, class_, stale_, offsets_, classify_, name_, branches_, sweep_)                     \
+    static const struct eg_unit_dispatch var = { .struct_size = sizeof(struct eg_unit_dispatch), .strategy = strategy_, \
+        .mix_slot = -1, .class_slot = class_, .stale_slot = stale_, .offsets_slot = offsets_, .classify = classify_,   \
+        .name = name_, .k = 2, .branches = branches_, .sweep = sweep_ }
+DISPATCH(disp_sg_cls, EG_DISPATCH_SEGMENTED, 1, -1, -1, NULL, "sg", NULL, NULL);
+DISPATCH(disp_sg_branch, EG_DISPATCH_SEGMENTED, -1, -1, 4, &ref_sg_cls, "sg", sg_branches, NULL);
+DISPATCH(disp_dg_branch, EG_DISPATCH_SEGMENTED, 5, 6, 4, NULL, "dg", dg_branches, &ref_dg_sweep);
+DISPATCH(disp_dg_sweep, EG_DISPATCH_SWITCH, -1, -1, -1, NULL, "dg", NULL, NULL);
+static const struct eg_unit_dispatch* const sg_cls_list[] = { &disp_sg_cls };
+static const struct eg_unit_dispatch* const sg_branch_list[] = { &disp_sg_branch };
+static const struct eg_unit_dispatch* const dg_branch_list[] = { &disp_dg_branch };
+static const struct eg_unit_dispatch* const dg_sweep_list[] = { &disp_dg_sweep };
+
+#define SEG_BODY(var, slots_, n_, list_) static const struct eg_unit_body var = { .struct_size = sizeof(struct eg_unit_body), \
+    .access = EG_ACCESS_SAMPLE_LOCAL, .n_slots = n_, .slots = slots_, .n_dispatches = 1, .dispatches = list_ }
+SEG_BODY(sg_cls_body, sg_cls_slots, 2, sg_cls_list);
+SEG_BODY(sg_branch_body, sg_k_slots, 5, sg_branch_list);
+SEG_BODY(dg_branch_body, dg_k_slots, 8, dg_branch_list);
+SEG_BODY(dg_sweep_body, dg_sweep_slots, 6, dg_sweep_list);
+static const struct eg_unit_launch launch_sweep = {
+    .struct_size = sizeof(struct eg_unit_launch), .n_lane_axes = 0, .block = 0, .active_map_slot = 4, .active_count_slot = 5,
+    .index_map_slot = -1, .index_count_slot = -1, .n_plane_axes = 0, .group = 1 };
+
+#define SEG_UNIT(var, name_, byte, entry, body_, launch_, finish_)                                                    \
+    static const struct eg_unit_meta var = { .struct_size = sizeof(struct eg_unit_meta), .name = name_,              \
+        .digest = DIGEST(byte), .pattern = EG_PATTERN_PURE, .scalar_type = EG_SCALAR_FLOAT64, .host_entry = entry,   \
+        .device_image_format = EG_IMAGE_NONE, .body = &body_, .launch = &launch_, .finish = finish_ }
+SEG_UNIT(unit_sg_cls, "sg__cls", 0xE1, "sg_cls_host", sg_cls_body, launch, NULL);
+SEG_UNIT(unit_sg_k0, "sg__k0", 0xE2, "sg_k0_host", sg_branch_body, launch, &finish1);
+SEG_UNIT(unit_sg_k1, "sg__k1", 0xE3, "sg_k1_host", sg_branch_body, launch, &finish1);
+COUNT_UNIT(unit_sgf, "sgf", 0xE4, "sgf_host", finish1);
+SEG_UNIT(unit_dg_k0, "dg__k0", 0xE5, "dg_k0_host", dg_branch_body, launch, &finish1);
+SEG_UNIT(unit_dg_k1, "dg__k1", 0xE6, "dg_k1_host", dg_branch_body, launch, &finish1);
+SEG_UNIT(unit_dg_sweep, "dg__sweep", 0xE7, "dg_sweep_host", dg_sweep_body, launch_sweep, &finish1);
+COUNT_UNIT(unit_dgf, "dgf", 0xE8, "dgf_host", finish1);
+
 static const struct eg_unit_meta* const units[] = { &unit_axpb, &unit_wait, &unit_split, &unit_count1,
                                                     &unit_count3, &unit_count1a, &unit_count3a, &unit_countA, &unit_countAa, &unit_vecs, &unit_count1i,
                                                     &unit_count1ia, &unit_count1e, &unit_lanes, &unit_prefix, &unit_count1g, &unit_widemul,
                                                     &unit_gathb, &unit_gatha, &unit_gathn, &unit_boxed, &unit_boxbad, &unit_shr, &unit_cells, &unit_keyed,
-                                                    &unit_keyedbad, &unit_cellsum, &unit_axpb_cards, &unit_axpb_badflag };
+                                                    &unit_keyedbad, &unit_cellsum, &unit_axpb_cards, &unit_axpb_badflag,
+                                                    &unit_sg_cls, &unit_sg_k0, &unit_sg_k1, &unit_sgf, &unit_dg_k0, &unit_dg_k1, &unit_dg_sweep, &unit_dgf };
 
 static const struct eg_library_meta library = {
     .struct_size = sizeof(struct eg_library_meta),
     .schema_major = EG_META_SCHEMA_MAJOR,
     .schema_minor = 0,
-    .n_units = 29,
+    .n_units = 37,
     .units = units,
 };
 
