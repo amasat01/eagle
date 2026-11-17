@@ -19,8 +19,6 @@
 
 #include "eagle/DeviceProps.h"
 #include "eagle/policy/Residency.h"
-#include "eagle/policy/GemmRouteRows.h"
-#include "eagle/policy/WeightRows.h"
 
 #include <algorithm>
 #include <array>
@@ -50,7 +48,7 @@ inline constexpr int WARP_LANES = 32;
 // `vectorWidth` times faster and hides the chain across its lanes, so it pays none;
 // one it leaves scalar pays the chain in full.
 //
-// The weights are rows of WeightRows.h, picked by the machine class (see weightRowIndex); the host rows were fitted by
+// The weights are rows of the door's row table, picked by the machine class (see weightRowIndex); the host rows were fitted by
 // benchmarks/reproduce/fit_profile.py to the calibration of a 4-core Xeon W-2125 (relative RMS 0.19 over the isolated groups). The device
 // built-in row is a conservative prior until a device calibration fits within 0.20.
 /// Warps per SM above which the issue pipe stays busy: a kernel resident in fewer runs the lanes slower.
@@ -105,7 +103,7 @@ struct Mix {
     }
 };
 
-/** @brief Per-target constants; see defaultWeights for where the numbers come from. */
+/** @brief Per-target constants; the built-in rows of the door hold the numbers. */
 struct Weights {
     Target target = Target::Host;
     double arith32 = 1;       ///< one 32-bit operation, in 64-bit operations
@@ -130,17 +128,12 @@ struct HysteresisState {
     int sinceDecision = 0;
 };
 
-/** @brief One row of EG_WEIGHT_ROWS. */
+/** @brief One row of the door's EG_WEIGHT_ROWS. */
 struct WeightRow {
     int target, vendor, family, model;
     double arith32, special32, special64, launchSeconds, splitSeconds, sortSeconds, laneRatePerCore, memoryRate, cacheRatio,
         chainSecondsPerCore, vectorWidth;
 };
-
-#define EG_WEIGHT_ROW_INIT(...) { __VA_ARGS__ },
-inline constexpr WeightRow WEIGHT_ROWS[] = { EG_WEIGHT_ROWS(EG_WEIGHT_ROW_INIT) };
-#undef EG_WEIGHT_ROW_INIT
-inline constexpr int WEIGHT_ROW_COUNT = static_cast<int>(sizeof(WEIGHT_ROWS) / sizeof(WEIGHT_ROWS[0]));
 
 /** @brief The row of the class (@p vendor, @p family, @p model) of @p target among @p rows, or -1 for the built-in row: an unknown class takes it, nothing
  *         nearer, and a row of the other target never answers. The table is an argument so a test can pass its own. */
@@ -153,20 +146,10 @@ inline int weightRowIndex(const WeightRow* rows, int count, Target target, int v
     return -1;
 }
 
-/** @brief weightRowIndex over the rows of WeightRows.h. */
-inline int weightRowIndex(Target target, int vendor, int family, int model) {
-    return weightRowIndex(WEIGHT_ROWS, WEIGHT_ROW_COUNT, target, vendor, family, model);
-}
-
-/** @brief One row of EG_GEMM_ROUTE_ROWS. */
+/** @brief One row of the door's EG_GEMM_ROUTE_ROWS. */
 struct GemmRouteRow {
     int target, family, model, dtypeBits, route;
 };
-
-#define EG_GEMM_ROUTE_ROW_INIT(...) { __VA_ARGS__ },
-inline constexpr GemmRouteRow GEMM_ROUTE_ROWS[] = { EG_GEMM_ROUTE_ROWS(EG_GEMM_ROUTE_ROW_INIT) };
-#undef EG_GEMM_ROUTE_ROW_INIT
-inline constexpr int GEMM_ROUTE_ROW_COUNT = static_cast<int>(sizeof(GEMM_ROUTE_ROWS) / sizeof(GEMM_ROUTE_ROWS[0]));
 
 /** @brief What is wrong with the route table @p rows (nullptr: nothing): a row that is not device, 32 or 64 bits, route 0 or 1; two rows of one
  *         class and width; a width with no built-in row (class all zero). A table that fails must not route. */
@@ -201,13 +184,6 @@ inline int gemmRoute(const GemmRouteRow* rows, int count, int family, int model,
     return builtin;
 }
 
-/** @brief The built-in row of @p target (the row whose class is all zero). */
-inline const WeightRow& builtinWeightRow(Target target) {
-    for (const WeightRow& r : WEIGHT_ROWS)
-        if (r.target == static_cast<int>(target) && !r.vendor && !r.family && !r.model) return r;
-    throw std::logic_error("WeightRows.h: a target has no built-in row");
-}
-
 /** @brief The facts of the live machine a row does not hold: physical cores (host; 1 on a device) and the bytes of cache a gathered plane may sit in. */
 struct Machine {
     double physicalCores = 1;
@@ -231,14 +207,6 @@ inline Weights weightsOfRow(const WeightRow& row, const Machine& machine) {
     w.chainSeconds = row.chainSecondsPerCore / machine.physicalCores;
     w.vectorWidth = row.vectorWidth;
     return w;
-}
-
-/**
- * @brief The built-in weights of @p target on the machine the rows were fitted on (a 4-core Xeon W-2125 with 12.7e6 bytes of cache; a
- *        Quadro P2000 for the device, whose cache is the live L2), until a fitted profile replaces them.
- */
-inline Weights defaultWeights(Target target) {
-    return weightsOfRow(builtinWeightRow(target), target == Target::Host ? Machine{ 4, 12.7e6 } : Machine{ 1, 0 });
 }
 
 namespace detail {
