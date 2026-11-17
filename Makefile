@@ -9,7 +9,8 @@
 #   make gate-gpu   the legs that need a GPU: the C++ gate (cuda mode, -Werror) and the python suite (-m gpu)
 #   make gate-all   both
 #
-# Stages, for the inner loop and for CI jobs that run one leg: gate-lint gate-names gate-cpp gate-py gate-docs gate-cpp-cuda gate-py-gpu
+# Stages, for the inner loop and for CI jobs that run one leg: gate-lint gate-names gate-cpp gate-door-cmake gate-py gate-docs gate-cpp-cuda gate-py-gpu
+# (gate-door-cmake builds the CMake door in CPU mode; its facts and rows headers are raptor's, so it needs RAPTOR_SRC and AETHER_SRC)
 #
 # THE ENVIRONMENT. Each run builds its venv under $(GATE_DIR) (default build/gate, git-ignored), fresh, with
 # `pip install -e python[test] -c ci/constraints.txt`. GATE_REUSE=1 keeps it (inner loop only).
@@ -63,7 +64,7 @@ NVCC = $(or $(CUDACXX),$(if $(CUDA_PATH),$(CUDA_PATH)/bin/nvcc))
 export HAWK_NVCC ?= $(NVCC)
 need_nvcc = @[ -n "$(NVCC)" ] && [ -x "$(NVCC)" ] || { echo "gate: no nvcc: set CUDACXX (or CUDA_PATH with bin/nvcc)" >&2; exit 2; }
 
-.PHONY: help gate gate-gpu gate-all gate-fresh gate-lint gate-names gate-cpp gate-py gate-docs gate-cpp-cuda gate-py-gpu \
+.PHONY: help gate gate-gpu gate-all gate-fresh gate-lint gate-names gate-cpp gate-door-cmake gate-py gate-docs gate-cpp-cuda gate-py-gpu \
         gate-env-cpu gate-env-gpu gate-clean gate-doxygen sanitize-cpp tsan-cpp tsan-ft ft-stress nodriver sdist-install release-gate
 
 help:
@@ -89,6 +90,7 @@ else
 	$(MAKE) --no-print-directory gate-lint
 	$(MAKE) --no-print-directory gate-names
 	$(MAKE) --no-print-directory gate-cpp
+	$(MAKE) --no-print-directory gate-door-cmake
 	$(MAKE) --no-print-directory gate-py
 	$(MAKE) --no-print-directory gate-docs
 endif
@@ -103,6 +105,23 @@ gate-gpu:
 gate-all:
 	$(MAKE) --no-print-directory gate-gpu
 	$(MAKE) --no-print-directory gate GATE_REUSE=1
+
+# -- the CMake door, CPU mode: it configures, builds and links, and exports exactly the eg_status functions eg_door.h declares (door.map
+# only says eg_*). The facts and rows headers are raptor's (the host door's rows). The Makefile build pins nvcc -arch sm_61; CMake follows CMAKE_CUDA_ARCHITECTURES.
+CARDS := $(RAPTOR_SRC)/rs/wings/cards
+gate-door-cmake:
+	$(call need_aether)
+	$(call need_cxx)
+	@[ -n "$(RAPTOR_SRC)" ] && [ -f "$(CARDS)/cpu/raptor_facts.h" ] || { echo "gate: RAPTOR_SRC (the raptor repository root, with rs/wings/cards) is required for the CMake door" >&2; exit 2; }
+	mkdir -p "$(GD)"
+	cmake -DAETHER_CPP_MODE=ON -DAETHER_FACTS_DIR="$(CARDS)/cpu" -DCMAKE_INSTALL_PREFIX="$(GD)/prefix_cpp" -B "$(GD)/aether_cpp" -S "$(AETHER_SRC)"
+	cmake --install "$(GD)/aether_cpp"
+	cmake -S . -B "$(GD)/door" -DEAGLE_BUILD_DOOR=ON -DEAGLE_CPP_MODE=ON -DEAGLE_BUILD_TESTS=OFF -DCMAKE_PREFIX_PATH="$(GD)/prefix_cpp" \
+	      -DEAGLE_DOOR_WING_FACTS="$(CARDS)/cpu/raptor_facts.h" -DEAGLE_DOOR_ROWS="$(CARDS)/door/host/eagle_door_rows.h"
+	cmake --build "$(GD)/door" --target eagle_door -j$(GATE_JOBS)
+	sed -n 's/^eg_status \(eg_[a-z0-9_]*\)(.*/\1/p' eagle/door/eg_door.h | sort -u > "$(GD)/door_declared.txt"
+	nm -D --defined-only "$(GD)/door/libeagle_door.so" | awk '{print $$3}' | sort > "$(GD)/door_exported.txt"
+	diff "$(GD)/door_declared.txt" "$(GD)/door_exported.txt" && echo "gate-door-cmake: the CMake door exports the $$(wc -l < "$(GD)/door_declared.txt") declared eg_ names and nothing else"
 
 # -- the python environments (cpu: arch $(CPU_CUDA_ARCH), compile-only; gpu: the device's own architecture) --------
 # one venv + one editable install per leg; the build tree and the header prefix live under $(GD) too
