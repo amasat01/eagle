@@ -266,6 +266,28 @@ struct eg_unit_dispatch {
     const struct eg_unit_ref* sweep; /**< a dynamic-selector branch unit: the fused unit run over an active set of the stale LIVE samples (passed
                                           in deps; the set eagle fills each step); else NULL. A branch record is static (stale_slot -1,
                                           classify set, sweep NULL) or dynamic (stale_slot and sweep set, classify NULL); any other mix is refused */
+    const struct eg_branch_cost* const* branch_costs; /**< AUTO: k entries, branches[j]'s cost; NULL: not stated (AUTO runs as built) */
+    uint32_t cost_flags;      /**< EG_DISPATCH_FUSED_VECTORISED, EG_DISPATCH_STATIC_SELECTOR; 0: none stated */
+    uint32_t reserved1;
+};
+
+#define EG_BRANCH_VECTORISED (1u << 0)   /**< eg_branch_cost.flags: this branch's host loop vectorises */
+#define EG_BRANCH_HAS_STORES (1u << 1)   /**< eg_branch_cost.flags: ``stores`` is stated */
+#define EG_DISPATCH_FUSED_VECTORISED (1u << 0) /**< eg_unit_dispatch.cost_flags: the fused host loop vectorises */
+#define EG_DISPATCH_STATIC_SELECTOR (1u << 1)  /**< eg_unit_dispatch.cost_flags: the selector is static */
+
+/** One branch's operation counts per sample, as the library counts them: the inputs of the run-time dispatch
+ *  decision. The counts are per step of the branch; the weights that price them are not kernel facts and are not here. */
+struct eg_branch_cost {
+    uint32_t struct_size;
+    uint32_t flags;           /**< EG_BRANCH_* */
+    double arith32, arith64;  /**< arithmetic operations at 32 and 64 bits */
+    double special32, special64; /**< special functions (exp, sin, ...) at 32 and 64 bits */
+    double loads, gathers;    /**< plane reads at the lane index, and reads at a computed index */
+    double chain32, chain64;  /**< the longest dependent arithmetic chain at 32 and 64 bits */
+    double chain_special32, chain_special64; /**< the special functions on that chain */
+    double stores;            /**< plane writes; read only with EG_BRANCH_HAS_STORES */
+    double selector_reads;    /**< reads of the selector's inputs, as the library counts them */
 };
 
 /** The typed walk of a unit: its slots and the planes eagle makes for it. */
@@ -360,6 +382,8 @@ struct eg_unit_finish {
     int32_t n_events;         /**< the comparisons of the stop rule (its `or` leaves, in operand order), counted by the
                                    library; 0: none. Event i of a GUARD link is the i-th of them */
     int32_t reserved1;
+    const char* device_persist_function; /**< AUTO: the persistent entry in the device image, NULL: not stated */
+    const char* device_range_function;   /**< AUTO: the contiguous-range entry in the device image, NULL: not stated */
 };
 
 /** The team a stage runs on (eg_unit_stage.team). Slot indices are into the
