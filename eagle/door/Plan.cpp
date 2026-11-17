@@ -757,7 +757,8 @@ void set_count(eg_ctx& ctx, eg_plan_s* plan, std::uint32_t m) {
 }
 
 bool gemm_routed(const eg_plan_s& plan) {
-    return plan.structure == EG_STRUCTURE_DEVICE && plan.unit->gemm.present && gemm_routable(*plan.unit, plan.parts.size());
+    return plan.structure == EG_STRUCTURE_DEVICE && plan.unit->gemm.present && gemm_routable(*plan.unit, plan.parts.size()) &&
+           plan.ctx->gemm_by_cublas[plan.unit->scalar_type == EG_SCALAR_FLOAT64];
 }
 
 /** @brief eg_plan_entry_figures: the device entries of the plan's unit as read at load; a host plan, a routed gemm unit or a

@@ -19,6 +19,7 @@
 
 #include "eagle/DeviceProps.h"
 #include "eagle/policy/Residency.h"
+#include "eagle/policy/GemmRouteRows.h"
 #include "eagle/policy/WeightRows.h"
 
 #include <algorithm>
@@ -155,6 +156,49 @@ inline int weightRowIndex(const WeightRow* rows, int count, Target target, int v
 /** @brief weightRowIndex over the rows of WeightRows.h. */
 inline int weightRowIndex(Target target, int vendor, int family, int model) {
     return weightRowIndex(WEIGHT_ROWS, WEIGHT_ROW_COUNT, target, vendor, family, model);
+}
+
+/** @brief One row of EG_GEMM_ROUTE_ROWS. */
+struct GemmRouteRow {
+    int target, family, model, dtypeBits, route;
+};
+
+#define EG_GEMM_ROUTE_ROW_INIT(...) { __VA_ARGS__ },
+inline constexpr GemmRouteRow GEMM_ROUTE_ROWS[] = { EG_GEMM_ROUTE_ROWS(EG_GEMM_ROUTE_ROW_INIT) };
+#undef EG_GEMM_ROUTE_ROW_INIT
+inline constexpr int GEMM_ROUTE_ROW_COUNT = static_cast<int>(sizeof(GEMM_ROUTE_ROWS) / sizeof(GEMM_ROUTE_ROWS[0]));
+
+/** @brief What is wrong with the route table @p rows (nullptr: nothing): a row that is not device, 32 or 64 bits, route 0 or 1; two rows of one
+ *         class and width; a width with no built-in row (class all zero). A table that fails must not route. */
+inline const char* gemmRouteRowsFault(const GemmRouteRow* rows, int count) {
+    for (const int bits : { 32, 64 }) {
+        bool builtin = false;
+        for (int i = 0; i < count; ++i) builtin = builtin || (rows[i].dtypeBits == bits && !rows[i].family && !rows[i].model);
+        if (!builtin) return "EG_GEMM_ROUTE_ROWS: a float width has no built-in row (family 0, model 0)";
+    }
+    for (int i = 0; i < count; ++i) {
+        const GemmRouteRow& r = rows[i];
+        if (r.target != 1 || (r.dtypeBits != 32 && r.dtypeBits != 64) || (r.route != 0 && r.route != 1))
+            return "EG_GEMM_ROUTE_ROWS: a row is not device (target 1), 32 or 64 bits, route 0 or 1";
+        for (int j = 0; j < i; ++j)
+            if (rows[j].family == r.family && rows[j].model == r.model && rows[j].dtypeBits == r.dtypeBits)
+                return "EG_GEMM_ROUTE_ROWS: two rows have one class and width";
+    }
+    return nullptr;
+}
+
+/** @brief The route (0 direct, 1 gemm) of the device class (@p family, @p model) at @p bits among the valid @p rows: its own row, else the built-in
+ *         row of the width (an unknown class takes it, nothing nearer; the all-zero class is never looked up as a class). The table is an
+ *         argument so a test can pass its own. */
+inline int gemmRoute(const GemmRouteRow* rows, int count, int family, int model, int bits) {
+    int builtin = 1;
+    for (int i = 0; i < count; ++i) {
+        const GemmRouteRow& r = rows[i];
+        if (r.dtypeBits != bits) continue;
+        if (!r.family && !r.model) builtin = r.route;
+        else if (r.family == family && r.model == model) return r.route;
+    }
+    return builtin;
 }
 
 /** @brief The built-in row of @p target (the row whose class is all zero). */

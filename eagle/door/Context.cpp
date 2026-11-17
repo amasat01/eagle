@@ -70,6 +70,13 @@ void resolve_weights(eg_ctx& ctx) {
 
 }  // namespace
 
+void resolve_gemm_routes(eg_ctx& ctx, const eagle::policy::GemmRouteRow* rows, int count) {
+    if (ctx.dev.ordinal < 0) return;
+    if (const char* fault = eagle::policy::gemmRouteRowsFault(rows, count)) refuse(EG_FAULT, fault);
+    for (int w = 0; w < 2; ++w)
+        ctx.gemm_by_cublas[w] = eagle::policy::gemmRoute(rows, count, ctx.dev.cc_major, ctx.dev.cc_minor, w ? 64 : 32) == 1;
+}
+
 /** @brief Make a context; a refused one keeps its status and reason (eg_ctx_new). */
 eg_status ctx_new(const eg_ctx_settings* settings, eg_ctx** out) noexcept {
     if (out == nullptr) return EG_BAD_REQUEST;
@@ -77,7 +84,7 @@ eg_status ctx_new(const eg_ctx_settings* settings, eg_ctx** out) noexcept {
     eg_ctx* ctx = new (std::nothrow) eg_ctx;
     if (ctx == nullptr) return EG_FAULT;
     ctx->pid = static_cast<long>(::getpid());
-    const eg_status status = call(ctx, [&](eg_ctx& c) { check_settings(c, settings); resolve_weights(c); });
+    const eg_status status = call(ctx, [&](eg_ctx& c) { check_settings(c, settings); resolve_weights(c); resolve_gemm_routes(c, eagle::policy::GEMM_ROUTE_ROWS, eagle::policy::GEMM_ROUTE_ROW_COUNT); });
     ctx->refused = status;
     *out = ctx;
     return status;

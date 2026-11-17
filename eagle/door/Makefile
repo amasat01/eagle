@@ -30,7 +30,8 @@
 #   device              the library, the device fixture unit and door_device_test; run
 #                       $(OUT)/door_device_test $(OUT)/libfixture_device.so $(OUT)/libfixture_unit.so
 #                       and the gemm rows: $(OUT)/gemm_device_test $(OUT)/libfixture_gemm.so, then the same with
-#                       LD_PRELOAD=$(OUT)/libno_cublas.so and the argument --no-cublas as a third
+#                       LD_PRELOAD=$(OUT)/libno_cublas.so and the argument --no-cublas as a third; the route rows:
+#                       $(OUT)/gemm_route_test $(OUT)/libfixture_gemm.so (the gemm rows again, then the route table's)
 #   pair-device-<unit>  the unit's cuda kernel text (KERNEL_CUDA_<unit>, compiled by the old path's
 #                       device recipe, PAIR_DEVICE_FLAGS) and its meta (META_CUDA_<unit>) in one library, plus
 #                       pair_device_test; run $(OUT)/pair_device_test $(OUT)/libpair_dev_<unit>.so <oracle dir>
@@ -211,6 +212,12 @@ $(GEMM_TEST): test/gemm_test.c $(LIB)
 $(GEMM_DEVICE_TEST): test/gemm_test.c $(LIB) | check-cuda
 	$(CC) $(DEPFLAGS) $(CFLAGS_C) -DEG_GEMM_DEVICE -isystem $(CUDA)/include -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door -Wl,-rpath,$(OUT) \
 	  $(CUDART) -ldl -lm -pthread
+
+# The route rows read a synthetic route table through a seam the shared library does not export, so this binary links the door's objects.
+GEMM_ROUTE_TEST := $(OUT)/gemm_route_test
+$(GEMM_ROUTE_TEST): test/gemm_test.c $(OBJ) $(OUT)/test/gemm_route_seam.o | check-cuda
+	$(CC) $(DEPFLAGS) $(CFLAGS_C) -DEG_GEMM_DEVICE -DEG_GEMM_ROUTE -isystem $(CUDA)/include -Itest/c_shim -c $< -o $@.o
+	$(CXX) -fopenmp -o $@ $@.o $(OBJ) $(OUT)/test/gemm_route_seam.o $(CUDART) -ldl -lm -pthread
 
 $(NO_CUBLAS): test/no_cublas.c
 	@mkdir -p $(OUT)
@@ -577,7 +584,7 @@ $(DEVICE_FIXTURE): test/fixture_device.c $(OUT)/fixture_device.fatbin $(OUT)/fat
 $(DEVICE_TEST): test/door_device_test.c $(LIB) | check-cuda
 	$(CC) $(DEPFLAGS) $(CFLAGS_C) -DEG_TEST_DIR='"$(CURDIR)/test"' -isystem $(CUDA)/include -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door -Wl,-rpath,$(OUT) $(CUDART) -lm -pthread
 
-device: check-cuda symbols $(FIXTURE) $(DEVICE_FIXTURE) $(DEVICE_TEST) $(GEMM_FIXTURE) $(GEMM_DEVICE_TEST) $(NO_CUBLAS)
+device: check-cuda symbols $(FIXTURE) $(DEVICE_FIXTURE) $(DEVICE_TEST) $(GEMM_FIXTURE) $(GEMM_DEVICE_TEST) $(GEMM_ROUTE_TEST) $(NO_CUBLAS)
 
 PAIR_DEVICE_TEST := $(OUT)/pair_device_test
 RUNNER_PAIR_TEST := $(OUT)/runner_pair_test

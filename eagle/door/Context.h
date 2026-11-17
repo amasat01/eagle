@@ -575,6 +575,7 @@ struct eg_ctx_s {
     eagle::policy::Weights weights;           ///< the dispatch rule's weights: the row of this machine's class (-1: built-in) on its live facts
     eagle::DeviceProps props;                 ///< the properties the rule reads: the host's documented ones, or the device's from the driver
     std::int32_t weight_vendor = 0, weight_family = 0, weight_model = 0, weight_row = -1;   ///< the class key read and the row index taken
+    bool gemm_by_cublas[2] = { true, true };  ///< DEVICE: whether this device class routes a routable gemm unit of a 32-bit (0) or 64-bit (1) scalar to cuBLAS
 
     /** @brief Store @p text as the reason, never throwing. */
     void set_reason(const char* text) noexcept {
@@ -712,6 +713,8 @@ void gemm_shape(GemmCall& c, const std::string& at);
 void check_gemm_plane(const std::string& at, std::int64_t rows, std::int64_t cols, const DLTensor& t);
 /** @brief Whether a DEVICE plan of @p plan's unit queues the cuBLAS products (a gemm unit the door can route, see eg_door.h). */
 bool gemm_routed(const eg_plan_s& plan);
+/** @brief Read the gemm route of @p ctx's device class from @p rows (a device context; refused EG_FAULT when the table is malformed). Run once at eg_ctx_new. */
+void resolve_gemm_routes(eg_ctx& ctx, const eagle::policy::GemmRouteRow* rows, int count);
 void gemm_new(eg_ctx& ctx, const eg_gemm_desc* desc, eg_gemm** out);
 void gemm_run(eg_ctx& ctx, eg_gemm_s* gemm, eg_plane_s* a, eg_plane_s* b, eg_plane_s* c);
 void gemm_release(eg_ctx& ctx, eg_gemm_s* gemm);
