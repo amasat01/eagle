@@ -2,6 +2,12 @@
 
 Releases after 0.6.4 are on [GitHub](https://github.com/amasat01/eagle/releases): the notes are the pull request body.
 
+## 0.7.8 (unreleased)
+
+### Fixed
+
+**A prebuilt kernel built in stages runs every stage.** A plugin from `hawk.artifact.plugins(bundle)` whose kernel is built in stages (a wide value in the warp form, a reduction over samples that a later part reads, a long chain cut in parts) ran its first stage alone through `eagle.plan.auto` and `eagle.plan.plan`, and returned wrong values with no error: on a GPU, a wide value in the warp form wrote 16 of 2048 samples. The plan now attaches the stages, as `eagle.deploy` does; a plugin whose sidecar lists stages but that does not carry the plugin of each is refused by name. It needs hawk 0.7.8, whose plugins carry what the plan reads; the `torch` and `jax` extras now require it.
+
 ## 0.7.5 (2026-11-10)
 
 This section covers what changes from 0.7.3. Host launches get their own thread pool, so small stages stop paying for threads they cannot use; banded arrays (double precision on GPUs with weak or no FP64) get pack and unpack calls.

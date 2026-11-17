@@ -44,9 +44,10 @@ def divide_u(x: Scalar, u: Param, z: Mutable[Scalar]):
     z = x / u
 
 
-def _bundle(tmp_path, mode, stages, targets=("host",), internal=()):
+def _bundle(tmp_path, mode, stages, targets=("host",), internal=(), link=True):
     """``stages``: ``[(kernel, cells_in, cells_out)]`` -> ``(plugin of stage 1, by name)``;
-    ``internal``: the cells the first sidecar marks as the kernel's own."""
+    ``internal``: the cells the first sidecar marks as the kernel's own; ``link=False``: the plugins as
+    ``hawk.artifact.plugins`` hands them over, the stages not attached."""
     names = ["split"] + [f"split_{k + 1}" for k in range(1, len(stages))]
     kernels = [hawk.Kernel(nm, (hawk.diff.param_planes(k) if cin else k).sinks)
                for nm, (k, cin, _out) in zip(names, stages)]
@@ -60,7 +61,8 @@ def _bundle(tmp_path, mode, stages, targets=("host",), internal=()):
                                      for nm, (_k, cin, out) in zip(names, stages)]
             art.sidecar["cells"] = {c: {**spec, **({"internal": True} if c in internal else {})}
                                     for c, spec in art.sidecar["cells"].items()}
-    _split.link(by, bundle)
+    if link:
+        _split.link(by, bundle)
     return by["split"], by
 
 
@@ -112,6 +114,32 @@ def test_three_stages_chain_two_cells(three, n):
     u = (x.astype(np.float64) * t).sum()
     got = eagle.plan.plan(plugin, structure=eexec.HostTeam).run(x=x)
     np.testing.assert_allclose(got["z"], x / u, rtol=10 * _tol(mode))
+
+
+@pytest.mark.parametrize("door", ["auto", "plan"])
+def test_a_prebuilt_split_plugin_gets_its_stages_at_the_plan_door(door, tmp_path):
+    """``hawk.artifact.plugins`` then ``eagle.plan.auto`` (or ``eagle.plan.plan``): the plan attaches the stages, so
+    the run equals the deploy's, bit for bit (0.7.5 and before ran the first stage alone, with no error)."""
+    stages = [(one_sum, (), ("t",)), (divide, ("t",), ())]
+    linked, _ = _bundle(tmp_path / "linked", "float64", stages)
+    plugin, _ = _bundle(tmp_path / "prebuilt", "float64", stages, link=False)
+    assert not _split.stages_of(plugin)
+    x = _x(1000, "float64")
+    run = (lambda p: eagle.plan.auto(p).run(x=x)) if door == "auto" else (
+        lambda p: eagle.plan.plan(p, structure=eexec.HostTeam).run(x=x))
+    got, want = run(plugin), run(linked)
+    assert len(_split.stages_of(plugin)) == 2
+    for nm in ("z", "t"):
+        assert _host(got[nm]).tobytes() == _host(want[nm]).tobytes(), nm
+
+
+def test_a_split_plugin_without_the_plugins_of_its_stages_is_refused_by_name(tmp_path):
+    plugin, by = _bundle(tmp_path, "float64", [(one_sum, (), ("t",)), (divide, ("t",), ())], link=False)
+    plugin.bundle_plugins = {"split": plugin}           # a plugin assembled without its second stage
+    for door, make in (("eagle.plan.auto", eagle.plan.auto),
+                       ("eagle.plan", lambda p: eagle.plan.plan(p, structure=eexec.HostTeam))):
+        with pytest.raises(ValueError, match=rf"{door}: 'split' runs in stages \['split', 'split_2'\].*'split_2'"):
+            make(plugin)
 
 
 def test_scratch_of_every_stage_is_made_once(two):

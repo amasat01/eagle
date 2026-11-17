@@ -348,7 +348,7 @@ def auto(plugin, *, targets=None, cache_dir=None, scalar_type=None,
             raise ValueError(
                 f"eagle.plan.auto: {key}= builds a hawk kernel, but this plugin "
                 "is already built: pass the kernel, or drop the keyword")
-    return AutoPlan(plugin, plan_kw)
+    return AutoPlan(_split.linked(plugin, "eagle.plan.auto"), plan_kw)
 
 
 def _deploy_hawk(kernels, targets, cache_dir, scalar_type) -> list:
