@@ -851,6 +851,8 @@ static void route_rows(const char* path) {
           "a route table with no built-in row for a width is refused EG_FAULT naming it, never routed silently");
     check(ctx != NULL && refused(gemm_route_rows_set(ctx, twice, 4), EG_FAULT, ctx, "two rows have one class and width"),
           "a route table with two rows of one class and width is refused EG_FAULT naming it");
+    check(ctx != NULL && refused(gemm_route_rows_set(ctx, NULL, 0), EG_FAULT, ctx, "a float width has no built-in row (family 0, model 0)"),
+          "an empty route table on a device context is refused EG_FAULT naming the missing built-in rows");
     if (ctx != NULL) eg_ctx_free(ctx);
 }
 

@@ -4,7 +4,7 @@
 // every handle still made from it.
 #include "eagle/door/Context.h"
 #include "eagle/door/device/Seam.h"
-#include "eagle/door/eagle_door_rows.h"
+#include <eagle/door/eagle_door_rows.h>   // by the include path: a build gives its own row header (the generated one) ahead of this directory's
 
 #include "eagle/door/Machine.h"
 #include "eagle/door/host/Team.h"
@@ -45,9 +45,10 @@ const eagle::policy::WeightRow kWeightRows[] = { EG_WEIGHT_ROWS(EG_WEIGHT_ROW_IN
 constexpr int kWeightRowCount = static_cast<int>(sizeof(kWeightRows) / sizeof(kWeightRows[0]));
 
 #define EG_GEMM_ROUTE_ROW_INIT(...) { __VA_ARGS__ },
-const eagle::policy::GemmRouteRow kGemmRouteRows[] = { EG_GEMM_ROUTE_ROWS(EG_GEMM_ROUTE_ROW_INIT) };
+// A trailing zero row keeps the array non-empty when a host-only door's header gives no rows; it is not counted.
+const eagle::policy::GemmRouteRow kGemmRouteRows[] = { EG_GEMM_ROUTE_ROWS(EG_GEMM_ROUTE_ROW_INIT) { 0, 0, 0, 0, 0 } };
 #undef EG_GEMM_ROUTE_ROW_INIT
-constexpr int kGemmRouteRowCount = static_cast<int>(sizeof(kGemmRouteRows) / sizeof(kGemmRouteRows[0]));
+constexpr int kGemmRouteRowCount = static_cast<int>(sizeof(kGemmRouteRows) / sizeof(kGemmRouteRows[0])) - 1;
 
 /** @brief The built-in row of @p target (the row whose class is all zero); a table without one is a defect of the row header. */
 const eagle::policy::WeightRow& builtin_weight_row(eagle::policy::Target target) {

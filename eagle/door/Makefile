@@ -229,11 +229,22 @@ $(WEIGHT_ROWS_TEST): test/weight_rows_test.cpp | check-inputs
 	@mkdir -p $(OUT)
 	$(CXX) $(CXXFLAGS_DOOR) -MMD -MP -MT $@ -o $@ $<
 
-test: symbols confined $(FIXTURE) $(FIXTURE_BAD) $(TEST) $(REV_FIXTURE) $(REV_TEST) $(GEMM_FIXTURE) $(GEMM_TEST) $(WEIGHT_ROWS_TEST)
+# Context.cpp against a row header with no gemm routes, linked with the rest of the door's objects, creates a host context.
+EMPTY_ROUTES_CTX := $(OUT)/empty_routes/Context.o
+EMPTY_ROUTES_TEST := $(OUT)/empty_routes_test
+$(EMPTY_ROUTES_CTX): Context.cpp test/empty_routes/eagle/door/eagle_door_rows.h | check-inputs
+	@mkdir -p $(dir $@)
+	$(CXX) -Itest/empty_routes $(CXXFLAGS_DOOR) -MMD -MP -c $< -o $@
+$(EMPTY_ROUTES_TEST): test/empty_routes_test.c $(EMPTY_ROUTES_CTX) $(filter-out $(OUT)/Context.o,$(OBJ))
+	$(CC) $(DEPFLAGS) $(CFLAGS_C) -c $< -o $@.o
+	$(CXX) -fopenmp -o $@ $@.o $(EMPTY_ROUTES_CTX) $(filter-out $(OUT)/Context.o,$(OBJ)) $(CUDART) -ldl -lm -pthread
+
+test: symbols confined $(FIXTURE) $(FIXTURE_BAD) $(TEST) $(REV_FIXTURE) $(REV_TEST) $(GEMM_FIXTURE) $(GEMM_TEST) $(WEIGHT_ROWS_TEST) $(EMPTY_ROUTES_TEST)
 	$(TEST) $(FIXTURE) $(FIXTURE_BAD)
 	$(REV_TEST) $(REV_FIXTURE)
 	$(GEMM_TEST) $(GEMM_FIXTURE)
 	$(WEIGHT_ROWS_TEST)
+	$(EMPTY_ROUTES_TEST)
 
 # pair-reverse: rr_pend, its one-step taping twin and its step vjp (the old path's kernel texts, KERNEL_rr_pend,
 # KERNEL_rr_pend_tape, KERNEL_rr_pend_step_vjp) in one library with META_reverse (their metas and the derived records),
