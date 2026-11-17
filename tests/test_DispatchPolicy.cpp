@@ -25,6 +25,19 @@ using namespace eagle::policy;
 
 namespace {
 
+// The tests' own rows: a host and a device row of their own numbers (the door's built-in rows live in eagle/door/eagle_door_rows.h and are
+// checked there), scaled by the machine the host row was written for.
+const WeightRow kSyntheticRows[] = {
+    { 0, 0, 0, 0, 1.495, 25.2, 122.0, 1.4e-6, 0.35e-9, 13.2e-9, 24.5e9 / 4, 52.1e9, 5.09, 0.23e-9 * 4, 8 },
+    { 1, 0, 0, 0, 1, 20, 20, 5e-6, 0.05e-9, 10e-9, 0, 0, 4, 0, 1 } };
+
+const WeightRow& syntheticRow(Target target) { return kSyntheticRows[static_cast<int>(target)]; }
+
+Weights syntheticWeights(Target target)
+{
+    return weightsOfRow(syntheticRow(target), target == Target::Host ? Machine{ 4, 12.7e6 } : Machine{ 1, 0 });
+}
+
 eagle::DeviceProps makeProps(int major, int minor, int sms, int clockKhz, int memKhz, int bus)
 {
     eagle::DeviceProps p;
@@ -127,7 +140,7 @@ TEST(DispatchPolicy, DecisionTable)
         { "device one branch takes all",       D, &datacenter(), costs({cheap(), plain40()}), mix({N, 0}, 400, 400), sg, sw },
     };
     for (const Row& r : table) {
-        const Weights w = defaultWeights(r.target);
+        const Weights w = syntheticWeights(r.target);
         HysteresisState s;
         s.current = r.current;
         EXPECT_EQ(resolve(r.cost, r.mix, *r.props, w, s), r.expect)
@@ -189,7 +202,7 @@ TEST(DispatchPolicy, EveryLookRecordedFromTheOldStackGivesTheSameGainAndPolicy)
 TEST(DispatchPolicy, WeightRowsAreFoundByClassAndAnUnknownClassTakesTheBuiltInRow)
 {
     // a synthetic table: the two built-in rows, a host class row and a device class row
-    const WeightRow table[] = { builtinWeightRow(Target::Host), builtinWeightRow(Target::Device),
+    const WeightRow table[] = { syntheticRow(Target::Host), syntheticRow(Target::Device),
                                 { 0, 1, 6, 85, 1, 1, 1, 1e-6, 1e-9, 1e-8, 1e9, 1e10, 2, 1e-9, 4 },
                                 { 1, 0, 8, 6, 1, 1, 1, 1e-6, 1e-9, 1e-8, 0, 0, 2, 0, 1 } };
     const int n = static_cast<int>(sizeof(table) / sizeof(table[0]));
@@ -200,9 +213,8 @@ TEST(DispatchPolicy, WeightRowsAreFoundByClassAndAnUnknownClassTakesTheBuiltInRo
     EXPECT_EQ(weightRowIndex(table, n, Target::Device, 1, 6, 85), -1) << "a host row never answers a device key";
     EXPECT_EQ(weightRowIndex(table, n, Target::Host, 0, 8, 6), -1) << "a device row never answers a host key";
     EXPECT_EQ(weightRowIndex(table, n, Target::Host, 0, 0, 0), -1) << "the built-in row is not looked up by its zero class";
-    EXPECT_EQ(weightRowIndex(Target::Host, 1, 6, 85), -1) << "no class row is written yet: every class takes the built-in row";
     for (const Target t : { Target::Host, Target::Device }) {
-        const WeightRow& b = builtinWeightRow(t);
+        const WeightRow& b = syntheticRow(t);
         EXPECT_EQ(b.vendor + b.family + b.model, 0);
     }
 }
@@ -220,8 +232,6 @@ TEST(DispatchPolicy, GemmRoutesAreFoundByClassAndWidthAndAnUnknownClassTakesTheB
     EXPECT_EQ(gemmRoute(table, n, 6, 2, 32), 1) << "an unknown class takes the built-in row of its width, not the nearest";
     EXPECT_EQ(gemmRoute(table, n, 8, 1, 64), 0);
     EXPECT_EQ(gemmRoute(table, n, 0, 0, 32), 1) << "the zero class reads the built-in row; it is not looked up as a class";
-    EXPECT_EQ(gemmRoute(GEMM_ROUTE_ROWS, GEMM_ROUTE_ROW_COUNT, 6, 1, 64), 1) << "the built-in rows route to gemm";
-    EXPECT_EQ(gemmRouteRowsFault(GEMM_ROUTE_ROWS, GEMM_ROUTE_ROW_COUNT), nullptr);
 }
 
 TEST(DispatchPolicy, AGemmRouteTableThatCannotRouteIsNamedAndRefused)
@@ -238,7 +248,7 @@ TEST(DispatchPolicy, AGemmRouteTableThatCannotRouteIsNamedAndRefused)
 
 TEST(DispatchPolicy, TheRowsScaleTheHostRatesByThePhysicalCores)
 {
-    const WeightRow& row = builtinWeightRow(Target::Host);
+    const WeightRow& row = syntheticRow(Target::Host);
     const Weights four = weightsOfRow(row, Machine{ 4, 12.7e6 }), eight = weightsOfRow(row, Machine{ 8, 12.7e6 });
     EXPECT_DOUBLE_EQ(four.laneRate, 24.5e9) << "4 cores of the fitted machine reproduce its all-core rate";
     EXPECT_DOUBLE_EQ(four.chainSeconds, 0.23e-9);
@@ -249,7 +259,7 @@ TEST(DispatchPolicy, TheRowsScaleTheHostRatesByThePhysicalCores)
 
 TEST(DispatchPolicy, VectorisedFusedHostCostIsMixIndependent)
 {
-    const Weights w = defaultWeights(Target::Host);
+    const Weights w = syntheticWeights(Target::Host);
     const double rare = predictedSeconds(probe(), probeMix(1, Target::Host), host(), w).fused;
     const double all = predictedSeconds(probe(), probeMix(100, Target::Host), host(), w).fused;
     EXPECT_DOUBLE_EQ(rare, all) << "the vectorised fused loop evaluates both branches at any mix";
@@ -268,11 +278,11 @@ TEST(DispatchPolicy, ADependentChainBoundsHostComputeButNotTheDevice)
     one.chain64 = 512;
     four.chain64 = 128;
     const Mix m = mix({BATCH, 0}, 1);
-    const Weights hw = defaultWeights(Target::Host);
+    const Weights hw = syntheticWeights(Target::Host);
     const double hostOne = predictedSeconds(costs({one, one}), m, host(), hw).fused;
     const double hostFour = predictedSeconds(costs({four, four}), m, host(), hw).fused;
     EXPECT_GT(hostOne, 3.0 * hostFour) << "latency-bound: the chain is the limit";
-    const Weights dw = defaultWeights(Target::Device);
+    const Weights dw = syntheticWeights(Target::Device);
     EXPECT_DOUBLE_EQ(predictedSeconds(costs({one, one}), m, consumer(), dw).fused,
                      predictedSeconds(costs({four, four}), m, consumer(), dw).fused)
         << "a device interleaves the chains of its resident warps";
@@ -286,7 +296,7 @@ TEST(DispatchPolicy, ShortChainsLeaveHostComputeAtTheThroughputLimit)
     BranchCost c = b;
     c.chain64 = 0;
     const Mix m = mix({BATCH, 0}, 1);
-    const Weights w = defaultWeights(Target::Host);
+    const Weights w = syntheticWeights(Target::Host);
     EXPECT_DOUBLE_EQ(predictedSeconds(costs({b, b}), m, host(), w).fused,
                      predictedSeconds(costs({c, c}), m, host(), w).fused);
 }
@@ -300,7 +310,7 @@ TEST(DispatchPolicy, AVectorisedBranchPaysNoChain)
     free = chained;
     free.chain64 = 0;
     const Mix m = mix({BATCH, 0}, 1);
-    const Weights w = defaultWeights(Target::Host);
+    const Weights w = syntheticWeights(Target::Host);
     EXPECT_DOUBLE_EQ(predictedSeconds(costs({chained, chained}), m, host(), w).split,
                      predictedSeconds(costs({free, free}), m, host(), w).split);
 }
@@ -310,7 +320,7 @@ TEST(DispatchPolicy, AScalarBranchPaysTheFullChain)
     BranchCost b;
     b.arith64 = 4;
     b.chain64 = 4000;
-    Weights w = defaultWeights(Target::Host);
+    Weights w = syntheticWeights(Target::Host);
     w.launchSeconds = 0;
     w.splitSeconds = 0;
     w.sortSeconds = 0;
@@ -327,7 +337,7 @@ TEST(DispatchPolicy, ReadOnlyPlanesAreReadOnce)
     readOnly.stores = 0;
     BranchCost carried = readOnly;
     carried.stores = 8;
-    Weights w = defaultWeights(Target::Host);
+    Weights w = syntheticWeights(Target::Host);
     w.launchSeconds = 0;
     w.splitSeconds = 0;
     w.sortSeconds = 0;
@@ -343,7 +353,7 @@ TEST(DispatchPolicy, ACostRowWithoutStoresKeepsTwoLoads)
     uncounted.loads = 8;
     counted.loads = 8;
     counted.stores = 8;
-    Weights w = defaultWeights(Target::Host);
+    Weights w = syntheticWeights(Target::Host);
     w.launchSeconds = 0;
     w.splitSeconds = 0;
     w.sortSeconds = 0;
@@ -358,7 +368,7 @@ TEST(DispatchPolicy, AVectorisedHostBranchRunsWidthTimesFaster)
     scalar.arith64 = 400;
     BranchCost vec = scalar;
     vec.vectorised = true;
-    Weights w = defaultWeights(Target::Host);
+    Weights w = syntheticWeights(Target::Host);
     w.launchSeconds = 0;
     w.splitSeconds = 0;
     w.sortSeconds = 0;
@@ -366,7 +376,7 @@ TEST(DispatchPolicy, AVectorisedHostBranchRunsWidthTimesFaster)
     const double split = predictedSeconds(costs({scalar, scalar}), m, host(), w).split;
     const double splitVec = predictedSeconds(costs({vec, vec}), m, host(), w).split;
     EXPECT_NEAR(split / splitVec, w.vectorWidth, 1e-9);
-    Weights d = defaultWeights(Target::Device);
+    Weights d = syntheticWeights(Target::Device);
     EXPECT_DOUBLE_EQ(predictedSeconds(costs({scalar, scalar}), m, consumer(), d).split,
                      predictedSeconds(costs({vec, vec}), m, consumer(), d).split)
         << "the width is a host fact";
@@ -374,7 +384,7 @@ TEST(DispatchPolicy, AVectorisedHostBranchRunsWidthTimesFaster)
 
 TEST(DispatchPolicy, StateIsMovedOncePerLaunchGathersEveryStep)
 {
-    const Weights w = defaultWeights(Target::Host);
+    const Weights w = syntheticWeights(Target::Host);
     BranchCost state;   // memory-bound, carried planes only
     state.loads = 8;
     BranchCost gather;  // memory-bound, indexed reads only
@@ -390,7 +400,7 @@ TEST(DispatchPolicy, StateIsMovedOncePerLaunchGathersEveryStep)
 
 TEST(DispatchPolicy, GatherIsFasterWhenThePlaneFitsTheCache)
 {
-    Weights w = defaultWeights(Target::Host);
+    Weights w = syntheticWeights(Target::Host);
     w.launchSeconds = 0;
     BranchCost gather;
     gather.gathers = 8;
@@ -402,7 +412,7 @@ TEST(DispatchPolicy, GatherIsFasterWhenThePlaneFitsTheCache)
 
 TEST(DispatchPolicy, ArithmeticAndTrafficOverlapNotAdd)
 {
-    Weights w = defaultWeights(Target::Host);
+    Weights w = syntheticWeights(Target::Host);
     w.launchSeconds = 0;
     BranchCost both;
     both.arith64 = 40;
@@ -419,7 +429,7 @@ TEST(DispatchPolicy, ArithmeticAndTrafficOverlapNotAdd)
 
 TEST(DispatchPolicy, FewResidentWarpsSlowTheDeviceLanes)
 {
-    const Weights w = defaultWeights(Target::Device);
+    const Weights w = syntheticWeights(Target::Device);
     CostVector lean = costs({probeCheap(), probeHeavy()});
     CostVector fat = lean;
     lean.regsPerThread = 40;
@@ -437,7 +447,7 @@ TEST(DispatchPolicy, SplitOverheadScalesWithTheBatch)
 {
     // Zero work in both branches: the gain is the fixed terms alone, and the
     // per-sample split overhead keeps it under 1 at every batch size.
-    const Weights w = defaultWeights(Target::Device);
+    const Weights w = syntheticWeights(Target::Device);
     const CostVector none = costs({BranchCost{}, BranchCost{}});
     for (std::int64_t n = 1 << 10; n <= (1 << 26); n <<= 4)
         EXPECT_LT(predictedGain(none, mix({n / 2, n / 2}, 1, 1 << 20), p2000(), w), 1.0) << n;
@@ -445,14 +455,14 @@ TEST(DispatchPolicy, SplitOverheadScalesWithTheBatch)
 
 TEST(DispatchPolicy, PlaneTrafficIsAmortisedByFusedSteps)
 {
-    const Weights w = defaultWeights(Target::Device);
+    const Weights w = syntheticWeights(Target::Device);
     const Mix one = mix({BATCH / 2, BATCH / 2}, 1, 400), many = mix({BATCH / 2, BATCH / 2}, 64, 400);
     EXPECT_GT(predictedGain(probe(), one, p2000(), w), predictedGain(probe(), many, p2000(), w));
 }
 
 TEST(DispatchPolicy, SortIsPaidOverTheRemainingSteps)
 {
-    const Weights w = defaultWeights(Target::Host);
+    const Weights w = syntheticWeights(Target::Host);
     const double soon = predictedGain(probe(), mix({BATCH, 0}, 64, 2), host(), w);
     const double later = predictedGain(probe(), mix({BATCH, 0}, 64, 400), host(), w);
     EXPECT_LT(soon, later);
@@ -468,7 +478,7 @@ TEST(DispatchPolicy, MeasuredMixedGroupsReplaceTheIndependentLanesPrior)
     EXPECT_DOUBLE_EQ(warpShare(0.01, 0.0), 0.01);     // grouped: only its own warps
     EXPECT_DOUBLE_EQ(warpShare(0.01, 1.0), 1.0);      // every warp mixed
     EXPECT_DOUBLE_EQ(warpShare(0.0, 0.5), 0.0);       // a branch nobody takes costs nothing
-    const Weights w = defaultWeights(Target::Device);
+    const Weights w = syntheticWeights(Target::Device);
     Mix grouped = probeMix(1, Target::Device);
     grouped.mixed32 = 0.0;
     EXPECT_LT(predictedGain(probe(), grouped, p2000(), w),
@@ -523,7 +533,7 @@ TEST(DispatchPolicy, HostTimingKeepsEveryRepetition)
 
 TEST(DispatchPolicy, LaunchTermCrossesOverWithBatchSize)
 {
-    const Weights w = defaultWeights(Target::Device);
+    const Weights w = syntheticWeights(Target::Device);
     const CostVector c = probe();
     double previous = 0;
     for (std::int64_t n = 1 << 8; n <= (1 << 26); n <<= 3) {
@@ -537,12 +547,12 @@ TEST(DispatchPolicy, LaunchTermCrossesOverWithBatchSize)
 
 TEST(DispatchPolicy, GainIsOneForAnEmptyMix)
 {
-    EXPECT_EQ(predictedGain(costs({cheap(), heavy()}), mix({0, 0}), host(), defaultWeights(Target::Host)), 1.0);
+    EXPECT_EQ(predictedGain(costs({cheap(), heavy()}), mix({0, 0}), host(), syntheticWeights(Target::Host)), 1.0);
 }
 
 TEST(DispatchPolicy, RefusesWrongBranchCounts)
 {
-    const Weights w = defaultWeights(Target::Host);
+    const Weights w = syntheticWeights(Target::Host);
     EXPECT_THROW(predictedGain(costs({cheap()}), mix({N}), host(), w), std::invalid_argument);
     CostVector none;
     EXPECT_THROW(predictedGain(none, mix({N}), host(), w), std::invalid_argument);
@@ -577,7 +587,7 @@ TEST(DispatchPolicy, HysteresisSequence)
 TEST(DispatchPolicy, ResolveCarriesTheStateThroughTheBand)
 {
     // The same in-band mix gives either answer, whichever the state already holds.
-    const Weights w = defaultWeights(Target::Host);
+    const Weights w = syntheticWeights(Target::Host);
     Mix m;
     double g = 0;
     for (std::int64_t percent = 1; percent <= 100; ++percent) {

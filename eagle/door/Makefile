@@ -223,10 +223,17 @@ $(NO_CUBLAS): test/no_cublas.c
 	@mkdir -p $(OUT)
 	$(CC) $(DEPFLAGS) -std=c11 -O2 -Wall -Wextra -Werror -fPIC -shared -o $@ $< -ldl
 
-test: symbols confined $(FIXTURE) $(FIXTURE_BAD) $(TEST) $(REV_FIXTURE) $(REV_TEST) $(GEMM_FIXTURE) $(GEMM_TEST)
+# The door's built-in weights rows against the table the Python binding serves, value for value (a header-only check: it runs no door).
+WEIGHT_ROWS_TEST := $(OUT)/weight_rows_test
+$(WEIGHT_ROWS_TEST): test/weight_rows_test.cpp | check-inputs
+	@mkdir -p $(OUT)
+	$(CXX) $(CXXFLAGS_DOOR) -MMD -MP -MT $@ -o $@ $<
+
+test: symbols confined $(FIXTURE) $(FIXTURE_BAD) $(TEST) $(REV_FIXTURE) $(REV_TEST) $(GEMM_FIXTURE) $(GEMM_TEST) $(WEIGHT_ROWS_TEST)
 	$(TEST) $(FIXTURE) $(FIXTURE_BAD)
 	$(REV_TEST) $(REV_FIXTURE)
 	$(GEMM_TEST) $(GEMM_FIXTURE)
+	$(WEIGHT_ROWS_TEST)
 
 # pair-reverse: rr_pend, its one-step taping twin and its step vjp (the old path's kernel texts, KERNEL_rr_pend,
 # KERNEL_rr_pend_tape, KERNEL_rr_pend_step_vjp) in one library with META_reverse (their metas and the derived records),

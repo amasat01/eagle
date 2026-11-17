@@ -99,6 +99,7 @@
 // self-check sizes). All of it is host code: this module is compiled without a
 // device runtime (EAGLE_CPU_ONLY) and reaches the GPU only through the backend
 // plugin (src/seam/).
+#include "DispatchDefaults.h"
 #include "eagle/diff/Record.h"
 #include "eagle/diff/Reverse.h"
 #include "eagle/diff/Transpose.h"
@@ -1555,7 +1556,7 @@ NB_MODULE(_core, m)
 
         // Default weights for the target, with any named field replaced (a fitted profile).
         auto weightsOf = [targetOf](const std::string& target, const nb::object& overrides) {
-            pol::Weights w = pol::defaultWeights(targetOf(target));
+            pol::Weights w = eagle_python::defaultDispatchWeights(targetOf(target));
             if (overrides.is_none()) return w;
             const nb::dict d = nb::cast<nb::dict>(overrides);
             const std::pair<const char*, double pol::Weights::*> fields[] = {
@@ -1594,7 +1595,7 @@ NB_MODULE(_core, m)
 
         m.def("default_dispatch_weights",
             [=](const std::string& target) {
-                const pol::Weights w = pol::defaultWeights(targetOf(target));
+                const pol::Weights w = eagle_python::defaultDispatchWeights(targetOf(target));
                 nb::dict d;
                 d["arith32"] = w.arith32; d["special32"] = w.special32; d["special64"] = w.special64;
                 d["elem_bytes"] = w.elemBytes; d["launch_seconds"] = w.launchSeconds;
