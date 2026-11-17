@@ -84,14 +84,8 @@ __global__ void maskCountKernel(const unsigned char* mask, long long n, unsigned
 
 }  // namespace
 
-std::uint64_t cells_new(unsigned count, bool zero) {
-    void* p = nullptr;
-    EAGLE_CHECK_ALWAYS(cudaMalloc(&p, count * sizeof(unsigned)));
-    cudaError_t z = zero ? cudaMemset(p, 0, count * sizeof(unsigned)) : cudaSuccess;
-    if (zero && z == cudaSuccess) z = cudaStreamSynchronize(0);   // the memset is async to the host and unordered with eagle's non-blocking stream
-    if (z != cudaSuccess) (void)cudaFree(p);
-    EAGLE_CHECK_ALWAYS(z);
-    return reinterpret_cast<std::uint64_t>(p);
+std::uint64_t cells_new(std::uint64_t stream, unsigned count) {
+    return reinterpret_cast<std::uint64_t>(alloc_async(stream, count * sizeof(unsigned), true));
 }
 
 void* host_pinned_new(std::size_t bytes) {
@@ -104,9 +98,7 @@ void host_pinned_free(void* data) noexcept {
     if (data != nullptr) (void)cudaFreeHost(data);
 }
 
-void cells_free(std::uint64_t cells) noexcept {
-    if (cells != 0) (void)cudaFree(reinterpret_cast<void*>(cells));
-}
+void cells_free(std::uint64_t stream, std::uint64_t cells) noexcept { free_async(stream, stream, reinterpret_cast<void*>(cells)); }
 
 void* alloc_async(std::uint64_t stream, std::size_t bytes, bool zero) {
     const auto s = reinterpret_cast<cudaStream_t>(stream);
@@ -263,13 +255,12 @@ void reduce_as(cudaStream_t s, const void* in, std::int64_t n, std::int64_t cols
     T* a = static_cast<T*>(wa);
     T* b = static_cast<T*>(wb);
     if (pair) {    // (hi, comp) land as 2 * cols values: split them into the two planes
-        T* both = nullptr;
-        EAGLE_CHECK_ALWAYS(cudaMalloc(&both, 2 * static_cast<std::size_t>(cols) * sizeof(T)));
+        const auto stream = reinterpret_cast<std::uint64_t>(s);
+        T* both = static_cast<T*>(alloc_async(stream, 2 * static_cast<std::size_t>(cols) * sizeof(T), false));
         canon::enqueueTo<T, OP>(x, canon::NoComp{}, rows, width, reduce::Policy::ordered, a, b, both, true, s);
         EAGLE_CHECK_ALWAYS(cudaMemcpyAsync(out, both, static_cast<std::size_t>(cols) * sizeof(T), cudaMemcpyDeviceToDevice, s));
         EAGLE_CHECK_ALWAYS(cudaMemcpyAsync(comp, both + cols, static_cast<std::size_t>(cols) * sizeof(T), cudaMemcpyDeviceToDevice, s));
-        EAGLE_CHECK_ALWAYS(cudaStreamSynchronize(s));
-        (void)cudaFree(both);
+        free_async(stream, stream, both);
     } else if (comp != nullptr) {
         canon::enqueueTo<T, OP>(x, SamplesLast<T>{ static_cast<const T*>(comp), rows, width }, rows, width, reduce::Policy::ordered, a, b,
                                 static_cast<T*>(out), false, s);
@@ -293,10 +284,9 @@ void reduce_step(std::uint64_t stream, int code, int op, const void* in, std::in
     const std::size_t elems = static_cast<std::size_t>(reduce::canonical::deviceWorkElems(static_cast<idx_t>(n), static_cast<idx_t>(cols)));
     void *wa = nullptr, *wb = nullptr;
     const std::size_t bytes = elems * 8;    // room for the widest partial of any element type
-    EAGLE_CHECK_ALWAYS(cudaMalloc(&wa, bytes));
-    const cudaError_t second = cudaMalloc(&wb, bytes);
     try {
-        EAGLE_CHECK_ALWAYS(second);
+        wa = alloc_async(stream, bytes, false);
+        wb = alloc_async(stream, bytes, false);
         switch (code) {
             case 0: reduce_op<float>(s, op, in, n, cols, out, comp, pair, wa, wb); break;
             case 1: reduce_op<double>(s, op, in, n, cols, out, comp, pair, wa, wb); break;
@@ -307,12 +297,12 @@ void reduce_step(std::uint64_t stream, int code, int op, const void* in, std::in
         EAGLE_CHECK_ALWAYS(cudaGetLastError());
         EAGLE_CHECK_ALWAYS(cudaStreamSynchronize(s));
     } catch (...) {
-        (void)cudaFree(wa);
-        (void)cudaFree(wb);
+        free_async(stream, stream, wa);
+        free_async(stream, stream, wb);
         throw;
     }
-    (void)cudaFree(wa);
-    (void)cudaFree(wb);
+    free_async(stream, stream, wa);
+    free_async(stream, stream, wb);
 }
 
 void copy_step(std::uint64_t stream, void* dst, const void* src, std::size_t bytes) {

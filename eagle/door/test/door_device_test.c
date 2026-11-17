@@ -780,6 +780,26 @@ static void reset_device(eg_ctx* ctx, const char* dev_lib) {
     ok = ok && refused(eg_runner_reset(ctx, NULL), EG_BAD_REQUEST, ctx, "runner");
     check(ok, "eg_runner_reset of a NULL runner refused BAD_REQUEST on a device context");
     dcount_free(ctx, &c);
+    {   /* a runner's cells are freed in stream order: freeing it returns while work queued before it still runs */
+        cudaStream_t own = NULL;
+        void *big_a = NULL, *big_b = NULL;
+        const size_t big = (size_t)256 << 20;
+        struct dcount r;
+        int ok = cudaStreamCreateWithFlags(&own, cudaStreamNonBlocking) == cudaSuccess && cudaMalloc(&big_a, big) == cudaSuccess &&
+                 cudaMalloc(&big_b, big) == cudaSuccess && eg_stream_use(ctx, (uint64_t)(uintptr_t)own) == EG_OK &&
+                 dcount_new(ctx, active, 4, 0.5, &r) == EG_OK;
+        for (int k = 0; ok && k < 100; ++k) ok = cudaMemcpyAsync(big_b, big_a, big, cudaMemcpyDeviceToDevice, own) == cudaSuccess;
+        ok = ok && cudaStreamQuery(own) == cudaErrorNotReady;   /* the queued copies are still running before the free */
+        ok = ok && eg_runner_free(ctx, r.runner) == EG_OK;
+        r.runner = NULL;
+        const int returned_early = ok && cudaStreamQuery(own) == cudaErrorNotReady;
+        ok = ok && cudaStreamSynchronize(own) == cudaSuccess && eg_stream_use(ctx, 0) == EG_OK;
+        check(ok && returned_early, "freeing a device runner returns while the stream's queued work still runs (its cells are freed in stream order)");
+        dcount_free(ctx, &r);
+        cudaFree(big_a);
+        cudaFree(big_b);
+        cudaStreamDestroy(own);
+    }
     eg_unit_free(ctx, plain);
     eg_unit_free(ctx, active);
 }
