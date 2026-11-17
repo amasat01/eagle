@@ -25,7 +25,7 @@ using namespace eagle::policy;
 
 namespace {
 
-// The tests' own rows: a host and a device row of their own numbers (the door's built-in rows live in eagle/door/eagle_door_rows.h and are
+// The tests' own rows: a host and a device row of their own numbers (the door's built-in rows live in the generated eagle_door_rows.h and are
 // checked there), scaled by the machine the host row was written for.
 const WeightRow kSyntheticRows[] = {
     { 0, 0, 0, 0, 1.495, 25.2, 122.0, 1.4e-6, 0.35e-9, 13.2e-9, 24.5e9 / 4, 52.1e9, 5.09, 0.23e-9 * 4, 8 },

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // The default dispatch weights the Python binding serves. This table serves only the old Python dispatch policy and leaves with it; the door's
-// built-in rows (eagle/door/eagle_door_rows.h) are the source of truth, and eagle/door/test/weight_rows_test.cpp fails when the two drift.
+// built-in rows (the generated eagle_door_rows.h) are the source of truth, and eagle/door/test/weight_rows_test.cpp fails when the two drift.
 #pragma once
 
 #include "eagle/policy/Dispatch.h"

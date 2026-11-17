@@ -6,8 +6,8 @@
 #
 # AETHER_INCLUDE: the include directory of an installed aether.
 # WING_FACTS:     the cpu wing's generated raptor_facts.h (aether's linalg needs it first).
-# DOOR_ROWS:      the door's row header (EG_WEIGHT_ROWS, EG_GEMM_ROUTE_ROWS), force-included into Context.cpp only; the default is the
-#                 hand-written one, until the generated header of the door build replaces it.
+# DOOR_ROWS:      the door's generated row header (EG_WEIGHT_ROWS, EG_GEMM_ROUTE_ROWS), force-included into Context.cpp only; required:
+#                 the host_device one for a CUDA door, the host one for a host-only door (raptor's rs/wings/cards/door/).
 # OUT:            the build directory (default: build/ here, git-ignored).
 #
 # Targets: lib (the library), symbols (it exports eg_* names only), confined (core and host reach no CUDA), test (build
@@ -45,7 +45,7 @@ CC ?= gcc
 OUT ?= $(CURDIR)/build
 AETHER_INCLUDE ?=
 WING_FACTS ?=
-DOOR_ROWS ?= eagle_door_rows.h
+DOOR_ROWS ?=
 
 PAIR_WING_DIR ?=
 PAIR_UNITS := ss_bcast mat_apply _wide_math _flat rotate mv ksum_c fixed_count g disp_r0_k2_pred disp_r0_k2_switch disp_r0_k5_pred disp_r0_k5_switch disp_r0_k16_pred disp_r0_k16_switch
@@ -117,6 +117,7 @@ all: test
 check-inputs:
 	@test -n "$(AETHER_INCLUDE)" || { echo "set AETHER_INCLUDE"; exit 1; }
 	@test -f "$(WING_FACTS)" || { echo "set WING_FACTS to the wing's raptor_facts.h"; exit 1; }
+	@test -f "$(DOOR_ROWS)" || { echo "set DOOR_ROWS to the generated eagle_door_rows.h of the door build (host_device for a CUDA door, host for a host-only door)"; exit 1; }
 
 # Each object lists the headers it includes in a dependency file the compiler writes beside it (-MMD -MP), so an edit
 # to any included header rebuilds exactly the objects that read it.

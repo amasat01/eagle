@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 
-/* A host-only door built with an EMPTY EG_GEMM_ROUTE_ROWS (test/empty_routes/eagle/door/eagle_door_rows.h): the host context is made, as a door whose
+/* A host-only door built with an EMPTY EG_GEMM_ROUTE_ROWS (test/empty_routes/eagle_door_rows.h): the host context is made, as a door whose
  * row header gives no gemm routes must make it. Usage: empty_routes_test */
 #include "eagle/door/eg_door.h"
 
