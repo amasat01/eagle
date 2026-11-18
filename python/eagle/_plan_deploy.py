@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sys
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -411,10 +412,12 @@ class _HostSide:
 
 
 def _is_hawk_kernel(obj) -> bool:
-    """Is ``obj`` a traced hawk kernel, read off its type (never by
-    importing hawk)? A plugin or any other object answers ``False``."""
-    return (type(obj).__module__.split(".", 1)[0] == "hawk"
-            and hasattr(obj, "walk") and hasattr(obj, "sinks"))
+    """Is ``obj`` a traced hawk kernel: an instance of hawk's ``Kernel``, a subclass
+    defined outside hawk included? A plugin or any other object answers ``False``.
+    Never imports hawk: a kernel exists only once hawk is loaded, so an unloaded
+    hawk means ``obj`` is not one."""
+    traced = sys.modules.get("hawk.trace.kernel")
+    return traced is not None and isinstance(obj, traced.Kernel)
 
 
 def _wants_fast_entries(kernels, targets) -> bool:

@@ -347,21 +347,42 @@ _MASKED = textwrap.dedent("""
     import eagle
     from types import SimpleNamespace
     from eagle import plan as eplan
+    from eagle._plan_deploy import _is_hawk_kernel
     plugin = SimpleNamespace(arg_spec=(), exec_access="sample_local",
                              host_entry=1)
     assert isinstance(eplan.auto(plugin), eplan.AutoPlan)
-    Fake = type("Kernel", (), {"__module__": "hawk.trace.kernel",
-                               "walk": None, "sinks": (), "name": "k"})
-    try:
-        eplan.auto(Fake())
-    except ImportError as exc:
-        print("REFUSED", exc)
+    Lookalike = type("Kernel", (), {"__module__": "hawk.trace.kernel",
+                                    "walk": None, "sinks": (), "name": "k"})
+    assert not _is_hawk_kernel(Lookalike())        # a kernel is an instance of hawk's type
     assert "hawk" not in [m for m in sys.modules if sys.modules[m] is not None]
+    print("OK")
 """)
 
 
 def test_eagle_imports_and_plans_a_plugin_with_hawk_absent():
     out = subprocess.run([sys.executable, "-W", "ignore", "-c", _MASKED],
+                         capture_output=True, text=True, timeout=300)
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip() == "OK", out.stdout
+
+
+_BUILD_MASKED = textwrap.dedent("""
+    import sys
+    import hawk
+    from hawk.trace.kernel import Kernel
+    sys.modules["hawk.artifact"] = None            # hawk loads, its build entry does not
+    from eagle import plan as eplan
+    kernel = Kernel.__new__(Kernel)
+    try:
+        eplan.auto(kernel)
+    except ImportError as exc:
+        print("REFUSED", exc)
+""")
+
+
+def test_a_kernel_whose_hawk_cannot_build_is_refused_naming_hawk():
+    pytest.importorskip("hawk")
+    out = subprocess.run([sys.executable, "-W", "ignore", "-c", _BUILD_MASKED],
                          capture_output=True, text=True, timeout=300)
     assert out.returncode == 0, out.stderr
     assert out.stdout.startswith(
