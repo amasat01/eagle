@@ -142,7 +142,7 @@ define ENV_RECIPE
 	if [ ! -x "$(GD)/venv_$(1)/bin/python" ]; then $(PYTHON) -m venv "$(GD)/venv_$(1)"; fi
 	PIP="$(GD)/venv_$(1)/bin/python -m pip"; \
 	$$PIP install --quiet --upgrade pip; \
-	$$PIP install --quiet -c "$(CONSTRAINTS)" "scikit-build-core>=0.10" "setuptools-scm>=8" "nanobind>=3.1,<4" pytest numpy; \
+	$$PIP install --quiet -c "$(CONSTRAINTS)" "scikit-build-core>=0.10" "setuptools-scm>=8" "nanobind>=3.1,<4; python_version>='3.10'" "nanobind>=2.2,<3; python_version<'3.10'" pytest numpy; \
 	if [ ! -f "$(GD)/prefix_$(1)/share/eagle/cmake/eagleConfig.cmake" ]; then \
 	  cmake -DAETHER_FACTS_DIR="$(CARDS)/cuda" -DAETHER_CPP_MODE=OFF -DCMAKE_CUDA_COMPILER="$(NVCC)" -DCMAKE_CUDA_HOST_COMPILER="$(CXX)" $(2) -DCMAKE_INSTALL_PREFIX="$(GD)/prefix_$(1)" \
 	        -B "$(GD)/aether_$(1)" -S "$(AETHER_SRC)"; \
