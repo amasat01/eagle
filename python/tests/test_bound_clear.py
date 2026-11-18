@@ -36,8 +36,7 @@ def host_plugin(tmp_path_factory):
     import eagle.exec as eexec  # noqa: F401
 
     unit = hawk_artifact.build_bundle(
-        [clear_scatter], tmp_path_factory.mktemp("clear"), targets=("host",),
-        device_arch=hawk_artifact.arch())
+        [clear_scatter], tmp_path_factory.mktemp("clear"), targets=("host",))
     sidecar = json.loads((unit.directory / "clear_scatter.json").read_text())
     lib = ctypes.CDLL(str(unit.directory / "clear_scatter.so"))
     view = hawk_artifact.plan_view(sidecar)

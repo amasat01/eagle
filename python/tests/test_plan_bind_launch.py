@@ -85,10 +85,6 @@ hawk_trace = pytest.importorskip("hawk.trace")
 hawk_artifact = pytest.importorskip("hawk.artifact")
 hawk_math = pytest.importorskip("hawk.math")
 
-#: The device architecture the fixture bundles are emitted for: the GPU this
-#: process runs on (hawk's own resolver), so the bundles load on any card.
-DEVICE_ARCH = hawk_artifact.arch()
-
 #: How many entries the layout array carries (``plugin/gref_abi.h``).
 LAYOUT_FIELDS = 5
 
@@ -150,7 +146,6 @@ def _lane(n=N) -> np.ndarray:
 def _bundle(kernel, tmp_path_factory, slug, targets=("cuda",)):
     return hawk_artifact.build_bundle(
         [kernel], tmp_path_factory.mktemp(f"e4_{slug}"), targets=targets,
-        device_arch=DEVICE_ARCH,
     )
 
 

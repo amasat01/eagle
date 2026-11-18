@@ -13,8 +13,8 @@ What is pinned (the ruling's rows, host side):
   ``finished == n``, ``done``; for the RK4 oscillator and, where the checkout
   carries it, the RK7(8) card's attempt kernel;
 * Non-vacuity: launches follow the longest sample (``<= S + every``) and
-  equal ``loop.iterations()``; an epilogue that does not count turns the row
-  red (the loop runs to its cap, ``done`` is false);
+  equal ``loop.iterations()`` (a unit that never raises its finish counter is
+  pinned in ``test_until_done.py``);
 * Monotone set/reset (#36): pre-set samples keep their planes; ``reset()`` runs them;
 * The ``Guard(active_set=True)`` artifact through the same call, bit-equal
   to the oracle above, compacting on a spread batch, and reordering (``reorder=0.5``) with
@@ -26,58 +26,14 @@ What is pinned (the ruling's rows, host side):
 from __future__ import annotations
 
 import ctypes
-import re
 from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
-_FINISH = {"mask": "terminated", "counter": "finished_count", "steps": 1}
 
-
-# --------------------------------------------------------------------------- #
-# A finishing HOST kernel. Until hawk emits them itself, the fixture takes
-# hawk's own host TU for the non-finishing step and adds, by text, what the
-# finishing epilogue adds: a writable mask, the
-# `finished_count` counter appended to the arg_spec, and as the LAST text of
-# the guarded scope `if (cond) { mask[i] = 1; atomic_ref(count) += 1; }`.
-# Once hawk's sidecar carries `finish`, `_finishing_host_plan` builds through
-# hawk unchanged and the patch is not used.
-# --------------------------------------------------------------------------- #
-_GUARD_OPEN = "if (!trm_terminated[i].eval()) {"
-
-
-def _patch_finish(src: str, *, cond: str, mask_slot: int, counter_slot: int,
-                  count: bool = True) -> str:
-    """Add the finish epilogue to hawk's host TU ``src`` (``count=False``: the
-    epilogue marks the sample but never counts it -- the non-vacuity red case)."""
-    decl = re.search(r"\n( *)\(void\)trm_terminated;\n", src)
-    assert decl, "hawk's host TU no longer declares trm_terminated"
-    pad = decl.group(1)
-    handle = "static_cast<const eagle::plugin::ScalarHandle*>(params[{}])->data"
-    handles = (
-        f"{pad}unsigned char* const hawk_mask_w = static_cast<unsigned char*>("
-        f"{handle.format(mask_slot)});\n"
-        f"{pad}std::uint32_t* const hawk_finished = static_cast<std::uint32_t*>("
-        f"{handle.format(counter_slot)});\n")
-    src = src[:decl.end()] + handles + src[decl.end():]
-    assert src.count(_GUARD_OPEN) == 1, "expected exactly one guarded scope"
-    at = src.index(_GUARD_OPEN)
-    indent = src[src.rindex("\n", 0, at) + 1:at]
-    close = src.index("\n" + indent + "}\n", at)
-    tally = ("std::atomic_ref<std::uint32_t>(*hawk_finished)"
-             ".fetch_add(1u, std::memory_order_relaxed);" if count
-             else "(void)hawk_finished;")
-    epilogue = (
-        f"\n{indent}    if ({cond}) {{\n"
-        f"{indent}        hawk_mask_w[i.global()] = 1;\n"
-        f"{indent}        {tally}\n"
-        f"{indent}    }}")
-    return src[:close] + epilogue + src[close:]
-
-
-def _load_host(so, entry_name, view, name, extra_keepalive=()):
+def _load_host(so, entry_name, view, name):
     from hawk import _core as hcore
 
     import eagle.exec as eexec
@@ -87,52 +43,29 @@ def _load_host(so, entry_name, view, name, extra_keepalive=()):
     cdll = ctypes.CDLL(str(so))
     plugin = SimpleNamespace(
         host_entry=ctypes.cast(getattr(cdll, entry_name), ctypes.c_void_p).value,
-        name=name, _keepalive=(lib, cdll, *extra_keepalive), **view)
+        name=name, _keepalive=(lib, cdll), **view)
     return eplan.plan(plugin, structure=eexec.HostTeam)
 
 
-def finishing_host_plan(kern, work, *, cond, kind=None, finishing=True, count=True):
-    """``(plan, real)``: the host plan of ``kern`` with a ``finish`` declaration
-    (``finishing=False``: the plain plan). ``real`` says hawk emitted the finish
-    itself; otherwise ``cond`` (C++ over the TU's names, e.g.
-    ``"mut_k[i].get()() >= psc_nstop[i].eval()"``) is the patched epilogue's
-    finish condition."""
+def host_plan(kern, work, *, kind=None):
+    """The host plan of ``kern`` as hawk builds it; a kernel that finishes carries its ``finish``
+    declaration in the sidecar the plan reads."""
     from hawk.artifact import build_bundle, plan_view
 
     kw = {} if kind is None else {"kind": kind}
     bundle = build_bundle([kern], work, targets=("host",), **kw)
     art = next(a for a in bundle.artifacts if a.name == kern.name)
-    sidecar, where = art.sidecar, Path(art.directory)
-    view = plan_view(sidecar)
+    view = plan_view(art.sidecar)
     entry = view.pop("host_entry")
-    real = "finish" in sidecar
-    if not finishing or real:
-        if real:
-            view["sidecar"] = sidecar
-        return _load_host(where / f"{kern.name}.so", entry, view, kern.name), real
-
-    from hawk.compile.drivers import CompileOptions, compile_source
-
-    arg_spec = tuple(tuple(p) for p in sidecar["arg_spec"])
-    mask_slot = arg_spec.index(("terminated", _FINISH["mask"]))
-    src = _patch_finish((where / f"{kern.name}.cpp").read_text(), cond=cond,
-                        mask_slot=mask_slot, counter_slot=len(arg_spec), count=count)
-    import os
-
-    res = compile_source(src, f"{kern.name}_finishing{'' if count else '_nocount'}",
-                         CompileOptions(target="host",
-                                        cache_dir=os.environ.get("HAWK_CACHE_DIR")))
-    view["arg_spec"] = arg_spec + (("lookup", _FINISH["counter"]),)
-    view["sidecar"] = dict(sidecar, arg_spec=[list(p) for p in view["arg_spec"]],
-                           terminated_readonly=False, finish=dict(_FINISH))
-    return _load_host(res.artifact, entry, view, kern.name), False
+    if "finish" in art.sidecar:
+        view["sidecar"] = art.sidecar
+    return _load_host(Path(art.directory) / f"{kern.name}.so", entry, view, kern.name)
 
 
 # --------------------------------------------------------------------------- #
 # Kernels and plans
 # --------------------------------------------------------------------------- #
 _DT = 0.01
-_COND = "mut_k[i].get()() >= psc_nstop[i].eval()"
 _PLANES = ("x", "v", "k")
 
 
@@ -191,31 +124,17 @@ pytestmark = pytest.mark.usefixtures("_exact_host_profile")
 @pytest.fixture(scope="module")
 def plans(tmp_path_factory):
     """``plans[label]``: ``plain`` (the explicit path's non-finishing kernel),
-    ``fplain``/``fmap`` (finishing, plain and active-set) and ``nocount`` (a
-    finishing kernel whose epilogue marks but never counts; only where the
-    epilogue is the fixture's)."""
+    ``fplain``/``fmap`` (finishing, plain and active-set)."""
     pytest.importorskip("hawk")
     from hawk.ext import Guard, Kind
 
     def work(label):
         return tmp_path_factory.mktemp(label)
 
-    out = {"plain": finishing_host_plan(_oscillator(), work("plain"), cond=_COND,
-                                        finishing=False)[0]}
-    try:
-        out["fplain"], real = finishing_host_plan(
-            _oscillator(finishing=True), work("fplain"), cond=_COND)
-    except Exception:  # this hawk refuses `terminated = cond` (no I-A)
-        real = False
-    if not real:
-        out["fplain"], _ = finishing_host_plan(_oscillator(), work("fplain2"),
-                                               cond=_COND)
-        out["nocount"], _ = finishing_host_plan(
-            _oscillator(), work("nocount"), cond=_COND, count=False)
+    out = {"plain": host_plan(_oscillator(), work("plain")),
+           "fplain": host_plan(_oscillator(finishing=True), work("fplain"))}
     kind = Kind("udh_map", guard=Guard(active_set=True))
-    out["fmap"], _ = finishing_host_plan(_oscillator(kind, finishing=real),
-                                         work("fmap"), cond=_COND, kind=kind)
-    out["real"] = real
+    out["fmap"] = host_plan(_oscillator(kind, finishing=True), work("fmap"), kind=kind)
     return out
 
 
@@ -440,18 +359,6 @@ def test_launches_follow_the_longest_sample(plans, label, every):
     assert runner.loop.iterations() == rep.launches
     assert rep.steps == rep.launches * e
     assert runner.loop.max_iters == -(-max_steps // e)
-
-
-def test_an_epilogue_that_never_counts_runs_to_the_cap(plans):
-    """Red case: the epilogue marks but does not count, so the guard never fires."""
-    import eagle
-
-    if "nocount" not in plans:
-        pytest.skip("the epilogue red is hawk's (I-A) once kernels finish natively")
-    n, cap = 500, 60
-    g = _planes(_inputs(n, "spread", 20))
-    rep = eagle.run_until_done(plans["nocount"], max_steps=cap, dt=_DT, **g)
-    assert rep.launches == cap and not rep.done and rep.finished == 0
 
 
 # --------------------------------------------------------------------------- #

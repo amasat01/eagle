@@ -257,6 +257,25 @@ def test_a_second_call_in_a_new_process_runs_no_tool(tmp_path):
     assert second["tool_runs"] == 0 and second["hits"] > 0
 
 
+def test_the_bundle_key_folds_in_the_opt_level(monkeypatch):
+    """Mirrors the host profile's own fold-in: two opt levels of the same
+    kernels/targets must never land in the same cache folder, since the
+    level changes the device (nvcc) build too, not just the host one — an
+    ``O0`` folder served an ``O3`` .so (or vice versa) would be silently
+    wrong, not just a slow rebuild."""
+    monkeypatch.delenv("HAWK_OPT_LEVEL", raising=False)
+    default_key = plan_deploy._bundle_key([ak_affine], ("host",))
+    monkeypatch.setenv("HAWK_OPT_LEVEL", "O3")
+    o3_key = plan_deploy._bundle_key([ak_affine], ("host",))
+    assert o3_key == default_key, "O3 is hawk's own default opt level"
+    monkeypatch.setenv("HAWK_OPT_LEVEL", "O0")
+    o0_key = plan_deploy._bundle_key([ak_affine], ("host",))
+    assert o0_key != o3_key
+    monkeypatch.setenv("HAWK_OPT_LEVEL", "fastest")
+    with pytest.raises(hawk.HawkError, match="unknown opt level"):
+        plan_deploy._bundle_key([ak_affine], ("host",))
+
+
 def _ak_grouped(group):
     from hawk.ext import Guard, Kind
 

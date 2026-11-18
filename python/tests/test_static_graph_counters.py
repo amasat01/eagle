@@ -41,10 +41,6 @@ from eagle.pipeline import GraphPipeline
 hawk_trace = pytest.importorskip("hawk.trace")
 hawk_artifact = pytest.importorskip("hawk.artifact")
 
-#: The GPU this process runs on, the same one test_plan_bind_launch.py
-#: builds against.
-DEVICE_ARCH = hawk_artifact.arch()
-
 _ALL_ZERO = {"captures": 0, "instantiations": 0, "binds": 0, "rebinds": 0,
              "updates": 0, "graph_builds": 0, "reverses": 0, "records": 0, "host_syncs": 0}
 
@@ -64,7 +60,7 @@ def _n20i_scale(x: hawk_trace.Scalar, a: hawk_trace.Param,
 def _n20i_unit(tmp_path_factory):
     return hawk_artifact.build_bundle(
         [_n20i_scale], tmp_path_factory.mktemp("n20i_counters"),
-        targets=("cuda",), device_arch=DEVICE_ARCH,
+        targets=("cuda",),
     )
 
 
