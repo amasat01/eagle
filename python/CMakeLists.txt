@@ -173,11 +173,14 @@ endif()
 # From a source distribution: the header copy it carries, and nothing from the
 # ambient environment (the copy is the exact tree this version was cut from).
 # The compile definitions are the ones the installed CUDA-mode eagle and aether
-# packages export; only the plugin uses them (the core takes include paths only).
+# packages export; only the plugin uses them (the core takes include paths and aether's forced
+# facts include, never the definitions). The sdist's header copy carries raptor_facts.h beside aether/.
 if(_eagle_from_sdist)
   add_library(aether::aether INTERFACE IMPORTED)
   set_target_properties(aether::aether PROPERTIES
     INTERFACE_INCLUDE_DIRECTORIES "${_eagle_sdist_include}"
+    INTERFACE_COMPILE_OPTIONS
+      "$<$<COMPILE_LANGUAGE:CXX>:SHELL:-include raptor_facts.h>;$<$<COMPILE_LANGUAGE:CUDA>:SHELL:--pre-include raptor_facts.h>"
     INTERFACE_COMPILE_DEFINITIONS "AETHER_WARP_SIZE=32;AETHER_HAS_CUDA=1")
   add_library(eagle::eagle INTERFACE IMPORTED)
   set_target_properties(eagle::eagle PROPERTIES
@@ -419,6 +422,15 @@ endif()
 # exported definitions describe the CUDA-mode package (AETHER_HAS_CUDA, ...).
 get_target_property(_eagle_core_incs eagle::eagle INTERFACE_INCLUDE_DIRECTORIES)
 get_target_property(_aether_incs aether::aether INTERFACE_INCLUDE_DIRECTORIES)
+# aether's consumer contract also forces its facts header (raptor_facts.h) ahead of every aether header: take that one option from the
+# package (its other compile options, -fopenmp and -march among them, are not this core's), never a path spelled here.
+get_target_property(_aether_opts aether::aether INTERFACE_COMPILE_OPTIONS)
+if(_aether_opts)
+  list(FILTER _aether_opts INCLUDE REGEX "raptor_facts\\.h")
+endif()
+if(NOT _aether_opts)
+  message(FATAL_ERROR "aether::aether states no forced facts include (INTERFACE_COMPILE_OPTIONS); this aether is older than the facts-header contract")
+endif()
 nanobind_add_module(_core MODULE FREE_THREADED src/eagle_core.cpp src/eagle_version.cpp)
 # the package version lives in this one small file: a new version recompiles it alone
 set_source_files_properties(src/eagle_version.cpp PROPERTIES COMPILE_DEFINITIONS EAGLE_PYTHON_VERSION="${eagle_VERSION}")
@@ -427,6 +439,7 @@ target_compile_features(_core PRIVATE cxx_std_23)
 # hold an (older) aether copy, and the aether this configure resolved must win.
 # the live eagle root ahead of aether's prefix, which may hold an installed (older) eagle copy
 target_include_directories(_core PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src" "${_eagle_hdr_root}" ${_aether_incs} ${_eagle_core_incs})
+target_compile_options(_core PRIVATE ${_aether_opts})
 target_compile_definitions(_core PRIVATE EAGLE_CPU_ONLY=1 AETHER_CPP_MODE=1 EAGLE_BLOCKSIZE=256 NDEBUG
   $<$<BOOL:${_eagle_plugin_skipped}>:EAGLE_CORE_BUILT_WITHOUT_CUDA_PLUGIN=1>)
 target_link_libraries(_core PRIVATE ${CMAKE_DL_LIBS})
@@ -479,6 +492,7 @@ add_library(eagle_xla SHARED src/xla/eagle_xla.cpp)
 target_compile_features(eagle_xla PRIVATE cxx_std_23)
 # the host finish is eagle's canonical reduction (eagle/reduce/canonical.h), header only
 target_include_directories(eagle_xla PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src" "${_eagle_hdr_root}" ${_aether_incs} ${_eagle_core_incs})
+target_compile_options(eagle_xla PRIVATE ${_aether_opts})
 target_compile_definitions(eagle_xla PRIVATE EAGLE_CPU_ONLY=1 AETHER_CPP_MODE=1 EAGLE_BLOCKSIZE=256 NDEBUG)
 target_include_directories(eagle_xla SYSTEM PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/xla/vendor")
 # one section per function/datum so the linker can drop the static runtime code the handler never calls
@@ -571,6 +585,7 @@ elseif(_eagle_python_mpi STREQUAL "ON" OR _eagle_python_mpi STREQUAL "AUTO")
     target_compile_features(_mpi PRIVATE cxx_std_23)
     target_include_directories(_mpi PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src"
       "${_eagle_hdr_root}" ${_aether_incs} ${_eagle_core_incs})
+    target_compile_options(_mpi PRIVATE ${_aether_opts})
     # EAGLE_MPI is PRIVATE to this target, exactly as it is on the C++ bed: it is
     # what makes RankPartition.h compile at all, and it must not leak to anything
     # else in the build.

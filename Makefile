@@ -352,10 +352,13 @@ nodriver:
 # sdist-install: the sdist installs into a clean venv with warnings as errors, imports and computes
 sdist-install:
 	@[ -n "$(RAPTOR_SRC)" ] && [ -n "$(AETHER_SRC)" ] || { echo "gate: RAPTOR_SRC and AETHER_SRC are required" >&2; exit 2; }
+	$(call need_raptor)
 	mkdir -p "$(GD)"
+	cmake -DAETHER_FACTS_DIR="$(CARDS)/cpu" -DAETHER_CPP_MODE=ON -DCMAKE_INSTALL_PREFIX="$(GD)/prefix_sd" -B "$(GD)/aether_sd" -S "$(AETHER_SRC)"
+	cmake --install "$(GD)/aether_sd"
 	$(PYTHON) -m venv "$(GD)/venv_sd"
 	"$(GD)/venv_sd/bin/python" -m pip install --quiet build
-	cd python && "$(GD)/venv_sd/bin/python" -m build --sdist --outdir "$(GD)/dist_sd"
+	cd python && EAGLE_SDIST_AETHER_INCLUDE="$(GD)/prefix_sd/include" "$(GD)/venv_sd/bin/python" -m build --sdist --outdir "$(GD)/dist_sd"
 	PIP="$(GD)/venv_sd/bin/python -m pip"; \
 	$$PIP install --quiet --upgrade pip; \
 	$$PIP install --quiet "$(RAPTOR_SRC)" "$(AETHER_SRC)/dsc"; \
