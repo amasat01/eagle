@@ -10,6 +10,8 @@ Releases after 0.6.4 are on [GitHub](https://github.com/amasat01/eagle/releases)
 
 **A host function enqueued outside a graph can no longer crash the process.** `eagle._core.HostFunc.enqueue` outside a capture handed the backend a borrowed reference to its function: dropping the `HostFunc` before the call ran freed the function under it (a segmentation fault), and an interpreter that exited first ran the call after finalization (an abort). The call now holds its own reference until it has run, and interpreter exit waits for pending calls. eagle's public calls already waited for their host functions before returning, so only code driving the binding directly was exposed.
 
+**A shared parameter given as an eagle array binds in a graph.** A `Param[Vector[n]]` or `Param[Matrix[r, c]]` value passed as an `eagle.Array` failed with a `TypeError` when the graph was built, because it was flattened with NumPy's `reshape(-1)`. Shared values are now flattened with `ravel()`, which NumPy, CuPy, torch and eagle arrays all provide; a non-contiguous value, such as a transposed view, is copied first.
+
 **A subclass of hawk's kernel type deploys.** `eagle.deploy`, `eagle.plan.auto` and `eagle.simulate` recognised a hawk kernel by the module its type was defined in, so a `Kernel` subclass defined in another package was taken for a built plugin and failed. They now check for an instance of hawk's `Kernel` (still without importing hawk); an object that is not a kernel is refused as before.
 
 ### Tests
