@@ -174,6 +174,7 @@ def test_the_state_is_safe_to_share_between_threads():
 
 
 def test_a_real_hawk_cost_goes_through_the_rule():
+    """Red until hawk states per-branch vectorised flags and the fused flag in the described cost (hawk H248)."""
     hawk = pytest.importorskip("hawk")
     import hawk.math as M
     from hawk.artifact import describe
@@ -185,6 +186,7 @@ def test_a_real_hawk_cost_goes_through_the_rule():
     row = describe([rare], targets=("host",))["rare"]["dispatch"][0]
     cost = dp.group_cost(row)
     assert dp.static_selector(cost.selector_reads, {"y"})
+    assert not cost.fused_vectorised  # the fused host loop renders the dispatch as a switch, which stays scalar
     big = 1 << 26  # the host's launch terms are noise at this size
     # which path wins a mixed batch is measured, not fixed here (test_dispatch_door follows the faster path)
     assert dp.resolve(cost, [big * 98 // 100, big // 100, big // 100], **RUN) in ("switch", "segmented")
