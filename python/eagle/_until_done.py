@@ -49,6 +49,7 @@ from ._active_set import (
     compaction_body,
 )
 from . import _core, _lane_bind, _layout, _split, _stream, arrays
+from ._cell_rows import sidecar_of
 from ._busy import BusyGuard
 from ._compat import zip_strict
 from ._conditional import SkipGuard, Skippable, _host_scalar, repeat_while
@@ -749,9 +750,11 @@ class Runner:
             fits = not auto and k > 1 and window in (None, k) and not refine
             width = sum(1 for role, _nm in specs[0] if role == "mutable")
             steps_reverse = "per_step"
-            if fits:        # the kernel hands over its measured rows as plain data; none given, per_step
-                source = getattr(plans[0].plugin, "_hawk_source", None)
-                table = source[0].steps_reverse_table(bool(device)) if source is not None else {}
+            meta = sidecar_of(plans[0].plugin)
+            if fits and "steps_reverse_table" in meta:   # the build's measured rows; a sidecar that states none: per_step
+                from hawk.runtime import steps_reverse_table
+
+                table = steps_reverse_table(meta, bool(device))
                 per_resident = table.get("regime") == "per_resident"
                 if per_resident and resident <= 0:
                     raise ValueError("eagle.until_done: steps_reverse='auto' on a device needs the device's "
