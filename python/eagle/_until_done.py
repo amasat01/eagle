@@ -762,7 +762,7 @@ class Runner:
                 from hawk.runtime import steps_reverse_table
 
                 table = steps_reverse_table(meta, bool(device))
-                per_resident = table.get("regime") == "per_resident"
+                per_resident = table.get("regime") == "PerResident"
                 if per_resident and resident <= 0:
                     raise ValueError("eagle.until_done: steps_reverse='auto' on a device needs the device's "
                                      "SM count and resident threads per SM")

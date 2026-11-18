@@ -116,7 +116,7 @@ def test_the_choice_rule_is_applied_to_the_measured_rows():
     assert choose(rows, 3, 4, 64) == "fused"         # the nearest measured regime
     assert choose({}, 4, 4, 8) == "per_step"         # a target with no row
     dev = _table(True)
-    assert dev["regime"] == "per_resident"
+    assert dev["regime"] == "PerResident"
     for resident in (5 * 2048, 58 * 1536, 108 * 2048):      # SM count x resident threads: P2000, L4, A100
         assert choose(dev, 2, 8, 65536 / resident) == "fused"
         assert choose(dev, 2, 8, 64 / resident) == "per_step"     # below the measured regime
