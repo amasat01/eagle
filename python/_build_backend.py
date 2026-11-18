@@ -56,11 +56,11 @@ def _aether_root() -> Path:
         Path(sys.prefix) / "include",
     ]
     for candidate in candidates:
-        if candidate and (Path(candidate) / "aether" / "aether.h").is_file():
+        if candidate and (Path(candidate) / "aether" / "aether.h").is_file() and (Path(candidate) / "raptor_facts.h").is_file():
             return Path(candidate)
     tried = [str(c) for c in candidates if c]
     raise RuntimeError(
-        f"cannot find aether's headers (aether/aether.h) to put in the sdist: "
+        f"cannot find an installed aether (aether/aether.h and raptor_facts.h) to put in the sdist: "
         f"tried {tried}. Set $EAGLE_SDIST_AETHER_INCLUDE."
     )
 
@@ -73,8 +73,10 @@ def _stage_headers() -> None:
         )
     shutil.rmtree(_INCLUDE, ignore_errors=True)
     headers_only = shutil.ignore_patterns("*.cpp", "*.cu", "*.txt", "*.cmake")
-    for root, name in ((_REPO, "eagle"), (_REPO, "plugin"), (_aether_root(), "aether")):
+    aether_root = _aether_root()
+    for root, name in ((_REPO, "eagle"), (_REPO, "plugin"), (aether_root, "aether")):
         shutil.copytree(root / name, _INCLUDE / name, ignore=headers_only)
+    shutil.copyfile(aether_root / "raptor_facts.h", _INCLUDE / "raptor_facts.h")   # aether forces it ahead of its headers
 
 
 def _outside_links() -> list[tuple[Path, str]]:
