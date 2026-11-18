@@ -33,40 +33,11 @@ def attach(plugin, kernel) -> None:
         _check_lowerable(record, "forward")
     except PlanUnavailable:
         return
-    major = _major_operand(kernel, record)
+    major = record.lane_major
     if major is None:
         return
     plugin._gemm = route = _Route(record, major, plugin.scalar_type or "float64")
     route.vjp = _VjpPlugin(plugin, route)
-
-
-def _major_operand(kernel, record):
-    """The operand read by the MAJOR half of the lane split (only through
-    ``lane // m``, ``m`` the other operand's free extent), the other one by
-    its minor half (``lane - (lane // m) * m``), or ``None``: the lanes are
-    then the product in row-major order. Read off hawk's own walk of the
-    fold (:mod:`hawk.ir.contraction`, whose fan-in reading gives ``m``)."""
-    from hawk.passes import contraction as hc
-    from raptor.ir.nodes import Op, SampleIndex
-
-    per = {}
-    for sink in hc._sinks_of(kernel):
-        _loop, _slot, terms = hc._fold(sink)
-        for term in terms:
-            for read in hc._reads_of(term):
-                per.setdefault(hc._read_name(read, {}), []).append(hc._read_index(read))
-
-    def split(name):        # (m, the ops applied to the lane index)
-        ops = {node.kind for ix in per.get(name, ()) for node in hc._walk(ix)
-               if isinstance(node, Op) and any(isinstance(o, SampleIndex) for o in node.operands)}
-        return hc._fanin(per.get(name, ())), ops
-
-    a, b = record.operands
-    for major, minor in ((a, b), (b, a)):
-        (m, ops), (m_minor, ops_minor) = split(major.name), split(minor.name)
-        if ops == {"div"} and ops_minor > {"div"} and m == m_minor == _free_size(minor):
-            return major.name
-    return None
 
 
 def _free_size(op):

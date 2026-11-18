@@ -40,12 +40,8 @@ def width_of(plugin):
     """The map word in bits of an index-set kernel (read from the sidecar's ``active_map`` dtype), or ``None`` when
     ``plugin`` does not declare a lane set. A thinning kernel (``Guard(active_set=True)``) is not one: its map is
     :class:`eagle.ActiveSet`'s, trusted."""
-    declared = getattr(plugin, "index_set", None)
-    if declared is None:
-        source = getattr(plugin, "_hawk_source", None)
-        lanes = getattr(getattr(source[0], "kind", None), "lanes", None) if source else None
-        if lanes is None:
-            return None
+    if getattr(plugin, "index_set", None) is None:
+        return None
     dtype = (getattr(plugin, "arg_dtypes", None) or {}).get("active_map")
     return 64 if str(dtype) in ("int64", "i64") else 32
 
