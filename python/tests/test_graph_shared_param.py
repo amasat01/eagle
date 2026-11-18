@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """A shared shaped value (``Param[Matrix[r, c]]``, ``Param[Vector[n]]``: one value every row
 reads) passes through a built ``eagle.Graph`` as an array of its own shape, on the CPU and on
-the GPU backend. Oracle: NumPy, within the rounding bound of a k-term dot product."""
+the GPU backend, whether it is a NumPy, CuPy or eagle array, contiguous or a transposed view.
+Oracle: NumPy, within the rounding bound of a k-term dot product."""
 
 from __future__ import annotations
 
@@ -45,7 +46,7 @@ def _bound(k, weights, x):
     return k * EPS * (np.abs(weights) @ np.abs(x))
 
 
-def _run(xp, tmp_path):
+def _run(xp, tmp_path, shared=None):
     targets = ("host",) if xp is np else ("host", "cuda")
     rot, dt = eagle.deploy([rotate, dot], targets=targets, cache_dir=str(tmp_path))
 
@@ -57,7 +58,8 @@ def _run(xp, tmp_path):
         return g
 
     y2, y3 = xp.zeros((2, ROWS)), xp.zeros(ROWS)
-    graph = both(xp.asarray(X2), xp.asarray(A), y2, xp.asarray(X3), xp.asarray(W), y3)
+    a, w = shared() if shared else (xp.asarray(A), xp.asarray(W))
+    graph = both(xp.asarray(X2), a, y2, xp.asarray(X3), w, y3)
     graph.launch(1)
     to_host = cp.asnumpy if xp is not np else np.asarray
     return graph.backend, to_host(y2), to_host(y3)
@@ -68,8 +70,18 @@ def _check(got2, got3):
     assert np.all(np.abs(got3 - W @ X3) <= _bound(3, W, X3))
 
 
-def test_a_shared_matrix_and_vector_pass_through_a_cpu_graph(tmp_path):
-    backend, got2, got3 = _run(np, tmp_path)
+def _eagle_arrays():
+    return eagle.to_array(A), eagle.to_array(W)
+
+
+def _eagle_transposed_view():
+    return eagle.to_array(np.ascontiguousarray(A.T)).T, eagle.to_array(W)   # holds A, not contiguous
+
+
+@pytest.mark.parametrize("shared", [None, _eagle_arrays, _eagle_transposed_view],
+                         ids=["numpy", "eagle", "eagle_transposed_view"])
+def test_a_shared_matrix_and_vector_pass_through_a_cpu_graph(tmp_path, shared):
+    backend, got2, got3 = _run(np, tmp_path, shared)
     assert backend == "cpu"
     _check(got2, got3)
 
