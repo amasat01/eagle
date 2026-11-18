@@ -35,7 +35,6 @@ from __future__ import annotations
 import hashlib
 import math
 import time
-from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import NamedTuple
 
@@ -340,8 +339,8 @@ def _kernel_name(plugin) -> str:
         value = getattr(plugin, attr, None)
         if isinstance(value, str) and value:
             return value
-    meta = getattr(plugin, "sidecar", None)
-    if isinstance(meta, Mapping) and isinstance(meta.get("name"), str):
+    meta = sidecar_of(plugin)
+    if isinstance(meta.get("name"), str):
         return meta["name"]
     return "the plan's kernel"
 
@@ -349,8 +348,8 @@ def _kernel_name(plugin) -> str:
 def _finish_of(plugin, name: str):
     """The plugin's ``finish`` declaration: its ``sidecar``'s key when it
     carries one, else its ``finish`` attribute, else ``None``."""
-    meta = getattr(plugin, "sidecar", None)
-    if isinstance(meta, Mapping):
+    meta = sidecar_of(plugin)
+    if meta:
         check_reserved_planes(meta, name=name)
         return read_finish(dict(meta), name=name)
     finish = getattr(plugin, "finish", None)

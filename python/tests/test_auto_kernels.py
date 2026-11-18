@@ -12,6 +12,9 @@ What each group of rows proves:
   equals the hand-assembled device plan bit for bit and is within one ULP of
   the host per multiply-add the device may contract. Inputs are pairwise
   distinct so a wrong row cannot pass.
+* CACHE: a second call runs no tool, in the same process and in a NEW one
+  (same ``cache_dir``): asserted on hawk's ``cache_stats`` counters, never on
+  timing.
 * ORDER: ``auto([k1, k2, k3])`` is a tuple of plans in the kernels' order,
   all built into ONE bundle.
 * DERIVED KERNELS: a ``hawk.steps(kernel, K)`` kernel is an input like any
@@ -31,6 +34,7 @@ from __future__ import annotations
 
 import ctypes
 import json
+import os
 import subprocess
 import sys
 import textwrap
@@ -213,6 +217,44 @@ def test_targets_default_and_explicit(cache):
     host_only = eplan.auto(ak_affine, targets=("host",), cache_dir=cache)
     assert getattr(host_only.plugin, "device_function", None) is None
     assert host_only.plugin.host_entry
+
+
+def _cpu_stats(cache_dir):
+    from hawk.artifact import cache_stats
+
+    return cache_stats(cache_dir)["cpu"]
+
+
+def test_a_second_call_in_the_same_process_runs_no_tool(tmp_path):
+    cache = tmp_path / "cache"
+    eplan.auto([ak_affine, ak_energy], targets=("host",), cache_dir=cache)
+    before = _cpu_stats(cache)
+    eplan.auto([ak_affine, ak_energy], targets=("host",), cache_dir=cache)
+    after = _cpu_stats(cache)
+    assert after["tool_runs"] == before["tool_runs"] and after["hits"] > before["hits"]
+
+
+_NEW_PROCESS = textwrap.dedent("""
+    import json, sys
+    sys.path.insert(0, {tests!r})
+    import hawk.artifact
+    from eagle import plan as eplan
+    from test_auto_kernels import ak_affine, ak_energy
+    eplan.auto([ak_affine, ak_energy], targets=("host",), cache_dir={cache!r})
+    print(json.dumps(hawk.artifact.cache_stats({cache!r})["cpu"]))
+""")
+
+
+def test_a_second_call_in_a_new_process_runs_no_tool(tmp_path):
+    """The counters are per process: the first process builds, the second only hits the cache."""
+    code = _NEW_PROCESS.format(tests=os.path.dirname(__file__), cache=str(tmp_path / "cache"))
+    runs = [subprocess.run([sys.executable, "-W", "ignore", "-c", code], env=dict(os.environ),
+                           capture_output=True, text=True, timeout=600) for _ in range(2)]
+    for run in runs:
+        assert run.returncode == 0, run.stderr
+    first, second = (json.loads(run.stdout.splitlines()[-1]) for run in runs)
+    assert first["tool_runs"] > 0
+    assert second["tool_runs"] == 0 and second["hits"] > 0
 
 
 def _ak_grouped(group):
