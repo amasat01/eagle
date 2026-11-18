@@ -45,8 +45,8 @@ def test_deploy_builds_for_the_running_device(monkeypatch, tmp_path):
     """``eagle.deploy(kernel, targets=("host", "cuda"))`` passes no
     ``device_arch=`` of its own (``_hawk_plugins`` -> ``build_bundle``), so
     with no ``$HAWK_CUDA_ARCH`` pin it must resolve through the SAME probe
-    hawk.artifact.arch uses -- spied at ``ospreys.cuda.toolchain.device_flags``, the real
-    function underneath the AOT nvcc device compile.
+    hawk.artifact.arch uses -- spied at ``ospreys.cuda.toolchain.resolve_arch``, the one resolver
+    the AOT nvcc device compile takes its arch from.
 
     Only the COMPILE step's arch resolution is under test here, not loading
     the result onto a device, so the registry loader is stubbed: this proves
@@ -60,14 +60,15 @@ def test_deploy_builds_for_the_running_device(monkeypatch, tmp_path):
 
     monkeypatch.delenv("HAWK_CUDA_ARCH", raising=False)
     monkeypatch.setattr(hnvrtc, "current_device_arch", lambda: "sm_80")
-    real_device_flags = tc.device_flags
+    real_resolve_arch = tc.resolve_arch
     seen = []
 
-    def _spy(*, arch="", **kw):
+    def _spy(device_arch=""):
+        arch = real_resolve_arch(device_arch)
         seen.append(arch)
-        return real_device_flags(arch=arch, **kw)
+        return arch
 
-    monkeypatch.setattr(tc, "device_flags", _spy)
+    monkeypatch.setattr(tc, "resolve_arch", _spy)
     fake_loaded = SimpleNamespace(fn=SimpleNamespace(kernel=SimpleNamespace(ptr=0)))
     monkeypatch.setattr(
         eregistry, "load_manifest",
