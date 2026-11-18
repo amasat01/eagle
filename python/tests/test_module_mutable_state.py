@@ -32,7 +32,6 @@ ALLOWED = {
     ("_active_set.py", "_REORDERING"): "guarded by _REORDER_LOCK",
     ("_active_set.py", "_GROUP_BY_COUNT"): "every operation is one atomic dict call: set once at construction, popped by the finalizer, keyed by the count plane's address",
     ("_device_kind.py", "_DLPACK_KINDS"): "read-only table",
-    ("_transfer.py", "_LIVE"): "a WeakSet: add is one atomic call, and the only iteration is the exit hook, which copies it under the set's own iteration guard",
     ("_counters.py", "_COUNTERS"): "guarded by _LOCK",
     ("_dispatch_door.py", "_PARTS"): "guarded by _PARTS_LOCK",
     ("_builder.py", "_FLOAT_BYTES"): TABLE,

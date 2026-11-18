@@ -11,9 +11,7 @@ in the capture; a node whose planes are all host arrays runs as a host function 
 
 from __future__ import annotations
 
-import atexit
 import contextvars
-import weakref
 
 from . import _core, _recording, _stream, arrays
 from ._active_set import _address
@@ -146,26 +144,13 @@ def copy_run_host(payload):
 
 
 # --- host nodes of a captured GPU graph --- #
-#: The host nodes alive: ``call`` reaches the user's module, which reaches the graph, a loop the
-#: binding's HostFunc cannot be traversed for. Interpreter exit lets go of them (see below).
-_LIVE = weakref.WeakSet()
-
-
-@atexit.register
-def _release_host_funcs():
-    """Nothing replays at exit: drop each node's function so the loop is broken before the
-    interpreter tears the binding down (else it reports leaked objects)."""
-    for node in list(_LIVE):
-        node.func = None
-
-
 class HostNode:
     """A node of host arrays in a GPU capture: ``call`` (its CPU lowering) runs on
     every replay, on a backend thread, once the work before it is done. Capturing it
     adds one host function node. An exception ``call`` raises is kept and re-raised by
     the graph's next ``launch`` / ``synchronize``."""
 
-    __slots__ = ("func", "errors", "__weakref__")
+    __slots__ = ("func", "errors")
 
     def __init__(self, call):
         errors = self.errors = []
@@ -177,7 +162,6 @@ class HostNode:
             except BaseException as exc:    # the backend thread cannot raise it
                 errors.append(exc)
         self.func = _core.HostFunc(run)
-        _LIVE.add(self)
         sink = HOST_SINK.get()
         if sink is not None:
             sink.append(self)
