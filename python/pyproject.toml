@@ -50,7 +50,7 @@ classifiers = [
 # `eagle.sidecar` imports. The constraint is expressed where a resolver can act on it,
 # never as a runtime surprise.
 # aether-dsc: the `aether` arrays eagle allocates its planes with (CPU and GPU, no extra needed).
-dependencies = ["raptor-core>=0.7.3,<0.8", "aether-dsc>=0.7.3,<0.8"]
+dependencies = ["raptor-core>=0.8.0.dev0,<0.9", "aether-dsc>=0.7.3,<0.8"]
 
 # The "raptor.pattern_loaders" entry-point declaration for
 # "graph_block" moved to a separate package — the block code was extracted there
@@ -150,7 +150,7 @@ filterwarnings = [
   "ignore:Due to '_pack_':DeprecationWarning:warp",
 ]
 markers = [
-    "ft: free-threading rows (need a free-threaded interpreter; skip on a GIL build)",
+    "ft: free-threading rows (need a free-threaded interpreter; they fail on a GIL build, so gate-py deselects them and ft-stress runs them)",
     "gpu: requires cupy + a CUDA GPU",
     "gpu2: requires cupy + TWO CUDA GPUs (skipped, never passed, on one)",
     "torch: requires torch (CPU or CUDA) + cupy GPU",

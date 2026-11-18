@@ -299,8 +299,8 @@ endif()
 # (GNUInstallDirs is included near the top, before the interface target — see
 # the note there; the CMAKE_INSTALL_* variables it defines are already set.)
 
-# Copy includes to install location
-install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/eagle" DESTINATION "include")
+# Copy includes to install location; the door's sources and private headers stay out (cmake/EagleDoor.cmake installs its two public headers)
+install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/eagle" DESTINATION "include" REGEX "/eagle/door(/|$)" EXCLUDE)
 # Plugin-protocol headers (eagle::plugin PODs + the device/host registries) are
 # installed under include/eagle/ so downstream consumers use the namespaced
 # prefix: #include "eagle/plugin/sidecar.h". In-tree code keeps the repo-root

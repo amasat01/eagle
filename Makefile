@@ -121,6 +121,12 @@ gate-door-cmake:
 	cmake -S . -B "$(GD)/door" -DEAGLE_BUILD_DOOR=ON -DEAGLE_CPP_MODE=ON -DEAGLE_BUILD_TESTS=OFF -DCMAKE_PREFIX_PATH="$(GD)/prefix_cpp" \
 	      -DEAGLE_DOOR_WING_FACTS="$(CARDS)/cpu/raptor_facts.h" -DEAGLE_DOOR_ROWS="$(CARDS)/door/host/eagle_door_rows.h"
 	cmake --build "$(GD)/door" --target eagle_door -j$(GATE_JOBS)
+	cmake --install "$(GD)/door" --prefix "$(GD)/prefix_door"
+	for h in eg_door.h eg_unit_meta.h; do \
+	  test -f "$(GD)/prefix_door/include/eagle/door/$$h" || { echo "gate-door-cmake: the door install lacks $$h" >&2; exit 1; }; \
+	  $(CC) -std=c11 -Wall -Wextra -pedantic -Werror -fsyntax-only -x c "$(GD)/prefix_door/include/eagle/door/$$h"; \
+	  $(CXX) -std=c++23 -Wall -Wextra -pedantic -Werror -fsyntax-only -x c++ "$(GD)/prefix_door/include/eagle/door/$$h"; \
+	done
 	sed -n 's/^eg_status \(eg_[a-z0-9_]*\)(.*/\1/p' eagle/door/eg_door.h | sort -u > "$(GD)/door_declared.txt"
 	nm -D --defined-only "$(GD)/door/libeagle_door.so" | awk '{print $$3}' | sort > "$(GD)/door_exported.txt"
 	diff "$(GD)/door_declared.txt" "$(GD)/door_exported.txt" && echo "gate-door-cmake: the CMake door exports the $$(wc -l < "$(GD)/door_declared.txt") declared eg_ names and nothing else"
@@ -194,10 +200,11 @@ gate-cpp:
 	tests/check_headers.sh "$(CLANGXX)" "$(GD)/prefix_cpp/include"
 
 # -- the python suite on the CPU: the compile-only CUDA toolchain builds the extension, nothing runs on a device ---
+# The ft rows fail on a GIL build by design; they run in ft-stress and tsan-ft, on a free-threaded interpreter.
 gate-py: gate-env-cpu
 	EAGLE_PLUGIN_EXPECTED_ARCHS=$(CPU_CUDA_ARCH)/$(CPU_CUDA_ARCH) \
 	  $(if $(HAWK_SRC),HAWK_AETHER_INCLUDE="$(AETHER_SRC)" HAWK_EAGLE_INCLUDE="$(CURDIR)",) \
-	  env -u PYTHONPATH -u LD_LIBRARY_PATH "$(GD)/venv_cpu/bin/python" -m pytest -q -m "not gpu and not interop_matrix" -n $(PYTEST_JOBS) --dist loadfile $(or $(PYTEST_ARGS),python/tests)
+	  env -u PYTHONPATH -u LD_LIBRARY_PATH "$(GD)/venv_cpu/bin/python" -m pytest -q -m "not gpu and not interop_matrix and not ft" -n $(PYTEST_JOBS) --dist loadfile $(or $(PYTEST_ARGS),python/tests)
 # LD_LIBRARY_PATH is dropped: a conda lib dir on it brings its own OpenMP runtime next to the one aether ships
 # interop_matrix rows certify a framework (torch, jax, warp, cupy) and FAIL when it is absent, by design: this is the
 # one sanctioned deselect, as in CI. gpu rows run in gate-gpu.

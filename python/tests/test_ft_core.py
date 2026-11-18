@@ -7,9 +7,10 @@ Row classes FT-1, FT-2, FT-5 and FT-6 (capture) of the family's free-threading
 acceptance, registered against the conformance harness that ``raptor-core``
 hosts (a TEST dependency only: nothing under ``eagle/`` imports it).
 
-On a GIL build every row that needs real parallelism SKIPS with a reason; the
-name manifest below keeps "skipped" from degrading into "silently not
-collected". No row ever sets ``-X gil=0`` or ``PYTHON_GIL``: the harness
+On a GIL build every row that needs real parallelism FAILS (``require_free_threaded``),
+so the GIL-build suite deselects the ``ft`` marker and these rows run in the
+free-threaded legs (ft-stress, tsan-ft); the name manifest below keeps a row from
+being silently not collected. No row ever sets ``-X gil=0`` or ``PYTHON_GIL``: the harness
 refuses to run when either is in force.
 
 The shared-object and capture rows run their threads in a CHILD process so that
