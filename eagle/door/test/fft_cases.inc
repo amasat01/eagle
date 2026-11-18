@@ -2,7 +2,7 @@
 
 /*
  * The transform rows of the door (eg_fft_new, eg_fft_run, eg_fft_free), written once for the host test (door_test.c) and
- * the device test (door_device_test.c). The includer defines, before this header, check(ok, what), reason_has(ctx, part)
+ * the device test (door_device_test.c). The includer defines, before this file, check(ok, what), reason_has(ctx, part)
  * and fft_move(dst, src, bytes): a copy between host memory and the memory of a plane of the context under test.
  *
  * The oracle is independent of the door: a direct O(n^2) DFT per line, written here in long double. Every value test

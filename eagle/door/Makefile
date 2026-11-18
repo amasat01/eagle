@@ -6,6 +6,8 @@
 #
 # AETHER_INCLUDE: the include directory of an installed aether.
 # WING_FACTS:     the cpu wing's generated raptor_facts.h (aether's linalg needs it first).
+# DOOR_ROWS:      the door's generated row header (EG_WEIGHT_ROWS, EG_GEMM_ROUTE_ROWS), force-included into Context.cpp only; required:
+#                 the host_device one for a CUDA door, the host one for a host-only door (raptor's rs/wings/cards/door/).
 # OUT:            the build directory (default: build/ here, git-ignored).
 #
 # Targets: lib (the library), symbols (it exports eg_* names only), confined (core and host reach no CUDA), test (build
@@ -43,6 +45,7 @@ CC ?= gcc
 OUT ?= $(CURDIR)/build
 AETHER_INCLUDE ?=
 WING_FACTS ?=
+DOOR_ROWS ?=
 
 PAIR_WING_DIR ?=
 PAIR_UNITS := ss_bcast mat_apply _wide_math _flat rotate mv ksum_c fixed_count g disp_r0_k2_pred disp_r0_k2_switch disp_r0_k5_pred disp_r0_k5_switch disp_r0_k16_pred disp_r0_k16_switch
@@ -84,8 +87,10 @@ comma := ,
 CXXFLAGS_DEVICE := $(filter-out -DEAGLE_CPU_ONLY=1,$(CXXFLAGS_DOOR)) -isystem $(CUDA)/include
 CUDART := $(if $(CUDA),-L$(CUDA)/lib64 -lcudart -Wl$(comma)-rpath$(comma)$(CUDA)/lib64)
 
-SRC := Context.cpp Unit.cpp Plane.cpp Plan.cpp Fft.cpp Gemm.cpp RunCheck.cpp Look.cpp abi.cpp host/Runner.cpp host/Reverse.cpp host/Ops.cpp host/Fft.cpp host/Gemm.cpp host/Record.cpp device/Device.cpp device/Gemm.cpp
-OBJ := $(SRC:%.cpp=$(OUT)/%.o) $(if $(CUDA),$(OUT)/device/Loop.o $(OUT)/device/Fft.o)
+# The sources are listed once, in sources.txt, which cmake/EagleDoor.cmake reads too.
+SRC := $(shell sed -n '/^[^\# ][^ ]*$$/p' sources.txt)
+CUDA_SRC := $(shell sed -n 's/^cuda //p' sources.txt)
+OBJ := $(SRC:%.cpp=$(OUT)/%.o) $(if $(CUDA),$(patsubst %.cu,$(OUT)/%.o,$(CUDA_SRC:%.cpp=$(OUT)/%.o)))
 # The shared-library link differs by system; door.map stays the one list of exported names (Darwin's list is made from it).
 ifeq ($(shell uname -s),Darwin)
 SOEXT := dylib
@@ -112,12 +117,17 @@ all: test
 check-inputs:
 	@test -n "$(AETHER_INCLUDE)" || { echo "set AETHER_INCLUDE"; exit 1; }
 	@test -f "$(WING_FACTS)" || { echo "set WING_FACTS to the wing's raptor_facts.h"; exit 1; }
+	@test -f "$(DOOR_ROWS)" || { echo "set DOOR_ROWS to the generated eagle_door_rows.h of the door build (host_device for a CUDA door, host for a host-only door)"; exit 1; }
 
 # Each object lists the headers it includes in a dependency file the compiler writes beside it (-MMD -MP), so an edit
 # to any included header rebuilds exactly the objects that read it.
 $(OUT)/%.o: %.cpp | check-inputs
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS_DOOR) -MMD -MP -c $< -o $@
+
+# Context.cpp alone reads the row tables: from the forced header, which its dependency file also lists.
+$(OUT)/Context.o: CXXFLAGS_DOOR += -include $(DOOR_ROWS)
+$(OUT)/Context.o: $(DOOR_ROWS)
 
 # The device group: built with the CUDA headers when CUDA is set, else its host-only refusals.
 $(OUT)/device/Device.o: device/Device.cpp | check-inputs
@@ -159,7 +169,7 @@ confined: $(CORE_OBJ)
 	  if [ -n "$$bad" ]; then echo "FAIL  $$o: undefined CUDA symbol: $$bad"; fail=1; fi; \
 	done; \
 	for s in $(CORE_SRC); do \
-	  bad=$$($(CXX) $(CXXFLAGS_DOOR) -M $$s | tr ' ' '\n' | grep -iE '/(cuda|cufft|cublas|nvrtc)[^/]*$$|/cuda[-0-9.]*/include/|/door/device/' | grep -v '/door/device/Seam\.h$$' || true); \
+	  bad=$$($(CXX) $(CXXFLAGS_DOOR) -include $(DOOR_ROWS) -M $$s | tr ' ' '\n' | grep -iE '/(cuda|cufft|cublas|nvrtc)[^/]*$$|/cuda[-0-9.]*/include/|/door/device/' | grep -v '/door/device/Seam\.h$$' || true); \
 	  if [ -n "$$bad" ]; then echo "FAIL  $$s: includes: $$bad"; fail=1; fi; \
 	done; \
 	if [ $$fail -ne 0 ]; then exit 1; fi; \
@@ -225,16 +235,17 @@ $(NO_CUBLAS): test/no_cublas.c
 
 # The door's built-in weights rows against the table the Python binding serves, value for value (a header-only check: it runs no door).
 WEIGHT_ROWS_TEST := $(OUT)/weight_rows_test
-$(WEIGHT_ROWS_TEST): test/weight_rows_test.cpp | check-inputs
+$(WEIGHT_ROWS_TEST): test/weight_rows_test.cpp $(DOOR_ROWS) | check-inputs
 	@mkdir -p $(OUT)
-	$(CXX) $(CXXFLAGS_DOOR) -MMD -MP -MT $@ -o $@ $<
+	$(CXX) $(CXXFLAGS_DOOR) -include $(DOOR_ROWS) -MMD -MP -MT $@ -o $@ $<
 
 # Context.cpp against a row header with no gemm routes, linked with the rest of the door's objects, creates a host context.
 EMPTY_ROUTES_CTX := $(OUT)/empty_routes/Context.o
 EMPTY_ROUTES_TEST := $(OUT)/empty_routes_test
-$(EMPTY_ROUTES_CTX): Context.cpp test/empty_routes/eagle/door/eagle_door_rows.h | check-inputs
+EMPTY_ROUTES_ROWS := test/empty_routes/eagle_door_rows.h
+$(EMPTY_ROUTES_CTX): Context.cpp $(EMPTY_ROUTES_ROWS) | check-inputs
 	@mkdir -p $(dir $@)
-	$(CXX) -Itest/empty_routes $(CXXFLAGS_DOOR) -MMD -MP -c $< -o $@
+	$(CXX) $(CXXFLAGS_DOOR) -include $(EMPTY_ROUTES_ROWS) -MMD -MP -c $< -o $@
 $(EMPTY_ROUTES_TEST): test/empty_routes_test.c $(EMPTY_ROUTES_CTX) $(filter-out $(OUT)/Context.o,$(OBJ))
 	$(CC) $(DEPFLAGS) $(CFLAGS_C) -c $< -o $@.o
 	$(CXX) -fopenmp -o $@ $@.o $(EMPTY_ROUTES_CTX) $(filter-out $(OUT)/Context.o,$(OBJ)) $(CUDART) -ldl -lm -pthread

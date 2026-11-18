@@ -18,8 +18,9 @@ failed=0 checked=0
 for h in $(find eagle -name '*.h' | LC_ALL=C sort | grep -Ev "$skip"); do
   printf '#include "%s"\n' "$h" > "$probe"
   checked=$((checked + 1))
+  # -include raptor_facts.h: the installed aether target forces it on every consumer, so a header is checked as a user's build sees it.
   if ! out=$("$cxx" -std=c++23 -fsyntax-only -fopenmp -DEAGLE_CPU_ONLY=1 -DAETHER_CPP_MODE=1 \
-               -I. -I"$aether" "$probe" 2>&1); then
+               -I. -I"$aether" -include raptor_facts.h "$probe" 2>&1); then
     failed=$((failed + 1))
     echo "FAIL $h"
     echo "$out" | grep -E 'error' | head -5

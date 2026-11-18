@@ -9,7 +9,8 @@
 #   make gate-gpu   the legs that need a GPU: the C++ gate (cuda mode, -Werror) and the python suite (-m gpu)
 #   make gate-all   both
 #
-# Stages, for the inner loop and for CI jobs that run one leg: gate-lint gate-names gate-cpp gate-py gate-docs gate-cpp-cuda gate-py-gpu
+# Stages, for the inner loop and for CI jobs that run one leg: gate-lint gate-names gate-cpp gate-door-cmake gate-py gate-docs gate-cpp-cuda gate-py-gpu
+# (gate-door-cmake builds the CMake door in CPU mode; its facts and rows headers are raptor's, so it needs RAPTOR_SRC and AETHER_SRC)
 #
 # THE ENVIRONMENT. Each run builds its venv under $(GATE_DIR) (default build/gate, git-ignored), fresh, with
 # `pip install -e python[test] -c ci/constraints.txt`. GATE_REUSE=1 keeps it (inner loop only).
@@ -40,6 +41,8 @@ RAPTOR_SRC  ?=
 AETHER_SRC  ?=
 HAWK_SRC    ?=
 SITE_SRC    ?=
+# raptor's committed wing cards: aether's configure takes the facts header from them (cpu/ in CPU mode, cuda/ in CUDA mode), the CMake door its rows header
+CARDS       := $(RAPTOR_SRC)/rs/wings/cards
 GPU_RUN     ?=
 # The CPU legs compile device code for one architecture and never execute it (CI: sm_70).
 CPU_CUDA_ARCH ?= 70
@@ -57,13 +60,14 @@ CONSTRAINTS := $(CURDIR)/ci/constraints.txt
 # a tool the environment must provide: fail with its name, never guess a path
 need = @command -v $(1) >/dev/null 2>&1 || { echo "gate: $(2) is not available ($(1)); set it in the environment" >&2; exit 2; }
 need_aether = @[ -n "$(AETHER_SRC)" ] && [ -d "$(AETHER_SRC)/aether" ] || { echo "gate: AETHER_SRC (the aether repository root) is required for the C++ legs" >&2; exit 2; }
+need_raptor = @[ -n "$(RAPTOR_SRC)" ] && [ -f "$(CARDS)/cpu/raptor_facts.h" ] || { echo "gate: RAPTOR_SRC (the raptor repository root, with rs/wings/cards) is required: aether's configure and the CMake door take raptor_facts.h from it" >&2; exit 2; }
 need_cxx = @[ "$(origin CXX)" != default ] || { echo "gate: CXX is not set in the environment (a g++ for the C++ legs)" >&2; exit 2; }
 NVCC = $(or $(CUDACXX),$(if $(CUDA_PATH),$(CUDA_PATH)/bin/nvcc))
 # hawk (which builds the kernels the tests deploy) compiles with the same nvcc, never whichever one is on PATH
 export HAWK_NVCC ?= $(NVCC)
 need_nvcc = @[ -n "$(NVCC)" ] && [ -x "$(NVCC)" ] || { echo "gate: no nvcc: set CUDACXX (or CUDA_PATH with bin/nvcc)" >&2; exit 2; }
 
-.PHONY: help gate gate-gpu gate-all gate-fresh gate-lint gate-names gate-cpp gate-py gate-docs gate-cpp-cuda gate-py-gpu \
+.PHONY: help gate gate-gpu gate-all gate-fresh gate-lint gate-names gate-cpp gate-door-cmake gate-py gate-docs gate-cpp-cuda gate-py-gpu \
         gate-env-cpu gate-env-gpu gate-clean gate-doxygen sanitize-cpp tsan-cpp tsan-ft ft-stress nodriver sdist-install release-gate
 
 help:
@@ -89,6 +93,7 @@ else
 	$(MAKE) --no-print-directory gate-lint
 	$(MAKE) --no-print-directory gate-names
 	$(MAKE) --no-print-directory gate-cpp
+	$(MAKE) --no-print-directory gate-door-cmake
 	$(MAKE) --no-print-directory gate-py
 	$(MAKE) --no-print-directory gate-docs
 endif
@@ -104,10 +109,27 @@ gate-all:
 	$(MAKE) --no-print-directory gate-gpu
 	$(MAKE) --no-print-directory gate GATE_REUSE=1
 
+# -- the CMake door, CPU mode: it configures, builds and links, and exports exactly the eg_status functions eg_door.h declares (door.map
+# only says eg_*). The facts and rows headers are raptor's (the host door's rows). The Makefile build pins nvcc -arch sm_61; CMake follows CMAKE_CUDA_ARCHITECTURES.
+gate-door-cmake:
+	$(call need_aether)
+	$(call need_cxx)
+	$(call need_raptor)
+	mkdir -p "$(GD)"
+	cmake -DAETHER_FACTS_DIR="$(CARDS)/cpu" -DAETHER_CPP_MODE=ON -DCMAKE_INSTALL_PREFIX="$(GD)/prefix_cpp" -B "$(GD)/aether_cpp" -S "$(AETHER_SRC)"
+	cmake --install "$(GD)/aether_cpp"
+	cmake -S . -B "$(GD)/door" -DEAGLE_BUILD_DOOR=ON -DEAGLE_CPP_MODE=ON -DEAGLE_BUILD_TESTS=OFF -DCMAKE_PREFIX_PATH="$(GD)/prefix_cpp" \
+	      -DEAGLE_DOOR_WING_FACTS="$(CARDS)/cpu/raptor_facts.h" -DEAGLE_DOOR_ROWS="$(CARDS)/door/host/eagle_door_rows.h"
+	cmake --build "$(GD)/door" --target eagle_door -j$(GATE_JOBS)
+	sed -n 's/^eg_status \(eg_[a-z0-9_]*\)(.*/\1/p' eagle/door/eg_door.h | sort -u > "$(GD)/door_declared.txt"
+	nm -D --defined-only "$(GD)/door/libeagle_door.so" | awk '{print $$3}' | sort > "$(GD)/door_exported.txt"
+	diff "$(GD)/door_declared.txt" "$(GD)/door_exported.txt" && echo "gate-door-cmake: the CMake door exports the $$(wc -l < "$(GD)/door_declared.txt") declared eg_ names and nothing else"
+
 # -- the python environments (cpu: arch $(CPU_CUDA_ARCH), compile-only; gpu: the device's own architecture) --------
 # one venv + one editable install per leg; the build tree and the header prefix live under $(GD) too
 define ENV_RECIPE
 	$(call need_aether)
+	$(call need_raptor)
 	$(call need_nvcc)
 	$(call need_cxx)
 	mkdir -p "$(GD)"
@@ -116,7 +138,7 @@ define ENV_RECIPE
 	$$PIP install --quiet --upgrade pip; \
 	$$PIP install --quiet -c "$(CONSTRAINTS)" "scikit-build-core>=0.10" "setuptools-scm>=8" "nanobind>=3.1,<4" pytest numpy; \
 	if [ ! -f "$(GD)/prefix_$(1)/share/eagle/cmake/eagleConfig.cmake" ]; then \
-	  cmake -DAETHER_CPP_MODE=OFF -DCMAKE_CUDA_COMPILER="$(NVCC)" -DCMAKE_CUDA_HOST_COMPILER="$(CXX)" $(2) -DCMAKE_INSTALL_PREFIX="$(GD)/prefix_$(1)" \
+	  cmake -DAETHER_FACTS_DIR="$(CARDS)/cuda" -DAETHER_CPP_MODE=OFF -DCMAKE_CUDA_COMPILER="$(NVCC)" -DCMAKE_CUDA_HOST_COMPILER="$(CXX)" $(2) -DCMAKE_INSTALL_PREFIX="$(GD)/prefix_$(1)" \
 	        -B "$(GD)/aether_$(1)" -S "$(AETHER_SRC)"; \
 	  cmake --install "$(GD)/aether_$(1)"; \
 	  cmake -B "$(GD)/eagle_hdr_$(1)" -DCMAKE_CUDA_COMPILER="$(NVCC)" -DCMAKE_CUDA_HOST_COMPILER="$(CXX)" $(2) -DCMAKE_INSTALL_PREFIX="$(GD)/prefix_$(1)" .; \
@@ -158,10 +180,11 @@ gate-names:
 # -- the C++ gate, host mode: the manifest-backed integrity gate and the header self-containment check -----------
 gate-cpp:
 	$(call need_aether)
+	$(call need_raptor)
 	$(call need_cxx)
 	@[ -n "$(CLANGXX)" ] && command -v "$(CLANGXX)" >/dev/null || { echo "gate: CLANGXX (the clang++ the header check runs) is not set in the environment" >&2; exit 2; }
 	mkdir -p "$(GD)"
-	cmake -DAETHER_CPP_MODE=ON -DCMAKE_INSTALL_PREFIX="$(GD)/prefix_cpp" -B "$(GD)/aether_cpp" -S "$(AETHER_SRC)"
+	cmake -DAETHER_FACTS_DIR="$(CARDS)/cpu" -DAETHER_CPP_MODE=ON -DCMAKE_INSTALL_PREFIX="$(GD)/prefix_cpp" -B "$(GD)/aether_cpp" -S "$(AETHER_SRC)"
 	cmake --install "$(GD)/aether_cpp"
 	cmake -B "$(GD)/cpp" -DCMAKE_PREFIX_PATH="$(GD)/prefix_cpp" -DFETCHCONTENT_QUIET=ON -DEAGLE_BUILD_TESTS=ON \
 	      -DEAGLE_TEST_REPORT=ON -DEAGLE_DEBUG_MODE=ON -DEAGLE_WARN_AS_ERR=ON -DEAGLE_CPP_MODE=ON .
@@ -204,10 +227,11 @@ gate-docs: gate-doxygen
 # -- the GPU legs -------------------------------------------------------------------------------------------------
 gate-cpp-cuda:
 	$(call need_aether)
+	$(call need_raptor)
 	$(call need_nvcc)
 	$(call need_cxx)
 	mkdir -p "$(GD)"
-	cmake -DAETHER_CPP_MODE=OFF -DCMAKE_CUDA_COMPILER="$(NVCC)" -DCMAKE_CUDA_HOST_COMPILER="$(CXX)" -DCMAKE_INSTALL_PREFIX="$(GD)/prefix_cuda" -B "$(GD)/aether_cuda" -S "$(AETHER_SRC)"
+	cmake -DAETHER_FACTS_DIR="$(CARDS)/cuda" -DAETHER_CPP_MODE=OFF -DCMAKE_CUDA_COMPILER="$(NVCC)" -DCMAKE_CUDA_HOST_COMPILER="$(CXX)" -DCMAKE_INSTALL_PREFIX="$(GD)/prefix_cuda" -B "$(GD)/aether_cuda" -S "$(AETHER_SRC)"
 	cmake --install "$(GD)/aether_cuda"
 	cmake -B "$(GD)/cuda" -DCMAKE_PREFIX_PATH="$(GD)/prefix_cuda" -DCMAKE_CUDA_COMPILER="$(NVCC)" -DCMAKE_CUDA_HOST_COMPILER="$(CXX)" -DFETCHCONTENT_QUIET=ON \
 	      -DEAGLE_BUILD_TESTS=ON -DEAGLE_TEST_REPORT=ON -DEAGLE_DEBUG_MODE=ON -DEAGLE_WARN_AS_ERR=ON -DEAGLE_CUDA_ARCHS=native .
@@ -228,8 +252,9 @@ gate-py-gpu: gate-env-gpu
 # sanitize-cpp: the CPP_MODE suite under ASan+UBSan through the manifest gate, with three non-vacuity checks
 sanitize-cpp:
 	$(call need_aether)
+	$(call need_raptor)
 	mkdir -p "$(GD)"
-	cmake -DAETHER_CPP_MODE=ON -DCMAKE_INSTALL_PREFIX="$(GD)/prefix_san" -B "$(GD)/aether_san" -S "$(AETHER_SRC)"
+	cmake -DAETHER_FACTS_DIR="$(CARDS)/cpu" -DAETHER_CPP_MODE=ON -DCMAKE_INSTALL_PREFIX="$(GD)/prefix_san" -B "$(GD)/aether_san" -S "$(AETHER_SRC)"
 	cmake --install "$(GD)/aether_san"
 	cmake -B "$(GD)/san" -DCMAKE_PREFIX_PATH="$(GD)/prefix_san" -DFETCHCONTENT_QUIET=ON -DEAGLE_BUILD_TESTS=ON \
 	      -DEAGLE_DEBUG_MODE=ON -DEAGLE_CPP_MODE=ON -DEAGLE_SANITIZERS=address,undefined .
@@ -256,8 +281,9 @@ TSAN_ROWS ?= HostPoolTest.*:HostScheduleTest.*:ConcurrencyHost.*
 TSAN_CXX  ?= $(or $(CLANGXX),$(CXX))
 tsan-cpp:
 	$(call need_aether)
+	$(call need_raptor)
 	mkdir -p "$(GD)"
-	cmake -DAETHER_CPP_MODE=ON -DCMAKE_INSTALL_PREFIX="$(GD)/prefix_cpp" -B "$(GD)/aether_cpp" -S "$(AETHER_SRC)"
+	cmake -DAETHER_FACTS_DIR="$(CARDS)/cpu" -DAETHER_CPP_MODE=ON -DCMAKE_INSTALL_PREFIX="$(GD)/prefix_cpp" -B "$(GD)/aether_cpp" -S "$(AETHER_SRC)"
 	cmake --install "$(GD)/aether_cpp"
 	cmake -B "$(GD)/tsan_cpp" -DCMAKE_CXX_COMPILER="$(TSAN_CXX)" -DCMAKE_PREFIX_PATH="$(GD)/prefix_cpp" -DFETCHCONTENT_QUIET=ON \
 	      -DEAGLE_BUILD_TESTS=ON -DEAGLE_CPP_MODE=ON -DEAGLE_SANITIZERS=thread .
@@ -271,11 +297,12 @@ tsan-cpp:
 # tsan-ft: eagle._core under ThreadSanitizer on a free-threaded CPython built with it (TSAN_PY_VERSION, e.g. 3.14.8)
 tsan-ft:
 	$(call need_aether)
+	$(call need_raptor)
 	@[ -n "$(TSAN_PY_VERSION)" ] || { echo "gate: TSAN_PY_VERSION is not set (the CPython built with ThreadSanitizer)" >&2; exit 2; }
 	@[ -n "$(RAPTOR_SRC)" ] || { echo "gate: RAPTOR_SRC is required" >&2; exit 2; }
 	mkdir -p "$(GD)"
 	tests/sanitize/build_tsan_python.sh "$(TSAN_PY_VERSION)" "$(GD)/tsan-python"
-	cmake -DAETHER_CPP_MODE=ON -DCMAKE_INSTALL_PREFIX="$(GD)/prefix_tsan" -B "$(GD)/aether_tsan" -S "$(AETHER_SRC)"
+	cmake -DAETHER_FACTS_DIR="$(CARDS)/cpu" -DAETHER_CPP_MODE=ON -DCMAKE_INSTALL_PREFIX="$(GD)/prefix_tsan" -B "$(GD)/aether_tsan" -S "$(AETHER_SRC)"
 	cmake --install "$(GD)/aether_tsan"
 	cmake -B "$(GD)/eagle_hdr_tsan" -S . -DEAGLE_CPP_MODE=ON -DCMAKE_PREFIX_PATH="$(GD)/prefix_tsan" -DCMAKE_INSTALL_PREFIX="$(GD)/prefix_tsan"
 	cmake --install "$(GD)/eagle_hdr_tsan"
@@ -298,11 +325,12 @@ ft-stress: gate-env-cpu
 # nodriver: the core-only wheel (no plugin, no nvcc) in a fresh venv; imports, the typed refusal, then a copy of the suite
 nodriver:
 	$(call need_aether)
+	$(call need_raptor)
 	@[ -n "$(RAPTOR_SRC)" ] || { echo "gate: RAPTOR_SRC is required" >&2; exit 2; }
 	if ldconfig -p | grep -q 'libcuda\.so\.1'; then echo "libcuda.so.1 present"; exit 1; fi
 	if command -v nvcc; then echo "nvcc present"; exit 1; fi
 	mkdir -p "$(GD)"
-	cmake -DAETHER_CPP_MODE=ON -DCMAKE_INSTALL_PREFIX="$(GD)/prefix_nd" -B "$(GD)/aether_nd" -S "$(AETHER_SRC)"
+	cmake -DAETHER_FACTS_DIR="$(CARDS)/cpu" -DAETHER_CPP_MODE=ON -DCMAKE_INSTALL_PREFIX="$(GD)/prefix_nd" -B "$(GD)/aether_nd" -S "$(AETHER_SRC)"
 	cmake --install "$(GD)/aether_nd"
 	cmake -B "$(GD)/eagle_hdr_nd" -S . -DEAGLE_CPP_MODE=ON -DCMAKE_PREFIX_PATH="$(GD)/prefix_nd" -DCMAKE_INSTALL_PREFIX="$(GD)/prefix_nd"
 	cmake --install "$(GD)/eagle_hdr_nd"
