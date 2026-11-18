@@ -16,6 +16,7 @@ import threading
 
 from . import _alloc
 from .dtypes import dtype_name
+from .sidecar import sidecar_of
 from ._graph_reduce import _lower_cpu, _lower_gpu, check_policy, reduce
 
 #: scratch sets made so far (one per kernel, sample count, policy, backend)
@@ -46,11 +47,8 @@ def cells_of(plugin) -> dict:
     found = getattr(plugin, "_stage_cells", None) or getattr(plugin, "_cells", None)
     if found is not None:
         return found
-    source = getattr(plugin, "_hawk_source", None)
-    meta = getattr(plugin, "_meta", None) or {}
-    if source is not None:
-        cells = kernel_cells(source[0])
-    elif "cells" in meta:
+    meta = sidecar_of(plugin)
+    if "cells" in meta:
         cells = _planes(meta["cells"])
         _check_companions(cells, plugin.arg_spec, name=getattr(plugin, "name", "<kernel>"))
     else:       # a raw plugin: a row plane and its companion
@@ -61,11 +59,6 @@ def cells_of(plugin) -> dict:
     except AttributeError:
         pass
     return cells
-
-
-def sidecar_of(plugin) -> dict:
-    """The sidecar dict a plugin carries (``_meta`` of a loaded kernel, ``sidecar`` of a host plugin), ``{}`` when it keeps none."""
-    return getattr(plugin, "_meta", None) or getattr(plugin, "sidecar", None) or {}
 
 
 def row_of(plugin) -> int:
@@ -95,12 +88,8 @@ def companions_of(plugin) -> dict:
     kernel holds (sidecar ``companions``). Every eagle door makes these planes
     itself, zeroed, with the bind; the caller never passes them and they are
     not handed back."""
-    declared = (getattr(plugin, "companions", None)
-                or (getattr(plugin, "_meta", None) or {}).get("companions"))
-    if declared:                # a stage of a split kernel is not its source kernel
-        return declared
-    source = getattr(plugin, "_hawk_source", None)
-    return {} if source is None else source[0].walk.companions
+    # a stage of a split kernel carries its own, not its source kernel's
+    return getattr(plugin, "companions", None) or sidecar_of(plugin).get("companions") or {}
 
 
 def fold_steps(plugin, planes: dict, pairs, device=None) -> tuple:

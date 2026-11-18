@@ -35,6 +35,7 @@ from .. import _alloc, _stream, arrays
 from .. import _core, _counters, _split
 from .._busy import Busy, BusyGuard
 from ..graph import get_node_kind
+from ..sidecar import sidecar_of
 
 __all__ = []
 
@@ -121,7 +122,7 @@ def _step_kernels(plugin, window, door, device, events="step", reverse="per_step
     from .._plan_deploy import _hawk_plugins
 
     step = getattr(kernel, "step", None) or getattr(kernel, "one_step", None) or kernel
-    if step.walk.finish is not None and step.steps != 1:
+    if sidecar_of(plugin).get("finish") is not None and step.steps != 1:
         raise _not_yet(door, f"for a kernel taking {step.steps} steps per launch")
     twin = tape(kernel, window, events=events)
     single = getattr(twin, "one_step", None) or twin

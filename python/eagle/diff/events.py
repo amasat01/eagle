@@ -129,7 +129,7 @@ def event_kernels(plugin, device, door):
     out = EventKernels()
     out.newton, out.vjp, out.guard_vjp = built[0], built[2], built[4]
     out.guards = guards
-    out.state = tuple(nm[:-len(_REFINED)] for _r, nm in entry.walk.arg_spec
+    out.state = tuple(nm[:-len(_REFINED)] for _r, nm in built[1].arg_spec
                       if nm.endswith(_REFINED))
     out.tau, out.time_step = tau, step.time_step
     out.time = step.time or "t"

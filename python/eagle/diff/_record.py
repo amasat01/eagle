@@ -33,6 +33,7 @@ from .._layout import _view
 from .._active_set import _address, _overlaps, _reordering_snapshot
 from .._busy import Busy
 from ..roles import STATE_ROLES
+from ..sidecar import sidecar_of
 
 __all__ = ["Record"]
 
@@ -203,12 +204,11 @@ def _with_parameter_planes(node, cells):
 
 def _param_plane_names(node):
     """The names of the one-cell parameter planes (``hawk.diff.param_planes``)
-    the launch ``node`` reads, from the kernel's own walk."""
+    the launch ``node`` reads, from the built unit's sidecar."""
     if node.kind in ("skippable", "repeat_while"):
         node = node.payload.child
-    source = getattr(getattr(getattr(node.payload, "plan", None), "plugin", None),
-                     "_hawk_source", None)
-    return frozenset(source[0].walk.param_planes) if node.kind == "launch" and source else frozenset()
+    plugin = getattr(getattr(node.payload, "plan", None), "plugin", None)
+    return frozenset(sidecar_of(plugin).get("param_planes", ())) if node.kind == "launch" else frozenset()
 
 
 def _refuse_ungraded_feed(accesses, planes):

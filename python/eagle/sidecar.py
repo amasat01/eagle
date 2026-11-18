@@ -55,6 +55,17 @@ _GRAPH_BLOCK = "graph_block"
 TERMINATED_READONLY_KEY = "terminated_readonly"
 
 
+def sidecar_of(plugin) -> dict:
+    """The sidecar dict a plugin carries (``_meta`` of a loaded kernel, ``sidecar`` of a host plugin), ``{}`` when it keeps none."""
+    return getattr(plugin, "_meta", None) or getattr(plugin, "sidecar", None) or {}
+
+
+def prior_reads(plugin) -> frozenset:
+    """The ``Mutable`` planes the kernel reads before it writes them (the sidecar's ``mutables`` rows flagged ``prior``): the
+    planes that need an initial value rather than a zero fill."""
+    return frozenset(m["name"] for m in sidecar_of(plugin).get("mutables", ()) if m.get("prior"))
+
+
 def read_terminated_readonly(meta: dict, *, name: str) -> bool:
     """Whether this sidecar declares its ``terminated`` mask read-only;
     ``False`` when the key is absent. Present-but-not-a-bool raises

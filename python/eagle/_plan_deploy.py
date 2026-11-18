@@ -151,7 +151,8 @@ class AutoPlan:
         required set)``
         of a call, bound as :func:`eagle.simulate` binds a kernel's own
         arguments."""
-        from ._simulate import _prior_reads, _signature
+        from ._simulate import _signature
+        from .sidecar import prior_reads
         from ._until_done import _RESERVED, _kernel_name
 
         arg_spec = _split.arg_spec(self.plugin)       # a split kernel: every stage's planes
@@ -163,7 +164,7 @@ class AutoPlan:
         kernel = self.kernel
         declared = kernel.planes if kernel is not None and kernel.planes else decl   # a derivative declares none
         order = [nm for nm in declared if nm in decl]
-        prior = _prior_reads([kernel])
+        prior = prior_reads(self.plugin)
         name = kernel.name if kernel is not None else _kernel_name(self.plugin)
         sig, required = _signature(decl, order, prior)
         return sig, tuple(required), prior, name, frozenset(order), frozenset(required)

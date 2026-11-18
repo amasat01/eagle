@@ -40,6 +40,7 @@ import time
 
 from . import _alloc, arrays
 from . import _cell_rows, _split
+from .sidecar import prior_reads
 from .dtypes import dtype_name
 from ._busy import BusyGuard
 from ._plan_planes import _plane_dtype, widen_indices
@@ -119,15 +120,15 @@ def _lower_dispatch(items, dispatch):
     groups lowered (:func:`eagle._dispatch_door.resolve_kernels`) and the
     group a runner takes over, if any. A model without hawk kernels passes
     through; ``dispatch=`` on one is refused."""
-    from ._dispatch_door import auto_groups, request, resolve_kernels
+    from ._dispatch_door import auto_groups, declared_dispatch, request, resolve_kernels
     from ._plan_deploy import _is_hawk_kernel
 
     kernels = [it for it in items if _is_hawk_kernel(it)]
     if not kernels or (dispatch is None and not any(auto_groups(k) for k in kernels)):
         if dispatch is not None:
-            request(kernels, dispatch)      # names the problem
+            request(declared_dispatch(kernels), dispatch)      # names the problem
         return items, None
-    lowered, spec = resolve_kernels(kernels, request(kernels, dispatch),
+    lowered, spec = resolve_kernels(kernels, request(declared_dispatch(kernels), dispatch),
                                     door="eagle.simulate")
     swap = iter(lowered)
     return [next(swap) if _is_hawk_kernel(it) else it for it in items], spec
@@ -266,16 +267,6 @@ def _declared_order(plans, kernels, decl) -> list:
     return order
 
 
-def _prior_reads(kernels) -> frozenset:
-    """Every plane a kernel of the model reads before it is first written --
-    the Mutable planes that need an initial value rather than a zero fill."""
-    prior = set()
-    for k in kernels:
-        if k is not None:
-            prior |= set(getattr(k.walk, "prior_reads", ()) or ())
-    return frozenset(prior)
-
-
 def _check_option_collision(decl) -> None:
     for nm, (_role, _width, _dtype, kname) in decl.items():
         if nm in _DOOR_OPTIONS:
@@ -306,9 +297,8 @@ def _check_positional_needs_a_raw_kernel(kernels, order, args) -> None:
     """Refuse positional kernel arguments when any item of the model (or
     ``until=``) is a PREBUILT plan with no raw hawk kernel to read a call
     signature from: :func:`_declared_order` then falls back to that plan's
-    own ``arg_spec`` order, which is role-grouped then name-sorted
-    (:mod:`hawk.ir.walk`), not the kernel's authored parameter order, so
-    binding positionally against it would silently misbind. Keyword
+    own ``arg_spec`` order, which is role-grouped then name-sorted, not the kernel's authored parameter
+    order, so binding positionally against it would silently misbind. Keyword
     binding is unchanged; a model built entirely of raw kernels still binds
     positionally."""
     if not args or all(k is not None for k in kernels):
@@ -560,7 +550,7 @@ class Simulation:
         _check_option_collision(decl)
         _check_result_shadow(decl)
         _check_special_kwargs(decl, kwargs)
-        prior = _prior_reads(kernels)
+        prior = frozenset().union(*(prior_reads(p.plugin) for p in plans))
         sig, required = _signature(decl, order, prior)
         planes = _bind(kname, sig, required, prior, args, kwargs)
         planes, axes = split_marks(planes, layout)

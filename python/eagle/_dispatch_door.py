@@ -36,6 +36,7 @@ from ._active_set import COUNT_PLANE, MAP_PLANE
 from ._busy import BusyGuard
 from ._until_done import FINISHED_PLANE, FUSED_STEPS_PLANE, RunReport
 from .roles import PER_SAMPLE_ROLES
+from .sidecar import sidecar_of
 
 __all__ = ["PerformanceWarning"]
 
@@ -66,30 +67,38 @@ def host_spec(kernel, spec=None):
     return spec
 
 
+def declared_dispatch(kernels) -> list:
+    """``[(group, strategy)]`` of the single steps of ``kernels``, before a build."""
+    return [(d.name, d.strategy) for k in kernels for d in _step(k).walk.dispatches]
+
+
 def auto_groups(kernel) -> list:
     """Names of the ``"auto"`` dispatch groups of ``kernel``'s single step."""
-    step = kernel.step if kernel.step is not None else kernel
-    return [d.name for d in step.walk.dispatches if d.strategy == "auto"]
+    return [name for name, strategy in declared_dispatch([kernel]) if strategy == "auto"]
 
 
 def _step(kernel):
     return kernel.step if kernel.step is not None else kernel
 
 
-def request(kernels, dispatch) -> dict:
+def built_dispatch(plugin) -> list:
+    """``[(group, strategy)]`` of a built unit, from its sidecar's ``dispatch`` rows."""
+    return [(d["name"], d["strategy"]) for d in sidecar_of(plugin).get("dispatch", ())]
+
+
+def request(declared, dispatch) -> dict:
     """``{group: policy or None}`` for the ``"auto"`` groups ``dispatch`` names.
+    ``declared`` is the ``(group, strategy)`` pairs of the model.
 
     ``None`` stands for "decide by measurement". Refuses a group that does not
     exist or that the author gave a policy, and a policy that is not one of
     :data:`POLICIES` (or ``"auto"`` for measuring)."""
     groups = {}
-    declared = {}
-    for k in kernels:
-        step = _step(k)
-        for d in step.walk.dispatches:
-            declared.setdefault(d.name, set()).add(d.strategy)
-            if d.strategy == "auto":
-                groups[d.name] = None
+    strategies = {}
+    for name, strategy in declared:
+        strategies.setdefault(name, set()).add(strategy)
+        if strategy == "auto":
+            groups[name] = None
     if dispatch is None:
         return groups
     if isinstance(dispatch, str):
@@ -110,14 +119,14 @@ def request(kernels, dispatch) -> dict:
             raise ValueError(
                 f"eagle: dispatch policy {policy!r} is unknown; the policies are "
                 f"{', '.join(repr(p) for p in POLICIES)}, or 'auto' to measure")
-        if group not in declared:
+        if group not in strategies:
             raise ValueError(
                 f"eagle: dispatch= names {group!r}, which is not a dispatch group of this "
-                f"model; its groups are {sorted(declared)}")
+                f"model; its groups are {sorted(strategies)}")
         if group not in groups:
             raise ValueError(
                 f"eagle: dispatch= names {group!r}, which the kernel declared "
-                f"strategy={sorted(declared[group])[0]!r}; only 'auto' groups can be "
+                f"strategy={sorted(strategies[group])[0]!r}; only 'auto' groups can be "
                 "chosen here, the author's policy stays")
         groups[group] = None if policy in ("auto", None) else policy
     return groups
@@ -198,13 +207,15 @@ def relower_graph_nodes(nodes, dispatch, *, door):
     out, decided = [], {}
     for node in nodes:
         plan = getattr(node.payload, "plan", None) if node.kind == "launch" else None
-        source = getattr(getattr(plan, "plugin", None), "_hawk_source", None)
+        plugin = getattr(plan, "plugin", None)
+        source = getattr(plugin, "_hawk_source", None)
         kernel = source[0] if source else None
-        groups = auto_groups(kernel) if kernel is not None else []
+        declared = built_dispatch(plugin) if kernel is not None else []
+        groups = [name for name, strategy in declared if strategy == "auto"]
         if not groups:
             out.append(node)
             continue
-        wanted = request([kernel], dispatch)
+        wanted = request(declared, dispatch)
         for group, policy in wanted.items():
             if policy == "segmented":
                 raise ValueError(
@@ -213,7 +224,7 @@ def relower_graph_nodes(nodes, dispatch, *, door):
                     "eagle.simulate(..., dispatch='segmented'), or 'switch' here")
         chosen = {g: (wanted.get(g) or "switch") for g in groups}
         lowered = hawk.resolve_dispatch(kernel, chosen)
-        mixes = {d["mix"] for d in (getattr(plan.plugin, "sidecar", None) or {}).get("dispatch", ()) if "mix" in d}
+        mixes = {d["mix"] for d in sidecar_of(plan.plugin).get("dispatch", ()) if "mix" in d}
         keep = {nm: v for nm, v in node.payload._planes.items() if nm not in mixes}
         rebound = auto(lowered).select(keep).bind(**keep)
         from .graph import Node

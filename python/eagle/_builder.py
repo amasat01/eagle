@@ -34,6 +34,7 @@ from ._graph_kinds import _cell, _copy, _wait
 from ._conditional import skippable
 from .graph import Graph, Node, get_node_kind
 from ._plan_planes import _declared_widths
+from .sidecar import sidecar_of
 from . import _layout
 from ._layout import _view
 from . import arrays as _arrays
@@ -80,12 +81,10 @@ def tree_leaves(tree):
                     f"return tree), got {type(tree).__name__}")
 
 
-def in_place_ok(kernel) -> bool:
-    """A kernel may read and write one plane only when it is ``sample_local``
-    and reduces nothing across samples."""
-    walk = kernel.walk
-    return walk.access.cls == "sample_local" and not any(
-        type(n).__name__ == "ReduceSamples" for n in walk.order)
+def in_place_ok(plugin) -> bool:
+    """A built kernel may read and write one plane only when its sidecar
+    states ``sample_local`` access and no reduction over samples (``cells``)."""
+    return sidecar_of(plugin).get("exec_access") == "sample_local" and not _cell_rows.cells_of(plugin)
 
 
 # ----------------------------------------------------------------------------- the recorded tree
@@ -309,7 +308,7 @@ class Rec:
             if hasattr(spec, "shape"):
                 out[nm] = spec
             else:
-                out[nm] = self._inplace(target, nm, kernel, arrs) if spec is None else None
+                out[nm] = self._inplace(target, nm, plan.plugin, kernel, arrs) if spec is None else None
                 if out[nm] is None:
                     if slot.dims and lanes is None:
                         raise ValueError(f"{self.fname}: {kernel.name}() writes {nm!r} per vector: pass the array yourself")
@@ -383,12 +382,12 @@ class Rec:
                                          _declared_widths(plan.plugin), door="call")
         return n, dims
 
-    def _inplace(self, target, slot, kernel, arrs):
+    def _inplace(self, target, slot, plugin, kernel, arrs):
         if target is None: return None
         for fr in reversed(self.frames):
             if target[0] in fr:
                 out = fr[target[0]]
-                if any(a is out for a in arrs) and not in_place_ok(kernel):
+                if any(a is out for a in arrs) and not in_place_ok(plugin):
                     raise ValueError(f"{self.where(target[1])}: `{target[0]} = {kernel.name}(...)` inside device control flow "
                                      f"writes '{target[0]}' in place, and '{kernel.name}' is not sample_local: declare the "
                                      "write (Mutable) or move it out of the loop")

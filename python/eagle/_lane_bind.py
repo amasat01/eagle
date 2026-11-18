@@ -25,7 +25,7 @@ from math import prod
 from ._plan_pack import _BUFFER_SHAPED_ROLES, _SAMPLE_SHAPED_ROLES, _n_from_kw
 from ._plan_planes import _plane_shape
 from .roles import OUTPUT_ROLES, PER_SAMPLE_ROLES
-from .sidecar import UNDECLARED_LANE_SPACE, LaneSpace, lane_space_from
+from .sidecar import UNDECLARED_LANE_SPACE, LaneSpace, lane_space_from, sidecar_of
 
 
 def threads(plugin, n: int) -> int:
@@ -296,7 +296,7 @@ def _cells_of(plane) -> int:
 
 def chunk_cap(plugin) -> int:
     """The most lane chunks an ordered ``hawk.scatter`` adds in (the unit's sidecar ``scatter_chunks``); refused by name when absent."""
-    meta = getattr(plugin, "_meta", None) or getattr(plugin, "sidecar", None) or {}
+    meta = sidecar_of(plugin)
     if "scatter_chunks" not in meta:
         raise ValueError(f"eagle: kernel {getattr(plugin, 'kernel', '?')!r} states no scatter_chunks in its sidecar (a unit built before the "
                          "chunk cap became a fact): rebuild it with the hawk that writes it")
@@ -338,8 +338,7 @@ def gather_columns(plugin, name, n):
     """The column count the compact Matrix plane ``name`` must have at ``n`` lanes:
     the product of the extents of the axes it varies along (sidecar ``gather_mats``;
     a runtime axis is ``n`` over the static ones). ``None`` when no pattern is recorded."""
-    declared = (getattr(plugin, "gather_mats", None)
-                or (getattr(plugin, "_meta", None) or {}).get("gather_mats"))
+    declared = getattr(plugin, "gather_mats", None) or sidecar_of(plugin).get("gather_mats")
     kept = declared.get(name) if isinstance(declared, dict) else None
     axes = declared_axes(plugin)
     if kept is None or not axes:
@@ -352,12 +351,7 @@ def adjoint_like(plugin) -> dict:
     """``{adjoint plane: the lookup plane it is the gradient of}`` (sidecar
     ``adjoint_like``): such a plane is the lookup plane's size, not the lane
     count; a Table's length is the caller's."""
-    declared = (getattr(plugin, "adjoint_like", None)
-                or (getattr(plugin, "_meta", None) or {}).get("adjoint_like"))
-    if declared:
-        return declared
-    source = getattr(plugin, "_hawk_source", None)
-    return {} if source is None else source[0].walk.adjoint_like
+    return getattr(plugin, "adjoint_like", None) or sidecar_of(plugin).get("adjoint_like") or {}
 
 
 def _like_shape(plugin, name, planes):

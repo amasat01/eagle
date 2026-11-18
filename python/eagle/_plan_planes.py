@@ -12,6 +12,7 @@ from .dtypes import _SCRATCH, dtype_name, dtype_of, scratch_dtype
 from .interop import BufferRefused
 from .roles import INPUT_ROLES, OUTPUT_ROLES, PER_SAMPLE_ROLES
 from ._plan_pack import _data_ptr, _trailing_extent
+from .sidecar import sidecar_of
 
 
 #: The reserved ``lookup`` word an automatic kernel reads its steps per
@@ -110,7 +111,7 @@ def _returned(arrays, names, to_host=None):
     """The result :meth:`Plan.run` hands back: the plane itself for a
     single-output plugin (never a 1-tuple), else a ``dict`` of every output
     plane keyed by its NAME -- never a positional tuple: ``arg_spec``'s own
-    order is ROLE-grouped then NAME-sorted (:mod:`hawk.ir.walk`), not the
+    order is ROLE-grouped then NAME-sorted, not the
     kernel's authored parameter order, so a positional result would
     silently swap two outputs declared in a different order. Matches what
     :class:`~eagle._simulate.SimResult`/:func:`eagle.loaded.LoadedPure`
@@ -139,12 +140,7 @@ def gathered(plugin) -> frozenset:
     """The ``mat_in`` planes the kernel reads only at lane indices (sidecar
     ``gather_mats``): a broadcast Matrix binds compact, ``(rows*cols, m)`` with the
     caller's column count ``m``, which is not the lane count."""
-    declared = (getattr(plugin, "gather_mats", None)
-                or (getattr(plugin, "_meta", None) or {}).get("gather_mats"))
-    if declared is None:
-        source = getattr(plugin, "_hawk_source", None)
-        declared = () if source is None else source[0].walk.gather_mats
-    return frozenset(declared)
+    return frozenset(getattr(plugin, "gather_mats", None) or sidecar_of(plugin).get("gather_mats") or ())
 
 
 def sample_spec(plugin, arg_spec):
@@ -164,7 +160,7 @@ def shared_shapes(plugin, kernel=None) -> dict:
     planes = getattr(kernel if kernel is not None else (source[0] if source else None), "planes", None) or {}
     declared = {nm: tuple(d.shared) for nm, d in planes.items() if getattr(d, "shared", ())}
     return declared or {nm: tuple(sh) for nm, sh in
-                        ((getattr(plugin, "_meta", None) or {}).get("param_shapes") or {}).items()}
+                        (sidecar_of(plugin).get("param_shapes") or {}).items()}
 
 
 def flat_shared(shapes: dict, bound: dict, kernel_name: str = "") -> dict:

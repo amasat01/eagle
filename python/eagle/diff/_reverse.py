@@ -28,7 +28,7 @@ from .._conditional import skippable
 from .._graph_kinds import OWN_CODE_KINDS
 from ..graph import _DERIVED_DOOR, Graph, Node, get_node_kind, opaque
 from ..roles import OUTPUT_ROLES
-from ..sidecar import derived_tag, refuse_prior_read
+from ..sidecar import derived_tag, prior_reads, refuse_prior_read
 from .._layout import _view
 from ._record import Record
 from ._run import _take_columns
@@ -184,7 +184,7 @@ def _vjp_from_auto(bound):
     if found is not None or source is None:
         return found
     kernel, unit, cache_dir = source
-    refuse_prior_read(getattr(kernel.walk, "prior_reads", ()) or (), door="eagle.diff.Reverse")
+    refuse_prior_read(prior_reads(plugin), door="eagle.diff.Reverse")
     from hawk import Kernel
     from hawk.diff import vjp
 

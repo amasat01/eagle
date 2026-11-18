@@ -49,13 +49,20 @@ from ._active_set import (
     compaction_body,
 )
 from . import _core, _lane_bind, _layout, _split, _stream, arrays
-from ._cell_rows import sidecar_of
 from ._busy import BusyGuard
 from ._compat import zip_strict
 from ._conditional import SkipGuard, Skippable, _host_scalar, repeat_while
 from .graph import LowerCtx, Node, get_node_kind
 from .roles import OUTPUT_ROLES, PER_SAMPLE_ROLES
-from .sidecar import FINISH_AUTO, FINISH_COUNTER, STEPS_PLANE, check_reserved_planes, read_finish, refuse_derived
+from .sidecar import (
+    FINISH_AUTO,
+    FINISH_COUNTER,
+    STEPS_PLANE,
+    check_reserved_planes,
+    read_finish,
+    refuse_derived,
+    sidecar_of,
+)
 
 #: The reserved ``lookup`` plane a finishing kernel counts newly finished
 #: samples into: one ``uint32`` cell, viewed as ``int32`` at bind.
