@@ -517,7 +517,6 @@ def test_float64_sum_cell_on_the_cpu_matches_eagle_reduce(tmp_path):
     takes on this machine (the fixed-point leaf where the GPU has slow FP64),
     so it equals the GPU's finish bit for bit."""
     import eagle
-    from eagle import _cell_rows
     from eagle._graph_reduce import fixed_f64
 
     rng = np.random.default_rng(0)
@@ -542,7 +541,6 @@ def test_float64_sum_cell_on_the_cpu_matches_eagle_reduce(tmp_path):
 @pytest.mark.parametrize("policy", ["compensated", "ordered"])
 def test_policy_reaches_the_cell_recipe(tmp_path, policy):
     """The recipe the handler runs carries the policy given, and the sum is right."""
-    from eagle import _cell_rows
     from eagle._graph_reduce import POLICIES
 
     x = np.random.default_rng(0).uniform(-1, 1, 3 * _ROW + 5)

@@ -124,7 +124,7 @@ def _compile(source, arch, tmp):
     """``{entry: {regs, stack, spill, n, ops}}`` of one unit on one arch."""
     from ospreys.cuda import toolchain as tc
     from hawk.compile import toolchain as hawk_tc
-    from ospreys.cuda.emit import FAST_ENTRIES_MACRO
+    from ospreys.cuda.backend import FAST_ENTRIES_MACRO
 
     cu, cubin = tmp / f"unit_{arch}.cu", tmp / f"unit_{arch}.cubin"
     cu.write_text(source)
