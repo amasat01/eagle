@@ -59,11 +59,7 @@ def test_plan_run_returns_the_finished_sum_and_max(tmp_path, n):
 def test_plan_run_returns_a_vector_cell_one_plane_per_component(tmp_path, n):
     def vcell(v: hawk.Vector[3], t: Mutable[hawk.Vector[3]]):
         t = hawk.sum(v)  # noqa: F841
-    try:
-        k = hawk.kernel(vcell)
-        k.walk.cells
-    except Exception:
-        pytest.skip("this hawk has no vector cells")
+    k = hawk.kernel(vcell)
     (p,) = eagle.plan.auto([k], targets=("host",), cache_dir=str(tmp_path))
     v = np.random.default_rng(n).uniform(-2, 2, (3, n))
     got = p.run(v=v)

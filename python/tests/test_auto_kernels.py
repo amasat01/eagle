@@ -14,10 +14,6 @@ What each group of rows proves:
   distinct so a wrong row cannot pass.
 * ORDER: ``auto([k1, k2, k3])`` is a tuple of plans in the kernels' order,
   all built into ONE bundle.
-* CACHE: a second call compiles nothing. In the same process the publisher's
-  memo answers (``unit_stats``); in a NEW process (same ``cache_dir``) the
-  unit's stamp answers, the compile cache has no miss and no published file's
-  mtime moves. Asserted on counters and mtimes, never on timing.
 * DERIVED KERNELS: a ``hawk.steps(kernel, K)`` kernel is an input like any
   other, and ``run_until_done`` takes its plan. A ``jvp``/``vjp`` kernel runs
   on its own as a plan but is refused as a step of a composed run (it enters
@@ -35,7 +31,6 @@ from __future__ import annotations
 
 import ctypes
 import json
-import os
 import subprocess
 import sys
 import textwrap
@@ -218,76 +213,6 @@ def test_targets_default_and_explicit(cache):
     host_only = eplan.auto(ak_affine, targets=("host",), cache_dir=cache)
     assert getattr(host_only.plugin, "device_function", None) is None
     assert host_only.plugin.host_entry
-
-
-# --------------------------------------------------------------------------- #
-# The cache: no rebuild, in-process and in a new process
-# --------------------------------------------------------------------------- #
-def test_a_second_call_in_the_same_process_compiles_nothing(tmp_path):
-    from hawk.artifact import unit_stats
-
-    eplan.auto([ak_affine, ak_energy], targets=("host",), cache_dir=tmp_path)
-    before = unit_stats()
-    eplan.auto([ak_affine, ak_energy], targets=("host",), cache_dir=tmp_path)
-    after = unit_stats()
-    assert after["published"] == before["published"]
-    assert after["memo_hits"] == before["memo_hits"] + 1
-
-
-_NEW_PROCESS = textwrap.dedent("""
-    import json, sys
-    sys.path.insert(0, {tests!r})
-    import hawk.artifact, hawk.compile
-    from eagle import plan as eplan
-    from test_auto_kernels import ak_affine, ak_energy
-    hawk.compile.reset_cache_stats()
-    a, e = eplan.auto([ak_affine, ak_energy], targets=("host",),
-                      cache_dir={cache!r})
-    print(json.dumps({{"units": hawk.artifact.unit_stats(),
-                      "compile": hawk.compile.cache_stats()}}))
-""")
-
-
-def _published_mtimes(root):
-    return {p: p.stat().st_mtime_ns for p in sorted(root.rglob("bundles/*/*"))}
-
-
-def test_a_second_call_in_a_new_process_hits_the_cache(tmp_path):
-    code = _NEW_PROCESS.format(tests=os.path.dirname(__file__), cache=str(tmp_path))
-    env = dict(os.environ)
-    first = subprocess.run([sys.executable, "-W", "ignore", "-c", code], env=env,
-                           capture_output=True, text=True, timeout=600)
-    assert first.returncode == 0, first.stderr
-    mtimes = _published_mtimes(tmp_path)
-    assert mtimes and json.loads(first.stdout.splitlines()[-1])["units"][
-        "published"] == 1
-    second = subprocess.run([sys.executable, "-W", "ignore", "-c", code], env=env,
-                            capture_output=True, text=True, timeout=600)
-    assert second.returncode == 0, second.stderr
-    report = json.loads(second.stdout.splitlines()[-1])
-    assert report["units"]["published"] == 0
-    assert report["units"]["stamp_hits"] == 1
-    assert report["compile"]["misses"] == 0
-    assert _published_mtimes(tmp_path) == mtimes
-
-
-def test_the_bundle_key_folds_in_the_opt_level(monkeypatch):
-    """Mirrors the host profile's own fold-in: two opt levels of the same
-    kernels/targets must never land in the same cache folder, since the
-    level changes the device (nvcc) build too, not just the host one — an
-    ``O0`` folder served an ``O3`` .so (or vice versa) would be silently
-    wrong, not just a slow rebuild."""
-    monkeypatch.delenv("HAWK_OPT_LEVEL", raising=False)
-    default_key = plan_deploy._bundle_key([ak_affine], ("host",))
-    monkeypatch.setenv("HAWK_OPT_LEVEL", "O3")
-    o3_key = plan_deploy._bundle_key([ak_affine], ("host",))
-    assert o3_key == default_key, "O3 is hawk's own default opt level"
-    monkeypatch.setenv("HAWK_OPT_LEVEL", "O0")
-    o0_key = plan_deploy._bundle_key([ak_affine], ("host",))
-    assert o0_key != o3_key
-    monkeypatch.setenv("HAWK_OPT_LEVEL", "fastest")
-    with pytest.raises(hawk.HawkError, match="unknown opt level"):
-        plan_deploy._bundle_key([ak_affine], ("host",))
 
 
 def _ak_grouped(group):

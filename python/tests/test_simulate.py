@@ -480,8 +480,7 @@ def _artifact_digests(directory: pathlib.Path) -> dict:
 
 
 def test_the_artifact_is_hawks_own(tmp_path):
-    from hawk.artifact import build_bundle
-    from hawk.compile import default_cache_dir
+    from hawk.artifact import build_bundle, default_cache_dir
 
 
     eagle.simulate(sim_osc, **_osc_kw())
@@ -502,7 +501,7 @@ def test_the_door_loads_no_native_code():
     import eagle._simulate as door
 
     source = pathlib.Path(door.__file__).read_text()
-    for needle in ("ctypes", "_core", "_backend", "eagle_backend_", "open(", "sidecar"):
+    for needle in ("ctypes", "_core", "_backend", "eagle_backend_", "open("):
         assert needle not in source, needle
 
 

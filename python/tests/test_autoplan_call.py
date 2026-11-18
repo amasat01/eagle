@@ -59,7 +59,7 @@ def test_autoplan_call_returns_tree(plan, monkeypatch):
     k = plan.kernel
     for tree in ({"y": "y"}, ("y", ["y"])):
         monkeypatch.setattr(plan, "kernel", types.SimpleNamespace(
-            planes=k.planes, name=k.name, walk=k.walk, returns=tree))
+            planes=k.planes, name=k.name, returns=tree))
         got = plan(X, 2.0, 0.5)
         want = 2.0 * X + 0.5
         if isinstance(tree, dict):
