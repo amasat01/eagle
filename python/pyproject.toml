@@ -150,7 +150,7 @@ filterwarnings = [
   "ignore:Due to '_pack_':DeprecationWarning:warp",
 ]
 markers = [
-    "ft: free-threading rows (need a free-threaded interpreter; skip on a GIL build)",
+    "ft: free-threading rows (need a free-threaded interpreter; they fail on a GIL build, so gate-py deselects them and ft-stress runs them)",
     "gpu: requires cupy + a CUDA GPU",
     "gpu2: requires cupy + TWO CUDA GPUs (skipped, never passed, on one)",
     "torch: requires torch (CPU or CUDA) + cupy GPU",

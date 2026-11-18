@@ -11,7 +11,8 @@ The FT-3 rows exercise the pure-Python modules under real thread interleaving
 and need no device: the CUDA-facing leaves (``cupy`` stream wrappers, kernel
 attribute queries, device ids) are replaced by tiny stand-ins so the CACHE
 LOGIC is what the threads race over. Rows that need a GIL-free interpreter
-skip on a GIL build (``require_free_threaded``); the cold-registry and
+fail on a GIL build (``require_free_threaded``), so the module carries the ``ft``
+marker and runs in the free-threaded legs; the cold-registry and
 ``_REORDERING`` rows interleave on any build, because they race a blocking
 step (a slow entry-point scan) or a mutation during iteration.
 
