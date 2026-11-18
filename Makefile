@@ -121,6 +121,12 @@ gate-door-cmake:
 	cmake -S . -B "$(GD)/door" -DEAGLE_BUILD_DOOR=ON -DEAGLE_CPP_MODE=ON -DEAGLE_BUILD_TESTS=OFF -DCMAKE_PREFIX_PATH="$(GD)/prefix_cpp" \
 	      -DEAGLE_DOOR_WING_FACTS="$(CARDS)/cpu/raptor_facts.h" -DEAGLE_DOOR_ROWS="$(CARDS)/door/host/eagle_door_rows.h"
 	cmake --build "$(GD)/door" --target eagle_door -j$(GATE_JOBS)
+	cmake --install "$(GD)/door" --prefix "$(GD)/prefix_door"
+	for h in eg_door.h eg_unit_meta.h; do \
+	  test -f "$(GD)/prefix_door/include/eagle/door/$$h" || { echo "gate-door-cmake: the door install lacks $$h" >&2; exit 1; }; \
+	  $(CC) -std=c11 -Wall -Wextra -pedantic -Werror -fsyntax-only -x c "$(GD)/prefix_door/include/eagle/door/$$h"; \
+	  $(CXX) -std=c++23 -Wall -Wextra -pedantic -Werror -fsyntax-only -x c++ "$(GD)/prefix_door/include/eagle/door/$$h"; \
+	done
 	sed -n 's/^eg_status \(eg_[a-z0-9_]*\)(.*/\1/p' eagle/door/eg_door.h | sort -u > "$(GD)/door_declared.txt"
 	nm -D --defined-only "$(GD)/door/libeagle_door.so" | awk '{print $$3}' | sort > "$(GD)/door_exported.txt"
 	diff "$(GD)/door_declared.txt" "$(GD)/door_exported.txt" && echo "gate-door-cmake: the CMake door exports the $$(wc -l < "$(GD)/door_declared.txt") declared eg_ names and nothing else"

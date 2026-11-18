@@ -88,3 +88,5 @@ endif()
 
 install(TARGETS eagle_door EXPORT ${PROJECT_NAME}_Targets
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
+# The door's public C headers, with the library; its private headers and sources are not installed.
+install(FILES "${_door}/eg_door.h" "${_door}/eg_unit_meta.h" DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/eagle/door")
