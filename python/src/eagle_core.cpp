@@ -67,13 +67,16 @@
 
 #include <algorithm>
 #include <array>
+#include <condition_variable>
 #include <initializer_list>
 #include <iterator>
+#include <mutex>
 #include <thread>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <new>
 #include <optional>
@@ -321,24 +324,131 @@ std::int32_t voidTrampoline(void* ctx)
     }
 }
 
-// A host node's function runs on a backend thread, not inside a seam call: it takes the
-// GIL, calls the Python callable, never touches the backend, and cannot raise into the
+// A host node's function runs on a backend thread, not inside a seam call: it calls the
+// Python callable with the GIL held, never touches the backend, and cannot raise into the
 // caller, so an exception it raises is reported as unraisable.
-void hostFuncTrampoline(void* ctx)
+void callHostFunc(PyObject* fn)
 {
-    nb::gil_scoped_acquire gil;
     try {
-        nb::handle(static_cast<PyObject*>(ctx))();
+        const nb::handle callable(fn);
+        callable();
     } catch (nb::python_error& e) {
         e.discard_as_unraisable("eagle host node");
     } catch (...) {
     }
 }
 
+// Inside a capture the node's function is borrowed: the graph owns the node, and a graph
+// with a host node waits for its launches before returning.
+void hostFuncTrampoline(void* ctx)
+{
+    nb::gil_scoped_acquire gil;
+    callHostFunc(static_cast<PyObject*>(ctx));
+}
+
+// Outside a capture the function runs once, later: it owns a reference until it has run,
+// so dropping its HostFunc first frees nothing under it, and interpreter exit waits for it
+// (a call that reached Python after finalization would abort the process).
+std::mutex pendingHostFuncsMutex;
+std::condition_variable pendingHostFuncsDone;
+std::size_t pendingHostFuncs = 0;
+
+void ownedHostFuncTrampoline(void* ctx)
+{
+    {
+        nb::gil_scoped_acquire gil;
+        callHostFunc(static_cast<PyObject*>(ctx));
+        Py_DECREF(static_cast<PyObject*>(ctx));
+    }
+    const std::lock_guard lock(pendingHostFuncsMutex);
+    if (--pendingHostFuncs == 0)
+        pendingHostFuncsDone.notify_all();
+}
+
+void waitForPendingHostFuncs()
+{
+    const nb::gil_scoped_release release;    // the pending calls need the GIL to finish
+    std::unique_lock lock(pendingHostFuncsMutex);
+    pendingHostFuncsDone.wait(lock, [] { return pendingHostFuncs == 0; });
+}
+
+// Whether host functions enqueued on @p stream become nodes of a capture. A backend that
+// predates the capture query is taken as capturing: its host functions keep the borrowed
+// reference they always had.
+bool isCapturing(std::uintptr_t stream)
+{
+    using Query = decltype(&::eagle_backend_stream_is_capturing);
+    void* symbol = cuda().optional("eagle_backend_stream_is_capturing");
+    if (symbol == nullptr)
+        return true;
+    Query query = nullptr;
+    std::memcpy(&query, &symbol, sizeof query);
+    std::int32_t capturing = 0;
+    ck(query(stream, &capturing));
+    return capturing != 0;
+}
+
+void enqueueOwnedHostFunc(decltype(&::eagle_backend_host_func) hostFunc, std::uintptr_t stream, PyObject* fn)
+{
+    {
+        const std::lock_guard lock(pendingHostFuncsMutex);
+        ++pendingHostFuncs;
+    }
+    Py_INCREF(fn);
+    const eagle_backend_status status = hostFunc(stream, &ownedHostFuncTrampoline, fn);
+    if (status != EAGLE_BACKEND_OK) {    // never enqueued: undo, then raise
+        Py_DECREF(fn);
+        const std::lock_guard lock(pendingHostFuncsMutex);
+        --pendingHostFuncs;
+    }
+    ck(status);
+}
+
 /** @brief A Python callable the backend may call from a stream: the owner of the reference. */
 struct PyHostFunc {
     nb::object fn;
 };
+
+// The garbage collector must see the callables a binding object owns: a callable that
+// reaches back to its owner (a host node's function closing over its graph) otherwise
+// forms a cycle nothing collects. Clearing is safe because only unreachable objects are
+// cleared, and a graph with a host node waits for its launches before returning.
+int hostFuncTraverse(PyObject* self, visitproc visit, void* arg)
+{
+    Py_VISIT(Py_TYPE(self));
+    if (!nb::inst_ready(self))
+        return 0;
+    Py_VISIT(nb::inst_ptr<PyHostFunc>(self)->fn.ptr());
+    return 0;
+}
+
+int hostFuncClear(PyObject* self)
+{
+    nb::inst_ptr<PyHostFunc>(self)->fn.reset();
+    return 0;
+}
+
+PyType_Slot hostFuncSlots[] = { { Py_tp_traverse, reinterpret_cast<void*>(hostFuncTraverse) },
+    { Py_tp_clear, reinterpret_cast<void*>(hostFuncClear) }, { 0, nullptr } };
+
+int composerTraverse(PyObject* self, visitproc visit, void* arg)
+{
+    Py_VISIT(Py_TYPE(self));
+    if (!nb::inst_ready(self))
+        return 0;
+    for (const nb::object& kept : nb::inst_ptr<PyComposer>(self)->keep)
+        Py_VISIT(kept.ptr());
+    return 0;
+}
+
+int composerClear(PyObject* self)
+{
+    nb::inst_ptr<PyComposer>(self)->keep.clear();
+    return 0;
+}
+
+PyType_Slot composerSlots[] = { { Py_tp_traverse, reinterpret_cast<void*>(composerTraverse) },
+    { Py_tp_clear, reinterpret_cast<void*>(composerClear) }, { 0, nullptr } };
 
 /**
  * @brief Write a captured graph to Graphviz ``dot`` and return the text.
@@ -458,6 +568,7 @@ NB_MODULE(_core, m)
 {
     m.doc() = "eagle._core — nanobind binding of the eagle::cuda CUDA-graph "
               "core (capture / instantiate / replay).";
+    nb::module_::import_("atexit").attr("register")(nb::cpp_function(&waitForPendingHostFuncs));
 
     m.def("_unsynchronised_bump", [] { unsynchronisedBump(); },
           "Free-threading canary: increments a deliberately PLAIN counter. "
@@ -538,7 +649,7 @@ NB_MODULE(_core, m)
                 eagle::exec::hostFree(reinterpret_cast<void*>(ptr));
         },
         nb::arg("ptr"), "Free an address from `host_alloc` (0 is fine).");
-    nb::class_<PyHostFunc>(m, "HostFunc")
+    nb::class_<PyHostFunc>(m, "HostFunc", nb::type_slots(hostFuncSlots))
         .def("__init__", [](PyHostFunc* self, nb::callable fn) { new (self) PyHostFunc{nb::object(fn)}; }, nb::arg("fn"),
             "Holds the Python callable `fn` for the backend to call from a stream. Keep this object "
             "alive for as long as the graph that captured it can replay.")
@@ -546,7 +657,11 @@ NB_MODULE(_core, m)
             "enqueue",
             [](PyHostFunc& h, std::uintptr_t stream) {
                 if (cuda().loaded()) {
-                    ck(EBX(eagle_backend_host_func)(stream, &hostFuncTrampoline, h.fn.ptr()));
+                    const auto hostFunc = EBX(eagle_backend_host_func);   // refused by name when absent
+                    if (isCapturing(stream))
+                        ck(hostFunc(stream, &hostFuncTrampoline, h.fn.ptr()));
+                    else
+                        enqueueOwnedHostFunc(hostFunc, stream, h.fn.ptr());
                     return;
                 }
                 h.fn();  // no stream to wait for: a direct call, its exception raised here
@@ -554,8 +669,9 @@ NB_MODULE(_core, m)
             nb::arg("stream") = 0,
             "Call `fn()` once the work enqueued before it on `stream` is done; inside a capture, a "
             "host node that runs on every replay. `fn` runs on a backend thread with the GIL, must not "
-            "call CUDA, and an exception it raises is reported as unraisable. Without a backend it is "
-            "called now and its exception propagates.");
+            "call CUDA, and an exception it raises is reported as unraisable. Outside a capture the call "
+            "keeps `fn` alive until it has run, and interpreter exit waits for it. Without a backend it "
+            "is called now and its exception propagates.");
     // Seam minor 7: device scope, modules, raw launch, built-in cell ops, strided copy. Each is
     // bound on its own: a backend without one raises BackendUnavailable naming it.
     m.def(
@@ -2650,7 +2766,7 @@ NB_MODULE(_core, m)
     // with the callables it registered). A raw callable member's target stream
     // crosses as a uintptr_t (same convention as Stream.ptr() /
     // CaptureFork.branch() above).
-    nb::class_<PyComposer>(m, "GraphComposer")
+    nb::class_<PyComposer>(m, "GraphComposer", nb::type_slots(composerSlots))
         .def(
             "__init__",
             [](PyComposer* self, const std::string& mode, int device) {

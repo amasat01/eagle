@@ -2,6 +2,24 @@
 
 Releases after 0.6.4 are on [GitHub](https://github.com/amasat01/eagle/releases): the notes are the pull request body.
 
+## 0.7.9 (2026-11-18)
+
+### Fixed
+
+**A host node whose function reaches back to its graph is freed when the graph is dropped.** The object that holds a host node's Python function was invisible to Python's garbage collector, so a function that referred back to the object owning the node (directly or through its closure) formed a cycle nothing collected: the graph and its arrays stayed alive until the interpreter exited, and an exit hook only hid that from nanobind's leak report. The garbage collector now sees that function (and the callables a `GraphComposer` keeps), so such a cycle is collected while the program runs, and the exit hook is gone. Graphs built through eagle's own API did not form this cycle.
+
+**A host function enqueued outside a graph can no longer crash the process.** `eagle._core.HostFunc.enqueue` outside a capture handed the backend a borrowed reference to its function: dropping the `HostFunc` before the call ran freed the function under it (a segmentation fault), and an interpreter that exited first ran the call after finalization (an abort). The call now holds its own reference until it has run, and interpreter exit waits for pending calls. eagle's public calls already waited for their host functions before returning, so only code driving the binding directly was exposed.
+
+**A shared parameter given as an eagle array binds in a graph.** A `Param[Vector[n]]` or `Param[Matrix[r, c]]` value passed as an `eagle.Array` failed with a `TypeError` when the graph was built, because it was flattened with NumPy's `reshape(-1)`. Shared values are now flattened with `ravel()`, which NumPy, CuPy, torch and eagle arrays all provide; a non-contiguous value, such as a transposed view, is copied first.
+
+**A subclass of hawk's kernel type deploys.** `eagle.deploy`, `eagle.plan.auto` and `eagle.simulate` recognised a hawk kernel by the module its type was defined in, so a `Kernel` subclass defined in another package was taken for a built plugin and failed. They now check for an instance of hawk's `Kernel` (still without importing hawk); an object that is not a kernel is refused as before.
+
+### Tests
+
+**A shared shaped value through a built graph.** New rows pass a `Param[Matrix[r, c]]` and a `Param[Vector[n]]` through an `eagle.Graph` on the CPU and on the GPU backend, against NumPy within the rounding bound of each dot product.
+
+**The Python gate runs on Python 3.9.** `make gate-py` installed nanobind 3, which needs Python 3.10; it now installs the nanobind the package's build selects for the interpreter (nanobind 2 on 3.9).
+
 ## 0.7.8 (2026-11-17)
 
 ### Fixed

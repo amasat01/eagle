@@ -169,7 +169,7 @@ def shared_shapes(plugin, kernel=None) -> dict:
 
 def flat_shared(shapes: dict, bound: dict, kernel_name: str = "") -> dict:
     """``bound`` with each shared plane checked against its natural shape and bound flat,
-    row-major (a view when the array is C-contiguous)."""
+    row-major (a view when the array is C-contiguous, else a copy)."""
     if not shapes or not any(nm in bound for nm in shapes):
         return bound
     out = dict(bound)
@@ -182,17 +182,9 @@ def flat_shared(shapes: dict, bound: dict, kernel_name: str = "") -> dict:
             raise ValueError(
                 f"{kernel_name or 'kernel'}(): {name!r} is a shared parameter of shape "
                 f"{tuple(shape)} (one value for every lane), got shape {got}")
-        if hasattr(value, "reshape"):
-            try:
-                out[name] = value.reshape(-1) if _c_contiguous(value) else value.copy().reshape(-1)
-            except AttributeError:
-                out[name] = value.reshape(-1)
+        if hasattr(value, "ravel"):    # NumPy, CuPy, torch and eagle.Array: a view, else a copy
+            out[name] = value.ravel()
     return out
-
-
-def _c_contiguous(value) -> bool:
-    flags = getattr(value, "flags", None)
-    return True if flags is None else bool(getattr(flags, "c_contiguous", True))
 
 
 def _plane_shape(width: int, n: int):
