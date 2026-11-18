@@ -15,8 +15,6 @@ shown to see a violation; eight threads.
 CUDA rows carry the ``gpu`` marker and skip where no CUDA Warp device exists.
 """
 
-from hawk.facts import load as _facts
-_ROW = _facts("cpu")["cells"]["row"]      # samples per row of the host facts
 import threading
 import time
 import traceback
@@ -25,8 +23,11 @@ from typing import Any
 import numpy as np
 import pytest
 
-wp = pytest.importorskip("warp")
-hawk = pytest.importorskip("hawk")
+wp = pytest.importorskip("warp", reason="warp is not installed here; these rows run in the Kaggle GPU job (.github/kaggle/kernel.py), where warp, hawk and eagle are all present")
+hawk = pytest.importorskip("hawk", reason="hawk is not installed here; these rows run in the Kaggle GPU job (.github/kaggle/kernel.py), where warp, hawk and eagle are all present")
+
+from hawk.facts import load as _facts  # noqa: E402
+_ROW = _facts("cpu")["cells"]["row"]      # samples per row of the host facts
 
 from hawk import Mutable, Param, Scalar, Terminated, Vector  # noqa: E402
 from hawk.math import dot, sqrt  # noqa: E402
