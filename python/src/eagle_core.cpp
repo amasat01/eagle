@@ -341,6 +341,47 @@ struct PyHostFunc {
     nb::object fn;
 };
 
+// The garbage collector must see the callables a binding object owns: a callable that
+// reaches back to its owner (a host node's function closing over its graph) otherwise
+// forms a cycle nothing collects. Clearing is safe because only unreachable objects are
+// cleared, and a graph with a host node waits for its launches before returning.
+int hostFuncTraverse(PyObject* self, visitproc visit, void* arg)
+{
+    Py_VISIT(Py_TYPE(self));
+    if (!nb::inst_ready(self))
+        return 0;
+    Py_VISIT(nb::inst_ptr<PyHostFunc>(self)->fn.ptr());
+    return 0;
+}
+
+int hostFuncClear(PyObject* self)
+{
+    nb::inst_ptr<PyHostFunc>(self)->fn.reset();
+    return 0;
+}
+
+PyType_Slot hostFuncSlots[] = { { Py_tp_traverse, reinterpret_cast<void*>(hostFuncTraverse) },
+    { Py_tp_clear, reinterpret_cast<void*>(hostFuncClear) }, { 0, nullptr } };
+
+int composerTraverse(PyObject* self, visitproc visit, void* arg)
+{
+    Py_VISIT(Py_TYPE(self));
+    if (!nb::inst_ready(self))
+        return 0;
+    for (const nb::object& kept : nb::inst_ptr<PyComposer>(self)->keep)
+        Py_VISIT(kept.ptr());
+    return 0;
+}
+
+int composerClear(PyObject* self)
+{
+    nb::inst_ptr<PyComposer>(self)->keep.clear();
+    return 0;
+}
+
+PyType_Slot composerSlots[] = { { Py_tp_traverse, reinterpret_cast<void*>(composerTraverse) },
+    { Py_tp_clear, reinterpret_cast<void*>(composerClear) }, { 0, nullptr } };
+
 /**
  * @brief Write a captured graph to Graphviz ``dot`` and return the text.
  *
@@ -539,7 +580,7 @@ NB_MODULE(_core, m)
                 eagle::exec::hostFree(reinterpret_cast<void*>(ptr));
         },
         nb::arg("ptr"), "Free an address from `host_alloc` (0 is fine).");
-    nb::class_<PyHostFunc>(m, "HostFunc")
+    nb::class_<PyHostFunc>(m, "HostFunc", nb::type_slots(hostFuncSlots))
         .def("__init__", [](PyHostFunc* self, nb::callable fn) { new (self) PyHostFunc{nb::object(fn)}; }, nb::arg("fn"),
             "Holds the Python callable `fn` for the backend to call from a stream. Keep this object "
             "alive for as long as the graph that captured it can replay.")
@@ -2651,7 +2692,7 @@ NB_MODULE(_core, m)
     // with the callables it registered). A raw callable member's target stream
     // crosses as a uintptr_t (same convention as Stream.ptr() /
     // CaptureFork.branch() above).
-    nb::class_<PyComposer>(m, "GraphComposer")
+    nb::class_<PyComposer>(m, "GraphComposer", nb::type_slots(composerSlots))
         .def(
             "__init__",
             [](PyComposer* self, const std::string& mode, int device) {
