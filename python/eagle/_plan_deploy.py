@@ -107,11 +107,11 @@ class AutoPlan:
         if kernel is None or getattr(kernel, "broadcast", None) or not hasattr(kernel, "lane_space"):
             return self, args, kw      # no kernel, a variant, or a stand-in that declares no lanes
         from hawk import _broadcast
-        from raptor.errors import RaptorError
+        from hawk.errors import HawkError
 
         try:
             run, args, kw = _broadcast.route(kernel, args, kw)
-        except RaptorError as exc:     # eagle's own doors refuse with ValueError
+        except HawkError as exc:     # eagle's own doors refuse with ValueError
             raise ValueError(str(exc)) from None
         if run is kernel:
             return self, args, kw
@@ -388,7 +388,7 @@ class _HostSide:
     __slots__ = ("_args", "_plugins", "_error", "_thread", "_pid")
 
     def __init__(self, kernels, cache_dir, scalar_type):
-        self._args = (list(kernels), _targets_of(_HOST, loadable=True), cache_dir, scalar_type)
+        self._args = (list(kernels), _targets_of(_HOST), cache_dir, scalar_type)
         self._plugins = self._error = None
         self._pid = os.getpid()
         self._thread = threading.Thread(target=self._build, name="eagle-host-build")
@@ -444,9 +444,8 @@ _BUILT_SCALAR_TYPES = ("float64", "float32", "banded")
 def _hawk_api():
     """The hawk entry points a build uses, or the refusal naming hawk."""
     try:
-        from hawk.artifact import build_bundle, plugins
+        from hawk.artifact import build_bundle, default_cache_dir, plugins
         from hawk.build_settings import BuildSettings
-        from hawk.compile import default_cache_dir
     except ImportError as exc:
         raise ImportError(
             "eagle.plan.auto: building a hawk kernel needs hawk, which does not "
@@ -514,12 +513,11 @@ def _hawk_plugins(kernels, targets, cache_dir, scalar_type=None, contraction=Non
 _HOST, _DEVICE = "host", "device"
 
 
-def _targets_of(entry: str, loadable: bool = False) -> tuple:
-    """The ids of hawk's target rows eagle enters as ``entry``, from their manifests (nothing is imported); ``loadable``: only the
-    rows whose backend imports, asked where the rows are about to be built."""
-    from hawk.targets import entry_ids
+def _targets_of(entry: str) -> tuple:
+    """The ids of the targets the found OSPREYs serve that eagle enters as ``entry`` (a host symbol or a device kernel)."""
+    from hawk.targets import TARGETS
 
-    return entry_ids(entry, loadable)
+    return tuple(t.id for t in TARGETS.values() if t.host_entry == (entry == _HOST))
 
 
 def _has_entry(targets, entry: str) -> bool:
@@ -528,8 +526,8 @@ def _has_entry(targets, entry: str) -> bool:
 
 
 def _default_targets() -> tuple:
-    """Every host row, plus every device row with a usable device and compiler."""
-    host = _targets_of(_HOST, loadable=True)
+    """Every host target, plus the device targets when a device is present and their OSPREY says its tools are."""
+    host = _targets_of(_HOST)
     try:
         from . import _core
 
@@ -537,66 +535,26 @@ def _default_targets() -> tuple:
             return host
     except Exception:
         return host
-    from hawk.compile import device_compiler_kind, nvrtc
+    from hawk.targets import buildable
 
-    if device_compiler_kind() != "nvcc":
-        try:
-            nvrtc.nvrtc_version()
-        except Exception:
-            return host
-    return host + _targets_of(_DEVICE, loadable=True)       # a device is present and about to be built for: the import is tested here
+    device = _targets_of(_DEVICE)
+    return host + device if all(buildable(t) for t in device) else host
 
 
 def _eager_targets() -> tuple:
     """What a default deploy waits for: the device alone when a GPU is usable
     (the host builds in the background, :class:`_HostSide`), else the host."""
     device = _targets_of(_DEVICE)
-    return device if _has_entry(_default_targets(), _DEVICE) else _targets_of(_HOST, loadable=True)
+    return device if _has_entry(_default_targets(), _DEVICE) else _targets_of(_HOST)
 
 
 def _bundle_key(kernels, targets, fast_entries=False, mode="float64") -> str:
-    """The cache directory name of one :func:`auto` request; hawk's own
-    stamp still decides whether the bytes there are the unit's.
-    ``fast_entries`` (the active-set fast entries,
-    :func:`_wants_fast_entries`) is eagle's own choice, not read off the
-    kernel, so it is folded in here explicitly -- the same reason
-    ``host_profile``/``opt_level``/the device arch are below: two requests
-    that build different bytes never share one folder."""
-    from hawk.artifact.unit_cache import declaration_digest
+    """The cache directory name of one :func:`auto` request: hawk's build key (everything hawk and the OSPREYs put into the
+    build) with eagle's own choice ``fast_entries`` (:func:`_wants_fast_entries`), so two requests that build different
+    bytes never share one folder; hawk's own stamp still decides whether the bytes there are the unit's."""
+    from hawk.artifact import build_key
 
-    h = hashlib.sha256(b"eagle.plan.auto/3\n")
-    for k in kernels:
-        sinks = k.sinks
-        tag = tuple(repr(getattr(sinks, a, None))
-                    for a in ("primal", "kind", "wrt", "primal_unit"))
-        # The declarations (plane sizes, Grid extents) never reach the walk, so two
-        # sizes of one kernel would otherwise share, and race on, one folder.
-        h.update(json.dumps([k.name, str(k.walk.digest), declaration_digest(k),
-                             repr(k.kind), tag]).encode())
-        group = getattr(k, "group", 1)
-        if group != 1:      # the lane group sets how an active map is read; group 1 keys as before
-            h.update(f"group={group}".encode())
-    h.update(json.dumps(list(targets)).encode())
+    h = hashlib.sha256(b"eagle.plan.auto/4\n")
+    h.update(build_key(kernels, targets=targets, mode=mode).encode())
     h.update(json.dumps(fast_entries).encode())
-    if mode != "float64":  # float64 keys stay as before, so existing caches still hit
-        h.update(mode.encode())
-    # One folder per host profile, so two profiles of one kernel never
-    # rebuild over each other (hawk's stamp already keeps them apart).
-    from hawk.compile.toolchain import opt_level
-    from ospreys.cpu.toolchain import host_profile
-
-    h.update(host_profile().encode())
-    # Same reason, for the opt level: it changes the device (nvcc) build
-    # too, so an "O0" request and an "O3" one of the same kernel must never
-    # land in the same folder either.
-    h.update(opt_level().encode())
-    # And again for the resolved device arch (hawk.artifact.arch; this call
-    # passes no device_arch= of its own, so it follows the running GPU) --
-    # called only when a device row is actually a target, same gate as hawk's own
-    # unit key, so a host-only request never pays for the device probe and
-    # two different GPUs' default builds never share one folder.
-    if _has_entry(targets, _DEVICE):
-        from hawk.artifact import arch as _hawk_arch
-
-        h.update(_hawk_arch().encode())
     return h.hexdigest()[:32]
