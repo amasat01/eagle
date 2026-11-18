@@ -383,47 +383,62 @@ def test_launches_follow_the_longest_sample(plans, target, label, every):
     assert runner.loop.max_iters == -(-max_steps // every)
 
 
-def _counter_stays_zero(plan):
-    """The host plan of ``plan``'s kernel whose entry runs the real kernel and then zeroes the
-    ``finished_count`` cell: a unit whose finish counter eagle reads as 0 whatever finished."""
+_ZEROING_ENTRY = """
+#include <stdint.h>
+typedef void (*entry_t)(void* const*, int64_t, int64_t, int64_t);
+static entry_t real_entry;
+static int counter_slot;
+void wrapper_set(entry_t entry, int slot) { real_entry = entry; counter_slot = slot; }
+/* the unit's host entry, then 0 into the finished_count cell (ScalarHandle.data is its first member) */
+void wrapper_host(void* const* params, int64_t base, int64_t count, int64_t n)
+{
+    real_entry(params, base, count, n);
+    *(uint32_t*)(*(void**)params[counter_slot]) = 0;
+}
+"""
+
+
+def _counter_stays_zero(plan, tmp_path):
+    """The host plan of ``plan``'s kernel whose entry is a small native wrapper: the real entry, then
+    0 into the ``finished_count`` cell, so eagle reads a finish counter that never rises."""
     import ctypes
+    import os
+    import subprocess
 
     import eagle.exec as eexec
     from eagle import plan as eplan
 
     plugin = plan.plugin
     slot = [tuple(pair) for pair in plugin.arg_spec].index(("lookup", "finished_count"))
-    entry = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_int64, ctypes.c_int64,
-                             ctypes.c_int64)
-    real = ctypes.cast(plugin.host_entry, entry)
-
-    def run(params, base, count, n_samples):
-        real(params, base, count, n_samples)
-        handle = ctypes.cast(params, ctypes.POINTER(ctypes.c_void_p))[slot]
-        cell = ctypes.cast(handle, ctypes.POINTER(ctypes.c_void_p))[0]   # ScalarHandle.data
-        ctypes.c_uint32.from_address(cell).value = 0
-
-    callback = entry(run)
-    wrapped = SimpleNamespace(**{**vars(plugin),
-                                 "host_entry": ctypes.cast(callback, ctypes.c_void_p).value,
-                                 "_keepalive": (*plugin._keepalive, callback)})
+    source = tmp_path / "wrapper.c"
+    source.write_text(_ZEROING_ENTRY)
+    library = tmp_path / "wrapper.so"
+    subprocess.run([os.environ.get("CC", "cc"), "-shared", "-fPIC", "-O1", str(source), "-o", str(library)],
+                   check=True)
+    lib = ctypes.CDLL(str(library))
+    lib.wrapper_set.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    lib.wrapper_set(plugin.host_entry, slot)
+    entry = ctypes.cast(lib.wrapper_host, ctypes.c_void_p).value
+    wrapped = SimpleNamespace(**{**vars(plugin), "host_entry": entry,
+                                 "_keepalive": (*plugin._keepalive, lib)})
     return eplan.plan(wrapped, structure=eexec.HostTeam)
 
 
-@pytest.mark.skip(reason="OWED: a Python entry wrapper deadlocks, the team threads that call it wait for the GIL "
-                         "that eagle's host launch holds; a native wrapper unit or a launch that releases the GIL is needed")
-def test_a_kernel_whose_counter_stays_zero_runs_to_the_cap(plans):
-    """The loop stops on the finish counter: a unit that never raises it runs to its cap."""
-    stripped = _counter_stays_zero(plans[("fplain", "host")])
+def test_a_kernel_whose_counter_stays_zero_runs_to_the_cap(plans, tmp_path):
+    """The loop stops on the finish counter: a unit that never raises it runs to its cap, and
+    its values are the real kernel's (the unwrapped plan is the oracle)."""
+    stripped = _counter_stays_zero(plans[("fplain", "host")], tmp_path)
     n, cap = 500, 60
     inp = _inputs(n, "spread", 20)
     g = _planes(inp, np)
     rep = eagle.run_until_done(stripped, max_steps=cap, dt=_DT, **g)
     assert rep.launches == cap and not rep.done and rep.finished == 0
-    # the same batch through the real kernel stops at its longest sample
-    g = _planes(inp, np)
-    rep = eagle.run_until_done(plans[("fplain", "host")], max_steps=cap, dt=_DT, **g)
+    # the same batch through the real kernel stops at its longest sample, with the same values
+    want = _planes(inp, np)
+    rep = eagle.run_until_done(plans[("fplain", "host")], max_steps=cap, dt=_DT, **want)
     assert rep.done and rep.launches == int(inp["nstop"].max())
+    for key in ("x", "v", "k"):
+        assert np.array_equal(g[key], want[key]), key
 
 
 @pytest.mark.parametrize("target", _TARGETS)
