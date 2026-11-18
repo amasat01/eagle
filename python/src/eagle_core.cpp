@@ -67,13 +67,16 @@
 
 #include <algorithm>
 #include <array>
+#include <condition_variable>
 #include <initializer_list>
 #include <iterator>
+#include <mutex>
 #include <thread>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <new>
 #include <optional>
@@ -321,18 +324,84 @@ std::int32_t voidTrampoline(void* ctx)
     }
 }
 
-// A host node's function runs on a backend thread, not inside a seam call: it takes the
-// GIL, calls the Python callable, never touches the backend, and cannot raise into the
+// A host node's function runs on a backend thread, not inside a seam call: it calls the
+// Python callable with the GIL held, never touches the backend, and cannot raise into the
 // caller, so an exception it raises is reported as unraisable.
-void hostFuncTrampoline(void* ctx)
+void callHostFunc(PyObject* fn)
 {
-    nb::gil_scoped_acquire gil;
     try {
-        nb::handle(static_cast<PyObject*>(ctx))();
+        const nb::handle callable(fn);
+        callable();
     } catch (nb::python_error& e) {
         e.discard_as_unraisable("eagle host node");
     } catch (...) {
     }
+}
+
+// Inside a capture the node's function is borrowed: the graph owns the node, and a graph
+// with a host node waits for its launches before returning.
+void hostFuncTrampoline(void* ctx)
+{
+    nb::gil_scoped_acquire gil;
+    callHostFunc(static_cast<PyObject*>(ctx));
+}
+
+// Outside a capture the function runs once, later: it owns a reference until it has run,
+// so dropping its HostFunc first frees nothing under it, and interpreter exit waits for it
+// (a call that reached Python after finalization would abort the process).
+std::mutex pendingHostFuncsMutex;
+std::condition_variable pendingHostFuncsDone;
+std::size_t pendingHostFuncs = 0;
+
+void ownedHostFuncTrampoline(void* ctx)
+{
+    {
+        nb::gil_scoped_acquire gil;
+        callHostFunc(static_cast<PyObject*>(ctx));
+        Py_DECREF(static_cast<PyObject*>(ctx));
+    }
+    const std::lock_guard lock(pendingHostFuncsMutex);
+    if (--pendingHostFuncs == 0)
+        pendingHostFuncsDone.notify_all();
+}
+
+void waitForPendingHostFuncs()
+{
+    const nb::gil_scoped_release release;    // the pending calls need the GIL to finish
+    std::unique_lock lock(pendingHostFuncsMutex);
+    pendingHostFuncsDone.wait(lock, [] { return pendingHostFuncs == 0; });
+}
+
+// Whether host functions enqueued on @p stream become nodes of a capture. A backend that
+// predates the capture query is taken as capturing: its host functions keep the borrowed
+// reference they always had.
+bool isCapturing(std::uintptr_t stream)
+{
+    using Query = decltype(&::eagle_backend_stream_is_capturing);
+    void* symbol = cuda().optional("eagle_backend_stream_is_capturing");
+    if (symbol == nullptr)
+        return true;
+    Query query = nullptr;
+    std::memcpy(&query, &symbol, sizeof query);
+    std::int32_t capturing = 0;
+    ck(query(stream, &capturing));
+    return capturing != 0;
+}
+
+void enqueueOwnedHostFunc(decltype(&::eagle_backend_host_func) hostFunc, std::uintptr_t stream, PyObject* fn)
+{
+    {
+        const std::lock_guard lock(pendingHostFuncsMutex);
+        ++pendingHostFuncs;
+    }
+    Py_INCREF(fn);
+    const eagle_backend_status status = hostFunc(stream, &ownedHostFuncTrampoline, fn);
+    if (status != EAGLE_BACKEND_OK) {    // never enqueued: undo, then raise
+        Py_DECREF(fn);
+        const std::lock_guard lock(pendingHostFuncsMutex);
+        --pendingHostFuncs;
+    }
+    ck(status);
 }
 
 /** @brief A Python callable the backend may call from a stream: the owner of the reference. */
@@ -499,6 +568,7 @@ NB_MODULE(_core, m)
 {
     m.doc() = "eagle._core — nanobind binding of the eagle::cuda CUDA-graph "
               "core (capture / instantiate / replay).";
+    nb::module_::import_("atexit").attr("register")(nb::cpp_function(&waitForPendingHostFuncs));
 
     m.def("_unsynchronised_bump", [] { unsynchronisedBump(); },
           "Free-threading canary: increments a deliberately PLAIN counter. "
@@ -587,7 +657,11 @@ NB_MODULE(_core, m)
             "enqueue",
             [](PyHostFunc& h, std::uintptr_t stream) {
                 if (cuda().loaded()) {
-                    ck(EBX(eagle_backend_host_func)(stream, &hostFuncTrampoline, h.fn.ptr()));
+                    const auto hostFunc = EBX(eagle_backend_host_func);   // refused by name when absent
+                    if (isCapturing(stream))
+                        ck(hostFunc(stream, &hostFuncTrampoline, h.fn.ptr()));
+                    else
+                        enqueueOwnedHostFunc(hostFunc, stream, h.fn.ptr());
                     return;
                 }
                 h.fn();  // no stream to wait for: a direct call, its exception raised here
@@ -595,8 +669,9 @@ NB_MODULE(_core, m)
             nb::arg("stream") = 0,
             "Call `fn()` once the work enqueued before it on `stream` is done; inside a capture, a "
             "host node that runs on every replay. `fn` runs on a backend thread with the GIL, must not "
-            "call CUDA, and an exception it raises is reported as unraisable. Without a backend it is "
-            "called now and its exception propagates.");
+            "call CUDA, and an exception it raises is reported as unraisable. Outside a capture the call "
+            "keeps `fn` alive until it has run, and interpreter exit waits for it. Without a backend it "
+            "is called now and its exception propagates.");
     // Seam minor 7: device scope, modules, raw launch, built-in cell ops, strided copy. Each is
     // bound on its own: a backend without one raises BackendUnavailable naming it.
     m.def(
