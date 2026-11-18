@@ -117,7 +117,6 @@ def _step_kernels(plugin, window, door, device, events="step", reverse="per_step
     from hawk import Kernel
     from hawk.diff import step_vjp, tape
     from hawk.diff.tape import taped_planes
-    from raptor.ir.nodes import element_count
 
     from .._plan_deploy import _hawk_plugins
 
@@ -141,7 +140,8 @@ def _step_kernels(plugin, window, door, device, events="step", reverse="per_step
     if reverse == "fused":      # all K steps of a window in one launch; a unit of its own (its kind differs)
         whole = Kernel(f"{step.name}_fused_vjp", step_vjp(kernel, steps_reverse="fused"))
         out.fused_vjp = _hawk_plugins([kernel, whole], targets, cache_dir, plugin.scalar_type)[1]
-    out.taped = tuple((name, element_count(t)) for name, t in taped_planes(single))
+    counts = sidecar_of(built[0])["element_counts"]
+    out.taped = tuple((name, counts[name]) for name, _type in taped_planes(single))
     out.time = getattr(step, "time", None) if getattr(step, "time_step", None) else None
     cache[key] = out
     return out

@@ -60,10 +60,10 @@ def sidecar_of(plugin) -> dict:
     return getattr(plugin, "_meta", None) or getattr(plugin, "sidecar", None) or {}
 
 
-def prior_reads(plugin) -> frozenset:
-    """The ``Mutable`` planes the kernel reads before it writes them (the sidecar's ``mutables`` rows flagged ``prior``): the
-    planes that need an initial value rather than a zero fill."""
-    return frozenset(m["name"] for m in sidecar_of(plugin).get("mutables", ()) if m.get("prior"))
+def prior_reads(meta: dict) -> frozenset:
+    """The ``Mutable`` planes the kernel reads before it writes them (the ``mutables`` rows of a sidecar or a description
+    flagged ``prior``): the planes that need an initial value rather than a zero fill."""
+    return frozenset(m["name"] for m in meta.get("mutables", ()) if m.get("prior"))
 
 
 def read_terminated_readonly(meta: dict, *, name: str) -> bool:

@@ -534,10 +534,11 @@ def _step_planes(plans, specs, planes) -> tuple:
     return views, _n_from_kw(union, views)
 
 
-def _steps_reverse_choice(rows, width: int, K: int, regime: float) -> str:
+def _steps_reverse_choice(table, width: int, K: int, regime: float) -> str:
     """The rule of ``steps_reverse="auto"``: ``"fused"`` when the measured row nearest ``(width, K)`` won at ``regime``, else
-    ``"per_step"``. A row is ``(state width, K, narrowest regime, widest regime)``; the nearest is matched by log2 distance. The
-    rows are an argument (the kernel hands over its measured rows as plain data), and a target with no row answers ``per_step``."""
+    ``"per_step"``. ``table`` is the build's measured columns (``widths``, ``ks``, ``lo``, ``hi``: row ``i`` is ``(state width,
+    K, narrowest regime, widest regime)``); the nearest row is matched by log2 distance. A target with no row answers ``per_step``."""
+    rows = list(zip(table.get("widths", ()), table.get("ks", ()), table.get("lo", ()), table.get("hi", ())))
     if not rows:
         return "per_step"
     _w, _k, lo, hi = min(rows, key=lambda r: (abs(math.log2(width / r[0])) + abs(math.log2(K / r[1])), r))
@@ -765,7 +766,7 @@ class Runner:
                 if per_resident and resident <= 0:
                     raise ValueError("eagle.until_done: steps_reverse='auto' on a device needs the device's "
                                      "SM count and resident threads per SM")
-                steps_reverse = _steps_reverse_choice(table.get("rows", ()), width, k, n / (resident if per_resident else 1))
+                steps_reverse = _steps_reverse_choice(table, width, k, n / (resident if per_resident else 1))
         elif steps_reverse == "auto":
             steps_reverse = "per_step"
         if steps_reverse == "fused":

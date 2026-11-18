@@ -57,7 +57,7 @@ import torch
 from .. import FINISHED_PLANE, _cell_rows, _layout, _split
 from .._graph_reduce import check_policy
 from ..sidecar import CELL_PLANE
-from ._kernel_planes import INPUT_ROLES, OUTPUT_ROLES, _prior_reads, call_mode, promote
+from ._kernel_planes import INPUT_ROLES, OUTPUT_ROLES, _prior_reads, call_mode, describe_kernel, promote
 from ._tower import LOCK, finished_identity, plane_names
 
 __all__ = ["KernelFunction", "function"]
@@ -244,7 +244,8 @@ class _Level:
         self.base = self.kind = None
         #: Mutable planes read before written (carried state): inputs as well as outputs
         self.state = tuple(state)
-        self.finish = kernel.walk.finish
+        description = describe_kernel(kernel)
+        self.finish = (description.get("finish") or {}).get("mask")
         internal = {FINISHED_PLANE} if self.finish is not None else frozenset()
         if self.per_cell:
             internal = internal | {_CELL_PLANE}
@@ -270,7 +271,7 @@ class _Level:
             and self.finish == self.terminated
         )
         #: a reduction over samples: its rows are eagle's scratch, the cell is the output
-        self.cells = _cell_rows.kernel_cells(kernel)
+        self.cells = _cell_rows.described_cells(description)
         companions = _cell_rows.row_names(self.cells) - frozenset(self.cells)
         written = OUTPUT_ROLES | {"accum_out"} if self.per_cell else OUTPUT_ROLES
         outputs = [n for n in order if (self.role.get(n) in written or n in self.cells)
@@ -278,11 +279,9 @@ class _Level:
         if self.finishes_terminated:
             outputs.append(self.terminated)
         self.outputs = tuple(outputs)
-        slot = kernel.walk.slot_types
+        shapes = description["slot_shapes"]
         self.width = {
-            n: math.prod(slot[(self.role[n], n)].shape)
-            for n in (*self.inputs, *self.outputs)
-            if (self.role[n], n) in slot
+            n: math.prod(shapes[n]) for n in (*self.inputs, *self.outputs) if n in shapes
         }
         self.wrt = None
         self._children = {}
@@ -795,7 +794,8 @@ class KernelFunction:
         from hawk.diff import step_vjp, vjp
 
         role_of = {name: role for role, name in kernel.arg_spec}
-        finish = kernel.walk.finish
+        description = describe_kernel(kernel)
+        finish = (description.get("finish") or {}).get("mask")
         #: A kernel that finishes a mask always carries the reserved
         #: `finished_count` lookup cell (the newly-finished counter) in its
         #: own arg_spec, whether or not it is wrapped here -- a launch
@@ -853,7 +853,7 @@ class KernelFunction:
         self._terminated = self._root.terminated
         self._role = {n: role_of[n] for n in self.inputs}
         self._shape = {
-            n: tuple(kernel.walk.slot_types[(role_of[n], n)].shape) for n in self.inputs
+            n: tuple(description["slot_shapes"][n]) for n in self.inputs
         }
         # derive both first-order levels now: a kernel the transforms refuse fails here
         self._root.child("vjp")

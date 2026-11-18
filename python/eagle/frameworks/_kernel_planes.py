@@ -27,6 +27,7 @@ from types import MappingProxyType
 import numpy as np
 
 from .. import FINISHED_PLANE, _cell_rows
+from ..sidecar import prior_reads
 from .._active_set import COUNT_PLANE, MAP_PLANE
 
 __all__ = ["ACTIVE_PLANES", "FLOAT_MODES", "INPUT_ROLES", "OUTPUT_ROLES", "ModeError", "Signature", "call_mode", "promote"]
@@ -41,10 +42,10 @@ OUTPUT_ROLES = frozenset({"mutable", "out"})
 #: Per-sample input roles (the sample count comes off these).
 SAMPLE_ROLES = frozenset({"per_sample", "vec_in", "mat_in", "terminated"})
 
-#: hawk IR dtype -> numpy dtype, for the non-float slots.
-_FIXED_DTYPE = MappingProxyType({"bool": np.dtype(np.bool_), "i64": np.dtype(np.int64), "i32": np.dtype(np.int64),
+#: hawk's slot dtype name -> numpy dtype, for the non-float slots (an ``int32`` index plane binds as int64).
+_FIXED_DTYPE = MappingProxyType({"bool": np.dtype(np.bool_), "int64": np.dtype(np.int64),
                                  "int32": np.dtype(np.int32), "uint32": np.dtype(np.uint32)})
-_FLOAT_IR = frozenset({"f64", "f32"})
+_FLOAT_DTYPES = frozenset({"float", "float64", "float32"})
 
 #: The reserved index-map planes of an ``active_set`` kernel: a bridge binds
 #: the identity map over the whole batch, so the kernel runs every sample.
@@ -95,12 +96,12 @@ class Signature:
     def __init__(self, kernel, *, who="eagle.frameworks", label=None):
         self.name = label or kernel.name
         self.arg_spec = tuple(tuple(pair) for pair in kernel.arg_spec)
-        types = kernel.walk.slot_types
+        self.description = description = describe_kernel(kernel)
         self.role = {name: role for role, name in self.arg_spec}
-        self._ir = {name: types[(role, name)] for role, name in self.arg_spec}
+        self._ir = slot_types(description)
         #: reductions over samples ``{cell: op}``: the kernel writes rows (and a
         #: ``<cell>_comp`` companion) that the bridge finishes into the cell
-        self.cells = _cell_rows.kernel_cells(kernel)
+        self.cells = _cell_rows.described_cells(description)
         self.rows = _cell_rows.row_names(self.cells)
         from hawk.diff.params import CELL_PLANE
 
@@ -136,7 +137,7 @@ class Signature:
                                           self.cell_plane))
         self.terminated = next((n for n in self.inputs
                                 if self.role[n] == "terminated"), None)
-        finish = getattr(kernel.walk, "finish", None)
+        finish = (description.get("finish") or {}).get("mask")
         self.finishes = (self.terminated is not None and finish is not None
                          and finish == self.terminated)
         outs = [n for r, n in self.arg_spec
@@ -155,7 +156,7 @@ class Signature:
         return self.role[name] == "lookup"
 
     def is_float(self, name) -> bool:
-        return self._ir[name].dtype in _FLOAT_IR
+        return self._ir[name].dtype in _FLOAT_DTYPES
 
     def is_table(self, name) -> bool:
         """Whether ``name`` has one entry per parameter cell (a per-cell kernel's lookup or
@@ -175,11 +176,13 @@ class Signature:
     def dtype(self, name, mode) -> np.dtype:
         """The array dtype of slot ``name`` in build ``mode``."""
         if name in ACTIVE_PLANES:
-            wide = name == MAP_PLANE and name in self._ir and self._ir[name].dtype in ("i64", "int64")
+            wide = name == MAP_PLANE and name in self._ir and self._ir[name].dtype == "int64"
             return np.dtype(np.int64 if wide else np.int32) if name == MAP_PLANE else np.dtype(np.uint32)
         ir = self._ir[name].dtype
-        if ir in _FLOAT_IR:
+        if ir in _FLOAT_DTYPES:
             return FLOAT_MODES[mode]
+        if ir == "int32" and name in self.description.get("index_planes", ()):
+            return np.dtype(np.int64)
         try:
             return _FIXED_DTYPE[ir]
         except KeyError:
@@ -191,12 +194,30 @@ class Signature:
         return self.is_float(name) and self.role[name] != "terminated"
 
 
+def describe_kernel(kernel) -> dict:
+    """hawk's description of ``kernel`` for the host (``hawk.artifact.describe``): its planes, shapes, dtypes, cells, finish
+    and prior reads, stated before any build."""
+    from hawk.artifact import describe
+
+    return describe([kernel], targets=("host",))[kernel.name]
+
+
+def slot_types(description: dict) -> dict:
+    """``{slot name: (shape, dtype name)}`` of every slot of a described kernel: the shape from ``slot_shapes``, the dtype from
+    ``arg_dtypes`` (a plane) or ``params`` (a by-value ``Param``)."""
+    from types import SimpleNamespace
+
+    dtypes = {**description["arg_dtypes"], **{p["name"]: p["dtype"] for p in description.get("params", ())}}
+    return {name: SimpleNamespace(shape=tuple(shape), dtype=dtypes.get(name))
+            for name, shape in description["slot_shapes"].items()}
+
+
 def _prior_reads(kernel):
     """The ``Mutable`` names ``kernel`` reads before writing them, per step (an
     automatic kernel's fused loop carries its outputs; its single step does not)."""
     from hawk.trace.steps import default_step
 
-    return default_step(kernel).walk.prior_reads
+    return prior_reads(describe_kernel(default_step(kernel)))
 
 
 class ModeError(TypeError, ValueError):

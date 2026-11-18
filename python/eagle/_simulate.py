@@ -40,7 +40,7 @@ import time
 
 from . import _alloc, arrays
 from . import _cell_rows, _split
-from .sidecar import prior_reads
+from .sidecar import prior_reads, sidecar_of
 from .dtypes import dtype_name
 from ._busy import BusyGuard
 from ._plan_planes import _plane_dtype, widen_indices
@@ -550,7 +550,7 @@ class Simulation:
         _check_option_collision(decl)
         _check_result_shadow(decl)
         _check_special_kwargs(decl, kwargs)
-        prior = frozenset().union(*(prior_reads(p.plugin) for p in plans))
+        prior = frozenset().union(*(prior_reads(sidecar_of(p.plugin)) for p in plans))
         sig, required = _signature(decl, order, prior)
         planes = _bind(kname, sig, required, prior, args, kwargs)
         planes, axes = split_marks(planes, layout)

@@ -219,9 +219,9 @@ class CellRows:
         return self.cell
 
 
-def kernel_cells(kernel) -> dict:
-    """``{cell plane: op}`` of a traced hawk kernel."""
-    return _planes(getattr(kernel.walk, "cells", {}))
+def described_cells(description: dict) -> dict:
+    """``{cell plane: op}`` of a kernel, from hawk's description of it (its ``cells`` member)."""
+    return _planes(description.get("cells") or {})
 
 
 def _planes(cells) -> dict:
