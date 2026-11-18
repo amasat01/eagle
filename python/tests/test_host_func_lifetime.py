@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """A host node's function may reach back to the object that owns the node: the garbage
 collector frees that cycle, and an interpreter that exits with one alive reports no leaked
-binding objects."""
+binding objects. A host function enqueued outside a graph runs once even when its node is
+dropped first, and the interpreter's exit waits for it."""
 
 from __future__ import annotations
 
@@ -100,3 +101,31 @@ def test_an_exit_with_a_built_gpu_graph_with_a_host_node_alive_reports_no_leaked
         assert float(D_OUT[0].get()) == 7.0
     """)
     assert "leaked" not in stderr, stderr
+
+
+_ENQUEUED = """
+    import gc
+    import sys
+    from eagle import _core, _transfer
+
+    RAN = []
+    node = _transfer.HostNode(lambda: RAN.append(1))
+    node()                                  # outside a graph: runs later, on a backend thread
+    if sys.argv[1] == "drop":
+        del node
+        gc.collect()                        # its HostFunc is freed before the call runs
+        _core.device_synchronize(-1)
+        assert RAN == [1], RAN
+"""
+
+
+@pytest.mark.gpu
+@pytest.mark.skipif(not _devices, reason="needs a GPU")
+@pytest.mark.parametrize("then", ["exit", "drop"])
+def test_a_host_function_enqueued_outside_a_graph_runs_once_whatever_follows(tmp_path, then):
+    script = tmp_path / "child.py"
+    script.write_text(textwrap.dedent(_ENQUEUED))
+    done = subprocess.run([sys.executable, str(script), then], capture_output=True, text=True,
+                          timeout=300, env={**os.environ})
+    assert done.returncode == 0, (done.returncode, done.stderr)
+    assert "leaked" not in done.stderr, done.stderr

@@ -414,6 +414,9 @@ def test_other_thread_alloc_free_during_capture():
 # --------------------------------------------------------------------------- #
 # A binding that detaches names itself here with the busy state that makes it safe.
 _GIL_RELEASE_ALLOWED = {
+    "eagle_core.cpp:None":
+        "the exit wait for host functions enqueued outside a graph: not a binding of an object, it "
+        "touches no Python object, and the calls it waits for need the GIL",
     "eagle_core.cpp:device_synchronize":
         "a blocking wait on the device: it touches no Python object, and a host node's callback needs the GIL",
     "eagle_core.cpp:stream_sync":
