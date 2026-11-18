@@ -390,7 +390,12 @@ def _define_active_kernel():
 
 def _check_kernel_bodies():
     """The active-set attempt's body is the plain attempt's, op for op."""
-    assert _define_active_kernel().walk.digest == _define_kernel().step.walk.digest, (
+    from hawk.artifact import describe
+
+    def digest(kernel):
+        return describe([kernel], targets=("host",))[kernel.name]["digest"]
+
+    assert digest(_define_active_kernel()) == digest(_define_kernel().step), (
         "the active-set attempt's body drifted from the plain attempt's")
 
 

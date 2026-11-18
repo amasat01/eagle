@@ -85,15 +85,16 @@ def _chosen(k, n, backend):
 
 
 def _table(device):
-    """The measured ``steps_reverse="auto"`` rows the build of a four-step kernel states in its sidecar."""
-    from eagle.sidecar import sidecar_of
+    """The measured ``steps_reverse="auto"`` columns hawk states for a four-step kernel, on the host or the device."""
+    from hawk.artifact import describe
     from hawk.runtime import steps_reverse_table
 
-    return steps_reverse_table(sidecar_of(eagle.plan.auto(hawk.steps(rr_pend, 4)).plugin), device)
+    kernel = hawk.steps(rr_pend, 4)
+    return steps_reverse_table(describe([kernel])[kernel.name], device)
 
 
 def test_auto_follows_the_measured_table_on_the_host():
-    assert _table(False)["rows"], "the host class has measured rows"
+    assert _table(False).get("widths"), "the host class has measured rows"
     assert _chosen(4, 8, "cpu") == "fused"           # inside the measured batch range
     assert _chosen(4, 4096, "cpu") == "per_step"     # beyond it
     assert _chosen(1, 8, "cpu") == "per_step"        # a single-step kernel has nothing to fuse
@@ -108,14 +109,14 @@ def test_auto_on_a_device_reads_its_residency_and_follows_the_device_rows():
 def test_the_choice_rule_is_applied_to_the_measured_rows():
     from eagle._until_done import _steps_reverse_choice as choose
 
-    rows = _table(False)["rows"]
+    rows = _table(False)
     assert choose(rows, 4, 4, 8 / 1) == "fused"      # inside the measured batch range
     assert choose(rows, 4, 4, 4096) == "per_step"    # beyond it
     assert choose(rows, 4, 8, 16) == "fused" and choose(rows, 2, 8, 65536) == "fused"
     assert choose(rows, 3, 4, 64) == "fused"         # the nearest measured regime
-    assert choose((), 4, 4, 8) == "per_step"         # a target with no row
+    assert choose({}, 4, 4, 8) == "per_step"         # a target with no row
     dev = _table(True)
     assert dev["regime"] == "per_resident"
     for resident in (5 * 2048, 58 * 1536, 108 * 2048):      # SM count x resident threads: P2000, L4, A100
-        assert choose(dev["rows"], 2, 8, 65536 / resident) == "fused"
-        assert choose(dev["rows"], 2, 8, 64 / resident) == "per_step"     # below the measured regime
+        assert choose(dev, 2, 8, 65536 / resident) == "fused"
+        assert choose(dev, 2, 8, 64 / resident) == "per_step"     # below the measured regime

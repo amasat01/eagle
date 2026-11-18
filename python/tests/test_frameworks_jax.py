@@ -45,8 +45,9 @@ jax = pytest.importorskip("jax",
     reason="jax is not installed here (jax's jaxlib ships free-threaded wheels for 3.14t only); these rows run in the Kaggle GPU job (.github/kaggle/kernel.py), where jax, hawk and eagle are all present")
 hawk = pytest.importorskip("hawk", reason="hawk is not installed here; these rows run in the Kaggle GPU job (.github/kaggle/kernel.py), where jax, hawk and eagle are all present")
 
-from hawk.facts import load as _facts  # noqa: E402
-_ROW = _facts("cpu")["cells"]["row"]      # samples per row of the host facts
+from conftest import host_cell_row  # noqa: E402
+
+_ROW = host_cell_row()      # samples per row of the host cells
 
 import jax.numpy as jnp  # noqa: E402
 from hawk import Mutable, Param, Scalar, Terminated, Vector  # noqa: E402

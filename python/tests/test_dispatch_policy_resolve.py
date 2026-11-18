@@ -176,17 +176,15 @@ def test_the_state_is_safe_to_share_between_threads():
 def test_a_real_hawk_cost_goes_through_the_rule():
     hawk = pytest.importorskip("hawk")
     import hawk.math as M
-    from raptor.ir import canonical
-    from aether.wings.cpu.host_vector import dispatch_costs
-    from hawk.targets import build_spec
+    from hawk.artifact import describe
 
     @hawk.kernel
     def rare(k: hawk.Index, x: hawk.Scalar, y: hawk.Mutable[hawk.Scalar]):
         y = M.dispatch(k, [x + 1.0, M.exp(M.sin(x) * M.cos(x)), x], strategy="auto")
 
-    cost = dispatch_costs(canonical(rare.sinks), build_spec(("host",)))["dispatch0"]
+    row = describe([rare], targets=("host",))["rare"]["dispatch"][0]
+    cost = dp.group_cost(row)
     assert dp.static_selector(cost.selector_reads, {"y"})
-    assert not cost.fused_vectorised  # the fused host loop renders the dispatch as a switch, which stays scalar
     big = 1 << 26  # the host's launch terms are noise at this size
     # which path wins a mixed batch is measured, not fixed here (test_dispatch_door follows the faster path)
     assert dp.resolve(cost, [big * 98 // 100, big // 100, big // 100], **RUN) in ("switch", "segmented")

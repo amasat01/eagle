@@ -89,6 +89,18 @@ def _exact_host_profile():
     mp.undo()
 
 
+def host_cell_row() -> int:
+    """Samples per row of a reduction over samples on the host: the ``cell_row`` hawk states for a kernel with a cell."""
+    import hawk
+    from hawk.artifact import describe
+
+    @hawk.kernel
+    def row_probe(x: hawk.Scalar, s: hawk.Mutable[hawk.Scalar]):
+        s = hawk.sum(x)  # noqa: F841
+
+    return describe([row_probe], targets=("host",))["row_probe"]["cell_row"]
+
+
 CUPY_AVAILABLE = _cupy_available()
 TORCH_AVAILABLE = _torch_available()
 MPI_AVAILABLE = _mpi_available()
