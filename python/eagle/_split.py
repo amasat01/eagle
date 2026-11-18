@@ -378,20 +378,16 @@ def cells(plugin) -> tuple:
                  if c not in plugin._internal)
 
 
-def kernels_of(kernel, spec=None) -> tuple:
-    """The stages of a traced hawk ``kernel`` as kernels of their own, in run
-    order (``()`` when it is one kernel): for a door that chains one ordinary
-    call per stage, the cells of a stage passed to the next as one-cell
-    planes."""
-    from hawk import Kernel
-    from raptor.wings.base.split import stages
+def kernels_of(kernel) -> tuple:
+    """The stages of a traced hawk ``kernel`` as kernels of their own, in run order: ``()`` for a kernel that is one unit.
+    hawk's description names the stages and their cells but states no stage kernel, so a split kernel is refused by name."""
+    from hawk.artifact import describe
 
-    from ._dispatch_door import host_spec
-
-    found = stages(kernel.name, kernel.sinks, spec=host_spec(kernel, spec))
-    return () if found is None else tuple(
-        Kernel(st.name, st.sinks, kernel.planes, kind=getattr(kernel, "kind", None))
-        for st in found)
+    stages = describe([kernel], targets=("host",))[kernel.name].get("stages")
+    if stages:
+        raise ValueError(f"eagle: kernel {kernel.name!r} splits into {len(stages)} stages and hawk states no kernel for a stage: "
+                         "lower it as one call")
+    return ()
 
 
 def _one_launch(stage, has_planes: bool) -> bool:

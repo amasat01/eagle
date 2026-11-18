@@ -93,10 +93,27 @@ def _props(props, target: str) -> Mapping[str, float]:
     return {f: get(f) for f in _PROPS_FIELDS}
 
 
+#: The counts of one branch, in the order the rule reads them (``describe()``'s ``dispatch[].cost.branches`` rows name them).
+_BRANCH_COUNTS = ("arith32", "arith64", "special32", "special64", "loads", "gathers", "chain32", "chain64",
+                  "chain_special32", "chain_special64", "stores")
+
+
+def group_cost(row: Mapping):
+    """The cost record of one dispatch group, from its ``describe()`` row: the per-branch counts, whether the selector is
+    static, and the ``(role, name)`` slots it reads. The vectorised flags are not stated, so the rule takes the fused flag."""
+    from types import SimpleNamespace
+
+    return SimpleNamespace(branches=list(row["cost"]["branches"]), static_selector=row["static_selector"],
+                           selector_reads=[tuple(pair) for pair in row["selector_reads"]])
+
+
 def _rows(cost) -> list[tuple[float, ...]]:
-    """Each branch's counts, chain lengths and, when counted, plane elements written
-    (an older hawk has no chains: 6 values; one without stores: 10)."""
-    if hasattr(cost.branches[0], "row_tuple"):
+    """Each branch's counts, chain lengths and plane elements written, as a tuple: from a described branch (a mapping
+    of the named counts), else from a record that gives its own tuple (6 values without chains, 10 without stores)."""
+    first = cost.branches[0]
+    if isinstance(first, Mapping):
+        return [tuple(b[name] for name in _BRANCH_COUNTS) for b in cost.branches]
+    if hasattr(first, "row_tuple"):
         return [b.row_tuple() for b in cost.branches]
     return [b.chain_tuple() if hasattr(b, "chain_tuple") else b.as_tuple() for b in cost.branches]
 
