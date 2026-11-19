@@ -42,9 +42,9 @@ memory at N = 1,000,000, <!--c xmin arm=eagle_simulate-->1.4×<!--/c--> the bare
 ## On a CPU
 
 <!--ctx card=ensemblecpu dev=amd-epyc-9b45 n=1e6 dist=spread-->
-The same workload on CPU threads: the eagle CPU path takes <!--c wall arm=eagle_cpu8-->3.69 s<!--/c--> on eight threads and
-<!--c wall arm=eagle_cpu1-->29.4 s<!--/c--> on one; Numba's `prange` takes <!--c wall arm=numba_prange-->20.9 s<!--/c--> and JAX
-<!--c wall arm=jax_vmap-->60.4 s<!--/c-->.
+The same workload on CPU threads: the eagle CPU path takes <!--c wall arm=eagle_cpu8-->2.49 s<!--/c--> on eight threads and
+<!--c wall arm=eagle_cpu1-->19.9 s<!--/c--> on one; Numba's `prange` takes <!--c wall arm=numba_prange-->19.6 s<!--/c--> and JAX
+<!--c wall arm=jax_vmap-->60.5 s<!--/c-->.
 
 ## Other devices
 

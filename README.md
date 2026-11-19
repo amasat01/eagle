@@ -324,17 +324,47 @@ Measured on:
 - [NVIDIA H100 NVL](https://amasat01.github.io/eagle/content/performance.html#perf-card-gpu-nvidia-h100-nvl)
 - [NVIDIA L4](https://amasat01.github.io/eagle/content/performance.html#perf-card-gpu-nvidia-l4)
 - [AMD EPYC 9B45](https://amasat01.github.io/eagle/content/performance.html#perf-card-cpu-amd-epyc-9b45)
+- [Intel Xeon W-2125 CPU @ 4.00GHz](https://amasat01.github.io/eagle/content/performance.html#perf-card-cpu-intel-r-xeon-r-w-2125-cpu-4-00ghz)
+- [Apple M4 Pro](https://amasat01.github.io/eagle/content/performance.html#perf-card-cpu-apple-m4-pro)
+- [Google Axion (Arm Neoverse-V2)](https://amasat01.github.io/eagle/content/performance.html#perf-card-cpu-aarch64)
 <!-- cards:end -->
 
 <!-- cpu-cards:begin -->
-**On a CPU alone: AMD EPYC 9B45, 16 logical CPUs, card of 2026-11-04**
+**On a CPU alone: AMD EPYC 9B45, 16 logical CPUs, card of 2026-11-10**
 
 | Arm (N = 1,000,000) | spread wall | uniform wall | vs eagle CPU, 8 threads (spread) |
 |---|---:|---:|---:|
-| eagle CPU, 8 threads | 3.69 s (2.05 ms) | 2.08 s (2.12 ms) | 1.0× |
-| eagle CPU, 1 thread | 29.4 s (14.4 ms) | 16.5 s (2.75 ms) | 7.9× |
-| Numba prange | 20.9 s (396 ms) | 17.9 s (265 ms) | 5.6× |
-| JAX jit(vmap(while_loop)) | 60.4 s (7.88 ms) | 28.8 s (57.4 ms) | 16× |
+| eagle CPU, 8 threads | 2.49 s (605 µs) | 2.06 s (23.7 µs) | 1.0× |
+| eagle CPU, 1 thread | 19.9 s (3.64 ms) | 16.4 s (5.63 ms) | 7.9× |
+| Numba prange | 19.6 s (49.3 ms) | 17.8 s (52.8 ms) | 7.8× |
+| JAX jit(vmap(while_loop)) | 60.5 s (92.9 ms) | 28.8 s (26.1 ms) | 24× |
+
+**On a CPU alone: Intel(R) Xeon(R) W-2125 CPU @ 4.00GHz, 8 logical CPUs, card of 2026-11-10**
+
+| Arm (N = 1,000,000) | spread wall | uniform wall | vs eagle CPU, 8 threads (spread) |
+|---|---:|---:|---:|
+| eagle CPU, 8 threads | 6.02 s (9.08 ms) | 4.92 s (22.9 ms) | 1.0× |
+| eagle CPU, 1 thread | 29.2 s (12.3 ms) | 24.1 s (9.44 ms) | 4.8× |
+| Numba prange | 55 s (21.4 ms) | 47.2 s (33.6 ms) | 9.1× |
+| JAX jit(vmap(while_loop)) | 118 s (276 ms) | 56.4 s (21.9 ms) | 19× |
+
+**On a CPU alone: Apple M4 Pro, 14 logical CPUs, card of 2026-11-10**
+
+| Arm (N = 1,000,000) | spread wall | uniform wall | vs eagle CPU, 8 threads (spread) |
+|---|---:|---:|---:|
+| eagle CPU, 8 threads | 2.67 s (16.6 ms) | 2.4 s (39 ms) | 1.0× |
+| eagle CPU, 1 thread | 20.1 s (17.9 ms) | 17.1 s (8.98 ms) | 7.5× |
+| Numba prange | 17.1 s (219 ms) | 15 s (236 ms) | 6.3× |
+| JAX jit(vmap(while_loop)) | 33.9 s (107 ms) | 16 s (71.5 ms) | 12× |
+
+**On a CPU alone: Google Axion (Arm Neoverse-V2), 8 logical CPUs, card of 2026-11-10**
+
+| Arm (N = 1,000,000) | spread wall | uniform wall | vs eagle CPU, 8 threads (spread) |
+|---|---:|---:|---:|
+| eagle CPU, 8 threads | 7.17 s (3.4 ms) | 6.11 s (14.2 ms) | 1.0× |
+| eagle CPU, 1 thread | 57.2 s (6.48 ms) | 48.7 s (16.9 ms) | 7.9× |
+| Numba prange | 22.6 s (108 ms) | 19.2 s (81.1 ms) | 3.1× |
+| JAX jit(vmap(while_loop)) | 62.3 s (147 ms) | 29.9 s (95.7 ms) | 8.6× |
 <!-- cpu-cards:end -->
 
 **Where each tool fits.** On a dense batch (uniform: every sample runs the same orbit) NVIDIA Warp's per-thread kernel is the

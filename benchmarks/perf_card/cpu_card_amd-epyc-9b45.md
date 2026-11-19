@@ -4,22 +4,22 @@
 
 | N | arm | threads | wall (IQR) | rounds | attempts·samples/s | useful FLOP/s | eff_sol | host memory | host memory net of NumPy | lines of code |
 |---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 64 (spread) | eagle CPU, 8 threads | 8 | 2.16 ms (39 µs) | 3 | 13.3 M | 14.8 G | 0.030 | 0 MiB | – | 22 |
-| 64 (spread) | eagle CPU, 1 thread | 1 | 2.16 ms (41.4 µs) | 3 | 13.3 M | 14.8 G | 0.030 | 0 MiB | – | 22 |
-| 1,000,000 (spread) | eagle CPU, 8 threads | 8 | 3.69 s (2.05 ms) | 3 | 135 M | 150 G | 0.306 | 146 MiB | – | 22 |
-| 1,000,000 (spread) | eagle CPU, 1 thread | 1 | 29.4 s (14.4 ms) | 3 | 17 M | 18.8 G | 0.038 | 145 MiB | – | 22 |
-| 1,000,000 (spread) | Numba prange | 8 | 20.9 s (396 ms) | 4 | 23.8 M | 26.4 G | 0.054 | 122 MiB | – | 58 |
-| 1,000,000 (spread) | JAX jit(vmap(while_loop)) | 8 | 60.4 s (7.88 ms) | 3 | 8.26 M | 9.13 G | 0.019 | 313 MiB | – | 25 |
+| 64 (spread) | eagle CPU, 8 threads | 8 | 1.56 ms (37.6 µs) | 9 | 18.5 M | 20.4 G | 0.042 | 0 MiB | – | 22 |
+| 64 (spread) | eagle CPU, 1 thread | 1 | 1.58 ms (28.6 µs) | 5 | 18.2 M | 20.2 G | 0.042 | 0 MiB | – | 22 |
+| 1,000,000 (spread) | eagle CPU, 8 threads | 8 | 2.49 s (605 µs) | 3 | 200 M | 221 G | 0.455 | 146 MiB | – | 22 |
+| 1,000,000 (spread) | eagle CPU, 1 thread | 1 | 19.9 s (3.64 ms) | 3 | 25 M | 27.7 G | 0.057 | 146 MiB | – | 22 |
+| 1,000,000 (spread) | Numba prange | 8 | 19.6 s (49.3 ms) | 3 | 25.4 M | 28.1 G | 0.058 | 121 MiB | – | 58 |
+| 1,000,000 (spread) | JAX jit(vmap(while_loop)) | 8 | 60.5 s (92.9 ms) | 3 | 8.24 M | 9.12 G | 0.019 | 312 MiB | – | 25 |
 | 1,000,000 (spread) | NumPy masked | 1 | not run: budget (> 120 s per run) | – | – | – | – | – | – | – |
-| 1,000,000 (spread-short) | eagle CPU, 8 threads | 8 | 168 ms (117 µs) | 3 | 157 M | 173 G | 0.354 | 146 MiB | – | 22 |
-| 1,000,000 (spread-short) | eagle CPU, 1 thread | 1 | 1.33 s (2.24 ms) | 3 | 19.8 M | 21.9 G | 0.045 | 146 MiB | – | 22 |
-| 1,000,000 (spread-short) | Numba prange | 8 | 1.04 s (1.7 ms) | 3 | 25.3 M | 27.9 G | 0.057 | 121 MiB | – | 58 |
-| 1,000,000 (spread-short) | JAX jit(vmap(while_loop)) | 8 | 2.67 s (47.5 ms) | 3 | 9.87 M | 10.9 G | 0.022 | 312 MiB | – | 25 |
+| 1,000,000 (spread-short) | eagle CPU, 8 threads | 8 | 136 ms (97.6 µs) | 3 | 194 M | 215 G | 0.442 | 146 MiB | – | 22 |
+| 1,000,000 (spread-short) | eagle CPU, 1 thread | 1 | 1.07 s (496 µs) | 3 | 24.6 M | 27.2 G | 0.056 | 145 MiB | – | 22 |
+| 1,000,000 (spread-short) | Numba prange | 8 | 1.05 s (2.07 ms) | 3 | 25.1 M | 27.8 G | 0.057 | 122 MiB | – | 58 |
+| 1,000,000 (spread-short) | JAX jit(vmap(while_loop)) | 8 | 2.67 s (2.27 ms) | 3 | 9.86 M | 10.9 G | 0.022 | 313 MiB | – | 25 |
 | 1,000,000 (spread-short) | NumPy masked | 1 | not run: budget (> 120 s per run) | – | – | – | – | – | – | – |
-| 1,000,000 (uniform) | eagle CPU, 8 threads | 8 | 2.08 s (2.12 ms) | 3 | 206 M | 228 G | 0.466 | 115 MiB | – | 22 |
-| 1,000,000 (uniform) | eagle CPU, 1 thread | 1 | 16.5 s (2.75 ms) | 3 | 25.9 M | 28.6 G | 0.058 | 145 MiB | – | 22 |
-| 1,000,000 (uniform) | Numba prange | 8 | 17.9 s (265 ms) | 3 | 23.9 M | 26.5 G | 0.054 | 121 MiB | – | 58 |
-| 1,000,000 (uniform) | JAX jit(vmap(while_loop)) | 8 | 28.8 s (57.4 ms) | 3 | 14.8 M | 16.4 G | 0.034 | 313 MiB | – | 25 |
+| 1,000,000 (uniform) | eagle CPU, 8 threads | 8 | 2.06 s (23.7 µs) | 3 | 208 M | 230 G | 0.473 | 146 MiB | – | 22 |
+| 1,000,000 (uniform) | eagle CPU, 1 thread | 1 | 16.4 s (5.63 ms) | 3 | 26 M | 28.8 G | 0.059 | 145 MiB | – | 22 |
+| 1,000,000 (uniform) | Numba prange | 8 | 17.8 s (52.8 ms) | 3 | 24.1 M | 26.6 G | 0.055 | 121 MiB | – | 58 |
+| 1,000,000 (uniform) | JAX jit(vmap(while_loop)) | 8 | 28.8 s (26.1 ms) | 3 | 14.8 M | 16.4 G | 0.034 | 313 MiB | – | 25 |
 | 1,000,000 (uniform) | NumPy masked | 1 | not run: budget (> 120 s per run) | – | – | – | – | – | – | – |
 
 | N | arm | max position error | max error / bound | samples with different step counts |
