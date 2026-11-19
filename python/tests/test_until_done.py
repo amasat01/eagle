@@ -43,6 +43,9 @@ from eagle import SkipGuard, compaction_body, repeat_while
 from eagle._active_set import MIN_REORDER_SPAN
 from eagle.sidecar import read_finish
 
+# the finishing kernels are compared bit for bit with the explicit path's separate compile
+pytestmark = pytest.mark.usefixtures("_exact_host_profile")
+
 _DT = 1e-3
 _FINISH = {"mask": "terminated", "counter": "finished_count", "steps": 1}
 
