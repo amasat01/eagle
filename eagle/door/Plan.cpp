@@ -16,30 +16,49 @@ namespace door {
 
 namespace {
 
-/** @brief The partitions of @p d: the whole range, or the caller's, checked to stay
- *  inside [0, n) without overlap. */
+/** @brief @p parts contiguous partitions of [0, @p range), each over @p n samples: the first range % parts take one
+ *  more, as eagle's Python plan splits. A range shorter than @p parts leaves the last partitions empty. */
+std::vector<exec::Partition> split_evenly(std::int64_t range, std::int64_t parts, std::int64_t n) {
+    std::vector<exec::Partition> out;
+    std::int64_t base = 0, remaining = range;
+    for (std::int64_t left = parts; left > 0; --left) {
+        const std::int64_t count = (remaining + left - 1) / left;
+        out.push_back(exec::Partition{ base, count, n });
+        base += count;
+        remaining -= count;
+    }
+    return out;
+}
+
+/** @brief The partitions of @p d: the whole range, an even split of it, or the caller's, checked to stay inside
+ *  the range without overlap. The range is the samples [0, n), or for a thread box the threads
+ *  [0, ceil(n / (t * stride)) * stride): each thread owns whole boxes, so no partition splits one. */
 std::vector<exec::Partition> read_partitions(const eg_plan_desc& d) {
     const std::int64_t n = d.n_samples;
     const bool device = d.structure == EG_STRUCTURE_DEVICE;
     const std::int64_t box_t = device ? d.unit->dev_box_t : d.unit->box_t, box_stride = device ? d.unit->dev_box_stride : d.unit->box_stride;
-    if (box_t > 0) {    // a thread box: base and count count threads, ceil(n / (t * stride)) * stride of them
-        if (d.n_partitions != 0)
-            refuse(EG_BAD_REQUEST, "unit '" + d.unit->name + "' computes " + std::to_string(box_t) +
-                   " lanes per thread (a thread box), so its partitions count threads, not lanes; pass none");
-        const std::int64_t span = box_t * box_stride;
-        return { exec::Partition{ 0, (n + span - 1) / span * box_stride, n } };
+    const std::int64_t range = box_t > 0 ? (n + box_t * box_stride - 1) / (box_t * box_stride) * box_stride : n;
+    const std::string range_text = box_t > 0 ? "the thread range [0, " + std::to_string(range) + ") of unit '" + d.unit->name + "' (" +
+                                                   std::to_string(box_t) + " lanes per thread, stride " + std::to_string(box_stride) + ")"
+                                             : "the range [0, " + std::to_string(n) + ")";
+    if ((d.flags & EG_PLAN_SPLIT_EVENLY) != 0) {
+        if (d.part_base != nullptr || d.part_count != nullptr)
+            refuse(EG_BAD_REQUEST, "eg_plan_desc: EG_PLAN_SPLIT_EVENLY takes no part_base or part_count");
+        if (d.n_partitions < 1)
+            refuse(EG_BAD_REQUEST, "eg_plan_desc: EG_PLAN_SPLIT_EVENLY needs n_partitions >= 1, got " + std::to_string(d.n_partitions));
+        return split_evenly(range, d.n_partitions, n);
     }
-    if (d.n_partitions == 0) return { exec::Partition::whole(n) };
+    if (d.n_partitions == 0) return { exec::Partition{ 0, range, n } };
     if (d.n_partitions < 0 || d.part_base == nullptr || d.part_count == nullptr)
         refuse(EG_BAD_REQUEST, "eg_plan_desc: n_partitions " + std::to_string(d.n_partitions) +
                " needs part_base and part_count");
     std::vector<exec::Partition> parts;
     for (std::int64_t i = 0; i < d.n_partitions; ++i) {
         const std::int64_t base = d.part_base[i], count = d.part_count[i];
-        if (base < 0 || count < 1 || base > n || count > n - base)
+        if (base < 0 || count < 1 || base > range || count > range - base)
             refuse(EG_BAD_REQUEST, "partition " + std::to_string(i) + " (base " +
                    std::to_string(base) + ", count " + std::to_string(count) +
-                   ") leaves the range [0, " + std::to_string(n) + ")");
+                   ") leaves " + range_text);
         parts.push_back(exec::Partition{ base, count, n });
     }
     std::vector<exec::Partition> sorted = parts;
@@ -47,7 +66,7 @@ std::vector<exec::Partition> read_partitions(const eg_plan_desc& d) {
               [](const exec::Partition& a, const exec::Partition& b) { return a.base < b.base; });
     for (std::size_t i = 1; i < sorted.size(); ++i)
         if (sorted[i].base < sorted[i - 1].base + sorted[i - 1].count)
-            refuse(EG_BAD_REQUEST, "partitions overlap at sample " + std::to_string(sorted[i].base));
+            refuse(EG_BAD_REQUEST, "partitions overlap at " + std::to_string(sorted[i].base));
     return parts;
 }
 
@@ -385,7 +404,8 @@ void plan_new(eg_ctx& ctx, const eg_plan_desc* desc, eg_plan** out) {
     if (out == nullptr) refuse(EG_BAD_REQUEST, "eg_plan_new: out is NULL");
     *out = nullptr;
     const eg_plan_desc d = read_input(desc, "eg_plan_desc");
-    if (d.flags != 0) refuse(EG_BAD_REQUEST, "eg_plan_desc.flags: unknown bits " + std::to_string(d.flags));
+    if ((d.flags & ~EG_PLAN_SPLIT_EVENLY) != 0)
+        refuse(EG_BAD_REQUEST, "eg_plan_desc.flags: unknown bits " + std::to_string(d.flags & ~EG_PLAN_SPLIT_EVENLY));
     check_handle(ctx.units, d.unit, "eg_plan_desc.unit");
     const bool device = d.structure == EG_STRUCTURE_DEVICE;
     if (device) device_plan_check(ctx, *d.unit);
@@ -428,10 +448,10 @@ void plan_new(eg_ctx& ctx, const eg_plan_desc* desc, eg_plan** out) {
                 refuse(EG_NOT_WRITTEN, "unit '" + d.unit->name + "': the unit '" + m->name + "' of dispatch group '" + g.name + "' has no " + (device ? "device function" : "host entry"));
         if (d.unit->box_t > 0 || d.unit->index_count_slot >= 0 || d.unit->active_map_slot >= 0)
             refuse(EG_NOT_WRITTEN, "unit '" + d.unit->name + "': a SEGMENTED dispatch group over a thread box, an index set or an active set is not written");
-        if (d.n_partitions != 0 && !(d.n_partitions == 1 && d.part_base != nullptr && d.part_count != nullptr && d.part_base[0] == 0 && d.part_count[0] == d.n_samples))
-            refuse(EG_BAD_REQUEST, "unit '" + d.unit->name + "' runs a SEGMENTED dispatch group over the sorted samples: one whole partition");
     }
     std::vector<exec::Partition> parts = read_partitions(d);
+    if (d.unit->seg.present && (parts.size() != 1 || parts[0].base != 0 || parts[0].count != d.n_samples))
+        refuse(EG_BAD_REQUEST, "unit '" + d.unit->name + "' runs a SEGMENTED dispatch group over the sorted samples: one whole partition");
     for (const exec::Partition& p : parts)    // a row of a cell has one writer: a partition starts on a row
         if (d.unit->cell_row > 0 && p.base % d.unit->cell_row != 0)
             refuse(EG_BAD_REQUEST, "unit '" + d.unit->name + "' reduces over samples in rows of " + std::to_string(d.unit->cell_row) +

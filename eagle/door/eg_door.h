@@ -302,17 +302,22 @@ struct eg_ctx_info {
     int32_t weight_row;      /**< the index of the EG_WEIGHT_ROWS row taken, -1 for the built-in row of the target (no row of that class) */
 };
 
-/** INPUT to ``eg_plan_new``. */
+/** ``eg_plan_desc.flags``: split the range evenly into ``n_partitions`` parts (``part_base`` and ``part_count`` NULL):
+ *  the first ``range % n_partitions`` parts take one more, a range shorter than the parts leaves the last ones empty. */
+#define EG_PLAN_SPLIT_EVENLY (1u << 0)
+
+/** INPUT to ``eg_plan_new``. The range the partitions cut is the samples [0, n_samples); for a thread-box unit it is
+ *  its threads, [0, ceil(n_samples / (t * stride)) * stride), so a partition counts threads and never splits a box. */
 struct eg_plan_desc {
     uint32_t struct_size;
-    uint32_t flags;               /**< none defined: must be 0 */
+    uint32_t flags;               /**< EG_PLAN_SPLIT_EVENLY or 0 */
     eg_unit* unit;                /**< the source unit; its stages ride in its meta */
     eg_structure structure;
     eg_reduce_policy policy;      /**< order of the unit's sums over samples */
     int64_t n_samples;
-    int64_t n_partitions;         /**< 0: one partition, the whole range */
-    const int64_t* part_base;     /**< n_partitions entries, else NULL */
-    const int64_t* part_count;    /**< n_partitions entries, else NULL */
+    int64_t n_partitions;         /**< 0: one partition, the whole range; with EG_PLAN_SPLIT_EVENLY the number of parts (>= 1) */
+    const int64_t* part_base;     /**< n_partitions entries, else NULL (always NULL with EG_PLAN_SPLIT_EVENLY) */
+    const int64_t* part_count;    /**< n_partitions entries, else NULL (always NULL with EG_PLAN_SPLIT_EVENLY) */
 };
 
 /** INPUT to ``eg_bind`` and ``eg_reverse``: planes and uniforms by SLOT, the
@@ -631,7 +636,7 @@ eg_status eg_plane_dlpack(eg_ctx* ctx, eg_plane* plane, struct DLManagedTensorVe
  * Replaces: ``plan.plan``, ``plan.Plan``, ``_split`` stage plans.
  * Calls today: ``eagle::exec::Partition`` (Partition.h),
  * ``exec::check_placement``. Status: OK; BAD_REQUEST (partitions that
- * overlap or leave the range); NOT_WRITTEN (DEVICE without the device group).
+ * overlap or leave the range, the range named; EG_PLAN_SPLIT_EVENLY with arrays or with n_partitions < 1); NOT_WRITTEN (DEVICE without the device group).
  */
 eg_status eg_plan_new(eg_ctx* ctx, const struct eg_plan_desc* desc, eg_plan** out);
 

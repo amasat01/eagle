@@ -189,7 +189,7 @@ static void thread_box(eg_ctx* ctx, const char* lib, const char* hex, const char
         check(ok && memcmp(got, want, n * sizeof(double)) == 0, what);
         if (rows == 1) {
             struct eg_plan_desc pd;
-            const int64_t base = 0, count = 64;
+            const int64_t base = 0, count = 64, past = INT64_C(1) << 40;
             memset(&pd, 0, sizeof(pd));
             pd.struct_size = sizeof(pd);
             pd.unit = unit;
@@ -198,9 +198,13 @@ static void thread_box(eg_ctx* ctx, const char* lib, const char* hex, const char
             pd.n_partitions = 1;
             pd.part_base = &base;
             pd.part_count = &count;
+            eg_plan* part = NULL;
+            check(eg_plan_new(ctx, &pd, &part) == EG_OK, "thread box: an explicit partition of threads accepted");
+            eg_plan_free(ctx, part);
+            pd.part_base = &past;
             eg_plan* none = NULL;
-            check(eg_plan_new(ctx, &pd, &none) == EG_BAD_REQUEST && reason_has(ctx, "thread box"),
-                  "thread box: explicit partitions refused BAD_REQUEST (they count threads, not lanes)");
+            check(eg_plan_new(ctx, &pd, &none) == EG_BAD_REQUEST && reason_has(ctx, "thread range"),
+                  "thread box: a partition past the thread total refused BAD_REQUEST, naming the thread range");
             if (plan) runner_refused(ctx, plan, "a device thread box", "thread box: a runner over it refused NOT_WRITTEN by name");
         }
         if (plan) eg_plan_free(ctx, plan);

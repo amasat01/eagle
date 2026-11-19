@@ -2096,6 +2096,146 @@ static void check_shared(eg_ctx* ctx) {
     eg_unit_free(ctx, unit);
 }
 
+/* The box unit over n = 100 lanes (27 threads) under @p desc: y, or NULL when the plan is refused. */
+static eg_status box_run(eg_ctx* ctx, eg_unit* unit, const struct eg_plan_desc* desc, double* x, double* y) {
+    struct tensor ty, tx;
+    eg_plane *py = wrap(ctx, &ty, y, 100, kDLFloat, 64), *px = wrap(ctx, &tx, x, 100, kDLFloat, 64);
+    const int32_t slots[2] = { 0, 1 };
+    eg_plane* planes[2] = { py, px };
+    struct eg_bind_desc bd;
+    memset(&bd, 0, sizeof(bd));
+    bd.struct_size = sizeof(bd);
+    bd.n_planes = 2;
+    bd.plane_slots = slots;
+    bd.planes = planes;
+    struct eg_plan_desc d = *desc;
+    d.unit = unit;
+    eg_plan* p = NULL;
+    eg_status s = py && px ? eg_plan_new(ctx, &d, &p) : EG_FAULT;
+    if (s == EG_OK) s = eg_bind(ctx, p, &bd);
+    if (s == EG_OK) s = eg_launch(ctx, p, NULL);
+    eg_plan_free(ctx, p);
+    eg_plane_free(ctx, py);
+    eg_plane_free(ctx, px);
+    return s;
+}
+
+/* A thread box's partitions count threads: explicit ones and the even split equal the whole-range result bitwise. */
+static void check_box_partitions(eg_ctx* ctx, eg_unit* unit) {
+    static double x[100], y[100], whole[100];
+    for (int i = 0; i < 100; ++i) x[i] = (double)i * 0.25 - 9.0;
+    struct eg_plan_desc d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    d.n_samples = 100;
+    int all = 1;
+    for (int si = 0; si < 2; ++si) {
+        d.structure = si == 0 ? EG_STRUCTURE_HOST_SERIAL : EG_STRUCTURE_HOST_TEAM;
+        for (int i = 0; i < 100; ++i) whole[i] = -5.0;
+        all &= box_run(ctx, unit, &d, x, whole) == EG_OK;
+        const int64_t one_base[1] = { 0 }, one_count[1] = { 27 };
+        const int64_t three_base[3] = { 0, 9, 18 }, three_count[3] = { 9, 9, 9 };
+        const int64_t gap_base[2] = { 3, 20 }, gap_count[2] = { 17, 7 };
+        const struct { int64_t n; const int64_t *base, *count; uint32_t flags; } cases[4] = {
+            { 1, one_base, one_count, 0 }, { 3, three_base, three_count, 0 }, { 3, NULL, NULL, EG_PLAN_SPLIT_EVENLY },
+            { 4, NULL, NULL, EG_PLAN_SPLIT_EVENLY } };
+        for (int c = 0; c < 4; ++c) {
+            d.n_partitions = cases[c].n, d.part_base = cases[c].base, d.part_count = cases[c].count, d.flags = cases[c].flags;
+            for (int i = 0; i < 100; ++i) y[i] = -5.0;
+            all &= box_run(ctx, unit, &d, x, y) == EG_OK && memcmp(y, whole, sizeof(y)) == 0;
+        }
+        d.n_partitions = 2, d.part_base = gap_base, d.part_count = gap_count, d.flags = 0;     /* threads [3, 20) and [20, 27) only */
+        for (int i = 0; i < 100; ++i) y[i] = -5.0;
+        all &= box_run(ctx, unit, &d, x, y) == EG_OK;
+        int served = 0;
+        for (int i = 0; i < 100; ++i) {
+            const int th = (i / 12) * 3 + (i % 12) % 3;       /* the lane's thread */
+            served += th >= 3;
+            all &= y[i] == (th >= 3 ? whole[i] : -5.0);
+        }
+        all &= served > 0 && served < 100;
+        d.flags = 0, d.n_partitions = 0, d.part_base = d.part_count = NULL;
+    }
+    check(all, "box: 1 and 3 explicit thread partitions, and EG_PLAN_SPLIT_EVENLY into 3 and 4, equal the whole-range result bitwise "
+               "(a partial range runs only its threads; SERIAL and TEAM)");
+    eg_plan* p = NULL;
+    d.structure = EG_STRUCTURE_HOST_TEAM, d.unit = unit;
+    const int64_t over_base[1] = { 0 }, over_count[1] = { 28 }, late_base[1] = { 27 }, late_count[1] = { 1 };
+    d.n_partitions = 1, d.part_base = over_base, d.part_count = over_count;
+    check(eg_plan_new(ctx, &d, &p) == EG_BAD_REQUEST && reason_has(ctx, "thread range [0, 27)") && reason_has(ctx, "4 lanes per thread, stride 3"),
+          "box: a thread partition past the thread total refused BAD_REQUEST, naming the unit, t, stride and the total");
+    d.part_base = late_base, d.part_count = late_count;
+    check(eg_plan_new(ctx, &d, &p) == EG_BAD_REQUEST && reason_has(ctx, "thread range [0, 27)"), "box: a thread partition starting at the total refused BAD_REQUEST");
+    const int64_t lap_base[2] = { 0, 4 }, lap_count[2] = { 5, 5 };
+    d.n_partitions = 2, d.part_base = lap_base, d.part_count = lap_count;
+    check(eg_plan_new(ctx, &d, &p) == EG_BAD_REQUEST && reason_has(ctx, "overlap"), "box: overlapping thread partitions refused BAD_REQUEST");
+}
+
+/* EG_PLAN_SPLIT_EVENLY cuts a range as eagle's Python plan does; its refusals by name. */
+static void check_even_split(eg_ctx* ctx) {
+    void* lib = dlopen(library_path, RTLD_LAZY | RTLD_NOLOAD);
+    int64_t* spans = lib ? (int64_t*)dlsym(lib, "fixture_spans") : NULL;
+    int64_t* span_n = lib ? (int64_t*)dlsym(lib, "fixture_span_n") : NULL;
+    eg_unit* unit = NULL;
+    check(spans != NULL && span_n != NULL && load(ctx, "spans", 0xB9, &unit) == EG_OK, "eg_unit_load spans");
+    if (spans == NULL || span_n == NULL || unit == NULL) return;
+    /* the Python plan's (n, parts) splits: ceil(remaining / left) each, the remainder spread early; empty parts launch nothing */
+    static const int64_t want_10_3[] = { 0, 4, 4, 3, 7, 3 };
+    static const int64_t want_7_7[] = { 0, 1, 1, 1, 2, 1, 3, 1, 4, 1, 5, 1, 6, 1 };
+    static const int64_t want_1_4[] = { 0, 1 };
+    const struct { int64_t n, parts, calls; const int64_t* want; } cases[3] = {
+        { 10, 3, 3, want_10_3 }, { 7, 7, 7, want_7_7 }, { 1, 4, 1, want_1_4 } };
+    int all = 1;
+    for (int c = 0; c < 3; ++c) {
+        int64_t cell = 0;
+        struct tensor t;
+        eg_plane* pc = wrap(ctx, &t, &cell, 1, kDLInt, 64);
+        struct eg_plan_desc d;
+        memset(&d, 0, sizeof(d));
+        d.struct_size = sizeof(d);
+        d.unit = unit;
+        d.structure = EG_STRUCTURE_HOST_SERIAL;
+        d.n_samples = cases[c].n;
+        d.n_partitions = cases[c].parts;
+        d.flags = EG_PLAN_SPLIT_EVENLY;
+        eg_plan* p = NULL;
+        const int32_t slot = 0;
+        struct eg_bind_desc bd;
+        memset(&bd, 0, sizeof(bd));
+        bd.struct_size = sizeof(bd);
+        bd.n_planes = 1;
+        bd.plane_slots = &slot;
+        bd.planes = &pc;
+        *span_n = 0;
+        uint64_t tiles = 0;
+        all &= pc && eg_plan_new(ctx, &d, &p) == EG_OK && eg_bind(ctx, p, &bd) == EG_OK && eg_launch(ctx, p, &tiles) == EG_OK &&
+               *span_n == cases[c].calls && tiles == (uint64_t)cases[c].calls &&
+               memcmp(spans, cases[c].want, 2 * sizeof(int64_t) * (size_t)cases[c].calls) == 0;
+        eg_plan_free(ctx, p);
+        eg_plane_free(ctx, pc);
+    }
+    check(all, "EG_PLAN_SPLIT_EVENLY: the bases and counts of the Python plan's even split for (n, parts) = (10, 3), (7, 7), (1, 4)");
+    eg_plan* p = NULL;
+    const int64_t base[1] = { 0 }, count[1] = { 4 };
+    struct eg_plan_desc d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    d.unit = unit;
+    d.structure = EG_STRUCTURE_HOST_SERIAL;
+    d.n_samples = 10;
+    d.flags = EG_PLAN_SPLIT_EVENLY;
+    d.n_partitions = 1, d.part_base = base, d.part_count = count;
+    check(eg_plan_new(ctx, &d, &p) == EG_BAD_REQUEST && reason_has(ctx, "takes no part_base or part_count"),
+          "EG_PLAN_SPLIT_EVENLY with part_base and part_count refused BAD_REQUEST by name");
+    d.part_base = d.part_count = NULL;
+    d.n_partitions = 0;
+    check(eg_plan_new(ctx, &d, &p) == EG_BAD_REQUEST && reason_has(ctx, "needs n_partitions >= 1"),
+          "EG_PLAN_SPLIT_EVENLY with n_partitions 0 refused BAD_REQUEST by name");
+    d.flags = 1u << 1, d.n_partitions = 1;
+    check(eg_plan_new(ctx, &d, &p) == EG_BAD_REQUEST && reason_has(ctx, "unknown bits"), "an unknown plan flag bit refused BAD_REQUEST");
+    eg_unit_free(ctx, unit);
+}
+
 static void check_box(eg_ctx* ctx) {
     void* lib = dlopen(library_path, RTLD_LAZY | RTLD_NOLOAD);
     int64_t* threads_run = lib ? (int64_t*)dlsym(lib, "fixture_box_threads") : NULL;
@@ -2134,19 +2274,7 @@ static void check_box(eg_ctx* ctx) {
         }
     check(all, "box: ceil(n / (T * stride)) * stride threads run, and every lane is served once (y = 2x + 1 for n = 1, 12, 1000, 1001, "
                "SERIAL and TEAM)");
-    eg_plan* p = NULL;
-    const int64_t base[1] = { 0 }, count[1] = { 4 };
-    struct eg_plan_desc d;
-    memset(&d, 0, sizeof(d));
-    d.struct_size = sizeof(d);
-    d.unit = unit;
-    d.structure = EG_STRUCTURE_HOST_TEAM;
-    d.n_samples = 100;
-    d.n_partitions = 1;
-    d.part_base = base;
-    d.part_count = count;
-    check(eg_plan_new(ctx, &d, &p) == EG_BAD_REQUEST && reason_has(ctx, "count threads, not lanes"),
-          "box: explicit partitions refused BAD_REQUEST by name");
+    check_box_partitions(ctx, unit);
     eg_unit* bad = NULL;
     check(load(ctx, "boxbad", 0x65, &bad) == EG_BAD_REQUEST && reason_has(ctx, "host_box needs"),
           "box: a thread box of fewer than 2 lanes refused BAD_REQUEST by name");
@@ -3438,6 +3566,7 @@ int main(int argc, char** argv) {
     check_gather(ctx);
     check_shared(ctx);
     check_box(ctx);
+    check_even_split(ctx);
     check_made(ctx);
     check_alloc(ctx, unit);
     check_clear(ctx, unit);
