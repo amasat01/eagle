@@ -510,6 +510,7 @@ def test_returns_routes_results_and_a_missing_framework_warns_once_and_keeps_eag
     from eagle.frameworks import _bridge
 
     monkeypatch.setitem(sys.modules, "jax", None)
+    monkeypatch.delitem(sys.modules, "eagle.frameworks.jax", raising=False)   # a bridge an earlier test imported
     monkeypatch.setattr(_bridge, "_WARNED", set())
     a = xp.asarray([1.0, 2.0], xp.float64)
     with warnings.catch_warnings(record=True) as seen:
