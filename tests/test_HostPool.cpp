@@ -145,6 +145,32 @@ TEST(HostPoolTest, EveryTeamEqualsASerialRunBitwise)
             }
 }
 
+/** @brief hostFor entered from inside a body of another hostFor, and from several threads at once, runs the entered
+ *  loop in place as a team of one, so each element is written once and the bits equal a serial run for every team. */
+TEST(HostPoolTest, ANestedOrConcurrentHostForRunsInPlaceWithTheSerialBits)
+{
+    Deadline deadline(120);
+    constexpr std::int64_t kOuter = 24, kInner = 1000;
+    std::vector<std::int64_t> want(kOuter * kInner);
+    for (std::int64_t o = 0; o < kOuter; ++o)
+        for (std::int64_t i = 0; i < kInner; ++i) want[o * kInner + i] = o * 31 + i * 7;
+    for (const int team : { 1, 2, 7 }) {
+        std::vector<std::int64_t> nested(want.size(), -1);
+        hostFor(kOuter, team, [&](std::int64_t o) {
+            hostFor(kInner, team, [&](std::int64_t i) { nested[o * kInner + i] = o * 31 + i * 7; });
+        });
+        EXPECT_EQ(nested, want) << "nested, team=" << team;
+        std::vector<std::int64_t> concurrent(want.size(), -1);
+        std::vector<std::thread> callers;
+        for (std::int64_t o = 0; o < kOuter; ++o)
+            callers.emplace_back([&, o] {
+                hostFor(kInner, team, [&](std::int64_t i) { concurrent[o * kInner + i] = o * 31 + i * 7; });
+            });
+        for (std::thread& t : callers) t.join();
+        EXPECT_EQ(concurrent, want) << "concurrent, team=" << team;
+    }
+}
+
 TEST(HostPoolTest, TheFloorKeepsLightStagesInPlace)
 {
     Deadline deadline(60);

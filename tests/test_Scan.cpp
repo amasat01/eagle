@@ -295,6 +295,26 @@ void verifyNestedHostUpdateMatches(FixtureT& fixture, int numThreads)
     }
 }
 
+/** @brief A host slice update gives the same indexes for every team of the host pool (the scan inside is team-invariant). */
+TEST_F(LargeScatterSlice, HostUpdateGivesTheSameIndexesForEveryTeam)
+{
+    std::vector<eagle::idx_t> one;
+    for (int team : { 1, 2, 7 }) {
+        eagle::exec::host_threads_setting().store(team);
+        SliceT slice(data_);
+        OMPfeed<SliceT>(slice.hostRef(), lflags_.hostRef(), rflags_.hostRef());
+        slice.hostUpdate();
+        const SliceT::GRef ref = slice.hostRef();
+        std::vector<eagle::idx_t> got;
+        for (idx_t i = 0; i < ref.size(); i++)
+            got.push_back(ref.rawIndexes().eval(eagle::SampleIndex::make(i)));
+        if (team == 1)
+            one = got;
+        EXPECT_EQ(got, one) << "team=" << team;
+    }
+    eagle::exec::host_threads_setting().store(0);
+}
+
 TEST_F(SmallScatterSlice, NestedHostUpdate_T1) { verifyNestedHostUpdateMatches(*this, 1); }
 TEST_F(SmallScatterSlice, NestedHostUpdate_T2) { verifyNestedHostUpdateMatches(*this, 2); }
 TEST_F(SmallScatterSlice, NestedHostUpdate_T4) { verifyNestedHostUpdateMatches(*this, 4); }
