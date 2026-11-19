@@ -241,8 +241,6 @@ if (NOT EAGLE_CPP_MODE)
   )
 endif()
 
-target_link_libraries(${EAGLE_LIB} INTERFACE stdc++fs)
-
 ###########################
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
