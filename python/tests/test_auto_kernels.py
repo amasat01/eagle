@@ -85,8 +85,8 @@ ak_energy_jvp = Kernel("ak_energy_jvp", jvp(ak_energy, wrt=("v",)))
 
 def _hand_plugins(kernels, work, targets=("host",)):
     """The plugins every caller used to assemble by hand, ``{name: plugin}``."""
-    from hawk import _core as hcore
     from hawk.artifact import build_bundle, plan_view
+    from hawk.runtime import load
 
     bundle = build_bundle(kernels, work, targets=targets)
     registry = None
@@ -98,7 +98,7 @@ def _hand_plugins(kernels, work, targets=("host",)):
     for art in bundle.artifacts:
         view = plan_view(art.sidecar)
         so = work / f"{art.name}.so"
-        lib, cdll = hcore.HostLibrary(str(so)), ctypes.CDLL(str(so))
+        lib, cdll = load(work, art.name), ctypes.CDLL(str(so))   # hawk's load self-checks the library
         extra = {"host_entry": ctypes.cast(getattr(cdll, view.pop("host_entry")),
                                            ctypes.c_void_p).value}
         keep = [lib, cdll]

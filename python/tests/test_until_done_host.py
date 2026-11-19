@@ -34,12 +34,12 @@ import pytest
 
 
 def _load_host(so, entry_name, view, name):
-    from hawk import _core as hcore
+    from hawk.runtime import load
 
     import eagle.exec as eexec
     from eagle import plan as eplan
 
-    lib = hcore.HostLibrary(str(so))
+    lib = load(Path(so).parent, name)      # hawk's load self-checks the library
     cdll = ctypes.CDLL(str(so))
     plugin = SimpleNamespace(
         host_entry=ctypes.cast(getattr(cdll, entry_name), ctypes.c_void_p).value,

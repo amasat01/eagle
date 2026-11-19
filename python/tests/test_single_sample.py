@@ -75,8 +75,8 @@ def _plugins(kernels, work):
     """``{name: plugin}``: each plugin carries the host entry and, when a GPU
     is present, the device function — the one object ``eagle.plan.auto``
     takes."""
-    from hawk import _core as hcore
     from hawk.artifact import build_bundle, plan_view
+    from hawk.runtime import load
 
     targets = ("host", "cuda") if CUPY_AVAILABLE else ("host",)
     bundle = build_bundle(kernels, work, targets=targets)
@@ -90,7 +90,7 @@ def _plugins(kernels, work):
         view = plan_view(art.sidecar)
         host_entry = view.pop("host_entry")
         so = work / f"{art.name}.so"
-        lib, cdll = hcore.HostLibrary(str(so)), ctypes.CDLL(str(so))
+        lib, cdll = load(work, art.name), ctypes.CDLL(str(so))   # hawk's load self-checks the library
         extra = {"host_entry": ctypes.cast(getattr(cdll, host_entry),
                                            ctypes.c_void_p).value}
         keep = [lib, cdll]

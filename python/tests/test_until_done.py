@@ -145,8 +145,8 @@ def _oscillator(kind, finishing, steps=1):
 def _build(kern, work, targets, cache_dir=None, settings=None):
     import ctypes
 
-    from hawk import _core as hcore
     from hawk.artifact import build_bundle, plan_view
+    from hawk.runtime import load
 
     import eagle.exec as eexec
     from eagle import plan as eplan
@@ -159,7 +159,7 @@ def _build(kern, work, targets, cache_dir=None, settings=None):
     host_entry = view.pop("host_entry")
     out = {}
     so = work / f"{kern.name}.so"
-    lib = hcore.HostLibrary(str(so))
+    lib = load(work, kern.name)      # hawk's load self-checks the library
     cdll = ctypes.CDLL(str(so))
     host = SimpleNamespace(
         host_entry=ctypes.cast(getattr(cdll, host_entry), ctypes.c_void_p).value,
