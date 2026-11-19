@@ -67,6 +67,8 @@ class Level:
         self.slots = {}
         #: how a level with no base makes its per-cell twin (see :meth:`cell_twin`)
         self.cell_source = None
+        #: the hawk derivative this level was built from (``None`` for the primal): its gradient, cotangent and next-value relations
+        self.derivative = None
 
     def __repr__(self) -> str:
         return f"Level({self.name!r}, kind={self.kind!r})"
@@ -117,6 +119,7 @@ class Level:
                               kind=which, base=self, who=self.who, label=f"{self.label}_{which}")
                 if alone:
                     level.chain = (level.kernel,)
+                level.derivative = derivative       # the derivative's own relations: promoting a Param rebuilds the kernel without them
                 self._derived[which] = level
             return level
 
@@ -135,6 +138,7 @@ class Level:
                 level = Level(Kernel(f"{self.name}_step_vjp", derived),
                               kind="vjp", base=self, who=self.who,
                               label=f"{self.label}_step_vjp")
+                level.derivative = derived
                 self._derived["step_vjp"] = level
             return level
 
@@ -183,7 +187,7 @@ class Level:
         with LOCK:
             got = self._names.get("step_vjp")
             if got is None:
-                derived = self.stepped().kernel
+                derived = self.stepped().derivative
                 outputs = [o for o in self.sig.outputs
                            if o != self.sig.terminated and self.sig.is_float(o)]
                 nexts = {o: c for o, c in step_seeds(derived).items() if o in outputs}
@@ -206,7 +210,7 @@ class Level:
         derived = self.derived(which)
         outputs = [o for o in self.sig.outputs if o != self.sig.terminated and self.sig.is_float(o)]
         if which == "vjp":
-            return reverse_names(self.who, self.label, self.wrt, outputs, derived.kernel)
+            return reverse_names(self.who, self.label, self.wrt, outputs, derived.derivative)
         return plane_names(self.who, self.label, self.wrt, outputs,
                            {n for _, n in self.sig.arg_spec}, {n for _, n in derived.sig.arg_spec},
                            self.sig.description.get("plane_names"))

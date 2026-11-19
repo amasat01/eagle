@@ -104,7 +104,8 @@ class Signature:
         self._ir = slot_types(description)
         #: reductions over samples ``{cell: op}``: the kernel writes rows (and a
         #: ``<cell>_comp`` companion) that the bridge finishes into the cell
-        every = _cell_rows.described_cells(description)
+        #: (a stage's description lists the cells of the whole kernel: this unit holds the ones its own slots carry)
+        every = {nm: op for nm, op in _cell_rows.described_cells(description).items() if nm in self.role}
         #: a cell only a later stage reads is the kernel's scratch, not its own: eagle's plan makes it; a stage bound as a
         #: unit has it as its own rows
         scratch = _cell_rows.described_cells(
