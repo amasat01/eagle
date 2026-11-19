@@ -19,6 +19,7 @@ from ._graph_edges import arrays_overlap
 from . import _core, _stream, _transfer
 from .interop import _stream_handle
 from .roles import OUTPUT_ROLES, STATE_ROLES
+from .sidecar import sidecar_of
 
 # --- Built-in kind: launch (a BoundPlan) --- #
 def _is_bound(obj) -> bool:
@@ -118,8 +119,11 @@ def _launch_transpose(node, incoming, ctx):
         finished = frozenset()
     planes, out = {}, {}
     owned = _cell_rows.companions_of(vjp)
+    seeds = sidecar_of(vjp).get("cotangent_of") or {}       # the vjp's cotangent planes, each with the output it seeds
     for role, name in _split.arg_spec(vjp):
-        src = name[4:] if name.startswith("bar_") else None
+        # a cotangent names the output it seeds; a gradient plane is the input's own name behind hawk's adjoint prefix, which
+        # no member of the description states for an input that is not a lookup
+        src = seeds.get(name, name[4:] if name.startswith("bar_") else None)
         if role == "nsamples" or name in owned:     # a keyed sum's companion is the bind's own
             continue
         if name in finished:
