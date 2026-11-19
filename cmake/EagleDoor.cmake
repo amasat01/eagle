@@ -89,7 +89,8 @@ else()
   set_source_files_properties(${_host_only} PROPERTIES COMPILE_DEFINITIONS EAGLE_CPU_ONLY=1)
   find_package(CUDAToolkit REQUIRED)
   target_sources(eagle_door PRIVATE "${_door}/device/Loop.cu")
-  target_link_libraries(eagle_door PRIVATE CUDA::cudart)
+  # static runtime: the device group needs only the driver at run time
+  target_link_libraries(eagle_door PRIVATE CUDA::cudart_static)
   set_source_files_properties("${_door}/device/Loop.cu" PROPERTIES
     COMPILE_OPTIONS "-Wno-deprecated-gpu-targets;-Werror=all-warnings;-diag-suppress=20050;-include;${EAGLE_DOOR_CUDA_WING_FACTS};-Xcompiler=-fPIC,-fvisibility=hidden,-Wall,-Wextra"
     COMPILE_DEFINITIONS AETHER_HAS_CUDA)

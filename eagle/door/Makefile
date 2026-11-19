@@ -10,6 +10,9 @@
 #                 the host_device one for a CUDA door, the host one for a host-only door (raptor's rs/wings/cards/door/).
 # OUT:            the build directory (default: build/ here, git-ignored).
 #
+# The device group (CUDA=<toolkit root>) needs only the driver at run time: the CUDA runtime is linked statically and
+# kept private, and `symbols` checks both.
+#
 # Targets: lib (the library), symbols (it exports eg_* names only), confined (core and host reach no CUDA), test (build
 # and run the C test), all (= test), pair-<unit> (see below), pairs (all of them).
 #
@@ -85,7 +88,8 @@ DEPFLAGS = -MMD -MP -MT $@
 
 comma := ,
 CXXFLAGS_DEVICE := $(filter-out -DEAGLE_CPU_ONLY=1,$(CXXFLAGS_DOOR)) -isystem $(CUDA)/include
-CUDART := $(if $(CUDA),-L$(CUDA)/lib64 -lcudart -Wl$(comma)-rpath$(comma)$(CUDA)/lib64)
+# The CUDA runtime is linked statically (with what it needs), so the device group asks the process for the driver only.
+CUDART := $(if $(CUDA),-L$(CUDA)/lib64 -lcudart_static -ldl -lrt -pthread)
 
 # The sources are listed once, in sources.txt, which cmake/EagleDoor.cmake reads too.
 SRC := $(shell sed -n '/^[^\# ][^ ]*$$/p' sources.txt)
@@ -158,6 +162,14 @@ symbols: $(LIB)
 	@omp=$$(nm -u $(LIB) | awk '{print $$NF}' | grep -E '^_?(GOMP_|omp_|__kmpc_)' || true); \
 	if [ -n "$$omp" ]; then echo "FAIL  $(LIB) needs an OpenMP runtime: $$omp"; exit 1; fi; \
 	echo "PASS  $(LIB) needs no OpenMP runtime: its loops run on eagle's host pool"
+ifneq ($(CUDA),)
+	@rt=$$(readelf -d $(LIB) | grep NEEDED | grep -i 'cudart' || true); \
+	if [ -n "$$rt" ]; then echo "FAIL  $(LIB) needs a shared CUDA runtime: $$rt"; exit 1; fi; \
+	echo "PASS  $(LIB) needs no shared CUDA runtime: the device group needs the driver only"
+	@leak=$$($(NM_DEFINED) $(LIB) | awk '{print $$3}' | grep -iE '(^|_)cuda|^cu[A-Z]' || true); \
+	if [ -n "$$leak" ]; then echo "FAIL  $(LIB) exports CUDA runtime symbols:"; echo "$$leak"; exit 1; fi; \
+	echo "PASS  $(LIB) exports no CUDA symbol (the statically linked runtime stays private)"
+endif
 
 # Confinement: every object and translation unit outside device/ is free of CUDA, and reaches the device group only
 # through device/Seam.h. A header counts as CUDA by its file name (cuda*, cufft*, cublas*, nvrtc*) or by sitting in a
