@@ -53,10 +53,7 @@
 // CUDA mode this `.cpp` is compiled by CXX (g++), not nvcc. Including it would make
 // this TU unbuildable in exactly the build mode it was added to cover. Nothing here
 // needs the `eagle_tests::Test` fixture; bare gtest is the whole dependency.
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wrestrict"
-#include <gtest/gtest.h>
-#pragma GCC diagnostic pop
+#include "Gtest.h"
 
 #include <algorithm>
 #include <cctype>

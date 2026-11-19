@@ -4,10 +4,7 @@
 /* The scratch arena plans and resolves; the graph owns the buffer. A resolve
  * before the buffer is attached, or a buffer smaller than the peak, is refused
  * instead of handing out a pointer into nothing. */
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wrestrict"
-#include <gtest/gtest.h>
-#pragma GCC diagnostic pop
+#include "Gtest.h"
 
 #include "eagle/ScratchArena.h"
 

@@ -17,10 +17,7 @@
  * (CMakeLists.txt), same as test_ConformanceCorpus.cpp. The CUDA-mode-only
  * counterpart (eagle::cuda::deviceProps against real hardware, including the
  * dev-box known-answer) lives in test_DeviceProps.cu. */
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wrestrict"
-#include <gtest/gtest.h>
-#pragma GCC diagnostic pop
+#include "Gtest.h"
 
 #include "eagle/DeviceProps.h"
 #include "eagle/cpu/DeviceProps.h"

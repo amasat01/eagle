@@ -3,10 +3,7 @@
 
 /* The busy guard: header-only, CUDA-free, compiled by CXX in both build
  * modes. */
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wrestrict"
-#include <gtest/gtest.h>
-#pragma GCC diagnostic pop
+#include "Gtest.h"
 
 #include "eagle/util/Busy.h"
 

@@ -168,7 +168,7 @@ define ENV_RECIPE
 	$(if $(SITE_SRC),$$PIP install --quiet --no-deps -c "$(CONSTRAINTS)" "$(SITE_SRC)";,) \
 	SKBUILD_BUILD_DIR="$(GD)/sb_dsc_$(1)" $$PIP install --quiet -c "$(CONSTRAINTS)" "$(AETHER_SRC)/dsc"; \
 	$(if $(OSPREY_WHEELS),$$PIP install --quiet --no-index --no-deps --force-reinstall "$(OSPREY_WHEELS)"/*.whl;,) \
-	$(if $(HAWK_SRC),SKBUILD_BUILD_DIR="$(GD)/sb_hawk_$(1)" $$PIP install --quiet -c "$(CONSTRAINTS)" "$(HAWK_SRC)";,) \
+	$(if $(HAWK_SRC),HAWK_AETHER_INCLUDE="$(AETHER_SRC)" HAWK_EAGLE_INCLUDE="$(CURDIR)" SKBUILD_BUILD_DIR="$(GD)/sb_hawk_$(1)" $$PIP install --quiet -c "$(CONSTRAINTS)" "$(HAWK_SRC)";,) \
 	CMAKE_PREFIX_PATH="$(GD)/prefix_$(1):$${CMAKE_PREFIX_PATH:-}" \
 	SKBUILD_BUILD_DIR="$(GD)/sb_eagle_$(1)" \
 	SKBUILD_CMAKE_ARGS="$(if $(call env_cuda,$(1)),-DCMAKE_CUDA_COMPILER=$(NVCC);-DCMAKE_CUDA_HOST_COMPILER=$(CXX);$(3),-DEAGLE_PYTHON_CUDA_PLUGIN=OFF);-DEAGLE_PYTHON_WARN_AS_ERR=ON" \

@@ -39,10 +39,7 @@
 // Deliberately NOT "TestBase.h" — same reasoning as tests/test_ExecContract.cpp:
 // that header pulls eagle's device headers, whose __device__/__host__ attributes
 // only nvcc parses, and this `.cpp` is compiled by g++ in either build mode.
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wrestrict"
-#include <gtest/gtest.h>
-#pragma GCC diagnostic pop
+#include "Gtest.h"
 
 #include <algorithm>
 #include <cmath>

@@ -21,10 +21,7 @@
  * face. The tests below exercise that dispatch, the fired-history list,
  * the two-level RECURSION LOCK nesting, and the pinned rejection set.
  */
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wrestrict"
-#include <gtest/gtest.h>
-#pragma GCC diagnostic pop
+#include "Gtest.h"
 
 #include "eagle/compose/GraphComposer.h"
 

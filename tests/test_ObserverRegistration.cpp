@@ -18,10 +18,7 @@
  * with -DEAGLE_CPU_ONLY (CMakeLists.txt COMPILE_DEFINITIONS on this one
  * source), independent of the ambient EAGLE_CPP_MODE, exactly like
  * test_LaunchTraits.cpp. */
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wrestrict"
-#include <gtest/gtest.h>
-#pragma GCC diagnostic pop
+#include "Gtest.h"
 
 #include "eagle/util/Observable.h"
 

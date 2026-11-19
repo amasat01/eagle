@@ -33,10 +33,7 @@
 #include <cuda_runtime.h>
 #include <dirent.h>
 
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wrestrict"
-#include <gtest/gtest.h>
-#pragma GCC diagnostic pop
+#include "Gtest.h"
 
 #include <algorithm>
 #include <cstdint>

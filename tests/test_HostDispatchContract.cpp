@@ -28,10 +28,7 @@
  * own host-face path, independent of whichever EAGLE_CPP_MODE the ambient
  * build uses -- dual-registered into BOTH build modes per the
  * test_LaunchTraits.cpp recipe. */
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wrestrict"
-#include <gtest/gtest.h>
-#pragma GCC diagnostic pop
+#include "Gtest.h"
 
 #include "eagle/cpu/Host.h"
 

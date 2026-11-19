@@ -21,10 +21,7 @@
  * own host-face path, independent of whichever EAGLE_CPP_MODE the ambient
  * build uses, exactly like the eagle_probe_launch_traits_cpu_only compile
  * probe. */
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wrestrict"
-#include <gtest/gtest.h>
-#pragma GCC diagnostic pop
+#include "Gtest.h"
 
 #include "eagle/launch/Traits.h"
 

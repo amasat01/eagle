@@ -28,10 +28,7 @@
 // Deliberately NOT "TestBase.h" — same reasoning as test_ConformanceCorpus.cpp:
 // that header pulls eagle's device headers, whose __device__/__host__ attributes
 // only nvcc parses, and in CUDA mode this `.cpp` is compiled by g++.
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wrestrict"
-#include <gtest/gtest.h>
-#pragma GCC diagnostic pop
+#include "Gtest.h"
 
 #include <algorithm>
 #include <cmath>

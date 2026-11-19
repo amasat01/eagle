@@ -6,10 +6,7 @@
  * CXX in BOTH build modes with EAGLE_CPU_ONLY forced on this one source (the
  * test_ConditionalGroupCpu.cpp recipe). The CUDA graph's adapter is
  * test_GraphViewCuda.cu. */
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wrestrict"
-#include <gtest/gtest.h>
-#pragma GCC diagnostic pop
+#include "Gtest.h"
 
 #include "eagle/graph/Describe.h"
 #include "eagle/graph/Edges.h"

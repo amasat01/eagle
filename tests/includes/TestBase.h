@@ -18,15 +18,7 @@
 #include <exception>
 #include <random>
 
-// -Wrestrict is GCC's (clang knows no such group and -Werror makes the pragma itself an error)
-#if defined(__GNUC__) && !defined(__clang__)
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wrestrict"
-#endif
-#include <gtest/gtest.h>
-#if defined(__GNUC__) && !defined(__clang__)
-#pragma GCC diagnostic pop
-#endif
+#include "Gtest.h"
 #ifdef __clang__
 #pragma pop_macro("AETHER_NOINLINE")
 #endif
