@@ -105,14 +105,20 @@ inline void cpu_relax() {
 }
 
 #if defined(__linux__)
+/// One core's CPU set. A named type because nvcc 12.9's front end fails with an internal error on a
+/// `std::vector` of the unnamed struct behind `cpu_set_t` in C++20 against libstdc++ 14.
+struct CoreMask {
+    cpu_set_t cpus;
+};
+
 /**
  * @brief The CPUs this process may run on, one set per physical core: the affinity mask grouped by the
  *        sibling list the kernel publishes (sysfs), in order of each core's first CPU. Empty when that is
  *        unreadable.
  */
-inline std::vector<cpu_set_t> core_masks() {
+inline std::vector<CoreMask> core_masks() {
     cpu_set_t mask;
-    std::vector<cpu_set_t> cores;
+    std::vector<CoreMask> cores;
     if (sched_getaffinity(0, sizeof(mask), &mask) != 0) return cores;
     std::vector<std::string> names;
     for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
@@ -126,9 +132,9 @@ inline std::vector<cpu_set_t> core_masks() {
         if (k == names.size()) {
             names.push_back(siblings);
             cores.emplace_back();
-            CPU_ZERO(&cores.back());
+            CPU_ZERO(&cores.back().cpus);
         }
-        CPU_SET(cpu, &cores[k]);
+        CPU_SET(cpu, &cores[k].cpus);
     }
     return cores;
 }
@@ -306,14 +312,14 @@ private:
         if (pins_.size() < 2) { pins_.clear(); return; }
         const int here = sched_getcpu();
         for (auto it = pins_.begin(); it != pins_.end(); ++it)
-            if (here >= 0 && CPU_ISSET(here, &*it)) { pins_.erase(it); break; }
+            if (here >= 0 && CPU_ISSET(here, &it->cpus)) { pins_.erase(it); break; }
 #endif
     }
 
     void pin([[maybe_unused]] int worker) const {
 #if defined(__linux__)
         if (static_cast<std::size_t>(worker) < pins_.size())
-            sched_setaffinity(0, sizeof(cpu_set_t), &pins_[worker]);
+            sched_setaffinity(0, sizeof(cpu_set_t), &pins_[worker].cpus);
 #endif
     }
 
@@ -405,7 +411,7 @@ private:
     int workers_ = 0;                       // guarded by busy_
     std::deque<Slot> slots_;                // one per worker, guarded by busy_ (a deque: addresses are stable)
 #if defined(__linux__)
-    std::vector<cpu_set_t> pins_;           // set before the first worker starts, then read-only
+    std::vector<CoreMask> pins_;           // set before the first worker starts, then read-only
 #endif
     const Job* job_ = nullptr;              // published by door_, retired after left_
     std::atomic<std::uint64_t> door_{ 0 };  // gen << 32 | OPEN | cap << 15 | joined
