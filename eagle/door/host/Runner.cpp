@@ -361,10 +361,10 @@ void runner_release(eg_ctx& ctx, eg_runner_s* runner) {
 /** @brief eg_run: check the report, then run the loop and fill it. */
 void run(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report) {
     check_handle(ctx.runners, runner, "runner");
-    if (ctx.rec == nullptr) check_report(report);   // a recorded run fills no report
+    if (ctx.rec == nullptr && ctx.dev_rec == nullptr) check_report(report);   // a recorded run fills no report
     for (const eg_plan_s* p : runner->plans) check_bound(*p);
     if (runner->record != nullptr) {
-        if (ctx.rec != nullptr)
+        if (ctx.rec != nullptr || ctx.dev_rec != nullptr)
             refuse(EG_NOT_WRITTEN, "eg_run of an EG_RUN_RECORD runner inside a recording is not written in this build of the door");
         record_forward(ctx, *runner, report);
         return;

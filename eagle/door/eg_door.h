@@ -1048,6 +1048,14 @@ eg_status eg_gemm_free(eg_ctx* ctx, eg_gemm* gemm);
  * run. Host: an ordered list replayed in C. Device: a capture on the
  * context's stream (so device work the caller issues on that stream between
  * begin and end is captured too).
+ *
+ * On a device context, ``eg_launch`` of a host plan, ``eg_run`` of a host runner, ``eg_reduce`` and ``eg_copy`` of host
+ * planes are recorded as HOST nodes of the capture: the driver's host-function launch calls one function inside this
+ * library, on the context's host team, in stream order at each replay. No caller code runs, and the step makes no CUDA
+ * call. The graph holds a reference to every plan, runner and plane a host node runs until ``eg_graph_free`` (which waits
+ * for the context's stream to be idle first) or ``eg_ctx_free``. A host node cannot return an error to a caller: the first
+ * failure is kept on the graph, and the next ``eg_graph_launch`` of it or ``eg_sync`` of the context returns FAULT naming
+ * the step, and clears it. ``eg_reverse`` and conditionals are not recorded on a device context (NOT_WRITTEN).
  * Replaces: ``graph.Graph.build`` / ``pipeline.GraphPipeline`` and the
  * node-by-node host arms. Status: OK; BAD_REQUEST (already recording).
  */
@@ -1072,7 +1080,7 @@ eg_status eg_record_cond_end(eg_ctx* ctx);
 eg_status eg_record_end(eg_ctx* ctx, eg_graph** out);
 
 /** Replay a recorded graph once. Calls today: seam ``launcher_launch`` on a
- *  device. Status: OK; FAULT. */
+ *  device. Status: OK; FAULT (also a failure a host node of an earlier replay kept, see ``eg_record_begin``). */
 eg_status eg_graph_launch(eg_ctx* ctx, eg_graph* graph);
 
 /** Free a graph. NULL-safe. */
@@ -1109,7 +1117,8 @@ eg_status eg_device_props(eg_ctx* ctx, int32_t device, struct eg_device_props* o
  *  alive until every plane and plan made while it was in scope is freed. */
 eg_status eg_stream_use(eg_ctx* ctx, uint64_t stream);
 
-/** Block until the context's stream is idle (seam ``stream_synchronize``). */
+/** Block until the context's stream is idle (seam ``stream_synchronize``). Status: OK; FAULT (also the failure a host
+ *  node of a device graph kept while the stream ran, see ``eg_record_begin``). */
 eg_status eg_sync(eg_ctx* ctx);
 
 /** While recording, add an external device graph as one child node; eagle

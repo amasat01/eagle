@@ -379,6 +379,38 @@ struct SegState {
 }  // namespace door
 }  // namespace eagle
 
+namespace eagle {
+namespace door {
+/**
+ * @brief The first failure of a host step that runs inside a device graph. Such a step cannot return to a caller: it
+ * stores its failure here, on the graph, and the next ``eg_graph_launch`` or ``eg_sync`` of the context returns it.
+ */
+struct StepFailure {
+    std::mutex lock;
+    bool failed = false;
+    std::string reason;
+
+    /** @brief Keep @p text unless an earlier failure is kept. Never throws. */
+    void set(const std::string& text) noexcept {
+        try {
+            const std::lock_guard<std::mutex> guard(lock);
+            if (!failed) failed = true, reason = text;
+        } catch (...) {
+        }
+    }
+    /** @brief Move the kept failure into @p out and clear it; false when there is none. */
+    bool take(std::string& out) {
+        const std::lock_guard<std::mutex> guard(lock);
+        if (!failed) return false;
+        out = std::move(reason);
+        failed = false;
+        reason.clear();
+        return true;
+    }
+};
+}  // namespace door
+}  // namespace eagle
+
 /** @brief A unit under one structure over fixed partitions, plus its bindings. */
 struct eg_plan_s {
     /** @brief One slot's binding: a plane (by handle) or a uniform (by value). */

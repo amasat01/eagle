@@ -152,7 +152,6 @@ EG_EXPORT eg_status eg_launch(eg_ctx* ctx, eg_plan* plan, uint64_t* tiles) {
 EG_EXPORT eg_status eg_reduce(eg_ctx* ctx, const struct eg_reduce_desc* desc) {
     return door::call(ctx, [&](eg_ctx& c) {
         const eg_reduce_desc d = door::read_input(desc, "eg_reduce_desc");
-        door::device_quiet(c, "eg_reduce", EG_NOT_WRITTEN, door::kHostWorkInGraph);
         if (door::device_planes(c, "eg_reduce", { d.in, d.out, d.comp })) door::device_reduce(c, d);
         else door::reduce(c, desc);
     });
@@ -165,7 +164,6 @@ EG_EXPORT eg_status eg_copy(eg_ctx* ctx, eg_plane* src, eg_plane* dst) {
         } else if (door::device_planes(c, "eg_copy", { src, dst })) {
             door::device_copy(c, src, dst);
         } else {
-            door::device_quiet(c, "eg_copy", EG_NOT_WRITTEN, door::kHostWorkInGraph);
             door::copy(c, src, dst);
         }
     });
@@ -275,7 +273,6 @@ EG_EXPORT eg_status eg_run(eg_ctx* ctx, eg_runner* runner, struct eg_run_report*
         if (runner->look != nullptr) door::look_run(c, runner, report);
         else if (runner->dev.ctx != nullptr) door::device_run(c, runner, report);
         else {
-            door::device_quiet(c, "eg_run of a host runner", EG_NOT_WRITTEN, door::kHostWorkInGraph);
             door::run(c, runner, report);
         }
     });
