@@ -108,7 +108,7 @@ class Signature:
         #: a cell only a later stage reads is the kernel's scratch, not its own: eagle's plan makes it; a stage bound as a
         #: unit has it as its own rows
         scratch = _cell_rows.described_cells(
-            {nm: spec for nm, spec in (description.get("cells") or {}).items() if spec.get("internal")})
+            {"cells": {nm: spec for nm, spec in (description.get("cells") or {}).items() if spec.get("internal")}})
         self.cells = every if unit else {nm: op for nm, op in every.items() if nm not in scratch}
         self.rows = _cell_rows.row_names(every)
         from hawk.diff import CELL_PLANE
