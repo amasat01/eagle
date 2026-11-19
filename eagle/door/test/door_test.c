@@ -1757,6 +1757,39 @@ static void check_index_sets(eg_ctx* ctx) {
         }
     check(all, "an index set runs exactly the lanes map[0..count) (count 0, 1, 137, 400; read at each launch) and leaves "
                "every other lane alone, equal to the plain loop on SERIAL and TEAM, 1 and 3 threads");
+    /* one partition is a range of POSITIONS of the set, cut at the live count: it runs map[base .. min(base + count, live)) and equals the whole run restricted to them */
+    {
+        const struct { int64_t base, count; } ranges[4] = { { 0, 60 }, { 50, 150 }, { 137, 50 }, { 300, 100 } };
+        int in_range = 1;
+        for (int si = 0; si < 2; ++si)
+            for (int ci = 0; ci < 2; ++ci) {
+                const int32_t slots[4] = { 0, 1, 2, 3 };
+                eg_plane* planes[4] = { py, px, pm, pc };
+                struct eg_bind_desc bd;
+                memset(&bd, 0, sizeof(bd));
+                bd.struct_size = sizeof(bd);
+                bd.n_planes = 4;
+                bd.plane_slots = slots;
+                bd.planes = planes;
+                count = counts[2 + ci];
+                for (int ri = 0; ri < 4; ++ri) {
+                    eg_plan* p = NULL;
+                    const int64_t pb[1] = { ranges[ri].base }, pc_[1] = { ranges[ri].count };
+                    in_range &= plan(ctx, ul, structures[si], M, 1, pb, pc_, &p) == EG_OK && eg_bind(ctx, p, &bd) == EG_OK;
+                    for (int i = 0; i < M; ++i) y[i] = want[i] = -1.0;
+                    for (int64_t t = ranges[ri].base; t < ranges[ri].base + ranges[ri].count && t < count; ++t)
+                        want[map[t]] = 2.0 * x[map[t]] + 1.0;
+                    in_range &= eg_launch(ctx, p, NULL) == EG_OK && memcmp(y, want, sizeof(y)) == 0;
+                    eg_plan_free(ctx, p);
+                }
+            }
+        check(in_range, "an index set over one partition [base, base + count) runs map[base .. min(base + count, live)) only: "
+                        "ranges (0, 60), (50, 150), (137, 50), (300, 100) at live 137 and 400, SERIAL and TEAM");
+        eg_plan* out = NULL;
+        const int64_t past[1] = { M - 10 }, wide_count[1] = { 11 };
+        check(plan(ctx, ul, EG_STRUCTURE_HOST_TEAM, M, 1, past, wide_count, &out) == EG_BAD_REQUEST && reason_has(ctx, "leaves the range"),
+              "an index set partition leaving [0, n) refused BAD_REQUEST");
+    }
 
     /* a prefix set: lanes [0, count) */
     all = 1;
@@ -1816,9 +1849,9 @@ static void check_index_sets(eg_ctx* ctx) {
     const int64_t part_base[2] = { 0, 500 }, part_count[2] = { 500, 500 };
     eg_plan* pp = NULL;
     all = all && plan(ctx, ul, EG_STRUCTURE_HOST_TEAM, M, 2, part_base, part_count, &pp) == EG_BAD_REQUEST &&
-          reason_has(ctx, "one whole partition");
+          reason_has(ctx, "one partition (positions of the set)");
     check(all, "index set refusals by name: a map of the wrong width, a repeated lane, a lane outside the dense lanes, a "
-               "count above the map (at bind and at launch), a wrong plane in the count slot, a partitioned plan");
+               "count above the map (at bind and at launch), a wrong plane in the count slot, two partitions");
     eg_plan_free(ctx, p);
     ok = eg_plane_free(ctx, py) == EG_OK && eg_plane_free(ctx, px) == EG_OK && eg_plane_free(ctx, pm) == EG_OK &&
          eg_plane_free(ctx, pm64) == EG_OK && eg_plane_free(ctx, pc) == EG_OK && eg_unit_free(ctx, ul) == EG_OK &&

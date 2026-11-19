@@ -307,7 +307,9 @@ struct eg_ctx_info {
 #define EG_PLAN_SPLIT_EVENLY (1u << 0)
 
 /** INPUT to ``eg_plan_new``. The range the partitions cut is the samples [0, n_samples); for a thread-box unit it is
- *  its threads, [0, ceil(n_samples / (t * stride)) * stride), so a partition counts threads and never splits a box. */
+ *  its threads, [0, ceil(n_samples / (t * stride)) * stride), so a partition counts threads and never splits a box.
+ *  A unit that reads an index set or a prefix count takes ONE partition, whose [base, base + count) are POSITIONS of
+ *  the set (the first entries of its map, or the first lanes of a prefix); a launch runs those below the live count. */
 struct eg_plan_desc {
     uint32_t struct_size;
     uint32_t flags;               /**< EG_PLAN_SPLIT_EVENLY or 0 */

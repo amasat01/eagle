@@ -25,9 +25,9 @@ inline int team_threads(const eg_ctx& ctx) {
     return env > 0 ? env : exec::detail::host_default_threads();
 }
 
-/** @brief Run @p plan once over the prefix [0, @p live) of its samples (an active set's live slots). */
-inline void run_prefix(const eg_plan_s& plan, int threads, std::int64_t live) {
-    const exec::Partition part{ 0, live, plan.n_samples };
+/** @brief Run @p plan once over the samples [@p base, @p end) of its set (an active set's live slots, or positions of an index set). */
+inline void run_prefix(const eg_plan_s& plan, int threads, std::int64_t end, std::int64_t base = 0) {
+    const exec::Partition part{ base, end - base, plan.n_samples };
     if (plan.structure == EG_STRUCTURE_HOST_SERIAL)
         exec::HostTeam::run_serial(plan.unit->host_entry, plan.params.data(), part);
     else
@@ -173,13 +173,15 @@ inline std::uint64_t run_plan(const eg_plan_s& plan, int threads) {
     if (plan.unit->seg.present) return run_segmented(plan, threads);
     if (!plan.unit->stages.empty()) return run_split(plan, threads);
     std::uint64_t tiles = 0;
-    if (plan.unit->index_count_slot >= 0) {    // an index set: lanes [0, count), read now; the entry maps them itself
+    if (plan.unit->index_count_slot >= 0) {    // an index set: its positions [base, base + count) of the plan's one partition, cut at the live count; the entry maps them itself
         const eg_plane_s& c = *plan.bindings[plan.unit->index_count_slot].plane;
         const std::uint64_t live = *reinterpret_cast<const std::uint32_t*>(static_cast<const char*>(c.tensor->dl_tensor.data) +
                                                                           c.tensor->dl_tensor.byte_offset);
         check_index_live(plan, live);
-        if (live > 0) run_prefix(plan, threads, static_cast<std::int64_t>(live));
-        return live > 0 ? 1 : 0;
+        const exec::Partition& range = plan.parts[0];
+        const std::int64_t end = std::min<std::int64_t>(range.base + range.count, static_cast<std::int64_t>(live));
+        if (end > range.base) run_prefix(plan, threads, end, range.base);
+        return end > range.base ? 1 : 0;
     }
     for (const exec::Partition& part : plan.parts) {
         if (plan.structure == EG_STRUCTURE_HOST_SERIAL) {

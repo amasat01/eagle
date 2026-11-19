@@ -460,8 +460,8 @@ void plan_new(eg_ctx& ctx, const eg_plan_desc* desc, eg_plan** out) {
             if (st.cell_row > 0 && !st.unit->cells.empty() && p.base % st.cell_row != 0)
                 refuse(EG_BAD_REQUEST, "unit '" + d.unit->name + "' stage '" + st.ref_name + "' reduces over samples in rows of " + std::to_string(st.cell_row) +
                        ": a partition starts on a multiple of it, got base " + std::to_string(p.base));
-    if (d.unit->index_count_slot >= 0 && (parts.size() != 1 || parts[0].base != 0 || parts[0].count != d.n_samples))
-        refuse(EG_BAD_REQUEST, "unit '" + d.unit->name + "' reads an index set: one whole partition");
+    if (d.unit->index_count_slot >= 0 && parts.size() != 1)
+        refuse(EG_BAD_REQUEST, "unit '" + d.unit->name + "' reads an index set: one partition (positions of the set)");
     static constexpr exec::Access kAccess[] = { exec::Access::SampleLocal,
         exec::Access::CrossSampleRead, exec::Access::CrossSampleWrite };
     try {
