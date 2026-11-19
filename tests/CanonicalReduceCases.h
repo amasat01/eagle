@@ -221,22 +221,55 @@ TEST_F(CanonicalReduceTest, ThreadCountInvariance_Bitwise)
 
 TEST_F(CanonicalReduceTest, ThreadCountInvariance_Float)
 {
-    const int saved = omp_get_max_threads();
     for (idx_t n : { idx_t(257), idx_t(70001), idx_t(300000) }) {
         auto x = corpus<float>(n, 7 + n);
         VecIn<float> in { x.data() };
         float ref = 0;
         for (int th : { 1, 2, 4, 8 }) {
-            omp_set_num_threads(th);
             const float got
-                = canon::reduce<float, aether::SumOp<float>>(in, n);
+                = canon::reduce<float, aether::SumOp<float>>(in, n, th);
             if (th == 1)
                 ref = got;
             EXPECT_TRUE(sameBits(got, ref)) << "n=" << n << " threads=" << th;
         }
         EXPECT_TRUE(sameBits(ref, oracle(x)));
     }
-    omp_set_num_threads(saved);
+}
+
+/** @brief ``op``'s reduction of ``x`` on ``team`` host threads is bit-equal to the one-thread run, and (integer-valued
+ *  input: every partial sum is exact) to the exact integer sum when ``exact`` is set. */
+template<typename T, typename Op>
+inline void expectTeamInvariant(const std::vector<T>& x, const char* what, bool exact)
+{
+    const idx_t n = idx_t(x.size());
+    VecIn<T> in { x.data() };
+    const T ref = canon::reduce<T, Op>(in, n, 1);
+    for (int team : { 2, 7 })
+        EXPECT_TRUE(sameBits(canon::reduce<T, Op>(in, n, team), ref)) << what << " n=" << n << " team=" << team;
+    if (exact) {
+        long long sum = 0;
+        for (T v : x)
+            sum += static_cast<long long>(v);
+        EXPECT_EQ(ref, T(sum)) << what << " n=" << n;
+    }
+}
+
+TEST_F(CanonicalReduceTest, TeamSizeInvariance_AllOperators)
+{
+    for (idx_t n : { idx_t(1), idx_t(2), idx_t(3), idx_t(255), idx_t(256), idx_t(257), idx_t(1000003) }) {
+        const auto d = corpus<double>(n, 90 + n);
+        const auto f = corpus<float>(n, 190 + n);
+        expectTeamInvariant<double, aether::SumOp<double>>(d, "f64 compensated sum", false);
+        expectTeamInvariant<double, PlainAdd<double>>(d, "f64 plain sum", false);
+        expectTeamInvariant<float, aether::SumOp<float>>(f, "f32 compensated sum", false);
+        expectTeamInvariant<double, canon::MinOp<double>>(d, "f64 min", false);
+        expectTeamInvariant<double, aether::MaxOp<double>>(d, "f64 max", false);
+        std::vector<double> whole(n);
+        for (idx_t i = 0; i < n; ++i)
+            whole[i] = double((i * 7919) % 2001) - 1000.0; // integer-valued: every order sums exactly
+        expectTeamInvariant<double, aether::SumOp<double>>(whole, "f64 integer-valued sum", true);
+        expectTeamInvariant<double, PlainAdd<double>>(whole, "f64 integer-valued plain sum", true);
+    }
 }
 
 TEST_F(CanonicalReduceTest, ChunkedEqualsUnchunked_Bitwise)

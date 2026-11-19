@@ -27,7 +27,7 @@
  * those are exact, so the tree only fixes the cost.
  *
  * The result is a function of the values in sample order only: it does not
- * depend on the OpenMP thread count, on the GPU grid, or on host vs device.
+ * depend on the host team size, on the GPU grid, or on host vs device.
  * Chunks of ``leafSize * 2^q`` samples are subtrees, so combining their
  * partials with the same pairwise levels gives the identical bits.
  *
@@ -46,6 +46,7 @@
 
 #pragma once
 
+#include "eagle/exec/HostPool.h"
 #include "eagle/typedefs.h"
 #include "eagle/util/throw.h"
 
@@ -352,10 +353,38 @@ inline P leaf(const In& in, idx_t base, idx_t cnt, const Cin& cin = {})
     return s[0];
 }
 
+/**
+ * @brief Run ``body(i)`` for ``i`` in ``[0, count)`` on the host pool with at most ``team`` threads, the caller
+ *        included: the range is cut into contiguous blocks, a few per thread so a late thread takes fewer of
+ *        them. ``body`` must not throw. In place when the team is one.
+ */
+template<typename F>
+inline void forEach(idx_t count, int team, const F& body)
+{
+    const idx_t lanes = std::min<idx_t>(count, idx_t(std::max(team, 1)) * 4);
+    const idx_t block = (count + lanes - 1) / lanes;
+    struct Range {
+        const F* body;
+        idx_t count, block;
+    } range{ &body, count, block };
+    eagle::exec::detail::HostPool::instance().run(
+        { static_cast<std::uint32_t>(lanes),
+          nullptr,
+          [](const void* ctx, std::uint32_t lane) {
+              const Range& r = *static_cast<const Range*>(ctx);
+              const idx_t end = std::min(r.count, (idx_t(lane) + 1) * r.block);
+              for (idx_t i = idx_t(lane) * r.block; i < end; ++i)
+                  (*r.body)(i);
+          },
+          &range },
+        team);
+}
+
 /** @brief Level-by-level pairwise reduction of ``v[0..m)`` (``m >= 1``), in
- *  place; returns the root. An odd last node is carried. */
+ *  place, on at most ``team`` host threads; returns the root. An odd last node
+ *  is carried. The tree is fixed: the bits do not depend on ``team``. */
 template<typename P>
-inline P pairwise(P* v, idx_t m)
+inline P pairwise(P* v, idx_t m, int team = eagle::exec::host_max_threads())
 {
     while (m > 1) {
         const idx_t pairs = m / 2;
@@ -363,9 +392,7 @@ inline P pairwise(P* v, idx_t m)
         // a later read in place).
         if (pairs >= 8192) {
             std::vector<P> nxt((m + 1) / 2);
-#pragma omp parallel for schedule(static)
-            for (idx_t i = 0; i < pairs; ++i)
-                nxt[i] = P::join(v[2 * i], v[2 * i + 1]);
+            forEach(pairs, team, [&](idx_t i) { nxt[i] = P::join(v[2 * i], v[2 * i + 1]); });
             if (m & 1)
                 nxt[pairs] = v[m - 1];
             std::copy(nxt.begin(), nxt.end(), v);
@@ -382,43 +409,43 @@ inline P pairwise(P* v, idx_t m)
 
 /** @brief Pairwise-combine partials (e.g. chunk results, in chunk order). */
 template<typename P>
-inline P combine(std::vector<P> partials)
+inline P combine(std::vector<P> partials, int team = eagle::exec::host_max_threads())
 {
     EAGLE_ASSERT(!partials.empty(), "canonical::combine: no partials");
-    return pairwise(partials.data(), idx_t(partials.size()));
+    return pairwise(partials.data(), idx_t(partials.size()), team);
 }
 
 /**
  * @brief Host canonical partial of ``in(begin) .. in(begin + n - 1)``,
- *        ``n >= 1``. OpenMP over leaves; bitwise independent of the thread
- *        count.
+ *        ``n >= 1``. The leaves run on at most ``team`` host threads; bitwise
+ *        independent of ``team``.
  */
 template<typename T, typename OP, typename P = Partial<T, OP>, typename In, typename Cin = NoComp>
-inline P partialRange(const In& in, idx_t begin, idx_t n, const Cin& cin = {})
+inline P partialRange(const In& in, idx_t begin, idx_t n, const Cin& cin = {},
+                      int team = eagle::exec::host_max_threads())
 {
     EAGLE_ASSERT(n >= 1, "canonical::partialRange: empty range");
     const idx_t nl = leafCount(n);
     std::vector<P> parts(nl);
-#pragma omp parallel for schedule(static)
-    for (idx_t l = 0; l < nl; ++l) {
+    forEach(nl, team, [&](idx_t l) {
         const idx_t b = l * leafSize;
         parts[l]      = leaf<T, OP, P>(in, begin + b, std::min(leafSize, n - b), cin);
-    }
-    return pairwise(parts.data(), nl);
+    });
+    return pairwise(parts.data(), nl, team);
 }
 
-/** @brief Host canonical reduction of ``in(begin) .. in(begin + n - 1)``. */
+/** @brief Host canonical reduction of ``in(begin) .. in(begin + n - 1)`` on at most ``team`` host threads. */
 template<typename T, typename OP, typename In>
-inline T reduceRange(const In& in, idx_t begin, idx_t n)
+inline T reduceRange(const In& in, idx_t begin, idx_t n, int team = eagle::exec::host_max_threads())
 {
-    return partialRange<T, OP>(in, begin, n).value();
+    return partialRange<T, OP>(in, begin, n, NoComp{}, team).value();
 }
 
-/** @brief Host canonical reduction of ``in(0) .. in(n-1)``. */
+/** @brief Host canonical reduction of ``in(0) .. in(n-1)`` on at most ``team`` host threads. */
 template<typename T, typename OP, typename In>
-inline T reduce(const In& in, idx_t n)
+inline T reduce(const In& in, idx_t n, int team = eagle::exec::host_max_threads())
 {
-    return reduceRange<T, OP>(in, 0, n);
+    return reduceRange<T, OP>(in, 0, n, team);
 }
 
 /**
@@ -427,15 +454,15 @@ inline T reduce(const In& in, idx_t n)
  *        partials combined by the pairwise levels. Bitwise equal to ``reduce``.
  */
 template<typename T, typename OP, typename In>
-inline T reduceChunked(const In& in, idx_t n, idx_t chunk)
+inline T reduceChunked(const In& in, idx_t n, idx_t chunk, int team = eagle::exec::host_max_threads())
 {
     EAGLE_ASSERT(n >= 1, "canonical::reduceChunked: empty range");
     EAGLE_ASSERT(isAlignedChunk(chunk),
         "canonical::reduceChunked: chunk must be leafSize * 2^q");
     std::vector<Partial<T, OP>> parts;
     for (idx_t b = 0; b < n; b += chunk)
-        parts.push_back(partialRange<T, OP>(in, b, std::min(chunk, n - b)));
-    return combine(std::move(parts)).value();
+        parts.push_back(partialRange<T, OP>(in, b, std::min(chunk, n - b), NoComp{}, team));
+    return combine(std::move(parts), team).value();
 }
 
 /** @brief Column ``j`` of a row-major ``(rows, cols)`` host plane as ``in(i)``. */
