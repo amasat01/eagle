@@ -353,33 +353,6 @@ inline P leaf(const In& in, idx_t base, idx_t cnt, const Cin& cin = {})
     return s[0];
 }
 
-/**
- * @brief Run ``body(i)`` for ``i`` in ``[0, count)`` on the host pool with at most ``team`` threads, the caller
- *        included: the range is cut into contiguous blocks, a few per thread so a late thread takes fewer of
- *        them. ``body`` must not throw. In place when the team is one.
- */
-template<typename F>
-inline void forEach(idx_t count, int team, const F& body)
-{
-    const idx_t lanes = std::min<idx_t>(count, idx_t(std::max(team, 1)) * 4);
-    const idx_t block = (count + lanes - 1) / lanes;
-    struct Range {
-        const F* body;
-        idx_t count, block;
-    } range{ &body, count, block };
-    eagle::exec::detail::HostPool::instance().run(
-        { static_cast<std::uint32_t>(lanes),
-          nullptr,
-          [](const void* ctx, std::uint32_t lane) {
-              const Range& r = *static_cast<const Range*>(ctx);
-              const idx_t end = std::min(r.count, (idx_t(lane) + 1) * r.block);
-              for (idx_t i = idx_t(lane) * r.block; i < end; ++i)
-                  (*r.body)(i);
-          },
-          &range },
-        team);
-}
-
 /** @brief Level-by-level pairwise reduction of ``v[0..m)`` (``m >= 1``), in
  *  place, on at most ``team`` host threads; returns the root. An odd last node
  *  is carried. The tree is fixed: the bits do not depend on ``team``. */
@@ -392,7 +365,7 @@ inline P pairwise(P* v, idx_t m, int team = eagle::exec::host_max_threads())
         // a later read in place).
         if (pairs >= 8192) {
             std::vector<P> nxt((m + 1) / 2);
-            forEach(pairs, team, [&](idx_t i) { nxt[i] = P::join(v[2 * i], v[2 * i + 1]); });
+            eagle::exec::hostFor(pairs, team, [&](idx_t i) { nxt[i] = P::join(v[2 * i], v[2 * i + 1]); });
             if (m & 1)
                 nxt[pairs] = v[m - 1];
             std::copy(nxt.begin(), nxt.end(), v);
@@ -427,7 +400,7 @@ inline P partialRange(const In& in, idx_t begin, idx_t n, const Cin& cin = {},
     EAGLE_ASSERT(n >= 1, "canonical::partialRange: empty range");
     const idx_t nl = leafCount(n);
     std::vector<P> parts(nl);
-    forEach(nl, team, [&](idx_t l) {
+    eagle::exec::hostFor(nl, team, [&](idx_t l) {
         const idx_t b = l * leafSize;
         parts[l]      = leaf<T, OP, P>(in, begin + b, std::min(leafSize, n - b), cin);
     });

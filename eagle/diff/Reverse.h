@@ -25,6 +25,7 @@
  */
 
 #include "eagle/diff/Window.h"
+#include "eagle/exec/HostPool.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -127,13 +128,11 @@ struct AdjointChain {
 };
 
 /** @brief acc[s] += g[s] for s < @p count: one step's share of a gradient
- *  that sums over steps (a parameter, a read-only input), in step order. */
+ *  that sums over steps (a parameter, a read-only input), in step order; on
+ *  at most @p team host threads when the range is long. */
 template <class T>
-void accumulatePrefix(T* acc, const T* g, idx_t count) {
-#ifdef _OPENMP
-#pragma omp parallel for schedule(static) if (count > 65536)
-#endif
-    for (idx_t s = 0; s < count; ++s) acc[s] += g[s];
+void accumulatePrefix(T* acc, const T* g, idx_t count, int team = exec::host_max_threads()) {
+    exec::hostFor(count, count > 65536 ? team : 1, [&](std::int64_t s) { acc[s] += g[s]; });
 }
 
 /** @brief plane[s] = value for s < @p count: the step index a time-indexed

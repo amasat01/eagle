@@ -166,5 +166,36 @@ TEST(DiffWindow, AccumulatePrefixLeavesTheTail) {
     EXPECT_EQ(acc, (std::vector<float>{ 3, 4, 1 }));
 }
 
+/** @brief The prefix accumulate and the column gather run long ranges on the host pool: the planes they write are the
+ *  one-thread run's, bit for bit, for every team (every element is written by exactly one lane). */
+TEST(DiffWindow, ParallelLoopsGiveTheSameBitsForEveryTeam) {
+    const idx_t count = 200001, n = 200003;
+    std::vector<float> g(count), base(count);
+    std::vector<double> src(n);
+    std::vector<idx_t> perm(count);
+    for (idx_t i = 0; i < count; ++i) {
+        g[i] = 0.1f * float(i % 977) - 40.0f;
+        base[i] = 1e-3f * float((i * 31) % 1013);
+        src[i] = 0.25 * double((i * 7919) % 4001);
+        perm[i] = (i * 104729) % count;
+    }
+    std::vector<float> accOne = base;
+    std::vector<double> gatherOne(count);
+    accumulatePrefix(accOne.data(), g.data(), count, 1);
+    gatherColumns(gatherOne.data(), count, src.data(), n, perm.data(), count, 1, sizeof(double), 1);
+    for (idx_t i = 0; i < count; ++i) {
+        ASSERT_EQ(accOne[i], base[i] + g[i]);
+        ASSERT_EQ(gatherOne[i], src[perm[i]]);
+    }
+    for (int team : { 2, 7 }) {
+        std::vector<float> acc = base;
+        std::vector<double> gathered(count);
+        accumulatePrefix(acc.data(), g.data(), count, team);
+        gatherColumns(gathered.data(), count, src.data(), n, perm.data(), count, 1, sizeof(double), team);
+        EXPECT_EQ(acc, accOne) << "team=" << team;
+        EXPECT_EQ(gathered, gatherOne) << "team=" << team;
+    }
+}
+
 }  // namespace DiffWindowTest
 }  // namespace eagle_tests
