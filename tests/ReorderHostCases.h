@@ -95,16 +95,16 @@ struct HostBatch {
             ReorderPlane { p4.data(), 4 }, ReorderPlane { p8.data(), 8 },
             ReorderPlane { p16.data(), 16 } };
     }
-    void reorder()
+    void reorder(int team = eagle::exec::host_max_threads())
     {
         auto pl = planes();
         reorderHost(pl.data(), std::uint32_t(pl.size()), mask.data(), kCompactMaskIsDrop,
-            perm.data(), inv.data(), map.data(), &count, &span, &fire, scratch, n);
+            perm.data(), inv.data(), map.data(), &count, &span, &fire, scratch, n, 0u, team);
     }
-    void restore()
+    void restore(int team = eagle::exec::host_max_threads())
     {
         auto pl = planes();
-        restoreHost(pl.data(), std::uint32_t(pl.size()), perm.data(), inv.data(), scratch, n);
+        restoreHost(pl.data(), std::uint32_t(pl.size()), perm.data(), inv.data(), scratch, n, team);
     }
     /** Drop (in sample order) every sample @p drop marks, wherever it sits. */
     void finish(const std::vector<std::uint8_t>& drop)
@@ -191,6 +191,31 @@ INSTANTIATE_TEST_SUITE_P(Edges, ReorderHostSizes,
         std::int64_t { 256 }, std::int64_t { 257 }, std::int64_t { 100003 }));
 
 class ReorderHost : public Test { };
+
+// The planes, perm, inv, map and counts of a reorder and of its restore are the one-thread run's for every team, and the
+// reorder meets the structural reference (expectReordered) at each of them.
+TEST_F(ReorderHost, EveryTeamGivesTheSameReorderAndRestore)
+{
+    for (const std::int64_t n : { std::int64_t { 1 }, std::int64_t { 2 }, std::int64_t { 255 }, std::int64_t { 257 },
+             std::int64_t { 1000003 } }) {
+        const auto drop = randomDrop(n, 0.6, 31u + unsigned(n));
+        HostBatch one(n);
+        for (int team : { 1, 2, 7 }) {
+            HostBatch b(n);
+            b.finish(drop);
+            b.reorder(team);
+            expectReordered(b, drop);
+            if (team == 1)
+                one = b;
+            EXPECT_EQ(b.perm, one.perm) << "n=" << n << " team=" << team;
+            EXPECT_EQ(b.inv, one.inv) << "n=" << n << " team=" << team;
+            EXPECT_EQ(b.p8, one.p8) << "n=" << n << " team=" << team;
+            EXPECT_EQ(b.map, one.map) << "n=" << n << " team=" << team;
+            b.restore(team);
+            EXPECT_TRUE(std::is_sorted(b.p8.begin(), b.p8.end())) << "n=" << n << " team=" << team;
+        }
+    }
+}
 
 // Staging more bytes per sample puts more planes in each group; the moves are
 // the same, so every plane, perm, inv, the map and the words come out equal.

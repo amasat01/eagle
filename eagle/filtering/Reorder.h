@@ -655,7 +655,7 @@ namespace detail {
  *  device kernel pair: every plane is copied to its staging slice first, then
  *  scattered back to its reordered slots. */
 inline void reorderGroupHost(const ReorderGroup& g, void* stage, const idx_t* keep,
-    const idx_t* incl, std::int64_t sp)
+    const idx_t* incl, std::int64_t sp, int team)
 {
     if (sp == 0)
         return;
@@ -669,35 +669,31 @@ inline void reorderGroupHost(const ReorderGroup& g, void* stage, const idx_t* ke
         withElem(g.elemBytes[j], [&]<typename T>() {
             const T* in = reinterpret_cast<const T*>(src);
             T* out      = static_cast<T*>(g.data[j]);
-#pragma omp parallel for schedule(static)
-            for (std::int64_t i = 0; i < sp; ++i)
+            exec::hostFor(sp, team, [&](std::int64_t i) {
                 out[reorderDst(keep[i] != 0, i, std::int64_t(incl[i]), cnt)] = in[i];
+            });
         });
     }
 }
 
 template<typename T>
-inline void restorePlaneHost(void* data, void* stage, const std::int32_t* perm, std::int64_t n)
+inline void restorePlaneHost(void* data, void* stage, const std::int32_t* perm, std::int64_t n, int team)
 {
     T* plane = static_cast<T*>(data);
     T* st    = static_cast<T*>(stage);
-#pragma omp parallel for schedule(static)
-    for (std::int64_t i = 0; i < n; ++i)
-        st[i] = plane[i];
-#pragma omp parallel for schedule(static)
-    for (std::int64_t s = 0; s < n; ++s)
-        plane[perm[s]] = st[s];
+    exec::hostFor(n, team, [&](std::int64_t i) { st[i] = plane[i]; });
+    exec::hostFor(n, team, [&](std::int64_t s) { plane[perm[s]] = st[s]; });
 }
 
 } // namespace detail
 
-/** @brief The host face of ``reorderDevice`` over host memory (OpenMP);
+/** @brief The host face of ``reorderDevice`` over host memory, on at most ``team`` host threads;
  *  the same moves in the same groups, so the two faces agree to the bit. */
 inline void reorderHost(const ReorderPlane* planes, std::uint32_t nPlanes,
     const std::uint8_t* mask, std::uint32_t flags, std::int32_t* perm,
     std::int32_t* inv, std::int32_t* indexMap, std::uint32_t* count,
     std::uint32_t* span, std::uint32_t* fire, void* scratch, std::int64_t n,
-    std::uint32_t stageBytesPerSample = 0)
+    std::uint32_t stageBytesPerSample = 0, int team = exec::host_max_threads())
 {
     detail::checkReorder(planes, nPlanes, mask, n, true);
     if (fire != nullptr && *fire == 0u)
@@ -716,12 +712,11 @@ inline void reorderHost(const ReorderPlane* planes, std::uint32_t nPlanes,
     auto blockSums  = spanView<idx_t>(base + 2 * std::size_t(N), N, hostDevice());
     void* stage     = static_cast<char*>(scratch) + detail::reorderStageOffset(n);
     const bool drop = (flags & kCompactMaskIsDrop) != 0;
-#pragma omp parallel for schedule(static)
-    for (std::int64_t i = 0; i < n; ++i) {
+    exec::hostFor(n, team, [&](std::int64_t i) {
         const bool set = mask[i] != 0;
         base[i]        = idx_t(drop ? !set : set);
-    }
-    cpu::Scan::scan<idx_t, aether::SumOp<idx_t>, true>(keep.as_const(), inclusive, blockSums);
+    });
+    cpu::Scan::scan<idx_t, aether::SumOp<idx_t>, true>(keep.as_const(), inclusive, blockSums, idx_t(0), team);
     const idx_t* k        = base;
     const idx_t* c        = base + N;
     const std::int64_t sp = std::int64_t(*span) < n ? std::int64_t(*span) : n;
@@ -730,24 +725,21 @@ inline void reorderHost(const ReorderPlane* planes, std::uint32_t nPlanes,
     ReorderGroup group;
     for (std::uint32_t q = 0; q < nPlanes + 1u;) {
         q = detail::nextReorderGroup(planes, nPlanes, perm, q, n, budget, group);
-        detail::reorderGroupHost(group, stage, k, c, sp);
+        detail::reorderGroupHost(group, stage, k, c, sp, team);
     }
-#pragma omp parallel for schedule(static)
-    for (std::int64_t s = 0; s < sp; ++s)
-        inv[perm[s]] = std::int32_t(s);
+    exec::hostFor(sp, team, [&](std::int64_t s) { inv[perm[s]] = std::int32_t(s); });
     const std::int64_t cnt = sp == 0 ? 0 : std::int64_t(c[sp - 1]);
-#pragma omp parallel for schedule(static)
-    for (std::int64_t t = 0; t < cnt; ++t)
-        indexMap[t] = std::int32_t(t);
+    exec::hostFor(cnt, team, [&](std::int64_t t) { indexMap[t] = std::int32_t(t); });
     *count = std::uint32_t(cnt);
     *span  = std::uint32_t(cnt);
     if (fire != nullptr)
         *fire = 0u;
 }
 
-/** @brief The host face of ``restoreDevice`` over host memory (OpenMP). */
+/** @brief The host face of ``restoreDevice`` over host memory, on at most ``team`` host threads. */
 inline void restoreHost(const ReorderPlane* planes, std::uint32_t nPlanes,
-    std::int32_t* perm, std::int32_t* inv, void* scratch, std::int64_t n)
+    std::int32_t* perm, std::int32_t* inv, void* scratch, std::int64_t n,
+    int team = exec::host_max_threads())
 {
     detail::checkReorder(planes, nPlanes, nullptr, n, false);
     if (n == 0)
@@ -755,29 +747,28 @@ inline void restoreHost(const ReorderPlane* planes, std::uint32_t nPlanes,
     void* stage = static_cast<char*>(scratch) + detail::reorderStageOffset(n);
     for (std::uint32_t p = 0; p < nPlanes; ++p) {
         detail::withElem(planes[p].elemBytes, [&]<typename T>() {
-            detail::restorePlaneHost<T>(planes[p].data, stage, perm, n);
+            detail::restorePlaneHost<T>(planes[p].data, stage, perm, n, team);
         });
     }
-#pragma omp parallel for schedule(static)
-    for (std::int64_t i = 0; i < n; ++i) {
+    exec::hostFor(n, team, [&](std::int64_t i) {
         perm[i] = std::int32_t(i);
         inv[i]  = std::int32_t(i);
-    }
+    });
 }
 
-/** @brief The host face of ``resetDevice`` over host memory (OpenMP). */
+/** @brief The host face of ``resetDevice`` over host memory, on at most ``team`` host threads. */
 inline void resetHost(std::int32_t* perm, std::int32_t* inv, std::int32_t* indexMap,
-    std::uint32_t* count, std::uint32_t* span, std::int64_t n)
+    std::uint32_t* count, std::uint32_t* span, std::int64_t n,
+    int team = exec::host_max_threads())
 {
     if (n < 0 || n > kCompactMaxSamples)
         EAGLE_THROW(std::invalid_argument, "reset: n must be in [0, 2^31 - 1]");
-#pragma omp parallel for schedule(static)
-    for (std::int64_t i = 0; i < n; ++i) {
+    exec::hostFor(n, team, [&](std::int64_t i) {
         perm[i] = std::int32_t(i);
         inv[i]  = std::int32_t(i);
         if (indexMap != nullptr)
             indexMap[i] = std::int32_t(i);
-    }
+    });
     *count = std::uint32_t(n);
     *span  = std::uint32_t(n);
 }

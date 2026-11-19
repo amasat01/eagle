@@ -9,6 +9,7 @@
 #include "eagle/util/throw.h"
 
 #include <stdexcept>
+#include <vector>
 
 #ifndef EAGLE_CPU_ONLY
 #include "eagle/cuda/Scan.h"
@@ -306,10 +307,11 @@ inline void compactDevice(const std::uint8_t* mask, std::uint32_t flags,
 #endif // EAGLE_CPU_ONLY
 
 /**
- * @brief The host face of ``compactDevice`` over host memory (OpenMP twins).
+ * @brief The host face of ``compactDevice`` over host memory, on at most ``team`` host threads.
  */
 inline void compactHost(const std::uint8_t* mask, std::uint32_t flags,
-    std::int32_t* indexMap, std::uint32_t* count, void* scratch, std::int64_t n)
+    std::int32_t* indexMap, std::uint32_t* count, void* scratch, std::int64_t n,
+    int team = exec::host_max_threads())
 {
     detail::checkCompact(n);
     if (n == 0) {
@@ -322,18 +324,16 @@ inline void compactHost(const std::uint8_t* mask, std::uint32_t flags,
     auto inclusive  = spanView<idx_t>(base + N, N, hostDevice());
     auto blockSums  = spanView<idx_t>(base + 2 * std::size_t(N), N, hostDevice());
     const bool drop = (flags & kCompactMaskIsDrop) != 0;
-#pragma omp parallel for schedule(static)
-    for (std::int64_t i = 0; i < n; ++i) {
+    exec::hostFor(n, team, [&](std::int64_t i) {
         const bool set = mask[i] != 0;
         base[i]        = idx_t(drop ? !set : set);
-    }
+    });
     cpu::Scan::scan<idx_t, aether::SumOp<idx_t>, true>(
-        keep.as_const(), inclusive, blockSums);
-#pragma omp parallel for schedule(static)
-    for (std::int64_t i = 0; i < n; ++i) {
+        keep.as_const(), inclusive, blockSums, idx_t(0), team);
+    exec::hostFor(n, team, [&](std::int64_t i) {
         if (base[i] != 0)
             indexMap[inclusive(idx_t(i)) - 1] = std::int32_t(i);
-    }
+    });
     *count = std::uint32_t(inclusive(N - 1));
 }
 
@@ -344,26 +344,29 @@ inline void compactHost(const std::uint8_t* mask, std::uint32_t flags,
  */
 inline void compactHost(const std::uint8_t* mask, std::uint32_t flags,
     std::int32_t* indexMap, std::uint32_t* count, void* scratch, std::int64_t n,
-    const ReorderTrigger* trig)
+    const ReorderTrigger* trig, int team = exec::host_max_threads())
 {
     if (trig == nullptr) {
-        compactHost(mask, flags, indexMap, count, scratch, n);
+        compactHost(mask, flags, indexMap, count, scratch, n, team);
         return;
     }
     detail::checkTrigger(*trig);
-    compactHost(mask, flags, indexMap, count, scratch, n);
+    compactHost(mask, flags, indexMap, count, scratch, n, team);
     // The predicate plane (scratch[0, n)) still holds the keep flags.
     const idx_t* keep          = static_cast<const idx_t*>(scratch);
     const std::int64_t ngroups = (n + 31) / 32;
-    std::int64_t live32        = 0;
-#pragma omp parallel for schedule(static) reduction(+ : live32)
-    for (std::int64_t g = 0; g < ngroups; ++g) {
+    // a group is live when any of its 32 samples is kept; one flag per group, summed in order
+    std::vector<std::uint8_t> live(static_cast<std::size_t>(ngroups));
+    exec::hostFor(ngroups, team, [&](std::int64_t g) {
         const std::int64_t end = (g + 1) * 32 < n ? (g + 1) * 32 : n;
         bool any               = false;
         for (std::int64_t i = g * 32; i < end && !any; ++i)
             any = keep[i] != 0;
-        live32 += any ? 1 : 0;
-    }
+        live[std::size_t(g)] = any ? 1 : 0;
+    });
+    std::int64_t live32 = 0;
+    for (std::uint8_t flag : live)
+        live32 += flag;
     *trig->live32 = std::uint32_t(live32);
     *trig->fire   = detail::triggerFires(*count, *trig->live32, *trig->span, trig->theta);
 }

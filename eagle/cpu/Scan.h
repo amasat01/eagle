@@ -3,150 +3,88 @@
 
 #pragma once
 
+#include "eagle/exec/HostPool.h"
 #include "eagle/filtering/scan_detail.h"
 #include "eagle/typedefs.h"
 #include "eagle/util/DeviceError.h"
 #include "eagle/util/log.h"
 #include "eagle/util/throw.h"
 
-#include <omp.h>
 #include <algorithm>
 #include <vector>
 
 namespace eagle {
 namespace cpu {
 
-/** @brief OpenMP parallelized prefix sum (scan) */
+/** @brief Prefix sum (scan) on eagle's host pool */
 struct Scan {
     using Self = Scan;
 
-    /** @brief Run the overall scan.
-     *
-     *  Context-aware: nested in a parallel region, ``scanBlock_`` and
-     *  ``applyOffsets_`` work-share via ``omp for`` and the sequential
-     *  prefix is wrapped in ``omp single``. Outside a parallel region,
-     *  each step opens its own ``parallel for``. */
+    /** @brief Run the overall scan on at most ``team`` host threads: every block is scanned on its own, the block
+     *  totals are prefixed in order, and each block adds its offset. The blocks are fixed by ``blockSize_`` and the
+     *  prefix runs in block order, so the results do not depend on ``team``. */
     template<typename T, typename OP, bool Inclusive,
         unsigned int blockSize_ = 1024>
     static void scan(const CRefArrT<T> arr, GRefArrT<T> results,
-        GRefArrT<T> blockSums, const T& init = 0)
+        GRefArrT<T> blockSums, const T& init = 0,
+        int team = exec::host_max_threads())
     {
-        const idx_t N = arr.samples();
-        auto blockSize
-            = [](const idx_t& size) { return std::min(blockSize_, size); };
+        const idx_t N         = arr.samples();
+        const idx_t blockSize = std::min(blockSize_, N);
+        const idx_t numBlocks
+            = filtering::detail::ScanCore::countBlocks<blockSize_>(N, blockSize);
 
-        std::vector<idx_t> blockSizes;
-        std::vector<idx_t> blocks;
-        blockSizes.push_back(blockSize(N));
-        blocks.push_back(filtering::detail::ScanCore::countBlocks<blockSize_>(
-            N, blockSizes.back()));
-
-        Self::scanBlock_<T, OP, Inclusive>(
-            arr, results, blockSums, blockSizes[0], blocks[0], init);
-
-        /* ``packetFlatFor`` uses ``omp for nowait`` when nested — explicit
-         * barrier ensures the prefix below sees fully-written blockSums. */
-        if (omp_in_parallel()) {
-#pragma omp barrier
-        }
-
-        if (omp_in_parallel()) {
-#pragma omp single
-            {
-                T acc = init;
-                for (idx_t b = 0; b < blocks[0]; ++b) {
-                    T temp       = blockSums(b);
-                    blockSums(b) = acc;
-                    acc          = OP{}(acc, temp);
+        exec::hostFor(numBlocks, team, [&](std::int64_t b) {
+            const idx_t start = idx_t(b) * blockSize;
+            const idx_t end   = std::min(start + blockSize, N);
+            T acc             = init;
+            // Serial within a block: each result depends on the previous
+            // one; the blocks are the parallel grain.
+            for (idx_t i = start; i < end; ++i) {
+                if constexpr (Inclusive) {
+                    acc        = OP{}(acc, arr(i));
+                    results(i) = acc;
+                } else {
+                    results(i) = acc;
+                    acc        = OP{}(acc, arr(i));
                 }
             }
-        } else {
-            T acc = init;
-            for (idx_t b = 0; b < blocks[0]; ++b) {
-                T temp       = blockSums(b);
-                blockSums(b) = acc;
-                acc          = OP{}(acc, temp);
-            }
+            blockSums(b) = acc;
+        });
+
+        T acc = init;
+        for (idx_t b = 0; b < numBlocks; ++b) {
+            T temp       = blockSums(b);
+            blockSums(b) = acc;
+            acc          = OP{}(acc, temp);
         }
 
-        Self::applyOffsets_<T, OP>(
-            results, blockSums.as_const(), blockSizes[0], blocks[0]);
-
-        /* Trailing barrier (same nowait reason as above) so consumers
-         * see fully-written ``results``. */
-        if (omp_in_parallel()) {
-#pragma omp barrier
-        }
+        const CRefArrT<T> offsets = blockSums.as_const();
+        exec::hostFor(numBlocks, team, [&](std::int64_t b) {
+            const idx_t start = idx_t(b) * blockSize;
+            const idx_t end   = std::min(start + blockSize, N);
+            const T offset    = offsets(b);
+            for (idx_t i = start; i < end; ++i)
+                results(i) = OP{}(results(i), offset);
+        });
     }
 
     /** @brief Run the inclusive scan */
     template<typename T, typename OP, unsigned int blockSize_ = 1024>
     static void inclusive(const CRefArrT<T> arr, GRefArrT<T> results,
-        GRefArrT<T> blockSums, const T& init = 0)
+        GRefArrT<T> blockSums, const T& init = 0,
+        int team = exec::host_max_threads())
     {
-        Scan::scan<T, OP, true, blockSize_>(arr, results, blockSums, init);
+        Scan::scan<T, OP, true, blockSize_>(arr, results, blockSums, init, team);
     }
 
     /** @brief Run the exclusive scan */
     template<typename T, typename OP, unsigned int blockSize_ = 1024>
     static void exclusive(const CRefArrT<T> arr, GRefArrT<T> results,
-        GRefArrT<T> blockSums, const T& init = 0)
+        GRefArrT<T> blockSums, const T& init = 0,
+        int team = exec::host_max_threads())
     {
-        Scan::scan<T, OP, false, blockSize_>(arr, results, blockSums, init);
-    }
-
-protected:
-    /** @brief Parallel inclusive scan, context-aware via
-     *  ``aether::packetFor`` (``DataT=bool``, W=1): one block per packet,
-     *  scanned serially. The calling graph inserts the necessary barriers
-     *  when nested. */
-    template<typename T, typename OP, bool Inclusive>
-    static void scanBlock_(const CRefArrT<T> arr, GRefArrT<T> results,
-        GRefArrT<T> blockSums, const idx_t blockSize,
-        const idx_t numBlocks, T init)
-    {
-        aether::packetFor<bool>(
-            idx_t{ 0 }, numBlocks,
-            [&](const auto& pi) {
-                const idx_t b     = pi.scalar(0).global();
-                const idx_t start = b * blockSize;
-                const idx_t end = std::min(start + blockSize, idx_t(arr.samples()));
-                T acc             = init;
-                // Serial within a block: each result depends on the previous
-                // one; the blocks are the parallel grain.
-                for (idx_t i = start; i < end; ++i) {
-                    if constexpr (Inclusive) {
-                        acc        = OP{}(acc, arr(i));
-                        results(i) = acc;
-                    } else {
-                        results(i) = acc;
-                        acc        = OP{}(acc, arr(i));
-                    }
-                }
-                blockSums(b) = acc;
-            },
-            /*parallel=*/true);
-    }
-
-    /** @brief Apply offsets.  Mirrors ``scanBlock_`` shape. */
-    template<typename T, typename OP>
-    static void applyOffsets_(GRefArrT<T> results,
-        const CRefArrT<T> blockSums, const idx_t blockSize,
-        const idx_t numBlocks)
-    {
-        aether::packetFor<bool>(
-            idx_t{ 0 }, numBlocks,
-            [&](const auto& pi) {
-                const idx_t b     = pi.scalar(0).global();
-                const idx_t start = b * blockSize;
-                const idx_t end = std::min(start + blockSize, idx_t(results.samples()));
-                const T offset    = blockSums(b);
-#pragma omp simd
-                for (idx_t i = start; i < end; ++i) {
-                    results(i) = OP{}(results(i), offset);
-                }
-            },
-            /*parallel=*/true);
+        Scan::scan<T, OP, false, blockSize_>(arr, results, blockSums, init, team);
     }
 };
 

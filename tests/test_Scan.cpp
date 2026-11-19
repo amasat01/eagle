@@ -305,5 +305,38 @@ TEST_F(LargeScatterSlice, NestedHostUpdate_T2) { verifyNestedHostUpdateMatches(*
 TEST_F(LargeScatterSlice, NestedHostUpdate_T4) { verifyNestedHostUpdateMatches(*this, 4); }
 TEST_F(LargeScatterSlice, NestedHostUpdate_T8) { verifyNestedHostUpdateMatches(*this, 8); }
 
+/** @brief The host scan runs its blocks on the host pool: for every team the results equal the one-thread run and the
+ *  serial prefix, exactly (integer sums). */
+template<bool Inclusive>
+void expectScanTeamInvariant()
+{
+    for (idx_t n : { idx_t(1), idx_t(2), idx_t(255), idx_t(256), idx_t(257), idx_t(1000003) }) {
+        const auto size = static_cast<std::size_t>(n);
+        std::vector<idx_t> in(size), want(size);
+        idx_t acc = 0;
+        for (idx_t i = 0; i < n; ++i) {
+            in[std::size_t(i)] = (i * 7919) % 13;
+            want[std::size_t(i)] = Inclusive ? acc + in[std::size_t(i)] : acc;
+            acc += in[std::size_t(i)];
+        }
+        const idx_t blocks = (n + 1023) / 1024;
+        std::vector<idx_t> one;
+        for (int team : { 1, 2, 7 }) {
+            std::vector<idx_t> out(std::size_t(n), -1), sums(std::size_t(blocks), -1);
+            eagle::cpu::Scan::scan<idx_t, aether::SumOp<idx_t>, Inclusive>(
+                eagle::spanView<idx_t>(in.data(), n, eagle::hostDevice()).as_const(),
+                eagle::spanView<idx_t>(out.data(), n, eagle::hostDevice()),
+                eagle::spanView<idx_t>(sums.data(), blocks, eagle::hostDevice()), idx_t(0), team);
+            EXPECT_EQ(out, want) << "n=" << n << " team=" << team;
+            if (team == 1)
+                one = out;
+            EXPECT_EQ(out, one) << "n=" << n << " team=" << team;
+        }
+    }
+}
+
+TEST(HostScan, InclusiveGivesTheSameResultForEveryTeam) { expectScanTeamInvariant<true>(); }
+TEST(HostScan, ExclusiveGivesTheSameResultForEveryTeam) { expectScanTeamInvariant<false>(); }
+
 } // namespace ScanTest
 } // namespace eagle_tests

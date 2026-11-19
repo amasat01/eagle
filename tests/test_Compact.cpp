@@ -69,6 +69,26 @@ TEST_P(CompactSizes, HostMatchesReference)
     }
 }
 
+TEST(CompactTeams, MaskAndDropGiveTheReferenceMapForEveryTeam)
+{
+    for (const std::int64_t n : { std::int64_t { 1 }, std::int64_t { 2 }, std::int64_t { 255 }, std::int64_t { 257 },
+             std::int64_t { 1000003 } }) {
+        const auto m = randomMask(n, 5u + unsigned(n));
+        for (const bool drop : { true, false }) {
+            const auto want = reference(m, drop);
+            for (int team : { 1, 2, 7 }) {
+                std::vector<std::int32_t> map(static_cast<std::size_t>(n), -1);
+                std::vector<eagle::idx_t> scratch(compactScratchBytes(n) / sizeof(eagle::idx_t));
+                std::uint32_t count = 99;
+                compactHost(m.data(), drop ? kCompactMaskIsDrop : 0u, map.data(), &count, scratch.data(), n, team);
+                ASSERT_EQ(count, want.size()) << "n=" << n << " drop=" << drop << " team=" << team;
+                EXPECT_TRUE(std::equal(want.begin(), want.end(), map.begin()))
+                    << "n=" << n << " drop=" << drop << " team=" << team;
+            }
+        }
+    }
+}
+
 INSTANTIATE_TEST_SUITE_P(Edges, CompactSizes,
     ::testing::Values(std::int64_t { 0 }, std::int64_t { 1 }, std::int64_t { 7 },
         std::int64_t { 256 }, std::int64_t { 257 }, std::int64_t { 100003 }));
