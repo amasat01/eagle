@@ -10,7 +10,6 @@
 #include "eagle/exec/HostTeam.h"
 #include "eagle/reduce/canonical.h"
 
-#include <omp.h>
 
 namespace eagle {
 namespace door {
@@ -76,7 +75,7 @@ T* mut_data_of(const eg_plane_s& p) {
 }
 
 template <class T, class OP>
-void columns(const ReduceOp& r) {
+void columns(const ReduceOp& r, int threads) {
     namespace canon = eagle::reduce::canonical;
     const T* in = data_of<T>(*r.in);
     T* out = mut_data_of<T>(*r.out);
@@ -86,9 +85,9 @@ void columns(const ReduceOp& r) {
             canon::Partial<T, OP> p;
             if (r.comp != nullptr && !r.pair) {
                 const Column<T> c{ data_of<T>(*r.comp) + j * r.n };
-                p = canon::partialRange<T, OP>(x, 0, r.n, c);
+                p = canon::partialRange<T, OP>(x, 0, r.n, c, threads);
             } else {
-                p = canon::partialRange<T, OP>(x, 0, r.n);
+                p = canon::partialRange<T, OP>(x, 0, r.n, {}, threads);
             }
             if (r.pair) {
                 out[j] = p.h;
@@ -97,16 +96,16 @@ void columns(const ReduceOp& r) {
                 out[j] = p.value();
             }
         } else {
-            out[j] = canon::partialRange<T, OP>(x, 0, r.n).value();
+            out[j] = canon::partialRange<T, OP>(x, 0, r.n, {}, threads).value();
         }
     }
 }
 
 template <class T>
-void by_op(const ReduceOp& r) {
-    if (r.op == EG_REDUCE_SUM) columns<T, aether::SumOp<T>>(r);
-    else if (r.op == EG_REDUCE_MAX) columns<T, aether::MaxOp<T>>(r);
-    else columns<T, eagle::reduce::canonical::MinOp<T>>(r);
+void by_op(const ReduceOp& r, int threads) {
+    if (r.op == EG_REDUCE_SUM) columns<T, aether::SumOp<T>>(r, threads);
+    else if (r.op == EG_REDUCE_MAX) columns<T, aether::MaxOp<T>>(r, threads);
+    else columns<T, eagle::reduce::canonical::MinOp<T>>(r, threads);
 }
 
 }  // namespace
@@ -167,19 +166,16 @@ ReduceOp reduce_check(const eg_ctx& ctx, const eg_reduce_desc& desc) {
     return r;
 }
 
-/** @brief Run a checked reduce on at most @p threads threads: each column's canonical tree into
- *  out[column]. The calling thread's OpenMP width is restored after. */
+/** @brief Run a checked reduce on at most @p threads threads of eagle's host pool: each column's canonical tree
+ *  into out[column]. */
 void reduce_exec(const ReduceOp& r, int threads) {
-    const int previous = omp_get_max_threads();
-    omp_set_num_threads(threads);
     switch (r.code) {
-        case kF32: by_op<float>(r); break;
-        case kF64: by_op<double>(r); break;
-        case kI32: by_op<std::int32_t>(r); break;
-        case kI64: by_op<std::int64_t>(r); break;
-        default: columns<std::uint8_t, aether::LogicalAndOp>(r);
+        case kF32: by_op<float>(r, threads); break;
+        case kF64: by_op<double>(r, threads); break;
+        case kI32: by_op<std::int32_t>(r, threads); break;
+        case kI64: by_op<std::int64_t>(r, threads); break;
+        default: columns<std::uint8_t, aether::LogicalAndOp>(r, threads);
     }
-    omp_set_num_threads(previous);
 }
 
 /** @brief After one launch of @p plan: companions folded into their targets, then cell rows into cells. */

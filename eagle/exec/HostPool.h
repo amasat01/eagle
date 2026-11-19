@@ -414,5 +414,32 @@ private:
 };
 
 }  // namespace detail
+
+/**
+ * @brief Run ``body(i)`` for ``i`` in ``[0, count)`` on eagle's host pool with at most ``team`` threads, the caller
+ *        included: the range is cut into contiguous blocks, a few per thread so a late thread takes fewer of them.
+ *        ``body`` must not throw. In place when the team is one. Each ``i`` runs once, so a body that writes only
+ *        its own element gives the same bits for every team.
+ */
+template <class F>
+inline void hostFor(std::int64_t count, int team, const F& body) {
+    if (count <= 0) return;
+    const std::int64_t lanes = std::min<std::int64_t>(count, std::int64_t(std::max(team, 1)) * 4);
+    const std::int64_t block = (count + lanes - 1) / lanes;
+    struct Range {
+        const F* body;
+        std::int64_t count, block;
+    } range{ &body, count, block };
+    detail::HostPool::instance().run(
+        { static_cast<std::uint32_t>(lanes), nullptr,
+          [](const void* ctx, std::uint32_t lane) {
+              const Range& r = *static_cast<const Range*>(ctx);
+              const std::int64_t end = std::min(r.count, (std::int64_t(lane) + 1) * r.block);
+              for (std::int64_t i = std::int64_t(lane) * r.block; i < end; ++i) (*r.body)(i);
+          },
+          &range },
+        team);
+}
+
 }  // namespace exec
 }  // namespace eagle

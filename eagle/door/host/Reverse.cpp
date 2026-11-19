@@ -183,11 +183,11 @@ void copy_bytes(eg_ctx* dev, void* dst, const void* src, std::size_t bytes) {
     else std::memcpy(dst, src, bytes);
 }
 
-/** @brief diff::gatherColumns on the host, or queued on @p dev's stream (@p index on the device). */
+/** @brief diff::gatherColumns on the host (on @p threads threads), or queued on @p dev's stream (@p index on the device). */
 void gather(eg_ctx* dev, void* dst, std::int64_t dst_ld, const void* src, std::int64_t src_ld, const std::int64_t* index,
-            std::int64_t count, std::int64_t rows, std::size_t bytes) {
+            std::int64_t count, std::int64_t rows, std::size_t bytes, int threads) {
     if (dev != nullptr) device_columns(*dev, 0, dst, dst_ld, src, src_ld, index, count, rows, static_cast<unsigned>(bytes), 0);
-    else diff::gatherColumns(dst, dst_ld, src, src_ld, index, count, rows, bytes);
+    else diff::gatherColumns(dst, dst_ld, src, src_ld, index, count, rows, bytes, threads);
 }
 
 /** @brief The int64 steps word of a K-step launch: written on the host, or filled on @p dev's stream. */
@@ -948,11 +948,11 @@ void bind_refine(eg_plan_s& plan, const std::vector<RSlot>& slots, const eg_plan
     }
 }
 
-/** @brief One event operation over @p q: on the host, or queued on @p D's stream (the planes are device addresses). */
+/** @brief One event operation over @p q: on the host (on @p threads threads), or queued on @p D's stream (the planes are device addresses). */
 template <class T>
-void apply_event(eg_ctx* D, const events::EventPlanes<T>& q, std::uint32_t op) {
+void apply_event(eg_ctx* D, const events::EventPlanes<T>& q, std::uint32_t op, int threads) {
     if (D != nullptr) device_event_op(*D, static_cast<unsigned>(sizeof(T)), op, &q);
-    else events::applyHost(q, op);
+    else events::applyHost(q, op, threads);
 }
 
 /** @brief events refine after the twin's forward (``RefinePass.run`` and ``events_refine_host``): locate each stop inside
@@ -1031,7 +1031,7 @@ void refine_pass(eg_ctx& ctx, eg_runner_s& runner, RunRecord& r, int threads) {
     p.lo = reinterpret_cast<T*>(f.lo.data());
     p.hi = reinterpret_cast<T*>(f.hi.data());
     p.tStop = reinterpret_cast<T*>(f.tstop.data());
-    const auto apply = [&](const events::EventPlanes<T>& q, std::uint32_t op) { apply_event(D, q, op); };
+    const auto apply = [&](const events::EventPlanes<T>& q, std::uint32_t op) { apply_event(D, q, op, threads); };
     const auto evaluate = [&] { run_on(*f.newton, threads, n, n); };
     evaluate();
     apply(p, events::kOpClassify);
@@ -1318,13 +1318,13 @@ void put(eg_ctx* dev, char* dst, std::int64_t n, const char* src, std::int64_t m
 }
 
 template <class T>
-void accumulate(Grad& g, std::int64_t m, std::int64_t count) {
+void accumulate(Grad& g, std::int64_t m, std::int64_t count, int threads) {
     if (g.acc.dev) {   // a DEVICE record: one queued accumulate over the rows
         device_columns(*g.acc.ctx, 1, g.acc.data(), m, g.grad.data(), m, nullptr, count, g.rows, sizeof(T), 0);
         return;
     }
     for (std::int64_t r = 0; r < g.rows; ++r)
-        diff::accumulatePrefix(reinterpret_cast<T*>(g.acc.data()) + r * m, reinterpret_cast<const T*>(g.grad.data()) + r * m, count);
+        diff::accumulatePrefix(reinterpret_cast<T*>(g.acc.data()) + r * m, reinterpret_cast<const T*>(g.grad.data()) + r * m, count, threads);
 }
 
 template <class T>
@@ -1333,10 +1333,10 @@ struct SampleColumn {
     T operator()(std::int64_t i) const { return p[i]; }
 };
 
-/** @brief The canonical compensated pair of @p x[0, count) (``reduce_canonical_host`` with pair). */
+/** @brief The canonical compensated pair of @p x[0, count) (``reduce_canonical_host`` with pair), on @p threads threads. */
 template <class T>
-reduce::canonical::Partial<T, aether::SumOp<T>> pair_sum(const T* x, std::int64_t count) {
-    return reduce::canonical::partialRange<T, aether::SumOp<T>>(SampleColumn<T>{ x }, 0, count);
+reduce::canonical::Partial<T, aether::SumOp<T>> pair_sum(const T* x, std::int64_t count, int threads) {
+    return reduce::canonical::partialRange<T, aether::SumOp<T>>(SampleColumn<T>{ x }, 0, count, {}, threads);
 }
 
 /** @brief What a recorded refine run's reverse adds to the step-by-step one (``RefineReverse.seeds`` and ``_add_refine``). */
@@ -1395,14 +1395,14 @@ void refine_reverse(eg_ctx& ctx, eg_runner_s& runner, RunRecord& r, const std::v
         }
     }
     q.components = sel.components = row;
-    apply_event(D, q, events::kOpSeed);
+    apply_event(D, q, events::kOpSeed, threads);
     if (f.rvjp == nullptr) f.rvjp = inner_plan(ctx, f.rvjp_unit, primal.structure, n);
     const char* start = nullptr;
     for (const Carried& c : r.reads)
         if (c.kind == Carried::START) start = c.src;
     bind_refine(*f.rvjp, f.vslots, primal, r, f, n, es, start);
     run_on(*f.rvjp, threads, n, n);
-    apply_event(D, sel, events::kOpSelect);
+    apply_event(D, sel, events::kOpSelect, threads);
     std::vector<char> steps_host, status_host;   // a device run: the steps and statuses read back for the stop order
     const std::int64_t* steps_at = reinterpret_cast<const std::int64_t*>(r.steps.data());
     const std::int8_t* status_at = q.status;
@@ -1426,9 +1426,9 @@ void refine_reverse(eg_ctx& ctx, eg_runner_s& runner, RunRecord& r, const std::v
             device_read(*D, hc.data(), hv, sizeof(hv));
             one.push_back({ hv[0], hv[1] });
         } else {
-            one.push_back(pair_sum(reinterpret_cast<const T*>(buf_of(b)), n));
+            one.push_back(pair_sum(reinterpret_cast<const T*>(buf_of(b)), n, threads));
         }
-        out.params.push_back({ slot, static_cast<double>(reduce::canonical::combine(std::move(one)).value()) });
+        out.params.push_back({ slot, static_cast<double>(reduce::canonical::combine(std::move(one), threads).value()) });
     }
     for (const auto& [b, slot] : f.sgrads) {   // a per-sample read's gradient: the refine vjp's plane, joined to the step reverse's
         Buf share;
@@ -1675,11 +1675,11 @@ void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, con
             device_write(*D, dcols.data(), cols.data(), static_cast<std::size_t>(cnt) * 8);
             at = reinterpret_cast<const std::int64_t*>(dcols.data());
         }
-        for (Carried& c : r.reads) gather(D, c.buf.data(), m, c.src, n, at, cnt, c.rows, c.bytes);
+        for (Carried& c : r.reads) gather(D, c.buf.data(), m, c.src, n, at, cnt, c.rows, c.bytes, threads);
         for (std::size_t k = 0; k < r.taped.size(); ++k)
             for (Buf& a : r.taped[k].adj) {
                 a.zero();
-                if (seed[k] != nullptr) gather(D, a.data(), m, seed[k], n, at, cnt, r.taped[k].rows, r.scalar);
+                if (seed[k] != nullptr) gather(D, a.data(), m, seed[k], n, at, cnt, r.taped[k].rows, r.scalar, threads);
             }
         for (Grad& g : r.grads) g.acc.zero();
         if (!live.empty()) {
@@ -1702,7 +1702,7 @@ void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, con
                     }
                     for (std::size_t i = 0; i < r.state.size(); ++i)
                         gather(D, r.state[i].buf.data(), m, r.pool[static_cast<std::size_t>(k)][i].data(), n, from, count,
-                               r.state[i].rows, r.state[i].bytes);
+                               r.state[i].rows, r.state[i].bytes, threads);
                 },
                 [&](std::int64_t c, std::int64_t len) {
                     if (chain.begin(c, len)) return;   // a full window of a FUSED reverse recomputes inside its vjp launch
@@ -1723,8 +1723,8 @@ void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, con
                         run_on(*r.fvjp, threads, whole, m);
                         chain.flip();
                         for (Grad& g : r.grads) {
-                            if (r.scalar == 8) accumulate<double>(g, m, whole);
-                            else accumulate<float>(g, m, whole);
+                            if (r.scalar == 8) accumulate<double>(g, m, whole, threads);
+                            else accumulate<float>(g, m, whole, threads);
                         }
                         return;
                     }
@@ -1736,8 +1736,8 @@ void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, con
                     run_on(vjp, threads, count, m);
                     chain.flip();
                     for (Grad& g : r.grads) {
-                        if (r.scalar == 8) accumulate<double>(g, m, count);
-                        else accumulate<float>(g, m, count);
+                        if (r.scalar == 8) accumulate<double>(g, m, count, threads);
+                        else accumulate<float>(g, m, count, threads);
                     }
                 });
         }
@@ -1770,10 +1770,10 @@ void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, con
                 std::memcpy(sample.data() + static_cast<std::size_t>(order[static_cast<std::size_t>(i)]) * r.scalar,
                             gr.acc.data() + static_cast<std::size_t>(i) * r.scalar, r.scalar);
             if (r.scalar == 8) {
-                const auto p = pair_sum(reinterpret_cast<const double*>(sample.data()), cnt);
+                const auto p = pair_sum(reinterpret_cast<const double*>(sample.data()), cnt, threads);
                 partials[g].push_back({ p.h, p.c });
             } else {
-                const auto p = pair_sum(reinterpret_cast<const float*>(sample.data()), cnt);
+                const auto p = pair_sum(reinterpret_cast<const float*>(sample.data()), cnt, threads);
                 partials[g].push_back({ static_cast<double>(p.h), static_cast<double>(p.c) });
             }
         }
@@ -1824,7 +1824,7 @@ void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, con
             if (r.scalar == 8) {
                 std::vector<reduce::canonical::Partial<double, aether::SumOp<double>>> p;
                 for (const auto& [h, c] : ps) p.push_back({ h, c });
-                double v = ps.empty() ? 0.0 : reduce::canonical::combine(std::move(p)).value();
+                double v = ps.empty() ? 0.0 : reduce::canonical::combine(std::move(p), threads).value();
                 for (const auto& [slot, x] : extra.params)
                     if (slot == o.slot) v += x;
                 if (D != nullptr) device_write(*D, o.data, &v, sizeof(v));
@@ -1832,7 +1832,7 @@ void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, con
             } else {
                 std::vector<reduce::canonical::Partial<float, aether::SumOp<float>>> p;
                 for (const auto& [h, c] : ps) p.push_back({ static_cast<float>(h), static_cast<float>(c) });
-                float v = ps.empty() ? 0.0f : reduce::canonical::combine(std::move(p)).value();
+                float v = ps.empty() ? 0.0f : reduce::canonical::combine(std::move(p), threads).value();
                 for (const auto& [slot, x] : extra.params)
                     if (slot == o.slot) v += static_cast<float>(x);
                 if (D != nullptr) device_write(*D, o.data, &v, sizeof(v));

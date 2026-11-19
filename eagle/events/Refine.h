@@ -33,6 +33,8 @@
  * twin uses, @c t0 + k*h, plus @c tau.
  */
 
+#include "eagle/exec/HostPool.h"
+
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -259,13 +261,10 @@ enum Op : std::uint32_t {
     kOpSelect = 6,   ///< Sensitivity.h
 };
 
-/** @brief Apply per-sample operation @p f to every sample on the host. */
+/** @brief Apply per-sample operation @p f to every sample on the host, on at most @p team threads when there are many. */
 template <class T, class F>
-void forEachSample(const EventPlanes<T>& p, F&& f) {
-#ifdef _OPENMP
-#pragma omp parallel for schedule(static) if (p.n > 65536)
-#endif
-    for (idx_t i = 0; i < p.n; ++i) f(p, i);
+void forEachSample(const EventPlanes<T>& p, F&& f, int team) {
+    exec::hostFor(p.n, p.n > 65536 ? team : 1, [&](std::int64_t i) { f(p, i); });
 }
 
 /** @brief Whether any sample is still pending (the host loop's early exit). */
@@ -329,13 +328,13 @@ void refine(const EventPlanes<T>& p, std::uint32_t op, cudaStream_t stream) {
 
 /** @brief Apply a forward event operation (kOpClassify..kOpCommit) on the host. */
 template <class T>
-void refineHost(const EventPlanes<T>& p, std::uint32_t op) {
+void refineHost(const EventPlanes<T>& p, std::uint32_t op, int team = exec::host_max_threads()) {
     switch (op) {
-    case kOpClassify: forEachSample(p, [](const EventPlanes<T>& q, idx_t i) { classify(q, i); }); break;
-    case kOpNewton: forEachSample(p, [](const EventPlanes<T>& q, idx_t i) { newton(q, i); }); break;
-    case kOpSettle: forEachSample(p, [](const EventPlanes<T>& q, idx_t i) { settle(q, i); }); break;
-    case kOpGraze: forEachSample(p, [](const EventPlanes<T>& q, idx_t i) { graze(q, i); }); break;
-    case kOpCommit: forEachSample(p, [](const EventPlanes<T>& q, idx_t i) { commit(q, i); }); break;
+    case kOpClassify: forEachSample(p, [](const EventPlanes<T>& q, idx_t i) { classify(q, i); }, team); break;
+    case kOpNewton: forEachSample(p, [](const EventPlanes<T>& q, idx_t i) { newton(q, i); }, team); break;
+    case kOpSettle: forEachSample(p, [](const EventPlanes<T>& q, idx_t i) { settle(q, i); }, team); break;
+    case kOpGraze: forEachSample(p, [](const EventPlanes<T>& q, idx_t i) { graze(q, i); }, team); break;
+    case kOpCommit: forEachSample(p, [](const EventPlanes<T>& q, idx_t i) { commit(q, i); }, team); break;
     default: break;
     }
 }

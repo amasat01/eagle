@@ -44,7 +44,7 @@ struct Reduction {
      * clauses (exactly associative, so any schedule gives the same value).
      * A floating-point sum and any other operator use the canonical tree
      * (``eagle/reduce/canonical.h``): the result is bitwise identical for
-     * every OpenMP thread count. */
+     * every thread count. */
     static T reduce(const CRefArrT<T>& in,
         std::vector<PaddedT>& buffer, const T& init = 0)
     {
@@ -86,13 +86,13 @@ struct Reduction {
 
         /* Floating-point sum and every other operator: the canonical tree
          * (eagle/reduce/canonical.h) — a function of the values in sample
-         * order only, bitwise independent of the OpenMP thread count. */
-        (void)numThreads;
+         * order only, bitwise independent of the thread count; it runs on
+         * as many of eagle's host threads as OpenMP would. */
         if constexpr (!std::is_same_v<T, bool>) {
             if (sz == 0)
                 return init;
             return OP{}(init,
-                eagle::reduce::canonical::reduce<T, OP>(in, sz));
+                eagle::reduce::canonical::reduce<T, OP>(in, sz, int(numThreads)));
         } else {
             return final; // bool: only LogicalAndOp, handled above
         }

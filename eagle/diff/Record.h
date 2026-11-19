@@ -17,6 +17,7 @@
  */
 
 #include "eagle/diff/Window.h"
+#include "eagle/exec/HostPool.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -127,7 +128,7 @@ idx_t recordForward(idx_t maxSteps, idx_t window, idx_t maxK, Done&& done, Check
  *        (1, 2, 4 or 8).
  */
 inline void gatherColumns(void* dst, idx_t dstLd, const void* src, idx_t srcLd, const idx_t* perm,
-                          idx_t count, idx_t rows, std::size_t bytes) {
+                          idx_t count, idx_t rows, std::size_t bytes, int team = exec::host_max_threads()) {
     auto go = [&](auto tag) {
         using T = decltype(tag);
         T* d = static_cast<T*>(dst);
@@ -135,10 +136,7 @@ inline void gatherColumns(void* dst, idx_t dstLd, const void* src, idx_t srcLd, 
         for (idx_t r = 0; r < rows; ++r) {
             T* dr = d + r * dstLd;
             const T* sr = s + r * srcLd;
-#ifdef _OPENMP
-#pragma omp parallel for schedule(static) if (count > 65536)
-#endif
-            for (idx_t c = 0; c < count; ++c) dr[c] = sr[perm[c]];
+            exec::hostFor(count, count > 65536 ? team : 1, [&](std::int64_t c) { dr[c] = sr[perm[c]]; });
         }
     };
     switch (bytes) {

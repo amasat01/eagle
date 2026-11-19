@@ -52,6 +52,36 @@ struct Batch {
     std::vector<double> tau, lo, hi, tStop;
 };
 
+/** @brief Every event operation visits each sample once and writes only that sample's planes: after the whole sequence the
+ *  planes are the one-thread run's, for every team. */
+TEST(EventRefine, EveryOperationGivesTheSameResultForEveryTeam) {
+    const idx_t n = 200001;
+    const auto run = [&](int team) {
+        Batch b(n);
+        for (idx_t i = 0; i < n; ++i) {
+            b.g0[i] = -0.2 + 0.4 * double((i * 31) % 101) / 100.0;
+            b.dg0[i] = -1.0 - double(i % 7);
+            b.g1[i] = -0.1 + 0.3 * double((i * 17) % 103) / 102.0;
+            b.dg1[i] = -0.5 - double(i % 5);
+            b.term[i] = (i % 11 == 0) ? 0 : 1;
+        }
+        auto p = b.planes(2);
+        for (std::uint32_t op : { kOpClassify, kOpNewton, kOpSettle, kOpGraze, kOpCommit })
+            applyHost(p, op, team);
+        return b;
+    };
+    const Batch one = run(1);
+    for (int team : { 2, 7 }) {
+        const Batch got = run(team);
+        EXPECT_EQ(got.status, one.status) << "team=" << team;
+        EXPECT_EQ(got.which, one.which) << "team=" << team;
+        EXPECT_EQ(got.tau, one.tau) << "team=" << team;
+        EXPECT_EQ(got.lo, one.lo) << "team=" << team;
+        EXPECT_EQ(got.hi, one.hi) << "team=" << team;
+        EXPECT_EQ(got.tStop, one.tStop) << "team=" << team;
+    }
+}
+
 TEST(EventRefine, ClassifySortsEverySampleIntoOneStatus) {
     Batch b(5);
     // 0: never stopped; 1: stopped before any step; 2: both guards inside the

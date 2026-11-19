@@ -109,13 +109,13 @@ void apply(const EventPlanes<T>& p, std::uint32_t op, cudaStream_t stream) {
 
 /** @brief Any event operation (Refine.h's or this header's) on the host. */
 template <class T>
-void applyHost(const EventPlanes<T>& p, std::uint32_t op) {
+void applyHost(const EventPlanes<T>& p, std::uint32_t op, int team = exec::host_max_threads()) {
     if (op == kOpSeed)
-        forEachSample(p, [](const EventPlanes<T>& q, idx_t i) { seed(q, i); });
+        forEachSample(p, [](const EventPlanes<T>& q, idx_t i) { seed(q, i); }, team);
     else if (op == kOpSelect)
-        forEachSample(p, [](const EventPlanes<T>& q, idx_t i) { select(q, i); });
+        forEachSample(p, [](const EventPlanes<T>& q, idx_t i) { select(q, i); }, team);
     else
-        refineHost(p, op);
+        refineHost(p, op, team);
 }
 
 }  // namespace events
