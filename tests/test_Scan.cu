@@ -275,7 +275,7 @@ void CUDAfeed(typename SliceT::GRef slice, ArrT::GRef left, ArrT::GRef right)
 template<typename SliceT>
 void OMPfeed(typename SliceT::GRef slice, ArrT::GRef left, ArrT::GRef right)
 {
-#pragma omp parallel for simd
+#pragma omp parallel for
     for (idx_t i = 0; i < idx_t(left.samples()); i++) {
         slice.scanner().inputs()(i) = left(i) || right(i);
     }
@@ -297,7 +297,7 @@ void CUDAedit(typename SliceT::GRef slice)
 template<typename SliceT>
 void OMPedit(typename SliceT::GRef slice)
 {
-#pragma omp parallel for simd
+#pragma omp parallel for
     for (idx_t i = 0; i < slice.size(); i++) {
         eagle::SampleIndex idx = eagle::SampleIndex::make(i);
         slice[idx]            = 4;
