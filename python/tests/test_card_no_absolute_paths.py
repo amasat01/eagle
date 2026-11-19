@@ -4,7 +4,7 @@
 """A card dict must never carry a local absolute path.
 
 ``benchmarks/perf_card/cpu_card.py``'s "compiler" field once recorded
-``ospreys.cpu.toolchain.host_compiler()``'s absolute discovery path verbatim (e.g.
+``hawk.targets.machine("host")``'s absolute compiler path verbatim (e.g.
 ``/home/<user>/.conda/envs/.../g++``) -- a leak of the build box's
 directory layout into a committed, published card. ``_hawk_host_flags``
 already strips ``-I``/``-isystem``/``-include`` for the identical reason (an
@@ -76,14 +76,14 @@ def test_find_absolute_paths_catches_a_planted_one():
 
 def test_compiler_field_is_sanitized_the_same_way_facts_does_it():
     """Exercises the real line in ``_EagleHostArm.facts()`` (via
-    ``hc.host_compiler()``, cheap -- a PATH lookup, no compilation) rather
+    ``hawk.targets.machine("host")``, cheap -- no compilation) rather
     than re-deriving the sanitization here."""
     module = _cpu_card()
-    hc = pytest.importorskip("ospreys.cpu.toolchain")
+    machine = pytest.importorskip("hawk.targets").machine
 
-    discovered = hc.host_compiler()
+    discovered = machine("host")["tools"]["compiler"]["path"]
     assert os.path.isabs(discovered), (
-        "host_compiler() is expected to resolve to an absolute path here; "
+        "the stated host compiler is expected to resolve to an absolute path here; "
         "this test's premise (the card must not record that verbatim) "
         "does not apply if that changes")
     recorded = module.cc.tool_name(discovered)

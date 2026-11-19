@@ -171,12 +171,12 @@ def compiled(tmp_path_factory):
     pytest.importorskip("hawk")
     if not (shutil.which("nvcc") and shutil.which("cuobjdump")):
         pytest.skip("no CUDA toolkit (nvcc, cuobjdump) on PATH")
-    from ospreys.cuda import toolchain as tc
+    from hawk.targets import machine
 
-    toolkit = tc.toolkit_archs("nvcc")
+    toolkit = machine("cuda")["tools"]["compiler"]["archs"]
     if _nvcc_release() not in PERSIST_REGS:
         pytest.skip(f"no register pins for CUDA {_nvcc_release()}")
-    archs = [a for a in ARCHS if toolkit is None or int(a[3:]) in toolkit[1]]
+    archs = [a for a in ARCHS if int(a[3:]) in toolkit]
     units = _units()
     out = {}
     for label, source in units.items():
