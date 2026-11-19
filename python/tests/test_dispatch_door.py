@@ -134,9 +134,9 @@ def test_the_default_follows_the_measured_faster_path_under_the_vector_math_prof
 
     Run them on a quiet machine with ``EAGLE_WALL_CLOCK_ROWS=1``.
     """
-    from ospreys.cpu import toolchain
+    from hawk.targets import machine
 
-    if toolchain.default_host_profile() != "native-vector-math":
+    if machine("host")["asked"]["options"].get("profile") != "native-vector-math":
         pytest.skip("no vector-math host profile on this machine")
     monkeypatch.setenv("HAWK_HOST_PROFILE", "native-vector-math")
     if share == "rare":

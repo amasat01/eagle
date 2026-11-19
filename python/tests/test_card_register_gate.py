@@ -108,43 +108,25 @@ def _load(name, rel):
 
 
 def _units():
-    """``{label: CUDA source}`` of the two card kernels, as deployed."""
-    from hawk.artifact import emit_source
-
+    """``{label: kernel}``: the card kernels, as ``eagle.deploy`` builds them."""
     rk78 = _load("eagle_rk78_card_gate", "perf_card/perf_card.py")
-    out = {}
-    for label, k in (("rk78", rk78._define_kernel()),):
-        out[label] = emit_source(k, targets=("cuda",)).sources["cuda"].text
-    return out
+    return {"rk78": rk78._define_kernel()}
 
 
-def _compile(source, arch, tmp):
-    """``{entry: {regs, stack, spill, n, ops}}`` of one unit on one arch."""
-    from ospreys.cuda import toolchain as tc
-    from hawk.compile import toolchain as hawk_tc
-    from ospreys.cuda.backend import FAST_ENTRIES_MACRO
+def _compile(kernel, arch, tmp):
+    """``{entry: {regs, stack, spill, n, ops}}`` of one kernel's cubin on one arch: the registers, stack and spills from the
+    figures the build states (``sidecar["tool"]["cuda"]``, there only for a real arch's cubin image), the SASS read back."""
+    from hawk.artifact import build_bundle
+    from hawk.build_settings import BuildSettings
 
-    cu, cubin = tmp / f"unit_{arch}.cu", tmp / f"unit_{arch}.cubin"
-    cu.write_text(source)
-    flags = tc.device_flags(level=hawk_tc.opt_level(), include=hawk_tc.include_flags(), arch=arch, target="cubin",
-                            extra=(f"-D{FAST_ENTRIES_MACRO}=1", "-Xptxas", "-v"))
-    run = subprocess.run(["nvcc", *flags, str(cu), "-o", str(cubin)],
-                         capture_output=True, text=True)
-    assert run.returncode == 0, run.stderr[-2000:]
-    entries, cur = {}, None
-    for line in run.stderr.splitlines():
-        m = re.search(r"Compiling entry function '([^']+)'", line)
-        if m:
-            cur = entries.setdefault(m.group(1), {"ops": collections.Counter(), "n": 0})
-            continue
-        m = re.search(r"Used (\d+) registers", line)
-        if m and cur is not None:
-            cur["regs"] = int(m.group(1))
-        m = re.search(r"(\d+) bytes stack frame, (\d+) bytes spill stores, (\d+) bytes spill loads",
-                      line)
-        if m and cur is not None:
-            cur["stack"], cur["spill"] = int(m.group(1)), int(m.group(2)) + int(m.group(3))
-    sass = subprocess.run(["cuobjdump", "-sass", str(cubin)], capture_output=True,
+    bundle = build_bundle([kernel], tmp / arch, targets=("cuda",), settings=BuildSettings(fast_entries=True),
+                          options={"cuda.arch": arch})
+    art = next(a for a in bundle.artifacts if a.name == kernel.name)
+    entries = {}
+    for name, figures in art.sidecar["tool"]["cuda"].items():
+        entries[name] = {"ops": collections.Counter(), "n": 0, "regs": figures["regs"], "stack": figures["stack_B"],
+                         "spill": (figures["spill_store_B"] or 0) + (figures["spill_load_B"] or 0)}
+    sass = subprocess.run(["cuobjdump", "-sass", str(art.entries["cuda"].artifact)], capture_output=True,
                           text=True, check=True).stdout
     cur = None
     for line in sass.splitlines():
@@ -177,12 +159,11 @@ def compiled(tmp_path_factory):
     if _nvcc_release() not in PERSIST_REGS:
         pytest.skip(f"no register pins for CUDA {_nvcc_release()}")
     archs = [a for a in ARCHS if int(a[3:]) in toolkit]
-    units = _units()
     out = {}
-    for label, source in units.items():
+    for label, kernel in _units().items():
         tmp = tmp_path_factory.mktemp(label)
         for arch in archs:
-            for entry, row in _compile(source, arch, tmp).items():
+            for entry, row in _compile(kernel, arch, tmp).items():
                 out.setdefault(entry, {})[arch] = row
     return out
 
@@ -202,7 +183,9 @@ def test_the_persist_entries_sit_on_their_residency_step(compiled, entry):
 @pytest.mark.parametrize("label", ["rk78"])
 def test_the_persist_entry_claims_once_per_chunk_head(label):
     pytest.importorskip("hawk")
-    source = _units()[label]
+    from hawk.artifact import emit_source
+
+    source = emit_source(_units()[label], targets=("cuda",)).sources["cuda"].text
     entry = source.split("_persist(", 1)[1].split("\n}\n", 1)[0]
     head, rest = entry.split("        do {", 1)
     step = rest.split("        } while (", 1)[0]
