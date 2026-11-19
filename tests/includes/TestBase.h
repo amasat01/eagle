@@ -10,20 +10,25 @@
 // See https://github.com/llvm/llvm-project/issues/62939#issuecomment-1563455451
 
 #ifdef __clang__
-#pragma push_macro("AETHER_NOINLINE()")
-#undef AETHER_NOINLINE()
+#pragma push_macro("AETHER_NOINLINE")
+#undef AETHER_NOINLINE
 #endif
 #include <cstdio>
 #include <cstdlib>
 #include <exception>
 #include <random>
 
+// -Wrestrict is GCC's (clang knows no such group and -Werror makes the pragma itself an error)
+#if defined(__GNUC__) && !defined(__clang__)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wrestrict"
+#endif
 #include <gtest/gtest.h>
+#if defined(__GNUC__) && !defined(__clang__)
 #pragma GCC diagnostic pop
+#endif
 #ifdef __clang__
-#pragma pop_macro("AETHER_NOINLINE()")
+#pragma pop_macro("AETHER_NOINLINE")
 #endif
 
 #include "eagle/typedefs.h"

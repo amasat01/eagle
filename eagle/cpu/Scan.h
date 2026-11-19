@@ -97,9 +97,9 @@ struct Scan {
 
 protected:
     /** @brief Parallel inclusive scan, context-aware via
-     *  ``aether::packetFor`` (``DataT=bool``, W=1; per-sample
-     *  loop carries its own ``omp simd``). The calling graph inserts the
-     *  necessary barriers when nested. */
+     *  ``aether::packetFor`` (``DataT=bool``, W=1): one block per packet,
+     *  scanned serially. The calling graph inserts the necessary barriers
+     *  when nested. */
     template<typename T, typename OP, bool Inclusive>
     static void scanBlock_(const CRefArrT<T> arr, GRefArrT<T> results,
         GRefArrT<T> blockSums, const idx_t blockSize,
@@ -112,7 +112,8 @@ protected:
                 const idx_t start = b * blockSize;
                 const idx_t end = std::min(start + blockSize, idx_t(arr.samples()));
                 T acc             = init;
-#pragma omp simd
+                // Serial within a block: each result depends on the previous
+                // one; the blocks are the parallel grain.
                 for (idx_t i = start; i < end; ++i) {
                     if constexpr (Inclusive) {
                         acc        = OP{}(acc, arr(i));

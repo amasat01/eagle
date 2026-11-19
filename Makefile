@@ -70,7 +70,7 @@ NVCC = $(or $(CUDACXX),$(if $(CUDA_PATH),$(CUDA_PATH)/bin/nvcc))
 export HAWK_NVCC ?= $(NVCC)
 need_nvcc = @[ -n "$(NVCC)" ] && [ -x "$(NVCC)" ] || { echo "gate: no nvcc: set CUDACXX (or CUDA_PATH with bin/nvcc)" >&2; exit 2; }
 
-.PHONY: help gate gate-gpu gate-all gate-fresh gate-lint gate-names gate-cpp gate-door-cmake gate-py gate-docs gate-cpp-cuda gate-py-gpu \
+.PHONY: help gate gate-gpu gate-all gate-all-cpu gate-fresh gate-lint gate-names gate-cpp gate-door-cmake gate-py gate-docs gate-cpp-cuda gate-py-gpu \
         gate-env-cpu gate-env-gpu gate-clean gate-doxygen sanitize-cpp tsan-cpp tsan-ft ft-stress nodriver sdist-install release-gate
 
 help:
@@ -86,31 +86,37 @@ gate-fresh:
 	@mkdir -p "$(GD)"
 
 # -- entry points -------------------------------------------------------------------------------------------------
+# The legs are prerequisites in their stated order, so `make -k gate` reaches every leg after a red one; the order is kept
+# serial (.NOTPARALLEL) because gate-fresh clears the directory every other leg writes into.
 # PYTEST_ARGS given: the inner-loop probe, the python stage alone on those files (use with GATE_REUSE=1)
-gate:
 ifneq ($(strip $(PYTEST_ARGS)),)
-	$(MAKE) --no-print-directory gate-fresh
-	$(MAKE) --no-print-directory gate-py
+GATE_LEGS := gate-fresh gate-py
 else
-	$(MAKE) --no-print-directory gate-fresh
-	$(MAKE) --no-print-directory gate-lint
-	$(MAKE) --no-print-directory gate-names
-	$(MAKE) --no-print-directory gate-cpp
-	$(MAKE) --no-print-directory gate-door-cmake
-	$(MAKE) --no-print-directory gate-py
-	$(MAKE) --no-print-directory gate-docs
+GATE_LEGS := gate-fresh gate-lint gate-names gate-cpp gate-door-cmake gate-py gate-docs
 endif
+.NOTPARALLEL: gate gate-gpu gate-all
+gate: $(GATE_LEGS)
 	@echo "gate: PASS"
 
-gate-gpu:
-	$(MAKE) --no-print-directory gate-fresh
-	$(MAKE) --no-print-directory gate-cpp-cuda
-	$(MAKE) --no-print-directory gate-py-gpu
+gate-gpu: gate-fresh gate-cpp-cuda gate-py-gpu
 	@echo "gate-gpu: PASS"
 
-gate-all:
-	$(MAKE) --no-print-directory gate-gpu
+gate-all: gate-gpu gate-all-cpu
+
+gate-all-cpu:
 	$(MAKE) --no-print-directory gate GATE_REUSE=1
+
+# the exported-symbol listing differs by system: GNU nm reads the dynamic table, Apple's lists the global defined symbols, each with
+# the C underscore, which the comparison strips
+ifeq ($(shell uname -s),Darwin)
+DOOR_EXT := dylib
+DOOR_NM := nm -gU
+DOOR_SYM_PREFIX := _
+else
+DOOR_EXT := so
+DOOR_NM := nm -D --defined-only
+DOOR_SYM_PREFIX :=
+endif
 
 # -- the CMake door, CPU mode: it configures, builds and links, and exports exactly the eg_status functions eg_door.h declares (door.map
 # only says eg_*). The facts and rows headers are raptor's (the host door's rows). The Makefile build pins nvcc -arch sm_61; CMake follows CMAKE_CUDA_ARCHITECTURES.
@@ -131,15 +137,20 @@ gate-door-cmake:
 	  $(CXX) -std=c++23 -Wall -Wextra -pedantic -Werror -fsyntax-only -x c++ "$(GD)/prefix_door/include/eagle/door/$$h"; \
 	done
 	sed -n 's/^eg_status \(eg_[a-z0-9_]*\)(.*/\1/p' eagle/door/eg_door.h | sort -u > "$(GD)/door_declared.txt"
-	nm -D --defined-only "$(GD)/door/libeagle_door.so" | awk '{print $$3}' | sort > "$(GD)/door_exported.txt"
+	$(DOOR_NM) "$(GD)/door/libeagle_door.$(DOOR_EXT)" | awk '{print $$3}' | sed 's/^$(DOOR_SYM_PREFIX)//' | sort > "$(GD)/door_exported.txt"
 	diff "$(GD)/door_declared.txt" "$(GD)/door_exported.txt" && echo "gate-door-cmake: the CMake door exports the $$(wc -l < "$(GD)/door_declared.txt") declared eg_ names and nothing else"
 
 # -- the python environments (cpu: arch $(CPU_CUDA_ARCH), compile-only; gpu: the device's own architecture) --------
+# The CPU environment compiles the CUDA side (aether and eagle in CUDA mode, the GPU plugin, for arch $(CPU_CUDA_ARCH)) wherever an nvcc exists, so
+# the CPU runner proves it builds; with no nvcc it builds the host-only package (CPP mode, EAGLE_PYTHON_CUDA_PLUGIN=OFF). The gpu environment
+# always needs nvcc.
+HAVE_NVCC := $(if $(NVCC),$(if $(wildcard $(NVCC)),yes))
+env_cuda = $(or $(filter gpu,$(1)),$(HAVE_NVCC))
 # one venv + one editable install per leg; the build tree and the header prefix live under $(GD) too
 define ENV_RECIPE
 	$(call need_aether)
 	$(call need_raptor)
-	$(call need_nvcc)
+	$(if $(filter gpu,$(1)),$(call need_nvcc))
 	$(call need_cxx)
 	mkdir -p "$(GD)"
 	if [ ! -x "$(GD)/venv_$(1)/bin/python" ]; then $(PYTHON) -m venv "$(GD)/venv_$(1)"; fi
@@ -147,10 +158,10 @@ define ENV_RECIPE
 	$$PIP install --quiet --upgrade pip; \
 	$$PIP install --quiet -c "$(CONSTRAINTS)" "scikit-build-core>=0.10" "setuptools-scm>=8" "nanobind>=3.1,<4; python_version>='3.10'" "nanobind>=2.2,<3; python_version<'3.10'" pytest numpy; \
 	if [ ! -f "$(GD)/prefix_$(1)/share/eagle/cmake/eagleConfig.cmake" ]; then \
-	  cmake -DAETHER_FACTS_DIR="$(CARDS)/cuda" -DAETHER_CPP_MODE=OFF -DCMAKE_CUDA_COMPILER="$(NVCC)" -DCMAKE_CUDA_HOST_COMPILER="$(CXX)" $(2) -DCMAKE_INSTALL_PREFIX="$(GD)/prefix_$(1)" \
+	  cmake -DAETHER_FACTS_DIR="$(CARDS)/$(if $(call env_cuda,$(1)),cuda,cpu)" $(if $(call env_cuda,$(1)),-DAETHER_CPP_MODE=OFF -DCMAKE_CUDA_COMPILER="$(NVCC)" -DCMAKE_CUDA_HOST_COMPILER="$(CXX)" $(2),-DAETHER_CPP_MODE=ON) -DCMAKE_INSTALL_PREFIX="$(GD)/prefix_$(1)" \
 	        -B "$(GD)/aether_$(1)" -S "$(AETHER_SRC)"; \
 	  cmake --install "$(GD)/aether_$(1)"; \
-	  cmake -B "$(GD)/eagle_hdr_$(1)" -DCMAKE_CUDA_COMPILER="$(NVCC)" -DCMAKE_CUDA_HOST_COMPILER="$(CXX)" $(2) -DCMAKE_INSTALL_PREFIX="$(GD)/prefix_$(1)" .; \
+	  cmake -B "$(GD)/eagle_hdr_$(1)" $(if $(call env_cuda,$(1)),-DCMAKE_CUDA_COMPILER="$(NVCC)" -DCMAKE_CUDA_HOST_COMPILER="$(CXX)" $(2),-DEAGLE_CPP_MODE=ON) -DCMAKE_INSTALL_PREFIX="$(GD)/prefix_$(1)" .; \
 	  cmake --install "$(GD)/eagle_hdr_$(1)"; \
 	fi; \
 	$(if $(RAPTOR_SRC),$$PIP install --quiet -c "$(CONSTRAINTS)" "$(RAPTOR_SRC)";,) \
@@ -160,7 +171,7 @@ define ENV_RECIPE
 	$(if $(HAWK_SRC),SKBUILD_BUILD_DIR="$(GD)/sb_hawk_$(1)" $$PIP install --quiet -c "$(CONSTRAINTS)" "$(HAWK_SRC)";,) \
 	CMAKE_PREFIX_PATH="$(GD)/prefix_$(1):$${CMAKE_PREFIX_PATH:-}" \
 	SKBUILD_BUILD_DIR="$(GD)/sb_eagle_$(1)" \
-	SKBUILD_CMAKE_ARGS="-DCMAKE_CUDA_COMPILER=$(NVCC);-DCMAKE_CUDA_HOST_COMPILER=$(CXX);$(3);-DEAGLE_PYTHON_WARN_AS_ERR=ON" \
+	SKBUILD_CMAKE_ARGS="$(if $(call env_cuda,$(1)),-DCMAKE_CUDA_COMPILER=$(NVCC);-DCMAKE_CUDA_HOST_COMPILER=$(CXX);$(3),-DEAGLE_PYTHON_CUDA_PLUGIN=OFF);-DEAGLE_PYTHON_WARN_AS_ERR=ON" \
 	$$PIP install --quiet --no-build-isolation --only-binary=:all: -c "$(CONSTRAINTS)" -e "./python[$(4)]"
 endef
 
