@@ -33,17 +33,29 @@ _PER_LANE = -1
 def attach(plugin, kernel) -> None:
     """Route ``plugin`` (built from ``kernel``) through the GEMM when hawk's description of ``kernel`` for the device states
     its unit as one matrix product on the ``gemm`` route that writes the kernel's one output; anything else stays the kernel."""
+    from hawk import Kernel
     from hawk.artifact import describe
+    from hawk.diff import ADJOINT_PREFIX, vjp
 
-    doc = describe([kernel], targets=("cuda",))[kernel.name]
+    adjoint = Kernel(f"{kernel.name}_vjp", vjp(kernel))
+    docs = describe([kernel, adjoint], targets=("cuda",))
+    doc, adjoint_doc = docs[kernel.name], docs[adjoint.name]
     found = [c for c in doc.get("contractions") or () if c["unit"] == kernel.name]
     if len(found) != 1 or found[0]["route"] != "gemm" or len(found[0]["products"]["calls"]) != 1:
         return
     route = _Route(doc["arg_spec"], found[0]["products"], plugin.scalar_type or "float64")
     if set(doc["planes_written"]) != {route.out}:
         return
+    # the vjp unit states which plane is the gradient of which lookup plane (``adjoint_like``) and spells the output's cotangent
+    # with hawk's adjoint prefix; a unit that does not state both stays the kernel
+    gradient = {primal: adjoint_plane for adjoint_plane, primal in (adjoint_doc.get("adjoint_like") or {}).items()}
+    cotangent = f"{ADJOINT_PREFIX}_{route.out}"
+    names = {nm for _role, nm in adjoint_doc["arg_spec"]}
+    if cotangent not in names or not all(nm in gradient for nm in route.inputs):
+        return
+    route.planes = {f"{route.out}_bar": cotangent, **{f"{nm}_bar": gradient[nm] for nm in route.inputs}}
     plugin._gemm = route
-    route.vjp = _VjpPlugin(plugin, route)
+    route.vjp = _VjpPlugin(plugin, route, adjoint_doc["arg_spec"])
 
 
 class _Route:
@@ -56,6 +68,7 @@ class _Route:
         self.fanin, self.dtype = products["lane_fanin"], dtype
         self.a, self.b, self.out = (names[self.call[k]] for k in ("a_slot", "b_slot", "c_slot"))
         self.inputs = (self.a, self.b)
+        self.planes = {}    # the plan's buffer of each adjoint operand and the cotangent -> its plane of the vjp unit
         self._plans, self._lock = {}, threading.Lock()
 
     def _extent(self, value, n):
@@ -121,7 +134,7 @@ class _Route:
         plan = self.plans(n)[adjoint]
         out = {}
         for spec in plan.required:
-            plane = planes["bar_" + spec.name[:-4] if spec.name.endswith("_bar") else spec.name]
+            plane = planes[self.planes.get(spec.name, spec.name)]
             rows, cols = spec.shape
             view = plane.reshape((rows, _size(plane) // rows))
             out[spec.name] = view if view.shape[1] == cols else view[:, :cols]
@@ -136,19 +149,16 @@ def _size(a) -> int:
 
 
 class _VjpPlugin:
-    """The adjoint as eagle.diff reads a vjp plugin: the hawk vjp's planes
-    (``bar_<output>`` per sample, the operands, ``bar_<operand>`` summed into),
-    and the route its bind runs."""
+    """The adjoint as eagle.diff reads a vjp plugin: the planes of the vjp unit hawk states (the output's cotangent per sample,
+    the operands, the gradients summed into), and the route its bind runs."""
 
     exec_op = None
     exec_access = "cross_sample_write"
 
-    def __init__(self, primal, route):
+    def __init__(self, primal, route, arg_spec):
         self._gemm, self._adjoint = route, True
         self.name, self.scalar_type = f"{primal.name}_vjp", primal.scalar_type
-        self.arg_spec = (*(("accum_out", f"bar_{nm}") for nm in route.inputs),
-                         ("per_sample", f"bar_{route.out}"),
-                         *(("lookup", nm) for nm in route.inputs))
+        self.arg_spec = tuple(tuple(pair) for pair in arg_spec)
 
 
 def _check_planes(p, planes):
@@ -175,7 +185,7 @@ class _Bound:
         self._arg_spec = tuple(p.plugin.arg_spec)
         self._device = planes_device(self._arg_spec, planes, door="plan.bind", device=device)
         self._dtype = self._gemm.dtype
-        lanes = planes[f"bar_{self._gemm.out}" if self._adjoint else self._gemm.out]
+        lanes = planes[self._gemm.planes[f"{self._gemm.out}_bar"] if self._adjoint else self._gemm.out]
         self.n = _size(lanes)
         self.rebind(**planes)
 
