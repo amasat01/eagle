@@ -49,7 +49,6 @@ _CLASSIFY, _NEWTON, _SETTLE, _GRAZE, _COMMIT, _SEED, _SELECT = range(7)
 EVENTS = ("step", "refine")
 ON_NO_EVENT = ("raise", "zero")
 _REFINED = "_refined"
-_DOT = "dot_"
 _GUARD = "event_g"
 
 
@@ -81,10 +80,11 @@ def _rows(a):
 
 class EventKernels:
     """The refine entry's builds for one plugin and device: ``newton`` (the
-    refine entry plus its ``tau``-derivative), ``vjp`` (the reverse of the
-    refine entry) and ``guard_vjp`` (``g_x`` at the refined state)."""
+    refine entry plus its ``tau``-derivative), ``tangent`` (``{plane: its tangent plane}``
+    as that derivative states them), ``vjp`` (the reverse of the refine entry) and
+    ``guard_vjp`` (``g_x`` at the refined state)."""
 
-    __slots__ = ("newton", "vjp", "guard_vjp", "guards", "state", "tau", "time_step",
+    __slots__ = ("newton", "tangent", "vjp", "guard_vjp", "guards", "state", "tau", "time_step",
                  "time", "t0")
 
 
@@ -119,7 +119,8 @@ def event_kernels(plugin, device, door):
     entry = plain(refine_entry(kernel))
     refine = describe([step], targets=("host",))[step.name]["refine_planes"]    # the planes the refine entry adds
     tau = refine["tau"]
-    newton = Kernel(f"{step.name}_newton", tuple(entry.sinks) + tuple(jvp(entry, wrt=(tau,))), {})
+    along_tau = jvp(entry, wrt=(tau,))
+    newton = Kernel(f"{step.name}_newton", tuple(entry.sinks) + tuple(along_tau), {})
     back = Kernel(f"{entry.name}_vjp", vjp(entry))
     sg = plain(state_guard(kernel))
     sg_back = Kernel(f"{sg.name}_vjp", vjp(sg))
@@ -128,6 +129,7 @@ def event_kernels(plugin, device, door):
                           plugin.scalar_type)
     out = EventKernels()
     out.newton, out.vjp, out.guard_vjp = built[0], built[2], built[4]
+    out.tangent = {primal: plane for plane, primal in along_tau.tangents.items()}
     out.guards = guards
     out.state = tuple(nm[:-len(_REFINED)] for _r, nm in built[1].arg_spec
                       if nm.endswith(_REFINED))
@@ -172,9 +174,10 @@ class RefinePass:
         self.h = rec.planes[k.time_step]
         self.out = {}
         bind = {}
+        primal_of = {plane: primal for primal, plane in k.tangent.items()}
         for role, nm in k.newton.arg_spec:
             if role == "mutable":
-                base = nm[len(_DOT):] if nm.startswith(_DOT) else nm
+                base = primal_of.get(nm, nm)
                 base = base[:-len(_REFINED)] if base.endswith(_REFINED) else base
                 like = rec.state.get(base)
                 self.out[nm] = (_alloc.zeros_like(xp, like) if like is not None
@@ -184,7 +187,7 @@ class RefinePass:
                 bind[nm] = self.steps
             elif nm == k.tau:
                 bind[nm] = self.tau
-            elif nm == _DOT + k.tau:
+            elif nm == k.tangent[k.tau]:
                 bind[nm] = _alloc.ones(xp, n, dtype=scalar)
             elif nm in self.prestop:
                 bind[nm] = self.prestop[nm]
@@ -193,9 +196,9 @@ class RefinePass:
         self.newton = _split.single(make_plan(k.newton, structure=rec.structure).bind(**bind),
                                     "eagle.diff events")
         self.g = [self.out[f"{_GUARD}{j}"] for j in range(k.guards)]
-        self.dg = [self.out[f"{_DOT}{_GUARD}{j}"] for j in range(k.guards)]
+        self.dg = [self.out[k.tangent[f"{_GUARD}{j}"]] for j in range(k.guards)]
         self.refined = {nm: self.out[nm + _REFINED] for nm in k.state}
-        self.phi_tau = {nm: self.out[_DOT + nm + _REFINED] for nm in k.state}
+        self.phi_tau = {nm: self.out[k.tangent[nm + _REFINED]] for nm in k.state}
         # g_x at the refined state, for the graze test
         gb, self.gx = {}, {}
         self.seeds = [_alloc.zeros(xp, n, dtype=scalar) for _ in range(k.guards)]
@@ -310,7 +313,7 @@ class RefinePass:
         planes = dict(self.prestop)
         planes.update(steps=self.steps, tau=self.tau, status=self.status, which=self.which)
         planes.update({f"dg{j}": d for j, d in enumerate(self.dg)})
-        planes.update({_DOT + nm: p for nm, p in self.phi_tau.items()})
+        planes.update({f"phi_tau_{nm}": p for nm, p in self.phi_tau.items()})
         return planes
 
 
@@ -343,7 +346,7 @@ class RefineReverse:
             ) if rec.device else (lambda code, args: _core.events_apply_host(
                 code, rec.scalar.itemsize, args))
         op(_SEED, (n, [_addr(x) for x in dg], [_addr(x) for x in dg], [_addr(x) for x in gbar],
-                   rows(rbar), rows(xbar), rows({nm: ev[_DOT + nm] for nm in k.state}), scal))
+                   rows(rbar), rows(xbar), rows({nm: ev[f"phi_tau_{nm}"] for nm in k.state}), scal))
         bind, grads = {}, {}
         seeds, gradients = (_split.relation(k.vjp, m) for m in ("cotangent_of", "gradient_of"))
         for role, nm in k.vjp.arg_spec:

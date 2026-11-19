@@ -12,8 +12,9 @@ cd "$(dirname "$0")/.."
 # Headers that need a toolkit this check does not install: CUDA (cuda.h, nvcc-only) or MPI.
 skip='^eagle/cuda/|^eagle/cuda\.h$|^eagle/array/launch\.h$|^eagle/exec/DeviceKernel\.h$|^eagle/exec/RankPartition\.h$'
 
-probe=$(mktemp --suffix=.cpp)
-trap 'rm -f "$probe"' EXIT
+probe_dir=$(mktemp -d)   # a folder: BSD mktemp takes no suffix, and the compiler needs the .cpp
+probe="$probe_dir/probe.cpp"
+trap 'rm -rf "$probe_dir"' EXIT
 failed=0 checked=0
 for h in $(find eagle -name '*.h' | LC_ALL=C sort | grep -Ev "$skip"); do
   printf '#include "%s"\n' "$h" > "$probe"

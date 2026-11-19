@@ -158,8 +158,10 @@ def _nvcc_release():
 @pytest.fixture(scope="module")
 def compiled(tmp_path_factory):
     pytest.importorskip("hawk")
-    if not _cuda_compiler():
-        pytest.skip("hawk states no CUDA compiler")
+    from hawk.targets import buildable
+
+    if not buildable("cuda"):
+        pytest.skip("hawk states no CUDA toolchain on this machine")
     toolkit = _cuda_compiler()["archs"]
     if _nvcc_release() not in PERSIST_REGS:
         pytest.skip(f"no register pins for CUDA {_nvcc_release()}")

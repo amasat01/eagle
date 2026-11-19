@@ -75,7 +75,7 @@ def driver(tmp_path_factory):
     d = tmp_path_factory.mktemp("hostdrv")
     (d / "drv.cpp").write_text(_DRIVER)
     proc = subprocess.run(
-        [gxx, "-std=c++23", "-O2", "-fopenmp", "-DEAGLE_CPU_ONLY=1", f"-I{ROOT}",
+        [gxx, "-std=c++23", "-O2", "-DEAGLE_CPU_ONLY=1", f"-I{ROOT}",
          str(d / "drv.cpp"), "-ldl", "-o", str(d / "drv")],
         capture_output=True, text=True)
     if proc.returncode != 0:
