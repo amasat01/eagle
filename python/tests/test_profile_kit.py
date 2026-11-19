@@ -34,6 +34,15 @@ STAGES = ("sol_probe", "wide_sweep", "ncu_corpus", "ncu_ensemble", "ncu_features
           "launch_shape")
 
 
+def _bash():
+    """The bash the kit's scripts run under (the first on PATH). A row that runs one skips by name where that bash is
+    older than 4: the scripts keep tables in associative arrays (lib.sh refuses such a bash)."""
+    major = subprocess.run(["bash", "-c", "echo ${BASH_VERSINFO[0]}"], capture_output=True, text=True).stdout.strip()
+    if not major.isdigit() or int(major) < 4:
+        pytest.skip(f"the kit's scripts need bash 4 or newer; the bash on PATH is {major or 'absent'}")
+    return "bash"
+
+
 def _kit_module():
     spec = importlib.util.spec_from_file_location("gpu_profile_under_test", PROFILE_PY)
     mod = importlib.util.module_from_spec(spec)
@@ -49,7 +58,7 @@ def _one_gpu_env():
 
 
 def _plan(*flags):
-    done = subprocess.run(["bash", str(PROFILE_SH), "--dry-run", *flags], capture_output=True, text=True,
+    done = subprocess.run([_bash(), str(PROFILE_SH), "--dry-run", *flags], capture_output=True, text=True,
                           env={**os.environ, "REPRO_TARGET": "devbox"})
     return done.returncode, done.stderr
 
@@ -67,7 +76,7 @@ def kit(tmp_path):
 
     def start(extra_env=None, *flags):
         env = {**os.environ, **base, **(extra_env or {})}
-        return subprocess.Popen(["bash", str(PROFILE_SH), "--env", str(env_file), "--out", str(tmp_path / "out"),
+        return subprocess.Popen([_bash(), str(PROFILE_SH), "--env", str(env_file), "--out", str(tmp_path / "out"),
                                  "--quick", *flags], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                 text=True, env=env)
 
@@ -323,7 +332,7 @@ BOOT_ENV = {**os.environ, "REPRO_TARGET": "devbox", "REPRO_GPUS": "NVIDIA RTX PR
 
 
 def _bootstrap(*flags, env=None):
-    done = subprocess.run(["bash", str(BOOTSTRAP_SH), "--dry-run", "--work", "/nonexistent/work", "--src", "/nonexistent/src",
+    done = subprocess.run([_bash(), str(BOOTSTRAP_SH), "--dry-run", "--work", "/nonexistent/work", "--src", "/nonexistent/src",
                            *flags], capture_output=True, text=True, env={**BOOT_ENV, **(env or {})})
     return done.returncode, done.stdout + done.stderr
 
@@ -382,7 +391,7 @@ def test_an_aarch64_machine_gets_the_aarch64_micromamba_and_toolchain_lock():
 def test_an_unknown_cuda_version_is_refused_with_the_choices(script_args):
     script = BOOTSTRAP_SH if script_args[0] == "bootstrap" else PROFILE_SH
     for flags, env in ((("--cuda", "11"), {}), ((), {"REPRO_CUDA": "latest"})):
-        done = subprocess.run(["bash", str(script), "--dry-run", *flags], capture_output=True, text=True,
+        done = subprocess.run([_bash(), str(script), "--dry-run", *flags], capture_output=True, text=True,
                               env={**BOOT_ENV, **env})
         assert done.returncode != 0 and "takes 12" in done.stderr, done.stderr[-400:]
         assert "unknown CUDA version" in done.stderr
@@ -480,7 +489,7 @@ def test_an_ncu_failure_note_keeps_ncus_own_lines_ahead_of_a_later_library_warni
 
 
 def _run_cards(*flags):
-    done = subprocess.run(["bash", str(REPRO / "run_cards.sh"), "--dry-run", "--work", "/nonexistent/work", "--slug", "m",
+    done = subprocess.run([_bash(), str(REPRO / "run_cards.sh"), "--dry-run", "--work", "/nonexistent/work", "--slug", "m",
                            *flags], capture_output=True, text=True)
     return done.returncode, done.stdout + done.stderr
 

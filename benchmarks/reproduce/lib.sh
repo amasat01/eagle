@@ -12,6 +12,8 @@ REPRO_DRY_RUN=${REPRO_DRY_RUN:-0}
 
 log() { printf '[repro] %s\n' "$*" >&2; }
 die() { printf '[repro] ERROR: %s\n' "$*" >&2; exit 1; }
+# the kit's scripts keep tables in associative arrays: bash 4 or newer (macOS ships 3.2 as /bin/bash)
+[ "${BASH_VERSINFO[0]}" -ge 4 ] || die "bash ${BASH_VERSION} is too old: these scripts need bash 4 or newer"
 
 # run CMD...: print the command; execute it unless this is a dry run.
 run() {

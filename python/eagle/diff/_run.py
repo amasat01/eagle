@@ -28,8 +28,10 @@ so distinct reverses of one run proceed concurrently.
 
 from __future__ import annotations
 
+import ctypes
 import math
 import os
+import sys
 import threading
 
 from .. import _alloc, _stream, arrays
@@ -72,13 +74,31 @@ def resolve_window(window, max_steps, door):
     return window
 
 
+def host_available_bytes(door):
+    """The host memory the system reports available, by the door's rule (``eg_reverse`` with a budget of 0): Linux's free
+    pages; on macOS the free and inactive pages of ``host_statistics64``. A system with neither is refused by name."""
+    page = os.sysconf("SC_PAGE_SIZE")
+    if "SC_AVPHYS_PAGES" in os.sysconf_names:
+        return os.sysconf("SC_AVPHYS_PAGES") * page
+    if sys.platform == "darwin":
+        system = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
+        system.mach_host_self.restype = ctypes.c_uint
+        host_vm_info64, words = 4, 38             # HOST_VM_INFO64, HOST_VM_INFO64_COUNT (vm_statistics64 in 32-bit words)
+        stats = (ctypes.c_uint32 * words)()       # free_count, active_count, inactive_count lead the structure
+        count = ctypes.c_uint(words)
+        if system.host_statistics64(system.mach_host_self(), host_vm_info64, stats, ctypes.byref(count)) != 0:
+            raise RuntimeError(f"{door}: host_statistics64 failed; state memory_budget=")
+        return (stats[0] + stats[2]) * page
+    raise ValueError(f"{door}: this system reports no available memory; state memory_budget=")
+
+
 def resolve_budget(budget, device, door):
     """``memory_budget`` in bytes: ``None`` -> half the free device memory
-    (device runs) or half the available host RAM."""
+    (device runs) or half the available host memory (:func:`host_available_bytes`)."""
     if budget is None:
         if device:
             return int(_core.device_mem_info(-1)[1]) // 2
-        return int(os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")) // 2
+        return host_available_bytes(door) // 2
     if isinstance(budget, bool) or not isinstance(budget, int) or budget < 1:
         raise ValueError(f"{door}: memory_budget is a positive int of bytes or None "
                          f"(half the free memory), got {budget!r}")

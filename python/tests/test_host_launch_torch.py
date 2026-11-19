@@ -62,6 +62,16 @@ def _gxx() -> str | None:
     )
 
 
+def _openmp():
+    """The OpenMP runtime aether-dsc ships: the plugin links that one file, the runtime already in this process (a
+    compiler's own copy would be a second runtime, which aborts on macOS)."""
+    from aether_dsc import openmp
+
+    found = openmp()
+    if found is None:
+        pytest.fail("aether-dsc carries no OpenMP runtime: the host plugin fixture has none to link")
+    return found
+
 def _compile_plugin(tmp_path) -> str:
     gxx = _gxx()
     if gxx is None:
@@ -70,7 +80,7 @@ def _compile_plugin(tmp_path) -> str:
     src.write_text(_PLUGIN_SRC)
     so = tmp_path / "addvec_host.so"
     proc = subprocess.run(
-        [gxx, "-O3", "-shared", "-fPIC", "-fopenmp", "-o", str(so), str(src)],
+        [gxx, "-O3", "-shared", "-fPIC", *_openmp().compile_flags, "-o", str(so), str(src), *_openmp().link_flags],
         capture_output=True,
         text=True,
     )
