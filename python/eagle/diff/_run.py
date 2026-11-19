@@ -657,7 +657,7 @@ class RunReverse:
         if any(nm == APPLIED_STEPS for _r, nm in vspec):
             self.step_plane = _alloc.zeros(xp, m, dtype=k.vjp.arg_dtypes[APPLIED_STEPS])
         self.grad = {}        # input name -> its share of one step, per slot
-        for base in sidecar_of(k.vjp).get("gradient_of", {}).values():
+        for base in _split.relation(k.vjp, "gradient_of").values():
             if base not in taped:
                 if base in rec.uniforms:
                     self.grad[base] = _alloc.zeros(xp, m, dtype=rec.scalar)
@@ -676,8 +676,7 @@ class RunReverse:
             """``kern``'s planes for one launch reading adjoint plane ``parity``: the state
             before the step (a tape row), or, for a fused window, the window's start."""
             bind = {}
-            side = sidecar_of(kern)
-            seeds, gradients, carried = side["cotangent_of"], side["gradient_of"], side["next_of"]
+            seeds, gradients, carried = (_split.relation(kern, m) for m in ("cotangent_of", "gradient_of", "next_of"))
             for role, nm in kern.arg_spec:
                 if nm in seeds:         # the cotangent of a next value: the adjoint of the plane it carries
                     bind[nm] = self.adj[parity][carried[seeds[nm]]]
@@ -713,7 +712,7 @@ class RunReverse:
         self.inputs = tuple(self.taped) + tuple(nm for nm in self.acc if nm not in self.folded)
         if rec.refine is not None:      # inputs only the stop rule reads (a guard's parameter)
             ek = rec.refine.k
-            more = list(sidecar_of(ek.vjp).get("gradient_of", {}).values())
+            more = list(_split.relation(ek.vjp, "gradient_of").values())
             self.inputs += tuple(nm for nm in more if nm not in self.inputs
                                  and nm not in (ek.tau, rec.t0) and nm in rec.planes)
         self._busy = BusyGuard("eagle.diff.Reverse")

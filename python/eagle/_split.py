@@ -139,6 +139,21 @@ def stages_of(plugin) -> tuple:
     return getattr(plugin, "_stages", None) or ()
 
 
+def relation(plugin, member: str) -> dict:
+    """A plane relation hawk states per unit (``gradient_of``, ``cotangent_of``, ``next_of``, ``tangent_of``) for the
+    whole kernel: a split kernel's later stages hold planes its first one does not, so it is the union over every
+    stage's unit (as :func:`arg_spec` is); a plane two units relate differently is refused by name."""
+    from .sidecar import sidecar_of
+
+    found: dict = {}
+    for unit in [st.plugin for st in stages_of(plugin)] or [plugin]:
+        for plane, other in (sidecar_of(unit).get(member) or {}).items():
+            if found.setdefault(plane, other) != other:
+                raise ValueError(f"{member}: the stages of one kernel relate plane {plane!r} to both "
+                                 f"{found[plane]!r} and {other!r}")
+    return found
+
+
 def _keyed(plugin) -> dict:
     """``{plane: spec}`` of the keyed planes eagle owns between the stages."""
     return getattr(plugin, "_keyed", None) or {}

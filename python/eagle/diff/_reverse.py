@@ -22,7 +22,7 @@ from collections.abc import Mapping
 from contextlib import contextmanager
 from typing import NamedTuple
 
-from .. import _alloc, _core, _counters, arrays
+from .. import _alloc, _core, _counters, _split, arrays
 from .._busy import BusyGuard
 from .._conditional import skippable
 from .._graph_kinds import OWN_CODE_KINDS
@@ -227,7 +227,7 @@ def _check_vjp_covers(label, bound, vplan):
     """Refuse a vjp that leaves out the gradient of a differentiable input
     (one built with a narrower ``wrt``): its share of that gradient would be
     silently missing."""
-    returned = set((sidecar_of(vplan.plugin).get("gradient_of") or {}).values())
+    returned = set(_split.relation(vplan.plugin, "gradient_of").values())
     for role, name in bound._arg_spec:
         value = bound._planes.get(name)
         wanted = role not in OUTPUT_ROLES and _is_float(value)

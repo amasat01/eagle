@@ -19,7 +19,6 @@ from ._graph_edges import arrays_overlap
 from . import _core, _stream, _transfer
 from .interop import _stream_handle
 from .roles import OUTPUT_ROLES, STATE_ROLES
-from .sidecar import sidecar_of
 
 # --- Built-in kind: launch (a BoundPlan) --- #
 def _is_bound(obj) -> bool:
@@ -119,8 +118,7 @@ def _launch_transpose(node, incoming, ctx):
         finished = frozenset()
     planes, out = {}, {}
     owned = _cell_rows.companions_of(vjp)
-    side = sidecar_of(vjp)
-    seeds, gradients = side.get("cotangent_of") or {}, side.get("gradient_of") or {}   # each plane with the output it seeds / input it differentiates
+    seeds, gradients = _split.relation(vjp, "cotangent_of"), _split.relation(vjp, "gradient_of")   # each plane with the output it seeds / input it differentiates
     for role, name in _split.arg_spec(vjp):
         src = seeds.get(name) or gradients.get(name)
         if role == "nsamples" or name in owned:     # a keyed sum's companion is the bind's own
