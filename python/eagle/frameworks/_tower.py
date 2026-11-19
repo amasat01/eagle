@@ -40,7 +40,7 @@ LOCK = threading.RLock()
 class Level:
     """One kernel of the tower (see the module doc).
 
-    :ivar kernel: the hawk kernel (``hawk.trace.Kernel``).
+    :ivar kernel: the hawk kernel (``hawk.Kernel``).
     :ivar label: the user's kernel name (``<kernel>_jvp``...), what messages show.
     :ivar name: its name (``<primal>``, ``<primal>_jvp``, ``<primal>_jvp_vjp``...).
     :ivar kind: ``None`` for the primal, else ``"jvp"`` / ``"vjp"``.
@@ -99,7 +99,7 @@ class Level:
         with LOCK:
             level = self._derived.get(which)
             if level is None:
-                from hawk.trace import Kernel
+                from hawk import Kernel
 
                 wrt = self.wrt
                 if not wrt:
@@ -129,7 +129,7 @@ class Level:
             level = self._derived.get("step_vjp")
             if level is None:
                 from hawk.diff import step_vjp
-                from hawk.trace import Kernel
+                from hawk import Kernel
 
                 derived = step_vjp(self.kernel, wrt=self.wrt)
                 level = Level(Kernel(f"{self.name}_step_vjp", derived),
@@ -166,23 +166,9 @@ class Level:
         with LOCK:
             level = self._derived.get("step_function")
             if level is None:
-                from hawk.diff import tape
-                from hawk.diff.event import as_plain_reads
-                from hawk.diff.tape import APPLIED_STEPS, NEXT_SUFFIX
-                from raptor.ir.nodes import Assign
-                from hawk.trace import Kernel
+                from hawk.diff import step_function
 
-                kernel = self.kernel
-                step = getattr(kernel, "step", None) or getattr(kernel, "one_step", None) or kernel
-                twin = tape(kernel, 1)
-                single = getattr(twin, "one_step", None) or twin
-                commits = [s for s in single.sinks
-                           if isinstance(s, Assign) and s.name != APPLIED_STEPS]
-                values = as_plain_reads(tuple(s.value for s in commits))
-                function = Kernel(f"{step.name}_function",
-                                  tuple(Assign(s.name + NEXT_SUFFIX, v, s.ttype)
-                                        for s, v in zip(commits, values)), {})
-                function.jump = getattr(step, "jump", None)
+                function = step_function(self.kernel)
                 level = Level(promote(function), who=self.who, label=self.label)
                 level._wrt = tuple(n for n in self.wrt if n in level.wrt)
                 level.cell_source = lambda _me, root=self: (lambda t: t and t.step_function())(
@@ -203,7 +189,7 @@ class Level:
                 nexts = {o: f"bar_{o}_next" for o in outputs if f"bar_{o}_next" in derived}
                 grads = plane_names(self.who, self.label, "vjp", self.wrt, [],
                                     {n for _, n in self.sig.arg_spec} | set(nexts.values()),
-                                    derived)
+                                    derived, self.sig.description.get("plane_names"))
                 got = self._names["step_vjp"] = (nexts, grads)
             return got
 
@@ -223,7 +209,8 @@ class Level:
         derived = self.derived(which)
         outputs = [o for o in self.sig.outputs if o != self.sig.terminated and self.sig.is_float(o)]
         return plane_names(self.who, self.label, which, self.wrt, outputs,
-                           {n for _, n in self.sig.arg_spec}, {n for _, n in derived.sig.arg_spec})
+                           {n for _, n in self.sig.arg_spec}, {n for _, n in derived.sig.arg_spec},
+                           self.sig.description.get("plane_names"))
 
     # -- build and load ------------------------------------------------------
     def unit(self, directory, target, mode, device_arch=""):
@@ -247,6 +234,34 @@ class Level:
         return next(a for a in unit.artifacts if a.name == self.name)
 
 
+class StageLevel:
+    """One stage of a kernel hawk builds in stages: a unit of its parent's bundle, bound from hawk's document of it
+    (``describe(...)["stages"][i]["sidecar"]``) and never differentiated. It offers what a framework asks of a level
+    to run it: :attr:`sig`, :attr:`name`, :attr:`label`, :attr:`slots`, :meth:`unit` and :meth:`artifact`."""
+
+    def __init__(self, parent, entry):
+        self.parent, self.who, self.name = parent, parent.who, entry["kernel"]
+        self.label = f"{parent.label} ({self.name})"
+        self.slots = {}
+        self.sig = Signature(description=entry["sidecar"], who=parent.who, label=self.label)
+
+    def unit(self, directory, target, mode, device_arch=""):
+        """The parent's bundle: every stage is built into it."""
+        return self.parent.unit(directory, target, mode, device_arch)
+
+    def artifact(self, unit):
+        """This stage's artifact in ``unit``."""
+        return next(a for a in unit.artifacts if a.name == self.name)
+
+
+def stage_levels(level) -> tuple:
+    """The :class:`StageLevel` of each stage of ``level``'s kernel, in run order; ``()`` for a kernel that is one unit."""
+    from hawk.artifact import describe
+
+    stages = describe(list(level.chain), targets=("host",))[level.name].get("stages")
+    return tuple(StageLevel(level, entry) for entry in stages or ())
+
+
 def per_cell_source(declared):
     """The :attr:`Level.cell_source` of the primal level of the kernel ``declared``."""
     def make(level):
@@ -266,19 +281,21 @@ def finished_identity(where, mask, bar_next, jt):
     return where(mask, bar_next, jt)
 
 
-def plane_names(who, name, which, wrt, outputs, own, derived) -> dict:
+def plane_names(who, name, which, wrt, outputs, own, derived, joined=None) -> dict:
     """``{plane: its plane in the derived kernel}`` for every ``wrt`` input and
     every ``outputs`` plane (``which`` = ``"jvp"``: tangents; ``"vjp"``:
     adjoints), read off the derived kernel's planes ``derived`` that the kernel
-    ``name`` (planes ``own``) does not hold. A plane with no counterpart (an
-    integer output) is absent; a ``wrt`` input with none is refused."""
+    ``name`` (planes ``own``) does not hold. ``joined`` is hawk's ``plane_names`` of the kernel (``{plane: {group, wire}}`` of each
+    plane whose name joins a quantity's namespace to a wire name): a derivative spells such a plane ``<group>_<wire>``. A plane with
+    no counterpart (an integer output) is absent; a ``wrt`` input with none is refused."""
     from hawk.diff import ADJOINT_PREFIX, TANGENT_PREFIX
-    from raptor.ir.nodes import NAMESPACE_SEP
+
+    joined = joined or {}
 
     prefix = TANGENT_PREFIX if which == "jvp" else ADJOINT_PREFIX
     fresh = set(derived) - set(own)
     wanted = list(wrt) + list(outputs)
-    flat = {p: p.replace(NAMESPACE_SEP, "_") for p in wanted}
+    flat = {p: f"{joined[p]['group']}_{joined[p]['wire']}" if p in joined else p for p in wanted}
 
     def spell(level, p):
         return f"{prefix}{level if level > 1 else ''}_{flat[p]}"

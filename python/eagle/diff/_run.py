@@ -28,6 +28,7 @@ so distinct reverses of one run proceed concurrently.
 
 from __future__ import annotations
 
+import math
 import os
 import threading
 
@@ -35,7 +36,7 @@ from .. import _alloc, _stream, arrays
 from .. import _core, _counters, _split
 from .._busy import Busy, BusyGuard
 from ..graph import get_node_kind
-from ..sidecar import sidecar_of
+from ..sidecar import prior_reads, sidecar_of
 
 __all__ = []
 
@@ -96,9 +97,9 @@ class _Kernels:
     """The kernels a recorded run needs, built once per window and device:
     the single-step taping twin, the fused twin of an automatic kernel, the
     vjp of one step as a pure function, the taped ``(name, rows)``, and the
-    time plane name of a ``time_step=`` kernel."""
+    time plane name of a ``time_step=`` kernel and its launch-start copy ``t0``."""
 
-    __slots__ = ("single", "fused", "vjp", "fused_vjp", "taped", "time")
+    __slots__ = ("single", "fused", "vjp", "fused_vjp", "taped", "time", "t0")
 
 
 def _step_kernels(plugin, window, door, device, events="step", reverse="per_step"):
@@ -116,7 +117,6 @@ def _step_kernels(plugin, window, door, device, events="step", reverse="per_step
     kernel, _unit, cache_dir = source
     from hawk import Kernel
     from hawk.diff import step_vjp, tape
-    from hawk.diff.tape import taped_planes
 
     from .._plan_deploy import _hawk_plugins
 
@@ -140,11 +140,25 @@ def _step_kernels(plugin, window, door, device, events="step", reverse="per_step
     if reverse == "fused":      # all K steps of a window in one launch; a unit of its own (its kind differs)
         whole = Kernel(f"{step.name}_fused_vjp", step_vjp(kernel, steps_reverse="fused"))
         out.fused_vjp = _hawk_plugins([kernel, whole], targets, cache_dir, plugin.scalar_type)[1]
-    counts = sidecar_of(built[0])["element_counts"]
-    out.taped = tuple((name, counts[name]) for name, _type in taped_planes(single))
     out.time = getattr(step, "time", None) if getattr(step, "time_step", None) else None
+    from hawk.artifact import describe
+
+    doc = describe([step], targets=("host",))[step.name]
+    out.t0 = (doc.get("refine_planes") or {}).get("t0")
+    out.taped = _taped_planes(doc, out.time, sidecar_of(built[0])["slot_shapes"])
     cache[key] = out
     return out
+
+
+def _taped_planes(doc, time, shapes) -> tuple:
+    """``((plane, elements), ...)`` the taping twin of a step records, in ``arg_spec`` order: the floating-point ``Mutable`` planes
+    the step overwrites and reads before it does (or the time plane), from hawk's description ``doc`` of the step; ``shapes`` is
+    the twin's ``slot_shapes``."""
+    carried = prior_reads(doc) | {time}
+    written = set(doc["planes_written"])
+    return tuple((name, math.prod(shapes[name])) for role, name in doc["arg_spec"]
+                 if role == "mutable" and name in written and name in carried
+                 and doc["arg_dtypes"][name].startswith("float"))
 
 
 def array_module(device):
@@ -321,7 +335,7 @@ class RunRecorder:
         scalar = planes[k.taped[0][0]].dtype
         planes.update(extras)
         planes[TAPE], self._backing = planes[TAPE]
-        self.t0 = f"{k.time}_0" if k.time is not None else None
+        self.t0 = k.t0
         self.promoted = set(extras) - {APPLIED_STEPS, self.t0, TAPE}
         self.active = runner.active
         self.every = 1 if runner.auto else runner.every

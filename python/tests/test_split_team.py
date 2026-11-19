@@ -46,7 +46,6 @@ def _plan(kernels, tmp_path, cache, target, name=None):
     bundle = build_bundle(kernels, tmp_path, targets=("cuda",) if target == "cuda" else ("host",),
                           cache_dir=cache, host_profile="native")
     by = plugins(bundle, device_loader=eagle.registry.load_manifest if target == "cuda" else None)
-    _split.link(by, bundle)
     structure = eexec.DeviceKernel if target == "cuda" else eexec.HostTeam
     return eagle.plan.plan(by[name or kernels[0].name], structure=structure), bundle
 

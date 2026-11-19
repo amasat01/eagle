@@ -74,11 +74,11 @@ import numpy as np
 from jax import extend as jex
 from jax.interpreters import ad, batching, mlir
 
-from .. import FINISHED_PLANE, _cell_rows, _layout, _split
+from .. import FINISHED_PLANE, _cell_rows, _layout
 from .._graph_reduce import POLICIES, check_policy
 from .._graph_reduce import fixed_f64 as _fixed_f64
 from ._kernel_planes import ACTIVE_PLANES, FUSED_STEPS, SAMPLE_ROLES, call_mode, promote
-from ._tower import LOCK, Level, finished_identity, per_cell_source
+from ._tower import LOCK, Level, finished_identity, per_cell_source, stage_levels
 
 __all__ = ["KernelFunction", "XLA_FFI_API", "function", "node", "preload"]
 
@@ -384,8 +384,7 @@ class _Prim:
         self.sig = sig
         #: a kernel hawk splits in stages lowers to one ordinary call per stage,
         #: each stage's cells passed to the next as one-cell planes
-        self.stages = tuple(Level(k, wrt=(), who=_WHO, label=f"{level.label} ({k.name})")
-                            for k in _split.kernels_of(level.kernel))
+        self.stages = stage_levels(level)
         p = jex.core.Primitive(f"eagle_{level.name}")
         p.multiple_results = True
         # ``n``: the sample count, given when no input plane is per sample (the
@@ -761,8 +760,6 @@ def _recipe_fields(level, artifact, mode, device=False):
     sample = next((i for i, n in enumerate(ops) if sig.role[n] in SAMPLE_ROLES), None)
     if sample is None:
         sample = len(ops) + next(i for i, r in enumerate(rets) if r != FINISHED_PLANE)
-    from hawk import _core as hawk_core
-
     return {"nargs": len(ops), "nrets": len(rets), "dtype": dtype, "zero": zero,
             "slot_kind": slot_kind, "slot_buffer": slot_buffer, "slot_cell": slot_cell,
             "sample_buffer": sample,
@@ -773,7 +770,7 @@ def _recipe_fields(level, artifact, mode, device=False):
                       for r, c, o, op in conv["cells"]],
             "work": [len(ops) + w for w in conv["work"]],
             "aliases": sorted(conv["aliases"].items()),
-            "index_bytes": int(hawk_core.build_info()["index_type_bytes"])}
+            "index_bytes": int(artifact.sidecar["index_bytes"])}
 
 
 def _install(digest, fields, *, platform, entry, ordinal=0, block=256, function=0,
@@ -874,10 +871,11 @@ def preload(cache_dir, *, platform=None):
                 continue
             fields = record["fields"]
             if record["platform"] == "cpu":
-                from hawk import _core as hawk_core
+                from hawk.runtime import load
 
-                library = hawk_core.HostLibrary(record["host"]["library"])  # ABI check
-                cdll = ctypes.CDLL(record["host"]["library"])
+                library_path = Path(record["host"]["library"])
+                library = load(library_path.parent, record["kernel"])       # hawk's own ABI check of the library
+                cdll = ctypes.CDLL(str(library_path))
                 entry = ctypes.cast(getattr(cdll, record["host"]["entry"]),
                                     ctypes.c_void_p).value
                 _KEEP.append((library, cdll))

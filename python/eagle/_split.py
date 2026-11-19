@@ -74,13 +74,6 @@ class Stage:
     team: dict | None = None
 
 
-def link(by_name: dict, bundle) -> None:
-    """Attach the stages of every split kernel of ``bundle`` to its first
-    plugin (``by_name`` is ``{name: plugin}``). Idempotent; a kernel
-    without ``stages`` is left as it is."""
-    _link(by_name, {a.name: a.sidecar for a in bundle.artifacts})
-
-
 _LINKING = threading.Lock()
 
 
@@ -408,18 +401,6 @@ def cells(plugin) -> tuple:
                  if c not in plugin._internal)
 
 
-def kernels_of(kernel) -> tuple:
-    """The stages of a traced hawk ``kernel`` as kernels of their own, in run order: ``()`` for a kernel that is one unit.
-    hawk's description names the stages and their cells but states no stage kernel, so a split kernel is refused by name."""
-    from hawk.artifact import describe
-
-    stages = describe([kernel], targets=("host",))[kernel.name].get("stages")
-    if stages:
-        raise ValueError(f"eagle: kernel {kernel.name!r} splits into {len(stages)} stages and hawk states no kernel for a stage: "
-                         "lower it as one call")
-    return ()
-
-
 def _one_launch(stage, has_planes: bool) -> bool:
     """Whether the one ``stage`` of a kernel is that kernel's own launch: a stage only for the scratch planes of its wide
     values (hawk's placement), or a warp per lane (hawk's warp form: a team of 32 and nothing else)."""
@@ -638,7 +619,7 @@ class SplitBound:
             self._event.synchronize()                       # that stream only
         _PENDING.discard(self)
         for kernel, team, plane, cells in self._status:
-            from hawk._lane_bind import check_scatter_status      # the plugin is hawk's: so is its check
+            from hawk.runtime import check_scatter_status      # the plugin is hawk's: so is its check
 
             check_scatter_status(kernel, team, plane.get().tolist(), cells)
 

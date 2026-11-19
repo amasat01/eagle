@@ -54,7 +54,7 @@ from types import MappingProxyType
 
 import torch
 
-from .. import FINISHED_PLANE, _cell_rows, _layout, _split
+from .. import FINISHED_PLANE, _cell_rows, _layout
 from .._graph_reduce import check_policy
 from ..sidecar import CELL_PLANE
 from ._kernel_planes import INPUT_ROLES, OUTPUT_ROLES, _prior_reads, call_mode, describe_kernel, promote
@@ -69,7 +69,7 @@ _WHO = "eagle.frameworks.torch"
 _INPUT_ROLES = INPUT_ROLES | {"uniform"}
 #: A Param, read by value (``uniform``) or from a one-cell device plane (``lookup``).
 _PARAM_ROLES = frozenset({"uniform", "lookup"})
-#: the per-sample plane naming each sample's parameter cell (``hawk.diff.params.CELL_PLANE``)
+#: the per-sample plane naming each sample's parameter cell (``hawk.diff.CELL_PLANE``)
 _CELL_PLANE = CELL_PLANE
 
 #: torch floating dtype of each hawk build mode.
@@ -244,7 +244,7 @@ class _Level:
         self.base = self.kind = None
         #: Mutable planes read before written (carried state): inputs as well as outputs
         self.state = tuple(state)
-        description = describe_kernel(kernel)
+        self.description = description = describe_kernel(kernel)
         self.finish = (description.get("finish") or {}).get("mask")
         internal = {FINISHED_PLANE} if self.finish is not None else frozenset()
         if self.per_cell:
@@ -319,7 +319,7 @@ class _Level:
 
     def _derive(self, kind):
         from hawk.diff import jvp, step_vjp, vjp
-        from hawk.trace import Kernel
+        from hawk import Kernel
 
         reverse = kind == "vjp"
         if self.state and not reverse:
@@ -344,6 +344,7 @@ class _Level:
             [] if self.state else floats,
             {n for _, n in self.spec} | set(nexts.values()),
             {n for _, n in kernel.arg_spec},
+            self.description.get("plane_names"),
         )
         child = _Level(
             self.owner, kernel, chain=(kernel,) if alone else (*self.chain, kernel),
@@ -766,7 +767,6 @@ class _Level:
             device_arch=arch,
         )
         built = plugins(unit, device_loader=load_manifest)
-        _split.link(built, unit)
         return eplan.plan(built[self.kernel.name], structure=eexec.DeviceKernel)
 
     @property

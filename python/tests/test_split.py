@@ -62,7 +62,7 @@ def _bundle(tmp_path, mode, stages, targets=("host",), internal=(), link=True):
             art.sidecar["cells"] = {c: {**spec, **({"internal": True} if c in internal else {})}
                                     for c, spec in art.sidecar["cells"].items()}
     if link:
-        _split.link(by, bundle)
+        _split.linked(by["split"], "eagle.test")
     return by["split"], by
 
 

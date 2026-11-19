@@ -931,13 +931,14 @@ class BoundPlan:
         return self
 
     def _guard_broadcast(self, name: str, value) -> None:
-        """A plane of a hawk kernel built to read it broadcast keeps the pattern
-        it was bound with (hawk's rule, :mod:`hawk._broadcast`)."""
+        """A plane of a hawk kernel built to read it broadcast keeps the shape
+        it was bound with: its compact shape carries the pattern the unit was built for."""
         source = getattr(self.plan.plugin, "_hawk_source", None)
-        if source is not None and name in (getattr(source[0], "broadcast", None) or ()):
-            from hawk import _broadcast
-
-            _broadcast.guard_rebind(source[0], name, self._planes[name], value)
+        if source is None or name not in (getattr(source[0], "broadcast", None) or ()):
+            return
+        old, new = tuple(self._planes[name].shape), getattr(value, "shape", None)
+        if new is not None and tuple(new) != old:
+            raise ValueError(f"argument {name!r} was bound with shape {old}; it cannot be rebound with shape {tuple(new)}")
 
     def _renew_companions(self, changed: dict) -> None:
         """After a rebind: the owned companion of each rebound target cleared

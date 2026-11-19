@@ -44,7 +44,7 @@ import tempfile
 import numpy as np
 import warp as wp
 
-from .. import FINISHED_PLANE, _cell_rows, _layout, _split
+from .. import FINISHED_PLANE, _cell_rows, _layout
 from .._graph_reduce import check_policy
 from ._kernel_planes import call_mode, promote
 from ._tower import LOCK, Level
@@ -546,7 +546,6 @@ class WarpFunction:
         arch = self._arch or f"sm_{device.arch}"
         unit = level.unit(self._dir, "cuda", mode, arch)
         built = plugins(unit, device_loader=load_manifest)
-        _split.link(built, unit)
         return eplan.plan(built[level.name], structure=eexec.DeviceKernel)
 
 

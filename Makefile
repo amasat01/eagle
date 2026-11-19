@@ -249,11 +249,12 @@ gate-cpp-cuda:
 	cmake --build "$(GD)/cuda" -j$(GATE_JOBS)
 	$(GPU_RUN) tests/check_gate.sh cuda "$(GD)/cuda/tests/eagle_tests"
 
-# interop_matrix stays deselected as in gate-py: its rows need the frameworks, installed by the Kaggle leg
+# interop_matrix stays deselected as in gate-py: its rows need the frameworks, installed by the Kaggle leg.
+# The ft rows fail on a GIL build by design; their GPU rows run in ft-stress, through GPU_RUN, on a free-threaded interpreter.
 gate-py-gpu: gate-env-gpu
 	$(if $(GPU_RUN),,@echo "gate: GPU_RUN is empty; the GPU rows run on whatever GPU is visible")
 	$(if $(AETHER_SRC),EAGLE_TEST_AETHER_INCLUDE="$(AETHER_SRC)",) \
-	  $(GPU_RUN) env -u PYTHONPATH -u LD_LIBRARY_PATH "$(GD)/venv_gpu/bin/python" -m pytest -q -rs -m "gpu and not interop_matrix" -n $(GPU_PYTEST_JOBS) --dist loadfile $(or $(PYTEST_ARGS),python/tests)
+	  $(GPU_RUN) env -u PYTHONPATH -u LD_LIBRARY_PATH "$(GD)/venv_gpu/bin/python" -m pytest -q -rs -m "gpu and not interop_matrix and not ft" -n $(GPU_PYTEST_JOBS) --dist loadfile $(or $(PYTEST_ARGS),python/tests)
 
 # ======================================================================================================================
 # The CI-only jobs. CI calls these; they are not part of `gate`. The commands are the ones the workflow carried.
@@ -320,6 +321,7 @@ tsan-ft:
 	CMAKE_PREFIX_PATH="$(GD)/prefix_tsan" RAPTOR_DIR="$(RAPTOR_SRC)" tests/sanitize/tsan_ft.sh "$(GD)/tsan-python/bin/python$(basename $(TSAN_PY_VERSION))t"
 
 # ft-stress: the ft rows, then the whole suite, on a free-threaded interpreter ($(PYTHON) must be one), with torch, jax, warp
+# (the ft rows include GPU rows: they run through GPU_RUN, as gate-py-gpu does)
 ft-stress: gate-env-cpu
 	"$(GD)/venv_cpu/bin/python" -c "import sys; assert sys._is_gil_enabled() is False, 'GIL is enabled'; print(sys.version)"
 	[ -z "$${PYTHON_GIL:-}" ] || { echo "PYTHON_GIL is set"; exit 1; }
@@ -330,7 +332,7 @@ ft-stress: gate-env-cpu
 	export EAGLE_PLUGIN_EXPECTED_ARCHS=$(CPU_CUDA_ARCH)/$(CPU_CUDA_ARCH); PY="$(GD)/venv_cpu/bin/python"; \
 	N="$$($$PY -m pytest python/tests -m ft --collect-only -q -p no:cacheprovider | grep -c '::' || true)"; \
 	echo "ft rows collected: $$N"; [ "$$N" -gt 0 ] || { echo "ft selection collected zero tests"; exit 1; }; \
-	$$PY -m pytest python/tests -m ft -q -rs -p no:cacheprovider -W error::RuntimeWarning; \
+	$(GPU_RUN) $$PY -m pytest python/tests -m ft -q -rs -p no:cacheprovider -W error::RuntimeWarning; \
 	$$PY -m pytest python/tests -q -p no:cacheprovider -W error::RuntimeWarning -m "not gpu and not interop_matrix"
 
 # nodriver: the core-only wheel (no plugin, no nvcc) in a fresh venv; imports, the typed refusal, then a copy of the suite

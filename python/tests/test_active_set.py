@@ -250,8 +250,8 @@ def plans(tmp_path_factory):
     import ctypes
     from types import SimpleNamespace
 
-    from hawk import _core as hcore
     from hawk.artifact import build_bundle, plan_view
+    from hawk.runtime import load
     from hawk.ext import Guard, Kind
 
     import eagle.exec as eexec
@@ -270,7 +270,7 @@ def plans(tmp_path_factory):
         view = plan_view(sidecar)
         host_entry = view.pop("host_entry")
         so = work / f"{kern.name}.so"
-        lib = hcore.HostLibrary(str(so))
+        lib = load(work, kern.name)      # hawk's load self-checks the library
         cdll = ctypes.CDLL(str(so))
         host = SimpleNamespace(
             host_entry=ctypes.cast(getattr(cdll, host_entry), ctypes.c_void_p).value,
