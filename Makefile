@@ -16,7 +16,8 @@
 # `pip install -e python[test] -c ci/constraints.txt`. GATE_REUSE=1 keeps it (inner loop only).
 # SIBLINGS are explicit inputs: RAPTOR_SRC, AETHER_SRC (the repository root), HAWK_SRC, SITE_SRC (the landing
 # site, which holds raptor_docs), OSPREY_WHEELS (the folder holding the OSPREY library wheels hawk builds with:
-# raptor-osprey, raptor-osprey-cpu, raptor-osprey-cuda; installed before HAWK_SRC). Unset means the declared dependency
+# raptor-osprey, raptor-osprey-cpu, raptor-osprey-cuda; installed before HAWK_SRC, replacing an installed copy: their version
+# does not change between builds, so a reused venv would otherwise keep the older library). Unset means the declared dependency
 # from PyPI; AETHER_SRC has no PyPI form for the C++ legs and is required there. Nothing else outside this repository is read.
 # TOOLCHAINS come from the environment and the gate fails loudly when one is missing: CXX (g++), CUDACXX (nvcc),
 # CLANGXX (the second header compiler), and for the docs doxygen on PATH.
@@ -155,7 +156,7 @@ define ENV_RECIPE
 	$(if $(RAPTOR_SRC),$$PIP install --quiet -c "$(CONSTRAINTS)" "$(RAPTOR_SRC)";,) \
 	$(if $(SITE_SRC),$$PIP install --quiet --no-deps -c "$(CONSTRAINTS)" "$(SITE_SRC)";,) \
 	SKBUILD_BUILD_DIR="$(GD)/sb_dsc_$(1)" $$PIP install --quiet -c "$(CONSTRAINTS)" "$(AETHER_SRC)/dsc"; \
-	$(if $(OSPREY_WHEELS),$$PIP install --quiet --no-index --no-deps "$(OSPREY_WHEELS)"/*.whl;,) \
+	$(if $(OSPREY_WHEELS),$$PIP install --quiet --no-index --no-deps --force-reinstall "$(OSPREY_WHEELS)"/*.whl;,) \
 	$(if $(HAWK_SRC),SKBUILD_BUILD_DIR="$(GD)/sb_hawk_$(1)" $$PIP install --quiet -c "$(CONSTRAINTS)" "$(HAWK_SRC)";,) \
 	CMAKE_PREFIX_PATH="$(GD)/prefix_$(1):$${CMAKE_PREFIX_PATH:-}" \
 	SKBUILD_BUILD_DIR="$(GD)/sb_eagle_$(1)" \
