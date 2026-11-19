@@ -125,7 +125,8 @@ def _compile(kernel, arch, tmp):
     entries = {}
     for name, figures in art.sidecar["tool"]["cuda"].items():
         entries[name] = {"ops": collections.Counter(), "n": 0, "regs": figures["regs"], "stack": figures["stack_B"],
-                         "spill": (figures["spill_store_B"] or 0) + (figures["spill_load_B"] or 0)}
+                         "spill": (figures["spill_store_B"] or 0) + (figures["spill_load_B"] or 0),
+                         "local": art.sidecar["launch"].get("local_bytes")}
     cuobjdump = pathlib.Path(_cuda_compiler()["path"]).with_name("cuobjdump")
     sass = subprocess.run([str(cuobjdump), "-sass", str(art.entries["cuda"].artifact)], capture_output=True,
                           text=True, check=True).stdout
@@ -201,7 +202,7 @@ def test_the_persist_entry_claims_once_per_chunk_head(label):
 def test_no_entry_spills_or_touches_local_memory(compiled):
     for entry, rows in compiled.items():
         for arch, row in rows.items():
-            assert (row["spill"], row["stack"]) == (0, 0), (entry, arch)
+            assert (row["spill"], row["stack"], row["local"] or 0) == (0, 0, 0), (entry, arch)
             assert row["ops"]["LDL"] + row["ops"]["STL"] == 0, (entry, arch)
 
 

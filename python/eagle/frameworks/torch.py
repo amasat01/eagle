@@ -58,7 +58,7 @@ from .. import FINISHED_PLANE, _cell_rows, _layout
 from .._graph_reduce import check_policy
 from ..sidecar import CELL_PLANE
 from ._kernel_planes import INPUT_ROLES, OUTPUT_ROLES, _prior_reads, call_mode, describe_kernel, promote
-from ._tower import LOCK, finished_identity, plane_names
+from ._tower import LOCK, finished_identity, plane_names, reverse_names, step_seeds
 
 __all__ = ["KernelFunction", "function"]
 
@@ -335,17 +335,14 @@ class _Level:
         kernel = Kernel(f"{self.owner.name}_{self.path}{kind[0]}",
                         tuple(derived) if alone else derived)
         floats = [o for o in self.outputs if o != self.terminated]
-        nexts = {o: f"bar_{o}_next" for o in floats if self.state}
-        named = plane_names(
-            _WHO,
-            self.owner.name,
-            kind,
-            derived.wrt,
-            [] if self.state else floats,
-            {n for _, n in self.spec} | set(nexts.values()),
-            {n for _, n in kernel.arg_spec},
-            self.description.get("plane_names"),
-        )
+        nexts = {o: c for o, c in step_seeds(derived).items() if o in floats} if self.state else {}
+        if reverse:
+            named = reverse_names(_WHO, self.owner.name, derived.wrt, [] if self.state else floats, derived)
+        else:
+            named = plane_names(
+                _WHO, self.owner.name, derived.wrt, floats,
+                {n for _, n in self.spec}, {n for _, n in kernel.arg_spec}, self.description.get("plane_names"),
+            )
         child = _Level(
             self.owner, kernel, chain=(kernel,) if alone else (*self.chain, kernel),
             path=self.path + kind[0]

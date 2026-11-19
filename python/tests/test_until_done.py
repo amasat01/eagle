@@ -143,7 +143,6 @@ def _oscillator(kind, finishing, steps=1):
 
 
 def _build(kern, work, targets, cache_dir=None, settings=None):
-    import ctypes
 
     from hawk.artifact import build_bundle, plan_view
     from hawk.runtime import load
@@ -156,14 +155,10 @@ def _build(kern, work, targets, cache_dir=None, settings=None):
     bundle = build_bundle([kern], work, targets=targets, settings=settings, **kw)
     sidecar = next(a.sidecar for a in bundle.artifacts if a.name == kern.name)
     view = plan_view(sidecar)
-    host_entry = view.pop("host_entry")
+    view.pop("host_entry")
     out = {}
-    so = work / f"{kern.name}.so"
     lib = load(work, kern.name)      # hawk's load self-checks the library
-    cdll = ctypes.CDLL(str(so))
-    host = SimpleNamespace(
-        host_entry=ctypes.cast(getattr(cdll, host_entry), ctypes.c_void_p).value,
-        name=kern.name, _keepalive=(lib, cdll), **view)
+    host = SimpleNamespace(host_entry=lib.entry.address, name=kern.name, _keepalive=(lib,), **view)
     out["host"] = eplan.plan(host, structure=eexec.HostTeam)
     if "cuda" in targets:
         registry = load_manifest(work / "manifest.json")

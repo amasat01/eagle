@@ -227,10 +227,7 @@ def _check_vjp_covers(label, bound, vplan):
     """Refuse a vjp that leaves out the gradient of a differentiable input
     (one built with a narrower ``wrt``): its share of that gradient would be
     silently missing."""
-    from .. import _split
-
-    returned = {name[4:] for _role, name in _split.arg_spec(vplan.plugin)
-                if name.startswith("bar_")}
+    returned = set((sidecar_of(vplan.plugin).get("gradient_of") or {}).values())
     for role, name in bound._arg_spec:
         value = bound._planes.get(name)
         wanted = role not in OUTPUT_ROLES and _is_float(value)

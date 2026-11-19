@@ -35,7 +35,7 @@ def attach(plugin, kernel) -> None:
     its unit as one matrix product on the ``gemm`` route that writes the kernel's one output; anything else stays the kernel."""
     from hawk import Kernel
     from hawk.artifact import describe
-    from hawk.diff import ADJOINT_PREFIX, vjp
+    from hawk.diff import vjp
 
     adjoint = Kernel(f"{kernel.name}_vjp", vjp(kernel))
     docs = describe([kernel, adjoint], targets=("cuda",))
@@ -46,14 +46,15 @@ def attach(plugin, kernel) -> None:
     route = _Route(doc["arg_spec"], found[0]["products"], plugin.scalar_type or "float64")
     if set(doc["planes_written"]) != {route.out}:
         return
-    # the vjp unit states which plane is the gradient of which lookup plane (``adjoint_like``) and spells the output's cotangent
-    # with hawk's adjoint prefix; a unit that does not state both stays the kernel
+    # the vjp unit states which plane is the gradient of which lookup plane (``adjoint_like``) and which cotangent seeds which
+    # output (``cotangent_of``); a product it does not link is refused by name, never run half-routed
     gradient = {primal: adjoint_plane for adjoint_plane, primal in (adjoint_doc.get("adjoint_like") or {}).items()}
-    cotangent = f"{ADJOINT_PREFIX}_{route.out}"
-    names = {nm for _role, nm in adjoint_doc["arg_spec"]}
-    if cotangent not in names or not all(nm in gradient for nm in route.inputs):
-        return
-    route.planes = {f"{route.out}_bar": cotangent, **{f"{nm}_bar": gradient[nm] for nm in route.inputs}}
+    seeded = {output: cotangent for cotangent, output in (adjoint_doc.get("cotangent_of") or {}).items()}
+    missing = [nm for nm in route.inputs if nm not in gradient] + ([route.out] if route.out not in seeded else [])
+    if missing:
+        raise ValueError(f"eagle.gemm: {kernel.name!r} is a matrix product on the gemm route, but its vjp states no gradient "
+                         f"plane (adjoint_like) or cotangent (cotangent_of) for {missing}")
+    route.planes = {f"{route.out}_bar": seeded[route.out], **{f"{nm}_bar": gradient[nm] for nm in route.inputs}}
     plugin._gemm = route
     route.vjp = _VjpPlugin(plugin, route, adjoint_doc["arg_spec"])
 
