@@ -60,7 +60,7 @@ target_include_directories(eagle_door
   INTERFACE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}> $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 target_compile_definitions(eagle_door PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:AETHER_CPP_MODE=1>")
 target_compile_options(eagle_door PRIVATE
-  "$<$<COMPILE_LANGUAGE:CXX>:-O2;-ffp-contract=off;${_door_warn};-fopenmp;-include;${EAGLE_DOOR_WING_FACTS}>")
+  "$<$<COMPILE_LANGUAGE:CXX>:-O2;-ffp-contract=off;${_door_warn};-include;${EAGLE_DOOR_WING_FACTS}>")
 # door.map is the one list of exported names; Apple's ld takes it as an exported-symbols list (the global pattern with the C symbol
 # underscore) and refuses undefined symbols by default-error, GNU ld by --version-script and --no-undefined.
 if(APPLE)
@@ -69,10 +69,10 @@ if(APPLE)
   file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/door.exp" "_${CMAKE_MATCH_1}\n")
   set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_door}/door.map")
   target_link_options(eagle_door PRIVATE
-    -Wl,-exported_symbols_list,${CMAKE_CURRENT_BINARY_DIR}/door.exp -Wl,-undefined,error -fopenmp)
+    -Wl,-exported_symbols_list,${CMAKE_CURRENT_BINARY_DIR}/door.exp -Wl,-undefined,error)
 else()
   target_link_options(eagle_door PRIVATE
-    -Wl,--version-script=${_door}/door.map -Wl,--no-undefined -fopenmp)
+    -Wl,--version-script=${_door}/door.map -Wl,--no-undefined)
 endif()
 target_link_libraries(eagle_door PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
 set_property(TARGET eagle_door APPEND PROPERTY LINK_DEPENDS "${_door}/door.map")
@@ -91,7 +91,7 @@ else()
   target_sources(eagle_door PRIVATE "${_door}/device/Loop.cu")
   target_link_libraries(eagle_door PRIVATE CUDA::cudart)
   set_source_files_properties("${_door}/device/Loop.cu" PROPERTIES
-    COMPILE_OPTIONS "-Wno-deprecated-gpu-targets;-Werror=all-warnings;-diag-suppress=20050;-include;${EAGLE_DOOR_CUDA_WING_FACTS};-Xcompiler=-fPIC,-fvisibility=hidden,-Wall,-Wextra,-fopenmp"
+    COMPILE_OPTIONS "-Wno-deprecated-gpu-targets;-Werror=all-warnings;-diag-suppress=20050;-include;${EAGLE_DOOR_CUDA_WING_FACTS};-Xcompiler=-fPIC,-fvisibility=hidden,-Wall,-Wextra"
     COMPILE_DEFINITIONS AETHER_HAS_CUDA)
   # The loop is the one CUDA unit: C++20 as the old path's device recipe.
   set_target_properties(eagle_door PROPERTIES CUDA_STANDARD 20 CUDA_STANDARD_REQUIRED ON CUDA_EXTENSIONS OFF)

@@ -147,6 +147,8 @@ gate-door-cmake:
 HAVE_NVCC := $(if $(NVCC),$(if $(wildcard $(NVCC)),yes))
 env_cuda = $(or $(filter gpu,$(1)),$(HAVE_NVCC))
 # one venv + one editable install per leg; the build tree and the header prefix live under $(GD) too
+# aether and eagle headers are installed into the gate prefix on every run, reuse included: the binding
+# compiles those copies, so a prefix kept from an earlier run would build the earlier headers.
 define ENV_RECIPE
 	$(call need_aether)
 	$(call need_raptor)
@@ -157,13 +159,11 @@ define ENV_RECIPE
 	PIP="$(GD)/venv_$(1)/bin/python -m pip"; \
 	$$PIP install --quiet --upgrade pip; \
 	$$PIP install --quiet -c "$(CONSTRAINTS)" "scikit-build-core>=0.10" "setuptools-scm>=8" "nanobind>=3.1,<4; python_version>='3.10'" "nanobind>=2.2,<3; python_version<'3.10'" pytest numpy; \
-	if [ ! -f "$(GD)/prefix_$(1)/share/eagle/cmake/eagleConfig.cmake" ]; then \
-	  cmake -DAETHER_FACTS_DIR="$(CARDS)/$(if $(call env_cuda,$(1)),cuda,cpu)" $(if $(call env_cuda,$(1)),-DAETHER_CPP_MODE=OFF -DCMAKE_CUDA_COMPILER="$(NVCC)" -DCMAKE_CUDA_HOST_COMPILER="$(CXX)" $(2),-DAETHER_CPP_MODE=ON) -DCMAKE_INSTALL_PREFIX="$(GD)/prefix_$(1)" \
-	        -B "$(GD)/aether_$(1)" -S "$(AETHER_SRC)"; \
-	  cmake --install "$(GD)/aether_$(1)"; \
-	  cmake -B "$(GD)/eagle_hdr_$(1)" $(if $(call env_cuda,$(1)),-DCMAKE_CUDA_COMPILER="$(NVCC)" -DCMAKE_CUDA_HOST_COMPILER="$(CXX)" $(2),-DEAGLE_CPP_MODE=ON) -DCMAKE_INSTALL_PREFIX="$(GD)/prefix_$(1)" .; \
-	  cmake --install "$(GD)/eagle_hdr_$(1)"; \
-	fi; \
+	cmake -DAETHER_FACTS_DIR="$(CARDS)/$(if $(call env_cuda,$(1)),cuda,cpu)" $(if $(call env_cuda,$(1)),-DAETHER_CPP_MODE=OFF -DCMAKE_CUDA_COMPILER="$(NVCC)" -DCMAKE_CUDA_HOST_COMPILER="$(CXX)" $(2),-DAETHER_CPP_MODE=ON) -DCMAKE_INSTALL_PREFIX="$(GD)/prefix_$(1)" \
+	      -B "$(GD)/aether_$(1)" -S "$(AETHER_SRC)"; \
+	cmake --install "$(GD)/aether_$(1)"; \
+	cmake -B "$(GD)/eagle_hdr_$(1)" $(if $(call env_cuda,$(1)),-DCMAKE_CUDA_COMPILER="$(NVCC)" -DCMAKE_CUDA_HOST_COMPILER="$(CXX)" $(2),-DEAGLE_CPP_MODE=ON) -DCMAKE_INSTALL_PREFIX="$(GD)/prefix_$(1)" .; \
+	cmake --install "$(GD)/eagle_hdr_$(1)"; \
 	$(if $(RAPTOR_SRC),$$PIP install --quiet -c "$(CONSTRAINTS)" "$(RAPTOR_SRC)";,) \
 	$(if $(SITE_SRC),$$PIP install --quiet --no-deps -c "$(CONSTRAINTS)" "$(SITE_SRC)";,) \
 	SKBUILD_BUILD_DIR="$(GD)/sb_dsc_$(1)" $$PIP install --quiet -c "$(CONSTRAINTS)" "$(AETHER_SRC)/dsc"; \

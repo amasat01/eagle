@@ -76,7 +76,7 @@ PAIR_CCBIN ?= $(CXX)
 ROOT := $(abspath $(CURDIR)/../..)
 WARN := -Wall -Wextra -pedantic -Werror
 CXXFLAGS_DOOR := -std=c++23 -O2 -fPIC -fvisibility=hidden -fvisibility-inlines-hidden \
-  -ffp-contract=off $(WARN) -fopenmp -DAETHER_CPP_MODE=1 -DEAGLE_CPU_ONLY=1 \
+  -ffp-contract=off $(WARN) -DAETHER_CPP_MODE=1 -DEAGLE_CPU_ONLY=1 \
   -include $(WING_FACTS) -I$(ROOT) -I$(AETHER_INCLUDE)
 CFLAGS_C := -std=c11 -O2 -ffp-contract=off $(WARN) -I$(ROOT)
 # The compiler writes the headers a target reads into a .d file beside the output (named after the -o file), keyed to
@@ -138,7 +138,7 @@ $(OUT)/device/Device.o: device/Device.cpp | check-inputs
 $(OUT)/device/Loop.o: device/Loop.cu | check-inputs check-cuda
 	@mkdir -p $(dir $@)
 	$(NVCC) -std=c++20 -O2 -arch=sm_61 -Wno-deprecated-gpu-targets -Werror all-warnings -ccbin $(CXX) \
-	  -Xcompiler -fPIC,-fvisibility=hidden,-Wall,-Wextra,-fopenmp -DAETHER_HAS_CUDA -diag-suppress=20050 -include $(CUDA_WING_FACTS) -I$(ROOT) -I$(AETHER_INCLUDE) -MMD -MP -c $< -o $@
+	  -Xcompiler -fPIC,-fvisibility=hidden,-Wall,-Wextra -DAETHER_HAS_CUDA -diag-suppress=20050 -include $(CUDA_WING_FACTS) -I$(ROOT) -I$(AETHER_INCLUDE) -MMD -MP -c $< -o $@
 
 # Darwin: the exported-symbols list is door.map's global pattern with the C symbol underscore.
 $(OUT)/door.exp: door.map
@@ -146,7 +146,7 @@ $(OUT)/door.exp: door.map
 	sed -n 's/.*global: *\([^;]*\);.*/_\1/p' door.map > $@
 
 $(LIB): $(OBJ) door.map $(LIB_EXPORT_LIST)
-	$(CXX) $(LIB_SHARED) -o $@ $(OBJ) $(LIB_EXPORT) -fopenmp -pthread -ldl $(CUDART)
+	$(CXX) $(LIB_SHARED) -o $@ $(OBJ) $(LIB_EXPORT) -pthread -ldl $(CUDART)
 
 lib: $(LIB)
 
@@ -155,6 +155,9 @@ symbols: $(LIB)
 	@extra=$$($(NM_DEFINED) $(LIB) | awk '{print $$3}' | grep -v '^$(SYM_PREFIX)eg_' || true); \
 	if [ -n "$$extra" ]; then echo "FAIL  exports beyond eg_*:"; echo "$$extra"; exit 1; fi; \
 	echo "PASS  $(LIB) exports $$($(NM_DEFINED) $(LIB) | grep -c ' $(SYM_PREFIX)eg_') eg_* names and nothing else"
+	@omp=$$(nm -u $(LIB) | awk '{print $$NF}' | grep -E '^_?(GOMP_|omp_|__kmpc_)' || true); \
+	if [ -n "$$omp" ]; then echo "FAIL  $(LIB) needs an OpenMP runtime: $$omp"; exit 1; fi; \
+	echo "PASS  $(LIB) needs no OpenMP runtime: its host loops run on eagle's host pool"
 
 # Confinement: every object and translation unit outside device/ is free of CUDA, and reaches the device group only
 # through device/Seam.h. A header counts as CUDA by its file name (cuda*, cufft*, cublas*, nvrtc*) or by sitting in a
@@ -227,7 +230,7 @@ $(GEMM_DEVICE_TEST): test/gemm_test.c $(LIB) | check-cuda
 GEMM_ROUTE_TEST := $(OUT)/gemm_route_test
 $(GEMM_ROUTE_TEST): test/gemm_test.c $(OBJ) $(OUT)/test/gemm_route_seam.o | check-cuda
 	$(CC) $(DEPFLAGS) $(CFLAGS_C) -DEG_GEMM_DEVICE -DEG_GEMM_ROUTE -isystem $(CUDA)/include -Itest/c_shim -c $< -o $@.o
-	$(CXX) -fopenmp -o $@ $@.o $(OBJ) $(OUT)/test/gemm_route_seam.o $(CUDART) -ldl -lm -pthread
+	$(CXX) -o $@ $@.o $(OBJ) $(OUT)/test/gemm_route_seam.o $(CUDART) -ldl -lm -pthread
 
 $(NO_CUBLAS): test/no_cublas.c
 	@mkdir -p $(OUT)
@@ -248,7 +251,7 @@ $(EMPTY_ROUTES_CTX): Context.cpp $(EMPTY_ROUTES_ROWS) | check-inputs
 	$(CXX) $(CXXFLAGS_DOOR) -include $(EMPTY_ROUTES_ROWS) -MMD -MP -c $< -o $@
 $(EMPTY_ROUTES_TEST): test/empty_routes_test.c $(EMPTY_ROUTES_CTX) $(filter-out $(OUT)/Context.o,$(OBJ))
 	$(CC) $(DEPFLAGS) $(CFLAGS_C) -c $< -o $@.o
-	$(CXX) -fopenmp -o $@ $@.o $(EMPTY_ROUTES_CTX) $(filter-out $(OUT)/Context.o,$(OBJ)) $(CUDART) -ldl -lm -pthread
+	$(CXX) -o $@ $@.o $(EMPTY_ROUTES_CTX) $(filter-out $(OUT)/Context.o,$(OBJ)) $(CUDART) -ldl -lm -pthread
 
 test: symbols confined $(FIXTURE) $(FIXTURE_BAD) $(TEST) $(REV_FIXTURE) $(REV_TEST) $(GEMM_FIXTURE) $(GEMM_TEST) $(WEIGHT_ROWS_TEST) $(EMPTY_ROUTES_TEST)
 	$(TEST) $(FIXTURE) $(FIXTURE_BAD)

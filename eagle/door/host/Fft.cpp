@@ -1,16 +1,30 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// The host transform: aether's batched pocketfft (aether/fft/Fft.h) on the
-// thread count of the launch, then the plan's Hermitian weight. The only file
-// of the door that includes Fft.h.
+// The host transform: aether's batched pocketfft (aether/fft/Fft.h), its
+// chunks run on eagle's host pool with the launch's team, then the plan's
+// Hermitian weight. The only file of the door that includes Fft.h.
 #include "aether/fft/Fft.h"
 #include "eagle/door/host/Ops.h"
+#include "eagle/exec/HostPool.h"
 
 namespace eagle {
 namespace door {
 namespace host {
 
 namespace {
+
+/** @brief aether's FFT loop on eagle's host pool: each chunk once, on a team of @p team threads. aether's
+ *         chunk body keeps its own first failure, so the body the pool runs does not throw. */
+struct PoolLoop {
+    int team;
+
+    template<class F>
+    void operator()(std::size_t count, F&& chunkBody) const
+    {
+        eagle::exec::hostFor(static_cast<std::int64_t>(count), team,
+            [&](std::int64_t chunk) { chunkBody(static_cast<std::size_t>(chunk)); });
+    }
+};
 
 aether::fft::Norm norm_of(eg_fft_norm norm)
 {
@@ -54,10 +68,11 @@ void exec(const eg_fft_s& plan, const eg_plane_s& in, const eg_plane_s& out,
     const aether::fft::Norm norm = norm_of(plan.norm);
     const T* src                 = floats_of<T>(in);
     T* dst                       = floats_of<T>(out);
+    PoolLoop loop{ threads };
     if (plan.kind == EG_FFT_C2C) {
-        aether::fft::c2c(src, dst, shape, axes, plan.forward, norm, threads);
+        aether::fft::c2c(src, dst, shape, axes, plan.forward, norm, loop);
     } else if (plan.kind == EG_FFT_R2C) {
-        aether::fft::r2c(src, dst, shape, axes, norm, threads);
+        aether::fft::r2c(src, dst, shape, axes, norm, loop);
         if (plan.weight != 1.0)
             weigh(dst, elements(out.tensor->dl_tensor), plan);
     } else if (plan.weight != 1.0) {
@@ -65,9 +80,9 @@ void exec(const eg_fft_s& plan, const eg_plane_s& in, const eg_plane_s& out,
         const std::int64_t count = elements(in.tensor->dl_tensor);
         std::vector<T> weighted(src, src + count);
         weigh(weighted.data(), count, plan);
-        aether::fft::c2r(weighted.data(), dst, shape, axes, norm, threads);
+        aether::fft::c2r(weighted.data(), dst, shape, axes, norm, loop);
     } else {
-        aether::fft::c2r(src, dst, shape, axes, norm, threads);
+        aether::fft::c2r(src, dst, shape, axes, norm, loop);
     }
 }
 
