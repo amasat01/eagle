@@ -276,8 +276,13 @@ class WarpFunction:
                 "capture is open (its row scratch cannot be allocated inside one); call "
                 f"fn.prepare(mode, device, backward=..., samples={n}) or run the call once "
                 "before wp.capture_begin")
+        row = None
+        if not _cell_rows.has(level, n, xp, mode, self._policy):
+            # the row width is the built unit's own (its sidecar), for this mode and device
+            built = self._built(level, mode, device)
+            row = _cell_rows.row_of(getattr(built, "plugin", built))
         return _cell_rows.scratch(level, n, xp, np.dtype(mode), self._policy,
-                                  cells=level.sig.cells)
+                                  cells=level.sig.cells, row=row)
 
     def _bind(self, args, kwargs):
         names = self.inputs

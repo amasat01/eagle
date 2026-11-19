@@ -57,8 +57,8 @@ class Level:
         self.kind = kind
         self.base = base
         self.who = who
-        self.sig = Signature(kernel, who=who, label=self.label)
         self.chain = (base.chain if base is not None else ()) + (kernel,)
+        self.sig = Signature(kernel, primals=self.chain[:-1], who=who, label=self.label)
         self._wrt = None if wrt is None else tuple(wrt)
         self._derived = {}
         self._names = {}

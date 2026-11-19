@@ -93,10 +93,10 @@ class Signature:
         result every launch zero-fills and the bridge discards).
     """
 
-    def __init__(self, kernel, *, who="eagle.frameworks", label=None):
+    def __init__(self, kernel, *, primals=(), who="eagle.frameworks", label=None):
         self.name = label or kernel.name
         self.arg_spec = tuple(tuple(pair) for pair in kernel.arg_spec)
-        self.description = description = describe_kernel(kernel)
+        self.description = description = describe_kernel(kernel, primals=primals)
         self.role = {name: role for role, name in self.arg_spec}
         self._ir = slot_types(description)
         #: reductions over samples ``{cell: op}``: the kernel writes rows (and a
@@ -129,8 +129,8 @@ class Signature:
                                    "active_set", False))
         #: ``Mutable`` planes the kernel reads before it writes them (carried
         #: state): inputs as well as outputs
-        self.state = tuple(n for r, n in self.arg_spec
-                           if r == "mutable" and n in _prior_reads(kernel))
+        carried = _prior_reads(kernel, primals=primals)
+        self.state = tuple(n for r, n in self.arg_spec if r == "mutable" and n in carried)
         self.inputs = tuple(n for r, n in self.arg_spec
                             if (r in INPUT_ROLES or n in self.state)
                             and n not in (FINISHED_PLANE, FUSED_STEPS, *ACTIVE_PLANES,
@@ -194,12 +194,13 @@ class Signature:
         return self.is_float(name) and self.role[name] != "terminated"
 
 
-def describe_kernel(kernel) -> dict:
+def describe_kernel(kernel, *, primals=()) -> dict:
     """hawk's description of ``kernel`` for the host (``hawk.artifact.describe``): its planes, shapes, dtypes, cells, finish
-    and prior reads, stated before any build."""
+    and prior reads, stated before any build. A derivative is described beside ``primals``, the chain of kernels it is
+    derived from, because hawk describes a derivative only together with its primal, as it builds one."""
     from hawk.artifact import describe
 
-    return describe([kernel], targets=("host",))[kernel.name]
+    return describe([*primals, kernel], targets=("host",))[kernel.name]
 
 
 def slot_types(description: dict) -> dict:
@@ -212,12 +213,13 @@ def slot_types(description: dict) -> dict:
             for name, shape in description["slot_shapes"].items()}
 
 
-def _prior_reads(kernel):
+def _prior_reads(kernel, *, primals=()):
     """The ``Mutable`` names ``kernel`` reads before writing them, per step (an
-    automatic kernel's fused loop carries its outputs; its single step does not)."""
+    automatic kernel's fused loop carries its outputs; its single step does not).
+    A derivative is described beside ``primals``, as in :func:`describe_kernel`."""
     from hawk.trace.steps import default_step
 
-    return prior_reads(describe_kernel(default_step(kernel)))
+    return prior_reads(describe_kernel(default_step(kernel), primals=primals))
 
 
 class ModeError(TypeError, ValueError):
