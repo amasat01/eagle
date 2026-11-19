@@ -284,10 +284,14 @@ def test_the_subject_is_the_published_hawk_unit_named_by_its_digest(vec3_unit):
     )
     # The two files every device row actually loads, named explicitly. The
     # device file's extension follows driver vs toolkit (``.ptx`` or
-    # ``.cubin``), so it is resolved rather than hard-coded.
-    assert device_artifact(vec3_unit.directory, "e4_vec3_scale").name in published, (
-        sorted(published)
-    )
+    # ``.cubin``), so it is resolved rather than hard-coded; a machine with no
+    # CUDA toolchain builds the host entry alone (``_bundle``), so no device file.
+    from hawk.targets import buildable
+
+    if buildable("cuda"):
+        assert device_artifact(vec3_unit.directory, "e4_vec3_scale").name in published, (
+            sorted(published)
+        )
     assert "e4_vec3_scale.json" in published, sorted(published)
 
 
