@@ -760,8 +760,6 @@ def _recipe_fields(level, artifact, mode, device=False):
     sample = next((i for i, n in enumerate(ops) if sig.role[n] in SAMPLE_ROLES), None)
     if sample is None:
         sample = len(ops) + next(i for i, r in enumerate(rets) if r != FINISHED_PLANE)
-    from hawk import _core as hawk_core
-
     return {"nargs": len(ops), "nrets": len(rets), "dtype": dtype, "zero": zero,
             "slot_kind": slot_kind, "slot_buffer": slot_buffer, "slot_cell": slot_cell,
             "sample_buffer": sample,
@@ -772,7 +770,7 @@ def _recipe_fields(level, artifact, mode, device=False):
                       for r, c, o, op in conv["cells"]],
             "work": [len(ops) + w for w in conv["work"]],
             "aliases": sorted(conv["aliases"].items()),
-            "index_bytes": int(hawk_core.build_info()["index_type_bytes"])}
+            "index_bytes": int(artifact.sidecar["index_bytes"])}
 
 
 def _install(digest, fields, *, platform, entry, ordinal=0, block=256, function=0,

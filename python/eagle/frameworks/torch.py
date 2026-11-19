@@ -69,7 +69,7 @@ _WHO = "eagle.frameworks.torch"
 _INPUT_ROLES = INPUT_ROLES | {"uniform"}
 #: A Param, read by value (``uniform``) or from a one-cell device plane (``lookup``).
 _PARAM_ROLES = frozenset({"uniform", "lookup"})
-#: the per-sample plane naming each sample's parameter cell (``hawk.diff.params.CELL_PLANE``)
+#: the per-sample plane naming each sample's parameter cell (``hawk.diff.CELL_PLANE``)
 _CELL_PLANE = CELL_PLANE
 
 #: torch floating dtype of each hawk build mode.

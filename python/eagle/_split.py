@@ -619,7 +619,7 @@ class SplitBound:
             self._event.synchronize()                       # that stream only
         _PENDING.discard(self)
         for kernel, team, plane, cells in self._status:
-            from hawk._lane_bind import check_scatter_status      # the plugin is hawk's: so is its check
+            from hawk.runtime import check_scatter_status      # the plugin is hawk's: so is its check
 
             check_scatter_status(kernel, team, plane.get().tolist(), cells)
 

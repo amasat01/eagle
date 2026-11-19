@@ -106,7 +106,7 @@ class Signature:
         #: ``<cell>_comp`` companion) that the bridge finishes into the cell
         self.cells = _cell_rows.described_cells(description)
         self.rows = _cell_rows.row_names(self.cells)
-        from hawk.diff.params import CELL_PLANE
+        from hawk.diff import CELL_PLANE
 
         #: a kernel whose ``Param`` planes hold one value per cell, each sample reading its
         #: own (``hawk.diff.param_planes(per_cell=True)`` and its derivatives): its lookups
