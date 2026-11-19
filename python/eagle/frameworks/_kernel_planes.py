@@ -206,12 +206,19 @@ def describe_kernel(kernel, *, primals=()) -> dict:
 
 def slot_types(description: dict) -> dict:
     """``{slot name: (shape, dtype name)}`` of every slot of a described kernel: the shape from ``slot_shapes``, the dtype from
-    ``arg_dtypes`` (which states every slot)."""
+    ``arg_dtypes`` (which states every slot). A kernel that runs in stages writes planes its first stage does not hold, so the
+    slots are the union over its record and the documents of its later stages (``stages[i]["sidecar"]``); a slot two of them
+    state with different types is refused by name."""
     from types import SimpleNamespace
 
-    dtypes = description["arg_dtypes"]
-    return {name: SimpleNamespace(shape=tuple(shape), dtype=dtypes[name])
-            for name, shape in description["slot_shapes"].items()}
+    found: dict = {}
+    for doc in (description, *(s["sidecar"] for s in description.get("stages") or () if "sidecar" in s)):
+        for name, shape in doc["slot_shapes"].items():
+            slot = SimpleNamespace(shape=tuple(shape), dtype=doc["arg_dtypes"][name])
+            if found.setdefault(name, slot) != slot:
+                raise ValueError(f"kernel {description['kernel']!r}: its stages state slot {name!r} as {found[name]} and "
+                                 f"{slot}; one plane has one type")
+    return found
 
 
 def _prior_reads(kernel, *, primals=()):
