@@ -354,7 +354,7 @@ def auto(plugin, *, targets=None, cache_dir=None, scalar_type=None, contraction=
             raise ValueError(
                 f"eagle.plan.auto: {key}= builds a hawk kernel, but this plugin "
                 "is already built: pass the kernel, or drop the keyword")
-    return AutoPlan(plugin, plan_kw)
+    return AutoPlan(_split.linked(plugin, "eagle.plan.auto"), plan_kw)
 
 
 def _deploy_hawk(kernels, targets, cache_dir, scalar_type, contraction=None) -> list:
@@ -482,7 +482,10 @@ def _build_by_name(kernels, targets, cache_dir, scalar_type=None) -> tuple:
     with _BUNDLE_LOCKS.setdefault(str(where.resolve()), threading.Lock()):
         bundle = build_bundle(kernels, where, targets=targets, cache_dir=cache_dir,
                               settings=build_settings(fast_entries=True) if fast else None, mode=mode)
-    return plugins(bundle, device_loader=load_manifest), bundle
+    by_name = plugins(bundle, device_loader=load_manifest)
+    for plugin in by_name.values():     # a kernel hawk builds in stages runs only with them attached
+        _split.linked(plugin, "eagle.plan.auto")
+    return by_name, bundle
 
 
 def _hawk_plugins(kernels, targets, cache_dir, scalar_type=None, contraction=None) -> tuple:
