@@ -25,7 +25,6 @@ What is pinned (the ruling's rows, host side):
 
 from __future__ import annotations
 
-import ctypes
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -33,17 +32,14 @@ import numpy as np
 import pytest
 
 
-def _load_host(so, entry_name, view, name):
+def _load_host(so, view, name):
     from hawk.runtime import load
 
     import eagle.exec as eexec
     from eagle import plan as eplan
 
     lib = load(Path(so).parent, name)      # hawk's load self-checks the library
-    cdll = ctypes.CDLL(str(so))
-    plugin = SimpleNamespace(
-        host_entry=ctypes.cast(getattr(cdll, entry_name), ctypes.c_void_p).value,
-        name=name, _keepalive=(lib, cdll), **view)
+    plugin = SimpleNamespace(host_entry=lib.entry.address, name=name, _keepalive=(lib,), **view)
     return eplan.plan(plugin, structure=eexec.HostTeam)
 
 
@@ -56,10 +52,10 @@ def host_plan(kern, work, *, kind=None):
     bundle = build_bundle([kern], work, targets=("host",), **kw)
     art = next(a for a in bundle.artifacts if a.name == kern.name)
     view = plan_view(art.sidecar)
-    entry = view.pop("host_entry")
+    view.pop("host_entry")
     if "finish" in art.sidecar:
         view["sidecar"] = art.sidecar
-    return _load_host(Path(art.directory) / f"{kern.name}.so", entry, view, kern.name)
+    return _load_host(Path(art.directory) / f"{kern.name}.so", view, kern.name)
 
 
 # --------------------------------------------------------------------------- #

@@ -247,7 +247,6 @@ def _oscillator(kind):
 def plans(tmp_path_factory):
     """(map-free, map) x (device, host) plans of the same oscillator step."""
     pytest.importorskip("hawk")
-    import ctypes
     from types import SimpleNamespace
 
     from hawk.artifact import build_bundle, plan_view
@@ -268,13 +267,9 @@ def plans(tmp_path_factory):
         bundle = build_bundle([kern], work, targets=targets)
         sidecar = next(a.sidecar for a in bundle.artifacts if a.name == kern.name)
         view = plan_view(sidecar)
-        host_entry = view.pop("host_entry")
-        so = work / f"{kern.name}.so"
+        view.pop("host_entry")
         lib = load(work, kern.name)      # hawk's load self-checks the library
-        cdll = ctypes.CDLL(str(so))
-        host = SimpleNamespace(
-            host_entry=ctypes.cast(getattr(cdll, host_entry), ctypes.c_void_p).value,
-            _keepalive=(lib, cdll), **view)
+        host = SimpleNamespace(host_entry=lib.entry.address, _keepalive=(lib,), **view)
         out[(label, "host")] = eplan.plan(host, structure=eexec.HostTeam)
         if gpu:
             registry = load_manifest(work / "manifest.json")

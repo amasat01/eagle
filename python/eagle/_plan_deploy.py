@@ -100,17 +100,16 @@ class AutoPlan:
     def _routed(self, args, kw):
         """``(plan, args, kw)`` for a call: a per-lane input of a ``Grid`` kernel given
         broadcast runs the kernel's variant of that pattern (hawk's rule,
-        :mod:`hawk._broadcast`: built once per pattern, with this plan's build
+        ``Kernel.broadcast_call``: built once per pattern, with this plan's build
         options), the caller's buffer bound compact. Anything else, and a plan of a
         prebuilt plugin or of a variant, is returned as it came."""
         kernel = self.kernel
         if kernel is None or getattr(kernel, "broadcast", None) or not hasattr(kernel, "lane_space"):
             return self, args, kw      # no kernel, a variant, or a stand-in that declares no lanes
-        from hawk import _broadcast
         from hawk.errors import HawkError
 
         try:
-            run, args, kw = _broadcast.route(kernel, args, kw)
+            run, args, kw = kernel.broadcast_call(args, kw)
         except HawkError as exc:     # eagle's own doors refuse with ValueError
             raise ValueError(str(exc)) from None
         if run is kernel:

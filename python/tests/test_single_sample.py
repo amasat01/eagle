@@ -28,7 +28,6 @@ head shape. What each group of rows proves:
 
 from __future__ import annotations
 
-import ctypes
 from types import SimpleNamespace
 
 import numpy as np
@@ -88,12 +87,10 @@ def _plugins(kernels, work):
     out = {}
     for art in bundle.artifacts:
         view = plan_view(art.sidecar)
-        host_entry = view.pop("host_entry")
-        so = work / f"{art.name}.so"
-        lib, cdll = load(work, art.name), ctypes.CDLL(str(so))   # hawk's load self-checks the library
-        extra = {"host_entry": ctypes.cast(getattr(cdll, host_entry),
-                                           ctypes.c_void_p).value}
-        keep = [lib, cdll]
+        view.pop("host_entry")
+        lib = load(work, art.name)      # hawk's load self-checks the library
+        extra = {"host_entry": lib.entry.address}
+        keep = [lib]
         if registry is not None:
             loaded = registry[art.name]
             extra["device_function"] = loaded.fn.kernel.ptr

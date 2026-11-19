@@ -32,7 +32,6 @@ What each group of rows proves:
 
 from __future__ import annotations
 
-import ctypes
 import json
 import os
 import subprocess
@@ -97,11 +96,10 @@ def _hand_plugins(kernels, work, targets=("host",)):
     out = {}
     for art in bundle.artifacts:
         view = plan_view(art.sidecar)
-        so = work / f"{art.name}.so"
-        lib, cdll = load(work, art.name), ctypes.CDLL(str(so))   # hawk's load self-checks the library
-        extra = {"host_entry": ctypes.cast(getattr(cdll, view.pop("host_entry")),
-                                           ctypes.c_void_p).value}
-        keep = [lib, cdll]
+        lib = load(work, art.name)      # hawk's load self-checks the library
+        view.pop("host_entry")
+        extra = {"host_entry": lib.entry.address}
+        keep = [lib]
         if registry is not None:
             loaded = registry[art.name]
             extra["device_function"] = loaded.fn.kernel.ptr
