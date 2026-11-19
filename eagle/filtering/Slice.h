@@ -124,7 +124,7 @@ public:
     void hostUpdate()
     {
         ensureExtractedRefs_();
-        scanner_.hostRun();
+        scanHost_();
         util::slice::OMPscatter<ParentT, ScannerT>(ref_, scannerRef_);
     }
 
@@ -254,6 +254,21 @@ protected:
         return std::vector<idx_t>(kernelCount, cuda::kFixedSize);
     }
 #endif
+
+    /** @brief Run the host scan exactly once.
+     *
+     *  Called by every thread of a caller's parallel region, the scan (which prefixes its block sums in place, so a
+     *  second run over the same buffers corrupts them) runs on one thread inside an ``omp single`` block; the block's
+     *  barrier publishes its results to the scatter that follows. */
+    void scanHost_()
+    {
+        if (omp_in_parallel()) {
+#pragma omp single
+            scanner_.hostRun();
+        } else {
+            scanner_.hostRun();
+        }
+    }
 
     /** @brief Ensure that the references are extracted.
      *
