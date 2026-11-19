@@ -104,8 +104,13 @@ class Signature:
         self._ir = slot_types(description)
         #: reductions over samples ``{cell: op}``: the kernel writes rows (and a
         #: ``<cell>_comp`` companion) that the bridge finishes into the cell
-        self.cells = _cell_rows.described_cells(description)
-        self.rows = _cell_rows.row_names(self.cells)
+        every = _cell_rows.described_cells(description)
+        #: a cell only a later stage reads is the kernel's scratch, not its own: eagle's plan makes it; a stage bound as a
+        #: unit has it as its own rows
+        scratch = _cell_rows.described_cells(
+            {nm: spec for nm, spec in (description.get("cells") or {}).items() if spec.get("internal")})
+        self.cells = every if unit else {nm: op for nm, op in every.items() if nm not in scratch}
+        self.rows = _cell_rows.row_names(every)
         from hawk.diff import CELL_PLANE
 
         #: a kernel whose ``Param`` planes hold one value per cell, each sample reading its
