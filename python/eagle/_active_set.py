@@ -983,8 +983,7 @@ def check_group(plugin, count_plane) -> None:
         raise ValueError(
             f"eagle.plan.bind: kernel {name!r} computes T={box['T']} lanes per thread "
             f"(a box of {span} lanes), but the ActiveSet compacts at group {group}, which "
-            f"splits a box; build it with ActiveSet(mask, group={span}) (or a multiple), "
-            "or build the kernel with HAWK_BOX=0")
+            f"splits a box; build it with ActiveSet(mask, group={span}) (or a multiple)")
     if group % required:
         raise ValueError(
             f"eagle.plan.bind: kernel {name!r} needs compaction groups of a multiple of "

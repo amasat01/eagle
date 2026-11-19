@@ -78,11 +78,8 @@ def staged(tmp_path_factory):
         j, s = m.split_index(ROW)
         y = x.at(s) * m.real(j + 1)
 
-    mp = pytest.MonkeyPatch()
-    mp.setenv("HAWK_BOX", "0")
     bundle = build_bundle([rows_sum], tmp_path_factory.mktemp("declared"), targets=("cuda",),
                           host_profile="native")
-    mp.undo()
     free = plugins(bundle, device_loader=load_manifest)["rows_sum"]
     for art in bundle.artifacts:
         if art.name == "rows_sum":

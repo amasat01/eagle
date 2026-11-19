@@ -335,8 +335,7 @@ def plan(
         if getattr(plugin, "box", None):
             raise ValueError(
                 "eagle.plan: this kernel computes several lanes per thread (a thread "
-                "box), so its partitions count threads, not lanes; use npartitions=, "
-                "or build the kernel with HAWK_BOX=0")
+                "box), so its partitions count threads, not lanes; use npartitions=")
         resolved, resolved_n = _resolve_explicit_partitions(partitions)
         if n_samples is not None and resolved_n is not None and n_samples != resolved_n:
             raise ValueError(

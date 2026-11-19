@@ -56,7 +56,7 @@ def test_partitions_split_the_threads():
 
 
 def test_explicit_lane_partitions_are_refused():
-    with pytest.raises(ValueError, match="count threads, not lanes.*HAWK_BOX=0"):
+    with pytest.raises(ValueError, match="count threads, not lanes; use npartitions="):
         eplan.plan(_plugin(box=BOX), structure=eexec.HostTeam,
                    partitions=[(0, 64, 128), (64, 64, 128)])
 
@@ -166,7 +166,7 @@ def _boxed(group):
 def test_an_active_set_of_lanes_is_refused_naming_T_the_group_and_the_fix():
     lanes = ActiveSet(np.zeros(SPAN * 4, dtype=bool))
     with pytest.raises(ValueError, match=r"T=4 lanes per thread \(a box of 32 lanes\).*"
-                                         r"group 1.*ActiveSet\(mask, group=32\).*HAWK_BOX=0"):
+                                         r"group 1.*ActiveSet\(mask, group=32\) \(or a multiple\)"):
         _active_set.check_group(_boxed(1), lanes.count)
 
 
