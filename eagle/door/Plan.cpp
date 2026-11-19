@@ -179,6 +179,8 @@ void check_plane(const eg_plan_s& plan, int slot, const eg_plane_s& plane) {
             refuse(EG_BAD_REQUEST, what + ": the index map is one dimension");
         if (slot == plan.unit->index_count_slot && (t.ndim != 1 || t.shape[0] != 1))
             refuse(EG_BAD_REQUEST, what + ": the index count is one cell, shape (1,)");
+        if (slot == plan.unit->finish.steps_slot && (t.ndim != 1 || t.shape[0] != 1))
+            refuse(EG_BAD_REQUEST, what + ": the steps word is one cell, shape (1,)");
     } else if (s.role == EG_ROLE_ACCUM_OUT) {   // a cell: the finished (1,); else the caller's length, as (*payload, *named axes) the meta states
         if (s.cell) {
             if (t.ndim != 1 || t.shape[0] != 1) refuse(EG_BAD_REQUEST, what + ": a cell is one element, shape (1,)");
@@ -196,7 +198,7 @@ void check_plane(const eg_plan_s& plan, int slot, const eg_plane_s& plane) {
     }
     if (!compact(t)) refuse(EG_BAD_REQUEST, what + ": the plane is not contiguous");
     const bool written = s.role == EG_ROLE_MUTABLE || s.role == EG_ROLE_OUT || s.role == EG_ROLE_WIDE_OUT || s.role == EG_ROLE_ACCUM_OUT ||
-                         slot == plan.unit->finish.mask_slot;
+                         slot == plan.unit->finish.mask_slot || slot == plan.unit->finish.steps_slot;
     if (written && (plane.tensor->flags & DLPACK_FLAG_BITMASK_READ_ONLY))
         refuse(EG_BAD_REQUEST, what + ": a read-only plane in a written slot");
 }
@@ -292,9 +294,6 @@ void check_bind(const eg_ctx& ctx, const eg_plan_s& plan, const eg_bind_desc& d)
         if (s.role == EG_ROLE_NSAMPLES)
             refuse(EG_BAD_REQUEST, "slot " + std::to_string(slot) + " ('" + s.name +
                    "') is the sample count: eagle passes it, do not bind it");
-        if (slot == plan.unit->finish.steps_slot)
-            refuse(EG_BAD_REQUEST, "slot " + std::to_string(slot) + " ('" + s.name +
-                   "') is the steps word: eagle makes it, do not pass it");
         if (slot == plan.unit->active_map_slot || slot == plan.unit->active_count_slot)
             refuse(EG_BAD_REQUEST, "slot " + std::to_string(slot) + " ('" + s.name +
                    "') is part of the active set: the runner makes it, do not pass it");
@@ -501,9 +500,7 @@ void plan_new(eg_ctx& ctx, const eg_plan_desc* desc, eg_plan** out) {
                 plan->params[i] = b.value;
             }
         if (d.unit->finish.present && d.unit->finish.steps_slot >= 0)    // the steps word of an AUTO unit
-            bind_handle(*plan, d.unit->finish.steps_slot,
-                        d.structure == EG_STRUCTURE_DEVICE ? reinterpret_cast<void*>(plan->device_steps)
-                                                           : static_cast<void*>(&plan->steps_word), 1);
+            bind_handle(*plan, d.unit->finish.steps_slot, steps_cell(*plan), 1);
         if (!d.unit->cells.empty()) {    // the rows of every cell component, zeroed
             const DLDataType real = real_dtype(d.unit->scalar_type);
             const std::int64_t rows = std::max<std::int64_t>(1, (d.n_samples + d.unit->cell_row - 1) / d.unit->cell_row);
@@ -800,6 +797,58 @@ void plan_entry_figures(eg_ctx& ctx, const eg_plan_s* plan, eg_entry_figures* ou
         f.const_bytes = u.const_bytes;
     }
     write_output(out, f, "eg_entry_figures");
+}
+
+/** @brief The cell of the steps word @p plan's kernel reads: the caller's plane when bound, else eagle's own (a host
+ *  address, or for a DEVICE plan a device address). */
+void* steps_cell(const eg_plan_s& plan) {
+    const eg_plane_s* bound = plan.bindings[static_cast<std::size_t>(plan.unit->finish.steps_slot)].plane;
+    if (bound != nullptr) return static_cast<char*>(bound->tensor->dl_tensor.data) + bound->tensor->dl_tensor.byte_offset;
+    return plan.structure == EG_STRUCTURE_DEVICE ? reinterpret_cast<void*>(plan.device_steps) : static_cast<void*>(const_cast<std::int64_t*>(&plan.steps_word));
+}
+
+namespace {
+/** @brief Read @p bytes at @p at into @p out: device memory (ordered after the context's queued work) for a DEVICE plan, else host memory. */
+void read_cell(const eg_plan_s& plan, const void* at, void* out, std::size_t bytes) {
+    if (plan.structure == EG_STRUCTURE_DEVICE) device_read(*plan.ctx, at, out, bytes);
+    else std::memcpy(out, at, bytes);
+}
+}  // namespace
+
+/** @brief eg_plan_counters: the finished counter, the steps word and every AUTO group's mix counters, read now. */
+void plan_counters(eg_ctx& ctx, const eg_plan_s* plan, struct eg_plan_counters* out, std::uint32_t* mix, std::int32_t mix_cap, std::int32_t* n_mix) {
+    check_handle(ctx.plans, plan, "plan");
+    if (n_mix == nullptr) refuse(EG_BAD_REQUEST, "eg_plan_counters: n_mix is NULL");
+    const eg_unit_s& u = *plan->unit;
+    std::int64_t count = 0;
+    for (const DispatchFacts& f : u.dispatches)
+        if (f.strategy == EG_DISPATCH_AUTO) count += f.k;
+    *n_mix = static_cast<std::int32_t>(count);
+    if (mix_cap > 0 && mix == nullptr) refuse(EG_BAD_REQUEST, "eg_plan_counters: mix is NULL with mix_cap > 0");
+    if (mix_cap < 0 || (mix_cap > 0 && mix_cap < count))
+        refuse(EG_BAD_REQUEST, "eg_plan_counters: mix_cap " + std::to_string(mix_cap) + " is below the " + std::to_string(count) +
+               " mix counters of the unit's AUTO groups");
+    struct eg_plan_counters c{};
+    c.finished = -1;
+    c.steps = -1;
+    if (u.finish.present) {
+        std::uint32_t finished = 0;
+        read_cell(*plan, plan->structure == EG_STRUCTURE_DEVICE ? reinterpret_cast<const void*>(plan->device_counter) : &plan->finished, &finished, sizeof(finished));
+        c.finished = finished;
+        if (u.finish.steps_slot >= 0) read_cell(*plan, steps_cell(*plan), &c.steps, sizeof(c.steps));
+    }
+    if (mix_cap > 0) {
+        std::size_t group = 0;
+        for (const DispatchFacts& f : u.dispatches) {
+            if (f.strategy != EG_DISPATCH_AUTO) continue;
+            const eg_plane_s* bound = plan->bindings[static_cast<std::size_t>(f.mix)].plane;
+            const DLTensor& t = (bound != nullptr ? bound : plan->mix[group])->tensor->dl_tensor;
+            read_cell(*plan, static_cast<const char*>(t.data) + t.byte_offset, mix, static_cast<std::size_t>(f.k) * sizeof(std::uint32_t));
+            mix += f.k;
+            ++group;
+        }
+    }
+    write_output(out, c, "eg_plan_counters");
 }
 
 /** @brief eg_bind: check every entry, then replace the named slots. */

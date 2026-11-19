@@ -39,7 +39,7 @@
  *  - Handles belong to the context that made them; a handle of another
  *    context is refused. Every ``*_free`` is NULL-safe and returns EG_OK.
  *  - Arrays cross by DLPack only (``DLManagedTensorVersioned``, DLPack >= 1.0).
- *  - ``eg_ctx_info`` and ``eg_device_props`` are each both a struct tag and a
+ *  - ``eg_ctx_info``, ``eg_device_props`` and ``eg_plan_counters`` are each both a struct tag and a
  *    function name; C++ callers write ``struct eg_ctx_info`` for the struct.
  *
  * GROUPS. The HOST group is complete. The DEVICE group is declared with one
@@ -431,6 +431,14 @@ struct eg_entry_figures {
     int32_t reserved0;
 };
 
+/** OUTPUT of ``eg_plan_counters``. */
+struct eg_plan_counters {
+    uint32_t struct_size;
+    uint32_t flags;          /**< none defined: 0 */
+    int64_t finished;        /**< the finished counter's value, -1 when the unit has none */
+    int64_t steps;           /**< the steps word's value, -1 when the unit has none */
+};
+
 /** Reduce flags. */
 #define EG_REDUCE_PAIR (1u << 0) /**< write the (sum, compensation) pair */
 
@@ -755,6 +763,19 @@ eg_status eg_launch(eg_ctx* ctx, eg_plan* plan, uint64_t* tiles);
  * handle of another context).
  */
 eg_status eg_plan_entry_figures(eg_ctx* ctx, const eg_plan* plan, struct eg_entry_figures* out);
+
+/**
+ * Read a plan's counters now: the finished counter (``out->finished``, -1 when the unit finishes nothing), the steps
+ * word of a unit with steps AUTO (``out->steps``, -1 when it has none), and the mix counters of every AUTO dispatch
+ * group, concatenated in the unit's dispatch order, k per group, into ``mix``. Two-call protocol as ``eg_error``:
+ * ``*n_mix`` always gets the count; with ``mix_cap`` 0 nothing is written; with ``0 < mix_cap < *n_mix`` the call is
+ * refused. Each value is read from the plane bound at its slot, eagle's or the caller's. On a DEVICE plan the read is
+ * synchronous on the context's stream, after the work queued there. ``struct_size`` as ``eg_plan_entry_figures``.
+ * Status: OK; BAD_REQUEST (``out`` or ``n_mix`` NULL, ``mix`` NULL with ``mix_cap`` > 0, ``mix_cap`` negative or too
+ * small, a handle of another context).
+ */
+eg_status eg_plan_counters(eg_ctx* ctx, const eg_plan* plan, struct eg_plan_counters* out, uint32_t* mix, int32_t mix_cap,
+                           int32_t* n_mix);
 
 /* ---- runs ---------------------------------------------------------------- */
 

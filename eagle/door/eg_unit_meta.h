@@ -375,7 +375,7 @@ struct eg_unit_finish {
     uint32_t flags;           /**< EG_FINISH_* */
     int32_t mask_slot;        /**< the TERMINATED slot it marks (the plan carrying the finish) */
     int32_t counter_slot;     /**< the uint32 LOOKUP cell it counts newly finished samples into (eagle-made) */
-    int32_t steps_slot;       /**< steps AUTO: the LOOKUP word the runner sets per launch (eagle-made), else -1 */
+    int32_t steps_slot;       /**< steps AUTO: the one-cell int64 LOOKUP word the runner sets per launch (eagle makes it unless the caller binds a plane there), else -1 */
     int32_t reserved0;
     int64_t steps;            /**< steps one launch takes, >= 1; EG_STEPS_AUTO; 0 (absent) is refused, EG_BAD_REQUEST */
     int64_t steps_max;        /**< AUTO: the most steps one launch takes, >= 1; else 0 */

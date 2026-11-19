@@ -1504,8 +1504,8 @@ static void check_auto(eg_ctx* ctx) {
     bd.n_planes = 1;
     bd.plane_slots = &steps_slot;
     bd.planes = &pl;
-    check(eg_bind(ctx, pa, &bd) == EG_BAD_REQUEST && reason_has(ctx, "steps word"),
-          "binding the steps word refused BAD_REQUEST");
+    check(eg_bind(ctx, pa, &bd) == EG_BAD_REQUEST && reason_has(ctx, "'steps'"),
+          "binding a float64 plane of RN cells to the steps word refused BAD_REQUEST, naming the slot");
     ok = eg_plan_free(ctx, pa) == EG_OK && eg_plan_free(ctx, pb) == EG_OK && eg_plan_free(ctx, pc2) == EG_OK && eg_plane_free(ctx, pl) == EG_OK &&
          eg_unit_free(ctx, ua) == EG_OK && eg_unit_free(ctx, uaa) == EG_OK;
     check(ok, "AUTO plans, plane and units freed");
@@ -3526,6 +3526,216 @@ static void check_queued_calls(eg_ctx* ctx, eg_ctx* other) {
     eg_unit_free(other, tick_other);
 }
 
+/* ---- a plan's counters, and a steps word the caller binds ---------------- */
+
+static eg_status counters_of(eg_ctx* ctx, eg_plan* p, struct eg_plan_counters* c, uint32_t* mix, int32_t cap, int32_t* n_mix) {
+    memset(c, 0, sizeof(*c));
+    c->struct_size = sizeof(*c);
+    return eg_plan_counters(ctx, p, c, mix, cap, n_mix);
+}
+
+/* Bind the int64 steps word (slot 4 of countA) to the caller's cell. */
+static eg_status bind_steps(eg_ctx* ctx, eg_plan* p, eg_plane* cell) {
+    const int32_t slot = 4;
+    struct eg_bind_desc d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    d.n_planes = 1;
+    d.plane_slots = &slot;
+    d.planes = &cell;
+    return eg_bind(ctx, p, &d);
+}
+
+static int64_t count_at_most(const double* limit, double bound) {
+    int64_t n = 0;
+    for (int64_t i = 0; i < RN; ++i) n += limit[i] <= bound;
+    return n;
+}
+
+/* The finished counter after launches of count1, and a launch of countA over the caller's steps word. */
+static void check_counters_finished(eg_ctx* ctx) {
+    static double k[RN], limit[RN];
+    static unsigned char mask[RN];
+    eg_unit *c1 = NULL, *ua = NULL, *axpb = NULL;
+    check(load(ctx, "count1", 0xD1, &c1) == EG_OK && load(ctx, "countA", 0xF1, &ua) == EG_OK && load(ctx, "axpb", 0xA1, &axpb) == EG_OK,
+          "eg_unit_load count1, countA and axpb for eg_plan_counters");
+    if (c1 == NULL || ua == NULL || axpb == NULL) return;
+    struct tensor t[3];
+    struct eg_plan_counters c;
+    int32_t n_mix = -1;
+    count_inputs(k, limit, mask);
+    memset(mask, 0, sizeof(mask));
+    eg_plan* p = count_plan(ctx, c1, EG_STRUCTURE_HOST_SERIAL, k, limit, mask, t);
+    int ok = p != NULL;
+    for (int launch = 1; ok && launch <= 3; ++launch) {
+        int64_t masked = 0;
+        ok = eg_launch(ctx, p, NULL) == EG_OK && counters_of(ctx, p, &c, NULL, 0, &n_mix) == EG_OK;
+        for (int64_t i = 0; i < RN; ++i) masked += mask[i] != 0;
+        ok = ok && c.finished == masked && masked == count_at_most(limit, launch) && c.steps == -1 && n_mix == 0 &&
+             c.struct_size == sizeof(c);
+    }
+    check(ok, "eg_plan_counters: after each of 3 launches the finished counter equals the mask count (limit <= launch), no steps word, no mix");
+    eg_plan_free(ctx, p);
+
+    int64_t word = 2;
+    struct tensor tw;
+    eg_plane* pw = wrap(ctx, &tw, &word, 1, kDLInt, 64);
+    count_inputs(k, limit, mask);
+    memset(mask, 0, sizeof(mask));
+    p = count_plan(ctx, ua, EG_STRUCTURE_HOST_TEAM, k, limit, mask, t);
+    ok = p != NULL && pw != NULL && counters_of(ctx, p, &c, NULL, 0, &n_mix) == EG_OK && c.finished == 0 && c.steps == 0;
+    check(ok, "eg_plan_counters: an unbound steps word of a fresh AUTO plan reads 0");
+    ok = ok && bind_steps(ctx, p, pw) == EG_OK && eg_launch(ctx, p, NULL) == EG_OK && counters_of(ctx, p, &c, NULL, 0, &n_mix) == EG_OK;
+    for (int64_t i = 0; ok && i < RN; ++i) ok = k[i] == (limit[i] < 2.0 ? limit[i] : 2.0);
+    check(ok && c.steps == 2 && c.finished == count_at_most(limit, 2.0),
+          "a bound steps word: a plain launch steps every sample by the caller's 2, and the counters read it back");
+    word = 5;
+    ok = eg_launch(ctx, p, NULL) == EG_OK && counters_of(ctx, p, &c, NULL, 0, &n_mix) == EG_OK && c.steps == 5 &&
+         c.finished == count_at_most(limit, 7.0);
+    check(ok, "a bound steps word is read at each launch (5 more steps: finished = limit <= 7)");
+    eg_plan_free(ctx, p);
+    eg_plane_free(ctx, pw);
+
+    int64_t two[2] = { 1, 1 };
+    struct tensor t2;
+    eg_plane* p2 = wrap(ctx, &t2, two, 2, kDLInt, 64);
+    p = count_plan(ctx, ua, EG_STRUCTURE_HOST_SERIAL, k, limit, mask, t);
+    ok = p != NULL && p2 != NULL && bind_steps(ctx, p, p2) == EG_BAD_REQUEST && reason_has(ctx, "one cell");
+    check(ok, "a steps word of two cells refused BAD_REQUEST by name");
+    eg_plane_free(ctx, p2);
+    int64_t ro = 1;
+    struct tensor tr;
+    eg_plane* pr = NULL;
+    tensor_init(&tr, &ro, 1, 64);
+    tensor_as(&tr, kDLInt, 64);
+    tr.managed.flags = DLPACK_FLAG_BITMASK_READ_ONLY;
+    eg_plane_wrap(ctx, &tr.managed, &pr);
+    ok = p != NULL && pr != NULL && bind_steps(ctx, p, pr) == EG_BAD_REQUEST && reason_has(ctx, "read-only");
+    check(ok, "a read-only steps word refused BAD_REQUEST (the runner writes it)");
+    eg_plane_free(ctx, pr);
+    struct tensor tf;
+    eg_plane* pf = wrap(ctx, &tf, k, 1, kDLFloat, 64);
+    ok = p != NULL && pf != NULL && bind_steps(ctx, p, pf) == EG_BAD_REQUEST;
+    check(ok, "a steps word of another element type refused BAD_REQUEST");
+    eg_plane_free(ctx, pf);
+    eg_plan_free(ctx, p);
+
+    p = NULL;
+    double x[4] = { 0 }, y[4] = { 0 };
+    const double a = 1.0, b = 0.0;
+    struct tensor tx, ty;
+    eg_plane *px = wrap(ctx, &tx, x, 4, kDLFloat, 64), *py = wrap(ctx, &ty, y, 4, kDLFloat, 64);
+    ok = px && py && plan(ctx, axpb, EG_STRUCTURE_HOST_SERIAL, 4, 0, NULL, NULL, &p) == EG_OK && bind(ctx, p, py, px, &a, &b) == EG_OK &&
+         counters_of(ctx, p, &c, NULL, 0, &n_mix) == EG_OK && c.finished == -1 && c.steps == -1 && n_mix == 0;
+    check(ok, "eg_plan_counters: a unit with no finish reads -1 and -1, no mix");
+    check(eg_plan_counters(ctx, p, &c, NULL, 0, NULL) == EG_BAD_REQUEST && reason_has(ctx, "n_mix is NULL") &&
+              eg_plan_counters(ctx, p, NULL, NULL, 0, &n_mix) == EG_BAD_REQUEST && eg_plan_counters(ctx, NULL, &c, NULL, 0, &n_mix) == EG_BAD_REQUEST,
+          "eg_plan_counters: n_mix NULL, out NULL and a NULL plan refused BAD_REQUEST");
+    c.struct_size = 2;
+    check(eg_plan_counters(ctx, p, &c, NULL, 0, &n_mix) == EG_BAD_REQUEST && reason_has(ctx, "too small"), "eg_plan_counters: a struct_size below 4 refused BAD_REQUEST");
+    eg_plan_free(ctx, p);
+    eg_plane_free(ctx, px);
+    eg_plane_free(ctx, py);
+    eg_unit_free(ctx, c1);
+    eg_unit_free(ctx, ua);
+    eg_unit_free(ctx, axpb);
+}
+
+/* eg_run over a bound steps word writes its budgets there as into its own: the planes and the counters agree. */
+static void check_counters_run(eg_ctx* ctx) {
+    static double k[RN], limit[RN], k_own[RN];
+    static unsigned char mask[RN];
+    eg_unit* ua = NULL;
+    check(load(ctx, "countA", 0xF1, &ua) == EG_OK, "eg_unit_load countA for a run over a bound steps word");
+    if (ua == NULL) return;
+    int64_t steps_seen[2] = { -1, -1 };
+    int ok = 1;
+    for (int bound = 0; bound < 2; ++bound) {
+        struct tensor t[3], tw;
+        int64_t word = 7;
+        eg_plane* pw = wrap(ctx, &tw, &word, 1, kDLInt, 64);
+        count_inputs(k, limit, mask);
+        memset(mask, 0, sizeof(mask));
+        eg_plan* p = count_plan(ctx, ua, EG_STRUCTURE_HOST_TEAM, k, limit, mask, t);
+        eg_runner* r = NULL;
+        const struct eg_runner_desc d = runner_desc(&p, 1, 1000);
+        struct eg_run_report rep;
+        memset(&rep, 0, sizeof(rep));
+        rep.struct_size = sizeof(rep);
+        struct eg_plan_counters c;
+        ok = ok && p && pw && (!bound || bind_steps(ctx, p, pw) == EG_OK) && eg_runner_new(ctx, &d, &r) == EG_OK && eg_run(ctx, r, &rep) == EG_OK &&
+             counters_of(ctx, p, &c, NULL, 0, &(int32_t){ 0 }) == EG_OK && c.finished == RN && rep.finished == RN && (!bound || word == c.steps);
+        steps_seen[bound] = c.steps;
+        if (!bound) memcpy(k_own, k, sizeof(k));
+        else ok = ok && memcmp(k, k_own, sizeof(k)) == 0;
+        eg_runner_free(ctx, r);
+        eg_plan_free(ctx, p);
+        eg_plane_free(ctx, pw);
+    }
+    check(ok && steps_seen[0] > 0 && steps_seen[0] == steps_seen[1],
+          "eg_run over a caller-bound steps word: the planes, the last budget and the finished count equal the run over eagle's own word");
+    eg_unit_free(ctx, ua);
+}
+
+/* The mix counters of a two-group AUTO unit, eagle's and the caller's. */
+static void check_counters_mix(eg_ctx* ctx) {
+    static double k[RN], limit[RN];
+    static unsigned char mask[RN];
+    eg_unit* um = NULL;
+    check(load(ctx, "mix2", 0xBA, &um) == EG_OK, "eg_unit_load mix2 (two AUTO dispatch groups)");
+    if (um == NULL) return;
+    struct tensor t[3];
+    count_inputs(k, limit, mask);
+    memset(mask, 0, sizeof(mask));
+    uint32_t want[5] = { 0, 0, 0, 0, 0 };    /* group a: limit < 6, >= 6; group b: limit mod 3 */
+    for (int64_t i = 0; i < RN; ++i) {
+        ++want[limit[i] >= 6.0 ? 1 : 0];
+        ++want[2 + (int64_t)limit[i] % 3];
+    }
+    eg_plan* p = count_plan(ctx, um, EG_STRUCTURE_HOST_TEAM, k, limit, mask, t);
+    struct eg_plan_counters c;
+    uint32_t mix[5] = { 9, 9, 9, 9, 9 };
+    int32_t n_mix = -1;
+    int ok = p != NULL && eg_launch(ctx, p, NULL) == EG_OK && counters_of(ctx, p, &c, mix, 0, &n_mix) == EG_OK && n_mix == 5 && mix[0] == 9;
+    check(ok, "eg_plan_counters: mix_cap 0 reports the count (2 + 3) and writes nothing");
+    ok = p != NULL && counters_of(ctx, p, &c, mix, 4, &n_mix) == EG_BAD_REQUEST && n_mix == 5 && reason_has(ctx, "mix_cap 4") && mix[0] == 9;
+    check(ok, "eg_plan_counters: mix_cap below the count refused BAD_REQUEST, the count still reported, nothing written");
+    ok = p != NULL && counters_of(ctx, p, &c, mix, 5, &n_mix) == EG_OK && n_mix == 5 && memcmp(mix, want, sizeof(want)) == 0 &&
+         c.finished == count_at_most(limit, 1.0);
+    check(ok, "eg_plan_counters: the two groups' mix counters, concatenated in group order, equal the counts of the branch choices");
+    ok = p != NULL && counters_of(ctx, p, &c, NULL, 5, &n_mix) == EG_BAD_REQUEST && reason_has(ctx, "mix is NULL");
+    check(ok, "eg_plan_counters: a NULL mix with mix_cap > 0 refused BAD_REQUEST");
+    eg_plan_free(ctx, p);
+
+    /* the second group's counters bound by the caller: read from there, and the launch fills them (eagle zeroes only its own) */
+    uint32_t own_b[3] = { 100, 100, 100 };
+    struct tensor tb;
+    eg_plane* pb = wrap(ctx, &tb, own_b, 3, kDLUInt, 32);
+    count_inputs(k, limit, mask);
+    memset(mask, 0, sizeof(mask));
+    p = count_plan(ctx, um, EG_STRUCTURE_HOST_SERIAL, k, limit, mask, t);
+    const int32_t slot = 5;
+    struct eg_bind_desc d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    d.n_planes = 1;
+    d.plane_slots = &slot;
+    d.planes = &pb;
+    ok = p != NULL && pb != NULL && eg_bind(ctx, p, &d) == EG_OK && eg_launch(ctx, p, NULL) == EG_OK &&
+         counters_of(ctx, p, &c, mix, 5, &n_mix) == EG_OK && mix[0] + mix[1] == (uint32_t)RN && mix[2] == own_b[0] && mix[3] == own_b[1] &&
+         mix[4] == own_b[2] && own_b[0] + own_b[1] + own_b[2] == 300u + RN;
+    check(ok, "eg_plan_counters reads a caller-bound mix counter from the caller's plane");
+    eg_plan_free(ctx, p);
+    eg_plane_free(ctx, pb);
+    eg_unit_free(ctx, um);
+}
+
+static void check_counters(eg_ctx* ctx) {
+    check_counters_finished(ctx);
+    check_counters_run(ctx);
+    check_counters_mix(ctx);
+}
+
 int main(int argc, char** argv) {
     if (argc != 5) {
         fprintf(stderr, "usage: %s <fixture> <wrong size> <no size block> <v1 tag>\n", argv[0]);
@@ -3558,6 +3768,7 @@ int main(int argc, char** argv) {
     check_segmented_runner(ctx);
     check_active_set(ctx);
     check_auto(ctx);
+    check_counters(ctx);
     check_slot_kinds(ctx);
     check_mask_dtypes(ctx);
     check_index_sets(ctx);

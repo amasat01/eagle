@@ -409,9 +409,9 @@ struct eg_plan_s {
     /** @brief DEVICE: the scratch planes of SEGMENTED member @p mi, the unit @p m: the planned unit's are ``team``, another member's ``segteam``. */
     const std::vector<eg_plane_s*>& seg_team(const eg_unit_s& m, std::size_t mi) const { return &m == unit ? team : segteam[mi]; }
     std::uint32_t finished = 0;               ///< the eagle-made finished counter of a finishing unit
-    std::int64_t steps_word = 0;              ///< the eagle-made steps word of an AUTO unit
+    std::int64_t steps_word = 0;              ///< eagle's own steps word of an AUTO unit, read when the caller binds none (`steps_cell`)
     std::uint64_t device_counter = 0;         ///< DEVICE with a finish: the device cell of the finished counter
-    std::uint64_t device_steps = 0;           ///< DEVICE with steps AUTO: the device int64 steps word
+    std::uint64_t device_steps = 0;           ///< DEVICE with steps AUTO: eagle's own device int64 steps word (`steps_cell`)
     eg_runner_s* active_owner = nullptr;      ///< the runner whose active set the plan reads
     int refs = 1;                             ///< the caller's reference plus one per runner
     bool caller_ref = true;
@@ -721,6 +721,9 @@ void plane_dlpack(eg_ctx& ctx, eg_plane_s* plane, DLManagedTensorVersioned** out
 void plan_new(eg_ctx& ctx, const eg_plan_desc* desc, eg_plan** out);
 void plan_free(eg_ctx& ctx, eg_plan_s* plan);
 void plan_release(eg_ctx& ctx, eg_plan_s* plan);
+void plan_counters(eg_ctx& ctx, const eg_plan_s* plan, struct eg_plan_counters* out, std::uint32_t* mix, std::int32_t mix_cap, std::int32_t* n_mix);
+/** @brief The steps word of an AUTO plan (its unit has ``finish.steps_slot``): the caller's bound plane, else eagle's own cell (a DEVICE plan's is a device address). */
+void* steps_cell(const eg_plan_s& plan);
 void check_bound(const eg_plan_s& plan);
 void bind(eg_ctx& ctx, eg_plan_s* plan, const eg_bind_desc* desc);
 void clear(eg_ctx& ctx, eg_plan_s* plan, std::int32_t n_slots, const std::int32_t* slots);
