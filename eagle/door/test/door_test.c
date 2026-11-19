@@ -331,67 +331,6 @@ static void check_foreign_handle(eg_ctx* ctx, eg_unit* unit) {
     check(tx.deleted == 1 && ty.deleted == 1, "eg_ctx_free runs the deleter of a plane still held");
 }
 
-struct busy_run {
-    eg_ctx* ctx;
-    eg_plan* plan;
-    eg_status status;
-};
-
-static void* busy_launch(void* arg) {
-    struct busy_run* r = arg;
-    uint64_t tiles = 0;
-    r->status = eg_launch(r->ctx, r->plan, &tiles);
-    return NULL;
-}
-
-/* A second thread entering a context while a launch runs is refused. */
-static void check_second_thread(eg_ctx* ctx) {
-    eg_unit* wait = NULL;
-    double x[2] = { 0, 0 }, y[2] = { 0, 0 };
-    struct tensor tx, ty;
-    tensor_init(&tx, x, 2, 64);
-    tensor_init(&ty, y, 2, 64);
-    eg_plane *px = NULL, *py = NULL;
-    eg_plan* p = NULL;
-    const double a = 1.0, b = 0.0;
-    int ready = load(ctx, "wait", 0xB2, &wait) == EG_OK && eg_plane_wrap(ctx, &tx.managed, &px) == EG_OK &&
-                eg_plane_wrap(ctx, &ty.managed, &py) == EG_OK &&
-                plan(ctx, wait, EG_STRUCTURE_HOST_SERIAL, 2, 0, NULL, NULL, &p) == EG_OK &&
-                bind(ctx, p, py, px, &a, &b) == EG_OK;
-    check(ready, "busy fixture: wait unit loaded, planned and bound");
-    if (!ready) return;
-    volatile double* flag = y;
-    struct busy_run r = { ctx, p, -1 };
-    pthread_t th;
-    pthread_create(&th, NULL, busy_launch, &r);
-    struct timespec t0, t;
-    clock_gettime(CLOCK_MONOTONIC, &t0);
-    int entered = 0;
-    for (;;) {
-        __atomic_thread_fence(__ATOMIC_SEQ_CST);
-        if (flag[1] != 0.0) { entered = 1; break; }
-        clock_gettime(CLOCK_MONOTONIC, &t);
-        if (t.tv_sec - t0.tv_sec > 10) break;
-    }
-    struct eg_ctx_info info;
-    memset(&info, 0, sizeof(info));
-    info.struct_size = sizeof(info);
-    const eg_status during = eg_ctx_info(ctx, &info);
-    size_t len = 0;
-    const eg_status err_during = eg_error(ctx, NULL, 0, &len);
-    __atomic_thread_fence(__ATOMIC_SEQ_CST);
-    flag[0] = 1.0;
-    __atomic_thread_fence(__ATOMIC_SEQ_CST);
-    pthread_join(th, NULL);
-    check(entered && during == EG_BAD_REQUEST && err_during == EG_BAD_REQUEST,
-          "second thread entering a busy context refused BAD_REQUEST");
-    check(r.status == EG_OK && eg_ctx_info(ctx, &info) == EG_OK, "the first thread's launch finished OK");
-    eg_plan_free(ctx, p);
-    eg_plane_free(ctx, px);
-    eg_plane_free(ctx, py);
-    eg_unit_free(ctx, wait);
-}
-
 /* Load "axpb" from @p path; BAD_REQUEST with a reason holding @p need1 and @p need2. */
 static int refused_with(eg_ctx* ctx, const char* path, const char* need1, const char* need2) {
     const char* saved = library_path;
@@ -1565,8 +1504,8 @@ static void check_auto(eg_ctx* ctx) {
     bd.n_planes = 1;
     bd.plane_slots = &steps_slot;
     bd.planes = &pl;
-    check(eg_bind(ctx, pa, &bd) == EG_BAD_REQUEST && reason_has(ctx, "steps word"),
-          "binding the steps word refused BAD_REQUEST");
+    check(eg_bind(ctx, pa, &bd) == EG_BAD_REQUEST && reason_has(ctx, "'steps'"),
+          "binding a float64 plane of RN cells to the steps word refused BAD_REQUEST, naming the slot");
     ok = eg_plan_free(ctx, pa) == EG_OK && eg_plan_free(ctx, pb) == EG_OK && eg_plan_free(ctx, pc2) == EG_OK && eg_plane_free(ctx, pl) == EG_OK &&
          eg_unit_free(ctx, ua) == EG_OK && eg_unit_free(ctx, uaa) == EG_OK;
     check(ok, "AUTO plans, plane and units freed");
@@ -1818,6 +1757,39 @@ static void check_index_sets(eg_ctx* ctx) {
         }
     check(all, "an index set runs exactly the lanes map[0..count) (count 0, 1, 137, 400; read at each launch) and leaves "
                "every other lane alone, equal to the plain loop on SERIAL and TEAM, 1 and 3 threads");
+    /* one partition is a range of POSITIONS of the set, cut at the live count: it runs map[base .. min(base + count, live)) and equals the whole run restricted to them */
+    {
+        const struct { int64_t base, count; } ranges[4] = { { 0, 60 }, { 50, 150 }, { 137, 50 }, { 300, 100 } };
+        int in_range = 1;
+        for (int si = 0; si < 2; ++si)
+            for (int ci = 0; ci < 2; ++ci) {
+                const int32_t slots[4] = { 0, 1, 2, 3 };
+                eg_plane* planes[4] = { py, px, pm, pc };
+                struct eg_bind_desc bd;
+                memset(&bd, 0, sizeof(bd));
+                bd.struct_size = sizeof(bd);
+                bd.n_planes = 4;
+                bd.plane_slots = slots;
+                bd.planes = planes;
+                count = counts[2 + ci];
+                for (int ri = 0; ri < 4; ++ri) {
+                    eg_plan* p = NULL;
+                    const int64_t pb[1] = { ranges[ri].base }, pc_[1] = { ranges[ri].count };
+                    in_range &= plan(ctx, ul, structures[si], M, 1, pb, pc_, &p) == EG_OK && eg_bind(ctx, p, &bd) == EG_OK;
+                    for (int i = 0; i < M; ++i) y[i] = want[i] = -1.0;
+                    for (int64_t t = ranges[ri].base; t < ranges[ri].base + ranges[ri].count && t < count; ++t)
+                        want[map[t]] = 2.0 * x[map[t]] + 1.0;
+                    in_range &= eg_launch(ctx, p, NULL) == EG_OK && memcmp(y, want, sizeof(y)) == 0;
+                    eg_plan_free(ctx, p);
+                }
+            }
+        check(in_range, "an index set over one partition [base, base + count) runs map[base .. min(base + count, live)) only: "
+                        "ranges (0, 60), (50, 150), (137, 50), (300, 100) at live 137 and 400, SERIAL and TEAM");
+        eg_plan* out = NULL;
+        const int64_t past[1] = { M - 10 }, wide_count[1] = { 11 };
+        check(plan(ctx, ul, EG_STRUCTURE_HOST_TEAM, M, 1, past, wide_count, &out) == EG_BAD_REQUEST && reason_has(ctx, "leaves the range"),
+              "an index set partition leaving [0, n) refused BAD_REQUEST");
+    }
 
     /* a prefix set: lanes [0, count) */
     all = 1;
@@ -1877,9 +1849,9 @@ static void check_index_sets(eg_ctx* ctx) {
     const int64_t part_base[2] = { 0, 500 }, part_count[2] = { 500, 500 };
     eg_plan* pp = NULL;
     all = all && plan(ctx, ul, EG_STRUCTURE_HOST_TEAM, M, 2, part_base, part_count, &pp) == EG_BAD_REQUEST &&
-          reason_has(ctx, "one whole partition");
+          reason_has(ctx, "one partition (positions of the set)");
     check(all, "index set refusals by name: a map of the wrong width, a repeated lane, a lane outside the dense lanes, a "
-               "count above the map (at bind and at launch), a wrong plane in the count slot, a partitioned plan");
+               "count above the map (at bind and at launch), a wrong plane in the count slot, two partitions");
     eg_plan_free(ctx, p);
     ok = eg_plane_free(ctx, py) == EG_OK && eg_plane_free(ctx, px) == EG_OK && eg_plane_free(ctx, pm) == EG_OK &&
          eg_plane_free(ctx, pm64) == EG_OK && eg_plane_free(ctx, pc) == EG_OK && eg_unit_free(ctx, ul) == EG_OK &&
@@ -2041,13 +2013,9 @@ static void check_wide(eg_ctx* ctx) {
     b1.struct_size = sizeof(b1);
     b1.n_planes = 1;
     b1.plane_slots = one;
-    eg_plane* pbad = wrap_nd(ctx, &tb, wi, kDLFloat, 64, 1, M, 0, 0);    /* one dimension: rows are missing */
+    eg_plane* pbad = wrap_nd(ctx, &tb, wi, kDLFloat, 64, 0, 0, 0, 0);    /* no dimension */
     b1.planes = &pbad;
-    all = all && pbad && eg_bind(ctx, p, &b1) == EG_BAD_REQUEST && reason_has(ctx, "(rows, 1000)");
-    eg_plane_free(ctx, pbad);
-    pbad = wrap_nd(ctx, &tb, wi, kDLFloat, 64, 2, 3, M - 1, 0);          /* trailing extent is not n */
-    b1.planes = &pbad;
-    all = all && pbad && eg_bind(ctx, p, &b1) == EG_BAD_REQUEST && reason_has(ctx, "(rows, 1000)");
+    all = all && pbad && eg_bind(ctx, p, &b1) == EG_BAD_REQUEST && reason_has(ctx, "at least one dimension");
     eg_plane_free(ctx, pbad);
     pbad = wrap_nd(ctx, &tb, wo, kDLFloat, 64, 2, 3, M, 0);              /* WIDE_OUT is written */
     tb.managed.flags |= DLPACK_FLAG_BITMASK_READ_ONLY;
@@ -2056,9 +2024,43 @@ static void check_wide(eg_ctx* ctx) {
     b1.planes = &pbad;
     all = all && pbad && eg_bind(ctx, p, &b1) == EG_BAD_REQUEST && reason_has(ctx, "read-only");
     eg_plane_free(ctx, pbad);
-    check(all, "wide refusals: a plane without rows, a trailing extent other than n, a read-only WIDE_OUT, each "
-               "BAD_REQUEST by name");
+    check(all, "wide refusals: a plane without a dimension, a read-only WIDE_OUT, each BAD_REQUEST by name");
     check(eg_plan_free(ctx, p) == EG_OK && eg_unit_free(ctx, unit) == EG_OK, "wide plan and unit freed");
+}
+
+/* A flat wide plane longer than n: every read at e * 3 + c stays inside it (the handle carries the plane's trailing extent, not n). */
+static void check_wide_flat(eg_ctx* ctx) {
+    enum { N = 512, W = 3 };
+    static double theta[N * W], y[N];
+    eg_unit* unit = NULL;
+    check(load(ctx, "widesum", 0xBB, &unit) == EG_OK, "eg_unit_load widesum (a WIDE_IN read at e * 3 + c)");
+    if (unit == NULL) return;
+    for (int i = 0; i < N * W; ++i) theta[i] = 0.5 * i;
+    const eg_structure structures[2] = { EG_STRUCTURE_HOST_SERIAL, EG_STRUCTURE_HOST_TEAM };
+    int all = 1;
+    for (int si = 0; si < 2; ++si) {
+        struct tensor tt, ty;
+        eg_plane *pt = wrap(ctx, &tt, theta, N * W, kDLFloat, 64), *py = wrap(ctx, &ty, y, N, kDLFloat, 64);
+        const int32_t slots[2] = { 0, 1 };
+        eg_plane* planes[2] = { py, pt };
+        struct eg_bind_desc bd;
+        memset(&bd, 0, sizeof(bd));
+        bd.struct_size = sizeof(bd);
+        bd.n_planes = 2;
+        bd.plane_slots = slots;
+        bd.planes = planes;
+        eg_plan* p = NULL;
+        memset(y, 0, sizeof(y));
+        all &= pt && py && plan(ctx, unit, structures[si], N, 0, NULL, NULL, &p) == EG_OK && eg_bind(ctx, p, &bd) == EG_OK &&
+               eg_launch(ctx, p, NULL) == EG_OK;
+        for (int e = 0; e < N; ++e)    /* the closed form, from e = 0 through the e >= 171 where an n-element extent would clamp */
+            all &= y[e] == 0.5 * (3.0 * e) + 10.0 * 0.5 * (3.0 * e + 1.0) + 100.0 * 0.5 * (3.0 * e + 2.0);
+        eg_plan_free(ctx, p);
+        eg_plane_free(ctx, pt);
+        eg_plane_free(ctx, py);
+    }
+    check(all, "wide: a flat (1536,) plane at n = 512, W = 3 reads every member at e * 3 + c, e up to 511 (SERIAL and TEAM)");
+    eg_unit_free(ctx, unit);
 }
 
 /* ---- GATHER and SHARED slots, and a host thread box ---------------------------- */
@@ -2157,6 +2159,146 @@ static void check_shared(eg_ctx* ctx) {
     eg_unit_free(ctx, unit);
 }
 
+/* The box unit over n = 100 lanes (27 threads) under @p desc: y, or NULL when the plan is refused. */
+static eg_status box_run(eg_ctx* ctx, eg_unit* unit, const struct eg_plan_desc* desc, double* x, double* y) {
+    struct tensor ty, tx;
+    eg_plane *py = wrap(ctx, &ty, y, 100, kDLFloat, 64), *px = wrap(ctx, &tx, x, 100, kDLFloat, 64);
+    const int32_t slots[2] = { 0, 1 };
+    eg_plane* planes[2] = { py, px };
+    struct eg_bind_desc bd;
+    memset(&bd, 0, sizeof(bd));
+    bd.struct_size = sizeof(bd);
+    bd.n_planes = 2;
+    bd.plane_slots = slots;
+    bd.planes = planes;
+    struct eg_plan_desc d = *desc;
+    d.unit = unit;
+    eg_plan* p = NULL;
+    eg_status s = py && px ? eg_plan_new(ctx, &d, &p) : EG_FAULT;
+    if (s == EG_OK) s = eg_bind(ctx, p, &bd);
+    if (s == EG_OK) s = eg_launch(ctx, p, NULL);
+    eg_plan_free(ctx, p);
+    eg_plane_free(ctx, py);
+    eg_plane_free(ctx, px);
+    return s;
+}
+
+/* A thread box's partitions count threads: explicit ones and the even split equal the whole-range result bitwise. */
+static void check_box_partitions(eg_ctx* ctx, eg_unit* unit) {
+    static double x[100], y[100], whole[100];
+    for (int i = 0; i < 100; ++i) x[i] = (double)i * 0.25 - 9.0;
+    struct eg_plan_desc d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    d.n_samples = 100;
+    int all = 1;
+    for (int si = 0; si < 2; ++si) {
+        d.structure = si == 0 ? EG_STRUCTURE_HOST_SERIAL : EG_STRUCTURE_HOST_TEAM;
+        for (int i = 0; i < 100; ++i) whole[i] = -5.0;
+        all &= box_run(ctx, unit, &d, x, whole) == EG_OK;
+        const int64_t one_base[1] = { 0 }, one_count[1] = { 27 };
+        const int64_t three_base[3] = { 0, 9, 18 }, three_count[3] = { 9, 9, 9 };
+        const int64_t gap_base[2] = { 3, 20 }, gap_count[2] = { 17, 7 };
+        const struct { int64_t n; const int64_t *base, *count; uint32_t flags; } cases[4] = {
+            { 1, one_base, one_count, 0 }, { 3, three_base, three_count, 0 }, { 3, NULL, NULL, EG_PLAN_SPLIT_EVENLY },
+            { 4, NULL, NULL, EG_PLAN_SPLIT_EVENLY } };
+        for (int c = 0; c < 4; ++c) {
+            d.n_partitions = cases[c].n, d.part_base = cases[c].base, d.part_count = cases[c].count, d.flags = cases[c].flags;
+            for (int i = 0; i < 100; ++i) y[i] = -5.0;
+            all &= box_run(ctx, unit, &d, x, y) == EG_OK && memcmp(y, whole, sizeof(y)) == 0;
+        }
+        d.n_partitions = 2, d.part_base = gap_base, d.part_count = gap_count, d.flags = 0;     /* threads [3, 20) and [20, 27) only */
+        for (int i = 0; i < 100; ++i) y[i] = -5.0;
+        all &= box_run(ctx, unit, &d, x, y) == EG_OK;
+        int served = 0;
+        for (int i = 0; i < 100; ++i) {
+            const int th = (i / 12) * 3 + (i % 12) % 3;       /* the lane's thread */
+            served += th >= 3;
+            all &= y[i] == (th >= 3 ? whole[i] : -5.0);
+        }
+        all &= served > 0 && served < 100;
+        d.flags = 0, d.n_partitions = 0, d.part_base = d.part_count = NULL;
+    }
+    check(all, "box: 1 and 3 explicit thread partitions, and EG_PLAN_SPLIT_EVENLY into 3 and 4, equal the whole-range result bitwise "
+               "(a partial range runs only its threads; SERIAL and TEAM)");
+    eg_plan* p = NULL;
+    d.structure = EG_STRUCTURE_HOST_TEAM, d.unit = unit;
+    const int64_t over_base[1] = { 0 }, over_count[1] = { 28 }, late_base[1] = { 27 }, late_count[1] = { 1 };
+    d.n_partitions = 1, d.part_base = over_base, d.part_count = over_count;
+    check(eg_plan_new(ctx, &d, &p) == EG_BAD_REQUEST && reason_has(ctx, "thread range [0, 27)") && reason_has(ctx, "4 lanes per thread, stride 3"),
+          "box: a thread partition past the thread total refused BAD_REQUEST, naming the unit, t, stride and the total");
+    d.part_base = late_base, d.part_count = late_count;
+    check(eg_plan_new(ctx, &d, &p) == EG_BAD_REQUEST && reason_has(ctx, "thread range [0, 27)"), "box: a thread partition starting at the total refused BAD_REQUEST");
+    const int64_t lap_base[2] = { 0, 4 }, lap_count[2] = { 5, 5 };
+    d.n_partitions = 2, d.part_base = lap_base, d.part_count = lap_count;
+    check(eg_plan_new(ctx, &d, &p) == EG_BAD_REQUEST && reason_has(ctx, "overlap"), "box: overlapping thread partitions refused BAD_REQUEST");
+}
+
+/* EG_PLAN_SPLIT_EVENLY cuts a range as eagle's Python plan does; its refusals by name. */
+static void check_even_split(eg_ctx* ctx) {
+    void* lib = dlopen(library_path, RTLD_LAZY | RTLD_NOLOAD);
+    int64_t* spans = lib ? (int64_t*)dlsym(lib, "fixture_spans") : NULL;
+    int64_t* span_n = lib ? (int64_t*)dlsym(lib, "fixture_span_n") : NULL;
+    eg_unit* unit = NULL;
+    check(spans != NULL && span_n != NULL && load(ctx, "spans", 0xB9, &unit) == EG_OK, "eg_unit_load spans");
+    if (spans == NULL || span_n == NULL || unit == NULL) return;
+    /* the Python plan's (n, parts) splits: ceil(remaining / left) each, the remainder spread early; empty parts launch nothing */
+    static const int64_t want_10_3[] = { 0, 4, 4, 3, 7, 3 };
+    static const int64_t want_7_7[] = { 0, 1, 1, 1, 2, 1, 3, 1, 4, 1, 5, 1, 6, 1 };
+    static const int64_t want_1_4[] = { 0, 1 };
+    const struct { int64_t n, parts, calls; const int64_t* want; } cases[3] = {
+        { 10, 3, 3, want_10_3 }, { 7, 7, 7, want_7_7 }, { 1, 4, 1, want_1_4 } };
+    int all = 1;
+    for (int c = 0; c < 3; ++c) {
+        int64_t cell = 0;
+        struct tensor t;
+        eg_plane* pc = wrap(ctx, &t, &cell, 1, kDLInt, 64);
+        struct eg_plan_desc d;
+        memset(&d, 0, sizeof(d));
+        d.struct_size = sizeof(d);
+        d.unit = unit;
+        d.structure = EG_STRUCTURE_HOST_SERIAL;
+        d.n_samples = cases[c].n;
+        d.n_partitions = cases[c].parts;
+        d.flags = EG_PLAN_SPLIT_EVENLY;
+        eg_plan* p = NULL;
+        const int32_t slot = 0;
+        struct eg_bind_desc bd;
+        memset(&bd, 0, sizeof(bd));
+        bd.struct_size = sizeof(bd);
+        bd.n_planes = 1;
+        bd.plane_slots = &slot;
+        bd.planes = &pc;
+        *span_n = 0;
+        uint64_t tiles = 0;
+        all &= pc && eg_plan_new(ctx, &d, &p) == EG_OK && eg_bind(ctx, p, &bd) == EG_OK && eg_launch(ctx, p, &tiles) == EG_OK &&
+               *span_n == cases[c].calls && tiles == (uint64_t)cases[c].calls &&
+               memcmp(spans, cases[c].want, 2 * sizeof(int64_t) * (size_t)cases[c].calls) == 0;
+        eg_plan_free(ctx, p);
+        eg_plane_free(ctx, pc);
+    }
+    check(all, "EG_PLAN_SPLIT_EVENLY: the bases and counts of the Python plan's even split for (n, parts) = (10, 3), (7, 7), (1, 4)");
+    eg_plan* p = NULL;
+    const int64_t base[1] = { 0 }, count[1] = { 4 };
+    struct eg_plan_desc d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    d.unit = unit;
+    d.structure = EG_STRUCTURE_HOST_SERIAL;
+    d.n_samples = 10;
+    d.flags = EG_PLAN_SPLIT_EVENLY;
+    d.n_partitions = 1, d.part_base = base, d.part_count = count;
+    check(eg_plan_new(ctx, &d, &p) == EG_BAD_REQUEST && reason_has(ctx, "takes no part_base or part_count"),
+          "EG_PLAN_SPLIT_EVENLY with part_base and part_count refused BAD_REQUEST by name");
+    d.part_base = d.part_count = NULL;
+    d.n_partitions = 0;
+    check(eg_plan_new(ctx, &d, &p) == EG_BAD_REQUEST && reason_has(ctx, "needs n_partitions >= 1"),
+          "EG_PLAN_SPLIT_EVENLY with n_partitions 0 refused BAD_REQUEST by name");
+    d.flags = 1u << 1, d.n_partitions = 1;
+    check(eg_plan_new(ctx, &d, &p) == EG_BAD_REQUEST && reason_has(ctx, "unknown bits"), "an unknown plan flag bit refused BAD_REQUEST");
+    eg_unit_free(ctx, unit);
+}
+
 static void check_box(eg_ctx* ctx) {
     void* lib = dlopen(library_path, RTLD_LAZY | RTLD_NOLOAD);
     int64_t* threads_run = lib ? (int64_t*)dlsym(lib, "fixture_box_threads") : NULL;
@@ -2195,19 +2337,7 @@ static void check_box(eg_ctx* ctx) {
         }
     check(all, "box: ceil(n / (T * stride)) * stride threads run, and every lane is served once (y = 2x + 1 for n = 1, 12, 1000, 1001, "
                "SERIAL and TEAM)");
-    eg_plan* p = NULL;
-    const int64_t base[1] = { 0 }, count[1] = { 4 };
-    struct eg_plan_desc d;
-    memset(&d, 0, sizeof(d));
-    d.struct_size = sizeof(d);
-    d.unit = unit;
-    d.structure = EG_STRUCTURE_HOST_TEAM;
-    d.n_samples = 100;
-    d.n_partitions = 1;
-    d.part_base = base;
-    d.part_count = count;
-    check(eg_plan_new(ctx, &d, &p) == EG_BAD_REQUEST && reason_has(ctx, "count threads, not lanes"),
-          "box: explicit partitions refused BAD_REQUEST by name");
+    check_box_partitions(ctx, unit);
     eg_unit* bad = NULL;
     check(load(ctx, "boxbad", 0x65, &bad) == EG_BAD_REQUEST && reason_has(ctx, "host_box needs"),
           "box: a thread box of fewer than 2 lanes refused BAD_REQUEST by name");
@@ -3256,6 +3386,419 @@ static void check_segmented_runner(eg_ctx* ctx) {
     eg_unit_free(ctx, k0), eg_unit_free(ctx, k1), eg_unit_free(ctx, cls), eg_unit_free(ctx, dk0), eg_unit_free(ctx, dk1), eg_unit_free(ctx, dsw), eg_unit_free(ctx, dgf);
 }
 
+/* ---- calls on one context queue; a reason belongs to its thread -------- */
+
+struct queued {
+    eg_ctx* ctx;
+    eg_plan* plan;
+    eg_status status;
+    int done;
+};
+
+static void* queued_launch(void* arg) {
+    struct queued* r = arg;
+    uint64_t tiles = 0;
+    r->status = eg_launch(r->ctx, r->plan, &tiles);
+    return NULL;
+}
+
+static void* queued_info(void* arg) {
+    struct queued* r = arg;
+    struct eg_ctx_info info;
+    memset(&info, 0, sizeof(info));
+    info.struct_size = sizeof(info);
+    r->status = eg_ctx_info(r->ctx, &info);
+    __atomic_store_n(&r->done, 1, __ATOMIC_SEQ_CST);
+    return NULL;
+}
+
+/* A second thread entering a context while a launch runs waits for it, then runs. */
+static void check_second_thread(eg_ctx* ctx) {
+    eg_unit* wait = NULL;
+    double x[2] = { 0, 0 }, y[2] = { 0, 0 };
+    struct tensor tx, ty;
+    tensor_init(&tx, x, 2, 64);
+    tensor_init(&ty, y, 2, 64);
+    eg_plane *px = NULL, *py = NULL;
+    eg_plan* p = NULL;
+    const double a = 1.0, b = 0.0;
+    int ready = load(ctx, "wait", 0xB2, &wait) == EG_OK && eg_plane_wrap(ctx, &tx.managed, &px) == EG_OK &&
+                eg_plane_wrap(ctx, &ty.managed, &py) == EG_OK &&
+                plan(ctx, wait, EG_STRUCTURE_HOST_SERIAL, 2, 0, NULL, NULL, &p) == EG_OK &&
+                bind(ctx, p, py, px, &a, &b) == EG_OK;
+    check(ready, "queue fixture: wait unit loaded, planned and bound");
+    if (!ready) return;
+    volatile double* flag = y;
+    struct queued first = { ctx, p, -1, 0 }, second = { ctx, NULL, -1, 0 };
+    pthread_t th, th2;
+    pthread_create(&th, NULL, queued_launch, &first);
+    struct timespec t0, t;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    int entered = 0;
+    for (;;) {
+        __atomic_thread_fence(__ATOMIC_SEQ_CST);
+        if (flag[1] != 0.0) { entered = 1; break; }
+        clock_gettime(CLOCK_MONOTONIC, &t);
+        if (t.tv_sec - t0.tv_sec > 10) break;
+    }
+    pthread_create(&th2, NULL, queued_info, &second);
+    const struct timespec pause = { 0, 200 * 1000 * 1000 };
+    nanosleep(&pause, NULL);
+    const int waited = __atomic_load_n(&second.done, __ATOMIC_SEQ_CST) == 0;
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    flag[0] = 1.0;
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    pthread_join(th, NULL);
+    pthread_join(th2, NULL);
+    check(entered && waited && second.status == EG_OK, "a second thread waits for the running call, then runs OK");
+    check(first.status == EG_OK, "the first thread's launch finished OK");
+    eg_plan_free(ctx, p);
+    eg_plane_free(ctx, px);
+    eg_plane_free(ctx, py);
+    eg_unit_free(ctx, wait);
+}
+
+enum { TICK_THREADS = 8, TICK_LAUNCHES = 250 };
+
+struct ticking {
+    eg_ctx* ctx;
+    eg_plan* plan;
+    int failed;
+};
+
+static void* tick_launches(void* arg) {
+    struct ticking* r = arg;
+    for (int i = 0; i < TICK_LAUNCHES; ++i) {
+        uint64_t tiles = 0;
+        if (eg_launch(r->ctx, r->plan, &tiles) != EG_OK) ++r->failed;
+    }
+    return NULL;
+}
+
+/* A plan of "tick" on @p ctx over @p cell (one int64 cell); NULL when it cannot be made. */
+static eg_plan* tick_plan(eg_ctx* ctx, eg_unit* tick, struct tensor* t, int64_t* cell) {
+    eg_plane* pc = wrap(ctx, t, cell, 1, kDLInt, 64);
+    eg_plan* p = NULL;
+    const int32_t slot = 0;
+    eg_plane* const planes[1] = { pc };
+    struct eg_bind_desc d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    d.n_planes = 1;
+    d.plane_slots = &slot;
+    d.planes = planes;
+    const int ok = pc != NULL && plan(ctx, tick, EG_STRUCTURE_HOST_SERIAL, 1, 0, NULL, NULL, &p) == EG_OK &&
+                   eg_bind(ctx, p, &d) == EG_OK;
+    eg_plane_free(ctx, pc);
+    if (!ok) {
+        eg_plan_free(ctx, p);
+        return NULL;
+    }
+    return p;
+}
+
+struct reasoner {
+    eg_ctx* ctx;
+    int step;     /* 0 none, 1: A has failed, 2: B has finished, 3: A may read */
+    char text[256];
+};
+
+static void failing_call(eg_ctx* ctx, int variant) {
+    eg_plane* out = NULL;
+    if (variant == 0) eg_plane_wrap(ctx, NULL, &out);
+    else eg_plane_wrap(ctx, NULL, NULL);
+}
+
+static void wait_step(struct reasoner* r, int step) {
+    while (__atomic_load_n(&r->step, __ATOMIC_SEQ_CST) < step) sched_yield();
+}
+
+static void* reason_a(void* arg) {
+    struct reasoner* r = arg;
+    failing_call(r->ctx, 0);
+    __atomic_store_n(&r->step, 1, __ATOMIC_SEQ_CST);
+    wait_step(r, 3);
+    size_t len = 0;
+    r->text[0] = '\0';
+    if (eg_error(r->ctx, r->text, sizeof(r->text), &len) != EG_OK) r->text[0] = '\0';
+    return NULL;
+}
+
+static void* reason_b(void* arg) {
+    struct reasoner* r = arg;
+    wait_step(r, 1);
+    failing_call(r->ctx, 1);
+    __atomic_store_n(&r->step, 2, __ATOMIC_SEQ_CST);
+    return NULL;
+}
+
+/* Planes of a context's own export are refused: their release would wait on the call that holds the context. */
+static void check_own_export(eg_ctx* ctx) {
+    double v[2] = { 0, 0 };
+    struct tensor t;
+    eg_plane* pl = wrap(ctx, &t, v, 2, kDLFloat, 64);
+    struct DLManagedTensorVersioned* exported = NULL;
+    eg_plane* again = NULL;
+    const int made = pl != NULL && eg_plane_dlpack(ctx, pl, &exported) == EG_OK;
+    check(made && eg_plane_wrap(ctx, exported, &again) == EG_BAD_REQUEST && again == NULL &&
+              reason_has(ctx, "an export of this context"),
+          "wrapping a context's own export is refused BAD_REQUEST (its release would wait on itself)");
+    if (made) exported->deleter(exported);
+    eg_plane_free(ctx, pl);
+}
+
+static void check_queued_calls(eg_ctx* ctx, eg_ctx* other) {
+    eg_unit *tick = NULL, *tick_other = NULL;
+    check(load(ctx, "tick", 0xB8, &tick) == EG_OK && load(other, "tick", 0xB8, &tick_other) == EG_OK, "eg_unit_load tick on two contexts");
+    if (tick == NULL || tick_other == NULL) return;
+    int64_t cell = 0, cell_other = 0;
+    struct tensor t, t_other;
+    eg_plan* p = tick_plan(ctx, tick, &t, &cell);
+    eg_plan* p_other = tick_plan(other, tick_other, &t_other, &cell_other);
+    check(p != NULL && p_other != NULL, "tick plans bound on two contexts");
+    if (p == NULL || p_other == NULL) return;
+    struct ticking many[TICK_THREADS], lone[2];
+    pthread_t th[TICK_THREADS], th_lone[2];
+    for (int i = 0; i < TICK_THREADS; ++i) many[i] = (struct ticking){ ctx, p, 0 };
+    for (int i = 0; i < TICK_THREADS; ++i) pthread_create(&th[i], NULL, tick_launches, &many[i]);
+    for (int i = 0; i < TICK_THREADS; ++i) pthread_join(th[i], NULL);
+    int failed = 0;
+    for (int i = 0; i < TICK_THREADS; ++i) failed += many[i].failed;
+    check(failed == 0 && cell == (int64_t)TICK_THREADS * TICK_LAUNCHES,
+          "8 threads x 250 launches on one context: every launch ran alone, the cell holds exactly 2000");
+    cell = 0;
+    lone[0] = (struct ticking){ ctx, p, 0 };
+    lone[1] = (struct ticking){ other, p_other, 0 };
+    for (int i = 0; i < 2; ++i) pthread_create(&th_lone[i], NULL, tick_launches, &lone[i]);
+    for (int i = 0; i < 2; ++i) pthread_join(th_lone[i], NULL);
+    check(lone[0].failed == 0 && lone[1].failed == 0 && cell == TICK_LAUNCHES && cell_other == TICK_LAUNCHES,
+          "two contexts launched at once from two threads both count exactly");
+    struct reasoner r = { ctx, 0, "" };
+    pthread_t ta, tb;
+    pthread_create(&ta, NULL, reason_a, &r);
+    pthread_create(&tb, NULL, reason_b, &r);
+    wait_step(&r, 2);
+    __atomic_store_n(&r.step, 3, __ATOMIC_SEQ_CST);
+    pthread_join(ta, NULL);
+    pthread_join(tb, NULL);
+    check(strstr(r.text, "tensor is NULL") != NULL, "a thread's reason survives another thread's failing call with another reason");
+    check_own_export(ctx);
+    eg_plan_free(ctx, p);
+    eg_plan_free(other, p_other);
+    eg_unit_free(ctx, tick);
+    eg_unit_free(other, tick_other);
+}
+
+/* ---- a plan's counters, and a steps word the caller binds ---------------- */
+
+static eg_status counters_of(eg_ctx* ctx, eg_plan* p, struct eg_plan_counters* c, uint32_t* mix, int32_t cap, int32_t* n_mix) {
+    memset(c, 0, sizeof(*c));
+    c->struct_size = sizeof(*c);
+    return eg_plan_counters(ctx, p, c, mix, cap, n_mix);
+}
+
+/* Bind the int64 steps word (slot 4 of countA) to the caller's cell. */
+static eg_status bind_steps(eg_ctx* ctx, eg_plan* p, eg_plane* cell) {
+    const int32_t slot = 4;
+    struct eg_bind_desc d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    d.n_planes = 1;
+    d.plane_slots = &slot;
+    d.planes = &cell;
+    return eg_bind(ctx, p, &d);
+}
+
+static int64_t count_at_most(const double* limit, double bound) {
+    int64_t n = 0;
+    for (int64_t i = 0; i < RN; ++i) n += limit[i] <= bound;
+    return n;
+}
+
+/* The finished counter after launches of count1, and a launch of countA over the caller's steps word. */
+static void check_counters_finished(eg_ctx* ctx) {
+    static double k[RN], limit[RN];
+    static unsigned char mask[RN];
+    eg_unit *c1 = NULL, *ua = NULL, *axpb = NULL;
+    check(load(ctx, "count1", 0xD1, &c1) == EG_OK && load(ctx, "countA", 0xF1, &ua) == EG_OK && load(ctx, "axpb", 0xA1, &axpb) == EG_OK,
+          "eg_unit_load count1, countA and axpb for eg_plan_counters");
+    if (c1 == NULL || ua == NULL || axpb == NULL) return;
+    struct tensor t[3];
+    struct eg_plan_counters c;
+    int32_t n_mix = -1;
+    count_inputs(k, limit, mask);
+    memset(mask, 0, sizeof(mask));
+    eg_plan* p = count_plan(ctx, c1, EG_STRUCTURE_HOST_SERIAL, k, limit, mask, t);
+    int ok = p != NULL;
+    for (int launch = 1; ok && launch <= 3; ++launch) {
+        int64_t masked = 0;
+        ok = eg_launch(ctx, p, NULL) == EG_OK && counters_of(ctx, p, &c, NULL, 0, &n_mix) == EG_OK;
+        for (int64_t i = 0; i < RN; ++i) masked += mask[i] != 0;
+        ok = ok && c.finished == masked && masked == count_at_most(limit, launch) && c.steps == -1 && n_mix == 0 &&
+             c.struct_size == sizeof(c);
+    }
+    check(ok, "eg_plan_counters: after each of 3 launches the finished counter equals the mask count (limit <= launch), no steps word, no mix");
+    eg_plan_free(ctx, p);
+
+    int64_t word = 2;
+    struct tensor tw;
+    eg_plane* pw = wrap(ctx, &tw, &word, 1, kDLInt, 64);
+    count_inputs(k, limit, mask);
+    memset(mask, 0, sizeof(mask));
+    p = count_plan(ctx, ua, EG_STRUCTURE_HOST_TEAM, k, limit, mask, t);
+    ok = p != NULL && pw != NULL && counters_of(ctx, p, &c, NULL, 0, &n_mix) == EG_OK && c.finished == 0 && c.steps == 0;
+    check(ok, "eg_plan_counters: an unbound steps word of a fresh AUTO plan reads 0");
+    ok = ok && bind_steps(ctx, p, pw) == EG_OK && eg_launch(ctx, p, NULL) == EG_OK && counters_of(ctx, p, &c, NULL, 0, &n_mix) == EG_OK;
+    for (int64_t i = 0; ok && i < RN; ++i) ok = k[i] == (limit[i] < 2.0 ? limit[i] : 2.0);
+    check(ok && c.steps == 2 && c.finished == count_at_most(limit, 2.0),
+          "a bound steps word: a plain launch steps every sample by the caller's 2, and the counters read it back");
+    word = 5;
+    ok = eg_launch(ctx, p, NULL) == EG_OK && counters_of(ctx, p, &c, NULL, 0, &n_mix) == EG_OK && c.steps == 5 &&
+         c.finished == count_at_most(limit, 7.0);
+    check(ok, "a bound steps word is read at each launch (5 more steps: finished = limit <= 7)");
+    eg_plan_free(ctx, p);
+    eg_plane_free(ctx, pw);
+
+    int64_t two[2] = { 1, 1 };
+    struct tensor t2;
+    eg_plane* p2 = wrap(ctx, &t2, two, 2, kDLInt, 64);
+    p = count_plan(ctx, ua, EG_STRUCTURE_HOST_SERIAL, k, limit, mask, t);
+    ok = p != NULL && p2 != NULL && bind_steps(ctx, p, p2) == EG_BAD_REQUEST && reason_has(ctx, "one cell");
+    check(ok, "a steps word of two cells refused BAD_REQUEST by name");
+    eg_plane_free(ctx, p2);
+    int64_t ro = 1;
+    struct tensor tr;
+    eg_plane* pr = NULL;
+    tensor_init(&tr, &ro, 1, 64);
+    tensor_as(&tr, kDLInt, 64);
+    tr.managed.flags = DLPACK_FLAG_BITMASK_READ_ONLY;
+    eg_plane_wrap(ctx, &tr.managed, &pr);
+    ok = p != NULL && pr != NULL && bind_steps(ctx, p, pr) == EG_BAD_REQUEST && reason_has(ctx, "read-only");
+    check(ok, "a read-only steps word refused BAD_REQUEST (the runner writes it)");
+    eg_plane_free(ctx, pr);
+    struct tensor tf;
+    eg_plane* pf = wrap(ctx, &tf, k, 1, kDLFloat, 64);
+    ok = p != NULL && pf != NULL && bind_steps(ctx, p, pf) == EG_BAD_REQUEST;
+    check(ok, "a steps word of another element type refused BAD_REQUEST");
+    eg_plane_free(ctx, pf);
+    eg_plan_free(ctx, p);
+
+    p = NULL;
+    double x[4] = { 0 }, y[4] = { 0 };
+    const double a = 1.0, b = 0.0;
+    struct tensor tx, ty;
+    eg_plane *px = wrap(ctx, &tx, x, 4, kDLFloat, 64), *py = wrap(ctx, &ty, y, 4, kDLFloat, 64);
+    ok = px && py && plan(ctx, axpb, EG_STRUCTURE_HOST_SERIAL, 4, 0, NULL, NULL, &p) == EG_OK && bind(ctx, p, py, px, &a, &b) == EG_OK &&
+         counters_of(ctx, p, &c, NULL, 0, &n_mix) == EG_OK && c.finished == -1 && c.steps == -1 && n_mix == 0;
+    check(ok, "eg_plan_counters: a unit with no finish reads -1 and -1, no mix");
+    check(eg_plan_counters(ctx, p, &c, NULL, 0, NULL) == EG_BAD_REQUEST && reason_has(ctx, "n_mix is NULL") &&
+              eg_plan_counters(ctx, p, NULL, NULL, 0, &n_mix) == EG_BAD_REQUEST && eg_plan_counters(ctx, NULL, &c, NULL, 0, &n_mix) == EG_BAD_REQUEST,
+          "eg_plan_counters: n_mix NULL, out NULL and a NULL plan refused BAD_REQUEST");
+    c.struct_size = 2;
+    check(eg_plan_counters(ctx, p, &c, NULL, 0, &n_mix) == EG_BAD_REQUEST && reason_has(ctx, "too small"), "eg_plan_counters: a struct_size below 4 refused BAD_REQUEST");
+    eg_plan_free(ctx, p);
+    eg_plane_free(ctx, px);
+    eg_plane_free(ctx, py);
+    eg_unit_free(ctx, c1);
+    eg_unit_free(ctx, ua);
+    eg_unit_free(ctx, axpb);
+}
+
+/* eg_run over a bound steps word writes its budgets there as into its own: the planes and the counters agree. */
+static void check_counters_run(eg_ctx* ctx) {
+    static double k[RN], limit[RN], k_own[RN];
+    static unsigned char mask[RN];
+    eg_unit* ua = NULL;
+    check(load(ctx, "countA", 0xF1, &ua) == EG_OK, "eg_unit_load countA for a run over a bound steps word");
+    if (ua == NULL) return;
+    int64_t steps_seen[2] = { -1, -1 };
+    int ok = 1;
+    for (int bound = 0; bound < 2; ++bound) {
+        struct tensor t[3], tw;
+        int64_t word = 7;
+        eg_plane* pw = wrap(ctx, &tw, &word, 1, kDLInt, 64);
+        count_inputs(k, limit, mask);
+        memset(mask, 0, sizeof(mask));
+        eg_plan* p = count_plan(ctx, ua, EG_STRUCTURE_HOST_TEAM, k, limit, mask, t);
+        eg_runner* r = NULL;
+        const struct eg_runner_desc d = runner_desc(&p, 1, 1000);
+        struct eg_run_report rep;
+        memset(&rep, 0, sizeof(rep));
+        rep.struct_size = sizeof(rep);
+        struct eg_plan_counters c;
+        ok = ok && p && pw && (!bound || bind_steps(ctx, p, pw) == EG_OK) && eg_runner_new(ctx, &d, &r) == EG_OK && eg_run(ctx, r, &rep) == EG_OK &&
+             counters_of(ctx, p, &c, NULL, 0, &(int32_t){ 0 }) == EG_OK && c.finished == RN && rep.finished == RN && (!bound || word == c.steps);
+        steps_seen[bound] = c.steps;
+        if (!bound) memcpy(k_own, k, sizeof(k));
+        else ok = ok && memcmp(k, k_own, sizeof(k)) == 0;
+        eg_runner_free(ctx, r);
+        eg_plan_free(ctx, p);
+        eg_plane_free(ctx, pw);
+    }
+    check(ok && steps_seen[0] > 0 && steps_seen[0] == steps_seen[1],
+          "eg_run over a caller-bound steps word: the planes, the last budget and the finished count equal the run over eagle's own word");
+    eg_unit_free(ctx, ua);
+}
+
+/* The mix counters of a two-group AUTO unit, eagle's and the caller's. */
+static void check_counters_mix(eg_ctx* ctx) {
+    static double k[RN], limit[RN];
+    static unsigned char mask[RN];
+    eg_unit* um = NULL;
+    check(load(ctx, "mix2", 0xBA, &um) == EG_OK, "eg_unit_load mix2 (two AUTO dispatch groups)");
+    if (um == NULL) return;
+    struct tensor t[3];
+    count_inputs(k, limit, mask);
+    memset(mask, 0, sizeof(mask));
+    uint32_t want[5] = { 0, 0, 0, 0, 0 };    /* group a: limit < 6, >= 6; group b: limit mod 3 */
+    for (int64_t i = 0; i < RN; ++i) {
+        ++want[limit[i] >= 6.0 ? 1 : 0];
+        ++want[2 + (int64_t)limit[i] % 3];
+    }
+    eg_plan* p = count_plan(ctx, um, EG_STRUCTURE_HOST_TEAM, k, limit, mask, t);
+    struct eg_plan_counters c;
+    uint32_t mix[5] = { 9, 9, 9, 9, 9 };
+    int32_t n_mix = -1;
+    int ok = p != NULL && eg_launch(ctx, p, NULL) == EG_OK && counters_of(ctx, p, &c, mix, 0, &n_mix) == EG_OK && n_mix == 5 && mix[0] == 9;
+    check(ok, "eg_plan_counters: mix_cap 0 reports the count (2 + 3) and writes nothing");
+    ok = p != NULL && counters_of(ctx, p, &c, mix, 4, &n_mix) == EG_BAD_REQUEST && n_mix == 5 && reason_has(ctx, "mix_cap 4") && mix[0] == 9;
+    check(ok, "eg_plan_counters: mix_cap below the count refused BAD_REQUEST, the count still reported, nothing written");
+    ok = p != NULL && counters_of(ctx, p, &c, mix, 5, &n_mix) == EG_OK && n_mix == 5 && memcmp(mix, want, sizeof(want)) == 0 &&
+         c.finished == count_at_most(limit, 1.0);
+    check(ok, "eg_plan_counters: the two groups' mix counters, concatenated in group order, equal the counts of the branch choices");
+    ok = p != NULL && counters_of(ctx, p, &c, NULL, 5, &n_mix) == EG_BAD_REQUEST && reason_has(ctx, "mix is NULL");
+    check(ok, "eg_plan_counters: a NULL mix with mix_cap > 0 refused BAD_REQUEST");
+    eg_plan_free(ctx, p);
+
+    /* the second group's counters bound by the caller: read from there, and the launch fills them (eagle zeroes only its own) */
+    uint32_t own_b[3] = { 100, 100, 100 };
+    struct tensor tb;
+    eg_plane* pb = wrap(ctx, &tb, own_b, 3, kDLUInt, 32);
+    count_inputs(k, limit, mask);
+    memset(mask, 0, sizeof(mask));
+    p = count_plan(ctx, um, EG_STRUCTURE_HOST_SERIAL, k, limit, mask, t);
+    const int32_t slot = 5;
+    struct eg_bind_desc d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    d.n_planes = 1;
+    d.plane_slots = &slot;
+    d.planes = &pb;
+    ok = p != NULL && pb != NULL && eg_bind(ctx, p, &d) == EG_OK && eg_launch(ctx, p, NULL) == EG_OK &&
+         counters_of(ctx, p, &c, mix, 5, &n_mix) == EG_OK && mix[0] + mix[1] == (uint32_t)RN && mix[2] == own_b[0] && mix[3] == own_b[1] &&
+         mix[4] == own_b[2] && own_b[0] + own_b[1] + own_b[2] == 300u + RN;
+    check(ok, "eg_plan_counters reads a caller-bound mix counter from the caller's plane");
+    eg_plan_free(ctx, p);
+    eg_plane_free(ctx, pb);
+    eg_unit_free(ctx, um);
+}
+
+static void check_counters(eg_ctx* ctx) {
+    check_counters_finished(ctx);
+    check_counters_run(ctx);
+    check_counters_mix(ctx);
+}
+
 int main(int argc, char** argv) {
     if (argc != 5) {
         fprintf(stderr, "usage: %s <fixture> <wrong size> <no size block> <v1 tag>\n", argv[0]);
@@ -3288,14 +3831,17 @@ int main(int argc, char** argv) {
     check_segmented_runner(ctx);
     check_active_set(ctx);
     check_auto(ctx);
+    check_counters(ctx);
     check_slot_kinds(ctx);
     check_mask_dtypes(ctx);
     check_index_sets(ctx);
     check_groups(ctx);
     check_wide(ctx);
+    check_wide_flat(ctx);
     check_gather(ctx);
     check_shared(ctx);
     check_box(ctx);
+    check_even_split(ctx);
     check_made(ctx);
     check_alloc(ctx, unit);
     check_clear(ctx, unit);
@@ -3332,6 +3878,12 @@ int main(int argc, char** argv) {
     check_bad_input(ctx, unit);
     check_foreign_handle(ctx, unit);
     check_second_thread(ctx);
+    {
+        eg_ctx* other = make_ctx();
+        check(other != NULL, "eg_ctx_new second host context");
+        if (other != NULL) check_queued_calls(ctx, other);
+        eg_ctx_free(other);
+    }
     check_size_block(ctx, argv + 2);
     check_fork(ctx);
 

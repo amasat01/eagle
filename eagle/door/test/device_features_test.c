@@ -142,6 +142,28 @@ static void index_set(eg_ctx* ctx, const char* lib, const char* hex, const char*
         }
         snprintf(what, sizeof(what), "index set (%d live lanes): closed form, listed lanes x*x+1, the rest untouched", live);
         check(closed, what);
+        if (c == 0) {    /* positions [1, 3) of the set: map[1] and map[2] equal the whole run, every other lane is as it was */
+            const int64_t base = 1, count_pos = 2;
+            struct eg_plan_desc pd;
+            memset(&pd, 0, sizeof(pd));
+            pd.struct_size = sizeof(pd);
+            pd.unit = unit;
+            pd.structure = EG_STRUCTURE_DEVICE;
+            pd.n_samples = LANES;
+            pd.n_partitions = 1;
+            pd.part_base = &base;
+            pd.part_count = &count_pos;
+            double ranged_y[LANES];
+            eg_plan* part = NULL;
+            int ranged = ok && eg_plan_new(ctx, &pd, &part) == EG_OK && bind(ctx, part, 4, slots, planes) == EG_OK &&
+                         cudaMemcpy(y.d, seven, sizeof(seven), cudaMemcpyHostToDevice) == cudaSuccess && launch_read(ctx, part, &y, ranged_y, sizeof(ranged_y));
+            for (int i = 0; ranged && i < LANES; ++i) {
+                const int listed = i == map[1] || i == map[2];
+                ranged = listed ? ranged_y[i] == got[i] : ranged_y[i] == -7.0;
+            }
+            check(ranged, "index set: one partition of positions [1, 3) runs map[1] and map[2] as the whole run does and leaves every other lane alone");
+            eg_plan_free(ctx, part);
+        }
         if (c == 0) {    /* a live count above the map's entries */
             const uint32_t six = 6;
             check(cudaMemcpy(pc.d, &six, sizeof(six), cudaMemcpyHostToDevice) == cudaSuccess && eg_launch(ctx, plan, NULL) == EG_BAD_REQUEST &&
@@ -171,6 +193,7 @@ static void thread_box(eg_ctx* ctx, const char* lib, const char* hex, const char
         snprintf(file, sizeof(file), "box_y_%d.f64", rows);
         double* want = read_all(dir, file, n * sizeof(double));
         double* got = malloc(n * sizeof(double));
+        double* got_part = malloc(n * sizeof(double));
         int32_t* lane = malloc(n * sizeof(int32_t));
         double* nans = malloc(n * sizeof(double));
         int ok = feat_r && th && want && got && lane && nans;
@@ -189,7 +212,7 @@ static void thread_box(eg_ctx* ctx, const char* lib, const char* hex, const char
         check(ok && memcmp(got, want, n * sizeof(double)) == 0, what);
         if (rows == 1) {
             struct eg_plan_desc pd;
-            const int64_t base = 0, count = 64;
+            const int64_t base = 64, count = 128, past = INT64_C(1) << 40;
             memset(&pd, 0, sizeof(pd));
             pd.struct_size = sizeof(pd);
             pd.unit = unit;
@@ -198,14 +221,25 @@ static void thread_box(eg_ctx* ctx, const char* lib, const char* hex, const char
             pd.n_partitions = 1;
             pd.part_base = &base;
             pd.part_count = &count;
+            eg_plan* part = NULL;
+            /* threads [64, 192) of the 256 serve the lanes th + 256 j, here the lanes [64, 192) of the 256: they equal the whole run, the others stay as they were */
+            int ranged = ok && eg_plan_new(ctx, &pd, &part) == EG_OK && bind(ctx, part, 4, slots, planes) == EG_OK &&
+                         cudaMemcpy(y.d, nans, n * sizeof(double), cudaMemcpyHostToDevice) == cudaSuccess && launch_read(ctx, part, &y, got_part, n * sizeof(double));
+            for (int64_t i = 0; ranged && i < n; ++i) {
+                const double expect_part = i >= base && i < base + count ? got[i] : nans[i];
+                ranged = memcmp(&got_part[i], &expect_part, sizeof(double)) == 0;
+            }
+            check(ranged, "thread box: one explicit partition of threads [64, 192) launches, y equals the whole run on those threads' lanes and the others are untouched");
+            eg_plan_free(ctx, part);
+            pd.part_base = &past;
             eg_plan* none = NULL;
-            check(eg_plan_new(ctx, &pd, &none) == EG_BAD_REQUEST && reason_has(ctx, "thread box"),
-                  "thread box: explicit partitions refused BAD_REQUEST (they count threads, not lanes)");
+            check(eg_plan_new(ctx, &pd, &none) == EG_BAD_REQUEST && reason_has(ctx, "thread range"),
+                  "thread box: a partition past the thread total refused BAD_REQUEST, naming the thread range");
             if (plan) runner_refused(ctx, plan, "a device thread box", "thread box: a runner over it refused NOT_WRITTEN by name");
         }
         if (plan) eg_plan_free(ctx, plan);
         if (ok) for (int i = 0; i < 4; ++i) dplane_free(ctx, planes[i]);
-        free(feat_r); free(th); free(want); free(got); free(lane); free(nans);
+        free(feat_r); free(th); free(want); free(got); free(got_part); free(lane); free(nans);
     }
     free(feat);
     eg_unit_free(ctx, unit);

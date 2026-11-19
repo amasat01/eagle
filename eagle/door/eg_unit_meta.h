@@ -85,12 +85,12 @@ typedef int32_t eg_slot_role;
 #define EG_ROLE_PER_SAMPLE 1  /**< one value per sample */
 #define EG_ROLE_VEC_IN 2      /**< a vector read in one piece */
 #define EG_ROLE_LOOKUP 3      /**< a table indexed at run time; its length is the caller's */
-#define EG_ROLE_WIDE_OUT 4    /**< several values per sample out; runtime length */
+#define EG_ROLE_WIDE_OUT 4    /**< several values per sample out; runtime length: the caller's plane is any compact plane of one dimension or more, and its handle carries the trailing extent */
 #define EG_ROLE_UNIFORM 5     /**< one value for all samples, by value */
 #define EG_ROLE_MAT_IN 6      /**< a matrix read in one piece */
 #define EG_ROLE_ACCUM_OUT 7   /**< accumulated over samples; runtime length */
 #define EG_ROLE_TERMINATED 8  /**< the mask that marks a sample finished */
-#define EG_ROLE_WIDE_IN 9     /**< several values per sample in; runtime length */
+#define EG_ROLE_WIDE_IN 9     /**< several values per sample in; runtime length: as EG_ROLE_WIDE_OUT, a read clamps to the trailing extent */
 #define EG_ROLE_NSAMPLES 10   /**< the sample count, by value; eagle passes it */
 #define EG_ROLE_OUT 11        /**< a plain output plane */
 
@@ -375,7 +375,7 @@ struct eg_unit_finish {
     uint32_t flags;           /**< EG_FINISH_* */
     int32_t mask_slot;        /**< the TERMINATED slot it marks (the plan carrying the finish) */
     int32_t counter_slot;     /**< the uint32 LOOKUP cell it counts newly finished samples into (eagle-made) */
-    int32_t steps_slot;       /**< steps AUTO: the LOOKUP word the runner sets per launch (eagle-made), else -1 */
+    int32_t steps_slot;       /**< steps AUTO: the one-cell int64 LOOKUP word the runner sets per launch (eagle makes it unless the caller binds a plane there), else -1 */
     int32_t reserved0;
     int64_t steps;            /**< steps one launch takes, >= 1; EG_STEPS_AUTO; 0 (absent) is refused, EG_BAD_REQUEST */
     int64_t steps_max;        /**< AUTO: the most steps one launch takes, >= 1; else 0 */

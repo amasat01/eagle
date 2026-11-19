@@ -138,6 +138,11 @@ EG_EXPORT eg_status eg_plan_entry_figures(eg_ctx* ctx, const eg_plan* plan, stru
     return door::call(ctx, [&](eg_ctx& c) { door::plan_entry_figures(c, plan, out); });
 }
 
+EG_EXPORT eg_status eg_plan_counters(eg_ctx* ctx, const eg_plan* plan, struct eg_plan_counters* out, uint32_t* mix, int32_t mix_cap,
+                                     int32_t* n_mix) {
+    return door::call(ctx, [&](eg_ctx& c) { door::plan_counters(c, plan, out, mix, mix_cap, n_mix); });
+}
+
 EG_EXPORT eg_status eg_launch(eg_ctx* ctx, eg_plan* plan, uint64_t* tiles) {
     return door::call(ctx, [&](eg_ctx& c) { door::launch(c, plan, tiles); });
 }

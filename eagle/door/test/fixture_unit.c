@@ -9,7 +9,12 @@
  *    HostTeam drives (params: y and x as 32-byte scalar handles, a and b by
  *    address).
  *  - "wait": the same slots; its entry marks y[1] = 1 on entry and returns
- *    once the test sets y[0] (or after a few seconds): it holds a context busy.
+ *    once the test sets y[0] (or after a few seconds): it holds a context for a call to queue behind.
+ *  - "tick": adds 1 to its one LOOKUP cell (a plain, non-atomic increment): exact only when launches never overlap.
+ *  - "spans": logs the (base, count) of each non-empty serial call into fixture_spans, counted by fixture_span_n.
+ *  - "mix2": count1 over two AUTO dispatch groups (k 2 and 3) whose mix counters the entry fills: group a counts the live samples
+ *    with limit >= 6 (cell 1) or below (cell 0), group b the live samples by limit mod 3.
+ *  - "widesum": y[e] = theta[3e] + 10 theta[3e + 1] + 100 theta[3e + 2], each read clamped to the WIDE_IN handle's extent.
  *  - "axpb_split": the "axpb" body named as a one-stage split unit.
  *  - "count1a", "count3a": the same finishing units reading an active set: the
  *    two LOOKUP slots after the counter hold the live sample slots (int32)
@@ -69,6 +74,10 @@ struct fixture_mirror {
 
 EG_FIXTURE_EXPORT void axpb_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void wait_host(void* const* params, int64_t base, int64_t count, int64_t n);
+EG_FIXTURE_EXPORT void tick_host(void* const* params, int64_t base, int64_t count, int64_t n);
+EG_FIXTURE_EXPORT void spans_host(void* const* params, int64_t base, int64_t count, int64_t n);
+EG_FIXTURE_EXPORT void mix2_host(void* const* params, int64_t base, int64_t count, int64_t n);
+EG_FIXTURE_EXPORT void widesum_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void count1_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void count3_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void count1a_host(void* const* params, int64_t base, int64_t count, int64_t n);
@@ -134,6 +143,26 @@ void wait_host(void* const* params, int64_t base, int64_t count, int64_t n) {
     }
 }
 
+void tick_host(void* const* params, int64_t base, int64_t count, int64_t n) {
+    (void)base;
+    (void)count;
+    (void)n;
+    ++*(int64_t*)((const struct fixture_handle*)params[0])->data;
+}
+
+EG_FIXTURE_EXPORT int64_t fixture_spans[64];
+EG_FIXTURE_EXPORT int64_t fixture_span_n;
+int64_t fixture_spans[64];
+int64_t fixture_span_n;
+
+void spans_host(void* const* params, int64_t base, int64_t count, int64_t n) {
+    (void)params;
+    (void)n;
+    fixture_spans[2 * fixture_span_n] = base;
+    fixture_spans[2 * fixture_span_n + 1] = count;
+    ++fixture_span_n;
+}
+
 /* Up to `steps` steps of every live sample served by threads [base, base + count); `map` is the
  * sample of each thread, or NULL: thread t serves sample t. */
 static void count_steps_w(void* const* params, int64_t base, int64_t count, int steps, const int32_t* map, int mask_bytes) {
@@ -159,6 +188,20 @@ static void count_steps(void* const* params, int64_t base, int64_t count, int st
 
 void count1_host(void* const* params, int64_t base, int64_t count, int64_t n) {
     (void)n;
+    count_steps(params, base, count, 1, NULL);
+}
+
+void mix2_host(void* const* params, int64_t base, int64_t count, int64_t n) {
+    const double* limit = (const double*)((const struct fixture_handle*)params[1])->data;
+    const char* mask = (const char*)((const struct fixture_handle*)params[2])->data;
+    uint32_t* mix_a = (uint32_t*)((const struct fixture_handle*)params[4])->data;
+    uint32_t* mix_b = (uint32_t*)((const struct fixture_handle*)params[5])->data;
+    (void)n;
+    for (int64_t i = base; i < base + count; ++i) {
+        if (mask[i] != 0) continue;
+        __atomic_fetch_add(&mix_a[limit[i] >= 6.0 ? 1 : 0], 1u, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&mix_b[(int64_t)limit[i] % 3], 1u, __ATOMIC_RELAXED);
+    }
     count_steps(params, base, count, 1, NULL);
 }
 
@@ -219,6 +262,20 @@ void count1g_host(void* const* params, int64_t base, int64_t count, int64_t n) {
             mask[i] = 1;
             __atomic_fetch_add(finished, 1u, __ATOMIC_RELAXED);
         }
+    }
+}
+
+void widesum_host(void* const* params, int64_t base, int64_t count, int64_t n) {
+    double* y = (double*)((const struct fixture_handle*)params[0])->data;
+    const struct fixture_handle* theta = (const struct fixture_handle*)params[1];
+    (void)n;
+    for (int64_t e = base; e < base + count; ++e) {
+        double v = 0.0, w = 1.0;
+        for (int64_t c = 0; c < 3; ++c, w *= 10.0) {
+            const int64_t at = 3 * e + c;
+            v += w * ((const double*)theta->data)[at < (int64_t)theta->samples ? at : (int64_t)theta->samples - 1];
+        }
+        y[e] = v;
     }
 }
 
@@ -568,6 +625,20 @@ static const struct eg_unit_meta unit_wait = {
     .launch = &launch,
 };
 
+SLOT_OF(slot_cell, EG_ROLE_LOOKUP, EG_DTYPE_INT64, "cell");
+static const struct eg_unit_slot* const tick_slots[] = { &slot_cell };
+static const struct eg_unit_body tick_body = {
+    .struct_size = sizeof(struct eg_unit_body), .access = EG_ACCESS_SAMPLE_LOCAL, .n_slots = 1, .slots = tick_slots };
+static const struct eg_unit_meta unit_tick = {
+    .struct_size = sizeof(struct eg_unit_meta), .name = "tick", .digest = DIGEST(0xB8), .pattern = EG_PATTERN_PURE,
+    .scalar_type = EG_SCALAR_FLOAT64, .host_entry = "tick_host", .device_image_format = EG_IMAGE_NONE,
+    .body = &tick_body, .launch = &launch };
+
+static const struct eg_unit_meta unit_spans = {
+    .struct_size = sizeof(struct eg_unit_meta), .name = "spans", .digest = DIGEST(0xB9), .pattern = EG_PATTERN_PURE,
+    .scalar_type = EG_SCALAR_FLOAT64, .host_entry = "spans_host", .device_image_format = EG_IMAGE_NONE,
+    .body = &tick_body, .launch = &launch };
+
 static const struct eg_unit_ref stage_ref = {
     .struct_size = sizeof(struct eg_unit_ref), .name = "axpb", .digest = DIGEST(0xA1) };
 static const struct eg_unit_stage stage0 = {
@@ -770,6 +841,14 @@ static const struct eg_unit_meta unit_widemul = {
     .struct_size = sizeof(struct eg_unit_meta), .name = "widemul", .digest = DIGEST(0x72), .pattern = EG_PATTERN_PURE,
     .scalar_type = EG_SCALAR_FLOAT64, .host_entry = "widemul_host", .device_image_format = EG_IMAGE_NONE,
     .body = &wide_body, .launch = &launch };
+
+static const struct eg_unit_slot* const widesum_slots[] = { &slot_y, &slot_wi };
+static const struct eg_unit_body widesum_body = {
+    .struct_size = sizeof(struct eg_unit_body), .access = EG_ACCESS_SAMPLE_LOCAL, .n_slots = 2, .slots = widesum_slots };
+static const struct eg_unit_meta unit_widesum = {
+    .struct_size = sizeof(struct eg_unit_meta), .name = "widesum", .digest = DIGEST(0xBB), .pattern = EG_PATTERN_PURE,
+    .scalar_type = EG_SCALAR_FLOAT64, .host_entry = "widesum_host", .device_image_format = EG_IMAGE_NONE,
+    .body = &widesum_body, .launch = &launch };
 
 /* gather: y (MUTABLE) and a GATHER 2x2 MAT_IN over a two-axis launch (runtime a, static b = 4) */
 static const uint8_t keep_b[2] = { 0, 1 }, keep_a[2] = { 1, 0 };
@@ -1023,7 +1102,20 @@ static const struct eg_unit_launch launch_auto_active_none = { .struct_size = si
 OTHER_AUTO(auto_steps, "auto_steps", 0xB6, sga_steps_slots, 7, 5, finish_auto);
 OTHER_AUTO(auto_k3, "auto_k3", 0xB7, sga_auto_slots, 6, 4, finish3);
 
-static const struct eg_unit_meta* const units[] = { &unit_axpb, &unit_wait, &unit_split, &unit_count1,
+/* "mix2": two AUTO groups of no segmented set; their mix slots are 4 and 5 */
+SLOT_OF(slot_mix_b, EG_ROLE_LOOKUP, EG_DTYPE_UINT32, "mix_b");
+static const struct eg_unit_slot* const mix2_slots[] = { &slot_k, &slot_limit, &slot_mask, &slot_finished, &slot_sga_mix, &slot_mix_b };
+#define MIX_GROUP(var, name_, mix_, k_)                                                                                  \
+    static const struct eg_unit_dispatch var = { .struct_size = sizeof(struct eg_unit_dispatch), .strategy = EG_DISPATCH_AUTO, \
+        .mix_slot = mix_, .class_slot = -1, .stale_slot = -1, .offsets_slot = -1, .name = name_, .k = k_ }
+MIX_GROUP(disp_mix_a, "a", 4, 2);
+MIX_GROUP(disp_mix_b, "b", 5, 3);
+static const struct eg_unit_dispatch* const mix2_list[] = { &disp_mix_a, &disp_mix_b };
+static const struct eg_unit_body mix2_body = { .struct_size = sizeof(struct eg_unit_body), .access = EG_ACCESS_SAMPLE_LOCAL, .n_slots = 6,
+    .slots = mix2_slots, .n_dispatches = 2, .dispatches = mix2_list };
+SEG_UNIT(unit_mix2, "mix2", 0xBA, "mix2_host", mix2_body, launch, &finish1);
+
+static const struct eg_unit_meta* const units[] = { &unit_axpb, &unit_wait, &unit_tick, &unit_spans, &unit_widesum, &unit_mix2, &unit_split, &unit_count1,
                                                     &unit_count3, &unit_count1a, &unit_count3a, &unit_countA, &unit_countAa, &unit_vecs, &unit_count1i,
                                                     &unit_count1ia, &unit_count1e, &unit_lanes, &unit_prefix, &unit_count1g, &unit_widemul,
                                                     &unit_gathb, &unit_gatha, &unit_gathn, &unit_boxed, &unit_boxbad, &unit_shr, &unit_cells, &unit_keyed,
@@ -1036,7 +1128,7 @@ static const struct eg_library_meta library = {
     .struct_size = sizeof(struct eg_library_meta),
     .schema_major = EG_META_SCHEMA_MAJOR,
     .schema_minor = 0,
-    .n_units = 51,
+    .n_units = 55,
     .units = units,
 };
 

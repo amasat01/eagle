@@ -26,18 +26,20 @@
  *  - No global mutable state: everything lives in a context. The one process
  *    resource is the host worker pool, shared by all contexts; each context
  *    states its own thread count, which is passed per launch. A context and
- *    every handle made from it are used by ONE thread at a time; a second
- *    thread entering the same context while a call runs is refused
- *    (EG_BAD_REQUEST), never raced. That refusal carries NO reason: the
- *    stored reason belongs to the thread inside and is left as it was, so
- *    ``eg_error`` reports none for it. Different contexts run concurrently.
+ *    its handles may be used from any number of threads: calls on one context
+ *    run one at a time, a second thread waiting until the running call returns
+ *    (no order between waiting threads). ``eg_error`` reports the reason of the
+ *    CALLING thread's own last non-OK call, so another thread's call never
+ *    overwrites it. A plane's deleter runs inside a call and must not call the
+ *    door on that context (it is refused BAD_REQUEST, not waited for).
+ *    Different contexts run concurrently.
  *  - Fork: a context belongs to the process that made it. In a forked child
  *    every call on it is refused except ``eg_error`` and ``eg_ctx_free``
  *    (which then frees host memory only: no device call, no thread join).
  *  - Handles belong to the context that made them; a handle of another
  *    context is refused. Every ``*_free`` is NULL-safe and returns EG_OK.
  *  - Arrays cross by DLPack only (``DLManagedTensorVersioned``, DLPack >= 1.0).
- *  - ``eg_ctx_info`` and ``eg_device_props`` are each both a struct tag and a
+ *  - ``eg_ctx_info``, ``eg_device_props`` and ``eg_plan_counters`` are each both a struct tag and a
  *    function name; C++ callers write ``struct eg_ctx_info`` for the struct.
  *
  * GROUPS. The HOST group is complete. The DEVICE group is declared with one
@@ -300,17 +302,24 @@ struct eg_ctx_info {
     int32_t weight_row;      /**< the index of the EG_WEIGHT_ROWS row taken, -1 for the built-in row of the target (no row of that class) */
 };
 
-/** INPUT to ``eg_plan_new``. */
+/** ``eg_plan_desc.flags``: split the range evenly into ``n_partitions`` parts (``part_base`` and ``part_count`` NULL):
+ *  the first ``range % n_partitions`` parts take one more, a range shorter than the parts leaves the last ones empty. */
+#define EG_PLAN_SPLIT_EVENLY (1u << 0)
+
+/** INPUT to ``eg_plan_new``. The range the partitions cut is the samples [0, n_samples); for a thread-box unit it is
+ *  its threads, [0, ceil(n_samples / (t * stride)) * stride), so a partition counts threads and never splits a box.
+ *  A unit that reads an index set or a prefix count takes ONE partition, whose [base, base + count) are POSITIONS of
+ *  the set (the first entries of its map, or the first lanes of a prefix); a launch runs those below the live count. */
 struct eg_plan_desc {
     uint32_t struct_size;
-    uint32_t flags;               /**< none defined: must be 0 */
+    uint32_t flags;               /**< EG_PLAN_SPLIT_EVENLY or 0 */
     eg_unit* unit;                /**< the source unit; its stages ride in its meta */
     eg_structure structure;
     eg_reduce_policy policy;      /**< order of the unit's sums over samples */
     int64_t n_samples;
-    int64_t n_partitions;         /**< 0: one partition, the whole range */
-    const int64_t* part_base;     /**< n_partitions entries, else NULL */
-    const int64_t* part_count;    /**< n_partitions entries, else NULL */
+    int64_t n_partitions;         /**< 0: one partition, the whole range; with EG_PLAN_SPLIT_EVENLY the number of parts (>= 1) */
+    const int64_t* part_base;     /**< n_partitions entries, else NULL (always NULL with EG_PLAN_SPLIT_EVENLY) */
+    const int64_t* part_count;    /**< n_partitions entries, else NULL (always NULL with EG_PLAN_SPLIT_EVENLY) */
 };
 
 /** INPUT to ``eg_bind`` and ``eg_reverse``: planes and uniforms by SLOT, the
@@ -424,6 +433,14 @@ struct eg_entry_figures {
     int32_t reserved0;
 };
 
+/** OUTPUT of ``eg_plan_counters``. */
+struct eg_plan_counters {
+    uint32_t struct_size;
+    uint32_t flags;          /**< none defined: 0 */
+    int64_t finished;        /**< the finished counter's value, -1 when the unit has none */
+    int64_t steps;           /**< the steps word's value, -1 when the unit has none */
+};
+
 /** Reduce flags. */
 #define EG_REDUCE_PAIR (1u << 0) /**< write the (sum, compensation) pair */
 
@@ -486,11 +503,11 @@ eg_status eg_ctx_new(const struct eg_ctx_settings* settings, eg_ctx** out);
 eg_status eg_ctx_free(eg_ctx* ctx);
 
 /**
- * The reason of the last non-OK status on ``ctx``, UTF-8, two-call protocol:
+ * The reason of the calling thread's last non-OK status on ``ctx``, UTF-8, two-call protocol:
  * ``*len`` gets the byte count without the terminator; with ``cap > len``
  * the text and a terminator are written. The reason stays until the next
- * non-OK call on ``ctx``; a refusal of ``eg_error`` itself never overwrites
- * it, and a busy-context refusal writes none. With no reason stored,
+ * non-OK call of this thread on ``ctx``; a refusal of ``eg_error`` itself never
+ * overwrites it. With no reason stored for this thread,
  * ``*len`` is 0. The ONE function that reads a reason.
  * Replaces: Python exceptions raised in the package; the seam's thread-local
  * ``eagle_backend_last_error()`` (eagle copies it into the context at once).
@@ -629,7 +646,7 @@ eg_status eg_plane_dlpack(eg_ctx* ctx, eg_plane* plane, struct DLManagedTensorVe
  * Replaces: ``plan.plan``, ``plan.Plan``, ``_split`` stage plans.
  * Calls today: ``eagle::exec::Partition`` (Partition.h),
  * ``exec::check_placement``. Status: OK; BAD_REQUEST (partitions that
- * overlap or leave the range); NOT_WRITTEN (DEVICE without the device group).
+ * overlap or leave the range, the range named; EG_PLAN_SPLIT_EVENLY with arrays or with n_partitions < 1); NOT_WRITTEN (DEVICE without the device group).
  */
 eg_status eg_plan_new(eg_ctx* ctx, const struct eg_plan_desc* desc, eg_plan** out);
 
@@ -748,6 +765,19 @@ eg_status eg_launch(eg_ctx* ctx, eg_plan* plan, uint64_t* tiles);
  * handle of another context).
  */
 eg_status eg_plan_entry_figures(eg_ctx* ctx, const eg_plan* plan, struct eg_entry_figures* out);
+
+/**
+ * Read a plan's counters now: the finished counter (``out->finished``, -1 when the unit finishes nothing), the steps
+ * word of a unit with steps AUTO (``out->steps``, -1 when it has none), and the mix counters of every AUTO dispatch
+ * group, concatenated in the unit's dispatch order, k per group, into ``mix``. Two-call protocol as ``eg_error``:
+ * ``*n_mix`` always gets the count; with ``mix_cap`` 0 nothing is written; with ``0 < mix_cap < *n_mix`` the call is
+ * refused. Each value is read from the plane bound at its slot, eagle's or the caller's. On a DEVICE plan the read is
+ * synchronous on the context's stream, after the work queued there. ``struct_size`` as ``eg_plan_entry_figures``.
+ * Status: OK; BAD_REQUEST (``out`` or ``n_mix`` NULL, ``mix`` NULL with ``mix_cap`` > 0, ``mix_cap`` negative or too
+ * small, a handle of another context).
+ */
+eg_status eg_plan_counters(eg_ctx* ctx, const eg_plan* plan, struct eg_plan_counters* out, uint32_t* mix, int32_t mix_cap,
+                           int32_t* n_mix);
 
 /* ---- runs ---------------------------------------------------------------- */
 

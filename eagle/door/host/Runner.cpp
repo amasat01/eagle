@@ -162,7 +162,7 @@ void run_auto(eg_runner_s& runner, int threads, std::int64_t& iterations, std::i
     const std::int64_t n = first.n_samples, cap = runner.max_steps;
     const std::int64_t cap_iterations = (cap + kAutoKMin - 1) / kAutoKMin + 1;
     std::int64_t k = kAutoK0, fin_at = first.finished, done = 0;
-    std::int64_t& word = first.steps_word;
+    std::int64_t& word = *static_cast<std::int64_t*>(steps_cell(first));
     word = std::min(kAutoK0, cap);
     bool go = static_cast<std::int64_t>(first.finished) != n && cap > 0;
     ActiveState& a = runner.act;
@@ -178,7 +178,7 @@ void run_auto(eg_runner_s& runner, int threads, std::int64_t& iterations, std::i
     while (iterations < cap_iterations && go) {
         for (std::size_t i = 0; i < runner.plans.size(); ++i) {
             eg_plan_s& p = *runner.plans[i];
-            p.steps_word = word;
+            *static_cast<std::int64_t*>(steps_cell(p)) = word;
             if (!runner.active) {
                 host::run_plan(p, threads);
             } else if (a.count > 0) {

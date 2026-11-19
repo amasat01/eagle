@@ -1114,7 +1114,7 @@ void fast_runner_setup(eg_ctx& ctx, const eg_runner_desc& d, eg_runner_s& runner
     runner.dev.mode = mode;
     const unsigned word[2] = { static_cast<unsigned>(static_cast<std::uint64_t>(d.max_steps) & 0xFFFFFFFFu),
                                static_cast<unsigned>(static_cast<std::uint64_t>(d.max_steps) >> 32) };
-    cells_write(dev.stream, plan.device_steps, word, 2);
+    cells_write(dev.stream, reinterpret_cast<std::uint64_t>(steps_cell(plan)), word, 2);
     if (mode != EG_MODE_PERSIST) return;
     runner.dev.fast = cells_new(ctx, 2);
     const bool fp64 = u.scalar_type != EG_SCALAR_FLOAT32;

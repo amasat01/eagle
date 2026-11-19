@@ -16,30 +16,49 @@ namespace door {
 
 namespace {
 
-/** @brief The partitions of @p d: the whole range, or the caller's, checked to stay
- *  inside [0, n) without overlap. */
+/** @brief @p parts contiguous partitions of [0, @p range), each over @p n samples: the first range % parts take one
+ *  more, as eagle's Python plan splits. A range shorter than @p parts leaves the last partitions empty. */
+std::vector<exec::Partition> split_evenly(std::int64_t range, std::int64_t parts, std::int64_t n) {
+    std::vector<exec::Partition> out;
+    std::int64_t base = 0, remaining = range;
+    for (std::int64_t left = parts; left > 0; --left) {
+        const std::int64_t count = (remaining + left - 1) / left;
+        out.push_back(exec::Partition{ base, count, n });
+        base += count;
+        remaining -= count;
+    }
+    return out;
+}
+
+/** @brief The partitions of @p d: the whole range, an even split of it, or the caller's, checked to stay inside
+ *  the range without overlap. The range is the samples [0, n), or for a thread box the threads
+ *  [0, ceil(n / (t * stride)) * stride): each thread owns whole boxes, so no partition splits one. */
 std::vector<exec::Partition> read_partitions(const eg_plan_desc& d) {
     const std::int64_t n = d.n_samples;
     const bool device = d.structure == EG_STRUCTURE_DEVICE;
     const std::int64_t box_t = device ? d.unit->dev_box_t : d.unit->box_t, box_stride = device ? d.unit->dev_box_stride : d.unit->box_stride;
-    if (box_t > 0) {    // a thread box: base and count count threads, ceil(n / (t * stride)) * stride of them
-        if (d.n_partitions != 0)
-            refuse(EG_BAD_REQUEST, "unit '" + d.unit->name + "' computes " + std::to_string(box_t) +
-                   " lanes per thread (a thread box), so its partitions count threads, not lanes; pass none");
-        const std::int64_t span = box_t * box_stride;
-        return { exec::Partition{ 0, (n + span - 1) / span * box_stride, n } };
+    const std::int64_t range = box_t > 0 ? (n + box_t * box_stride - 1) / (box_t * box_stride) * box_stride : n;
+    const std::string range_text = box_t > 0 ? "the thread range [0, " + std::to_string(range) + ") of unit '" + d.unit->name + "' (" +
+                                                   std::to_string(box_t) + " lanes per thread, stride " + std::to_string(box_stride) + ")"
+                                             : "the range [0, " + std::to_string(n) + ")";
+    if ((d.flags & EG_PLAN_SPLIT_EVENLY) != 0) {
+        if (d.part_base != nullptr || d.part_count != nullptr)
+            refuse(EG_BAD_REQUEST, "eg_plan_desc: EG_PLAN_SPLIT_EVENLY takes no part_base or part_count");
+        if (d.n_partitions < 1)
+            refuse(EG_BAD_REQUEST, "eg_plan_desc: EG_PLAN_SPLIT_EVENLY needs n_partitions >= 1, got " + std::to_string(d.n_partitions));
+        return split_evenly(range, d.n_partitions, n);
     }
-    if (d.n_partitions == 0) return { exec::Partition::whole(n) };
+    if (d.n_partitions == 0) return { exec::Partition{ 0, range, n } };
     if (d.n_partitions < 0 || d.part_base == nullptr || d.part_count == nullptr)
         refuse(EG_BAD_REQUEST, "eg_plan_desc: n_partitions " + std::to_string(d.n_partitions) +
                " needs part_base and part_count");
     std::vector<exec::Partition> parts;
     for (std::int64_t i = 0; i < d.n_partitions; ++i) {
         const std::int64_t base = d.part_base[i], count = d.part_count[i];
-        if (base < 0 || count < 1 || base > n || count > n - base)
+        if (base < 0 || count < 1 || base > range || count > range - base)
             refuse(EG_BAD_REQUEST, "partition " + std::to_string(i) + " (base " +
                    std::to_string(base) + ", count " + std::to_string(count) +
-                   ") leaves the range [0, " + std::to_string(n) + ")");
+                   ") leaves " + range_text);
         parts.push_back(exec::Partition{ base, count, n });
     }
     std::vector<exec::Partition> sorted = parts;
@@ -47,7 +66,7 @@ std::vector<exec::Partition> read_partitions(const eg_plan_desc& d) {
               [](const exec::Partition& a, const exec::Partition& b) { return a.base < b.base; });
     for (std::size_t i = 1; i < sorted.size(); ++i)
         if (sorted[i].base < sorted[i - 1].base + sorted[i - 1].count)
-            refuse(EG_BAD_REQUEST, "partitions overlap at sample " + std::to_string(sorted[i].base));
+            refuse(EG_BAD_REQUEST, "partitions overlap at " + std::to_string(sorted[i].base));
     return parts;
 }
 
@@ -144,9 +163,8 @@ void check_plane(const eg_plan_s& plan, int slot, const eg_plane_s& plane) {
         if (t.ndim < 1 || elements(t) != want)
             refuse(EG_BAD_REQUEST, what + ": a block sum's output of " + std::to_string(want) + " elements (" + std::to_string(k.width) + " per key) is expected");
         check_sink_shape(plan, s, t, what);
-    } else if (wide(s)) {                       // (rows, n): the rows are the caller's, one value per sample along the last axis
-        if (t.ndim != 2 || t.shape[1] != plan.n_samples)
-            refuse(EG_BAD_REQUEST, what + ": a plane of shape (rows, " + std::to_string(plan.n_samples) + ") is expected");
+    } else if (wide(s)) {                       // the caller's layout: any compact plane; the kernel's reads clamp to its trailing extent
+        if (t.ndim < 1) refuse(EG_BAD_REQUEST, what + ": a plane of at least one dimension is expected");
     } else if (s.role == EG_ROLE_LOOKUP) {      // a table of the caller's: any compact shape, read by element count
         if (t.ndim < 1) refuse(EG_BAD_REQUEST, what + ": a table needs at least one dimension");
         if (s.shared && s.rank > 0) {    // a shared parameter has its natural shape, bound flat
@@ -160,6 +178,8 @@ void check_plane(const eg_plan_s& plan, int slot, const eg_plane_s& plane) {
             refuse(EG_BAD_REQUEST, what + ": the index map is one dimension");
         if (slot == plan.unit->index_count_slot && (t.ndim != 1 || t.shape[0] != 1))
             refuse(EG_BAD_REQUEST, what + ": the index count is one cell, shape (1,)");
+        if (slot == plan.unit->finish.steps_slot && (t.ndim != 1 || t.shape[0] != 1))
+            refuse(EG_BAD_REQUEST, what + ": the steps word is one cell, shape (1,)");
     } else if (s.role == EG_ROLE_ACCUM_OUT) {   // a cell: the finished (1,); else the caller's length, as (*payload, *named axes) the meta states
         if (s.cell) {
             if (t.ndim != 1 || t.shape[0] != 1) refuse(EG_BAD_REQUEST, what + ": a cell is one element, shape (1,)");
@@ -177,7 +197,7 @@ void check_plane(const eg_plan_s& plan, int slot, const eg_plane_s& plane) {
     }
     if (!compact(t)) refuse(EG_BAD_REQUEST, what + ": the plane is not contiguous");
     const bool written = s.role == EG_ROLE_MUTABLE || s.role == EG_ROLE_OUT || s.role == EG_ROLE_WIDE_OUT || s.role == EG_ROLE_ACCUM_OUT ||
-                         slot == plan.unit->finish.mask_slot;
+                         slot == plan.unit->finish.mask_slot || slot == plan.unit->finish.steps_slot;
     if (written && (plane.tensor->flags & DLPACK_FLAG_BITMASK_READ_ONLY))
         refuse(EG_BAD_REQUEST, what + ": a read-only plane in a written slot");
 }
@@ -273,9 +293,6 @@ void check_bind(const eg_ctx& ctx, const eg_plan_s& plan, const eg_bind_desc& d)
         if (s.role == EG_ROLE_NSAMPLES)
             refuse(EG_BAD_REQUEST, "slot " + std::to_string(slot) + " ('" + s.name +
                    "') is the sample count: eagle passes it, do not bind it");
-        if (slot == plan.unit->finish.steps_slot)
-            refuse(EG_BAD_REQUEST, "slot " + std::to_string(slot) + " ('" + s.name +
-                   "') is the steps word: eagle makes it, do not pass it");
         if (slot == plan.unit->active_map_slot || slot == plan.unit->active_count_slot)
             refuse(EG_BAD_REQUEST, "slot " + std::to_string(slot) + " ('" + s.name +
                    "') is part of the active set: the runner makes it, do not pass it");
@@ -385,7 +402,8 @@ void plan_new(eg_ctx& ctx, const eg_plan_desc* desc, eg_plan** out) {
     if (out == nullptr) refuse(EG_BAD_REQUEST, "eg_plan_new: out is NULL");
     *out = nullptr;
     const eg_plan_desc d = read_input(desc, "eg_plan_desc");
-    if (d.flags != 0) refuse(EG_BAD_REQUEST, "eg_plan_desc.flags: unknown bits " + std::to_string(d.flags));
+    if ((d.flags & ~EG_PLAN_SPLIT_EVENLY) != 0)
+        refuse(EG_BAD_REQUEST, "eg_plan_desc.flags: unknown bits " + std::to_string(d.flags & ~EG_PLAN_SPLIT_EVENLY));
     check_handle(ctx.units, d.unit, "eg_plan_desc.unit");
     const bool device = d.structure == EG_STRUCTURE_DEVICE;
     if (device) device_plan_check(ctx, *d.unit);
@@ -428,10 +446,10 @@ void plan_new(eg_ctx& ctx, const eg_plan_desc* desc, eg_plan** out) {
                 refuse(EG_NOT_WRITTEN, "unit '" + d.unit->name + "': the unit '" + m->name + "' of dispatch group '" + g.name + "' has no " + (device ? "device function" : "host entry"));
         if (d.unit->box_t > 0 || d.unit->index_count_slot >= 0 || d.unit->active_map_slot >= 0)
             refuse(EG_NOT_WRITTEN, "unit '" + d.unit->name + "': a SEGMENTED dispatch group over a thread box, an index set or an active set is not written");
-        if (d.n_partitions != 0 && !(d.n_partitions == 1 && d.part_base != nullptr && d.part_count != nullptr && d.part_base[0] == 0 && d.part_count[0] == d.n_samples))
-            refuse(EG_BAD_REQUEST, "unit '" + d.unit->name + "' runs a SEGMENTED dispatch group over the sorted samples: one whole partition");
     }
     std::vector<exec::Partition> parts = read_partitions(d);
+    if (d.unit->seg.present && (parts.size() != 1 || parts[0].base != 0 || parts[0].count != d.n_samples))
+        refuse(EG_BAD_REQUEST, "unit '" + d.unit->name + "' runs a SEGMENTED dispatch group over the sorted samples: one whole partition");
     for (const exec::Partition& p : parts)    // a row of a cell has one writer: a partition starts on a row
         if (d.unit->cell_row > 0 && p.base % d.unit->cell_row != 0)
             refuse(EG_BAD_REQUEST, "unit '" + d.unit->name + "' reduces over samples in rows of " + std::to_string(d.unit->cell_row) +
@@ -441,8 +459,8 @@ void plan_new(eg_ctx& ctx, const eg_plan_desc* desc, eg_plan** out) {
             if (st.cell_row > 0 && !st.unit->cells.empty() && p.base % st.cell_row != 0)
                 refuse(EG_BAD_REQUEST, "unit '" + d.unit->name + "' stage '" + st.ref_name + "' reduces over samples in rows of " + std::to_string(st.cell_row) +
                        ": a partition starts on a multiple of it, got base " + std::to_string(p.base));
-    if (d.unit->index_count_slot >= 0 && (parts.size() != 1 || parts[0].base != 0 || parts[0].count != d.n_samples))
-        refuse(EG_BAD_REQUEST, "unit '" + d.unit->name + "' reads an index set: one whole partition");
+    if (d.unit->index_count_slot >= 0 && parts.size() != 1)
+        refuse(EG_BAD_REQUEST, "unit '" + d.unit->name + "' reads an index set: one partition (positions of the set)");
     static constexpr exec::Access kAccess[] = { exec::Access::SampleLocal,
         exec::Access::CrossSampleRead, exec::Access::CrossSampleWrite };
     try {
@@ -481,9 +499,7 @@ void plan_new(eg_ctx& ctx, const eg_plan_desc* desc, eg_plan** out) {
                 plan->params[i] = b.value;
             }
         if (d.unit->finish.present && d.unit->finish.steps_slot >= 0)    // the steps word of an AUTO unit
-            bind_handle(*plan, d.unit->finish.steps_slot,
-                        d.structure == EG_STRUCTURE_DEVICE ? reinterpret_cast<void*>(plan->device_steps)
-                                                           : static_cast<void*>(&plan->steps_word), 1);
+            bind_handle(*plan, d.unit->finish.steps_slot, steps_cell(*plan), 1);
         if (!d.unit->cells.empty()) {    // the rows of every cell component, zeroed
             const DLDataType real = real_dtype(d.unit->scalar_type);
             const std::int64_t rows = std::max<std::int64_t>(1, (d.n_samples + d.unit->cell_row - 1) / d.unit->cell_row);
@@ -782,6 +798,58 @@ void plan_entry_figures(eg_ctx& ctx, const eg_plan_s* plan, eg_entry_figures* ou
     write_output(out, f, "eg_entry_figures");
 }
 
+/** @brief The cell of the steps word @p plan's kernel reads: the caller's plane when bound, else eagle's own (a host
+ *  address, or for a DEVICE plan a device address). */
+void* steps_cell(const eg_plan_s& plan) {
+    const eg_plane_s* bound = plan.bindings[static_cast<std::size_t>(plan.unit->finish.steps_slot)].plane;
+    if (bound != nullptr) return static_cast<char*>(bound->tensor->dl_tensor.data) + bound->tensor->dl_tensor.byte_offset;
+    return plan.structure == EG_STRUCTURE_DEVICE ? reinterpret_cast<void*>(plan.device_steps) : static_cast<void*>(const_cast<std::int64_t*>(&plan.steps_word));
+}
+
+namespace {
+/** @brief Read @p bytes at @p at into @p out: device memory (ordered after the context's queued work) for a DEVICE plan, else host memory. */
+void read_cell(const eg_plan_s& plan, const void* at, void* out, std::size_t bytes) {
+    if (plan.structure == EG_STRUCTURE_DEVICE) device_read(*plan.ctx, at, out, bytes);
+    else std::memcpy(out, at, bytes);
+}
+}  // namespace
+
+/** @brief eg_plan_counters: the finished counter, the steps word and every AUTO group's mix counters, read now. */
+void plan_counters(eg_ctx& ctx, const eg_plan_s* plan, struct eg_plan_counters* out, std::uint32_t* mix, std::int32_t mix_cap, std::int32_t* n_mix) {
+    check_handle(ctx.plans, plan, "plan");
+    if (n_mix == nullptr) refuse(EG_BAD_REQUEST, "eg_plan_counters: n_mix is NULL");
+    const eg_unit_s& u = *plan->unit;
+    std::int64_t count = 0;
+    for (const DispatchFacts& f : u.dispatches)
+        if (f.strategy == EG_DISPATCH_AUTO) count += f.k;
+    *n_mix = static_cast<std::int32_t>(count);
+    if (mix_cap > 0 && mix == nullptr) refuse(EG_BAD_REQUEST, "eg_plan_counters: mix is NULL with mix_cap > 0");
+    if (mix_cap < 0 || (mix_cap > 0 && mix_cap < count))
+        refuse(EG_BAD_REQUEST, "eg_plan_counters: mix_cap " + std::to_string(mix_cap) + " is below the " + std::to_string(count) +
+               " mix counters of the unit's AUTO groups");
+    struct eg_plan_counters c{};
+    c.finished = -1;
+    c.steps = -1;
+    if (u.finish.present) {
+        std::uint32_t finished = 0;
+        read_cell(*plan, plan->structure == EG_STRUCTURE_DEVICE ? reinterpret_cast<const void*>(plan->device_counter) : &plan->finished, &finished, sizeof(finished));
+        c.finished = finished;
+        if (u.finish.steps_slot >= 0) read_cell(*plan, steps_cell(*plan), &c.steps, sizeof(c.steps));
+    }
+    if (mix_cap > 0) {
+        std::size_t group = 0;
+        for (const DispatchFacts& f : u.dispatches) {
+            if (f.strategy != EG_DISPATCH_AUTO) continue;
+            const eg_plane_s* bound = plan->bindings[static_cast<std::size_t>(f.mix)].plane;
+            const DLTensor& t = (bound != nullptr ? bound : plan->mix[group])->tensor->dl_tensor;
+            read_cell(*plan, static_cast<const char*>(t.data) + t.byte_offset, mix, static_cast<std::size_t>(f.k) * sizeof(std::uint32_t));
+            mix += f.k;
+            ++group;
+        }
+    }
+    write_output(out, c, "eg_plan_counters");
+}
+
 /** @brief eg_bind: check every entry, then replace the named slots. */
 void bind(eg_ctx& ctx, eg_plan_s* plan, const eg_bind_desc* desc) {
     check_handle(ctx.plans, plan, "plan");
@@ -806,7 +874,8 @@ void bind(eg_ctx& ctx, eg_plan_s* plan, const eg_bind_desc* desc) {
             bind_handle(*plan, d.plane_slots[i], data,
                         sf.role == EG_ROLE_LOOKUP ? static_cast<std::uint64_t>(elements(t))
                         : sf.keys_of >= 0 ? static_cast<std::uint64_t>(key_count(*plan->unit, plan->unit->keyed[static_cast<std::size_t>(sf.keys_of)], plan->n_samples))
-                                          : static_cast<std::uint64_t>(plan->n_samples));
+                        : wide(sf) ? static_cast<std::uint64_t>(t.shape[t.ndim - 1])
+                                   : static_cast<std::uint64_t>(plan->n_samples));
         }
         if (old != nullptr) plane_release(ctx, old);
         renew_owned(ctx, *plan, d.plane_slots[i], t);

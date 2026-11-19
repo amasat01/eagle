@@ -182,13 +182,13 @@ void ctx_info(eg_ctx& ctx, struct eg_ctx_info* out) {
     std::memcpy(static_cast<void*>(out), static_cast<const void*>(&info), n);
 }
 
-/** @brief The reason text, two-call protocol (eg_error); never changes the reason. */
+/** @brief The calling thread's reason text, two-call protocol (eg_error); never changes a reason. */
 eg_status error_read(eg_ctx* ctx, char* buf, std::size_t cap, std::size_t* len) noexcept {
     if (ctx == nullptr || len == nullptr) return EG_BAD_REQUEST;
-    bool idle = false;
-    if (!ctx->busy.compare_exchange_strong(idle, true, std::memory_order_acquire))
-        return EG_BAD_REQUEST;
-    const char* text = ctx->reason_lost ? "out of memory" : ctx->reason.c_str();
+    Hold hold(*ctx);
+    const auto found = ctx->reasons.find(std::this_thread::get_id());
+    const bool lost = found == ctx->reasons.end() ? ctx->reason_lost : found->second.lost;
+    const char* text = lost ? "out of memory" : found == ctx->reasons.end() ? "" : found->second.text.c_str();
     const std::size_t n = std::strlen(text);
     *len = n;
     eg_status status = EG_OK;
@@ -196,7 +196,6 @@ eg_status error_read(eg_ctx* ctx, char* buf, std::size_t cap, std::size_t* len) 
         if (buf == nullptr || cap <= n) status = EG_BAD_REQUEST;
         else std::memcpy(buf, text, n + 1);
     }
-    ctx->busy.store(false, std::memory_order_release);
     return status;
 }
 
