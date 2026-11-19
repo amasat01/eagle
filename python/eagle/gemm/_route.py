@@ -56,7 +56,7 @@ def attach(plugin, kernel) -> None:
                          f"plane (adjoint_like) or cotangent (cotangent_of) for {missing}")
     route.planes = {f"{route.out}_bar": seeded[route.out], **{f"{nm}_bar": gradient[nm] for nm in route.inputs}}
     plugin._gemm = route
-    route.vjp = _VjpPlugin(plugin, route, adjoint_doc["arg_spec"])
+    route.vjp = _VjpPlugin(plugin, route, adjoint_doc)
 
 
 class _Route:
@@ -150,16 +150,17 @@ def _size(a) -> int:
 
 
 class _VjpPlugin:
-    """The adjoint as eagle.diff reads a vjp plugin: the planes of the vjp unit hawk states (the output's cotangent per sample,
-    the operands, the gradients summed into), and the route its bind runs."""
+    """The adjoint as eagle.diff reads a vjp plugin: hawk's description of the vjp unit (its ``sidecar``: the planes, which
+    one is the output's cotangent and which the gradient of each operand) and the route its bind runs."""
 
     exec_op = None
     exec_access = "cross_sample_write"
 
-    def __init__(self, primal, route, arg_spec):
+    def __init__(self, primal, route, description):
         self._gemm, self._adjoint = route, True
         self.name, self.scalar_type = f"{primal.name}_vjp", primal.scalar_type
-        self.arg_spec = tuple(tuple(pair) for pair in arg_spec)
+        self.sidecar = description
+        self.arg_spec = tuple(tuple(pair) for pair in description["arg_spec"])
 
 
 def _check_planes(p, planes):
