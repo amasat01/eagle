@@ -40,7 +40,7 @@ LOCK = threading.RLock()
 class Level:
     """One kernel of the tower (see the module doc).
 
-    :ivar kernel: the hawk kernel (``hawk.trace.Kernel``).
+    :ivar kernel: the hawk kernel (``hawk.Kernel``).
     :ivar label: the user's kernel name (``<kernel>_jvp``...), what messages show.
     :ivar name: its name (``<primal>``, ``<primal>_jvp``, ``<primal>_jvp_vjp``...).
     :ivar kind: ``None`` for the primal, else ``"jvp"`` / ``"vjp"``.
@@ -99,7 +99,7 @@ class Level:
         with LOCK:
             level = self._derived.get(which)
             if level is None:
-                from hawk.trace import Kernel
+                from hawk import Kernel
 
                 wrt = self.wrt
                 if not wrt:
@@ -129,7 +129,7 @@ class Level:
             level = self._derived.get("step_vjp")
             if level is None:
                 from hawk.diff import step_vjp
-                from hawk.trace import Kernel
+                from hawk import Kernel
 
                 derived = step_vjp(self.kernel, wrt=self.wrt)
                 level = Level(Kernel(f"{self.name}_step_vjp", derived),
@@ -166,23 +166,9 @@ class Level:
         with LOCK:
             level = self._derived.get("step_function")
             if level is None:
-                from hawk.diff import tape
-                from hawk.diff.event import as_plain_reads
-                from hawk.diff.tape import APPLIED_STEPS, NEXT_SUFFIX
-                from raptor.ir.nodes import Assign
-                from hawk.trace import Kernel
+                from hawk.diff import step_function
 
-                kernel = self.kernel
-                step = getattr(kernel, "step", None) or getattr(kernel, "one_step", None) or kernel
-                twin = tape(kernel, 1)
-                single = getattr(twin, "one_step", None) or twin
-                commits = [s for s in single.sinks
-                           if isinstance(s, Assign) and s.name != APPLIED_STEPS]
-                values = as_plain_reads(tuple(s.value for s in commits))
-                function = Kernel(f"{step.name}_function",
-                                  tuple(Assign(s.name + NEXT_SUFFIX, v, s.ttype)
-                                        for s, v in zip(commits, values)), {})
-                function.jump = getattr(step, "jump", None)
+                function = step_function(self.kernel)
                 level = Level(promote(function), who=self.who, label=self.label)
                 level._wrt = tuple(n for n in self.wrt if n in level.wrt)
                 level.cell_source = lambda _me, root=self: (lambda t: t and t.step_function())(

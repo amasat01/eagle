@@ -54,7 +54,7 @@ from types import MappingProxyType
 
 import torch
 
-from .. import FINISHED_PLANE, _cell_rows, _layout, _split
+from .. import FINISHED_PLANE, _cell_rows, _layout
 from .._graph_reduce import check_policy
 from ..sidecar import CELL_PLANE
 from ._kernel_planes import INPUT_ROLES, OUTPUT_ROLES, _prior_reads, call_mode, describe_kernel, promote
@@ -319,7 +319,7 @@ class _Level:
 
     def _derive(self, kind):
         from hawk.diff import jvp, step_vjp, vjp
-        from hawk.trace import Kernel
+        from hawk import Kernel
 
         reverse = kind == "vjp"
         if self.state and not reverse:
@@ -766,7 +766,6 @@ class _Level:
             device_arch=arch,
         )
         built = plugins(unit, device_loader=load_manifest)
-        _split.link(built, unit)
         return eplan.plan(built[self.kernel.name], structure=eexec.DeviceKernel)
 
     @property

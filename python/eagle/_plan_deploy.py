@@ -417,15 +417,15 @@ def _is_hawk_kernel(obj) -> bool:
     defined outside hawk included? A plugin or any other object answers ``False``.
     Never imports hawk: a kernel exists only once hawk is loaded, so an unloaded
     hawk means ``obj`` is not one."""
-    traced = sys.modules.get("hawk.trace.kernel")
-    return traced is not None and isinstance(obj, traced.Kernel)
+    hawk = sys.modules.get("hawk")
+    return hawk is not None and isinstance(obj, hawk.Kernel)
 
 
 def _wants_fast_entries(kernels, targets) -> bool:
     """Whether this bundle call should ask hawk for the fast-path entries
     (``<name>_range``, and an active-set kernel's ``<name>_persist``, behind
     ``HAWK_FAST_ENTRIES=1``) -- ANY kernel here automatic (``.one_step``
-    set, :mod:`hawk.trace.steps`'s own ``auto`` marker), on a build that
+    set, hawk's own ``auto`` marker), on a build that
     includes a device target (the entries are device-only). One flag for the
     whole bundle call, matching :func:`eagle._until_done._build_auto`'s
     own ONE-place eligibility: this is the single spot that decides eagle
@@ -482,9 +482,7 @@ def _build_by_name(kernels, targets, cache_dir, scalar_type=None) -> tuple:
     with _BUNDLE_LOCKS.setdefault(str(where.resolve()), threading.Lock()):
         bundle = build_bundle(kernels, where, targets=targets, cache_dir=cache_dir,
                               settings=build_settings(fast_entries=True) if fast else None, mode=mode)
-    by_name = plugins(bundle, device_loader=load_manifest)
-    _split.link(by_name, bundle)
-    return by_name, bundle
+    return plugins(bundle, device_loader=load_manifest), bundle
 
 
 def _hawk_plugins(kernels, targets, cache_dir, scalar_type=None, contraction=None) -> tuple:

@@ -276,7 +276,7 @@ def _split_parts(kernel, group: str, device: bool) -> tuple:
     import dataclasses
 
     import hawk
-    from hawk.trace.kernel import Kernel
+    from hawk import Kernel
 
     from ._plan_deploy import _build_by_name, auto
 

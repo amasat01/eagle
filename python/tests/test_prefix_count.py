@@ -15,7 +15,6 @@ if "prefix" not in getattr(getattr(hawk_ext, "IndexSet", None), "__dataclass_fie
 import eagle  # noqa: E402
 import eagle.exec as eexec  # noqa: E402
 import eagle.plan  # noqa: E402
-from eagle import _split  # noqa: E402
 from hawk import Kernel, Mutable, Scalar  # noqa: E402
 from hawk.artifact import build_bundle, plugins  # noqa: E402
 from hawk.diff import vjp  # noqa: E402
@@ -57,7 +56,6 @@ def _plan(kernels, tmp_path, cache, target, name):
     bundle = build_bundle(kernels, tmp_path, targets=("cuda",) if target == "cuda" else ("host",), cache_dir=cache,
                           host_profile="native", kind=PRE)
     by = plugins(bundle, device_loader=eagle.registry.load_manifest if target == "cuda" else None)
-    _split.link(by, bundle)
     return eagle.plan.plan(by[name], structure=eexec.DeviceKernel if target == "cuda" else eexec.HostTeam)
 
 

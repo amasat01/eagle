@@ -28,6 +28,7 @@ so distinct reverses of one run proceed concurrently.
 
 from __future__ import annotations
 
+import math
 import os
 import threading
 
@@ -140,8 +141,8 @@ def _step_kernels(plugin, window, door, device, events="step", reverse="per_step
     if reverse == "fused":      # all K steps of a window in one launch; a unit of its own (its kind differs)
         whole = Kernel(f"{step.name}_fused_vjp", step_vjp(kernel, steps_reverse="fused"))
         out.fused_vjp = _hawk_plugins([kernel, whole], targets, cache_dir, plugin.scalar_type)[1]
-    counts = sidecar_of(built[0])["element_counts"]
-    out.taped = tuple((name, counts[name]) for name, _type in taped_planes(single))
+    shapes = sidecar_of(built[0])["slot_shapes"]
+    out.taped = tuple((name, math.prod(shapes[name])) for name, _type in taped_planes(single))
     out.time = getattr(step, "time", None) if getattr(step, "time_step", None) else None
     cache[key] = out
     return out

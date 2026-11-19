@@ -42,7 +42,7 @@ OUTPUT_ROLES = frozenset({"mutable", "out"})
 #: Per-sample input roles (the sample count comes off these).
 SAMPLE_ROLES = frozenset({"per_sample", "vec_in", "mat_in", "terminated"})
 
-#: hawk's slot dtype name -> numpy dtype, for the non-float slots (an ``int32`` index plane binds as int64).
+#: hawk's slot dtype name -> numpy dtype, for the non-float slots.
 _FIXED_DTYPE = MappingProxyType({"bool": np.dtype(np.bool_), "int64": np.dtype(np.int64),
                                  "int32": np.dtype(np.int32), "uint32": np.dtype(np.uint32)})
 _FLOAT_DTYPES = frozenset({"float", "float64", "float32"})
@@ -181,8 +181,6 @@ class Signature:
         ir = self._ir[name].dtype
         if ir in _FLOAT_DTYPES:
             return FLOAT_MODES[mode]
-        if ir == "int32" and name in self.description.get("index_planes", ()):
-            return np.dtype(np.int64)
         try:
             return _FIXED_DTYPE[ir]
         except KeyError:
@@ -205,11 +203,11 @@ def describe_kernel(kernel, *, primals=()) -> dict:
 
 def slot_types(description: dict) -> dict:
     """``{slot name: (shape, dtype name)}`` of every slot of a described kernel: the shape from ``slot_shapes``, the dtype from
-    ``arg_dtypes`` (a plane) or ``params`` (a by-value ``Param``)."""
+    ``arg_dtypes`` (which states every slot)."""
     from types import SimpleNamespace
 
-    dtypes = {**description["arg_dtypes"], **{p["name"]: p["dtype"] for p in description.get("params", ())}}
-    return {name: SimpleNamespace(shape=tuple(shape), dtype=dtypes.get(name))
+    dtypes = description["arg_dtypes"]
+    return {name: SimpleNamespace(shape=tuple(shape), dtype=dtypes[name])
             for name, shape in description["slot_shapes"].items()}
 
 

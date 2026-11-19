@@ -29,7 +29,6 @@ def plan_(tmp_path_factory):
     root = tmp_path_factory.mktemp("status")
     bundle = build_bundle([square], root / "b", targets=("cuda",), cache_dir=str(root / "c"), host_profile="native")
     by = plugins(bundle, device_loader=eagle.registry.load_manifest)
-    _split.link(by, bundle)
     return eagle.plan.plan(by["square"], structure=eexec.DeviceKernel)
 
 
