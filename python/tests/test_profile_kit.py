@@ -654,7 +654,7 @@ def test_ncu_features_enumerates_every_row_case_dtype_and_arm_of_ours_and_fails_
     cells = mod.feature_cells(False)
     assert {c[:4] for c in cells} == want and len(cells) == len(want) and len(mod.feature_cells(True)) == len(rows)
     monkeypatch.setattr(mod, "require_ncu", lambda args: None)
-    args = types.SimpleNamespace(quick=False, out=tmp_path, ncu="/bin/false", ncu_sudo=False)
+    args = types.SimpleNamespace(quick=False, out=tmp_path, ncu=shutil.which("false"), ncu_sudo=False)
     with pytest.raises(RuntimeError, match="every ncu capture failed"):
         mod.ncu_features(args)
     with (tmp_path / "ncu_features.csv").open() as fh:

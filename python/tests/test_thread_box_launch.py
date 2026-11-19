@@ -79,6 +79,7 @@ def built(tmp_path_factory):
     import hawk.math as m
     from hawk import Index, Mutable, Scalar, Table
     from hawk.artifact import build_bundle, plugins
+    from hawk.targets import buildable
 
     @hawk.kernel
     def rows_mix(lane: Index, x: Table[Scalar], w: Table[Scalar], y: Mutable[Scalar]):
@@ -90,7 +91,7 @@ def built(tmp_path_factory):
 
     root = tmp_path_factory.mktemp("box")
     return {target: build_bundle([rows_mix], root / target, targets=(target,), host_profile="native")
-            for target in ("host", "cuda")}, plugins
+            for target in ("host", "cuda") if buildable(target)}, plugins
 
 
 def _plan(bundle, plugins, target, npartitions=1):

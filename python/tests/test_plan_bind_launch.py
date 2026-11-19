@@ -144,8 +144,12 @@ def _lane(n=N) -> np.ndarray:
 # is not and there is no reason to pay it per row.
 # --------------------------------------------------------------------------- #
 def _bundle(kernel, tmp_path_factory, slug, targets=("cuda",)):
+    """``kernel``'s bundle for those of ``targets`` hawk states it can build here (a machine with no CUDA
+    toolchain builds the host entry alone; the rows that launch on a device are marked ``gpu``)."""
+    from hawk.targets import buildable
+
     return hawk_artifact.build_bundle(
-        [kernel], tmp_path_factory.mktemp(f"e4_{slug}"), targets=targets,
+        [kernel], tmp_path_factory.mktemp(f"e4_{slug}"), targets=tuple(t for t in targets if buildable(t)),
     )
 
 
