@@ -251,6 +251,7 @@ def _stepped(owner):
     step = level.step_function()
     fstep = _primitive(step, owner)
     wrt = tuple(step.wrt)
+    next_of = {plane: nxt for nxt, plane in step.kernel.next_values.items()}      # each carried plane's next-value plane
 
     @jax.custom_jvp
     def call(*operands):
@@ -269,7 +270,7 @@ def _stepped(owner):
         mask = by[sig.terminated] if sig.finishes else None
         res = []
         for name, o in zip(sig.outputs, outs):
-            nxt = name + "_next"
+            nxt = next_of.get(name)
             if not sig.is_float(name) or nxt not in step.sig.outputs:
                 res.append(np.zeros(o.shape, jax.dtypes.float0) if not sig.is_float(name)
                            else jnp.zeros_like(o))
