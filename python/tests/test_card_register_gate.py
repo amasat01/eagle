@@ -22,7 +22,8 @@ supports, and ``ptxas -v`` plus the SASS are read back:
 * the fused RKF7(8) entries stay within 2 registers of their pinned counts
   (no cap reaches them spill-free, so they are left as they are);
 
-Skipped where ``nvcc``/``cuobjdump`` or hawk are absent.
+The pins are keyed by the release of the CUDA compiler hawk builds with (``hawk.targets.machine``),
+which need not be the ``nvcc`` on PATH. Skipped where hawk states no CUDA compiler.
 """
 
 from __future__ import annotations
@@ -31,7 +32,6 @@ import collections
 import importlib.util
 import pathlib
 import re
-import shutil
 import subprocess
 import sys
 
@@ -126,7 +126,8 @@ def _compile(kernel, arch, tmp):
     for name, figures in art.sidecar["tool"]["cuda"].items():
         entries[name] = {"ops": collections.Counter(), "n": 0, "regs": figures["regs"], "stack": figures["stack_B"],
                          "spill": (figures["spill_store_B"] or 0) + (figures["spill_load_B"] or 0)}
-    sass = subprocess.run(["cuobjdump", "-sass", str(art.entries["cuda"].artifact)], capture_output=True,
+    cuobjdump = pathlib.Path(_cuda_compiler()["path"]).with_name("cuobjdump")
+    sass = subprocess.run([str(cuobjdump), "-sass", str(art.entries["cuda"].artifact)], capture_output=True,
                           text=True, check=True).stdout
     cur = None
     for line in sass.splitlines():
@@ -141,21 +142,24 @@ def _compile(kernel, arch, tmp):
     return entries
 
 
+def _cuda_compiler():
+    """hawk's stated CUDA compiler: ``path``, ``release`` (``"X.Y"``) and ``archs``; ``{}`` when it finds none."""
+    from hawk.targets import machine
+
+    return machine("cuda")["tools"].get("compiler") or {}
+
+
 def _nvcc_release():
-    """The ``"X.Y"`` release of the ``nvcc`` on PATH (``None`` if unreadable)."""
-    out = subprocess.run(["nvcc", "--version"], capture_output=True, text=True).stdout
-    m = re.search(r"release (\d+\.\d+)", out)
-    return m.group(1) if m else None
+    """The ``"X.Y"`` release of the compiler hawk builds the cubins with: the key of every pin table."""
+    return _cuda_compiler().get("release")
 
 
 @pytest.fixture(scope="module")
 def compiled(tmp_path_factory):
     pytest.importorskip("hawk")
-    if not (shutil.which("nvcc") and shutil.which("cuobjdump")):
-        pytest.skip("no CUDA toolkit (nvcc, cuobjdump) on PATH")
-    from hawk.targets import machine
-
-    toolkit = machine("cuda")["tools"]["compiler"]["archs"]
+    if not _cuda_compiler():
+        pytest.skip("hawk states no CUDA compiler")
+    toolkit = _cuda_compiler()["archs"]
     if _nvcc_release() not in PERSIST_REGS:
         pytest.skip(f"no register pins for CUDA {_nvcc_release()}")
     archs = [a for a in ARCHS if int(a[3:]) in toolkit]
