@@ -37,6 +37,7 @@ void device_open(eg_ctx&, std::int32_t device) {
            "): the device group is not built");
 }
 void device_close(eg_ctx&) noexcept {}
+std::int32_t device_count(eg_ctx&) { return 0; }
 void device_unit_load(eg_unit_s&, const eg_unit_meta&, void*) {}
 void device_unit_free(eg_unit_s&) noexcept {}
 void device_plan_check(const eg_ctx&, const eg_unit_s&) {
@@ -286,16 +287,40 @@ void run_later(eg_ctx& ctx, DeviceRecording& rec) noexcept {
 
 }  // namespace
 
+/** @brief The devices the driver sees, or -1 with @p why (the runtime's words) when no driver can be opened. A driver
+ *  whose cuInit reports no device sees 0; any other failure after the driver opened is a FAULT. */
+std::int32_t driver_device_count(std::string& why) {
+    try {
+        EG_DRIVER(cuInit);
+        EG_DRIVER(cuDeviceGetCount);
+        const CUresult init = cuInit_(0);
+        if (init == CUDA_ERROR_NO_DEVICE) return 0;
+        check(init, "cuInit");
+        int count = 0;
+        check(cuDeviceGetCount_(&count), "cuDeviceGetCount");
+        return count;
+    } catch (const std::runtime_error& e) {
+        if (dynamic_cast<const Refusal*>(&e) != nullptr) throw;
+        why = e.what();
+        return -1;
+    }
+}
+
+/** @brief eg_device_count: the devices the driver sees, 0 when there is no usable driver. */
+std::int32_t device_count(eg_ctx&) {
+    std::string why;
+    return std::max<std::int32_t>(0, driver_device_count(why));
+}
+
 /** @brief EG_CTX_DEVICE: retain the device's primary context, make the context's stream, read the launch facts. */
 void device_open(eg_ctx& ctx, std::int32_t device) {
-    EG_DRIVER(cuInit);
-    EG_DRIVER(cuDeviceGetCount);
     EG_DRIVER(cuDeviceGet);
     EG_DRIVER(cuDevicePrimaryCtxRetain);
     EG_DRIVER(cuStreamCreate);
-    check(cuInit_(0), "cuInit");
-    int count = 0;
-    check(cuDeviceGetCount_(&count), "cuDeviceGetCount");
+    std::string why;
+    const std::int32_t count = driver_device_count(why);
+    if (count < 0)
+        refuse(EG_BAD_REQUEST, "eg_ctx_settings EG_CTX_DEVICE: no CUDA driver could be opened (" + why + ")");
     if (device >= count)
         refuse(EG_BAD_REQUEST, "eg_ctx_settings.device " + std::to_string(device) + ": the driver sees " +
                std::to_string(count) + " device(s)");

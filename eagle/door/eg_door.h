@@ -490,7 +490,8 @@ struct eg_device_props {
  * launch); with EG_CTX_DEVICE the seam's ``probe`` / ``set_device``.
  * Status: OK; BAD_REQUEST (other ABI major, unknown flag, struct too small,
  * ``device`` != 0 without EG_CTX_DEVICE, a negative ordinal); NOT_WRITTEN
- * (EG_CTX_DEVICE, no device backend built); FAULT (backend load).
+ * (EG_CTX_DEVICE, no device backend built); BAD_REQUEST also for EG_CTX_DEVICE with "no CUDA driver could be opened"
+ * or "the driver sees 0 device(s)"; FAULT (a driver that failed after it opened).
  */
 eg_status eg_ctx_new(const struct eg_ctx_settings* settings, eg_ctx** out);
 
@@ -1084,15 +1085,18 @@ eg_status eg_graph_free(eg_ctx* ctx, eg_graph* graph);
 /*
  * Device-group calls without a device. In a door built WITHOUT the device
  * group every call below returns EG_NOT_WRITTEN ("the device group is not
- * built"), except ``eg_sync``, which is EG_OK (nothing to wait for). In a door
- * built WITH it, on a host context (made without EG_CTX_DEVICE): ``eg_sync`` is
- * EG_OK, ``eg_stream_use`` is EG_BAD_REQUEST ("host-only context": it has no
- * stream), and ``eg_device_count``, ``eg_device_props`` and ``eg_record_child``
- * are EG_NOT_WRITTEN, as on a device context: they are not written in either
- * build yet.
+ * built"), except ``eg_sync``, which is EG_OK (nothing to wait for), and
+ * ``eg_device_count``, which is EG_OK with 0. In a door built WITH it, on a
+ * host context (made without EG_CTX_DEVICE): ``eg_sync`` is EG_OK,
+ * ``eg_stream_use`` is EG_BAD_REQUEST ("host-only context": it has no
+ * stream), ``eg_device_count`` answers, and ``eg_device_props`` and
+ * ``eg_record_child`` are EG_NOT_WRITTEN, as on a device context: they are
+ * not written in either build yet.
  */
 
-/** Number of devices the backend sees (seam ``device_count``). */
+/** Number of devices the driver sees (seam ``device_count``): 0, with EG_OK, when the driver library cannot be
+ *  opened or ``cuInit`` reports no device, and in a door built without the device group. Any context answers.
+ *  Status: OK; BAD_REQUEST (``count`` NULL); FAULT (a driver that failed after it opened). */
 eg_status eg_device_count(eg_ctx* ctx, int32_t* count);
 
 /** Properties of a device (seam ``device_props``). */

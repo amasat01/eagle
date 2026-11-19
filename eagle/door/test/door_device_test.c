@@ -1587,9 +1587,9 @@ int main(int argc, char** argv) {
     {   /* the device group on a host context of a door built with it */
         int32_t count = 0;
         check(eg_sync(host) == EG_OK && refused(eg_stream_use(host, 0), EG_BAD_REQUEST, host, "host-only context") &&
-                  refused(eg_device_count(host, &count), EG_NOT_WRITTEN, host, "not written in this build"),
+                  eg_device_count(host, &count) == EG_OK && count >= 1,
               "a host context of a door with the device group: eg_sync OK, eg_stream_use BAD_REQUEST (host-only context), "
-              "eg_device_count NOT_WRITTEN (not written in either build)");
+              "eg_device_count OK with a count of 1 or more");
     }
 
     /* Units. */

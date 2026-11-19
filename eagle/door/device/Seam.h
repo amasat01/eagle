@@ -13,6 +13,8 @@ namespace door {
 // The device group (device/Device.cpp); the host-only build refuses EG_CTX_DEVICE and structure DEVICE.
 void device_open(eg_ctx& ctx, std::int32_t device);
 void device_close(eg_ctx& ctx) noexcept;
+/** @brief The devices the driver sees (device/Device.cpp); 0 with no driver, no device, or no device group built. */
+std::int32_t device_count(eg_ctx& ctx);
 void device_unit_load(eg_unit_s& unit, const eg_unit_meta& meta, void* library);
 void device_unit_free(eg_unit_s& unit) noexcept;
 void device_plan_check(const eg_ctx& ctx, const eg_unit_s& unit);

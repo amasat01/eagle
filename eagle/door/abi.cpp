@@ -303,12 +303,18 @@ EG_EXPORT eg_status eg_stream_use(eg_ctx* ctx, uint64_t stream) {
     return door::call(ctx, [stream](eg_ctx& c) { door::device_stream_use(c, stream); });
 }
 
+EG_EXPORT eg_status eg_device_count(eg_ctx* ctx, int32_t* count) {
+    return door::call(ctx, [count](eg_ctx& c) {
+        if (count == nullptr) door::refuse(EG_BAD_REQUEST, "eg_device_count: count is NULL");
+        *count = door::device_count(c);
+    });
+}
+
 // ---- not written in this build ---------------------------------------------
 
 EG_EXPORT eg_status eg_run_events(eg_ctx* ctx, eg_runner* runner, eg_plane* t_stop, eg_plane* status) {
     return door::call(ctx, [=](eg_ctx& c) { door::run_events(c, runner, t_stop, status); });
 }
-EG_EXPORT eg_status eg_device_count(eg_ctx* ctx, int32_t*) { return not_written(ctx, "eg_device_count"); }
 EG_EXPORT eg_status eg_device_props(eg_ctx* ctx, int32_t, struct eg_device_props*) {
     return not_written(ctx, "eg_device_props");
 }
