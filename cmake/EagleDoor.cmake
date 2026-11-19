@@ -61,8 +61,19 @@ target_include_directories(eagle_door
 target_compile_definitions(eagle_door PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:AETHER_CPP_MODE=1>")
 target_compile_options(eagle_door PRIVATE
   "$<$<COMPILE_LANGUAGE:CXX>:-O2;-ffp-contract=off;${_door_warn};-fopenmp;-include;${EAGLE_DOOR_WING_FACTS}>")
-target_link_options(eagle_door PRIVATE
-  -Wl,--version-script=${_door}/door.map -Wl,--no-undefined -fopenmp)
+# door.map is the one list of exported names; Apple's ld takes it as an exported-symbols list (the global pattern with the C symbol
+# underscore) and refuses undefined symbols by default-error, GNU ld by --version-script and --no-undefined.
+if(APPLE)
+  file(READ "${_door}/door.map" _door_map)
+  string(REGEX MATCH "global: *([^;]*);" _unused "${_door_map}")
+  file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/door.exp" "_${CMAKE_MATCH_1}\n")
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_door}/door.map")
+  target_link_options(eagle_door PRIVATE
+    -Wl,-exported_symbols_list,${CMAKE_CURRENT_BINARY_DIR}/door.exp -Wl,-undefined,error -fopenmp)
+else()
+  target_link_options(eagle_door PRIVATE
+    -Wl,--version-script=${_door}/door.map -Wl,--no-undefined -fopenmp)
+endif()
 target_link_libraries(eagle_door PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
 set_property(TARGET eagle_door APPEND PROPERTY LINK_DEPENDS "${_door}/door.map")
 
