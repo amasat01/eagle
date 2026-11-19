@@ -211,9 +211,7 @@ class Level:
         outputs = [o for o in self.sig.outputs if o != self.sig.terminated and self.sig.is_float(o)]
         if which == "vjp":
             return reverse_names(self.who, self.label, self.wrt, outputs, derived.derivative)
-        return plane_names(self.who, self.label, self.wrt, outputs,
-                           {n for _, n in self.sig.arg_spec}, {n for _, n in derived.sig.arg_spec},
-                           self.sig.description.get("plane_names"))
+        return plane_names(self.who, self.label, self.wrt, outputs, derived.derivative)
 
     # -- build and load ------------------------------------------------------
     def unit(self, directory, target, mode, device_arch=""):
@@ -308,36 +306,13 @@ def step_seeds(derived) -> dict:
     return {derived.next_values[out]: plane for plane, out in derived.cotangents.items() if out in derived.next_values}
 
 
-def plane_names(who, name, wrt, outputs, own, derived, joined=None) -> dict:
-    """``{plane: its tangent plane in the forward-mode derivative}`` for every ``wrt`` input and
-    every ``outputs`` plane, read off the derived kernel's planes ``derived`` that the kernel
-    ``name`` (planes ``own``) does not hold. ``joined`` is hawk's ``plane_names`` of the kernel (``{plane: {group, wire}}`` of each
-    plane whose name joins a quantity's namespace to a wire name): a derivative spells such a plane ``<group>_<wire>``. A plane with
-    no counterpart (an integer output) is absent; a ``wrt`` input with none is refused."""
-    from hawk.diff import TANGENT_PREFIX
-
-    joined = joined or {}
-
-    prefix = TANGENT_PREFIX
-    fresh = set(derived) - set(own)
-    wanted = list(wrt) + list(outputs)
-    flat = {p: f"{joined[p]['group']}_{joined[p]['wire']}" if p in joined else p for p in wanted}
-
-    def spell(level, p):
-        return f"{prefix}{level if level > 1 else ''}_{flat[p]}"
-
-    top = len(own) + len(fresh) + 2
-    # one level for the whole derivative (hawk's rule), else per plane
-    common = next((lv for lv in range(1, top) if all(spell(lv, p) in fresh for p in wrt)), None)
-    out = {}
-    for p in wanted:
-        levels = [lv for lv in range(1, top) if spell(lv, p) in fresh]
-        if common is not None and spell(common, p) in fresh:
-            out[p] = spell(common, p)
-        elif levels:
-            out[p] = spell(levels[0], p)
-        elif p in wrt:
-            raise ValueError(
-                f"{who}: the jvp of {name!r} declares no {prefix}-plane for "
-                f"{p!r} (its new planes: {sorted(fresh)})")
-    return out
+def plane_names(who, name, wrt, outputs, derived) -> dict:
+    """``{plane: its tangent plane}`` for every ``wrt`` input and every ``outputs`` plane, as the forward derivative
+    ``derived`` states them (``tangents``: each tangent plane with the plane it is the tangent of, at that derivative's own
+    level). A plane with no tangent (an integer output) is absent; a ``wrt`` input with none is refused."""
+    tangent = {primal: plane for plane, primal in derived.tangents.items()}
+    missing = [p for p in wrt if p not in tangent]
+    if missing:
+        raise ValueError(f"{who}: the jvp of {name!r} declares no tangent plane for {missing[0]!r} "
+                         f"(its tangents: {sorted(tangent)})")
+    return {p: tangent[p] for p in list(wrt) + list(outputs) if p in tangent}

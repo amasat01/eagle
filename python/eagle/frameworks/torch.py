@@ -339,10 +339,7 @@ class _Level:
         if reverse:
             named = reverse_names(_WHO, self.owner.name, derived.wrt, [] if self.state else floats, derived)
         else:
-            named = plane_names(
-                _WHO, self.owner.name, derived.wrt, floats,
-                {n for _, n in self.spec}, {n for _, n in kernel.arg_spec}, self.description.get("plane_names"),
-            )
+            named = plane_names(_WHO, self.owner.name, derived.wrt, floats, derived)
         child = _Level(
             self.owner, kernel, chain=(kernel,) if alone else (*self.chain, kernel),
             path=self.path + kind[0]
