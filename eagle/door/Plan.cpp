@@ -163,9 +163,8 @@ void check_plane(const eg_plan_s& plan, int slot, const eg_plane_s& plane) {
         if (t.ndim < 1 || elements(t) != want)
             refuse(EG_BAD_REQUEST, what + ": a block sum's output of " + std::to_string(want) + " elements (" + std::to_string(k.width) + " per key) is expected");
         check_sink_shape(plan, s, t, what);
-    } else if (wide(s)) {                       // (rows, n): the rows are the caller's, one value per sample along the last axis
-        if (t.ndim != 2 || t.shape[1] != plan.n_samples)
-            refuse(EG_BAD_REQUEST, what + ": a plane of shape (rows, " + std::to_string(plan.n_samples) + ") is expected");
+    } else if (wide(s)) {                       // the caller's layout: any compact plane; the kernel's reads clamp to its trailing extent
+        if (t.ndim < 1) refuse(EG_BAD_REQUEST, what + ": a plane of at least one dimension is expected");
     } else if (s.role == EG_ROLE_LOOKUP) {      // a table of the caller's: any compact shape, read by element count
         if (t.ndim < 1) refuse(EG_BAD_REQUEST, what + ": a table needs at least one dimension");
         if (s.shared && s.rank > 0) {    // a shared parameter has its natural shape, bound flat
@@ -875,7 +874,8 @@ void bind(eg_ctx& ctx, eg_plan_s* plan, const eg_bind_desc* desc) {
             bind_handle(*plan, d.plane_slots[i], data,
                         sf.role == EG_ROLE_LOOKUP ? static_cast<std::uint64_t>(elements(t))
                         : sf.keys_of >= 0 ? static_cast<std::uint64_t>(key_count(*plan->unit, plan->unit->keyed[static_cast<std::size_t>(sf.keys_of)], plan->n_samples))
-                                          : static_cast<std::uint64_t>(plan->n_samples));
+                        : wide(sf) ? static_cast<std::uint64_t>(t.shape[t.ndim - 1])
+                                   : static_cast<std::uint64_t>(plan->n_samples));
         }
         if (old != nullptr) plane_release(ctx, old);
         renew_owned(ctx, *plan, d.plane_slots[i], t);

@@ -2013,13 +2013,9 @@ static void check_wide(eg_ctx* ctx) {
     b1.struct_size = sizeof(b1);
     b1.n_planes = 1;
     b1.plane_slots = one;
-    eg_plane* pbad = wrap_nd(ctx, &tb, wi, kDLFloat, 64, 1, M, 0, 0);    /* one dimension: rows are missing */
+    eg_plane* pbad = wrap_nd(ctx, &tb, wi, kDLFloat, 64, 0, 0, 0, 0);    /* no dimension */
     b1.planes = &pbad;
-    all = all && pbad && eg_bind(ctx, p, &b1) == EG_BAD_REQUEST && reason_has(ctx, "(rows, 1000)");
-    eg_plane_free(ctx, pbad);
-    pbad = wrap_nd(ctx, &tb, wi, kDLFloat, 64, 2, 3, M - 1, 0);          /* trailing extent is not n */
-    b1.planes = &pbad;
-    all = all && pbad && eg_bind(ctx, p, &b1) == EG_BAD_REQUEST && reason_has(ctx, "(rows, 1000)");
+    all = all && pbad && eg_bind(ctx, p, &b1) == EG_BAD_REQUEST && reason_has(ctx, "at least one dimension");
     eg_plane_free(ctx, pbad);
     pbad = wrap_nd(ctx, &tb, wo, kDLFloat, 64, 2, 3, M, 0);              /* WIDE_OUT is written */
     tb.managed.flags |= DLPACK_FLAG_BITMASK_READ_ONLY;
@@ -2028,9 +2024,43 @@ static void check_wide(eg_ctx* ctx) {
     b1.planes = &pbad;
     all = all && pbad && eg_bind(ctx, p, &b1) == EG_BAD_REQUEST && reason_has(ctx, "read-only");
     eg_plane_free(ctx, pbad);
-    check(all, "wide refusals: a plane without rows, a trailing extent other than n, a read-only WIDE_OUT, each "
-               "BAD_REQUEST by name");
+    check(all, "wide refusals: a plane without a dimension, a read-only WIDE_OUT, each BAD_REQUEST by name");
     check(eg_plan_free(ctx, p) == EG_OK && eg_unit_free(ctx, unit) == EG_OK, "wide plan and unit freed");
+}
+
+/* A flat wide plane longer than n: every read at e * 3 + c stays inside it (the handle carries the plane's trailing extent, not n). */
+static void check_wide_flat(eg_ctx* ctx) {
+    enum { N = 512, W = 3 };
+    static double theta[N * W], y[N];
+    eg_unit* unit = NULL;
+    check(load(ctx, "widesum", 0xBB, &unit) == EG_OK, "eg_unit_load widesum (a WIDE_IN read at e * 3 + c)");
+    if (unit == NULL) return;
+    for (int i = 0; i < N * W; ++i) theta[i] = 0.5 * i;
+    const eg_structure structures[2] = { EG_STRUCTURE_HOST_SERIAL, EG_STRUCTURE_HOST_TEAM };
+    int all = 1;
+    for (int si = 0; si < 2; ++si) {
+        struct tensor tt, ty;
+        eg_plane *pt = wrap(ctx, &tt, theta, N * W, kDLFloat, 64), *py = wrap(ctx, &ty, y, N, kDLFloat, 64);
+        const int32_t slots[2] = { 0, 1 };
+        eg_plane* planes[2] = { py, pt };
+        struct eg_bind_desc bd;
+        memset(&bd, 0, sizeof(bd));
+        bd.struct_size = sizeof(bd);
+        bd.n_planes = 2;
+        bd.plane_slots = slots;
+        bd.planes = planes;
+        eg_plan* p = NULL;
+        memset(y, 0, sizeof(y));
+        all &= pt && py && plan(ctx, unit, structures[si], N, 0, NULL, NULL, &p) == EG_OK && eg_bind(ctx, p, &bd) == EG_OK &&
+               eg_launch(ctx, p, NULL) == EG_OK;
+        for (int e = 0; e < N; ++e)    /* the closed form, from e = 0 through the e >= 171 where an n-element extent would clamp */
+            all &= y[e] == 0.5 * (3.0 * e) + 10.0 * 0.5 * (3.0 * e + 1.0) + 100.0 * 0.5 * (3.0 * e + 2.0);
+        eg_plan_free(ctx, p);
+        eg_plane_free(ctx, pt);
+        eg_plane_free(ctx, py);
+    }
+    check(all, "wide: a flat (1536,) plane at n = 512, W = 3 reads every member at e * 3 + c, e up to 511 (SERIAL and TEAM)");
+    eg_unit_free(ctx, unit);
 }
 
 /* ---- GATHER and SHARED slots, and a host thread box ---------------------------- */
@@ -3807,6 +3837,7 @@ int main(int argc, char** argv) {
     check_index_sets(ctx);
     check_groups(ctx);
     check_wide(ctx);
+    check_wide_flat(ctx);
     check_gather(ctx);
     check_shared(ctx);
     check_box(ctx);

@@ -14,6 +14,7 @@
  *  - "spans": logs the (base, count) of each non-empty serial call into fixture_spans, counted by fixture_span_n.
  *  - "mix2": count1 over two AUTO dispatch groups (k 2 and 3) whose mix counters the entry fills: group a counts the live samples
  *    with limit >= 6 (cell 1) or below (cell 0), group b the live samples by limit mod 3.
+ *  - "widesum": y[e] = theta[3e] + 10 theta[3e + 1] + 100 theta[3e + 2], each read clamped to the WIDE_IN handle's extent.
  *  - "axpb_split": the "axpb" body named as a one-stage split unit.
  *  - "count1a", "count3a": the same finishing units reading an active set: the
  *    two LOOKUP slots after the counter hold the live sample slots (int32)
@@ -76,6 +77,7 @@ EG_FIXTURE_EXPORT void wait_host(void* const* params, int64_t base, int64_t coun
 EG_FIXTURE_EXPORT void tick_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void spans_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void mix2_host(void* const* params, int64_t base, int64_t count, int64_t n);
+EG_FIXTURE_EXPORT void widesum_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void count1_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void count3_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void count1a_host(void* const* params, int64_t base, int64_t count, int64_t n);
@@ -260,6 +262,20 @@ void count1g_host(void* const* params, int64_t base, int64_t count, int64_t n) {
             mask[i] = 1;
             __atomic_fetch_add(finished, 1u, __ATOMIC_RELAXED);
         }
+    }
+}
+
+void widesum_host(void* const* params, int64_t base, int64_t count, int64_t n) {
+    double* y = (double*)((const struct fixture_handle*)params[0])->data;
+    const struct fixture_handle* theta = (const struct fixture_handle*)params[1];
+    (void)n;
+    for (int64_t e = base; e < base + count; ++e) {
+        double v = 0.0, w = 1.0;
+        for (int64_t c = 0; c < 3; ++c, w *= 10.0) {
+            const int64_t at = 3 * e + c;
+            v += w * ((const double*)theta->data)[at < (int64_t)theta->samples ? at : (int64_t)theta->samples - 1];
+        }
+        y[e] = v;
     }
 }
 
@@ -826,6 +842,14 @@ static const struct eg_unit_meta unit_widemul = {
     .scalar_type = EG_SCALAR_FLOAT64, .host_entry = "widemul_host", .device_image_format = EG_IMAGE_NONE,
     .body = &wide_body, .launch = &launch };
 
+static const struct eg_unit_slot* const widesum_slots[] = { &slot_y, &slot_wi };
+static const struct eg_unit_body widesum_body = {
+    .struct_size = sizeof(struct eg_unit_body), .access = EG_ACCESS_SAMPLE_LOCAL, .n_slots = 2, .slots = widesum_slots };
+static const struct eg_unit_meta unit_widesum = {
+    .struct_size = sizeof(struct eg_unit_meta), .name = "widesum", .digest = DIGEST(0xBB), .pattern = EG_PATTERN_PURE,
+    .scalar_type = EG_SCALAR_FLOAT64, .host_entry = "widesum_host", .device_image_format = EG_IMAGE_NONE,
+    .body = &widesum_body, .launch = &launch };
+
 /* gather: y (MUTABLE) and a GATHER 2x2 MAT_IN over a two-axis launch (runtime a, static b = 4) */
 static const uint8_t keep_b[2] = { 0, 1 }, keep_a[2] = { 1, 0 };
 static const int64_t gath_shape[2] = { 2, 2 }, gath_extents[2] = { -1, 4 };
@@ -1091,7 +1115,7 @@ static const struct eg_unit_body mix2_body = { .struct_size = sizeof(struct eg_u
     .slots = mix2_slots, .n_dispatches = 2, .dispatches = mix2_list };
 SEG_UNIT(unit_mix2, "mix2", 0xBA, "mix2_host", mix2_body, launch, &finish1);
 
-static const struct eg_unit_meta* const units[] = { &unit_axpb, &unit_wait, &unit_tick, &unit_spans, &unit_mix2, &unit_split, &unit_count1,
+static const struct eg_unit_meta* const units[] = { &unit_axpb, &unit_wait, &unit_tick, &unit_spans, &unit_widesum, &unit_mix2, &unit_split, &unit_count1,
                                                     &unit_count3, &unit_count1a, &unit_count3a, &unit_countA, &unit_countAa, &unit_vecs, &unit_count1i,
                                                     &unit_count1ia, &unit_count1e, &unit_lanes, &unit_prefix, &unit_count1g, &unit_widemul,
                                                     &unit_gathb, &unit_gatha, &unit_gathn, &unit_boxed, &unit_boxbad, &unit_shr, &unit_cells, &unit_keyed,
@@ -1104,7 +1128,7 @@ static const struct eg_library_meta library = {
     .struct_size = sizeof(struct eg_library_meta),
     .schema_major = EG_META_SCHEMA_MAJOR,
     .schema_minor = 0,
-    .n_units = 54,
+    .n_units = 55,
     .units = units,
 };
 
