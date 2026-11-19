@@ -119,11 +119,10 @@ def _launch_transpose(node, incoming, ctx):
         finished = frozenset()
     planes, out = {}, {}
     owned = _cell_rows.companions_of(vjp)
-    seeds = sidecar_of(vjp).get("cotangent_of") or {}       # the vjp's cotangent planes, each with the output it seeds
+    side = sidecar_of(vjp)
+    seeds, gradients = side.get("cotangent_of") or {}, side.get("gradient_of") or {}   # each plane with the output it seeds / input it differentiates
     for role, name in _split.arg_spec(vjp):
-        # a cotangent names the output it seeds; a gradient plane is the input's own name behind hawk's adjoint prefix, which
-        # no member of the description states for an input that is not a lookup
-        src = seeds.get(name, name[4:] if name.startswith("bar_") else None)
+        src = seeds.get(name) or gradients.get(name)
         if role == "nsamples" or name in owned:     # a keyed sum's companion is the bind's own
             continue
         if name in finished:

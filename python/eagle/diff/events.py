@@ -38,6 +38,7 @@ from __future__ import annotations
 
 from .. import _alloc, _stream, arrays
 from .. import _core, _split
+from ..sidecar import sidecar_of
 
 __all__ = ["phase"]
 
@@ -50,7 +51,6 @@ EVENTS = ("step", "refine")
 ON_NO_EVENT = ("raise", "zero")
 _REFINED = "_refined"
 _DOT = "dot_"
-_BAR = "bar_"
 _GUARD = "event_g"
 
 
@@ -200,11 +200,12 @@ class RefinePass:
         # g_x at the refined state, for the graze test
         gb, self.gx = {}, {}
         self.seeds = [_alloc.zeros(xp, n, dtype=scalar) for _ in range(k.guards)]
+        guard_side = sidecar_of(k.guard_vjp)
         for role, nm in k.guard_vjp.arg_spec:
-            if nm.startswith(_BAR + _GUARD):
-                gb[nm] = self.seeds[int(nm[len(_BAR + _GUARD):])]
-            elif nm.startswith(_BAR):
-                base = nm[len(_BAR):]
+            if nm in guard_side["cotangent_of"]:      # the cotangent of guard ``j``
+                gb[nm] = self.seeds[int(guard_side["cotangent_of"][nm][len(_GUARD):])]
+            elif nm in guard_side["gradient_of"]:
+                base = guard_side["gradient_of"][nm]
                 like = rec.state.get(base)
                 gb[nm] = _alloc.zeros_like(xp, like) if like is not None else _alloc.zeros(xp, n, dtype=scalar)
                 if base in self.refined:
@@ -345,13 +346,15 @@ class RefineReverse:
         op(_SEED, (n, [_addr(x) for x in dg], [_addr(x) for x in dg], [_addr(x) for x in gbar],
                    rows(rbar), rows(xbar), rows({nm: ev[_DOT + nm] for nm in k.state}), scal))
         bind, grads = {}, {}
+        side = sidecar_of(k.vjp)
         for role, nm in k.vjp.arg_spec:
-            if nm.startswith(_BAR) and nm.endswith(_REFINED):
-                bind[nm] = rbar[nm[len(_BAR):-len(_REFINED)]]
-            elif nm.startswith(_BAR + _GUARD):
-                bind[nm] = gbar[int(nm[len(_BAR + _GUARD):])]
-            elif nm.startswith(_BAR):
-                base = nm[len(_BAR):]
+            seeded = side["cotangent_of"].get(nm)       # the output this plane seeds
+            if seeded is not None and seeded.endswith(_REFINED):
+                bind[nm] = rbar[seeded[:-len(_REFINED)]]
+            elif seeded is not None:
+                bind[nm] = gbar[int(seeded[len(_GUARD):])]
+            elif nm in side["gradient_of"]:
+                base = side["gradient_of"][nm]
                 like = ev.get(base, rec.planes.get(base))
                 if like is None or not hasattr(like, "shape") or base in rec.uniforms:
                     grads[base] = bind[nm] = _alloc.zeros(xp, n, dtype=rec.scalar)

@@ -46,7 +46,6 @@ TAPE_ON = "tape_on"
 FUSED_STEPS = "fused_steps"
 _STATE = ("mutable", "terminated")
 _EPOCH = "slot_samples"   # a checkpoint's slot -> sample map, when compaction reorders
-_NEXT = "_next"      # hawk.diff.step_vjp's naming contract (bar_<plane>_next)
 _LEAF = 4096         # the canonical reduction's leaf (eagle/reduce/canonical.h)
 
 # Module-level so a row can plant a wrong chunking or combine and see it fail.
@@ -638,9 +637,8 @@ class RunReverse:
         if any(nm == APPLIED_STEPS for _r, nm in vspec):
             self.step_plane = _alloc.zeros(xp, m, dtype=k.vjp.arg_dtypes[APPLIED_STEPS])
         self.grad = {}        # input name -> its share of one step, per slot
-        for _role, nm in vspec:
-            if nm.startswith("bar_") and not nm.endswith(_NEXT) and nm[4:] not in taped:
-                base = nm[4:]
+        for base in sidecar_of(k.vjp).get("gradient_of", {}).values():
+            if base not in taped:
                 if base in rec.uniforms:
                     self.grad[base] = _alloc.zeros(xp, m, dtype=rec.scalar)
                 elif base in self.reads:
@@ -658,13 +656,15 @@ class RunReverse:
             """``kern``'s planes for one launch reading adjoint plane ``parity``: the state
             before the step (a tape row), or, for a fused window, the window's start."""
             bind = {}
+            side = sidecar_of(kern)
+            seeds, gradients, carried = side["cotangent_of"], side["gradient_of"], side["next_of"]
             for role, nm in kern.arg_spec:
-                if nm.startswith("bar_") and nm.endswith(_NEXT):
-                    bind[nm] = self.adj[parity][nm[4:-len(_NEXT)]]
-                elif nm.startswith("bar_") and nm[4:] in taped:
-                    bind[nm] = self.adj[1 - parity][nm[4:]]
-                elif nm.startswith("bar_"):
-                    bind[nm] = self.grad[nm[4:]]
+                if nm in seeds:         # the cotangent of a next value: the adjoint of the plane it carries
+                    bind[nm] = self.adj[parity][carried[seeds[nm]]]
+                elif gradients.get(nm) in taped:
+                    bind[nm] = self.adj[1 - parity][gradients[nm]]
+                elif nm in gradients:
+                    bind[nm] = self.grad[gradients[nm]]
                 elif nm in taped and row is None:
                     bind[nm] = self.state[nm]
                 elif nm in taped:
@@ -693,8 +693,7 @@ class RunReverse:
         self.inputs = tuple(self.taped) + tuple(nm for nm in self.acc if nm not in self.folded)
         if rec.refine is not None:      # inputs only the stop rule reads (a guard's parameter)
             ek = rec.refine.k
-            more = [nm[4:] for _r, nm in ek.vjp.arg_spec if nm.startswith("bar_")
-                    and not nm.endswith("_refined") and not nm.startswith("bar_event_g")]
+            more = list(sidecar_of(ek.vjp).get("gradient_of", {}).values())
             self.inputs += tuple(nm for nm in more if nm not in self.inputs
                                  and nm not in (ek.tau, rec.t0) and nm in rec.planes)
         self._busy = BusyGuard("eagle.diff.Reverse")

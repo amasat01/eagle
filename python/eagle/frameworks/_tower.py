@@ -183,14 +183,11 @@ class Level:
         with LOCK:
             got = self._names.get("step_vjp")
             if got is None:
-                derived = {n for _, n in self.stepped().sig.arg_spec}
+                derived = self.stepped().kernel
                 outputs = [o for o in self.sig.outputs
                            if o != self.sig.terminated and self.sig.is_float(o)]
-                nexts = {o: f"bar_{o}_next" for o in outputs if f"bar_{o}_next" in derived}
-                grads = plane_names(self.who, self.label, "vjp", self.wrt, [],
-                                    {n for _, n in self.sig.arg_spec} | set(nexts.values()),
-                                    derived, self.sig.description.get("plane_names"))
-                got = self._names["step_vjp"] = (nexts, grads)
+                nexts = {o: c for o, c in step_seeds(derived).items() if o in outputs}
+                got = self._names["step_vjp"] = (nexts, gradient_names(self.who, self.label, self.wrt, derived))
             return got
 
     def names(self, which) -> dict:
@@ -208,7 +205,9 @@ class Level:
     def _match(self, which) -> dict:
         derived = self.derived(which)
         outputs = [o for o in self.sig.outputs if o != self.sig.terminated and self.sig.is_float(o)]
-        return plane_names(self.who, self.label, which, self.wrt, outputs,
+        if which == "vjp":
+            return reverse_names(self.who, self.label, self.wrt, outputs, derived.kernel)
+        return plane_names(self.who, self.label, self.wrt, outputs,
                            {n for _, n in self.sig.arg_spec}, {n for _, n in derived.sig.arg_spec},
                            self.sig.description.get("plane_names"))
 
@@ -281,18 +280,41 @@ def finished_identity(where, mask, bar_next, jt):
     return where(mask, bar_next, jt)
 
 
-def plane_names(who, name, which, wrt, outputs, own, derived, joined=None) -> dict:
-    """``{plane: its plane in the derived kernel}`` for every ``wrt`` input and
-    every ``outputs`` plane (``which`` = ``"jvp"``: tangents; ``"vjp"``:
-    adjoints), read off the derived kernel's planes ``derived`` that the kernel
+def gradient_names(who, name, wrt, derived) -> dict:
+    """``{input: its gradient plane}`` for every ``wrt`` input, as the reverse derivative ``derived`` states it
+    (``gradients``); an input with none is refused."""
+    gradient = {inp: plane for plane, inp in derived.gradients.items()}
+    missing = [p for p in wrt if p not in gradient]
+    if missing:
+        raise ValueError(f"{who}: the vjp of {name!r} declares no gradient plane for {missing[0]!r} "
+                         f"(its gradients: {sorted(gradient)})")
+    return {p: gradient[p] for p in wrt}
+
+
+def reverse_names(who, name, wrt, outputs, derived) -> dict:
+    """``{plane: its plane in the reverse derivative}``: every ``wrt`` input's gradient and each of ``outputs``' cotangent, as
+    the derivative states them (``gradients``, ``cotangents``); an output with no cotangent (an integer one) is absent."""
+    seeds = {out: plane for plane, out in derived.cotangents.items()}
+    return {**gradient_names(who, name, wrt, derived), **{o: seeds[o] for o in outputs if o in seeds}}
+
+
+def step_seeds(derived) -> dict:
+    """``{carried plane: the cotangent seeding its next value}`` of a step derivative: a cotangent names the next value it
+    seeds (``cotangents``), and that names the plane it carries (``next_values``)."""
+    return {derived.next_values[out]: plane for plane, out in derived.cotangents.items() if out in derived.next_values}
+
+
+def plane_names(who, name, wrt, outputs, own, derived, joined=None) -> dict:
+    """``{plane: its tangent plane in the forward-mode derivative}`` for every ``wrt`` input and
+    every ``outputs`` plane, read off the derived kernel's planes ``derived`` that the kernel
     ``name`` (planes ``own``) does not hold. ``joined`` is hawk's ``plane_names`` of the kernel (``{plane: {group, wire}}`` of each
     plane whose name joins a quantity's namespace to a wire name): a derivative spells such a plane ``<group>_<wire>``. A plane with
     no counterpart (an integer output) is absent; a ``wrt`` input with none is refused."""
-    from hawk.diff import ADJOINT_PREFIX, TANGENT_PREFIX
+    from hawk.diff import TANGENT_PREFIX
 
     joined = joined or {}
 
-    prefix = TANGENT_PREFIX if which == "jvp" else ADJOINT_PREFIX
+    prefix = TANGENT_PREFIX
     fresh = set(derived) - set(own)
     wanted = list(wrt) + list(outputs)
     flat = {p: f"{joined[p]['group']}_{joined[p]['wire']}" if p in joined else p for p in wanted}
@@ -312,6 +334,6 @@ def plane_names(who, name, which, wrt, outputs, own, derived, joined=None) -> di
             out[p] = spell(levels[0], p)
         elif p in wrt:
             raise ValueError(
-                f"{who}: the {which} of {name!r} declares no {prefix}-plane for "
+                f"{who}: the jvp of {name!r} declares no {prefix}-plane for "
                 f"{p!r} (its new planes: {sorted(fresh)})")
     return out

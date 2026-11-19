@@ -28,22 +28,21 @@ def clear_scatter(x: hawk_trace.Scalar, key: hawk_trace.Index,
 
 @pytest.fixture(scope="module")
 def host_plugin(tmp_path_factory):
-    import ctypes
     from types import SimpleNamespace
 
-    import json
+    from hawk.runtime import load
 
     import eagle.exec as eexec  # noqa: F401
 
     unit = hawk_artifact.build_bundle(
         [clear_scatter], tmp_path_factory.mktemp("clear"), targets=("host",))
-    sidecar = json.loads((unit.directory / "clear_scatter.json").read_text())
-    lib = ctypes.CDLL(str(unit.directory / "clear_scatter.so"))
+    kernel = load(unit.directory, "clear_scatter")      # hawk's own load: the library, self-checked
+    sidecar = kernel.sidecar
     view = hawk_artifact.plan_view(sidecar)
-    entry = getattr(lib, view.pop("host_entry"))
-    return SimpleNamespace(host_entry=ctypes.cast(entry, ctypes.c_void_p).value,
-                           **hawk_artifact.fold_entries(lib, sidecar),
-                           _keepalive=lib, _meta=sidecar, **view)
+    view.pop("host_entry")
+    return SimpleNamespace(host_entry=kernel.entry.address,
+                           **hawk_artifact.fold_entries(kernel.library, sidecar),
+                           _keepalive=kernel, _meta=sidecar, **view)
 
 
 def _bind(plugin):

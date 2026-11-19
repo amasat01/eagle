@@ -46,7 +46,6 @@ the largest batch to keep the sweep under ~3 minutes).
 from __future__ import annotations
 
 import argparse
-import ctypes
 import json
 import pathlib
 import statistics
@@ -204,13 +203,14 @@ def _sidecar(bundle, name: str) -> dict:
 def host_plugin(bundle, name: str):
     """The plan-able view of the bundle's HOST entry (mirrors two_body_hybrid.py)."""
     from hawk.artifact import fold_entries, plan_view
+    from hawk.runtime import load
 
-    library = ctypes.CDLL(str(pathlib.Path(bundle.directory) / f"{name}.so"))
-    view = plan_view(_sidecar(bundle, name))
-    entry = getattr(library, view.pop("host_entry"))
+    kernel = load(pathlib.Path(bundle.directory), name)      # hawk's own load: the library, self-checked
+    view = plan_view(kernel.sidecar)
+    view.pop("host_entry")
     return SimpleNamespace(
-        host_entry=ctypes.cast(entry, ctypes.c_void_p).value,
-        _keepalive=library, **fold_entries(library, _sidecar(bundle, name)), **view)
+        host_entry=kernel.entry.address,
+        _keepalive=kernel, **fold_entries(kernel.library, kernel.sidecar), **view)
 
 
 def device_plugin(bundle, name: str):
