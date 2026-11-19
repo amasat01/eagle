@@ -36,7 +36,7 @@ from .. import _alloc, _stream, arrays
 from .. import _core, _counters, _split
 from .._busy import Busy, BusyGuard
 from ..graph import get_node_kind
-from ..sidecar import sidecar_of
+from ..sidecar import prior_reads, sidecar_of
 
 __all__ = []
 
@@ -117,7 +117,6 @@ def _step_kernels(plugin, window, door, device, events="step", reverse="per_step
     kernel, _unit, cache_dir = source
     from hawk import Kernel
     from hawk.diff import step_vjp, tape
-    from hawk.diff.tape import taped_planes
 
     from .._plan_deploy import _hawk_plugins
 
@@ -141,11 +140,24 @@ def _step_kernels(plugin, window, door, device, events="step", reverse="per_step
     if reverse == "fused":      # all K steps of a window in one launch; a unit of its own (its kind differs)
         whole = Kernel(f"{step.name}_fused_vjp", step_vjp(kernel, steps_reverse="fused"))
         out.fused_vjp = _hawk_plugins([kernel, whole], targets, cache_dir, plugin.scalar_type)[1]
-    shapes = sidecar_of(built[0])["slot_shapes"]
-    out.taped = tuple((name, math.prod(shapes[name])) for name, _type in taped_planes(single))
     out.time = getattr(step, "time", None) if getattr(step, "time_step", None) else None
+    out.taped = _taped_planes(step, out.time, sidecar_of(built[0])["slot_shapes"])
     cache[key] = out
     return out
+
+
+def _taped_planes(step, time, shapes) -> tuple:
+    """``((plane, elements), ...)`` the taping twin of ``step`` records, in ``arg_spec`` order: the floating-point ``Mutable`` planes
+    the step overwrites and reads before it does (or the time plane), from hawk's description of the step; ``shapes`` is the
+    twin's ``slot_shapes``."""
+    from hawk.artifact import describe
+
+    doc = describe([step], targets=("host",))[step.name]
+    carried = prior_reads(doc) | {time}
+    written = set(doc["planes_written"])
+    return tuple((name, math.prod(shapes[name])) for role, name in doc["arg_spec"]
+                 if role == "mutable" and name in written and name in carried
+                 and doc["arg_dtypes"][name].startswith("float"))
 
 
 def array_module(device):
