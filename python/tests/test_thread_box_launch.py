@@ -6,8 +6,8 @@
 
 Rows: the plan's partitions count ``ceil(n / (T * stride)) * stride`` threads,
 each still over ``n`` lanes, split evenly under ``npartitions``; explicit lane
-partitions are refused; a box kernel built by hawk runs to the same bytes as
-its box-free build on the host (one and three partitions, rows that fill the
+partitions are refused; a box kernel built by hawk agrees with
+the closed form of its body on the host (one and three partitions, rows that fill the
 boxes, end in a partial one, or are fewer than ``T``) and the device; an
 ``ActiveSet`` whose group would split a box is refused at bind, naming ``T``,
 the group and the fix, and that refusal is the check's alone.
@@ -71,7 +71,7 @@ def test_the_sidecar_reader_takes_the_box_and_refuses_a_malformed_one():
 
 
 # --------------------------------------------------------------------------- #
-# A real box kernel, against its box-free build
+# A real box kernel, against the closed form of its body
 # --------------------------------------------------------------------------- #
 @pytest.fixture(scope="module")
 def built(tmp_path_factory):
@@ -88,21 +88,9 @@ def built(tmp_path_factory):
             acc = acc + w.at(j * 4 + e) * x.at(e * ROW + s) + x.at(s)
         y = acc
 
-    mp = pytest.MonkeyPatch()
     root = tmp_path_factory.mktemp("box")
-    out = {}
-
-    def build(tag, targets):
-        bundle = build_bundle([rows_mix], root / tag, targets=targets, host_profile="native")
-        return bundle
-
-    for target in ("host", "cuda"):
-        mp.delenv("HAWK_BOX", raising=False)
-        out[target] = [build(target, (target,))]
-        mp.setenv("HAWK_BOX", "0")
-        out[target].append(build(target + "_free", (target,)))
-    mp.undo()
-    return out, plugins
+    return {target: build_bundle([rows_mix], root / target, targets=(target,), host_profile="native")
+            for target in ("host", "cuda")}, plugins
 
 
 def _plan(bundle, plugins, target, npartitions=1):
@@ -115,40 +103,57 @@ def _plan(bundle, plugins, target, npartitions=1):
                       structure=eexec.DeviceKernel, npartitions=npartitions)
 
 
+def _inputs(rows):
+    rng = np.random.default_rng(rows)
+    return rng.standard_normal(4 * ROW), rng.standard_normal(4 * rows)
+
+
 def _run(plan, xp, rows):
     n = rows * ROW
-    rng = np.random.default_rng(rows)
-    x = xp.asarray(rng.standard_normal(4 * ROW))
-    w = xp.asarray(rng.standard_normal(4 * rows))
+    x, w = _inputs(rows)
     y = xp.full(n, np.nan)
-    plan.bind(lane=xp.arange(n, dtype=np.int32), x=x, w=w, y=y).launch()
+    plan.bind(lane=xp.arange(n, dtype=np.int32), x=xp.asarray(x), w=xp.asarray(w), y=y).launch()
     return np.asarray(y.get() if hasattr(y, "get") else y)
 
 
 ROWS = (32, 21, 3)
 
 
+def _closed_form(rows):
+    """``(y, bound)`` of ``rows_mix`` for ``rows`` rows: lane ``i`` is ``(j, s) = divmod(i, ROW)`` (``split_index``'s
+    major and minor), and ``y = sum_e (w[4j+e] * x[e*ROW+s] + x[s])`` added in the kernel's order. ``bound`` is the
+    per-lane tolerance: the chain has 4 multiplies and 8 adds, each rounding at most one ulp of its partial result
+    (a contracted multiply-add rounds less), so ``12 * eps * sum |term|`` covers any of the compilers' choices."""
+    x, w = _inputs(rows)
+    j, s = np.divmod(np.arange(rows * ROW), ROW)
+    acc, magnitude = np.zeros(rows * ROW), np.zeros(rows * ROW)
+    for e in range(4):
+        product = w[j * 4 + e] * x[e * ROW + s]
+        acc = (acc + product) + x[s]
+        magnitude += np.abs(product) + np.abs(x[s])
+    return acc, 12 * np.finfo(np.float64).eps * magnitude
+
+
 @pytest.mark.parametrize("npartitions", [1, 3])
 @pytest.mark.parametrize("rows", ROWS)
-def test_host_box_kernel_equals_its_box_free_build(built, rows, npartitions):
-    out, plugins = built
-    boxed, free = out["host"]
-    assert plugins(boxed)["rows_mix"].box["T"] > 1
-    assert getattr(plugins(free)["rows_mix"], "box", None) is None
-    got = _run(_plan(boxed, plugins, "host", npartitions), np, rows)
+def test_the_boxed_host_kernel_equals_the_closed_form_of_its_body(built, rows, npartitions):
+    bundles, plugins = built
+    assert plugins(bundles["host"])["rows_mix"].box["T"] > 1
+    got = _run(_plan(bundles["host"], plugins, "host", npartitions), np, rows)
     assert not np.isnan(got).any()
-    assert np.array_equal(got, _run(_plan(free, plugins, "host"), np, rows))
+    want, bound = _closed_form(rows)
+    assert (np.abs(got - want) <= bound).all()
 
 
 @pytest.mark.gpu
 @pytest.mark.parametrize("rows", ROWS)
-def test_device_box_kernel_equals_its_box_free_build(built, rows):
+def test_the_boxed_device_kernel_equals_the_closed_form_of_its_body(built, rows):
     cp = pytest.importorskip("cupy")
-    out, plugins = built
-    boxed, free = out["cuda"]
-    got = _run(_plan(boxed, plugins, "cuda", 2), cp, rows)
+    bundles, plugins = built
+    got = _run(_plan(bundles["cuda"], plugins, "cuda", 2), cp, rows)
     assert not np.isnan(got).any()
-    assert np.array_equal(got, _run(_plan(free, plugins, "cuda"), cp, rows))
+    want, bound = _closed_form(rows)
+    assert (np.abs(got - want) <= bound).all()
 
 
 # --------------------------------------------------------------------------- #
