@@ -244,7 +244,7 @@ class _Level:
         self.base = self.kind = None
         #: Mutable planes read before written (carried state): inputs as well as outputs
         self.state = tuple(state)
-        description = describe_kernel(kernel)
+        self.description = description = describe_kernel(kernel)
         self.finish = (description.get("finish") or {}).get("mask")
         internal = {FINISHED_PLANE} if self.finish is not None else frozenset()
         if self.per_cell:
@@ -344,6 +344,7 @@ class _Level:
             [] if self.state else floats,
             {n for _, n in self.spec} | set(nexts.values()),
             {n for _, n in kernel.arg_spec},
+            self.description.get("plane_names"),
         )
         child = _Level(
             self.owner, kernel, chain=(kernel,) if alone else (*self.chain, kernel),

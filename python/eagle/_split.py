@@ -401,18 +401,6 @@ def cells(plugin) -> tuple:
                  if c not in plugin._internal)
 
 
-def kernels_of(kernel) -> tuple:
-    """The stages of a traced hawk ``kernel`` as kernels of their own, in run order: ``()`` for a kernel that is one unit.
-    hawk's description states each stage's own unit document but no kernel for it, so a split kernel is refused by name."""
-    from hawk.artifact import describe
-
-    stages = describe([kernel], targets=("host",))[kernel.name].get("stages")
-    if stages:
-        raise ValueError(f"eagle: kernel {kernel.name!r} splits into {len(stages)} stages and hawk states a document, not a kernel, for each stage: "
-                         "lower it as one call")
-    return ()
-
-
 def _one_launch(stage, has_planes: bool) -> bool:
     """Whether the one ``stage`` of a kernel is that kernel's own launch: a stage only for the scratch planes of its wide
     values (hawk's placement), or a warp per lane (hawk's warp form: a team of 32 and nothing else)."""

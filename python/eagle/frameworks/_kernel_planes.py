@@ -93,10 +93,13 @@ class Signature:
         result every launch zero-fills and the bridge discards).
     """
 
-    def __init__(self, kernel, *, primals=(), who="eagle.frameworks", label=None):
-        self.name = label or kernel.name
-        self.arg_spec = tuple(tuple(pair) for pair in kernel.arg_spec)
-        self.description = description = describe_kernel(kernel, primals=primals)
+    def __init__(self, kernel=None, *, description=None, primals=(), who="eagle.frameworks", label=None):
+        """Of ``kernel`` (described here, beside ``primals`` for a derivative), or of a unit given as its ``description``
+        (hawk's document of a stage): a unit is bound as it is, never differentiated."""
+        unit = description is not None
+        self.description = description = description if unit else describe_kernel(kernel, primals=primals)
+        self.name = label or (description["kernel"] if unit else kernel.name)
+        self.arg_spec = tuple(tuple(pair) for pair in (description["arg_spec"] if unit else kernel.arg_spec))
         self.role = {name: role for role, name in self.arg_spec}
         self._ir = slot_types(description)
         #: reductions over samples ``{cell: op}``: the kernel writes rows (and a
@@ -125,11 +128,11 @@ class Signature:
         #: every launch but ``until_done``'s binds to 1: never a user input
         self.fused = ("lookup", FUSED_STEPS) in self.arg_spec
         #: (the built artifact declares them; the kernel's own ``arg_spec`` does not)
-        self.active = bool(getattr(getattr(getattr(kernel, "kind", None), "guard", None),
-                                   "active_set", False))
+        self.active = (MAP_PLANE in self.role if unit else
+                       bool(getattr(getattr(getattr(kernel, "kind", None), "guard", None), "active_set", False)))
         #: ``Mutable`` planes the kernel reads before it writes them (carried
         #: state): inputs as well as outputs
-        carried = _prior_reads(kernel, primals=primals)
+        carried = prior_reads(description) if unit else _prior_reads(kernel, primals=primals)
         self.state = tuple(n for r, n in self.arg_spec if r == "mutable" and n in carried)
         self.inputs = tuple(n for r, n in self.arg_spec
                             if (r in INPUT_ROLES or n in self.state)
@@ -215,9 +218,9 @@ def _prior_reads(kernel, *, primals=()):
     """The ``Mutable`` names ``kernel`` reads before writing them, per step (an
     automatic kernel's fused loop carries its outputs; its single step does not).
     A derivative is described beside ``primals``, as in :func:`describe_kernel`."""
-    from hawk.trace.steps import default_step
-
-    return prior_reads(describe_kernel(default_step(kernel), primals=primals))
+    step = getattr(kernel, "step", None)       # a default automatic kernel's single step, under the same name
+    single = step if step is not None and step.name == kernel.name else kernel
+    return prior_reads(describe_kernel(single, primals=primals))
 
 
 class ModeError(TypeError, ValueError):
