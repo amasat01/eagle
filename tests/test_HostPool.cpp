@@ -28,7 +28,7 @@
 #include <sched.h>
 #endif
 
-#if defined(__unix__)
+#if defined(__unix__) || defined(__APPLE__)
 #include <sys/wait.h>
 #include <unistd.h>
 #endif
@@ -301,18 +301,25 @@ TEST(HostPoolTest, AStageWorthAWakeTakesItsWholeBudget)
     EXPECT_EQ(stage.lanes(), host_max_threads());   // 120 us is past 2 * HOST_FLOOR_US: not the 3 that us / floor gives
 }
 
-#if defined(__linux__)
 namespace {
+#if defined(__linux__)
+using Mask = cpu_set_t;
+void readMask(Mask& mask) { sched_getaffinity(0, sizeof(mask), &mask); }
+#else
+struct Mask {};   // this system has no thread affinity masks: only which threads ran is recorded
+void readMask(Mask&) {}
+#endif
+
 std::mutex g_masks_mu;
-std::map<std::thread::id, cpu_set_t> g_masks;
+std::map<std::thread::id, Mask> g_masks;
 std::atomic<int> g_started{ 0 };
 
 // Notes this thread's affinity, and holds the lane until every lane of the job has started (or a second passes),
 // so each lane runs on a thread of its own.
 void noteMask(const void* ctx, std::uint32_t)
 {
-    cpu_set_t mask;
-    sched_getaffinity(0, sizeof(mask), &mask);
+    Mask mask;
+    readMask(mask);
     {
         std::lock_guard<std::mutex> lock(g_masks_mu);
         g_masks[std::this_thread::get_id()] = mask;
@@ -324,7 +331,7 @@ void noteMask(const void* ctx, std::uint32_t)
 }
 
 // The affinity masks of the workers (not the caller) that ran a job of @p lanes lanes on a team of @p lanes.
-std::map<std::thread::id, cpu_set_t> workerMasks(int lanes)
+std::map<std::thread::id, Mask> workerMasks(int lanes)
 {
     g_masks.clear();
     g_started.store(0);
@@ -341,6 +348,7 @@ std::map<std::thread::id, cpu_set_t> workerMasks(int lanes)
 
 TEST(HostPoolTest, EachWorkerHasOnePhysicalCoreToItself)
 {
+#if defined(__linux__)
     Deadline deadline(60);
     const int cores = physical_cores();
     if (cores < 3) GTEST_SKIP() << "needs three physical cores";
@@ -362,10 +370,14 @@ TEST(HostPoolTest, EachWorkerHasOnePhysicalCoreToItself)
             EXPECT_EQ(CPU_COUNT(&both), 0) << "two workers share a physical core";
         }
     }
+#else
+    GTEST_SKIP() << "this system has no thread affinity masks";
+#endif
 }
 
 TEST(HostPoolTest, AWorkerBeyondTheCoresKeepsTheWholeMask)
 {
+#if defined(__linux__)
     Deadline deadline(60);
     const int cores = physical_cores();
     if (cores < 3) GTEST_SKIP() << "needs three physical cores";
@@ -374,6 +386,9 @@ TEST(HostPoolTest, AWorkerBeyondTheCoresKeepsTheWholeMask)
     const auto masks = workerMasks(cores + 1);
     const bool any = std::any_of(masks.begin(), masks.end(), [&](const auto& m) { return CPU_EQUAL(&whole, &m.second); });
     EXPECT_TRUE(any) << "no worker ran with the whole mask";
+#else
+    GTEST_SKIP() << "this system has no thread affinity masks";
+#endif
 }
 
 TEST(HostPoolTest, ALaunchWakesOnlyTheWorkersOfItsTeam)
@@ -395,6 +410,7 @@ TEST(HostPoolTest, ALaunchWakesOnlyTheWorkersOfItsTeam)
 
 TEST(HostPoolTest, AfterABiggerTeamASmallerOneStillHasACorePerWorker)
 {
+#if defined(__linux__)
     Deadline deadline(60);
     const int cores = physical_cores();
     if (cores < 3) GTEST_SKIP() << "needs three physical cores";
@@ -411,8 +427,10 @@ TEST(HostPoolTest, AfterABiggerTeamASmallerOneStillHasACorePerWorker)
             EXPECT_EQ(CPU_COUNT(&both), 0) << "two workers share a physical core";
         }
     }
-}
+#else
+    GTEST_SKIP() << "this system has no thread affinity masks";
 #endif
+}
 
 TEST(HostPoolTest, TheBudgetFollowsTheSettingTheEnvironmentAndTheCores)
 {
@@ -497,7 +515,7 @@ TEST(HostPoolTest, ConcurrentCallersEqualASerialRunBitwise)
         }
 }
 
-#if defined(__unix__)
+#if defined(__unix__) || defined(__APPLE__)
 TEST(HostPoolTest, AForkedChildLaunchesOnAFreshPool)
 {
     Deadline deadline(60);

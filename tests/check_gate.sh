@@ -242,7 +242,7 @@ if [ "$BIN_RC" -ne 0 ]; then
 fi
 
 # C1/C4 — the summary line must exist and report ran >= 1.
-RAN=$(grep -oP '^\[==========\] \K[0-9]+(?= tests? from .* ran)' "$LOG" | tail -1)
+RAN=$(sed -n -E 's/^\[==========\] ([0-9]+) tests? from .* ran.*/\1/p' "$LOG" | tail -1)   # POSIX sed: BSD grep has no -P
 if [ -z "$RAN" ]; then
     red "[C4] no gtest summary line in $LOG — the suite never reported a run (aborted, crashed, or not a gtest binary)"
 elif [ "$RAN" -lt 1 ]; then
