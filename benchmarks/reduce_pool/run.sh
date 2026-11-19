@@ -23,7 +23,7 @@ echo "op team n pool_median pool_iqr omp_median omp_iqr bits_equal"
 for op in $ops; do
   arg=$op
   [ "$bench" = bench ] && arg=
-  for n in 10000 10000000; do
+  for n in 10000 1000000 10000000; do
     for team in 1 4 $all; do
       : > "$work/pool.txt"; : > "$work/omp.txt"
       for r in $(seq "$rounds"); do
