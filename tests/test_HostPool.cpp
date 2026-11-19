@@ -17,6 +17,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -169,6 +170,29 @@ TEST(HostPoolTest, ANestedOrConcurrentHostForRunsInPlaceWithTheSerialBits)
         for (std::thread& t : callers) t.join();
         EXPECT_EQ(concurrent, want) << "concurrent, team=" << team;
     }
+}
+
+/** @brief A team of one runs the loop on the caller without the pool: a floating-point block sum, its blocks fixed, gives
+ *  the same bits at team 1 as through the pool at team 7. */
+TEST(HostPoolTest, ATeamOfOneGivesThePoolBitsOfAFloatingPointBlockSum)
+{
+    Deadline deadline(120);
+    constexpr std::int64_t kBlocks = 97, kBlock = 1000;
+    std::vector<double> in(kBlocks * kBlock);
+    for (std::size_t i = 0; i < in.size(); ++i) in[i] = 1.0 / (1.0 + double(i % 977)) - 0.37;
+    const auto total = [&](int team) {
+        std::vector<double> sums(kBlocks);
+        hostFor(kBlocks, team, [&](std::int64_t b) {
+            double acc = 0.0;
+            for (std::int64_t i = b * kBlock; i < (b + 1) * kBlock; ++i) acc += in[i];
+            sums[b] = acc;
+        });
+        double sum = 0.0;
+        for (double s : sums) sum += s;
+        return sum;
+    };
+    const double one = total(1), seven = total(7);
+    EXPECT_EQ(std::memcmp(&one, &seven, sizeof one), 0) << one << " vs " << seven;
 }
 
 TEST(HostPoolTest, TheFloorKeepsLightStagesInPlace)

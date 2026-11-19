@@ -255,11 +255,11 @@ protected:
     }
 #endif
 
-    /** @brief Run the host scan exactly once.
+    /** @brief Run the host scan.
      *
-     *  Called by every thread of a caller's parallel region, the scan (which prefixes its block sums in place, so a
-     *  second run over the same buffers corrupts them) runs on one thread inside an ``omp single`` block; the block's
-     *  barrier publishes its results to the scatter that follows. */
+     *  Called from inside a parallel region on a shared slice (every thread of the region calls it), the scan runs
+     *  once, on one thread under ``omp single``: it prefixes its block sums in place, so a second run over the same
+     *  buffers would corrupt them. The block's barrier publishes the results to the scatter that follows. */
     void scanHost_()
     {
         if (omp_in_parallel()) {

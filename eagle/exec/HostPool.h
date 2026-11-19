@@ -424,7 +424,8 @@ private:
 /**
  * @brief Run ``body(i)`` for ``i`` in ``[0, count)`` on eagle's host pool with at most ``team`` threads, the caller
  *        included: the range is cut into contiguous blocks, a few per thread so a late thread takes fewer of them.
- *        ``body`` must not throw. In place, as one block on the calling thread, when the team is one, when the pool
+ *        ``body`` must not throw. With a team of one the loop runs directly on the caller and never enters the pool.
+ *        In place, as one block on the calling thread, when the pool
  *        is serving another call, and when the caller is a pool worker or inside a lane (a nested loop has a team of
  *        one, as a nested OpenMP region does): the pool's lanes are never used twice at once. Each ``i`` runs once,
  *        so a body that writes only its own element gives the same bits for every team.
@@ -432,6 +433,10 @@ private:
 template <class F>
 inline void hostFor(std::int64_t count, int team, const F& body) {
     if (count <= 0) return;
+    if (team <= 1) {
+        for (std::int64_t i = 0; i < count; ++i) body(i);
+        return;
+    }
     const std::int64_t lanes = std::min<std::int64_t>(count, std::int64_t(std::max(team, 1)) * 4);
     const std::int64_t block = (count + lanes - 1) / lanes;
     struct Range {
