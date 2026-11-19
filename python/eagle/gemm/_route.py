@@ -1,7 +1,6 @@
 """The opt-in matmul route of a contraction kernel: built under
-``contraction="gemm"``, a kernel hawk recognises as
-ONE dense two-operand contraction runs as the lowered GEMM
-(:func:`eagle.gemm.plan.lower_dense_gemm`'s plans), forward and adjoint. Its
+``contraction="gemm"``, a kernel whose unit hawk's description (``contractions``) states as
+ONE matrix product the library chose to run beside the kernel runs as that GEMM, forward and adjoint. Its
 values are within a few ulp of the kernel's own loop (another summing
 order), not the same bits, so the route is never taken unless asked.
 
@@ -17,73 +16,102 @@ import threading
 
 from .. import _alloc, _stream, arrays
 from ..roles import OUTPUT_ROLES
-from .plan import PlanUnavailable, _check_lowerable, _gemm_plan
+from .plan import (
+    _DENSE_GEMM_DETERMINISM,
+    _DENSE_GEMM_MECHANISM_NAME,
+    LoweredPlan,
+    WorkspaceSpec,
+    matmul_step,
+)
+
+#: ``contractions`` product flags (hawk states them): the operand or the product is read or written transposed, or accumulated
+_TRANS_A, _TRANS_B, _TRANS_C, _ACCUMULATE = 1, 2, 4, 8
+#: an extent that depends on the launch's lane count
+_PER_LANE = -1
 
 
 def attach(plugin, kernel) -> None:
-    """Route ``plugin`` (built from ``kernel``) through the GEMM when hawk
-    recognises one dense two-operand contraction with one output whose lanes
-    are its result in row-major order; anything else stays the kernel."""
-    from hawk.passes.contraction import recognize
+    """Route ``plugin`` (built from ``kernel``) through the GEMM when hawk's description of ``kernel`` for the device states
+    its unit as one matrix product on the ``gemm`` route that writes the kernel's one output; anything else stays the kernel."""
+    from hawk.artifact import describe
 
-    record = recognize(kernel)
-    if record is None or record.operand_class != "gemm" or len(record.outputs) != 1:
+    doc = describe([kernel], targets=("cuda",))[kernel.name]
+    found = [c for c in doc.get("contractions") or () if c["unit"] == kernel.name]
+    if len(found) != 1 or found[0]["route"] != "gemm" or len(found[0]["products"]["calls"]) != 1:
         return
-    try:
-        _check_lowerable(record, "forward")
-    except PlanUnavailable:
+    route = _Route(doc["arg_spec"], found[0]["products"], plugin.scalar_type or "float64")
+    if set(doc["planes_written"]) != {route.out}:
         return
-    major = record.lane_major
-    if major is None:
-        return
-    plugin._gemm = route = _Route(record, major, plugin.scalar_type or "float64")
+    plugin._gemm = route
     route.vjp = _VjpPlugin(plugin, route)
 
 
-def _free_size(op):
-    """The declared extent of ``op``'s free axis (``None`` when it is the run's)."""
-    sizes = [size for label, size, _stride in op.dims if label != op.reduce_dim]
-    return sizes[0] if len(sizes) == 1 and isinstance(sizes[0], int) else None
-
-
 class _Route:
-    """The record, which operand is the lane-major one, and the two plans per
-    sample count (a plane counted by the launch, ``Staged[..., n_samples]``,
-    has a run-time free extent: ``n // fan-in``)."""
+    """The product of a unit (its operands ``a`` and ``b`` and its output, named from the call's slots) and the two plans per
+    sample count (a plane counted by the launch has an extent that is the lane count over the call's fan-in)."""
 
-    def __init__(self, record, major, dtype):
-        self.record, self.dtype = record, dtype
-        self.out = record.outputs[0][0]
-        self.inputs = tuple(op.name for op in record.operands)
-        self.lane_flat = major == record.operands[1].name
+    def __init__(self, arg_spec, products, dtype):
+        names = [nm for _role, nm in arg_spec]
+        (self.call,) = products["calls"]
+        self.fanin, self.dtype = products["lane_fanin"], dtype
+        self.a, self.b, self.out = (names[self.call[k]] for k in ("a_slot", "b_slot", "c_slot"))
+        self.inputs = (self.a, self.b)
         self._plans, self._lock = {}, threading.Lock()
 
-    def _resolved(self, n):
-        """The record with every run-time extent made the one ``n`` gives."""
-        from dataclasses import replace
+    def _extent(self, value, n):
+        """``value`` as an extent for ``n`` lanes."""
+        if value != _PER_LANE:
+            return value
+        if not self.fanin:
+            raise ValueError(f"eagle.gemm: {self.out!r}'s product has an extent counted by the launch but states no lane fan-in")
+        return n // self.fanin
 
-        ops = []
-        for op in self.record.operands:
-            if all(isinstance(size, int) for _l, size, _s in op.dims):
-                ops.append(op)
-                continue
-            other = next(o for o in self.record.operands if o is not op)
-            free = n // _free_size(other)
-            ops.append(replace(op, dims=tuple(
-                (label, free if label != op.reduce_dim else size, stride)
-                for label, size, stride in op.dims)))
-        return replace(self.record, operands=tuple(ops))
+    def lanes(self):
+        """The lanes of the product (its output's elements), ``None`` when the launch counts them."""
+        rows, cols = self.call["c_rows"], self.call["c_cols"]
+        return None if _PER_LANE in (rows, cols) else rows * cols
 
     def plans(self, n):
-        """``(forward, adjoint)`` for ``n`` lanes, built once per count."""
+        """``(forward, adjoint)`` for ``n`` lanes, built once per count.
+
+        Forward is the call as stated: ``C = op(A) @ op(B)``, ``C`` stored transposed when flagged. The adjoint follows from it
+        (``dA = dC @ opB^T``, ``dB = opA^T @ dC``, each stored in its operand's own layout), accumulating into the gradients."""
         with self._lock:
             held = self._plans.get(n)
             if held is None:
-                rec = self._resolved(n)
-                held = self._plans[n] = tuple(
-                    _gemm_plan(rec, d, self.dtype, lane_flat=self.lane_flat, accumulate=(d == "adjoint"))
-                    for d in ("forward", "adjoint"))
+                held = self._plans[n] = (self._forward(n), self._adjoint(n))
         return held
+
+    def _shapes(self, n):
+        c = self.call
+        return tuple((self._extent(c[f"{x}_rows"], n), self._extent(c[f"{x}_cols"], n)) for x in "abc")
+
+    def _forward(self, n):
+        a_shape, b_shape, c_shape = self._shapes(n)
+        flags = self.call["flags"]
+        return LoweredPlan(
+            steps=(matmul_step(self.out, a=self.a, b=self.b, out=self.out, transpose_a=bool(flags & _TRANS_A),
+                               transpose_b=bool(flags & _TRANS_B), transpose_out=bool(flags & _TRANS_C),
+                               accumulate=bool(flags & _ACCUMULATE)),),
+            mechanism=_DENSE_GEMM_MECHANISM_NAME, determinism=_DENSE_GEMM_DETERMINISM,
+            inputs=(WorkspaceSpec(self.a, a_shape, self.dtype), WorkspaceSpec(self.b, b_shape, self.dtype)),
+            outputs=(WorkspaceSpec(self.out, c_shape, self.dtype),))
+
+    def _adjoint(self, n):
+        a_shape, b_shape, c_shape = self._shapes(n)
+        flags = self.call["flags"]
+        ta, tb, tc = bool(flags & _TRANS_A), bool(flags & _TRANS_B), bool(flags & _TRANS_C)
+        bar = f"{self.out}_bar"
+        return LoweredPlan(
+            steps=(
+                matmul_step(f"{self.a}_bar", a=bar, b=self.b, out=f"{self.a}_bar", transpose_a=tc, transpose_b=not tb,
+                            transpose_out=ta, accumulate=True),
+                matmul_step(f"{self.b}_bar", a=self.a, b=bar, out=f"{self.b}_bar", transpose_a=not ta, transpose_b=tc,
+                            transpose_out=tb, accumulate=True)),
+            mechanism=_DENSE_GEMM_MECHANISM_NAME, determinism=_DENSE_GEMM_DETERMINISM,
+            inputs=(WorkspaceSpec(bar, c_shape, self.dtype), WorkspaceSpec(self.a, a_shape, self.dtype),
+                    WorkspaceSpec(self.b, b_shape, self.dtype)),
+            outputs=(WorkspaceSpec(f"{self.a}_bar", a_shape, self.dtype), WorkspaceSpec(f"{self.b}_bar", b_shape, self.dtype)))
 
     def matrices(self, planes, n, adjoint):
         """The plan's buffers as views of the bound planes (no copy): an
@@ -216,11 +244,11 @@ def run(p, kw):
     planes = {nm: _placed(kw[nm], route.dtype, xp) for nm in route.inputs}
     out = kw.get(route.out)
     if out is None:
-        sizes = [_free_size(op) for op in route.record.operands]
-        if None in sizes:
+        lanes = route.lanes()
+        if lanes is None:
             raise ValueError(f"eagle.plan.run: {p.plugin.name!r} reads a plane counted by the launch, so the "
                              f"count comes from the output: pass {route.out}= (one value per lane)")
-        out = _alloc.zeros(xp, sizes[0] * sizes[1], dtype=route.dtype)
+        out = _alloc.zeros(xp, lanes, dtype=route.dtype)
     planes[route.out] = _placed(out, route.dtype, xp)
     for role, nm in p.plugin.arg_spec:
         if role in OUTPUT_ROLES and nm != route.out:
