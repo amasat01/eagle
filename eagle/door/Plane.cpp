@@ -42,6 +42,10 @@ std::uint64_t banded_cell(double x, const std::string& what) {
 
 }  // namespace
 
+namespace {
+bool exported_by(const eg_ctx& ctx, const DLManagedTensorVersioned* tensor);
+}  // namespace
+
 /** @brief eg_plane_wrap: check the tensor, then take ownership of it. */
 void plane_wrap(eg_ctx& ctx, DLManagedTensorVersioned* tensor, eg_plane** out) {
     if (out == nullptr) refuse(EG_BAD_REQUEST, "eg_plane_wrap: out is NULL");
@@ -50,6 +54,9 @@ void plane_wrap(eg_ctx& ctx, DLManagedTensorVersioned* tensor, eg_plane** out) {
     if (tensor->version.major != DLPACK_MAJOR_VERSION)
         refuse(EG_NOT_WRITTEN, "eg_plane_wrap: DLPack major " + std::to_string(tensor->version.major) +
                " (this eagle reads major " + std::to_string(DLPACK_MAJOR_VERSION) + ")");
+    if (exported_by(ctx, tensor))
+        refuse(EG_BAD_REQUEST, "eg_plane_wrap: the tensor is an export of this context (its release would need the "
+                               "context a call is holding); wrap the plane's handle instead");
     const DLTensor& t = tensor->dl_tensor;
     if (t.device.device_type == kDLCUDA && ctx.dev.ordinal >= 0) {
         if (t.device.device_id != ctx.dev.ordinal)
@@ -180,22 +187,18 @@ struct Export {
 };
 
 /** @brief The consumer's release: wait for a call in progress on the context, drop the plane's reference, free the export.
- *  The last access to the context is the store that ends the wait for others, so a context freed right after is not touched. */
+ *  The last access to the context is the unlock, so a context freed right after is not touched. */
 void export_release(DLManagedTensorVersioned* tensor) {
     auto* e = static_cast<Export*>(tensor->manager_ctx);
     eg_ctx& ctx = *e->ctx;
-    bool idle = false;
-    while (!ctx.busy.compare_exchange_weak(idle, true, std::memory_order_acquire)) {
-        idle = false;
-        std::this_thread::yield();
-    }
+    Hold hold(ctx);
     --ctx.exports;
     try {
         plane_release(ctx, e->plane);
     } catch (...) {
     }
     const bool last = ctx.closed && ctx.exports == 0;
-    ctx.busy.store(false, std::memory_order_release);
+    hold.release();
     delete e;
     if (!last) return;
     try {
@@ -203,6 +206,11 @@ void export_release(DLManagedTensorVersioned* tensor) {
     } catch (...) {
     }
     delete &ctx;
+}
+
+/** @brief Whether @p tensor is an export (eg_plane_dlpack) of @p ctx. */
+bool exported_by(const eg_ctx& ctx, const DLManagedTensorVersioned* tensor) {
+    return tensor->deleter == export_release && static_cast<const Export*>(tensor->manager_ctx)->ctx == &ctx;
 }
 }  // namespace
 

@@ -331,67 +331,6 @@ static void check_foreign_handle(eg_ctx* ctx, eg_unit* unit) {
     check(tx.deleted == 1 && ty.deleted == 1, "eg_ctx_free runs the deleter of a plane still held");
 }
 
-struct busy_run {
-    eg_ctx* ctx;
-    eg_plan* plan;
-    eg_status status;
-};
-
-static void* busy_launch(void* arg) {
-    struct busy_run* r = arg;
-    uint64_t tiles = 0;
-    r->status = eg_launch(r->ctx, r->plan, &tiles);
-    return NULL;
-}
-
-/* A second thread entering a context while a launch runs is refused. */
-static void check_second_thread(eg_ctx* ctx) {
-    eg_unit* wait = NULL;
-    double x[2] = { 0, 0 }, y[2] = { 0, 0 };
-    struct tensor tx, ty;
-    tensor_init(&tx, x, 2, 64);
-    tensor_init(&ty, y, 2, 64);
-    eg_plane *px = NULL, *py = NULL;
-    eg_plan* p = NULL;
-    const double a = 1.0, b = 0.0;
-    int ready = load(ctx, "wait", 0xB2, &wait) == EG_OK && eg_plane_wrap(ctx, &tx.managed, &px) == EG_OK &&
-                eg_plane_wrap(ctx, &ty.managed, &py) == EG_OK &&
-                plan(ctx, wait, EG_STRUCTURE_HOST_SERIAL, 2, 0, NULL, NULL, &p) == EG_OK &&
-                bind(ctx, p, py, px, &a, &b) == EG_OK;
-    check(ready, "busy fixture: wait unit loaded, planned and bound");
-    if (!ready) return;
-    volatile double* flag = y;
-    struct busy_run r = { ctx, p, -1 };
-    pthread_t th;
-    pthread_create(&th, NULL, busy_launch, &r);
-    struct timespec t0, t;
-    clock_gettime(CLOCK_MONOTONIC, &t0);
-    int entered = 0;
-    for (;;) {
-        __atomic_thread_fence(__ATOMIC_SEQ_CST);
-        if (flag[1] != 0.0) { entered = 1; break; }
-        clock_gettime(CLOCK_MONOTONIC, &t);
-        if (t.tv_sec - t0.tv_sec > 10) break;
-    }
-    struct eg_ctx_info info;
-    memset(&info, 0, sizeof(info));
-    info.struct_size = sizeof(info);
-    const eg_status during = eg_ctx_info(ctx, &info);
-    size_t len = 0;
-    const eg_status err_during = eg_error(ctx, NULL, 0, &len);
-    __atomic_thread_fence(__ATOMIC_SEQ_CST);
-    flag[0] = 1.0;
-    __atomic_thread_fence(__ATOMIC_SEQ_CST);
-    pthread_join(th, NULL);
-    check(entered && during == EG_BAD_REQUEST && err_during == EG_BAD_REQUEST,
-          "second thread entering a busy context refused BAD_REQUEST");
-    check(r.status == EG_OK && eg_ctx_info(ctx, &info) == EG_OK, "the first thread's launch finished OK");
-    eg_plan_free(ctx, p);
-    eg_plane_free(ctx, px);
-    eg_plane_free(ctx, py);
-    eg_unit_free(ctx, wait);
-}
-
 /* Load "axpb" from @p path; BAD_REQUEST with a reason holding @p need1 and @p need2. */
 static int refused_with(eg_ctx* ctx, const char* path, const char* need1, const char* need2) {
     const char* saved = library_path;
@@ -3256,6 +3195,209 @@ static void check_segmented_runner(eg_ctx* ctx) {
     eg_unit_free(ctx, k0), eg_unit_free(ctx, k1), eg_unit_free(ctx, cls), eg_unit_free(ctx, dk0), eg_unit_free(ctx, dk1), eg_unit_free(ctx, dsw), eg_unit_free(ctx, dgf);
 }
 
+/* ---- calls on one context queue; a reason belongs to its thread -------- */
+
+struct queued {
+    eg_ctx* ctx;
+    eg_plan* plan;
+    eg_status status;
+    int done;
+};
+
+static void* queued_launch(void* arg) {
+    struct queued* r = arg;
+    uint64_t tiles = 0;
+    r->status = eg_launch(r->ctx, r->plan, &tiles);
+    return NULL;
+}
+
+static void* queued_info(void* arg) {
+    struct queued* r = arg;
+    struct eg_ctx_info info;
+    memset(&info, 0, sizeof(info));
+    info.struct_size = sizeof(info);
+    r->status = eg_ctx_info(r->ctx, &info);
+    __atomic_store_n(&r->done, 1, __ATOMIC_SEQ_CST);
+    return NULL;
+}
+
+/* A second thread entering a context while a launch runs waits for it, then runs. */
+static void check_second_thread(eg_ctx* ctx) {
+    eg_unit* wait = NULL;
+    double x[2] = { 0, 0 }, y[2] = { 0, 0 };
+    struct tensor tx, ty;
+    tensor_init(&tx, x, 2, 64);
+    tensor_init(&ty, y, 2, 64);
+    eg_plane *px = NULL, *py = NULL;
+    eg_plan* p = NULL;
+    const double a = 1.0, b = 0.0;
+    int ready = load(ctx, "wait", 0xB2, &wait) == EG_OK && eg_plane_wrap(ctx, &tx.managed, &px) == EG_OK &&
+                eg_plane_wrap(ctx, &ty.managed, &py) == EG_OK &&
+                plan(ctx, wait, EG_STRUCTURE_HOST_SERIAL, 2, 0, NULL, NULL, &p) == EG_OK &&
+                bind(ctx, p, py, px, &a, &b) == EG_OK;
+    check(ready, "queue fixture: wait unit loaded, planned and bound");
+    if (!ready) return;
+    volatile double* flag = y;
+    struct queued first = { ctx, p, -1, 0 }, second = { ctx, NULL, -1, 0 };
+    pthread_t th, th2;
+    pthread_create(&th, NULL, queued_launch, &first);
+    struct timespec t0, t;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    int entered = 0;
+    for (;;) {
+        __atomic_thread_fence(__ATOMIC_SEQ_CST);
+        if (flag[1] != 0.0) { entered = 1; break; }
+        clock_gettime(CLOCK_MONOTONIC, &t);
+        if (t.tv_sec - t0.tv_sec > 10) break;
+    }
+    pthread_create(&th2, NULL, queued_info, &second);
+    const struct timespec pause = { 0, 200 * 1000 * 1000 };
+    nanosleep(&pause, NULL);
+    const int waited = __atomic_load_n(&second.done, __ATOMIC_SEQ_CST) == 0;
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    flag[0] = 1.0;
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    pthread_join(th, NULL);
+    pthread_join(th2, NULL);
+    check(entered && waited && second.status == EG_OK, "a second thread waits for the running call, then runs OK");
+    check(first.status == EG_OK, "the first thread's launch finished OK");
+    eg_plan_free(ctx, p);
+    eg_plane_free(ctx, px);
+    eg_plane_free(ctx, py);
+    eg_unit_free(ctx, wait);
+}
+
+enum { TICK_THREADS = 8, TICK_LAUNCHES = 250 };
+
+struct ticking {
+    eg_ctx* ctx;
+    eg_plan* plan;
+    int failed;
+};
+
+static void* tick_launches(void* arg) {
+    struct ticking* r = arg;
+    for (int i = 0; i < TICK_LAUNCHES; ++i) {
+        uint64_t tiles = 0;
+        if (eg_launch(r->ctx, r->plan, &tiles) != EG_OK) ++r->failed;
+    }
+    return NULL;
+}
+
+/* A plan of "tick" on @p ctx over @p cell (one int64 cell); NULL when it cannot be made. */
+static eg_plan* tick_plan(eg_ctx* ctx, eg_unit* tick, struct tensor* t, int64_t* cell) {
+    eg_plane* pc = wrap(ctx, t, cell, 1, kDLInt, 64);
+    eg_plan* p = NULL;
+    const int32_t slot = 0;
+    eg_plane* const planes[1] = { pc };
+    struct eg_bind_desc d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    d.n_planes = 1;
+    d.plane_slots = &slot;
+    d.planes = planes;
+    const int ok = pc != NULL && plan(ctx, tick, EG_STRUCTURE_HOST_SERIAL, 1, 0, NULL, NULL, &p) == EG_OK &&
+                   eg_bind(ctx, p, &d) == EG_OK;
+    eg_plane_free(ctx, pc);
+    if (!ok) {
+        eg_plan_free(ctx, p);
+        return NULL;
+    }
+    return p;
+}
+
+struct reasoner {
+    eg_ctx* ctx;
+    int step;     /* 0 none, 1: A has failed, 2: B has finished, 3: A may read */
+    char text[256];
+};
+
+static void failing_call(eg_ctx* ctx, int variant) {
+    eg_plane* out = NULL;
+    if (variant == 0) eg_plane_wrap(ctx, NULL, &out);
+    else eg_plane_wrap(ctx, NULL, NULL);
+}
+
+static void wait_step(struct reasoner* r, int step) {
+    while (__atomic_load_n(&r->step, __ATOMIC_SEQ_CST) < step) sched_yield();
+}
+
+static void* reason_a(void* arg) {
+    struct reasoner* r = arg;
+    failing_call(r->ctx, 0);
+    __atomic_store_n(&r->step, 1, __ATOMIC_SEQ_CST);
+    wait_step(r, 3);
+    size_t len = 0;
+    r->text[0] = '\0';
+    if (eg_error(r->ctx, r->text, sizeof(r->text), &len) != EG_OK) r->text[0] = '\0';
+    return NULL;
+}
+
+static void* reason_b(void* arg) {
+    struct reasoner* r = arg;
+    wait_step(r, 1);
+    failing_call(r->ctx, 1);
+    __atomic_store_n(&r->step, 2, __ATOMIC_SEQ_CST);
+    return NULL;
+}
+
+/* Planes of a context's own export are refused: their release would wait on the call that holds the context. */
+static void check_own_export(eg_ctx* ctx) {
+    double v[2] = { 0, 0 };
+    struct tensor t;
+    eg_plane* pl = wrap(ctx, &t, v, 2, kDLFloat, 64);
+    struct DLManagedTensorVersioned* exported = NULL;
+    eg_plane* again = NULL;
+    const int made = pl != NULL && eg_plane_dlpack(ctx, pl, &exported) == EG_OK;
+    check(made && eg_plane_wrap(ctx, exported, &again) == EG_BAD_REQUEST && again == NULL &&
+              reason_has(ctx, "an export of this context"),
+          "wrapping a context's own export is refused BAD_REQUEST (its release would wait on itself)");
+    if (made) exported->deleter(exported);
+    eg_plane_free(ctx, pl);
+}
+
+static void check_queued_calls(eg_ctx* ctx, eg_ctx* other) {
+    eg_unit *tick = NULL, *tick_other = NULL;
+    check(load(ctx, "tick", 0xB8, &tick) == EG_OK && load(other, "tick", 0xB8, &tick_other) == EG_OK, "eg_unit_load tick on two contexts");
+    if (tick == NULL || tick_other == NULL) return;
+    int64_t cell = 0, cell_other = 0;
+    struct tensor t, t_other;
+    eg_plan* p = tick_plan(ctx, tick, &t, &cell);
+    eg_plan* p_other = tick_plan(other, tick_other, &t_other, &cell_other);
+    check(p != NULL && p_other != NULL, "tick plans bound on two contexts");
+    if (p == NULL || p_other == NULL) return;
+    struct ticking many[TICK_THREADS], lone[2];
+    pthread_t th[TICK_THREADS], th_lone[2];
+    for (int i = 0; i < TICK_THREADS; ++i) many[i] = (struct ticking){ ctx, p, 0 };
+    for (int i = 0; i < TICK_THREADS; ++i) pthread_create(&th[i], NULL, tick_launches, &many[i]);
+    for (int i = 0; i < TICK_THREADS; ++i) pthread_join(th[i], NULL);
+    int failed = 0;
+    for (int i = 0; i < TICK_THREADS; ++i) failed += many[i].failed;
+    check(failed == 0 && cell == (int64_t)TICK_THREADS * TICK_LAUNCHES,
+          "8 threads x 250 launches on one context: every launch ran alone, the cell holds exactly 2000");
+    cell = 0;
+    lone[0] = (struct ticking){ ctx, p, 0 };
+    lone[1] = (struct ticking){ other, p_other, 0 };
+    for (int i = 0; i < 2; ++i) pthread_create(&th_lone[i], NULL, tick_launches, &lone[i]);
+    for (int i = 0; i < 2; ++i) pthread_join(th_lone[i], NULL);
+    check(lone[0].failed == 0 && lone[1].failed == 0 && cell == TICK_LAUNCHES && cell_other == TICK_LAUNCHES,
+          "two contexts launched at once from two threads both count exactly");
+    struct reasoner r = { ctx, 0, "" };
+    pthread_t ta, tb;
+    pthread_create(&ta, NULL, reason_a, &r);
+    pthread_create(&tb, NULL, reason_b, &r);
+    wait_step(&r, 2);
+    __atomic_store_n(&r.step, 3, __ATOMIC_SEQ_CST);
+    pthread_join(ta, NULL);
+    pthread_join(tb, NULL);
+    check(strstr(r.text, "tensor is NULL") != NULL, "a thread's reason survives another thread's failing call with another reason");
+    check_own_export(ctx);
+    eg_plan_free(ctx, p);
+    eg_plan_free(other, p_other);
+    eg_unit_free(ctx, tick);
+    eg_unit_free(other, tick_other);
+}
+
 int main(int argc, char** argv) {
     if (argc != 5) {
         fprintf(stderr, "usage: %s <fixture> <wrong size> <no size block> <v1 tag>\n", argv[0]);
@@ -3332,6 +3474,12 @@ int main(int argc, char** argv) {
     check_bad_input(ctx, unit);
     check_foreign_handle(ctx, unit);
     check_second_thread(ctx);
+    {
+        eg_ctx* other = make_ctx();
+        check(other != NULL, "eg_ctx_new second host context");
+        if (other != NULL) check_queued_calls(ctx, other);
+        eg_ctx_free(other);
+    }
     check_size_block(ctx, argv + 2);
     check_fork(ctx);
 

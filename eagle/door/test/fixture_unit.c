@@ -9,7 +9,8 @@
  *    HostTeam drives (params: y and x as 32-byte scalar handles, a and b by
  *    address).
  *  - "wait": the same slots; its entry marks y[1] = 1 on entry and returns
- *    once the test sets y[0] (or after a few seconds): it holds a context busy.
+ *    once the test sets y[0] (or after a few seconds): it holds a context for a call to queue behind.
+ *  - "tick": adds 1 to its one LOOKUP cell (a plain, non-atomic increment): exact only when launches never overlap.
  *  - "axpb_split": the "axpb" body named as a one-stage split unit.
  *  - "count1a", "count3a": the same finishing units reading an active set: the
  *    two LOOKUP slots after the counter hold the live sample slots (int32)
@@ -69,6 +70,7 @@ struct fixture_mirror {
 
 EG_FIXTURE_EXPORT void axpb_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void wait_host(void* const* params, int64_t base, int64_t count, int64_t n);
+EG_FIXTURE_EXPORT void tick_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void count1_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void count3_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void count1a_host(void* const* params, int64_t base, int64_t count, int64_t n);
@@ -132,6 +134,13 @@ void wait_host(void* const* params, int64_t base, int64_t count, int64_t n) {
         clock_gettime(CLOCK_MONOTONIC, &t);
         if (t.tv_sec - t0.tv_sec > 10) return;
     }
+}
+
+void tick_host(void* const* params, int64_t base, int64_t count, int64_t n) {
+    (void)base;
+    (void)count;
+    (void)n;
+    ++*(int64_t*)((const struct fixture_handle*)params[0])->data;
 }
 
 /* Up to `steps` steps of every live sample served by threads [base, base + count); `map` is the
@@ -567,6 +576,15 @@ static const struct eg_unit_meta unit_wait = {
     .body = &body,
     .launch = &launch,
 };
+
+SLOT_OF(slot_cell, EG_ROLE_LOOKUP, EG_DTYPE_INT64, "cell");
+static const struct eg_unit_slot* const tick_slots[] = { &slot_cell };
+static const struct eg_unit_body tick_body = {
+    .struct_size = sizeof(struct eg_unit_body), .access = EG_ACCESS_SAMPLE_LOCAL, .n_slots = 1, .slots = tick_slots };
+static const struct eg_unit_meta unit_tick = {
+    .struct_size = sizeof(struct eg_unit_meta), .name = "tick", .digest = DIGEST(0xB8), .pattern = EG_PATTERN_PURE,
+    .scalar_type = EG_SCALAR_FLOAT64, .host_entry = "tick_host", .device_image_format = EG_IMAGE_NONE,
+    .body = &tick_body, .launch = &launch };
 
 static const struct eg_unit_ref stage_ref = {
     .struct_size = sizeof(struct eg_unit_ref), .name = "axpb", .digest = DIGEST(0xA1) };
@@ -1023,7 +1041,7 @@ static const struct eg_unit_launch launch_auto_active_none = { .struct_size = si
 OTHER_AUTO(auto_steps, "auto_steps", 0xB6, sga_steps_slots, 7, 5, finish_auto);
 OTHER_AUTO(auto_k3, "auto_k3", 0xB7, sga_auto_slots, 6, 4, finish3);
 
-static const struct eg_unit_meta* const units[] = { &unit_axpb, &unit_wait, &unit_split, &unit_count1,
+static const struct eg_unit_meta* const units[] = { &unit_axpb, &unit_wait, &unit_tick, &unit_split, &unit_count1,
                                                     &unit_count3, &unit_count1a, &unit_count3a, &unit_countA, &unit_countAa, &unit_vecs, &unit_count1i,
                                                     &unit_count1ia, &unit_count1e, &unit_lanes, &unit_prefix, &unit_count1g, &unit_widemul,
                                                     &unit_gathb, &unit_gatha, &unit_gathn, &unit_boxed, &unit_boxbad, &unit_shr, &unit_cells, &unit_keyed,
@@ -1036,7 +1054,7 @@ static const struct eg_library_meta library = {
     .struct_size = sizeof(struct eg_library_meta),
     .schema_major = EG_META_SCHEMA_MAJOR,
     .schema_minor = 0,
-    .n_units = 51,
+    .n_units = 52,
     .units = units,
 };
 

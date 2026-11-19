@@ -26,11 +26,13 @@
  *  - No global mutable state: everything lives in a context. The one process
  *    resource is the host worker pool, shared by all contexts; each context
  *    states its own thread count, which is passed per launch. A context and
- *    every handle made from it are used by ONE thread at a time; a second
- *    thread entering the same context while a call runs is refused
- *    (EG_BAD_REQUEST), never raced. That refusal carries NO reason: the
- *    stored reason belongs to the thread inside and is left as it was, so
- *    ``eg_error`` reports none for it. Different contexts run concurrently.
+ *    its handles may be used from any number of threads: calls on one context
+ *    run one at a time, a second thread waiting until the running call returns
+ *    (no order between waiting threads). ``eg_error`` reports the reason of the
+ *    CALLING thread's own last non-OK call, so another thread's call never
+ *    overwrites it. A plane's deleter runs inside a call and must not call the
+ *    door on that context (it is refused BAD_REQUEST, not waited for).
+ *    Different contexts run concurrently.
  *  - Fork: a context belongs to the process that made it. In a forked child
  *    every call on it is refused except ``eg_error`` and ``eg_ctx_free``
  *    (which then frees host memory only: no device call, no thread join).
@@ -486,11 +488,11 @@ eg_status eg_ctx_new(const struct eg_ctx_settings* settings, eg_ctx** out);
 eg_status eg_ctx_free(eg_ctx* ctx);
 
 /**
- * The reason of the last non-OK status on ``ctx``, UTF-8, two-call protocol:
+ * The reason of the calling thread's last non-OK status on ``ctx``, UTF-8, two-call protocol:
  * ``*len`` gets the byte count without the terminator; with ``cap > len``
  * the text and a terminator are written. The reason stays until the next
- * non-OK call on ``ctx``; a refusal of ``eg_error`` itself never overwrites
- * it, and a busy-context refusal writes none. With no reason stored,
+ * non-OK call of this thread on ``ctx``; a refusal of ``eg_error`` itself never
+ * overwrites it. With no reason stored for this thread,
  * ``*len`` is 0. The ONE function that reads a reason.
  * Replaces: Python exceptions raised in the package; the seam's thread-local
  * ``eagle_backend_last_error()`` (eagle copies it into the context at once).

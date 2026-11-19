@@ -3,7 +3,7 @@
 // The door's internal state: the context and the handles made from it.
 //
 // Every exported function of eg_door.h is a shim in abi.cpp that enters the
-// context through `call` below. The shim refuses a second thread, a forked
+// context through `call` below. The shim queues a second thread, and refuses a forked
 // child and a context refused at creation BEFORE the body runs; the body
 // refuses by throwing `Refusal`, and `call` turns every exception into a
 // status plus the reason text in the context. No exception leaves `call`.
@@ -27,9 +27,11 @@ struct eg_unit_meta;
 #include <cstring>
 #include <exception>
 #include <initializer_list>
+#include <mutex>
 #include <new>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -551,14 +553,25 @@ struct eg_gemm_s {
     bool caller_ref = true;
 };
 
+namespace eagle {
+namespace door {
+/** @brief The last non-OK reason of one calling thread; @c lost when its text could not be stored (out of memory). */
+struct Reason {
+    std::string text;
+    bool lost = false;
+};
+}  // namespace door
+}  // namespace eagle
+
 /** @brief All door state of one caller. */
 struct eg_ctx_s {
     long pid = 0;                             ///< the process that made the context
-    std::atomic<bool> busy{ false };          ///< a call is running on the context
+    std::mutex lock;                          ///< one call runs at a time; a second thread waits here (never taken in a forked child)
+    std::atomic<std::thread::id> holder;      ///< the thread inside `lock`, else the null id: a re-entry on that thread is refused, not waited for
     eg_status refused = EG_OK;                ///< a refused eg_ctx_new: every call returns it
     std::int32_t host_threads = 0;            ///< 0: the default budget
-    std::string reason;                       ///< the last non-OK status's reason
-    bool reason_lost = false;                 ///< the reason could not be stored (out of memory)
+    std::unordered_map<std::thread::id, eagle::door::Reason> reasons;   ///< each calling thread's last non-OK reason, under `lock`
+    bool reason_lost = false;                 ///< a thread's first reason could not even get an entry (out of memory)
     std::unordered_set<eg_unit_s*> units;
     std::unordered_set<eg_plane_s*> planes;
     std::unordered_set<eg_plan_s*> plans;
@@ -566,7 +579,7 @@ struct eg_ctx_s {
     std::unordered_set<eg_graph_s*> graphs;
     std::unordered_set<eg_fft_s*> ffts;
     std::unordered_set<eg_gemm_s*> gemms;
-    int exports = 0;                          ///< the DLPack exports (eg_plane_dlpack) not yet released by their consumers; changed under `busy`
+    int exports = 0;                          ///< the DLPack exports (eg_plane_dlpack) not yet released by their consumers; changed under `lock`
     bool closed = false;                      ///< eg_ctx_free ran with exports outstanding: the last export's release frees the context
     eg_recording_s* rec = nullptr;            ///< between eg_record_begin and eg_record_end
     eagle::door::DeviceState dev;             ///< EG_CTX_DEVICE: the device and its stream
@@ -577,11 +590,16 @@ struct eg_ctx_s {
     std::int32_t weight_vendor = 0, weight_family = 0, weight_model = 0, weight_row = -1;   ///< the class key read and the row index taken
     bool gemm_by_cublas[2] = { true, true };  ///< DEVICE: whether this device class routes a routable gemm unit of a 32-bit (0) or 64-bit (1) scalar to cuBLAS
 
-    /** @brief Store @p text as the reason, never throwing. */
+    /** @brief Store @p text as the calling thread's reason, never throwing. */
     void set_reason(const char* text) noexcept {
         try {
-            reason = text;
-            reason_lost = false;
+            eagle::door::Reason& r = reasons[std::this_thread::get_id()];
+            try {
+                r.text = text;
+                r.lost = false;
+            } catch (...) {
+                r.lost = true;
+            }
         } catch (...) {
             reason_lost = true;
         }
@@ -595,20 +613,60 @@ namespace door {
 inline bool forked(const eg_ctx& ctx) { return ctx.pid != static_cast<long>(::getpid()); }
 
 /**
+ * @brief The context's call lock, held for a scope. A forked child holds nothing: it has one thread, and a lock
+ * that another thread of the parent held at the fork would never open. A thread that already holds the lock (a
+ * caller's deleter, run inside a call, calling the door again) is not waited for: it would wait on itself, so
+ * `reentered()` is true and the lock is neither taken nor released here.
+ */
+class Hold {
+public:
+    explicit Hold(eg_ctx& ctx) : ctx_(ctx) {
+        if (forked(ctx)) return;
+        const std::thread::id self = std::this_thread::get_id();
+        if (ctx.holder.load(std::memory_order_relaxed) == self) {
+            reentered_ = true;
+            return;
+        }
+        ctx.lock.lock();
+        ctx.holder.store(self, std::memory_order_relaxed);
+        held_ = true;
+    }
+    ~Hold() { release(); }
+    Hold(const Hold&) = delete;
+    Hold& operator=(const Hold&) = delete;
+    /** @brief True when this thread already held the context's lock. */
+    bool reentered() const { return reentered_; }
+    /** @brief Release before the context may be freed. */
+    void release() {
+        if (!held_) return;
+        held_ = false;
+        ctx_.holder.store(std::thread::id{}, std::memory_order_relaxed);
+        ctx_.lock.unlock();
+    }
+
+private:
+    eg_ctx& ctx_;
+    bool held_ = false;
+    bool reentered_ = false;
+};
+
+/**
  * @brief Run @p body on @p ctx under the door's rules and return its status.
  *
- * Refused before @p body runs: a NULL context, a second thread (no reason is
- * written: the reason belongs to the thread inside), a forked child unless
- * @p in_child, and a context refused at creation unless @p in_refused.
+ * A second thread waits until the running call returns. Refused before
+ * @p body runs: a NULL context, a call made from inside a call on the same
+ * thread, a forked child unless @p in_child, and a context refused at
+ * creation unless @p in_refused.
  */
 template <class F>
 eg_status call(eg_ctx* ctx, F&& body, bool in_child = false, bool in_refused = false) noexcept {
     if (ctx == nullptr) return EG_BAD_REQUEST;
-    bool idle = false;
-    if (!ctx->busy.compare_exchange_strong(idle, true, std::memory_order_acquire))
-        return EG_BAD_REQUEST;
+    Hold hold(*ctx);
     eg_status status = EG_OK;
-    if (!in_child && forked(*ctx)) {
+    if (hold.reentered()) {
+        status = EG_BAD_REQUEST;
+        ctx->set_reason("this context is already inside a call on this thread (a plane's deleter must not call the door)");
+    } else if (!in_child && forked(*ctx)) {
         status = EG_BAD_REQUEST;
         ctx->set_reason("this context belongs to another process: a forked child may only call "
                         "eg_error and eg_ctx_free");
@@ -634,7 +692,6 @@ eg_status call(eg_ctx* ctx, F&& body, bool in_child = false, bool in_refused = f
             ctx->set_reason("an unknown failure inside eagle");
         }
     }
-    ctx->busy.store(false, std::memory_order_release);
     return status;
 }
 
