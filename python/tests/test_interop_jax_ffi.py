@@ -296,7 +296,7 @@ def test_jit_invariance_on_the_cpu(tmp_path, monkeypatch):
     import jax
     import jax.numpy as jnp
     from eagle.frameworks import jax as eagle_jax
-    from ospreys.cpu.toolchain import EXACT_HOST_PROFILES, host_profile
+    from hawk.targets import machine
     from test_interop_jax import _jax
 
     _jax()
@@ -308,7 +308,7 @@ def test_jit_invariance_on_the_cpu(tmp_path, monkeypatch):
         else:
             monkeypatch.delenv("HAWK_HOST_PROFILE", raising=False)
         K = eagle_jax.function(drag, cache_dir=tmp_path / (name or "default"))
-        _invariance(jax, jnp, K, device, bitwise=host_profile() in EXACT_HOST_PROFILES)
+        _invariance(jax, jnp, K, device, bitwise=machine("host")["exact"])
 
 
 @register_row("JX-JIT-INVARIANCE", leg="cuda")
