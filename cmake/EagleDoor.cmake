@@ -90,8 +90,10 @@ else()
   find_package(CUDAToolkit REQUIRED)
   target_sources(eagle_door PRIVATE "${_door}/device/Loop.cu")
   target_link_libraries(eagle_door PRIVATE CUDA::cudart)
+  # the loop reaches eagle's host compaction, reorder and scan, which run on OpenMP; the host group needs none
+  target_link_options(eagle_door PRIVATE -fopenmp)
   set_source_files_properties("${_door}/device/Loop.cu" PROPERTIES
-    COMPILE_OPTIONS "-Wno-deprecated-gpu-targets;-Werror=all-warnings;-diag-suppress=20050;-include;${EAGLE_DOOR_CUDA_WING_FACTS};-Xcompiler=-fPIC,-fvisibility=hidden,-Wall,-Wextra"
+    COMPILE_OPTIONS "-Wno-deprecated-gpu-targets;-Werror=all-warnings;-diag-suppress=20050;-include;${EAGLE_DOOR_CUDA_WING_FACTS};-Xcompiler=-fPIC,-fvisibility=hidden,-Wall,-Wextra,-fopenmp"
     COMPILE_DEFINITIONS AETHER_HAS_CUDA)
   # The loop is the one CUDA unit: C++20 as the old path's device recipe.
   set_target_properties(eagle_door PROPERTIES CUDA_STANDARD 20 CUDA_STANDARD_REQUIRED ON CUDA_EXTENSIONS OFF)
