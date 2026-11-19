@@ -682,6 +682,12 @@ static void figures_device(eg_ctx* ctx, const char* dev_lib) {
          (double)f.grid == geom[1] && f.grid == (FN + f.block - 1) / f.block;
     if (!ok) printf("      block %d grid %lld, the kernel saw %g x %g\n", f.block, (long long)f.grid, geom[0], geom[1]);
     check(ok, "eg_runner_figures after eg_run: block and grid == the launch the kernel saw (blockDim, gridDim), grid covers the samples");
+    struct eg_plan_counters counters;
+    int32_t n_mix = -1;
+    memset(&counters, 0, sizeof(counters));
+    counters.struct_size = sizeof(counters);
+    check(p != NULL && eg_plan_counters(ctx, p, &counters, NULL, 0, &n_mix) == EG_OK && counters.finished == FN && counters.steps == -1 && n_mix == 0,
+          "eg_plan_counters on a DEVICE plan after eg_run: the finished counter is the mask count, no steps word, no mix (a synchronous device read)");
     if (r) eg_runner_free(ctx, r);
     if (p) eg_plan_free(ctx, p);
     eg_plane_free(ctx, pk);
