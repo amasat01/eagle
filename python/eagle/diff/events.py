@@ -105,7 +105,7 @@ def event_kernels(plugin, device, door):
     from hawk import Kernel
     from hawk.diff import jvp, refine_entry, vjp
     from hawk.diff.event import event_guard, state_guard
-    from hawk.diff.tape import T0_SUFFIX, TAU_SUFFIX
+    from hawk.artifact import describe
 
     from .._plan_deploy import _hawk_plugins
 
@@ -118,7 +118,8 @@ def event_kernels(plugin, device, door):
     # the refine kernels run over every sample: plain, whatever the step's kind
     plain = lambda k: Kernel(k.name, tuple(k.sinks), {})
     entry = plain(refine_entry(kernel))
-    tau = step.time_step + TAU_SUFFIX
+    refine = describe([step], targets=("host",))[step.name]["refine_planes"]    # the planes the refine entry adds
+    tau = refine["tau"]
     newton = Kernel(f"{step.name}_newton", tuple(entry.sinks) + tuple(jvp(entry, wrt=(tau,))), {})
     back = Kernel(f"{entry.name}_vjp", vjp(entry))
     sg = plain(state_guard(kernel))
@@ -133,7 +134,7 @@ def event_kernels(plugin, device, door):
                       if nm.endswith(_REFINED))
     out.tau, out.time_step = tau, step.time_step
     out.time = step.time or "t"
-    out.t0 = out.time + T0_SUFFIX
+    out.t0 = refine["t0"]
     cache[device] = out
     return out
 

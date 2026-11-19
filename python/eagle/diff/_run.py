@@ -97,9 +97,9 @@ class _Kernels:
     """The kernels a recorded run needs, built once per window and device:
     the single-step taping twin, the fused twin of an automatic kernel, the
     vjp of one step as a pure function, the taped ``(name, rows)``, and the
-    time plane name of a ``time_step=`` kernel."""
+    time plane name of a ``time_step=`` kernel and its launch-start copy ``t0``."""
 
-    __slots__ = ("single", "fused", "vjp", "fused_vjp", "taped", "time")
+    __slots__ = ("single", "fused", "vjp", "fused_vjp", "taped", "time", "t0")
 
 
 def _step_kernels(plugin, window, door, device, events="step", reverse="per_step"):
@@ -141,18 +141,19 @@ def _step_kernels(plugin, window, door, device, events="step", reverse="per_step
         whole = Kernel(f"{step.name}_fused_vjp", step_vjp(kernel, steps_reverse="fused"))
         out.fused_vjp = _hawk_plugins([kernel, whole], targets, cache_dir, plugin.scalar_type)[1]
     out.time = getattr(step, "time", None) if getattr(step, "time_step", None) else None
-    out.taped = _taped_planes(step, out.time, sidecar_of(built[0])["slot_shapes"])
+    from hawk.artifact import describe
+
+    doc = describe([step], targets=("host",))[step.name]
+    out.t0 = (doc.get("refine_planes") or {}).get("t0")
+    out.taped = _taped_planes(doc, out.time, sidecar_of(built[0])["slot_shapes"])
     cache[key] = out
     return out
 
 
-def _taped_planes(step, time, shapes) -> tuple:
-    """``((plane, elements), ...)`` the taping twin of ``step`` records, in ``arg_spec`` order: the floating-point ``Mutable`` planes
-    the step overwrites and reads before it does (or the time plane), from hawk's description of the step; ``shapes`` is the
-    twin's ``slot_shapes``."""
-    from hawk.artifact import describe
-
-    doc = describe([step], targets=("host",))[step.name]
+def _taped_planes(doc, time, shapes) -> tuple:
+    """``((plane, elements), ...)`` the taping twin of a step records, in ``arg_spec`` order: the floating-point ``Mutable`` planes
+    the step overwrites and reads before it does (or the time plane), from hawk's description ``doc`` of the step; ``shapes`` is
+    the twin's ``slot_shapes``."""
     carried = prior_reads(doc) | {time}
     written = set(doc["planes_written"])
     return tuple((name, math.prod(shapes[name])) for role, name in doc["arg_spec"]
@@ -334,7 +335,7 @@ class RunRecorder:
         scalar = planes[k.taped[0][0]].dtype
         planes.update(extras)
         planes[TAPE], self._backing = planes[TAPE]
-        self.t0 = f"{k.time}_0" if k.time is not None else None
+        self.t0 = k.t0
         self.promoted = set(extras) - {APPLIED_STEPS, self.t0, TAPE}
         self.active = runner.active
         self.every = 1 if runner.auto else runner.every
