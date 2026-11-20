@@ -2213,9 +2213,10 @@ void device_record_end(eg_ctx& ctx, const eg_record_end_desc* desc, eg_graph** o
             reverse = ctx.dev_rec->shape.reverse_plan();
             if (ctx.dev_rec->shape.leaves() != static_cast<int>(ctx.dev_rec->plans.size() + ctx.dev_rec->others))
                 refuse(EG_NOT_WRITTEN, "eg_record_end: a call that runs on the host in a device recording (a host plan, the copy or reduce of host planes) is not written in EG_RECORD_DIFF");
-            std::size_t ordinal = 0;
+            std::vector<const Node*> leaves;
             for (const Op& op : ctx.dev_rec->log)
-                if (op.kind == Op::Leaf) leaf_check(op.leaf, ordinal++);
+                if (op.kind == Op::Leaf) leaves.push_back(&op.leaf);
+            leaf_checks(leaves);
         }
     }
     std::unique_ptr<DeviceRecording> rec(ctx.dev_rec);

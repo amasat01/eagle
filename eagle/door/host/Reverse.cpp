@@ -1297,9 +1297,9 @@ void record_forward(eg_ctx& ctx, eg_runner_s& runner, eg_run_report* report) {
 
 namespace {
 
-/** @brief One bound caller plane of a reverse, checked against what it binds. */
-char* caller_plane(const eg_ctx& ctx, bool dev, eg_plane_s* p, const DLTensor& like, std::int64_t elements_, const std::string& what) {
-    check_handle(ctx.planes, p, what.c_str());
+/** @brief One bound caller plane of a reverse, checked against what it binds, and, with @p handles_of, to be a plane of that context. */
+char* caller_plane(const eg_ctx* handles_of, bool dev, eg_plane_s* p, const DLTensor& like, std::int64_t elements_, const std::string& what) {
+    if (handles_of != nullptr) check_handle(handles_of->planes, p, what.c_str());
     const DLTensor& t = p->tensor->dl_tensor;
     if (t.dtype.code != like.dtype.code || t.dtype.bits != like.dtype.bits || t.dtype.lanes != like.dtype.lanes)
         refuse(EG_BAD_REQUEST, what + ": a dtype mismatch with the slot it binds");
@@ -1473,8 +1473,7 @@ double sample_sum(const double* x, std::int64_t count, int threads) { return pai
 float sample_sum(const float* x, std::int64_t count, int threads) { return pair_sum(x, count, threads).value(); }
 
 /** @brief eg_reverse (``RunReverse.__call__`` / ``_run`` and ``diff_reverse_host``). */
-void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, const eg_bind_desc* grads_in) {
-    check_handle(ctx.runners, runner, "runner");
+void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, const eg_bind_desc* grads_in, bool handles) {
     if (runner->record == nullptr) refuse(EG_BAD_REQUEST, "eg_reverse: the runner is not recorded (no EG_RUN_RECORD)");
     if (ctx.rec != nullptr) refuse(EG_NOT_WRITTEN, "eg_reverse inside a recording is not written in this build of the door");
     RunRecord& r = *runner->record;
@@ -1510,7 +1509,7 @@ void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, con
             refuse(EG_BAD_REQUEST, "seeds.plane_slots[" + std::to_string(i) + "] " + std::to_string(s) + " ('" + pu.slots[static_cast<std::size_t>(s)].name +
                    "') is not a taped state of the recorded run: a slot with no link");
         const Carried& st = r.state[static_cast<std::size_t>(r.taped[static_cast<std::size_t>(k)].state)];
-        seed[static_cast<std::size_t>(k)] = caller_plane(ctx, on_dev, seeds.planes[i], primal.bindings[static_cast<std::size_t>(s)].plane->tensor->dl_tensor,
+        seed[static_cast<std::size_t>(k)] = caller_plane(handles ? &ctx : nullptr, on_dev, seeds.planes[i], primal.bindings[static_cast<std::size_t>(s)].plane->tensor->dl_tensor,
                                                          st.rows * n, "seeds.planes[" + std::to_string(i) + "]");
     }
     struct Out { char* data; int taped, grad, slot; bool plane; };
@@ -1541,13 +1540,13 @@ void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, con
                    "'): a slot with no link");
         if (k >= 0) {
             const Carried& st = r.state[static_cast<std::size_t>(r.taped[static_cast<std::size_t>(k)].state)];
-            outs.push_back({ caller_plane(ctx, on_dev, grads.planes[i], primal.bindings[static_cast<std::size_t>(s)].plane->tensor->dl_tensor, st.rows * n, what), k, -1, s, false });
+            outs.push_back({ caller_plane(handles ? &ctx : nullptr, on_dev, grads.planes[i], primal.bindings[static_cast<std::size_t>(s)].plane->tensor->dl_tensor, st.rows * n, what), k, -1, s, false });
         } else if (plane) {   // a per-sample read: one gradient per sample, unsummed
-            outs.push_back({ caller_plane(ctx, on_dev, grads.planes[i], primal.bindings[static_cast<std::size_t>(s)].plane->tensor->dl_tensor, n, what), -1, g, s, true });
+            outs.push_back({ caller_plane(handles ? &ctx : nullptr, on_dev, grads.planes[i], primal.bindings[static_cast<std::size_t>(s)].plane->tensor->dl_tensor, n, what), -1, g, s, true });
         } else {   // a parameter: the sum over samples, one value
             DLTensor like{};
             like.dtype = DLDataType{ kDLFloat, static_cast<std::uint8_t>(r.scalar * 8), 1 };
-            outs.push_back({ caller_plane(ctx, on_dev, grads.planes[i], like, 1, what), -1, g, s, false });
+            outs.push_back({ caller_plane(handles ? &ctx : nullptr, on_dev, grads.planes[i], like, 1, what), -1, g, s, false });
         }
     }
     RefineExtra extra;
@@ -1854,6 +1853,30 @@ void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, con
     }
     if (D != nullptr) device_sync(*D);   // the gradients land before eg_reverse returns
     r.live = false;
+}
+
+bool run_reversible(const eg_runner_s& runner) { return runner.record != nullptr && (runner.record->rf == nullptr || runner.record->recorded); }
+
+RunSlots recorded_run_slots(const eg_runner_s& runner) {
+    RunSlots out;
+    const RunRecord& r = *runner.record;
+    const eg_plan_s& primal = *runner.plans[0];
+    const auto tracked = [&](int slot) {
+        const eg_plane_s* p = slot >= 0 ? primal.bindings[static_cast<std::size_t>(slot)].plane : nullptr;
+        return p != nullptr && p->tensor->dl_tensor.dtype.code == kDLFloat;
+    };
+    const auto is_state = [&](int slot) { return std::any_of(r.taped.begin(), r.taped.end(), [&](const TapedState& x) { return x.primal_slot == slot; }); };
+    const auto add_read = [&](int slot) {
+        if (tracked(slot) && !is_state(slot) && std::find(out.reads.begin(), out.reads.end(), slot) == out.reads.end()) out.reads.push_back(slot);
+    };
+    for (const TapedState& x : r.taped)
+        if (tracked(x.primal_slot)) out.states.push_back(x.primal_slot);
+    for (const Grad& g : r.grads) add_read(g.primal_slot);
+    if (r.rf != nullptr && r.recorded) {
+        for (const auto& pg : r.rf->pgrads) add_read(pg.second);
+        for (const auto& pg : r.rf->sgrads) add_read(pg.second);
+    }
+    return out;
 }
 
 /** @brief Drop what the last run left to read: its record (eg_reverse then refuses) and its refine results. */

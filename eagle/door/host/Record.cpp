@@ -285,14 +285,14 @@ void keep_leaf_copies(Tape& tape, const Node& n) {
 
 /** @brief Run one recorded node. */
 void run_node(eg_ctx& ctx, const Node& n, Tape* tape) {
-    if (tape != nullptr && n.kind != Node::Run && n.kind != Node::Cond) keep_leaf_copies(*tape, n);
+    if (tape != nullptr && n.kind != Node::Cond) keep_leaf_copies(*tape, n);
     switch (n.kind) {
         case Node::Launch:
             check_bound(*n.plan);
             n.plan->finished = 0;    // a replayed launch counts from zero, as eg_launch does
             host::run_plan(*n.plan, host::team_threads(ctx));
             break;
-        case Node::Run: run_loop(ctx, n.runner, nullptr); break;
+        case Node::Run: run_from_start(ctx, n.runner); break;
         case Node::Reduce: host::reduce_exec(n.reduce, host::team_threads(ctx)); break;
         case Node::Copy: host::copy_exec(*n.src, *n.dst); break;
         case Node::Fft: host::fft_exec(*n.fft, *n.src, *n.dst, host::team_threads(ctx)); break;
@@ -506,7 +506,7 @@ void record_end(eg_ctx& ctx, const eg_record_end_desc* desc, eg_graph** out) {
             const std::function<void(const std::vector<Node>&)> collect = [&](const std::vector<Node>& nodes) {
                 for (const Node& n : nodes) {
                     if (n.kind == Node::Launch) launches.push_back(n.plan);
-                    else if (n.kind != Node::Run && n.kind != Node::Cond) others.push_back(&n);
+                    else if (n.kind != Node::Cond) others.push_back(&n);
                     for (const std::vector<Node>& arm : n.arms) collect(arm);
                 }
             };

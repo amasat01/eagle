@@ -84,6 +84,8 @@ struct DiffNode {
     host::ReduceOp reduce;                      ///< a reduce
     eg_fft_s *fft = nullptr, *adjoint = nullptr;    ///< a transform (a reference is held) and the transform that is its adjoint (made here, freed with the tape)
     eg_gemm_s gemm, gemm_a, gemm_b;             ///< a product, and the products that give the gradients of its A and of its B
+    eg_runner_s* runner = nullptr;              ///< a run (a recorded runner: the graph's node holds its reference)
+    std::vector<int> slots;                     ///< a run: the primal slot of each entry of ``reads``; the first ``writes.size()`` are the states it overwrites
 };
 
 /** @brief A plane the graph copied just before node ``node`` overwrites it (or reads it in place). */
@@ -124,8 +126,9 @@ struct GraphDiff {
 
 /** @brief The tape of a graph ended with EG_RECORD_DIFF (host/GraphReverse.cpp): @p plan from GraphShape::reverse_plan, @p launches by launch ordinal and @p others (copies, reduces, transforms and products) by their ordinal; refuses what the reverse does not cover. */
 std::unique_ptr<GraphDiff> diff_plan(eg_ctx& ctx, const std::vector<eg_plan_s*>& launches, const std::vector<const Node*>& others, const ReversePlan& plan, const eg_record_end_desc& desc);
-/** @brief Refuse the reduce @p n (the @p ordinal-th copy, reduce, transform or product of the recording) when it has no gradient to pull back: op other than sum (BAD_REQUEST), a 2-D or companion float sum (NOT_WRITTEN). Other kinds pass. */
-void leaf_check(const Node& n, std::size_t ordinal);
+/** @brief Refuse what has no gradient to pull back among @p others (the copies, reduces, transforms, products and runs of the recording, in order): a reduce
+ *  with an op other than sum (BAD_REQUEST), a 2-D or companion float sum, a run of a runner that is not EG_RUN_RECORD (NOT_WRITTEN), a runner run twice (BAD_REQUEST). */
+void leaf_checks(const std::vector<const Node*>& others);
 /** @brief Whether leaf @p leaf ran at the last replay, from the tests the replay saved. */
 bool leaf_ran(const GraphDiff& diff, std::size_t leaf);
 void diff_free(eg_ctx& ctx, GraphDiff& diff);

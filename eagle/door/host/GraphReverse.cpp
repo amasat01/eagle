@@ -172,9 +172,13 @@ private:
 /** @brief How a leaf that is not a launch registers its planes: ``(plane, writes, who, at)`` returns its index in GraphDiff::planes. */
 using Track = std::function<int(eg_plane_s*, bool, const std::string&, const std::string&)>;
 
-/** @brief The words that name the copy, reduce, transform or product leaf @p n (the @p ordinal-th of them) in a refusal. */
+/** @brief The words that name the run, copy, reduce, transform or product leaf @p n (the @p ordinal-th of them) in a refusal. */
 std::string leaf_name(const Node& n, std::size_t ordinal) {
-    const char* const what = n.kind == Node::Copy ? "eg_copy" : n.kind == Node::Reduce ? "eg_reduce" : n.kind == Node::Fft ? "eg_fft_run" : "eg_gemm_run";
+    const char* const what = n.kind == Node::Run      ? "eg_run"
+                             : n.kind == Node::Copy   ? "eg_copy"
+                             : n.kind == Node::Reduce ? "eg_reduce"
+                             : n.kind == Node::Fft    ? "eg_fft_run"
+                                                      : "eg_gemm_run";
     return std::string("eg_record_end: ") + what + " (leaf " + std::to_string(ordinal) + ")";
 }
 
@@ -187,6 +191,22 @@ void other_leaf(eg_ctx& ctx, const Node& n, DiffNode& dn, std::size_t ordinal, c
     const auto write = [&](eg_plane_s* p, const char* name) { dn.writes.push_back(track(p, true, at + " " + name, at + " " + name)); };
     dn.kind = n.kind;
     switch (n.kind) {
+        case Node::Run: {
+            dn.runner = n.runner;
+            const RunSlots run = recorded_run_slots(*n.runner);
+            const eg_plan_s& primal = *n.runner->plans[0];
+            const auto plane_at = [&](int slot) { return primal.bindings[static_cast<std::size_t>(slot)].plane; };
+            for (int slot : run.states) {
+                dn.slots.push_back(slot);
+                read(plane_at(slot), primal.unit->slots[static_cast<std::size_t>(slot)].name.c_str());
+            }
+            for (int slot : run.states) write(plane_at(slot), primal.unit->slots[static_cast<std::size_t>(slot)].name.c_str());
+            for (int slot : run.reads) {
+                dn.slots.push_back(slot);
+                read(plane_at(slot), primal.unit->slots[static_cast<std::size_t>(slot)].name.c_str());
+            }
+            return;
+        }
         case Node::Copy:
             if (!floats(n.src)) return;
             read(n.src, "src");
@@ -219,12 +239,22 @@ void other_leaf(eg_ctx& ctx, const Node& n, DiffNode& dn, std::size_t ordinal, c
 
 }  // namespace
 
-void leaf_check(const Node& n, std::size_t ordinal) {
-    if (n.kind != Node::Reduce) return;
-    const std::string at = leaf_name(n, ordinal);
-    if (n.reduce.op != EG_REDUCE_SUM) refuse(EG_BAD_REQUEST, at + " has no gradient eagle can pull back (a tie has no single answer); only op='sum' reverses");
-    if (tensor(*n.reduce.in).dtype.code == kDLFloat && (n.reduce.cols != 1 || n.reduce.comp != nullptr))
-        refuse(EG_NOT_WRITTEN, at + ": a 2-D or companion reduce: eagle does not pull back yet; only a 1-D op='sum' reduce reverses");
+void leaf_checks(const std::vector<const Node*>& others) {
+    for (std::size_t j = 0; j < others.size(); ++j) {
+        const Node& n = *others[j];
+        const std::string at = leaf_name(n, j);
+        if (n.kind == Node::Run) {
+            if (!run_reversible(*n.runner))
+                refuse(EG_NOT_WRITTEN, at + ": the run of runner " + std::to_string(j) + " in a DIFF recording needs EG_RUN_RECORD to be reversed");
+            for (std::size_t i = 0; i < j; ++i)
+                if (others[i]->kind == Node::Run && others[i]->runner == n.runner)
+                    refuse(EG_BAD_REQUEST, at + ": its runner is run twice in the recording and its record holds one run: record the second run with a second runner");
+        }
+        if (n.kind != Node::Reduce) continue;
+        if (n.reduce.op != EG_REDUCE_SUM) refuse(EG_BAD_REQUEST, at + " has no gradient eagle can pull back (a tie has no single answer); only op='sum' reverses");
+        if (tensor(*n.reduce.in).dtype.code == kDLFloat && (n.reduce.cols != 1 || n.reduce.comp != nullptr))
+            refuse(EG_NOT_WRITTEN, at + ": a 2-D or companion reduce: eagle does not pull back yet; only a 1-D op='sum' reduce reverses");
+    }
 }
 
 bool leaf_ran(const GraphDiff& diff, std::size_t leaf) {
@@ -235,7 +265,7 @@ bool leaf_ran(const GraphDiff& diff, std::size_t leaf) {
 
 std::unique_ptr<GraphDiff> diff_plan(eg_ctx& ctx, const std::vector<eg_plan_s*>& launches, const std::vector<const Node*>& others, const ReversePlan& plan, const eg_record_end_desc& desc) {
     if (desc.n_vjps < 0 || (desc.n_vjps > 0 && desc.vjps == nullptr)) refuse(EG_BAD_REQUEST, "eg_record_end_desc.n_vjps without vjps");
-    for (std::size_t j = 0; j < others.size(); ++j) leaf_check(*others[j], j);
+    leaf_checks(others);
     auto diff = std::make_unique<GraphDiff>();
     diff->nodes.resize(launches.size() + others.size());
     diff->plan = plan;
@@ -317,6 +347,18 @@ std::unique_ptr<GraphDiff> diff_plan(eg_ctx& ctx, const std::vector<eg_plan_s*>&
                     } catch (const std::exception&) {
                         refuse(EG_FAULT, "eg_record_end: no memory for the window checkpoints of the WHILE of node " + std::to_string(loop.cond));
                     }
+                }
+        }
+        // A run's reverse reads the planes it only reads as they are live (its record keeps its states, not those): no later leaf may overwrite one.
+        for (std::size_t i = 0; i < plan.leaves.size(); ++i) {
+            const DiffNode& run = diff->nodes[static_cast<std::size_t>(plan.leaves[i].node)];
+            if (run.kind != Node::Run) continue;
+            for (std::size_t k = run.writes.size(); k < run.reads.size(); ++k)
+                for (std::size_t m = i + 1; m < plan.leaves.size(); ++m) {
+                    const std::vector<int>& w = diff->nodes[static_cast<std::size_t>(plan.leaves[m].node)].writes;
+                    if (std::find(w.begin(), w.end(), run.reads[k]) != w.end())
+                        refuse(EG_NOT_WRITTEN, "eg_record_end: leaf " + std::to_string(plan.leaves[m].node) + " overwrites the plane of slot '" +
+                               run.runner->plans[0]->unit->slots[static_cast<std::size_t>(run.slots[k])].name + "', which a run before it reads and its reverse needs as it was");
                 }
         }
         // The copies the reverse needs: for each plane a leaf reads, the first leaf at or after it that writes the plane, and
@@ -594,8 +636,9 @@ void graph_reverse(eg_ctx& ctx, eg_graph_s* graph, const eg_graph_reverse_desc* 
             }
         tape.built = group;
     };
-    // The adjoint @p dy of the written plane of the copy, sum reduce, transform or product @p node (leaf @p i) pulled back to what it read.
-    const auto transpose = [&](const DiffNode& node, std::size_t i, Bytes& dy, int taint) {
+    // The adjoints @p adjoint of the planes the run, copy, sum reduce, transform or product @p node (leaf @p i) wrote, pulled back to what it read.
+    const auto transpose = [&](const DiffNode& node, std::size_t i, std::vector<Bytes>& adjoint, int taint) {
+        Bytes& dy = adjoint.front();
         const auto give = [&](int plane, Bytes bytes) {
             Contribution c;
             c.node = static_cast<int>(i);
@@ -624,6 +667,32 @@ void graph_reverse(eg_ctx& ctx, eg_graph_s* graph, const eg_graph_reverse_desc* 
                 View y(plane_of(out), dy.data()), x(plane_of(in), back.data());
                 run_fft(*node.adjoint, y, x);
                 give(in, std::move(back));
+                break;
+            }
+            case Node::Run: {                   // eg_reverse of the runner, seeded with the adjoints of the states it overwrote
+                const std::size_t n_states = node.writes.size();
+                std::vector<std::unique_ptr<View>> views;
+                std::vector<Bytes> grads;
+                std::vector<eg_plane_s*> seed_planes, grad_planes;
+                for (std::size_t k = 0; k < n_states; ++k) {
+                    views.push_back(std::make_unique<View>(plane_of(node.writes[k]), adjoint[k].data()));
+                    seed_planes.push_back(views.back()->get());
+                }
+                for (int plane : node.reads) {
+                    grads.emplace_back(byte_count(plane_of(plane)), D);
+                    views.push_back(std::make_unique<View>(plane_of(plane), grads.back().data()));
+                    grad_planes.push_back(views.back()->get());
+                }
+                eg_bind_desc seeds{}, outs{};
+                seeds.struct_size = outs.struct_size = sizeof(eg_bind_desc);
+                seeds.n_planes = static_cast<std::int32_t>(n_states);
+                seeds.plane_slots = node.slots.data();
+                seeds.planes = seed_planes.data();
+                outs.n_planes = static_cast<std::int32_t>(node.reads.size());
+                outs.plane_slots = node.slots.data();
+                outs.planes = grad_planes.data();
+                reverse(ctx, node.runner, &seeds, &outs, false);
+                for (std::size_t k = 0; k < node.reads.size(); ++k) give(node.reads[k], std::move(grads[k]));
                 break;
             }
             default: {
@@ -660,7 +729,7 @@ void graph_reverse(eg_ctx& ctx, eg_graph_s* graph, const eg_graph_reverse_desc* 
             if (incoming < 0) incoming = origin;
         }
         if (node.kind != Node::Launch) {
-            if (flows) transpose(node, i, adjoint.front(), incoming);
+            if (flows) transpose(node, i, adjoint, incoming);
             continue;
         }
         const eg_plan_s& primal = *node.plan;

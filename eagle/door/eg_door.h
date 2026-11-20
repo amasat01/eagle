@@ -1088,6 +1088,8 @@ eg_status eg_gemm_free(eg_ctx* ctx, eg_gemm* gemm);
  * for the context's stream to be idle first) or ``eg_ctx_free``. A host node cannot return an error to a caller: the first
  * failure is kept on the graph, and the next ``eg_graph_launch`` of it or ``eg_sync`` of the context returns FAULT naming
  * the step, and clears it. ``eg_reverse`` is not recorded on a device context (NOT_WRITTEN).
+ * A recorded ``eg_run`` replays as a restart: at every ``eg_graph_launch``, plain or EG_RECORD_DIFF, ``eg_runner_reset`` and then the
+ * run, so each launch runs the batch from its start and, for an EG_RUN_RECORD runner, keeps its own record.
  * Replaces: ``graph.Graph.build`` / ``pipeline.GraphPipeline`` and the
  * node-by-node host arms. Status: OK; BAD_REQUEST (already recording).
  */
@@ -1163,17 +1165,25 @@ struct eg_record_end_desc {
 
 /** End recording; ``*out`` replays it. ``desc`` NULL: a plain graph. With EG_RECORD_DIFF every recorded call must be an
  *  ``eg_launch`` on a plan with no split, SEGMENTED or companion unit, an ``eg_copy``, ``eg_reduce``, ``eg_fft_run`` or
- *  ``eg_gemm_run``, or a fork, an IF, IF_ELSE, SWITCH or WHILE around them; these are the leaves. The reverse runs over the leaves
+ *  ``eg_gemm_run``, an ``eg_run`` of an EG_RUN_RECORD runner (refine or not), or a fork, an IF, IF_ELSE or SWITCH around them,
+ *  or a WHILE around the others; these are the leaves. The reverse runs over the leaves
  *  in reverse recording order; fork, branch, join and wait are structure only. What each kind reverses to (the door makes these
  *  transposes at this call, with no ``eg_node_vjp``, on the target of the graph, and frees them with it): a copy copies the adjoint
  *  of its target back into the adjoint of its source (a source that is not a float plane has no adjoint); a 1-D sum reduce gives
  *  every sample the adjoint of the sum; a transform of any kind, norm and direction applies its adjoint transform (the Hermitian
  *  weights of a real kind and the norm swap included) to the adjoint of its output; a product gives A the adjoint of C times op(B)
  *  transposed, B op(A) transposed times the adjoint of C, and, when it accumulates, passes the adjoint of C on to C's earlier value
- *  (the three products run as the forward does: the reference loop on the host, cuBLAS on a device). None of these has a scatter-add.
+ *  (the three products run as the forward does: the reference loop on the host, cuBLAS on a device). A run is reversed by ``eg_reverse``
+ *  of its runner, seeded with the adjoints of the state planes the run overwrote and giving gradients for every plane it reads; the
+ *  adjoint of a state plane is then the run's gradient of that state (the run replaced it), those of the other planes it reads gain
+ *  the run's gradients, and a plane with no link gets none. The runner's record is reversed once per ``eg_graph_launch``; its own
+ *  memory passes are in its ``eg_runner_figures``. A plane a run only reads must not be overwritten by a later leaf (NOT_WRITTEN by name).
+ *  None of these has a scatter-add.
  *  A reduce whose op is not sum is refused BAD_REQUEST with the text "has no gradient eagle can pull back (a tie has no single
  *  answer); only op='sum' reverses"; a 2-D or companion reduce NOT_WRITTEN with "eagle does not pull back yet; only a 1-D op='sum'
- *  reduce reverses"; a run NOT_WRITTEN with "a run is not written in it yet, record the launches it would run". The text after the
+ *  reduce reverses"; a run of a runner made without EG_RUN_RECORD NOT_WRITTEN with "the run of runner k in a DIFF recording needs EG_RUN_RECORD to
+ *  be reversed", the same runner run twice BAD_REQUEST ending "record the second run with a second runner", a run inside a WHILE NOT_WRITTEN
+ *  with "a phase count must be static: unroll the phases into the graph". The text after the
  *  call's name is the same on every target, for the caller to carry unchanged. A device recording refuses a call that runs on the
  *  host (a host plan, the copy or reduce of host planes) NOT_WRITTEN by name. Each replay saves what every conditional's test saw
  *  (``cell[cell_index]`` and the baseline element) and a leaf under an arm takes part in the reverse only if that arm ran, decided

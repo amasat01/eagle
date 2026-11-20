@@ -824,7 +824,18 @@ void active_identity(ActiveState& a);
 void record_forward(eg_ctx& ctx, eg_runner_s& runner, eg_run_report* report);
 /** @brief eg_run_events (host/Reverse.cpp). */
 void run_events(eg_ctx& ctx, eg_runner_s* runner, eg_plane_s* t_stop, eg_plane_s* status);
-void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds, const eg_bind_desc* grads);
+/** @brief eg_reverse; with @p handles false its planes need not be handles of the context (a graph's reverse binds buffers of its tape). */
+void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds, const eg_bind_desc* grads, bool handles = true);
+/** @brief The primal slots of recorded runner @p runner (EG_RUN_RECORD, or refine with it) that carry a float plane: the taped states, which the
+ *  run reads and overwrites, and the other planes it reads and gives a gradient for. */
+struct RunSlots {
+    std::vector<int> states, reads;
+};
+RunSlots recorded_run_slots(const eg_runner_s& runner);
+/** @brief Whether @p runner's run can be reversed: an EG_RUN_RECORD runner (events refine included, when it was made with the flag). */
+bool run_reversible(const eg_runner_s& runner);
+/** @brief The run a recorded graph replays: the runner back at its start (eg_runner_reset), then its run, taped when it is an EG_RUN_RECORD runner. */
+void run_from_start(eg_ctx& ctx, eg_runner_s* runner);
 void runner_release(eg_ctx& ctx, eg_runner_s* runner);
 void run(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report);
 void run_loop(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report);

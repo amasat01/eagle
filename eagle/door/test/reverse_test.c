@@ -237,9 +237,8 @@ static void lin_rows(eg_ctx* ctx, const char* lib) {
                               "a float32 seed for a float64 state refused BAD_REQUEST (a dtype mismatch)");
                         eg_plane_free(ctx, pf);
                         check(eg_record_begin(ctx) == EG_OK && eg_reverse(ctx, r, &sd, &gd) == EG_NOT_WRITTEN &&
-                                  reason_has(ctx, "inside a recording") && eg_run(ctx, r, &again) == EG_NOT_WRITTEN &&
-                                  reason_has(ctx, "inside a recording"),
-                              "eg_reverse and eg_run of a recorded runner inside a recording refused NOT_WRITTEN");
+                                  reason_has(ctx, "inside a recording") && eg_run(ctx, r, &again) == EG_OK,
+                              "eg_reverse of a recorded runner inside a recording refused NOT_WRITTEN; its eg_run is recorded, not run");
                         eg_graph* g = NULL;
                         eg_record_end(ctx, NULL, &g);
                         if (g) eg_graph_free(ctx, g);

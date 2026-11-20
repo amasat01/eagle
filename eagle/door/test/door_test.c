@@ -1671,9 +1671,16 @@ static void check_recorded_list(eg_ctx* ctx, eg_unit* axpb, eg_unit* count1) {
     check(eg_record_begin(ctx) == EG_OK && bind(ctx, pld, pyd, pyd, &a, &b) == EG_BAD_REQUEST && reason_has(ctx, "eg_bind while recording") &&
               eg_record_end(ctx, NULL, &gb) == EG_OK && eg_graph_free(ctx, gb) == EG_OK && bind(ctx, pld, pyd, pyd, &a, &b) == EG_OK,
           "eg_bind between eg_record_begin and eg_record_end is refused BAD_REQUEST by name; after the end it binds again");
+    /* each replay restarts the batch: the first reaches the closed-form count of a batch from its start (no sample pre-finished), each later
+     * one runs the step once more over every sample */
+    unsigned char none[K];
+    double want_restart[K];
+    int64_t restart_launches = 0, restart_finished = 0;
+    memset(none, 0, sizeof(none));
+    count_oracle(limit, none, 1, 1000, want_restart, &restart_launches, &restart_finished);
     int kok = 1;
-    for (int i = 0; i < K; ++i) kok &= k[i] == want_k[i];
-    check(kok, "the recorded eg_run reached the closed-form count (replayed 5 times: a finished batch launches nothing)");
+    for (int i = 0; i < K; ++i) kok &= k[i] == want_restart[i] + (double)(N - 1);
+    check(kok, "the recorded eg_run restarts at every replay: the closed-form count of a batch from its start, then one more step per later replay");
     ok = eg_graph_free(ctx, g) == EG_OK && ty_r.deleted == 1 && tcnt[0].deleted == 1 && tcnt[2].deleted == 1;
     check(ok, "eg_graph_free drops its plan, runner and plane references: the deleters run once");
     ok = eg_plan_free(ctx, pld) == EG_OK;

@@ -367,13 +367,15 @@ void run(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report) {
     check_handle(ctx.runners, runner, "runner");
     if (ctx.rec == nullptr && ctx.dev_rec == nullptr) check_report(report);   // a recorded run fills no report
     for (const eg_plan_s* p : runner->plans) check_bound(*p);
-    if (runner->record != nullptr) {
-        if (ctx.rec != nullptr || ctx.dev_rec != nullptr)
-            refuse(EG_NOT_WRITTEN, "eg_run of an EG_RUN_RECORD runner inside a recording is not written in this build of the door");
-        record_forward(ctx, *runner, report);
-        return;
-    }
-    if (!record_run(ctx, runner)) run_loop(ctx, runner, report);
+    if (record_run(ctx, runner)) return;
+    if (runner->record != nullptr) record_forward(ctx, *runner, report);
+    else run_loop(ctx, runner, report);
+}
+
+void run_from_start(eg_ctx& ctx, eg_runner_s* runner) {
+    runner_reset(ctx, runner);
+    if (runner->record != nullptr) record_forward(ctx, *runner, nullptr);
+    else run_loop(ctx, runner, nullptr);
 }
 
 void runner_figures(eg_ctx& ctx, const eg_runner_s* runner, struct eg_runner_figures* out) {

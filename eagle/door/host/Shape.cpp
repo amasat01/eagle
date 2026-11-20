@@ -77,7 +77,7 @@ int GraphShape::add(eg_gnode_kind kind, std::string label, std::string unit, std
     Node& n = nodes_[static_cast<std::size_t>(ordinal)];
     n.facts = facts;
     if (kind == EG_GNODE_LAUNCH) n.launch = launches_++;
-    else if (kind == EG_GNODE_COPY || kind == EG_GNODE_REDUCE || kind == EG_GNODE_FFT || kind == EG_GNODE_GEMM) n.other = others_++;
+    else if (kind == EG_GNODE_RUN || kind == EG_GNODE_COPY || kind == EG_GNODE_REDUCE || kind == EG_GNODE_FFT || kind == EG_GNODE_GEMM) n.other = others_++;
     return ordinal;
 }
 
@@ -207,6 +207,8 @@ ReversePlan GraphShape::reverse_plan() const {
         [&](int container, const std::vector<int>& iters, const std::vector<RGate>& gates) {
             for (int c : kids[static_cast<std::size_t>(container + 1)]) {
                 const Node& n = nodes_[static_cast<std::size_t>(c)];
+                if (n.kind == EG_GNODE_RUN && !iters.empty())
+                    refuse(EG_NOT_WRITTEN, "eg_record_end: the run (node " + std::to_string(c) + ") sits in a WHILE: a phase count must be static: unroll the phases into the graph");
                 if (n.kind == EG_GNODE_LAUNCH || n.other >= 0) {
                     plan.leaves.push_back({ n.launch >= 0 ? n.launch : launches_ + n.other, gates, keyed(c, iters), loop, iteration });
                     plan.leaf_of[plan.leaves.back().key] = static_cast<int>(plan.leaves.size()) - 1;
@@ -247,9 +249,6 @@ ReversePlan GraphShape::reverse_plan() const {
                         loop = -1;
                         iteration = -1;
                     }
-                } else if (n.kind != EG_GNODE_JOIN && n.kind != EG_GNODE_WAIT) {
-                    refuse(EG_NOT_WRITTEN, "eg_record_end: recorded node " + std::to_string(c) + " (" + n.label + ") is a run; EG_RECORD_DIFF records launches, copies, "
-                           "reduces, transforms and products, and conditionals and forks around them: a run is not written in it yet, record the launches it would run");
                 }
             }
         };
