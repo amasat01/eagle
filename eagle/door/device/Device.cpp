@@ -1571,9 +1571,10 @@ void device_runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out)
         }
     KeptDerived kept;
     check_runner(ctx, d, true, kept);
-    if (d.step_graph != nullptr && !reinterpret_cast<const DeviceGraph*>(d.step_graph)->hooks.empty())
-        refuse(EG_BAD_REQUEST, "step_graph: a graph holding host nodes cannot run inside the captured loop (the driver runs a host node "
-               "outside the loop's device graph)");
+    for (std::int32_t i = 0; i < d.n_step_graphs; ++i)
+        if (!reinterpret_cast<const DeviceGraph*>(d.step_graphs[i].graph)->hooks.empty())
+            refuse(EG_BAD_REQUEST, "step_graphs[" + std::to_string(i) + "]: a graph holding host nodes cannot run inside the captured loop (the driver runs a host node "
+                   "outside the loop's device graph)");
     for (std::int32_t i = 0; i < d.n_plans; ++i)
         if (d.plans[i]->structure != EG_STRUCTURE_DEVICE)
             refuse(EG_BAD_REQUEST, "plans[" + std::to_string(i) + "] is a host plan in a runner over DEVICE plans: "
@@ -1589,9 +1590,9 @@ void device_runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out)
         runner->max_steps = d.max_steps;
         runner->dev.ctx = &ctx;
         runner->dev.stepped = true;
-        runner->step_graph = d.step_graph;
+        runner->step_graphs.assign(d.step_graphs, d.step_graphs + d.n_step_graphs);
         ctx.runners.insert(runner);
-        if (d.step_graph != nullptr) step_graph_retain(ctx, d.step_graph);
+        for (const eg_step_graph& g : runner->step_graphs) step_graph_retain(ctx, g.graph);
         for (eg_plan_s* p : runner->plans) ++p->refs;
         *out = runner;
         return;
@@ -1640,7 +1641,7 @@ void device_runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out)
     try {
         runner->plans.assign(d.plans, d.plans + d.n_plans);
         runner->max_steps = d.max_steps;
-        runner->step_graph = d.step_graph;
+        runner->step_graphs.assign(d.step_graphs, d.step_graphs + d.n_step_graphs);
         runner->dev.ctx = &ctx;
         Current current(ctx.dev);
         runner->dev.cells = cells_new(ctx, 6);    // [remaining, ran, total, live count, finished at the last compaction, compactions]
@@ -1671,7 +1672,7 @@ void device_runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out)
         delete runner;
         throw;
     }
-    if (runner->step_graph != nullptr) step_graph_retain(ctx, runner->step_graph);
+    for (const eg_step_graph& g : runner->step_graphs) step_graph_retain(ctx, g.graph);
     for (eg_plan_s* p : runner->plans) {
         ++p->refs;
         if (active) {
@@ -1743,8 +1744,7 @@ void stepped_run(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report) {
     std::int64_t launches = 0;
     cells_read(stream, first.device_counter, &finished, 1);
     while (launches < cap && static_cast<std::int64_t>(finished) != n) {
-        if (runner->step_graph != nullptr) device_graph_launch(ctx, runner->step_graph);
-        device_launch(first);
+        run_step(*runner, [&](eg_graph_s* g) { device_graph_launch(ctx, g); }, [&](eg_plan_s* p) { if (p == &first) device_launch(*p); });
         cells_read(stream, first.device_counter, &finished, 1);
         ++launches;
     }
@@ -1788,15 +1788,14 @@ void device_run(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report) {
     DeviceRun& r = runner->dev;
     const std::uint64_t stream = ctx.dev.stream;
     Current current(ctx.dev);
-    auto* step = reinterpret_cast<DeviceGraph*>(runner->step_graph);
-    if (step != nullptr) reapply_bindings(*step);    // the loop captures the graph as it is now
+    for (const eg_step_graph& g : runner->step_graphs) reapply_bindings(*reinterpret_cast<DeviceGraph*>(g.graph));    // the loop captures the graphs as they are now
     std::vector<unsigned char> bound;
     for (const eg_plan_s* p : runner->plans) {
         const std::vector<unsigned char> one = binding_bytes(*p);
         bound.insert(bound.end(), one.begin(), one.end());
     }
-    if (step != nullptr)    // a rebound plan of the step graph captures again, as a rebound plan of the runner does
-        for (const eg_plan_s* p : step->plans) {
+    for (const eg_step_graph& g : runner->step_graphs)    // a rebound plan of a step graph captures again, as a rebound plan of the runner does
+        for (const eg_plan_s* p : reinterpret_cast<DeviceGraph*>(g.graph)->plans) {
             const std::vector<unsigned char> one = binding_bytes(*p);
             bound.insert(bound.end(), one.begin(), one.end());
         }
@@ -1820,12 +1819,11 @@ void device_run(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report) {
         const auto t0 = std::chrono::steady_clock::now();
         auto* cells = reinterpret_cast<unsigned*>(r.cells);
         const auto cap = static_cast<unsigned>(loop_cap(runner->max_steps, every));
-        const auto body = [runner, step](std::uint64_t s) {
-            for (std::int64_t l = 0; l < (runner->active ? runner->act.every_launches : 1); ++l) {
-                if (step != nullptr)    // the step graph's capture joins the loop body as a child graph, before the plans
-                    for (const Piece& piece : step->pieces) loop_embed(piece.loop, s);
-                for (eg_plan_s* p : runner->plans) launch_on(*p, s, false);
-            }
+        const auto body = [runner](std::uint64_t s) {
+            for (std::int64_t l = 0; l < (runner->active ? runner->act.every_launches : 1); ++l)
+                run_step(*runner,    // a step graph's capture joins the loop body as a child graph, between the plans' launches at its position
+                         [s](eg_graph_s* g) { for (const Piece& piece : reinterpret_cast<DeviceGraph*>(g)->pieces) loop_embed(piece.loop, s); },
+                         [s](eg_plan_s* p) { launch_on(*p, s, false); });
         };
         std::vector<LoopGate> gates;
         if (runner->active) {

@@ -579,7 +579,7 @@ struct eg_runner_s {
     eagle::door::RunRecord* record = nullptr; ///< EG_RUN_RECORD: the derived plans and the last record
     eagle::door::AutoLook* look = nullptr;    ///< a runner over an AUTO group that names its segmented set: the look that decides each run
     eagle::door::BandFigures band;            ///< the band policy's cells after the last host run of an automatic unit
-    eg_graph_s* step_graph = nullptr;         ///< the graph run once per step (one reference held, released with the runner)
+    std::vector<eg_step_graph> step_graphs;   ///< the graphs run once per step, in step order (one reference held to each, released with the runner)
 };
 
 namespace eagle {
@@ -953,6 +953,15 @@ void graph_release(eg_ctx& ctx, eg_graph_s* graph);
 /** @brief Hold and release a step graph, host or device (a graph freed by its caller lives until its last runner is freed). */
 void step_graph_retain(const eg_ctx& ctx, eg_graph_s* graph);
 void step_graph_release(eg_ctx& ctx, eg_graph_s* graph);
+/** @brief Run the step's graphs and plans in step order: each graph of @p runner ahead of the plan it names, through @p run_graph and @p run_plan. */
+template <class GraphFn, class PlanFn>
+void run_step(const eg_runner_s& runner, GraphFn run_graph, PlanFn run_plan) {
+    std::size_t g = 0;
+    for (std::size_t p = 0; p <= runner.plans.size(); ++p) {
+        for (; g < runner.step_graphs.size() && static_cast<std::size_t>(runner.step_graphs[g].before_plan) == p; ++g) run_graph(runner.step_graphs[g].graph);
+        if (p < runner.plans.size()) run_plan(runner.plans[p]);
+    }
+}
 void graph_describe(eg_ctx& ctx, const eg_graph_s* graph, eg_graph_description* out);
 void record_drop_all(eg_ctx& ctx);
 bool device_planes(const eg_ctx& ctx, const char* op, std::initializer_list<const eg_plane_s*> planes);

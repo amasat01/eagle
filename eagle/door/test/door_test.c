@@ -810,7 +810,8 @@ static void check_runner(eg_ctx* ctx, eg_unit* axpb) {
         d.n_derived = bad[i].n_derived;
         d.every = bad[i].every;
         d.window = bad[i].window;
-        d.step_graph = bad[i].graph ? (eg_graph*)&d : NULL;
+        d.step_graphs = bad[i].graph ? &(struct eg_step_graph){ (eg_graph*)&d, 0, 0 } : NULL;
+        d.n_step_graphs = bad[i].graph;
         const int ok1 = eg_runner_new(ctx, &d, &r) == bad[i].status && r == NULL && reason_has(ctx, bad[i].reason);
         if (!ok1) printf("      refusal %zu ('%s') did not hold\n", i, bad[i].reason);
         all &= ok1;
@@ -1166,7 +1167,7 @@ static void step_graph_case(eg_ctx* ctx, eg_unit* axpb, eg_unit* cu, eg_structur
         eg_runner* r = NULL;
         struct eg_runner_desc d = runner_desc(&w.pc, 1, 1000);
         d.every = every;
-        d.step_graph = g;
+        d.step_graphs = &(struct eg_step_graph){ g, 0, 0 }, d.n_step_graphs = 1;
         s = g ? eg_runner_new(ctx, &d, &r) : EG_FAULT;
         if (s == EG_OK && graphed == 2) s = eg_graph_free(ctx, g);    /* the runner's reference keeps the graph alive */
         struct eg_run_report rep;
@@ -1307,13 +1308,13 @@ static void check_step_graph(eg_ctx* ctx, eg_unit* axpb) {
         struct eg_runner_desc d = runner_desc(&pa1, 1, 1000);
         d.flags = EG_RUN_REORDER;
         d.reorder_theta = 0.5;
-        d.step_graph = g;
-        all = all && eg_runner_new(ctx, &d, &r) == EG_BAD_REQUEST && r == NULL && reason_has(ctx, "only the step_graph touches");
+        d.step_graphs = &(struct eg_step_graph){ g, 0, 0 }, d.n_step_graphs = 1;
+        all = all && eg_runner_new(ctx, &d, &r) == EG_BAD_REQUEST && r == NULL && reason_has(ctx, "only step_graphs[0] touches");
         d = runner_desc(&p3, 1, 1000);
-        d.step_graph = g;
+        d.step_graphs = &(struct eg_step_graph){ g, 0, 0 }, d.n_step_graphs = 1;
         all = all && eg_runner_new(ctx, &d, &r) == EG_BAD_REQUEST && r == NULL && reason_has(ctx, "one step per launch");
         d = runner_desc(&pc, 1, 1000);
-        d.step_graph = g;
+        d.step_graphs = &(struct eg_step_graph){ g, 0, 0 }, d.n_step_graphs = 1;
         all = all && eg_runner_new(ctx, &d, &r) == EG_OK && eg_graph_free(ctx, g) == EG_OK;
         all = all && eg_graph_free(ctx, g) == EG_BAD_REQUEST && reason_has(ctx, "already freed") && eg_runner_free(ctx, r) == EG_OK;
         check(all, "a step graph: reorder refused for a per-sample plane only the graph touches, a K=3 unit refused, the graph "
@@ -1322,6 +1323,173 @@ static void check_step_graph(eg_ctx* ctx, eg_unit* axpb) {
         eg_plan_free(ctx, pc);
         eg_plan_free(ctx, pa1);
         eg_plan_free(ctx, p3);
+        eg_plane_free(ctx, px);
+        eg_plane_free(ctx, py);
+    }
+}
+
+/* ---- step graphs at positions among a step's plans ----------------------- */
+
+/* The items a step is written from: the two plans (the count plan is always first of the plans) and the copies the graphs hold. */
+enum step_item { ITEM_COUNT, ITEM_AXPB, ITEM_Y_TO_X, ITEM_X_TO_KS, ITEM_K_TO_KS, ITEM_K_TO_KT, N_ITEMS };
+
+struct pos_fix {
+    eg_plan *pa, *pc;
+    eg_plane *px, *py, *pk, *pks, *pkt;
+};
+
+struct pos_state {
+    double x[RN], y[RN], k[RN], ks[RN], kt[RN];
+};
+
+/* The copy an item holds: its source and destination plane. */
+static void item_copy(const struct pos_fix* f, enum step_item it, eg_plane** src, eg_plane** dst) {
+    *src = it == ITEM_Y_TO_X ? f->py : it == ITEM_X_TO_KS ? f->px : f->pk;
+    *dst = it == ITEM_Y_TO_X ? f->px : it == ITEM_K_TO_KT ? f->pkt : f->pks;
+}
+
+/* Run the step written as `items` for one batch: as a runner whose plans are the plan items in order and whose step graphs are the copy
+ * items at their positions (graphed), or as the hand-written loop of `plain_steps` steps doing the items in order. Leaves the planes in `out`. */
+static int run_items(eg_ctx* ctx, eg_unit* axpb, eg_unit* c1, eg_structure structure, int32_t threads, const enum step_item* items,
+                     int n_items, int graphed, int64_t plain_steps, struct pos_state* out, int64_t* launches) {
+    static struct pos_state st;
+    static double limit[RN];
+    static unsigned char mask[RN];
+    struct tensor t[3], tx, ty, tk, tks, tkt;
+    const double a = 1.0009765625, b = 0.5;
+    count_inputs(st.k, limit, mask);
+    for (int64_t i = 0; i < RN; ++i) st.x[i] = 0.0, st.y[i] = 1.0 + (double)(i % 7) * 0.125, st.ks[i] = st.kt[i] = -1.0;
+    eg_host_threads(ctx, threads);
+    struct pos_fix f;
+    memset(&f, 0, sizeof(f));
+    f.px = wrap(ctx, &tx, st.x, RN, kDLFloat, 64);
+    f.py = wrap(ctx, &ty, st.y, RN, kDLFloat, 64);
+    f.pk = wrap(ctx, &tk, st.k, RN, kDLFloat, 64);
+    f.pks = wrap(ctx, &tks, st.ks, RN, kDLFloat, 64);
+    f.pkt = wrap(ctx, &tkt, st.kt, RN, kDLFloat, 64);
+    f.pc = count_plan(ctx, c1, structure, st.k, limit, mask, t);
+    eg_status s = f.px && f.py && f.pk && f.pks && f.pkt && f.pc ? plan(ctx, axpb, structure, RN, 0, NULL, NULL, &f.pa) : EG_FAULT;
+    if (s == EG_OK) s = bind(ctx, f.pa, f.py, f.px, &a, &b);
+    if (s == EG_OK && graphed) {
+        eg_plan* plans[N_ITEMS];
+        struct eg_step_graph graphs[N_ITEMS];
+        int n_plans = 0, n_graphs = 0;
+        for (int i = 0; s == EG_OK && i < n_items; ++i) {
+            if (items[i] == ITEM_COUNT || items[i] == ITEM_AXPB) {
+                plans[n_plans++] = items[i] == ITEM_COUNT ? f.pc : f.pa;
+                continue;
+            }
+            eg_plane *src, *dst;
+            item_copy(&f, items[i], &src, &dst);
+            graphs[n_graphs].graph = NULL;
+            graphs[n_graphs].before_plan = n_plans;
+            graphs[n_graphs].reserved0 = 0;
+            s = eg_record_begin(ctx) == EG_OK && eg_copy(ctx, src, dst) == EG_OK && eg_record_end(ctx, NULL, &graphs[n_graphs].graph) == EG_OK ? EG_OK : EG_FAULT;
+            ++n_graphs;
+        }
+        eg_runner* r = NULL;
+        struct eg_runner_desc d = runner_desc(plans, n_plans, 1000);
+        d.step_graphs = graphs;
+        d.n_step_graphs = n_graphs;
+        struct eg_run_report rep;
+        memset(&rep, 0, sizeof(rep));
+        rep.struct_size = sizeof(rep);
+        if (s == EG_OK) s = eg_runner_new(ctx, &d, &r);
+        if (s == EG_OK) s = eg_run(ctx, r, &rep);
+        *launches = rep.launches;
+        if (s == EG_OK) s = eg_runner_free(ctx, r);
+        for (int i = 0; i < n_graphs; ++i) eg_graph_free(ctx, graphs[i].graph);
+    } else if (s == EG_OK) {
+        for (int64_t step = 0; step < plain_steps; ++step)
+            for (int i = 0; i < n_items; ++i) {
+                eg_plane *src, *dst;
+                if (items[i] == ITEM_COUNT || items[i] == ITEM_AXPB) {
+                    eg_launch(ctx, items[i] == ITEM_COUNT ? f.pc : f.pa, NULL);
+                } else {
+                    item_copy(&f, items[i], &src, &dst);
+                    eg_copy(ctx, src, dst);
+                }
+            }
+    }
+    memcpy(out, &st, sizeof(st));
+    eg_plan_free(ctx, f.pa);
+    eg_plan_free(ctx, f.pc);
+    eg_plane_free(ctx, f.px), eg_plane_free(ctx, f.py), eg_plane_free(ctx, f.pk), eg_plane_free(ctx, f.pks), eg_plane_free(ctx, f.pkt);
+    return s == EG_OK;
+}
+
+/* The step `items` as a runner against the hand-written loop of the same order: every plane bitwise equal. */
+static int items_match(eg_ctx* ctx, eg_unit* axpb, eg_unit* c1, eg_structure structure, int32_t threads, const enum step_item* items, int n_items,
+                       struct pos_state* graphed) {
+    static struct pos_state plain;
+    int64_t launches = 0, ignore = 0;
+    return run_items(ctx, axpb, c1, structure, threads, items, n_items, 1, 0, graphed, &launches) &&
+           run_items(ctx, axpb, c1, structure, threads, items, n_items, 0, launches, &plain, &ignore) &&
+           memcmp(graphed, &plain, sizeof(plain)) == 0;
+}
+
+static void check_step_positions(eg_ctx* ctx, eg_unit* axpb) {
+    eg_unit* c1 = NULL;
+    if (load(ctx, "count1", 0xD1, &c1) != EG_OK) {
+        check(0, "step graph positions: count1 loaded");
+        return;
+    }
+    static struct pos_state got;
+    static double k0[RN], l0[RN], want_k[RN];
+    static unsigned char m0[RN];
+    int64_t want_launches = 0, want_finished = 0;
+    count_inputs(k0, l0, m0);
+    count_oracle(l0, m0, 1, 1000, want_k, &want_launches, &want_finished);
+    const eg_structure structures[2] = { EG_STRUCTURE_HOST_SERIAL, EG_STRUCTURE_HOST_TEAM };
+    const int32_t threads[2] = { 1, 3 };
+    const enum step_item after[] = { ITEM_COUNT, ITEM_K_TO_KS };
+    const enum step_item around[] = { ITEM_K_TO_KS, ITEM_COUNT, ITEM_K_TO_KT };
+    const enum step_item between[] = { ITEM_COUNT, ITEM_Y_TO_X, ITEM_AXPB };
+    const enum step_item last[] = { ITEM_COUNT, ITEM_AXPB, ITEM_Y_TO_X };
+    const enum step_item chain[] = { ITEM_COUNT, ITEM_AXPB, ITEM_Y_TO_X, ITEM_X_TO_KS };
+    for (int si = 0; si < 2; ++si) {
+        check(items_match(ctx, axpb, c1, structures[si], threads[si], after, 2, &got) && memcmp(got.ks, want_k, sizeof(want_k)) == 0,
+              "[plan, graph]: the graph runs after the plan (its snapshot is the final k), bitwise the hand-written loop of the same order");
+        check(items_match(ctx, axpb, c1, structures[si], threads[si], around, 3, &got) && memcmp(got.kt, want_k, sizeof(want_k)) == 0 &&
+                  memcmp(got.ks, want_k, sizeof(want_k)) != 0,
+              "[graph, plan, graph]: the first graph runs ahead of the plan (its snapshot lags the final k), the last after it, bitwise the hand-written loop");
+        static struct pos_state after_both;
+        check(items_match(ctx, axpb, c1, structures[si], threads[si], between, 3, &got) &&
+                  items_match(ctx, axpb, c1, structures[si], threads[si], last, 3, &after_both) && memcmp(got.y, after_both.y, sizeof(got.y)) != 0,
+              "a two-plan step with a graph between the plans: bitwise the hand-written loop of the same order, and not the step with the graph after both");
+        check(items_match(ctx, axpb, c1, structures[si], threads[si], chain, 4, &got) && memcmp(got.ks, got.x, sizeof(got.ks)) == 0,
+              "two graphs at one position run in array order: bitwise the hand-written loop of the same order");
+    }
+    {   /* refusals, each by name */
+        static double k[RN], limit[RN];
+        static unsigned char mask[RN];
+        struct tensor t[3], tx, ty;
+        count_inputs(k, limit, mask);
+        eg_plane* px = wrap(ctx, &tx, k, RN, kDLFloat, 64);
+        eg_plane* py = wrap(ctx, &ty, limit, RN, kDLFloat, 64);
+        eg_plan* pc = count_plan(ctx, c1, EG_STRUCTURE_HOST_TEAM, k, limit, mask, t);
+        eg_graph *g1 = NULL, *g2 = NULL;
+        int ok = px && py && pc && eg_record_begin(ctx) == EG_OK && eg_copy(ctx, px, py) == EG_OK && eg_record_end(ctx, NULL, &g1) == EG_OK;
+        ok = ok && eg_record_begin(ctx) == EG_OK && eg_copy(ctx, py, px) == EG_OK && eg_record_end(ctx, NULL, &g2) == EG_OK;
+        struct eg_step_graph list[2] = { { g1, 1, 0 }, { g2, 0, 0 } };
+        eg_runner* r = NULL;
+        struct eg_runner_desc d = runner_desc(&pc, 1, 1000);
+        d.step_graphs = list;
+        d.n_step_graphs = 2;
+        int all = ok && eg_runner_new(ctx, &d, &r) == EG_BAD_REQUEST && r == NULL && reason_has(ctx, "positions must not decrease");
+        list[0].before_plan = 0, list[1].before_plan = 2;
+        all = all && eg_runner_new(ctx, &d, &r) == EG_BAD_REQUEST && r == NULL && reason_has(ctx, "outside 0 .. n_plans");
+        list[1].before_plan = -1;
+        all = all && eg_runner_new(ctx, &d, &r) == EG_BAD_REQUEST && r == NULL && reason_has(ctx, "outside 0 .. n_plans");
+        d.step_graphs = NULL;
+        all = all && eg_runner_new(ctx, &d, &r) == EG_BAD_REQUEST && r == NULL && reason_has(ctx, "needs step_graphs");
+        list[1].before_plan = 1;
+        d.step_graphs = list;
+        all = all && eg_runner_new(ctx, &d, &r) == EG_OK && eg_runner_free(ctx, r) == EG_OK;
+        check(all, "step graphs: positions that decrease, lie outside 0 .. n_plans, or a missing array refused BAD_REQUEST by name; the last position n_plans is taken");
+        if (g1) eg_graph_free(ctx, g1);
+        if (g2) eg_graph_free(ctx, g2);
+        eg_plan_free(ctx, pc);
         eg_plane_free(ctx, px);
         eg_plane_free(ctx, py);
     }
@@ -5688,6 +5856,7 @@ int main(int argc, char** argv) {
     oracle(ctx, unit, 100001, 50000, "n=100001 threads=1");
     check_runner(ctx, unit);
     check_step_graph(ctx, unit);
+    check_step_positions(ctx, unit);
     check_reorder_threshold(ctx);
     check_weight_row(ctx);
     check_auto_look(ctx);

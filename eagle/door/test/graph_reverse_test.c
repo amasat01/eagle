@@ -1724,7 +1724,7 @@ static int lin_runner(struct rig* r, const struct run_units* ru, struct lin* l, 
         d.derived_units = units;
         d.window = window;
     }
-    d.step_graph = step;
+    d.step_graphs = &(struct eg_step_graph){ step, 0, 0 }, d.n_step_graphs = step != NULL;
     if (ru->active) d.every = 4;
     if (ru->reorder) d.flags |= EG_RUN_REORDER, d.reorder_theta = 0.5;
     return eg_runner_new(r->ctx, &d, &l->runner) == EG_OK;
@@ -2071,6 +2071,8 @@ static void step_model(const double* x0, int mixing, double w, double a, double 
     for (int i = 0; i < n; ++i) x[i] = x0[i], t[i] = 0.0;
     for (int j = 0; j < steps; ++j) {
         double s = 0.0;
+        if (mixing == 4)    /* two graphs: the scaling first, then the mixing one */
+            for (int i = 0; i < n; ++i) x[i] *= w;
         for (int i = 0; i < n; ++i) s += (1.0 / 80.0) * x[i];
         for (int i = 0; i < n; ++i) {
             if (mixing == 3) x[i] = w * t[i];    /* the graph writes the state from the time plane */
@@ -2095,7 +2097,7 @@ static double step_model_j(const double* x0, int mixing, double w, double a, dou
 static int step_case(struct rig* r, const struct units* u, const struct run_units* ru, eg_unit* twin, int64_t window, int mixing, uint64_t budget, double* gx_out, double* ga_out,
                      double* gb_out, int32_t* passes, const char* what, int n) {
     eg_ctx* ctx = r->ctx;
-    const int mix = mixing == 1;
+    const int mix = mixing == 1, two = mixing == 4;    /* mode 4: a second graph, the mixing one, runs after the scaling graph */
     struct lin l;
     static double y[LNMAX], z[LNMAX], seed[LNMAX], gx[LNMAX], gt[LNMAX];
     double w[1] = { 1.3 }, wc[1] = { 1.0 / 80.0 }, ga = 0.0, gb = 0.0;
@@ -2112,19 +2114,28 @@ static int step_case(struct rig* r, const struct units* u, const struct run_unit
     eg_plane *pz = mix ? mk(r, &tz, n, z) : NULL, *pwc = mix ? mk(r, &twc, 1, wc) : NULL;
     eg_plane* a2[] = { l.px, pwc, pz };
     eg_plan* f2 = mix && ok ? plan_with(r, u->scale, 3, a2, NULL) : NULL;
+    static double y2[LNMAX], z2[LNMAX];
+    double wsum[1] = { 0.0 }, wc2[1] = { 1.0 / 80.0 };
+    struct tensor ty2, tz2, tws, twc2;
+    eg_plane *py2 = two ? mk(r, &ty2, n, y2) : NULL, *pz2 = two ? mk(r, &tz2, n, z2) : NULL, *pws = two ? mk(r, &tws, 1, wsum) : NULL, *pwc2 = two ? mk(r, &twc2, 1, wc2) : NULL;
+    eg_plane *b1[] = { l.px, pwc2, pz2 }, *b2[] = { l.px, pws, py2 };
+    eg_plan *fb1 = two && ok ? plan_with(r, u->scale, 3, b1, NULL) : NULL, *fb2 = two && ok ? plan_with(r, u->scale, 3, b2, NULL) : NULL;
     const struct eg_node_vjp vjps[] = { { 0, u->scale_vjp }, { 1, u->scale_vjp } };
     const struct eg_node_vjp vjps_plain[] = { { 0, u->scale_vjp } };
-    eg_graph* g = NULL;
+    eg_graph *g = NULL, *g2 = NULL;
     ok = ok && f && (!mix || f2) && eg_record_begin(ctx) == EG_OK && (!mix || (eg_launch(ctx, f2, NULL) == EG_OK && reduce_op(ctx, pz, pw, EG_REDUCE_SUM) == EG_OK)) &&
          eg_launch(ctx, f, NULL) == EG_OK && (mixing == 3 || eg_copy(ctx, py, l.px) == EG_OK) && end_diff(ctx, 1 + mix, mix ? vjps : vjps_plain, &g) == EG_OK &&
          lin_runner(r, ru, &l, 1, twin, window, g);
-    struct eg_runner_desc d;    /* the budget is a field of the descriptor: remake the runner when one is asked for */
-    if (ok && budget != 0) {
+    ok = ok && (!two || (fb1 && fb2 && eg_record_begin(ctx) == EG_OK && eg_launch(ctx, fb1, NULL) == EG_OK && reduce_op(ctx, pz2, pws, EG_REDUCE_SUM) == EG_OK &&
+                         eg_launch(ctx, fb2, NULL) == EG_OK && eg_copy(ctx, py2, l.px) == EG_OK && end_diff(ctx, 2, vjps, &g2) == EG_OK));
+    struct eg_runner_desc d;    /* the budget and the graph list are fields of the descriptor: remake the runner when either is asked for */
+    const struct eg_step_graph list[2] = { { g, 0, 0 }, { g2, 0, 0 } };
+    if (ok && (budget != 0 || two)) {
         eg_runner_free(ctx, l.runner);
         d = runner_desc(&l.plan, LSTEPS);
         const eg_derived_role roles[2] = { EG_DERIVED_TAPE, EG_DERIVED_STEP_VJP };
         eg_unit* const units[2] = { twin, ru->vjp };
-        d.flags = EG_RUN_RECORD, d.n_derived = 2, d.derived_roles = roles, d.derived_units = units, d.window = window, d.memory_budget = budget, d.step_graph = g;
+        d.flags = EG_RUN_RECORD, d.n_derived = 2, d.derived_roles = roles, d.derived_units = units, d.window = window, d.memory_budget = budget, d.step_graphs = list, d.n_step_graphs = two ? 2 : 1;
         ok = eg_runner_new(ctx, &d, &l.runner) == EG_OK;
     }
     struct eg_run_report rep;
@@ -2169,8 +2180,11 @@ static int step_case(struct rig* r, const struct units* u, const struct run_unit
     memcpy(gx_out, gx, (size_t)n * sizeof(double)), *ga_out = ga, *gb_out = gb;
     eg_runner_free(ctx, l.runner);
     if (g) eg_graph_free(ctx, g);
+    if (g2) eg_graph_free(ctx, g2);
     if (f) eg_plan_free(ctx, f);
     if (f2) eg_plan_free(ctx, f2);
+    if (fb1) eg_plan_free(ctx, fb1);
+    if (fb2) eg_plan_free(ctx, fb2);
     eg_plan_free(ctx, l.plan);
     release(r);
     r->n_samples = 0;
@@ -2323,6 +2337,9 @@ static void step_reverse_rows(struct rig* r, const struct units* u, const struct
               "a memory budget that would split the samples into passes: a step graph's reverse is one pass over all samples, with the same gradients", LN);
     verdict(r, p3 == 1 + LSTEPS && memcmp(g1, g3, sizeof(g1)) == 0 && memcmp(&a1, &a3, sizeof(a1)) == 0, "the budgeted run's gradients are the unbudgeted ones, bit for bit, in one sample pass plus one graph pass per step");
     verdict(r, p1 == 1 + LSTEPS, "eg_runner_figures' reverse_passes counts the sample pass and one step-graph pass per step of the run (10 steps: 11)");
+    step_case(r, u, ru, wide, wide_window, 4, 0, g3, &a3, &b3, &p3,
+              "two step graphs at position 0 (a scaling one, then a mixing one): the gradients equal central differences of the whole run, the graphs reversed last first", LN);
+    verdict(r, p3 == 1 + 2 * LSTEPS, "eg_runner_figures' reverse_passes counts one pass per graph per step (10 steps, two graphs: 21)");
     step_add_case(r, u, ru);
     step_cplane_case(r, u, ru);
     if (!r->device) {   /* a runner that reads an active set, then one that also reorders (over 4100 samples, above the reorder threshold) */

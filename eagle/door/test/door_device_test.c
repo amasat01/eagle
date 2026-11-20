@@ -1879,7 +1879,7 @@ static int dsteps_case(eg_ctx* ctx, eg_unit* unit, eg_unit* plain, int64_t every
         d.plans = &q->p1;
         d.max_steps = 1000;
         d.every = every;
-        d.step_graph = g;
+        d.step_graphs = &(struct eg_step_graph){ g, 0, 0 }, d.n_step_graphs = 1;
         struct eg_run_report rep;
         memset(&rep, 0, sizeof(rep));
         rep.struct_size = sizeof(rep);
@@ -1902,6 +1902,72 @@ static int dsteps_case(eg_ctx* ctx, eg_unit* unit, eg_unit* plain, int64_t every
     cudaMemcpy(q->k2, q->dk2, sizeof(q->k2), cudaMemcpyDeviceToHost);
     cudaMemcpy(q->kc, q->dkc, sizeof(q->kc), cudaMemcpyDeviceToHost);
     return s == EG_OK;
+}
+
+/* One batch with the copy k -> kc as one step graph and the launch of the second count plan as another, at positions among the one plan: as step
+ * graphs of a runner over `plain` (graphed), or as the hand-written loop of `plain_steps` steps doing the same in the same order.
+ * after: [plan, copy]; around: [copy, plan, launch]. Returns whether every call succeeded; k, k2 and kc are read back into q. */
+static int dsteps_positions(eg_ctx* ctx, eg_unit* plain, int around, int graphed, int64_t plain_steps, struct dsteps* q) {
+    eg_status s = dsteps_new(ctx, plain, plain, 1, q);
+    if (s == EG_OK && graphed) {
+        eg_graph* copy = NULL;
+        eg_graph* launch = NULL;
+        int ok = eg_record_begin(ctx) == EG_OK && eg_copy(ctx, q->pl[0], q->pl[6]) == EG_OK && eg_record_end(ctx, NULL, &copy) == EG_OK;
+        ok = ok && eg_record_begin(ctx) == EG_OK && eg_launch(ctx, q->p2, NULL) == EG_OK && eg_record_end(ctx, NULL, &launch) == EG_OK;
+        const struct eg_step_graph after[1] = { { copy, 1, 0 } };
+        const struct eg_step_graph surround[2] = { { copy, 0, 0 }, { launch, 1, 0 } };
+        eg_runner* r = NULL;
+        struct eg_runner_desc d;
+        memset(&d, 0, sizeof(d));
+        d.struct_size = sizeof(d);
+        d.n_plans = 1;
+        d.plans = &q->p1;
+        d.max_steps = 1000;
+        d.step_graphs = around ? surround : after;
+        d.n_step_graphs = around ? 2 : 1;
+        struct eg_run_report rep;
+        memset(&rep, 0, sizeof(rep));
+        rep.struct_size = sizeof(rep);
+        s = ok ? eg_runner_new(ctx, &d, &r) : EG_FAULT;
+        if (s == EG_OK) s = eg_run(ctx, r, &rep);
+        if (s == EG_OK) s = eg_sync(ctx);
+        if (s == EG_OK) s = eg_runner_free(ctx, r);
+        if (copy) eg_graph_free(ctx, copy);
+        if (launch) eg_graph_free(ctx, launch);
+    } else if (s == EG_OK) {
+        for (int64_t st = 0; s == EG_OK && st < plain_steps; ++st) {
+            if (around) s = eg_copy(ctx, q->pl[0], q->pl[6]);
+            if (s == EG_OK) s = eg_launch(ctx, q->p1, NULL);
+            if (s == EG_OK && around) s = eg_launch(ctx, q->p2, NULL);
+            if (s == EG_OK && !around) s = eg_copy(ctx, q->pl[0], q->pl[6]);
+        }
+        if (s == EG_OK) s = eg_sync(ctx);
+    }
+    if (s != EG_OK) printf("      step graph position case failed with status %d\n", (int)s), reason_has(ctx, "\1");
+    cudaMemcpy(q->k, q->dk, sizeof(q->k), cudaMemcpyDeviceToHost);
+    cudaMemcpy(q->k2, q->dk2, sizeof(q->k2), cudaMemcpyDeviceToHost);
+    cudaMemcpy(q->kc, q->dkc, sizeof(q->kc), cudaMemcpyDeviceToHost);
+    return s == EG_OK;
+}
+
+static void step_graph_positions_device(eg_ctx* ctx, const char* dev_lib) {
+    eg_unit* plain = NULL;
+    if (load(ctx, dev_lib, "dcount1", 0xD9, &plain) != EG_OK) {
+        check(0, "step graph positions: dcount1 loaded");
+        return;
+    }
+    static struct dsteps g, p;
+    const int64_t need = 50;    /* the longest limit among the live samples: steps the batch takes */
+    for (int around = 0; around < 2; ++around) {
+        int ok = dsteps_positions(ctx, plain, around, 1, 0, &g) && dsteps_positions(ctx, plain, around, 0, need, &p);
+        ok = ok && memcmp(g.k, p.k, sizeof(g.k)) == 0 && memcmp(g.k2, p.k2, sizeof(g.k2)) == 0 && memcmp(g.kc, p.kc, sizeof(g.kc)) == 0;
+        if (!around) ok = ok && memcmp(g.kc, g.k, sizeof(g.kc)) == 0;    /* the copy runs after the plan: it holds the final k */
+        else ok = ok && memcmp(g.kc, g.k, sizeof(g.kc)) != 0;            /* the copy runs ahead of the plan: it lags the final k */
+        check(ok, around ? "device [graph, plan, graph] in the captured loop body: bitwise the hand-written loop of the same order, the first copy lagging the final k"
+                         : "device [plan, graph] in the captured loop body: bitwise the hand-written loop of the same order, the copy holding the final k");
+        dsteps_free(ctx, &g);
+        dsteps_free(ctx, &p);
+    }
 }
 
 static void step_graph_device(eg_ctx* ctx, const char* dev_lib) {
@@ -1950,7 +2016,7 @@ static void step_graph_device(eg_ctx* ctx, const char* dev_lib) {
         d.n_plans = 1;
         d.plans = &g.p1;
         d.max_steps = 1000;
-        d.step_graph = graph;
+        d.step_graphs = &(struct eg_step_graph){ graph, 0, 0 }, d.n_step_graphs = 1;
         check(graph != NULL && refused(eg_runner_new(ctx, &d, &r), EG_NOT_WRITTEN, ctx, "a conditional inside a device step graph") && r == NULL &&
                   eg_graph_free(ctx, graph) == EG_OK,
               "a device step graph holding a conditional refused NOT_WRITTEN by name (the host takes it)");
@@ -1976,8 +2042,8 @@ static void step_graph_device(eg_ctx* ctx, const char* dev_lib) {
         d.max_steps = 1000;
         d.flags = EG_RUN_REORDER;
         d.reorder_theta = 0.5;
-        d.step_graph = graph;
-        int ok = graph != NULL && refused(eg_runner_new(ctx, &d, &r), EG_BAD_REQUEST, ctx, "only the step_graph touches") && r == NULL;
+        d.step_graphs = &(struct eg_step_graph){ graph, 0, 0 }, d.n_step_graphs = 1;
+        int ok = graph != NULL && refused(eg_runner_new(ctx, &d, &r), EG_BAD_REQUEST, ctx, "only step_graphs[0] touches") && r == NULL;
         d.flags = 0;
         d.reorder_theta = 0;
         ok = ok && eg_runner_new(ctx, &d, &r) == EG_OK && eg_graph_free(ctx, graph) == EG_OK &&
@@ -2932,6 +2998,7 @@ int main(int argc, char** argv) {
     cell_rows_device(ctx, dev_lib);
     reset_device(ctx, dev_lib);
     step_graph_device(ctx, dev_lib);
+    step_graph_positions_device(ctx, dev_lib);
     report_device(ctx, dev_lib);
     check_segmented_device(ctx, dev_lib);
     check_auto_device(ctx, dev_lib);

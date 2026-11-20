@@ -348,6 +348,13 @@ struct eg_bind_desc {
 #define EG_RUN_RECORD (1u << 0)  /**< record each run for ``eg_reverse`` */
 #define EG_RUN_REORDER (1u << 1) /**< reorder the bound planes at ``reorder_theta`` */
 
+/** One per-step graph of a runner (``eg_runner_desc.step_graphs``). */
+struct eg_step_graph {
+    eg_graph* graph;         /**< the graph to run once per step */
+    int32_t before_plan;     /**< the index of the plan it runs ahead of, 0 .. n_plans; n_plans: after the last plan. Graphs sharing a position run in array order */
+    int32_t reserved0;
+};
+
 /** INPUT to ``eg_runner_new``. */
 struct eg_runner_desc {
     uint32_t struct_size;
@@ -380,33 +387,36 @@ struct eg_runner_desc {
     eg_events events;
     eg_no_event on_no_event;
     int32_t reserved0;
-    eg_graph* step_graph;               /**< per-step work, or NULL: a graph recorded on the runner's own side (a host graph for a host
-                                             runner, a device graph for a device one) that runs once per step, BEFORE the step's plans,
-                                             on every launch, on the planes it was recorded over. It may hold launches, copies, reduces, transforms,
+    const struct eg_step_graph* step_graphs;   /**< per-step work, or NULL with n_step_graphs 0: graphs, each recorded on the runner's own side
+                                             (a host graph for a host runner, a device graph for a device one), that run once per step on
+                                             every launch, on the planes they were recorded over, in the order of the array, each ahead of
+                                             the plan its ``before_plan`` names (see eg_step_graph); the positions must not decrease along the
+                                             array, so the array is the step's order. Each graph follows the rules below. A graph may hold launches, copies, reduces, transforms,
                                              products, forks and, on the host, conditionals; never a run of a runner (a device graph
                                              with a conditional is NOT_WRITTEN: cudaGraphAddChildGraphNode of a graph holding a conditional
                                              node into the loop's own conditional body answers cudaErrorNotSupported, 801 "operation not
                                              supported", measured on a CUDA 12.6 runtime over a 560 driver). Each plan must advance exactly one step per launch (finish steps 1): a unit that
                                              advances K > 1 steps per launch, or an automatic count, is BAD_REQUEST, as the per-step hook
                                              nodes of eagle's Python runner were (read, not run: it refused them the same way).
-                                             On the host the graph is replayed ahead of each launch, with an active set ahead of each of
+                                             On the host a graph is replayed within each launch at its position, with an active set within each of
                                              the ``every`` launches between compactions, over all samples, not the live prefix, and
                                              stops with the plans when every sample finished. On a device it is captured into the loop
-                                             as a child graph of the loop body, so it runs wherever the plans do: for each launch of every
+                                             as a child graph of the loop body, between the plans' launches at its position, so it runs wherever the plans do: for each launch of every
                                              whole interval the loop runs, the last one included even when the batch finished inside it
                                              (eagle's Python device loop captured its hook nodes in the same body, read, not run), and a plan of it rebound after the
                                              first run makes the loop capture again at the next run; a device graph holding host nodes
-                                             is BAD_REQUEST. The runner holds a reference to the graph, released at eg_runner_free:
+                                             is BAD_REQUEST. The runner holds a reference to each graph, released at eg_runner_free:
                                              eg_graph_free drops the caller's reference and the graph lives until its last runner is
                                              freed. BAD_REQUEST too: a graph of another context or side,
                                              a graph ended with EG_RECORD_DIFF, and, with EG_RUN_REORDER, a per-sample plane only the
                                              graph touches (the reorder moves the plans' planes, not it). A runner with EG_RUN_RECORD
-                                             takes the graph only if it was ended with EG_RECORD_DIFF (BAD_REQUEST otherwise): the graph is
-                                             then reversed per step. A plain runner takes either kind. Recorded, the forward is unchanged and
+                                             takes a graph only if it was ended with EG_RECORD_DIFF (BAD_REQUEST otherwise): the graph is
+                                             then reversed per step, and every ``before_plan`` must be 0 (BAD_REQUEST by name: put the
+                                             node before the plan), as for a runner with events REFINE. A plain runner takes either kind. Recorded, the forward is unchanged and
                                              the tape stores nothing new: eg_reverse recomputes each checkpoint window twice, once in the
                                              caller's sample order over the caller's planes (the graph's DIFF snapshots, its planes and the
                                              carried planes kept for every step of the window; the planes are put back at the end) and once
-                                             in the usual columns, and at every global step, after the plans' vjp, reverses the graph over
+                                             in the usual columns, and at every global step, after the plans' vjp, reverses the graphs, last of the array first, each over
                                              ALL n samples at once with that step's snapshots: a carried state the graph overwrites has its
                                              adjoint replaced by what flows to it through the graph's reads, one it only reads has that
                                              added; planes of the graph that are no carried state have no adjoint. A graph may mix samples,
@@ -420,7 +430,9 @@ struct eg_runner_desc {
                                              a graph that overwrites a plane the run takes a gradient of, such a plane that does not hold
                                              one value per sample and row, such a plane with EG_RUN_REORDER, and EG_RUN_REORDER on a device.
                                              The reverse of each step counts as one pass in eg_runner_figures.reverse_passes, and a step
-                                             graph adjoint fed by a cross-sample scatter-add clears reverse_bitwise. The device reverse runs the graph reverse per step, host driven, between the vjp launches. */
+                                             graph adjoint fed by a cross-sample scatter-add clears reverse_bitwise. The device reverse runs the graphs' reverse per step, host driven, between the vjp launches. */
+    int32_t n_step_graphs;              /**< entries of step_graphs */
+    int32_t reserved1;
 };
 
 /** Report flags. */

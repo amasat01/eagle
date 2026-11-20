@@ -184,7 +184,8 @@ static void run_unit(eg_ctx* ctx, const char* lib, const char* name, const char*
             check(eg_runner_new(ctx, &bad, &none) == EG_BAD_REQUEST && reason_has(ctx, "without an active set"),
                   "device runner: every other than K refused BAD_REQUEST (no active set)");
             bad = rd;
-            bad.step_graph = (eg_graph*)&bad;
+            bad.step_graphs = &(struct eg_step_graph){ (eg_graph*)&bad, 0, 0 };
+            bad.n_step_graphs = 1;
             check(eg_runner_new(ctx, &bad, &none) == EG_BAD_REQUEST && reason_has(ctx, "step_graph"),
                   "device runner: a step_graph that is not a graph of the context refused BAD_REQUEST by name");
         }

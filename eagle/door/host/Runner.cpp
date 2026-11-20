@@ -130,8 +130,7 @@ void run_active(eg_ctx& ctx, eg_runner_s& runner, int threads, std::int64_t& ite
         for (std::int64_t l = 0; l < a.every_launches; ++l) {
             const std::int64_t live = a.count;
             if (live <= 0 || static_cast<std::int64_t>(first.finished) == n) break;
-            if (runner.step_graph != nullptr) graph_launch(ctx, runner.step_graph);
-            for (const eg_plan_s* p : runner.plans) host::run_prefix(*p, threads, live);
+            run_step(runner, [&](eg_graph_s* g) { graph_launch(ctx, g); }, [&](const eg_plan_s* p) { host::run_prefix(*p, threads, live); });
         }
         if (first.finished != a.done_at_last) {
             compact(a, mask);
@@ -263,7 +262,7 @@ void runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out) {
     try {
         runner->plans.assign(d.plans, d.plans + d.n_plans);
         runner->max_steps = d.max_steps;
-        runner->step_graph = d.step_graph;
+        runner->step_graphs.assign(d.step_graphs, d.step_graphs + d.n_step_graphs);
         if (active) {
             const std::int64_t k = launch_steps(d.plans[0]->unit->finish, static_cast<std::size_t>(d.n_plans)), n = d.plans[0]->n_samples;
             ActiveState& a = runner->act;
@@ -283,7 +282,7 @@ void runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out) {
         delete runner;
         throw;
     }
-    if (runner->step_graph != nullptr) step_graph_retain(ctx, runner->step_graph);
+    for (const eg_step_graph& s : runner->step_graphs) step_graph_retain(ctx, s.graph);
     for (eg_plan_s* p : runner->plans) {
         ++p->refs;
         if (active) {
@@ -350,7 +349,7 @@ void runner_reset(eg_ctx& ctx, eg_runner_s* runner) {
 /** @brief eg_runner_free: drop the runner's plan references. */
 void runner_free(eg_ctx& ctx, eg_runner_s* runner) {
     ctx.runners.erase(runner);
-    if (runner->step_graph != nullptr) step_graph_release(ctx, runner->step_graph);
+    for (const eg_step_graph& s : runner->step_graphs) step_graph_release(ctx, s.graph);
     look_free(ctx, *runner);
     record_free(ctx, *runner);
     for (eg_plan_s* p : runner->plans) {
@@ -442,8 +441,7 @@ void run_loop(eg_ctx& ctx, eg_runner_s* runner, eg_run_report* report) {
     } else {
         const std::int64_t cap = runner->max_steps / k + (runner->max_steps % k != 0);
         while (launches < cap && static_cast<std::int64_t>(first.finished) != n) {
-            if (runner->step_graph != nullptr) graph_launch(ctx, runner->step_graph);
-            for (const eg_plan_s* p : runner->plans) host::run_plan(*p, threads);
+            run_step(*runner, [&](eg_graph_s* g) { graph_launch(ctx, g); }, [&](const eg_plan_s* p) { host::run_plan(*p, threads); });
             ++launches;
         }
     }

@@ -287,9 +287,13 @@ static void lin_rows(eg_ctx* ctx, const char* lib) {
     eg_graph* step = NULL;    /* per-step work in a recorded run is reversed per step, so a plain graph has no tape to reverse by */
     d = recorded(&plan, LSTEPS, 3, 0, roles, good);
     check(eg_record_begin(ctx) == EG_OK && eg_launch(ctx, plan, NULL) == EG_OK && eg_record_end(ctx, NULL, &step) == EG_OK &&
-              (d.step_graph = step, eg_runner_new(ctx, &d, &none) == EG_BAD_REQUEST) && none == NULL &&
+              (d.step_graphs = &(struct eg_step_graph){ step, 0, 0 }, d.n_step_graphs = 1, eg_runner_new(ctx, &d, &none) == EG_BAD_REQUEST) && none == NULL &&
               reason_has(ctx, "end it with EG_RECORD_DIFF"),
           "a step graph that is not ended with EG_RECORD_DIFF on an EG_RUN_RECORD runner refused BAD_REQUEST by name: its reverse needs the graph's tape");
+    d = recorded(&plan, LSTEPS, 3, 0, roles, good);
+    check((d.step_graphs = &(struct eg_step_graph){ step, 1, 0 }, d.n_step_graphs = 1, eg_runner_new(ctx, &d, &none) == EG_BAD_REQUEST) && none == NULL &&
+              reason_has(ctx, "put the node before the plan"),
+          "a step graph at a position after the plan on an EG_RUN_RECORD runner refused BAD_REQUEST by name: the node goes before the plan");
     eg_graph_free(ctx, step);
     const eg_derived_role swapped[2] = { EG_DERIVED_STEP_VJP, EG_DERIVED_TAPE };
     d = recorded(&plan, LSTEPS, 3, 0, swapped, good);
