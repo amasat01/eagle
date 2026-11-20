@@ -244,7 +244,8 @@ class _Level:
         self.base = self.kind = None
         #: Mutable planes read before written (carried state): inputs as well as outputs
         self.state = tuple(state)
-        self.description = description = describe_kernel(kernel)
+        # a derivative is described beside the chain it is derived from (the kernels before it)
+        self.description = description = describe_kernel(kernel, primals=self.chain[:-1])
         self.finish = (description.get("finish") or {}).get("mask")
         internal = {FINISHED_PLANE} if self.finish is not None else frozenset()
         if self.per_cell:

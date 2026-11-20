@@ -486,7 +486,8 @@ class WarpFunction:
             if role == "lookup" and name == FINISHED_PLANE:
                 arrays[name] = np.zeros(1, dtype=np.int32)
             elif rows is not None and name in rows:
-                arrays[name] = rows[name]
+                # hawk takes NumPy arrays: a zero-copy view of eagle's row scratch
+                arrays[name] = np.asarray(rows[name])
             elif name in planes:
                 arrays[name] = planes[name].numpy()
         run(host, **arrays)
