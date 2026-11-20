@@ -356,7 +356,10 @@ std::unique_ptr<GraphDiff> diff_plan(eg_ctx& ctx, const std::vector<eg_plan_s*>&
             LoopTape& tape = diff->loops[L];
             for (int m = loop.first_leaf; m < loop.first_leaf + loop.cap * loop.per_iter; ++m) {
                 const DiffNode& node = diff->nodes[static_cast<std::size_t>(plan.leaves[static_cast<std::size_t>(m)].node)];
-                if (node.writes.empty()) continue;
+                if (node.writes.empty() && node.overwrites.empty()) continue;
+                if (node.kind != Node::Launch && !node.overwrites.empty())    // the window rebuild re-launches plans; it has no re-run of an int copy
+                    refuse(EG_NOT_WRITTEN, "eg_record_end: leaf " + std::to_string(plan.leaves[static_cast<std::size_t>(m)].node) + " overwrites an int plane a vjp reads inside a WHILE body; "
+                           "only a launch may write it there (the loop's window rebuilds its states by re-launching the body)");
                 if (node.kind == Node::Launch) {
                     const eg_plan_s& primal = *node.plan;
                     for (std::size_t sl = 0; sl < primal.bindings.size(); ++sl)     // the rebuild re-runs this launch: every plane it binds must be tracked
@@ -364,8 +367,9 @@ std::unique_ptr<GraphDiff> diff_plan(eg_ctx& ctx, const std::vector<eg_plan_s*>&
                             refuse(EG_NOT_WRITTEN, "eg_record_end: launch " + std::to_string(plan.leaves[static_cast<std::size_t>(m)].node) + " (unit '" + primal.unit->name +
                                    "') in a WHILE body binds the plane of slot '" + primal.unit->slots[sl].name + "', which is not a real plane the tape tracks; the loop's window cannot rebuild it");
                 }
-                for (int p : node.writes)
-                    if (std::find(tape.planes.begin(), tape.planes.end(), p) == tape.planes.end()) tape.planes.push_back(p);
+                for (const std::vector<int>* written : { &node.writes, &node.overwrites })    // an int plane a vjp reads is loop state like any other
+                    for (int p : *written)
+                        if (std::find(tape.planes.begin(), tape.planes.end(), p) == tape.planes.end()) tape.planes.push_back(p);
             }
             tape.ckpt.resize(static_cast<std::size_t>(loop.groups));
             for (std::vector<Bytes>& group : tape.ckpt)
@@ -640,7 +644,7 @@ void graph_reverse(eg_ctx& ctx, eg_graph_s* graph, const eg_graph_reverse_desc* 
                 const DiffNode& node = d.nodes[static_cast<std::size_t>(d.plan.leaves[m].node)];
                 for (Snapshot& s : d.snapshots)
                     if (s.node == m) copy_bytes(D, store(s).data(), state[position(tape, s.plane)].data(), s.size);
-                if (node.writes.empty()) continue;    // it writes nothing the tape tracks: nothing reads what it makes
+                if (node.writes.empty() && node.overwrites.empty()) continue;    // it writes nothing the tape tracks: nothing reads what it makes
                 if (node.kind != Node::Launch) {
                     rerun(node, data_at);
                     continue;

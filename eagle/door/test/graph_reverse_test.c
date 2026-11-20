@@ -1434,6 +1434,47 @@ static void window_copy_row(struct rig* r, const struct units* u) {
     release(r);
 }
 
+/* A WHILE of cap 40 (windows of 16), 37 passes: the body ticks the int plane n down, launches t = n x and copies t into x. The vjp of the launch reads
+ * n by a Value link, so n is loop state the window checkpoints keep: dJ/dx_0 is the product of the n each pass read, n_0 - k for pass k = 1 .. 37. */
+static void window_int_row(struct rig* r, const struct units* u) {
+    eg_ctx* ctx = r->ctx;
+    enum { PASSES = 37, CAP = 40 };
+    double x[N], t[N], seed[N], gx[N], want[N];
+    int32_t n[N], c[N];
+    struct tensor tx, tt, ts, tg, tn, tc;
+    for (int i = 0; i < N; ++i) {
+        x[i] = 1.0 + 0.01 * i;
+        t[i] = gx[i] = 0.0;
+        seed[i] = 1.0;
+        want[i] = 1.0;
+        for (int k = 1; k <= PASSES; ++k) want[i] *= (double)(60 + i % 3 - k);
+    }
+    eg_plane *px = mk(r, &tx, N, x), *pt = mk(r, &tt, N, t), *ps = mk(r, &ts, N, seed), *pg = mk(r, &tg, N, gx);
+    eg_plane *pn = mk_typed(r, &tn, N, n, kDLInt, 32), *pc = mk_i32(r, &tc, N, c);
+    eg_plane *a1[] = { px, pn, pt }, *a2[] = { pn }, *a3[] = { pc };
+    eg_plan *f = plan_with(r, u->iscale, 3, a1, NULL), *tn_plan = plan_with(r, u->tick, 1, a2, NULL), *tk = plan_with(r, u->tick, 1, a3, NULL);
+    const struct eg_node_vjp vjps[] = { { 1, u->iscale_vjp } };
+    eg_graph* g = NULL;
+    int ok = f && tn_plan && tk && eg_record_begin(ctx) == EG_OK && cond_open(ctx, EG_COND_WHILE, 0, pc, 0, CAP) == EG_OK && eg_launch(ctx, tn_plan, NULL) == EG_OK &&
+             eg_launch(ctx, f, NULL) == EG_OK && eg_copy(ctx, pt, px) == EG_OK && eg_launch(ctx, tk, NULL) == EG_OK && eg_record_cond_end(ctx) == EG_OK &&
+             end_diff(ctx, 1, vjps, &g) == EG_OK;
+    for (int i = 0; i < N; ++i) {
+        n[i] = 60 + i % 3;
+        c[i] = PASSES;
+    }
+    up(r);
+    eg_plane *in[] = { px }, *gr[] = { pg };
+    ok = ok && eg_graph_launch(ctx, g) == EG_OK && reverse(ctx, g, px, ps, 1, in, gr) == EG_OK;
+    down(r);
+    verdict(r, ok && close_rel(gx, want, N, 1e-12),
+            "a WHILE of cap 40 (windows of 16), 37 passes, whose body ticks an int plane n and launches t = n x: dJ/dx_0 = the product of the n each pass read");
+    eg_graph_free(ctx, g);
+    eg_plan_free(ctx, f);
+    eg_plan_free(ctx, tn_plan);
+    eg_plan_free(ctx, tk);
+    release(r);
+}
+
 static void leaf_rows(struct rig* r, const struct units* u) {
     copy_row(r, u, 0);
     copy_row(r, u, 1);
@@ -1499,6 +1540,7 @@ static void int_read_row(struct rig* r, const struct units* u, int overwritten) 
 static void int_read_rows(struct rig* r, const struct units* u) {
     int_read_row(r, u, 0);
     int_read_row(r, u, 1);
+    window_int_row(r, u);
 }
 
 /* ---- slice 3c: runs of recorded runners in a recording --------------------------------------------------------------------- */
