@@ -3151,6 +3151,97 @@ static void check_weight_row(eg_ctx* ctx) {
           "eg_ctx_info of a caller that predates the weights members fills none of them");
 }
 
+/* ---- SEGMENTED state: a drifted sort, the class a group ran by, and the cut across threads ---------------------------- */
+
+/* Load the SEGMENTED group's branch unit of @p ctx with its members in deps: the static group "sg" (classify unit) or the dynamic "dg" (sweep unit). */
+static eg_unit* seg_group(eg_ctx* ctx, int dynamic) {
+    eg_unit *first = NULL, *second = NULL, *top = NULL;
+    const int ok = dynamic ? load(ctx, "dg__k1", 0xE6, &first) == EG_OK && load(ctx, "dg__sweep", 0xE7, &second) == EG_OK
+                           : load(ctx, "sg__k1", 0xE3, &first) == EG_OK && load(ctx, "sg__cls", 0xE1, &second) == EG_OK;
+    eg_unit* deps[2] = { first, second };
+    if (!ok || load_with(ctx, dynamic ? "dg__k0" : "sg__k0", dynamic ? 0xE5 : 0xE2, deps, 2, &top) != EG_OK) return NULL;
+    return top;
+}
+
+/* The caller changes the samples between two launches, so the group's kept sort no longer matches them: the next launch must detect it and the step complete
+ * as the fused unit's, which has no sort: k and the finished marks stay bitwise equal launch by launch. The static group drifts through the key its classify
+ * unit reads (limit), the dynamic one through the state its class is read from (k). */
+static void check_segmented_drift(eg_ctx* ctx) {
+    for (int dynamic = 0; dynamic < 2; ++dynamic) {
+        eg_unit* group = seg_group(ctx, dynamic);
+        eg_unit* fused = NULL;
+        check(group != NULL && load(ctx, dynamic ? "dgf" : "sgf", dynamic ? 0xE8 : 0xE4, &fused) == EG_OK,
+              dynamic ? "eg_unit_load of the dynamic group and its fused unit for the drift rows" : "eg_unit_load of the static group and its fused unit for the drift rows");
+        if (group == NULL || fused == NULL) return;
+        static struct seg_set a, f;
+        seg_inputs(&a, dynamic), seg_inputs(&f, dynamic);
+        int ok = seg_plan(ctx, group, &a, dynamic) && seg_plan(ctx, fused, &f, 0);
+        uint64_t tiles = 0;
+        int same = ok, launches = 0;
+        for (; ok && launches < 400 && !(seg_finished(&a) == SGN && seg_finished(&f) == SGN); ++launches) {
+            ok = eg_launch(ctx, a.plan, &tiles) == EG_OK && eg_launch(ctx, f.plan, &tiles) == EG_OK;
+            same = same && ok && seg_same(&a, &f, 0);
+            if (launches == 1) {    /* after the second launch: a third of the live samples change class */
+                for (int i = 0; i < SGN; i += 3) {
+                    if (a.mask[i] || f.mask[i]) continue;
+                    if (dynamic) a.k[i] += 2.0, f.k[i] += 2.0;
+                    else a.limit[i] = f.limit[i] = (double)(2 + (i * 5) % 9);
+                }
+            }
+        }
+        check(same && launches < 400 && seg_finished(&a) == SGN,
+              dynamic ? "dynamic group: samples whose class changed between launches (a stale sort) are caught, every step equals the fused unit's bitwise to the end"
+                      : "static group: samples whose class key changed between launches (a stale sort) are caught, every step equals the fused unit's bitwise to the end");
+        eg_plan_free(ctx, a.plan), eg_plan_free(ctx, f.plan);
+        eg_unit_free(ctx, fused);
+    }
+}
+
+/* One launch of a fresh group from the fixture inputs: each sample's k moved by exactly the step of the class the group ran it by, once. The classes are
+ * door-internal (no call reads them), so this pins them through their effect: the static group's classify unit sends limit >= 6 to the branch that steps
+ * 2 and the others to the one that steps 1 (it writes no class plane for a caller); the dynamic group's class is k >= 4, stepping 0.125 (class + 1), and
+ * its branches record the sample's slot in pos, so every sample was visited. */
+static int one_launch_visits(eg_ctx* ctx, int dynamic, struct seg_set* q, eg_unit* group) {
+    seg_inputs(q, dynamic);
+    uint64_t tiles = 0;
+    int ok = seg_plan(ctx, group, q, dynamic) && eg_launch(ctx, q->plan, &tiles) == EG_OK;
+    for (int i = 0; ok && i < SGN; ++i) {
+        const double step = dynamic ? 0.125 * ((DG_K0(i) >= 4.0 ? 1 : 0) + 1) : (q->limit[i] >= 6.0 ? 2.0 : 1.0);
+        ok = q->k[i] == (dynamic ? DG_K0(i) : 0.0) + step && (!dynamic || q->pos[i] == (double)i);
+    }
+    return ok;
+}
+
+/* Each segmented group on contexts of 1, 4 and 7 threads: one launch visits every sample once, and the run to the end equals the 1-thread run bitwise. */
+static void check_segmented_threads(void) {
+    for (int dynamic = 0; dynamic < 2; ++dynamic) {
+        static struct seg_set one, run;
+        int visits = 1, same = 1;
+        for (int ti = 0; ti < 3; ++ti) {
+            const int threads[3] = { 1, 4, 7 };
+            eg_ctx* ctx = make_ctx();
+            eg_host_threads(ctx, threads[ti]);
+            eg_unit* group = seg_group(ctx, dynamic);
+            if (group == NULL) { visits = same = 0; eg_ctx_free(ctx); continue; }
+            visits = visits && one_launch_visits(ctx, dynamic, &run, group);
+            eg_plan_free(ctx, run.plan);
+            seg_inputs(&run, dynamic);
+            eg_runner* r = NULL;
+            struct eg_run_report rep;
+            same = same && seg_plan(ctx, group, &run, dynamic) && seg_run(ctx, &run, 1000, &r, &rep) == EG_OK && seg_finished(&run) == SGN;
+            if (ti == 0) one = run;
+            else same = same && seg_same(&run, &one, dynamic);
+            eg_runner_free(ctx, r);
+            eg_plan_free(ctx, run.plan);
+            eg_ctx_free(ctx);
+        }
+        check(visits, dynamic ? "dynamic group on 1, 4 and 7 threads: one launch moves every sample by its class's step once and records its slot in pos"
+                              : "static group on 1, 4 and 7 threads: one launch moves every sample by its class's step exactly once");
+        check(same, dynamic ? "dynamic group run to the end on 1, 4 and 7 threads: planes bitwise equal to the 1-thread run"
+                            : "static group run to the end on 1, 4 and 7 threads: planes bitwise equal to the 1-thread run");
+    }
+}
+
 /* ---- an AUTO group that names its segmented set ---------------------------- */
 
 /* The planes of one run of the "sga" group: k, limit, mask and how (the path each step took: 1 segmented, 1000 fused) over SGN samples, wrapped and bound to
@@ -3906,6 +3997,8 @@ int main(int argc, char** argv) {
     check_weight_row(ctx);
     check_auto_look(ctx);
     check_segmented_runner(ctx);
+    check_segmented_drift(ctx);
+    check_segmented_threads();
     check_active_set(ctx);
     check_auto(ctx);
     check_counters(ctx);
