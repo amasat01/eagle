@@ -477,11 +477,13 @@ void record_fork_branch(eg_ctx& ctx) { recording(ctx).shape.fork_branch(); }
 void record_fork_end(eg_ctx& ctx) {
     eg_recording_s& rec = recording(ctx);
     const std::string race = rec.shape.fork_end();
-    if (race.empty()) return;
-    release(ctx, rec.top);                      // a race ends the recording: it cannot be repaired from here
+    if (!race.empty()) refuse(EG_BAD_REQUEST, race);    // the fork stays open, as before the call
+}
+
+void record_abort(eg_ctx& ctx) {
+    release(ctx, recording(ctx).top);
     delete ctx.rec;
     ctx.rec = nullptr;
-    refuse(EG_BAD_REQUEST, race);
 }
 
 void record_wait(eg_ctx& ctx, std::int32_t n_planes, eg_plane_s* const* planes) {

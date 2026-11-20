@@ -107,7 +107,8 @@ public:
     /** @brief Open a conditional of @p kind (an eg_cond_kind) and @p want arms; its test node was just added. */
     void cond_begin(int kind, std::size_t want);
     void cond_arm();
-    void cond_end();
+    /** @brief Close the innermost conditional; with @p arms_need_work (a capture) an arm with no node is refused, nothing closed. */
+    void cond_end(bool arms_need_work = false);
     bool open() const { return !frames_.empty(); }
     /** @brief The leaves of the recording for EG_RECORD_DIFF. Refuses a run (NOT_WRITTEN), and a WHILE without max_iters (BAD_REQUEST). */
     ReversePlan reverse_plan() const;

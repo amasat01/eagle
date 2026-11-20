@@ -124,7 +124,7 @@ std::string GraphShape::fork_end() {
                         reason = "eg_record_fork_end: a " + std::string(graph::kindName(kind)) + " race between node " + std::to_string(i) + " (" +
                                  ni.label + ") slot '" + ni.uses[static_cast<std::size_t>(ua)].name + "' and node " + std::to_string(j) + " (" +
                                  nj.label + ") slot '" + nj.uses[static_cast<std::size_t>(ub)].name + "' of different branches: give the branches " +
-                                 "disjoint planes or order them with eg_record_wait; the recording is ended";
+                                 "disjoint planes or order them with eg_record_wait";
                     });
                     if (!reason.empty()) return reason;
                 }
@@ -180,10 +180,14 @@ void GraphShape::cond_arm() {
     f.branches.push_back(push(EG_GNODE_ARM, f.node, arm, "an arm"));
 }
 
-void GraphShape::cond_end() {
+void GraphShape::cond_end(bool arms_need_work) {
     const Frame& f = innermost(false, "eg_record_cond_end");
     if (f.branches.size() != f.want)
         refuse(EG_BAD_REQUEST, "eg_record_cond_end: the conditional has " + std::to_string(f.branches.size()) + " arm(s) of the " + std::to_string(f.want) + " it takes");
+    if (arms_need_work)    // a captured arm with no work never completes: refuse before anything is closed
+        for (std::size_t arm = 0; arm < f.branches.size(); ++arm)
+            if (std::none_of(nodes_.begin() + f.branches[arm] + 1, nodes_.end(), [&](const Node& n) { return n.parent == f.branches[arm]; }))
+                refuse(EG_BAD_REQUEST, "eg_record_cond_end: arm " + std::to_string(arm) + " holds no node; every arm of a device recording must launch at least one kernel");
     frames_.pop_back();
 }
 

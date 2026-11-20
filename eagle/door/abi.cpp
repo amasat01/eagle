@@ -204,6 +204,13 @@ EG_EXPORT eg_status eg_record_begin(eg_ctx* ctx) {
         else door::record_begin(c);
     });
 }
+EG_EXPORT eg_status eg_record_abort(eg_ctx* ctx) {
+    return door::call(ctx, [](eg_ctx& c) {
+        if (c.dev_rec != nullptr) door::device_record_abort(c);
+        else if (c.rec != nullptr) door::record_abort(c);
+        else door::refuse(EG_BAD_REQUEST, "eg_record_abort: no open recording");
+    });
+}
 EG_EXPORT eg_status eg_record_cond_begin(eg_ctx* ctx, const struct eg_cond_desc* desc) {
     return door::call(ctx, [desc](eg_ctx& c) {
         if (c.dev_rec != nullptr) door::device_record_cond_begin(c, desc);

@@ -93,6 +93,7 @@ void device_record_launch(eg_ctx&, eg_plan_s&) {}
 void device_record_run(eg_ctx&, eg_runner_s*) {}
 void device_record_host_step(eg_ctx&, void (*)(void*, StepFailure&) noexcept, void*, void (*)(eg_ctx&, void*)) {}
 void device_record_end(eg_ctx&, const eg_record_end_desc*, eg_graph**) {}
+void device_record_abort(eg_ctx&) {}
 void device_record_cond_begin(eg_ctx&, const eg_cond_desc*) {}
 void device_record_cond_arm(eg_ctx&) {}
 void device_record_cond_end(eg_ctx&) {}
@@ -2027,6 +2028,12 @@ void device_record_cond_begin(eg_ctx& ctx, const eg_cond_desc* desc) {
     }
 }
 
+/** @brief eg_record_abort on a device context: the open capture is ended and destroyed with everything the recording holds. */
+void device_record_abort(eg_ctx& ctx) {
+    recording_of(ctx);
+    abort_recording(ctx);
+}
+
 /** @brief eg_record_cond_arm on a device context: the capture moves to the next arm's stream. */
 void device_record_cond_arm(eg_ctx& ctx) {
     DeviceRecording& rec = recording_of(ctx);
@@ -2040,7 +2047,7 @@ void device_record_cond_arm(eg_ctx& ctx) {
 /** @brief eg_record_cond_end on a device context: every arm is closed (each must hold a node) and the capture goes on after the conditional. */
 void device_record_cond_end(eg_ctx& ctx) {
     DeviceRecording& rec = recording_of(ctx);
-    rec.shape.cond_end();
+    rec.shape.cond_end(true);
     rec.log.push_back(Op{ Op::CondEnd, nullptr, {}, {} });
     const Frame f = rec.frames.back();
     rec.frames.pop_back();
@@ -2086,10 +2093,7 @@ void device_record_fork_branch(eg_ctx& ctx) {
 void device_record_fork_end(eg_ctx& ctx) {
     DeviceRecording& rec = recording_of(ctx);
     const std::string race = rec.shape.fork_end();
-    if (!race.empty()) {
-        abort_recording(ctx);
-        refuse(EG_BAD_REQUEST, race);
-    }
+    if (!race.empty()) refuse(EG_BAD_REQUEST, race);    // the fork stays open, as before the call
     rec.log.push_back(Op{ Op::ForkEnd, nullptr, {}, {} });
     const Frame f = rec.frames.back();
     rec.frames.pop_back();

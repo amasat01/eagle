@@ -1227,6 +1227,72 @@ static void check_recording_states(eg_ctx* ctx) {
           "an empty-armed graph replays and frees its planes");
 }
 
+/* The nodes of a graph's description in order: how many, and their kinds as one string of digits for a comparison. */
+static int described(eg_ctx* ctx, const eg_graph* g, int* n_nodes, int* n_edges, char* kinds, size_t room) {
+    struct eg_graph_description d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    if (eg_graph_describe(ctx, g, &d) != EG_OK || (size_t)d.n_nodes + 1 > room) return 0;
+    for (int i = 0; i < d.n_nodes; ++i) {
+        const struct eg_graph_node* n = (const struct eg_graph_node*)((const char*)d.nodes + (size_t)i * d.node_size);
+        kinds[i] = (char)('A' + n->kind);
+    }
+    kinds[d.n_nodes] = 0;
+    *n_nodes = d.n_nodes;
+    *n_edges = d.n_edges;
+    return 1;
+}
+
+/* eg_record_abort from every state, with a recording that works after it; and a refused recording call changing nothing. */
+static void check_record_abort(eg_ctx* ctx) {
+    int32_t v[6] = { 11, 22, 0, 0, 0, 1 };
+    struct tensor t[6];
+    eg_plane* p[6];
+    int ok = 1;
+    for (int i = 0; i < 6; ++i) ok = ok && (p[i] = cell_at(ctx, &t[i], &v[i]));
+    if (!ok) {
+        check(0, "record abort planes wrapped");
+        return;
+    }
+    eg_plane *s1 = p[0], *s2 = p[1], *d1 = p[2], *d2 = p[3], *cell = p[5];
+    eg_graph *g = NULL, *a = NULL, *b = NULL;
+    check(eg_record_abort(ctx) == EG_BAD_REQUEST && reason_has(ctx, "no open recording"), "eg_record_abort with nothing open: refused BAD_REQUEST by name");
+    /* an open fork whose branch holds only a refused wait: no way forward, abort and record again */
+    ok = eg_record_begin(ctx) == EG_OK && eg_record_fork_begin(ctx) == EG_OK && eg_record_wait(ctx, 1, &d1) == EG_BAD_REQUEST &&
+         reason_has(ctx, "no earlier sibling") && eg_record_fork_branch(ctx) == EG_BAD_REQUEST && reason_has(ctx, "branch is empty") &&
+         eg_record_fork_end(ctx) == EG_BAD_REQUEST && reason_has(ctx, "branch is empty") && eg_record_abort(ctx) == EG_OK &&
+         eg_record_abort(ctx) == EG_BAD_REQUEST;
+    ok = ok && eg_record_begin(ctx) == EG_OK && eg_copy(ctx, s1, d1) == EG_OK && eg_record_end(ctx, NULL, &g) == EG_OK && eg_graph_launch(ctx, g) == EG_OK && v[2] == 11 &&
+         eg_graph_free(ctx, g) == EG_OK;
+    check(ok, "eg_record_abort of a fork whose branch holds only a refused wait: OK, then a new recording ends and replays; a second abort is refused");
+    struct eg_cond_desc d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    d.cell = cell;
+    d.kind = EG_COND_IF;
+    ok = eg_record_begin(ctx) == EG_OK && eg_record_cond_begin(ctx, &d) == EG_OK && eg_copy(ctx, s2, d2) == EG_OK && eg_record_abort(ctx) == EG_OK &&
+         eg_record_begin(ctx) == EG_OK && eg_record_abort(ctx) == EG_OK;
+    check(ok, "eg_record_abort inside an open IF arm and of an empty recording: OK, the context records again");
+    d.kind = EG_COND_WHILE;
+    d.max_iters = 3;
+    ok = eg_record_begin(ctx) == EG_OK && eg_record_cond_begin(ctx, &d) == EG_OK && eg_copy(ctx, s2, d2) == EG_OK && eg_record_abort(ctx) == EG_OK &&
+         eg_record_begin(ctx) == EG_OK && eg_copy(ctx, s2, d2) == EG_OK && eg_record_end(ctx, NULL, &g) == EG_OK && eg_graph_free(ctx, g) == EG_OK;
+    check(ok, "eg_record_abort inside an open WHILE body: OK, a new recording ends");
+    /* refused calls change nothing: the description equals that of the recording without them */
+    int n1, n2, e1, e2;
+    char k1[32], k2[32];
+    ok = eg_record_begin(ctx) == EG_OK && eg_record_fork_begin(ctx) == EG_OK && eg_copy(ctx, s1, d1) == EG_OK && eg_record_wait(ctx, 1, &d2) == EG_BAD_REQUEST &&
+         eg_record_cond_arm(ctx) == EG_BAD_REQUEST && eg_record_cond_end(ctx) == EG_BAD_REQUEST && eg_record_fork_branch(ctx) == EG_OK &&
+         eg_record_wait(ctx, 1, &d2) == EG_BAD_REQUEST && eg_copy(ctx, s2, d2) == EG_OK && eg_record_fork_end(ctx) == EG_OK && eg_record_end(ctx, NULL, &a) == EG_OK;
+    ok = ok && eg_record_begin(ctx) == EG_OK && eg_record_fork_begin(ctx) == EG_OK && eg_copy(ctx, s1, d1) == EG_OK && eg_record_fork_branch(ctx) == EG_OK &&
+         eg_copy(ctx, s2, d2) == EG_OK && eg_record_fork_end(ctx) == EG_OK && eg_record_end(ctx, NULL, &b) == EG_OK;
+    ok = ok && described(ctx, a, &n1, &e1, k1, sizeof(k1)) && described(ctx, b, &n2, &e2, k2, sizeof(k2));
+    check(ok && n1 == n2 && e1 == e2 && strcmp(k1, k2) == 0, "refused wait, arm and conditional-end calls leave the shape as it was: the description equals that of the recording without them");
+    if (a) eg_graph_free(ctx, a);
+    if (b) eg_graph_free(ctx, b);
+    for (int i = 0; i < 6; ++i) eg_plane_free(ctx, p[i]);
+}
+
 /* Fork, join and wait over copies of int32 cells. Oracle: the same copies run in recording order, written out by hand. */
 static void check_fork_join(eg_ctx* ctx) {
     int32_t v[6] = { 11, 22, 0, 0, 0, 0 };
@@ -1251,11 +1317,11 @@ static void check_fork_join(eg_ctx* ctx) {
     ok = eg_record_begin(ctx) == EG_OK && eg_record_fork_begin(ctx) == EG_OK && eg_copy(ctx, s1, dd) == EG_OK &&
          eg_record_fork_branch(ctx) == EG_OK && eg_copy(ctx, s2, dd) == EG_OK;
     ok = ok && eg_record_fork_end(ctx) == EG_BAD_REQUEST && reason_has(ctx, "WAW race between node 2 (eg_copy) slot 'dst' and node 4 (eg_copy) slot 'dst'");
-    check(ok && eg_record_end(ctx, NULL, &none) == EG_BAD_REQUEST && reason_has(ctx, "not recording"),
-          "a race between sibling branches is refused at eg_record_fork_end naming both ordinals, both slots and the hazard; the recording ends");
+    check(ok && eg_record_end(ctx, NULL, &none) == EG_BAD_REQUEST && reason_has(ctx, "still open") && eg_record_abort(ctx) == EG_OK,
+          "a race between sibling branches is refused at eg_record_fork_end naming both ordinals, both slots and the hazard; the fork stays open, as before the call");
     ok = eg_record_begin(ctx) == EG_OK && eg_record_fork_begin(ctx) == EG_OK && eg_copy(ctx, s1, d1) == EG_OK &&
          eg_record_fork_branch(ctx) == EG_OK && eg_copy(ctx, d1, d2) == EG_OK;
-    check(ok && eg_record_fork_end(ctx) == EG_BAD_REQUEST && reason_has(ctx, "RAW race between node 2 (eg_copy) slot 'dst' and node 4 (eg_copy) slot 'src'"),
+    check(ok && eg_record_fork_end(ctx) == EG_BAD_REQUEST && reason_has(ctx, "RAW race between node 2 (eg_copy) slot 'dst' and node 4 (eg_copy) slot 'src'") && eg_record_abort(ctx) == EG_OK,
           "a branch that reads what a sibling branch writes is a RAW race");
 
     /* the same with a wait: accepted, and the reader sees the sibling's value */
@@ -1274,7 +1340,7 @@ static void check_fork_join(eg_ctx* ctx) {
     ok = ok && eg_record_wait(ctx, 1, &d2) == EG_BAD_REQUEST && reason_has(ctx, "no earlier sibling branch") &&
          eg_record_wait(ctx, 0, &d1) == EG_BAD_REQUEST && eg_record_wait(ctx, 1, &nullp) == EG_BAD_REQUEST &&
          eg_copy(ctx, s2, d1) == EG_OK && eg_record_wait(ctx, 1, &d1) == EG_BAD_REQUEST && reason_has(ctx, "written by this branch");
-    check(ok && eg_record_fork_end(ctx) == EG_BAD_REQUEST, "eg_record_wait refused outside a fork, for a plane no earlier sibling writes, for a plane this branch writes, for no planes and for a NULL plane");
+    check(ok && eg_record_fork_end(ctx) == EG_BAD_REQUEST && eg_record_abort(ctx) == EG_OK, "eg_record_wait refused outside a fork, for a plane no earlier sibling writes, for a plane this branch writes, for no planes and for a NULL plane");
 
     /* fork structure */
     ok = eg_record_begin(ctx) == EG_OK && eg_record_fork_branch(ctx) == EG_BAD_REQUEST && reason_has(ctx, "no fork is open") &&
@@ -1576,10 +1642,9 @@ static void check_fork_launches(eg_ctx* ctx, eg_unit* axpb) {
     ok = eg_graph_describe(ctx, g, &fd) == EG_OK && fd.n_nodes == 6 && fd.nodes[2].kind == EG_GNODE_LAUNCH && fd.nodes[4].kind == EG_GNODE_LAUNCH &&
          fd.nodes[2].launch == 0 && fd.nodes[4].launch == 1 && fd.nodes[0].launch == -1 && fd.nodes[5].launch == -1;
     check(ok, "the LAUNCH nodes of two branches carry their launch ordinals 0 and 1 (nodes 2 and 4); other nodes -1");
-    eg_graph* none = NULL;
     ok = eg_record_begin(ctx) == EG_OK && eg_record_fork_begin(ctx) == EG_OK && eg_launch(ctx, pl1, NULL) == EG_OK &&
          eg_record_fork_branch(ctx) == EG_OK && eg_launch(ctx, pl1, NULL) == EG_OK;
-    check(ok && eg_record_fork_end(ctx) == EG_BAD_REQUEST && reason_has(ctx, "race between node 2 (eg_launch of unit") && eg_record_end(ctx, NULL, &none) == EG_BAD_REQUEST,
+    check(ok && eg_record_fork_end(ctx) == EG_BAD_REQUEST && reason_has(ctx, "race between node 2 (eg_launch of unit") && eg_record_abort(ctx) == EG_OK,
           "two launches of a plan writing one plane in two branches are a race, named by node and unit");
 
     /* a launch node names its unit; the hazard edge between two launches of one plan carries the slots */
@@ -4831,6 +4896,7 @@ int main(int argc, char** argv) {
     check_conditionals(ctx);
     check_recording_states(ctx);
     check_fork_join(ctx);
+    check_record_abort(ctx);
     check_graph_describe(ctx);
     {
         eg_unit *c1 = NULL;

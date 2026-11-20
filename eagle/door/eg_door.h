@@ -1094,10 +1094,18 @@ eg_status eg_gemm_free(eg_ctx* ctx, eg_gemm* gemm);
  * its captures and those runs in the order recorded, each run eagerly on the context's stream (it reads back and synchronizes, which a captured
  * graph cannot). A graph with no such run is one capture. The description and the rebinding of a plan's arguments cover every capture.
  * A run inside a conditional arm, a fork branch or a WHILE is refused NOT_WRITTEN, the recording left open: record it outside them.
+ * One rule for every refusal between ``eg_record_begin`` and ``eg_record_end``: a refused recording call changes nothing, the recording is as it was
+ * before the call (a race refused at ``eg_record_fork_end`` leaves the fork open). The caller may go on, or end the recording with ``eg_record_abort``.
  * Replaces: ``graph.Graph.build`` / ``pipeline.GraphPipeline`` and the
  * node-by-node host arms. Status: OK; BAD_REQUEST (already recording).
  */
 eg_status eg_record_begin(eg_ctx* ctx);
+
+/** Discard the open recording, from any state (an open fork or conditional, an empty branch, a half-recorded run): every plan, runner,
+ *  transform plan and plane it holds is released, and on a device context its capture is ended and destroyed with its pending driver
+ *  error cleared, so a launch, a bind or a new ``eg_record_begin`` that follows works. No graph results. Status: OK when it discarded a
+ *  recording; BAD_REQUEST "eg_record_abort: no open recording" otherwise. */
+eg_status eg_record_abort(eg_ctx* ctx);
 
 /** Open a conditional on ``desc->cell``; its first arm is being recorded. A fork may open inside an arm and a
  *  conditional inside a fork branch; a fork opened inside an arm must be closed before the arm or the conditional ends.
@@ -1131,7 +1139,7 @@ eg_status eg_record_fork_branch(eg_ctx* ctx);
  * with no ``eg_record_wait`` between them, are a race and refused BAD_REQUEST naming both node ordinals (0-based, in
  * recording order, a conditional's own test counting as a node reading its cell and baseline), both slots and the hazard (RAW, WAR or
  * WAW). The hazards come from each node's slots (a unit slot's role: read, write or both) and from the memory of the planes
- * (eagle/graph/Edges.h). A refused race ends the recording. Replay: the branches may run at the same time (a device graph: parallel branches; the host: in
+ * (eagle/graph/Edges.h). A refused race leaves the fork open. Replay: the branches may run at the same time (a device graph: parallel branches; the host: in
  * recording order, one legal schedule); the values equal the run in recording order. Status: OK; BAD_REQUEST (no fork open,
  * a conditional still open inside the branch, an empty branch, a race).
  */

@@ -1790,6 +1790,19 @@ static eg_status gb_cond(struct gb* g, int kind, uint32_t flags, int32_t arms, e
 }
 
 /* One replay of the graph, then eg_sync: OK. */
+/* A description's node count, edge count and node kinds as a string, to compare two recordings. */
+static int gb_shape(eg_ctx* c, const eg_graph* gr, int* n_nodes, int* n_edges, char* kinds, size_t room) {
+    struct eg_graph_description d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    if (eg_graph_describe(c, gr, &d) != EG_OK || (size_t)d.n_nodes + 1 > room) return 0;
+    for (int i = 0; i < d.n_nodes; ++i) kinds[i] = (char)('A' + ((const struct eg_graph_node*)((const char*)d.nodes + (size_t)i * d.node_size))->kind);
+    kinds[d.n_nodes] = 0;
+    *n_nodes = d.n_nodes;
+    *n_edges = d.n_edges;
+    return 1;
+}
+
 static int gb_replay(struct gb* g, eg_graph* gr) { return eg_graph_launch(g->ctx, gr) == EG_OK && eg_sync(g->ctx) == EG_OK; }
 
 static int gb_edge(const struct eg_graph_description* d, int from, int to, eg_gedge_kind kind, const eg_plane* plane) {
@@ -1998,8 +2011,49 @@ static void graph_builder_device(const char* dev_lib) {
     if (!ok) reason_has(c, "(the nested recording was refused)");
     check(ok, "device nesting: a fork inside a conditional arm and a conditional inside a fork branch recorded; the open ones refuse the end and the wrong close by name");
     if (c != NULL) {    /* the last fork's branch 1 reads p1 that branch 0 writes: a race refused at its end */
-        check(ok && refused(eg_record_fork_end(c), EG_BAD_REQUEST, c, "race between node") && reason_has(c, "node ") && reason_has(c, "slot "),
-              "device race: branches touching one plane with no wait are refused at fork_end, naming both nodes and slots");
+        check(ok && refused(eg_record_fork_end(c), EG_BAD_REQUEST, c, "race between node") && reason_has(c, "node ") && reason_has(c, "slot ") &&
+                  eg_record_abort(c) == EG_OK,
+              "device race: branches touching one plane with no wait are refused at fork_end, naming both nodes and slots; the fork stays open, as before the call");
+        /* eg_record_abort from every state of a capture, each followed by a launch outside any recording and a recording that ends */
+        check(refused(eg_record_abort(c), EG_BAD_REQUEST, c, "no open recording"), "device eg_record_abort with nothing open: refused BAD_REQUEST by name");
+        eg_graph* ag = NULL;
+        ok = eg_record_begin(c) == EG_OK && eg_record_fork_begin(c) == EG_OK && refused(eg_record_wait(c, 1, &g.p1), EG_BAD_REQUEST, c, "no earlier sibling") &&
+             refused(eg_record_fork_branch(c), EG_BAD_REQUEST, c, "branch is empty") && refused(eg_record_fork_end(c), EG_BAD_REQUEST, c, "branch is empty") &&
+             eg_record_abort(c) == EG_OK;
+        ok = ok && eg_launch(c, g.a, NULL) == EG_OK && eg_sync(c) == EG_OK && eg_record_begin(c) == EG_OK && eg_launch(c, g.b, NULL) == EG_OK &&
+             eg_record_end(c, NULL, &ag) == EG_OK && gb_replay(&g, ag) && eg_graph_free(c, ag) == EG_OK;
+        if (!ok) reason_has(c, "(the abort of a fork with a refused wait failed)");
+        check(ok, "device eg_record_abort of a fork whose branch holds only a refused wait: OK, then a launch outside a recording and a new recording replay");
+        ok = eg_record_begin(c) == EG_OK && eg_launch(c, g.a, NULL) == EG_OK && gb_cond(&g, EG_COND_IF, 0, 0, g.pf, 2, NULL, 0, 0) == EG_OK && eg_launch(c, g.b, NULL) == EG_OK &&
+             eg_record_abort(c) == EG_OK && eg_record_begin(c) == EG_OK && eg_launch(c, g.a, NULL) == EG_OK && eg_record_end(c, NULL, &ag) == EG_OK && gb_replay(&g, ag) &&
+             eg_graph_free(c, ag) == EG_OK;
+        if (!ok) reason_has(c, "(the abort inside an IF arm failed)");
+        check(ok, "device eg_record_abort inside an open IF arm (a capture with a conditional woven in): OK, a new recording replays");
+        ok = eg_record_begin(c) == EG_OK && gb_cond(&g, EG_COND_WHILE, 0, 0, g.pf, 2, NULL, 0, 4) == EG_OK && eg_launch(c, g.a, NULL) == EG_OK && eg_record_abort(c) == EG_OK &&
+             eg_record_begin(c) == EG_OK && eg_launch(c, g.a, NULL) == EG_OK && eg_record_end(c, NULL, &ag) == EG_OK && gb_replay(&g, ag) && eg_graph_free(c, ag) == EG_OK;
+        if (!ok) reason_has(c, "(the abort inside a WHILE body failed)");
+        check(ok, "device eg_record_abort inside an open WHILE body: OK, a new recording replays");
+        ok = eg_record_begin(c) == EG_OK && eg_record_abort(c) == EG_OK && eg_record_begin(c) == EG_OK && eg_launch(c, g.a, NULL) == EG_OK && eg_record_end(c, NULL, &ag) == EG_OK &&
+             eg_graph_free(c, ag) == EG_OK;
+        check(ok, "device eg_record_abort of a recording of one launch and of an empty one: OK, the context records again");
+        /* a refused eg_record_cond_end (an arm with no work) changes nothing: the arm takes its launch and the conditional closes */
+        ok = eg_record_begin(c) == EG_OK && gb_cond(&g, EG_COND_IF, 0, 0, g.pf, 2, NULL, 0, 0) == EG_OK && refused(eg_record_cond_end(c), EG_BAD_REQUEST, c, "holds no node") &&
+             eg_launch(c, g.a, NULL) == EG_OK && eg_record_cond_end(c) == EG_OK && eg_record_end(c, NULL, &ag) == EG_OK && eg_graph_free(c, ag) == EG_OK;
+        if (!ok) reason_has(c, "(the refused empty-arm end failed)");
+        check(ok, "device eg_record_cond_end over an empty arm: refused BAD_REQUEST by name with the recording as before; the arm takes a launch and the conditional closes");
+        /* refused calls leave the shape as it was: the description equals that of the recording without them */
+        eg_graph *ra = NULL, *rb = NULL;
+        int n1 = 0, n2 = 0, e1 = 0, e2 = 0;
+        char k1[32] = "", k2[32] = "";
+        ok = eg_record_begin(c) == EG_OK && eg_record_fork_begin(c) == EG_OK && eg_launch(c, g.a, NULL) == EG_OK && eg_record_wait(c, 1, &g.p2) == EG_BAD_REQUEST &&
+             eg_record_cond_arm(c) == EG_BAD_REQUEST && eg_record_cond_end(c) == EG_BAD_REQUEST && eg_record_fork_branch(c) == EG_OK && eg_record_wait(c, 1, &g.p3) == EG_BAD_REQUEST &&
+             eg_launch(c, g.b, NULL) == EG_OK && eg_record_fork_end(c) == EG_OK && eg_record_end(c, NULL, &ra) == EG_OK;
+        ok = ok && eg_record_begin(c) == EG_OK && eg_record_fork_begin(c) == EG_OK && eg_launch(c, g.a, NULL) == EG_OK && eg_record_fork_branch(c) == EG_OK && eg_launch(c, g.b, NULL) == EG_OK &&
+             eg_record_fork_end(c) == EG_OK && eg_record_end(c, NULL, &rb) == EG_OK;
+        ok = ok && gb_shape(c, ra, &n1, &e1, k1, sizeof(k1)) && gb_shape(c, rb, &n2, &e2, k2, sizeof(k2));
+        check(ok && n1 == n2 && e1 == e2 && strcmp(k1, k2) == 0, "device refused wait, arm and conditional-end calls leave the shape as it was: the description equals that of the recording without them");
+        if (ra) eg_graph_free(c, ra);
+        if (rb) eg_graph_free(c, rb);
     }
     gb_free(&g);
 
