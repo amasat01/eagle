@@ -1973,7 +1973,10 @@ static void graph_builder_device(const char* dev_lib) {
         eg_plane* moved[1] = { g.p3 };
         gb_clear(&g);
         ok = ok && bind_planes(c, g.a, 1, slot0, moved) == EG_OK && gb_replay(&g, gr);
-        check(ok && gb_holds(g.d3, 1) && gb_holds(g.d1, 0), "device rebind: after eg_bind the next replay writes the new plane and leaves the old one (never stale)");
+        const int wrote_new = gb_holds(g.d3, 1), left_old = gb_holds(g.d1, 0);
+        if (!ok) reason_has(c, "(the rebound replay was refused)");
+        else if (!wrote_new || !left_old) printf("      rebind: new plane written %d, old plane left %d\n", wrote_new, left_old);
+        check(ok && wrote_new && left_old, "device rebind: after eg_bind the next replay writes the new plane and leaves the old one (never stale)");
     }
     if (gr) eg_graph_free(c, gr);
     gb_free(&g);

@@ -458,6 +458,7 @@ void capture_abort(DeviceCapture* capture) noexcept {
         cuda::CapturedGraph dropped(owned->capturer.end());
     } catch (...) {
     }
+    (void)cudaGetLastError();    // the error of an unfinished capture (an unjoined fork) is not the next call's
 }
 
 void loop_launch(DeviceLoop* loop, std::uint64_t stream) {
@@ -505,21 +506,6 @@ std::vector<std::uint64_t> capture_kernels(std::uint64_t stream, unsigned count)
         at = from[static_cast<std::size_t>(edge - to.begin())];
     }
     return nodes;
-}
-
-bool loop_set_kernel_args(DeviceLoop* loop, std::uint64_t node, const std::vector<void*>& args, std::int64_t base, std::int64_t count,
-                          std::int64_t n) {
-    const auto at = reinterpret_cast<cudaGraphNode_t>(node);
-    cudaKernelNodeParams p = {};
-    EAGLE_CHECK_ALWAYS(cudaGraphKernelNodeGetParams(at, &p));
-    std::vector<void*> params = args;
-    params.push_back(&base);
-    params.push_back(&count);
-    params.push_back(&n);
-    p.kernelParams = params.data();
-    p.extra = nullptr;
-    EAGLE_CHECK_ALWAYS(cudaGraphKernelNodeSetParams(at, &p));
-    return cudaGraphExecKernelNodeSetParams(loop->exec, at, &p) == cudaSuccess;
 }
 
 struct DevicePool {

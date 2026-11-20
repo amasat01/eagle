@@ -185,11 +185,6 @@ void loop_reinstantiate(DeviceLoop* loop);
  *  one before (a plan's partitions launched in turn). */
 std::vector<std::uint64_t> capture_kernels(std::uint64_t stream, unsigned count);
 
-/** @brief Give kernel node @p node the argument list @p args followed by the triple (@p base, @p count, @p n), in the template and
- *  in the instance; false when the driver refused the update of the instance, which then must be made again (loop_reinstantiate). */
-bool loop_set_kernel_args(DeviceLoop* loop, std::uint64_t node, const std::vector<void*>& args, std::int64_t base, std::int64_t count,
-                          std::int64_t n);
-
 struct DevicePool;   ///< the streams and events a recording's conditionals and forks use, made before the capture opens (none can be made inside it)
 
 /** @brief Make @p streams streams and @p events events; free them with pool_free once the capture has ended. */

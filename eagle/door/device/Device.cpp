@@ -2131,6 +2131,25 @@ bool device_graph(const eg_ctx& ctx, const eg_graph* graph) {
 /** @brief Re-apply to the instantiated graph the arguments of every recorded launch whose plan was rebound since the last launch,
  *  and make the instance again when the driver refuses to update a node of it: a replay never runs on stale arguments. A plan the
  *  graph holds as cuBLAS products (no kernel node) or in the tape of EG_RECORD_DIFF cannot be re-applied and is refused. */
+/** @brief Give kernel node @p node of @p loop the arguments @p args followed by the triple (@p base, @p count, @p n), in the template
+ *  and in the instance; false when the driver refused the update of the instance (the template is updated either way). */
+bool set_kernel_args(const DeviceLoop* loop, std::uint64_t node, const std::vector<void*>& args, std::int64_t base, std::int64_t count, std::int64_t n) {
+    static const auto get = cuda::detail::driver_entry<decltype(&::cuGraphKernelNodeGetParams)>("cuGraphKernelNodeGetParams_v2");
+    static const auto set = cuda::detail::driver_entry<decltype(&::cuGraphKernelNodeSetParams)>("cuGraphKernelNodeSetParams_v2");
+    static const auto set_exec = cuda::detail::driver_entry<decltype(&::cuGraphExecKernelNodeSetParams)>("cuGraphExecKernelNodeSetParams_v2");
+    const auto at = reinterpret_cast<CUgraphNode>(node);
+    CUDA_KERNEL_NODE_PARAMS p = {};
+    check(get(at, &p), "cuGraphKernelNodeGetParams");
+    std::vector<void*> params = args;
+    params.push_back(&base);
+    params.push_back(&count);
+    params.push_back(&n);
+    p.kernelParams = params.data();
+    p.extra = nullptr;
+    check(set(at, &p), "cuGraphKernelNodeSetParams");
+    return set_exec(reinterpret_cast<CUgraphExec>(loop_exec(loop)), at, &p) == CUDA_SUCCESS;
+}
+
 void reapply_bindings(DeviceGraph& graph) {
     bool instance_stale = false;
     for (std::size_t i = 0; i < graph.plans.size(); ++i) {
@@ -2143,7 +2162,7 @@ void reapply_bindings(DeviceGraph& graph) {
         std::size_t k = 0;
         for (const exec::Partition& p : plan.parts) {
             if (p.count <= 0) continue;
-            if (!loop_set_kernel_args(graph.loop, graph.kernels[i][k++], plan.params, p.base, p.count, p.nSamples)) instance_stale = true;
+            if (!set_kernel_args(graph.loop, graph.kernels[i][k++], plan.params, p.base, p.count, p.nSamples)) instance_stale = true;
         }
         graph.bound[i] = binding_bytes(plan);
     }
