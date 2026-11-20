@@ -672,8 +672,7 @@ eg_status eg_host_threads(eg_ctx* ctx, int32_t threads);
  * compare-and-swap from -1 to its slot ordinal and only the winner writes cell 1 (the offending index), so the pair always describes one
  * violation; which violation is reported when several lanes violate is unspecified. The door reads cell 1 only when cell 0 is not -1, and then
  * the call returns FAULT "unit 'u': slot k ('name'): index i outside its N elements" (N: the slot's plane length); a replay or run stops
- * there. The next launch starts from cleared cells. So that a generated check has its slot's length in scope, the handle of an ACCUM_OUT slot of a
- * checked unit bound to a one-dimensional plane states that plane's length (an unchecked unit's states the sample count, as before). ``eg_plan_entry_figures`` reports EG_ENTRY_CHECKED for a plan of a checked unit.
+ * there. The next launch starts from cleared cells. ``eg_plan_entry_figures`` reports EG_ENTRY_CHECKED for a plan of a checked unit.
  */
 eg_status eg_unit_load(eg_ctx* ctx, const struct eg_unit_load_desc* desc, eg_unit** out);
 
@@ -789,6 +788,8 @@ eg_status eg_plan_free(eg_ctx* ctx, eg_plan* plan);
  * the map lists, in the order of the map and in any order, up to the count (refused BAD_REQUEST by name when the count
  * is above the map's length); each position at most once is the caller's promise, which is not scanned. A plan a
  * runner owns refuses the slots, and eg_runner_new refuses a plan that holds the caller's map or count.
+ * The handle a kernel receives for an ACCUM_OUT slot states the element count of the plane bound there, whatever its rank (the target is a flat
+ * plane of its own length, which a generated bounds check compares an index with), and not the sample count; the cell rows eagle makes state theirs.
  * Replaces: ``Plan.bind``, ``_plan_binding.BoundPlan``, ``_plan_pack``,
  * ``marshal``, ``_lane_bind`` (team grids, chunk counts), ``_cell_rows``.
  * Calls today: nothing compiled (Python packs ``ctypes`` addresses).

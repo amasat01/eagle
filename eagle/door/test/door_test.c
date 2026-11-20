@@ -2300,6 +2300,8 @@ static void check_checked_units(eg_ctx* ctx) {
     check(eg_launch(ctx, c.plan, NULL) == EG_OK && eg_launch(ctx, u.plan, NULL) == EG_OK && memcmp(c.buf, u.buf, sizeof(c.buf)) == 0 && c.buf[SC_GUARD] != 0.0,
           "in range: the checked unit's plane is bitwise the unchecked unit's");
 
+    int64_t* seen = (int64_t*)dlsym(dlopen(library_path, RTLD_NOW | RTLD_NOLOAD), "fixture_acc_samples");
+    check(seen != NULL && *seen == SC_LEN && SC_LEN != SC_N, "an unchecked ACCUM_OUT unit whose plane (8 elements) is shorter than the lane count (16) sees the plane length in its handle");
     long long slot = -1, index = -1;
     scat_reset(&c, SC_N);
     c.idx[7] = 100;
@@ -2395,6 +2397,7 @@ static void check_checked_units(eg_ctx* ctx) {
     eg_unit* bad_unit = NULL;
     check(load(ctx, "scat_badshape", 0x73, &bad_unit) == EG_BAD_REQUEST && reason_has(ctx, "fault_slot 4") && reason_has(ctx, "SHARED int64 LOOKUP of 2 cells"), "a fault_slot of the wrong shape is refused at load by name");
     check(load(ctx, "scat_badrole", 0x74, &bad_unit) == EG_BAD_REQUEST && reason_has(ctx, "fault_slot 2"), "a fault_slot naming a caller slot role is refused at load by name");
+    check(load(ctx, "scat_badindex", 0x76, &bad_unit) == EG_BAD_REQUEST && reason_has(ctx, "fault_slot 5 is also its index map slot"), "a fault_slot that is also the unit's index map slot is refused at load by name");
     check(load(ctx, "scat_badslot", 0x75, &bad_unit) == EG_BAD_REQUEST && reason_has(ctx, "fault_slot 9 names no slot"), "a fault_slot that names no slot is refused at load by name");
     scat_free(ctx, &c);
     scat_free(ctx, &u);

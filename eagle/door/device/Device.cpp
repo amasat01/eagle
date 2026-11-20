@@ -822,7 +822,7 @@ void launch_split(const eg_plan_s& plan) {
                 const DLTensor& t = (st.row_of[j] >= 0 ? plan.rows[c] : plan.comps[c])->tensor->dl_tensor;
                 plugin::ScalarHandle& h = handles[j];
                 h.data = static_cast<char*>(t.data) + t.byte_offset;
-                h.samples = static_cast<std::uint64_t>(plan.n_samples);
+                h.samples = static_cast<std::uint64_t>(elements(t));    // the cell rows' own length
                 h.stride = 1;
                 h.deviceType = plugin::kEagleAbiDeviceCUDA;
                 h.deviceId = 0;
@@ -849,7 +849,7 @@ void launch_split(const eg_plan_s& plan) {
                 const int role = su.slots[j].role;
                 plugin::ScalarHandle& h = handles[j];
                 h.data = static_cast<char*>(t.data) + t.byte_offset;
-                h.samples = static_cast<std::uint64_t>(role == EG_ROLE_LOOKUP ? elements(t)
+                h.samples = static_cast<std::uint64_t>(role == EG_ROLE_LOOKUP || role == EG_ROLE_ACCUM_OUT ? elements(t)
                                                        : role == EG_ROLE_WIDE_IN || role == EG_ROLE_WIDE_OUT ? t.shape[t.ndim - 1] : plan.n_samples);
                 h.stride = 1;
                 h.deviceType = plugin::kEagleAbiDeviceCUDA;
@@ -1022,7 +1022,7 @@ void launch_segmented(const eg_plan_s& plan) {
             const int role = sf.role;
             plugin::ScalarHandle& h = handles[j];
             h.data = static_cast<char*>(t.data) + t.byte_offset;
-            h.samples = static_cast<std::uint64_t>(role == EG_ROLE_LOOKUP ? elements(t) : role == EG_ROLE_WIDE_IN || role == EG_ROLE_WIDE_OUT ? t.shape[t.ndim - 1] : n);
+            h.samples = static_cast<std::uint64_t>(role == EG_ROLE_LOOKUP || role == EG_ROLE_ACCUM_OUT ? elements(t) : role == EG_ROLE_WIDE_IN || role == EG_ROLE_WIDE_OUT ? t.shape[t.ndim - 1] : n);
             h.stride = 1;
             h.deviceType = plugin::kEagleAbiDeviceCUDA;
             h.deviceId = 0;

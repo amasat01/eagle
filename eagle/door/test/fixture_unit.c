@@ -101,6 +101,8 @@ EG_FIXTURE_EXPORT void wait_host(void* const* params, int64_t base, int64_t coun
 EG_FIXTURE_EXPORT void tick_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void scat_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void scatp_host(void* const* params, int64_t base, int64_t count, int64_t n);
+EG_FIXTURE_EXPORT int64_t fixture_acc_samples;
+int64_t fixture_acc_samples;
 EG_FIXTURE_EXPORT void spans_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void mix2_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void widesum_host(void* const* params, int64_t base, int64_t count, int64_t n);
@@ -226,7 +228,10 @@ static void scat_claim(int64_t* cell, int64_t slot, int64_t index) {
     }
 
 void scat_host(void* const* params, int64_t base, int64_t count, int64_t n) { SCAT_BODY(1) }
-void scatp_host(void* const* params, int64_t base, int64_t count, int64_t n) { SCAT_BODY(0) }
+void scatp_host(void* const* params, int64_t base, int64_t count, int64_t n) {
+    fixture_acc_samples = (int64_t)((const struct fixture_handle*)params[3])->samples;    /* what an unchecked unit sees as its accumulate target's length */
+    SCAT_BODY(0)
+}
 
 void tick_host(void* const* params, int64_t base, int64_t count, int64_t n) {
     (void)base;
@@ -1327,6 +1332,15 @@ SCAT_UNIT(unit_scat, "scat", 0x71, "scat_host", scat_body, 1, 5);
 SCAT_UNIT(unit_scatp, "scatp", 0x72, "scatp_host", scatp_body, 0, 0);
 SCAT_UNIT(unit_scat_badshape, "scat_badshape", 0x73, "scat_host", scat_body, 1, 4);
 SCAT_UNIT(unit_scat_badrole, "scat_badrole", 0x74, "scat_host", scat_body, 1, 2);
+SLOT_OF(slot_scount, EG_ROLE_LOOKUP, EG_DTYPE_UINT32, "count");
+static const struct eg_unit_slot* const scati_slots[] = { &slot_sidx, &slot_sjdx, &slot_sval, &slot_sacc, &slot_stbl, &slot_sfault, &slot_scount };
+static const struct eg_unit_body scati_body = { .struct_size = sizeof(struct eg_unit_body), .access = EG_ACCESS_SAMPLE_LOCAL, .n_slots = 7, .slots = scati_slots };
+static const struct eg_unit_launch launch_scati = { .struct_size = sizeof(struct eg_unit_launch), .active_map_slot = -1, .active_count_slot = -1, .index_map_slot = 5,
+                                                    .index_count_slot = 6, .group = 1 };
+/* the fault cell named as the index map of the unit's launch record: refused at load */
+static const struct eg_unit_meta unit_scat_badindex = { .struct_size = sizeof(struct eg_unit_meta), .flags = EG_UNIT_CHECKED, .name = "scat_badindex", .digest = DIGEST(0x76),
+    .pattern = EG_PATTERN_PURE, .scalar_type = EG_SCALAR_FLOAT64, .host_entry = "scat_host", .device_image_format = EG_IMAGE_NONE, .body = &scati_body, .launch = &launch_scati,
+    .fault_slot = 5 };
 SCAT_UNIT(unit_scat_badslot, "scat_badslot", 0x75, "scat_host", scat_body, 1, 9);
 
 static const struct eg_unit_meta* const units[] = { &unit_axpb, &unit_wait, &unit_tick, &unit_spans, &unit_prefixsum, &unit_widesum, &unit_mix2, &unit_split, &unit_count1,
@@ -1338,7 +1352,7 @@ static const struct eg_unit_meta* const units[] = { &unit_axpb, &unit_wait, &uni
                                                     &unit_sga_cls, &unit_sga_k0, &unit_sga_k1, &unit_sga_rare, &unit_sga_even, &unit_sga_scalar, &unit_sga_heavy,
                                                     &unit_auto_nocls, &unit_auto_nobr, &unit_auto_sweep, &unit_auto_nocost, &unit_auto_group, &unit_auto_steps, &unit_auto_k3,
                                                     &unit_vecw, &unit_vecr, &unit_vecsplit, &unit_actrow, &unit_gathl, &unit_gathls, &unit_scat, &unit_scatp,
-                                                    &unit_scat_badshape, &unit_scat_badrole, &unit_scat_badslot };
+                                                    &unit_scat_badshape, &unit_scat_badrole, &unit_scat_badslot, &unit_scat_badindex };
 
 static const struct eg_library_meta library = {
     .struct_size = sizeof(struct eg_library_meta),

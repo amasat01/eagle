@@ -745,7 +745,7 @@ static void host_device_copies(eg_ctx* ctx, const char* dev_lib) {
     cudaFreeHost(hx), cudaFreeHost(hy), cudaFree(dx), cudaFree(d1), cudaFree(dc);
 /* ---- checked units on a device context ---- */
 
-enum { DS_LEN = 8, DS_GUARD = 2, DS_MAX = 64 };
+enum { DS_LEN = 8, DS_GUARD = 2, DS_MAX = 5000 };
 
 /* One run of "dscat" / "dscatp": host mirrors of the device planes; acc sits between guard cells that must never change. */
 struct dscat_rig {
@@ -1627,6 +1627,58 @@ static void check_auto_device(eg_ctx* ctx, const char* dev_lib) {
     }
     for (int u = 0; u < 4; ++u) eg_unit_free(ctx, auto_unit[u]);
     eg_unit_free(ctx, k0), eg_unit_free(ctx, k1), eg_unit_free(ctx, cls), eg_unit_free(ctx, fused);
+}
+
+/* A device run whose second plan is a checked unit: a finishing device unit (dcount1) then dscat in one step. An out-of-range write faults the run by
+ * name, a clean run passes, and a good run after the bad one passes. */
+static void checked_run_device(eg_ctx* ctx, const char* dev_lib) {
+    eg_unit *checked = NULL, *count = NULL;
+    check(load(ctx, dev_lib, "dscat", 0xF1, &checked) == EG_OK && load(ctx, dev_lib, "dcount1", 0xD9, &count) == EG_OK, "eg_unit_load dscat and dcount1 for a device run with a checked plan");
+    if (checked == NULL || count == NULL) return;
+    static struct dcount c;
+    static struct dscat_rig r;
+    int ok = dcount_new(ctx, count, 0, 0.0, &c) == EG_OK && dscat_make(ctx, &r, checked, DN);
+    if (!ok) {
+        check(0, "device run with a checked plan: plans made");
+        return;
+    }
+    eg_runner_free(ctx, c.runner);
+    eg_plan* steps[2] = { c.plan, r.plan };
+    struct eg_runner_desc d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    d.n_plans = 2;
+    d.plans = steps;
+    d.max_steps = 1000;
+    struct eg_run_report rep;
+    for (int pass = 0; pass < 3; ++pass) {    /* bad, bad again is not needed: bad, then good, then good */
+        c.runner = NULL;
+        dscat_reset(&r);
+        if (pass == 0) r.idx[9] = -1;
+        dscat_up(&r);
+        dcount_inputs(&c);
+        memset(&rep, 0, sizeof(rep));
+        rep.struct_size = sizeof(rep);
+        const eg_status made = eg_runner_new(ctx, &d, &c.runner);
+        const eg_status run = made == EG_OK ? eg_run(ctx, c.runner, &rep) : made;
+        dscat_down(&r);
+        if (pass == 0) check(made == EG_OK && run == EG_FAULT && reason_has(ctx, "unit 'dscat': slot 3 ('acc'): index -1 outside its 8 elements") && dscat_guards_hold(&r),
+                             "a device run with an out-of-range write in a checked plan: FAULT by name, the guard bytes unchanged");
+        else check(made == EG_OK && run == EG_OK && eg_sync(ctx) == EG_OK, pass == 1 ? "a clean device run with a checked plan passes" : "a second clean device run passes");
+        eg_runner_free(ctx, c.runner);
+    }
+    c.runner = NULL;
+    dscat_free(ctx, &r);
+    dcount_free(ctx, &c);
+    eg_unit_free(ctx, checked);
+    eg_unit_free(ctx, count);
+}
+
+/* A wrong-shape fault_slot is refused when a device unit loads. */
+static void checked_refusal_device(eg_ctx* ctx, const char* dev_lib) {
+    eg_unit* bad = NULL;
+    check(load(ctx, dev_lib, "dscat_badshape", 0xF3, &bad) == EG_BAD_REQUEST && bad == NULL && reason_has(ctx, "fault_slot 4") && reason_has(ctx, "SHARED int64 LOOKUP of 2 cells"),
+          "a DEVICE unit whose fault_slot is not a 2-cell int64 LOOKUP is refused at load by name");
 }
 
 static void reset_device(eg_ctx* ctx, const char* dev_lib) {
@@ -2874,6 +2926,8 @@ int main(int argc, char** argv) {
     host_nodes_device(ctx, dev_lib);
     host_device_copies(ctx, dev_lib);
     checked_units_device(ctx, dev_lib);
+    checked_run_device(ctx, dev_lib);
+    checked_refusal_device(ctx, dev_lib);
     cell_rows_device(ctx, dev_lib);
     reset_device(ctx, dev_lib);
     step_graph_device(ctx, dev_lib);

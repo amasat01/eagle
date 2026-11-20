@@ -336,14 +336,18 @@ static const struct eg_unit_meta unit_dscat = {
     .struct_size = sizeof(struct eg_unit_meta), .flags = EG_UNIT_CHECKED, .name = "dscat", .digest = DIGEST(0xF1), .pattern = EG_PATTERN_PURE,
     .scalar_type = EG_SCALAR_FLOAT64, .device_image = "fixture__image", .device_function = "dscat", .device_image_format = EG_IMAGE_FATBIN, .body = &scat_body,
     .launch = &launch_any, .device_image_size = "fixture__image_size", .fault_slot = 5 };
+static const struct eg_unit_meta unit_dscat_badshape = {
+    .struct_size = sizeof(struct eg_unit_meta), .flags = EG_UNIT_CHECKED, .name = "dscat_badshape", .digest = DIGEST(0xF3), .pattern = EG_PATTERN_PURE,
+    .scalar_type = EG_SCALAR_FLOAT64, .device_image = "fixture__image", .device_function = "dscat", .device_image_format = EG_IMAGE_FATBIN, .body = &scat_body,
+    .launch = &launch_any, .device_image_size = "fixture__image_size", .fault_slot = 4 };
 
 static const struct eg_unit_meta* const units[] = { &unit_axpy, &unit_axpy64, &unit_boxdev, &unit_banded, &unit_nofn,
                                                     &unit_noimg, &unit_dcells, &unit_dkeyed, &unit_dkeyednf, &unit_dkeyedh, &unit_fat129, &unit_ptx129, &unit_sass70, &unit_dprefix, &unit_dprefixsum, &unit_dcount, &unit_dcount1, &unit_dcount1a, &unit_dauto, &unit_dautorange, &unit_dlookup,
                                                     &unit_sg_cls, &unit_sg_k0, &unit_sg_k1, &unit_sgf, &unit_dg_k0, &unit_dg_k1, &unit_dg_sweep, &unit_dgf,
-                                                    &unit_sga_cls, &unit_sga_k0, &unit_sga_k1, &unit_sga_rare, &unit_sga_even, &unit_sga_scalar, &unit_sga_heavy, &unit_dscat, &unit_dscatp };
+                                                    &unit_sga_cls, &unit_sga_k0, &unit_sga_k1, &unit_sga_rare, &unit_sga_even, &unit_sga_scalar, &unit_sga_heavy, &unit_dscat, &unit_dscatp, &unit_dscat_badshape };
 
 static const struct eg_library_meta library = {
-    .struct_size = sizeof(struct eg_library_meta), .schema_major = EG_META_SCHEMA_MAJOR, .n_units = 38, .units = units,
+    .struct_size = sizeof(struct eg_library_meta), .schema_major = EG_META_SCHEMA_MAJOR, .n_units = 39, .units = units,
 };
 
 __attribute__((visibility("default"))) const struct eg_library_meta* eg_unit_library_meta(void) { return &library; }

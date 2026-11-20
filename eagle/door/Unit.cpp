@@ -168,7 +168,7 @@ void read_fault(const eg_unit_meta& m, eg_unit_s& unit) {
     SlotFacts& s = unit.slots[static_cast<std::size_t>(m.fault_slot)];
     if (s.role != EG_ROLE_LOOKUP || s.dtype != EG_DTYPE_INT64 || !s.shared || s.rank != 1 || s.shape.front() != 2 || s.gathered || s.param_plane)
         refuse(EG_BAD_REQUEST, what + " ('" + s.name + "') is not a SHARED int64 LOOKUP of 2 cells (slot ordinal, index)");
-    if (s.made || s.like != -1 || (unit.finish.present && (m.fault_slot == unit.finish.counter_slot || m.fault_slot == unit.finish.steps_slot)))
+    if (s.made || s.like != -1 || (unit.finish.present && (m.fault_slot == unit.finish.counter_slot || m.fault_slot == unit.finish.steps_slot || m.fault_slot == unit.finish.mask_slot)))
         refuse(EG_BAD_REQUEST, what + " ('" + s.name + "') is a slot another record of the unit already owns");
     s.made = true;    // eagle's own cell: a caller binding is refused by name
     unit.fault_slot = m.fault_slot;
@@ -519,6 +519,13 @@ void read_body(const eg_unit_meta& m, void* library, bool device_only, eg_unit_s
         unit.group = launch.group;
         unit.active_map_slot = launch.active_map_slot;
         unit.active_count_slot = launch.active_count_slot;
+    }
+    if (unit.fault_slot >= 0) {    // the fault cell is the door's own: no launch record may name it
+        const std::pair<std::int32_t, const char*> named[] = { { launch.active_map_slot, "active map" }, { launch.active_count_slot, "active count" },
+                                                               { launch.index_map_slot, "index map" }, { launch.index_count_slot, "index count" } };
+        for (const auto& slot : named)
+            if (slot.first == unit.fault_slot)
+                refuse(EG_BAD_REQUEST, "meta that contradicts itself: unit '" + unit.name + "' fault_slot " + std::to_string(unit.fault_slot) + " is also its " + slot.second + " slot");
     }
     if (launch.n_lane_axes < 0 || (launch.n_lane_axes > 0 && launch.lane_extents == nullptr))
         refuse(EG_BAD_REQUEST, "meta that contradicts itself: unit '" + unit.name + "' n_lane_axes " +

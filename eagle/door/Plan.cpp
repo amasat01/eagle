@@ -519,9 +519,9 @@ void plan_new(eg_ctx& ctx, const eg_plan_desc* desc, eg_plan** out) {
             for (const CellFacts& c : d.unit->cells) {
                 plan->rows.push_back(make_plane(ctx, real, { rows }, device));
                 plan->comps.push_back(c.comp >= 0 ? make_plane(ctx, real, { rows }, device) : nullptr);
-                bind_handle(*plan, c.slot, plan->rows.back()->tensor->dl_tensor.data, static_cast<std::uint64_t>(d.n_samples));
+                bind_handle(*plan, c.slot, plan->rows.back()->tensor->dl_tensor.data, static_cast<std::uint64_t>(rows));
                 plan->bindings[c.slot].bound = false;    // bound when the caller binds the cell
-                if (c.comp >= 0) bind_handle(*plan, c.comp, plan->comps.back()->tensor->dl_tensor.data, static_cast<std::uint64_t>(d.n_samples));
+                if (c.comp >= 0) bind_handle(*plan, c.comp, plan->comps.back()->tensor->dl_tensor.data, static_cast<std::uint64_t>(rows));
             }
             if (device) device_cell_work(*plan);
         }
@@ -872,7 +872,7 @@ std::uint64_t bound_count(const eg_plan_s& plan, int slot, const DLTensor& t) {
     const SlotFacts& sf = plan.unit->slots[static_cast<std::size_t>(slot)];
     if (sf.mirror) return static_cast<std::uint64_t>(sf.gathered ? t.shape[t.ndim - 1] : plan.n_samples);
     if (sf.role == EG_ROLE_LOOKUP) return static_cast<std::uint64_t>(elements(t));
-    if (sf.role == EG_ROLE_ACCUM_OUT && plan.unit->fault_slot >= 0 && t.ndim == 1) return static_cast<std::uint64_t>(t.shape[0]);    // a checked unit's check needs the plane's length in the handle
+    if (sf.role == EG_ROLE_ACCUM_OUT) return static_cast<std::uint64_t>(elements(t));    // an accumulate target is a flat plane of its own length, not of the lane count
     if (sf.keys_of >= 0) return static_cast<std::uint64_t>(key_count(*plan.unit, plan.unit->keyed[static_cast<std::size_t>(sf.keys_of)], plan.n_samples));
     return static_cast<std::uint64_t>(wide(sf) ? t.shape[t.ndim - 1] : plan.n_samples);
 }
