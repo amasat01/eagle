@@ -257,27 +257,33 @@ VJP_OF(d_scale_tape_vjp, 0, 5, scale_tape_links);
 VJP_OF(d_scale_open_vjp, 0, 4, scale_open_links);
 
 #define DIGEST(c) { c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c }
-#define UNIT(var, name_, byte, entry, body_, derived_)                                                                \
+#ifdef EG_GRAPH_IMAGE
+#define IMAGE(function) .device_image = "graph__image", .device_image_size = "graph__image_size", .device_function = function, \
+    .device_image_format = EG_IMAGE_FATBIN
+#else
+#define IMAGE(function) .device_image_format = EG_IMAGE_NONE
+#endif
+#define NO_IMAGE .device_image_format = EG_IMAGE_NONE
+#define UNIT(var, name_, byte, entry, body_, derived_, image_)                                                        \
     static const struct eg_unit_meta var = { .struct_size = sizeof(struct eg_unit_meta), .name = name_,             \
                                              .digest = DIGEST(byte), .pattern = EG_PATTERN_PURE,                    \
-                                             .scalar_type = EG_SCALAR_FLOAT64, .host_entry = entry,                 \
-                                             .device_image_format = EG_IMAGE_NONE, .body = &body_, .launch = &launch, \
-                                             .finish = NULL, .derived = derived_ }
-UNIT(u_scale, "scale", 0x10, "scale_host", scale_body, NULL);
-UNIT(u_scale_vjp, "scale_vjp", 0x11, "scale_vjp_host", scale_vjp_body, &d_scale_vjp);
-UNIT(u_square, "square", 0x12, "square_host", square_body, NULL);
-UNIT(u_square_vjp, "square_vjp", 0x13, "square_vjp_host", square_vjp_body, &d_square_vjp);
-UNIT(u_mul2, "mul2", 0x14, "mul2_host", mul2_body, NULL);
-UNIT(u_mul2_vjp, "mul2_vjp", 0x15, "mul2_vjp_host", mul2_vjp_body, &d_mul2_vjp);
-UNIT(u_uscale, "uscale", 0x16, "uscale_host", uscale_body, NULL);
-UNIT(u_uscale_vjp, "uscale_vjp", 0x17, "uscale_vjp_host", uscale_vjp_body, &d_uscale_vjp);
-UNIT(u_scale_tape_vjp, "scale_tape_vjp", 0x18, "scale_vjp_host", scale_vjp_body, &d_scale_tape_vjp);
-UNIT(u_scale_open_vjp, "scale_open_vjp", 0x19, "scale_vjp_host", scale_vjp_body, &d_scale_open_vjp);
+                                             .scalar_type = EG_SCALAR_FLOAT64, .host_entry = entry, image_,         \
+                                             .body = &body_, .launch = &launch, .finish = NULL, .derived = derived_ }
+UNIT(u_scale, "scale", 0x10, "scale_host", scale_body, NULL, IMAGE("scale"));
+UNIT(u_scale_vjp, "scale_vjp", 0x11, "scale_vjp_host", scale_vjp_body, &d_scale_vjp, IMAGE("scale_vjp"));
+UNIT(u_square, "square", 0x12, "square_host", square_body, NULL, IMAGE("square"));
+UNIT(u_square_vjp, "square_vjp", 0x13, "square_vjp_host", square_vjp_body, &d_square_vjp, IMAGE("square_vjp"));
+UNIT(u_mul2, "mul2", 0x14, "mul2_host", mul2_body, NULL, IMAGE("mul2"));
+UNIT(u_mul2_vjp, "mul2_vjp", 0x15, "mul2_vjp_host", mul2_vjp_body, &d_mul2_vjp, IMAGE("mul2_vjp"));
+UNIT(u_uscale, "uscale", 0x16, "uscale_host", uscale_body, NULL, NO_IMAGE);
+UNIT(u_uscale_vjp, "uscale_vjp", 0x17, "uscale_vjp_host", uscale_vjp_body, &d_uscale_vjp, NO_IMAGE);
+UNIT(u_scale_tape_vjp, "scale_tape_vjp", 0x18, "scale_vjp_host", scale_vjp_body, &d_scale_tape_vjp, NO_IMAGE);
+UNIT(u_scale_open_vjp, "scale_open_vjp", 0x19, "scale_vjp_host", scale_vjp_body, &d_scale_open_vjp, NO_IMAGE);
 
-UNIT(u_fan, "fan", 0x1a, "fan_host", fan_body, NULL);
-UNIT(u_fan_vjp, "fan_vjp", 0x1b, "fan_vjp_host", fan_vjp_body, &d_fan_vjp);
-UNIT(u_norm2, "norm2", 0x1c, "norm2_host", norm2_body, NULL);
-UNIT(u_norm2_vjp, "norm2_vjp", 0x1d, "norm2_vjp_host", norm2_vjp_body, &d_norm2_vjp);
+UNIT(u_fan, "fan", 0x1a, "fan_host", fan_body, NULL, IMAGE("fan"));
+UNIT(u_fan_vjp, "fan_vjp", 0x1b, "fan_vjp_host", fan_vjp_body, &d_fan_vjp, IMAGE("fan_vjp"));
+UNIT(u_norm2, "norm2", 0x1c, "norm2_host", norm2_body, NULL, IMAGE("norm2"));
+UNIT(u_norm2_vjp, "norm2_vjp", 0x1d, "norm2_vjp_host", norm2_vjp_body, &d_norm2_vjp, IMAGE("norm2_vjp"));
 
 static const struct eg_unit_meta* const units[] = { &u_scale, &u_scale_vjp, &u_square, &u_square_vjp, &u_mul2, &u_mul2_vjp,
                                                     &u_uscale, &u_uscale_vjp, &u_scale_tape_vjp, &u_scale_open_vjp, &u_fan, &u_fan_vjp, &u_norm2, &u_norm2_vjp };

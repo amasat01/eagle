@@ -220,9 +220,16 @@ $(REV_TEST): test/reverse_test.c $(LIB)
 GRAPH_FIXTURE := $(OUT)/libfixture_graph.so
 GRAPH_TEST := $(OUT)/graph_reverse_test
 
-$(GRAPH_FIXTURE): test/fixture_graph.c
+# With CUDA the fixture carries the device functions of test/fixture_graph.cu (sm_61 fatbin); the test runs its gradient rows on a
+# DEVICE context too when the machine has a device.
+$(OUT)/fixture_graph.fatbin: test/fixture_graph.cu | check-cuda
 	@mkdir -p $(OUT)
-	$(CC) $(DEPFLAGS) $(CFLAGS_C) -fPIC -shared -fvisibility=hidden -o $@ $<
+	$(NVCC) $(DEPFLAGS) -fatbin -arch=sm_61 -Wno-deprecated-gpu-targets -std=c++20 -ccbin $(CXX) -I$(ROOT) $< -o $@
+
+$(GRAPH_FIXTURE): test/fixture_graph.c $(if $(CUDA),$(OUT)/fixture_graph.fatbin)
+	@mkdir -p $(OUT)
+	$(if $(CUDA),$(call embed,$(OUT)/fixture_graph.fatbin,graph__image,$(OUT)/fixture_graph_image.o))
+	$(CC) $(DEPFLAGS) $(CFLAGS_C) $(if $(CUDA),-DEG_GRAPH_IMAGE) -fPIC -shared -fvisibility=hidden -o $@ $< $(if $(CUDA),$(OUT)/fixture_graph_image.o)
 
 $(GRAPH_TEST): test/graph_reverse_test.c $(LIB)
 	$(CC) $(DEPFLAGS) $(CFLAGS_C) -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door -Wl,-rpath,$(OUT) -lm -pthread
@@ -643,7 +650,7 @@ $(DEVICE_FIXTURE): test/fixture_device.c $(OUT)/fixture_device.fatbin $(OUT)/fat
 $(DEVICE_TEST): test/door_device_test.c $(LIB) | check-cuda
 	$(CC) $(DEPFLAGS) $(CFLAGS_C) -DEG_TEST_DIR='"$(CURDIR)/test"' -isystem $(CUDA)/include -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door -Wl,-rpath,$(OUT) $(CUDART) -lm -pthread
 
-device: check-cuda symbols $(FIXTURE) $(FIXTURE_BAD) $(FIXTURE_ALT) $(TEST) $(DEVICE_FIXTURE) $(DEVICE_TEST) $(GEMM_FIXTURE) $(GEMM_DEVICE_TEST) $(GEMM_ROUTE_TEST) $(NO_CUBLAS)
+device: check-cuda symbols $(FIXTURE) $(FIXTURE_BAD) $(FIXTURE_ALT) $(TEST) $(DEVICE_FIXTURE) $(DEVICE_TEST) $(GEMM_FIXTURE) $(GEMM_DEVICE_TEST) $(GEMM_ROUTE_TEST) $(NO_CUBLAS) $(GRAPH_FIXTURE) $(GRAPH_TEST)
 
 PAIR_DEVICE_TEST := $(OUT)/pair_device_test
 RUNNER_PAIR_TEST := $(OUT)/runner_pair_test
