@@ -23,6 +23,7 @@
 #include "eagle/policy/Residency.h"
 
 #include <algorithm>
+#include <map>
 #include <chrono>
 #include <limits>
 #include <memory>
@@ -297,12 +298,14 @@ struct LeafCopy {
     void* direct = nullptr;
     void* const* table = nullptr;
     unsigned capacity = 0;
+    unsigned window = 1;                                ///< a table copy happens at the iterations that are multiples of this, into ``table[iteration / window]``
 };
 
 /** @brief What the second capture of a EG_RECORD_DIFF recording adds: the saved tests by conditional ordinal and the copies in front of each launch. */
 struct DiffPass {
     std::vector<DiffSlot> slots;
     std::vector<std::vector<LeafCopy>> before;          ///< per launch ordinal
+    std::map<int, std::vector<LeafCopy>> checkpoints;   ///< per windowed WHILE (its node ordinal): the planes its body writes, kept at the start of each window
 };
 
 struct DeviceRecording {
@@ -1759,7 +1762,7 @@ void diff_copies(eg_ctx& ctx, const DeviceRecording& rec, std::size_t launch) {
             copy_step(ctx.dev.stream, c.direct, c.plane, c.bytes);
         } else {
             const Frame* loop = innermost_loop(rec);
-            table_copy_step(ctx.dev.stream, c.plane, c.bytes, c.table, loop->iteration, c.capacity);
+            table_copy_step(ctx.dev.stream, c.plane, c.bytes, c.table, loop->iteration, c.capacity, 1);
         }
     }
 }
@@ -1771,6 +1774,14 @@ void diff_save(eg_ctx& ctx, const DeviceRecording& rec, int node, const unsigned
         const Frame* loop = innermost_loop(rec);
         save_test_step(ctx.dev.stream, cell, baseline, loop != nullptr ? loop->iteration : nullptr, slot.buffer, slot.capacity);
     }
+}
+
+/** @brief The second capture keeps the planes a windowed WHILE's body writes at the start of every window, as its forward does on the host. */
+void diff_checkpoints(eg_ctx& ctx, const DeviceRecording& rec, int node) {
+    const auto it = rec.dp->checkpoints.find(node);
+    if (it == rec.dp->checkpoints.end()) return;
+    const Frame* loop = innermost_loop(rec);
+    for (const LeafCopy& c : it->second) table_copy_step(ctx.dev.stream, c.plane, c.bytes, c.table, loop->iteration, c.capacity, c.window);
 }
 
 }  // namespace
@@ -1909,7 +1920,10 @@ void device_record_cond_begin(eg_ctx& ctx, const eg_cond_desc* desc) {
     }
     ctx.dev.stream = cond_stream(frame.weave, 0);
     rec.frames.push_back(std::move(frame));
-    if (rec.dp != nullptr && d.kind == EG_COND_WHILE) diff_save(ctx, rec, node, cell, baseline);    // a WHILE's test at the start of each iteration
+    if (rec.dp != nullptr && d.kind == EG_COND_WHILE) {    // at the start of each iteration: the test, and the window's checkpoint
+        diff_checkpoints(ctx, rec, node);
+        diff_save(ctx, rec, node, cell, baseline);
+    }
 }
 
 /** @brief eg_record_cond_arm on a device context: the capture moves to the next arm's stream. */
@@ -2065,6 +2079,7 @@ void plan_diff_pass(eg_ctx& ctx, const GraphDiff& diff, std::size_t n_launches, 
     }
     for (const Snapshot& snap : diff.snapshots) {
         const RLeaf& leaf = plan.leaves[snap.node];
+        if (leaf.loop >= 0) continue;                                           // a windowed WHILE's states are rebuilt by the reverse from its checkpoints
         const DLTensor& t = diff.planes[static_cast<std::size_t>(snap.plane)]->tensor->dl_tensor;
         const char* plane = static_cast<const char*>(t.data) + t.byte_offset;
         auto& copies = pass.before[static_cast<std::size_t>(leaf.launch)];
@@ -2078,6 +2093,19 @@ void plan_diff_pass(eg_ctx& ctx, const GraphDiff& diff, std::size_t n_launches, 
             copies.push_back({ plane, snap.size, nullptr, nullptr, iterations[leaf.launch] });
         }
         table[static_cast<std::size_t>(leaf.key[1])] = const_cast<char*>(snap.bytes.data());
+    }
+    for (std::size_t L = 0; L < plan.loops.size(); ++L) {
+        const RLoop& loop = plan.loops[L];
+        const LoopTape& tape = diff.loops[L];
+        for (std::size_t q = 0; q < tape.planes.size(); ++q) {
+            const DLTensor& t = diff.planes[static_cast<std::size_t>(tape.planes[q])]->tensor->dl_tensor;
+            std::vector<void*> table;
+            for (const std::vector<Bytes>& group : tape.ckpt) table.push_back(const_cast<char*>(group[q].data()));
+            void** device_table = static_cast<void**>(grab(table.size() * sizeof(void*)));
+            device_write(ctx, device_table, table.data(), table.size() * sizeof(void*));
+            pass.checkpoints[loop.cond].push_back({ static_cast<const char*>(t.data) + t.byte_offset, static_cast<std::size_t>(elements(t)) * (t.dtype.bits / 8),
+                                                    nullptr, device_table, static_cast<unsigned>(loop.groups), static_cast<unsigned>(loop.w) });
+        }
     }
     for (auto& entry : tables) {
         void** device_table = static_cast<void**>(grab(entry.second.size() * sizeof(void*)));

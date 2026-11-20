@@ -303,7 +303,7 @@ UNIT(u_fan_vjp, "fan_vjp", 0x1b, "fan_vjp_host", fan_vjp_body, &d_fan_vjp, IMAGE
 UNIT(u_norm2, "norm2", 0x1c, "norm2_host", norm2_body, NULL, IMAGE("norm2"));
 UNIT(u_norm2_vjp, "norm2_vjp", 0x1d, "norm2_vjp_host", norm2_vjp_body, &d_norm2_vjp, IMAGE("norm2_vjp"));
 UNIT(u_tick, "tick", 0x1e, "tick_host", tick_body, NULL, IMAGE("tick"));
-UNIT(u_scale_scatter_vjp, "scale_scatter_vjp", 0x1f, "scale_vjp_host", scale_scatter_vjp_body, &d_scale_vjp, NO_IMAGE);
+UNIT(u_scale_scatter_vjp, "scale_scatter_vjp", 0x1f, "scale_vjp_host", scale_scatter_vjp_body, &d_scale_vjp, IMAGE("scale_vjp"));
 
 static const struct eg_unit_meta* const units[] = { &u_scale, &u_scale_vjp, &u_square, &u_square_vjp, &u_mul2, &u_mul2_vjp,
                                                     &u_uscale, &u_uscale_vjp, &u_scale_tape_vjp, &u_scale_open_vjp, &u_fan, &u_fan_vjp, &u_norm2, &u_norm2_vjp, &u_tick, &u_scale_scatter_vjp };

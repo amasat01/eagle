@@ -538,8 +538,10 @@ __global__ void saveTestKernel(const unsigned* cell, const unsigned* baseline, c
     dst[3 * k + 2] = baseline != nullptr ? *baseline : 0u;
 }
 
-__global__ void tableCopyKernel(const unsigned char* src, std::size_t bytes, unsigned char* const* table, const unsigned* iter, unsigned capacity) {
+__global__ void tableCopyKernel(const unsigned char* src, std::size_t bytes, unsigned char* const* table, const unsigned* iter, unsigned capacity, unsigned window) {
     unsigned k = *iter;
+    if (k % window != 0) return;
+    k /= window;
     if (k >= capacity) k = capacity - 1;
     unsigned char* dst = table[k];
     const std::size_t first = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x, stride = static_cast<std::size_t>(gridDim.x) * blockDim.x;
@@ -553,11 +555,11 @@ void save_test_step(std::uint64_t stream, const unsigned* cell, const unsigned* 
     EAGLE_CHECK_ALWAYS(cudaGetLastError());
 }
 
-void table_copy_step(std::uint64_t stream, const void* src, std::size_t bytes, void* const* table, const unsigned* iter, unsigned capacity) {
+void table_copy_step(std::uint64_t stream, const void* src, std::size_t bytes, void* const* table, const unsigned* iter, unsigned capacity, unsigned window) {
     if (bytes == 0) return;
     const unsigned blocks = static_cast<unsigned>(std::min<std::size_t>((bytes + 255) / 256, 1024));
     tableCopyKernel<<<blocks, 256, 0, reinterpret_cast<cudaStream_t>(stream)>>>(static_cast<const unsigned char*>(src), bytes,
-                                                                               reinterpret_cast<unsigned char* const*>(table), iter, capacity);
+                                                                               reinterpret_cast<unsigned char* const*>(table), iter, capacity, window);
     EAGLE_CHECK_ALWAYS(cudaGetLastError());
 }
 

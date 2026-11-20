@@ -198,9 +198,9 @@ bool pool_has(const DevicePool* pool, unsigned streams, unsigned events);
  *  "evaluated", the cell, the baseline or 0 for none) takes ``*cell`` and ``*baseline``. A null @p iter is entry 0. */
 void save_test_step(std::uint64_t stream, const unsigned* cell, const unsigned* baseline, const unsigned* iter, unsigned* dst, unsigned capacity);
 
-/** @brief Queue on @p stream (inside a capture) the copy of @p bytes at @p src to ``table[min(*iter, capacity - 1)]``, @p table being a device array of
- *  device addresses. */
-void table_copy_step(std::uint64_t stream, const void* src, std::size_t bytes, void* const* table, const unsigned* iter, unsigned capacity);
+/** @brief Queue on @p stream (inside a capture) the copy of @p bytes at @p src to ``table[min(*iter / window, capacity - 1)]`` when ``*iter`` is a multiple of
+ *  @p window, @p table being a device array of device addresses. */
+void table_copy_step(std::uint64_t stream, const void* src, std::size_t bytes, void* const* table, const unsigned* iter, unsigned capacity, unsigned window);
 
 /** @brief One device-to-host read of read_many. */
 struct ReadItem {

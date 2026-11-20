@@ -729,9 +729,12 @@ static void window_chain_row(struct rig* r, const struct units* u) {
     eg_graph *loop = NULL, *chain = NULL;
     int ok = f1 && f2 && tk && eg_record_begin(ctx) == EG_OK && cond_open(ctx, EG_COND_WHILE, 0, pc, 0, CAP) == EG_OK && eg_launch(ctx, f1, NULL) == EG_OK &&
              eg_launch(ctx, f2, NULL) == EG_OK && eg_launch(ctx, tk, NULL) == EG_OK && eg_record_cond_end(ctx) == EG_OK && end_diff(ctx, 2, vjps, &loop) == EG_OK;
+    if (!ok) printf("      stage: the loop recording\n");
     ok = ok && eg_record_begin(ctx) == EG_OK;
     for (int k = 0; ok && k < PASSES; ++k) ok = eg_launch(ctx, f1, NULL) == EG_OK && eg_launch(ctx, f2, NULL) == EG_OK;
+    if (!ok) printf("      stage: the chain launches\n");
     ok = ok && end_diff(ctx, 2 * PASSES, vjps, &chain) == EG_OK;
+    if (!ok) printf("      stage: the chain end\n");
     eg_plane* in[] = { px, pa };
     for (int which = 0; ok && which < 2; ++which) {
         eg_graph* g = which ? chain : loop;
@@ -739,6 +742,7 @@ static void window_chain_row(struct rig* r, const struct units* u) {
             x[i] = x0[i];
             c[i] = PASSES;
         }
+        up(r);
         ok = eg_graph_launch(ctx, g) == EG_OK;
         eg_plane* gr[] = { which ? NULL : pgx, pga };
         double* gxw = gx[which];
@@ -747,7 +751,16 @@ static void window_chain_row(struct rig* r, const struct units* u) {
         eg_plane* qga = mk(r, &tga2, 1, ga[which]);
         gr[0] = qgx;
         gr[1] = qga;
-        ok = ok && qgx && qga && reverse(ctx, g, px, ps, 2, in, gr) == EG_OK;
+        if (!ok) printf("      stage: launch of graph %d\n", which);
+        eg_status rs = ok && qgx && qga ? reverse(ctx, g, px, ps, 2, in, gr) : EG_BAD_REQUEST;
+        if (ok && rs != EG_OK) {
+            char buf[400];
+            size_t len = 0;
+            eg_error(ctx, buf, sizeof(buf), &len);
+            printf("      reverse of graph %d: status %d, %s\n", which, (int)rs, buf);
+        }
+        ok = ok && rs == EG_OK;
+        down(r);
     }
     verdict(r, ok && memcmp(gx[0], gx[1], sizeof(gx[0])) == 0 && memcmp(ga[0], ga[1], sizeof(ga[0])) == 0 && fabs(gx[0][0] - pow(a[0], PASSES)) < 1e-12,
             "a WHILE of cap 40 (windows of 16) over 37 passes gives bit for bit the gradients of the same 37 passes written out as launches");
@@ -781,10 +794,11 @@ static void window_reader_row(struct rig* r, const struct units* u) {
     eg_graph* g = NULL;
     int ok = f0 && f1 && f2 && tk && eg_record_begin(ctx) == EG_OK && eg_launch(ctx, f0, NULL) == EG_OK && cond_open(ctx, EG_COND_WHILE, 0, pc, 0, 40) == EG_OK &&
              eg_launch(ctx, f1, NULL) == EG_OK && eg_launch(ctx, f2, NULL) == EG_OK && eg_launch(ctx, tk, NULL) == EG_OK && eg_record_cond_end(ctx) == EG_OK &&
-             end_diff(ctx, 3, vjps, &g) == EG_OK && eg_graph_launch(ctx, g) == EG_OK;
+             end_diff(ctx, 3, vjps, &g) == EG_OK && (up(r), eg_graph_launch(ctx, g)) == EG_OK;
     eg_plane* in[] = { px, pw };
     eg_plane* gr[] = { pgx, pgw };
     ok = ok && reverse(ctx, g, py, ps, 2, in, gr) == EG_OK;
+    down(r);
     double want[N];
     for (int i = 0; i < N; ++i) want[i] = w[0];
     verdict(r, ok && close_to(gx, want, N) && close_to(gw, &want_w, 1) && fabs(x[0] - pow(a[0], 37) * x0[0]) < 1e-12,
@@ -920,21 +934,25 @@ static void scatter_row(struct rig* r, const struct units* u, eg_unit* vjp1, int
     const struct eg_node_vjp vjps[] = { { 0, u->scale_vjp }, { 1, vjp1 } };
     eg_graph* g = NULL;
     int ok = f1 && f2 && eg_record_begin(ctx) == EG_OK && eg_launch(ctx, f1, NULL) == EG_OK && eg_launch(ctx, f2, NULL) == EG_OK &&
-             end_diff(ctx, 2, vjps, &g) == EG_OK && eg_graph_launch(ctx, g) == EG_OK;
+             end_diff(ctx, 2, vjps, &g) == EG_OK && (up(r), eg_graph_launch(ctx, g)) == EG_OK;
     eg_plane* in[] = { px, pw1, pw2 };
     eg_plane* gr[] = { pgx, pgw1, pgw2 };
     uint8_t bitwise[3] = { 9, 9, 9 };
     int32_t passes = 0;
     ok = ok && reverse_with(ctx, g, py, p1, 3, in, gr, 0, bitwise, &passes) == EG_OK;
+    down(r);
     for (int i = 0; i < N; ++i) want[i] = w1[0] * w2[0];
     const double want_w1 = w2[0] * sx, want_w2 = w1[0] * sx;
     ok = ok && close_to(gx, want, N) && close_to(gw1, &want_w1, 1) && close_to(gw2, &want_w2, 1) && passes == 1;
     ok = ok && bitwise[0] == !scatter && bitwise[1] == !scatter && bitwise[2] == 1;
+    if (!ok) printf("      bitwise %d %d %d, passes %d, gx %g (want %g), gw1 %g (want %g), gw2 %g (want %g)\n", bitwise[0], bitwise[1], bitwise[2], (int)passes, gx[0], want[0], gw1[0], want_w1, gw2[0], want_w2);
     verdict(r, ok, scatter ? "a scatter-add vjp taints the gradients its adjoint reaches: bitwise 0 for x and w1, 1 for w2; values are the closed forms; passes 1"
                            : "without a scatter-add every gradient is bitwise; values are the closed forms; passes 1");
     /* STRICT refuses a tainted gradient by name before anything is written, and accepts a clean graph */
     for (int i = 0; i < N; ++i) gx[i] = -999.0;
+    up(r);
     const eg_status st = reverse_with(ctx, g, py, p1, 3, in, gr, EG_REVERSE_STRICT, NULL, NULL);
+    down(r);
     ok = scatter ? refused(st, EG_BAD_REQUEST, ctx, "inputs[0]") && reason_has(ctx, "launch 1") && gx[0] == -999.0 : st == EG_OK && close_to(gx, want, N);
     verdict(r, ok, scatter ? "EG_REVERSE_STRICT over a scatter-add gradient is refused by name (the input and the launch) and writes no gradient"
                            : "EG_REVERSE_STRICT over a graph with no scatter-add succeeds");
@@ -966,6 +984,7 @@ static void scatter_if_row(struct rig* r, const struct units* u) {
     for (int lane = 1; ok && lane >= 0; --lane) {
         uint8_t bitwise[2] = { 9, 9 };
         flags[2] = lane;
+        up(r);
         ok = eg_graph_launch(ctx, g) == EG_OK && reverse_with(ctx, g, py, p1, 2, in, gr, 0, bitwise, NULL) == EG_OK && bitwise[0] == 1 && bitwise[1] == !lane;
     }
     verdict(r, ok, "a scatter-add vjp under an IF arm taints x2 only when the arm ran; x, overwritten or alone, stays bitwise");
@@ -1005,6 +1024,8 @@ static void option_rows(struct rig* r, const struct units* u) {
     scatter_row(r, u, u->scale_vjp, 0);
     scatter_if_row(r, u);
     int_input_row(r, u);
+}
+
 /* ---- the policy row: the reduced gradient of a shared parameter is the same bits on the host and on the device, run to run ---------- */
 
 enum { M = 100000 };
@@ -1105,6 +1126,7 @@ int main(int argc, char** argv) {
         gradient_rows(&dev, &du);
         device_refusal_rows(&dev, &du);
         conditional_rows(&dev, &du);
+        option_rows(&dev, &du);
         policy_row(&host, &u, &dev, &du);
         eg_ctx_free(dctx);
     }
