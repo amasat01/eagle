@@ -4,6 +4,7 @@
 #include "eagle/door/host/Shape.h"
 
 #include <algorithm>
+#include <cmath>
 #include <functional>
 
 namespace eagle {
@@ -200,12 +201,13 @@ ReversePlan GraphShape::reverse_plan() const {
         plan.test_of[std::move(key)] = static_cast<int>(plan.tests.size()) - 1;
         return static_cast<int>(plan.tests.size()) - 1;
     };
+    int loop = -1, iteration = -1;              // the windowed WHILE the walk is inside, and its iteration
     std::function<void(int, const std::vector<int>&, const std::vector<RGate>&)> walk =
         [&](int container, const std::vector<int>& iters, const std::vector<RGate>& gates) {
             for (int c : kids[static_cast<std::size_t>(container + 1)]) {
                 const Node& n = nodes_[static_cast<std::size_t>(c)];
                 if (n.kind == EG_GNODE_LAUNCH) {
-                    plan.leaves.push_back({ n.launch, gates, keyed(c, iters) });
+                    plan.leaves.push_back({ n.launch, gates, keyed(c, iters), loop, iteration });
                     plan.leaf_of[plan.leaves.back().key] = static_cast<int>(plan.leaves.size()) - 1;
                 } else if (n.kind == EG_GNODE_FORK) {
                     for (int b : kids[static_cast<std::size_t>(c + 1)]) walk(b, iters, gates);
@@ -222,12 +224,27 @@ ReversePlan GraphShape::reverse_plan() const {
                     }
                     if (n.facts.max_iters < 1)
                         refuse(EG_BAD_REQUEST, "eg_record_end: the WHILE of node " + std::to_string(c) + " has max_iters 0; EG_RECORD_DIFF needs a cap, which bounds the tape");
-                    for (int k = 0; k < n.facts.max_iters; ++k) {
+                    const bool outermost = iters.empty();   // an inner WHILE stays unrolled inside its outer iteration
+                    const int cap = static_cast<int>(n.facts.max_iters);
+                    const int w = std::min(cap, std::clamp(static_cast<int>(std::ceil(std::sqrt(static_cast<double>(cap)))), 16, 1024));
+                    const std::size_t first = plan.leaves.size();
+                    if (outermost) loop = static_cast<int>(plan.loops.size());
+                    for (int k = 0; k < cap; ++k) {
                         std::vector<int> inner_iters = iters;
                         inner_iters.push_back(k);
                         std::vector<RGate> inner = gates;
                         inner.push_back({ add_test(c, keyed(c, inner_iters)), 0 });
+                        if (outermost) iteration = k;
                         walk(arms[0], inner_iters, inner);
+                    }
+                    if (outermost) {
+                        const int per = static_cast<int>(plan.leaves.size() - first) / cap;
+                        if (per > 0) {          // a body with no launch has nothing to rebuild
+                            plan.loop_of_cond[c] = loop;
+                            plan.loops.push_back({ c, cap, w, (cap + w - 1) / w, static_cast<int>(first), per });
+                        }
+                        loop = -1;
+                        iteration = -1;
                     }
                 } else if (n.kind != EG_GNODE_JOIN && n.kind != EG_GNODE_WAIT) {
                     refuse(EG_NOT_WRITTEN, "eg_record_end: recorded node " + std::to_string(c) + " (" + n.label + ") is not an eg_launch; EG_RECORD_DIFF records launches, "

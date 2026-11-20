@@ -250,6 +250,20 @@ void replay(eg_ctx& ctx, const std::vector<Node>& nodes, Tape* tape) {
     for (const Node& n : nodes) run_node(ctx, n, tape);
 }
 
+/** @brief Iteration @p k of the WHILE at node @p cond starts: when it opens a window, copy the planes the body writes. */
+void keep_window_start(GraphDiff& diff, int cond, int k) {
+    const auto it = diff.plan.loop_of_cond.find(cond);
+    if (it == diff.plan.loop_of_cond.end()) return;
+    const int w = diff.plan.loops[static_cast<std::size_t>(it->second)].w;
+    if (k % w != 0) return;
+    LoopTape& tape = diff.loops[static_cast<std::size_t>(it->second)];
+    std::vector<Bytes>& group = tape.ckpt[static_cast<std::size_t>(k / w)];
+    for (std::size_t q = 0; q < tape.planes.size(); ++q) {
+        const DLTensor& t = diff.planes[static_cast<std::size_t>(tape.planes[q])]->tensor->dl_tensor;
+        std::memcpy(group[q].data(), static_cast<const char*>(t.data) + t.byte_offset, static_cast<std::size_t>(elements(t)) * (t.dtype.bits / 8));
+    }
+}
+
 /** @brief The key of node @p n under the loops @p tape is in, then @p extra (a WHILE's own iteration) when given. */
 std::vector<int> tape_key(const Tape& tape, const Node& n, int extra = -1) {
     std::vector<int> key{ n.ordinal };
@@ -264,8 +278,9 @@ void run_node(eg_ctx& ctx, const Node& n, Tape* tape) {
         case Node::Launch:
             if (tape != nullptr) {                  // copy the planes this leaf overwrites, as they are before it
                 const int leaf = tape->diff->plan.leaf_of.at(tape_key(*tape, n));
+                const bool windowed = tape->diff->plan.leaves[static_cast<std::size_t>(leaf)].loop >= 0;   // its copies are rebuilt by the reverse
                 for (Snapshot& s : tape->diff->snapshots)
-                    if (s.node == static_cast<std::size_t>(leaf)) {
+                    if (!windowed && s.node == static_cast<std::size_t>(leaf)) {
                         const DLTensor& t = tape->diff->planes[static_cast<std::size_t>(s.plane)]->tensor->dl_tensor;
                         std::memcpy(s.bytes.data(), static_cast<const char*>(t.data) + t.byte_offset, s.size);
                     }
@@ -299,6 +314,7 @@ void run_node(eg_ctx& ctx, const Node& n, Tape* tape) {
                 for (std::int64_t i = 0; n.max_iters == 0 || i < n.max_iters; ++i) {
                     save(static_cast<int>(i));
                     if (!truth()) break;
+                    if (tape != nullptr && tape->iters.empty()) keep_window_start(*tape->diff, n.ordinal, static_cast<int>(i));
                     if (tape != nullptr) tape->iters.push_back(static_cast<int>(i));
                     replay(ctx, n.arms[0], tape);
                     if (tape != nullptr) tape->iters.pop_back();

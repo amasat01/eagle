@@ -645,9 +645,12 @@ static void if_row(struct rig* r, const struct units* u, eg_cond_kind kind, int 
     release(r);
 }
 
+static eg_status reverse_with(eg_ctx* ctx, eg_graph* g, eg_plane* out, eg_plane* seed, int32_t n_in, eg_plane* const* in, eg_plane* const* grads,
+                              uint32_t flags, uint8_t* bitwise, int32_t* passes);
+
 /* x <- a x per pass (t = a x, x = 1 t), a counter plane ticking down: the loop stops at zero or at its cap. With @p guarded the two
  * launches sit in an IF on lane 2 of a flag array, inside the loop. */
-static void while_row(struct rig* r, const struct units* u, int32_t start, int guarded, int lane) {
+static void while_row(struct rig* r, const struct units* u, int32_t start, int guarded, int lane, int cap, eg_unit* vjp0) {
     eg_ctx* ctx = r->ctx;
     double x[N], x0[N], t[N], a[1] = { 0.9 }, one1[1] = { 1.0 }, seed[N], gx[N], ga[1], want[N], want_a = 0.0;
     int32_t c[N], flags[4] = { 7, 7, 7, 7 };
@@ -662,10 +665,10 @@ static void while_row(struct rig* r, const struct units* u, int32_t start, int g
     eg_plane *pgx = mk(r, &tgx, N, gx), *pga = mk(r, &tga, 1, ga), *pc = mk_i32(r, &tc, N, c), *pf = mk_i32(r, &tf, 4, flags);
     eg_plane *a1[] = { px, pa, pt }, *a2[] = { pt, po, px }, *a3[] = { pc };
     eg_plan *f1 = plan_with(r, u->scale, 3, a1, NULL), *f2 = plan_with(r, u->scale, 3, a2, NULL), *tk = plan_with(r, u->tick, 1, a3, NULL);
-    const struct eg_node_vjp vjps[] = { { 0, u->scale_vjp }, { 1, u->scale_vjp } };
+    const struct eg_node_vjp vjps[] = { { 0, vjp0 }, { 1, u->scale_vjp } };
     eg_graph* g = NULL;
     up(r);
-    int ok = f1 && f2 && tk && pf && eg_record_begin(ctx) == EG_OK && cond_open(ctx, EG_COND_WHILE, 0, pc, 0, 4) == EG_OK;
+    int ok = f1 && f2 && tk && pf && eg_record_begin(ctx) == EG_OK && cond_open(ctx, EG_COND_WHILE, 0, pc, 0, cap) == EG_OK;
     if (guarded) ok = ok && cond_open(ctx, EG_COND_IF, 0, pf, 2, 0) == EG_OK;
     ok = ok && eg_launch(ctx, f1, NULL) == EG_OK && eg_launch(ctx, f2, NULL) == EG_OK;
     if (guarded) ok = ok && eg_record_cond_end(ctx) == EG_OK;
@@ -674,11 +677,12 @@ static void while_row(struct rig* r, const struct units* u, int32_t start, int g
     flags[2] = lane;
     up(r);
     ok = ok && eg_graph_launch(ctx, g) == EG_OK;
-    const int passes = start > 4 ? 4 : start;              /* the cap is 4 */
+    const int passes = start > cap ? cap : start;
     const int ran = guarded && lane == 0 ? 0 : passes;     /* passes that multiplied */
     eg_plane* in[] = { px, pa };
     eg_plane* gr[] = { pgx, pga };
-    ok = ok && reverse(ctx, g, px, ps, 2, in, gr) == EG_OK;
+    uint8_t bitwise[2] = { 9, 9 };
+    ok = ok && reverse_with(ctx, g, px, ps, 2, in, gr, 0, bitwise, NULL) == EG_OK && bitwise[0] == (vjp0 == u->scale_vjp) && bitwise[1] == (vjp0 == u->scale_vjp);
     down(r);
     for (int i = 0; i < N; ++i) {
         want[i] = pow(a[0], ran);
@@ -686,10 +690,105 @@ static void while_row(struct rig* r, const struct units* u, int32_t start, int g
     }
     ok = ok && fabs(x[0] - pow(a[0], ran) * x0[0]) < 1e-12 && close_to(gx, want, N) && close_to(ga, &want_a, 1);
     char what[200];
-    snprintf(what, sizeof(what), "a WHILE with cap 4 whose counter starts at %d%s%s: %d pass(es), dJ/dx0 = a^%d, dJ/da the closed form", (int)start,
+    snprintf(what, sizeof(what), "a WHILE with cap %d whose counter starts at %d%s%s%s: %d pass(es), dJ/dx0 = a^%d, dJ/da the closed form", cap, (int)start,
+             vjp0 == u->scale_vjp ? "" : ", a scatter-add vjp (bitwise 0)",
              guarded ? ", an IF around the body, lane " : "", guarded ? (lane ? "set" : "clear") : "", ran, ran);
     verdict(r, ok, what);
     eg_graph_free(ctx, g);
+    eg_plan_free(ctx, f1);
+    eg_plan_free(ctx, f2);
+    eg_plan_free(ctx, tk);
+    release(r);
+}
+
+/* The WHILE of cap 40 (windows of 16, stopping after 37 passes) against the same 37 passes written out as 74 launches: the window gives
+ * the unrolled chain's gradients bit for bit. */
+static void window_chain_row(struct rig* r, const struct units* u) {
+    eg_ctx* ctx = r->ctx;
+    enum { PASSES = 37, CAP = 40 };
+    double x0[N], x[N], t[N], a[1] = { 0.9 }, one1[1] = { 1.0 }, seed[N], gx[2][N], ga[2][1];
+    int32_t c[N];
+    struct tensor tx, tt, ta, to, ts, tgx, tga, tc;
+    fill(x, a, 0.5);
+    a[0] = 0.9;
+    for (int i = 0; i < N; ++i) {
+        x0[i] = x[i];
+        seed[i] = 1.0;
+    }
+    eg_plane *px = mk(r, &tx, N, x), *pt = mk(r, &tt, N, t), *pa = mk(r, &ta, 1, a), *po = mk(r, &to, 1, one1), *ps = mk(r, &ts, N, seed);
+    eg_plane *pgx = mk(r, &tgx, N, gx[0]), *pga = mk(r, &tga, 1, ga[0]), *pc = mk_i32(r, &tc, N, c);
+    eg_plane *a1[] = { px, pa, pt }, *a2[] = { pt, po, px }, *a3[] = { pc };
+    eg_plan *f1 = plan_with(r, u->scale, 3, a1, NULL), *f2 = plan_with(r, u->scale, 3, a2, NULL), *tk = plan_with(r, u->tick, 1, a3, NULL);
+    struct eg_node_vjp vjps[2 * PASSES];
+    for (int i = 0; i < 2 * PASSES; ++i) {
+        vjps[i].launch = i;
+        vjps[i].vjp = u->scale_vjp;
+    }
+    eg_graph *loop = NULL, *chain = NULL;
+    int ok = f1 && f2 && tk && eg_record_begin(ctx) == EG_OK && cond_open(ctx, EG_COND_WHILE, 0, pc, 0, CAP) == EG_OK && eg_launch(ctx, f1, NULL) == EG_OK &&
+             eg_launch(ctx, f2, NULL) == EG_OK && eg_launch(ctx, tk, NULL) == EG_OK && eg_record_cond_end(ctx) == EG_OK && end_diff(ctx, 2, vjps, &loop) == EG_OK;
+    ok = ok && eg_record_begin(ctx) == EG_OK;
+    for (int k = 0; ok && k < PASSES; ++k) ok = eg_launch(ctx, f1, NULL) == EG_OK && eg_launch(ctx, f2, NULL) == EG_OK;
+    ok = ok && end_diff(ctx, 2 * PASSES, vjps, &chain) == EG_OK;
+    eg_plane* in[] = { px, pa };
+    for (int which = 0; ok && which < 2; ++which) {
+        eg_graph* g = which ? chain : loop;
+        for (int i = 0; i < N; ++i) {
+            x[i] = x0[i];
+            c[i] = PASSES;
+        }
+        ok = eg_graph_launch(ctx, g) == EG_OK;
+        eg_plane* gr[] = { which ? NULL : pgx, pga };
+        double* gxw = gx[which];
+        struct tensor tgx2, tga2;
+        eg_plane* qgx = mk(r, &tgx2, N, gxw);
+        eg_plane* qga = mk(r, &tga2, 1, ga[which]);
+        gr[0] = qgx;
+        gr[1] = qga;
+        ok = ok && qgx && qga && reverse(ctx, g, px, ps, 2, in, gr) == EG_OK;
+    }
+    verdict(r, ok && memcmp(gx[0], gx[1], sizeof(gx[0])) == 0 && memcmp(ga[0], ga[1], sizeof(ga[0])) == 0 && fabs(gx[0][0] - pow(a[0], PASSES)) < 1e-12,
+            "a WHILE of cap 40 (windows of 16) over 37 passes gives bit for bit the gradients of the same 37 passes written out as launches");
+    eg_graph_free(ctx, loop);
+    eg_graph_free(ctx, chain);
+    eg_plan_free(ctx, f1);
+    eg_plan_free(ctx, f2);
+    eg_plan_free(ctx, tk);
+    release(r);
+}
+
+/* y = w x reads x before a WHILE (cap 40, 37 passes) overwrites it: the gradient of y needs x as it was, the checkpoint at loop entry. */
+static void window_reader_row(struct rig* r, const struct units* u) {
+    eg_ctx* ctx = r->ctx;
+    double x[N], x0[N], t[N], y[N], w[1] = { 1.7 }, a[1] = { 0.9 }, one1[1] = { 1.0 }, seed[N], gx[N], gw[1], want_w = 0.0;
+    int32_t c[N];
+    struct tensor tx, tt, ty, tw, ta, to, ts, tgx, tgw, tc;
+    fill(x, w, 0.5);
+    for (int i = 0; i < N; ++i) {
+        x0[i] = x[i];
+        seed[i] = 1.0;
+        want_w += x0[i];
+        c[i] = 37;
+    }
+    eg_plane *px = mk(r, &tx, N, x), *pt = mk(r, &tt, N, t), *py = mk(r, &ty, N, y), *pw = mk(r, &tw, 1, w), *pa = mk(r, &ta, 1, a);
+    eg_plane *po = mk(r, &to, 1, one1), *ps = mk(r, &ts, N, seed), *pgx = mk(r, &tgx, N, gx), *pgw = mk(r, &tgw, 1, gw), *pc = mk_i32(r, &tc, N, c);
+    eg_plane *a0[] = { px, pw, py }, *a1[] = { px, pa, pt }, *a2[] = { pt, po, px }, *a3[] = { pc };
+    eg_plan *f0 = plan_with(r, u->scale, 3, a0, NULL), *f1 = plan_with(r, u->scale, 3, a1, NULL), *f2 = plan_with(r, u->scale, 3, a2, NULL);
+    eg_plan* tk = plan_with(r, u->tick, 1, a3, NULL);
+    const struct eg_node_vjp vjps[] = { { 0, u->scale_vjp }, { 1, u->scale_vjp }, { 2, u->scale_vjp } };
+    eg_graph* g = NULL;
+    int ok = f0 && f1 && f2 && tk && eg_record_begin(ctx) == EG_OK && eg_launch(ctx, f0, NULL) == EG_OK && cond_open(ctx, EG_COND_WHILE, 0, pc, 0, 40) == EG_OK &&
+             eg_launch(ctx, f1, NULL) == EG_OK && eg_launch(ctx, f2, NULL) == EG_OK && eg_launch(ctx, tk, NULL) == EG_OK && eg_record_cond_end(ctx) == EG_OK &&
+             end_diff(ctx, 3, vjps, &g) == EG_OK && eg_graph_launch(ctx, g) == EG_OK;
+    eg_plane* in[] = { px, pw };
+    eg_plane* gr[] = { pgx, pgw };
+    ok = ok && reverse(ctx, g, py, ps, 2, in, gr) == EG_OK;
+    double want[N];
+    for (int i = 0; i < N; ++i) want[i] = w[0];
+    verdict(r, ok && close_to(gx, want, N) && close_to(gw, &want_w, 1) && fabs(x[0] - pow(a[0], 37) * x0[0]) < 1e-12,
+            "a launch before a WHILE reads a plane the loop overwrites: its gradient uses the plane as it was at loop entry (dJ/dw = sum x0)");
+    eg_graph_free(ctx, g);
+    eg_plan_free(ctx, f0);
     eg_plan_free(ctx, f1);
     eg_plan_free(ctx, f2);
     eg_plan_free(ctx, tk);
@@ -765,10 +864,17 @@ static void conditional_rows(struct rig* r, const struct units* u) {
     if_row(r, u, EG_COND_IF, 1, 0);
     if_row(r, u, EG_COND_IF_ELSE, 0, 0);
     if_row(r, u, EG_COND_IF, 0, 1);
-    while_row(r, u, 3, 0, 1);
-    while_row(r, u, 100, 0, 1);
-    while_row(r, u, 3, 1, 1);
-    while_row(r, u, 3, 1, 0);
+    while_row(r, u, 3, 0, 1, 4, u->scale_vjp);
+    while_row(r, u, 100, 0, 1, 4, u->scale_vjp);
+    while_row(r, u, 3, 1, 1, 4, u->scale_vjp);
+    while_row(r, u, 3, 1, 0, 4, u->scale_vjp);
+    while_row(r, u, 37, 0, 1, 40, u->scale_vjp);      /* 3 windows of 16: the loop stops inside the last */
+    while_row(r, u, 100, 0, 1, 40, u->scale_vjp);     /* the cap is reached */
+    while_row(r, u, 37, 1, 1, 40, u->scale_vjp);
+    while_row(r, u, 3, 0, 1, 4, u->scatter_vjp);
+    while_row(r, u, 37, 0, 1, 40, u->scatter_vjp);
+    window_chain_row(r, u);
+    window_reader_row(r, u);
     fork_in_arm_row(r, u);
     while_refusal_row(r, u);
 }

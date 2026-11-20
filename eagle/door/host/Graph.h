@@ -83,9 +83,17 @@ struct DiffNode {
 /** @brief A plane the graph copied just before node ``node`` overwrites it (or reads it in place). */
 struct Snapshot {
     std::size_t node = 0;
+    int alias = -1;                             ///< a leaf copy in a windowed WHILE: the entry whose buffer it shares (same body leaf, iteration mod w); else -1
     int plane = -1;
     std::size_t size = 0;                       ///< bytes of the plane
     Bytes bytes;
+};
+
+/** @brief What the forward keeps of a windowed WHILE: the planes its body writes, copied at the start of every w-th iteration. */
+struct LoopTape {
+    std::vector<int> planes;                    ///< indices in GraphDiff::planes
+    std::vector<std::vector<Bytes>> ckpt;       ///< per window, per plane of ``planes``
+    int built = -1;                             ///< the window whose iterations the reverse has rebuilt into the shared buffers
 };
 
 /** @brief The tape of a graph ended with EG_RECORD_DIFF. */
@@ -95,6 +103,7 @@ struct GraphDiff {
     std::vector<DiffNode> nodes;                ///< per launch, by the ordinal among the eg_launch calls
     ReversePlan plan;                           ///< the launches in the order the forward runs them, WHILE bodies unrolled
     std::vector<TestSave> saved;                ///< per ``plan.tests``: what the last replay's test saw
+    std::vector<LoopTape> loops;                ///< per ``plan.loops``
     std::vector<Snapshot> snapshots;            ///< ``node`` is the index in ``plan.leaves``
     bool launched = false;
     /** @brief A plan the graph runs: its bind count at eg_record_end (a launch of the graph refuses a rebound plan) and its

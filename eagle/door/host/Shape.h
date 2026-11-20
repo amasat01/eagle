@@ -59,12 +59,24 @@ struct RLeaf {
     int launch = 0;                             ///< the ordinal among the eg_launch calls of the recording
     std::vector<RGate> gates;                   ///< empty: it always runs
     std::vector<int> key;                       ///< the launch node's ordinal, then the iteration of each enclosing WHILE
+    int loop = -1;                              ///< the windowed WHILE (index in ReversePlan::loops) it is a copy for, else -1
+    int iter = -1;                              ///< its iteration in that loop
+};
+
+/** @brief An outermost WHILE whose reverse rebuilds states window by window: its iterations ``0 .. cap - 1`` are the leaves
+ *  ``first_leaf + k * per_iter ...``, and the forward keeps the planes the body writes at the start of every ``w``-th iteration. */
+struct RLoop {
+    int cond = 0;                               ///< the COND node's ordinal
+    int cap = 0, w = 0, groups = 0;             ///< max_iters, the window, ceil(cap / w)
+    int first_leaf = 0, per_iter = 0;           ///< the first leaf of iteration 0 and the leaves of one iteration
 };
 
 /** @brief The leaves of a recording in the order the forward runs them, its WHILE bodies unrolled ``max_iters`` times. */
 struct ReversePlan {
     std::vector<RLeaf> leaves;
     std::vector<RTest> tests;
+    std::vector<RLoop> loops;
+    std::map<int, int> loop_of_cond;            ///< COND node ordinal -> index in ``loops``
     std::map<std::vector<int>, int> leaf_of, test_of;   ///< by key
 };
 

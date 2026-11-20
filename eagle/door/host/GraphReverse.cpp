@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <functional>
 #include <map>
 #include <new>
 #include <string>
@@ -207,29 +208,67 @@ std::unique_ptr<GraphDiff> diff_plan(eg_ctx& ctx, const std::vector<eg_plan_s*>&
             node.vjp = v.vjp;
             ++v.vjp->refs;
         }
+        // The planes the body of each windowed WHILE writes, and the copies of them its forward keeps at the start of every w-th iteration.
+        diff->loops.resize(plan.loops.size());
+        for (std::size_t L = 0; L < plan.loops.size(); ++L) {
+            const RLoop& loop = plan.loops[L];
+            LoopTape& tape = diff->loops[L];
+            for (int m = loop.first_leaf; m < loop.first_leaf + loop.cap * loop.per_iter; ++m) {
+                const DiffNode& node = diff->nodes[static_cast<std::size_t>(plan.leaves[static_cast<std::size_t>(m)].launch)];
+                if (node.writes.empty()) continue;
+                const eg_plan_s& primal = *node.plan;
+                for (std::size_t sl = 0; sl < primal.bindings.size(); ++sl)     // the rebuild re-runs this launch: every plane it binds must be tracked
+                    if (primal.bindings[sl].plane != nullptr && find_plane(*diff, primal.bindings[sl].plane) < 0)
+                        refuse(EG_NOT_WRITTEN, "eg_record_end: launch " + std::to_string(plan.leaves[static_cast<std::size_t>(m)].launch) + " (unit '" + primal.unit->name +
+                               "') in a WHILE body binds the plane of slot '" + primal.unit->slots[sl].name + "', which is not a real plane the tape tracks; the loop's window cannot rebuild it");
+                for (int p : node.writes)
+                    if (std::find(tape.planes.begin(), tape.planes.end(), p) == tape.planes.end()) tape.planes.push_back(p);
+            }
+            tape.ckpt.resize(static_cast<std::size_t>(loop.groups));
+            for (std::vector<Bytes>& group : tape.ckpt)
+                for (int p : tape.planes) {
+                    try {
+                        group.emplace_back(byte_count(*diff->planes[static_cast<std::size_t>(p)]), diff->dev);
+                    } catch (const std::exception&) {
+                        refuse(EG_FAULT, "eg_record_end: no memory for the window checkpoints of the WHILE of node " + std::to_string(loop.cond));
+                    }
+                }
+        }
         // The copies the reverse needs: for each plane a leaf reads, the first leaf at or after it that writes the plane, and
-        // the next ones while that writer may not run (it sits under a conditional).
+        // the next ones while that writer may not run (it sits under a conditional). A leaf copy of a windowed WHILE shares the
+        // buffer of its body leaf in iteration (k mod w), which the reverse refills window by window; a reader outside the loop
+        // reads the loop's start-of-loop checkpoint instead.
         const auto writes = [&](const RLeaf& l, int p) {
             const std::vector<int>& w = diff->nodes[static_cast<std::size_t>(l.launch)].writes;
             return std::find(w.begin(), w.end(), p) != w.end();
+        };
+        const std::function<int(std::size_t, int)> snapshot_of = [&](std::size_t m, int p) {
+            for (std::size_t k = 0; k < diff->snapshots.size(); ++k)
+                if (diff->snapshots[k].node == m && diff->snapshots[k].plane == p) return static_cast<int>(k);
+            Snapshot snap;
+            snap.node = m;
+            snap.plane = p;
+            snap.size = byte_count(*diff->planes[static_cast<std::size_t>(p)]);
+            const RLeaf& lm = plan.leaves[m];
+            if (lm.loop >= 0 && lm.iter >= plan.loops[static_cast<std::size_t>(lm.loop)].w) {
+                const RLoop& loop = plan.loops[static_cast<std::size_t>(lm.loop)];
+                const std::size_t local = (m - static_cast<std::size_t>(loop.first_leaf)) % static_cast<std::size_t>(loop.per_iter);
+                snap.alias = snapshot_of(static_cast<std::size_t>(loop.first_leaf) + static_cast<std::size_t>(lm.iter % loop.w) * static_cast<std::size_t>(loop.per_iter) + local, p);
+            } else {
+                try {
+                    snap.bytes = Bytes(snap.size, diff->dev);
+                } catch (const std::exception&) {
+                    refuse(EG_FAULT, "eg_record_end: no memory for the copy of a plane before leaf " + std::to_string(m) + " of the tape");
+                }
+            }
+            diff->snapshots.push_back(std::move(snap));
+            return static_cast<int>(diff->snapshots.size()) - 1;
         };
         for (std::size_t i = 0; i < plan.leaves.size(); ++i)
             for (int p : diff->nodes[static_cast<std::size_t>(plan.leaves[i].launch)].reads)
                 for (std::size_t m = i; m < plan.leaves.size(); ++m) {
                     if (!writes(plan.leaves[m], p)) continue;
-                    const auto same = [&](const Snapshot& s) { return s.node == m && s.plane == p; };
-                    if (std::none_of(diff->snapshots.begin(), diff->snapshots.end(), same)) {
-                        Snapshot snap;
-                        snap.node = m;
-                        snap.plane = p;
-                        snap.size = byte_count(*diff->planes[static_cast<std::size_t>(p)]);
-                        try {
-                            snap.bytes = Bytes(snap.size, diff->dev);
-                        } catch (const std::exception&) {
-                            refuse(EG_FAULT, "eg_record_end: no memory for the copy of a plane before leaf " + std::to_string(m) + " of the tape");
-                        }
-                        diff->snapshots.push_back(std::move(snap));
-                    }
+                    if (plan.leaves[m].loop < 0 || plan.leaves[m].loop == plan.leaves[i].loop) snapshot_of(m, p);
                     if (plan.leaves[m].gates.empty()) break;
                 }
         for (eg_plan_s* plan : launches) {
@@ -357,9 +396,79 @@ void graph_reverse(eg_ctx& ctx, eg_graph_s* graph, const eg_graph_reverse_desc* 
         return ordered_sum(D, src, static_cast<std::size_t>(elements(tensor(plane))), element_bytes(plane));
     };
     const int threads = host::team_threads(ctx);
+    // The buffer a snapshot entry reads and fills: a windowed WHILE's later iterations share the first window's.
+    const auto store = [&](Snapshot& s) -> Bytes& { return s.alias >= 0 ? d.snapshots[static_cast<std::size_t>(s.alias)].bytes : s.bytes; };
+    const auto position = [](const LoopTape& tape, int plane) { return static_cast<std::size_t>(std::find(tape.planes.begin(), tape.planes.end(), plane) - tape.planes.begin()); };
+    // The value plane @p plane had when leaf @p i read it: before the first leaf at or after it that ran and overwrites it, else live.
+    const auto value_of = [&](int plane, std::size_t i) {
+        const eg_plane_s& p = *d.planes[static_cast<std::size_t>(plane)];
+        char* data = live(p);
+        for (std::size_t m = i; m < n_leaves; ++m) {
+            const std::vector<int>& w = d.nodes[static_cast<std::size_t>(d.plan.leaves[m].launch)].writes;
+            if (std::find(w.begin(), w.end(), plane) == w.end() || !leaf_ran(d, m)) continue;
+            const RLeaf &lm = d.plan.leaves[m], &li = d.plan.leaves[i];
+            if (lm.loop >= 0 && !(li.loop == lm.loop && li.iter / d.plan.loops[static_cast<std::size_t>(lm.loop)].w == lm.iter / d.plan.loops[static_cast<std::size_t>(lm.loop)].w)) {
+                // the writer is in a window the reader is not in: the plane is as the checkpoint after the reader's window (or at loop entry) kept it
+                const LoopTape& tape = d.loops[static_cast<std::size_t>(lm.loop)];
+                const std::size_t group = li.loop == lm.loop ? static_cast<std::size_t>(li.iter / d.plan.loops[static_cast<std::size_t>(lm.loop)].w) + 1 : 0;
+                data = const_cast<char*>(tape.ckpt[group][position(tape, plane)].data());
+            } else {
+                for (Snapshot& s : d.snapshots)
+                    if (s.node == m && s.plane == plane) data = store(s).data();
+            }
+            break;
+        }
+        return data;
+    };
+    // Rebuild window @p group of loop @p index: re-launch its body's plans over private copies, from the window's checkpoint, saving
+    // each leaf's pre-write copies where the snapshot entries share their buffers.
+    const auto rebuild = [&](int index, int group) {
+        LoopTape& tape = d.loops[static_cast<std::size_t>(index)];
+        const RLoop& loop = d.plan.loops[static_cast<std::size_t>(index)];
+        if (tape.built == group) return;
+        std::vector<Bytes> state;
+        for (std::size_t q = 0; q < tape.planes.size(); ++q) {
+            const std::size_t size = byte_count(*d.planes[static_cast<std::size_t>(tape.planes[q])]);
+            state.emplace_back(size, D);
+            copy_bytes(D, state.back().data(), tape.ckpt[static_cast<std::size_t>(group)][q].data(), size);
+        }
+        for (int k = group * loop.w; k < std::min(loop.cap, (group + 1) * loop.w); ++k)
+            for (int local = 0; local < loop.per_iter; ++local) {
+                const std::size_t m = static_cast<std::size_t>(loop.first_leaf + k * loop.per_iter + local);
+                if (!leaf_ran(d, m)) continue;
+                const DiffNode& node = d.nodes[static_cast<std::size_t>(d.plan.leaves[m].launch)];
+                for (Snapshot& s : d.snapshots)
+                    if (s.node == m) copy_bytes(D, store(s).data(), state[position(tape, s.plane)].data(), s.size);
+                if (node.writes.empty()) continue;    // it writes nothing the tape tracks: no vjp reads what it makes
+                const eg_plan_s& primal = *node.plan;
+                eg_plan_s* rp = inner_plan(ctx, primal.unit, primal.structure, primal.n_samples);
+                try {
+                    for (std::size_t sl = 0; sl < primal.bindings.size(); ++sl) {
+                        const eg_plan_s::Binding& b = primal.bindings[sl];
+                        if (primal.unit->slots[sl].role == EG_ROLE_UNIFORM) {
+                            bind_value(*rp, static_cast<int>(sl), b.value, sizeof(b.value));
+                        } else if (b.plane != nullptr) {
+                            const int idx = find_plane(d, b.plane);
+                            const std::size_t at = position(tape, idx);
+                            char* data = at < tape.planes.size() ? state[at].data() : value_of(idx, static_cast<std::size_t>(loop.first_leaf));
+                            bind_raw(*rp, static_cast<int>(sl), data, bound_count(*rp, static_cast<int>(sl), tensor(*b.plane)));
+                        }
+                    }
+                    if (D != nullptr) device_launch_prefix(*rp, primal.n_samples, primal.n_samples);
+                    else host::run_plan(*rp, threads);
+                } catch (...) {
+                    inner_free(ctx, rp);
+                    throw;
+                }
+                inner_free(ctx, rp);
+            }
+        tape.built = group;
+    };
+    for (LoopTape& tape : d.loops) tape.built = -1;
     for (std::size_t back = 0; back < n_leaves; ++back) {
         const std::size_t i = n_leaves - 1 - back;
         if (!leaf_ran(d, i)) continue;         // a leaf that did not run is the identity: what it would write keeps its adjoint
+        if (d.plan.leaves[i].loop >= 0) rebuild(d.plan.leaves[i].loop, d.plan.leaves[i].iter / d.plan.loops[static_cast<std::size_t>(d.plan.leaves[i].loop)].w);
         const DiffNode& node = d.nodes[static_cast<std::size_t>(d.plan.leaves[i].launch)];
         const eg_plan_s& primal = *node.plan;
         std::vector<Bytes> adjoint;
@@ -389,14 +498,7 @@ void graph_reverse(eg_ctx& ctx, eg_graph_s* graph, const eg_graph_reverse_desc* 
                 const eg_plane_s& plane = *d.planes[static_cast<std::size_t>(l.plane)];
                 char* data = nullptr;
                 if (l.kind == VjpLink::VALUE_PLANE) {
-                    data = live(plane);
-                    for (std::size_t m = i; m < n_leaves && data == live(plane); ++m) {    // the first leaf at or after this one that ran and overwrites it
-                        const std::vector<int>& w = d.nodes[static_cast<std::size_t>(d.plan.leaves[m].launch)].writes;
-                        if (std::find(w.begin(), w.end(), l.plane) == w.end() || !leaf_ran(d, m)) continue;
-                        for (Snapshot& s : d.snapshots)
-                            if (s.node == m && s.plane == l.plane) data = reinterpret_cast<char*>(s.bytes.data());
-                        break;
-                    }
+                    data = value_of(l.plane, i);
                 } else if (l.kind == VjpLink::ADJOINT_IN) {
                     const std::vector<int>& w = node.writes;
                     data = adjoint[static_cast<std::size_t>(std::find(w.begin(), w.end(), l.plane) - w.begin())].data();
