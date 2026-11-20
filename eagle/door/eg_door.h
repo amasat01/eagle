@@ -349,7 +349,11 @@ struct eg_runner_desc {
     eg_plan* const* plans;              /**< bound plans; the first carries the finish mask */
     const eg_derived_role* derived_roles;
     eg_unit* const* derived_units;      /**< what EG_RUN_RECORD / EG_EVENTS_REFINE need */
-    int64_t max_steps;
+    int64_t max_steps;                  /**< a compacting run stops after ceil(max_steps / every) cadences of ``every`` steps, a
+                                             non-compacting K-step run after ceil(max_steps / K) launches, so a sample may take up
+                                             to the next whole cadence or launch; an AUTO run cuts its last launch so no sample
+                                             exceeds max_steps. The report's steps counts steps launched (a sample finished
+                                             inside a launch does not advance it). */
     int64_t every;                      /**< compaction cadence in steps; 0: the runner's choice */
     int64_t window;                     /**< record window; 0: clamp(ceil(sqrt(max_steps)), 16, 1024); -1: every step */
     uint64_t memory_budget;             /**< bytes for the record; 0: half the free memory */
