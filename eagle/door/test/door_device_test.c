@@ -1970,6 +1970,191 @@ static void step_graph_positions_device(eg_ctx* ctx, const char* dev_lib) {
     }
 }
 
+/* ---- WHILE body control on a device: counter, limit and break (eg_cond_desc.counter, .limit, .brk) ---- */
+
+/* A one-sample dcount1 plan over device planes: k counts the launches that ran (the kernel's own tally, the oracle of the iteration count). */
+struct wcount {
+    double *dk, *dlimit;
+    unsigned char* dmask;
+    struct tensor t[3];
+    eg_plane* pl[3];
+    eg_plan* plan;
+};
+
+static int wcount_new(eg_ctx* ctx, eg_unit* unit, struct wcount* c) {
+    memset(c, 0, sizeof(*c));
+    const double limit = 1e9;
+    int ok = cuda_ok(cudaMalloc((void**)&c->dk, sizeof(double)), "cudaMalloc k") && cuda_ok(cudaMalloc((void**)&c->dlimit, sizeof(double)), "cudaMalloc limit") &&
+             cuda_ok(cudaMalloc((void**)&c->dmask, 1), "cudaMalloc mask") && cuda_ok(cudaMemcpy(c->dlimit, &limit, sizeof(limit), cudaMemcpyHostToDevice), "cudaMemcpy limit");
+    if (!ok) return 0;
+    c->pl[0] = wrap_device_typed(ctx, &c->t[0], c->dk, 1, kDLFloat, 64);
+    c->pl[1] = wrap_device_typed(ctx, &c->t[1], c->dlimit, 1, kDLFloat, 64);
+    c->pl[2] = wrap_device_typed(ctx, &c->t[2], c->dmask, 1, kDLBool, 8);
+    const int32_t slots[3] = { 0, 1, 2 };
+    return c->pl[0] && c->pl[1] && c->pl[2] && plan_n(ctx, unit, EG_STRUCTURE_DEVICE, 1, 0, NULL, NULL, &c->plan) == EG_OK &&
+           bind_planes(ctx, c->plan, 3, slots, c->pl) == EG_OK;
+}
+
+static void wcount_reset(struct wcount* c) {
+    cudaMemset(c->dk, 0, sizeof(double));
+    cudaMemset(c->dmask, 0, 1);
+}
+
+static double wcount_k(struct wcount* c) {
+    double k = -1.0;
+    cudaDeviceSynchronize();
+    cudaMemcpy(&k, c->dk, sizeof(k), cudaMemcpyDeviceToHost);
+    return k;
+}
+
+static void wcount_free(eg_ctx* ctx, struct wcount* c) {
+    eg_plan_free(ctx, c->plan);
+    for (int i = 0; i < 3; ++i) eg_plane_free(ctx, c->pl[i]);
+    cudaFree(c->dk), cudaFree(c->dlimit), cudaFree(c->dmask);
+}
+
+static uint32_t device_word(const void* dev) {
+    uint32_t v = 0xFFFFFFFFu;
+    cudaDeviceSynchronize();
+    cudaMemcpy(&v, dev, sizeof(v), cudaMemcpyDeviceToHost);
+    return v;
+}
+
+static void device_set(void* dev, uint32_t v) { cudaMemcpy(dev, &v, sizeof(v), cudaMemcpyHostToDevice); }
+
+static void while_control_device(eg_ctx* ctx, const char* dev_lib) {
+    eg_unit* unit = NULL;
+    struct wcount a, b;
+    uint32_t *dn = NULL, *dl = NULL, *db = NULL;
+    int32_t* dcell = NULL;
+    int32_t* dshift = NULL;
+    memset(&a, 0, sizeof(a)), memset(&b, 0, sizeof(b));
+    int ok = load(ctx, dev_lib, "dcount1", 0xD9, &unit) == EG_OK && wcount_new(ctx, unit, &a) && wcount_new(ctx, unit, &b) &&
+             cuda_ok(cudaMalloc((void**)&dn, 4), "cudaMalloc counter") && cuda_ok(cudaMalloc((void**)&dl, 4), "cudaMalloc limit") &&
+             cuda_ok(cudaMalloc((void**)&db, 4), "cudaMalloc brk") && cuda_ok(cudaMalloc((void**)&dcell, 4), "cudaMalloc cell") &&
+             cuda_ok(cudaMalloc((void**)&dshift, 5 * sizeof(int32_t)), "cudaMalloc shift cells");
+    struct tensor tn, tl, tb, tc, ts[5];
+    eg_plane *pn = ok ? wrap_device_typed(ctx, &tn, dn, 1, kDLUInt, 32) : NULL, *pl = ok ? wrap_device_typed(ctx, &tl, dl, 1, kDLUInt, 32) : NULL,
+             *pb = ok ? wrap_device_typed(ctx, &tb, db, 1, kDLUInt, 32) : NULL, *pc = ok ? wrap_device_typed(ctx, &tc, dcell, 1, kDLInt, 32) : NULL, *psh[5] = { NULL };
+    for (int i = 0; ok && i < 5; ++i) psh[i] = wrap_device_typed(ctx, &ts[i], dshift + i, 1, kDLInt, 32);
+    ok = ok && pn && pl && pb && pc && psh[0] && psh[1] && psh[2] && psh[3] && psh[4];
+    if (!ok) {
+        check(0, "device WHILE body control: planes and plans made");
+        return;
+    }
+    struct eg_cond_desc d;
+    eg_graph* g = NULL;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d), d.kind = EG_COND_WHILE;
+
+    /* counter: three iterations by a shifting cell test; the body's launches count them too, and the host loop of the same shifts gives the number */
+    const int32_t start[5] = { 1, 1, 1, 0, 0 };
+    int32_t shifted[5];
+    uint32_t want_passes = 0;
+    memcpy(shifted, start, sizeof(shifted));
+    while (shifted[0] != 0) {
+        for (int i = 0; i < 4; ++i) shifted[i] = shifted[i + 1];
+        shifted[4] = 0;
+        ++want_passes;
+    }
+    d.cell = psh[0], d.counter = pn, d.max_iters = 20;
+    ok = eg_record_begin(ctx) == EG_OK && eg_record_cond_begin(ctx, &d) == EG_OK && eg_launch(ctx, a.plan, NULL) == EG_OK;
+    for (int i = 0; ok && i < 4; ++i) ok = eg_copy(ctx, psh[i + 1], psh[i]) == EG_OK;
+    ok = ok && eg_record_cond_end(ctx) == EG_OK && eg_record_end(ctx, NULL, &g) == EG_OK;
+    wcount_reset(&a);
+    cudaMemcpy(dshift, start, sizeof(start), cudaMemcpyHostToDevice);
+    device_set(dn, 99);
+    ok = ok && eg_graph_launch(ctx, g) == EG_OK && eg_sync(ctx) == EG_OK;
+    check(ok && device_word(dn) == want_passes && wcount_k(&a) == (double)want_passes, "a device WHILE by its cell: the counter reads the iterations the host loop of the same shifts ran, as do the body's launches");
+    eg_graph_free(ctx, g);
+
+    /* the smallest bound wins: max_iters, limit and the cell; the kernel's own tally is the oracle */
+    const struct { int64_t max; uint32_t limit; int32_t cell; int want; } bounds[] = { { 3, 5, 1, 3 }, { 6, 2, 1, 2 }, { 6, 5, 0, 0 } };
+    for (size_t i = 0; i < sizeof(bounds) / sizeof(bounds[0]); ++i) {
+        memset(&d, 0, sizeof(d));
+        d.struct_size = sizeof(d), d.kind = EG_COND_WHILE, d.cell = pc, d.max_iters = bounds[i].max, d.limit = pl, d.counter = pn;
+        g = NULL;
+        ok = eg_record_begin(ctx) == EG_OK && eg_record_cond_begin(ctx, &d) == EG_OK && eg_launch(ctx, a.plan, NULL) == EG_OK && eg_record_cond_end(ctx) == EG_OK &&
+             eg_record_end(ctx, NULL, &g) == EG_OK;
+        wcount_reset(&a);
+        device_set(dl, bounds[i].limit), device_set(dcell, (uint32_t)bounds[i].cell), device_set(dn, 99);
+        ok = ok && eg_graph_launch(ctx, g) == EG_OK && eg_sync(ctx) == EG_OK;
+        char what[160];
+        snprintf(what, sizeof(what), "a device WHILE with max_iters %d, limit %u and a cell test of %d runs the smallest bound (%d iterations): the kernel's tally and the counter agree",
+                 (int)bounds[i].max, bounds[i].limit, bounds[i].cell, bounds[i].want);
+        check(ok && wcount_k(&a) == (double)bounds[i].want && device_word(dn) == (uint32_t)bounds[i].want, what);
+        eg_graph_free(ctx, g);
+    }
+
+    /* limit alone: 4 iterations, then 2 after the plane changes between two replays (the test reads it at the replay) */
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d), d.kind = EG_COND_WHILE, d.max_iters = 9, d.limit = pl, d.counter = pn;
+    ok = eg_record_begin(ctx) == EG_OK && eg_record_cond_begin(ctx, &d) == EG_OK && eg_launch(ctx, a.plan, NULL) == EG_OK && eg_record_cond_end(ctx) == EG_OK &&
+         eg_record_end(ctx, NULL, &g) == EG_OK;
+    wcount_reset(&a);
+    device_set(dl, 4);
+    ok = ok && eg_graph_launch(ctx, g) == EG_OK && eg_sync(ctx) == EG_OK && wcount_k(&a) == 4.0 && device_word(dn) == 4;
+    wcount_reset(&a);
+    device_set(dl, 2);
+    ok = ok && eg_graph_launch(ctx, g) == EG_OK && eg_sync(ctx) == EG_OK && wcount_k(&a) == 2.0 && device_word(dn) == 2;
+    check(ok, "a device WHILE with a limit and no cell runs limit iterations (4), and the limit changed between replays is read at the replay (2)");
+    eg_graph_free(ctx, g);
+
+    /* brk: the body copies its counter into brk, so iteration 1 breaks: 2 iterations; a second replay does the same (brk zeroed at entry) */
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d), d.kind = EG_COND_WHILE, d.max_iters = 50, d.brk = pb, d.counter = pn;
+    ok = eg_record_begin(ctx) == EG_OK && eg_record_cond_begin(ctx, &d) == EG_OK && eg_launch(ctx, a.plan, NULL) == EG_OK && eg_copy(ctx, pn, pb) == EG_OK &&
+         eg_record_cond_end(ctx) == EG_OK && eg_record_end(ctx, NULL, &g) == EG_OK;
+    for (int rep = 0; ok && rep < 2; ++rep) {
+        wcount_reset(&a);
+        ok = eg_graph_launch(ctx, g) == EG_OK && eg_sync(ctx) == EG_OK && wcount_k(&a) == 2.0 && device_word(dn) == 2 && device_word(db) == 1;
+    }
+    check(ok, "a device WHILE whose body sets brk at iteration 1 runs 2 iterations, and a second replay runs 2 again (brk zeroed at entry)");
+    eg_graph_free(ctx, g);
+
+    /* mid-body break: [A, brk = counter, IF not brk { B }] under a limit of 5: B ran one time fewer than A (oracle: the same work as a host loop) */
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d), d.kind = EG_COND_WHILE, d.limit = pl, d.brk = pb, d.counter = pn;
+    struct eg_cond_desc arm;
+    memset(&arm, 0, sizeof(arm));
+    arm.struct_size = sizeof(arm), arm.kind = EG_COND_IF, arm.flags = EG_COND_NEGATE, arm.cell = pb;
+    ok = eg_record_begin(ctx) == EG_OK && eg_record_cond_begin(ctx, &d) == EG_OK && eg_launch(ctx, a.plan, NULL) == EG_OK && eg_copy(ctx, pn, pb) == EG_OK &&
+         eg_record_cond_begin(ctx, &arm) == EG_OK && eg_launch(ctx, b.plan, NULL) == EG_OK && eg_record_cond_end(ctx) == EG_OK && eg_record_cond_end(ctx) == EG_OK &&
+         eg_record_end(ctx, NULL, &g) == EG_OK;
+    double want_a = 0.0, want_b = 0.0;
+    for (uint32_t i = 0, host_brk; i < 5; ++i) {
+        want_a += 1.0;
+        host_brk = i;
+        if (!host_brk) want_b += 1.0;
+        if (host_brk) break;
+    }
+    wcount_reset(&a), wcount_reset(&b);
+    device_set(dl, 5);
+    ok = ok && eg_graph_launch(ctx, g) == EG_OK && eg_sync(ctx) == EG_OK;
+    const double got_a = wcount_k(&a), got_b = wcount_k(&b);
+    check(ok && memcmp(&got_a, &want_a, sizeof(got_a)) == 0 && memcmp(&got_b, &want_b, sizeof(got_b)) == 0 && got_a == got_b + 1.0,
+          "a device mid-body break (the counter copied into brk, the rest of the body in an IF on brk with EG_COND_NEGATE): B ran one time fewer than A, bitwise the host loop");
+    eg_graph_free(ctx, g);
+
+    /* refusals by name: the common checks run on a device recording too */
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d), d.kind = EG_COND_WHILE, d.max_iters = 4;
+    ok = eg_record_begin(ctx) == EG_OK && eg_record_cond_begin(ctx, &d) == EG_BAD_REQUEST && reason_has(ctx, "a loop needs a cell, a limit or a brk to stop") && eg_record_abort(ctx) == EG_OK;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d), d.kind = EG_COND_IF, d.cell = pc, d.counter = pn;
+    ok = ok && eg_record_begin(ctx) == EG_OK && eg_record_cond_begin(ctx, &d) == EG_BAD_REQUEST && reason_has(ctx, "eg_cond_desc.counter is for WHILE only") && eg_record_abort(ctx) == EG_OK;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d), d.kind = EG_COND_WHILE, d.cell = pc, d.counter = pc;
+    ok = ok && eg_record_begin(ctx) == EG_OK && eg_record_cond_begin(ctx, &d) == EG_BAD_REQUEST && reason_has(ctx, "uint32") && eg_record_abort(ctx) == EG_OK;
+    check(ok, "a device WHILE with no way to stop, a counter on an IF and a counter that is not uint32 are each refused by name");
+
+    wcount_free(ctx, &a), wcount_free(ctx, &b);
+    eg_plane* all[] = { pn, pl, pb, pc, psh[0], psh[1], psh[2], psh[3], psh[4] };
+    for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); ++i) eg_plane_free(ctx, all[i]);
+    cudaFree(dn), cudaFree(dl), cudaFree(db), cudaFree(dcell), cudaFree(dshift);
+    eg_unit_free(ctx, unit);
+}
+
 static void step_graph_device(eg_ctx* ctx, const char* dev_lib) {
     eg_unit *plain = NULL, *active = NULL;
     if (load(ctx, dev_lib, "dcount1", 0xD9, &plain) != EG_OK || load(ctx, dev_lib, "dcount1a", 0xDA, &active) != EG_OK) {
@@ -2999,6 +3184,7 @@ int main(int argc, char** argv) {
     reset_device(ctx, dev_lib);
     step_graph_device(ctx, dev_lib);
     step_graph_positions_device(ctx, dev_lib);
+    while_control_device(ctx, dev_lib);
     report_device(ctx, dev_lib);
     check_segmented_device(ctx, dev_lib);
     check_auto_device(ctx, dev_lib);

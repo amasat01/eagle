@@ -40,6 +40,7 @@ struct NodeFacts {
     std::uint32_t cond_flags = 0;
     std::int32_t has_baseline = 0, n_plans = 0;
     std::int64_t max_iters = 0, cell_index = 0;
+    bool loop_controlled = false;               ///< WHILE: it holds a counter, a limit or a break plane
 };
 
 /** @brief A conditional's test as the reverse needs it: which kind, and whether it is negated. One per test the forward can evaluate. */

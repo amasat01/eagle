@@ -913,6 +913,8 @@ bool record_launch(eg_ctx& ctx, eg_plan_s* plan);
 bool record_run(eg_ctx& ctx, eg_runner_s* runner);
 void record_begin(eg_ctx& ctx);
 void record_cond_begin(eg_ctx& ctx, const eg_cond_desc* desc);
+/** @brief Refuse the counter, limit and brk of @p d (and a WHILE that has no way to stop) as eg_record_cond_begin does on host and device. */
+void check_loop_control(eg_ctx& ctx, const eg_cond_desc& d);
 void record_cond_arm(eg_ctx& ctx);
 void record_cond_end(eg_ctx& ctx);
 void record_fork_begin(eg_ctx& ctx);

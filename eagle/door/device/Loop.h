@@ -202,6 +202,9 @@ bool pool_has(const DevicePool* pool, unsigned streams, unsigned events);
  *  "evaluated", the cell, the baseline or 0 for none) takes ``*cell`` and ``*baseline``. A null @p iter is entry 0. */
 void save_test_step(std::uint64_t stream, const unsigned* cell, const unsigned* baseline, const unsigned* iter, unsigned* dst, unsigned capacity);
 
+/** @brief Queue on @p stream a kernel that copies the word @p ran (a WHILE's iteration count) into the caller's counter word @p counter. */
+void counter_step(std::uint64_t stream, const unsigned* ran, unsigned* counter);
+
 /** @brief Queue on @p stream (inside a capture) the copy of @p bytes at @p src to ``table[min(*iter / window, capacity - 1)]`` when ``*iter`` is a multiple of
  *  @p window, @p table being a device array of device addresses. */
 void table_copy_step(std::uint64_t stream, const void* src, std::size_t bytes, void* const* table, const unsigned* iter, unsigned capacity, unsigned window);
@@ -225,11 +228,12 @@ bool cond_arms_supported();
 /**
  * @brief Weave a conditional into the capture on @p origin. @p kind: 0 IF, 1 IF_ELSE, 2 WHILE, 3 SWITCH. The test is
  * ``*cell != (baseline ? *baseline : 0)`` over 32-bit device words (``*cell`` is the arm index for SWITCH, which takes no
- * baseline), inverted when @p negate. A WHILE stops after @p cap iterations (0: no cap) and keeps
- * its state in the two device words @p loop_cells. Every arm is being captured on return; @p arms is the arm count.
+ * baseline), inverted when @p negate; a NULL @p cell always holds (a WHILE stopped by @p limit or @p brk alone). A WHILE stops after
+ * @p cap iterations (0: no cap), when its count reaches the word @p limit (NULL: no limit), and after an iteration that leaves the
+ * word @p brk (NULL: none) non-zero; it zeroes @p brk when it is entered and keeps its state in the two device words @p loop_cells. Every arm is being captured on return; @p arms is the arm count.
  */
 DeviceWeave* cond_begin(DevicePool* pool, std::uint64_t origin, int kind, const unsigned* cell, const unsigned* baseline, bool negate,
-                        unsigned arms, unsigned cap, unsigned* loop_cells);
+                        unsigned arms, unsigned cap, unsigned* loop_cells, const unsigned* limit, unsigned* brk);
 
 /** @brief The stream that captures arm @p arm of @p weave. */
 std::uint64_t cond_stream(const DeviceWeave* weave, unsigned arm);

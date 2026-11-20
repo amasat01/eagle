@@ -545,6 +545,8 @@ __global__ void saveTestKernel(const unsigned* cell, const unsigned* baseline, c
     dst[3 * k + 2] = baseline != nullptr ? *baseline : 0u;
 }
 
+__global__ void counterKernel(const unsigned* ran, unsigned* counter) { *counter = *ran; }
+
 __global__ void tableCopyKernel(const unsigned char* src, std::size_t bytes, unsigned char* const* table, const unsigned* iter, unsigned capacity, unsigned window) {
     unsigned k = *iter;
     if (k % window != 0) return;
@@ -559,6 +561,11 @@ __global__ void tableCopyKernel(const unsigned char* src, std::size_t bytes, uns
 
 void save_test_step(std::uint64_t stream, const unsigned* cell, const unsigned* baseline, const unsigned* iter, unsigned* dst, unsigned capacity) {
     saveTestKernel<<<1, 1, 0, reinterpret_cast<cudaStream_t>(stream)>>>(cell, baseline, iter, dst, capacity);
+    EAGLE_CHECK_ALWAYS(cudaGetLastError());
+}
+
+void counter_step(std::uint64_t stream, const unsigned* ran, unsigned* counter) {
+    counterKernel<<<1, 1, 0, reinterpret_cast<cudaStream_t>(stream)>>>(ran, counter);
     EAGLE_CHECK_ALWAYS(cudaGetLastError());
 }
 
@@ -608,14 +615,14 @@ struct DeviceFork {
 bool cond_arms_supported() { return cuda::conditionalArmsSupported(); }
 
 DeviceWeave* cond_begin(DevicePool* pool, std::uint64_t origin, int kind, const unsigned* cell, const unsigned* baseline, bool negate,
-                        unsigned arms, unsigned cap, unsigned* loop_cells) {
+                        unsigned arms, unsigned cap, unsigned* loop_cells, const unsigned* limit, unsigned* brk) {
     const auto stream = reinterpret_cast<cudaStream_t>(origin);
     auto weave = std::make_unique<DeviceWeave>();
     weave->streams_before = pool->streams_taken;
     std::vector<cudaStream_t> borrowed;
     for (unsigned k = 0; k < arms; ++k) borrowed.push_back(pool->stream());
     weave->pool = pool;
-    const conditional::LoopTerms terms{ cap == 0 ? conditional::kLoopUncapped : cap, loop_cells };
+    const conditional::LoopTerms terms{ cap == 0 ? conditional::kLoopUncapped : cap, loop_cells, limit, brk };
     weave->cond = std::make_unique<cuda::CaptureConditional>(stream, static_cast<cuda::CondKind>(kind), CountGuard{ cell, baseline }, arms,
                                                              negate ? 1u : 0u, terms, borrowed);
     weave->cond->begin();

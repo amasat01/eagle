@@ -48,6 +48,11 @@ struct Node {
     std::size_t want = 0;                       ///< arms the conditional needs
     bool negate = false;                        ///< the conditional tests its cell for zero (EG_COND_NEGATE)
     std::int64_t max_iters = 0;                 ///< WHILE: the most iterations a replay runs; 0: no cap
+    eg_plane_s* counter = nullptr;              ///< WHILE: the one-cell plane that receives the iteration index and the completed count
+    eg_plane_s* limit = nullptr;                ///< WHILE: the plane whose element ``limit_index`` bounds the iteration count
+    std::int64_t limit_index = 0;
+    eg_plane_s* brk = nullptr;                  ///< WHILE: the plane whose element ``brk_index`` stops the loop once an iteration leaves it non-zero
+    std::int64_t brk_index = 0;
     std::vector<std::vector<Node>> arms;
 };
 

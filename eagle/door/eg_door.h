@@ -554,18 +554,40 @@ struct eg_reduce_desc {
 /** INPUT to ``eg_record_cond_begin``. The test reads ``cell[cell_index]`` and, when ``baseline`` is set, ``baseline[baseline_index]``
  *  (both at replay time): IF, IF_ELSE and WHILE take the arm when ``cell[cell_index] != baseline[baseline_index]`` (``!= 0`` with no
  *  baseline), or when they are equal under EG_COND_NEGATE. SWITCH takes ``cell[cell_index]`` as the arm index and refuses a
- *  baseline. A ``struct_size`` that ends before ``max_iters`` reads 0, before ``cell_index`` reads index 0 and no baseline. */
+ *  baseline. A ``struct_size`` that ends before ``max_iters`` reads 0, before ``cell_index`` reads index 0 and no baseline, before
+ *  ``counter`` reads no counter, limit or break (``counter``, ``limit`` and ``brk`` are for WHILE only: another kind refuses a
+ *  non-NULL one by name).
+ *
+ *  A WHILE tests, before each iteration and in this order: the iteration count is below ``max_iters`` (when it is not 0), below
+ *  ``limit[limit_index]`` (when ``limit`` is set, read at replay time), and the cell test above (when ``cell`` is set). After an
+ *  iteration that left ``brk[brk_index]`` non-zero it stops. A WHILE with none of ``cell``, ``limit`` and ``brk`` is refused: a
+ *  loop needs one of them to stop. ``counter``, ``limit`` and ``brk`` are planes like any other of the recording: a ``counter``
+ *  is written, a ``limit`` read, a ``brk`` read and written by the loop, and the graph description and its hazard edges say so.
+ *
+ *  A break from the middle of a body needs no member: record a write of ``brk`` (a launch that sets it from a cell), then the rest
+ *  of the body inside an IF arm on ``brk`` with EG_COND_NEGATE (arms nest in WHILE bodies); the loop stops after that iteration.
+ *
+ *  A recording made with EG_RECORD_DIFF refuses a WHILE holding a ``counter``, ``limit`` or ``brk`` (its reverse rebuilds the body
+ *  by re-launching it, which would neither set the counter nor honour the break). */
 struct eg_cond_desc {
     uint32_t struct_size;
     uint32_t flags;          /**< EG_COND_NEGATE, or 0 */
     eg_cond_kind kind;
     int32_t n_arms;          /**< SWITCH only: arm count */
-    eg_plane* cell;          /**< a one-dimensional int32 or uint32 plane (a mask reduction or a kernel writes uint32): truth, or the arm index */
+    eg_plane* cell;          /**< a one-dimensional int32 or uint32 plane (a mask reduction or a kernel writes uint32): truth, or the arm index;
+                                  NULL only for a WHILE that has a ``limit`` or a ``brk`` */
     int64_t max_iters;       /**< WHILE only: the loop stops without error after this many iterations; 0: no cap. Another kind refuses
                                   a nonzero value. */
     int64_t cell_index;      /**< the element of ``cell`` the test reads: 0 or more, below its length */
     eg_plane* baseline;      /**< NULL: compare with 0; else a plane of the dtype of ``cell`` (IF, IF_ELSE, WHILE only) */
     int64_t baseline_index;  /**< the element of ``baseline`` read; ignored without a baseline */
+    eg_plane* counter;       /**< WHILE only: NULL, or a one-cell uint32 plane. The loop writes 0 when it is entered, the iteration index
+                                  during each iteration (a body launch may read it) and the number of completed iterations when it ends. */
+    eg_plane* limit;         /**< WHILE only: NULL, or a uint32 plane: the loop also stops when its iteration count reaches ``limit[limit_index]`` */
+    int64_t limit_index;     /**< the element of ``limit`` read; ignored without a limit */
+    eg_plane* brk;           /**< WHILE only: NULL, or a uint32 plane: the loop sets ``brk[brk_index]`` to 0 when it is entered and stops
+                                  after any iteration that leaves it non-zero */
+    int64_t brk_index;       /**< the element of ``brk`` the loop zeroes and reads; ignored without a brk */
 };
 
 /** OUTPUT of ``eg_device_props`` (device group): the driver's raw facts of one device and the roofline figures derived

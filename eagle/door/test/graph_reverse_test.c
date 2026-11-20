@@ -894,6 +894,42 @@ static void while_refusal_row(struct rig* r, const struct units* u) {
     release(r);
 }
 
+/* A WHILE holding a counter, a limit or a brk is refused by EG_RECORD_DIFF by name (the reverse re-launches the body, which would set none of them); the recording ends plain. */
+static void while_control_refusal_row(struct rig* r, const struct units* u) {
+    eg_ctx* ctx = r->ctx;
+    double x[N], t[N], a[1] = { 0.9 };
+    int32_t c[N];
+    uint32_t word[3] = { 0, 4, 0 };
+    struct tensor tx, tt, ta, tc, tw[3];
+    fill(x, a, 0.5);
+    for (int i = 0; i < N; ++i) c[i] = 1;
+    eg_plane *px = mk(r, &tx, N, x), *pt = mk(r, &tt, N, t), *pa = mk(r, &ta, 1, a), *pc = mk_i32(r, &tc, N, c);
+    eg_plane* pw[3];
+    for (int i = 0; i < 3; ++i) pw[i] = mk_typed(r, &tw[i], 1, &word[i], kDLUInt, 32);
+    eg_plane* a1[] = { px, pa, pt };
+    eg_plan* f1 = plan_with(r, u->scale, 3, a1, NULL);
+    const struct eg_node_vjp vjps[] = { { 0, u->scale_vjp } };
+    int ok = f1 && pc && pw[0] && pw[1] && pw[2];
+    for (int member = 0; ok && member < 3; ++member) {
+        struct eg_cond_desc d;
+        memset(&d, 0, sizeof(d));
+        d.struct_size = sizeof(d);
+        d.kind = EG_COND_WHILE;
+        d.cell = pc;
+        d.max_iters = 4;
+        d.counter = member == 0 ? pw[0] : NULL;
+        d.limit = member == 1 ? pw[1] : NULL;
+        d.brk = member == 2 ? pw[2] : NULL;
+        eg_graph *g = NULL, *plain = NULL;
+        ok = eg_record_begin(ctx) == EG_OK && eg_record_cond_begin(ctx, &d) == EG_OK && eg_launch(ctx, f1, NULL) == EG_OK && eg_record_cond_end(ctx) == EG_OK &&
+             refused(end_diff(ctx, 1, vjps, &g), EG_NOT_WRITTEN, ctx, "a counter, a limit or a break") && g == NULL && eg_record_end(ctx, NULL, &plain) == EG_OK;
+        eg_graph_free(ctx, plain);
+    }
+    verdict(r, ok, "EG_RECORD_DIFF over a WHILE holding a counter, a limit or a brk is refused by name; the recording stays open and ends plain");
+    eg_plan_free(ctx, f1);
+    release(r);
+}
+
 static void conditional_rows(struct rig* r, const struct units* u) {
     fork_reverse_row(r, u);
     if_row(r, u, EG_COND_IF, 0, 0);
@@ -913,6 +949,7 @@ static void conditional_rows(struct rig* r, const struct units* u) {
     window_reader_row(r, u);
     fork_in_arm_row(r, u);
     while_refusal_row(r, u);
+    while_control_refusal_row(r, u);
 }
 
 /* ---- reverse options: bitwise report, strict, passes, a non-float input (host) ------------------------------------------------ */

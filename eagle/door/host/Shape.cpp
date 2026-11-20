@@ -229,6 +229,9 @@ ReversePlan GraphShape::reverse_plan() const {
                         }
                         continue;
                     }
+                    if (n.facts.loop_controlled)
+                        refuse(EG_NOT_WRITTEN, "eg_record_end: the WHILE of node " + std::to_string(c) + " holds a counter, a limit or a break; the reverse rebuilds its body by "
+                               "re-launching it, which would neither set the counter nor honour the limit or the break, so EG_RECORD_DIFF cannot record it");
                     if (n.facts.max_iters < 1)
                         refuse(EG_BAD_REQUEST, "eg_record_end: the WHILE of node " + std::to_string(c) + " has max_iters 0; EG_RECORD_DIFF needs a cap, which bounds the tape");
                     const bool outermost = iters.empty();   // an inner WHILE stays unrolled inside its outer iteration

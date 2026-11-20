@@ -273,6 +273,7 @@ struct Frame {
     unsigned arm = 0, arms = 0;                         ///< a conditional's open arm and arm count; a fork's branch count is ``arms``
     const unsigned* iteration = nullptr;                ///< a WHILE: its iteration counter word; its cap
     unsigned cap = 0;
+    unsigned* counter = nullptr;                        ///< a WHILE: the caller's counter word, or null
     std::uint64_t outer = 0;
 };
 
@@ -2046,7 +2047,7 @@ DeviceRecording& recording_of(eg_ctx& ctx) {
 
 /** @brief The 32-bit device word at element @p index of the one-dimensional int32 or uint32 device plane @p plane, a conditional's
  *  test operand (@p what names it in a refusal). */
-const unsigned* test_word(eg_ctx& ctx, eg_plane_s* plane, std::int64_t index, const std::string& what) {
+unsigned* test_word(eg_ctx& ctx, eg_plane_s* plane, std::int64_t index, const std::string& what) {
     check_handle(ctx.planes, plane, what.c_str());
     const DLTensor& t = plane->tensor->dl_tensor;
     if (t.device.device_type != kDLCUDA) refuse(EG_BAD_REQUEST, what + ": a device plane is expected in a device recording");
@@ -2054,7 +2055,7 @@ const unsigned* test_word(eg_ctx& ctx, eg_plane_s* plane, std::int64_t index, co
         refuse(EG_BAD_REQUEST, what + ": a one-dimensional int32 or uint32 plane is expected");
     if (index < 0 || index >= t.shape[0])
         refuse(EG_BAD_REQUEST, what + ": index " + std::to_string(index) + " is outside the plane's " + std::to_string(t.shape[0]) + " elements");
-    return reinterpret_cast<const unsigned*>(static_cast<const char*>(t.data) + t.byte_offset) + index;
+    return reinterpret_cast<unsigned*>(static_cast<char*>(t.data) + t.byte_offset) + index;
 }
 
 /** @brief Free the captures among @p pieces and, when @p release, drop the runner references they hold and forget the steps. */
@@ -2123,7 +2124,8 @@ void device_record_cond_begin(eg_ctx& ctx, const eg_cond_desc* desc) {
         refuse(EG_NOT_WRITTEN, "eg_record_cond_begin: a device recording holds at most " + std::to_string(kRecordedLoops) + " WHILE conditionals");
     if (!pool_has(rec.pool, arms, 0))
         refuse(EG_NOT_WRITTEN, "eg_record_cond_begin: a device recording holds at most " + std::to_string(kRecordStreams) + " open arms and branches at once");
-    const unsigned* cell = test_word(ctx, d.cell, d.cell_index, "eg_cond_desc.cell");
+    check_loop_control(ctx, d);
+    const unsigned* cell = d.cell != nullptr || d.kind != EG_COND_WHILE ? test_word(ctx, d.cell, d.cell_index, "eg_cond_desc.cell") : nullptr;
     const unsigned* baseline = nullptr;
     if (d.baseline != nullptr) {
         baseline = test_word(ctx, d.baseline, d.baseline_index, "eg_cond_desc.baseline");
@@ -2135,7 +2137,9 @@ void device_record_cond_begin(eg_ctx& ctx, const eg_cond_desc* desc) {
     facts.has_baseline = d.baseline != nullptr;
     facts.max_iters = d.max_iters;
     facts.cell_index = d.cell_index;
-    const int node = note_node(ctx, EG_GNODE_COND, "a conditional", { { d.cell, 0, -1, "cell" }, { d.baseline, 0, -1, "baseline" } }, "", facts);
+    facts.loop_controlled = d.counter != nullptr || d.limit != nullptr || d.brk != nullptr;
+    const int node = note_node(ctx, EG_GNODE_COND, "a conditional", { { d.cell, 0, -1, "cell" }, { d.baseline, 0, -1, "baseline" },
+                                                                   { d.counter, 1, -1, "counter" }, { d.limit, 0, -1, "limit" }, { d.brk, 2, -1, "brk" } }, "", facts);
     rec.shape.cond_begin(d.kind, arms);
     Current current(ctx.dev);
     if (rec.dp != nullptr && d.kind != EG_COND_WHILE) diff_save(ctx, rec, node, cell, baseline);    // outside the conditional: the test as it is when it is reached
@@ -2147,13 +2151,19 @@ void device_record_cond_begin(eg_ctx& ctx, const eg_cond_desc* desc) {
     Frame frame;
     frame.arms = arms;
     frame.outer = ctx.dev.stream;
-    frame.weave = cond_begin(rec.pool, ctx.dev.stream, static_cast<int>(d.kind), cell, baseline, negate, arms, static_cast<unsigned>(d.max_iters), loop);
+    frame.weave = cond_begin(rec.pool, ctx.dev.stream, static_cast<int>(d.kind), cell, baseline, negate, arms, static_cast<unsigned>(d.max_iters), loop,
+                            d.limit != nullptr ? test_word(ctx, d.limit, d.limit_index, "eg_cond_desc.limit") : nullptr,
+                            d.brk != nullptr ? test_word(ctx, d.brk, d.brk_index, "eg_cond_desc.brk") : nullptr);
     if (loop != nullptr) {
         frame.iteration = loop + 1;
         frame.cap = static_cast<unsigned>(d.max_iters);
         ++rec.loops;
     }
     ctx.dev.stream = cond_stream(frame.weave, 0);
+    if (d.counter != nullptr) {      // the iteration index is visible to the body from its first node
+        frame.counter = test_word(ctx, d.counter, 0, "eg_cond_desc.counter");
+        counter_step(ctx.dev.stream, frame.iteration, frame.counter);
+    }
     rec.frames.push_back(std::move(frame));
     if (rec.dp != nullptr && d.kind == EG_COND_WHILE) {    // at the start of each iteration: the test, and the window's checkpoint
         diff_checkpoints(ctx, rec, node);
@@ -2188,6 +2198,7 @@ void device_record_cond_end(eg_ctx& ctx) {
     Current current(ctx.dev);
     try {
         cond_end(f.weave);
+        if (f.counter != nullptr) counter_step(ctx.dev.stream, f.iteration, f.counter);    // the loop's completed iterations
     } catch (const std::invalid_argument& e) {
         refuse(EG_BAD_REQUEST, std::string("eg_record_cond_end: ") + e.what());
     }

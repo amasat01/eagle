@@ -30,7 +30,7 @@ std::vector<eg_plane_s*> planes_of(const Node& n) {
         case Node::Copy:
         case Node::Fft: return { n.src, n.dst };
         case Node::Gemm: return { n.src, n.rhs, n.dst };
-        case Node::Cond: return { n.cell, n.baseline };
+        case Node::Cond: return { n.cell, n.baseline, n.counter, n.limit, n.brk };
         case Node::Host: return n.hplanes;
         default: return {};
     }
@@ -149,6 +149,9 @@ std::vector<PlaneUse> uses_of(const Node& n) {
         case Node::Cond:
             add(n.cell, "cell", 0);
             add(n.baseline, "baseline", 0);
+            add(n.counter, "counter", 1);
+            add(n.limit, "limit", 0);
+            add(n.brk, "brk", 2);
             break;
         case Node::Host: return host_node_uses(n);
     }
@@ -170,6 +173,7 @@ NodeFacts facts_of(const Node& n) {
         f.has_baseline = n.baseline != nullptr;
         f.max_iters = n.max_iters;
         f.cell_index = n.cell_index;
+        f.loop_controlled = n.counter != nullptr || n.limit != nullptr || n.brk != nullptr;
     } else if (n.kind == Node::Run) {
         f.n_plans = static_cast<std::int32_t>(n.runner->plans.size());
     }
@@ -247,13 +251,23 @@ bool record(eg_ctx& ctx, Node&& node) {
     return true;
 }
 
-/** @brief Element @p index of the one-dimensional 32-bit plane @p p, read now. */
-std::int32_t element(const eg_plane_s& p, std::int64_t index) {
+/** @brief The bytes of element @p index of the one-dimensional 32-bit plane @p p. */
+char* element_bytes(const eg_plane_s& p, std::int64_t index) {
     const DLTensor& t = p.tensor->dl_tensor;
     const std::int64_t stride = t.strides != nullptr ? t.strides[0] : 1;
+    return static_cast<char*>(t.data) + t.byte_offset + index * stride * 4;
+}
+
+/** @brief Element @p index of the one-dimensional 32-bit plane @p p, read now. */
+std::int32_t element(const eg_plane_s& p, std::int64_t index) {
     std::int32_t v;
-    std::memcpy(&v, static_cast<const char*>(t.data) + t.byte_offset + index * stride * 4, sizeof(v));
+    std::memcpy(&v, element_bytes(p, index), sizeof(v));
     return v;
+}
+
+/** @brief Write @p value into element @p index of the one-dimensional 32-bit plane @p p. */
+void set_element(const eg_plane_s& p, std::int64_t index, std::uint32_t value) {
+    std::memcpy(element_bytes(p, index), &value, sizeof(value));
 }
 
 /** @brief Run @p nodes in order; each conditional reads its cell now. */
@@ -332,14 +346,23 @@ void run_node(eg_ctx& ctx, const Node& n, Tape* tape) {
                 save(-1);
                 replay(ctx, n.arms[truth() ? 0 : 1], tape);
             } else if (n.cond == EG_COND_WHILE) {
-                for (std::int64_t i = 0; n.max_iters == 0 || i < n.max_iters; ++i) {
+                if (n.brk != nullptr) set_element(*n.brk, n.brk_index, 0);
+                std::int64_t i = 0;
+                for (; n.max_iters == 0 || i < n.max_iters; ++i) {
+                    if (n.limit != nullptr && i >= static_cast<std::uint32_t>(element(*n.limit, n.limit_index))) break;
                     save(static_cast<int>(i));
-                    if (!truth()) break;
+                    if (n.cell != nullptr && !truth()) break;
+                    if (n.counter != nullptr) set_element(*n.counter, 0, static_cast<std::uint32_t>(i));
                     if (tape != nullptr && tape->iters.empty()) keep_window_start(*tape->diff, n.ordinal, static_cast<int>(i));
                     if (tape != nullptr) tape->iters.push_back(static_cast<int>(i));
                     replay(ctx, n.arms[0], tape);
                     if (tape != nullptr) tape->iters.pop_back();
+                    if (n.brk != nullptr && element(*n.brk, n.brk_index) != 0) {
+                        ++i;
+                        break;
+                    }
                 }
+                if (n.counter != nullptr) set_element(*n.counter, 0, static_cast<std::uint32_t>(i));
             } else {
                 save(-1);
                 const std::int32_t arm = cell();
@@ -428,6 +451,32 @@ void record_begin(eg_ctx& ctx) {
     ctx.rec = new eg_recording_s;
 }
 
+/** @brief Refuse a uint32 plane ``what`` that is not one-dimensional, whose element @p index is out of range, or (@p one_cell) that is longer than one element. */
+static void check_control_plane(eg_ctx& ctx, eg_plane_s* plane, std::int64_t index, bool one_cell, const std::string& what) {
+    check_handle(ctx.planes, plane, what.c_str());
+    const DLTensor& t = plane->tensor->dl_tensor;
+    if (t.dtype.code != kDLUInt || t.dtype.bits != 32 || t.dtype.lanes != 1 || t.ndim != 1)
+        refuse(EG_BAD_REQUEST, what + ": a one-dimensional uint32 plane is expected");
+    if (one_cell && t.shape[0] != 1) refuse(EG_BAD_REQUEST, what + ": a one-cell plane is expected, not " + std::to_string(t.shape[0]) + " elements");
+    if (index < 0 || index >= t.shape[0])
+        refuse(EG_BAD_REQUEST, what + "_index " + std::to_string(index) + " is outside the plane's " + std::to_string(t.shape[0]) + " element(s)");
+}
+
+void check_loop_control(eg_ctx& ctx, const eg_cond_desc& d) {
+    if (d.kind != EG_COND_WHILE) {
+        if (d.counter != nullptr) refuse(EG_BAD_REQUEST, "eg_cond_desc.counter is for WHILE only: pass NULL");
+        if (d.limit != nullptr) refuse(EG_BAD_REQUEST, "eg_cond_desc.limit is for WHILE only: pass NULL");
+        if (d.brk != nullptr) refuse(EG_BAD_REQUEST, "eg_cond_desc.brk is for WHILE only: pass NULL");
+        return;
+    }
+    if (d.cell == nullptr && d.limit == nullptr && d.brk == nullptr)
+        refuse(EG_BAD_REQUEST, "eg_record_cond_begin: a loop needs a cell, a limit or a brk to stop");
+    if (d.cell == nullptr && d.baseline != nullptr) refuse(EG_BAD_REQUEST, "eg_cond_desc.baseline: needs a cell to compare with");
+    if (d.counter != nullptr) check_control_plane(ctx, d.counter, 0, true, "eg_cond_desc.counter");
+    if (d.limit != nullptr) check_control_plane(ctx, d.limit, d.limit_index, false, "eg_cond_desc.limit");
+    if (d.brk != nullptr) check_control_plane(ctx, d.brk, d.brk_index, false, "eg_cond_desc.brk");
+}
+
 void record_cond_begin(eg_ctx& ctx, const eg_cond_desc* desc) {
     eg_recording_s& rec = recording(ctx);
     const eg_cond_desc d = read_input(desc, "eg_cond_desc");
@@ -453,21 +502,24 @@ void record_cond_begin(eg_ctx& ctx, const eg_cond_desc* desc) {
         refuse(EG_BAD_REQUEST, "eg_cond_desc.max_iters " + std::to_string(d.max_iters) + ": WHILE only, 0 or more");
     if (d.kind == EG_COND_SWITCH && d.baseline != nullptr)
         refuse(EG_BAD_REQUEST, "eg_cond_desc.baseline: not for SWITCH, whose cell is an arm index");
-    check_handle(ctx.planes, d.cell, "eg_cond_desc.cell");
-    const DLTensor& t = d.cell->tensor->dl_tensor;
+    check_loop_control(ctx, d);
     const auto check_element = [](const DLTensor& plane, std::int64_t index, const char* what) {
         if (index < 0 || index >= plane.shape[0])
             refuse(EG_BAD_REQUEST, std::string(what) + "_index " + std::to_string(index) + " is outside the plane's " + std::to_string(plane.shape[0]) + " element(s)");
     };
-    if ((t.dtype.code != kDLInt && t.dtype.code != kDLUInt) || t.dtype.bits != 32 || t.dtype.lanes != 1 || t.ndim != 1)
-        refuse(EG_BAD_REQUEST, "eg_cond_desc.cell: a one-dimensional int32 or uint32 plane is expected");
-    check_element(t, d.cell_index, "eg_cond_desc.cell");
-    if (d.baseline != nullptr) {
-        check_handle(ctx.planes, d.baseline, "eg_cond_desc.baseline");
-        const DLTensor& b = d.baseline->tensor->dl_tensor;
-        if (b.dtype.code != t.dtype.code || b.dtype.bits != 32 || b.dtype.lanes != 1 || b.ndim != 1)
-            refuse(EG_BAD_REQUEST, "eg_cond_desc.baseline: a one-dimensional plane of the dtype of the cell is expected");
-        check_element(b, d.baseline_index, "eg_cond_desc.baseline");
+    if (d.cell != nullptr || d.kind != EG_COND_WHILE) {     // a WHILE may be stopped by its limit or break alone
+        check_handle(ctx.planes, d.cell, "eg_cond_desc.cell");
+        const DLTensor& t = d.cell->tensor->dl_tensor;
+        if ((t.dtype.code != kDLInt && t.dtype.code != kDLUInt) || t.dtype.bits != 32 || t.dtype.lanes != 1 || t.ndim != 1)
+            refuse(EG_BAD_REQUEST, "eg_cond_desc.cell: a one-dimensional int32 or uint32 plane is expected");
+        check_element(t, d.cell_index, "eg_cond_desc.cell");
+        if (d.baseline != nullptr) {
+            check_handle(ctx.planes, d.baseline, "eg_cond_desc.baseline");
+            const DLTensor& b = d.baseline->tensor->dl_tensor;
+            if (b.dtype.code != t.dtype.code || b.dtype.bits != 32 || b.dtype.lanes != 1 || b.ndim != 1)
+                refuse(EG_BAD_REQUEST, "eg_cond_desc.baseline: a one-dimensional plane of the dtype of the cell is expected");
+            check_element(b, d.baseline_index, "eg_cond_desc.baseline");
+        }
     }
     Node n;
     n.kind = Node::Cond;
@@ -479,6 +531,11 @@ void record_cond_begin(eg_ctx& ctx, const eg_cond_desc* desc) {
     n.want = want;
     n.negate = (d.flags & EG_COND_NEGATE) != 0;
     n.max_iters = d.max_iters;
+    n.counter = d.counter;
+    n.limit = d.limit;
+    n.limit_index = d.limit_index;
+    n.brk = d.brk;
+    n.brk_index = d.brk_index;
     n.arms.emplace_back();                      // the first arm is being recorded
     record(ctx, std::move(n));
     Node* test = &rec.current().back();

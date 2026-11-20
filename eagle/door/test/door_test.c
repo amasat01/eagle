@@ -2388,6 +2388,188 @@ static void check_host_node_structure(eg_ctx* ctx, eg_unit* axpb) {
     eg_plane_free(ctx, pl);
 }
 
+/* ---- WHILE body control: counter, limit and break (eg_cond_desc.counter, .limit, .brk) ---- */
+
+/* planes[0] (int32) += 1. */
+static int32_t host_tick(void* user, int32_t n, struct DLManagedTensorVersioned* const* planes) {
+    (void)user, (void)n;
+    const DLTensor* t = (const DLTensor*)&planes[0]->dl_tensor;
+    *(int32_t*)((char*)t->data + t->byte_offset) += 1;
+    return 0;
+}
+
+/* out[counter] = counter: planes[0] is the loop's counter (uint32), planes[1] an int32 array. */
+static int32_t host_index_out(void* user, int32_t n, struct DLManagedTensorVersioned* const* planes) {
+    (void)user, (void)n;
+    const DLTensor *c = (const DLTensor*)&planes[0]->dl_tensor, *o = (const DLTensor*)&planes[1]->dl_tensor;
+    const uint32_t at = *(const uint32_t*)((const char*)c->data + c->byte_offset);
+    ((int32_t*)((char*)o->data + o->byte_offset))[at] = (int32_t)at;
+    return 0;
+}
+
+/* brk = 1 when the counter (planes[0]) reads the log's `calls`: the iteration to break at. */
+static int32_t host_brk_at(void* user, int32_t n, struct DLManagedTensorVersioned* const* planes) {
+    (void)n;
+    const DLTensor *c = (const DLTensor*)&planes[0]->dl_tensor, *b = (const DLTensor*)&planes[1]->dl_tensor;
+    if (*(const uint32_t*)((const char*)c->data + c->byte_offset) == (uint32_t)((const struct host_log*)user)->calls) *(uint32_t*)((char*)b->data + b->byte_offset) = 1;
+    return 0;
+}
+
+static eg_status host_call2(eg_ctx* ctx, eg_host_node* node, eg_plane* a, uint32_t access_a, eg_plane* b, uint32_t access_b) {
+    eg_plane* planes[2] = { a, b };
+    const uint32_t access[2] = { access_a, access_b };
+    return eg_host_call(ctx, node, b != NULL ? 2 : 1, planes, access);
+}
+
+/* A WHILE of `d` (its kind and planes filled by the caller) whose body ticks `ticks` and counts `cell` down; the graph, or NULL. */
+static eg_graph* while_tick_graph(eg_ctx* ctx, const struct eg_cond_desc* d, eg_host_node* tick, eg_plane* ticks, eg_host_node* down, eg_plane* cell) {
+    eg_graph* g = NULL;
+    int ok = eg_record_begin(ctx) == EG_OK && eg_record_cond_begin(ctx, d) == EG_OK && host_call2(ctx, tick, ticks, EG_ACCESS_READ | EG_ACCESS_WRITE, NULL, 0) == EG_OK &&
+             host_call2(ctx, down, cell, EG_ACCESS_READ | EG_ACCESS_WRITE, NULL, 0) == EG_OK && eg_record_cond_end(ctx) == EG_OK && eg_record_end(ctx, NULL, &g) == EG_OK;
+    return ok ? g : NULL;
+}
+
+static void check_while_control(eg_ctx* ctx) {
+    int32_t ticks = 0, cell = 0, ticks_b = 0, out[9];
+    uint32_t counter = 99, limit = 0, brk = 0, two[2] = { 0, 0 };
+    struct tensor tk, tc, tkb, to, tn, tl, tb, tt;
+    struct host_log down_log = { 0 }, tick_log = { 0 }, idx_log = { 0 }, brk_log = { .calls = 3 };
+    eg_plane *pk = wrap(ctx, &tk, &ticks, 1, kDLInt, 32), *pc = wrap(ctx, &tc, &cell, 1, kDLInt, 32), *pkb = wrap(ctx, &tkb, &ticks_b, 1, kDLInt, 32),
+             *po = wrap(ctx, &to, out, 9, kDLInt, 32), *pn = wrap(ctx, &tn, &counter, 1, kDLUInt, 32), *pl = wrap(ctx, &tl, &limit, 1, kDLUInt, 32),
+             *pb = wrap(ctx, &tb, &brk, 1, kDLUInt, 32), *pt = wrap(ctx, &tt, two, 2, kDLUInt, 32);
+    eg_host_node *down = host_node_make(ctx, "down", host_countdown, &down_log), *tick = host_node_make(ctx, "tick", host_tick, &tick_log),
+                 *idx = host_node_make(ctx, "index", host_index_out, &idx_log), *tick_b = host_node_make(ctx, "tick_b", host_tick, &tick_log),
+                 *stop = host_node_make(ctx, "stop", host_brk_at, &brk_log);
+    int ok = pk && pc && pkb && po && pn && pl && pb && pt && down && tick && idx && tick_b && stop;
+    if (!ok) {
+        check(0, "WHILE body control: planes and host nodes made");
+        return;
+    }
+    struct eg_cond_desc d;
+    eg_graph* g = NULL;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    d.kind = EG_COND_WHILE;
+
+    /* counter: seven iterations by the cell test; a body node writes out[counter] = counter (oracle: the index sequence) */
+    d.cell = pc;
+    d.counter = pn;
+    cell = 7;
+    for (int i = 0; i < 9; ++i) out[i] = -1;
+    ok = eg_record_begin(ctx) == EG_OK && eg_record_cond_begin(ctx, &d) == EG_OK && host_call2(ctx, down, pc, EG_ACCESS_READ | EG_ACCESS_WRITE, NULL, 0) == EG_OK &&
+         host_call2(ctx, idx, pn, EG_ACCESS_READ, po, EG_ACCESS_WRITE) == EG_OK && eg_record_cond_end(ctx) == EG_OK && eg_record_end(ctx, NULL, &g) == EG_OK &&
+         eg_graph_launch(ctx, g) == EG_OK;
+    for (int i = 0; i < 9; ++i) ok = ok && out[i] == (i < 7 ? i : -1);
+    check(ok && counter == 7, "a WHILE of seven iterations by its cell: the counter reads 7 and the body saw the indices 0 to 6 in order");
+    eg_graph_free(ctx, g);
+
+    /* the smallest bound wins: max_iters, limit and cell; the counter holds the iterations run */
+    const struct { int64_t max; int32_t limit, cell, want; } bounds[] = { { 3, 5, 100, 3 }, { 6, 2, 100, 2 }, { 6, 5, 4, 4 }, { 6, 5, 0, 0 } };
+    for (size_t i = 0; i < sizeof(bounds) / sizeof(bounds[0]); ++i) {
+        memset(&d, 0, sizeof(d));
+        d.struct_size = sizeof(d), d.kind = EG_COND_WHILE, d.cell = pc, d.max_iters = bounds[i].max, d.limit = pl, d.counter = pn;
+        g = while_tick_graph(ctx, &d, tick, pk, down, pc);
+        ticks = 0, limit = (uint32_t)bounds[i].limit, cell = bounds[i].cell, counter = 99;
+        char what[160];
+        snprintf(what, sizeof(what), "a WHILE with max_iters %d, limit %d and a cell that allows %d runs the smallest bound (%d iterations): the body and the counter agree",
+                 (int)bounds[i].max, bounds[i].limit, bounds[i].cell, bounds[i].want);
+        check(g != NULL && eg_graph_launch(ctx, g) == EG_OK && ticks == bounds[i].want && counter == (uint32_t)bounds[i].want, what);
+        eg_graph_free(ctx, g);
+    }
+
+    /* limit alone (no cell): 4 iterations, then 2 after the plane changes between two replays (read at replay time) */
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d), d.kind = EG_COND_WHILE, d.max_iters = 9, d.limit = pl, d.counter = pn;
+    g = while_tick_graph(ctx, &d, tick, pk, down, pc);
+    ticks = 0, limit = 4, cell = 100;
+    ok = g != NULL && eg_graph_launch(ctx, g) == EG_OK && ticks == 4 && counter == 4;
+    ticks = 0, limit = 2;
+    ok = ok && eg_graph_launch(ctx, g) == EG_OK && ticks == 2 && counter == 2;
+    check(ok, "a WHILE with a limit and no cell runs limit iterations (4), and the limit changed between replays is read at the replay (2)");
+    eg_graph_free(ctx, g);
+
+    /* brk: a body node sets it at iteration 3, so 4 iterations ran; a second replay starts over (the loop zeroes brk when it is entered) */
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d), d.kind = EG_COND_WHILE, d.max_iters = 50, d.brk = pb, d.counter = pn;
+    ok = eg_record_begin(ctx) == EG_OK && eg_record_cond_begin(ctx, &d) == EG_OK && host_call2(ctx, tick, pk, EG_ACCESS_READ | EG_ACCESS_WRITE, NULL, 0) == EG_OK &&
+         host_call2(ctx, stop, pn, EG_ACCESS_READ, pb, EG_ACCESS_READ | EG_ACCESS_WRITE) == EG_OK && eg_record_cond_end(ctx) == EG_OK && eg_record_end(ctx, NULL, &g) == EG_OK;
+    for (int rep = 0; ok && rep < 2; ++rep) {
+        ticks = 0;
+        ok = eg_graph_launch(ctx, g) == EG_OK && ticks == 4 && counter == 4 && brk == 1;
+    }
+    check(ok, "a WHILE with a brk set by its body at iteration 3 runs 4 iterations, and a second replay runs 4 again (brk zeroed at entry)");
+    eg_graph_free(ctx, g);
+
+    /* mid-body break: [A, brk = counter, IF not brk { B }] under a limit of 5: B runs once fewer than A (oracle: the same work as a host loop) */
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d), d.kind = EG_COND_WHILE, d.limit = pl, d.brk = pb, d.counter = pn;
+    struct eg_cond_desc arm = { 0 };
+    arm.struct_size = sizeof(arm), arm.kind = EG_COND_IF, arm.flags = EG_COND_NEGATE, arm.cell = pb;
+    ok = eg_record_begin(ctx) == EG_OK && eg_record_cond_begin(ctx, &d) == EG_OK && host_call2(ctx, tick, pk, EG_ACCESS_READ | EG_ACCESS_WRITE, NULL, 0) == EG_OK &&
+         eg_copy(ctx, pn, pb) == EG_OK && eg_record_cond_begin(ctx, &arm) == EG_OK && host_call2(ctx, tick_b, pkb, EG_ACCESS_READ | EG_ACCESS_WRITE, NULL, 0) == EG_OK &&
+         eg_record_cond_end(ctx) == EG_OK && eg_record_cond_end(ctx) == EG_OK && eg_record_end(ctx, NULL, &g) == EG_OK;
+    limit = 5, ticks = ticks_b = 0;
+    int32_t want_a = 0, want_b = 0;
+    for (uint32_t i = 0, host_brk = 0; i < 5; ++i) {
+        ++want_a;
+        host_brk = i;
+        if (!host_brk) ++want_b;
+        if (host_brk) break;
+    }
+    ok = ok && eg_graph_launch(ctx, g) == EG_OK && ticks == want_a && ticks_b == want_b && ticks == ticks_b + 1;
+    check(ok, "a mid-body break (the cell copied into brk, the rest of the body in an IF on brk with EG_COND_NEGATE): B ran one time fewer than A, as in the host loop");
+    eg_graph_free(ctx, g);
+
+    /* refusals, each by name; a refused begin leaves the recording open, so it is aborted */
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d), d.kind = EG_COND_WHILE, d.max_iters = 4;
+    ok = eg_record_begin(ctx) == EG_OK && eg_record_cond_begin(ctx, &d) == EG_BAD_REQUEST && reason_has(ctx, "a loop needs a cell, a limit or a brk to stop") && eg_record_abort(ctx) == EG_OK;
+    check(ok, "a WHILE with no cell, limit or brk is refused by name");
+    const struct { eg_plane* plane; const char* what; } bad[] = { { pc, "uint32" }, { pt, "one-cell" } };
+    for (size_t i = 0; i < 2; ++i) {
+        memset(&d, 0, sizeof(d));
+        d.struct_size = sizeof(d), d.kind = EG_COND_WHILE, d.cell = pc, d.counter = bad[i].plane;
+        char what[120];
+        snprintf(what, sizeof(what), "a counter that is not a one-cell uint32 plane is refused (%s expected)", bad[i].what);
+        ok = eg_record_begin(ctx) == EG_OK && eg_record_cond_begin(ctx, &d) == EG_BAD_REQUEST && reason_has(ctx, bad[i].what) && eg_record_abort(ctx) == EG_OK;
+        check(ok, what);
+    }
+    const struct { eg_plane* limit; int64_t limit_index; eg_plane* brk; int64_t brk_index; const char* needle; } range[] = {
+        { pl, 1, NULL, 0, "limit_index 1" }, { NULL, 0, pb, -1, "brk_index -1" } };
+    for (size_t i = 0; i < 2; ++i) {
+        memset(&d, 0, sizeof(d));
+        d.struct_size = sizeof(d), d.kind = EG_COND_WHILE, d.cell = pc, d.limit = range[i].limit, d.limit_index = range[i].limit_index, d.brk = range[i].brk,
+        d.brk_index = range[i].brk_index;
+        ok = eg_record_begin(ctx) == EG_OK && eg_record_cond_begin(ctx, &d) == EG_BAD_REQUEST && reason_has(ctx, range[i].needle) && eg_record_abort(ctx) == EG_OK;
+        check(ok, i == 0 ? "a limit_index outside its plane is refused by name" : "a brk_index outside its plane is refused by name");
+    }
+    const eg_cond_kind others[] = { EG_COND_IF, EG_COND_IF_ELSE, EG_COND_SWITCH };
+    ok = 1;
+    for (size_t k = 0; k < 3; ++k)
+        for (int member = 0; member < 3; ++member) {
+            memset(&d, 0, sizeof(d));
+            d.struct_size = sizeof(d), d.kind = others[k], d.cell = pc, d.n_arms = others[k] == EG_COND_SWITCH ? 2 : 0;
+            d.counter = member == 0 ? pn : NULL, d.limit = member == 1 ? pl : NULL, d.brk = member == 2 ? pb : NULL;
+            const char* name = member == 0 ? "counter" : member == 1 ? "limit" : "brk";
+            char needle[48];
+            snprintf(needle, sizeof(needle), "eg_cond_desc.%s is for WHILE only", name);
+            ok = ok && eg_record_begin(ctx) == EG_OK && eg_record_cond_begin(ctx, &d) == EG_BAD_REQUEST && reason_has(ctx, needle) && eg_record_abort(ctx) == EG_OK;
+        }
+    check(ok, "a counter, limit or brk on an IF, IF_ELSE or SWITCH is refused by name");
+
+    /* a struct that ends before the new members reads them as absent */
+    memset(&d, 0, sizeof(d));
+    d.struct_size = (uint32_t)offsetof(struct eg_cond_desc, counter), d.kind = EG_COND_WHILE, d.cell = pc, d.max_iters = 2, d.counter = pn, d.limit = pl;
+    cell = 100, ticks = 0;
+    g = while_tick_graph(ctx, &d, tick, pk, down, pc);
+    check(g != NULL && eg_graph_launch(ctx, g) == EG_OK && ticks == 2, "a descriptor that ends before counter, limit and brk reads them as absent");
+    eg_graph_free(ctx, g);
+
+    eg_host_node_free(ctx, down), eg_host_node_free(ctx, tick), eg_host_node_free(ctx, idx), eg_host_node_free(ctx, tick_b), eg_host_node_free(ctx, stop);
+    eg_plane* all[] = { pk, pc, pkb, po, pn, pl, pb, pt };
+    for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); ++i) eg_plane_free(ctx, all[i]);
+}
+
 /* A node alive when its context is freed releases its user data at that free, once. */
 static void check_host_node_context_free(void) {
     eg_ctx* other = make_ctx();
@@ -5913,6 +6095,7 @@ int main(int argc, char** argv) {
     check_fft_threads();
     check_conditionals(ctx);
     check_recording_states(ctx);
+    check_while_control(ctx);
     check_fork_join(ctx);
     check_record_abort(ctx);
     check_graph_describe(ctx);
