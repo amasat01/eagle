@@ -489,7 +489,8 @@ void graph_launch(eg_ctx& ctx, eg_graph_s* graph) {
 void graph_describe(eg_ctx& ctx, const eg_graph_s* graph, eg_graph_description* out) {
     check_handle(ctx.graphs, const_cast<eg_graph_s*>(graph), "graph");
     if (out == nullptr) refuse(EG_BAD_REQUEST, "eg_graph_describe: out is NULL");
-    if (out->struct_size < 2 * sizeof(std::uint32_t)) refuse(EG_BAD_REQUEST, "eg_graph_description: struct_size " + std::to_string(out->struct_size) + " is too small");
+    if (out->struct_size < sizeof(eg_graph_description))
+        refuse(EG_BAD_REQUEST, "eg_graph_description: struct_size " + std::to_string(out->struct_size) + " is below the door's " + std::to_string(sizeof(eg_graph_description)) + "; the node and edge sizes it ends with are needed to step the arrays");
     if (graph->described == nullptr) graph->described = std::make_unique<DescribeStore>();
     eg_graph_description d;
     graph->shape.describe(*graph->described, graph->diff != nullptr ? EG_RECORD_DIFF : 0, d);

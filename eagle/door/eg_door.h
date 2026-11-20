@@ -1255,6 +1255,8 @@ struct eg_graph_description {
     int32_t n_edges;
     const struct eg_graph_edge* edges;
     int32_t n_levels;                      /**< 0 for an empty graph, else the highest ``level`` plus one */
+    uint32_t node_size;                    /**< the door's ``sizeof(struct eg_graph_node)``: step ``nodes`` by this, not by the caller's own size */
+    uint32_t edge_size;                    /**< the door's ``sizeof(struct eg_graph_edge)``: step ``edges`` by this */
 };
 
 /**
@@ -1262,8 +1264,8 @@ struct eg_graph_description {
  * call), the hazard, wait, join and order edges, and the schedule level of each node (the longest path from a root). The same
  * description is kept for a host and a device graph: the door builds it at record time, it is not read back from a driver.
  * Read-only and callback-free; the arrays are the door's and stay valid until ``eg_graph_free`` of the graph or the next
- * ``eg_graph_describe`` of it, so a caller copies what it keeps. Node indices are the ordinals a race refusal names. A host graph replays in recording order, which respects every
- * level. Status: OK; BAD_REQUEST (a NULL, freed or foreign graph; ``out`` NULL); NOT_WRITTEN (a device graph, where the
+ * ``eg_graph_describe`` of it, so a caller copies what it keeps. Node indices are the ordinals a race refusal names. A node or edge struct grows by appended members, so step the arrays by ``node_size`` and ``edge_size``. A host graph replays in recording order, which respects every
+ * level. Status: OK; BAD_REQUEST (a NULL, freed or foreign graph; ``out`` NULL or with a ``struct_size`` below the door's ``sizeof(struct eg_graph_description)``); NOT_WRITTEN (a device graph, where the
  * recording does not keep the description yet).
  */
 eg_status eg_graph_describe(eg_ctx* ctx, const eg_graph* graph, struct eg_graph_description* out);

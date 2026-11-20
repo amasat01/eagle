@@ -263,6 +263,8 @@ void GraphShape::describe(DescribeStore& store, std::uint32_t flags, eg_graph_de
     out.n_edges = static_cast<std::int32_t>(edges.size());
     out.edges = edges.data();
     out.n_levels = n == 0 ? 0 : *std::max_element(level.begin(), level.end()) + 1;
+    out.node_size = sizeof(eg_graph_node);
+    out.edge_size = sizeof(eg_graph_edge);
 }
 
 }  // namespace door

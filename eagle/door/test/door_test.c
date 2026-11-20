@@ -1503,6 +1503,11 @@ static void check_graph_describe(eg_ctx* ctx) {
          edge_at(&d, EG_GEDGE_ORDER, 6, 7) >= 0 && edge_at(&d, EG_GEDGE_ORDER, 4, 5) >= 0 && count_edges(&d, EG_GEDGE_WAIT) == 1 &&
          count_edges(&d, EG_GEDGE_RAW) == 0 && count_edges(&d, EG_GEDGE_WAW) == 0;
     check(ok, "the same description: the WAIT edge carries the plane, the joins and orders are there, the resolved race and the exclusive arms give no hazard edge");
+    struct eg_graph_description small = d;
+    small.struct_size = offsetof(struct eg_graph_description, node_size);
+    ok = ok && d.node_size == sizeof(struct eg_graph_node) && d.edge_size == sizeof(struct eg_graph_edge) &&
+         eg_graph_describe(ctx, g, &small) == EG_BAD_REQUEST && reason_has(ctx, "struct_size");
+    check(ok, "the description states the door's node and edge sizes; a struct_size that ends before them is refused by name");
     check(ok && eg_graph_free(ctx, g) == EG_OK && eg_graph_describe(ctx, g, &d) == EG_BAD_REQUEST && reason_has(ctx, "graph") &&
               eg_graph_describe(ctx, NULL, &d) == EG_BAD_REQUEST,
           "eg_graph_describe of a freed graph or NULL is refused BAD_REQUEST by name");
