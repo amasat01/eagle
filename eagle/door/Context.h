@@ -511,6 +511,7 @@ namespace door {
 struct DeviceLoop;
 struct DeviceFft;         ///< the cuFFT plans of a device transform (device/Fft.cpp)
 struct DeviceRecording;   ///< a capture in progress on the context's stream (device/Device.cpp)
+struct GraphDiff;         ///< the tape of a graph ended with EG_RECORD_DIFF (host/Graph.h)
 struct DeviceGraph;       ///< a recorded device graph: the instantiated capture and the plans it launched
 struct RunRecord;         ///< an EG_RUN_RECORD runner: its derived plans and last record (host/Reverse.cpp)
 
@@ -806,6 +807,10 @@ void banded_pack(eg_ctx& ctx, const double* in, std::uint64_t* out, std::uint64_
 void banded_unpack(eg_ctx& ctx, const std::uint64_t* in, double* out, std::uint64_t n);
 void banded_pack_scalar(eg_ctx& ctx, double x, std::uint64_t* out);
 void bind_raw(eg_plan_s& plan, int slot, void* data, std::uint64_t count);
+/** @brief The sample count the plane @p t bound at @p slot of @p plan states in its handle or mirror (eg_bind's rule). */
+std::uint64_t bound_count(const eg_plan_s& plan, int slot, const DLTensor& t);
+/** @brief Copy @p bytes on one side: host memory, or device to device on @p dev (host/Reverse.cpp). */
+void copy_bytes(eg_ctx* dev, void* dst, const void* src, std::size_t bytes);
 void launch(eg_ctx& ctx, eg_plan_s* plan, std::uint64_t* tiles);
 void runner_new(eg_ctx& ctx, const eg_runner_desc* desc, eg_runner** out);
 void runner_free(eg_ctx& ctx, eg_runner_s* runner);

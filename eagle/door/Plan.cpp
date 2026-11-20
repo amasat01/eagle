@@ -851,6 +851,16 @@ void plan_counters(eg_ctx& ctx, const eg_plan_s* plan, struct eg_plan_counters* 
     write_output(out, c, "eg_plan_counters");
 }
 
+/** @brief The sample count a plane bound at @p slot of @p plan states in its handle or mirror: a lookup its length, a keyed output its
+ *  key count, a wide or gathered plane its trailing extent, else the plan's sample count. */
+std::uint64_t bound_count(const eg_plan_s& plan, int slot, const DLTensor& t) {
+    const SlotFacts& sf = plan.unit->slots[static_cast<std::size_t>(slot)];
+    if (sf.mirror) return static_cast<std::uint64_t>(sf.gathered ? t.shape[t.ndim - 1] : plan.n_samples);
+    if (sf.role == EG_ROLE_LOOKUP) return static_cast<std::uint64_t>(elements(t));
+    if (sf.keys_of >= 0) return static_cast<std::uint64_t>(key_count(*plan.unit, plan.unit->keyed[static_cast<std::size_t>(sf.keys_of)], plan.n_samples));
+    return static_cast<std::uint64_t>(wide(sf) ? t.shape[t.ndim - 1] : plan.n_samples);
+}
+
 /** @brief eg_bind: check every entry, then replace the named slots. */
 void bind(eg_ctx& ctx, eg_plan_s* plan, const eg_bind_desc* desc) {
     check_handle(ctx.plans, plan, "plan");
@@ -870,14 +880,9 @@ void bind(eg_ctx& ctx, eg_plan_s* plan, const eg_bind_desc* desc) {
         if (sf.cell) {
             b.bound = true;          // the kernel reads eagle's rows (made at eg_plan_new); this plane receives the folded cell
         } else if (sf.mirror) {
-            bind_mirror(*plan, d.plane_slots[i], data,
-                        static_cast<std::uint64_t>(sf.gathered ? t.shape[t.ndim - 1] : plan->n_samples));
+            bind_mirror(*plan, d.plane_slots[i], data, bound_count(*plan, d.plane_slots[i], t));
         } else {
-            bind_handle(*plan, d.plane_slots[i], data,
-                        sf.role == EG_ROLE_LOOKUP ? static_cast<std::uint64_t>(elements(t))
-                        : sf.keys_of >= 0 ? static_cast<std::uint64_t>(key_count(*plan->unit, plan->unit->keyed[static_cast<std::size_t>(sf.keys_of)], plan->n_samples))
-                        : wide(sf) ? static_cast<std::uint64_t>(t.shape[t.ndim - 1])
-                                   : static_cast<std::uint64_t>(plan->n_samples));
+            bind_handle(*plan, d.plane_slots[i], data, bound_count(*plan, d.plane_slots[i], t));
         }
         if (old != nullptr) plane_release(ctx, old);
         renew_owned(ctx, *plan, d.plane_slots[i], t);

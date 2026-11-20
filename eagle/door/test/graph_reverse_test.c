@@ -83,6 +83,27 @@ static int close_to(const double* got, const double* want, int n) {
     return 1;
 }
 
+/* A (rows, N) host plane over @p data. */
+struct tensor2 {
+    struct DLManagedTensorVersioned managed;
+    int64_t shape[2];
+};
+static eg_plane* host_plane2(eg_ctx* ctx, struct tensor2* t, int64_t rows, double* data) {
+    memset(t, 0, sizeof(*t));
+    t->shape[0] = rows;
+    t->shape[1] = N;
+    t->managed.version.major = DLPACK_MAJOR_VERSION;
+    t->managed.dl_tensor.data = data;
+    t->managed.dl_tensor.device.device_type = kDLCPU;
+    t->managed.dl_tensor.ndim = 2;
+    t->managed.dl_tensor.dtype.code = kDLFloat;
+    t->managed.dl_tensor.dtype.bits = 64;
+    t->managed.dl_tensor.dtype.lanes = 1;
+    t->managed.dl_tensor.shape = t->shape;
+    eg_plane* p = NULL;
+    return eg_plane_wrap(ctx, &t->managed, &p) == EG_OK ? p : NULL;
+}
+
 /* The values every row starts from. */
 static void fill(double* x, double* w, double base) {
     for (int i = 0; i < N; ++i) x[i] = base + 0.3 * i;
@@ -96,6 +117,7 @@ static void drop(eg_ctx* ctx, int n, eg_plane* const* p) {
 
 struct units {
     eg_unit *scale, *scale_vjp, *square, *square_vjp, *mul2, *mul2_vjp, *uscale, *uscale_vjp, *tape_vjp, *open_vjp;
+    eg_unit *fan, *fan_vjp, *norm2, *norm2_vjp;
 };
 
 static eg_status end_diff(eg_ctx* ctx, int32_t n, const struct eg_node_vjp* v, eg_graph** g) {
@@ -241,6 +263,49 @@ static void shared_read_row(const struct rig* r, const struct units* u) {
     drop(ctx, 7, all);
 }
 
+/* v = fan(x) = (x, 2x, 3x), o = |v|^2, J = sum o: dJ/dx = 28 x. With @p overwrite, a third launch rewrites v from z = 5x after
+ * the norm read it, so the norm's vjp needs the snapshot of v. */
+static void vector_row(const struct rig* r, const struct units* u, int overwrite) {
+    eg_ctx* ctx = r->ctx;
+    double x[N], z[N], o[N], v[3 * N], one[N], gx[N], want[N];
+    struct tensor tx, tz, to, t1, tgx;
+    struct tensor2 tv;
+    fill(x, o, 0.5);
+    for (int i = 0; i < N; ++i) {
+        one[i] = 1.0;
+        z[i] = 5.0 * x[i];
+    }
+    eg_plane* px = host_plane(ctx, &tx, N, x);
+    eg_plane* pz = host_plane(ctx, &tz, N, z);
+    eg_plane* po = host_plane(ctx, &to, N, o);
+    eg_plane* p1 = host_plane(ctx, &t1, N, one);
+    eg_plane* pgx = host_plane(ctx, &tgx, N, gx);
+    eg_plane* pv = host_plane2(ctx, &tv, 3, v);
+    eg_plane* a[] = { px, pv };
+    eg_plane* b[] = { pv, po };
+    eg_plane* c[] = { pz, pv };
+    eg_plan* f = plan_with(r, u->fan, 2, a, NULL);
+    eg_plan* g = plan_with(r, u->norm2, 2, b, NULL);
+    eg_plan* h = overwrite ? plan_with(r, u->fan, 2, c, NULL) : NULL;
+    const struct eg_node_vjp vjps[] = { { 0, u->fan_vjp }, { 1, u->norm2_vjp } };
+    eg_graph* graph = NULL;
+    int ok = f && g && (h || !overwrite) && eg_record_begin(ctx) == EG_OK && eg_launch(ctx, f, NULL) == EG_OK && eg_launch(ctx, g, NULL) == EG_OK &&
+             (!overwrite || eg_launch(ctx, h, NULL) == EG_OK) && end_diff(ctx, 2, vjps, &graph) == EG_OK && eg_graph_launch(ctx, graph) == EG_OK;
+    eg_plane* in[] = { px };
+    eg_plane* gr[] = { pgx };
+    ok = ok && reverse(ctx, graph, po, p1, 1, in, gr) == EG_OK;
+    for (int i = 0; i < N; ++i) want[i] = 28.0 * x[i];
+    check(ok && close_to(gx, want, N),
+          overwrite ? "eg_graph_reverse through a width-3 vector plane that a later launch overwrites: the snapshot keeps the plane's shape and the gradient is right"
+                    : "eg_graph_reverse through a width-3 vector plane between two launches: dJ/dx matches the closed form");
+    eg_graph_free(ctx, graph);
+    eg_plan_free(ctx, f);
+    eg_plan_free(ctx, g);
+    if (h) eg_plan_free(ctx, h);
+    eg_plane* all[] = { px, pz, po, p1, pgx, pv };
+    drop(ctx, 6, all);
+}
+
 static void refusal_rows(const struct rig* r, const struct units* u) {
     eg_ctx* ctx = r->ctx;
     double x[N], y[N], z[N], w[1], one[N], gx[N], k = 2.0;
@@ -353,12 +418,15 @@ int main(int argc, char** argv) {
     const struct rig r = { ctx, argv[1] };
     const struct units u = { load(&r, "scale", 0x10), load(&r, "scale_vjp", 0x11), load(&r, "square", 0x12), load(&r, "square_vjp", 0x13),
                              load(&r, "mul2", 0x14), load(&r, "mul2_vjp", 0x15), load(&r, "uscale", 0x16), load(&r, "uscale_vjp", 0x17),
-                             load(&r, "scale_tape_vjp", 0x18), load(&r, "scale_open_vjp", 0x19) };
-    check(u.scale && u.scale_vjp && u.square && u.square_vjp && u.mul2 && u.mul2_vjp && u.uscale && u.uscale_vjp && u.tape_vjp && u.open_vjp,
-          "the graph fixture's ten units load");
+                             load(&r, "scale_tape_vjp", 0x18), load(&r, "scale_open_vjp", 0x19),
+                             load(&r, "fan", 0x1a), load(&r, "fan_vjp", 0x1b), load(&r, "norm2", 0x1c), load(&r, "norm2_vjp", 0x1d) };
+    check(u.scale && u.scale_vjp && u.square && u.square_vjp && u.mul2 && u.mul2_vjp && u.uscale && u.uscale_vjp && u.tape_vjp && u.open_vjp && u.fan && u.fan_vjp && u.norm2 && u.norm2_vjp,
+          "the graph fixture's fourteen units load");
     chain_row(&r, &u);
     overwrite_row(&r, &u);
     shared_read_row(&r, &u);
+    vector_row(&r, &u, 0);
+    vector_row(&r, &u, 1);
     refusal_rows(&r, &u);
     eg_ctx_free(ctx);
     printf("%s: %d failure(s)\n", argv[0], failures);

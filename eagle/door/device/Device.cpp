@@ -9,6 +9,7 @@
 #include "eagle/door/Context.h"
 #include "eagle/door/device/Seam.h"
 #include "eagle/door/eg_unit_meta.h"
+#include "eagle/door/host/Graph.h"
 #include "eagle/door/host/Ops.h"
 #include "eagle/door/host/Segment.h"
 
@@ -86,7 +87,8 @@ DeviceRun::~DeviceRun() = default;
 void device_record_begin(eg_ctx&) {}
 void device_record_launch(eg_ctx&, eg_plan_s&) {}
 void device_record_host_step(eg_ctx&, void (*)(void*, StepFailure&) noexcept, void*, void (*)(eg_ctx&, void*)) {}
-void device_record_end(eg_ctx&, eg_graph**) {}
+void device_record_end(eg_ctx&, const eg_record_end_desc*, eg_graph**) {}
+GraphDiff* device_graph_diff(eg_ctx&, eg_graph*) { return nullptr; }
 bool device_graph(const eg_ctx&, const eg_graph*) { return false; }
 void device_graph_launch(eg_ctx&, eg_graph*) {}
 void device_graph_free(eg_ctx&, eg_graph*) {}
@@ -244,6 +246,7 @@ struct HostHook {
 };
 
 struct DeviceRecording {
+    bool launches_only = true;                          ///< no copy, reduce, transform, product or host node was captured: what EG_RECORD_DIFF needs
     std::vector<std::unique_ptr<HostHook>> hooks;       ///< the host nodes captured so far
     std::shared_ptr<StepFailure> failure;               ///< shared by the hooks and, once recorded, the graph
     DeviceCapture* capture = nullptr;
@@ -256,6 +259,7 @@ struct DeviceRecording {
 
 /** @brief A recorded device graph: the instantiated capture and the plans whose bindings it holds by value. */
 struct DeviceGraph {
+    std::unique_ptr<GraphDiff> diff;                    ///< the tape of a graph ended with EG_RECORD_DIFF
     std::vector<std::unique_ptr<HostHook>> hooks;       ///< its host nodes, each holding the references its step runs
     std::shared_ptr<StepFailure> failure;               ///< the first failure of a host node, kept for the next launch or sync
     DeviceLoop* loop = nullptr;
@@ -595,6 +599,7 @@ void device_gemm_ready(eg_ctx& ctx) {
 void device_gemm_run(eg_ctx& ctx, const eg_gemm_s& gemm, eg_plane_s* a, eg_plane_s* b, eg_plane_s* c) {
     const auto at = [](const eg_plane_s* p) { return static_cast<char*>(p->tensor->dl_tensor.data) + p->tensor->dl_tensor.byte_offset; };
     const auto stride = [](const eg_plane_s* p) { return static_cast<int>(p->tensor->dl_tensor.shape[1]); };
+    if (ctx.dev_rec != nullptr) ctx.dev_rec->launches_only = false;
     Current current(ctx.dev);
     gemm_product(ctx, ctx.dev.stream, gemm.call, gemm.f32, at(a), stride(a), at(b), stride(b), at(c), stride(c));
 }
@@ -1079,6 +1084,7 @@ void device_reduce(eg_ctx& ctx, const eg_reduce_desc& d) {
     const auto at = [](const eg_plane_s* p) -> void* {
         return p == nullptr ? nullptr : static_cast<char*>(p->tensor->dl_tensor.data) + p->tensor->dl_tensor.byte_offset;
     };
+    if (ctx.dev_rec != nullptr) ctx.dev_rec->launches_only = false;
     Current current(ctx.dev);
     reduce_step(ctx.dev.stream, r.code, r.op == EG_REDUCE_ALL ? 3 : r.op, at(r.in), r.n, r.cols, at(r.out), at(r.comp), r.pair);
 }
@@ -1088,6 +1094,7 @@ void device_reduce(eg_ctx& ctx, const eg_reduce_desc& d) {
  *  host plane, pageable or pinned, copies across and waits, so the host bytes are safe to reuse on return. */
 void device_copy(eg_ctx& ctx, eg_plane_s* src, eg_plane_s* dst) {
     host::copy_check(ctx, src, dst);
+    if (ctx.dev_rec != nullptr) ctx.dev_rec->launches_only = false;
     const DLTensor& s = src->tensor->dl_tensor;
     const DLTensor& t = dst->tensor->dl_tensor;
     char *ps = static_cast<char*>(s.data) + s.byte_offset, *pd = static_cast<char*>(t.data) + t.byte_offset;
@@ -1129,6 +1136,7 @@ void device_fft_run(eg_ctx& ctx, eg_fft_s& plan, eg_plane_s* in, eg_plane_s* out
     Current current(ctx.dev);
     fft_enqueue(*plan.dev, plan, at(in), at(out), plan.work, ctx.dev.stream);
     if (ctx.dev_rec == nullptr) return;
+    ctx.dev_rec->launches_only = false;
     ctx.dev_rec->ffts.push_back(&plan);
     ++plan.refs;
 }
@@ -1656,6 +1664,7 @@ void device_record_launch(eg_ctx& ctx, eg_plan_s& plan) {
 /** @brief A host node on the capture in scope (device/Seam.h). Nothing in it makes a CUDA call. */
 void device_record_host_step(eg_ctx& ctx, void (*run)(void*, StepFailure&) noexcept, void* user, void (*release)(eg_ctx&, void*)) {
     DeviceRecording& rec = *ctx.dev_rec;
+    rec.launches_only = false;
     EG_DRIVER(cuLaunchHostFunc);
     if (!rec.failure) rec.failure = std::make_shared<StepFailure>();
     rec.hooks.push_back(std::make_unique<HostHook>(HostHook{ run, user, release, rec.failure }));
@@ -1668,9 +1677,18 @@ void device_record_host_step(eg_ctx& ctx, void (*run)(void*, StepFailure&) noexc
 }
 
 /** @brief eg_record_end on a device context: end the capture and instantiate it (FAULT when the capture failed). */
-void device_record_end(eg_ctx& ctx, eg_graph** out) {
+void device_record_end(eg_ctx& ctx, const eg_record_end_desc* desc, eg_graph** out) {
     if (out == nullptr) refuse(EG_BAD_REQUEST, "eg_record_end: out is NULL");
     *out = nullptr;
+    bool diff_wanted = false;
+    if (desc != nullptr) {
+        const eg_record_end_desc d = read_input(desc, "eg_record_end_desc");
+        if ((d.flags & ~EG_RECORD_DIFF) != 0) refuse(EG_BAD_REQUEST, "eg_record_end_desc.flags: unknown bits " + std::to_string(d.flags & ~EG_RECORD_DIFF));
+        diff_wanted = (d.flags & EG_RECORD_DIFF) != 0;
+        if (!diff_wanted && d.n_vjps != 0) refuse(EG_BAD_REQUEST, "eg_record_end_desc.n_vjps: vjps without EG_RECORD_DIFF");
+        if (diff_wanted && !ctx.dev_rec->launches_only)
+            refuse(EG_NOT_WRITTEN, "eg_record_end: the recording holds a node that is not an eg_launch; EG_RECORD_DIFF records plain launches only");
+    }
     const std::unique_ptr<DeviceRecording> rec(ctx.dev_rec);
     ctx.dev_rec = nullptr;
     Current current(ctx.dev);
@@ -1692,6 +1710,33 @@ void device_record_end(eg_ctx& ctx, eg_graph** out) {
         refuse(EG_FAULT, "eg_record_end: the device capture failed: " + failed);
     }
     auto graph = std::make_unique<DeviceGraph>();
+    if (diff_wanted) {
+        // The capture just made holds the launches alone. The tape allocates (not allowed inside a capture), so it is planned
+        // now and the launches are captured again with the snapshot copies in front of the launches that overwrite a plane.
+        try {
+            graph->diff = diff_plan(ctx, rec->plans, *desc);
+            loop_free(loop);
+            loop = nullptr;
+            rec->capture = capture_begin(rec->stream);
+            for (std::size_t i = 0; i < rec->plans.size(); ++i) {
+                for (const Snapshot& snap : graph->diff->snapshots) {
+                    if (snap.node != i) continue;
+                    const DLTensor& t = graph->diff->planes[static_cast<std::size_t>(snap.plane)]->tensor->dl_tensor;
+                    copy_step(rec->stream, const_cast<char*>(snap.bytes.data()), static_cast<char*>(t.data) + t.byte_offset, snap.size);
+                }
+                finished_zero(*rec->plans[i], rec->stream);
+                launch_on(*rec->plans[i], rec->stream);
+            }
+            loop = capture_end(rec->capture);
+            rec->capture = nullptr;
+        } catch (...) {
+            if (loop != nullptr) loop_free(loop);
+            if (rec->capture != nullptr) capture_abort(rec->capture);
+            if (graph->diff != nullptr) diff_free(ctx, *graph->diff);
+            for (eg_plan_s* p : rec->plans) plan_release(ctx, p);
+            throw;
+        }
+    }
     graph->loop = loop;
     graph->plans = std::move(rec->plans);
     graph->ffts = std::move(rec->ffts);
@@ -1718,8 +1763,12 @@ void device_graph_launch(eg_ctx& ctx, eg_graph* handle) {
             refuse(EG_BAD_REQUEST, "eg_graph_launch: a plan of unit '" + graph->plans[i]->unit->name + "' was rebound since "
                    "the recording; a device graph replays the bindings it captured: record it again");
     Current current(ctx.dev);
+    if (graph->diff != nullptr) diff_check_launch(*graph->diff);
     loop_launch(graph->loop, ctx.dev.stream);
+    if (graph->diff != nullptr) diff_launched(*graph->diff);
 }
+
+GraphDiff* device_graph_diff(eg_ctx&, eg_graph* graph) { return reinterpret_cast<DeviceGraph*>(graph)->diff.get(); }
 
 /** @brief eg_graph_free of a device graph: drop its plan references and its instantiated capture. */
 void device_graph_free(eg_ctx& ctx, eg_graph* handle) {
@@ -1735,6 +1784,7 @@ void device_graph_free(eg_ctx& ctx, eg_graph* handle) {
     }
     for (eg_plan_s* p : graph->plans) plan_release(ctx, p);
     for (eg_fft_s* f : graph->ffts) fft_release(ctx, f);
+    if (graph->diff != nullptr) diff_free(ctx, *graph->diff);
     eg_ctx* c = &ctx;
     DeviceLoop* loop = graph->loop;
     now_or_after_capture(ctx, [c, loop] {

@@ -177,11 +177,15 @@ char* plane_bytes(const eg_plane_s& p) {
 }
 std::size_t elem_bytes(const DLTensor& t) { return static_cast<std::size_t>(t.dtype.bits / 8) * t.dtype.lanes; }
 
+}  // namespace
+
 /** @brief Copy @p bytes on one side: host memory, or device to device on @p dev. */
 void copy_bytes(eg_ctx* dev, void* dst, const void* src, std::size_t bytes) {
     if (dev != nullptr) device_copy_bytes(*dev, dst, src, bytes);
     else std::memcpy(dst, src, bytes);
 }
+
+namespace {
 
 /** @brief diff::gatherColumns on the host (on @p threads threads), or queued on @p dev's stream (@p index on the device). */
 void gather(eg_ctx* dev, void* dst, std::int64_t dst_ld, const void* src, std::int64_t src_ld, const std::int64_t* index,

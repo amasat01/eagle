@@ -309,7 +309,15 @@ void record_end(eg_ctx& ctx, const eg_record_end_desc* desc, eg_graph** out) {
     if (desc != nullptr) {
         const eg_record_end_desc d = read_input(desc, "eg_record_end_desc");
         if ((d.flags & ~EG_RECORD_DIFF) != 0) refuse(EG_BAD_REQUEST, "eg_record_end_desc.flags: unknown bits " + std::to_string(d.flags & ~EG_RECORD_DIFF));
-        if ((d.flags & EG_RECORD_DIFF) != 0) diff = diff_plan(ctx, rec.top, d);   // a refusal leaves the recording open
+        if ((d.flags & EG_RECORD_DIFF) != 0) {      // a refusal leaves the recording open
+            std::vector<eg_plan_s*> launches;
+            for (std::size_t i = 0; i < rec.top.size(); ++i) {
+                if (rec.top[i].kind != Node::Launch)
+                    refuse(EG_NOT_WRITTEN, "eg_record_end: recorded node " + std::to_string(i) + " is not an eg_launch; EG_RECORD_DIFF records plain launches only");
+                launches.push_back(rec.top[i].plan);
+            }
+            diff = diff_plan(ctx, launches, d);
+        }
         else if (d.n_vjps != 0) refuse(EG_BAD_REQUEST, "eg_record_end_desc.n_vjps: vjps without EG_RECORD_DIFF");
     }
     auto graph = std::make_unique<eg_graph_s>();
@@ -328,21 +336,17 @@ void graph_launch(eg_ctx& ctx, eg_graph_s* graph) {
         return;
     }
     GraphDiff& diff = *graph->diff;
-    for (const GraphDiff::PlanMark& m : diff.marks)
-        if (m.plan->binds != m.binds)
-            refuse(EG_BAD_REQUEST, "eg_graph_launch: a plan of this EG_RECORD_DIFF graph was rebound (eg_bind, eg_clear) since eg_record_end; "
-                   "its tape holds the planes it was recorded with");
+    diff_check_launch(diff);
     diff.launched = false;
     for (std::size_t i = 0; i < graph->nodes.size(); ++i) {
         for (Snapshot& s : diff.snapshots)      // the planes node i overwrites, as the nodes before it left them
             if (s.node == i) {
                 const DLTensor& t = diff.planes[static_cast<std::size_t>(s.plane)]->tensor->dl_tensor;
-                std::memcpy(s.bytes.data(), static_cast<const char*>(t.data) + t.byte_offset, s.bytes.size() * sizeof(std::uint64_t));
+                std::memcpy(s.bytes.data(), static_cast<const char*>(t.data) + t.byte_offset, s.size);
             }
         run_node(ctx, graph->nodes[i]);
     }
-    for (GraphDiff::PlanMark& m : diff.marks) m.launches = m.plan->launches;
-    diff.launched = true;
+    diff_launched(diff);
 }
 
 void graph_free(eg_ctx& ctx, eg_graph_s* graph) {

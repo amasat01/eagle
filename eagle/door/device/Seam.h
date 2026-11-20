@@ -29,7 +29,11 @@ void device_loop_drop(eg_runner_s& runner);
 void device_sync(eg_ctx& ctx);
 void device_record_begin(eg_ctx& ctx);
 void device_record_launch(eg_ctx& ctx, eg_plan_s& plan);
-void device_record_end(eg_ctx& ctx, eg_graph** out);
+/** @brief eg_record_end on a device context; with @p diff (the tape of EG_RECORD_DIFF, planned by diff_plan over the recorded launches, which
+ *  must be all it holds) the capture is made again with the snapshot copies in front of the launches that overwrite a plane. */
+void device_record_end(eg_ctx& ctx, const eg_record_end_desc* desc, eg_graph** out);
+/** @brief The tape of device graph @p graph (null: it is a plain graph). */
+GraphDiff* device_graph_diff(eg_ctx& ctx, eg_graph* graph);
 /** @brief Record a HOST node on the capture in scope: when the graph replays, the driver's host-function launch calls
  *  @p run(@p user, failure) on a driver thread, ordered on the stream. @p run must not throw and makes no CUDA call (the
  *  driver forbids it); it stores a failure in @p failure, which the context's next ``eg_graph_launch`` or ``eg_sync``

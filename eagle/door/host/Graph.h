@@ -5,8 +5,10 @@
 #pragma once
 
 #include "eagle/door/Context.h"
+#include "eagle/door/device/Seam.h"
 #include "eagle/door/host/Ops.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <memory>
 #include <utility>
@@ -32,6 +34,21 @@ struct Node {
     std::vector<std::vector<Node>> arms;
 };
 
+/** @brief Zeroed bytes, 8-byte aligned: host memory, or (given a context) device memory freed in stream order. */
+struct Bytes {
+    std::vector<std::uint64_t> words;
+    std::shared_ptr<char> dev;
+    explicit Bytes(std::size_t n = 0, eg_ctx* on = nullptr) {
+        if (on == nullptr) {
+            words.assign((n + 7) / 8, 0);
+            return;
+        }
+        dev.reset(static_cast<char*>(device_alloc(*on, std::max<std::size_t>(n, 8))), [on](char* p) { device_free(*on, p); });
+    }
+    char* data() { return dev ? dev.get() : reinterpret_cast<char*>(words.data()); }
+    const char* data() const { return dev ? dev.get() : reinterpret_cast<const char*>(words.data()); }
+};
+
 /** @brief How a slot of a launch's vjp reads the launch (one per vjp slot that is not the sample count). */
 struct VjpLink {
     enum Kind { VALUE_PLANE, VALUE_UNIFORM, ADJOINT_IN, GRAD } kind = VALUE_PLANE;
@@ -43,6 +60,7 @@ struct VjpLink {
 
 /** @brief One launch node's accesses and its vjp. */
 struct DiffNode {
+    eg_plan_s* plan = nullptr;
     std::vector<int> reads, writes;             ///< indices in GraphDiff::planes
     eg_unit_s* vjp = nullptr;                   ///< a reference is held; null: no gradient flows through the node
     std::vector<VjpLink> links;
@@ -52,12 +70,14 @@ struct DiffNode {
 struct Snapshot {
     std::size_t node = 0;
     int plane = -1;
-    std::vector<std::uint64_t> bytes;
+    std::size_t size = 0;                       ///< bytes of the plane
+    Bytes bytes;
 };
 
 /** @brief The tape of a graph ended with EG_RECORD_DIFF. */
 struct GraphDiff {
     std::vector<eg_plane_s*> planes;            ///< every plane a launch binds, once
+    eg_ctx* dev = nullptr;                      ///< the context of a DEVICE graph (its buffers and vjps live on the device), else null
     std::vector<DiffNode> nodes;                ///< per top-level node, which are all launches
     std::vector<Snapshot> snapshots;
     bool launched = false;
@@ -72,8 +92,11 @@ struct GraphDiff {
 
 
 /** @brief The tape of a graph ended with EG_RECORD_DIFF over @p nodes (host/GraphReverse.cpp); refuses what the reverse does not cover. */
-std::unique_ptr<GraphDiff> diff_plan(eg_ctx& ctx, const std::vector<Node>& nodes, const eg_record_end_desc& desc);
+std::unique_ptr<GraphDiff> diff_plan(eg_ctx& ctx, const std::vector<eg_plan_s*>& launches, const eg_record_end_desc& desc);
 void diff_free(eg_ctx& ctx, GraphDiff& diff);
+/** @brief Refuse a launch of the graph when a plan of @p diff was rebound since eg_record_end; after a launch, @p diff_launched marks it. */
+void diff_check_launch(const GraphDiff& diff);
+void diff_launched(GraphDiff& diff);
 
 }  // namespace door
 }  // namespace eagle

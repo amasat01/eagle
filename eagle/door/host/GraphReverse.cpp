@@ -12,6 +12,7 @@
 #include "eagle/diff/Transpose.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <map>
 #include <new>
@@ -21,14 +22,6 @@ namespace eagle {
 namespace door {
 
 namespace {
-
-/** @brief Zeroed bytes, 8-byte aligned. */
-struct Bytes {
-    std::vector<std::uint64_t> words;
-    explicit Bytes(std::size_t n = 0) : words((n + 7) / 8, 0) {}
-    char* data() { return reinterpret_cast<char*>(words.data()); }
-    const char* data() const { return reinterpret_cast<const char*>(words.data()); }
-};
 
 /** @brief One adjoint of a plane: the seed (node -1) or what the vjp of node ``node`` produced. */
 struct Contribution {
@@ -99,9 +92,8 @@ std::vector<VjpLink> link_vjp(const GraphDiff& d, const DiffNode& node, const eg
                 if (!is(node.reads)) refuse(EG_BAD_REQUEST, where + ": GRAD of '" + ps.name + "', which the launch does not read");
                 k.kind = VjpLink::GRAD;
                 k.reduced = l.reduced != 0;
-                const std::int64_t want = k.reduced ? 1 : plan.n_samples;
-                if (elements(tensor(*d.planes[static_cast<std::size_t>(k.plane)])) != want)
-                    refuse(EG_BAD_REQUEST, where + ": the gradient of '" + ps.name + "' has " + std::to_string(want) + " element(s), the plane has another count");
+                if (k.reduced && elements(tensor(*d.planes[static_cast<std::size_t>(k.plane)])) != 1)
+                    refuse(EG_BAD_REQUEST, where + ": a reduced gradient is the sum over samples into a one-element plane; '" + ps.name + "' is not one");
             }
         }
         out.push_back(k);
@@ -112,8 +104,16 @@ std::vector<VjpLink> link_vjp(const GraphDiff& d, const DiffNode& node, const eg
     return out;
 }
 
-/** @brief dst = ((src[0] + src[1]) + ...) over @p count elements of @p es bytes, in the order of @p src. */
-Bytes ordered_sum(const std::vector<Contribution>& src, std::size_t count, std::size_t es) {
+/** @brief ((src[0] + src[1]) + ...) over @p count elements of @p es bytes, in the order of @p src, on the host or queued on @p dev. */
+Bytes ordered_sum(eg_ctx* dev, std::vector<Contribution>& src, std::size_t count, std::size_t es) {
+    if (dev != nullptr) {
+        Bytes out(count * es, dev);
+        copy_bytes(dev, out.data(), src.front().bytes.data(), count * es);
+        for (std::size_t k = 1; k < src.size(); ++k)
+            device_columns(*dev, 1, out.data(), static_cast<std::int64_t>(count), src[k].bytes.data(), static_cast<std::int64_t>(count), nullptr,
+                           static_cast<std::int64_t>(count), 1, static_cast<unsigned>(es), 0);
+        return out;
+    }
     Bytes out(count * es);
     const auto go = [&](auto tag) {
         using T = decltype(tag);
@@ -127,9 +127,19 @@ Bytes ordered_sum(const std::vector<Contribution>& src, std::size_t count, std::
 }
 
 /** @brief The sum over the first @p count samples of @p x, a compensated pair in sample order, as a one-element plane. */
-Bytes sum_over_samples(const Bytes& x, std::int64_t count, std::size_t es, int threads) {
-    Bytes out(es);
-    if (es == 8) {
+Bytes sum_over_samples(eg_ctx* dev, const Bytes& x, std::int64_t count, std::size_t es, int threads) {
+    Bytes out(es, dev);
+    if (dev != nullptr) {
+        Bytes pair(2 * es, dev);
+        device_pair_sum(*dev, es == 8, x.data(), count, pair.data(), pair.data() + es);
+        double hd[2];
+        float hf[2];
+        device_read(*dev, pair.data(), es == 8 ? static_cast<void*>(hd) : static_cast<void*>(hf), 2 * es);
+        const double h = es == 8 ? hd[0] : hf[0], c = es == 8 ? hd[1] : hf[1];
+        const double v = std::isfinite(h) ? h + c : h;    // the value of the compensated pair
+        const float vf = static_cast<float>(v);
+        device_write(*dev, out.data(), es == 8 ? static_cast<const void*>(&v) : static_cast<const void*>(&vf), es);
+    } else if (es == 8) {
         const double v = sample_sum(reinterpret_cast<const double*>(x.data()), count, threads);
         std::memcpy(out.data(), &v, es);
     } else {
@@ -141,20 +151,21 @@ Bytes sum_over_samples(const Bytes& x, std::int64_t count, std::size_t es, int t
 
 }  // namespace
 
-std::unique_ptr<GraphDiff> diff_plan(eg_ctx& ctx, const std::vector<Node>& nodes, const eg_record_end_desc& desc) {
+std::unique_ptr<GraphDiff> diff_plan(eg_ctx& ctx, const std::vector<eg_plan_s*>& launches, const eg_record_end_desc& desc) {
     if (desc.n_vjps < 0 || (desc.n_vjps > 0 && desc.vjps == nullptr)) refuse(EG_BAD_REQUEST, "eg_record_end_desc.n_vjps without vjps");
     auto diff = std::make_unique<GraphDiff>();
-    diff->nodes.resize(nodes.size());
+    diff->nodes.resize(launches.size());
+    const bool device = !launches.empty() && launches.front()->structure == EG_STRUCTURE_DEVICE;
+    if (device) diff->dev = &ctx;
     try {
         std::vector<std::string> first_user;       // per plane: who named it first, for the overlap reason
-        for (std::size_t i = 0; i < nodes.size(); ++i) {
-            const Node& nd = nodes[i];
+        for (std::size_t i = 0; i < launches.size(); ++i) {
+            const eg_plan_s& plan = *launches[i];
             const std::string at = "eg_record_end: launch " + std::to_string(i);
-            if (nd.kind != Node::Launch)
-                refuse(EG_NOT_WRITTEN, "eg_record_end: recorded node " + std::to_string(i) + " is not an eg_launch; EG_RECORD_DIFF records plain launches only");
-            const eg_plan_s& plan = *nd.plan;
+            diff->nodes[i].plan = launches[i];
             check_plain_unit(*plan.unit, at);
-            if (plan.structure == EG_STRUCTURE_DEVICE) refuse(EG_NOT_WRITTEN, at + ": a DEVICE plan is not written in EG_RECORD_DIFF");
+            if ((plan.structure == EG_STRUCTURE_DEVICE) != device)
+                refuse(EG_NOT_WRITTEN, at + ": host and DEVICE plans in one EG_RECORD_DIFF graph are not written");
             std::map<int, std::string> named;       // plane -> the slot of this node that names it
             for (std::size_t s = 0; s < plan.bindings.size(); ++s) {
                 const SlotFacts& sf = plan.unit->slots[s];
@@ -168,7 +179,6 @@ std::unique_ptr<GraphDiff> diff_plan(eg_ctx& ctx, const std::vector<Node>& nodes
                     first_user.push_back("launch " + std::to_string(i) + " slot '" + sf.name + "'");
                     idx = static_cast<int>(diff->planes.size()) - 1;
                     host::check_access(*p, writes, (at + " slot '" + sf.name + "'").c_str());
-                    if (tensor(*p).ndim != 1) refuse(EG_NOT_WRITTEN, at + " slot '" + sf.name + "': a plane of rank " + std::to_string(tensor(*p).ndim) + " is not written in EG_RECORD_DIFF");
                 }
                 if (!named.emplace(idx, sf.name).second)
                     refuse(EG_BAD_REQUEST, at + ": slots '" + named[idx] + "' and '" + sf.name + "' name one plane");
@@ -182,11 +192,11 @@ std::unique_ptr<GraphDiff> diff_plan(eg_ctx& ctx, const std::vector<Node>& nodes
         for (std::int32_t k = 0; k < desc.n_vjps; ++k) {
             const eg_node_vjp v = desc.vjps[k];
             const std::string at = "eg_record_end_desc.vjps[" + std::to_string(k) + "]";
-            if (v.launch < 0 || static_cast<std::size_t>(v.launch) >= nodes.size()) refuse(EG_BAD_REQUEST, at + ".launch " + std::to_string(v.launch) + " is out of range");
+            if (v.launch < 0 || static_cast<std::size_t>(v.launch) >= launches.size()) refuse(EG_BAD_REQUEST, at + ".launch " + std::to_string(v.launch) + " is out of range");
             DiffNode& node = diff->nodes[static_cast<std::size_t>(v.launch)];
             if (node.vjp != nullptr) refuse(EG_BAD_REQUEST, at + ".launch " + std::to_string(v.launch) + " is given twice");
             check_handle(ctx.units, v.vjp, (at + ".vjp").c_str());
-            node.links = link_vjp(*diff, node, *nodes[static_cast<std::size_t>(v.launch)].plan, *v.vjp, at);
+            node.links = link_vjp(*diff, node, *launches[static_cast<std::size_t>(v.launch)], *v.vjp, at);
             node.vjp = v.vjp;
             ++v.vjp->refs;
         }
@@ -202,16 +212,17 @@ std::unique_ptr<GraphDiff> diff_plan(eg_ctx& ctx, const std::vector<Node>& nodes
             Snapshot snap;
             snap.node = static_cast<std::size_t>(s.node);
             snap.plane = std::stoi(s.plane);
+            snap.size = byte_count(*diff->planes[static_cast<std::size_t>(snap.plane)]);
             try {
-                snap.bytes.assign((byte_count(*diff->planes[static_cast<std::size_t>(snap.plane)]) + 7) / 8, 0);
-            } catch (const std::bad_alloc&) {
+                snap.bytes = Bytes(snap.size, diff->dev);
+            } catch (const std::exception&) {
                 refuse(EG_FAULT, "eg_record_end: no memory for the copy of a plane before launch " + std::to_string(snap.node));
             }
             diff->snapshots.push_back(std::move(snap));
         }
-        for (const Node& nd : nodes) {
-            const auto same = [&](const GraphDiff::PlanMark& m) { return m.plan == nd.plan; };
-            if (std::none_of(diff->marks.begin(), diff->marks.end(), same)) diff->marks.push_back({ nd.plan, nd.plan->binds, nd.plan->launches });
+        for (eg_plan_s* plan : launches) {
+            const auto same = [&](const GraphDiff::PlanMark& m) { return m.plan == plan; };
+            if (std::none_of(diff->marks.begin(), diff->marks.end(), same)) diff->marks.push_back({ plan, plan->binds, plan->launches });
         }
     } catch (...) {
         diff_free(ctx, *diff);
@@ -228,11 +239,30 @@ void diff_free(eg_ctx& ctx, GraphDiff& diff) {
     diff.nodes.clear();
 }
 
+void diff_check_launch(const GraphDiff& diff) {
+    for (const GraphDiff::PlanMark& m : diff.marks)
+        if (m.plan->binds != m.binds)
+            refuse(EG_BAD_REQUEST, "eg_graph_launch: a plan of this EG_RECORD_DIFF graph was rebound (eg_bind, eg_clear) since eg_record_end; "
+                   "its tape holds the planes it was recorded with");
+}
+
+void diff_launched(GraphDiff& diff) {
+    for (GraphDiff::PlanMark& m : diff.marks) m.launches = m.plan->launches;
+    diff.launched = true;
+}
+
 void graph_reverse(eg_ctx& ctx, eg_graph_s* graph, const eg_graph_reverse_desc* desc) {
     if (ctx.rec != nullptr || ctx.dev_rec != nullptr) refuse(EG_BAD_REQUEST, "eg_graph_reverse while recording (eg_record_begin .. eg_record_end)");
-    check_handle(ctx.graphs, graph, "graph");
-    if (graph->diff == nullptr) refuse(EG_BAD_REQUEST, "eg_graph_reverse: the graph was not ended with EG_RECORD_DIFF");
-    GraphDiff& d = *graph->diff;
+    GraphDiff* tape = nullptr;
+    if (device_graph(ctx, graph)) {
+        tape = device_graph_diff(ctx, graph);
+    } else {
+        check_handle(ctx.graphs, graph, "graph");
+        tape = graph->diff.get();
+    }
+    if (tape == nullptr) refuse(EG_BAD_REQUEST, "eg_graph_reverse: the graph was not ended with EG_RECORD_DIFF");
+    GraphDiff& d = *tape;
+    eg_ctx* const D = d.dev;       // a DEVICE graph: its buffers, vjp launches and sums are queued on the context's stream
     if (!d.launched) refuse(EG_BAD_REQUEST, "eg_graph_reverse: the graph was never launched (eg_graph_launch)");
     for (const GraphDiff::PlanMark& m : d.marks) {
         if (m.plan->binds != m.binds)
@@ -253,6 +283,8 @@ void graph_reverse(eg_ctx& ctx, eg_graph_s* graph, const eg_graph_reverse_desc* 
         const int idx = find_plane(d, given);
         if (idx < 0) refuse(EG_BAD_REQUEST, at + " is no plane of the graph");
         host::check_access(*given, write, at.c_str());
+        if (tensor(*given).device.device_type != (D != nullptr ? kDLCUDA : kDLCPU))
+            refuse(EG_BAD_REQUEST, at + (D != nullptr ? ": a device graph takes device planes" : ": a host graph takes host planes"));
         return idx;
     };
     const auto same_shape = [&](const eg_plane_s& a, const eg_plane_s& b, const std::string& at) {
@@ -271,8 +303,8 @@ void graph_reverse(eg_ctx& ctx, eg_graph_s* graph, const eg_graph_reverse_desc* 
         if (!pending[static_cast<std::size_t>(p)].empty()) refuse(EG_BAD_REQUEST, "eg_graph_reverse_desc.outputs[" + std::to_string(k) + "] is given twice");
         same_shape(*d.planes[static_cast<std::size_t>(p)], *r.seeds[k], "eg_graph_reverse_desc.seeds[" + std::to_string(k) + "]");
         Contribution seed;
-        seed.bytes = Bytes(byte_count(*r.seeds[k]));
-        std::memcpy(seed.bytes.data(), live(*r.seeds[k]), byte_count(*r.seeds[k]));
+        seed.bytes = Bytes(byte_count(*r.seeds[k]), D);
+        copy_bytes(D, seed.bytes.data(), live(*r.seeds[k]), byte_count(*r.seeds[k]));
         pending[static_cast<std::size_t>(p)].push_back(std::move(seed));
     }
     std::vector<char> input(d.planes.size(), 0), seen(d.planes.size(), 0);
@@ -299,16 +331,16 @@ void graph_reverse(eg_ctx& ctx, eg_graph_s* graph, const eg_graph_reverse_desc* 
         pending[static_cast<std::size_t>(p)].clear();
         const eg_plane_s& plane = *d.planes[static_cast<std::size_t>(p)];
         any = !src.empty();
-        if (!any) return Bytes(byte_count(plane));
+        if (!any) return Bytes(byte_count(plane), D);
         std::stable_sort(src.begin(), src.end(), [](const Contribution& a, const Contribution& b) { return a.node < b.node; });
         if (src.size() == 1) return std::move(src.front().bytes);
-        return ordered_sum(src, static_cast<std::size_t>(elements(tensor(plane))), element_bytes(plane));
+        return ordered_sum(D, src, static_cast<std::size_t>(elements(tensor(plane))), element_bytes(plane));
     };
     const int threads = host::team_threads(ctx);
     for (std::size_t back = 0; back < n_nodes; ++back) {
         const std::size_t i = n_nodes - 1 - back;
         const DiffNode& node = d.nodes[i];
-        const eg_plan_s& primal = *graph->nodes[i].plan;
+        const eg_plan_s& primal = *node.plan;
         std::vector<Bytes> adjoint;
         bool flows = false;
         for (int w : node.writes) {
@@ -345,12 +377,13 @@ void graph_reverse(eg_ctx& ctx, eg_graph_s* graph, const eg_graph_reverse_desc* 
                     const std::vector<int>& w = node.writes;
                     data = adjoint[static_cast<std::size_t>(std::find(w.begin(), w.end(), l.plane) - w.begin())].data();
                 } else {
-                    grads[k] = Bytes(n * element_bytes(plane));
+                    grads[k] = Bytes(l.reduced ? n * element_bytes(plane) : byte_count(plane), D);
                     data = grads[k].data();
                 }
-                bind_raw(*vp, l.slot, data, l.kind == VjpLink::GRAD ? n : static_cast<std::uint64_t>(elements(tensor(plane))));
+                bind_raw(*vp, l.slot, data, l.kind == VjpLink::GRAD && l.reduced ? n : bound_count(*vp, l.slot, tensor(plane)));
             }
-            host::run_plan(*vp, threads);
+            if (D != nullptr) device_launch_prefix(*vp, primal.n_samples, primal.n_samples);
+            else host::run_plan(*vp, threads);
         } catch (...) {
             inner_free(ctx, vp);
             throw;
@@ -362,15 +395,16 @@ void graph_reverse(eg_ctx& ctx, eg_graph_s* graph, const eg_graph_reverse_desc* 
             const eg_plane_s& plane = *d.planes[static_cast<std::size_t>(l.plane)];
             Contribution c;
             c.node = static_cast<int>(i);
-            c.bytes = l.reduced ? sum_over_samples(grads[k], primal.n_samples, element_bytes(plane), threads) : std::move(grads[k]);
+            c.bytes = l.reduced ? sum_over_samples(D, grads[k], primal.n_samples, element_bytes(plane), threads) : std::move(grads[k]);
             pending[static_cast<std::size_t>(l.plane)].push_back(std::move(c));
         }
     }
     for (std::int32_t k = 0; k < r.n_grads; ++k) {
         bool any = false;
-        const Bytes g = collect(wanted[static_cast<std::size_t>(k)], any);
-        std::memcpy(live(*r.grads[k]), g.data(), byte_count(*r.grads[k]));
+        Bytes g = collect(wanted[static_cast<std::size_t>(k)], any);
+        copy_bytes(D, live(*r.grads[k]), g.data(), byte_count(*r.grads[k]));
     }
+    if (D != nullptr) device_sync(ctx);     // the gradients land before eg_graph_reverse returns
 }
 
 }  // namespace door
