@@ -223,7 +223,7 @@ struct eg_unit_stage {
 /** One unit of the library. */
 struct eg_unit_meta {
     uint32_t struct_size;
-    uint32_t flags;                     /**< EG_UNIT_CALLER_CARDS (eg_unit_meta.h); other bits are refused */
+    uint32_t flags;                     /**< EG_UNIT_CALLER_CARDS, EG_UNIT_CHECKED (eg_unit_meta.h); other bits are refused */
     const char* name;
     uint8_t digest[EG_DIGEST_BYTES];
     int32_t pattern;                    /**< enum of the typed-meta design */
@@ -248,6 +248,10 @@ struct eg_unit_meta {
                                              whose PTX is newer than the driver takes */
     int32_t reserved1;
     const struct eg_unit_gemm* gemm;    /**< NULL: none; the matrix products a DEVICE plan runs instead of a kernel (eg_unit_meta.h) */
+    /* appended: read only with EG_UNIT_CHECKED in ``flags`` */
+    int32_t fault_slot;                 /**< CHECKED UNIT (EG_UNIT_CHECKED): the SHARED int64 LOOKUP slot of 2 cells (slot ordinal, index) the unit's
+                                             generated checks claim (see ``eg_unit_load``); ignored without the flag */
+    int32_t reserved2;
 };
 
 /** The top of the tree: what ``eg_unit_library_meta`` returns. */
@@ -485,6 +489,7 @@ struct eg_runner_figures {
 /** Entry flags. */
 #define EG_ENTRY_DEVICE (1u << 0)  /**< the plan has a device function: its figures are set */
 #define EG_ENTRY_PERSIST (1u << 1) /**< the image has a persist entry: ``persist_*`` are set */
+#define EG_ENTRY_CHECKED (1u << 3) /**< the plan's unit is checked (``eg_unit_meta.fault_slot``): its launches, replays and runs read the fault cell back */
 #define EG_ENTRY_GEMM (1u << 2)    /**< a gemm unit the door routes: ``eg_launch`` queues its cuBLAS products, not the
                                         device function (EG_ENTRY_DEVICE is clear and every figure 0). Set only for
                                         a DEVICE plan of one partition with no index or active set, cells or
@@ -658,6 +663,17 @@ eg_status eg_host_threads(eg_ctx* ctx, int32_t threads);
  * build lacks); FAULT (the library does not load, or lacks the symbol).
  * A library at a path this process loaded before is read again when the file there is another file (device and
  * inode); the same file loaded twice is one library.
+ * CHECKED UNITS. Checked is a build fact of the unit, not a context setting: a unit built with the checks of its generated code states
+ * ``eg_unit_meta.fault_slot`` with the flag EG_UNIT_CHECKED, a SHARED int64 LOOKUP of 2 cells (slot ordinal, index); a unit built without them
+ * has no flag, its ``fault_slot`` is not read, and it costs nothing. A ``fault_slot`` that names no slot, is not such a LOOKUP, or is a slot another record of the unit owns is refused
+ * BAD_REQUEST at load; a caller that binds a plane there is refused BAD_REQUEST by name (the door makes the cells, one pair per plan, zero cost
+ * to the caller). The door sets both cells to -1 before each ``eg_launch``, graph replay and ``eg_run`` (not each inner launch of a run: the
+ * first violation wins) and reads them after, on a device after the work queued on the stream. A violating lane claims cell 0 with one atomic
+ * compare-and-swap from -1 to its slot ordinal and only the winner writes cell 1 (the offending index), so the pair always describes one
+ * violation; which violation is reported when several lanes violate is unspecified. The door reads cell 1 only when cell 0 is not -1, and then
+ * the call returns FAULT "unit 'u': slot k ('name'): index i outside its N elements" (N: the slot's plane length); a replay or run stops
+ * there. The next launch starts from cleared cells. So that a generated check has its slot's length in scope, the handle of an ACCUM_OUT slot of a
+ * checked unit bound to a one-dimensional plane states that plane's length (an unchecked unit's states the sample count, as before). ``eg_plan_entry_figures`` reports EG_ENTRY_CHECKED for a plan of a checked unit.
  */
 eg_status eg_unit_load(eg_ctx* ctx, const struct eg_unit_load_desc* desc, eg_unit** out);
 

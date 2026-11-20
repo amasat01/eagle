@@ -10,6 +10,9 @@
  *    address).
  *  - "wait": the same slots; its entry marks y[1] = 1 on entry and returns
  *    once the test sets y[0] (or after a few seconds): it holds a context for a call to queue behind.
+ *  - "scat", "scatp": acc[idx[i]] += val[i] * tbl[jdx[i]] with a data-indexed ACCUM_OUT write (acc) and table read (tbl of 8 cells); "scat" is the CHECKED build
+ *    (fault_slot 5, the checks written as the lowering emits them: an index outside its slot's length claims the cell with one atomic CAS and skips the
+ *    lane), "scatp" the same unit built unchecked; "scat_badshape", "scat_badrole", "scat_badslot" state a fault_slot that is no 2-cell int64 LOOKUP.
  *  - "tick": adds 1 to its one LOOKUP cell (a plain, non-atomic increment): exact only when launches never overlap.
  *  - "spans": logs the (base, count) of each non-empty serial call into fixture_spans, counted by fixture_span_n.
  *  - "mix2": count1 over two AUTO dispatch groups (k 2 and 3) whose mix counters the entry fills: group a counts the live samples
@@ -96,6 +99,8 @@ struct fixture_mirror {
 EG_FIXTURE_EXPORT void axpb_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void wait_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void tick_host(void* const* params, int64_t base, int64_t count, int64_t n);
+EG_FIXTURE_EXPORT void scat_host(void* const* params, int64_t base, int64_t count, int64_t n);
+EG_FIXTURE_EXPORT void scatp_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void spans_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void mix2_host(void* const* params, int64_t base, int64_t count, int64_t n);
 EG_FIXTURE_EXPORT void widesum_host(void* const* params, int64_t base, int64_t count, int64_t n);
@@ -202,6 +207,26 @@ void wait_host(void* const* params, int64_t base, int64_t count, int64_t n) {
         if (t.tv_sec - t0.tv_sec > 10) return;
     }
 }
+
+/* The write contract of the fault cell: claim cell 0 (the violated slot) with one atomic compare-and-swap from -1, and only the winner writes the index. */
+static void scat_claim(int64_t* cell, int64_t slot, int64_t index) {
+    int64_t unclaimed = -1;
+    if (__atomic_compare_exchange_n(&cell[0], &unclaimed, slot, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) __atomic_store_n(&cell[1], index, __ATOMIC_RELEASE);
+}
+
+/* acc[idx[i]] += val[i] * tbl[jdx[i]]; with CHECKED, an index outside the slot's plane skips the lane and is recorded as the lowering will emit it. */
+#define SCAT_BODY(CHECKED)                                                                                                      \
+    const struct fixture_handle *idx = params[0], *jdx = params[1], *val = params[2], *acc = params[3], *tbl = params[4];       \
+    (void)n;                                                                                                                    \
+    for (int64_t i = base; i < base + count; ++i) {                                                                             \
+        const int64_t k = ((const int32_t*)idx->data)[i], j = ((const int32_t*)jdx->data)[i];                                   \
+        if (CHECKED && (k < 0 || k >= (int64_t)acc->samples)) { scat_claim((int64_t*)((const struct fixture_handle*)params[5])->data, 3, k); continue; } \
+        if (CHECKED && (j < 0 || j >= (int64_t)tbl->samples)) { scat_claim((int64_t*)((const struct fixture_handle*)params[5])->data, 4, j); continue; } \
+        ((double*)acc->data)[k] += ((const double*)val->data)[i] * ((const double*)tbl->data)[j];                               \
+    }
+
+void scat_host(void* const* params, int64_t base, int64_t count, int64_t n) { SCAT_BODY(1) }
+void scatp_host(void* const* params, int64_t base, int64_t count, int64_t n) { SCAT_BODY(0) }
 
 void tick_host(void* const* params, int64_t base, int64_t count, int64_t n) {
     (void)base;
@@ -670,7 +695,7 @@ static const struct eg_unit_meta unit_axpb_cards = {
 
 static const struct eg_unit_meta unit_axpb_badflag = {
     .struct_size = sizeof(struct eg_unit_meta),
-    .flags = 1u << 1,
+    .flags = 1u << 2,
     .name = "axpb_badflag",
     .digest = DIGEST(0xD5),
     .pattern = EG_PATTERN_PURE,
@@ -1283,6 +1308,27 @@ static const struct eg_unit_meta unit_actrow = {
     .scalar_type = EG_SCALAR_FLOAT64, .host_entry = "actrow_host", .device_image_format = EG_IMAGE_NONE,
     .body = &actrow_body, .launch = &launch_actrow };
 
+static const int64_t scat_tbl_shape[] = { 8 }, scat_fault_shape[] = { 2 };
+SLOT_OF(slot_sidx, EG_ROLE_PER_SAMPLE, EG_DTYPE_INT32, "idx");
+SLOT_OF(slot_sjdx, EG_ROLE_PER_SAMPLE, EG_DTYPE_INT32, "jdx");
+SLOT(slot_sval, EG_ROLE_PER_SAMPLE, "val");
+SLOT(slot_sacc, EG_ROLE_ACCUM_OUT, "acc");
+static const struct eg_unit_slot slot_stbl = { .struct_size = sizeof(struct eg_unit_slot), .flags = EG_SLOT_SHARED, .role = EG_ROLE_LOOKUP, .dtype = EG_DTYPE_REAL,
+                                              .rank = 1, .like_slot = -1, .shape = scat_tbl_shape, .name = "tbl" };
+static const struct eg_unit_slot slot_sfault = { .struct_size = sizeof(struct eg_unit_slot), .flags = EG_SLOT_SHARED, .role = EG_ROLE_LOOKUP, .dtype = EG_DTYPE_INT64,
+                                                .rank = 1, .like_slot = -1, .shape = scat_fault_shape, .name = "fault" };
+static const struct eg_unit_slot* const scat_slots[] = { &slot_sidx, &slot_sjdx, &slot_sval, &slot_sacc, &slot_stbl, &slot_sfault };
+static const struct eg_unit_body scat_body = { .struct_size = sizeof(struct eg_unit_body), .access = EG_ACCESS_SAMPLE_LOCAL, .n_slots = 6, .slots = scat_slots };
+static const struct eg_unit_body scatp_body = { .struct_size = sizeof(struct eg_unit_body), .access = EG_ACCESS_SAMPLE_LOCAL, .n_slots = 5, .slots = scat_slots };
+#define SCAT_UNIT(var, name_, byte, entry_, body_, checked_, fault_)                                                                                       \
+    static const struct eg_unit_meta var = { .struct_size = sizeof(struct eg_unit_meta), .name = name_, .digest = DIGEST(byte), .pattern = EG_PATTERN_PURE, \
+        .scalar_type = EG_SCALAR_FLOAT64, .host_entry = entry_, .device_image_format = EG_IMAGE_NONE, .body = &body_, .launch = &launch, .flags = checked_ ? EG_UNIT_CHECKED : 0u, .fault_slot = fault_ }
+SCAT_UNIT(unit_scat, "scat", 0x71, "scat_host", scat_body, 1, 5);
+SCAT_UNIT(unit_scatp, "scatp", 0x72, "scatp_host", scatp_body, 0, 0);
+SCAT_UNIT(unit_scat_badshape, "scat_badshape", 0x73, "scat_host", scat_body, 1, 4);
+SCAT_UNIT(unit_scat_badrole, "scat_badrole", 0x74, "scat_host", scat_body, 1, 2);
+SCAT_UNIT(unit_scat_badslot, "scat_badslot", 0x75, "scat_host", scat_body, 1, 9);
+
 static const struct eg_unit_meta* const units[] = { &unit_axpb, &unit_wait, &unit_tick, &unit_spans, &unit_prefixsum, &unit_widesum, &unit_mix2, &unit_split, &unit_count1,
                                                     &unit_count3, &unit_count1a, &unit_count3a, &unit_countA, &unit_countAa, &unit_vecs, &unit_count1i,
                                                     &unit_count1ia, &unit_count1e, &unit_lanes, &unit_prefix, &unit_count1g, &unit_widemul,
@@ -1291,7 +1337,8 @@ static const struct eg_unit_meta* const units[] = { &unit_axpb, &unit_wait, &uni
                                                     &unit_sg_cls, &unit_sg_k0, &unit_sg_k1, &unit_sgf, &unit_dg_k0, &unit_dg_k1, &unit_dg_sweep, &unit_dgf,
                                                     &unit_sga_cls, &unit_sga_k0, &unit_sga_k1, &unit_sga_rare, &unit_sga_even, &unit_sga_scalar, &unit_sga_heavy,
                                                     &unit_auto_nocls, &unit_auto_nobr, &unit_auto_sweep, &unit_auto_nocost, &unit_auto_group, &unit_auto_steps, &unit_auto_k3,
-                                                    &unit_vecw, &unit_vecr, &unit_vecsplit, &unit_actrow, &unit_gathl, &unit_gathls };
+                                                    &unit_vecw, &unit_vecr, &unit_vecsplit, &unit_actrow, &unit_gathl, &unit_gathls, &unit_scat, &unit_scatp,
+                                                    &unit_scat_badshape, &unit_scat_badrole, &unit_scat_badslot };
 
 static const struct eg_library_meta library = {
     .struct_size = sizeof(struct eg_library_meta),

@@ -321,11 +321,13 @@ EG_EXPORT eg_status eg_runner_reset(eg_ctx* ctx, eg_runner* runner) {
 EG_EXPORT eg_status eg_run(eg_ctx* ctx, eg_runner* runner, struct eg_run_report* report) {
     return door::call(ctx, [&](eg_ctx& c) {
         door::check_handle(c.runners, runner, "runner");
+        door::fault_reset(c, *runner);
         if (runner->look != nullptr) door::look_run(c, runner, report);
         else if (runner->dev.ctx != nullptr) door::device_run(c, runner, report);
         else {
             door::run(c, runner, report);
         }
+        door::fault_check(c, *runner);
     });
 }
 

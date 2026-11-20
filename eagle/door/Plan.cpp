@@ -296,6 +296,9 @@ void check_bind(const eg_ctx& ctx, const eg_plan_s& plan, const eg_bind_desc& d)
         if (slot == plan.unit->finish.counter_slot)
             refuse(EG_BAD_REQUEST, "slot " + std::to_string(slot) + " ('" + s.name +
                    "') is the finished counter: eagle makes it, do not pass it");
+        if (slot == plan.unit->fault_slot)
+            refuse(EG_BAD_REQUEST, "slot " + std::to_string(slot) + " ('" + s.name +
+                   "') is the fault cell of a checked unit: eagle makes it, do not pass it");
         if (s.role == EG_ROLE_NSAMPLES)
             refuse(EG_BAD_REQUEST, "slot " + std::to_string(slot) + " ('" + s.name +
                    "') is the sample count: eagle passes it, do not bind it");
@@ -504,6 +507,10 @@ void plan_new(eg_ctx& ctx, const eg_plan_desc* desc, eg_plan** out) {
                 b.bound = true;
                 plan->params[i] = b.value;
             }
+        if (d.unit->fault_slot >= 0) {    // a checked unit: the cells its generated checks claim
+            plan->fault = make_plane(ctx, DLDataType{ kDLInt, 64, 1 }, { 2 }, device);
+            bind_handle(*plan, d.unit->fault_slot, plan->fault->tensor->dl_tensor.data, 2);
+        }
         if (d.unit->finish.present && d.unit->finish.steps_slot >= 0)    // the steps word of an AUTO unit
             bind_handle(*plan, d.unit->finish.steps_slot, steps_cell(*plan), 1);
         if (!d.unit->cells.empty()) {    // the rows of every cell component, zeroed
@@ -664,6 +671,7 @@ void plan_free(eg_ctx& ctx, eg_plan_s* plan) {
     ctx.plans.erase(plan);
     for (eg_plan_s::Binding& b : plan->bindings)
         if (b.plane != nullptr) plane_release(ctx, b.plane);
+    if (plan->fault != nullptr) plane_release(ctx, plan->fault);
     for (eg_plane_s* r : plan->work) plane_release(ctx, r);
     for (eg_plane_s* r : plan->rows) plane_release(ctx, r);
     for (eg_plane_s* r : plan->team) if (r != nullptr) plane_release(ctx, r);
@@ -802,6 +810,7 @@ void plan_entry_figures(eg_ctx& ctx, const eg_plan_s* plan, eg_entry_figures* ou
         f.shared_bytes = u.shared_bytes;
         f.const_bytes = u.const_bytes;
     }
+    if (u.fault_slot >= 0) f.flags |= EG_ENTRY_CHECKED;
     write_output(out, f, "eg_entry_figures");
 }
 
@@ -863,6 +872,7 @@ std::uint64_t bound_count(const eg_plan_s& plan, int slot, const DLTensor& t) {
     const SlotFacts& sf = plan.unit->slots[static_cast<std::size_t>(slot)];
     if (sf.mirror) return static_cast<std::uint64_t>(sf.gathered ? t.shape[t.ndim - 1] : plan.n_samples);
     if (sf.role == EG_ROLE_LOOKUP) return static_cast<std::uint64_t>(elements(t));
+    if (sf.role == EG_ROLE_ACCUM_OUT && plan.unit->fault_slot >= 0 && t.ndim == 1) return static_cast<std::uint64_t>(t.shape[0]);    // a checked unit's check needs the plane's length in the handle
     if (sf.keys_of >= 0) return static_cast<std::uint64_t>(key_count(*plan.unit, plan.unit->keyed[static_cast<std::size_t>(sf.keys_of)], plan.n_samples));
     return static_cast<std::uint64_t>(wide(sf) ? t.shape[t.ndim - 1] : plan.n_samples);
 }
@@ -929,7 +939,9 @@ void launch(eg_ctx& ctx, eg_plan_s* plan, std::uint64_t* tiles) {
             if (tiles != nullptr) *tiles = 0;
             return;
         }
+        fault_reset(ctx, *plan);
         device_launch_call(*plan);
+        fault_check(ctx, *plan);
         if (tiles != nullptr) *tiles = 0;
         return;
     }
@@ -938,7 +950,9 @@ void launch(eg_ctx& ctx, eg_plan_s* plan, std::uint64_t* tiles) {
         return;
     }
     plan->finished = 0;    // an eg_launch counts the samples it finishes: eg_plan_counters reads this launch's count
+    fault_reset(ctx, *plan);
     const std::uint64_t run = host::run_plan(*plan, host::team_threads(ctx));
+    fault_check(ctx, *plan);
     if (tiles != nullptr) *tiles = run;
 }
 

@@ -318,13 +318,32 @@ AUTO_SET(even, 0x95);
 AUTO_SET(scalar, 0x96);
 AUTO_SET(heavy, 0x97);
 
+/* dscat / dscatp: the checked and unchecked builds of one data-indexed accumulate (slots idx, jdx, val, acc, tbl, fault; see fixture_device.cu). */
+static const int64_t scat_tbl_shape[] = { 8 }, scat_fault_shape[] = { 2 };
+SLOT(slot_sidx, EG_ROLE_PER_SAMPLE, EG_DTYPE_INT32, 0, NULL, "idx");
+SLOT(slot_sjdx, EG_ROLE_PER_SAMPLE, EG_DTYPE_INT32, 0, NULL, "jdx");
+SLOT(slot_sval, EG_ROLE_PER_SAMPLE, EG_DTYPE_REAL, 0, NULL, "val");
+SLOT(slot_sacc, EG_ROLE_ACCUM_OUT, EG_DTYPE_REAL, 0, NULL, "acc");
+static const struct eg_unit_slot slot_stbl = { .struct_size = sizeof(struct eg_unit_slot), .flags = EG_SLOT_SHARED, .role = EG_ROLE_LOOKUP, .dtype = EG_DTYPE_REAL,
+                                               .rank = 1, .like_slot = -1, .shape = scat_tbl_shape, .name = "tbl" };
+static const struct eg_unit_slot slot_sfault = { .struct_size = sizeof(struct eg_unit_slot), .flags = EG_SLOT_SHARED, .role = EG_ROLE_LOOKUP, .dtype = EG_DTYPE_INT64,
+                                                 .rank = 1, .like_slot = -1, .shape = scat_fault_shape, .name = "fault" };
+static const struct eg_unit_slot* const scat_slots[] = { &slot_sidx, &slot_sjdx, &slot_sval, &slot_sacc, &slot_stbl, &slot_sfault };
+static const struct eg_unit_body scat_body = { .struct_size = sizeof(struct eg_unit_body), .access = EG_ACCESS_SAMPLE_LOCAL, .n_slots = 6, .slots = scat_slots };
+static const struct eg_unit_body scatp_body = { .struct_size = sizeof(struct eg_unit_body), .access = EG_ACCESS_SAMPLE_LOCAL, .n_slots = 5, .slots = scat_slots };
+MADE_UNIT(unit_dscatp, "dscatp", 0xF2, "dscatp", scatp_body, launch_any);
+static const struct eg_unit_meta unit_dscat = {
+    .struct_size = sizeof(struct eg_unit_meta), .flags = EG_UNIT_CHECKED, .name = "dscat", .digest = DIGEST(0xF1), .pattern = EG_PATTERN_PURE,
+    .scalar_type = EG_SCALAR_FLOAT64, .device_image = "fixture__image", .device_function = "dscat", .device_image_format = EG_IMAGE_FATBIN, .body = &scat_body,
+    .launch = &launch_any, .device_image_size = "fixture__image_size", .fault_slot = 5 };
+
 static const struct eg_unit_meta* const units[] = { &unit_axpy, &unit_axpy64, &unit_boxdev, &unit_banded, &unit_nofn,
                                                     &unit_noimg, &unit_dcells, &unit_dkeyed, &unit_dkeyednf, &unit_dkeyedh, &unit_fat129, &unit_ptx129, &unit_sass70, &unit_dprefix, &unit_dprefixsum, &unit_dcount, &unit_dcount1, &unit_dcount1a, &unit_dauto, &unit_dautorange, &unit_dlookup,
                                                     &unit_sg_cls, &unit_sg_k0, &unit_sg_k1, &unit_sgf, &unit_dg_k0, &unit_dg_k1, &unit_dg_sweep, &unit_dgf,
-                                                    &unit_sga_cls, &unit_sga_k0, &unit_sga_k1, &unit_sga_rare, &unit_sga_even, &unit_sga_scalar, &unit_sga_heavy };
+                                                    &unit_sga_cls, &unit_sga_k0, &unit_sga_k1, &unit_sga_rare, &unit_sga_even, &unit_sga_scalar, &unit_sga_heavy, &unit_dscat, &unit_dscatp };
 
 static const struct eg_library_meta library = {
-    .struct_size = sizeof(struct eg_library_meta), .schema_major = EG_META_SCHEMA_MAJOR, .n_units = 36, .units = units,
+    .struct_size = sizeof(struct eg_library_meta), .schema_major = EG_META_SCHEMA_MAJOR, .n_units = 38, .units = units,
 };
 
 __attribute__((visibility("default"))) const struct eg_library_meta* eg_unit_library_meta(void) { return &library; }

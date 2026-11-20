@@ -743,6 +743,162 @@ static void host_device_copies(eg_ctx* ctx, const char* dev_lib) {
     eg_plane_free(ctx, phx), eg_plane_free(ctx, phy), eg_plane_free(ctx, ppg), eg_plane_free(ctx, pdx), eg_plane_free(ctx, pd1), eg_plane_free(ctx, pc);
     eg_unit_free(ctx, dp);
     cudaFreeHost(hx), cudaFreeHost(hy), cudaFree(dx), cudaFree(d1), cudaFree(dc);
+/* ---- checked units on a device context ---- */
+
+enum { DS_LEN = 8, DS_GUARD = 2, DS_MAX = 64 };
+
+/* One run of "dscat" / "dscatp": host mirrors of the device planes; acc sits between guard cells that must never change. */
+struct dscat_rig {
+    int32_t idx[DS_MAX], jdx[DS_MAX];
+    double val[DS_MAX], tbl[DS_LEN], buf[DS_LEN + 2 * DS_GUARD];
+    void *d_idx, *d_jdx, *d_val, *d_buf, *d_tbl;
+    struct tensor t[5];
+    eg_plane* p[5];
+    eg_plan* plan;
+    int n;
+};
+
+static void dscat_reset(struct dscat_rig* r) {
+    for (int i = 0; i < r->n; ++i) r->idx[i] = (3 * i) % DS_LEN, r->jdx[i] = (5 * i + 1) % DS_LEN, r->val[i] = 0.5 + 0.125 * i;
+    for (int i = 0; i < DS_LEN; ++i) r->tbl[i] = 1.0 + 0.25 * i;
+    for (int i = 0; i < DS_LEN + 2 * DS_GUARD; ++i) r->buf[i] = (i < DS_GUARD || i >= DS_LEN + DS_GUARD) ? -7.5 : 0.0;
+}
+
+/* Copy the host mirrors to the device (the legacy stream: settle before the context's stream reads them). */
+static void dscat_up(struct dscat_rig* r) {
+    cudaMemcpy(r->d_idx, r->idx, sizeof(int32_t) * (size_t)r->n, cudaMemcpyHostToDevice);
+    cudaMemcpy(r->d_jdx, r->jdx, sizeof(int32_t) * (size_t)r->n, cudaMemcpyHostToDevice);
+    cudaMemcpy(r->d_val, r->val, sizeof(double) * (size_t)r->n, cudaMemcpyHostToDevice);
+    cudaMemcpy(r->d_tbl, r->tbl, sizeof(r->tbl), cudaMemcpyHostToDevice);
+    cudaMemcpy(r->d_buf, r->buf, sizeof(r->buf), cudaMemcpyHostToDevice);
+    cudaDeviceSynchronize();
+}
+
+static void dscat_down(struct dscat_rig* r) {
+    cudaDeviceSynchronize();
+    cudaMemcpy(r->buf, r->d_buf, sizeof(r->buf), cudaMemcpyDeviceToHost);
+}
+
+static int dscat_guards_hold(const struct dscat_rig* r) {
+    for (int i = 0; i < DS_GUARD; ++i)
+        if (r->buf[i] != -7.5 || r->buf[DS_LEN + DS_GUARD + i] != -7.5) return 0;
+    return 1;
+}
+
+static int dscat_make(eg_ctx* ctx, struct dscat_rig* r, eg_unit* unit, int n) {
+    r->n = n;
+    dscat_reset(r);
+    cudaMalloc(&r->d_idx, sizeof(int32_t) * DS_MAX);
+    cudaMalloc(&r->d_jdx, sizeof(int32_t) * DS_MAX);
+    cudaMalloc(&r->d_val, sizeof(double) * DS_MAX);
+    cudaMalloc(&r->d_tbl, sizeof(r->tbl));
+    cudaMalloc(&r->d_buf, sizeof(r->buf));
+    dscat_up(r);
+    r->p[0] = wrap_typed(ctx, &r->t[0], r->d_idx, kDLInt, 32, n, 1);
+    r->p[1] = wrap_typed(ctx, &r->t[1], r->d_jdx, kDLInt, 32, n, 1);
+    r->p[2] = wrap(ctx, &r->t[2], r->d_val, 1, n, 0, 1, 0);
+    r->p[3] = wrap(ctx, &r->t[3], (char*)r->d_buf + DS_GUARD * sizeof(double), 1, DS_LEN, 0, 1, 0);
+    r->p[4] = wrap(ctx, &r->t[4], r->d_tbl, 1, DS_LEN, 0, 1, 0);
+    const int32_t slots[5] = { 0, 1, 2, 3, 4 };
+    r->plan = NULL;
+    int ok = r->p[0] && r->p[1] && r->p[2] && r->p[3] && r->p[4] && plan_n(ctx, unit, EG_STRUCTURE_DEVICE, n, 0, NULL, NULL, &r->plan) == EG_OK;
+    return ok && bind_planes(ctx, r->plan, 5, slots, r->p) == EG_OK;
+}
+
+static void dscat_free(eg_ctx* ctx, struct dscat_rig* r) {
+    eg_plan_free(ctx, r->plan);
+    for (int i = 0; i < 5; ++i) eg_plane_free(ctx, r->p[i]);
+    cudaFree(r->d_idx), cudaFree(r->d_jdx), cudaFree(r->d_val), cudaFree(r->d_tbl), cudaFree(r->d_buf);
+}
+
+static int dscat_reported(eg_ctx* ctx, long long* slot, long long* index) {
+    char buf[512];
+    size_t len = 0;
+    if (eg_error(ctx, buf, sizeof(buf), &len) != EG_OK) return 0;
+    const char* at = strstr(buf, "slot ");
+    return at != NULL && sscanf(at, "slot %lld ('%*[^']'): index %lld outside", slot, index) == 2;
+}
+
+static void checked_units_device(eg_ctx* ctx, const char* dev_lib) {
+    eg_unit *checked = NULL, *plain = NULL;
+    check(load(ctx, dev_lib, "dscat", 0xF1, &checked) == EG_OK && load(ctx, dev_lib, "dscatp", 0xF2, &plain) == EG_OK, "eg_unit_load a checked device unit (dscat) and the same unit built unchecked (dscatp)");
+    if (checked == NULL || plain == NULL) return;
+    static struct dscat_rig c, u, m;
+    int ok = dscat_make(ctx, &c, checked, DS_LEN) && dscat_make(ctx, &u, plain, DS_LEN);
+    check(ok, "checked and unchecked DEVICE plans made: the door makes the device fault cell");
+    if (!ok) return;
+    struct eg_entry_figures f;
+    memset(&f, 0, sizeof(f));
+    f.struct_size = sizeof(f);
+    const int info = eg_plan_entry_figures(ctx, c.plan, &f) == EG_OK && (f.flags & EG_ENTRY_CHECKED) != 0;
+    memset(&f, 0, sizeof(f));
+    f.struct_size = sizeof(f);
+    check(info && eg_plan_entry_figures(ctx, u.plan, &f) == EG_OK && (f.flags & EG_ENTRY_CHECKED) == 0, "eg_plan_entry_figures reports EG_ENTRY_CHECKED for the checked plan and not the unchecked one");
+
+    ok = eg_launch(ctx, c.plan, NULL) == EG_OK;
+    ok = ok && eg_launch(ctx, u.plan, NULL) == EG_OK;
+    dscat_down(&c);
+    dscat_down(&u);
+    check(ok && memcmp(c.buf, u.buf, sizeof(c.buf)) == 0 && c.buf[DS_GUARD] != 0.0, "in range: the checked device unit's plane is bitwise the unchecked unit's");
+
+    dscat_reset(&c);
+    c.idx[2] = 100;
+    dscat_up(&c);
+    const eg_status bad = eg_launch(ctx, c.plan, NULL);
+    dscat_down(&c);
+    check(bad == EG_FAULT && reason_has(ctx, "unit 'dscat': slot 3 ('acc'): index 100 outside its 8 elements") && dscat_guards_hold(&c),
+          "an ACCUM_OUT write index out of range on the device: FAULT naming unit, slot, index and length; the guard bytes are unchanged");
+    dscat_reset(&c);
+    dscat_reset(&u);
+    c.jdx[1] = 9;
+    dscat_up(&c);
+    check(eg_launch(ctx, c.plan, NULL) == EG_FAULT && reason_has(ctx, "slot 4 ('tbl'): index 9 outside its 8 elements"), "a table read index out of range on the device: FAULT naming slot 4 ('tbl')");
+    dscat_reset(&c);
+    dscat_up(&c);
+    dscat_up(&u);
+    ok = eg_launch(ctx, c.plan, NULL) == EG_OK && eg_launch(ctx, u.plan, NULL) == EG_OK;
+    dscat_down(&c);
+    dscat_down(&u);
+    check(ok && memcmp(c.buf, u.buf, sizeof(c.buf)) == 0, "a good launch after a bad one is OK: the cell was reset, the values are the unchecked unit's");
+
+    /* a recorded graph replay */
+    dscat_reset(&c);
+    dscat_up(&c);
+    eg_graph* g = NULL;
+    ok = eg_record_begin(ctx) == EG_OK && eg_launch(ctx, c.plan, NULL) == EG_OK && eg_record_end(ctx, NULL, &g) == EG_OK && eg_graph_launch(ctx, g) == EG_OK && eg_sync(ctx) == EG_OK;
+    c.idx[4] = -3;
+    dscat_up(&c);
+    const eg_status replay_bad = ok ? eg_graph_launch(ctx, g) : EG_OK;
+    const int named = replay_bad == EG_FAULT && reason_has(ctx, "unit 'dscat': slot 3 ('acc'): index -3 outside its 8 elements");
+    c.idx[4] = 4;
+    dscat_up(&c);
+    check(ok && named && eg_graph_launch(ctx, g) == EG_OK && eg_sync(ctx) == EG_OK, "the same in a device graph replay: a good replay, a bad one FAULT by name, a good one after it OK");
+    eg_graph_free(ctx, g);
+
+    /* many lanes violate at once: the reported pair is of one violation (even lanes the write, odd lanes the table) */
+    ok = dscat_make(ctx, &m, checked, 64);
+    int consistent = ok;
+    for (int rep = 0; ok && rep < 40; ++rep) {
+        dscat_reset(&m);
+        for (int i = 0; i < 64; ++i) {
+            m.idx[i] = i % 2 == 0 ? 1000 + i : i % DS_LEN;
+            m.jdx[i] = i % 2 == 0 ? i % DS_LEN : 4000 + i;
+        }
+        dscat_up(&m);
+        long long slot = -1, index = -1;
+        const int faulted = eg_launch(ctx, m.plan, NULL) == EG_FAULT && dscat_reported(ctx, &slot, &index);
+        consistent = consistent && faulted && ((slot == 3 && index >= 1000 && index < 1064 && index % 2 == 0) || (slot == 4 && index >= 4000 && index < 4064 && index % 2 == 1));
+    }
+    check(consistent, "40 device launches where every lane violates: the reported slot and index are always of one violation");
+    dscat_free(ctx, &m);
+
+    const int32_t fault_slot[1] = { 5 };
+    eg_plane* fp[1] = { c.p[4] };
+    check(bind_planes(ctx, c.plan, 1, fault_slot, fp) == EG_BAD_REQUEST && reason_has(ctx, "fault cell of a checked unit"), "a caller plane bound at fault_slot is refused BAD_REQUEST by name");
+    dscat_free(ctx, &c);
+    dscat_free(ctx, &u);
+    eg_unit_free(ctx, checked);
+    eg_unit_free(ctx, plain);
 }
 
 /* A launch writes each cell as the reduction over the lanes it RAN: a DEVICE prefix set of live count 8, 3, 0, 5, 0 over a SUM cell of rows
@@ -2717,6 +2873,7 @@ int main(int argc, char** argv) {
     host_steps_in_graph(ctx, dev_lib, host_lib);
     host_nodes_device(ctx, dev_lib);
     host_device_copies(ctx, dev_lib);
+    checked_units_device(ctx, dev_lib);
     cell_rows_device(ctx, dev_lib);
     reset_device(ctx, dev_lib);
     step_graph_device(ctx, dev_lib);

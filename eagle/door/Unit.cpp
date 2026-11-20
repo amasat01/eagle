@@ -10,6 +10,7 @@
 #include "plugin/gref_abi.h"
 
 #include <cerrno>
+#include <cstddef>
 #include <cstring>
 #include <dlfcn.h>
 #include <fcntl.h>
@@ -154,6 +155,23 @@ void read_finish(const eg_unit_meta& m, eg_unit_s& unit) {
                                    read_steps_table(f.host_steps_reverse, "unit '" + unit.name + "' finish host_steps_reverse"),
                                    read_steps_table(f.device_steps_reverse, "unit '" + unit.name + "' finish device_steps_reverse") };
     }
+}
+
+/** @brief A checked unit (eg_unit_meta.fault_slot): the slot must be the SHARED int64 LOOKUP of two cells the door makes, and no slot another record owns. */
+void read_fault(const eg_unit_meta& m, eg_unit_s& unit) {
+    if ((m.flags & EG_UNIT_CHECKED) == 0) return;
+    if (m.struct_size < offsetof(eg_unit_meta, fault_slot) + sizeof(m.fault_slot))
+        refuse(EG_BAD_REQUEST, "meta that contradicts itself: unit '" + unit.name + "' is CHECKED but its meta ends before fault_slot");
+    const int n_slots = static_cast<int>(unit.slots.size());
+    const std::string what = "meta that contradicts itself: unit '" + unit.name + "' fault_slot " + std::to_string(m.fault_slot);
+    if (m.fault_slot < 0 || m.fault_slot >= n_slots) refuse(EG_BAD_REQUEST, what + " names no slot (the unit has " + std::to_string(n_slots) + ")");
+    SlotFacts& s = unit.slots[static_cast<std::size_t>(m.fault_slot)];
+    if (s.role != EG_ROLE_LOOKUP || s.dtype != EG_DTYPE_INT64 || !s.shared || s.rank != 1 || s.shape.front() != 2 || s.gathered || s.param_plane)
+        refuse(EG_BAD_REQUEST, what + " ('" + s.name + "') is not a SHARED int64 LOOKUP of 2 cells (slot ordinal, index)");
+    if (s.made || s.like != -1 || (unit.finish.present && (m.fault_slot == unit.finish.counter_slot || m.fault_slot == unit.finish.steps_slot)))
+        refuse(EG_BAD_REQUEST, what + " ('" + s.name + "') is a slot another record of the unit already owns");
+    s.made = true;    // eagle's own cell: a caller binding is refused by name
+    unit.fault_slot = m.fault_slot;
 }
 
 /** @brief Read the companions and cells of @p body: the slots eagle makes, the fold entries and the rows' fold. */
@@ -452,6 +470,7 @@ void read_body(const eg_unit_meta& m, void* library, bool device_only, eg_unit_s
     read_dispatch(body, unit);
     read_team_planes(body, unit);
     read_finish(m, unit);
+    read_fault(m, unit);
     if (m.launch == nullptr) return;
     eg_unit_launch absent{};
     absent.active_map_slot = absent.active_count_slot = -1;
@@ -706,8 +725,8 @@ void read_gemm(const eg_unit_meta& m, eg_unit_s& unit) {
 
 /** @brief Check the unit-level members and resolve the host entry. */
 void read_unit(const eg_unit_meta& m, void* library, eg_unit_s& unit) {
-    if ((m.flags & ~EG_UNIT_CALLER_CARDS) != 0)
-        refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': unknown flag bits " + std::to_string(m.flags & ~EG_UNIT_CALLER_CARDS));
+    if ((m.flags & ~(EG_UNIT_CALLER_CARDS | EG_UNIT_CHECKED)) != 0)
+        refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': unknown flag bits " + std::to_string(m.flags & ~(EG_UNIT_CALLER_CARDS | EG_UNIT_CHECKED)));
     if (m.pattern != EG_PATTERN_PURE)
         refuse(EG_NOT_WRITTEN, "unit '" + unit.name + "': pattern " + std::to_string(m.pattern) +
                " is not written");

@@ -2600,13 +2600,19 @@ void device_graph_launch(eg_ctx& ctx, eg_graph* handle) {
     Current current(ctx.dev);
     reapply_bindings(*graph);
     if (graph->diff != nullptr) diff_check_launch(*graph->diff);
+    for (const eg_plan_s* p : graph->plans) fault_reset(ctx, *p);    // a checked unit's cell starts clear at each replay
     for (const DiffSlot& slot : graph->slots)    // the tests this replay will save start as not evaluated
         zero_bytes(ctx.dev.stream, slot.buffer, static_cast<std::size_t>(slot.capacity) * 3 * sizeof(unsigned));
     for (const Piece& piece : graph->pieces) {    // the captures and the runs between them, in the order recorded
         if (piece.loop != nullptr) loop_launch(piece.loop, ctx.dev.stream);
         else if (piece.host) host_node_run(ctx, *piece.host);
-        else run_from_start(ctx, piece.runner);
+        else {
+            fault_reset(ctx, *piece.runner);
+            run_from_start(ctx, piece.runner);
+            fault_check(ctx, *piece.runner);
+        }
     }
+    for (const eg_plan_s* p : graph->plans) fault_check(ctx, *p);
     if (graph->diff != nullptr) diff_launched(*graph->diff);
 }
 

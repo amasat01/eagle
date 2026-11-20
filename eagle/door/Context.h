@@ -309,6 +309,7 @@ struct eg_unit_s {
     eagle::door::DerivedFacts derived;        ///< a derived unit (eg_unit_meta.derived), else not present
     eagle::door::GemmFacts gemm;              ///< a dense-contraction unit (eg_unit_meta.gemm), else not present
     std::int32_t index = -1;                  ///< the unit index in its library table
+    std::int32_t fault_slot = -1;             ///< a checked unit: the two-cell int64 LOOKUP the door makes per plan for the generated checks, else -1
     std::array<std::uint8_t, EG_DIGEST_BYTES> digest{};
     std::vector<eagle::door::TeamPlaneFacts> team_planes;
     std::int64_t scatter_chunks = 0;          ///< the most chunks of an ordered scatter (body.scatter_chunks), 0: none
@@ -449,6 +450,7 @@ struct eg_plan_s {
     std::vector<eg_plane_s*> comps;           ///< the compensation rows of each cell column (nullptr: none), parallel to ``rows``
     std::vector<eg_plane_s*> outs;            ///< a split unit: the cell plane eagle makes for each internal cell column (nullptr: the caller's)
     std::vector<eg_plane_s*> team;            ///< one eagle-made scratch plane per team plane of a split unit, one reference each
+    eg_plane_s* fault = nullptr;              ///< a checked unit: the two int64 cells (slot ordinal, index) of the generated checks, one reference
     std::vector<eg_plane_s*> work;            ///< DEVICE: the two reduction work buffers of each cell component, one reference each
     std::vector<std::vector<eg_plane_s*>> segteam;   ///< a SEGMENTED plan: the scratch planes of each member that is a split unit other than the planned unit (by member index)
     std::vector<eg_plane_s*> segdev;          ///< a DEVICE SEGMENTED plan: the offsets and class planes eagle makes in device memory
@@ -936,6 +938,13 @@ void bind_value(eg_plan_s& p, int slot, const void* value, std::size_t bytes);
 void host_node_new(eg_ctx& ctx, const eg_host_node_desc* desc, eg_host_node** out);
 void host_node_release(eg_ctx& ctx, eg_host_node_s* node);
 void host_call(eg_ctx& ctx, eg_host_node_s* node, std::int32_t n_planes, eg_plane_s* const* planes, const std::uint32_t* access);
+/** @brief Checked units (host/Fault.cpp): set the fault cell of @p plan (or of every plan of a runner) to -1 before a launch, replay or run; read it after
+ *  (a device plan: after the work queued on the stream) and refuse EG_FAULT "unit 'u': slot k ('name'): index i outside its N elements" when a check fired.
+ *  Both are no-ops for a plan of an unchecked unit. */
+void fault_reset(eg_ctx& ctx, const eg_plan_s& plan);
+void fault_check(eg_ctx& ctx, const eg_plan_s& plan);
+void fault_reset(eg_ctx& ctx, const eg_runner_s& runner);
+void fault_check(eg_ctx& ctx, const eg_runner_s& runner);
 void graph_launch(eg_ctx& ctx, eg_graph_s* graph);
 void graph_free(eg_ctx& ctx, eg_graph_s* graph);
 /** @brief A reference to host graph @p graph for a runner that runs it per step, and its release (the last one frees the graph). */

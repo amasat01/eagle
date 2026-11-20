@@ -151,6 +151,8 @@ typedef int32_t eg_steps_regime;
 /* ---- flags --------------------------------------------------------------- */
 #define EG_UNIT_CALLER_CARDS (1u << 0) /**< eg_unit_meta.flags: lowered under card documents the caller stated, not the shipped
                                           cards; eagle loads such a unit as any other and only carries the bit */
+#define EG_UNIT_CHECKED (1u << 1)      /**< eg_unit_meta.flags: the unit is built with the checks of its generated code and states ``fault_slot`` (a
+                                          meta without the bit is unchecked whatever its ``fault_slot`` holds, so a zero-filled member is safe) */
 
 #define EG_SLOT_PRIOR (1u << 0)       /**< the body reads the slot before writing it: a caller must give it an initial value;
                                           eagle validates the bit and does not act on it */

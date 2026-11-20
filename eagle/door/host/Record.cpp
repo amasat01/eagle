@@ -301,9 +301,15 @@ void run_node(eg_ctx& ctx, const Node& n, Tape* tape) {
         case Node::Launch:
             check_bound(*n.plan);
             n.plan->finished = 0;    // a replayed launch counts from zero, as eg_launch does
+            fault_reset(ctx, *n.plan);
             host::run_plan(*n.plan, host::team_threads(ctx));
+            fault_check(ctx, *n.plan);
             break;
-        case Node::Run: run_from_start(ctx, n.runner); break;
+        case Node::Run:
+            fault_reset(ctx, *n.runner);
+            run_from_start(ctx, n.runner);
+            fault_check(ctx, *n.runner);
+            break;
         case Node::Reduce: host::reduce_exec(n.reduce, host::team_threads(ctx)); break;
         case Node::Copy: host::copy_exec(*n.src, *n.dst); break;
         case Node::Fft: host::fft_exec(*n.fft, *n.src, *n.dst, host::team_threads(ctx)); break;

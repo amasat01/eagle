@@ -325,3 +325,37 @@ extern "C" __global__ void sga(ScalarHandle k, ScalarHandle limit, ScalarHandle 
     static_cast<double*>(how.data)[i] += 1000.0;
     segStep(k, limit, mask, finished, i, l >= 6.0 ? 2.0 : 1.0);
 }
+
+// dscat / dscatp: acc[idx[i]] += val[i] * tbl[jdx[i]] with a data-indexed ACCUM_OUT write (acc) and table read (tbl). dscat is the CHECKED build: an
+// index outside its slot's length skips the lane and claims the fault cell with one atomic compare-and-swap of cell 0 (the slot), the winner writing
+// cell 1 (the index), as the lowering will emit it; dscatp is the same unit built unchecked.
+__device__ inline void scat_claim(ScalarHandle fault, long long slot, long long index) {
+    auto* cell = static_cast<unsigned long long*>(fault.data);
+    if (atomicCAS(cell, static_cast<unsigned long long>(-1LL), static_cast<unsigned long long>(slot)) == static_cast<unsigned long long>(-1LL))
+        cell[1] = static_cast<unsigned long long>(index);
+}
+
+template <bool Checked>
+__device__ inline void scat_body(ScalarHandle idx, ScalarHandle jdx, ScalarHandle val, ScalarHandle acc, ScalarHandle tbl, ScalarHandle fault, long long base,
+                                 long long count) {
+    const long long flat = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (flat >= count) return;
+    const long long i = base + flat;
+    const long long k = static_cast<const int*>(idx.data)[i], j = static_cast<const int*>(jdx.data)[i];
+    if (Checked && (k < 0 || k >= static_cast<long long>(acc.samples))) { scat_claim(fault, 3, k); return; }
+    if (Checked && (j < 0 || j >= static_cast<long long>(tbl.samples))) { scat_claim(fault, 4, j); return; }
+    static_cast<double*>(acc.data)[k] += static_cast<const double*>(val.data)[i] * static_cast<const double*>(tbl.data)[j];
+}
+
+extern "C" __global__ void dscat(ScalarHandle idx, ScalarHandle jdx, ScalarHandle val, ScalarHandle acc, ScalarHandle tbl, ScalarHandle fault, long long base,
+                                 long long count, long long nSamples) {
+    (void)nSamples;
+    scat_body<true>(idx, jdx, val, acc, tbl, fault, base, count);
+}
+
+extern "C" __global__ void dscatp(ScalarHandle idx, ScalarHandle jdx, ScalarHandle val, ScalarHandle acc, ScalarHandle tbl, long long base,
+                                  long long count, long long nSamples) {
+    (void)nSamples;
+    const ScalarHandle none{};
+    scat_body<false>(idx, jdx, val, acc, tbl, none, base, count);
+}

@@ -2218,6 +2218,190 @@ static void check_host_node_context_free(void) {
     check(node != NULL && eg_ctx_free(other) == EG_OK && log.released == 1, "a host node still alive at eg_ctx_free releases its user data once");
 }
 
+/* ---- checked units: the fault cell of the generated checks ---- */
+
+enum { SC_N = 16, SC_LEN = 8, SC_GUARD = 2 };
+
+/* The planes of one "scat" / "scatp" run: acc sits in the middle of a buffer whose guard cells must never change. */
+struct scat_rig {
+    int32_t idx[RN], jdx[RN];
+    double val[RN], tbl[SC_LEN], buf[SC_LEN + 2 * SC_GUARD];
+    struct tensor t[5];
+    eg_plane* p[5];
+    eg_plan* plan;
+};
+
+static void scat_reset(struct scat_rig* r, int n) {
+    for (int i = 0; i < n; ++i) r->idx[i] = (3 * i) % SC_LEN, r->jdx[i] = (5 * i + 1) % SC_LEN, r->val[i] = 0.5 + 0.125 * i;
+    for (int i = 0; i < SC_LEN; ++i) r->tbl[i] = 1.0 + 0.25 * i;
+    for (int i = 0; i < SC_LEN + 2 * SC_GUARD; ++i) r->buf[i] = (i < SC_GUARD || i >= SC_LEN + SC_GUARD) ? -7.5 : 0.0;
+}
+
+static int scat_guards_hold(const struct scat_rig* r) {
+    for (int i = 0; i < SC_GUARD; ++i)
+        if (r->buf[i] != -7.5 || r->buf[SC_LEN + SC_GUARD + i] != -7.5) return 0;
+    return 1;
+}
+
+static int scat_make(eg_ctx* ctx, struct scat_rig* r, eg_unit* unit, eg_structure structure, int n) {
+    scat_reset(r, n);
+    r->p[0] = wrap(ctx, &r->t[0], r->idx, n, kDLInt, 32);
+    r->p[1] = wrap(ctx, &r->t[1], r->jdx, n, kDLInt, 32);
+    r->p[2] = wrap(ctx, &r->t[2], r->val, n, kDLFloat, 64);
+    r->p[3] = wrap(ctx, &r->t[3], r->buf + SC_GUARD, SC_LEN, kDLFloat, 64);
+    r->p[4] = wrap(ctx, &r->t[4], r->tbl, SC_LEN, kDLFloat, 64);
+    const int32_t slots[5] = { 0, 1, 2, 3, 4 };
+    struct eg_bind_desc d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    d.n_planes = 5;
+    d.plane_slots = slots;
+    d.planes = r->p;
+    r->plan = NULL;
+    return r->p[0] && r->p[1] && r->p[2] && r->p[3] && r->p[4] && plan(ctx, unit, structure, n, 0, NULL, NULL, &r->plan) == EG_OK && eg_bind(ctx, r->plan, &d) == EG_OK;
+}
+
+static void scat_free(eg_ctx* ctx, struct scat_rig* r) {
+    eg_plan_free(ctx, r->plan);
+    for (int i = 0; i < 5; ++i) eg_plane_free(ctx, r->p[i]);
+}
+
+/* The slot and index a FAULT reason names ("slot k ('name'): index i outside"), or -1. */
+static int scat_reported(eg_ctx* ctx, long long* slot, long long* index) {
+    char buf[512];
+    size_t len = 0;
+    if (eg_error(ctx, buf, sizeof(buf), &len) != EG_OK) return 0;
+    const char* at = strstr(buf, "slot ");
+    return at != NULL && sscanf(at, "slot %lld ('%*[^']'): index %lld outside", slot, index) == 2;
+}
+
+static void scat_show(eg_ctx* ctx) {
+    char buf[512];
+    size_t len = 0;
+    if (eg_error(ctx, buf, sizeof(buf), &len) == EG_OK) printf("      reason: %s\n", buf);
+}
+
+static void check_checked_units(eg_ctx* ctx) {
+    eg_unit *checked = NULL, *plain = NULL;
+    check(load(ctx, "scat", 0x71, &checked) == EG_OK && load(ctx, "scatp", 0x72, &plain) == EG_OK, "eg_unit_load a checked unit (scat) and the same unit built unchecked (scatp)");
+    if (checked == NULL || plain == NULL) return;
+    struct scat_rig c, u;
+    int ok = scat_make(ctx, &c, checked, EG_STRUCTURE_HOST_SERIAL, SC_N) && scat_make(ctx, &u, plain, EG_STRUCTURE_HOST_SERIAL, SC_N);
+    check(ok, "checked and unchecked plans made: the door makes the fault cell, the caller binds slots 0..4 only");
+    if (!ok) return;
+    struct eg_entry_figures f;
+    memset(&f, 0, sizeof(f));
+    f.struct_size = sizeof(f);
+    const int info = eg_plan_entry_figures(ctx, c.plan, &f) == EG_OK && (f.flags & EG_ENTRY_CHECKED) != 0;
+    memset(&f, 0, sizeof(f));
+    f.struct_size = sizeof(f);
+    check(info && eg_plan_entry_figures(ctx, u.plan, &f) == EG_OK && (f.flags & EG_ENTRY_CHECKED) == 0, "eg_plan_entry_figures reports EG_ENTRY_CHECKED for the checked unit's plan and not for the unchecked one");
+
+    check(eg_launch(ctx, c.plan, NULL) == EG_OK && eg_launch(ctx, u.plan, NULL) == EG_OK && memcmp(c.buf, u.buf, sizeof(c.buf)) == 0 && c.buf[SC_GUARD] != 0.0,
+          "in range: the checked unit's plane is bitwise the unchecked unit's");
+
+    long long slot = -1, index = -1;
+    scat_reset(&c, SC_N);
+    c.idx[7] = 100;
+    check(eg_launch(ctx, c.plan, NULL) == EG_FAULT && reason_has(ctx, "unit 'scat': slot 3 ('acc'): index 100 outside its 8 elements") && scat_guards_hold(&c),
+          "an ACCUM_OUT write index out of range: FAULT naming the unit, slot, index and length; the plane's guard bytes are unchanged");
+    scat_reset(&c, SC_N);
+    c.jdx[3] = -4;
+    check(eg_launch(ctx, c.plan, NULL) == EG_FAULT && scat_reported(ctx, &slot, &index) && slot == 4 && index == -4 && reason_has(ctx, "slot 4 ('tbl')") && scat_guards_hold(&c),
+          "a table read index below zero: FAULT naming slot 4 ('tbl') and the index");
+    scat_reset(&c, SC_N);
+    scat_reset(&u, SC_N);
+    check(eg_launch(ctx, c.plan, NULL) == EG_OK && eg_launch(ctx, u.plan, NULL) == EG_OK && memcmp(c.buf, u.buf, sizeof(c.buf)) == 0,
+          "a good launch after a bad one is OK: the cell was reset, and the values are the unchecked unit's");
+
+    /* a recorded graph replay */
+    scat_reset(&c, SC_N);
+    eg_graph* g = NULL;
+    ok = eg_record_begin(ctx) == EG_OK && eg_launch(ctx, c.plan, NULL) == EG_OK && eg_record_end(ctx, NULL, &g) == EG_OK && eg_graph_launch(ctx, g) == EG_OK;
+    c.idx[2] = SC_LEN;
+    const eg_status second = eg_graph_launch(ctx, g);
+    const int bad = second == EG_FAULT && reason_has(ctx, "unit 'scat': slot 3 ('acc'): index 8 outside its 8 elements") && scat_guards_hold(&c);
+    c.idx[2] = 6;
+    if (!ok || !bad) scat_show(ctx);
+    const eg_status third = eg_graph_launch(ctx, g);
+    if (third != EG_OK) scat_show(ctx);
+    check(ok && bad && third == EG_OK, "the same in a graph replay: a good replay, a bad one FAULT by name with the guards unchanged, a good one after it OK");
+    eg_graph_free(ctx, g);
+
+    /* a run: a finishing unit's plan, then the checked plan, in one step */
+    eg_unit* c1 = NULL;
+    static double k[RN], limit[RN], want_k[RN];
+    static unsigned char mask[RN];
+    struct tensor tk[3];
+    count_inputs(k, limit, mask);
+    (void)want_k;
+    struct scat_rig run_rig;
+    eg_plan* cp = load(ctx, "count1", 0xD1, &c1) == EG_OK ? count_plan(ctx, c1, EG_STRUCTURE_HOST_SERIAL, k, limit, mask, tk) : NULL;
+    const int made = scat_make(ctx, &run_rig, checked, EG_STRUCTURE_HOST_SERIAL, RN);
+    eg_plan* steps[2] = { cp, run_rig.plan };
+    struct eg_runner_desc rd = runner_desc(steps, 2, 1000);
+    eg_runner* run = NULL;
+    struct eg_run_report rep;
+    memset(&rep, 0, sizeof(rep));
+    rep.struct_size = sizeof(rep);
+    scat_reset(&run_rig, RN);
+    run_rig.idx[5] = -1;
+    ok = made && cp && eg_runner_new(ctx, &rd, &run) == EG_OK;
+    if (!ok) scat_show(ctx);
+    check(ok && eg_run(ctx, run, &rep) == EG_FAULT && reason_has(ctx, "unit 'scat': slot 3 ('acc'): index -1 outside its 8 elements") && scat_guards_hold(&run_rig),
+          "the same in a run: FAULT by name after the run, the guard bytes unchanged");
+    eg_runner_free(ctx, run);
+    count_inputs(k, limit, mask);
+    scat_reset(&run_rig, RN);
+    run = NULL;
+    memset(&rep, 0, sizeof(rep));
+    rep.struct_size = sizeof(rep);
+    check(ok && eg_runner_new(ctx, &rd, &run) == EG_OK && eg_run(ctx, run, &rep) == EG_OK, "a good run after a bad one is OK");
+    eg_runner_free(ctx, run);
+    eg_plan_free(ctx, cp);
+    scat_free(ctx, &run_rig);
+    eg_unit_free(ctx, c1);
+
+    /* many lanes violate at once: the reported slot and index belong to one violation (even lanes break acc, odd lanes break tbl) */
+    struct scat_rig m;
+    eg_host_threads(ctx, 4);
+    ok = scat_make(ctx, &m, checked, EG_STRUCTURE_HOST_TEAM, 64);
+    int consistent = ok;
+    for (int rep_i = 0; ok && rep_i < 40; ++rep_i) {
+        scat_reset(&m, 64);
+        for (int i = 0; i < 64; ++i) {
+            m.idx[i] = i % 2 == 0 ? 1000 + i : i % SC_LEN;
+            m.jdx[i] = i % 2 == 0 ? i % SC_LEN : 4000 + i;
+        }
+        slot = index = -1;
+        const int faulted = eg_launch(ctx, m.plan, NULL) == EG_FAULT && scat_reported(ctx, &slot, &index);
+        consistent = consistent && faulted && ((slot == 3 && index >= 1000 && index < 1064 && index % 2 == 0) || (slot == 4 && index >= 4000 && index < 4064 && index % 2 == 1)) &&
+                     scat_guards_hold(&m);
+    }
+    check(consistent, "40 launches where every lane violates (even lanes the write, odd lanes the table): the reported slot and index are always of one violation");
+    eg_host_threads(ctx, 1);
+    scat_free(ctx, &m);
+
+    /* refusals */
+    struct eg_bind_desc bd;
+    const int32_t fslot[1] = { 5 };
+    eg_plane* fp[1] = { c.p[4] };
+    memset(&bd, 0, sizeof(bd));
+    bd.struct_size = sizeof(bd);
+    bd.n_planes = 1;
+    bd.plane_slots = fslot;
+    bd.planes = fp;
+    check(eg_bind(ctx, c.plan, &bd) == EG_BAD_REQUEST && reason_has(ctx, "fault cell of a checked unit"), "a caller plane bound at fault_slot is refused BAD_REQUEST by name");
+    eg_unit* bad_unit = NULL;
+    check(load(ctx, "scat_badshape", 0x73, &bad_unit) == EG_BAD_REQUEST && reason_has(ctx, "fault_slot 4") && reason_has(ctx, "SHARED int64 LOOKUP of 2 cells"), "a fault_slot of the wrong shape is refused at load by name");
+    check(load(ctx, "scat_badrole", 0x74, &bad_unit) == EG_BAD_REQUEST && reason_has(ctx, "fault_slot 2"), "a fault_slot naming a caller slot role is refused at load by name");
+    check(load(ctx, "scat_badslot", 0x75, &bad_unit) == EG_BAD_REQUEST && reason_has(ctx, "fault_slot 9 names no slot"), "a fault_slot that names no slot is refused at load by name");
+    scat_free(ctx, &c);
+    scat_free(ctx, &u);
+    eg_unit_free(ctx, checked);
+    eg_unit_free(ctx, plain);
+}
+
 /* y = a*y + b in place over RN samples (axpb with x = y), then sum y into s, then copy s into t:
  * recorded once and replayed N times must equal the same calls run directly N times, bitwise. */
 static void check_recorded_list(eg_ctx* ctx, eg_unit* axpb, eg_unit* count1) {
@@ -4130,7 +4314,7 @@ static void check_unit_flags(eg_ctx* ctx) {
     eg_unit* cards = NULL;
     eg_unit* bad = NULL;
     check(load(ctx, "axpb_cards", 0xD4, &cards) == EG_OK && cards != NULL, "a unit with EG_UNIT_CALLER_CARDS loads");
-    check(load(ctx, "axpb_badflag", 0xD5, &bad) == EG_NOT_WRITTEN && bad == NULL && reason_has(ctx, "unknown flag bits 2"),
+    check(load(ctx, "axpb_badflag", 0xD5, &bad) == EG_NOT_WRITTEN && bad == NULL && reason_has(ctx, "unknown flag bits 4"),
           "a unit flag bit eagle does not know is refused NOT_WRITTEN, naming the bits");
     eg_unit_free(ctx, cards);
 }
@@ -5561,6 +5745,7 @@ int main(int argc, char** argv) {
             check_host_node_recorded(ctx, unit);
             check_host_node_structure(ctx, unit);
             check_host_node_context_free();
+            check_checked_units(ctx);
             eg_host_threads(ctx, 1);
             eg_unit_free(ctx, c1);
         }
