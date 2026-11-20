@@ -286,7 +286,6 @@ inline bool compact(const DLTensor& t) {
 struct eg_unit_s {
     eg_ctx* ctx = nullptr;
     void* library = nullptr;                  ///< dlopen handle, closed when ``refs`` drops to 0
-    int library_fd = -1;                      ///< the open library file, closed right after the handle
     eagle::exec::HostEntryV2 host_entry = nullptr;
     std::string name;
     std::int32_t scalar_type = 0;
@@ -754,8 +753,8 @@ bool ctx_close(eg_ctx& ctx);
 void ctx_info(eg_ctx& ctx, struct eg_ctx_info* out);
 void unit_load(eg_ctx& ctx, const eg_unit_load_desc* desc, eg_unit** out);
 void unit_release(eg_ctx& ctx, eg_unit_s* unit);
-/** @brief Unload a unit library and close the file it was read from. */
-void close_library(void* library, int fd);
+/** @brief Drop one load of a unit library; the last one unloads it and closes the file it was read from. */
+void close_library(void* library);
 void plane_wrap(eg_ctx& ctx, DLManagedTensorVersioned* tensor, eg_plane** out);
 void plane_release(eg_ctx& ctx, eg_plane_s* plane);
 eg_plane_s* make_plane(eg_ctx& ctx, const DLDataType& dtype, std::vector<std::int64_t> shape, bool device = false,

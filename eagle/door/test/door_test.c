@@ -26,6 +26,7 @@
 
 #include <dlfcn.h>
 #ifdef __linux__
+#include <dirent.h>
 #include <link.h>
 #endif
 #include <pthread.h>
@@ -231,6 +232,20 @@ static int door_images(void) {
 #endif
 }
 
+/* The descriptors this process holds open (Linux); -1: not countable here. */
+static int open_descriptors(void) {
+#ifdef __linux__
+    DIR* d = opendir("/proc/self/fd");
+    int total = 0;
+    if (d == NULL) return -1;
+    while (readdir(d) != NULL) ++total;
+    closedir(d);
+    return total;
+#else
+    return -1;
+#endif
+}
+
 /* Launch @p unit (axpb) over four samples with a = 2, b = 1 and put y[0..3] in @p y. */
 static eg_status launch_axpb4(eg_ctx* ctx, eg_unit* unit, double* y) {
     double x[4] = { 1.0, 2.0, 3.0, 4.0 };
@@ -285,14 +300,25 @@ static void check_fresh_load(eg_ctx* ctx) {
     eg_unit_free(ctx, ub);
 
     library_path = same;
-    const int before = door_images();
+    const int images = door_images(), fds = open_descriptors();
     eg_unit *s1 = NULL, *s2 = NULL;
     check(load(ctx, "axpb", 0xA1, &s1) == EG_OK && load(ctx, "axpb", 0xA1, &s2) == EG_OK && s1 != NULL && s2 != NULL,
           "fresh load: one file loaded twice loads both times");
-    check(before < 0 ? dlopen(same, RTLD_LAZY | RTLD_NOLOAD) != NULL : door_images() == before + 1,
-          "fresh load: one file loaded twice is one library");
+    if (images < 0) {
+        void* held = dlopen(same, RTLD_LAZY | RTLD_NOLOAD);
+        check(held != NULL, "fresh load: one file loaded twice is one library");
+        if (held != NULL) dlclose(held);
+    } else {
+        check(door_images() == images + 1, "fresh load: one file loaded twice is one library");
+    }
     eg_unit_free(ctx, s1);
     eg_unit_free(ctx, s2);
+    if (fds >= 0)
+        check(open_descriptors() == fds, "fresh load: freeing both loads of one file closes every descriptor they held");
+    eg_unit* again = NULL;
+    check(copy_file(alt, next) && rename(next, same) == 0 && load(ctx, "axpb", 0xA2, &again) == EG_OK,
+          "fresh load: a file replaced after both were freed still loads afresh");
+    eg_unit_free(ctx, again);
     library_path = saved;
     remove(live);
     remove(next);
@@ -2019,6 +2045,7 @@ static void check_groups(eg_ctx* ctx) {
     if (unit == NULL) return;
     void* lib = dlopen(library_path, RTLD_LAZY | RTLD_NOLOAD);
     int64_t* past = lib ? (int64_t*)dlsym(lib, "fixture_past_n") : NULL;
+    if (lib != NULL) dlclose(lib);    /* the unit holds the library: the address stays valid */
     check(past != NULL, "the fixture's past-n counter is reachable");
     if (past == NULL) return;
     const eg_structure structures[2] = { EG_STRUCTURE_HOST_SERIAL, EG_STRUCTURE_HOST_TEAM };
@@ -2354,6 +2381,7 @@ static void check_even_split(eg_ctx* ctx) {
     void* lib = dlopen(library_path, RTLD_LAZY | RTLD_NOLOAD);
     int64_t* spans = lib ? (int64_t*)dlsym(lib, "fixture_spans") : NULL;
     int64_t* span_n = lib ? (int64_t*)dlsym(lib, "fixture_span_n") : NULL;
+    if (lib != NULL) dlclose(lib);    /* the unit loaded next holds the library: the addresses stay valid */
     eg_unit* unit = NULL;
     check(spans != NULL && span_n != NULL && load(ctx, "spans", 0xB9, &unit) == EG_OK, "eg_unit_load spans");
     if (spans == NULL || span_n == NULL || unit == NULL) return;
@@ -2417,6 +2445,7 @@ static void check_even_split(eg_ctx* ctx) {
 static void check_box(eg_ctx* ctx) {
     void* lib = dlopen(library_path, RTLD_LAZY | RTLD_NOLOAD);
     int64_t* threads_run = lib ? (int64_t*)dlsym(lib, "fixture_box_threads") : NULL;
+    if (lib != NULL) dlclose(lib);    /* the unit loaded next holds the library: the address stays valid */
     eg_unit* unit = NULL;
     check(threads_run != NULL && load(ctx, "boxed", 0x64, &unit) == EG_OK, "eg_unit_load boxed (a thread box of 4 lanes 3 apart)");
     if (threads_run == NULL || unit == NULL) return;

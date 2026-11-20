@@ -13,8 +13,11 @@
 #include <cstring>
 #include <dlfcn.h>
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
+#include <map>
+#include <mutex>
 #include <numeric>
 
 namespace eagle {
@@ -1153,46 +1156,79 @@ void resolve_segmented(eg_ctx& ctx, const eg_unit_load_desc& d, eg_unit_s& unit)
     }
 }
 
+/** @brief A unit library the door holds: its handle, the descriptor it was loaded under and how many door loads hold it. */
+struct OpenLibrary {
+    void* handle;
+    int fd;
+    int loads;
+};
+
+/** @brief Every unit library the door holds across contexts, by the identity (device, inode) of its file; one lock. */
+std::mutex library_lock;
+std::map<std::pair<dev_t, ino_t>, OpenLibrary> open_libraries;
+
 #if defined(__linux__)
 /** @brief The name the loader is given for the library file open as @p fd. */
 std::string fd_spelling(int fd) { return "/proc/self/fd/" + std::to_string(fd); }
 #endif
 
 /**
- * @brief Open the library file at @p path into @p library, keeping its descriptor in @p fd.
+ * @brief Load the library file at @p path and count this load.
  *
  * dlopen answers an object already loaded under the same path name without reading the file, so a library rebuilt
- * in place would come back as the old one. On Linux the loader is given the name of the descriptor instead: no loaded
- * object carries it, and the loader still matches by device and inode, so the same file is one library and a
- * replaced file is read afresh. Elsewhere the loader reads the file at @p path itself.
+ * in place would come back as the old one. On Linux the loader is given the name of an open descriptor instead: no
+ * loaded object carries it while the door holds the descriptor, and a replaced file is another file, read afresh.
+ * The loader adds every new name that reaches an object by its file identity to that object, so a file the door
+ * holds already is reloaded under the name it has (no second name to keep alive). The descriptor of a library stays
+ * open while the library lives, so its name cannot be reused. Elsewhere the loader reads the file at @p path itself.
  */
-void* open_library(const char* path, int& fd) {
-    fd = ::open(path, O_RDONLY | O_CLOEXEC);
-    if (fd < 0)
-        refuse(EG_FAULT, std::string("the unit library '") + path + "' does not load: " + std::strerror(errno));
+void* open_library(const char* path) {
+    int fd = ::open(path, O_RDONLY | O_CLOEXEC);
+    struct stat identity;
+    if (fd < 0 || ::fstat(fd, &identity) != 0) {
+        const std::string why = std::strerror(errno);
+        if (fd >= 0) ::close(fd);
+        refuse(EG_FAULT, std::string("the unit library '") + path + "' does not load: " + why);
+    }
+    const std::lock_guard<std::mutex> guard(library_lock);
+    const auto held = open_libraries.find({identity.st_dev, identity.st_ino});
+    if (held != open_libraries.end()) {
+        ::close(fd);
+        fd = held->second.fd;
+    }
 #if defined(__linux__)
-    void* library = ::dlopen(fd_spelling(fd).c_str(), RTLD_NOW | RTLD_LOCAL);
+    const std::string spelling = fd_spelling(fd);
+    const char* name = spelling.c_str();
 #else
-    void* library = ::dlopen(path, RTLD_NOW | RTLD_LOCAL);
+    const char* name = path;
 #endif
+    void* library = ::dlopen(name, RTLD_NOW | RTLD_LOCAL);
     if (library == nullptr) {
         const char* why = ::dlerror();
-        ::close(fd);
-        fd = -1;
+        if (held == open_libraries.end()) ::close(fd);
         refuse(EG_FAULT, std::string("the unit library '") + path + "' does not load: " + (why ? why : "unknown"));
     }
+    if (held == open_libraries.end())
+        open_libraries.emplace(std::make_pair(identity.st_dev, identity.st_ino), OpenLibrary{library, fd, 1});
+    else
+        ++held->second.loads;
     return library;
 }
 
 }  // namespace
 
-void close_library(void* library, int fd) {
+void close_library(void* library) {
+    const std::lock_guard<std::mutex> guard(library_lock);
     ::dlclose(library);
+    auto held = open_libraries.begin();
+    while (held->second.handle != library) ++held;
+    if (--held->second.loads > 0) return;
+    const int fd = held->second.fd;
+    open_libraries.erase(held);
 #if defined(__linux__)
     // An object that outlives its dlclose (a handle another caller leaked, a pinned library) keeps the name it was
     // loaded under; closing the descriptor would let a later file reuse that name and be answered by the old object.
-    const std::string spelling = fd_spelling(fd);
-    if (void* lingering = ::dlopen(spelling.c_str(), RTLD_LAZY | RTLD_NOLOAD)) {
+    if (void* lingering = ::dlopen(fd_spelling(fd).c_str(), RTLD_LAZY | RTLD_NOLOAD)) {
         ::dlclose(lingering);
         return;
     }
@@ -1205,8 +1241,7 @@ void unit_load(eg_ctx& ctx, const eg_unit_load_desc* desc, eg_unit** out) {
     if (out == nullptr) refuse(EG_BAD_REQUEST, "eg_unit_load: out is NULL");
     *out = nullptr;
     const eg_unit_ref ref = read_desc(read_input(desc, "eg_unit_load_desc"));
-    int fd = -1;
-    void* library = open_library(desc->path, fd);
+    void* library = open_library(desc->path);
     try {
         void* sym = ::dlsym(library, EG_UNIT_LIBRARY_META_SYMBOL);
         if (sym == nullptr)
@@ -1218,7 +1253,6 @@ void unit_load(eg_ctx& ctx, const eg_unit_load_desc* desc, eg_unit** out) {
         auto* unit = new eg_unit_s;
         unit->ctx = &ctx;
         unit->library = library;
-        unit->library_fd = fd;
         unit->name = ref.name;
         unit->index = index;
         std::memcpy(unit->digest.data(), m.digest, EG_DIGEST_BYTES);
@@ -1238,7 +1272,7 @@ void unit_load(eg_ctx& ctx, const eg_unit_load_desc* desc, eg_unit** out) {
         }
         *out = unit;
     } catch (...) {
-        close_library(library, fd);
+        close_library(library);
         throw;
     }
 }
@@ -1252,7 +1286,7 @@ void unit_release(eg_ctx& ctx, eg_unit_s* unit) {
     for (eg_unit_s* h : unit->seg.held) unit_release(ctx, h);
     if (unit->auto_seg != nullptr) unit_release(ctx, unit->auto_seg);
     device_unit_free(*unit);
-    close_library(unit->library, unit->library_fd);
+    close_library(unit->library);
     delete unit;
 }
 
