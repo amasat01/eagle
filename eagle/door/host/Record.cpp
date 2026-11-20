@@ -12,6 +12,7 @@
 #include "eagle/door/host/Ops.h"
 #include "eagle/door/device/Seam.h"
 #include "eagle/door/host/Team.h"
+#include "eagle/graph/Edges.h"
 
 #include <cstring>
 #include <memory>
@@ -28,7 +29,7 @@ std::vector<eg_plane_s*> planes_of(const Node& n) {
         case Node::Copy:
         case Node::Fft: return { n.src, n.dst };
         case Node::Gemm: return { n.src, n.rhs, n.dst };
-        case Node::Cond: return { n.cell };
+        case Node::Cond: return { n.cell, n.baseline };
         default: return {};
     }
 }
@@ -58,12 +59,30 @@ void release(eg_ctx& ctx, const std::vector<Node>& nodes) {
 }  // namespace door
 }  // namespace eagle
 
+/** @brief What a recording keeps besides the node tree: the open conditionals and forks, and the planes every node touches. */
 struct eg_recording_s {
+    /** @brief A wait: the nodes of branch ``branch`` from ordinal ``since`` run after node ``from``. */
+    struct Order {
+        int from, branch, since;
+    };
+    /** @brief An open conditional (``cond`` set) or fork. */
+    struct Frame {
+        eagle::door::Node* cond = nullptr;
+        std::vector<std::vector<eagle::graph::gidx>> branches;   ///< a fork's branches: the ordinals of their nodes, nested ones included
+        std::vector<Order> ordered;
+    };
     std::vector<eagle::door::Node> top;
-    std::vector<eagle::door::Node*> open;       ///< the open conditionals, outermost first
+    std::vector<Frame> frames;                  ///< the open conditionals and forks, outermost first
+    std::vector<eagle::graph::PlaneRef> refs;   ///< every plane any node touches, by node ordinal
+    std::vector<std::string> names;             ///< per node ordinal: the call, for a race reason
+    int nodes() const { return static_cast<int>(names.size()); }
 
     /** @brief The list the next call is recorded into. */
-    std::vector<eagle::door::Node>& current() { return open.empty() ? top : open.back()->arms.back(); }
+    std::vector<eagle::door::Node>& current() {
+        for (auto it = frames.rbegin(); it != frames.rend(); ++it)
+            if (it->cond != nullptr) return it->cond->arms.back();
+        return top;
+    }
 };
 
 namespace eagle {
@@ -93,6 +112,87 @@ std::string describe(const Node& n) {
         case Node::Cond: return "a conditional";
     }
     return "a host step";
+}
+
+/** @brief How a slot of role @p role touches its plane: 0 read, 1 write, 2 in place (graph::PlaneRef access); -1: not a plane. */
+int slot_access(std::int32_t role) {
+    if (role == EG_ROLE_MUTABLE || role == EG_ROLE_TERMINATED) return 2;
+    if (reads_role(role)) return 0;
+    return writes_role(role) ? 1 : -1;
+}
+
+/** @brief @p p as a hazard reference of node @p ordinal: its memory (base, shape, byte strides) and how the node touches it. */
+eagle::graph::PlaneRef plane_ref(const eg_plane_s& p, const std::string& name, int ordinal, int access) {
+    const DLTensor& t = p.tensor->dl_tensor;
+    eagle::graph::PlaneRef r;
+    r.name = name;
+    r.node = ordinal;
+    r.base = reinterpret_cast<std::uintptr_t>(t.data) + t.byte_offset;
+    r.itemsize = static_cast<eagle::graph::gidx>(t.dtype.bits / 8) * t.dtype.lanes;
+    r.access = access;
+    eagle::graph::gidx stride = r.itemsize;     // a plane without strides is compact, row-major
+    r.shape.assign(t.shape, t.shape + t.ndim);
+    r.strides.assign(static_cast<std::size_t>(t.ndim), 0);
+    for (int k = t.ndim; k-- > 0;) {
+        r.strides[static_cast<std::size_t>(k)] = t.strides != nullptr ? t.strides[k] * r.itemsize : stride;
+        stride *= t.shape[k];
+    }
+    return r;
+}
+
+/** @brief The planes @p n touches as hazard references: one per bound plane of each launch, and the named planes of the other calls. */
+std::vector<eagle::graph::PlaneRef> plane_refs(const Node& n, int ordinal) {
+    std::vector<eagle::graph::PlaneRef> refs;
+    const auto add = [&](const eg_plane_s* p, const std::string& name, int access) {
+        if (p != nullptr && access >= 0) refs.push_back(plane_ref(*p, name, ordinal, access));
+    };
+    const auto add_plan = [&](const eg_plan_s& plan) {
+        for (std::size_t s = 0; s < plan.bindings.size(); ++s)
+            add(plan.bindings[s].plane, plan.unit->slots[s].name, slot_access(plan.unit->slots[s].role));
+    };
+    switch (n.kind) {
+        case Node::Launch: add_plan(*n.plan); break;
+        case Node::Run:
+            for (const eg_plan_s* plan : n.runner->plans) add_plan(*plan);
+            break;
+        case Node::Reduce:
+            add(n.reduce.in, "in", 0);
+            add(n.reduce.out, "out", 1);
+            add(n.reduce.comp, "comp", n.reduce.pair ? 1 : 0);
+            break;
+        case Node::Copy:
+        case Node::Fft:
+            add(n.src, "src", 0);
+            add(n.dst, "dst", 1);
+            break;
+        case Node::Gemm:
+            add(n.src, "a", 0);
+            add(n.rhs, "b", 0);
+            add(n.dst, "c", 1);
+            break;
+        case Node::Cond:
+            add(n.cell, "cell", 0);
+            add(n.baseline, "baseline", 0);
+            break;
+    }
+    return refs;
+}
+
+/** @brief The recording of @p n: its hazard references and its place in every open fork branch. */
+void note(eg_recording_s& rec, const Node& n) {
+    const int ordinal = rec.nodes();
+    rec.names.push_back(describe(n));
+    for (eagle::graph::PlaneRef& r : plane_refs(n, ordinal)) rec.refs.push_back(std::move(r));
+    for (eg_recording_s::Frame& f : rec.frames)
+        if (f.cond == nullptr) f.branches.back().push_back(ordinal);
+}
+
+/** @brief The branch of each node ordinal in the fork @p f (-1: not in it). */
+std::vector<int> branch_table(const eg_recording_s& rec, const eg_recording_s::Frame& f) {
+    std::vector<int> branch_of(static_cast<std::size_t>(rec.nodes()), -1);
+    for (std::size_t b = 0; b < f.branches.size(); ++b)
+        for (eagle::graph::gidx i : f.branches[b]) branch_of[static_cast<std::size_t>(i)] = static_cast<int>(b);
+    return branch_of;
 }
 
 /** @brief What the driver's host node runs at each replay, on a driver thread: the recorded step on the context's host
@@ -142,10 +242,20 @@ bool record(eg_ctx& ctx, Node&& node) {
     std::vector<Node>& list = ctx.rec->current();
     list.push_back(std::move(node));
     retain(list.back());
+    note(*ctx.rec, list.back());
     return true;
 }
 
-/** @brief Run @p nodes in order; each conditional reads its int32 cell now. */
+/** @brief Element @p index of the one-dimensional 32-bit plane @p p, read now. */
+std::int32_t element(const eg_plane_s& p, std::int64_t index) {
+    const DLTensor& t = p.tensor->dl_tensor;
+    const std::int64_t stride = t.strides != nullptr ? t.strides[0] : 1;
+    std::int32_t v;
+    std::memcpy(&v, static_cast<const char*>(t.data) + t.byte_offset + index * stride * 4, sizeof(v));
+    return v;
+}
+
+/** @brief Run @p nodes in order; each conditional reads its cell now. */
 void replay(eg_ctx& ctx, const std::vector<Node>& nodes) {
     for (const Node& n : nodes) run_node(ctx, n);
 }
@@ -164,16 +274,20 @@ void run_node(eg_ctx& ctx, const Node& n) {
         case Node::Fft: host::fft_exec(*n.fft, *n.src, *n.dst, host::team_threads(ctx)); break;
         case Node::Gemm: host::gemm_exec(*n.gemm, *n.src, *n.rhs, *n.dst); break;
         case Node::Cond: {
-            const DLTensor& t = n.cell->tensor->dl_tensor;
-            const auto* cell = reinterpret_cast<const std::int32_t*>(static_cast<const char*>(t.data) + t.byte_offset);
+            // int32 or uint32: equal or not, or an arm index, reads the same bits
+            const auto truth = [&] {
+                const std::int32_t base = n.baseline != nullptr ? element(*n.baseline, n.baseline_index) : 0;
+                return (element(*n.cell, n.cell_index) != base) != n.negate;
+            };
             if (n.cond == EG_COND_IF) {
-                if (*cell != 0) replay(ctx, n.arms[0]);
+                if (truth()) replay(ctx, n.arms[0]);
             } else if (n.cond == EG_COND_IF_ELSE) {
-                replay(ctx, n.arms[*cell != 0 ? 0 : 1]);
+                replay(ctx, n.arms[truth() ? 0 : 1]);
             } else if (n.cond == EG_COND_WHILE) {
-                while (*cell != 0) replay(ctx, n.arms[0]);
-            } else if (*cell >= 0 && static_cast<std::size_t>(*cell) < n.want) {
-                replay(ctx, n.arms[static_cast<std::size_t>(*cell)]);
+                for (std::int64_t i = 0; (n.max_iters == 0 || i < n.max_iters) && truth(); ++i) replay(ctx, n.arms[0]);
+            } else {
+                const std::int32_t arm = element(*n.cell, n.cell_index);
+                if (arm >= 0 && static_cast<std::size_t>(arm) < n.want) replay(ctx, n.arms[static_cast<std::size_t>(arm)]);
             }
             break;
         }
@@ -183,6 +297,20 @@ void run_node(eg_ctx& ctx, const Node& n) {
 eg_recording_s& recording(eg_ctx& ctx) {
     if (ctx.rec == nullptr) refuse(EG_BAD_REQUEST, "not recording: call eg_record_begin first");
     return *ctx.rec;
+}
+
+/** @brief The conditional the call @p call acts on: the innermost open frame must be one. */
+Node* innermost_cond(eg_recording_s& rec, const char* call) {
+    if (rec.frames.empty()) refuse(EG_BAD_REQUEST, std::string(call) + ": no conditional is open");
+    if (rec.frames.back().cond == nullptr) refuse(EG_BAD_REQUEST, std::string(call) + ": a fork is still open inside the conditional's arm");
+    return rec.frames.back().cond;
+}
+
+/** @brief The fork the call @p call acts on: the innermost open frame must be one. */
+eg_recording_s::Frame& innermost_fork(eg_recording_s& rec, const char* call) {
+    if (rec.frames.empty()) refuse(EG_BAD_REQUEST, std::string(call) + ": no fork is open");
+    if (rec.frames.back().cond != nullptr) refuse(EG_BAD_REQUEST, std::string(call) + ": a conditional is still open inside the fork branch");
+    return rec.frames.back();
 }
 
 }  // namespace
@@ -251,7 +379,8 @@ void record_begin(eg_ctx& ctx) {
 void record_cond_begin(eg_ctx& ctx, const eg_cond_desc* desc) {
     eg_recording_s& rec = recording(ctx);
     const eg_cond_desc d = read_input(desc, "eg_cond_desc");
-    if (d.flags != 0) refuse(EG_BAD_REQUEST, "eg_cond_desc.flags: unknown bits " + std::to_string(d.flags));
+    if ((d.flags & ~EG_COND_NEGATE) != 0)
+        refuse(EG_BAD_REQUEST, "eg_cond_desc.flags: unknown bits " + std::to_string(d.flags & ~EG_COND_NEGATE));
     std::size_t want = 1;
     switch (d.kind) {
         case EG_COND_IF:
@@ -266,24 +395,48 @@ void record_cond_begin(eg_ctx& ctx, const eg_cond_desc* desc) {
     }
     if (d.kind != EG_COND_SWITCH && d.n_arms != 0)
         refuse(EG_BAD_REQUEST, "eg_cond_desc.n_arms is for SWITCH only: pass 0");
+    if (d.kind == EG_COND_SWITCH && (d.flags & EG_COND_NEGATE) != 0)
+        refuse(EG_BAD_REQUEST, "eg_cond_desc.flags: EG_COND_NEGATE is not for SWITCH, whose cell is an arm index");
+    if (d.max_iters < 0 || (d.kind != EG_COND_WHILE && d.max_iters != 0))
+        refuse(EG_BAD_REQUEST, "eg_cond_desc.max_iters " + std::to_string(d.max_iters) + ": WHILE only, 0 or more");
+    if (d.kind == EG_COND_SWITCH && d.baseline != nullptr)
+        refuse(EG_BAD_REQUEST, "eg_cond_desc.baseline: not for SWITCH, whose cell is an arm index");
     check_handle(ctx.planes, d.cell, "eg_cond_desc.cell");
     const DLTensor& t = d.cell->tensor->dl_tensor;
-    if (t.dtype.code != kDLInt || t.dtype.bits != 32 || t.dtype.lanes != 1 || t.ndim < 1 || t.shape[0] < 1)
-        refuse(EG_BAD_REQUEST, "eg_cond_desc.cell: an int32 plane of at least one element is expected");
+    const auto check_element = [](const DLTensor& plane, std::int64_t index, const char* what) {
+        if (index < 0 || index >= plane.shape[0])
+            refuse(EG_BAD_REQUEST, std::string(what) + "_index " + std::to_string(index) + " is outside the plane's " + std::to_string(plane.shape[0]) + " element(s)");
+    };
+    if ((t.dtype.code != kDLInt && t.dtype.code != kDLUInt) || t.dtype.bits != 32 || t.dtype.lanes != 1 || t.ndim != 1)
+        refuse(EG_BAD_REQUEST, "eg_cond_desc.cell: a one-dimensional int32 or uint32 plane is expected");
+    check_element(t, d.cell_index, "eg_cond_desc.cell");
+    if (d.baseline != nullptr) {
+        check_handle(ctx.planes, d.baseline, "eg_cond_desc.baseline");
+        const DLTensor& b = d.baseline->tensor->dl_tensor;
+        if (b.dtype.code != t.dtype.code || b.dtype.bits != 32 || b.dtype.lanes != 1 || b.ndim != 1)
+            refuse(EG_BAD_REQUEST, "eg_cond_desc.baseline: a one-dimensional plane of the dtype of the cell is expected");
+        check_element(b, d.baseline_index, "eg_cond_desc.baseline");
+    }
     Node n;
     n.kind = Node::Cond;
     n.cond = d.kind;
     n.cell = d.cell;
+    n.cell_index = d.cell_index;
+    n.baseline = d.baseline;
+    n.baseline_index = d.baseline_index;
     n.want = want;
+    n.negate = (d.flags & EG_COND_NEGATE) != 0;
+    n.max_iters = d.max_iters;
     n.arms.emplace_back();                      // the first arm is being recorded
     record(ctx, std::move(n));
-    rec.open.push_back(&rec.current().back());
+    eg_recording_s::Frame frame;
+    frame.cond = &rec.current().back();
+    rec.frames.push_back(std::move(frame));
 }
 
 void record_cond_arm(eg_ctx& ctx) {
     eg_recording_s& rec = recording(ctx);
-    if (rec.open.empty()) refuse(EG_BAD_REQUEST, "eg_record_cond_arm: no conditional is open");
-    Node& n = *rec.open.back();
+    Node& n = *innermost_cond(rec, "eg_record_cond_arm");
     if (n.arms.size() >= n.want)
         refuse(EG_BAD_REQUEST, "eg_record_cond_arm: this conditional takes " + std::to_string(n.want) +
                " arm(s) and all are open");
@@ -292,24 +445,79 @@ void record_cond_arm(eg_ctx& ctx) {
 
 void record_cond_end(eg_ctx& ctx) {
     eg_recording_s& rec = recording(ctx);
-    if (rec.open.empty()) refuse(EG_BAD_REQUEST, "eg_record_cond_end: no conditional is open");
-    const Node& n = *rec.open.back();
+    const Node& n = *innermost_cond(rec, "eg_record_cond_end");
     if (n.arms.size() != n.want)
         refuse(EG_BAD_REQUEST, "eg_record_cond_end: the conditional has " + std::to_string(n.arms.size()) +
                " arm(s) of the " + std::to_string(n.want) + " it takes");
-    rec.open.pop_back();
+    rec.frames.pop_back();
 }
 
-void record_fork_begin(eg_ctx&) { refuse(EG_NOT_WRITTEN, "eg_record_fork_begin is not written in this build of the door"); }
-void record_fork_branch(eg_ctx&) { refuse(EG_NOT_WRITTEN, "eg_record_fork_branch is not written in this build of the door"); }
-void record_fork_end(eg_ctx&) { refuse(EG_NOT_WRITTEN, "eg_record_fork_end is not written in this build of the door"); }
-void record_wait(eg_ctx&, std::int32_t, eg_plane_s* const*) { refuse(EG_NOT_WRITTEN, "eg_record_wait is not written in this build of the door"); }
+void record_fork_begin(eg_ctx& ctx) {
+    eg_recording_s::Frame frame;
+    frame.branches.emplace_back();
+    recording(ctx).frames.push_back(std::move(frame));
+}
+
+void record_fork_branch(eg_ctx& ctx) {
+    eg_recording_s::Frame& fork = innermost_fork(recording(ctx), "eg_record_fork_branch");
+    if (fork.branches.back().empty()) refuse(EG_BAD_REQUEST, "eg_record_fork_branch: the branch is empty");
+    fork.branches.emplace_back();
+}
+
+void record_fork_end(eg_ctx& ctx) {
+    eg_recording_s& rec = recording(ctx);
+    eg_recording_s::Frame& fork = innermost_fork(rec, "eg_record_fork_end");
+    if (fork.branches.back().empty()) refuse(EG_BAD_REQUEST, "eg_record_fork_end: the branch is empty");
+    eagle::graph::SiblingGroup group;
+    group.branches = fork.branches;
+    const std::vector<int> branch_of = branch_table(rec, fork);
+    for (const eagle::graph::Conflict& c : eagle::graph::siblingConflicts(rec.refs, std::vector<eagle::graph::SiblingGroup>{ group })) {
+        const auto after_wait = [&](const eg_recording_s::Order& o) {
+            return o.from == c.a && o.branch == branch_of[static_cast<std::size_t>(c.b)] && c.b >= o.since;
+        };
+        if (std::any_of(fork.ordered.begin(), fork.ordered.end(), after_wait)) continue;
+        const std::string reason = "eg_record_fork_end: a " + std::string(eagle::graph::kindName(c.kind)) + " race between node " +
+                                   std::to_string(c.a) + " (" + rec.names[static_cast<std::size_t>(c.a)] + ") slot '" + c.planeA +
+                                   "' and node " + std::to_string(c.b) + " (" + rec.names[static_cast<std::size_t>(c.b)] + ") slot '" +
+                                   c.planeB + "' of different branches: give the branches disjoint planes or order them with "
+                                   "eg_record_wait; the recording is ended";
+        release(ctx, rec.top);
+        delete ctx.rec;
+        ctx.rec = nullptr;
+        refuse(EG_BAD_REQUEST, reason);
+    }
+    rec.frames.pop_back();
+}
+
+void record_wait(eg_ctx& ctx, std::int32_t n_planes, eg_plane_s* const* planes) {
+    eg_recording_s& rec = recording(ctx);
+    eg_recording_s::Frame& fork = innermost_fork(rec, "eg_record_wait");
+    if (n_planes < 1 || planes == nullptr) refuse(EG_BAD_REQUEST, "eg_record_wait: n_planes " + std::to_string(n_planes) + " without planes");
+    const std::vector<int> branch_of = branch_table(rec, fork);
+    const int mine = static_cast<int>(fork.branches.size()) - 1;
+    std::vector<int> writers;                   // the nodes of earlier sibling branches that write a named plane
+    for (std::int32_t k = 0; k < n_planes; ++k) {
+        const std::string at = "eg_record_wait: planes[" + std::to_string(k) + "]";
+        check_handle(ctx.planes, planes[k], at.c_str());
+        const eagle::graph::PlaneRef named = plane_ref(*planes[k], at, -1, 0);
+        bool found = false;
+        for (const eagle::graph::PlaneRef& r : rec.refs) {
+            const int branch = branch_of[static_cast<std::size_t>(r.node)];
+            if (branch < 0 || r.access == 0 || !eagle::graph::detail::overlap(named, r)) continue;
+            if (branch == mine) refuse(EG_BAD_REQUEST, at + " is written by this branch (node " + std::to_string(r.node) + " slot '" + r.name + "')");
+            writers.push_back(r.node);
+            found = true;
+        }
+        if (!found) refuse(EG_BAD_REQUEST, at + " is written by no earlier sibling branch");
+    }
+    for (int from : writers) fork.ordered.push_back({ from, mine, rec.nodes() });
+}
 
 void record_end(eg_ctx& ctx, const eg_record_end_desc* desc, eg_graph** out) {
     if (out == nullptr) refuse(EG_BAD_REQUEST, "eg_record_end: out is NULL");
     *out = nullptr;
     eg_recording_s& rec = recording(ctx);
-    if (!rec.open.empty()) refuse(EG_BAD_REQUEST, "eg_record_end: a conditional is still open");
+    if (!rec.frames.empty()) refuse(EG_BAD_REQUEST, "eg_record_end: a conditional or fork is still open");
     std::unique_ptr<GraphDiff> diff;
     if (desc != nullptr) {
         const eg_record_end_desc d = read_input(desc, "eg_record_end_desc");

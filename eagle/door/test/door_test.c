@@ -1184,7 +1184,7 @@ static void check_recording_states(eg_ctx* ctx) {
     d.cell = pf;
     all = all && eg_record_cond_begin(ctx, &d) == EG_BAD_REQUEST && reason_has(ctx, "int32");
     d.cell = pc;
-    d.flags = 1;
+    d.flags = 2;
     all = all && eg_record_cond_begin(ctx, &d) == EG_BAD_REQUEST && reason_has(ctx, "unknown bits");
     d.flags = 0;
     d.kind = 9;
@@ -1225,6 +1225,270 @@ static void check_recording_states(eg_ctx* ctx) {
           eg_plane_free(ctx, pf) == EG_OK;
     check(all && tc.deleted == 1 && tf.deleted == 1,
           "an empty-armed graph replays and frees its planes");
+}
+
+/* Fork, join and wait over copies of int32 cells. Oracle: the same copies run in recording order, written out by hand. */
+static void check_fork_join(eg_ctx* ctx) {
+    int32_t v[6] = { 11, 22, 0, 0, 0, 0 };
+    struct tensor t[6];
+    eg_plane* p[6];
+    int ok = 1;
+    for (int i = 0; i < 6; ++i) ok = ok && (p[i] = cell_at(ctx, &t[i], &v[i]));
+    if (!ok) {
+        check(0, "fork and join planes wrapped");
+        return;
+    }
+    eg_plane *s1 = p[0], *s2 = p[1], *d1 = p[2], *d2 = p[3], *dd = p[4];
+    eg_graph *g = NULL, *none = NULL;
+
+    ok = eg_record_begin(ctx) == EG_OK && eg_record_fork_begin(ctx) == EG_OK && eg_copy(ctx, s1, d1) == EG_OK &&
+         eg_record_fork_branch(ctx) == EG_OK && eg_copy(ctx, s2, d2) == EG_OK && eg_record_fork_end(ctx) == EG_OK &&
+         eg_record_end(ctx, NULL, &g) == EG_OK && v[2] == 0 && v[3] == 0 && eg_graph_launch(ctx, g) == EG_OK;
+    check(ok && v[2] == 11 && v[3] == 22 && eg_graph_free(ctx, g) == EG_OK,
+          "two branches writing disjoint planes, then a join: the recording runs nothing and a replay gives the recording-order values");
+
+    /* a race: two branches write one plane with no wait */
+    ok = eg_record_begin(ctx) == EG_OK && eg_record_fork_begin(ctx) == EG_OK && eg_copy(ctx, s1, dd) == EG_OK &&
+         eg_record_fork_branch(ctx) == EG_OK && eg_copy(ctx, s2, dd) == EG_OK;
+    ok = ok && eg_record_fork_end(ctx) == EG_BAD_REQUEST && reason_has(ctx, "WAW race between node 0 (eg_copy) slot 'dst' and node 1 (eg_copy) slot 'dst'");
+    check(ok && eg_record_end(ctx, NULL, &none) == EG_BAD_REQUEST && reason_has(ctx, "not recording"),
+          "a race between sibling branches is refused at eg_record_fork_end naming both ordinals, both slots and the hazard; the recording ends");
+    ok = eg_record_begin(ctx) == EG_OK && eg_record_fork_begin(ctx) == EG_OK && eg_copy(ctx, s1, d1) == EG_OK &&
+         eg_record_fork_branch(ctx) == EG_OK && eg_copy(ctx, d1, d2) == EG_OK;
+    check(ok && eg_record_fork_end(ctx) == EG_BAD_REQUEST && reason_has(ctx, "RAW race between node 0 (eg_copy) slot 'dst' and node 1 (eg_copy) slot 'src'"),
+          "a branch that reads what a sibling branch writes is a RAW race");
+
+    /* the same with a wait: accepted, and the reader sees the sibling's value */
+    v[2] = v[3] = 0;
+    ok = eg_record_begin(ctx) == EG_OK && eg_record_fork_begin(ctx) == EG_OK && eg_copy(ctx, s1, d1) == EG_OK &&
+         eg_record_fork_branch(ctx) == EG_OK && eg_record_wait(ctx, 1, &d1) == EG_OK && eg_copy(ctx, d1, d2) == EG_OK &&
+         eg_record_fork_end(ctx) == EG_OK && eg_record_end(ctx, NULL, &g) == EG_OK && eg_graph_launch(ctx, g) == EG_OK;
+    check(ok && v[2] == 11 && v[3] == 11 && eg_graph_free(ctx, g) == EG_OK,
+          "the same two branches with eg_record_wait on the written plane: accepted, and the second branch reads the first's value");
+
+    /* each wait refusal, then the recording is closed by its own race */
+    eg_plane* nullp = NULL;
+    ok = eg_record_begin(ctx) == EG_OK && eg_record_wait(ctx, 1, &d1) == EG_BAD_REQUEST && reason_has(ctx, "no fork is open");
+    ok = ok && eg_record_fork_begin(ctx) == EG_OK && eg_record_wait(ctx, 1, &d1) == EG_BAD_REQUEST && reason_has(ctx, "no earlier sibling branch") &&
+         eg_copy(ctx, s1, d1) == EG_OK && eg_record_fork_branch(ctx) == EG_OK;
+    ok = ok && eg_record_wait(ctx, 1, &d2) == EG_BAD_REQUEST && reason_has(ctx, "no earlier sibling branch") &&
+         eg_record_wait(ctx, 0, &d1) == EG_BAD_REQUEST && eg_record_wait(ctx, 1, &nullp) == EG_BAD_REQUEST &&
+         eg_copy(ctx, s2, d1) == EG_OK && eg_record_wait(ctx, 1, &d1) == EG_BAD_REQUEST && reason_has(ctx, "written by this branch");
+    check(ok && eg_record_fork_end(ctx) == EG_BAD_REQUEST, "eg_record_wait refused outside a fork, for a plane no earlier sibling writes, for a plane this branch writes, for no planes and for a NULL plane");
+
+    /* fork structure */
+    ok = eg_record_begin(ctx) == EG_OK && eg_record_fork_branch(ctx) == EG_BAD_REQUEST && reason_has(ctx, "no fork is open") &&
+         eg_record_fork_end(ctx) == EG_BAD_REQUEST && reason_has(ctx, "no fork is open") && eg_record_fork_begin(ctx) == EG_OK &&
+         eg_record_fork_branch(ctx) == EG_BAD_REQUEST && reason_has(ctx, "empty") && eg_record_fork_end(ctx) == EG_BAD_REQUEST &&
+         reason_has(ctx, "empty") && eg_copy(ctx, s1, d1) == EG_OK;
+    int32_t cell = 1;
+    struct tensor tc;
+    eg_plane* pc = cell_at(ctx, &tc, &cell);
+    struct eg_cond_desc d;
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    d.cell = pc;
+    ok = ok && pc && eg_record_cond_begin(ctx, &d) == EG_OK && eg_record_fork_end(ctx) == EG_BAD_REQUEST && reason_has(ctx, "conditional is still open") &&
+         eg_record_cond_end(ctx) == EG_OK && eg_record_fork_branch(ctx) == EG_OK && eg_copy(ctx, s2, d2) == EG_OK &&
+         eg_record_end(ctx, NULL, &none) == EG_BAD_REQUEST && reason_has(ctx, "still open") && eg_record_fork_end(ctx) == EG_OK &&
+         eg_record_end(ctx, NULL, &g) == EG_OK && eg_graph_free(ctx, g) == EG_OK;
+    check(ok, "fork calls refused by name: outside a fork, an empty branch, a conditional open inside the branch, the end with a fork open");
+
+    /* a fork inside a conditional arm; a conditional inside a branch */
+    ok = pc && eg_record_begin(ctx) == EG_OK && eg_record_cond_begin(ctx, &d) == EG_OK && eg_record_fork_begin(ctx) == EG_OK &&
+         eg_record_cond_arm(ctx) == EG_BAD_REQUEST && reason_has(ctx, "fork is still open") && eg_record_cond_end(ctx) == EG_BAD_REQUEST &&
+         eg_copy(ctx, s1, d1) == EG_OK && eg_record_fork_branch(ctx) == EG_OK && eg_copy(ctx, s2, d2) == EG_OK &&
+         eg_record_fork_end(ctx) == EG_OK && eg_record_cond_end(ctx) == EG_OK && eg_record_end(ctx, NULL, &g) == EG_OK;
+    v[2] = v[3] = 0;
+    cell = 0;
+    ok = ok && eg_graph_launch(ctx, g) == EG_OK && v[2] == 0 && v[3] == 0;
+    cell = 1;
+    ok = ok && eg_graph_launch(ctx, g) == EG_OK && v[2] == 11 && v[3] == 22;
+    check(ok && eg_graph_free(ctx, g) == EG_OK, "a fork nested in a conditional arm: its branches run when the arm does and not otherwise");
+
+    /* NEGATE on IF, IF_ELSE, WHILE; refused on SWITCH */
+    d.flags = EG_COND_NEGATE;
+    ok = pc && eg_record_begin(ctx) == EG_OK && eg_record_cond_begin(ctx, &d) == EG_OK && eg_copy(ctx, s1, d1) == EG_OK &&
+         eg_record_cond_end(ctx) == EG_OK && eg_record_end(ctx, NULL, &g) == EG_OK;
+    v[2] = 0;
+    cell = 1;
+    ok = ok && eg_graph_launch(ctx, g) == EG_OK && v[2] == 0;
+    cell = 0;
+    ok = ok && eg_graph_launch(ctx, g) == EG_OK && v[2] == 11;
+    check(ok && eg_graph_free(ctx, g) == EG_OK, "a negated IF takes its arm when the cell is zero");
+    d.kind = EG_COND_IF_ELSE;
+    ok = eg_record_begin(ctx) == EG_OK && eg_record_cond_begin(ctx, &d) == EG_OK && eg_copy(ctx, s1, d1) == EG_OK &&
+         eg_record_cond_arm(ctx) == EG_OK && eg_copy(ctx, s2, d1) == EG_OK && eg_record_cond_end(ctx) == EG_OK &&
+         eg_record_end(ctx, NULL, &g) == EG_OK;
+    cell = 0;
+    ok = ok && eg_graph_launch(ctx, g) == EG_OK && v[2] == 11;
+    cell = 5;
+    ok = ok && eg_graph_launch(ctx, g) == EG_OK && v[2] == 22;
+    check(ok && eg_graph_free(ctx, g) == EG_OK, "a negated IF_ELSE takes arm 0 when the cell is zero and arm 1 otherwise");
+    d.kind = EG_COND_WHILE;
+    ok = eg_record_begin(ctx) == EG_OK && eg_record_cond_begin(ctx, &d) == EG_OK && eg_copy(ctx, s1, d2) == EG_OK &&
+         eg_copy(ctx, s1, pc) == EG_OK && eg_record_cond_end(ctx) == EG_OK && eg_record_end(ctx, NULL, &g) == EG_OK;
+    v[3] = 0;
+    cell = 1;
+    ok = ok && eg_graph_launch(ctx, g) == EG_OK && v[3] == 0;
+    cell = 0;
+    ok = ok && eg_graph_launch(ctx, g) == EG_OK && v[3] == 11 && cell == 11;
+    check(ok && eg_graph_free(ctx, g) == EG_OK, "a negated WHILE loops while the cell is zero");
+    d.kind = EG_COND_SWITCH;
+    d.n_arms = 2;
+    ok = eg_record_begin(ctx) == EG_OK && eg_record_cond_begin(ctx, &d) == EG_BAD_REQUEST && reason_has(ctx, "NEGATE");
+    d.flags = 0;
+    d.n_arms = 0;
+    d.kind = EG_COND_IF;
+    d.max_iters = 3;
+    ok = ok && eg_record_cond_begin(ctx, &d) == EG_BAD_REQUEST && reason_has(ctx, "max_iters");
+    d.kind = EG_COND_WHILE;
+    d.max_iters = -1;
+    ok = ok && eg_record_cond_begin(ctx, &d) == EG_BAD_REQUEST && reason_has(ctx, "max_iters");
+    d.max_iters = 0;
+    check(ok && eg_record_end(ctx, NULL, &g) == EG_OK && eg_graph_free(ctx, g) == EG_OK,
+          "EG_COND_NEGATE on SWITCH and max_iters on another kind or below 0 are refused by name");
+
+    /* WHILE max_iters: a shift register {1,1,1,1,0} leaves one place per pass; the cell is its first place */
+    int32_t b[5];
+    struct tensor tb[5];
+    eg_plane* pb[5];
+    ok = 1;
+    for (int i = 0; i < 5; ++i) ok = ok && (pb[i] = cell_at(ctx, &tb[i], &b[i]));
+    eg_graph *g_cap = NULL, *g_free = NULL;
+    d.cell = pb[0];
+    for (int cap = 0; ok && cap < 2; ++cap) {
+        d.max_iters = cap == 0 ? 0 : 2;
+        ok = eg_record_begin(ctx) == EG_OK && eg_record_cond_begin(ctx, &d) == EG_OK;
+        for (int i = 0; ok && i < 4; ++i) ok = eg_copy(ctx, pb[i + 1], pb[i]) == EG_OK;
+        ok = ok && eg_record_cond_end(ctx) == EG_OK && eg_record_end(ctx, NULL, cap == 0 ? &g_free : &g_cap) == EG_OK;
+    }
+    const int32_t start[5] = { 1, 1, 1, 1, 0 }, want_free[5] = { 0, 0, 0, 0, 0 }, want_cap[5] = { 1, 1, 0, 0, 0 };
+    memcpy(b, start, sizeof(b));
+    ok = ok && eg_graph_launch(ctx, g_free) == EG_OK && memcmp(b, want_free, sizeof(b)) == 0;
+    memcpy(b, start, sizeof(b));
+    ok = ok && eg_graph_launch(ctx, g_cap) == EG_OK && memcmp(b, want_cap, sizeof(b)) == 0;
+    check(ok, "a WHILE with max_iters 2 stops after two passes without error; with 0 it runs to its end");
+    ok = ok && eg_graph_free(ctx, g_free) == EG_OK && eg_graph_free(ctx, g_cap) == EG_OK;
+    for (int i = 0; i < 5; ++i) ok = ok && eg_plane_free(ctx, pb[i]) == EG_OK;
+
+    /* a uint32 cell; any other dtype or size is refused */
+    uint32_t u = 7, two[2] = { 1, 1 };
+    struct tensor tu, t2;
+    eg_plane* pu = wrap(ctx, &tu, &u, 1, kDLUInt, 32);
+    eg_plane* p2 = wrap(ctx, &t2, two, 2, kDLInt, 32);
+    d.cell = pu;
+    d.kind = EG_COND_IF;
+    d.max_iters = 0;
+    ok = pu && p2 && eg_record_begin(ctx) == EG_OK && eg_record_cond_begin(ctx, &d) == EG_OK && eg_copy(ctx, s1, d1) == EG_OK &&
+         eg_record_cond_end(ctx) == EG_OK;
+    d.cell = p2;
+    d.cell_index = 2;
+    ok = ok && eg_record_cond_begin(ctx, &d) == EG_BAD_REQUEST && reason_has(ctx, "cell_index") && eg_record_end(ctx, NULL, &g) == EG_OK;
+    v[2] = 0;
+    ok = ok && eg_graph_launch(ctx, g) == EG_OK && v[2] == 11;
+    u = 0;
+    v[2] = 0;
+    ok = ok && eg_graph_launch(ctx, g) == EG_OK && v[2] == 0;
+    d.cell_index = 0;
+    check(ok && eg_graph_free(ctx, g) == EG_OK, "a uint32 cell tests like an int32 one; a cell index outside the plane is refused by name");
+
+    /* D8: the test reads cell[cell_index] against baseline[baseline_index]; oracle: the comparison written out by hand */
+    int32_t lanes[4] = { 0, 0, 0, 0 }, count[1] = { 3 }, base[2] = { 0, 3 };
+    struct tensor tl, tn, tbs;
+    eg_plane *pl = wrap(ctx, &tl, lanes, 4, kDLInt, 32), *pn = wrap(ctx, &tn, count, 1, kDLInt, 32), *pbs = wrap(ctx, &tbs, base, 2, kDLInt, 32);
+    memset(&d, 0, sizeof(d));
+    d.struct_size = sizeof(d);
+    d.kind = EG_COND_IF;
+    d.cell = pl;
+    d.cell_index = 2;
+    ok = pl && pn && pbs && eg_record_begin(ctx) == EG_OK && eg_record_cond_begin(ctx, &d) == EG_OK && eg_copy(ctx, s1, d1) == EG_OK &&
+         eg_record_cond_end(ctx) == EG_OK && eg_record_end(ctx, NULL, &g) == EG_OK;
+    v[2] = 0;
+    lanes[0] = lanes[1] = lanes[3] = 9;
+    ok = ok && eg_graph_launch(ctx, g) == EG_OK && v[2] == 0;
+    lanes[2] = 1;
+    ok = ok && eg_graph_launch(ctx, g) == EG_OK && v[2] == 11;
+    check(ok && eg_graph_free(ctx, g) == EG_OK, "an IF on lane 2 of a 4-lane flag array reads that lane at each replay, whatever the other lanes hold");
+    for (int negate = 0; negate < 2; ++negate) {
+        d.cell = pn;
+        d.cell_index = 0;
+        d.baseline = pbs;
+        d.baseline_index = 1;
+        d.flags = negate ? EG_COND_NEGATE : 0;
+        ok = eg_record_begin(ctx) == EG_OK && eg_record_cond_begin(ctx, &d) == EG_OK && eg_copy(ctx, s1, d1) == EG_OK &&
+             eg_record_cond_end(ctx) == EG_OK && eg_record_end(ctx, NULL, &g) == EG_OK;
+        for (int equal = 0; ok && equal < 2; ++equal) {
+            count[0] = equal ? 3 : 4;
+            v[2] = 0;
+            ok = eg_graph_launch(ctx, g) == EG_OK && (v[2] == 11) == ((count[0] != 3) != negate);
+        }
+        check(ok && eg_graph_free(ctx, g) == EG_OK, negate ? "a negated test against a baseline element runs the arm when count == baseline"
+                                                           : "a test against a baseline element runs the arm when count != baseline and skips it when equal");
+    }
+    d.flags = 0;
+    d.kind = EG_COND_SWITCH;
+    d.n_arms = 2;
+    ok = eg_record_begin(ctx) == EG_OK && eg_record_cond_begin(ctx, &d) == EG_BAD_REQUEST && reason_has(ctx, "baseline");
+    d.baseline = NULL;
+    d.kind = EG_COND_IF;
+    d.n_arms = 0;
+    d.cell = pl;
+    d.cell_index = -1;
+    ok = ok && eg_record_cond_begin(ctx, &d) == EG_BAD_REQUEST && reason_has(ctx, "cell_index");
+    d.cell_index = 0;
+    d.baseline = pbs;
+    d.baseline_index = 2;
+    ok = ok && eg_record_cond_begin(ctx, &d) == EG_BAD_REQUEST && reason_has(ctx, "baseline_index");
+    check(ok && eg_record_end(ctx, NULL, &g) == EG_OK && eg_graph_free(ctx, g) == EG_OK, "a baseline on SWITCH and an index outside the cell or the baseline are refused by name");
+    eg_plane_free(ctx, pl);
+    eg_plane_free(ctx, pn);
+    eg_plane_free(ctx, pbs);
+    for (int i = 0; i < 6; ++i) eg_plane_free(ctx, p[i]);
+    eg_plane_free(ctx, pc);
+    eg_plane_free(ctx, pu);
+    eg_plane_free(ctx, p2);
+}
+
+/* Launches in branches: the slots' roles give the hazards; a plain graph reads a plan's new binding at its next replay. */
+static void check_fork_launches(eg_ctx* ctx, eg_unit* axpb) {
+    enum { K = RN };
+    static double y1[K], y2[K];
+    const double a = 0.5, b = 1.0;
+    struct tensor t1, t2;
+    for (int i = 0; i < K; ++i) y1[i] = 4.0, y2[i] = 8.0;
+    eg_plane *p1 = wrap(ctx, &t1, y1, K, kDLFloat, 64), *p2 = wrap(ctx, &t2, y2, K, kDLFloat, 64);
+    eg_plan *pl1 = NULL, *pl2 = NULL;
+    int ok = p1 && p2 && plan(ctx, axpb, EG_STRUCTURE_HOST_SERIAL, K, 0, NULL, NULL, &pl1) == EG_OK &&
+             plan(ctx, axpb, EG_STRUCTURE_HOST_SERIAL, K, 0, NULL, NULL, &pl2) == EG_OK &&
+             bind(ctx, pl1, p1, p1, &a, &b) == EG_OK && bind(ctx, pl2, p2, p2, &a, &b) == EG_OK;
+    if (!ok) {
+        check(0, "fork launch plans made");
+        return;
+    }
+    eg_graph* g = NULL;
+    ok = eg_record_begin(ctx) == EG_OK && eg_record_fork_begin(ctx) == EG_OK && eg_launch(ctx, pl1, NULL) == EG_OK &&
+         eg_record_fork_branch(ctx) == EG_OK && eg_launch(ctx, pl2, NULL) == EG_OK && eg_record_fork_end(ctx) == EG_OK &&
+         eg_record_end(ctx, NULL, &g) == EG_OK && eg_graph_launch(ctx, g) == EG_OK;
+    check(ok && y1[0] == 3.0 && y2[0] == 5.0 && y1[K - 1] == 3.0 && y2[K - 1] == 5.0, "two launches of plans on disjoint planes in two branches both run once (a*y + b)");
+    eg_graph* none = NULL;
+    ok = eg_record_begin(ctx) == EG_OK && eg_record_fork_begin(ctx) == EG_OK && eg_launch(ctx, pl1, NULL) == EG_OK &&
+         eg_record_fork_branch(ctx) == EG_OK && eg_launch(ctx, pl1, NULL) == EG_OK;
+    check(ok && eg_record_fork_end(ctx) == EG_BAD_REQUEST && reason_has(ctx, "race between node 0 (eg_launch of unit") && eg_record_end(ctx, NULL, &none) == EG_BAD_REQUEST,
+          "two launches of a plan writing one plane in two branches are a race, named by node and unit");
+
+    /* a plain graph reads the plan's new binding at its next launch */
+    ok = eg_record_begin(ctx) == EG_OK && eg_launch(ctx, pl1, NULL) == EG_OK;
+    eg_graph* gp = NULL;
+    ok = ok && eg_record_end(ctx, NULL, &gp) == EG_OK;
+    y1[0] = 4.0;
+    y2[0] = 8.0;
+    ok = ok && eg_graph_launch(ctx, gp) == EG_OK && y1[0] == 3.0 && y2[0] == 8.0 && bind(ctx, pl1, p2, p2, &a, &b) == EG_OK &&
+         eg_graph_launch(ctx, gp) == EG_OK && y1[0] == 3.0 && y2[0] == 5.0;
+    check(ok, "a plan rebound after the recording: the next replay of the plain graph runs on the new plane");
+    ok = eg_graph_free(ctx, g) == EG_OK && eg_graph_free(ctx, gp) == EG_OK && eg_plan_free(ctx, pl1) == EG_OK && eg_plan_free(ctx, pl2) == EG_OK &&
+         eg_plane_free(ctx, p1) == EG_OK && eg_plane_free(ctx, p2) == EG_OK;
+    check(ok, "fork graphs, plans and planes freed");
 }
 
 /* y = a*y + b in place over RN samples (axpb with x = y), then sum y into s, then copy s into t:
@@ -4435,12 +4699,14 @@ int main(int argc, char** argv) {
     check_fft_threads();
     check_conditionals(ctx);
     check_recording_states(ctx);
+    check_fork_join(ctx);
     {
         eg_unit *c1 = NULL;
         check(load(ctx, "count1", 0xD1, &c1) == EG_OK, "eg_unit_load count1 for the recorded list");
         if (c1 != NULL) {
             eg_host_threads(ctx, 3);
             check_recorded_list(ctx, unit, c1);
+            check_fork_launches(ctx, unit);
             eg_host_threads(ctx, 1);
             eg_unit_free(ctx, c1);
         }

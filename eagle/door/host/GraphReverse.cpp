@@ -29,11 +29,6 @@ struct Contribution {
     Bytes bytes;
 };
 
-bool reads_role(std::int32_t r) {
-    return r == EG_ROLE_PER_SAMPLE || r == EG_ROLE_LOOKUP || r == EG_ROLE_VEC_IN || r == EG_ROLE_MAT_IN || r == EG_ROLE_WIDE_IN;
-}
-bool writes_role(std::int32_t r) { return r == EG_ROLE_MUTABLE || r == EG_ROLE_WIDE_OUT || r == EG_ROLE_ACCUM_OUT || r == EG_ROLE_OUT; }
-
 const DLTensor& tensor(const eg_plane_s& p) { return p.tensor->dl_tensor; }
 char* live(const eg_plane_s& p) { return static_cast<char*>(tensor(p).data) + tensor(p).byte_offset; }
 std::size_t element_bytes(const eg_plane_s& p) { return static_cast<std::size_t>(tensor(p).dtype.bits / 8); }
