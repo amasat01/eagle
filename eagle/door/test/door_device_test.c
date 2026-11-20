@@ -1792,6 +1792,12 @@ static eg_status gb_cond(struct gb* g, int kind, uint32_t flags, int32_t arms, e
 /* One replay of the graph, then eg_sync: OK. */
 static int gb_replay(struct gb* g, eg_graph* gr) { return eg_graph_launch(g->ctx, gr) == EG_OK && eg_sync(g->ctx) == EG_OK; }
 
+static int gb_edge(const struct eg_graph_description* d, int from, int to, eg_gedge_kind kind, const eg_plane* plane) {
+    for (int i = 0; i < d->n_edges; ++i)
+        if (d->edges[i].from == from && d->edges[i].to == to && d->edges[i].kind == kind && d->edges[i].plane == plane) return 1;
+    return 0;
+}
+
 /* A recording a failed row left open would fail every row after it: start over on a fresh context. */
 #define GB_SECTION_END()                                         \
     do {                                                         \
@@ -1827,10 +1833,10 @@ static void graph_builder_device(const char* dev_lib) {
     eg_plane* w1[1] = { g.p1 };
     eg_plane* wx[1] = { g.px };
     eg_plane* w2[1] = { g.p2 };
-    ok = eg_record_begin(c) == EG_OK && refused(eg_record_wait(c, 1, w1), EG_BAD_REQUEST, c, "outside a fork branch") &&
+    ok = eg_record_begin(c) == EG_OK && refused(eg_record_wait(c, 1, w1), EG_BAD_REQUEST, c, "no fork is open") &&
          eg_record_fork_begin(c) == EG_OK && refused(eg_record_fork_branch(c), EG_BAD_REQUEST, c, "empty") && eg_launch(c, g.a, NULL) == EG_OK &&
          refused(eg_record_wait(c, 1, w1), EG_BAD_REQUEST, c, "written by this branch") && eg_record_fork_branch(c) == EG_OK &&
-         refused(eg_record_wait(c, 1, wx), EG_BAD_REQUEST, c, "no earlier branch writes") && eg_record_wait(c, 1, w1) == EG_OK &&
+         refused(eg_record_wait(c, 1, wx), EG_BAD_REQUEST, c, "written by no earlier sibling branch") && eg_record_wait(c, 1, w1) == EG_OK &&
          eg_launch(c, g.c, NULL) == EG_OK && refused(eg_record_wait(c, 1, w2), EG_BAD_REQUEST, c, "written by this branch") &&
          eg_record_fork_end(c) == EG_OK && eg_record_end(c, NULL, &gr) == EG_OK;
     if (!ok) reason_has(c, "(the wait recording was refused)");
@@ -1845,6 +1851,19 @@ static void graph_builder_device(const char* dev_lib) {
             same &= memcmp(&got[i], &want, sizeof(want)) == 0;
         }
         check(ok && same, "device wait: the dependent branch ran after its producer, 3 replays: 2 (2 x + 1) + 1 bitwise");
+    }
+    {   /* the description the door built at record time: a fork of two branches, a wait, a launch ordered after its producer */
+        struct eg_graph_description d;
+        memset(&d, 0, sizeof(d));
+        d.struct_size = sizeof(d);
+        const int described = ok && eg_graph_describe(c, gr, &d) == EG_OK && d.n_nodes == 7;
+        check(described && d.nodes[0].kind == EG_GNODE_FORK && d.nodes[1].kind == EG_GNODE_BRANCH && d.nodes[1].parent == 0 && d.nodes[2].kind == EG_GNODE_LAUNCH &&
+                  d.nodes[2].parent == 1 && d.nodes[3].kind == EG_GNODE_BRANCH && d.nodes[3].arm == 1 && d.nodes[4].kind == EG_GNODE_WAIT && d.nodes[4].parent == 3 &&
+                  d.nodes[5].kind == EG_GNODE_LAUNCH && d.nodes[5].parent == 3 && d.nodes[6].kind == EG_GNODE_JOIN && d.nodes[6].parent == -1,
+              "device description: fork, two branches, a wait, two launches and the join, with their parents");
+        check(described && gb_edge(&d, 2, 4, EG_GEDGE_WAIT, g.p1) && gb_edge(&d, 2, 5, EG_GEDGE_RAW, g.p1) && d.nodes[5].level > d.nodes[2].level && d.n_levels >= 3 &&
+                  d.nodes[2].unit != NULL && strcmp(d.nodes[2].unit, "dprefix") == 0,
+              "device description: the WAIT edge from the producer to the wait names its plane, the RAW edge to the reader, and the reader sits on a later level");
     }
     if (gr) eg_graph_free(c, gr);
     gr = NULL;
@@ -1866,6 +1885,14 @@ static void graph_builder_device(const char* dev_lib) {
     gb_flags(&g, 0, 0, 7);
     ok = ok && gb_replay(&g, gr);
     check(ok && gb_holds(g.d1, 1), "device IF: lane 2 rewritten to 7, the arm runs again (the test is read at each replay)");
+    {   /* a conditional's test, its arm and the launch in it */
+        struct eg_graph_description d;
+        memset(&d, 0, sizeof(d));
+        d.struct_size = sizeof(d);
+        check(ok && eg_graph_describe(c, gr, &d) == EG_OK && d.n_nodes == 3 && d.nodes[0].kind == EG_GNODE_COND && d.nodes[0].arm == EG_COND_IF && d.nodes[0].cell_index == 2 &&
+                  d.nodes[1].kind == EG_GNODE_ARM && d.nodes[1].parent == 0 && d.nodes[2].kind == EG_GNODE_LAUNCH && d.nodes[2].parent == 1,
+              "device description: a conditional's test (its kind and cell index), its arm and the launch inside it");
+    }
     if (gr) eg_graph_free(c, gr);
     gr = NULL;
     GB_SECTION_END();
@@ -1957,7 +1984,7 @@ static void graph_builder_device(const char* dev_lib) {
     if (!ok) reason_has(c, "(the nested recording was refused)");
     check(ok, "device nesting: a fork inside a conditional arm and a conditional inside a fork branch recorded; the open ones refuse the end and the wrong close by name");
     if (c != NULL) {    /* the last fork's branch 1 reads p1 that branch 0 writes: a race refused at its end */
-        check(ok && refused(eg_record_fork_end(c), EG_BAD_REQUEST, c, "a race") && reason_has(c, "node ") && reason_has(c, "slot "),
+        check(ok && refused(eg_record_fork_end(c), EG_BAD_REQUEST, c, "race between node") && reason_has(c, "node ") && reason_has(c, "slot "),
               "device race: branches touching one plane with no wait are refused at fork_end, naming both nodes and slots");
     }
     gb_free(&g);

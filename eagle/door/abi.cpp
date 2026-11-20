@@ -262,8 +262,8 @@ EG_EXPORT eg_status eg_graph_launch(eg_ctx* ctx, eg_graph* graph) {
 }
 EG_EXPORT eg_status eg_graph_describe(eg_ctx* ctx, const eg_graph* graph, struct eg_graph_description* out) {
     return door::call(ctx, [graph, out](eg_ctx& c) {
-        if (door::device_graph(c, graph)) door::refuse(EG_NOT_WRITTEN, "eg_graph_describe: the description of a device graph is not written in this build of the door");
-        door::graph_describe(c, graph, out);
+        if (door::device_graph(c, graph)) door::device_graph_describe(c, graph, out);
+        else door::graph_describe(c, graph, out);
     });
 }
 EG_EXPORT eg_status eg_graph_free(eg_ctx* ctx, eg_graph* graph) {

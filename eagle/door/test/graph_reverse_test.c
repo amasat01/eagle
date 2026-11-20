@@ -234,14 +234,9 @@ static void chain_row(struct rig* r, const struct units* u) {
     struct eg_graph_description desc;
     memset(&desc, 0, sizeof(desc));
     desc.struct_size = sizeof(desc);
-    if (r->device) {    /* a device graph keeps no description yet */
-        verdict(r, eg_graph_describe(ctx, graph, &desc) == EG_NOT_WRITTEN && reason_has(ctx, "description of a device graph"),
-                "eg_graph_describe of a device graph is refused NOT_WRITTEN by name");
-    } else {
-        verdict(r, eg_graph_describe(ctx, graph, &desc) == EG_OK && desc.flags == EG_RECORD_DIFF && desc.n_nodes == 2 &&
-                       desc.nodes[0].kind == EG_GNODE_LAUNCH && desc.n_levels == 2,
-                "eg_graph_describe of a graph ended with EG_RECORD_DIFF: the flag is set, two LAUNCH nodes on two levels");
-    }
+    verdict(r, eg_graph_describe(ctx, graph, &desc) == EG_OK && desc.flags == EG_RECORD_DIFF && desc.n_nodes == 2 &&
+                   desc.nodes[0].kind == EG_GNODE_LAUNCH && desc.n_levels == 2,
+            "eg_graph_describe of a graph ended with EG_RECORD_DIFF: the flag is set, two LAUNCH nodes on two levels");
     eg_graph_free(ctx, graph);
     eg_plan_free(ctx, f);
     eg_plan_free(ctx, g);

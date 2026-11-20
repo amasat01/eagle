@@ -217,6 +217,7 @@ void record_host_step(eg_ctx& ctx, Node&& node) {
  *  it as a host node of the capture. */
 bool record(eg_ctx& ctx, Node&& node) {
     if (ctx.dev_rec != nullptr) {
+        device_shape(ctx).add(gnode_kind(node), describe(node), unit_name(node), uses_of(node), facts_of(node));
         record_host_step(ctx, std::move(node));
         return true;
     }

@@ -6,6 +6,7 @@
 #pragma once
 
 #include "eagle/door/Context.h"
+#include "eagle/door/host/Shape.h"
 
 namespace eagle {
 namespace door {
@@ -44,6 +45,10 @@ void device_record_fork_end(eg_ctx& ctx);
 void device_record_wait(eg_ctx& ctx, std::int32_t n_planes, eg_plane_s* const* planes);
 /** @brief Whether the driver has IF_ELSE and SWITCH conditional nodes: the truth of the capability bits EG_CAP_COND_IF_ELSE and EG_CAP_COND_SWITCH on a device context. */
 bool device_cond_arms_supported();
+/** @brief The shape of the device recording in progress; the host calls it keeps as nodes (a host launch, run, copy ...) add themselves to it. */
+GraphShape& device_shape(eg_ctx& ctx);
+/** @brief eg_graph_describe of device graph @p graph: the description built at record time. */
+void device_graph_describe(eg_ctx& ctx, const eg_graph* graph, eg_graph_description* out);
 /** @brief The tape of device graph @p graph (null: it is a plain graph). */
 GraphDiff* device_graph_diff(eg_ctx& ctx, eg_graph* graph);
 /** @brief Record a HOST node on the capture in scope: when the graph replays, the driver's host-function launch calls
