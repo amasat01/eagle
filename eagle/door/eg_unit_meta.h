@@ -157,7 +157,9 @@ typedef int32_t eg_steps_regime;
 #define EG_SLOT_PARAM_PLANE (1u << 1) /**< a LOOKUP slot that is a parameter read at index 0 only: its gradient is the sum over
                                           samples into that one cell; eg_reverse of such a slot is not written in this build and is
                                           refused by name */
-#define EG_SLOT_GATHER (1u << 2)      /**< a matrix read only at lane indices: its column count is not the lane count */
+#define EG_SLOT_GATHER (1u << 2)      /**< compact along the lane axes ``gather`` keeps (m = the product of their extents):
+                                          a rank-2 MAT_IN is bound as (rows, cols, m); a LOOKUP, read flat by the kernel's
+                                          index over the kept axes, holds product(shape) x m elements */
 #define EG_SLOT_SHARED (1u << 3)      /**< a parameter plane with NO lane axis: one value for every lane, bound flat (eg_bind sizes it by its shape, not by lanes) */
 
 #define EG_FINISH_ENTRY_COUNTS (1u << 0) /**< the fast entries count samples finished on entry: the runner zeroes the counter, it does not count the mask */
@@ -177,7 +179,7 @@ struct eg_unit_slot {
     int32_t n_gather;         /**< entries of ``gather``: the launch's n_lane_axes for a GATHER slot of a launch with lane axes, else 0 */
     int32_t reserved0;
     const int64_t* shape;     /**< ``rank`` extents, NULL when rank is 0; the plane is (*shape, lanes) unless the role has a runtime length */
-    const uint8_t* gather;    /**< with EG_SLOT_GATHER: 1 for each lane axis the compact matrix varies along (eg_bind's column count); required, with ``n_gather`` equal to ``n_lane_axes``, on a unit whose launch has lane axes */
+    const uint8_t* gather;    /**< with EG_SLOT_GATHER: 1 for each lane axis the compact plane varies along (m, the count eg_bind checks); required, with ``n_gather`` equal to ``n_lane_axes``, on a unit whose launch has lane axes */
     const char* name;         /**< the declared name: hawk resolves names to slots; eagle's reasons quote it; joins a stage slot */
 };
 

@@ -962,6 +962,25 @@ static const struct eg_unit_meta unit_gath18 = {
     .struct_size = sizeof(struct eg_unit_meta), .name = "gath18", .digest = DIGEST(0xEA), .pattern = EG_PATTERN_PURE,
     .scalar_type = EG_SCALAR_FLOAT64, .host_entry = "gath_host", .device_image_format = EG_IMAGE_NONE,
     .body = &g18_body, .launch = &launch_18 };
+/* a broadcast vector read flat over both kept lane axes (a LOOKUP): 3 x 6 = 18 values; and a GATHER LOOKUP that also
+   claims to be SHARED, which contradicts itself */
+#define GATH_LOOKUP(var, flags_) static const struct eg_unit_slot var = {                                        \
+    .struct_size = sizeof(struct eg_unit_slot), .flags = flags_, .role = EG_ROLE_LOOKUP, .dtype = EG_DTYPE_REAL, \
+    .rank = 0, .like_slot = -1, .n_gather = 2, .gather = keep_both, .name = "x" }
+GATH_LOOKUP(slot_gl, EG_SLOT_GATHER);
+GATH_LOOKUP(slot_gls, EG_SLOT_GATHER | EG_SLOT_SHARED);
+static const struct eg_unit_slot* const gl_slots[] = { &slot_y, &slot_gl };
+static const struct eg_unit_slot* const gls_slots[] = { &slot_y, &slot_gls };
+GATH_BODY(gl_body, gl_slots);
+GATH_BODY(gls_body, gls_slots);
+static const struct eg_unit_meta unit_gathl = {
+    .struct_size = sizeof(struct eg_unit_meta), .name = "gathl", .digest = DIGEST(0xEB), .pattern = EG_PATTERN_PURE,
+    .scalar_type = EG_SCALAR_FLOAT64, .host_entry = "gath_host", .device_image_format = EG_IMAGE_NONE,
+    .body = &gl_body, .launch = &launch_18 };
+static const struct eg_unit_meta unit_gathls = {
+    .struct_size = sizeof(struct eg_unit_meta), .name = "gathls", .digest = DIGEST(0xEC), .pattern = EG_PATTERN_PURE,
+    .scalar_type = EG_SCALAR_FLOAT64, .host_entry = "gath_host", .device_image_format = EG_IMAGE_NONE,
+    .body = &gls_body, .launch = &launch_18 };
 
 /* a thread box and a shared parameter */
 static const struct eg_unit_box box_4_3 = { .struct_size = sizeof(struct eg_unit_box), .axis = 0, .t = 4, .stride = 3 };
@@ -1272,13 +1291,13 @@ static const struct eg_unit_meta* const units[] = { &unit_axpb, &unit_wait, &uni
                                                     &unit_sg_cls, &unit_sg_k0, &unit_sg_k1, &unit_sgf, &unit_dg_k0, &unit_dg_k1, &unit_dg_sweep, &unit_dgf,
                                                     &unit_sga_cls, &unit_sga_k0, &unit_sga_k1, &unit_sga_rare, &unit_sga_even, &unit_sga_scalar, &unit_sga_heavy,
                                                     &unit_auto_nocls, &unit_auto_nobr, &unit_auto_sweep, &unit_auto_nocost, &unit_auto_group, &unit_auto_steps, &unit_auto_k3,
-                                                    &unit_vecw, &unit_vecr, &unit_vecsplit, &unit_actrow };
+                                                    &unit_vecw, &unit_vecr, &unit_vecsplit, &unit_actrow, &unit_gathl, &unit_gathls };
 
 static const struct eg_library_meta library = {
     .struct_size = sizeof(struct eg_library_meta),
     .schema_major = EG_META_SCHEMA_MAJOR,
     .schema_minor = 0,
-    .n_units = 61,
+    .n_units = sizeof(units) / sizeof(units[0]),
     .units = units,
 };
 

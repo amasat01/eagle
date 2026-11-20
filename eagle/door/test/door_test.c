@@ -3511,6 +3511,46 @@ static void check_gather(eg_ctx* ctx) {
     }
 }
 
+/* A broadcast vector read flat over both kept lane axes (3 x 6) is a table of 18 values: 6 are refused at bind and at the rebind of
+   a bound plan, naming the count; a GATHER table that is also SHARED is refused at load. */
+static void check_gather_table(eg_ctx* ctx) {
+    enum { N = 36 };
+    static double y[N], x18[18], x6[6];
+    struct tensor ty, t18, t6;
+    eg_unit* unit = NULL;
+    eg_plan* p = NULL;
+    eg_plane *py = wrap(ctx, &ty, y, N, kDLFloat, 64), *p18 = wrap(ctx, &t18, x18, 18, kDLFloat, 64), *p6 = wrap(ctx, &t6, x6, 6, kDLFloat, 64);
+    const int32_t both[2] = { 0, 1 }, one[1] = { 1 };
+    eg_plane* good[2] = { py, p18 };
+    eg_plane* bad[1] = { p6 };
+    struct eg_bind_desc bd;
+    memset(&bd, 0, sizeof(bd));
+    bd.struct_size = sizeof(bd);
+    bd.n_planes = 1;
+    bd.plane_slots = one;
+    bd.planes = bad;
+    int ok = py && p18 && p6 && load(ctx, "gathl", 0xEB, &unit) == EG_OK && plan(ctx, unit, EG_STRUCTURE_HOST_TEAM, N, 0, NULL, NULL, &p) == EG_OK &&
+             eg_bind(ctx, p, &bd) == EG_BAD_REQUEST && reason_has(ctx, "a table of 18 elements is expected");
+    bd.n_planes = 2;
+    bd.plane_slots = both;
+    bd.planes = good;
+    ok = ok && eg_bind(ctx, p, &bd) == EG_OK;
+    bd.n_planes = 1;
+    bd.plane_slots = one;
+    bd.planes = bad;
+    check(ok && eg_bind(ctx, p, &bd) == EG_BAD_REQUEST && reason_has(ctx, "a table of 18 elements is expected"),
+          "gather: a broadcast table of 6 values for a slot that varies along both axes (18) is refused at bind and at the rebind of a bound plan, naming the count");
+    eg_plan_free(ctx, p);
+    eg_plane_free(ctx, py);
+    eg_plane_free(ctx, p18);
+    eg_plane_free(ctx, p6);
+    eg_unit_free(ctx, unit);
+    unit = NULL;
+    check(load(ctx, "gathls", 0xEC, &unit) == EG_BAD_REQUEST && reason_has(ctx, "is GATHER (it varies along lane axes) and SHARED"),
+          "gather: a GATHER table that is also SHARED contradicts itself and is refused at load");
+    eg_unit_free(ctx, unit);
+}
+
 /* A gathered slot that varies along both axes (3 x 6) needs 18 columns: a 6-column plane is refused at bind and at the rebind of a bound plan. */
 static void check_gather_columns(eg_ctx* ctx) {
     enum { N = 36 };
@@ -5481,6 +5521,7 @@ int main(int argc, char** argv) {
     check_wide_flat(ctx);
     check_gather(ctx);
     check_gather_columns(ctx);
+    check_gather_table(ctx);
     check_shared(ctx);
     check_box(ctx);
     check_even_split(ctx);

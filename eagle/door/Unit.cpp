@@ -47,8 +47,10 @@ SlotFacts read_slot(const eg_unit_slot* in, const std::string& unit, int index) 
     const std::string named = what + " ('" + (s.name ? s.name : "?") + "')";
     if (s.flags & ~(EG_SLOT_PRIOR | EG_SLOT_PARAM_PLANE | EG_SLOT_GATHER | EG_SLOT_SHARED))
         refuse(EG_NOT_WRITTEN, named + ": unknown flag bits " + std::to_string(s.flags));
-    if ((s.flags & EG_SLOT_GATHER) && (s.role != EG_ROLE_MAT_IN || s.rank != 2))
-        refuse(EG_BAD_REQUEST, "meta that contradicts itself: " + named + " is GATHER but not a rank-2 MAT_IN");
+    if ((s.flags & EG_SLOT_GATHER) && !((s.role == EG_ROLE_MAT_IN && s.rank == 2) || s.role == EG_ROLE_LOOKUP))
+        refuse(EG_BAD_REQUEST, "meta that contradicts itself: " + named + " is GATHER but neither a rank-2 MAT_IN nor a LOOKUP");
+    if ((s.flags & EG_SLOT_GATHER) && (s.flags & (EG_SLOT_SHARED | EG_SLOT_PARAM_PLANE)))
+        refuse(EG_BAD_REQUEST, "meta that contradicts itself: " + named + " is GATHER (it varies along lane axes) and SHARED or PARAM_PLANE (it has none)");
     if ((s.flags & EG_SLOT_SHARED) && s.role != EG_ROLE_LOOKUP)
         refuse(EG_BAD_REQUEST, "meta that contradicts itself: " + named + " is SHARED but not a LOOKUP");
     if ((s.flags & EG_SLOT_PARAM_PLANE) && s.role != EG_ROLE_LOOKUP)

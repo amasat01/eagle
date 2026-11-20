@@ -148,15 +148,21 @@ void check_plane(const eg_plan_s& plan, int slot, const eg_plane_s& plane) {
     if (!dtype_ok(t.dtype, s, plan.unit->scalar_type))
         refuse(EG_BAD_REQUEST, what + ": dtype (code " + std::to_string(t.dtype.code) + ", bits " +
                std::to_string(t.dtype.bits) + ") is not the slot's");
-    if (s.gathered) {                    // (rows, cols, m): m the caller's column count, checked against the lane axes it varies along
-        const std::int64_t m = t.ndim == 3 ? t.shape[2] : -1;
-        std::int64_t want = 1, fixed = 1;
+    if (s.gathered) {                    // compact along the kept lane axes: m = the product of their extents
+        std::int64_t m = 1, fixed = 1;
         for (std::int64_t e : plan.unit->lane_extents) fixed *= e > 0 ? e : 1;
         for (std::size_t i = 0; i < s.keep.size(); ++i)
-            if (s.keep[i]) want *= plan.unit->lane_extents[i] > 0 ? plan.unit->lane_extents[i] : plan.n_samples / fixed;
-        if (t.ndim != 3 || t.shape[0] != s.shape[0] || t.shape[1] != s.shape[1] || m != want)
+            if (s.keep[i]) m *= plan.unit->lane_extents[i] > 0 ? plan.unit->lane_extents[i] : plan.n_samples / fixed;
+        if (s.role == EG_ROLE_LOOKUP) {  // read flat by the kernel's index over the kept axes: (*shape) values per kept lane
+            std::int64_t want = m;
+            for (std::int64_t e : s.shape) want *= e;
+            if (t.ndim < 1 || elements(t) != want)
+                refuse(EG_BAD_REQUEST, what + ": a table of " + std::to_string(want) + " elements is expected (" + std::to_string(m) +
+                       " for the lane axes it varies along)");
+        } else if (t.ndim != 3 || t.shape[0] != s.shape[0] || t.shape[1] != s.shape[1] || t.shape[2] != m) {    // (rows, cols, m)
             refuse(EG_BAD_REQUEST, what + ": a plane of shape (" + std::to_string(s.shape[0]) + ", " + std::to_string(s.shape[1]) +
-                   ", " + std::to_string(want) + ") is expected (m: the columns of the lane axes it varies along)");
+                   ", " + std::to_string(m) + ") is expected (m: the columns of the lane axes it varies along)");
+        }
     } else if (s.keys_of >= 0) {                // a block sum's output: width entries per key, the keys' count along the last axis
         const KeyedFacts& k = plan.unit->keyed[static_cast<std::size_t>(s.keys_of)];
         const std::int64_t want = k.width * key_count(*plan.unit, k, plan.n_samples);
