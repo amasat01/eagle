@@ -558,6 +558,8 @@ eg_status eg_host_threads(eg_ctx* ctx, int32_t threads);
  * from ``deps`` (named with its digest), meta of another schema major, meta
  * that contradicts itself); NOT_WRITTEN (a pattern, role or scalar type this
  * build lacks); FAULT (the library does not load, or lacks the symbol).
+ * A library at a path this process loaded before is read again when the file there is another file (device and
+ * inode); the same file loaded twice is one library.
  */
 eg_status eg_unit_load(eg_ctx* ctx, const struct eg_unit_load_desc* desc, eg_unit** out);
 

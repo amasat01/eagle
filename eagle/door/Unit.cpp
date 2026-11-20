@@ -9,7 +9,11 @@
 #include "eagle/door/eg_unit_meta.h"
 #include "plugin/gref_abi.h"
 
+#include <cerrno>
+#include <cstring>
 #include <dlfcn.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 #include <numeric>
 
@@ -1149,19 +1153,60 @@ void resolve_segmented(eg_ctx& ctx, const eg_unit_load_desc& d, eg_unit_s& unit)
     }
 }
 
+#if defined(__linux__)
+/** @brief The name the loader is given for the library file open as @p fd. */
+std::string fd_spelling(int fd) { return "/proc/self/fd/" + std::to_string(fd); }
+#endif
+
+/**
+ * @brief Open the library file at @p path into @p library, keeping its descriptor in @p fd.
+ *
+ * dlopen answers an object already loaded under the same path name without reading the file, so a library rebuilt
+ * in place would come back as the old one. On Linux the loader is given the name of the descriptor instead: no loaded
+ * object carries it, and the loader still matches by device and inode, so the same file is one library and a
+ * replaced file is read afresh. Elsewhere the loader reads the file at @p path itself.
+ */
+void* open_library(const char* path, int& fd) {
+    fd = ::open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+        refuse(EG_FAULT, std::string("the unit library '") + path + "' does not load: " + std::strerror(errno));
+#if defined(__linux__)
+    void* library = ::dlopen(fd_spelling(fd).c_str(), RTLD_NOW | RTLD_LOCAL);
+#else
+    void* library = ::dlopen(path, RTLD_NOW | RTLD_LOCAL);
+#endif
+    if (library == nullptr) {
+        const char* why = ::dlerror();
+        ::close(fd);
+        fd = -1;
+        refuse(EG_FAULT, std::string("the unit library '") + path + "' does not load: " + (why ? why : "unknown"));
+    }
+    return library;
+}
+
 }  // namespace
+
+void close_library(void* library, int fd) {
+    ::dlclose(library);
+#if defined(__linux__)
+    // An object that outlives its dlclose (a handle another caller leaked, a pinned library) keeps the name it was
+    // loaded under; closing the descriptor would let a later file reuse that name and be answered by the old object.
+    const std::string spelling = fd_spelling(fd);
+    if (void* lingering = ::dlopen(spelling.c_str(), RTLD_LAZY | RTLD_NOLOAD)) {
+        ::dlclose(lingering);
+        return;
+    }
+#endif
+    ::close(fd);
+}
 
 /** @brief eg_unit_load: open, find, check, resolve; the library stays open while referenced. */
 void unit_load(eg_ctx& ctx, const eg_unit_load_desc* desc, eg_unit** out) {
     if (out == nullptr) refuse(EG_BAD_REQUEST, "eg_unit_load: out is NULL");
     *out = nullptr;
     const eg_unit_ref ref = read_desc(read_input(desc, "eg_unit_load_desc"));
-    void* library = ::dlopen(desc->path, RTLD_NOW | RTLD_LOCAL);
-    if (library == nullptr) {
-        const char* why = ::dlerror();
-        refuse(EG_FAULT, std::string("the unit library '") + desc->path + "' does not load: " +
-               (why ? why : "unknown"));
-    }
+    int fd = -1;
+    void* library = open_library(desc->path, fd);
     try {
         void* sym = ::dlsym(library, EG_UNIT_LIBRARY_META_SYMBOL);
         if (sym == nullptr)
@@ -1173,6 +1218,7 @@ void unit_load(eg_ctx& ctx, const eg_unit_load_desc* desc, eg_unit** out) {
         auto* unit = new eg_unit_s;
         unit->ctx = &ctx;
         unit->library = library;
+        unit->library_fd = fd;
         unit->name = ref.name;
         unit->index = index;
         std::memcpy(unit->digest.data(), m.digest, EG_DIGEST_BYTES);
@@ -1192,7 +1238,7 @@ void unit_load(eg_ctx& ctx, const eg_unit_load_desc* desc, eg_unit** out) {
         }
         *out = unit;
     } catch (...) {
-        ::dlclose(library);
+        close_library(library, fd);
         throw;
     }
 }
@@ -1206,7 +1252,7 @@ void unit_release(eg_ctx& ctx, eg_unit_s* unit) {
     for (eg_unit_s* h : unit->seg.held) unit_release(ctx, h);
     if (unit->auto_seg != nullptr) unit_release(ctx, unit->auto_seg);
     device_unit_free(*unit);
-    ::dlclose(unit->library);
+    close_library(unit->library, unit->library_fd);
     delete unit;
 }
 

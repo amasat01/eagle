@@ -8,10 +8,13 @@
  * exits non-zero on any failure.
  *
  * Usage: door_test <fixture> <fixture: wrong size> <fixture: no size block> <fixture: v1 tag>
+ * The alternate fixture library (libfixture_alt.so) is read from the directory of <fixture>.
  */
 #define _POSIX_C_SOURCE 200809L
 /* macOS hides dlopen's RTLD_NOLOAD under a strict POSIX request unless its own extensions are asked for too */
 #define _DARWIN_C_SOURCE
+/* glibc declares dl_iterate_phdr (the count of libraries the door holds) only under its own extensions */
+#define _GNU_SOURCE
 
 #include "eagle/door/eg_door.h"
 #include "plugin/dlpack.h"
@@ -22,6 +25,9 @@
 #endif
 
 #include <dlfcn.h>
+#ifdef __linux__
+#include <link.h>
+#endif
 #include <pthread.h>
 #include <sched.h>
 #include <stddef.h>
@@ -189,6 +195,109 @@ static void oracle(eg_ctx* ctx, eg_unit* unit, int64_t n, int64_t split, const c
     snprintf(what, sizeof(what), "%s: each deleter ran exactly once, at plan free", label);
     check(once, what);
     free(x), free(want), free(whole), free(parted), free(serial);
+}
+
+/* ---- a rebuilt library is read afresh ------------------------------------ */
+
+/* Copy the file @p from to @p to; 1 when every byte arrived. */
+static int copy_file(const char* from, const char* to) {
+    FILE* in = fopen(from, "rb");
+    FILE* out = fopen(to, "wb");
+    char buf[65536];
+    size_t got = 0;
+    int ok = in != NULL && out != NULL;
+    while (ok && (got = fread(buf, 1, sizeof(buf), in)) > 0) ok = fwrite(buf, 1, got, out) == got;
+    if (in != NULL) fclose(in);
+    if (out != NULL && fclose(out) != 0) ok = 0;
+    return ok;
+}
+
+#ifdef __linux__
+static int count_one_image(struct dl_phdr_info* info, size_t size, void* total) {
+    (void)size;
+    if (strncmp(info->dlpi_name, "/proc/self/fd/", 14) == 0) ++*(int*)total;
+    return 0;
+}
+#endif
+
+/* The libraries the door holds open (Linux names each by its descriptor); -1: not countable here. */
+static int door_images(void) {
+#ifdef __linux__
+    int total = 0;
+    dl_iterate_phdr(count_one_image, &total);
+    return total;
+#else
+    return -1;
+#endif
+}
+
+/* Launch @p unit (axpb) over four samples with a = 2, b = 1 and put y[0..3] in @p y. */
+static eg_status launch_axpb4(eg_ctx* ctx, eg_unit* unit, double* y) {
+    double x[4] = { 1.0, 2.0, 3.0, 4.0 };
+    const double a = 2.0, b = 1.0;
+    struct tensor tx, ty;
+    eg_plane *px = NULL, *py = NULL;
+    eg_plan* p = NULL;
+    tensor_init(&tx, x, 4, 64);
+    tensor_init(&ty, y, 4, 64);
+    eg_status s = eg_plane_wrap(ctx, &tx.managed, &px);
+    if (s == EG_OK) s = eg_plane_wrap(ctx, &ty.managed, &py);
+    if (s == EG_OK) s = plan(ctx, unit, EG_STRUCTURE_HOST_SERIAL, 4, 0, NULL, NULL, &p);
+    if (s == EG_OK) s = bind(ctx, p, py, px, &a, &b);
+    uint64_t tiles = 0;
+    if (s == EG_OK) s = eg_launch(ctx, p, &tiles);
+    eg_plane_free(ctx, px);
+    eg_plane_free(ctx, py);
+    eg_plan_free(ctx, p);
+    return s;
+}
+
+/* Library A is loaded from a path, then another library (same unit name, other digest, other values) replaces the file
+ * there by rename: a second load from that path reads the new file, and the first unit keeps its own library. */
+static void check_fresh_load(eg_ctx* ctx) {
+    char dir[] = "/tmp/eg_door_fresh_XXXXXX";
+    char alt[4096], live[256], next[256], same[256];
+    const char* slash = strrchr(library_path, '/');
+    const size_t head = slash ? (size_t)(slash - library_path) + 1 : 0;
+    snprintf(alt, sizeof(alt), "%.*slibfixture_alt.so", (int)head, library_path);
+    check(mkdtemp(dir) != NULL, "fresh load: a temporary directory");
+    snprintf(live, sizeof(live), "%s/lib.so", dir);
+    snprintf(next, sizeof(next), "%s/lib.so.new", dir);
+    snprintf(same, sizeof(same), "%s/same.so", dir);
+    check(copy_file(library_path, live) && copy_file(alt, next) && copy_file(library_path, same),
+          "fresh load: library A at the path, library B beside it, and a copy of A for the twice-loaded row");
+    const char* saved = library_path;
+    const double want_a[4] = { 3.0, 5.0, 7.0, 9.0 }, want_b[4] = { 4.0, 6.0, 8.0, 10.0 };
+    double ya[4] = { 0 }, yb[4] = { 0 }, yheld[4] = { 0 };
+    eg_unit *ua = NULL, *ub = NULL, *stale = NULL;
+    library_path = live;
+    check(load(ctx, "axpb", 0xA1, &ua) == EG_OK && launch_axpb4(ctx, ua, ya) == EG_OK && memcmp(ya, want_a, sizeof(ya)) == 0,
+          "fresh load: library A loads and launches a*x + b");
+    check(rename(next, live) == 0, "fresh load: library B replaces the file by rename");
+    check(load(ctx, "axpb", 0xA2, &ub) == EG_OK && ub != NULL, "fresh load: the unit of the replaced file loads from the same path");
+    check(ub != NULL && launch_axpb4(ctx, ub, yb) == EG_OK && memcmp(yb, want_b, sizeof(yb)) == 0,
+          "fresh load: the replaced file's unit launches its own values (a*x + 2b)");
+    check(ua != NULL && launch_axpb4(ctx, ua, yheld) == EG_OK && memcmp(yheld, want_a, sizeof(yheld)) == 0,
+          "fresh load: the unit loaded before the replacement still launches its own values");
+    check(load(ctx, "axpb", 0xA1, &stale) == EG_BAD_REQUEST && stale == NULL && reason_has(ctx, "axpb"),
+          "fresh load: the old digest from the replaced path is refused BAD_REQUEST by name");
+    eg_unit_free(ctx, ua);
+    eg_unit_free(ctx, ub);
+
+    library_path = same;
+    const int before = door_images();
+    eg_unit *s1 = NULL, *s2 = NULL;
+    check(load(ctx, "axpb", 0xA1, &s1) == EG_OK && load(ctx, "axpb", 0xA1, &s2) == EG_OK && s1 != NULL && s2 != NULL,
+          "fresh load: one file loaded twice loads both times");
+    check(before < 0 ? dlopen(same, RTLD_LAZY | RTLD_NOLOAD) != NULL : door_images() == before + 1,
+          "fresh load: one file loaded twice is one library");
+    eg_unit_free(ctx, s1);
+    eg_unit_free(ctx, s2);
+    library_path = saved;
+    remove(live);
+    remove(next);
+    remove(same);
+    rmdir(dir);
 }
 
 /* ---- refusals ------------------------------------------------------------ */
@@ -4041,6 +4150,7 @@ int main(int argc, char** argv) {
     check_shared(ctx);
     check_box(ctx);
     check_even_split(ctx);
+    check_fresh_load(ctx);
     check_made(ctx);
     check_alloc(ctx, unit);
     check_clear(ctx, unit);

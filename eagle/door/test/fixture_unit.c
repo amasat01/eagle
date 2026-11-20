@@ -45,7 +45,8 @@
  *
  * The size block beside the host entries (``eagle_abi_tag``,
  * ``eagle_layout_sizes``) follows FIXTURE_BLOCK: 0 (default) the real one,
- * 1 a wrong sizeof(ScalarHandle), 2 none exported, 3 the v1 tag.
+ * 1 a wrong sizeof(ScalarHandle), 2 none exported, 3 the v1 tag. 4 is the real block with "axpb"
+ * rebuilt as another library of the same unit: digest 0xA2 and y = a*x + 2b.
  */
 #define _POSIX_C_SOURCE 200809L
 
@@ -57,6 +58,19 @@
 #include <time.h>
 
 #define EG_FIXTURE_EXPORT __attribute__((visibility("default")))
+
+#ifndef FIXTURE_BLOCK
+#define FIXTURE_BLOCK 0
+#endif
+
+/* "axpb" of the alternate library (FIXTURE_BLOCK 4) differs in digest and in value. */
+#if FIXTURE_BLOCK == 4
+#define AXPB_DIGEST_BYTE 0xA2
+#define AXPB_B_FACTOR 2.0
+#else
+#define AXPB_DIGEST_BYTE 0xA1
+#define AXPB_B_FACTOR 1.0
+#endif
 
 /* The scalar handle of the v2 host ABI (plugin/gref_layout.h, 32 bytes). */
 struct fixture_handle {
@@ -125,7 +139,7 @@ void axpb_host(void* const* params, int64_t base, int64_t count, int64_t n) {
     const double a = *(const double*)params[2];
     const double b = *(const double*)params[3];
     (void)n;
-    for (int64_t i = base; i < base + count; ++i) y[i] = a * x[i] + b;
+    for (int64_t i = base; i < base + count; ++i) y[i] = a * x[i] + AXPB_B_FACTOR * b;
 }
 
 void wait_host(void* const* params, int64_t base, int64_t count, int64_t n) {
@@ -532,10 +546,6 @@ void dgf_host(void* const* params, int64_t base, int64_t count, int64_t n) {
         if (!is_dead(params, i)) seg_step(params, 0, i, 0.125 * (dg_class(k, i) + 1));
 }
 
-#ifndef FIXTURE_BLOCK
-#define FIXTURE_BLOCK 0
-#endif
-
 #if FIXTURE_BLOCK != 2
 EG_FIXTURE_EXPORT extern const char eagle_abi_tag[];
 EG_FIXTURE_EXPORT extern const uint64_t eagle_layout_sizes[5];
@@ -592,7 +602,7 @@ static const struct eg_unit_launch launch = {
 static const struct eg_unit_meta unit_axpb = {
     .struct_size = sizeof(struct eg_unit_meta),
     .name = "axpb",
-    .digest = DIGEST(0xA1),
+    .digest = DIGEST(AXPB_DIGEST_BYTE),
     .pattern = EG_PATTERN_PURE,
     .scalar_type = EG_SCALAR_FLOAT64,
     .host_entry = "axpb_host",

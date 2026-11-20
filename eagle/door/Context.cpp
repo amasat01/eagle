@@ -10,7 +10,6 @@
 
 #include <algorithm>
 
-#include <dlfcn.h>
 
 namespace eagle {
 namespace door {
@@ -140,7 +139,7 @@ void ctx_free_all(eg_ctx& ctx) {
     ctx.planes.clear();
     for (eg_unit_s* unit : ctx.units) {
         if (!child) device_unit_free(*unit);
-        if (!child && unit->library != nullptr) ::dlclose(unit->library);
+        if (!child && unit->library != nullptr) close_library(unit->library, unit->library_fd);
         delete unit;
     }
     ctx.units.clear();

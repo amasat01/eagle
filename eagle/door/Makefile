@@ -193,9 +193,12 @@ confined: $(CORE_OBJ)
 # The fixture unit library and three variants of its size block (FIXTURE_BLOCK
 # in test/fixture_unit.c): a wrong sizeof(ScalarHandle), none exported, the v1 tag.
 FIXTURE_BAD := $(OUT)/libfixture_wrong_size.so $(OUT)/libfixture_no_block.so $(OUT)/libfixture_v1_tag.so
-block_of = $(if $(findstring wrong_size,$1),1,$(if $(findstring no_block,$1),2,$(if $(findstring v1_tag,$1),3,0)))
+block_of = $(if $(findstring wrong_size,$1),1,$(if $(findstring no_block,$1),2,$(if $(findstring v1_tag,$1),3,$(if $(findstring _alt,$1),4,0))))
 
-$(FIXTURE) $(FIXTURE_BAD): test/fixture_unit.c
+# The alternate library (FIXTURE_BLOCK 4): "axpb" of another digest and value, for the reload rows; the test finds it beside the fixture.
+FIXTURE_ALT := $(OUT)/libfixture_alt.so
+
+$(FIXTURE) $(FIXTURE_BAD) $(FIXTURE_ALT): test/fixture_unit.c
 	@mkdir -p $(OUT)
 	$(CC) $(DEPFLAGS) $(CFLAGS_C) -DFIXTURE_BLOCK=$(call block_of,$@) -fPIC -shared -fvisibility=hidden -o $@ $<
 
@@ -265,7 +268,7 @@ $(EMPTY_ROUTES_TEST): test/empty_routes_test.c $(EMPTY_ROUTES_CTX) $(filter-out 
 	$(CC) $(DEPFLAGS) $(CFLAGS_C) -c $< -o $@.o
 	$(CXX) -o $@ $@.o $(EMPTY_ROUTES_CTX) $(filter-out $(OUT)/Context.o,$(OBJ)) $(CUDART) -ldl -lm -pthread
 
-test: symbols confined $(FIXTURE) $(FIXTURE_BAD) $(TEST) $(REV_FIXTURE) $(REV_TEST) $(GEMM_FIXTURE) $(GEMM_TEST) $(WEIGHT_ROWS_TEST) $(EMPTY_ROUTES_TEST)
+test: symbols confined $(FIXTURE) $(FIXTURE_BAD) $(FIXTURE_ALT) $(TEST) $(REV_FIXTURE) $(REV_TEST) $(GEMM_FIXTURE) $(GEMM_TEST) $(WEIGHT_ROWS_TEST) $(EMPTY_ROUTES_TEST)
 	$(TEST) $(FIXTURE) $(FIXTURE_BAD)
 	$(REV_TEST) $(REV_FIXTURE)
 	$(GEMM_TEST) $(GEMM_FIXTURE)
@@ -628,7 +631,7 @@ $(DEVICE_FIXTURE): test/fixture_device.c $(OUT)/fixture_device.fatbin $(OUT)/fat
 $(DEVICE_TEST): test/door_device_test.c $(LIB) | check-cuda
 	$(CC) $(DEPFLAGS) $(CFLAGS_C) -DEG_TEST_DIR='"$(CURDIR)/test"' -isystem $(CUDA)/include -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door -Wl,-rpath,$(OUT) $(CUDART) -lm -pthread
 
-device: check-cuda symbols $(FIXTURE) $(FIXTURE_BAD) $(TEST) $(DEVICE_FIXTURE) $(DEVICE_TEST) $(GEMM_FIXTURE) $(GEMM_DEVICE_TEST) $(GEMM_ROUTE_TEST) $(NO_CUBLAS)
+device: check-cuda symbols $(FIXTURE) $(FIXTURE_BAD) $(FIXTURE_ALT) $(TEST) $(DEVICE_FIXTURE) $(DEVICE_TEST) $(GEMM_FIXTURE) $(GEMM_DEVICE_TEST) $(GEMM_ROUTE_TEST) $(NO_CUBLAS)
 
 PAIR_DEVICE_TEST := $(OUT)/pair_device_test
 RUNNER_PAIR_TEST := $(OUT)/runner_pair_test
