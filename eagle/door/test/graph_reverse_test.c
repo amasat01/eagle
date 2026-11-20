@@ -2097,7 +2097,7 @@ static double step_model_j(const double* x0, int mixing, double w, double a, dou
 static int step_case(struct rig* r, const struct units* u, const struct run_units* ru, eg_unit* twin, int64_t window, int mixing, uint64_t budget, double* gx_out, double* ga_out,
                      double* gb_out, int32_t* passes, const char* what, int n) {
     eg_ctx* ctx = r->ctx;
-    const int mix = mixing == 1, two = mixing == 4;    /* mode 4: a second graph, the mixing one, runs after the scaling graph */
+    const int mix = mixing == 1, two = mixing == 4 || mixing == 5;    /* modes 4 and 5: a second graph, the mixing one, runs after the scaling graph; mode 5 shares the scaling graph's temporary plane */
     struct lin l;
     static double y[LNMAX], z[LNMAX], seed[LNMAX], gx[LNMAX], gt[LNMAX];
     double w[1] = { 1.3 }, wc[1] = { 1.0 / 80.0 }, ga = 0.0, gb = 0.0;
@@ -2117,7 +2117,7 @@ static int step_case(struct rig* r, const struct units* u, const struct run_unit
     static double y2[LNMAX], z2[LNMAX];
     double wsum[1] = { 0.0 }, wc2[1] = { 1.0 / 80.0 };
     struct tensor ty2, tz2, tws, twc2;
-    eg_plane *py2 = two ? mk(r, &ty2, n, y2) : NULL, *pz2 = two ? mk(r, &tz2, n, z2) : NULL, *pws = two ? mk(r, &tws, 1, wsum) : NULL, *pwc2 = two ? mk(r, &twc2, 1, wc2) : NULL;
+    eg_plane *py2 = mixing == 5 ? py : two ? mk(r, &ty2, n, y2) : NULL, *pz2 = two ? mk(r, &tz2, n, z2) : NULL, *pws = two ? mk(r, &tws, 1, wsum) : NULL, *pwc2 = two ? mk(r, &twc2, 1, wc2) : NULL;
     eg_plane *b1[] = { l.px, pwc2, pz2 }, *b2[] = { l.px, pws, py2 };
     eg_plan *fb1 = two && ok ? plan_with(r, u->scale, 3, b1, NULL) : NULL, *fb2 = two && ok ? plan_with(r, u->scale, 3, b2, NULL) : NULL;
     const struct eg_node_vjp vjps[] = { { 0, u->scale_vjp }, { 1, u->scale_vjp } };
@@ -2130,6 +2130,15 @@ static int step_case(struct rig* r, const struct units* u, const struct run_unit
                          eg_launch(ctx, fb2, NULL) == EG_OK && eg_copy(ctx, py2, l.px) == EG_OK && end_diff(ctx, 2, vjps, &g2) == EG_OK));
     struct eg_runner_desc d;    /* the budget and the graph list are fields of the descriptor: remake the runner when either is asked for */
     const struct eg_step_graph list[2] = { { g, 0, 0 }, { g2, 0, 0 } };
+    if (ok && mixing == 5) {    /* the temporary plane both graphs write is no carried state: the adjoint could not pass between them */
+        eg_runner* refused_runner = NULL;
+        d = runner_desc(&l.plan, LSTEPS);
+        const eg_derived_role roles[2] = { EG_DERIVED_TAPE, EG_DERIVED_STEP_VJP };
+        eg_unit* const units[2] = { twin, ru->vjp };
+        d.flags = EG_RUN_RECORD, d.n_derived = 2, d.derived_roles = roles, d.derived_units = units, d.window = window, d.step_graphs = list, d.n_step_graphs = 2;
+        verdict(r, eg_runner_new(ctx, &d, &refused_runner) == EG_NOT_WRITTEN && refused_runner == NULL && reason_has(ctx, "share a plane"), what);
+        goto cleanup;
+    }
     if (ok && (budget != 0 || two)) {
         eg_runner_free(ctx, l.runner);
         d = runner_desc(&l.plan, LSTEPS);
@@ -2178,6 +2187,7 @@ static int step_case(struct rig* r, const struct units* u, const struct run_unit
     if (!fd_ok) printf("      dJ/da %.10g (central %.10g), dJ/db %.10g (central %.10g)\n", ga, fda, gb, fdb);
     verdict(r, fd_ok, what);
     memcpy(gx_out, gx, (size_t)n * sizeof(double)), *ga_out = ga, *gb_out = gb;
+cleanup:
     eg_runner_free(ctx, l.runner);
     if (g) eg_graph_free(ctx, g);
     if (g2) eg_graph_free(ctx, g2);
@@ -2340,6 +2350,8 @@ static void step_reverse_rows(struct rig* r, const struct units* u, const struct
     step_case(r, u, ru, wide, wide_window, 4, 0, g3, &a3, &b3, &p3,
               "two step graphs at position 0 (a scaling one, then a mixing one): the gradients equal central differences of the whole run, the graphs reversed last first", LN);
     verdict(r, p3 == 1 + 2 * LSTEPS, "eg_runner_figures' reverse_passes counts one pass per graph per step (10 steps, two graphs: 21)");
+    step_case(r, u, ru, wide, wide_window, 5, 0, g3, &a3, &b3, &p3,
+              "two step graphs of a recorded run that both write a plane which is no carried state: refused NOT_WRITTEN by name at eg_runner_new", LN);
     step_add_case(r, u, ru);
     step_cplane_case(r, u, ru);
     if (!r->device) {   /* a runner that reads an active set, then one that also reorders (over 4100 samples, above the reorder threshold) */

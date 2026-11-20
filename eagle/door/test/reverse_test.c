@@ -294,6 +294,12 @@ static void lin_rows(eg_ctx* ctx, const char* lib) {
     check((d.step_graphs = &(struct eg_step_graph){ step, 1, 0 }, d.n_step_graphs = 1, eg_runner_new(ctx, &d, &none) == EG_BAD_REQUEST) && none == NULL &&
               reason_has(ctx, "put the node before the plan"),
           "a step graph at a position after the plan on an EG_RUN_RECORD runner refused BAD_REQUEST by name: the node goes before the plan");
+    {   struct eg_step_graph twice[2] = { { step, 0, 0 }, { step, 0, 0 } };
+        d = recorded(&plan, LSTEPS, 3, 0, roles, good);
+        d.step_graphs = twice, d.n_step_graphs = 2;
+        check(eg_runner_new(ctx, &d, &none) == EG_BAD_REQUEST && none == NULL && reason_has(ctx, "one tape per graph"),
+              "the same step graph twice on an EG_RUN_RECORD runner refused BAD_REQUEST by name: a tape belongs to one graph");
+    }
     eg_graph_free(ctx, step);
     const eg_derived_role swapped[2] = { EG_DERIVED_STEP_VJP, EG_DERIVED_TAPE };
     d = recorded(&plan, LSTEPS, 3, 0, swapped, good);

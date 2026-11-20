@@ -818,6 +818,16 @@ static void check_runner(eg_ctx* ctx, eg_unit* axpb) {
     }
     check(all, "eg_runner_new refuses RECORD, REORDER, unknown flags, events REFINE, steps_reverse FUSED, "
                "derived units, a step_graph, every, window and max_steps < 1, each by name");
+    {   /* a refine runner's step graphs: the position and duplicate refusals come before any graph is looked at */
+        struct eg_step_graph after = { (eg_graph*)&d, 1, 0 }, twice[2] = { { (eg_graph*)&d, 0, 0 }, { (eg_graph*)&d, 0, 0 } };
+        d = runner_desc(plans, 1, 10);
+        d.events = EG_EVENTS_REFINE;
+        d.step_graphs = &after, d.n_step_graphs = 1;
+        int ok2 = eg_runner_new(ctx, &d, &r) == EG_BAD_REQUEST && r == NULL && reason_has(ctx, "put the node before the plan");
+        d.step_graphs = twice, d.n_step_graphs = 2;
+        ok2 = ok2 && eg_runner_new(ctx, &d, &r) == EG_BAD_REQUEST && r == NULL && reason_has(ctx, "one tape per graph");
+        check(ok2, "a refine runner refuses a step graph after the first plan and the same graph twice, BAD_REQUEST by name");
+    }
     eg_plan* swapped[2] = { plans[1], plans[0] };
     d = runner_desc(swapped, 2, 10);
     check(eg_runner_new(ctx, &d, &r) == EG_BAD_REQUEST && reason_has(ctx, "has no finish"),
