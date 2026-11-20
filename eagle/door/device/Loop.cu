@@ -292,7 +292,9 @@ void reduce_step(std::uint64_t stream, int code, int op, const void* in, std::in
             default: reduce_as<std::uint8_t, aether::LogicalAndOp>(s, in, n, cols, out, nullptr, false, wa, wb);
         }
         EAGLE_CHECK_ALWAYS(cudaGetLastError());
-        EAGLE_CHECK_ALWAYS(cudaStreamSynchronize(s));
+        cudaStreamCaptureStatus capturing = cudaStreamCaptureStatusNone;
+        EAGLE_CHECK_ALWAYS(cudaStreamIsCapturing(s, &capturing));
+        if (capturing == cudaStreamCaptureStatusNone) EAGLE_CHECK_ALWAYS(cudaStreamSynchronize(s));    // a capture cannot wait: its replay leaves the result in place
     } catch (...) {
         free_async(stream, stream, wa);
         free_async(stream, stream, wb);

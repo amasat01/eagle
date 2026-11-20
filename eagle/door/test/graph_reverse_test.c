@@ -1312,6 +1312,10 @@ static void gemm_row(struct rig* r, uint32_t flags, const char* name) {
  * window rebuild re-runs the product and the copy, and the gradients are the written-out sequence's bit for bit. */
 static void window_gemm_row(struct rig* r, const struct units* u) {
     eg_ctx* ctx = r->ctx;
+    if (r->device) {    /* the body of a WHILE runs on an arm stream of the capture, and a product there needs a cuBLAS handle of that stream, which the door does not make */
+        check(1, "on a DEVICE context: a WHILE with a product in its body: skipped, a device product on an arm stream has no cuBLAS handle (the copy rebuild is the next row)");
+        return;
+    }
     enum { PASSES = 37, CAP = 40, S = 3 };
     const int64_t sq[2] = { S, S };
     double x0[S * S], x[S * S], mm[S * S], t[S * S], seed[S * S], gx[2][S * S], gm[2][S * S], want[S * S];
@@ -1375,6 +1379,57 @@ static void window_gemm_row(struct rig* r, const struct units* u) {
     release(r);
 }
 
+/* x <- a x by a launch and a copy per pass, in a WHILE of cap 40 (windows of 16) that runs 37 times, against the same 37 pairs written out: the
+ * window rebuild re-runs the copy, and the gradients are the written-out sequence's bit for bit, dJ/dx_0 = a^37. */
+static void window_copy_row(struct rig* r, const struct units* u) {
+    eg_ctx* ctx = r->ctx;
+    enum { PASSES = 37, CAP = 40 };
+    double x0[N], x[N], t[N], a[1] = { 0.9 }, seed[N], gx[2][N], ga[2][1];
+    int32_t c[N];
+    struct tensor tx, tt, ta, ts, tgx[2], tga[2], tc;
+    fill(x, a, 0.5);
+    a[0] = 0.9;
+    for (int i = 0; i < N; ++i) {
+        x0[i] = x[i];
+        seed[i] = 1.0;
+        t[i] = 0.0;
+    }
+    eg_plane *px = mk(r, &tx, N, x), *pt = mk(r, &tt, N, t), *pa = mk(r, &ta, 1, a), *ps = mk(r, &ts, N, seed);
+    eg_plane *pgx[2] = { mk(r, &tgx[0], N, gx[0]), mk(r, &tgx[1], N, gx[1]) }, *pga[2] = { mk(r, &tga[0], 1, ga[0]), mk(r, &tga[1], 1, ga[1]) };
+    eg_plane* pc = mk_i32(r, &tc, N, c);
+    eg_plane *a1[] = { px, pa, pt }, *a3[] = { pc };
+    eg_plan *f = plan_with(r, u->scale, 3, a1, NULL), *tk = plan_with(r, u->tick, 1, a3, NULL);
+    struct eg_node_vjp vjps[PASSES];
+    for (int i = 0; i < PASSES; ++i) {
+        vjps[i].launch = i;
+        vjps[i].vjp = u->scale_vjp;
+    }
+    eg_graph *loop = NULL, *chain = NULL;
+    int ok = f && tk && eg_record_begin(ctx) == EG_OK && cond_open(ctx, EG_COND_WHILE, 0, pc, 0, CAP) == EG_OK && eg_launch(ctx, f, NULL) == EG_OK &&
+             eg_copy(ctx, pt, px) == EG_OK && eg_launch(ctx, tk, NULL) == EG_OK && eg_record_cond_end(ctx) == EG_OK && end_diff(ctx, 1, vjps, &loop) == EG_OK;
+    ok = ok && eg_record_begin(ctx) == EG_OK;
+    for (int k = 0; ok && k < PASSES; ++k) ok = eg_launch(ctx, f, NULL) == EG_OK && eg_copy(ctx, pt, px) == EG_OK;
+    ok = ok && end_diff(ctx, PASSES, vjps, &chain) == EG_OK;
+    eg_plane* in[] = { px, pa };
+    for (int which = 0; ok && which < 2; ++which) {
+        for (int i = 0; i < N; ++i) {
+            x[i] = x0[i];
+            c[i] = PASSES;
+        }
+        up(r);
+        eg_plane* gr[] = { pgx[which], pga[which] };
+        ok = eg_graph_launch(ctx, which ? chain : loop) == EG_OK && reverse(ctx, which ? chain : loop, px, ps, 2, in, gr) == EG_OK;
+        down(r);
+    }
+    verdict(r, ok && memcmp(gx[0], gx[1], sizeof(gx[0])) == 0 && memcmp(ga[0], ga[1], sizeof(ga[0])) == 0 && fabs(gx[0][0] - pow(a[0], PASSES)) < 1e-12,
+            "a WHILE of cap 40 (windows of 16) with a launch and a copy in its body, 37 passes: bit for bit the gradients of the same 37 pairs written out, dJ/dx_0 = a^37");
+    eg_graph_free(ctx, loop);
+    eg_graph_free(ctx, chain);
+    eg_plan_free(ctx, f);
+    eg_plan_free(ctx, tk);
+    release(r);
+}
+
 static void leaf_rows(struct rig* r, const struct units* u) {
     copy_row(r, u, 0);
     copy_row(r, u, 1);
@@ -1393,6 +1448,7 @@ static void leaf_rows(struct rig* r, const struct units* u) {
     gemm_row(r, EG_GEMM_TRANS_B | EG_GEMM_TRANS_C, " with B and C transposed");
     gemm_row(r, EG_GEMM_ACCUMULATE | EG_GEMM_TRANS_A, " that accumulates, with A transposed");
     window_gemm_row(r, u);
+    window_copy_row(r, u);
 }
 
 /* ---- the policy row: the reduced gradient of a shared parameter is the same bits on the host and on the device, run to run ---------- */

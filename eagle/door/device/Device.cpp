@@ -1193,7 +1193,7 @@ std::int64_t device_free_bytes(eg_ctx& ctx) {
 }
 
 /** @brief eg_reduce over device planes: checked as the host's, then the canonical ordered tree on the context's
- *  stream (the order the host runs); returns with the result in place. */
+ *  stream (the order the host runs); returns with the result in place (in a capture, once the graph has replayed). */
 void device_reduce(eg_ctx& ctx, const eg_reduce_desc& d) { device_reduce_leaf(ctx, host::reduce_check(ctx, d)); }
 
 /** @brief The checked reduce @p r on the context's stream, kept in the recording if there is one. */
