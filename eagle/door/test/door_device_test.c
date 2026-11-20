@@ -356,7 +356,7 @@ static void free_while_recording(eg_ctx* ctx, const char* dev_lib, eg_plan* keep
         s = eg_launch(ctx, keep, NULL);
         if (s == EG_OK) s = eg_plan_free(ctx, drop);
         if (s == EG_OK) drop = NULL;
-        const eg_status ended = eg_record_end(ctx, &g);
+        const eg_status ended = eg_record_end(ctx, NULL, &g);
         if (s == EG_OK) s = ended;
     }
     if (s == EG_OK) s = eg_graph_launch(ctx, g);
@@ -447,7 +447,7 @@ static void set_count_device(eg_ctx* ctx, const char* dev_lib) {
         for (int i = 0; i < SM; ++i) x[i] = 0.25 * i + 1.0;
         cudaMemcpy(dx, x, sizeof(x), cudaMemcpyHostToDevice);
         ok = eg_set_count(ctx, p, counts[0]) == EG_OK && eg_record_begin(ctx) == EG_OK && eg_launch(ctx, p, NULL) == EG_OK &&
-             eg_record_end(ctx, &g) == EG_OK;
+             eg_record_end(ctx, NULL, &g) == EG_OK;
         for (int k = 0; ok && k < 4; ++k) {
             ok = (k == 0 || eg_set_count(ctx, p, counts[k]) == EG_OK) && cudaMemcpy(dy, y0, sizeof(y0), cudaMemcpyHostToDevice) == cudaSuccess &&
                  eg_graph_launch(ctx, g) == EG_OK && eg_sync(ctx) == EG_OK;
@@ -523,7 +523,7 @@ static void host_steps_in_graph(eg_ctx* ctx, const char* dev_lib, const char* ho
     cudaDeviceSynchronize();
     eg_graph* g = NULL;
     ok = eg_record_begin(ctx) == EG_OK && eg_launch(ctx, a, NULL) == EG_OK && eg_launch(ctx, h, NULL) == EG_OK &&
-         eg_launch(ctx, b, NULL) == EG_OK && eg_record_end(ctx, &g) == EG_OK;
+         eg_launch(ctx, b, NULL) == EG_OK && eg_record_end(ctx, NULL, &g) == EG_OK;
     if (!ok) reason_has(ctx, "(the recording was refused)");
     check(ok && ticks == 0, "host steps: a host launch recorded inside a device recording runs nothing at record time");
     for (int k = 0; ok && k < REPLAYS; ++k) ok = eg_graph_launch(ctx, g) == EG_OK && eg_sync(ctx) == EG_OK;
@@ -552,7 +552,7 @@ static void host_steps_in_graph(eg_ctx* ctx, const char* dev_lib, const char* ho
     eg_graph* gf = NULL;
     ok = phx && phy && phc && plan_n(ctx, prefix, EG_STRUCTURE_HOST_SERIAL, 8, 0, NULL, NULL, &f) == EG_OK &&
          bind_planes(ctx, f, 3, slots, f_planes) == EG_OK && eg_record_begin(ctx) == EG_OK && eg_launch(ctx, f, NULL) == EG_OK &&
-         eg_record_end(ctx, &gf) == EG_OK;
+         eg_record_end(ctx, NULL, &gf) == EG_OK;
     hcount = 9;    /* above the 8 entries: the host launch is refused when the step runs */
     ok = ok && eg_graph_launch(ctx, gf) == EG_OK;
     check(ok && refused(eg_sync(ctx), EG_FAULT, ctx, "eg_launch of unit 'prefix'") && reason_has(ctx, "index count 9"),
@@ -672,7 +672,7 @@ static void alloc_planes(eg_ctx* ctx, eg_ctx* host, eg_unit* axpy, const double*
     d.shape = shape1;
     eg_plane* q = NULL;
     ok = eg_record_begin(ctx) == EG_OK && refused(eg_plane_new(ctx, &d, &q), EG_BAD_REQUEST, ctx, "outside the capture") && q == NULL &&
-         eg_record_end(ctx, &g) == EG_OK && eg_graph_free(ctx, g) == EG_OK;
+         eg_record_end(ctx, NULL, &g) == EG_OK && eg_graph_free(ctx, g) == EG_OK;
     check(ok, "eg_plane_new inside a DEVICE recording refused BAD_REQUEST by reason; the recording still ends");
     d.kind = EG_MEM_PINNED;
     ok = refused(eg_plane_new(host, &d, &q), EG_NOT_WRITTEN, host, "PINNED memory on a host-only context");
@@ -842,7 +842,7 @@ static void figures_device(eg_ctx* ctx, const char* dev_lib) {
     cudaMemset(dk, 0, FN * sizeof(double));
     cudaMemset(dm, 0, FN);
     eg_graph* g = NULL;
-    ok = p != NULL && eg_record_begin(ctx) == EG_OK && eg_launch(ctx, p, NULL) == EG_OK && eg_record_end(ctx, &g) == EG_OK;
+    ok = p != NULL && eg_record_begin(ctx) == EG_OK && eg_launch(ctx, p, NULL) == EG_OK && eg_record_end(ctx, NULL, &g) == EG_OK;
     for (int replay = 1; ok && replay <= 3; ++replay)
         ok = eg_graph_launch(ctx, g) == EG_OK && eg_plan_counters(ctx, p, &counters, NULL, 0, &n_mix) == EG_OK && counters.finished == at[replay];
     check(ok, "eg_plan_counters on a DEVICE plan: each replay of a recorded launch reads the samples that replay finished");
@@ -1563,7 +1563,7 @@ static void lookup_device(eg_ctx* ctx, const char* dev_lib) {
     cudaMemcpy(dx, x, sizeof(x), cudaMemcpyHostToDevice);
     cudaMemcpy(dy, y0, sizeof(y0), cudaMemcpyHostToDevice);
     eg_graph* g = NULL;
-    ok = eg_record_begin(ctx) == EG_OK && eg_launch(ctx, p, NULL) == EG_OK && eg_record_end(ctx, &g) == EG_OK;
+    ok = eg_record_begin(ctx) == EG_OK && eg_launch(ctx, p, NULL) == EG_OK && eg_record_end(ctx, NULL, &g) == EG_OK;
     ok = ok && eg_graph_launch(ctx, g) == EG_OK && eg_sync(ctx) == EG_OK;
     cudaMemcpy(got, dy, sizeof(got), cudaMemcpyDeviceToHost);
     for (int i = 0; i < SM; ++i) want[i] = y0[i];
@@ -1690,7 +1690,7 @@ static void copy_across(eg_ctx* ctx) {
             ok = eg_record_begin(ctx) == EG_OK &&
                  refused(eg_copy(ctx, h_in, d_a), EG_NOT_WRITTEN, ctx, "a host<->device copy is not recordable; copy before or after the recording") &&
                  refused(eg_copy(ctx, d_a, h_out), EG_NOT_WRITTEN, ctx, "not recordable") && eg_copy(ctx, d_a, d_b) == EG_OK &&
-                 eg_record_end(ctx, &g) == EG_OK;
+                 eg_record_end(ctx, NULL, &g) == EG_OK;
             ok = ok && eg_graph_launch(ctx, g) == EG_OK && eg_sync(ctx) == EG_OK;
             unsigned char* back = calloc(bytes, 1);
             ok = ok && back && cudaMemcpy(back, dev_b, bytes, cudaMemcpyDeviceToHost) == cudaSuccess && memcmp(back, in, bytes) == 0;
@@ -1854,11 +1854,11 @@ int main(int argc, char** argv) {
     check(refused(eg_runner_new(ctx, &rn, &runner), EG_BAD_REQUEST, ctx, "has no finish") && runner == NULL,
           "eg_runner_new over a DEVICE plan without a finish: BAD_REQUEST (the device runner checks as the host one)");
     eg_graph* g = NULL;
-    check(eg_record_begin(ctx) == EG_OK && eg_launch(ctx, p, NULL) == EG_OK && eg_record_end(ctx, &g) == EG_OK &&
+    check(eg_record_begin(ctx) == EG_OK && eg_launch(ctx, p, NULL) == EG_OK && eg_record_end(ctx, NULL, &g) == EG_OK &&
               eg_graph_free(ctx, g) == EG_OK,
           "recording a DEVICE launch: captured, eg_record_end and eg_graph_free OK");
     check(eg_record_begin(ctx) == EG_OK && refused(bind(ctx, p, py, px, pv, a), EG_BAD_REQUEST, ctx, "eg_bind while recording") &&
-              eg_record_end(ctx, &g) == EG_OK && eg_graph_free(ctx, g) == EG_OK,
+              eg_record_end(ctx, NULL, &g) == EG_OK && eg_graph_free(ctx, g) == EG_OK,
           "eg_bind inside a DEVICE recording is refused BAD_REQUEST by name; the recording still ends");
     free_while_recording(ctx, dev_lib, p);
 

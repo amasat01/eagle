@@ -202,6 +202,8 @@ void run_on(eg_plan_s& plan, int threads, std::int64_t count, std::int64_t of) {
     else host::run_prefix(plan, threads, count);
 }
 
+}  // namespace
+
 /** @brief A plan of a derived unit over eagle's memory: one whole partition of @p n samples. */
 eg_plan_s* inner_plan(eg_ctx& ctx, eg_unit_s* unit, eg_structure structure, std::int64_t n) {
     auto* p = new eg_plan_s;
@@ -242,6 +244,8 @@ void bind_value(eg_plan_s& p, int slot, const void* value, std::size_t bytes) {
     b.bound = true;
     p.params[static_cast<std::size_t>(slot)] = b.value;
 }
+namespace {
+
 void bind_int64(eg_plan_s& p, int slot, std::int64_t v) { bind_value(p, slot, &v, sizeof(v)); }
 
 /** @brief The plane eagle made for twin slot @p s (a filled uniform or the start copy), or null. */
@@ -1460,6 +1464,9 @@ std::int64_t host_available_bytes() {
 #endif
 }
 }  // namespace
+
+double sample_sum(const double* x, std::int64_t count, int threads) { return pair_sum(x, count, threads).value(); }
+float sample_sum(const float* x, std::int64_t count, int threads) { return pair_sum(x, count, threads).value(); }
 
 /** @brief eg_reverse (``RunReverse.__call__`` / ``_run`` and ``diff_reverse_host``). */
 void reverse(eg_ctx& ctx, eg_runner_s* runner, const eg_bind_desc* seeds_in, const eg_bind_desc* grads_in) {

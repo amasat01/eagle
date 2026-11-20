@@ -216,6 +216,17 @@ $(REV_FIXTURE): test/fixture_reverse.c
 $(REV_TEST): test/reverse_test.c $(LIB)
 	$(CC) $(DEPFLAGS) $(CFLAGS_C) -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door -Wl,-rpath,$(OUT) -lm -pthread
 
+# eg_graph_reverse: the closed-form fixture library (test/fixture_graph.c) and its test.
+GRAPH_FIXTURE := $(OUT)/libfixture_graph.so
+GRAPH_TEST := $(OUT)/graph_reverse_test
+
+$(GRAPH_FIXTURE): test/fixture_graph.c
+	@mkdir -p $(OUT)
+	$(CC) $(DEPFLAGS) $(CFLAGS_C) -fPIC -shared -fvisibility=hidden -o $@ $<
+
+$(GRAPH_TEST): test/graph_reverse_test.c $(LIB)
+	$(CC) $(DEPFLAGS) $(CFLAGS_C) -Itest/c_shim -o $@ $< -L$(OUT) -leagle_door -Wl,-rpath,$(OUT) -lm -pthread
+
 # The gemm unit record: its fixture library (test/fixture_gemm.c), the host rows, and the device rows with the
 # missing-cuBLAS shim (device targets only).
 GEMM_FIXTURE := $(OUT)/libfixture_gemm.so
@@ -268,9 +279,10 @@ $(EMPTY_ROUTES_TEST): test/empty_routes_test.c $(EMPTY_ROUTES_CTX) $(filter-out 
 	$(CC) $(DEPFLAGS) $(CFLAGS_C) -c $< -o $@.o
 	$(CXX) -o $@ $@.o $(EMPTY_ROUTES_CTX) $(filter-out $(OUT)/Context.o,$(OBJ)) $(CUDART) -ldl -lm -pthread
 
-test: symbols confined $(FIXTURE) $(FIXTURE_BAD) $(FIXTURE_ALT) $(TEST) $(REV_FIXTURE) $(REV_TEST) $(GEMM_FIXTURE) $(GEMM_TEST) $(WEIGHT_ROWS_TEST) $(EMPTY_ROUTES_TEST)
+test: symbols confined $(FIXTURE) $(FIXTURE_BAD) $(FIXTURE_ALT) $(TEST) $(REV_FIXTURE) $(REV_TEST) $(GRAPH_FIXTURE) $(GRAPH_TEST) $(GEMM_FIXTURE) $(GEMM_TEST) $(WEIGHT_ROWS_TEST) $(EMPTY_ROUTES_TEST)
 	$(TEST) $(FIXTURE) $(FIXTURE_BAD)
 	$(REV_TEST) $(REV_FIXTURE)
+	$(GRAPH_TEST) $(GRAPH_FIXTURE)
 	$(GEMM_TEST) $(GEMM_FIXTURE)
 	$(WEIGHT_ROWS_TEST)
 	$(EMPTY_ROUTES_TEST)

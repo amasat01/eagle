@@ -462,6 +462,8 @@ struct eg_plan_s {
     eg_runner_s* active_owner = nullptr;      ///< the runner whose active set the plan reads
     int refs = 1;                             ///< the caller's reference plus one per runner
     bool caller_ref = true;
+    std::uint64_t binds = 0;                  ///< eg_bind and eg_clear calls on this plan
+    std::uint64_t launches = 0;               ///< eg_launch calls on this plan (a replay of a graph is not one)
 };
 
 /** @brief The slots a plain launch of @p p reads as its set of positions: an index set's, or the active set of a plan no runner owns
@@ -858,7 +860,16 @@ void record_begin(eg_ctx& ctx);
 void record_cond_begin(eg_ctx& ctx, const eg_cond_desc* desc);
 void record_cond_arm(eg_ctx& ctx);
 void record_cond_end(eg_ctx& ctx);
-void record_end(eg_ctx& ctx, eg_graph** out);
+void record_end(eg_ctx& ctx, const eg_record_end_desc* desc, eg_graph** out);
+void graph_reverse(eg_ctx& ctx, eg_graph_s* graph, const eg_graph_reverse_desc* desc);
+/** @brief A plan of a derived unit over eagle's memory: one whole partition of @p n samples (host/Reverse.cpp). */
+eg_plan_s* inner_plan(eg_ctx& ctx, eg_unit_s* unit, eg_structure structure, std::int64_t n);
+void inner_free(eg_ctx& ctx, eg_plan_s*& p);
+/** @brief The sum of @p x[0, count) as a canonical compensated pair in sample order, on @p threads threads (host/Reverse.cpp). */
+double sample_sum(const double* x, std::int64_t count, int threads);
+float sample_sum(const float* x, std::int64_t count, int threads);
+/** @brief Bind the by-value uniform of @p slot of @p p. */
+void bind_value(eg_plan_s& p, int slot, const void* value, std::size_t bytes);
 void graph_launch(eg_ctx& ctx, eg_graph_s* graph);
 void graph_free(eg_ctx& ctx, eg_graph_s* graph);
 void record_drop_all(eg_ctx& ctx);

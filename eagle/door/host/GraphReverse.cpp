@@ -1,0 +1,377 @@
+// SPDX-License-Identifier: Apache-2.0
+
+// The reverse of a recorded graph of plain launches (EG_RECORD_DIFF, eg_graph_reverse) on the host. At eg_record_end the
+// door keeps, per launch, the planes it reads and writes and the links of its vjp, and plans the copies the reverse needs
+// (eagle::diff::snapshots: a plane a later node overwrites is copied just before it, at each eg_graph_launch, host/Record.cpp).
+// eg_graph_reverse then runs the vjps in reverse node order over the planes each node read, summing the adjoints of a plane
+// read by several nodes in node order, the seed first (the order of eagle::diff::transpose).
+#include "eagle/door/Context.h"
+#include "eagle/door/host/Graph.h"
+#include "eagle/door/host/Ops.h"
+#include "eagle/door/host/Team.h"
+#include "eagle/diff/Transpose.h"
+
+#include <algorithm>
+#include <cstring>
+#include <map>
+#include <new>
+#include <string>
+
+namespace eagle {
+namespace door {
+
+namespace {
+
+/** @brief Zeroed bytes, 8-byte aligned. */
+struct Bytes {
+    std::vector<std::uint64_t> words;
+    explicit Bytes(std::size_t n = 0) : words((n + 7) / 8, 0) {}
+    char* data() { return reinterpret_cast<char*>(words.data()); }
+    const char* data() const { return reinterpret_cast<const char*>(words.data()); }
+};
+
+/** @brief One adjoint of a plane: the seed (node -1) or what the vjp of node ``node`` produced. */
+struct Contribution {
+    int node = -1;
+    Bytes bytes;
+};
+
+bool reads_role(std::int32_t r) {
+    return r == EG_ROLE_PER_SAMPLE || r == EG_ROLE_LOOKUP || r == EG_ROLE_VEC_IN || r == EG_ROLE_MAT_IN || r == EG_ROLE_WIDE_IN;
+}
+bool writes_role(std::int32_t r) { return r == EG_ROLE_MUTABLE || r == EG_ROLE_WIDE_OUT || r == EG_ROLE_ACCUM_OUT || r == EG_ROLE_OUT; }
+
+const DLTensor& tensor(const eg_plane_s& p) { return p.tensor->dl_tensor; }
+char* live(const eg_plane_s& p) { return static_cast<char*>(tensor(p).data) + tensor(p).byte_offset; }
+std::size_t element_bytes(const eg_plane_s& p) { return static_cast<std::size_t>(tensor(p).dtype.bits / 8); }
+std::size_t byte_count(const eg_plane_s& p) { return static_cast<std::size_t>(elements(tensor(p))) * element_bytes(p); }
+
+/** @brief Refuse a unit the graph reverse does not run: a split, SEGMENTED, companion or cell unit, or an index or active set. */
+void check_plain_unit(const eg_unit_s& u, const std::string& at) {
+    if (!u.stages.empty() || u.seg.present || !u.dispatches.empty() || !u.companions.empty() || !u.cells.empty() ||
+        u.index_count_slot >= 0 || u.active_count_slot >= 0)
+        refuse(EG_NOT_WRITTEN, at + " (unit '" + u.name + "'): a split, SEGMENTED, companion, cell, index-set or active-set unit is not written in EG_RECORD_DIFF");
+}
+
+int find_plane(const GraphDiff& d, const eg_plane_s* p) {
+    const auto it = std::find(d.planes.begin(), d.planes.end(), p);
+    return it == d.planes.end() ? -1 : static_cast<int>(it - d.planes.begin());
+}
+
+/** @brief The links of @p vjp (the vjp of node @p at, a launch of @p plan) in terms of the launch, refusing what is not written. */
+std::vector<VjpLink> link_vjp(const GraphDiff& d, const DiffNode& node, const eg_plan_s& plan, const eg_unit_s& vjp, const std::string& at) {
+    const eg_unit_s& pu = *plan.unit;
+    if (!vjp.derived.present) refuse(EG_BAD_REQUEST, at + ": unit '" + vjp.name + "' has no derived record");
+    if (vjp.derived.of_unit != pu.index || vjp.library != pu.library)
+        refuse(EG_BAD_REQUEST, at + ": unit '" + vjp.name + "' is not a derived unit of '" + pu.name + "'");
+    check_plain_unit(vjp, at);
+    std::vector<VjpLink> out;
+    std::vector<int> linked(vjp.slots.size(), 0);
+    for (std::size_t i = 0; i < vjp.derived.links.size(); ++i) {
+        const DerivedFacts::Link& l = vjp.derived.links[i];
+        const std::string where = at + ": unit '" + vjp.name + "' links[" + std::to_string(i) + "]";
+        if (l.slot < 0 || l.slot >= static_cast<std::int32_t>(vjp.slots.size())) refuse(EG_BAD_REQUEST, where + ".slot is out of range");
+        if (linked[static_cast<std::size_t>(l.slot)]++ != 0) refuse(EG_BAD_REQUEST, where + ": slot " + std::to_string(l.slot) + " has a second link");
+        if (l.what != EG_WHAT_PRIMAL_SLOT)
+            refuse(EG_BAD_REQUEST, where + ": a graph vjp has no tape slot, step plane or time start copy (what " + std::to_string(l.what) + ")");
+        if (l.form != EG_FORM_VALUE && l.form != EG_FORM_ADJOINT_IN && l.form != EG_FORM_GRAD)
+            refuse(EG_NOT_WRITTEN, where + ": form " + std::to_string(l.form) + " is not written in a graph vjp (VALUE, ADJOINT_IN and GRAD are)");
+        if (l.of_slot < 0 || l.of_slot >= static_cast<std::int32_t>(pu.slots.size())) refuse(EG_BAD_REQUEST, where + ".of_slot is out of range");
+        const SlotFacts& ps = pu.slots[static_cast<std::size_t>(l.of_slot)];
+        VjpLink k;
+        k.slot = l.slot;
+        k.primal = l.of_slot;
+        const auto is = [&](const std::vector<int>& slots_of_node) { return std::find(slots_of_node.begin(), slots_of_node.end(), k.plane) != slots_of_node.end(); };
+        if (l.form == EG_FORM_GRAD && ps.role == EG_ROLE_UNIFORM)
+            refuse(EG_NOT_WRITTEN, where + ": the gradient of the by-value uniform '" + ps.name + "' is not written; pass the parameter in a one-cell plane");
+        if (l.form == EG_FORM_VALUE && ps.role == EG_ROLE_UNIFORM) {
+            k.kind = VjpLink::VALUE_UNIFORM;
+        } else {
+            const eg_plane_s* bound = plan.bindings[static_cast<std::size_t>(l.of_slot)].plane;
+            k.plane = bound == nullptr ? -1 : find_plane(d, bound);
+            if (k.plane < 0) refuse(EG_BAD_REQUEST, where + ": '" + ps.name + "' of '" + pu.name + "' is no plane the graph tracks (a real read or written plane)");
+            if (l.form == EG_FORM_VALUE) {
+                k.kind = VjpLink::VALUE_PLANE;
+            } else if (l.form == EG_FORM_ADJOINT_IN) {
+                if (!is(node.writes)) refuse(EG_BAD_REQUEST, where + ": ADJOINT_IN of '" + ps.name + "', which the launch does not write");
+                k.kind = VjpLink::ADJOINT_IN;
+            } else {
+                if (!is(node.reads)) refuse(EG_BAD_REQUEST, where + ": GRAD of '" + ps.name + "', which the launch does not read");
+                k.kind = VjpLink::GRAD;
+                k.reduced = l.reduced != 0;
+                const std::int64_t want = k.reduced ? 1 : plan.n_samples;
+                if (elements(tensor(*d.planes[static_cast<std::size_t>(k.plane)])) != want)
+                    refuse(EG_BAD_REQUEST, where + ": the gradient of '" + ps.name + "' has " + std::to_string(want) + " element(s), the plane has another count");
+            }
+        }
+        out.push_back(k);
+    }
+    for (std::size_t i = 0; i < vjp.slots.size(); ++i)
+        if (linked[i] == 0 && vjp.slots[i].role != EG_ROLE_NSAMPLES)
+            refuse(EG_BAD_REQUEST, at + ": unit '" + vjp.name + "' slot " + std::to_string(i) + " ('" + vjp.slots[i].name + "') has no link");
+    return out;
+}
+
+/** @brief dst = ((src[0] + src[1]) + ...) over @p count elements of @p es bytes, in the order of @p src. */
+Bytes ordered_sum(const std::vector<Contribution>& src, std::size_t count, std::size_t es) {
+    Bytes out(count * es);
+    const auto go = [&](auto tag) {
+        using T = decltype(tag);
+        std::vector<const T*> in;
+        for (const Contribution& c : src) in.push_back(reinterpret_cast<const T*>(c.bytes.data()));
+        diff::orderedSum<T>(reinterpret_cast<T*>(out.data()), in, static_cast<std::ptrdiff_t>(count));
+    };
+    if (es == 8) go(double{});
+    else go(float{});
+    return out;
+}
+
+/** @brief The sum over the first @p count samples of @p x, a compensated pair in sample order, as a one-element plane. */
+Bytes sum_over_samples(const Bytes& x, std::int64_t count, std::size_t es, int threads) {
+    Bytes out(es);
+    if (es == 8) {
+        const double v = sample_sum(reinterpret_cast<const double*>(x.data()), count, threads);
+        std::memcpy(out.data(), &v, es);
+    } else {
+        const float v = sample_sum(reinterpret_cast<const float*>(x.data()), count, threads);
+        std::memcpy(out.data(), &v, es);
+    }
+    return out;
+}
+
+}  // namespace
+
+std::unique_ptr<GraphDiff> diff_plan(eg_ctx& ctx, const std::vector<Node>& nodes, const eg_record_end_desc& desc) {
+    if (desc.n_vjps < 0 || (desc.n_vjps > 0 && desc.vjps == nullptr)) refuse(EG_BAD_REQUEST, "eg_record_end_desc.n_vjps without vjps");
+    auto diff = std::make_unique<GraphDiff>();
+    diff->nodes.resize(nodes.size());
+    try {
+        std::vector<std::string> first_user;       // per plane: who named it first, for the overlap reason
+        for (std::size_t i = 0; i < nodes.size(); ++i) {
+            const Node& nd = nodes[i];
+            const std::string at = "eg_record_end: launch " + std::to_string(i);
+            if (nd.kind != Node::Launch)
+                refuse(EG_NOT_WRITTEN, "eg_record_end: recorded node " + std::to_string(i) + " is not an eg_launch; EG_RECORD_DIFF records plain launches only");
+            const eg_plan_s& plan = *nd.plan;
+            check_plain_unit(*plan.unit, at);
+            if (plan.structure == EG_STRUCTURE_DEVICE) refuse(EG_NOT_WRITTEN, at + ": a DEVICE plan is not written in EG_RECORD_DIFF");
+            std::map<int, std::string> named;       // plane -> the slot of this node that names it
+            for (std::size_t s = 0; s < plan.bindings.size(); ++s) {
+                const SlotFacts& sf = plan.unit->slots[s];
+                eg_plane_s* p = plan.bindings[s].plane;
+                const bool reads = reads_role(sf.role), writes = writes_role(sf.role);
+                if (p == nullptr || sf.made || sf.dtype != EG_DTYPE_REAL || (!reads && !writes)) continue;
+                int idx = find_plane(*diff, p);
+                if (idx < 0) {
+                    ++p->refs;
+                    diff->planes.push_back(p);
+                    first_user.push_back("launch " + std::to_string(i) + " slot '" + sf.name + "'");
+                    idx = static_cast<int>(diff->planes.size()) - 1;
+                    host::check_access(*p, writes, (at + " slot '" + sf.name + "'").c_str());
+                    if (tensor(*p).ndim != 1) refuse(EG_NOT_WRITTEN, at + " slot '" + sf.name + "': a plane of rank " + std::to_string(tensor(*p).ndim) + " is not written in EG_RECORD_DIFF");
+                }
+                if (!named.emplace(idx, sf.name).second)
+                    refuse(EG_BAD_REQUEST, at + ": slots '" + named[idx] + "' and '" + sf.name + "' name one plane");
+                (writes ? diff->nodes[i].writes : diff->nodes[i].reads).push_back(idx);
+            }
+        }
+        for (std::size_t a = 0; a < diff->planes.size(); ++a)
+            for (std::size_t b = a + 1; b < diff->planes.size(); ++b)
+                if (host::overlaps(tensor(*diff->planes[a]), tensor(*diff->planes[b])))
+                    refuse(EG_BAD_REQUEST, "eg_record_end: the planes of " + first_user[a] + " and " + first_user[b] + " are views of overlapping memory");
+        for (std::int32_t k = 0; k < desc.n_vjps; ++k) {
+            const eg_node_vjp v = desc.vjps[k];
+            const std::string at = "eg_record_end_desc.vjps[" + std::to_string(k) + "]";
+            if (v.launch < 0 || static_cast<std::size_t>(v.launch) >= nodes.size()) refuse(EG_BAD_REQUEST, at + ".launch " + std::to_string(v.launch) + " is out of range");
+            DiffNode& node = diff->nodes[static_cast<std::size_t>(v.launch)];
+            if (node.vjp != nullptr) refuse(EG_BAD_REQUEST, at + ".launch " + std::to_string(v.launch) + " is given twice");
+            check_handle(ctx.units, v.vjp, (at + ".vjp").c_str());
+            node.links = link_vjp(*diff, node, *nodes[static_cast<std::size_t>(v.launch)].plan, *v.vjp, at);
+            node.vjp = v.vjp;
+            ++v.vjp->refs;
+        }
+        std::vector<diff::NodeVjp> rows;
+        for (std::size_t i = 0; i < diff->nodes.size(); ++i) {
+            diff::NodeVjp row;
+            row.node = static_cast<decltype(row.node)>(i);
+            for (int p : diff->nodes[i].reads) row.reads.push_back(std::to_string(p));
+            for (int p : diff->nodes[i].writes) row.writes.push_back(std::to_string(p));
+            rows.push_back(std::move(row));
+        }
+        for (const diff::Snapshot& s : diff::snapshots(rows)) {
+            Snapshot snap;
+            snap.node = static_cast<std::size_t>(s.node);
+            snap.plane = std::stoi(s.plane);
+            try {
+                snap.bytes.assign((byte_count(*diff->planes[static_cast<std::size_t>(snap.plane)]) + 7) / 8, 0);
+            } catch (const std::bad_alloc&) {
+                refuse(EG_FAULT, "eg_record_end: no memory for the copy of a plane before launch " + std::to_string(snap.node));
+            }
+            diff->snapshots.push_back(std::move(snap));
+        }
+        for (const Node& nd : nodes) {
+            const auto same = [&](const GraphDiff::PlanMark& m) { return m.plan == nd.plan; };
+            if (std::none_of(diff->marks.begin(), diff->marks.end(), same)) diff->marks.push_back({ nd.plan, nd.plan->binds, nd.plan->launches });
+        }
+    } catch (...) {
+        diff_free(ctx, *diff);
+        throw;
+    }
+    return diff;
+}
+
+void diff_free(eg_ctx& ctx, GraphDiff& diff) {
+    for (eg_plane_s* p : diff.planes) plane_release(ctx, p);
+    for (const DiffNode& n : diff.nodes)
+        if (n.vjp != nullptr) unit_release(ctx, n.vjp);
+    diff.planes.clear();
+    diff.nodes.clear();
+}
+
+void graph_reverse(eg_ctx& ctx, eg_graph_s* graph, const eg_graph_reverse_desc* desc) {
+    if (ctx.rec != nullptr || ctx.dev_rec != nullptr) refuse(EG_BAD_REQUEST, "eg_graph_reverse while recording (eg_record_begin .. eg_record_end)");
+    check_handle(ctx.graphs, graph, "graph");
+    if (graph->diff == nullptr) refuse(EG_BAD_REQUEST, "eg_graph_reverse: the graph was not ended with EG_RECORD_DIFF");
+    GraphDiff& d = *graph->diff;
+    if (!d.launched) refuse(EG_BAD_REQUEST, "eg_graph_reverse: the graph was never launched (eg_graph_launch)");
+    for (const GraphDiff::PlanMark& m : d.marks) {
+        if (m.plan->binds != m.binds)
+            refuse(EG_BAD_REQUEST, "eg_graph_reverse: a plan of the graph (unit '" + m.plan->unit->name + "') was rebound (eg_bind, eg_clear) after its last launch");
+        if (m.plan->launches != m.launches)
+            refuse(EG_BAD_REQUEST, "eg_graph_reverse: a plan of the graph (unit '" + m.plan->unit->name + "') was launched outside the graph after its last launch");
+    }
+    const eg_graph_reverse_desc r = read_input(desc, "eg_graph_reverse_desc");
+    if (r.flags != 0) refuse(EG_BAD_REQUEST, "eg_graph_reverse_desc.flags: unknown bits " + std::to_string(r.flags));
+    if (r.n_seeds < 0 || (r.n_seeds > 0 && (r.outputs == nullptr || r.seeds == nullptr)) ||
+        r.n_grads < 0 || (r.n_grads > 0 && (r.inputs == nullptr || r.grads == nullptr)))
+        refuse(EG_BAD_REQUEST, "eg_graph_reverse_desc: a count without its arrays");
+
+    const std::size_t n_nodes = d.nodes.size();
+    const auto checked = [&](eg_plane_s* given, int k, const char* what, bool write) {
+        const std::string at = std::string("eg_graph_reverse_desc.") + what + "[" + std::to_string(k) + "]";
+        check_handle(ctx.planes, given, at.c_str());
+        const int idx = find_plane(d, given);
+        if (idx < 0) refuse(EG_BAD_REQUEST, at + " is no plane of the graph");
+        host::check_access(*given, write, at.c_str());
+        return idx;
+    };
+    const auto same_shape = [&](const eg_plane_s& a, const eg_plane_s& b, const std::string& at) {
+        if (tensor(a).dtype.code != tensor(b).dtype.code || tensor(a).dtype.bits != tensor(b).dtype.bits || elements(tensor(a)) != elements(tensor(b)))
+            refuse(EG_BAD_REQUEST, at + ": the dtype or element count differs from the graph plane");
+    };
+    std::vector<std::vector<Contribution>> pending(d.planes.size());
+    std::vector<char> written(d.planes.size(), 0);
+    for (const DiffNode& n : d.nodes)
+        for (int p : n.writes) written[static_cast<std::size_t>(p)] = 1;
+    for (std::int32_t k = 0; k < r.n_seeds; ++k) {
+        check_handle(ctx.planes, r.seeds[k], "eg_graph_reverse_desc.seeds");
+        const int p = checked(r.outputs[k], k, "outputs", false);
+        if (written[static_cast<std::size_t>(p)] == 0)
+            refuse(EG_BAD_REQUEST, "eg_graph_reverse_desc.outputs[" + std::to_string(k) + "] is not written by the graph");
+        if (!pending[static_cast<std::size_t>(p)].empty()) refuse(EG_BAD_REQUEST, "eg_graph_reverse_desc.outputs[" + std::to_string(k) + "] is given twice");
+        same_shape(*d.planes[static_cast<std::size_t>(p)], *r.seeds[k], "eg_graph_reverse_desc.seeds[" + std::to_string(k) + "]");
+        Contribution seed;
+        seed.bytes = Bytes(byte_count(*r.seeds[k]));
+        std::memcpy(seed.bytes.data(), live(*r.seeds[k]), byte_count(*r.seeds[k]));
+        pending[static_cast<std::size_t>(p)].push_back(std::move(seed));
+    }
+    std::vector<char> input(d.planes.size(), 0), seen(d.planes.size(), 0);
+    for (const DiffNode& n : d.nodes) {
+        for (int p : n.reads) {
+            if (seen[static_cast<std::size_t>(p)] == 0) input[static_cast<std::size_t>(p)] = 1;
+            seen[static_cast<std::size_t>(p)] = 1;
+        }
+        for (int p : n.writes) seen[static_cast<std::size_t>(p)] = 1;
+    }
+    std::vector<int> wanted;
+    for (std::int32_t k = 0; k < r.n_grads; ++k) {
+        check_handle(ctx.planes, r.grads[k], "eg_graph_reverse_desc.grads");
+        const int p = checked(r.inputs[k], k, "inputs", false);
+        if (input[static_cast<std::size_t>(p)] == 0) refuse(EG_BAD_REQUEST, "eg_graph_reverse_desc.inputs[" + std::to_string(k) + "] is not read before the graph writes it");
+        host::check_access(*r.grads[k], true, ("eg_graph_reverse_desc.grads[" + std::to_string(k) + "]").c_str());
+        same_shape(*d.planes[static_cast<std::size_t>(p)], *r.grads[k], "eg_graph_reverse_desc.grads[" + std::to_string(k) + "]");
+        wanted.push_back(p);
+    }
+
+    // The adjoint a plane has accumulated: the seed first, then the nodes in node order; none: nullopt-like empty vector.
+    const auto collect = [&](int p, bool& any) {
+        std::vector<Contribution> src = std::move(pending[static_cast<std::size_t>(p)]);
+        pending[static_cast<std::size_t>(p)].clear();
+        const eg_plane_s& plane = *d.planes[static_cast<std::size_t>(p)];
+        any = !src.empty();
+        if (!any) return Bytes(byte_count(plane));
+        std::stable_sort(src.begin(), src.end(), [](const Contribution& a, const Contribution& b) { return a.node < b.node; });
+        if (src.size() == 1) return std::move(src.front().bytes);
+        return ordered_sum(src, static_cast<std::size_t>(elements(tensor(plane))), element_bytes(plane));
+    };
+    const int threads = host::team_threads(ctx);
+    for (std::size_t back = 0; back < n_nodes; ++back) {
+        const std::size_t i = n_nodes - 1 - back;
+        const DiffNode& node = d.nodes[i];
+        const eg_plan_s& primal = *graph->nodes[i].plan;
+        std::vector<Bytes> adjoint;
+        bool flows = false;
+        for (int w : node.writes) {
+            bool any = false;
+            adjoint.push_back(collect(w, any));
+            flows = flows || any;
+        }
+        if (node.vjp == nullptr) {
+            if (flows) refuse(EG_BAD_REQUEST, "eg_graph_reverse: a gradient flows through launch " + std::to_string(i) + " (unit '" + primal.unit->name + "'), which has no vjp");
+            continue;
+        }
+        const std::size_t n = static_cast<std::size_t>(primal.n_samples);
+        eg_plan_s* vp = inner_plan(ctx, node.vjp, primal.structure, primal.n_samples);
+        std::vector<Bytes> grads(node.links.size());
+        try {
+            for (std::size_t k = 0; k < node.links.size(); ++k) {
+                const VjpLink& l = node.links[k];
+                if (l.kind == VjpLink::VALUE_UNIFORM) {
+                    bind_value(*vp, l.slot, primal.bindings[static_cast<std::size_t>(l.primal)].value, sizeof(primal.bindings[0].value));
+                    continue;
+                }
+                const eg_plane_s& plane = *d.planes[static_cast<std::size_t>(l.plane)];
+                char* data = nullptr;
+                if (l.kind == VjpLink::VALUE_PLANE) {
+                    data = live(plane);
+                    for (std::size_t m = i; m < n_nodes && data == live(plane); ++m) {     // the first node at or after this one that overwrites it
+                        const std::vector<int>& w = d.nodes[m].writes;
+                        if (std::find(w.begin(), w.end(), l.plane) == w.end()) continue;
+                        for (Snapshot& s : d.snapshots)
+                            if (s.node == m && s.plane == l.plane) data = reinterpret_cast<char*>(s.bytes.data());
+                        break;
+                    }
+                } else if (l.kind == VjpLink::ADJOINT_IN) {
+                    const std::vector<int>& w = node.writes;
+                    data = adjoint[static_cast<std::size_t>(std::find(w.begin(), w.end(), l.plane) - w.begin())].data();
+                } else {
+                    grads[k] = Bytes(n * element_bytes(plane));
+                    data = grads[k].data();
+                }
+                bind_raw(*vp, l.slot, data, l.kind == VjpLink::GRAD ? n : static_cast<std::uint64_t>(elements(tensor(plane))));
+            }
+            host::run_plan(*vp, threads);
+        } catch (...) {
+            inner_free(ctx, vp);
+            throw;
+        }
+        inner_free(ctx, vp);
+        for (std::size_t k = 0; k < node.links.size(); ++k) {
+            const VjpLink& l = node.links[k];
+            if (l.kind != VjpLink::GRAD) continue;
+            const eg_plane_s& plane = *d.planes[static_cast<std::size_t>(l.plane)];
+            Contribution c;
+            c.node = static_cast<int>(i);
+            c.bytes = l.reduced ? sum_over_samples(grads[k], primal.n_samples, element_bytes(plane), threads) : std::move(grads[k]);
+            pending[static_cast<std::size_t>(l.plane)].push_back(std::move(c));
+        }
+    }
+    for (std::int32_t k = 0; k < r.n_grads; ++k) {
+        bool any = false;
+        const Bytes g = collect(wanted[static_cast<std::size_t>(k)], any);
+        std::memcpy(live(*r.grads[k]), g.data(), byte_count(*r.grads[k]));
+    }
+}
+
+}  // namespace door
+}  // namespace eagle

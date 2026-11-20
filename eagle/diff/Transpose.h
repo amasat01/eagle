@@ -264,7 +264,9 @@ inline void orderedSum(T* dst, const std::vector<const T*>& src, std::ptrdiff_t 
 {
     if (src.empty())
         throw std::invalid_argument("orderedSum: no sources");
+#ifdef _OPENMP
 #pragma omp parallel for schedule(static)
+#endif
     for (std::ptrdiff_t i = 0; i < n; ++i) {
         T acc = src[0][i];
         for (std::size_t k = 1; k < src.size(); ++k)

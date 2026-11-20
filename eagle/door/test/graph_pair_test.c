@@ -169,7 +169,7 @@ int main(int argc, char** argv) {
     eg_graph* graph = NULL;
     ok = set_new(ctx, osc, &rec, 0) && eg_record_begin(ctx) == EG_OK;
     for (int i = 0; ok && i < LAUNCHES; ++i) ok = eg_launch(ctx, rec.plan, NULL) == EG_OK;
-    ok = ok && eg_record_end(ctx, &graph) == EG_OK && graph != NULL && set_get(&rec, slots_of(&got), 0);
+    ok = ok && eg_record_end(ctx, NULL, &graph) == EG_OK && graph != NULL && set_get(&rec, slots_of(&got), 0);
     int untouched = ok;
     for (int i = 0; untouched && i < N; ++i) untouched = got.t[i] == 0.0 && got.x[i] == x_in[i] && got.term[i] == 0;
     check(untouched, "recording 3 DEVICE launches: eg_record_end OK, the capture ran nothing");
@@ -241,7 +241,7 @@ int main(int argc, char** argv) {
     eg_plan_free(ctx, spare.plan);    /* its finished counter is a device cell: freed after the capture */
     spare.plan = NULL;
     eg_graph* g2 = NULL;
-    check(eg_record_end(ctx, &g2) == EG_OK && g2 != NULL, "eg_record_end OK after a DEVICE plan was freed while recording");
+    check(eg_record_end(ctx, NULL, &g2) == EG_OK && g2 != NULL, "eg_record_end OK after a DEVICE plan was freed while recording");
     set_free(ctx, &spare);
     ok = set_new(ctx, osc, &other, 0);
     check(ok && eg_graph_free(ctx, g2) == EG_OK, "the second graph frees; a plan made after it works");
@@ -260,7 +260,7 @@ int main(int argc, char** argv) {
     eg_graph* g3 = NULL;
     ok = set_new(ctx, osc, &onrec, s) && eg_record_begin(ctx) == EG_OK;
     for (int i = 0; ok && i < LAUNCHES; ++i) ok = eg_launch(ctx, onrec.plan, NULL) == EG_OK;
-    ok = ok && eg_record_end(ctx, &g3) == EG_OK;
+    ok = ok && eg_record_end(ctx, NULL, &g3) == EG_OK;
     for (int r = 0; ok && r < REPLAYS; ++r) ok = eg_graph_launch(ctx, g3) == EG_OK;
     ok = ok && set_get(&onrec, slots_of(&got), s);
     check(ok && same(&got, &want), "recorded on the caller's stream, 5 replays on it: equal to the oracle");

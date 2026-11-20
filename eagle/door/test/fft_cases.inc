@@ -515,7 +515,7 @@ static void fft_recorded(eg_ctx* ctx, int device)
         eg_fft* again = NULL;
         ok = ok && eg_record_begin(ctx) == EG_OK && eg_fft_run(ctx, rig.plan, rig.in, rig.out) == EG_OK;
         ok = ok && fft_new(ctx, &c, &again) == EG_BAD_REQUEST && reason_has(ctx, "while recording");
-        ok = ok && eg_record_end(ctx, &graph) == EG_OK && eg_fft_free(ctx, rig.plan) == EG_OK;
+        ok = ok && eg_record_end(ctx, NULL, &graph) == EG_OK && eg_fft_free(ctx, rig.plan) == EG_OK;
         rig.plan = NULL;
         if (!device) { /* a host recording runs nothing until it replays */
             fft_get(ctx, rig.out, 64, replay, rig.n_out);

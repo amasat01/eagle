@@ -1093,13 +1093,58 @@ eg_status eg_record_cond_arm(eg_ctx* ctx);
 /** Close the innermost conditional. Status: OK; BAD_REQUEST. */
 eg_status eg_record_cond_end(eg_ctx* ctx);
 
-/** End recording; ``*out`` replays it. Status: OK; BAD_REQUEST (not
- *  recording, a conditional open); FAULT (capture failed). */
-eg_status eg_record_end(eg_ctx* ctx, eg_graph** out);
+#define EG_RECORD_DIFF (1u << 0) /**< plan the recording for ``eg_graph_reverse`` (host, plain launches only) */
+
+/** One recorded launch a gradient flows through, and the vjp unit that reverses it. ``launch`` is the 0-based ordinal of the
+ *  ``eg_launch`` inside the recording (a plan launched twice is two ordinals). The vjp is a unit of the launch's library whose
+ *  derived record (``eg_unit_derived``, ``of_unit`` the launch's unit) links each of its slots to a slot of the launch:
+ *  (PRIMAL_SLOT, VALUE) the primal value, (PRIMAL_SLOT, ADJOINT_IN) the cotangent of a written plane, (PRIMAL_SLOT, GRAD) the
+ *  gradient of a read (``reduced`` 1: a one-cell shared parameter plane, summed over samples). The links decide; no other link
+ *  (a tape row, a step plane, a time start copy, ADJOINT_OUT) and no by-value uniform gradient is written. */
+struct eg_node_vjp {
+    int32_t launch;
+    eg_unit* vjp;
+};
+
+/** INPUT to ``eg_record_end``. */
+struct eg_record_end_desc {
+    uint32_t struct_size;
+    uint32_t flags;                    /**< EG_RECORD_DIFF, or 0 */
+    int32_t n_vjps;                    /**< EG_RECORD_DIFF: one per recorded launch a gradient flows through */
+    const struct eg_node_vjp* vjps;
+};
+
+/** End recording; ``*out`` replays it. ``desc`` NULL: a plain graph. With EG_RECORD_DIFF every recorded node must be an
+ *  ``eg_launch`` (a run, reduce, copy, fft, gemm, conditional or child is refused by name), on a host plan with no split,
+ *  SEGMENTED or companion unit; the planes the later nodes overwrite are copied at each ``eg_graph_launch`` just before the
+ *  overwriting node, so the reverse reads what each node read. Status: OK; BAD_REQUEST (not recording, a conditional open,
+ *  a vjp whose links the launch cannot satisfy, two names of one plane in a node, overlapping planes); NOT_WRITTEN (a
+ *  node or unit the reverse does not cover; a device context); FAULT (capture failed; a snapshot buffer not allocated). */
+eg_status eg_record_end(eg_ctx* ctx, const struct eg_record_end_desc* desc, eg_graph** out);
 
 /** Replay a recorded graph once. Calls today: seam ``launcher_launch`` on a
  *  device. Status: OK; FAULT (also a failure a host node of an earlier replay kept, see ``eg_record_begin``). */
 eg_status eg_graph_launch(eg_ctx* ctx, eg_graph* graph);
+
+/** INPUT to ``eg_graph_reverse``. Planes are matched by handle, not by slot: graph planes are shared across nodes. */
+struct eg_graph_reverse_desc {
+    uint32_t struct_size;
+    uint32_t flags;                    /**< 0 */
+    int32_t n_seeds;
+    eg_plane* const* outputs;          /**< planes written by the graph */
+    eg_plane* const* seeds;            /**< dJ/d(outputs[i]), one value per element; an output with no seed has cotangent zero */
+    int32_t n_grads;
+    eg_plane* const* inputs;           /**< planes the graph reads before anything writes them */
+    eg_plane* const* grads;            /**< dJ/d(inputs[i]) is written into grads[i]; an input not listed gets nothing */
+};
+
+/** Reverse the graph's LAST ``eg_graph_launch``, eagerly on the host. Nodes run in reverse order; a plane read by several
+ *  nodes gets its adjoints summed in node order, the seed first. The caller's promise: no plane the record reads live was
+ *  changed since that launch, except through the graph's own plans (which the door checks: see below). Status: OK;
+ *  BAD_REQUEST (graph not ended with EG_RECORD_DIFF, never launched, a call while recording, a plan of the graph rebound
+ *  (eg_bind, eg_clear) or launched outside the graph since its last launch, a launch with a gradient flowing through it and
+ *  no vjp, a seed or gradient plane that does not match); NOT_WRITTEN (a device context or graph). */
+eg_status eg_graph_reverse(eg_ctx* ctx, eg_graph* graph, const struct eg_graph_reverse_desc* desc);
 
 /** Free a graph. NULL-safe. */
 eg_status eg_graph_free(eg_ctx* ctx, eg_graph* graph);

@@ -212,10 +212,20 @@ EG_EXPORT eg_status eg_record_cond_begin(eg_ctx* ctx, const struct eg_cond_desc*
 }
 EG_EXPORT eg_status eg_record_cond_arm(eg_ctx* ctx) { return door::call(ctx, door::record_cond_arm); }
 EG_EXPORT eg_status eg_record_cond_end(eg_ctx* ctx) { return door::call(ctx, door::record_cond_end); }
-EG_EXPORT eg_status eg_record_end(eg_ctx* ctx, eg_graph** out) {
-    return door::call(ctx, [out](eg_ctx& c) {
-        if (c.dev_rec != nullptr) door::device_record_end(c, out);
-        else door::record_end(c, out);
+EG_EXPORT eg_status eg_record_end(eg_ctx* ctx, const struct eg_record_end_desc* desc, eg_graph** out) {
+    return door::call(ctx, [desc, out](eg_ctx& c) {
+        if (c.dev_rec != nullptr) {
+            if (desc != nullptr) door::refuse(EG_NOT_WRITTEN, "eg_record_end_desc: EG_RECORD_DIFF is not written on a device context");
+            door::device_record_end(c, out);
+        } else {
+            door::record_end(c, desc, out);
+        }
+    });
+}
+EG_EXPORT eg_status eg_graph_reverse(eg_ctx* ctx, eg_graph* graph, const struct eg_graph_reverse_desc* desc) {
+    return door::call(ctx, [graph, desc](eg_ctx& c) {
+        if (door::device_graph(c, graph)) door::refuse(EG_NOT_WRITTEN, "eg_graph_reverse: a device graph is not written in this build of the door");
+        door::graph_reverse(c, graph, desc);
     });
 }
 EG_EXPORT eg_status eg_graph_launch(eg_ctx* ctx, eg_graph* graph) {

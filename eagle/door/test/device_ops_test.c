@@ -233,7 +233,7 @@ static void copy_rows(eg_ctx* ctx, const char* dir) {
     d.out = b.p;
     eg_graph* g = NULL;
     check(ok && hp && eg_record_begin(ctx) == EG_OK && eg_copy(ctx, a.p, hp) == EG_NOT_WRITTEN && reason_has(ctx, "not recordable") &&
-              eg_reduce(ctx, &d) == EG_NOT_WRITTEN && reason_has(ctx, "while recording") && eg_record_end(ctx, &g) == EG_OK && eg_graph_free(ctx, g) == EG_OK,
+              eg_reduce(ctx, &d) == EG_NOT_WRITTEN && reason_has(ctx, "while recording") && eg_record_end(ctx, NULL, &g) == EG_OK && eg_graph_free(ctx, g) == EG_OK,
           "a host<->device eg_copy and eg_reduce while recording on a device context: NOT_WRITTEN by name");
     if (hp) eg_plane_free(ctx, hp);
     if (ov) {

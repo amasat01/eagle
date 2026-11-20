@@ -8,33 +8,18 @@
 // caller's handles; eg_graph_free drops them. In a device recording the same nodes become host nodes of the capture
 // (record_host_step): the graph holds them and their references until it is freed.
 #include "eagle/door/Context.h"
+#include "eagle/door/host/Graph.h"
 #include "eagle/door/host/Ops.h"
 #include "eagle/door/device/Seam.h"
 #include "eagle/door/host/Team.h"
 
+#include <cstring>
 #include <memory>
 
 namespace eagle {
 namespace door {
 
 namespace {
-
-/** @brief One recorded call, or one conditional with an arm list per arm. */
-struct Node {
-    enum Kind { Launch, Run, Reduce, Copy, Fft, Gemm, Cond } kind = Launch;
-    eg_plan_s* plan = nullptr;
-    eg_runner_s* runner = nullptr;
-    host::ReduceOp reduce;
-    eg_fft_s* fft = nullptr;
-    eg_gemm_s* gemm = nullptr;
-    eg_plane_s* rhs = nullptr;                  ///< a product's B (its A is ``src``, its C ``dst``)
-    eg_plane_s* src = nullptr;                  ///< a copy's source, a transform's input
-    eg_plane_s* dst = nullptr;                  ///< a copy's target, a transform's output
-    eg_cond_kind cond = EG_COND_IF;
-    eg_plane_s* cell = nullptr;
-    std::size_t want = 0;                       ///< arms the conditional needs
-    std::vector<std::vector<Node>> arms;
-};
 
 /** @brief The planes a node names directly. */
 std::vector<eg_plane_s*> planes_of(const Node& n) {
@@ -73,10 +58,6 @@ void release(eg_ctx& ctx, const std::vector<Node>& nodes) {
 }  // namespace door
 }  // namespace eagle
 
-struct eg_graph_s {
-    std::vector<eagle::door::Node> nodes;
-};
-
 struct eg_recording_s {
     std::vector<eagle::door::Node> top;
     std::vector<eagle::door::Node*> open;       ///< the open conditionals, outermost first
@@ -91,6 +72,7 @@ namespace door {
 namespace {
 
 void replay(eg_ctx& ctx, const std::vector<Node>& nodes);
+void run_node(eg_ctx& ctx, const Node& n);
 
 /** @brief One host step of a device graph: the recorded node, what it is called in a failure, and its context. */
 struct HostStep {
@@ -165,32 +147,35 @@ bool record(eg_ctx& ctx, Node&& node) {
 
 /** @brief Run @p nodes in order; each conditional reads its int32 cell now. */
 void replay(eg_ctx& ctx, const std::vector<Node>& nodes) {
-    for (const Node& n : nodes) {
-        switch (n.kind) {
-            case Node::Launch:
-                check_bound(*n.plan);
-                n.plan->finished = 0;    // a replayed launch counts from zero, as eg_launch does
-                host::run_plan(*n.plan, host::team_threads(ctx));
-                break;
-            case Node::Run: run_loop(ctx, n.runner, nullptr); break;
-            case Node::Reduce: host::reduce_exec(n.reduce, host::team_threads(ctx)); break;
-            case Node::Copy: host::copy_exec(*n.src, *n.dst); break;
-            case Node::Fft: host::fft_exec(*n.fft, *n.src, *n.dst, host::team_threads(ctx)); break;
-            case Node::Gemm: host::gemm_exec(*n.gemm, *n.src, *n.rhs, *n.dst); break;
-            case Node::Cond: {
-                const DLTensor& t = n.cell->tensor->dl_tensor;
-                const auto* cell = reinterpret_cast<const std::int32_t*>(static_cast<const char*>(t.data) + t.byte_offset);
-                if (n.cond == EG_COND_IF) {
-                    if (*cell != 0) replay(ctx, n.arms[0]);
-                } else if (n.cond == EG_COND_IF_ELSE) {
-                    replay(ctx, n.arms[*cell != 0 ? 0 : 1]);
-                } else if (n.cond == EG_COND_WHILE) {
-                    while (*cell != 0) replay(ctx, n.arms[0]);
-                } else if (*cell >= 0 && static_cast<std::size_t>(*cell) < n.want) {
-                    replay(ctx, n.arms[static_cast<std::size_t>(*cell)]);
-                }
-                break;
+    for (const Node& n : nodes) run_node(ctx, n);
+}
+
+/** @brief Run one recorded node. */
+void run_node(eg_ctx& ctx, const Node& n) {
+    switch (n.kind) {
+        case Node::Launch:
+            check_bound(*n.plan);
+            n.plan->finished = 0;    // a replayed launch counts from zero, as eg_launch does
+            host::run_plan(*n.plan, host::team_threads(ctx));
+            break;
+        case Node::Run: run_loop(ctx, n.runner, nullptr); break;
+        case Node::Reduce: host::reduce_exec(n.reduce, host::team_threads(ctx)); break;
+        case Node::Copy: host::copy_exec(*n.src, *n.dst); break;
+        case Node::Fft: host::fft_exec(*n.fft, *n.src, *n.dst, host::team_threads(ctx)); break;
+        case Node::Gemm: host::gemm_exec(*n.gemm, *n.src, *n.rhs, *n.dst); break;
+        case Node::Cond: {
+            const DLTensor& t = n.cell->tensor->dl_tensor;
+            const auto* cell = reinterpret_cast<const std::int32_t*>(static_cast<const char*>(t.data) + t.byte_offset);
+            if (n.cond == EG_COND_IF) {
+                if (*cell != 0) replay(ctx, n.arms[0]);
+            } else if (n.cond == EG_COND_IF_ELSE) {
+                replay(ctx, n.arms[*cell != 0 ? 0 : 1]);
+            } else if (n.cond == EG_COND_WHILE) {
+                while (*cell != 0) replay(ctx, n.arms[0]);
+            } else if (*cell >= 0 && static_cast<std::size_t>(*cell) < n.want) {
+                replay(ctx, n.arms[static_cast<std::size_t>(*cell)]);
             }
+            break;
         }
     }
 }
@@ -315,13 +300,21 @@ void record_cond_end(eg_ctx& ctx) {
     rec.open.pop_back();
 }
 
-void record_end(eg_ctx& ctx, eg_graph** out) {
+void record_end(eg_ctx& ctx, const eg_record_end_desc* desc, eg_graph** out) {
     if (out == nullptr) refuse(EG_BAD_REQUEST, "eg_record_end: out is NULL");
     *out = nullptr;
     eg_recording_s& rec = recording(ctx);
     if (!rec.open.empty()) refuse(EG_BAD_REQUEST, "eg_record_end: a conditional is still open");
+    std::unique_ptr<GraphDiff> diff;
+    if (desc != nullptr) {
+        const eg_record_end_desc d = read_input(desc, "eg_record_end_desc");
+        if ((d.flags & ~EG_RECORD_DIFF) != 0) refuse(EG_BAD_REQUEST, "eg_record_end_desc.flags: unknown bits " + std::to_string(d.flags & ~EG_RECORD_DIFF));
+        if ((d.flags & EG_RECORD_DIFF) != 0) diff = diff_plan(ctx, rec.top, d);   // a refusal leaves the recording open
+        else if (d.n_vjps != 0) refuse(EG_BAD_REQUEST, "eg_record_end_desc.n_vjps: vjps without EG_RECORD_DIFF");
+    }
     auto graph = std::make_unique<eg_graph_s>();
     graph->nodes = std::move(rec.top);
+    graph->diff = std::move(diff);
     ctx.graphs.insert(graph.get());
     delete ctx.rec;
     ctx.rec = nullptr;
@@ -330,13 +323,33 @@ void record_end(eg_ctx& ctx, eg_graph** out) {
 
 void graph_launch(eg_ctx& ctx, eg_graph_s* graph) {
     check_handle(ctx.graphs, graph, "graph");
-    replay(ctx, graph->nodes);
+    if (graph->diff == nullptr) {
+        replay(ctx, graph->nodes);
+        return;
+    }
+    GraphDiff& diff = *graph->diff;
+    for (const GraphDiff::PlanMark& m : diff.marks)
+        if (m.plan->binds != m.binds)
+            refuse(EG_BAD_REQUEST, "eg_graph_launch: a plan of this EG_RECORD_DIFF graph was rebound (eg_bind, eg_clear) since eg_record_end; "
+                   "its tape holds the planes it was recorded with");
+    diff.launched = false;
+    for (std::size_t i = 0; i < graph->nodes.size(); ++i) {
+        for (Snapshot& s : diff.snapshots)      // the planes node i overwrites, as the nodes before it left them
+            if (s.node == i) {
+                const DLTensor& t = diff.planes[static_cast<std::size_t>(s.plane)]->tensor->dl_tensor;
+                std::memcpy(s.bytes.data(), static_cast<const char*>(t.data) + t.byte_offset, s.bytes.size() * sizeof(std::uint64_t));
+            }
+        run_node(ctx, graph->nodes[i]);
+    }
+    for (GraphDiff::PlanMark& m : diff.marks) m.launches = m.plan->launches;
+    diff.launched = true;
 }
 
 void graph_free(eg_ctx& ctx, eg_graph_s* graph) {
     check_handle(ctx.graphs, graph, "graph");
     ctx.graphs.erase(graph);
     release(ctx, graph->nodes);
+    if (graph->diff != nullptr) diff_free(ctx, *graph->diff);
     delete graph;
 }
 

@@ -245,7 +245,7 @@ static eg_status run(eg_ctx* ctx, eg_unit* unit, eg_structure s, struct matrix* 
     } else {
         if (st == EG_OK && v->record) st = eg_record_begin(ctx);
         if (st == EG_OK) st = eg_launch(ctx, *plan_out, NULL);
-        if (st == EG_OK && v->record) st = eg_record_end(ctx, &graph);
+        if (st == EG_OK && v->record) st = eg_record_end(ctx, NULL, &graph);
         if (st == EG_OK && v->record) st = eg_graph_launch(ctx, graph);
     }
     if (st == EG_OK) st = eg_sync(ctx);
@@ -355,7 +355,7 @@ static eg_status direct_run(eg_ctx* ctx, int device, const struct direct* d, int
     eg_status st = direct_desc(ctx, d, &gemm);
     if (st == EG_OK && record) st = eg_record_begin(ctx);
     if (st == EG_OK) st = eg_gemm_run(ctx, gemm, plane[0], plane[1], plane[2]);
-    if (st == EG_OK && record) st = eg_record_end(ctx, &graph);
+    if (st == EG_OK && record) st = eg_record_end(ctx, NULL, &graph);
     if (st == EG_OK && record && free_first) st = eg_gemm_free(ctx, gemm), gemm = NULL;
     if (st == EG_OK && record) st = eg_graph_launch(ctx, graph);
     if (st == EG_OK) st = eg_sync(ctx);
@@ -518,7 +518,7 @@ static void direct_refusals(eg_ctx* ctx) {
     check(refused(eg_gemm_new(ctx, &ok, NULL), EG_BAD_REQUEST, ctx, "eg_gemm_new: out is NULL") &&
               refused(eg_gemm_new(ctx, NULL, &g), EG_BAD_REQUEST, ctx, "eg_gemm_desc is NULL"),
           "eg_gemm_new refuses a NULL out and a NULL descriptor: BAD_REQUEST naming it");
-    check(eg_record_begin(ctx) == EG_OK && refused(eg_gemm_new(ctx, &ok, &g), EG_BAD_REQUEST, ctx, "eg_gemm_new while recording") && eg_record_end(ctx, (eg_graph**)&g) == EG_OK,
+    check(eg_record_begin(ctx) == EG_OK && refused(eg_gemm_new(ctx, &ok, &g), EG_BAD_REQUEST, ctx, "eg_gemm_new while recording") && eg_record_end(ctx, NULL, (eg_graph**)&g) == EG_OK,
           "eg_gemm_new while recording: BAD_REQUEST naming it, and the recording still ends");
     eg_graph_free(ctx, (eg_graph*)g);
     g = NULL;

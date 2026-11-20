@@ -726,6 +726,7 @@ void clear(eg_ctx& ctx, eg_plan_s* plan, std::int32_t n_slots, const std::int32_
     if (ctx.rec != nullptr || ctx.dev_rec != nullptr)
         refuse(EG_BAD_REQUEST, "eg_clear while recording (eg_record_begin .. eg_record_end): clear between launches, outside the recording");
     if (n_slots < 0 || (n_slots > 0 && slots == nullptr)) refuse(EG_BAD_REQUEST, "eg_clear: n_slots without its array");
+    ++plan->binds;
     const int n_all = static_cast<int>(plan->bindings.size());
     std::vector<bool> seen(n_all, false);
     for (std::int32_t i = 0; i < n_slots; ++i) {
@@ -857,6 +858,7 @@ void bind(eg_ctx& ctx, eg_plan_s* plan, const eg_bind_desc* desc) {
         refuse(EG_BAD_REQUEST, "eg_bind while recording (eg_record_begin .. eg_record_end): bind before recording, a recorded launch replays the planes it was recorded with");
     const eg_bind_desc d = read_input(desc, "eg_bind_desc");
     check_bind(ctx, *plan, d);
+    ++plan->binds;
     for (int i = 0; i < d.n_planes; ++i) {
         eg_plan_s::Binding& b = plan->bindings[d.plane_slots[i]];
         eg_plane_s* old = b.plane;
@@ -909,6 +911,7 @@ void bind_raw(eg_plan_s& plan, int slot, void* data, std::uint64_t count) {
 void launch(eg_ctx& ctx, eg_plan_s* plan, std::uint64_t* tiles) {
     check_handle(ctx.plans, plan, "plan");
     check_bound(*plan);
+    ++plan->launches;
     if (plan->structure == EG_STRUCTURE_DEVICE) {
         if (ctx.dev_rec != nullptr) {    // captured on the stream in scope
             device_record_launch(ctx, *plan);

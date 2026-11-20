@@ -1066,7 +1066,7 @@ static eg_graph* record_copy_cond(eg_ctx* ctx, eg_cond_kind kind, int32_t n_arms
         ok = eg_copy(ctx, src[i], out) == EG_OK;
         if (ok && i + 1 < arms) ok = eg_record_cond_arm(ctx) == EG_OK;
     }
-    ok = ok && eg_record_cond_end(ctx) == EG_OK && eg_record_end(ctx, &g) == EG_OK;
+    ok = ok && eg_record_cond_end(ctx) == EG_OK && eg_record_end(ctx, NULL, &g) == EG_OK;
     return ok ? g : NULL;
 }
 
@@ -1124,7 +1124,7 @@ static void check_conditionals(eg_ctx* ctx) {
         d.cell = pb[0];
         ok = eg_record_begin(ctx) == EG_OK && eg_record_cond_begin(ctx, &d) == EG_OK;
         for (int i = 0; ok && i < 4; ++i) ok = eg_copy(ctx, pb[i + 1], pb[i]) == EG_OK;
-        ok = ok && eg_record_cond_end(ctx) == EG_OK && eg_record_end(ctx, &g_wh) == EG_OK;
+        ok = ok && eg_record_cond_end(ctx) == EG_OK && eg_record_end(ctx, NULL, &g_wh) == EG_OK;
     }
     if (ok) {
         const int32_t start[5] = { 1, 1, 1, 0, 0 };
@@ -1175,7 +1175,7 @@ static void check_recording_states(eg_ctx* ctx) {
     d.struct_size = sizeof(d);
     d.cell = pc;
     int all = pc && pf;
-    all = all && eg_record_end(ctx, &g) == EG_BAD_REQUEST && reason_has(ctx, "not recording");
+    all = all && eg_record_end(ctx, NULL, &g) == EG_BAD_REQUEST && reason_has(ctx, "not recording");
     all = all && eg_record_cond_begin(ctx, &d) == EG_BAD_REQUEST && reason_has(ctx, "not recording");
     all = all && eg_record_cond_arm(ctx) == EG_BAD_REQUEST && eg_record_cond_end(ctx) == EG_BAD_REQUEST;
     all = all && eg_record_begin(ctx) == EG_OK && eg_record_begin(ctx) == EG_BAD_REQUEST && reason_has(ctx, "already recording");
@@ -1199,7 +1199,7 @@ static void check_recording_states(eg_ctx* ctx) {
     d.n_arms = 0;
     all = all && eg_record_cond_begin(ctx, &d) == EG_OK;
     all = all && eg_record_cond_arm(ctx) == EG_BAD_REQUEST && reason_has(ctx, "all are open");
-    all = all && eg_record_end(ctx, &g) == EG_BAD_REQUEST && reason_has(ctx, "still open") && g == NULL;
+    all = all && eg_record_end(ctx, NULL, &g) == EG_BAD_REQUEST && reason_has(ctx, "still open") && g == NULL;
     all = all && eg_record_cond_end(ctx) == EG_OK;
     d.kind = EG_COND_IF_ELSE;
     all = all && eg_record_cond_begin(ctx, &d) == EG_OK && eg_record_cond_end(ctx) == EG_BAD_REQUEST &&
@@ -1218,7 +1218,7 @@ static void check_recording_states(eg_ctx* ctx) {
     d.kind = EG_COND_IF;
     all = all && eg_record_cond_begin(ctx, &d) == EG_OK && eg_record_cond_end(ctx) == EG_OK &&
          eg_record_cond_end(ctx) == EG_OK;
-    all = all && eg_record_end(ctx, &g) == EG_OK && g != NULL && eg_record_end(ctx, &none) == EG_BAD_REQUEST;
+    all = all && eg_record_end(ctx, NULL, &g) == EG_OK && g != NULL && eg_record_end(ctx, NULL, &none) == EG_BAD_REQUEST;
     check(all, "recording states: not recording, already recording, no conditional open, arm misuse, bad cell, "
                "flags, kind and n_arms, a conditional still open at end, nesting, each BAD_REQUEST by name");
     all = eg_graph_launch(ctx, g) == EG_OK && eg_graph_free(ctx, g) == EG_OK && eg_plane_free(ctx, pc) == EG_OK &&
@@ -1264,7 +1264,7 @@ static void check_recorded_list(eg_ctx* ctx, eg_unit* axpb, eg_unit* count1) {
     uint64_t tiles = 99;
     ok = ok && eg_record_begin(ctx) == EG_OK && eg_launch(ctx, plr, &tiles) == EG_OK && tiles == 0 &&
          reduce_do(ctx, pyr, psr, NULL, EG_REDUCE_SUM, EG_REDUCE_COMPENSATED, 0) == EG_OK &&
-         eg_copy(ctx, psr, ptr) == EG_OK && eg_run(ctx, rn, NULL) == EG_OK && eg_record_end(ctx, &g) == EG_OK;
+         eg_copy(ctx, psr, ptr) == EG_OK && eg_run(ctx, rn, NULL) == EG_OK && eg_record_end(ctx, NULL, &g) == EG_OK;
     ok = ok && memcmp(y_rec, y_dir, sizeof(y_rec)) == 0 && s_rec == 0.0 && t_rec == 0.0 && k[1] == 0.0 &&
          limit[1] == (double)(1 + 37 % 50);
     check(ok, "while recording, eg_launch, eg_reduce, eg_copy and eg_run run nothing");
@@ -1281,7 +1281,7 @@ static void check_recorded_list(eg_ctx* ctx, eg_unit* axpb, eg_unit* count1) {
     check(ok, "a recorded launch + reduce + copy replayed 5 times equals the same calls run directly 5 times, bitwise");
     eg_graph* gb = NULL;
     check(eg_record_begin(ctx) == EG_OK && bind(ctx, pld, pyd, pyd, &a, &b) == EG_BAD_REQUEST && reason_has(ctx, "eg_bind while recording") &&
-              eg_record_end(ctx, &gb) == EG_OK && eg_graph_free(ctx, gb) == EG_OK && bind(ctx, pld, pyd, pyd, &a, &b) == EG_OK,
+              eg_record_end(ctx, NULL, &gb) == EG_OK && eg_graph_free(ctx, gb) == EG_OK && bind(ctx, pld, pyd, pyd, &a, &b) == EG_OK,
           "eg_bind between eg_record_begin and eg_record_end is refused BAD_REQUEST by name; after the end it binds again");
     int kok = 1;
     for (int i = 0; i < K; ++i) kok &= k[i] == want_k[i];
@@ -1357,7 +1357,7 @@ static void check_free_with_graph(void) {
     eg_plane* pv = ctx ? wrap(ctx, &tv, &v, 1, kDLFloat, 64) : NULL;
     eg_plane* pw = ctx ? wrap(ctx, &tw, &w, 1, kDLFloat, 64) : NULL;
     eg_graph* g = NULL;
-    int ok = pv && pw && eg_record_begin(ctx) == EG_OK && eg_copy(ctx, pv, pw) == EG_OK && eg_record_end(ctx, &g) == EG_OK &&
+    int ok = pv && pw && eg_record_begin(ctx) == EG_OK && eg_copy(ctx, pv, pw) == EG_OK && eg_record_end(ctx, NULL, &g) == EG_OK &&
              eg_record_begin(ctx) == EG_OK && eg_copy(ctx, pw, pv) == EG_OK;
     ok = ok && eg_ctx_free(ctx) == EG_OK && tv.deleted == 1 && tw.deleted == 1;
     check(ok, "eg_ctx_free with a live graph and an open recording runs each plane's deleter once");
@@ -2898,7 +2898,7 @@ static void check_clear(eg_ctx* ctx, eg_unit* axpb) {
         ok = ok && eg_clear(ctx, kp, 1, s_acc) == EG_BAD_REQUEST && reason_has(ctx, "'acc') is unbound");
         ok = ok && eg_record_begin(ctx) == EG_OK && eg_clear(ctx, p, 0, NULL) == EG_BAD_REQUEST && reason_has(ctx, "eg_clear while recording");
         eg_graph* g = NULL;
-        ok = ok && eg_record_end(ctx, &g) == EG_OK && eg_graph_free(ctx, g) == EG_OK;
+        ok = ok && eg_record_end(ctx, NULL, &g) == EG_OK && eg_graph_free(ctx, g) == EG_OK;
         check(ok, "eg_clear: n_slots < 0, slots NULL, a slot out of range, an input, a uniform, a companion, an unbound slot, the same slot twice "
                   "and a call while recording each refused BAD_REQUEST by reason");
         eg_plan_free(ctx, p);
@@ -2970,7 +2970,7 @@ static void check_set_count(eg_ctx* ctx, eg_unit* axpb) {
         bd.plane_slots = slots;
         bd.planes = planes;
         all &= plan(ctx, up, structures[si], SM, 0, NULL, NULL, &p) == EG_OK && eg_bind(ctx, p, &bd) == EG_OK && eg_set_count(ctx, p, counts[0]) == EG_OK &&
-               eg_record_begin(ctx) == EG_OK && eg_launch(ctx, p, NULL) == EG_OK && eg_record_end(ctx, &g) == EG_OK;
+               eg_record_begin(ctx) == EG_OK && eg_launch(ctx, p, NULL) == EG_OK && eg_record_end(ctx, NULL, &g) == EG_OK;
         for (int k = 0; k < 4 && all; ++k) {
             all &= k == 0 || eg_set_count(ctx, p, counts[k]) == EG_OK;
             for (int i = 0; i < SM; ++i) y[i] = -1.0;
@@ -3012,7 +3012,7 @@ static void check_set_count(eg_ctx* ctx, eg_unit* axpb) {
         ok = ok && eg_set_count(ctx, r, 1) == EG_BAD_REQUEST && reason_has(ctx, "has no index count slot");
         ok = ok && eg_bind(ctx, p, &bd) == EG_OK && eg_record_begin(ctx) == EG_OK && eg_set_count(ctx, p, 1) == EG_BAD_REQUEST && reason_has(ctx, "eg_set_count while recording");
         eg_graph* g = NULL;
-        ok = ok && eg_record_end(ctx, &g) == EG_OK && eg_graph_free(ctx, g) == EG_OK;
+        ok = ok && eg_record_end(ctx, NULL, &g) == EG_OK && eg_graph_free(ctx, g) == EG_OK;
         check(ok, "eg_set_count: a lookup set (bound or not), a unit with no index count slot, an unbound count slot and a call while "
                   "recording each refused BAD_REQUEST by reason");
         eg_plan_free(ctx, p);
@@ -3337,7 +3337,7 @@ static void check_reset(eg_ctx* ctx) {
     ok = ok && eg_runner_reset(ctx, NULL) == EG_BAD_REQUEST && reason_has(ctx, "runner");
     ok = ok && eg_record_begin(ctx) == EG_OK && eg_runner_reset(ctx, r) == EG_BAD_REQUEST && reason_has(ctx, "eg_runner_reset while recording");
     eg_graph* g = NULL;
-    ok = ok && eg_record_end(ctx, &g) == EG_OK && eg_graph_free(ctx, g) == EG_OK;
+    ok = ok && eg_record_end(ctx, NULL, &g) == EG_OK && eg_graph_free(ctx, g) == EG_OK;
     check(ok, "eg_runner_reset: a NULL runner and a call while recording refused BAD_REQUEST by reason");
     eg_runner_free(ctx, r);
     eg_plan_free(ctx, p);
@@ -4157,7 +4157,7 @@ static void check_counters_finished(eg_ctx* ctx) {
     memset(mask, 0, sizeof(mask));
     p = count_plan(ctx, c1, EG_STRUCTURE_HOST_SERIAL, k, limit, mask, t);
     eg_graph* g = NULL;
-    ok = p != NULL && eg_record_begin(ctx) == EG_OK && eg_launch(ctx, p, NULL) == EG_OK && eg_record_end(ctx, &g) == EG_OK;
+    ok = p != NULL && eg_record_begin(ctx) == EG_OK && eg_launch(ctx, p, NULL) == EG_OK && eg_record_end(ctx, NULL, &g) == EG_OK;
     for (int replay = 1; ok && replay <= 3; ++replay)
         ok = eg_graph_launch(ctx, g) == EG_OK && counters_of(ctx, p, &c, NULL, 0, &n_mix) == EG_OK &&
              c.finished == count_at_most(limit, replay) - count_at_most(limit, replay - 1);

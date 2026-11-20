@@ -235,7 +235,7 @@ static void lin_rows(eg_ctx* ctx, const char* lib) {
                                   reason_has(ctx, "inside a recording"),
                               "eg_reverse and eg_run of a recorded runner inside a recording refused NOT_WRITTEN");
                         eg_graph* g = NULL;
-                        eg_record_end(ctx, &g);
+                        eg_record_end(ctx, NULL, &g);
                         if (g) eg_graph_free(ctx, g);
                     }
                     eg_plane_free(ctx, ps);
