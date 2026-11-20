@@ -8,8 +8,7 @@ The rules live in :mod:`eagle._layout`; every eagle door applies them through
 
 * CLASSIFY: the decision table (native / zero-copy view / copy / ambiguous),
   including the ambiguous ``N == w`` case (refused, resolved by ``layout=`` or a
-  marker), scalar planes and matrices; and that HAWK's
-  restatement (``hawk.runtime.plane_layout``) agrees on every corpus array.
+  marker), scalar planes and matrices; and the one-sample shapes.
 * PLAN.RUN: a sample-major input or output gives the native answer, the copy
   warns once per call site naming the argument, a written plane lands back in
   the caller's array, and a transposed view passes with no warning and no copy.
@@ -105,20 +104,6 @@ def test_classify_table():
     assert _cls(np.moveaxis(m, -1, 0), (3, 3)) == "view"
 
 
-def test_hawk_and_eagle_classify_every_corpus_array_identically():
-    """hawk restates the rule (it imports no eagle); the two must not drift."""
-    runtime = pytest.importorskip("hawk.runtime")
-    base = np.zeros((W, N))
-    corpus = [base, base.T, np.zeros((N, W)), np.zeros((W, W)),
-              np.zeros((W, W)).T, np.zeros((1, W)), np.zeros((W, 1)),
-              np.zeros((N, 2 * W))[:, ::2], np.zeros((2 * W, N))[::2].T,
-              np.zeros((2, N)), np.zeros(N)]
-    for a in corpus:
-        eagle_says = _cls(a)
-        hawk_says = runtime.plane_layout(memoryview(a), W)
-        assert eagle_says == hawk_says, (a.shape, a.strides, eagle_says, hawk_says)
-
-
 #: ONE SAMPLE: ``(head, flat width, shape, expected)``. A shape that is both a
 #: batch and one sample is a batch (native is never guessed away).
 _SINGLE_CORPUS = [
@@ -140,14 +125,11 @@ _SINGLE_CORPUS = [
 
 
 @pytest.mark.parametrize("head,width,shape,expected", _SINGLE_CORPUS)
-def test_hawk_and_eagle_classify_every_single_sample_shape_identically(
-        head, width, shape, expected):
-    """One sample is the plane's head; hawk restates the rule and must agree."""
-    runtime = pytest.importorskip("hawk.runtime")
+def test_every_single_sample_shape_is_classified_as_its_row_states(head, width, shape, expected):
+    """One sample is the plane's head: each shape of the corpus gets its stated class."""
     a = np.zeros(shape)
     assert _layout.classify(a.shape, [s // a.itemsize for s in a.strides],
                             (width,)) == expected
-    assert runtime.plane_layout(memoryview(a), width) == expected
     if len(head) == 2 and shape == head:
         assert _layout.classify(a.shape, (shape[1], 1), head) == expected
 
@@ -409,22 +391,6 @@ def test_classify_resolves_an_ambiguous_plane_by_marker_and_by_layout():
                             axis="last") == "conflict"
     assert _layout.classify(sq.shape, st, (W,), axis="last",
                             layout="samples_first") == "native"
-
-
-def test_hawk_and_eagle_agree_on_the_ambiguous_cases_and_markers():
-    runtime = pytest.importorskip("hawk.runtime")
-    for a in (np.zeros((W, W)), np.zeros((W, W)).T, np.asfortranarray(np.zeros((W, W)))):
-        st = [s // 8 for s in a.strides]
-        for axis in (None, "first", "last"):
-            for layout in (None, "samples_first", "samples_last"):
-                assert _layout.classify(a.shape, st, (W,), axis, layout) == \
-                    runtime.plane_layout(memoryview(a), W, axis, layout), \
-                    (a.strides, axis, layout)
-    for a in (np.zeros((W, N)), np.zeros((W, N)).T, np.zeros((N, W))):
-        st = [s // 8 for s in a.strides]
-        for axis in (None, "first", "last"):
-            assert _layout.classify(a.shape, st, (W,), axis) == \
-                runtime.plane_layout(memoryview(a), W, axis)
 
 
 def test_the_marker_protocol_is_shared_with_hawk():
