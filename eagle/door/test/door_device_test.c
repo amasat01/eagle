@@ -1798,6 +1798,15 @@ static int gb_edge(const struct eg_graph_description* d, int from, int to, eg_ge
     return 0;
 }
 
+static void gb_dump(const struct eg_graph_description* d) {
+    printf("      description: %d nodes, %d edges, %d levels\n", d->n_nodes, d->n_edges, d->n_levels);
+    for (int i = 0; i < d->n_nodes; ++i)
+        printf("      node %d: kind %d parent %d level %d arm %d unit %s\n", i, d->nodes[i].kind, d->nodes[i].parent, d->nodes[i].level, d->nodes[i].arm,
+               d->nodes[i].unit ? d->nodes[i].unit : "-");
+    for (int i = 0; i < d->n_edges; ++i)
+        printf("      edge %d -> %d: kind %d plane %p\n", d->edges[i].from, d->edges[i].to, d->edges[i].kind, (void*)d->edges[i].plane);
+}
+
 /* A recording a failed row left open would fail every row after it: start over on a fresh context. */
 #define GB_SECTION_END()                                         \
     do {                                                         \
@@ -1857,13 +1866,18 @@ static void graph_builder_device(const char* dev_lib) {
         memset(&d, 0, sizeof(d));
         d.struct_size = sizeof(d);
         const int described = ok && eg_graph_describe(c, gr, &d) == EG_OK && d.n_nodes == 7;
+        const int dumped_before = failures;
         check(described && d.nodes[0].kind == EG_GNODE_FORK && d.nodes[1].kind == EG_GNODE_BRANCH && d.nodes[1].parent == 0 && d.nodes[2].kind == EG_GNODE_LAUNCH &&
-                  d.nodes[2].parent == 1 && d.nodes[3].kind == EG_GNODE_BRANCH && d.nodes[3].arm == 1 && d.nodes[4].kind == EG_GNODE_WAIT && d.nodes[4].parent == 3 &&
+                  d.nodes[2].parent == 1 && d.nodes[3].kind == EG_GNODE_BRANCH && d.nodes[3].parent == 0 && d.nodes[4].kind == EG_GNODE_WAIT && d.nodes[4].parent == 3 &&
                   d.nodes[5].kind == EG_GNODE_LAUNCH && d.nodes[5].parent == 3 && d.nodes[6].kind == EG_GNODE_JOIN && d.nodes[6].parent == -1,
               "device description: fork, two branches, a wait, two launches and the join, with their parents");
-        check(described && gb_edge(&d, 2, 4, EG_GEDGE_WAIT, g.p1) && gb_edge(&d, 2, 5, EG_GEDGE_RAW, g.p1) && d.nodes[5].level > d.nodes[2].level && d.n_levels >= 3 &&
+        check(described && gb_edge(&d, 2, 4, EG_GEDGE_WAIT, g.p1) && gb_edge(&d, 4, 5, EG_GEDGE_ORDER, NULL) && gb_edge(&d, 2, 6, EG_GEDGE_JOIN, NULL) && gb_edge(&d, 5, 6, EG_GEDGE_JOIN, NULL) && d.nodes[5].level > d.nodes[2].level && d.n_levels >= 3 &&
                   d.nodes[2].unit != NULL && strcmp(d.nodes[2].unit, "dprefix") == 0,
-              "device description: the WAIT edge from the producer to the wait names its plane, the RAW edge to the reader, and the reader sits on a later level");
+              "device description: the WAIT edge from the producer to the wait names its plane, the reader follows the wait, both launches join, and the reader sits on a later level");
+        if (failures != dumped_before && ok) {
+            printf("      the planes: p1 %p\n", (void*)g.p1);
+            gb_dump(&d);
+        }
     }
     if (gr) eg_graph_free(c, gr);
     gr = NULL;
