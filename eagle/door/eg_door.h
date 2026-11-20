@@ -408,6 +408,9 @@ struct eg_runner_figures {
     eg_steps_reverse steps_reverse; /**< PER_STEP or FUSED: the reverse mode of a recorded runner (steps_reverse AUTO resolved
                                          at eg_runner_new); PER_STEP for a runner without EG_RUN_RECORD */
     int64_t grid;            /**< blocks of that launch */
+    /* appended: a struct_size that ends before a member reads 0 */
+    int32_t reverse_passes;  /**< the memory passes of the last ``eg_reverse`` of this runner; 0 before one */
+    int32_t reverse_bitwise; /**< 1 once an ``eg_reverse`` ran: its sums over samples are the canonical compensated pair, bitwise; 0 before one */
 };
 
 /** Entry flags. */
@@ -1165,8 +1168,11 @@ struct eg_record_end_desc {
  *  (``cell[cell_index]`` and the baseline element) and a leaf under an arm takes part in the reverse only if that arm ran, decided
  *  from the saved values with NEGATE applied, never from the live cells. A WHILE needs ``max_iters`` of 1 or more (0 is refused:
  *  the cap bounds the tape); the tape plans its body unrolled ``max_iters`` times, each copy running only if its iteration did.
- *  The planes the later leaves overwrite are copied at each ``eg_graph_launch`` just before the overwriting leaf, per iteration,
- *  so the reverse reads what each leaf read; that memory is allocated here (FAULT by name when it cannot be). One
+ *  The planes the later leaves overwrite are copied at each ``eg_graph_launch`` just before the overwriting leaf, so the reverse reads
+ *  what each leaf read; that memory is allocated here (FAULT by name when it cannot be). A WHILE keeps the planes its body writes
+ *  only at the start of every ``w``-th iteration, ``w = min(max_iters, clamp(ceil(sqrt(max_iters)), 16, 1024))``, and the reverse
+ *  rebuilds each window's states on private copies by re-launching the body's plans, newest window first: the tape holds
+ *  ``ceil(max_iters / w) + w`` states of those planes instead of ``max_iters``, and the gradient is the unrolled plan's. One
  *  ``eg_node_vjp`` per ``eg_launch`` ordinal serves every unrolled copy of it. Status: OK; BAD_REQUEST (not recording, a conditional or fork open,
  *  a vjp whose links the launch cannot satisfy, two names of one plane in a node, overlapping planes); NOT_WRITTEN (a
  *  node or unit the reverse does not cover; a device context); FAULT (capture failed; a snapshot buffer not allocated). */
@@ -1179,19 +1185,31 @@ eg_status eg_record_end(eg_ctx* ctx, const struct eg_record_end_desc* desc, eg_g
  *  node of an earlier replay kept, see ``eg_record_begin``). */
 eg_status eg_graph_launch(eg_ctx* ctx, eg_graph* graph);
 
+/** ``eg_graph_reverse_desc.flags``: refuse a gradient that is not bit-reproducible (see ``bitwise``) instead of reporting it. */
+#define EG_REVERSE_STRICT (1u << 0)
+
 /** INPUT to ``eg_graph_reverse``. Planes are matched by handle, not by slot: graph planes are shared across nodes. */
 struct eg_graph_reverse_desc {
     uint32_t struct_size;
-    uint32_t flags;                    /**< 0 */
+    uint32_t flags;                    /**< EG_REVERSE_STRICT, or 0 */
     int32_t n_seeds;
     eg_plane* const* outputs;          /**< planes written by the graph */
     eg_plane* const* seeds;            /**< dJ/d(outputs[i]), one value per element; an output with no seed has cotangent zero */
     int32_t n_grads;
     eg_plane* const* inputs;           /**< planes the graph reads before anything writes them */
     eg_plane* const* grads;            /**< dJ/d(inputs[i]) is written into grads[i]; an input not listed gets nothing */
+    /* appended: a struct_size that ends before a member leaves it unwritten */
+    uint8_t* bitwise;                  /**< OUT, ``n_grads`` entries, or NULL: 1 when no cross-sample scatter-add feeds grads[i], else 0 */
+    int32_t* passes;                   /**< OUT, or NULL: the memory passes the reverse ran in; 1 (a graph has no memory budget) */
 };
 
-/** Reverse the graph's LAST ``eg_graph_launch``, eagerly on the host. Leaves run in reverse order (see ``eg_record_end``); a
+/** Reverse the graph's LAST ``eg_graph_launch``, eagerly on the host. The sum over samples of a shared parameter's gradient (a
+ *  reduced GRAD link) is always the compensated pair in sample order, on the host and on a device: the same bits on every run, every
+ *  thread count and both targets, so there is no policy member and such a gradient is bitwise. A gradient is not bitwise when a
+ *  cross-sample scatter-add feeds it: a vjp slot of role ACCUM_OUT taints the adjoint it writes, and the taint passes through every
+ *  earlier leaf that reads a tainted adjoint, through arms and WHILE copies; ``bitwise[i]`` is then 0, and under EG_REVERSE_STRICT
+ *  the call is refused by name (the input and the launch ordinal of the tainting vjp) before any gradient is written. An input
+ *  that is not a float plane is refused by name. Leaves run in reverse order (see ``eg_record_end``); a
  *  leaf that did not run, an arm not taken or a WHILE iteration that did not happen, is the identity: what it would write keeps
  *  its adjoint for the earlier writer or the input plane, and it adds nothing to what it only reads. A plane read by several
  *  leaves gets its adjoints summed in leaf order, the seed first. The caller's promise: no plane the record reads live was
